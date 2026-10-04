@@ -641,23 +641,31 @@ func (c redirectOnCloseConn) Close() error {
 }
 
 // A close failure other than a refused redirect still fails Inspect and
-// Approve, and Approve publishes nothing.
+// Approve, and Approve publishes nothing. Each call gets a fresh server: an
+// in-memory transport serves one session, so a reused one fails at dial.
 func TestInspectApproveCloseFailureIsUnavailable(t *testing.T) {
 	pins := testPins(t)
-	s, _, _ := staticCatalogServer(t, "fs", tool("read"))
-	inspected, err := Inspect(context.Background(), Implementation{Name: "test"}, s, pins)
+	clean, _, _ := staticCatalogServer(t, "fs", tool("read"))
+	inspected, err := Inspect(context.Background(), Implementation{Name: "test"}, clean, pins)
 	if err != nil {
 		t.Fatal(err)
 	}
-	s.tr = closeErrTransport{Transport: s.tr, err: errors.New("close failed")}
-	_, err = Inspect(context.Background(), Implementation{Name: "test"}, s, pins)
-	var a *AdmissionError
-	if !errors.As(err, &a) || a.Reason != "unavailable" {
-		t.Fatalf("inspect = %v, want unavailable", err)
-	}
-	_, err = Approve(context.Background(), Implementation{Name: "test"}, s, pins, approvalFor(inspected))
-	if !errors.As(err, &a) || a.Reason != "unavailable" || pinBytes(t, pins, "fs") != nil {
-		t.Fatalf("approve = %v, want unavailable and no pin", err)
+	closeFailed := errors.New("close failed")
+	for _, action := range []string{"inspect", "approve"} {
+		s, _, _ := staticCatalogServer(t, "fs", tool("read"))
+		s.tr = closeErrTransport{Transport: s.tr, err: closeFailed}
+		if action == "inspect" {
+			_, err = Inspect(context.Background(), Implementation{Name: "test"}, s, pins)
+		} else {
+			_, err = Approve(context.Background(), Implementation{Name: "test"}, s, pins, approvalFor(inspected))
+		}
+		var a *AdmissionError
+		if !errors.As(err, &a) || a.Reason != "unavailable" || !errors.Is(err, closeFailed) {
+			t.Fatalf("%s = %v, want unavailable caused by the close failure", action, err)
+		}
+		if pinBytes(t, pins, "fs") != nil {
+			t.Fatalf("%s wrote a pin despite the close failure", action)
+		}
 	}
 }
 
