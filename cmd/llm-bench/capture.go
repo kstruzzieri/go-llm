@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -15,6 +14,7 @@ import (
 	"time"
 
 	"github.com/kstruzzieri/go-llm/conversation"
+	"github.com/kstruzzieri/go-llm/internal/sqlitedsn"
 
 	_ "modernc.org/sqlite"
 )
@@ -120,8 +120,10 @@ func openReadOnlySQLite(path string) (*sql.DB, error) {
 	if err != nil {
 		return nil, err
 	}
-
-	u := url.URL{Scheme: "file", Path: abs}
+	u, err := sqlitedsn.FileURL(abs)
+	if err != nil {
+		return nil, err
+	}
 	q := u.Query()
 	q.Set("mode", "ro")
 	q.Add("_pragma", "query_only(1)")

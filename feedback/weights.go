@@ -4,10 +4,11 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"net/url"
 	"os"
 	"path/filepath"
 	"sync"
+
+	"github.com/kstruzzieri/go-llm/internal/sqlitedsn"
 
 	_ "modernc.org/sqlite"
 )
@@ -100,11 +101,15 @@ func NewSQLiteWeightReader(ctx context.Context, dbPath string, config CollectorC
 	if dbPath == "" {
 		return nil, fmt.Errorf("feedback: open SQLite weight reader: empty path")
 	}
-	// A relative path would render as file://name, which SQLite rejects as a
-	// URI authority.
 	abs, err := filepath.Abs(dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("feedback: open SQLite weight reader: resolve path %q: %w", dbPath, err)
+	}
+	// FileURL renders the path as a URI SQLite accepts on every OS. It runs
+	// before the Stat below, so a path it rejects is never touched.
+	u, err := sqlitedsn.FileURL(abs)
+	if err != nil {
+		return nil, fmt.Errorf("feedback: open SQLite weight reader: %w", err)
 	}
 	want := migrations[len(migrations)-1].version
 	info, err := os.Stat(abs)
@@ -122,7 +127,6 @@ func NewSQLiteWeightReader(ctx context.Context, dbPath string, config CollectorC
 	if info.Size() < 512 {
 		return nil, fmt.Errorf("feedback: validate SQLite weight reader schema: database file size %d is smaller than one SQLite page (512 bytes); want version %d", info.Size(), want)
 	}
-	u := url.URL{Scheme: "file", Path: abs}
 	q := u.Query()
 	q.Set("mode", "ro")
 	// In the DSN so a connection database/sql opens to replace a discarded one
