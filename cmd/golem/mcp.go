@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 
+	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
 	"github.com/kstruzzieri/go-llm/internal/mcpstdio"
 	"github.com/kstruzzieri/go-llm/mcpclient"
 )
@@ -56,6 +57,7 @@ func sanitizeAlias(s string) string {
 // parseMCPServers turns the repeatable flag values into mcpclient.Server configs,
 // deriving aliases when omitted and rejecting explicit-alias collisions. (Connect
 // also rejects duplicates, fatally; this gives a clearer per-flag message.)
+// Every stdio server precedes every HTTP server; withMCPPolicy relies on it.
 func parseMCPServers(stdioFlags, httpFlags []string) ([]mcpclient.Server, error) {
 	used := make(map[string]bool)
 	var servers []mcpclient.Server
@@ -194,13 +196,17 @@ var mcpEnvNameRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 // withMCPPolicy applies repeatable -mcp-env 'alias=NAME,...' values (forwarded
 // by name from golem's environment; the CLI never takes values) and runs every
-// stdio server in the absolute workspace root. parseMCPServers places stdio
+// stdio server in the canonical workspace root. parseMCPServers places stdio
 // servers first, so servers[:stdioCount] are the stdio ones. Errors name the
 // occurrence and entry by position and never echo supplied text.
 func withMCPPolicy(root string, servers []mcpclient.Server, stdioCount int, envFlags []string) ([]mcpclient.Server, error) {
-	dir, err := filepath.Abs(root)
+	// The pin store keys a workspace by this same canonical root, so every
+	// spelling of one directory (relative, symlinked, case-flipped) yields
+	// one connection identity.
+	dir, err := agenttools.CanonicalWorkspaceRoot(root)
 	if err != nil {
-		return nil, errors.New("-root: cannot resolve an absolute path")
+		// Its errors carry the path; never surface them.
+		return nil, errors.New("-root: cannot resolve the workspace directory")
 	}
 	index := make(map[string]int, len(servers))
 	for i, server := range servers {
@@ -223,28 +229,9 @@ func withMCPPolicy(root string, servers []mcpclient.Server, stdioCount int, envF
 			return nil, fmt.Errorf("-mcp-env #%d: alias is already configured", n+1)
 		}
 		configured[alias] = true
-		names := strings.Split(list, ",")
-		vars := make([]mcpclient.EnvVar, len(names))
-		seen := make(map[string]bool, len(names))
-		for e, name := range names {
-			// Variable names cannot contain spaces, so trimming only forgives
-			// "A, B" (as PR 1's -mcp-tools does after review).
-			name = strings.TrimSpace(name)
-			if !mcpEnvNameRE.MatchString(name) {
-				return nil, fmt.Errorf("-mcp-env #%d: entry %d is not a variable name", n+1, e+1)
-			}
-			// Windows environment names are case-insensitive: catch Path,PATH
-			// here with a positional message rather than as a generic
-			// invalid_config from the library. The forwarded spelling is kept.
-			key := name
-			if runtime.GOOS == "windows" {
-				key = strings.ToUpper(name)
-			}
-			if seen[key] {
-				return nil, fmt.Errorf("-mcp-env #%d: entry %d repeats a name", n+1, e+1)
-			}
-			seen[key] = true
-			vars[e] = mcpclient.InheritEnv(name)
+		vars, err := mcpEnvVars(n+1, list, runtime.GOOS == "windows")
+		if err != nil {
+			return nil, err
 		}
 		servers[i] = servers[i].WithEnv(vars...)
 	}
@@ -252,4 +239,33 @@ func withMCPPolicy(root string, servers []mcpclient.Server, stdioCount int, envF
 		servers[i] = servers[i].WithDir(dir)
 	}
 	return servers, nil
+}
+
+// mcpEnvVars parses the comma-separated names of -mcp-env occurrence n.
+// foldCase matches names case-insensitively, as Windows environment names
+// are (production passes runtime.GOOS == "windows"), so Path,PATH is caught
+// here with a positional message rather than as a generic invalid_config from
+// the library. The forwarded spelling is kept.
+func mcpEnvVars(n int, list string, foldCase bool) ([]mcpclient.EnvVar, error) {
+	names := strings.Split(list, ",")
+	vars := make([]mcpclient.EnvVar, len(names))
+	seen := make(map[string]bool, len(names))
+	for e, name := range names {
+		// Variable names cannot contain spaces, so trimming only forgives
+		// "A, B" (as PR 1's -mcp-tools does after review).
+		name = strings.TrimSpace(name)
+		if !mcpEnvNameRE.MatchString(name) {
+			return nil, fmt.Errorf("-mcp-env #%d: entry %d is not a variable name", n, e+1)
+		}
+		key := name
+		if foldCase {
+			key = strings.ToUpper(name)
+		}
+		if seen[key] {
+			return nil, fmt.Errorf("-mcp-env #%d: entry %d repeats a name", n, e+1)
+		}
+		seen[key] = true
+		vars[e] = mcpclient.InheritEnv(name)
+	}
+	return vars, nil
 }

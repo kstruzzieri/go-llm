@@ -684,7 +684,7 @@ func TestMCPTrustGoalPlanStillReject(t *testing.T) {
 
 func TestMCPTrustParserDoesNotLeak(t *testing.T) {
 	in, out, diag := runTestFiles(t)
-	err := run([]string{"-mcp-stdio", `fs=env TOKEN=credential-value "`}, in, out, diag)
+	err := run([]string{"-config", filepath.Join(t.TempDir(), "absent.json"), "-root", t.TempDir(), "-mcp-stdio", `fs=env TOKEN=credential-value "`}, in, out, diag)
 	if err == nil || strings.Contains(err.Error()+readRunTestFile(t, diag), "credential-value") {
 		t.Fatalf("parser error: %v", err)
 	}
@@ -756,7 +756,7 @@ func TestMCPToolsRunWiring(t *testing.T) {
 		t.Fatalf("-mcp-tools fs= did not reach Connect: %q", got)
 	}
 	in, out, diag = runTestFiles(t)
-	err := run([]string{"-p", "hi", "-mcp-tools", "fs=credential-value!"}, in, out, diag)
+	err := run([]string{"-config", config, "-root", root, "-p", "hi", "-mcp-tools", "fs=credential-value!"}, in, out, diag)
 	if err == nil || exitCodeFor(err) != 2 || err.Error() != "golem: -mcp-tools #1: alias is not a configured MCP server" {
 		t.Fatalf("headless -mcp-tools error = %v (exit %d), want positional usage error, exit 2", err, exitCodeFor(err))
 	}
