@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -29,10 +30,20 @@ func envValues(env []string, key string) []string {
 	return out
 }
 
-// hostGitLocationKeys are the repository-location overrides every host Git
-// call (Agentflow's and #354's) must drop so cmd.Dir alone selects the
-// repository. GIT_TERMINAL_PROMPT is listed because the helper owns its
-// value: an inherited one must not survive beside the appended =0.
+// unsetenvForTest removes name for the rest of the test and restores the
+// original value afterwards (t.Setenv registers the restoration).
+func unsetenvForTest(t *testing.T, name string) {
+	t.Helper()
+	t.Setenv(name, "")
+	if err := os.Unsetenv(name); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// hostGitLocationKeys are the repository-location overrides no host Git call
+// (parallel mode's or #354's) may receive, so cmd.Dir alone selects the
+// repository. GIT_TERMINAL_PROMPT is listed because the adapters own its
+// value: an inherited one must not appear beside the owned =0.
 var hostGitLocationKeys = []string{
 	"GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
 	"GIT_COMMON_DIR", "GIT_NAMESPACE", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_PREFIX",
@@ -45,7 +56,7 @@ func seedEnv(t *testing.T, keys []string) {
 		t.Setenv(k, "seeded-"+k)
 		t.Setenv(strings.ToLower(k), "seeded-lower-"+k)
 	}
-	t.Setenv("GOLEM_UNRELATED_KEEP", "kept")
+	t.Setenv("GOLEM_UNRELATED_PARENT", "parent")
 }
 
 func TestHostGitEnvStripsLocationOverridesCaseInsensitively(t *testing.T) {
@@ -56,20 +67,20 @@ func TestHostGitEnvStripsLocationOverridesCaseInsensitively(t *testing.T) {
 			continue
 		}
 		if got := envValues(env, k); len(got) != 0 {
-			t.Fatalf("%s survived the host Git environment filter: %q", k, got)
+			t.Fatalf("%s reached the host Git environment: %q", k, got)
 		}
 	}
 	if got := envValues(env, "GIT_TERMINAL_PROMPT"); len(got) != 1 || got[0] != "0" {
 		t.Fatalf("GIT_TERMINAL_PROMPT = %q, want exactly [0]", got)
 	}
-	if got := envValues(env, "GOLEM_UNRELATED_KEEP"); len(got) != 1 || got[0] != "kept" {
-		t.Fatalf("unrelated variable did not survive: %q", got)
+	if got := envValues(env, "GOLEM_UNRELATED_PARENT"); len(got) != 0 {
+		t.Fatalf("an unrelated parent variable reached host git: %q", got)
 	}
 }
 
-// gitContextEnv is the capture-only filter (#354 D5): on top of the host
-// filter it removes config injection and discovery overrides and pins the C
-// locale so the non-repository exit is classified from stable text.
+// gitContextEnv is the capture environment (#354 D5): the host-git allowlist
+// plus LC_ALL=C and GIT_NO_LAZY_FETCH=1, so config injection, discovery
+// overrides and unrelated parent variables never reach it.
 func TestGitContextEnvStripsConfigAndDiscoveryOverrides(t *testing.T) {
 	extra := []string{
 		"GIT_CONFIG", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0",
@@ -84,7 +95,7 @@ func TestGitContextEnvStripsConfigAndDiscoveryOverrides(t *testing.T) {
 			continue
 		}
 		if got := envValues(env, k); len(got) != 0 {
-			t.Fatalf("%s survived the capture environment filter: %q", k, got)
+			t.Fatalf("%s reached the capture environment: %q", k, got)
 		}
 	}
 	if got := envValues(env, "GIT_TERMINAL_PROMPT"); len(got) != 1 || got[0] != "0" {
@@ -96,29 +107,30 @@ func TestGitContextEnvStripsConfigAndDiscoveryOverrides(t *testing.T) {
 	if got := envValues(env, "GIT_NO_LAZY_FETCH"); len(got) != 1 || got[0] != "1" {
 		t.Fatalf("GIT_NO_LAZY_FETCH = %q, want exactly [1]", got)
 	}
-	if got := envValues(env, "GOLEM_UNRELATED_KEEP"); len(got) != 1 || got[0] != "kept" {
-		t.Fatalf("unrelated variable did not survive: %q", got)
+	if got := envValues(env, "GOLEM_UNRELATED_PARENT"); len(got) != 0 {
+		t.Fatalf("an unrelated parent variable reached capture: %q", got)
 	}
-	// The capture filter is strictly a superset of the host filter: everything
-	// the host filter keeps survives unless it is one of the capture-only keys
-	// seeded above. The predicate is spelled out here rather than borrowed from
-	// production so the test cannot agree with a broken implementation.
-	captureOnly := func(k string) bool {
-		up := strings.ToUpper(k)
-		if strings.HasPrefix(up, "GIT_CONFIG_KEY_") || strings.HasPrefix(up, "GIT_CONFIG_VALUE_") {
-			return true
-		}
-		for _, x := range extra {
-			if strings.EqualFold(k, x) {
-				return true
-			}
-		}
-		return false
+	// The capture environment is the host environment plus exactly its two
+	// owned settings: nothing else is added and nothing the host keeps is lost.
+	want := append(hostGitEnv(), "GIT_NO_LAZY_FETCH=1", "LC_ALL=C")
+	slices.Sort(want)
+	if !slices.Equal(env, want) {
+		t.Fatalf("capture env names = %v, want host env plus LC_ALL and GIT_NO_LAZY_FETCH: %v", envNames(env), envNames(want))
 	}
-	for _, kv := range hostGitEnv() {
-		k, _, _ := strings.Cut(kv, "=")
-		if !captureOnly(k) && len(envValues(env, k)) == 0 {
-			t.Fatalf("capture filter dropped %q, which the host filter keeps", k)
+}
+
+// Both adapters read the parent at each call, never once at start-up.
+func TestHostGitEnvReadsTheParentAtEachCall(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		build func() []string
+	}{{"host", hostGitEnv}, {"capture", gitContextEnv}} {
+		t.Setenv("HOME", "/first-"+tc.name)
+		first := envValues(tc.build(), "HOME")
+		t.Setenv("HOME", "/second-"+tc.name)
+		second := envValues(tc.build(), "HOME")
+		if !slices.Equal(first, []string{"/first-" + tc.name}) || !slices.Equal(second, []string{"/second-" + tc.name}) {
+			t.Fatalf("%s HOME across two calls = %q then %q", tc.name, first, second)
 		}
 	}
 }
@@ -150,6 +162,10 @@ func gitContextTestRun(t *testing.T, dir string, args ...string) string {
 		"GIT_AUTHOR_NAME=gitcontext-test", "GIT_AUTHOR_EMAIL=gitcontext-test@example.com",
 		"GIT_COMMITTER_NAME=gitcontext-test", "GIT_COMMITTER_EMAIL=gitcontext-test@example.com",
 	)
+	// Trace2 is a fixture-only setting the host-git policy rightly drops.
+	if trace, ok := os.LookupEnv("GIT_TRACE2_EVENT"); ok {
+		cmd.Env = append(cmd.Env, "GIT_TRACE2_EVENT="+trace)
+	}
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("git %v: %v\n%s", args, err, out)
@@ -682,13 +698,15 @@ func TestLoadGitContextRejectsRedirectedWorktree(t *testing.T) {
 
 // With no filter driver anywhere (isolated HOME, no system config),
 // `git config --get-regexp` exits 1; that is "none", not a capture error.
-// Every other real-Git test here inherits the developer's global config, which
-// may define git-lfs filters, so this is the only case that reaches that exit.
+// Real-Git tests that do not isolate their configuration inherit the
+// developer's global config, which may define git-lfs filters; this one pins
+// the exit-1 path.
 func TestLoadGitContextWithoutAnyFilterDrivers(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	unsetenvForTest(t, "GIT_CONFIG_GLOBAL")
 	root := gitContextTestRepo(t)
 	gitContextTestCommit(t, root, "tracked.go", "package x\n", "base")
 	if out, err := exec.Command("git", "-C", root, "config", "--show-scope", "--get-regexp", `^filter\.`).CombinedOutput(); err == nil {
@@ -698,4 +716,110 @@ func TestLoadGitContextWithoutAnyFilterDrivers(t *testing.T) {
 	if err != nil || snap.Absence != gitContextPresent || snap.State.Branch != "main" {
 		t.Fatalf("no filter drivers must be a plain success: err=%v snapshot=%+v", err, snap.State)
 	}
+}
+
+// TestBuildHostGitEnv pins the exact host-git environment (#623). The parent
+// holds every name the policy forwards plus everything it must not: a canary,
+// a provider key, repository-location overrides, config injection, discovery
+// overrides, locale, credential and network helpers, and lower-case variants.
+// The expected lists are spelled out here, not derived from production.
+func TestBuildHostGitEnv(t *testing.T) {
+	parent := map[string]string{}
+	for _, name := range []string{
+		"PATH", "HOME", "USER", "TMPDIR", "LANG", "XDG_CONFIG_HOME",
+		"GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_NOSYSTEM",
+		"SYSTEMROOT", "TEMP", "TMP", "PATHEXT", "USERPROFILE", "COMSPEC",
+		"LOCALAPPDATA", "APPDATA", "HOMEDRIVE", "HOMEPATH",
+	} {
+		parent[name] = "v:" + name
+	}
+	for _, name := range []string{
+		"GO_LLM_623_CANARY", "OPENAI_API_KEY",
+		"GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR",
+		"GIT_NAMESPACE", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_PREFIX",
+		"GIT_CONFIG", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0",
+		"GIT_CEILING_DIRECTORIES", "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+		"LC_ALL", "LC_CTYPE", "GIT_NO_LAZY_FETCH", "GIT_TERMINAL_PROMPT", "PWD",
+		"SSH_AUTH_SOCK", "HTTPS_PROXY", "GIT_LFS_SKIP_SMUDGE", "GIT_ASKPASS", "GIT_EXEC_PATH", "SUDO_UID",
+		"home", "path", "git_dir", "xdg_config_home",
+	} {
+		parent[name] = "sk-canary-623"
+	}
+	lookup := func(name string) (string, bool) {
+		v, ok := parent[name]
+		return v, ok
+	}
+	host := []string{"GIT_TERMINAL_PROMPT=0"}
+	capture := []string{"GIT_TERMINAL_PROMPT=0", "LC_ALL=C", "GIT_NO_LAZY_FETCH=1"}
+	for _, tc := range []struct {
+		name, goos string
+		owned      []string
+		want       []string
+	}{
+		{name: "linux host", goos: "linux", owned: host, want: []string{
+			"GIT_CONFIG_GLOBAL=v:GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM=v:GIT_CONFIG_NOSYSTEM",
+			"GIT_CONFIG_SYSTEM=v:GIT_CONFIG_SYSTEM", "GIT_TERMINAL_PROMPT=0", "HOME=v:HOME",
+			"LANG=v:LANG", "PATH=v:PATH", "TMPDIR=v:TMPDIR", "USER=v:USER",
+			"XDG_CONFIG_HOME=v:XDG_CONFIG_HOME",
+		}},
+		{name: "linux capture", goos: "linux", owned: capture, want: []string{
+			"GIT_CONFIG_GLOBAL=v:GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM=v:GIT_CONFIG_NOSYSTEM",
+			"GIT_CONFIG_SYSTEM=v:GIT_CONFIG_SYSTEM", "GIT_NO_LAZY_FETCH=1", "GIT_TERMINAL_PROMPT=0",
+			"HOME=v:HOME", "LANG=v:LANG", "LC_ALL=C", "PATH=v:PATH", "TMPDIR=v:TMPDIR",
+			"USER=v:USER", "XDG_CONFIG_HOME=v:XDG_CONFIG_HOME",
+		}},
+		{name: "windows host", goos: "windows", owned: host, want: []string{
+			"APPDATA=v:APPDATA", "COMSPEC=v:COMSPEC",
+			"GIT_CONFIG_GLOBAL=v:GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM=v:GIT_CONFIG_NOSYSTEM",
+			"GIT_CONFIG_SYSTEM=v:GIT_CONFIG_SYSTEM", "GIT_TERMINAL_PROMPT=0", "HOME=v:HOME",
+			"HOMEDRIVE=v:HOMEDRIVE", "HOMEPATH=v:HOMEPATH", "LANG=v:LANG",
+			"LOCALAPPDATA=v:LOCALAPPDATA", "PATH=v:PATH", "PATHEXT=v:PATHEXT",
+			"SYSTEMROOT=v:SYSTEMROOT", "TEMP=v:TEMP", "TMP=v:TMP", "TMPDIR=v:TMPDIR",
+			"USER=v:USER", "USERPROFILE=v:USERPROFILE", "XDG_CONFIG_HOME=v:XDG_CONFIG_HOME",
+		}},
+		{name: "windows capture", goos: "windows", owned: capture, want: []string{
+			"APPDATA=v:APPDATA", "COMSPEC=v:COMSPEC",
+			"GIT_CONFIG_GLOBAL=v:GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM=v:GIT_CONFIG_NOSYSTEM",
+			"GIT_CONFIG_SYSTEM=v:GIT_CONFIG_SYSTEM", "GIT_NO_LAZY_FETCH=1", "GIT_TERMINAL_PROMPT=0",
+			"HOME=v:HOME", "HOMEDRIVE=v:HOMEDRIVE", "HOMEPATH=v:HOMEPATH", "LANG=v:LANG",
+			"LC_ALL=C", "LOCALAPPDATA=v:LOCALAPPDATA", "PATH=v:PATH", "PATHEXT=v:PATHEXT",
+			"SYSTEMROOT=v:SYSTEMROOT", "TEMP=v:TEMP", "TMP=v:TMP", "TMPDIR=v:TMPDIR",
+			"USER=v:USER", "USERPROFILE=v:USERPROFILE", "XDG_CONFIG_HOME=v:XDG_CONFIG_HOME",
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := buildHostGitEnv(tc.goos, lookup, tc.owned...); !slices.Equal(got, tc.want) {
+				t.Fatalf("buildHostGitEnv names = %v\nwant %v", envNames(got), envNames(tc.want))
+			}
+		})
+	}
+}
+
+func TestBuildHostGitEnvShape(t *testing.T) {
+	none := func(string) (string, bool) { return "", false }
+	if got := buildHostGitEnv("linux", none); got == nil || len(got) != 0 {
+		t.Fatalf("empty parent and no owned entries = %#v, want a non-nil empty slice", got)
+	}
+	if got, want := buildHostGitEnv("linux", none, "LC_ALL=C", "GIT_TERMINAL_PROMPT=0"), []string{"GIT_TERMINAL_PROMPT=0", "LC_ALL=C"}; !slices.Equal(got, want) {
+		t.Fatalf("empty parent with owned entries = %q, want only the owned entries, sorted %q", got, want)
+	}
+	emptyHome := func(name string) (string, bool) {
+		if name == "HOME" {
+			return "", true
+		}
+		return "", false
+	}
+	if got, want := buildHostGitEnv("linux", emptyHome, "GIT_TERMINAL_PROMPT=0"), []string{"GIT_TERMINAL_PROMPT=0", "HOME="}; !slices.Equal(got, want) {
+		t.Fatalf("set-but-empty HOME = %q, want %q", got, want)
+	}
+}
+
+// envNames lists the variable names in env, so a failure never prints a value.
+func envNames(env []string) []string {
+	names := make([]string, 0, len(env))
+	for _, kv := range env {
+		name, _, _ := strings.Cut(kv, "=")
+		names = append(names, name)
+	}
+	return names
 }

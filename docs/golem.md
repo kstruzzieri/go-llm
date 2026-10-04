@@ -418,7 +418,8 @@ at 4 KiB inside the shared 16 KiB injected-context budget
 it splits with `AGENTS.md` project context, which renders into the remainder
 (and keeps its full 16 KiB when there is no Git block). Capture is read-only
 and helper-resistant: argv-only `git` with `--no-optional-locks` and
-`core.fsmonitor=false`, no shell, a scrubbed environment that enforces
+`core.fsmonitor=false`, no shell, an environment built from scratch (see
+[Golem's own git calls](#golems-own-git-calls)) that enforces
 `GIT_NO_LAZY_FETCH=1`, one 2 s deadline, no status inside submodules (a changed
 submodule HEAD is reported, modified
 submodule content is not), and a refusal when the repository's own `.git/config`
@@ -464,14 +465,17 @@ every validation gate and to its own `git` calls. They receive only:
   `agentflow_unavailable` with the name; `-agentflow-status -json` keeps exit 3
   and empty stdout and prints the name on stderr.
 - **Strict mode:** `AGENTFLOW_STRICT=1`, when set to exactly `1`.
-- **Runner settings:** `PYTHONPATH` for `-agentflow-src`, and
+- **Runner settings:** `PWD`, set to the directory AgentFlow runs in and
+  spelled as Golem was given it (a logical path such as `/tmp/x` can differ
+  textually from the physical `/private/tmp/x`; not set on Windows; Golem's
+  own `PWD` is never forwarded), `PYTHONPATH` for `-agentflow-src`, and
   `PYTHONDONTWRITEBYTECODE=1` during audit.
 
 Everything else, including provider API keys, is dropped unless you approve it
 with `-agentflow-env`; an approved value reaches AgentFlow and every gate.
 `AGENTFLOW_CONFIRM_RISK` and `AGENTFLOW_AGENT_ID` are never forwarded; Golem
 passes those decisions as explicit arguments. `-agentflow-env` takes names
-only (`[A-Za-z_][A-Za-z0-9_]*`). It rejects `PYTHONPATH`,
+only (`[A-Za-z_][A-Za-z0-9_]*`). It rejects `PWD`, `PYTHONPATH`,
 `PYTHONDONTWRITEBYTECODE` and `AGENTFLOW_*`, and its errors identify an entry
 by position instead of echoing it.
 
@@ -498,9 +502,60 @@ filesystem. Tools also read configuration saved in those directories, such as
 Go's `go env -w` settings, so on-disk settings still apply without approval.
 Golem resolves the `agentflow` or `python3` executable with its own `PATH`
 before launch. Windows support is built but untested, and on non-Unix
-platforms cancellation stops only the direct child. Golem's own `git` calls in
-parallel task mode still inherit its environment, minus repository-location
-overrides.
+platforms cancellation stops only the direct child. Golem's own `git` calls
+follow a separate policy; see [Golem's own git calls](#golems-own-git-calls).
+
+## Golem's own git calls
+
+Golem runs `git` itself in two places: parallel task mode (`-plan-workers`
+above 1) creates, checks and removes worker worktrees, and the session's git
+context snapshot reads the branch, status and recent commits. Those `git`
+processes, and everything they start (repository hooks such as
+`post-checkout`, checkout and clean filters, and `core.fsmonitor` helpers),
+receive an environment Golem builds from scratch:
+
+- **Baseline:** `PATH`, `HOME`, `USER`, `TMPDIR`, `LANG`, `XDG_CONFIG_HOME`,
+  `GIT_CONFIG_GLOBAL`, `GIT_CONFIG_SYSTEM` and `GIT_CONFIG_NOSYSTEM`, when set.
+  On Windows also `SYSTEMROOT`, `TEMP`, `TMP`, `PATHEXT`, `USERPROFILE`,
+  `COMSPEC`, `LOCALAPPDATA`, `APPDATA`, `HOMEDRIVE` and `HOMEPATH`; Go adds
+  `SYSTEMROOT` when it is missing.
+- **Golem's settings:** `GIT_TERMINAL_PROMPT=0`; the snapshot also sets
+  `LC_ALL=C` and `GIT_NO_LAZY_FETCH=1`.
+
+Git adds its own variables for the processes it starts (for example
+`GIT_DIR`, `GIT_EXEC_PATH` and `GIT_PREFIX`). Nothing else from Golem's
+environment is passed: not provider API keys, and not repository-location
+overrides such as a `GIT_DIR` or `GIT_INDEX_FILE` inherited from an outer git
+hook. There is no flag to add names, and `-agentflow-env` does not apply here.
+AgentFlow's own `git` calls are separate: they run inside AgentFlow with its
+environment.
+
+**Upgrading:** hooks, filters and helpers that relied on other variables now
+run without them.
+
+- An SSH agent (`SSH_AUTH_SOCK`), proxy and certificate variables and
+  `GIT_ASKPASS` are not passed, so a worker checkout that has to reach the
+  network (git-lfs over SSH with agent-held keys, or a partial clone's lazy
+  fetch) can fail.
+- `GIT_LFS_SKIP_SMUDGE` is not passed, so creating a worker worktree may
+  download LFS objects.
+- Git configuration injected through the environment (`GIT_CONFIG_COUNT` with
+  `GIT_CONFIG_KEY_<n>`/`GIT_CONFIG_VALUE_<n>`, or `GIT_CONFIG_PARAMETERS`) is no
+  longer passed to worker worktrees; the snapshot already ignored it. Put such
+  settings, for example `safe.directory`, in your global git configuration
+  instead.
+- A custom `GIT_EXEC_PATH`, `LC_*` locale settings and `SUDO_UID` (git's
+  `safe.directory` allowance under sudo) are not passed.
+
+Run without `-plan-workers` to avoid worker worktrees, or pass
+`-no-git-context` to skip the snapshot. If a worker's `post-checkout` hook
+fails, git keeps the worktree; Golem reports it as preserved, like the other
+worker roots a failed run keeps.
+
+This keeps provider keys away from repository code; it does not confine that
+code. Hooks, filters and helpers still run as you with the baseline and can
+read your files under `HOME`. Your global and system git configuration is
+trusted: a filter it defines runs during the snapshot.
 
 ## Grant security and observation fencing
 
