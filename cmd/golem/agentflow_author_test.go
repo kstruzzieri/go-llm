@@ -1574,8 +1574,9 @@ func TestRunAgentflowAuthor_StopReasonNamesTheCause(t *testing.T) {
 		zeroCalls bool
 	}{
 		{name: "completed", maxSteps: 4, responses: []agent.ModelResult{answerStep("no plan today")}, want: errPlannerNoSubmission.Error()},
+		// Literal on purpose: the docs and changelog quote this text, so it must not derive from the sentinel.
 		{name: "step cap", maxSteps: 1, responses: []agent.ModelResult{read("r1", "seed.txt")},
-			want: errPlannerNoSubmission.Error() + ": agent run stopped: step_cap_reached"},
+			want: "the planner did not submit a plan: agent run stopped: step_cap_reached"},
 		{name: "tool errors", maxSteps: 4, responses: []agent.ModelResult{read("r1", "missing-a.txt"), read("r2", "missing-b.txt"), read("r3", "missing-c.txt")},
 			want: errPlannerNoSubmission.Error() + ": agent run stopped: tool_error_cap_reached"},
 		{name: "repeats", maxSteps: 4, responses: []agent.ModelResult{read("r1", "seed.txt"), read("r2", "seed.txt"), read("r3", "seed.txt")},
@@ -1602,5 +1603,20 @@ func TestRunAgentflowAuthor_StopReasonNamesTheCause(t *testing.T) {
 				t.Fatalf("model calls = %d, want 0", caller.i)
 			}
 		})
+	}
+}
+
+// #611: a denial on the planner's last step makes Run return a nil error with
+// a non-Completed StopReason. The approval-denied case must still win: it is
+// checked before the default branch, so the denial is never reported as a stop.
+func TestRunAgentflowAuthor_DenialOnLastStepIsNotReportedAsStop(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir()) // the denied plan is saved to the temp dir
+	root := t.TempDir()
+	caller := &scriptCaller{responses: []agent.ModelResult{submitPlanCall(validIRJSON(t))}}
+	sess := newTestSession(t, caller, root)
+	sess.maxSteps = 1
+	err := runAgentflowAuthorWithClient(context.Background(), io.Discard, io.Discard, nil, sess, flags{goal: "x", goalSet: true}, root, &stubLocker{}, nil)
+	if !errors.Is(err, errPlannerApprovalDenied) || strings.Contains(err.Error(), "agent run stopped") {
+		t.Fatalf("err = %v, want the approval denial without a stop reason", err)
 	}
 }
