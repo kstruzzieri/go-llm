@@ -45,8 +45,9 @@ type Check interface {
 // preserving its compiled semantics, including POSIX matching rules.
 //
 // Pattern is matched against the normalized path, so write it in normalized
-// form: lower-case, with every pathAliases source spelled as its
-// replacement (ß as ss).
+// form: lower-case; U+017F as s, U+00DF and U+1E9E as ss, U+212A as k, and
+// the ligatures U+FB00-U+FB06 spelled out (ff, fi, fl, ffi, ffl, st, st);
+// U+200C-U+200F, U+202A-U+202E, U+206A-U+206F and U+FEFF never appear.
 type PathDeny struct{ Pattern *regexp.Regexp }
 
 func (d PathDeny) check(raw json.RawMessage) (string, bool) {
@@ -66,8 +67,10 @@ func (d PathDeny) check(raw json.RawMessage) (string, bool) {
 // maps the spellings a case-insensitive filesystem treats as one name; on
 // Windows, windowsComponent on every component after the volume name; then a
 // lower-casing. Lower-casing is deliberate: on APFS and NTFS ".Git" is ".git".
-// Every step can only over-block a distinct spelling on a filesystem that
-// does not alias it, the right direction for a deny list. Short (8.3) names
+// Against a deny pattern every step can only over-block a distinct spelling
+// on a filesystem that does not alias it, the right direction. Against
+// IsCredentialPath's template exceptions, a distinct spelling that folds onto
+// a template (.env.EXAMPLE) is allowed like the template. Short (8.3) names
 // are outside a lexical check; the workspace layer is the boundary.
 func normalizePath(s string) string {
 	clean := filepath.Clean(s)

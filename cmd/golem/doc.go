@@ -107,12 +107,13 @@
 // case-variant field name is guarded and two equivalent spellings are blocked
 // as ambiguous. Paths are matched after a case fold that also maps the
 // spellings filesystems treat as one name (.ſsh and .ßh on APFS, zero-width
-// marks on HFS+, ::$DATA streams on Windows). These are direct-access
-// tripwires on named tool arguments, not confinement: search skips the
-// credential files and dispatch refuses a scope at or below .git, .ssh,
-// .gnupg, .aws or .kube, but run_command, retrieve, MCP tools, verifier
-// commands, and copies or hard links under other names can still reach or
-// expose the same files. The egress classifier reads the
+// joiners, direction marks and the BOM on HFS+, ::$DATA streams on Windows).
+// These are direct-access tripwires on named tool arguments, not confinement:
+// search skips the credential files and dispatch refuses a scope at or below
+// .git, .ssh, .gnupg, .aws or .kube, but run_command, retrieve, MCP tools,
+// verifier commands, edit_file's pre-approval match errors, and copies or
+// hard links under other names can still reach or expose the same files. The
+// egress classifier reads the
 // argv of every run_command and start_command, and of any other exec-class
 // call (MCP tools included) whose arguments carry a top-level argv string
 // array, after peeling env, nohup, nice, time, timeout and stdbuf, and labels

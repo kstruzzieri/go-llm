@@ -28,10 +28,11 @@
 // path components on writes, the credential set IsCredentialPath defines on
 // direct reads (the search tool skips the same files, #627), and an inline
 // shell script that pipes a recognized remote fetch into a shell. Paths are
-// matched after a normalization that also maps the spellings case-insensitive
-// filesystems treat as one name, so a custom PathDeny pattern is written in
-// normalized form. A violation BLOCKS the call before Plan and approval
-// regardless of origin, because invariants are policy, not detection; the
+// matched after a normalization that also maps the alias spellings APFS,
+// HFS+ and NTFS treat as one name, so a custom PathDeny pattern is written in
+// normalized form (PathDeny lists the mapping). A violation BLOCKS the call
+// before Plan and approval regardless of origin, because invariants are
+// policy, not detection; the
 // finding's Rule names the invariant and the guard reads arguments with the
 // tool decoder's own name equivalence. Egress classifies an exec-class argv
 // as privileged, network, package-manager, interpreter or unknown (anything

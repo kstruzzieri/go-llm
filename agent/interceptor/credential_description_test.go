@@ -2,6 +2,7 @@ package interceptor_test
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
 
@@ -16,11 +17,18 @@ import (
 // read rule must appear there too or the description goes stale silently.
 func TestSearchDescriptionNamesCredentialSet(t *testing.T) {
 	desc := (*tools.Search)(nil).Spec().Description
+	words := descriptionWords(desc)
 	for _, name := range interceptor.CredentialRuleNames() {
-		if !strings.Contains(desc, name) {
+		if !slices.Contains(words, name) {
 			t.Errorf("search description does not name %q: %s", name, desc)
 		}
 	}
+}
+
+// descriptionWords splits a description into whole names, so ".env" must
+// appear as itself, not only as the prefix of ".env.example".
+func descriptionWords(desc string) []string {
+	return strings.FieldsFunc(desc, func(r rune) bool { return strings.ContainsRune(" ,;()", r) })
 }
 
 type nopCaller struct{}
@@ -45,8 +53,9 @@ func TestDispatchDescriptionNamesProtectedScopes(t *testing.T) {
 	if !strings.Contains(desc, "scope") {
 		t.Skip("scoped dispatch is not supported on this platform")
 	}
+	words := descriptionWords(desc)
 	for _, name := range append([]string{".git"}, interceptor.CredentialRuleNames()...) {
-		if interceptor.IsProtectedPath(name) && !strings.Contains(desc, name) {
+		if interceptor.IsProtectedPath(name) && !slices.Contains(words, name) {
 			t.Errorf("dispatch description does not name protected %q: %s", name, desc)
 		}
 	}
