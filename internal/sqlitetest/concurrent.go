@@ -50,9 +50,9 @@ const (
 
 // RunConcurrentFirstOpens checks that procs processes opening one new
 // database path at the same moment all succeed and leave it in WAL mode, once
-// per trial on a fresh path. Call it from a top-level test: the parent re-runs
+// per trial on a fresh path. Call it once, from a top-level test: the parent re-runs
 // the test binary with -test.run=^<t.Name()>$, and in those children it calls
-// open, checks the result, closes it, and returns, so the test and any
+// open, checks the result, closes it, and ends the test, so the test and any
 // TestMain finish normally. Every child must report ready before any is
 // released, so a child that never reaches the opener (for example, one whose
 // -test.run pattern matches nothing) fails the trial instead of passing, and
@@ -97,7 +97,12 @@ type concurrentChild struct {
 func concurrentOpenTrial(t *testing.T, trial, procs int) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "concurrent.db")
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	remaining := time.Duration(0)
+	d, ok := t.Deadline()
+	if ok {
+		remaining = time.Until(d)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), trialTimeout(remaining, ok))
 	defer cancel()
 	ready := make(chan bool, procs) // one event per child: ready, or exited first
 	children := make([]*concurrentChild, 0, procs)
@@ -142,6 +147,16 @@ func concurrentOpenTrial(t *testing.T, trial, procs int) {
 		t.Fatalf("trial %d: %d of %d concurrent first opens of %s failed (all ready: %v):\n%s",
 			trial, len(failed), procs, path, allReady, strings.Join(failed, "\n"))
 	}
+}
+
+// trialTimeout bounds one trial: a minute, or three quarters of the time left
+// before the test's deadline when that is sooner, so a hung child is killed
+// and reported before the test binary panics on -test.timeout.
+func trialTimeout(remaining time.Duration, hasDeadline bool) time.Duration {
+	if hasDeadline {
+		return min(time.Minute, remaining*3/4)
+	}
+	return time.Minute
 }
 
 func startConcurrentChild(ctx context.Context, name, path string, ready chan<- bool) (*concurrentChild, error) {
@@ -215,4 +230,7 @@ func concurrentOpenChild(t *testing.T, path string, open func(ctx context.Contex
 		t.Fatalf("close after concurrent first open: %v", err)
 	}
 	fmt.Println(concurrentOpenDone)
+	// End the child's test here: code after the harness call, including a
+	// second call that would spawn grandchildren, belongs to the parent.
+	t.SkipNow()
 }

@@ -8,6 +8,8 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -106,4 +108,48 @@ func TestRunConcurrentFirstOpensLongOutput(t *testing.T) {
 		fmt.Println(strings.Repeat("x", 128<<10))
 		return openWAL(ctx, path)
 	})
+}
+
+// TestRunConcurrentFirstOpensOverlaps pins the harness's main property: every
+// child is inside open at the same time. Each child marks its arrival next to
+// the database and waits for all procs markers before opening, so a harness
+// that released children one at a time would time out here.
+func TestRunConcurrentFirstOpensOverlaps(t *testing.T) {
+	const procs = 3
+	sqlitetest.RunConcurrentFirstOpens(t, procs, 1, func(ctx context.Context, path string) (io.Closer, error) {
+		if err := os.WriteFile(fmt.Sprintf("%s.in-open.%d", path, os.Getpid()), nil, 0o600); err != nil {
+			return nil, err
+		}
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			in, err := filepath.Glob(path + ".in-open.*")
+			if err != nil {
+				return nil, err
+			}
+			if len(in) == procs {
+				return openWAL(ctx, path)
+			}
+			if time.Now().After(deadline) {
+				return nil, fmt.Errorf("%d of %d processes were in open together", len(in), procs)
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	})
+}
+
+// parentPIDEnv lets TestRunConcurrentFirstOpensEndsChildTest tell the
+// parent from a child after the harness returns.
+const parentPIDEnv = "GO_LLM_SQLITETEST_PARENT_PID"
+
+// Code after the harness call must run only in the parent: a child that
+// carried on would run it too, and a second harness call there would spawn
+// grandchildren recursively.
+func TestRunConcurrentFirstOpensEndsChildTest(t *testing.T) {
+	if os.Getenv(parentPIDEnv) == "" {
+		t.Setenv(parentPIDEnv, strconv.Itoa(os.Getpid()))
+	}
+	sqlitetest.RunConcurrentFirstOpens(t, 2, 1, openWAL)
+	if got := os.Getenv(parentPIDEnv); got != strconv.Itoa(os.Getpid()) {
+		t.Fatalf("code after RunConcurrentFirstOpens ran in child %d (parent %s)", os.Getpid(), got)
+	}
 }
