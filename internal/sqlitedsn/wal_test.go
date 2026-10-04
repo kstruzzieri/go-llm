@@ -403,3 +403,29 @@ func TestEnableWALRestoresBusyTimeout(t *testing.T) {
 		t.Fatalf("enableWAL replaced its connection: %v", err)
 	}
 }
+
+// An earlier ctx deadline ends the budget. The holder keeps the database
+// EXCLUSIVE, so the attempt waits inside SQLite's busy handler, which does
+// not watch ctx; only the cap can stop that wait by the ctx deadline instead
+// of the full busy_timeout.
+func TestEnableWALStopsAtContextDeadline(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ctxdeadline.db")
+	holder := pinnedHolder(t, path)
+	execConn(t, holder, "PRAGMA locking_mode=EXCLUSIVE", "BEGIN IMMEDIATE", "CREATE TABLE t (x)", "COMMIT")
+	db := openWithTimeout(t, path, 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	err := EnableWAL(ctx, db)
+	elapsed := time.Since(start)
+	// Which one depends on whether the deadline lands inside SQLite's wait or
+	// in the 1ms pause between attempts; the bound below is the contract.
+	var se *sqlite.Error
+	if !errors.Is(err, context.DeadlineExceeded) && (!errors.As(err, &se) || se.Code()&0xff != sqlite3.SQLITE_BUSY) {
+		t.Fatalf("err = %v, want SQLITE_BUSY or context.DeadlineExceeded", err)
+	}
+	t.Logf("elapsed %v", elapsed)
+	if elapsed > budgetSlack(200*time.Millisecond) {
+		t.Fatalf("returned after %v; the 200ms ctx deadline did not end the 5s budget", elapsed)
+	}
+}

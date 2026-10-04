@@ -144,8 +144,9 @@ func WithBusyTimeout(path string, timeout time.Duration) (string, error) {
 // read lock to a write lock, and SQLite skips the busy handler on that upgrade,
 // so two connections racing a database's first switch fail at once with
 // SQLITE_BUSY whatever busy_timeout says. EnableWAL retries on SQLITE_BUSY
-// within one budget equal to the connection's busy_timeout, which also caps
-// SQLite's own lock waits during each attempt's prepare and execute; a zero
+// within one budget equal to the connection's busy_timeout, or shorter when
+// ctx has an earlier deadline, which also caps SQLite's own lock waits during
+// each attempt's prepare and execute; a zero
 // busy_timeout allows one attempt. The total wait is bounded by the budget
 // plus scheduling and I/O overhead. It returns an error if SQLite reports a
 // journal mode other than "wal"; an in-memory database reports "memory" and
@@ -183,6 +184,12 @@ func enableWAL(ctx context.Context, db *sql.DB, onBusy func()) (err error) {
 		_ = conn.Close()
 	}()
 	deadline := time.Now().Add(time.Duration(saved) * time.Millisecond)
+	// An earlier ctx deadline ends the budget too, as in provider's
+	// runInTxBefore; the cap below then stops a lock wait in progress by it,
+	// which ctx alone cannot (SQLite's busy handler does not watch ctx).
+	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
+		deadline = d
+	}
 	capBusy := func() error { return setBusyTimeoutCap(conn, saved, time.Until(deadline)) }
 	for {
 		mode, err := walAttempt(ctx, conn, capBusy)
