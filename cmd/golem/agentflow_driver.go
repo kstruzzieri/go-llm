@@ -42,6 +42,7 @@ type afClient interface {
 	RunGate(context.Context, string, string, string, []string) error
 	FinishStep(context.Context, string, string) error
 	CompleteStep(context.Context, string, string) error
+	BlockStep(context.Context, string, string, string) error
 	FinishRun(context.Context) (string, error)
 	RecordFileChange(context.Context, string, string, string) error
 	RecordEvidence(context.Context, agentflow.EvidenceEntry) error
@@ -52,6 +53,13 @@ type afClient interface {
 // machine is testable without a model; production wiring (runAgentflowTask)
 // builds the step-scoped Request and calls sess.orch.Run.
 type runStepFunc func(ctx context.Context, step agentflow.Step, attempt, goal string) error
+
+// runStoppedError is an agent run that returned without error but stopped
+// before completing: agent.Orchestrator.Run reports loop caps only through
+// Result.StopReason (#611).
+type runStoppedError struct{ reason agent.StopReason }
+
+func (e *runStoppedError) Error() string { return "agent run stopped: " + e.reason.String() }
 
 // beforeGatesFunc is a resume-only, read-only safety check invoked after the
 // model has recorded file receipts and immediately before any command gate.
@@ -226,7 +234,17 @@ func (d *driver) runOneStep(ctx context.Context, id string) error {
 
 func (d *driver) runAttempt(ctx context.Context, step agentflow.Step, attempt, goal string) error {
 	if err := d.runStep(ctx, step, attempt, goal); err != nil {
-		return err // includes a fatal record-file-change failure surfaced via ctx cancel
+		var stopped *runStoppedError
+		if !errors.As(err, &stopped) {
+			return err // includes a fatal record-file-change failure surfaced via ctx cancel
+		}
+		// #611: close the stopped attempt so recovery re-runs the step instead
+		// of settling it on its gates alone.
+		err = fmt.Errorf("step %s attempt %s: %w", step.ID, attempt, err)
+		if berr := d.af.BlockStep(ctx, step.ID, attempt, "golem: "+stopped.Error()); berr != nil {
+			return fmt.Errorf("%w; record blocked attempt: %w", err, berr)
+		}
+		return fmt.Errorf("%w; attempt recorded as blocked", err)
 	}
 	if d.beforeGates != nil {
 		if err := d.beforeGates(ctx, step, attempt); err != nil {
@@ -455,11 +473,18 @@ func newTaskStepRunner(root string, plan *agentflow.Plan, af afClient, orch *age
 			Approver: taskApprover(approveEdits),
 			Options:  sess.startupModelOptions,
 		}
-		_, runErr := orch.Run(stepCtx, req, agent.Observer(newRenderer(out, false, sess.maxSteps, sess.clock, sess.mixed)))
+		res, runErr := orch.Run(stepCtx, req, agent.Observer(newRenderer(out, false, sess.maxSteps, sess.clock, sess.mixed)))
 		if fatal := afJournal.fatalErr(); fatal != nil {
 			return fmt.Errorf("unreceipted edit aborted the run: %w", fatal)
 		}
-		return runErr
+		if runErr != nil {
+			return runErr
+		}
+		if res.StopReason != agent.Completed {
+			// #611: loop caps return a nil error; StopReason is the only signal.
+			return &runStoppedError{reason: res.StopReason}
+		}
+		return nil
 	}, nil
 }
 

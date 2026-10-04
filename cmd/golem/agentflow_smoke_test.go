@@ -194,12 +194,8 @@ func TestAgentflowResumeStatusAndProof_RealCLI(t *testing.T) {
 		t.Fatalf("verify-proof: exit=%d err=%v stdout=%s stderr=%s", exitCode, runErr, out, errOut)
 	}
 
-	receipts, err := os.ReadFile(filepath.Join(dir, ".agent", "command-receipts.jsonl"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if lines := strings.Split(strings.TrimSpace(string(receipts)), "\n"); len(lines) != 1 {
-		t.Fatalf("command receipts = %d, want exactly one: %s", len(lines), receipts)
+	if n := commandReceiptCount(t, dir); n != 1 {
+		t.Fatalf("command receipts = %d, want exactly one", n)
 	}
 	stepRuns, err := os.ReadFile(filepath.Join(dir, ".agent", "step-runs.jsonl"))
 	if err != nil {
@@ -780,5 +776,215 @@ func copyTree(t *testing.T, src, dst string) {
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+// stepRunEvent is the subset of an AgentFlow step-runs.jsonl event the #611
+// tests read.
+type stepRunEvent struct {
+	Event     string `json:"event"`
+	AttemptID string `json:"attempt_id"`
+	Reason    string `json:"reason"`
+}
+
+func readStepRunEvents(t *testing.T, dir string) []stepRunEvent {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(dir, ".agent", "step-runs.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var events []stepRunEvent
+	for _, line := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+		var event stepRunEvent
+		if err := json.Unmarshal([]byte(line), &event); err != nil {
+			t.Fatal(err)
+		}
+		events = append(events, event)
+	}
+	return events
+}
+
+func lastStepRunEvent(events []stepRunEvent, attempt string) stepRunEvent {
+	var last stepRunEvent
+	for _, event := range events {
+		if event.AttemptID == attempt {
+			last = event
+		}
+	}
+	return last
+}
+
+// commandReceiptCount counts the command-receipt ledger's rows. init-execution
+// always creates the ledger, so a missing file fails the test instead of
+// reading as zero receipts.
+func commandReceiptCount(t *testing.T, dir string) int {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(dir, ".agent", "command-receipts.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(b)) == "" {
+		return 0
+	}
+	return len(strings.Split(strings.TrimSpace(string(b)), "\n"))
+}
+
+// runStoppedSmokeStep drives the smoke fixture's first task run with a model
+// that writes the step's file and then hits the step cap (#611). Without the
+// fix this run would pass its grep gate and complete the step.
+func runStoppedSmokeStep(t *testing.T) (string, agentflow.Runner, agentflow.Plan, []byte) {
+	t.Helper()
+	dir := t.TempDir()
+	copyTree(t, "../../testdata/agentflow", dir)
+	gitInit(t, dir)
+	runner := agentflowRunnerOrSkip(t, dir)
+	planBytes, err := os.ReadFile(filepath.Join(dir, "plan.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var plan agentflow.Plan
+	if err := json.Unmarshal(planBytes, &plan); err != nil {
+		t.Fatal(err)
+	}
+	client := agentflow.NewClient(runner, dir)
+	runCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	orch := agent.New(&scriptCaller{responses: []agent.ModelResult{
+		toolStep("w1", "write_file", `{"path":"src/answer.txt","content":"expected\n"}`),
+	}}, agent.ContextManager{})
+	runStep, err := newTaskStepRunner(dir, &plan, client, orch, &replSession{maxSteps: 1}, true, io.Discard, nil, cancel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &driver{
+		af: client, plan: &plan, planPath: filepath.Join(dir, "plan.json"),
+		taskBrief: agentflow.TaskBriefFromPlan(plan, "feature"), runStep: runStep, out: io.Discard,
+	}
+	_, err = d.run(runCtx)
+	if want := "step P1 attempt A1: agent run stopped: step_cap_reached; attempt recorded as blocked"; err == nil || err.Error() != want {
+		t.Fatalf("first run error = %v, want %q", err, want)
+	}
+	if got := lastStepRunEvent(readStepRunEvents(t, dir), "A1"); got.Event != "blocked" || got.Reason != "golem: agent run stopped: step_cap_reached" {
+		t.Fatalf("A1 last event = %+v, want blocked with the Golem reason", got)
+	}
+	if n := commandReceiptCount(t, dir); n != 0 {
+		t.Fatalf("command receipts = %d, want 0: a gate ran before the block", n)
+	}
+	return dir, runner, plan, planBytes
+}
+
+func TestAgentflowStoppedStepIsBlockedAndResumes_RealCLI(t *testing.T) {
+	dir, runner, plan, planBytes := runStoppedSmokeStep(t)
+	ctx := context.Background()
+
+	var status bytes.Buffer
+	statusErr := runAgentflowStatusWithRunner(ctx, &status, dir, false, runner)
+	var exit *agentflowStatusExit
+	if !errors.As(statusErr, &exit) || exit.ExitCode() != 2 || !strings.Contains(status.String(), "state: step_unclaimed") {
+		t.Fatalf("status = %v\n%s", statusErr, status.String())
+	}
+
+	client := agentflow.NewOwnedClient(runner, dir, "golem")
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	orch := agent.New(&scriptCaller{responses: []agent.ModelResult{
+		toolStep("w2", "write_file", `{"path":"src/answer.txt","content":"expected\n"}`),
+		answerStep("done"),
+	}}, agent.ContextManager{})
+	runStep, err := newTaskStepRunner(dir, &plan, client, orch, &replSession{maxSteps: 4}, true, io.Discard, nil, cancel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &driver{af: client, plan: &plan, runStep: runStep}
+	final, err := d.resume(runCtx, dir, planBytes, nil)
+	if err != nil || final.State != "complete" {
+		t.Fatalf("resume state=%q err=%v", final.State, err)
+	}
+	summary, err := client.ProofSummary(ctx)
+	if err != nil || summary.Total == 0 || summary.Failed != 0 {
+		t.Fatalf("proof summary = %+v, err=%v", summary, err)
+	}
+	events := readStepRunEvents(t, dir)
+	claims := 0
+	for _, event := range events {
+		if event.Event == "claimed" {
+			claims++
+		}
+	}
+	if claims != 2 || lastStepRunEvent(events, "A2").Event != "completed" {
+		t.Fatalf("claims=%d A2=%+v, want two claims and A2 completed", claims, lastStepRunEvent(events, "A2"))
+	}
+	if n := commandReceiptCount(t, dir); n != 1 {
+		t.Fatalf("command receipts = %d, want exactly the resumed gate", n)
+	}
+}
+
+func TestAgentflowStoppedStepPartialEditFailsClosed_RealCLI(t *testing.T) {
+	dir, runner, plan, planBytes := runStoppedSmokeStep(t)
+	ctx := context.Background()
+
+	client := agentflow.NewOwnedClient(runner, dir, "golem")
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	orch := agent.New(&scriptCaller{responses: []agent.ModelResult{answerStep("already done")}}, agent.ContextManager{})
+	runStep, err := newTaskStepRunner(dir, &plan, client, orch, &replSession{maxSteps: 4}, true, io.Discard, nil, cancel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &driver{af: client, plan: &plan, runStep: runStep}
+	if _, err := d.resume(runCtx, dir, planBytes, nil); err == nil || !strings.Contains(err.Error(), "reached state \"file_receipts_missing\" before gates") {
+		t.Fatalf("want the before-gates refusal in state file_receipts_missing, got resume err = %v", err)
+	}
+	if got := lastStepRunEvent(readStepRunEvents(t, dir), "A2").Event; got != "claimed" {
+		t.Fatalf("A2 last event = %q after the refusal, want claimed: the refused attempt stays open", got)
+	}
+	if n := commandReceiptCount(t, dir); n != 0 {
+		t.Fatalf("command receipts = %d, want no gate after the inherited edit", n)
+	}
+	var status bytes.Buffer
+	statusErr := runAgentflowStatusWithRunner(ctx, &status, dir, false, runner)
+	var exit *agentflowStatusExit
+	if !errors.As(statusErr, &exit) || exit.ExitCode() != 3 || !strings.Contains(status.String(), "state: file_receipts_missing") {
+		t.Fatalf("status = %v\n%s", statusErr, status.String())
+	}
+
+	// The documented remedy: A2 is still open, so restoring alone would let a
+	// resume settle A2 on its gates. Block A2, restore the inherited edit, then
+	// resume into a fresh A3.
+	if err := client.BlockStep(ctx, "P1", "A2", "operator: discard inherited partial edit"); err != nil {
+		t.Fatal(err)
+	}
+	runTestGit(t, dir, "checkout", "--", "src/answer.txt")
+	if got := lastStepRunEvent(readStepRunEvents(t, dir), "A2"); got.Event != "blocked" || got.Reason != "operator: discard inherited partial edit" {
+		t.Fatalf("A2 last event = %+v, want blocked with the operator reason", got)
+	}
+	if b, err := os.ReadFile(filepath.Join(dir, "src", "answer.txt")); err != nil || string(b) != "pending\n" {
+		t.Fatalf("src/answer.txt = %q, err=%v after the restore, want the committed %q", b, err, "pending\n")
+	}
+	orch = agent.New(&scriptCaller{responses: []agent.ModelResult{
+		toolStep("w3", "write_file", `{"path":"src/answer.txt","content":"expected\n"}`),
+		answerStep("done"),
+	}}, agent.ContextManager{})
+	runStep, err = newTaskStepRunner(dir, &plan, client, orch, &replSession{maxSteps: 4}, true, io.Discard, nil, cancel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d = &driver{af: client, plan: &plan, runStep: runStep}
+	final, err := d.resume(runCtx, dir, planBytes, nil)
+	if err != nil || final.State != "complete" {
+		t.Fatalf("resume after the remedy: state=%q err=%v", final.State, err)
+	}
+	events := readStepRunEvents(t, dir)
+	if got := lastStepRunEvent(events, "A3").Event; got != "completed" {
+		t.Fatalf("A3 last event = %q, want completed", got)
+	}
+	claims := 0
+	for _, event := range events {
+		if event.Event == "claimed" {
+			claims++
+		}
+	}
+	if claims != 3 {
+		t.Fatalf("claim events = %d, want three (A1, A2, A3)", claims)
 	}
 }

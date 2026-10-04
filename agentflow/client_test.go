@@ -473,6 +473,45 @@ func TestClient_FinishStep_ArgvIncludesAttempt(t *testing.T) {
 	}
 }
 
+func TestClient_BlockStep_ArgvCarriesReasonAndActor(t *testing.T) {
+	const reason = "golem: agent run stopped: step_cap_reached"
+	for _, tt := range []struct {
+		name      string
+		owner     string
+		wantActor string
+	}{
+		{name: "default actor", wantActor: "golem"},
+		{name: "owned worker", owner: "golem-w1", wantActor: "golem-w1"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			f := &fakeRunner{replies: map[string]fakeReply{"block-step": {exit: 0}}}
+			c := NewClient(f, "/ws")
+			if tt.owner != "" {
+				c = NewOwnedClient(f, "/ws", tt.owner)
+			}
+			if err := c.BlockStep(context.Background(), "P1", "A1", reason); err != nil {
+				t.Fatal(err)
+			}
+			want := []string{"block-step", "P1", "--root", "/ws", "--attempt", "A1", "--reason", reason, "--agent", tt.wantActor, "--json"}
+			if len(f.calls) != 1 || !reflect.DeepEqual(f.calls[0], want) {
+				t.Fatalf("argv = %v, want [%v]", f.calls, want)
+			}
+		})
+	}
+}
+
+func TestClient_BlockStep_SurfacesCommandError(t *testing.T) {
+	c, _ := newTestClient(map[string]fakeReply{"block-step": {stderr: []byte("block rejected: A1 lease expired"), exit: 2}})
+	err := c.BlockStep(context.Background(), "P1", "A1", "golem: agent run stopped: step_cap_reached")
+	var ce *CommandError
+	if !errors.As(err, &ce) || ce.Cmd != "block-step" || ce.Exit != 2 {
+		t.Fatalf("err = %v, want *CommandError for block-step with exit 2", err)
+	}
+	if got, want := err.Error(), "agentflow block-step: exit 2: block rejected: A1 lease expired"; got != want {
+		t.Fatalf("err.Error() = %q, want %q", got, want)
+	}
+}
+
 func TestClient_FinishRun_StopReportsStoppedAt(t *testing.T) {
 	c, _ := newTestClient(map[string]fakeReply{
 		"finish-run": {stdout: []byte(`{"ok":false,"stopped_at":"verify-proof","diagnostics":["bad proof"]}`), exit: 1},

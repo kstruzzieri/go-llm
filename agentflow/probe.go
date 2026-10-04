@@ -32,6 +32,7 @@ var requiredFeatures = []featureProbe{
 	{"record-file-change", []string{"--root", "--step", "--attempt", "--path", "--agent", "--json"}},
 	{"run", []string{"--root", "--step", "--attempt", "--gate", "--agent", "--confirm-risk"}},
 	{"finish-step", []string{"--root", "--attempt", "--agent", "--json"}},
+	{"block-step", []string{"--root", "--attempt", "--reason", "--agent", "--json"}},
 	{"finish-run", []string{"--root", "--json"}},
 	{"next-action", []string{"--root", "--json"}},
 	{"status", []string{"--root"}}, // status intentionally has no --json in 0.4.x

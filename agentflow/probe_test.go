@@ -15,14 +15,14 @@ func TestProbe_OKWhenAllPresent(t *testing.T) {
 }
 
 func probeReplies(topHelp string) map[string]fakeReply {
-	allFlags := []byte("--root --json --from-json --agent --step --attempt --path --gate --confirm-risk")
+	allFlags := []byte("--root --json --from-json --agent --step --attempt --path --gate --confirm-risk --reason")
 	replies := map[string]fakeReply{
 		"--version": {stdout: []byte("agentflow 0.4.0\n")},
 		"--help":    {stdout: []byte(topHelp)},
 	}
 	for _, sub := range []string{
 		"init", "lock-plan", "init-execution", "doctor", "next-step", "claim-step",
-		"record-file-change", "run", "finish-step", "finish-run", "next-action", "status",
+		"record-file-change", "run", "finish-step", "block-step", "finish-run", "next-action", "status",
 	} {
 		replies[sub] = fakeReply{stdout: allFlags}
 	}
@@ -188,4 +188,33 @@ func TestProbeWorkflow_RequiresStableRecommendationAndMaterializationSurface(t *
 		!strings.Contains(err.Error(), "--reason") {
 		t.Fatalf("missing flag error = %v", err)
 	}
+}
+
+func TestProbe_RequiresBlockStepFlags(t *testing.T) {
+	help := "usage: agentflow {init,init-execution,lock-plan,record-file-change,run,finish-step,finish-run,next-step,next-action,doctor,status}"
+	required := []string{"--root", "--attempt", "--reason", "--agent", "--json"}
+	for _, missing := range required {
+		t.Run("missing "+missing, func(t *testing.T) {
+			var present []string
+			for _, flag := range required {
+				if flag != missing {
+					present = append(present, flag)
+				}
+			}
+			replies := probeReplies(help)
+			replies["block-step"] = fakeReply{stdout: []byte("usage: block-step " + strings.Join(present, " ") + "\n")}
+			err := NewClient(&fakeRunner{replies: replies}, "/ws").Probe(context.Background())
+			if err == nil || !strings.Contains(err.Error(), "block-step "+missing) {
+				t.Fatalf("expected missing block-step %s error, got %v", missing, err)
+			}
+		})
+	}
+	t.Run("help fails", func(t *testing.T) {
+		replies := probeReplies(help)
+		replies["block-step"] = fakeReply{stdout: []byte("agentflow: error: invalid choice: 'block-step'\n"), exit: 2}
+		err := NewClient(&fakeRunner{replies: replies}, "/ws").Probe(context.Background())
+		if err == nil || !strings.Contains(err.Error(), "agentflow block-step --help failed") {
+			t.Fatalf("expected block-step help failure, got %v", err)
+		}
+	})
 }

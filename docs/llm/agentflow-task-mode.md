@@ -287,6 +287,60 @@ starts parallel recovery. Normal interactive startup only detects a
 case-insensitive `.agent` directory and prints the status/resume commands; it
 does not inspect or mutate the ledgers.
 
+### Stopped step runs
+
+A step's agent run can stop before it finishes without an error. It used up
+`-max-steps`, hit three consecutive tool errors (default guard denials count),
+repeated the same tool call with the same result three times, or exhausted a
+run token budget. Golem treats that as a failed attempt. It runs no gate and no
+`finish-step`, records the attempt as `blocked` in AgentFlow's ledger with the
+reason `golem: agent run stopped: <reason>`, and exits 1:
+
+```text
+agentflow task failed: step P1 attempt A1: agent run stopped: tool_error_cap_reached; attempt recorded as blocked
+```
+
+`<reason>` is `step_cap_reached`, `tool_error_cap_reached`,
+`repeat_limit_reached` or `budget_reached`, the same tokens as the REPL footer
+and the `-p` result's `stopReason`. On `-agentflow-resume` the same error
+follows `agentflow resume failed:`. For a parallel worker it appears inside the
+cohort failure, after `run parallel cohort:` and `worker <id>:`.
+
+A blocked attempt is closed, so `-agentflow-status` reports `step_unclaimed`
+(exit `2`), and `-agentflow-resume` claims a new attempt and runs the model
+again. Resume never settles the stopped attempt on its gates.
+
+Edits the stopped run made stay in the workspace. To retry from a clean tree,
+restore the modified tracked files (for example `git restore`) and delete
+files the stopped run created *before* you resume. Otherwise the new attempt
+must write every in-scope file that is still changed; writing the same bytes
+again is enough. If it does not, resume fails before any gate (exit `1`) and
+leaves the new attempt open, and `-agentflow-status` then reports
+`file_receipts_missing` (exit `3`). Do not just restore the files at that
+point. A resume would then settle the open attempt on its gates without running
+the model. Block the open attempt first, then restore, then resume:
+
+```text
+agentflow block-step <step> --root <workspace> --attempt <open attempt> --reason "<text>" --agent golem
+```
+
+The same command applies when recording the block itself fails. That error says
+so (`...; record blocked attempt: <agentflow error>`), and the attempt may still
+be open; check `-agentflow-status`.
+
+Under the `enforce` lease policy, `-agentflow-status` reports `step_unclaimed`
+with exit `3` (see above), so recovery is the operator's. A stopped review
+amendment is blocked too, but its step stays completed. Resume does not retry
+the amendment, and its findings stay unresolved: strict verification reports
+the step as not completed, and non-strict verification shows them as warnings.
+Addressing them needs a successful amendment from a new review-backed task. A
+stopped parallel worker blocks only its own worktree's ledger: the cohort
+fails, the worktree is preserved and its path printed, and the canonical ledger
+is untouched.
+
+Planning mode names the reason too:
+`golem: the planner did not submit a plan: agent run stopped: step_cap_reached`.
+
 ## Workflow routing in task mode
 
 An external plan without `-task-brief` remains backward-compatible through a
