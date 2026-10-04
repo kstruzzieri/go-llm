@@ -30,7 +30,9 @@ func TestResolveLauncher(t *testing.T) {
 		{"./bin/server", filepath.Join(dir, "bin", "server"), "/work/bin/server", nil, true},
 		{"/opt/server", "/opt/server", "/opt/server", nil, true},
 		{"server", "server", "", &exec.Error{Name: "server", Err: exec.ErrDot}, false},
-		{"server", "server", "server", nil, false}, // relative result (GODEBUG=execerrdot=0)
+		{"server", "server", "server", nil, false},                    // relative result (GODEBUG=execerrdot=0)
+		{"/opt/x/../server", "/opt/server", "/opt/server", nil, true}, // cleaned before lookup, not after
+		{"/opt/server", "/opt/server", "/opt/./server", nil, true},    // lookPath's result is executed unchanged
 	} {
 		launcher, err := resolveLauncher(tt.argv0, dir, fake(tt.result, tt.err))
 		if got != tt.wantArg || (err == nil) != tt.ok || (tt.ok && launcher != tt.result) {

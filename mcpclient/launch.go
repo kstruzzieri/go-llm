@@ -144,7 +144,10 @@ func prepareHTTP(p preparedServer, s Server) (preparedServer, error) {
 
 // resolveLauncher resolves argv0 to the absolute path that will be executed.
 // Every form goes through lookPath, so Windows PATHEXT resolution here matches
-// exec.Cmd.Start's own re-resolution of the same path.
+// exec.Cmd.Start's own re-resolution of the same path. argv0 is cleaned
+// lexically before lookup and lookPath's result is returned unchanged, so the
+// path checked is exactly the path executed; a symlink followed by ".."
+// therefore resolves lexically, not as the kernel would.
 func resolveLauncher(argv0, dir string, lookPath func(string) (string, error)) (string, error) {
 	if argv0 == "" {
 		return "", errors.New("mcpclient: empty executable")
@@ -153,12 +156,12 @@ func resolveLauncher(argv0, dir string, lookPath func(string) (string, error)) (
 	if !filepath.IsAbs(name) && (strings.ContainsRune(name, filepath.Separator) || strings.ContainsRune(name, '/')) {
 		name = filepath.Join(dir, name)
 	}
-	resolved, err := lookPath(name)
+	resolved, err := lookPath(filepath.Clean(name))
 	if err != nil {
 		return "", err
 	}
 	if !filepath.IsAbs(resolved) {
 		return "", errors.New("mcpclient: executable did not resolve to an absolute path")
 	}
-	return filepath.Clean(resolved), nil
+	return resolved, nil
 }

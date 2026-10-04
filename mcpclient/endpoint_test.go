@@ -269,3 +269,25 @@ func TestAdmissionFailureNamesHTTPRefusals(t *testing.T) {
 		}
 	}
 }
+
+// discover names a recorded refusal even when the SDK flattens the cause
+// (spec F9): the dial error here carries no sentinel.
+func TestDiscoverNamesRecordedRefusal(t *testing.T) {
+	redirect, destination := new(httpRefusals), new(httpRefusals)
+	redirect.redirect.Store(true)
+	destination.destination.Store(true)
+	for want, refusals := range map[string]*httpRefusals{
+		"redirect_refused":    redirect,
+		"destination_refused": destination,
+		"unavailable":         nil,
+	} {
+		t.Run(want, func(t *testing.T) {
+			p := preparedServer{alias: "fs", transport: &failingTransport{err: errors.New("flattened")}, refusals: refusals}
+			_, _, _, _, err := discover(context.Background(), Implementation{Name: "test"}, p)
+			var failure *AdmissionError
+			if !errors.As(err, &failure) || failure.Reason != want {
+				t.Fatalf("discover = %v, want reason %s", err, want)
+			}
+		})
+	}
+}
