@@ -50,7 +50,7 @@ func TestWindowsURIFilename(t *testing.T) {
 		"file:///C:/x.db", "file://localhost/C:/x.db", "file:x.db", "file::memory:",
 		"file:///C:/x.db?mode=ro", "file:C:/x.db",
 	} {
-		if err := windowsURIFilename(mustParse(t, in)); err != nil {
+		if err := windowsURIFilename(mustParse(t, in), windowsAbs(`C:\work`)); err != nil {
 			t.Errorf("windowsURIFilename(%q) = %v, want nil", in, err)
 		}
 	}
@@ -62,10 +62,67 @@ func TestWindowsURIFilename(t *testing.T) {
 		"file://server/share/x.db",
 		"file://LOCALHOST/C:/x.db",
 	} {
-		if err := windowsURIFilename(mustParse(t, in)); err == nil {
+		if err := windowsURIFilename(mustParse(t, in), windowsAbs(`C:\work`)); err == nil {
 			t.Errorf("windowsURIFilename(%q) = nil, want an error", in)
 		}
 	}
+}
+
+// A relative or rooted URI filename resolves against the working directory,
+// as SQLite resolves it with GetFullPathNameW. Under a UNC working directory
+// it opens the share, so it must be rejected; under a drive it is local.
+func TestWindowsURIFilenameResolvesAgainstWorkingDirectory(t *testing.T) {
+	unc := windowsAbs(`\\server\share\work`)
+	for _, in := range []string{
+		"file:x.db", "file:/x.db", "file:///x.db", "file://localhost/x.db", "file:sub/x.db?mode=ro",
+	} {
+		if err := windowsURIFilename(mustParse(t, in), unc); err == nil {
+			t.Errorf("windowsURIFilename(%q) under a UNC working directory = nil, want an error", in)
+		}
+	}
+	// These name a drive-letter file, or no file at all.
+	for _, in := range []string{
+		"file:///C:/x.db", "file://localhost/C:/x.db", "file:C:/x.db",
+		"file::memory:", "file::memory:?cache=shared", "file:shared?mode=memory&cache=shared",
+		"file:", "file:?mode=ro",
+	} {
+		if err := windowsURIFilename(mustParse(t, in), unc); err != nil {
+			t.Errorf("windowsURIFilename(%q) under a UNC working directory = %v, want nil", in, err)
+		}
+	}
+	drive := windowsAbs(`C:\work`)
+	for _, in := range []string{"file:x.db", "file:/x.db", "file:///x.db"} {
+		if err := windowsURIFilename(mustParse(t, in), drive); err != nil {
+			t.Errorf("windowsURIFilename(%q) under a drive working directory = %v, want nil", in, err)
+		}
+	}
+}
+
+// windowsAbs models filepath.Abs on Windows (GetFullPathNameW) with working
+// directory cwd, for the forms the tests use: drive-qualified and UNC paths
+// are kept, a rooted path takes cwd's drive or share, and a relative path is
+// joined to cwd.
+func windowsAbs(cwd string) func(string) (string, error) {
+	return func(p string) (string, error) {
+		p = strings.ReplaceAll(p, "/", `\`)
+		switch {
+		case len(p) >= 3 && p[1] == ':' && p[2] == '\\', strings.HasPrefix(p, `\\`):
+			return p, nil
+		case strings.HasPrefix(p, `\`):
+			return windowsVolume(cwd) + p, nil
+		default:
+			return cwd + `\` + p, nil
+		}
+	}
+}
+
+// windowsVolume returns the drive ("C:") or share (\\server\share) of cwd.
+func windowsVolume(cwd string) string {
+	if strings.HasPrefix(cwd, `\\`) {
+		parts := strings.SplitN(cwd[2:], `\`, 3)
+		return `\\` + parts[0] + `\` + parts[1]
+	}
+	return cwd[:2]
 }
 
 func TestFileURLRejectsEmptyPath(t *testing.T) {
@@ -123,6 +180,26 @@ func TestFileURLOnWindows(t *testing.T) {
 	}
 	if _, err := os.Stat(path); err != nil {
 		t.Errorf("database not created at %q: %v", path, err)
+	}
+
+	// A relative URI resolves against the working directory, as SQLite will:
+	// FileURL must resolve it with the real filepath.Abs, accept it under a
+	// drive, and the DSN must open that directory's file.
+	t.Chdir(dir)
+	relDSN, err := WithBusyTimeout("file:relative.db", time.Second)
+	if err != nil {
+		t.Fatalf("WithBusyTimeout(file:relative.db) under %q: %v", dir, err)
+	}
+	relDB, err := sql.Open("sqlite", relDSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = relDB.Close() }()
+	if _, err := relDB.Exec("CREATE TABLE t (id INTEGER)"); err != nil {
+		t.Fatalf("open relative URI %q: %v", relDSN, err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "relative.db")); err != nil {
+		t.Errorf("relative URI did not create relative.db in %q: %v", dir, err)
 	}
 }
 
