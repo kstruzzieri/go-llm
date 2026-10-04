@@ -39,7 +39,7 @@ func TestStoreOpenersUseSharedHelpers(t *testing.T) {
 				return nil
 			}
 			name := d.Name()
-			if path == self || strings.HasPrefix(name, ".") || name == "testdata" || name == "vendor" || isFile(filepath.Join(path, "go.mod")) {
+			if path == self || strings.HasPrefix(name, ".") || name == "testdata" || name == "docs" || name == "vendor" || isFile(filepath.Join(path, "go.mod")) {
 				return filepath.SkipDir
 			}
 			return nil
@@ -66,16 +66,16 @@ func TestStoreOpenersUseSharedHelpers(t *testing.T) {
 }
 
 var (
-	// A WAL switch statement anywhere in a literal, ended by ';' or the end of
-	// the literal. That ending lets error prefixes such as
-	// "PRAGMA journal_mode=WAL: %w" pass.
-	walStatement = regexp.MustCompile(`(?i)\bpragma\s+journal_mode\s*=\s*'?wal'?\s*(;|$)`)
+	// A WAL switch anywhere in a literal (statement, schema-qualified, or a DSN
+	// _pragma value), ended by ';', '&' or the end of the literal. That ending
+	// lets error prefixes such as "PRAGMA journal_mode=WAL: %w" pass.
+	walStatement = regexp.MustCompile(`(?i)\bjournal_mode\s*=\s*'?wal'?\s*(;|&|$)`)
 	// The DSN form, _pragma=journal_mode(WAL).
 	walDSNPragma = regexp.MustCompile(`(?i)journal_mode\s*\(\s*'?wal'?\s*\)`)
 )
 
-// sqliteSetupHits reports "line: what" for each WAL switch literal and each
-// Scheme: "file" composite field in src.
+// sqliteSetupHits reports "line: what" for each WAL switch literal, each
+// Scheme: "file" composite field, and each literal starting with file: in src.
 func sqliteSetupHits(src []byte) []string {
 	fset := token.NewFileSet()
 	file := fset.AddFile("", fset.Base(), len(src))
@@ -127,6 +127,9 @@ var i = "PRAGMA journal_mode"
 var j = "PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL"
 var k = strings.HasPrefix(p, "file:")
 var l = "a file: b"
+var m = q.Add("_pragma", "journal_mode=WAL")
+var n = "PRAGMA main.journal_mode=WAL"
+var o = "x.db?_pragma=busy_timeout(5000)&_pragma=journal_mode=WAL&mode=rwc"
 `)
 	got := strings.Join(sqliteSetupHits(src), "\n")
 	want := strings.Join([]string{
@@ -137,6 +140,9 @@ var l = "a file: b"
 		`9: hand-built file URL`,
 		`13: WAL switch "PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL"`,
 		`14: file: URI literal "file:"`,
+		`16: WAL switch "journal_mode=WAL"`,
+		`17: WAL switch "PRAGMA main.journal_mode=WAL"`,
+		`18: WAL switch "x.db?_pragma=busy_timeout(5000)&_pragma=journal_mode=WAL&mode=rwc"`,
 	}, "\n")
 	if got != want {
 		t.Errorf("hits:\n%s\nwant:\n%s", got, want)
