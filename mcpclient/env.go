@@ -28,8 +28,9 @@ type EnvVar struct {
 // server is launched. An unset variable blocks the alias with env_unset.
 func InheritEnv(name string) EnvVar { return EnvVar{name: name, inherit: true} }
 
-// SetEnv supplies value for name. name must not be a baseline variable, so
-// the PATH used to resolve the launcher is always the child's PATH.
+// SetEnv supplies value for name. name must not be a baseline variable, so the
+// child's PATH always derives from the parent PATH that resolved the launcher
+// (minus relative entries, which exec.LookPath refuses with exec.ErrDot).
 func SetEnv(name, value string) EnvVar { return EnvVar{name: name, value: &value, set: true} }
 
 func (v EnvVar) source() string {
@@ -56,24 +57,31 @@ func (v EnvVar) Format(f fmt.State, _ rune) {
 	}
 }
 
-// envPolicy is a platform's baseline environment, name-matching rule, and
-// PATH list syntax. The PATH rules are explicit, not the host's filepath, so
-// both policies behave the same on every host.
+// envPolicy is a platform's baseline environment, name-matching rule, forced
+// variables and PATH list syntax. The PATH rules are explicit, not the host's
+// filepath, so both policies behave the same on every host.
 type envPolicy struct {
 	id       string // part of the connection identity
 	baseline []string
 	foldCase bool
+	forced   []string          // NAME=value entries set last; additions may not name them
 	listSep  byte              // PATH list separator
-	isAbs    func(string) bool // whether a PATH entry is absolute
+	quotes   bool              // PATH entries may be double-quoted (Windows)
+	isAbs    func(string) bool // whether an unquoted PATH entry is absolute
 }
 
 var (
 	unixEnvPolicy = envPolicy{id: "unix-v1", listSep: ':', isAbs: unixAbs,
 		baseline: []string{"HOME", "LANG", "PATH", "TMPDIR", "USER"}}
-	windowsEnvPolicy = envPolicy{id: "windows-v1", foldCase: true, listSep: ';', isAbs: windowsAbs, baseline: []string{
-		"APPDATA", "COMSPEC", "HOME", "LANG", "LOCALAPPDATA", "PATH", "PATHEXT",
-		"SYSTEMROOT", "TEMP", "TMP", "TMPDIR", "USER", "USERPROFILE",
-	}}
+	// Windows programs (cmd.exe, CreateProcess without an application name,
+	// Node's spawn) search the current directory, the workspace root, before
+	// PATH for a bare name unless NoDefaultCurrentDirectoryInExePath is set.
+	windowsEnvPolicy = envPolicy{id: "windows-v1", foldCase: true, listSep: ';', quotes: true, isAbs: windowsAbs,
+		forced: []string{"NoDefaultCurrentDirectoryInExePath=1"},
+		baseline: []string{
+			"APPDATA", "COMSPEC", "HOME", "LANG", "LOCALAPPDATA", "PATH", "PATHEXT",
+			"SYSTEMROOT", "TEMP", "TMP", "TMPDIR", "USER", "USERPROFILE",
+		}}
 )
 
 func unixAbs(entry string) bool { return strings.HasPrefix(entry, "/") }
@@ -112,6 +120,11 @@ func validateEnvAdditions(vars []EnvVar, p envPolicy) error {
 	for _, name := range p.baseline {
 		baseline[p.key(name)] = true
 	}
+	forced := make(map[string]bool, len(p.forced))
+	for _, kv := range p.forced {
+		name, _, _ := strings.Cut(kv, "=")
+		forced[p.key(name)] = true
+	}
 	seen := make(map[string]bool, len(vars))
 	for i, v := range vars {
 		switch {
@@ -121,6 +134,8 @@ func validateEnvAdditions(vars []EnvVar, p envPolicy) error {
 			return fmt.Errorf("mcpclient: environment entry %d is not a variable name", i+1)
 		case seen[p.key(v.name)]:
 			return fmt.Errorf("mcpclient: environment entry %d repeats a name", i+1)
+		case forced[p.key(v.name)]:
+			return fmt.Errorf("mcpclient: environment entry %d names a variable the platform policy sets", i+1)
 		case v.set && baseline[p.key(v.name)]:
 			return fmt.Errorf("mcpclient: environment entry %d sets a baseline variable", i+1)
 		case v.set && strings.IndexByte(*v.value, 0) >= 0:
@@ -137,10 +152,11 @@ func validateEnvAdditions(vars []EnvVar, p envPolicy) error {
 // vars must already pass validateEnvAdditions.
 //
 // PATH keeps only its absolute entries, in order (absolutePath). A PATH left
-// with none is omitted, not forwarded empty: POSIX lookup reads an empty PATH
-// as the current directory, while an unset one falls back to the system
-// default. An InheritEnv("PATH") filtered to nothing is still set, so it is
-// omitted, never env_unset.
+// with none is omitted, which is strictly better than forwarding it empty (a
+// zero-length entry means the current directory); an unset PATH leaves each
+// program its own default search path, which for sh and bash ends in ".".
+// An InheritEnv("PATH") filtered to nothing is still set, so it is omitted,
+// never env_unset. The policy's forced entries are applied last.
 func buildServerEnv(p envPolicy, vars []EnvVar, lookup func(string) (string, bool)) (env []string, unset []string) {
 	entries := make(map[string]string)
 	put := func(name, value string) {
@@ -170,6 +186,10 @@ func buildServerEnv(p envPolicy, vars []EnvVar, lookup func(string) (string, boo
 		}
 		put(v.name, value)
 	}
+	for _, kv := range p.forced {
+		name, _, _ := strings.Cut(kv, "=")
+		entries[p.key(name)] = kv
+	}
 	keys := make([]string, 0, len(entries))
 	for k := range entries {
 		keys = append(keys, k)
@@ -186,16 +206,37 @@ func buildServerEnv(p envPolicy, vars []EnvVar, lookup func(string) (string, boo
 // empty and relative ones: the server runs in the workspace, where a relative
 // entry would select programs from the workspace. The launcher agrees:
 // exec.LookPath refuses a result found through a relative or empty entry
-// (exec.ErrDot), and prepare refuses ErrDot.
+// (exec.ErrDot), and prepare refuses ErrDot. Where quotes apply, entries split
+// and are judged as filepath.SplitList does on Windows (a separator inside
+// quotes does not split, an unbalanced quote runs to the end, quotes are
+// removed), and a kept entry is forwarded with its quotes.
 func (p envPolicy) absolutePath(list string) string {
-	sep := string(p.listSep)
+	var entries []string
+	if p.quotes {
+		start, quoted := 0, false
+		for i := 0; i < len(list); i++ {
+			if list[i] == '"' {
+				quoted = !quoted
+			} else if list[i] == p.listSep && !quoted {
+				entries = append(entries, list[start:i])
+				start = i + 1
+			}
+		}
+		entries = append(entries, list[start:])
+	} else {
+		entries = strings.Split(list, string(p.listSep))
+	}
 	var kept []string
-	for _, entry := range strings.Split(list, sep) {
-		if p.isAbs(entry) {
+	for _, entry := range entries {
+		unquoted := entry
+		if p.quotes {
+			unquoted = strings.ReplaceAll(entry, `"`, "")
+		}
+		if p.isAbs(unquoted) {
 			kept = append(kept, entry)
 		}
 	}
-	return strings.Join(kept, sep)
+	return strings.Join(kept, string(p.listSep))
 }
 
 // envIdentity is the sorted source:KEY list that is fingerprinted for vars.

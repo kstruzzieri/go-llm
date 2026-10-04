@@ -27,12 +27,14 @@
 // platform baseline environment plus WithEnv additions, never the inherited
 // environment. InheritEnv forwards the parent's value read at launch, and an
 // unset name blocks the alias with env_unset; SetEnv supplies a value and may
-// not name a baseline variable. An HTTP endpoint keeps its path and query
-// exactly; userinfo, fragments, dot segments, backslashes, zone IDs and
-// non-ASCII hosts are fatal invalid_config errors. Every request must target
-// that endpoint and every redirect is refused, session close included; a
-// refused close redirect never fails admission, Inspect or Approve, and
-// Manager.Close reports it.
+// not name a baseline variable. The Windows policy also always sets
+// NoDefaultCurrentDirectoryInExePath=1, so a bare program name is not looked up
+// in the working directory before PATH; additions may not name it. An HTTP
+// endpoint keeps its path and query exactly; userinfo, fragments, dot segments,
+// backslashes, zone IDs and non-ASCII hosts are fatal invalid_config errors.
+// Every request must target that endpoint and every redirect is refused,
+// session close included; a refused close redirect never fails admission,
+// Inspect or Approve, and Manager.Close reports it.
 //
 // The prepared identity is fingerprinted with a per-user HMAC key
 // (connection-hmac.pem beside the pin directories, created by NewPinStore when
@@ -69,12 +71,14 @@
 // TOFU detects definition and connection drift, not malicious initial
 // definitions, a program replaced at the same path, a file or symlink swapped
 // between check and launch, or changed behavior behind unchanged catalogs and
-// launchers. The child's PATH keeps only its absolute entries (a PATH with
-// none is omitted), but PATH values are not identity: a wrapper (env, npx,
-// uvx, sh -c) or a script's #! interpreter binds only the launcher, not what
-// it later finds through those entries. Stdio servers keep the host user's filesystem and network authority. A backup
-// holding both the key and the pins allows offline guessing of low-entropy
-// argv or query secrets. New workspaces and aliases have fresh
-// trust namespaces. Live catalog-change notifications are not handled.
-// Foreign-result provenance and observation fencing remain independent.
+// launchers. The child's PATH keeps only its absolute entries (a quoted Windows
+// entry is judged unquoted and kept as written); a PATH with none is omitted,
+// leaving each program its own default search path. PATH values are not
+// identity: a wrapper (env, npx, uvx, sh -c) or a script's #! interpreter binds
+// only the launcher, not what it later finds through those entries. Stdio
+// servers keep the host user's filesystem and network authority. A backup
+// holding both the key and the pins allows offline guessing of low-entropy argv
+// or query secrets. New workspaces and aliases have fresh trust namespaces.
+// Live catalog-change notifications are not handled. Foreign-result provenance
+// and observation fencing remain independent.
 package mcpclient

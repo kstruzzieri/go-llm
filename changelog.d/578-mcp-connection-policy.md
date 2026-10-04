@@ -36,8 +36,13 @@ and network authority (#580).
   relative program path containing a separator (`./bin/server`) resolves
   against `-root`, not Golem's current directory.
 - Relative and empty `PATH` entries (`.`, `./node_modules/.bin`) are dropped
-  from a stdio server's `PATH`, and a `PATH` with no absolute entry is omitted.
-  Servers that relied on a relative entry need absolute entries instead.
+  from a stdio server's `PATH` (a quoted Windows entry is judged without its
+  quotes and kept as written), and a `PATH` with no absolute entry is omitted
+  (then programs use their own default search path). Servers that relied on a
+  relative entry need absolute entries instead.
+- On Windows a stdio server always gets `NoDefaultCurrentDirectoryInExePath=1`,
+  so a bare program name is not looked up in the workspace root before `PATH`;
+  `-mcp-env` may not name it.
 - `PATH` values are not part of the connection: a wrapper
   (`env KEY=val command`, `npx`, `uvx`, `sh -c`) or a script's `#!`
   interpreter binds only the launcher, so what it finds through the absolute

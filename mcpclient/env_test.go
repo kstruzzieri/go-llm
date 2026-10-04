@@ -134,6 +134,9 @@ func TestValidateEnvAdditions(t *testing.T) {
 		{"set baseline", unixEnvPolicy, []EnvVar{SetEnv("PATH", "/x")}, "mcpclient: environment entry 1 sets a baseline variable"},
 		{"set baseline lowercase on unix", unixEnvPolicy, []EnvVar{SetEnv("path", "/x")}, ""},
 		{"set baseline folded on windows", windowsEnvPolicy, []EnvVar{SetEnv("Path", "/x")}, "mcpclient: environment entry 1 sets a baseline variable"},
+		{"inherit forced on windows", windowsEnvPolicy, []EnvVar{InheritEnv("NoDefaultCurrentDirectoryInExePath")}, "mcpclient: environment entry 1 names a variable the platform policy sets"},
+		{"set forced folded on windows", windowsEnvPolicy, []EnvVar{InheritEnv("A"), SetEnv("nodefaultcurrentdirectoryinexepath", "")}, "mcpclient: environment entry 2 names a variable the platform policy sets"},
+		{"forced name is ordinary on unix", unixEnvPolicy, []EnvVar{InheritEnv("NoDefaultCurrentDirectoryInExePath")}, ""},
 		{"NUL in set value", unixEnvPolicy, []EnvVar{InheritEnv("A"), SetEnv("B", "x\x00y")}, "mcpclient: environment entry 2 value contains NUL"},
 		{"newline in set value", unixEnvPolicy, []EnvVar{SetEnv("B", "x\ny")}, ""},
 	} {
@@ -167,7 +170,7 @@ func TestBuildServerEnv(t *testing.T) {
 	folded, _ := buildServerEnv(windowsEnvPolicy, []EnvVar{InheritEnv("Path")}, func(name string) (string, bool) {
 		return map[string]string{"PATH": "C:\\bin", "Path": "C:\\bin"}[name], name == "PATH" || name == "Path"
 	})
-	if want := []string{"Path=C:\\bin"}; !slices.Equal(folded, want) {
+	if want := []string{"NoDefaultCurrentDirectoryInExePath=1", "Path=C:\\bin"}; !slices.Equal(folded, want) {
 		t.Fatalf("windows folding = %q, want one Path entry %q", folded, want)
 	}
 }
@@ -188,10 +191,48 @@ func TestBuildServerEnvCompleteBaselines(t *testing.T) {
 	}
 	windows, _ := buildServerEnv(windowsEnvPolicy, nil, everything(`C:\path`))
 	if want := []string{
-		"APPDATA=appdata", "COMSPEC=comspec", "HOME=home", "LANG=lang", "LOCALAPPDATA=localappdata", `PATH=C:\path`, "PATHEXT=pathext",
+		"APPDATA=appdata", "COMSPEC=comspec", "HOME=home", "LANG=lang", "LOCALAPPDATA=localappdata", "NoDefaultCurrentDirectoryInExePath=1", `PATH=C:\path`, "PATHEXT=pathext",
 		"SYSTEMROOT=systemroot", "TEMP=temp", "TMP=tmp", "TMPDIR=tmpdir", "USER=user", "USERPROFILE=userprofile",
 	}; !slices.Equal(windows, want) {
 		t.Fatalf("windows baseline = %q, want %q", windows, want)
+	}
+}
+
+// Windows programs search the current directory, now the workspace root,
+// before PATH unless NoDefaultCurrentDirectoryInExePath is set, so the Windows
+// policy always sets it, last, where no addition can replace it. Unix forces
+// nothing.
+func TestBuildServerEnvForcedEntries(t *testing.T) {
+	none := func(string) (string, bool) { return "", false }
+	zero := func(name string) (string, bool) {
+		return "0", strings.EqualFold(name, "NoDefaultCurrentDirectoryInExePath")
+	}
+	for _, tt := range []struct {
+		name   string
+		policy envPolicy
+		vars   []EnvVar
+		lookup func(string) (string, bool)
+		want   []string
+	}{
+		{"windows empty parent", windowsEnvPolicy, nil, none, []string{"NoDefaultCurrentDirectoryInExePath=1"}},
+		// Validation rejects these additions; the builder must still win.
+		{"windows inherited addition", windowsEnvPolicy, []EnvVar{InheritEnv("NODEFAULTCURRENTDIRECTORYINEXEPATH")}, zero, []string{"NoDefaultCurrentDirectoryInExePath=1"}},
+		{"windows set addition", windowsEnvPolicy, []EnvVar{SetEnv("NoDefaultCurrentDirectoryInExePath", "0")}, none, []string{"NoDefaultCurrentDirectoryInExePath=1"}},
+		{"unix empty parent", unixEnvPolicy, nil, none, []string{}},
+		{"unix inherited name", unixEnvPolicy, []EnvVar{InheritEnv("NoDefaultCurrentDirectoryInExePath")}, zero, []string{"NoDefaultCurrentDirectoryInExePath=0"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			env, _ := buildServerEnv(tt.policy, tt.vars, tt.lookup)
+			if !slices.Equal(env, tt.want) {
+				t.Fatalf("env = %q, want %q", env, tt.want)
+			}
+		})
+	}
+	unix, _ := buildServerEnv(unixEnvPolicy, nil, func(name string) (string, bool) { return "/" + name, true })
+	for _, kv := range unix {
+		if strings.HasPrefix(strings.ToUpper(kv), "NODEFAULTCURRENTDIRECTORYINEXEPATH=") {
+			t.Fatalf("unix env %q carries the Windows-only variable", unix)
+		}
 	}
 }
 
@@ -199,6 +240,7 @@ func TestBuildServerEnvCompleteBaselines(t *testing.T) {
 // list separator and path rules; with none left PATH is omitted, because an
 // empty PATH means the current directory to POSIX lookups.
 func TestBuildServerEnvDropsRelativePathEntries(t *testing.T) {
+	const forced = "NoDefaultCurrentDirectoryInExePath=1"
 	for _, tt := range []struct {
 		name   string
 		policy envPolicy
@@ -212,9 +254,20 @@ func TestBuildServerEnvDropsRelativePathEntries(t *testing.T) {
 		{"unix empty", unixEnvPolicy, nil, "PATH", "", []string{}},
 		{"unix inherited overlap", unixEnvPolicy, []EnvVar{InheritEnv("PATH")}, "PATH", "/usr/bin::./node_modules/.bin:.:/bin:rel", []string{"PATH=/usr/bin:/bin"}},
 		{"unix inherited all relative", unixEnvPolicy, []EnvVar{InheritEnv("PATH")}, "PATH", ".:bin", []string{}},
-		{"windows baseline", windowsEnvPolicy, nil, "PATH", `C:\bin;;.\x;\rooted;C:rel;\\srv\share\bin;D:/y`, []string{`PATH=C:\bin;\\srv\share\bin;D:/y`}},
-		{"windows inherited Path", windowsEnvPolicy, []EnvVar{InheritEnv("Path")}, "Path", `C:\bin;;.\x;\rooted;C:rel;\\srv\share\bin;D:/y`, []string{`Path=C:\bin;\\srv\share\bin;D:/y`}},
-		{"windows colon is not a separator", windowsEnvPolicy, nil, "PATH", `C:\a:b;rel`, []string{`PATH=C:\a:b`}},
+		{"unix quotes are literal", unixEnvPolicy, nil, "PATH", `"/usr/bin":/bin`, []string{"PATH=/bin"}},
+		{"windows baseline", windowsEnvPolicy, nil, "PATH", `C:\bin;;.\x;\rooted;C:rel;\\srv\share\bin;D:/y`, []string{forced, `PATH=C:\bin;\\srv\share\bin;D:/y`}},
+		{"windows inherited Path", windowsEnvPolicy, []EnvVar{InheritEnv("Path")}, "Path", `C:\bin;;.\x;\rooted;C:rel;\\srv\share\bin;D:/y`, []string{forced, `Path=C:\bin;\\srv\share\bin;D:/y`}},
+		{"windows colon is not a separator", windowsEnvPolicy, nil, "PATH", `C:\a:b;rel`, []string{forced, `PATH=C:\a:b`}},
+		{"windows all relative", windowsEnvPolicy, nil, "PATH", `.;bin`, []string{forced}},
+		// Quoted entries split and are judged as filepath.SplitList does, and
+		// are forwarded with their quotes.
+		{"windows quoted entries kept", windowsEnvPolicy, nil, "PATH", `"C:\Program Files\nodejs";C:\Windows\system32;"C:\a;b";C:\bin`, []string{forced, `PATH="C:\Program Files\nodejs";C:\Windows\system32;"C:\a;b";C:\bin`}},
+		{"windows quoted relative dropped", windowsEnvPolicy, nil, "PATH", `"rel";C:\x`, []string{forced, `PATH=C:\x`}},
+		{"windows inner quotes", windowsEnvPolicy, nil, "PATH", `C:\"Program Files"\x;rel`, []string{forced, `PATH=C:\"Program Files"\x`}},
+		// An unbalanced quote runs to the end of the list, as in
+		// filepath.SplitList; the whole tail is one entry, judged unquoted.
+		{"windows unbalanced quote absolute", windowsEnvPolicy, nil, "PATH", `C:\x;"C:\y;rel`, []string{forced, `PATH=C:\x;"C:\y;rel`}},
+		{"windows unbalanced quote relative", windowsEnvPolicy, nil, "PATH", `C:\x;"rel;C:\y`, []string{forced, `PATH=C:\x`}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			lookup := func(name string) (string, bool) {

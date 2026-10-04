@@ -748,8 +748,10 @@ relative program path containing a separator (`./bin/server`) resolves against
 it. They get a minimal environment: `PATH`, `HOME`, `LANG`, `USER` and `TMPDIR`
 (on Windows also `SYSTEMROOT`, `TEMP`, `TMP`, `PATHEXT`, `USERPROFILE`,
 `COMSPEC`, `APPDATA` and `LOCALAPPDATA`), each copied from Golem's environment
-when set (`PATH` without its relative or empty entries). Nothing else is
-inherited. Forward more variables by name with
+when set (`PATH` without its relative or empty entries). On Windows Golem also
+always sets `NoDefaultCurrentDirectoryInExePath=1`, so a bare program name is
+not looked up in the workspace root before `PATH`; `-mcp-env` may not name it.
+Nothing else is inherited. Forward more variables by name with
 `-mcp-env 'fs=GITHUB_TOKEN,HTTPS_PROXY'` (repeatable, one per stdio alias);
 values are read from Golem's environment and never appear on the command line. A
 named variable that is unset blocks that server before launch (`env_unset`); one
@@ -759,26 +761,28 @@ arguments, which are pinned only as a keyed fingerprint and never displayed.
 Stdio servers keep the host user's filesystem and network authority; confinement
 is [#580](https://github.com/kstruzzieri/go-llm/issues/580).
 
-Each pin also binds the connection: for stdio, the resolved program path and
-its symlink-resolved target, the arguments, the working directory, and the
+Each pin also binds the connection: for stdio, the resolved program path and its
+symlink-resolved target, the arguments, the working directory, and the
 environment policy (the platform baseline and the forwarded names, not their
 values); for HTTP, the exact endpoint (scheme, host, port, path and query). The
 pin stores these only as fingerprints keyed with a per-user secret. A changed
 connection blocks the alias before anything is launched or contacted
 (`connection_changed`, naming the changed fields: `launcher`, `target`, `dir`,
 `env`, `env_baseline`, `argv`, `origin`, `endpoint`, `kind`, `key`, or
-`identity` when no single field explains the change), even when the tool list
-is identical. Updating a program in place at the same path or changing a
-forwarded value does not change the connection; an upgrade that moves a symlink
-to a new versioned path changes `target`. A file or symlink swapped between the
-check and the launch is not detected. Relative and empty `PATH` entries (`.`,
-`./node_modules/.bin`) are dropped from the server's `PATH`, and a `PATH` with
-no absolute entry is omitted. The value of `PATH` is not part of the
-connection: with a wrapper such as `env KEY=val command`, `npx`, `uvx` or
-`sh -c '…'`, or a script that starts `#!/usr/bin/env node`, only the wrapper or
-script is bound, so the program it finds through the absolute `PATH` entries,
-or the interpreter a `#!` line names, can change without `connection_changed`.
-Prefer an absolute launcher path to a wrapper.
+`identity` when no single field explains the change), even when the tool list is
+identical. Updating a program in place at the same path or changing a forwarded
+value does not change the connection; an upgrade that moves a symlink to a new
+versioned path changes `target`. A file or symlink swapped between the check and
+the launch is not detected. Relative and empty `PATH` entries (`.`,
+`./node_modules/.bin`) are dropped from the server's `PATH`; on Windows a quoted
+entry is judged without its quotes and kept as written. A `PATH` with no
+absolute entry is omitted (then programs use their own default search path). The
+value of `PATH` is not part of the connection: with a wrapper such as
+`env KEY=val command`, `npx`, `uvx` or `sh -c '…'`, or a script that starts
+`#!/usr/bin/env node`, only the wrapper or script is bound, so the program it
+finds through the absolute `PATH` entries, or the interpreter a `#!` line names,
+can change without `connection_changed`. Prefer an absolute launcher path to a
+wrapper.
 
 HTTP servers are pinned to that one endpoint: every request must target it
 exactly, and every redirect is refused, same-origin included
