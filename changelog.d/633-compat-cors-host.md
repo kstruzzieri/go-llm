@@ -27,8 +27,10 @@ are logged.
 #### Upgrade note
 
 Browser clients that relied on the `*` default must pass their origin to
-`WithCORS`; a malformed origin (for example one with a trailing slash) is
-logged and trusts nothing. Clients that reach the server under another name,
-such as `host.docker.internal` from a container, or LAN clients of a
-`WithTLS` server bound to a wildcard address (`:port`, `0.0.0.0`), must be
-listed with `WithAllowedHosts`. Host matching ignores ports and case.
+`WithCORS`, exactly as the browser sends it. `ListenAndServe` returns the new
+`compat.ErrInvalidCORSOrigin` for an origin no browser sends, such as one with
+a trailing slash, upper-case letters, or the scheme's default port (#636).
+Clients that reach the server under another name, such as
+`host.docker.internal` from a container, or LAN clients of a `WithTLS` server
+bound to a wildcard address (`:port`, `0.0.0.0`), must be listed with
+`WithAllowedHosts`. Host matching ignores ports and case.

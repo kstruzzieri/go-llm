@@ -25,7 +25,9 @@ func WithBasePath(prefix string) Option {
 // (disabled): the server sends no CORS headers and refuses POSTs that
 // browsers mark as cross-origin, so pages on other origins can neither read
 // responses nor run models blind. Browser clients opt in by passing their
-// exact origin, e.g. "https://app.example". The server is unauthenticated, so
+// exact origin as the browser sends it, e.g. "https://app.example": lower
+// case, no path or trailing slash, no default port. ListenAndServe returns
+// ErrInvalidCORSOrigin for anything else. The server is unauthenticated, so
 // "*" lets any website the user visits call it and read the results.
 func WithCORS(origin string) Option {
 	return func(s *Server) { s.corsOrigin = origin }

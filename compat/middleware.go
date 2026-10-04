@@ -4,9 +4,11 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"slices"
 	"strings"
 	"time"
@@ -54,9 +56,9 @@ func crossOriginMiddleware(next http.Handler, origin string) http.Handler {
 	}
 	protection := http.NewCrossOriginProtection()
 	if origin != "" {
-		if err := protection.AddTrustedOrigin(origin); err != nil {
-			log.Printf("compat: WithCORS: %v; cross-origin requests stay refused", err)
-		}
+		// ListenAndServe refuses an origin no browser sends (checkCORSOrigin);
+		// one that reaches here anyway matches no request and admits no one.
+		_ = protection.AddTrustedOrigin(origin)
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if err := protection.Check(r); err != nil {
@@ -65,6 +67,25 @@ func crossOriginMiddleware(next http.Handler, origin string) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// checkCORSOrigin rejects a WithCORS origin that no browser sends as Origin.
+// CORS and the cross-origin guard both compare it with the request's Origin
+// byte for byte, so anything but a lower-case scheme://host[:port] without
+// the scheme's default port refuses the very client it was meant to admit.
+func checkCORSOrigin(origin string) error {
+	if origin == "" || origin == "*" {
+		return nil
+	}
+	if err := http.NewCrossOriginProtection().AddTrustedOrigin(origin); err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidCORSOrigin, err)
+	}
+	u, _ := url.Parse(origin) // cannot fail: AddTrustedOrigin parsed it
+	if origin != strings.ToLower(u.Scheme+"://"+u.Host) ||
+		u.Scheme == "https" && u.Port() == "443" || u.Scheme == "http" && u.Port() == "80" {
+		return fmt.Errorf("%w: %q is not a lower-case scheme://host[:port] without the default port", ErrInvalidCORSOrigin, origin)
+	}
+	return nil
 }
 
 // hostMiddleware refuses requests whose Host header names neither a loopback

@@ -15,6 +15,10 @@ import (
 // address is not a loopback and WithTLS was not configured.
 var ErrNonLoopbackRequiresTLS = errors.New("compat: non-loopback address requires TLS (use WithTLS)")
 
+// ErrInvalidCORSOrigin is returned from ListenAndServe when the WithCORS
+// origin is neither "" nor "*" and is not an origin as browsers send it.
+var ErrInvalidCORSOrigin = errors.New(`compat: WithCORS origin must be "*" or an exact browser origin such as "https://app.example"`)
+
 // Server is the OpenAI-compatible HTTP façade over a provider.Router.
 //
 // After New returns, Server is safe for concurrent use: ListenAndServe runs
@@ -94,10 +98,14 @@ func New(router *provider.Router, registry *provider.ModelRegistry, providers *p
 }
 
 // ListenAndServe starts the HTTP server and blocks until ctx is cancelled or
-// an unrecoverable error occurs. Non-loopback bind requires TLS.
+// an unrecoverable error occurs. Non-loopback bind requires TLS, and a
+// WithCORS origin no browser would send returns ErrInvalidCORSOrigin.
 func (s *Server) ListenAndServe(ctx context.Context) error {
 	if s.tlsCert == "" && !isLoopback(s.addr) {
 		return fmt.Errorf("%w: addr=%q", ErrNonLoopbackRequiresTLS, s.addr)
+	}
+	if err := checkCORSOrigin(s.corsOrigin); err != nil {
+		return err
 	}
 
 	// ReadHeaderTimeout bounds the header-read phase so a slow-header attack
