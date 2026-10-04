@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/kstruzzieri/go-llm/internal/sqlitetest"
@@ -31,4 +32,40 @@ func TestOpenFeedbackServiceConcurrentFirstOpens(t *testing.T) {
 		}
 		return closeFunc(func() error { _, err := svc.close(); return err }), nil
 	})
+}
+
+// A connection that cannot use WAL must fail the open, not run the store with
+// a rollback journal: nolock=1 turns locking off, and SQLite then reports
+// journal mode "delete". The working directory is a temp dir because the
+// opener prepares the raw path string, which for a file: URI is a relative
+// path (#648).
+func TestOpenSessionRejectsNonWAL(t *testing.T) {
+	path := filepath.ToSlash(filepath.Join(t.TempDir(), "x.db"))
+	t.Chdir(t.TempDir())
+	s, _, err := openSession(t.Context(), "file:"+path+"?nolock=1", "nonwal")
+	if err == nil {
+		_ = s.Close()
+		t.Fatal("open of a nolock database succeeded; want a WAL-mode error")
+	}
+	if !strings.Contains(err.Error(), `journal_mode is "delete", want wal`) {
+		t.Fatalf("err = %v, want the WAL-mode error", err)
+	}
+}
+
+// A connection that cannot use WAL must fail the open, not run the store with
+// a rollback journal: nolock=1 turns locking off, and SQLite then reports
+// journal mode "delete". The working directory is a temp dir because the
+// opener prepares the raw path string, which for a file: URI is a relative
+// path (#648).
+func TestOpenFeedbackServiceRejectsNonWAL(t *testing.T) {
+	path := filepath.ToSlash(filepath.Join(t.TempDir(), "x.db"))
+	t.Chdir(t.TempDir())
+	svc, err := openFeedbackService(t.Context(), t.TempDir(), "file:"+path+"?nolock=1", func(string) {})
+	if err == nil {
+		_, _ = svc.close()
+		t.Fatal("open of a nolock database succeeded; want a WAL-mode error")
+	}
+	if !strings.Contains(err.Error(), `journal_mode is "delete", want wal`) {
+		t.Fatalf("err = %v, want the WAL-mode error", err)
+	}
 }
