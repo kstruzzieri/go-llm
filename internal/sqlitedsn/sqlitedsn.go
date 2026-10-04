@@ -150,7 +150,9 @@ func WithBusyTimeout(path string, timeout time.Duration) (string, error) {
 // plus scheduling and I/O overhead. It returns an error if SQLite reports a
 // journal mode other than "wal"; an in-memory database reports "memory" and
 // is accepted unchanged. Cancellation is checked between attempts; a lock
-// wait already in progress ends by the budget's deadline.
+// wait already in progress ends by the budget's deadline. The bound excludes
+// shared-cache (cache=shared) lock waits, which modernc retries outside the
+// busy handler; no store opens with a shared cache.
 func EnableWAL(ctx context.Context, db *sql.DB) error { return enableWAL(ctx, db, nil) }
 
 // enableWAL is EnableWAL with onBusy called after each attempt that fails with
@@ -209,8 +211,10 @@ func enableWAL(ctx context.Context, db *sql.DB, onBusy func()) (err error) {
 // zero, so a spent budget needs no clamp.
 func setBusyTimeoutCap(conn *sql.Conn, saved int64, remaining time.Duration) error {
 	ms := min(remaining.Milliseconds(), saved)
-	_, err := conn.ExecContext(context.Background(), fmt.Sprintf("PRAGMA busy_timeout = %d", ms))
-	return err
+	if _, err := conn.ExecContext(context.Background(), fmt.Sprintf("PRAGMA busy_timeout = %d", ms)); err != nil {
+		return fmt.Errorf("sqlitedsn: cap busy_timeout: %w", err)
+	}
+	return nil
 }
 
 // walAttempt runs one WAL switch with SQLite's lock waits capped to the time

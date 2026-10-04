@@ -354,8 +354,16 @@ func TestEnableWALModes(t *testing.T) {
 	})
 	t.Run("memory", func(t *testing.T) {
 		db := openWithTimeout(t, ":memory:", time.Second)
+		if _, err := db.Exec("CREATE TABLE keep (x)"); err != nil {
+			t.Fatal(err)
+		}
 		if err := EnableWAL(ctx, db); err != nil {
 			t.Fatalf("EnableWAL(:memory:) = %v, want nil", err)
+		}
+		// Discarding the connection would silently drop the in-memory database.
+		var n int
+		if err := db.QueryRow("SELECT count(*) FROM keep").Scan(&n); err != nil {
+			t.Fatalf("in-memory database lost after EnableWAL: %v", err)
 		}
 	})
 	t.Run("temporary database reports delete", func(t *testing.T) {
@@ -371,17 +379,27 @@ func TestEnableWALRestoresBusyTimeout(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "restore.db")
 	release := holdReserved(t, path)
 	db := openWithTimeout(t, path, 300*time.Millisecond)
+	// TEMP tables belong to one connection; the marker proves below that the
+	// connection enableWAL used came back to the pool rather than a replacement.
+	if _, err := db.Exec("CREATE TEMP TABLE marker (x)"); err != nil {
+		t.Fatal(err)
+	}
 	// Let budget pass before the retry, so the cap drops below the saved value.
 	err := enableWAL(context.Background(), db, func() { time.Sleep(20 * time.Millisecond); release() })
 	if err != nil {
 		t.Fatalf("enableWAL: %v", err)
 	}
-	// One kept-idle connection: this reads the connection enableWAL used.
+	// One kept-idle connection: this reads the connection enableWAL used, and
+	// the TEMP marker proves the same physical connection came back.
 	var got int64
 	if err := db.QueryRow("PRAGMA busy_timeout").Scan(&got); err != nil {
 		t.Fatal(err)
 	}
 	if got != 300 {
 		t.Fatalf("busy_timeout after enableWAL = %dms, want the saved 300ms", got)
+	}
+	var n int
+	if err := db.QueryRow("SELECT count(*) FROM marker").Scan(&n); err != nil {
+		t.Fatalf("enableWAL replaced its connection: %v", err)
 	}
 }
