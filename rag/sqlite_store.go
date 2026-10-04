@@ -97,18 +97,20 @@ func NewSQLiteStore(dbPath string) (*SQLiteStore, error) {
 		return nil, fmt.Errorf("rag: open sqlite: %w", err)
 	}
 
-	if dbPath == ":memory:" {
-		// In-memory databases: constrain to exactly 1 connection.
-		// With database/sql's connection pool, multiple connections to :memory:
-		// each create a separate database, causing missing schema/data.
+	if dbPath == ":memory:" || dbPath == "" {
+		// In-memory and temporary ("") databases are private to each
+		// connection, so with database/sql's pool every extra connection would
+		// get its own empty database, causing missing schema/data. Constrain
+		// to exactly 1 connection.
 		db.SetMaxOpenConns(1)
-	} else if dbPath != "" {
+	} else {
 		// File-backed databases: enable WAL mode for better concurrent read
 		// performance. journal_mode persists in the database file, so one
 		// switch suffices, and EnableWAL retries it when another opener races
 		// it; busy_timeout is per-connection and therefore set via the DSN in
-		// sqliteReadWriteDSN. "" is SQLite's private temporary database, where
-		// WAL does not apply.
+		// sqliteReadWriteDSN. A file: URI that names no file (a temporary
+		// database) reports journal mode "delete" and fails closed; pass ""
+		// for a temporary store.
 		if err := sqlitedsn.EnableWAL(context.Background(), db); err != nil {
 			_ = db.Close()
 			return nil, fmt.Errorf("rag: set WAL mode: %w", err)

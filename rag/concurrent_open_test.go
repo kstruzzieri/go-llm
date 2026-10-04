@@ -74,3 +74,16 @@ func TestOpenSQLiteStoreReadOnlyIgnoresSharedCache(t *testing.T) {
 		t.Fatal("CREATE TABLE through the read-only store succeeded; want a read-only error")
 	}
 }
+
+// "" is SQLite's private temporary database: every pooled connection would get
+// its own unmigrated copy, so the pool must stay at one connection like :memory:.
+func TestNewSQLiteStoreEmptyPathUsesOneConnection(t *testing.T) {
+	store, err := NewSQLiteStore("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	if got := store.db.Stats().MaxOpenConnections; got != 1 {
+		t.Fatalf("MaxOpenConnections = %d, want 1", got)
+	}
+}
