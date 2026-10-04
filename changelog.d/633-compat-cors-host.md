@@ -30,6 +30,8 @@ Browser clients that relied on the `*` default must pass their origin to
 `WithCORS`, exactly as the browser sends it. `ListenAndServe` returns the new
 `compat.ErrInvalidCORSOrigin` for an origin no browser sends, such as one with
 a trailing slash, upper-case letters, or the scheme's default port (#636).
+Explicit ports must be decimal numbers from 0 to 65535 without leading
+zeros; an empty port suffix is also refused.
 Clients that reach the server under another name, such as
 `host.docker.internal` from a container, or LAN clients of a `WithTLS` server
 bound to a wildcard address (`:port`, `0.0.0.0`), must be listed with

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -81,9 +82,21 @@ func checkCORSOrigin(origin string) error {
 		return fmt.Errorf("%w: %v", ErrInvalidCORSOrigin, err)
 	}
 	u, _ := url.Parse(origin) // cannot fail: AddTrustedOrigin parsed it
-	if origin != strings.ToLower(u.Scheme+"://"+u.Host) ||
-		u.Scheme == "https" && u.Port() == "443" || u.Scheme == "http" && u.Port() == "80" {
-		return fmt.Errorf("%w: %q is not a lower-case scheme://host[:port] without the default port", ErrInvalidCORSOrigin, origin)
+	if origin != strings.ToLower(u.Scheme+"://"+u.Host) {
+		return fmt.Errorf("%w: %q is not a lower-case scheme://host[:port]", ErrInvalidCORSOrigin, origin)
+	}
+	if strings.HasSuffix(u.Host, ":") {
+		return fmt.Errorf("%w: %q has an empty port", ErrInvalidCORSOrigin, origin)
+	}
+	if portText := u.Port(); portText != "" {
+		// Browsers serialize ports as 16-bit decimal numbers without leading zeros.
+		port, err := strconv.ParseUint(portText, 10, 16)
+		if err != nil || portText != strconv.FormatUint(port, 10) {
+			return fmt.Errorf("%w: %q port must be a canonical decimal number from 0 to 65535", ErrInvalidCORSOrigin, origin)
+		}
+		if u.Scheme == "https" && port == 443 || u.Scheme == "http" && port == 80 {
+			return fmt.Errorf("%w: %q must omit the default port", ErrInvalidCORSOrigin, origin)
+		}
 	}
 	return nil
 }
