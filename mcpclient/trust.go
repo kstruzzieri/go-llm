@@ -231,6 +231,10 @@ func inspectOrApprove(ctx context.Context, impl Implementation, server Server, p
 	if err != nil {
 		return nil, err
 	}
+	conn, err := pins.digestConnection(ctx, prepared.identity)
+	if err != nil {
+		return nil, admissionFailure(server.Alias, "pin_unavailable", err)
+	}
 	session, _, candidate, _, err := discover(ctx, impl, prepared)
 	if err != nil {
 		return nil, err
@@ -243,7 +247,7 @@ func inspectOrApprove(ctx context.Context, impl Implementation, server Server, p
 	if err = ctx.Err(); err != nil {
 		return nil, admissionFailure(server.Alias, "canceled", err)
 	}
-	result = inspection(pins, server.Alias, prior, candidate)
+	result = inspection(pins, server.Alias, prior.toolCatalog, candidate)
 	if digest != "" {
 		if candidate.digest() != digest {
 			failure := admissionFailure(server.Alias, "digest_mismatch", nil)
@@ -252,7 +256,7 @@ func inspectOrApprove(ctx context.Context, impl Implementation, server Server, p
 			failure.Diff = result.Diff
 			return nil, failure
 		}
-		if err = pins.replacePin(ctx, server.Alias, revision, candidate); err != nil {
+		if err = pins.replacePin(ctx, server.Alias, revision, pinEntry{toolCatalog: candidate, conn: conn}); err != nil {
 			return nil, admissionFailure(server.Alias, "pin_unavailable", err)
 		}
 	}

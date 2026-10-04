@@ -221,11 +221,22 @@ func connectOne(ctx context.Context, impl Implementation, s Server, opts Connect
 	if err != nil {
 		return nil, nil, []error{err}
 	}
+	conn, err := opts.Pins.digestConnection(ctx, prepared.identity)
+	if err != nil {
+		return nil, nil, []error{admissionFailure(s.Alias, "pin_unavailable", err)}
+	}
 	session, remote, catalog, notices, err := discover(ctx, impl, prepared)
 	if err != nil {
 		return nil, nil, []error{err}
 	}
-	prior, created, err := opts.Pins.admit(ctx, s.Alias, catalog, opts.RequirePinned)
+	prior, revision, err := opts.Pins.capturePin(ctx, s.Alias)
+	if err == nil && !revision.exists && opts.RequirePinned {
+		err = errPinMissing
+	}
+	created := false
+	if err == nil {
+		prior, created, err = opts.Pins.admitAt(ctx, s.Alias, revision, pinEntry{toolCatalog: catalog, conn: conn})
+	}
 	if err == nil {
 		err = ctx.Err()
 	}
@@ -241,7 +252,7 @@ func connectOne(ctx context.Context, impl Implementation, s Server, opts Connect
 		failure := admissionFailure(s.Alias, "pin_unavailable", err)
 		failure.cause = errors.Join(err, closeErr)
 		failure.PinnedDigest, failure.CandidateDigest = prior.digest(), catalog.digest()
-		failure.Diff = diffCatalogs(prior, catalog)
+		failure.Diff = diffCatalogs(prior.toolCatalog, catalog)
 		return nil, nil, append(notices, failure)
 	}
 	// Selection applies only after the complete catalog was validated, hashed
