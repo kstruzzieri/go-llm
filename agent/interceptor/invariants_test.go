@@ -192,8 +192,8 @@ func inspectWith(t *testing.T, iv Invariants, tool, args string) []agent.Finding
 }
 
 // TestPathDenyComponentMatrix covers every protected component on every write
-// tool, at the root and nested, and every credential component plus exact
-// .env on read_file.
+// tool, at the root and nested, and every credential component and the #627
+// read set (widened names, templates, aliases) on read_file.
 func TestPathDenyComponentMatrix(t *testing.T) {
 	writeTools := map[string]string{
 		"write_file":       `{"path":%s,"content":"x"}`,
@@ -229,7 +229,16 @@ func TestPathDenyComponentMatrix(t *testing.T) {
 			expectOne(t, inspect(t, "read_file", sprintfJSON(`{"path":%s}`, p)), "credential_path", `path "`+clean+`" matches protected pattern`)
 		})
 	}
-	for _, p := range []string{".git/config", ".env.example", ".env.local", "env", "sub/.envrc", ".environment"} {
+	for _, tc := range []struct{ path, normalized string }{
+		{".git/config", ".git/config"}, {"sub/.git/config", "sub/.git/config"}, {".git/modules/x/config", ".git/modules/x/config"},
+		{".env.local", ".env.local"}, {".netrc", ".netrc"}, {"_netrc", "_netrc"}, {".npmrc", ".npmrc"},
+		{".pypirc", ".pypirc"}, {".git-credentials", ".git-credentials"}, {".\u00DFh/id_rsa", ".ssh/id_rsa"},
+	} {
+		t.Run("read_file/"+tc.path, func(t *testing.T) {
+			expectOne(t, inspect(t, "read_file", sprintfJSON(`{"path":%s}`, tc.path)), "credential_path", `path "`+tc.normalized+`" matches protected pattern`)
+		})
+	}
+	for _, p := range []string{".env.example", ".env.sample", ".env.template", ".env.dist", "env", "sub/.envrc", ".environment", ".git/HEAD", ".env/bin/activate"} {
 		t.Run("read_file allows "+p, func(t *testing.T) {
 			expectNone(t, inspect(t, "read_file", sprintfJSON(`{"path":%s}`, p)))
 		})

@@ -34,6 +34,9 @@ func TestPathDenyWindowsSeparators(t *testing.T) {
 		{"all-period component is kept", "write_file", `{"path":"...\\x","content":"x"}`, ""},
 		{"plain git dir", "write_file", `{"path":"notes\\git\\x","content":"x"}`, ""},
 		{"gitignore", "write_file", `{"path":"sub\\.gitignore","content":"x"}`, ""},
+		{"read git config stream", "read_file", `{"path":"sub\\.git\\config::$DATA"}`, `path "sub/.git/config" matches protected pattern`},
+		{"read env local trailing period", "read_file", `{"path":".env.local."}`, `path ".env.local" matches protected pattern`},
+		{"read template trailing space", "read_file", `{"path":".env.example "}`, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

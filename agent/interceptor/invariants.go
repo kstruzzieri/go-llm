@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -29,9 +30,9 @@ type Invariant struct {
 }
 
 // Check is the sealed evaluator vocabulary. Tables are composed from the
-// shipped value kinds (PathDeny, RemoteScript); NewInvariants rejects
-// anything else, pointers included, so a check can neither panic nor
-// silently disable enforcement.
+// shipped value kinds (PathDeny, CredentialPath, RemoteScript);
+// NewInvariants rejects anything else, pointers included, so a check can
+// neither panic nor silently disable enforcement.
 type Check interface {
 	check(raw json.RawMessage) (detail string, violated bool)
 }
@@ -42,6 +43,10 @@ type Check interface {
 // as the workspace treats it. A non-string value is not a violation; the
 // tool rejects it. NewInvariants owns the pattern's mutable state while
 // preserving its compiled semantics, including POSIX matching rules.
+//
+// Pattern is matched against the normalized path, so write it in normalized
+// form: lower-case, with every pathAliases source spelled as its
+// replacement (ß as ss).
 type PathDeny struct{ Pattern *regexp.Regexp }
 
 func (d PathDeny) check(raw json.RawMessage) (string, bool) {
@@ -152,25 +157,80 @@ func (RemoteScript) check(raw json.RawMessage) (string, bool) {
 	return "inline shell script pipes " + fetch + " into " + sink, true
 }
 
-// Default path patterns (#439 D7): repository internals and credential
-// directories as a component at any depth for writes; credential directories
-// plus the exact basename .env for direct reads.
+// Default path rules (#439 D7, #627). Writes refuse repository internals and
+// credential directories as a component at any depth (protectedPattern).
+// Direct reads refuse the credential set IsCredentialPath defines, and the
+// search tool skips the same files.
 var (
-	protectedPattern  = regexp.MustCompile(`(^|/)\.(git|ssh|gnupg|aws|kube)(/|$)`)
-	credentialPattern = regexp.MustCompile(`(^|/)\.(ssh|gnupg|aws|kube)(/|$)|(^|/)\.env$`)
+	protectedPattern = regexp.MustCompile(`(^|/)\.(git|ssh|gnupg|aws|kube)(/|$)`)
+
+	// credentialDirs make every path at or below them a credential path.
+	credentialDirs = []string{".ssh", ".gnupg", ".aws", ".kube"}
+	// credentialFiles are credential basenames at any depth.
+	credentialFiles = []string{".env", ".netrc", "_netrc", ".npmrc", ".pypirc", ".git-credentials"}
+	// envTemplates are the committed .env.* files that hold no secrets. They
+	// stay readable because a refusal counts toward the tool-error cap.
+	envTemplates = []string{".env.example", ".env.sample", ".env.template", ".env.dist"}
 )
+
+// IsCredentialPath reports whether the default read_file invariant refuses p,
+// matched after normalizePath: a credential directory as any component; a
+// credential file basename at any depth; a .env.* basename other than the
+// committed templates; or a config file under any .git directory (remote URLs
+// and older CI checkouts carry tokens there). The search tool skips the same
+// files, so the two readers cannot drift (#627).
+func IsCredentialPath(p string) bool {
+	parts := strings.Split(normalizePath(p), "/")
+	base, dirs := parts[len(parts)-1], parts[:len(parts)-1]
+	for _, c := range parts {
+		if slices.Contains(credentialDirs, c) {
+			return true
+		}
+	}
+	switch {
+	case slices.Contains(credentialFiles, base):
+		return true
+	case strings.HasPrefix(base, ".env.") && !slices.Contains(envTemplates, base):
+		return true
+	case base == "config" && slices.Contains(dirs, ".git"):
+		return true
+	}
+	return false
+}
+
+// IsProtectedPath reports whether p has a .git, .ssh, .gnupg, .aws or .kube
+// component after normalizePath: the set the default write invariants refuse.
+// Every credential rule that depends on an ancestor depends on one of these,
+// so a dispatch child rooted outside them judges a child-relative path the
+// way the parent judges the full path; Dispatch refuses the scopes it reports
+// (#627).
+func IsProtectedPath(p string) bool { return protectedPattern.MatchString(normalizePath(p)) }
+
+// CredentialPath blocks a string path that IsCredentialPath reports. As with
+// PathDeny, a non-string value is not a violation; the tool rejects it.
+type CredentialPath struct{}
+
+func (CredentialPath) check(raw json.RawMessage) (string, bool) {
+	var s string
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return "", false
+	}
+	if !IsCredentialPath(s) {
+		return "", false
+	}
+	return "path " + strconv.Quote(normalizePath(s)) + " matches protected pattern", true
+}
 
 // DefaultInvariants returns the shipped table as fresh storage on every call.
 // Tool and field names are pinned against the real tool schemas by the
 // agent/tools drift test.
 func DefaultInvariants() []Invariant {
 	protected := PathDeny{Pattern: protectedPattern}
-	credential := PathDeny{Pattern: credentialPattern}
 	return []Invariant{
 		{Tool: "write_file", Name: "protected_path", Field: "path", Check: protected},
 		{Tool: "edit_file", Name: "protected_path", Field: "path", Check: protected},
 		{Tool: "promote_artifact", Name: "protected_path", Field: "path", Check: protected},
-		{Tool: "read_file", Name: "credential_path", Field: "path", Check: credential},
+		{Tool: "read_file", Name: "credential_path", Field: "path", Check: CredentialPath{}},
 		{Tool: "run_command", Name: "remote_script_execution", Field: "argv", Check: RemoteScript{}},
 		{Tool: "start_command", Name: "remote_script_execution", Field: "argv", Check: RemoteScript{}},
 	}
@@ -242,6 +302,8 @@ func ownedCheck(inv Invariant) (Check, error) {
 			re = *regexp.MustCompile("")
 		}
 		return PathDeny{Pattern: &re}, nil
+	case CredentialPath:
+		return c, nil
 	case RemoteScript:
 		return c, nil
 	default:
