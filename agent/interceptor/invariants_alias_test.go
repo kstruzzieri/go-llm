@@ -41,14 +41,15 @@ func TestNormalizePathAliases(t *testing.T) {
 // are tested even though CI has no Windows runtime.
 func TestWindowsComponent(t *testing.T) {
 	for in, want := range map[string]string{
-		".env::$DATA":   ".env",
-		".env:secret":   ".env",
-		".env. ":        ".env",
-		".env. ::$DATA": ".env",
-		"config::$DATA": "config",
-		".ssh.":         ".ssh",
-		"...":           "...",
-		"plain":         "plain",
+		".env::$DATA":             ".env",
+		".env:secret":             ".env",
+		".env. ":                  ".env",
+		".env. ::$DATA":           ".env",
+		"config::$DATA":           "config",
+		".git::$INDEX_ALLOCATION": ".git", // directory stream (CVE-2019-1352)
+		".ssh.":                   ".ssh",
+		"...":                     "...",
+		"plain":                   "plain",
 	} {
 		if got := windowsComponent(in); got != want {
 			t.Errorf("windowsComponent(%q) = %q, want %q", in, got, want)
