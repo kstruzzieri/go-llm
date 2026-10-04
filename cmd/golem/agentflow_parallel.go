@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -1092,55 +1093,11 @@ func buildHostGitEnv(goos string, lookup func(string) (string, bool), owned ...s
 	return env
 }
 
-// hostGitBlockedKeys are the inherited repository-location overrides every
-// host Git subprocess drops so cmd.Dir alone selects the repository.
-// GIT_TERMINAL_PROMPT is listed because hostGitEnv owns its value: an
-// inherited setting must not survive beside the appended =0.
-var hostGitBlockedKeys = []string{
-	"GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
-	"GIT_COMMON_DIR", "GIT_NAMESPACE", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_PREFIX",
-	"GIT_TERMINAL_PROMPT",
-}
-
-// hostGitEnv strips inherited repo-location overrides so every git call
-// resolves the repository from cmd.Dir, and pins GIT_TERMINAL_PROMPT=0 so no
-// subprocess can block on a credential prompt. GIT_INDEX_FILE alone would
-// silently point the clean/index-flag validation at a different index (git
-// exports it to hooks) while the toplevel identity checks still pass. Keys are
-// matched case-insensitively: the environment is case-insensitive on Windows,
-// and a differently-cased duplicate must not slip past the filter. Shared by
-// the Agentflow Git calls and #354's capture-only gitContextEnv.
+// hostGitEnv is the environment of parallel task mode's git calls, built at
+// each launch. GIT_TERMINAL_PROMPT=0 keeps any git subprocess from blocking on
+// a credential prompt.
 func hostGitEnv() []string {
-	return append(dropEnvKeys(os.Environ(), hostGitBlockedKeys, nil), "GIT_TERMINAL_PROMPT=0")
-}
-
-// dropEnvKeys returns env without every entry whose key (the text before the
-// first '=') equals one of keys or starts with one of prefixes, compared
-// case-insensitively. The input is never modified.
-func dropEnvKeys(env, keys, prefixes []string) []string {
-	out := make([]string, 0, len(env)+1)
-	for _, kv := range env {
-		key, _, _ := strings.Cut(kv, "=")
-		if envKeyBlocked(key, keys, prefixes) {
-			continue
-		}
-		out = append(out, kv)
-	}
-	return out
-}
-
-func envKeyBlocked(key string, keys, prefixes []string) bool {
-	for _, k := range keys {
-		if strings.EqualFold(key, k) {
-			return true
-		}
-	}
-	for _, p := range prefixes {
-		if len(key) >= len(p) && strings.EqualFold(key[:len(p)], p) {
-			return true
-		}
-	}
-	return false
+	return buildHostGitEnv(runtime.GOOS, os.LookupEnv, "GIT_TERMINAL_PROMPT=0")
 }
 
 func parallelUnexpectedIndexPath(ctx context.Context, root string) (string, error) {
