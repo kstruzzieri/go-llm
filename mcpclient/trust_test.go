@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -603,6 +604,49 @@ func TestTrustCleanupErrorKeepsRefusalReason(t *testing.T) {
 				t.Fatal("refused catalog published tools or changed the pin")
 			}
 		})
+	}
+}
+
+// redirectOnClose really closes the client connection, then reports a refused
+// redirect, as an HTTP session whose close DELETE is redirected does.
+type redirectOnClose struct{ gomcp.Transport }
+
+func (c redirectOnClose) Connect(ctx context.Context) (gomcp.Connection, error) {
+	conn, err := c.Transport.Connect(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return redirectOnCloseConn{conn}, nil
+}
+
+type redirectOnCloseConn struct{ gomcp.Connection }
+
+func (c redirectOnCloseConn) Close() error {
+	_ = c.Connection.Close()
+	return fmt.Errorf("close: %w", errRedirectRefused)
+}
+
+// A Connect canceled after a dial succeeded reports canceled even when
+// closing that session fails with a refusal: cleanup keeps its error in the
+// cause but never renames the reason.
+func TestTrustCanceledConnectKeepsReasonOverCloseRefusal(t *testing.T) {
+	pins := testPins(t)
+	s, done, _ := staticCatalogServer(t, "fs", tool("read"))
+	s.tr = redirectOnClose{s.tr}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	m, w, e := connectWithHooks(ctx, Implementation{Name: "test"}, []Server{s}, ConnectOptions{Pins: pins}, &connectHooks{published: func(int) { cancel() }})
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer func() { _ = m.Close() }()
+	waitOn(t, done, "canceled session close")
+	failure := admission(t, w)
+	if failure.Reason != "canceled" || !errors.Is(failure, errRedirectRefused) {
+		t.Fatalf("reason = %q (close error kept: %t), want canceled with the close error kept", failure.Reason, errors.Is(failure, errRedirectRefused))
+	}
+	if len(m.Tools()) != 0 {
+		t.Fatal("canceled connect published tools")
 	}
 }
 

@@ -193,7 +193,12 @@ func connectWithHooks(ctx context.Context, impl Implementation, servers []Server
 			continue
 		}
 		if err := ctx.Err(); err != nil {
-			warnings = append(warnings, admissionFailure(servers[i].Alias, "canceled", errors.Join(err, r.session.Close())))
+			// Classify the cancellation alone; a close error (a refused
+			// redirect on the session DELETE, say) stays in the chain but
+			// must not rename the reason.
+			failure := admissionFailure(servers[i].Alias, "canceled", err)
+			failure.cause = errors.Join(err, r.session.Close())
+			warnings = append(warnings, failure)
 			continue
 		}
 		m.sessions = append(m.sessions, r.session)

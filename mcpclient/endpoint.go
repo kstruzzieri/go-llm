@@ -149,7 +149,12 @@ func (g endpointGuard) RoundTrip(req *http.Request) (*http.Response, error) {
 
 // newHTTPTransport builds the SDK transport for an admitted endpoint. Every
 // redirect is refused, same-origin included: an admitted endpoint must not
-// hand a request, its body or credentials to a Location target.
+// hand a request, its body or credentials to a Location target. The chain is
+// guard, then httpSessionTransport, then the copied default client's
+// Transport (http.DefaultTransport when nil). A host-installed
+// http.DefaultClient.Transport sits below the guard and CheckRedirect, so it
+// is trusted not to follow redirects or rewrite URLs: the same trust as
+// Golem's own proxy environment.
 func newHTTPTransport(ep endpoint) (gomcp.Transport, *httpRefusals) {
 	refusals := new(httpRefusals)
 	// Copy the default client, as before, so its Timeout still applies; drop

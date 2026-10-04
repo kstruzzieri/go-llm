@@ -167,6 +167,32 @@ func TestHTTPSessionDeleteDoesNotRedirectAndClosesBody(t *testing.T) {
 	}
 }
 
+// The go-sdk drops its session DELETE response unclosed (`_, err :=
+// c.client.Do(req)`), so the transport itself must close that body.
+func TestHTTPSessionDeleteClosesDroppedBody(t *testing.T) {
+	deleteBody := &closeTrackingBody{Reader: strings.NewReader("bye")}
+	originalClient := http.DefaultClient
+	http.DefaultClient = &http.Client{Transport: mcpRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		resp := mcpHTTPResponse(req, http.StatusOK, "")
+		resp.Body = deleteBody
+		return resp, nil
+	})}
+	t.Cleanup(func() { http.DefaultClient = originalClient })
+
+	tr, _ := newHTTPTransport(mustEndpoint(t, "https://mcp.invalid"))
+	client := tr.(*gomcp.StreamableClientTransport).HTTPClient
+	req, err := http.NewRequest(http.MethodDelete, "https://mcp.invalid/", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Do(req); err != nil {
+		t.Fatal(err)
+	}
+	if !deleteBody.closed {
+		t.Error("HTTP session DELETE body was left open when the response was dropped")
+	}
+}
+
 func mcpHTTPResponse(req *http.Request, status int, body string) *http.Response {
 	return &http.Response{
 		StatusCode: status,
