@@ -21,6 +21,8 @@ import (
 func TestCallFailureAllowlist(t *testing.T) {
 	leak := &url.Error{Op: "Post", URL: "https://h/mcp?token=canary", Err: errors.New("dial canary")}
 	rejected := &jsonrpc.Error{Code: -32005, Message: "rejected by transport"}
+	// A non-lifecycle code, so only the case order keeps its message out.
+	server := &jsonrpc.Error{Code: -32603, Message: "canary from server"}
 	for _, tt := range []struct {
 		err  error
 		want string
@@ -30,9 +32,13 @@ func TestCallFailureAllowlist(t *testing.T) {
 		{errDestinationRefused, "mcp call failed: destination refused"},
 		{context.Canceled, "mcp call failed: canceled"},
 		{fmt.Errorf("x: %w", context.DeadlineExceeded), "mcp call failed: timed out"},
+		{fmt.Errorf("%w: %w", server, errRedirectRefused), "mcp call failed: redirect refused"},
+		{fmt.Errorf("%w: %w", server, context.DeadlineExceeded), "mcp call failed: timed out"},
 		{fmt.Errorf("call: %w", &jsonrpc.Error{Code: -32602, Message: "invalid params: path"}), "mcp call failed: invalid params: path"},
 		{fmt.Errorf("%w: %w", rejected, leak), "mcp call failed: transport error"},
 		{&jsonrpc.Error{Code: -32001, Message: "canary from server"}, "mcp call failed: transport error"},
+		{&jsonrpc.Error{Code: -32003, Message: "canary from server"}, "mcp call failed: transport error"},
+		{&jsonrpc.Error{Code: -32004, Message: "canary from server"}, "mcp call failed: transport error"},
 		{errors.New("https://h/mcp?token=canary"), "mcp call failed: transport error"},
 	} {
 		if got := callFailure(tt.err); got != tt.want {
