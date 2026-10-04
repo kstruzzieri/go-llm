@@ -2,6 +2,7 @@ package sqlitedsn
 
 import (
 	"database/sql"
+	"fmt"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -61,6 +62,8 @@ func TestWindowsURIFilename(t *testing.T) {
 		"file:////server/share/x.db",
 		"file://server/share/x.db",
 		"file://LOCALHOST/C:/x.db",
+		// A stray % does not decode, but SQLite copies it literally.
+		"file:%5C%5Cserver%5Cshare%5C100%.db",
 	} {
 		if err := windowsURIFilename(mustParse(t, in), windowsAbs(`C:\work`)); err == nil {
 			t.Errorf("windowsURIFilename(%q) = nil, want an error", in)
@@ -78,6 +81,9 @@ func TestWindowsURIFilenameResolvesAgainstWorkingDirectory(t *testing.T) {
 		// Only the filename decides whether a file is named: SQLite applies the
 		// last mode option, and callers may change the query after FileURL returns.
 		"file:shared?mode=memory&cache=shared", "file:x.db?mode=memory&mode=rwc", "file:x.db?mode=memory",
+		// SQLite stops the filename at %00 and opens x.db; Windows filepath.Abs
+		// fails on the NUL, which must not be read as an in-memory database.
+		"file:x.db%00", "file:///x.db%00",
 	} {
 		if err := windowsURIFilename(mustParse(t, in), unc); err == nil {
 			t.Errorf("windowsURIFilename(%q) under a UNC working directory = nil, want an error", in)
@@ -104,9 +110,12 @@ func TestWindowsURIFilenameResolvesAgainstWorkingDirectory(t *testing.T) {
 // windowsAbs models filepath.Abs on Windows (GetFullPathNameW) with working
 // directory cwd, for the forms the tests use: drive-qualified and UNC paths
 // are kept, a rooted path takes cwd's drive or share, and a relative path is
-// joined to cwd.
+// joined to cwd. Like Windows, it fails on a NUL byte.
 func windowsAbs(cwd string) func(string) (string, error) {
 	return func(p string) (string, error) {
+		if strings.Contains(p, "\x00") {
+			return "", fmt.Errorf("invalid argument: %q contains NUL", p)
+		}
 		p = strings.ReplaceAll(p, "/", `\`)
 		switch {
 		case len(p) >= 3 && p[1] == ':' && p[2] == '\\', strings.HasPrefix(p, `\\`):
