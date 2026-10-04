@@ -16,11 +16,19 @@
   same moment (a WAL sidecar disappeared before its permissions were tightened).
 - A store whose switch to WAL reports any journal mode other than `wal` now
   fails to open instead of silently running with a rollback journal. This
-  includes `file:` URIs with `immutable=1` or `nolock=1` passed to
-  `provider.OpenSQLiteFeedbackStore` or `rag.NewSQLiteStore`, which used to open
-  a WAL database read-only; for read-only access pass your own handle to
+  includes `file:` URIs with `immutable=1`, which used to open an existing WAL
+  database read-only through `provider.OpenSQLiteFeedbackStore`,
+  `rag.NewSQLiteStore`, `transcript.Open` or `memory.OpenHardenedDB`, and
+  `nolock=1`, which used to create a new database in rollback mode with locking
+  off. For read-only access, pass your own handle to
   `provider.NewSQLiteFeedbackStore` or use `rag.OpenSQLiteStoreReadOnly`.
 - Opening a store now stops waiting for the WAL switch at the caller's context
   deadline, if that is sooner than the store's busy timeout. An open that hits
   the deadline while another process holds the database can report
   `SQLITE_BUSY` rather than `context.DeadlineExceeded`.
+- `rag.OpenSQLiteStoreReadOnly` now accepts a `file:` URI as well as a path. It
+  always opens read-only and immutable with a private cache, whatever the URI's
+  own `mode` or `cache` parameters say.
+- `rag.NewSQLiteStore("")` (a temporary database) now keeps one connection, so
+  the store no longer sees an empty, unmigrated database on a second pooled
+  connection.
