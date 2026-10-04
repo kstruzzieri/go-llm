@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -173,6 +174,15 @@ func TestPinRecordStoresNoIdentityValues(t *testing.T) {
 	raw := pinBytes(t, pins, "fs")
 	if bytes.Contains(raw, []byte("canary")) || bytes.Contains(raw, []byte("CANARY")) || !bytes.Contains(raw, []byte(`"version":2`)) {
 		t.Fatalf("pin record = %s; want version 2 with no identity values", raw)
+	}
+	// Exactly six keys: a v0.4 reader accepts only the first five, so the
+	// sixth, connection, is what blocks a downgrade.
+	var record map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &record); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := slices.Sorted(maps.Keys(record)), []string{"alias", "connection", "digest", "tools", "version", "workspace"}; !slices.Equal(got, want) {
+		t.Fatalf("pin record keys = %q, want %q", got, want)
 	}
 }
 

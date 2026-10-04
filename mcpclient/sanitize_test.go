@@ -159,6 +159,48 @@ func TestToolCallAndCloseRedirectsRefused(t *testing.T) {
 	}
 }
 
+// TestInspectApproveSurviveRedirectedClose: Connect admits a server whose
+// session-close DELETE answers 3xx, so Inspect and Approve must not fail on
+// that refusal either, or the alias could never be re-approved. The redirect
+// is still refused: its target is never contacted.
+func TestInspectApproveSurviveRedirectedClose(t *testing.T) {
+	var targetHits, redirectDeletes atomic.Int32
+	target := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { targetHits.Add(1) }))
+	t.Cleanup(target.Close)
+	srv := gomcp.NewServer(&gomcp.Implementation{Name: "redirector"}, nil)
+	srv.AddTool(&gomcp.Tool{Name: "read", InputSchema: map[string]any{"type": "object"}}, func(context.Context, *gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
+		return &gomcp.CallToolResult{}, nil
+	})
+	handler := gomcp.NewStreamableHTTPHandler(func(*http.Request) *gomcp.Server { return srv }, nil)
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			redirectDeletes.Add(1)
+			http.Redirect(w, r, target.URL+"/mcp", http.StatusTemporaryRedirect)
+			return
+		}
+		handler.ServeHTTP(w, r)
+	}))
+	t.Cleanup(origin.Close)
+	pins := testPins(t)
+	server := HTTPServer("fs", origin.URL+"/mcp")
+	inspected, err := Inspect(context.Background(), Implementation{Name: "test"}, server, pins)
+	if err != nil {
+		t.Fatalf("inspect = %v, want success despite the redirected close", err)
+	}
+	if got := fmt.Sprint(inspected.Diff.Added); got != "[mcp__fs__read]" || pinBytes(t, pins, "fs") != nil {
+		t.Fatalf("inspect catalog added = %s, want [mcp__fs__read] and no pin", got)
+	}
+	if _, err := Approve(context.Background(), Implementation{Name: "test"}, server, pins, approvalFor(inspected)); err != nil {
+		t.Fatalf("approve = %v, want success despite the redirected close", err)
+	}
+	if pin := pinBytes(t, pins, "fs"); !strings.Contains(string(pin), `"version":2`) {
+		t.Fatalf("approve wrote %q, want a version 2 pin", pin)
+	}
+	if targetHits.Load() != 0 || redirectDeletes.Load() < 2 {
+		t.Fatalf("target hits = %d (want 0); redirected DELETEs = %d (want >= 2)", targetHits.Load(), redirectDeletes.Load())
+	}
+}
+
 func TestSSEResumeRedirectIsRefusedAndSanitized(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		var elsewhere, resumes atomic.Int32

@@ -147,11 +147,13 @@ func buildServerEnv(p envPolicy, vars []EnvVar, lookup func(string) (string, boo
 	return env, unset
 }
 
-// envIdentity is the sorted source:NAME list that is fingerprinted for vars.
-func envIdentity(vars []EnvVar) []string {
+// envIdentity is the sorted source:KEY list that is fingerprinted for vars.
+// KEY is the name as p matches it, so on Windows Path and PATH are one
+// identity, as they are one variable.
+func envIdentity(vars []EnvVar, p envPolicy) []string {
 	out := make([]string, len(vars))
 	for i, v := range vars {
-		out[i] = v.source() + ":" + v.name
+		out[i] = v.source() + ":" + p.key(v.name)
 	}
 	sort.Strings(out)
 	return out

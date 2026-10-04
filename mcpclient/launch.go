@@ -64,7 +64,7 @@ func prepareStdio(p preparedServer, s Server, le launchEnv) (preparedServer, err
 	argv := append([]string(nil), s.command...)
 	p.identity.kind = "stdio"
 	p.identity.envBaseline = le.policy.id
-	p.identity.env = envIdentity(s.env)
+	p.identity.env = envIdentity(s.env, le.policy)
 	p.identity.argv = argv
 	if s.tr != nil {
 		// Test-only transport: identity fields are taken verbatim and nothing

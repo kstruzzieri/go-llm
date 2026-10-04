@@ -32,16 +32,18 @@ and network authority (#580).
   `NODE_EXTRA_CA_CERTS`, `VIRTUAL_ENV`, nvm or pyenv paths, `XDG_*`) need
   `-mcp-env 'alias=NAME,...'`. `env KEY=val command` still works for
   non-secret values.
-- Stdio servers now start in `-root` instead of the current directory.
+- Stdio servers now start in `-root` instead of the current directory, and a
+  relative program path containing a separator (`./bin/server`) resolves
+  against `-root`, not Golem's current directory.
 - HTTP endpoints with userinfo, a fragment (including a bare trailing `#`),
   `.` or `..` path segments (including percent-encoded `%2e%2e` and
   `%2F`-joined forms), a backslash, an IPv6 zone ID, or a non-ASCII host now
-  fail as `invalid_config`, which stops Golem startup; use the `xn--` form for
-  internationalized hosts. `golem mcp inspect` with the same server names the
-  rule.
-- Every HTTP redirect is refused, including on session close: a server that
-  answers the session `DELETE` with a redirect now makes `golem mcp inspect`
-  and `approve` fail with `redirect_refused`.
+  fail as `invalid_config`, which stops Golem startup and names the alias and
+  the rule on stderr; use the `xn--` form for internationalized hosts.
+- Every HTTP redirect is refused, including on session close: a session
+  `DELETE` answered with a redirect is never followed, and library callers see
+  it only as `Manager.Close`'s fixed error text; startup, `golem mcp inspect`
+  and `approve` are unaffected.
 - The first run creates `<user data dir>/golem/mcp-pins/connection-hmac.pem`,
   so the `mcp-pins` directory must be writable. An unreadable or corrupt key,
   or on Unix one with group or other permission bits or another owner, makes

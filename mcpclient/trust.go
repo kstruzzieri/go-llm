@@ -19,8 +19,9 @@ type AdmissionError struct {
 	PinnedDigest    string
 	CandidateDigest string
 	Diff            CatalogDiff
-	// Names lists validated names relevant to Reason (for selection_missing,
-	// the selected tools absent from the admitted catalog). Never remote prose.
+	// Names lists validated names relevant to Reason: for selection_missing,
+	// the selected tools absent from the admitted catalog; for env_unset, the
+	// inherited variable names the parent lacks. Never values or remote prose.
 	Names []string
 	// ConnectionChanges lists fixed labels for a changed connection identity
 	// (connection_changed). Never values, paths or fingerprints.
@@ -328,8 +329,10 @@ func inspectOrApprove(ctx context.Context, impl Implementation, server Server, p
 		return nil, err
 	}
 	// Close discovery before publication so failed cleanup cannot look like an
-	// uncommitted approval to the operator after we have changed the pin.
-	if err = session.Close(); err != nil {
+	// uncommitted approval to the operator after we have changed the pin. A
+	// refused redirect on the session DELETE is not a failure: the client side
+	// is closed, nothing reached the Location, and Connect admits such a server.
+	if err = session.Close(); err != nil && !errors.Is(err, errRedirectRefused) {
 		return nil, admissionFailure(server.Alias, "unavailable", err)
 	}
 	if err = ctx.Err(); err != nil {

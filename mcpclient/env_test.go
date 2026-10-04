@@ -80,9 +80,25 @@ func TestEnvPolicyIDsAndIdentity(t *testing.T) {
 	if unixEnvPolicy.id != "unix-v1" || windowsEnvPolicy.id != "windows-v1" {
 		t.Fatalf("policy ids = (%q, %q), want (unix-v1, windows-v1)", unixEnvPolicy.id, windowsEnvPolicy.id)
 	}
-	got := envIdentity([]EnvVar{SetEnv("B", "x"), InheritEnv("A")})
+	got := envIdentity([]EnvVar{SetEnv("B", "x"), InheritEnv("A")}, unixEnvPolicy)
 	if want := []string{"inherit:A", "set:B"}; !slices.Equal(got, want) {
 		t.Fatalf("envIdentity = %q, want %q", got, want)
+	}
+	// Names are fingerprinted as the policy matches them: Windows folds case,
+	// so Path and PATH are one identity there and two on Unix.
+	for _, tt := range []struct {
+		policy envPolicy
+		name   string
+		want   []string
+	}{
+		{windowsEnvPolicy, "Path", []string{"inherit:PATH"}},
+		{windowsEnvPolicy, "PATH", []string{"inherit:PATH"}},
+		{unixEnvPolicy, "Path", []string{"inherit:Path"}},
+		{unixEnvPolicy, "PATH", []string{"inherit:PATH"}},
+	} {
+		if got := envIdentity([]EnvVar{InheritEnv(tt.name)}, tt.policy); !slices.Equal(got, tt.want) {
+			t.Errorf("%s envIdentity(inherit %s) = %q, want %q", tt.policy.id, tt.name, got, tt.want)
+		}
 	}
 }
 

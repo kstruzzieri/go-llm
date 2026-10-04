@@ -640,6 +640,27 @@ func (c redirectOnCloseConn) Close() error {
 	return fmt.Errorf("close: %w", errRedirectRefused)
 }
 
+// A close failure other than a refused redirect still fails Inspect and
+// Approve, and Approve publishes nothing.
+func TestInspectApproveCloseFailureIsUnavailable(t *testing.T) {
+	pins := testPins(t)
+	s, _, _ := staticCatalogServer(t, "fs", tool("read"))
+	inspected, err := Inspect(context.Background(), Implementation{Name: "test"}, s, pins)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.tr = closeErrTransport{Transport: s.tr, err: errors.New("close failed")}
+	_, err = Inspect(context.Background(), Implementation{Name: "test"}, s, pins)
+	var a *AdmissionError
+	if !errors.As(err, &a) || a.Reason != "unavailable" {
+		t.Fatalf("inspect = %v, want unavailable", err)
+	}
+	_, err = Approve(context.Background(), Implementation{Name: "test"}, s, pins, approvalFor(inspected))
+	if !errors.As(err, &a) || a.Reason != "unavailable" || pinBytes(t, pins, "fs") != nil {
+		t.Fatalf("approve = %v, want unavailable and no pin", err)
+	}
+}
+
 // A Connect canceled after a dial succeeded reports canceled even when
 // closing that session fails with a refusal: cleanup keeps its error in the
 // cause but never renames the reason.

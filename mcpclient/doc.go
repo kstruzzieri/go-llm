@@ -30,7 +30,9 @@
 // not name a baseline variable. An HTTP endpoint keeps its path and query
 // exactly; userinfo, fragments, dot segments, backslashes, zone IDs and
 // non-ASCII hosts are fatal invalid_config errors. Every request must target
-// that endpoint and every redirect is refused, session close included.
+// that endpoint and every redirect is refused, session close included; a
+// refused close redirect never fails admission, Inspect or Approve, and
+// Manager.Close reports it.
 //
 // The prepared identity is fingerprinted with a per-user HMAC key
 // (connection-hmac.pem beside the pin directories, created by NewPinStore when

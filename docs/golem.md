@@ -743,19 +743,20 @@ exposing a partial set. Selected tools still require approval for every call.
 `golem mcp inspect` and `approve` do not take `-mcp-tools`: they always review
 the complete catalog.
 
-Stdio servers run in the workspace root (`-root`, symlinks resolved) with a
-minimal environment: `PATH`, `HOME`, `LANG`, `USER` and `TMPDIR` (on Windows
-also `SYSTEMROOT`, `TEMP`, `TMP`, `PATHEXT`, `USERPROFILE`, `COMSPEC`, `APPDATA`
-and `LOCALAPPDATA`), each copied from Golem's environment when set. Nothing else
-is inherited. Forward more variables by name with
+Stdio servers run in the workspace root (`-root`, symlinks resolved), and a
+relative program path containing a separator (`./bin/server`) resolves against
+it. They get a minimal environment: `PATH`, `HOME`, `LANG`, `USER` and `TMPDIR`
+(on Windows also `SYSTEMROOT`, `TEMP`, `TMP`, `PATHEXT`, `USERPROFILE`,
+`COMSPEC`, `APPDATA` and `LOCALAPPDATA`), each copied from Golem's environment
+when set. Nothing else is inherited. Forward more variables by name with
 `-mcp-env 'fs=GITHUB_TOKEN,HTTPS_PROXY'` (repeatable, one per stdio alias);
-values are read from Golem's environment and never appear on the command line.
-A named variable that is unset blocks that server before launch (`env_unset`);
-one set to an empty value is forwarded empty. `-mcp-env 'fs='` is a usage
-error. `env KEY=val command` still works for non-secret values; they become
-part of the arguments, which are pinned only as a keyed fingerprint and never
-displayed. Stdio servers keep the host user's filesystem and network authority;
-confinement is [#580](https://github.com/kstruzzieri/go-llm/issues/580).
+values are read from Golem's environment and never appear on the command line. A
+named variable that is unset blocks that server before launch (`env_unset`); one
+set to an empty value is forwarded empty. `-mcp-env 'fs='` is a usage error.
+`env KEY=val command` still works for non-secret values; they become part of the
+arguments, which are pinned only as a keyed fingerprint and never displayed.
+Stdio servers keep the host user's filesystem and network authority; confinement
+is [#580](https://github.com/kstruzzieri/go-llm/issues/580).
 
 Each pin also binds the connection: for stdio, the resolved program path and
 its symlink-resolved target, the arguments, the working directory, and the
@@ -773,12 +774,15 @@ to a new versioned path changes `target`. A file or symlink swapped between the
 check and the launch is not detected.
 
 HTTP servers are pinned to that one endpoint: every request must target it
-exactly, and every redirect is refused, same-origin and session close included
-(`redirect_refused`, `destination_refused`). Endpoints with userinfo, a fragment
-(even a bare trailing `#`), `.` or `..` path segments (percent-encoded ones
-included), a backslash, an IPv6 zone ID, or a non-ASCII host (use the `xn--`
-form) are rejected as `invalid_config`, which stops startup; `golem mcp inspect`
-with the same server names the rule.
+exactly, and every redirect is refused, same-origin included
+(`redirect_refused`, `destination_refused`). A redirected session-close
+`DELETE` is never followed either; it fails only the close, which the library's
+`Manager.Close` reports with fixed text, never startup, inspection or approval.
+Endpoints with userinfo, a fragment (even a bare trailing `#`), `.` or `..`
+path segments (percent-encoded ones included), a backslash, an IPv6 zone ID, or
+a non-ASCII host (use the `xn--` form) are rejected as `invalid_config`, which
+stops startup with the alias and the rule on stderr; `golem mcp inspect` with
+the same server names it too.
 
 Review and approve both identities without starting a model session or invoking
 a tool. `inspect` launches or contacts the candidate to read its catalog, so it
@@ -811,7 +815,8 @@ already exist; inspect before retrying.
 **Upgrading from v0.4:** pins written by v0.4.0 and earlier bind only the
 catalog, so every attached server reports `connection_missing`, in the REPL and
 with `-p`, until you run `inspect` and `approve` once. Stdio servers now start
-in `-root` instead of Golem's current directory. Servers that relied on
+in `-root` instead of Golem's current directory, and a relative program path
+such as `./bin/server` resolves against `-root`. Servers that relied on
 inherited variables (tokens, `HTTP_PROXY`/`HTTPS_PROXY`, `NODE_EXTRA_CA_CERTS`,
 `VIRTUAL_ENV`, nvm or pyenv paths, `XDG_*`) need `-mcp-env`. A v0.4 binary
 reports pins written by this version as `pin_unavailable` and blocks those
