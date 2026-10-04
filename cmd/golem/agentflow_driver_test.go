@@ -115,6 +115,10 @@ func (f *fakeAF) CompleteStep(_ context.Context, id, attempt string) error {
 	f.seq = append(f.seq, "complete-step:"+id+":"+attempt)
 	return f.failure("complete-step")
 }
+func (f *fakeAF) BlockStep(_ context.Context, id, attempt, reason string) error {
+	f.seq = append(f.seq, "block-step:"+id+":"+attempt+":"+reason)
+	return f.failure("block-step")
+}
 func (f *fakeAF) FinishRun(context.Context) (string, error) {
 	f.seq = append(f.seq, "finish-run")
 	if f.proofError != nil {
@@ -1637,4 +1641,157 @@ func TestMustAgentflowRunnerPanicsWithoutEchoOnUnvalidatedNames(t *testing.T) {
 		}
 	}()
 	mustAgentflowRunner(t.TempDir(), "", []string{"NAME=sk-SECRET-577"})
+}
+
+// stopTestPlan has one step with one command gate, so a skipped gate shows in
+// fakeAF's call sequence.
+func stopTestPlan() *agentflow.Plan {
+	return &agentflow.Plan{AllowedFiles: []string{"out.txt"}, Steps: []agentflow.Step{{
+		ID: "P1", Files: []string{"out.txt"},
+		Validation: []string{"go test"}, Gates: []agentflow.Gate{{Kind: "command", Run: []string{"go", "test"}}},
+	}}}
+}
+
+// #611: a step run that stops at a loop cap (nil error, non-Completed
+// StopReason) fails its attempt before any gate and records it as blocked.
+func TestTaskStepRunnerStopReasonsBlockBeforeGates(t *testing.T) {
+	read := func(id, path string) agent.ModelResult {
+		return toolStep(id, "read_file", `{"path":"`+path+`"}`)
+	}
+	write := toolStep("w1", "write_file", `{"path":"out.txt","content":"partial\n"}`)
+	blocked := func(token string) string { return "block-step:P1:A-P1:golem: agent run stopped: " + token }
+	failure := func(token string) string {
+		return "step P1 attempt A-P1: agent run stopped: " + token + "; attempt recorded as blocked"
+	}
+	tests := []struct {
+		name      string
+		maxSteps  int
+		budget    agent.Budget
+		responses []agent.ModelResult
+		wantSeq   []string
+		wantErr   string // empty: the step completes
+		zeroCalls bool
+	}{
+		{
+			name: "completed", maxSteps: 4, responses: []agent.ModelResult{write, answerStep("done")},
+			wantSeq: []string{"claim:P1", "record-file-change:P1:A-P1:out.txt", "before-gates", "gate:P1:go test", "finish-step:P1:A-P1"},
+		},
+		{
+			name: "step cap", maxSteps: 1, responses: []agent.ModelResult{write},
+			wantSeq: []string{"claim:P1", "record-file-change:P1:A-P1:out.txt", blocked("step_cap_reached")},
+			wantErr: failure("step_cap_reached"),
+		},
+		{
+			name: "tool errors", maxSteps: 4,
+			responses: []agent.ModelResult{read("r1", "missing-a.txt"), read("r2", "missing-b.txt"), read("r3", "missing-c.txt")},
+			wantSeq:   []string{"claim:P1", blocked("tool_error_cap_reached")},
+			wantErr:   failure("tool_error_cap_reached"),
+		},
+		{
+			name: "repeats", maxSteps: 4,
+			responses: []agent.ModelResult{read("r1", "seed.txt"), read("r2", "seed.txt"), read("r3", "seed.txt")},
+			wantSeq:   []string{"claim:P1", blocked("repeat_limit_reached")},
+			wantErr:   failure("repeat_limit_reached"),
+		},
+		{
+			name: "budget", maxSteps: 4, budget: agent.Budget{InputCeiling: 8192, OutputReserve: 64, TotalTokens: 1},
+			responses: []agent.ModelResult{answerStep("never sent")},
+			wantSeq:   []string{"claim:P1", blocked("budget_reached")},
+			wantErr:   failure("budget_reached"), zeroCalls: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			if err := os.WriteFile(filepath.Join(root, "seed.txt"), []byte("seed\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			plan := stopTestPlan()
+			caller := &scriptCaller{responses: tt.responses}
+			af := &fakeAF{}
+			runCtx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			sess := &replSession{maxSteps: tt.maxSteps, startupBudget: tt.budget}
+			runStep, err := newTaskStepRunner(root, plan, af, agent.New(caller, agent.ContextManager{}), sess, true, io.Discard, nil, cancel)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// The recorder proves a stopped run never reaches the pre-gate hook.
+			d := &driver{af: af, plan: plan, runStep: runStep, beforeGates: func(context.Context, agentflow.Step, string) error {
+				af.seq = append(af.seq, "before-gates")
+				return nil
+			}}
+			err = d.runOneStep(runCtx, "P1")
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("runOneStep: %v", err)
+				}
+			} else if err == nil || err.Error() != tt.wantErr {
+				t.Fatalf("err = %v, want %q (calls %v)", err, tt.wantErr, af.seq)
+			}
+			if !equalSeq(af.seq, tt.wantSeq) {
+				t.Fatalf("agentflow calls = %v, want %v", af.seq, tt.wantSeq)
+			}
+			if tt.zeroCalls && caller.i != 0 {
+				t.Fatalf("model calls = %d, want 0", caller.i)
+			}
+		})
+	}
+}
+
+// D6: a failed block names both the stop and the block failure, and still runs
+// no gate.
+func TestRunAttemptBlockFailureNamesBothCauses(t *testing.T) {
+	af := &fakeAF{failAt: map[string]error{"block-step": errors.New("block rejected: A-P1 lease expired")}}
+	d := &driver{af: af, plan: stopTestPlan(), runStep: func(context.Context, agentflow.Step, string, string) error {
+		return &runStoppedError{reason: agent.ToolErrorCapReached}
+	}}
+	err := d.runOneStep(context.Background(), "P1")
+	want := "step P1 attempt A-P1: agent run stopped: tool_error_cap_reached; record blocked attempt: block rejected: A-P1 lease expired"
+	if err == nil || err.Error() != want {
+		t.Fatalf("err = %v, want %q", err, want)
+	}
+	if wantSeq := []string{"claim:P1", "block-step:P1:A-P1:golem: agent run stopped: tool_error_cap_reached"}; !equalSeq(af.seq, wantSeq) {
+		t.Fatalf("agentflow calls = %v, want %v", af.seq, wantSeq)
+	}
+}
+
+// D8: any other step-run error keeps today's behavior: returned as is, attempt
+// left open, no block.
+func TestRunAttemptOtherStepErrorsLeaveAttemptOpen(t *testing.T) {
+	af := &fakeAF{}
+	providerDown := errors.New("provider down")
+	d := &driver{af: af, plan: stopTestPlan(), runStep: func(context.Context, agentflow.Step, string, string) error {
+		return providerDown
+	}}
+	if err := d.runOneStep(context.Background(), "P1"); err != providerDown {
+		t.Fatalf("err = %v, want the step error unchanged", err)
+	}
+	if want := []string{"claim:P1"}; !equalSeq(af.seq, want) {
+		t.Fatalf("agentflow calls = %v, want %v", af.seq, want)
+	}
+}
+
+// D8 through the production runner: a provider failure returns its error,
+// leaves the attempt open, and never consults StopReason (which is the zero
+// value, Completed, on error paths).
+func TestTaskStepRunnerProviderErrorLeavesAttemptOpen(t *testing.T) {
+	root := t.TempDir()
+	plan := stopTestPlan()
+	providerDown := errors.New("provider down")
+	af := &fakeAF{}
+	runCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	orch := agent.New(&failingCaller{err: providerDown}, agent.ContextManager{})
+	runStep, err := newTaskStepRunner(root, plan, af, orch, &replSession{maxSteps: 4}, true, io.Discard, nil, cancel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &driver{af: af, plan: plan, runStep: runStep}
+	if err := d.runOneStep(runCtx, "P1"); !errors.Is(err, providerDown) {
+		t.Fatalf("err = %v, want the provider error", err)
+	}
+	if want := []string{"claim:P1"}; !equalSeq(af.seq, want) {
+		t.Fatalf("agentflow calls = %v, want %v", af.seq, want)
+	}
 }

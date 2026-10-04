@@ -1483,7 +1483,7 @@ func runAgentflowAuthorWithClient(ctx context.Context, stdout, stderr io.Writer,
 		Options:  plannerOpts,
 		Approver: &authorPlanApprover{delegate: approver, sess: as},
 	}
-	_, runErr := sess.orch.Run(loopCtx, req, agent.Observer(newRenderer(stderr, false, sess.maxSteps, sess.clock, sess.mixed)))
+	res, runErr := sess.orch.Run(loopCtx, req, agent.Observer(newRenderer(stderr, false, sess.maxSteps, sess.clock, sess.mixed)))
 	budgetExhausted := as.attempts >= maxPlanSubmissions
 
 	switch {
@@ -1524,6 +1524,11 @@ func runAgentflowAuthorWithClient(ctx context.Context, stdout, stderr io.Writer,
 		// handled by the cases above, which set those fields before cancelling).
 		return errPlannerInterrupted
 	default:
+		// runErr is nil here: the cases above take every non-nil error, so
+		// StopReason is meaningful (#611).
+		if res.StopReason != agent.Completed {
+			return fmt.Errorf("%w: %w", errPlannerNoSubmission, &runStoppedError{reason: res.StopReason})
+		}
 		return errPlannerNoSubmission
 	}
 }
