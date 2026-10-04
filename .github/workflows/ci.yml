@@ -219,4 +219,4 @@ jobs:
       - name: Test internal/sqlitedsn on Windows
         env:
           CGO_ENABLED: "0"
-        run: go test -count=1 ./internal/sqlitedsn
+        run: go test -count=1 -v ./internal/sqlitedsn

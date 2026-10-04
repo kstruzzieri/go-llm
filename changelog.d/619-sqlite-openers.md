@@ -4,12 +4,14 @@
   routing-feedback or RAG database at the same time no longer fail with
   `SQLITE_BUSY`, as long as the other opener finishes within the store's busy
   timeout. For example, two MCP servers starting on a new transcript path both
-  start.
+  start. Agent-memory record stores (`memory.OpenRecordStore`) can still fail a
+  concurrent first open during signing initialization (#631).
 - File-backed stores open on Windows. The RAG index had failed to open there
   since v0.1.0, and the other stores since v0.4.0. UNC and device paths
   (`\\server\share\...`, `\\?\...`), including `file:` URIs that name them, are
-  now rejected with an error: use a local or mapped-drive path. This includes a
-  relative or rooted `file:` URI when the working directory is a UNC share.
+  now rejected with an error: use a local drive path. This includes a relative
+  or rooted `file:` URI when the working directory is a UNC share. A drive
+  letter mapped to a network share is not detected and has the same WAL limits.
 - A relative path now works for read-only RAG stores
   (`rag.OpenSQLiteStoreReadOnly`).
 - An open no longer fails when another process closes the same database at the

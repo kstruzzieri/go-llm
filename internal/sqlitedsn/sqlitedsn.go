@@ -25,7 +25,8 @@ import (
 // or device paths are rejected in either form, because SQLite WAL does not
 // work on network filesystems; the only URI authority accepted is localhost.
 // A relative or rooted URI filename is checked as SQLite will resolve it,
-// against the working directory at the time of the call.
+// against the working directory at the time of the call. A drive letter mapped
+// to a network share is not detected and has the same WAL limits.
 // FileURL rejects "". Callers handle ":memory:" before calling it.
 func FileURL(path string) (*url.URL, error) {
 	if path == "" {
