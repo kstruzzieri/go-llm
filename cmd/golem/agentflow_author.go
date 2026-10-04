@@ -1437,13 +1437,15 @@ func runAgentflowAuthorWithClient(ctx context.Context, stdout, stderr io.Writer,
 	}
 	defer release()
 
-	// Keep the guard inside the injected seam so tests exercise the same safety
+	// Keep the guards inside the injected seam so tests exercise the same safety
 	// boundary as production.
-	if err := guardExistingPlan(root); err != nil {
+	// #612 R5: refuse retained non-1.x AgentFlow state before any AgentFlow call
+	// and before the locked-plan guard, whose "reset the run" advice cannot work
+	// on 0.x state: the upgrade guidance must win.
+	if err := checkAgentflowStateMajor(root); err != nil {
 		return err
 	}
-	// #612 R5: refuse retained non-1.x AgentFlow state before any AgentFlow call.
-	if err := checkAgentflowStateMajor(root); err != nil {
+	if err := guardExistingPlan(root); err != nil {
 		return err
 	}
 

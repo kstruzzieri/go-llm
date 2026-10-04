@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -236,7 +237,7 @@ const PlanSchemaVersion = "1.0.0"
 // contract, evidence, review runs, runtime) must not be checked with it.
 func SupportedSchemaVersion(v string) bool {
 	parts := schemaVersionPattern.FindStringSubmatch(v)
-	return parts != nil && parts[1] == "1"
+	return parts != nil && parts[1] == strconv.Itoa(maxMajor)
 }
 
 // PreflightP0 rejects a plan Golem cannot run in P0: every step must have at

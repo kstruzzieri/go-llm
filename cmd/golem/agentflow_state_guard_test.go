@@ -77,6 +77,24 @@ func TestCheckAgentflowStateMajor(t *testing.T) {
 			want: ".agent/plan.lock.json unreadable"},
 		{name: "malformed ledger row", files: []file{{"step-runs.jsonl", "{\n"}},
 			want: ".agent/step-runs.jsonl:1 unreadable"},
+		// AgentFlow is Python: it persists an unknown non-finite number as
+		// NaN/Infinity, which encoding/json rejects. A real 1.0 tree is not
+		// "unreadable" for that (#612, found by the real-CLI guard check).
+		{name: "1.x lock with Python non-finite constants", files: []file{
+			{"plan.lock.json", `{"schema_version":"1.0.0","a":Infinity,"b":-Infinity,"c":NaN}`},
+			{"step-runs.jsonl", `{"schema_version":"1.0.0","step_id":"S1","x":NaN}` + "\n"},
+		}},
+		{name: "0.x lock with Python non-finite constants names the version", files: []file{{"plan.lock.json", `{"schema_version":"0.3.0","future":Infinity}`}},
+			want: `.agent/plan.lock.json schema_version "0.3.0"`},
+		{name: "duplicate schema_version: last wins (ok)", files: []file{{"plan.lock.json", `{"schema_version":"0.3.0","schema_version":"1.0.0"}`}}},
+		{name: "duplicate schema_version: last wins (refused)", files: []file{{"plan.lock.json", `{"schema_version":"1.0.0","schema_version":"0.3.0"}`}},
+			want: `.agent/plan.lock.json schema_version "0.3.0"`},
+		{name: "numeric schema_version", files: []file{{"plan.lock.json", `{"schema_version":1}`}},
+			want: ".agent/plan.lock.json unreadable"},
+		{name: "null schema_version", files: []file{{"plan.lock.json", `{"schema_version":null}`}},
+			want: ".agent/plan.lock.json unreadable"},
+		{name: "top-level array", files: []file{{"plan.lock.json", `[]`}},
+			want: ".agent/plan.lock.json unreadable"},
 	}
 	for _, ledger := range stateLedgers {
 		cases = append(cases, struct {
@@ -150,6 +168,27 @@ func TestRunAgentflowTask_RefusesZeroXStateBeforeAgentflow(t *testing.T) {
 				t.Fatal("guard refusal changed .agent/")
 			}
 		})
+	}
+}
+
+// A 0.x LOCKED plan gets the upgrade guidance, not the "already locked; reset
+// the run" advice: AgentFlow has no reset command and 1.0 cannot touch 0.x state.
+func TestRunAgentflowAuthor_ZeroXLockedPlanGetsUpgradeGuidance(t *testing.T) {
+	root := t.TempDir()
+	writeAgentFile(t, root, "plan.lock.json", `{"schema_version":"0.3.0","objective":"x","steps":[{"id":"S1"}],"locked":true}`)
+	before := snapshotAuditFixtureTree(t, filepath.Join(root, ".agent"))
+	caller := &scriptCaller{responses: []agent.ModelResult{submitPlanCall(validIRJSON(t))}}
+	sess := newTestSession(t, caller, root)
+	client := &stubLocker{}
+	err := runAgentflowAuthorWithClient(context.Background(), &bytes.Buffer{}, &bytes.Buffer{}, nil, sess, flags{goal: "x", goalSet: true}, root, client, nil)
+	if err == nil || !strings.Contains(err.Error(), `incompatible AgentFlow state (.agent/plan.lock.json schema_version "0.3.0")`) {
+		t.Fatalf("err = %v", err)
+	}
+	if client.probes != 0 || caller.i != 0 || client.inits != 0 {
+		t.Fatalf("guard refusal reached probe=%d model=%d init=%d", client.probes, caller.i, client.inits)
+	}
+	if after := snapshotAuditFixtureTree(t, filepath.Join(root, ".agent")); !reflect.DeepEqual(after, before) {
+		t.Fatal("guard refusal changed .agent/")
 	}
 }
 

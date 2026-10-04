@@ -125,6 +125,9 @@ func TestProbeParallel_RequiresAggregateLedgersAndEveryUsedFlag(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), missing) {
 				t.Fatalf("missing %s error = %v", missing, err)
 			}
+			if !strings.HasSuffix(err.Error(), "(upgrade Agentflow)") {
+				t.Fatalf("missing %s error = %v, want the upgrade hint", missing, err)
+			}
 		})
 	}
 }
@@ -236,7 +239,15 @@ func TestCheckVersion(t *testing.T) {
 		{"agentflow 1.-0.0\n", `cannot parse agentflow version "1.-0.0"`},
 		// %q is the only sanitizer for text that reaches stderr raw later (#612).
 		{"agentflow 1.\x1b[2J\n", `cannot parse agentflow version "1.\x1b[2J"`},
-		{"agentflow\n", `cannot parse agentflow version from "agentflow\n"`},
+		{"agentflow\n", `cannot parse agentflow version from "agentflow"`},
+		// Only the first line is the version; later lines (warnings, paths) are
+		// neither parsed nor echoed (#612).
+		{"agentflow 1.0.0\nwarning: deprecated /Users/x/y\n", ""},
+		{"\n  agentflow 1.0.0 (python 3.12)\n", ""},
+		{"agentflow 2.0.0\nwarning: /Users/x/y\n", "agentflow 2.0 is newer than this Golem supports; need 1.x"},
+		{"agentflow\nwarning: /Users/x/y\n", `cannot parse agentflow version from "agentflow"`},
+		// A real AgentFlow prints about 16 bytes; anything echoed is clipped.
+		{"agentflow 1." + strings.Repeat("9", 100) + "x\n", `cannot parse agentflow version "1.` + strings.Repeat("9", 62) + `..."`},
 	} {
 		t.Run(strings.TrimSpace(tt.out), func(t *testing.T) {
 			c, f := newTestClient(map[string]fakeReply{"--version": {stdout: []byte(tt.out)}})
@@ -267,7 +278,9 @@ func TestCheckVersion_LaunchFailureIsNotAVersionError(t *testing.T) {
 		want  string
 	}{
 		{fakeReply{err: launch}, "agentflow unavailable (--version failed): exec: agentflow: not found"},
-		{fakeReply{exit: 2}, "agentflow unavailable (--version failed): exit 2"},
+		{fakeReply{exit: 2}, "agentflow unavailable (--version failed): agentflow --version: exit 2"},
+		// A broken install's own error is the diagnosis; keep it (#612).
+		{fakeReply{exit: 1, stderr: []byte("boom: missing module\n")}, "agentflow unavailable (--version failed): agentflow --version: exit 1: boom: missing module"},
 	} {
 		c, _ := newTestClient(map[string]fakeReply{"--version": tt.reply})
 		err := c.CheckVersion(context.Background())

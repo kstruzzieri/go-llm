@@ -162,6 +162,41 @@ func TestAgentflowStatus_JSONHidesVersionLaunchFailure(t *testing.T) {
 	}
 }
 
+// versionExitRunner fails `agentflow --version` with an exit code and stderr:
+// a broken install, where AgentFlow's own message is the diagnosis (#612).
+type versionExitRunner struct{ stderr string }
+
+func (r versionExitRunner) Run(context.Context, []string, []byte) ([]byte, []byte, int, error) {
+	return nil, []byte(r.stderr), 1, nil
+}
+
+// Human status keeps (sanitized) --version stderr as develop did; JSON status
+// stays silent because that text is not Golem's own.
+func TestAgentflowStatus_VersionExitKeepsStderrInHumanOnly(t *testing.T) {
+	runner := versionExitRunner{stderr: "boom: RUNNER-SECRET-577 missing module\x1b[2J\n"}
+
+	var human bytes.Buffer
+	err := runAgentflowStatusWithRunner(context.Background(), &human, t.TempDir(), false, runner)
+	var exit *agentflowStatusExit
+	if !errors.As(err, &exit) || exit.ExitCode() != 3 || exit.diagnostic != "" {
+		t.Fatalf("human err = %v, want exit 3 without a stderr diagnostic", err)
+	}
+	const want = "agentflow status unavailable: agentflow unavailable (--version failed): " +
+		"agentflow --version: exit 1: boom: RUNNER-SECRET-577 missing module\\x1b[2J\n"
+	if human.String() != want {
+		t.Fatalf("human stdout = %q, want %q", human.String(), want)
+	}
+
+	var jsonOut bytes.Buffer
+	err = runAgentflowStatusWithRunner(context.Background(), &jsonOut, t.TempDir(), true, runner)
+	if !errors.As(err, &exit) || exit.ExitCode() != 3 {
+		t.Fatalf("json err = %v, want exit 3", err)
+	}
+	if exit.diagnostic != "" || jsonOut.Len() != 0 {
+		t.Fatalf("json diagnostic=%q stdout=%q, want silent exit 3", exit.diagnostic, jsonOut.String())
+	}
+}
+
 func TestAgentflowStatus_JSONRelaysRawProjection(t *testing.T) {
 	for _, payload := range [][]byte{
 		[]byte("{\"state\":\"uninitialized\",\"unknown\":{\"kept\":true}}\n"),

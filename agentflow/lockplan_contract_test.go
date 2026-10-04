@@ -40,9 +40,11 @@ func agentflowTestSource(mode, src string, installed bool) (useSrc, skip bool, e
 }
 
 // agentflowRunnerForTest honors GO_LLM_REQUIRE_AGENTFLOW and the explicit
-// AGENTFLOW_SRC checkout, otherwise uses an installed binary or skips. CI's
-// agentflow-compat job selects real-CLI tests by name, so a test using this
-// must be named Test*_RealCLI or Test*_RealCLI_<scenario>.
+// AGENTFLOW_SRC checkout, otherwise uses an installed binary or skips. The
+// chosen CLI must pass the AgentFlow 1.x version gate: a non-1.x install skips
+// (or fails under GO_LLM_REQUIRE_AGENTFLOW) instead of failing on a raw schema
+// rejection (#612). CI's agentflow-compat job selects real-CLI tests by name,
+// so a test using this must be named Test*_RealCLI or Test*_RealCLI_<scenario>.
 func agentflowRunnerForTest(t *testing.T, dir string) Runner {
 	t.Helper()
 	src := os.Getenv("AGENTFLOW_SRC")
@@ -53,15 +55,27 @@ func agentflowRunnerForTest(t *testing.T, dir string) Runner {
 		t.Fatal(err)
 	case skip:
 		t.Skip("agentflow CLI not available (set AGENTFLOW_SRC=<checkout> to run)")
-	case useSrc:
-		return NewSrcExecRunner(dir, src)
 	}
-	return NewExecRunner(dir)
+	runner := NewExecRunner(dir)
+	if useSrc {
+		runner = NewSrcExecRunner(dir, src)
+	}
+	if err := NewClient(runner, dir).CheckVersion(context.Background()); err != nil {
+		if os.Getenv("GO_LLM_REQUIRE_AGENTFLOW") != "" {
+			t.Fatalf("agentflow is not usable for the real-CLI tests: %v", err)
+		}
+		t.Skipf("agentflow is not AgentFlow 1.x (%v); install AgentFlow 1.x or set AGENTFLOW_SRC=<1.x checkout>", err)
+	}
+	return runner
 }
 
 func TestAgentflowRunnerForTest_PrefersSourceOverride(t *testing.T) {
 	binDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(binDir, "agentflow"), []byte("#!/bin/sh\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// Source mode runs `python3 -m agentflow --version` for the version gate.
+	if err := os.WriteFile(filepath.Join(binDir, "python3"), []byte("#!/bin/sh\necho 'agentflow 1.0.0'\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	checkout := writeSourceCheckoutFixture(t)

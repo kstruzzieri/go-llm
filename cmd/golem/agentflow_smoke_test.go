@@ -217,6 +217,10 @@ func TestAgentflowResumeStatusAndProof_RealCLI(t *testing.T) {
 	if claims != 1 {
 		t.Fatalf("claim events = %d, want exactly one", claims)
 	}
+	// R5 must accept the ledger rows a real AgentFlow 1.0 run leaves behind.
+	if err := checkAgentflowStateMajor(dir); err != nil {
+		t.Fatalf("guard refused a real AgentFlow 1.0 tree: %v", err)
+	}
 }
 
 // #612 R-new: AgentFlow 1.0 rejects a 0.x plan before it looks at execution
@@ -619,6 +623,10 @@ func TestAgentflowParallelSmoke(t *testing.T) {
 	}
 
 	assertParallelSmokeProof(t, dir, proof, base)
+	// Aggregated worker rows are real AgentFlow 1.0 ledger rows too (R5).
+	if err := checkAgentflowStateMajor(dir); err != nil {
+		t.Fatalf("guard refused a real AgentFlow 1.0 tree: %v", err)
+	}
 
 	calls := recorder.snapshot()
 	claims := map[string]parallelSmokeCall{}
@@ -771,10 +779,13 @@ func assertParallelSmokeProof(t *testing.T, dir, proof, base string) {
 }
 
 // agentflowRunnerOrSkip honors GO_LLM_REQUIRE_AGENTFLOW and the explicit
-// AGENTFLOW_SRC checkout, otherwise uses an installed binary or skips. Mirrors
-// agentflow.agentflowRunnerForTest, which is unexported in another package.
-// CI's agentflow-compat job selects real-CLI tests by name, so a new test using
-// this must be named Test*_RealCLI or Test*_RealCLI_<scenario>.
+// AGENTFLOW_SRC checkout, otherwise uses an installed binary or skips. The
+// chosen CLI must pass the AgentFlow 1.x version gate: a non-1.x install skips
+// (or fails under GO_LLM_REQUIRE_AGENTFLOW) instead of failing on a raw schema
+// rejection (#612). Mirrors agentflow.agentflowRunnerForTest, which is
+// unexported in another package. CI's agentflow-compat job selects real-CLI
+// tests by name, so a new test using this must be named Test*_RealCLI or
+// Test*_RealCLI_<scenario>.
 func agentflowRunnerOrSkip(t *testing.T, dir string) agentflow.Runner {
 	t.Helper()
 	mode, src := os.Getenv("GO_LLM_REQUIRE_AGENTFLOW"), os.Getenv("AGENTFLOW_SRC")
@@ -796,14 +807,22 @@ func agentflowRunnerOrSkip(t *testing.T, dir string) agentflow.Runner {
 	default:
 		t.Fatalf("GO_LLM_REQUIRE_AGENTFLOW=%q, want installed or source", mode)
 	}
-	if src != "" {
-		return agentflow.NewSrcExecRunner(dir, src)
+	var runner agentflow.Runner
+	switch {
+	case src != "":
+		runner = agentflow.NewSrcExecRunner(dir, src)
+	case installed:
+		runner = agentflow.NewExecRunner(dir)
+	default:
+		t.Skip("agentflow CLI not available (set AGENTFLOW_SRC=<checkout> to run)")
 	}
-	if installed {
-		return agentflow.NewExecRunner(dir)
+	if err := agentflow.NewClient(runner, dir).CheckVersion(context.Background()); err != nil {
+		if mode != "" {
+			t.Fatalf("agentflow is not usable for the real-CLI tests: %v", err)
+		}
+		t.Skipf("agentflow is not AgentFlow 1.x (%v); install AgentFlow 1.x or set AGENTFLOW_SRC=<1.x checkout>", err)
 	}
-	t.Skip("agentflow CLI not available (set AGENTFLOW_SRC=<checkout> to run)")
-	return nil
+	return runner
 }
 
 // gitInit initializes a git repository at dir and commits the fixture as it

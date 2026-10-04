@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -70,17 +69,34 @@ func readAgentflowState(dir, name string) ([]byte, error) {
 	return b, nil
 }
 
+// checkAgentflowStateVersion reads only the top-level schema_version. AgentFlow
+// is Python and persists an unknown non-finite number as NaN/Infinity, which
+// encoding/json rejects, so the document goes through the Python-dialect parser
+// the plan binding already uses.
 func checkAgentflowStateVersion(where string, b []byte) error {
-	var doc struct {
-		SchemaVersion *string `json:"schema_version"`
-	}
-	if json.Unmarshal(b, &doc) != nil || doc.SchemaVersion == nil {
+	version, ok := agentflowStateSchemaVersion(b)
+	if !ok {
 		return incompatibleAgentflowState(where, "unreadable")
 	}
-	if !agentflow.SupportedSchemaVersion(*doc.SchemaVersion) {
-		return incompatibleAgentflowState(where, fmt.Sprintf("schema_version %q", *doc.SchemaVersion))
+	if !agentflow.SupportedSchemaVersion(version) {
+		return incompatibleAgentflowState(where, fmt.Sprintf("schema_version %q", version))
 	}
 	return nil
+}
+
+func agentflowStateSchemaVersion(b []byte) (string, bool) {
+	value, err := parseAgentflowJSON(b)
+	doc, isObject := value.(agentflowJSONObject)
+	if err != nil || !isObject {
+		return "", false
+	}
+	for _, member := range doc { // the parser already folds duplicate keys, last wins
+		if agentflowJSONStringEqualASCII(member.key, "schema_version") {
+			version, isString := member.value.(agentflowJSONString)
+			return string(version), isString
+		}
+	}
+	return "", false
 }
 
 func incompatibleAgentflowState(where, what string) error {
