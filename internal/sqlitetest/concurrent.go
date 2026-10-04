@@ -147,7 +147,11 @@ func concurrentOpenTrial(t *testing.T, trial, procs int) {
 func startConcurrentChild(ctx context.Context, name, path string, ready chan<- bool) (*concurrentChild, error) {
 	c := &concurrentChild{scanned: make(chan struct{})}
 	c.cmd = exec.CommandContext(ctx, os.Args[0], "-test.run=^"+regexp.QuoteMeta(name)+"$", "-test.count=1")
-	c.cmd.Env = append(os.Environ(), concurrentOpenPathEnv+"="+path)
+	// A race-built child that exits 0 sleeps 1s (GORACE atexit_sleep_ms)
+	// first, which would make every trial last at least 1s under -race. Races
+	// are still reported while the child runs; os/exec keeps the last GORACE.
+	c.cmd.Env = append(os.Environ(), concurrentOpenPathEnv+"="+path,
+		"GORACE="+strings.TrimSpace(os.Getenv("GORACE")+" atexit_sleep_ms=0"))
 	c.cmd.Stderr = &c.stderr
 	var err error
 	if c.release, err = c.cmd.StdinPipe(); err != nil {

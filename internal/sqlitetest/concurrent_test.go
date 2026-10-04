@@ -70,7 +70,9 @@ func TestRunConcurrentFirstOpensFails(t *testing.T) {
 	} {
 		t.Run(tc.mode, func(t *testing.T) {
 			cmd := exec.Command(os.Args[0], "-test.run=^TestRunConcurrentFirstOpensFails$", "-test.count=1")
-			cmd.Env = append(os.Environ(), harnessModeEnv+"="+tc.mode)
+			// No race-detector exit sleep: see startConcurrentChild.
+			cmd.Env = append(os.Environ(), harnessModeEnv+"="+tc.mode,
+				"GORACE="+strings.TrimSpace(os.Getenv("GORACE")+" atexit_sleep_ms=0"))
 			out, err := cmd.CombinedOutput()
 			if err == nil || !bytes.Contains(out, []byte(tc.want)) {
 				t.Fatalf("harness in mode %s: err = %v, want a failure containing %q; output:\n%s", tc.mode, err, tc.want, out)
