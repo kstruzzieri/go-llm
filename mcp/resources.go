@@ -242,8 +242,9 @@ func (s *Server) handleRouteBreakersResource(_ context.Context, _ *gomcp.ReadRes
 }
 
 // warmEntry is the route://warmth wire projection of one warm model. Zero
-// times are omitted, and so is VRAM until the warmth source has measured it:
-// OllamaWarmthSource.RecordUse records a model with VRAM 0 until its next poll.
+// times are omitted, and so is a zero VRAM figure, because 0 also stands for
+// "not measured yet": OllamaWarmthSource.RecordUse records a model with VRAM 0
+// until its next poll.
 type warmEntry struct {
 	Provider  string  `json:"provider"`
 	Model     string  `json:"model"`

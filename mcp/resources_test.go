@@ -411,6 +411,9 @@ func (e routeSnapshotEngine) WarmthSnapshot() []provider.WarmModel { return e.wa
 
 func (e routeSnapshotEngine) StickyRoutes() map[string]provider.StickyRouteInfo { return e.sticky }
 
+// routeResourceHandler is the method-expression form of a route:// handler.
+type routeResourceHandler func(*Server, context.Context, *gomcp.ReadResourceRequest) (*gomcp.ReadResourceResult, error)
+
 // TestRouteBreakersResourceJSON pins the route://breakers wire projection:
 // state by name, zero times and absent error classes omitted, times in UTC,
 // the last error reduced to its bounded routing class, and [] when no
@@ -505,8 +508,8 @@ func TestRouteBreakersResourceJSON(t *testing.T) {
 
 // TestRouteWarmthAndStickyResourceJSON pins the route://warmth and
 // route://sticky wire projections: flat provider/model keys, warmth sorted by
-// provider then model, times in UTC, zero times and unmeasured VRAM omitted,
-// and the empty forms [] and {} rather than null.
+// provider then model, times in UTC, zero times and zero VRAM omitted, and the
+// empty forms [] and {} rather than null.
 func TestRouteWarmthAndStickyResourceJSON(t *testing.T) {
 	edt := time.FixedZone("EDT", -4*60*60)
 	loadedAt := time.Date(2026, 10, 3, 8, 0, 0, 0, edt)
@@ -539,10 +542,9 @@ func TestRouteWarmthAndStickyResourceJSON(t *testing.T) {
 	}
 	empty := routeSnapshotEngine{recordingRouteEngine: newRecordingRouteEngine("")}
 
-	type handler func(*Server, context.Context, *gomcp.ReadResourceRequest) (*gomcp.ReadResourceResult, error)
 	tests := []struct {
 		name   string
-		read   handler
+		read   routeResourceHandler
 		engine routeSnapshotEngine
 		want   string
 	}{
@@ -598,5 +600,26 @@ func TestRouteWarmthAndStickyResourceJSON(t *testing.T) {
 				t.Errorf("JSON:\n%s\nwant:\n%s", got, tt.want)
 			}
 		})
+	}
+}
+
+// TestRouteResourcesWithoutRouter pins the empty forms for a server whose
+// router is gone, as after Close: reads return [] or {}, never null or a panic.
+func TestRouteResourcesWithoutRouter(t *testing.T) {
+	for name, c := range map[string]struct {
+		read routeResourceHandler
+		want string
+	}{
+		"breakers": {(*Server).handleRouteBreakersResource, `[]`},
+		"warmth":   {(*Server).handleRouteWarmthResource, `[]`},
+		"sticky":   {(*Server).handleRouteStickyResource, `{}`},
+	} {
+		res, err := c.read(&Server{}, context.Background(), nil)
+		if err != nil {
+			t.Fatalf("%s: read error = %v", name, err)
+		}
+		if got := res.Contents[0].Text; got != c.want {
+			t.Errorf("%s without router = %s, want %s", name, got, c.want)
+		}
 	}
 }

@@ -19,9 +19,9 @@ UTC, omitted when unset:
   bounded routing error class such as `network`, `5xx` or `rate_limit`
   (omitted when no error was recorded). Error text is never emitted.
 - `route://warmth`: `provider`, `model`, `loaded`, `since`, `expires_at`, and
-  `vram_gb`, omitted until the warmth source has measured it. Entries are
-  sorted by provider, then model, so unchanged state reads back in the same
-  order.
+  `vram_gb`, omitted when 0 because 0 also means not measured yet. Entries
+  are sorted by provider, then model, so unchanged state reads back in the
+  same order.
 - `route://sticky`: `provider`, `model`, `score`, `reason`, `created_at`,
   `last_used_at`, `expires_at`.
 
