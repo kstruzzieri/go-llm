@@ -22,7 +22,9 @@ child's guards would see paths below the directory without it.
   `tools.NewDispatch` for children. The `golem.Runtime` bootstrap installs
   none. It is always on in the Golem CLI.
 - The default table's `read_file` row now holds an `interceptor.CredentialPath`
-  check instead of a `PathDeny`.
+  check instead of a `PathDeny`. `CredentialPath`, `interceptor.IsCredentialPath`
+  (the read set) and `interceptor.IsProtectedPath` (the write set) are new
+  exports for custom tables and hosts.
 - Custom `PathDeny` patterns are matched against the normalized path, so a
   pattern that spells one of the normalized characters literally (for example
   `ß`) no longer matches. Write it in normalized form (`ss`).
