@@ -79,6 +79,15 @@ func prepareStdio(p preparedServer, s Server, le launchEnv) (preparedServer, err
 	invalid := func(detail string, cause error) (preparedServer, error) {
 		return preparedServer{}, launchInvalid(s.Alias, detail, cause)
 	}
+	if le.policy.id == windowsEnvPolicy.id {
+		// Go appends PATHEXT entries verbatim during both LookPath and
+		// Cmd.Start. Path delimiters can make the second lookup select a
+		// different executable from the launcher we fingerprinted.
+		pathExt, _ := le.lookup("PATHEXT")
+		if strings.ContainsAny(pathExt, `:\/`) {
+			return invalid("mcpclient: PATHEXT must not contain path delimiters", nil)
+		}
+	}
 	dir := s.dir
 	if dir == "" {
 		wd, err := le.getwd()

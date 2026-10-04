@@ -44,6 +44,10 @@ and network authority (#580).
 - On Windows a stdio server always gets `NoDefaultCurrentDirectoryInExePath=1`,
   so a bare program name is not looked up in the workspace root before `PATH`;
   `-mcp-env` may not name it.
+- Windows stdio preparation rejects `PATHEXT` containing `/`, `\` or `:` as
+  `launch_invalid` before executable lookup. These delimiters could make Go
+  resolve a different executable when starting the already prepared launcher;
+  the diagnostic never includes the environment value.
 - `PATH` values are not part of the connection: a wrapper
   (`env KEY=val command`, `npx`, `uvx`, `sh -c`) or a script's `#!`
   interpreter binds only the launcher, so what it finds through the absolute

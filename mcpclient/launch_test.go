@@ -53,6 +53,68 @@ func testLaunchEnv(parent map[string]string) launchEnv {
 	}
 }
 
+// A Windows PATHEXT suffix must not introduce a path component: otherwise
+// exec.Cmd.Start can append it again to the prepared extensionless basename
+// and execute a different file. Removing the pre-lookup check must fail these
+// cases even when the launcher itself exists.
+func TestPrepareStdioRejectsPathExtSeparatorsBeforeLookup(t *testing.T) {
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	for _, tt := range []struct {
+		name    string
+		policy  envPolicy
+		pathExt string
+		set     bool
+		invalid bool
+	}{
+		{"windows slash", windowsEnvPolicy, ".exe/canary", true, true},
+		{"windows backslash", windowsEnvPolicy, `.exe\canary`, true, true},
+		{"windows colon", windowsEnvPolicy, ".exe:canary", true, true},
+		{"windows later entry", windowsEnvPolicy, ".COM;.EXE;cmd/canary", true, true},
+		{"windows standard", windowsEnvPolicy, ".COM;.EXE;.BAT;.CMD", true, false},
+		{"windows without leading dots", windowsEnvPolicy, "COM;EXE;BAT;CMD", true, false},
+		{"windows empty", windowsEnvPolicy, "", true, false},
+		{"windows empty entries", windowsEnvPolicy, ";;", true, false},
+		{"windows unset", windowsEnvPolicy, "", false, false},
+		{"unix ignores PATHEXT", unixEnvPolicy, `.exe/canary;.cmd\canary;.exe:canary`, true, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			parent := make(map[string]string)
+			if tt.set {
+				parent["PATHEXT"] = tt.pathExt
+			}
+			le := testLaunchEnv(parent)
+			le.policy = tt.policy
+			lookedUp := false
+			le.lookPath = func(string) (string, error) {
+				lookedUp = true
+				return exe, nil
+			}
+			p, err := prepare(StdioServer("fs", []string{exe}).WithDir(dir), "/ws", le)
+			if !tt.invalid {
+				if err != nil || !lookedUp || p.transport == nil {
+					t.Fatalf("prepare(PATHEXT=%q) = (%v, lookup=%t), want a prepared transport", tt.pathExt, err, lookedUp)
+				}
+				return
+			}
+			if lookedUp || p.transport != nil {
+				t.Error("prepare with a PATHEXT path separator performed executable lookup or prepared a transport")
+			}
+			failure, ok := err.(*AdmissionError)
+			if !ok || failure.Reason != "launch_invalid" {
+				t.Fatalf("prepare(PATHEXT=%q) = %v, want a bare launch_invalid AdmissionError", tt.pathExt, err)
+			}
+			const want = `server "fs": launch_invalid: mcpclient: PATHEXT must not contain path delimiters`
+			if err.Error() != want {
+				t.Errorf("prepare(PATHEXT=%q) error = %q, want fixed text %q without the value", tt.pathExt, err.Error(), want)
+			}
+		})
+	}
+}
+
 func TestPrepareStdioFreezesResolvedLaunch(t *testing.T) {
 	root := t.TempDir()
 	real := filepath.Join(root, "real")
