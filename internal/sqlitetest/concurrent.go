@@ -50,15 +50,15 @@ const (
 
 // RunConcurrentFirstOpens checks that procs processes opening one new
 // database path at the same moment all succeed and leave it in WAL mode, once
-// per trial on a fresh path. Call it once, from a top-level test: the parent re-runs
-// the test binary with -test.run=^<t.Name()>$, and in those children it calls
-// open, checks the result, closes it, and ends the test, so the test and any
-// TestMain finish normally. Every child must report ready before any is
-// released, so a child that never reaches the opener (for example, one whose
-// -test.run pattern matches nothing) fails the trial instead of passing, and
-// every child must report done after its open, AssertWAL and Close succeed,
-// so an opener that skips or exits early fails it too. procs must be at
-// least 2 and trials at least 1.
+// per trial on a fresh path. Call it once, from a top-level test: the parent
+// re-runs the test binary with -test.run=^<t.Name()>$, and in those children
+// it calls open, checks the result, closes it, and ends the test, so the test
+// and any TestMain finish normally. Every child must report ready before any
+// is released, so a child that never reaches the opener (for example, one
+// whose -test.run pattern matches nothing) fails the trial instead of
+// passing, and every child must report done after its open, AssertWAL and
+// Close succeed, so an opener that skips or exits early fails it too. procs
+// must be at least 2 and trials at least 1.
 // GO_LLM_SQLITETEST_OPEN_TRIALS overrides trials, for mutation runs.
 func RunConcurrentFirstOpens(t *testing.T, procs, trials int, open func(ctx context.Context, path string) (io.Closer, error)) {
 	t.Helper()
