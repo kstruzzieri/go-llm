@@ -144,19 +144,18 @@ func WithBusyTimeout(path string, timeout time.Duration) (string, error) {
 // read lock to a write lock, and SQLite skips the busy handler on that upgrade,
 // so two connections racing a database's first switch fail at once with
 // SQLITE_BUSY whatever busy_timeout says. EnableWAL retries on SQLITE_BUSY
-// within one budget equal to the connection's busy_timeout, or shorter when
-// ctx has an earlier deadline, which also caps SQLite's own lock waits during
-// each attempt's prepare and execute; a zero
-// busy_timeout allows one attempt. The total wait is bounded by the budget
-// plus scheduling and I/O overhead. It returns an error if SQLite reports a
-// journal mode other than "wal"; an in-memory database reports "memory" and
-// is accepted unchanged. Cancellation is checked between attempts; a lock
-// wait already in progress ends by the budget's deadline. Shared-cache
-// (cache=shared) connections are outside this contract: modernc waits on an
-// unlock notification outside the busy handler, and a concurrent writer on the
-// same shared cache makes SQLite decline the switch, which EnableWAL reports as
-// an error. rag.NewSQLiteStore forwards a caller's cache=shared URI; go-llm's
-// own openers never build one.
+// within one budget: the connection's busy_timeout, or the time left to ctx's
+// deadline if that is sooner. The budget also caps SQLite's own lock waits
+// during each attempt's prepare and execute; a zero busy_timeout allows one
+// attempt. The total wait is bounded by the budget plus scheduling and I/O
+// overhead. It returns an error if SQLite reports a journal mode other than
+// "wal"; an in-memory database reports "memory" and is accepted unchanged.
+// Cancellation is checked between attempts; a lock wait already in progress
+// ends by the budget's deadline. Shared-cache (cache=shared) connections are
+// outside this contract: modernc waits on an unlock notification outside the
+// busy handler, and a concurrent writer on the same shared cache makes SQLite
+// decline the switch, which EnableWAL reports as an error. rag.NewSQLiteStore
+// forwards a caller's cache=shared URI; go-llm's own openers never build one.
 func EnableWAL(ctx context.Context, db *sql.DB) error { return enableWAL(ctx, db, nil) }
 
 // enableWAL is EnableWAL with onBusy called after each attempt that fails with

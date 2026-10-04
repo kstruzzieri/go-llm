@@ -261,7 +261,8 @@ transaction); use the DSN or a connection hook for `busy_timeout`.
 `provider.OpenSQLiteFeedbackStore`, `memory.OpenHardenedDB`, `transcript.Open`
 and `rag.NewSQLiteStore` set `busy_timeout` in their DSN and retry the WAL
 switch within it, so processes opening one new path at the same time all
-succeed.
+succeed as long as each finishes within the busy timeout (or its context
+deadline, if sooner).
 
 For provider routing feedback, unversioned legacy tables still must pass the
 existing column and CHECK-fingerprint validation. Validation, creation of

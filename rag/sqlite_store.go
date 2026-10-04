@@ -180,7 +180,9 @@ func sqliteReadWriteDSN(dbPath string) (string, error) {
 // OpenSQLiteStoreReadOnly opens an existing SQLite vector store as an immutable
 // read-only snapshot without changing journal mode or running migrations. Use
 // it for retrieval/probe paths that must not create WAL/SHM files or mutate
-// copied/foreign index DBs.
+// copied/foreign index DBs. dbPath may be a plain path or a file: URI; the open
+// always forces mode=ro, immutable=1 and a private cache, whatever the URI's
+// own parameters say.
 func OpenSQLiteStoreReadOnly(dbPath string) (*SQLiteStore, error) {
 	if dbPath == "" {
 		return nil, fmt.Errorf("rag: open sqlite read-only: empty path")

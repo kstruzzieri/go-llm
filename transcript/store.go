@@ -40,7 +40,9 @@ type Store struct {
 // Open opens (or creates) a transcript database at path and runs migrations.
 // Pass ":memory:" explicitly for in-process tests (empty string is rejected to
 // avoid the default-string footgun). The returned store owns the *sql.DB and
-// closes it on Close.
+// closes it on Close. path may be a file: URI; the open switches the database
+// to WAL and fails if the connection cannot use it (for example immutable=1 or
+// nolock=1).
 func Open(ctx context.Context, path string) (*Store, error) {
 	if path == "" {
 		return nil, fmt.Errorf("transcript: Open requires non-empty path; pass \":memory:\" explicitly")

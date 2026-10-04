@@ -53,7 +53,9 @@ func PrepareDBFile(path string) error {
 // including replacements database/sql opens after a context-cancelled
 // statement, a 5s busy_timeout; it is built before the file is prepared, so a
 // path it rejects is never created. The WAL switch retries within that
-// timeout when another opener races it.
+// timeout, or until ctx's deadline if sooner, when another opener races it,
+// and the open fails if the connection cannot use WAL (for example a file: URI
+// with immutable=1 or nolock=1).
 func OpenHardenedDB(ctx context.Context, path string) (*sql.DB, error) {
 	dsn, err := sqlitedsn.WithBusyTimeout(path, 5*time.Second)
 	if err != nil {
