@@ -82,10 +82,13 @@ use,
 prompting. `-goal` never executes the plan or edits source files, and it refuses
 to replace a locked plan, a non-empty draft, or an unrecognized plan file.
 
-Golem planning mode still compiles plan schema `0.3.0` because it does not author
-design decisions. Externally supplied plans may use schema `0.4.0` for AgentFlow's
-optional `design_decisions` and per-step `design_decision_ids` fields. Plans that
-omit `requirements` remain valid for existing `-plan` users and do not gain
+Golem planning mode compiles plan schema `1.0.0`, and task mode requires a plan
+whose `schema_version` major is 1. A plan written for AgentFlow 0.x (`0.3.0` or
+`0.4.0`) is refused before any AgentFlow call; see
+[Upgrading from AgentFlow 0.x](#upgrading-from-agentflow-0x). Externally
+supplied plans may use AgentFlow's optional `design_decisions` and per-step
+`design_decision_ids` fields. Plans that omit
+`requirements` remain valid for existing `-plan` users and do not gain
 criterion coverage. A review-backed criterion may declare `spec_quality` or
 `deep`; Golem authors that floor into the lock, while AgentFlow remains
 responsible for later review evidence and proof projection.
@@ -100,6 +103,11 @@ it), and keeps one bounded repair submission after a rejected first plan.
 Re-run the spike if the AgentFlow validator contract tightens.
 
 ## Enabling task mode
+
+`-goal`, `-plan`, `-agentflow-status` and `-agentflow-resume` require AgentFlow
+1.x: `agentflow --version` must report `1.y.z`. An older or newer AgentFlow is
+refused before any mutation, and a failed run does not ask it for recovery
+advice.
 
 - `-plan <plan.json>` — required; the path to the plan document to lock and
   execute. Passing it turns on task mode.
@@ -173,7 +181,9 @@ Human status shows the authoritative `next-action` state and reason, current
 step/gate, attempt owner and lease, typed gate statuses, diagnostics, and the
 serial resume disposition. Any suggested command is labeled display-only and
 is never executed. JSON mode relays AgentFlow's exact `next-action --json`
-bytes. Both forms use actor `golem` and make only that read-only AgentFlow call.
+bytes. Both forms use actor `golem`. Status first runs `agentflow --version` and
+refuses an AgentFlow outside 1.x; otherwise it makes only the read-only
+`next-action` call.
 Before returning exit `0` or `2`, status validates the typed projection's
 contract fields, actor, attempt owner, lease, and recovery permissions. A
 foreign, expired, malformed, or otherwise unsafe projection is displayed as
@@ -185,9 +195,11 @@ When the state is `complete`, human status reads the proof pack only after
 for `passed`, `warning`, `failed`, `not_run`, `skipped`, and `not_applicable`
 checks. A missing or malformed summary is an unsafe exit `3`. A merely present
 proof file is never reported as verified. JSON output remains byte-exact but
-uses the same proof-consistency exit decision. If `next-action` cannot be read,
-human mode reports the sanitized failure, JSON mode emits no bytes, and status
-exits `3`.
+uses the same proof-consistency exit decision. If `--version` or `next-action`
+cannot be read, human mode reports the sanitized failure, JSON mode emits no
+bytes, and status exits `3`. In JSON mode a rejected version, like an unset
+`-agentflow-env` name, is also printed as one `golem:` line on stderr; any other
+launch failure stays silent.
 
 Status exit codes are stable for scripts:
 
@@ -340,6 +352,34 @@ is untouched.
 
 Planning mode names the reason too:
 `golem: the planner did not submit a plan: agent run stopped: step_cap_reached`.
+
+## Upgrading from AgentFlow 0.x
+
+Golem drives AgentFlow 1.x only. AgentFlow 1.0 moved its plan, execution
+contract, ledgers, drift report and proof pack to schema `1.0.0` and gives 0.x
+working state no upgrade path, so Golem does not migrate it either:
+
+1. Finish the run with AgentFlow 0.x, or run `agentflow build-proof` with it
+   and keep the proof bundle.
+2. Move the workspace's `.agent/` directory aside. Re-initializing only the
+   execution contract is not enough: AgentFlow keeps the old ledger rows and
+   rejects them when it reads them.
+3. Install AgentFlow 1.x, then re-plan with `-goal`, or migrate an external
+   plan to `schema_version` `1.0.0` and review it again before `-plan`.
+
+What Golem does with 0.x state:
+
+- `-plan`, `-agentflow-resume` and `-goal` refuse a workspace when
+  `.agent/plan.lock.json`, `.agent/execution.contract.json`, or any row of the
+  four execution ledgers has a schema major other than 1. The refusal names the
+  file (and line) and makes no AgentFlow call. `-goal` keeps refusing an
+  existing locked plan or non-empty draft first, with its own message.
+- A plan file whose `schema_version` major is not 1 is refused before any
+  AgentFlow call.
+- `-agentflow-status` stays read-only and exits 3. AgentFlow 1.x reports a
+  workspace whose plan lock is 0.x as `state_invalid`, with its own upgrade
+  diagnostic. A partial tree can show a setup state instead, such as
+  `execution_uninitialized` when the execution contract is missing.
 
 ## Workflow routing in task mode
 

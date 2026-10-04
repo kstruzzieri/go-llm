@@ -73,7 +73,7 @@ func (c *Client) rootArgs(extra ...string) []string {
 	return append([]string{"--root", c.root}, extra...)
 }
 
-// --- AgentFlow 0.4.0 payload structs ---
+// --- AgentFlow payload structs (1.0; unchanged since 0.4.0) ---
 
 type claimResult struct {
 	AttemptID string `json:"attempt_id"`

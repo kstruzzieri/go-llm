@@ -22,7 +22,8 @@ type VersionError struct{ msg string }
 func (e *VersionError) Error() string { return e.msg }
 
 // CheckVersion runs only `agentflow --version` and the version gate. Status
-// calls it alone to stay read-only and cheap; Probe calls it first.
+// calls it instead of Probe, then reads next-action, to stay read-only and
+// cheap; Probe calls it first.
 func (c *Client) CheckVersion(ctx context.Context) error {
 	vout, _, exit, err := c.r.Run(ctx, []string{"--version"}, nil)
 	if err != nil || exit != 0 {
