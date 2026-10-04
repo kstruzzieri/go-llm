@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -698,4 +699,107 @@ func TestLoadGitContextWithoutAnyFilterDrivers(t *testing.T) {
 	if err != nil || snap.Absence != gitContextPresent || snap.State.Branch != "main" {
 		t.Fatalf("no filter drivers must be a plain success: err=%v snapshot=%+v", err, snap.State)
 	}
+}
+
+// TestBuildHostGitEnv pins the exact host-git environment (#623). The parent
+// holds every name the policy forwards plus everything it must not: a canary,
+// a provider key, repository-location overrides, config injection, discovery
+// overrides, locale, credential and network helpers, and lower-case variants.
+// The expected lists are spelled out here, not derived from production.
+func TestBuildHostGitEnv(t *testing.T) {
+	parent := map[string]string{}
+	for _, name := range []string{
+		"PATH", "HOME", "USER", "TMPDIR", "LANG", "XDG_CONFIG_HOME",
+		"GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_NOSYSTEM",
+		"SYSTEMROOT", "TEMP", "TMP", "PATHEXT", "USERPROFILE", "COMSPEC",
+		"LOCALAPPDATA", "APPDATA", "HOMEDRIVE", "HOMEPATH",
+	} {
+		parent[name] = "v:" + name
+	}
+	for _, name := range []string{
+		"GO_LLM_623_CANARY", "OPENAI_API_KEY",
+		"GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR",
+		"GIT_NAMESPACE", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_PREFIX",
+		"GIT_CONFIG", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0",
+		"GIT_CEILING_DIRECTORIES", "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+		"LC_ALL", "LC_CTYPE", "GIT_NO_LAZY_FETCH", "GIT_TERMINAL_PROMPT", "PWD",
+		"SSH_AUTH_SOCK", "HTTPS_PROXY", "GIT_LFS_SKIP_SMUDGE", "GIT_ASKPASS", "GIT_EXEC_PATH", "SUDO_UID",
+		"home", "path", "git_dir", "xdg_config_home",
+	} {
+		parent[name] = "sk-canary-623"
+	}
+	lookup := func(name string) (string, bool) {
+		v, ok := parent[name]
+		return v, ok
+	}
+	host := []string{"GIT_TERMINAL_PROMPT=0"}
+	capture := []string{"GIT_TERMINAL_PROMPT=0", "LC_ALL=C", "GIT_NO_LAZY_FETCH=1"}
+	for _, tc := range []struct {
+		name, goos string
+		owned      []string
+		want       []string
+	}{
+		{name: "linux host", goos: "linux", owned: host, want: []string{
+			"GIT_CONFIG_GLOBAL=v:GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM=v:GIT_CONFIG_NOSYSTEM",
+			"GIT_CONFIG_SYSTEM=v:GIT_CONFIG_SYSTEM", "GIT_TERMINAL_PROMPT=0", "HOME=v:HOME",
+			"LANG=v:LANG", "PATH=v:PATH", "TMPDIR=v:TMPDIR", "USER=v:USER",
+			"XDG_CONFIG_HOME=v:XDG_CONFIG_HOME",
+		}},
+		{name: "linux capture", goos: "linux", owned: capture, want: []string{
+			"GIT_CONFIG_GLOBAL=v:GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM=v:GIT_CONFIG_NOSYSTEM",
+			"GIT_CONFIG_SYSTEM=v:GIT_CONFIG_SYSTEM", "GIT_NO_LAZY_FETCH=1", "GIT_TERMINAL_PROMPT=0",
+			"HOME=v:HOME", "LANG=v:LANG", "LC_ALL=C", "PATH=v:PATH", "TMPDIR=v:TMPDIR",
+			"USER=v:USER", "XDG_CONFIG_HOME=v:XDG_CONFIG_HOME",
+		}},
+		{name: "windows host", goos: "windows", owned: host, want: []string{
+			"APPDATA=v:APPDATA", "COMSPEC=v:COMSPEC",
+			"GIT_CONFIG_GLOBAL=v:GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM=v:GIT_CONFIG_NOSYSTEM",
+			"GIT_CONFIG_SYSTEM=v:GIT_CONFIG_SYSTEM", "GIT_TERMINAL_PROMPT=0", "HOME=v:HOME",
+			"HOMEDRIVE=v:HOMEDRIVE", "HOMEPATH=v:HOMEPATH", "LANG=v:LANG",
+			"LOCALAPPDATA=v:LOCALAPPDATA", "PATH=v:PATH", "PATHEXT=v:PATHEXT",
+			"SYSTEMROOT=v:SYSTEMROOT", "TEMP=v:TEMP", "TMP=v:TMP", "TMPDIR=v:TMPDIR",
+			"USER=v:USER", "USERPROFILE=v:USERPROFILE", "XDG_CONFIG_HOME=v:XDG_CONFIG_HOME",
+		}},
+		{name: "windows capture", goos: "windows", owned: capture, want: []string{
+			"APPDATA=v:APPDATA", "COMSPEC=v:COMSPEC",
+			"GIT_CONFIG_GLOBAL=v:GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM=v:GIT_CONFIG_NOSYSTEM",
+			"GIT_CONFIG_SYSTEM=v:GIT_CONFIG_SYSTEM", "GIT_NO_LAZY_FETCH=1", "GIT_TERMINAL_PROMPT=0",
+			"HOME=v:HOME", "HOMEDRIVE=v:HOMEDRIVE", "HOMEPATH=v:HOMEPATH", "LANG=v:LANG",
+			"LC_ALL=C", "LOCALAPPDATA=v:LOCALAPPDATA", "PATH=v:PATH", "PATHEXT=v:PATHEXT",
+			"SYSTEMROOT=v:SYSTEMROOT", "TEMP=v:TEMP", "TMP=v:TMP", "TMPDIR=v:TMPDIR",
+			"USER=v:USER", "USERPROFILE=v:USERPROFILE", "XDG_CONFIG_HOME=v:XDG_CONFIG_HOME",
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := buildHostGitEnv(tc.goos, lookup, tc.owned...); !slices.Equal(got, tc.want) {
+				t.Fatalf("buildHostGitEnv names = %v\nwant %v", envNames(got), envNames(tc.want))
+			}
+		})
+	}
+}
+
+func TestBuildHostGitEnvShape(t *testing.T) {
+	none := func(string) (string, bool) { return "", false }
+	if got := buildHostGitEnv("linux", none); got == nil || len(got) != 0 {
+		t.Fatalf("empty parent and no owned entries = %#v, want a non-nil empty slice", got)
+	}
+	emptyHome := func(name string) (string, bool) {
+		if name == "HOME" {
+			return "", true
+		}
+		return "", false
+	}
+	if got, want := buildHostGitEnv("linux", emptyHome, "GIT_TERMINAL_PROMPT=0"), []string{"GIT_TERMINAL_PROMPT=0", "HOME="}; !slices.Equal(got, want) {
+		t.Fatalf("set-but-empty HOME = %q, want %q", got, want)
+	}
+}
+
+// envNames lists the variable names in env, so a failure never prints a value.
+func envNames(env []string) []string {
+	names := make([]string, 0, len(env))
+	for _, kv := range env {
+		name, _, _ := strings.Cut(kv, "=")
+		names = append(names, name)
+	}
+	return names
 }

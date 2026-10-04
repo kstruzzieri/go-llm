@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -1046,6 +1047,49 @@ func runParallelGit(ctx context.Context, dir string, args ...string) ([]byte, er
 		return nil, fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
 	}
 	return out, nil
+}
+
+// hostGitBaselineEnv names the parent variables Golem's own git calls receive
+// when they are set (#623); nothing else is inherited. PATH, HOME, USER,
+// TMPDIR and LANG match Agentflow's baseline (USER serves hooks; git's
+// identity fallback does not need it). XDG_CONFIG_HOME and
+// GIT_CONFIG_GLOBAL/SYSTEM/NOSYSTEM select the user's own git configuration,
+// which carries safe.directory and core.excludesFile: dropping them would turn
+// a dotfiles setup into dubious-ownership failures or change which paths count
+// as ignored. Repository-location overrides, config injection and discovery
+// overrides are absent by construction. An inherited GIT_INDEX_FILE, which git
+// exports to hooks and so reaches Golem when it runs inside one, would
+// otherwise point index-flag validation at another index while the toplevel
+// identity checks still pass.
+var hostGitBaselineEnv = []string{"PATH", "HOME", "USER", "TMPDIR", "LANG",
+	"XDG_CONFIG_HOME", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_NOSYSTEM"}
+
+// hostGitWindowsEnv extends the baseline on Windows: Agentflow's Windows
+// extras plus HOMEDRIVE and HOMEPATH, which Git for Windows tries before
+// USERPROFILE when HOME is unset. Built, not exercised in CI.
+var hostGitWindowsEnv = []string{"SYSTEMROOT", "TEMP", "TMP", "PATHEXT", "USERPROFILE",
+	"COMSPEC", "LOCALAPPDATA", "APPDATA", "HOMEDRIVE", "HOMEPATH"}
+
+// buildHostGitEnv returns the complete environment of one host git launch on
+// goos: each baseline name lookup reports as set (an empty value is kept),
+// then the owned NAME=VALUE entries, sorted. It is never nil. Owned names are
+// never baseline names, so no name repeats, and the fixed upper-case names
+// need no case folding.
+func buildHostGitEnv(goos string, lookup func(string) (string, bool), owned ...string) []string {
+	names := hostGitBaselineEnv
+	if goos == "windows" {
+		names = append(slices.Clone(hostGitBaselineEnv), hostGitWindowsEnv...)
+	}
+	env := make([]string, 0, len(names)+len(owned))
+	for _, name := range names {
+		if value, ok := lookup(name); ok {
+			env = append(env, name+"="+value)
+		}
+	}
+	env = append(env, owned...)
+	// Names hold only A-Z and '_', both above '=', so entry order is name order.
+	slices.Sort(env)
+	return env
 }
 
 // hostGitBlockedKeys are the inherited repository-location overrides every
