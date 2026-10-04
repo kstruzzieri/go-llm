@@ -36,7 +36,8 @@ type Runner interface {
 // binary, or `python3 -P -m agentflow` with PYTHONPATH pointed at a checkout (for
 // environments where the console script is not installed). argv is always built
 // explicitly; no shell string is ever parsed. The child environment is built
-// from scratch for every launch (see buildChildEnv).
+// from scratch for every launch (see buildChildEnv), and Run adds the
+// runner-owned PWD (see workingDirEnv).
 type ExecRunner struct {
 	bin     string
 	prefix  []string // e.g. {"-P","-m","agentflow"} for src mode
