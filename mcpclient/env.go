@@ -3,6 +3,7 @@ package mcpclient
 import (
 	"errors"
 	"fmt"
+	"io"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -14,10 +15,11 @@ var envNameRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 // EnvVar is one host-approved environment addition for a stdio server. Build
 // it with InheritEnv or SetEnv; the zero value is invalid. Values are never
-// stored, rendered or fingerprinted.
+// persisted, rendered or fingerprinted; they are held in memory only, behind a
+// pointer so reflection-based formatting prints an address, not the value.
 type EnvVar struct {
 	name    string
-	value   string
+	value   *string // non-nil exactly when set
 	inherit bool
 	set     bool
 }
@@ -28,7 +30,7 @@ func InheritEnv(name string) EnvVar { return EnvVar{name: name, inherit: true} }
 
 // SetEnv supplies value for name. name must not be a baseline variable, so
 // the PATH used to resolve the launcher is always the child's PATH.
-func SetEnv(name, value string) EnvVar { return EnvVar{name: name, value: value, set: true} }
+func SetEnv(name, value string) EnvVar { return EnvVar{name: name, value: &value, set: true} }
 
 func (v EnvVar) source() string {
 	if v.inherit {
@@ -37,10 +39,21 @@ func (v EnvVar) source() string {
 	return "set"
 }
 
-// Format renders only the source and name, for every verb, so a value never
-// reaches logs through fmt.
+// Format renders only source:name whenever fmt calls it (any verb on a value
+// or pointer, including through exported fields, slices and maps), so a value
+// never reaches logs that way. A name that is not a valid variable name prints
+// as <invalid>, and the zero value as invalid, so a mistaken name is never
+// echoed. fmt cannot call Format through an unexported field or under %p;
+// those paths print the raw fields, where the value is only a pointer.
 func (v EnvVar) Format(f fmt.State, _ rune) {
-	_, _ = fmt.Fprintf(f, "%s:%s", v.source(), v.name)
+	switch {
+	case !v.inherit && !v.set:
+		_, _ = io.WriteString(f, "invalid")
+	case !envNameRE.MatchString(v.name):
+		_, _ = fmt.Fprintf(f, "%s:<invalid>", v.source())
+	default:
+		_, _ = fmt.Fprintf(f, "%s:%s", v.source(), v.name)
+	}
 }
 
 // envPolicy is a platform's baseline environment and name-matching rule.
@@ -91,6 +104,8 @@ func validateEnvAdditions(vars []EnvVar, p envPolicy) error {
 			return fmt.Errorf("mcpclient: environment entry %d repeats a name", i+1)
 		case v.set && baseline[p.key(v.name)]:
 			return fmt.Errorf("mcpclient: environment entry %d sets a baseline variable", i+1)
+		case v.set && strings.IndexByte(*v.value, 0) >= 0:
+			return fmt.Errorf("mcpclient: environment entry %d value contains NUL", i+1)
 		}
 		seen[p.key(v.name)] = true
 	}
@@ -110,7 +125,7 @@ func buildServerEnv(p envPolicy, vars []EnvVar, lookup func(string) (string, boo
 	}
 	for _, v := range vars {
 		if v.set {
-			entries[p.key(v.name)] = v.name + "=" + v.value
+			entries[p.key(v.name)] = v.name + "=" + *v.value
 			continue
 		}
 		value, ok := lookup(v.name)

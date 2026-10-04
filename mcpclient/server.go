@@ -106,8 +106,12 @@ func (s Server) WithDir(dir string) Server {
 	return s
 }
 
-// Format renders only the transport kind and alias, for every verb, so argv,
-// endpoints and explicit environment values never reach logs through fmt.
+// Format renders only the transport kind and alias whenever fmt calls it (any
+// verb on a value or pointer, including through exported fields, slices and
+// maps), so argv, endpoints and explicit environment values never reach logs
+// that way. fmt cannot call Format through an unexported field or under %p;
+// those paths print the raw fields, where environment values are only
+// pointers but argv and endpoint text are not redacted.
 func (s Server) Format(f fmt.State, _ rune) {
 	kind := "stdio"
 	if s.kind == transportHTTP {

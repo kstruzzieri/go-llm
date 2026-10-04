@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -24,6 +25,64 @@ func TestEnvVarAndServerFormatRedact(t *testing.T) {
 	}
 	if got := fmt.Sprint(stdio); got != "stdio:fs" {
 		t.Fatalf("fmt.Sprint(stdio) = %q, want stdio:fs", got)
+	}
+	if got := fmt.Sprint(http); got != "http:api" {
+		t.Fatalf("fmt.Sprint(http) = %q, want http:api", got)
+	}
+}
+
+// holder keeps its fields unexported, where fmt cannot call Format and
+// reflects the raw fields instead.
+type holder struct {
+	v EnvVar
+	s Server
+}
+
+func TestEnvValueNotRenderedThroughUnexportedFields(t *testing.T) {
+	h := holder{SetEnv("T", "canary-env"), StdioServer("fs", []string{"x"}).WithEnv(SetEnv("T", "canary-env"))}
+	if got := fmt.Sprintf("%v|%+v|%#v", h, h, h); strings.Contains(got, "canary-env") {
+		t.Fatalf("holder formatting leaked an environment value: %q", got)
+	}
+}
+
+func TestEnvVarFormatNeverPrintsInvalidNames(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		v    EnvVar
+		want string
+	}{
+		{"valid set", SetEnv("TOKEN", "x"), "set:TOKEN"},
+		{"valid inherit", InheritEnv("TOKEN"), "inherit:TOKEN"},
+		{"set name carrying a secret", SetEnv("API_KEY=sk-canary", ""), "set:<invalid>"},
+		{"inherit leading digit", InheritEnv("1BAD"), "inherit:<invalid>"},
+		{"inherit empty", InheritEnv(""), "inherit:<invalid>"},
+		{"zero value", EnvVar{}, "invalid"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := fmt.Sprintf("%v", tt.v); got != tt.want {
+				t.Fatalf("Sprintf(%%v) = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestHostEnvPolicy(t *testing.T) {
+	want := "unix-v1"
+	if runtime.GOOS == "windows" {
+		want = "windows-v1"
+	}
+	if got := hostEnvPolicy().id; got != want {
+		t.Fatalf("hostEnvPolicy().id = %q, want %q on %s", got, want, runtime.GOOS)
+	}
+}
+
+func TestEnvPolicyIDsAndIdentity(t *testing.T) {
+	if unixEnvPolicy.id != "unix-v1" || windowsEnvPolicy.id != "windows-v1" {
+		t.Fatalf("policy ids = (%q, %q), want (unix-v1, windows-v1)", unixEnvPolicy.id, windowsEnvPolicy.id)
+	}
+	got := envIdentity([]EnvVar{SetEnv("B", "x"), InheritEnv("A")})
+	if want := []string{"inherit:A", "set:B"}; !slices.Equal(got, want) {
+		t.Fatalf("envIdentity = %q, want %q", got, want)
 	}
 }
 
@@ -59,6 +118,8 @@ func TestValidateEnvAdditions(t *testing.T) {
 		{"set baseline", unixEnvPolicy, []EnvVar{SetEnv("PATH", "/x")}, "mcpclient: environment entry 1 sets a baseline variable"},
 		{"set baseline lowercase on unix", unixEnvPolicy, []EnvVar{SetEnv("path", "/x")}, ""},
 		{"set baseline folded on windows", windowsEnvPolicy, []EnvVar{SetEnv("Path", "/x")}, "mcpclient: environment entry 1 sets a baseline variable"},
+		{"NUL in set value", unixEnvPolicy, []EnvVar{InheritEnv("A"), SetEnv("B", "x\x00y")}, "mcpclient: environment entry 2 value contains NUL"},
+		{"newline in set value", unixEnvPolicy, []EnvVar{SetEnv("B", "x\ny")}, ""},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			err := validateEnvAdditions(tt.vars, tt.policy)
@@ -137,5 +198,27 @@ func TestConnectRejectsInvalidLaunchPolicy(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestConnectAcceptsValidLaunchPolicy(t *testing.T) {
+	// The test-only transport is never resolved or launched, so InheritEnv("A")
+	// need not be set; only validation is under test. The dial failure shows
+	// the server got past validation and preparation.
+	s := Server{Alias: "fs", tr: &failingTransport{err: errors.New("unreachable")}}.
+		WithEnv(InheritEnv("A"), SetEnv("B", "x")).WithDir(t.TempDir())
+	m, warns, err := Connect(context.Background(), Implementation{Name: "test"}, []Server{s}, ConnectOptions{Pins: testPins(t)})
+	if err != nil {
+		t.Fatalf("Connect error = %v, want nil", err)
+	}
+	if m != nil {
+		t.Cleanup(func() { _ = m.Close() })
+	}
+	if len(warns) != 1 {
+		t.Fatalf("warnings = %v, want one", warns)
+	}
+	var failure *AdmissionError
+	if !errors.As(warns[0], &failure) || failure.Reason != "unavailable" {
+		t.Fatalf("warning = %v, want per-alias unavailable", warns[0])
 	}
 }
