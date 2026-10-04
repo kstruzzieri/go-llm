@@ -13,10 +13,13 @@ import (
 	"strings"
 
 	"github.com/kstruzzieri/go-llm/agent"
+	"github.com/kstruzzieri/go-llm/agent/interceptor"
 )
 
 // Search greps the workspace tree with RE2. It skips ignore-set directories,
-// binary files (NUL sniff), and symlink entries (never read or descended).
+// credential files (interceptor.IsCredentialPath, the set the default
+// read_file invariant refuses, #627), binary files (NUL sniff), and symlink
+// entries (never read or descended).
 type Search struct {
 	ws *Workspace
 }
@@ -33,7 +36,7 @@ type searchArgs struct {
 func (*Search) Spec() agent.ToolSpec {
 	return agent.ToolSpec{
 		Name:        "search",
-		Description: "Search file contents under the workspace root. Literal substring by default; set regex:true for an RE2 pattern. Returns path:line: text. Skips .git, vendor, node_modules, .superpowers, binary files, and symlinks.",
+		Description: "Search file contents under the workspace root. Literal substring by default; set regex:true for an RE2 pattern. Returns path:line: text. Skips .git, vendor, node_modules, .superpowers, binary files, symlinks, and credential files (.env and .env.* other than .env.example, .env.sample, .env.template and .env.dist; .netrc, _netrc, .npmrc, .pypirc, .git-credentials; anything under .ssh, .gnupg, .aws or .kube).",
 		Parameters: json.RawMessage(`{
   "type":"object",
   "properties":{
@@ -86,6 +89,9 @@ func (t *Search) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolRes
 		}
 		if d.Type()&fs.ModeSymlink != 0 {
 			return nil // never read a symlink
+		}
+		if interceptor.IsCredentialPath(rel) {
+			return nil // never read what the read_file invariant refuses (#627)
 		}
 		fileTruncated, err := t.searchFile(rel, d, re, &out, &matches)
 		if err != nil {
