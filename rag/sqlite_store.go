@@ -83,6 +83,10 @@ type replaceSourceOptions struct {
 
 // NewSQLiteStore creates a vector store backed by SQLite.
 // Use ":memory:" for dbPath to create an in-memory database (for testing).
+// dbPath may be a file: URI. A file-backed store is switched to WAL and the
+// open fails if the connection cannot use it (immutable=1, nolock=1, or
+// mode=ro on a rollback-journal file); use OpenSQLiteStoreReadOnly for
+// read-only access.
 func NewSQLiteStore(dbPath string) (*SQLiteStore, error) {
 	dsn, err := sqliteReadWriteDSN(dbPath)
 	if err != nil {
