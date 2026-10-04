@@ -74,7 +74,7 @@ func TestDefaultInvariantsMatchToolSchemas(t *testing.T) {
 	exempt := map[string]string{
 		"glob":           "directory listing; the pattern argument bypasses a path check",
 		"list":           "directory listing; a name check would be bypassed by listing the parent",
-		"search":         "no path argument; content exposure is #437's",
+		"search":         "no path argument; its walk skips interceptor.IsCredentialPath files (#627)",
 		"command_status": "handle argument only",
 		"command_tail":   "handle argument only",
 		"stop_command":   "handle argument only",
@@ -98,26 +98,36 @@ func TestDefaultInvariantsMatchToolSchemas(t *testing.T) {
 }
 
 // protectedByOracle is an independent second opinion for the parity test on
-// the decoder axis: split the path the way the host would open it and look
-// for a protected component, or the exact .env basename for reads. It
-// shares the host normalization with the guard on purpose; normalization
-// itself is pinned by literal expectations in the interceptor package.
+// the decoder axis. It splits the path the way the host would open it and
+// applies its own literal copy of the rules: protected components for writes;
+// for reads, credential components, credential basenames, .env.* other than
+// the templates, and a config under .git (#627). It shares only Clean and
+// lower-casing with the guard; alias folding is pinned by literal tests in the
+// interceptor package, and these fixtures are ASCII.
 func protectedByOracle(p string, forRead bool) bool {
 	clean := strings.ToLower(filepath.ToSlash(filepath.Clean(p)))
 	parts := strings.Split(clean, "/")
-	comps := []string{".git", ".ssh", ".gnupg", ".aws", ".kube"}
-	if forRead {
-		comps = comps[1:]
-		if parts[len(parts)-1] == ".env" {
-			return true
+	base := parts[len(parts)-1]
+	if !forRead {
+		for _, c := range parts {
+			if slices.Contains([]string{".git", ".ssh", ".gnupg", ".aws", ".kube"}, c) {
+				return true
+			}
 		}
+		return false
 	}
 	for _, c := range parts {
-		if slices.Contains(comps, c) {
+		if slices.Contains([]string{".ssh", ".gnupg", ".aws", ".kube"}, c) {
 			return true
 		}
 	}
-	return false
+	if slices.Contains([]string{".env", ".netrc", "_netrc", ".npmrc", ".pypirc", ".git-credentials"}, base) {
+		return true
+	}
+	if strings.HasPrefix(base, ".env.") && !slices.Contains([]string{".env.example", ".env.sample", ".env.template", ".env.dist"}, base) {
+		return true
+	}
+	return base == "config" && slices.Contains(parts[:len(parts)-1], ".git")
 }
 
 func inspectDefault(t *testing.T, tool, args string) []agent.Finding {
@@ -176,6 +186,9 @@ func TestGuardDecodesPathsLikeTheTools(t *testing.T) {
 		`{"path":"foo/../.aws/credentials"}`,
 		`{"path":"./.env"}`,
 		`{"path":".env.local"}`,
+		`{"path":".netrc"}`,
+		`{"path":".env.example"}`,
+		`{"path":"sub/.git/config"}`,
 		`{"path":"README.md"}`,
 		`{"path":""}`,
 		`{"path":null}`,
