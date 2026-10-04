@@ -55,7 +55,7 @@ type afClient interface {
 type runStepFunc func(ctx context.Context, step agentflow.Step, attempt, goal string) error
 
 // runStoppedError is an agent run that returned without error but stopped
-// before completing: agent.Run reports loop caps only through
+// before completing: agent.Orchestrator.Run reports loop caps only through
 // Result.StopReason (#611).
 type runStoppedError struct{ reason agent.StopReason }
 

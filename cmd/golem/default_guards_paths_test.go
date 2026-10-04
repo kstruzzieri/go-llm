@@ -230,10 +230,7 @@ func TestDefaultGuardsPath_DispatchChild(t *testing.T) {
 func TestDefaultGuardsPath_TaskStepStoppedByDenialsIsBlocked(t *testing.T) {
 	root := t.TempDir()
 	writeEnvSentinel(t, root)
-	plan := &agentflow.Plan{AllowedFiles: []string{"out.txt"}, Steps: []agentflow.Step{{
-		ID: "P1", Files: []string{"out.txt"},
-		Validation: []string{"go test"}, Gates: []agentflow.Gate{{Kind: "command", Run: []string{"go", "test"}}},
-	}}}
+	plan := stopTestPlan()
 	caller := &recordingCaller{next: &scriptCaller{responses: []agent.ModelResult{
 		toolStep("r1", "read_file", `{"path":".env"}`),
 		toolStep("r2", "read_file", `{"path":".env"}`),
