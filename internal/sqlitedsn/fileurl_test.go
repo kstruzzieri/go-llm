@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestWindowsURIPath(t *testing.T) {
@@ -101,13 +102,17 @@ func TestFileURLOnWindows(t *testing.T) {
 		}
 	}
 	path := filepath.Join(dir, "local host.db")
-	db, err := sql.Open("sqlite", "file://localhost/"+filepath.ToSlash(path))
+	dsn, err := WithBusyTimeout("file://localhost/"+filepath.ToSlash(path), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = db.Close() }()
 	if _, err := db.Exec("CREATE TABLE t (id INTEGER)"); err != nil {
-		t.Fatalf("open file://localhost/ URI: %v", err)
+		t.Fatalf("open file://localhost/ URI via %q: %v", dsn, err)
 	}
 	u, err := FileURL(path)
 	if err != nil {

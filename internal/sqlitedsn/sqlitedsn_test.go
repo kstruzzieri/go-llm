@@ -77,6 +77,8 @@ func TestWithBusyTimeoutResolvesRelativePath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Open from another directory so only an absolute DSN still reaches dir.
+	t.Chdir(t.TempDir())
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		t.Fatal(err)
