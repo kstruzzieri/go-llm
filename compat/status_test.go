@@ -151,7 +151,7 @@ func TestStatusHandler_BoundedErrorAndStableWarmth(t *testing.T) {
 		},
 	}))
 	defer func() { _ = router.Close() }()
-	srv := New(router, modelReg, provReg)
+	srv := New(router, modelReg, provReg, allowHTTPTestHost)
 
 	wantProviders := `[{"name":"alpha","healthy":true,"capabilities":["chat"]},` +
 		`{"name":"beta","healthy":true,"capabilities":["chat"]},` +
@@ -214,7 +214,7 @@ func TestStatusHandler_LogsTruncatedHealthErrors(t *testing.T) {
 	}
 	router := provider.NewRouter(modelReg, provReg)
 	defer func() { _ = router.Close() }()
-	srv := New(router, modelReg, provReg)
+	srv := New(router, modelReg, provReg, allowHTTPTestHost)
 
 	srv.buildHandler().ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/v1/status", nil))
 	log.SetOutput(orig)
