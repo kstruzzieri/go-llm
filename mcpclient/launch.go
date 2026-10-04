@@ -96,7 +96,13 @@ func prepareStdio(p preparedServer, s Server, le launchEnv) (preparedServer, err
 	if info, statErr := os.Stat(dir); statErr != nil || !info.IsDir() {
 		return invalid(errors.New("mcpclient: working directory is not a directory"))
 	}
-	launcher, err := resolveLauncher(argv[0], dir, le.lookPath)
+	// Validation rejects an empty command; an unvalidated one reaches
+	// resolveLauncher's empty-executable refusal instead of panicking here.
+	var argv0 string
+	if len(argv) > 0 {
+		argv0 = argv[0]
+	}
+	launcher, err := resolveLauncher(argv0, dir, le.lookPath)
 	if err != nil {
 		return invalid(err)
 	}

@@ -119,6 +119,9 @@ func TestPrepareStdioFailures(t *testing.T) {
 		s      Server
 		reason string
 	}{
+		// Validation rejects an empty command first; prepare must still
+		// refuse it rather than panic in a Connect worker.
+		"empty command":      {StdioServer("fs", nil).WithDir(dir), "launch_invalid"},
 		"missing dir":        {StdioServer("fs", []string{"/bin/sh"}).WithDir(filepath.Join(dir, "missing")), "launch_invalid"},
 		"dir is a file":      {StdioServer("fs", []string{"/bin/sh"}).WithDir(file), "launch_invalid"},
 		"missing executable": {StdioServer("fs", []string{filepath.Join(dir, "nope")}).WithDir(dir), "launch_invalid"},
