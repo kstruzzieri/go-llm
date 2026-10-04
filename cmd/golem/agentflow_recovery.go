@@ -84,7 +84,12 @@ func runAgentflowStatus(ctx context.Context, out io.Writer, root, source string,
 
 func runAgentflowStatusWithRunner(ctx context.Context, out io.Writer, root string, jsonOutput bool, runner agentflow.Runner) error {
 	client := agentflow.NewOwnedClient(runner, root, "golem")
-	state, err := client.NextAction(ctx)
+	// #612 R6: refuse an unsupported AgentFlow before relaying anything it says.
+	var state agentflow.NextActionState
+	err := client.CheckVersion(ctx)
+	if err == nil {
+		state, err = client.NextAction(ctx)
+	}
 	if err != nil {
 		if state.RawJSON != nil {
 			if jsonOutput {
@@ -98,15 +103,25 @@ func runAgentflowStatusWithRunner(ctx context.Context, out io.Writer, root strin
 			renderAgentflowStatus(out, state, nil, disposition)
 			return statusExit(3)
 		}
+		// CheckVersion wraps launch failures; an unset approved name keeps its
+		// own one-line text in both modes.
+		var unset *agentflow.EnvNotSetError
+		if errors.As(err, &unset) {
+			err = unset
+		}
 		if !jsonOutput {
 			_, _ = fmt.Fprintf(out, "agentflow status unavailable: %s\n", recoveryDisplayText(err.Error()))
 			return statusExit(3)
 		}
-		// JSON mode: only an unset approved name is reported (on stderr, by
-		// main); other runner errors may carry arbitrary text and stay silent.
-		var unset *agentflow.EnvNotSetError
-		if errors.As(err, &unset) {
+		// JSON mode: only Golem-owned text reaches stderr (printed by main): an
+		// unset approved name or a rejected version. Other runner errors may
+		// carry arbitrary text and stay silent.
+		var versionErr *agentflow.VersionError
+		switch {
+		case unset != nil:
 			return &agentflowStatusExit{code: 3, diagnostic: unset.Error()}
+		case errors.As(err, &versionErr):
+			return &agentflowStatusExit{code: 3, diagnostic: versionErr.Error()}
 		}
 		return statusExit(3)
 	}

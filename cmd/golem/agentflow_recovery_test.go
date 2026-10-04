@@ -18,17 +18,29 @@ import (
 
 type recoveryRunner struct {
 	payload []byte
+	version string // --version reply; "" means a supported "agentflow 1.0.0"
 	calls   [][]string
 }
 
+// failingRecoveryRunner reports a supported version, then fails every other
+// call with stderr, so the next-action failure path still sees that stderr.
 type failingRecoveryRunner struct{ stderr []byte }
 
-func (r *failingRecoveryRunner) Run(_ context.Context, _ []string, _ []byte) ([]byte, []byte, int, error) {
+func (r *failingRecoveryRunner) Run(_ context.Context, args []string, _ []byte) ([]byte, []byte, int, error) {
+	if len(args) > 0 && args[0] == "--version" {
+		return []byte("agentflow 1.0.0\n"), nil, 0, nil
+	}
 	return nil, append([]byte(nil), r.stderr...), 1, nil
 }
 
 func (r *recoveryRunner) Run(_ context.Context, args []string, _ []byte) ([]byte, []byte, int, error) {
 	r.calls = append(r.calls, append([]string(nil), args...))
+	if len(args) > 0 && args[0] == "--version" {
+		if r.version == "" {
+			return []byte("agentflow 1.0.0\n"), nil, 0, nil
+		}
+		return []byte(r.version), nil, 0, nil
+	}
 	return append([]byte(nil), r.payload...), nil, 0, nil
 }
 
@@ -89,13 +101,64 @@ func TestAgentflowStatus_HumanIsReadOnlyAndOwned(t *testing.T) {
 			t.Errorf("output missing %q:\n%s", want, out.String())
 		}
 	}
-	wantCalls := [][]string{{"next-action", "--root", root, "--json", "--agent", "golem"}}
+	wantCalls := [][]string{{"--version"}, {"next-action", "--root", root, "--json", "--agent", "golem"}}
 	if !reflect.DeepEqual(runner.calls, wantCalls) {
 		t.Fatalf("calls = %v, want %v", runner.calls, wantCalls)
 	}
 	after, err := os.ReadFile(statePath)
 	if err != nil || !bytes.Equal(after, before) {
 		t.Fatalf("proof state changed: %q err=%v", after, err)
+	}
+}
+
+// #612 R6/U6: status refuses an unsupported AgentFlow before next-action. The
+// rejection is Golem's own text, so JSON mode reports it on stderr.
+func TestAgentflowStatus_RejectsUnsupportedVersionBeforeNextAction(t *testing.T) {
+	for _, tt := range []struct{ version, want string }{
+		{"agentflow 0.4.0\n", "agentflow 0.4 is too old; need >= 1.0"},
+		{"agentflow 2.0.0\n", "agentflow 2.0 is newer than this Golem supports; need 1.x"},
+	} {
+		for _, jsonOutput := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s json=%t", strings.TrimSpace(tt.version), jsonOutput), func(t *testing.T) {
+				runner := &recoveryRunner{version: tt.version, payload: []byte(`{"state":"complete"}`)}
+				var out bytes.Buffer
+				err := runAgentflowStatusWithRunner(context.Background(), &out, t.TempDir(), jsonOutput, runner)
+				var exit *agentflowStatusExit
+				if !errors.As(err, &exit) || exit.ExitCode() != 3 {
+					t.Fatalf("err = %v, want exit 3", err)
+				}
+				if jsonOutput {
+					if out.Len() != 0 || exit.diagnostic != tt.want {
+						t.Fatalf("json stdout=%q diagnostic=%q, want empty / %q", out.String(), exit.diagnostic, tt.want)
+					}
+				} else if out.String() != "agentflow status unavailable: "+tt.want+"\n" || exit.diagnostic != "" {
+					t.Fatalf("human stdout=%q diagnostic=%q", out.String(), exit.diagnostic)
+				}
+				if !reflect.DeepEqual(runner.calls, [][]string{{"--version"}}) {
+					t.Fatalf("calls = %v, want only --version", runner.calls)
+				}
+			})
+		}
+	}
+}
+
+// versionLaunchFailRunner fails every launch with text that must never reach
+// JSON status output (#612 G17).
+type versionLaunchFailRunner struct{}
+
+func (versionLaunchFailRunner) Run(context.Context, []string, []byte) ([]byte, []byte, int, error) {
+	return nil, nil, 0, errors.New("exec /opt/RUNNER-SECRET-577/agentflow: permission denied")
+}
+
+func TestAgentflowStatus_JSONHidesVersionLaunchFailure(t *testing.T) {
+	var out bytes.Buffer
+	err := runAgentflowStatusWithRunner(context.Background(), &out, t.TempDir(), true, versionLaunchFailRunner{})
+	var exit *agentflowStatusExit
+	if !errors.As(err, &exit) || exit.ExitCode() != 3 {
+		t.Fatalf("err = %v, want exit 3", err)
+	}
+	if exit.diagnostic != "" || out.Len() != 0 {
+		t.Fatalf("diagnostic=%q stdout=%q, want silent exit 3", exit.diagnostic, out.String())
 	}
 }
 
@@ -420,6 +483,11 @@ func TestAgentflowRecoveryOutputEscapesTerminalControls(t *testing.T) {
 	}
 	if !strings.Contains(unavailable.String(), "agentflow status unavailable") {
 		t.Fatalf("status output = %q, want unavailable diagnostic", unavailable.String())
+	}
+	// The evil stderr must reach the output, escaped. Otherwise the absence
+	// checks above prove nothing (for example, if --version failed first).
+	if !strings.Contains(unavailable.String(), `proof: verified\x1b[2J`) {
+		t.Fatalf("status output = %q, want the escaped next-action stderr", unavailable.String())
 	}
 }
 

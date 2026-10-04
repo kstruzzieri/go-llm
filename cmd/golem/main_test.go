@@ -1202,7 +1202,7 @@ func writeFakeAgentflow(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "agentflow")
-	script := "#!/bin/sh\nprintf '%s' \"$GOLEM_AGENTFLOW_STATUS_PAYLOAD\"\n"
+	script := "#!/bin/sh\nif [ \"$1\" = --version ]; then printf 'agentflow 1.0.0\\n'; exit 0; fi\nprintf '%s' \"$GOLEM_AGENTFLOW_STATUS_PAYLOAD\"\n"
 	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
