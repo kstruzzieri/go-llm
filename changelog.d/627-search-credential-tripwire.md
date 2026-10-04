@@ -8,8 +8,8 @@ one credential set: `.env` and `.env.*` (except `.env.example`, `.env.sample`,
 directory named exactly `.git`); `read_file` refuses them where the invariants
 are installed. Path guards also normalize spellings that filesystems treat as
 the same name: APFS opens `.ssh` for `.ſsh` and `.ßh`, HFS+ ignores zero-width
-joiners and non-joiners, direction marks and the BOM, and Windows reads `.env`
-through `.env::$DATA`. A `dispatch` task scoped at or below `.git`, `.ssh`,
+joiners and non-joiners, bidirectional and deprecated format controls, and the
+BOM, and Windows reads `.env` through `.env::$DATA`. A `dispatch` task scoped at or below `.git`, `.ssh`,
 `.gnupg`, `.aws` or `.kube` is refused, because that child's guards would see
 paths below the directory without it.
 
@@ -33,4 +33,6 @@ paths below the directory without it.
 - `glob` and `list` still show these names. Shell commands, `retrieve`, MCP
   tools, verifier commands and `edit_file`'s pre-approval match errors can
   still reach the same bytes, as can a copy or hard link under another name.
-  This is a tripwire, not confinement.
+  Paths are judged relative to the workspace root, so a session rooted inside
+  one of these directories is not covered. This is a tripwire, not
+  confinement.

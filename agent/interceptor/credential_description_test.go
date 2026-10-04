@@ -38,8 +38,9 @@ func (nopCaller) Chat(context.Context, provider.ChatRequest, func(provider.ChatR
 }
 
 // TestDispatchDescriptionNamesProtectedScopes (#627): where scoped dispatch
-// exists, its description names every protected directory a scope may not
-// sit in, so the refusal set and the model-facing text cannot drift apart.
+// exists, its description names every directory in the refusal set
+// (protectedDirs, which also builds the write rule's pattern), so the two
+// cannot drift apart.
 func TestDispatchDescriptionNamesProtectedScopes(t *testing.T) {
 	readers, err := tools.NewFileTools(t.TempDir())
 	if err != nil {
@@ -54,8 +55,8 @@ func TestDispatchDescriptionNamesProtectedScopes(t *testing.T) {
 		t.Skip("scoped dispatch is not supported on this platform")
 	}
 	words := descriptionWords(desc)
-	for _, name := range append([]string{".git"}, interceptor.CredentialRuleNames()...) {
-		if interceptor.IsProtectedPath(name) && !slices.Contains(words, name) {
+	for _, name := range interceptor.ProtectedDirNames() {
+		if !slices.Contains(words, name) {
 			t.Errorf("dispatch description does not name protected %q: %s", name, desc)
 		}
 	}

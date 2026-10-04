@@ -418,7 +418,8 @@ at 4 KiB inside the shared 16 KiB injected-context budget
 it splits with `AGENTS.md` project context, which renders into the remainder
 (and keeps its full 16 KiB when there is no Git block). Capture is read-only
 and helper-resistant: argv-only `git` with `--no-optional-locks` and
-`core.fsmonitor=false`, no shell, a scrubbed environment that enforces
+`core.fsmonitor=false`, no shell, an environment built from scratch (see
+[Golem's own git calls](#golems-own-git-calls)) that enforces
 `GIT_NO_LAZY_FETCH=1`, one 2 s deadline, no status inside submodules (a changed
 submodule HEAD is reported, modified
 submodule content is not), and a refusal when the repository's own `.git/config`
@@ -464,14 +465,17 @@ every validation gate and to its own `git` calls. They receive only:
   `agentflow_unavailable` with the name; `-agentflow-status -json` keeps exit 3
   and empty stdout and prints the name on stderr.
 - **Strict mode:** `AGENTFLOW_STRICT=1`, when set to exactly `1`.
-- **Runner settings:** `PYTHONPATH` for `-agentflow-src`, and
+- **Runner settings:** `PWD`, set to the directory AgentFlow runs in and
+  spelled as Golem was given it (a logical path such as `/tmp/x` can differ
+  textually from the physical `/private/tmp/x`; not set on Windows; Golem's
+  own `PWD` is never forwarded), `PYTHONPATH` for `-agentflow-src`, and
   `PYTHONDONTWRITEBYTECODE=1` during audit.
 
 Everything else, including provider API keys, is dropped unless you approve it
 with `-agentflow-env`; an approved value reaches AgentFlow and every gate.
 `AGENTFLOW_CONFIRM_RISK` and `AGENTFLOW_AGENT_ID` are never forwarded; Golem
 passes those decisions as explicit arguments. `-agentflow-env` takes names
-only (`[A-Za-z_][A-Za-z0-9_]*`). It rejects `PYTHONPATH`,
+only (`[A-Za-z_][A-Za-z0-9_]*`). It rejects `PWD`, `PYTHONPATH`,
 `PYTHONDONTWRITEBYTECODE` and `AGENTFLOW_*`, and its errors identify an entry
 by position instead of echoing it.
 
@@ -498,9 +502,60 @@ filesystem. Tools also read configuration saved in those directories, such as
 Go's `go env -w` settings, so on-disk settings still apply without approval.
 Golem resolves the `agentflow` or `python3` executable with its own `PATH`
 before launch. Windows support is built but untested, and on non-Unix
-platforms cancellation stops only the direct child. Golem's own `git` calls in
-parallel task mode still inherit its environment, minus repository-location
-overrides.
+platforms cancellation stops only the direct child. Golem's own `git` calls
+follow a separate policy; see [Golem's own git calls](#golems-own-git-calls).
+
+## Golem's own git calls
+
+Golem runs `git` itself in two places: parallel task mode (`-plan-workers`
+above 1) creates, checks and removes worker worktrees, and the session's git
+context snapshot reads the branch, status and recent commits. Those `git`
+processes, and everything they start (repository hooks such as
+`post-checkout`, checkout and clean filters, and `core.fsmonitor` helpers),
+receive an environment Golem builds from scratch:
+
+- **Baseline:** `PATH`, `HOME`, `USER`, `TMPDIR`, `LANG`, `XDG_CONFIG_HOME`,
+  `GIT_CONFIG_GLOBAL`, `GIT_CONFIG_SYSTEM` and `GIT_CONFIG_NOSYSTEM`, when set.
+  On Windows also `SYSTEMROOT`, `TEMP`, `TMP`, `PATHEXT`, `USERPROFILE`,
+  `COMSPEC`, `LOCALAPPDATA`, `APPDATA`, `HOMEDRIVE` and `HOMEPATH`; Go adds
+  `SYSTEMROOT` when it is missing.
+- **Golem's settings:** `GIT_TERMINAL_PROMPT=0`; the snapshot also sets
+  `LC_ALL=C` and `GIT_NO_LAZY_FETCH=1`.
+
+Git adds its own variables for the processes it starts (for example
+`GIT_DIR`, `GIT_EXEC_PATH` and `GIT_PREFIX`). Nothing else from Golem's
+environment is passed: not provider API keys, and not repository-location
+overrides such as a `GIT_DIR` or `GIT_INDEX_FILE` inherited from an outer git
+hook. There is no flag to add names, and `-agentflow-env` does not apply here.
+AgentFlow's own `git` calls are separate: they run inside AgentFlow with its
+environment.
+
+**Upgrading:** hooks, filters and helpers that relied on other variables now
+run without them.
+
+- An SSH agent (`SSH_AUTH_SOCK`), proxy and certificate variables and
+  `GIT_ASKPASS` are not passed, so a worker checkout that has to reach the
+  network (git-lfs over SSH with agent-held keys, or a partial clone's lazy
+  fetch) can fail.
+- `GIT_LFS_SKIP_SMUDGE` is not passed, so creating a worker worktree may
+  download LFS objects.
+- Git configuration injected through the environment (`GIT_CONFIG_COUNT` with
+  `GIT_CONFIG_KEY_<n>`/`GIT_CONFIG_VALUE_<n>`, or `GIT_CONFIG_PARAMETERS`) is no
+  longer passed to worker worktrees; the snapshot already ignored it. Put such
+  settings, for example `safe.directory`, in your global git configuration
+  instead.
+- A custom `GIT_EXEC_PATH`, `LC_*` locale settings and `SUDO_UID` (git's
+  `safe.directory` allowance under sudo) are not passed.
+
+Run without `-plan-workers` to avoid worker worktrees, or pass
+`-no-git-context` to skip the snapshot. If a worker's `post-checkout` hook
+fails, git keeps the worktree; Golem reports it as preserved, like the other
+worker roots a failed run keeps.
+
+This keeps provider keys away from repository code; it does not confine that
+code. Hooks, filters and helpers still run as you with the baseline and can
+read your files under `HOME`. Your global and system git configuration is
+trusted: a filter it defines runs during the snapshot.
 
 ## Grant security and observation fencing
 
@@ -596,7 +651,7 @@ keep their existing behavior. A
 caller-owned blocked `agent.Result` can still contain the original goal, so
 library callers must not persist it verbatim.
 
-Two guards run on every tool call in every Golem session, on the agent and on every dispatch child, with or without `-interceptors` (#575); together with the scoped-child refusal reporter above they are the startup notice's `guards:` line. Argument invariants refuse a call before it is planned or approved, so session grants and `-allow-tool` cannot override a refusal, and the model sees `tool call blocked by interceptor invariants (<rule>)` as a tool error. They cover `write_file`/`edit_file`/`promote_artifact` under a `.git`, `.ssh`, `.gnupg`, `.aws` or `.kube` component (a hook under `.git/hooks` is code execution at the next commit), `read_file` of a credential path: anything under `.ssh`, `.gnupg`, `.aws` or `.kube`, a `.env` or `.env.*` file other than the committed templates `.env.example`, `.env.sample`, `.env.template` and `.env.dist`, `.netrc`, `_netrc`, `.npmrc`, `.pypirc`, `.git-credentials`, or a `config` file under `.git` (a direct-read tripwire on names, not confinement: `search` skips the same files and `dispatch` refuses a scope at or below `.git`, `.ssh`, `.gnupg`, `.aws` or `.kube`, but command output, `retrieve`, MCP tools, verifier commands, `edit_file`'s pre-approval match errors, and copies or hard links under other names can still expose the same bytes), and a `run_command`/`start_command` whose argv is an inline `sh`/`bash`/`dash`/`ksh`/`zsh` script that pipes a `curl`/`wget` stdout fetch into a bare shell (optionally `-s`, or `-s --` and arguments, optionally under `sudo`). The outer shell is read with `-c` alone or among `-e`, `-u`, `-x`, `-l` and `-i` (separate or clustered, as in `-lic`), `-o errexit`/`nounset`/`xtrace`, `-o pipefail` (bash, zsh and ksh only) and `--`, the script being the first operand; any other option form, parse-only `-n` included, is not read and so never blocked, and neither is a pipeline whose fetch or sink is preceded by a quoted `"NAME=value"` word (the shell runs that word as the command). Paths are matched after the host's own normalization plus a case fold that also maps the spellings filesystems treat as one name (APFS opens `.ssh` for `.ſsh` and `.ßh`, HFS+ ignores zero-width joiners and non-joiners, direction marks and the BOM, and Windows reads `.env` through `.env::$DATA`), and the guard reads arguments the way the tool's decoder does, so `Path` is guarded like `path` and two equivalent spellings are blocked as ambiguous. The egress classifier reads every exec-class call whose arguments carry a top-level `argv` string array (`run_command`, `start_command`, and MCP tools, whose labels reflect their opaque arguments rather than verified execution), labels each one whose argv is not on its quiet set by what that argv reaches, and the approval prompt shows it on the risk line, including grant-covered auto-approvals: `interceptor risk 20 · egress: network (git push)`. Classes and weights are `privileged` 20 (sudo, doas, su), `network` 20 (curl, wget, ssh, rsync, git push/fetch/pull/clone, docker, kubectl, gh, cloud CLIs, or an inline script naming one), `package-manager` 10 (npm, pip, cargo, brew, go get/install/mod, python -m pip, ...), `interpreter` 0 (a shell or python/node/perl/ruby running a script), and `unknown` 10 for anything off the explicit quiet set (coreutils, make, go test, git status, formatters and linters), including any wrapper option or git/go subcommand the classifier does not model, any shell option form it does not read, and any inline script it cannot read literally (expansions, `;`, `&&`, extra lines); a readable script whose network command is not literally in command position (`command curl`, `exec curl`, a nested shell, zsh `=curl`) stays `interpreter` 0. These are shape checks on the argv, not a sandbox: `go build` may still download modules, `make` runs whatever the Makefile says, and quiet commands such as `find -exec`, `awk` `system()` or `git -c` options can still run anything; the badge exists so you can prefer `y` over `a` when a command reaches out. No score or badge revokes a grant. A hard line-count limit on edits is deferred; the existing 256 KiB write bounds remain. Three consecutive refusals or other tool errors stop the run (`tool_error_cap_reached`); a capped turn skips verification of the batch that hit the cap, keeps earlier writes (undoable with `/undo`) and running background jobs, and is never saved (it has no answer). A `-p` run capped this way exits 1: text format prints `one-shot: model produced no final answer`, and `json` or `stream-json` report `status: error` with `empty_answer`. `golem.result.v1`, protocol-v1 events and exit codes are unchanged. Headless approval shows no risk line; the stderr footer appends ` · risk N` whenever a guard produced a finding, now also without `-interceptors`.
+Two guards run on every tool call in every Golem session, on the agent and on every dispatch child, with or without `-interceptors` (#575); together with the scoped-child refusal reporter above they are the startup notice's `guards:` line. Argument invariants refuse a call before it is planned or approved, so session grants and `-allow-tool` cannot override a refusal, and the model sees `tool call blocked by interceptor invariants (<rule>)` as a tool error. They cover `write_file`/`edit_file`/`promote_artifact` under a `.git`, `.ssh`, `.gnupg`, `.aws` or `.kube` component (a hook under `.git/hooks` is code execution at the next commit), `read_file` of a credential path: anything under `.ssh`, `.gnupg`, `.aws` or `.kube`, a `.env` or `.env.*` file other than the committed templates `.env.example`, `.env.sample`, `.env.template` and `.env.dist`, `.netrc`, `_netrc`, `.npmrc`, `.pypirc`, `.git-credentials`, or a `config` file under `.git` (a direct-read tripwire on names, not confinement: `search` skips the same files and `dispatch` refuses a scope at or below `.git`, `.ssh`, `.gnupg`, `.aws` or `.kube`, but command output, `retrieve`, MCP tools, verifier commands, `edit_file`'s pre-approval match errors, and copies or hard links under other names can still expose the same bytes), and a `run_command`/`start_command` whose argv is an inline `sh`/`bash`/`dash`/`ksh`/`zsh` script that pipes a `curl`/`wget` stdout fetch into a bare shell (optionally `-s`, or `-s --` and arguments, optionally under `sudo`). The outer shell is read with `-c` alone or among `-e`, `-u`, `-x`, `-l` and `-i` (separate or clustered, as in `-lic`), `-o errexit`/`nounset`/`xtrace`, `-o pipefail` (bash, zsh and ksh only) and `--`, the script being the first operand; any other option form, parse-only `-n` included, is not read and so never blocked, and neither is a pipeline whose fetch or sink is preceded by a quoted `"NAME=value"` word (the shell runs that word as the command). Paths are matched relative to the workspace root (a session rooted inside one of these directories is not covered), after the host's own normalization plus a case fold that also maps the spellings filesystems treat as one name (APFS opens `.ssh` for `.ſsh` and `.ßh`, HFS+ ignores zero-width joiners and non-joiners, bidirectional and deprecated format controls, and the BOM, and Windows reads `.env` through `.env::$DATA`), and the guard reads arguments the way the tool's decoder does, so `Path` is guarded like `path` and two equivalent spellings are blocked as ambiguous. The egress classifier reads every exec-class call whose arguments carry a top-level `argv` string array (`run_command`, `start_command`, and MCP tools, whose labels reflect their opaque arguments rather than verified execution), labels each one whose argv is not on its quiet set by what that argv reaches, and the approval prompt shows it on the risk line, including grant-covered auto-approvals: `interceptor risk 20 · egress: network (git push)`. Classes and weights are `privileged` 20 (sudo, doas, su), `network` 20 (curl, wget, ssh, rsync, git push/fetch/pull/clone, docker, kubectl, gh, cloud CLIs, or an inline script naming one), `package-manager` 10 (npm, pip, cargo, brew, go get/install/mod, python -m pip, ...), `interpreter` 0 (a shell or python/node/perl/ruby running a script), and `unknown` 10 for anything off the explicit quiet set (coreutils, make, go test, git status, formatters and linters), including any wrapper option or git/go subcommand the classifier does not model, any shell option form it does not read, and any inline script it cannot read literally (expansions, `;`, `&&`, extra lines); a readable script whose network command is not literally in command position (`command curl`, `exec curl`, a nested shell, zsh `=curl`) stays `interpreter` 0. These are shape checks on the argv, not a sandbox: `go build` may still download modules, `make` runs whatever the Makefile says, and quiet commands such as `find -exec`, `awk` `system()` or `git -c` options can still run anything; the badge exists so you can prefer `y` over `a` when a command reaches out. No score or badge revokes a grant. A hard line-count limit on edits is deferred; the existing 256 KiB write bounds remain. Three consecutive refusals or other tool errors stop the run (`tool_error_cap_reached`); a capped turn skips verification of the batch that hit the cap, keeps earlier writes (undoable with `/undo`) and running background jobs, and is never saved (it has no answer). A `-p` run capped this way exits 1: text format prints `one-shot: model produced no final answer`, and `json` or `stream-json` report `status: error` with `empty_answer`. `golem.result.v1`, protocol-v1 events and exit codes are unchanged. Headless approval shows no risk line; the stderr footer appends ` · risk N` whenever a guard produced a finding, now also without `-interceptors`.
 
 ## Project-context trust
 

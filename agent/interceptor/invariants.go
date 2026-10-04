@@ -165,7 +165,10 @@ func (RemoteScript) check(raw json.RawMessage) (string, bool) {
 // Direct reads refuse the credential set IsCredentialPath defines, and the
 // search tool skips the same files.
 var (
-	protectedPattern = regexp.MustCompile(`(^|/)\.(git|ssh|gnupg|aws|kube)(/|$)`)
+	// protectedDirs are the write rule's components: repository internals
+	// plus every credential directory. protectedPattern is built from them.
+	protectedDirs    = append([]string{".git"}, credentialDirs...)
+	protectedPattern = componentPattern(protectedDirs)
 
 	// credentialDirs make every path at or below them a credential path.
 	credentialDirs = []string{".ssh", ".gnupg", ".aws", ".kube"}
@@ -175,6 +178,15 @@ var (
 	// stay readable because a refusal counts toward the tool-error cap.
 	envTemplates = []string{".env.example", ".env.sample", ".env.template", ".env.dist"}
 )
+
+// componentPattern matches a path with any of names as a whole component.
+func componentPattern(names []string) *regexp.Regexp {
+	quoted := make([]string, len(names))
+	for i, n := range names {
+		quoted[i] = regexp.QuoteMeta(n)
+	}
+	return regexp.MustCompile(`(^|/)(` + strings.Join(quoted, "|") + `)(/|$)`)
+}
 
 // IsCredentialPath reports whether the default read_file invariant refuses p,
 // matched after normalizePath: a credential directory as any component; a
