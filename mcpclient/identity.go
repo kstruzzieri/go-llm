@@ -11,7 +11,8 @@ import (
 
 // connectionIdentity is a server's frozen launch or destination identity
 // (spec §5.6). Values can be secret: argv and endpoint are never rendered and
-// no value is persisted; only keyed digests leave the process.
+// no value is persisted; only keyed digests leave the process. Values must be
+// valid UTF-8: digestConnection refuses anything else (signing.ErrInvalidUTF8).
 type connectionIdentity struct {
 	workspace, alias, kind string
 	// stdio
@@ -100,15 +101,21 @@ func (s *PinStore) digestConnection(ctx context.Context, c connectionIdentity) (
 // compareConnectionPins returns fixed labels for what differs; nil means the
 // connections are identical. Tags compare in constant time.
 func compareConnectionPins(pinned, candidate *connectionPin) []string {
-	switch {
-	case pinned.kind != candidate.kind:
-		return []string{"kind"}
-	case pinned.keyID != candidate.keyID:
-		return []string{"key"}
-	case equalTag(pinned.fingerprint, candidate.fingerprint):
+	// A kind or key change makes every field tag differ, so those labels
+	// alone describe it (spec §5.7: kind, then key).
+	var labels []string
+	if pinned.kind != candidate.kind {
+		labels = append(labels, "kind")
+	}
+	if pinned.keyID != candidate.keyID {
+		labels = append(labels, "key")
+	}
+	if len(labels) > 0 {
+		return labels
+	}
+	if equalTag(pinned.fingerprint, candidate.fingerprint) {
 		return nil
 	}
-	var labels []string
 	for _, name := range connectionFieldNames[candidate.kind] {
 		if !equalTag(pinned.fields[name], candidate.fields[name]) {
 			labels = append(labels, name)

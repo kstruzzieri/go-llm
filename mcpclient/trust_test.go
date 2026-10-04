@@ -313,7 +313,7 @@ func TestTrustApprovalRevisionRace(t *testing.T) {
 }
 
 func TestTrustConfigValidatedBeforeDial(t *testing.T) {
-	for _, mode := range []string{"missing-store", "zero-store", "invalid-alias", "duplicate", "empty-command", "empty-endpoint", "bad-digest"} {
+	for _, mode := range []string{"missing-store", "zero-store", "keyless-store", "invalid-alias", "duplicate", "empty-command", "empty-endpoint", "bad-digest"} {
 		t.Run(mode, func(t *testing.T) {
 			pins := testPins(t)
 			attempted := make(chan string, 2)
@@ -324,6 +324,8 @@ func TestTrustConfigValidatedBeforeDial(t *testing.T) {
 				pins = nil
 			case "zero-store":
 				pins = &PinStore{}
+			case "keyless-store":
+				pins = &PinStore{workspace: "/x", dir: "/y"}
 			case "invalid-alias":
 				servers = append(servers, StdioServer("bad\x1b", []string{"x"}))
 			case "duplicate":

@@ -233,7 +233,8 @@ func inspectOrApprove(ctx context.Context, impl Implementation, server Server, p
 	}
 	conn, err := pins.digestConnection(ctx, prepared.identity)
 	if err != nil {
-		return nil, admissionFailure(server.Alias, "pin_unavailable", err)
+		// As in connectOne: an unfingerprintable identity is an unusable launch.
+		return nil, admissionFailure(server.Alias, "launch_invalid", err)
 	}
 	session, _, candidate, _, err := discover(ctx, impl, prepared)
 	if err != nil {

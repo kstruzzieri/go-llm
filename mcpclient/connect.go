@@ -223,7 +223,9 @@ func connectOne(ctx context.Context, impl Implementation, s Server, opts Connect
 	}
 	conn, err := opts.Pins.digestConnection(ctx, prepared.identity)
 	if err != nil {
-		return nil, nil, []error{admissionFailure(s.Alias, "pin_unavailable", err)}
+		// An identity that cannot be fingerprinted (non-UTF-8 argv or path)
+		// is an unusable launch, not a pin store fault.
+		return nil, nil, []error{admissionFailure(s.Alias, "launch_invalid", err)}
 	}
 	session, remote, catalog, notices, err := discover(ctx, impl, prepared)
 	if err != nil {

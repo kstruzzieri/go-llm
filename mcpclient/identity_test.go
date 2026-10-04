@@ -3,6 +3,11 @@ package mcpclient
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -11,6 +16,9 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/kstruzzieri/go-llm/signing"
+	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 func baseStdioIdentity() connectionIdentity {
@@ -61,6 +69,7 @@ func TestConnectionChangeLabels(t *testing.T) {
 		{func(c *connectionIdentity) { c.argv = []string{"l", "--b"} }, []string{"argv"}},
 		{func(c *connectionIdentity) { c.launcher, c.target = "/bin/x", "/bin/y" }, []string{"launcher", "target"}},
 		{func(c *connectionIdentity) { c.alias = "other" }, []string{"identity"}},
+		{func(c *connectionIdentity) { c.workspace = "/other" }, []string{"identity"}},
 		{func(c *connectionIdentity) {
 			*c = connectionIdentity{workspace: "/ws", alias: "fs", kind: "http", origin: "https://h", endpoint: "/"}
 		}, []string{"kind"}},
@@ -105,6 +114,10 @@ func TestConnectionKeyLossAndCorruption(t *testing.T) {
 	if got := compareConnectionPins(before, mustDigest(t, recreated, baseStdioIdentity())); !slices.Equal(got, []string{"key"}) {
 		t.Fatalf("labels after key loss = %q, want [key]", got)
 	}
+	httpID := connectionIdentity{workspace: "/ws", alias: "fs", kind: "http", origin: "https://h", endpoint: "/"}
+	if got := compareConnectionPins(before, mustDigest(t, recreated, httpID)); !slices.Equal(got, []string{"kind", "key"}) {
+		t.Fatalf("labels after key loss and kind change = %q, want [kind key]", got)
+	}
 	if err := os.WriteFile(keyPath, []byte("corrupt"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -113,6 +126,61 @@ func TestConnectionKeyLossAndCorruption(t *testing.T) {
 	}
 	if raw, _ := os.ReadFile(keyPath); string(raw) != "corrupt" {
 		t.Fatal("corrupt key was regenerated")
+	}
+}
+
+// TestConnectionFingerprintKnownAnswer pins the persisted encoding: payloads
+// are literal canonical JSON and the signing frame is rebuilt by hand.
+func TestConnectionFingerprintKnownAnswer(t *testing.T) {
+	key := make([]byte, 32)
+	for i := range key {
+		key[i] = byte(i)
+	}
+	k, err := signing.NewHMAC(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &PinStore{connKey: k}
+	// "go-llm-signing-v1\x00" || uint64 big-endian len(domain) || domain || payload
+	tag := func(domain, payload string) string {
+		frame := binary.BigEndian.AppendUint64([]byte("go-llm-signing-v1\x00"), uint64(len(domain)))
+		frame = append(frame, domain+payload...)
+		m := hmac.New(sha256.New, key)
+		_, _ = m.Write(frame)
+		return hex.EncodeToString(m.Sum(nil))
+	}
+	stdio := mustDigest(t, store, baseStdioIdentity())
+	if want := "hmac-sha256:" + tag("go-llm/mcp-connection/v1", `{"alias":"fs","argv":["l","--a"],"dir":"/w","env":["inherit:TOKEN"],"env_baseline":"unix-v1","format":1,"kind":"stdio","launcher":"/bin/l","target":"/bin/t","workspace":"/ws"}`); stdio.fingerprint != want {
+		t.Errorf("stdio fingerprint = %s, want %s", stdio.fingerprint, want)
+	}
+	if want := tag("go-llm/mcp-connection-field/v1/env_baseline", `"unix-v1"`); stdio.fields["env_baseline"] != want {
+		t.Errorf("env_baseline tag = %s, want %s", stdio.fields["env_baseline"], want)
+	}
+	http := mustDigest(t, store, connectionIdentity{workspace: "/ws", alias: "api", kind: "http", origin: "https://h", endpoint: "/mcp?q=1"})
+	if want := "hmac-sha256:" + tag("go-llm/mcp-connection/v1", `{"alias":"api","endpoint":"/mcp?q=1","format":1,"kind":"http","origin":"https://h","workspace":"/ws"}`); http.fingerprint != want {
+		t.Errorf("http fingerprint = %s, want %s", http.fingerprint, want)
+	}
+}
+
+// TestConnectionInvalidUTF8IsLaunchInvalid: identity values that cannot be
+// fingerprinted block the alias as an unusable launch, before any dial, and
+// the refusal never echoes the value.
+func TestConnectionInvalidUTF8IsLaunchInvalid(t *testing.T) {
+	pins := testPins(t)
+	s, _, _ := staticCatalogServer(t, "fs", &gomcp.Tool{Name: "read", Description: "A"})
+	s.command = []string{"l", "--tok=\xffcanary"}
+	m, w, err := Connect(context.Background(), Implementation{Name: "test"}, []Server{s}, ConnectOptions{Pins: pins})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = m.Close() })
+	if a := admission(t, w); a.Reason != "launch_invalid" || len(m.Tools()) != 0 || strings.Contains(fmt.Sprint(w), "canary") {
+		t.Fatalf("connect: reason %q, %d tools, warnings %v", a.Reason, len(m.Tools()), w)
+	}
+	_, err = Inspect(context.Background(), Implementation{Name: "test"}, s, pins)
+	var a *AdmissionError
+	if !errors.As(err, &a) || a.Reason != "launch_invalid" || strings.Contains(err.Error(), "canary") {
+		t.Fatalf("inspect: %v", err)
 	}
 }
 
