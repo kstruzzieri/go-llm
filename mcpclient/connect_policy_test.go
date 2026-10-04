@@ -137,8 +137,15 @@ func TestPinChangedBetweenPreflightAndAdmitIsConflict(t *testing.T) {
 			}
 			t.Cleanup(func() { _ = m.Close() })
 			waitOn(t, done, "raced session close")
-			if failure := admission(t, w); failure.Reason != "pin_conflict" || len(m.Tools()) != 0 {
+			failure := admission(t, w)
+			if failure.Reason != "pin_conflict" || len(m.Tools()) != 0 {
 				t.Fatalf("%s race = (%q, %d tools), want pin_conflict and nothing published", name, failure.Reason, len(m.Tools()))
+			}
+			// A conflict loads no record to compare, so it reports no digests,
+			// no diff and no review hint (a false "added: <every tool>" otherwise).
+			if text := failure.Error(); failure.PinnedDigest != "" || failure.CandidateDigest != "" || failure.Diff.String() != "" ||
+				strings.Contains(text, "added:") || strings.Contains(text, "review with") {
+				t.Fatalf("%s race Error() = %q, want no digests, diff or review hint", name, text)
 			}
 			if name == "deleted" && pinBytes(t, pins, "fs") != nil {
 				t.Fatal("a pin deleted after preflight was re-created")

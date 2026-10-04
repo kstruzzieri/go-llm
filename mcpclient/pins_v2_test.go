@@ -110,22 +110,23 @@ func TestPinAdmitAtRevision(t *testing.T) {
 
 func TestPinRecordV2Strictness(t *testing.T) {
 	for name, mutate := range map[string]func(map[string]any, map[string]any){
-		"extra top-level":       func(r, _ map[string]any) { r["extra"] = true },
-		"missing connection":    func(r, _ map[string]any) { delete(r, "connection") },
-		"null connection":       func(r, _ map[string]any) { r["connection"] = nil },
-		"extra connection key":  func(_, c map[string]any) { c["extra"] = "x" },
-		"missing key_id":        func(_, c map[string]any) { delete(c, "key_id") },
-		"null fields":           func(_, c map[string]any) { c["fields"] = nil },
-		"extra field":           func(_, c map[string]any) { c["fields"].(map[string]any)["argv"] = strings.Repeat("0", 64) },
-		"missing field":         func(_, c map[string]any) { delete(c["fields"].(map[string]any), "origin") },
-		"catalog-style digest":  func(_, c map[string]any) { c["fingerprint"] = "sha256:" + strings.Repeat("a", 64) },
-		"uppercase hex":         func(_, c map[string]any) { c["key_id"] = strings.Repeat("B", 64) },
-		"unknown kind":          func(_, c map[string]any) { c["kind"] = "ftp" },
-		"kind field mismatch":   func(_, c map[string]any) { c["kind"] = "stdio" },
-		"null field value":      func(_, c map[string]any) { c["fields"].(map[string]any)["origin"] = nil },
-		"unsupported version 3": func(r, _ map[string]any) { r["version"] = 3 },
-		"case-variant key":      func(_, c map[string]any) { c["Fingerprint"] = c["fingerprint"]; delete(c, "fingerprint") },
-		"case-variant extra":    func(_, c map[string]any) { c["Fingerprint"] = c["fingerprint"] },
+		"extra top-level":        func(r, _ map[string]any) { r["extra"] = true },
+		"missing connection":     func(r, _ map[string]any) { delete(r, "connection") },
+		"null connection":        func(r, _ map[string]any) { r["connection"] = nil },
+		"extra connection key":   func(_, c map[string]any) { c["extra"] = "x" },
+		"missing key_id":         func(_, c map[string]any) { delete(c, "key_id") },
+		"null fields":            func(_, c map[string]any) { c["fields"] = nil },
+		"extra field":            func(_, c map[string]any) { c["fields"].(map[string]any)["argv"] = strings.Repeat("0", 64) },
+		"missing field":          func(_, c map[string]any) { delete(c["fields"].(map[string]any), "origin") },
+		"catalog-style digest":   func(_, c map[string]any) { c["fingerprint"] = "sha256:" + strings.Repeat("a", 64) },
+		"uppercase hex":          func(_, c map[string]any) { c["key_id"] = strings.Repeat("B", 64) },
+		"unknown kind":           func(_, c map[string]any) { c["kind"] = "ftp" },
+		"unknown kind no fields": func(_, c map[string]any) { c["kind"] = "ftp"; c["fields"] = map[string]any{} },
+		"kind field mismatch":    func(_, c map[string]any) { c["kind"] = "stdio" },
+		"null field value":       func(_, c map[string]any) { c["fields"].(map[string]any)["origin"] = nil },
+		"unsupported version 3":  func(r, _ map[string]any) { r["version"] = 3 },
+		"case-variant key":       func(_, c map[string]any) { c["Fingerprint"] = c["fingerprint"]; delete(c, "fingerprint") },
+		"case-variant extra":     func(_, c map[string]any) { c["Fingerprint"] = c["fingerprint"] },
 	} {
 		t.Run(name, func(t *testing.T) {
 			ctx := context.Background()
@@ -172,5 +173,75 @@ func TestPinRecordStoresNoIdentityValues(t *testing.T) {
 	raw := pinBytes(t, pins, "fs")
 	if bytes.Contains(raw, []byte("canary")) || bytes.Contains(raw, []byte("CANARY")) || !bytes.Contains(raw, []byte(`"version":2`)) {
 		t.Fatalf("pin record = %s; want version 2 with no identity values", raw)
+	}
+}
+
+// A version 1 record keeps exactly its five keys and a version 2 record its
+// six: a connection object on v1, or a case-variant duplicate of "version",
+// is an invalid pin, never read as either version.
+func TestPinRecordExactKeySets(t *testing.T) {
+	for name, tt := range map[string]struct {
+		v1     bool
+		mutate func(map[string]any)
+	}{
+		"v1 with connection":    {true, func(r map[string]any) { r["connection"] = testConnPin().record() }},
+		"v1 with Version extra": {true, func(r map[string]any) { r["Version"] = r["version"] }},
+		"v2 with Version extra": {false, func(r map[string]any) { r["Version"] = r["version"] }},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			s := pinStoreForTest(t)
+			a := pinCatalog(t, "fs", "A")
+			if tt.v1 {
+				writeV1Pin(t, s, "fs", a.toolCatalog)
+			} else if _, _, err := s.admit(ctx, "fs", a, false); err != nil {
+				t.Fatal(err)
+			}
+			var record map[string]any
+			if err := json.Unmarshal(readPinBytes(t, s), &record); err != nil {
+				t.Fatal(err)
+			}
+			tt.mutate(record)
+			raw, err := json.Marshal(record)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(s.dir, fsKey+".json"), raw, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, _, err := s.capturePin(ctx, "fs"); err == nil {
+				t.Fatalf("%s accepted", name)
+			}
+			if !bytes.Equal(raw, readPinBytes(t, s)) {
+				t.Fatal("invalid record rewritten")
+			}
+		})
+	}
+}
+
+// A candidate must carry a connection the reader would accept: publishing one
+// it rejects would leave the alias unreadable, and Approve could not recover
+// it because capturePin fails first.
+func TestPinRejectsMalformedCandidateConnection(t *testing.T) {
+	blankKind := testConnPin()
+	blankKind.kind = ""
+	for name, conn := range map[string]*connectionPin{"nil connection": nil, "blank kind": blankKind} {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			s := pinStoreForTest(t)
+			candidate := pinEntry{toolCatalog: pinCatalog(t, "fs", "A").toolCatalog, conn: conn}
+			for op, call := range map[string]func() error{
+				"admit":      func() error { _, _, err := s.admit(ctx, "fs", candidate, false); return err },
+				"admitAt":    func() error { _, _, err := s.admitAt(ctx, "fs", pinRevision{}, candidate); return err },
+				"replacePin": func() error { return s.replacePin(ctx, "fs", pinRevision{}, candidate) },
+			} {
+				if err := call(); err == nil {
+					t.Fatalf("%s accepted a %s candidate", op, name)
+				}
+				if files, err := os.ReadDir(s.dir); err != nil || len(files) != 0 {
+					t.Fatalf("%s with a %s candidate wrote %d files (%v)", op, name, len(files), err)
+				}
+			}
+		})
 	}
 }

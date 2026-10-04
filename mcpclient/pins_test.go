@@ -168,66 +168,74 @@ func TestPinCorruptNeverAbsent(t *testing.T) {
 	}
 }
 
+// Every case runs against both record versions this binary reads, so the
+// version 1 decoder keeps the same negative coverage as version 2.
 func TestPinRecordValidation(t *testing.T) {
-	for _, field := range []string{"version", "workspace", "alias", "digest", "tools", "unknown", "description", "name", "schema", "order", "duplicate", "case-key"} {
-		t.Run(field, func(t *testing.T) {
-			s := pinStoreForTest(t)
-			ctx := context.Background()
-			a := pinCatalog(t, "fs", "A")
-			if _, _, err := s.admit(ctx, "fs", a, false); err != nil {
-				t.Fatal(err)
-			}
-			var record map[string]any
-			if err := json.Unmarshal(readPinBytes(t, s), &record); err != nil {
-				t.Fatal(err)
-			}
-			switch field {
-			case "version":
-				record[field] = 3
-			case "workspace", "alias", "digest":
-				record[field] = "wrong"
-			case "tools":
-				record[field] = nil
-			case "unknown":
-				record[field] = true
-			case "case-key":
-				record["Version"] = record["version"]
-				delete(record, "version")
-			default:
-				entries := a.entriesCopy()
-				switch field {
-				case "description":
-					entries[0].Description = strings.Repeat("x", 8193)
-				case "name":
-					entries[0].Name = "mcp__other__read"
-				case "schema":
-					entries[0].InputSchema = json.RawMessage(`null`)
-				case "order":
-					entries = append(entries, catalogEntry{Name: "mcp__fs__aaa", InputSchema: json.RawMessage(`{}`)})
-				case "duplicate":
-					entries = append(entries, entries[0])
+	for _, version := range []int{1, 2} {
+		for _, field := range []string{"version", "workspace", "alias", "digest", "tools", "unknown", "missing", "description", "name", "schema", "order", "duplicate", "case-key"} {
+			t.Run(fmt.Sprintf("v%d/%s", version, field), func(t *testing.T) {
+				s := pinStoreForTest(t)
+				ctx := context.Background()
+				a := pinCatalog(t, "fs", "A")
+				if version == 1 {
+					writeV1Pin(t, s, "fs", a.toolCatalog)
+				} else if _, _, err := s.admit(ctx, "fs", a, false); err != nil {
+					t.Fatal(err)
 				}
-				canonical, err := newToolCatalog(entries)
+				var record map[string]any
+				if err := json.Unmarshal(readPinBytes(t, s), &record); err != nil {
+					t.Fatal(err)
+				}
+				switch field {
+				case "version":
+					record[field] = 3
+				case "workspace", "alias", "digest":
+					record[field] = "wrong"
+				case "tools":
+					record[field] = nil
+				case "unknown":
+					record[field] = true
+				case "missing":
+					delete(record, "workspace")
+				case "case-key":
+					record["Version"] = record["version"]
+					delete(record, "version")
+				default:
+					entries := a.entriesCopy()
+					switch field {
+					case "description":
+						entries[0].Description = strings.Repeat("x", 8193)
+					case "name":
+						entries[0].Name = "mcp__other__read"
+					case "schema":
+						entries[0].InputSchema = json.RawMessage(`null`)
+					case "order":
+						entries = append(entries, catalogEntry{Name: "mcp__fs__aaa", InputSchema: json.RawMessage(`{}`)})
+					case "duplicate":
+						entries = append(entries, entries[0])
+					}
+					canonical, err := newToolCatalog(entries)
+					if err != nil {
+						t.Fatal(err)
+					}
+					record["tools"] = entries
+					record["digest"] = canonical.digest()
+				}
+				raw, err := json.Marshal(record)
 				if err != nil {
 					t.Fatal(err)
 				}
-				record["tools"] = entries
-				record["digest"] = canonical.digest()
-			}
-			raw, err := json.Marshal(record)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err = os.WriteFile(filepath.Join(s.dir, fsKey+".json"), raw, 0600); err != nil {
-				t.Fatal(err)
-			}
-			if _, _, err = s.capturePin(ctx, "fs"); err == nil {
-				t.Fatalf("accepted invalid %s", field)
-			}
-			if !bytes.Equal(raw, readPinBytes(t, s)) {
-				t.Fatal("invalid record rewritten")
-			}
-		})
+				if err = os.WriteFile(filepath.Join(s.dir, fsKey+".json"), raw, 0600); err != nil {
+					t.Fatal(err)
+				}
+				if _, _, err = s.capturePin(ctx, "fs"); err == nil {
+					t.Fatalf("accepted invalid %s", field)
+				}
+				if !bytes.Equal(raw, readPinBytes(t, s)) {
+					t.Fatal("invalid record rewritten")
+				}
+			})
+		}
 	}
 }
 

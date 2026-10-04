@@ -258,8 +258,13 @@ func connectOne(ctx context.Context, impl Implementation, s Server, opts Connect
 		// stays in the chain but must not rename the reason.
 		failure := admissionFailure(s.Alias, "pin_unavailable", err)
 		failure.cause = errors.Join(err, closeErr)
-		failure.PinnedDigest, failure.CandidateDigest = prior.digest(), catalog.digest()
-		failure.Diff = diffCatalogs(prior.toolCatalog, catalog)
+		// Only a catalog mismatch compared a loaded record; any other refusal
+		// (a revision conflict, say) has a zero prior and would report a false
+		// "added: <every tool>" diff.
+		if errors.Is(err, errPinMismatch) {
+			failure.PinnedDigest, failure.CandidateDigest = prior.digest(), catalog.digest()
+			failure.Diff = diffCatalogs(prior.toolCatalog, catalog)
+		}
 		return nil, nil, append(notices, failure)
 	}
 	// Selection applies only after the complete catalog was validated, hashed

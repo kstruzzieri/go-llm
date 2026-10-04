@@ -110,6 +110,11 @@ func validatePinEntry(alias string, e pinEntry) error {
 	if e.conn == nil {
 		return errors.New("mcpclient: pin candidate lacks a connection identity")
 	}
+	// Publish only what the reader accepts: a record it rejects would make the
+	// alias unreadable, and Approve could not replace it.
+	if _, err := decodeConnection(e.conn.record()); err != nil {
+		return err
+	}
 	return validatePinCatalog(alias, e.toolCatalog)
 }
 
@@ -241,10 +246,12 @@ func (s *PinStore) admitWith(ctx context.Context, alias string, candidate pinEnt
 }
 
 // admitAt admits at the revision preflight captured (spec §5.8 step 5): any
-// change since then, deletion or undecodable bytes included, is a revision
-// conflict. A revision is existence plus a hash of the raw bytes, so a
-// byte-identical delete and re-create is indistinguishable and admits the
-// record preflight approved.
+// change since then that still reads as a pin file, deletion or undecodable
+// bytes included, is a revision conflict. A record replaced by an oversized
+// file, a symlink or a directory fails to read first and is refused as
+// unavailable instead, still without publishing. A revision is existence plus
+// a hash of the raw bytes, so a byte-identical delete and re-create is
+// indistinguishable and admits the record preflight approved.
 func (s *PinStore) admitAt(ctx context.Context, alias string, prior pinRevision, candidate pinEntry) (pinEntry, bool, error) {
 	return s.admitWith(ctx, alias, candidate, sameRevision(prior))
 }
@@ -410,7 +417,7 @@ func decodePin(raw []byte, workspace, alias string) (pinEntry, error) {
 		return pinEntry{}, err
 	}
 	if record.Workspace != workspace || record.Alias != alias {
-		return pinEntry{}, errors.New("record identity or version mismatch")
+		return pinEntry{}, errors.New("record identity mismatch")
 	}
 	var entries []catalogEntry
 	dec = json.NewDecoder(bytes.NewReader(record.Tools))
