@@ -7,14 +7,14 @@ import (
 	"fmt"
 	"iter"
 	"math"
-	"net/url"
-	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	_ "modernc.org/sqlite"
+
+	"github.com/kstruzzieri/go-llm/internal/sqlitedsn"
 )
 
 // Compile-time interface satisfaction checks.
@@ -98,12 +98,14 @@ func NewSQLiteStore(dbPath string) (*SQLiteStore, error) {
 		// With database/sql's connection pool, multiple connections to :memory:
 		// each create a separate database, causing missing schema/data.
 		db.SetMaxOpenConns(1)
-	} else {
-		// File-backed databases: enable WAL mode for better concurrent read performance.
-		// WAL is not meaningful for :memory: databases. journal_mode persists in
-		// the database file, so one Exec suffices; busy_timeout is per-connection
-		// and therefore set via the DSN in sqliteReadWriteDSN.
-		if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
+	} else if dbPath != "" {
+		// File-backed databases: enable WAL mode for better concurrent read
+		// performance. journal_mode persists in the database file, so one
+		// switch suffices, and EnableWAL retries it when another opener races
+		// it; busy_timeout is per-connection and therefore set via the DSN in
+		// sqliteReadWriteDSN. "" is SQLite's private temporary database, where
+		// WAL does not apply.
+		if err := sqlitedsn.EnableWAL(context.Background(), db); err != nil {
 			_ = db.Close()
 			return nil, fmt.Errorf("rag: set WAL mode: %w", err)
 		}
@@ -151,28 +153,16 @@ func (s *SQLiteStore) setWriteEmbeddingState(err error, scan bool) {
 // to one connection (the routing-feedback store's alternative) because
 // retrieval reads are in the user-facing latency path and rely on WAL read
 // concurrency.
-// Plain paths are made absolute first: a relative path in url.URL.Path
-// renders as file://<path>, which the URI parser reads as a host name, not a
-// file. Existing file: URIs retain their path and query parameters.
-// Windows drive-letter/UNC normalization is deferred with the Windows build
-// work (issue #303); this mirrors OpenSQLiteStoreReadOnly's exposure.
+// Plain paths and file: URIs go through sqlitedsn.FileURL, which makes plain
+// paths absolute, keeps a URI's path and query, and renders Windows paths
+// SQLite accepts (rejecting UNC and device paths).
 func sqliteReadWriteDSN(dbPath string) (string, error) {
 	if dbPath == "" || dbPath == ":memory:" {
 		return dbPath, nil
 	}
-	var u *url.URL
-	if strings.HasPrefix(dbPath, "file:") {
-		parsed, err := url.Parse(dbPath)
-		if err != nil {
-			return "", fmt.Errorf("parse URI %q: %w", dbPath, err)
-		}
-		u = parsed
-	} else {
-		abs, err := filepath.Abs(dbPath)
-		if err != nil {
-			return "", fmt.Errorf("resolve path %q: %w", dbPath, err)
-		}
-		u = &url.URL{Scheme: "file", Path: abs}
+	u, err := sqlitedsn.FileURL(dbPath)
+	if err != nil {
+		return "", err
 	}
 	q := u.Query()
 	q.Add("_pragma", "busy_timeout(5000)")
@@ -189,7 +179,10 @@ func OpenSQLiteStoreReadOnly(dbPath string) (*SQLiteStore, error) {
 	if dbPath == "" {
 		return nil, fmt.Errorf("rag: open sqlite read-only: empty path")
 	}
-	u := url.URL{Scheme: "file", Path: dbPath}
+	u, err := sqlitedsn.FileURL(dbPath)
+	if err != nil {
+		return nil, fmt.Errorf("rag: open sqlite read-only: %w", err)
+	}
 	q := u.Query()
 	q.Set("mode", "ro")
 	q.Set("immutable", "1")
