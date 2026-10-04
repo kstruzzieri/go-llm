@@ -38,7 +38,7 @@ func TestProbe_FailsOnMissingSubcommand(t *testing.T) {
 		"--help":    {stdout: []byte(help)},
 	}}
 	err := NewClient(f, "/ws").Probe(context.Background())
-	if err == nil || !strings.Contains(err.Error(), "lock-plan") {
+	if err == nil || !strings.Contains(err.Error(), "lock-plan") || !strings.HasSuffix(err.Error(), "(upgrade Agentflow)") {
 		t.Fatalf("expected missing-subcommand error, got %v", err)
 	}
 }
@@ -49,7 +49,7 @@ func TestProbe_FailsOnMissingRequiredFlag(t *testing.T) {
 	replies["lock-plan"] = fakeReply{stdout: []byte("usage: lock-plan [--json]\n")} // missing --from-json
 	f := &fakeRunner{replies: replies}
 	err := NewClient(f, "/ws").Probe(context.Background())
-	if err == nil || !strings.Contains(err.Error(), "lock-plan --from-json") {
+	if err == nil || !strings.Contains(err.Error(), "lock-plan --from-json") || !strings.HasSuffix(err.Error(), "(upgrade Agentflow)") {
 		t.Fatalf("expected missing flag error, got %v", err)
 	}
 }
@@ -230,6 +230,12 @@ func TestCheckVersion(t *testing.T) {
 		{"agentflow x.0.0\n", `cannot parse agentflow version "x.0.0"`},
 		{"agentflow 1.x\n", `cannot parse agentflow version "1.x"`},
 		{"agentflow 1.bad.0\n", `cannot parse agentflow version "1.bad.0"`},
+		{"agentflow 1\n", `cannot parse agentflow version "1"`},
+		{"agentflow 1.0rc1\n", `cannot parse agentflow version "1.0rc1"`},
+		{"agentflow +1.0.0\n", `cannot parse agentflow version "+1.0.0"`},
+		{"agentflow 1.-0.0\n", `cannot parse agentflow version "1.-0.0"`},
+		// %q is the only sanitizer for text that reaches stderr raw later (#612).
+		{"agentflow 1.\x1b[2J\n", `cannot parse agentflow version "1.\x1b[2J"`},
 		{"agentflow\n", `cannot parse agentflow version from "agentflow\n"`},
 	} {
 		t.Run(strings.TrimSpace(tt.out), func(t *testing.T) {

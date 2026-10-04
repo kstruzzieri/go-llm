@@ -55,7 +55,7 @@ var requiredFeatures = []featureProbe{
 	{"block-step", []string{"--root", "--attempt", "--reason", "--agent", "--json"}},
 	{"finish-run", []string{"--root", "--json"}},
 	{"next-action", []string{"--root", "--json"}},
-	{"status", []string{"--root"}}, // status intentionally has no --json in 0.4.x
+	{"status", []string{"--root"}}, // status intentionally has no --json in 0.4.x and 1.0
 }
 
 var requiredReviewFeatures = []featureProbe{
@@ -91,8 +91,8 @@ func (c *Client) Probe(ctx context.Context) error {
 		}
 	}
 	if len(missing) > 0 {
-		return fmt.Errorf("agentflow is missing required subcommands: %s (upgrade to >= %d.%d)",
-			strings.Join(missing, ", "), minVersion[0], minVersion[1])
+		return fmt.Errorf("agentflow is missing required subcommands: %s (upgrade Agentflow)",
+			strings.Join(missing, ", "))
 	}
 	for _, feature := range requiredFeatures {
 		sout, _, exit, err := c.r.Run(ctx, []string{feature.subcommand, "--help"}, nil)
@@ -102,8 +102,8 @@ func (c *Client) Probe(ctx context.Context) error {
 		usage := string(sout)
 		for _, needle := range feature.needles {
 			if !helpHasToken(usage, needle) {
-				return fmt.Errorf("agentflow %s %s unavailable (upgrade to >= %d.%d)",
-					feature.subcommand, needle, minVersion[0], minVersion[1])
+				return fmt.Errorf("agentflow %s %s unavailable (upgrade Agentflow)",
+					feature.subcommand, needle)
 			}
 		}
 	}
@@ -172,7 +172,7 @@ func errOrExit(err error, exit int) error {
 }
 
 func checkVersion(s string) error {
-	// s like "agentflow 1.0.0"; anything after the minor ("1.0.0rc1") is accepted.
+	// s like "agentflow 1.0.0"; anything after the second dot ("1.0.0rc1") is accepted.
 	fields := strings.Fields(strings.TrimSpace(s))
 	if len(fields) < 2 {
 		return &VersionError{fmt.Sprintf("cannot parse agentflow version from %q", s)}
@@ -184,7 +184,8 @@ func checkVersion(s string) error {
 	}
 	major, majorErr := strconv.Atoi(parts[0])
 	minor, minorErr := strconv.Atoi(parts[1])
-	if majorErr != nil || minorErr != nil {
+	// Atoi also accepts a leading sign; a version part is plain decimal.
+	if majorErr != nil || minorErr != nil || strings.ContainsAny(parts[0]+parts[1], "+-") {
 		return &VersionError{fmt.Sprintf("cannot parse agentflow version %q", v)}
 	}
 	if major < minVersion[0] || (major == minVersion[0] && minor < minVersion[1]) {
