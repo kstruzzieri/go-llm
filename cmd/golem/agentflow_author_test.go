@@ -1558,3 +1558,49 @@ func TestRunAgentflowAuthorUsesCurrentGitFragment(t *testing.T) {
 		t.Fatalf("Git block duplicated or not last: %q", caller.system)
 	}
 }
+
+// #611: a planner that stops at a loop cap without submitting names the stop
+// reason; a planner that answers without submitting keeps the exact message.
+func TestRunAgentflowAuthor_StopReasonNamesTheCause(t *testing.T) {
+	read := func(id, path string) agent.ModelResult {
+		return toolStep(id, "read_file", `{"path":"`+path+`"}`)
+	}
+	tests := []struct {
+		name      string
+		maxSteps  int
+		budget    agent.Budget
+		responses []agent.ModelResult
+		want      string
+		zeroCalls bool
+	}{
+		{name: "completed", maxSteps: 4, responses: []agent.ModelResult{answerStep("no plan today")}, want: errPlannerNoSubmission.Error()},
+		{name: "step cap", maxSteps: 1, responses: []agent.ModelResult{read("r1", "seed.txt")},
+			want: errPlannerNoSubmission.Error() + ": agent run stopped: step_cap_reached"},
+		{name: "tool errors", maxSteps: 4, responses: []agent.ModelResult{read("r1", "missing-a.txt"), read("r2", "missing-b.txt"), read("r3", "missing-c.txt")},
+			want: errPlannerNoSubmission.Error() + ": agent run stopped: tool_error_cap_reached"},
+		{name: "repeats", maxSteps: 4, responses: []agent.ModelResult{read("r1", "seed.txt"), read("r2", "seed.txt"), read("r3", "seed.txt")},
+			want: errPlannerNoSubmission.Error() + ": agent run stopped: repeat_limit_reached"},
+		{name: "budget", maxSteps: 4, budget: agent.Budget{InputCeiling: 32768, OutputReserve: 64, TotalTokens: 1},
+			responses: []agent.ModelResult{answerStep("never sent")},
+			want:      errPlannerNoSubmission.Error() + ": agent run stopped: budget_reached", zeroCalls: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			if err := os.WriteFile(filepath.Join(root, "seed.txt"), []byte("seed\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			caller := &scriptCaller{responses: tt.responses}
+			sess := newTestSession(t, caller, root)
+			sess.maxSteps = tt.maxSteps
+			sess.startupBudget = tt.budget
+			err := runAgentflowAuthorWithClient(context.Background(), io.Discard, io.Discard, nil, sess, flags{goal: "x", goalSet: true}, root, &stubLocker{}, nil)
+			if !errors.Is(err, errPlannerNoSubmission) || err.Error() != tt.want {
+				t.Fatalf("err = %v, want %q wrapping errPlannerNoSubmission", err, tt.want)
+			}
+			if tt.zeroCalls && caller.i != 0 {
+				t.Fatalf("model calls = %d, want 0", caller.i)
+			}
+		})
+	}
+}
