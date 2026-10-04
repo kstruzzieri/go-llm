@@ -1071,7 +1071,7 @@ var hostGitWindowsEnv = []string{"SYSTEMROOT", "TEMP", "TMP", "PATHEXT", "USERPR
 	"COMSPEC", "LOCALAPPDATA", "APPDATA", "HOMEDRIVE", "HOMEPATH"}
 
 // buildHostGitEnv returns the complete environment of one host git launch on
-// goos: each baseline name lookup reports as set (an empty value is kept),
+// goos: each baseline name that lookup reports as set (an empty value is kept),
 // then the owned NAME=VALUE entries, sorted. It is never nil. Owned names are
 // never baseline names, so no name repeats, and the fixed upper-case names
 // need no case folding.

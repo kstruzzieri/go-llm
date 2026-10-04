@@ -783,6 +783,9 @@ func TestBuildHostGitEnvShape(t *testing.T) {
 	if got := buildHostGitEnv("linux", none); got == nil || len(got) != 0 {
 		t.Fatalf("empty parent and no owned entries = %#v, want a non-nil empty slice", got)
 	}
+	if got, want := buildHostGitEnv("linux", none, "LC_ALL=C", "GIT_TERMINAL_PROMPT=0"), []string{"GIT_TERMINAL_PROMPT=0", "LC_ALL=C"}; !slices.Equal(got, want) {
+		t.Fatalf("empty parent with owned entries = %q, want only the owned entries, sorted %q", got, want)
+	}
 	emptyHome := func(name string) (string, bool) {
 		if name == "HOME" {
 			return "", true
