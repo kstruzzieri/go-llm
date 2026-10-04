@@ -249,3 +249,68 @@ func TestMCPToolsValidationMatchesLibrary(t *testing.T) {
 		}
 	}
 }
+
+func TestWithMCPPolicy(t *testing.T) {
+	root := t.TempDir()
+	parse := func(t *testing.T) []mcpclient.Server {
+		t.Helper()
+		servers, err := parseMCPServers([]string{"fs=server one", "npx other"}, []string{"api=https://example.com/mcp"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return servers
+	}
+	// The space after the comma must be trimmed, not rejected (PR 1 parity).
+	servers, err := withMCPPolicy(root, parse(t), 2, []string{"fs=GITHUB_TOKEN, HTTPS_PROXY"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, wantDir := range []string{root, root, ""} {
+		if got := reflect.ValueOf(servers[i]).FieldByName("dir").String(); got != wantDir {
+			t.Fatalf("server %d dir = %q, want %q", i, got, wantDir)
+		}
+	}
+	if got := reflect.ValueOf(servers[0]).FieldByName("env").Len(); got != 2 {
+		t.Fatalf("fs env additions = %d, want 2", got)
+	}
+	for _, tt := range []struct {
+		flags []string
+		want  string
+	}{
+		{[]string{"fs"}, "-mcp-env #1: expected alias=NAME[,NAME...]"},
+		{[]string{"fs="}, "-mcp-env #1: expected alias=NAME[,NAME...]"},
+		{[]string{"missing=A"}, "-mcp-env #1: alias is not a configured MCP server"},
+		{[]string{"api=A"}, "-mcp-env #1: alias is not a stdio MCP server"},
+		{[]string{"fs=A", "fs=B"}, "-mcp-env #2: alias is already configured"},
+		{[]string{"fs=A,1BAD"}, "-mcp-env #1: entry 2 is not a variable name"},
+		{[]string{"fs=TOKEN=credential-value"}, "-mcp-env #1: entry 1 is not a variable name"},
+		{[]string{"fs=A,A"}, "-mcp-env #1: entry 2 repeats a name"},
+	} {
+		_, err := withMCPPolicy(root, parse(t), 2, tt.flags)
+		if err == nil || err.Error() != tt.want || strings.Contains(err.Error(), "credential-value") {
+			t.Fatalf("withMCPPolicy(%q) error = %v, want %q", tt.flags, err, tt.want)
+		}
+	}
+}
+
+func TestMCPEnvRejectedInGoalAndPlan(t *testing.T) {
+	for _, mode := range []string{"-goal", "-plan"} {
+		in, out, diag := runTestFiles(t)
+		err := run([]string{mode, "unused", "-mcp-env", "fs=A"}, in, out, diag)
+		// The exact mode rejection, not a later -mcp-env alias error.
+		if err == nil || !strings.Contains(err.Error(), "does not attach MCP tools") {
+			t.Fatalf("%s with -mcp-env err = %v, want the mode's MCP rejection", mode, err)
+		}
+	}
+}
+
+func TestMCPEnvInvalidThroughCLIDoesNotLeak(t *testing.T) {
+	in, out, diag := runTestFiles(t)
+	err := run([]string{"-mcp-stdio", "fs=server", "-mcp-env", "fs=TOKEN=credential-value", "-no-project-context", "-no-git-context"}, in, out, diag)
+	if err == nil || !strings.Contains(err.Error(), "-mcp-env #1: entry 1 is not a variable name") {
+		t.Fatalf("invalid -mcp-env err = %v", err)
+	}
+	if strings.Contains(err.Error()+readRunTestFile(t, out)+readRunTestFile(t, diag), "credential-value") {
+		t.Fatal("invalid -mcp-env echoed the supplied text")
+	}
+}

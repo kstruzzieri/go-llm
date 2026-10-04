@@ -2,12 +2,15 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -341,6 +344,102 @@ func TestMCPTrustStdioProcess(t *testing.T) {
 	}
 	os.Exit(0)
 }
+
+const mcpEnvProbeMarker = "golem-mcp-envprobe"
+
+// TestMCPEnvProbeProcess is not a test. Re-executed with mcpEnvProbeMarker,
+// the test binary becomes a stdio MCP server whose one tool description
+// reports the child's environment names, PROBE_TOKEN value and working
+// directory, so each catalog digest and pin records what that launch saw.
+func TestMCPEnvProbeProcess(t *testing.T) {
+	if !slices.Contains(os.Args, mcpEnvProbeMarker) {
+		return
+	}
+	var names []string
+	for _, kv := range os.Environ() {
+		name, _, _ := strings.Cut(kv, "=")
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	wd, _ := os.Getwd()
+	raw, _ := json.Marshal(map[string]any{"names": names, "token": os.Getenv("PROBE_TOKEN"), "cwd": wd})
+	srv := gomcp.NewServer(&gomcp.Implementation{Name: "envprobe", Version: "1"}, nil)
+	srv.AddTool(&gomcp.Tool{Name: "probe", Description: string(raw), InputSchema: map[string]any{"type": "object"}}, func(context.Context, *gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
+		return &gomcp.CallToolResult{}, nil
+	})
+	if err := srv.Run(context.Background(), &gomcp.StdioTransport{}); err != nil {
+		os.Exit(1)
+	}
+	os.Exit(0)
+}
+
+// TestMCPStdioRunsInRootWithNamedEnv drives the real CLI. The REPL launch pins
+// the probe's catalog, then `golem mcp inspect` launches it again: matching
+// pinned and candidate identities show both launches saw the same thing, and
+// the candidate description shows what: the canonical -root as working
+// directory and only the baseline plus the -mcp-env names.
+func TestMCPStdioRunsInRootWithNamedEnv(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the literal baseline below is the Unix one; Windows builds this test without running it")
+	}
+	config, root := writeRunLifecycleConfig(t)
+	t.Setenv("PROBE_TOKEN", "probe-value")
+	t.Setenv("GOLEM_MCP_ENV_CANARY", "canary-value")
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := "probe=" + strconv.Quote(executable) + " -test.run=^TestMCPEnvProbeProcess$ -- " + mcpEnvProbeMarker
+	in, out, diag := runTestFiles(t)
+	if err := run([]string{"-config", config, "-root", root, "-mcp-stdio", spec, "-mcp-env", "probe=PROBE_TOKEN", "-no-probe", "-no-cap-probe", "-no-git-context", "-no-project-context", "-no-rag", "-no-memory", "-no-session", "-no-auto-index"}, in, out, diag); err != nil {
+		t.Fatal(err)
+	}
+	if got := readRunTestFile(t, diag); !strings.Contains(got, "mcp: attached 1 tool(s) from 1 configured server(s)\n") {
+		t.Fatalf("REPL startup: %q", got)
+	}
+	inspection, _, err := trustCommand(t, "inspect", "-root", root, "-mcp-stdio", spec, "-mcp-env", "probe=PROBE_TOKEN")
+	if err != nil {
+		t.Fatal(err)
+	}
+	field := func(label string) string {
+		t.Helper()
+		i := strings.Index(inspection, "\n"+label)
+		if i < 0 {
+			t.Fatalf("inspect output lacks %q: %q", label, inspection)
+		}
+		line := inspection[i+1+len(label):]
+		return line[:strings.IndexByte(line, '\n')]
+	}
+	if field("pinned: ") != field("candidate: ") || field("connection pinned: ") != field("connection candidate: ") {
+		t.Fatalf("REPL and inspect launches differ: %q", inspection)
+	}
+	description, err := strconv.Unquote(field("candidate mcp__probe__probe\n  description: "))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var report struct {
+		Names []string `json:"names"`
+		Token string   `json:"token"`
+		Cwd   string   `json:"cwd"`
+	}
+	if err := json.Unmarshal([]byte(description), &report); err != nil {
+		t.Fatal(err)
+	}
+	var wantNames []string
+	for _, name := range []string{"HOME", "LANG", "PATH", "PROBE_TOKEN", "TMPDIR", "USER"} {
+		if _, ok := os.LookupEnv(name); ok {
+			wantNames = append(wantNames, name)
+		}
+	}
+	wantCwd, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(report.Names, wantNames) || report.Token != "probe-value" || report.Cwd != wantCwd {
+		t.Fatalf("child saw (%q, %q, %q), want (%q, probe-value, %q)", report.Names, report.Token, report.Cwd, wantNames, wantCwd)
+	}
+}
+
 func TestMCPTrustDerivedAliases(t *testing.T) {
 	if _, err := exec.LookPath("env"); err != nil {
 		t.Skip("requires env command")
@@ -355,6 +454,9 @@ func TestMCPTrustDerivedAliases(t *testing.T) {
 	second := "env GOLEM_MCP_TRUST_DESCRIPTION=second " + strconv.Quote(executable) + " -test.run=^TestMCPTrustStdioProcess$"
 	servers, err := parseMCPServers([]string{first, second}, nil)
 	if err != nil {
+		t.Fatal(err)
+	}
+	if servers, err = withMCPPolicy(root, servers, 2, nil); err != nil {
 		t.Fatal(err)
 	}
 	if servers[0].Alias != "env" || servers[1].Alias != "env2" {
@@ -391,6 +493,9 @@ func TestMCPTrustDerivedAliases(t *testing.T) {
 	// transport fingerprint to silently reset the operator's alias decision.
 	reordered, err := parseMCPServers([]string{second, first}, nil)
 	if err != nil {
+		t.Fatal(err)
+	}
+	if reordered, err = withMCPPolicy(root, reordered, 2, nil); err != nil {
 		t.Fatal(err)
 	}
 	mgr, warnings, err = connectMCP(t.Context(), root, reordered, false)

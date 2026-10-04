@@ -23,7 +23,7 @@ func openMCPPins(root string) (*mcpclient.PinStore, error) {
 
 func runMCPTrust(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 || (args[0] != "inspect" && args[0] != "approve") {
-		return errors.New("usage: golem mcp inspect|approve [-root .] -mcp-stdio 'alias=command args'|-mcp-http 'alias=https://endpoint' [-digest sha256:… -connection hmac-sha256:…]")
+		return errors.New("usage: golem mcp inspect|approve [-root .] -mcp-stdio 'alias=command args'|-mcp-http 'alias=https://endpoint' [-mcp-env 'alias=NAME,...'] [-digest sha256:… -connection hmac-sha256:…]")
 	}
 	action := args[0]
 	fs := flag.NewFlagSet("golem mcp "+action, flag.ContinueOnError)
@@ -33,6 +33,8 @@ func runMCPTrust(ctx context.Context, args []string, stdout, stderr io.Writer) e
 	var stdio, httpFlags stringSliceFlag
 	fs.Var(&stdio, "mcp-stdio", "one explicitly aliased stdio server")
 	fs.Var(&httpFlags, "mcp-http", "one explicitly aliased HTTP server")
+	var envFlags stringSliceFlag
+	fs.Var(&envFlags, "mcp-env", "forward these variables by name to the stdio server")
 	var selection stringSliceFlag
 	fs.Var(&selection, "mcp-tools", "not accepted: inspect and approve always review the complete catalog")
 	digest, connection := "", ""
@@ -69,6 +71,9 @@ func runMCPTrust(ctx context.Context, args []string, stdout, stderr io.Writer) e
 	servers, err := parseMCPServers(stdio, httpFlags)
 	if err != nil {
 		return errors.New("mcp: invalid server specification")
+	}
+	if servers, err = withMCPPolicy(*root, servers, len(stdio), envFlags); err != nil {
+		return fmt.Errorf("mcp: %w", err)
 	}
 	pins, err := openMCPPins(*root)
 	if err != nil {

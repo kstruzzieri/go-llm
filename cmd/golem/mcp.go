@@ -1,10 +1,12 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"net/url"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 
@@ -25,8 +27,8 @@ func (s *stringSliceFlag) Set(v string) error { *s = append(*s, v); return nil }
 // splitAlias splits "[alias=]spec". The left of the first '=' is the alias only
 // if it fully matches the alias regex; otherwise the whole value is the spec.
 // This keeps URLs with query strings and `env KEY=val cmd` stdio forms intact.
-// Caveat (documented in flag help): a bare leading `KEY=val cmd` is read as
-// alias=KEY; use `env KEY=val cmd` to pass environment variables.
+// Caveat: a bare leading `KEY=val cmd` is read as alias=KEY; stdio servers get
+// a minimal environment, and -mcp-env forwards variables by name.
 func splitAlias(value string) (alias, spec string) {
 	if i := strings.IndexByte(value, '='); i >= 0 {
 		if cand := value[:i]; golemAliasRE.MatchString(cand) {
@@ -184,6 +186,70 @@ func applyMCPTools(servers []mcpclient.Server, flags []string) ([]mcpclient.Serv
 			seen[name] = true
 		}
 		servers[i] = servers[i].WithTools(names...)
+	}
+	return servers, nil
+}
+
+var mcpEnvNameRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// withMCPPolicy applies repeatable -mcp-env 'alias=NAME,...' values (forwarded
+// by name from golem's environment; the CLI never takes values) and runs every
+// stdio server in the absolute workspace root. parseMCPServers places stdio
+// servers first, so servers[:stdioCount] are the stdio ones. Errors name the
+// occurrence and entry by position and never echo supplied text.
+func withMCPPolicy(root string, servers []mcpclient.Server, stdioCount int, envFlags []string) ([]mcpclient.Server, error) {
+	dir, err := filepath.Abs(root)
+	if err != nil {
+		return nil, errors.New("-root: cannot resolve an absolute path")
+	}
+	index := make(map[string]int, len(servers))
+	for i, server := range servers {
+		index[server.Alias] = i
+	}
+	configured := make(map[string]bool, len(envFlags))
+	for n, raw := range envFlags {
+		alias, list, ok := strings.Cut(strings.TrimSpace(raw), "=")
+		if !ok || !golemAliasRE.MatchString(alias) || list == "" {
+			return nil, fmt.Errorf("-mcp-env #%d: expected alias=NAME[,NAME...]", n+1)
+		}
+		i, known := index[alias]
+		if !known {
+			return nil, fmt.Errorf("-mcp-env #%d: alias is not a configured MCP server", n+1)
+		}
+		if i >= stdioCount {
+			return nil, fmt.Errorf("-mcp-env #%d: alias is not a stdio MCP server", n+1)
+		}
+		if configured[alias] {
+			return nil, fmt.Errorf("-mcp-env #%d: alias is already configured", n+1)
+		}
+		configured[alias] = true
+		names := strings.Split(list, ",")
+		vars := make([]mcpclient.EnvVar, len(names))
+		seen := make(map[string]bool, len(names))
+		for e, name := range names {
+			// Variable names cannot contain spaces, so trimming only forgives
+			// "A, B" (as PR 1's -mcp-tools does after review).
+			name = strings.TrimSpace(name)
+			if !mcpEnvNameRE.MatchString(name) {
+				return nil, fmt.Errorf("-mcp-env #%d: entry %d is not a variable name", n+1, e+1)
+			}
+			// Windows environment names are case-insensitive: catch Path,PATH
+			// here with a positional message rather than as a generic
+			// invalid_config from the library. The forwarded spelling is kept.
+			key := name
+			if runtime.GOOS == "windows" {
+				key = strings.ToUpper(name)
+			}
+			if seen[key] {
+				return nil, fmt.Errorf("-mcp-env #%d: entry %d repeats a name", n+1, e+1)
+			}
+			seen[key] = true
+			vars[e] = mcpclient.InheritEnv(name)
+		}
+		servers[i] = servers[i].WithEnv(vars...)
+	}
+	for i := 0; i < stdioCount; i++ {
+		servers[i] = servers[i].WithDir(dir)
 	}
 	return servers, nil
 }
