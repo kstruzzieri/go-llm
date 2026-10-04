@@ -57,8 +57,9 @@ func recordScript(dir, kind string) string {
 		"{\n" +
 		"  printf 'argv'; for a in \"$@\"; do printf ' %s' \"$a\"; done; printf '\\n'\n" +
 		"  if /usr/bin/env | grep -qF " + shellQuote(hostGitCanaryValue) + "; then echo canary; fi\n" +
-		"  if [ -n \"${HOME+set}\" ]; then echo home; fi\n" +
-		"  if [ -n \"${PATH+set}\" ]; then echo path; fi\n" +
+		// The exported environment, not shell variables: sh defaults PATH.
+		"  if /usr/bin/env | grep -q '^HOME='; then echo home; fi\n" +
+		"  if /usr/bin/env | grep -q '^PATH='; then echo path; fi\n" +
 		"} > \"$rec\"\n"
 }
 
@@ -358,7 +359,8 @@ func TestParallelEligibilityHonorsXDGIgnore(t *testing.T) {
 }
 
 // Git keeps a worktree whose post-checkout hook failed (F10). Golem must
-// record it so cleanup removes it and failure reporting names it.
+// record it: a failed run reports recorded roots as preserved (runTaskDriver
+// cleans up only after success), and cleanup, when called, removes them.
 func TestParallelPrepareRecordsWorktreeLeftByFailingHook(t *testing.T) {
 	isolateGitConfig(t)
 	root := newParallelTestRepo(t)

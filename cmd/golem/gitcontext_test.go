@@ -67,7 +67,7 @@ func TestHostGitEnvStripsLocationOverridesCaseInsensitively(t *testing.T) {
 			continue
 		}
 		if got := envValues(env, k); len(got) != 0 {
-			t.Fatalf("%s survived the host Git environment filter: %q", k, got)
+			t.Fatalf("%s reached the host Git environment: %q", k, got)
 		}
 	}
 	if got := envValues(env, "GIT_TERMINAL_PROMPT"); len(got) != 1 || got[0] != "0" {
@@ -95,7 +95,7 @@ func TestGitContextEnvStripsConfigAndDiscoveryOverrides(t *testing.T) {
 			continue
 		}
 		if got := envValues(env, k); len(got) != 0 {
-			t.Fatalf("%s survived the capture environment filter: %q", k, got)
+			t.Fatalf("%s reached the capture environment: %q", k, got)
 		}
 	}
 	if got := envValues(env, "GIT_TERMINAL_PROMPT"); len(got) != 1 || got[0] != "0" {
@@ -698,8 +698,9 @@ func TestLoadGitContextRejectsRedirectedWorktree(t *testing.T) {
 
 // With no filter driver anywhere (isolated HOME, no system config),
 // `git config --get-regexp` exits 1; that is "none", not a capture error.
-// Every other real-Git test here inherits the developer's global config, which
-// may define git-lfs filters, so this is the only case that reaches that exit.
+// Real-Git tests that do not isolate their configuration inherit the
+// developer's global config, which may define git-lfs filters; this one pins
+// the exit-1 path.
 func TestLoadGitContextWithoutAnyFilterDrivers(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

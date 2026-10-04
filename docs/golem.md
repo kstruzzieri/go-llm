@@ -418,7 +418,8 @@ at 4 KiB inside the shared 16 KiB injected-context budget
 it splits with `AGENTS.md` project context, which renders into the remainder
 (and keeps its full 16 KiB when there is no Git block). Capture is read-only
 and helper-resistant: argv-only `git` with `--no-optional-locks` and
-`core.fsmonitor=false`, no shell, a scrubbed environment that enforces
+`core.fsmonitor=false`, no shell, an environment built from scratch (see
+[Golem's own git calls](#golems-own-git-calls)) that enforces
 `GIT_NO_LAZY_FETCH=1`, one 2 s deadline, no status inside submodules (a changed
 submodule HEAD is reported, modified
 submodule content is not), and a refusal when the repository's own `.git/config`
@@ -548,8 +549,8 @@ run without them.
 
 Run without `-plan-workers` to avoid worker worktrees, or pass
 `-no-git-context` to skip the snapshot. If a worker's `post-checkout` hook
-fails, git keeps the worktree; Golem removes it during cleanup or reports it as
-preserved.
+fails, git keeps the worktree; Golem reports it as preserved, like the other
+worker roots a failed run keeps.
 
 This keeps provider keys away from repository code; it does not confine that
 code. Hooks, filters and helpers still run as you with the baseline and can

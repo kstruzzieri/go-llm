@@ -699,8 +699,8 @@ func (c *parallelCoordinator) prepareWorkers(ctx context.Context) error {
 		_, preErr := os.Lstat(workerRoot)
 		if _, err := runParallelGit(ctx, c.root, "worktree", "add", "--detach", workerRoot, c.head); err != nil {
 			// Git keeps a worktree whose post-checkout hook failed. Record a root
-			// this add created, so cleanup removes it and failure reporting names
-			// it; never record a directory that was already there.
+			// this add created, so failure reporting names it as preserved and a
+			// cleanup removes it; never record a directory that was already there.
 			if _, postErr := os.Lstat(workerRoot); errors.Is(preErr, fs.ErrNotExist) && postErr == nil {
 				c.workers[i].root = workerRoot
 			}

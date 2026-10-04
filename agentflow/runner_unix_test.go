@@ -284,7 +284,8 @@ func TestExecRunnerAppendsPWDToACopyOfOwnedEntries(t *testing.T) {
 // -test.run=^TestExecRunnerRemovedCwdHelper$ -- removedcwd <out>`, it removes
 // its own working directory and runs the env probe through a runner with an
 // empty dir, whose PWD therefore needs the (unresolvable) cwd. Exit 6: Run
-// succeeded; exit 7: the probe launched.
+// succeeded; exit 7: the probe launched. On success it writes <out>.ran, so
+// the caller can tell the check ran rather than matching no test.
 func TestExecRunnerRemovedCwdHelper(t *testing.T) {
 	i := slices.Index(os.Args, "--")
 	if i < 0 || len(os.Args) != i+3 || os.Args[i+1] != "removedcwd" {
@@ -308,6 +309,9 @@ func TestExecRunnerRemovedCwdHelper(t *testing.T) {
 	if _, err := os.Stat(os.Args[i+2]); err == nil {
 		os.Exit(7)
 	}
+	if err := os.WriteFile(os.Args[i+2]+".ran", nil, 0o600); err != nil {
+		os.Exit(8)
+	}
 	os.Exit(0)
 }
 
@@ -320,5 +324,8 @@ func TestExecRunnerFailsBeforeLaunchWhenWorkingDirIsUnresolvable(t *testing.T) {
 	cmd.Env = []string{"PATH=" + os.Getenv("PATH")} // no PWD: Getwd must ask the kernel
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("helper: %v: %s", err, output)
+	}
+	if _, err := os.Stat(out + ".ran"); err != nil {
+		t.Fatalf("the helper never ran its check: %v", err)
 	}
 }

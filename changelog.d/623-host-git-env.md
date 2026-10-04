@@ -30,5 +30,5 @@ system git configuration stays trusted.
 #### Fixed
 
 - When a worker worktree's `post-checkout` hook fails, git keeps the worktree.
-  Golem now removes it during cleanup, or reports it as preserved, instead of
-  leaving it behind unreported.
+  Golem now reports it as preserved, like the other worker roots a failed run
+  keeps, instead of leaving it behind unreported.
