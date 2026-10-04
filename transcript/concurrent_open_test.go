@@ -31,6 +31,10 @@ func TestChmodTranscriptDBFilesSkipsSidecarRemovedAfterStat(t *testing.T) {
 		if err := os.WriteFile(p, nil, 0o644); err != nil {
 			t.Fatal(err)
 		}
+		// Chmod, not the create mode: a strict umask would pre-secure the fixture.
+		if err := os.Chmod(p, 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
 	chmod := func(p string, mode os.FileMode) error {
 		if p != path {
