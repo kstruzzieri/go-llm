@@ -63,6 +63,8 @@ func TestNewInvariantsRejectsMalformedTables(t *testing.T) {
 		{"nil pattern", []Invariant{{Tool: "t", Name: "n", Field: "f", Check: PathDeny{}}}, "interceptor: invariant t/n has a PathDeny with no pattern"},
 		{"pointer check", []Invariant{{Tool: "t", Name: "n", Field: "f", Check: &deny}}, "interceptor: invariant t/n has unsupported check kind *interceptor.PathDeny"},
 		{"typed nil check", []Invariant{{Tool: "t", Name: "n", Field: "f", Check: (*PathDeny)(nil)}}, "interceptor: invariant t/n has unsupported check kind *interceptor.PathDeny"},
+		{"credential pointer check", []Invariant{{Tool: "t", Name: "n", Field: "f", Check: &CredentialPath{}}}, "interceptor: invariant t/n has unsupported check kind *interceptor.CredentialPath"},
+		{"credential typed nil check", []Invariant{{Tool: "t", Name: "n", Field: "f", Check: (*CredentialPath)(nil)}}, "interceptor: invariant t/n has unsupported check kind *interceptor.CredentialPath"},
 		{"duplicate", []Invariant{{Tool: "t", Name: "n", Field: "f", Check: deny}, {Tool: "t", Name: "n", Field: "g", Check: deny}}, "interceptor: duplicate invariant t/n"},
 	}
 	for _, tc := range cases {
@@ -192,8 +194,8 @@ func inspectWith(t *testing.T, iv Invariants, tool, args string) []agent.Finding
 }
 
 // TestPathDenyComponentMatrix covers every protected component on every write
-// tool, at the root and nested, and every credential component plus exact
-// .env on read_file.
+// tool, at the root and nested, and every credential component and the #627
+// read set (widened names, templates, aliases) on read_file.
 func TestPathDenyComponentMatrix(t *testing.T) {
 	writeTools := map[string]string{
 		"write_file":       `{"path":%s,"content":"x"}`,
@@ -229,7 +231,16 @@ func TestPathDenyComponentMatrix(t *testing.T) {
 			expectOne(t, inspect(t, "read_file", sprintfJSON(`{"path":%s}`, p)), "credential_path", `path "`+clean+`" matches protected pattern`)
 		})
 	}
-	for _, p := range []string{".git/config", ".env.example", ".env.local", "env", "sub/.envrc", ".environment"} {
+	for _, tc := range []struct{ path, normalized string }{
+		{".git/config", ".git/config"}, {"sub/.git/config", "sub/.git/config"}, {".git/modules/x/config", ".git/modules/x/config"},
+		{".env.local", ".env.local"}, {".netrc", ".netrc"}, {"_netrc", "_netrc"}, {".npmrc", ".npmrc"},
+		{".pypirc", ".pypirc"}, {".git-credentials", ".git-credentials"}, {".\u00DFh/id_rsa", ".ssh/id_rsa"},
+	} {
+		t.Run("read_file/"+tc.path, func(t *testing.T) {
+			expectOne(t, inspect(t, "read_file", sprintfJSON(`{"path":%s}`, tc.path)), "credential_path", `path "`+tc.normalized+`" matches protected pattern`)
+		})
+	}
+	for _, p := range []string{".env.example", ".env.sample", ".env.template", ".env.dist", "env", "sub/.envrc", ".environment", ".git/HEAD", ".env/bin/activate"} {
 		t.Run("read_file allows "+p, func(t *testing.T) {
 			expectNone(t, inspect(t, "read_file", sprintfJSON(`{"path":%s}`, p)))
 		})
@@ -250,6 +261,10 @@ func TestPathDenyNormalization(t *testing.T) {
 		{"dot-slash cleaned", `{"path":"./.git/hooks/pre-commit","content":"x"}`, `path ".git/hooks/pre-commit" matches protected pattern`},
 		{"absolute kube", `{"path":"/abs/.kube/config","content":"x"}`, `path "/abs/.kube/config" matches protected pattern`},
 		{"parent escape kept", `{"path":"../.git/config","content":"x"}`, `path "../.git/config" matches protected pattern`},
+		{"long s alias", `{"path":".\u017Fsh/authorized_keys","content":"x"}`, `path ".ssh/authorized_keys" matches protected pattern`},
+		{"sharp s alias", `{"path":".\u00DFh/x","content":"x"}`, `path ".ssh/x" matches protected pattern`},
+		{"hfs ignorable in git", `{"path":".g\u200Cit/hooks/pre-commit","content":"x"}`, `path ".git/hooks/pre-commit" matches protected pattern`},
+		{"zero width space is not ignored", `{"path":".g\u200Bit/hooks/pre-commit","content":"x"}`, ""},
 		{"gitignore is not .git", `{"path":".gitignore","content":"x"}`, ""},
 		{"github dir is not .git", `{"path":".github/workflows/ci.yml","content":"x"}`, ""},
 		{"plain git dir", `{"path":"notes/git/x","content":"x"}`, ""},
