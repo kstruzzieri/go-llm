@@ -512,8 +512,9 @@ func settleAgentflowAttempt(ctx context.Context, client afClient, plan *agentflo
 }
 
 func (d *driver) resume(ctx context.Context, root string, planJSON []byte, approved *agentflow.WorkflowRecommendation) (agentflow.NextActionState, error) {
-	// #612 R6: resume mutates, so it runs the full probe (version gate and
-	// capabilities, including #611's block-step) before its first next-action.
+	// #612 R6: resume mutates, so it runs the base probe (version gate and the
+	// base capability probes, including #611's block-step) before its first
+	// next-action. It does not probe every command resume later uses.
 	if err := d.af.Probe(ctx); err != nil {
 		return agentflow.NextActionState{}, &agentflowUnavailableError{fmt.Errorf("agentflow unavailable: %w", err)}
 	}

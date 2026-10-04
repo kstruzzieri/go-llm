@@ -458,7 +458,7 @@ func TestAgentflowRecoveryOutputEscapesTerminalControls(t *testing.T) {
 		t.Fatal(err)
 	}
 	var report bytes.Buffer
-	reportAgentflowRecovery(context.Background(), &report, agentflow.NewOwnedClient(&recoveryRunner{payload: payload}, t.TempDir(), "golem"), nil)
+	reportAgentflowRecovery(context.Background(), &report, agentflow.NewOwnedClient(&recoveryRunner{payload: payload}, t.TempDir(), "golem"), errors.New("step P1 failed"))
 	if strings.Contains(report.String(), "\x1b") || strings.Contains(report.String(), "\u0085") || strings.Contains(report.String(), "\nproof: verified\n") {
 		t.Fatalf("raw terminal control or forged line reached recovery report: %q", report.String())
 	}

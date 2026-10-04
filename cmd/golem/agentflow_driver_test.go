@@ -658,11 +658,17 @@ func TestDriver_WorkflowFailuresStopAtTheirMutationBoundary(t *testing.T) {
 			af := &fakeAF{failAt: map[string]error{tt.failAt: errors.New("scripted failure")}}
 			d := &driver{af: af, plan: reviewPlan(), planPath: "plan.json", out: io.Discard,
 				runStep: func(context.Context, agentflow.Step, string, string) error { return nil }}
-			if _, err := d.run(context.Background()); err == nil || !strings.Contains(err.Error(), tt.wantText) {
+			_, err := d.run(context.Background())
+			if err == nil || !strings.Contains(err.Error(), tt.wantText) {
 				t.Fatalf("error = %v, want %q", err, tt.wantText)
 			}
 			if !equalSeq(af.seq, tt.wantSeq) {
 				t.Fatalf("failure sequence = %v, want %v", af.seq, tt.wantSeq)
+			}
+			// #612 R10: only the probe failure skips the recovery report.
+			var u *agentflowUnavailableError
+			if got, want := errors.As(err, &u), tt.failAt == "probe-workflow"; got != want {
+				t.Fatalf("%s: marked unavailable = %t, want %t", tt.name, got, want)
 			}
 		})
 	}
@@ -1088,30 +1094,36 @@ func TestRunAgentflowTask_RejectedVersionMakesNoOtherCall(t *testing.T) {
 func TestDriverRun_MarksProbeFailuresUnavailable(t *testing.T) {
 	for _, tt := range []struct {
 		probe    string
+		wantErr  string
 		parallel bool
 		review   string
 	}{
-		{probe: "probe"},
-		{probe: "probe-parallel", parallel: true},
-		{probe: "probe-workflow"},
-		{probe: "probe-review", review: "review.json"},
+		{probe: "probe", wantErr: "agentflow unavailable: too old"},
+		{probe: "probe-parallel", wantErr: "agentflow parallel runtime unavailable: too old", parallel: true},
+		{probe: "probe-workflow", wantErr: "agentflow workflow routing unavailable: too old"},
+		{probe: "probe-review", wantErr: "agentflow review unavailable: too old", review: "review.json"},
 	} {
-		af := &fakeAF{failAt: map[string]error{tt.probe: errors.New("too old")}}
-		d := &driver{
-			af: af, plan: stopTestPlan(), reviewManifest: tt.review,
-			runStep: func(context.Context, agentflow.Step, string, string) error { return nil },
-		}
-		if tt.parallel {
-			d.parallelCohort = func(context.Context) error { return nil }
-		}
-		_, err := d.run(context.Background())
-		var unavailable *agentflowUnavailableError
-		if !errors.As(err, &unavailable) || !strings.Contains(err.Error(), "too old") {
-			t.Fatalf("%s failure = %v, want *agentflowUnavailableError wrapping it", tt.probe, err)
-		}
-		if got := af.seq[len(af.seq)-1]; got != tt.probe {
-			t.Fatalf("%s: last call = %q (seq %v), want the failing probe", tt.probe, got, af.seq)
-		}
+		t.Run(tt.probe, func(t *testing.T) {
+			af := &fakeAF{failAt: map[string]error{tt.probe: errors.New("too old")}}
+			d := &driver{
+				af: af, plan: stopTestPlan(), reviewManifest: tt.review,
+				runStep: func(context.Context, agentflow.Step, string, string) error { return nil },
+			}
+			if tt.parallel {
+				d.parallelCohort = func(context.Context) error { return nil }
+			}
+			_, err := d.run(context.Background())
+			var unavailable *agentflowUnavailableError
+			if !errors.As(err, &unavailable) {
+				t.Fatalf("failure = %v, want *agentflowUnavailableError", err)
+			}
+			if err.Error() != tt.wantErr {
+				t.Fatalf("error = %q, want %q", err.Error(), tt.wantErr)
+			}
+			if got := af.seq[len(af.seq)-1]; got != tt.probe {
+				t.Fatalf("last call = %q (seq %v), want the failing probe", got, af.seq)
+			}
+		})
 	}
 }
 
