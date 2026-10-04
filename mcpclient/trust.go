@@ -179,7 +179,7 @@ func inspection(s *PinStore, alias string, prior, candidate toolCatalog) *Inspec
 var digestRE = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 
 func validateTrustConfig(servers []Server, pins *PinStore, policy envPolicy) error {
-	if pins == nil || pins.workspace == "" || pins.dir == "" {
+	if pins == nil || pins.workspace == "" || pins.dir == "" || pins.connKey == nil {
 		return errors.New("mcpclient: initialized pin store required")
 	}
 	seen := make(map[string]bool, len(servers))

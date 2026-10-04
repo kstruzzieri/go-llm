@@ -47,6 +47,8 @@ type PinStore struct {
 	workspace string
 	base      string
 	dir       string
+	// connKey fingerprints connection identities; one key per user data dir.
+	connKey *signing.HMACSigner
 	// Private per-instance seams keep deterministic fault tests isolated.
 	ops pinFileOps
 }
@@ -98,6 +100,17 @@ func newPinStore(workspace, base string) (*PinStore, error) {
 		return nil, err
 	}
 	if err = root.Close(); err != nil {
+		return nil, err
+	}
+	// The connection key lives beside the per-workspace pin directories, in
+	// the private golem/mcp-pins directory openRoot just created. A missing key
+	// is created; an unreadable or corrupt one fails here and is never
+	// regenerated (spec §5.6).
+	keyPath := filepath.Join(base, "golem", "mcp-pins", connectionKeyFile)
+	if err = pathguard.ValidateOutside(keyPath, canonical); err != nil {
+		return nil, err
+	}
+	if s.connKey, _, err = signing.LoadOrCreateHMAC(keyPath); err != nil {
 		return nil, err
 	}
 	return s, nil
