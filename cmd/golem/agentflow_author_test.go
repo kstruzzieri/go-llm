@@ -1126,12 +1126,12 @@ func TestRunAgentflowAuthor_InterruptCancelsLockPlan(t *testing.T) {
 
 func TestRunAgentflowAuthor_RefusesLockedPlan(t *testing.T) {
 	root := t.TempDir()
-	writePlanLock(t, root, `{"schema_version":"0.3.0","objective":"x","steps":[{"id":"S1"}],"locked":true}`)
+	writePlanLock(t, root, `{"schema_version":"1.0.0","objective":"x","steps":[{"id":"S1"}],"locked":true}`)
 	caller := &scriptCaller{responses: []agent.ModelResult{submitPlanCall(validIRJSON(t))}}
 	sess := newTestSession(t, caller, root)
 	var out, errb bytes.Buffer
-	if err := runAgentflowAuthorWithClient(context.Background(), &out, &errb, nil, sess, flags{goal: "x", goalSet: true}, root, &stubLocker{}, nil); err == nil {
-		t.Error("expected clobber-guard refusal for a locked plan")
+	if err := runAgentflowAuthorWithClient(context.Background(), &out, &errb, nil, sess, flags{goal: "x", goalSet: true}, root, &stubLocker{}, nil); err == nil || !strings.Contains(err.Error(), "already locked") {
+		t.Errorf("err = %v, want the clobber guard's already-locked refusal", err)
 	}
 }
 

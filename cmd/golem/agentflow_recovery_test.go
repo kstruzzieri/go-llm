@@ -454,7 +454,7 @@ func newResumeFixtureWithPlan(t *testing.T, plan *agentflow.Plan) resumeFixture 
 	if err := os.WriteFile(filepath.Join(agentDir, "plan.lock.json"), planJSON, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	execution := []byte(`{"schema_version":"0.4.0","plan":".agent/plan.lock.json","command_policy":{"command_timeout_seconds":600}}`)
+	execution := []byte(`{"schema_version":"1.0.0","plan":".agent/plan.lock.json","command_policy":{"command_timeout_seconds":600}}`)
 	if err := os.WriteFile(filepath.Join(agentDir, "execution.contract.json"), execution, 0o600); err != nil {
 		t.Fatal(err)
 	}

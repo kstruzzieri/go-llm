@@ -1442,6 +1442,10 @@ func runAgentflowAuthorWithClient(ctx context.Context, stdout, stderr io.Writer,
 	if err := guardExistingPlan(root); err != nil {
 		return err
 	}
+	// #612 R5: refuse retained non-1.x AgentFlow state before any AgentFlow call.
+	if err := checkAgentflowStateMajor(root); err != nil {
+		return err
+	}
 
 	// Fail before any model work when AgentFlow is unavailable.
 	if err := client.Probe(loopCtx); err != nil {

@@ -529,6 +529,10 @@ func runAgentflowTask(ctx context.Context, stdout, stderr io.Writer, interrupts 
 	if err := validateTraceability(plan); err != nil {
 		return err
 	}
+	// #612 R5: refuse retained non-1.x AgentFlow state before any AgentFlow call.
+	if err := checkAgentflowStateMajor(root); err != nil {
+		return err
+	}
 	evidence, err := readEvidenceSidecar(f.evidencePath)
 	if err != nil {
 		return err
