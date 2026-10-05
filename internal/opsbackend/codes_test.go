@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kstruzzieri/go-llm/provider"
 )
@@ -24,7 +25,9 @@ func TestClassify(t *testing.T) {
 	live := context.Background()
 	canceled, cancel := context.WithCancel(context.Background())
 	cancel()
-	wrap := func(err error) error { return &url.Error{Op: "Get", URL: "http://127.0.0.1:1/x?secret=1", Err: err} }
+	expired, cancelExpired := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancelExpired()
+	wrap :=func(err error) error { return &url.Error{Op: "Get", URL: "http://127.0.0.1:1/x?secret=1", Err: err} }
 	for _, tc := range []struct {
 		name string
 		ctx  context.Context
@@ -40,7 +43,13 @@ func TestClassify(t *testing.T) {
 		{"net timeout", live, wrap(timeoutErr{}), CodeTimeout, true},
 		{"dial", live, wrap(errors.New("connect: connection refused")), CodeUnreachable, true},
 		{"coded passthrough", live, newCoded(CodeMalformed, "running"), CodeMalformed, true},
+		// The inner error has no Timeout method, so only the DeadlineExceeded arm codes it.
+		{"wrapped deadline", live, &url.Error{Op: "Get", URL: "http://127.0.0.1:1/x", Err: fmt.Errorf("read body: %w", context.DeadlineExceeded)}, CodeTimeout, true},
 		{"caller canceled", canceled, wrap(context.Canceled), "", false},
+		// A tick deadline is an outage, not caller cancellation.
+		{"tick deadline", expired, wrap(context.DeadlineExceeded), CodeTimeout, true},
+		// Cancellation is judged by the caller's context, not by the error.
+		{"canceled ctx, dial err", canceled, wrap(errors.New("connect: connection refused")), "", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := classify(tc.ctx, "running", tc.err)
