@@ -31,11 +31,12 @@ const (
 	SentinelName        = "SENTINEL-NAME-7f3a"
 	SentinelDescription = "SENTINEL-DESCRIPTION-7f3a"
 	SentinelModelMeta   = "SENTINEL-MODELMETA-7f3a"
+	SentinelContentType = "SENTINEL-CONTENTTYPE-7f3a"
 )
 
 // AllSentinels lists every sentinel for absence checks.
 var AllSentinels = []string{SentinelCmd, SentinelProxy, SentinelError, SentinelMeta, SentinelPath, SentinelQuery, SentinelAPIKey,
-	SentinelName, SentinelDescription, SentinelModelMeta}
+	SentinelName, SentinelDescription, SentinelModelMeta, SentinelContentType}
 
 // ContainsSentinel reports whether s holds any sentinel by their shared
 // "SENTINEL-" prefix, case-insensitively, so a clipped or case-folded leak is
@@ -79,6 +80,8 @@ type Row struct {
 	DurationMs int
 	Error      string
 	Meta       string
+	// ContentType is resp_content_type; empty means "application/json".
+	ContentType string
 }
 
 // MetricsJSON renders rows exactly as llama-swap v235's /api/metrics does,
@@ -111,6 +114,9 @@ func MetricsJSON(rows ...Row) string {
 		e := entry{ID: r.ID, Timestamp: r.At, Model: r.Model, ReqPath: r.Path, RespContentType: "application/json",
 			RespStatusCode: r.Status, DurationMs: r.DurationMs, ErrorMsg: r.Error,
 			Tokens: tokens{Cache: r.Cache, Draft: -1, DraftAcc: -1, Input: r.Input, Output: r.Output, PromptPS: r.PromptPS, TokensPS: r.TokensPS}}
+		if r.ContentType != "" {
+			e.RespContentType = r.ContentType
+		}
 		if r.Meta != "" {
 			e.Metadata = map[string]string{"client": r.Meta}
 		}
@@ -123,12 +129,13 @@ func MetricsJSON(rows ...Row) string {
 	return string(b)
 }
 
-// DefaultRows returns three gemma rows near now, in now's zone: timings,
-// usage-only (no cache count, so -1 as v235 reports it), and a 500 whose error
-// text and path carry sentinels.
+// DefaultRows returns three gemma rows near now, in now's zone: timings (its
+// content type carries a sentinel), usage-only (no cache count, so -1 as v235
+// reports it; its metadata carries a sentinel), and a 500 whose error text and
+// path carry sentinels.
 func DefaultRows(now time.Time) []Row {
 	return []Row{
-		{ID: 0, At: now.Add(-3 * time.Minute), Model: "gemma4:31b", Path: "/v1/chat/completions", Status: 200, Input: 900, Output: 300, Cache: 100, PromptPS: 910.5, TokensPS: 41.25, DurationMs: 8200},
+		{ID: 0, At: now.Add(-3 * time.Minute), Model: "gemma4:31b", Path: "/v1/chat/completions", Status: 200, Input: 900, Output: 300, Cache: 100, PromptPS: 910.5, TokensPS: 41.25, DurationMs: 8200, ContentType: "application/json; " + SentinelContentType},
 		{ID: 1, At: now.Add(-2 * time.Minute), Model: "gemma4:31b", Path: "/v1/chat/completions", Status: 200, Input: 1200, Output: 80, Cache: -1, PromptPS: -1, TokensPS: -1, DurationMs: 2100, Meta: SentinelMeta},
 		{ID: 2, At: now.Add(-1 * time.Minute), Model: "gemma4:31b", Path: "/" + SentinelPath + "/x?" + SentinelQuery + "=1", Status: 500, DurationMs: 40, Error: SentinelError},
 	}
@@ -156,16 +163,18 @@ func llamaSwapDispatch(p string) bool {
 	return dispatchExact[p] || strings.HasPrefix(p, "/upstream/") || strings.HasPrefix(p, "/api/models/unload/")
 }
 
-// ollamaDispatchExact is every Ollama route that loads, runs or changes a
-// model; /api/blobs/ (blob upload) is matched by prefix.
+// ollamaDispatchExact lists the native Ollama routes that load, run or change
+// a model. ollamaDispatch adds /api/blobs/ (blob upload) and every /v1/ route
+// except the /v1/models listing, so OpenAI-compatible routes newer Ollama
+// releases add (/v1/responses, /v1/messages) count too.
 var ollamaDispatchExact = map[string]bool{
 	"/api/generate": true, "/api/chat": true, "/api/embed": true, "/api/embeddings": true,
 	"/api/pull": true, "/api/push": true, "/api/create": true, "/api/copy": true, "/api/delete": true,
-	"/v1/chat/completions": true, "/v1/completions": true, "/v1/embeddings": true,
 }
 
 func ollamaDispatch(p string) bool {
-	return ollamaDispatchExact[p] || strings.HasPrefix(p, "/api/blobs/")
+	return ollamaDispatchExact[p] || strings.HasPrefix(p, "/api/blobs/") ||
+		(strings.HasPrefix(p, "/v1/") && p != "/v1/models" && !strings.HasPrefix(p, "/v1/models/"))
 }
 
 // Server is the shared recording core of both fakes.

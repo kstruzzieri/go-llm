@@ -155,9 +155,9 @@ func TestOllamaLoadAndMutateRoutesCountAsLoads(t *testing.T) {
 	loads := []string{
 		"/api/generate", "/api/chat", "/api/embed", "/api/embeddings", "/api/pull", "/api/push",
 		"/api/create", "/api/copy", "/api/delete", "/api/blobs/sha256:x",
-		"/v1/chat/completions", "/v1/completions", "/v1/embeddings",
+		"/v1/chat/completions", "/v1/completions", "/v1/embeddings", "/v1/responses",
 	}
-	reads := []string{"/api/ps", "/api/tags", "/api/version", "/api/show", "/v1/models"}
+	reads := []string{"/api/ps", "/api/tags", "/api/version", "/api/show", "/v1/models", "/v1/models/llama3"}
 	var want int64
 	for i, p := range append(append([]string(nil), loads...), reads...) {
 		resp, err := http.Post(f.URL()+p, "application/json", strings.NewReader("{}"))
@@ -254,8 +254,10 @@ func TestDefaultBodiesMatchV235Shape(t *testing.T) {
 		Running []map[string]any `json:"running"`
 	}
 	if err := json.Unmarshal([]byte(DefaultRunning), &running); err != nil || len(running.Running) != 1 ||
-		running.Running[0]["name"] != SentinelName || running.Running[0]["description"] != SentinelDescription {
-		t.Fatalf("running = %+v, %v: name and description must carry sentinels", running, err)
+		running.Running[0]["name"] != SentinelName || running.Running[0]["description"] != SentinelDescription ||
+		!strings.Contains(fmt.Sprint(running.Running[0]["cmd"]), SentinelCmd) ||
+		!strings.Contains(fmt.Sprint(running.Running[0]["proxy"]), SentinelProxy) {
+		t.Fatalf("running = %+v, %v: cmd, proxy, name and description must carry sentinels", running, err)
 	}
 	var models struct {
 		Data []map[string]any `json:"data"`
@@ -285,9 +287,15 @@ func TestDefaultBodiesMatchV235Shape(t *testing.T) {
 	if loc := DefaultRows(now)[0].At.Location(); loc != time.UTC {
 		t.Fatalf("DefaultRows zone = %v, want the caller's", loc)
 	}
-	for _, s := range regexp.MustCompile(`SENTINEL-[A-Z]+-7f3a`).FindAllString(DefaultRunning+DefaultModels+MetricsJSON(DefaultRows(now)...), -1) {
+	bodies := DefaultRunning + DefaultModels + MetricsJSON(DefaultRows(now)...)
+	for _, s := range regexp.MustCompile(`SENTINEL-[A-Z]+-7f3a`).FindAllString(bodies, -1) {
 		if !slices.Contains(AllSentinels, s) {
 			t.Fatalf("default bodies carry %s, which AllSentinels omits", s)
+		}
+	}
+	for _, s := range AllSentinels {
+		if s != SentinelAPIKey && !strings.Contains(bodies, s) {
+			t.Fatalf("no default body carries %s", s)
 		}
 	}
 	resp, err := http.Get(NewLlamaSwap(t).URL() + "/api/metrics")
@@ -296,8 +304,12 @@ func TestDefaultBodiesMatchV235Shape(t *testing.T) {
 	}
 	defer func() { _ = resp.Body.Close() }()
 	var rows []struct {
-		Timestamp string `json:"timestamp"`
-		Tokens    struct {
+		Timestamp   string            `json:"timestamp"`
+		ReqPath     string            `json:"req_path"`
+		ContentType string            `json:"resp_content_type"`
+		ErrorMsg    string            `json:"error_msg"`
+		Metadata    map[string]string `json:"metadata"`
+		Tokens      struct {
 			Cache int `json:"cache_tokens"`
 		} `json:"tokens"`
 	}
@@ -308,6 +320,12 @@ func TestDefaultBodiesMatchV235Shape(t *testing.T) {
 		if !strings.HasSuffix(r.Timestamp, "-04:00") {
 			t.Fatalf("timestamp %q: want a local-time offset like v235's", r.Timestamp)
 		}
+	}
+	if !strings.Contains(rows[0].ContentType, SentinelContentType) ||
+		!strings.Contains(fmt.Sprint(rows[1].Metadata), SentinelMeta) ||
+		!strings.Contains(rows[2].ErrorMsg, SentinelError) ||
+		!strings.Contains(rows[2].ReqPath, SentinelPath) || !strings.Contains(rows[2].ReqPath, SentinelQuery) {
+		t.Fatalf("metrics rows = %+v: resp_content_type, metadata, error_msg and req_path must carry sentinels", rows)
 	}
 	if rows[1].Tokens.Cache != -1 {
 		t.Fatalf("usage-only row cache_tokens = %d, want -1 as v235 reports a missing count", rows[1].Tokens.Cache)
