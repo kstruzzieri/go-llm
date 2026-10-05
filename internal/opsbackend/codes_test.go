@@ -27,7 +27,7 @@ func TestClassify(t *testing.T) {
 	cancel()
 	expired, cancelExpired := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
 	defer cancelExpired()
-	wrap :=func(err error) error { return &url.Error{Op: "Get", URL: "http://127.0.0.1:1/x?secret=1", Err: err} }
+	wrap := func(err error) error { return &url.Error{Op: "Get", URL: "http://127.0.0.1:1/x?secret=1", Err: err} }
 	for _, tc := range []struct {
 		name string
 		ctx  context.Context
