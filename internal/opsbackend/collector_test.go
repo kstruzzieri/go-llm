@@ -119,16 +119,23 @@ func TestCollectorRemoteAndInvalidAreNeverContacted(t *testing.T) {
 	}
 }
 
+// TestCollectorVersionClassification: a classified runtime is never asked
+// again; a 401 is not a classification (v235 puts /api/version behind its
+// API-key check), so it stays unidentified and is retried after backoff.
 func TestCollectorVersionClassification(t *testing.T) {
 	for _, tc := range []struct {
 		name, body string
 		status     int
+		kind       Kind
 		support    string
 		version    string
+		lastErr    Code
+		retried    bool
 	}{
-		{"other llama-swap", `{"build_date":"x","commit":"y","version":"v240"}`, 0, SupportUnsupported, "v240"},
-		{"ollama-shaped", `{"version":"0.12.3"}`, 0, SupportUnrecognized, ""},
-		{"404 runtime", "", http.StatusNotFound, SupportUnrecognized, ""},
+		{"other llama-swap", `{"build_date":"x","commit":"y","version":"v240"}`, 0, KindNone, SupportUnsupported, "v240", "", false},
+		{"ollama-shaped", `{"version":"0.12.3"}`, 0, KindNone, SupportUnrecognized, "", "", false},
+		{"404 runtime", "", http.StatusNotFound, KindNone, SupportUnrecognized, "", CodeHTTPStatus, false},
+		{"401 api key", "", http.StatusUnauthorized, KindUnidentified, SupportUnknown, "", CodeUnauthorized, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := opsfixture.NewLlamaSwap(t)
@@ -137,12 +144,19 @@ func TestCollectorVersionClassification(t *testing.T) {
 			} else {
 				f.SetBody("/api/version", tc.body)
 			}
-			c := NewCollector([]BackendSpec{lsSpec(f.URL())}, Options{Clock: newFakeClock().clock()})
+			clk := newFakeClock()
+			c := NewCollector([]BackendSpec{lsSpec(f.URL())}, Options{Interval: 2 * time.Second, Clock: clk.clock()})
 			b := c.Tick(context.Background()).Backends[0]
-			if b.Kind != KindNone || b.Support != tc.support || b.Version != tc.version {
+			if b.Kind != tc.kind || b.Support != tc.support || b.Version != tc.version || surface(b, "version").LastError != tc.lastErr {
 				t.Fatalf("backend = %+v requests = %v", b, f.Requests())
 			}
-			assertRequests(t, f, reqVersion)
+			clk.advance(2*time.Second, 2*time.Second) // past the first backoff
+			c.Tick(context.Background())
+			if tc.retried {
+				assertRequests(t, f, reqVersion, reqVersion)
+			} else {
+				assertRequests(t, f, reqVersion)
+			}
 		})
 	}
 }
@@ -467,6 +481,28 @@ func TestCollectorOllama(t *testing.T) {
 		t.Fatalf("an Ollama model leaving /api/ps must read unknown, never unloaded: %+v", tr)
 	}
 	assertRequests(t, f, reqPS, reqPS)
+}
+
+// TestCollectorSkippedResidencyReadOpensGap: spec §4.5 opens a gap when a
+// residency read fails; one the tick deadline skipped is no sample either,
+// so no transition is inferred across it.
+func TestCollectorSkippedResidencyReadOpensGap(t *testing.T) {
+	f := opsfixture.NewLlamaSwap(t)
+	clk := newFakeClock()
+	c := NewCollector([]BackendSpec{lsSpec(f.URL())}, Options{Interval: 2 * time.Second, Clock: clk.clock()})
+	f.SetBody("/running", `{"running":[]}`)
+	c.Tick(context.Background()) // baseline, nothing loaded
+	spent, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	clk.advance(2*time.Second, 2*time.Second)
+	c.Tick(spent) // on schedule, but no budget left: /running is never read
+	f.SetBody("/running", `{"running":[{"model":"m","state":"ready","ttl":600}]}`)
+	clk.advance(2*time.Second, 2*time.Second)
+	b := c.Tick(context.Background()).Backends[0]
+	if got := memory(t, b, "m"); got.Loads != 0 || b.Gaps != 1 || b.Periods != 2 {
+		t.Fatalf("load inferred across a skipped read: mem=%+v gaps=%d periods=%d", got, b.Gaps, b.Periods)
+	}
+	assertRequests(t, f, reqVersion, reqRunning, reqMetrics, reqModels, reqRunning, reqMetrics, reqModels)
 }
 
 // TestCollectorUnstartedRequestIsNotAnObservation: once the tick deadline

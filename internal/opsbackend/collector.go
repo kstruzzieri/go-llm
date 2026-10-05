@@ -327,10 +327,13 @@ func (c *Collector) fetch(callerCtx, ctx context.Context, b *backendState, cl *c
 		return false
 	}
 	// A request the tick deadline or the caller stopped before it started
-	// says nothing about the backend: nothing is sent or recorded.
-	// ponytail: a skipped residency read does not open a gap; a backend
-	// starved over 3 intervals keeps inferring transitions across the hole.
+	// says nothing about the backend: nothing is sent, and reachability and
+	// backoff stay untouched. A skipped residency read is still a missing
+	// sample, so it opens a gap like a failed one (spec §4.5).
 	if ctx.Err() != nil {
+		if surface == "running" || surface == "ps" {
+			b.breakPeriod()
+		}
 		return false
 	}
 	body, err := cl.get(ctx, surface, path, limit)
@@ -387,7 +390,11 @@ func (c *Collector) identifyBackend(callerCtx, ctx context.Context, b *backendSt
 		version, isLS = decodeVersion(body)
 		return nil
 	}) && b.surface("version").lastErr != CodeHTTPStatus {
-		return // no answer yet: retried under backoff
+		// No answer yet: retried under backoff. A 401 or 403 is coded
+		// unauthorized, not http_status, so it lands here too: v235 serves
+		// /api/version behind its API-key check (server.go:208,260;
+		// auth.go:34), so a wrong api_key is not another runtime.
+		return
 	}
 	// Every outcome sets Version: a backend that read v235 before an outage
 	// must not keep that version once it answers as something else.
