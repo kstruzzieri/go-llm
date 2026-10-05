@@ -72,6 +72,41 @@ func TestHeldDispatchCountsAsLoadWhenClientGivesUp(t *testing.T) {
 	if n := f.Loads.Load(); n != 1 {
 		t.Fatalf("would-be loads = %d, want 1: a dispatch request counts when received, even if never answered", n)
 	}
+	if got := f.Requests(); len(got) != 1 || got[0] != (Request{"GET", "/props?model=x"}) {
+		t.Fatalf("requests = %v, want the held dispatch recorded on receipt", got)
+	}
+}
+
+// TestEveryV235DispatchRouteCountsAsLoad lists llama-swap v235's
+// model-dispatched routes independently of dispatchExact.
+func TestEveryV235DispatchRouteCountsAsLoad(t *testing.T) {
+	f := NewLlamaSwap(t)
+	paths := []string{
+		// modelPostJSONRoutes
+		"/v1/chat/completions", "/v1/responses", "/v1/completions", "/v1/messages",
+		"/v1/messages/count_tokens", "/v1/embeddings", "/reranking", "/rerank", "/v1/rerank",
+		"/v1/reranking", "/infill", "/completion", "/v1/audio/speech", "/v1/audio/voices",
+		"/v1/images/generations", "/sdapi/v1/txt2img", "/sdapi/v1/img2img",
+		"/v/chat/completions", "/v/responses", "/v/completions", "/v/messages",
+		"/v/messages/count_tokens", "/v/embeddings", "/v/rerank", "/v/reranking",
+		// modelPostFormRoutes
+		"/v1/audio/transcriptions", "/v1/images/edits",
+		// modelGetRoutes (/v1/audio/voices is listed above)
+		"/sdapi/v1/loras", "/props",
+		// operations and passthrough
+		"/unload", "/api/models/unload", "/api/models/unload/m", "/upstream/m/v1/models",
+	}
+	for i, p := range paths {
+		resp, err := http.Get(f.URL() + p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+		if n := f.Loads.Load(); n != int64(i+1) {
+			t.Fatalf("%s: would-be loads = %d, want %d", p, n, i+1)
+		}
+	}
 }
 
 func TestOllamaStatusOverrideWithoutBody(t *testing.T) {

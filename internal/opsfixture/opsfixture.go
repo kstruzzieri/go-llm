@@ -108,12 +108,22 @@ func DefaultRows(now time.Time) []Row {
 	}
 }
 
+// dispatchExact is every model-dispatched route in llama-swap v235
+// internal/server/server.go modelPostJSONRoutes, modelPostFormRoutes,
+// modelGetRoutes, plus /unload and /api/models/unload. /slots and /embedding
+// are llama-server dispatch paths, kept as extra cover.
 var dispatchExact = map[string]bool{
-	"/props": true, "/slots": true, "/v1/chat/completions": true, "/v1/completions": true,
-	"/v1/embeddings": true, "/completion": true, "/embedding": true, "/infill": true,
+	"/v1/chat/completions": true, "/v1/responses": true, "/v1/completions": true,
+	"/v1/messages": true, "/v1/messages/count_tokens": true, "/v1/embeddings": true,
+	"/reranking": true, "/rerank": true, "/v1/rerank": true, "/v1/reranking": true,
+	"/infill": true, "/completion": true, "/v1/audio/speech": true, "/v1/audio/voices": true,
+	"/v1/images/generations": true, "/sdapi/v1/txt2img": true, "/sdapi/v1/img2img": true,
+	"/v/chat/completions": true, "/v/responses": true, "/v/completions": true, "/v/messages": true,
+	"/v/messages/count_tokens": true, "/v/embeddings": true, "/v/rerank": true, "/v/reranking": true,
+	"/v1/audio/transcriptions": true, "/v1/images/edits": true,
+	"/sdapi/v1/loras": true, "/props": true,
 	"/unload": true, "/api/models/unload": true,
-	// Also proxied to a model: they appear as activity-row req_path values.
-	"/embeddings": true, "/v1/rerank": true, "/rerank": true, "/reranking": true,
+	"/slots": true, "/embedding": true,
 }
 
 func isDispatch(path string) bool {
