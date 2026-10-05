@@ -75,6 +75,10 @@ func TestClientStatusAndCap(t *testing.T) {
 	if _, err := c.get(context.Background(), "models", "/v1/models", modelsLimit); !isCode(err, CodeUnauthorized) {
 		t.Fatalf("403 = %v", err)
 	}
+	f.SetStatus("/running", http.StatusMultipleChoices) // Location-less 3xx: a plain response, not a redirect
+	if _, err := c.get(context.Background(), "running", "/running", runningLimit); !isCode(err, CodeHTTPStatus) {
+		t.Fatalf("300 = %v", err)
+	}
 	f.SetStatus("/api/metrics", http.StatusInternalServerError)
 	_, err = c.get(context.Background(), "metrics", "/api/metrics", metricsLimit)
 	if !isCode(err, CodeHTTPStatus) {
