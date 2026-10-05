@@ -151,6 +151,13 @@ func TestNormalizeOllama(t *testing.T) {
 		"library/qwen3:8b":                  "qwen3:8b",
 		"hf.co/user/model:Q4_K_M":           "hf.co/user/model:q4_k_m",
 		"localhost:5000/team/model":         "localhost:5000/team/model:latest",
+		" llama3 ":                          "llama3:latest",
+		"registry.ollama.ai/user/m":         "user/m:latest",
+		"example.com/library/m":             "example.com/library/m:latest",
+		"registry.ollama.ai/library/x":      "x:latest",
+		"registry.ollama.ai/llama3":         "registry.ollama.ai/llama3:latest",
+		"library/library/x":                 "library/library/x:latest",
+		"localhost:5000/m":                  "localhost:5000/m:latest",
 	} {
 		if got := NormalizeOllama(in); got != want {
 			t.Fatalf("NormalizeOllama(%q) = %q, want %q", in, got, want)
