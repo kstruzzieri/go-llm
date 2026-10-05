@@ -1,13 +1,16 @@
 // Package opsfixture serves fake llama-swap v235 and Ollama runtime surfaces
 // for golem ops tests. Every request is recorded before routing, and every
-// model-dispatched route counts as a would-be model load, so a test can prove
-// both that observation happened and that nothing could have loaded a model.
+// route that could load, run or change a model counts as a would-be model load
+// (Server.Loads), so a test can prove both that observation happened and that
+// nothing could have loaded a model.
 package opsfixture
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"path"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -24,16 +27,38 @@ const (
 	SentinelPath   = "SENTINEL-PATH-7f3a"
 	SentinelQuery  = "SENTINEL-QUERY-7f3a"
 	SentinelAPIKey = "SENTINEL-APIKEY-7f3a"
+
+	SentinelName        = "SENTINEL-NAME-7f3a"
+	SentinelDescription = "SENTINEL-DESCRIPTION-7f3a"
+	SentinelModelMeta   = "SENTINEL-MODELMETA-7f3a"
 )
 
 // AllSentinels lists every sentinel for absence checks.
-var AllSentinels = []string{SentinelCmd, SentinelProxy, SentinelError, SentinelMeta, SentinelPath, SentinelQuery, SentinelAPIKey}
+var AllSentinels = []string{SentinelCmd, SentinelProxy, SentinelError, SentinelMeta, SentinelPath, SentinelQuery, SentinelAPIKey,
+	SentinelName, SentinelDescription, SentinelModelMeta}
 
-// Default bodies. DefaultRunning carries cmd and proxy sentinels.
+// ContainsSentinel reports whether s holds any sentinel by their shared
+// "SENTINEL-" prefix, case-insensitively, so a clipped or case-folded leak is
+// still caught.
+func ContainsSentinel(s string) bool {
+	return strings.Contains(strings.ToLower(s), "sentinel-")
+}
+
+// Default bodies, ending in a newline like v235's json.Encoder output. Every
+// never-retained field carries a sentinel: cmd, proxy, name and description in
+// DefaultRunning; name, description and a non-peer meta.llamaswap on the local
+// qwen3-embedding:8b model in DefaultModels.
+//
+// ponytail: v235 sorts /v1/models data by id; this order is kept because
+// decoder tests pin it.
 const (
-	DefaultVersion = `{"build_date":"2026-07-03T16:20:46Z","commit":"c59816b","version":"v235"}`
-	DefaultRunning = `{"running":[{"model":"gemma4:31b","state":"ready","cmd":"` + SentinelCmd + ` --model /m.gguf","proxy":"http://127.0.0.1:5800/` + SentinelProxy + `","ttl":600,"name":"","description":""}]}`
-	DefaultModels  = `{"object":"list","data":[{"id":"gemma4:31b","object":"model","owned_by":"llama-swap"},{"id":"qwen3-embedding:8b","object":"model","owned_by":"llama-swap"},{"id":"peer-model","object":"model","owned_by":"llama-swap","meta":{"llamaswap":{"peerID":"lab"}}}]}`
+	DefaultVersion = `{"build_date":"2026-07-03T16:20:46Z","commit":"c59816b","version":"v235"}` + "\n"
+	DefaultRunning = `{"running":[{"model":"gemma4:31b","state":"ready","cmd":"` + SentinelCmd + ` --model /m.gguf","proxy":"http://127.0.0.1:5800/` + SentinelProxy + `","ttl":600,"name":"` + SentinelName + `","description":"` + SentinelDescription + `"}]}` + "\n"
+	DefaultModels  = `{"data":[` +
+		`{"id":"gemma4:31b","object":"model","created":1791158400,"owned_by":"llama-swap"},` +
+		`{"id":"qwen3-embedding:8b","object":"model","created":1791158400,"owned_by":"llama-swap","name":"` + SentinelName + `","description":"` + SentinelDescription + `","meta":{"llamaswap":{"note":"` + SentinelModelMeta + `"}}},` +
+		`{"id":"peer-model","object":"model","created":1791158400,"owned_by":"llama-swap","name":"lab: peer-model","meta":{"llamaswap":{"peerID":"lab"}}}` +
+		`],"object":"list"}` + "\n"
 )
 
 // Request is one recorded request: method and raw request URI.
@@ -98,12 +123,13 @@ func MetricsJSON(rows ...Row) string {
 	return string(b)
 }
 
-// DefaultRows returns three gemma rows near now: timings, usage-only, and a
-// 500 whose error text and path carry sentinels.
+// DefaultRows returns three gemma rows near now, in now's zone: timings,
+// usage-only (no cache count, so -1 as v235 reports it), and a 500 whose error
+// text and path carry sentinels.
 func DefaultRows(now time.Time) []Row {
 	return []Row{
 		{ID: 0, At: now.Add(-3 * time.Minute), Model: "gemma4:31b", Path: "/v1/chat/completions", Status: 200, Input: 900, Output: 300, Cache: 100, PromptPS: 910.5, TokensPS: 41.25, DurationMs: 8200},
-		{ID: 1, At: now.Add(-2 * time.Minute), Model: "gemma4:31b", Path: "/v1/chat/completions", Status: 200, Input: 1200, Output: 80, PromptPS: -1, TokensPS: -1, DurationMs: 2100, Meta: SentinelMeta},
+		{ID: 1, At: now.Add(-2 * time.Minute), Model: "gemma4:31b", Path: "/v1/chat/completions", Status: 200, Input: 1200, Output: 80, Cache: -1, PromptPS: -1, TokensPS: -1, DurationMs: 2100, Meta: SentinelMeta},
 		{ID: 2, At: now.Add(-1 * time.Minute), Model: "gemma4:31b", Path: "/" + SentinelPath + "/x?" + SentinelQuery + "=1", Status: 500, DurationMs: 40, Error: SentinelError},
 	}
 }
@@ -126,17 +152,27 @@ var dispatchExact = map[string]bool{
 	"/slots": true, "/embedding": true,
 }
 
-func isDispatch(path string) bool {
-	return dispatchExact[path] || strings.HasPrefix(path, "/upstream/") || strings.HasPrefix(path, "/api/models/unload/")
+func llamaSwapDispatch(p string) bool {
+	return dispatchExact[p] || strings.HasPrefix(p, "/upstream/") || strings.HasPrefix(p, "/api/models/unload/")
+}
+
+// ollamaDispatchExact is every Ollama route that loads, runs or changes a
+// model; /api/blobs/ (blob upload) is matched by prefix.
+var ollamaDispatchExact = map[string]bool{
+	"/api/generate": true, "/api/chat": true, "/api/embed": true, "/api/embeddings": true,
+	"/api/pull": true, "/api/push": true, "/api/create": true, "/api/copy": true, "/api/delete": true,
+	"/v1/chat/completions": true, "/v1/completions": true, "/v1/embeddings": true,
+}
+
+func ollamaDispatch(p string) bool {
+	return ollamaDispatchExact[p] || strings.HasPrefix(p, "/api/blobs/")
 }
 
 // Server is the shared recording core of both fakes.
 type Server struct {
-	srv   *httptest.Server
-	Loads atomic.Int64 // model-dispatched requests, counted on receipt
-
-	inflight    atomic.Int64
-	maxInflight atomic.Int64
+	srv      *httptest.Server
+	dispatch func(path string) bool
+	Loads    atomic.Int64 // would-be loads (see package doc), counted on receipt
 
 	mu           sync.Mutex
 	requests     []Request
@@ -147,26 +183,27 @@ type Server struct {
 	pathInflight map[string]int64
 }
 
-func newServer(t testing.TB, bodies map[string]string) *Server {
-	s := &Server{bodies: bodies, status: map[string]int{}, hold: map[string]chan struct{}{}, pathInflight: map[string]int64{}}
+func newServer(t testing.TB, bodies map[string]string, dispatch func(string) bool) *Server {
+	s := &Server{dispatch: dispatch, bodies: bodies, status: map[string]int{}, hold: map[string]chan struct{}{}, pathInflight: map[string]int64{}}
 	s.srv = httptest.NewServer(http.HandlerFunc(s.serve))
 	t.Cleanup(s.srv.Close)
 	return s
 }
 
-// NewLlamaSwap starts a fake llama-swap v235 with default bodies.
+// NewLlamaSwap starts a fake llama-swap v235 with default bodies. Its default
+// rows are stamped in a fixed UTC-4 zone: v235 stamps rows in local time.
 func NewLlamaSwap(t testing.TB) *Server {
 	return newServer(t, map[string]string{
 		"/api/version": DefaultVersion,
 		"/running":     DefaultRunning,
-		"/api/metrics": MetricsJSON(DefaultRows(time.Now().UTC())...),
+		"/api/metrics": MetricsJSON(DefaultRows(time.Now().In(time.FixedZone("", -4*3600)))...),
 		"/v1/models":   DefaultModels,
-	})
+	}, llamaSwapDispatch)
 }
 
 // NewOllama starts a fake Ollama serving ps as /api/ps.
 func NewOllama(t testing.TB, ps string) *Server {
-	return newServer(t, map[string]string{"/api/ps": ps})
+	return newServer(t, map[string]string{"/api/ps": ps}, ollamaDispatch)
 }
 
 // URL is the server root.
@@ -187,8 +224,10 @@ func (s *Server) SetStatus(path string, status int) {
 }
 
 // HoldFor blocks requests for path until the returned release runs or the
-// client gives up. Release is idempotent and also runs at test cleanup, so a
-// failed assertion can never leave server shutdown waiting on a handler.
+// client gives up. The request body is drained first, because net/http only
+// notices a vanished client once the body has been read. Release is idempotent
+// and also runs at test cleanup, so a failed assertion can never leave server
+// shutdown waiting on a handler.
 func (s *Server) HoldFor(t testing.TB, path string) func() {
 	ch := make(chan struct{})
 	var once sync.Once
@@ -214,34 +253,27 @@ func (s *Server) Requests() []Request {
 	return append([]Request(nil), s.requests...)
 }
 
-// Auth returns every Authorization header received, in order.
+// Auth returns one entry per request, in order: the Authorization header
+// (empty when absent), followed by "\nx-api-key: <value>" when the request
+// also carries x-api-key, which v235 accepts as an API key too.
 func (s *Server) Auth() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]string(nil), s.auth...)
 }
 
-// MaxInflight is the highest number of concurrent requests observed.
-func (s *Server) MaxInflight() int64 { return s.maxInflight.Load() }
-
-// Inflight is the number of requests currently being served.
-func (s *Server) Inflight() int64 { return s.inflight.Load() }
-
 func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
-	n := s.inflight.Add(1)
-	defer s.inflight.Add(-1)
-	for {
-		m := s.maxInflight.Load()
-		if n <= m || s.maxInflight.CompareAndSwap(m, n) {
-			break
-		}
+	auth := r.Header.Get("Authorization")
+	if k := r.Header.Get("X-Api-Key"); k != "" {
+		auth += "\nx-api-key: " + k
 	}
 	s.mu.Lock()
 	s.requests = append(s.requests, Request{r.Method, r.RequestURI})
-	s.auth = append(s.auth, r.Header.Get("Authorization"))
+	s.auth = append(s.auth, auth)
 	// Counted before any hold: a dispatch request whose client gives up still
-	// reached a model route.
-	dispatch := isDispatch(r.URL.Path)
+	// reached a model route. The cleaned path also counts: v235's ServeMux
+	// redirects //props and /x/../props to /props.
+	dispatch := s.dispatch(r.URL.Path) || s.dispatch(path.Clean(r.URL.Path))
 	if dispatch {
 		s.Loads.Add(1)
 	}
@@ -255,6 +287,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 		s.pathInflight[r.URL.Path]--
 		s.mu.Unlock()
 	}()
+	_, _ = io.Copy(io.Discard, r.Body)
 	if hold != nil {
 		select {
 		case <-hold:
