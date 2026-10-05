@@ -21,6 +21,7 @@ const (
 	maxTransitions = 20
 	maxSkew        = time.Second
 	maxVersionLen  = 64
+	maxNameLen     = 512 // longest model name residency memory admits, in bytes
 )
 
 // Clock supplies wall time for display and monotonic elapsed time for ages
@@ -113,25 +114,28 @@ type ModelMemory struct {
 
 // BackendObservation is everything observed about one provider.
 type BackendObservation struct {
-	Provider       string
-	Endpoint       string // scheme://host[:port] only
-	Hosting        Hosting
-	Kind           Kind
-	Version        string
-	Support        string
-	Reachable      *Sample[bool]
-	ReachCode      Code
-	ReachRetry     time.Duration // when Reachable is a failure: monotonic time of the next scheduled retry
-	Surfaces       []Surface
-	Running        *Sample[[]RunningModel]
-	Rows           *Sample[[]ActivityRow]
-	Listed         *Sample[[]ListedModel]
-	PS             *Sample[[]PSModel]
-	Since          time.Time // current observation period start
-	Periods        int
-	Gaps           int
-	Refused        int64
-	Models         []ModelMemory
+	Provider   string
+	Endpoint   string // scheme://host[:port] only
+	Hosting    Hosting
+	Kind       Kind
+	Version    string
+	Support    string
+	Reachable  *Sample[bool]
+	ReachCode  Code
+	ReachRetry time.Duration // when Reachable is a failure: monotonic time of the next scheduled retry
+	Surfaces   []Surface
+	Running    *Sample[[]RunningModel]
+	Rows       *Sample[[]ActivityRow]
+	Listed     *Sample[[]ListedModel]
+	PS         *Sample[[]PSModel]
+	Since      time.Time // current observation period start
+	Periods    int
+	Gaps       int
+	Refused    int64
+	Models     []ModelMemory
+	// ModelsOverflow is the most names one residency sample held that memory
+	// could not track (over the cap, or longer than maxNameLen bytes). It
+	// never decreases, so a model dropped once always reads as untracked.
 	ModelsOverflow int
 }
 
@@ -322,6 +326,13 @@ func (c *Collector) fetch(callerCtx, ctx context.Context, b *backendState, cl *c
 	if _, mono := c.now(); mono < s.next {
 		return false
 	}
+	// A request the tick deadline or the caller stopped before it started
+	// says nothing about the backend: nothing is sent or recorded.
+	// ponytail: a skipped residency read does not open a gap; a backend
+	// starved over 3 intervals keeps inferring transitions across the hole.
+	if ctx.Err() != nil {
+		return false
+	}
 	body, err := cl.get(ctx, surface, path, limit)
 	if err == nil {
 		err = apply(body)
@@ -375,19 +386,17 @@ func (c *Collector) identifyBackend(callerCtx, ctx context.Context, b *backendSt
 	if !c.fetch(callerCtx, ctx, b, b.identify, "version", "/api/version", versionLimit, func(body []byte) error {
 		version, isLS = decodeVersion(body)
 		return nil
-	}) {
-		// A non-2xx answer (llama-server direct, vLLM: 404) identifies a
-		// runtime that is not llama-swap; stop asking.
-		if b.surface("version").lastErr == CodeHTTPStatus {
-			b.dropSamples()
-			b.obs.Kind, b.obs.Support = KindNone, SupportUnrecognized
-		}
-		return
+	}) && b.surface("version").lastErr != CodeHTTPStatus {
+		return // no answer yet: retried under backoff
 	}
+	// Every outcome sets Version: a backend that read v235 before an outage
+	// must not keep that version once it answers as something else.
 	switch {
 	case !isLS:
+		// Includes a non-2xx answer (llama-server direct, vLLM: 404): a
+		// runtime that is not llama-swap. Stop asking.
 		b.dropSamples()
-		b.obs.Kind, b.obs.Support = KindNone, SupportUnrecognized
+		b.obs.Kind, b.obs.Support, b.obs.Version = KindNone, SupportUnrecognized, ""
 	case version != "v235":
 		b.dropSamples()
 		b.obs.Kind, b.obs.Support, b.obs.Version = KindNone, SupportUnsupported, bound(version)
@@ -496,16 +505,19 @@ func liveState(cur map[string]string, name string) string {
 // afterwards one load episode is a move from absent or stopping into
 // starting or ready.
 func (b *backendState) applyResidency(cur map[string]string, at time.Time) {
+	untracked := 0
 	for _, name := range slices.Sorted(maps.Keys(cur)) {
 		if _, ok := b.mem[name]; ok {
 			continue
 		}
-		if len(b.mem) >= maxTracked {
-			b.obs.ModelsOverflow++
+		if len(b.mem) >= maxTracked || len(name) > maxNameLen {
+			untracked++
 			continue
 		}
 		b.mem[name] = &ModelMemory{Model: name, Since: at}
 	}
+	// The same untracked names arrive every tick, so they are not summed.
+	b.obs.ModelsOverflow = max(b.obs.ModelsOverflow, untracked)
 	if b.prev == nil {
 		b.prev = make(map[string]string, len(b.mem))
 		b.obs.Periods++
@@ -540,7 +552,11 @@ func (b *backendState) applyResidency(cur map[string]string, at time.Time) {
 		case "absent", "stopping":
 			m.FirstObserved = time.Time{}
 		}
-		m.Transitions = append(m.Transitions, Transition{To: ResidencyOf(now), At: at})
+		to := ResidencyOf(now)
+		if now == "absent" && b.obs.Kind == KindOllama {
+			to = "unknown" // absence from /api/ps is not proof of unload (spec §4.4)
+		}
+		m.Transitions = append(m.Transitions, Transition{To: to, At: at})
 		if len(m.Transitions) > maxTransitions {
 			m.Transitions = slices.Clone(m.Transitions[len(m.Transitions)-maxTransitions:])
 		}

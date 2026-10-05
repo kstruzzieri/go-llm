@@ -101,6 +101,7 @@ func TestCollectorRemoteAndInvalidAreNeverContacted(t *testing.T) {
 		{Provider: "a-remote", BaseURL: "https://api.example.com", APIFormat: "openai-compat"},
 		{Provider: "b-prefix", BaseURL: f.URL() + "/upstream/gemma4:31b", APIFormat: "openai-compat"},
 		{Provider: "c-hosted", BaseURL: "https://opencode.ai/zen/go", APIFormat: "openai-compat"},
+		{Provider: "d-format", BaseURL: f.URL(), APIFormat: "anthropic"},
 	}, Options{Clock: newFakeClock().clock()})
 	obs := c.Tick(context.Background())
 	assertRequests(t, f)
@@ -112,6 +113,9 @@ func TestCollectorRemoteAndInvalidAreNeverContacted(t *testing.T) {
 	}
 	if h := obs.Backends[2]; h.Hosting != HostingRemote || h.Support != SupportNotObserved || h.Endpoint != "https://opencode.ai" {
 		t.Fatalf("hosted with a path must read remote with an origin-only endpoint: %+v", h)
+	}
+	if d := obs.Backends[3]; d.Hosting != HostingLocal || d.Kind != KindNone || d.Support != SupportInvalidConfig {
+		t.Fatalf("unknown api_format = %+v", d)
 	}
 }
 
@@ -277,6 +281,16 @@ func TestCollectorUnreachableRecordsRetry(t *testing.T) {
 	if b.Reachable == nil || b.Reachable.Value || b.ReachCode != CodeTimeout || b.ReachRetry != 2*time.Second {
 		t.Fatalf("timeout: reachable=%+v code=%q retry=%v", b.Reachable, b.ReachCode, b.ReachRetry)
 	}
+	// Recovery: the backend is identified again before it is observed, with
+	// the clients built for it the first time.
+	observe := c.backends[0].observe
+	release()
+	clk.advance(2*time.Second, 2*time.Second)
+	b = c.Tick(context.Background()).Backends[0]
+	if b.Kind != KindLlamaSwap || b.Reachable == nil || !b.Reachable.Value || c.backends[0].observe != observe {
+		t.Fatalf("recovery: kind=%s reachable=%+v same observe client=%v", b.Kind, b.Reachable, c.backends[0].observe == observe)
+	}
+	assertRequests(t, f, reqVersion, reqRunning, reqVersion, reqRunning, reqMetrics, reqModels)
 }
 
 func TestCollectorCallerCancellationIsUnclassifiedWithoutBackoff(t *testing.T) {
@@ -371,20 +385,40 @@ func TestCollectorPeerListingFailsClosed(t *testing.T) {
 	}
 }
 
+// TestCollectorReclassificationClearsSamples covers the three answers spec
+// §4.5 names: another version, another runtime, a 404.
 func TestCollectorReclassificationClearsSamples(t *testing.T) {
-	f := opsfixture.NewLlamaSwap(t)
-	clk := newFakeClock()
-	c := NewCollector([]BackendSpec{lsSpec(f.URL())}, Options{Interval: 2 * time.Second, Clock: clk.clock()})
-	c.Tick(context.Background())
-	release := f.HoldFor(t, "/running")
-	clk.advance(2*time.Second, 2*time.Second)
-	c.Tick(context.Background()) // /running times out: unidentified
-	release()
-	f.SetBody("/api/version", `{"build_date":"x","commit":"y","version":"v240"}`)
-	clk.advance(30*time.Second, 30*time.Second)
-	b := c.Tick(context.Background()).Backends[0]
-	if b.Support != SupportUnsupported || b.Running != nil || b.Rows != nil || b.Listed != nil {
-		t.Fatalf("v235 samples survived reclassification to v240: %+v", b)
+	for _, tc := range []struct {
+		name, body string
+		status     int
+		support    string
+		version    string
+	}{
+		{"other version", `{"build_date":"x","commit":"y","version":"v240"}`, 0, SupportUnsupported, "v240"},
+		{"other runtime", `{"version":"0.12.3"}`, 0, SupportUnrecognized, ""},
+		{"404", "", http.StatusNotFound, SupportUnrecognized, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel() // each waits out the 2 s client deadline
+			f := opsfixture.NewLlamaSwap(t)
+			clk := newFakeClock()
+			c := NewCollector([]BackendSpec{lsSpec(f.URL())}, Options{Interval: 2 * time.Second, Clock: clk.clock()})
+			c.Tick(context.Background())
+			release := f.HoldFor(t, "/running")
+			clk.advance(2*time.Second, 2*time.Second)
+			c.Tick(context.Background()) // /running times out: unidentified
+			release()
+			if tc.status != 0 {
+				f.SetStatus("/api/version", tc.status)
+			} else {
+				f.SetBody("/api/version", tc.body)
+			}
+			clk.advance(30*time.Second, 30*time.Second)
+			b := c.Tick(context.Background()).Backends[0]
+			if b.Support != tc.support || b.Version != tc.version || b.Running != nil || b.Rows != nil || b.Listed != nil {
+				t.Fatalf("v235 samples or version survived reclassification: %+v", b)
+			}
+		})
 	}
 }
 
@@ -400,6 +434,23 @@ func TestCollectorAdmissionIsDeterministicAndCapped(t *testing.T) {
 	if len(b.Models) != 256 || b.ModelsOverflow != 44 || b.Models[0].Model != "m000" || b.Models[255].Model != "m255" {
 		t.Fatalf("tracked=%d overflow=%d first=%s last=%s", len(b.Models), b.ModelsOverflow, b.Models[0].Model, b.Models[len(b.Models)-1].Model)
 	}
+	if b = c.Tick(context.Background()).Backends[0]; b.ModelsOverflow != 44 {
+		t.Fatalf("overflow after the same sample again = %d, want 44: the same models count once", b.ModelsOverflow)
+	}
+}
+
+// TestCollectorDoesNotTrackOverlongNames bounds residency memory by name
+// size as well as count: a name over maxNameLen bytes is never admitted and
+// reads as overflow, so its loads read as not measured.
+func TestCollectorDoesNotTrackOverlongNames(t *testing.T) {
+	f := opsfixture.NewLlamaSwap(t)
+	longest, over := strings.Repeat("a", maxNameLen), strings.Repeat("b", maxNameLen+1)
+	f.SetBody("/running", `{"running":[{"model":"`+longest+`","state":"ready"},{"model":"`+over+`","state":"ready"},{"model":"m","state":"ready"}]}`)
+	c := NewCollector([]BackendSpec{lsSpec(f.URL())}, Options{Clock: newFakeClock().clock()})
+	b := c.Tick(context.Background()).Backends[0]
+	if len(b.Models) != 2 || b.Models[0].Model != longest || b.Models[1].Model != "m" || b.ModelsOverflow != 1 {
+		t.Fatalf("tracked=%d overflow=%d", len(b.Models), b.ModelsOverflow)
+	}
 }
 
 func TestCollectorOllama(t *testing.T) {
@@ -409,7 +460,33 @@ func TestCollectorOllama(t *testing.T) {
 	if b.Kind != KindOllama || b.PS == nil || len(b.PS.Value) != 1 {
 		t.Fatalf("ollama = %+v", b)
 	}
-	assertRequests(t, f, reqPS)
+	// Spec §4.4: absence from /api/ps is not proof of unload.
+	f.SetBody("/api/ps", `{"models":[]}`)
+	b = c.Tick(context.Background()).Backends[0]
+	if tr := memory(t, b, "llama3:latest").Transitions; len(tr) != 1 || tr[0].To != "unknown" {
+		t.Fatalf("an Ollama model leaving /api/ps must read unknown, never unloaded: %+v", tr)
+	}
+	assertRequests(t, f, reqPS, reqPS)
+}
+
+// TestCollectorUnstartedRequestIsNotAnObservation: once the tick deadline
+// has passed, a backend's request never starts, and nothing is recorded
+// against it; a timeout would raise a false backend_unreachable for a
+// backend that was never contacted.
+func TestCollectorUnstartedRequestIsNotAnObservation(t *testing.T) {
+	f := opsfixture.NewLlamaSwap(t)
+	c := NewCollector([]BackendSpec{lsSpec(f.URL())}, Options{Interval: 2 * time.Second, Clock: newFakeClock().clock()})
+	spent, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	b := c.backends[0]
+	if c.fetch(context.Background(), spent, b, b.identify, "version", "/api/version", versionLimit, func([]byte) error { return nil }) {
+		t.Fatal("fetch past the tick deadline applied a sample")
+	}
+	o := c.snapshot().Backends[0]
+	if s := surface(o, "version"); s.LastError != "" || s.NextAttempt != 0 || o.Reachable != nil || o.ReachCode != "" {
+		t.Fatalf("an unstarted request was recorded: version=%+v reachable=%+v code=%q", s, o.Reachable, o.ReachCode)
+	}
+	assertRequests(t, f)
 }
 
 func surface(b BackendObservation, name string) Surface {
