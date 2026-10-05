@@ -7,9 +7,12 @@ import "strings"
 // [host/][namespace/]model[:tag]: the host is dropped only when it is
 // registry.ollama.ai, the namespace only when the host is that default and
 // the namespace is library, a missing tag becomes ":latest", and comparison
-// is case-insensitive.
+// is case-insensitive. An empty or blank name normalizes to "".
 func NormalizeOllama(name string) string {
 	n := strings.ToLower(strings.TrimSpace(name))
+	if n == "" {
+		return "" // never equals a nonblank normalized name
+	}
 	// A tag follows the last ':' only when no '/' comes after it, so a
 	// registry port is never read as a tag.
 	if strings.LastIndex(n, ":") <= strings.LastIndex(n, "/") {
