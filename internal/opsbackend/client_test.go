@@ -1,13 +1,19 @@
 package opsbackend
 
 import (
+	"bufio"
 	"context"
 	"errors"
+	"io"
+	"log"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/kstruzzieri/go-llm/internal/opsfixture"
 	"github.com/kstruzzieri/go-llm/provider"
@@ -71,6 +77,9 @@ func TestClientStatusAndCap(t *testing.T) {
 	if _, err := c.get(context.Background(), "running", "/running", runningLimit); !isCode(err, CodeUnauthorized) {
 		t.Fatalf("401 = %v", err)
 	}
+	if got := f.Auth(); len(got) != 1 || got[0] != "" {
+		t.Fatalf("keyless Authorization = %q, want none sent", got)
+	}
 	f.SetStatus("/v1/models", http.StatusForbidden)
 	if _, err := c.get(context.Background(), "models", "/v1/models", modelsLimit); !isCode(err, CodeUnauthorized) {
 		t.Fatalf("403 = %v", err)
@@ -93,6 +102,129 @@ func TestClientStatusAndCap(t *testing.T) {
 	exact := int64(len(opsfixture.DefaultVersion))
 	if body, err := c.get(context.Background(), "version", "/api/version", exact); err != nil || string(body) != opsfixture.DefaultVersion {
 		t.Fatalf("body of exactly the cap = %q, %v; want it returned whole", body, err)
+	}
+}
+
+func TestClientRequestTimeout(t *testing.T) {
+	f := opsfixture.NewLlamaSwap(t)
+	f.HoldFor(t, "/running")
+	d, _ := rootDestination("ls", f.URL())
+	var refused atomic.Int64
+	c, err := newClient(d, "", provider.DestinationPurposeHealth, llamaSwapRoutes, &refused)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The caller's deadline is longer than the 2 s request timeout, so only
+	// the client's own timeout can end the request in time.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	start := time.Now()
+	_, err = c.get(ctx, "running", "/running", runningLimit)
+	if elapsed := time.Since(start); !isCode(err, CodeTimeout) || elapsed > 3*time.Second {
+		t.Fatalf("held request: err=%v after %v; want timeout within ~2s", err, elapsed)
+	}
+}
+
+// rawPeer serves one canned response on loopback after reading the request
+// head. With hangUp it closes at once; otherwise it waits for the client to
+// close. done closes when the connection is finished.
+func rawPeer(t *testing.T, response string, hangUp bool) (base string, done <-chan struct{}) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	ch := make(chan struct{})
+	go func() {
+		defer close(ch)
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		if _, err := http.ReadRequest(bufio.NewReader(conn)); err != nil {
+			return
+		}
+		_, _ = io.WriteString(conn, response)
+		if !hangUp {
+			_, _ = io.Copy(io.Discard, conn)
+		}
+	}()
+	return "http://" + ln.Addr().String(), ch
+}
+
+func TestClientTruncatedBodyIsUnreachable(t *testing.T) {
+	base, _ := rawPeer(t, "HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n0123456789", true)
+	d, _ := rootDestination("ls", base)
+	var refused atomic.Int64
+	c, err := newClient(d, "", provider.DestinationPurposeHealth, llamaSwapRoutes, &refused)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := c.get(context.Background(), "running", "/running", runningLimit)
+	if !isCode(err, CodeUnreachable) || body != nil {
+		t.Fatalf("truncated body = %q, %v; want nil, unreachable", body, err)
+	}
+}
+
+// lockedLog is a log destination the transport's goroutines can write while
+// the test reads it.
+type lockedLog struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (l *lockedLog) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *lockedLog) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
+}
+
+// Not parallel: it swaps the process-wide log output.
+func TestClientBytesPastContentLengthNeverLogged(t *testing.T) {
+	logged := &lockedLog{}
+	prev := log.Writer()
+	log.SetOutput(logged)
+	t.Cleanup(func() { log.SetOutput(prev) })
+	base, done := rawPeer(t, "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello"+opsfixture.SentinelError, false)
+	d, _ := rootDestination("ls", base)
+	var refused atomic.Int64
+	c, err := newClient(d, "", provider.DestinationPurposeHealth, llamaSwapRoutes, &refused)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if body, err := c.get(context.Background(), "running", "/running", runningLimit); err != nil || string(body) != "hello" {
+		t.Fatalf("get = %q, %v; want the Content-Length body", body, err)
+	}
+	select {
+	case <-done: // the client closed the connection; any log line is written
+	case <-time.After(5 * time.Second):
+		t.Fatal("client never closed the connection")
+	}
+	if s := logged.String(); opsfixture.ContainsSentinel(s) {
+		t.Fatalf("process log carried body text: %q", s)
+	}
+}
+
+func TestClientRefusesHeaderBreakingAPIKey(t *testing.T) {
+	f := opsfixture.NewLlamaSwap(t)
+	d, _ := rootDestination("ls", f.URL())
+	var refused atomic.Int64
+	_, err := newClient(d, opsfixture.SentinelAPIKey+"\r\nX-Evil: 1", provider.DestinationPurposeHealth, llamaSwapRoutes, &refused)
+	if !isCode(err, CodeInvalidConfiguration) {
+		t.Fatalf("CR/LF api_key = %v, want invalid_configuration", err)
+	}
+	if opsfixture.ContainsSentinel(err.Error()) {
+		t.Fatalf("error carried the key: %q", err)
+	}
+	if n := len(f.Requests()); n != 0 {
+		t.Fatalf("server saw %d requests, want 0", n)
 	}
 }
 

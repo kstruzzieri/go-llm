@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -58,6 +59,11 @@ type client struct {
 // transport because the guard refuses opaque delegates for loopback
 // destinations. A remote destination fails at Install and reads denied.
 func newClient(d provider.Destination, apiKey, purpose string, routes []route, refused *atomic.Int64) (*client, error) {
+	// net/http refuses such a header value at send time, which would read as
+	// a permanent outage of a healthy backend; it is a configuration fault.
+	if strings.ContainsFunc(apiKey, func(r rune) bool { return (r < 0x20 && r != '\t') || r == 0x7f }) {
+		return nil, newCoded(CodeInvalidConfiguration, "api_key is not a valid header value")
+	}
 	m, err := provider.NewDestinationManifest(provider.DestinationEdge{Purpose: purpose, Destination: d})
 	if err != nil {
 		return nil, newCoded(CodeInvalidConfiguration, "destination manifest")
@@ -67,10 +73,16 @@ func newClient(d provider.Destination, apiKey, purpose string, routes []route, r
 	if err := g.Install(loopbackOnly, m); err != nil {
 		return nil, newCoded(CodeDenied, "destination not admitted")
 	}
-	// ponytail: a nil Transport makes the guard clone http.DefaultTransport
-	// privately (falling back to a fresh one if it was replaced), so no
-	// unchecked type assertion on the global is needed here.
-	guarded, err := provider.GuardHTTPClient(g, d, &http.Client{Timeout: requestTimeout})
+	// Keep-alive is off: bytes a peer sends past a response's Content-Length
+	// land on the idle pooled connection, and net/http logs them to stderr
+	// ("Unsolicited response received on idle HTTP channel"), which must
+	// never carry body text. One connection per request is cheap on loopback.
+	stock := &http.Transport{}
+	if tr, ok := http.DefaultTransport.(*http.Transport); ok {
+		stock = tr.Clone()
+	}
+	stock.DisableKeepAlives = true
+	guarded, err := provider.GuardHTTPClient(g, d, &http.Client{Transport: stock, Timeout: requestTimeout})
 	if err != nil {
 		return nil, newCoded(CodeDenied, "destination guard")
 	}
