@@ -10,10 +10,16 @@ import (
 	"testing"
 )
 
-type acceptRT struct{ calls int }
+// acceptRT records the request it receives, so tests can require that a
+// permitted request reaches the delegate unmodified (same pointer).
+type acceptRT struct {
+	calls int
+	got   *http.Request
+}
 
-func (a *acceptRT) RoundTrip(*http.Request) (*http.Response, error) {
+func (a *acceptRT) RoundTrip(req *http.Request) (*http.Response, error) {
 	a.calls++
+	a.got = req
 	return &http.Response{StatusCode: 200, Body: http.NoBody}, nil
 }
 
@@ -26,9 +32,13 @@ func TestAllowlistPermitsExactRoutes(t *testing.T) {
 		next := &acceptRT{}
 		var refused atomic.Int64
 		a := newAllowlist(next, "http", "127.0.0.1:8090", llamaSwapRoutes, &refused)
-		resp, err := a.RoundTrip(&http.Request{Method: http.MethodGet, URL: validURL(path), Header: http.Header{}})
+		req := &http.Request{Method: http.MethodGet, URL: validURL(path), Header: http.Header{}}
+		resp, err := a.RoundTrip(req)
 		if err != nil || resp == nil || next.calls != 1 || refused.Load() != 0 {
 			t.Fatalf("%s: err=%v calls=%d refused=%d", path, err, next.calls, refused.Load())
+		}
+		if next.got != req {
+			t.Fatalf("%s: delegate received a different request than the one approved", path)
 		}
 	}
 }
@@ -125,6 +135,9 @@ func TestRouteTablesAreExact(t *testing.T) {
 			_, err = newAllowlist(next, "http", "127.0.0.1:8090", tc.routes, &refused).RoundTrip(req)
 			if permitted := err == nil && next.calls == 1; permitted != slices.Contains(tc.want, p) {
 				t.Errorf("%s state, GET %s: permitted = %t (err=%v)", tc.name, p, permitted, err)
+			}
+			if next.calls == 1 && next.got != req {
+				t.Errorf("%s state, GET %s: delegate received a different request than the one approved", tc.name, p)
 			}
 		}
 	}
