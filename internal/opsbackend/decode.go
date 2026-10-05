@@ -48,33 +48,29 @@ type PSModel struct {
 	ExpiresAt time.Time
 }
 
-type versionInfo struct{ Version, Commit, BuildDate string }
-
 // decodeStrict requires exactly one JSON value followed by EOF; trailing
-// whitespace (v235's encoder ends every body in a newline) is allowed.
+// whitespace (v235's encoder ends every body in a newline) is allowed, which
+// json.Unmarshal enforces without copying the body.
 func decodeStrict(b []byte, v any) error {
-	dec := json.NewDecoder(bytes.NewReader(b))
-	if err := dec.Decode(v); err != nil {
+	if err := json.Unmarshal(b, v); err != nil {
 		return newCoded(CodeMalformed, "invalid JSON")
-	}
-	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
-		return newCoded(CodeMalformed, "trailing data after JSON value")
 	}
 	return nil
 }
 
-// decodeVersion reports whether b is llama-swap's build metadata: one object
-// whose version, commit and build_date are all strings.
-func decodeVersion(b []byte) (versionInfo, bool) {
+// decodeVersion reports whether b is llama-swap's build metadata, one object
+// whose version, commit and build_date are all strings, and returns its
+// version. Commit and build date only classify; they are not kept.
+func decodeVersion(b []byte) (string, bool) {
 	var v struct {
 		Version   *string `json:"version"`
 		Commit    *string `json:"commit"`
 		BuildDate *string `json:"build_date"`
 	}
 	if err := decodeStrict(b, &v); err != nil || v.Version == nil || v.Commit == nil || v.BuildDate == nil {
-		return versionInfo{}, false
+		return "", false
 	}
-	return versionInfo{Version: *v.Version, Commit: *v.Commit, BuildDate: *v.BuildDate}, true
+	return *v.Version, true
 }
 
 var runningStates = map[string]bool{"starting": true, "ready": true, "stopping": true, "stopped": true, "shutdown": true}
@@ -105,41 +101,55 @@ func decodeRunning(b []byte) ([]RunningModel, error) {
 	return out, nil
 }
 
-// decodeMetrics decodes the activity ring. The raw path is read only to
-// classify it and is not retained.
+// metricsRow is the approved subset of one activity row.
+type metricsRow struct {
+	ID        int64     `json:"id"`
+	Timestamp time.Time `json:"timestamp"`
+	Model     string    `json:"model"`
+	ReqPath   string    `json:"req_path"`
+	Status    int       `json:"resp_status_code"`
+	Tokens    struct {
+		Input    int64   `json:"input_tokens"`
+		Output   int64   `json:"output_tokens"`
+		Cache    int64   `json:"cache_tokens"`
+		PromptPS float64 `json:"prompt_per_second"`
+		TokensPS float64 `json:"tokens_per_second"`
+	} `json:"tokens"`
+	DurationMs int64 `json:"duration_ms"`
+}
+
+// decodeMetrics decodes the activity ring one row at a time into a single
+// reused value, so an 8 MiB body of empty or null rows is rejected at the
+// first row instead of first materializing every row. The raw path is read
+// only to classify it and is not retained.
 func decodeMetrics(b []byte) ([]ActivityRow, error) {
-	var rows *[]*struct {
-		ID        *int64     `json:"id"`
-		Timestamp *time.Time `json:"timestamp"`
-		Model     *string    `json:"model"`
-		ReqPath   string     `json:"req_path"`
-		Status    int        `json:"resp_status_code"`
-		Tokens    struct {
-			Input    int64   `json:"input_tokens"`
-			Output   int64   `json:"output_tokens"`
-			Cache    int64   `json:"cache_tokens"`
-			PromptPS float64 `json:"prompt_per_second"`
-			TokensPS float64 `json:"tokens_per_second"`
-		} `json:"tokens"`
-		DurationMs int64 `json:"duration_ms"`
+	malformed := newCoded(CodeMalformed, "invalid activity list")
+	dec := json.NewDecoder(bytes.NewReader(b))
+	if tok, err := dec.Token(); err != nil || tok != json.Delim('[') {
+		return nil, malformed
 	}
-	if err := decodeStrict(b, &rows); err != nil {
-		return nil, err
-	}
-	if rows == nil {
-		return nil, newCoded(CodeMalformed, "activity list absent or null")
-	}
-	out := make([]ActivityRow, 0, len(*rows))
-	for _, r := range *rows {
-		if r == nil || r.ID == nil || *r.ID < 0 || r.Timestamp == nil || r.Model == nil || *r.Model == "" {
-			return nil, newCoded(CodeMalformed, "invalid activity row")
+	out := []ActivityRow{}
+	var r metricsRow
+	for dec.More() {
+		// Reset per row. ID -1 makes an absent or null id fail the id >= 0
+		// check; JSON null leaves a non-pointer field untouched, so a null
+		// row or field reads as absent and is rejected below.
+		r = metricsRow{ID: -1}
+		if err := dec.Decode(&r); err != nil || r.ID < 0 || r.Timestamp.IsZero() || r.Model == "" {
+			return nil, malformed
 		}
 		out = append(out, ActivityRow{
-			ID: *r.ID, Timestamp: r.Timestamp.UTC(), Model: *r.Model, Status: r.Status,
+			ID: r.ID, Timestamp: r.Timestamp.UTC(), Model: r.Model, Status: r.Status,
 			PathClass: pathClass(r.ReqPath), InputTokens: r.Tokens.Input, OutputTokens: r.Tokens.Output,
 			CacheTokens: r.Tokens.Cache, PromptPerSecond: r.Tokens.PromptPS, TokensPerSecond: r.Tokens.TokensPS,
 			DurationMs: r.DurationMs,
 		})
+	}
+	if tok, err := dec.Token(); err != nil || tok != json.Delim(']') {
+		return nil, malformed
+	}
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return nil, malformed
 	}
 	return out, nil
 }

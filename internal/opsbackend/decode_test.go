@@ -2,6 +2,7 @@ package opsbackend
 
 import (
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -10,7 +11,7 @@ import (
 )
 
 func TestDecodeVersion(t *testing.T) {
-	if v, ok := decodeVersion([]byte(opsfixture.DefaultVersion)); !ok || v.Version != "v235" {
+	if v, ok := decodeVersion([]byte(opsfixture.DefaultVersion)); !ok || v != "v235" {
 		t.Fatalf("llama-swap version = %+v, %v", v, ok)
 	}
 	for _, body := range []string{`{"version":"0.12.3"}`, `404 page not found`, `{"version":235,"commit":"x","build_date":"y"}`, `{"version":"v235","commit":"x","build_date":"y"} trailing`, `{"version":"v235","commit":"x"}`, `{"version":"v235","build_date":"y"}`} {
@@ -74,10 +75,33 @@ func TestDecodeMetricsDropsRawPathAndText(t *testing.T) {
 			t.Fatalf("row %d = %+v, want the kept facts of %+v", i, r, w)
 		}
 	}
-	for _, body := range []string{`null`, `{}`, `[null]`, `[{"timestamp":"2026-10-05T10:00:00Z","model":"m"}]`, `[{"id":-1,"timestamp":"2026-10-05T10:00:00Z","model":"m"}]`, `[{"id":1,"model":"m"}]`, `[{"id":1,"timestamp":"2026-10-05T10:00:00Z","model":""}]`} {
+	const ok = `{"id":1,"timestamp":"2026-10-05T10:00:00Z","model":"m"}`
+	for _, body := range []string{`null`, `{}`, `[null]`, `[{"timestamp":"2026-10-05T10:00:00Z","model":"m"}]`, `[{"id":-1,"timestamp":"2026-10-05T10:00:00Z","model":"m"}]`, `[{"id":1,"model":"m"}]`, `[{"id":1,"timestamp":"2026-10-05T10:00:00Z","model":""}]`,
+		`[{"id":null,"timestamp":"2026-10-05T10:00:00Z","model":"m"}]`, `[{"id":1,"timestamp":null,"model":"m"}]`, `[{"id":1,"timestamp":"2026-10-05T10:00:00Z","model":null}]`,
+		`[` + ok + `,{}]`, `[` + ok + `,null]`, `[` + ok, `[` + ok + `}`, `[] []`, `[]x`, `[7]`} {
 		if _, err := decodeMetrics([]byte(body)); !isCode(err, CodeMalformed) {
 			t.Fatalf("decodeMetrics(%q) = %v, want malformed", body, err)
 		}
+	}
+}
+
+// TestDecodeMetricsBoundsMemory feeds a capped body of empty rows: the sample
+// is rejected at the first row, without first building every row.
+func TestDecodeMetricsBoundsMemory(t *testing.T) {
+	body := append(make([]byte, 0, metricsLimit), '[')
+	for len(body)+6 <= metricsLimit {
+		body = append(body, "{},"...)
+	}
+	body = append(body, "{}]"...)
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	_, err := decodeMetrics(body)
+	runtime.ReadMemStats(&after)
+	if !isCode(err, CodeMalformed) {
+		t.Fatalf("empty rows = %v, want malformed", err)
+	}
+	if d := after.TotalAlloc - before.TotalAlloc; d > 64<<20 {
+		t.Fatalf("rejecting a %d-byte body allocated %d bytes, want under 64 MiB", len(body), d)
 	}
 }
 
