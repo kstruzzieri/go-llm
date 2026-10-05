@@ -528,9 +528,14 @@ func TestGuardedLocalhostDialValidatesResolution(t *testing.T) {
 
 	t.Run("non-loopback resolution refused", func(t *testing.T) {
 		client, ctx := newClient(t, []net.IP{net.ParseIP("192.168.1.5")}, nil)
-		if resp, err := client.Do(mustReq(t, ctx, baseURL+"/v1/models")); err == nil {
+		resp, err := client.Do(mustReq(t, ctx, baseURL+"/v1/models"))
+		if err == nil {
 			_ = resp.Body.Close()
 			t.Fatal("localhost resolving off-host was dialed")
+		}
+		// Typed as a denial so callers fail closed instead of reading an outage.
+		if !errors.Is(err, ErrDestinationDenied) {
+			t.Fatalf("off-host localhost refusal = %v, want errors.Is ErrDestinationDenied", err)
 		}
 	})
 
@@ -538,9 +543,13 @@ func TestGuardedLocalhostDialValidatesResolution(t *testing.T) {
 		// One loopback plus one non-loopback signals tampering; filtering to
 		// the loopback half would dial through a poisoned name anyway.
 		client, ctx := newClient(t, []net.IP{net.ParseIP("127.0.0.1"), net.ParseIP("192.168.1.5")}, nil)
-		if resp, err := client.Do(mustReq(t, ctx, baseURL+"/v1/models")); err == nil {
+		resp, err := client.Do(mustReq(t, ctx, baseURL+"/v1/models"))
+		if err == nil {
 			_ = resp.Body.Close()
 			t.Fatal("localhost with a mixed resolution was dialed")
+		}
+		if !errors.Is(err, ErrDestinationDenied) {
+			t.Fatalf("mixed localhost refusal = %v, want errors.Is ErrDestinationDenied", err)
 		}
 	})
 
