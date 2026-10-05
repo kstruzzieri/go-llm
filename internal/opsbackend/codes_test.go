@@ -50,6 +50,7 @@ func TestClassify(t *testing.T) {
 		{"tick deadline", expired, wrap(context.DeadlineExceeded), CodeTimeout, true},
 		// Cancellation is judged by the caller's context, not by the error.
 		{"canceled ctx, dial err", canceled, wrap(errors.New("connect: connection refused")), "", false},
+		{"nil", live, nil, "", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := classify(tc.ctx, "running", tc.err)
@@ -57,7 +58,18 @@ func TestClassify(t *testing.T) {
 			if code != tc.want || ok != tc.ok {
 				t.Fatalf("CodeOf = %q, %v; want %q, %v", code, ok, tc.want, tc.ok)
 			}
-			if tc.ok && strings.Contains(err.Error(), "secret") {
+			switch {
+			case tc.err == nil:
+				if err != nil {
+					t.Fatalf("classify(nil) = %v, want nil", err)
+				}
+			case errors.Is(tc.ctx.Err(), context.Canceled):
+				// Unclassified, but never nil: a nil here reads as a success.
+				if !errors.Is(err, context.Canceled) {
+					t.Fatalf("caller cancellation returned %v, want an error matching context.Canceled", err)
+				}
+			}
+			if err != nil && strings.Contains(err.Error(), "secret") {
 				t.Fatalf("classified error leaked the request URL: %q", err)
 			}
 		})
