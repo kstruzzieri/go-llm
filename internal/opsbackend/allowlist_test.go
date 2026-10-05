@@ -106,6 +106,15 @@ func TestRouteTablesAreExact(t *testing.T) {
 		{"llama-swap", llamaSwapRoutes, []string{"/api/version", "/running", "/api/metrics", "/v1/models"}},
 		{"ollama", ollamaRoutes, []string{"/api/ps"}},
 	} {
+		// The probes below only try GET on known paths; this pin also
+		// catches an added method or an unprobed path (spec §4.2: GET only).
+		pin := make([]route, len(tc.want))
+		for i, p := range tc.want {
+			pin[i] = route{http.MethodGet, p}
+		}
+		if !slices.Equal(tc.routes, pin) {
+			t.Errorf("%s routes = %v; want exactly %v", tc.name, tc.routes, pin)
+		}
 		for _, p := range paths {
 			req, err := http.NewRequest(http.MethodGet, "http://127.0.0.1:8090"+p, nil)
 			if err != nil {
