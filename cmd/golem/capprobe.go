@@ -21,8 +21,9 @@ type capProbeHandle struct {
 
 // sidecarSecuringCapStore re-chmods the DB file and its -wal/-shm sidecars
 // after every mutation. SaveCapProbe runs mid-session (route-time probes), and
-// a WAL checkpoint can recreate a sidecar honoring the umask rather than the DB
-// file's 0600 mode (#237 lesson: every writable golem DB re-secures per write).
+// a sidecar left with looser bits (by an older run or a looser DB file) keeps
+// them; SQLite only gives new sidecars the DB file's mode (#237 lesson: every
+// writable golem DB re-secures per write).
 // The store is the only write seam golem controls, so the invariant lives here.
 // Reads pass straight through; only mutations trigger the re-chmod.
 type sidecarSecuringCapStore struct {

@@ -103,18 +103,22 @@ func NewSQLiteFeedbackStore(ctx context.Context, db *sql.DB, cfg SQLiteFeedbackS
 // OpenSQLiteFeedbackStore opens a SQLite database at path (use ":memory:"
 // for in-process tests; explicit empty string is rejected to avoid the
 // default-string footgun) and returns a store that owns the *sql.DB.
-// Close on this store closes the DB.
+// Close on this store closes the DB. path may be a file: URI. The open
+// switches the database to WAL and fails if the connection cannot use it
+// (immutable=1, nolock=1, or mode=ro on a rollback-journal file); for
+// read-only access, open a *sql.DB yourself and pass it to
+// NewSQLiteFeedbackStore.
 func OpenSQLiteFeedbackStore(ctx context.Context, path string, cfg SQLiteFeedbackStoreConfig) (*SQLiteFeedbackStore, error) {
 	if path == "" {
 		return nil, errors.New("provider: OpenSQLiteFeedbackStore requires non-empty path; pass \":memory:\" explicitly")
 	}
 	// busy_timeout = 5000ms: bounded wait on a contended lock before giving up
-	// with SQLITE_BUSY, instead of tight retry loops in the calling code. A ctx
-	// deadline alone does not shorten that wait; Record and RecordBatch cap it
-	// to the time left on their deadline (runInTxBefore). The DSN sets it on
-	// every connection: the journal_mode PRAGMA below reads the database, and
-	// database/sql replaces a connection after a context-cancelled statement
-	// run outside a transaction.
+	// with SQLITE_BUSY, instead of tight retry loops in the calling code.
+	// Record and RecordBatch (runInTxBefore) and the WAL switch below
+	// (EnableWAL) cap it to the time left on ctx's deadline; the migrations do
+	// not. The DSN sets it on every connection: the WAL switch retries within
+	// it when another opener races it, and database/sql replaces a connection
+	// after a context-cancelled statement run outside a transaction.
 	dsn, err := sqlitedsn.WithBusyTimeout(path, 5*time.Second)
 	if err != nil {
 		return nil, fmt.Errorf("provider: open sqlite %q: %w", path, err)
@@ -128,7 +132,7 @@ func OpenSQLiteFeedbackStore(ctx context.Context, path string, cfg SQLiteFeedbac
 	db.SetMaxOpenConns(1)
 
 	if path != ":memory:" {
-		if _, err := db.ExecContext(ctx, "PRAGMA journal_mode=WAL"); err != nil {
+		if err := sqlitedsn.EnableWAL(ctx, db); err != nil {
 			_ = db.Close()
 			return nil, fmt.Errorf("provider: set WAL mode: %w", err)
 		}

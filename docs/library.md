@@ -252,13 +252,17 @@ to the busy timeout, before the canceled context is reported. Current-schema
 opens require only reads; memory record signing initialization is separate and
 may write. This coordination covers the migration runners. Caller setup,
 including the initial `journal_mode=WAL` switch, must complete before racing the
-runners. A one-off PRAGMA on a `*sql.DB` does not configure every pooled or
-replacement connection (`database/sql` replaces a modernc connection after a
-context-cancelled statement run outside a transaction); use the DSN or a
-connection hook for `busy_timeout`. `provider.OpenSQLiteFeedbackStore` and
-`memory.OpenHardenedDB` set `busy_timeout` in their DSN, so every connection
-waits for another connection's lock, including the first `journal_mode=WAL`
-PRAGMA.
+runners, and `busy_timeout` does not cover that switch: it upgrades a read lock
+to a write lock, and SQLite skips the busy handler on that upgrade, so a
+racing opener fails at once with a busy error. A one-off PRAGMA on a `*sql.DB`
+does not configure every pooled or replacement connection (`database/sql`
+replaces a modernc connection after a context-cancelled statement run outside a
+transaction); use the DSN or a connection hook for `busy_timeout`.
+`provider.OpenSQLiteFeedbackStore`, `memory.OpenHardenedDB`, `transcript.Open`
+and `rag.NewSQLiteStore` set `busy_timeout` in their DSN and retry the WAL
+switch within it, so processes opening one new path at the same time all
+succeed as long as each finishes within the busy timeout (or its context
+deadline, if sooner).
 
 For provider routing feedback, unversioned legacy tables still must pass the
 existing column and CHECK-fingerprint validation. Validation, creation of
