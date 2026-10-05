@@ -24,6 +24,8 @@ AgentFlow 1.0.0 release.
   `-agentflow-status` stays read-only and exits 3; with a 0.x plan lock,
   AgentFlow reports `state_invalid`. See "Upgrading from AgentFlow 0.x" in
   `docs/llm/agentflow-task-mode.md`.
+- Retained-state checks reject nonregular files, including named pipes,
+  without blocking authoring or holding its lock after refusal.
 - `-agentflow-status` now makes two read-only AgentFlow calls:
   `--version`, then `next-action`.
 - Developers running go-llm's own tests with an AgentFlow that is not 1.x on

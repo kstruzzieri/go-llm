@@ -4,8 +4,8 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
-	"os"
 	"path/filepath"
 
 	"github.com/kstruzzieri/go-llm/agentflow"
@@ -57,12 +57,23 @@ func checkAgentflowStateMajor(root string) error {
 	return nil
 }
 
-// readAgentflowState returns nil, nil for an absent file.
+// readAgentflowState reads only regular files and returns nil, nil for an absent
+// file. The Unix open is nonblocking so a FIFO cannot stall the guard before
+// the opened file's type is checked.
 func readAgentflowState(dir, name string) ([]byte, error) {
-	b, err := os.ReadFile(filepath.Join(dir, name))
+	f, err := openAgentflowStateFile(filepath.Join(dir, name))
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, nil
 	}
+	if err != nil {
+		return nil, incompatibleAgentflowState(".agent/"+name, "unreadable")
+	}
+	defer func() { _ = f.Close() }()
+	info, err := f.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		return nil, incompatibleAgentflowState(".agent/"+name, "unreadable")
+	}
+	b, err := io.ReadAll(f)
 	if err != nil {
 		return nil, incompatibleAgentflowState(".agent/"+name, "unreadable")
 	}
