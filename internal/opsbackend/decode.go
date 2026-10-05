@@ -212,14 +212,17 @@ func decodePS(b []byte) ([]PSModel, error) {
 // pathClasses maps exact recorded request paths to classes. v235 strips "/v"
 // from versionless "/v/..." routes in place before its metrics middleware
 // records r.URL.Path, so "/chat/completions", "/completions", "/embeddings",
-// "/rerank" and "/reranking" read like their "/v1/" twins; "/responses" and
-// "/messages" stay "other" like "/v1/responses" and "/v1/messages".
+// "/rerank" and "/reranking" read like their "/v1/" twins; requests through
+// /upstream/<model>/v/... are recorded unstripped, so the "/v/" forms do too.
+// "/responses" and "/messages" in either form stay "other" like
+// "/v1/responses" and "/v1/messages".
 var pathClasses = map[string]string{
-	"/v1/chat/completions": "chat", "/chat/completions": "chat",
-	"/v1/completions": "completions", "/completion": "completions", "/completions": "completions",
-	"/v1/embeddings": "embeddings", "/embedding": "embeddings", "/embeddings": "embeddings",
+	"/v1/chat/completions": "chat", "/chat/completions": "chat", "/v/chat/completions": "chat",
+	"/v1/completions": "completions", "/completion": "completions", "/completions": "completions", "/v/completions": "completions",
+	"/v1/embeddings": "embeddings", "/embedding": "embeddings", "/embeddings": "embeddings", "/v/embeddings": "embeddings",
 	"/infill":    "infill",
 	"/v1/rerank": "rerank", "/rerank": "rerank", "/reranking": "rerank", "/v1/reranking": "rerank",
+	"/v/rerank": "rerank", "/v/reranking": "rerank",
 }
 
 // pathClass maps an exact known request path to a class; anything else,
