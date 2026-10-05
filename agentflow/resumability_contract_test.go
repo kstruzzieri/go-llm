@@ -29,7 +29,7 @@ func TestResumabilityProjection_RealCLI_AllStatesAndDigests(t *testing.T) {
 		t.Fatal(err)
 	}
 	plan := Plan{
-		SchemaVersion: "0.3.0", Objective: "exercise every next-action state", Scope: []string{"src"},
+		SchemaVersion: "1.0.0", Objective: "exercise every next-action state", Scope: []string{"src"},
 		NonGoals: []string{}, Invariants: []string{"only the fixture changes"}, RiskLevel: "low",
 		DriftBudget:  DriftBudget{UnrelatedEdits: 0, NewDependencies: 0, FormattingDrift: "minimal", ArchitectureDrift: "requires_approval"},
 		AllowedFiles: []string{"src/feature.txt"}, BlockedFiles: []string{}, ValidationGates: []string{"unit-tests"},

@@ -12,6 +12,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kstruzzieri/go-llm/agent"
 	"github.com/kstruzzieri/go-llm/agentflow"
@@ -43,7 +44,10 @@ func (f *fakeAF) failure(name string) error {
 	return f.failAt[name]
 }
 
-func (f *fakeAF) Probe(context.Context) error { f.seq = append(f.seq, "probe"); return nil }
+func (f *fakeAF) Probe(context.Context) error {
+	f.seq = append(f.seq, "probe")
+	return f.failure("probe")
+}
 func (f *fakeAF) ProbeParallel(context.Context) error {
 	f.seq = append(f.seq, "probe-parallel")
 	return f.failure("probe-parallel")
@@ -654,11 +658,17 @@ func TestDriver_WorkflowFailuresStopAtTheirMutationBoundary(t *testing.T) {
 			af := &fakeAF{failAt: map[string]error{tt.failAt: errors.New("scripted failure")}}
 			d := &driver{af: af, plan: reviewPlan(), planPath: "plan.json", out: io.Discard,
 				runStep: func(context.Context, agentflow.Step, string, string) error { return nil }}
-			if _, err := d.run(context.Background()); err == nil || !strings.Contains(err.Error(), tt.wantText) {
+			_, err := d.run(context.Background())
+			if err == nil || !strings.Contains(err.Error(), tt.wantText) {
 				t.Fatalf("error = %v, want %q", err, tt.wantText)
 			}
 			if !equalSeq(af.seq, tt.wantSeq) {
 				t.Fatalf("failure sequence = %v, want %v", af.seq, tt.wantSeq)
+			}
+			// #612 R10: only the probe failure skips the recovery report.
+			var u *agentflowUnavailableError
+			if got, want := errors.As(err, &u), tt.failAt == "probe-workflow"; got != want {
+				t.Fatalf("%s: marked unavailable = %t, want %t", tt.name, got, want)
 			}
 		})
 	}
@@ -970,8 +980,26 @@ func TestValidateTraceability_RejectsInvalidReferences(t *testing.T) {
 	}
 }
 
+// fakeAgentflowOnPath puts an `agentflow` script first on PATH. It appends each
+// invocation's arguments to a log and answers --version with version; any
+// other call prints {}. The returned log path exists only once the script ran.
+func fakeAgentflowOnPath(t *testing.T, version string) string {
+	t.Helper()
+	bin := t.TempDir()
+	log := filepath.Join(t.TempDir(), "calls")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> " + shellQuote(log) + "\n" +
+		"if [ \"$1\" = --version ]; then printf 'agentflow %s\\n' " + shellQuote(version) + "; exit 0; fi\n" +
+		"printf '{}\\n'\n"
+	if err := os.WriteFile(filepath.Join(bin, "agentflow"), []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return log
+}
+
 func TestRunAgentflowTask_RejectsInvalidTraceabilityBeforeClientUse(t *testing.T) {
 	planJSON := `{
+		"schema_version":"1.0.0",
 		"requirements":[{"id":"REQ-1","text":"behavior","acceptance_criteria":[{"id":"AC-1","text":"verified","review":{"minimum_depth":"deep"}}]}],
 		"steps":[{"id":"P1","files":["a.go"],"criterion_ids":["AC-MISSING"],"validation":["true"],"gates":[{"kind":"command","run":["true"]}]}]
 	}`
@@ -992,9 +1020,116 @@ func TestRunAgentflowTask_RejectsInvalidTraceabilityBeforeClientUse(t *testing.T
 	}
 }
 
+// #612 R4: a 0.x plan file is refused before any AgentFlow call.
+func TestRunAgentflowTask_RejectsZeroXPlanBeforeClientUse(t *testing.T) {
+	calls := fakeAgentflowOnPath(t, "1.0.0")
+	plan := agentflow.Compile(validTraceableIR())
+	plan.SchemaVersion = "0.3.0"
+	planBytes, err := json.Marshal(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	planPath := filepath.Join(t.TempDir(), "plan.json")
+	if err := os.WriteFile(planPath, planBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sess := &replSession{orch: agent.New(&scriptCaller{}, agent.ContextManager{})}
+	var stdout, stderr bytes.Buffer
+	err = runAgentflowTask(context.Background(), &stdout, &stderr, nil, sess, flags{
+		planPath: planPath, approveEdits: true, approveGates: true,
+	}, t.TempDir())
+	want := `plan schema_version "0.3.0" is not an AgentFlow 1.x plan; migrate it to schema_version 1.0.0 and review it again, or re-plan with -goal after moving any existing .agent/ aside`
+	if err == nil || err.Error() != want {
+		t.Fatalf("err = %v, want %q", err, want)
+	}
+	if stdout.Len() != 0 || stderr.Len() != 0 {
+		t.Fatalf("schema rejection used task output: stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	if got, readErr := os.ReadFile(calls); readErr == nil {
+		t.Fatalf("AgentFlow ran before the schema check: %q", got)
+	}
+}
+
+// #612 U7: with a rejected AgentFlow, fresh runs and resume make no call but
+// --version: resume probes first (R6), and the failure report does not ask the
+// refused binary for next-action or status (R10).
+func TestRunAgentflowTask_RejectedVersionMakesNoOtherCall(t *testing.T) {
+	for _, resume := range []bool{false, true} {
+		t.Run(fmt.Sprintf("resume=%t", resume), func(t *testing.T) {
+			root := t.TempDir()
+			calls := fakeAgentflowOnPath(t, "0.4.0")
+			planBytes, err := json.Marshal(agentflow.Compile(validTraceableIR()))
+			if err != nil {
+				t.Fatal(err)
+			}
+			planPath := filepath.Join(t.TempDir(), "plan.json")
+			if err := os.WriteFile(planPath, planBytes, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			sess := &replSession{orch: agent.New(&scriptCaller{}, agent.ContextManager{}), maxSteps: 4, clock: time.Now}
+			var stdout, stderr bytes.Buffer
+			err = runAgentflowTask(context.Background(), &stdout, &stderr, nil, sess, flags{
+				planPath: planPath, approveEdits: true, approveGates: true, agentflowResume: resume,
+			}, root)
+			if !errors.Is(err, errAgentflowTaskFailed) {
+				t.Fatalf("err = %v, want errAgentflowTaskFailed", err)
+			}
+			if !strings.Contains(stderr.String(), "agentflow 0.4 is too old; need >= 1.0") {
+				t.Fatalf("stderr = %q, want the version rejection", stderr.String())
+			}
+			got, err := os.ReadFile(calls)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(got) != "--version\n" {
+				t.Fatalf("AgentFlow calls = %q, want only --version", got)
+			}
+		})
+	}
+}
+
+// The driver marks every probe failure, so runAgentflowTask can skip recovery.
+// Each row fails one probe; parallel and review probes run only when their
+// feature is configured.
+func TestDriverRun_MarksProbeFailuresUnavailable(t *testing.T) {
+	for _, tt := range []struct {
+		probe    string
+		wantErr  string
+		parallel bool
+		review   string
+	}{
+		{probe: "probe", wantErr: "agentflow unavailable: too old"},
+		{probe: "probe-parallel", wantErr: "agentflow parallel runtime unavailable: too old", parallel: true},
+		{probe: "probe-workflow", wantErr: "agentflow workflow routing unavailable: too old"},
+		{probe: "probe-review", wantErr: "agentflow review unavailable: too old", review: "review.json"},
+	} {
+		t.Run(tt.probe, func(t *testing.T) {
+			af := &fakeAF{failAt: map[string]error{tt.probe: errors.New("too old")}}
+			d := &driver{
+				af: af, plan: stopTestPlan(), reviewManifest: tt.review,
+				runStep: func(context.Context, agentflow.Step, string, string) error { return nil },
+			}
+			if tt.parallel {
+				d.parallelCohort = func(context.Context) error { return nil }
+			}
+			_, err := d.run(context.Background())
+			var unavailable *agentflowUnavailableError
+			if !errors.As(err, &unavailable) {
+				t.Fatalf("failure = %v, want *agentflowUnavailableError", err)
+			}
+			if err.Error() != tt.wantErr {
+				t.Fatalf("error = %q, want %q", err.Error(), tt.wantErr)
+			}
+			if got := af.seq[len(af.seq)-1]; got != tt.probe {
+				t.Fatalf("last call = %q (seq %v), want the failing probe", got, af.seq)
+			}
+		})
+	}
+}
+
 func TestRunAgentflowTask_RejectsInvalidDesignTraceabilityBeforeClientUse(t *testing.T) {
 	planJSON := `{
-		"schema_version":"0.4.0",
+		"schema_version":"1.0.0",
 		"design_decisions":[],
 		"steps":[{"id":"P1","files":["a.go"],"design_decision_ids":["DD-MISSING"],"validation":["true"],"gates":[{"kind":"command","run":["true"]}]}]
 	}`
@@ -1328,7 +1463,7 @@ func TestReadEvidenceSidecar(t *testing.T) {
 // a headless run missing either approval class errors before building the runner
 // or touching agentflow (no binary is on PATH here).
 func TestRunAgentflowTask_RequiresApprovalFlags(t *testing.T) {
-	planJSON := `{"steps":[{"id":"P1","files":["a.go"],"validation":["go test"],"gates":[{"kind":"command","run":["go","test"]}]}]}`
+	planJSON := `{"schema_version":"1.0.0","steps":[{"id":"P1","files":["a.go"],"validation":["go test"],"gates":[{"kind":"command","run":["go","test"]}]}]}`
 	planPath := filepath.Join(t.TempDir(), "plan.json")
 	if err := os.WriteFile(planPath, []byte(planJSON), 0o600); err != nil {
 		t.Fatal(err)

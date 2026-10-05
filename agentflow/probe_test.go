@@ -2,6 +2,8 @@ package agentflow
 
 import (
 	"context"
+	"errors"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -17,7 +19,7 @@ func TestProbe_OKWhenAllPresent(t *testing.T) {
 func probeReplies(topHelp string) map[string]fakeReply {
 	allFlags := []byte("--root --json --from-json --agent --step --attempt --path --gate --confirm-risk --reason")
 	replies := map[string]fakeReply{
-		"--version": {stdout: []byte("agentflow 0.4.0\n")},
+		"--version": {stdout: []byte("agentflow 1.0.0\n")},
 		"--help":    {stdout: []byte(topHelp)},
 	}
 	for _, sub := range []string{
@@ -32,11 +34,11 @@ func probeReplies(topHelp string) map[string]fakeReply {
 func TestProbe_FailsOnMissingSubcommand(t *testing.T) {
 	help := "usage: agentflow {init,doctor}" // lock-plan etc missing
 	f := &fakeRunner{replies: map[string]fakeReply{
-		"--version": {stdout: []byte("agentflow 0.4.0\n")},
+		"--version": {stdout: []byte("agentflow 1.0.0\n")},
 		"--help":    {stdout: []byte(help)},
 	}}
 	err := NewClient(f, "/ws").Probe(context.Background())
-	if err == nil || !strings.Contains(err.Error(), "lock-plan") {
+	if err == nil || !strings.Contains(err.Error(), "lock-plan") || !strings.HasSuffix(err.Error(), "(upgrade Agentflow)") {
 		t.Fatalf("expected missing-subcommand error, got %v", err)
 	}
 }
@@ -47,7 +49,7 @@ func TestProbe_FailsOnMissingRequiredFlag(t *testing.T) {
 	replies["lock-plan"] = fakeReply{stdout: []byte("usage: lock-plan [--json]\n")} // missing --from-json
 	f := &fakeRunner{replies: replies}
 	err := NewClient(f, "/ws").Probe(context.Background())
-	if err == nil || !strings.Contains(err.Error(), "lock-plan --from-json") {
+	if err == nil || !strings.Contains(err.Error(), "lock-plan --from-json") || !strings.HasSuffix(err.Error(), "(upgrade Agentflow)") {
 		t.Fatalf("expected missing flag error, got %v", err)
 	}
 }
@@ -60,13 +62,6 @@ func TestProbe_FailsOnMissingInitSubcommand(t *testing.T) {
 	f := &fakeRunner{replies: replies}
 	if err := NewClient(f, "/ws").Probe(context.Background()); err == nil {
 		t.Fatal("expected probe to fail when standalone init is unavailable")
-	}
-}
-
-func TestProbe_FailsOnOldVersion(t *testing.T) {
-	f := &fakeRunner{replies: map[string]fakeReply{"--version": {stdout: []byte("agentflow 0.3.0\n")}}}
-	if err := NewClient(f, "/ws").Probe(context.Background()); err == nil {
-		t.Fatal("expected version-too-old error")
 	}
 }
 
@@ -98,9 +93,9 @@ func TestProbeParallel_RequiresNextActionAgentWithoutChangingBaseProbe(t *testin
 		t.Fatalf("base Probe = %v", err)
 	}
 	if err := c.ProbeParallel(context.Background()); err == nil ||
-		!strings.Contains(err.Error(), "next-action --agent") || !strings.Contains(err.Error(), "#22") ||
-		!strings.Contains(err.Error(), "0.4.0") {
-		t.Fatalf("pre-#22 diagnostic = %v", err)
+		!strings.Contains(err.Error(), "next-action --agent unavailable (upgrade Agentflow)") ||
+		strings.Contains(err.Error(), "0.4.0") {
+		t.Fatalf("parallel probe diagnostic = %v", err)
 	}
 }
 
@@ -129,6 +124,9 @@ func TestProbeParallel_RequiresAggregateLedgersAndEveryUsedFlag(t *testing.T) {
 			err := NewClient(&fakeRunner{replies: copy}, "/ws").ProbeParallel(context.Background())
 			if err == nil || !strings.Contains(err.Error(), missing) {
 				t.Fatalf("missing %s error = %v", missing, err)
+			}
+			if !strings.HasSuffix(err.Error(), "(upgrade Agentflow)") {
+				t.Fatalf("missing %s error = %v, want the upgrade hint", missing, err)
 			}
 		})
 	}
@@ -217,4 +215,94 @@ func TestProbe_RequiresBlockStepFlags(t *testing.T) {
 			t.Fatalf("expected block-step help failure, got %v", err)
 		}
 	})
+}
+
+const fullProbeHelp = "usage: agentflow {init,init-execution,lock-plan,record-file-change,run,finish-step,finish-run,next-step,next-action,doctor,status}"
+
+// TestCheckVersion pins the #612 range: AgentFlow 1.x only. Every rejection is
+// a *VersionError, so status may show it where it hides runner errors.
+func TestCheckVersion(t *testing.T) {
+	for _, tt := range []struct{ out, want string }{
+		{"agentflow 1.0.0\n", ""},
+		{"agentflow 1.7.3\n", ""},
+		{"agentflow 1.0.0rc1\n", ""},
+		{"agentflow 1.0.0.dev1+gabc\n", ""},
+		{"agentflow 0.3.0\n", "agentflow 0.3 is too old; need >= 1.0"},
+		{"agentflow 0.4.0\n", "agentflow 0.4 is too old; need >= 1.0"},
+		{"agentflow 2.0.0\n", "agentflow 2.0 is newer than this Golem supports; need 1.x"},
+		{"agentflow x.0.0\n", `cannot parse agentflow version "x.0.0"`},
+		{"agentflow 1.x\n", `cannot parse agentflow version "1.x"`},
+		{"agentflow 1.bad.0\n", `cannot parse agentflow version "1.bad.0"`},
+		{"agentflow 1\n", `cannot parse agentflow version "1"`},
+		{"agentflow 1.0rc1\n", `cannot parse agentflow version "1.0rc1"`},
+		{"agentflow +1.0.0\n", `cannot parse agentflow version "+1.0.0"`},
+		{"agentflow 1.-0.0\n", `cannot parse agentflow version "1.-0.0"`},
+		// %q is the only sanitizer for text that reaches stderr raw later (#612).
+		{"agentflow 1.\x1b[2J\n", `cannot parse agentflow version "1.\x1b[2J"`},
+		{"agentflow\n", `cannot parse agentflow version from "agentflow"`},
+		// Only the first line is the version; later lines (warnings, paths) are
+		// neither parsed nor echoed (#612).
+		{"agentflow 1.0.0\nwarning: deprecated /Users/x/y\n", ""},
+		{"\n  agentflow 1.0.0 (python 3.12)\n", ""},
+		{"agentflow 2.0.0\nwarning: /Users/x/y\n", "agentflow 2.0 is newer than this Golem supports; need 1.x"},
+		{"agentflow\nwarning: /Users/x/y\n", `cannot parse agentflow version from "agentflow"`},
+		// A real AgentFlow prints about 16 bytes; anything echoed is clipped.
+		{"agentflow 1." + strings.Repeat("9", 100) + "x\n", `cannot parse agentflow version "1.` + strings.Repeat("9", 62) + `..."`},
+	} {
+		t.Run(strings.TrimSpace(tt.out), func(t *testing.T) {
+			c, f := newTestClient(map[string]fakeReply{"--version": {stdout: []byte(tt.out)}})
+			err := c.CheckVersion(context.Background())
+			if tt.want == "" {
+				if err != nil {
+					t.Fatalf("CheckVersion(%q) = %v", tt.out, err)
+				}
+			} else {
+				var versionErr *VersionError
+				if !errors.As(err, &versionErr) || err.Error() != tt.want {
+					t.Fatalf("CheckVersion(%q) = %v, want *VersionError %q", tt.out, err, tt.want)
+				}
+			}
+			if !reflect.DeepEqual(f.calls, [][]string{{"--version"}}) {
+				t.Fatalf("calls = %v, want only --version", f.calls)
+			}
+		})
+	}
+}
+
+// A launch failure keeps Probe's existing wrapping and is not a VersionError,
+// so JSON status keeps it silent (#612 G17).
+func TestCheckVersion_LaunchFailureIsNotAVersionError(t *testing.T) {
+	launch := errors.New("exec: agentflow: not found")
+	for _, tt := range []struct {
+		reply fakeReply
+		want  string
+	}{
+		{fakeReply{err: launch}, "agentflow unavailable (--version failed): exec: agentflow: not found"},
+		{fakeReply{exit: 2}, "agentflow unavailable (--version failed): agentflow --version: exit 2"},
+		// A broken install's own error is the diagnosis; keep it (#612).
+		{fakeReply{exit: 1, stderr: []byte("boom: missing module\n")}, "agentflow unavailable (--version failed): agentflow --version: exit 1: boom: missing module"},
+	} {
+		c, _ := newTestClient(map[string]fakeReply{"--version": tt.reply})
+		err := c.CheckVersion(context.Background())
+		var versionErr *VersionError
+		if err == nil || errors.As(err, &versionErr) || err.Error() != tt.want {
+			t.Fatalf("CheckVersion = %v, want plain %q", err, tt.want)
+		}
+	}
+}
+
+// Probe stops at a rejected version: no --help or subcommand probe runs.
+func TestProbe_RejectsUnsupportedVersionBeforeHelp(t *testing.T) {
+	for _, version := range []string{"agentflow 0.4.0\n", "agentflow 2.0.0\n"} {
+		f := &fakeRunner{replies: probeReplies(fullProbeHelp)}
+		f.replies["--version"] = fakeReply{stdout: []byte(version)}
+		err := NewClient(f, "/ws").Probe(context.Background())
+		var versionErr *VersionError
+		if !errors.As(err, &versionErr) {
+			t.Fatalf("Probe(%q) = %v, want *VersionError", version, err)
+		}
+		if len(f.calls) != 1 {
+			t.Fatalf("Probe(%q) ran %v after rejecting the version", version, f.calls)
+		}
+	}
 }

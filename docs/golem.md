@@ -448,6 +448,11 @@ Git notices go to stderr, never to machine stdout.
 
 ## AgentFlow subprocess environment
 
+`-goal`, `-plan`, `-agentflow-status` and `-agentflow-resume` require AgentFlow
+1.x; an older or newer AgentFlow is refused before any mutation (see
+[Upgrading from AgentFlow 0.x](llm/agentflow-task-mode.md#upgrading-from-agentflow-0x)).
+`golem audit` does not check the AgentFlow version.
+
 Planning and task modes (`-goal`, `-plan`, `-agentflow-status`,
 `-agentflow-resume`) and `golem audit` whenever it checks proofs (`-scope
 proofs`, or the default `all` when `.agent/` exists) start AgentFlow with an

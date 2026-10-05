@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -215,6 +216,89 @@ func TestAgentflowResumeStatusAndProof_RealCLI(t *testing.T) {
 	}
 	if claims != 1 {
 		t.Fatalf("claim events = %d, want exactly one", claims)
+	}
+	// R5 must accept the ledger rows a real AgentFlow 1.0 run leaves behind.
+	if err := checkAgentflowStateMajor(dir); err != nil {
+		t.Fatalf("guard refused a real AgentFlow 1.0 tree: %v", err)
+	}
+}
+
+// #612 R-new: AgentFlow 1.0 rejects a 0.x plan before it looks at execution
+// state, and Golem status reports that as state_invalid without touching
+// .agent/. Only the early old-plan rejection is covered here; the
+// retained-state guard's artifact coverage is U5's job.
+func TestAgentflowStatusReportsZeroXState_RealCLI(t *testing.T) {
+	dir := t.TempDir()
+	copyTree(t, "../../testdata/agentflow", dir)
+	runner := agentflowRunnerOrSkip(t, dir)
+	client := agentflow.NewOwnedClient(runner, dir, "golem")
+	ctx := context.Background()
+	planBytes, err := os.ReadFile(filepath.Join(dir, "plan.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var plan agentflow.Plan
+	if err := json.Unmarshal(planBytes, &plan); err != nil {
+		t.Fatal(err)
+	}
+	gitInit(t, dir)
+	recommendation, err := client.RecommendWorkflow(ctx, agentflow.TaskBriefFromPlan(plan, "feature"), "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.LockPlan(ctx, filepath.Join(dir, "plan.json")); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.MaterializeWorkflowContract(ctx, recommendation); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.InitExecution(ctx); err != nil {
+		t.Fatal(err)
+	}
+	attempt, err := client.ClaimStep(ctx, "P1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "src", "answer.txt"), []byte("expected\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.RecordFileChange(ctx, "P1", attempt, "src/answer.txt"); err != nil {
+		t.Fatal(err)
+	}
+	for name, version := range map[string]string{"plan.lock.json": "0.4.0", "execution.contract.json": "0.3.0"} {
+		path := filepath.Join(dir, ".agent", name)
+		b, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var doc map[string]json.RawMessage
+		if err := json.Unmarshal(b, &doc); err != nil {
+			t.Fatal(err)
+		}
+		doc["schema_version"] = json.RawMessage(strconv.Quote(version))
+		if b, err = json.Marshal(doc); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	before := snapshotSmokeAgentTree(t, dir)
+	var status bytes.Buffer
+	statusErr := runAgentflowStatusWithRunner(ctx, &status, dir, false, runner)
+	var exit *agentflowStatusExit
+	if !errors.As(statusErr, &exit) || exit.ExitCode() != 3 {
+		t.Fatalf("status error = %v\n%s", statusErr, status.String())
+	}
+	if !strings.Contains(status.String(), "state: state_invalid") || !strings.Contains(status.String(), "incompatible with supported 1.0.0") {
+		t.Fatalf("status output = %s", status.String())
+	}
+	if after := snapshotSmokeAgentTree(t, dir); !reflect.DeepEqual(after, before) {
+		t.Fatal("status mutated a 0.x .agent/ tree")
 	}
 }
 
@@ -539,6 +623,10 @@ func TestAgentflowParallelSmoke(t *testing.T) {
 	}
 
 	assertParallelSmokeProof(t, dir, proof, base)
+	// Aggregated worker rows are real AgentFlow 1.0 ledger rows too (R5).
+	if err := checkAgentflowStateMajor(dir); err != nil {
+		t.Fatalf("guard refused a real AgentFlow 1.0 tree: %v", err)
+	}
 
 	calls := recorder.snapshot()
 	claims := map[string]parallelSmokeCall{}
@@ -613,7 +701,7 @@ func writeParallelSmokeFixture(t *testing.T) (string, agentflow.Plan, string) {
 	dir := t.TempDir()
 	copyTree(t, "../../testdata/agentflow", dir)
 	plan := agentflow.Plan{
-		SchemaVersion: "0.3.0", Objective: "prove bounded parallel task execution", Scope: []string{"src"},
+		SchemaVersion: "1.0.0", Objective: "prove bounded parallel task execution", Scope: []string{"src"},
 		NonGoals: []string{}, Invariants: []string{"only declared files change"}, RiskLevel: "low",
 		DriftBudget:  agentflow.DriftBudget{UnrelatedEdits: 0, NewDependencies: 0, FormattingDrift: "minimal", ArchitectureDrift: "requires_approval"},
 		AllowedFiles: []string{"src/*", ".agent/"}, BlockedFiles: []string{},
@@ -691,10 +779,13 @@ func assertParallelSmokeProof(t *testing.T, dir, proof, base string) {
 }
 
 // agentflowRunnerOrSkip honors GO_LLM_REQUIRE_AGENTFLOW and the explicit
-// AGENTFLOW_SRC checkout, otherwise uses an installed binary or skips. Mirrors
-// agentflow.agentflowRunnerForTest, which is unexported in another package.
-// CI's agentflow-compat job selects real-CLI tests by name, so a new test using
-// this must be named Test*_RealCLI or Test*_RealCLI_<scenario>.
+// AGENTFLOW_SRC checkout, otherwise uses an installed binary or skips. The
+// chosen CLI must pass the AgentFlow 1.x version gate: a non-1.x install skips
+// (or fails under GO_LLM_REQUIRE_AGENTFLOW) instead of failing on a raw schema
+// rejection (#612). Mirrors agentflow.agentflowRunnerForTest, which is
+// unexported in another package. CI's agentflow-compat job selects real-CLI
+// tests by name, so a new test using this must be named Test*_RealCLI or
+// Test*_RealCLI_<scenario>.
 func agentflowRunnerOrSkip(t *testing.T, dir string) agentflow.Runner {
 	t.Helper()
 	mode, src := os.Getenv("GO_LLM_REQUIRE_AGENTFLOW"), os.Getenv("AGENTFLOW_SRC")
@@ -716,14 +807,22 @@ func agentflowRunnerOrSkip(t *testing.T, dir string) agentflow.Runner {
 	default:
 		t.Fatalf("GO_LLM_REQUIRE_AGENTFLOW=%q, want installed or source", mode)
 	}
-	if src != "" {
-		return agentflow.NewSrcExecRunner(dir, src)
+	var runner agentflow.Runner
+	switch {
+	case src != "":
+		runner = agentflow.NewSrcExecRunner(dir, src)
+	case installed:
+		runner = agentflow.NewExecRunner(dir)
+	default:
+		t.Skip("agentflow CLI not available (set AGENTFLOW_SRC=<checkout> to run)")
 	}
-	if installed {
-		return agentflow.NewExecRunner(dir)
+	if err := agentflow.NewClient(runner, dir).CheckVersion(context.Background()); err != nil {
+		if mode != "" {
+			t.Fatalf("agentflow is not usable for the real-CLI tests: %v", err)
+		}
+		t.Skipf("agentflow is not AgentFlow 1.x (%v); install AgentFlow 1.x or set AGENTFLOW_SRC=<1.x checkout>", err)
 	}
-	t.Skip("agentflow CLI not available (set AGENTFLOW_SRC=<checkout> to run)")
-	return nil
+	return runner
 }
 
 // gitInit initializes a git repository at dir and commits the fixture as it
