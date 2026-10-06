@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -110,29 +112,139 @@ func TestBackoffKeepsReachabilitySteady(t *testing.T) {
 	}
 }
 
+// TestMissedScheduleIsNotHeldByAnotherSurfacesBackoff: /api/metrics backs
+// off (next attempt at 30 s) while version, /running and /v1/models are due
+// every tick. If no tick reaches the backend after 14 s (a slow neighbor
+// spends the tick budget, which leaves this backend's state untouched, or
+// the collector stalls), the 14 s reading must age out at 20 s as usual, not
+// be held to metrics' retry.
+func TestMissedScheduleIsNotHeldByAnotherSurfacesBackoff(t *testing.T) {
+	const interval = 2 * time.Second
+	fx := opsfixture.NewLlamaSwap(t)
+	fx.SetStatus("/api/metrics", 500)
+	clk := &cadenceClock{wall: now}
+	c := opsbackend.NewCollector([]opsbackend.BackendSpec{{Provider: "llamacpp", BaseURL: fx.URL(), APIFormat: "openai-compat"}},
+		opsbackend.Options{Interval: interval, Clock: clk.clock()})
+	var obs opsbackend.Observations
+	for range 8 { // ticks at 0..14 s; metrics fails at 0, 2, 6 and 14 s
+		obs = c.Tick(context.Background())
+		clk.advance(interval)
+	}
+	if m := surface(obs.Backends[0], "metrics"); m.NextAttempt != 30*time.Second {
+		t.Fatalf("setup: metrics next attempt = %v, want 30s", m.NextAttempt)
+	}
+	for _, tc := range []struct {
+		mono time.Duration
+		ok   bool
+	}{{20 * time.Second, true}, {21 * time.Second, false}} {
+		in := input(ModeServe, obs.Backends...)
+		in.NowMono = tc.mono
+		if r := Build(in).Backends[0].Reachability; (r.State == ReachOK && !r.Stale) != tc.ok {
+			t.Fatalf("t=%v: reachability = %+v, want ok = %v", tc.mono, r, tc.ok)
+		}
+	}
+}
+
+// TestDemotedBackendHoldsOnlyBySurfacesItReads: llama-swap with /api/metrics
+// in backoff goes down at 10 s and returns at 20 s answering /api/version
+// 401 (a wrong api_key after a restart), so it stays unidentified and only
+// version is read. Metrics' pre-outage schedule must neither bound the hold
+// (ok flapping to stale) nor keep alerting: from 24 s on, reachability reads
+// ok and attention never changes.
+func TestDemotedBackendHoldsOnlyBySurfacesItReads(t *testing.T) {
+	const interval = 2 * time.Second
+	var phase atomic.Int32 // 0 up, metrics 500; 1 down; 2 back, version 401
+	base := fixtureFront(t, func(w http.ResponseWriter, r *http.Request) bool {
+		if phase.Load() == 1 {
+			if conn, _, err := http.NewResponseController(w).Hijack(); err == nil {
+				_ = conn.Close()
+			}
+			return true
+		}
+		switch {
+		case r.URL.Path == "/api/metrics":
+			w.WriteHeader(http.StatusInternalServerError)
+		case r.URL.Path == "/api/version" && phase.Load() == 2:
+			w.WriteHeader(http.StatusUnauthorized)
+		default:
+			return false
+		}
+		return true
+	})
+	clk := &cadenceClock{wall: now}
+	c := opsbackend.NewCollector([]opsbackend.BackendSpec{{Provider: "llamacpp", BaseURL: base, APIFormat: "openai-compat"}},
+		opsbackend.Options{Interval: interval, Clock: clk.clock()})
+	var steady []Attention
+	for range 61 { // 0..120 s
+		switch clk.clock().Mono() {
+		case 10 * time.Second:
+			phase.Store(1)
+		case 20 * time.Second:
+			phase.Store(2)
+		}
+		obs := c.Tick(context.Background())
+		for _, d := range []time.Duration{0, interval - time.Millisecond} {
+			in := input(ModeServe, obs.Backends...)
+			in.NowMono = clk.clock().Mono() + d
+			if in.NowMono < 24*time.Second { // the first retry after the return answers at 24 s
+				continue
+			}
+			s := Build(in)
+			if r := s.Backends[0].Reachability; r.State != ReachOK || r.Stale {
+				t.Fatalf("t=%v: reachability = %+v, want a steady ok", in.NowMono, r)
+			}
+			for _, a := range s.Attention {
+				if strings.Contains(a.Text, "on metrics") {
+					t.Fatalf("t=%v: alert for a surface the backend no longer reads: %q", in.NowMono, a.Text)
+				}
+			}
+			if steady == nil {
+				steady = s.Attention
+			} else if !reflect.DeepEqual(s.Attention, steady) {
+				t.Fatalf("t=%v: attention changed with no change in the backend:\n got %+v\nwant %+v", in.NowMono, s.Attention, steady)
+			}
+		}
+		clk.advance(interval)
+	}
+}
+
+func surface(o opsbackend.BackendObservation, name string) opsbackend.Surface {
+	for _, s := range o.Surfaces {
+		if s.Name == name {
+			return s
+		}
+	}
+	return opsbackend.Surface{}
+}
+
 // TestPositiveReachabilityHeldOnlyByPendingAttempts: the hold lasts until an
 // attempt that would re-stamp reachability can have been published, and no
 // longer; a backend with nothing pending, or whose pending attempts never
 // re-stamp (denied, refused), goes stale on the positive rule.
 func TestPositiveReachabilityHeldOnlyByPendingAttempts(t *testing.T) {
-	pending := func(code opsbackend.Code) opsbackend.Surface {
-		return opsbackend.Surface{Name: "version", LastError: code, NextAttempt: 18 * time.Second}
+	pending := func(name string, code opsbackend.Code, at time.Duration) opsbackend.Surface {
+		return opsbackend.Surface{Name: name, LastError: code, NextAttempt: at}
 	}
 	for _, tc := range []struct {
-		name    string
-		surface opsbackend.Surface
-		mono    time.Duration
-		ok      bool
+		name     string
+		surfaces []opsbackend.Surface
+		mono     time.Duration
+		ok       bool
 	}{
-		{"nothing pending", opsbackend.Surface{Name: "version"}, 17 * time.Second, false},
-		{"401 pending at 18 s, last instant (18 + 2 + 10 + 1 s)", pending(opsbackend.CodeUnauthorized), 31 * time.Second, true},
-		{"401 pending at 18 s, missed", pending(opsbackend.CodeUnauthorized), 32 * time.Second, false},
-		{"denied attempts never re-stamp", pending(opsbackend.CodeDenied), 17 * time.Second, false},
-		{"refused attempts never re-stamp", pending(opsbackend.CodeRefused), 17 * time.Second, false},
+		{"nothing pending", []opsbackend.Surface{{Name: "version"}}, 17 * time.Second, false},
+		{"401 pending at 18 s, last instant (18 + 2 + 10 + 1 s)", []opsbackend.Surface{pending("version", opsbackend.CodeUnauthorized, 18*time.Second)}, 31 * time.Second, true},
+		{"401 pending at 18 s, missed", []opsbackend.Surface{pending("version", opsbackend.CodeUnauthorized, 18*time.Second)}, 32 * time.Second, false},
+		{"denied attempts never re-stamp", []opsbackend.Surface{pending("version", opsbackend.CodeDenied, 18*time.Second)}, 17 * time.Second, false},
+		{"refused attempts never re-stamp", []opsbackend.Surface{pending("version", opsbackend.CodeRefused, 18*time.Second)}, 17 * time.Second, false},
+		// A due surface would have re-stamped the reading: the console missed
+		// its schedule (a slow neighbor spent the tick budget), however far
+		// off another surface's backoff runs.
+		{"version due beside metrics pending", []opsbackend.Surface{{Name: "version"}, pending("metrics", opsbackend.CodeUnauthorized, 30*time.Second)}, 17 * time.Second, false},
+		{"the earliest pending attempt bounds the hold", []opsbackend.Surface{pending("version", opsbackend.CodeUnauthorized, 18*time.Second), pending("metrics", opsbackend.CodeUnauthorized, 40*time.Second)}, 35 * time.Second, false},
 	} {
 		b := healthyLlamaSwap() // reachability ok at 10 s
-		b.Kind, b.Running, b.Rows, b.Listed = opsbackend.KindUnidentified, nil, nil, nil
-		b.Surfaces = []opsbackend.Surface{tc.surface}
+		b.Running, b.Rows, b.Listed = nil, nil, nil
+		b.Surfaces = tc.surfaces
 		in := input(ModeWatch, b, remote())
 		in.NowMono = tc.mono
 		s := Build(in)
@@ -249,7 +361,7 @@ func TestModelErrorsAreCapped(t *testing.T) {
 			items = append(items, a)
 		}
 	}
-	if len(items) != maxModelErrors+1 || items[0].Subject != "" || items[0].Text != "44 more models returned non-2xx in the last 10 min; not listed" ||
+	if len(items) != maxModelErrors+1 || items[0].Subject != "" || items[0].Text != "model_errors list capped at 256 models; 44 more models returned non-2xx responses in the last 10 minutes" ||
 		items[1].Subject != "llamacpp/m000" || items[maxModelErrors].Subject != "llamacpp/m255" {
 		t.Fatalf("model_errors not capped at %d plus one overflow item: %d items, first %+v", maxModelErrors, len(items), items[:min(2, len(items))])
 	}

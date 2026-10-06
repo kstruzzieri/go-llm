@@ -102,7 +102,7 @@ func (b builder) attention() []Attention {
 	slices.SortFunc(errs, attentionOrder)
 	if n := len(errs) - maxModelErrors; n > 0 {
 		errs = errs[:maxModelErrors]
-		add(SevSerious, AttnModelErrors, "", fmt.Sprintf("%d more models returned non-2xx in the last 10 min; not listed", n))
+		add(SevSerious, AttnModelErrors, "", fmt.Sprintf("model_errors list capped at %d models; %d more models returned non-2xx responses in the last 10 minutes", maxModelErrors, n))
 	}
 	out = append(out, errs...)
 	// configview reports a missing models.json as Ready false plus a
@@ -148,16 +148,23 @@ func (b builder) staleFacts(o opsbackend.BackendObservation) []string {
 // okCurrent reports whether a positive reachability reading still speaks for
 // now. Every attempt the collector makes re-stamps reachability unless the
 // ops allowlist or the destination gate stopped it, so while every surface
-// backs off (a 401 from the start) the backend is next contacted at its
-// earliest pending attempt, and the reading stands until that attempt can
-// have been published: the bound a failure keeps until its retry.
+// the backend's kind reads backs off (a 401 from the start) it is next
+// contacted at its earliest pending attempt, and the reading stands until
+// that attempt can have been published: the bound a failure keeps until its
+// retry. A surface due now (NextAttempt 0) would have re-stamped it, so an
+// aged reading beside one means the console missed its schedule. The
+// collector publishes only the surfaces the current kind reads.
 func (b builder) okCurrent(o opsbackend.BackendObservation) bool {
 	if b.fresh(o.Reachable.Mono) {
 		return true
 	}
 	var next time.Duration
 	for _, s := range o.Surfaces {
-		if s.NextAttempt > 0 && s.LastError != opsbackend.CodeDenied && s.LastError != opsbackend.CodeRefused && (next == 0 || s.NextAttempt < next) {
+		switch {
+		case s.LastError == opsbackend.CodeDenied || s.LastError == opsbackend.CodeRefused:
+		case s.NextAttempt == 0:
+			return false
+		case next == 0 || s.NextAttempt < next:
 			next = s.NextAttempt
 		}
 	}
