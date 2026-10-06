@@ -24,19 +24,20 @@ type Input struct {
 
 type builder struct{ in Input }
 
-const (
-	stampLayout = "2006-01-02T15:04:05.000Z07:00"
-	// retryGrace is the request timeout (2 s) plus one second: a failure
-	// reading stays fresh until its scheduled retry has had time to answer.
-	retryGrace = 3 * time.Second
-)
+const stampLayout = "2006-01-02T15:04:05.000Z07:00"
 
-// stamp renders UTC RFC3339 with milliseconds; zero time is null.
+// stamp renders UTC RFC3339 with milliseconds. Zero time is null, and so is a
+// time whose UTC year falls outside 0000-9999, which RFC3339 cannot write (a
+// metrics row timestamp or an Ollama expires_at can carry either).
 func stamp(t time.Time) *string {
 	if t.IsZero() {
 		return nil
 	}
-	s := t.UTC().Format(stampLayout)
+	t = t.UTC()
+	if y := t.Year(); y < 0 || y > 9999 {
+		return nil
+	}
+	s := t.Format(stampLayout)
 	return &s
 }
 
@@ -64,14 +65,19 @@ func (b builder) fresh(mono time.Duration) bool {
 }
 
 // failureFresh reports whether a failure reading is still current: it is
-// until its next scheduled retry has had time to answer (spec §5.4). Without
-// this, reachability would flip between unreachable and unknown between
-// backoff retries.
+// until the retry its failure scheduled has had time to answer and be
+// published (spec §5.4). Ticks run backends serially, so the first tick at or
+// after retry can start up to one interval plus one running tick
+// (opsbackend.TickTimeout) later; that tick can itself take a full
+// TickTimeout, its requests bounded by opsbackend.RequestTimeout, and watch
+// and serve publish only when it ends. One second of grace absorbs jitter.
+// Without this, reachability would flip between unreachable and unknown
+// between backoff retries.
 func (b builder) failureFresh(retry time.Duration) bool {
 	if b.in.Mode == ModeOnce || b.in.Interval <= 0 {
 		return true
 	}
-	return b.in.NowMono <= retry+retryGrace
+	return b.in.NowMono <= retry+b.in.Interval+2*opsbackend.TickTimeout+time.Second
 }
 
 func (b builder) envelope(source string, at time.Time, mono time.Duration) Envelope {

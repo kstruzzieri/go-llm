@@ -32,7 +32,9 @@ type Snapshot struct {
 
 // ConfigView carries the configuration origin and problems, never paths.
 type ConfigView struct {
-	Source      string       `json:"source"`
+	Source string `json:"source"`
+	// Ready is configview's flag, which it sets before chain validation, so
+	// it can read true alongside diagnostics. Judge problems by Diagnostics.
 	Ready       bool         `json:"ready"`
 	Revision    *string      `json:"revision"`
 	Diagnostics []Diagnostic `json:"diagnostics"`

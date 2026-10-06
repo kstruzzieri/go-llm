@@ -1,12 +1,15 @@
 package opsview
 
-// Residency, activity and reachability states.
+import "github.com/kstruzzieri/go-llm/internal/opsbackend"
+
+// Residency, activity and reachability states. The residency words alias
+// opsbackend's, which records transitions in them, so each has one source.
 const (
-	StateLoaded      = "loaded"
-	StateLoading     = "loading"
-	StateUnloading   = "unloading"
-	StateUnloaded    = "unloaded"
-	StateUnknown     = "unknown"
+	StateLoaded      = opsbackend.ResidencyLoaded
+	StateLoading     = opsbackend.ResidencyLoading
+	StateUnloading   = opsbackend.ResidencyUnloading
+	StateUnloaded    = opsbackend.ResidencyUnloaded
+	StateUnknown     = opsbackend.ResidencyUnknown
 	StateNotObserved = "not_observed"
 	ReachOK          = "ok"
 	ReachUnreachable = "unreachable"

@@ -14,8 +14,11 @@ import (
 	"github.com/kstruzzieri/go-llm/provider"
 )
 
+// TickTimeout bounds one Tick. Watch and serve publish a snapshot only when
+// its tick ends, so opsview's failure freshness is derived from it.
+const TickTimeout = 5 * time.Second
+
 const (
-	tickTimeout    = 5 * time.Second
 	backoffBase    = 2 * time.Second
 	backoffMax     = 30 * time.Second
 	maxTracked     = 256
@@ -303,7 +306,7 @@ func (c *Collector) Tick(ctx context.Context) Observations {
 	}
 	c.lastWall, c.lastMono, c.ticked = wall, mono, true
 
-	c.tickEnd = time.Now().Add(tickTimeout)
+	c.tickEnd = time.Now().Add(TickTimeout)
 	tctx, cancel := context.WithDeadline(ctx, c.tickEnd)
 	defer cancel()
 	for _, b := range c.backends {
@@ -370,7 +373,7 @@ func (c *Collector) fetch(callerCtx, ctx context.Context, b *backendState, cl *c
 	// reachability and backoff stay untouched. A skipped residency read is
 	// still a missing sample, so it opens a gap like a failed one (spec
 	// §4.5).
-	if ctx.Err() != nil || time.Until(c.tickEnd) < requestTimeout {
+	if ctx.Err() != nil || time.Until(c.tickEnd) < RequestTimeout {
 		b.missed(surface)
 		return false
 	}
@@ -623,7 +626,7 @@ func (b *backendState) applyResidency(cur map[string]string, at time.Time) {
 		}
 		to := ResidencyOf(now)
 		if now == "absent" && b.obs.Kind == KindOllama {
-			to = "unknown" // absence from /api/ps is not proof of unload (spec §4.4)
+			to = ResidencyUnknown // absence from /api/ps is not proof of unload (spec §4.4)
 		}
 		m.Transitions = append(m.Transitions, Transition{To: to, At: at})
 		if len(m.Transitions) > maxTransitions {

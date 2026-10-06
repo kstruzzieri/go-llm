@@ -28,17 +28,27 @@ func NormalizeOllama(name string) string {
 	return n
 }
 
+// Residency words: the console vocabulary transitions are recorded in. opsview
+// aliases them, so each word has one definition.
+const (
+	ResidencyLoading   = "loading"
+	ResidencyLoaded    = "loaded"
+	ResidencyUnloading = "unloading"
+	ResidencyUnloaded  = "unloaded"
+	ResidencyUnknown   = "unknown" // Ollama absence: not proof of unload
+)
+
 // ResidencyOf maps a llama-swap process state to the console vocabulary.
 // stopped and shutdown never appear in /running in v235; they read as
 // unloaded if they ever do.
 func ResidencyOf(raw string) string {
 	switch raw {
 	case "starting":
-		return "loading"
+		return ResidencyLoading
 	case "ready":
-		return "loaded"
+		return ResidencyLoaded
 	case "stopping":
-		return "unloading"
+		return ResidencyUnloading
 	}
-	return "unloaded"
+	return ResidencyUnloaded
 }

@@ -863,8 +863,8 @@ func TestCollectorUnstartedRequestIsNotAnObservation(t *testing.T) {
 		ctx    context.Context
 		budget time.Duration // tick time left
 	}{
-		{"tick deadline passed", spent, tickTimeout},
-		{"under one request timeout left", context.Background(), requestTimeout - 100*time.Millisecond},
+		{"tick deadline passed", spent, TickTimeout},
+		{"under one request timeout left", context.Background(), RequestTimeout - 100*time.Millisecond},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := opsfixture.NewLlamaSwap(t)

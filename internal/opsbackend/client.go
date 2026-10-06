@@ -22,9 +22,9 @@ const (
 	psLimit      = 256 << 10
 )
 
-// requestTimeout bounds one request; the provider's configured timeout is
+// RequestTimeout bounds one request; the provider's configured timeout is
 // never used (spec §4.5).
-const requestTimeout = 2 * time.Second
+const RequestTimeout = 2 * time.Second
 
 // rootDestination validates a provider base URL for observation before any
 // I/O (spec §4.1). A local destination's canonical form must have no path: a
@@ -82,7 +82,7 @@ func newClient(d provider.Destination, apiKey, purpose string, routes []route, r
 		stock = tr.Clone()
 	}
 	stock.DisableKeepAlives = true
-	guarded, err := provider.GuardHTTPClient(g, d, &http.Client{Transport: stock, Timeout: requestTimeout})
+	guarded, err := provider.GuardHTTPClient(g, d, &http.Client{Transport: stock, Timeout: RequestTimeout})
 	if err != nil {
 		return nil, newCoded(CodeDenied, "destination guard")
 	}
@@ -93,7 +93,7 @@ func newClient(d provider.Destination, apiKey, purpose string, routes []route, r
 	hc := &http.Client{
 		Transport:     newAllowlist(guarded.Transport, u.Scheme, u.Host, routes, refused),
 		CheckRedirect: guarded.CheckRedirect,
-		Timeout:       requestTimeout,
+		Timeout:       RequestTimeout,
 	}
 	return &client{hc: hc, gate: g, purpose: purpose, dest: d, apiKey: apiKey}, nil
 }
