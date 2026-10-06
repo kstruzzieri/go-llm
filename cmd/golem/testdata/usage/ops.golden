@@ -1,0 +1,7 @@
+Usage of golem ops:
+  -config string
+    	path to models.json (default: auto-discover)
+  -json
+    	emit the opsview v1 snapshot as JSON
+  -watch
+    	redraw every second in the terminal (requires a TTY)
