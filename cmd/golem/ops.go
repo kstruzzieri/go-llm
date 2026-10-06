@@ -159,13 +159,6 @@ func (s *opsSource) view(obs opsbackend.Observations, mode opsview.Mode) opsview
 	})
 }
 
-// renderOpsTable is a TEMPORARY stub so this task builds; Task 12 replaces it
-// with the escaping table renderer.
-func renderOpsTable(w io.Writer, s opsview.Snapshot, _ time.Duration, _ int) error {
-	_, err := fmt.Fprintf(w, "GOLEM OPS %d models\n", len(s.Models))
-	return err
-}
-
 // runOpsWatch is a TEMPORARY stub so this task builds; Task 13 replaces it
 // with the -watch loop.
 func runOpsWatch(_ context.Context, _ *opsSource, _ io.Writer, _ int, _ termOps, _ func(string) string) error {
