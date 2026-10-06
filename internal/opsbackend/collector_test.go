@@ -971,6 +971,40 @@ func TestCollectorNoTransitionAcrossAnInTickJump(t *testing.T) {
 	}
 }
 
+// TestCollectorReachabilityIsSteadyBetweenRetries: llama-swap answers
+// /api/version but /running fails at the dial level. Once the backend reads
+// unreachable nothing is sent to it before its retry time, so reachability
+// reads unreachable on every tick between retries (spec §5.4) instead of
+// flipping to ok on surfaces /running's backoff does not cover.
+func TestCollectorReachabilityIsSteadyBetweenRetries(t *testing.T) {
+	f := opsfixture.NewLlamaSwap(t)
+	var sent atomic.Int64
+	base := front(t, f, func(w http.ResponseWriter, r *http.Request) bool {
+		sent.Add(1)
+		if r.URL.Path == "/running" {
+			hangUp(w)
+			return true
+		}
+		return false
+	})
+	clk := newFakeClock()
+	c := NewCollector([]BackendSpec{lsSpec(base)}, Options{Interval: 2 * time.Second, Clock: clk.clock()})
+	// Failures at 0 s (retry 2 s) and 2 s (retry 6 s); retried again at 6 s.
+	retryTicks := map[time.Duration]bool{0: true, 2 * time.Second: true, 6 * time.Second: true}
+	for range 8 {
+		now := clk.clock().Mono()
+		before := sent.Load()
+		b := c.Tick(context.Background()).Backends[0]
+		if b.Reachable == nil || b.Reachable.Value || b.ReachCode != CodeUnreachable || b.ReachRetry <= now {
+			t.Fatalf("tick at %v: reachable=%+v code=%q retry=%v, want unreachable with a later retry", now, b.Reachable, b.ReachCode, b.ReachRetry)
+		}
+		if n := sent.Load() - before; (n > 0) != retryTicks[now] {
+			t.Fatalf("tick at %v sent %d requests; want traffic only at retry times 0s, 2s, 6s", now, n)
+		}
+		clk.advance(time.Second, time.Second)
+	}
+}
+
 // TestCollectorRechecksIdentityEveryTick: a llama-swap upgraded or replaced
 // between two ticks is never seen down, so its version is read on every
 // tick after the one that identified it.

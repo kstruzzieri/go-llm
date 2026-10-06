@@ -310,6 +310,13 @@ func (c *Collector) Tick(ctx context.Context) Observations {
 		// Peer confirmation fails closed: only a listing read on this tick
 		// counts (spec §5.4).
 		b.obs.Listed = nil
+		// An unreachable backend gets no request of any surface before the
+		// retry its failure scheduled, so reachability reads unreachable
+		// steadily between retries (spec §5.4) instead of flipping to ok on
+		// a surface the failed one's backoff does not cover.
+		if r := b.obs.Reachable; r != nil && !r.Value && mono < b.obs.ReachRetry {
+			continue
+		}
 		switch b.obs.Kind {
 		case KindUnidentified:
 			c.identifyBackend(ctx, tctx, b, b.identify)
