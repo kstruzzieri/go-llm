@@ -58,7 +58,7 @@ func deref(s *string) string {
 // fresh reports whether a successful reading taken at mono is recent enough:
 // within three intervals. A one-shot run's readings come from the run itself.
 func (b builder) fresh(mono time.Duration) bool {
-	if b.in.Mode == ModeOnce || b.in.Interval <= 0 {
+	if b.in.Mode == ModeOnce {
 		return true
 	}
 	return b.in.NowMono-mono <= 3*b.in.Interval
@@ -74,7 +74,7 @@ func (b builder) fresh(mono time.Duration) bool {
 // Without this, reachability would flip between unreachable and unknown
 // between backoff retries.
 func (b builder) failureFresh(retry time.Duration) bool {
-	if b.in.Mode == ModeOnce || b.in.Interval <= 0 {
+	if b.in.Mode == ModeOnce {
 		return true
 	}
 	return b.in.NowMono <= retry+b.in.Interval+2*opsbackend.TickTimeout+time.Second

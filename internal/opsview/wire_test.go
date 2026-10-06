@@ -1,8 +1,18 @@
 package opsview
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/kstruzzieri/go-llm/internal/opsbackend"
+	"github.com/kstruzzieri/go-llm/internal/opsfixture"
 )
 
 func TestEveryReasonHasALabel(t *testing.T) {
@@ -49,15 +59,17 @@ func TestStamp(t *testing.T) {
 }
 
 func TestFreshness(t *testing.T) {
-	watch := builder{in: Input{Mode: ModeWatch, Interval: 2 * time.Second, NowMono: 20 * time.Second}}
-	if !watch.fresh(14*time.Second) || watch.fresh(13*time.Second) {
-		t.Fatal("positive readings: fresh within 3 x interval only")
-	}
-	// A failure stays fresh until its scheduled retry has had time to answer
-	// and be published: retry + interval (2 s) + two ticks (2 x 5 s) + 1 s.
-	// NowMono 20 s is exactly that bound for a retry at 7 s.
-	if !watch.failureFresh(7*time.Second) || watch.failureFresh(7*time.Second-time.Millisecond) {
-		t.Fatal("failure readings stay fresh through retry + interval + two ticks + 1 s, and no longer")
+	for _, mode := range []Mode{ModeWatch, ModeServe} {
+		b := builder{in: Input{Mode: mode, Interval: 2 * time.Second, NowMono: 20 * time.Second}}
+		if !b.fresh(14*time.Second) || b.fresh(13*time.Second) {
+			t.Fatalf("%s: positive readings: fresh within 3 x interval only", mode)
+		}
+		// A failure stays fresh until its scheduled retry has had time to
+		// answer and be published: retry + interval (2 s) + two ticks
+		// (2 x 5 s) + 1 s. NowMono 20 s is exactly that bound for a retry at 7 s.
+		if !b.failureFresh(7*time.Second) || b.failureFresh(7*time.Second-time.Millisecond) {
+			t.Fatalf("%s: failure readings stay fresh through retry + interval + two ticks + 1 s, and no longer", mode)
+		}
 	}
 	once := builder{in: Input{Mode: ModeOnce, Interval: 2 * time.Second, NowMono: time.Hour}}
 	if !once.fresh(0) || !once.failureFresh(0) {
@@ -106,5 +118,104 @@ func TestVocabularyLiterals(t *testing.T) {
 		if c.got != c.want {
 			t.Errorf("wire literal %q, want %q", c.got, c.want)
 		}
+	}
+}
+
+// cadenceClock is a fake opsbackend clock whose wall and monotonic readings
+// advance together, so the collector never sees a jump.
+type cadenceClock struct {
+	mu   sync.Mutex
+	wall time.Time
+	mono time.Duration
+}
+
+func (c *cadenceClock) clock() opsbackend.Clock {
+	return opsbackend.Clock{
+		Wall: func() time.Time { c.mu.Lock(); defer c.mu.Unlock(); return c.wall },
+		Mono: func() time.Duration { c.mu.Lock(); defer c.mu.Unlock(); return c.mono },
+	}
+}
+
+func (c *cadenceClock) advance(d time.Duration) {
+	c.mu.Lock()
+	c.wall, c.mono = c.wall.Add(d), c.mono+d
+	c.mu.Unlock()
+}
+
+// fixtureFront serves a fixture llama-swap through hook, which handles the
+// request itself when it returns true.
+func fixtureFront(t *testing.T, hook func(w http.ResponseWriter, r *http.Request) bool) string {
+	t.Helper()
+	u, err := url.Parse(opsfixture.NewLlamaSwap(t).URL())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rp := httputil.NewSingleHostReverseProxy(u)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !hook(w, r) {
+			rp.ServeHTTP(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL
+}
+
+// TestFailureStaysFreshThroughWorstCaseServeCadence drives a real collector
+// through serve's worst case: the 4 s backoff retry falls 1 ms after a gated
+// tick starts, that tick spends its full 5 s, and the retry tick does too, so
+// serve keeps showing the old failure until retry + interval + 2 x
+// TickTimeout - 1 ms. It must still read fresh there (spec §5.4).
+func TestFailureStaysFreshThroughWorstCaseServeCadence(t *testing.T) {
+	const interval = 2 * time.Second
+	ms := time.Millisecond
+	clk := &cadenceClock{wall: time.Date(2026, 10, 5, 10, 0, 0, 0, time.UTC)}
+	var slow atomic.Int64 // fake time b-slow spends on this tick
+	// a-down hangs up every request: a dial-level failure, observed first.
+	down := fixtureFront(t, func(w http.ResponseWriter, _ *http.Request) bool {
+		if conn, _, err := http.NewResponseController(w).Hijack(); err == nil {
+			_ = conn.Close()
+		}
+		return true
+	})
+	// b-slow is healthy; its /api/version spends the tick's chosen fake time.
+	slowURL := fixtureFront(t, func(_ http.ResponseWriter, r *http.Request) bool {
+		if r.URL.Path == "/api/version" {
+			clk.advance(time.Duration(slow.Load()))
+		}
+		return false
+	})
+	c := opsbackend.NewCollector([]opsbackend.BackendSpec{
+		{Provider: "a-down", BaseURL: down, APIFormat: "openai-compat"},
+		{Provider: "b-slow", BaseURL: slowURL, APIFormat: "openai-compat"},
+	}, opsbackend.Options{Interval: interval, Clock: clk.clock()})
+
+	// t0 at 0: fail, retry 2 s. t1 at 2 s: fail, retry 6 s; b-slow 2 s - 1 ms.
+	// t2 at 6 s - 1 ms: gated; b-slow 5 s. t3 at 13 s - 1 ms: retry; b-slow 5 s.
+	var prev *opsbackend.BackendObservation
+	var worst time.Duration
+	for i, spend := range []time.Duration{0, 2*time.Second - ms, opsbackend.TickTimeout, opsbackend.TickTimeout} {
+		slow.Store(int64(spend))
+		start := clk.clock().Mono()
+		obs := c.Tick(context.Background())
+		end := clk.clock().Mono()
+		if end-start > opsbackend.TickTimeout {
+			t.Fatalf("tick %d took %v of fake time, over the tick budget", i, end-start)
+		}
+		// Serve shows the previous snapshot until this tick stores its own.
+		shown := end - time.Nanosecond
+		if prev != nil && prev.Reachable != nil && !prev.Reachable.Value {
+			worst = max(worst, shown-prev.ReachRetry)
+			b := builder{in: Input{Mode: ModeServe, Interval: interval, NowMono: shown}}
+			if !b.failureFresh(prev.ReachRetry) {
+				t.Fatalf("tick %d: failure with retry %v read stale at %v (overshoot %v) before its retry was published at %v",
+					i, prev.ReachRetry, shown, shown-prev.ReachRetry, end)
+			}
+		}
+		d := obs.Backends[0]
+		prev = &d
+		clk.advance(interval)
+	}
+	if want := interval + 2*opsbackend.TickTimeout - ms - time.Nanosecond; worst != want {
+		t.Fatalf("schedule overshoot = %v, want the two-tick worst case %v", worst, want)
 	}
 }
