@@ -73,7 +73,7 @@ type Runtime struct {
 }
 
 // Reachability is whether the backend answered. A failure carries the time
-// until the next scheduled retry.
+// until the next scheduled retry, except in once mode, which exits before it.
 type Reachability struct {
 	State     string  `json:"state"`
 	Code      *string `json:"code"`

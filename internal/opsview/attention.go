@@ -73,7 +73,9 @@ func (b builder) attention() []Attention {
 			if o.ReachCode == opsbackend.CodeTimeout {
 				what = "did not answer in time"
 			}
-			add(SevCritical, AttnBackendUnreachable, o.Provider, o.Provider+" "+what+"; its models read unknown")
+			// Readings taken before the failure stay fresh for their own
+			// window, so its models need not read unknown yet.
+			add(SevCritical, AttnBackendUnreachable, o.Provider, o.Provider+" "+what+"; its readings age out")
 		case down:
 		case o.Reachable != nil && !o.Reachable.Value:
 			// The failure outlived its retry window: the console missed its

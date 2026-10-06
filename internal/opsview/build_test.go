@@ -181,6 +181,12 @@ func TestFailureReachabilityFollowsRetry(t *testing.T) {
 	if r.State != ReachUnreachable || r.Stale || r.RetryInMs == nil || *r.RetryInMs != 6000 {
 		t.Fatalf("between retries = %+v", r)
 	}
+	// Once mode exits after one render: no retry happens, so none is promised.
+	in.Mode = ModeOnce
+	if r := Build(in).Backends[0].Reachability; r.State != ReachUnreachable || r.RetryInMs != nil {
+		t.Fatalf("once mode promised a retry: %+v", r)
+	}
+	in.Mode = ModeWatch
 	// The retry's answer may publish up to retry + interval + 2 ticks + 1 s
 	// (31 s) later; past that, the console missed its own schedule.
 	in.NowMono = 32 * time.Second
@@ -206,6 +212,14 @@ func TestReachabilityNeverClaimsMoreThanItRead(t *testing.T) {
 		{"invalid configuration, cached ok attached", func(b *opsbackend.BackendObservation) {
 			b.Hosting, b.Kind, b.Support = opsbackend.HostingUnknown, opsbackend.KindNone, opsbackend.SupportInvalidConfig
 		}, 11 * time.Second, StateNotObserved, opsbackend.SupportInvalidConfig, false},
+		// identifyBackend drops every sample when it demotes a backend, and
+		// kind none is never polled again: "no reading yet" would be forever.
+		{"unsupported, samples dropped", func(b *opsbackend.BackendObservation) {
+			b.Kind, b.Support, b.Version, b.Reachable = opsbackend.KindNone, opsbackend.SupportUnsupported, "v236", nil
+		}, 11 * time.Second, StateNotObserved, opsbackend.SupportUnsupported, false},
+		{"unrecognized, samples dropped", func(b *opsbackend.BackendObservation) {
+			b.Kind, b.Support, b.Version, b.Reachable = opsbackend.KindNone, opsbackend.SupportUnrecognized, "", nil
+		}, 11 * time.Second, StateNotObserved, opsbackend.SupportUnrecognized, false},
 	} {
 		b := healthyLlamaSwap()
 		tc.edit(&b)

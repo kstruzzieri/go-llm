@@ -126,8 +126,10 @@ func (b builder) backend(o opsbackend.BackendObservation) Backend {
 	switch {
 	case o.Hosting == opsbackend.HostingRemote:
 		out.Reachability = Reachability{State: StateNotObserved, Code: strPtr(ReasonRemote), Envelope: Envelope{Source: "none"}}
-	case o.Support == opsbackend.SupportInvalidConfig:
-		out.Reachability = Reachability{State: StateNotObserved, Code: strPtr(opsbackend.SupportInvalidConfig), Envelope: Envelope{Source: "none"}}
+	case !observed(o):
+		// Invalid configuration, unsupported or unrecognized: never polled
+		// again, so "no reading yet" would read that way for the whole run.
+		out.Reachability = Reachability{State: StateNotObserved, Code: strPtr(o.Support), Envelope: Envelope{Source: "none"}}
 	case o.Reachable == nil:
 		out.Reachability = Reachability{State: StateUnknown, Code: strPtr(ReasonNoSample), Envelope: Envelope{Source: src}}
 	case o.Reachable.Value:
@@ -145,8 +147,11 @@ func (b builder) backend(o opsbackend.BackendObservation) Backend {
 			out.Reachability = Reachability{State: StateUnknown, Code: strPtr(ReasonStale), Envelope: env}
 			break
 		}
-		retry := max(0, (o.ReachRetry - b.in.NowMono).Milliseconds())
-		out.Reachability = Reachability{State: ReachUnreachable, Code: strPtr(string(o.ReachCode)), RetryInMs: &retry, Envelope: env}
+		out.Reachability = Reachability{State: ReachUnreachable, Code: strPtr(string(o.ReachCode)), Envelope: env}
+		if b.in.Mode != ModeOnce { // once mode exits before any retry
+			retry := max(0, (o.ReachRetry - b.in.NowMono).Milliseconds())
+			out.Reachability.RetryInMs = &retry
+		}
 	}
 	return out
 }

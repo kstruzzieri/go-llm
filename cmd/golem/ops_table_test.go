@@ -9,6 +9,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/kstruzzieri/go-llm/internal/opsbackend"
 	"github.com/kstruzzieri/go-llm/internal/opsview"
 )
 
@@ -378,6 +379,44 @@ func TestOpsCellQuotesMarkFloods(t *testing.T) {
 	} {
 		if got := opsCell(in); got != want {
 			t.Fatalf("opsCell(%+q) = %+q, want %+q", in, got, want)
+		}
+	}
+}
+
+// TestOpsTableNotObservedBackends pins the backend cell for every backend
+// golem ops does not read, built by opsview.Build from the observation the
+// collector leaves: the reason as label text, then "not observed". No raw
+// kind ("none"), state or code reaches the operator, and no observation
+// facts follow, since nothing is observed.
+func TestOpsTableNotObservedBackends(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		o    opsbackend.BackendObservation
+		want string
+	}{
+		{"remote", opsbackend.BackendObservation{Provider: "opencode", Endpoint: "https://opencode.invalid", Hosting: opsbackend.HostingRemote,
+			Kind: opsbackend.KindNone, Support: opsbackend.SupportNotObserved}, "remote endpoint; not observed"},
+		{"invalid configuration", opsbackend.BackendObservation{Provider: "broken", Hosting: opsbackend.HostingUnknown,
+			Kind: opsbackend.KindNone, Support: opsbackend.SupportInvalidConfig}, "unusable base_url or api_key in models.json; not observed"},
+		{"unsupported", opsbackend.BackendObservation{Provider: "llamacpp", Endpoint: "http://127.0.0.1:8090", Hosting: opsbackend.HostingLocal,
+			Kind: opsbackend.KindNone, Support: opsbackend.SupportUnsupported, Version: "v236"}, "llama-swap version other than v235 (v236); not observed"},
+		{"unrecognized", opsbackend.BackendObservation{Provider: "vllm", Endpoint: "http://127.0.0.1:8000", Hosting: opsbackend.HostingLocal,
+			Kind: opsbackend.KindNone, Support: opsbackend.SupportUnrecognized}, "not llama-swap (runtime not recognized); not observed"},
+	} {
+		s := opsview.Build(opsview.Input{Observations: opsbackend.Observations{Backends: []opsbackend.BackendObservation{tc.o}},
+			Mode: opsview.ModeWatch, Interval: 2 * time.Second, NowMono: 11 * time.Second})
+		var out bytes.Buffer
+		if err := renderOpsTable(&out, s, 0, 0); err != nil {
+			t.Fatal(err)
+		}
+		var line string
+		for _, l := range strings.Split(out.String(), "\n") {
+			if strings.HasPrefix(l, tc.o.Provider+" ") {
+				line = l
+			}
+		}
+		if !strings.HasSuffix(line, "  "+tc.want) {
+			t.Errorf("%s: backend line = %q, want cell %q", tc.name, line, tc.want)
 		}
 	}
 }

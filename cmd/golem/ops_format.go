@@ -152,6 +152,16 @@ func statsText(m opsview.Model, window string) string {
 // backendText summarizes one backend. withRetry is false in once mode, which
 // exits before any retry.
 func backendText(b opsview.Backend, elapsed time.Duration, withRetry bool) string {
+	if b.Reachability.State == opsview.StateNotObserved {
+		// Remote, invalid configuration, unsupported or unrecognized: the
+		// code says why; kind is "none" and nothing below was observed. The
+		// remote label already says "not observed".
+		why := strings.TrimSuffix(opsReason(b.Reachability.Code), ", not observed")
+		if b.Runtime.Version != nil {
+			why += " (" + *b.Runtime.Version + ")"
+		}
+		return why + "; not observed"
+	}
 	rt := b.Runtime.Kind
 	if b.Runtime.Version != nil {
 		rt += " " + *b.Runtime.Version

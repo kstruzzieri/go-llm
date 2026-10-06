@@ -34,7 +34,7 @@ func TestUnreachableIsSteadyBetweenRetries(t *testing.T) {
 		in := input(ModeWatch, down, remote())
 		in.NowMono = nowMono
 		r := reasons(Build(in))
-		if a, ok := r[AttnBackendUnreachable+":llamacpp"]; !ok || a.Severity != SevCritical || a.Text != "llamacpp is unreachable; its models read unknown" {
+		if a, ok := r[AttnBackendUnreachable+":llamacpp"]; !ok || a.Severity != SevCritical || a.Text != "llamacpp is unreachable; its readings age out" {
 			t.Fatalf("t=%v: unreachable attention missing: %+v", nowMono, r)
 		}
 		if _, ok := r[AttnTelemetryStale+":llamacpp"]; ok {
@@ -45,7 +45,7 @@ func TestUnreachableIsSteadyBetweenRetries(t *testing.T) {
 		}
 	}
 	down.ReachCode = opsbackend.CodeTimeout
-	if a := reasons(Build(input(ModeWatch, down, remote())))[AttnBackendUnreachable+":llamacpp"]; a.Text != "llamacpp did not answer in time; its models read unknown" {
+	if a := reasons(Build(input(ModeWatch, down, remote())))[AttnBackendUnreachable+":llamacpp"]; a.Text != "llamacpp did not answer in time; its readings age out" {
 		t.Fatalf("timeout text = %q", a.Text)
 	}
 }
