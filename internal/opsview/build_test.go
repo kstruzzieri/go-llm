@@ -337,6 +337,37 @@ func TestBackendOnlyModelsBoundedAndRowOnly(t *testing.T) {
 	modelByID(t, s, "backend:llamacpp/extra-000") // sorted: the first names are kept
 }
 
+// TestBackendOnlyNamesBoundedInLength pins the name-size bound: decode does
+// not bound name length, so without it a hostile /running name would land in
+// Models at any size. Dropped names count as overflow beside the count cap.
+func TestBackendOnlyNamesBoundedInLength(t *testing.T) {
+	longest, over := slices.Repeat([]byte("a"), opsbackend.MaxNameLen), slices.Repeat([]byte("b"), opsbackend.MaxNameLen+1)
+	for _, extra := range []int{0, 300} {
+		b := healthyLlamaSwap()
+		b.Running.Value = append(b.Running.Value, opsbackend.RunningModel{Model: string(longest), State: "ready"}, opsbackend.RunningModel{Model: string(over), State: "ready"})
+		for i := range extra {
+			b.Running.Value = append(b.Running.Value, opsbackend.RunningModel{Model: fmt.Sprintf("extra-%03d", i), State: "ready"})
+		}
+		s := Build(input(ModeWatch, b, remote()))
+		ids := backendOnlyIDs(s)
+		wantIDs, wantOverflow := 1, 1
+		if extra > 0 {
+			wantIDs, wantOverflow = maxBackendOnly, extra+1-maxBackendOnly+1
+		}
+		if len(ids) != wantIDs || s.Backends[0].Observation.BackendOnlyOverflow != wantOverflow {
+			t.Fatalf("extra %d: backend-only = %d overflow = %d, want %d and %d", extra, len(ids), s.Backends[0].Observation.BackendOnlyOverflow, wantIDs, wantOverflow)
+		}
+		for _, id := range ids {
+			if len(id) > len("backend:llamacpp/")+opsbackend.MaxNameLen {
+				t.Fatalf("extra %d: listed a %d-byte ID", extra, len(id))
+			}
+		}
+		if extra == 0 && ids[0] != "backend:llamacpp/"+string(longest) {
+			t.Fatalf("the %d-byte name was not listed", opsbackend.MaxNameLen)
+		}
+	}
+}
+
 func TestBackendOnlyNeedsFreshObservedProof(t *testing.T) {
 	b := healthyLlamaSwap()
 	b.Running.Value = append(b.Running.Value, opsbackend.RunningModel{Model: "extra", State: "ready"})

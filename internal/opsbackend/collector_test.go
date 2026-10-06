@@ -621,11 +621,11 @@ func TestCollectorAdmissionIsDeterministicAndCapped(t *testing.T) {
 }
 
 // TestCollectorDoesNotTrackOverlongNames bounds residency memory by name
-// size as well as count: a name over maxNameLen bytes is never admitted and
+// size as well as count: a name over MaxNameLen bytes is never admitted and
 // reads as overflow, so its loads read as not measured.
 func TestCollectorDoesNotTrackOverlongNames(t *testing.T) {
 	f := opsfixture.NewLlamaSwap(t)
-	longest, over := strings.Repeat("a", maxNameLen), strings.Repeat("b", maxNameLen+1)
+	longest, over := strings.Repeat("a", MaxNameLen), strings.Repeat("b", MaxNameLen+1)
 	f.SetBody("/running", `{"running":[{"model":"`+longest+`","state":"ready"},{"model":"`+over+`","state":"ready"},{"model":"m","state":"ready"}]}`)
 	c := NewCollector([]BackendSpec{lsSpec(f.URL())}, Options{Clock: newFakeClock().clock()})
 	b := c.Tick(context.Background()).Backends[0]

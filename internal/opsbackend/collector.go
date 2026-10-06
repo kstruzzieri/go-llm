@@ -25,8 +25,11 @@ const (
 	maxTransitions = 20
 	maxSkew        = time.Second
 	maxVersionLen  = 64
-	maxNameLen     = 512 // longest model name residency memory admits, in bytes
 )
+
+// MaxNameLen is the longest model name, in bytes, that residency memory
+// admits and that opsview lists as a backend-only model.
+const MaxNameLen = 512
 
 // Clock supplies wall time for display and monotonic elapsed time for ages
 // and gaps. Production uses SystemClock; tests drive both by hand.
@@ -138,7 +141,7 @@ type BackendObservation struct {
 	Refused    int64
 	Models     []ModelMemory
 	// ModelsOverflow is the most names one residency sample held that memory
-	// could not track (over the cap, or longer than maxNameLen bytes). It
+	// could not track (over the cap, or longer than MaxNameLen bytes). It
 	// never decreases, so a model dropped once always reads as untracked.
 	ModelsOverflow int
 }
@@ -592,7 +595,7 @@ func (b *backendState) applyResidency(cur map[string]string, at time.Time) {
 		if _, ok := b.mem[name]; ok {
 			continue
 		}
-		if len(b.mem) >= maxTracked || len(name) > maxNameLen {
+		if len(b.mem) >= maxTracked || len(name) > MaxNameLen {
 			untracked++
 			continue
 		}

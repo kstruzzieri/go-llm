@@ -180,7 +180,8 @@ func confirmedBy(o opsbackend.BackendObservation, current func(mono time.Duratio
 }
 
 // backendOnly returns unconfigured models with proven identity, sorted and
-// capped, plus the overflow count.
+// capped, plus the overflow count. A name over opsbackend.MaxNameLen bytes is
+// never listed and counts as overflow: decode does not bound name length.
 func (b builder) backendOnly(v view, configured map[string]bool) ([]string, int) {
 	o := v.o
 	if !observed(o) {
@@ -193,17 +194,22 @@ func (b builder) backendOnly(v view, configured map[string]bool) ([]string, int)
 		}
 	}
 	var out []string
+	long := 0
 	for name := range seen {
 		if configured[o.Provider+"/"+name] || (o.Kind == opsbackend.KindOllama && configuredOllama(o.Provider, name, configured)) {
+			continue
+		}
+		if len(name) > opsbackend.MaxNameLen {
+			long++
 			continue
 		}
 		out = append(out, name)
 	}
 	slices.Sort(out)
 	if len(out) > maxBackendOnly {
-		return out[:maxBackendOnly], len(out) - maxBackendOnly
+		return out[:maxBackendOnly], len(out) - maxBackendOnly + long
 	}
-	return out, 0
+	return out, long
 }
 
 func configuredOllama(provider, psName string, configured map[string]bool) bool {
