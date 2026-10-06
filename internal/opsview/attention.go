@@ -51,12 +51,20 @@ func (b builder) attention() []Attention {
 		}
 		// A failure stays current until its scheduled retry, so a down
 		// backend raises one steady alert instead of flipping to "stale"
-		// between retries (spec §5.4).
+		// between retries (spec §5.4). It carries no since: Reachable.At is
+		// re-stamped by every failed retry, not the outage's onset, and would
+		// reorder attention each cycle.
 		down := o.Reachable != nil && !o.Reachable.Value && b.failureFresh(o.ReachRetry)
 		if down && used[o.Provider] {
-			add(SevCritical, AttnBackendUnreachable, o.Provider, o.Reachable.At, fmt.Sprintf("%s is unreachable (%s); every model on it is unavailable", o.Provider, o.ReachCode))
+			add(SevCritical, AttnBackendUnreachable, o.Provider, time.Time{}, fmt.Sprintf("%s is unreachable (%s); every model on it is unavailable", o.Provider, o.ReachCode))
 		}
-		if !down && b.positiveStale(o) {
+		switch {
+		case down:
+		case o.Reachable != nil && !o.Reachable.Value:
+			// The failure outlived its retry window: the console missed its
+			// own schedule, so the backend is no longer known down.
+			add(SevWarning, AttnTelemetryStale, o.Provider, time.Time{}, fmt.Sprintf("%s last check failed (%s); next check overdue, so its facts read unknown", o.Provider, o.ReachCode))
+		case b.positiveStale(o):
 			add(SevWarning, AttnTelemetryStale, o.Provider, time.Time{}, fmt.Sprintf("%s has no fresh reading; its facts read unknown", o.Provider))
 		}
 		for _, s := range o.Surfaces {
@@ -127,7 +135,7 @@ func (b builder) modelErrors(o opsbackend.BackendObservation, add func(string, s
 	for _, model := range slices.Sorted(maps.Keys(per)) {
 		a := per[model]
 		if a.n >= 2 {
-			add(SevSerious, AttnModelErrors, model, a.newest, fmt.Sprintf("at least %d retained requests to %s on %s returned non-2xx in the last 10 min (newest at %s)", a.n, model, o.Provider, deref(stamp(a.newest))))
+			add(SevSerious, AttnModelErrors, o.Provider+"/"+model, a.newest, fmt.Sprintf("at least %d retained requests to %s on %s returned non-2xx in the last 10 min (newest at %s)", a.n, model, o.Provider, deref(stamp(a.newest))))
 		}
 	}
 }
