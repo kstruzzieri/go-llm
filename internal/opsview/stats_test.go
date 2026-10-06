@@ -1,6 +1,7 @@
 package opsview
 
 import (
+	"fmt"
 	"math"
 	"testing"
 	"time"
@@ -79,31 +80,82 @@ func TestAllUnavailableSumIsNullWithReason(t *testing.T) {
 }
 
 func TestCoverageNeverComplete(t *testing.T) {
+	m := func(id int64, ago time.Duration) opsbackend.ActivityRow { return row(id, ago, "m", 200, 1, 1, 1, 1, 1) }
+	at := func(hms string) string { return "2026-10-05T" + hms + ".000Z" }
+	type rows = []opsbackend.ActivityRow
 	for _, tc := range []struct {
-		name   string
-		rows   []opsbackend.ActivityRow
-		state  string
-		reason string
+		name                string
+		rows                rows
+		state, reason       string
+		retained            int
+		evicted, contiguous bool
+		oldest, newest      string
 	}{
-		{"empty", []opsbackend.ActivityRow{}, CoverageUnknown, CovEmpty},
-		{"unevicted", []opsbackend.ActivityRow{row(0, time.Minute, "m", 200, 1, 1, 1, 1, 1)}, CoverageUnknown, CovRetentionStartUnknown},
-		{"evicted inside window", []opsbackend.ActivityRow{row(7, time.Minute, "m", 200, 1, 1, 1, 1, 1), row(8, 30*time.Second, "m", 200, 1, 1, 1, 1, 1)}, CoverageIncomplete, CovEvicted},
-		{"evicted older than window", []opsbackend.ActivityRow{row(7, 20*time.Minute, "m", 200, 1, 1, 1, 1, 1), row(8, time.Minute, "m", 200, 1, 1, 1, 1, 1)}, CoverageUnknown, CovWithinRetained},
-		{"id gap", []opsbackend.ActivityRow{row(0, 2*time.Minute, "m", 200, 1, 1, 1, 1, 1), row(2, time.Minute, "m", 200, 1, 1, 1, 1, 1)}, CoverageUnknown, CovNoncontiguous},
+		{"empty", rows{}, CoverageUnknown, CovEmpty, 0, false, true, "", ""},
+		{"unevicted", rows{m(0, time.Minute)}, CoverageUnknown, CovRetentionStartUnknown, 1, false, true, at("09:59:00"), at("09:59:00")},
+		{"evicted inside window", rows{m(7, time.Minute), m(8, 30*time.Second)}, CoverageIncomplete, CovEvicted, 2, true, true, at("09:59:00"), at("09:59:30")},
+		{"evicted older than window", rows{m(7, 20*time.Minute), m(8, time.Minute)}, CoverageUnknown, CovWithinRetained, 2, true, true, at("09:40:00"), at("09:59:00")},
+		{"id gap", rows{m(0, 2*time.Minute), m(2, time.Minute)}, CoverageUnknown, CovNoncontiguous, 2, false, false, at("09:58:00"), at("09:59:00")},
 		// The gap row belongs to another model: contiguity is judged on the
 		// whole ring, so filtering by model first would wrongly report a gap.
-		{"other model fills gap", []opsbackend.ActivityRow{row(0, 2*time.Minute, "m", 200, 1, 1, 1, 1, 1), row(1, 90*time.Second, "x", 200, 1, 1, 1, 1, 1), row(2, time.Minute, "m", 200, 1, 1, 1, 1, 1)}, CoverageUnknown, CovRetentionStartUnknown},
+		{"other model fills gap", rows{m(0, 2*time.Minute), row(1, 90*time.Second, "x", 200, 1, 1, 1, 1, 1), m(2, time.Minute)}, CoverageUnknown, CovRetentionStartUnknown, 3, false, true, at("09:58:00"), at("09:59:00")},
 		// Evicted with its oldest row inside the window, but a gap outranks it.
-		{"gap outranks eviction", []opsbackend.ActivityRow{row(7, time.Minute, "m", 200, 1, 1, 1, 1, 1), row(9, 30*time.Second, "m", 200, 1, 1, 1, 1, 1)}, CoverageUnknown, CovNoncontiguous},
+		{"gap outranks eviction", rows{m(7, time.Minute), m(9, 30*time.Second)}, CoverageUnknown, CovNoncontiguous, 2, true, false, at("09:59:00"), at("09:59:30")},
 		// A repeated ID is not one run.
-		{"duplicate ids", []opsbackend.ActivityRow{row(0, 2*time.Minute, "m", 200, 1, 1, 1, 1, 1), row(0, time.Minute, "m", 200, 1, 1, 1, 1, 1)}, CoverageUnknown, CovNoncontiguous},
+		{"duplicate ids", rows{m(0, 2*time.Minute), m(0, time.Minute)}, CoverageUnknown, CovNoncontiguous, 2, false, false, at("09:58:00"), at("09:59:00")},
+		// Listed newest first. The lowest ID (100) predates the window, so
+		// the evicted rows that preceded it do too.
+		{"newest listed first", rows{m(101, time.Minute), m(100, 20*time.Minute)}, CoverageUnknown, CovWithinRetained, 2, true, true, at("09:40:00"), at("09:59:00")},
+		// Eviction follows ID order: the rows evicted before ID 100 (5 min
+		// ago) may sit inside the window although ID 101 is dated 40 min ago.
+		{"lowest id inside window", rows{m(100, 5*time.Minute), m(101, 40*time.Minute), m(102, time.Minute)}, CoverageIncomplete, CovEvicted, 3, true, true, at("09:20:00"), at("09:59:00")},
 	} {
 		s := statsFor("m", tc.rows)
-		if s.Coverage.State != tc.state || s.Coverage.Reason != tc.reason {
-			t.Fatalf("%s: coverage = %+v", tc.name, s.Coverage)
+		c := s.Coverage
+		if c.State != tc.state || c.Reason != tc.reason || c.RetainedRows != tc.retained || c.Evicted != tc.evicted || c.Contiguous != tc.contiguous ||
+			deref(c.OldestRetainedAt) != tc.oldest || deref(c.NewestRetainedAt) != tc.newest {
+			t.Fatalf("%s: coverage = %+v (oldest %q, newest %q)", tc.name, c, deref(c.OldestRetainedAt), deref(c.NewestRetainedAt))
 		}
 		if tc.name == "empty" && s.Calls != nil {
 			t.Fatalf("empty ring must report calls null, got %d", *s.Calls)
+		}
+	}
+}
+
+// windowStats reads only the model's indexed rows. Relabeling an indexed
+// row of another model after indexing makes a full rescan count it.
+func TestWindowStatsReadsOnlyItsModelsRows(t *testing.T) {
+	rs := []opsbackend.ActivityRow{row(0, time.Minute, "m", 200, 1, 1, 1, 1, 1), row(1, time.Minute, "x", 200, 1, 1, 1, 1, 1), row(2, time.Minute, "m", 200, 1, 1, 1, 1, 1)}
+	r := newRing(rs)
+	rs[1].Model = "m"
+	b := builder{in: Input{Now: now, Mode: ModeOnce}}
+	if s := b.windowStats("m", &opsbackend.Sample[[]opsbackend.ActivityRow]{Value: rs, At: now}, r, windows[0]); *s.Calls != 2 {
+		t.Fatalf("calls = %d, want 2: windowStats rescanned rows outside the model's index", *s.Calls)
+	}
+}
+
+// BenchmarkWindowStats is Build's statistics cost at the caps: 276 models
+// (20 configured plus the 256 backend-only cap), both windows, over a
+// 150k-row ring (about what fits in the 8 MiB metrics body).
+func BenchmarkWindowStats(b *testing.B) {
+	const models, n = 276, 150_000
+	names := make([]string, models)
+	for i := range names {
+		names[i] = fmt.Sprintf("m%d", i)
+	}
+	rs := make([]opsbackend.ActivityRow, n)
+	for i := range rs {
+		rs[i] = row(int64(i), time.Duration(n-i)*20*time.Millisecond, names[i%models], 200, 1, 1, 1, 1, 1)
+	}
+	s := &opsbackend.Sample[[]opsbackend.ActivityRow]{Value: rs, At: now}
+	bd := builder{in: Input{Now: now, Mode: ModeOnce}}
+	b.ReportAllocs()
+	for b.Loop() {
+		r := newRing(rs)
+		for _, name := range names {
+			for _, w := range windows {
+				bd.windowStats(name, s, r, w)
+			}
 		}
 	}
 }
