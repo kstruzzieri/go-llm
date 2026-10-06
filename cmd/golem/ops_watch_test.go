@@ -264,6 +264,70 @@ func TestOpsWatchRestoresOnErrorAndPanic(t *testing.T) {
 	}
 }
 
+// altWriteFailer lands write number failAt (from 1) only up to accept bytes
+// and fails it; every other write lands whole. writes keeps what landed,
+// with each frame read as "frame".
+type altWriteFailer struct {
+	failAt, accept int
+	calls          int
+	writes         []string
+}
+
+func (f *altWriteFailer) Write(p []byte) (int, error) {
+	f.calls++
+	n, err := len(p), error(nil)
+	if f.calls == f.failAt {
+		n, err = min(f.accept, len(p)), errOpsWrite
+	}
+	if n > 0 {
+		got := string(p[:n])
+		if strings.HasPrefix(got, clearHome) {
+			got = "frame"
+		}
+		f.writes = append(f.writes, got)
+	}
+	return n, err
+}
+
+// TestOpsWatchFailedEntryRestoresOnlyWhatReachedTheTerminal pins both
+// writes of altScreenOn, at start and on resume from Ctrl-Z: a short write
+// that switched screens is restored, and a write that landed nothing gets
+// no restore, whose ?1049l would home the cursor on the normal screen
+// (DECRC with nothing saved).
+func TestOpsWatchFailedEntryRestoresOnlyWhatReachedTheTerminal(t *testing.T) {
+	f := opsfixture.NewLlamaSwap(t)
+	src, err := newOpsSource(fixtureConfig(t, f.URL()), opsInterval)
+	if err != nil {
+		t.Fatal(err)
+	}
+	enter := len("\x1b[?1049h") // the screen switch lands; the cursor hide does not
+	// With Ctrl-Z pending, the writes run on, frame, off (suspend), on.
+	const start, resume = 1, 4
+	for _, tc := range []struct {
+		name           string
+		failAt, accept int
+		want           []string
+	}{
+		{"short write at start", start, enter, []string{altScreenOn[:enter], altScreenOff}},
+		{"nothing written at start", start, 0, nil},
+		{"short write on resume", resume, enter, []string{altScreenOn, "frame", altScreenOff, altScreenOn[:enter], altScreenOff}},
+		{"nothing written on resume", resume, 0, []string{altScreenOn, "frame", altScreenOff}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := &altWriteFailer{failAt: tc.failAt, accept: tc.accept}
+			stops := make(chan os.Signal, 1)
+			stops <- nil
+			job := opsJob{stops: stops, suspend: func() {}}
+			if err := runOpsWatch(context.Background(), src, w, 1, opsTerm{terminal: true, w: 80, h: 24}, xterm, job); !errors.Is(err, errOpsWrite) {
+				t.Fatalf("failed alternate-screen write returned %v, want errOpsWrite", err)
+			}
+			if !slices.Equal(w.writes, tc.want) {
+				t.Fatalf("the terminal got %q, want %q", w.writes, tc.want)
+			}
+		})
+	}
+}
+
 // TestOpsWatchSuspendHandsBackTheTerminal drives Ctrl-Z through an injected
 // job, so the test binary is never stopped: the screen and cursor are
 // restored before the process stops, and on resume the alternate screen is

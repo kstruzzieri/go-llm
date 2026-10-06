@@ -55,10 +55,24 @@ func runOpsWatch(ctx context.Context, src *opsSource, w io.Writer, fd int, ops t
 	if getenv("TERM") == "dumb" {
 		return errors.New("golem ops: -watch needs an ANSI terminal (TERM=dumb)")
 	}
-	if _, err := io.WriteString(w, altScreenOn); err != nil {
+	// on records whether any byte of the latest altScreenOn write landed: a
+	// short write may already have switched screens or hidden the cursor. A
+	// write that landed nothing gets no restore, whose ?1049l would home the
+	// cursor on the normal screen (DECRC with nothing saved).
+	on := false
+	enter := func() error {
+		n, err := io.WriteString(w, altScreenOn)
+		on = n > 0
 		return err
 	}
-	defer func() { _, _ = io.WriteString(w, altScreenOff) }()
+	defer func() {
+		if on {
+			_, _ = io.WriteString(w, altScreenOff)
+		}
+	}()
+	if err := enter(); err != nil {
+		return err
+	}
 
 	render := time.NewTicker(opsFrameEvery)
 	defer render.Stop()
@@ -90,7 +104,7 @@ func runOpsWatch(ctx context.Context, src *opsSource, w io.Writer, fd int, ops t
 			// terminal again on resume, and redraw at once.
 			_, _ = io.WriteString(w, altScreenOff)
 			job.suspend()
-			if _, err := io.WriteString(w, altScreenOn); err != nil {
+			if err := enter(); err != nil {
 				return err
 			}
 		case <-render.C:
