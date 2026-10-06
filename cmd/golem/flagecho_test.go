@@ -80,6 +80,7 @@ func flagParseFailure(n int) string {
 // that quotes argv (unknown flag, double-dash, bad syntax, invalid typed value)
 // on each subcommand, in process and through main().
 func TestSubcommandFlagErrorsDoNotEchoArgv(t *testing.T) {
+	pinNoDiscovery(t) // a parse regression must not load a real models.json
 	for _, s := range subcommandFlagSurfaces() {
 		vectors := [][]string{
 			{"-sk-" + flagEchoSecret},
@@ -123,6 +124,7 @@ func TestSubcommandFlagErrorsDoNotEchoArgv(t *testing.T) {
 // TestSubcommandHelpMatchesGolden pins each subcommand's help bytes, which
 // predate parseQuietly, in process and through main().
 func TestSubcommandHelpMatchesGolden(t *testing.T) {
+	pinNoDiscovery(t) // a parse regression must not load a real models.json
 	for _, s := range subcommandFlagSurfaces() {
 		want, err := os.ReadFile(filepath.Join("testdata", "usage", s.golden+".golden"))
 		if err != nil {

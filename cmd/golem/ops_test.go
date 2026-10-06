@@ -17,8 +17,18 @@ import (
 	"github.com/kstruzzieri/go-llm/internal/opsview"
 )
 
+// pinNoDiscovery points config auto-discovery at a missing file for this
+// test and every golem process it starts (children inherit os.Environ), so a
+// regression that ignores -config fails instead of loading the developer's
+// real models.json and contacting a live backend.
+func pinNoDiscovery(t *testing.T) {
+	t.Helper()
+	t.Setenv("GO_LLM_CONFIG", filepath.Join(t.TempDir(), "absent-models.json"))
+}
+
 func writeOpsConfig(t *testing.T, providers map[string]config.ProviderConfig, models map[string]config.ModelConfig, defaults map[string]string) string {
 	t.Helper()
+	pinNoDiscovery(t)
 	data, err := json.Marshal(config.Config{Providers: providers, Models: models, Defaults: defaults})
 	if err != nil {
 		t.Fatal(err)
@@ -31,12 +41,14 @@ func writeOpsConfig(t *testing.T, providers map[string]config.ProviderConfig, mo
 }
 
 // fixtureConfig mirrors Keith's real models.json shape: a loopback llama-swap
-// with slot discovery beside a hosted provider whose base carries a path.
+// with slot discovery beside a hosted provider whose base carries a path. The
+// hosted host is under the reserved .invalid TLD, so a classification
+// regression can never send a live outbound request.
 func fixtureConfig(t *testing.T, baseURL string) string {
 	return writeOpsConfig(t,
 		map[string]config.ProviderConfig{
 			"llamacpp": {BaseURL: baseURL, APIFormat: "openai-compat", APIKey: opsfixture.SentinelAPIKey, SlotDiscovery: true},
-			"opencode": {BaseURL: "https://opencode.ai/zen/go", APIFormat: "openai-compat"},
+			"opencode": {BaseURL: "https://opencode.invalid/zen/go", APIFormat: "openai-compat"},
 		},
 		map[string]config.ModelConfig{
 			"agent":  {Name: "gemma4:31b", Provider: "llamacpp", Type: "dense", Capabilities: []string{"chat", "stream", "tool_call"}},
@@ -111,12 +123,17 @@ func TestOpsCanaryOnFailurePaths(t *testing.T) {
 		if f.Loads.Load() != 0 {
 			t.Fatalf("%s failing: golem ops reached a dispatch route", path)
 		}
+		var sawFailing bool
 		for _, r := range f.Requests() {
 			switch r.URI {
 			case "/api/version", "/running", "/api/metrics", "/v1/models":
 			default:
 				t.Fatalf("%s failing: unexpected request %v", path, r)
 			}
+			sawFailing = sawFailing || r.URI == path
+		}
+		if !sawFailing {
+			t.Fatalf("%s failing: never requested (requests %v)", path, f.Requests())
 		}
 	}
 }
@@ -127,11 +144,57 @@ func TestOpsBasePrefixMakesNoRequests(t *testing.T) {
 	if n := len(f.Requests()); n != 0 {
 		t.Fatalf("server saw %d requests, want 0", n)
 	}
+	var found bool
 	for _, b := range snap.Backends {
-		if b.ID == "llamacpp" && b.Runtime.Support != "invalid_configuration" {
-			t.Fatalf("prefix backend = %+v", b)
+		if b.ID == "llamacpp" {
+			found = true
+			if b.Runtime.Support != "invalid_configuration" {
+				t.Fatalf("prefix backend = %+v", b)
+			}
 		}
 	}
+	if !found {
+		t.Fatalf("prefix backend missing: %+v", snap.Backends)
+	}
+}
+
+// TestOpsConfiglessRun pins auto-discovery finding nothing: the run still
+// renders configview's not-ready snapshot, observes nothing and exits 0.
+func TestOpsConfiglessRun(t *testing.T) {
+	home := t.TempDir()
+	for _, k := range []string{"HOME", "USERPROFILE", "AppData"} {
+		t.Setenv(k, home)
+	}
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "xdg"))
+	t.Setenv("GO_LLM_CONFIG", "") // registers the restore; unset below
+	if err := os.Unsetenv("GO_LLM_CONFIG"); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(t.TempDir())
+	check := func(where, out string) {
+		t.Helper()
+		var snap opsview.Snapshot
+		if err := json.Unmarshal([]byte(out), &snap); err != nil {
+			t.Fatalf("%s: decode: %v\n%s", where, err, out)
+		}
+		var missing, attn bool
+		for _, d := range snap.Config.Diagnostics {
+			missing = missing || d.Code == "config_missing"
+		}
+		for _, a := range snap.Attention {
+			attn = attn || (a.Reason == opsview.AttnConfigProblem && strings.Contains(a.Text, "config_missing"))
+		}
+		if snap.Config.Ready || len(snap.Backends) != 0 || !missing || !attn {
+			t.Fatalf("%s: configless snapshot = %+v, want not ready, no backends and a config_missing problem", where, snap)
+		}
+	}
+	_, out, _ := runOpsJSON(t)
+	check("in process", out)
+	exit, stdout, stderr := runGolemMain(t, "ops", "-json")
+	if exit != 0 || stderr != "" {
+		t.Fatalf("exit/stderr = %d / %q, want 0 / \"\"", exit, stderr)
+	}
+	check("process", stdout)
 }
 
 // TestOpsHostedProviderReadsRemote pins Keith's real configuration shape: the
@@ -230,6 +293,9 @@ func TestOpsExitCodes(t *testing.T) {
 	}
 	exit, stdout, stderr := runGolemMain(t, "ops", "-json", "-config", fixtureConfig(t, closed))
 	var snap opsview.Snapshot
+	if opsfixture.ContainsSentinel(stdout + stderr) {
+		t.Fatalf("unreachable backend: process output leaked a sentinel: %q %q", stdout, stderr)
+	}
 	if exit != 0 || stderr != "" || json.Unmarshal([]byte(stdout), &snap) != nil {
 		t.Fatalf("unreachable backend: exit/stdout/stderr = %d / %q / %q, want 0 and a snapshot", exit, stdout, stderr)
 	}
@@ -253,6 +319,7 @@ type failingWriter struct{}
 func (failingWriter) Write([]byte) (int, error) { return 0, errOpsWrite }
 
 func TestOpsConfigErrorIsBounded(t *testing.T) {
+	pinNoDiscovery(t)
 	path := filepath.Join(t.TempDir(), "models.json")
 	raw := `{"providers":{"llamacpp":{"base_url":"http://[::1/` + opsfixture.SentinelPath + `","api_format":"openai-compat"}},"models":{},"defaults":{}}`
 	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
@@ -282,7 +349,7 @@ func TestOpsConfigErrorIsBounded(t *testing.T) {
 func TestOpsFlagErrors(t *testing.T) {
 	// Every case must fail before loading configuration; if one ever reaches
 	// auto-discovery it finds nothing rather than a real models.json.
-	t.Setenv("GO_LLM_CONFIG", filepath.Join(t.TempDir(), "missing-models.json"))
+	pinNoDiscovery(t)
 	for _, tc := range []struct {
 		args []string
 		want string
