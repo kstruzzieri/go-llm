@@ -398,8 +398,12 @@ func (g *opsGuard) finish() {
 			}
 		}
 		slices.Sort(where)
-		g.t.Errorf("guarded reference %s: found %d, permitted %d by opsPermittedRefs, at %v (%s is permitted only in: %v)",
-			key, len(g.sites[key]), opsPermittedRefs[key], g.sites[key], ref, where)
+		only := "nowhere"
+		if len(where) > 0 {
+			only = "only in " + strings.Join(where, ", ")
+		}
+		g.t.Errorf("guarded reference %s: found %d, permitted %d by opsPermittedRefs, at %v (%s is permitted %s)",
+			key, len(g.sites[key]), opsPermittedRefs[key], g.sites[key], ref, only)
 	}
 	for _, pkg := range slices.Sorted(maps.Keys(opsClosedNames)) {
 		for _, name := range opsClosedNames[pkg] {
