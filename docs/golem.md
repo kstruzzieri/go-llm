@@ -405,6 +405,120 @@ Switching away from a route is not revocation either: `/grants` lists the
 session's destination authority, including routes that are no longer active,
 and `/grants clear` revokes all of it.
 
+## golem ops
+
+`golem ops` shows what your local inference backends report about every model
+in `models.json`: whether it is loaded, recent request statistics, and whether
+the backend answers. It is read-only: it never loads, unloads or writes
+anything, keeps nothing on disk, and asks no consent question.
+
+```bash
+golem ops                                # one snapshot as a table
+golem ops -json                          # the same snapshot as an opsview v1 JSON document
+golem ops -watch                         # live view: redraws every second, polls every 2 s
+golem ops -config /path/to/models.json   # default: auto-discover
+```
+
+`-json` cannot be combined with `-watch`. `golem ops` exits 0 whenever it
+prints a snapshot, including when a backend is down. A `models.json` that fails
+to load is an error that names only the config diagnostic, never the file's
+text; with no `models.json` found at all, it prints an empty snapshot whose
+attention list reports `config_missing`.
+
+**What it contacts.** Only providers whose `base_url` is a loopback address
+(`127.0.0.0/8`, `::1`) or `localhost`, with no path. For
+`api_format: openai-compat` it asks `GET /api/version`; when the answer is llama-swap v235 it
+then reads `GET /running`, `GET /api/metrics` and `GET /v1/models`, and it asks
+`/api/version` again on every later poll, so a restart into another version or
+runtime is noticed. For `api_format: ollama` it reads `GET /api/ps`. The
+provider's `api_key`, if set, is sent as a Bearer token. Every request passes an
+exact method-and-path allowlist and the destination guard, so `golem ops` can
+never reach a route that loads a model (`/props`, `/v1/chat/completions`,
+`/upstream/...`) or unloads one (`/unload`), and a `localhost` that resolves to
+an off-host address is refused (shown as blocked by the destination guard).
+Hosted providers are never contacted and read "not observed". So does a
+loopback `base_url` with a path, reported as an unusable `base_url`, because a
+prefix such as `/upstream/<model>` would start that model.
+
+Other llama-swap versions read unsupported (with the version they report).
+`llama-server` without llama-swap, vLLM, LM Studio and anything else that does not
+answer `/api/version` as llama-swap read unrecognized. `golem ops` stops
+contacting such a backend for the rest of the run; restart it after an upgrade.
+A 401 or 403 is reported as "not authorized (check api_key)" and retried.
+
+**How to read it.**
+
+- *Residency* comes from the backend: loaded, loading, unloading, unloaded or
+  unknown. llama-swap's `/running` lists only running models, so "unloaded"
+  needs proof that the ID is llama-swap's own: a successful request for it in
+  llama-swap's retained history that `/v1/models` does not attribute to a peer.
+  A configured alias, or a model with no such request, reads unknown ("not
+  confirmed as a llama-swap model ID"). An Ollama model reads loaded, with its
+  expiry, while it is in `/api/ps`, and unknown otherwise, because Ollama can
+  serve one name from another name's runner. "First observed" is when this
+  `golem ops` run first saw the model loaded, not when it loaded.
+- *Activity* is always unknown: llama-swap v235 publishes no reliable in-flight
+  count, and Ollama none. It is never shown as idle. `-json` carries the time of
+  the model's last completed request when llama-swap still retains one.
+- *Statistics* (`LAST 1H` in the table; 15-minute and 1-hour windows in `-json`)
+  count llama-swap's retained request history for all clients, not only golem:
+  by default its last 1,000 requests (`metricsMaxInMemory`). They cover only
+  that retained history and never claim completeness. A configured alias reads
+  n/a, because llama-swap records its requests under the canonical ID. A token
+  count of zero is treated as missing, because llama-swap reports a missing
+  value as zero, so a token total with no positive values is null rather than 0.
+  p50 needs 5 samples and p95 needs 20. Ollama keeps no per-request history, so
+  its statistics read n/a.
+- *Observed loads* (`-watch` only, the `LOADS` column) count moves into loading
+  or loaded that this run saw, sampled every 2 seconds, with the number of
+  observation gaps; no load is inferred across a gap. The one-shot table has no
+  `LOADS` column and no retry text, because it exits before any retry.
+- *Freshness* (`-watch`): a successful reading is current for three polls
+  (6 seconds), then reads unknown ("no fresh reading") beside its last value. A
+  failed check stays current until the next scheduled check plus a grace
+  window, then turns stale the same way. An unreachable backend is retried with
+  backoff from 2 up to 30 seconds, shown as "next check in" or "retry due".
+  After the machine sleeps, every reading is dropped and read again rather than
+  shown with a wrong age.
+- *Backend-only models*: models a backend proves it serves that `models.json`
+  does not mention appear as `backend:<provider>/<name>` rows marked "not in
+  models.json", at most 256 per backend. Names longer than 512 bytes are
+  counted, not listed, here and in the model-error attention item.
+- *Attention* lists, most urgent first: a backend a configured role uses that
+  is unreachable (critical); models that returned non-2xx responses in the last
+  10 minutes, and any request `golem ops` refused itself, which is a console bug
+  (serious); a used backend that is unsupported, unrecognized or misconfigured,
+  telemetry that is stale or unavailable, and `models.json` diagnostics
+  (warning); and a note when every provider is remote (info).
+
+Every name a backend reports is escaped and clipped before it reaches the
+terminal.
+
+**`-watch`.** The live view draws on the terminal's alternate screen, redraws
+every second so ages advance, and polls every 2 seconds. Each frame is cut to
+the terminal's width and height; `ACTIVITY` is the last column, so a narrow
+terminal clips it first. Ctrl-C or SIGTERM exits 0 and restores the screen and
+cursor. Ctrl-Z suspends with the screen restored, and `fg` redraws at once.
+When golem leads its own session, as in `tmux new-window 'golem ops -watch'`,
+there is no job-control shell to resume it, so Ctrl-Z is ignored. `-watch`
+refuses to start on Windows, when stdout is not a terminal, and with
+`TERM=dumb`; use `golem ops` or `golem ops -json` there.
+
+**Known limitations.**
+
+- Statistics windows, the 10-minute model-error check and last-completed times
+  compare llama-swap's request timestamps with golem's clock, so they assume
+  both share one. If the backend's clock runs more than 1 minute ahead (for
+  example llama-swap in a container or VM behind a loopback port), every row is
+  ignored as future-dated and statistics read 0 calls; a backend clock behind
+  golem's moves rows out of the windows early.
+- Observed loads are sampled every 2 seconds, so a short load can be missed.
+- Ctrl-Z pressed during a collection takes effect when it ends, up to 5 seconds
+  later.
+- Keys typed during `-watch` echo on screen until the next redraw.
+- Rows containing wide (CJK) characters may misalign.
+- `-watch` is not available on Windows.
+
 ## Git context
 
 When `-root` is inside a Git work tree, Golem injects one bounded repository
