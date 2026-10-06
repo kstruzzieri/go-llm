@@ -606,5 +606,20 @@
       "stats": []
     }
   ],
-  "attention": []
+  "attention": [
+    {
+      "severity": "warning",
+      "reason": "config_problem",
+      "subject": "agent",
+      "since": null,
+      "text": "models.json problem: chain_invalid agent"
+    },
+    {
+      "severity": "warning",
+      "reason": "telemetry_unavailable",
+      "subject": "llamacpp",
+      "since": null,
+      "text": "llamacpp models telemetry unavailable: malformed_response"
+    }
+  ]
 }
