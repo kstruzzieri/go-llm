@@ -811,12 +811,13 @@ func TestCollectorTransitions(t *testing.T) {
 
 // TestCollectorListingCountsOnlyOnItsTick: peer confirmation fails closed
 // (spec §5.4), so a listing from an earlier tick never survives a tick that
-// did not read /v1/models, here because /running was unreachable first.
+// did not read /v1/models, here because the identity re-check was
+// unreachable and the llama-swap surfaces were never polled.
 func TestCollectorListingCountsOnlyOnItsTick(t *testing.T) {
 	f := opsfixture.NewLlamaSwap(t)
 	var down atomic.Bool
 	base := front(t, f, func(w http.ResponseWriter, r *http.Request) bool {
-		if down.Load() && r.URL.Path == "/running" {
+		if down.Load() && r.URL.Path == "/api/version" {
 			hangUp(w)
 			return true
 		}
@@ -863,12 +864,13 @@ func TestCollectorUnstartedRequestIsNotAnObservation(t *testing.T) {
 		budget time.Duration // tick time left
 	}{
 		{"tick deadline passed", spent, tickTimeout},
-		{"under one request timeout left", context.Background(), requestTimeout / 2},
+		{"under one request timeout left", context.Background(), requestTimeout - 100*time.Millisecond},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := opsfixture.NewLlamaSwap(t)
 			c := NewCollector([]BackendSpec{lsSpec(f.URL())}, Options{Interval: 2 * time.Second, Clock: newFakeClock().clock()})
 			c.tickEnd = time.Now().Add(tc.budget)
+			c.lastWall, c.lastMono = c.now() // as Tick leaves them: no jump
 			b := c.backends[0]
 			if c.fetch(context.Background(), tc.ctx, b, b.identify, "version", "/api/version", versionLimit, func([]byte) error { return nil }) {
 				t.Fatal("fetch without the budget for a request applied a sample")
@@ -935,6 +937,37 @@ func TestCollectorSleepDuringTickDropsReadings(t *testing.T) {
 	clk.advance(2*time.Second, 2*time.Second)
 	if c.Tick(context.Background()).TimingUncertain {
 		t.Fatal("a jump inside one tick was counted again on the next")
+	}
+}
+
+// TestCollectorNoTransitionAcrossAnInTickJump: the lid closes during the
+// identity re-check and /running is read after wake. Comparing that sample
+// with the pre-sleep one would infer a load across the gap (spec §4.5), so
+// a sample that arrives after an in-tick jump is not applied.
+func TestCollectorNoTransitionAcrossAnInTickJump(t *testing.T) {
+	f := opsfixture.NewLlamaSwap(t)
+	clk := newFakeClock()
+	var armed atomic.Bool
+	base := front(t, f, func(_ http.ResponseWriter, r *http.Request) bool {
+		if r.URL.Path == "/api/version" && armed.CompareAndSwap(true, false) {
+			clk.advance(3*time.Hour, 0)
+		}
+		return false
+	})
+	c := NewCollector([]BackendSpec{lsSpec(base)}, Options{Interval: 2 * time.Second, Clock: clk.clock()})
+	f.SetBody("/running", `{"running":[]}`)
+	c.Tick(context.Background()) // baseline, nothing loaded
+	armed.Store(true)
+	f.SetBody("/running", `{"running":[{"model":"m","state":"ready","ttl":600}]}`)
+	clk.advance(2*time.Second, 2*time.Second)
+	obs := c.Tick(context.Background())
+	if !obs.TimingUncertain {
+		t.Fatal("jump inside the tick not detected")
+	}
+	for _, m := range obs.Backends[0].Models {
+		if m.Loads != 0 || len(m.Transitions) != 0 {
+			t.Fatalf("transition inferred across an in-tick jump: %+v", m)
+		}
 	}
 }
 

@@ -368,6 +368,14 @@ func (c *Collector) fetch(callerCtx, ctx context.Context, b *backendState, cl *c
 		return false
 	}
 	body, err := cl.get(ctx, surface, path, limit)
+	// An answer that arrives after a clock jump inside this tick (lastWall
+	// and lastMono still hold the tick's start) is not applied: compared
+	// with a pre-sleep sample it would infer a transition across the gap.
+	// The end of the tick drops every reading and marks timing uncertain.
+	if wall, mono := c.now(); err == nil && jumped(c.lastWall, c.lastMono, wall, mono) {
+		b.missed(surface)
+		return false
+	}
 	if err == nil {
 		err = apply(body)
 	}
