@@ -124,7 +124,15 @@ func statsText(m opsview.Model, window string) string {
 			continue
 		}
 		if s.Calls == nil || s.Errors == nil {
-			return "n/a (" + opsview.Label(s.Coverage.Reason) + ")"
+			// The values' own reason says why they are null (an alias reads
+			// unconfirmed_model_id beside a ring whose coverage reason is
+			// about retention); "no values" defers to the coverage reason,
+			// which names why (an empty ring).
+			reason := s.Coverage.Reason
+			if r := s.DurationMs.Reason; r != nil && *r != opsview.ReasonNoValues {
+				reason = *r
+			}
+			return "n/a (" + opsview.Label(reason) + ")"
 		}
 		text := fmt.Sprintf("%d calls, %d errors", *s.Calls, *s.Errors)
 		if s.DecodeTPS.P50 != nil {
@@ -141,19 +149,21 @@ func statsText(m opsview.Model, window string) string {
 	return "n/a"
 }
 
-func backendText(b opsview.Backend, elapsed time.Duration) string {
+// backendText summarizes one backend. withRetry is false in once mode, which
+// exits before any retry.
+func backendText(b opsview.Backend, elapsed time.Duration, withRetry bool) string {
 	rt := b.Runtime.Kind
 	if b.Runtime.Version != nil {
 		rt += " " + *b.Runtime.Version
 	}
-	text := rt + " " + b.Runtime.Support + "; " + b.Reachability.State
+	text := rt + " " + opsview.Label(b.Runtime.Support) + "; " + b.Reachability.State
 	if b.Reachability.Code != nil {
 		text += " (" + opsview.Label(*b.Reachability.Code) + ")"
 	}
 	if age := agedMs(b.Reachability.Envelope, elapsed); age != nil {
 		text += ", checked " + fmtAge(*age) + " ago"
 	}
-	if r := b.Reachability.RetryInMs; r != nil {
+	if r := b.Reachability.RetryInMs; r != nil && withRetry {
 		// retry_in_ms sits at 0 until the collector's retry is published
 		// (up to 13 s later), so a due retry never reads "in 0s".
 		if left := *r - elapsed.Milliseconds(); left > 0 {
