@@ -191,8 +191,9 @@ func TestUnusedProviderDoesNotAlertWhenDown(t *testing.T) {
 	down.Provider = "spare"
 	down.Reachable = sample(false, 10*time.Second)
 	down.ReachCode, down.ReachRetry = opsbackend.CodeUnreachable, 12*time.Second
-	if _, ok := reasons(Build(input(ModeWatch, down, remote())))[AttnBackendUnreachable+":spare"]; ok {
-		t.Fatal("a provider no role uses raised a critical alert")
+	// Known down, so not stale or overdue either: nothing at all.
+	if got := Build(input(ModeWatch, down, remote())).Attention; len(got) != 0 {
+		t.Fatalf("a provider no role uses raised %+v", got)
 	}
 }
 
@@ -383,19 +384,30 @@ func TestAttentionOrdering(t *testing.T) {
 	if got := Build(input(ModeWatch, e, remote())).Attention; len(got) != 2 || got[0].Subject != "llamacpp/alpha" || got[1].Subject != "llamacpp/zeta" {
 		t.Fatalf("within a severity, attention orders by subject before text: %+v", got)
 	}
+
+	// Same severity and subject: reason decides before text, whose order
+	// ("agent has..." before "models.json...") is the reverse.
+	a := healthyLlamaSwap()
+	a.Provider, a.Running.Mono = "agent", time.Second
+	in := input(ModeWatch, a, remote())
+	in.Config.Diagnostics = []configview.Diagnostic{{Code: "chain_invalid", Subject: "agent"}}
+	if got := Build(in).Attention; len(got) != 2 || got[0].Reason != AttnConfigProblem || got[1].Reason != AttnTelemetryStale {
+		t.Fatalf("within a severity and subject, attention orders by reason before text: %+v", got)
+	}
 }
 
-// TestAttentionTiesOrderDeterministically pins a total order: two surface
-// codes on one backend raise items with equal severity, subject and reason,
-// so a renderer comparing the top item would see a change on every
+// TestAttentionTiesOrderDeterministically pins a total order: two
+// diagnostics on one use case raise items with equal severity, subject and
+// reason, so a renderer comparing the top item would see a change on every
 // reordering unless the text breaks the tie.
 func TestAttentionTiesOrderDeterministically(t *testing.T) {
-	a, c := healthyLlamaSwap(), healthyLlamaSwap()
-	a.Surfaces = []opsbackend.Surface{{Name: "running", LastError: opsbackend.CodeHTTPStatus}, {Name: "models", LastError: opsbackend.CodeMalformed}}
-	c.Surfaces = []opsbackend.Surface{a.Surfaces[1], a.Surfaces[0]}
-	want := Build(input(ModeWatch, a, remote())).Attention
-	if got := Build(input(ModeWatch, c, remote())).Attention; len(want) != 2 || !reflect.DeepEqual(got, want) {
-		t.Fatalf("attention order followed surface order:\n got %+v\nwant %+v", got, want)
+	diags := []configview.Diagnostic{{Code: "selector_type_conflict", Subject: "agent"}, {Code: "chain_invalid", Subject: "agent"}}
+	in := input(ModeWatch, healthyLlamaSwap(), remote())
+	in.Config.Diagnostics = diags
+	want := Build(in).Attention
+	in.Config.Diagnostics = []configview.Diagnostic{diags[1], diags[0]}
+	if got := Build(in).Attention; len(want) != 2 || !reflect.DeepEqual(got, want) {
+		t.Fatalf("attention order followed diagnostics order:\n got %+v\nwant %+v", got, want)
 	}
 }
 
