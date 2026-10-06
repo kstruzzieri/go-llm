@@ -361,9 +361,31 @@ func TestModelErrorsAreCapped(t *testing.T) {
 			items = append(items, a)
 		}
 	}
-	if len(items) != maxModelErrors+1 || items[0].Subject != "" || items[0].Text != "model_errors list capped at 256 models; 44 more models returned non-2xx responses in the last 10 minutes" ||
+	if len(items) != maxModelErrors+1 || items[0].Subject != "" || items[0].Text != "44 unlisted models returned non-2xx responses in the last 10 minutes (the list holds at most 256 models, none named over 512 bytes)" ||
 		items[1].Subject != "llamacpp/m000" || items[maxModelErrors].Subject != "llamacpp/m255" {
 		t.Fatalf("model_errors not capped at %d plus one overflow item: %d items, first %+v", maxModelErrors, len(items), items[:min(2, len(items))])
+	}
+}
+
+// TestModelErrorsNamesBoundedInLength pins the name-size bound on
+// model_errors: decode does not bound row names, so an erroring model named
+// over MaxNameLen bytes must not reach Subject or Text; the overflow item
+// counts it instead.
+func TestModelErrorsNamesBoundedInLength(t *testing.T) {
+	b := healthyLlamaSwap()
+	huge := strings.Repeat("h", 1<<20)
+	b.Rows.Value = append(b.Rows.Value, row(2, time.Minute, huge, 500, 0, 0, 0, 0, 1), row(3, time.Minute, huge, 500, 0, 0, 0, 0, 1))
+	var items []Attention
+	for _, a := range Build(input(ModeWatch, b, remote())).Attention {
+		if len(a.Subject)+len(a.Text) > 4*opsbackend.MaxNameLen {
+			t.Fatalf("an attention item carries the %d-byte name: subject %d bytes, text %d bytes", len(huge), len(a.Subject), len(a.Text))
+		}
+		if a.Reason == AttnModelErrors {
+			items = append(items, a)
+		}
+	}
+	if len(items) != 1 || items[0].Subject != "" || !strings.HasPrefix(items[0].Text, "1 unlisted models returned non-2xx") {
+		t.Fatalf("model_errors = %+v, want one overflow item counting the long name", items)
 	}
 }
 

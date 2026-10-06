@@ -47,6 +47,7 @@ func (b builder) attention() []Attention {
 	used := b.usedProviders()
 	remote := 0
 	var errs []Attention
+	unlisted := 0 // erroring models never itemised (name over MaxNameLen)
 	for _, o := range b.in.Observations.Backends {
 		if o.Refused > 0 {
 			add(SevSerious, AttnRefused, o.Provider, fmt.Sprintf("golem ops refused %d of its own requests to %s; this is a console bug", o.Refused, o.Provider))
@@ -97,12 +98,17 @@ func (b builder) attention() []Attention {
 				add(SevWarning, AttnTelemetryUnavailable, o.Provider, fmt.Sprintf("%s telemetry unavailable on %s: %s", o.Provider, strings.Join(names, ", "), Label(string(code))))
 			}
 		}
-		errs = append(errs, b.modelErrors(o)...)
+		items, long := b.modelErrors(o)
+		errs = append(errs, items...)
+		unlisted += long
 	}
 	slices.SortFunc(errs, attentionOrder)
 	if n := len(errs) - maxModelErrors; n > 0 {
 		errs = errs[:maxModelErrors]
-		add(SevSerious, AttnModelErrors, "", fmt.Sprintf("model_errors list capped at %d models; %d more models returned non-2xx responses in the last 10 minutes", maxModelErrors, n))
+		unlisted += n
+	}
+	if unlisted > 0 {
+		add(SevSerious, AttnModelErrors, "", fmt.Sprintf("%d unlisted models returned non-2xx responses in the last 10 minutes (the list holds at most %d models, none named over %d bytes)", unlisted, maxModelErrors, opsbackend.MaxNameLen))
 	}
 	out = append(out, errs...)
 	// configview reports a missing models.json as Ready false plus a
@@ -173,10 +179,13 @@ func (b builder) okCurrent(o opsbackend.BackendObservation) bool {
 
 // modelErrors reports a lower bound: rows are retained history only, so
 // absence never implies healthy. A future-dated row is skipped, or it would
-// sit in the window forever. The caller sorts and caps the items.
-func (b builder) modelErrors(o opsbackend.BackendObservation) []Attention {
+// sit in the window forever. A model named over opsbackend.MaxNameLen bytes
+// is not itemised (decode does not bound names, and Subject and Text carry
+// them into -json): it is returned as a count for the overflow item. The
+// caller sorts and caps the items.
+func (b builder) modelErrors(o opsbackend.BackendObservation) ([]Attention, int) {
 	if o.Rows == nil || !b.fresh(o.Rows.Mono) {
-		return nil
+		return nil, 0
 	}
 	type agg struct {
 		n      int
@@ -199,11 +208,16 @@ func (b builder) modelErrors(o opsbackend.BackendObservation) []Attention {
 		}
 	}
 	var out []Attention
+	long := 0
 	for model, a := range per {
-		if a.n >= 2 {
+		switch {
+		case a.n < 2:
+		case len(model) > opsbackend.MaxNameLen:
+			long++
+		default:
 			out = append(out, Attention{Severity: SevSerious, Reason: AttnModelErrors, Subject: o.Provider + "/" + model,
 				Text: fmt.Sprintf("at least %d retained requests to %s on %s returned non-2xx in the last 10 min (newest at %s)", a.n, model, o.Provider, deref(stamp(a.newest)))})
 		}
 	}
-	return out
+	return out, long
 }
