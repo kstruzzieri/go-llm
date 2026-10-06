@@ -41,9 +41,25 @@ type destinationTransport struct {
 // delegates. Guard-generated denial errors name only the canonical
 // destination and purpose, never the request URL; delegate errors are
 // returned unchanged.
+//
+// A denial closes the request body: the http.RoundTripper contract requires
+// it on errors too, and http.Client never closes the body after a transport
+// error, so skipping it leaks a pipe-backed body's writer goroutine (#655).
+// An admitted request hands the body to the delegate unclosed.
 func (t *destinationTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	if err := t.gate.authorize(req.Context(), t.dest.Provider(), t.dest); err != nil {
+	if err := t.admit(req); err != nil {
+		if req.Body != nil {
+			_ = req.Body.Close()
+		}
 		return nil, err
+	}
+	return t.delegate.RoundTrip(req)
+}
+
+// admit reports why req may not pass the guard, or nil when it may.
+func (t *destinationTransport) admit(req *http.Request) error {
+	if err := t.gate.authorize(req.Context(), t.dest.Provider(), t.dest); err != nil {
+		return err
 	}
 	// NewRequest populates Host from URL; only a differing value is an override.
 	if req.URL == nil || (req.Host != "" && req.Host != req.URL.Host) || !t.targetsBound(req.URL) {
@@ -51,9 +67,9 @@ func (t *destinationTransport) RoundTrip(req *http.Request) (*http.Response, err
 		if cap := capabilityFromContext(req.Context()); cap != nil {
 			purpose = cap.purpose
 		}
-		return nil, &DestinationDeniedError{Destination: t.dest, Purpose: purpose}
+		return &DestinationDeniedError{Destination: t.dest, Purpose: purpose}
 	}
-	return t.delegate.RoundTrip(req)
+	return nil
 }
 
 // targetsBound reports whether u stays inside the bound destination:
