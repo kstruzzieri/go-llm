@@ -10,7 +10,6 @@ import (
 	"maps"
 	"os"
 	"os/signal"
-	"runtime"
 	"slices"
 	"syscall"
 	"time"
@@ -50,7 +49,7 @@ func runOps(ctx context.Context, args []string, stdin io.Reader, out, errOut io.
 		return errors.New("golem ops: -json cannot be combined with -watch")
 	}
 	if watch {
-		if err := opsWatchUnsupported(runtime.GOOS); err != nil {
+		if err := opsWatchUnsupported(opsGOOS); err != nil {
 			return err
 		}
 		fd, ok := terminalFd(out)

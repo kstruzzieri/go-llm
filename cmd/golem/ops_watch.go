@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"runtime"
 	"strings"
 	"time"
 
@@ -21,6 +22,9 @@ const (
 // opsFrameEvery is the -watch redraw cadence; ages advance on every frame.
 const opsFrameEvery = time.Second
 
+// opsGOOS is runtime.GOOS; tests override it to reach the Windows refusal.
+var opsGOOS = runtime.GOOS
+
 // opsWatchUnsupported refuses -watch on Windows before any descriptor is
 // probed, with goos passed in so the row is provable on any host. -watch
 // writes VT sequences, and golem never enables
@@ -34,7 +38,7 @@ func opsWatchUnsupported(goos string) error {
 
 // opsJob hands the terminal back on Ctrl-Z. stops delivers SIGTSTP; suspend
 // stops the process and returns once it is continued. The zero value never
-// stops.
+// stops. Ctrl-Z during a collection waits for it to end (up to TickTimeout).
 type opsJob struct {
 	stops   <-chan os.Signal
 	suspend func()

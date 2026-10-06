@@ -117,6 +117,41 @@ func TestOpsTableAgesAdvance(t *testing.T) {
 	}
 }
 
+// TestOpsTableModelsHeader pins the MODELS labels in order, and that each
+// labels its own cells: activity last, so a terminal clip cuts it first.
+func TestOpsTableModelsHeader(t *testing.T) {
+	for _, tc := range []struct {
+		mode opsview.Mode
+		want string
+	}{
+		{opsview.ModeOnce, "MODELS RESIDENCY LAST 1H USED BY ACTIVITY"},
+		{opsview.ModeWatch, "MODELS RESIDENCY LOADS LAST 1H USED BY ACTIVITY"},
+	} {
+		s := hostileSnapshot()
+		s.Mode = tc.mode
+		var out bytes.Buffer
+		_ = renderOpsTable(&out, s, 0, 0)
+		var header, row string
+		for _, line := range strings.Split(out.String(), "\n") {
+			if strings.HasPrefix(line, "MODELS") {
+				header = line
+			}
+			if strings.HasPrefix(line, "llamacpp/evil") {
+				row = line
+			}
+		}
+		if got := strings.Join(strings.Fields(header), " "); got != tc.want {
+			t.Fatalf("%s header = %q, want %q", tc.mode, got, tc.want)
+		}
+		if got := strings.Index(header, "ACTIVITY"); got != strings.LastIndex(row, "unknown") {
+			t.Fatalf("%s: ACTIVITY at column %d, its cell at %d:\n%s\n%s", tc.mode, got, strings.LastIndex(row, "unknown"), header, row)
+		}
+		if tc.mode == opsview.ModeWatch && strings.Index(header, "LOADS") != strings.Index(row, "3 observed loads") {
+			t.Fatalf("LOADS does not label the loads cell:\n%s\n%s", header, row)
+		}
+	}
+}
+
 // TestOpsTableOnceModeHasNoLoadsOrRetry pins once mode: it exits after one
 // render, so it has no loads history and no next check.
 func TestOpsTableOnceModeHasNoLoadsOrRetry(t *testing.T) {

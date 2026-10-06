@@ -141,13 +141,40 @@ func waitSeen(seen *lockedBuffer, ok func(string) bool) {
 	}
 }
 
-// TestOpsWatchJobStopsAndResumes runs the real watchJob in a helper process
-// in its own process group, so the test binary is never stopped: Ctrl-Z is
-// caught rather than stopping the helper, suspend stops it with SIGSTOP
-// (a re-raised SIGTSTP would be ignored once Go has caught it), and SIGCONT
-// resumes it.
+// jobHelper re-runs this test as a helper in mode, in the process group or
+// session attr makes, so the test binary itself is never stopped, and returns
+// once the helper stops or exits.
+func jobHelper(t *testing.T, mode string, attr *syscall.SysProcAttr) (*exec.Cmd, *lockedBuffer, syscall.WaitStatus) {
+	t.Helper()
+	cmd := exec.Command(os.Args[0], "-test.run=^"+t.Name()+"$")
+	cmd.Env = append(os.Environ(), "GOLEM_WATCH_JOB_HELPER="+mode)
+	cmd.SysProcAttr = attr
+	out := &lockedBuffer{}
+	cmd.Stdout = out
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	killer := time.AfterFunc(10*time.Second, func() { _ = cmd.Process.Kill() })
+	t.Cleanup(func() { killer.Stop() })
+	var ws syscall.WaitStatus
+	if _, err := syscall.Wait4(cmd.Process.Pid, &ws, syscall.WUNTRACED, nil); err != nil {
+		t.Fatal(err)
+	}
+	return cmd, out, ws
+}
+
+// stoppedBy decodes a stop by hand: darwin's WaitStatus.Stopped reads a
+// SIGSTOP stop as a continue.
+func stoppedBy(ws syscall.WaitStatus) (syscall.Signal, bool) {
+	return syscall.Signal(ws >> 8 & 0xff), ws&0x7f == 0x7f
+}
+
+// TestOpsWatchJobStopsAndResumes runs the real watchJob in a helper in its
+// own process group under this test's session: Ctrl-Z is caught rather than
+// stopping the helper, suspend stops it with SIGSTOP (a re-raised SIGTSTP
+// would be ignored once Go has caught it) and returns only after SIGCONT.
 func TestOpsWatchJobStopsAndResumes(t *testing.T) {
-	if os.Getenv("GOLEM_WATCH_JOB_HELPER") == "1" {
+	if os.Getenv("GOLEM_WATCH_JOB_HELPER") == "group" {
 		job, stop := watchJob()
 		defer stop()
 		_ = syscall.Kill(os.Getpid(), syscall.SIGTSTP)
@@ -157,31 +184,55 @@ func TestOpsWatchJobStopsAndResumes(t *testing.T) {
 		fmt.Println("resumed")
 		return
 	}
-	cmd := exec.Command(os.Args[0], "-test.run=^TestOpsWatchJobStopsAndResumes$")
-	cmd.Env = append(os.Environ(), "GOLEM_WATCH_JOB_HELPER=1")
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	out := &lockedBuffer{}
-	cmd.Stdout = out
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
-	killer := time.AfterFunc(10*time.Second, func() { _ = cmd.Process.Kill() })
-	defer killer.Stop()
-	var ws syscall.WaitStatus
-	if _, err := syscall.Wait4(cmd.Process.Pid, &ws, syscall.WUNTRACED, nil); err != nil {
-		t.Fatal(err)
-	}
-	// Decoded by hand: darwin's WaitStatus.Stopped reads a SIGSTOP stop as a
-	// continue.
-	if stopped, sig := ws&0x7f == 0x7f, syscall.Signal(ws>>8&0xff); !stopped || sig != syscall.SIGSTOP {
+	cmd, out, ws := jobHelper(t, "group", &syscall.SysProcAttr{Setpgid: true})
+	if sig, stopped := stoppedBy(ws); !stopped || sig != syscall.SIGSTOP {
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
 		t.Fatalf("helper did not stop itself with SIGSTOP (status %#x):\n%s", ws, out.String())
+	}
+	time.Sleep(200 * time.Millisecond) // anything written before the stop has arrived
+	if strings.Contains(out.String(), "resumed") {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		t.Fatalf("suspend returned before the stop landed:\n%s", out.String())
 	}
 	if err := syscall.Kill(cmd.Process.Pid, syscall.SIGCONT); err != nil {
 		t.Fatal(err)
 	}
 	if err := cmd.Wait(); err != nil || !strings.Contains(out.String(), "caught\nresumed\n") {
 		t.Fatalf("helper after SIGCONT: %v:\n%s", err, out.String())
+	}
+}
+
+// TestOpsWatchJobIgnoredWithoutJobControl runs -watch with the real watchJob
+// in a helper that leads its own session, as under tmux new-window, ssh -t or
+// a terminal emulator's -e: no shell would ever continue it, so Ctrl-Z must
+// neither stop it nor interrupt the drawing.
+func TestOpsWatchJobIgnoredWithoutJobControl(t *testing.T) {
+	if os.Getenv("GOLEM_WATCH_JOB_HELPER") == "session" {
+		job, stop := watchJob()
+		defer stop()
+		f := opsfixture.NewLlamaSwap(t)
+		src, err := newOpsSource(fixtureConfig(t, f.URL()), opsInterval)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+		defer cancel()
+		_ = syscall.Kill(os.Getpid(), syscall.SIGTSTP)
+		if err := runOpsWatch(ctx, src, os.Stdout, 1, opsTerm{terminal: true, w: 80, h: 24}, xterm, job); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	cmd, out, ws := jobHelper(t, "session", &syscall.SysProcAttr{Setsid: true})
+	if _, stopped := stoppedBy(ws); stopped {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		t.Fatalf("helper leading its own session stopped on Ctrl-Z (status %#x); nothing would continue it", ws)
+	}
+	_ = cmd.Wait() // reaped above; this only drains the output
+	if !ws.Exited() || ws.ExitStatus() != 0 || strings.Count(out.String(), clearHome) < 2 {
+		t.Fatalf("helper did not keep drawing through Ctrl-Z (status %#x):\n%q", ws, out.String())
 	}
 }

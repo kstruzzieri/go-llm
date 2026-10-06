@@ -154,6 +154,16 @@ func TestOpsWatchRefusesWindows(t *testing.T) {
 			t.Fatalf("%s = %v, want nil", goos, err)
 		}
 	}
+	// and runOps asks it before anything else
+	pinNoDiscovery(t)
+	saved := opsGOOS
+	opsGOOS = "windows"
+	t.Cleanup(func() { opsGOOS = saved })
+	var out, errOut bytes.Buffer
+	err := runOps(context.Background(), []string{"-watch"}, strings.NewReader(""), &out, &errOut)
+	if err == nil || err.Error() != "golem ops: -watch is not supported on Windows" || exitCodeFor(err) == 0 {
+		t.Fatalf("runOps -watch on windows = %v (exit %d), want the Windows refusal and a nonzero exit", err, exitCodeFor(err))
+	}
 }
 
 // frameRecorder keeps every successful write, calls afterFrame with each
