@@ -258,7 +258,7 @@ func (b builder) model(id, prov, name string, configured bool, v view, used []Us
 			if v.identified[name] {
 				m.Stats = append(m.Stats, b.windowStats(name, o.Rows, v.ring, w))
 			} else {
-				m.Stats = append(m.Stats, unconfirmedStats(w))
+				m.Stats = append(m.Stats, b.unconfirmedStats(name, v, w))
 			}
 		}
 	}
@@ -270,11 +270,13 @@ func (b builder) model(id, prov, name string, configured bool, v view, used []Us
 
 // unconfirmedStats is one window for a name no sample proved canonical. An
 // alias's requests are recorded under its canonical ID, so counting rows by
-// the alias would claim a false measured zero.
-func unconfirmedStats(w window) Stats {
+// the alias would claim a false measured zero: every per-model value is null
+// with reason unconfirmed_model_id. The envelope and coverage describe the
+// ring, not the model, so they stay true and still decay.
+func (b builder) unconfirmedStats(name string, v view, w window) Stats {
+	ring := b.windowStats(name, v.o.Rows, v.ring, w)
 	s := unavailableStats(w, ReasonUnconfirmed)
-	s.Envelope = Envelope{Source: "llama-swap /api/metrics"}
-	s.Coverage = Coverage{State: CoverageUnknown, Reason: ReasonUnconfirmed}
+	s.Envelope, s.Coverage = ring.Envelope, ring.Coverage
 	return s
 }
 
@@ -312,7 +314,9 @@ func (b builder) llamaSwapResidency(v view, name string) Residency {
 	switch {
 	case state != "":
 		r.State = state
-	case v.confirmed[name]:
+	// A stale sample still carries its last reading: a name an aged sample
+	// proved canonical and that was absent then last read unloaded.
+	case v.confirmed[name] || (env.Stale && v.identified[name]):
 		r.State = StateUnloaded
 	default:
 		r.State, r.Reason = StateUnknown, strPtr(ReasonUnconfirmed)
@@ -333,14 +337,11 @@ func (b builder) llamaSwapResidency(v view, name string) Residency {
 func (b builder) ollamaResidency(o opsbackend.BackendObservation, name string) Residency {
 	s := o.PS
 	env := b.envelope("ollama /api/ps", s.At, s.Mono)
-	want := opsbackend.NormalizeOllama(name)
 	r := Residency{State: StateUnknown, Reason: strPtr(ReasonOllamaAbsent), Envelope: env}
-	for _, pm := range s.Value {
-		if want != "" && (opsbackend.NormalizeOllama(pm.Name) == want || opsbackend.NormalizeOllama(pm.Model) == want) {
-			r = Residency{State: StateLoaded, ExpiresAt: stamp(pm.ExpiresAt), Envelope: env}
-			if mem, ok := memoryFor(o, want); ok {
-				r.FirstObserved = stamp(mem.FirstObserved)
-			}
+	if pm, ok := psEntry(o, name); ok {
+		r = Residency{State: StateLoaded, ExpiresAt: stamp(pm.ExpiresAt), Envelope: env}
+		if mem, ok := memoryFor(o, opsbackend.NormalizeOllama(pm.Name)); ok {
+			r.FirstObserved = stamp(mem.FirstObserved)
 		}
 	}
 	if env.Stale {
@@ -348,6 +349,22 @@ func (b builder) ollamaResidency(o opsbackend.BackendObservation, name string) R
 		r = Residency{State: StateUnknown, Reason: strPtr(ReasonStale), LastState: &last, Envelope: env}
 	}
 	return r
+}
+
+// psEntry returns the first /api/ps entry whose name or model matches name.
+// The collector keys memory by the entry's normalized name, which differs
+// from name when the match came through the model.
+func psEntry(o opsbackend.BackendObservation, name string) (opsbackend.PSModel, bool) {
+	want := opsbackend.NormalizeOllama(name)
+	if want == "" || o.PS == nil {
+		return opsbackend.PSModel{}, false // a blank name matches nothing
+	}
+	for _, pm := range o.PS.Value {
+		if opsbackend.NormalizeOllama(pm.Name) == want || opsbackend.NormalizeOllama(pm.Model) == want {
+			return pm, true
+		}
+	}
+	return opsbackend.PSModel{}, false
 }
 
 func (b builder) activity(v view, name string) Activity {
@@ -391,12 +408,17 @@ func (b builder) activity(v view, name string) Activity {
 // An untracked model has a measured zero only when residency has been
 // sampled, the tracking cap never overflowed, and, on llama-swap, a sample
 // proved the name canonical (an alias loads under its canonical ID);
-// otherwise the count was not measured and loads is omitted.
+// otherwise the count was not measured and loads is omitted. An untracked
+// Ollama name never has one: a copied name can load through another name's
+// runner, so its absence from /api/ps is not proof (spec §4.4).
 func (b builder) loads(v view, name string) *Loads {
 	o := v.o
 	key, named := name, v.identified[name]
 	if o.Kind == opsbackend.KindOllama {
-		key, named = opsbackend.NormalizeOllama(name), true
+		key, named = opsbackend.NormalizeOllama(name), false
+		if pm, ok := psEntry(o, name); ok {
+			key = opsbackend.NormalizeOllama(pm.Name)
+		}
 	}
 	mem, tracked := memoryFor(o, key)
 	if !tracked && (o.Periods == 0 || o.ModelsOverflow > 0 || !named) {

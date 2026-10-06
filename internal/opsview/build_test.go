@@ -123,6 +123,10 @@ func TestStaleDegradesToUnknown(t *testing.T) {
 	if st := m.Stats[0]; st.Calls == nil || *st.Calls != 1 || !st.Stale {
 		t.Fatalf("stale stats lost their values: %+v", st)
 	}
+	// A confirmed-unloaded model keeps its last reading too.
+	if m := modelByID(t, Build(in), "llamacpp/qwen3-embedding:8b"); m.Residency.State != StateUnknown || deref(m.Residency.LastState) != StateUnloaded {
+		t.Fatalf("stale unloaded lost its last_state: %+v", m.Residency)
+	}
 }
 
 func TestUnsupportedBackendIgnoresCachedSamples(t *testing.T) {
@@ -184,14 +188,24 @@ func TestLastCompletedAtSkipsFutureRows(t *testing.T) {
 func TestUnconfirmedNameClaimsNoStats(t *testing.T) {
 	b := healthyLlamaSwap()
 	b.Rows.Value = append(b.Rows.Value, row(2, 30*time.Second, "alias-name", 500, 0, 0, 0, 0, 1))
-	m := modelByID(t, Build(input(ModeWatch, b, remote())), "llamacpp/alias-name")
+	in := input(ModeWatch, b, remote())
+	s := Build(in)
+	m, canon := modelByID(t, s, "llamacpp/alias-name"), modelByID(t, s, "llamacpp/gemma4:31b")
 	if len(m.Stats) != len(windows) {
 		t.Fatalf("alias stats = %+v", m.Stats)
 	}
-	for _, st := range m.Stats {
-		if st.Calls != nil || st.Errors != nil || deref(st.OutputTokens.Reason) != ReasonUnconfirmed || st.Coverage.Reason != ReasonUnconfirmed {
+	for i, st := range m.Stats {
+		if st.Calls != nil || st.Errors != nil || deref(st.OutputTokens.Reason) != ReasonUnconfirmed || deref(st.DurationMs.Reason) != ReasonUnconfirmed {
 			t.Fatalf("an alias's requests are recorded under its canonical ID, so counting its name claims a false measured value: %+v", st)
 		}
+		// Coverage and the envelope describe the ring, not the model.
+		if !reflect.DeepEqual(st.Coverage, canon.Stats[i].Coverage) || !reflect.DeepEqual(st.Envelope, canon.Stats[i].Envelope) {
+			t.Fatalf("alias ring facts = %+v / %+v, want %+v / %+v", st.Coverage, st.Envelope, canon.Stats[i].Coverage, canon.Stats[i].Envelope)
+		}
+	}
+	in.NowMono = 17 * time.Second
+	if st := modelByID(t, Build(in), "llamacpp/alias-name").Stats[0]; !st.Stale {
+		t.Fatalf("alias stats never decay: %+v", st)
 	}
 }
 
@@ -280,6 +294,27 @@ func TestOllamaStatsCarryNoHistoryReason(t *testing.T) {
 	}
 	if m := modelByID(t, s, "ollama/qwen3:8b"); m.Residency.State != StateUnknown || deref(m.Residency.Reason) != ReasonOllamaAbsent {
 		t.Fatalf("ollama absent = %+v", m.Residency)
+	}
+}
+
+func TestOllamaMemoryFollowsMatchedEntry(t *testing.T) {
+	o := opsbackend.BackendObservation{
+		Provider: "ollama", Endpoint: "http://127.0.0.1:11434", Hosting: opsbackend.HostingLocal, Kind: opsbackend.KindOllama,
+		Support: opsbackend.SupportSupported, Reachable: sample(true, 10*time.Second), Since: now.Add(-time.Hour), Periods: 1,
+		// "real" is served as the model of an entry named "alias"; the
+		// collector keys memory by the entry's name.
+		PS:     sample([]opsbackend.PSModel{{Name: "alias:latest", Model: "real:latest"}}, 10*time.Second),
+		Models: []opsbackend.ModelMemory{{Model: "alias:latest", FirstObserved: now.Add(-5 * time.Minute), Loads: 4, Since: now.Add(-time.Hour)}},
+	}
+	in := input(ModeWatch, o)
+	in.Configured = []string{"ollama/gone", "ollama/real"}
+	s := Build(in)
+	if m := modelByID(t, s, "ollama/real"); m.Residency.FirstObserved == nil || m.Loads == nil || m.Loads.Count != 4 {
+		t.Fatalf("memory read by the configured name, not the matched entry: %+v / %+v", m.Residency, m.Loads)
+	}
+	// Absent from /api/ps proves nothing, so an untracked name has no zero.
+	if l := modelByID(t, s, "ollama/gone").Loads; l != nil {
+		t.Fatalf("loads for an absent Ollama name = %+v", l)
 	}
 }
 
