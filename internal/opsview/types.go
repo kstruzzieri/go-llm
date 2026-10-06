@@ -197,7 +197,8 @@ type Dist struct {
 	Reason      *string  `json:"reason"`
 }
 
-// Attention is one item that needs the operator.
+// Attention is one item that needs the operator. Since is null in Phases
+// 0-1: no rule has a reading of when its condition began.
 type Attention struct {
 	Severity string  `json:"severity"`
 	Reason   string  `json:"reason"`

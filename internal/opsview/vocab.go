@@ -89,6 +89,17 @@ var labels = map[string]string{
 	CovEvicted:               "older rows evicted; window not fully covered",
 	CovRetentionStartUnknown: "retention start unknown (llama-swap may have restarted)",
 	CovWithinRetained:        "window inside retained rows; completeness unproven",
+
+	opsbackend.SupportUnsupported:       "llama-swap version other than v235",
+	opsbackend.SupportUnrecognized:      "not llama-swap (runtime not recognized)",
+	opsbackend.SupportInvalidConfig:     "unusable base_url or api_key in models.json",
+	string(opsbackend.CodeUnreachable):  "no response",
+	string(opsbackend.CodeTimeout):      "no answer in time",
+	string(opsbackend.CodeUnauthorized): "not authorized (check api_key)",
+	string(opsbackend.CodeDenied):       "blocked by the destination guard",
+	string(opsbackend.CodeMalformed):    "malformed response",
+	string(opsbackend.CodeTooLarge):     "response over its size cap",
+	string(opsbackend.CodeHTTPStatus):   "unexpected HTTP status",
 }
 
 // Label returns the human text for a code, or the code itself.

@@ -1,7 +1,9 @@
 package opsview
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -9,6 +11,7 @@ import (
 
 	"github.com/kstruzzieri/go-llm/configview"
 	"github.com/kstruzzieri/go-llm/internal/opsbackend"
+	"github.com/kstruzzieri/go-llm/internal/opsfixture"
 )
 
 func reasons(s Snapshot) map[string]Attention {
@@ -24,16 +27,24 @@ func TestUnreachableIsSteadyBetweenRetries(t *testing.T) {
 	down.Kind = opsbackend.KindUnidentified
 	down.Reachable = sample(false, 2*time.Second)
 	down.ReachCode, down.ReachRetry = opsbackend.CodeUnreachable, 18*time.Second
+	down.Surfaces = []opsbackend.Surface{{Name: "models", LastError: opsbackend.CodeMalformed}} // from before the outage
 	for _, nowMono := range []time.Duration{3 * time.Second, 12 * time.Second, 20 * time.Second} {
 		in := input(ModeWatch, down, remote())
 		in.NowMono = nowMono
 		r := reasons(Build(in))
-		if a, ok := r[AttnBackendUnreachable+":llamacpp"]; !ok || a.Severity != SevCritical {
+		if a, ok := r[AttnBackendUnreachable+":llamacpp"]; !ok || a.Severity != SevCritical || a.Text != "llamacpp is unreachable; its models read unknown" {
 			t.Fatalf("t=%v: unreachable attention missing: %+v", nowMono, r)
 		}
 		if _, ok := r[AttnTelemetryStale+":llamacpp"]; ok {
 			t.Fatalf("t=%v: a known-down backend must not also read stale", nowMono)
 		}
+		if a, ok := r[AttnTelemetryUnavailable+":llamacpp"]; ok {
+			t.Fatalf("t=%v: a surface error from before the outage still alerts: %+v", nowMono, a)
+		}
+	}
+	down.ReachCode = opsbackend.CodeTimeout
+	if a := reasons(Build(input(ModeWatch, down, remote())))[AttnBackendUnreachable+":llamacpp"]; a.Text != "llamacpp did not answer in time; its models read unknown" {
+		t.Fatalf("timeout text = %q", a.Text)
 	}
 }
 
@@ -54,8 +65,82 @@ func TestFailurePastItsRetryReadsStale(t *testing.T) {
 	in.NowMono = 32 * time.Second
 	got := Build(in).Attention
 	if len(got) != 1 || got[0].Reason != AttnTelemetryStale || got[0].Severity != SevWarning || got[0].Subject != "llamacpp" || got[0].Since != nil ||
-		got[0].Text != "llamacpp last check failed (unreachable); next check overdue, so its facts read unknown" {
+		got[0].Text != "llamacpp last check failed (no response); next check overdue, so its facts read unknown" {
 		t.Fatalf("a failure past its retry window must read stale: %+v", got)
+	}
+}
+
+// TestBackoffKeepsReachabilitySteady drives a real collector against a
+// backend whose only positive reading is reachability, re-stamped only at the
+// backoff retries (2, 6, 14, 30 and 60 s): it must read ok through several
+// cycles instead of flapping to stale between them.
+func TestBackoffKeepsReachabilitySteady(t *testing.T) {
+	const interval = 2 * time.Second
+	for _, tc := range []struct {
+		name, format, path string
+		status             int
+		fixture            func(testing.TB) *opsfixture.Server
+	}{
+		{"llama-swap 401 from start", "openai-compat", "/api/version", 401, opsfixture.NewLlamaSwap},
+		{"ollama 500 from start", "ollama", "/api/ps", 500, func(t testing.TB) *opsfixture.Server { return opsfixture.NewOllama(t, `{"models":[]}`) }},
+	} {
+		fx := tc.fixture(t)
+		fx.SetStatus(tc.path, tc.status)
+		clk := &cadenceClock{wall: now}
+		c := opsbackend.NewCollector([]opsbackend.BackendSpec{{Provider: "llamacpp", BaseURL: fx.URL(), APIFormat: tc.format}},
+			opsbackend.Options{Interval: interval, Clock: clk.clock()})
+		for range 40 { // 80 s
+			obs := c.Tick(context.Background())
+			for _, d := range []time.Duration{0, interval - time.Millisecond} { // as published, and just before the next tick
+				in := input(ModeServe, obs.Backends...)
+				in.NowMono = clk.clock().Mono() + d
+				s := Build(in)
+				if r := s.Backends[0].Reachability; r.State != ReachOK || r.Stale {
+					t.Fatalf("%s: t=%v reachability between backoff retries = %+v", tc.name, in.NowMono, r)
+				}
+				if a, ok := reasons(s)[AttnTelemetryStale+":llamacpp"]; ok {
+					t.Fatalf("%s: t=%v telemetry_stale between backoff retries: %+v", tc.name, in.NowMono, a)
+				}
+			}
+			clk.advance(interval)
+		}
+		if n := len(fx.Requests()); n != 6 {
+			t.Fatalf("%s: %d requests in 80 s, want 6 (backoff retries at 0, 2, 6, 14, 30, 60 s)", tc.name, n)
+		}
+	}
+}
+
+// TestPositiveReachabilityHeldOnlyByPendingAttempts: the hold lasts until an
+// attempt that would re-stamp reachability can have been published, and no
+// longer; a backend with nothing pending, or whose pending attempts never
+// re-stamp (denied, refused), goes stale on the positive rule.
+func TestPositiveReachabilityHeldOnlyByPendingAttempts(t *testing.T) {
+	pending := func(code opsbackend.Code) opsbackend.Surface {
+		return opsbackend.Surface{Name: "version", LastError: code, NextAttempt: 18 * time.Second}
+	}
+	for _, tc := range []struct {
+		name    string
+		surface opsbackend.Surface
+		mono    time.Duration
+		ok      bool
+	}{
+		{"nothing pending", opsbackend.Surface{Name: "version"}, 17 * time.Second, false},
+		{"401 pending at 18 s, last instant (18 + 2 + 10 + 1 s)", pending(opsbackend.CodeUnauthorized), 31 * time.Second, true},
+		{"401 pending at 18 s, missed", pending(opsbackend.CodeUnauthorized), 32 * time.Second, false},
+		{"denied attempts never re-stamp", pending(opsbackend.CodeDenied), 17 * time.Second, false},
+		{"refused attempts never re-stamp", pending(opsbackend.CodeRefused), 17 * time.Second, false},
+	} {
+		b := healthyLlamaSwap() // reachability ok at 10 s
+		b.Kind, b.Running, b.Rows, b.Listed = opsbackend.KindUnidentified, nil, nil, nil
+		b.Surfaces = []opsbackend.Surface{tc.surface}
+		in := input(ModeWatch, b, remote())
+		in.NowMono = tc.mono
+		s := Build(in)
+		r := s.Backends[0].Reachability
+		a, stale := reasons(s)[AttnTelemetryStale+":llamacpp"]
+		if (r.State == ReachOK && !r.Stale) != tc.ok || stale == tc.ok || (stale && a.Text != "llamacpp has no fresh reading of reachability") {
+			t.Fatalf("%s: reachability = %+v, telemetry_stale = %v %q, want ok = %v", tc.name, r, stale, a.Text, tc.ok)
+		}
 	}
 }
 
@@ -94,7 +179,7 @@ func TestBackendUnsupportedOnlyWhenUsed(t *testing.T) {
 				}
 				continue
 			}
-			if len(got) != 1 || got[0].Reason != AttnBackendUnsupported || got[0].Severity != SevWarning || got[0].Subject != provider || !strings.Contains(got[0].Text, support) {
+			if len(got) != 1 || got[0].Reason != AttnBackendUnsupported || got[0].Severity != SevWarning || got[0].Subject != provider || got[0].Text != provider+" is not observed: "+Label(support) {
 				t.Fatalf("%s on a used provider must raise only backend_unsupported: %+v", support, got)
 			}
 		}
@@ -128,9 +213,9 @@ func TestModelErrorsThresholdAndWindow(t *testing.T) {
 	)
 	r := reasons(Build(input(ModeWatch, b, remote())))
 	a, ok := r[AttnModelErrors+":llamacpp/gemma4:31b"]
-	if !ok || a.Severity != SevSerious || deref(a.Since) != deref(stamp(now.Add(-2*time.Minute))) ||
+	if !ok || a.Severity != SevSerious || a.Since != nil ||
 		a.Text != "at least 2 retained requests to gemma4:31b on llamacpp returned non-2xx in the last 10 min (newest at 2026-10-05T09:58:00.000Z)" {
-		t.Fatalf("model_errors missing or not dated by its newest error: %+v", r)
+		t.Fatalf("model_errors missing, dated (since must stay null), or not naming its newest error: %+v", r)
 	}
 	if _, ok := r[AttnModelErrors+":llamacpp/qwen3-embedding:8b"]; ok {
 		t.Fatal("one error raised model_errors")
@@ -148,6 +233,45 @@ func TestModelErrorsThresholdAndWindow(t *testing.T) {
 	b.Rows.Mono = time.Second
 	if _, ok := reasons(Build(input(ModeWatch, b, remote())))[AttnModelErrors+":llamacpp/gemma4:31b"]; ok {
 		t.Fatal("model_errors raised from a stale metrics reading")
+	}
+}
+
+func TestModelErrorsAreCapped(t *testing.T) {
+	b := healthyLlamaSwap()
+	for i := range 300 {
+		name := fmt.Sprintf("m%03d", i)
+		b.Rows.Value = append(b.Rows.Value, row(int64(2+2*i), time.Minute, name, 500, 0, 0, 0, 0, 1), row(int64(3+2*i), time.Minute, name, 500, 0, 0, 0, 0, 1))
+	}
+	var items []Attention
+	for _, a := range Build(input(ModeWatch, b, remote())).Attention {
+		if a.Reason == AttnModelErrors {
+			items = append(items, a)
+		}
+	}
+	if len(items) != maxModelErrors+1 || items[0].Subject != "" || items[0].Text != "44 more models returned non-2xx in the last 10 min; not listed" ||
+		items[1].Subject != "llamacpp/m000" || items[maxModelErrors].Subject != "llamacpp/m255" {
+		t.Fatalf("model_errors not capped at %d plus one overflow item: %d items, first %+v", maxModelErrors, len(items), items[:min(2, len(items))])
+	}
+}
+
+func TestTelemetryUnavailableGroupsByCode(t *testing.T) {
+	b := healthyLlamaSwap()
+	b.Surfaces = []opsbackend.Surface{ // a wrong api_key fails every surface at once
+		{Name: "version", LastError: opsbackend.CodeUnauthorized}, {Name: "running", LastError: opsbackend.CodeUnauthorized},
+		{Name: "metrics", LastError: opsbackend.CodeUnauthorized}, {Name: "models", LastError: opsbackend.CodeMalformed},
+	}
+	var got []string
+	for _, a := range Build(input(ModeWatch, b, remote())).Attention {
+		if a.Reason == AttnTelemetryUnavailable {
+			got = append(got, a.Text)
+		}
+	}
+	want := []string{
+		"llamacpp telemetry unavailable on metrics, running, version: not authorized (check api_key)",
+		"llamacpp telemetry unavailable on models: malformed response",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("telemetry_unavailable = %q, want one item per code naming its surfaces in order: %q", got, want)
 	}
 }
 
@@ -176,19 +300,26 @@ func TestTelemetryAttention(t *testing.T) {
 
 	// Each fact is judged on its own reading: one stale fact alerts even
 	// while every other reading is fresh.
-	for name, edit := range map[string]func(*opsbackend.BackendObservation){
-		"residency":    func(o *opsbackend.BackendObservation) { o.Running.Mono = time.Second },
-		"statistics":   func(o *opsbackend.BackendObservation) { o.Rows.Mono = time.Second },
-		"reachability": func(o *opsbackend.BackendObservation) { o.Reachable.Mono = time.Second },
-		"ollama residency": func(o *opsbackend.BackendObservation) {
+	for _, tc := range []struct {
+		name string
+		edit func(*opsbackend.BackendObservation)
+		text string
+	}{
+		{"residency", func(o *opsbackend.BackendObservation) { o.Running.Mono = time.Second }, "llamacpp has no fresh reading of residency (/running)"},
+		{"statistics", func(o *opsbackend.BackendObservation) { o.Rows.Mono = time.Second }, "llamacpp has no fresh reading of statistics (/api/metrics)"},
+		{"reachability", func(o *opsbackend.BackendObservation) { o.Reachable.Mono = time.Second }, "llamacpp has no fresh reading of reachability"},
+		{"ollama residency", func(o *opsbackend.BackendObservation) {
 			*o = localOllama()
 			o.Provider, o.PS.Mono = "llamacpp", time.Second
-		},
+		}, "llamacpp has no fresh reading of residency (/api/ps)"},
+		{"every fact", func(o *opsbackend.BackendObservation) {
+			o.Running.Mono, o.Rows.Mono, o.Reachable.Mono = time.Second, time.Second, time.Second
+		}, "llamacpp has no fresh reading of residency (/running), statistics (/api/metrics), reachability"},
 	} {
 		stale := healthyLlamaSwap()
-		edit(&stale)
-		if _, ok := reasons(Build(input(ModeWatch, stale, remote())))[AttnTelemetryStale+":llamacpp"]; !ok {
-			t.Fatalf("stale %s masked by fresh readings", name)
+		tc.edit(&stale)
+		if a, ok := reasons(Build(input(ModeWatch, stale, remote())))[AttnTelemetryStale+":llamacpp"]; !ok || a.Severity != SevWarning || a.Text != tc.text {
+			t.Fatalf("stale %s masked by fresh readings or misnamed: %+v, want %q", tc.name, a, tc.text)
 		}
 	}
 	if r := reasons(Build(input(ModeWatch, healthyLlamaSwap(), remote()))); len(r) != 0 {
@@ -199,8 +330,8 @@ func TestTelemetryAttention(t *testing.T) {
 func TestRefusedConfigAndCoverageAttention(t *testing.T) {
 	refused := healthyLlamaSwap()
 	refused.Refused = 1
-	if _, ok := reasons(Build(input(ModeWatch, refused, remote())))[AttnRefused+":llamacpp"]; !ok {
-		t.Fatal("refused_requests missing")
+	if a, ok := reasons(Build(input(ModeWatch, refused, remote())))[AttnRefused+":llamacpp"]; !ok || a.Severity != SevSerious {
+		t.Fatalf("refused_requests missing or not serious: %+v", a)
 	}
 
 	in := input(ModeWatch, healthyLlamaSwap(), remote())
@@ -217,8 +348,8 @@ func TestRefusedConfigAndCoverageAttention(t *testing.T) {
 		t.Fatalf("a missing models.json must raise exactly one config_problem: %+v", got)
 	}
 
-	if _, ok := reasons(Build(input(ModeWatch, remote())))[AttnCoverageNote+":"]; !ok {
-		t.Fatal("coverage_note missing for an all-remote configuration")
+	if a, ok := reasons(Build(input(ModeWatch, remote())))[AttnCoverageNote+":"]; !ok || a.Severity != SevInfo {
+		t.Fatalf("coverage_note missing for an all-remote configuration, or not info: %+v", a)
 	}
 	invalid := opsbackend.BackendObservation{Provider: "broken", Hosting: opsbackend.HostingUnknown, Kind: opsbackend.KindNone, Support: opsbackend.SupportInvalidConfig}
 	if _, ok := reasons(Build(input(ModeWatch, remote(), invalid)))[AttnCoverageNote+":"]; ok {
@@ -242,20 +373,21 @@ func TestAttentionOrdering(t *testing.T) {
 		}
 	}
 
-	// Within a severity, the older since comes first, ahead of subject.
+	// Within a severity, subject decides before text: alpha's text
+	// ("at least 3") sorts after zeta's ("at least 2").
 	e := healthyLlamaSwap()
 	e.Rows.Value = append(e.Rows.Value,
-		row(5, time.Minute, "alpha", 500, 0, 0, 0, 0, 1), row(6, time.Minute, "alpha", 500, 0, 0, 0, 0, 1),
-		row(7, 5*time.Minute, "zeta", 500, 0, 0, 0, 0, 1), row(8, 5*time.Minute, "zeta", 500, 0, 0, 0, 0, 1),
+		row(5, time.Minute, "alpha", 500, 0, 0, 0, 0, 1), row(6, time.Minute, "alpha", 500, 0, 0, 0, 0, 1), row(7, time.Minute, "alpha", 500, 0, 0, 0, 0, 1),
+		row(8, time.Minute, "zeta", 500, 0, 0, 0, 0, 1), row(9, time.Minute, "zeta", 500, 0, 0, 0, 0, 1),
 	)
-	if got := Build(input(ModeWatch, e, remote())).Attention; len(got) != 2 || got[0].Subject != "llamacpp/zeta" || got[1].Subject != "llamacpp/alpha" {
-		t.Fatalf("within a severity, attention orders by since then subject: %+v", got)
+	if got := Build(input(ModeWatch, e, remote())).Attention; len(got) != 2 || got[0].Subject != "llamacpp/alpha" || got[1].Subject != "llamacpp/zeta" {
+		t.Fatalf("within a severity, attention orders by subject before text: %+v", got)
 	}
 }
 
-// TestAttentionTiesOrderDeterministically pins a total order: two failing
-// surfaces on one backend raise items with equal severity, since, subject and
-// reason, so a renderer comparing the top item would see a change on every
+// TestAttentionTiesOrderDeterministically pins a total order: two surface
+// codes on one backend raise items with equal severity, subject and reason,
+// so a renderer comparing the top item would see a change on every
 // reordering unless the text breaks the tie.
 func TestAttentionTiesOrderDeterministically(t *testing.T) {
 	a, c := healthyLlamaSwap(), healthyLlamaSwap()

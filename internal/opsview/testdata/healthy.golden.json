@@ -619,7 +619,7 @@
       "reason": "telemetry_unavailable",
       "subject": "llamacpp",
       "since": null,
-      "text": "llamacpp models telemetry unavailable: malformed_response"
+      "text": "llamacpp telemetry unavailable on models: malformed response"
     }
   ]
 }

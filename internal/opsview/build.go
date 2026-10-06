@@ -132,6 +132,7 @@ func (b builder) backend(o opsbackend.BackendObservation) Backend {
 		out.Reachability = Reachability{State: StateUnknown, Code: strPtr(ReasonNoSample), Envelope: Envelope{Source: src}}
 	case o.Reachable.Value:
 		env := b.envelope(src, o.Reachable.At, o.Reachable.Mono)
+		env.Stale = !b.okCurrent(o) // held through the backend's own backoff
 		if env.Stale {
 			out.Reachability = Reachability{State: StateUnknown, Code: strPtr(ReasonStale), Envelope: env}
 		} else {

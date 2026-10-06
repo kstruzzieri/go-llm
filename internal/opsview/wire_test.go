@@ -21,6 +21,12 @@ func TestEveryReasonHasALabel(t *testing.T) {
 		ReasonOllamaAbsent, ReasonNoSample, ReasonUnknownProvider, ReasonNotObserved,
 		ReasonNoHistory, ReasonTooFewSamples, ReasonNoValues,
 		CovEmpty, CovNoncontiguous, CovEvicted, CovRetentionStartUnknown, CovWithinRetained,
+		// Support and observation codes reach renderers as reasons and in
+		// attention text.
+		opsbackend.SupportUnsupported, opsbackend.SupportUnrecognized, opsbackend.SupportInvalidConfig,
+		string(opsbackend.CodeUnreachable), string(opsbackend.CodeTimeout), string(opsbackend.CodeUnauthorized),
+		string(opsbackend.CodeDenied), string(opsbackend.CodeMalformed), string(opsbackend.CodeTooLarge),
+		string(opsbackend.CodeHTTPStatus),
 	} {
 		if Label(code) == code {
 			t.Fatalf("reason %q has no human label", code)
