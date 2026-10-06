@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"slices"
+	"syscall"
 	"time"
 
 	"github.com/kstruzzieri/go-llm/config"
@@ -56,7 +57,9 @@ func runOps(ctx context.Context, args []string, stdin io.Reader, out, errOut io.
 		if err != nil {
 			return opsLoadError("golem ops", err)
 		}
-		ctx, stop := signal.NotifyContext(ctx, os.Interrupt)
+		// SIGTERM too: its default action would exit with the alternate
+		// screen active and the cursor hidden.
+		ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 		defer stop()
 		return runOpsWatch(ctx, src, out, fd, realTermOps{}, os.Getenv)
 	}
@@ -157,10 +160,4 @@ func (s *opsSource) view(obs opsbackend.Observations, mode opsview.Mode) opsview
 		Config: s.cfg, Configured: s.configured, Revision: s.revision, Observations: obs,
 		Now: s.clock.Wall(), NowMono: s.clock.Mono(), Mode: mode, Interval: s.interval,
 	})
-}
-
-// runOpsWatch is a TEMPORARY stub so this task builds; Task 13 replaces it
-// with the -watch loop.
-func runOpsWatch(_ context.Context, _ *opsSource, _ io.Writer, _ int, _ termOps, _ func(string) string) error {
-	return errors.New("golem ops: -watch not implemented yet")
 }
