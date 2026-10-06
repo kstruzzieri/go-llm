@@ -186,6 +186,7 @@ type Collector struct {
 	opts      Options
 	backends  []*backendState
 	ticked    bool
+	tickEnd   time.Time // real time: it bounds real requests
 	lastWall  time.Time
 	lastMono  time.Duration
 	uncertain bool
@@ -282,8 +283,7 @@ func (c *Collector) Tick(ctx context.Context) Observations {
 	wall, mono := c.now()
 	if c.ticked {
 		elapsed := mono - c.lastMono
-		skew := wall.Sub(c.lastWall) - elapsed
-		diverged := skew > maxSkew || skew < -maxSkew
+		diverged := jumped(c.lastWall, c.lastMono, wall, mono)
 		late := c.opts.Interval > 0 && elapsed > 3*c.opts.Interval
 		for _, b := range c.backends {
 			switch {
@@ -299,20 +299,43 @@ func (c *Collector) Tick(ctx context.Context) Observations {
 	}
 	c.lastWall, c.lastMono, c.ticked = wall, mono, true
 
-	tctx, cancel := context.WithTimeout(ctx, tickTimeout)
+	c.tickEnd = time.Now().Add(tickTimeout)
+	tctx, cancel := context.WithDeadline(ctx, c.tickEnd)
 	defer cancel()
 	for _, b := range c.backends {
-		if b.obs.Kind == KindUnidentified {
-			c.identifyBackend(ctx, tctx, b)
-		}
 		switch b.obs.Kind {
+		case KindUnidentified:
+			c.identifyBackend(ctx, tctx, b, b.identify)
 		case KindLlamaSwap:
-			c.observeLlamaSwap(ctx, tctx, b)
+			// Identity is read again on every later tick: an upgrade
+			// restart or another runtime taking the port is never seen
+			// down, and v235 readings must not outlive the process.
+			c.identifyBackend(ctx, tctx, b, b.observe)
 		case KindOllama:
 			c.observeOllama(ctx, tctx, b)
 		}
+		if b.obs.Kind == KindLlamaSwap {
+			c.observeLlamaSwap(ctx, tctx, b)
+		}
+	}
+	// The lid can close inside a tick too: readings taken before the jump
+	// would render as fresh. Drop them all, and measure the next tick from
+	// here so the same jump is not counted twice.
+	if endWall, endMono := c.now(); jumped(wall, mono, endWall, endMono) {
+		for _, b := range c.backends {
+			b.dropSamples()
+		}
+		c.uncertain = true
+		c.lastWall, c.lastMono = endWall, endMono
 	}
 	return c.snapshot()
+}
+
+// jumped reports whether wall and monotonic time moved apart by more than
+// maxSkew between two readings, either way.
+func jumped(w0 time.Time, m0 time.Duration, w1 time.Time, m1 time.Duration) bool {
+	skew := w1.Sub(w0) - (m1 - m0)
+	return skew > maxSkew || skew < -maxSkew
 }
 
 func (c *Collector) now() (time.Time, time.Duration) {
@@ -326,11 +349,14 @@ func (c *Collector) fetch(callerCtx, ctx context.Context, b *backendState, cl *c
 	if _, mono := c.now(); mono < s.next {
 		return false
 	}
-	// A request the tick deadline or the caller stopped before it started
-	// says nothing about the backend: nothing is sent, and reachability and
-	// backoff stay untouched. A skipped residency read is still a missing
-	// sample, so it opens a gap like a failed one (spec §4.5).
-	if ctx.Err() != nil {
+	// A request the caller or the tick deadline stopped before it started,
+	// or one with less than a request timeout of tick left (neighbors spent
+	// the budget, so the tick deadline rather than this backend would cut
+	// it short), says nothing about the backend: nothing is sent, and
+	// reachability and backoff stay untouched. A skipped residency read is
+	// still a missing sample, so it opens a gap like a failed one (spec
+	// §4.5).
+	if ctx.Err() != nil || time.Until(c.tickEnd) < requestTimeout {
 		if surface == "running" || surface == "ps" {
 			b.breakPeriod()
 		}
@@ -383,10 +409,12 @@ func backoff(failures int) time.Duration {
 	return d
 }
 
-func (c *Collector) identifyBackend(callerCtx, ctx context.Context, b *backendState) {
+// identifyBackend reads /api/version through cl: the identify client while
+// unidentified, the observe client to re-check a llama-swap.
+func (c *Collector) identifyBackend(callerCtx, ctx context.Context, b *backendState, cl *client) {
 	var version string
 	var isLS bool
-	if !c.fetch(callerCtx, ctx, b, b.identify, "version", "/api/version", versionLimit, func(body []byte) error {
+	if !c.fetch(callerCtx, ctx, b, cl, "version", "/api/version", versionLimit, func(body []byte) error {
 		version, isLS = decodeVersion(body)
 		return nil
 	}) && b.surface("version").lastErr != CodeHTTPStatus {

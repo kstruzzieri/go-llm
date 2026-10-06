@@ -4,6 +4,9 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
 	"slices"
 	"strings"
 	"sync"
@@ -70,6 +73,24 @@ var (
 	reqModels  = opsfixture.Request{Method: "GET", URI: "/v1/models"}
 	reqPS      = opsfixture.Request{Method: "GET", URI: "/api/ps"}
 )
+
+// front serves f through a loopback proxy that lets hook see each request
+// first; hook reports whether it answered the request itself.
+func front(t *testing.T, f *opsfixture.Server, hook func(w http.ResponseWriter, r *http.Request) bool) string {
+	t.Helper()
+	u, err := url.Parse(f.URL())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rp := httputil.NewSingleHostReverseProxy(u)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !hook(w, r) {
+			rp.ServeHTTP(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL
+}
 
 // waitFor polls cond for up to d.
 func waitFor(t *testing.T, d time.Duration, cond func() bool) {
@@ -502,27 +523,129 @@ func TestCollectorSkippedResidencyReadOpensGap(t *testing.T) {
 	if got := memory(t, b, "m"); got.Loads != 0 || b.Gaps != 1 || b.Periods != 2 {
 		t.Fatalf("load inferred across a skipped read: mem=%+v gaps=%d periods=%d", got, b.Gaps, b.Periods)
 	}
-	assertRequests(t, f, reqVersion, reqRunning, reqMetrics, reqModels, reqRunning, reqMetrics, reqModels)
+	assertRequests(t, f, reqVersion, reqRunning, reqMetrics, reqModels, reqVersion, reqRunning, reqMetrics, reqModels)
 }
 
-// TestCollectorUnstartedRequestIsNotAnObservation: once the tick deadline
-// has passed, a backend's request never starts, and nothing is recorded
-// against it; a timeout would raise a false backend_unreachable for a
-// backend that was never contacted.
+// TestCollectorUnstartedRequestIsNotAnObservation: a request is not started
+// once the tick deadline has passed, or when less than one request timeout
+// of the tick is left (it could be cut short by a budget its neighbors
+// spent), and nothing is recorded against the backend: a timeout would raise
+// a false backend_unreachable for a backend that was never contacted.
 func TestCollectorUnstartedRequestIsNotAnObservation(t *testing.T) {
-	f := opsfixture.NewLlamaSwap(t)
-	c := NewCollector([]BackendSpec{lsSpec(f.URL())}, Options{Interval: 2 * time.Second, Clock: newFakeClock().clock()})
 	spent, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
 	defer cancel()
-	b := c.backends[0]
-	if c.fetch(context.Background(), spent, b, b.identify, "version", "/api/version", versionLimit, func([]byte) error { return nil }) {
-		t.Fatal("fetch past the tick deadline applied a sample")
+	for _, tc := range []struct {
+		name   string
+		ctx    context.Context
+		budget time.Duration // tick time left
+	}{
+		{"tick deadline passed", spent, tickTimeout},
+		{"under one request timeout left", context.Background(), requestTimeout / 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := opsfixture.NewLlamaSwap(t)
+			c := NewCollector([]BackendSpec{lsSpec(f.URL())}, Options{Interval: 2 * time.Second, Clock: newFakeClock().clock()})
+			c.tickEnd = time.Now().Add(tc.budget)
+			b := c.backends[0]
+			if c.fetch(context.Background(), tc.ctx, b, b.identify, "version", "/api/version", versionLimit, func([]byte) error { return nil }) {
+				t.Fatal("fetch without the budget for a request applied a sample")
+			}
+			o := c.snapshot().Backends[0]
+			if s := surface(o, "version"); s.LastError != "" || s.NextAttempt != 0 || o.Reachable != nil || o.ReachCode != "" {
+				t.Fatalf("an unstarted request was recorded: version=%+v reachable=%+v code=%q", s, o.Reachable, o.ReachCode)
+			}
+			assertRequests(t, f)
+		})
 	}
-	o := c.snapshot().Backends[0]
-	if s := surface(o, "version"); s.LastError != "" || s.NextAttempt != 0 || o.Reachable != nil || o.ReachCode != "" {
-		t.Fatalf("an unstarted request was recorded: version=%+v reachable=%+v code=%q", s, o.Reachable, o.ReachCode)
+}
+
+// TestCollectorTickBudgetIsNotBlamedOnTheLastBackend: two hung neighbors
+// spend 4 s of the 5 s tick. A healthy backend that answers /running in
+// 1.2 s is not started, rather than cut short by the tick deadline and read
+// as down.
+func TestCollectorTickBudgetIsNotBlamedOnTheLastBackend(t *testing.T) {
+	hung := func() string {
+		f := opsfixture.NewLlamaSwap(t)
+		f.HoldFor(t, "/api/version")
+		return f.URL()
 	}
-	assertRequests(t, f)
+	ok := opsfixture.NewLlamaSwap(t)
+	slow := front(t, ok, func(_ http.ResponseWriter, r *http.Request) bool {
+		if r.URL.Path == "/running" {
+			select {
+			case <-time.After(1200 * time.Millisecond):
+			case <-r.Context().Done():
+			}
+		}
+		return false
+	})
+	c := NewCollector([]BackendSpec{
+		{Provider: "a1-hung", BaseURL: hung(), APIFormat: "openai-compat"},
+		{Provider: "a2-hung", BaseURL: hung(), APIFormat: "openai-compat"},
+		{Provider: "c-slow", BaseURL: slow, APIFormat: "openai-compat"},
+	}, Options{Interval: 2 * time.Second, Clock: newFakeClock().clock()})
+	b := c.Tick(context.Background()).Backends[2]
+	if b.Reachable != nil || b.ReachCode != "" || slices.ContainsFunc(b.Surfaces, func(s Surface) bool { return s.LastError != "" }) {
+		t.Fatalf("a backend the tick budget never reached was read as down: reachable=%+v code=%q surfaces=%+v", b.Reachable, b.ReachCode, b.Surfaces)
+	}
+	assertRequests(t, ok)
+}
+
+// TestCollectorSleepDuringTickDropsReadings: the lid closes after /running
+// is read and opens before /api/metrics answers, so wall time moves 3 h
+// inside one tick while monotonic time does not.
+func TestCollectorSleepDuringTickDropsReadings(t *testing.T) {
+	f := opsfixture.NewLlamaSwap(t)
+	clk := newFakeClock()
+	var once sync.Once
+	base := front(t, f, func(_ http.ResponseWriter, r *http.Request) bool {
+		if r.URL.Path == "/api/metrics" {
+			once.Do(func() { clk.advance(3*time.Hour, 0) })
+		}
+		return false
+	})
+	c := NewCollector([]BackendSpec{lsSpec(base)}, Options{Interval: 2 * time.Second, Clock: clk.clock()})
+	obs := c.Tick(context.Background())
+	if b := obs.Backends[0]; !obs.TimingUncertain || b.Running != nil {
+		t.Fatalf("sleep inside a tick: uncertain=%v running=%+v", obs.TimingUncertain, b.Running)
+	}
+	clk.advance(2*time.Second, 2*time.Second)
+	if c.Tick(context.Background()).TimingUncertain {
+		t.Fatal("a jump inside one tick was counted again on the next")
+	}
+}
+
+// TestCollectorRechecksIdentityEveryTick: a llama-swap upgraded or replaced
+// between two ticks is never seen down, so its version is read on every
+// tick after the one that identified it.
+func TestCollectorRechecksIdentityEveryTick(t *testing.T) {
+	for _, tc := range []struct {
+		name, body string
+		status     int
+		support    string
+		version    string
+	}{
+		{"upgrade restart", `{"build_date":"x","commit":"y","version":"v240"}`, 0, SupportUnsupported, "v240"},
+		{"llama-server took the port", "", http.StatusNotFound, SupportUnrecognized, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := opsfixture.NewLlamaSwap(t)
+			clk := newFakeClock()
+			c := NewCollector([]BackendSpec{lsSpec(f.URL())}, Options{Interval: 2 * time.Second, Clock: clk.clock()})
+			c.Tick(context.Background())
+			if tc.status != 0 {
+				f.SetStatus("/api/version", tc.status)
+			} else {
+				f.SetBody("/api/version", tc.body)
+			}
+			clk.advance(2*time.Second, 2*time.Second)
+			b := c.Tick(context.Background()).Backends[0]
+			if b.Kind != KindNone || b.Support != tc.support || b.Version != tc.version || b.Running != nil || b.Rows != nil || b.Listed != nil {
+				t.Fatalf("v235 readings survived a new identity: %+v", b)
+			}
+			assertRequests(t, f, reqVersion, reqRunning, reqMetrics, reqModels, reqVersion)
+		})
+	}
 }
 
 func surface(b BackendObservation, name string) Surface {
