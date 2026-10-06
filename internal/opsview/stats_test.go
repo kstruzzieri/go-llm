@@ -66,8 +66,8 @@ func TestWindowStatsTokenBasesAndZeros(t *testing.T) {
 	if *s.OutputTokens.Sum != 380 || s.OutputTokens.Unavailable != 1 {
 		t.Fatalf("output = %+v", s.OutputTokens)
 	}
-	if s.DecodeTPS.N != 1 || s.DurationMs.N != 3 || s.DurationMs.Label != LabelDuration {
-		t.Fatalf("decode/duration = %+v / %+v", s.DecodeTPS, s.DurationMs)
+	if s.PrefillTPS.N != 1 || s.DecodeTPS.N != 1 || s.DurationMs.N != 3 || s.DurationMs.Label != LabelDuration {
+		t.Fatalf("prefill/decode/duration = %+v / %+v / %+v", s.PrefillTPS, s.DecodeTPS, s.DurationMs)
 	}
 }
 
@@ -93,6 +93,10 @@ func TestCoverageNeverComplete(t *testing.T) {
 		// The gap row belongs to another model: contiguity is judged on the
 		// whole ring, so filtering by model first would wrongly report a gap.
 		{"other model fills gap", []opsbackend.ActivityRow{row(0, 2*time.Minute, "m", 200, 1, 1, 1, 1, 1), row(1, 90*time.Second, "x", 200, 1, 1, 1, 1, 1), row(2, time.Minute, "m", 200, 1, 1, 1, 1, 1)}, CoverageUnknown, CovRetentionStartUnknown},
+		// Evicted with its oldest row inside the window, but a gap outranks it.
+		{"gap outranks eviction", []opsbackend.ActivityRow{row(7, time.Minute, "m", 200, 1, 1, 1, 1, 1), row(9, 30*time.Second, "m", 200, 1, 1, 1, 1, 1)}, CoverageUnknown, CovNoncontiguous},
+		// A repeated ID is not one run.
+		{"duplicate ids", []opsbackend.ActivityRow{row(0, 2*time.Minute, "m", 200, 1, 1, 1, 1, 1), row(0, time.Minute, "m", 200, 1, 1, 1, 1, 1)}, CoverageUnknown, CovNoncontiguous},
 	} {
 		s := statsFor("m", tc.rows)
 		if s.Coverage.State != tc.state || s.Coverage.Reason != tc.reason {
@@ -109,8 +113,8 @@ func TestAbsentAndEmptyMetricsCarryReasons(t *testing.T) {
 	absent := b.windowStats("m", nil, ring{}, windows[0])
 	empty := statsFor("m", []opsbackend.ActivityRow{})
 	for name, s := range map[string]Stats{"absent": absent, "empty": empty} {
-		if s.Calls != nil || s.PromptTokensProcessed.Reason == nil || s.DecodeTPS.Reason == nil || s.DurationMs.Reason == nil {
-			t.Fatalf("%s metrics left null values without reasons: %+v", name, s)
+		if s.Calls != nil || s.PromptTokensProcessed.Reason == nil || s.DecodeTPS.Reason == nil || s.DurationMs.Reason == nil || s.DurationMs.Label != LabelDuration {
+			t.Fatalf("%s metrics left null values without reasons or the duration label: %+v", name, s)
 		}
 	}
 	if deref(absent.DecodeTPS.Reason) != ReasonNoSample || deref(empty.DecodeTPS.Reason) != ReasonNoValues {
@@ -163,5 +167,75 @@ func TestRingBoundsBeforeYearOne(t *testing.T) {
 	r := newRing([]opsbackend.ActivityRow{{ID: 0, Timestamp: early, Model: "m", Status: 200}})
 	if !r.oldestAt.Equal(early) || !r.newestAt.Equal(early) {
 		t.Fatalf("ring bounds = %v .. %v, want %v for both", r.oldestAt, r.newestAt, early)
+	}
+}
+
+// Usage basis needs both rates exactly -1; any other pair is the timings
+// basis. Rates count only when positive, and prefill and decode are counted
+// separately. Inputs are powers of two so each sum names its rows.
+func TestBasisAndRateRules(t *testing.T) {
+	s := statsFor("m", []opsbackend.ActivityRow{
+		row(0, time.Minute, "m", 200, 100, 1, 500, 0, 0),   // timings; prefill only; duration 0 counts
+		row(1, time.Minute, "m", 200, 200, 1, -1, 41, 10),  // one rate -1: timings; decode only
+		row(2, time.Minute, "m", 200, 400, 1, -2, -2, 10),  // both negative, not -1: timings
+		row(3, time.Minute, "m", 200, 800, 1, -1, -1, 10),  // both exactly -1: usage
+		row(4, time.Minute, "m", 200, 1600, 1, 700, 0, 10), // timings; prefill only
+		row(5, time.Minute, "m", 200, 3200, 1, 0, 0, 10),   // zero rates: neither
+	})
+	if p := s.PromptTokensProcessed; p.Sum == nil || *p.Sum != 100+200+400+1600+3200 || p.N != 5 {
+		t.Fatalf("processed = %+v", p)
+	}
+	if u := s.PromptTokensUsage; u.Sum == nil || *u.Sum != 800 || u.N != 1 {
+		t.Fatalf("usage = %+v", u)
+	}
+	if s.PrefillTPS.N != 2 || s.DecodeTPS.N != 1 || s.DurationMs.N != 6 {
+		t.Fatalf("prefill/decode/duration n = %d/%d/%d, want 2/1/6", s.PrefillTPS.N, s.DecodeTPS.N, s.DurationMs.N)
+	}
+}
+
+// Errors are the non-2xx rows (spec 5.4), so 199 and 300 are errors and 200
+// and 299 are not.
+func TestErrorsAreNon2xx(t *testing.T) {
+	s := statsFor("m", []opsbackend.ActivityRow{
+		row(0, time.Minute, "m", 199, 1, 1, 1, 1, 1),
+		row(1, time.Minute, "m", 200, 1, 1, 1, 1, 1),
+		row(2, time.Minute, "m", 299, 1, 1, 1, 1, 1),
+		row(3, time.Minute, "m", 300, 1, 1, 1, 1, 1),
+	})
+	if *s.Calls != 4 || *s.Errors != 2 {
+		t.Fatalf("calls/errors = %d/%d, want 4/2", *s.Calls, *s.Errors)
+	}
+}
+
+// A window is [Now-d, Now]: a row exactly at its start is inside.
+func TestWindowBounds(t *testing.T) {
+	rows := []opsbackend.ActivityRow{
+		row(0, 14*time.Minute+59*time.Second, "m", 200, 1, 1, 1, 1, 1),
+		row(1, 15*time.Minute, "m", 200, 1, 1, 1, 1, 1),
+		row(2, 15*time.Minute+time.Second, "m", 200, 1, 1, 1, 1, 1),
+		row(3, 59*time.Minute+59*time.Second, "m", 200, 1, 1, 1, 1, 1),
+		row(4, time.Hour, "m", 200, 1, 1, 1, 1, 1),
+		row(5, time.Hour+time.Second, "m", 200, 1, 1, 1, 1, 1),
+	}
+	b := builder{in: Input{Now: now, Mode: ModeOnce}}
+	for i, want := range []struct {
+		name  string
+		calls int
+	}{{"15m", 2}, {"1h", 5}} {
+		s := b.windowStats("m", &opsbackend.Sample[[]opsbackend.ActivityRow]{Value: rows, At: now}, newRing(rows), windows[i])
+		if s.Window != want.name || *s.Calls != want.calls {
+			t.Fatalf("window %d = %q with %d calls, want %q with %d", i, s.Window, *s.Calls, want.name, want.calls)
+		}
+	}
+}
+
+// Statistics carry the metrics sample's envelope: in watch mode a sample
+// older than 3 x interval is stale.
+func TestStatsEnvelopeDecays(t *testing.T) {
+	b := builder{in: Input{Now: now, NowMono: 10 * time.Second, Mode: ModeWatch, Interval: 2 * time.Second}}
+	rows := []opsbackend.ActivityRow{row(0, time.Minute, "m", 200, 1, 1, 1, 1, 1)}
+	s := b.windowStats("m", &opsbackend.Sample[[]opsbackend.ActivityRow]{Value: rows, At: now.Add(-7 * time.Second), Mono: 3 * time.Second}, newRing(rows), windows[0])
+	if !s.Stale || deref(s.ObservedAt) != "2026-10-05T09:59:53.000Z" || s.AgeMs == nil || *s.AgeMs != 7000 || s.Source != "llama-swap /api/metrics" {
+		t.Fatalf("stats envelope = %+v (observed_at %q)", s.Envelope, deref(s.ObservedAt))
 	}
 }
