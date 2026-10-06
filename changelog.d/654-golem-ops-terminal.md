@@ -21,7 +21,9 @@
   llama-swap's retained history (all clients) and never claim completeness;
   zero token counts are treated as missing; a reading that is no longer
   current, including a failed check past its next scheduled check plus a
-  grace window, reads unknown; and every backend-reported string is escaped
+  grace window, reads unknown (statistics instead keep their values marked
+  stale, and a reachable backend in backoff stays reachable until its next
+  scheduled check plus the grace window); and every backend-reported string is escaped
   and clipped before it reaches the terminal. Names over 512 bytes are
   counted, not listed.
 - `-watch` uses the terminal's alternate screen and restores it on Ctrl-C and

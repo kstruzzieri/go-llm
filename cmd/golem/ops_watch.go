@@ -70,8 +70,8 @@ func runOpsWatch(ctx context.Context, src *opsSource, w io.Writer, fd int, ops t
 	frames := 0
 	for ctx.Err() == nil {
 		view := src.view(obs, opsview.ModeWatch) // freshness judged at render time
-		// ponytail: a resize shows on the next frame (up to 1 s); redraw on
-		// watchResize if that lag shows.
+		// ponytail: a resize shows on the next frame (up to 1 s, or up to 5 s
+		// during a collection); redraw on watchResize if that lag shows.
 		width, height, err := ops.GetSize(fd)
 		if err != nil || width <= 0 || height <= 1 {
 			width, height = 80, 24

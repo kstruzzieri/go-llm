@@ -474,9 +474,11 @@ A 401 or 403 is reported as "not authorized (check api_key)" and retried.
   observation gaps; no load is inferred across a gap. The one-shot table has no
   `LOADS` column and no retry text, because it exits before any retry.
 - *Freshness* (`-watch`): a successful reading is current for three polls
-  (6 seconds), then reads unknown ("no fresh reading") beside its last value. A
-  failed check stays current until the next scheduled check plus a grace
-  window, then turns stale the same way. An unreachable backend is retried with
+  (6 seconds), then reads unknown ("no fresh reading") beside its last value,
+  except that statistics keep their values marked "(stale)", and a reachable
+  backend whose every surface is backing off stays reachable until its next
+  scheduled check plus the grace window. A failed check stays current until
+  the next scheduled check plus a grace window, then turns stale the same way. An unreachable backend is retried with
   backoff from 2 up to 30 seconds, shown as "next check in" or "retry due".
   After the machine sleeps, every reading is dropped and read again rather than
   shown with a wrong age.
