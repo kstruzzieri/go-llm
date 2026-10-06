@@ -553,6 +553,15 @@ func (c *Collector) observeOllama(callerCtx, ctx context.Context, b *backendStat
 	})
 }
 
+// polledBy lists the surfaces each kind reads. A kind that reads nothing
+// (none) keeps version: its last answer is the classification.
+var polledBy = map[Kind][]string{
+	KindUnidentified: {"version"},
+	KindLlamaSwap:    {"version", "running", "metrics", "models"},
+	KindOllama:       {"ps"},
+	KindNone:         {"version"},
+}
+
 func (b *backendState) surface(name string) *surfaceState {
 	s, ok := b.surfaces[name]
 	if !ok {
@@ -664,8 +673,15 @@ func (c *Collector) snapshot() Observations {
 	for _, b := range c.backends {
 		o := b.obs
 		o.Refused = b.refused.Load()
+		// Only surfaces the current kind reads are published: one a demoted
+		// llama-swap no longer reads would show an old error and a backoff
+		// schedule nothing runs. Its state is kept, so its backoff resumes
+		// where it stopped once the kind reads it again.
 		o.Surfaces = make([]Surface, 0, len(b.order))
 		for _, name := range b.order {
+			if !slices.Contains(polledBy[b.obs.Kind], name) {
+				continue
+			}
 			s := b.surfaces[name]
 			o.Surfaces = append(o.Surfaces, Surface{Name: name, LastSuccess: s.lastSuccess, LastError: s.lastErr, NextAttempt: s.next})
 		}

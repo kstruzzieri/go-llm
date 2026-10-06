@@ -421,6 +421,11 @@ func TestCollectorUnreachableRecordsRetry(t *testing.T) {
 	if b.Reachable == nil || b.Reachable.Value || b.ReachCode != CodeTimeout || b.ReachRetry != 2*time.Second {
 		t.Fatalf("timeout: reachable=%+v code=%q retry=%v", b.Reachable, b.ReachCode, b.ReachRetry)
 	}
+	// Demoted to unidentified, the backend is read through version alone:
+	// /running's error and backoff schedule are not published.
+	if len(b.Surfaces) != 1 || b.Surfaces[0].Name != "version" {
+		t.Fatalf("demoted backend published surfaces it no longer polls: %+v", b.Surfaces)
+	}
 	// Recovery: the backend is identified again before it is observed, with
 	// the clients built for it the first time.
 	observe := c.backends[0].observe
@@ -1032,6 +1037,10 @@ func TestCollectorRechecksIdentityEveryTick(t *testing.T) {
 			b := c.Tick(context.Background()).Backends[0]
 			if b.Kind != KindNone || b.Support != tc.support || b.Version != tc.version || b.Running != nil || b.Rows != nil || b.Listed != nil {
 				t.Fatalf("v235 readings survived a new identity: %+v", b)
+			}
+			// Never read again, it publishes only the answer that classified it.
+			if len(b.Surfaces) != 1 || b.Surfaces[0].Name != "version" {
+				t.Fatalf("a backend no kind reads published %+v, want version alone", b.Surfaces)
 			}
 			assertRequests(t, f, reqVersion, reqRunning, reqMetrics, reqModels, reqVersion)
 		})
