@@ -28,13 +28,6 @@ import (
 // wrap; the development host keeps the fake call-order coverage and this runs
 // in Docker and GitHub CI.
 
-// ptyPair is a master/slave PTY pair. The slave stands in for the process's
-// real stdin and stdout, so the editor's descriptors are genuine terminals.
-type ptyPair struct {
-	master *os.File
-	slave  *os.File
-}
-
 func openPTY(t *testing.T) *ptyPair {
 	t.Helper()
 	mfd, err := unix.Open("/dev/ptmx", unix.O_RDWR|unix.O_NOCTTY, 0)
@@ -74,13 +67,6 @@ func openPTY(t *testing.T) *ptyPair {
 	return p
 }
 
-// close is idempotent: subtests close early to unblock a hung read, and the
-// cleanup runs again at test end.
-func (p *ptyPair) close() {
-	_ = p.master.Close()
-	_ = p.slave.Close()
-}
-
 // termios reads the slave's current terminal settings. The struct is
 // comparable, so equality is a byte-for-byte check of every flag and control
 // character -- which is the actual claim: not "restored approximately".
@@ -91,27 +77,6 @@ func (p *ptyPair) termios(t *testing.T) unix.Termios {
 		t.Fatalf("TCGETS: %v", err)
 	}
 	return *st
-}
-
-// drainMaster consumes everything the editor writes to the terminal and makes
-// it available to the test. Without a reader the PTY buffer fills and the
-// editor blocks on its own prompt repaint, so this is required for progress,
-// not just for assertions.
-func drainMaster(p *ptyPair) *lockedBuffer {
-	seen := &lockedBuffer{}
-	go func() {
-		buf := make([]byte, 4096)
-		for {
-			n, err := p.master.Read(buf)
-			if n > 0 {
-				_, _ = seen.Write(buf[:n])
-			}
-			if err != nil {
-				return
-			}
-		}
-	}()
-	return seen
 }
 
 // ptyREPL runs one full REPL over the pair and returns a channel carrying the

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
 	"strings"
 	"time"
 
@@ -20,11 +21,30 @@ const (
 // opsFrameEvery is the -watch redraw cadence; ages advance on every frame.
 const opsFrameEvery = time.Second
 
+// opsWatchUnsupported refuses -watch on Windows before any descriptor is
+// probed, with goos passed in so the row is provable on any host. -watch
+// writes VT sequences, and golem never enables
+// ENABLE_VIRTUAL_TERMINAL_PROCESSING on stdout (see selectsEditor).
+func opsWatchUnsupported(goos string) error {
+	if goos == "windows" {
+		return errors.New("golem ops: -watch is not supported on Windows")
+	}
+	return nil
+}
+
+// opsJob hands the terminal back on Ctrl-Z. stops delivers SIGTSTP; suspend
+// stops the process and returns once it is continued. The zero value never
+// stops.
+type opsJob struct {
+	stops   <-chan os.Signal
+	suspend func()
+}
+
 // runOpsWatch redraws every opsFrameEvery and collects every opsInterval
 // until ctx ends (SIGINT and SIGTERM exit 0). The alternate screen preserves
 // prior terminal output; it and the cursor are restored on every return path,
 // errors and panics included.
-func runOpsWatch(ctx context.Context, src *opsSource, w io.Writer, fd int, ops termOps, getenv func(string) string) error {
+func runOpsWatch(ctx context.Context, src *opsSource, w io.Writer, fd int, ops termOps, getenv func(string) string, job opsJob) error {
 	if !ops.IsTerminal(fd) {
 		return errors.New("golem ops: -watch needs a terminal on stdout")
 	}
@@ -61,6 +81,14 @@ func runOpsWatch(ctx context.Context, src *opsSource, w io.Writer, fd int, ops t
 		}
 		select {
 		case <-ctx.Done():
+		case <-job.stops:
+			// Suspend with the shell's screen and cursor back; take the
+			// terminal again on resume, and redraw at once.
+			_, _ = io.WriteString(w, altScreenOff)
+			job.suspend()
+			if _, err := io.WriteString(w, altScreenOn); err != nil {
+				return err
+			}
 		case <-render.C:
 			if frames++; frames%int(opsInterval/opsFrameEvery) == 0 {
 				obs = src.tick(ctx)

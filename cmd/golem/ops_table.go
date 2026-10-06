@@ -85,19 +85,19 @@ func renderOpsTable(w io.Writer, s opsview.Snapshot, elapsed time.Duration, widt
 	for _, b := range s.Backends {
 		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\n", idCell(b.ID), opsCell(b.Hosting), opsCell(backendText(b, elapsed, withLoads)))
 	}
-	header := "\nMODELS\tRESIDENCY\tACTIVITY\tUSED BY\tLAST 1H"
+	// ACTIVITY is last: its cell is the longest and, phases 0-1, always
+	// unknown, so a terminal clip cuts it rather than loads or the 1h summary.
+	header := "\nMODELS\tRESIDENCY"
 	if withLoads {
 		header += "\tLOADS"
 	}
-	_, _ = fmt.Fprintln(tw, header)
+	_, _ = fmt.Fprintln(tw, header+"\tLAST 1H\tUSED BY\tACTIVITY")
 	for _, m := range s.Models {
-		cells := []string{
-			idCell(m.ID), opsCell(partText(residencyPart(m, generatedAt, elapsed))),
-			opsCell(partText(activityPart(m, elapsed))), opsCell(usedByText(m)), opsCell(statsText(m, "1h")),
-		}
+		cells := []string{idCell(m.ID), opsCell(partText(residencyPart(m, generatedAt, elapsed)))}
 		if withLoads {
 			cells = append(cells, opsCell(loadsText(m)))
 		}
+		cells = append(cells, opsCell(statsText(m, "1h")), opsCell(usedByText(m)), opsCell(partText(activityPart(m, elapsed))))
 		_, _ = fmt.Fprintln(tw, strings.Join(cells, "\t"))
 	}
 	if err := tw.Flush(); err != nil {

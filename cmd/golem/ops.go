@@ -10,6 +10,7 @@ import (
 	"maps"
 	"os"
 	"os/signal"
+	"runtime"
 	"slices"
 	"syscall"
 	"time"
@@ -49,6 +50,9 @@ func runOps(ctx context.Context, args []string, stdin io.Reader, out, errOut io.
 		return errors.New("golem ops: -json cannot be combined with -watch")
 	}
 	if watch {
+		if err := opsWatchUnsupported(runtime.GOOS); err != nil {
+			return err
+		}
 		fd, ok := terminalFd(out)
 		if !ok {
 			return errors.New("golem ops: -watch needs a terminal on stdout")
@@ -61,7 +65,9 @@ func runOps(ctx context.Context, args []string, stdin io.Reader, out, errOut io.
 		// screen active and the cursor hidden.
 		ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 		defer stop()
-		return runOpsWatch(ctx, src, out, fd, realTermOps{}, os.Getenv)
+		job, stopJob := watchJob()
+		defer stopJob()
+		return runOpsWatch(ctx, src, out, fd, realTermOps{}, os.Getenv, job)
 	}
 	src, err := newOpsSource(configPath, 0)
 	if err != nil {
