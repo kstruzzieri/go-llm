@@ -9,6 +9,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/kstruzzieri/go-llm/provider"
 )
@@ -246,6 +247,9 @@ func newBackendState(spec BackendSpec) *backendState {
 	if _, err := rootDestination(spec.Provider, spec.BaseURL); err != nil {
 		return b // local with a path prefix: invalid_configuration, never contacted
 	}
+	// newClient on a local root destination fails only on configuration: an
+	// api_key that is not a valid header value. Such a backend keeps
+	// invalid_configuration and is never contacted.
 	switch spec.APIFormat {
 	case "openai-compat":
 		cl, err := newClient(d, spec.APIKey, provider.DestinationPurposeDiscovery, identifyRoutes, &b.refused)
@@ -303,6 +307,9 @@ func (c *Collector) Tick(ctx context.Context) Observations {
 	tctx, cancel := context.WithDeadline(ctx, c.tickEnd)
 	defer cancel()
 	for _, b := range c.backends {
+		// Peer confirmation fails closed: only a listing read on this tick
+		// counts (spec §5.4).
+		b.obs.Listed = nil
 		switch b.obs.Kind {
 		case KindUnidentified:
 			c.identifyBackend(ctx, tctx, b, b.identify)
@@ -357,9 +364,7 @@ func (c *Collector) fetch(callerCtx, ctx context.Context, b *backendState, cl *c
 	// still a missing sample, so it opens a gap like a failed one (spec
 	// §4.5).
 	if ctx.Err() != nil || time.Until(c.tickEnd) < requestTimeout {
-		if surface == "running" || surface == "ps" {
-			b.breakPeriod()
-		}
+		b.missed(surface)
 		return false
 	}
 	body, err := cl.get(ctx, surface, path, limit)
@@ -377,9 +382,10 @@ func (c *Collector) record(callerCtx context.Context, b *backendState, surface s
 		b.obs.Reachable, b.obs.ReachCode, b.obs.ReachRetry = &Sample[bool]{Value: true, At: wall, Mono: mono}, "", 0
 		return
 	}
+	b.missed(surface) // even a cancelled residency read left a hole
 	code, ok := CodeOf(err)
 	if !ok || callerCtx.Err() != nil {
-		return // caller cancellation: unclassified, no backoff
+		return // caller cancellation: unclassified, no backoff, no error
 	}
 	s.failures++
 	s.next = mono + backoff(s.failures)
@@ -396,6 +402,11 @@ func (c *Collector) record(callerCtx context.Context, b *backendState, surface s
 	default:
 		b.obs.Reachable, b.obs.ReachCode, b.obs.ReachRetry = &Sample[bool]{Value: true, At: wall, Mono: mono}, "", 0
 	}
+}
+
+// missed opens a gap when a residency read produced no sample, for any
+// reason: no transition is inferred across it.
+func (b *backendState) missed(surface string) {
 	if surface == "running" || surface == "ps" {
 		b.breakPeriod()
 	}
@@ -417,19 +428,25 @@ func (c *Collector) identifyBackend(callerCtx, ctx context.Context, b *backendSt
 	if !c.fetch(callerCtx, ctx, b, cl, "version", "/api/version", versionLimit, func(body []byte) error {
 		version, isLS = decodeVersion(body)
 		return nil
-	}) && b.surface("version").lastErr != CodeHTTPStatus {
-		// No answer yet: retried under backoff. A 401 or 403 is coded
-		// unauthorized, not http_status, so it lands here too: v235 serves
-		// /api/version behind its API-key check (server.go:208,260;
-		// auth.go:34), so a wrong api_key is not another runtime.
-		return
+	}) {
+		switch b.surface("version").lastErr {
+		case CodeHTTPStatus, CodeTooLarge:
+			// An answer, but not llama-swap's (spec §4.1): read below as
+			// unrecognized and never asked again.
+		default:
+			// No answer yet: retried under backoff. A 401 or 403 is coded
+			// unauthorized, so it lands here: v235 serves /api/version
+			// behind its API-key check (server.go:208,260; auth.go:34), so
+			// a wrong api_key is not another runtime.
+			return
+		}
 	}
 	// Every outcome sets Version: a backend that read v235 before an outage
 	// must not keep that version once it answers as something else.
 	switch {
 	case !isLS:
-		// Includes a non-2xx answer (llama-server direct, vLLM: 404): a
-		// runtime that is not llama-swap. Stop asking.
+		// Includes a non-2xx answer (llama-server direct, vLLM: 404) and
+		// an over-cap body: a runtime that is not llama-swap. Stop asking.
 		b.dropSamples()
 		b.obs.Kind, b.obs.Support, b.obs.Version = KindNone, SupportUnrecognized, ""
 	case version != "v235":
@@ -448,11 +465,16 @@ func (c *Collector) identifyBackend(callerCtx, ctx context.Context, b *backendSt
 	}
 }
 
+// bound cuts s to at most maxVersionLen bytes on a rune boundary.
 func bound(s string) string {
-	if len(s) > maxVersionLen {
-		return s[:maxVersionLen]
+	if len(s) <= maxVersionLen {
+		return s
 	}
-	return s
+	i := maxVersionLen
+	for i > 0 && !utf8.RuneStart(s[i]) {
+		i--
+	}
+	return s[:i]
 }
 
 func (c *Collector) observeLlamaSwap(callerCtx, ctx context.Context, b *backendState) {
@@ -485,7 +507,7 @@ func (c *Collector) observeLlamaSwap(callerCtx, ctx context.Context, b *backendS
 	if b.obs.Kind != KindLlamaSwap {
 		return
 	}
-	if !c.fetch(callerCtx, ctx, b, b.observe, "models", "/v1/models", modelsLimit, func(body []byte) error {
+	c.fetch(callerCtx, ctx, b, b.observe, "models", "/v1/models", modelsLimit, func(body []byte) error {
 		listed, err := decodeModels(body)
 		if err != nil {
 			return err
@@ -493,9 +515,7 @@ func (c *Collector) observeLlamaSwap(callerCtx, ctx context.Context, b *backendS
 		wall, mono := c.now()
 		b.obs.Listed = &Sample[[]ListedModel]{Value: listed, At: wall, Mono: mono}
 		return nil
-	}) {
-		b.obs.Listed = nil // peer confirmation fails closed without a current listing
-	}
+	})
 }
 
 func (c *Collector) observeOllama(callerCtx, ctx context.Context, b *backendState) {
@@ -579,12 +599,11 @@ func (b *backendState) applyResidency(cur map[string]string, at time.Time) {
 		if (was == "absent" || was == "stopping") && (now == "starting" || now == "ready") {
 			m.Loads++
 		}
-		switch now {
-		case "ready":
-			if m.FirstObserved.IsZero() {
-				m.FirstObserved = at
-			}
-		case "absent", "stopping":
+		// Every other state zeroes FirstObserved, so entering ready always
+		// starts a new loaded stretch.
+		if now == "ready" {
+			m.FirstObserved = at
+		} else {
 			m.FirstObserved = time.Time{}
 		}
 		to := ResidencyOf(now)

@@ -10,8 +10,10 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/kstruzzieri/go-llm/internal/opsfixture"
 )
@@ -92,6 +94,14 @@ func front(t *testing.T, f *opsfixture.Server, hook func(w http.ResponseWriter, 
 	return srv.URL
 }
 
+// hangUp closes the connection without a response, so the client reads
+// unreachable at once.
+func hangUp(w http.ResponseWriter) {
+	if conn, _, err := http.NewResponseController(w).Hijack(); err == nil {
+		_ = conn.Close()
+	}
+}
+
 // waitFor polls cond for up to d.
 func waitFor(t *testing.T, d time.Duration, cond func() bool) {
 	t.Helper()
@@ -123,6 +133,7 @@ func TestCollectorRemoteAndInvalidAreNeverContacted(t *testing.T) {
 		{Provider: "b-prefix", BaseURL: f.URL() + "/upstream/gemma4:31b", APIFormat: "openai-compat"},
 		{Provider: "c-hosted", BaseURL: "https://opencode.ai/zen/go", APIFormat: "openai-compat"},
 		{Provider: "d-format", BaseURL: f.URL(), APIFormat: "anthropic"},
+		{Provider: "e-key", BaseURL: f.URL(), APIFormat: "openai-compat", APIKey: "k\r\nX-Injected: 1"},
 	}, Options{Clock: newFakeClock().clock()})
 	obs := c.Tick(context.Background())
 	assertRequests(t, f)
@@ -137,6 +148,9 @@ func TestCollectorRemoteAndInvalidAreNeverContacted(t *testing.T) {
 	}
 	if d := obs.Backends[3]; d.Hosting != HostingLocal || d.Kind != KindNone || d.Support != SupportInvalidConfig {
 		t.Fatalf("unknown api_format = %+v", d)
+	}
+	if e := obs.Backends[4]; e.Hosting != HostingLocal || e.Kind != KindNone || e.Support != SupportInvalidConfig {
+		t.Fatalf("api_key that is not a header value = %+v", e)
 	}
 }
 
@@ -157,6 +171,8 @@ func TestCollectorVersionClassification(t *testing.T) {
 		{"ollama-shaped", `{"version":"0.12.3"}`, 0, KindNone, SupportUnrecognized, "", "", false},
 		{"404 runtime", "", http.StatusNotFound, KindNone, SupportUnrecognized, "", CodeHTTPStatus, false},
 		{"401 api key", "", http.StatusUnauthorized, KindUnidentified, SupportUnknown, "", CodeUnauthorized, true},
+		{"over-cap answer", `{"version":"` + strings.Repeat("a", versionLimit) + `"}`, 0, KindNone, SupportUnrecognized, "", CodeTooLarge, false},
+		{"long version", `{"build_date":"x","commit":"y","version":"v` + strings.Repeat("9", 100) + `"}`, 0, KindNone, SupportUnsupported, "v" + strings.Repeat("9", maxVersionLen-1), "", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := opsfixture.NewLlamaSwap(t)
@@ -504,26 +520,137 @@ func TestCollectorOllama(t *testing.T) {
 	assertRequests(t, f, reqPS, reqPS)
 }
 
-// TestCollectorSkippedResidencyReadOpensGap: spec §4.5 opens a gap when a
-// residency read fails; one the tick deadline skipped is no sample either,
-// so no transition is inferred across it.
-func TestCollectorSkippedResidencyReadOpensGap(t *testing.T) {
+// TestCollectorMissedResidencyReadOpensGap: spec §4.5 opens a gap when a
+// residency read fails. A read the tick deadline skipped, or one the caller
+// cancelled in flight, is no sample either, so no transition is inferred
+// across it; cancellation still sets no backoff and no error.
+func TestCollectorMissedResidencyReadOpensGap(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		miss func(t *testing.T, f *opsfixture.Server, c *Collector)
+	}{
+		{"failed", func(t *testing.T, f *opsfixture.Server, c *Collector) {
+			f.SetStatus("/running", http.StatusInternalServerError)
+			c.Tick(context.Background())
+			f.SetStatus("/running", 0)
+		}},
+		{"skipped", func(t *testing.T, f *opsfixture.Server, c *Collector) {
+			spent, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+			defer cancel()
+			c.Tick(spent) // on schedule, but no budget left: /running is never read
+		}},
+		{"cancelled in flight", func(t *testing.T, f *opsfixture.Server, c *Collector) {
+			release := f.HoldFor(t, "/running")
+			defer release()
+			ctx, cancel := context.WithCancel(context.Background())
+			go func() {
+				defer cancel() // bounded: cancels after 2 s even if the request never arrives
+				deadline := time.Now().Add(2 * time.Second)
+				for f.InflightOn("/running") == 0 && time.Now().Before(deadline) {
+					time.Sleep(time.Millisecond)
+				}
+			}()
+			b := c.Tick(ctx).Backends[0]
+			if s := surface(b, "running"); s.LastError != "" || s.NextAttempt != 0 {
+				t.Fatalf("cancellation was classified: %+v", s)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := opsfixture.NewLlamaSwap(t)
+			clk := newFakeClock()
+			c := NewCollector([]BackendSpec{lsSpec(f.URL())}, Options{Interval: 2 * time.Second, Clock: clk.clock()})
+			f.SetBody("/running", `{"running":[]}`)
+			c.Tick(context.Background()) // baseline, nothing loaded
+			clk.advance(2*time.Second, 2*time.Second)
+			tc.miss(t, f, c)
+			f.SetBody("/running", `{"running":[{"model":"m","state":"ready","ttl":600}]}`)
+			clk.advance(2*time.Second, 2*time.Second)
+			b := c.Tick(context.Background()).Backends[0]
+			if got := memory(t, b, "m"); got.Loads != 0 || b.Gaps != 1 || b.Periods != 2 {
+				t.Fatalf("load inferred across a missed read: mem=%+v gaps=%d periods=%d", got, b.Gaps, b.Periods)
+			}
+		})
+	}
+}
+
+// TestCollectorTransitions: transitions use the console vocabulary and the
+// tick's time, unloading back to loaded is a new episode (spec §5.4), and
+// FirstObserved is set exactly while the model reads loaded.
+func TestCollectorTransitions(t *testing.T) {
 	f := opsfixture.NewLlamaSwap(t)
 	clk := newFakeClock()
 	c := NewCollector([]BackendSpec{lsSpec(f.URL())}, Options{Interval: 2 * time.Second, Clock: clk.clock()})
-	f.SetBody("/running", `{"running":[]}`)
-	c.Tick(context.Background()) // baseline, nothing loaded
-	spent, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
-	defer cancel()
-	clk.advance(2*time.Second, 2*time.Second)
-	c.Tick(spent) // on schedule, but no budget left: /running is never read
-	f.SetBody("/running", `{"running":[{"model":"m","state":"ready","ttl":600}]}`)
-	clk.advance(2*time.Second, 2*time.Second)
-	b := c.Tick(context.Background()).Backends[0]
-	if got := memory(t, b, "m"); got.Loads != 0 || b.Gaps != 1 || b.Periods != 2 {
-		t.Fatalf("load inferred across a skipped read: mem=%+v gaps=%d periods=%d", got, b.Gaps, b.Periods)
+	var ats []time.Time
+	var b BackendObservation
+	for i, st := range []string{"", "starting", "ready", "stopping", "ready", "starting", "ready", ""} {
+		body := `{"running":[]}`
+		if st != "" {
+			body = `{"running":[{"model":"m","state":"` + st + `","ttl":600}]}`
+		}
+		f.SetBody("/running", body)
+		clk.advance(2*time.Second, 2*time.Second)
+		b = c.Tick(context.Background()).Backends[0]
+		if i == 0 {
+			continue // baseline
+		}
+		ats = append(ats, b.Running.At)
+		m := memory(t, b, "m")
+		if loaded := st == "ready"; loaded == m.FirstObserved.IsZero() || (loaded && !m.FirstObserved.Equal(b.Running.At)) {
+			t.Fatalf("step %d (%q): FirstObserved = %v", i, st, m.FirstObserved)
+		}
 	}
-	assertRequests(t, f, reqVersion, reqRunning, reqMetrics, reqModels, reqVersion, reqRunning, reqMetrics, reqModels)
+	m := memory(t, b, "m")
+	var got []string
+	for i, tr := range m.Transitions {
+		got = append(got, tr.To)
+		if !tr.At.Equal(ats[i]) {
+			t.Fatalf("transition %d at %v, want %v", i, tr.At, ats[i])
+		}
+	}
+	if want := "loading,loaded,unloading,loaded,loading,loaded,unloaded"; strings.Join(got, ",") != want || m.Loads != 2 {
+		t.Fatalf("transitions = %s loads=%d, want %s loads=2", strings.Join(got, ","), m.Loads, want)
+	}
+}
+
+// TestCollectorListingCountsOnlyOnItsTick: peer confirmation fails closed
+// (spec §5.4), so a listing from an earlier tick never survives a tick that
+// did not read /v1/models, here because /running was unreachable first.
+func TestCollectorListingCountsOnlyOnItsTick(t *testing.T) {
+	f := opsfixture.NewLlamaSwap(t)
+	var down atomic.Bool
+	base := front(t, f, func(w http.ResponseWriter, r *http.Request) bool {
+		if down.Load() && r.URL.Path == "/running" {
+			hangUp(w)
+			return true
+		}
+		return false
+	})
+	clk := newFakeClock()
+	c := NewCollector([]BackendSpec{lsSpec(base)}, Options{Interval: 2 * time.Second, Clock: clk.clock()})
+	if c.Tick(context.Background()).Backends[0].Listed == nil {
+		t.Fatal("valid listing not recorded")
+	}
+	down.Store(true)
+	clk.advance(2*time.Second, 2*time.Second)
+	if b := c.Tick(context.Background()).Backends[0]; b.ReachCode != CodeUnreachable || b.Listed != nil {
+		t.Fatalf("a listing not read on this tick survived: reach=%q listed=%+v", b.ReachCode, b.Listed)
+	}
+}
+
+// TestBoundKeepsWholeRunes: a backend-sourced version is cut to
+// maxVersionLen bytes without splitting a UTF-8 sequence.
+func TestBoundKeepsWholeRunes(t *testing.T) {
+	for in, want := range map[string]string{
+		"v235":                                "v235",
+		strings.Repeat("a", 70):               strings.Repeat("a", maxVersionLen),
+		strings.Repeat("a", 63) + "\u00e9xyz": strings.Repeat("a", 63),
+		strings.Repeat("a", 62) + "\u20acxyz": strings.Repeat("a", 62),
+	} {
+		if got := bound(in); got != want || !utf8.ValidString(got) {
+			t.Fatalf("bound(%q) = %q, want %q", in, got, want)
+		}
+	}
 }
 
 // TestCollectorUnstartedRequestIsNotAnObservation: a request is not started
