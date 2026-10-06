@@ -2,12 +2,15 @@ package opsview
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"testing"
 	"time"
 
@@ -52,6 +55,35 @@ func input(mode Mode, backends ...opsbackend.BackendObservation) Input {
 		Observations: opsbackend.Observations{Interval: 2 * time.Second, Backends: backends},
 		Now:          now, NowMono: 11 * time.Second, Mode: mode, Interval: 2 * time.Second,
 	}
+}
+
+func localOllama(ps ...opsbackend.PSModel) opsbackend.BackendObservation {
+	return opsbackend.BackendObservation{
+		Provider: "ollama", Endpoint: "http://127.0.0.1:11434", Hosting: opsbackend.HostingLocal, Kind: opsbackend.KindOllama,
+		Support: opsbackend.SupportSupported, Reachable: sample(true, 10*time.Second), Since: now.Add(-time.Hour), Periods: 1,
+		PS: sample(ps, 10*time.Second),
+	}
+}
+
+func encode(t *testing.T, s Snapshot) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(s); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+func backendOnlyIDs(s Snapshot) []string {
+	ids := []string{}
+	for _, m := range s.Models {
+		if !m.Configured {
+			ids = append(ids, m.ID)
+		}
+	}
+	return ids
 }
 
 func remote() opsbackend.BackendObservation {
@@ -155,6 +187,34 @@ func TestFailureReachabilityFollowsRetry(t *testing.T) {
 	if r := Build(in).Backends[0].Reachability; r.State != StateUnknown || !r.Stale {
 		t.Fatalf("missed retry = %+v", r)
 	}
+	b.Running = nil // no residency reading at all: say why
+	if m := modelByID(t, Build(input(ModeWatch, b, remote())), "llamacpp/gemma4:31b"); deref(m.Residency.Reason) != string(opsbackend.CodeUnreachable) {
+		t.Fatalf("residency without a reading must carry the backend's code: %+v", m.Residency)
+	}
+}
+
+func TestReachabilityNeverClaimsMoreThanItRead(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		edit        func(*opsbackend.BackendObservation)
+		mono        time.Duration
+		state, code string
+		stale       bool
+	}{
+		{"no reading", func(b *opsbackend.BackendObservation) { b.Reachable = nil }, 11 * time.Second, StateUnknown, ReasonNoSample, false},
+		{"ok aged out", func(*opsbackend.BackendObservation) {}, 17 * time.Second, StateUnknown, ReasonStale, true},
+		{"invalid configuration, cached ok attached", func(b *opsbackend.BackendObservation) {
+			b.Hosting, b.Kind, b.Support = opsbackend.HostingUnknown, opsbackend.KindNone, opsbackend.SupportInvalidConfig
+		}, 11 * time.Second, StateNotObserved, opsbackend.SupportInvalidConfig, false},
+	} {
+		b := healthyLlamaSwap()
+		tc.edit(&b)
+		in := input(ModeWatch, b, remote())
+		in.NowMono = tc.mono
+		if r := Build(in).Backends[0].Reachability; r.State != tc.state || deref(r.Code) != tc.code || r.Stale != tc.stale {
+			t.Fatalf("%s: reachability = %+v", tc.name, r)
+		}
+	}
 }
 
 func TestActivityNeverIdleAndUsedBy(t *testing.T) {
@@ -237,6 +297,16 @@ func TestUnmeasuredLoadsAreOmitted(t *testing.T) {
 	if l := modelByID(t, Build(input(ModeWatch, capped, remote())), "llamacpp/qwen3-embedding:8b").Loads; l != nil {
 		t.Fatalf("loads for a possibly capped model = %+v", l)
 	}
+	broken := healthyLlamaSwap()
+	broken.Gaps = 1 // the only period broke: a load during the gap would go unseen
+	if l := modelByID(t, Build(input(ModeWatch, broken, remote())), "llamacpp/qwen3-embedding:8b").Loads; l != nil {
+		t.Fatalf("loads for an untracked model during an open gap = %+v", l)
+	}
+	reopened := healthyLlamaSwap()
+	reopened.Periods, reopened.Gaps = 2, 1 // a new period opened after the gap
+	if l := modelByID(t, Build(input(ModeWatch, reopened, remote())), "llamacpp/qwen3-embedding:8b").Loads; l == nil || l.Count != 0 {
+		t.Fatalf("measured zero missing after a reopened period: %+v", l)
+	}
 	s := Build(input(ModeWatch, healthyLlamaSwap(), remote()))
 	if l := modelByID(t, s, "llamacpp/qwen3-embedding:8b").Loads; l == nil || l.Count != 0 {
 		t.Fatalf("measured zero missing: %+v", l)
@@ -267,6 +337,92 @@ func TestBackendOnlyModelsBoundedAndRowOnly(t *testing.T) {
 	modelByID(t, s, "backend:llamacpp/extra-000") // sorted: the first names are kept
 }
 
+func TestBackendOnlyNeedsFreshObservedProof(t *testing.T) {
+	b := healthyLlamaSwap()
+	b.Running.Value = append(b.Running.Value, opsbackend.RunningModel{Model: "extra", State: "ready"})
+	if ids := backendOnlyIDs(Build(input(ModeWatch, b, remote()))); !reflect.DeepEqual(ids, []string{"backend:llamacpp/extra"}) {
+		t.Fatalf("fresh /running: backend-only = %v", ids)
+	}
+	stale := input(ModeWatch, b, remote())
+	stale.NowMono = 17 * time.Second
+	if ids := backendOnlyIDs(Build(stale)); len(ids) != 0 {
+		t.Fatalf("stale /running listed %v", ids)
+	}
+	u := b
+	u.Kind, u.Support = opsbackend.KindNone, opsbackend.SupportUnsupported
+	if ids := backendOnlyIDs(Build(input(ModeWatch, u, remote()))); len(ids) != 0 {
+		t.Fatalf("unsupported backend listed its cached names: %v", ids)
+	}
+	in := input(ModeWatch, localOllama(opsbackend.PSModel{Name: "llama3:latest", Model: "llama3:latest"}, opsbackend.PSModel{Name: "zeta:latest", Model: "zeta:latest"}))
+	in.Configured = []string{"ollama/llama3"} // matches llama3:latest only once normalized
+	if ids := backendOnlyIDs(Build(in)); !reflect.DeepEqual(ids, []string{"backend:ollama/zeta:latest"}) {
+		t.Fatalf("fresh /api/ps: backend-only = %v", ids)
+	}
+	in.NowMono = 17 * time.Second
+	if ids := backendOnlyIDs(Build(in)); len(ids) != 0 {
+		t.Fatalf("stale /api/ps listed %v", ids)
+	}
+}
+
+func shuffled[T any](r *rand.Rand, s []T) []T {
+	out := slices.Clone(s)
+	r.Shuffle(len(out), func(i, j int) { out[i], out[j] = out[j], out[i] })
+	return out
+}
+
+// shuffleInput reorders every input collection whose order carries no meaning.
+func shuffleInput(r *rand.Rand, in Input) Input {
+	in.Configured = shuffled(r, in.Configured)
+	bs := shuffled(r, in.Observations.Backends)
+	for i, b := range bs {
+		if b.Running != nil {
+			c := *b.Running
+			c.Value = shuffled(r, c.Value)
+			b.Running = &c
+		}
+		if b.Rows != nil {
+			c := *b.Rows
+			c.Value = shuffled(r, c.Value)
+			b.Rows = &c
+		}
+		if b.Listed != nil {
+			c := *b.Listed
+			c.Value = shuffled(r, c.Value)
+			b.Listed = &c
+		}
+		if b.PS != nil {
+			c := *b.PS
+			c.Value = shuffled(r, c.Value)
+			b.PS = &c
+		}
+		b.Models = shuffled(r, b.Models)
+		bs[i] = b
+	}
+	in.Observations.Backends = bs
+	return in
+}
+
+func TestBuildIsSortedAndDeterministic(t *testing.T) {
+	ls := healthyLlamaSwap()
+	ls.Running.Value = append(ls.Running.Value, opsbackend.RunningModel{Model: "extra", State: "starting"})
+	ol := localOllama(opsbackend.PSModel{Name: "llama3:latest", Model: "llama3:latest"}, opsbackend.PSModel{Name: "zeta:latest", Model: "zeta:latest"})
+	ol.Models = []opsbackend.ModelMemory{{Model: "llama3:latest", Loads: 2, Since: now.Add(-time.Hour)}, {Model: "zeta:latest", Loads: 1, Since: now.Add(-time.Hour)}}
+	in := input(ModeWatch, remote(), ol, ls) // backends deliberately out of order
+	in.Configured = append(in.Configured, "ollama/llama3")
+	s := Build(in)
+	if !slices.IsSortedFunc(s.Backends, func(x, y Backend) int { return cmp.Compare(x.ID, y.ID) }) ||
+		!slices.IsSortedFunc(s.Models, func(x, y Model) int { return cmp.Compare(x.ID, y.ID) }) {
+		t.Fatalf("not sorted by id (spec §5.2): %s", encode(t, s))
+	}
+	want := encode(t, s)
+	r := rand.New(rand.NewPCG(1, 2))
+	for i := range 50 {
+		if got := encode(t, Build(shuffleInput(r, in))); !bytes.Equal(got, want) {
+			t.Fatalf("shuffle %d changed the snapshot:\n%s", i, got)
+		}
+	}
+}
+
 func TestCoverageUsesWholeRing(t *testing.T) {
 	b := healthyLlamaSwap()
 	b.Rows.Value = []opsbackend.ActivityRow{
@@ -281,12 +437,7 @@ func TestCoverageUsesWholeRing(t *testing.T) {
 }
 
 func TestOllamaStatsCarryNoHistoryReason(t *testing.T) {
-	o := opsbackend.BackendObservation{
-		Provider: "ollama", Endpoint: "http://127.0.0.1:11434", Hosting: opsbackend.HostingLocal, Kind: opsbackend.KindOllama,
-		Support: opsbackend.SupportSupported, Reachable: sample(true, 10*time.Second),
-		PS: sample([]opsbackend.PSModel{{Name: "llama3:latest", Model: "llama3:latest", ExpiresAt: now.Add(5 * time.Minute)}}, 10*time.Second),
-	}
-	in := input(ModeWatch, o)
+	in := input(ModeWatch, localOllama(opsbackend.PSModel{Name: "llama3:latest", Model: "llama3:latest", ExpiresAt: now.Add(5 * time.Minute)}))
 	in.Configured = []string{"ollama/llama3", "ollama/qwen3:8b"}
 	s := Build(in)
 	if m := modelByID(t, s, "ollama/llama3"); m.Residency.State != StateLoaded || m.Residency.ExpiresAt == nil || len(m.Stats) != 2 || m.Stats[0].Coverage.Reason != ReasonNoHistory {
@@ -295,17 +446,16 @@ func TestOllamaStatsCarryNoHistoryReason(t *testing.T) {
 	if m := modelByID(t, s, "ollama/qwen3:8b"); m.Residency.State != StateUnknown || deref(m.Residency.Reason) != ReasonOllamaAbsent {
 		t.Fatalf("ollama absent = %+v", m.Residency)
 	}
+	if a := modelByID(t, s, "ollama/llama3").Activity; deref(a.Reason) != ReasonOllamaNoInflight || a.ObservedAt == nil || a.AgeMs == nil {
+		t.Fatalf("ollama activity must carry the /api/ps envelope: %+v", a)
+	}
 }
 
 func TestOllamaMemoryFollowsMatchedEntry(t *testing.T) {
-	o := opsbackend.BackendObservation{
-		Provider: "ollama", Endpoint: "http://127.0.0.1:11434", Hosting: opsbackend.HostingLocal, Kind: opsbackend.KindOllama,
-		Support: opsbackend.SupportSupported, Reachable: sample(true, 10*time.Second), Since: now.Add(-time.Hour), Periods: 1,
-		// "real" is served as the model of an entry named "alias"; the
-		// collector keys memory by the entry's name.
-		PS:     sample([]opsbackend.PSModel{{Name: "alias:latest", Model: "real:latest"}}, 10*time.Second),
-		Models: []opsbackend.ModelMemory{{Model: "alias:latest", FirstObserved: now.Add(-5 * time.Minute), Loads: 4, Since: now.Add(-time.Hour)}},
-	}
+	// "real" is served as the model of an entry named "alias"; the
+	// collector keys memory by the entry's name.
+	o := localOllama(opsbackend.PSModel{Name: "alias:latest", Model: "real:latest"})
+	o.Models = []opsbackend.ModelMemory{{Model: "alias:latest", FirstObserved: now.Add(-5 * time.Minute), Loads: 4, Since: now.Add(-time.Hour)}}
 	in := input(ModeWatch, o)
 	in.Configured = []string{"ollama/gone", "ollama/real"}
 	s := Build(in)
@@ -319,14 +469,10 @@ func TestOllamaMemoryFollowsMatchedEntry(t *testing.T) {
 }
 
 func TestBlankOllamaNamesNeverMatch(t *testing.T) {
-	o := opsbackend.BackendObservation{
-		Provider: "ollama", Endpoint: "http://127.0.0.1:11434", Hosting: opsbackend.HostingLocal, Kind: opsbackend.KindOllama,
-		Support: opsbackend.SupportSupported, Reachable: sample(true, 10*time.Second), Since: now.Add(-time.Hour), Periods: 1,
-		// decodePS admits a blank model and a whitespace name, which both
-		// normalize to "", and memory keys the whitespace name as "".
-		PS:     sample([]opsbackend.PSModel{{Name: " ", Model: ""}}, 10*time.Second),
-		Models: []opsbackend.ModelMemory{{Model: "", Loads: 3, Since: now.Add(-time.Hour)}},
-	}
+	// decodePS admits a blank model and a whitespace name, which both
+	// normalize to "", and memory keys the whitespace name as "".
+	o := localOllama(opsbackend.PSModel{Name: " ", Model: ""})
+	o.Models = []opsbackend.ModelMemory{{Model: "", Loads: 3, Since: now.Add(-time.Hour)}}
 	in := input(ModeWatch, o)
 	in.Configured = []string{"ollama/"}
 	s := Build(in)
@@ -353,13 +499,15 @@ func TestEnumsNeverIdleOrComplete(t *testing.T) {
 }
 
 func TestHealthyGolden(t *testing.T) {
-	s := Build(input(ModeWatch, healthyLlamaSwap(), remote()))
-	var got bytes.Buffer
-	enc := json.NewEncoder(&got)
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(s); err != nil {
-		t.Fatal(err)
-	}
+	// Non-empty surfaces, transitions and diagnostics pin their keys. They
+	// live here, not in the shared fixtures, so other tests' attention stays
+	// unaffected.
+	b := healthyLlamaSwap()
+	b.Surfaces = []opsbackend.Surface{{Name: "running", LastSuccess: now}, {Name: "models", LastError: opsbackend.CodeMalformed}}
+	b.Models[0].Transitions = []opsbackend.Transition{{To: StateLoaded, At: now.Add(-14 * time.Minute)}}
+	in := input(ModeWatch, b, remote())
+	in.Config.Diagnostics = []configview.Diagnostic{{Code: "chain_invalid", Subject: "agent"}}
+	got := bytes.NewBuffer(encode(t, Build(in)))
 	path := filepath.Join("testdata", "healthy.golden.json")
 	if *update {
 		if err := os.MkdirAll("testdata", 0o755); err != nil {

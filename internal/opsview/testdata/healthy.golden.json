@@ -8,7 +8,12 @@
     "source": "user_config",
     "ready": true,
     "revision": "3f9c1a",
-    "diagnostics": []
+    "diagnostics": [
+      {
+        "code": "chain_invalid",
+        "subject": "agent"
+      }
+    ]
   },
   "backends": [
     {
@@ -37,7 +42,18 @@
         "models_overflow": 0,
         "backend_only_overflow": 0
       },
-      "surfaces": []
+      "surfaces": [
+        {
+          "name": "running",
+          "last_success": "2026-10-05T10:00:00.000Z",
+          "last_error": null
+        },
+        {
+          "name": "models",
+          "last_success": null,
+          "last_error": "malformed_response"
+        }
+      ]
     },
     {
       "id": "opencode",
@@ -258,7 +274,12 @@
         "gaps": 0,
         "sample_ms": 2000,
         "complete": false,
-        "transitions": []
+        "transitions": [
+          {
+            "to": "loaded",
+            "at": "2026-10-05T09:46:00.000Z"
+          }
+        ]
       },
       "stats": [
         {

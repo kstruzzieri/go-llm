@@ -405,8 +405,10 @@ func (b builder) activity(v view, name string) Activity {
 }
 
 // loads reports observed load history for a model on an observed backend.
-// An untracked model has a measured zero only when residency has been
-// sampled, the tracking cap never overflowed, and, on llama-swap, a sample
+// An untracked model has a measured zero only while a residency period is
+// open (the collector bumps Periods when one opens and Gaps when one breaks,
+// so Gaps >= Periods means none yet or a broken one, where a load could go
+// unseen), the tracking cap never overflowed, and, on llama-swap, a sample
 // proved the name canonical (an alias loads under its canonical ID);
 // otherwise the count was not measured and loads is omitted. An untracked
 // Ollama name never has one: a copied name can load through another name's
@@ -421,7 +423,7 @@ func (b builder) loads(v view, name string) *Loads {
 		}
 	}
 	mem, tracked := memoryFor(o, key)
-	if !tracked && (o.Periods == 0 || o.ModelsOverflow > 0 || !named) {
+	if !tracked && (o.Gaps >= o.Periods || o.ModelsOverflow > 0 || !named) {
 		return nil
 	}
 	l := &Loads{SampleMs: b.in.Interval.Milliseconds(), Since: stamp(o.Since), Transitions: []TransitionView{}}
