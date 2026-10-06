@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -685,4 +686,105 @@ func TestGuardedTransportDeniesCapabilityWithoutToken(t *testing.T) {
 	if got := spy.calls.Load(); got != 0 {
 		t.Errorf("delegate called %d times, want 0", got)
 	}
+}
+
+// closeRecorder is a request body that counts Close calls. It stands in for
+// a pipe-backed streaming upload, whose writer goroutine unblocks only when
+// the reader side is closed.
+type closeRecorder struct {
+	io.Reader
+	closes atomic.Int64
+}
+
+func (c *closeRecorder) Close() error {
+	c.closes.Add(1)
+	return nil
+}
+
+// #655: the http.RoundTripper contract says RoundTrip always closes the
+// request body, errors included. http.Client never closes it after a
+// transport error, so a denial that skipped Close would leak a pipe-backed
+// body's writer goroutine. Every denial (capability refusals and target
+// refusals alike) closes the body exactly once, and an admitted request
+// leaves it to the delegate, which owns it from there.
+func TestGuardedTransportDenialClosesRequestBody(t *testing.T) {
+	const base = "https://opencode.ai/zen/go"
+	bind := func(t *testing.T, gate *DestinationGate) context.Context {
+		t.Helper()
+		ctx, err := gate.Bind(context.Background(), "agent", "opencode")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return ctx
+	}
+
+	for _, tc := range []struct {
+		name string
+		req  func(t *testing.T, gate *DestinationGate, dest Destination) *http.Request
+	}{
+		{"no capability", func(t *testing.T, _ *DestinationGate, _ Destination) *http.Request {
+			return mustReq(t, context.Background(), base+"/v1")
+		}},
+		{"revoked capability", func(t *testing.T, gate *DestinationGate, _ Destination) *http.Request {
+			ctx := bind(t, gate)
+			gate.Clear()
+			return mustReq(t, ctx, base+"/v1")
+		}},
+		{"capability without token", func(t *testing.T, _ *DestinationGate, dest Destination) *http.Request {
+			forged := context.WithValue(context.Background(), destCapabilityCtxKey{}, &destinationCapability{
+				purpose: "agent", provider: "opencode", dest: dest,
+			})
+			return mustReq(t, forged, base+"/v1")
+		}},
+		{"Request.Host override", func(t *testing.T, gate *DestinationGate, _ Destination) *http.Request {
+			req := mustReq(t, bind(t, gate), base+"/v1")
+			req.Host = "evil.example.com"
+			return req
+		}},
+		{"off-target URL", func(t *testing.T, gate *DestinationGate, _ Destination) *http.Request {
+			return mustReq(t, bind(t, gate), "https://evil.example.com/zen/go/v1")
+		}},
+		{"nil URL", func(t *testing.T, gate *DestinationGate, _ Destination) *http.Request {
+			req := mustReq(t, bind(t, gate), base+"/v1")
+			req.URL = nil
+			return req
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client, gate, dest, spy := guardedForTest(t, "agent", "opencode", base)
+			req := tc.req(t, gate, dest)
+			body := &closeRecorder{Reader: strings.NewReader(`{"stream":true}`)}
+			req.Method, req.Body = http.MethodPost, body
+
+			if _, err := client.Transport.RoundTrip(req); !errors.Is(err, ErrDestinationDenied) {
+				t.Fatalf("RoundTrip = %v, want ErrDestinationDenied", err)
+			}
+			if got := spy.calls.Load(); got != 0 {
+				t.Fatalf("delegate called %d times, want 0", got)
+			}
+			if got := body.closes.Load(); got != 1 {
+				t.Errorf("request body closed %d times on denial, want 1", got)
+			}
+		})
+	}
+
+	t.Run("admitted request leaves body to delegate", func(t *testing.T) {
+		client, gate, _, spy := guardedForTest(t, "agent", "opencode", base)
+		req := mustReq(t, bind(t, gate), base+"/v1")
+		body := &closeRecorder{Reader: strings.NewReader(`{"stream":true}`)}
+		req.Method, req.Body = http.MethodPost, body
+
+		resp, err := client.Transport.RoundTrip(req)
+		if err != nil {
+			t.Fatalf("admitted request denied: %v", err)
+		}
+		_ = resp.Body.Close()
+		if got := spy.calls.Load(); got != 1 {
+			t.Fatalf("delegate called %d times, want 1", got)
+		}
+		// The spy never closes, so any close here came from the guard.
+		if got := body.closes.Load(); got != 0 {
+			t.Errorf("guard closed an admitted request body %d times, want 0", got)
+		}
+	})
 }
