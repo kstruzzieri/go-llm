@@ -262,6 +262,38 @@ func TestRemoteDestinationCannotBuildClient(t *testing.T) {
 	}
 }
 
+// TestAllowlistWrapsDestinationGuard proves the composition order of spec
+// §4.2: the allowlist delegates to GuardHTTPClient's transport, not to the
+// stock one beneath it. An allowed request on a context the gate never bound
+// is denied by the guard and never sent.
+func TestAllowlistWrapsDestinationGuard(t *testing.T) {
+	f := opsfixture.NewLlamaSwap(t)
+	d, err := rootDestination("ls", f.URL())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var refused atomic.Int64
+	c, err := newClient(d, "", provider.DestinationPurposeHealth, llamaSwapRoutes, &refused)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, d.BaseURL()+"/api/version", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := c.hc.Do(req)
+	if err == nil {
+		_ = resp.Body.Close()
+		t.Fatalf("unbound request reached the backend (status %d): allowlist is not layered over GuardHTTPClient", resp.StatusCode)
+	}
+	if !errors.Is(err, provider.ErrDestinationDenied) || refused.Load() != 0 {
+		t.Fatalf("unbound request = %v (refused %d), want the guard's denial, not an allowlist refusal", err, refused.Load())
+	}
+	if n := len(f.Requests()); n != 0 {
+		t.Fatalf("server saw %d requests, want 0", n)
+	}
+}
+
 func isCode(err error, want Code) bool {
 	code, ok := CodeOf(err)
 	return ok && code == want && !errors.Is(err, context.Canceled)
