@@ -2,6 +2,7 @@ package opsbackend
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -120,7 +121,8 @@ func TestCollectorOneTickObservesEverySurfaceOnce(t *testing.T) {
 	obs := c.Tick(context.Background())
 	assertRequests(t, f, reqVersion, reqRunning, reqMetrics, reqModels)
 	b := obs.Backends[0]
-	if b.Kind != KindLlamaSwap || b.Support != SupportSupported || b.Version != "v235" || b.Running == nil || len(b.Running.Value) != 1 {
+	if b.Kind != KindLlamaSwap || b.Support != SupportSupported || b.Version != "v235" || b.Running == nil || len(b.Running.Value) != 1 ||
+		b.Rows == nil || len(b.Rows.Value) != 3 || b.Listed == nil || len(b.Listed.Value) != 3 {
 		t.Fatalf("backend = %+v", b)
 	}
 	assertNoSentinels(t, obs)
@@ -128,12 +130,12 @@ func TestCollectorOneTickObservesEverySurfaceOnce(t *testing.T) {
 
 func TestCollectorRemoteAndInvalidAreNeverContacted(t *testing.T) {
 	f := opsfixture.NewLlamaSwap(t)
-	c := NewCollector([]BackendSpec{
-		{Provider: "a-remote", BaseURL: "https://api.example.com", APIFormat: "openai-compat"},
-		{Provider: "b-prefix", BaseURL: f.URL() + "/upstream/gemma4:31b", APIFormat: "openai-compat"},
-		{Provider: "c-hosted", BaseURL: "https://opencode.ai/zen/go", APIFormat: "openai-compat"},
-		{Provider: "d-format", BaseURL: f.URL(), APIFormat: "anthropic"},
+	c := NewCollector([]BackendSpec{ // out of order: observations sort by provider
 		{Provider: "e-key", BaseURL: f.URL(), APIFormat: "openai-compat", APIKey: "k\r\nX-Injected: 1"},
+		{Provider: "c-hosted", BaseURL: "https://opencode.ai/zen/go", APIFormat: "openai-compat"},
+		{Provider: "a-remote", BaseURL: "https://api.example.com", APIFormat: "openai-compat"},
+		{Provider: "d-format", BaseURL: f.URL(), APIFormat: "anthropic"},
+		{Provider: "b-prefix", BaseURL: f.URL() + "/upstream/gemma4:31b", APIFormat: "openai-compat"},
 	}, Options{Clock: newFakeClock().clock()})
 	obs := c.Tick(context.Background())
 	assertRequests(t, f)
@@ -236,8 +238,11 @@ func TestCollectorLoadEpisodesAndGaps(t *testing.T) {
 	starting := `{"running":[{"model":"m","state":"starting","ttl":600}]}`
 	ready := `{"running":[{"model":"m","state":"ready","ttl":600}]}`
 
-	step(none)       // baseline, nothing tracked
-	step(starting)   // episode 1 begins
+	base := step(none)      // baseline, nothing tracked
+	first := step(starting) // episode 1 begins
+	if !base.Since.Equal(base.Running.At) || !memory(t, first, "m").Since.Equal(first.Running.At) {
+		t.Fatalf("Since: period %v (want %v), model %v (want %v)", base.Since, base.Running.At, memory(t, first, "m").Since, first.Running.At)
+	}
 	b := step(ready) // same episode
 	if got := memory(t, b, "m"); got.Loads != 1 || got.FirstObserved.IsZero() {
 		t.Fatalf("after starting->ready: %+v", got)
@@ -252,8 +257,8 @@ func TestCollectorLoadEpisodesAndGaps(t *testing.T) {
 	// The first sample after a gap is a baseline: a model still loaded
 	// across the gap is not a new load episode.
 	b = step(ready)
-	if got := memory(t, b, "m"); got.Loads != 2 || got.Gaps != 1 || b.Gaps != 1 || b.Periods != 2 {
-		t.Fatalf("gap handling: mem=%+v gaps=%d periods=%d", got, b.Gaps, b.Periods)
+	if got := memory(t, b, "m"); got.Loads != 2 || got.Gaps != 1 || b.Gaps != 1 || b.Periods != 2 || !b.Since.Equal(b.Running.At) || !got.Since.Equal(first.Running.At) {
+		t.Fatalf("gap handling: mem=%+v gaps=%d periods=%d since=%v", got, b.Gaps, b.Periods, b.Since)
 	}
 	step(none)
 	b = step(ready)
@@ -264,22 +269,60 @@ func TestCollectorLoadEpisodesAndGaps(t *testing.T) {
 
 // TestCollectorClockJumpDropsSamples: macOS monotonic time stops during
 // sleep, so a pre-sleep reading would look seconds old after wake. Every
-// reading is dropped when wall and monotonic time diverge.
+// reading is dropped when wall and monotonic time diverge by more than 1 s
+// either way; drift within that is not a jump.
 func TestCollectorClockJumpDropsSamples(t *testing.T) {
-	f := opsfixture.NewLlamaSwap(t)
-	clk := newFakeClock()
-	c := NewCollector([]BackendSpec{lsSpec(f.URL())}, Options{Interval: 2 * time.Second, Clock: clk.clock()})
-	c.Tick(context.Background())
-	f.SetStatus("/running", http.StatusInternalServerError) // the post-wake re-read fails
-	clk.advance(2*time.Hour, 2*time.Second)
-	obs := c.Tick(context.Background())
-	b := obs.Backends[0]
-	if b.Running != nil || b.Gaps != 1 || !obs.TimingUncertain {
-		t.Fatalf("clock jump: running=%v gaps=%d uncertain=%v", b.Running, b.Gaps, obs.TimingUncertain)
+	for _, tc := range []struct {
+		name       string
+		wall, mono time.Duration
+		jump       bool
+	}{
+		{"slept 2 h", 2 * time.Hour, 2 * time.Second, true},
+		{"wall 2 s ahead", 4 * time.Second, 2 * time.Second, true},
+		{"wall stepped back", -time.Hour, 2 * time.Second, true},
+		{"0.5 s drift", 2500 * time.Millisecond, 2 * time.Second, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := opsfixture.NewLlamaSwap(t)
+			clk := newFakeClock()
+			c := NewCollector([]BackendSpec{lsSpec(f.URL())}, Options{Interval: 2 * time.Second, Clock: clk.clock()})
+			c.Tick(context.Background())
+			f.SetStatus("/running", http.StatusInternalServerError) // the post-wake re-read fails
+			clk.advance(tc.wall, tc.mono)
+			obs := c.Tick(context.Background())
+			b := obs.Backends[0]
+			if (b.Running == nil) != tc.jump || b.Gaps != 1 || obs.TimingUncertain != tc.jump {
+				t.Fatalf("clock jump: running=%v gaps=%d uncertain=%v, want jump=%v", b.Running, b.Gaps, obs.TimingUncertain, tc.jump)
+			}
+			clk.advance(2*time.Second, 2*time.Second)
+			if c.Tick(context.Background()).TimingUncertain {
+				t.Fatal("timing uncertainty must clear on the next clean tick")
+			}
+		})
 	}
-	clk.advance(2*time.Second, 2*time.Second)
-	if c.Tick(context.Background()).TimingUncertain {
-		t.Fatal("timing uncertainty must clear on the next clean tick")
+}
+
+// TestCollectorLateTickOpensGap: a tick more than 3 intervals after the last
+// opens a gap (spec §4.5), which also clears FirstObserved; exactly 3 does
+// not.
+func TestCollectorLateTickOpensGap(t *testing.T) {
+	for _, tc := range []struct {
+		late time.Duration
+		gaps int
+	}{{6 * time.Second, 0}, {7 * time.Second, 1}} {
+		t.Run(tc.late.String(), func(t *testing.T) {
+			f := opsfixture.NewLlamaSwap(t)
+			clk := newFakeClock()
+			c := NewCollector([]BackendSpec{lsSpec(f.URL())}, Options{Interval: 2 * time.Second, Clock: clk.clock()})
+			f.SetBody("/running", `{"running":[{"model":"m","state":"ready","ttl":600}]}`)
+			c.Tick(context.Background()) // baseline: m loaded
+			f.SetBody("/running", `{"running":[]}`)
+			clk.advance(tc.late, tc.late)
+			b := c.Tick(context.Background()).Backends[0]
+			if m := memory(t, b, "m"); b.Gaps != tc.gaps || m.Gaps != tc.gaps || !m.FirstObserved.IsZero() {
+				t.Fatalf("late by %v: gaps=%d mem=%+v, want %d gaps and no FirstObserved", tc.late, b.Gaps, m, tc.gaps)
+			}
+		})
 	}
 }
 
@@ -298,6 +341,18 @@ func TestObservationsDroppedOnSkewSinceCollection(t *testing.T) {
 	}
 	if obs.Backends[0].Running == nil {
 		t.Fatal("Dropped mutated its receiver")
+	}
+	full := Observations{Backends: []BackendObservation{{
+		Reachable: &Sample[bool]{}, ReachCode: CodeTimeout, ReachRetry: time.Second, Running: &Sample[[]RunningModel]{},
+		Rows: &Sample[[]ActivityRow]{}, Listed: &Sample[[]ListedModel]{}, PS: &Sample[[]PSModel]{},
+	}}}
+	if b := full.Dropped().Backends[0]; b.Reachable != nil || b.ReachCode != "" || b.ReachRetry != 0 || b.Running != nil || b.Rows != nil || b.Listed != nil || b.PS != nil {
+		t.Fatalf("Dropped kept a reading: %+v", b)
+	}
+	ahead := Observations{CollectedAt: clk.clock().Wall(), CollectedMono: clk.clock().Mono()}
+	clk.advance(time.Second, time.Hour)
+	if ahead.SkewSince(clk.clock()) < time.Minute {
+		t.Fatal("monotonic time running ahead of wall time not detected")
 	}
 }
 
@@ -319,6 +374,40 @@ func TestCollectorBackoffSequenceAndRetryTime(t *testing.T) {
 	}
 	if s := surface(last, "running"); s.NextAttempt != 7*time.Second+8*time.Second {
 		t.Fatalf("NextAttempt = %v, want 15s (third failure at 7s, backoff 8s)", s.NextAttempt)
+	}
+	f.SetStatus("/running", 0)
+	clk.advance(8*time.Second, 8*time.Second) // 15 s: the retry succeeds
+	c.Tick(context.Background())
+	f.SetStatus("/running", http.StatusInternalServerError)
+	clk.advance(2*time.Second, 2*time.Second) // 17 s: fails again
+	if s := surface(c.Tick(context.Background()).Backends[0], "running"); s.NextAttempt != 19*time.Second {
+		t.Fatalf("NextAttempt = %v, want 19s: a success restarts backoff at 2 s", s.NextAttempt)
+	}
+}
+
+func TestBackoffDoublesToThe30sCap(t *testing.T) {
+	for n, want := range map[int]time.Duration{
+		1: 2 * time.Second, 2: 4 * time.Second, 3: 8 * time.Second, 4: 16 * time.Second,
+		5: 30 * time.Second, 6: 30 * time.Second, 64: 30 * time.Second, 1 << 20: 30 * time.Second,
+	} {
+		if got := backoff(n); got != want {
+			t.Fatalf("backoff(%d) = %v, want %v", n, got, want)
+		}
+	}
+}
+
+// TestCollectorCallerDeadlineIsUnclassified: a deadline the caller set is
+// the caller's, like a cancellation: a request it cuts short is not the
+// backend's timeout and starts no backoff.
+func TestCollectorCallerDeadlineIsUnclassified(t *testing.T) {
+	f := opsfixture.NewLlamaSwap(t)
+	f.HoldFor(t, "/running")
+	c := NewCollector([]BackendSpec{lsSpec(f.URL())}, Options{Interval: 2 * time.Second, Clock: newFakeClock().clock()})
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	b := c.Tick(ctx).Backends[0]
+	if s := surface(b, "running"); s.LastError != "" || s.NextAttempt != 0 || b.ReachCode != "" || b.Kind != KindLlamaSwap {
+		t.Fatalf("caller deadline classified: running=%+v reach=%q kind=%s", s, b.ReachCode, b.Kind)
 	}
 }
 
@@ -401,7 +490,18 @@ func TestCollectorTickIsSerialized(t *testing.T) {
 	}
 }
 
+// TestCollectorSnapshotsAreDetached: writing through every slice and pointer
+// of a returned snapshot, or of Dropped's result, leaves the collector (and
+// the receiver) unchanged.
 func TestCollectorSnapshotsAreDetached(t *testing.T) {
+	asJSON := func(o Observations) string {
+		t.Helper()
+		b, err := json.Marshal(o)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
 	f := opsfixture.NewLlamaSwap(t)
 	clk := newFakeClock()
 	c := NewCollector([]BackendSpec{lsSpec(f.URL())}, Options{Interval: 2 * time.Second, Clock: clk.clock()})
@@ -410,15 +510,36 @@ func TestCollectorSnapshotsAreDetached(t *testing.T) {
 	f.SetBody("/running", `{"running":[{"model":"m","state":"ready","ttl":600}]}`)
 	clk.advance(2*time.Second, 2*time.Second)
 	obs := c.Tick(context.Background())
-	obs.Backends[0].Running.Value[0].Model = "mutated"
-	obs.Backends[0].Models[0].Transitions[0].To = "mutated"
-	// Keep the cached running sample: the next read fails, so the collector
-	// must still hold its own unmutated copy.
-	f.SetStatus("/running", http.StatusInternalServerError)
-	clk.advance(2*time.Second, 2*time.Second)
-	next := c.Tick(context.Background()).Backends[0]
-	if next.Running.Value[0].Model != "m" || memory(t, next, "m").Transitions[0].To == "mutated" {
-		t.Fatalf("snapshot shares storage with collector state: %+v", next)
+	want := asJSON(c.snapshot())
+	b := &obs.Backends[0]
+	b.Reachable.Value, b.Reachable.Mono = false, 999
+	b.Running.Value[0].Model, b.Running.Mono = "x", 999
+	b.Rows.Value[0].Model, b.Rows.Mono = "x", 999
+	b.Listed.Value[0].ID, b.Listed.Mono = "x", 999
+	b.Surfaces[0].Name = "x"
+	b.Models[0].Model = "x"
+	b.Models[0].Transitions[0].To = "x"
+	b.Models[0].Transitions = append(b.Models[0].Transitions[:1], Transition{To: "y"})
+	if got := asJSON(c.snapshot()); got != want {
+		t.Fatalf("collector state changed through a snapshot:\n got %s\nwant %s", got, want)
+	}
+
+	recv := c.snapshot()
+	keep := asJSON(recv)
+	d := recv.Dropped()
+	d.Backends[0].Surfaces[0].Name = "x"
+	d.Backends[0].Models[0].Transitions[0].To = "x"
+	if asJSON(recv) != keep {
+		t.Fatal("Dropped result aliases its receiver")
+	}
+
+	o := opsfixture.NewOllama(t, `{"models":[{"name":"llama3:latest","model":"llama3:latest","size_vram":1,"expires_at":"2026-10-05T10:05:00Z"}]}`)
+	oc := NewCollector([]BackendSpec{{Provider: "ollama", BaseURL: o.URL(), APIFormat: "ollama"}}, Options{Clock: newFakeClock().clock()})
+	oobs := oc.Tick(context.Background())
+	owant := asJSON(oc.snapshot())
+	oobs.Backends[0].PS.Value[0].Name, oobs.Backends[0].PS.Mono = "x", 999
+	if asJSON(oc.snapshot()) != owant {
+		t.Fatal("Ollama ps sample shares storage with collector state")
 	}
 }
 
@@ -488,6 +609,10 @@ func TestCollectorAdmissionIsDeterministicAndCapped(t *testing.T) {
 	if b = c.Tick(context.Background()).Backends[0]; b.ModelsOverflow != 44 {
 		t.Fatalf("overflow after the same sample again = %d, want 44: the same models count once", b.ModelsOverflow)
 	}
+	f.SetBody("/running", `{"running":[]}`)
+	if b = c.Tick(context.Background()).Backends[0]; b.ModelsOverflow != 44 {
+		t.Fatalf("overflow after an empty sample = %d, want 44: a dropped model stays untracked", b.ModelsOverflow)
+	}
 }
 
 // TestCollectorDoesNotTrackOverlongNames bounds residency memory by name
@@ -505,7 +630,8 @@ func TestCollectorDoesNotTrackOverlongNames(t *testing.T) {
 }
 
 func TestCollectorOllama(t *testing.T) {
-	f := opsfixture.NewOllama(t, `{"models":[{"name":"llama3:latest","model":"llama3:latest","size_vram":1,"expires_at":"2026-10-05T10:05:00Z"}]}`)
+	// Memory is keyed by NormalizeOllama("Llama3") = "llama3:latest".
+	f := opsfixture.NewOllama(t, `{"models":[{"name":"Llama3","model":"Llama3","size_vram":1,"expires_at":"2026-10-05T10:05:00Z"}]}`)
 	c := NewCollector([]BackendSpec{{Provider: "ollama", BaseURL: f.URL(), APIFormat: "ollama"}}, Options{Clock: newFakeClock().clock()})
 	b := c.Tick(context.Background()).Backends[0]
 	if b.Kind != KindOllama || b.PS == nil || len(b.PS.Value) != 1 {
@@ -518,6 +644,76 @@ func TestCollectorOllama(t *testing.T) {
 		t.Fatalf("an Ollama model leaving /api/ps must read unknown, never unloaded: %+v", tr)
 	}
 	assertRequests(t, f, reqPS, reqPS)
+}
+
+// TestCollectorOllamaOutageAndAnswer: an unreachable Ollama stays an Ollama
+// (it has no identification to redo), and any HTTP answer reads reachable.
+func TestCollectorOllamaOutageAndAnswer(t *testing.T) {
+	f := opsfixture.NewOllama(t, `{"models":[]}`)
+	var down atomic.Bool
+	down.Store(true)
+	base := front(t, f, func(w http.ResponseWriter, _ *http.Request) bool {
+		if down.Load() {
+			hangUp(w)
+			return true
+		}
+		return false
+	})
+	clk := newFakeClock()
+	c := NewCollector([]BackendSpec{{Provider: "ollama", BaseURL: base, APIFormat: "ollama"}}, Options{Interval: 2 * time.Second, Clock: clk.clock()})
+	b := c.Tick(context.Background()).Backends[0]
+	if b.Kind != KindOllama || b.Reachable == nil || b.Reachable.Value || b.ReachCode != CodeUnreachable {
+		t.Fatalf("outage: kind=%s reachable=%+v code=%q", b.Kind, b.Reachable, b.ReachCode)
+	}
+	down.Store(false)
+	f.SetStatus("/api/ps", http.StatusInternalServerError)
+	clk.advance(2*time.Second, 2*time.Second)
+	b = c.Tick(context.Background()).Backends[0]
+	if b.Kind != KindOllama || b.Reachable == nil || !b.Reachable.Value || b.ReachCode != "" || surface(b, "ps").LastError != CodeHTTPStatus {
+		t.Fatalf("status answer: kind=%s reachable=%+v code=%q ps=%+v", b.Kind, b.Reachable, b.ReachCode, surface(b, "ps"))
+	}
+}
+
+// TestCollectorSendsTheAPIKeyOnEveryRequest: the identify, observe (which
+// also re-checks identity) and Ollama clients all carry the api_key, and it
+// never reaches a snapshot.
+func TestCollectorSendsTheAPIKeyOnEveryRequest(t *testing.T) {
+	ls := opsfixture.NewLlamaSwap(t)
+	ol := opsfixture.NewOllama(t, `{"models":[]}`)
+	clk := newFakeClock()
+	c := NewCollector([]BackendSpec{
+		{Provider: "llamacpp", BaseURL: ls.URL(), APIFormat: "openai-compat", APIKey: opsfixture.SentinelAPIKey},
+		{Provider: "ollama", BaseURL: ol.URL(), APIFormat: "ollama", APIKey: opsfixture.SentinelAPIKey},
+	}, Options{Interval: 2 * time.Second, Clock: clk.clock()})
+	c.Tick(context.Background())
+	clk.advance(2*time.Second, 2*time.Second)
+	assertNoSentinels(t, c.Tick(context.Background()))
+	auth := append(ls.Auth(), ol.Auth()...)
+	if len(auth) != 10 || slices.ContainsFunc(auth, func(a string) bool { return a != "Bearer "+opsfixture.SentinelAPIKey }) {
+		t.Fatalf("Authorization = %q, want 10 bearer headers (8 llama-swap, 2 Ollama)", auth)
+	}
+}
+
+// TestCollectorKeepsTheLast20Transitions: the display list is capped at 20,
+// newest last; the load counter is not capped.
+func TestCollectorKeepsTheLast20Transitions(t *testing.T) {
+	f := opsfixture.NewLlamaSwap(t)
+	clk := newFakeClock()
+	c := NewCollector([]BackendSpec{lsSpec(f.URL())}, Options{Interval: 2 * time.Second, Clock: clk.clock()})
+	var b BackendObservation
+	for i := range 26 { // baseline, then 25 transitions: loaded, unloaded, ...
+		body := `{"running":[]}`
+		if i%2 == 1 {
+			body = `{"running":[{"model":"m","state":"ready","ttl":600}]}`
+		}
+		f.SetBody("/running", body)
+		clk.advance(2*time.Second, 2*time.Second)
+		b = c.Tick(context.Background()).Backends[0]
+	}
+	m := memory(t, b, "m")
+	if tr := m.Transitions; len(tr) != 20 || m.Loads != 13 || tr[0].To != "unloaded" || tr[19].To != "loaded" || !tr[19].At.Equal(b.Running.At) {
+		t.Fatalf("transitions=%d loads=%d first=%+v last=%+v", len(tr), m.Loads, tr[0], tr[len(tr)-1])
+	}
 }
 
 // TestCollectorMissedResidencyReadOpensGap: spec §4.5 opens a gap when a
