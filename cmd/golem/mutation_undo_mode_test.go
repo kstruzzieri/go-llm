@@ -13,10 +13,20 @@ import (
 	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
 )
 
+// TestMutationUndoLateModeAndCapability pins three schedules for undoing a
+// tracked create whose bytes still match:
+//   - read-swap: the admitted parent is swapped, inside the precondition read's
+//     guard decision, for an outside directory holding the same bytes at another
+//     mode. #613's post-guard reachability check refuses that read (spec §4.11),
+//     so the refusal is early and no IfMatch runs.
+//   - late-mode: the file is chmod'ed in place inside the write decision, after
+//     the read verified it, so only the late IfMatch mode check can refuse it.
+//   - admitted-move: the parent moves inside the write decision; the admitted
+//     directory stays authoritative (#552) and the admitted file is deleted.
 func TestMutationUndoLateModeAndCapability(t *testing.T) {
 	for _, persistent := range []bool{false, true} {
-		for _, moved := range []bool{false, true} {
-			t.Run(map[bool]string{false: "ram", true: "checkpoint"}[persistent]+map[bool]string{false: "/mode", true: "/admitted-move"}[moved], func(t *testing.T) {
+		for _, variant := range []string{"read-swap", "late-mode", "admitted-move"} {
+			t.Run(map[bool]string{false: "ram/", true: "checkpoint/"}[persistent]+variant, func(t *testing.T) {
 				must := func(err error) {
 					t.Helper()
 					if err != nil {
@@ -64,11 +74,15 @@ func TestMutationUndoLateModeAndCapability(t *testing.T) {
 					if !write {
 						reads++
 					}
-					if !reached && (moved && write || !moved && !write && reads == wanted) {
+					if !reached && (variant == "read-swap" && !write && reads == wanted || variant != "read-swap" && write) {
 						reached = true
-						must(os.Rename(parent, parent+"-old"))
-						must(os.Rename(outside, parent))
-						outside = parent
+						if variant == "late-mode" {
+							must(os.Chmod(filepath.Join(parent, "file"), 0644))
+						} else {
+							must(os.Rename(parent, parent+"-old"))
+							must(os.Rename(outside, parent))
+							outside = parent
+						}
 					}
 					return nil
 				})
@@ -86,16 +100,30 @@ func TestMutationUndoLateModeAndCapability(t *testing.T) {
 				}
 				read(filepath.Join(outside, "file"), "AFTER\n")
 				read(filepath.Join(denied, "file"), "DENIED\n")
-				if moved {
+				switch variant {
+				case "admitted-move":
 					if _, err := os.Lstat(filepath.Join(parent+"-old", "file")); !os.IsNotExist(err) {
 						t.Fatalf("admitted target not deleted: %v", err)
 					}
-				} else {
+				case "read-swap":
 					read(filepath.Join(parent+"-old", "file"), "AFTER\n")
+				case "late-mode":
+					read(filepath.Join(parent, "file"), "AFTER\n")
 				}
+				// Exact output names the refusing check: only late-mode reaches
+				// IfMatch and prints its cause line.
+				refusal := "cannot undo parent/file: file changed since golem wrote it\n"
+				late := refusal + "undo failed for parent/file: file precondition mismatch\n"
+				want := map[string]string{"read-swap": refusal, "late-mode": late}[variant]
 				if persistent {
-					if checkpoint.fatal == nil || !moved && !errors.Is(checkpoint.fatal, agenttools.ErrPreconditionMismatch) ||
-						moved && checkpoint.fatal.Error() != "golem: inverse after-state mismatch" {
+					interrupted := "undo interrupted; run /undo to resume\n"
+					want = map[string]string{
+						"read-swap": "undo failed for parent/file: file identity changed between stat and open\n" + interrupted,
+						"late-mode": late + interrupted,
+					}[variant]
+					wantFatal := map[string]error{"read-swap": errFileChanged, "late-mode": agenttools.ErrPreconditionMismatch}[variant]
+					if checkpoint.fatal == nil || variant != "admitted-move" && !errors.Is(checkpoint.fatal, wantFatal) ||
+						variant == "admitted-move" && checkpoint.fatal.Error() != "golem: inverse after-state mismatch" {
 						t.Fatalf("failure not latched: %v output=%s", checkpoint.fatal, out.String())
 					}
 					groups, err := checkpoint.store.list(context.Background())
@@ -111,12 +139,15 @@ func TestMutationUndoLateModeAndCapability(t *testing.T) {
 					if strings.Contains(out.String(), "undid ") {
 						t.Fatalf("false success: %s", out.String())
 					}
-				} else if moved {
+				} else if variant == "admitted-move" {
 					if len(ram.recs) != 0 || !strings.Contains(out.String(), "undid ") {
 						t.Fatalf("successful capability undo not recorded: %s", out.String())
 					}
-				} else if len(ram.recs) != 1 || out.String() != "cannot undo parent/file: file changed since golem wrote it\nundo failed for parent/file: file precondition mismatch\n" {
-					t.Fatalf("mode refusal lost: %q", out.String())
+				} else if len(ram.recs) != 1 {
+					t.Fatalf("refusal popped RAM history: %q", out.String())
+				}
+				if variant != "admitted-move" && out.String() != want {
+					t.Fatalf("undo result %q, want %q", out.String(), want)
 				}
 			})
 		}
