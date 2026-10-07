@@ -128,7 +128,8 @@ func (t *Search) searchFile(rel string, d fs.DirEntry, re *regexp.Regexp, out *s
 		// The root itself changed, or the walk broke its own contract: neither
 		// is about this file, and skipping would report absence ("no matches")
 		// for a tree that was never fully searched. Abort like walk, glob and
-		// list. ErrRootReplaced wraps errFileChanged, so test it first.
+		// list. ErrRootReplaced wraps errFileChanged, so test it before the
+		// generic skip.
 		return false, err
 	}
 	if err != nil {

@@ -53,7 +53,8 @@ var (
 	errParentMissing = errors.New("parent directory does not exist")
 	// errWalkEntryUnheld reports a walk entry that carries no held directory,
 	// so its name cannot be bound to the listing it came from. Only the Unix
-	// walk raises it; it lives here because search.go builds on every platform.
+	// backend (openWalked, verifyWalkedParent) raises it; it lives here because
+	// search.go builds on every platform.
 	errWalkEntryUnheld = errors.New("tools: walk entry has no held directory")
 	// errScopeDenied marks guard vetoes for sanitized tool output. Its text is
 	// the stable model-visible denial message.

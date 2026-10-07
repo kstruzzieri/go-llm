@@ -73,7 +73,7 @@ func moveIntoVault(t *testing.T, root string) func() {
 	}
 }
 
-// R1: the directory is pinned, then moved under a denied name before the leaf
+// The directory is pinned, then moved under a denied name before the leaf
 // is opened through it. beforeReadOpen fires before each component open; the
 // second firing precedes the leaf.
 func TestReachabilityPointReadMovedBeforeLeafOpen(t *testing.T) {
@@ -96,7 +96,7 @@ func TestReachabilityPointReadMovedBeforeLeafOpen(t *testing.T) {
 	}
 }
 
-// R2: the move happens inside the guard, after the leaf is already open.
+// The move happens inside the guard, after the leaf is already open.
 // A symlink back to the moved directory must not make that guarded name valid.
 func TestReachabilityPointReadMovedInsideGuard(t *testing.T) {
 	var root string
@@ -218,7 +218,7 @@ func TestReachabilityMovedAndRestoredPasses(t *testing.T) {
 	}
 }
 
-// R6: the root is replaced after the per-call root open and before the
+// The root is replaced after the per-call root open and before the
 // guard returns.
 func TestReachabilityRootReplacedInsideGuard(t *testing.T) {
 	var root string
@@ -244,7 +244,7 @@ func TestReachabilityRootReplacedInsideGuard(t *testing.T) {
 	}
 }
 
-// R5: a scoped child pinned at frontend keeps its descriptor for its whole
+// A scoped child pinned at frontend keeps its descriptor for its whole
 // lifetime; moving the scope under a denied name must fail its reads.
 func TestReachabilityScopedChildScopeMoved(t *testing.T) {
 	parent, root := reachFixture(t, nil)
@@ -295,7 +295,7 @@ func TestReachabilityScopedChildOwnRootLookup(t *testing.T) {
 	}
 }
 
-// R5b: an ancestor of the scope is replaced by a symlink to its moved self.
+// An ancestor of the scope is replaced by a symlink to its moved self.
 // Resolving the child's root by absolute path would follow the symlink and
 // pass; only a check anchored at the parent root with O_NOFOLLOW fails it.
 func TestReachabilityScopedAncestorSymlink(t *testing.T) {
@@ -588,7 +588,7 @@ func TestReachabilityScopedChildTopRootReplaced(t *testing.T) {
 	}
 }
 
-// R4: List opened frontend (verified), then the directory moves under a
+// List opened frontend (verified), then the directory moves under a
 // denied name before it is enumerated.
 func TestReachabilityListDirMovedBeforeEnumeration(t *testing.T) {
 	ws, root := reachFixture(t, nil)
@@ -604,7 +604,7 @@ func TestReachabilityListDirMovedBeforeEnumeration(t *testing.T) {
 	}
 }
 
-// R4b: a walk opened frontend from the held root and the directory moves
+// A walk opened frontend from the held root and the directory moves
 // before it is enumerated; the walk aborts instead of emitting its names.
 func TestReachabilityGlobAbortsWhenSubdirMoves(t *testing.T) {
 	ws, root := reachFixture(t, nil)
@@ -793,7 +793,7 @@ func TestReachabilityWalkChildMovedInsideEntryGuard(t *testing.T) {
 	}
 }
 
-// R3: the walk's guard allows frontend/private.txt, then the directory moves
+// The walk's guard allows frontend/private.txt, then the directory moves
 // under a denied name before the file is opened through the held descriptor.
 // The file is skipped; other matches survive.
 func TestReachabilitySearchSkipsMovedFile(t *testing.T) {

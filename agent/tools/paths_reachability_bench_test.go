@@ -22,6 +22,22 @@ func benchWrite(b *testing.B, path, body string) {
 	}
 }
 
+// benchTree2000 writes 2000 Go files three levels deep (10 x 10 x 20) and
+// returns the root.
+func benchTree2000(b *testing.B) string {
+	b.Helper()
+	root := b.TempDir()
+	body := strings.Repeat("package x // filler line\n", 40)
+	for a := 0; a < 10; a++ {
+		for c := 0; c < 10; c++ {
+			for f := 0; f < 20; f++ {
+				benchWrite(b, filepath.Join(root, fmt.Sprintf("a%d", a), fmt.Sprintf("b%d", c), fmt.Sprintf("f%d.go", f)), body)
+			}
+		}
+	}
+	return root
+}
+
 // BenchmarkReachabilityReadDepth5 measures one point read five components
 // deep with 20 siblings per level (#613 budget: <= +25% versus the base).
 func BenchmarkReachabilityReadDepth5(b *testing.B) {
@@ -47,16 +63,7 @@ func BenchmarkReachabilityReadDepth5(b *testing.B) {
 // BenchmarkReachabilitySearch2000 measures a no-match search over 2000 files
 // three levels deep (#613 budget: <= +50% versus the base on Darwin).
 func BenchmarkReachabilitySearch2000(b *testing.B) {
-	root := b.TempDir()
-	body := strings.Repeat("package x // filler line\n", 40)
-	for a := 0; a < 10; a++ {
-		for c := 0; c < 10; c++ {
-			for f := 0; f < 20; f++ {
-				benchWrite(b, filepath.Join(root, fmt.Sprintf("a%d", a), fmt.Sprintf("b%d", c), fmt.Sprintf("f%d.go", f)), body)
-			}
-		}
-	}
-	ws, err := NewWorkspace(root)
+	ws, err := NewWorkspace(benchTree2000(b))
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -96,18 +103,9 @@ func BenchmarkReachabilitySearchWide(b *testing.B) {
 
 // BenchmarkReachabilityGlob2000 measures glob over the 2000-file tree. "**"
 // stops at listMaxEntries, so it pays up to 1000 per-candidate parent checks;
-// "**/f1.go" matches 100. Not covered by the spec 4.8 budget; reported.
+// "**/f1.go" matches 100. It has no #613 budget; reported for comparison.
 func BenchmarkReachabilityGlob2000(b *testing.B) {
-	root := b.TempDir()
-	body := strings.Repeat("package x // filler line\n", 40)
-	for a := 0; a < 10; a++ {
-		for c := 0; c < 10; c++ {
-			for f := 0; f < 20; f++ {
-				benchWrite(b, filepath.Join(root, fmt.Sprintf("a%d", a), fmt.Sprintf("b%d", c), fmt.Sprintf("f%d.go", f)), body)
-			}
-		}
-	}
-	ws, err := NewWorkspace(root)
+	ws, err := NewWorkspace(benchTree2000(b))
 	if err != nil {
 		b.Fatal(err)
 	}

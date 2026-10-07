@@ -61,19 +61,25 @@ guarantees.
 ## Workspace read boundary (#613)
 
 On Linux and Darwin, `read_file`, `search`, `glob`, `list`, scoped dispatch
-construction and readers, and the internal reads behind write/edit previews and
-undo bind the guard's decision to what they return. After the guard allows a
-path and the file is opened or the directory enumerated, the path is resolved
-again from the top-level workspace root, one component at a time without
-following symlinks, and must reach the object being read. Otherwise the read
-fails closed with "path changed during access" (`ErrRootReplaced` for Go
-callers when the root itself was replaced). A directory that fails this check
-after enumeration aborts the walk or listing. `search` skips a file that fails
-its own check, as it skips unreadable files, but aborts on a replaced root.
-Scoped children verify from the top-level root, so a scope directory moved
-after construction stops serving reads, even when a symlink now leads to it.
-`list` rechecks its directory after the entry guards, truncated listings
-included; `glob` rechecks each matching name's parent after that name's guard.
+construction and readers, the reads behind `write_file`/`edit_file` previews
+and pre-apply re-reads, and the exported `ReadFileForUndo`,
+`ReadFileWithModeForUndo` and `HashFileWithMode` bind the guard's decision to
+what they return. After the guard allows a path and the file is opened or the
+directory enumerated, the path is resolved again from the top-level workspace
+root, one component at a time without following symlinks, and must reach the
+object being read. Otherwise the read fails closed. The four read tools report
+"path changed during access"; `write_file`, `edit_file` and the exported
+helpers return the existing "file identity changed between stat and open".
+When the workspace root, or a scoped child's scope or one of its ancestors, was
+renamed away, replaced or turned into a symlink, Go callers get
+`ErrRootReplaced`, whose text adds the prefix "workspace root replaced: ". A
+directory that fails this check after enumeration aborts the walk or listing.
+`search` skips a file that fails its own check, as it skips unreadable files,
+but aborts on `ErrRootReplaced`. Scoped children verify from the top-level
+root, so a scope directory moved after construction stops serving reads, even
+when a symlink now leads to it. `list` rechecks its directory after the entry
+guards, truncated listings included; `glob` rechecks the parent of each name it
+returns after that name's guard.
 
 These checks bind the directory being enumerated. Entry names and metadata
 remain an enumeration snapshot: `list` can still show a directory renamed during
@@ -105,13 +111,13 @@ code: their Effect metadata must remain constant and truthful. This is not
 process isolation, and the child's model transport and configured retrieval
 backend can still use the network.
 
-Scoped tasks retain #448's single pinned descendant directory, re-verified at its
-path on every read (#613). Native readers
-must share one Workspace, and every read must satisfy both the caller's guard
-and the selected subtree. Typed, sanitized denials disclose neither denied
-contents nor private guard diagnostics. Legacy string tasks remain unscoped.
-Separate tasks may select different subtrees; a single child spanning disjoint
-roots is not implemented. Scoped retrieval remains excluded and belongs to
+Scoped tasks retain #448's single pinned descendant directory, re-verified at
+its path on every read (#613). Native readers must share one Workspace, and
+every read must satisfy both the caller's guard and the selected subtree. Typed,
+sanitized denials disclose neither denied contents nor private guard
+diagnostics. Legacy string tasks remain unscoped. Separate tasks may select
+different subtrees; a single child spanning disjoint roots is not implemented.
+Scoped retrieval remains excluded and belongs to
 [#554](https://github.com/kstruzzieri/go-llm/issues/554). #552's filesystem
 boundaries remain unchanged.
 
