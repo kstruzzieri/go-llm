@@ -165,6 +165,15 @@ func seatbeltTempCleanup(dir string, created os.FileInfo) func() error {
 // on failure prepare has already attempted guarded cleanup itself and nothing
 // may spawn. The stamped WorkspaceRoot is consumed as-is — re-resolving it
 // here could silently change the policy after approval.
+//
+// Before constructing the profile, prepare requires the executable target it
+// resolves to be the approved object (spec.ExeIdentity, os.SameFile): the
+// last check binding the approved object, not its bytes, and not atomic with
+// launch. The wrapper still launches the approved spelling spec.Path, not
+// the canonical target, because sandbox-exec cannot override argv[0] and
+// multi-call binaries dispatch on it (clang++ -> clang). sandbox-exec
+// re-resolves that spelling at launch; a swap after this check stays the
+// documented residual, still confined by the profile.
 func (b *seatbeltBackend) prepare(spec execSpec) (execSpec, func() error, error) {
 	if len(spec.Argv) == 0 || spec.Path == "" {
 		return execSpec{}, nil, errors.New("tools: seatbelt requires a non-empty argv and executable path")
@@ -211,6 +220,15 @@ func (b *seatbeltBackend) prepare(spec execSpec) (execSpec, func() error, error)
 	canonExe, err := filepath.EvalSymlinks(spec.Path)
 	if err != nil {
 		return fail(fmt.Errorf("tools: seatbelt resolve executable target: %w", err))
+	}
+	// The profile's read allowance is about to name canonExe; confine it to
+	// the approved object (#553). A nil identity is refused, never skipped.
+	exeInfo, err := os.Stat(canonExe)
+	if err != nil {
+		return fail(fmt.Errorf("tools: seatbelt inspect executable target: %w", err))
+	}
+	if spec.ExeIdentity == nil || !os.SameFile(exeInfo, spec.ExeIdentity) {
+		return fail(errors.New("executable changed since approval; retry"))
 	}
 	sysRoots, err := b.systemRoots(spec.WorkspaceRoot)
 	if err != nil {
