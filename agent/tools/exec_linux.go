@@ -378,10 +378,21 @@ func (b *bwrapBackend) prepare(spec execSpec) (execSpec, error) {
 	if err != nil {
 		return execSpec{}, fmt.Errorf("tools: bwrap resolve executable target: %w", err)
 	}
-	if fi, serr := os.Stat(canonExe); serr != nil {
+	fi, serr := os.Stat(canonExe)
+	if serr != nil {
 		return execSpec{}, fmt.Errorf("tools: bwrap inspect executable target: %w", serr)
-	} else if !fi.Mode().IsRegular() {
+	}
+	if !fi.Mode().IsRegular() {
 		return execSpec{}, fmt.Errorf("tools: bwrap executable %q resolves to a non-regular file", spec.Path)
+	}
+	// The resolved target must be the approved object (spec.ExeIdentity,
+	// #553) before it becomes the bind source and the launched path. This is
+	// the last check before building the namespace: it binds the object, not
+	// its bytes, and is not atomic with bwrap's own bind-time resolution of
+	// canonExe; a swap after it stays the documented residual (#484). A nil
+	// identity is refused, never skipped.
+	if spec.ExeIdentity == nil || !os.SameFile(fi, spec.ExeIdentity) {
+		return execSpec{}, errors.New("executable changed since approval; retry")
 	}
 	args, err := buildBwrapArgs(bwrapPolicy{
 		workspaceRoot:     spec.WorkspaceRoot,
