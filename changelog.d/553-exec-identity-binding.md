@@ -14,6 +14,10 @@ object before launching it.
   object.
 - A sandboxed command refuses with "executable changed since approval; retry"
   when its executable target changed after approval.
+- Seatbelt now runs an approved executable reached through symlinks outside
+  its read roots (Homebrew style, such as `/opt/homebrew/bin/<tool>`) by
+  granting metadata on each link in the chain. Dynamic libraries outside the
+  read roots are still denied.
 - Approval keys and grants are unchanged; a fresh plan against a same-path
   replacement is approved normally.
 - An executable or working directory under an excluded `.git` directory cannot
