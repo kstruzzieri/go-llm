@@ -505,8 +505,8 @@ func TestScratchSourceBeginControls(t *testing.T) {
 		{"lexically divergent internal link", func(t *testing.T, canon string, spec *execSpec) {
 			// On the host a/l -> s/../../x resolves through a/s -> deep/er
 			// to a/x (A). rewriteSymlinkTarget cleans the target lexically
-			// to root x (B), a pre-existing snapshot inaccuracy outside
-			// #553; the validator must fail closed on it.
+			// to root x (B), a pre-existing snapshot inaccuracy tracked in
+			// #660; the validator must fail closed on it.
 			a := filepath.Join(canon, "a")
 			if err := os.MkdirAll(filepath.Join(a, "deep/er"), 0o755); err != nil {
 				t.Fatal(err)
