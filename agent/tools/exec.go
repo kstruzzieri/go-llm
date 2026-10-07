@@ -60,7 +60,7 @@ type execSpec struct {
 	// allowances to it; the host runner ignores it.
 	WorkspaceRoot string
 	// ExeIdentity, DirIdentity and RootIdentity are the os.FileInfo identities
-	// recheckExecPlan compared at Invoke time (#553). Scratch validates its
+	// recheckExecPlan compared before setup/launch (#553). Scratch validates its
 	// snapshot against them, and the sandbox backends verify the executable
 	// target they resolve matches ExeIdentity. Scratch replaces ExeIdentity
 	// with the cloned target identity after source validation. They never
@@ -393,8 +393,9 @@ func prepareExecPlan(ws *Workspace, argv []string, dir string, timeout time.Dura
 // and executable (path equality + os.SameFile identity) before setup/launch,
 // so an escape/symlink, root substitution, or binary swap introduced after
 // approval is caught at this check. It is not atomic with the spawn: a swap
-// after the check and an in-place rewrite (same identity) remain the
-// documented residual (#484). On success it returns an owned execSpec
+// after the check, and any change that keeps the identity (an in-place
+// rewrite, or a delete-and-recreate that reuses the inode number), remain
+// the documented residual (#484). On success it returns an owned execSpec
 // snapshot carrying the compared identities for the later scratch and
 // backend checks; on mismatch a descriptive error the caller renders
 // model-visible. Shared by foreground Invoke and the background tool (#346).
