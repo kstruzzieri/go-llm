@@ -1313,3 +1313,103 @@ func TestReachabilityDeepPathPasses(t *testing.T) {
 		t.Fatalf("deep read = %q, %v", data, err)
 	}
 }
+
+// openChain opens the directory that names lead to from root, one descriptor at
+// a time and never following a symlink, creating each directory first when
+// mkdir is set. The caller closes the result. A long tree's absolute path is
+// too long for a single path lookup on Darwin, so tests reach it this way.
+func openChain(t *testing.T, root string, names []string, mkdir bool) int {
+	t.Helper()
+	dir, err := unix.Open(root, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range names {
+		if mkdir {
+			if err := unix.Mkdirat(dir, name, 0o700); err != nil {
+				_ = unix.Close(dir)
+				t.Fatal(err)
+			}
+		}
+		next, err := unix.Openat(dir, name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+		_ = unix.Close(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		dir = next
+	}
+	return dir
+}
+
+// longPathTree builds five nested directories with 240-byte names under root
+// and f.txt (LONG_MARKER) in the innermost one. Each name fits NAME_MAX, but
+// the directories joined exceed Darwin's PATH_MAX (1024), so no single path
+// lookup can reach the file. It returns the directory names and the file's
+// relative path.
+func longPathTree(t *testing.T, root string) ([]string, string) {
+	t.Helper()
+	names := make([]string, 5)
+	for i := range names {
+		names[i] = fmt.Sprint(i) + strings.Repeat("d", 239)
+	}
+	if run := filepath.Join(names...); len(run) <= 1024 {
+		t.Fatalf("directory run is %d bytes; it must exceed Darwin's PATH_MAX", len(run))
+	}
+	dir := openChain(t, root, names, true)
+	defer func() { _ = unix.Close(dir) }()
+	fd, err := unix.Openat(dir, "f.txt", unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_CLOEXEC, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = unix.Write(fd, []byte("LONG_MARKER\n"))
+	_ = unix.Close(fd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return names, filepath.Join(filepath.Join(names...), "f.txt")
+}
+
+// Control: a path whose directories joined exceed Darwin's PATH_MAX, though
+// each name is short enough, still verifies and reads. Verification must not
+// depend on looking the whole run up in one call.
+func TestReachabilityLongPathPasses(t *testing.T) {
+	ws, root := reachFixture(t, nil)
+	_, rel := longPathTree(t, root)
+	data, err := ws.readAll(rel)
+	if err != nil || string(data) != "LONG_MARKER\n" {
+		t.Fatalf("long path read = %q, %v", data, err)
+	}
+}
+
+// A middle directory of a path too long for one lookup becomes a symlink to its
+// moved self inside the guard. Verifying such a path one name at a time must
+// still refuse the symlink: a per-file errFileChanged, not ErrRootReplaced.
+func TestReachabilityLongPathMiddleSymlink(t *testing.T) {
+	var root, rel string
+	var names []string
+	fired := false
+	ws, root := reachFixture(t, func(r string) {
+		if r != rel || fired {
+			return
+		}
+		fired = true
+		parent := openChain(t, root, names[:2], false)
+		defer func() { _ = unix.Close(parent) }()
+		vault := openChain(t, root, []string{"vault"}, false)
+		defer func() { _ = unix.Close(vault) }()
+		if err := unix.Renameat(parent, names[2], vault, names[2]); err != nil {
+			t.Fatal(err)
+		}
+		if err := unix.Symlinkat(filepath.Join(root, "vault", names[2]), parent, names[2]); err != nil {
+			t.Fatal(err)
+		}
+	})
+	names, rel = longPathTree(t, root)
+	data, err := ws.readAll(rel)
+	if !fired {
+		t.Fatal("guard never saw the long path")
+	}
+	if !errors.Is(err, errFileChanged) || errors.Is(err, ErrRootReplaced) || len(data) != 0 {
+		t.Fatalf("read through symlinked middle directory = %q, %v; want errFileChanged, not ErrRootReplaced", data, err)
+	}
+}
