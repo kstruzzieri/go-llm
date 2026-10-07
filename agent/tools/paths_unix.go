@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -66,41 +67,40 @@ func (w *Workspace) verifyReachable(rel string, opened *os.File) error {
 		return err
 	}
 	root, identity, prefix := w.readAnchor()
-	fd, err := unix.Open(root, workspaceSearchFlags|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	dir, err := unix.Open(root, workspaceSearchFlags|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return reachabilityError(err, true)
 	}
-	dir := os.NewFile(uintptr(fd), root)
-	defer func() { _ = dir.Close() }()
-	if fi, err := dir.Stat(); err != nil {
+	defer func() { _ = unix.Close(dir) }()
+	var st unix.Stat_t
+	if err := unix.Fstat(dir, &st); err != nil {
 		return reachabilityError(err, true)
-	} else if !os.SameFile(identity, fi) {
+	} else if !sameIdentity(identity, &st) {
 		return ErrRootReplaced
 	}
 	parts := splitClean(prefix)
 	inRoot := len(parts) // parts[:inRoot] lead from the anchor to this workspace's own root
 	parts = append(parts, splitClean(rel)...)
-	var st unix.Stat_t
 	if len(parts) == 0 {
-		err = unix.Fstat(int(dir.Fd()), &st)
+		err = unix.Fstat(dir, &st)
 	} else {
 		for i, part := range parts[:len(parts)-1] {
-			next, err := unix.Openat(int(dir.Fd()), part, workspaceSearchFlags|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+			next, err := unix.Openat(dir, part, workspaceSearchFlags|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 			if err != nil {
 				return reachabilityError(err, i < inRoot)
 			}
-			_ = dir.Close()
-			dir = os.NewFile(uintptr(next), part)
+			_ = unix.Close(dir)
+			dir = next
 			if i == inRoot-1 {
 				// The scope's name may now hold another directory.
-				if fi, err := dir.Stat(); err != nil {
+				if err := unix.Fstat(dir, &st); err != nil {
 					return reachabilityError(err, true)
-				} else if !os.SameFile(w.rootIdentity, fi) {
+				} else if !sameIdentity(w.rootIdentity, &st) {
 					return ErrRootReplaced
 				}
 			}
 		}
-		err = unix.Fstatat(int(dir.Fd()), parts[len(parts)-1], &st, unix.AT_SYMLINK_NOFOLLOW)
+		err = unix.Fstatat(dir, parts[len(parts)-1], &st, unix.AT_SYMLINK_NOFOLLOW)
 	}
 	// When rel names this workspace's own root, the leaf is that root.
 	ownRoot := len(parts) == inRoot
@@ -114,6 +114,13 @@ func (w *Workspace) verifyReachable(rel string, opened *os.File) error {
 		return errFileChanged
 	}
 	return nil
+}
+
+// sameIdentity reports whether a construction-time identity (from os.Stat or
+// File.Stat) names the object st describes. Any other FileInfo fails closed.
+func sameIdentity(fi os.FileInfo, st *unix.Stat_t) bool {
+	s, ok := fi.Sys().(*syscall.Stat_t)
+	return ok && uint64(s.Dev) == uint64(st.Dev) && uint64(s.Ino) == uint64(st.Ino)
 }
 
 // reachabilityError classifies a failed lookup by where it failed. On the way
