@@ -56,17 +56,26 @@ var (
 	// backend (openWalked, verifyWalkedParent) raises it; it lives here because
 	// search.go builds on every platform.
 	errWalkEntryUnheld = errors.New("tools: walk entry has no held directory")
+	// errAnchorUnreachable marks a reachability lookup (#613) that failed on
+	// the way to the workspace's own root for a reason other than a changed
+	// path, such as lost permission above the root. It wraps the cause, which
+	// keeps the tool text, and search aborts on it. Only the Unix backend
+	// raises it; it lives here for the same reason as errWalkEntryUnheld.
+	errAnchorUnreachable = errors.New("workspace root unreachable")
 	// errScopeDenied marks guard vetoes for sanitized tool output. Its text is
 	// the stable model-visible denial message.
 	errScopeDenied = errors.New("path denied by workspace policy")
 )
 
-// ErrRootReplaced reports that the workspace root path no longer reaches the
-// directory captured at construction (deleted and recreated, swapped, or
-// renamed away; for a scoped child, this includes its scope directory). Every
+// ErrRootReplaced reports that the workspace root directory is no longer the
+// directory captured at construction (deleted and recreated, or swapped). Every
 // pinned read fails with it until the host builds a new Workspace; hosts that
 // keep a Workspace across project lifetimes should treat it as "rebuild", not
-// "retry". It wraps the identity-change error so tool output is unchanged.
+// "retry". On Linux and Darwin a read in progress also reports it when the root
+// path stops reaching that directory (renamed away or made a symlink), or a
+// scoped child's path stops reaching its pinned scope; later calls on a
+// top-level Workspace then report the failed root lookup instead. It wraps the
+// identity-change error so tool output is unchanged.
 var ErrRootReplaced = fmt.Errorf("workspace root replaced: %w", errFileChanged)
 
 type scopeDeniedError struct{ cause error }

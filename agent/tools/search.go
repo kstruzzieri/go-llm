@@ -118,18 +118,19 @@ func (t *Search) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolRes
 }
 
 // searchFile opens one file (TOCTOU-hardened), skips it if binary, unreadable or
-// moved, and appends matching lines. A replaced root or an unheld walk entry
-// aborts the walk with an error instead. It returns true when a cap was reached
-// (the caller stops the walk). The file is closed before returning — never
-// deferred to the end of the walk — so large trees do not exhaust descriptors.
+// moved, and appends matching lines. A replaced or unreachable root or an
+// unheld walk entry aborts the walk with an error instead. It returns true when
+// a cap was reached (the caller stops the walk). The file is closed before
+// returning — never deferred to the end of the walk — so large trees do not
+// exhaust descriptors.
 func (t *Search) searchFile(rel string, d fs.DirEntry, re *regexp.Regexp, out *strings.Builder, matches *int) (bool, error) {
 	f, err := t.ws.openWalked(rel, d)
-	if errors.Is(err, ErrRootReplaced) || errors.Is(err, errWalkEntryUnheld) {
-		// The root itself changed, or the walk broke its own contract: neither
-		// is about this file, and skipping would report absence ("no matches")
-		// for a tree that was never fully searched. Abort like walk, glob and
-		// list. ErrRootReplaced wraps errFileChanged, so test it before the
-		// generic skip.
+	if errors.Is(err, ErrRootReplaced) || errors.Is(err, errAnchorUnreachable) || errors.Is(err, errWalkEntryUnheld) {
+		// The root itself changed or became unreachable, or the walk broke its
+		// own contract: none is about this file, and skipping would report
+		// absence ("no matches") for a tree that was never fully searched.
+		// Abort like walk, glob and list. ErrRootReplaced wraps errFileChanged,
+		// so test it before the generic skip.
 		return false, err
 	}
 	if err != nil {

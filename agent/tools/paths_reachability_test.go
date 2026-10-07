@@ -959,6 +959,74 @@ func TestReachabilitySearchAbortsWhenRootMovesAway(t *testing.T) {
 	}
 }
 
+// Search permission is lost on the path to the workspace's own root inside the
+// guard of the second of three matching files: on the top-level root's parent,
+// or on an ancestor of a scoped child's scope. That is an anchor-level failure:
+// search aborts with the cause's text instead of returning the first file's
+// match as if the rest had none. Control: an unreadable file below the root is
+// still skipped.
+func TestReachabilitySearchAbortsWhenAnchorUnreachable(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("chmod 000 does not deny root; permission assertions require non-root")
+	}
+	for _, tc := range []struct {
+		name  string
+		scope string                   // "" searches the top-level workspace
+		lock  func(root string) string // the path made unsearchable
+		want  string
+	}{
+		{"top-level root parent", "", filepath.Dir, "path is not accessible"},
+		{"scoped child ancestor", "deep/inner", func(root string) string { return filepath.Join(root, "deep") }, "path is not accessible"},
+		{"unreadable file below the root", "", func(root string) string { return filepath.Join(root, "b.txt") }, "a.txt:1: MATCH a.txt\nc.txt:1: MATCH c.txt"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := filepath.Join(t.TempDir(), "ws")
+			if err := os.MkdirAll(filepath.Join(dir, tc.scope), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			for _, name := range []string{"a.txt", "b.txt", "c.txt"} {
+				if err := os.WriteFile(filepath.Join(dir, tc.scope, name), []byte("MATCH "+name+"\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			ws, err := NewWorkspace(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			locked := tc.lock(ws.root)
+			t.Cleanup(func() { _ = os.Chmod(locked, 0o700) })
+			trigger := filepath.ToSlash(filepath.Join(tc.scope, "b.txt"))
+			calls := 0
+			ws.SetScopeGuard(func(rel string, _ bool) error {
+				if rel != trigger {
+					return nil
+				}
+				calls++
+				if calls == 1 {
+					if err := os.Chmod(locked, 0); err != nil {
+						t.Fatal(err)
+					}
+				}
+				return nil
+			})
+			target := ws
+			if tc.scope != "" {
+				child, _, cleanup, err := newScopedWorkspace(ws, tc.scope)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer cleanup()
+				target = child
+			}
+			res, err := NewSearch(target).Invoke(t.Context(), json.RawMessage(`{"pattern":"MATCH"}`))
+			wantErr := tc.want == "path is not accessible"
+			if calls != 1 || err != nil || res.IsError != wantErr || res.Content != tc.want {
+				t.Fatalf("search = %+v, %v, guard calls=%d; want IsError=%v %q", res, err, calls, wantErr, tc.want)
+			}
+		})
+	}
+}
+
 // A scoped child searches its scope, which moves under a denied name, or is
 // replaced by a new directory of the same name, inside the guard of the second
 // of three matching files. The child's own root is gone either way: search

@@ -32,11 +32,20 @@ unchanged. See docs/least-privilege.md.
   `file identity changed between stat and open`, prefixed
   `workspace root replaced: ` for `ErrRootReplaced`. That error is unexported;
   only `ErrRootReplaced` can be matched with `errors.Is`.
-- A scoped dispatch child's reads fail with `ErrRootReplaced` once its scope
-  directory, or an ancestor of it, is renamed, moved or replaced, even when a
-  symlink now leads to it; previously the child kept reading the moved
-  directory. A workspace root replaced while a scoped child runs also fails its
-  reads with `ErrRootReplaced` instead of serving the old tree.
+- Golem's `/undo` refuses earlier when the file's directory is moved or swapped
+  during the undo's precondition read. RAM undo prints only
+  `cannot undo <path>: file changed since golem wrote it`, without the
+  `undo failed for <path>: file precondition mismatch` line; checkpoint undo
+  prints `undo failed for <path>: file identity changed between stat and open`
+  and `undo interrupted; run /undo to resume`. Previously the late precondition
+  check refused. Nothing is mutated, the record or checkpoint is kept, and
+  `/undo` can be retried once the layout is restored.
+- A scoped dispatch child's reads fail with `ErrRootReplaced` once its path no
+  longer reaches the pinned scope directory, for example because the scope was
+  moved or replaced, even when a symlink now leads to it; previously the child
+  kept reading the moved directory. A workspace root replaced while a scoped
+  child runs also fails its reads with `ErrRootReplaced` instead of serving the
+  old tree.
 - `search` skips a file whose own check fails, as it already skips unreadable
   files. A directory whose check fails after enumeration aborts the `search`,
   `glob` or `list` call.
@@ -46,5 +55,7 @@ unchanged. See docs/least-privilege.md.
   `search` never skips files for it, so it cannot yield partial results or
   `no matches`. It reports `ErrRootReplaced` (tool output
   `path changed during access`); after a top-level root replacement, hosts
-  should build a new `Workspace`.
+  should build a new `Workspace`. Losing access to the root or scope path
+  during the call, such as search permission on a parent directory, also aborts
+  it, with the cause's text (`path is not accessible`).
 - The #552 write and delete operations themselves are unchanged.

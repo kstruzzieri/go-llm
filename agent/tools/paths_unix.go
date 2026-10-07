@@ -5,6 +5,7 @@ package tools
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -51,12 +52,14 @@ func workspaceOpenError(err error) error {
 // top-level workspace root, by name and never through a symlink, to the object
 // the caller holds. It is a sequence of lookups, not an atomic snapshot.
 //
-// The walk first reaches this workspace's own root: the top-level root, then a
-// scoped child's prefix down to its pinned scope directory. Failing there (the
-// root renamed away, replaced, or turned into a symlink) is root-level and
-// reports ErrRootReplaced, so walkers abort instead of skipping every
-// remaining file. A name below the own root that no longer reaches the held
-// object reports errFileChanged.
+// The lookup first reaches this workspace's own root: the top-level root, then
+// a scoped child's prefix down to its pinned scope directory. Every failure
+// there is anchor-level and aborts walkers, search included, instead of
+// skipping every remaining file: the root renamed away, replaced or turned
+// into a symlink reports ErrRootReplaced, and any other error (lost
+// permission, say) is wrapped with errAnchorUnreachable around its cause. A
+// name below the own root that no longer reaches the held object reports
+// errFileChanged.
 func (w *Workspace) verifyReachable(rel string, opened *os.File) error {
 	var held unix.Stat_t
 	if err := unix.Fstat(int(opened.Fd()), &held); err != nil {
@@ -70,18 +73,13 @@ func (w *Workspace) verifyReachable(rel string, opened *os.File) error {
 	dir := os.NewFile(uintptr(fd), root)
 	defer func() { _ = dir.Close() }()
 	if fi, err := dir.Stat(); err != nil {
-		return err
+		return reachabilityError(err, true)
 	} else if !os.SameFile(identity, fi) {
 		return ErrRootReplaced
 	}
-	var parts []string
-	for _, part := range strings.Split(filepath.Join(prefix, rel), string(os.PathSeparator)) {
-		if part != "" && part != "." {
-			parts = append(parts, part)
-		}
-	}
-	// parts[:inRoot] lead from the anchor to this workspace's own root.
-	inRoot := len(strings.FieldsFunc(prefix, func(r rune) bool { return r == os.PathSeparator }))
+	parts := splitClean(prefix)
+	inRoot := len(parts) // parts[:inRoot] lead from the anchor to this workspace's own root
+	parts = append(parts, splitClean(rel)...)
 	var st unix.Stat_t
 	if len(parts) == 0 {
 		err = unix.Fstat(int(dir.Fd()), &st)
@@ -96,7 +94,7 @@ func (w *Workspace) verifyReachable(rel string, opened *os.File) error {
 			if i == inRoot-1 {
 				// The scope's name may now hold another directory.
 				if fi, err := dir.Stat(); err != nil {
-					return err
+					return reachabilityError(err, true)
 				} else if !os.SameFile(w.rootIdentity, fi) {
 					return ErrRootReplaced
 				}
@@ -118,18 +116,36 @@ func (w *Workspace) verifyReachable(rel string, opened *os.File) error {
 	return nil
 }
 
-// reachabilityError maps a lookup that no longer reaches a directory or entry
-// (nothing there, not a directory, or a symlink) to errFileChanged, whose
-// model-visible text names no location, or to ErrRootReplaced when the lookup
-// was for the workspace's own root. Other errors are returned unchanged.
+// reachabilityError classifies a failed lookup by where it failed. On the way
+// to the workspace's own root (ownRoot), a lookup that no longer reaches its
+// directory (nothing there, not a directory, or a symlink) is ErrRootReplaced,
+// and any other error is wrapped with errAnchorUnreachable, keeping the cause's
+// tool text. Below the own root, such a lookup is errFileChanged, whose
+// model-visible text names no location, and other errors are returned
+// unchanged.
 func reachabilityError(err error, ownRoot bool) error {
-	if !errors.Is(err, unix.ENOENT) && !errors.Is(err, unix.ENOTDIR) && !errors.Is(err, unix.ELOOP) {
-		return err
-	}
-	if ownRoot {
+	changed := errors.Is(err, unix.ENOENT) || errors.Is(err, unix.ENOTDIR) || errors.Is(err, unix.ELOOP)
+	switch {
+	case ownRoot && changed:
 		return ErrRootReplaced
+	case ownRoot:
+		return fmt.Errorf("%w: %w", errAnchorUnreachable, err)
+	case changed:
+		return errFileChanged
 	}
-	return errFileChanged
+	return err
+}
+
+// splitClean splits a relative path into its components, dropping "" and "."
+// segments.
+func splitClean(p string) []string {
+	var parts []string
+	for _, part := range strings.Split(p, string(os.PathSeparator)) {
+		if part != "" && part != "." {
+			parts = append(parts, part)
+		}
+	}
+	return parts
 }
 
 // openRead pins each component before consulting policy on the final canonical

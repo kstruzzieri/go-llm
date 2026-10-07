@@ -70,12 +70,17 @@ root, one component at a time without following symlinks, and must reach the
 object being read. Otherwise the read fails closed. The four read tools report
 "path changed during access"; `write_file`, `edit_file` and the exported
 helpers return the existing "file identity changed between stat and open".
-When the workspace root, or a scoped child's scope or one of its ancestors, was
-renamed away, replaced or turned into a symlink, Go callers get
-`ErrRootReplaced`, whose text adds the prefix "workspace root replaced: ". A
-directory that fails this check after enumeration aborts the walk or listing.
-`search` skips a file that fails its own check, as it skips unreadable files,
-but aborts on `ErrRootReplaced`. Scoped children verify from the top-level
+When the workspace root is renamed away, replaced or turned into a symlink, or
+a scoped child's path no longer reaches its pinned scope directory, a read in
+progress reports `ErrRootReplaced` to Go callers, whose text adds the prefix
+"workspace root replaced: ". Later calls on a top-level Workspace report
+`ErrRootReplaced` only when another directory is at the root path; otherwise
+they report the failed root lookup. When the root or scope path cannot be
+looked up for another reason, such as lost search permission, the read fails
+with that cause ("path is not accessible" from the read tools). A directory
+that fails this check after enumeration aborts the walk or listing. `search`
+skips a file that fails its own check, as it skips unreadable files, but aborts
+when the root or scope path fails. Scoped children verify from the top-level
 root, so a scope directory moved after construction stops serving reads, even
 when a symlink now leads to it. `list` rechecks its directory after the entry
 guards, truncated listings included; `glob` rechecks the parent of each name it
