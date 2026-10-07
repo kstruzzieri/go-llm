@@ -139,13 +139,14 @@ func beginScratchSession(ctx context.Context, rt *scratchRuntime, spec execSpec)
 func rewriteScratchSpec(spec execSpec, canonicalRoot, work, tmp string) (execSpec, error) {
 	out := spec
 	out.WorkspaceRoot = work
-	rel, err := filepath.Rel(canonicalRoot, spec.Dir)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+	// One containment predicate, shared with validateScratchSource, so the
+	// validator checks exactly the spellings this rewrite remaps.
+	rel, ok := scratchContained(canonicalRoot, spec.Dir)
+	if !ok {
 		return execSpec{}, fmt.Errorf("tools: scratch cwd %q escapes workspace root %q", spec.Dir, canonicalRoot)
 	}
 	out.Dir = filepath.Join(work, rel)
-	if prel, err := filepath.Rel(canonicalRoot, spec.Path); err == nil &&
-		prel != ".." && !strings.HasPrefix(prel, ".."+string(filepath.Separator)) && !filepath.IsAbs(prel) {
+	if prel, ok := scratchContained(canonicalRoot, spec.Path); ok {
 		out.Path = filepath.Join(work, prel)
 	}
 	env := make([]string, 0, len(spec.Env)+1)
