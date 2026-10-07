@@ -1820,6 +1820,17 @@ func TestSeatbeltProfileGrantsMetadataOnSymlinkChain(t *testing.T) {
 			t.Errorf("link parent %s literal is under %q; want file-read-metadata", filepath.Dir(link), rule)
 		}
 	}
+	// Nothing broader reaches a link: no subpath in any rule equals or
+	// covers one (a read subpath over a link's directory would expose the
+	// whole prefix, e.g. all of /opt/homebrew/bin).
+	for _, part := range strings.Split(profile, `(subpath "`)[1:] {
+		root := part[:strings.Index(part, `")`)]
+		for _, link := range links {
+			if root == "/" || link == root || strings.HasPrefix(link, root+"/") {
+				t.Errorf("subpath %q covers link %s; want only its metadata literal", root, link)
+			}
+		}
+	}
 	if rule := seatbeltRuleOf(profile, `(literal "`+target+`")`); rule != "file-read*" {
 		t.Errorf("canonical target literal is under %q; want file-read*", rule)
 	}
@@ -1919,4 +1930,52 @@ func TestSeatbeltSymlinkChainMustEndAtApprovedTarget(t *testing.T) {
 		!strings.Contains(err.Error(), "not the approved target") {
 		t.Fatalf("chain to a different target = %v; want the approved-target refusal", err)
 	}
+}
+
+// TestSeatbeltSymlinkChainResolvesDotDotPhysically: ".." after a directory
+// link climbs from the link's target, not lexically, so the walk must visit
+// the link. bin/tool -> ../dl/../real/tool with dl -> a/b/real resolves to
+// a/b/real/tool; a lexical join would skip dl and land on the real/tool
+// decoy.
+func TestSeatbeltSymlinkChainResolvesDotDotPhysically(t *testing.T) {
+	dir := canonTempDirT(t)
+	target := filepath.Join(dir, "a", "b", "real", "tool")
+	decoy := filepath.Join(dir, "real", "tool")
+	for _, p := range []string{target, decoy} {
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	spelled := filepath.Join(dir, "bin", "tool")
+	dl := filepath.Join(dir, "dl")
+	if err := os.MkdirAll(filepath.Dir(spelled), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("../dl/../real/tool", spelled); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("a/b/real", dl); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{spelled, dl}
+	got, err := seatbeltSymlinkChain(spelled, target)
+	if err != nil || strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("chain = %q, %v; want %q", got, err, want)
+	}
+
+	b, base := testSeatbeltBackend(t, nil)
+	spec := seatbeltSpec(t, canonTempDirT(t))
+	spec.Path, spec.Argv = spelled, []string{"tool"}
+	spec.ExeIdentity = execIdentityOf(t, spelled)
+	wrapped, calls, err := seatbeltLaunch(t, b, "foreground", spec)
+	if err != nil || calls != 1 {
+		t.Fatalf("launch = %v, delegate calls %d; want the chain accepted once", err, calls)
+	}
+	if rule := seatbeltRuleOf(wrapped.Argv[2], `(literal "`+dl+`")`); rule != "file-read-metadata" {
+		t.Errorf("directory link %s literal is under %q; want file-read-metadata", dl, rule)
+	}
+	assertEmptyDir(t, base)
 }
