@@ -223,7 +223,7 @@ func TestScopedPinnedRootAndCleanup(t *testing.T) {
 		t.Fatalf("pinned read = %q, %v", got, err)
 	}
 	got, _ := NewSearch(ws).Invoke(t.Context(), json.RawMessage(`{"pattern":"ONLY"}`))
-	if got.Content != "visible.txt:1: A_ONLY" {
+	if !got.IsError || got.Content != "path changed during access" {
 		t.Fatalf("pinned search = %+v", got)
 	}
 	cleanup()

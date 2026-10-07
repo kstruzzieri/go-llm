@@ -100,6 +100,16 @@ func (w *Workspace) openReadDir(p string) (*os.File, string, error) {
 }
 func readWorkspaceEntries(f *os.File) ([]fs.DirEntry, error) { return f.ReadDir(-1) }
 
+// readDirEntries enumerates only: the checked-path backend opens by name
+// after the guard decides, so there is no retained descriptor to verify.
+func (w *Workspace) readDirEntries(f *os.File, _ string) ([]fs.DirEntry, error) {
+	return readWorkspaceEntries(f)
+}
+
+// These preserve the checked-path backend's existing guarantees.
+func (w *Workspace) verifyReachable(_ string, _ *os.File) error       { return nil }
+func (w *Workspace) verifyWalkedParent(_ string, _ fs.DirEntry) error { return nil }
+
 func (w *Workspace) pinScope(string) (*os.File, string, error) {
 	return nil, "", errors.New("scoped dispatch is unsupported on this platform")
 }

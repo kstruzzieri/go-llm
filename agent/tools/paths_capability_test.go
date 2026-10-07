@@ -180,6 +180,18 @@ func TestWorkspaceWalkAndMetadataPinned(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// #448: entry metadata is a descriptor-relative snapshot. Capture public's
+	// sole entry before the root is replaced; its Info must still report the
+	// original size afterwards, when no path names that file any more.
+	public, err := ws.openDir("public")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = public.Close() })
+	held, err := readWorkspaceEntries(public)
+	if err != nil || len(held) != 1 || held[0].Name() != "original" {
+		t.Fatalf("held entries %v, %v", held, err)
+	}
 	swapped := false
 	ws.SetScopeGuard(func(rel string, write bool) error {
 		if !swapped {
@@ -199,16 +211,16 @@ func TestWorkspaceWalkAndMetadataPinned(t *testing.T) {
 	var names []string
 	err = ws.walk(context.Background(), func(rel string, d fs.DirEntry) error {
 		names = append(names, rel)
-		if rel == "public/original" {
-			info, err := d.Info()
-			if err != nil || info.Size() != 9 {
-				t.Fatalf("metadata %v, %v", info, err)
-			}
-		}
 		return nil
 	})
-	if err != nil || len(names) != 2 || names[0] != "public" || names[1] != "public/original" {
+	// #613: the root was replaced after its listing was verified; the walk
+	// aborts before enumerating public, so no name from either tree's public
+	// directory is emitted.
+	if !errors.Is(err, ErrRootReplaced) || len(names) != 1 || names[0] != "public" {
 		t.Fatalf("walk %v, %v", names, err)
+	}
+	if info, err := held[0].Info(); err != nil || info.Size() != 9 {
+		t.Fatalf("metadata %v, %v", info, err)
 	}
 }
 

@@ -87,6 +87,10 @@ func (t *Glob) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolResul
 		if !matchGlob(args.Pattern, rel) {
 			return nil
 		}
+		// #613: the entry guard may have moved this name's directory.
+		if err := t.ws.verifyWalkedParent(rel, d); err != nil {
+			return err
+		}
 		if len(entries) >= listMaxEntries {
 			truncated = true
 			return fs.SkipAll
@@ -179,7 +183,7 @@ func (t *List) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolResul
 	}
 	defer func() { _ = f.Close() }()
 
-	dirents, err := readWorkspaceEntries(f)
+	dirents, err := t.ws.readDirEntries(f, relBase)
 	if err != nil {
 		return t.ws.toolErrorResult(err), nil
 	}
@@ -209,6 +213,10 @@ func (t *List) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolResul
 			continue
 		}
 		entries = append(entries, markEntry(rel, d))
+	}
+	// #613: an entry guard may have moved the directory after enumeration.
+	if err := t.ws.verifyReachable(relBase, f); err != nil {
+		return t.ws.toolErrorResult(err), nil
 	}
 	return renderEntries(entries, truncated), nil
 }

@@ -39,6 +39,10 @@ func (w *Workspace) workspaceRoot() (*os.File, func(), error) {
 	return f, func() { _ = f.Close() }, nil
 }
 
+// errWalkEntryUnheld reports a walk entry that carries no held directory, so
+// its name cannot be bound to the listing it came from.
+var errWalkEntryUnheld = errors.New("tools: walk entry has no held directory")
+
 func workspaceOpenError(err error) error {
 	if errors.Is(err, unix.ELOOP) {
 		return errSymlink
@@ -394,6 +398,35 @@ func readWorkspaceEntries(f *os.File) ([]fs.DirEntry, error) {
 	return entries, nil
 }
 
+// readDirEntries enumerates a directory the caller opened at rel, then
+// verifies (#613) that rel still reaches it, so names read from a directory
+// that moved after the guard decided are never returned.
+func (w *Workspace) readDirEntries(f *os.File, rel string) ([]fs.DirEntry, error) {
+	if w.beforeReadDir != nil {
+		w.beforeReadDir(rel)
+	}
+	entries, err := readWorkspaceEntries(f)
+	if err != nil {
+		return nil, err
+	}
+	if err := w.verifyReachable(rel, f); err != nil {
+		return nil, err
+	}
+	return entries, nil
+}
+
+// verifyWalkedParent binds a listed name to its held directory after the
+// walk's entry guard. Membership and metadata remain an enumeration snapshot.
+// Every Unix walk entry holds its directory; any other entry fails closed
+// rather than silently skipping the check.
+func (w *Workspace) verifyWalkedParent(rel string, d fs.DirEntry) error {
+	e, ok := d.(workspaceEntry)
+	if !ok {
+		return errWalkEntryUnheld
+	}
+	return w.verifyReachable(filepath.Dir(rel), e.dir)
+}
+
 func (w *Workspace) walk(ctx context.Context, fn func(string, fs.DirEntry) error) (resultErr error) {
 	defer func() { resultErr = w.scopedPathError(resultErr) }()
 	root, release, err := w.workspaceRoot()
@@ -413,7 +446,7 @@ func (w *Workspace) walkDir(ctx context.Context, parent *os.File, base string, f
 	}
 	f := os.NewFile(uintptr(fd), ".")
 	defer func() { _ = f.Close() }()
-	entries, err := readWorkspaceEntries(f)
+	entries, err := w.readDirEntries(f, base)
 	if err != nil {
 		return err
 	}

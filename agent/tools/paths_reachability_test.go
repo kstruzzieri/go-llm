@@ -5,6 +5,7 @@ package tools
 import (
 	"encoding/json"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -475,5 +476,155 @@ func TestReachabilityRootPathBecomesSymlink(t *testing.T) {
 	}
 	if !errors.Is(err, errFileChanged) || len(data) != 0 {
 		t.Fatalf("read through symlinked root = %q, %v", data, err)
+	}
+}
+
+// R4: List opened frontend (verified), then the directory moves under a
+// denied name before it is enumerated.
+func TestReachabilityListDirMovedBeforeEnumeration(t *testing.T) {
+	ws, root := reachFixture(t, nil)
+	move := moveIntoVault(t, root)
+	ws.beforeReadDir = func(rel string) {
+		if rel == "frontend" {
+			move()
+		}
+	}
+	res, err := NewList(ws).Invoke(t.Context(), json.RawMessage(`{"path":"frontend"}`))
+	if err != nil || !res.IsError || res.Content != "path changed during access" {
+		t.Fatalf("list = %+v, %v", res, err)
+	}
+}
+
+// R4b: a walk opened frontend from the held root and the directory moves
+// before it is enumerated; the walk aborts instead of emitting its names.
+func TestReachabilityGlobAbortsWhenSubdirMoves(t *testing.T) {
+	ws, root := reachFixture(t, nil)
+	move := moveIntoVault(t, root)
+	ws.beforeReadDir = func(rel string) {
+		if rel == "frontend" {
+			move()
+		}
+	}
+	res, err := NewGlob(ws).Invoke(t.Context(), json.RawMessage(`{"pattern":"**"}`))
+	if err != nil || !res.IsError || res.Content != "path changed during access" {
+		t.Fatalf("glob = %+v, %v", res, err)
+	}
+}
+
+// Direct walk pins the enumeration check independently of List/Glob's later checks.
+func TestReachabilityWalkRejectsMovedEnumeration(t *testing.T) {
+	ws, root := reachFixture(t, nil)
+	move := moveIntoVault(t, root)
+	ws.beforeReadDir = func(rel string) {
+		if rel == "frontend" {
+			move()
+		}
+	}
+	var names []string
+	err := ws.walk(t.Context(), func(rel string, _ fs.DirEntry) error {
+		names = append(names, rel)
+		return nil
+	})
+	if !errors.Is(err, errFileChanged) || strings.Contains(strings.Join(names, "\n"), "private.txt") {
+		t.Fatalf("walk = %v, %v; want changed path before child names", names, err)
+	}
+}
+
+// invokeListing runs list on dir ("" for the root) or glob "**".
+func invokeListing(t *testing.T, ws *Workspace, tool, dir string) (string, bool) {
+	t.Helper()
+	if tool == "list" {
+		raw, _ := json.Marshal(map[string]string{"path": dir})
+		res, err := NewList(ws).Invoke(t.Context(), raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return res.Content, res.IsError
+	}
+	res, err := NewGlob(ws).Invoke(t.Context(), json.RawMessage(`{"pattern":"**"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return res.Content, res.IsError
+}
+
+// Directory enumeration has finished when the final entry's guard moves its
+// parent. There is no later child-directory recursion to catch this move.
+func TestReachabilityNamesMovedInsideEntryGuard(t *testing.T) {
+	for _, tool := range []string{"list", "glob"} {
+		t.Run(tool, func(t *testing.T) {
+			var move func()
+			calls := 0
+			ws, root := reachFixture(t, func(rel string) {
+				if rel == "frontend/private.txt" {
+					calls++
+					move()
+				}
+			})
+			move = moveIntoVault(t, root)
+			content, isError := invokeListing(t, ws, tool, "frontend")
+			if calls != 1 || !isError || content != "path changed during access" {
+				t.Fatalf("%s: content=%q, IsError=%v, guard calls=%d", tool, content, isError, calls)
+			}
+		})
+	}
+}
+
+// The final-entry schedule on a flat root: the only entry's guard replaces the
+// root itself. No directory follows for a recursion check to catch it, so the
+// listing must be verified after its entry guards.
+func TestReachabilityFlatRootReplacedInsideEntryGuard(t *testing.T) {
+	for _, tool := range []string{"list", "glob"} {
+		t.Run(tool, func(t *testing.T) {
+			dir := filepath.Join(t.TempDir(), "flat")
+			if err := os.Mkdir(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "only.txt"), []byte("ORIGINAL\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			ws, err := NewWorkspace(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			root := ws.root
+			calls := 0
+			ws.SetScopeGuard(func(rel string, _ bool) error {
+				if rel != "only.txt" {
+					return nil
+				}
+				calls++
+				if calls > 1 {
+					return nil
+				}
+				if err := os.Rename(root, root+"-old"); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Mkdir(root, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(root, "only.txt"), []byte("REPLACEMENT\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				return nil
+			})
+			content, isError := invokeListing(t, ws, tool, "")
+			if calls != 1 || !isError || content != "path changed during access" {
+				t.Fatalf("%s: content=%q, IsError=%v, guard calls=%d", tool, content, isError, calls)
+			}
+		})
+	}
+}
+
+// A walk entry that holds no directory cannot be bound to its listing; the
+// check fails closed instead of passing the name through.
+func TestReachabilityWalkedParentRequiresHeldDirectory(t *testing.T) {
+	ws, root := reachFixture(t, nil)
+	info, err := os.Lstat(filepath.Join(root, "keep.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ws.verifyWalkedParent("keep.txt", fs.FileInfoToDirEntry(info)); !errors.Is(err, errWalkEntryUnheld) {
+		t.Fatalf("unheld entry = %v", err)
 	}
 }
