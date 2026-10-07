@@ -1114,6 +1114,7 @@ func TestBwrapAcceptsApprovedExecutable(t *testing.T) {
 
 // assertBwrapLaunchesCanonical pins the unchanged launch shape: canonExe is
 // the read-only bind source and the executed path, spelling only --argv0.
+// It assumes exactly one trailing payload argument after the executed path.
 func assertBwrapLaunchesCanonical(t *testing.T, argv []string, spelling, canonExe string) {
 	t.Helper()
 	joined := " " + strings.Join(argv, " ") + " "
