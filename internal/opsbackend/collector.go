@@ -189,14 +189,15 @@ type Options struct {
 // Collector polls configured backends. Tick is serialized; every result is a
 // deep copy that shares no storage with the collector.
 type Collector struct {
-	mu        sync.Mutex
-	opts      Options
-	backends  []*backendState
-	ticked    bool
-	tickEnd   time.Time // real time: it bounds real requests
-	lastWall  time.Time
-	lastMono  time.Duration
-	uncertain bool
+	mu          sync.Mutex
+	opts        Options
+	backends    []*backendState
+	nextBackend int // next tick's first backend after exhausting the budget
+	ticked      bool
+	tickEnd     time.Time // real time: it bounds real requests
+	lastWall    time.Time
+	lastMono    time.Duration
+	uncertain   bool
 }
 
 type surfaceState struct {
@@ -207,16 +208,17 @@ type surfaceState struct {
 }
 
 type backendState struct {
-	spec     BackendSpec
-	dest     provider.Destination
-	obs      BackendObservation
-	refused  atomic.Int64
-	identify *client
-	observe  *client
-	surfaces map[string]*surfaceState
-	order    []string
-	prev     map[string]string // model -> live state in the current period; nil before a baseline
-	mem      map[string]*ModelMemory
+	spec        BackendSpec
+	dest        provider.Destination
+	obs         BackendObservation
+	refused     atomic.Int64
+	identify    *client
+	observe     *client
+	surfaces    map[string]*surfaceState
+	order       []string
+	nextSurface int               // first deferred llama-swap telemetry surface; identity stays first
+	prev        map[string]string // model -> live state in the current period; nil before a baseline
+	mem         map[string]*ModelMemory
 }
 
 // NewCollector validates every spec without I/O. Remote, invalid and
@@ -312,7 +314,9 @@ func (c *Collector) Tick(ctx context.Context) Observations {
 	c.tickEnd = time.Now().Add(TickTimeout)
 	tctx, cancel := context.WithDeadline(ctx, c.tickEnd)
 	defer cancel()
-	for _, b := range c.backends {
+	first := c.nextBackend
+	for i := range c.backends {
+		b := c.backends[(first+i)%len(c.backends)]
 		// Peer confirmation fails closed: only a listing read on this tick
 		// counts (spec §5.4).
 		b.obs.Listed = nil
@@ -337,6 +341,12 @@ func (c *Collector) Tick(ctx context.Context) Observations {
 		if b.obs.Kind == KindLlamaSwap {
 			c.observeLlamaSwap(ctx, tctx, b)
 		}
+	}
+	// Rotate providers independently of their unfinished telemetry sweeps:
+	// a slow backend may never fit a whole sweep into a single tick.
+	c.nextBackend = 0
+	if len(c.backends) > 0 && time.Until(c.tickEnd) < RequestTimeout {
+		c.nextBackend = (first + 1) % len(c.backends)
 	}
 	// The lid can close inside a tick too: readings taken before the jump
 	// would render as fresh. Drop them all, and measure the next tick from
@@ -363,11 +373,12 @@ func (c *Collector) now() (time.Time, time.Duration) {
 }
 
 // fetch performs one surface request when its backoff allows, decodes it and
-// records the outcome. It reports whether a fresh sample was applied.
-func (c *Collector) fetch(callerCtx, ctx context.Context, b *backendState, cl *client, surface, path string, limit int64, apply func([]byte) error) bool {
+// records the outcome. It reports whether a fresh sample was applied and
+// whether the tick deferred the request without starting it.
+func (c *Collector) fetch(callerCtx, ctx context.Context, b *backendState, cl *client, surface, path string, limit int64, apply func([]byte) error) (applied, deferred bool) {
 	s := b.surface(surface)
 	if _, mono := c.now(); mono < s.next {
-		return false
+		return false, false
 	}
 	// A request the caller or the tick deadline stopped before it started,
 	// or one with less than a request timeout of tick left (neighbors spent
@@ -378,7 +389,7 @@ func (c *Collector) fetch(callerCtx, ctx context.Context, b *backendState, cl *c
 	// §4.5).
 	if ctx.Err() != nil || time.Until(c.tickEnd) < RequestTimeout {
 		b.missed(surface)
-		return false
+		return false, true
 	}
 	body, err := cl.get(ctx, surface, path, limit)
 	// An answer that arrives after a clock jump inside this tick (lastWall
@@ -387,13 +398,13 @@ func (c *Collector) fetch(callerCtx, ctx context.Context, b *backendState, cl *c
 	// The end of the tick drops every reading and marks timing uncertain.
 	if wall, mono := c.now(); err == nil && jumped(c.lastWall, c.lastMono, wall, mono) {
 		b.missed(surface)
-		return false
+		return false, false
 	}
 	if err == nil {
 		err = apply(body)
 	}
 	c.record(callerCtx, b, surface, s, err)
-	return err == nil
+	return err == nil, false
 }
 
 func (c *Collector) record(callerCtx context.Context, b *backendState, surface string, s *surfaceState, err error) {
@@ -446,10 +457,10 @@ func backoff(failures int) time.Duration {
 func (c *Collector) identifyBackend(callerCtx, ctx context.Context, b *backendState, cl *client) {
 	var version string
 	var isLS bool
-	if !c.fetch(callerCtx, ctx, b, cl, "version", "/api/version", versionLimit, func(body []byte) error {
+	if applied, _ := c.fetch(callerCtx, ctx, b, cl, "version", "/api/version", versionLimit, func(body []byte) error {
 		version, isLS = decodeVersion(body)
 		return nil
-	}) {
+	}); !applied {
 		switch b.surface("version").lastErr {
 		case CodeHTTPStatus, CodeTooLarge:
 			// An answer, but not llama-swap's (spec §4.1): read below as
@@ -499,44 +510,59 @@ func bound(s string) string {
 }
 
 func (c *Collector) observeLlamaSwap(callerCtx, ctx context.Context, b *backendState) {
-	c.fetch(callerCtx, ctx, b, b.observe, "running", "/running", runningLimit, func(body []byte) error {
-		models, err := decodeRunning(body)
-		if err != nil {
-			return err
+	// Identity was checked first. Resume at the first deferred telemetry
+	// surface so a repeatedly slow prefix cannot starve the model listing.
+	surfaces := polledBy[KindLlamaSwap][1:]
+	first := b.nextSurface
+	b.nextSurface = 0
+	pending := false
+	for i := range surfaces {
+		index := (first + i) % len(surfaces)
+		var deferred bool
+		switch surfaces[index] {
+		case "running":
+			_, deferred = c.fetch(callerCtx, ctx, b, b.observe, "running", "/running", runningLimit, func(body []byte) error {
+				models, err := decodeRunning(body)
+				if err != nil {
+					return err
+				}
+				wall, mono := c.now()
+				b.obs.Running = &Sample[[]RunningModel]{Value: models, At: wall, Mono: mono}
+				cur := make(map[string]string, len(models))
+				for _, m := range models {
+					cur[m.Model] = m.State
+				}
+				b.applyResidency(cur, wall)
+				return nil
+			})
+		case "metrics":
+			_, deferred = c.fetch(callerCtx, ctx, b, b.observe, "metrics", "/api/metrics", metricsLimit, func(body []byte) error {
+				rows, err := decodeMetrics(body)
+				if err != nil {
+					return err
+				}
+				wall, mono := c.now()
+				b.obs.Rows = &Sample[[]ActivityRow]{Value: rows, At: wall, Mono: mono}
+				return nil
+			})
+		case "models":
+			_, deferred = c.fetch(callerCtx, ctx, b, b.observe, "models", "/v1/models", modelsLimit, func(body []byte) error {
+				listed, err := decodeModels(body)
+				if err != nil {
+					return err
+				}
+				wall, mono := c.now()
+				b.obs.Listed = &Sample[[]ListedModel]{Value: listed, At: wall, Mono: mono}
+				return nil
+			})
 		}
-		wall, mono := c.now()
-		b.obs.Running = &Sample[[]RunningModel]{Value: models, At: wall, Mono: mono}
-		cur := make(map[string]string, len(models))
-		for _, m := range models {
-			cur[m.Model] = m.State
+		if deferred && !pending {
+			b.nextSurface, pending = index, true
 		}
-		b.applyResidency(cur, wall)
-		return nil
-	})
-	if b.obs.Kind != KindLlamaSwap {
-		return
+		if b.obs.Kind != KindLlamaSwap {
+			return
+		}
 	}
-	c.fetch(callerCtx, ctx, b, b.observe, "metrics", "/api/metrics", metricsLimit, func(body []byte) error {
-		rows, err := decodeMetrics(body)
-		if err != nil {
-			return err
-		}
-		wall, mono := c.now()
-		b.obs.Rows = &Sample[[]ActivityRow]{Value: rows, At: wall, Mono: mono}
-		return nil
-	})
-	if b.obs.Kind != KindLlamaSwap {
-		return
-	}
-	c.fetch(callerCtx, ctx, b, b.observe, "models", "/v1/models", modelsLimit, func(body []byte) error {
-		listed, err := decodeModels(body)
-		if err != nil {
-			return err
-		}
-		wall, mono := c.now()
-		b.obs.Listed = &Sample[[]ListedModel]{Value: listed, At: wall, Mono: mono}
-		return nil
-	})
 }
 
 func (c *Collector) observeOllama(callerCtx, ctx context.Context, b *backendState) {

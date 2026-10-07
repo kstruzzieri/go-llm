@@ -398,10 +398,20 @@ func TestBackendOnlyNeedsFreshObservedProof(t *testing.T) {
 	if ids := backendOnlyIDs(Build(input(ModeWatch, u, remote()))); len(ids) != 0 {
 		t.Fatalf("unsupported backend listed its cached names: %v", ids)
 	}
-	in := input(ModeWatch, localOllama(opsbackend.PSModel{Name: "llama3:latest", Model: "llama3:latest"}, opsbackend.PSModel{Name: "zeta:latest", Model: "zeta:latest"}))
-	in.Configured = []string{"ollama/llama3"} // matches llama3:latest only once normalized
-	if ids := backendOnlyIDs(Build(in)); !reflect.DeepEqual(ids, []string{"backend:ollama/zeta:latest"}) {
+	in := input(ModeWatch, localOllama(
+		opsbackend.PSModel{Name: "llama3:latest", Model: "llama3:latest"},
+		opsbackend.PSModel{Name: "hf.co/team/model:Q4_K_M", Model: "hf.co/team/model:Q4_K_M"},
+		opsbackend.PSModel{Name: "zeta:latest", Model: "zeta:latest"},
+	))
+	in.Configured = []string{"ollama/https://registry.ollama.ai/library/llama3", "ollama/https://hf.co/team/model:Q4_K_M"}
+	s := Build(in)
+	if ids := backendOnlyIDs(s); !reflect.DeepEqual(ids, []string{"backend:ollama/zeta:latest"}) {
 		t.Fatalf("fresh /api/ps: backend-only = %v", ids)
+	}
+	for _, id := range in.Configured {
+		if m := modelByID(t, s, id); m.Residency.State != StateLoaded {
+			t.Fatalf("scheme-qualified Ollama model %q = %+v", id, m.Residency)
+		}
 	}
 	in.NowMono = 17 * time.Second
 	if ids := backendOnlyIDs(Build(in)); len(ids) != 0 {

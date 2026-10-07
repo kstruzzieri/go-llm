@@ -4,12 +4,15 @@ import "strings"
 
 // NormalizeOllama reduces a model name to Ollama's own shortest display form
 // (DisplayShortest) so configured names and /api/ps names compare. Read as
-// [host/][namespace/]model[:tag]: the host is dropped only when it is
-// registry.ollama.ai, the namespace only when the host is that default and
-// the namespace is library, a missing tag becomes ":latest", and comparison
-// is case-insensitive. An empty or blank name normalizes to "".
+// [scheme://][host/][namespace/]model[:tag]. The scheme is dropped; the host
+// only when it is registry.ollama.ai, the namespace only when the host is
+// that default and the namespace is library. A missing tag becomes ":latest";
+// comparison is case-insensitive. An empty or blank name normalizes to "".
 func NormalizeOllama(name string) string {
 	n := strings.ToLower(strings.TrimSpace(name))
+	if _, rest, ok := strings.Cut(n, "://"); ok {
+		n = rest
+	}
 	if n == "" {
 		return "" // never equals a nonblank normalized name
 	}

@@ -33,3 +33,11 @@
   with `TERM=dumb`. The one-shot table has no loads column and no retry text.
 - Known limitations (clock sharing with llama-swap, 2-second load sampling,
   wide characters) are listed in `docs/golem.md`.
+- Slow successful polls no longer permanently starve later surfaces or
+  providers: deferred work receives polling time on subsequent ticks while
+  retaining the request and tick deadlines.
+- Ollama model names with a scheme, such as
+  `https://registry.ollama.ai/library/llama3`, match the backend's short name
+  instead of appearing unknown beside a duplicate backend-only row.
+- `-watch` respects a one-row terminal instead of falling back to an 80×24
+  frame that overflows the terminal.

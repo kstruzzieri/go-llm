@@ -877,7 +877,7 @@ func TestCollectorUnstartedRequestIsNotAnObservation(t *testing.T) {
 			c.tickEnd = time.Now().Add(tc.budget)
 			c.lastWall, c.lastMono = c.now() // as Tick leaves them: no jump
 			b := c.backends[0]
-			if c.fetch(context.Background(), tc.ctx, b, b.identify, "version", "/api/version", versionLimit, func([]byte) error { return nil }) {
+			if applied, _ := c.fetch(context.Background(), tc.ctx, b, b.identify, "version", "/api/version", versionLimit, func([]byte) error { return nil }); applied {
 				t.Fatal("fetch without the budget for a request applied a sample")
 			}
 			o := c.snapshot().Backends[0]
@@ -919,6 +919,56 @@ func TestCollectorTickBudgetIsNotBlamedOnTheLastBackend(t *testing.T) {
 		t.Fatalf("a backend the tick budget never reached was read as down: reachable=%+v code=%q surfaces=%+v", b.Reachable, b.ReachCode, b.Surfaces)
 	}
 	assertRequests(t, ok)
+}
+
+// Every request succeeds within its own deadline, but neither slow backend
+// fits all four surfaces into one tick. Deferred telemetry must get a turn
+// without keeping later backends behind the same unfinished sweep forever.
+func TestCollectorBudgetDeferralIsFair(t *testing.T) {
+	var fixtures []*opsfixture.Server
+	var specs []BackendSpec
+	for _, name := range []string{"a-slow", "b-slow"} {
+		f := opsfixture.NewLlamaSwap(t)
+		fixtures = append(fixtures, f)
+		base := front(t, f, func(_ http.ResponseWriter, r *http.Request) bool {
+			select {
+			case <-time.After(1100 * time.Millisecond):
+			case <-r.Context().Done():
+			}
+			return false
+		})
+		specs = append(specs, BackendSpec{Provider: name, BaseURL: base, APIFormat: "openai-compat"})
+	}
+	fast := opsfixture.NewOllama(t, `{"models":[]}`)
+	specs = append(specs, BackendSpec{Provider: "z-fast", BaseURL: fast.URL(), APIFormat: "ollama"})
+	c := NewCollector(specs, Options{Interval: 2 * time.Second})
+	for tick := range 6 {
+		before := []int{len(fixtures[0].Requests()), len(fixtures[1].Requests())}
+		obs := c.Tick(context.Background())
+		for i, f := range fixtures {
+			if requests := f.Requests()[before[i]:]; len(requests) > 0 && requests[0] != reqVersion {
+				t.Fatalf("tick %d backend %d observed telemetry before identity: %v", tick, i, requests)
+			}
+		}
+		for _, b := range obs.Backends {
+			if b.ReachCode != "" || slices.ContainsFunc(b.Surfaces, func(s Surface) bool { return s.LastError != "" }) {
+				t.Fatalf("tick %d: successful or deferred backend %s reported a failure: %+v", tick, b.Provider, b)
+			}
+		}
+	}
+	for i, f := range fixtures {
+		for _, req := range []opsfixture.Request{reqVersion, reqRunning, reqMetrics, reqModels} {
+			if countURI(f, req.URI) == 0 {
+				t.Errorf("backend %d: %s was never polled in six ticks", i, req.URI)
+			}
+		}
+		if f.Loads.Load() != 0 {
+			t.Fatalf("backend %d: observation reached a model-dispatched route", i)
+		}
+	}
+	if n := countURI(fast, "/api/ps"); n < 2 {
+		t.Errorf("fast backend polled %d times in six ticks, want at least two turns", n)
+	}
 }
 
 // TestCollectorSleepDuringTickDropsReadings: the lid closes after /running

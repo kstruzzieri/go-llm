@@ -87,7 +87,7 @@ func runOpsWatch(ctx context.Context, src *opsSource, w io.Writer, fd int, ops t
 		// ponytail: a resize shows on the next frame (up to 1 s, or up to 5 s
 		// during a collection); redraw on watchResize if that lag shows.
 		width, height, err := ops.GetSize(fd)
-		if err != nil || width <= 0 || height <= 1 {
+		if err != nil || width <= 0 || height <= 0 {
 			width, height = 80, 24
 		}
 		var frame bytes.Buffer

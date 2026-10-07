@@ -433,4 +433,7 @@ func TestOpsWatchCadenceAndResize(t *testing.T) {
 	if cols, lines := size(w.frame(2)); cols > 40 || lines > 5 {
 		t.Fatalf("frame after resize is %d columns x %d lines, want at most 40 x 5", cols, lines)
 	}
+	if got := watchFrame(t, 40, 1); got != "" {
+		t.Fatalf("watch frame at 40x1 = %q, want empty with the cursor row reserved", got)
+	}
 }
