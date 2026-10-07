@@ -76,6 +76,32 @@ func BenchmarkReachabilitySearch2000(b *testing.B) {
 	}
 }
 
+// BenchmarkReachabilitySearchDeep measures a no-match search over 2000 files
+// nine components deep (100 leaf directories of 20 files), the shape of a
+// Java-style package tree. Each searched file's check walks every component,
+// so this bounds the per-file cost that the three-level tree understates.
+func BenchmarkReachabilitySearchDeep(b *testing.B) {
+	root := b.TempDir()
+	body := strings.Repeat("package x // filler line\n", 40)
+	for l := 0; l < 100; l++ {
+		dir := filepath.Join(root, "src", "main", "java", "com", "acme", fmt.Sprintf("m%d", l/10), fmt.Sprintf("p%d", l%10), "impl")
+		for f := 0; f < 20; f++ {
+			benchWrite(b, filepath.Join(dir, fmt.Sprintf("f%d.go", f)), body)
+		}
+	}
+	ws, err := NewWorkspace(root)
+	if err != nil {
+		b.Fatal(err)
+	}
+	s := NewSearch(ws)
+	raw := json.RawMessage(`{"pattern":"NOMATCHXYZ"}`)
+	for b.Loop() {
+		if res, err := s.Invoke(context.Background(), raw); err != nil || res.IsError || res.Content != "no matches" || res.Truncated {
+			b.Fatalf("search: %+v, %v", res, err)
+		}
+	}
+}
+
 // BenchmarkReachabilitySearchWide exposes repeated enumeration of one large
 // directory. Compare its scaling before/after; a fixed-size timing alone does
 // not establish algorithmic complexity.
