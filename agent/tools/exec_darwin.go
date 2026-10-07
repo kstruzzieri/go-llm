@@ -238,8 +238,12 @@ func (b *seatbeltBackend) prepare(spec execSpec) (execSpec, func() error, error)
 		spec.WorkspaceRoot, canonTemp, canonExe,
 		"/dev/null", "/dev/random", "/dev/urandom")
 	if canonExe != spec.Path && posixCleanAbs(spec.Path) {
-		// A symlinked approved path needs metadata on its own spine to be
-		// resolvable; the content allowance stays on the canonical target.
+		// Metadata on the approved spelling's strict ancestors only; the
+		// content allowance stays on the canonical target. The link node
+		// itself gets no allowance, so a symlinked spelling outside every
+		// read root (an external Homebrew-style link) is denied at
+		// sandbox-exec's execvp: a known pre-existing #442 gap, follow-up
+		// pending.
 		ancestorSources = append(ancestorSources, spec.Path)
 	}
 	ancestors, err := seatbeltMetadataAncestors(ancestorSources)

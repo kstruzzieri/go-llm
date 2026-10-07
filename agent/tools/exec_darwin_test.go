@@ -375,19 +375,21 @@ func TestSeatbeltRunCleanupAndResultTaxonomy(t *testing.T) {
 		assertEmptyDir(t, base)
 	})
 	t.Run("runner error propagated and temp cleaned", func(t *testing.T) {
-		fake := &captureRunner{err: errors.New("spawn failed")}
+		runErr := errors.New("spawn failed")
+		fake := &captureRunner{err: runErr}
 		b, base := testSeatbeltBackend(t, fake)
-		if _, err := b.Run(context.Background(), seatbeltSpec(t, canonTempDirT(t))); err == nil {
-			t.Fatal("runner error swallowed")
+		if _, err := b.Run(context.Background(), seatbeltSpec(t, canonTempDirT(t))); !errors.Is(err, runErr) {
+			t.Fatalf("Run = %v; want the runner error %v", err, runErr)
 		}
 		assertEmptyDir(t, base)
 	})
 	t.Run("collector error cleans temp and skips delegate", func(t *testing.T) {
 		fake := &captureRunner{}
 		b, base := testSeatbeltBackend(t, fake)
-		b.systemRoots = func(string) ([]string, error) { return nil, errors.New("collector down") }
-		if _, err := b.Run(context.Background(), seatbeltSpec(t, canonTempDirT(t))); err == nil {
-			t.Fatal("collector error swallowed")
+		collectorErr := errors.New("collector down")
+		b.systemRoots = func(string) ([]string, error) { return nil, collectorErr }
+		if _, err := b.Run(context.Background(), seatbeltSpec(t, canonTempDirT(t))); !errors.Is(err, collectorErr) {
+			t.Fatalf("Run = %v; want the collector error %v", err, collectorErr)
 		}
 		if fake.called != 0 {
 			t.Fatal("delegate ran despite collector failure")
@@ -505,11 +507,12 @@ func TestSeatbeltStartRejectsBadRootBeforeDelegate(t *testing.T) {
 }
 
 func TestSeatbeltStartSpawnFailureCleansTemp(t *testing.T) {
-	starter := &captureStarter{err: errors.New("spawn failed")}
+	spawnErr := errors.New("spawn failed")
+	starter := &captureStarter{err: spawnErr}
 	b, base := testSeatbeltBackend(t, nil)
 	b.starter = starter
-	if _, err := b.Start(seatbeltSpec(t, canonTempDirT(t)), io.Discard, io.Discard); err == nil {
-		t.Fatal("spawn failure swallowed")
+	if _, err := b.Start(seatbeltSpec(t, canonTempDirT(t)), io.Discard, io.Discard); !errors.Is(err, spawnErr) {
+		t.Fatalf("Start = %v; want the spawn error %v", err, spawnErr)
 	}
 	assertEmptyDir(t, base)
 }
@@ -919,8 +922,8 @@ func TestSeatbeltRejectsWorkspaceHardLinkToOutsideInode(t *testing.T) {
 					_, _, _ = proc.Wait()
 				}
 			}
-			if err == nil {
-				t.Error("Seatbelt launch error = nil, want outside-hard-link rejection")
+			if err == nil || !strings.Contains(err.Error(), "is linked outside the workspace") {
+				t.Errorf("Seatbelt launch error = %v, want the outside-hard-link rejection", err)
 			}
 			if calls := runner.called + starter.called; calls != 0 {
 				t.Errorf("delegate calls = %d, want 0", calls)
@@ -1422,7 +1425,7 @@ func TestNewExecBackendSeatbeltMatchesRealCapability(t *testing.T) {
 
 // --- Executable identity binding (#553) ---
 
-var seatbeltLifetimes = []string{"Run", "Start"}
+var seatbeltLifetimes = []string{"foreground", "background"}
 
 // seatbeltLaunch drives one lifetime of b with capture delegates and returns
 // the wrapper spec the selected delegate received, the total delegate calls,
@@ -1433,7 +1436,7 @@ func seatbeltLaunch(t *testing.T, b *seatbeltBackend, lifetime string, spec exec
 	runner := &captureRunner{}
 	starter := &captureStarter{proc: &fakeProcess{pid: 42}}
 	b.runner, b.starter = runner, starter
-	if lifetime == "Run" {
+	if lifetime == "foreground" {
 		_, err := b.Run(context.Background(), spec)
 		return runner.spec, runner.called + starter.called, err
 	}
@@ -1472,7 +1475,7 @@ func TestSeatbeltPrepareRejectsExecutableIdentityChange(t *testing.T) {
 			}
 			_, calls, err := seatbeltLaunch(t, b, lifetime, spec)
 			if err == nil || !strings.Contains(err.Error(), "executable changed since approval") {
-				t.Fatalf("%s = %v; want the executable-changed error", lifetime, err)
+				t.Fatalf("%s launch = %v; want the executable-changed error", lifetime, err)
 			}
 			if calls != 0 {
 				t.Fatalf("delegate called %d times; want 0 (prepare must refuse before launch)", calls)
@@ -1499,7 +1502,7 @@ func TestSeatbeltPrepareRejectsMissingIdentity(t *testing.T) {
 			spec.ExeIdentity = nil // deliberately missing after helper initialization
 			_, calls, err := seatbeltLaunch(t, b, lifetime, spec)
 			if err == nil || !strings.Contains(err.Error(), "executable changed since approval") {
-				t.Fatalf("%s = %v; want refusal on missing identity", lifetime, err)
+				t.Fatalf("%s launch = %v; want refusal on missing identity", lifetime, err)
 			}
 			if calls != 0 {
 				t.Fatalf("delegate called %d times; want 0", calls)
@@ -1511,7 +1514,7 @@ func TestSeatbeltPrepareRejectsMissingIdentity(t *testing.T) {
 
 // TestSeatbeltAcceptsApprovedExecutable is the capture-delegate compatibility
 // control for the identity check: an unchanged #! script and a Homebrew-style
-// absolute symlink both reach the delegate through Run and Start, and the
+// absolute symlink both reach the delegate in both lifetimes, and the
 // wrapper still launches the approved spelling (argv[0] preserved, D6).
 func TestSeatbeltAcceptsApprovedExecutable(t *testing.T) {
 	fixtures := map[string]func(t *testing.T, ws string) execSpec{
@@ -1553,7 +1556,7 @@ func TestSeatbeltAcceptsApprovedExecutable(t *testing.T) {
 				spec := fixture(t, canonTempDirT(t))
 				wrapped, calls, err := seatbeltLaunch(t, b, lifetime, spec)
 				if err != nil {
-					t.Fatalf("%s = %v; want the approved executable accepted", lifetime, err)
+					t.Fatalf("%s launch = %v; want the approved executable accepted", lifetime, err)
 				}
 				if calls != 1 {
 					t.Fatalf("delegate called %d times; want 1", calls)
@@ -1614,7 +1617,7 @@ func TestSeatbeltAcceptsScratchStampedExecutable(t *testing.T) {
 			b, base := testSeatbeltBackend(t, nil)
 			wrapped, calls, err := seatbeltLaunch(t, b, lifetime, rewritten)
 			if err != nil {
-				t.Fatalf("%s = %v; want the scratch-stamped clone accepted", lifetime, err)
+				t.Fatalf("%s launch = %v; want the scratch-stamped clone accepted", lifetime, err)
 			}
 			if calls != 1 {
 				t.Fatalf("delegate called %d times; want 1", calls)
@@ -1663,8 +1666,8 @@ func copyTestBinary(t *testing.T, dst string, mode os.FileMode) {
 // unchanged workspace #! script, an execute-only native tool, and a native
 // tool under a search-only ancestor all run; the last two pin that resolving
 // and stat'ing the target adds no read requirement on the executable or its
-// directories. A Homebrew-style external symlink passes prepare but is
-// characterized as a pre-existing profile denial at execvp.
+// directories. A Homebrew-style external symlink is a known pre-existing
+// profile denial at execvp, kept as a tripwire.
 func TestSeatbeltBehavioralApprovedExecutableShapes(t *testing.T) {
 	requireSeatbeltCapability(t)
 	helperArgv := func(exe string) []string {
@@ -1694,11 +1697,13 @@ func TestSeatbeltBehavioralApprovedExecutableShapes(t *testing.T) {
 			t.Fatalf("exit=%d stdout=%q stderr=%q", res.ExitCode, res.Stdout, res.Stderr)
 		}
 	})
-	// Characterization, not support: prepare accepts the external link
-	// (realSeatbeltRun fails on any backend error), but the profile grants
-	// metadata only on strict ancestors, so sandbox-exec cannot traverse the
-	// link node and execvp is denied. This predates the identity check (same
-	// result without it); flip this leg when the profile admits the link.
+	// Tripwire for a known pre-existing #442 gap (follow-up pending), not
+	// support: the profile grants metadata only on the link's strict
+	// ancestors, never the link node, so sandbox-exec's execvp of an external
+	// symlinked spelling is denied. The identity check is not the cause (same
+	// result without it); TestSeatbeltAcceptsApprovedExecutable/homebrew
+	// symlink is what proves prepare accepts the link. Flip this leg when the
+	// profile admits the link node.
 	t.Run("homebrew symlink denied at execvp", func(t *testing.T) {
 		prefix := canonTempDirT(t)
 		real := filepath.Join(prefix, "Cellar", "tool", "1.0", "bin", "tool")
