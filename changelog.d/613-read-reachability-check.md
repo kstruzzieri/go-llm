@@ -33,13 +33,15 @@ unchanged. See docs/least-privilege.md.
   `workspace root replaced: ` for `ErrRootReplaced`. That error is unexported;
   only `ErrRootReplaced` can be matched with `errors.Is`.
 - Golem's `/undo` refuses earlier when the file's directory is moved or swapped
-  during the undo's precondition read. RAM undo prints only
+  during one of the undo's precondition reads. RAM undo prints only
   `cannot undo <path>: file changed since golem wrote it`, without the
-  `undo failed for <path>: file precondition mismatch` line; checkpoint undo
-  prints `undo failed for <path>: file identity changed between stat and open`
-  and `undo interrupted; run /undo to resume`. Previously the late precondition
-  check refused. Nothing is mutated, the record or checkpoint is kept, and
-  `/undo` can be retried once the layout is restored.
+  `undo failed for <path>: file precondition mismatch` line. Checkpoint undo
+  prints the same `cannot undo` refusal (with `undo interrupted; run /undo to
+  resume` once the undo has started) or, when the move lands on its final
+  pre-write read, `undo failed for <path>: file identity changed between stat
+  and open` and `undo interrupted; run /undo to resume`. Nothing is mutated,
+  the record or checkpoint is kept, and `/undo` can be retried once the layout
+  is restored.
 - A scoped dispatch child's reads fail with `ErrRootReplaced` once its path no
   longer reaches the pinned scope directory, for example because the scope was
   moved or replaced, even when a symlink now leads to it; previously the child
