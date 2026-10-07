@@ -783,31 +783,46 @@ func TestScratchSourceManifestRows(t *testing.T) {
 }
 
 // TestScratchSourceStampsCloneExecutable pins the rewritten spec's
-// ExeIdentity: a workspace-local executable is stamped with the work clone's
-// identity (never the source's), and an external one keeps its approval.
+// ExeIdentity. A workspace-local spelling is rewritten into the clone and
+// restamped with the object that clone path resolves to: the work clone of a
+// workspace file (never the source), or the external target of an internal
+// link. An external spelling is not rewritten and keeps its approval, even
+// when the host object behind it is swapped after approval.
 func TestScratchSourceStampsCloneExecutable(t *testing.T) {
+	const (
+		stampClone    = "work clone"
+		stampTarget   = "external link target"
+		stampApproved = "approved identity"
+	)
 	tests := []struct {
-		name     string
-		setup    func(t *testing.T, canon string, spec *execSpec)
-		internal bool
+		name  string
+		setup func(t *testing.T, canon string, spec *execSpec)
+		swap  func(t *testing.T, spec execSpec) // after approval, before the session
+		stamp string
 	}{
 		{"unchanged workspace script", func(t *testing.T, canon string, spec *execSpec) {
 			spec.Path = filepath.Join(canon, "scripts/run.sh")
-		}, true},
+		}, nil, stampClone},
 		{"internal absolute symlink", func(t *testing.T, canon string, spec *execSpec) {
 			spec.Path = filepath.Join(canon, "link.sh")
 			if err := os.Symlink(filepath.Join(canon, "scripts/run.sh"), spec.Path); err != nil {
 				t.Fatal(err)
 			}
-		}, true},
-		{"external PATH executable", func(t *testing.T, canon string, spec *execSpec) {}, false},
+		}, nil, stampClone},
 		{"workspace symlink to external executable", func(t *testing.T, canon string, spec *execSpec) {
 			target := externalExecutable(t, "ext.sh")
 			spec.Path = filepath.Join(canon, "ext-link")
 			if err := os.Symlink(target, spec.Path); err != nil {
 				t.Fatal(err)
 			}
-		}, false},
+		}, nil, stampTarget},
+		{"external PATH executable", func(t *testing.T, canon string, spec *execSpec) {}, nil, stampApproved},
+		{"external executable swapped after approval", func(t *testing.T, canon string, spec *execSpec) {
+			spec.Path = externalExecutable(t, "ext.sh")
+		}, func(t *testing.T, spec execSpec) {
+			writeExecutable(t, spec.Path+".new", "#!/bin/sh\n# B\n")
+			mustRename(t, spec.Path+".new", spec.Path)
+		}, stampApproved},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -816,6 +831,9 @@ func TestScratchSourceStampsCloneExecutable(t *testing.T) {
 			tc.setup(t, canon, &spec)
 			approved := execIdentityOf(t, spec.Path)
 			spec.ExeIdentity = approved
+			if tc.swap != nil {
+				tc.swap(t, spec)
+			}
 			session, rewritten, err := beginScratchSession(context.Background(), rt, spec)
 			if err != nil {
 				t.Fatal(err)
@@ -828,17 +846,39 @@ func TestScratchSourceStampsCloneExecutable(t *testing.T) {
 			if !os.SameFile(rewritten.DirIdentity, spec.DirIdentity) || !os.SameFile(rewritten.RootIdentity, spec.RootIdentity) {
 				t.Fatal("DirIdentity and RootIdentity must stay the approved source identities")
 			}
-			if !tc.internal {
+			switch tc.stamp {
+			case stampClone:
+				if !os.SameFile(rewritten.ExeIdentity, cloneInfo) {
+					t.Fatalf("ExeIdentity must be the work clone %q, got %v", rewritten.Path, rewritten.ExeIdentity)
+				}
+				if os.SameFile(cloneInfo, approved) {
+					t.Fatal("the work clone must be a distinct object from the approved source")
+				}
+			case stampTarget:
+				// Rewritten into the clone, where the link still resolves to
+				// the approved external object; the restamp records it.
+				if rewritten.Path == spec.Path {
+					t.Fatalf("internal link spelling %q must be rewritten into the clone", spec.Path)
+				}
+				if !os.SameFile(rewritten.ExeIdentity, cloneInfo) || !os.SameFile(cloneInfo, approved) {
+					t.Fatalf("ExeIdentity must be the external target the clone link resolves to, got %v", rewritten.ExeIdentity)
+				}
+			case stampApproved:
+				if rewritten.Path != spec.Path {
+					t.Fatalf("external spelling %q must not be rewritten, got %q", spec.Path, rewritten.Path)
+				}
 				if !os.SameFile(rewritten.ExeIdentity, approved) {
 					t.Fatalf("external executable must keep its approved identity, got %v", rewritten.ExeIdentity)
 				}
-				return
-			}
-			if !os.SameFile(rewritten.ExeIdentity, cloneInfo) {
-				t.Fatalf("ExeIdentity must be the work clone %q, got %v", rewritten.Path, rewritten.ExeIdentity)
-			}
-			if os.SameFile(cloneInfo, approved) {
-				t.Fatal("the work clone must be a distinct object from the approved source")
+				if tc.swap == nil {
+					return
+				}
+				if os.SameFile(cloneInfo, approved) {
+					t.Fatal("fixture: the swap must install a different host object")
+				}
+				if os.SameFile(rewritten.ExeIdentity, cloneInfo) {
+					t.Fatal("external executable was restamped with the object swapped in after approval")
+				}
 			}
 		})
 	}
