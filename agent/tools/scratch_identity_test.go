@@ -25,6 +25,9 @@ import (
 // before validation, so only a check against the snapshot's source manifest
 // can see the substitution.
 
+// approvedScript is executable A, the object the swap fixtures approve.
+const approvedScript = "#!/bin/sh\n# approved A\nexit 0\n"
+
 const (
 	wantRootMismatch = "does not match approved workspace root"
 	wantDirMismatch  = "does not match approved working directory"
@@ -93,7 +96,7 @@ func newScratchSourceFixture(t *testing.T, background bool) (*scratchSourceHarne
 			t.Fatal(err)
 		}
 	}
-	writeExecutable(t, filepath.Join(ws, "tool.sh"), "#!/bin/sh\n# approved A\nexit 0\n")
+	writeExecutable(t, filepath.Join(ws, "tool.sh"), approvedScript)
 
 	h := &scratchSourceHarness{}
 	if !background {
@@ -191,6 +194,31 @@ func assertScratchFreshRun(t *testing.T, h *scratchSourceHarness, raw string) {
 	}
 }
 
+// forEachScratchMode runs fn as a foreground and a background subtest.
+func forEachScratchMode(t *testing.T, fn func(t *testing.T, background bool)) {
+	t.Helper()
+	for _, background := range []bool{false, true} {
+		name := "foreground"
+		if background {
+			name = "background"
+		}
+		t.Run(name, func(t *testing.T) { fn(t, background) })
+	}
+}
+
+// externalExecutable writes a unique executable outside every workspace, in
+// a symlink-resolved private temp dir, and returns its path.
+func externalExecutable(t *testing.T, name string) string {
+	t.Helper()
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(dir, name)
+	writeExecutable(t, p, "#!/bin/sh\n# "+name+"\n")
+	return p
+}
+
 func mustRename(t *testing.T, from, to string) {
 	t.Helper()
 	if err := os.Rename(from, to); err != nil {
@@ -212,202 +240,184 @@ func mustLstat(t *testing.T, p string) os.FileInfo {
 func isWorkRootCopy(dst string) bool { return filepath.Base(filepath.Dir(dst)) == "workspace" }
 
 func TestScratchSourceRootReplaced(t *testing.T) {
-	for _, background := range []bool{false, true} {
-		name := "foreground"
-		if background {
-			name = "background"
+	forEachScratchMode(t, func(t *testing.T, background bool) {
+		h, root := newScratchSourceFixture(t, background)
+		parent := filepath.Dir(root)
+		saved, repl := filepath.Join(parent, "saved"), filepath.Join(parent, "repl")
+		// Replacement root B: a root-level regular file, and no dir/ so
+		// the approved cwd can be moved in (identity unchanged).
+		if err := os.Mkdir(repl, 0o755); err != nil {
+			t.Fatal(err)
 		}
-		t.Run(name, func(t *testing.T) {
-			h, root := newScratchSourceFixture(t, background)
-			parent := filepath.Dir(root)
-			saved, repl := filepath.Join(parent, "saved"), filepath.Join(parent, "repl")
-			// Replacement root B: a root-level regular file, and no dir/ so
-			// the approved cwd can be moved in (identity unchanged).
-			if err := os.Mkdir(repl, 0o755); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(filepath.Join(repl, "keep.txt"), []byte("B"), 0o644); err != nil {
-				t.Fatal(err)
-			}
-			raw := `{"argv":["/bin/sh","-c","true"],"dir":"dir"}`
-			h.plan(raw)
-			approvedRoot := mustLstat(t, root)
-			approvedDir := mustLstat(t, filepath.Join(root, "dir"))
+		if err := os.WriteFile(filepath.Join(repl, "keep.txt"), []byte("B"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		raw := `{"argv":["/bin/sh","-c","true"],"dir":"dir"}`
+		h.plan(raw)
+		approvedRoot := mustLstat(t, root)
+		approvedDir := mustLstat(t, filepath.Join(root, "dir"))
 
-			fired, restored := 0, false
-			t.Cleanup(func() {
-				if fired > 0 && !restored {
-					_ = os.Rename(filepath.Join(root, "dir"), filepath.Join(saved, "dir"))
-					_ = os.Rename(root, repl)
-					_ = os.Rename(saved, root)
-				}
-			})
-			h.rt.store.random = &scratchSeamReader{Reader: cryptorand.Reader, fn: func() {
-				fired++
-				if len(h.rt.slots) != 1 {
-					t.Errorf("seam fired with %d admission slots owned, want 1", len(h.rt.slots))
-				}
-				mustRename(t, root, saved)
-				mustRename(t, repl, root)
-				mustRename(t, filepath.Join(saved, "dir"), filepath.Join(root, "dir"))
-				if !os.SameFile(mustLstat(t, filepath.Join(root, "dir")), approvedDir) {
-					t.Fatal("moved cwd must keep the approved identity")
-				}
-			}}
-			h.rt.clone = func(f *os.File, dst string) error {
-				if fired > 0 && !restored && isWorkRootCopy(dst) {
-					restored = true
-					mustRename(t, filepath.Join(root, "dir"), filepath.Join(saved, "dir"))
-					mustRename(t, root, repl)
-					mustRename(t, saved, root)
-				}
-				return cloneFile(f, dst)
+		fired, restored := 0, false
+		t.Cleanup(func() {
+			if fired > 0 && !restored {
+				_ = os.Rename(filepath.Join(root, "dir"), filepath.Join(saved, "dir"))
+				_ = os.Rename(root, repl)
+				_ = os.Rename(saved, root)
 			}
-
-			res := h.invoke(raw)
-			if fired != 1 || !restored {
-				t.Fatalf("schedule did not run: seam fired %d, restored %v", fired, restored)
-			}
-			if !os.SameFile(mustLstat(t, root), approvedRoot) || !os.SameFile(mustLstat(t, filepath.Join(root, "dir")), approvedDir) {
-				t.Fatal("host root and cwd must be restored to the approved objects")
-			}
-			assertScratchSourceRejected(t, h, res, wantRootMismatch)
-			assertScratchFreshRun(t, h, raw)
 		})
-	}
+		h.rt.store.random = &scratchSeamReader{Reader: cryptorand.Reader, fn: func() {
+			fired++
+			if len(h.rt.slots) != 1 {
+				t.Errorf("seam fired with %d admission slots owned, want 1", len(h.rt.slots))
+			}
+			mustRename(t, root, saved)
+			mustRename(t, repl, root)
+			mustRename(t, filepath.Join(saved, "dir"), filepath.Join(root, "dir"))
+			if !os.SameFile(mustLstat(t, filepath.Join(root, "dir")), approvedDir) {
+				t.Fatal("moved cwd must keep the approved identity")
+			}
+		}}
+		h.rt.clone = func(f *os.File, dst string) error {
+			if fired > 0 && !restored && isWorkRootCopy(dst) {
+				restored = true
+				mustRename(t, filepath.Join(root, "dir"), filepath.Join(saved, "dir"))
+				mustRename(t, root, repl)
+				mustRename(t, saved, root)
+			}
+			return cloneFile(f, dst)
+		}
+
+		res := h.invoke(raw)
+		if fired != 1 || !restored {
+			t.Fatalf("schedule did not run: seam fired %d, restored %v", fired, restored)
+		}
+		if !os.SameFile(mustLstat(t, root), approvedRoot) || !os.SameFile(mustLstat(t, filepath.Join(root, "dir")), approvedDir) {
+			t.Fatal("host root and cwd must be restored to the approved objects")
+		}
+		assertScratchSourceRejected(t, h, res, wantRootMismatch)
+		assertScratchFreshRun(t, h, raw)
+	})
 }
 
 func TestScratchSourceCwdReplaced(t *testing.T) {
-	for _, background := range []bool{false, true} {
-		name := "foreground"
-		if background {
-			name = "background"
+	forEachScratchMode(t, func(t *testing.T, background bool) {
+		h, root := newScratchSourceFixture(t, background)
+		parent := filepath.Dir(root)
+		cwd := filepath.Join(root, "dir")
+		saved, repl := filepath.Join(parent, "saved-dir"), filepath.Join(parent, "repl-dir")
+		if err := os.Mkdir(repl, 0o755); err != nil {
+			t.Fatal(err)
 		}
-		t.Run(name, func(t *testing.T) {
-			h, root := newScratchSourceFixture(t, background)
-			parent := filepath.Dir(root)
-			cwd := filepath.Join(root, "dir")
-			saved, repl := filepath.Join(parent, "saved-dir"), filepath.Join(parent, "repl-dir")
-			if err := os.Mkdir(repl, 0o755); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(filepath.Join(repl, "inner.txt"), []byte("B"), 0o644); err != nil {
-				t.Fatal(err)
-			}
-			raw := `{"argv":["/bin/sh","-c","true"],"dir":"dir"}`
-			h.plan(raw)
-			approvedRoot := mustLstat(t, root)
-			approvedDir := mustLstat(t, cwd)
+		if err := os.WriteFile(filepath.Join(repl, "inner.txt"), []byte("B"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		raw := `{"argv":["/bin/sh","-c","true"],"dir":"dir"}`
+		h.plan(raw)
+		approvedRoot := mustLstat(t, root)
+		approvedDir := mustLstat(t, cwd)
 
-			fired, restored := 0, false
-			t.Cleanup(func() {
-				if fired > 0 && !restored {
-					_ = os.Rename(cwd, repl)
-					_ = os.Rename(saved, cwd)
-				}
-			})
-			h.rt.store.random = &scratchSeamReader{Reader: cryptorand.Reader, fn: func() {
-				fired++
-				if len(h.rt.slots) != 1 {
-					t.Errorf("seam fired with %d admission slots owned, want 1", len(h.rt.slots))
-				}
-				mustRename(t, cwd, saved)
-				mustRename(t, repl, cwd)
-			}}
-			h.rt.clone = func(f *os.File, dst string) error {
-				if fired > 0 && !restored && isWorkRootCopy(dst) {
-					restored = true
-					mustRename(t, cwd, repl)
-					mustRename(t, saved, cwd)
-				}
-				return cloneFile(f, dst)
+		fired, restored := 0, false
+		t.Cleanup(func() {
+			if fired > 0 && !restored {
+				_ = os.Rename(cwd, repl)
+				_ = os.Rename(saved, cwd)
 			}
-
-			res := h.invoke(raw)
-			if fired != 1 || !restored {
-				t.Fatalf("schedule did not run: seam fired %d, restored %v", fired, restored)
-			}
-			if !os.SameFile(mustLstat(t, root), approvedRoot) {
-				t.Fatal("root identity must be unchanged by the cwd swap")
-			}
-			if !os.SameFile(mustLstat(t, cwd), approvedDir) {
-				t.Fatal("host cwd must be restored to the approved object")
-			}
-			assertScratchSourceRejected(t, h, res, wantDirMismatch)
-			assertScratchFreshRun(t, h, raw)
 		})
-	}
+		h.rt.store.random = &scratchSeamReader{Reader: cryptorand.Reader, fn: func() {
+			fired++
+			if len(h.rt.slots) != 1 {
+				t.Errorf("seam fired with %d admission slots owned, want 1", len(h.rt.slots))
+			}
+			mustRename(t, cwd, saved)
+			mustRename(t, repl, cwd)
+		}}
+		h.rt.clone = func(f *os.File, dst string) error {
+			if fired > 0 && !restored && isWorkRootCopy(dst) {
+				restored = true
+				mustRename(t, cwd, repl)
+				mustRename(t, saved, cwd)
+			}
+			return cloneFile(f, dst)
+		}
+
+		res := h.invoke(raw)
+		if fired != 1 || !restored {
+			t.Fatalf("schedule did not run: seam fired %d, restored %v", fired, restored)
+		}
+		if !os.SameFile(mustLstat(t, root), approvedRoot) {
+			t.Fatal("root identity must be unchanged by the cwd swap")
+		}
+		if !os.SameFile(mustLstat(t, cwd), approvedDir) {
+			t.Fatal("host cwd must be restored to the approved object")
+		}
+		assertScratchSourceRejected(t, h, res, wantDirMismatch)
+		assertScratchFreshRun(t, h, raw)
+	})
 }
 
 func TestScratchSourceExecutableReplaced(t *testing.T) {
 	const markerB = "#!/bin/sh\n# substitute B\nexit 0\n"
-	for _, background := range []bool{false, true} {
-		name := "foreground"
-		if background {
-			name = "background"
-		}
-		t.Run(name, func(t *testing.T) {
-			h, root := newScratchSourceFixture(t, background)
-			parent := filepath.Dir(root)
-			exe := filepath.Join(root, "tool.sh")
-			saved, repl := filepath.Join(parent, "saved-tool.sh"), filepath.Join(parent, "repl-tool.sh")
-			writeExecutable(t, repl, markerB)
-			raw := `{"argv":["./tool.sh"]}`
-			h.plan(raw)
-			approvedExe := execIdentityOf(t, exe)
+	forEachScratchMode(t, func(t *testing.T, background bool) {
+		h, root := newScratchSourceFixture(t, background)
+		parent := filepath.Dir(root)
+		exe := filepath.Join(root, "tool.sh")
+		saved, repl := filepath.Join(parent, "saved-tool.sh"), filepath.Join(parent, "repl-tool.sh")
+		writeExecutable(t, repl, markerB)
+		raw := `{"argv":["./tool.sh"]}`
+		h.plan(raw)
+		approvedExe := execIdentityOf(t, exe)
 
-			canonicalCopies, restored := 0, false
-			t.Cleanup(func() {
-				if canonicalCopies > 0 && !restored {
-					_ = os.Rename(exe, repl)
-					_ = os.Rename(saved, exe)
-				}
-			})
-			h.rt.clone = func(f *os.File, dst string) error {
-				if filepath.Base(dst) != "tool.sh" {
-					return cloneFile(f, dst)
-				}
-				switch filepath.Base(filepath.Dir(dst)) {
-				case "tree": // canonical -> reference
-					canonicalCopies++
-					fi, err := f.Stat()
-					if err != nil {
-						t.Fatal(err)
-					}
-					if err := copyFromHandle(context.Background(), f, dst, fi.Size()); err != nil {
-						t.Fatal(err)
-					}
-					if canonicalCopies == 1 {
-						// A is fully copied; substitute B so the source drift
-						// check retries and the accepted pass copies B.
-						mustRename(t, exe, saved)
-						mustRename(t, repl, exe)
-					}
-					return nil
-				case "workspace": // reference -> work
-					if canonicalCopies > 0 && !restored {
-						restored = true
-						mustRename(t, exe, repl)
-						mustRename(t, saved, exe)
-					}
-				}
-				return cloneFile(f, dst)
-			}
-
-			res := h.invoke(raw)
-			if canonicalCopies != 2 || !restored {
-				t.Fatalf("schedule did not run: %d canonical copies of tool.sh (want 2), restored %v", canonicalCopies, restored)
-			}
-			if !os.SameFile(execIdentityOf(t, exe), approvedExe) {
-				t.Fatal("host executable must be restored to the approved object")
-			}
-			assertScratchSourceRejected(t, h, res, wantExeMismatch)
-			assertScratchFreshRun(t, h, raw)
-			if got := string(h.marker()); got != "#!/bin/sh\n# approved A\nexit 0\n" {
-				t.Fatalf("fresh session ran %q, want the approved executable A", got)
+		canonicalCopies, restored := 0, false
+		t.Cleanup(func() {
+			if canonicalCopies > 0 && !restored {
+				_ = os.Rename(exe, repl)
+				_ = os.Rename(saved, exe)
 			}
 		})
-	}
+		h.rt.clone = func(f *os.File, dst string) error {
+			if filepath.Base(dst) != "tool.sh" {
+				return cloneFile(f, dst)
+			}
+			switch filepath.Base(filepath.Dir(dst)) {
+			case "tree": // canonical -> reference
+				canonicalCopies++
+				fi, err := f.Stat()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := copyFromHandle(context.Background(), f, dst, fi.Size()); err != nil {
+					t.Fatal(err)
+				}
+				if canonicalCopies == 1 {
+					// A is fully copied; substitute B so the source drift
+					// check retries and the accepted pass copies B.
+					mustRename(t, exe, saved)
+					mustRename(t, repl, exe)
+				}
+				return nil
+			case "workspace": // reference -> work
+				if canonicalCopies > 0 && !restored {
+					restored = true
+					mustRename(t, exe, repl)
+					mustRename(t, saved, exe)
+				}
+			}
+			return cloneFile(f, dst)
+		}
+
+		res := h.invoke(raw)
+		if canonicalCopies != 2 || !restored {
+			t.Fatalf("schedule did not run: %d canonical copies of tool.sh (want 2), restored %v", canonicalCopies, restored)
+		}
+		if !os.SameFile(execIdentityOf(t, exe), approvedExe) {
+			t.Fatal("host executable must be restored to the approved object")
+		}
+		assertScratchSourceRejected(t, h, res, wantExeMismatch)
+		assertScratchFreshRun(t, h, raw)
+		if got := string(h.marker()); got != approvedScript {
+			t.Fatalf("fresh session ran %q, want the approved executable A", got)
+		}
+	})
 }
 
 // TestScratchSourceCwdAliasRunsCommand: Workspace.resolveDir keeps the
@@ -430,16 +440,6 @@ func TestScratchSourceCwdAliasRunsCommand(t *testing.T) {
 // approved specs: legitimate spellings pass, substitutions and excluded or
 // unprovable sources fail the named check.
 func TestScratchSourceBeginControls(t *testing.T) {
-	ext := func(t *testing.T, name string) string {
-		t.Helper()
-		dir, err := filepath.EvalSymlinks(t.TempDir())
-		if err != nil {
-			t.Fatal(err)
-		}
-		p := filepath.Join(dir, name)
-		writeExecutable(t, p, "#!/bin/sh\n# "+name+"\n")
-		return p
-	}
 	// alias returns spelling when the filesystem resolves it to the same
 	// object as target; otherwise only this subtest is skipped.
 	alias := func(t *testing.T, target, spelling string) string {
@@ -483,7 +483,7 @@ func TestScratchSourceBeginControls(t *testing.T) {
 			spec.ExeIdentity = execIdentityOf(t, spec.Path)
 		}, ""},
 		{"workspace symlink to unique external executable", func(t *testing.T, canon string, spec *execSpec) {
-			target := ext(t, "ext.sh")
+			target := externalExecutable(t, "ext.sh")
 			spec.Path = filepath.Join(canon, "ext-link")
 			if err := os.Symlink(target, spec.Path); err != nil {
 				t.Fatal(err)
@@ -491,7 +491,7 @@ func TestScratchSourceBeginControls(t *testing.T) {
 			spec.ExeIdentity = execIdentityOf(t, target)
 		}, ""},
 		{"workspace symlink retargeted to another external executable", func(t *testing.T, canon string, spec *execSpec) {
-			first, second := ext(t, "first.sh"), ext(t, "second.sh")
+			first, second := externalExecutable(t, "first.sh"), externalExecutable(t, "second.sh")
 			spec.Path = filepath.Join(canon, "ext-link")
 			if err := os.Symlink(first, spec.Path); err != nil {
 				t.Fatal(err)
@@ -802,12 +802,7 @@ func TestScratchSourceStampsCloneExecutable(t *testing.T) {
 		}, true},
 		{"external PATH executable", func(t *testing.T, canon string, spec *execSpec) {}, false},
 		{"workspace symlink to external executable", func(t *testing.T, canon string, spec *execSpec) {
-			dir, err := filepath.EvalSymlinks(t.TempDir())
-			if err != nil {
-				t.Fatal(err)
-			}
-			target := filepath.Join(dir, "ext.sh")
-			writeExecutable(t, target, "#!/bin/sh\n")
+			target := externalExecutable(t, "ext.sh")
 			spec.Path = filepath.Join(canon, "ext-link")
 			if err := os.Symlink(target, spec.Path); err != nil {
 				t.Fatal(err)
