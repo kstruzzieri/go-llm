@@ -410,6 +410,22 @@ func TestScratchSourceExecutableReplaced(t *testing.T) {
 	}
 }
 
+// TestScratchSourceCwdAliasRunsCommand: Workspace.resolveDir keeps the
+// caller's spelling, so a case alias of a real directory is an approved cwd
+// on a case-insensitive filesystem and must still run under scratch.
+func TestScratchSourceCwdAliasRunsCommand(t *testing.T) {
+	h, root := newScratchSourceFixture(t, false)
+	if fi, err := os.Stat(filepath.Join(root, "DIR")); err != nil || !os.SameFile(fi, execIdentityOf(t, filepath.Join(root, "dir"))) {
+		t.Skip("filesystem does not alias DIR to dir")
+	}
+	raw := `{"argv":["/bin/sh","-c","true"],"dir":"DIR"}`
+	h.plan(raw)
+	res := h.invoke(raw)
+	if res.IsError || h.calls() != 1 {
+		t.Fatalf("aliased cwd must run once: calls=%d IsError=%v: %s", h.calls(), res.IsError, res.Content)
+	}
+}
+
 // TestScratchSourceBeginControls drives beginScratchSession directly with
 // approved specs: legitimate spellings pass, substitutions and excluded or
 // unprovable sources fail the named check.
@@ -496,6 +512,28 @@ func TestScratchSourceBeginControls(t *testing.T) {
 		{"missing cwd identity", func(t *testing.T, canon string, spec *execSpec) {
 			spec.Dir = filepath.Join(canon, "dir")
 			spec.DirIdentity = nil
+		}, wantDirMismatch},
+		{"case alias cwd", func(t *testing.T, canon string, spec *execSpec) {
+			spec.Dir = alias(t, filepath.Join(canon, "dir"), filepath.Join(canon, "DIR"))
+			spec.DirIdentity = execIdentityOf(t, spec.Dir)
+		}, ""},
+		{"normalization alias cwd", func(t *testing.T, canon string, spec *execSpec) {
+			if err := os.Mkdir(filepath.Join(canon, "café"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			spec.Dir = alias(t, filepath.Join(canon, "café"), filepath.Join(canon, "café"))
+			spec.DirIdentity = execIdentityOf(t, spec.Dir)
+		}, ""},
+		{"approved cwd moved within the workspace", func(t *testing.T, canon string, spec *execSpec) {
+			// The approved inode is still in the snapshot, but under dir2;
+			// the approved spelling now names a different directory.
+			spec.Dir = filepath.Join(canon, "dir")
+			spec.DirIdentity = execIdentityOf(t, spec.Dir)
+			mustRename(t, spec.Dir, filepath.Join(canon, "dir2"))
+			if err := os.Mkdir(spec.Dir+".new", 0o755); err != nil {
+				t.Fatal(err)
+			}
+			mustRename(t, spec.Dir+".new", spec.Dir)
 		}, wantDirMismatch},
 		{"cwd outside the workspace root", func(t *testing.T, canon string, spec *execSpec) {
 			spec.Dir = t.TempDir()

@@ -56,18 +56,37 @@ func scratchContained(base, p string) (string, bool) {
 	return rel, true
 }
 
+// referenceCopyOf reports whether located, a stat inside the reference tree,
+// is the reference copy of a source manifest entry of the wanted type that
+// carries the approved identity. The source entry supplies the identity
+// evidence and the reference only locates it, so case, normalization, and
+// hard-link spellings resolve without comparing a clone inode with a source
+// inode, and an approved object moved to another path is not accepted.
+func referenceCopyOf(man snapshotManifest, reference string, wantDir bool, approved, located os.FileInfo) bool {
+	for _, e := range man.entries {
+		if !manifestEntryMatches(e, wantDir, approved) {
+			continue
+		}
+		copied, err := os.Stat(filepath.Join(reference, filepath.FromSlash(e.path)))
+		if err == nil && os.SameFile(copied, located) {
+			return true
+		}
+	}
+	return false
+}
+
 // validateScratchSource binds the canonical->reference snapshot to the
 // approved spec. man is the source manifest of the accepted snapshot pass;
-// reference is the pristine copy that pass produced. The workspace root and
-// cwd must be the approved directories by source identity. A workspace-local
-// executable spelling must resolve, inside the reference tree, to the copy of
-// a source entry carrying the approved identity: the source manifest supplies
-// the identity evidence and the reference only locates that entry, so case,
-// normalization, and hard-link aliases keep working without comparing a clone
-// inode with a source inode. An internal spelling whose link resolves outside
-// the reference must be the approved external object. External spellings are
-// not rewritten and not checked here. Where the platform has no file
-// identity, the checks are skipped, matching the degraded drift comparison.
+// reference is the pristine copy that pass produced. The workspace root
+// entry "." must carry the approved root identity. The approved cwd spelling
+// and a workspace-local executable spelling must each locate, inside the
+// reference tree, the copy of a source entry carrying the approved identity
+// (referenceCopyOf), so case, normalization, and hard-link aliases of either
+// keep working. An internal executable spelling whose link resolves outside
+// the reference must be the approved external object. External executable
+// spellings are not rewritten and not checked here. Where the platform has no
+// file identity, the checks are skipped, matching the degraded drift
+// comparison.
 func validateScratchSource(man snapshotManifest, spec execSpec, canonicalRoot, reference string) error {
 	if !scratchIdentitySupported {
 		return nil
@@ -79,7 +98,8 @@ func validateScratchSource(man snapshotManifest, spec execSpec, canonicalRoot, r
 	if !ok {
 		return fmt.Errorf("tools: scratch cwd %q escapes workspace root %q", spec.Dir, canonicalRoot)
 	}
-	if !manifestIdentityMatch(man, filepath.ToSlash(dirRel), true, spec.DirIdentity) {
+	cwd, err := os.Stat(filepath.Join(reference, dirRel))
+	if err != nil || !cwd.IsDir() || !referenceCopyOf(man, reference, true, spec.DirIdentity, cwd) {
 		return errScratchDirMismatch
 	}
 	exeRel, ok := scratchContained(canonicalRoot, spec.Path)
@@ -109,14 +129,8 @@ func validateScratchSource(man snapshotManifest, spec execSpec, canonicalRoot, r
 		}
 		return nil
 	}
-	for _, e := range man.entries {
-		if !manifestEntryMatches(e, false, spec.ExeIdentity) {
-			continue
-		}
-		copied, err := os.Stat(filepath.Join(reference, filepath.FromSlash(e.path)))
-		if err == nil && os.SameFile(copied, target) {
-			return nil
-		}
+	if !referenceCopyOf(man, reference, false, spec.ExeIdentity, target) {
+		return errScratchExeMismatch
 	}
-	return errScratchExeMismatch
+	return nil
 }
