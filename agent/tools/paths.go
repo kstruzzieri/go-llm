@@ -94,6 +94,17 @@ type Workspace struct {
 	rootIdentity os.FileInfo
 	pinnedRoot   *os.File       // invocation-owned capability; operations borrow it
 	scope        *scopeCounters // invocation-owned scoped child counters
+	// anchorRoot, anchorIdentity and anchorPrefix locate where the
+	// post-decision reachability check (#613) starts: the top-level workspace
+	// root, its construction-time identity, and this workspace's path below
+	// it. All zero for a top-level workspace; scoped children inherit them so
+	// verification starts above their pinned scope.
+	anchorRoot     string
+	anchorIdentity os.FileInfo
+	anchorPrefix   string
+	// beforeReadDir is a per-workspace deterministic race-test seam fired
+	// before a verified directory enumeration.
+	beforeReadDir func(rel string)
 	// beforeReadOpen is a per-workspace deterministic race-test seam.
 	beforeReadOpen func()
 	beforeMutation func(mutationPhase, string) error // private deterministic phase/failure seam
@@ -237,6 +248,15 @@ func canonicalFuturePath(root, path string) (string, error) {
 // SetScopeGuard installs (or clears with nil) the proof-mode scope guard.
 // Host setup must complete before workspace calls; installation is not concurrent-safe.
 func (w *Workspace) SetScopeGuard(g ScopeGuard) { w.guard = g }
+
+// readAnchor returns where reachability checks start: the top-level root path,
+// its construction-time identity, and this workspace's path below it.
+func (w *Workspace) readAnchor() (string, os.FileInfo, string) {
+	if w.anchorRoot == "" {
+		return w.root, w.rootIdentity, ""
+	}
+	return w.anchorRoot, w.anchorIdentity, w.anchorPrefix
+}
 
 // checkScope consults the guard for a cleaned absolute path. A veto preserves
 // the host error while marking it for sanitized model-visible tool output.

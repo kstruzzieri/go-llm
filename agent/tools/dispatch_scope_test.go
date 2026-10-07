@@ -217,7 +217,9 @@ func TestScopedPinnedRootAndCleanup(t *testing.T) {
 	if err := os.Rename(filepath.Join(parent.root, "b"), filepath.Join(parent.root, "a")); err != nil {
 		t.Fatal(err)
 	}
-	if got, err := ws.readAll("visible.txt"); err != nil || string(got) != "A_ONLY\n" {
+	// #613: the pinned scope moved away from its guarded path; reads fail
+	// closed and never return either directory's content.
+	if got, err := ws.readAll("visible.txt"); !errors.Is(err, errFileChanged) || len(got) != 0 {
 		t.Fatalf("pinned read = %q, %v", got, err)
 	}
 	got, _ := NewSearch(ws).Invoke(t.Context(), json.RawMessage(`{"pattern":"ONLY"}`))

@@ -46,8 +46,69 @@ func workspaceOpenError(err error) error {
 	return err
 }
 
+// verifyReachable is the post-decision check (#613). After the guard allowed
+// rel and the caller opened or enumerated it, rel must still resolve from the
+// top-level workspace root, by name and never through a symlink, to the object
+// the caller holds. It is a sequence of lookups, not an atomic snapshot.
+func (w *Workspace) verifyReachable(rel string, opened *os.File) error {
+	var held unix.Stat_t
+	if err := unix.Fstat(int(opened.Fd()), &held); err != nil {
+		return err
+	}
+	root, identity, prefix := w.readAnchor()
+	fd, err := unix.Open(root, workspaceSearchFlags|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return reachabilityError(err)
+	}
+	dir := os.NewFile(uintptr(fd), root)
+	defer func() { _ = dir.Close() }()
+	if fi, err := dir.Stat(); err != nil {
+		return err
+	} else if !os.SameFile(identity, fi) {
+		return ErrRootReplaced
+	}
+	var parts []string
+	for _, part := range strings.Split(filepath.Join(prefix, rel), string(os.PathSeparator)) {
+		if part != "" && part != "." {
+			parts = append(parts, part)
+		}
+	}
+	var st unix.Stat_t
+	if len(parts) == 0 {
+		err = unix.Fstat(int(dir.Fd()), &st)
+	} else {
+		for _, part := range parts[:len(parts)-1] {
+			next, err := unix.Openat(int(dir.Fd()), part, workspaceSearchFlags|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+			if err != nil {
+				return reachabilityError(err)
+			}
+			_ = dir.Close()
+			dir = os.NewFile(uintptr(next), part)
+		}
+		err = unix.Fstatat(int(dir.Fd()), parts[len(parts)-1], &st, unix.AT_SYMLINK_NOFOLLOW)
+	}
+	if err != nil {
+		return reachabilityError(err)
+	}
+	if st.Dev != held.Dev || st.Ino != held.Ino {
+		return errFileChanged
+	}
+	return nil
+}
+
+// reachabilityError maps a lookup that no longer reaches a directory or entry
+// to errFileChanged, whose model-visible text names no location.
+func reachabilityError(err error) error {
+	if errors.Is(err, unix.ENOENT) || errors.Is(err, unix.ENOTDIR) || errors.Is(err, unix.ELOOP) {
+		return errFileChanged
+	}
+	return err
+}
+
 // openRead pins each component before consulting policy on the final canonical
-// logical path. No subsequent access reopens an ambient absolute pathname.
+// logical path, and opens content only through those pinned descriptors. After
+// the guard allows, verifyReachable separately reopens the top-level anchor by
+// path to confirm the guarded name still reaches the opened object.
 func (w *Workspace) openRead(p string, directory bool) (*os.File, string, error) {
 	return w.openReadMode(p, directory, false)
 }
@@ -78,7 +139,13 @@ func (w *Workspace) openReadMode(p string, directory, pin bool) (file *os.File, 
 		if errors.Is(resultErr, errScopeDenied) {
 			return
 		}
-		if err := w.checkScope(filepath.Join(w.root, policyRel), false); err != nil {
+		err := w.checkScope(filepath.Join(w.root, policyRel), false)
+		if err == nil && file != nil {
+			// #613: the decision binds only if the guarded path still reaches
+			// the opened object after the guard returned.
+			err = w.verifyReachable(canonical, file)
+		}
+		if err != nil {
 			if file != nil {
 				_ = file.Close()
 			}
