@@ -87,13 +87,13 @@ func (t *Glob) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolResul
 		if !matchGlob(args.Pattern, rel) {
 			return nil
 		}
-		// #613: the entry guard may have moved this name's directory.
-		if err := t.ws.verifyWalkedParent(rel, d); err != nil {
-			return err
-		}
 		if len(entries) >= listMaxEntries {
 			truncated = true
 			return fs.SkipAll
+		}
+		// #613: the entry guard may have moved this name's directory.
+		if err := t.ws.verifyWalkedParent(rel, d); err != nil {
+			return err
 		}
 		entries = append(entries, markEntry(rel, d))
 		return nil

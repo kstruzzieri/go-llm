@@ -50,6 +50,13 @@ func workspaceOpenError(err error) error {
 // rel and the caller opened or enumerated it, rel must still resolve from the
 // top-level workspace root, by name and never through a symlink, to the object
 // the caller holds. It is a sequence of lookups, not an atomic snapshot.
+//
+// The walk first reaches this workspace's own root: the top-level root, then a
+// scoped child's prefix down to its pinned scope directory. Failing there (the
+// root renamed away, replaced, or turned into a symlink) is root-level and
+// reports ErrRootReplaced, so walkers abort instead of skipping every
+// remaining file. A name below the own root that no longer reaches the held
+// object reports errFileChanged.
 func (w *Workspace) verifyReachable(rel string, opened *os.File) error {
 	var held unix.Stat_t
 	if err := unix.Fstat(int(opened.Fd()), &held); err != nil {
@@ -58,7 +65,7 @@ func (w *Workspace) verifyReachable(rel string, opened *os.File) error {
 	root, identity, prefix := w.readAnchor()
 	fd, err := unix.Open(root, workspaceSearchFlags|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
-		return reachabilityError(err)
+		return reachabilityError(err, true)
 	}
 	dir := os.NewFile(uintptr(fd), root)
 	defer func() { _ = dir.Close() }()
@@ -73,36 +80,56 @@ func (w *Workspace) verifyReachable(rel string, opened *os.File) error {
 			parts = append(parts, part)
 		}
 	}
+	// parts[:inRoot] lead from the anchor to this workspace's own root.
+	inRoot := len(strings.FieldsFunc(prefix, func(r rune) bool { return r == os.PathSeparator }))
 	var st unix.Stat_t
 	if len(parts) == 0 {
 		err = unix.Fstat(int(dir.Fd()), &st)
 	} else {
-		for _, part := range parts[:len(parts)-1] {
+		for i, part := range parts[:len(parts)-1] {
 			next, err := unix.Openat(int(dir.Fd()), part, workspaceSearchFlags|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 			if err != nil {
-				return reachabilityError(err)
+				return reachabilityError(err, i < inRoot)
 			}
 			_ = dir.Close()
 			dir = os.NewFile(uintptr(next), part)
+			if i == inRoot-1 {
+				// The scope's name may now hold another directory.
+				if fi, err := dir.Stat(); err != nil {
+					return err
+				} else if !os.SameFile(w.rootIdentity, fi) {
+					return ErrRootReplaced
+				}
+			}
 		}
 		err = unix.Fstatat(int(dir.Fd()), parts[len(parts)-1], &st, unix.AT_SYMLINK_NOFOLLOW)
 	}
+	// When rel names this workspace's own root, the leaf is that root.
+	ownRoot := len(parts) == inRoot
 	if err != nil {
-		return reachabilityError(err)
+		return reachabilityError(err, ownRoot)
 	}
 	if st.Dev != held.Dev || st.Ino != held.Ino {
+		if ownRoot {
+			return ErrRootReplaced
+		}
 		return errFileChanged
 	}
 	return nil
 }
 
 // reachabilityError maps a lookup that no longer reaches a directory or entry
-// to errFileChanged, whose model-visible text names no location.
-func reachabilityError(err error) error {
-	if errors.Is(err, unix.ENOENT) || errors.Is(err, unix.ENOTDIR) || errors.Is(err, unix.ELOOP) {
-		return errFileChanged
+// (nothing there, not a directory, or a symlink) to errFileChanged, whose
+// model-visible text names no location, or to ErrRootReplaced when the lookup
+// was for the workspace's own root. Other errors are returned unchanged.
+func reachabilityError(err error, ownRoot bool) error {
+	if !errors.Is(err, unix.ENOENT) && !errors.Is(err, unix.ENOTDIR) && !errors.Is(err, unix.ELOOP) {
+		return err
 	}
-	return err
+	if ownRoot {
+		return ErrRootReplaced
+	}
+	return errFileChanged
 }
 
 // openRead pins each component before consulting policy on the final canonical
@@ -491,7 +518,7 @@ func (w *Workspace) walkDir(ctx context.Context, parent *os.File, base string, f
 				// #613: enumerated as a directory, so nothing (ENOENT) or a
 				// non-directory (ENOTDIR, incl. a symlink under O_DIRECTORY)
 				// at this name now is a changed path, as the identity check is.
-				return reachabilityError(workspaceOpenError(err))
+				return reachabilityError(workspaceOpenError(err), false)
 			}
 			child := os.NewFile(uintptr(fd), entry.Name())
 			var st unix.Stat_t

@@ -60,8 +60,9 @@ var (
 	errScopeDenied = errors.New("path denied by workspace policy")
 )
 
-// ErrRootReplaced reports that the workspace root directory is no longer the
-// directory captured at construction (deleted and recreated, or swapped). Every
+// ErrRootReplaced reports that the workspace root path no longer reaches the
+// directory captured at construction (deleted and recreated, swapped, or
+// renamed away; for a scoped child, this includes its scope directory). Every
 // pinned read fails with it until the host builds a new Workspace; hosts that
 // keep a Workspace across project lifetimes should treat it as "rebuild", not
 // "retry". It wraps the identity-change error so tool output is unchanged.
@@ -91,7 +92,8 @@ func (e scopeDeniedError) Is(target error) bool { return target == errScopeDenie
 // the guard allows a path and the file is opened or the directory enumerated,
 // the path is resolved again from the top-level workspace root by name, never
 // through a symlink, and must reach the same object; otherwise the read fails
-// with a path-changed error (ErrRootReplaced when the root itself changed).
+// with a path-changed error (ErrRootReplaced when the root itself, or a scoped
+// child's scope, moved or changed).
 // This is decision integrity, not adversary resistance: a process that can
 // rename can place content at an allowed name, hard links make names unreliable
 // provenance, the re-resolution is not an atomic snapshot, bytes are read after
