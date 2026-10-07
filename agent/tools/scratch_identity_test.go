@@ -502,6 +502,38 @@ func TestScratchSourceBeginControls(t *testing.T) {
 			}
 			mustRename(t, spec.Path+".new", spec.Path)
 		}, wantExeMismatch},
+		{"lexically divergent internal link", func(t *testing.T, canon string, spec *execSpec) {
+			// On the host a/l -> s/../../x resolves through a/s -> deep/er
+			// to a/x (A). rewriteSymlinkTarget cleans the target lexically
+			// to root x (B), a pre-existing snapshot inaccuracy outside
+			// #553; the validator must fail closed on it.
+			a := filepath.Join(canon, "a")
+			if err := os.MkdirAll(filepath.Join(a, "deep/er"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			writeExecutable(t, filepath.Join(a, "x"), "#!/bin/sh\n# A\n")
+			writeExecutable(t, filepath.Join(canon, "x"), "#!/bin/sh\n# B\n")
+			if err := os.Symlink("deep/er", filepath.Join(a, "s")); err != nil {
+				t.Fatal(err)
+			}
+			spec.Path = filepath.Join(a, "l")
+			if err := os.Symlink("s/../../x", spec.Path); err != nil {
+				t.Fatal(err)
+			}
+			spec.ExeIdentity = execIdentityOf(t, spec.Path)
+			if !os.SameFile(spec.ExeIdentity, execIdentityOf(t, filepath.Join(a, "x"))) {
+				t.Fatal("fixture: the host must resolve a/l to a/x")
+			}
+		}, wantExeMismatch},
+		{"approved executable moved within the workspace", func(t *testing.T, canon string, spec *execSpec) {
+			// The approved inode is still in the snapshot, but under
+			// moved.sh; the approved spelling now names a different file.
+			spec.Path = filepath.Join(canon, "scripts/run.sh")
+			spec.ExeIdentity = execIdentityOf(t, spec.Path)
+			mustRename(t, spec.Path, filepath.Join(canon, "scripts/moved.sh"))
+			writeExecutable(t, spec.Path+".new", "#!/bin/sh\n# B\n")
+			mustRename(t, spec.Path+".new", spec.Path)
+		}, wantExeMismatch},
 		{"external PATH executable", func(t *testing.T, canon string, spec *execSpec) {}, ""},
 		{"missing root identity", func(t *testing.T, canon string, spec *execSpec) {
 			spec.RootIdentity = nil
