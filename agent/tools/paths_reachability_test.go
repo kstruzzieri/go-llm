@@ -874,3 +874,92 @@ func toolInvoker(t *testing.T, tool interface {
 		return res.Content, res.IsError, err
 	}
 }
+
+// Control: a case alias resolves through the canonical spelling the open
+// recorded, so verification passes on a case-insensitive filesystem. The guard
+// must also have decided on that canonical spelling, not the caller's.
+func TestReachabilityCaseAliasPasses(t *testing.T) {
+	var seen []string
+	ws, root := reachFixture(t, func(rel string) { seen = append(seen, rel) })
+	if _, err := os.Lstat(filepath.Join(root, "FRONTEND")); err != nil {
+		t.Skip("case-sensitive filesystem")
+	}
+	if data, err := ws.readAll("FRONTEND/private.txt"); err != nil || string(data) != "MOVED_MARKER\n" {
+		t.Fatalf("case alias read = %q, %v", data, err)
+	}
+	f, canonical, err := ws.openRead("FRONTEND/private.txt", false)
+	if err != nil {
+		t.Fatalf("case alias open: %v", err)
+	}
+	_ = f.Close()
+	if canonical != "frontend/private.txt" {
+		t.Fatalf("canonical = %q, want frontend/private.txt", canonical)
+	}
+	if len(seen) != 2 {
+		t.Fatalf("guard fired %d times, want 2 (%q)", len(seen), seen)
+	}
+	for _, rel := range seen {
+		if rel != "frontend/private.txt" {
+			t.Fatalf("guard saw %q, want the canonical spelling", rel)
+		}
+	}
+}
+
+// Control: moving an unrelated sibling during the decision does not fail the
+// read, whether the sibling is a file beside the root, a directory beside a
+// walked directory, or a directory beside the leaf at the intermediate level.
+func TestReachabilitySiblingMovePasses(t *testing.T) {
+	for _, tc := range []struct {
+		name, from, to string
+		dir            bool
+	}{
+		{"file at root", "keep.txt", "kept.txt", false},
+		{"directory beside walked directory", "side", "side-moved", true},
+		{"directory beside leaf", "frontend/other", "frontend/other-moved", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var root string
+			fired := 0
+			ws, root := reachFixture(t, func(rel string) {
+				if rel != "frontend/private.txt" {
+					return
+				}
+				fired++
+				if fired == 1 {
+					if err := os.Rename(filepath.Join(root, tc.from), filepath.Join(root, tc.to)); err != nil {
+						t.Fatal(err)
+					}
+				}
+			})
+			if tc.dir {
+				if err := os.MkdirAll(filepath.Join(root, tc.from), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if data, err := ws.readAll("frontend/private.txt"); err != nil || string(data) != "MOVED_MARKER\n" {
+				t.Fatalf("read with sibling move = %q, %v", data, err)
+			}
+			if fired != 1 {
+				t.Fatalf("guard fired %d times for the leaf, want 1", fired)
+			}
+			if _, err := os.Lstat(filepath.Join(root, tc.to)); err != nil {
+				t.Fatalf("sibling was not moved: %v", err)
+			}
+		})
+	}
+}
+
+// Control: deep paths verify every component.
+func TestReachabilityDeepPathPasses(t *testing.T) {
+	ws, root := reachFixture(t, nil)
+	rel := filepath.Join("a", "b", "c", "d", "e", "f.txt")
+	if err := os.MkdirAll(filepath.Dir(filepath.Join(root, rel)), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, rel), []byte("DEEP\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if data, err := ws.readAll(rel); err != nil || string(data) != "DEEP\n" {
+		t.Fatalf("deep read = %q, %v", data, err)
+	}
+}
