@@ -93,3 +93,33 @@ func BenchmarkReachabilitySearchWide(b *testing.B) {
 		})
 	}
 }
+
+// BenchmarkReachabilityGlob2000 measures glob over the 2000-file tree. "**"
+// stops at listMaxEntries, so it pays up to 1000 per-candidate parent checks;
+// "**/f1.go" matches 100. Not covered by the spec 4.8 budget; reported.
+func BenchmarkReachabilityGlob2000(b *testing.B) {
+	root := b.TempDir()
+	body := strings.Repeat("package x // filler line\n", 40)
+	for a := 0; a < 10; a++ {
+		for c := 0; c < 10; c++ {
+			for f := 0; f < 20; f++ {
+				benchWrite(b, filepath.Join(root, fmt.Sprintf("a%d", a), fmt.Sprintf("b%d", c), fmt.Sprintf("f%d.go", f)), body)
+			}
+		}
+	}
+	ws, err := NewWorkspace(root)
+	if err != nil {
+		b.Fatal(err)
+	}
+	g := NewGlob(ws)
+	for _, pat := range []string{"**", "**/f1.go"} {
+		raw := json.RawMessage(`{"pattern":"` + pat + `"}`)
+		b.Run(strings.NewReplacer("*", "s", "/", "_").Replace(pat), func(b *testing.B) {
+			for b.Loop() {
+				if res, err := g.Invoke(context.Background(), raw); err != nil || res.IsError {
+					b.Fatalf("glob: %+v, %v", res, err)
+				}
+			}
+		})
+	}
+}
