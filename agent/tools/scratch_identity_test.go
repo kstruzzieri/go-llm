@@ -652,6 +652,51 @@ func TestScratchSourceStampRejectsNonRegularClone(t *testing.T) {
 	assertScratchNoLeak(t, rt)
 }
 
+// TestScratchSourceRejectsExcludedGitExecutable checks the validator itself
+// over a real snapshot, which omits every .git entry: an internal executable
+// spelling under .git has no reference copy. Through beginScratchSession the
+// clone stamp would also reject it, so only this direct call discriminates
+// the validator.
+func TestScratchSourceRejectsExcludedGitExecutable(t *testing.T) {
+	canon, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(canon, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeExecutable(t, filepath.Join(canon, ".git/tool.sh"), "#!/bin/sh\n")
+	writeExecutable(t, filepath.Join(canon, "tool.sh"), "#!/bin/sh\n")
+	reference := filepath.Join(t.TempDir(), "tree")
+	man, err := snapshotCanonical(context.Background(), canon, reference, cloneFixtureConfig(), cloneFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ name, rel, want string }{
+		{"included executable", "tool.sh", ""},
+		{"executable under .git", ".git/tool.sh", wantExeMismatch},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			spec := execSpec{
+				Path: filepath.Join(canon, tc.rel), Dir: canon, WorkspaceRoot: canon,
+				ExeIdentity:  execIdentityOf(t, filepath.Join(canon, tc.rel)),
+				DirIdentity:  execIdentityOf(t, canon),
+				RootIdentity: execIdentityOf(t, canon),
+			}
+			err := validateScratchSource(man, spec, canon, reference)
+			if tc.want == "" {
+				if err != nil {
+					t.Fatalf("snapshotted executable rejected: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("want rejection %q, got %v", tc.want, err)
+			}
+		})
+	}
+}
+
 // noIdentityInfo is a FileInfo whose platform identity is unavailable, so
 // statIdentity reports all-zero dev/ino.
 type noIdentityInfo struct{ os.FileInfo }
