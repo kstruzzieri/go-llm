@@ -971,6 +971,75 @@ func TestCollectorBudgetDeferralIsFair(t *testing.T) {
 	}
 }
 
+// A backend whose four requests never fit one tick still reads residency on
+// every tick: a skipped /running opens a gap that erases every loaded-since
+// and hides loads across it. Only the reads after /running take turns.
+func TestCollectorBudgetDeferralKeepsResidencyContinuous(t *testing.T) {
+	f := opsfixture.NewLlamaSwap(t)
+	base := front(t, f, func(_ http.ResponseWriter, r *http.Request) bool {
+		select {
+		case <-time.After(1100 * time.Millisecond):
+		case <-r.Context().Done():
+		}
+		return false
+	})
+	c := NewCollector([]BackendSpec{{Provider: "slow", BaseURL: base, APIFormat: "openai-compat"}}, Options{Interval: 2 * time.Second})
+	for tick := range 3 {
+		before := len(f.Requests())
+		b := c.Tick(context.Background()).Backends[0]
+		if got := f.Requests()[before:]; tick > 0 && !slices.Contains(got, reqRunning) {
+			t.Fatalf("tick %d read %v without /running", tick, got)
+		}
+		if b.Gaps != 0 {
+			t.Fatalf("tick %d: residency gaps = %d, want 0 (every tick read /running)", tick, b.Gaps)
+		}
+	}
+	for _, req := range []opsfixture.Request{reqMetrics, reqModels} {
+		if countURI(f, req.URI) == 0 {
+			t.Errorf("%s was never polled in three ticks", req.URI)
+		}
+	}
+}
+
+// The telemetry after /running resumes at the first surface the budget
+// deferred, not the last: with budgets alternating between room for one of
+// them and none, resuming at the last would hand /api/metrics every turn and
+// never read the listing.
+func TestCollectorTelemetryResumesAtFirstDeferred(t *testing.T) {
+	f := opsfixture.NewLlamaSwap(t)
+	var slow atomic.Bool
+	base := front(t, f, func(_ http.ResponseWriter, r *http.Request) bool {
+		if slow.Load() {
+			select {
+			case <-time.After(300 * time.Millisecond):
+			case <-r.Context().Done():
+			}
+		}
+		return false
+	})
+	c := NewCollector([]BackendSpec{{Provider: "ls", BaseURL: base, APIFormat: "openai-compat"}}, Options{Interval: 2 * time.Second})
+	c.Tick(context.Background())
+	b := c.backends[0]
+	if b.obs.Kind != KindLlamaSwap {
+		t.Fatalf("kind = %v after the first tick, want llama-swap", b.obs.Kind)
+	}
+	slow.Store(true)
+	before := len(f.Requests())
+	// A budget of RequestTimeout + n*300ms - 150ms starts exactly n requests,
+	// with 150ms to spare either way.
+	for _, n := range []int{2, 1, 2} {
+		c.tickEnd = time.Now().Add(RequestTimeout + time.Duration(n)*300*time.Millisecond - 150*time.Millisecond)
+		c.lastWall, c.lastMono = c.now() // as Tick leaves them: no jump
+		ctx, cancel := context.WithDeadline(context.Background(), c.tickEnd)
+		c.observeLlamaSwap(context.Background(), ctx, b)
+		cancel()
+	}
+	want := []opsfixture.Request{reqRunning, reqMetrics, reqRunning, reqRunning, reqModels}
+	if got := f.Requests()[before:]; !slices.Equal(got, want) {
+		t.Fatalf("requests = %v, want %v (the listing's turn survives a budget with room for none)", got, want)
+	}
+}
+
 // TestCollectorSleepDuringTickDropsReadings: the lid closes after /running
 // is read and opens before /api/metrics answers, so wall time moves 3 h
 // inside one tick while monotonic time does not.

@@ -216,7 +216,7 @@ type backendState struct {
 	observe     *client
 	surfaces    map[string]*surfaceState
 	order       []string
-	nextSurface int               // first deferred llama-swap telemetry surface; identity stays first
+	nextSurface int               // first deferred llama-swap surface after /running; identity and residency stay first
 	prev        map[string]string // model -> live state in the current period; nil before a baseline
 	mem         map[string]*ModelMemory
 }
@@ -510,9 +510,30 @@ func bound(s string) string {
 }
 
 func (c *Collector) observeLlamaSwap(callerCtx, ctx context.Context, b *backendState) {
-	// Identity was checked first. Resume at the first deferred telemetry
-	// surface so a repeatedly slow prefix cannot starve the model listing.
-	surfaces := polledBy[KindLlamaSwap][1:]
+	// Identity was checked first, and residency always goes next: a skipped
+	// /running opens a gap that erases every loaded-since and hides loads
+	// across it, while a skipped /api/metrics only ages and a skipped
+	// /v1/models only withholds this poll's peer confirmation.
+	c.fetch(callerCtx, ctx, b, b.observe, "running", "/running", runningLimit, func(body []byte) error {
+		models, err := decodeRunning(body)
+		if err != nil {
+			return err
+		}
+		wall, mono := c.now()
+		b.obs.Running = &Sample[[]RunningModel]{Value: models, At: wall, Mono: mono}
+		cur := make(map[string]string, len(models))
+		for _, m := range models {
+			cur[m.Model] = m.State
+		}
+		b.applyResidency(cur, wall)
+		return nil
+	})
+	if b.obs.Kind != KindLlamaSwap {
+		return
+	}
+	// The rest resume at the first one the budget deferred, so a slow
+	// /api/metrics cannot starve the model listing.
+	surfaces := polledBy[KindLlamaSwap][2:]
 	first := b.nextSurface
 	b.nextSurface = 0
 	pending := false
@@ -520,21 +541,6 @@ func (c *Collector) observeLlamaSwap(callerCtx, ctx context.Context, b *backendS
 		index := (first + i) % len(surfaces)
 		var deferred bool
 		switch surfaces[index] {
-		case "running":
-			_, deferred = c.fetch(callerCtx, ctx, b, b.observe, "running", "/running", runningLimit, func(body []byte) error {
-				models, err := decodeRunning(body)
-				if err != nil {
-					return err
-				}
-				wall, mono := c.now()
-				b.obs.Running = &Sample[[]RunningModel]{Value: models, At: wall, Mono: mono}
-				cur := make(map[string]string, len(models))
-				for _, m := range models {
-					cur[m.Model] = m.State
-				}
-				b.applyResidency(cur, wall)
-				return nil
-			})
 		case "metrics":
 			_, deferred = c.fetch(callerCtx, ctx, b, b.observe, "metrics", "/api/metrics", metricsLimit, func(body []byte) error {
 				rows, err := decodeMetrics(body)
