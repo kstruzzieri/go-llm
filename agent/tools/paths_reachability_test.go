@@ -228,3 +228,122 @@ func TestReachabilityRootReplacedInsideGuard(t *testing.T) {
 		t.Fatalf("read after root replacement = %q, %v; want ErrRootReplaced", data, err)
 	}
 }
+
+// R5: a scoped child pinned at frontend keeps its descriptor for its whole
+// lifetime; moving the scope under a denied name must fail its reads.
+func TestReachabilityScopedChildScopeMoved(t *testing.T) {
+	parent, root := reachFixture(t, nil)
+	child, counts, cleanup, err := newScopedWorkspace(parent, "frontend")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	moveIntoVault(t, root)()
+	res, err := NewReadFile(child).Invoke(t.Context(), json.RawMessage(`{"path":"private.txt"}`))
+	if err != nil || !res.IsError || res.Content != "path changed during access" {
+		t.Fatalf("child read_file = %+v, %v", res, err)
+	}
+	if counts.evaluations.Load() != 0 || counts.requests.Load() != 0 {
+		t.Fatalf("reachability failure counted as policy denial: evaluations=%d, requests=%d", counts.evaluations.Load(), counts.requests.Load())
+	}
+}
+
+// R5b: an ancestor of the scope is replaced by a symlink to its moved self.
+// Resolving the child's root by absolute path would follow the symlink and
+// pass; only a check anchored at the parent root with O_NOFOLLOW fails it.
+func TestReachabilityScopedAncestorSymlink(t *testing.T) {
+	parent, root := reachFixture(t, nil)
+	if err := os.MkdirAll(filepath.Join(root, "deep", "inner"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "deep", "inner", "x.txt"), []byte("DEEP_MARKER\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	child, _, cleanup, err := newScopedWorkspace(parent, "deep/inner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	moved := filepath.Join(root, "vault", "deep")
+	if err := os.Rename(filepath.Join(root, "deep"), moved); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(moved, filepath.Join(root, "deep")); err != nil {
+		t.Fatal(err)
+	}
+	if data, err := child.readAll("x.txt"); !errors.Is(err, errFileChanged) || len(data) != 0 {
+		t.Fatalf("child read through symlinked ancestor = %q, %v", data, err)
+	}
+}
+
+// Nested scopes chain their anchors: an inner child of a scoped outer child
+// still verifies from the top-level root.
+func TestReachabilityNestedScopeAnchorsAtTopRoot(t *testing.T) {
+	parent, root := reachFixture(t, nil)
+	if err := os.MkdirAll(filepath.Join(root, "deep", "inner"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "deep", "inner", "x.txt"), []byte("DEEP_MARKER\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	outer, _, closeOuter, err := newScopedWorkspace(parent, "deep")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeOuter()
+	inner, _, closeInner, err := newScopedWorkspace(outer, "inner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeInner()
+	if data, err := inner.readAll("x.txt"); err != nil || string(data) != "DEEP_MARKER\n" {
+		t.Fatalf("nested read before move = %q, %v", data, err)
+	}
+	moved := filepath.Join(root, "vault", "deep")
+	if err := os.Rename(filepath.Join(root, "deep"), moved); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(moved, filepath.Join(root, "deep")); err != nil {
+		t.Fatal(err)
+	}
+	if data, err := inner.readAll("x.txt"); !errors.Is(err, errFileChanged) || len(data) != 0 {
+		t.Fatalf("nested read after ancestor swap = %q, %v", data, err)
+	}
+}
+
+// An ancestor ABOVE the outer scope becomes a symlink to its moved self. The
+// outer root's absolute path still resolves to the same directory (only its
+// final component is no-follow), so an inner child anchored at the outer root
+// would pass; anchored at the top-level root, the walk meets the symlink.
+func TestReachabilityNestedScopeSwapAboveOuterRoot(t *testing.T) {
+	parent, root := reachFixture(t, nil)
+	if err := os.MkdirAll(filepath.Join(root, "p", "deep", "inner"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "p", "deep", "inner", "x.txt"), []byte("DEEP_MARKER\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	outer, _, closeOuter, err := newScopedWorkspace(parent, "p/deep")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeOuter()
+	inner, _, closeInner, err := newScopedWorkspace(outer, "inner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeInner()
+	if data, err := inner.readAll("x.txt"); err != nil || string(data) != "DEEP_MARKER\n" {
+		t.Fatalf("nested read before swap = %q, %v", data, err)
+	}
+	moved := filepath.Join(root, "vault", "p")
+	if err := os.Rename(filepath.Join(root, "p"), moved); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(moved, filepath.Join(root, "p")); err != nil {
+		t.Fatal(err)
+	}
+	if data, err := inner.readAll("x.txt"); !errors.Is(err, errFileChanged) || len(data) != 0 {
+		t.Fatalf("nested read after swap above outer root = %q, %v", data, err)
+	}
+}
