@@ -65,8 +65,9 @@ canonical workspace root, sanitized environment values, timeout and the selected
 sandbox/scratch policy. Each plan records filesystem identities for its
 executable, cwd and workspace root and rechecks them before invocation. On Linux
 and Darwin, scratch setup checks its source snapshot manifest against those
-objects before running in the clone, and native sandbox preparation checks that
-the executable target it resolves is the approved object.
+objects (the executable only when it is inside the workspace) before running in
+the clone, and native sandbox preparation checks that the executable target it
+resolves is the approved object.
 
 These checks do not bind file bytes: an in-place rewrite keeps the identity.
 They do not bind a script's interpreter, loader inputs or dependencies, or the

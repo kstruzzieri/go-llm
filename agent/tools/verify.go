@@ -46,7 +46,7 @@ type VerifyResult struct {
 // The plan is prepared ONCE, at construction, and frozen. Every Run re-checks
 // it before launch, so a cwd escape or a binary swap between approval and
 // that check fails closed. A swap after the check, or an in-place rewrite,
-// remains the documented launch residual (#553).
+// remains the documented launch residual (#484).
 type VerifyCommand struct {
 	ws      *Workspace
 	runner  commandRunner

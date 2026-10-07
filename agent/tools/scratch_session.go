@@ -102,7 +102,7 @@ func beginScratchSession(ctx context.Context, rt *scratchRuntime, spec execSpec)
 		return fail(fmt.Errorf("tools: clone scratch workspace: %w", err))
 	}
 	// Bind the accepted source pass to the approved objects (#553). This is
-	// the last check before the command runs in the clone, not a
+	// the last source check before the command runs in the clone, not a
 	// point-in-time coherence proof: same-UID mutation of the host,
 	// reference, or work trees after it remains the accepted residual.
 	if err = validateScratchSource(s.manifest, spec, rt.root, s.reference); err != nil {

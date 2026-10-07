@@ -10,7 +10,7 @@ object before launching it.
 
 - A scratch command refuses to run, with "scratch snapshot does not match
   approved ...; retry", when its root, cwd or workspace executable was replaced
-  between approval and execution. Retry to re-approve against the current
+  between approval and execution. Retrying plans against the current
   object.
 - A sandboxed command refuses with "executable changed since approval; retry"
   when its executable target changed after approval.

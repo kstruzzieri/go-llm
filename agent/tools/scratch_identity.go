@@ -10,10 +10,10 @@ import (
 
 // Scratch source binding (#553): the snapshot must be a copy of the objects
 // recheckExecPlan approved. These checks bind the approved object at the last
-// check before the command runs in the clone. They do not bind bytes (an
-// in-place rewrite keeps the identity), do not make launch atomic, and are
-// not a point-in-time coherence proof of the snapshot; same-UID mutation of
-// the host, reference, or work trees after the checks is the accepted
+// source check before the command runs in the clone. They do not bind bytes
+// (an in-place rewrite keeps the identity), do not make launch atomic, and
+// are not a point-in-time coherence proof of the snapshot; same-UID mutation
+// of the host, reference, or work trees after the checks is the accepted
 // residual (#484).
 var (
 	errScratchRootMismatch = errors.New("tools: scratch snapshot does not match approved workspace root; retry")
