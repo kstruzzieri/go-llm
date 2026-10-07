@@ -341,6 +341,25 @@ func (e workspaceEntry) openRegular() (*os.File, error) {
 	return os.NewFile(uintptr(fd), e.name), nil
 }
 
+// openWalked opens a walked regular file from its pinned directory descriptor
+// and verifies (#613) that rel still reaches it after the walk's guard
+// decision. Entries without a pinned directory fall back to a by-name open.
+func (w *Workspace) openWalked(rel string, d fs.DirEntry) (*os.File, error) {
+	e, ok := d.(workspaceEntry)
+	if !ok {
+		return w.openRegularFile(rel)
+	}
+	f, err := e.openRegular()
+	if err != nil {
+		return nil, err
+	}
+	if err := w.verifyReachable(rel, f); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	return f, nil
+}
+
 func (e workspaceEntry) Name() string               { return e.name }
 func (e workspaceEntry) Size() int64                { return e.stat.Size }
 func (e workspaceEntry) ModTime() time.Time         { return time.Unix(e.stat.Mtim.Sec, e.stat.Mtim.Nsec) }

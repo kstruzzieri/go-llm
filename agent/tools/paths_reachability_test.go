@@ -3,6 +3,7 @@
 package tools
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +14,8 @@ import (
 	"runtime/debug"
 	"strings"
 	"testing"
+
+	"github.com/kstruzzieri/go-llm/agent"
 )
 
 // reachFixture builds <root>/frontend/private.txt (MOVED_MARKER), an empty
@@ -682,5 +685,94 @@ func TestReachabilityWalkChildMovedInsideEntryGuard(t *testing.T) {
 				t.Fatalf("content=%q, IsError=%v, guard calls=%d", content, isError, calls)
 			}
 		})
+	}
+}
+
+// R3: the walk's guard allows frontend/private.txt, then the directory moves
+// under a denied name before the file is opened through the held descriptor.
+// The file is skipped; other matches survive.
+func TestReachabilitySearchSkipsMovedFile(t *testing.T) {
+	var root string
+	var move func()
+	ws, root := reachFixture(t, func(rel string) {
+		if rel == "frontend/private.txt" {
+			move()
+		}
+	})
+	move = moveIntoVault(t, root)
+	res, err := NewSearch(ws).Invoke(t.Context(), json.RawMessage(`{"pattern":"MARKER"}`))
+	if err != nil || res.IsError || res.Content != "keep.txt:1: KEEP_MARKER" {
+		t.Fatalf("search = %+v, %v", res, err)
+	}
+}
+
+// A skipped file's descriptor is closed, not left for the garbage collector.
+// The directory moves into the vault inside every search's guard decision and
+// is restored between searches. GC stays off so a finalizer cannot close a
+// leaked *os.File and hide the leak.
+func TestReachabilitySearchSkipReleasesDescriptors(t *testing.T) {
+	var root string
+	moved := false
+	ws, root := reachFixture(t, func(rel string) {
+		if rel != "frontend/private.txt" {
+			return
+		}
+		if err := os.Rename(filepath.Join(root, "frontend"), filepath.Join(root, "vault", "frontend")); err != nil {
+			t.Fatal(err)
+		}
+		moved = true
+	})
+	search := func() {
+		t.Helper()
+		res, err := NewSearch(ws).Invoke(t.Context(), json.RawMessage(`{"pattern":"MARKER"}`))
+		if err != nil || res.IsError || res.Content != "keep.txt:1: KEEP_MARKER" {
+			t.Fatalf("search = %+v, %v", res, err)
+		}
+		if !moved {
+			t.Fatal("guard never moved the directory; the skip path was not exercised")
+		}
+		moved = false
+		if err := os.Rename(filepath.Join(root, "vault", "frontend"), filepath.Join(root, "frontend")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	search()
+	runtime.GC()
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
+	before := openFDCount(t)
+	for range 64 {
+		search()
+	}
+	if after := openFDCount(t); after != before {
+		t.Fatalf("descriptors before=%d after=%d", before, after)
+	}
+}
+
+// Control: ordinary tool output is unchanged when nothing moves.
+func TestReachabilityOrdinaryOutputsUnchanged(t *testing.T) {
+	ws, _ := reachFixture(t, nil)
+	cases := []struct {
+		name, raw, want string
+		invoke          func(json.RawMessage) (string, bool, error)
+	}{
+		{"read_file", `{"path":"frontend/private.txt"}`, "MOVED_MARKER\n", toolInvoker(t, NewReadFile(ws))},
+		{"search", `{"pattern":"MARKER"}`, "frontend/private.txt:1: MOVED_MARKER\nkeep.txt:1: KEEP_MARKER", toolInvoker(t, NewSearch(ws))},
+		{"list", `{}`, "frontend/\nkeep.txt", toolInvoker(t, NewList(ws))},
+		{"glob", `{"pattern":"**"}`, "frontend/\nfrontend/private.txt\nkeep.txt", toolInvoker(t, NewGlob(ws))},
+	}
+	for _, tc := range cases {
+		got, isErr, err := tc.invoke(json.RawMessage(tc.raw))
+		if err != nil || isErr || got != tc.want {
+			t.Errorf("%s = %q (error=%v), %v; want %q", tc.name, got, isErr, err, tc.want)
+		}
+	}
+}
+
+func toolInvoker(t *testing.T, tool interface {
+	Invoke(context.Context, json.RawMessage) (agent.ToolResult, error)
+}) func(json.RawMessage) (string, bool, error) {
+	return func(raw json.RawMessage) (string, bool, error) {
+		res, err := tool.Invoke(t.Context(), raw)
+		return res.Content, res.IsError, err
 	}
 }

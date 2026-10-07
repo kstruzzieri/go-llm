@@ -85,6 +85,12 @@ func (w *Workspace) openRegularFile(p string) (*os.File, error) {
 	return f, nil
 }
 
+// openWalked opens by checked path after the guard decided; this backend has
+// no retained descriptors and adds no #613 recheck.
+func (w *Workspace) openWalked(rel string, _ fs.DirEntry) (*os.File, error) {
+	return w.openRegularFile(rel)
+}
+
 func (w *Workspace) openReadDir(p string) (*os.File, string, error) {
 	f, err := w.openDir(p)
 	if err != nil {
