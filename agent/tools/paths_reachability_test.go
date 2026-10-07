@@ -130,6 +130,27 @@ func TestReachabilityLeafSymlinkInsideGuard(t *testing.T) {
 	}
 }
 
+// openFDCount counts this process's open descriptors by name. Names only: on
+// Darwin os.ReadDir's per-entry stat can hit the descriptor used to read
+// /dev/fd after it is closed (EBADF).
+func openFDCount(t *testing.T) int {
+	t.Helper()
+	fdDir := "/dev/fd"
+	if runtime.GOOS == "linux" {
+		fdDir = "/proc/self/fd"
+	}
+	dir, err := os.Open(fdDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names, err := dir.Readdirnames(-1)
+	_ = dir.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return len(names)
+}
+
 // verifyReachable must release every directory it opens on the way down. GC
 // stays off so a finalizer cannot close a leaked *os.File and hide the leak
 // (same technique as TestMutationDescriptorLifetime).
@@ -155,29 +176,11 @@ func TestReachabilityReleasesDescriptors(t *testing.T) {
 	read()
 	runtime.GC()
 	defer debug.SetGCPercent(debug.SetGCPercent(-1))
-	fdDir := "/dev/fd"
-	if runtime.GOOS == "linux" {
-		fdDir = "/proc/self/fd"
-	}
-	// Names only: on Darwin os.ReadDir's per-entry stat can hit the
-	// descriptor used to read /dev/fd after it is closed (EBADF).
-	count := func() int {
-		dir, err := os.Open(fdDir)
-		if err != nil {
-			t.Fatal(err)
-		}
-		names, err := dir.Readdirnames(-1)
-		_ = dir.Close()
-		if err != nil {
-			t.Fatal(err)
-		}
-		return len(names)
-	}
-	before := count()
+	before := openFDCount(t)
 	for range 64 {
 		read()
 	}
-	if after := count(); after != before {
+	if after := openFDCount(t); after != before {
 		t.Fatalf("descriptors before=%d after=%d", before, after)
 	}
 }
@@ -238,6 +241,9 @@ func TestReachabilityScopedChildScopeMoved(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer cleanup()
+	if data, err := child.readAll("private.txt"); err != nil || string(data) != "MOVED_MARKER\n" {
+		t.Fatalf("child read before move = %q, %v", data, err)
+	}
 	moveIntoVault(t, root)()
 	res, err := NewReadFile(child).Invoke(t.Context(), json.RawMessage(`{"path":"private.txt"}`))
 	if err != nil || !res.IsError || res.Content != "path changed during access" {
@@ -264,6 +270,9 @@ func TestReachabilityScopedAncestorSymlink(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer cleanup()
+	if data, err := child.readAll("x.txt"); err != nil || string(data) != "DEEP_MARKER\n" {
+		t.Fatalf("child read before swap = %q, %v", data, err)
+	}
 	moved := filepath.Join(root, "vault", "deep")
 	if err := os.Rename(filepath.Join(root, "deep"), moved); err != nil {
 		t.Fatal(err)
@@ -276,9 +285,13 @@ func TestReachabilityScopedAncestorSymlink(t *testing.T) {
 	}
 }
 
-// Nested scopes chain their anchors: an inner child of a scoped outer child
-// still verifies from the top-level root.
-func TestReachabilityNestedScopeAnchorsAtTopRoot(t *testing.T) {
+// An inner child of a scoped outer child reads successfully, then the outer
+// root's own final component is swapped for a symlink to its moved self; the
+// inner read must fail closed. That an inner child anchors at the top-level
+// root, not at the outer root, is proven by
+// TestReachabilityNestedScopeSwapAboveOuterRoot: here the swapped name is the
+// outer root's last component, which a by-path O_NOFOLLOW open fails anyway.
+func TestReachabilityNestedScopeOuterRootSwapped(t *testing.T) {
 	parent, root := reachFixture(t, nil)
 	if err := os.MkdirAll(filepath.Join(root, "deep", "inner"), 0o700); err != nil {
 		t.Fatal(err)
@@ -345,5 +358,122 @@ func TestReachabilityNestedScopeSwapAboveOuterRoot(t *testing.T) {
 	}
 	if data, err := inner.readAll("x.txt"); !errors.Is(err, errFileChanged) || len(data) != 0 {
 		t.Fatalf("nested read after swap above outer root = %q, %v", data, err)
+	}
+}
+
+// Construction pins the scope directory through the same guarded open as a
+// read, so the decision on the scope name must still hold after the guard
+// returns. The scope moves under a denied name inside that decision: the
+// constructor must fail closed, return no child and no cleanup, and leak no
+// descriptor.
+func TestReachabilityConstructionScopeMovedInsideGuard(t *testing.T) {
+	var root string
+	armed := false
+	fired := false
+	parent, root := reachFixture(t, func(rel string) {
+		if rel == "frontend" && armed {
+			armed, fired = false, true
+			moveIntoVault(t, root)()
+		}
+	})
+	// Control: unarmed construction succeeds, so the failure below is the move.
+	_, _, closeControl, err := newScopedWorkspace(parent, "frontend")
+	if err != nil {
+		t.Fatalf("control construction = %v", err)
+	}
+	closeControl()
+	runtime.GC()
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
+	before := openFDCount(t)
+	armed = true
+	child, counts, cleanup, err := newScopedWorkspace(parent, "frontend")
+	if !fired {
+		t.Fatal("guard never saw the scope name")
+	}
+	if !errors.Is(err, errFileChanged) || child != nil || counts != nil || cleanup != nil {
+		t.Fatalf("construction after scope move = child %v, counts %v, cleanup %v, err %v; want errFileChanged and nothing returned", child != nil, counts != nil, cleanup != nil, err)
+	}
+	if after := openFDCount(t); after != before {
+		t.Fatalf("descriptors before=%d after=%d", before, after)
+	}
+}
+
+// Nested construction verifies through the outer child's inherited anchor. The
+// outer child's guard wraps the parent's, so the inner pin reaches the parent
+// guard with the full name p/deep/inner; an ancestor above the outer root is
+// swapped for a symlink to its moved self inside that decision.
+func TestReachabilityNestedConstructionSwapAboveOuterRoot(t *testing.T) {
+	var root string
+	armed := false
+	fired := false
+	parent, root := reachFixture(t, func(rel string) {
+		if rel == "p/deep/inner" && armed {
+			armed, fired = false, true
+			moved := filepath.Join(root, "vault", "p")
+			if err := os.Rename(filepath.Join(root, "p"), moved); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(moved, filepath.Join(root, "p")); err != nil {
+				t.Fatal(err)
+			}
+		}
+	})
+	if err := os.MkdirAll(filepath.Join(root, "p", "deep", "inner"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "p", "deep", "inner", "x.txt"), []byte("DEEP_MARKER\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	outer, _, closeOuter, err := newScopedWorkspace(parent, "p/deep")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeOuter()
+	// Control: unarmed nested construction succeeds and reads.
+	control, _, closeControl, err := newScopedWorkspace(outer, "inner")
+	if err != nil {
+		t.Fatalf("control nested construction = %v", err)
+	}
+	if data, err := control.readAll("x.txt"); err != nil || string(data) != "DEEP_MARKER\n" {
+		t.Fatalf("control nested read = %q, %v", data, err)
+	}
+	closeControl()
+	armed = true
+	inner, counts, closeInner, err := newScopedWorkspace(outer, "inner")
+	if !fired {
+		t.Fatal("parent guard never saw p/deep/inner")
+	}
+	if !errors.Is(err, errFileChanged) || inner != nil || counts != nil || closeInner != nil {
+		t.Fatalf("nested construction after swap = inner %v, counts %v, cleanup %v, err %v; want errFileChanged and nothing returned", inner != nil, counts != nil, closeInner != nil, err)
+	}
+}
+
+// The top-level root's canonical path becomes a symlink to its moved self
+// after the read opened and the guard decided: the object and rel are
+// unchanged, but the path no longer names the root without a symlink. The
+// reachability check opens the root no-follow, like workspaceRoot does, and
+// must fail closed.
+func TestReachabilityRootPathBecomesSymlink(t *testing.T) {
+	var root string
+	swapped := false
+	ws, root := reachFixture(t, func(rel string) {
+		if rel != "frontend/private.txt" || swapped {
+			return
+		}
+		swapped = true
+		moved := root + "-moved"
+		if err := os.Rename(root, moved); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(moved, root); err != nil {
+			t.Fatal(err)
+		}
+	})
+	data, err := ws.readAll("frontend/private.txt")
+	if !swapped {
+		t.Fatal("guard never saw frontend/private.txt")
+	}
+	if !errors.Is(err, errFileChanged) || len(data) != 0 {
+		t.Fatalf("read through symlinked root = %q, %v", data, err)
 	}
 }
