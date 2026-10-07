@@ -61,7 +61,9 @@ func scratchContained(base, p string) (string, bool) {
 // carries the approved identity. The source entry supplies the identity
 // evidence and the reference only locates it, so case, normalization, and
 // hard-link spellings resolve without comparing a clone inode with a source
-// inode, and an approved object moved to another path is not accepted.
+// inode. An approved object moved to another path is accepted only when the
+// approved spelling still locates that entry's reference copy (for example
+// through a symlink); a different object at the spelling is rejected.
 func referenceCopyOf(man snapshotManifest, reference string, wantDir bool, approved, located os.FileInfo) bool {
 	for _, e := range man.entries {
 		if !manifestEntryMatches(e, wantDir, approved) {

@@ -567,6 +567,17 @@ func TestScratchSourceBeginControls(t *testing.T) {
 			}
 			mustRename(t, spec.Dir+".new", spec.Dir)
 		}, wantDirMismatch},
+		{"approved cwd moved, symlink at the spelling", func(t *testing.T, canon string, spec *execSpec) {
+			// The spelling still locates the copy of the approved directory
+			// (through the link), as symlinked executable spellings do.
+			spec.Dir = filepath.Join(canon, "dir")
+			spec.DirIdentity = execIdentityOf(t, spec.Dir)
+			mustRename(t, spec.Dir, filepath.Join(canon, "dir2"))
+			if err := os.Symlink("dir2", spec.Dir+".new"); err != nil {
+				t.Fatal(err)
+			}
+			mustRename(t, spec.Dir+".new", spec.Dir)
+		}, ""},
 		{"cwd outside the workspace root", func(t *testing.T, canon string, spec *execSpec) {
 			spec.Dir = t.TempDir()
 			spec.DirIdentity = execIdentityOf(t, spec.Dir)
