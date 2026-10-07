@@ -86,6 +86,17 @@ func (e scopeDeniedError) Is(target error) bool { return target == errScopeDenie
 // Missing entries retain their requested spelling: hosts reserving absent names
 // must cover the filesystem's equivalent case/normalization spellings themselves.
 // Workspace does not impose a global folding/normalization algorithm.
+//
+// On Linux and Darwin a read decision binds to what is returned (#613): after
+// the guard allows a path and the file is opened or the directory enumerated,
+// the path is resolved again from the top-level workspace root by name, never
+// through a symlink, and must reach the same object; otherwise the read fails
+// with a path-changed error (ErrRootReplaced when the root itself changed).
+// This is decision integrity, not adversary resistance: a process that can
+// rename can place content at an allowed name, hard links make names unreliable
+// provenance, the re-resolution is not an atomic snapshot, bytes are read after
+// it, and case-only or normalization-only renames on case-insensitive
+// filesystems are not detected. Mutations keep the #552 contract.
 type ScopeGuard func(rel string, write bool) error
 
 // Workspace is the single audited chokepoint for all filesystem access within the

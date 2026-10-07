@@ -58,6 +58,41 @@ checkpoint after-state failures retain pending intent and refuse success. Other
 platforms keep the checked-path backend without these concurrent mutation
 guarantees.
 
+## Workspace read boundary (#613)
+
+On Linux and Darwin, `read_file`, `search`, `glob`, `list`, scoped dispatch
+construction and readers, and the internal reads behind write/edit previews and
+undo bind the guard's decision to what they return. After the guard allows a
+path and the file is opened or the directory enumerated, the path is resolved
+again from the top-level workspace root, one component at a time without
+following symlinks, and must reach the object being read. Otherwise the read
+fails closed with "path changed during access" (`ErrRootReplaced` for Go
+callers when the root itself was replaced). A directory that fails this check
+after enumeration aborts the walk or listing. `search` skips a file that fails
+its own check, as it skips unreadable files, but aborts on a replaced root.
+Scoped children verify from the top-level root, so a scope directory moved
+after construction stops serving reads, even when a symlink now leads to it.
+`list` rechecks its directory after the entry guards, truncated listings
+included; `glob` rechecks each matching name's parent after that name's guard.
+
+These checks bind the directory being enumerated. Entry names and metadata
+remain an enumeration snapshot: `list` can still show a directory renamed during
+its own entry guard under its old name, though nothing is read through it.
+`glob` binds each name to its parent at that name's check, not the result set
+as a whole. This reverses #448's rule that a pinned directory or root keeps
+serving reads after it moves; replacement content at the old name is still
+never returned.
+
+This is decision integrity, not adversary resistance. A process that can rename
+can place content at an allowed name permanently, with no race needed, and hard
+links already make a name unreliable provenance. The re-resolution is a
+sequence of per-component lookups, not an atomic snapshot: coordinated renames
+interleaved with it can pass. Bytes are read after it, so an object may move
+while being read. Case-only and normalization-only renames on case-insensitive
+filesystems are not detected. Writes and deletes keep the mutation boundary
+above. Other platforms open by checked path after the guard decides, add no
+post-enumeration check, and keep their existing limits.
+
 ## Child capability and budget boundary (#449)
 
 Dispatch selects only `read_file`, `search`, `glob`, `list` and optional
@@ -70,7 +105,8 @@ code: their Effect metadata must remain constant and truthful. This is not
 process isolation, and the child's model transport and configured retrieval
 backend can still use the network.
 
-Scoped tasks retain #448's single pinned descendant directory. Native readers
+Scoped tasks retain #448's single pinned descendant directory, re-verified at its
+path on every read (#613). Native readers
 must share one Workspace, and every read must satisfy both the caller's guard
 and the selected subtree. Typed, sanitized denials disclose neither denied
 contents nor private guard diagnostics. Legacy string tasks remain unscoped.
