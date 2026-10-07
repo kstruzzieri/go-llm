@@ -5,6 +5,7 @@ package tools
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -626,5 +627,60 @@ func TestReachabilityWalkedParentRequiresHeldDirectory(t *testing.T) {
 	}
 	if err := ws.verifyWalkedParent("keep.txt", fs.FileInfoToDirEntry(info)); !errors.Is(err, errWalkEntryUnheld) {
 		t.Fatalf("unheld entry = %v", err)
+	}
+}
+
+// A truncated listing is still verified after its entry guards: the move
+// happens in an early entry's guard, and truncation must not skip the check.
+func TestReachabilityTruncatedListMovedInsideEntryGuard(t *testing.T) {
+	var move func()
+	calls := 0
+	ws, root := reachFixture(t, func(rel string) {
+		if rel == "frontend/f0005.txt" {
+			calls++
+			move()
+		}
+	})
+	for i := 0; i < listMaxEntries+5; i++ {
+		if err := os.WriteFile(filepath.Join(root, "frontend", fmt.Sprintf("f%04d.txt", i)), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	move = moveIntoVault(t, root)
+	content, isError := invokeListing(t, ws, "list", "frontend")
+	if calls != 1 || !isError || content != "path changed during access" {
+		t.Fatalf("content tail=%q, IsError=%v, guard calls=%d", content[max(0, len(content)-60):], isError, calls)
+	}
+}
+
+// A directory the walk enumerated moves away inside its own entry guard,
+// before the walk recurses into it. The recursion's open then finds nothing,
+// or a symlink, at that name: a changed path, like the identity mismatch the
+// recursion already reports.
+func TestReachabilityWalkChildMovedInsideEntryGuard(t *testing.T) {
+	for _, symlink := range []bool{false, true} {
+		t.Run(map[bool]string{false: "moved", true: "symlinked"}[symlink], func(t *testing.T) {
+			var root string
+			calls := 0
+			ws, root := reachFixture(t, func(rel string) {
+				if rel != "frontend" {
+					return
+				}
+				calls++
+				if calls > 1 {
+					return
+				}
+				moveIntoVault(t, root)()
+				if symlink {
+					if err := os.Symlink(filepath.Join(root, "vault", "frontend"), filepath.Join(root, "frontend")); err != nil {
+						t.Fatal(err)
+					}
+				}
+			})
+			content, isError := invokeListing(t, ws, "glob", "")
+			if calls != 1 || !isError || content != "path changed during access" {
+				t.Fatalf("content=%q, IsError=%v, guard calls=%d", content, isError, calls)
+			}
+		})
 	}
 }

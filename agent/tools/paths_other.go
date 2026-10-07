@@ -100,13 +100,15 @@ func (w *Workspace) openReadDir(p string) (*os.File, string, error) {
 }
 func readWorkspaceEntries(f *os.File) ([]fs.DirEntry, error) { return f.ReadDir(-1) }
 
-// readDirEntries enumerates only: the checked-path backend opens by name
-// after the guard decides, so there is no retained descriptor to verify.
+// readDirEntries enumerates only. The checked-path backend opened this
+// directory by its checked path after the guard decided, so it adds no
+// post-enumeration check (#613); other platforms keep their existing limits.
 func (w *Workspace) readDirEntries(f *os.File, _ string) ([]fs.DirEntry, error) {
 	return readWorkspaceEntries(f)
 }
 
-// These preserve the checked-path backend's existing guarantees.
+// No-op for the same reason: this backend's reads open by checked path after
+// the guard decides and keep their existing limits, adding no #613 recheck.
 func (w *Workspace) verifyReachable(_ string, _ *os.File) error       { return nil }
 func (w *Workspace) verifyWalkedParent(_ string, _ fs.DirEntry) error { return nil }
 

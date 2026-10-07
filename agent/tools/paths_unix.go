@@ -471,7 +471,10 @@ func (w *Workspace) walkDir(ctx context.Context, parent *os.File, base string, f
 		if entry.IsDir() {
 			fd, err := unix.Openat(int(f.Fd()), entry.Name(), workspaceSearchFlags|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 			if err != nil {
-				return workspaceOpenError(err)
+				// #613: enumerated as a directory, so nothing (ENOENT) or a
+				// non-directory (ENOTDIR, incl. a symlink under O_DIRECTORY)
+				// at this name now is a changed path, as the identity check is.
+				return reachabilityError(workspaceOpenError(err))
 			}
 			child := os.NewFile(uintptr(fd), entry.Name())
 			var st unix.Stat_t
