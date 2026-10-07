@@ -15,6 +15,8 @@ import (
 	"strings"
 	"testing"
 
+	"golang.org/x/sys/unix"
+
 	"github.com/kstruzzieri/go-llm/agent"
 )
 
@@ -692,7 +694,6 @@ func TestReachabilityWalkChildMovedInsideEntryGuard(t *testing.T) {
 // under a denied name before the file is opened through the held descriptor.
 // The file is skipped; other matches survive.
 func TestReachabilitySearchSkipsMovedFile(t *testing.T) {
-	var root string
 	var move func()
 	ws, root := reachFixture(t, func(rel string) {
 		if rel == "frontend/private.txt" {
@@ -745,6 +746,103 @@ func TestReachabilitySearchSkipReleasesDescriptors(t *testing.T) {
 	}
 	if after := openFDCount(t); after != before {
 		t.Fatalf("descriptors before=%d after=%d", before, after)
+	}
+}
+
+// Root replacement is a root-level condition, not a per-file mismatch: search
+// aborts like glob and list instead of reporting absence ("no matches") or
+// emitting the replaced root's content. The root is renamed away and recreated
+// inside the guard of the file being searched.
+func TestReachabilitySearchAbortsOnRootReplacement(t *testing.T) {
+	cases := []struct {
+		name         string
+		files, after map[string]string
+		trigger      string
+	}{
+		{"only file", map[string]string{"only.txt": "MATCH ORIGINAL\n"}, map[string]string{"only.txt": "MATCH REPLACEMENT\n"}, "only.txt"},
+		{"last file after a match", map[string]string{"a/a.txt": "MATCH A_OLD\n", "z.txt": "MATCH Z_OLD\n"}, map[string]string{"z.txt": "MATCH Z_NEW\n"}, "z.txt"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			write := func(base string, files map[string]string) {
+				for rel, body := range files {
+					if err := os.MkdirAll(filepath.Dir(filepath.Join(base, rel)), 0o700); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(filepath.Join(base, rel), []byte(body), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			dir := filepath.Join(t.TempDir(), "ws")
+			write(dir, tc.files)
+			ws, err := NewWorkspace(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			root := ws.root
+			calls := 0
+			ws.SetScopeGuard(func(rel string, _ bool) error {
+				if rel != tc.trigger {
+					return nil
+				}
+				calls++
+				if calls > 1 {
+					return nil
+				}
+				if err := os.Rename(root, root+"-old"); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Mkdir(root, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				write(root, tc.after)
+				return nil
+			})
+			res, err := NewSearch(ws).Invoke(t.Context(), json.RawMessage(`{"pattern":"MATCH"}`))
+			if calls != 1 || err != nil || !res.IsError || res.Content != "path changed during access" {
+				t.Fatalf("search = %+v, %v, guard calls=%d; want the changed-path error", res, err, calls)
+			}
+		})
+	}
+}
+
+// An entry that is not a regular file cannot be read and is skipped; the
+// search continues and returns the regular file's match. The FIFO sorts first,
+// so a search that aborted on it would never reach b.txt.
+func TestReachabilitySearchSkipsNonRegularEntry(t *testing.T) {
+	root := t.TempDir()
+	if err := unix.Mkfifo(filepath.Join(root, "a.pipe"), 0o600); err != nil {
+		t.Skipf("mkfifo unsupported on this filesystem: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "b.txt"), []byte("MATCH\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ws, err := NewWorkspace(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := NewSearch(ws).Invoke(t.Context(), json.RawMessage(`{"pattern":"MATCH"}`))
+	if err != nil || res.IsError || res.Content != "b.txt:1: MATCH" {
+		t.Fatalf("search = %+v, %v", res, err)
+	}
+}
+
+// openWalked fails closed for an entry that holds no directory: a by-name
+// fallback would consult the guard again and re-list every ancestor.
+func TestReachabilityOpenWalkedRequiresHeldDirectory(t *testing.T) {
+	ws, root := reachFixture(t, nil)
+	info, err := os.Lstat(filepath.Join(root, "keep.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := ws.openWalked("keep.txt", fs.FileInfoToDirEntry(info))
+	opened := f != nil
+	if opened {
+		_ = f.Close()
+	}
+	if !errors.Is(err, errWalkEntryUnheld) || opened {
+		t.Fatalf("unheld entry = opened %v, %v; want errWalkEntryUnheld and no file", opened, err)
 	}
 }
 

@@ -39,10 +39,6 @@ func (w *Workspace) workspaceRoot() (*os.File, func(), error) {
 	return f, func() { _ = f.Close() }, nil
 }
 
-// errWalkEntryUnheld reports a walk entry that carries no held directory, so
-// its name cannot be bound to the listing it came from.
-var errWalkEntryUnheld = errors.New("tools: walk entry has no held directory")
-
 func workspaceOpenError(err error) error {
 	if errors.Is(err, unix.ELOOP) {
 		return errSymlink
@@ -343,11 +339,13 @@ func (e workspaceEntry) openRegular() (*os.File, error) {
 
 // openWalked opens a walked regular file from its pinned directory descriptor
 // and verifies (#613) that rel still reaches it after the walk's guard
-// decision. Entries without a pinned directory fall back to a by-name open.
+// decision. Every Unix walk entry holds its directory; any other entry fails
+// closed with errWalkEntryUnheld, as verifyWalkedParent does, because a by-name
+// open would consult the guard again and re-list every ancestor.
 func (w *Workspace) openWalked(rel string, d fs.DirEntry) (*os.File, error) {
 	e, ok := d.(workspaceEntry)
 	if !ok {
-		return w.openRegularFile(rel)
+		return nil, errWalkEntryUnheld
 	}
 	f, err := e.openRegular()
 	if err != nil {
