@@ -7,6 +7,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
+	"runtime/debug"
 	"strings"
 	"testing"
 )
@@ -104,6 +106,79 @@ func TestReachabilityPointReadMovedInsideGuard(t *testing.T) {
 	res, err := NewReadFile(ws).Invoke(t.Context(), json.RawMessage(`{"path":"frontend/private.txt"}`))
 	if err != nil || !res.IsError || res.Content != "path changed during access" {
 		t.Fatalf("read_file = %+v, %v; want the changed-path error", res, err)
+	}
+}
+
+// The leaf itself is replaced by a symlink to the moved file; verification
+// must not follow it back to the held object.
+func TestReachabilityLeafSymlinkInsideGuard(t *testing.T) {
+	var root string
+	ws, root := reachFixture(t, func(rel string) {
+		if rel == "frontend/private.txt" {
+			moved := filepath.Join(root, "vault", "private.txt")
+			if err := os.Rename(filepath.Join(root, "frontend", "private.txt"), moved); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(moved, filepath.Join(root, "frontend", "private.txt")); err != nil {
+				t.Fatal(err)
+			}
+		}
+	})
+	data, err := ws.readAll("frontend/private.txt")
+	if !errors.Is(err, errFileChanged) || len(data) != 0 {
+		t.Fatalf("leaf symlink read = %q, %v", data, err)
+	}
+}
+
+// verifyReachable must release every directory it opens on the way down. GC
+// stays off so a finalizer cannot close a leaked *os.File and hide the leak
+// (same technique as TestMutationDescriptorLifetime).
+func TestReachabilityReleasesDescriptors(t *testing.T) {
+	root := t.TempDir()
+	rel := filepath.Join("a", "b", "c", "d", "f.txt")
+	if err := os.MkdirAll(filepath.Dir(filepath.Join(root, rel)), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, rel), []byte("x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ws, err := NewWorkspace(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	read := func() {
+		t.Helper()
+		if _, err := ws.readAll(rel); err != nil {
+			t.Fatal(err)
+		}
+	}
+	read()
+	runtime.GC()
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
+	fdDir := "/dev/fd"
+	if runtime.GOOS == "linux" {
+		fdDir = "/proc/self/fd"
+	}
+	// Names only: on Darwin os.ReadDir's per-entry stat can hit the
+	// descriptor used to read /dev/fd after it is closed (EBADF).
+	count := func() int {
+		dir, err := os.Open(fdDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		names, err := dir.Readdirnames(-1)
+		_ = dir.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(names)
+	}
+	before := count()
+	for range 64 {
+		read()
+	}
+	if after := count(); after != before {
+		t.Fatalf("descriptors before=%d after=%d", before, after)
 	}
 }
 
