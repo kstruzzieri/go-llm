@@ -833,6 +833,39 @@ func TestCheckpointUndoCreatedFileAlreadyAbsent(t *testing.T) {
 	}
 }
 
+// An unreachable root reads as not-exist too; it must not pass for the
+// already-absent end state while the created file lives on in the moved root.
+func TestCheckpointUndoCreatedFileRefusesVanishedRoot(t *testing.T) {
+	j, tools, root := newJournalFixture(t)
+	_, _ = beginTestTurn(t, j, "create")
+	applyTool(t, tools, "write_file", map[string]any{"path": "gone.txt", "content": "G1\n"})
+	mustSealTurn(t, j)
+	moved := root + "-moved"
+	if err := os.Rename(root, moved); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(moved) })
+
+	out := runUndo(t, j, 1)
+	if _, err := os.Stat(filepath.Join(moved, "gone.txt")); err != nil {
+		t.Fatalf("refused undo must leave the created file in the moved root: %v", err)
+	}
+	if ids := listIDs(t, j.store); len(ids) != 1 {
+		t.Fatalf("checkpoints = %v, want the checkpoint kept while the root is unreachable; output: %s", ids, out)
+	}
+
+	if err := os.Rename(moved, root); err != nil {
+		t.Fatal(err)
+	}
+	out = runUndo(t, j, 1)
+	if _, ok := readWorkspace(t, root, "gone.txt"); ok {
+		t.Errorf("gone.txt still exists after undo with the root restored; output: %s", out)
+	}
+	if ids := listIDs(t, j.store); len(ids) != 0 {
+		t.Errorf("checkpoints = %v, want none after undo with the root restored", ids)
+	}
+}
+
 func TestCheckpointUndoRefusesWhenTooFew(t *testing.T) {
 	j, tools, root := newJournalFixture(t)
 	_, _ = beginTestTurn(t, j, "only")

@@ -56,6 +56,43 @@ func TestWorkspaceCleanRelContainment(t *testing.T) {
 	}
 }
 
+// A missing target and a vanished root read as the same not-exist error;
+// VerifyRoot is how undo tells them apart.
+func TestWorkspaceVerifyRoot(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		after func(root string) error
+		want  error // nil => intact
+	}{
+		{name: "intact", after: func(string) error { return nil }},
+		{name: "vanished", after: func(root string) error { return os.Rename(root, root+"-moved") }, want: fs.ErrNotExist},
+		{name: "replaced", after: func(root string) error {
+			if err := os.Rename(root, root+"-moved"); err != nil {
+				return err
+			}
+			return os.Mkdir(root, 0o700)
+		}, want: ErrRootReplaced},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := filepath.Join(t.TempDir(), "root")
+			if err := os.Mkdir(root, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			ws, err := NewWorkspace(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := tc.after(root); err != nil {
+				t.Fatal(err)
+			}
+			err = ws.VerifyRoot()
+			if tc.want == nil && err != nil || tc.want != nil && !errors.Is(err, tc.want) {
+				t.Fatalf("VerifyRoot = %v, want %v", err, tc.want)
+			}
+		})
+	}
+}
+
 func TestWorkspaceUnderRootPrefixSibling(t *testing.T) {
 	parent := t.TempDir()
 	root := filepath.Join(parent, "root")
