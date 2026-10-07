@@ -66,7 +66,7 @@ and pre-apply re-reads, and the exported `ReadFileForUndo`,
 `ReadFileWithModeForUndo` and `HashFileWithMode` bind the guard's decision to
 what they return. After the guard allows a path and the file is opened or the
 directory enumerated, the path is resolved again from the top-level workspace
-root, one component at a time without following symlinks, and must reach the
+root by name, never following a symlink in any component, and must reach the
 object being read. Otherwise the read fails closed. The four read tools report
 "path changed during access"; `write_file`, `edit_file` and the exported
 helpers return the existing "file identity changed between stat and open".
@@ -97,7 +97,7 @@ never returned.
 This is decision integrity, not adversary resistance. A process that can rename
 can place content at an allowed name permanently, with no race needed, and hard
 links already make a name unreliable provenance. The re-resolution is a
-sequence of per-component lookups, not an atomic snapshot: coordinated renames
+sequence of lookups, not an atomic snapshot: coordinated renames
 interleaved with it can pass. Bytes are read after it, so an object may move
 while being read. Case-only and normalization-only renames on case-insensitive
 filesystems are not detected. Writes and deletes keep the mutation boundary

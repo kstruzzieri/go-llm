@@ -5,8 +5,8 @@ On Linux and Darwin, the read-only file tools (`read_file`, `search`, `glob`,
 `write_file`/`edit_file` previews and pre-apply re-reads, and the exported undo
 and hash readers now resolve the guarded path again from the top-level
 workspace root after the guard decides and the file is opened or the directory
-enumerated, one component at a time without following symlinks. If the path no
-longer reaches the same object, the read fails closed. A directory renamed into
+enumerated, by name and never following a symlink in any component. If the
+path no longer reaches the same object, the read fails closed. A directory renamed into
 a denied location therefore can no longer serve content under its old, allowed
 name. `list` rechecks its directory after its entry guards, and `glob` rechecks
 the parent of each name it returns after that name's guard. This reverses

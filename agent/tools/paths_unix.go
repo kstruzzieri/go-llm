@@ -51,7 +51,9 @@ func workspaceOpenError(err error) error {
 // verifyReachable is the post-decision check (#613). After the guard allowed
 // rel and the caller opened or enumerated it, rel must still resolve from the
 // top-level workspace root, by name and never through a symlink, to the object
-// the caller holds. It is a sequence of lookups, not an atomic snapshot.
+// the caller holds. It is a sequence of lookups, not an atomic snapshot. Linux
+// looks up one name at a time; on Darwin one lookup covers a run of names and
+// refuses a symlink in any of them (O_NOFOLLOW_ANY).
 //
 // The lookup first reaches this workspace's own root: the top-level root, then
 // a scoped child's prefix down to its pinned scope directory. Every failure
@@ -84,20 +86,25 @@ func (w *Workspace) verifyReachable(rel string, opened *os.File) error {
 	if len(parts) == 0 {
 		err = unix.Fstat(dir, &st)
 	} else {
-		for i, part := range parts[:len(parts)-1] {
-			next, err := unix.Openat(dir, part, workspaceSearchFlags|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
-			if err != nil {
-				return reachabilityError(err, i < inRoot)
+		dirs := parts[:len(parts)-1]
+		// Up to and including the scope directory, a failure is anchor-level.
+		if scope := min(inRoot, len(dirs)); scope > 0 {
+			if err := descend(&dir, dirs[:scope]); err != nil {
+				return reachabilityError(err, true)
 			}
-			_ = unix.Close(dir)
-			dir = next
-			if i == inRoot-1 {
+			if scope == inRoot {
 				// The scope's name may now hold another directory.
 				if err := unix.Fstat(dir, &st); err != nil {
 					return reachabilityError(err, true)
 				} else if !sameIdentity(w.rootIdentity, &st) {
 					return ErrRootReplaced
 				}
+			}
+			dirs = dirs[scope:]
+		}
+		if len(dirs) > 0 {
+			if err := descend(&dir, dirs); err != nil {
+				return reachabilityError(err, false)
 			}
 		}
 		err = unix.Fstatat(dir, parts[len(parts)-1], &st, unix.AT_SYMLINK_NOFOLLOW)
@@ -112,6 +119,34 @@ func (w *Workspace) verifyReachable(rel string, opened *os.File) error {
 			return ErrRootReplaced
 		}
 		return errFileChanged
+	}
+	return nil
+}
+
+// descend replaces *dir with the directory that comps reach from it, never
+// following a symlink in any component. Where the platform can refuse a symlink
+// anywhere in a path (Darwin O_NOFOLLOW_ANY), one openat covers the run; a run
+// too long for one path (ENAMETOOLONG) is opened one name at a time instead,
+// still without following symlinks.
+func descend(dir *int, comps []string) error {
+	if workspaceNoFollowAny != 0 && len(comps) > 1 {
+		next, err := unix.Openat(*dir, strings.Join(comps, string(os.PathSeparator)), workspaceSearchFlags|workspaceNoFollowAny|unix.O_CLOEXEC, 0)
+		if err == nil {
+			_ = unix.Close(*dir)
+			*dir = next
+			return nil
+		}
+		if !errors.Is(err, unix.ENAMETOOLONG) {
+			return err
+		}
+	}
+	for _, c := range comps {
+		next, err := unix.Openat(*dir, c, workspaceSearchFlags|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+		if err != nil {
+			return err
+		}
+		_ = unix.Close(*dir)
+		*dir = next
 	}
 	return nil
 }
