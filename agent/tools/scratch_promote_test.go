@@ -76,6 +76,11 @@ func newPromoteFixture(t *testing.T) *promoteFixture {
 		t.Fatal(err)
 	}
 	spec := execSpec{Path: "/bin/sh", Argv: []string{"sh"}, Dir: rt.root, Env: []string{"PATH=/usr/bin:/bin"}, WorkspaceRoot: rt.root}
+	if scratchIdentitySupported {
+		spec.ExeIdentity = execIdentityOf(t, spec.Path)
+		spec.DirIdentity = execIdentityOf(t, rt.root)
+		spec.RootIdentity = execIdentityOf(t, rt.root)
+	}
 	session, _, err := beginScratchSession(context.Background(), rt, spec)
 	if err != nil {
 		t.Fatal(err)

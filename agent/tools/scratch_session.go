@@ -101,6 +101,13 @@ func beginScratchSession(ctx context.Context, rt *scratchRuntime, spec execSpec)
 	if _, err = snapshotCanonical(ctx, s.reference, s.work, rt.cfg, rt.clone); err != nil {
 		return fail(fmt.Errorf("tools: clone scratch workspace: %w", err))
 	}
+	// Bind the accepted source pass to the approved objects (#553). This is
+	// the last check before the command runs in the clone, not a
+	// point-in-time coherence proof: same-UID mutation of the host,
+	// reference, or work trees after it remains the accepted residual.
+	if err = validateScratchSource(s.manifest, spec, rt.root, s.reference); err != nil {
+		return fail(err)
+	}
 	if err = os.Mkdir(filepath.Join(s.execParent, "tmp"), 0o700); err != nil {
 		return fail(err)
 	}
@@ -111,6 +118,16 @@ func beginScratchSession(ctx context.Context, rt *scratchRuntime, spec execSpec)
 	rewritten, err := rewriteScratchSpec(spec, rt.root, s.work, filepath.Join(s.execParent, "tmp"))
 	if err != nil {
 		return fail(err)
+	}
+	// A rewritten executable now names the work clone; backends verify the
+	// object they launch against ExeIdentity, so stamp the clone's identity.
+	// External spellings keep their approved identity.
+	if scratchIdentitySupported && rewritten.Path != spec.Path {
+		fi, statErr := os.Stat(rewritten.Path)
+		if statErr != nil || !fi.Mode().IsRegular() {
+			return fail(errScratchExeMismatch)
+		}
+		rewritten.ExeIdentity = fi
 	}
 	return s, rewritten, nil
 }

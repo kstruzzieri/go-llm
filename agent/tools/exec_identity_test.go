@@ -44,3 +44,15 @@ func TestRecheckExecPlanCarriesIdentities(t *testing.T) {
 		t.Fatalf("RootIdentity = %v, want the approved root identity", spec.RootIdentity)
 	}
 }
+
+// execIdentityOf is the approved identity a hand-built spec carries for p.
+// Executable identity is the target (os.Stat), including /bin/sh aliases;
+// fixtures pass canonical directories, where Stat and Lstat agree.
+func execIdentityOf(t *testing.T, p string) os.FileInfo {
+	t.Helper()
+	fi, err := os.Stat(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return fi
+}

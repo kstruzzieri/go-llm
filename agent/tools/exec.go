@@ -63,7 +63,11 @@ type execSpec struct {
 	// recheckExecPlan compared before setup/launch (#553). Scratch validates its
 	// snapshot against them, and the sandbox backends verify the executable
 	// target they resolve matches ExeIdentity. Scratch replaces ExeIdentity
-	// with the cloned target identity after source validation. They never
+	// with the cloned target identity after source validation. After the
+	// scratch rewrite Dir and WorkspaceRoot point into the clone while
+	// DirIdentity and RootIdentity still describe the approved host source
+	// objects, and consumers compare identities only (os.SameFile or
+	// statIdentity), never the captured mode, size, or mtime. They never
 	// affect the approval key. They bind the approved object, not its bytes
 	// (an in-place rewrite keeps the identity), and do not make launch atomic.
 	ExeIdentity  os.FileInfo
