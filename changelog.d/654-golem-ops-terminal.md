@@ -10,11 +10,14 @@
 - Loopback providers whose `base_url` has no path only. An `openai-compat`
   provider is identified with `GET /api/version`; llama-swap v235 is then read
   with `/api/version`, `/running`, `/api/metrics` and `/v1/models` on every
-  poll, and Ollama with `/api/ps`. Every request passes an exact
-  method-and-path allowlist over the destination guard, so observation can never
-  load or unload a model. Hosted providers are never contacted. Other
-  llama-swap versions read unsupported, and other runtimes (`llama-server`
-  alone, vLLM, LM Studio) unrecognized.
+  poll, and Ollama with `/api/ps`, plus `/api/version` after a `/api/ps`
+  timeout: an answer keeps the backend reachable and reports `/api/ps` as
+  unavailable, because Ollama can hold `/api/ps` behind its scheduler while
+  the server answers. Every request passes an exact method-and-path allowlist
+  over the destination guard, so observation can never load or unload a model.
+  Hosted providers are never contacted. Other llama-swap versions read
+  unsupported, and other runtimes (`llama-server` alone, vLLM, LM Studio)
+  unrecognized.
 - Honest by construction: activity is always unknown (v235 publishes no
   reliable in-flight count); a configured alias reads unknown residency and
   n/a statistics rather than unloaded or zero; statistics cover only

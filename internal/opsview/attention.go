@@ -18,9 +18,12 @@ const (
 )
 
 // telemetryCodes are the surface errors from a backend that answered but
-// whose telemetry is unusable. Unreachable and timeout are reachability's.
+// whose telemetry is unusable. Unreachable is reachability's, and so is a
+// timeout unless the backend's latest reading says it answered (Ollama's
+// /api/ps behind a scheduler lock while /api/version answers).
 var telemetryCodes = []opsbackend.Code{
 	opsbackend.CodeUnauthorized, opsbackend.CodeDenied, opsbackend.CodeMalformed, opsbackend.CodeTooLarge, opsbackend.CodeHTTPStatus,
+	opsbackend.CodeTimeout,
 }
 
 func (b builder) usedProviders() map[string]bool {
@@ -89,6 +92,9 @@ func (b builder) attention() []Attention {
 		// Surface errors from before an outage say nothing during it. One
 		// item per code: a wrong api_key fails every surface at once.
 		for _, code := range telemetryCodes {
+			if code == opsbackend.CodeTimeout && (o.Reachable == nil || !o.Reachable.Value) {
+				continue
+			}
 			var names []string
 			for _, s := range o.Surfaces {
 				if s.LastError == code {

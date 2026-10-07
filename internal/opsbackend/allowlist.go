@@ -19,7 +19,9 @@ var (
 		{http.MethodGet, "/api/metrics"},
 		{http.MethodGet, "/v1/models"},
 	}
-	ollamaRoutes = []route{{http.MethodGet, "/api/ps"}}
+	// Ollama answers /api/version from a constant, outside the scheduler
+	// locks /api/ps waits on; it is only a liveness probe after a timeout.
+	ollamaRoutes = []route{{http.MethodGet, "/api/version"}, {http.MethodGet, "/api/ps"}}
 )
 
 // allowlist refuses every request that is not an exact permitted method and

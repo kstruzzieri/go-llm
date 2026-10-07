@@ -210,9 +210,12 @@ func NewLlamaSwap(t testing.TB) *Server {
 	}, llamaSwapDispatch)
 }
 
-// NewOllama starts a fake Ollama serving ps as /api/ps.
+// DefaultOllamaVersion is the fake Ollama's /api/version body.
+const DefaultOllamaVersion = `{"version":"0.33.0"}`
+
+// NewOllama starts a fake Ollama serving ps as /api/ps, and /api/version.
 func NewOllama(t testing.TB, ps string) *Server {
-	return newServer(t, map[string]string{"/api/ps": ps}, ollamaDispatch)
+	return newServer(t, map[string]string{"/api/ps": ps, "/api/version": DefaultOllamaVersion}, ollamaDispatch)
 }
 
 // URL is the server root.

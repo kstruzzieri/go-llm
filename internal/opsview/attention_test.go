@@ -410,6 +410,38 @@ func TestTelemetryUnavailableGroupsByCode(t *testing.T) {
 	}
 }
 
+// TestSurfaceTimeoutOnAnsweringBackend: an Ollama whose /api/ps timed out
+// while /api/version answered reads reachable; the timeout is a warning on
+// /api/ps, never an outage. A failure past its retry window (reachability
+// false) keeps only its telemetry_stale item.
+func TestSurfaceTimeoutOnAnsweringBackend(t *testing.T) {
+	o := localOllama()
+	o.Surfaces = []opsbackend.Surface{{Name: "ps", LastError: opsbackend.CodeTimeout, NextAttempt: 14 * time.Second}}
+	var got []Attention
+	for _, a := range Build(input(ModeWatch, o, remote())).Attention {
+		if a.Subject == "ollama" {
+			got = append(got, a)
+		}
+	}
+	want := []Attention{{Severity: SevWarning, Reason: AttnTelemetryUnavailable, Subject: "ollama", Text: "ollama telemetry unavailable on ps: no answer in time"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("ollama attention = %+v, want only %+v", got, want)
+	}
+
+	f := healthyLlamaSwap()
+	f.Reachable, f.ReachCode, f.ReachRetry = sample(false, 2*time.Second), opsbackend.CodeTimeout, 4*time.Second
+	f.Surfaces = []opsbackend.Surface{{Name: "running", LastError: opsbackend.CodeTimeout, NextAttempt: 4 * time.Second}}
+	in := input(ModeWatch, f, remote())
+	in.NowMono = 30 * time.Second // past the failure's retry window
+	r := reasons(Build(in))
+	if _, ok := r[AttnTelemetryUnavailable+":llamacpp"]; ok {
+		t.Fatalf("a stale timeout failure also raised telemetry_unavailable: %+v", r)
+	}
+	if _, ok := r[AttnTelemetryStale+":llamacpp"]; !ok {
+		t.Fatalf("a stale timeout failure lost its telemetry_stale item: %+v", r)
+	}
+}
+
 func TestTelemetryAttention(t *testing.T) {
 	failing := healthyLlamaSwap()
 	failing.Surfaces = []opsbackend.Surface{{Name: "running", LastError: opsbackend.CodeHTTPStatus}}
@@ -423,7 +455,10 @@ func TestTelemetryAttention(t *testing.T) {
 	for code, want := range map[opsbackend.Code]bool{
 		opsbackend.CodeUnauthorized: true, opsbackend.CodeDenied: true, opsbackend.CodeMalformed: true,
 		opsbackend.CodeTooLarge: true, opsbackend.CodeHTTPStatus: true,
-		opsbackend.CodeTimeout: false, opsbackend.CodeUnreachable: false, // reachability's to report
+		// A timeout on a backend that answered elsewhere (Ollama's /api/ps
+		// behind a scheduler lock) is that surface's; unreachable stays
+		// reachability's to report.
+		opsbackend.CodeTimeout: true, opsbackend.CodeUnreachable: false,
 	} {
 		f := healthyLlamaSwap()
 		f.Surfaces = []opsbackend.Surface{{Name: "running", LastError: code}}

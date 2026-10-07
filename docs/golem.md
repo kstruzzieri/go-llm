@@ -430,7 +430,12 @@ attention list reports `config_missing`.
 `api_format: openai-compat` it asks `GET /api/version`; when the answer is llama-swap v235 it
 then reads `GET /running`, `GET /api/metrics` and `GET /v1/models`, and it asks
 `/api/version` again on every later poll, so a restart into another version or
-runtime is noticed. For `api_format: ollama` it reads `GET /api/ps`. The
+runtime is noticed. For `api_format: ollama` it reads `GET /api/ps`; when that
+times out it asks `GET /api/version` once, because Ollama can hold `/api/ps`
+behind its scheduler (MLX model startup, unloads, health checks) while still
+answering. An answer keeps the backend reachable and reports `/api/ps` as
+telemetry unavailable (no answer in time); `/api/ps` keeps its own backoff and
+its residency gap. The
 provider's `api_key`, if set, is sent as a Bearer token. Every request passes an
 exact method-and-path allowlist and the destination guard, so `golem ops` can
 never reach a route that loads a model (`/props`, `/v1/chat/completions`,

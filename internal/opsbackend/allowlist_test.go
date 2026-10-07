@@ -114,7 +114,7 @@ func TestRouteTablesAreExact(t *testing.T) {
 	}{
 		{"identify", identifyRoutes, []string{"/api/version"}},
 		{"llama-swap", llamaSwapRoutes, []string{"/api/version", "/running", "/api/metrics", "/v1/models"}},
-		{"ollama", ollamaRoutes, []string{"/api/ps"}},
+		{"ollama", ollamaRoutes, []string{"/api/version", "/api/ps"}},
 	} {
 		// The probes below only try GET on known paths; this pin also
 		// catches an added method or an unprobed path (spec §4.2: GET only).

@@ -572,6 +572,8 @@ func (c *Collector) observeLlamaSwap(callerCtx, ctx context.Context, b *backendS
 }
 
 func (c *Collector) observeOllama(callerCtx, ctx context.Context, b *backendState) {
+	ps := b.surface("ps")
+	failures := ps.failures
 	c.fetch(callerCtx, ctx, b, b.observe, "ps", "/api/ps", psLimit, func(body []byte) error {
 		models, err := decodePS(body)
 		if err != nil {
@@ -586,6 +588,15 @@ func (c *Collector) observeOllama(callerCtx, ctx context.Context, b *backendStat
 		b.applyResidency(cur, wall)
 		return nil
 	})
+	// Ollama holds /api/ps behind scheduler locks that slow work can keep
+	// (MLX startup, unloads, health checks) while the server still answers.
+	// After a timeout on this poll's own attempt, /api/version, which takes
+	// no lock, decides reachability: any answer keeps the backend reachable.
+	// The residency gap and /api/ps's backoff stand; Ollama does not cancel
+	// a /api/ps the client gave up on, so retrying it each poll piles them up.
+	if ps.lastErr == CodeTimeout && ps.failures > failures {
+		c.fetch(callerCtx, ctx, b, b.observe, "version", "/api/version", versionLimit, func([]byte) error { return nil })
+	}
 }
 
 // polledBy lists the surfaces each kind reads. A kind that reads nothing

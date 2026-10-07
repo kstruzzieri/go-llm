@@ -679,6 +679,71 @@ func TestCollectorOllamaOutageAndAnswer(t *testing.T) {
 	}
 }
 
+// TestCollectorOllamaPSTimeoutProbesVersion: Ollama holds /api/ps behind
+// scheduler locks that slow work can keep (MLX startup, unloads, health
+// checks) while /api/version, which takes none, still answers. A timed-out
+// /api/ps then probes /api/version once: an answer keeps the backend
+// reachable, while the residency gap and /api/ps's own backoff stand, so a
+// stalled /api/ps is not retried on every poll.
+func TestCollectorOllamaPSTimeoutProbesVersion(t *testing.T) {
+	f := opsfixture.NewOllama(t, `{"models":[{"name":"llama3:latest","model":"llama3:latest","size_vram":1,"expires_at":"2026-10-05T10:05:00Z"}]}`)
+	clk := newFakeClock()
+	c := NewCollector([]BackendSpec{{Provider: "ollama", BaseURL: f.URL(), APIFormat: "ollama"}}, Options{Interval: 2 * time.Second, Clock: clk.clock()})
+	c.Tick(context.Background()) // a baseline, so the timeout has a period to break
+	release := f.HoldFor(t, "/api/ps")
+	clk.advance(2*time.Second, 2*time.Second)
+	b := c.Tick(context.Background()).Backends[0]
+	if b.Reachable == nil || !b.Reachable.Value || b.ReachCode != "" || b.ReachRetry != 0 {
+		t.Fatalf("/api/ps timed out, /api/version answered: reachable=%+v code=%q retry=%v, want ok", b.Reachable, b.ReachCode, b.ReachRetry)
+	}
+	if ps := surface(b, "ps"); ps.LastError != CodeTimeout || ps.NextAttempt != 2*time.Second+backoffBase || b.Gaps != 1 {
+		t.Fatalf("ps = %+v gaps = %d, want a timeout retried at %v and one gap", ps, b.Gaps, 2*time.Second+backoffBase)
+	}
+	if got := surfaceNames(b); !slices.Equal(got, []string{"ps"}) {
+		t.Fatalf("published surfaces = %v, want ps only (a probed version reads due now and would end the hold of ok reachability)", got)
+	}
+	assertRequests(t, f, reqPS, reqPS, reqVersion)
+	// Inside /api/ps's backoff nothing is due, and the cached timeout is not
+	// a fresh one: no request at all.
+	clk.advance(time.Second, time.Second)
+	c.Tick(context.Background())
+	assertRequests(t, f, reqPS, reqPS, reqVersion)
+	release()
+	clk.advance(time.Second, time.Second)
+	if ps := surface(c.Tick(context.Background()).Backends[0], "ps"); ps.LastError != "" {
+		t.Fatalf("ps after release = %+v, want answered", ps)
+	}
+	assertRequests(t, f, reqPS, reqPS, reqVersion, reqPS)
+}
+
+// TestCollectorOllamaProbeNeedsAnAnswer: the probe proves nothing unless the
+// version endpoint answers; when it times out too, the backend reads
+// unreachable on the probe's own code and retry, as before.
+func TestCollectorOllamaProbeNeedsAnAnswer(t *testing.T) {
+	f := opsfixture.NewOllama(t, `{"models":[]}`)
+	f.HoldFor(t, "/api/ps")
+	f.HoldFor(t, "/api/version")
+	clk := newFakeClock()
+	c := NewCollector([]BackendSpec{{Provider: "ollama", BaseURL: f.URL(), APIFormat: "ollama"}}, Options{Interval: 2 * time.Second, Clock: clk.clock()})
+	b := c.Tick(context.Background()).Backends[0]
+	if b.Reachable == nil || b.Reachable.Value || b.ReachCode != CodeTimeout || b.ReachRetry != backoffBase {
+		t.Fatalf("both timed out: reachable=%+v code=%q retry=%v, want unreachable on timeout, retry %v", b.Reachable, b.ReachCode, b.ReachRetry, backoffBase)
+	}
+	assertRequests(t, f, reqPS, reqVersion)
+}
+
+// TestCollectorOllamaProbesOnlyAfterATimeout: any other /api/ps failure is
+// already an answer (or the console's own refusal), so it sends no probe.
+func TestCollectorOllamaProbesOnlyAfterATimeout(t *testing.T) {
+	f := opsfixture.NewOllama(t, `{"models":[]}`)
+	f.SetStatus("/api/ps", http.StatusInternalServerError)
+	c := NewCollector([]BackendSpec{{Provider: "ollama", BaseURL: f.URL(), APIFormat: "ollama"}}, Options{Interval: 2 * time.Second, Clock: newFakeClock().clock()})
+	if ps := surface(c.Tick(context.Background()).Backends[0], "ps"); ps.LastError != CodeHTTPStatus {
+		t.Fatalf("ps = %+v, want http_status", ps)
+	}
+	assertRequests(t, f, reqPS)
+}
+
 // TestCollectorSendsTheAPIKeyOnEveryRequest: the identify, observe (which
 // also re-checks identity) and Ollama clients all carry the api_key, and it
 // never reaches a snapshot.
@@ -1164,6 +1229,14 @@ func TestCollectorRechecksIdentityEveryTick(t *testing.T) {
 			assertRequests(t, f, reqVersion, reqRunning, reqMetrics, reqModels, reqVersion)
 		})
 	}
+}
+
+func surfaceNames(b BackendObservation) []string {
+	var out []string
+	for _, s := range b.Surfaces {
+		out = append(out, s.Name)
+	}
+	return out
 }
 
 func surface(b BackendObservation, name string) Surface {
