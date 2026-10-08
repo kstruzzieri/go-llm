@@ -84,6 +84,21 @@ jobs:
             exit 1
           fi
 
+      # golem ops -watch on a real Darwin PTY (#654): screen and cursor
+      # restored on exit, on SIGINT and on SIGTERM, frames that follow a
+      # resize, and Ctrl-Z job control in helper processes, with and without
+      # a job-control session. Linux CI runs the same tests. A rename would
+      # match nothing and pass, so the step requires exactly the five to pass.
+      - name: golem ops -watch PTY
+        shell: bash
+        run: |
+          go test -race -count=1 -v -run '^TestOpsWatch(RealPTY|Job)' ./cmd/golem | tee "$RUNNER_TEMP/ops-watch-pty.txt"
+          passed=$(grep -cE -- '^--- PASS: TestOpsWatch(RealPTY|Job)' "$RUNNER_TEMP/ops-watch-pty.txt" || true)
+          if [ "$passed" -ne 5 ]; then
+            echo "::error::expected 5 passing -watch PTY and job tests, saw $passed"
+            exit 1
+          fi
+
       # Real Seatbelt confinement (#442). GO_LLM_REQUIRE_SEATBELT=1 turns a
       # skip into a hard failure, so a runner that cannot apply Seatbelt (a
       # nested sandbox) fails the gate rather than silently passing. The

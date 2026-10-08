@@ -854,11 +854,13 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 			return runIndex(context.Background(), args[1:], stdout, stderr)
 		case "models":
 			return runModels(context.Background(), args[1:], stdout, stderr)
+		case "ops":
+			return runOps(context.Background(), args[1:], stdin, stdout, stderr)
 		case "source":
 			return runSource(context.Background(), args[1:], stdin, stdout, stderr)
 		default:
 			// Unquoted: the argument may be a pasted secret.
-			return errors.New("unknown command (did you mean \"audit\", \"index\", \"models\", \"source\", or \"mcp\"?)")
+			return errors.New("unknown command (did you mean \"audit\", \"index\", \"models\", \"ops\", \"source\", or \"mcp\"?)")
 		}
 	}
 
