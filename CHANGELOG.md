@@ -6,6 +6,842 @@ All notable changes to `go-llm` are documented here. Downstream consumers
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-08
+
+### Changed — `localhost` destinations always dial loopback (#665)
+
+The destination guard no longer resolves a `localhost` base URL. It dials
+127.0.0.1, then ::1, on the destination's port, as RFC 6761 permits and
+browsers do. A hosts file that maps `localhost` elsewhere can no longer
+redirect a local provider, and it no longer stops `golem.New`'s config-driven
+bootstrap, Golem or `go-llm-mcp` at startup with `provider.ErrDestinationDenied`
+(#654): requests reach the local backend instead. A backend listening on only
+one of the two stacks is still reached.
+
+### Changed — v0.5.0 consumer upgrade notes (#664)
+
+Read this before upgrading from v0.4.0. Consumers on older pins must also apply
+the v0.4.0 and v0.3.0 upgrade notes. The
+[v0.5.0 upgrade guide](docs/releases/v0.5.0.md) has the details and the
+consumer compile check.
+
+#### Library consumers
+
+- `mcpclient.Approve` takes `ApprovalDigests{Catalog, Connection}` and requires
+  both (#578). `StdioServer` children receive only the platform baseline
+  environment plus `Server.WithEnv` additions (`InheritEnv`, `SetEnv`), and
+  `Manager.Close` returns fixed error text whose causes are reachable only
+  through `errors.Is` and `errors.As`.
+- `compat.ProviderStatus.Error` is replaced by `ErrorClass`, and `/v1/status`
+  reports `providers[].error_class` (#637). `compat.New` no longer sends
+  `Access-Control-Allow-Origin: *` and refuses cross-origin browser POSTs and
+  unlisted `Host` headers with 403 (#633): pass the browser's exact origin to
+  `WithCORS` and other host names to `WithAllowedHosts`.
+- `route://breakers`, `route://warmth` and `route://sticky` emit flat
+  snake_case objects; the nested `info`, `Key` and `Info` objects are gone
+  (#634).
+- `agent/tools` `search` skips credential files, and `dispatch` refuses scopes
+  at or below `.git`, `.ssh`, `.gnupg`, `.aws` or `.kube`, for every consumer
+  (#627). Custom `PathDeny` patterns are matched against normalized paths.
+  This is a tripwire, not confinement: `glob` and `list` still show these
+  names, and shell commands, `retrieve` and MCP tools can still reach them.
+- On Linux and Darwin, Workspace reads fail closed when the guarded path no
+  longer reaches the opened object (#613). Handle `path changed during access`
+  and `ErrRootReplaced`, and build a new `Workspace` after the root is
+  replaced. Scoped children stop reading a moved scope. This is decision
+  integrity, not adversary resistance.
+- SQLite stores fail to open when the WAL switch reports another journal mode,
+  including `immutable=1` and `nolock=1` URIs (#619). Use
+  `rag.OpenSQLiteStoreReadOnly` or your own handle for read-only access. UNC
+  and device paths are rejected on Windows.
+- A `localhost` base URL that resolves off-host matches
+  `provider.ErrDestinationDenied` (#654). `golem.New`'s config-driven
+  bootstrap, Golem and `go-llm-mcp` now fail at startup instead of starting
+  without that provider's model list.
+- `agentflow.PreflightP0` rejects plans whose schema major is not 1,
+  `agentflow.Compile` emits `1.0.0` (#612), and `agentflow.NewSrcExecRunner`
+  requires an absolute checkout. AgentFlow children receive an environment
+  built from scratch; approve parent variables with
+  `(*agentflow.ExecRunner).AllowEnv` (#577).
+
+#### Golem operators
+
+- Approve every MCP server once more: pins written by v0.4.0 or earlier report
+  `connection_missing` until `golem mcp inspect` and
+  `golem mcp approve -digest … -connection …` run with the startup `-root`,
+  server and `-mcp-env` arguments (#578). Stdio servers start in `-root`
+  without Golem's environment; name the variables they need with `-mcp-env`.
+  A relative program path such as `./bin/server` resolves against `-root`.
+  HTTP endpoints with userinfo, fragments, dot segments, backslashes, IPv6
+  zone IDs or non-ASCII hosts stop startup as `invalid_config`, and every
+  redirect is refused. A v0.4 binary blocks pins written by v0.5.0.
+- Install AgentFlow 1.x. `-goal`, `-plan`, `-agentflow-resume` and
+  `-agentflow-status` refuse other versions, 0.x plans and 0.x `.agent/` state
+  (#612). Gates no longer inherit Golem's environment; approve variables with
+  `-agentflow-env NAME` (#577).
+- Deterministic tool guards are always on, with no opt-out (#575). Matching
+  calls are refused before approval, and a `-p` run stopped by three
+  consecutive refusals exits 1.
+- Golem's own `git` calls no longer pass SSH agent, proxy,
+  `GIT_CONFIG_COUNT`/`GIT_CONFIG_PARAMETERS` injection or other parent
+  variables to hooks, filters and helpers (#623).
+
+### Fixed — Undo refuses while the workspace root is unreachable (#658)
+
+Undo treated any "not found" result for a file golem created as "already
+removed". A workspace root renamed or moved away fails with the same error. In
+that case the REPL's `/undo` reported `undid <path>` and deleted the
+checkpoint, and AgentFlow task mode's in-memory undo printed
+`undid <path> (already absent)` and dropped its record. The file still existed
+in the moved directory. Both journals now count a missing file as already
+undone only while the workspace root still names the directory golem started
+in. Otherwise they refuse with `cannot undo <path>: file changed since golem
+wrote it` and keep the record, so the undo succeeds once the root is back.
+
+The check is the new read-only `agent/tools.Workspace.VerifyRoot`. It returns
+nil when the root is intact, the not-exist error when the root is gone, and
+`ErrRootReplaced` when another directory or a non-directory occupies the path.
+Windows captures the original directory identity when the workspace is
+constructed, so replacing the root before the first undo cannot make the new
+directory look like the original. Mutation behavior is unchanged.
+
+### Fixed — The destination guard closes the request body when it denies a request (#655)
+
+A client from `provider.GuardHTTPClient` that denied a request returned the
+error without closing the request body. Denials include a missing or revoked
+capability, another provider's capability, a `Request.Host` override, an
+off-target URL and a nil URL. The `http.RoundTripper` contract requires the
+body to be closed on errors too, and `http.Client` never closes it after a
+transport error. A guarded caller that streamed a pipe-backed body therefore
+leaked the writer goroutine, blocked on `Write`, on every denial. The guard now
+closes the body on every denial. An admitted request still passes its body to
+the underlying transport unclosed.
+
+### Fixed — a `localhost` that resolves off-host is a destination denial (#654)
+
+- The destination guard already refused to dial a `localhost` base URL that
+  resolves to any non-loopback address (for example a tampered hosts file),
+  but its error was untyped, so callers read it as an outage: provider
+  bootstrap logged a warning and started without that provider's model list,
+  and the MCP server's Ollama health probe reported the backend unavailable.
+  The refusal now matches `provider.ErrDestinationDenied`, so when a provider
+  the run uses names `localhost`, Golem (the REPL, `-p`, `golem index`,
+  `golem source`, `golem models`) and `go-llm-mcp` stop at startup instead, as
+  for any other destination denial. Headless Golem reports it as
+  `provider_unavailable` (exit 1).
+- `configview` diagnostic subjects (`selector_type_conflict`, `chain_invalid`)
+  are still cut at 64 bytes but no longer split a multi-byte UTF-8 character,
+  which JSON output rendered as U+FFFD. They appear in `golem models -json`,
+  the MCP configview resource and `golem ops`.
+
+### Added — `golem ops` read-only backend console, terminal (#654)
+
+- `golem ops` (table), `golem ops -json` (opsview v1 document) and
+  `golem ops -watch` (live view: redraws every second, polls every 2 s) show,
+  for every model in `models.json`, residency, request statistics from
+  llama-swap's retained history, observed loads (`-watch` only) and backend
+  reachability from llama-swap v235 and Ollama, joined to the roles and use
+  cases that use it, plus an attention list. It exits 0 whenever it prints a
+  snapshot, including when a backend is down.
+- Loopback providers whose `base_url` has no path only. An `openai-compat`
+  provider is identified with `GET /api/version`; llama-swap v235 is then read
+  with `/api/version`, `/running`, `/api/metrics` and `/v1/models` on every
+  poll, and Ollama with `/api/ps`, plus `/api/version` after a `/api/ps`
+  timeout: an answer keeps the backend reachable and reports `/api/ps` as
+  unavailable, because Ollama can hold `/api/ps` behind its scheduler while
+  the server answers. Every request passes an exact method-and-path allowlist
+  over the destination guard, so observation can never load or unload a model.
+  Hosted providers are never contacted. Other llama-swap versions read
+  unsupported, and other runtimes (`llama-server` alone, vLLM, LM Studio)
+  unrecognized.
+- Honest by construction: activity is always unknown (v235 publishes no
+  reliable in-flight count); a configured alias reads unknown residency and
+  n/a statistics rather than unloaded or zero; statistics cover only
+  llama-swap's retained history (all clients) and never claim completeness;
+  zero token counts are treated as missing; a reading that is no longer
+  current, including a failed check past its next scheduled check plus a
+  grace window, reads unknown (statistics instead keep their values marked
+  stale, and a reachable backend in backoff stays reachable until its next
+  scheduled check plus the grace window); and every backend-reported string is escaped
+  and clipped before it reaches the terminal. Names over 512 bytes are
+  counted, not listed.
+- `-watch` uses the terminal's alternate screen and restores it on Ctrl-C and
+  SIGTERM. Ctrl-Z suspends it and `fg` redraws, except when golem leads its own
+  session (such as `tmux new-window 'golem ops -watch'`), where Ctrl-Z is
+  ignored. It refuses to start on Windows, when stdout is not a terminal, or
+  with `TERM=dumb`. The one-shot table has no loads column and no retry text.
+- Known limitations (clock sharing with llama-swap, 2-second load sampling,
+  wide characters) are listed in `docs/golem.md`.
+- Each poll reads a backend's identity and residency before its other
+  surfaces. When a slow backend's reads do not all fit one poll, its activity
+  and model-listing reads take turns across polls, and providers take turns
+  going first, within the same request and poll deadlines.
+- Ollama model names with a scheme, such as
+  `https://registry.ollama.ai/library/llama3`, match the backend's short name.
+- `-watch` sizes its frame to the terminal down to a single row, which it
+  leaves for the cursor.
+
+### Security — `/v1/status` no longer returns raw provider health-error text (#637)
+
+**Breaking:** `GET /v1/status` replaces `providers[].error` with
+`error_class`, and the Go type `compat.ProviderStatus` replaces `Error` with
+`ErrorClass`.
+
+A failed health check used to report the error's text. For OpenAI-compatible
+providers (`api_format: openai-compat`) that text included the request URL,
+with any credentials in its query string, or up to 64 KiB of the upstream error
+body. The provider now reports and logs only the bounded routing error class
+(`network`, `timeout`, `4xx`, `5xx`, `rate_limit` or `unknown`). Raw error text
+is omitted from logs too: truncation alone still leaks credentials and allows
+upstream control characters to forge log entries. Health logs retain provider
+and request identifiers, each limited to 512 runes and quoted to escape control
+characters. Ollama's health check keeps no cause, so an unhealthy Ollama provider
+reports `unknown`.
+
+Providers are now sorted by name, and warm models by provider, then model, so
+repeated reads list them in the same order. `expires_at` is RFC 3339 UTC with
+fractional seconds, matching `route://warmth`; before, it used the server's
+local offset and dropped fractional seconds.
+
+### Fixed — `route://` resources emit a stable JSON shape (#634)
+
+**Breaking:** readers of `route://breakers`, `route://warmth` and
+`route://sticky` must move to the keys listed below. The old nested objects
+(`info` in breakers, `Key` and `Info` in warmth, `Key` in sticky) are gone.
+
+These MCP resources marshaled provider structs that have no JSON tags. Keys
+came out as Go field names, unset timestamps as `0001-01-01T00:00:00Z`, and
+other times in the server's local offset. `route://breakers` was the worst
+case: the breaker state came out as an integer, and the last error as whatever
+exported fields its concrete type had: `{}` for the built-in providers' wrapped
+errors, or the endpoint URL, including any query-string credentials, for a
+provider that returned a bare `*url.Error`.
+
+Each resource keeps its URI and top-level shape: an array for breakers and
+warmth, an object keyed by sticky-key hash for sticky, and `[]` or `{}` when
+empty. Entries are now flat objects with snake_case keys and times in RFC 3339
+UTC, omitted when unset:
+
+- `route://breakers`: `provider`, `state` (`closed`, `open` or `half-open`),
+  `failures`, `last_failure`, `recover_at`, and `last_error_class`, the
+  bounded routing error class such as `network`, `5xx` or `rate_limit`
+  (omitted when no error was recorded). Error text is never emitted. An open
+  breaker still reads `open` after `recover_at` until the router next scores
+  that provider as a route candidate, which moves it to `half-open` for a
+  probe.
+- `route://warmth`: `provider`, `model`, `loaded`, `since`, `expires_at`, and
+  `vram_gb`, omitted when 0 because 0 also means not measured yet. Entries
+  are sorted by provider, then model, so unchanged state reads back in the
+  same order.
+- `route://sticky`: `provider`, `model`, `score`, `reason`, `created_at`,
+  `last_used_at`, `expires_at`.
+
+`provider.ErrorClassOf` exposes the error classification to other callers.
+
+### Security — compat refuses cross-origin browser calls by default and validates the Host header (#633)
+
+`compat.New` no longer sends `Access-Control-Allow-Origin: *` by default. The
+server is unauthenticated, so that default let any website the user visited
+call the local shim and read model responses. CORS is now off unless
+configured: browser clients opt in with `compat.WithCORS`, passing their exact
+origin.
+
+Turning CORS off only hides responses, since a page can still send a
+`text/plain` POST that needs no preflight and run a model blind. The server
+now also refuses, with a 403 `cross_origin_not_allowed` error, POSTs that a
+browser marks as coming from another origin (by `Sec-Fetch-Site`, or by an
+`Origin` that does not match the `Host`), unless that origin is the
+`WithCORS` origin; `WithCORS("*")` turns this check off. Requests without
+those headers, as SDKs, CLIs and other non-browser clients send them, are
+unaffected.
+
+It also refuses, with a 403 `host_not_allowed` error, any request whose
+`Host` header is missing or names something other than a loopback address
+(`localhost`, `127.0.0.0/8`, `::1`), the host part of `WithAddr`, or a name
+added with the new `compat.WithAllowedHosts`. This blocks DNS rebinding, where
+an attacker's domain resolves to 127.0.0.1 and the browser treats the shim as
+same-origin, so neither CORS nor the cross-origin check applies. The Host
+check runs before CORS and every route, preflights included. Both refusals
+are logged.
+
+#### Upgrade note
+
+Browser clients that relied on the `*` default must pass their origin to
+`WithCORS`, exactly as the browser sends it. `ListenAndServe` returns the new
+`compat.ErrInvalidCORSOrigin` for an origin no browser sends, such as one with
+a trailing slash, upper-case letters, or the scheme's default port (#636).
+Explicit ports must be decimal numbers from 0 to 65535 without leading
+zeros; an empty port suffix is also refused.
+Clients that reach the server under another name, such as
+`host.docker.internal` from a container, or LAN clients of a `WithTLS` server
+bound to a wildcard address (`:port`, `0.0.0.0`), must be listed with
+`WithAllowedHosts`. Host matching ignores ports and case.
+
+### Security — `search` skips credential files; read tripwire widened (#627)
+
+`search` and the default `credential_path` invariant on `read_file` now share
+one credential set: `.env` and `.env.*` (except `.env.example`, `.env.sample`,
+`.env.template` and `.env.dist`), `.netrc`, `_netrc`, `.npmrc`, `.pypirc`,
+`.git-credentials`, a `config` file under `.git`, and anything under `.ssh`,
+`.gnupg`, `.aws` or `.kube`. `search` skips these files (it never walks a
+directory named exactly `.git`); `read_file` refuses them where the invariants
+are installed. Path guards also normalize spellings that filesystems treat as
+the same name: APFS opens `.ssh` for `.ſsh` and `.ßh`, HFS+ ignores zero-width
+joiners and non-joiners, bidirectional and deprecated format controls, and the
+BOM, and Windows reads `.env` through `.env::$DATA`. A `dispatch` task scoped at or below `.git`, `.ssh`,
+`.gnupg`, `.aws` or `.kube` is refused, because that child's guards would see
+paths below the directory without it.
+
+#### Upgrade note
+
+- The `search` skip and the scope refusal are tool behavior in `agent/tools`
+  and apply to every consumer, not only the Golem CLI: library `search` output
+  can omit files that previously appeared, with or without interceptors.
+- The `read_file` refusal stays opt-in for library consumers: install
+  `interceptor.Invariants` on the orchestrator and pass it to
+  `tools.NewDispatch` for children. The `golem.Runtime` bootstrap installs
+  none. It is always on in the Golem CLI.
+- The default table's `read_file` row now holds an `interceptor.CredentialPath`
+  check instead of a `PathDeny`. `CredentialPath`, `interceptor.IsCredentialPath`
+  (the read set) and `interceptor.IsProtectedPath` (the write set) are new
+  exports for custom tables and hosts.
+- Custom `PathDeny` patterns are matched against the normalized path, so a
+  pattern that spells one of the normalized characters literally (for example
+  `ß`) no longer matches. Write it in normalized form (`ss`); the `PathDeny`
+  doc lists every mapped code point.
+- `glob` and `list` still show these names. Shell commands, `retrieve`, MCP
+  tools, verifier commands and `edit_file`'s pre-approval match errors can
+  still reach the same bytes, as can a copy or hard link under another name.
+  Paths are judged relative to the workspace root, so a session rooted inside
+  one of these directories is not covered. This is a tripwire, not
+  confinement.
+
+### Fixed — AgentFlow children get PWD for the directory they run in (#624)
+
+AgentFlow and its gates receive `PWD` set to the directory they run in. Go
+derives `PWD` this way only when a child inherits its parent's environment, so
+the from-scratch environment of #577 sets it explicitly. In v0.4.0, source mode
+and `golem audit` passed Golem's own `PWD`, which was wrong whenever Golem ran
+from another directory. Programs that read `PWD` directly, such as a Makefile
+using `$(PWD)`, see the right directory. `PWD` keeps the directory's spelling,
+so a logical path such as `/tmp/x` can differ textually from the physical
+`/private/tmp/x`; Windows children do not get one.
+
+`PWD` is runner-owned: `-agentflow-env PWD` and
+`(*agentflow.ExecRunner).AllowEnv("PWD")` are rejected, like `PYTHONPATH`.
+
+### Security — Golem's own git calls no longer inherit its environment (#623)
+
+The `git` processes Golem starts itself, for parallel task mode's worker
+worktrees and for the session's git context snapshot, now receive an
+environment built from scratch: `PATH`, `HOME`, `USER`, `TMPDIR`, `LANG`,
+`XDG_CONFIG_HOME`, `GIT_CONFIG_GLOBAL`, `GIT_CONFIG_SYSTEM` and
+`GIT_CONFIG_NOSYSTEM` (plus `SYSTEMROOT`, `TEMP`, `TMP`, `PATHEXT`,
+`USERPROFILE`, `COMSPEC`, `LOCALAPPDATA`, `APPDATA`, `HOMEDRIVE` and
+`HOMEPATH` on Windows) and `GIT_TERMINAL_PROMPT=0`; the snapshot also sets
+`LC_ALL=C` and `GIT_NO_LAZY_FETCH=1`. Repository hooks, filters and
+`core.fsmonitor` helpers that those calls run no longer see provider API keys
+or other parent variables. `-agentflow-env` does not apply to these calls.
+
+#### Upgrade note
+
+Hooks, filters and helpers that relied on other variables now run without
+them. An SSH agent, proxy and certificate variables, `GIT_ASKPASS`,
+`GIT_LFS_SKIP_SMUDGE`, a custom `GIT_EXEC_PATH`, `LC_*` and `SUDO_UID` are not
+passed: a worker checkout that needs the network (git-lfs over SSH with
+agent-held keys, a partial clone's lazy fetch) can fail, and git-lfs may
+download objects it used to skip. Git configuration injected through the
+environment (`GIT_CONFIG_COUNT` with `GIT_CONFIG_KEY_<n>`/`GIT_CONFIG_VALUE_<n>`,
+or `GIT_CONFIG_PARAMETERS`) is no longer passed to worker worktrees; the
+snapshot already ignored it. Put such settings, for example `safe.directory`,
+in your global git configuration instead. Run without `-plan-workers` to avoid
+worker worktrees, or pass `-no-git-context` to skip the snapshot. This narrows
+the environment only: hooks and filters still run as you, and your global and
+system git configuration stays trusted.
+
+#### Fixed
+
+- When a worker worktree's `post-checkout` hook fails, git keeps the worktree.
+  Golem now reports it as preserved, like the other worker roots a failed run
+  keeps, instead of leaving it behind unreported.
+
+### Security — Inline-shell guards read common shell option forms (#622)
+
+The egress classifier and the `remote_script_execution` invariant now read an
+outer `sh`/`bash`/`dash`/`ksh`/`zsh` started with `-c` among `-e`, `-u`, `-x`,
+`-l` and `-i` (separate or clustered), `-o errexit`/`nounset`/`xtrace`,
+`-o pipefail` (bash, zsh and ksh only) and `--`, taking the first operand as
+the script. `bash -e -c`, `bash -o pipefail -c`, `sh -xc` and `bash -lic`
+fetch-into-shell pipelines are now blocked and labeled `network`, as `bash -c`
+ones already were, and `bash -c -e '<script>'`, previously misread with `-e`
+as the script, is read correctly. Any other shell option form, including
+parse-only `-n`, `-o noexec`, `fish -c`, and an unmodeled option before a
+script file (`bash -v build.sh`, `sh -n check.sh`), is now labeled `unknown` 10
+instead of `interpreter` 0 and is never blocked.
+
+`curl … | sh -s -- -y` is now recognized as a stdin sink and blocked like
+`| sh`. A quoted assignment-shaped word such as `"TAG=x"` before the fetch or
+the sink is the command in shell grammar, not an assignment, so
+`"TAG=x" curl … | sh` is no longer blocked as a pipeline whose fetch never
+runs; its egress label is unchanged.
+
+### Fixed — MCP admission keeps the refusal reason and first-pin notice under cancellation (#620)
+
+- A refused MCP server (`catalog_changed`, `pin_missing`, `pin_conflict`, `invalid_catalog`) whose session close returned `context.Canceled` was reported as `canceled`, hiding the real refusal from the operator. The reason is now classified from the refusal alone; the close error stays in the cause chain, so `errors.Is(err, context.Canceled)` still holds.
+- When `Connect` was canceled during or after first-contact admission, the "first pin" notice for the pin just written to disk was dropped, leaving only a `canceled` failure. The notice is now reported ahead of that failure, in server config order.
+
+### Fixed — SQLite stores open concurrently and on Windows (#619)
+
+- Two processes opening a new transcript, memory, feedback, session,
+  routing-feedback or RAG database at the same time no longer fail with
+  `SQLITE_BUSY`, as long as the other opener finishes within the store's busy
+  timeout. For example, two MCP servers starting on a new transcript path both
+  start. Agent-memory record stores (`memory.OpenRecordStore`) can still fail a
+  concurrent first open during signing initialization (#631).
+- File-backed stores open on Windows. The RAG index had failed to open there
+  since v0.1.0, and the other stores since v0.4.0. UNC and device paths
+  (`\\server\share\...`, `\\?\...`), including `file:` URIs that name them, are
+  now rejected with an error: use a local drive path. This includes a relative
+  or rooted `file:` URI when the working directory is a UNC share. A drive
+  letter mapped to a network share is not detected and has the same WAL limits.
+- A relative path now works for read-only RAG stores
+  (`rag.OpenSQLiteStoreReadOnly`).
+- An open no longer fails when another process closes the same database at the
+  same moment (a WAL sidecar disappeared before its permissions were tightened).
+- A store whose switch to WAL reports any journal mode other than `wal` now
+  fails to open instead of silently running with a rollback journal. This
+  includes `file:` URIs with `immutable=1`, which used to open an existing WAL
+  database read-only through `provider.OpenSQLiteFeedbackStore`,
+  `rag.NewSQLiteStore`, `transcript.Open` or `memory.OpenHardenedDB`, and
+  `nolock=1`, which used to create a new database in rollback mode with locking
+  off. For read-only access, pass your own handle to
+  `provider.NewSQLiteFeedbackStore` or use `rag.OpenSQLiteStoreReadOnly`.
+- Opening a store now stops waiting for the WAL switch at the caller's context
+  deadline, if that is sooner than the store's busy timeout. An open that hits
+  the deadline while another process holds the database can report
+  `SQLITE_BUSY` rather than `context.DeadlineExceeded`.
+- `rag.OpenSQLiteStoreReadOnly` now accepts a `file:` URI as well as a path. It
+  always opens read-only and immutable with a private cache, whatever the URI's
+  own `mode` or `cache` parameters say. Caller-supplied `_pragma` URI options
+  are rejected before connection setup, so they cannot execute SQL that
+  modifies the source database.
+- Plain read-only RAG paths retain filesystem symlink and `..` resolution,
+  so opening an index selects the same database as the supplied path.
+- `rag.NewSQLiteStore("")` (a temporary database) now keeps one connection, so
+  the store no longer sees an empty, unmigrated database on a second pooled
+  connection.
+
+### Security — Reads verify the guarded path still reaches the opened file (#613)
+
+On Linux and Darwin, the read-only file tools (`read_file`, `search`, `glob`,
+`list`), scoped dispatch construction and readers, the reads behind
+`write_file`/`edit_file` previews and pre-apply re-reads, and the exported undo
+and hash readers now resolve the guarded path again from the top-level
+workspace root after the guard decides and the file is opened or the directory
+enumerated, by name and never following a symlink in any component. If the
+canonical root gains a symlink ancestor above the workspace, verification
+also fails closed: the root is reached from `/` without following symlinks.
+If the path no longer reaches the same object, the read fails closed. A directory
+renamed into a denied location can no longer serve content under its old, allowed
+name. `list` rechecks its directory after its entry guards, and `glob` rechecks
+the parent of each name it returns after that name's guard. This reverses
+#448's rule that a pinned directory or root keeps serving reads after it moves.
+
+This is decision integrity, not adversary resistance: a process that can rename
+can still place content at an allowed name, hard links make a name unreliable
+provenance, the re-resolution is a sequence of lookups rather than an atomic
+snapshot, bytes are read after it, and case-only or normalization-only renames
+on case-insensitive filesystems are not detected. Other platforms are
+unchanged. See docs/least-privilege.md.
+
+#### Upgrade notes
+
+- `read_file`, `glob` and `list` can now fail with `path changed during access`
+  when the target or one of its directories moves during the call. Retry the
+  call. A directory that vanished or became a symlink between a walk's
+  enumeration and its recursion also reports this text instead of
+  `path not found` or a generic failure.
+- `write_file`/`edit_file` previews and pre-apply re-reads, and the exported
+  `Workspace.ReadFileForUndo`, `ReadFileWithModeForUndo` and `HashFileWithMode`,
+  fail in the same cases with the existing error text
+  `file identity changed between stat and open`, prefixed
+  `workspace root replaced: ` for `ErrRootReplaced`. That error is unexported;
+  only `ErrRootReplaced` can be matched with `errors.Is`.
+- Golem's `/undo` refuses earlier when the file's directory is moved or swapped
+  during one of the undo's precondition reads. RAM undo prints only
+  `cannot undo <path>: file changed since golem wrote it`, without the
+  `undo failed for <path>: file precondition mismatch` line. Checkpoint undo
+  prints the same `cannot undo` refusal (with `undo interrupted; run /undo to
+  resume` once the undo has started) or, when the move lands on its final
+  pre-write read, `undo failed for <path>: file identity changed between stat
+  and open` and `undo interrupted; run /undo to resume`. Nothing is mutated,
+  the record or checkpoint is kept, and `/undo` can be retried once the layout
+  is restored.
+- A scoped dispatch child's reads fail with `ErrRootReplaced` once its path no
+  longer reaches the pinned scope directory, for example because the scope was
+  moved or replaced, even when a symlink now leads to it; previously the child
+  kept reading the moved directory. A workspace root replaced while a scoped
+  child runs also fails its reads with `ErrRootReplaced` instead of serving the
+  old tree.
+- `search` skips a file whose own check fails, as it already skips unreadable
+  files. A directory whose check fails after enumeration aborts the `search`,
+  `glob` or `list` call.
+- A workspace root that is replaced, renamed away or turned into a symlink
+  during a `search`, `glob` or `list`, or a scoped child's scope that moves or
+  is replaced, now aborts the call instead of continuing through the old tree;
+  `search` checks for root failure even when the current file cannot be opened,
+  and never skips files for it, so it cannot yield partial results or
+  `no matches`. It reports `ErrRootReplaced` (tool output
+  `path changed during access`); after a top-level root replacement, hosts
+  should build a new `Workspace`. Losing access to the root or scope path
+  during the call, such as search permission on a parent directory, also aborts
+  it, with the cause's text (`path is not accessible`).
+- The #552 write and delete operations themselves are unchanged.
+
+### Changed — Golem requires AgentFlow 1.x (#612)
+
+Golem now drives AgentFlow 1.x only. Planning mode compiles plan schema
+`1.0.0`, and the real-CLI suite and the CI compatibility job run against the
+AgentFlow 1.0.0 release.
+
+#### Upgrade note
+
+- **Version:** `-goal`, `-plan`, `-agentflow-resume` and `-agentflow-status`
+  run `agentflow --version` first and refuse anything outside 1.x, before any
+  mutation. Messages: `agentflow 0.4 is too old; need >= 1.0`, and
+  `agentflow 2.0 is newer than this Golem supports; need 1.x`. A refused
+  AgentFlow is not asked for recovery advice. `-agentflow-status -json` prints
+  the version message as one `golem:` line on stderr, with empty stdout and
+  exit 3.
+- **Plans:** a plan whose `schema_version` major is not 1 (including Golem's
+  previous `0.3.0` and external `0.4.0` plans) is refused before any AgentFlow
+  call. Migrate it to `1.0.0` and review it again, or re-plan with `-goal`
+  after moving any existing `.agent/` aside.
+- **Existing 0.x state:** `-plan`, `-agentflow-resume` and `-goal` refuse a
+  workspace whose `.agent/` plan lock, execution contract or any execution
+  ledger row is not AgentFlow 1.x, naming the file. Finish or `build-proof` the
+  run with AgentFlow 0.x, move `.agent/` aside, then re-plan.
+  `-agentflow-status` stays read-only and exits 3; with a 0.x plan lock,
+  AgentFlow reports `state_invalid`. See "Upgrading from AgentFlow 0.x" in
+  `docs/llm/agentflow-task-mode.md`.
+- Retained-state checks reject nonregular files, including named pipes,
+  without blocking authoring or holding its lock after refusal.
+- `-agentflow-status` now makes two read-only AgentFlow calls:
+  `--version`, then `next-action`.
+- Developers running go-llm's own tests with an AgentFlow that is not 1.x on
+  PATH (or at `AGENTFLOW_SRC`): the real-CLI tests, including the untagged
+  ones in `./agentflow` (lock-plan and review), now skip with a message naming
+  the version found. They fail instead when `GO_LLM_REQUIRE_AGENTFLOW` is set.
+  Install AgentFlow 1.x, or set `AGENTFLOW_SRC` to a 1.x checkout.
+
+#### Library changes
+
+- `agentflow.PreflightP0` rejects a plan whose `schema_version` major is not 1,
+  and `agentflow.Compile` emits `1.0.0`.
+- New exports: `Client.CheckVersion` (runs only `agentflow --version` and the
+  1.x gate), `VersionError` (a rejected version), `PlanSchemaVersion` and
+  `SupportedSchemaVersion`.
+- `Probe`'s missing-subcommand and flag hints, and `ProbeParallel`'s flag hint,
+  now end in `(upgrade Agentflow)` instead of naming a version.
+  `ProbeParallel`'s missing-subcommand error gains the same hint.
+- A failed `agentflow --version` now includes its stderr in the error, and only
+  the first line of the `--version` output is parsed.
+
+### Fixed — AgentFlow task steps that stop early fail before their gates (#611)
+
+An AgentFlow task step whose agent run stopped before finishing used to go on
+to its gates and `finish-step`. That happened when the run used up
+`-max-steps`, hit three consecutive tool errors (including #575 default guard
+denials), repeated the same tool call three times, or exhausted a run token
+budget, so a step judged only by weak gates could be recorded as completed.
+Golem now fails the attempt before any gate, records it as `blocked` in
+AgentFlow's ledger with the reason `golem: agent run stopped: <reason>`, and
+exits 1 with
+`agentflow task failed: step <id> attempt <id>: agent run stopped: <reason>; attempt recorded as blocked`.
+Planning mode (`-goal`) names the reason as well:
+`the planner did not submit a plan: agent run stopped: <reason>`.
+
+#### Upgrade note
+
+`-agentflow-status` reports a stopped step as `step_unclaimed` (exit 2), and
+`-agentflow-resume` runs it again in a new attempt instead of settling the
+stopped attempt on its gates. Edits from the stopped run stay in place: restore
+or delete them before resuming, or the new attempt must write each still-changed
+in-scope file. If it does not, resume fails closed in `file_receipts_missing`
+and leaves that attempt open. Block it with `agentflow block-step` before
+restoring files, as `docs/llm/agentflow-task-mode.md` describes. Under the
+`enforce` lease policy recovery stays manual (exit 3). Golem's AgentFlow
+probe now also requires `block-step` with `--root`, `--attempt`, `--reason`,
+`--agent` and `--json`, which every supported AgentFlow provides. Other
+step-run failures, such as a provider error, still leave the attempt open as
+before.
+
+### Fixed — Bound routing-feedback lock waits by the write deadline (#592)
+
+`SQLiteFeedbackStore` writes now cap SQLite's busy wait to the time left on the
+caller's context deadline, so a contended feedback write adds about the
+router's one-second feedback budget to a routed request instead of up to the
+store's five-second `busy_timeout`. The cap applies to caller-owned handles as
+well and is restored afterward; a connection left inside a transaction, or
+whose timeout restore fails, is discarded. Writes without a deadline are
+unchanged. Still not bounded: a frozen filesystem, a shared-cache database, the
+DSN pragmas run when a new pooled connection opens, and feedback scoring reads.
+
+### Fixed — Validate the feedback weight reader schema through the WAL (#591)
+
+`feedback.NewSQLiteWeightReader` now validates the schema on its serving
+read-only connection, which reads committed WAL pages under SQLite's locks,
+instead of an immutable preflight that ignored the WAL and so missed
+migrations not yet checkpointed into the main file. Concurrent Golem sessions
+on one workspace no longer start with behavioral feedback disabled
+(`version 0, want 1`). The reader rejects an empty or truncated database file,
+or a path that is not a regular file, before opening it, and resolves a
+relative path against the working directory. It may now create SQLite's `-shm`
+file, and an empty `-wal` for a WAL-mode database that has none, beside a
+database it rejects; outside a concurrent truncation of the main file, it
+still never writes or deletes the main file or an existing WAL. The reader
+now waits up to one second for a lock another connection holds, where it
+previously failed at once as `SQLITE_BUSY`. Golem no longer checkpoints
+before opening the reader.
+
+### Fixed — Serialize the transcript audit-column upgrade (#590)
+
+Opening a legacy transcript database from two processes at once no longer fails
+with `duplicate column name`. The audit-column upgrade now re-checks the
+conversations table under SQLite's write lock and adds every missing column in
+one transaction; a failed upgrade adds none. Opening an already-upgraded
+database still takes no write lock.
+
+### Added — MCP tool selection (#579)
+
+`-mcp-tools 'alias=name,...'` (Golem) and `mcpclient.Server.WithTools` (library) expose only the named original tools of an attached MCP server; `alias=` exposes none. The complete catalog is still verified and pinned, so a change to an unselected tool still blocks the alias, and a selected tool the server does not offer blocks the alias with `selection_missing` instead of exposing a partial set. Selected tools keep per-call approval. `mcpclient.StdioServer` now copies its argv. `mcpclient.AdmissionError.Names` lists the selected names the server did not offer.
+
+### Security — MCP connection policy (#578)
+
+MCP pins now bind how Golem connects, not only the tool catalog. Each pin
+stores keyed fingerprints of the stdio launch (resolved program path and its
+symlink target, arguments, working directory, environment policy) or the exact
+HTTP endpoint, and a changed connection is refused before anything is launched
+or contacted (`connection_changed`, naming the changed fields), even when the
+tool list is identical. Stdio servers run in the workspace root with a minimal
+environment (`PATH`, `HOME`, `LANG`, `USER` and `TMPDIR`, plus `SYSTEMROOT`,
+`TEMP`, `TMP`, `PATHEXT`, `USERPROFILE`, `COMSPEC`, `APPDATA` and
+`LOCALAPPDATA` on Windows) and the variables named with the new repeatable
+`-mcp-env 'alias=NAME,...'` flag; nothing else is inherited, and an unset named
+variable blocks that server (`env_unset`). HTTP servers are pinned to one exact
+endpoint and every redirect is refused, same-origin and session close
+included. Headless `pin_missing` is now reported before the server is
+launched. Tool-call errors no longer echo transport text that can contain
+URLs. Same-path program updates and file or symlink swaps between the check
+and the launch are not detected, and stdio servers keep host-user filesystem
+and network authority (#580).
+
+#### Upgrade notes
+
+- Every server pinned by v0.4.0 or earlier reports `connection_missing`, in
+  the REPL and with `-p`, until `golem mcp inspect` and
+  `golem mcp approve -digest … -connection …` are run once with the same
+  `-root`, server and `-mcp-env` arguments as startup.
+- `golem mcp approve` requires `-connection` (the fingerprint `inspect` prints)
+  in addition to `-digest`, and checks it before launching anything
+  (`connection_mismatch`).
+- Stdio servers no longer inherit Golem's environment. Servers that relied on
+  inherited variables (exported tokens, `HTTP_PROXY`/`HTTPS_PROXY`,
+  `NODE_EXTRA_CA_CERTS`, `VIRTUAL_ENV`, nvm or pyenv paths, `XDG_*`) need
+  `-mcp-env 'alias=NAME,...'`. `env KEY=val command` still works for
+  non-secret values.
+- Stdio servers now start in `-root` instead of the current directory, and a
+  relative program path containing a separator (`./bin/server`) resolves
+  against `-root`, not Golem's current directory.
+- Relative and empty `PATH` entries (`.`, `./node_modules/.bin`) are dropped
+  from a stdio server's `PATH` (a quoted Windows entry is judged without its
+  quotes and kept as written, but one holding a `;` only when the whole entry
+  is quoted), and a `PATH` with no absolute entry is omitted (then programs use
+  their own default search path). Servers that relied on a relative entry need
+  absolute entries instead.
+- On Windows a stdio server always gets `NoDefaultCurrentDirectoryInExePath=1`,
+  so a bare program name is not looked up in the workspace root before `PATH`;
+  `-mcp-env` may not name it.
+- Windows stdio preparation rejects `PATHEXT` containing `/`, `\` or `:` as
+  `launch_invalid` before executable lookup. These delimiters could make Go
+  resolve a different executable when starting the already prepared launcher;
+  the diagnostic never includes the environment value.
+- `PATH` values are not part of the connection: a wrapper
+  (`env KEY=val command`, `npx`, `uvx`, `sh -c`) or a script's `#!`
+  interpreter binds only the launcher, so what it finds through the absolute
+  `PATH` entries can change without `connection_changed`. Prefer absolute
+  launcher paths to wrappers.
+- HTTP endpoints with userinfo, a fragment (including a bare trailing `#`),
+  `.` or `..` path segments (including percent-encoded `%2e%2e` and
+  `%2F`-joined forms), a backslash, an IPv6 zone ID, or a non-ASCII host now
+  fail as `invalid_config`, which stops Golem startup and names the alias and
+  the rule on stderr; use the `xn--` form for internationalized hosts.
+- Every HTTP redirect is refused, including on session close: a session
+  `DELETE` answered with a redirect is never followed, and library callers see
+  it only as `Manager.Close`'s fixed error text; startup, `golem mcp inspect`
+  and `approve` are unaffected.
+- The first run creates `<user data dir>/golem/mcp-pins/connection-hmac.pem`,
+  so the `mcp-pins` directory must be writable. An unreadable or corrupt key,
+  or on Unix one with group or other permission bits or another owner, makes
+  the pin store unavailable and is never replaced. A lost key is recreated,
+  and every pin then reports `connection_changed` (`key`) until approved once
+  more.
+- Failed MCP tool calls now report only `mcp call failed:` followed by
+  `redirect refused`, `destination refused`, `canceled`, `timed out`, the
+  server's own JSON-RPC error message, or `transport error`.
+- A v0.4 binary reports pins written by this version as `pin_unavailable` and
+  blocks those aliases.
+
+#### Library changes
+
+- `mcpclient.Approve` takes `ApprovalDigests{Catalog, Connection}`; both are
+  required, and the connection fingerprint is checked before the server is
+  launched or contacted.
+- `mcpclient.Inspection` gains `CandidateConnection` (a new `ConnectionView`),
+  `PinnedConnection` and `ConnectionChanges`; `AdmissionError` gains
+  `ConnectionChanges`, and its `Names` also lists unset variables for
+  `env_unset`. A `launch_invalid` rejection's text names the fixed rule that
+  failed (for example `executable not found or not executable`), and per-alias
+  rejections remain bare `*AdmissionError` values.
+- `StdioServer` children receive only the platform baseline environment plus
+  `Server.WithEnv` additions, built with `InheritEnv` (the parent's value,
+  read at launch) or `SetEnv` (a host-supplied value, which may not name a
+  baseline variable). `Server.WithDir` sets the absolute working directory;
+  the default is the process working directory captured at preparation.
+- `Server` and `EnvVar` implement `fmt.Formatter`: a `Server` formats as its
+  kind and alias (`stdio:fs`) and an `EnvVar` as its source and name
+  (`inherit:GITHUB_TOKEN`).
+- `NewPinStore` creates or loads the per-user connection key and fails when
+  an existing key is unreadable, insecure or corrupt.
+- `Manager.Close` returns an error with the fixed text
+  `mcpclient: closing MCP sessions failed`; causes are available only through
+  `errors.Is` and `errors.As`.
+
+### Security — Golem subcommands no longer echo command-line text in argument errors (#577)
+
+`golem index`, `golem models` and `golem source add`, `rm`, `reindex` and
+`list` no longer repeat command-line text in flag-parse errors. Before,
+an unknown flag, malformed flag or invalid flag value was printed back
+verbatim, together with the full usage text, so a secret pasted on the command
+line reached the terminal and any captured log. `golem index` also repeated it
+on stdout.
+
+A flag-parse failure is now one line on stderr under the command's own prefix, giving
+the argument count and pointing to `-help`; the exit code is still 1. `-h`,
+`-help` and `--help` print the same usage as before and exit 0.
+
+Three other errors no longer quote the offending argument: an unknown `golem`
+command, an unknown `golem source` subcommand, and a flag placed after the
+`golem source` path or id.
+
+### Security — AgentFlow subprocesses no longer inherit Golem's environment (#577)
+
+AgentFlow, every validation gate it runs and its own `git` calls now receive an
+environment built from scratch: `PATH`, `HOME`, `USER`, `TMPDIR` and `LANG`
+(plus `SYSTEMROOT`, `TEMP`, `TMP`, `PATHEXT`, `USERPROFILE`, `COMSPEC`,
+`LOCALAPPDATA` and `APPDATA` on Windows), operator-approved names (`-agentflow-env`), `AGENTFLOW_STRICT=1` when
+set to exactly `1`, and the runner's own `PWD`, `PYTHONPATH` and
+`PYTHONDONTWRITEBYTECODE`. Provider API keys and other parent variables no
+longer reach gates unless explicitly approved.
+
+#### Upgrade note
+
+Gates that depended on inherited variables (for example `GOFLAGS`, `GOPRIVATE`,
+`HTTPS_PROXY` or `SSL_CERT_FILE`) now run without them. Approve each one with
+the new repeatable `-agentflow-env NAME` flag on `golem` and `golem audit`. An
+approved name that is unset fails the launch, and an approved value reaches
+every gate.
+
+#### Library and CLI changes
+
+- `agentflow.ValidateEnvNames` and `(*agentflow.ExecRunner).AllowEnv` approve
+  parent variables by name.
+- `agentflow.EnvNotSetError` reports an approved name that is unset at launch;
+  it carries the name only. `golem audit` names the variable in its
+  `agentflow_unavailable` diagnostic, and `golem -agentflow-status -json` prints
+  it on stderr while keeping exit 3 and empty stdout.
+- `agentflow.NewSrcExecRunner` now requires an absolute checkout containing
+  `src/agentflow/__init__.py` and resolves symlinks; an invalid checkout fails
+  at `Run`.
+- `golem -goal` now resolves a relative `-agentflow-src` against `-root`, like
+  task and status modes, and its printed "execute separately" command carries
+  every `-agentflow-env` name.
+- `golem` and `golem audit` no longer echo command-line text in argument
+  errors: unexpected positional arguments are reported by count, and
+  flag-parse errors report the argument count and point to `-help`.
+
+### Changed — Golem installs deterministic tool guards by default (#575)
+
+Golem now installs argument invariants, exec-class egress labels and
+scoped-child refusal reporting on every run, including `-p` and dispatch
+children, with or without `-interceptors`. There is no opt-out. Every
+session prints a new stderr startup line:
+`guards: invariants, egress, child_scope_denials (always on; -interceptors adds detectors, secrets, canary)`.
+
+#### Upgrade note
+
+The invariants are lexical checks on specific tool arguments:
+`write_file`, `edit_file` and `promote_artifact` paths under a `.git`, `.ssh`,
+`.gnupg`, `.aws` or `.kube` component; `read_file` paths under `.ssh`,
+`.gnupg`, `.aws` or `.kube`, or named `.env`; `run_command`/`start_command`
+inline `sh`/`bash`/`dash`/`ksh`/`zsh` `-c` (or `-lc`, `-ec`, `-euc`) scripts
+that pipe a `curl`/`wget` stdout fetch into a bare shell (optionally `-s`,
+optionally under `sudo`); and the same guarded argument spelled twice.
+Matching calls are refused before approval; grants and `-allow-tool` cannot
+override this. The model sees the refusal as a tool error, and three
+consecutive errors stop the run. A `-p` run stopped this way exits 1: text
+format prints `one-shot: model produced no final answer`, and `json` or
+`stream-json` report `status: error` with `empty_answer`.
+Blocked calls emit no `tool.started`/`tool.finished` events. Other routes to
+the same files or effects are not covered: shell commands, search, retrieval,
+MCP tools, verifier commands, and shell forms the recognizer does not model
+(for example `bash -e -c` or `sh -xc`). This is a tripwire, not confinement.
+
+Egress labels classify the `argv` of any exec-class call whose arguments
+carry one, MCP tools included, unless the command is on the quiet set. They
+appear on interactive approval prompts. Invariant refusals (30 each), egress
+labels (0 to 20 by class; see docs/golem.md) and scoped-child refusals (10
+each) add to the `interceptor risk`
+score shown on prompts and stderr footers, now also without
+`-interceptors`; a dispatch child's envelope gains its own `risk_score` the
+same way. Labels and scores are informational and do not confine network
+access or revoke grants.
+
+`golem.result.v1`, protocol-v1 events and exit codes are unchanged. Content
+detectors, Secrets, canaries and `/consult` still require `-interceptors`.
+Library consumers (`agent`, `agent/interceptor`, and `golem.New`'s
+config-driven bootstrap) are unaffected and remain opt-in; embedders supply
+an `Options.Orchestrator` built with `agent.WithInterceptors`.
+
+### Security — Scratch and sandboxed exec verify the approved executable, cwd and root (#553)
+
+On Linux and Darwin, a scratch command now checks its workspace snapshot's root,
+working directory and (for a workspace-local executable) executable against the
+objects approved at preview time before it runs in the clone, and the Seatbelt
+and Bubblewrap backends check that the executable they resolve is the approved
+object before launching it.
+
+#### Upgrade note
+
+- A scratch command refuses to run, with "scratch snapshot does not match
+  approved ...; retry", when its root, cwd or workspace executable was replaced
+  between approval and execution. Retrying plans against the current
+  object.
+- A sandboxed command refuses with "executable changed since approval; retry"
+  when its executable target changed after approval.
+- Seatbelt now launches an approved executable reached through symlinks
+  outside its read roots (Homebrew style, such as `/opt/homebrew/bin/<tool>`)
+  by granting metadata on each link in the chain. Only self-contained binaries
+  benefit: a tool that loads libraries or frameworks from outside the read
+  roots, as most Homebrew formulae do, is still stopped by the dynamic loader.
+- Approval keys and grants are unchanged; a fresh plan against a same-path
+  replacement is approved normally.
+- An executable or working directory under an excluded `.git` directory cannot
+  be used as a scratch target, since the snapshot does not clone it.
+- These checks bind the approved object, not its bytes: an in-place rewrite that
+  keeps the file's identity is not detected. Concurrent same-UID host mutation
+  remains an accepted residual.
+
 ## [0.4.0] - 2026-09-29
 
 ### Changed — v0.4.0 consumer upgrade notes (#603)
