@@ -6,8 +6,10 @@ On Linux and Darwin, the read-only file tools (`read_file`, `search`, `glob`,
 and hash readers now resolve the guarded path again from the top-level
 workspace root after the guard decides and the file is opened or the directory
 enumerated, by name and never following a symlink in any component. If the
-path no longer reaches the same object, the read fails closed. A directory renamed into
-a denied location therefore can no longer serve content under its old, allowed
+canonical root gains a symlink ancestor above the workspace, verification
+also fails closed: the root is reached from `/` without following symlinks.
+If the path no longer reaches the same object, the read fails closed. A directory
+renamed into a denied location can no longer serve content under its old, allowed
 name. `list` rechecks its directory after its entry guards, and `glob` rechecks
 the parent of each name it returns after that name's guard. This reverses
 #448's rule that a pinned directory or root keeps serving reads after it moves.
@@ -54,7 +56,8 @@ unchanged. See docs/least-privilege.md.
 - A workspace root that is replaced, renamed away or turned into a symlink
   during a `search`, `glob` or `list`, or a scoped child's scope that moves or
   is replaced, now aborts the call instead of continuing through the old tree;
-  `search` never skips files for it, so it cannot yield partial results or
+  `search` checks for root failure even when the current file cannot be opened,
+  and never skips files for it, so it cannot yield partial results or
   `no matches`. It reports `ErrRootReplaced` (tool output
   `path changed during access`); after a top-level root replacement, hosts
   should build a new `Workspace`. Losing access to the root or scope path

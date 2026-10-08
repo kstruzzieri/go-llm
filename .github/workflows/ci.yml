@@ -220,3 +220,10 @@ jobs:
         env:
           CGO_ENABLED: "0"
         run: go test -count=1 -v ./internal/sqlitedsn
+
+      # Windows loads path-based FileInfo identities lazily. Compile smoke
+      # cannot detect a replaced root being mistaken for the original (#658).
+      - name: Test workspace identity and undo on Windows
+        env:
+          CGO_ENABLED: "0"
+        run: go test -count=1 -v -run '^(TestWorkspaceVerifyRoot.*|TestNewWorkspace.*|TestUndoCreatedFile.*|TestCheckpointUndoCreatedFile.*)$' ./agent/tools ./cmd/golem

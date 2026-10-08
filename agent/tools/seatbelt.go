@@ -75,8 +75,11 @@ func seatbeltMetadataAncestors(paths []string) ([]string, error) {
 }
 
 // seatbeltPolicy is the per-invocation input to profile generation. All paths
-// must already be canonical (symlink-free); the builder validates shape and
-// treats them as data, performing no filesystem I/O.
+// must already be canonical (symlink-free), except that metadataAncestors,
+// the exact file-read-metadata literals, also carries each link node on the
+// approved executable's symlink chain at its canonical-parent spelling. The
+// builder validates shape and treats them as data, performing no filesystem
+// I/O.
 type seatbeltPolicy struct {
 	workspaceRoot     string
 	tempRoot          string

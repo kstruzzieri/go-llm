@@ -69,11 +69,17 @@ func (w *Workspace) verifyReachable(rel string, opened *os.File) error {
 		return err
 	}
 	root, identity, prefix := w.readAnchor()
-	dir, err := unix.Open(root, workspaceSearchFlags|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	dir, err := unix.Open(string(os.PathSeparator), workspaceSearchFlags|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return reachabilityError(err, true)
 	}
 	defer func() { _ = unix.Close(dir) }()
+	// O_NOFOLLOW on an absolute root only protects its final component.
+	// Resolve the canonical anchor from / so a symlink above the workspace
+	// cannot redirect verification back to the same, now relocated inode.
+	if err := descend(&dir, splitClean(root)); err != nil {
+		return reachabilityError(err, true)
+	}
 	var st unix.Stat_t
 	if err := unix.Fstat(dir, &st); err != nil {
 		return reachabilityError(err, true)
@@ -434,6 +440,11 @@ func (w *Workspace) openWalked(rel string, d fs.DirEntry) (*os.File, error) {
 	}
 	f, err := e.openRegular()
 	if err != nil {
+		// An unreadable or vanished leaf must not hide a root-level failure:
+		// search skips leaf errors but must abort when its anchor is lost.
+		if reachErr := w.verifyReachable(filepath.Dir(rel), e.dir); reachErr != nil {
+			return nil, reachErr
+		}
 		return nil, err
 	}
 	if err := w.verifyReachable(rel, f); err != nil {

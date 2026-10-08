@@ -805,6 +805,11 @@ func TestScratchBackgroundWrapCoversAbandonedReap(t *testing.T) {
 	}
 	rt.tempBase = t.TempDir()
 	spec := execSpec{Path: "/bin/sh", Argv: []string{"sh", "-c", "sleep 5"}, Dir: rt.root, Env: []string{"PATH=/usr/bin:/bin"}, WorkspaceRoot: rt.root}
+	if scratchIdentitySupported {
+		spec.ExeIdentity = execIdentityOf(t, spec.Path)
+		spec.DirIdentity = execIdentityOf(t, rt.root)
+		spec.RootIdentity = execIdentityOf(t, rt.root)
+	}
 	session, rewritten, err := beginScratchSession(context.Background(), rt, spec)
 	if err != nil {
 		t.Fatal(err)

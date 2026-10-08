@@ -8,7 +8,7 @@ The [Mnemoverse article on least privilege for AI agents](https://mnemoverse.com
 
 | Area | Shipped behavior | Limit |
 |---|---|---|
-| Tool execution | Read-only CLI default; explicit tool mounting; shared preparation, validation and approval before invocation. | Opting into exec permits host execution. Sanitized command environments do not restrict filesystem or network access. |
+| Tool execution | Read-only CLI default; explicit tool mounting; shared preparation, validation and approval before invocation. | Opting into exec permits host execution. Sanitized command environments do not restrict filesystem or network access. The executable, cwd and root are identity-checked before launch (#553), but launch is by pathname, not a pinned descriptor. |
 | Agentflow subprocesses | Agentflow, its gates and its `git` calls receive a documented baseline plus operator-approved names (`-agentflow-env`); provider keys and other parent variables are dropped unless explicitly approved. | Environment narrowing only: gates keep host-user filesystem and network authority, and an approved value reaches every gate. |
 | Golem's own `git` calls | Parallel-mode worktree operations and the git context snapshot receive a fixed baseline plus Golem's settings; provider keys and other parent variables never reach `git` or the hooks, filters and helpers it runs. | Environment narrowing only: repository hooks, filters and `core.fsmonitor` helpers still run as you with the baseline, `HOME` and your trusted global and system git config. |
 | Native sandboxes | Library Seatbelt and Bubblewrap backends fail closed when explicitly selected but unavailable. Sandbox policy participates in exec approval identity. | CLI exec and verification do not yet select these backends. |
@@ -67,7 +67,9 @@ and pre-apply re-reads, and the exported `ReadFileForUndo`,
 what they return. After the guard allows a path and the file is opened or the
 directory enumerated, the path is resolved again from the top-level workspace
 root by name, never following a symlink in any component, and must reach the
-object being read. Otherwise the read fails closed. The four read tools report
+object being read. The canonical workspace root is itself reached from `/`
+without following symlinks, including in ancestors above the workspace.
+Otherwise the read fails closed. The four read tools report
 "path changed during access"; `write_file`, `edit_file` and the exported
 helpers return the existing "file identity changed between stat and open".
 When the workspace root is renamed away, replaced or turned into a symlink, or
@@ -80,8 +82,9 @@ looked up for another reason, such as lost search permission, the read fails
 with that cause ("path is not accessible" from the read tools). A directory
 that fails this check after enumeration aborts the walk or listing. `search`
 skips a file that fails its own check, as it skips unreadable files, but aborts
-when the root or scope path fails. Scoped children verify from the top-level
-root, so a scope directory moved after construction stops serving reads, even
+when the root or scope path fails, even if the current file cannot be opened.
+Scoped children verify from the top-level root, so a scope directory moved
+after construction stops serving reads, even
 when a symlink now leads to it. `list` rechecks its directory after the entry
 guards, truncated listings included; `glob` rechecks the parent of each name it
 returns after that name's guard.
@@ -103,6 +106,32 @@ while being read. Case-only and normalization-only renames on case-insensitive
 filesystems are not detected. Writes and deletes keep the mutation boundary
 above. Other platforms open by checked path after the guard decides, add no
 post-enumeration check, and keep their existing limits.
+
+## Exec launch boundary (#553)
+
+Exec approval covers argv, the resolved executable spelling, working directory,
+canonical workspace root, sanitized environment values, timeout and the selected
+sandbox/scratch policy. Each plan records filesystem identities for its
+executable, cwd and workspace root and rechecks them before invocation. On Linux
+and Darwin, scratch setup checks its source snapshot manifest against those
+objects (the executable only when it is inside the workspace) before running in
+the clone, and native sandbox preparation checks that the executable target it
+resolves is the approved object.
+
+These checks do not bind file bytes: an in-place rewrite keeps the identity.
+They do not bind a script's interpreter, loader inputs or dependencies, or the
+kernel's pathname resolution at launch; commands are started by pathname, so a
+change after the final check can still alter what runs or where. Seatbelt
+launches the approved spelling, which keeps invocation-name (`argv[0]`)
+behavior, and that spelling is resolved again at launch; the result still runs
+inside the profile. Session grants identify the command recipe, not file
+identity, so a fresh plan may reuse a grant after a same-path update.
+
+Concurrent same-UID host mutation remains an accepted residual. That covers
+in-place rewrites, changes after validation, and changes to the scratch
+reference or execution trees. Snapshot drift detection is not a point-in-time
+coherence proof. Protection against these races requires a coordinated launch
+redesign with [#484](https://github.com/kstruzzieri/go-llm/issues/484).
 
 ## Child capability and budget boundary (#449)
 

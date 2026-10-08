@@ -244,6 +244,85 @@ func TestReachabilityRootReplacedInsideGuard(t *testing.T) {
 	}
 }
 
+// Replacing an ancestor above the top-level root with a symlink to its moved
+// self preserves the root inode. Checking only the root's final component
+// would accept the moved tree, including through a scoped child's pinned root.
+func TestReachabilityRootAncestorSymlink(t *testing.T) {
+	for _, scope := range []string{"", "scope"} {
+		for _, operation := range []string{"read", "read_file", "list", "glob", "search"} {
+			t.Run(filepath.Join(scope, operation), func(t *testing.T) {
+				base := t.TempDir()
+				root := filepath.Join(base, "ancestor", "nested", "ws")
+				if err := os.MkdirAll(filepath.Join(root, scope), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				for _, name := range []string{"a.txt", "b.txt"} {
+					if err := os.WriteFile(filepath.Join(root, scope, name), []byte("MATCH\n"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				ws, err := NewWorkspace(root)
+				if err != nil {
+					t.Fatal(err)
+				}
+				ancestor := filepath.Dir(filepath.Dir(ws.root))
+				armed, moved := false, false
+				ws.SetScopeGuard(func(rel string, _ bool) error {
+					if armed && rel == filepath.ToSlash(filepath.Join(scope, "b.txt")) && !moved {
+						moved = true
+						if err := os.Rename(ancestor, ancestor+"-moved"); err != nil {
+							t.Fatal(err)
+						}
+						if err := os.Symlink(ancestor+"-moved", ancestor); err != nil {
+							t.Fatal(err)
+						}
+					}
+					return nil
+				})
+				target := ws
+				if scope != "" {
+					child, _, cleanup, err := newScopedWorkspace(ws, scope)
+					if err != nil {
+						t.Fatal(err)
+					}
+					defer cleanup()
+					target = child
+				}
+				if data, err := target.readAll("b.txt"); err != nil || string(data) != "MATCH\n" {
+					t.Fatalf("ordinary read = %q, %v", data, err)
+				}
+				armed = true
+				switch operation {
+				case "read":
+					data, err := target.readAll("b.txt")
+					if !errors.Is(err, ErrRootReplaced) || len(data) != 0 {
+						t.Fatalf("read through ancestor symlink = %q, %v; want ErrRootReplaced and no bytes", data, err)
+					}
+				case "list", "glob":
+					content, isError := invokeListing(t, target, operation, "")
+					if !isError || content != "path changed during access" {
+						t.Fatalf("%s through ancestor symlink = %q, IsError=%v", operation, content, isError)
+					}
+				default:
+					var tool agent.Tool = NewReadFile(target)
+					raw := json.RawMessage(`{"path":"b.txt"}`)
+					if operation == "search" {
+						tool = NewSearch(target)
+						raw = json.RawMessage(`{"pattern":"MATCH"}`)
+					}
+					res, err := tool.Invoke(t.Context(), raw)
+					if err != nil || !res.IsError || res.Content != "path changed during access" {
+						t.Fatalf("%s through ancestor symlink = %+v, %v", operation, res, err)
+					}
+				}
+				if !moved {
+					t.Fatal("guard never moved the root ancestor")
+				}
+			})
+		}
+	}
+}
+
 // A scoped child pinned at frontend keeps its descriptor for its whole
 // lifetime; moving the scope under a denied name must fail its reads.
 func TestReachabilityScopedChildScopeMoved(t *testing.T) {

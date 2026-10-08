@@ -99,9 +99,11 @@ func marshalResource(uri string, v any) (*gomcp.ReadResourceResult, error) {
 func (s *Server) handleHealthResource(ctx context.Context, req *gomcp.ReadResourceRequest) (*gomcp.ReadResourceResult, error) {
 	ollamaOK, herr := s.checkOllamaAvailable(ctx)
 	if herr != nil {
-		// A denial here cannot happen for an installed generation (the
-		// health edge is always in the manifest); surface it as unavailable
-		// rather than panicking a resource read.
+		// The health edge is always in an installed generation's manifest,
+		// but a typed denial can still arrive here: the guard refuses
+		// localhost that resolves off-host, and a hosts-file change after
+		// startup can make it. Report unavailable rather than failing the
+		// resource read.
 		ollamaOK = false
 	}
 

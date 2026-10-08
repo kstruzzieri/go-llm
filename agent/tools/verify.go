@@ -39,13 +39,14 @@ type VerifyResult struct {
 //
 // It reuses run_command's preparation wholesale — argv validation, cwd
 // containment through the Workspace, the fixed environment allowlist,
-// executable resolution and identity stamping, the spawn-time re-check, the
+// executable resolution and identity stamping, the pre-launch re-check, the
 // process-group kill and the output caps — but it is NOT a model-visible tool:
 // nothing registers it, and the model can neither call it nor see it.
 //
 // The plan is prepared ONCE, at construction, and frozen. Every Run re-checks
-// it, so a cwd escape or a binary swap after the user approved the command
-// fails closed instead of running something else.
+// it before launch, so a cwd escape or a binary swap between approval and
+// that check fails closed. A swap after the check, or an in-place rewrite,
+// remains the documented launch residual (#484).
 type VerifyCommand struct {
 	ws      *Workspace
 	runner  commandRunner

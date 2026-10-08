@@ -206,6 +206,15 @@ func TestBwrapHelperProcess(t *testing.T) {
 // there and the workspace bind is the reliable carrier.
 func bwrapHelperBinary(t *testing.T, ws string) string {
 	t.Helper()
+	helper := filepath.Join(ws, "bwrap-helper-bin")
+	copyBwrapHelper(t, helper, 0o755)
+	return helper
+}
+
+// copyBwrapHelper copies the test binary (the helper entry point) to dst,
+// creating its parent, and then applies mode.
+func copyBwrapHelper(t *testing.T, dst string, mode os.FileMode) {
+	t.Helper()
 	exe, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
@@ -214,11 +223,15 @@ func bwrapHelperBinary(t *testing.T, ws string) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	helper := filepath.Join(ws, "bwrap-helper-bin")
-	if err := os.WriteFile(helper, data, 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	return helper
+	if err := os.WriteFile(dst, data, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dst, mode); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func bwrapHelperArgv(helper string, mode string, extra ...string) []string {
@@ -256,6 +269,7 @@ func realBwrapRun(t *testing.T, cfg SandboxConfig, ws string, argv []string) exe
 		Dir:           ws,
 		Env:           []string{"PATH=/usr/bin:/bin", "HOME=" + bwrapTestHome},
 		WorkspaceRoot: ws,
+		ExeIdentity:   execIdentityOf(t, argv[0]),
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -677,6 +691,7 @@ func TestBwrapTimeoutKillsTree(t *testing.T) {
 		Dir:           ws,
 		Env:           []string{"PATH=/usr/bin:/bin", "HOME=" + bwrapTestHome},
 		WorkspaceRoot: ws,
+		ExeIdentity:   execIdentityOf(t, helper),
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 	defer cancel()
@@ -731,7 +746,7 @@ func TestBwrapBackgroundLifetime(t *testing.T) {
 	var stdout, stderr strings.Builder
 	proc, err := mgr.backend.Start(execSpec{
 		Path: helper, Argv: bwrapHelperArgv(helper, "pid"),
-		Dir: ws, Env: env, WorkspaceRoot: ws,
+		Dir: ws, Env: env, WorkspaceRoot: ws, ExeIdentity: execIdentityOf(t, helper),
 	}, &stdout, &stderr)
 	if err != nil {
 		t.Fatal(err)
@@ -746,7 +761,7 @@ func TestBwrapBackgroundLifetime(t *testing.T) {
 
 	hangProc, err := mgr.backend.Start(execSpec{
 		Path: helper, Argv: bwrapHelperArgv(helper, "hang", token),
-		Dir: ws, Env: env, WorkspaceRoot: ws,
+		Dir: ws, Env: env, WorkspaceRoot: ws, ExeIdentity: execIdentityOf(t, helper),
 	}, io.Discard, io.Discard)
 	if err != nil {
 		t.Fatal(err)
@@ -933,4 +948,75 @@ func TestBwrapPublicPlanToInvoke(t *testing.T) {
 	if !strings.Contains(result.Content, "exit code: 0") {
 		t.Fatalf("invoke result = %q", result.Content)
 	}
+}
+
+// TestBwrapBehavioralApprovedExecutableShapes: the identity check (#553)
+// binds the approved object without narrowing what runs. Under real bwrap an
+// unchanged workspace #! script, a Homebrew-style external symlink, an
+// execute-only native tool, and a native tool under a search-only ancestor
+// all run; the last two pin that resolving and stat'ing the target adds no
+// read requirement on the executable or its directories.
+func TestBwrapBehavioralApprovedExecutableShapes(t *testing.T) {
+	requireBwrapCapability(t)
+	cfg := SandboxConfig{Runtime: SandboxRuntimeBwrap}
+	assertHelperRan := func(t *testing.T, res execResult) {
+		t.Helper()
+		if res.ExitCode != 0 || !strings.Contains(string(res.Stdout), "HELPER-PID: ") {
+			t.Fatalf("helper did not run: exit=%d %s", res.ExitCode, helperOutput(t, res))
+		}
+	}
+	requireUnprivileged := func(t *testing.T) {
+		t.Helper()
+		if os.Geteuid() == 0 {
+			t.Skip("root bypasses permission bits; the fixture cannot withhold read access")
+		}
+	}
+
+	t.Run("script", func(t *testing.T) {
+		ws := wsTempDir(t)
+		script := filepath.Join(ws, "tool.sh")
+		if err := os.WriteFile(script, []byte("#!/bin/sh\necho script-ok\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		res := realBwrapRun(t, cfg, ws, []string{script})
+		if res.ExitCode != 0 || !strings.Contains(string(res.Stdout), "script-ok") {
+			t.Fatalf("workspace script did not run: exit=%d %s", res.ExitCode, helperOutput(t, res))
+		}
+	})
+	t.Run("homebrew symlink", func(t *testing.T) {
+		prefix := wsTempDir(t)
+		real := filepath.Join(prefix, "Cellar", "tool", "1.0", "bin", "tool")
+		copyBwrapHelper(t, real, 0o755)
+		link := filepath.Join(prefix, "bin", "tool")
+		if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(real, link); err != nil {
+			t.Fatal(err)
+		}
+		assertHelperRan(t, realBwrapRun(t, cfg, wsTempDir(t), bwrapHelperArgv(link, "pid")))
+	})
+	t.Run("execute-only", func(t *testing.T) {
+		requireUnprivileged(t)
+		exe := filepath.Join(wsTempDir(t), "tool")
+		copyBwrapHelper(t, exe, 0o111)
+		if _, err := os.ReadFile(exe); !errors.Is(err, os.ErrPermission) {
+			t.Fatalf("fixture must be unreadable: ReadFile err = %v", err)
+		}
+		assertHelperRan(t, realBwrapRun(t, cfg, wsTempDir(t), bwrapHelperArgv(exe, "pid")))
+	})
+	t.Run("search-only ancestor", func(t *testing.T) {
+		requireUnprivileged(t)
+		locked := filepath.Join(wsTempDir(t), "locked")
+		exe := filepath.Join(locked, "tool")
+		copyBwrapHelper(t, exe, 0o755)
+		if err := os.Chmod(locked, 0o111); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
+		if _, err := os.ReadDir(locked); !errors.Is(err, os.ErrPermission) {
+			t.Fatalf("fixture ancestor must be unlistable: ReadDir err = %v", err)
+		}
+		assertHelperRan(t, realBwrapRun(t, cfg, wsTempDir(t), bwrapHelperArgv(exe, "pid")))
+	})
 }
