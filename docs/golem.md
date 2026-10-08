@@ -439,8 +439,8 @@ its residency gap. The
 provider's `api_key`, if set, is sent as a Bearer token. Every request passes an
 exact method-and-path allowlist and the destination guard, so `golem ops` can
 never reach a route that loads a model (`/props`, `/v1/chat/completions`,
-`/upstream/...`) or unloads one (`/unload`), and a `localhost` that resolves to
-an off-host address is refused (shown as blocked by the destination guard).
+`/upstream/...`) or unloads one (`/unload`), and a `localhost` base URL always
+dials loopback (127.0.0.1, then ::1), whatever the hosts file says.
 Hosted providers are never contacted and read "not observed". So does a
 loopback `base_url` with a path, reported as an unusable `base_url`, because a
 prefix such as `/upstream/<model>` would start that model.
