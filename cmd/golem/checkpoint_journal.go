@@ -94,7 +94,7 @@ func undoTargetFrom(cur fileState, f checkpointFile) fileState {
 // (symlink, directory, permission) is surfaced so callers refuse rather
 // than guess.
 func (j *checkpointJournal) liveState(path string) (fileState, error) {
-	cur, mode, err := j.ws.ReadFileWithModeForUndo(path)
+	cur, mode, err := readForUndo(j.ws, path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return fileState{absent: true}, nil

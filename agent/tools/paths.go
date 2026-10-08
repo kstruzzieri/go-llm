@@ -131,7 +131,7 @@ func NewWorkspace(root string) (*Workspace, error) {
 	if err != nil {
 		return nil, err
 	}
-	identity, err := os.Stat(canon)
+	identity, err := workspaceRootIdentity(canon)
 	if err != nil {
 		return nil, err
 	}
@@ -460,6 +460,23 @@ func (w *Workspace) ReadFileWithModeForUndo(p string) ([]byte, fs.FileMode, erro
 		return nil, 0, err
 	}
 	return data, fi.Mode(), nil
+}
+
+// VerifyRoot reports whether the root path still names, without following a
+// symlink, the directory this Workspace was constructed over: nil when it
+// does, the not-exist error when it is gone, ErrRootReplaced when something
+// else took its place. Reads surface a vanished root as the same not-exist
+// error as a missing target, so a caller that treats absence as evidence (undo)
+// checks the root before believing it.
+func (w *Workspace) VerifyRoot() error {
+	fi, err := os.Lstat(w.root)
+	if err != nil {
+		return err
+	}
+	if !fi.IsDir() || !os.SameFile(w.rootIdentity, fi) {
+		return ErrRootReplaced
+	}
+	return nil
 }
 
 // HashFileWithMode returns the ContentHash and complete mode of a regular file

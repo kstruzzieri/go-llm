@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"sync"
 
@@ -29,6 +30,24 @@ func newMutationJournal(ws *agenttools.Workspace) *mutationJournal {
 	return &mutationJournal{ws: ws}
 }
 
+// readForUndo is ReadFileWithModeForUndo for both undo journals, whose
+// not-exist result is evidence about the target only while the root is
+// reachable: a root renamed away also reads as not-exist, yet the file lives
+// on wherever the root went. %v drops the root error's not-exist chain, so no
+// caller mistakes it for absence.
+// ponytail: the root is checked after the read, so a root moved away and back
+// within one read still reads as absent; closing that needs the read itself to
+// report which component was missing.
+func readForUndo(ws *agenttools.Workspace, path string) ([]byte, fs.FileMode, error) {
+	cur, mode, err := ws.ReadFileWithModeForUndo(path)
+	if os.IsNotExist(err) {
+		if rootErr := ws.VerifyRoot(); rootErr != nil {
+			return nil, 0, fmt.Errorf("golem: workspace root unreachable: %v", rootErr)
+		}
+	}
+	return cur, mode, err
+}
+
 // Record pushes a successful mutation. Safe for concurrent use.
 func (j *mutationJournal) Record(rec agenttools.MutationRecord) {
 	j.mu.Lock()
@@ -48,7 +67,7 @@ func (j *mutationJournal) undo(out io.Writer) {
 
 	// Bytes and mode come from ONE open handle so they cannot race apart;
 	// the mode participates only for tracked records (#443 promotion).
-	cur, curMode, err := j.ws.ReadFileWithModeForUndo(rec.Path)
+	cur, curMode, err := readForUndo(j.ws, rec.Path)
 	curExists := err == nil
 	curHash := ""
 	if err != nil && !os.IsNotExist(err) {
