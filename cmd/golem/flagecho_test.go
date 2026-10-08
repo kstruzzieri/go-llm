@@ -56,6 +56,13 @@ func subcommandFlagSurfaces() []subcommandFlagSurface {
 			call:   func(args []string, out, errOut io.Writer) error { return runModels(ctx, args, out, errOut) },
 			stderr: "golem: golem models: MSG\n",
 		},
+		{
+			argv: []string{"ops"}, golden: "ops", typed: "-json=" + flagEchoSecret,
+			call: func(args []string, out, errOut io.Writer) error {
+				return runOps(ctx, args, strings.NewReader(""), out, errOut)
+			},
+			stderr: "golem: golem ops: MSG\n",
+		},
 		sourceSurface("add", "-text="+flagEchoSecret),
 		sourceSurface("list", "-json="+flagEchoSecret),
 		// rm and reindex declare only string and repeatable flags, which accept
@@ -73,6 +80,7 @@ func flagParseFailure(n int) string {
 // that quotes argv (unknown flag, double-dash, bad syntax, invalid typed value)
 // on each subcommand, in process and through main().
 func TestSubcommandFlagErrorsDoNotEchoArgv(t *testing.T) {
+	pinNoDiscovery(t) // a parse regression must not load a real models.json
 	for _, s := range subcommandFlagSurfaces() {
 		vectors := [][]string{
 			{"-sk-" + flagEchoSecret},
@@ -116,6 +124,7 @@ func TestSubcommandFlagErrorsDoNotEchoArgv(t *testing.T) {
 // TestSubcommandHelpMatchesGolden pins each subcommand's help bytes, which
 // predate parseQuietly, in process and through main().
 func TestSubcommandHelpMatchesGolden(t *testing.T) {
+	pinNoDiscovery(t) // a parse regression must not load a real models.json
 	for _, s := range subcommandFlagSurfaces() {
 		want, err := os.ReadFile(filepath.Join("testdata", "usage", s.golden+".golden"))
 		if err != nil {
@@ -171,7 +180,7 @@ func TestSourcePositionalErrorsDoNotEchoArgv(t *testing.T) {
 // rejects a non-flag first argument before any flag parsing.
 func TestUnknownCommandDoesNotEchoArgv(t *testing.T) {
 	exit, stdout, stderr := runGolemMain(t, "sk-"+flagEchoSecret)
-	want := "golem: unknown command (did you mean \"audit\", \"index\", \"models\", \"source\", or \"mcp\"?)\n"
+	want := "golem: unknown command (did you mean \"audit\", \"index\", \"models\", \"ops\", \"source\", or \"mcp\"?)\n"
 	if exit != 1 || stdout != "" || stderr != want {
 		t.Fatalf("exit/stdout/stderr = %d / %q / %q, want 1 / \"\" / %q", exit, stdout, stderr, want)
 	}
