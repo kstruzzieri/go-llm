@@ -9,9 +9,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // spyDelegate is the observation point for every zero-request claim: it
@@ -116,19 +119,23 @@ func TestGuardHTTPClientRejectsLoopbackTLSDialHooks(t *testing.T) {
 	}
 }
 
-func TestGuardedHTTPSLocalhostRejectsPoisonedResolutionBeforeDial(t *testing.T) {
+// #665: "localhost" is loopback by name (RFC 6761 §6.3). The guard dials
+// 127.0.0.1, then ::1, on the destination's port and never hands the name to
+// the dialer, so no hosts file or resolver can redirect it.
+func TestGuardedLocalhostDialsLoopbackByName(t *testing.T) {
 	dest := mustDest(t, "llamacpp", "https://localhost:8443")
 	gate := installTestGate(t, DestinationEdge{Purpose: "agent", Destination: dest})
-	var dials atomic.Int64
+	var mu sync.Mutex
+	var dialed []string
 	base := &http.Client{Transport: &http.Transport{
-		DialContext: func(context.Context, string, string) (net.Conn, error) {
-			dials.Add(1)
-			return nil, errors.New("unexpected dial")
+		DialContext: func(_ context.Context, _, addr string) (net.Conn, error) {
+			mu.Lock()
+			dialed = append(dialed, addr)
+			mu.Unlock()
+			return nil, errors.New("refused by test")
 		},
 	}}
-	client, err := guardHTTPClient(gate, dest, base, func(context.Context, string) ([]net.IP, error) {
-		return []net.IP{net.ParseIP("192.168.1.5")}, nil
-	})
+	client, err := GuardHTTPClient(gate, dest, base)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -137,12 +144,18 @@ func TestGuardedHTTPSLocalhostRejectsPoisonedResolutionBeforeDial(t *testing.T) 
 		t.Fatal(err)
 	}
 
-	if resp, err := client.Do(mustReq(t, ctx, "https://localhost:8443/v1/models")); err == nil {
+	resp, err := client.Do(mustReq(t, ctx, "https://localhost:8443/v1/models"))
+	if err == nil {
 		_ = resp.Body.Close()
-		t.Error("client.Do(poisoned localhost) = nil error, want rejection")
+		t.Fatal("client.Do succeeded through a dialer that refuses every address")
 	}
-	if got := dials.Load(); got != 0 {
-		t.Errorf("DialContext calls after poisoned localhost resolution = %d, want 0", got)
+	if errors.Is(err, ErrDestinationDenied) {
+		t.Errorf("localhost dial failure = %v, want an outage, not a destination denial", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if want := []string{"127.0.0.1:8443", "[::1]:8443"}; !slices.Equal(dialed, want) {
+		t.Errorf("dialed %q, want %q", dialed, want)
 	}
 }
 
@@ -482,99 +495,51 @@ func TestGuardedRemoteKeepsProxyAndDenialNeverReachesIt(t *testing.T) {
 	})
 }
 
-// I12: a "localhost" destination must not dial an address that is not
-// loopback — a poisoned resolver (hosts file) must fail the dial entirely,
-// not be filtered around.
-func TestGuardedLocalhostDialValidatesResolution(t *testing.T) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	})}
-	go func() { _ = srv.Serve(ln) }()
-	defer func() { _ = srv.Close() }()
-	port := ln.Addr().(*net.TCPAddr).Port
-
-	baseURL := fmt.Sprintf("http://localhost:%d", port)
-	newClient := func(t *testing.T, ips []net.IP, lookupErr error) (*http.Client, context.Context) {
-		t.Helper()
-		dest := mustDest(t, "llamacpp", baseURL)
-		gate := installTestGate(t, DestinationEdge{Purpose: "agent", Destination: dest})
-		client, err := guardHTTPClient(gate, dest, nil, func(_ context.Context, host string) ([]net.IP, error) {
-			if !strings.EqualFold(host, "localhost") {
-				t.Errorf("lookup called for %q, want localhost", host)
+// I12: a "localhost" destination dials only loopback addresses. A local
+// backend often listens on one stack (llama-server and Ollama bind
+// 127.0.0.1 by default), so the guard must reach a server on either one, as
+// the unguarded client did.
+func TestGuardedLocalhostReachesEitherLoopbackStack(t *testing.T) {
+	for _, stack := range []struct{ name, listen string }{
+		{"IPv4 only", "127.0.0.1:0"},
+		{"IPv6 only", "[::1]:0"},
+	} {
+		t.Run(stack.name, func(t *testing.T) {
+			ln, err := net.Listen("tcp", stack.listen)
+			if err != nil {
+				t.Skipf("cannot listen on %s: %v", stack.listen, err)
 			}
-			return ips, lookupErr
+			// A unique body proves the fixture answered: an unrelated server on
+			// the other stack's same port must not satisfy the test.
+			marker := "fixture " + stack.listen
+			srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = io.WriteString(w, marker)
+			})}
+			go func() { _ = srv.Serve(ln) }()
+			defer func() { _ = srv.Close() }()
+
+			baseURL := fmt.Sprintf("http://localhost:%d", ln.Addr().(*net.TCPAddr).Port)
+			dest := mustDest(t, "llamacpp", baseURL)
+			gate := installTestGate(t, DestinationEdge{Purpose: "agent", Destination: dest})
+			client, err := GuardHTTPClient(gate, dest, &http.Client{Timeout: 5 * time.Second})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, err := gate.Bind(context.Background(), "agent", "llamacpp")
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp, err := client.Do(mustReq(t, ctx, baseURL+"/v1/models"))
+			if err != nil {
+				t.Fatalf("localhost did not reach a server on %s: %v", stack.listen, err)
+			}
+			body, err := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			if err != nil || string(body) != marker {
+				t.Fatalf("localhost reached %q (err %v), want the fixture on %s", body, err, stack.listen)
+			}
 		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		ctx, err := gate.Bind(context.Background(), "agent", "llamacpp")
-		if err != nil {
-			t.Fatal(err)
-		}
-		return client, ctx
 	}
-
-	t.Run("loopback resolution connects", func(t *testing.T) {
-		client, ctx := newClient(t, []net.IP{net.ParseIP("127.0.0.1")}, nil)
-		resp, err := client.Do(mustReq(t, ctx, baseURL+"/v1/models"))
-		if err != nil {
-			t.Fatalf("loopback-resolved localhost dial failed: %v", err)
-		}
-		_ = resp.Body.Close()
-	})
-
-	t.Run("non-loopback resolution refused", func(t *testing.T) {
-		client, ctx := newClient(t, []net.IP{net.ParseIP("192.168.1.5")}, nil)
-		resp, err := client.Do(mustReq(t, ctx, baseURL+"/v1/models"))
-		if err == nil {
-			_ = resp.Body.Close()
-			t.Fatal("localhost resolving off-host was dialed")
-		}
-		// Typed as a denial so callers fail closed instead of reading an outage.
-		if !errors.Is(err, ErrDestinationDenied) {
-			t.Fatalf("off-host localhost refusal = %v, want errors.Is ErrDestinationDenied", err)
-		}
-	})
-
-	t.Run("mixed resolution refused entirely", func(t *testing.T) {
-		// One loopback plus one non-loopback signals tampering; filtering to
-		// the loopback half would dial through a poisoned name anyway.
-		client, ctx := newClient(t, []net.IP{net.ParseIP("127.0.0.1"), net.ParseIP("192.168.1.5")}, nil)
-		resp, err := client.Do(mustReq(t, ctx, baseURL+"/v1/models"))
-		if err == nil {
-			_ = resp.Body.Close()
-			t.Fatal("localhost with a mixed resolution was dialed")
-		}
-		if !errors.Is(err, ErrDestinationDenied) {
-			t.Fatalf("mixed localhost refusal = %v, want errors.Is ErrDestinationDenied", err)
-		}
-	})
-
-	// The stdlib dialer tries every resolved address; the guard must not
-	// regress that. macOS commonly resolves localhost to [::1, 127.0.0.1]
-	// while a local llama-server binds only 127.0.0.1 — if the guard dialed
-	// just the first address, every guarded localhost setup on such a host
-	// would fail where the unguarded client worked.
-	t.Run("all-loopback resolution tries every address", func(t *testing.T) {
-		client, ctx := newClient(t, []net.IP{net.ParseIP("::1"), net.ParseIP("127.0.0.1")}, nil)
-		resp, err := client.Do(mustReq(t, ctx, baseURL+"/v1/models"))
-		if err != nil {
-			t.Fatalf("dial gave up before trying 127.0.0.1: %v", err)
-		}
-		_ = resp.Body.Close()
-	})
-
-	t.Run("resolution failure refused", func(t *testing.T) {
-		client, ctx := newClient(t, nil, fmt.Errorf("resolver down"))
-		if resp, err := client.Do(mustReq(t, ctx, baseURL+"/v1/models")); err == nil {
-			_ = resp.Body.Close()
-			t.Fatal("unresolvable localhost was dialed")
-		}
-	})
 }
 
 // I19/M20: the guard's own errors never echo the request URL, whose query

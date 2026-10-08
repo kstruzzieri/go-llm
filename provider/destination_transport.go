@@ -131,9 +131,12 @@ func canonicalAuthority(scheme string, u *url.URL) (string, error) {
 	return host, nil
 }
 
-// lookupIPFunc is the resolver seam for localhost dial validation; tests
-// inject one, production uses the default resolver.
-type lookupIPFunc func(ctx context.Context, host string) ([]net.IP, error)
+// localhostIPs are the addresses a "localhost" destination dials, in order.
+// RFC 6761 §6.3 lets an application treat the name as loopback without asking
+// the resolver, as browsers do, so no hosts file can redirect a local
+// destination or stop it from starting (#665). Local backends commonly bind
+// 127.0.0.1 only, so it goes first.
+var localhostIPs = []string{"127.0.0.1", "::1"}
 
 // GuardHTTPClient returns an http.Client whose every request is checked by
 // the destination guard before any transport work. The guard is the
@@ -142,20 +145,16 @@ type lookupIPFunc func(ctx context.Context, host string) ([]net.IP, error)
 //
 // The returned client always refuses redirects, same-origin included (D6) —
 // an admitted origin must not transfer authority or credentials to a
-// Location target. Loopback destinations additionally bypass proxies and,
-// for the "localhost" hostname, refuse to dial when the name resolves to
-// anything that is not a loopback address (D3) — which requires an
-// *http.Transport delegate; a loopback destination over an opaque
-// RoundTripper is refused rather than left half-guarded. Remote destinations
-// keep the base client's transport as-is, proxy included.
+// Location target. Loopback destinations additionally bypass proxies and
+// dial the "localhost" hostname as 127.0.0.1, then ::1, without resolving it
+// (D3 as amended by #665) — which requires an *http.Transport delegate; a
+// loopback destination over an opaque RoundTripper is refused rather than
+// left half-guarded. Remote destinations keep the base client's transport
+// as-is, proxy included.
 //
 // base contributes its Timeout and Transport. A base carrying a cookie Jar
 // is refused: the guard cannot vouch for jar-driven behavior.
 func GuardHTTPClient(gate *DestinationGate, dest Destination, base *http.Client) (*http.Client, error) {
-	return guardHTTPClient(gate, dest, base, nil)
-}
-
-func guardHTTPClient(gate *DestinationGate, dest Destination, base *http.Client, lookup lookupIPFunc) (*http.Client, error) {
 	if gate == nil {
 		return nil, fmt.Errorf("%w: guard requires a gate", ErrDestinationInvalid)
 	}
@@ -186,7 +185,7 @@ func guardHTTPClient(gate *DestinationGate, dest Destination, base *http.Client,
 	}
 
 	if dest.IsLocal() {
-		inner, err = loopbackTransport(inner, lookup)
+		inner, err = loopbackTransport(inner)
 		if err != nil {
 			return nil, err
 		}
@@ -215,10 +214,10 @@ func guardHTTPClient(gate *DestinationGate, dest Destination, base *http.Client,
 
 // loopbackTransport prepares the delegate for a loopback destination: clone
 // the *http.Transport (or the default), reject TLS dial hooks that bypass
-// DialContext, strip the proxy, and validate "localhost" resolution at dial
-// time. An opaque RoundTripper cannot be retrofitted with these properties,
-// so it is refused rather than treated as guaranteed-local.
-func loopbackTransport(inner http.RoundTripper, lookup lookupIPFunc) (*http.Transport, error) {
+// DialContext, strip the proxy, and dial "localhost" as the loopback
+// addresses. An opaque RoundTripper cannot be retrofitted with these
+// properties, so it is refused rather than treated as guaranteed-local.
+func loopbackTransport(inner http.RoundTripper) (*http.Transport, error) {
 	var tr *http.Transport
 	switch v := inner.(type) {
 	case nil:
@@ -233,19 +232,6 @@ func loopbackTransport(inner http.RoundTripper, lookup lookupIPFunc) (*http.Tran
 	}
 	tr.Proxy = nil
 
-	if lookup == nil {
-		lookup = func(ctx context.Context, host string) ([]net.IP, error) {
-			addrs, err := net.DefaultResolver.LookupIPAddr(ctx, host)
-			if err != nil {
-				return nil, err
-			}
-			ips := make([]net.IP, len(addrs))
-			for i, a := range addrs {
-				ips[i] = a.IP
-			}
-			return ips, nil
-		}
-	}
 	baseDial := tr.DialContext
 	if baseDial == nil {
 		baseDial = (&net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}).DialContext
@@ -256,30 +242,11 @@ func loopbackTransport(inner http.RoundTripper, lookup lookupIPFunc) (*http.Tran
 			return nil, err
 		}
 		if strings.EqualFold(host, "localhost") {
-			ips, err := lookup(ctx, host)
-			if err != nil {
-				return nil, fmt.Errorf("provider: destination guard: resolve localhost: %w", err)
-			}
-			if len(ips) == 0 {
-				return nil, errors.New("provider: destination guard: localhost resolved to no addresses")
-			}
-			// ANY non-loopback mapping fails the whole dial. Filtering down
-			// to the loopback half would happily dial through a poisoned
-			// hosts file — the presence of an off-host mapping for
-			// "localhost" is the tampering signal itself. Typed as a denial
-			// so callers fail closed rather than reading an outage.
-			for _, ip := range ips {
-				if !ip.IsLoopback() {
-					return nil, fmt.Errorf("%w: destination guard: localhost resolved to non-loopback %s; refusing", ErrDestinationDenied, ip)
-				}
-			}
-			// Try every verified address, like the stdlib dialer would: a
-			// resolver commonly returns [::1, 127.0.0.1] while the local
-			// backend listens on only one stack, and giving up after the
-			// first address would fail setups the unguarded client served.
+			// Try both stacks, like the stdlib dialer: the backend may listen
+			// on either one.
 			var dialErrs []error
-			for _, ip := range ips {
-				conn, err := baseDial(ctx, network, net.JoinHostPort(ip.String(), port))
+			for _, ip := range localhostIPs {
+				conn, err := baseDial(ctx, network, net.JoinHostPort(ip, port))
 				if err == nil {
 					return conn, nil
 				}

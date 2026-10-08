@@ -100,10 +100,9 @@ func (s *Server) handleHealthResource(ctx context.Context, req *gomcp.ReadResour
 	ollamaOK, herr := s.checkOllamaAvailable(ctx)
 	if herr != nil {
 		// The health edge is always in an installed generation's manifest,
-		// but a typed denial can still arrive here: the guard refuses
-		// localhost that resolves off-host, and a hosts-file change after
-		// startup can make it. Report unavailable rather than failing the
-		// resource read.
+		// but a typed denial can still arrive here: the guard refuses every
+		// redirect, and the backend can start redirecting after startup.
+		// Report unavailable rather than failing the resource read.
 		ollamaOK = false
 	}
 
