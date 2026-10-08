@@ -1,3 +1,0 @@
-### Added — MCP tool selection (#579)
-
-`-mcp-tools 'alias=name,...'` (Golem) and `mcpclient.Server.WithTools` (library) expose only the named original tools of an attached MCP server; `alias=` exposes none. The complete catalog is still verified and pinned, so a change to an unselected tool still blocks the alias, and a selected tool the server does not offer blocks the alias with `selection_missing` instead of exposing a partial set. Selected tools keep per-call approval. `mcpclient.StdioServer` now copies its argv. `mcpclient.AdmissionError.Names` lists the selected names the server did not offer.
