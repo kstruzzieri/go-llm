@@ -131,7 +131,7 @@ func NewWorkspace(root string) (*Workspace, error) {
 	if err != nil {
 		return nil, err
 	}
-	identity, err := os.Stat(canon)
+	identity, err := workspaceRootIdentity(canon)
 	if err != nil {
 		return nil, err
 	}
@@ -473,7 +473,7 @@ func (w *Workspace) VerifyRoot() error {
 	if err != nil {
 		return err
 	}
-	if !os.SameFile(w.rootIdentity, fi) {
+	if !fi.IsDir() || !os.SameFile(w.rootIdentity, fi) {
 		return ErrRootReplaced
 	}
 	return nil

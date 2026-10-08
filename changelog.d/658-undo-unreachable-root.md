@@ -12,5 +12,7 @@ wrote it` and keep the record, so the undo succeeds once the root is back.
 
 The check is the new read-only `agent/tools.Workspace.VerifyRoot`. It returns
 nil when the root is intact, the not-exist error when the root is gone, and
-`ErrRootReplaced` when another directory has taken its place. Mutation
-behavior is unchanged.
+`ErrRootReplaced` when another directory or a non-directory occupies the path.
+Windows captures the original directory identity when the workspace is
+constructed, so replacing the root before the first undo cannot make the new
+directory look like the original. Mutation behavior is unchanged.

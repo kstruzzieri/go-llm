@@ -72,6 +72,12 @@ func TestWorkspaceVerifyRoot(t *testing.T) {
 			}
 			return os.Mkdir(root, 0o700)
 		}, want: ErrRootReplaced},
+		{name: "replaced by file", after: func(root string) error {
+			if err := os.Rename(root, root+"-moved"); err != nil {
+				return err
+			}
+			return os.WriteFile(root, nil, 0o600)
+		}, want: ErrRootReplaced},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root := filepath.Join(t.TempDir(), "root")
@@ -90,6 +96,45 @@ func TestWorkspaceVerifyRoot(t *testing.T) {
 				t.Fatalf("VerifyRoot = %v, want %v", err, tc.want)
 			}
 		})
+	}
+}
+
+func TestWorkspaceVerifyRootRejectsRegularFile(t *testing.T) {
+	t.Parallel()
+	root := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(root, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Construction historically accepts a file; verification must still
+	// require a directory even when the saved and current identities match.
+	ws, err := NewWorkspace(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ws.VerifyRoot(); !errors.Is(err, ErrRootReplaced) {
+		t.Errorf("VerifyRoot for a regular file = %v, want ErrRootReplaced", err)
+	}
+}
+
+func TestWorkspaceVerifyRootRejectsSymlink(t *testing.T) {
+	t.Parallel()
+	root := filepath.Join(t.TempDir(), "root")
+	if err := os.Mkdir(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ws, err := NewWorkspace(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	moved := root + "-moved"
+	if err := os.Rename(root, moved); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(moved, root); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if err := ws.VerifyRoot(); !errors.Is(err, ErrRootReplaced) {
+		t.Errorf("VerifyRoot for a symlink to the original root = %v, want ErrRootReplaced", err)
 	}
 }
 
