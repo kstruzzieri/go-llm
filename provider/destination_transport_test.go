@@ -542,6 +542,85 @@ func TestGuardedLocalhostReachesEitherLoopbackStack(t *testing.T) {
 	}
 }
 
+// A dropped (not refused) IPv4 attempt must not use up the request: like
+// net.Dialer's RFC 6555 fallback, ::1 starts while 127.0.0.1 still hangs.
+func TestGuardedLocalhostFallsBackWhileIPv4Hangs(t *testing.T) {
+	ln, err := net.Listen("tcp", "[::1]:0")
+	if err != nil {
+		t.Skipf("cannot listen on [::1]: %v", err)
+	}
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, "ipv6")
+	})}
+	go func() { _ = srv.Serve(ln) }()
+	defer func() { _ = srv.Close() }()
+
+	var hung atomic.Int64
+	dialer := &net.Dialer{}
+	base := &http.Client{Timeout: 3 * time.Second, Transport: &http.Transport{
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			if strings.HasPrefix(addr, "127.0.0.1:") {
+				hung.Add(1)
+				<-ctx.Done() // a firewall dropping the SYN
+				return nil, ctx.Err()
+			}
+			return dialer.DialContext(ctx, network, addr)
+		},
+	}}
+	baseURL := fmt.Sprintf("http://localhost:%d", ln.Addr().(*net.TCPAddr).Port)
+	dest := mustDest(t, "llamacpp", baseURL)
+	gate := installTestGate(t, DestinationEdge{Purpose: "agent", Destination: dest})
+	client, err := GuardHTTPClient(gate, dest, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, err := gate.Bind(context.Background(), "agent", "llamacpp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := client.Do(mustReq(t, ctx, baseURL+"/v1/models"))
+	if err != nil {
+		t.Fatalf("::1 not reached while the IPv4 attempt hung: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if string(body) != "ipv6" || hung.Load() != 1 {
+		t.Fatalf("body %q after %d IPv4 attempts, want the ::1 fixture after one", body, hung.Load())
+	}
+}
+
+// closeSpy records Close on a net.Conn.
+type closeSpy struct {
+	net.Conn
+	closed chan struct{}
+}
+
+func (c *closeSpy) Close() error { close(c.closed); return c.Conn.Close() }
+
+// An attempt that connects after the winner returned is closed, not leaked.
+func TestDialLoopbackClosesLateWinner(t *testing.T) {
+	late := &closeSpy{closed: make(chan struct{})}
+	late.Conn, _ = net.Pipe()
+	winner, _ := net.Pipe()
+	defer func() { _ = winner.Close() }()
+	dial := func(_ context.Context, _, addr string) (net.Conn, error) {
+		if strings.HasPrefix(addr, "127.0.0.1:") {
+			time.Sleep(2 * loopbackFallbackDelay) // ignores cancellation, then connects
+			return late, nil
+		}
+		return winner, nil
+	}
+	conn, err := dialLoopback(context.Background(), dial, "tcp", "8090")
+	if err != nil || conn != winner {
+		t.Fatalf("dialLoopback = %v, %v; want the ::1 connection", conn, err)
+	}
+	select {
+	case <-late.closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the late 127.0.0.1 connection was never closed")
+	}
+}
+
 // I19/M20: the guard's own errors never echo the request URL, whose query
 // may carry request data; they name only the canonical destination and the
 // purpose.

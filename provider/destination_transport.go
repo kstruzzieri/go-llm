@@ -138,6 +138,9 @@ func canonicalAuthority(scheme string, u *url.URL) (string, error) {
 // 127.0.0.1 only, so it goes first.
 var localhostIPs = []string{"127.0.0.1", "::1"}
 
+// loopbackFallbackDelay is net.Dialer's default RFC 6555 fallback delay.
+const loopbackFallbackDelay = 300 * time.Millisecond
+
 // GuardHTTPClient returns an http.Client whose every request is checked by
 // the destination guard before any transport work. The guard is the
 // OUTERMOST layer: a denied request never reaches the delegate transport,
@@ -242,21 +245,67 @@ func loopbackTransport(inner http.RoundTripper) (*http.Transport, error) {
 			return nil, err
 		}
 		if strings.EqualFold(host, "localhost") {
-			// Try both stacks, like the stdlib dialer: the backend may listen
-			// on either one.
-			var dialErrs []error
-			for _, ip := range localhostIPs {
-				conn, err := baseDial(ctx, network, net.JoinHostPort(ip, port))
-				if err == nil {
-					return conn, nil
-				}
-				dialErrs = append(dialErrs, err)
-			}
-			return nil, errors.Join(dialErrs...)
+			return dialLoopback(ctx, baseDial, network, port)
 		}
 		return baseDial(ctx, network, addr)
 	}
 	return tr, nil
+}
+
+// dialLoopback dials localhostIPs the way net.Dialer dials a dual-stack name
+// (RFC 6555): each address starts when the previous one fails or after
+// loopbackFallbackDelay, the first connection wins, and the rest are canceled
+// and closed. The backend may listen on either stack, and a dropped attempt
+// must not use up the request.
+func dialLoopback(ctx context.Context, dial func(context.Context, string, string) (net.Conn, error), network, port string) (net.Conn, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	type result struct {
+		conn net.Conn
+		err  error
+	}
+	results := make(chan result, len(localhostIPs)) // buffered: no attempt blocks after a winner returns
+	next := 0
+	start := func() {
+		addr := net.JoinHostPort(localhostIPs[next], port)
+		next++
+		go func() {
+			conn, err := dial(ctx, network, addr)
+			results <- result{conn, err}
+		}()
+	}
+	start()
+	fallback := time.NewTimer(loopbackFallbackDelay)
+	defer fallback.Stop()
+	var errs []error
+	for pending := 1; pending > 0; {
+		select {
+		case <-fallback.C:
+			if next < len(localhostIPs) {
+				start()
+				pending++
+			}
+		case r := <-results:
+			pending--
+			if r.err == nil {
+				go func(n int) { // close any attempt that connects after the winner
+					for ; n > 0; n-- {
+						if late := <-results; late.conn != nil {
+							_ = late.conn.Close()
+						}
+					}
+				}(pending)
+				return r.conn, nil
+			}
+			errs = append(errs, r.err)
+			if next < len(localhostIPs) {
+				start()
+				pending++
+				fallback.Reset(loopbackFallbackDelay)
+			}
+		}
+	}
+	return nil, errors.Join(errs...)
 }
 
 // defaultTransportClone returns a private copy of http.DefaultTransport so
