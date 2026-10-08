@@ -49,7 +49,7 @@ const (
 	// left the process. It always indicates a console bug.
 	CodeRefused Code = "refused"
 	// CodeDenied reports that the destination gate refused the request,
-	// including a redirect and a localhost name that resolves off-host.
+	// including a redirect.
 	CodeDenied Code = "denied"
 )
 
