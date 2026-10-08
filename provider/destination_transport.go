@@ -266,10 +266,11 @@ func loopbackTransport(inner http.RoundTripper, lookup lookupIPFunc) (*http.Tran
 			// ANY non-loopback mapping fails the whole dial. Filtering down
 			// to the loopback half would happily dial through a poisoned
 			// hosts file — the presence of an off-host mapping for
-			// "localhost" is the tampering signal itself.
+			// "localhost" is the tampering signal itself. Typed as a denial
+			// so callers fail closed rather than reading an outage.
 			for _, ip := range ips {
 				if !ip.IsLoopback() {
-					return nil, fmt.Errorf("provider: destination guard: localhost resolved to non-loopback %s; refusing", ip)
+					return nil, fmt.Errorf("%w: destination guard: localhost resolved to non-loopback %s; refusing", ErrDestinationDenied, ip)
 				}
 			}
 			// Try every verified address, like the stdlib dialer would: a

@@ -1,0 +1,625 @@
+{
+  "version": 1,
+  "mode": "watch",
+  "interval_ms": 2000,
+  "generated_at": "2026-10-05T10:00:00.000Z",
+  "timing_uncertain": false,
+  "config": {
+    "source": "user_config",
+    "ready": true,
+    "revision": "3f9c1a",
+    "diagnostics": [
+      {
+        "code": "chain_invalid",
+        "subject": "agent"
+      }
+    ]
+  },
+  "backends": [
+    {
+      "id": "llamacpp",
+      "endpoint": "http://127.0.0.1:8090",
+      "hosting": "local",
+      "runtime": {
+        "kind": "llama-swap",
+        "version": "v235",
+        "support": "supported"
+      },
+      "reachability": {
+        "state": "ok",
+        "code": null,
+        "retry_in_ms": null,
+        "source": "llama-swap",
+        "observed_at": "2026-10-05T10:00:00.000Z",
+        "stale": false,
+        "age_ms": 1000
+      },
+      "observation": {
+        "since": "2026-10-05T09:00:00.000Z",
+        "periods": 1,
+        "gaps": 0,
+        "refused": 0,
+        "models_overflow": 0,
+        "backend_only_overflow": 0
+      },
+      "surfaces": [
+        {
+          "name": "running",
+          "last_success": "2026-10-05T10:00:00.000Z",
+          "last_error": null
+        },
+        {
+          "name": "models",
+          "last_success": null,
+          "last_error": "malformed_response"
+        }
+      ]
+    },
+    {
+      "id": "opencode",
+      "endpoint": "https://opencode.ai",
+      "hosting": "remote",
+      "runtime": {
+        "kind": "none",
+        "version": null,
+        "support": "not_observed"
+      },
+      "reachability": {
+        "state": "not_observed",
+        "code": "remote_endpoint",
+        "retry_in_ms": null,
+        "source": "none",
+        "observed_at": null,
+        "stale": false,
+        "age_ms": null
+      },
+      "observation": {
+        "since": null,
+        "periods": 0,
+        "gaps": 0,
+        "refused": 0,
+        "models_overflow": 0,
+        "backend_only_overflow": 0
+      },
+      "surfaces": []
+    }
+  ],
+  "models": [
+    {
+      "id": "llamacpp/alias-name",
+      "provider": "llamacpp",
+      "backend_model": "alias-name",
+      "configured": true,
+      "used_by": [],
+      "residency": {
+        "state": "unknown",
+        "reason": "unconfirmed_model_id",
+        "last_state": null,
+        "first_observed": null,
+        "expires_at": null,
+        "source": "llama-swap /running",
+        "observed_at": "2026-10-05T10:00:00.000Z",
+        "stale": false,
+        "age_ms": 1000
+      },
+      "activity": {
+        "state": "unknown",
+        "reason": "no_inflight_source",
+        "last_completed_at": null,
+        "source": "llama-swap /api/metrics",
+        "observed_at": "2026-10-05T10:00:00.000Z",
+        "stale": false,
+        "age_ms": 1000
+      },
+      "stats": [
+        {
+          "window": "15m",
+          "scope": "backend_all_clients",
+          "source": "llama-swap /api/metrics",
+          "observed_at": "2026-10-05T10:00:00.000Z",
+          "stale": false,
+          "age_ms": 1000,
+          "coverage": {
+            "retained_rows": 2,
+            "oldest_retained_at": "2026-10-05T09:58:00.000Z",
+            "newest_retained_at": "2026-10-05T09:59:00.000Z",
+            "evicted": false,
+            "contiguous": true,
+            "state": "unknown",
+            "reason": "retention_start_unknown"
+          },
+          "calls": null,
+          "errors": null,
+          "prompt_tokens_processed": {
+            "sum": null,
+            "n": 0,
+            "unavailable": 0,
+            "reason": "unconfirmed_model_id"
+          },
+          "prompt_tokens_usage": {
+            "sum": null,
+            "n": 0,
+            "unavailable": 0,
+            "reason": "unconfirmed_model_id"
+          },
+          "output_tokens": {
+            "sum": null,
+            "n": 0,
+            "unavailable": 0,
+            "reason": "unconfirmed_model_id"
+          },
+          "prefill_tps": {
+            "p50": null,
+            "p95": null,
+            "n": 0,
+            "provisional": false,
+            "label": "",
+            "reason": "unconfirmed_model_id"
+          },
+          "decode_tps": {
+            "p50": null,
+            "p95": null,
+            "n": 0,
+            "provisional": false,
+            "label": "",
+            "reason": "unconfirmed_model_id"
+          },
+          "duration_ms": {
+            "p50": null,
+            "p95": null,
+            "n": 0,
+            "provisional": false,
+            "label": "backend-reported request duration",
+            "reason": "unconfirmed_model_id"
+          }
+        },
+        {
+          "window": "1h",
+          "scope": "backend_all_clients",
+          "source": "llama-swap /api/metrics",
+          "observed_at": "2026-10-05T10:00:00.000Z",
+          "stale": false,
+          "age_ms": 1000,
+          "coverage": {
+            "retained_rows": 2,
+            "oldest_retained_at": "2026-10-05T09:58:00.000Z",
+            "newest_retained_at": "2026-10-05T09:59:00.000Z",
+            "evicted": false,
+            "contiguous": true,
+            "state": "unknown",
+            "reason": "retention_start_unknown"
+          },
+          "calls": null,
+          "errors": null,
+          "prompt_tokens_processed": {
+            "sum": null,
+            "n": 0,
+            "unavailable": 0,
+            "reason": "unconfirmed_model_id"
+          },
+          "prompt_tokens_usage": {
+            "sum": null,
+            "n": 0,
+            "unavailable": 0,
+            "reason": "unconfirmed_model_id"
+          },
+          "output_tokens": {
+            "sum": null,
+            "n": 0,
+            "unavailable": 0,
+            "reason": "unconfirmed_model_id"
+          },
+          "prefill_tps": {
+            "p50": null,
+            "p95": null,
+            "n": 0,
+            "provisional": false,
+            "label": "",
+            "reason": "unconfirmed_model_id"
+          },
+          "decode_tps": {
+            "p50": null,
+            "p95": null,
+            "n": 0,
+            "provisional": false,
+            "label": "",
+            "reason": "unconfirmed_model_id"
+          },
+          "duration_ms": {
+            "p50": null,
+            "p95": null,
+            "n": 0,
+            "provisional": false,
+            "label": "backend-reported request duration",
+            "reason": "unconfirmed_model_id"
+          }
+        }
+      ]
+    },
+    {
+      "id": "llamacpp/gemma4:31b",
+      "provider": "llamacpp",
+      "backend_model": "gemma4:31b",
+      "configured": true,
+      "used_by": [
+        {
+          "use_case": "agent",
+          "role": "agent",
+          "is_fallback": false
+        }
+      ],
+      "residency": {
+        "state": "loaded",
+        "reason": null,
+        "last_state": null,
+        "first_observed": "2026-10-05T09:46:00.000Z",
+        "expires_at": null,
+        "source": "llama-swap /running",
+        "observed_at": "2026-10-05T10:00:00.000Z",
+        "stale": false,
+        "age_ms": 1000
+      },
+      "activity": {
+        "state": "unknown",
+        "reason": "no_inflight_source",
+        "last_completed_at": "2026-10-05T09:58:00.000Z",
+        "source": "llama-swap /api/metrics",
+        "observed_at": "2026-10-05T10:00:00.000Z",
+        "stale": false,
+        "age_ms": 1000
+      },
+      "loads": {
+        "count": 1,
+        "since": "2026-10-05T09:00:00.000Z",
+        "gaps": 0,
+        "sample_ms": 2000,
+        "complete": false,
+        "transitions": [
+          {
+            "to": "loaded",
+            "at": "2026-10-05T09:46:00.000Z"
+          }
+        ]
+      },
+      "stats": [
+        {
+          "window": "15m",
+          "scope": "backend_all_clients",
+          "source": "llama-swap /api/metrics",
+          "observed_at": "2026-10-05T10:00:00.000Z",
+          "stale": false,
+          "age_ms": 1000,
+          "coverage": {
+            "retained_rows": 2,
+            "oldest_retained_at": "2026-10-05T09:58:00.000Z",
+            "newest_retained_at": "2026-10-05T09:59:00.000Z",
+            "evicted": false,
+            "contiguous": true,
+            "state": "unknown",
+            "reason": "retention_start_unknown"
+          },
+          "calls": 1,
+          "errors": 0,
+          "prompt_tokens_processed": {
+            "sum": 900,
+            "n": 1,
+            "unavailable": 0,
+            "reason": null
+          },
+          "prompt_tokens_usage": {
+            "sum": null,
+            "n": 0,
+            "unavailable": 0,
+            "reason": "no_available_values"
+          },
+          "output_tokens": {
+            "sum": 300,
+            "n": 1,
+            "unavailable": 0,
+            "reason": null
+          },
+          "prefill_tps": {
+            "p50": null,
+            "p95": null,
+            "n": 1,
+            "provisional": false,
+            "label": "",
+            "reason": "too_few_samples"
+          },
+          "decode_tps": {
+            "p50": null,
+            "p95": null,
+            "n": 1,
+            "provisional": false,
+            "label": "",
+            "reason": "too_few_samples"
+          },
+          "duration_ms": {
+            "p50": null,
+            "p95": null,
+            "n": 1,
+            "provisional": false,
+            "label": "backend-reported request duration",
+            "reason": "too_few_samples"
+          }
+        },
+        {
+          "window": "1h",
+          "scope": "backend_all_clients",
+          "source": "llama-swap /api/metrics",
+          "observed_at": "2026-10-05T10:00:00.000Z",
+          "stale": false,
+          "age_ms": 1000,
+          "coverage": {
+            "retained_rows": 2,
+            "oldest_retained_at": "2026-10-05T09:58:00.000Z",
+            "newest_retained_at": "2026-10-05T09:59:00.000Z",
+            "evicted": false,
+            "contiguous": true,
+            "state": "unknown",
+            "reason": "retention_start_unknown"
+          },
+          "calls": 1,
+          "errors": 0,
+          "prompt_tokens_processed": {
+            "sum": 900,
+            "n": 1,
+            "unavailable": 0,
+            "reason": null
+          },
+          "prompt_tokens_usage": {
+            "sum": null,
+            "n": 0,
+            "unavailable": 0,
+            "reason": "no_available_values"
+          },
+          "output_tokens": {
+            "sum": 300,
+            "n": 1,
+            "unavailable": 0,
+            "reason": null
+          },
+          "prefill_tps": {
+            "p50": null,
+            "p95": null,
+            "n": 1,
+            "provisional": false,
+            "label": "",
+            "reason": "too_few_samples"
+          },
+          "decode_tps": {
+            "p50": null,
+            "p95": null,
+            "n": 1,
+            "provisional": false,
+            "label": "",
+            "reason": "too_few_samples"
+          },
+          "duration_ms": {
+            "p50": null,
+            "p95": null,
+            "n": 1,
+            "provisional": false,
+            "label": "backend-reported request duration",
+            "reason": "too_few_samples"
+          }
+        }
+      ]
+    },
+    {
+      "id": "llamacpp/qwen3-embedding:8b",
+      "provider": "llamacpp",
+      "backend_model": "qwen3-embedding:8b",
+      "configured": true,
+      "used_by": [
+        {
+          "use_case": "embedding",
+          "role": "embed",
+          "is_fallback": false
+        }
+      ],
+      "residency": {
+        "state": "unloaded",
+        "reason": null,
+        "last_state": null,
+        "first_observed": null,
+        "expires_at": null,
+        "source": "llama-swap /running",
+        "observed_at": "2026-10-05T10:00:00.000Z",
+        "stale": false,
+        "age_ms": 1000
+      },
+      "activity": {
+        "state": "unknown",
+        "reason": "no_inflight_source",
+        "last_completed_at": "2026-10-05T09:59:00.000Z",
+        "source": "llama-swap /api/metrics",
+        "observed_at": "2026-10-05T10:00:00.000Z",
+        "stale": false,
+        "age_ms": 1000
+      },
+      "loads": {
+        "count": 0,
+        "since": "2026-10-05T09:00:00.000Z",
+        "gaps": 0,
+        "sample_ms": 2000,
+        "complete": false,
+        "transitions": []
+      },
+      "stats": [
+        {
+          "window": "15m",
+          "scope": "backend_all_clients",
+          "source": "llama-swap /api/metrics",
+          "observed_at": "2026-10-05T10:00:00.000Z",
+          "stale": false,
+          "age_ms": 1000,
+          "coverage": {
+            "retained_rows": 2,
+            "oldest_retained_at": "2026-10-05T09:58:00.000Z",
+            "newest_retained_at": "2026-10-05T09:59:00.000Z",
+            "evicted": false,
+            "contiguous": true,
+            "state": "unknown",
+            "reason": "retention_start_unknown"
+          },
+          "calls": 1,
+          "errors": 0,
+          "prompt_tokens_processed": {
+            "sum": 50,
+            "n": 1,
+            "unavailable": 0,
+            "reason": null
+          },
+          "prompt_tokens_usage": {
+            "sum": null,
+            "n": 0,
+            "unavailable": 0,
+            "reason": "no_available_values"
+          },
+          "output_tokens": {
+            "sum": null,
+            "n": 0,
+            "unavailable": 1,
+            "reason": "no_available_values"
+          },
+          "prefill_tps": {
+            "p50": null,
+            "p95": null,
+            "n": 1,
+            "provisional": false,
+            "label": "",
+            "reason": "too_few_samples"
+          },
+          "decode_tps": {
+            "p50": null,
+            "p95": null,
+            "n": 0,
+            "provisional": false,
+            "label": "",
+            "reason": "too_few_samples"
+          },
+          "duration_ms": {
+            "p50": null,
+            "p95": null,
+            "n": 1,
+            "provisional": false,
+            "label": "backend-reported request duration",
+            "reason": "too_few_samples"
+          }
+        },
+        {
+          "window": "1h",
+          "scope": "backend_all_clients",
+          "source": "llama-swap /api/metrics",
+          "observed_at": "2026-10-05T10:00:00.000Z",
+          "stale": false,
+          "age_ms": 1000,
+          "coverage": {
+            "retained_rows": 2,
+            "oldest_retained_at": "2026-10-05T09:58:00.000Z",
+            "newest_retained_at": "2026-10-05T09:59:00.000Z",
+            "evicted": false,
+            "contiguous": true,
+            "state": "unknown",
+            "reason": "retention_start_unknown"
+          },
+          "calls": 1,
+          "errors": 0,
+          "prompt_tokens_processed": {
+            "sum": 50,
+            "n": 1,
+            "unavailable": 0,
+            "reason": null
+          },
+          "prompt_tokens_usage": {
+            "sum": null,
+            "n": 0,
+            "unavailable": 0,
+            "reason": "no_available_values"
+          },
+          "output_tokens": {
+            "sum": null,
+            "n": 0,
+            "unavailable": 1,
+            "reason": "no_available_values"
+          },
+          "prefill_tps": {
+            "p50": null,
+            "p95": null,
+            "n": 1,
+            "provisional": false,
+            "label": "",
+            "reason": "too_few_samples"
+          },
+          "decode_tps": {
+            "p50": null,
+            "p95": null,
+            "n": 0,
+            "provisional": false,
+            "label": "",
+            "reason": "too_few_samples"
+          },
+          "duration_ms": {
+            "p50": null,
+            "p95": null,
+            "n": 1,
+            "provisional": false,
+            "label": "backend-reported request duration",
+            "reason": "too_few_samples"
+          }
+        }
+      ]
+    },
+    {
+      "id": "opencode/kimi-k3",
+      "provider": "opencode",
+      "backend_model": "kimi-k3",
+      "configured": true,
+      "used_by": [
+        {
+          "use_case": "agent",
+          "role": "agent",
+          "is_fallback": true
+        }
+      ],
+      "residency": {
+        "state": "not_observed",
+        "reason": "remote_endpoint",
+        "last_state": null,
+        "first_observed": null,
+        "expires_at": null,
+        "source": "none",
+        "observed_at": null,
+        "stale": false,
+        "age_ms": null
+      },
+      "activity": {
+        "state": "not_observed",
+        "reason": "remote_endpoint",
+        "last_completed_at": null,
+        "source": "none",
+        "observed_at": null,
+        "stale": false,
+        "age_ms": null
+      },
+      "stats": []
+    }
+  ],
+  "attention": [
+    {
+      "severity": "warning",
+      "reason": "config_problem",
+      "subject": "agent",
+      "since": null,
+      "text": "models.json problem: chain_invalid agent"
+    },
+    {
+      "severity": "warning",
+      "reason": "telemetry_unavailable",
+      "subject": "llamacpp",
+      "since": null,
+      "text": "llamacpp telemetry unavailable on models: malformed response"
+    }
+  ]
+}
