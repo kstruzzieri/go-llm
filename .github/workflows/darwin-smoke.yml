@@ -65,6 +65,25 @@ jobs:
             exit 1
           fi
 
+      # Scratch source binding (#553) on APFS: the case and normalization
+      # alias rows for the scratch cwd and executable, the production-path
+      # cwd alias test, and the /var -> /private/var reference prefix only
+      # discriminate on a case-insensitive volume behind a symlinked temp
+      # prefix, so Linux CI skips or cannot reach them. A skip fails the step,
+      # and so does a missing pass of the production-path alias test.
+      - name: Scratch source binding
+        shell: bash
+        run: |
+          go test -race -count=1 -v -run '^TestScratchSource' ./agent/tools | tee "$RUNNER_TEMP/scratch-source.txt"
+          if grep -q -- '--- SKIP' "$RUNNER_TEMP/scratch-source.txt"; then
+            echo "::error::scratch source tests skipped: this runner volume does not alias the fixture spellings"
+            exit 1
+          fi
+          if ! grep -q -- '--- PASS: TestScratchSourceCwdAliasRunsCommand' "$RUNNER_TEMP/scratch-source.txt"; then
+            echo "::error::TestScratchSourceCwdAliasRunsCommand did not pass (renamed or not selected)"
+            exit 1
+          fi
+
       # golem ops -watch on a real Darwin PTY (#654): screen and cursor
       # restored on exit, on SIGINT and on SIGTERM, frames that follow a
       # resize, and Ctrl-Z job control in helper processes, with and without

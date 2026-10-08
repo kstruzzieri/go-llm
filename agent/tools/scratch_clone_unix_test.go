@@ -334,7 +334,7 @@ func TestScratchSessionIgnoresRestrictiveUmask(t *testing.T) {
 	rt, canon := newTestScratchRuntime(t, ScratchConfig{Enabled: true})
 	old := syscall.Umask(0o777)
 	defer syscall.Umask(old)
-	session, _, err := beginScratchSession(context.Background(), rt, testSpec(canon))
+	session, _, err := beginScratchSession(context.Background(), rt, testSpec(t, canon))
 	syscall.Umask(old)
 	if err != nil {
 		t.Fatalf("restrictive umask broke scratch setup: %v", err)

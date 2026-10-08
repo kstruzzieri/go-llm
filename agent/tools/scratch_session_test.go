@@ -37,21 +37,33 @@ func newTestScratchRuntime(t *testing.T, cfg ScratchConfig) (*scratchRuntime, st
 	return rt, rt.root
 }
 
-func testSpec(canon string) execSpec {
-	return execSpec{
+// testSpec is the approved spec recheckExecPlan would hand scratch. Where the
+// platform has file identity it carries the approved identities; elsewhere
+// the scratch source checks are skipped and no Unix /bin/sh is assumed.
+func testSpec(t *testing.T, canon string) execSpec {
+	t.Helper()
+	spec := execSpec{
 		Path:          "/bin/sh",
 		Argv:          []string{"sh", "-c", "true"},
 		Dir:           canon,
 		Env:           []string{"PATH=/usr/bin:/bin", "HOME=/home/u", "TMPDIR=/ambient/tmp"},
 		WorkspaceRoot: canon,
 	}
+	if scratchIdentitySupported {
+		spec.ExeIdentity = execIdentityOf(t, spec.Path)
+		spec.DirIdentity = execIdentityOf(t, canon)
+		spec.RootIdentity = execIdentityOf(t, canon)
+	}
+	return spec
 }
 
 func TestScratchSessionBeginLayoutAndRewrite(t *testing.T) {
 	rt, canon := newTestScratchRuntime(t, ScratchConfig{Enabled: true})
-	spec := testSpec(canon)
+	spec := testSpec(t, canon)
 	spec.Dir = filepath.Join(canon, "dir")
 	spec.Path = filepath.Join(canon, "scripts/run.sh")
+	spec.DirIdentity = execIdentityOf(t, spec.Dir)
+	spec.ExeIdentity = execIdentityOf(t, spec.Path)
 	session, rewritten, err := beginScratchSession(context.Background(), rt, spec)
 	if err != nil {
 		t.Fatal(err)
@@ -128,7 +140,7 @@ func slicesContains(s []string, v string) bool {
 
 func TestScratchSessionExternalExecutableUnchanged(t *testing.T) {
 	rt, canon := newTestScratchRuntime(t, ScratchConfig{Enabled: true})
-	spec := testSpec(canon)
+	spec := testSpec(t, canon)
 	session, rewritten, err := beginScratchSession(context.Background(), rt, spec)
 	if err != nil {
 		t.Fatal(err)
@@ -145,19 +157,19 @@ func TestScratchSessionWorkspaceBinding(t *testing.T) {
 	// containment rewrite (Dir stays under the runtime root), so only the
 	// explicit binding check can reject it.
 	sub := filepath.Join(canon, "dir")
-	spec := testSpec(sub)
+	spec := testSpec(t, sub)
 	if _, _, err := beginScratchSession(context.Background(), rt, spec); err == nil {
 		t.Fatal("a spec rooted at a sub-root of the runtime's canonical root must be rejected")
 	}
 	other := t.TempDir()
-	if _, _, err := beginScratchSession(context.Background(), rt, testSpec(other)); err == nil {
+	if _, _, err := beginScratchSession(context.Background(), rt, testSpec(t, other)); err == nil {
 		t.Fatal("a spec rooted outside the runtime's canonical root must be rejected")
 	}
 }
 
 func TestScratchSessionAdmissionCap(t *testing.T) {
 	rt, canon := newTestScratchRuntime(t, ScratchConfig{Enabled: true, MaxConcurrentSessions: 2})
-	spec := testSpec(canon)
+	spec := testSpec(t, canon)
 	s1, _, err := beginScratchSession(context.Background(), rt, spec)
 	if err != nil {
 		t.Fatal(err)
@@ -187,7 +199,7 @@ func TestScratchSessionAdmissionCap(t *testing.T) {
 func TestScratchSessionSlotReleasedOnBeginFailure(t *testing.T) {
 	rt, canon := newTestScratchRuntime(t, ScratchConfig{Enabled: true, MaxConcurrentSessions: 1})
 	rt.clone = func(f *os.File, dst string) error { return errors.New("boom") }
-	spec := testSpec(canon)
+	spec := testSpec(t, canon)
 	if _, _, err := beginScratchSession(context.Background(), rt, spec); err == nil {
 		t.Fatal("clone failure must fail begin")
 	}
@@ -214,7 +226,7 @@ func TestScratchSessionExpiredSetupUsesFreshCleanupBudget(t *testing.T) {
 		cancel()
 		return errors.New("stop setup")
 	}
-	if _, _, err := beginScratchSession(ctx, rt, testSpec(canon)); err == nil {
+	if _, _, err := beginScratchSession(ctx, rt, testSpec(t, canon)); err == nil {
 		t.Fatal("canceled setup must fail")
 	}
 	entries, err := os.ReadDir(rt.tempBase)
@@ -231,7 +243,7 @@ func TestScratchSessionExpiredSetupUsesFreshCleanupBudget(t *testing.T) {
 
 func TestScratchSessionFinishCapturesAndRemoves(t *testing.T) {
 	rt, canon := newTestScratchRuntime(t, ScratchConfig{Enabled: true, MaxConcurrentSessions: 1})
-	spec := testSpec(canon)
+	spec := testSpec(t, canon)
 	session, _, err := beginScratchSession(context.Background(), rt, spec)
 	if err != nil {
 		t.Fatal(err)
@@ -268,7 +280,7 @@ func TestScratchSessionFinishCapturesAndRemoves(t *testing.T) {
 
 func TestScratchSessionFinishCaptureErrorStillCleans(t *testing.T) {
 	rt, canon := newTestScratchRuntime(t, ScratchConfig{Enabled: true})
-	session, _, err := beginScratchSession(context.Background(), rt, testSpec(canon))
+	session, _, err := beginScratchSession(context.Background(), rt, testSpec(t, canon))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -292,7 +304,7 @@ func TestScratchSessionFinishCaptureErrorStillCleans(t *testing.T) {
 
 func TestScratchSessionFinishUsesFreshCleanupBudget(t *testing.T) {
 	rt, canon := newTestScratchRuntime(t, ScratchConfig{Enabled: true, MaxConcurrentSessions: 1})
-	session, _, err := beginScratchSession(context.Background(), rt, testSpec(canon))
+	session, _, err := beginScratchSession(context.Background(), rt, testSpec(t, canon))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -318,7 +330,7 @@ func TestScratchSessionFinishUsesFreshCleanupBudget(t *testing.T) {
 
 func TestScratchSessionCleanupGuardAbandonsImpostor(t *testing.T) {
 	rt, canon := newTestScratchRuntime(t, ScratchConfig{Enabled: true})
-	session, _, err := beginScratchSession(context.Background(), rt, testSpec(canon))
+	session, _, err := beginScratchSession(context.Background(), rt, testSpec(t, canon))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -363,7 +375,7 @@ func TestScratchSessionDeferredReaperRetainsAdmission(t *testing.T) {
 		close(entered)
 		<-release
 	}
-	session, _, err := beginScratchSession(context.Background(), rt, testSpec(canon))
+	session, _, err := beginScratchSession(context.Background(), rt, testSpec(t, canon))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -374,7 +386,7 @@ func TestScratchSessionDeferredReaperRetainsAdmission(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("deferred reaper did not start")
 	}
-	if _, _, err := beginScratchSession(context.Background(), rt, testSpec(canon)); err == nil {
+	if _, _, err := beginScratchSession(context.Background(), rt, testSpec(t, canon)); err == nil {
 		t.Fatal("cleanup backlog released its admission slot before reaping")
 	}
 	for _, p := range parents {
@@ -394,7 +406,7 @@ func TestScratchSessionDeferredReaperRetainsAdmission(t *testing.T) {
 		}
 	}
 	rt.beforeReap = nil
-	next, _, err := beginScratchSession(context.Background(), rt, testSpec(canon))
+	next, _, err := beginScratchSession(context.Background(), rt, testSpec(t, canon))
 	if err != nil {
 		t.Fatalf("reaper did not restore admission: %v", err)
 	}
@@ -404,7 +416,7 @@ func TestScratchSessionDeferredReaperRetainsAdmission(t *testing.T) {
 
 func TestScratchSessionDoubleFinishAndDiscard(t *testing.T) {
 	rt, canon := newTestScratchRuntime(t, ScratchConfig{Enabled: true, MaxConcurrentSessions: 1})
-	session, _, err := beginScratchSession(context.Background(), rt, testSpec(canon))
+	session, _, err := beginScratchSession(context.Background(), rt, testSpec(t, canon))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -422,7 +434,7 @@ func TestScratchSessionDoubleFinishAndDiscard(t *testing.T) {
 	session.discard()
 
 	// discard before finish tears down without publishing.
-	s2, _, err := beginScratchSession(context.Background(), rt, testSpec(canon))
+	s2, _, err := beginScratchSession(context.Background(), rt, testSpec(t, canon))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -457,7 +469,7 @@ func TestScratchSessionReadOnlyDirectoryCleansUp(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chmod(filepath.Join(canon, "ro"), 0o755) })
 
-	session, _, err := beginScratchSession(context.Background(), rt, testSpec(canon))
+	session, _, err := beginScratchSession(context.Background(), rt, testSpec(t, canon))
 	if err != nil {
 		t.Fatal(err)
 	}
