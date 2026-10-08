@@ -5,10 +5,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
-	"os"
 	"regexp"
 	"strings"
 
@@ -117,26 +117,24 @@ func (t *Search) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolRes
 	return agent.ToolResult{Content: content, Truncated: truncated}, nil
 }
 
-// walkOpener is implemented by entries whose walk pinned their directory: the
-// file opens from that descriptor, so the walk never re-resolves a path by name.
-type walkOpener interface {
-	openRegular() (*os.File, error)
-}
-
-// searchFile opens one file (TOCTOU-hardened), skips it if binary or unreadable,
-// and appends matching lines. It returns true when a cap was reached (the caller
-// stops the walk). The file is closed before returning — never deferred to the
-// end of the walk — so large trees do not exhaust descriptors.
+// searchFile opens one file (TOCTOU-hardened), skips it if binary, unreadable or
+// moved, and appends matching lines. A replaced or unreachable root or an
+// unheld walk entry aborts the walk with an error instead. It returns true when
+// a cap was reached (the caller stops the walk). The file is closed before
+// returning — never deferred to the end of the walk — so large trees do not
+// exhaust descriptors.
 func (t *Search) searchFile(rel string, d fs.DirEntry, re *regexp.Regexp, out *strings.Builder, matches *int) (bool, error) {
-	var f *os.File
-	var err error
-	if e, ok := d.(walkOpener); ok {
-		f, err = e.openRegular()
-	} else {
-		f, err = t.ws.openRegularFile(rel)
+	f, err := t.ws.openWalked(rel, d)
+	if errors.Is(err, ErrRootReplaced) || errors.Is(err, errAnchorUnreachable) || errors.Is(err, errWalkEntryUnheld) {
+		// The root itself changed or became unreachable, or the walk broke its
+		// own contract: none is about this file, and skipping would report
+		// absence ("no matches") for a tree that was never fully searched.
+		// Abort like walk, glob and list. ErrRootReplaced wraps errFileChanged,
+		// so test it before the generic skip.
+		return false, err
 	}
 	if err != nil {
-		return false, nil // unreadable or raced file: skip, not fatal
+		return false, nil // unreadable, raced or moved file: skip, not fatal
 	}
 	defer func() { _ = f.Close() }()
 

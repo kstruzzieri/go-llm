@@ -100,6 +100,10 @@ func newScopedWorkspace(parent *Workspace, scope string) (*Workspace, *scopeCoun
 	}
 	counter := new(scopeCounters)
 	ws := &Workspace{root: filepath.Join(snapshot.root, rel), rootIdentity: identity, pinnedRoot: root, scope: counter}
+	// #613: verification starts at the top-level root, above the pinned scope,
+	// so a moved scope or a symlinked ancestor cannot satisfy it.
+	anchorRoot, anchorIdentity, anchorPrefix := snapshot.readAnchor()
+	ws.anchorRoot, ws.anchorIdentity, ws.anchorPrefix = anchorRoot, anchorIdentity, filepath.Join(anchorPrefix, rel)
 	ws.guard = func(childRel string, write bool) error {
 		var err error
 		if write {

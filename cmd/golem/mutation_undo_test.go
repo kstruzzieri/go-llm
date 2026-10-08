@@ -13,10 +13,22 @@ import (
 	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
 )
 
+// errFileChanged is agent/tools' unexported identity sentinel, reached through
+// the exported ErrRootReplaced that wraps it.
+var errFileChanged = errors.Unwrap(agenttools.ErrRootReplaced)
+
+// TestMutationUndoAdmissionGap: an undo whose target changes between the
+// precondition read and the mutation must refuse, keep its record or intent,
+// and never touch content it did not check (#552). "outside" and "denied" swap
+// the admitted directory inside the precondition read's own guard decision;
+// #613's post-guard reachability check refuses that read (spec §4.11), so the
+// refusal is early. "edited" rewrites the file in place inside the write
+// decision, after the read verified it, so only the late IfMatch check can
+// refuse it.
 func TestMutationUndoAdmissionGap(t *testing.T) {
 	for _, persistent := range []bool{false, true} {
 		for _, existed := range []bool{false, true} {
-			for _, victim := range []string{"outside", "denied"} {
+			for _, victim := range []string{"outside", "denied", "edited"} {
 				name := "ram/"
 				if persistent {
 					name = "checkpoint/"
@@ -62,8 +74,12 @@ func TestMutationUndoAdmissionGap(t *testing.T) {
 						mustSealTurn(t, journal)
 						undo = func(out *strings.Builder) { journal.undo(context.Background(), out, 1) }
 						checkState = func() {
-							if !errors.Is(journal.fatal, agenttools.ErrPreconditionMismatch) {
-								t.Errorf("late mismatch not latched: %v", journal.fatal)
+							want := errFileChanged
+							if victim == "edited" {
+								want = agenttools.ErrPreconditionMismatch
+							}
+							if !errors.Is(journal.fatal, want) {
+								t.Errorf("refusal not latched as %v: %v", want, journal.fatal)
 							}
 							groups, err := store.list(context.Background())
 							must(err)
@@ -100,7 +116,13 @@ func TestMutationUndoAdmissionGap(t *testing.T) {
 						if !writing {
 							reads++
 						}
-						if !writing && reads == wanted && !swapped {
+						if victim == "edited" && writing && !swapped {
+							// Same inode in the same admitted directory: the
+							// precondition read already passed.
+							write(allowed, "EDITED\n")
+							swapped = true
+						}
+						if victim != "edited" && !writing && reads == wanted && !swapped {
 							must(os.Rename(allowed, allowed+"-old"))
 							if victim == "outside" {
 								must(os.Rename(outside, allowed))
@@ -127,17 +149,31 @@ func TestMutationUndoAdmissionGap(t *testing.T) {
 						return string(b)
 					}
 					checkState()
-					// The cause line proves the refusal came from the late IfMatch
-					// check, not an earlier pre-check that shares the refusal text.
-					late := "cannot undo allowed/file: file changed since golem wrote it\nundo failed for allowed/file: file precondition mismatch\n"
-					if strings.Contains(output.String(), "undid ") || !strings.Contains(output.String(), late) {
-						t.Errorf("false undo result: %q", output.String())
+					// Exact output names the refusing check. A swap is refused by
+					// the precondition read itself: no IfMatch cause line. Only
+					// "edited" reaches the late IfMatch check and its cause line.
+					want := "cannot undo allowed/file: file changed since golem wrote it\n"
+					if persistent {
+						want = "undo failed for allowed/file: file identity changed between stat and open\n"
 					}
-					if read(allowed+"-old") != "AFTER\n" {
+					if victim == "edited" {
+						want = "cannot undo allowed/file: file changed since golem wrote it\nundo failed for allowed/file: file precondition mismatch\n"
+					}
+					if persistent {
+						want += "undo interrupted; run /undo to resume\n"
+					}
+					if output.String() != want {
+						t.Errorf("undo result %q, want %q", output.String(), want)
+					}
+					original, body := allowed+"-old", "AFTER\n"
+					if victim == "edited" {
+						original, body = allowed, "EDITED\n"
+					}
+					if read(original) != body {
 						t.Error("refused undo modified original")
 					}
 					outBody, deniedBody := read(outside), read(denied)
-					t.Logf("undo=%q outside=%q denied=%q original=%q", output.String(), outBody, deniedBody, read(allowed+"-old"))
+					t.Logf("undo=%q outside=%q denied=%q original=%q", output.String(), outBody, deniedBody, read(original))
 					if outBody != "OUTSIDE\n" || deniedBody != "DENIED\n" {
 						t.Error("SECURITY: undo mutated a directory whose content was not checked")
 					}
