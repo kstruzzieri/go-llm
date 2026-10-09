@@ -54,10 +54,6 @@ consumer compile check.
   including `immutable=1` and `nolock=1` URIs (#619). Use
   `rag.OpenSQLiteStoreReadOnly` or your own handle for read-only access. UNC
   and device paths are rejected on Windows.
-- A `localhost` base URL that resolves off-host matches
-  `provider.ErrDestinationDenied` (#654). `golem.New`'s config-driven
-  bootstrap, Golem and `go-llm-mcp` now fail at startup instead of starting
-  without that provider's model list.
 - `agentflow.PreflightP0` rejects plans whose schema major is not 1,
   `agentflow.Compile` emits `1.0.0` (#612), and `agentflow.NewSrcExecRunner`
   requires an absolute checkout. AgentFlow children receive an environment
