@@ -75,7 +75,7 @@ const agentProofDir = ".agent/"
 // marshals with all keys present.
 func Compile(ir PlanIR) Plan {
 	p := Plan{
-		SchemaVersion: "0.3.0",
+		SchemaVersion: PlanSchemaVersion,
 		Objective:     ir.Objective,
 		Scope:         cloneStrings(ir.Scope),
 		NonGoals:      cloneStrings(ir.NonGoals),

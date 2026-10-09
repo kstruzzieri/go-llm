@@ -7,14 +7,14 @@ import (
 	"fmt"
 	"iter"
 	"math"
-	"net/url"
-	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	_ "modernc.org/sqlite"
+
+	"github.com/kstruzzieri/go-llm/internal/sqlitedsn"
 )
 
 // Compile-time interface satisfaction checks.
@@ -83,6 +83,10 @@ type replaceSourceOptions struct {
 
 // NewSQLiteStore creates a vector store backed by SQLite.
 // Use ":memory:" for dbPath to create an in-memory database (for testing).
+// dbPath may be a file: URI. A file-backed store is switched to WAL and the
+// open fails if the connection cannot use it (immutable=1, nolock=1, or
+// mode=ro on a rollback-journal file); use OpenSQLiteStoreReadOnly for
+// read-only access.
 func NewSQLiteStore(dbPath string) (*SQLiteStore, error) {
 	dsn, err := sqliteReadWriteDSN(dbPath)
 	if err != nil {
@@ -93,17 +97,21 @@ func NewSQLiteStore(dbPath string) (*SQLiteStore, error) {
 		return nil, fmt.Errorf("rag: open sqlite: %w", err)
 	}
 
-	if dbPath == ":memory:" {
-		// In-memory databases: constrain to exactly 1 connection.
-		// With database/sql's connection pool, multiple connections to :memory:
-		// each create a separate database, causing missing schema/data.
+	if dbPath == ":memory:" || dbPath == "" {
+		// In-memory and temporary ("") databases are private to each
+		// connection, so with database/sql's pool every extra connection would
+		// get its own empty database, causing missing schema/data. Constrain
+		// to exactly 1 connection.
 		db.SetMaxOpenConns(1)
 	} else {
-		// File-backed databases: enable WAL mode for better concurrent read performance.
-		// WAL is not meaningful for :memory: databases. journal_mode persists in
-		// the database file, so one Exec suffices; busy_timeout is per-connection
-		// and therefore set via the DSN in sqliteReadWriteDSN.
-		if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
+		// File-backed databases: enable WAL mode for better concurrent read
+		// performance. journal_mode persists in the database file, so one
+		// switch suffices, and EnableWAL retries it when another opener races
+		// it; busy_timeout is per-connection and therefore set via the DSN in
+		// sqliteReadWriteDSN. A file: URI that names no file (a temporary
+		// database) reports journal mode "delete" and fails closed; pass ""
+		// for a temporary store.
+		if err := sqlitedsn.EnableWAL(context.Background(), db); err != nil {
 			_ = db.Close()
 			return nil, fmt.Errorf("rag: set WAL mode: %w", err)
 		}
@@ -151,28 +159,16 @@ func (s *SQLiteStore) setWriteEmbeddingState(err error, scan bool) {
 // to one connection (the routing-feedback store's alternative) because
 // retrieval reads are in the user-facing latency path and rely on WAL read
 // concurrency.
-// Plain paths are made absolute first: a relative path in url.URL.Path
-// renders as file://<path>, which the URI parser reads as a host name, not a
-// file. Existing file: URIs retain their path and query parameters.
-// Windows drive-letter/UNC normalization is deferred with the Windows build
-// work (issue #303); this mirrors OpenSQLiteStoreReadOnly's exposure.
+// Plain paths and file: URIs go through sqlitedsn.FileURL, which makes plain
+// paths absolute, keeps a URI's path and query, and renders Windows paths
+// SQLite accepts (rejecting UNC and device paths).
 func sqliteReadWriteDSN(dbPath string) (string, error) {
 	if dbPath == "" || dbPath == ":memory:" {
 		return dbPath, nil
 	}
-	var u *url.URL
-	if strings.HasPrefix(dbPath, "file:") {
-		parsed, err := url.Parse(dbPath)
-		if err != nil {
-			return "", fmt.Errorf("parse URI %q: %w", dbPath, err)
-		}
-		u = parsed
-	} else {
-		abs, err := filepath.Abs(dbPath)
-		if err != nil {
-			return "", fmt.Errorf("resolve path %q: %w", dbPath, err)
-		}
-		u = &url.URL{Scheme: "file", Path: abs}
+	u, err := sqlitedsn.FileURL(dbPath)
+	if err != nil {
+		return "", err
 	}
 	q := u.Query()
 	q.Add("_pragma", "busy_timeout(5000)")
@@ -184,15 +180,29 @@ func sqliteReadWriteDSN(dbPath string) (string, error) {
 // OpenSQLiteStoreReadOnly opens an existing SQLite vector store as an immutable
 // read-only snapshot without changing journal mode or running migrations. Use
 // it for retrieval/probe paths that must not create WAL/SHM files or mutate
-// copied/foreign index DBs.
+// copied/foreign index DBs. dbPath may be a plain path or a file: URI; the open
+// always forces mode=ro, immutable=1 and a private cache, whatever the URI's
+// own parameters say. Caller-supplied _pragma parameters are rejected before
+// opening. Plain paths retain their filesystem symlink and ".." resolution.
 func OpenSQLiteStoreReadOnly(dbPath string) (*SQLiteStore, error) {
 	if dbPath == "" {
 		return nil, fmt.Errorf("rag: open sqlite read-only: empty path")
 	}
-	u := url.URL{Scheme: "file", Path: dbPath}
+	u, err := sqlitedsn.FileURLPreservingPath(dbPath)
+	if err != nil {
+		return nil, fmt.Errorf("rag: open sqlite read-only: %w", err)
+	}
 	q := u.Query()
+	// modernc executes _pragma values as SQL during connection setup. Even
+	// mode=ro on the main database cannot prevent an appended ATTACH from
+	// opening another writable handle to the same file.
+	if q.Has("_pragma") {
+		return nil, fmt.Errorf("rag: open sqlite read-only: _pragma URI parameters are not supported")
+	}
 	q.Set("mode", "ro")
 	q.Set("immutable", "1")
+	// A shared cache would join a read-write opener's btree and ignore mode=ro.
+	q.Set("cache", "private")
 	u.RawQuery = q.Encode()
 
 	db, err := sql.Open("sqlite", u.String())

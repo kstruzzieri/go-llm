@@ -157,3 +157,73 @@ jobs:
         env:
           GO_LLM_REQUIRE_BWRAP: "1"
         run: go test -race -count=1 -run '^(TestBwrap|TestBuildBwrap|TestCollectBwrap|TestProbeBwrap|TestExistingPolicyPaths)' ./agent/tools
+
+  # Real-CLI Agentflow suite (#577) against the one verified-compatible pin, run
+  # twice: against an installed `agentflow` and against a source checkout.
+  # GO_LLM_REQUIRE_AGENTFLOW turns a missing-Agentflow skip into a hard failure,
+  # so a runner that cannot find Agentflow fails loudly instead of passing.
+  agentflow-compat:
+    name: Agentflow compatibility
+    runs-on: ubuntu-24.04
+    env:
+      AGENTFLOW_TESTS: '^(Test.*_RealCLI($|_)|TestAgentflow(Smoke|ParallelSmoke)$)'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+
+      # Pinned to the Agentflow 1.0.0 release commit (tag v1.0.0), the version
+      # Golem develop is verified against (#612). Golem supports Agentflow 1.x only.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: kstruzzieri/agentflow
+          ref: bf48d63abeeaff2d7929972455c5512cb9051f60
+          path: _agentflow
+          persist-credentials: false
+
+      - name: Install Agentflow
+        run: |
+          python3 -m venv "$RUNNER_TEMP/agentflow-venv"
+          "$RUNNER_TEMP/agentflow-venv/bin/pip" install ./_agentflow
+
+      # Only this step puts the venv on PATH. The source step must run the
+      # system python3, which cannot import Agentflow except from AGENTFLOW_SRC.
+      - name: Agentflow compatibility (installed)
+        env:
+          GO_LLM_REQUIRE_AGENTFLOW: installed
+        run: |
+          export PATH="$RUNNER_TEMP/agentflow-venv/bin:$PATH"
+          go test -tags=agentflow_integration -count=1 -run "$AGENTFLOW_TESTS" ./agentflow ./cmd/golem
+
+      - name: Agentflow compatibility (source)
+        env:
+          GO_LLM_REQUIRE_AGENTFLOW: source
+          AGENTFLOW_SRC: ${{ github.workspace }}/_agentflow
+        run: go test -tags=agentflow_integration -count=1 -run "$AGENTFLOW_TESTS" ./agentflow ./cmd/golem
+
+  windows-sqlite:
+    name: Windows SQLite URIs
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+
+      # Linux CI only builds and vets for Windows. This runs the SQLite URI
+      # tests natively: Windows path resolution, SQLite's URI parser and the
+      # Windows VFS (#619).
+      - name: Test internal/sqlitedsn on Windows
+        env:
+          CGO_ENABLED: "0"
+        run: go test -count=1 -v ./internal/sqlitedsn
+
+      # Windows loads path-based FileInfo identities lazily. Compile smoke
+      # cannot detect a replaced root being mistaken for the original (#658).
+      - name: Test workspace identity and undo on Windows
+        env:
+          CGO_ENABLED: "0"
+        run: go test -count=1 -v -run '^(TestWorkspaceVerifyRoot.*|TestNewWorkspace.*|TestUndoCreatedFile.*|TestCheckpointUndoCreatedFile.*)$' ./agent/tools ./cmd/golem

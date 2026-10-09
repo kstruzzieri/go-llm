@@ -2,12 +2,16 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -25,6 +29,10 @@ type trustHTTPFixture struct {
 	url     string
 	calls   atomic.Int32
 	deletes atomic.Int32
+	// requests counts every HTTP request, so tests can prove no contact.
+	requests atomic.Int32
+	// down makes every request fail, so a pinned endpoint becomes unavailable.
+	down atomic.Bool
 }
 
 func newTrustHTTPFixture(t *testing.T) *trustHTTPFixture {
@@ -33,8 +41,13 @@ func newTrustHTTPFixture(t *testing.T) *trustHTTPFixture {
 	f.set("Read\nfile", map[string]any{"type": "object"})
 	handler := gomcp.NewStreamableHTTPHandler(func(*http.Request) *gomcp.Server { return f.server }, nil)
 	httpServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		f.requests.Add(1)
 		if r.Method == http.MethodDelete {
 			f.deletes.Add(1)
+		}
+		if f.down.Load() {
+			http.Error(w, "down", http.StatusServiceUnavailable)
+			return
 		}
 		handler.ServeHTTP(w, r)
 	}))
@@ -54,6 +67,24 @@ func trustCommand(t *testing.T, args ...string) (string, string, error) {
 	err := run(append([]string{"mcp"}, args...), in, out, diag)
 	return readRunTestFile(t, out), readRunTestFile(t, diag), err
 }
+
+// mcpConnection returns the candidate connection fingerprint that
+// `golem mcp inspect` prints for one server specification under root.
+func mcpConnection(t *testing.T, root, flag, spec string) string {
+	t.Helper()
+	out, _, err := trustCommand(t, "inspect", "-root", root, flag, spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const label = "connection candidate: "
+	i := strings.Index(out, label)
+	if i < 0 {
+		t.Fatalf("inspect output lacks %q: %q", label, out)
+	}
+	line := out[i+len(label):]
+	return line[:strings.IndexByte(line, '\n')]
+}
+
 func TestMCPTrustOperator(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	root := t.TempDir()
@@ -71,7 +102,8 @@ func TestMCPTrustOperator(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "server \"fs\"\npin file: " + strconv.QuoteToGraphic(inspection.PinPath) + "\npinned: \ncandidate: " + mcpDigestA + "\nadded: mcp__fs__read\ncandidate mcp__fs__read\n  description: \"Read file\"\n  inputSchema: \"{\\\"type\\\":\\\"object\\\"}\"\n"
+	conn := inspection.CandidateConnection.Fingerprint
+	want := "server \"fs\"\npin file: " + strconv.QuoteToGraphic(inspection.PinPath) + "\npinned: \ncandidate: " + mcpDigestA + "\nadded: mcp__fs__read\nconnection pinned: \nconnection candidate: " + conn + "\nconnection kind: http\nconnection origin: " + strconv.QuoteToGraphic(f.url) + "\ncandidate mcp__fs__read\n  description: \"Read file\"\n  inputSchema: \"{\\\"type\\\":\\\"object\\\"}\"\n"
 	if out != want {
 		t.Fatalf("inspect output\ngot %q\nwant %q", out, want)
 	}
@@ -79,7 +111,7 @@ func TestMCPTrustOperator(t *testing.T) {
 		t.Fatalf("inspection wrote pin: %v", err)
 	}
 	for _, digest := range []string{"", "sha256:bad", "sha256:" + strings.Repeat("A", 64), mcpDigestB} {
-		_, _, err := trustCommand(t, append(append([]string{"approve"}, args...), "-digest", digest)...)
+		_, _, err := trustCommand(t, append(append([]string{"approve"}, args...), "-digest", digest, "-connection", conn)...)
 		if err == nil {
 			t.Fatalf("approved wrong digest %q", digest)
 		}
@@ -87,7 +119,7 @@ func TestMCPTrustOperator(t *testing.T) {
 			t.Fatal("failed approval wrote pin")
 		}
 	}
-	out, diag, err = trustCommand(t, append(append([]string{"approve"}, args...), "-digest", mcpDigestA)...)
+	out, diag, err = trustCommand(t, append(append([]string{"approve"}, args...), "-digest", mcpDigestA, "-connection", conn)...)
 	if err != nil || out != "" || diag != "mcp: approved server \"fs\" "+mcpDigestA+"; added: mcp__fs__read\n" {
 		t.Fatalf("approve: %v stdout=%q stderr=%q", err, out, diag)
 	}
@@ -96,7 +128,7 @@ func TestMCPTrustOperator(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.set("Read\nfiles", map[string]any{"type": "object"})
-	_, _, err = trustCommand(t, append(append([]string{"approve"}, args...), "-digest", mcpDigestA)...)
+	_, _, err = trustCommand(t, append(append([]string{"approve"}, args...), "-digest", mcpDigestA, "-connection", conn)...)
 	if err == nil {
 		t.Fatal("approved stale digest")
 	}
@@ -104,19 +136,36 @@ func TestMCPTrustOperator(t *testing.T) {
 	if string(after) != string(before) {
 		t.Fatal("stale approval replaced pin")
 	}
-	out, diag, err = trustCommand(t, append(append([]string{"approve"}, args...), "-digest", mcpDigestB)...)
+	out, diag, err = trustCommand(t, append(append([]string{"approve"}, args...), "-digest", mcpDigestB, "-connection", conn)...)
 	if err != nil || out != "" || diag != "mcp: approved server \"fs\" "+mcpDigestB+"; changed: mcp__fs__read (description)\n" {
 		t.Fatalf("changed approval: %v %q %q", err, out, diag)
 	}
-	_, _, err = trustCommand(t, "approve", "-root", root, "-mcp-http", "other="+f.url, "-digest", mcpDigestB)
-	if err == nil {
-		t.Fatal("digest accepted under wrong alias")
+	// other's own fingerprint passes the connection check, so the refusal
+	// proves the catalog digest itself is bound to the alias.
+	otherConn := mcpConnection(t, root, "-mcp-http", "other="+f.url)
+	requests := f.requests.Load()
+	_, _, err = trustCommand(t, "approve", "-root", root, "-mcp-http", "other="+f.url, "-digest", mcpDigestB, "-connection", otherConn)
+	var refusal *mcpclient.AdmissionError
+	if !errors.As(err, &refusal) || refusal.Reason != "digest_mismatch" || f.requests.Load() == requests {
+		t.Fatalf("digest under wrong alias = (%v, %d requests), want digest_mismatch after fetching the catalog", err, f.requests.Load()-requests)
 	}
 	if f.calls.Load() != 0 {
 		t.Fatal("trust command invoked a tool")
 	}
 	for range f.server.Sessions() {
 		t.Fatal("trust command left session open")
+	}
+}
+
+func TestMCPTrustApproveRequiresConnection(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	root := t.TempDir()
+	f := newTrustHTTPFixture(t)
+	if _, _, err := trustCommand(t, "approve", "-root", root, "-mcp-http", "fs="+f.url, "-digest", mcpDigestA); err == nil {
+		t.Fatal("approve without -connection succeeded")
+	}
+	if n := f.requests.Load(); n != 0 {
+		t.Fatalf("approve without -connection sent %d requests to the server", n)
 	}
 }
 
@@ -128,6 +177,7 @@ func TestMCPTrustArguments(t *testing.T) {
 		{}, {"unknown"}, {"inspect"}, {"inspect", "-mcp-http", f.url}, {"inspect", "-mcp-stdio", "env TOKEN=credential-value command"},
 		{"inspect", "-mcp-http", "fs=" + f.url, "-mcp-http", "other=" + f.url},
 		{"inspect", "-mcp-http", "fs=" + f.url, "extra"},
+		{"inspect", "-mcp-http", "fs=" + f.url, "-mcp-tools", "fs=read"},
 		{"inspect", "-root", "", "-mcp-http", "fs=" + f.url},
 		{"inspect", "-root", filepath.Join(root, "missing"), "-mcp-http", "fs=" + f.url},
 		{"inspect", "-mcp-stdio", `fs=env TOKEN=credential-value "`},
@@ -141,13 +191,25 @@ func TestMCPTrustArguments(t *testing.T) {
 			t.Fatal("credentials leaked")
 		}
 	}
+	// -digest and -connection are approve-only: inspect refuses them before
+	// contacting the server.
+	before := f.requests.Load()
+	for _, extra := range [][]string{{"-connection", "hmac-sha256:" + strings.Repeat("0", 64)}, {"-digest", mcpDigestA}} {
+		out, _, err := trustCommand(t, append([]string{"inspect", "-root", root, "-mcp-http", "fs=" + f.url}, extra...)...)
+		if err == nil || err.Error() != "mcp: invalid command flags" || out != "" {
+			t.Fatalf("inspect %s = (%v, %q), want \"mcp: invalid command flags\" and no output", extra[0], err, out)
+		}
+	}
+	if n := f.requests.Load() - before; n != 0 {
+		t.Fatalf("inspect with an approve-only flag sent %d requests", n)
+	}
 	t.Chdir(root)
 	if _, _, err := trustCommand(t, "inspect", "-mcp-http", "fs="+f.url); err != nil {
 		t.Fatalf("default root: %v", err)
 	}
 	t.Setenv("XDG_DATA_HOME", root)
-	if _, _, err := trustCommand(t, "inspect", "-mcp-http", "fs="+f.url); err == nil {
-		t.Fatal("accepted in-workspace pins")
+	if _, _, err := trustCommand(t, "inspect", "-mcp-http", "fs="+f.url); err == nil || err.Error() != "mcp: pin store unavailable; check -root and the user data directory (golem/mcp-pins, including connection-hmac.pem)" {
+		t.Fatalf("in-workspace pins = %v, want the pin store refusal with its hint", err)
 	}
 }
 
@@ -178,17 +240,25 @@ func TestMCPTrustEarlyOneShot(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				server := mcpclient.HTTPServer("fs", f.url)
+				endpoint := f.url
+				if kind == "unavailable" {
+					endpoint += "/?token=credential-value"
+				}
+				server := mcpclient.HTTPServer("fs", endpoint)
 				inspection, err := mcpclient.Inspect(t.Context(), mcpClientImpl(), server, pins)
 				if err != nil {
 					t.Fatal(err)
 				}
 				var before []byte
-				if kind == "mismatch" || kind == "unreadable" {
-					if _, err := mcpclient.Approve(t.Context(), mcpClientImpl(), server, pins, mcpDigestA); err != nil {
+				// Seed a matching pin wherever a record is in play, so
+				// preflight passes and each kind reaches its own failure.
+				if kind != "absent" && kind != "store" {
+					if _, err := mcpclient.Approve(t.Context(), mcpClientImpl(), server, pins, mcpclient.ApprovalDigests{Catalog: mcpDigestA, Connection: inspection.CandidateConnection.Fingerprint}); err != nil {
 						t.Fatal(err)
 					}
 					before, _ = os.ReadFile(inspection.PinPath)
+				}
+				if kind == "mismatch" || kind == "unreadable" {
 					f.set("Read\nfiles", map[string]any{"type": "object"})
 					if kind == "unreadable" {
 						before = []byte("invalid pin")
@@ -197,10 +267,9 @@ func TestMCPTrustEarlyOneShot(t *testing.T) {
 						}
 					}
 				}
-				endpoint := f.url
 				switch kind {
 				case "unavailable":
-					endpoint = "http://127.0.0.1:1/?token=credential-value"
+					f.down.Store(true)
 				case "store":
 					t.Setenv("XDG_DATA_HOME", root)
 				case "invalid":
@@ -218,14 +287,19 @@ func TestMCPTrustEarlyOneShot(t *testing.T) {
 				if got := readRunTestFile(t, out); got != want {
 					t.Fatalf("stdout=%q want=%q", got, want)
 				}
-				if got := readRunTestFile(t, diag); !strings.Contains(got, "mcp:") || strings.Contains(got, "credential-value") {
+				got := readRunTestFile(t, diag)
+				if !strings.Contains(got, "mcp:") || strings.Contains(got, "credential-value") {
 					t.Fatalf("diagnostics=%q", got)
+				}
+				reason := map[string]string{"absent": "pin_missing", "mismatch": "catalog_changed", "unavailable": "unavailable", "invalid": "invalid_catalog", "unreadable": "pin_unavailable"}[kind]
+				if reason != "" && !strings.Contains(got, `warning: mcp: server "fs": `+reason) {
+					t.Fatalf("diagnostics=%q, want reason %s", got, reason)
 				}
 				if providerCalls.Load() != 0 {
 					t.Fatalf("provider requests=%d before MCP refusal", providerCalls.Load())
 				}
 				after, readErr := os.ReadFile(inspection.PinPath)
-				if kind == "mismatch" || kind == "unreadable" {
+				if before != nil {
 					if string(after) != string(before) {
 						t.Fatal("changed pin")
 					}
@@ -291,6 +365,102 @@ func TestMCPTrustStdioProcess(t *testing.T) {
 	}
 	os.Exit(0)
 }
+
+const mcpEnvProbeMarker = "golem-mcp-envprobe"
+
+// TestMCPEnvProbeProcess is not a test. Re-executed with mcpEnvProbeMarker,
+// the test binary becomes a stdio MCP server whose one tool description
+// reports the child's environment names, PROBE_TOKEN value and working
+// directory, so each catalog digest and pin records what that launch saw.
+func TestMCPEnvProbeProcess(t *testing.T) {
+	if !slices.Contains(os.Args, mcpEnvProbeMarker) {
+		return
+	}
+	var names []string
+	for _, kv := range os.Environ() {
+		name, _, _ := strings.Cut(kv, "=")
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	wd, _ := os.Getwd()
+	raw, _ := json.Marshal(map[string]any{"names": names, "token": os.Getenv("PROBE_TOKEN"), "cwd": wd})
+	srv := gomcp.NewServer(&gomcp.Implementation{Name: "envprobe", Version: "1"}, nil)
+	srv.AddTool(&gomcp.Tool{Name: "probe", Description: string(raw), InputSchema: map[string]any{"type": "object"}}, func(context.Context, *gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
+		return &gomcp.CallToolResult{}, nil
+	})
+	if err := srv.Run(context.Background(), &gomcp.StdioTransport{}); err != nil {
+		os.Exit(1)
+	}
+	os.Exit(0)
+}
+
+// TestMCPStdioRunsInRootWithNamedEnv drives the real CLI. The REPL launch pins
+// the probe's catalog, then `golem mcp inspect` launches it again: matching
+// pinned and candidate identities show both launches saw the same thing, and
+// the candidate description shows what: the canonical -root as working
+// directory and only the baseline plus the -mcp-env names.
+func TestMCPStdioRunsInRootWithNamedEnv(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the literal baseline below is the Unix one; Windows builds this test without running it")
+	}
+	config, root := writeRunLifecycleConfig(t)
+	t.Setenv("PROBE_TOKEN", "probe-value")
+	t.Setenv("GOLEM_MCP_ENV_CANARY", "canary-value")
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := "probe=" + strconv.Quote(executable) + " -test.run=^TestMCPEnvProbeProcess$ -- " + mcpEnvProbeMarker
+	in, out, diag := runTestFiles(t)
+	if err := run([]string{"-config", config, "-root", root, "-mcp-stdio", spec, "-mcp-env", "probe=PROBE_TOKEN", "-no-probe", "-no-cap-probe", "-no-git-context", "-no-project-context", "-no-rag", "-no-memory", "-no-session", "-no-auto-index"}, in, out, diag); err != nil {
+		t.Fatal(err)
+	}
+	if got := readRunTestFile(t, diag); !strings.Contains(got, "mcp: attached 1 tool(s) from 1 configured server(s)\n") {
+		t.Fatalf("REPL startup: %q", got)
+	}
+	inspection, _, err := trustCommand(t, "inspect", "-root", root, "-mcp-stdio", spec, "-mcp-env", "probe=PROBE_TOKEN")
+	if err != nil {
+		t.Fatal(err)
+	}
+	field := func(label string) string {
+		t.Helper()
+		i := strings.Index(inspection, "\n"+label)
+		if i < 0 {
+			t.Fatalf("inspect output lacks %q: %q", label, inspection)
+		}
+		line := inspection[i+1+len(label):]
+		return line[:strings.IndexByte(line, '\n')]
+	}
+	if field("pinned: ") != field("candidate: ") || field("connection pinned: ") != field("connection candidate: ") {
+		t.Fatalf("REPL and inspect launches differ: %q", inspection)
+	}
+	description, err := strconv.Unquote(field("candidate mcp__probe__probe\n  description: "))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var report struct {
+		Names []string `json:"names"`
+		Token string   `json:"token"`
+		Cwd   string   `json:"cwd"`
+	}
+	if err := json.Unmarshal([]byte(description), &report); err != nil {
+		t.Fatal(err)
+	}
+	var wantNames []string
+	for _, name := range []string{"HOME", "LANG", "PATH", "PROBE_TOKEN", "TMPDIR", "USER"} {
+		if _, ok := os.LookupEnv(name); ok {
+			wantNames = append(wantNames, name)
+		}
+	}
+	wantCwd, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(report.Names, wantNames) || report.Token != "probe-value" || report.Cwd != wantCwd {
+		t.Fatalf("child saw (%q, %q, %q), want (%q, probe-value, %q)", report.Names, report.Token, report.Cwd, wantNames, wantCwd)
+	}
+}
+
 func TestMCPTrustDerivedAliases(t *testing.T) {
 	if _, err := exec.LookPath("env"); err != nil {
 		t.Skip("requires env command")
@@ -305,6 +475,9 @@ func TestMCPTrustDerivedAliases(t *testing.T) {
 	second := "env GOLEM_MCP_TRUST_DESCRIPTION=second " + strconv.Quote(executable) + " -test.run=^TestMCPTrustStdioProcess$"
 	servers, err := parseMCPServers([]string{first, second}, nil)
 	if err != nil {
+		t.Fatal(err)
+	}
+	if servers, err = withMCPPolicy(root, servers, 2, nil); err != nil {
 		t.Fatal(err)
 	}
 	if servers[0].Alias != "env" || servers[1].Alias != "env2" {
@@ -343,6 +516,9 @@ func TestMCPTrustDerivedAliases(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if reordered, err = withMCPPolicy(root, reordered, 2, nil); err != nil {
+		t.Fatal(err)
+	}
 	mgr, warnings, err = connectMCP(t.Context(), root, reordered, false)
 	if err != nil {
 		t.Fatal(err)
@@ -364,7 +540,7 @@ func TestMCPTrustDerivedAliases(t *testing.T) {
 	if err != nil || !strings.Contains(out, "server \"env2\"") || !strings.Contains(out, candidate.CandidateDigest) {
 		t.Fatalf("env2 inspection=%q %v", out, err)
 	}
-	_, diag, err := trustCommand(t, "approve", "-root", root, "-mcp-stdio", "env2="+first, "-digest", candidate.CandidateDigest)
+	_, diag, err := trustCommand(t, "approve", "-root", root, "-mcp-stdio", "env2="+first, "-digest", candidate.CandidateDigest, "-connection", candidate.CandidateConnection.Fingerprint)
 	if err != nil || !strings.Contains(diag, "changed: mcp__env2__read (description)") {
 		t.Fatalf("env2 approval=%q %v", diag, err)
 	}
@@ -378,7 +554,7 @@ func TestMCPTrustInspectionQuoting(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	root := t.TempDir()
 	f := newTrustHTTPFixture(t)
-	if _, _, err := trustCommand(t, "approve", "-root", root, "-mcp-http", "fs="+f.url, "-digest", mcpDigestA); err != nil {
+	if _, _, err := trustCommand(t, "approve", "-root", root, "-mcp-http", "fs="+f.url, "-digest", mcpDigestA, "-connection", mcpConnection(t, root, "-mcp-http", "fs="+f.url)); err != nil {
 		t.Fatal(err)
 	}
 	f.set("line\n\x00\x1b\u0081\u202e\xff", map[string]any{"type": "object", "description": "schema\n\x00\x1b\u0081\u202e"})
@@ -439,8 +615,7 @@ func TestMCPTrustDisjointDiffAndHint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	candidate, err := mcpclient.Inspect(t.Context(), mcpClientImpl(), servers[0], pins)
-	if err != nil {
+	if _, err := mcpclient.Inspect(t.Context(), mcpClientImpl(), servers[0], pins); err != nil {
 		t.Fatal(err)
 	}
 	message := warnings[0].Error()
@@ -455,7 +630,7 @@ func TestMCPTrustDisjointDiffAndHint(t *testing.T) {
 			t.Fatalf("diagnostic leaked %q", secret)
 		}
 	}
-	wantHint := "review with golem mcp inspect, then run golem mcp approve with the same -root and server arguments, explicit alias=fs, and -digest " + candidate.CandidateDigest
+	wantHint := "review with golem mcp inspect using the same -root, server and -mcp-env arguments and explicit alias=fs, then golem mcp approve with the -digest and -connection it prints"
 	if !strings.HasSuffix(message, wantHint) {
 		t.Fatalf("hint not bound: %s", message)
 	}
@@ -466,7 +641,7 @@ func TestMCPTrustCleanupOnLaterFailure(t *testing.T) {
 		t.Run(fmt.Sprint(mixed), func(t *testing.T) {
 			config, root := writeRunLifecycleConfig(t)
 			f := newTrustHTTPFixture(t)
-			_, _, err := trustCommand(t, "approve", "-root", root, "-mcp-http", "fs="+f.url, "-digest", mcpDigestA)
+			_, _, err := trustCommand(t, "approve", "-root", root, "-mcp-http", "fs="+f.url, "-digest", mcpDigestA, "-connection", mcpConnection(t, root, "-mcp-http", "fs="+f.url))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -509,7 +684,7 @@ func TestMCPTrustGoalPlanStillReject(t *testing.T) {
 
 func TestMCPTrustParserDoesNotLeak(t *testing.T) {
 	in, out, diag := runTestFiles(t)
-	err := run([]string{"-mcp-stdio", `fs=env TOKEN=credential-value "`}, in, out, diag)
+	err := run([]string{"-config", filepath.Join(t.TempDir(), "absent.json"), "-root", t.TempDir(), "-mcp-stdio", `fs=env TOKEN=credential-value "`}, in, out, diag)
 	if err == nil || strings.Contains(err.Error()+readRunTestFile(t, diag), "credential-value") {
 		t.Fatalf("parser error: %v", err)
 	}
@@ -521,7 +696,7 @@ func TestMCPTrustEmptyApproval(t *testing.T) {
 	f := newTrustHTTPFixture(t)
 	f.server.RemoveTools("read")
 	const digest = "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
-	out, diag, err := trustCommand(t, "approve", "-root", root, "-mcp-http", "fs="+f.url, "-digest", digest)
+	out, diag, err := trustCommand(t, "approve", "-root", root, "-mcp-http", "fs="+f.url, "-digest", digest, "-connection", mcpConnection(t, root, "-mcp-http", "fs="+f.url))
 	if err != nil || out != "" || diag != "mcp: approved server \"fs\" "+digest+"\n" {
 		t.Fatalf("empty approval: %v %q %q", err, out, diag)
 	}
@@ -566,5 +741,91 @@ func TestMCPTrustMalformedHTTPDoesNotLeak(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// TestMCPFatalConfigNamesReason: a configuration Connect refuses outright
+// reports the alias, reason and fixed rule (never the URL) on stderr, and the
+// machine record and exit code stay the generic mcp_untrusted refusal.
+func TestMCPFatalConfigNamesReason(t *testing.T) {
+	for _, format := range []string{"text", "json"} {
+		t.Run(format, func(t *testing.T) {
+			config, root := writeRunLifecycleConfig(t)
+			in, out, diag := runTestFiles(t)
+			err := run([]string{"-config", config, "-root", root, "-p", "hi", "-output-format", format, "-mcp-http", "fs=https://user:canary@example.com/mcp", "-no-project-context", "-no-git-context", "-no-probe", "-no-cap-probe", "-no-rag"}, in, out, diag)
+			if err == nil || exitCodeFor(err) != 1 || err.Error() != "golem: MCP catalog admission failed" {
+				t.Fatalf("exit: %v (%d)", err, exitCodeFor(err))
+			}
+			want := ""
+			if format == "json" {
+				want = "{\"schema\":\"golem.result.v1\",\"status\":\"error\",\"answer\":null,\"stopReason\":null,\"model\":null,\"error\":{\"code\":\"mcp_untrusted\",\"message\":\"golem: MCP catalog admission failed\"},\"grounding\":null}\n"
+			}
+			if got := readRunTestFile(t, out); got != want {
+				t.Fatalf("stdout=%q want=%q", got, want)
+			}
+			got := readRunTestFile(t, diag)
+			if !strings.Contains(got, "mcp: server \"fs\": invalid_config: mcpclient: endpoint must not carry userinfo\n") {
+				t.Fatalf("diagnostics=%q, want the alias, reason and rule", got)
+			}
+			if strings.Contains(got, "canary") || strings.Contains(got, "example.com") {
+				t.Fatalf("diagnostics leaked endpoint text: %q", got)
+			}
+		})
+	}
+}
+
+// An unusable pin store blocks each alias with a hint at what to check, and
+// the alias is still reported as blocked.
+func TestMCPPinStoreFailureHint(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_DATA_HOME", file)
+	mgr, warnings, err := connectMCP(t.Context(), t.TempDir(), []mcpclient.Server{mcpclient.HTTPServer("fs", "https://example.com/mcp")}, true)
+	if mgr != nil || err != nil || len(warnings) != 1 {
+		t.Fatalf("connectMCP = (%v, %v, %v), want one warning", mgr, warnings, err)
+	}
+	if got, want := warnings[0].Error(), `server "fs": pin_unavailable; check -root and the user data directory (golem/mcp-pins, including connection-hmac.pem)`; got != want {
+		t.Fatalf("warning = %q, want %q", got, want)
+	}
+	if got := mcpBlockedAliases(warnings); !slices.Equal(got, []string{"fs (pin_unavailable)"}) {
+		t.Fatalf("blocked = %q", got)
+	}
+}
+
+func TestMCPToolsRunWiring(t *testing.T) {
+	config, root := writeRunLifecycleConfig(t)
+	f := newTrustHTTPFixture(t)
+	in, out, diag := runTestFiles(t)
+	args := []string{"-config", config, "-root", root, "-mcp-http", "fs=" + f.url, "-mcp-tools", "fs=", "-no-probe", "-no-cap-probe", "-no-git-context", "-no-project-context", "-no-rag", "-no-memory", "-no-session", "-no-auto-index"}
+	if err := run(args, in, out, diag); err != nil {
+		t.Fatal(err)
+	}
+	if got := readRunTestFile(t, diag); !strings.Contains(got, "mcp: attached 0 tool(s) from 1 configured server(s)\n") {
+		t.Fatalf("-mcp-tools fs= did not reach Connect: %q", got)
+	}
+	in, out, diag = runTestFiles(t)
+	err := run([]string{"-config", config, "-root", root, "-p", "hi", "-mcp-tools", "fs=credential-value!"}, in, out, diag)
+	if err == nil || exitCodeFor(err) != 2 || err.Error() != "golem: -mcp-tools #1: alias is not a configured MCP server" {
+		t.Fatalf("headless -mcp-tools error = %v (exit %d), want positional usage error, exit 2", err, exitCodeFor(err))
+	}
+	if strings.Contains(err.Error()+readRunTestFile(t, out)+readRunTestFile(t, diag), "credential-value") {
+		t.Fatal("-mcp-tools value echoed")
+	}
+}
+
+func TestMCPTrustRejectsToolSelection(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	root := t.TempDir()
+	f := newTrustHTTPFixture(t)
+	for _, action := range []string{"inspect", "approve"} {
+		out, _, err := trustCommand(t, action, "-root", root, "-mcp-http", "fs="+f.url, "-mcp-tools", "fs=credential-value")
+		if err == nil || out != "" || err.Error() != "mcp: inspect and approve do not take -mcp-tools; they always review the complete catalog" {
+			t.Fatalf("%s with -mcp-tools = (%v, %q), want the explicit rejection", action, err, out)
+		}
+	}
+	if f.deletes.Load() != 0 {
+		t.Fatal("a rejected -mcp-tools command contacted the server")
 	}
 }

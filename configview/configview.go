@@ -10,6 +10,7 @@ package configview
 import (
 	"net/url"
 	"sort"
+	"unicode/utf8"
 
 	"github.com/kstruzzieri/go-llm/config"
 	"github.com/kstruzzieri/go-llm/provider"
@@ -336,12 +337,17 @@ func sortedKeys[V any](m map[string]V) []string {
 	return keys
 }
 
-// bound64 truncates a diagnostic subject to 64 bytes.
+// bound64 cuts s to at most 64 bytes on a rune boundary, so a cut never
+// splits a UTF-8 sequence.
 func bound64(s string) string {
-	if len(s) > 64 {
-		return s[:64]
+	if len(s) <= 64 {
+		return s
 	}
-	return s
+	i := 64
+	for i > 0 && !utf8.RuneStart(s[i]) {
+		i--
+	}
+	return s[:i]
 }
 
 func selectorProvider(sel string) string {

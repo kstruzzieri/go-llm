@@ -42,6 +42,7 @@ type afClient interface {
 	RunGate(context.Context, string, string, string, []string) error
 	FinishStep(context.Context, string, string) error
 	CompleteStep(context.Context, string, string) error
+	BlockStep(context.Context, string, string, string) error
 	FinishRun(context.Context) (string, error)
 	RecordFileChange(context.Context, string, string, string) error
 	RecordEvidence(context.Context, agentflow.EvidenceEntry) error
@@ -52,6 +53,20 @@ type afClient interface {
 // machine is testable without a model; production wiring (runAgentflowTask)
 // builds the step-scoped Request and calls sess.orch.Run.
 type runStepFunc func(ctx context.Context, step agentflow.Step, attempt, goal string) error
+
+// runStoppedError is an agent run that returned without error but stopped
+// before completing: agent.Orchestrator.Run reports loop caps only through
+// Result.StopReason (#611).
+type runStoppedError struct{ reason agent.StopReason }
+
+func (e *runStoppedError) Error() string { return "agent run stopped: " + e.reason.String() }
+
+// agentflowUnavailableError marks a failed version gate or capability probe.
+// A refused AgentFlow is not asked for recovery advice (#612 R10).
+type agentflowUnavailableError struct{ err error }
+
+func (e *agentflowUnavailableError) Error() string { return e.err.Error() }
+func (e *agentflowUnavailableError) Unwrap() error { return e.err }
 
 // beforeGatesFunc is a resume-only, read-only safety check invoked after the
 // model has recorded file receipts and immediately before any command gate.
@@ -125,15 +140,15 @@ func validateFreshWorkerProjection(state agentflow.NextActionState, agentID stri
 // run drives the P0 sequence and returns the proof-pack path on success.
 func (d *driver) run(ctx context.Context) (string, error) {
 	if err := d.af.Probe(ctx); err != nil {
-		return "", fmt.Errorf("agentflow unavailable: %w", err)
+		return "", &agentflowUnavailableError{fmt.Errorf("agentflow unavailable: %w", err)}
 	}
 	if d.parallelCohort != nil {
 		if err := d.af.ProbeParallel(ctx); err != nil {
-			return "", fmt.Errorf("agentflow parallel runtime unavailable: %w", err)
+			return "", &agentflowUnavailableError{fmt.Errorf("agentflow parallel runtime unavailable: %w", err)}
 		}
 	}
 	if err := d.af.ProbeWorkflow(ctx); err != nil {
-		return "", fmt.Errorf("agentflow workflow routing unavailable: %w", err)
+		return "", &agentflowUnavailableError{fmt.Errorf("agentflow workflow routing unavailable: %w", err)}
 	}
 	var recommendation agentflow.WorkflowRecommendation
 	if d.approvedRecommendation != nil {
@@ -152,7 +167,7 @@ func (d *driver) run(ctx context.Context) (string, error) {
 	}
 	if d.reviewManifest != "" {
 		if err := d.af.ProbeReview(ctx); err != nil {
-			return "", fmt.Errorf("agentflow review unavailable: %w", err)
+			return "", &agentflowUnavailableError{fmt.Errorf("agentflow review unavailable: %w", err)}
 		}
 	}
 	if err := d.af.Init(ctx); err != nil {
@@ -226,7 +241,17 @@ func (d *driver) runOneStep(ctx context.Context, id string) error {
 
 func (d *driver) runAttempt(ctx context.Context, step agentflow.Step, attempt, goal string) error {
 	if err := d.runStep(ctx, step, attempt, goal); err != nil {
-		return err // includes a fatal record-file-change failure surfaced via ctx cancel
+		var stopped *runStoppedError
+		if !errors.As(err, &stopped) {
+			return err // includes a fatal record-file-change failure surfaced via ctx cancel
+		}
+		// #611: close the stopped attempt so recovery re-runs the step instead
+		// of settling it on its gates alone.
+		err = fmt.Errorf("step %s attempt %s: %w", step.ID, attempt, err)
+		if berr := d.af.BlockStep(ctx, step.ID, attempt, "golem: "+stopped.Error()); berr != nil {
+			return fmt.Errorf("%w; record blocked attempt: %w", err, berr)
+		}
+		return fmt.Errorf("%w; attempt recorded as blocked", err)
 	}
 	if d.beforeGates != nil {
 		if err := d.beforeGates(ctx, step, attempt); err != nil {
@@ -455,11 +480,18 @@ func newTaskStepRunner(root string, plan *agentflow.Plan, af afClient, orch *age
 			Approver: taskApprover(approveEdits),
 			Options:  sess.startupModelOptions,
 		}
-		_, runErr := orch.Run(stepCtx, req, agent.Observer(newRenderer(out, false, sess.maxSteps, sess.clock, sess.mixed)))
+		res, runErr := orch.Run(stepCtx, req, agent.Observer(newRenderer(out, false, sess.maxSteps, sess.clock, sess.mixed)))
 		if fatal := afJournal.fatalErr(); fatal != nil {
 			return fmt.Errorf("unreceipted edit aborted the run: %w", fatal)
 		}
-		return runErr
+		if runErr != nil {
+			return runErr
+		}
+		if res.StopReason != agent.Completed {
+			// #611: loop caps return a nil error; StopReason is the only signal.
+			return &runStoppedError{reason: res.StopReason}
+		}
+		return nil
 	}, nil
 }
 
@@ -504,6 +536,10 @@ func runAgentflowTask(ctx context.Context, stdout, stderr io.Writer, interrupts 
 	if err := validateTraceability(plan); err != nil {
 		return err
 	}
+	// #612 R5: refuse retained non-1.x AgentFlow state before any AgentFlow call.
+	if err := checkAgentflowStateMajor(root); err != nil {
+		return err
+	}
 	evidence, err := readEvidenceSidecar(f.evidencePath)
 	if err != nil {
 		return err
@@ -544,12 +580,7 @@ func runAgentflowTask(ctx context.Context, stdout, stderr io.Writer, interrupts 
 
 	// 3. Build root-specific Agentflow runners for the canonical and optional
 	// worker roots.
-	runnerForRoot := func(root string) agentflow.Runner {
-		if agentflowSrc != "" {
-			return agentflow.NewSrcExecRunner(root, agentflowSrc)
-		}
-		return agentflow.NewExecRunner(root)
-	}
+	runnerForRoot := agentflowRunnerForRoot(agentflowSrc, f.agentflowEnv)
 	rootRunner := runnerForRoot(root)
 	client := agentflow.NewClient(rootRunner, root)
 	if f.agentflowResume {
@@ -578,7 +609,7 @@ func runAgentflowTask(ctx context.Context, stdout, stderr io.Writer, interrupts 
 		final, err := d.resume(runCtx, root, planBytes, approvedRecommendation)
 		if err != nil {
 			reportAgentflowResumeError(stderr, err)
-			reportAgentflowRecovery(ctx, stderr, client)
+			reportAgentflowRecovery(ctx, stderr, client, err)
 			return errAgentflowTaskFailed
 		}
 		summary, err := verifiedAgentflowProofSummary(runCtx, client)
@@ -607,7 +638,7 @@ func runAgentflowTask(ctx context.Context, stdout, stderr io.Writer, interrupts 
 	proof, err := runTaskDriver(runCtx, d, coordinator, stderr)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "agentflow task failed: %s\n", recoveryDisplayText(err.Error()))
-		reportAgentflowRecovery(ctx, stderr, client)
+		reportAgentflowRecovery(ctx, stderr, client, err)
 		return errAgentflowTaskFailed
 	}
 	_, _ = fmt.Fprintf(stdout, "proof pack: %s\n", proof)
@@ -805,6 +836,28 @@ func resolveTaskAgentflowSource(root, source string) (string, error) {
 	return filepath.Abs(source)
 }
 
+// mustAgentflowRunner builds the Agentflow runner for root: the installed
+// binary, or `python3 -P -m agentflow` when source is set. envNames are the
+// -agentflow-env names; flag validation has already accepted them, so a
+// failure here is a wiring bug. The panic message carries the validator's
+// position-only text, never the rejected input.
+func mustAgentflowRunner(root, source string, envNames []string) *agentflow.ExecRunner {
+	r := agentflow.NewExecRunner(root)
+	if source != "" {
+		r = agentflow.NewSrcExecRunner(root, source)
+	}
+	if err := r.AllowEnv(envNames...); err != nil {
+		panic(fmt.Sprintf("golem: unvalidated -agentflow-env reached a runner: %v", err))
+	}
+	return r
+}
+
+// agentflowRunnerForRoot is the one constructor the driver uses for the
+// canonical root and every worker root, so all share one environment policy.
+func agentflowRunnerForRoot(source string, envNames []string) func(root string) agentflow.Runner {
+	return func(root string) agentflow.Runner { return mustAgentflowRunner(root, source, envNames) }
+}
+
 // resolveReviewManifest absolutizes an optional review manifest against the
 // process cwd and confirms it exists. Returning early on "" keeps task mode
 // review-free by default. Absolutizing here is load-bearing: the agentflow
@@ -954,8 +1007,14 @@ func writeStepGoalList(b *strings.Builder, values []string) {
 
 // reportAgentflowRecovery prints the authoritative AgentFlow recovery state after
 // a failed run. next-action is advisory only: its command is printed, never
-// executed, so proof state stays adapter-driven.
-func reportAgentflowRecovery(ctx context.Context, out io.Writer, client *agentflow.Client) {
+// executed, so proof state stays adapter-driven. cause is the failure being
+// reported: when AgentFlow itself was unavailable (version gate or capability
+// probe) the binary is not asked for advice (#612 R10).
+func reportAgentflowRecovery(ctx context.Context, out io.Writer, client *agentflow.Client, cause error) {
+	var unavailable *agentflowUnavailableError
+	if errors.As(cause, &unavailable) {
+		return // #612 R10: a refused AgentFlow gives no recovery advice
+	}
 	if st, err := client.NextAction(ctx); err == nil {
 		_, _ = fmt.Fprintf(out, "agentflow next-action: %s", recoveryDisplayText(st.State))
 		if st.Reason != "" {

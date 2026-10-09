@@ -8,11 +8,13 @@ The [Mnemoverse article on least privilege for AI agents](https://mnemoverse.com
 
 | Area | Shipped behavior | Limit |
 |---|---|---|
-| Tool execution | Read-only CLI default; explicit tool mounting; shared preparation, validation and approval before invocation. | Opting into exec permits host execution. Sanitized command environments do not restrict filesystem or network access. |
+| Tool execution | Read-only CLI default; explicit tool mounting; shared preparation, validation and approval before invocation. | Opting into exec permits host execution. Sanitized command environments do not restrict filesystem or network access. The executable, cwd and root are identity-checked before launch (#553), but launch is by pathname, not a pinned descriptor. |
+| Agentflow subprocesses | Agentflow, its gates and its `git` calls receive a documented baseline plus operator-approved names (`-agentflow-env`); provider keys and other parent variables are dropped unless explicitly approved. | Environment narrowing only: gates keep host-user filesystem and network authority, and an approved value reaches every gate. |
+| Golem's own `git` calls | Parallel-mode worktree operations and the git context snapshot receive a fixed baseline plus Golem's settings; provider keys and other parent variables never reach `git` or the hooks, filters and helpers it runs. | Environment narrowing only: repository hooks, filters and `core.fsmonitor` helpers still run as you with the baseline, `HOME` and your trusted global and system git config. |
 | Native sandboxes | Library Seatbelt and Bubblewrap backends fail closed when explicitly selected but unavailable. Sandbox policy participates in exec approval identity. | CLI exec and verification do not yet select these backends. |
-| Interceptors | Optional deterministic injection/secret detectors, argument invariants, exec egress labels and native scoped-child refusal reporting. Observation fencing is independent. | `-interceptors` is off by default. Labels and risk scores do not constrain network access or suspend grants. |
+| Interceptors | Always-on argument invariants, exec-class egress labels and native scoped-child refusal reporting in the Golem CLI (#575); optional deterministic injection/secret detectors and canary (`-interceptors`). In every configuration, `search` skips the read rule's credential files and scoped `dispatch` refuses protected directories (#627). Observation fencing is independent. | Content detectors and Secrets are off by default. Invariants are lexical checks on named tool arguments, not confinement. Labels and risk scores do not constrain network access or suspend grants. Library consumers opt in to interceptor installation, on the orchestrator and on `NewDispatch`. |
 | Provider destinations | Model-provider requests made by config-driven Golem and the go-llm MCP server require admission for remote destinations; guarded transports check capabilities, origins and base paths and refuse redirects. Grants are revocable. | This provider boundary does not govern Golem's connections to external MCP tool servers, shell traffic, or consultant-process traffic. |
-| MCP client | Workspace/alias catalog pins detect definition drift; tools require approval, have bounded execution/output, and produce foreign observations. | Pins do not attest endpoint/process identity. All admitted catalog tools are mounted. Local stdio servers run with host-user authority and inherit the parent environment; their HTTP counterparts are outside provider admission. |
+| MCP client | Workspace/alias catalog pins detect definition drift and bind keyed fingerprints of the stdio launch (resolved program path, symlink target, argv, working directory, environment policy) or the exact HTTP endpoint, checked before launch or contact (#578); tools require approval, have bounded execution/output, and produce foreign observations. Stdio servers run in the workspace root with a documented baseline environment plus operator-named variables (`-mcp-env`); HTTP servers are pinned to one exact endpoint and every redirect is refused. | Same-path program updates, changed packages behind an unchanged launcher, and file or symlink swaps between check and launch are not detected. Relative and empty `PATH` entries are dropped from the server's `PATH` (a `PATH` with no absolute entry is omitted, leaving programs their own default search path), and on Windows the server always gets `NoDefaultCurrentDirectoryInExePath=1`, so bare names are not looked up in the workspace root first; but `PATH` values are not identity: a wrapper (`env`, `npx`, `uvx`, `sh -c`) or a script's `#!` interpreter binds only the launcher, and what it finds through the absolute `PATH` entries can change undetected. All admitted catalog tools are mounted unless the host selects exact tools per alias (`-mcp-tools`, #579); selection narrows exposure, not catalog verification. Local stdio servers keep host-user filesystem and network authority (confinement is #580), and a named variable's value reaches that server. HTTP servers remain outside provider admission. |
 | Grants | Exec grants bind command/environment/runtime details; grants can be cleared. | Edit grants cover the write class; changed script contents and foreign content do not automatically invalidate reuse. |
 | Provenance and audit | Observation fences, project-context trust, signed mutation receipts, signed memory records and offline integrity checks. | Observation fences are model-facing wire conventions, not deterministic enforcement barriers. A signature is not authorization. Persistent origin/exposure continuity and complete policy-decision telemetry remain planned. |
 
@@ -56,6 +58,81 @@ checkpoint after-state failures retain pending intent and refuse success. Other
 platforms keep the checked-path backend without these concurrent mutation
 guarantees.
 
+## Workspace read boundary (#613)
+
+On Linux and Darwin, `read_file`, `search`, `glob`, `list`, scoped dispatch
+construction and readers, the reads behind `write_file`/`edit_file` previews
+and pre-apply re-reads, and the exported `ReadFileForUndo`,
+`ReadFileWithModeForUndo` and `HashFileWithMode` bind the guard's decision to
+what they return. After the guard allows a path and the file is opened or the
+directory enumerated, the path is resolved again from the top-level workspace
+root by name, never following a symlink in any component, and must reach the
+object being read. The canonical workspace root is itself reached from `/`
+without following symlinks, including in ancestors above the workspace.
+Otherwise the read fails closed. The four read tools report
+"path changed during access"; `write_file`, `edit_file` and the exported
+helpers return the existing "file identity changed between stat and open".
+When the workspace root is renamed away, replaced or turned into a symlink, or
+a scoped child's path no longer reaches its pinned scope directory, a read in
+progress reports `ErrRootReplaced` to Go callers, whose text adds the prefix
+"workspace root replaced: ". Later calls on a top-level Workspace report
+`ErrRootReplaced` only when another directory is at the root path; otherwise
+they report the failed root lookup. When the root or scope path cannot be
+looked up for another reason, such as lost search permission, the read fails
+with that cause ("path is not accessible" from the read tools). A directory
+that fails this check after enumeration aborts the walk or listing. `search`
+skips a file that fails its own check, as it skips unreadable files, but aborts
+when the root or scope path fails, even if the current file cannot be opened.
+Scoped children verify from the top-level root, so a scope directory moved
+after construction stops serving reads, even
+when a symlink now leads to it. `list` rechecks its directory after the entry
+guards, truncated listings included; `glob` rechecks the parent of each name it
+returns after that name's guard.
+
+These checks bind the directory being enumerated. Entry names and metadata
+remain an enumeration snapshot: `list` can still show a directory renamed during
+its own entry guard under its old name, though nothing is read through it.
+`glob` binds each name to its parent at that name's check, not the result set
+as a whole. This reverses #448's rule that a pinned directory or root keeps
+serving reads after it moves; replacement content at the old name is still
+never returned.
+
+This is decision integrity, not adversary resistance. A process that can rename
+can place content at an allowed name permanently, with no race needed, and hard
+links already make a name unreliable provenance. The re-resolution is a
+sequence of lookups, not an atomic snapshot: coordinated renames
+interleaved with it can pass. Bytes are read after it, so an object may move
+while being read. Case-only and normalization-only renames on case-insensitive
+filesystems are not detected. Writes and deletes keep the mutation boundary
+above. Other platforms open by checked path after the guard decides, add no
+post-enumeration check, and keep their existing limits.
+
+## Exec launch boundary (#553)
+
+Exec approval covers argv, the resolved executable spelling, working directory,
+canonical workspace root, sanitized environment values, timeout and the selected
+sandbox/scratch policy. Each plan records filesystem identities for its
+executable, cwd and workspace root and rechecks them before invocation. On Linux
+and Darwin, scratch setup checks its source snapshot manifest against those
+objects (the executable only when it is inside the workspace) before running in
+the clone, and native sandbox preparation checks that the executable target it
+resolves is the approved object.
+
+These checks do not bind file bytes: an in-place rewrite keeps the identity.
+They do not bind a script's interpreter, loader inputs or dependencies, or the
+kernel's pathname resolution at launch; commands are started by pathname, so a
+change after the final check can still alter what runs or where. Seatbelt
+launches the approved spelling, which keeps invocation-name (`argv[0]`)
+behavior, and that spelling is resolved again at launch; the result still runs
+inside the profile. Session grants identify the command recipe, not file
+identity, so a fresh plan may reuse a grant after a same-path update.
+
+Concurrent same-UID host mutation remains an accepted residual. That covers
+in-place rewrites, changes after validation, and changes to the scratch
+reference or execution trees. Snapshot drift detection is not a point-in-time
+coherence proof. Protection against these races requires a coordinated launch
+redesign with [#484](https://github.com/kstruzzieri/go-llm/issues/484).
+
 ## Child capability and budget boundary (#449)
 
 Dispatch selects only `read_file`, `search`, `glob`, `list` and optional
@@ -68,16 +145,17 @@ code: their Effect metadata must remain constant and truthful. This is not
 process isolation, and the child's model transport and configured retrieval
 backend can still use the network.
 
-Scoped tasks retain #448's single pinned descendant directory. Native readers
-must share one Workspace, and every read must satisfy both the caller's guard
-and the selected subtree. Typed, sanitized denials disclose neither denied
-contents nor private guard diagnostics. Legacy string tasks remain unscoped.
-Separate tasks may select different subtrees; a single child spanning disjoint
-roots is not implemented. Scoped retrieval remains excluded and belongs to
+Scoped tasks retain #448's single pinned descendant directory, re-verified at
+its path on every read (#613). Native readers must share one Workspace, and
+every read must satisfy both the caller's guard and the selected subtree. Typed,
+sanitized denials disclose neither denied contents nor private guard
+diagnostics. Legacy string tasks remain unscoped. Separate tasks may select
+different subtrees; a single child spanning disjoint roots is not implemented.
+Scoped retrieval remains excluded and belongs to
 [#554](https://github.com/kstruzzieri/go-llm/issues/554). #552's filesystem
 boundaries remain unchanged.
 
-With the parent reporter enabled, actual scoped native-reader refusals contribute
+With the parent reporter enabled (always in Golem since #575), actual scoped native-reader refusals contribute
 to its run-level risk report as described in
 [interceptors and secret detection](golem.md#interceptors-and-secret-detection).
 A refusal is counted when the reader returns it, even if the child observation
@@ -173,8 +251,8 @@ This workstream belongs to [#429](https://github.com/kstruzzieri/go-llm/issues/4
 |---|---|---|---|
 | [#575](https://github.com/kstruzzieri/go-llm/issues/575) — default deterministic tool guards | P1 | 2–3 | Install argument invariants and egress labels by default. Specify compatibility for `-interceptors`, startup reporting and machine output; preserve the existing canary behavior. Invariants enforce argument denials; egress labels inform previews/telemetry and neither authorize calls nor prove they are offline. |
 | [#576](https://github.com/kstruzzieri/go-llm/issues/576) — native sandbox selection | P1 | 5–8 | Wire explicit native-runtime selection through foreground/background exec, scratch execution and verification. Fail closed if required isolation is unavailable. Include runtime/network policy in verifier approval keys and test the CLI path. |
-| [#577](https://github.com/kstruzzieri/go-llm/issues/577) — Agentflow environment allowlist | P1 | 2–3 | Replace ambient environment inheritance with a documented baseline plus explicit runner variables; prove unrelated sentinel secrets do not reach the child. |
-| [#578](https://github.com/kstruzzieri/go-llm/issues/578) — MCP connection and environment boundaries | P1 | 5 | Explicit stdio environment allowlists and HTTP endpoint binding/redirect refusal for handshake, discovery, calls and cleanup. Environment allowlists limit inherited-secret exposure, not filesystem or network authority; local MCP retains host-user authority without an explicitly selected sandbox from [#580](https://github.com/kstruzzieri/go-llm/issues/580). Catalog pin identity remains workspace/alias/catalog unless explicitly amended. |
+| [#577](https://github.com/kstruzzieri/go-llm/issues/577) — Agentflow environment allowlist | P1 | 2–3 | Shipped: Agentflow children get a documented baseline plus `-agentflow-env` names; sentinel secrets are proven absent from Agentflow and executed gates, in installed and source modes, by a pinned real-Agentflow CI job. |
+| [#578](https://github.com/kstruzzieri/go-llm/issues/578) — MCP connection and environment boundaries | P1 | 5 | Shipped: stdio servers get a documented baseline plus `-mcp-env` names and run in the workspace root; HTTP endpoints are bound exactly, with every redirect refused, for handshake, discovery, calls and cleanup. Environment allowlists limit inherited-secret exposure, not filesystem or network authority; local MCP retains host-user authority without an explicitly selected sandbox from [#580](https://github.com/kstruzzieri/go-llm/issues/580). Pin identity is amended: each workspace/alias pin now also binds keyed fingerprints of the connection (launch or endpoint), checked before launch, and pins from earlier versions need one re-approval. |
 | [#579](https://github.com/kstruzzieri/go-llm/issues/579) — per-server MCP tool selection | P1 | 3 | Exact tool allowlists affect advertisement and invocation. Preserve full-catalog drift checks and existing mandatory MCP approval. |
 | [#580](https://github.com/kstruzzieri/go-llm/issues/580) — local MCP subprocess confinement | P2 | 8, provisional | Independently integrate a sandboxed stdio launch path with lifecycle cleanup. Validate feasibility before committing the implementation scope; CLI sandbox-selector availability is not a prerequisite. |
 
@@ -218,6 +296,6 @@ Reuse [#434](https://github.com/kstruzzieri/go-llm/issues/434) quarantined inges
 2. Narrow grants with [#420](https://github.com/kstruzzieri/go-llm/issues/420) and complete the individually sized observability issues. Develop [#580](https://github.com/kstruzzieri/go-llm/issues/580) against its own stdio launch seam, coordinated with [#578](https://github.com/kstruzzieri/go-llm/issues/578) and [#406](https://github.com/kstruzzieri/go-llm/issues/406).
 3. Implement [#582](https://github.com/kstruzzieri/go-llm/issues/582), then [#583](https://github.com/kstruzzieri/go-llm/issues/583). Enable [#584](https://github.com/kstruzzieri/go-llm/issues/584) only with both continuity layers and regression evidence. Feed remaining demonstrated gaps into deferred [#585](https://github.com/kstruzzieri/go-llm/issues/585) discovery.
 
-Points are provisional relative complexity, not engineer-day conversions. There is no inferred velocity, delivery date or fixed aggregate commitment. The [release roadmap](../README.md#roadmap) records milestone scope; new work here has no release commitment until explicitly assigned. In particular, P1 [#575](https://github.com/kstruzzieri/go-llm/issues/575) is unmilestoned: priority is not a release assignment. Milestone placement requires a separate capacity decision.
+Points are provisional relative complexity, not engineer-day conversions. There is no inferred velocity, delivery date or fixed aggregate commitment. The [release roadmap](../README.md#roadmap) records milestone scope; new work here has no release commitment until explicitly assigned. Priority is not a release assignment; placement is a separate capacity decision. The 2026-09-30 re-plan assigned the step 1 work ([#575](https://github.com/kstruzzieri/go-llm/issues/575), [#577](https://github.com/kstruzzieri/go-llm/issues/577), [#578](https://github.com/kstruzzieri/go-llm/issues/578), [#579](https://github.com/kstruzzieri/go-llm/issues/579), with [#576](https://github.com/kstruzzieri/go-llm/issues/576) as a stretch item) to v0.5.0 and [#582](https://github.com/kstruzzieri/go-llm/issues/582)–[#584](https://github.com/kstruzzieri/go-llm/issues/584) to the v0.6.0 outline. At the v0.5.0 stamp, [#576](https://github.com/kstruzzieri/go-llm/issues/576) moved to v0.6.0 with the other v0.5.0 stretch items.
 
 A policy service, JIT credential broker or sender-constrained OAuth is deferred until a concrete consumer/integration needs it and supports the corresponding upstream scopes and token lifecycle. Reuse the current deterministic enforcement seams first. Local wrappers cannot manufacture upstream authorization restrictions.

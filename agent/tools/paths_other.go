@@ -85,6 +85,12 @@ func (w *Workspace) openRegularFile(p string) (*os.File, error) {
 	return f, nil
 }
 
+// openWalked opens by checked path after the guard decided; this backend has
+// no retained descriptors and adds no #613 recheck.
+func (w *Workspace) openWalked(rel string, _ fs.DirEntry) (*os.File, error) {
+	return w.openRegularFile(rel)
+}
+
 func (w *Workspace) openReadDir(p string) (*os.File, string, error) {
 	f, err := w.openDir(p)
 	if err != nil {
@@ -99,6 +105,18 @@ func (w *Workspace) openReadDir(p string) (*os.File, string, error) {
 	return f, rel, err
 }
 func readWorkspaceEntries(f *os.File) ([]fs.DirEntry, error) { return f.ReadDir(-1) }
+
+// readDirEntries enumerates only. The checked-path backend opened this
+// directory by its checked path after the guard decided, so it adds no
+// post-enumeration check (#613); other platforms keep their existing limits.
+func (w *Workspace) readDirEntries(f *os.File, _ string) ([]fs.DirEntry, error) {
+	return readWorkspaceEntries(f)
+}
+
+// No-op for the same reason: this backend's reads open by checked path after
+// the guard decides and keep their existing limits, adding no #613 recheck.
+func (w *Workspace) verifyReachable(_ string, _ *os.File) error       { return nil }
+func (w *Workspace) verifyWalkedParent(_ string, _ fs.DirEntry) error { return nil }
 
 func (w *Workspace) pinScope(string) (*os.File, string, error) {
 	return nil, "", errors.New("scoped dispatch is unsupported on this platform")

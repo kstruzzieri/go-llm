@@ -323,7 +323,7 @@ func canonicalCheckpointPath(p string) string {
 func formatCheckpointTime(t time.Time) string { return t.UTC().Format(time.RFC3339Nano) }
 
 // execTx runs fn inside one transaction and re-secures the DB files afterward
-// on every path (WAL/SHM can be recreated honoring the umask by any write). A
+// on every path (a WAL/SHM sidecar left with looser bits keeps them). A
 // hardening failure is an operation failure, never ignored.
 func (s *checkpointStore) execTx(ctx context.Context, fn func(*sql.Tx) error) error {
 	tx, err := s.db.BeginTx(ctx, nil)

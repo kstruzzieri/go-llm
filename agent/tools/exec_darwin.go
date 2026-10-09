@@ -67,6 +67,11 @@ type seatbeltProbeFunc func(context.Context, string) error
 // are command input, never policy (D5).
 const seatbeltTempBase = "/private/tmp"
 
+// seatbeltMaxSymlinkHops bounds the approved executable's symlink walk. It
+// exceeds the kernel's MAXSYMLINKS (32), so every chain the kernel can
+// resolve fits; a longer chain could never launch and fails closed.
+const seatbeltMaxSymlinkHops = 40
+
 // seatbeltDefaultSystemRoots is the reviewed, minimal read-only system
 // execution surface (D1). Broad mutable roots (/System, /usr, /Library,
 // /private/etc, /dev, Homebrew prefixes) are deliberately absent — on current
@@ -165,6 +170,15 @@ func seatbeltTempCleanup(dir string, created os.FileInfo) func() error {
 // on failure prepare has already attempted guarded cleanup itself and nothing
 // may spawn. The stamped WorkspaceRoot is consumed as-is — re-resolving it
 // here could silently change the policy after approval.
+//
+// Before constructing the profile, prepare requires the executable target it
+// resolves to be the approved object (spec.ExeIdentity, os.SameFile): the
+// last check binding the approved object, not its bytes, and not atomic with
+// launch. The wrapper still launches the approved spelling spec.Path, not
+// the canonical target, because sandbox-exec cannot override argv[0] and
+// multi-call binaries dispatch on it (clang++ -> clang). sandbox-exec
+// re-resolves that spelling at launch; a swap after this check stays the
+// documented residual, still confined by the profile.
 func (b *seatbeltBackend) prepare(spec execSpec) (execSpec, func() error, error) {
 	if len(spec.Argv) == 0 || spec.Path == "" {
 		return execSpec{}, nil, errors.New("tools: seatbelt requires a non-empty argv and executable path")
@@ -212,6 +226,15 @@ func (b *seatbeltBackend) prepare(spec execSpec) (execSpec, func() error, error)
 	if err != nil {
 		return fail(fmt.Errorf("tools: seatbelt resolve executable target: %w", err))
 	}
+	// The profile's read allowance is about to name canonExe; confine it to
+	// the approved object (#553). A nil identity is refused, never skipped.
+	exeInfo, err := os.Stat(canonExe)
+	if err != nil {
+		return fail(fmt.Errorf("tools: seatbelt inspect executable target: %w", err))
+	}
+	if spec.ExeIdentity == nil || !os.SameFile(exeInfo, spec.ExeIdentity) {
+		return fail(errors.New("executable changed since approval; retry"))
+	}
 	sysRoots, err := b.systemRoots(spec.WorkspaceRoot)
 	if err != nil {
 		return fail(err)
@@ -219,15 +242,23 @@ func (b *seatbeltBackend) prepare(spec execSpec) (execSpec, func() error, error)
 	ancestorSources := append(append([]string(nil), sysRoots...),
 		spec.WorkspaceRoot, canonTemp, canonExe,
 		"/dev/null", "/dev/random", "/dev/urandom")
+	var links []string
 	if canonExe != spec.Path && posixCleanAbs(spec.Path) {
-		// A symlinked approved path needs metadata on its own spine to be
-		// resolvable; the content allowance stays on the canonical target.
-		ancestorSources = append(ancestorSources, spec.Path)
+		// sandbox-exec's execvp reads every link on the approved spelling's
+		// chain, so each link node gets a metadata literal and its own
+		// traversal spine; the content allowance stays on canonExe alone.
+		// The chain is walked here: a change before launch is the
+		// documented pathname-launch residual, still inside the profile.
+		if links, err = seatbeltSymlinkChain(spec.Path, canonExe); err != nil {
+			return fail(err)
+		}
+		ancestorSources = append(append(ancestorSources, spec.Path), links...)
 	}
 	ancestors, err := seatbeltMetadataAncestors(ancestorSources)
 	if err != nil {
 		return fail(err)
 	}
+	ancestors = append(ancestors, links...)
 	profile, err := buildSeatbeltProfile(seatbeltPolicy{
 		workspaceRoot:     spec.WorkspaceRoot,
 		tempRoot:          canonTemp,
@@ -247,6 +278,54 @@ func (b *seatbeltBackend) prepare(spec execSpec) (execSpec, func() error, error)
 	wrapped.Path = b.execPath
 	wrapped.Argv = append([]string{"sandbox-exec", "-p", profile, spec.Path}, spec.Argv[1:]...)
 	return wrapped, cleanup, nil
+}
+
+// seatbeltSymlinkChain resolves the approved spelling one component at a time
+// and returns every symlink it traverses, file or directory, at its
+// canonical-parent spelling: the path Seatbelt checks when execvp reads that
+// link. The walk must end at canonExe, the target the identity check
+// approved; any other end, or more than seatbeltMaxSymlinkHops links, fails
+// closed.
+func seatbeltSymlinkChain(spelled, canonExe string) ([]string, error) {
+	var links []string
+	resolved := "/"
+	rest := strings.Split(spelled, "/")
+	for len(rest) > 0 {
+		name := rest[0]
+		rest = rest[1:]
+		switch name {
+		case "", ".":
+			continue
+		case "..":
+			resolved = filepath.Dir(resolved)
+			continue
+		}
+		next := filepath.Join(resolved, name)
+		fi, err := os.Lstat(next)
+		if err != nil {
+			return nil, fmt.Errorf("tools: seatbelt walk executable symlinks: %w", err)
+		}
+		if fi.Mode()&os.ModeSymlink == 0 {
+			resolved = next
+			continue
+		}
+		if len(links) == seatbeltMaxSymlinkHops {
+			return nil, fmt.Errorf("tools: seatbelt executable %q traverses more than %d symlinks", spelled, seatbeltMaxSymlinkHops)
+		}
+		links = append(links, next)
+		target, err := os.Readlink(next)
+		if err != nil {
+			return nil, fmt.Errorf("tools: seatbelt walk executable symlinks: %w", err)
+		}
+		if filepath.IsAbs(target) {
+			resolved = "/"
+		}
+		rest = append(strings.Split(target, "/"), rest...)
+	}
+	if resolved != canonExe {
+		return nil, fmt.Errorf("tools: seatbelt executable %q resolves to %q, not the approved target %q", spelled, resolved, canonExe)
+	}
+	return links, nil
 }
 
 // Run executes one foreground command under its per-invocation profile. A

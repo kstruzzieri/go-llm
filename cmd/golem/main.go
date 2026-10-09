@@ -18,11 +18,13 @@ import (
 	"github.com/kstruzzieri/go-llm/agent"
 	"github.com/kstruzzieri/go-llm/agent/interceptor"
 	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
+	"github.com/kstruzzieri/go-llm/agentflow"
 	"github.com/kstruzzieri/go-llm/config"
 	"github.com/kstruzzieri/go-llm/conversation"
 	"github.com/kstruzzieri/go-llm/fingerprint"
 	golemruntime "github.com/kstruzzieri/go-llm/golem"
 	"github.com/kstruzzieri/go-llm/internal/providerbootstrap"
+	"github.com/kstruzzieri/go-llm/mcpclient"
 	"github.com/kstruzzieri/go-llm/provider"
 	"github.com/kstruzzieri/go-llm/provider/openaicompat"
 	"github.com/kstruzzieri/go-llm/rag"
@@ -55,9 +57,11 @@ type flags struct {
 	delegateRole        string
 	dispatch            bool
 	dispatchRole        string
-	interceptors        bool // -interceptors: default interceptor chain on every orchestrator and dispatch child (#514/#439)
+	interceptors        bool // -interceptors: full content chain on top of the always-on guards (#514/#439/#575)
 	mcpStdio            stringSliceFlag
 	mcpHTTP             stringSliceFlag
+	mcpTools            stringSliceFlag
+	mcpEnv              stringSliceFlag
 	allowDestinations   stringSliceFlag
 	noRag               bool
 	noAutoIndex         bool
@@ -80,6 +84,7 @@ type flags struct {
 	approveEdits        bool
 	approveGates        bool
 	agentflowSrc        string
+	agentflowEnv        stringSliceFlag // -agentflow-env: parent variable names Agentflow and its gates may receive
 	agentflowStatus     bool
 	agentflowResume     bool
 	jsonOutput          bool
@@ -104,6 +109,24 @@ type flags struct {
 	trustProjectContextSet bool
 
 	consultantsConfig string // -consultants-config: explicit consultants.json path (#382)
+}
+
+// parseQuietly parses args without the flag package's own error output, which
+// quotes argv (unknown flags, bad values) and so may echo secrets. Help still
+// prints fs.Usage to helpOut (nil means stderr, the flag package default);
+// every other failure becomes one value-free error.
+func parseQuietly(fs *flag.FlagSet, args []string, helpOut io.Writer) error {
+	fs.SetOutput(io.Discard)
+	err := fs.Parse(args)
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, flag.ErrHelp) {
+		fs.SetOutput(helpOut)
+		fs.Usage()
+		return flag.ErrHelp
+	}
+	return fmt.Errorf("invalid command-line flags in %d argument(s); run with -help for usage", len(args))
 }
 
 func parseFlags(args []string) (flags, error) {
@@ -132,9 +155,11 @@ func parseFlags(args []string) (flags, error) {
 	fs.StringVar(&f.delegateRole, "delegate-role", "coding", "model role the delegate_code tool routes to")
 	fs.BoolVar(&f.dispatch, "dispatch", false, "enable the dispatch tool (bounded read-only exploration tasks use backend-governed concurrency; ungoverned routing stays serial)")
 	fs.StringVar(&f.dispatchRole, "dispatch-role", "", "model role dispatch child agents route to (default: the primary agent chain, so children never force a model swap)")
-	fs.BoolVar(&f.interceptors, "interceptors", false, "enable the interceptor pipeline (#436/#437/#439): origin-sensitive injection detectors, all-origin supported secret/payment-card blocking across completed turns, argument guards, and command egress labels on the agent and dispatch children; streaming output is not intercepted; risk appears at interactive tool-call and plan-lock prompts and successful REPL/-p stderr footers, but not verifier approval prompts; default off")
-	fs.Var(&f.mcpStdio, "mcp-stdio", "attach an MCP server over stdio: \"[alias=]command args...\" (repeatable; use `env KEY=val cmd` for env vars)")
+	fs.BoolVar(&f.interceptors, "interceptors", false, "add the content interceptor pipeline (#436/#437/#438) on top of the always-on guards (#439/#555, always on since #575: argument invariants for named tools, exec-class egress labels, scoped-child refusal reporting): origin-sensitive injection detectors, all-origin supported secret/payment-card blocking across completed turns, and a canary; required by /consult; streaming output is not intercepted; risk appears at interactive tool-call and plan-lock prompts and successful REPL/-p stderr footers with or without this flag, but not verifier approval prompts; default off")
+	fs.Var(&f.mcpStdio, "mcp-stdio", "attach an MCP server over stdio: \"[alias=]command args...\" (repeatable; runs in -root with a minimal environment; forward variables with -mcp-env)")
 	fs.Var(&f.mcpHTTP, "mcp-http", "attach an MCP server over streamable HTTP: \"[alias=]https://endpoint\" (repeatable)")
+	fs.Var(&f.mcpTools, "mcp-tools", "expose only these original tools of an attached MCP server: \"alias=name[,name...]\"; \"alias=\" exposes none (repeatable; the complete catalog is still verified and pinned)")
+	fs.Var(&f.mcpEnv, "mcp-env", "forward named environment variables to an attached stdio MCP server: \"alias=NAME[,NAME...]\" (repeatable; values are read from golem's environment, never from the command line)")
 	fs.Var(&f.allowDestinations, "allow-destination", "admit a remote model destination without prompting: \"<provider>/<canonical base URL>\" (repeatable; required for remote destinations in noninteractive runs)")
 	fs.BoolVar(&f.noRag, "no-rag", false, "disable the retrieve tool entirely (ignore any auto index)")
 	fs.BoolVar(&f.noAutoIndex, "no-auto-index", false, "disable startup auto-index refresh, which otherwise skips detected secret/payment-card files by default; existing auto indexes may still be used")
@@ -158,11 +183,12 @@ func parseFlags(args []string) (flags, error) {
 	fs.BoolVar(&f.feedback, "feedback", false, "enable local behavioral feedback collection and retrieval ranking")
 	fs.StringVar(&f.feedbackDB, "feedback-db", "", "override the behavioral feedback DB path (default: per-workspace under the data dir)")
 	fs.StringVar(&f.think, "think", "", "reasoning control for the agent model: off, on, low, medium, high (default: model decides); no-op with a notice when the model does not support thinking")
-	fs.StringVar(&f.planPath, "plan", "", "AgentFlow task mode: path to a plan document (JSON) to lock and execute; requires both -approve-plan-edits and -approve-plan-gates; mutually exclusive with -p, -allow-write/-allow-exec, -rag-db, -delegate, -dispatch, and -mcp-*")
+	fs.StringVar(&f.planPath, "plan", "", "AgentFlow task mode (requires AgentFlow 1.x): path to a plan document (JSON) to lock and execute; requires both -approve-plan-edits and -approve-plan-gates; mutually exclusive with -p, -allow-write/-allow-exec, -rag-db, -delegate, -dispatch, and -mcp-*")
 	fs.IntVar(&f.planWorkers, "plan-workers", 1, "AgentFlow task mode: maximum workers for the initial parallel plan cohort (positive; requires -plan)")
 	fs.BoolVar(&f.approveEdits, "approve-plan-edits", false, "required in task mode: auto-approve step-scoped write/edit (still bounded by the step-scope and .agent guards)")
 	fs.BoolVar(&f.approveGates, "approve-plan-gates", false, "required in task mode: auto-run plan-declared validation gates")
 	fs.StringVar(&f.agentflowSrc, "agentflow-src", "", "run 'python3 -P -m agentflow' with PYTHONPATH=<checkout>/src instead of the agentflow binary (Python 3.11+)")
+	fs.Var(&f.agentflowEnv, "agentflow-env", "forward one named parent environment variable to Agentflow and every gate it runs (repeatable; names only, values are read at launch)")
 	fs.BoolVar(&f.agentflowStatus, "agentflow-status", false, "inspect the current Agentflow next action without mutation")
 	fs.BoolVar(&f.agentflowResume, "agentflow-resume", false, "resume an existing Agentflow run serially; requires -plan and both plan approvals")
 	fs.BoolVar(&f.jsonOutput, "json", false, "with -agentflow-status, relay Agentflow next-action JSON verbatim")
@@ -172,15 +198,16 @@ func parseFlags(args []string) (flags, error) {
 	fs.StringVar(&f.workflowHandoffPath, "workflow-handoff", "", "task mode: approved workflow recommendation already materialized by planning mode")
 	fs.StringVar(&f.workflowProfile, "workflow-profile", "", "Agentflow modes: explicitly select a workflow profile; requires -workflow-reason")
 	fs.StringVar(&f.workflowReason, "workflow-reason", "", "Agentflow modes: non-empty rationale paired with -workflow-profile")
-	fs.StringVar(&f.goal, "goal", "", "AgentFlow planning mode: author and preview a traceable plan, require approval to lock it, then stop")
+	fs.StringVar(&f.goal, "goal", "", "AgentFlow planning mode (requires AgentFlow 1.x): author and preview a traceable plan, require approval to lock it, then stop")
 	fs.BoolVar(&f.approvePlanLock, "approve-plan-lock", false, "planning mode: print the plan preview and approve the lock without prompting (non-interactive -goal)")
 	fs.StringVar(&f.outputFormat, "output-format", "text", "one-shot mode: stdout format — text (the final answer), json (one golem.result.v1 record), or stream-json (one protocol-v1 event per line, then the same record); requires -p")
 	fs.Var(&f.allowTools, "allow-tool", "one-shot mode: mount and non-interactively approve one exact built-in gated tool by name (repeatable; write_file, edit_file, run_command, start_command, stop_command); creates no session grants; MCP tools and submit_plan are never eligible; requires -p")
-	if err := fs.Parse(args); err != nil {
+	// main() prefixes "golem: " when it prints the error.
+	if err := parseQuietly(fs, args, nil); err != nil {
 		return flags{}, err
 	}
 	if fs.NArg() > 0 {
-		return flags{}, fmt.Errorf("golem: unexpected positional arguments %q; every option must be a -flag", fs.Args())
+		return flags{}, fmt.Errorf("golem: %d unexpected positional argument(s); every option must be a -flag", fs.NArg())
 	}
 	f.think = strings.ToLower(f.think)
 	switch f.think {
@@ -239,6 +266,9 @@ func autoIndexEnabled(f flags, autoErr, embChainErr error) bool {
 
 // validateFlags rejects flag values flag.Parse cannot police.
 func validateFlags(f flags) error {
+	if err := agentflow.ValidateEnvNames(f.agentflowEnv); err != nil {
+		return fmt.Errorf("golem: -agentflow-env: %w", err)
+	}
 	if f.trustProjectContextSet {
 		if f.noProjectContext {
 			return fmt.Errorf("-trust-project-context conflicts with -no-project-context")
@@ -272,7 +302,7 @@ func validateFlags(f flags) error {
 		}
 		if f.promptSet || f.goalSet || f.reviewManifest != "" || f.evidencePath != "" ||
 			f.wfProfileSet || f.wfReasonSet || f.workflowProfile != "" || f.workflowReason != "" ||
-			f.ragDB != "" || f.delegate || f.dispatch || len(f.mcpStdio) > 0 || len(f.mcpHTTP) > 0 ||
+			f.ragDB != "" || f.delegate || f.dispatch || len(f.mcpStdio) > 0 || len(f.mcpHTTP) > 0 || len(f.mcpTools) > 0 || len(f.mcpEnv) > 0 ||
 			f.allowWrite || f.allowExec || f.approvePlanLock {
 			return fmt.Errorf("golem: %s cannot be combined with planning, setup, review, or ambient tool flags", mode)
 		}
@@ -368,7 +398,7 @@ func validateFlags(f flags) error {
 	if f.planPath != "" && f.dispatch {
 		return fmt.Errorf("golem: -plan (task mode) does not attach dispatch; proof-mode tools are built from the locked plan")
 	}
-	if f.planPath != "" && (len(f.mcpStdio) > 0 || len(f.mcpHTTP) > 0) {
+	if f.planPath != "" && (len(f.mcpStdio) > 0 || len(f.mcpHTTP) > 0 || len(f.mcpTools) > 0 || len(f.mcpEnv) > 0) {
 		return fmt.Errorf("golem: -plan (task mode) does not attach MCP tools; proof-mode tools are built from the locked plan")
 	}
 	if f.planPath != "" && (!f.approveEdits || !f.approveGates) {
@@ -395,7 +425,7 @@ func validateFlags(f flags) error {
 	if f.goalSet && f.dispatch {
 		return fmt.Errorf("golem: -goal (planning mode) does not attach dispatch")
 	}
-	if f.goalSet && (len(f.mcpStdio) > 0 || len(f.mcpHTTP) > 0) {
+	if f.goalSet && (len(f.mcpStdio) > 0 || len(f.mcpHTTP) > 0 || len(f.mcpTools) > 0 || len(f.mcpEnv) > 0) {
 		return fmt.Errorf("golem: -goal (planning mode) does not attach MCP tools")
 	}
 	if f.goalSet && f.evidencePath != "" {
@@ -608,13 +638,14 @@ func startupNotices(info startupInfo) []string {
 	return out
 }
 
-// interceptorsFor is the ONE place the flag becomes a chain (#514 D2): the
-// startup orchestrator, every factory-built orchestrator, and every dispatch
-// child derive exactly this list from the production flags value. nil when
-// -interceptors is off.
+// interceptorsFor is the ONE place the flag becomes a chain (#514 D2, #575):
+// the startup orchestrator, every factory-built orchestrator, and every
+// dispatch child derive exactly this list from the production flags value.
+// Without -interceptors it is Golem's always-on deterministic guards; with it,
+// the full default chain plus the canary. Never empty.
 func interceptorsFor(f flags, canary *canaryBinding) []agent.Interceptor {
 	if !f.interceptors {
-		return nil
+		return defaultGuards()
 	}
 	if canary == nil {
 		// An omitted binding fails at ForRun instead of silently losing policy.
@@ -623,14 +654,39 @@ func interceptorsFor(f flags, canary *canaryBinding) []agent.Interceptor {
 	return append(interceptor.Defaults(), canary)
 }
 
-// interceptorsNotice names the installed chain in the startup notice, from
-// the instances themselves, so the line cannot drift from what runs.
-func interceptorsNotice(ics []agent.Interceptor) string {
+// defaultGuards is Golem's always-on subset of interceptor.Defaults (#575 D2,
+// D4), selected by concrete type so construction and relative order stay the
+// library's. ponytail: a new Defaults member stays off until it is named
+// here, which keeps widening the default an explicit decision.
+func defaultGuards() []agent.Interceptor {
+	var out []agent.Interceptor
+	for _, ic := range interceptor.Defaults() {
+		switch ic.(type) {
+		case interceptor.Invariants, interceptor.Egress, interceptor.ChildScopeDenials:
+			out = append(out, ic)
+		}
+	}
+	// Fail closed, like interceptor.mustInvariants: a re-typed or removed
+	// library guard must not silently shrink the always-on set.
+	if len(out) != 3 {
+		panic(fmt.Sprintf("golem: default guards: matched %d of 3 in interceptor.Defaults", len(out)))
+	}
+	return out
+}
+
+// interceptorsNotice names the installed chain in the startup notice. The
+// names come from the instances themselves, so the list cannot drift from
+// what runs; the guards-only suffix is fixed text. The guards-only chain
+// (#575) never claims "enabled".
+func interceptorsNotice(full bool, ics []agent.Interceptor) string {
 	names := make([]string, len(ics))
 	for i, ic := range ics {
 		names[i] = ic.Name()
 	}
-	return "interceptors: enabled (" + strings.Join(names, ", ") + ")"
+	if full {
+		return "interceptors: enabled (" + strings.Join(names, ", ") + ")"
+	}
+	return "guards: " + strings.Join(names, ", ") + " (always on; -interceptors adds detectors, secrets, canary)"
 }
 
 // newOrchestratorFactory returns the session's orchestrator constructor. The
@@ -644,7 +700,8 @@ func interceptorsNotice(ics []agent.Interceptor) string {
 //
 // With -dispatch it also installs the per-run dispatch invocation cap, and
 // with a workspace-declared verifier (#347) the post-write verification hook.
-// With -interceptors it also installs the default interceptor chain (#514/#439).
+// It always installs interceptorsFor's chain: the deterministic guards, or
+// the full default chain with -interceptors (#514/#439/#575).
 // A typed-nil verifier would satisfy the interface and panic on first use
 // (#347); the factory normalizes the two concrete types it can receive so
 // that guarantee does not rest on every call site.
@@ -666,12 +723,10 @@ func newOrchestratorFactory(caller agent.ModelCaller, f flags, verifier agent.Ve
 			Max:  agenttools.DefaultDispatchCallsPerRun,
 		}))
 	}
-	if ics := interceptorsFor(f, canary); len(ics) > 0 {
-		// #514 D2: the same chain on every orchestrator this factory builds;
-		// dispatch children receive it through newDispatchTool from the same
-		// flags value.
-		opts = append(opts, agent.WithInterceptors(ics...))
-	}
+	// #514 D2 / #575: the same chain on every orchestrator this factory
+	// builds; dispatch children receive it through newDispatchTool from the
+	// same flags value.
+	opts = append(opts, agent.WithInterceptors(interceptorsFor(f, canary)...))
 	return func() *agent.Orchestrator {
 		return agent.New(caller, agent.ContextManager{Mixed: f.progressive}, opts...)
 	}
@@ -713,6 +768,9 @@ func main() {
 		}
 		var statusErr *agentflowStatusExit
 		if errors.As(err, &statusErr) {
+			if statusErr.diagnostic != "" {
+				_, _ = fmt.Fprintf(os.Stderr, "golem: %s\n", statusErr.diagnostic)
+			}
 			os.Exit(statusErr.ExitCode())
 		}
 		if code, ok := auditExitCode(err); ok {
@@ -796,10 +854,13 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 			return runIndex(context.Background(), args[1:], stdout, stderr)
 		case "models":
 			return runModels(context.Background(), args[1:], stdout, stderr)
+		case "ops":
+			return runOps(context.Background(), args[1:], stdin, stdout, stderr)
 		case "source":
 			return runSource(context.Background(), args[1:], stdin, stdout, stderr)
 		default:
-			return fmt.Errorf("unknown command %q (did you mean \"audit\", \"index\", \"models\", \"source\", or \"mcp\"?)", args[0])
+			// Unquoted: the argument may be a pasted secret.
+			return errors.New("unknown command (did you mean \"audit\", \"index\", \"models\", \"ops\", \"source\", or \"mcp\"?)")
 		}
 	}
 
@@ -848,6 +909,10 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	if merr != nil {
 		return maybeUsageError(errors.New("golem: invalid MCP server specification"), headlessExitApplies(f))
 	}
+	mcpServers, merr = applyMCPTools(mcpServers, f.mcpTools)
+	if merr != nil {
+		return maybeUsageError(fmt.Errorf("golem: %w", merr), headlessExitApplies(f))
+	}
 	f, taskWarns := applyTaskMode(f)
 	f, goalWarns := applyGoalMode(f)
 	taskWarns = append(taskWarns, goalWarns...)
@@ -861,10 +926,14 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	if root, err = filepath.EvalSymlinks(root); err != nil {
 		return maybeUsageError(fmt.Errorf("resolve root: %w", err), headlessExitApplies(f))
 	}
+	mcpServers, merr = withMCPPolicy(root, mcpServers, len(f.mcpStdio), f.mcpEnv)
+	if merr != nil {
+		return maybeUsageError(fmt.Errorf("golem: %w", merr), headlessExitApplies(f))
+	}
 
 	ctx := context.Background()
 	if f.agentflowStatus {
-		return runAgentflowStatus(ctx, stdout, root, f.agentflowSrc, f.jsonOutput)
+		return runAgentflowStatus(ctx, stdout, root, f.agentflowSrc, f.agentflowEnv, f.jsonOutput)
 	}
 
 	projectState, pendingTrust, err := preflightProjectContext(ctx, stderr, root, f)
@@ -1013,7 +1082,14 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	mcpBlocked := mcpBlockedAliases(mcpWarns)
 	if mcpErr != nil || (f.promptSet && len(mcpBlocked) > 0) {
 		err := errors.New("golem: MCP catalog admission failed")
-		_, _ = fmt.Fprintln(stderr, "mcp: catalog admission failed")
+		// An AdmissionError's text is alias, reason and a fixed rule; any
+		// other fatal error may carry paths, so it stays generic.
+		var refusal *mcpclient.AdmissionError
+		if mcpErr != nil && errors.As(mcpErr, &refusal) {
+			_, _ = fmt.Fprintln(stderr, "mcp: "+mcpErr.Error())
+		} else {
+			_, _ = fmt.Fprintln(stderr, "mcp: catalog admission failed")
+		}
 		reportPreRunFailure(stdout, outFormat, "mcp_untrusted", err)
 		return err
 	}
@@ -1305,12 +1381,11 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		}
 		dispatchLine = fmt.Sprintf("dispatch: enabled -> %s", head)
 	}
-	interceptorLine := ""
-	interceptorsOn := false
-	if ics := interceptorsFor(f, canary); len(ics) > 0 {
-		interceptorLine = interceptorsNotice(ics)
-		interceptorsOn = true
-	}
+	interceptorLine := interceptorsNotice(f.interceptors, interceptorsFor(f, canary))
+	// #575 D5: /consult admits staged advice only under the FULL chain. The
+	// always-on guards never inspect advisory text, so the gate follows the
+	// flag, not "a chain is installed".
+	interceptorsOn := f.interceptors
 
 	consultants, cerr := loadConsultants(f.consultantsConfig)
 	if cerr != nil {

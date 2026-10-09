@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -52,7 +53,6 @@ func runModels(ctx context.Context, args []string, out, errOut io.Writer) error 
 		jsonOut    bool
 	)
 	fs := flag.NewFlagSet("golem models", flag.ContinueOnError)
-	fs.SetOutput(errOut)
 	fs.StringVar(&configPath, "config", "", "path to models.json (default: auto-discover)")
 	fs.StringVar(&rootFlag, "root", ".", "workspace root (scopes the cap-probe cache path guard)")
 	fs.StringVar(&baseURL, "base-url", "", "override the openai-compat backend base URL (server root, without /v1); used as given, disables discovery")
@@ -63,8 +63,11 @@ func runModels(ctx context.Context, args []string, out, errOut io.Writer) error 
 	fs.BoolVar(&jsonOut, "json", false, "emit the configview snapshot as JSON (no probing; excludes -probe-all/-reprobe)")
 	var allowDest stringSliceFlag
 	fs.Var(&allowDest, "allow-destination", "admit a remote model destination: \"<provider>/<canonical base URL>\" (repeatable; this command never prompts)")
-	if err := fs.Parse(args); err != nil {
-		return err
+	if err := parseQuietly(fs, args, errOut); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return err
+		}
+		return fmt.Errorf("golem models: %w", err)
 	}
 	fs.Visit(func(fl *flag.Flag) {
 		if fl.Name == "base-url" {

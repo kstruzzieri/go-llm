@@ -19,7 +19,15 @@
 // serve the active model route, startup scans 127.0.0.1:8080-8090 for it
 // (-no-probe disables the scan).
 //
-// -interceptors installs the #436 injection detectors (zero-width characters,
+// Every agent session installs three deterministic interceptors on the agent
+// and on every dispatch child, with or without -interceptors (#575): the #439
+// argument invariants and egress classifier described below, and #555
+// scoped-child refusal reporting, which adds native dispatch refusals to the
+// parent's risk report. Their findings raise the run's risk score, shown on
+// interactive tool-call and plan-lock prompts and on successful REPL and -p
+// stderr footers, whether or not -interceptors is set.
+//
+// -interceptors adds the #436 injection detectors (zero-width characters,
 // base64/hex-encoded instructions, exact and scrambled instruction phrases)
 // on the agent and on every dispatch child. Injection content is classified by
 // provenance: workspace files, command output, memory records, plan
@@ -30,9 +38,9 @@
 // show "interceptor risk 30"; the verifier approval prompt cannot show it.
 // Successful REPL and -p stderr footers append " · risk 30". The
 // non-interactive -approve-plan-lock path is unchanged. A dispatch child's
-// score stays in that child's existing risk_score envelope field rather than
-// aggregating into the parent report. The -trace record carries every parent
-// finding. These three injection detectors return no output findings.
+// own score stays in that child's existing risk_score envelope field rather
+// than aggregating into the parent report. The -trace record carries every
+// parent finding. These three injection detectors return no output findings.
 //
 // The same opt-in chain installs Secrets. It blocks supported credential and
 // payment-card shapes at every origin across input, completed model content and
@@ -44,7 +52,8 @@
 // content-light telemetry. Initial blocks save no conversation or checkpoint
 // row; later blocks retain undo records for earlier allowed mutations. A
 // caller-owned blocked agent.Result may still contain its original goal.
-// -interceptors remains off by default.
+// -interceptors remains off by default; the #439 guards and #555 refusal
+// reporting do not depend on it.
 //
 // With -interceptors, Golem also plants an unpredictable canary in its system
 // instructions for each live conversation activation. The canary survives
@@ -78,27 +87,50 @@
 // in tool arguments; other transformations or encodings, split values, Unicode
 // normalization and cross-message reconstruction are outside this detector.
 //
-// The same chain carries the #439 guards, so they are opt-in with it.
-// Argument invariants block a tool call before it is planned or prompted:
-// write_file, edit_file and promote_artifact under a .git, .ssh, .gnupg,
-// .aws or .kube component, read_file under the credential components or
-// the exact basename .env, and an inline sh/bash/dash/ksh/zsh -c script that
-// pipes a curl or wget stdout fetch into a bare shell (optionally under
-// sudo). The guard reads the argument the tool's own decoder would use, so
-// a case-variant field name is guarded and two equivalent spellings are
-// blocked as ambiguous. The model sees "tool call blocked by interceptor
-// invariants (<name>)". The egress classifier tags every run_command and
-// start_command by what its argv visibly reaches (privileged, network,
-// package-manager, interpreter, unknown) after peeling env, nohup, nice,
-// time, timeout and stdbuf; anything it cannot parse, including an inline
-// script it cannot read literally, and any command outside its quiet set,
-// stays visible as unknown. The approval prompt
-// appends the current call's class and label to the risk line,
+// The #439 guards run in every session, with or without -interceptors (#575).
+// Argument invariants block a tool call before it is planned or approved, so
+// session grants and -allow-tool cannot override them; the model sees "tool
+// call blocked by interceptor invariants (<name>)" as a tool error. They cover
+// write_file, edit_file and promote_artifact under a .git, .ssh, .gnupg, .aws
+// or .kube component, read_file of a credential path (anything under .ssh,
+// .gnupg, .aws or .kube; .env and .env.* other than the committed templates
+// .env.example, .env.sample, .env.template and .env.dist; .netrc, _netrc,
+// .npmrc, .pypirc, .git-credentials; a config file under .git), and a
+// run_command or start_command whose argv is an inline
+// sh, bash, dash, ksh or zsh script that pipes a curl or wget stdout fetch
+// into a bare shell (optionally -s, or -s -- and arguments, optionally under
+// sudo). The outer shell is read with -c alone or among -e, -u, -x, -l and -i
+// (separate or clustered, as in -lic), -o errexit, nounset or xtrace, -o
+// pipefail on bash, zsh and ksh, and --, the script being the first operand;
+// any other option form, parse-only -n included, is not read and never
+// blocked. The guard reads the argument the tool's own decoder would use, so a
+// case-variant field name is guarded and two equivalent spellings are blocked
+// as ambiguous. Paths are matched relative to the workspace root (a session
+// rooted inside one of these directories is not covered) after a case fold that
+// also maps the spellings filesystems treat as one name (.ſsh and .ßh on APFS;
+// zero-width joiners and non-joiners, bidirectional and deprecated format
+// controls, and the BOM on HFS+; ::$DATA streams on Windows). These are
+// direct-access tripwires on named tool arguments, not confinement: search
+// skips the credential files and dispatch refuses a scope at or below .git,
+// .ssh, .gnupg, .aws or .kube, but run_command, retrieve, MCP tools, verifier
+// commands, edit_file's pre-approval match errors, and copies or hard links
+// under other names can still reach or expose the same files. The egress
+// classifier reads the argv of every run_command and start_command, and of any
+// other exec-class call (MCP tools included) whose arguments carry a top-level
+// argv string array, after peeling env, nohup, nice, time, timeout and stdbuf,
+// and labels what it visibly reaches (privileged, network, package-manager,
+// interpreter, unknown). A command in its quiet set gets no label. Anything
+// else it cannot parse, including a shell option form it does not read or an
+// inline script it cannot read literally, is labeled unknown; a readable script
+// whose network command is not literally in command position (command curl,
+// exec curl, a nested shell, zsh =curl) stays interpreter 0. The approval
+// prompt appends the current call's class and label to the risk line,
 // "interceptor risk 20 · egress: network (git push)", on grant-covered
-// auto-approvals too. These are finite checks over the argv, not a sandbox:
-// go build may still download modules and make runs whatever the Makefile
-// says. No score or badge revokes a grant. The hard line-count limit the
-// issue mentioned is deferred; the existing 256 KiB write bounds remain.
+// auto-approvals too. These are finite checks over the argv, not a sandbox: go
+// build may still download modules, make runs whatever the Makefile says, and
+// quiet commands such as find -exec, awk system() or git -c options can still
+// run anything. No score or badge revokes a grant. The hard line-count limit
+// the issue mentioned is deferred; the existing 256 KiB write bounds remain.
 //
 // Independently of -interceptors, every tool result reaches the model inside
 // a keyed <<<TOOL_RESULT / >>>TOOL_RESULT frame minted per request, and every
@@ -107,7 +139,8 @@
 // Golem application prompt and its capability-gated write/exec clauses
 // (#430). For observations allowed through the interceptor pipeline, the
 // terminal, events, session store and traces show raw results; approval,
-// grants and sandboxes remain the enforcement layer.
+// grants and sandboxes, plus the always-on argument invariants (a lexical
+// tripwire), remain the enforcement layer.
 //
 // /consult <name> <prompt> asks one external subscription CLI for a single
 // advisory judgment (#382). Consultants come only from a local
@@ -115,10 +148,11 @@
 // -consultants-config -- which owns the command path, model and bounds; the
 // operator supplies only the name and the prompt, and the adapter owns argv
 // and the process environment. It requires -interceptors, because the reply is
-// admitted through the same interceptor chain as any other untrusted ingress,
-// and it stages at most ONE receipt: the admitted answer rides the next goal
-// inside a keyed <<<CONSULT_ADVICE frame and is then dropped, never entering
-// history, summaries or the session store. Failed or answerless turns retain
+// admitted through the content interceptor pipeline as any other untrusted
+// ingress (the always-on guards scan no advisory text), and it stages at most
+// ONE receipt: the admitted answer rides the next goal inside a keyed
+// <<<CONSULT_ADVICE frame and is then dropped, never entering history,
+// summaries or the session store. Failed or answerless turns retain
 // the slot for retry, except interceptor refusal and context exhaustion, which
 // drop it with a notice. /new, /clear and a successful /resume also drop it;
 // /consult drop discards just the advice, preserving history and grants.

@@ -107,6 +107,39 @@ func TestCanonicalPlanJSONSHA256RejectsMalformedInput(t *testing.T) {
 	}
 }
 
+// parseAgentflowJSON runs on every retained ledger row before any AgentFlow
+// call, so nesting is bounded like encoding/json (10000): a deep line is
+// refused, not a fatal stack overflow (#612).
+func TestParseAgentflowJSONBoundsNesting(t *testing.T) {
+	arrays := func(n int) string { return strings.Repeat("[", n) + strings.Repeat("]", n) }
+	objects := func(n int) string { return strings.Repeat(`{"a":`, n) + "1" + strings.Repeat("}", n) }
+	for _, tc := range []struct {
+		name    string
+		data    string
+		wantErr bool
+	}{
+		{"arrays at the limit", arrays(10000), false},
+		{"arrays past the limit", arrays(10001), true},
+		{"objects at the limit", objects(10000), false},
+		{"objects past the limit", objects(10001), true},
+		// Width is not depth: leaving a container gives its level back.
+		{"10001 sibling arrays", "[" + strings.Repeat("[],", 10001) + "[]]", false},
+		{"10001 sibling objects", "[" + strings.Repeat("{},", 10001) + "{}]", false},
+		{"4M unterminated arrays", strings.Repeat("[", 4_000_000), true},
+		{"4M unterminated objects", strings.Repeat(`{"a":`, 4_000_000), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := parseAgentflowJSON([]byte(tc.data))
+			switch {
+			case tc.wantErr && (err == nil || !strings.Contains(err.Error(), "nested too deeply")):
+				t.Fatalf("err = %v, want a nested-too-deeply refusal", err)
+			case !tc.wantErr && err != nil:
+				t.Fatalf("err = %v, want success", err)
+			}
+		})
+	}
+}
+
 func TestDecodeAgentflowPlanJSONRejectsUnexecutableLoneSurrogate(t *testing.T) {
 	data := []byte(`{"steps":[{"id":"P1","gates":[{"kind":"command","run":["echo","\ud800"]}]}]}`)
 	var plan agentflow.Plan
@@ -260,7 +293,7 @@ func TestRenderPlanPreview_DeterministicAndTraceable(t *testing.T) {
 		"Allowed files\n  - \"src/*\"\n  - \".agent/\"\n\n" +
 		"Blocked files\n  - none\n\n" +
 		"Rollback\n  \"git checkout -- .\"\n\n" +
-		"Schema\n  \"0.3.0\"\n\n" +
+		"Schema\n  \"1.0.0\"\n\n" +
 		"Drift budget\n  unrelated_edits: 0\n  new_dependencies: 0\n  formatting_drift: \"minimal\"\n  architecture_drift: \"requires_approval\"\n\n" +
 		"Requirements\n  \"REQ-1\": \"add the requested behavior\"\n    \"AC-1\": \"the focused validation passes\"\n\n" +
 		"Steps\n  \"S1\": \"do\"\n    files: [\"src/a.go\"]\n    depends_on: none\n    criteria: [\"AC-1\"]\n    expected_diff: [\"x\"]\n    validation:\n      - \"true\"\n        argv: [\"true\"]\n        criteria: [\"AC-1\"]\n"
@@ -881,6 +914,39 @@ func TestRunAgentflowAuthor_HappyPathPrintsExecuteSeparately(t *testing.T) {
 	}
 }
 
+func TestRunAgentflowAuthor_PrintedCommandCarriesApprovedEnv(t *testing.T) {
+	root := t.TempDir()
+	caller := &scriptCaller{responses: []agent.ModelResult{submitPlanCall(validIRJSON(t))}}
+	sess := newTestSession(t, caller, root)
+	f := flags{goal: "x", goalSet: true, agentflowSrc: "/af", agentflowEnv: stringSliceFlag{"GOPRIVATE", "HTTPS_PROXY"}}
+	var out, errb bytes.Buffer
+	if err := runAgentflowAuthorWithClient(context.Background(), &out, &errb, nil, sess, f, root, &stubLocker{}, fixedApprover(true)); err != nil {
+		t.Fatal(err)
+	}
+	want := " -agentflow-src '/af' -agentflow-env 'GOPRIVATE' -agentflow-env 'HTTPS_PROXY' -approve-plan-edits -approve-plan-gates\n"
+	if !strings.Contains(out.String(), want) {
+		t.Fatalf("printed command missing approved names:\n%s", out.String())
+	}
+}
+
+func TestRunAgentflowAuthor_ResolvesRelativeSourceAgainstRoot(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(root, "tools"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sess := newTestSession(t, &scriptCaller{}, root)
+	f := flags{goal: "x", goalSet: true, approvePlanLock: true, agentflowSrc: filepath.Join("tools", "af")}
+	var out, errb bytes.Buffer
+	err = runAgentflowAuthor(context.Background(), nil, &out, &errb, nil, sess, f, root)
+	if err == nil || !strings.Contains(err.Error(), "agentflow source checkout: ") ||
+		!strings.Contains(err.Error(), filepath.Join(root, "tools", "af")) {
+		t.Fatalf("author error = %v, want the root-resolved checkout to fail validation", err)
+	}
+}
+
 func TestRunAgentflowAuthor_RefusesLockWithoutExplicitApproval(t *testing.T) {
 	root := t.TempDir()
 	caller := &scriptCaller{responses: []agent.ModelResult{submitPlanCall(validIRJSON(t))}}
@@ -1093,12 +1159,12 @@ func TestRunAgentflowAuthor_InterruptCancelsLockPlan(t *testing.T) {
 
 func TestRunAgentflowAuthor_RefusesLockedPlan(t *testing.T) {
 	root := t.TempDir()
-	writePlanLock(t, root, `{"schema_version":"0.3.0","objective":"x","steps":[{"id":"S1"}],"locked":true}`)
+	writePlanLock(t, root, `{"schema_version":"1.0.0","objective":"x","steps":[{"id":"S1"}],"locked":true}`)
 	caller := &scriptCaller{responses: []agent.ModelResult{submitPlanCall(validIRJSON(t))}}
 	sess := newTestSession(t, caller, root)
 	var out, errb bytes.Buffer
-	if err := runAgentflowAuthorWithClient(context.Background(), &out, &errb, nil, sess, flags{goal: "x", goalSet: true}, root, &stubLocker{}, nil); err == nil {
-		t.Error("expected clobber-guard refusal for a locked plan")
+	if err := runAgentflowAuthorWithClient(context.Background(), &out, &errb, nil, sess, flags{goal: "x", goalSet: true}, root, &stubLocker{}, nil); err == nil || !strings.Contains(err.Error(), "already locked") {
+		t.Errorf("err = %v, want the clobber guard's already-locked refusal", err)
 	}
 }
 
@@ -1523,5 +1589,67 @@ func TestRunAgentflowAuthorUsesCurrentGitFragment(t *testing.T) {
 	}
 	if strings.Count(caller.system, gitContextOpen) != 1 || !strings.HasSuffix(caller.system, gitContextClose) {
 		t.Fatalf("Git block duplicated or not last: %q", caller.system)
+	}
+}
+
+// #611: a planner that stops at a loop cap without submitting names the stop
+// reason; a planner that answers without submitting keeps the exact message.
+func TestRunAgentflowAuthor_StopReasonNamesTheCause(t *testing.T) {
+	read := func(id, path string) agent.ModelResult {
+		return toolStep(id, "read_file", `{"path":"`+path+`"}`)
+	}
+	tests := []struct {
+		name      string
+		maxSteps  int
+		budget    agent.Budget
+		responses []agent.ModelResult
+		want      string
+		zeroCalls bool
+	}{
+		{name: "completed", maxSteps: 4, responses: []agent.ModelResult{answerStep("no plan today")}, want: errPlannerNoSubmission.Error()},
+		// Literal on purpose: the docs and changelog quote this text, so it must not derive from the sentinel.
+		{name: "step cap", maxSteps: 1, responses: []agent.ModelResult{read("r1", "seed.txt")},
+			want: "the planner did not submit a plan: agent run stopped: step_cap_reached"},
+		{name: "tool errors", maxSteps: 4, responses: []agent.ModelResult{read("r1", "missing-a.txt"), read("r2", "missing-b.txt"), read("r3", "missing-c.txt")},
+			want: errPlannerNoSubmission.Error() + ": agent run stopped: tool_error_cap_reached"},
+		{name: "repeats", maxSteps: 4, responses: []agent.ModelResult{read("r1", "seed.txt"), read("r2", "seed.txt"), read("r3", "seed.txt")},
+			want: errPlannerNoSubmission.Error() + ": agent run stopped: repeat_limit_reached"},
+		{name: "budget", maxSteps: 4, budget: agent.Budget{InputCeiling: 32768, OutputReserve: 64, TotalTokens: 1},
+			responses: []agent.ModelResult{answerStep("never sent")},
+			want:      errPlannerNoSubmission.Error() + ": agent run stopped: budget_reached", zeroCalls: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			if err := os.WriteFile(filepath.Join(root, "seed.txt"), []byte("seed\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			caller := &scriptCaller{responses: tt.responses}
+			sess := newTestSession(t, caller, root)
+			sess.maxSteps = tt.maxSteps
+			sess.startupBudget = tt.budget
+			err := runAgentflowAuthorWithClient(context.Background(), io.Discard, io.Discard, nil, sess, flags{goal: "x", goalSet: true}, root, &stubLocker{}, nil)
+			if !errors.Is(err, errPlannerNoSubmission) || err.Error() != tt.want {
+				t.Fatalf("err = %v, want %q wrapping errPlannerNoSubmission", err, tt.want)
+			}
+			if tt.zeroCalls && caller.i != 0 {
+				t.Fatalf("model calls = %d, want 0", caller.i)
+			}
+		})
+	}
+}
+
+// #611: a denial on the planner's last step makes Run return a nil error with
+// a non-Completed StopReason. The approval-denied case must still win: it is
+// checked before the default branch, so the denial is never reported as a stop.
+func TestRunAgentflowAuthor_DenialOnLastStepIsNotReportedAsStop(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir()) // the denied plan is saved to the temp dir
+	root := t.TempDir()
+	caller := &scriptCaller{responses: []agent.ModelResult{submitPlanCall(validIRJSON(t))}}
+	sess := newTestSession(t, caller, root)
+	sess.maxSteps = 1
+	err := runAgentflowAuthorWithClient(context.Background(), io.Discard, io.Discard, nil, sess, flags{goal: "x", goalSet: true}, root, &stubLocker{}, nil)
+	if !errors.Is(err, errPlannerApprovalDenied) || strings.Contains(err.Error(), "agent run stopped") {
+		t.Fatalf("err = %v, want the approval denial without a stop reason", err)
 	}
 }

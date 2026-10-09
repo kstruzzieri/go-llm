@@ -4,13 +4,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // spyDelegate is the observation point for every zero-request claim: it
@@ -115,19 +119,23 @@ func TestGuardHTTPClientRejectsLoopbackTLSDialHooks(t *testing.T) {
 	}
 }
 
-func TestGuardedHTTPSLocalhostRejectsPoisonedResolutionBeforeDial(t *testing.T) {
+// #665: "localhost" is loopback by name (RFC 6761 §6.3). The guard dials
+// 127.0.0.1, then ::1, on the destination's port and never hands the name to
+// the dialer, so no hosts file or resolver can redirect it.
+func TestGuardedLocalhostDialsLoopbackByName(t *testing.T) {
 	dest := mustDest(t, "llamacpp", "https://localhost:8443")
 	gate := installTestGate(t, DestinationEdge{Purpose: "agent", Destination: dest})
-	var dials atomic.Int64
+	var mu sync.Mutex
+	var dialed []string
 	base := &http.Client{Transport: &http.Transport{
-		DialContext: func(context.Context, string, string) (net.Conn, error) {
-			dials.Add(1)
-			return nil, errors.New("unexpected dial")
+		DialContext: func(_ context.Context, _, addr string) (net.Conn, error) {
+			mu.Lock()
+			dialed = append(dialed, addr)
+			mu.Unlock()
+			return nil, errors.New("refused by test")
 		},
 	}}
-	client, err := guardHTTPClient(gate, dest, base, func(context.Context, string) ([]net.IP, error) {
-		return []net.IP{net.ParseIP("192.168.1.5")}, nil
-	})
+	client, err := GuardHTTPClient(gate, dest, base)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,12 +144,18 @@ func TestGuardedHTTPSLocalhostRejectsPoisonedResolutionBeforeDial(t *testing.T) 
 		t.Fatal(err)
 	}
 
-	if resp, err := client.Do(mustReq(t, ctx, "https://localhost:8443/v1/models")); err == nil {
+	resp, err := client.Do(mustReq(t, ctx, "https://localhost:8443/v1/models"))
+	if err == nil {
 		_ = resp.Body.Close()
-		t.Error("client.Do(poisoned localhost) = nil error, want rejection")
+		t.Fatal("client.Do succeeded through a dialer that refuses every address")
 	}
-	if got := dials.Load(); got != 0 {
-		t.Errorf("DialContext calls after poisoned localhost resolution = %d, want 0", got)
+	if errors.Is(err, ErrDestinationDenied) {
+		t.Errorf("localhost dial failure = %v, want an outage, not a destination denial", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if want := []string{"127.0.0.1:8443", "[::1]:8443"}; !slices.Equal(dialed, want) {
+		t.Errorf("dialed %q, want %q", dialed, want)
 	}
 }
 
@@ -481,90 +495,130 @@ func TestGuardedRemoteKeepsProxyAndDenialNeverReachesIt(t *testing.T) {
 	})
 }
 
-// I12: a "localhost" destination must not dial an address that is not
-// loopback — a poisoned resolver (hosts file) must fail the dial entirely,
-// not be filtered around.
-func TestGuardedLocalhostDialValidatesResolution(t *testing.T) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+// I12: a "localhost" destination dials only loopback addresses. A local
+// backend often listens on one stack (llama-server and Ollama bind
+// 127.0.0.1 by default), so the guard must reach a server on either one, as
+// the unguarded client did.
+func TestGuardedLocalhostReachesEitherLoopbackStack(t *testing.T) {
+	for _, stack := range []struct{ name, listen string }{
+		{"IPv4 only", "127.0.0.1:0"},
+		{"IPv6 only", "[::1]:0"},
+	} {
+		t.Run(stack.name, func(t *testing.T) {
+			ln, err := net.Listen("tcp", stack.listen)
+			if err != nil {
+				t.Skipf("cannot listen on %s: %v", stack.listen, err)
+			}
+			// A unique body proves the fixture answered: an unrelated server on
+			// the other stack's same port must not satisfy the test.
+			marker := "fixture " + stack.listen
+			srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = io.WriteString(w, marker)
+			})}
+			go func() { _ = srv.Serve(ln) }()
+			defer func() { _ = srv.Close() }()
+
+			baseURL := fmt.Sprintf("http://localhost:%d", ln.Addr().(*net.TCPAddr).Port)
+			dest := mustDest(t, "llamacpp", baseURL)
+			gate := installTestGate(t, DestinationEdge{Purpose: "agent", Destination: dest})
+			client, err := GuardHTTPClient(gate, dest, &http.Client{Timeout: 5 * time.Second})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, err := gate.Bind(context.Background(), "agent", "llamacpp")
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp, err := client.Do(mustReq(t, ctx, baseURL+"/v1/models"))
+			if err != nil {
+				t.Fatalf("localhost did not reach a server on %s: %v", stack.listen, err)
+			}
+			body, err := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			if err != nil || string(body) != marker {
+				t.Fatalf("localhost reached %q (err %v), want the fixture on %s", body, err, stack.listen)
+			}
+		})
+	}
+}
+
+// A dropped (not refused) IPv4 attempt must not use up the request: like
+// net.Dialer's RFC 6555 fallback, ::1 starts while 127.0.0.1 still hangs.
+func TestGuardedLocalhostFallsBackWhileIPv4Hangs(t *testing.T) {
+	ln, err := net.Listen("tcp", "[::1]:0")
 	if err != nil {
-		t.Fatal(err)
+		t.Skipf("cannot listen on [::1]: %v", err)
 	}
 	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "ipv6")
 	})}
 	go func() { _ = srv.Serve(ln) }()
 	defer func() { _ = srv.Close() }()
-	port := ln.Addr().(*net.TCPAddr).Port
 
-	baseURL := fmt.Sprintf("http://localhost:%d", port)
-	newClient := func(t *testing.T, ips []net.IP, lookupErr error) (*http.Client, context.Context) {
-		t.Helper()
-		dest := mustDest(t, "llamacpp", baseURL)
-		gate := installTestGate(t, DestinationEdge{Purpose: "agent", Destination: dest})
-		client, err := guardHTTPClient(gate, dest, nil, func(_ context.Context, host string) ([]net.IP, error) {
-			if !strings.EqualFold(host, "localhost") {
-				t.Errorf("lookup called for %q, want localhost", host)
+	var hung atomic.Int64
+	dialer := &net.Dialer{}
+	base := &http.Client{Timeout: 3 * time.Second, Transport: &http.Transport{
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			if strings.HasPrefix(addr, "127.0.0.1:") {
+				hung.Add(1)
+				<-ctx.Done() // a firewall dropping the SYN
+				return nil, ctx.Err()
 			}
-			return ips, lookupErr
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		ctx, err := gate.Bind(context.Background(), "agent", "llamacpp")
-		if err != nil {
-			t.Fatal(err)
-		}
-		return client, ctx
+			return dialer.DialContext(ctx, network, addr)
+		},
+	}}
+	baseURL := fmt.Sprintf("http://localhost:%d", ln.Addr().(*net.TCPAddr).Port)
+	dest := mustDest(t, "llamacpp", baseURL)
+	gate := installTestGate(t, DestinationEdge{Purpose: "agent", Destination: dest})
+	client, err := GuardHTTPClient(gate, dest, base)
+	if err != nil {
+		t.Fatal(err)
 	}
+	ctx, err := gate.Bind(context.Background(), "agent", "llamacpp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := client.Do(mustReq(t, ctx, baseURL+"/v1/models"))
+	if err != nil {
+		t.Fatalf("::1 not reached while the IPv4 attempt hung: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if string(body) != "ipv6" || hung.Load() != 1 {
+		t.Fatalf("body %q after %d IPv4 attempts, want the ::1 fixture after one", body, hung.Load())
+	}
+}
 
-	t.Run("loopback resolution connects", func(t *testing.T) {
-		client, ctx := newClient(t, []net.IP{net.ParseIP("127.0.0.1")}, nil)
-		resp, err := client.Do(mustReq(t, ctx, baseURL+"/v1/models"))
-		if err != nil {
-			t.Fatalf("loopback-resolved localhost dial failed: %v", err)
-		}
-		_ = resp.Body.Close()
-	})
+// closeSpy records Close on a net.Conn.
+type closeSpy struct {
+	net.Conn
+	closed chan struct{}
+}
 
-	t.Run("non-loopback resolution refused", func(t *testing.T) {
-		client, ctx := newClient(t, []net.IP{net.ParseIP("192.168.1.5")}, nil)
-		if resp, err := client.Do(mustReq(t, ctx, baseURL+"/v1/models")); err == nil {
-			_ = resp.Body.Close()
-			t.Fatal("localhost resolving off-host was dialed")
-		}
-	})
+func (c *closeSpy) Close() error { close(c.closed); return c.Conn.Close() }
 
-	t.Run("mixed resolution refused entirely", func(t *testing.T) {
-		// One loopback plus one non-loopback signals tampering; filtering to
-		// the loopback half would dial through a poisoned name anyway.
-		client, ctx := newClient(t, []net.IP{net.ParseIP("127.0.0.1"), net.ParseIP("192.168.1.5")}, nil)
-		if resp, err := client.Do(mustReq(t, ctx, baseURL+"/v1/models")); err == nil {
-			_ = resp.Body.Close()
-			t.Fatal("localhost with a mixed resolution was dialed")
+// An attempt that connects after the winner returned is closed, not leaked.
+func TestDialLoopbackClosesLateWinner(t *testing.T) {
+	late := &closeSpy{closed: make(chan struct{})}
+	late.Conn, _ = net.Pipe()
+	winner, _ := net.Pipe()
+	defer func() { _ = winner.Close() }()
+	dial := func(_ context.Context, _, addr string) (net.Conn, error) {
+		if strings.HasPrefix(addr, "127.0.0.1:") {
+			time.Sleep(2 * loopbackFallbackDelay) // ignores cancellation, then connects
+			return late, nil
 		}
-	})
-
-	// The stdlib dialer tries every resolved address; the guard must not
-	// regress that. macOS commonly resolves localhost to [::1, 127.0.0.1]
-	// while a local llama-server binds only 127.0.0.1 — if the guard dialed
-	// just the first address, every guarded localhost setup on such a host
-	// would fail where the unguarded client worked.
-	t.Run("all-loopback resolution tries every address", func(t *testing.T) {
-		client, ctx := newClient(t, []net.IP{net.ParseIP("::1"), net.ParseIP("127.0.0.1")}, nil)
-		resp, err := client.Do(mustReq(t, ctx, baseURL+"/v1/models"))
-		if err != nil {
-			t.Fatalf("dial gave up before trying 127.0.0.1: %v", err)
-		}
-		_ = resp.Body.Close()
-	})
-
-	t.Run("resolution failure refused", func(t *testing.T) {
-		client, ctx := newClient(t, nil, fmt.Errorf("resolver down"))
-		if resp, err := client.Do(mustReq(t, ctx, baseURL+"/v1/models")); err == nil {
-			_ = resp.Body.Close()
-			t.Fatal("unresolvable localhost was dialed")
-		}
-	})
+		return winner, nil
+	}
+	conn, err := dialLoopback(context.Background(), dial, "tcp", "8090")
+	if err != nil || conn != winner {
+		t.Fatalf("dialLoopback = %v, %v; want the ::1 connection", conn, err)
+	}
+	select {
+	case <-late.closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the late 127.0.0.1 connection was never closed")
+	}
 }
 
 // I19/M20: the guard's own errors never echo the request URL, whose query
@@ -676,4 +730,105 @@ func TestGuardedTransportDeniesCapabilityWithoutToken(t *testing.T) {
 	if got := spy.calls.Load(); got != 0 {
 		t.Errorf("delegate called %d times, want 0", got)
 	}
+}
+
+// closeRecorder is a request body that counts Close calls. It stands in for
+// a pipe-backed streaming upload, whose writer goroutine unblocks only when
+// the reader side is closed.
+type closeRecorder struct {
+	io.Reader
+	closes atomic.Int64
+}
+
+func (c *closeRecorder) Close() error {
+	c.closes.Add(1)
+	return nil
+}
+
+// #655: the http.RoundTripper contract says RoundTrip always closes the
+// request body, errors included. http.Client never closes it after a
+// transport error, so a denial that skipped Close would leak a pipe-backed
+// body's writer goroutine. Every denial (capability refusals and target
+// refusals alike) closes the body exactly once, and an admitted request
+// leaves it to the delegate, which owns it from there.
+func TestGuardedTransportDenialClosesRequestBody(t *testing.T) {
+	const base = "https://opencode.ai/zen/go"
+	bind := func(t *testing.T, gate *DestinationGate) context.Context {
+		t.Helper()
+		ctx, err := gate.Bind(context.Background(), "agent", "opencode")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return ctx
+	}
+
+	for _, tc := range []struct {
+		name string
+		req  func(t *testing.T, gate *DestinationGate, dest Destination) *http.Request
+	}{
+		{"no capability", func(t *testing.T, _ *DestinationGate, _ Destination) *http.Request {
+			return mustReq(t, context.Background(), base+"/v1")
+		}},
+		{"revoked capability", func(t *testing.T, gate *DestinationGate, _ Destination) *http.Request {
+			ctx := bind(t, gate)
+			gate.Clear()
+			return mustReq(t, ctx, base+"/v1")
+		}},
+		{"capability without token", func(t *testing.T, _ *DestinationGate, dest Destination) *http.Request {
+			forged := context.WithValue(context.Background(), destCapabilityCtxKey{}, &destinationCapability{
+				purpose: "agent", provider: "opencode", dest: dest,
+			})
+			return mustReq(t, forged, base+"/v1")
+		}},
+		{"Request.Host override", func(t *testing.T, gate *DestinationGate, _ Destination) *http.Request {
+			req := mustReq(t, bind(t, gate), base+"/v1")
+			req.Host = "evil.example.com"
+			return req
+		}},
+		{"off-target URL", func(t *testing.T, gate *DestinationGate, _ Destination) *http.Request {
+			return mustReq(t, bind(t, gate), "https://evil.example.com/zen/go/v1")
+		}},
+		{"nil URL", func(t *testing.T, gate *DestinationGate, _ Destination) *http.Request {
+			req := mustReq(t, bind(t, gate), base+"/v1")
+			req.URL = nil
+			return req
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client, gate, dest, spy := guardedForTest(t, "agent", "opencode", base)
+			req := tc.req(t, gate, dest)
+			body := &closeRecorder{Reader: strings.NewReader(`{"stream":true}`)}
+			req.Method, req.Body = http.MethodPost, body
+
+			if _, err := client.Transport.RoundTrip(req); !errors.Is(err, ErrDestinationDenied) {
+				t.Fatalf("RoundTrip = %v, want ErrDestinationDenied", err)
+			}
+			if got := spy.calls.Load(); got != 0 {
+				t.Fatalf("delegate called %d times, want 0", got)
+			}
+			if got := body.closes.Load(); got != 1 {
+				t.Errorf("request body closed %d times on denial, want 1", got)
+			}
+		})
+	}
+
+	t.Run("admitted request leaves body to delegate", func(t *testing.T) {
+		client, gate, _, spy := guardedForTest(t, "agent", "opencode", base)
+		req := mustReq(t, bind(t, gate), base+"/v1")
+		body := &closeRecorder{Reader: strings.NewReader(`{"stream":true}`)}
+		req.Method, req.Body = http.MethodPost, body
+
+		resp, err := client.Transport.RoundTrip(req)
+		if err != nil {
+			t.Fatalf("admitted request denied: %v", err)
+		}
+		_ = resp.Body.Close()
+		if got := spy.calls.Load(); got != 1 {
+			t.Fatalf("delegate called %d times, want 1", got)
+		}
+		// The spy never closes, so any close here came from the guard.
+		if got := body.closes.Load(); got != 0 {
+			t.Errorf("guard closed an admitted request body %d times, want 0", got)
+		}
+	})
 }

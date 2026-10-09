@@ -815,10 +815,28 @@ func agentflowJSONStringEqualASCII(value agentflowJSONString, want string) bool 
 	return true
 }
 
+// agentflowJSONMaxDepth bounds container nesting like encoding/json. It runs
+// on every retained ledger row before any AgentFlow call, and Go cannot recover
+// from a stack overflow. Python's own recursion limit (about 1000) is lower, so
+// nothing AgentFlow accepts is refused.
+const agentflowJSONMaxDepth = 10000
+
 type agentflowJSONParser struct {
 	data   []byte
 	offset int
+	depth  int
 }
+
+// enter counts one more open object or array; the caller defers leave.
+func (p *agentflowJSONParser) enter() error {
+	if p.depth >= agentflowJSONMaxDepth {
+		return p.errorf("JSON nested too deeply")
+	}
+	p.depth++
+	return nil
+}
+
+func (p *agentflowJSONParser) leave() { p.depth-- }
 
 func parseAgentflowJSON(data []byte) (any, error) {
 	parser := agentflowJSONParser{data: data}
@@ -864,6 +882,10 @@ func (p *agentflowJSONParser) value() (any, error) {
 }
 
 func (p *agentflowJSONParser) object() (agentflowJSONObject, error) {
+	if err := p.enter(); err != nil {
+		return nil, err
+	}
+	defer p.leave()
 	p.offset++
 	p.skipSpace()
 	if p.take('}') {
@@ -906,6 +928,10 @@ func (p *agentflowJSONParser) object() (agentflowJSONObject, error) {
 }
 
 func (p *agentflowJSONParser) array() ([]any, error) {
+	if err := p.enter(); err != nil {
+		return nil, err
+	}
+	defer p.leave()
 	p.offset++
 	p.skipSpace()
 	if p.take(']') {
@@ -1389,12 +1415,11 @@ func guardExistingPlan(root string) error {
 // runAgentflowAuthor is the -goal flow: guard, probe, run a read-only authoring
 // loop, then initialize and lock only after submit_plan's preview is approved.
 func runAgentflowAuthor(ctx context.Context, src lineSource, stdout, stderr io.Writer, interrupts <-chan struct{}, sess *replSession, f flags, root string) error {
-	var runner agentflow.Runner
-	if f.agentflowSrc != "" {
-		runner = agentflow.NewSrcExecRunner(root, f.agentflowSrc)
-	} else {
-		runner = agentflow.NewExecRunner(root)
+	source, err := resolveTaskAgentflowSource(root, f.agentflowSrc)
+	if err != nil {
+		return fmt.Errorf("resolve Agentflow source: %w", err)
 	}
+	runner := mustAgentflowRunner(root, source, f.agentflowEnv)
 	// Only -approve-plan-lock may arrive without a source: its approver never
 	// reads stdin. Any other nil is an internal wiring error, and opening a
 	// second reader here would defeat the single-source invariant.
@@ -1438,8 +1463,14 @@ func runAgentflowAuthorWithClient(ctx context.Context, stdout, stderr io.Writer,
 	}
 	defer release()
 
-	// Keep the guard inside the injected seam so tests exercise the same safety
+	// Keep the guards inside the injected seam so tests exercise the same safety
 	// boundary as production.
+	// #612 R5: refuse retained non-1.x AgentFlow state before any AgentFlow call
+	// and before the locked-plan guard, whose "reset the run" advice cannot work
+	// on 0.x state: the upgrade guidance must win.
+	if err := checkAgentflowStateMajor(root); err != nil {
+		return err
+	}
 	if err := guardExistingPlan(root); err != nil {
 		return err
 	}
@@ -1484,7 +1515,7 @@ func runAgentflowAuthorWithClient(ctx context.Context, stdout, stderr io.Writer,
 		Options:  plannerOpts,
 		Approver: &authorPlanApprover{delegate: approver, sess: as},
 	}
-	_, runErr := sess.orch.Run(loopCtx, req, agent.Observer(newRenderer(stderr, false, sess.maxSteps, sess.clock, sess.mixed)))
+	res, runErr := sess.orch.Run(loopCtx, req, agent.Observer(newRenderer(stderr, false, sess.maxSteps, sess.clock, sess.mixed)))
 	budgetExhausted := as.attempts >= maxPlanSubmissions
 
 	switch {
@@ -1498,6 +1529,9 @@ func runAgentflowAuthorWithClient(ctx context.Context, stdout, stderr io.Writer,
 			shellQuote(as.lockedPath), shellQuote(root), shellQuote(as.taskBriefPath), shellQuote(as.workflowHandoffPath))
 		if f.agentflowSrc != "" {
 			_, _ = fmt.Fprintf(stdout, " -agentflow-src %s", shellQuote(f.agentflowSrc))
+		}
+		for _, name := range f.agentflowEnv {
+			_, _ = fmt.Fprintf(stdout, " -agentflow-env %s", shellQuote(name))
 		}
 		_, _ = fmt.Fprintln(stdout, " -approve-plan-edits -approve-plan-gates")
 		return nil
@@ -1522,6 +1556,11 @@ func runAgentflowAuthorWithClient(ctx context.Context, stdout, stderr io.Writer,
 		// handled by the cases above, which set those fields before cancelling).
 		return errPlannerInterrupted
 	default:
+		// runErr is nil here: the cases above take every non-nil error, so
+		// StopReason is meaningful (#611).
+		if res.StopReason != agent.Completed {
+			return fmt.Errorf("%w: %w", errPlannerNoSubmission, &runStoppedError{reason: res.StopReason})
+		}
 		return errPlannerNoSubmission
 	}
 }

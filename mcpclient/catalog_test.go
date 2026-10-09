@@ -47,9 +47,6 @@ func TestNewToolCatalogCanonicalFixtures(t *testing.T) {
 			if got := catalog.digest(); got != tt.digest {
 				t.Errorf("newToolCatalog(%v).digest() = %s, want %s", tt.entries, got, tt.digest)
 			}
-			if got := catalog.version(); got != 1 {
-				t.Errorf("newToolCatalog(%v).version() = %d, want 1", tt.entries, got)
-			}
 		})
 	}
 }

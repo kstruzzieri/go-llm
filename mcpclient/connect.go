@@ -114,6 +114,8 @@ func (m *Manager) Tools() []agent.Tool {
 }
 
 // Close closes every client session (which terminates stdio subprocesses).
+// A failure's text is fixed and never includes endpoints; the causes stay
+// reachable through errors.Is and errors.As.
 func (m *Manager) Close() error {
 	var errs []error
 	for _, s := range m.sessions {
@@ -121,8 +123,19 @@ func (m *Manager) Close() error {
 			errs = append(errs, err)
 		}
 	}
-	return errors.Join(errs...)
+	if err := errors.Join(errs...); err != nil {
+		return &closeError{cause: err}
+	}
+	return nil
 }
+
+// closeError hides session close causes from display: an HTTP DELETE failure
+// is a *url.Error whose text holds the full endpoint, query included.
+type closeError struct{ cause error }
+
+func (e *closeError) Error() string { return "mcpclient: closing MCP sessions failed" }
+
+func (e *closeError) Unwrap() error { return e.cause }
 
 // ConnectOptions selects the workspace trust store and first-contact policy.
 // Pins is required; RequirePinned forbids automatic first pin creation.
@@ -138,16 +151,25 @@ func Connect(ctx context.Context, impl Implementation, servers []Server, opts Co
 	return connectWithHooks(ctx, impl, servers, opts, nil)
 }
 
-// connectHooks carries test-only observation callbacks; nil in production.
-// launched fires on the caller's goroutine immediately before a server's dial
-// is dispatched; published fires after that server's result is recorded.
+// connectHooks carries test-only seams; nil in production. launched fires on
+// the caller's goroutine immediately before a server's worker is dispatched
+// (preparation, preflight and any dial run later, inside that worker);
+// published fires after that server's result is recorded; launch overrides
+// the process facts prepare reads; preflighted fires after a server's
+// pre-launch connection check passes.
 type connectHooks struct {
-	launched  func(i int)
-	published func(i int)
+	launched    func(i int)
+	published   func(i int)
+	launch      *launchEnv
+	preflighted func(alias string)
 }
 
 func connectWithHooks(ctx context.Context, impl Implementation, servers []Server, opts ConnectOptions, h *connectHooks) (*Manager, []error, error) {
-	if err := validateTrustConfig(servers, opts.Pins); err != nil {
+	le := hostLaunchEnv()
+	if h != nil && h.launch != nil {
+		le = *h.launch
+	}
+	if err := validateTrustConfig(servers, opts.Pins, le.policy); err != nil {
 		return nil, nil, err
 	}
 
@@ -164,7 +186,7 @@ func connectWithHooks(ctx context.Context, impl Implementation, servers []Server
 			h.launched(i)
 		}
 		g.Go(func() error {
-			session, tools, warns := connectOne(ctx, impl, s, opts)
+			session, tools, warns := connectOne(ctx, impl, s, opts, le, h)
 			results[i] = connectResult{session: session, tools: tools, warns: warns}
 			if h != nil && h.published != nil {
 				h.published(i)
@@ -177,14 +199,20 @@ func connectWithHooks(ctx context.Context, impl Implementation, servers []Server
 	m := &Manager{}
 	var warnings []error
 	for i, r := range results {
-		if r.session != nil {
-			if err := ctx.Err(); err != nil {
-				warnings = append(warnings, admissionFailure(servers[i].Alias, "canceled", errors.Join(err, r.session.Close())))
-				continue
-			}
-		}
+		// A live session means connectOne succeeded, so warns holds only
+		// notices; keep them on cancellation: a first-pin notice reports a
+		// pin already on disk.
 		warnings = append(warnings, r.warns...)
 		if r.session == nil {
+			continue
+		}
+		if err := ctx.Err(); err != nil {
+			// Classify the cancellation alone; a close error (a refused
+			// redirect on the session DELETE, say) stays in the chain but
+			// must not rename the reason.
+			failure := admissionFailure(servers[i].Alias, "canceled", err)
+			failure.cause = errors.Join(err, r.session.Close())
+			warnings = append(warnings, failure)
 			continue
 		}
 		m.sessions = append(m.sessions, r.session)
@@ -200,56 +228,118 @@ type connectResult struct {
 	warns   []error
 }
 
-func connectOne(ctx context.Context, impl Implementation, s Server, opts ConnectOptions) (*gomcp.ClientSession, []agent.Tool, []error) {
+func connectOne(ctx context.Context, impl Implementation, s Server, opts ConnectOptions, le launchEnv, h *connectHooks) (*gomcp.ClientSession, []agent.Tool, []error) {
 	ctx, cancel := context.WithTimeout(ctx, connectTimeout)
 	defer cancel()
-	session, remote, catalog, notices, err := discover(ctx, impl, s)
+	prepared, err := prepare(s, opts.Pins.workspace, le)
 	if err != nil {
 		return nil, nil, []error{err}
 	}
-	prior, created, err := opts.Pins.admit(ctx, s.Alias, catalog, opts.RequirePinned)
+	conn, err := opts.Pins.digestConnection(ctx, prepared.identity)
+	if err != nil {
+		// An identity that cannot be fingerprinted (non-UTF-8 argv or path)
+		// is an unusable launch, not a pin store fault.
+		return nil, nil, []error{launchInvalid(s.Alias, invalidIdentity, err)}
+	}
+	// Preflight (spec §5.8 step 3): nothing is launched or contacted unless
+	// this is permitted first contact or the pinned connection matches.
+	current, revision, err := opts.Pins.capturePin(ctx, s.Alias)
+	if err == nil {
+		err = preflightConnection(current, revision, conn, opts.RequirePinned)
+	}
+	if err != nil {
+		return nil, nil, []error{admissionFailure(s.Alias, "pin_unavailable", err)}
+	}
+	if h != nil && h.preflighted != nil {
+		h.preflighted(s.Alias)
+	}
+	session, remote, catalog, notices, err := discover(ctx, impl, prepared)
+	if err != nil {
+		return nil, nil, []error{err}
+	}
+	prior, created, err := opts.Pins.admitAt(ctx, s.Alias, revision, pinEntry{toolCatalog: catalog, conn: conn})
 	if err == nil {
 		err = ctx.Err()
 	}
+	// created can accompany an error (the store joins ctx.Err() and lease
+	// cleanup after the rename): the pin is on disk either way, so report it.
+	if created {
+		notices = append(notices, fmt.Errorf("server %q: first pin %s; connection pinned; tools: %s; use explicit alias= values for stable pins", s.Alias, catalog.digest(), strings.Join(catalogNames(catalog), ", ")))
+	}
 	if err != nil {
 		closeErr := session.Close()
-		failure := admissionFailure(s.Alias, "pin_unavailable", errors.Join(err, closeErr))
-		failure.PinnedDigest, failure.CandidateDigest = prior.digest(), catalog.digest()
-		failure.Diff = diffCatalogs(prior, catalog)
-		return nil, nil, []error{failure}
+		// Classify the refusal alone; a close error (even context.Canceled)
+		// stays in the chain but must not rename the reason.
+		failure := admissionFailure(s.Alias, "pin_unavailable", err)
+		failure.cause = errors.Join(err, closeErr)
+		// Only a catalog mismatch compared a loaded record; any other refusal
+		// (a revision conflict, say) has a zero prior and would report a false
+		// "added: <every tool>" diff.
+		if errors.Is(err, errPinMismatch) {
+			failure.PinnedDigest, failure.CandidateDigest = prior.digest(), catalog.digest()
+			failure.Diff = diffCatalogs(prior.toolCatalog, catalog)
+		}
+		return nil, nil, append(notices, failure)
 	}
-	if created {
-		notices = append(notices, fmt.Errorf("server %q: first pin %s; tools: %s; use explicit alias= values for stable pins", s.Alias, catalog.digest(), strings.Join(catalogNames(catalog), ", ")))
+	// Selection applies only after the complete catalog was validated, hashed
+	// and admitted above, so unselected tools stay under change detection.
+	if s.toolsSet {
+		var missing []string
+		remote, missing = selectRemote(remote, s.tools)
+		if len(missing) > 0 {
+			// A cleanup error stays the cause; it never replaces the reason
+			// (admissionFailure would reclassify a canceled close).
+			failure := &AdmissionError{Alias: s.Alias, Reason: "selection_missing", Names: missing, cause: session.Close()}
+			return nil, nil, append(notices, failure)
+		}
 	}
 	return session, adapters(session, s.Alias, remote, catalog), notices
 }
 
+// preflightConnection decides before launch whether a server may be contacted:
+// a missing record only under trust-on-first-use, a version 1 record never,
+// and a version 2 record only when its connection identity matches.
+func preflightConnection(current pinEntry, rev pinRevision, candidate *connectionPin, requirePinned bool) error {
+	if !rev.exists {
+		if requirePinned {
+			return errPinMissing
+		}
+		return nil
+	}
+	return checkConnection(current, candidate)
+}
+
 // discover owns the candidate session until a complete catalog is returned.
 // The caller closes successful candidates or transfers ownership to Manager.
-func discover(ctx context.Context, impl Implementation, s Server) (*gomcp.ClientSession, []*gomcp.Tool, toolCatalog, []error, error) {
-	tr, err := s.transport()
-	if err != nil {
-		return nil, nil, toolCatalog{}, nil, admissionFailure(s.Alias, "unavailable", err)
+func discover(ctx context.Context, impl Implementation, p preparedServer) (*gomcp.ClientSession, []*gomcp.Tool, toolCatalog, []error, error) {
+	fail := func(reason string, cause error) *AdmissionError {
+		failure := admissionFailure(p.alias, reason, cause)
+		if refused := p.refusal(); refused != "" {
+			failure.Reason = refused
+		}
+		return failure
 	}
 	// Empty capabilities disables roots, sampling and elicitation.
 	client := gomcp.NewClient(&gomcp.Implementation{Name: impl.Name, Version: impl.Version}, &gomcp.ClientOptions{Capabilities: &gomcp.ClientCapabilities{}})
-	session, err := client.Connect(ctx, tr, nil)
+	session, err := client.Connect(ctx, p.transport, nil)
 	if err != nil {
-		return nil, nil, toolCatalog{}, nil, admissionFailure(s.Alias, "unavailable", err)
+		return nil, nil, toolCatalog{}, nil, fail("unavailable", err)
 	}
-	remote, failures := listAllTools(ctx, session, s.Alias)
+	remote, failures := listAllTools(ctx, session, p.alias)
 	var catalog toolCatalog
 	var notices []error
 	if len(failures) > 0 {
 		err = failures[0]
 	} else {
-		catalog, notices, err = validateCatalog(s.Alias, remote)
+		catalog, notices, err = validateCatalog(p.alias, remote)
 	}
 	if err == nil {
 		err = ctx.Err()
 	}
 	if err != nil {
-		return nil, nil, toolCatalog{}, nil, admissionFailure(s.Alias, "invalid_catalog", errors.Join(err, session.Close()))
+		failure := fail("invalid_catalog", err)
+		failure.cause = errors.Join(err, session.Close()) // as in connectOne
+		return nil, nil, toolCatalog{}, nil, failure
 	}
 	return session, remote, catalog, notices, nil
 }

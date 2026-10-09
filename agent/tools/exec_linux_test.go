@@ -465,6 +465,7 @@ func bwrapTestSpec(t *testing.T, ws string) execSpec {
 		Dir:           ws,
 		Env:           []string{"PATH=/usr/bin", "HOME=/home/u", "TMPDIR=/ambient"},
 		WorkspaceRoot: ws,
+		ExeIdentity:   execIdentityOf(t, "/bin/sh"),
 	}
 }
 
@@ -544,6 +545,7 @@ func TestBwrapPrepareBindsWorkspaceResidentExecutable(t *testing.T) {
 		t.Fatal(err)
 	}
 	spec.Path = exe
+	spec.ExeIdentity = execIdentityOf(t, exe)
 	if _, err := b.Run(context.Background(), spec); err != nil {
 		t.Fatal(err)
 	}
@@ -576,33 +578,43 @@ func TestBwrapPrepareCapUsesPrlimitChain(t *testing.T) {
 
 func TestBwrapPrepareRejectsInvalidSpecs(t *testing.T) {
 	ws := wsTempDir(t)
-	cases := map[string]func(*execSpec){
-		"empty argv":      func(s *execSpec) { s.Argv = nil },
-		"empty path":      func(s *execSpec) { s.Path = "" },
-		"empty dir":       func(s *execSpec) { s.Dir = "" },
-		"empty workspace": func(s *execSpec) { s.WorkspaceRoot = "" },
-		"non-canonical workspace": func(s *execSpec) {
+	const (
+		emptyField   = "requires a non-empty argv, executable path, and working directory"
+		badWorkspace = "must be a canonical non-root path"
+	)
+	// Each case pins its own check: "dir outside workspace" is caught by the
+	// argv builder, after the #553 identity check, so a bare err != nil would
+	// pass on an identity refusal instead.
+	cases := map[string]struct {
+		mutate func(*execSpec)
+		want   string
+	}{
+		"empty argv":      {func(s *execSpec) { s.Argv = nil }, emptyField},
+		"empty path":      {func(s *execSpec) { s.Path = "" }, emptyField},
+		"empty dir":       {func(s *execSpec) { s.Dir = "" }, emptyField},
+		"empty workspace": {func(s *execSpec) { s.WorkspaceRoot = "" }, "requires a workspace root"},
+		"non-canonical workspace": {func(s *execSpec) {
 			s.WorkspaceRoot = ws + "/./x"
 			s.Dir = s.WorkspaceRoot
-		},
-		"broad workspace":       func(s *execSpec) { s.WorkspaceRoot = "/tmp"; s.Dir = "/tmp" },
-		"dir outside workspace": func(s *execSpec) { s.Dir = "/somewhere/else" },
+		}, badWorkspace},
+		"broad workspace":       {func(s *execSpec) { s.WorkspaceRoot = "/tmp"; s.Dir = "/tmp" }, badWorkspace},
+		"dir outside workspace": {func(s *execSpec) { s.Dir = "/somewhere/else" }, "must be a canonical path inside workspace"},
 	}
-	for name, mutate := range cases {
+	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			runner := &captureRunner{}
 			starter := &captureStarter{proc: fakeProcess{}}
 			b := testBwrapBackend(runner, starter, SandboxConfig{Runtime: SandboxRuntimeBwrap}, 0)
 			spec := bwrapTestSpec(t, ws)
-			mutate(&spec)
-			if _, err := b.Run(context.Background(), spec); err == nil {
-				t.Fatal("Run accepted invalid spec")
+			tc.mutate(&spec)
+			if _, err := b.Run(context.Background(), spec); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Run = %v; want %q", err, tc.want)
 			}
-			if proc, err := b.Start(spec, io.Discard, io.Discard); err == nil {
+			if proc, err := b.Start(spec, io.Discard, io.Discard); err == nil || !strings.Contains(err.Error(), tc.want) {
 				if proc != nil {
 					_, _, _ = proc.Wait()
 				}
-				t.Fatal("Start accepted invalid spec")
+				t.Fatalf("Start = %v; want %q", err, tc.want)
 			}
 			if runner.called+starter.called != 0 {
 				t.Fatalf("delegate calls = %d, want 0", runner.called+starter.called)
@@ -912,6 +924,7 @@ func TestBwrapPrepareBindsAndExecutesCanonicalExecutableTarget(t *testing.T) {
 	b := testBwrapBackend(runner, &captureStarter{proc: fakeProcess{}}, SandboxConfig{Runtime: SandboxRuntimeBwrap}, 0)
 	spec := bwrapTestSpec(t, ws)
 	spec.Path = link
+	spec.ExeIdentity = execIdentityOf(t, link)
 	if _, err := b.Run(context.Background(), spec); err != nil {
 		t.Fatal(err)
 	}
@@ -950,5 +963,225 @@ func TestBwrapPrepareRejectsNonRegularExecutable(t *testing.T) {
 	}
 	if runner.called != 0 {
 		t.Fatal("runner ran despite a non-regular executable target")
+	}
+}
+
+// --- Executable identity binding (#553) ---
+
+var bwrapLifetimes = []string{"foreground", "background"}
+
+// bwrapLaunch drives one lifetime of b with fresh capture delegates and
+// returns the wrapped spec the selected delegate received, the total delegate
+// calls, and the launch error. A Start that returns a process is waited.
+func bwrapLaunch(t *testing.T, b *bwrapBackend, lifetime string, spec execSpec) (execSpec, int, error) {
+	t.Helper()
+	runner := &captureRunner{}
+	starter := &captureStarter{proc: fakeProcess{}}
+	b.runner, b.starter = runner, starter
+	if lifetime == "foreground" {
+		_, err := b.Run(context.Background(), spec)
+		return runner.spec, runner.called + starter.called, err
+	}
+	proc, err := b.Start(spec, io.Discard, io.Discard)
+	if proc != nil {
+		if _, _, werr := proc.Wait(); werr != nil {
+			t.Errorf("Wait = %v; want nil", werr)
+		}
+	}
+	return starter.spec, runner.called + starter.called, err
+}
+
+// bwrap must refuse when the executable target resolved at prepare time is
+// not the approved object. Regular-over-regular so the existing non-regular
+// guard cannot mask the identity check.
+func TestBwrapPrepareRejectsExecutableIdentityChange(t *testing.T) {
+	for _, lifetime := range bwrapLifetimes {
+		t.Run(lifetime, func(t *testing.T) {
+			b := testBwrapBackend(nil, nil, SandboxConfig{Runtime: SandboxRuntimeBwrap}, 0)
+			ws := wsTempDir(t)
+			approved := filepath.Join(ws, "tool")
+			if err := os.WriteFile(approved, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			spec := bwrapTestSpec(t, ws)
+			spec.Path = approved
+			spec.Argv = []string{"tool"}
+			spec.ExeIdentity = execIdentityOf(t, approved)
+
+			newer := filepath.Join(ws, "tool.new")
+			if err := os.WriteFile(newer, []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Rename(newer, approved); err != nil {
+				t.Fatal(err)
+			}
+			_, calls, err := bwrapLaunch(t, b, lifetime, spec)
+			if err == nil || !strings.Contains(err.Error(), "executable changed since approval") {
+				t.Fatalf("%s launch = %v; want the executable-changed error", lifetime, err)
+			}
+			if calls != 0 {
+				t.Fatalf("delegate called %d times; want 0 (prepare must refuse before launch)", calls)
+			}
+		})
+	}
+}
+
+// A spec with no approved identity (never produced by recheckExecPlan) is
+// refused, so a future caller cannot silently skip the check.
+func TestBwrapPrepareRejectsMissingIdentity(t *testing.T) {
+	for _, lifetime := range bwrapLifetimes {
+		t.Run(lifetime, func(t *testing.T) {
+			b := testBwrapBackend(nil, nil, SandboxConfig{Runtime: SandboxRuntimeBwrap}, 0)
+			ws := wsTempDir(t)
+			exe := filepath.Join(ws, "tool")
+			if err := os.WriteFile(exe, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			spec := bwrapTestSpec(t, ws)
+			spec.Path = exe
+			spec.Argv = []string{"tool"}
+			spec.ExeIdentity = nil // deliberately missing after helper initialization
+			_, calls, err := bwrapLaunch(t, b, lifetime, spec)
+			if err == nil || !strings.Contains(err.Error(), "executable changed since approval") {
+				t.Fatalf("%s launch = %v; want refusal on missing identity", lifetime, err)
+			}
+			if calls != 0 {
+				t.Fatalf("delegate called %d times; want 0", calls)
+			}
+		})
+	}
+}
+
+// TestBwrapAcceptsApprovedExecutable is the capture-delegate compatibility
+// control for the identity check: an unchanged #! script and a Homebrew-style
+// absolute symlink both reach the delegate in both lifetimes, with the
+// canonical target bound and launched and the approved spelling kept as
+// --argv0.
+func TestBwrapAcceptsApprovedExecutable(t *testing.T) {
+	fixtures := map[string]func(t *testing.T, ws string) execSpec{
+		"script": func(t *testing.T, ws string) execSpec {
+			p := filepath.Join(ws, "tool.sh")
+			if err := os.WriteFile(p, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			spec := bwrapTestSpec(t, ws)
+			spec.Path, spec.Argv = p, []string{"tool.sh", "arg1"}
+			spec.ExeIdentity = execIdentityOf(t, p)
+			return spec
+		},
+		"homebrew symlink": func(t *testing.T, ws string) execSpec {
+			prefix := wsTempDir(t)
+			real := filepath.Join(prefix, "Cellar", "tool", "1.0", "bin", "tool")
+			link := filepath.Join(prefix, "bin", "tool")
+			for _, d := range []string{filepath.Dir(real), filepath.Dir(link)} {
+				if err := os.MkdirAll(d, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.WriteFile(real, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(real, link); err != nil {
+				t.Fatal(err)
+			}
+			spec := bwrapTestSpec(t, ws)
+			spec.Path, spec.Argv = link, []string{"tool", "arg1"}
+			spec.ExeIdentity = execIdentityOf(t, link)
+			return spec
+		},
+	}
+	for name, fixture := range fixtures {
+		for _, lifetime := range bwrapLifetimes {
+			t.Run(name+"/"+lifetime, func(t *testing.T) {
+				b := testBwrapBackend(nil, nil, SandboxConfig{Runtime: SandboxRuntimeBwrap}, 0)
+				spec := fixture(t, wsTempDir(t))
+				canonExe, err := filepath.EvalSymlinks(spec.Path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				wrapped, calls, err := bwrapLaunch(t, b, lifetime, spec)
+				if err != nil {
+					t.Fatalf("%s launch = %v; want the approved executable accepted", lifetime, err)
+				}
+				if calls != 1 {
+					t.Fatalf("delegate called %d times; want 1", calls)
+				}
+				assertBwrapLaunchesCanonical(t, wrapped.Argv, spec.Path, canonExe)
+			})
+		}
+	}
+}
+
+// assertBwrapLaunchesCanonical pins the unchanged launch shape: canonExe is
+// the read-only bind source and the executed path, spelling only --argv0.
+// It assumes exactly one trailing payload argument after the executed path.
+func assertBwrapLaunchesCanonical(t *testing.T, argv []string, spelling, canonExe string) {
+	t.Helper()
+	joined := " " + strings.Join(argv, " ") + " "
+	if !strings.Contains(joined, " --ro-bind "+canonExe+" "+canonExe+" ") {
+		t.Fatalf("canonical target %q is not the bind source: %q", canonExe, argv)
+	}
+	if !strings.Contains(joined, " --argv0 "+spelling+" "+canonExe+" ") {
+		t.Fatalf("want --argv0 %q launching %q: %q", spelling, canonExe, argv)
+	}
+	if argv[len(argv)-2] != canonExe {
+		t.Fatalf("payload path = %q, want the canonical target %q", argv[len(argv)-2], canonExe)
+	}
+}
+
+// TestBwrapAcceptsScratchStampedExecutable composes scratch with the bwrap
+// check: scratch rewrites a workspace-local executable to its work clone and
+// restamps ExeIdentity, so prepare sees the clone as the approved object and
+// binds and launches its canonical target in both lifetimes.
+func TestBwrapAcceptsScratchStampedExecutable(t *testing.T) {
+	rt, canon := newTestScratchRuntime(t, ScratchConfig{Enabled: true})
+	// bwrap requires a canonical workspace root, and the rewritten root is a
+	// descendant of the scratch temp base.
+	tempBase, err := filepath.EvalSymlinks(rt.tempBase)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt.tempBase = tempBase
+	script := filepath.Join(canon, "tool.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	spec := testSpec(t, canon)
+	spec.Path, spec.Argv = script, []string{"./tool.sh", "arg1"}
+	spec.ExeIdentity = execIdentityOf(t, script)
+	session, rewritten, err := beginScratchSession(context.Background(), rt, spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.discard()
+
+	clone := filepath.Join(session.work, "tool.sh")
+	if rewritten.Path != clone {
+		t.Fatalf("rewritten Path = %q, want the work clone %q", rewritten.Path, clone)
+	}
+	// Non-fatal so the bwrap legs below still show what prepare does with an
+	// unstamped identity.
+	if !os.SameFile(rewritten.ExeIdentity, execIdentityOf(t, clone)) {
+		t.Errorf("rewritten ExeIdentity is not the work clone")
+	}
+	if os.SameFile(rewritten.ExeIdentity, spec.ExeIdentity) {
+		t.Errorf("rewritten ExeIdentity still names the source executable")
+	}
+	canonClone, err := filepath.EvalSymlinks(clone)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, lifetime := range bwrapLifetimes {
+		t.Run(lifetime, func(t *testing.T) {
+			b := testBwrapBackend(nil, nil, SandboxConfig{Runtime: SandboxRuntimeBwrap}, 0)
+			wrapped, calls, err := bwrapLaunch(t, b, lifetime, rewritten)
+			if err != nil {
+				t.Fatalf("%s launch = %v; want the scratch-stamped clone accepted", lifetime, err)
+			}
+			if calls != 1 {
+				t.Fatalf("delegate called %d times; want 1", calls)
+			}
+			assertBwrapLaunchesCanonical(t, wrapped.Argv, rewritten.Path, canonClone)
+		})
 	}
 }

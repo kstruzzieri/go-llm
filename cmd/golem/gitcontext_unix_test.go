@@ -54,8 +54,8 @@ func TestRunGitDisablesLazyFetch(t *testing.T) {
 	if got := out.String(); got != "--no-lazy-fetch\n1\n" {
 		t.Errorf("runGit lazy-fetch option and environment = %q, want %q", got, "--no-lazy-fetch\n1\n")
 	}
-	if got := envValues(hostGitEnv(), "GIT_NO_LAZY_FETCH"); len(got) != 1 || got[0] != "0" {
-		t.Errorf("hostGitEnv lazy-fetch setting = %q, want unchanged [0]", got)
+	if got := envValues(hostGitEnv(), "GIT_NO_LAZY_FETCH"); len(got) != 0 {
+		t.Errorf("hostGitEnv forwarded the parent lazy-fetch setting: %q", got)
 	}
 }
 
@@ -383,6 +383,7 @@ func TestLoadGitContextAllowsGlobalFilterDrivers(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	unsetenvForTest(t, "GIT_CONFIG_GLOBAL")
 	if err := os.WriteFile(filepath.Join(home, ".gitconfig"), []byte("[filter \"lfs\"]\n\tclean = cat\n\tprocess = cat\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}

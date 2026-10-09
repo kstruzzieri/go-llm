@@ -59,6 +59,24 @@ type execSpec struct {
 	// resolved and re-checked against. Sandboxing backends scope their
 	// allowances to it; the host runner ignores it.
 	WorkspaceRoot string
+	// ExeIdentity, DirIdentity and RootIdentity are the os.FileInfo identities
+	// recheckExecPlan compared before setup/launch (#553). Scratch validates its
+	// snapshot against them, and the sandbox backends verify the executable
+	// target they resolve matches ExeIdentity. Scratch rewrites only a
+	// workspace-local executable spelling so Path names the clone; on Linux
+	// and Darwin it then restamps ExeIdentity with the object that clone path
+	// resolves to (an internal link to an external file is stamped with that
+	// external object), and elsewhere ExeIdentity is left unchanged and
+	// unused. External spellings keep the approved identity. After the
+	// scratch rewrite Dir and WorkspaceRoot point into the clone while
+	// DirIdentity and RootIdentity still describe the approved host source
+	// objects, and consumers compare identities only (os.SameFile or
+	// statIdentity), never the captured mode, size, or mtime. They never
+	// affect the approval key. They bind the approved object, not its bytes
+	// (an in-place rewrite keeps the identity), and do not make launch atomic.
+	ExeIdentity  os.FileInfo
+	DirIdentity  os.FileInfo
+	RootIdentity os.FileInfo
 }
 
 type execResult struct {
@@ -380,11 +398,15 @@ func prepareExecPlan(ws *Workspace, argv []string, dir string, timeout time.Dura
 }
 
 // recheckExecPlan re-resolves and re-checks the approved cwd, workspace root,
-// and executable (path equality + os.SameFile identity) at spawn time, so an
-// escape/symlink, root substitution, or binary swap introduced after approval
-// fails closed. On success it returns an owned execSpec snapshot; on mismatch
-// a descriptive error the caller renders model-visible. Shared by foreground
-// Invoke and the background tool (#346).
+// and executable (path equality + os.SameFile identity) before setup/launch,
+// so an escape/symlink, root substitution, or binary swap introduced after
+// approval is caught at this check. It is not atomic with the spawn: a swap
+// after the check, and any change that keeps the identity (an in-place
+// rewrite, or a delete-and-recreate that reuses the inode number), remain
+// the documented residual (#484). On success it returns an owned execSpec
+// snapshot carrying the compared identities for the later scratch and
+// backend checks; on mismatch a descriptive error the caller renders
+// model-visible. Shared by foreground Invoke and the background tool (#346).
 func recheckExecPlan(ws *Workspace, pp execPending) (execSpec, error) {
 	dir, _, dirIdentity, err := resolveExecDir(ws, pp.dirLabel)
 	if err != nil || dir != pp.dir || pp.dirIdentity == nil || !os.SameFile(dirIdentity, pp.dirIdentity) {
@@ -408,6 +430,9 @@ func recheckExecPlan(ws *Workspace, pp execPending) (execSpec, error) {
 		Dir:           pp.dir,
 		Env:           append([]string{}, pp.env...),
 		WorkspaceRoot: ws.root,
+		ExeIdentity:   pp.identity,
+		DirIdentity:   pp.dirIdentity,
+		RootIdentity:  pp.workspaceIdentity,
 	}, nil
 }
 

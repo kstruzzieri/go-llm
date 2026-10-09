@@ -175,13 +175,15 @@ func canonTempDirT(t *testing.T) string {
 
 func seatbeltSpec(t *testing.T, ws string) execSpec {
 	t.Helper()
-	return execSpec{
+	s := execSpec{
 		Path:          "/bin/echo",
 		Argv:          []string{"echo", "hi"},
 		Dir:           ws,
 		Env:           []string{"PATH=/usr/bin", "HOME=/Users/nobody"},
 		WorkspaceRoot: ws,
 	}
+	s.ExeIdentity = execIdentityOf(t, s.Path)
+	return s
 }
 
 func tmpdirOf(t *testing.T, env []string) string {
@@ -349,6 +351,7 @@ func TestSeatbeltRunCanonicalExecutableTarget(t *testing.T) {
 	spec := seatbeltSpec(t, ws)
 	spec.Path = link
 	spec.Argv = []string{"link-tool"}
+	spec.ExeIdentity = execIdentityOf(t, link)
 	if _, err := b.Run(context.Background(), spec); err != nil {
 		t.Fatal(err)
 	}
@@ -372,19 +375,21 @@ func TestSeatbeltRunCleanupAndResultTaxonomy(t *testing.T) {
 		assertEmptyDir(t, base)
 	})
 	t.Run("runner error propagated and temp cleaned", func(t *testing.T) {
-		fake := &captureRunner{err: errors.New("spawn failed")}
+		runErr := errors.New("spawn failed")
+		fake := &captureRunner{err: runErr}
 		b, base := testSeatbeltBackend(t, fake)
-		if _, err := b.Run(context.Background(), seatbeltSpec(t, canonTempDirT(t))); err == nil {
-			t.Fatal("runner error swallowed")
+		if _, err := b.Run(context.Background(), seatbeltSpec(t, canonTempDirT(t))); !errors.Is(err, runErr) {
+			t.Fatalf("Run = %v; want the runner error %v", err, runErr)
 		}
 		assertEmptyDir(t, base)
 	})
 	t.Run("collector error cleans temp and skips delegate", func(t *testing.T) {
 		fake := &captureRunner{}
 		b, base := testSeatbeltBackend(t, fake)
-		b.systemRoots = func(string) ([]string, error) { return nil, errors.New("collector down") }
-		if _, err := b.Run(context.Background(), seatbeltSpec(t, canonTempDirT(t))); err == nil {
-			t.Fatal("collector error swallowed")
+		collectorErr := errors.New("collector down")
+		b.systemRoots = func(string) ([]string, error) { return nil, collectorErr }
+		if _, err := b.Run(context.Background(), seatbeltSpec(t, canonTempDirT(t))); !errors.Is(err, collectorErr) {
+			t.Fatalf("Run = %v; want the collector error %v", err, collectorErr)
 		}
 		if fake.called != 0 {
 			t.Fatal("delegate ran despite collector failure")
@@ -502,11 +507,12 @@ func TestSeatbeltStartRejectsBadRootBeforeDelegate(t *testing.T) {
 }
 
 func TestSeatbeltStartSpawnFailureCleansTemp(t *testing.T) {
-	starter := &captureStarter{err: errors.New("spawn failed")}
+	spawnErr := errors.New("spawn failed")
+	starter := &captureStarter{err: spawnErr}
 	b, base := testSeatbeltBackend(t, nil)
 	b.starter = starter
-	if _, err := b.Start(seatbeltSpec(t, canonTempDirT(t)), io.Discard, io.Discard); err == nil {
-		t.Fatal("spawn failure swallowed")
+	if _, err := b.Start(seatbeltSpec(t, canonTempDirT(t)), io.Discard, io.Discard); !errors.Is(err, spawnErr) {
+		t.Fatalf("Start = %v; want the spawn error %v", err, spawnErr)
 	}
 	assertEmptyDir(t, base)
 }
@@ -689,6 +695,7 @@ func realSeatbeltRun(t *testing.T, cfg SandboxConfig, ws string, argv []string, 
 		Dir:           ws,
 		Env:           append([]string{"PATH=/usr/bin:/bin", "HOME=" + os.Getenv("HOME")}, extraEnv...),
 		WorkspaceRoot: ws,
+		ExeIdentity:   execIdentityOf(t, argv[0]),
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -915,8 +922,8 @@ func TestSeatbeltRejectsWorkspaceHardLinkToOutsideInode(t *testing.T) {
 					_, _, _ = proc.Wait()
 				}
 			}
-			if err == nil {
-				t.Error("Seatbelt launch error = nil, want outside-hard-link rejection")
+			if err == nil || !strings.Contains(err.Error(), "is linked outside the workspace") {
+				t.Errorf("Seatbelt launch error = %v, want the outside-hard-link rejection", err)
 			}
 			if calls := runner.called + starter.called; calls != 0 {
 				t.Errorf("delegate calls = %d, want 0", calls)
@@ -1171,6 +1178,7 @@ func helperStart(t *testing.T, ws, mode string, modeArgs ...string) (backgroundP
 		Dir:           ws,
 		Env:           []string{"PATH=/usr/bin:/bin", "GO_LLM_SEATBELT_HELPER=1"},
 		WorkspaceRoot: ws,
+		ExeIdentity:   execIdentityOf(t, exe),
 	}
 	out := &lockedBuffer{}
 	proc, err := backend.Start(spec, out, io.Discard)
@@ -1413,4 +1421,561 @@ func TestNewExecBackendSeatbeltMatchesRealCapability(t *testing.T) {
 	if got.approval.preview != want {
 		t.Fatalf("preview = %q, want %q", got.approval.preview, want)
 	}
+}
+
+// --- Executable identity binding (#553) ---
+
+var seatbeltLifetimes = []string{"foreground", "background"}
+
+// seatbeltLaunch drives one lifetime of b with capture delegates and returns
+// the wrapper spec the selected delegate received, the total delegate calls,
+// and the launch error. A Start that returns a process is waited, so the
+// private temp is reaped on every path.
+func seatbeltLaunch(t *testing.T, b *seatbeltBackend, lifetime string, spec execSpec) (execSpec, int, error) {
+	t.Helper()
+	runner := &captureRunner{}
+	starter := &captureStarter{proc: &fakeProcess{pid: 42}}
+	b.runner, b.starter = runner, starter
+	if lifetime == "foreground" {
+		_, err := b.Run(context.Background(), spec)
+		return runner.spec, runner.called + starter.called, err
+	}
+	proc, err := b.Start(spec, io.Discard, io.Discard)
+	if proc != nil {
+		if _, _, werr := proc.Wait(); werr != nil {
+			t.Errorf("Wait = %v; want nil", werr)
+		}
+	}
+	return starter.spec, runner.called + starter.called, err
+}
+
+// A regular executable renamed over the approved one between recheck and
+// prepare must be refused: the resolved target no longer matches the approved
+// identity. Regular-over-regular so no type guard masks the identity check.
+func TestSeatbeltPrepareRejectsExecutableIdentityChange(t *testing.T) {
+	for _, lifetime := range seatbeltLifetimes {
+		t.Run(lifetime, func(t *testing.T) {
+			b, base := testSeatbeltBackend(t, nil)
+			ws := canonTempDirT(t)
+			approved := filepath.Join(ws, "tool")
+			if err := os.WriteFile(approved, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			spec := seatbeltSpec(t, ws)
+			spec.Path = approved
+			spec.Argv = []string{"tool"}
+			spec.ExeIdentity = execIdentityOf(t, approved)
+
+			replacement := filepath.Join(ws, "tool.new")
+			if err := os.WriteFile(replacement, []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Rename(replacement, approved); err != nil {
+				t.Fatal(err)
+			}
+			_, calls, err := seatbeltLaunch(t, b, lifetime, spec)
+			if err == nil || !strings.Contains(err.Error(), "executable changed since approval") {
+				t.Fatalf("%s launch = %v; want the executable-changed error", lifetime, err)
+			}
+			if calls != 0 {
+				t.Fatalf("delegate called %d times; want 0 (prepare must refuse before launch)", calls)
+			}
+			assertEmptyDir(t, base)
+		})
+	}
+}
+
+// A spec with no approved identity (never set by production recheck) is
+// refused, so a future caller cannot silently skip the check.
+func TestSeatbeltPrepareRejectsMissingIdentity(t *testing.T) {
+	for _, lifetime := range seatbeltLifetimes {
+		t.Run(lifetime, func(t *testing.T) {
+			b, base := testSeatbeltBackend(t, nil)
+			ws := canonTempDirT(t)
+			exe := filepath.Join(ws, "tool")
+			if err := os.WriteFile(exe, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			spec := seatbeltSpec(t, ws)
+			spec.Path = exe
+			spec.Argv = []string{"tool"}
+			spec.ExeIdentity = nil // deliberately missing after helper initialization
+			_, calls, err := seatbeltLaunch(t, b, lifetime, spec)
+			if err == nil || !strings.Contains(err.Error(), "executable changed since approval") {
+				t.Fatalf("%s launch = %v; want refusal on missing identity", lifetime, err)
+			}
+			if calls != 0 {
+				t.Fatalf("delegate called %d times; want 0", calls)
+			}
+			assertEmptyDir(t, base)
+		})
+	}
+}
+
+// TestSeatbeltAcceptsApprovedExecutable is the capture-delegate compatibility
+// control for the identity check: an unchanged #! script and a Homebrew-style
+// absolute symlink both reach the delegate in both lifetimes, and the
+// wrapper still launches the approved spelling (argv[0] preserved, D6).
+func TestSeatbeltAcceptsApprovedExecutable(t *testing.T) {
+	fixtures := map[string]func(t *testing.T, ws string) execSpec{
+		"script": func(t *testing.T, ws string) execSpec {
+			p := filepath.Join(ws, "tool.sh")
+			if err := os.WriteFile(p, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			spec := seatbeltSpec(t, ws)
+			spec.Path, spec.Argv = p, []string{"tool.sh"}
+			spec.ExeIdentity = execIdentityOf(t, p)
+			return spec
+		},
+		"homebrew symlink": func(t *testing.T, ws string) execSpec {
+			prefix := canonTempDirT(t)
+			real := filepath.Join(prefix, "Cellar", "tool", "1.0", "bin", "tool")
+			link := filepath.Join(prefix, "bin", "tool")
+			for _, d := range []string{filepath.Dir(real), filepath.Dir(link)} {
+				if err := os.MkdirAll(d, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.WriteFile(real, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(real, link); err != nil {
+				t.Fatal(err)
+			}
+			spec := seatbeltSpec(t, ws)
+			spec.Path, spec.Argv = link, []string{"tool"}
+			spec.ExeIdentity = execIdentityOf(t, link)
+			return spec
+		},
+	}
+	for name, fixture := range fixtures {
+		for _, lifetime := range seatbeltLifetimes {
+			t.Run(name+"/"+lifetime, func(t *testing.T) {
+				b, base := testSeatbeltBackend(t, nil)
+				spec := fixture(t, canonTempDirT(t))
+				wrapped, calls, err := seatbeltLaunch(t, b, lifetime, spec)
+				if err != nil {
+					t.Fatalf("%s launch = %v; want the approved executable accepted", lifetime, err)
+				}
+				if calls != 1 {
+					t.Fatalf("delegate called %d times; want 1", calls)
+				}
+				if len(wrapped.Argv) < 4 || wrapped.Argv[3] != spec.Path {
+					t.Fatalf("wrapper argv = %q; want the approved spelling %q launched", wrapped.Argv, spec.Path)
+				}
+				assertEmptyDir(t, base)
+			})
+		}
+	}
+}
+
+// TestSeatbeltAcceptsScratchStampedExecutable composes scratch with the
+// Seatbelt check: scratch rewrites a workspace-local executable to its work
+// clone and restamps ExeIdentity, so prepare sees the clone as the approved
+// object, allows its canonical target, and launches the rewritten spelling.
+func TestSeatbeltAcceptsScratchStampedExecutable(t *testing.T) {
+	rt, canon := newTestScratchRuntime(t, ScratchConfig{Enabled: true})
+	// Seatbelt requires a canonical workspace root, and the rewritten root is
+	// a descendant of the scratch temp base.
+	tempBase, err := filepath.EvalSymlinks(rt.tempBase)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt.tempBase = tempBase
+	script := filepath.Join(canon, "tool.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	spec := testSpec(t, canon)
+	spec.Path, spec.Argv = script, []string{"./tool.sh"}
+	spec.ExeIdentity = execIdentityOf(t, script)
+	session, rewritten, err := beginScratchSession(context.Background(), rt, spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.discard()
+
+	clone := filepath.Join(session.work, "tool.sh")
+	if rewritten.Path != clone {
+		t.Fatalf("rewritten Path = %q, want the work clone %q", rewritten.Path, clone)
+	}
+	// Non-fatal so the Seatbelt legs below still show what prepare does with
+	// an unstamped identity.
+	if !os.SameFile(rewritten.ExeIdentity, execIdentityOf(t, clone)) {
+		t.Errorf("rewritten ExeIdentity is not the work clone")
+	}
+	if os.SameFile(rewritten.ExeIdentity, spec.ExeIdentity) {
+		t.Errorf("rewritten ExeIdentity still names the source executable")
+	}
+	canonClone, err := filepath.EvalSymlinks(clone)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, lifetime := range seatbeltLifetimes {
+		t.Run(lifetime, func(t *testing.T) {
+			b, base := testSeatbeltBackend(t, nil)
+			wrapped, calls, err := seatbeltLaunch(t, b, lifetime, rewritten)
+			if err != nil {
+				t.Fatalf("%s launch = %v; want the scratch-stamped clone accepted", lifetime, err)
+			}
+			if calls != 1 {
+				t.Fatalf("delegate called %d times; want 1", calls)
+			}
+			if !strings.Contains(wrapped.Argv[2], `(literal "`+canonClone+`")`) {
+				t.Fatalf("profile does not allow the canonical clone %q:\n%s", canonClone, wrapped.Argv[2])
+			}
+			if wrapped.Argv[3] != rewritten.Path {
+				t.Fatalf("wrapper launches %q, want the rewritten spelling %q", wrapped.Argv[3], rewritten.Path)
+			}
+			assertEmptyDir(t, base)
+		})
+	}
+}
+
+// copyTestBinary copies this native, non-platform test binary to dst with
+// mode. Copied Apple platform binaries are SIGKILLed outside their system
+// location, so they cannot stand in for an external native tool.
+func copyTestBinary(t *testing.T, dst string, mode os.FileMode) {
+	t.Helper()
+	if raceInstrumented {
+		t.Skip("race-instrumented helper cannot initialize under the sandbox; helper legs run in the non-race pass")
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(exe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dst, data, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dst, mode); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dst, 0o755) })
+}
+
+// TestSeatbeltBehavioralApprovedExecutableShapes: the identity check binds
+// the approved object without narrowing what runs. Under real Seatbelt an
+// unchanged workspace #! script, an execute-only native tool, and a native
+// tool under a search-only ancestor all run; the last two pin that resolving
+// and stat'ing the target adds no read requirement on the executable or its
+// directories. Homebrew-style external symlinks, single-hop and a
+// multi-hop chain through a directory link, run by their link spelling.
+func TestSeatbeltBehavioralApprovedExecutableShapes(t *testing.T) {
+	requireSeatbeltCapability(t)
+	helperArgv := func(exe string) []string {
+		return []string{exe, "-test.run=^TestSeatbeltHelperProcess$", "-test.v", "--", "pid"}
+	}
+	assertHelperRan := func(t *testing.T, res execResult) {
+		t.Helper()
+		if res.ExitCode != 0 || !strings.Contains(string(res.Stdout), "HELPER-PID: ") {
+			t.Fatalf("exit=%d stdout=%q stderr=%q", res.ExitCode, res.Stdout, res.Stderr)
+		}
+	}
+	requireUnprivileged := func(t *testing.T) {
+		t.Helper()
+		if os.Geteuid() == 0 {
+			t.Skip("root bypasses permission bits; the fixture cannot withhold read access")
+		}
+	}
+
+	t.Run("script", func(t *testing.T) {
+		ws := canonTempDirT(t)
+		script := filepath.Join(ws, "tool.sh")
+		if err := os.WriteFile(script, []byte("#!/bin/sh\necho script-ok\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		res := realSeatbeltRun(t, seatbeltTestCfg(), ws, []string{script})
+		if res.ExitCode != 0 || !strings.Contains(string(res.Stdout), "script-ok") {
+			t.Fatalf("exit=%d stdout=%q stderr=%q", res.ExitCode, res.Stdout, res.Stderr)
+		}
+	})
+	// Seatbelt checks each link execvp reads at its canonical-parent
+	// spelling, outside every read root here; prepare grants each one a
+	// metadata literal.
+	t.Run("homebrew symlink", func(t *testing.T) {
+		prefix := canonTempDirT(t)
+		real := filepath.Join(prefix, "Cellar", "tool", "1.0", "bin", "tool")
+		copyTestBinary(t, real, 0o755)
+		link := filepath.Join(prefix, "bin", "tool")
+		if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(real, link); err != nil {
+			t.Fatal(err)
+		}
+		assertHelperRan(t, realSeatbeltRun(t, seatbeltTestCfg(), canonTempDirT(t), helperArgv(link), "GO_LLM_SEATBELT_HELPER=1"))
+	})
+	t.Run("homebrew multi-hop symlink", func(t *testing.T) {
+		spelled, _, _ := homebrewChain(t, func(t *testing.T, p string) { copyTestBinary(t, p, 0o755) })
+		assertHelperRan(t, realSeatbeltRun(t, seatbeltTestCfg(), canonTempDirT(t), helperArgv(spelled), "GO_LLM_SEATBELT_HELPER=1"))
+	})
+	t.Run("execute-only", func(t *testing.T) {
+		requireUnprivileged(t)
+		exe := filepath.Join(canonTempDirT(t), "tool")
+		copyTestBinary(t, exe, 0o111)
+		if _, err := os.ReadFile(exe); !errors.Is(err, os.ErrPermission) {
+			t.Fatalf("fixture must be unreadable: ReadFile err = %v", err)
+		}
+		assertHelperRan(t, realSeatbeltRun(t, seatbeltTestCfg(), canonTempDirT(t), helperArgv(exe), "GO_LLM_SEATBELT_HELPER=1"))
+	})
+	t.Run("search-only ancestor", func(t *testing.T) {
+		requireUnprivileged(t)
+		locked := filepath.Join(canonTempDirT(t), "locked")
+		exe := filepath.Join(locked, "tool")
+		copyTestBinary(t, exe, 0o755)
+		if err := os.Chmod(locked, 0o111); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
+		if _, err := os.ReadDir(locked); !errors.Is(err, os.ErrPermission) {
+			t.Fatalf("fixture ancestor must be unlistable: ReadDir err = %v", err)
+		}
+		assertHelperRan(t, realSeatbeltRun(t, seatbeltTestCfg(), canonTempDirT(t), helperArgv(exe), "GO_LLM_SEATBELT_HELPER=1"))
+	})
+}
+
+// homebrewChain lays out a Homebrew-style multi-hop chain outside any
+// workspace: bin/tool -> ../opt/tool/bin/tool (relative, through the
+// directory link opt/tool -> ../Cellar/tool/1.0, also relative), and
+// Cellar/tool/1.0/bin/tool -> <store>/tool (absolute, a third location).
+// writeTarget creates the final executable. It returns the approved
+// spelling, the canonical target, and every link node in walk order.
+func homebrewChain(t *testing.T, writeTarget func(*testing.T, string)) (spelled, target string, links []string) {
+	t.Helper()
+	prefix, store := canonTempDirT(t), canonTempDirT(t)
+	target = filepath.Join(store, "tool")
+	writeTarget(t, target)
+	spelled = filepath.Join(prefix, "bin", "tool")
+	opt := filepath.Join(prefix, "opt", "tool")
+	cellar := filepath.Join(prefix, "Cellar", "tool", "1.0", "bin", "tool")
+	for _, l := range [][2]string{
+		{spelled, "../opt/tool/bin/tool"},
+		{opt, "../Cellar/tool/1.0"},
+		{cellar, target},
+	} {
+		if err := os.MkdirAll(filepath.Dir(l[0]), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(l[1], l[0]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return spelled, target, []string{spelled, opt, cellar}
+}
+
+// seatbeltRuleOf returns the operation ("file-read-metadata") of the profile
+// rule holding the first occurrence of needle, or "" when absent.
+func seatbeltRuleOf(profile, needle string) string {
+	i := strings.Index(profile, needle)
+	if i < 0 {
+		return ""
+	}
+	start := strings.LastIndex(profile[:i], "(allow ")
+	if start < 0 {
+		return ""
+	}
+	rest := profile[start+len("(allow "):]
+	return rest[:strings.IndexAny(rest, " \n)")]
+}
+
+// TestSeatbeltProfileGrantsMetadataOnSymlinkChain: every link the approved
+// spelling traverses (file and directory links, relative and absolute
+// targets) gets exactly one file-read-metadata literal at its canonical-parent
+// spelling and no other allowance; reads stay on the canonical target. No
+// real sandbox, so this runs under -race too.
+func TestSeatbeltProfileGrantsMetadataOnSymlinkChain(t *testing.T) {
+	spelled, target, links := homebrewChain(t, func(t *testing.T, p string) {
+		if err := os.WriteFile(p, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	})
+	b, base := testSeatbeltBackend(t, nil)
+	spec := seatbeltSpec(t, canonTempDirT(t))
+	spec.Path, spec.Argv = spelled, []string{"tool"}
+	spec.ExeIdentity = execIdentityOf(t, spelled)
+	wrapped, calls, err := seatbeltLaunch(t, b, "foreground", spec)
+	if err != nil || calls != 1 {
+		t.Fatalf("launch = %v, delegate calls %d; want the chain accepted once", err, calls)
+	}
+	profile := wrapped.Argv[2]
+	for _, link := range links {
+		q := `"` + link + `"`
+		if n := strings.Count(profile, q); n != 1 {
+			t.Errorf("link %s appears %d times in the profile; want exactly one metadata literal", link, n)
+		}
+		if rule := seatbeltRuleOf(profile, "(literal "+q+")"); rule != "file-read-metadata" {
+			t.Errorf("link %s literal is under %q; want file-read-metadata", link, rule)
+		}
+		// Each link's own traversal spine, so the program can lstat its
+		// spelling (realpath); opt/ and Cellar/.../bin have no other source.
+		if rule := seatbeltRuleOf(profile, `(literal "`+filepath.Dir(link)+`")`); rule != "file-read-metadata" {
+			t.Errorf("link parent %s literal is under %q; want file-read-metadata", filepath.Dir(link), rule)
+		}
+	}
+	// Nothing broader reaches a link: no subpath in any rule equals or
+	// covers one (a read subpath over a link's directory would expose the
+	// whole prefix, e.g. all of /opt/homebrew/bin).
+	for _, part := range strings.Split(profile, `(subpath "`)[1:] {
+		root := part[:strings.Index(part, `")`)]
+		for _, link := range links {
+			if root == "/" || link == root || strings.HasPrefix(link, root+"/") {
+				t.Errorf("subpath %q covers link %s; want only its metadata literal", root, link)
+			}
+		}
+	}
+	if rule := seatbeltRuleOf(profile, `(literal "`+target+`")`); rule != "file-read*" {
+		t.Errorf("canonical target literal is under %q; want file-read*", rule)
+	}
+	if wrapped.Argv[3] != spelled {
+		t.Errorf("wrapper launches %q; want the approved spelling %q", wrapped.Argv[3], spelled)
+	}
+	if t.Failed() {
+		t.Logf("profile:\n%s", profile)
+	}
+	assertEmptyDir(t, base)
+}
+
+// TestSeatbeltPrepareRejectsUnresolvableSymlinkChain: dangling and cyclic
+// spellings still fail at the existing resolve step, before any chain walk.
+func TestSeatbeltPrepareRejectsUnresolvableSymlinkChain(t *testing.T) {
+	for name, build := range map[string]func(t *testing.T, dir string) string{
+		"dangling": func(t *testing.T, dir string) string {
+			link := filepath.Join(dir, "tool")
+			if err := os.Symlink(filepath.Join(dir, "missing"), link); err != nil {
+				t.Fatal(err)
+			}
+			return link
+		},
+		"cycle": func(t *testing.T, dir string) string {
+			a, b := filepath.Join(dir, "a"), filepath.Join(dir, "b")
+			if err := os.Symlink(b, a); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink("a", b); err != nil {
+				t.Fatal(err)
+			}
+			return a
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			b, base := testSeatbeltBackend(t, nil)
+			spec := seatbeltSpec(t, canonTempDirT(t))
+			spec.Path = build(t, canonTempDirT(t)) // identity stays /bin/echo's: resolve fails first
+			_, calls, err := seatbeltLaunch(t, b, "foreground", spec)
+			if err == nil || !strings.Contains(err.Error(), "seatbelt resolve executable target") {
+				t.Fatalf("launch = %v; want the resolve failure", err)
+			}
+			if calls != 0 {
+				t.Fatalf("delegate called %d times; want 0", calls)
+			}
+			assertEmptyDir(t, base)
+		})
+	}
+}
+
+// TestSeatbeltPrepareRejectsOverlongSymlinkChain: Go's resolver follows up
+// to 255 links but the kernel stops at MAXSYMLINKS (32), so a chain past the
+// walk bound resolves in prepare yet could never launch; it fails closed.
+func TestSeatbeltPrepareRejectsOverlongSymlinkChain(t *testing.T) {
+	dir := canonTempDirT(t)
+	target := filepath.Join(dir, "tool")
+	if err := os.WriteFile(target, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	next := target
+	for i := 0; i <= seatbeltMaxSymlinkHops; i++ {
+		link := filepath.Join(dir, fmt.Sprintf("hop%02d", i))
+		if err := os.Symlink(next, link); err != nil {
+			t.Fatal(err)
+		}
+		next = link
+	}
+	b, base := testSeatbeltBackend(t, nil)
+	spec := seatbeltSpec(t, canonTempDirT(t))
+	spec.Path, spec.Argv = next, []string{"tool"}
+	// os.Stat cannot follow the chain (ELOOP); the approved object is the target.
+	spec.ExeIdentity = execIdentityOf(t, target)
+	_, calls, err := seatbeltLaunch(t, b, "foreground", spec)
+	if err == nil || !strings.Contains(err.Error(), "traverses more than") {
+		t.Fatalf("launch = %v; want the symlink hop-bound refusal", err)
+	}
+	if calls != 0 {
+		t.Fatalf("delegate called %d times; want 0", calls)
+	}
+	assertEmptyDir(t, base)
+}
+
+// TestSeatbeltSymlinkChainMustEndAtApprovedTarget: prepare walks the chain
+// after EvalSymlinks, so a chain changed in between must not be granted; the
+// walk refuses any end other than the approved canonical target.
+func TestSeatbeltSymlinkChainMustEndAtApprovedTarget(t *testing.T) {
+	spelled, target, links := homebrewChain(t, func(t *testing.T, p string) {
+		if err := os.WriteFile(p, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	})
+	got, err := seatbeltSymlinkChain(spelled, target)
+	if err != nil || strings.Join(got, "\n") != strings.Join(links, "\n") {
+		t.Fatalf("chain = %q, %v; want %q", got, err, links)
+	}
+	if _, err := seatbeltSymlinkChain(spelled, filepath.Join(filepath.Dir(target), "other")); err == nil ||
+		!strings.Contains(err.Error(), "not the approved target") {
+		t.Fatalf("chain to a different target = %v; want the approved-target refusal", err)
+	}
+}
+
+// TestSeatbeltSymlinkChainResolvesDotDotPhysically: ".." after a directory
+// link climbs from the link's target, not lexically, so the walk must visit
+// the link. bin/tool -> ../dl/../real/tool with dl -> a/b/real resolves to
+// a/b/real/tool; a lexical join would skip dl and land on the real/tool
+// decoy.
+func TestSeatbeltSymlinkChainResolvesDotDotPhysically(t *testing.T) {
+	dir := canonTempDirT(t)
+	target := filepath.Join(dir, "a", "b", "real", "tool")
+	decoy := filepath.Join(dir, "real", "tool")
+	for _, p := range []string{target, decoy} {
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	spelled := filepath.Join(dir, "bin", "tool")
+	dl := filepath.Join(dir, "dl")
+	if err := os.MkdirAll(filepath.Dir(spelled), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("../dl/../real/tool", spelled); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("a/b/real", dl); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{spelled, dl}
+	got, err := seatbeltSymlinkChain(spelled, target)
+	if err != nil || strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("chain = %q, %v; want %q", got, err, want)
+	}
+
+	b, base := testSeatbeltBackend(t, nil)
+	spec := seatbeltSpec(t, canonTempDirT(t))
+	spec.Path, spec.Argv = spelled, []string{"tool"}
+	spec.ExeIdentity = execIdentityOf(t, spelled)
+	wrapped, calls, err := seatbeltLaunch(t, b, "foreground", spec)
+	if err != nil || calls != 1 {
+		t.Fatalf("launch = %v, delegate calls %d; want the chain accepted once", err, calls)
+	}
+	if rule := seatbeltRuleOf(wrapped.Argv[2], `(literal "`+dl+`")`); rule != "file-read-metadata" {
+		t.Errorf("directory link %s literal is under %q; want file-read-metadata", dl, rule)
+	}
+	assertEmptyDir(t, base)
 }

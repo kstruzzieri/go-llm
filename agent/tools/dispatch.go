@@ -237,7 +237,7 @@ func (d *Dispatch) Spec() agent.ToolSpec {
 	description := "Run one or more bounded, read-only exploration tasks in child agents and return their summaries, stop reasons, and actual models."
 	if supportsScopedDispatch {
 		items = `{"oneOf":[{"type":"string"},{"type":"object","properties":{"task":{"type":"string"},"scope":{"type":"string"}},"required":["task","scope"],"additionalProperties":false}]}`
-		description += " A task is a string, or {task, scope} where scope is an existing workspace-relative subdirectory that bounds the child's reads (read_file, search, glob, list only; no retrieval)."
+		description += " A task is a string, or {task, scope} where scope is an existing workspace-relative subdirectory outside .git, .ssh, .gnupg, .aws and .kube that bounds the child's reads (read_file, search, glob, list only; no retrieval)."
 	}
 	return agent.ToolSpec{
 		Name:        DispatchToolName,

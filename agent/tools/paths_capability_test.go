@@ -84,14 +84,17 @@ func TestWorkspacePinnedDuringPolicy(t *testing.T) {
 				}
 				return nil
 			})
+			// #613: the pinned directory moved after the guard decided, so the
+			// guarded path no longer reaches it. Fail closed; the replacement
+			// content (FORBIDDEN) must never be returned either.
 			if listing {
 				result, err := NewList(ws).Invoke(context.Background(), json.RawMessage(`{"path":"public"}`))
-				if err != nil || result.Content != "public/file.txt" {
+				if err != nil || !result.IsError || result.Content != "path changed during access" {
 					t.Fatalf("list = %+v, %v", result, err)
 				}
 			} else {
 				data, err := ws.readAll("public/file.txt")
-				if err != nil || string(data) != "ORIGINAL\n" {
+				if !errors.Is(err, errFileChanged) || len(data) != 0 {
 					t.Fatalf("read = %q, %v", data, err)
 				}
 			}
@@ -144,20 +147,18 @@ func TestWorkspacePinnedRoot(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(root, "secret.txt"), []byte("FORBIDDEN\n"), 0600); err != nil {
 				t.Fatal(err)
 			}
+			// #613: a replaced root fails reads and listings closed, even
+			// through a borrowed pinned root.
 			data, err := ws.readAll("secret.txt")
 			if present {
-				if err != nil || string(data) != "ORIGINAL\n" {
+				if !errors.Is(err, ErrRootReplaced) || len(data) != 0 {
 					t.Fatalf("pinned read %q, %v", data, err)
 				}
 			} else if !errors.Is(err, fs.ErrNotExist) {
 				t.Fatalf("missing pinned read %q, %v", data, err)
 			}
 			result, err := NewList(ws).Invoke(context.Background(), json.RawMessage(`{}`))
-			want := "no entries"
-			if present {
-				want = "secret.txt"
-			}
-			if err != nil || result.Content != want {
+			if err != nil || !result.IsError || result.Content != "path changed during access" {
 				t.Fatalf("pinned list %+v, %v", result, err)
 			}
 			if _, err := pinned.Stat(); err != nil {
@@ -179,6 +180,18 @@ func TestWorkspaceWalkAndMetadataPinned(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// #448: entry metadata is a descriptor-relative snapshot. Capture public's
+	// sole entry before the root is replaced; its Info must still report the
+	// original size afterwards, when no path names that file any more.
+	public, err := ws.openDir("public")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = public.Close() })
+	held, err := readWorkspaceEntries(public)
+	if err != nil || len(held) != 1 || held[0].Name() != "original" {
+		t.Fatalf("held entries %v, %v", held, err)
+	}
 	swapped := false
 	ws.SetScopeGuard(func(rel string, write bool) error {
 		if !swapped {
@@ -198,16 +211,16 @@ func TestWorkspaceWalkAndMetadataPinned(t *testing.T) {
 	var names []string
 	err = ws.walk(context.Background(), func(rel string, d fs.DirEntry) error {
 		names = append(names, rel)
-		if rel == "public/original" {
-			info, err := d.Info()
-			if err != nil || info.Size() != 9 {
-				t.Fatalf("metadata %v, %v", info, err)
-			}
-		}
 		return nil
 	})
-	if err != nil || len(names) != 2 || names[0] != "public" || names[1] != "public/original" {
+	// #613: the root was replaced after its listing was verified; the walk
+	// aborts before enumerating public, so no name from either tree's public
+	// directory is emitted.
+	if !errors.Is(err, ErrRootReplaced) || len(names) != 1 || names[0] != "public" {
 		t.Fatalf("walk %v, %v", names, err)
+	}
+	if info, err := held[0].Info(); err != nil || info.Size() != 9 {
+		t.Fatalf("metadata %v, %v", info, err)
 	}
 }
 

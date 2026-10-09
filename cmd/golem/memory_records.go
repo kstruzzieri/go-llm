@@ -145,7 +145,7 @@ func openMemoryRuntime(ctx context.Context, getenv func(string) string, root str
 		_ = db.Close()
 		return memoryRuntime{warns: rt.warns}
 	}
-	// Migrations may have (re)created -wal/-shm honoring the umask; re-secure.
+	// A -wal/-shm sidecar left with looser bits keeps them; re-secure.
 	// Warn only still-live features: one that already warned above (e.g. record
 	// store construction failed) must not warn a second time.
 	if cerr := chmodDBFiles(dbPath); cerr != nil {

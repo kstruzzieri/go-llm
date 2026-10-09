@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 
 	"github.com/kstruzzieri/go-llm/agent"
+	"github.com/kstruzzieri/go-llm/agent/interceptor"
 )
 
 // scopeCounters belongs to one scoped child; evaluations include quiet pruning,
@@ -84,6 +85,14 @@ func newScopedWorkspace(parent *Workspace, scope string) (*Workspace, *scopeCoun
 		return nil, nil, nil, err
 	}
 	cleanup := func() { _ = root.Close() }
+	// A child rooted at or below a protected directory would judge
+	// child-relative paths without that ancestor, so the read_file credential
+	// invariant could not see it (#627). rel is the stored on-disk spelling;
+	// IsProtectedPath normalizes alias spellings.
+	if interceptor.IsProtectedPath(rel) {
+		cleanup()
+		return nil, nil, nil, errScopeDenied
+	}
 	identity, err := root.Stat()
 	if err != nil {
 		cleanup()
@@ -91,6 +100,10 @@ func newScopedWorkspace(parent *Workspace, scope string) (*Workspace, *scopeCoun
 	}
 	counter := new(scopeCounters)
 	ws := &Workspace{root: filepath.Join(snapshot.root, rel), rootIdentity: identity, pinnedRoot: root, scope: counter}
+	// #613: verification starts at the top-level root, above the pinned scope,
+	// so a moved scope or a symlinked ancestor cannot satisfy it.
+	anchorRoot, anchorIdentity, anchorPrefix := snapshot.readAnchor()
+	ws.anchorRoot, ws.anchorIdentity, ws.anchorPrefix = anchorRoot, anchorIdentity, filepath.Join(anchorPrefix, rel)
 	ws.guard = func(childRel string, write bool) error {
 		var err error
 		if write {

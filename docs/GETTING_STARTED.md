@@ -234,6 +234,10 @@ a `config.Config` built programmatically keeps `api_key` as written.
 
 ### Remote-relevant flags
 
+- `-allow-destination "hosted/https://api.openai.com"` — pre-admits the
+  example's remote provider. Repeat for each reachable remote destination.
+  Subcommands such as `golem models` and one-shot runs never prompt, so they
+  require these grants. See [destination admission](backends.md#use-a-hosted-api-bring-your-own-key).
 - `-no-probe` — skips the openai-compat port discovery scan. The scan is
   loopback-only (localhost ports 8080-8090); a remote `base_url` is never
   scanned regardless, so this flag just silences local discovery when you are
@@ -271,8 +275,10 @@ runs with file tools only.
 ### Verify the setup
 
 ```bash
-golem models                 # confirm resolution and tool_call provenance
-golem -p "say hi"            # one-shot smoke against the hosted endpoint
+# Confirm resolution and tool_call provenance.
+golem models -config models.json -allow-destination "hosted/https://api.openai.com"
+# One-shot smoke against the hosted endpoint.
+golem -config models.json -allow-destination "hosted/https://api.openai.com" -p "say hi"
 ```
 
 `golem models` shows which model each role resolves to and where its
@@ -420,17 +426,38 @@ Add to `claude_desktop_config.json`:
   "mcpServers": {
     "go-llm": {
       "command": "/path/to/go-llm-mcp",
-      "args": ["--transport", "stdio"]
+      "args": [
+        "--transport", "stdio",
+        "--config", "/absolute/path/to/models.json",
+        "--rag-db", "/absolute/path/to/project-rag.db"
+      ]
     }
   }
 }
 ```
+
+Use a distinct `--rag-db` per project and index that project's files before
+relying on retrieval. Set the intended config explicitly, as above, or supply
+`GO_LLM_CONFIG` through the host's server environment settings. The server
+inherits its parent process's environment; it does not source your interactive
+shell profile itself. Ensure any API-key variables referenced by the config
+are available to that process. For remote providers, also add the destination
+grants described below to `args`.
 
 #### Tools, routing, and remote admission
 
 The server exposes tools for chat, generation, code completion, embeddings, RAG, model management, and analysis, plus opt-in agent-memory tools (`agent_memory_search`, `agent_memory_create`, `agent_memory_promote`) registered only when `--agent-memory-db <path>` is set; their signing, key lifecycle, and fenced-result contract are documented in [Agent-memory provenance and integrity](memory.md). The server also exposes prompt templates and routing/config resources. Remote model destinations are denied unless pre-admitted: the standalone server never prompts, so pass `-allow-destination "provider/https://host/base"` (repeatable) for each remote endpoint — the same canonical form Golem takes. Its admission scope is broader than Golem's route-derived manifest — any configured provider may be reached for any served purpose, plus health, model-listing, and warmth checks — so admit every remote provider the config declares, not just the destinations Golem's manifest showed. Chat, generate, completion, embedding, and analysis tools accept an optional `model` parameter; when omitted, the request is routed by `provider.Router` using a use-case-appropriate weight profile (chat / fim / embedding / reasoning / analysis / code-review / agent), with circuit-breaker-aware fallback. Routing state for diagnostics is exposed via the `route://breakers`, `route://warmth`, and `route://sticky` resources. (The actual model that served a given call is computed internally as `RouteOutcome.ActualModel` but is not currently included in tool responses; see the [README roadmap](../README.md#roadmap).)
 
 `rag_search` and chat requests with `use_rag=true` also accept optional `current_file`, `workspace_root`, and `open_files` fields for contextual ranking; chat rejects non-empty context fields when `use_rag=false`. Omitted or empty fields preserve the current hybrid-by-default retrieval path, response shape, and compact chat prompt. `rag_search` can additionally set `explain_scores=true` to return the existing scored-result JSON, including fused `RankScore` and available per-signal `Signals`; without that flag, contextual results are flattened back to the ordinary semantic-similarity `SearchResult` shape.
+
+`rag_search` supplies retrieved context for the host's model to use. By contrast,
+`rag_answer`, `verify_support`, and `code_review` invoke the server's configured
+generation routes, which may be local or hosted.
+
+A host's project instructions can encourage `rag_search` for conceptual or
+cross-file questions and text search for known identifiers. Retrieval reflects
+the indexed content, so re-read files edited since indexing and refresh the
+index as the project changes.
 
 #### Embedded in a Go Application
 

@@ -82,10 +82,13 @@ use,
 prompting. `-goal` never executes the plan or edits source files, and it refuses
 to replace a locked plan, a non-empty draft, or an unrecognized plan file.
 
-Golem planning mode still compiles plan schema `0.3.0` because it does not author
-design decisions. Externally supplied plans may use schema `0.4.0` for AgentFlow's
-optional `design_decisions` and per-step `design_decision_ids` fields. Plans that
-omit `requirements` remain valid for existing `-plan` users and do not gain
+Golem planning mode compiles plan schema `1.0.0`, and task mode requires a plan
+whose `schema_version` major is 1. A plan written for AgentFlow 0.x (`0.3.0` or
+`0.4.0`) is refused before any AgentFlow call; see
+[Upgrading from AgentFlow 0.x](#upgrading-from-agentflow-0x). Externally
+supplied plans may use AgentFlow's optional `design_decisions` and per-step
+`design_decision_ids` fields. Plans that omit
+`requirements` remain valid for existing `-plan` users and do not gain
 criterion coverage. A review-backed criterion may declare `spec_quality` or
 `deep`; Golem authors that floor into the lock, while AgentFlow remains
 responsible for later review evidence and proof projection.
@@ -101,6 +104,11 @@ Re-run the spike if the AgentFlow validator contract tightens.
 
 ## Enabling task mode
 
+`-goal`, `-plan`, `-agentflow-status` and `-agentflow-resume` require AgentFlow
+1.x: `agentflow --version` must report a 1.x version. An older or newer
+AgentFlow is refused before any mutation, and a failed run does not ask it for
+recovery advice.
+
 - `-plan <plan.json>` — required; the path to the plan document to lock and
   execute. Passing it turns on task mode.
 - `-plan-workers N` — optional, task-mode-only worker bound. The default is `1`
@@ -114,9 +122,17 @@ Re-run the spike if the AgentFlow validator contract tightens.
   gates.
 - `-agentflow-src <checkout>` — run `python3 -P -m agentflow` from a source
   checkout (`PYTHONPATH=<checkout>/src`) instead of the installed `agentflow`
-  binary. Requires Python 3.11+; the workspace is excluded from implicit module
-  search. Checkout paths containing the platform's path-list separator are
-  rejected. Use this when the CLI isn't installed on PATH.
+  binary. A relative path resolves against `-root`, symlinks are then
+  resolved, and the result must contain `src/agentflow/__init__.py`; paths
+  containing the platform's path-list separator are rejected. Requires Python
+  3.11+; the workspace is excluded from implicit module search. Use this when
+  the CLI isn't installed on PATH.
+- `-agentflow-env <NAME>` — repeatable. Forwards one named parent environment
+  variable to AgentFlow and every gate it runs. Names only: the value is read
+  at each launch, and an unset name fails the launch. Everything not approved,
+  apart from a small baseline, is dropped; see
+  [AgentFlow subprocess environment](../golem.md#agentflow-subprocess-environment)
+  for the full policy.
 - `-evidence <sidecar.json>` — optional. Records evidence with AgentFlow
   before the plan is locked. Accepts one JSON object or an array of objects;
   each entry needs `id`, `claim`, and `source`.
@@ -147,7 +163,7 @@ Re-run the spike if the AgentFlow validator contract tightens.
 
 `-plan` is mutually exclusive with `-p` (one-shot mode), `-allow-write` /
 `-allow-exec`, `-rag-db`, `-delegate`, `-dispatch`, and `-mcp-stdio` /
-`-mcp-http`. Task
+`-mcp-http` / `-mcp-tools` / `-mcp-env`. Task
 mode builds its toolset from the locked plan alone, so it refuses to start
 if any of those are also passed — it is a constrained proof surface, not a
 general-purpose agent session with a plan bolted on.
@@ -165,7 +181,9 @@ Human status shows the authoritative `next-action` state and reason, current
 step/gate, attempt owner and lease, typed gate statuses, diagnostics, and the
 serial resume disposition. Any suggested command is labeled display-only and
 is never executed. JSON mode relays AgentFlow's exact `next-action --json`
-bytes. Both forms use actor `golem` and make only that read-only AgentFlow call.
+bytes. Both forms use actor `golem`. Status first runs `agentflow --version` and
+refuses an AgentFlow outside 1.x; otherwise it makes only the read-only
+`next-action` call.
 Before returning exit `0` or `2`, status validates the typed projection's
 contract fields, actor, attempt owner, lease, and recovery permissions. A
 foreign, expired, malformed, or otherwise unsafe projection is displayed as
@@ -177,9 +195,11 @@ When the state is `complete`, human status reads the proof pack only after
 for `passed`, `warning`, `failed`, `not_run`, `skipped`, and `not_applicable`
 checks. A missing or malformed summary is an unsafe exit `3`. A merely present
 proof file is never reported as verified. JSON output remains byte-exact but
-uses the same proof-consistency exit decision. If `next-action` cannot be read,
-human mode reports the sanitized failure, JSON mode emits no bytes, and status
-exits `3`.
+uses the same proof-consistency exit decision. If `--version` or `next-action`
+cannot be read, human mode reports the sanitized failure, JSON mode emits no
+bytes, and status exits `3`. In JSON mode a rejected version, like an unset
+`-agentflow-env` name, is also printed as one `golem:` line on stderr; any other
+launch failure stays silent.
 
 Status exit codes are stable for scripts:
 
@@ -278,6 +298,95 @@ attempt, executes advisory command strings, rebuilds stale/failing proof, or
 starts parallel recovery. Normal interactive startup only detects a
 case-insensitive `.agent` directory and prints the status/resume commands; it
 does not inspect or mutate the ledgers.
+
+### Stopped step runs
+
+A step's agent run can stop before it finishes without an error. It used up
+`-max-steps`, hit three consecutive tool errors (default guard denials count),
+repeated the same tool call with the same result three times, or exhausted a
+run token budget. Golem treats that as a failed attempt. It runs no gate and no
+`finish-step`, records the attempt as `blocked` in AgentFlow's ledger with the
+reason `golem: agent run stopped: <reason>`, and exits 1:
+
+```text
+agentflow task failed: step P1 attempt A1: agent run stopped: tool_error_cap_reached; attempt recorded as blocked
+```
+
+`<reason>` is `step_cap_reached`, `tool_error_cap_reached`,
+`repeat_limit_reached` or `budget_reached`, the same tokens as the REPL footer
+and the `-p` result's `stopReason`. On `-agentflow-resume` the same error
+follows `agentflow resume failed:`. For a parallel worker it appears inside the
+cohort failure, after `run parallel cohort:` and `worker <id>:`.
+
+A blocked attempt is closed, so `-agentflow-status` reports `step_unclaimed`
+(exit `2`), and `-agentflow-resume` claims a new attempt and runs the model
+again. Resume never settles the stopped attempt on its gates.
+
+Edits the stopped run made stay in the workspace. To retry from a clean tree,
+restore the modified tracked files (for example `git restore`) and delete
+files the stopped run created *before* you resume. Otherwise the new attempt
+must write every in-scope file that is still changed; writing the same bytes
+again is enough. If it does not, resume fails before any gate (exit `1`) and
+leaves the new attempt open, and `-agentflow-status` then reports
+`file_receipts_missing` (exit `3`). Do not just restore the files at that
+point. A resume would then settle the open attempt on its gates without running
+the model. Block the open attempt first, then restore, then resume:
+
+```text
+agentflow block-step <step> --root <workspace> --attempt <open attempt> --reason "<text>" --agent golem
+```
+
+The same command applies when recording the block itself fails. That error says
+so (`...; record blocked attempt: <agentflow error>`), and the attempt may still
+be open; check `-agentflow-status`.
+
+Under the `enforce` lease policy, `-agentflow-status` reports `step_unclaimed`
+with exit `3` (see above), so recovery is the operator's. A stopped review
+amendment is blocked too, but its step stays completed. Resume does not retry
+the amendment, and its findings stay unresolved: strict verification reports
+the step as not completed, and non-strict verification shows them as warnings.
+Addressing them needs a successful amendment from a new review-backed task. A
+stopped parallel worker blocks only its own worktree's ledger: the cohort
+fails, the worktree is preserved and its path printed, and the canonical ledger
+is untouched.
+
+Planning mode names the reason too:
+`golem: the planner did not submit a plan: agent run stopped: step_cap_reached`.
+
+## Upgrading from AgentFlow 0.x
+
+Golem drives AgentFlow 1.x only. AgentFlow 1.0 moved its plan, execution
+contract, ledgers, drift report and proof pack to schema `1.0.0` and gives 0.x
+working state no upgrade path, so Golem does not migrate it either:
+
+1. Finish the run with AgentFlow 0.x, or run `agentflow build-proof` with it
+   and keep the proof bundle.
+2. Move the workspace's `.agent/` directory aside. Re-initializing only the
+   execution contract is not enough: AgentFlow keeps the old ledger rows and
+   rejects them when it reads them.
+3. Install AgentFlow 1.x, then re-plan with `-goal`, or migrate an external
+   plan to `schema_version` `1.0.0` and review it again before `-plan`.
+
+What Golem does with 0.x state:
+
+- `-plan`, `-agentflow-resume` and `-goal` refuse a workspace when
+  `.agent/plan.lock.json`, `.agent/execution.contract.json`, or any row of the
+  four execution ledgers has a schema major other than 1. The refusal names the
+  file (and line) and makes no AgentFlow call. For `-goal` this check runs
+  before the locked-plan and non-empty-draft refusal, which still applies to a
+  1.x plan.
+- A plan file whose `schema_version` major is not 1 is refused before any
+  AgentFlow call.
+- `-agentflow-status` stays read-only and exits 3. AgentFlow 1.x reports a
+  workspace whose plan lock is 0.x as `state_invalid`, and its `next-action`
+  diagnostic names the incompatible version (for example `plan-lock
+  schema_version 0.3.0 is incompatible with supported 1.0.0`). When the
+  execution contract is 0.x, `agentflow doctor` adds AgentFlow's own upgrade
+  remedy: run `build-proof` with the older AgentFlow and keep the bundle. Follow
+  the steps above; they move `.agent/` aside, which AgentFlow's remedy to
+  re-initialise execution state does not do. A partial tree can show a setup
+  state instead, such as `execution_uninitialized` when the execution contract
+  is missing.
 
 ## Workflow routing in task mode
 

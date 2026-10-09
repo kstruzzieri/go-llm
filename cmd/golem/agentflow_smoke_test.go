@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -194,12 +195,8 @@ func TestAgentflowResumeStatusAndProof_RealCLI(t *testing.T) {
 		t.Fatalf("verify-proof: exit=%d err=%v stdout=%s stderr=%s", exitCode, runErr, out, errOut)
 	}
 
-	receipts, err := os.ReadFile(filepath.Join(dir, ".agent", "command-receipts.jsonl"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if lines := strings.Split(strings.TrimSpace(string(receipts)), "\n"); len(lines) != 1 {
-		t.Fatalf("command receipts = %d, want exactly one: %s", len(lines), receipts)
+	if n := commandReceiptCount(t, dir); n != 1 {
+		t.Fatalf("command receipts = %d, want exactly one", n)
 	}
 	stepRuns, err := os.ReadFile(filepath.Join(dir, ".agent", "step-runs.jsonl"))
 	if err != nil {
@@ -219,6 +216,89 @@ func TestAgentflowResumeStatusAndProof_RealCLI(t *testing.T) {
 	}
 	if claims != 1 {
 		t.Fatalf("claim events = %d, want exactly one", claims)
+	}
+	// R5 must accept the ledger rows a real AgentFlow 1.0 run leaves behind.
+	if err := checkAgentflowStateMajor(dir); err != nil {
+		t.Fatalf("guard refused a real AgentFlow 1.0 tree: %v", err)
+	}
+}
+
+// #612 R-new: AgentFlow 1.0 rejects a 0.x plan before it looks at execution
+// state, and Golem status reports that as state_invalid without touching
+// .agent/. Only the early old-plan rejection is covered here; the
+// retained-state guard's artifact coverage is U5's job.
+func TestAgentflowStatusReportsZeroXState_RealCLI(t *testing.T) {
+	dir := t.TempDir()
+	copyTree(t, "../../testdata/agentflow", dir)
+	runner := agentflowRunnerOrSkip(t, dir)
+	client := agentflow.NewOwnedClient(runner, dir, "golem")
+	ctx := context.Background()
+	planBytes, err := os.ReadFile(filepath.Join(dir, "plan.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var plan agentflow.Plan
+	if err := json.Unmarshal(planBytes, &plan); err != nil {
+		t.Fatal(err)
+	}
+	gitInit(t, dir)
+	recommendation, err := client.RecommendWorkflow(ctx, agentflow.TaskBriefFromPlan(plan, "feature"), "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.LockPlan(ctx, filepath.Join(dir, "plan.json")); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.MaterializeWorkflowContract(ctx, recommendation); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.InitExecution(ctx); err != nil {
+		t.Fatal(err)
+	}
+	attempt, err := client.ClaimStep(ctx, "P1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "src", "answer.txt"), []byte("expected\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.RecordFileChange(ctx, "P1", attempt, "src/answer.txt"); err != nil {
+		t.Fatal(err)
+	}
+	for name, version := range map[string]string{"plan.lock.json": "0.4.0", "execution.contract.json": "0.3.0"} {
+		path := filepath.Join(dir, ".agent", name)
+		b, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var doc map[string]json.RawMessage
+		if err := json.Unmarshal(b, &doc); err != nil {
+			t.Fatal(err)
+		}
+		doc["schema_version"] = json.RawMessage(strconv.Quote(version))
+		if b, err = json.Marshal(doc); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	before := snapshotSmokeAgentTree(t, dir)
+	var status bytes.Buffer
+	statusErr := runAgentflowStatusWithRunner(ctx, &status, dir, false, runner)
+	var exit *agentflowStatusExit
+	if !errors.As(statusErr, &exit) || exit.ExitCode() != 3 {
+		t.Fatalf("status error = %v\n%s", statusErr, status.String())
+	}
+	if !strings.Contains(status.String(), "state: state_invalid") || !strings.Contains(status.String(), "incompatible with supported 1.0.0") {
+		t.Fatalf("status output = %s", status.String())
+	}
+	if after := snapshotSmokeAgentTree(t, dir); !reflect.DeepEqual(after, before) {
+		t.Fatal("status mutated a 0.x .agent/ tree")
 	}
 }
 
@@ -496,37 +576,7 @@ func (c parallelSmokeCaller) Chat(ctx context.Context, req provider.ChatRequest,
 }
 
 func TestAgentflowParallelSmoke(t *testing.T) {
-	dir := t.TempDir()
-	copyTree(t, "../../testdata/agentflow", dir)
-	plan := agentflow.Plan{
-		SchemaVersion: "0.3.0", Objective: "prove bounded parallel task execution", Scope: []string{"src"},
-		NonGoals: []string{}, Invariants: []string{"only declared files change"}, RiskLevel: "low",
-		DriftBudget:  agentflow.DriftBudget{UnrelatedEdits: 0, NewDependencies: 0, FormattingDrift: "minimal", ArchitectureDrift: "requires_approval"},
-		AllowedFiles: []string{"src/*", ".agent/"}, BlockedFiles: []string{},
-		ValidationGates: []string{"p1", "p2", "p3"}, RollbackPlan: "git checkout -- .", EvidenceIDs: []string{},
-		Steps: []agentflow.Step{
-			{ID: "P1", Action: "write worker one", Files: []string{"src/parallel-one.txt"}, Preconditions: []string{}, ExpectedDiff: []string{"worker-one"}, Validation: []string{"p1"}, EvidenceIDs: []string{}, Gates: []agentflow.Gate{{Kind: "command", Run: []string{"grep", "-qx", "worker-one", "src/parallel-one.txt"}}}},
-			{ID: "P2", Action: "write worker two", Files: []string{"src/parallel-two.txt"}, Preconditions: []string{}, ExpectedDiff: []string{"worker-two"}, Validation: []string{"p2"}, EvidenceIDs: []string{}, Gates: []agentflow.Gate{{Kind: "command", Run: []string{"grep", "-qx", "worker-two", "src/parallel-two.txt"}}}},
-			{ID: "P3", Action: "write canonical three", Files: []string{"src/parallel-three.txt"}, Preconditions: []string{}, ExpectedDiff: []string{"canonical-three"}, Validation: []string{"p3"}, EvidenceIDs: []string{}, DependsOn: []string{"P1", "P2"}, Gates: []agentflow.Gate{{Kind: "command", Run: []string{"grep", "-qx", "canonical-three", "src/parallel-three.txt"}}}},
-		},
-	}
-	planBytes, err := json.MarshalIndent(plan, "", "  ")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "plan.json"), append(planBytes, '\n'), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, ".gitignore"), []byte(".agent/\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	for _, name := range []string{"parallel-one.txt", "parallel-two.txt", "parallel-three.txt"} {
-		if err := os.WriteFile(filepath.Join(dir, "src", name), []byte("pending\n"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	gitInit(t, dir)
-	base := strings.TrimSpace(runTestGit(t, dir, "rev-parse", "HEAD"))
+	dir, plan, base := writeParallelSmokeFixture(t)
 
 	// Skip before goroutines start when neither a source checkout nor installed
 	// CLI is available, then create one real runner per production root.
@@ -572,47 +622,10 @@ func TestAgentflowParallelSmoke(t *testing.T) {
 		t.Fatalf("parallel driver: %v\n%s", err, stderr.String())
 	}
 
-	wantBytes := map[string]string{
-		"parallel-one.txt": "worker-one\n", "parallel-two.txt": "worker-two\n", "parallel-three.txt": "canonical-three\n",
-	}
-	for name, want := range wantBytes {
-		got, err := os.ReadFile(filepath.Join(dir, "src", name))
-		if err != nil || string(got) != want {
-			t.Fatalf("src/%s = %q, %v; want %q", name, got, err, want)
-		}
-	}
-	proofBytes, err := os.ReadFile(proof)
-	if err != nil || len(bytes.TrimSpace(proofBytes)) == 0 {
-		t.Fatalf("verified proof %q is empty or missing: %v", proof, err)
-	}
-	var proofState struct {
-		Aggregation *struct {
-			SchemaVersion string `json:"schema_version"`
-			Mode          string `json:"mode"`
-			SourceCount   int    `json:"source_count"`
-			Sources       []struct {
-				SourceID         string  `json:"source_id"`
-				BaseCommit       *string `json:"base_commit"`
-				HeadCommit       *string `json:"head_commit"`
-				NamespacedPrefix string  `json:"namespaced_prefix"`
-			} `json:"sources"`
-		} `json:"aggregation"`
-	}
-	if err := json.Unmarshal(proofBytes, &proofState); err != nil {
-		t.Fatal(err)
-	}
-	if proofState.Aggregation == nil || proofState.Aggregation.SchemaVersion != "0.1.0" || proofState.Aggregation.Mode != "cross_worktree" || proofState.Aggregation.SourceCount != 2 {
-		t.Fatalf("aggregation provenance = %#v", proofState.Aggregation)
-	}
-	provenance := map[string]string{}
-	for _, source := range proofState.Aggregation.Sources {
-		if source.BaseCommit == nil || source.HeadCommit == nil || *source.BaseCommit != base || *source.HeadCommit != base {
-			t.Fatalf("source %s commits = %v/%v, want %s", source.SourceID, source.BaseCommit, source.HeadCommit, base)
-		}
-		provenance[source.SourceID] = source.NamespacedPrefix
-	}
-	if provenance["w1"] != "WTw1-" || provenance["w2"] != "WTw2-" || len(provenance) != 2 {
-		t.Fatalf("aggregation sources = %v", provenance)
+	assertParallelSmokeProof(t, dir, proof, base)
+	// Aggregated worker rows are real AgentFlow 1.0 ledger rows too (R5).
+	if err := checkAgentflowStateMajor(dir); err != nil {
+		t.Fatalf("guard refused a real AgentFlow 1.0 tree: %v", err)
 	}
 
 	calls := recorder.snapshot()
@@ -658,7 +671,7 @@ func TestAgentflowParallelSmoke(t *testing.T) {
 		t.Fatalf("P2 worker advisory projection = %q, want P1 while assigned P2", projections[claims["P2"].root])
 	}
 	for _, aggregate := range aggregates {
-		if aggregate.promoted["parallel-one.txt"] != wantBytes["parallel-one.txt"] || aggregate.promoted["parallel-two.txt"] != wantBytes["parallel-two.txt"] {
+		if aggregate.promoted["parallel-one.txt"] != parallelSmokeWant["parallel-one.txt"] || aggregate.promoted["parallel-two.txt"] != parallelSmokeWant["parallel-two.txt"] {
 			t.Fatalf("source was not promoted before aggregation: %v", aggregate.promoted)
 		}
 	}
@@ -675,19 +688,141 @@ func TestAgentflowParallelSmoke(t *testing.T) {
 	}
 }
 
-// agentflowRunnerOrSkip honors the explicit AGENTFLOW_SRC checkout, otherwise
-// uses an installed binary or skips. Mirrors
-// agentflow.agentflowRunnerForTest, which is unexported in another package.
+// parallelSmokeWant is the content each parallel fixture step writes under src/.
+var parallelSmokeWant = map[string]string{
+	"parallel-one.txt": "worker-one\n", "parallel-two.txt": "worker-two\n", "parallel-three.txt": "canonical-three\n",
+}
+
+// writeParallelSmokeFixture builds a committed repo whose plan has two
+// independent steps (P1, P2) and a dependent P3, and returns the root, the plan,
+// and the baseline commit.
+func writeParallelSmokeFixture(t *testing.T) (string, agentflow.Plan, string) {
+	t.Helper()
+	dir := t.TempDir()
+	copyTree(t, "../../testdata/agentflow", dir)
+	plan := agentflow.Plan{
+		SchemaVersion: "1.0.0", Objective: "prove bounded parallel task execution", Scope: []string{"src"},
+		NonGoals: []string{}, Invariants: []string{"only declared files change"}, RiskLevel: "low",
+		DriftBudget:  agentflow.DriftBudget{UnrelatedEdits: 0, NewDependencies: 0, FormattingDrift: "minimal", ArchitectureDrift: "requires_approval"},
+		AllowedFiles: []string{"src/*", ".agent/"}, BlockedFiles: []string{},
+		ValidationGates: []string{"p1", "p2", "p3"}, RollbackPlan: "git checkout -- .", EvidenceIDs: []string{},
+		Steps: []agentflow.Step{
+			{ID: "P1", Action: "write worker one", Files: []string{"src/parallel-one.txt"}, Preconditions: []string{}, ExpectedDiff: []string{"worker-one"}, Validation: []string{"p1"}, EvidenceIDs: []string{}, Gates: []agentflow.Gate{{Kind: "command", Run: []string{"grep", "-qx", "worker-one", "src/parallel-one.txt"}}}},
+			{ID: "P2", Action: "write worker two", Files: []string{"src/parallel-two.txt"}, Preconditions: []string{}, ExpectedDiff: []string{"worker-two"}, Validation: []string{"p2"}, EvidenceIDs: []string{}, Gates: []agentflow.Gate{{Kind: "command", Run: []string{"grep", "-qx", "worker-two", "src/parallel-two.txt"}}}},
+			{ID: "P3", Action: "write canonical three", Files: []string{"src/parallel-three.txt"}, Preconditions: []string{}, ExpectedDiff: []string{"canonical-three"}, Validation: []string{"p3"}, EvidenceIDs: []string{}, DependsOn: []string{"P1", "P2"}, Gates: []agentflow.Gate{{Kind: "command", Run: []string{"grep", "-qx", "canonical-three", "src/parallel-three.txt"}}}},
+		},
+	}
+	planBytes, err := json.MarshalIndent(plan, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "plan.json"), append(planBytes, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".gitignore"), []byte(".agent/\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"parallel-one.txt", "parallel-two.txt", "parallel-three.txt"} {
+		if err := os.WriteFile(filepath.Join(dir, "src", name), []byte("pending\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gitInit(t, dir)
+	base := strings.TrimSpace(runTestGit(t, dir, "rev-parse", "HEAD"))
+	return dir, plan, base
+}
+
+// assertParallelSmokeProof checks that every fixture step's bytes landed in dir
+// and that the verified proof aggregated exactly the two worker ledgers across
+// worktrees, both pinned to base.
+func assertParallelSmokeProof(t *testing.T, dir, proof, base string) {
+	t.Helper()
+	for name, want := range parallelSmokeWant {
+		got, err := os.ReadFile(filepath.Join(dir, "src", name))
+		if err != nil || string(got) != want {
+			t.Fatalf("src/%s = %q, %v; want %q", name, got, err, want)
+		}
+	}
+	proofBytes, err := os.ReadFile(proof)
+	if err != nil || len(bytes.TrimSpace(proofBytes)) == 0 {
+		t.Fatalf("verified proof %q is empty or missing: %v", proof, err)
+	}
+	var proofState struct {
+		Aggregation *struct {
+			SchemaVersion string `json:"schema_version"`
+			Mode          string `json:"mode"`
+			SourceCount   int    `json:"source_count"`
+			Sources       []struct {
+				SourceID         string  `json:"source_id"`
+				BaseCommit       *string `json:"base_commit"`
+				HeadCommit       *string `json:"head_commit"`
+				NamespacedPrefix string  `json:"namespaced_prefix"`
+			} `json:"sources"`
+		} `json:"aggregation"`
+	}
+	if err := json.Unmarshal(proofBytes, &proofState); err != nil {
+		t.Fatal(err)
+	}
+	if proofState.Aggregation == nil || proofState.Aggregation.SchemaVersion != "0.1.0" || proofState.Aggregation.Mode != "cross_worktree" || proofState.Aggregation.SourceCount != 2 {
+		t.Fatalf("aggregation provenance = %#v", proofState.Aggregation)
+	}
+	provenance := map[string]string{}
+	for _, source := range proofState.Aggregation.Sources {
+		if source.BaseCommit == nil || source.HeadCommit == nil || *source.BaseCommit != base || *source.HeadCommit != base {
+			t.Fatalf("source %s commits = %v/%v, want %s", source.SourceID, source.BaseCommit, source.HeadCommit, base)
+		}
+		provenance[source.SourceID] = source.NamespacedPrefix
+	}
+	if provenance["w1"] != "WTw1-" || provenance["w2"] != "WTw2-" || len(provenance) != 2 {
+		t.Fatalf("aggregation sources = %v", provenance)
+	}
+}
+
+// agentflowRunnerOrSkip honors GO_LLM_REQUIRE_AGENTFLOW and the explicit
+// AGENTFLOW_SRC checkout, otherwise uses an installed binary or skips. The
+// chosen CLI must pass the AgentFlow 1.x version gate: a non-1.x install skips
+// (or fails under GO_LLM_REQUIRE_AGENTFLOW) instead of failing on a raw schema
+// rejection (#612). Mirrors agentflow.agentflowRunnerForTest, which is
+// unexported in another package. CI's agentflow-compat job selects real-CLI
+// tests by name, so a new test using this must be named Test*_RealCLI or
+// Test*_RealCLI_<scenario>.
 func agentflowRunnerOrSkip(t *testing.T, dir string) agentflow.Runner {
 	t.Helper()
-	if src := os.Getenv("AGENTFLOW_SRC"); src != "" {
-		return agentflow.NewSrcExecRunner(dir, src)
+	mode, src := os.Getenv("GO_LLM_REQUIRE_AGENTFLOW"), os.Getenv("AGENTFLOW_SRC")
+	_, lookErr := exec.LookPath("agentflow")
+	installed := lookErr == nil
+	switch mode {
+	case "":
+	case "installed":
+		if src != "" {
+			t.Fatal("GO_LLM_REQUIRE_AGENTFLOW=installed but AGENTFLOW_SRC is set")
+		}
+		if !installed {
+			t.Fatal("GO_LLM_REQUIRE_AGENTFLOW=installed but agentflow is not on PATH")
+		}
+	case "source":
+		if src == "" {
+			t.Fatal("GO_LLM_REQUIRE_AGENTFLOW=source but AGENTFLOW_SRC is empty")
+		}
+	default:
+		t.Fatalf("GO_LLM_REQUIRE_AGENTFLOW=%q, want installed or source", mode)
 	}
-	if _, err := exec.LookPath("agentflow"); err == nil {
-		return agentflow.NewExecRunner(dir)
+	var runner agentflow.Runner
+	switch {
+	case src != "":
+		runner = agentflow.NewSrcExecRunner(dir, src)
+	case installed:
+		runner = agentflow.NewExecRunner(dir)
+	default:
+		t.Skip("agentflow CLI not available (set AGENTFLOW_SRC=<checkout> to run)")
 	}
-	t.Skip("agentflow CLI not available (set AGENTFLOW_SRC=<checkout> to run)")
-	return nil
+	if err := agentflow.NewClient(runner, dir).CheckVersion(context.Background()); err != nil {
+		if mode != "" {
+			t.Fatalf("agentflow is not usable for the real-CLI tests: %v", err)
+		}
+		t.Skipf("agentflow is not AgentFlow 1.x (%v); install AgentFlow 1.x or set AGENTFLOW_SRC=<1.x checkout>", err)
+	}
+	return runner
 }
 
 // gitInit initializes a git repository at dir and commits the fixture as it
@@ -740,5 +875,215 @@ func copyTree(t *testing.T, src, dst string) {
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+// stepRunEvent is the subset of an AgentFlow step-runs.jsonl event the #611
+// tests read.
+type stepRunEvent struct {
+	Event     string `json:"event"`
+	AttemptID string `json:"attempt_id"`
+	Reason    string `json:"reason"`
+}
+
+func readStepRunEvents(t *testing.T, dir string) []stepRunEvent {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(dir, ".agent", "step-runs.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var events []stepRunEvent
+	for _, line := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+		var event stepRunEvent
+		if err := json.Unmarshal([]byte(line), &event); err != nil {
+			t.Fatal(err)
+		}
+		events = append(events, event)
+	}
+	return events
+}
+
+func lastStepRunEvent(events []stepRunEvent, attempt string) stepRunEvent {
+	var last stepRunEvent
+	for _, event := range events {
+		if event.AttemptID == attempt {
+			last = event
+		}
+	}
+	return last
+}
+
+// commandReceiptCount counts the command-receipt ledger's rows. init-execution
+// always creates the ledger, so a missing file fails the test instead of
+// reading as zero receipts.
+func commandReceiptCount(t *testing.T, dir string) int {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(dir, ".agent", "command-receipts.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(b)) == "" {
+		return 0
+	}
+	return len(strings.Split(strings.TrimSpace(string(b)), "\n"))
+}
+
+// runStoppedSmokeStep drives the smoke fixture's first task run with a model
+// that writes the step's file and then hits the step cap (#611). Without the
+// fix this run would pass its grep gate and complete the step.
+func runStoppedSmokeStep(t *testing.T) (string, agentflow.Runner, agentflow.Plan, []byte) {
+	t.Helper()
+	dir := t.TempDir()
+	copyTree(t, "../../testdata/agentflow", dir)
+	gitInit(t, dir)
+	runner := agentflowRunnerOrSkip(t, dir)
+	planBytes, err := os.ReadFile(filepath.Join(dir, "plan.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var plan agentflow.Plan
+	if err := json.Unmarshal(planBytes, &plan); err != nil {
+		t.Fatal(err)
+	}
+	client := agentflow.NewClient(runner, dir)
+	runCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	orch := agent.New(&scriptCaller{responses: []agent.ModelResult{
+		toolStep("w1", "write_file", `{"path":"src/answer.txt","content":"expected\n"}`),
+	}}, agent.ContextManager{})
+	runStep, err := newTaskStepRunner(dir, &plan, client, orch, &replSession{maxSteps: 1}, true, io.Discard, nil, cancel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &driver{
+		af: client, plan: &plan, planPath: filepath.Join(dir, "plan.json"),
+		taskBrief: agentflow.TaskBriefFromPlan(plan, "feature"), runStep: runStep, out: io.Discard,
+	}
+	_, err = d.run(runCtx)
+	if want := "step P1 attempt A1: agent run stopped: step_cap_reached; attempt recorded as blocked"; err == nil || err.Error() != want {
+		t.Fatalf("first run error = %v, want %q", err, want)
+	}
+	if got := lastStepRunEvent(readStepRunEvents(t, dir), "A1"); got.Event != "blocked" || got.Reason != "golem: agent run stopped: step_cap_reached" {
+		t.Fatalf("A1 last event = %+v, want blocked with the Golem reason", got)
+	}
+	if n := commandReceiptCount(t, dir); n != 0 {
+		t.Fatalf("command receipts = %d, want 0: a gate ran before the block", n)
+	}
+	return dir, runner, plan, planBytes
+}
+
+func TestAgentflowStoppedStepIsBlockedAndResumes_RealCLI(t *testing.T) {
+	dir, runner, plan, planBytes := runStoppedSmokeStep(t)
+	ctx := context.Background()
+
+	var status bytes.Buffer
+	statusErr := runAgentflowStatusWithRunner(ctx, &status, dir, false, runner)
+	var exit *agentflowStatusExit
+	if !errors.As(statusErr, &exit) || exit.ExitCode() != 2 || !strings.Contains(status.String(), "state: step_unclaimed") {
+		t.Fatalf("status = %v\n%s", statusErr, status.String())
+	}
+
+	client := agentflow.NewOwnedClient(runner, dir, "golem")
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	orch := agent.New(&scriptCaller{responses: []agent.ModelResult{
+		toolStep("w2", "write_file", `{"path":"src/answer.txt","content":"expected\n"}`),
+		answerStep("done"),
+	}}, agent.ContextManager{})
+	runStep, err := newTaskStepRunner(dir, &plan, client, orch, &replSession{maxSteps: 4}, true, io.Discard, nil, cancel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &driver{af: client, plan: &plan, runStep: runStep}
+	final, err := d.resume(runCtx, dir, planBytes, nil)
+	if err != nil || final.State != "complete" {
+		t.Fatalf("resume state=%q err=%v", final.State, err)
+	}
+	summary, err := client.ProofSummary(ctx)
+	if err != nil || summary.Total == 0 || summary.Failed != 0 {
+		t.Fatalf("proof summary = %+v, err=%v", summary, err)
+	}
+	events := readStepRunEvents(t, dir)
+	claims := 0
+	for _, event := range events {
+		if event.Event == "claimed" {
+			claims++
+		}
+	}
+	if claims != 2 || lastStepRunEvent(events, "A2").Event != "completed" {
+		t.Fatalf("claims=%d A2=%+v, want two claims and A2 completed", claims, lastStepRunEvent(events, "A2"))
+	}
+	if n := commandReceiptCount(t, dir); n != 1 {
+		t.Fatalf("command receipts = %d, want exactly the resumed gate", n)
+	}
+}
+
+func TestAgentflowStoppedStepPartialEditFailsClosed_RealCLI(t *testing.T) {
+	dir, runner, plan, planBytes := runStoppedSmokeStep(t)
+	ctx := context.Background()
+
+	client := agentflow.NewOwnedClient(runner, dir, "golem")
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	orch := agent.New(&scriptCaller{responses: []agent.ModelResult{answerStep("already done")}}, agent.ContextManager{})
+	runStep, err := newTaskStepRunner(dir, &plan, client, orch, &replSession{maxSteps: 4}, true, io.Discard, nil, cancel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &driver{af: client, plan: &plan, runStep: runStep}
+	if _, err := d.resume(runCtx, dir, planBytes, nil); err == nil || !strings.Contains(err.Error(), "reached state \"file_receipts_missing\" before gates") {
+		t.Fatalf("want the before-gates refusal in state file_receipts_missing, got resume err = %v", err)
+	}
+	if got := lastStepRunEvent(readStepRunEvents(t, dir), "A2").Event; got != "claimed" {
+		t.Fatalf("A2 last event = %q after the refusal, want claimed: the refused attempt stays open", got)
+	}
+	if n := commandReceiptCount(t, dir); n != 0 {
+		t.Fatalf("command receipts = %d, want no gate after the inherited edit", n)
+	}
+	var status bytes.Buffer
+	statusErr := runAgentflowStatusWithRunner(ctx, &status, dir, false, runner)
+	var exit *agentflowStatusExit
+	if !errors.As(statusErr, &exit) || exit.ExitCode() != 3 || !strings.Contains(status.String(), "state: file_receipts_missing") {
+		t.Fatalf("status = %v\n%s", statusErr, status.String())
+	}
+
+	// The documented remedy: A2 is still open, so restoring alone would let a
+	// resume settle A2 on its gates. Block A2, restore the inherited edit, then
+	// resume into a fresh A3.
+	if err := client.BlockStep(ctx, "P1", "A2", "operator: discard inherited partial edit"); err != nil {
+		t.Fatal(err)
+	}
+	runTestGit(t, dir, "checkout", "--", "src/answer.txt")
+	if got := lastStepRunEvent(readStepRunEvents(t, dir), "A2"); got.Event != "blocked" || got.Reason != "operator: discard inherited partial edit" {
+		t.Fatalf("A2 last event = %+v, want blocked with the operator reason", got)
+	}
+	if b, err := os.ReadFile(filepath.Join(dir, "src", "answer.txt")); err != nil || string(b) != "pending\n" {
+		t.Fatalf("src/answer.txt = %q, err=%v after the restore, want the committed %q", b, err, "pending\n")
+	}
+	orch = agent.New(&scriptCaller{responses: []agent.ModelResult{
+		toolStep("w3", "write_file", `{"path":"src/answer.txt","content":"expected\n"}`),
+		answerStep("done"),
+	}}, agent.ContextManager{})
+	runStep, err = newTaskStepRunner(dir, &plan, client, orch, &replSession{maxSteps: 4}, true, io.Discard, nil, cancel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d = &driver{af: client, plan: &plan, runStep: runStep}
+	final, err := d.resume(runCtx, dir, planBytes, nil)
+	if err != nil || final.State != "complete" {
+		t.Fatalf("resume after the remedy: state=%q err=%v", final.State, err)
+	}
+	events := readStepRunEvents(t, dir)
+	if got := lastStepRunEvent(events, "A3").Event; got != "completed" {
+		t.Fatalf("A3 last event = %q, want completed", got)
+	}
+	claims := 0
+	for _, event := range events {
+		if event.Event == "claimed" {
+			claims++
+		}
+	}
+	if claims != 3 {
+		t.Fatalf("claim events = %d, want three (A1, A2, A3)", claims)
 	}
 }

@@ -1,5 +1,5 @@
 {
-  "schema_version": "0.3.0",
+  "schema_version": "1.0.0",
   "objective": "smoke: prove the agentflow task spine",
   "scope": ["src"],
   "non_goals": [],

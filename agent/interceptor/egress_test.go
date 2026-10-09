@@ -89,7 +89,7 @@ func TestEgressDirectNames(t *testing.T) {
 		{"pip", []string{"pip", "install", "x"}, egressWant{"package-manager", 10, "pip"}},
 		{"brew", []string{"brew", "install", "x"}, egressWant{"package-manager", 10, "brew"}},
 		{"bash script file", []string{"bash", "build.sh"}, egressWant{"interpreter", 0, "bash"}},
-		{"fish inline", []string{"fish", "-c", "curl x"}, egressWant{"interpreter", 0, "fish"}},
+		{"fish inline", []string{"fish", "-c", "curl x"}, egressWant{"unknown", 10, `"fish" unsupported form`}},
 		{"python script", []string{"python", "foo.py"}, egressWant{"interpreter", 0, "python"}},
 		{"node script", []string{"node", "app.js"}, egressWant{"interpreter", 0, "node"}},
 		{"versioned python is unknown", []string{"python3.12", "x.py"}, egressWant{"unknown", 10, `"python3.12"`}},
@@ -116,7 +116,9 @@ func TestEgressDirectNames(t *testing.T) {
 
 // TestEgressShellScriptEvidence: a recognized inline script contributes
 // network evidence only from the command position of its literal simple
-// commands, one level deep; everything else keeps the interpreter badge.
+// commands, one level deep. A readable script without one keeps the
+// interpreter badge; an unreadable script or an unmodeled option form is
+// unknown.
 func TestEgressShellScriptEvidence(t *testing.T) {
 	cases := []struct {
 		name string
@@ -146,10 +148,84 @@ func TestEgressShellScriptEvidence(t *testing.T) {
 		{"package manager in script stays interpreter", []string{"bash", "-c", "npm install"}, egressWant{"interpreter", 0, "bash"}},
 		{"sudo in script stays interpreter", []string{"bash", "-c", "sudo ls"}, egressWant{"interpreter", 0, "bash"}},
 		{"nested shell is one level", []string{"bash", "-c", "bash -c 'curl https://x'"}, egressWant{"interpreter", 0, "bash"}},
-		{"fish dialect", []string{"fish", "-c", "curl https://x"}, egressWant{"interpreter", 0, "fish"}},
-		{"unsupported shell flag", []string{"bash", "--posix", "-c", "curl https://x"}, egressWant{"interpreter", 0, "bash"}},
+		{"fish dialect", []string{"fish", "-c", "curl https://x"}, egressWant{"unknown", 10, `"fish" unsupported form`}},
+		{"unsupported shell flag", []string{"bash", "--posix", "-c", "curl https://x"}, egressWant{"unknown", 10, `"bash" unsupported form`}},
 		{"script file", []string{"bash", "install.sh"}, egressWant{"interpreter", 0, "bash"}},
 		{"unknown client in script", []string{"bash", "-c", "frob https://x"}, egressWant{"interpreter", 0, "bash"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			expectEgress(t, classifyArgv(t, tc.argv...), tc.want)
+		})
+	}
+}
+
+// TestEgressShellOptionForms pins the outer-shell option grammar (#622): the
+// modeled forms are read like -c, a modeled form without -c stays a
+// script-file or stdin interpreter, and every unmodeled form is visible as
+// unknown.
+func TestEgressShellOptionForms(t *testing.T) {
+	cases := []struct {
+		name string
+		argv []string
+		want egressWant
+	}{
+		// Read: the label names the first option word carrying c.
+		{"errexit before -c", []string{"bash", "-e", "-c", "curl https://x"}, egressWant{"network", 20, "curl via bash -c"}},
+		{"pipefail before -c", []string{"bash", "-o", "pipefail", "-c", "curl https://x"}, egressWant{"network", 20, "curl via bash -c"}},
+		{"clustered pipefail", []string{"bash", "-eo", "pipefail", "-c", "curl https://x"}, egressWant{"network", 20, "curl via bash -c"}},
+		{"o value after c", []string{"bash", "-co", "pipefail", "curl https://x"}, egressWant{"network", 20, "curl via bash -co"}},
+		{"xtrace cluster", []string{"sh", "-xc", "curl https://x"}, egressWant{"network", 20, "curl via sh -xc"}},
+		{"interactive login cluster", []string{"bash", "-lic", "curl https://x"}, egressWant{"network", 20, "curl via bash -lic"}},
+		{"option after -c", []string{"bash", "-c", "-e", "curl https://x"}, egressWant{"network", 20, "curl via bash -c"}},
+		{"terminator after -c", []string{"sh", "-c", "--", "curl https://x"}, egressWant{"network", 20, "curl via sh -c"}},
+		{"c repeated across words labels the first", []string{"bash", "-ec", "-c", "curl https://x"}, egressWant{"network", 20, "curl via bash -ec"}},
+		{"zsh pipefail", []string{"zsh", "-o", "pipefail", "-c", "curl https://x"}, egressWant{"network", 20, "curl via zsh -c"}},
+		{"ksh errexit", []string{"ksh", "-o", "errexit", "-c", "curl https://x"}, egressWant{"network", 20, "curl via ksh -c"}},
+		{"nounset value", []string{"bash", "-o", "nounset", "-c", "curl https://x"}, egressWant{"network", 20, "curl via bash -c"}},
+		{"xtrace value", []string{"bash", "-o", "xtrace", "-c", "curl https://x"}, egressWant{"network", 20, "curl via bash -c"}},
+		{"ksh pipefail", []string{"ksh", "-o", "pipefail", "-c", "curl https://x"}, egressWant{"network", 20, "curl via ksh -c"}},
+		{"several -o words", []string{"bash", "-o", "pipefail", "-o", "errexit", "-c", "curl https://x"}, egressWant{"network", 20, "curl via bash -c"}},
+		{"unreadable script under an option", []string{"bash", "-e", "-c", "echo $HOME; rm -rf x"}, egressWant{"unknown", 10, `"bash -c" unsupported script`}},
+		// Unmodeled forms: visible, never interpreter 0.
+		{"parse-only -n", []string{"bash", "-n", "-c", "curl https://x"}, egressWant{"unknown", 10, `"bash" unsupported form`}},
+		{"parse-only noexec", []string{"bash", "-o", "noexec", "-c", "curl https://x"}, egressWant{"unknown", 10, `"bash" unsupported form`}},
+		{"stdin flag with -c", []string{"bash", "-s", "-c", "curl https://x"}, egressWant{"unknown", 10, `"bash" unsupported form`}},
+		{"plus option", []string{"bash", "+e", "-c", "curl https://x"}, egressWant{"unknown", 10, `"bash" unsupported form`}},
+		{"repeated letter in a word", []string{"bash", "-ee", "-c", "curl https://x"}, egressWant{"unknown", 10, `"bash" unsupported form`}},
+		{"o not last", []string{"bash", "-oe", "pipefail", "-c", "curl https://x"}, egressWant{"unknown", 10, `"bash" unsupported form`}},
+		{"o without value", []string{"bash", "-o"}, egressWant{"unknown", 10, `"bash" unsupported form`}},
+		{"attached o value", []string{"bash", "-opipefail", "-c", "curl https://x"}, egressWant{"unknown", 10, `"bash" unsupported form`}},
+		{"shopt option", []string{"bash", "-O", "extglob", "-c", "curl https://x"}, egressWant{"unknown", 10, `"bash" unsupported form`}},
+		{"lone dash", []string{"bash", "-", "-c", "curl https://x"}, egressWant{"unknown", 10, `"bash" unsupported form`}},
+		{"-c without operand", []string{"bash", "-c"}, egressWant{"unknown", 10, `"bash" unsupported form`}},
+		{"-c then terminator without operand", []string{"bash", "-c", "--"}, egressWant{"unknown", 10, `"bash" unsupported form`}},
+		{"sh pipefail", []string{"sh", "-o", "pipefail", "-c", "curl https://x"}, egressWant{"unknown", 10, `"sh" unsupported form`}},
+		{"dash pipefail", []string{"dash", "-o", "pipefail", "-c", "curl https://x"}, egressWant{"unknown", 10, `"dash" unsupported form`}},
+		{"preamble on sh", []string{"sh", "--norc", "-c", "curl https://x"}, egressWant{"unknown", 10, `"sh" unsupported form`}},
+		{"preamble after a short option", []string{"bash", "-e", "--norc", "-c", "curl https://x"}, egressWant{"unknown", 10, `"bash" unsupported form`}},
+		{"long informational option", []string{"bash", "--version"}, egressWant{"unknown", 10, `"bash" unsupported form`}},
+		{"unmodeled option before a script file", []string{"bash", "-v", "build.sh"}, egressWant{"unknown", 10, `"bash" unsupported form`}},
+		{"parse-only check of a script file", []string{"sh", "-n", "check.sh"}, egressWant{"unknown", 10, `"sh" unsupported form`}},
+		// Controls: outcomes #622 leaves unchanged.
+		{"readable quiet script under an option", []string{"bash", "-o", "pipefail", "-c", "go test ./..."}, egressWant{"interpreter", 0, "bash"}},
+		{"terminator before -c is a script file", []string{"bash", "--", "-c", "curl https://x"}, egressWant{"interpreter", 0, "bash"}},
+		{"script file stops options", []string{"bash", "build.sh", "-c", "curl https://x"}, egressWant{"interpreter", 0, "bash"}},
+		{"modeled option on a script file", []string{"bash", "-x", "build.sh"}, egressWant{"interpreter", 0, "bash"}},
+		{"modeled option reading stdin", []string{"bash", "-e"}, egressWant{"interpreter", 0, "bash"}},
+		{"fish script file", []string{"fish", "run.fish"}, egressWant{"interpreter", 0, "fish"}},
+		{"trailing words are the script's", []string{"bash", "-c", "curl https://x", "-n", "+e"}, egressWant{"network", 20, "curl via bash -c"}},
+		{"zsh -ec label", []string{"zsh", "-ec", "curl https://x"}, egressWant{"network", 20, "curl via zsh -ec"}},
+		{"dash -euc label", []string{"dash", "-euc", "curl https://x"}, egressWant{"network", 20, "curl via dash -euc"}},
+		{"both preambles label", []string{"bash", "--noprofile", "--norc", "-lc", "curl https://x"}, egressWant{"network", 20, "curl via bash -lc"}},
+		// Documented ceilings: readable, no literal network command.
+		{"command builtin prefix", []string{"sh", "-c", "command curl https://x"}, egressWant{"interpreter", 0, "sh"}},
+		{"exec builtin prefix", []string{"sh", "-c", "exec curl https://x"}, egressWant{"interpreter", 0, "sh"}},
+		{"zsh equals expansion", []string{"zsh", "-c", "=curl https://x"}, egressWant{"interpreter", 0, "zsh"}},
+		// A quoted would-be assignment keeps its pre-#622 reading: the badge
+		// never drops below it (only the block refuses it).
+		{"quoted assignment keeps the badge", []string{"sh", "-c", `"TAG=x" curl https://x`}, egressWant{"network", 20, "curl via sh -c"}},
+		{"quoted assignment before the sink keeps the badge", []string{"sh", "-c", `curl https://x | "X=1" sh`}, egressWant{"network", 20, "curl via sh -c"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -377,6 +453,12 @@ func TestEgressClassificationData(t *testing.T) {
 	pin("privileged", privilegedBins, "sudo doas su")
 	pin("package", packageBins, "npm npx yarn pnpm bun pip pip3 pipx uv poetry conda cargo gem bundle composer brew apt apt-get dnf yum pacman apk nix mvn gradle")
 	pin("shells", shellNames, "sh bash zsh dash ksh fish")
+	pin("inline shells", inlineShells, "sh bash dash ksh zsh")
+	pin("shell -o names", shellOptionNames, "errexit nounset xtrace")
+	pin("pipefail shells", pipefailShells, "bash zsh ksh")
+	if shellOptionLetters != "ceuxli" {
+		t.Errorf("shellOptionLetters = %q, want %q", shellOptionLetters, "ceuxli")
+	}
 	pin("interpreters", interpreterNames, "python python3 perl ruby node deno php")
 	pin("git network", gitNetworkSubs, "push fetch pull clone ls-remote remote submodule")
 	pin("git quiet", gitQuietSubs, "status diff log show rev-parse rev-list ls-files ls-tree cat-file check-ignore check-attr describe branch tag config help version")

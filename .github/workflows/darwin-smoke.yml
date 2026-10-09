@@ -43,6 +43,62 @@ jobs:
       - name: Workspace mutation boundary
         run: go test -race -count=1 -run '^TestMutation' ./agent/tools ./cmd/golem
 
+      # Credential tripwire aliases (#627) on APFS: case and Unicode fold
+      # spellings of a protected directory resolve to the directory itself
+      # only on a case-insensitive volume, so these cases exercise the
+      # stored-spelling paths natively. Linux CI runs them too, where each
+      # spelling is its own directory. Two of them skip on a volume without
+      # the aliases, so a skip here fails the step instead of passing it, and
+      # so does any count of passing tests other than the four (a rename
+      # would otherwise run nothing and pass).
+      - name: Credential tripwire aliases
+        shell: bash
+        run: |
+          go test -race -count=1 -v -run '^TestCredentialAlias' ./agent/tools | tee "$RUNNER_TEMP/credential-alias.txt"
+          if grep -q -- '--- SKIP' "$RUNNER_TEMP/credential-alias.txt"; then
+            echo "::error::credential alias tests skipped: this runner volume does not alias .ssh spellings"
+            exit 1
+          fi
+          passed=$(grep -c -- '--- PASS: TestCredentialAlias' "$RUNNER_TEMP/credential-alias.txt" || true)
+          if [ "$passed" -ne 4 ]; then
+            echo "::error::expected 4 passing TestCredentialAlias tests, saw $passed"
+            exit 1
+          fi
+
+      # Scratch source binding (#553) on APFS: the case and normalization
+      # alias rows for the scratch cwd and executable, the production-path
+      # cwd alias test, and the /var -> /private/var reference prefix only
+      # discriminate on a case-insensitive volume behind a symlinked temp
+      # prefix, so Linux CI skips or cannot reach them. A skip fails the step,
+      # and so does a missing pass of the production-path alias test.
+      - name: Scratch source binding
+        shell: bash
+        run: |
+          go test -race -count=1 -v -run '^TestScratchSource' ./agent/tools | tee "$RUNNER_TEMP/scratch-source.txt"
+          if grep -q -- '--- SKIP' "$RUNNER_TEMP/scratch-source.txt"; then
+            echo "::error::scratch source tests skipped: this runner volume does not alias the fixture spellings"
+            exit 1
+          fi
+          if ! grep -q -- '--- PASS: TestScratchSourceCwdAliasRunsCommand' "$RUNNER_TEMP/scratch-source.txt"; then
+            echo "::error::TestScratchSourceCwdAliasRunsCommand did not pass (renamed or not selected)"
+            exit 1
+          fi
+
+      # golem ops -watch on a real Darwin PTY (#654): screen and cursor
+      # restored on exit, on SIGINT and on SIGTERM, frames that follow a
+      # resize, and Ctrl-Z job control in helper processes, with and without
+      # a job-control session. Linux CI runs the same tests. A rename would
+      # match nothing and pass, so the step requires exactly the five to pass.
+      - name: golem ops -watch PTY
+        shell: bash
+        run: |
+          go test -race -count=1 -v -run '^TestOpsWatch(RealPTY|Job)' ./cmd/golem | tee "$RUNNER_TEMP/ops-watch-pty.txt"
+          passed=$(grep -cE -- '^--- PASS: TestOpsWatch(RealPTY|Job)' "$RUNNER_TEMP/ops-watch-pty.txt" || true)
+          if [ "$passed" -ne 5 ]; then
+            echo "::error::expected 5 passing -watch PTY and job tests, saw $passed"
+            exit 1
+          fi
+
       # Real Seatbelt confinement (#442). GO_LLM_REQUIRE_SEATBELT=1 turns a
       # skip into a hard failure, so a runner that cannot apply Seatbelt (a
       # nested sandbox) fails the gate rather than silently passing. The

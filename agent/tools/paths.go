@@ -51,6 +51,17 @@ var (
 	errNotDir        = errors.New("not a directory")
 	errFileChanged   = errors.New("file identity changed between stat and open")
 	errParentMissing = errors.New("parent directory does not exist")
+	// errWalkEntryUnheld reports a walk entry that carries no held directory,
+	// so its name cannot be bound to the listing it came from. Only the Unix
+	// backend (openWalked, verifyWalkedParent) raises it; it lives here because
+	// search.go builds on every platform.
+	errWalkEntryUnheld = errors.New("tools: walk entry has no held directory")
+	// errAnchorUnreachable marks a reachability lookup (#613) that failed on
+	// the way to the workspace's own root for a reason other than a changed
+	// path, such as lost permission above the root. It wraps the cause, which
+	// keeps the tool text, and search aborts on it. Only the Unix backend
+	// raises it; it lives here for the same reason as errWalkEntryUnheld.
+	errAnchorUnreachable = errors.New("workspace root unreachable")
 	// errScopeDenied marks guard vetoes for sanitized tool output. Its text is
 	// the stable model-visible denial message.
 	errScopeDenied = errors.New("path denied by workspace policy")
@@ -60,7 +71,11 @@ var (
 // directory captured at construction (deleted and recreated, or swapped). Every
 // pinned read fails with it until the host builds a new Workspace; hosts that
 // keep a Workspace across project lifetimes should treat it as "rebuild", not
-// "retry". It wraps the identity-change error so tool output is unchanged.
+// "retry". On Linux and Darwin a read in progress also reports it when the root
+// path stops reaching that directory (renamed away or made a symlink), or a
+// scoped child's path stops reaching its pinned scope; later calls on a
+// top-level Workspace then report the failed root lookup instead. It wraps the
+// identity-change error so tool output is unchanged.
 var ErrRootReplaced = fmt.Errorf("workspace root replaced: %w", errFileChanged)
 
 type scopeDeniedError struct{ cause error }
@@ -82,6 +97,18 @@ func (e scopeDeniedError) Is(target error) bool { return target == errScopeDenie
 // Missing entries retain their requested spelling: hosts reserving absent names
 // must cover the filesystem's equivalent case/normalization spellings themselves.
 // Workspace does not impose a global folding/normalization algorithm.
+//
+// On Linux and Darwin a read decision binds to what is returned (#613): after
+// the guard allows a path and the file is opened or the directory enumerated,
+// the path is resolved again from the top-level workspace root by name, never
+// through a symlink, and must reach the same object; otherwise the read fails
+// with a path-changed error (ErrRootReplaced when the root itself, or a scoped
+// child's scope, moved or changed).
+// This is decision integrity, not adversary resistance: a process that can
+// rename can place content at an allowed name, hard links make names unreliable
+// provenance, the re-resolution is not an atomic snapshot, bytes are read after
+// it, and case-only or normalization-only renames on case-insensitive
+// filesystems are not detected. Mutations keep the #552 contract.
 type ScopeGuard func(rel string, write bool) error
 
 // Workspace is the single audited chokepoint for all filesystem access within the
@@ -94,6 +121,17 @@ type Workspace struct {
 	rootIdentity os.FileInfo
 	pinnedRoot   *os.File       // invocation-owned capability; operations borrow it
 	scope        *scopeCounters // invocation-owned scoped child counters
+	// anchorRoot, anchorIdentity and anchorPrefix locate where the
+	// post-decision reachability check (#613) starts: the top-level workspace
+	// root, its construction-time identity, and this workspace's path below
+	// it. All zero for a top-level workspace; scoped children inherit them so
+	// verification starts above their pinned scope.
+	anchorRoot     string
+	anchorIdentity os.FileInfo
+	anchorPrefix   string
+	// beforeReadDir is a per-workspace deterministic race-test seam fired
+	// before a verified directory enumeration.
+	beforeReadDir func(rel string)
 	// beforeReadOpen is a per-workspace deterministic race-test seam.
 	beforeReadOpen func()
 	beforeMutation func(mutationPhase, string) error // private deterministic phase/failure seam
@@ -131,7 +169,7 @@ func NewWorkspace(root string) (*Workspace, error) {
 	if err != nil {
 		return nil, err
 	}
-	identity, err := os.Stat(canon)
+	identity, err := workspaceRootIdentity(canon)
 	if err != nil {
 		return nil, err
 	}
@@ -237,6 +275,15 @@ func canonicalFuturePath(root, path string) (string, error) {
 // SetScopeGuard installs (or clears with nil) the proof-mode scope guard.
 // Host setup must complete before workspace calls; installation is not concurrent-safe.
 func (w *Workspace) SetScopeGuard(g ScopeGuard) { w.guard = g }
+
+// readAnchor returns where reachability checks start: the top-level root path,
+// its construction-time identity, and this workspace's path below it.
+func (w *Workspace) readAnchor() (string, os.FileInfo, string) {
+	if w.anchorRoot == "" {
+		return w.root, w.rootIdentity, ""
+	}
+	return w.anchorRoot, w.anchorIdentity, w.anchorPrefix
+}
 
 // checkScope consults the guard for a cleaned absolute path. A veto preserves
 // the host error while marking it for sanitized model-visible tool output.
@@ -460,6 +507,23 @@ func (w *Workspace) ReadFileWithModeForUndo(p string) ([]byte, fs.FileMode, erro
 		return nil, 0, err
 	}
 	return data, fi.Mode(), nil
+}
+
+// VerifyRoot reports whether the root path still names, without following a
+// symlink, the directory this Workspace was constructed over: nil when it
+// does, the not-exist error when it is gone, ErrRootReplaced when something
+// else took its place. Reads surface a vanished root as the same not-exist
+// error as a missing target, so a caller that treats absence as evidence (undo)
+// checks the root before believing it.
+func (w *Workspace) VerifyRoot() error {
+	fi, err := os.Lstat(w.root)
+	if err != nil {
+		return err
+	}
+	if !fi.IsDir() || !os.SameFile(w.rootIdentity, fi) {
+		return ErrRootReplaced
+	}
+	return nil
 }
 
 // HashFileWithMode returns the ContentHash and complete mode of a regular file

@@ -253,6 +253,10 @@ type modelSwitchFixture struct {
 func newModelSwitchFixture(t *testing.T, remoteURL string) modelSwitchFixture {
 	t.Helper()
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	// run() reads os.UserConfigDir (consultants.json, REPL commands); keep the
+	// developer's real config out of the run.
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	primary := newModelBackend(t, "primary", "agent-model", "agent-model-b", "weak-model")
 	alt := newModelBackend(t, "alt", "alt-model")
 	providers := fmt.Sprintf(`"primary": {"base_url": %q, "api_format": "openai-compat", "timeout": "5s"},

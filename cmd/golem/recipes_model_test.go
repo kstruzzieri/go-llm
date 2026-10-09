@@ -233,7 +233,7 @@ func TestRecipeModelThinkingBudgetTraceAndPressure(t *testing.T) {
 		if err := json.Unmarshal(raw, &rec); err != nil {
 			t.Fatal(err)
 		}
-		if rec.Request.Budget.InputCeiling != 16384 || rec.Request.Budget.OutputReserve != 1024 || rec.Request.Hash != "fnv64:bc94f893b4083980" {
+		if rec.Request.Budget.InputCeiling != 16384 || rec.Request.Budget.OutputReserve != 1024 || rec.Request.Hash != "fnv64:e3e37db31503857d" {
 			t.Fatalf("hint metadata %+v", rec)
 		}
 		body := fx.alt.chatBodies()[0]
@@ -262,7 +262,7 @@ func TestRecipeModelThinkingBudgetTraceAndPressure(t *testing.T) {
 			if err := json.Unmarshal(raw, &rec); err != nil {
 				t.Fatal(err)
 			}
-			if rec.Request.Budget.InputCeiling != 32768 || rec.Request.Budget.OutputReserve != 1024 || rec.Request.Hash != "fnv64:bc94f893b4083980" {
+			if rec.Request.Budget.InputCeiling != 32768 || rec.Request.Budget.OutputReserve != 1024 || rec.Request.Hash != "fnv64:e3e37db31503857d" {
 				t.Fatalf("following ordinary trace metadata %+v", rec)
 			}
 		}

@@ -45,6 +45,9 @@ printf '# Changelog fragments\n' >"$repo/changelog.d/README.md"
 printf '### Fixed — twelve (#12)\n\nBody twelve.\n\n\n' >"$repo/changelog.d/12-twelve.md"
 printf '### Added — nine (#9)\n\nBody nine.\n' >"$repo/changelog.d/9-nine.md"
 g add -A && g commit -qm base
+# 0.2.0 is released, so its section is closed to corrections; the
+# untagged-version window has its own cases at the end.
+g tag v0.2.0
 
 same() { # <a> <b> <message-on-difference>
   cmp -s "$1" "$2" || { printf '%s\n' "$3" >&2; exit 1; }
@@ -345,6 +348,44 @@ pr bad-fragment
 printf 'no heading\n' >"$repo/changelog.d/23-bad.md"
 g add -A && g commit -qm bad
 expect_fail guard-validates 'changelog.d/23-bad.md: first line must be' "$repo/scripts/check-changelog" develop
+
+# Between the stamp and the tag, the newest version's body may be corrected.
+g checkout -q develop
+printf '\n## [0.3.0] - 2026-09-10\n\n### Added — stamped (#27)\n\nStale claim.\n' >"$tmp/entry"
+sed -i.bak "/^## \\[Unreleased\\]\$/r $tmp/entry" "$repo/CHANGELOG.md" && rm "$repo/CHANGELOG.md.bak"
+g commit -qam stamped-untagged
+
+pr corrects-untagged-version
+sed -i.bak 's/^Stale claim\.$/Corrected claim./' "$repo/CHANGELOG.md" && rm "$repo/CHANGELOG.md.bak"
+g commit -qam correct
+"$repo/scripts/check-changelog" develop >/dev/null
+
+pr corrects-and-smuggles
+sed -i.bak 's/^Stale claim\.$/Corrected claim./; s/^Intro paragraph\.$/Intro paragraph, edited./' "$repo/CHANGELOG.md" && rm "$repo/CHANGELOG.md.bak"
+g commit -qam correct-and-smuggle
+expect_fail correction-outside-section 'CHANGELOG.md is edited directly.' "$repo/scripts/check-changelog" develop
+
+pr folds-and-corrects
+"$repo/scripts/changelog-fold" >/dev/null
+sed -i.bak 's/^Stale claim\.$/Corrected claim./' "$repo/CHANGELOG.md" && rm "$repo/CHANGELOG.md.bak"
+g commit -qam fold-and-correct
+expect_fail correction-with-fold 'CHANGELOG.md is edited directly.' "$repo/scripts/check-changelog" develop
+
+pr corrects-released-version
+sed -i.bak 's/^Body five\.$/Body five, edited./' "$repo/CHANGELOG.md" && rm "$repo/CHANGELOG.md.bak"
+g commit -qam correct-released
+expect_fail correction-older-version 'CHANGELOG.md is edited directly.' "$repo/scripts/check-changelog" develop
+
+pr redates-untagged-version
+sed -i.bak 's/^## \[0\.3\.0\] - 2026-09-10$/## [0.3.0] - 2026-09-11/' "$repo/CHANGELOG.md" && rm "$repo/CHANGELOG.md.bak"
+g commit -qam redate
+expect_fail correction-heading 'CHANGELOG.md is edited directly.' "$repo/scripts/check-changelog" develop
+
+g checkout -q develop && g tag v0.3.0
+pr corrects-tagged-version
+sed -i.bak 's/^Stale claim\.$/Corrected claim./' "$repo/CHANGELOG.md" && rm "$repo/CHANGELOG.md.bak"
+g commit -qam correct-tagged
+expect_fail correction-after-tag 'CHANGELOG.md is edited directly.' "$repo/scripts/check-changelog" develop
 
 expect_fail guard-usage 'Usage: scripts/check-changelog <base-ref>' "$repo/scripts/check-changelog"
 printf 'changelog scripts: ok\n'

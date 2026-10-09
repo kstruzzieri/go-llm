@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -225,12 +226,29 @@ func ExtractCommandGates(s Step) ([]CommandGate, error) {
 	return out, nil
 }
 
+// PlanSchemaVersion is the AgentFlow plan-lock schema Golem authors (#612).
+const PlanSchemaVersion = "1.0.0"
+
+// SupportedSchemaVersion reports whether v is an AgentFlow 1.x schema triple,
+// the only major this adapter drives (#612). AgentFlow owns the minor rule.
+// It applies only to the AgentFlow artifact families that moved to 1.0.0 (plan
+// lock, execution contract, and the step-run, command-receipt, file-receipt and
+// verification-run ledgers); families that stay 0.x at AgentFlow 1.0 (workflow
+// contract, evidence, review runs, runtime) must not be checked with it.
+func SupportedSchemaVersion(v string) bool {
+	parts := schemaVersionPattern.FindStringSubmatch(v)
+	return parts != nil && parts[1] == strconv.Itoa(maxMajor)
+}
+
 // PreflightP0 rejects a plan Golem cannot run in P0: every step must have at
 // least one structured command gate, and every validation[] label must have a
 // matching gates[] command at the same index. Inspection-only gates and bare
 // validation strings are out of scope (Golem does not parse shell strings out of
-// validation).
+// validation). It also requires an AgentFlow 1.x schema_version (#612).
 func PreflightP0(p *Plan) error {
+	if !SupportedSchemaVersion(p.SchemaVersion) {
+		return fmt.Errorf("plan schema_version %q is not an AgentFlow 1.x plan; migrate it to schema_version %s and review it again, or re-plan with -goal after moving any existing .agent/ aside", p.SchemaVersion, PlanSchemaVersion)
+	}
 	for _, s := range p.Steps {
 		if len(s.Validation) > 0 && len(s.Gates) != len(s.Validation) {
 			return fmt.Errorf("step %s: P0 requires one gates[] command for each validation[] entry", s.ID)

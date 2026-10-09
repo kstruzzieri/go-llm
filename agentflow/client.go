@@ -73,7 +73,7 @@ func (c *Client) rootArgs(extra ...string) []string {
 	return append([]string{"--root", c.root}, extra...)
 }
 
-// --- AgentFlow 0.4.0 payload structs ---
+// --- AgentFlow payload structs (1.0; unchanged since 0.4.0) ---
 
 type claimResult struct {
 	AttemptID string `json:"attempt_id"`
@@ -361,6 +361,18 @@ func (c *Client) FinishStep(ctx context.Context, step, attempt string) error {
 func (c *Client) CompleteStep(ctx context.Context, step, attempt string) error {
 	args := append([]string{"complete-step", step}, c.rootArgs("--attempt", attempt, "--agent", c.agentName(), "--json")...)
 	_, err := c.call(ctx, "complete-step", args, true)
+	return err
+}
+
+// BlockStep closes an open attempt as blocked, recording reason in the ledger.
+// Like the other attempt commands it acts as this client's agent, so a parallel
+// worker blocks as its own owner. AgentFlow does not refuse an attempt that is
+// already closed, so call it only on an attempt the caller holds open. A non-nil
+// error does not prove the attempt is still open: AgentFlow appends the blocked
+// event before it clears the attempt pointer.
+func (c *Client) BlockStep(ctx context.Context, step, attempt, reason string) error {
+	args := append([]string{"block-step", step}, c.rootArgs("--attempt", attempt, "--reason", reason, "--agent", c.agentName(), "--json")...)
+	_, err := c.call(ctx, "block-step", args, true)
 	return err
 }
 

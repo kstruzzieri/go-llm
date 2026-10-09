@@ -2,10 +2,12 @@ package mcp
 
 import (
 	"context"
+	"database/sql"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -116,5 +118,53 @@ func TestOpenRetrievalFeedbackWeighterWaitsForLockedWALFile(t *testing.T) {
 	sqlitetest.AssertNewConnectionBusyTimeout(t, db, 5*time.Second)
 	if err := db.Close(); err != nil {
 		t.Fatalf("close: %v", err)
+	}
+}
+
+// TestOpenRetrievalFeedbackWeighterResecuresLooseSidecars pins the 0600
+// re-securing of sidecars that already exist with looser bits. SQLite gives a
+// new sidecar the DB file's mode, so only a sidecar left by an earlier, looser
+// DB distinguishes the opener's SecureDBFiles call from its absence.
+func TestOpenRetrievalFeedbackWeighterResecuresLooseSidecars(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("file mode bits are not portable on Windows")
+	}
+	path := filepath.Join(t.TempDir(), "feedback.db")
+	if err := prepareRetrievalFeedbackDB(path); err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	// An open WAL connection keeps the sidecars on disk.
+	holder, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open holder: %v", err)
+	}
+	t.Cleanup(func() { _ = holder.Close() })
+	holder.SetMaxOpenConns(1)
+	if _, err := holder.ExecContext(t.Context(),
+		"PRAGMA journal_mode=WAL; CREATE TABLE x(a); INSERT INTO x VALUES(1)"); err != nil {
+		t.Fatalf("seed holder: %v", err)
+	}
+	sidecars := []string{path + "-wal", path + "-shm"}
+	for _, sidecar := range sidecars {
+		if _, err := os.Stat(sidecar); err != nil {
+			t.Fatalf("sidecar %s missing while the holder is open: %v", sidecar, err)
+		}
+		if err := os.Chmod(sidecar, 0o644); err != nil {
+			t.Fatalf("loosen %s: %v", sidecar, err)
+		}
+	}
+	db, _, err := openRetrievalFeedbackWeighter(t.Context(), path)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	for _, sidecar := range sidecars {
+		info, err := os.Stat(sidecar)
+		if err != nil {
+			t.Fatalf("stat %s: %v", sidecar, err)
+		}
+		if got := info.Mode().Perm(); got != 0o600 {
+			t.Errorf("sidecar %s mode = %o after open, want 0600", sidecar, got)
+		}
 	}
 }

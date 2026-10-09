@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/kstruzzieri/go-llm/config"
 	"github.com/kstruzzieri/go-llm/provider"
@@ -296,3 +298,17 @@ const snapshotGoldenV1 = `{
     "dirty": false
   }
 }`
+
+func TestBound64CutsOnARuneBoundary(t *testing.T) {
+	a63 := strings.Repeat("a", 63)
+	for _, c := range []struct{ in, want string }{
+		{strings.Repeat("a", 64), strings.Repeat("a", 64)},
+		{strings.Repeat("a", 65), strings.Repeat("a", 64)},
+		{a63 + "\u00e9", a63}, // a two-byte rune straddling the cap is dropped whole
+		{a63 + "\u20ac", a63}, // three bytes
+	} {
+		if got := bound64(c.in); got != c.want || !utf8.ValidString(got) {
+			t.Fatalf("bound64(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}

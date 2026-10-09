@@ -197,7 +197,6 @@ func runIndex(ctx context.Context, args []string, out, errOut io.Writer) (runErr
 		progressive bool
 	)
 	fs := flag.NewFlagSet("golem index", flag.ContinueOnError)
-	fs.SetOutput(errOut)
 	fs.StringVar(&configPath, "config", "", "path to models.json (default: auto-discover)")
 	fs.StringVar(&rootFlag, "root", ".", "workspace root to index")
 	fs.StringVar(&ollamaURL, "ollama-url", "", "override Ollama base URL")
@@ -206,8 +205,12 @@ func runIndex(ctx context.Context, args []string, out, errOut io.Writer) (runErr
 	fs.Bool("no-color", false, "disable dim ANSI footers in summary")
 	var allowDest stringSliceFlag
 	fs.Var(&allowDest, "allow-destination", "admit a remote model destination: \"<provider>/<canonical base URL>\" (repeatable; this command never prompts)")
-	if err := fs.Parse(args); err != nil {
-		return err
+	if err := parseQuietly(fs, args, errOut); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return err
+		}
+		_, _ = fmt.Fprintf(errOut, "golem index: %v\n", err)
+		return errors.Join(errIndexFailed, err)
 	}
 
 	root, err := filepath.Abs(rootFlag)

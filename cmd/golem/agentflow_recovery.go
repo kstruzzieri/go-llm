@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -63,26 +64,32 @@ func resumeDisposition(state string) recoveryDisposition {
 	}
 }
 
-type agentflowStatusExit struct{ code int }
+// agentflowStatusExit carries a status exit code. diagnostic, when set, is the
+// one stderr line main prints before exiting; stdout stays the JSON contract.
+type agentflowStatusExit struct {
+	code       int
+	diagnostic string
+}
 
 func (e *agentflowStatusExit) Error() string { return fmt.Sprintf("agentflow status exit %d", e.code) }
 func (e *agentflowStatusExit) ExitCode() int { return e.code }
 
-func runAgentflowStatus(ctx context.Context, out io.Writer, root, source string, jsonOutput bool) error {
+func runAgentflowStatus(ctx context.Context, out io.Writer, root, source string, envNames []string, jsonOutput bool) error {
 	source, err := resolveTaskAgentflowSource(root, source)
 	if err != nil {
 		return err
 	}
-	var runner agentflow.Runner = agentflow.NewExecRunner(root)
-	if source != "" {
-		runner = agentflow.NewSrcExecRunner(root, source)
-	}
-	return runAgentflowStatusWithRunner(ctx, out, root, jsonOutput, runner)
+	return runAgentflowStatusWithRunner(ctx, out, root, jsonOutput, mustAgentflowRunner(root, source, envNames))
 }
 
 func runAgentflowStatusWithRunner(ctx context.Context, out io.Writer, root string, jsonOutput bool, runner agentflow.Runner) error {
 	client := agentflow.NewOwnedClient(runner, root, "golem")
-	state, err := client.NextAction(ctx)
+	// #612 R6: refuse an unsupported AgentFlow before relaying anything it says.
+	var state agentflow.NextActionState
+	err := client.CheckVersion(ctx)
+	if err == nil {
+		state, err = client.NextAction(ctx)
+	}
 	if err != nil {
 		if state.RawJSON != nil {
 			if jsonOutput {
@@ -96,8 +103,25 @@ func runAgentflowStatusWithRunner(ctx context.Context, out io.Writer, root strin
 			renderAgentflowStatus(out, state, nil, disposition)
 			return statusExit(3)
 		}
+		// CheckVersion wraps launch failures; an unset approved name keeps its
+		// own one-line text in both modes.
+		var unset *agentflow.EnvNotSetError
+		if errors.As(err, &unset) {
+			err = unset
+		}
 		if !jsonOutput {
 			_, _ = fmt.Fprintf(out, "agentflow status unavailable: %s\n", recoveryDisplayText(err.Error()))
+			return statusExit(3)
+		}
+		// JSON mode: only Golem-owned text reaches stderr (printed by main): an
+		// unset approved name or a rejected version. Other runner errors may
+		// carry arbitrary text and stay silent.
+		var versionErr *agentflow.VersionError
+		switch {
+		case unset != nil:
+			return &agentflowStatusExit{code: 3, diagnostic: unset.Error()}
+		case errors.As(err, &versionErr):
+			return &agentflowStatusExit{code: 3, diagnostic: versionErr.Error()}
 		}
 		return statusExit(3)
 	}
@@ -488,6 +512,12 @@ func settleAgentflowAttempt(ctx context.Context, client afClient, plan *agentflo
 }
 
 func (d *driver) resume(ctx context.Context, root string, planJSON []byte, approved *agentflow.WorkflowRecommendation) (agentflow.NextActionState, error) {
+	// #612 R6: resume mutates, so it runs the base probe (version gate and the
+	// base capability probes, including #611's block-step) before its first
+	// next-action. It does not probe every command resume later uses.
+	if err := d.af.Probe(ctx); err != nil {
+		return agentflow.NextActionState{}, &agentflowUnavailableError{fmt.Errorf("agentflow unavailable: %w", err)}
+	}
 	state, err := d.af.NextAction(ctx)
 	if err != nil {
 		return agentflow.NextActionState{}, err

@@ -228,14 +228,14 @@ func (s *PinStore) acquireLease(root *os.Root, name string) (*pinLease, error) {
 	return lease, nil
 }
 
-func (s *PinStore) publish(ctx context.Context, root *os.Root, name, alias string, c toolCatalog) (err error) {
+func (s *PinStore) publish(ctx context.Context, root *os.Root, name, alias string, e pinEntry) (err error) {
 	// Write the canonical catalog bytes verbatim: encoding/json's default HTML
 	// escaping would expand every '<', '>' and '&' sixfold and let a catalog
 	// inside every validated bound exceed maxPinBytes on disk.
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
 	enc.SetEscapeHTML(false)
-	err = enc.Encode(pinRecord{Version: c.version(), Workspace: s.workspace, Alias: alias, Digest: c.digest(), Tools: c.canonicalBytes()})
+	err = enc.Encode(pinRecord{Version: pinRecordVersion, Workspace: s.workspace, Alias: alias, Digest: e.digest(), Tools: e.canonicalBytes(), Connection: e.conn.record()})
 	if err != nil {
 		return err
 	}

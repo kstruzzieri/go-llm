@@ -4,8 +4,14 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
 	"log"
+	"net"
 	"net/http"
+	"net/url"
+	"slices"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/kstruzzieri/go-llm/provider"
@@ -38,6 +44,89 @@ func corsMiddleware(next http.Handler, origin string) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// crossOriginMiddleware refuses state-changing requests that a browser marks
+// as coming from another origin (http.CrossOriginProtection). Disabling CORS
+// only hides responses: a page can still send a text/plain POST, which needs
+// no preflight, and run a model blind. The WithCORS origin is trusted, and
+// "*" turns the check off, since it already invites every origin.
+func crossOriginMiddleware(next http.Handler, origin string) http.Handler {
+	if origin == "*" {
+		return next
+	}
+	protection := http.NewCrossOriginProtection()
+	if origin != "" {
+		// ListenAndServe refuses an origin no browser sends (checkCORSOrigin);
+		// one that reaches here anyway matches no request and admits no one.
+		_ = protection.AddTrustedOrigin(origin)
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := protection.Check(r); err != nil {
+			writeError(w, http.StatusForbidden, "cross_origin_not_allowed", "cross-origin request not allowed (configure compat.WithCORS)")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// checkCORSOrigin rejects a WithCORS origin that no browser sends as Origin.
+// CORS and the cross-origin guard both compare it with the request's Origin
+// byte for byte, so anything but a lower-case scheme://host[:port] without
+// the scheme's default port refuses the very client it was meant to admit.
+func checkCORSOrigin(origin string) error {
+	if origin == "" || origin == "*" {
+		return nil
+	}
+	if err := http.NewCrossOriginProtection().AddTrustedOrigin(origin); err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidCORSOrigin, err)
+	}
+	u, _ := url.Parse(origin) // cannot fail: AddTrustedOrigin parsed it
+	if origin != strings.ToLower(u.Scheme+"://"+u.Host) {
+		return fmt.Errorf("%w: %q is not a lower-case scheme://host[:port]", ErrInvalidCORSOrigin, origin)
+	}
+	if strings.HasSuffix(u.Host, ":") {
+		return fmt.Errorf("%w: %q has an empty port", ErrInvalidCORSOrigin, origin)
+	}
+	if portText := u.Port(); portText != "" {
+		// Browsers serialize ports as 16-bit decimal numbers without leading zeros.
+		port, err := strconv.ParseUint(portText, 10, 16)
+		if err != nil || portText != strconv.FormatUint(port, 10) {
+			return fmt.Errorf("%w: %q port must be a canonical decimal number from 0 to 65535", ErrInvalidCORSOrigin, origin)
+		}
+		if u.Scheme == "https" && port == 443 || u.Scheme == "http" && port == 80 {
+			return fmt.Errorf("%w: %q must omit the default port", ErrInvalidCORSOrigin, origin)
+		}
+	}
+	return nil
+}
+
+// hostMiddleware refuses requests whose Host header names neither a loopback
+// address nor an allowed host. This blocks DNS rebinding: a page on an
+// attacker's domain that resolves to 127.0.0.1 is same-origin to the browser,
+// so neither CORS nor the cross-origin guard applies, but its requests still
+// carry the attacker's Host.
+// allowed holds names already normalized by hostname.
+func hostMiddleware(next http.Handler, allowed []string) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		host := hostname(r.Host)
+		if host != "" && (isLoopbackHost(host) || slices.Contains(allowed, host)) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		log.Printf("compat: refused %s %q: Host %q not allowed (see WithAllowedHosts)", r.Method, r.URL.Path, r.Host)
+		writeError(w, http.StatusForbidden, "host_not_allowed", "Host header not allowed (configure compat.WithAllowedHosts)")
+	})
+}
+
+// hostname returns the lower-cased host of a Host header or host:port
+// address, without the port or IPv6 brackets.
+func hostname(hostport string) string {
+	host := hostport
+	if h, _, err := net.SplitHostPort(hostport); err == nil {
+		host = h
+	}
+	return strings.ToLower(strings.TrimSuffix(strings.TrimPrefix(host, "["), "]"))
 }
 
 // recoveryMiddleware turns handler panics into 500 JSON errors. If the handler

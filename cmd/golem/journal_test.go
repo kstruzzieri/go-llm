@@ -3,6 +3,8 @@ package main
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -116,6 +118,70 @@ func TestUndoCreatedFileAlreadyAbsent(t *testing.T) {
 	jr.undo(&out2)
 	if !strings.Contains(out2.String(), "nothing to undo") {
 		t.Fatalf("record should have been popped: %q", out2.String())
+	}
+}
+
+// A create's undo must not read an unreachable workspace root as "the created
+// file is already gone": the file still exists wherever the root went, so the
+// record must survive until the root is back.
+func TestUndoCreatedFileRefusesUnreachableRoot(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		replaced bool // an empty directory takes the root's place
+	}{
+		{name: "vanished"},
+		{name: "replaced", replaced: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			base := t.TempDir()
+			root, moved := filepath.Join(base, "ws"), filepath.Join(base, "moved")
+			if err := os.MkdirAll(filepath.Join(root, "allowed"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			jr, ws := newJournal(t, root)
+			if err := ws.WriteFileAtomic("allowed/file", []byte("DATA")); err != nil {
+				t.Fatal(err)
+			}
+			jr.Record(agenttools.MutationRecord{Path: "allowed/file", Existed: false, AfterHash: hashFor("DATA")})
+			if err := os.Rename(root, moved); err != nil {
+				t.Fatal(err)
+			}
+			if tc.replaced {
+				if err := os.Mkdir(root, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			if _, _, err := readForUndo(ws, "allowed/file"); err == nil || errors.Is(err, fs.ErrNotExist) {
+				t.Fatalf("readForUndo with the root unreachable = %v, want an error that is not absence", err)
+			}
+			var out strings.Builder
+			jr.undo(&out)
+			if !strings.HasPrefix(out.String(), "cannot undo allowed/file: ") {
+				t.Fatalf("undo must refuse while the root is unreachable: %q", out.String())
+			}
+			if _, err := os.Stat(filepath.Join(moved, "allowed", "file")); err != nil {
+				t.Fatalf("refused undo must leave the created file in the moved root: %v", err)
+			}
+
+			// The record survived: with the root back, undo deletes the file.
+			if tc.replaced {
+				if err := os.Remove(root); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.Rename(moved, root); err != nil {
+				t.Fatal(err)
+			}
+			var out2 strings.Builder
+			jr.undo(&out2)
+			if out2.String() != "undid allowed/file\n" {
+				t.Fatalf("record should have survived the refused undo: %q", out2.String())
+			}
+			if _, err := os.Stat(filepath.Join(root, "allowed", "file")); !os.IsNotExist(err) {
+				t.Fatalf("undo with the root restored must delete the created file: %v", err)
+			}
+		})
 	}
 }
 

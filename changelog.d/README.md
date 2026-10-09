@@ -22,3 +22,8 @@ direct `CHANGELOG.md` edit that is not a fold and validates the fragments in
 the tree. At release, `scripts/changelog-fold` moves every fragment under
 `## [Unreleased]` (newest issue first) and removes it; stamp the version
 heading afterwards as before.
+
+Between the stamp and the `v<x.y.z>` tag, a pull request that folds nothing
+may edit the body of the newest version section directly to correct its
+notes. The heading and everything outside that section must stay unchanged,
+and the window closes when the tag exists.

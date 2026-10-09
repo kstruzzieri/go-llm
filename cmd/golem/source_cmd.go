@@ -33,13 +33,26 @@ const sourceUsage = `usage: golem source <add|list|rm|reindex> [options] [arg]
 Flags must come before the positional path or id.
 `
 
+// parseSourceFlags parses through parseQuietly and renders a parse failure
+// under the subcommand's own prefix, since errSourceFailed means "already
+// rendered".
+func parseSourceFlags(fs *flag.FlagSet, args []string, errOut io.Writer) error {
+	err := parseQuietly(fs, args, errOut)
+	if err == nil || errors.Is(err, flag.ErrHelp) {
+		return err
+	}
+	_, _ = fmt.Fprintf(errOut, "%s: %v\n", fs.Name(), err)
+	return errSourceFailed
+}
+
 // rejectTrailingFlags catches stdlib flag's stop-at-first-positional
 // behavior: a "-flag" after the positional argument would otherwise be
-// misread as a second positional and produce a confusing count error.
+// misread as a second positional and produce a confusing count error. It
+// does not quote the argument, which may be a pasted secret.
 func rejectTrailingFlags(fs *flag.FlagSet, command string, errOut io.Writer) bool {
 	for _, arg := range fs.Args()[1:] {
 		if len(arg) > 1 && arg[0] == '-' {
-			_, _ = fmt.Fprintf(errOut, "golem source %s: flags must come before the positional argument (saw %q after it)\n", command, arg)
+			_, _ = fmt.Fprintf(errOut, "golem source %s: flags must come before the positional argument\n", command)
 			return true
 		}
 	}
@@ -88,7 +101,8 @@ func runSourceWith(ctx context.Context, args []string, stdin io.Reader, out, err
 	case "reindex":
 		return runSourceReindex(ctx, args[1:], out, errOut, deps)
 	default:
-		_, _ = fmt.Fprintf(errOut, "golem source: unknown source command %q\n%s", args[0], sourceUsage)
+		// Unquoted: the argument may be a flag carrying a pasted secret.
+		_, _ = fmt.Fprintf(errOut, "golem source: unknown source command\n%s", sourceUsage)
 		return errSourceFailed
 	}
 }
@@ -126,7 +140,6 @@ func runSourceAdd(ctx context.Context, args []string, stdin io.Reader, out, errO
 		rootFlag                                       string
 	)
 	fs := flag.NewFlagSet("golem source add", flag.ContinueOnError)
-	fs.SetOutput(errOut)
 	fs.StringVar(&configPath, "config", "", "path to models.json (default: auto-discover)")
 	fs.StringVar(&rootFlag, "root", ".", "workspace root")
 	fs.StringVar(&ollamaURL, "ollama-url", "", "override Ollama base URL")
@@ -137,11 +150,8 @@ func runSourceAdd(ctx context.Context, args []string, stdin io.Reader, out, errO
 	fs.Var(&tags, "tag", "optional tag (repeatable)")
 	var allowDest stringSliceFlag
 	fs.Var(&allowDest, "allow-destination", "admit a remote model destination: \"<provider>/<canonical base URL>\" (repeatable; this command never prompts)")
-	if err := fs.Parse(args); err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			return err
-		}
-		return errSourceFailed
+	if err := parseSourceFlags(fs, args, errOut); err != nil {
+		return err
 	}
 	if fs.NArg() > 1 && rejectTrailingFlags(fs, "add", errOut) {
 		return errSourceFailed
@@ -359,13 +369,9 @@ func sourceHumanText(value string) string {
 func runSourceRm(ctx context.Context, args []string, out, errOut io.Writer, deps sourceDeps) error {
 	var rootFlag string
 	fs := flag.NewFlagSet("golem source rm", flag.ContinueOnError)
-	fs.SetOutput(errOut)
 	fs.StringVar(&rootFlag, "root", ".", "workspace root")
-	if err := fs.Parse(args); err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			return err
-		}
-		return errSourceFailed
+	if err := parseSourceFlags(fs, args, errOut); err != nil {
+		return err
 	}
 	if fs.NArg() == 0 {
 		_, _ = fmt.Fprintln(errOut, "golem source rm: id is required")
@@ -464,16 +470,12 @@ func runSourceReindex(ctx context.Context, args []string, out, errOut io.Writer,
 	var configPath, rootFlag, ollamaURL string
 	var allowDest stringSliceFlag
 	fs := flag.NewFlagSet("golem source reindex", flag.ContinueOnError)
-	fs.SetOutput(errOut)
 	fs.StringVar(&configPath, "config", "", "path to models.json (default: auto-discover)")
 	fs.StringVar(&rootFlag, "root", ".", "workspace root")
 	fs.StringVar(&ollamaURL, "ollama-url", "", "override Ollama base URL")
 	fs.Var(&allowDest, "allow-destination", "admit a remote model destination: \"<provider>/<canonical base URL>\" (repeatable; this command never prompts)")
-	if err := fs.Parse(args); err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			return err
-		}
-		return errSourceFailed
+	if err := parseSourceFlags(fs, args, errOut); err != nil {
+		return err
 	}
 	if fs.NArg() == 0 {
 		_, _ = fmt.Fprintln(errOut, "golem source reindex: id is required")
@@ -573,14 +575,10 @@ func runSourceList(ctx context.Context, args []string, out, errOut io.Writer, de
 	var rootFlag string
 	var asJSON bool
 	fs := flag.NewFlagSet("golem source list", flag.ContinueOnError)
-	fs.SetOutput(errOut)
 	fs.StringVar(&rootFlag, "root", ".", "workspace root")
 	fs.BoolVar(&asJSON, "json", false, "emit JSON")
-	if err := fs.Parse(args); err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			return err
-		}
-		return errSourceFailed
+	if err := parseSourceFlags(fs, args, errOut); err != nil {
+		return err
 	}
 	if fs.NArg() > 0 {
 		_, _ = fmt.Fprintln(errOut, "golem source list: no positional arguments")

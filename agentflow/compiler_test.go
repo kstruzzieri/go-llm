@@ -67,7 +67,7 @@ func TestTaskBriefFromPlan_UsesExactCompiledFacts(t *testing.T) {
 func TestCompile_FillsContractBoilerplate(t *testing.T) {
 	p := Compile(sampleIR())
 
-	if p.SchemaVersion != "0.3.0" {
+	if p.SchemaVersion != "1.0.0" {
 		t.Errorf("schema_version = %q", p.SchemaVersion)
 	}
 	if p.DriftBudget != (DriftBudget{0, 0, "minimal", "requires_approval"}) {
