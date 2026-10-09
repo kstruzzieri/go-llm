@@ -240,4 +240,4 @@ filesystem still skip in the container; the native Darwin job covers those.
 
 ## Notes
 
-The CI image is based on `golang:1.27-alpine`, matching the `toolchain` line and the `go` directive in `go.mod`. It installs `build-base` and sets `CGO_ENABLED=1` because Go's race detector requires cgo support even though the module itself avoids cgo-only dependencies.
+The CI image is based on `golang:1.27.1-alpine`, pinned to the patch release on the `toolchain` line in `go.mod`, which the GitHub lint job also uses. A floating minor tag can move to a newer patch whose export data the pinned golangci-lint cannot read, which fails the gate's lint stage on every branch. Bump the image tag, the `toolchain` line and `GOLANGCI_LINT_VERSION` in `Dockerfile.ci` together. It installs `build-base` and sets `CGO_ENABLED=1` because Go's race detector requires cgo support even though the module itself avoids cgo-only dependencies.
