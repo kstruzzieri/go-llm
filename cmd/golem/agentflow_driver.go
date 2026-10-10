@@ -205,7 +205,34 @@ func (d *driver) run(ctx context.Context) (string, error) {
 			return "", err
 		}
 	}
+	if err := d.requireNoStepWork(ctx); err != nil {
+		return "", err
+	}
 	return d.af.FinishRun(ctx)
+}
+
+// requireNoStepWork refuses finish-run while AgentFlow still reports step or
+// attempt work (#651). next-step returns nothing both when every step is done
+// and when the remaining steps hold open attempts, and non-strict finish-run
+// does not require completed steps; only next-action's run-phase states prove
+// that every step completed and no attempt is open.
+func (d *driver) requireNoStepWork(ctx context.Context) error {
+	state, err := d.af.NextAction(ctx)
+	if err != nil {
+		return fmt.Errorf("check step work before finish-run: %w", err)
+	}
+	switch state.State {
+	case "run_unverified", "drift_failing", "proof_missing", "proof_stale", "proof_failing", "complete":
+		return nil
+	}
+	where := fmt.Sprintf("state %q", state.State)
+	if state.StepID != nil {
+		where += fmt.Sprintf(" step %q", *state.StepID)
+	}
+	// Resume's verdict needs its owned projection (agent identity and that
+	// agent's recovery actions), which this unowned query lacks, so the
+	// refusal defers it to -agentflow-status rather than predicting it.
+	return fmt.Errorf("agentflow still reports step work before finish-run: %s; no proof was built; run -agentflow-status to see whether -agentflow-resume can recover it", where)
 }
 
 func (d *driver) runSerialSteps(ctx context.Context) error {
