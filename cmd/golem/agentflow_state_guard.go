@@ -57,6 +57,38 @@ func checkAgentflowStateMajor(root string) error {
 	return nil
 }
 
+// agentflowExecutionHistory reports the first of AgentFlow's canonical
+// execution artifacts (EXECUTION_ARTIFACT_PATHS) that a workspace retains: the
+// execution contract, then any ledger with rows. "" means no history. It does
+// not inspect attempts/, receipts/ or other ledgers, so a partial manual
+// cleanup that keeps only those is not detected (#643 S1).
+func agentflowExecutionHistory(root string) (string, error) {
+	dir := filepath.Join(root, ".agent")
+	contract, err := readAgentflowState(dir, agentflowStateDocs[1])
+	if err != nil {
+		return "", err
+	}
+	if contract != nil {
+		return ".agent/" + agentflowStateDocs[1], nil
+	}
+	for _, name := range agentflowStateLedgers {
+		b, err := readAgentflowState(dir, name)
+		if err != nil {
+			return "", err
+		}
+		rows := 0
+		for _, line := range bytes.Split(b, []byte("\n")) {
+			if len(bytes.TrimSpace(line)) != 0 {
+				rows++
+			}
+		}
+		if rows > 0 {
+			return fmt.Sprintf(".agent/%s has %d entries", name, rows), nil
+		}
+	}
+	return "", nil
+}
+
 // readAgentflowState reads only regular files and returns nil, nil for an absent
 // file. The Unix open is nonblocking so a FIFO cannot stall the guard before
 // the opened file's type is checked.

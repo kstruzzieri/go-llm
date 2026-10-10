@@ -226,3 +226,60 @@ func TestRunAgentflowAuthor_RefusesZeroXScaffoldBeforeProbe(t *testing.T) {
 		t.Fatal("guard refusal changed .agent/")
 	}
 }
+
+// pristineScaffoldLock is the unlocked plan.lock.json AgentFlow 1.0's init
+// writes (artifacts.py initial_files); writePristineScaffold adds the rest of
+// that file list. None of it is execution history (#643 F3).
+const pristineScaffoldLock = `{"allowed_files":[],"blocked_files":[],"evidence_ids":[],"invariants":[],"locked":false,"locked_at":null,"non_goals":[],"objective":"","risk_level":"low","rollback_plan":"","schema_version":"1.0.0","scope":[],"steps":[],"validation_gates":[]}`
+
+func writePristineScaffold(t *testing.T, root string) {
+	t.Helper()
+	writeAgentFile(t, root, "plan.lock.json", pristineScaffoldLock)
+	writeAgentFile(t, root, "drift-report.json", `{"status":"not_run"}`)
+	writeAgentFile(t, root, "proof-pack.md", "# Proof Pack\n")
+	writeAgentFile(t, root, "assumptions.json", `{"assumptions":[],"schema_version":"0.2.0"}`)
+	for _, name := range []string{"amendments.jsonl", "capability-receipts.jsonl", "context-receipts.jsonl", "evidence.jsonl", "failures.jsonl", "review-runs.jsonl", "runtime-snapshots.jsonl"} {
+		writeAgentFile(t, root, name, "")
+	}
+}
+
+// TestAgentflowExecutionHistory pins #643 S1: AgentFlow's canonical execution
+// artifacts are history; the scaffold, a locked plan, the workflow contract,
+// evidence, and empty or blank-only ledgers are not.
+func TestAgentflowExecutionHistory(t *testing.T) {
+	type file struct{ name, body string }
+	for _, tt := range []struct {
+		name     string
+		scaffold bool
+		files    []file
+		want     string
+	}{
+		{name: "no .agent"},
+		{name: "pristine scaffold", scaffold: true},
+		{name: "goal handoff", files: []file{{"plan.lock.json", v1Lock}, {"workflow.contract.json", `{"workflow_profile":"standard"}`}, {"evidence.jsonl", ""}}},
+		{name: "empty ledgers", files: []file{{"step-runs.jsonl", ""}, {"command-receipts.jsonl", ""}, {"file-receipts.jsonl", ""}, {"verification-runs.jsonl", ""}}},
+		{name: "blank-only ledgers", files: []file{{"step-runs.jsonl", "\n \n\r\n"}, {"command-receipts.jsonl", "\n"}, {"file-receipts.jsonl", " "}, {"verification-runs.jsonl", "\r\n"}}},
+		{name: "contract only", files: []file{{"execution.contract.json", v1Contract}}, want: ".agent/execution.contract.json"},
+		{name: "step runs", files: []file{{"step-runs.jsonl", v1Row + "\n"}}, want: ".agent/step-runs.jsonl has 1 entries"},
+		{name: "command receipts", files: []file{{"command-receipts.jsonl", v1Row + "\n"}}, want: ".agent/command-receipts.jsonl has 1 entries"},
+		{name: "file receipts", files: []file{{"file-receipts.jsonl", v1Row + "\n"}}, want: ".agent/file-receipts.jsonl has 1 entries"},
+		{name: "verification runs", files: []file{{"verification-runs.jsonl", v1Row + "\n"}}, want: ".agent/verification-runs.jsonl has 1 entries"},
+		{name: "count skips blanks, CRLF and no final newline", files: []file{{"step-runs.jsonl", v1Row + "\r\n\n" + v1Row + "\n \n" + v1Row}}, want: ".agent/step-runs.jsonl has 3 entries"},
+		{name: "contract before ledgers", files: []file{{"step-runs.jsonl", v1Row + "\n"}, {"execution.contract.json", v1Contract}}, want: ".agent/execution.contract.json"},
+		{name: "first ledger in order", files: []file{{"verification-runs.jsonl", v1Row + "\n"}, {"command-receipts.jsonl", v1Row + "\n" + v1Row + "\n"}}, want: ".agent/command-receipts.jsonl has 2 entries"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			if tt.scaffold {
+				writePristineScaffold(t, root)
+			}
+			for _, f := range tt.files {
+				writeAgentFile(t, root, f.name, f.body)
+			}
+			got, err := agentflowExecutionHistory(root)
+			if err != nil || got != tt.want {
+				t.Fatalf("agentflowExecutionHistory = %q, %v; want %q", got, err, tt.want)
+			}
+		})
+	}
+}
