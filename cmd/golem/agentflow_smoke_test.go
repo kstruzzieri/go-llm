@@ -298,6 +298,59 @@ func TestAgentflowFreshPlanRefusesOpenStepWork_RealCLI(t *testing.T) {
 	}
 }
 
+// #643 T6: a real run to a verified proof, then a second fresh -plan over the
+// same tree, is refused before any AgentFlow call and leaves .agent/
+// byte-identical. Run 1 starts from AgentFlow's real pristine init scaffold,
+// which the guard must accept.
+func TestAgentflowFreshPlanRefusesExecutionHistory_RealCLI(t *testing.T) {
+	dir := t.TempDir()
+	copyTree(t, "../../testdata/agentflow", dir)
+	gitInit(t, dir)
+	runner := agentflowRunnerOrSkip(t, dir)
+	ctx := context.Background()
+	if out, errOut, exit, err := runner.Run(ctx, []string{"init", "--root", dir}, nil); err != nil || exit != 0 {
+		t.Fatalf("agentflow init: exit=%d err=%v stdout=%s stderr=%s", exit, err, out, errOut)
+	}
+	planPath := filepath.Join(dir, "plan.json")
+	taskFlags := flags{planPath: planPath, approveEdits: true, approveGates: true, agentflowSrc: os.Getenv("AGENTFLOW_SRC")}
+
+	write := provider.ChatResponse{ToolCalls: []provider.ToolCall{{
+		ID: "write-1", Type: "function",
+		Function: provider.ToolCallFunction{Name: "write_file", Arguments: json.RawMessage(`{"path":"src/answer.txt","content":"expected\n"}`)},
+	}}}
+	first := &replSession{orch: agent.New(&scriptCaller{responses: []agent.ModelResult{
+		{Response: write},
+		{Response: provider.ChatResponse{Content: "done"}},
+	}}, agent.ContextManager{}), maxSteps: 4, clock: time.Now}
+	var stdout, stderr bytes.Buffer
+	if err := runAgentflowTask(ctx, &stdout, &stderr, nil, first, taskFlags, dir); err != nil {
+		t.Fatalf("run 1: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "proof pack:") {
+		t.Fatalf("run 1 did not finish:\n%s", stdout.String())
+	}
+	if state, err := agentflow.NewClient(runner, dir).NextAction(ctx); err != nil || state.State != "complete" {
+		t.Fatalf("after run 1: state=%q err=%v, want complete", state.State, err)
+	}
+
+	before := snapshotSmokeAgentTree(t, dir)
+	caller := &recordingCaller{next: &scriptCaller{}}
+	second := &replSession{orch: agent.New(caller, agent.ContextManager{}), maxSteps: 4, clock: time.Now}
+	stdout.Reset()
+	stderr.Reset()
+	err := runAgentflowTask(ctx, &stdout, &stderr, nil, second, taskFlags, dir)
+	want := "refusing a fresh -plan run: .agent/ holds AgentFlow execution history (.agent/execution.contract.json); run -agentflow-status to see whether -agentflow-resume can continue it, or move .agent/ aside to start over"
+	if err == nil || err.Error() != want {
+		t.Fatalf("run 2 err = %v\nwant %s", err, want)
+	}
+	if len(caller.reqs) != 0 || strings.Contains(stdout.String(), "proof pack:") {
+		t.Fatalf("run 2 reached the model (%d requests) or reported success:\n%s", len(caller.reqs), stdout.String())
+	}
+	if after := snapshotSmokeAgentTree(t, dir); !reflect.DeepEqual(after, before) {
+		t.Fatal("run 2 changed .agent/")
+	}
+}
+
 // #612 R-new: AgentFlow 1.0 rejects a 0.x plan before it looks at execution
 // state, and Golem status reports that as state_invalid without touching
 // .agent/. Only the early old-plan rejection is covered here; the

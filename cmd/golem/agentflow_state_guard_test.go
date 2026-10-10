@@ -488,3 +488,24 @@ func TestRunAgentflowAuthor_RefusesExecutionHistory(t *testing.T) {
 		})
 	}
 }
+
+// #643 T7: on a case-insensitive filesystem an .AGENT directory is the same
+// directory, so its history must be refused too (the #209 case-fold lesson).
+func TestAgentflowExecutionHistory_CaseFoldedAgentDir(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "probe"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "PROBE")); err != nil {
+		t.Skip("case-sensitive filesystem")
+	}
+	if err := os.MkdirAll(filepath.Join(root, ".AGENT"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".AGENT", "execution.contract.json"), []byte(v1Contract), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := agentflowExecutionHistory(root); err != nil || got != ".agent/execution.contract.json" {
+		t.Fatalf("agentflowExecutionHistory = %q, %v; want the case-folded contract", got, err)
+	}
+}
