@@ -473,10 +473,12 @@ func copyFromHandle(ctx context.Context, f *os.File, target string, expectedSize
 
 // rewriteSymlinkTarget applies the snapshot symlink policy (D2 + amendment
 // A1): targets that stay inside the source root, with each ".." applied to
-// the physical parent (#660), keep working inside the clone (relative verbatim; absolute rewritten relative), targets
-// outside the root are absolutized so they cannot accidentally point into
-// the scratch hierarchy (resolved when resolvable, lexical when dangling),
-// and dangling links never fail the snapshot.
+// the physical parent (#660), keep working inside the clone (rewritten
+// relative to the link's own directory), targets outside the root are
+// absolutized so they cannot accidentally point into the scratch hierarchy
+// (resolved when resolvable, lexical when dangling), and a target that does
+// not exist never fails the snapshot. A chain that dangles midway but whose
+// composed target exists is classified like any existing external target.
 func rewriteSymlinkTarget(ctx context.Context, srcRoot, rel, target string, canonicalEntries map[scratchFileIdentity]string) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
