@@ -431,6 +431,29 @@ call. The driver then probes the CLI, prints the saved route, and follows the
 same execution sequence while skipping both `recommend-workflow` and
 `workflow-contract`; the approved candidate is not materialized twice.
 
+### Re-running a plan
+
+A fresh `-plan` or `-goal` needs a workspace with no AgentFlow execution
+history. Before any AgentFlow call, Golem refuses one whose `.agent/` still
+holds AgentFlow's canonical execution state: `execution.contract.json`, or rows
+in `step-runs.jsonl`, `command-receipts.jsonl`, `file-receipts.jsonl` or
+`verification-runs.jsonl`. AgentFlow's `lock-plan` would otherwise overwrite the
+locked plan under the ledgers recorded against it. The refusal names the first
+artifact found and exits 1:
+
+```text
+golem: refusing a fresh -plan run: .agent/ holds AgentFlow execution history (.agent/step-runs.jsonl has 3 entries); run -agentflow-status to see whether -agentflow-resume can continue it, or move .agent/ aside to start over
+```
+
+This includes repeating the same plan after it finished. A locked plan with no
+execution contract, which is the state a `-goal` handoff leaves, still runs, and
+so do a missing `.agent/` and AgentFlow's pristine `init` scaffold.
+`-agentflow-resume` is not affected. Moving `.agent/` aside keeps the earlier
+run's history, but does not undo the source changes that run made. The check
+reads only those five files, so a partial manual cleanup that keeps attempt
+pointers or receipts elsewhere under `.agent/` is not detected. It is a
+single-operator preflight, not a lock against a concurrent writer.
+
 The workflow contract may require gates or capabilities beyond what the loaded
 plan/run supplies. Golem does not invent a security scanner, review agent,
 capability receipt, waiver, manifest, or plan gate, and it does not claim that
