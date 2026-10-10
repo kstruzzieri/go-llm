@@ -436,3 +436,55 @@ func TestRunAgentflowTask_ResumeIsNotRefusedByHistoryGuard(t *testing.T) {
 		t.Fatalf("resume never reached the AgentFlow version probe: calls=%q err=%v runErr=%v", got, readErr, err)
 	}
 }
+
+// #643 T5: -goal refuses retained execution history before any probe, model
+// call or .agent/ write, whether the plan lock is absent or the pristine
+// scaffold (both pass guardExistingPlan today). A locked plan without history
+// keeps guardExistingPlan's own refusal.
+func TestRunAgentflowAuthor_RefusesExecutionHistory(t *testing.T) {
+	const history = "refusing to plan: .agent/ holds AgentFlow execution history (%s); run -agentflow-status to see whether -agentflow-resume can continue it, or move .agent/ aside to start over"
+	for _, tt := range []struct {
+		name     string
+		scaffold bool
+		lock     string
+		ledger   [2]string // file, body
+		want     string
+	}{
+		{name: "no lock, contract", ledger: [2]string{"execution.contract.json", v1Contract}, want: fmt.Sprintf(history, ".agent/execution.contract.json")},
+		{name: "no lock, step runs", ledger: [2]string{"step-runs.jsonl", v1Row + "\n"}, want: fmt.Sprintf(history, ".agent/step-runs.jsonl has 1 entries")},
+		{name: "scaffold, contract", scaffold: true, ledger: [2]string{"execution.contract.json", v1Contract}, want: fmt.Sprintf(history, ".agent/execution.contract.json")},
+		{name: "scaffold, step runs", scaffold: true, ledger: [2]string{"step-runs.jsonl", v1Row + "\n"}, want: fmt.Sprintf(history, ".agent/step-runs.jsonl has 1 entries")},
+		{name: "locked plan, no history", lock: v1Lock, want: "already locked"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			if tt.scaffold {
+				writePristineScaffold(t, root)
+			}
+			if tt.lock != "" {
+				writeAgentFile(t, root, "plan.lock.json", tt.lock)
+			}
+			if tt.ledger[0] != "" {
+				writeAgentFile(t, root, tt.ledger[0], tt.ledger[1])
+			}
+			before := snapshotAuditFixtureTree(t, filepath.Join(root, ".agent"))
+			// One queued response: scriptCaller only advances i when it pops one.
+			caller := &scriptCaller{responses: []agent.ModelResult{submitPlanCall(validIRJSON(t))}}
+			client := &stubLocker{}
+			err := runAgentflowAuthorWithClient(context.Background(), &bytes.Buffer{}, &bytes.Buffer{}, nil, newTestSession(t, caller, root), flags{goal: "x", goalSet: true}, root, client, nil)
+			if tt.want == "already locked" {
+				if err == nil || !strings.Contains(err.Error(), "is already locked") {
+					t.Fatalf("err = %v, want the locked-plan refusal", err)
+				}
+			} else if err == nil || err.Error() != tt.want {
+				t.Fatalf("err = %v\nwant %s", err, tt.want)
+			}
+			if client.probes+client.workflowProbes+client.recommendations+client.inits+client.locks+client.materializations != 0 || len(client.sequence) != 0 || caller.i != 0 {
+				t.Fatalf("refusal reached AgentFlow or the model: client=%+v model=%d", client, caller.i)
+			}
+			if after := snapshotAuditFixtureTree(t, filepath.Join(root, ".agent")); !reflect.DeepEqual(after, before) {
+				t.Fatal("refusal changed .agent/")
+			}
+		})
+	}
+}
