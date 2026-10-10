@@ -572,7 +572,8 @@ func runAgentflowTask(ctx context.Context, stdout, stderr io.Writer, interrupts 
 	// locked plan is the documented post-run review flow (resume rejects review
 	// manifests); its relock rewrites an identical plan, so the ledgers stay
 	// consistent.
-	if !f.agentflowResume && !(f.reviewManifest != "" && lockedPlanMatches(root, planBytes)) {
+	reviewOfLockedPlan := f.reviewManifest != "" && lockedPlanMatches(root, planBytes)
+	if !f.agentflowResume && !reviewOfLockedPlan {
 		if err := refuseAgentflowExecutionHistory(root, "refusing a fresh -plan run"); err != nil {
 			return err
 		}
