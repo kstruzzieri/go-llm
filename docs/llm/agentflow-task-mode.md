@@ -447,13 +447,21 @@ artifact found and exits 1:
 golem: refusing a fresh -plan run: .agent/ holds AgentFlow execution history (.agent/step-runs.jsonl has 3 entries); run -agentflow-status to see whether -agentflow-resume can continue it, or move .agent/ aside to start over
 ```
 
-This includes repeating the same plan after it finished. One exception is the
-post-run review round: `-plan <plan> -review-manifest <manifest>` still runs
-over a workspace with history when `<plan>` is the same plan as the locked
-`.agent/plan.lock.json` (compared without its lock fields), because
+This includes repeating the same plan after it finished. The one exception is
+review ingestion: `-plan <plan> -review-manifest <manifest>` still runs over a
+workspace with history when `<plan>` is the same plan as the locked
+`.agent/plan.lock.json`, compared without its lock fields, because
 `-agentflow-resume` does not take review manifests and relocking an identical
-plan keeps the ledgers consistent. A review manifest with a different plan is
-refused like any other run. A locked plan with no execution contract, which is
+plan keeps the ledgers and the execution contract consistent. The condition is
+"same plan plus a manifest", not "the run finished": over an unfinished run the
+same command first runs the remaining steps, as `-review-manifest` documents.
+Repeat the original `-task-brief`, `-workflow-profile` and `-workflow-reason`,
+or `-workflow-handoff`, on that run: without a handoff Golem materializes the
+workflow route from those flags again, so changed flags would replace the proof
+policy under the finished work. The relock restamps `locked_at`, so a verified
+proof becomes `proof_stale` until the round's `finish-run` rebuilds it; if the
+round stops before that, run it again. A review manifest with a different plan
+is refused, with a note that the plan must match. A locked plan with no execution contract, which is
 the state a `-goal` handoff leaves, still runs, and so do a missing `.agent/`
 and AgentFlow's pristine `init` scaffold.
 `-agentflow-resume` is not affected. Moving `.agent/` aside keeps the earlier

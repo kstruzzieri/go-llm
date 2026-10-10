@@ -386,6 +386,9 @@ func TestAgentflowFreshPlanRefusesExecutionHistory_RealCLI(t *testing.T) {
 	if !strings.Contains(stdout.String(), "review RR-20261010T120000Z-643a643b") || !strings.Contains(stdout.String(), "proof pack:") || len(reviewCaller.reqs) != 0 {
 		t.Fatalf("run 3 did not record the review and finish (model requests %d):\n%s", len(reviewCaller.reqs), stdout.String())
 	}
+	if state, err := agentflow.NewClient(runner, dir).NextAction(ctx); err != nil || state.State != "complete" {
+		t.Fatalf("after run 3: state=%q err=%v, want complete", state.State, err)
+	}
 }
 
 // #612 R-new: AgentFlow 1.0 rejects a 0.x plan before it looks at execution

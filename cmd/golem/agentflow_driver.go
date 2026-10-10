@@ -568,13 +568,18 @@ func runAgentflowTask(ctx context.Context, stdout, stderr io.Writer, interrupts 
 		return err
 	}
 	// #643: a fresh run must not relock over retained execution state; resume
-	// is the recovery path for it. A -review-manifest round over the same
-	// locked plan is the documented post-run review flow (resume rejects review
-	// manifests); its relock rewrites an identical plan, so the ledgers stay
-	// consistent.
+	// is the recovery path for it. The exception is a -review-manifest run with
+	// the same plan as the locked one, which is how review is ingested over
+	// existing work (resume rejects review manifests): its relock rewrites an
+	// identical plan, so the ledgers and the execution contract stay
+	// consistent. It does not hold the workflow contract fixed; that follows
+	// the run's routing flags or -workflow-handoff, as on any run.
 	reviewOfLockedPlan := f.reviewManifest != "" && lockedPlanMatches(root, planBytes)
 	if !f.agentflowResume && !reviewOfLockedPlan {
 		if err := refuseAgentflowExecutionHistory(root, "refusing a fresh -plan run"); err != nil {
+			if f.reviewManifest != "" {
+				return fmt.Errorf("%w; a -review-manifest round over this history needs the same plan as .agent/plan.lock.json", err)
+			}
 			return err
 		}
 	}

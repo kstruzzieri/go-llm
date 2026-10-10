@@ -532,6 +532,7 @@ func TestAgentflowExecutionHistory_CaseFoldedAgentDir(t *testing.T) {
 // identical plan; a different plan, or no manifest, is still refused.
 func TestRunAgentflowTask_ReviewRoundOverSameLockedPlan(t *testing.T) {
 	const history = "refusing a fresh -plan run: .agent/ holds AgentFlow execution history (.agent/execution.contract.json); run -agentflow-status to see whether -agentflow-resume can continue it, or move .agent/ aside to start over"
+	const reviewHint = "; a -review-manifest round over this history needs the same plan as .agent/plan.lock.json"
 	plan := agentflow.Compile(validTraceableIR())
 	other := plan
 	other.Objective = "a different plan"
@@ -539,11 +540,13 @@ func TestRunAgentflowTask_ReviewRoundOverSameLockedPlan(t *testing.T) {
 		name     string
 		supplied agentflow.Plan
 		manifest bool
-		refused  bool
+		noLock   bool
+		want     string // "" means the review round proceeds
 	}{
 		{name: "review over the same plan proceeds", supplied: plan, manifest: true},
-		{name: "review over a different plan is refused", supplied: other, manifest: true, refused: true},
-		{name: "same plan without a review is refused", supplied: plan, refused: true},
+		{name: "review over a different plan is refused", supplied: other, manifest: true, want: history + reviewHint},
+		{name: "review with no locked plan is refused", supplied: plan, manifest: true, noLock: true, want: history + reviewHint},
+		{name: "same plan without a review is refused", supplied: plan, want: history},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			root := t.TempDir()
@@ -561,7 +564,9 @@ func TestRunAgentflowTask_ReviewRoundOverSameLockedPlan(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			writeAgentFile(t, root, "plan.lock.json", string(lockBytes))
+			if !tt.noLock {
+				writeAgentFile(t, root, "plan.lock.json", string(lockBytes))
+			}
 			writeAgentFile(t, root, "execution.contract.json", v1Contract)
 			writeAgentFile(t, root, "step-runs.jsonl", v1Row+"\n")
 			before := snapshotAuditFixtureTree(t, filepath.Join(root, ".agent"))
@@ -581,9 +586,9 @@ func TestRunAgentflowTask_ReviewRoundOverSameLockedPlan(t *testing.T) {
 				}
 			}
 			calls, err := runFreshTaskOverFixture(t, root, f)
-			if tt.refused {
-				if err == nil || err.Error() != history {
-					t.Fatalf("err = %v\nwant %s", err, history)
+			if tt.want != "" {
+				if err == nil || err.Error() != tt.want {
+					t.Fatalf("err = %v\nwant %s", err, tt.want)
 				}
 				if _, statErr := os.Stat(calls); !os.IsNotExist(statErr) {
 					t.Fatal("AgentFlow ran before the refusal")
