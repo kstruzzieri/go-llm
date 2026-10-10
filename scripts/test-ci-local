@@ -559,6 +559,87 @@ run_hook hook-dedupe "$hook_repo" 0
 assert_status hook-dedupe 0
 assert_gate_runs hook-dedupe 1
 
+# assert_gated NAME N TREEISH: gate run N used the exact compose command from
+# a directory outside both checkouts that the hook removed afterwards; the
+# tree it mounted was readable by any uid; and it held exactly TREEISH's
+# files with the committed tracked.go: no gitignored, untracked or
+# uncommitted content, no .git.
+assert_gated() {
+  line="$(sed -n "${2}p" "$tmp/$1.log")"
+  cwd="${line%%|*}"
+  if [ "${line#*|}" != "$gate_cmd" ]; then
+    printf '%s: gate run %s was %s\n' "$1" "$2" "$line" >&2
+    exit 1
+  fi
+  case "$cwd" in
+    "$hook_repo" | "$hook_repo"/* | "$hook_wt" | "$hook_wt"/*)
+      printf '%s: gate run %s used checkout %s\n' "$1" "$2" "$cwd" >&2
+      exit 1
+      ;;
+  esac
+  if [ -e "$cwd" ]; then
+    printf '%s: export %s was not removed\n' "$1" "$cwd" >&2
+    exit 1
+  fi
+  if [ -s "$tmp/$1.snap/$2.unreadable" ]; then
+    printf '%s: export entries unreadable by the container:\n' "$1" >&2
+    cat "$tmp/$1.snap/$2.unreadable" >&2
+    exit 1
+  fi
+  fixture_git -C "$hook_repo" ls-tree -r --name-only "$3" | LC_ALL=C sort >"$tmp/$1.want-$2"
+  (cd "$tmp/$1.snap/$2" && find . \( -type f -o -type l \) | sed 's|^\./||' | LC_ALL=C sort) >"$tmp/$1.got-$2"
+  diff -u "$tmp/$1.want-$2" "$tmp/$1.got-$2"
+  fixture_git -C "$hook_repo" show "$3:tracked.go" | cmp - "$tmp/$1.snap/$2/tracked.go"
+}
+
+assert_gated hook-update-0 1 "$c1"
+assert_gated hook-update-35 1 "$c1"
+assert_gated hook-expr 1 "$c1"
+assert_gated hook-dedupe 1 "$c1"
+
+# Two trees gate in stdin order, each on its own files, even when one is not
+# this checkout's HEAD.
+printf 'refs/heads/main %s refs/heads/main %s\nrefs/heads/wt %s refs/heads/wt %s\n' \
+  "$c1" "$zero" "$c2" "$zero" >"$tmp/hook-two.in"
+run_hook hook-two "$hook_repo" 0
+assert_status hook-two 0
+assert_gate_runs hook-two 2
+assert_gated hook-two 1 "$c1"
+assert_gated hook-two 2 "$c2"
+
+# The first failure stops the push; later trees are not gated.
+cp "$tmp/hook-two.in" "$tmp/hook-two-fail.in"
+run_hook hook-two-fail "$hook_repo" 35
+assert_status hook-two-fail 35
+assert_gate_runs hook-two-fail 1
+assert_gated hook-two-fail 1 "$c1"
+
+# An annotated tag alone gates the tree it names.
+printf 'refs/tags/v1 %s refs/tags/v1 %s\n' "$tag1" "$zero" >"$tmp/hook-tag.in"
+run_hook hook-tag "$hook_repo" 0
+assert_status hook-tag 0
+assert_gate_runs hook-tag 1
+assert_gated hook-tag 1 "$c1"
+
+# From a linked worktree (#306): .git is a pointer file there, and the pushed
+# commit is not the main repository's HEAD.
+printf 'refs/heads/wt %s refs/heads/wt %s\n' "$c2" "$zero" >"$tmp/hook-worktree.in"
+run_hook hook-worktree "$hook_wt" 0
+assert_status hook-worktree 0
+assert_gate_runs hook-worktree 1
+assert_gated hook-worktree 1 "$c2"
+
+# A local replace ref must not change what is gated: git push sends c1's real
+# objects. Without the hook's GIT_NO_REPLACE_OBJECTS, c1 would peel to c2's
+# tree and the export would hold second.go.
+fixture_git -C "$hook_repo" replace "$c1" "$c2"
+printf 'refs/heads/main %s refs/heads/main %s\n' "$c1" "$zero" >"$tmp/hook-replace.in"
+run_hook hook-replace "$hook_repo" 0
+fixture_git -C "$hook_repo" replace -d "$c1" >/dev/null
+assert_status hook-replace 0
+assert_gate_runs hook-replace 1
+assert_gated hook-replace 1 "$c1"
+
 mkdir -p "$tmp/misplaced/scripts"
 cp "$script_dir/ci-local" "$tmp/misplaced/scripts/ci-local"
 if PATH="$tmp/bin:$PATH" CI_LOCAL_TEST_LOG="$tmp/misplaced-log" "$tmp/misplaced/scripts/ci-local" --mode pre-push >"$tmp/misplaced-error" 2>&1; then
