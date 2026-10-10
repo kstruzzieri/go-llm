@@ -105,6 +105,10 @@ if [ -n "${CI_LOCAL_DOCKER_SNAPSHOT-}" ]; then
   mkdir "$snap"
   tar -cf - . | tar -xf - -C "$snap"
 fi
+if [ "$1" = rm ] && [ -n "${CI_LOCAL_DOCKER_RM_ERROR-}" ]; then
+  printf '%s\n' "$CI_LOCAL_DOCKER_RM_ERROR" >&2
+  exit 1
+fi
 # Stand in for a long gate: block until the test signals the job.
 if [ "$1" = compose ] && [ -n "${CI_LOCAL_DOCKER_BLOCK-}" ]; then
   : >"$CI_LOCAL_DOCKER_BLOCK"
@@ -651,58 +655,74 @@ assert_status hook-replace 0
 assert_gate_runs hook-replace 1
 assert_gated hook-replace 1 "$c1"
 
-# Ctrl-C (or a closed terminal's SIGHUP) reaches the whole foreground job. compose dies, but its container
-# (no TTY here) would keep running against the removed export, so the hook's
-# INT/TERM/HUP traps remove the named container. The job gets its own process
-# group (set -m) and the subshell execs the hook, so the job is the hook.
+# Ctrl-C (or a closed terminal's SIGHUP) reaches the whole foreground job.
+# compose dies, but its container (no TTY here) would keep running against the
+# removed export, so the hook's INT/TERM/HUP traps remove the named container
+# and report a removal that failed for any reason but "No such container" (an
+# interrupt before compose created it). The job gets its own process group
+# (set -m) and the subshell execs the hook, so the job is the hook.
 printf 'refs/heads/main %s refs/heads/main %s\n' "$c1" "$zero" >"$tmp/hook-interrupt.in"
-for sig in INT TERM HUP; do
-  name="hook-interrupt-$sig"
-  : >"$tmp/$name.log"
+# run_interrupt NAME SIG STATUS [RM_ERROR]: signal the hook's job mid-gate; the
+# stubbed `docker rm` fails with RM_ERROR when it is given.
+run_interrupt() {
+  : >"$tmp/$1.log"
   set -m
   (
     cd "$hook_repo"
-    exec env GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 PATH="$tmp/bin:$PATH" CI_LOCAL_TEST_LOG="$tmp/$name.log" CI_LOCAL_DOCKER_BLOCK="$tmp/$name.blocked" \
-      "$repo_root/.githooks/pre-push" origin example.invalid <"$tmp/hook-interrupt.in" >"$tmp/$name.out" 2>&1
+    exec env GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 PATH="$tmp/bin:$PATH" \
+      CI_LOCAL_TEST_LOG="$tmp/$1.log" CI_LOCAL_DOCKER_BLOCK="$tmp/$1.blocked" CI_LOCAL_DOCKER_RM_ERROR="${4-}" \
+      "$repo_root/.githooks/pre-push" origin example.invalid <"$tmp/hook-interrupt.in" >"$tmp/$1.out" 2>&1
   ) &
   job=$!
   set +m
   waited=0
-  until [ -e "$tmp/$name.blocked" ]; do
+  until [ -e "$tmp/$1.blocked" ]; do
     waited=$((waited + 1))
-    if [ "$waited" -gt 100 ]; then
-      printf '%s: gate never started\n' "$name" >&2
+    if [ "$waited" -gt 300 ]; then
+      printf '%s: gate never started\n' "$1" >&2
       kill -s KILL -- "-$job" 2>/dev/null || true
       exit 1
     fi
     sleep 0.1
   done
-  kill -s "$sig" -- "-$job"
+  kill -s "$2" -- "-$job"
   set +e
   wait "$job"
   ci_status=$?
   set -e
-  case "$sig" in
-    INT) assert_status "$name" 130 ;;
-    TERM) assert_status "$name" 143 ;;
-    HUP) assert_status "$name" 129 ;;
-  esac
-  run_line="$(sed -n 1p "$tmp/$name.log")"
+  assert_status "$1" "$3"
+  run_line="$(sed -n 1p "$tmp/$1.log")"
   container="$(printf '%s\n' "$run_line" | sed -n 's/.* --name \(go-llm-prepush-[0-9]*\) .*/\1/p')"
   if ! is_gate_cmd "${run_line#*|}" || [ -z "$container" ]; then
-    printf '%s: gate run was %s\n' "$name" "$run_line" >&2
+    printf '%s: gate run was %s\n' "$1" "$run_line" >&2
     exit 1
   fi
-  if [ "$(sed -n 2p "$tmp/$name.log" | cut -d'|' -f2-)" != "rm -f $container" ]; then
-    printf '%s: container %s was not removed; docker calls:\n' "$name" "$container" >&2
-    cat "$tmp/$name.log" >&2
+  if [ "$(sed -n 2p "$tmp/$1.log" | cut -d'|' -f2-)" != "rm -f $container" ]; then
+    printf '%s: container %s was not removed; docker calls:\n' "$1" "$container" >&2
+    cat "$tmp/$1.log" >&2
     exit 1
   fi
   if [ -e "${run_line%%|*}" ]; then
-    printf '%s: export %s was not removed\n' "$name" "${run_line%%|*}" >&2
+    printf '%s: export %s was not removed\n' "$1" "${run_line%%|*}" >&2
     exit 1
   fi
-done
+}
+run_interrupt hook-interrupt-INT INT 130
+run_interrupt hook-interrupt-TERM TERM 143
+run_interrupt hook-interrupt-HUP HUP 129
+# A container that never started is not worth a warning; a failed removal is.
+run_interrupt hook-interrupt-absent INT 130 'Error response from daemon: No such container: x'
+if grep -Fq 'could not remove container' "$tmp/hook-interrupt-absent.out"; then
+  printf 'hook-interrupt-absent: warned about a container that never existed\n' >&2
+  cat "$tmp/hook-interrupt-absent.out" >&2
+  exit 1
+fi
+run_interrupt hook-interrupt-rm-fails INT 130 'Cannot connect to the Docker daemon at unix:///var/run/docker.sock'
+if ! grep -Eq '^pre-push: could not remove container go-llm-prepush-[0-9]+: Cannot connect to the Docker daemon' "$tmp/hook-interrupt-rm-fails.out"; then
+  printf 'hook-interrupt-rm-fails: the failed removal was not reported:\n' >&2
+  cat "$tmp/hook-interrupt-rm-fails.out" >&2
+  exit 1
+fi
 
 mkdir -p "$tmp/misplaced/scripts"
 cp "$script_dir/ci-local" "$tmp/misplaced/scripts/ci-local"

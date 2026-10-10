@@ -73,9 +73,23 @@ umask 022
 name="go-llm-prepush-$$"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
-trap 'docker rm -f "$name" >/dev/null 2>&1; exit 129' HUP
-trap 'docker rm -f "$name" >/dev/null 2>&1; exit 130' INT
-trap 'docker rm -f "$name" >/dev/null 2>&1; exit 143' TERM
+# "No such container" means the interrupt came before compose created it; any
+# other failure leaves a container running, so report it. The || keeps set -e
+# from ending the trap before its exit status.
+remove_container() {
+  if ! out="$(docker rm -f "$name" 2>&1)"; then
+    case "$out" in
+      *'No such container'*) ;;
+      *)
+        printf 'pre-push: could not remove container %s: %s\n' "$name" "$out" >&2
+        printf 'pre-push: remove it with: docker rm -f %s\n' "$name" >&2
+        ;;
+    esac
+  fi
+}
+trap 'remove_container; exit 129' HUP
+trap 'remove_container; exit 130' INT
+trap 'remove_container; exit 143' TERM
 for tree in $trees; do
   mkdir "$work/$tree"
   # Through a file, not a pipe: sh has no pipefail, and some tar
