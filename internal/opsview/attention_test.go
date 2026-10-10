@@ -114,9 +114,8 @@ func TestBackoffKeepsReachabilitySteady(t *testing.T) {
 
 // TestMissedScheduleIsNotHeldByAnotherSurfacesBackoff: /api/metrics backs
 // off (next attempt at 30 s) while version, /running and /v1/models are due
-// every tick. If no tick reaches the backend after 14 s (a slow neighbor
-// spends the tick budget, which leaves this backend's state untouched, or
-// the collector stalls), the 14 s reading must age out at 20 s as usual, not
+// every tick. If no tick reaches the backend after 14 s (the collector stalls
+// or a tick runs late), the 14 s reading must age out at 20 s as usual, not
 // be held to metrics' retry.
 func TestMissedScheduleIsNotHeldByAnotherSurfacesBackoff(t *testing.T) {
 	const interval = 2 * time.Second
@@ -237,7 +236,7 @@ func TestPositiveReachabilityHeldOnlyByPendingAttempts(t *testing.T) {
 		{"denied attempts never re-stamp", []opsbackend.Surface{pending("version", opsbackend.CodeDenied, 18*time.Second)}, 17 * time.Second, false},
 		{"refused attempts never re-stamp", []opsbackend.Surface{pending("version", opsbackend.CodeRefused, 18*time.Second)}, 17 * time.Second, false},
 		// A due surface would have re-stamped the reading: the console missed
-		// its schedule (a slow neighbor spent the tick budget), however far
+		// its schedule (the collector stalled), however far
 		// off another surface's backoff runs.
 		{"version due beside metrics pending", []opsbackend.Surface{{Name: "version"}, pending("metrics", opsbackend.CodeUnauthorized, 30*time.Second)}, 17 * time.Second, false},
 		{"the earliest pending attempt bounds the hold", []opsbackend.Surface{pending("version", opsbackend.CodeUnauthorized, 18*time.Second), pending("metrics", opsbackend.CodeUnauthorized, 40*time.Second)}, 35 * time.Second, false},

@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"net/http/httputil"
 	"net/url"
+	"runtime/debug"
 	"slices"
 	"strings"
 	"sync"
@@ -922,9 +923,10 @@ func TestBoundKeepsWholeRunes(t *testing.T) {
 
 // TestCollectorUnstartedRequestIsNotAnObservation: a request is not started
 // once the tick deadline has passed, or when less than one request timeout
-// of the tick is left (it could be cut short by a budget its neighbors
-// spent), and nothing is recorded against the backend: a timeout would raise
-// a false backend_unreachable for a backend that was never contacted.
+// of the backend's budget is left (its own earlier reads spent it, and the
+// tick deadline would cut the request short), and nothing is recorded
+// against the backend: a timeout would raise a false backend_unreachable for
+// a backend that was never contacted.
 func TestCollectorUnstartedRequestIsNotAnObservation(t *testing.T) {
 	spent, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
 	defer cancel()
@@ -954,41 +956,162 @@ func TestCollectorUnstartedRequestIsNotAnObservation(t *testing.T) {
 	}
 }
 
-// TestCollectorTickBudgetIsNotBlamedOnTheLastBackend: two hung neighbors
-// spend 4 s of the 5 s tick. A healthy backend that answers /running in
-// 1.2 s is not started, rather than cut short by the tick deadline and read
-// as down.
-func TestCollectorTickBudgetIsNotBlamedOnTheLastBackend(t *testing.T) {
-	hung := func() string {
-		f := opsfixture.NewLlamaSwap(t)
-		f.HoldFor(t, "/api/version")
-		return f.URL()
-	}
-	ok := opsfixture.NewLlamaSwap(t)
-	slow := front(t, ok, func(_ http.ResponseWriter, r *http.Request) bool {
-		if r.URL.Path == "/running" {
-			select {
-			case <-time.After(1200 * time.Millisecond):
-			case <-r.Context().Done():
-			}
+// TestCollectorOwnBudgetIsNotBlamedOnTheLastSurface: a backend whose reads
+// take 1.3 s each spends its own tick budget on version, /running and
+// /api/metrics. /v1/models would start with about 1.1 s left; it is deferred
+// to a later tick, not started and then cut short by the tick deadline and
+// read as a timeout. Since #662 only a backend's own reads can leave it short.
+func TestCollectorOwnBudgetIsNotBlamedOnTheLastSurface(t *testing.T) {
+	f := opsfixture.NewLlamaSwap(t)
+	// Counted on arrival, before the delay: a request the tick deadline
+	// cuts short inside the delay never reaches f.
+	var models atomic.Int64
+	base := front(t, f, func(_ http.ResponseWriter, r *http.Request) bool {
+		if r.URL.Path == "/v1/models" {
+			models.Add(1)
+		}
+		select {
+		case <-time.After(1300 * time.Millisecond):
+		case <-r.Context().Done():
 		}
 		return false
 	})
-	c := NewCollector([]BackendSpec{
-		{Provider: "a1-hung", BaseURL: hung(), APIFormat: "openai-compat"},
-		{Provider: "a2-hung", BaseURL: hung(), APIFormat: "openai-compat"},
-		{Provider: "c-slow", BaseURL: slow, APIFormat: "openai-compat"},
-	}, Options{Interval: 2 * time.Second, Clock: newFakeClock().clock()})
-	b := c.Tick(context.Background()).Backends[2]
-	if b.Reachable != nil || b.ReachCode != "" || slices.ContainsFunc(b.Surfaces, func(s Surface) bool { return s.LastError != "" }) {
-		t.Fatalf("a backend the tick budget never reached was read as down: reachable=%+v code=%q surfaces=%+v", b.Reachable, b.ReachCode, b.Surfaces)
+	c := NewCollector([]BackendSpec{lsSpec(base)}, Options{Interval: 2 * time.Second, Clock: newFakeClock().clock()})
+	b := c.Tick(context.Background()).Backends[0]
+	if b.Reachable == nil || !b.Reachable.Value || b.ReachCode != "" || slices.ContainsFunc(b.Surfaces, func(s Surface) bool { return s.LastError != "" }) {
+		t.Errorf("a read the backend's own budget deferred was read as a failure: reachable=%+v code=%q surfaces=%+v", b.Reachable, b.ReachCode, b.Surfaces)
 	}
-	assertRequests(t, ok)
+	if n := models.Load(); n != 0 {
+		t.Fatalf("/v1/models started %d times with under one request timeout of budget left; requests = %v", n, f.Requests())
+	}
+}
+
+// TestCollectorWorkerPanicReachesTheCaller (#662): a panic while reading a
+// backend is raised by Tick on the caller's goroutine, where the caller's
+// defers still run (golem ops -watch restores the terminal in one), and the
+// collector stays usable afterwards.
+func TestCollectorWorkerPanicReachesTheCaller(t *testing.T) {
+	f := opsfixture.NewLlamaSwap(t)
+	clock := newFakeClock().clock()
+	mono := clock.Mono
+	var armed atomic.Bool
+	armed.Store(true)
+	clock.Mono = func() time.Duration {
+		// Panic once, on the first reading taken while reading the backend,
+		// never on one of Tick's own.
+		if armed.Load() && strings.Contains(string(debug.Stack()), ").pollBackend(") && armed.CompareAndSwap(true, false) {
+			panic("worker clock")
+		}
+		return mono()
+	}
+	c := NewCollector([]BackendSpec{lsSpec(f.URL())}, Options{Interval: 2 * time.Second, Clock: clock})
+	var raised any
+	func() {
+		defer func() { raised = recover() }()
+		c.Tick(context.Background())
+	}()
+	if raised != "worker clock" {
+		t.Fatalf("Tick raised %v, want the worker's panic on the caller's goroutine", raised)
+	}
+	done := make(chan struct{})
+	go func() { c.Tick(context.Background()); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Tick after a worker panic did not return: the collector lock is held")
+	}
+	// The panic came before any request; the next tick reads everything.
+	assertRequests(t, f, reqVersion, reqRunning, reqMetrics, reqModels)
+}
+
+// TestCollectorSlowBackendsDoNotDelayAHealthyOne (#662): one backend holds
+// every request until it times out and another answers each one slowly. A
+// healthy backend beside them reads every surface on every tick, with no
+// deferral, gap or failure, and the snapshot keeps backend order although
+// the backends finish in another.
+func TestCollectorSlowBackendsDoNotDelayAHealthyOne(t *testing.T) {
+	delayed := func(d time.Duration) (*opsfixture.Server, string) {
+		f := opsfixture.NewLlamaSwap(t)
+		return f, front(t, f, func(_ http.ResponseWriter, r *http.Request) bool {
+			select {
+			case <-time.After(d):
+			case <-r.Context().Done():
+			}
+			return false
+		})
+	}
+	hang := opsfixture.NewLlamaSwap(t)
+	hang.HoldFor(t, "/api/version") // times out at RequestTimeout (2 s)
+	// 800 ms inside the request timeout. Version, /running and /api/metrics
+	// take 3.6 s; /v1/models would start with 1.4 s left and is deferred.
+	_, slow := delayed(1200 * time.Millisecond)
+	// Four reads take 2.4 s: /v1/models is in flight when a-hang times out.
+	ok, okURL := delayed(600 * time.Millisecond)
+	clk := newFakeClock()
+	c := NewCollector([]BackendSpec{ // out of order: observations sort by provider
+		{Provider: "z-ok", BaseURL: okURL, APIFormat: "openai-compat"},
+		{Provider: "a-hang", BaseURL: hang.URL(), APIFormat: "openai-compat"},
+		{Provider: "b-slow", BaseURL: slow, APIFormat: "openai-compat"},
+	}, Options{Interval: 2 * time.Second, Clock: clk.clock()})
+	for tick := range 2 {
+		now := clk.clock().Mono()
+		before := len(ok.Requests())
+		obs := c.Tick(context.Background())
+		if got := []string{obs.Backends[0].Provider, obs.Backends[1].Provider, obs.Backends[2].Provider}; !slices.Equal(got, []string{"a-hang", "b-slow", "z-ok"}) {
+			t.Fatalf("tick %d: snapshot order %v, want backend order (they finish a-hang, z-ok, b-slow)", tick, got)
+		}
+		if got := ok.Requests()[before:]; !slices.Equal(got, []opsfixture.Request{reqVersion, reqRunning, reqMetrics, reqModels}) {
+			t.Fatalf("tick %d: healthy backend read %v, want every surface", tick, got)
+		}
+		b := obs.Backends[2]
+		if b.Reachable == nil || !b.Reachable.Value || b.Reachable.Mono != now || b.Gaps != 0 ||
+			b.Running == nil || b.Running.Mono != now || b.Rows == nil || b.Rows.Mono != now || b.Listed == nil || b.Listed.Mono != now {
+			t.Fatalf("tick %d: healthy backend = %+v, want every reading from this tick and no gap", tick, b)
+		}
+		if slices.ContainsFunc(b.Surfaces, func(s Surface) bool { return s.LastError != "" }) {
+			t.Fatalf("tick %d: healthy backend reported a failure: %+v", tick, b.Surfaces)
+		}
+		if s := obs.Backends[1]; s.ReachCode != "" || slices.ContainsFunc(s.Surfaces, func(s Surface) bool { return s.LastError != "" }) {
+			t.Fatalf("tick %d: the slow backend's own deferral was reported as a failure: %+v", tick, s)
+		}
+		clk.advance(2*time.Second, 2*time.Second)
+	}
+}
+
+// TestCollectorTickLastsAsLongAsTheSlowestBackend (#662): three backends that
+// each take 1 s to answer finish together, not one after another. Serially
+// they would fit the budget too (the third starting with 3 s left), so only
+// the wall time tells the two apart.
+func TestCollectorTickLastsAsLongAsTheSlowestBackend(t *testing.T) {
+	var specs []BackendSpec
+	for _, name := range []string{"a", "b", "c"} {
+		f := opsfixture.NewOllama(t, `{"models":[]}`)
+		base := front(t, f, func(_ http.ResponseWriter, r *http.Request) bool {
+			select {
+			case <-time.After(time.Second):
+			case <-r.Context().Done():
+			}
+			return false
+		})
+		specs = append(specs, BackendSpec{Provider: name, BaseURL: base, APIFormat: "ollama"})
+	}
+	c := NewCollector(specs, Options{Interval: 2 * time.Second, Clock: newFakeClock().clock()})
+	start := time.Now()
+	obs := c.Tick(context.Background())
+	if elapsed := time.Since(start); elapsed < time.Second || elapsed >= 2*time.Second {
+		t.Fatalf("tick took %v, want about the slowest backend's 1 s, not the 3 s sum", elapsed)
+	}
+	for _, b := range obs.Backends {
+		if b.PS == nil {
+			t.Fatalf("backend %s was not read: %+v", b.Provider, b)
+		}
+	}
 }
 
 // Every request succeeds within its own deadline, but neither slow backend
-// fits all four surfaces into one tick. Deferred telemetry must get a turn
-// without keeping later backends behind the same unfinished sweep forever.
+// fits all four surfaces into its tick budget: deferred telemetry gets a turn
+// on a later tick. A fast backend beside them is read on every tick, since
+// backends no longer share one budget (#662).
 func TestCollectorBudgetDeferralIsFair(t *testing.T) {
 	var fixtures []*opsfixture.Server
 	var specs []BackendSpec
@@ -1007,8 +1130,11 @@ func TestCollectorBudgetDeferralIsFair(t *testing.T) {
 	fast := opsfixture.NewOllama(t, `{"models":[]}`)
 	specs = append(specs, BackendSpec{Provider: "z-fast", BaseURL: fast.URL(), APIFormat: "ollama"})
 	c := NewCollector(specs, Options{Interval: 2 * time.Second})
-	for tick := range 6 {
+	// At 1.1 s a request, a slow backend reads version, /running and one
+	// telemetry surface per tick; the other one goes first on the next tick.
+	for tick := range 3 {
 		before := []int{len(fixtures[0].Requests()), len(fixtures[1].Requests())}
+		polled := countURI(fast, "/api/ps")
 		obs := c.Tick(context.Background())
 		for i, f := range fixtures {
 			if requests := f.Requests()[before[i]:]; len(requests) > 0 && requests[0] != reqVersion {
@@ -1020,19 +1146,19 @@ func TestCollectorBudgetDeferralIsFair(t *testing.T) {
 				t.Fatalf("tick %d: successful or deferred backend %s reported a failure: %+v", tick, b.Provider, b)
 			}
 		}
+		if n := countURI(fast, "/api/ps") - polled; n != 1 {
+			t.Fatalf("tick %d: fast backend polled %d times, want once on every tick", tick, n)
+		}
 	}
 	for i, f := range fixtures {
 		for _, req := range []opsfixture.Request{reqVersion, reqRunning, reqMetrics, reqModels} {
 			if countURI(f, req.URI) == 0 {
-				t.Errorf("backend %d: %s was never polled in six ticks", i, req.URI)
+				t.Errorf("backend %d: %s was never polled in three ticks", i, req.URI)
 			}
 		}
 		if f.Loads.Load() != 0 {
 			t.Fatalf("backend %d: observation reached a model-dispatched route", i)
 		}
-	}
-	if n := countURI(fast, "/api/ps"); n < 2 {
-		t.Errorf("fast backend polled %d times in six ticks, want at least two turns", n)
 	}
 }
 

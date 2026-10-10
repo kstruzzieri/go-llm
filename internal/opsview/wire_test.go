@@ -167,7 +167,7 @@ func fixtureFront(t *testing.T, hook func(w http.ResponseWriter, r *http.Request
 }
 
 // TestFailureStaysFreshThroughWorstCaseServeCadence drives a real collector
-// through serve's worst case: the 4 s backoff retry falls 1 ms after a gated
+// through serve's worst case: the 8 s backoff retry falls 1 ms after a gated
 // tick starts, that tick spends its full 5 s, and the retry tick does too, so
 // serve keeps showing the old failure until retry + interval + 2 x
 // TickTimeout - 1 ms. It must still read fresh there (spec §5.4).
@@ -176,7 +176,7 @@ func TestFailureStaysFreshThroughWorstCaseServeCadence(t *testing.T) {
 	ms := time.Millisecond
 	clk := &cadenceClock{wall: time.Date(2026, 10, 5, 10, 0, 0, 0, time.UTC)}
 	var slow atomic.Int64 // fake time b-slow spends on this tick
-	// a-down hangs up every request: a dial-level failure, observed first.
+	// a-down hangs up every request: a dial-level failure.
 	down := fixtureFront(t, func(w http.ResponseWriter, _ *http.Request) bool {
 		if conn, _, err := http.NewResponseController(w).Hijack(); err == nil {
 			_ = conn.Close()
@@ -195,11 +195,16 @@ func TestFailureStaysFreshThroughWorstCaseServeCadence(t *testing.T) {
 		{Provider: "b-slow", BaseURL: slowURL, APIFormat: "openai-compat"},
 	}, opsbackend.Options{Interval: interval, Clock: clk.clock()})
 
-	// t0 at 0: fail, retry 2 s. t1 at 2 s: fail, retry 6 s; b-slow 2 s - 1 ms.
-	// t2 at 6 s - 1 ms: gated; b-slow 5 s. t3 at 13 s - 1 ms: retry; b-slow 5 s.
+	// Backends are read concurrently (#662), so a-down is contacted only on
+	// ticks where b-slow spends no fake time, and on the last tick, whose
+	// failure no later tick shows: its stamps never depend on which backend
+	// answers first.
+	// t0 at 0: fail, retry 2 s. t1 at 2 s: fail, retry 6 s. t2 at 4 s: gated.
+	// t3 at 6 s: third failure, retry 14 s. t4 at 8 s: gated; b-slow 4 s - 1 ms.
+	// t5 at 14 s - 1 ms: gated; b-slow 5 s. t6 at 21 s - 1 ms: retry; b-slow 5 s.
 	var prev *opsbackend.BackendObservation
 	var worst time.Duration
-	for i, spend := range []time.Duration{0, 2*time.Second - ms, opsbackend.TickTimeout, opsbackend.TickTimeout} {
+	for i, spend := range []time.Duration{0, 0, 0, 0, 4*time.Second - ms, opsbackend.TickTimeout, opsbackend.TickTimeout} {
 		slow.Store(int64(spend))
 		start := clk.clock().Mono()
 		obs := c.Tick(context.Background())
