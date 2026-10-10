@@ -632,13 +632,11 @@ func resolveSymlinkTarget(ctx context.Context, target string) (string, bool, err
 			if err != nil {
 				return "", false, err
 			}
-			if !filepath.IsAbs(link) {
-				link = filepath.Join(filepath.Dir(current), link)
-			}
+			next := composeLinkTarget(filepath.Dir(current), link)
 			for i := len(suffix) - 1; i >= 0; i-- {
-				link = filepath.Join(link, suffix[i])
+				next = filepath.Join(next, suffix[i])
 			}
-			current = filepath.Clean(link)
+			current = next
 			suffix = suffix[:0]
 			links++
 			continue

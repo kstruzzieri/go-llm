@@ -925,3 +925,60 @@ func TestRewriteSymlinkTargetDotDotResolvesLikeHost(t *testing.T) {
 		})
 	}
 }
+
+// TestCloneTreeDanglingChainDotDotThroughSymlinkStaysIsolated pins #660 for
+// external dangling chains: ext/leaf -> s/../../project-alias/created.txt
+// pops out of ext/s -> deep/er, so the host resolves it through
+// ext/project-alias (an alias of the workspace) to the missing
+// project/created.txt. A lexical clean classified it at the nonexistent
+// parent/project-alias instead, leaving a clone link nothing can write.
+func TestCloneTreeDanglingChainDotDotThroughSymlinkStaysIsolated(t *testing.T) {
+	parent, err := CanonicalWorkspaceRoot(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := filepath.Join(parent, "project")
+	ext := filepath.Join(parent, "ext")
+	if err := os.Mkdir(src, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(ext, "deep", "er"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join("deep", "er"), filepath.Join(ext, "s")); err != nil {
+		t.Skipf("symlinks unsupported: %v", err)
+	}
+	if err := os.Symlink(src, filepath.Join(ext, "project-alias")); err != nil {
+		t.Fatal(err)
+	}
+	sep := string(filepath.Separator)
+	leaf := filepath.Join(ext, "leaf")
+	if err := os.Symlink("s"+sep+".."+sep+".."+sep+"project-alias"+sep+"created.txt", leaf); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(leaf, filepath.Join(src, "through")); err != nil {
+		t.Fatal(err)
+	}
+
+	dst := filepath.Join(t.TempDir(), "clone")
+	if _, err := snapshotCanonical(context.Background(), src, dst, cloneFixtureConfig(), cloneFile); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dst, "through"), []byte("scratch"), 0o644); err != nil {
+		cloneTarget, _ := os.Readlink(filepath.Join(dst, "through"))
+		t.Fatalf("write through clone link (target %q): %v", cloneTarget, err)
+	}
+	if _, err := os.Lstat(filepath.Join(src, "created.txt")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("clone write reached the canonical workspace: %v", err)
+	}
+	if got, err := os.ReadFile(filepath.Join(dst, "created.txt")); err != nil || string(got) != "scratch" {
+		t.Fatalf("clone link did not resolve inside the clone: got %q err=%v", got, err)
+	}
+	// Fixture guard, after the snapshot: the host link really lands in src.
+	if err := os.WriteFile(filepath.Join(src, "through"), []byte("host"), 0o644); err != nil {
+		t.Fatalf("fixture: host write through link: %v", err)
+	}
+	if got, err := os.ReadFile(filepath.Join(src, "created.txt")); err != nil || string(got) != "host" {
+		t.Fatalf("fixture: host link must resolve to project/created.txt, got %q err=%v", got, err)
+	}
+}
