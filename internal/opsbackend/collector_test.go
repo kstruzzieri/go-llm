@@ -978,6 +978,43 @@ func TestCollectorOwnBudgetIsNotBlamedOnTheLastSurface(t *testing.T) {
 	}
 }
 
+// TestCollectorWorkerPanicReachesTheCaller (#662): a panic while reading a
+// backend is raised by Tick on the caller's goroutine, where the caller's
+// defers still run (golem ops -watch restores the terminal in one), and the
+// collector stays usable afterwards.
+func TestCollectorWorkerPanicReachesTheCaller(t *testing.T) {
+	f := opsfixture.NewLlamaSwap(t)
+	clock := newFakeClock().clock()
+	mono := clock.Mono
+	var calls atomic.Int64
+	clock.Mono = func() time.Duration {
+		// Call 1 is Tick's own reading; call 2 is the first fetch, made
+		// while reading the backend.
+		if calls.Add(1) == 2 {
+			panic("worker clock")
+		}
+		return mono()
+	}
+	c := NewCollector([]BackendSpec{lsSpec(f.URL())}, Options{Interval: 2 * time.Second, Clock: clock})
+	var raised any
+	func() {
+		defer func() { raised = recover() }()
+		c.Tick(context.Background())
+	}()
+	if raised != "worker clock" {
+		t.Fatalf("Tick raised %v, want the worker's panic on the caller's goroutine", raised)
+	}
+	done := make(chan struct{})
+	go func() { c.Tick(context.Background()); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Tick after a worker panic did not return: the collector lock is held")
+	}
+	// The panic came before any request; the next tick reads everything.
+	assertRequests(t, f, reqVersion, reqRunning, reqMetrics, reqModels)
+}
+
 // Every request succeeds within its own deadline, but neither slow backend
 // fits all four surfaces into one tick. Deferred telemetry must get a turn
 // without keeping later backends behind the same unfinished sweep forever.
