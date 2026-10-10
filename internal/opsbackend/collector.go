@@ -14,8 +14,10 @@ import (
 	"github.com/kstruzzieri/go-llm/provider"
 )
 
-// TickTimeout bounds one Tick. Watch and serve publish a snapshot only when
-// its tick ends, so opsview's failure freshness is derived from it.
+// TickTimeout is each backend's budget in one Tick. Backends are read
+// concurrently from the tick's start, so it also bounds the tick: watch and
+// serve publish a snapshot only when its tick ends, and opsview's failure
+// freshness is derived from it.
 const TickTimeout = 5 * time.Second
 
 const (
@@ -32,7 +34,9 @@ const (
 const MaxNameLen = 512
 
 // Clock supplies wall time for display and monotonic elapsed time for ages
-// and gaps. Production uses SystemClock; tests drive both by hand.
+// and gaps. Production uses SystemClock; tests drive both by hand. Tick calls
+// Wall and Mono from concurrent goroutines, so both must be safe for
+// concurrent use.
 type Clock struct {
 	Wall func() time.Time
 	Mono func() time.Duration
@@ -186,18 +190,18 @@ type Options struct {
 	Clock    Clock
 }
 
-// Collector polls configured backends. Tick is serialized; every result is a
-// deep copy that shares no storage with the collector.
+// Collector polls configured backends. Tick is serialized, and within a tick
+// each backend is read in its own goroutine; every result is a deep copy that
+// shares no storage with the collector.
 type Collector struct {
-	mu          sync.Mutex
-	opts        Options
-	backends    []*backendState
-	nextBackend int // next tick's first backend after exhausting the budget
-	ticked      bool
-	tickEnd     time.Time // real time: it bounds real requests
-	lastWall    time.Time
-	lastMono    time.Duration
-	uncertain   bool
+	mu        sync.Mutex
+	opts      Options
+	backends  []*backendState
+	ticked    bool
+	tickEnd   time.Time // real time: it bounds real requests; workers only read it
+	lastWall  time.Time
+	lastMono  time.Duration
+	uncertain bool
 }
 
 type surfaceState struct {
@@ -288,7 +292,10 @@ func originOf(d provider.Destination) string {
 }
 
 // Tick observes every backend once (subject to per-surface backoff) and
-// returns a detached snapshot.
+// returns a detached snapshot. Each backend is read in its own goroutine with
+// the whole TickTimeout from the tick's start, so one backend's slow or hung
+// reads never cost another its turn; the snapshot is taken once all of them
+// finish, in backend order.
 func (c *Collector) Tick(ctx context.Context) Observations {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -311,42 +318,29 @@ func (c *Collector) Tick(ctx context.Context) Observations {
 	}
 	c.lastWall, c.lastMono, c.ticked = wall, mono, true
 
+	// Every collector field a worker reads is written above or in
+	// NewCollector and only read until Wait returns; each worker writes only
+	// its own backend.
 	c.tickEnd = time.Now().Add(TickTimeout)
 	tctx, cancel := context.WithDeadline(ctx, c.tickEnd)
 	defer cancel()
-	first := c.nextBackend
-	for i := range c.backends {
-		b := c.backends[(first+i)%len(c.backends)]
-		// Peer confirmation fails closed: only a listing read on this tick
-		// counts (spec §5.4).
-		b.obs.Listed = nil
-		// An unreachable backend gets no request of any surface before the
-		// retry its failure scheduled, so reachability reads unreachable
-		// steadily between retries (spec §5.4) instead of flipping to ok on
-		// a surface the failed one's backoff does not cover.
-		if r := b.obs.Reachable; r != nil && !r.Value && mono < b.obs.ReachRetry {
-			continue
-		}
-		switch b.obs.Kind {
-		case KindUnidentified:
-			c.identifyBackend(ctx, tctx, b, b.identify)
-		case KindLlamaSwap:
-			// Identity is read again on every later tick: an upgrade
-			// restart or another runtime taking the port is never seen
-			// down, and v235 readings must not outlive the process.
-			c.identifyBackend(ctx, tctx, b, b.observe)
-		case KindOllama:
-			c.observeOllama(ctx, tctx, b)
-		}
-		if b.obs.Kind == KindLlamaSwap {
-			c.observeLlamaSwap(ctx, tctx, b)
-		}
+	// A worker's panic would end the process past the caller's defers
+	// (golem ops -watch restores the terminal in one), so it is raised here.
+	panics := make([]any, len(c.backends))
+	var wg sync.WaitGroup
+	for i, b := range c.backends {
+		wg.Go(func() {
+			defer func() { panics[i] = recover() }()
+			c.pollBackend(ctx, tctx, b, mono)
+		})
 	}
-	// Rotate providers independently of their unfinished telemetry sweeps:
-	// a slow backend may never fit a whole sweep into a single tick.
-	c.nextBackend = 0
-	if len(c.backends) > 0 && time.Until(c.tickEnd) < RequestTimeout {
-		c.nextBackend = (first + 1) % len(c.backends)
+	wg.Wait()
+	for _, p := range panics {
+		if p != nil {
+			// ponytail: the value, not the worker's stack; wrap it with
+			// debug.Stack() if a collection panic ever needs diagnosing.
+			panic(p)
+		}
 	}
 	// The lid can close inside a tick too: readings taken before the jump
 	// would render as fresh. Drop them all, and measure the next tick from
@@ -359,6 +353,37 @@ func (c *Collector) Tick(ctx context.Context) Observations {
 		c.lastWall, c.lastMono = endWall, endMono
 	}
 	return c.snapshot()
+}
+
+// pollBackend reads one backend in its fixed order: identity, then residency
+// (/running or /api/ps), then a llama-swap's telemetry that takes turns, or
+// an Ollama's version probe after a /api/ps timeout. It runs in its own
+// goroutine and writes only b; mono is the tick's start.
+func (c *Collector) pollBackend(callerCtx, ctx context.Context, b *backendState, mono time.Duration) {
+	// Peer confirmation fails closed: only a listing read on this tick
+	// counts (spec §5.4).
+	b.obs.Listed = nil
+	// An unreachable backend gets no request of any surface before the retry
+	// its failure scheduled, so reachability reads unreachable steadily
+	// between retries (spec §5.4) instead of flipping to ok on a surface the
+	// failed one's backoff does not cover.
+	if r := b.obs.Reachable; r != nil && !r.Value && mono < b.obs.ReachRetry {
+		return
+	}
+	switch b.obs.Kind {
+	case KindUnidentified:
+		c.identifyBackend(callerCtx, ctx, b, b.identify)
+	case KindLlamaSwap:
+		// Identity is read again on every later tick: an upgrade restart or
+		// another runtime taking the port is never seen down, and v235
+		// readings must not outlive the process.
+		c.identifyBackend(callerCtx, ctx, b, b.observe)
+	case KindOllama:
+		c.observeOllama(callerCtx, ctx, b)
+	}
+	if b.obs.Kind == KindLlamaSwap {
+		c.observeLlamaSwap(callerCtx, ctx, b)
+	}
 }
 
 // jumped reports whether wall and monotonic time moved apart by more than
@@ -381,12 +406,12 @@ func (c *Collector) fetch(callerCtx, ctx context.Context, b *backendState, cl *c
 		return false, false
 	}
 	// A request the caller or the tick deadline stopped before it started,
-	// or one with less than a request timeout of tick left (neighbors spent
-	// the budget, so the tick deadline rather than this backend would cut
-	// it short), says nothing about the backend: nothing is sent, and
-	// reachability and backoff stay untouched. A skipped residency read is
-	// still a missing sample, so it opens a gap like a failed one (spec
-	// §4.5).
+	// or one with less than a request timeout of the backend's budget left
+	// (its own earlier reads spent it, so the tick deadline rather than the
+	// backend would cut it short), says nothing about the backend: nothing is
+	// sent, and reachability and backoff stay untouched. A skipped residency
+	// read is still a missing sample, so it opens a gap like a failed one
+	// (spec §4.5).
 	if ctx.Err() != nil || time.Until(c.tickEnd) < RequestTimeout {
 		b.missed(surface)
 		return false, true
