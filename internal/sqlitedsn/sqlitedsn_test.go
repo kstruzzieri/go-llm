@@ -2,10 +2,12 @@ package sqlitedsn
 
 import (
 	"database/sql"
+	"fmt"
 	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"testing"
 	"time"
 
@@ -108,5 +110,32 @@ func TestWithBusyTimeoutKeepsCallerBusyTimeout(t *testing.T) {
 	}
 	if got := u.Query()["_pragma"]; len(got) != 1 || got[0] != "busy_timeout(250)" {
 		t.Fatalf("WithBusyTimeout pragmas = %q, want only the caller's busy_timeout(250)", got)
+	}
+}
+
+// TestLinkedSQLiteHasWALResetFix fails when the linked SQLite predates 3.51.3,
+// the first release with the WAL-reset corruption fix
+// (https://www.sqlite.org/wal.html, section 11). go-llm's stores run in WAL
+// mode and can share a file across processes, the bug's trigger, so a go.mod
+// downgrade of modernc.org/sqlite below v1.46.2 must not pass CI. modernc
+// still embeds SQLite 3.40.0 on netbsd/amd64 and 3.41.2 on freebsd/386 and
+// freebsd/arm; this test fails there by design, because those targets do not
+// have the fix.
+func TestLinkedSQLiteHasWALResetFix(t *testing.T) {
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	var version string
+	if err := db.QueryRow("SELECT sqlite_version()").Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	var major, minor, patch int
+	if _, err := fmt.Sscanf(version, "%d.%d.%d", &major, &minor, &patch); err != nil {
+		t.Fatalf("parse sqlite_version() %q: %v", version, err)
+	}
+	if slices.Compare([]int{major, minor, patch}, []int{3, 51, 3}) < 0 {
+		t.Fatalf("linked SQLite %s predates 3.51.3 (WAL-reset corruption fix); keep modernc.org/sqlite at v1.46.2 or later", version)
 	}
 }
