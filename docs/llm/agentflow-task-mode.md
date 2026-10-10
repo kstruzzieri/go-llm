@@ -411,7 +411,14 @@ For an external plan, the task driver order is:
    recommendation once through AgentFlow.
 4. Initialize execution, run plan steps and declared gates, and print the same
    route again immediately before review-manifest ingestion.
-5. Let `finish-run` build and verify proof under the materialized policy.
+5. After the steps and any review amendments, ask `next-action` whether step
+   work remains. AgentFlow's `next-step` returns nothing both when every step is
+   done and when the remaining steps hold open attempts, so if `next-action`
+   still reports an open attempt or an unfinished step (for example an attempt
+   left open by an earlier run), Golem exits 1 without running `finish-run` and
+   points at `-agentflow-resume`. Resume does not yet settle an attempt whose
+   gate already failed (#652).
+6. Let `finish-run` build and verify proof under the materialized policy.
 
 For a planning-mode handoff, Golem first validates the saved recommendation,
 matches the loaded plan and task brief to their approved digests, and compares
