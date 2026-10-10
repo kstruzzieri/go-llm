@@ -223,6 +223,74 @@ func TestAgentflowResumeStatusAndProof_RealCLI(t *testing.T) {
 	}
 }
 
+// #651: a fresh -plan over a workspace whose only step holds an attempt left
+// open by a failed gate must not report success. next-step skips the open
+// step and a non-strict finish-run would pass (agentflow#58), so before the
+// fix this printed a proof pack recording steps_completed 0 of 1.
+func TestAgentflowFreshPlanRefusesOpenStepWork_RealCLI(t *testing.T) {
+	dir := t.TempDir()
+	copyTree(t, "../../testdata/agentflow", dir)
+	gitInit(t, dir)
+	runner := agentflowRunnerOrSkip(t, dir)
+	client := agentflow.NewClient(runner, dir)
+	ctx := context.Background()
+	planPath := filepath.Join(dir, "plan.json")
+	planBytes, err := os.ReadFile(planPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var plan agentflow.Plan
+	if err := json.Unmarshal(planBytes, &plan); err != nil {
+		t.Fatal(err)
+	}
+
+	// Run 1: the step writes the wrong token, so its gate fails and the
+	// attempt stays open.
+	first := &driver{
+		af: client, plan: &plan, planPath: planPath,
+		taskBrief: agentflow.TaskBriefFromPlan(plan, "feature"), out: io.Discard,
+		runStep: func(ctx context.Context, step agentflow.Step, attempt, _ string) error {
+			if err := os.WriteFile(filepath.Join(dir, "src", "answer.txt"), []byte("wrong\n"), 0o600); err != nil {
+				return err
+			}
+			return client.RecordFileChange(ctx, step.ID, attempt, "src/answer.txt")
+		},
+	}
+	if _, err := first.run(ctx); err == nil || !strings.Contains(err.Error(), "gate") {
+		t.Fatalf("run 1 error = %v, want the failed gate", err)
+	}
+	if state, err := client.NextAction(ctx); err != nil || state.State != "validation_missing" {
+		t.Fatalf("after run 1: state=%q err=%v, want an open attempt in validation_missing", state.State, err)
+	}
+
+	// Run 2: a fresh -plan through the production entry. The recording caller
+	// proves the model is never asked; an empty scriptCaller alone answers.
+	caller := &recordingCaller{next: &scriptCaller{}}
+	sess := &replSession{orch: agent.New(caller, agent.ContextManager{}), maxSteps: 4, clock: time.Now}
+	var stdout, stderr bytes.Buffer
+	err = runAgentflowTask(ctx, &stdout, &stderr, nil, sess, flags{
+		planPath: planPath, approveEdits: true, approveGates: true,
+		agentflowSrc: os.Getenv("AGENTFLOW_SRC"),
+	}, dir)
+	if !errors.Is(err, errAgentflowTaskFailed) {
+		t.Fatalf("run 2 error = %v, want errAgentflowTaskFailed\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+	}
+	if len(caller.reqs) != 0 {
+		t.Fatalf("run 2 called the model %d times", len(caller.reqs))
+	}
+	if strings.Contains(stdout.String(), "proof pack:") {
+		t.Fatalf("run 2 reported success:\n%s", stdout.String())
+	}
+	for _, want := range []string{"validation_missing", "-agentflow-resume"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Fatalf("run 2 stderr does not mention %s:\n%s", want, stderr.String())
+		}
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".agent", "proof-pack.json")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("proof-pack.json stat err = %v, want it never built", err)
+	}
+}
+
 // #612 R-new: AgentFlow 1.0 rejects a 0.x plan before it looks at execution
 // state, and Golem status reports that as state_invalid without touching
 // .agent/. Only the early old-plan rejection is covered here; the
