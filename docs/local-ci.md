@@ -47,7 +47,8 @@ On a Linux host the bind-mounted checkout must be readable by uid 1000; the gate
 `scripts/ci-local` resolves the module root from its own location and validates that the root contains `go.mod` (declaring this module) and `docker-compose.ci.yml`, instead of asking Git. Linked worktrees store `.git` as a file pointing at host-only metadata that is not visible inside the container, so Git-based root discovery would fail there. The Docker gate and the pre-push hook therefore work from both normal checkouts and `git worktree add` checkouts. The pre-push hook does not mount a checkout at all: it exports each pushed tree with `git archive` on the host and runs the gate on that export, which has no `.git`.
 
 `scripts/test-ci-local` is a hermetic regression harness for the local gate. It
-stubs the external commands, needs no toolchain or Docker, and covers root
+stubs the external commands, needs no Go toolchain or Docker (only git 2.32 or
+newer, for the hook's fixture repository), and covers root
 discovery, exact phase ordering, prerequisites, failure status propagation, the
 pre-push hook's ref parsing and tree export (against a fixture repository and
 a linked worktree of it), the native Darwin selectors and requirement environment, and the
@@ -192,7 +193,8 @@ sends.
 
 An interrupted push (Ctrl-C, or a closed terminal) removes the gate's container, named
 `go-llm-prepush-<pid>`, and the export; without that, compose would exit and
-leave the container running.
+leave the container running. If the removal fails (the Docker daemon is
+unreachable, say), the hook prints the `docker rm -f` command to run.
 
 The export lives under `$TMPDIR`, which the Docker host must be able to
 bind-mount. Docker Desktop shares it by default; on another runtime, point
