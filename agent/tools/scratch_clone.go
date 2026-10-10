@@ -472,22 +472,20 @@ func copyFromHandle(ctx context.Context, f *os.File, target string, expectedSize
 }
 
 // rewriteSymlinkTarget applies the snapshot symlink policy (D2 + amendment
-// A1): targets that stay lexically inside the source root keep working
-// inside the clone (relative verbatim; absolute rewritten relative), targets
-// outside the root are absolutized so they cannot accidentally point into
-// the scratch hierarchy (resolved when resolvable, lexical when dangling),
-// and dangling links never fail the snapshot.
+// A1): targets that stay inside the source root, with each ".." applied to
+// the physical parent (#660), keep working inside the clone (rewritten
+// relative to the link's own directory), targets outside the root are
+// absolutized so they cannot accidentally point into the scratch hierarchy
+// (resolved when resolvable, lexical when dangling), and a target that does
+// not exist never fails the snapshot. A chain that dangles midway but whose
+// composed target exists is classified like any existing external target.
 func rewriteSymlinkTarget(ctx context.Context, srcRoot, rel, target string, canonicalEntries map[scratchFileIdentity]string) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	linkDir := filepath.Dir(filepath.Join(srcRoot, filepath.FromSlash(rel)))
-	var absTarget string
-	if filepath.IsAbs(target) {
-		absTarget = filepath.Clean(target)
-	} else {
-		absTarget = filepath.Clean(filepath.Join(linkDir, target))
-	}
+	link := filepath.Join(srcRoot, filepath.FromSlash(rel))
+	linkDir := filepath.Dir(link)
+	absTarget := composeLinkTarget(link, target)
 	inside := func(root, p string) bool {
 		return p == root || strings.HasPrefix(p, root+string(filepath.Separator))
 	}
@@ -544,6 +542,34 @@ func rewriteSymlinkTarget(ctx context.Context, srcRoot, rel, target string, cano
 	return resolved, nil
 }
 
+// composeLinkTarget joins target text onto its source link's directory (#660).
+// The host lookup includes the enclosing link in the kernel's traversal limit;
+// EvalSymlinks alone permits more hops. A missing suffix can still compose from
+// the resolved prefix through the last "..". Any other host lookup error, an
+// unresolved prefix, or a target without ".." retains the pre-#660 lexical join.
+func composeLinkTarget(link, target string) string {
+	raw := target
+	if !filepath.IsAbs(target) {
+		raw = filepath.Dir(link) + string(filepath.Separator) + target
+	}
+	parts := strings.Split(filepath.ToSlash(raw), "/")
+	i := len(parts) - 1
+	for i >= 0 && parts[i] != ".." {
+		i--
+	}
+	if i < 0 {
+		return filepath.Clean(raw)
+	}
+	if _, err := os.Stat(link); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return filepath.Clean(raw)
+	}
+	prefix, err := filepath.EvalSymlinks(filepath.FromSlash(strings.Join(parts[:i+1], "/")))
+	if err != nil {
+		return filepath.Clean(raw)
+	}
+	return filepath.Join(prefix, filepath.FromSlash(strings.Join(parts[i+1:], "/")))
+}
+
 // relativeToCanonicalIdentity recognizes aliases of any recorded canonical
 // file or directory, including a missing suffix below an aliased directory.
 func relativeToCanonicalIdentity(ctx context.Context, target string, canonicalEntries map[scratchFileIdentity]string) (string, bool, error) {
@@ -576,11 +602,12 @@ func relativeToCanonicalIdentity(ctx context.Context, target string, canonicalEn
 
 // resolveSymlinkTarget resolves every existing symlink component while
 // preserving a missing suffix. filepath.EvalSymlinks alone cannot resolve a
-// dangling link whose target itself passes through a workspace alias.
+// dangling link whose target itself passes through a workspace alias. The
+// bool reports whether the final path exists: a chain that dangles midway
+// but names an existing object is complete, so the external gates apply.
 func resolveSymlinkTarget(ctx context.Context, target string) (string, bool, error) {
 	const maxDanglingLinks = 255
 	current := filepath.Clean(target)
-	complete := true
 	var suffix []string
 	for links := 0; ; {
 		if err := ctx.Err(); err != nil {
@@ -594,12 +621,11 @@ func resolveSymlinkTarget(ctx context.Context, target string) (string, bool, err
 			for i := len(suffix) - 1; i >= 0; i-- {
 				resolved = filepath.Join(resolved, suffix[i])
 			}
-			return resolved, complete, nil
+			return resolved, len(suffix) == 0, nil
 		}
 		if !errors.Is(err, fs.ErrNotExist) {
 			return "", false, err
 		}
-		complete = false
 		fi, statErr := os.Lstat(current)
 		if statErr == nil && fi.Mode()&fs.ModeSymlink != 0 {
 			if links >= maxDanglingLinks {
@@ -609,13 +635,11 @@ func resolveSymlinkTarget(ctx context.Context, target string) (string, bool, err
 			if err != nil {
 				return "", false, err
 			}
-			if !filepath.IsAbs(link) {
-				link = filepath.Join(filepath.Dir(current), link)
-			}
+			next := composeLinkTarget(current, link)
 			for i := len(suffix) - 1; i >= 0; i-- {
-				link = filepath.Join(link, suffix[i])
+				next = filepath.Join(next, suffix[i])
 			}
-			current = filepath.Clean(link)
+			current = next
 			suffix = suffix[:0]
 			links++
 			continue
