@@ -502,11 +502,11 @@ func TestScratchSourceBeginControls(t *testing.T) {
 			}
 			mustRename(t, spec.Path+".new", spec.Path)
 		}, wantExeMismatch},
-		{"lexically divergent internal link", func(t *testing.T, canon string, spec *execSpec) {
+		{"dotdot through internal link resolves like the host", func(t *testing.T, canon string, spec *execSpec) {
 			// On the host a/l -> s/../../x resolves through a/s -> deep/er
-			// to a/x (A). rewriteSymlinkTarget cleans the target lexically
-			// to root x (B), a pre-existing snapshot inaccuracy tracked in
-			// #660; the validator must fail closed on it.
+			// to a/x (A), not the root x (B). The snapshot composes the
+			// target the same way (#660), so the approved executable is the
+			// reference copy of a/x and validation passes.
 			a := filepath.Join(canon, "a")
 			if err := os.MkdirAll(filepath.Join(a, "deep/er"), 0o755); err != nil {
 				t.Fatal(err)
@@ -524,7 +524,7 @@ func TestScratchSourceBeginControls(t *testing.T) {
 			if !os.SameFile(spec.ExeIdentity, execIdentityOf(t, filepath.Join(a, "x"))) {
 				t.Fatal("fixture: the host must resolve a/l to a/x")
 			}
-		}, wantExeMismatch},
+		}, ""},
 		{"approved executable moved within the workspace", func(t *testing.T, canon string, spec *execSpec) {
 			// The approved inode is still in the snapshot, but under
 			// moved.sh; the approved spelling now names a different file.

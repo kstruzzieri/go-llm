@@ -744,3 +744,184 @@ func TestSnapshotManifestRecordsSpecialBits(t *testing.T) {
 	}
 	t.Fatal("manifest missing sg entry")
 }
+
+// TestRewriteSymlinkTargetUnresolvableDotDotStaysLexical pins the fallback
+// contract (#660): when a prefix popped by ".." does not resolve to a
+// directory on the host, the link dangles there and the rewrite is exactly
+// the lexical one snapshots always produced. This table passes on the
+// pre-#660 code.
+func TestRewriteSymlinkTargetUnresolvableDotDotStaysLexical(t *testing.T) {
+	src, err := CanonicalWorkspaceRoot(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := filepath.Join(src, "a")
+	if err := os.MkdirAll(filepath.Join(a, "deep", "er"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(a, "deep", "er", "f"), []byte("f"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(a, "file"), []byte("f"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	links := map[string]string{
+		"s":  filepath.Join("deep", "er"),
+		"sm": filepath.Join("deep", "missing"),
+		"fl": filepath.Join("deep", "er", "f"),
+		"p":  "q",
+		"q":  "p",
+		"se": "se" + string(filepath.Separator) + "..",
+	}
+	for name, target := range links {
+		if err := os.Symlink(target, filepath.Join(a, name)); err != nil {
+			t.Skipf("symlinks unsupported: %v", err)
+		}
+	}
+	gitDir := filepath.Join(src, ".git")
+	if err := os.MkdirAll(filepath.Join(gitDir, "private"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(gitDir, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(gitDir, 0o755) })
+	sep := string(filepath.Separator)
+	for _, tc := range []struct{ name, rel, target, want string }{
+		{"missing prefix", "a/l", "missing" + sep + ".." + sep + "x", "x"},
+		{"missing link target", "a/l", "sm" + sep + ".." + sep + "x", "x"},
+		{"resolved then missing", "a/l", "s" + sep + ".." + sep + "missing" + sep + ".." + sep + "x", "x"},
+		{"link to a non-directory", "a/l", "fl" + sep + ".." + sep + "x", "x"},
+		{"file prefix", "a/l", "file" + sep + "sub" + sep + ".." + sep + ".." + sep + "x", "x"},
+		{"symlink loop", "a/l", "p" + sep + ".." + sep + "x", "x"},
+		{"self-expanding link", "a/l", "se" + sep + ".." + sep + "x", "x"},
+		{"name too long", "a/l", strings.Repeat("n", 300) + sep + ".." + sep + "x", "x"},
+		{"inaccessible excluded .git", "l", ".git" + sep + "private" + sep + ".." + sep + ".." + sep + "x", "x"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := rewriteSymlinkTarget(context.Background(), src, tc.rel, tc.target, nil)
+			if err != nil || got != tc.want {
+				t.Fatalf("rewrite = %q err=%v, want %q", got, err, tc.want)
+			}
+		})
+	}
+}
+
+// TestCloneTreeDotDotThroughSymlinkMatchesHost pins kernel ".." semantics
+// (#660): with a/s -> deep/er, a/l -> s/../../x pops out of deep/er, so the
+// host reads a/x. A lexical clean pointed the clone at the root x instead.
+// The rewrite must also be a fixed point of the reference -> work pass.
+func TestCloneTreeDotDotThroughSymlinkMatchesHost(t *testing.T) {
+	src, err := CanonicalWorkspaceRoot(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(src, "a", "deep", "er"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(src, "a", "x"), []byte("A"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(src, "x"), []byte("B"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join("deep", "er"), filepath.Join(src, "a", "s")); err != nil {
+		t.Skipf("symlinks unsupported: %v", err)
+	}
+	sep := string(filepath.Separator)
+	links := map[string]string{
+		"rel": "s" + sep + ".." + sep + ".." + sep + "x",
+		// Concatenated, not filepath.Join: Join would clean the ".."
+		// away lexically, which is the bug under test.
+		"abs": filepath.Join(src, "a", "s") + sep + ".." + sep + ".." + sep + "x",
+	}
+	for name, target := range links {
+		if err := os.Symlink(target, filepath.Join(src, "a", name)); err != nil {
+			t.Fatal(err)
+		}
+		if got, err := os.ReadFile(filepath.Join(src, "a", name)); err != nil || string(got) != "A" {
+			t.Fatalf("fixture: host a/%s must read a/x, got %q err=%v", name, got, err)
+		}
+	}
+	cfg := cloneFixtureConfig()
+	ref := filepath.Join(t.TempDir(), "reference")
+	man, err := snapshotCanonical(context.Background(), src, ref, cfg, cloneFile)
+	if err != nil {
+		t.Fatalf("snapshotCanonical: %v", err)
+	}
+	work := filepath.Join(t.TempDir(), "work")
+	if _, err := snapshotCanonical(context.Background(), ref, work, cfg, cloneFile); err != nil {
+		t.Fatalf("snapshotCanonical (reference -> work): %v", err)
+	}
+	for _, tree := range []string{ref, work} {
+		for name := range links {
+			p := filepath.Join(tree, "a", name)
+			if got, err := os.Readlink(p); err != nil || got != "x" {
+				t.Fatalf("%s a/%s target = %q err=%v, want x", tree, name, got, err)
+			}
+			if got, err := os.ReadFile(p); err != nil || string(got) != "A" {
+				t.Fatalf("%s a/%s reads %q err=%v, want A (the copy of a/x)", tree, name, got, err)
+			}
+		}
+	}
+	out, err := diffTrees(context.Background(), ref, work, man, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.changes) != 0 {
+		t.Fatalf("untouched trees must diff empty, got phantom changes: %+v", out.changes)
+	}
+}
+
+// TestRewriteSymlinkTargetDotDotResolvesLikeHost pins resolvable shapes
+// (#660): chains, absolute link text, and a link whose own text pops a link.
+// Each row's host read is checked against the expected file first.
+func TestRewriteSymlinkTargetDotDotResolvesLikeHost(t *testing.T) {
+	src, err := CanonicalWorkspaceRoot(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := filepath.Join(src, "a")
+	if err := os.MkdirAll(filepath.Join(a, "deep", "er"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(a, "deep", "q"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for rel, data := range map[string]string{"x": "B", "a/x": "A", "a/deep/x": "D"} {
+		if err := os.WriteFile(filepath.Join(src, filepath.FromSlash(rel)), []byte(data), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sep := string(filepath.Separator)
+	for name, target := range map[string]string{
+		"s":  filepath.Join("deep", "er"),
+		"t":  filepath.Join("deep", "er"),
+		"c":  "t",
+		"sa": filepath.Join(a, "deep", "er"),
+		"sq": "s" + sep + ".." + sep + "q",
+	} {
+		if err := os.Symlink(target, filepath.Join(a, name)); err != nil {
+			t.Skipf("symlinks unsupported: %v", err)
+		}
+	}
+	for i, tc := range []struct{ name, target, want, content string }{
+		{"chain c -> t -> deep/er", "c" + sep + ".." + sep + ".." + sep + "x", "x", "A"},
+		{"absolute link text", "sa" + sep + ".." + sep + ".." + sep + "x", "x", "A"},
+		{"link text that pops a link", "sq" + sep + ".." + sep + "x", filepath.Join("deep", "x"), "D"},
+	} {
+		host := filepath.Join(a, fmt.Sprintf("l%d", i))
+		t.Run(tc.name, func(t *testing.T) {
+			if err := os.Symlink(tc.target, host); err != nil {
+				t.Fatal(err)
+			}
+			if got, err := os.ReadFile(host); err != nil || string(got) != tc.content {
+				t.Fatalf("fixture: host link reads %q err=%v, want %q", got, err, tc.content)
+			}
+			got, err := rewriteSymlinkTarget(context.Background(), src, "a/l", tc.target, nil)
+			if err != nil || got != tc.want {
+				t.Fatalf("rewrite = %q err=%v, want %q", got, err, tc.want)
+			}
+		})
+	}
+}

@@ -472,8 +472,8 @@ func copyFromHandle(ctx context.Context, f *os.File, target string, expectedSize
 }
 
 // rewriteSymlinkTarget applies the snapshot symlink policy (D2 + amendment
-// A1): targets that stay lexically inside the source root keep working
-// inside the clone (relative verbatim; absolute rewritten relative), targets
+// A1): targets that stay inside the source root, with each ".." applied to
+// the physical parent (#660), keep working inside the clone (relative verbatim; absolute rewritten relative), targets
 // outside the root are absolutized so they cannot accidentally point into
 // the scratch hierarchy (resolved when resolvable, lexical when dangling),
 // and dangling links never fail the snapshot.
@@ -482,12 +482,7 @@ func rewriteSymlinkTarget(ctx context.Context, srcRoot, rel, target string, cano
 		return "", err
 	}
 	linkDir := filepath.Dir(filepath.Join(srcRoot, filepath.FromSlash(rel)))
-	var absTarget string
-	if filepath.IsAbs(target) {
-		absTarget = filepath.Clean(target)
-	} else {
-		absTarget = filepath.Clean(filepath.Join(linkDir, target))
-	}
+	absTarget := composeLinkTarget(linkDir, target)
 	inside := func(root, p string) bool {
 		return p == root || strings.HasPrefix(p, root+string(filepath.Separator))
 	}
@@ -542,6 +537,34 @@ func rewriteSymlinkTarget(ctx context.Context, srcRoot, rel, target string, cano
 		return "", fmt.Errorf("tools: incomplete external symlink target %q cannot be proven outside the workspace", rel)
 	}
 	return resolved, nil
+}
+
+// composeLinkTarget joins a symlink's target text onto the directory holding
+// the link as the kernel walks it (#660). The raw prefix through the last
+// ".." is resolved by filepath.EvalSymlinks, which pops each ".." off the
+// physical path and fails (ENOENT, ENOTDIR, ELOOP, ...) where the host's
+// walk would; the components after it carry no ".." and are appended as
+// spelled. A target without "..", or one whose prefix does not resolve (the
+// host link dangles there), is the lexical join, so only links the host
+// resolves change from the pre-#660 rewrite.
+func composeLinkTarget(dir, target string) string {
+	raw := target
+	if !filepath.IsAbs(target) {
+		raw = dir + string(filepath.Separator) + target
+	}
+	parts := strings.Split(filepath.ToSlash(raw), "/")
+	i := len(parts) - 1
+	for i >= 0 && parts[i] != ".." {
+		i--
+	}
+	if i < 0 {
+		return filepath.Clean(raw)
+	}
+	prefix, err := filepath.EvalSymlinks(filepath.FromSlash(strings.Join(parts[:i+1], "/")))
+	if err != nil {
+		return filepath.Clean(raw)
+	}
+	return filepath.Join(prefix, filepath.FromSlash(strings.Join(parts[i+1:], "/")))
 }
 
 // relativeToCanonicalIdentity recognizes aliases of any recorded canonical
