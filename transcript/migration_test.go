@@ -421,7 +421,7 @@ func TestAuditUpgradeIsAtomic(t *testing.T) {
 // TestMigrateCurrentSchemaTakesNoWriteLock: on an up-to-date database the
 // real Open only reads, so it returns at once while another connection holds
 // the write lock. Existing-object CREATE ... IF NOT EXISTS and journal_mode=WAL
-// on a WAL database take no write lock under modernc v1.46.1 (SQLite 3.51.2);
+// on a WAL database take no write lock under modernc v1.46.2 (SQLite 3.51.3);
 // this test pins that.
 func TestMigrateCurrentSchemaTakesNoWriteLock(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "transcript.db")
