@@ -412,12 +412,15 @@ For an external plan, the task driver order is:
 4. Initialize execution, run plan steps and declared gates, and print the same
    route again immediately before review-manifest ingestion.
 5. After the steps and any review amendments, ask `next-action` whether step
-   work remains. AgentFlow's `next-step` returns nothing both when every step is
-   done and when the remaining steps hold open attempts, so if `next-action`
-   still reports an open attempt or an unfinished step (for example an attempt
-   left open by an earlier run), Golem exits 1 without running `finish-run` and
-   points at `-agentflow-resume`. Resume does not yet settle an attempt whose
-   gate already failed (#652).
+   work remains, and continue only from a run-phase state (`run_unverified`,
+   `drift_failing`, `proof_missing`, `proof_stale`, `proof_failing`,
+   `complete`). AgentFlow's `next-step` returns nothing both when every step is
+   done and when the remaining steps hold open attempts, so any other state
+   (for example an attempt left open by an earlier run), or a failed
+   `next-action` call, exits 1 without running `finish-run`. The error names the
+   state and step, and points at `-agentflow-resume` when resume can continue
+   from that state, otherwise at `-agentflow-status`. Resume does not yet settle
+   an attempt whose gate already failed (#652).
 6. Let `finish-run` build and verify proof under the materialized policy.
 
 For a planning-mode handoff, Golem first validates the saved recommendation,
@@ -580,8 +583,8 @@ Still deferred:
   glob/directory ownership, and merge or conflict automation. This is not a
   scheduler or general parallel execution mode.
 
-AgentFlow's `next-action` output is surfaced to the operator on a failed run
-for recovery context, but it is advisory only: Golem prints the suggested
-state, reason, and command, and never executes it. Proof state stays
-entirely adapter-driven, through the same typed calls the driver made on the
-way in.
+Golem reads `next-action`'s state to choose a resume disposition and, before
+`finish-run`, to confirm no step work remains. Its suggested command is
+advisory only: on a failed run Golem prints the state, reason, and command for
+recovery context and never executes the command. Proof state stays entirely
+adapter-driven, through the same typed calls the driver made on the way in.
