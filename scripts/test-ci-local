@@ -105,6 +105,11 @@ if [ -n "${CI_LOCAL_DOCKER_SNAPSHOT-}" ]; then
   mkdir "$snap"
   tar -cf - . | tar -xf - -C "$snap"
 fi
+# Stand in for a long gate: block until the test signals the job.
+if [ "$1" = compose ] && [ -n "${CI_LOCAL_DOCKER_BLOCK-}" ]; then
+  : >"$CI_LOCAL_DOCKER_BLOCK"
+  while :; do sleep 1; done
+fi
 exit "${CI_LOCAL_DOCKER_STATUS:-0}"
 STUB
 chmod +x "$tmp/bin/golangci-lint" "$tmp/bin/go" "$tmp/bin/python3" "$tmp/bin/docker"
@@ -458,7 +463,10 @@ for checkout in "$hook_repo" "$hook_wt"; do
   printf 'func  Dirty(){}\n' >>"$checkout/tracked.go"
 done
 zero=0000000000000000000000000000000000000000
-gate_cmd='compose -f docker-compose.ci.yml run --build --rm ci ./scripts/ci-local --mode full'
+# The gate command, with the container named after the hook's pid so an
+# interrupt can remove it.
+gate_re='^compose -f docker-compose\.ci\.yml run --build --rm --name go-llm-prepush-[0-9][0-9]* ci \./scripts/ci-local --mode full$'
+is_gate_cmd() { printf '%s\n' "$1" | grep -Eq "$gate_re"; }
 
 # run_hook NAME CHECKOUT DOCKER_STATUS runs the hook from CHECKOUT with
 # $tmp/NAME.in as git's stdin, under a hostile umask and a hostile tar.umask
@@ -548,7 +556,10 @@ for docker_status in 0 35; do
   run_hook "hook-update-$docker_status" "$hook_repo" "$docker_status"
   assert_status "hook-update-$docker_status" "$docker_status"
   assert_gate_runs "hook-update-$docker_status" 1
-  test "$(cut -d'|' -f2- "$tmp/hook-update-$docker_status.log")" = "$gate_cmd"
+  if ! is_gate_cmd "$(cut -d'|' -f2- "$tmp/hook-update-$docker_status.log")"; then
+    printf 'hook-update-%s: gate run was %s\n' "$docker_status" "$(cat "$tmp/hook-update-$docker_status.log")" >&2
+    exit 1
+  fi
 done
 
 # A branch and its annotated tag name one tree: one gate run. Two refs at one
@@ -567,7 +578,7 @@ assert_gate_runs hook-dedupe 1
 assert_gated() {
   line="$(sed -n "${2}p" "$tmp/$1.log")"
   cwd="${line%%|*}"
-  if [ "${line#*|}" != "$gate_cmd" ]; then
+  if ! is_gate_cmd "${line#*|}"; then
     printf '%s: gate run %s was %s\n' "$1" "$2" "$line" >&2
     exit 1
   fi
@@ -639,6 +650,58 @@ fixture_git -C "$hook_repo" replace -d "$c1" >/dev/null
 assert_status hook-replace 0
 assert_gate_runs hook-replace 1
 assert_gated hook-replace 1 "$c1"
+
+# Ctrl-C reaches the whole foreground job. compose dies, but its container
+# (no TTY here) would keep running against the removed export, so the hook's
+# INT/TERM traps remove the named container. The job gets its own process
+# group (set -m) and the subshell execs the hook, so the job is the hook.
+printf 'refs/heads/main %s refs/heads/main %s\n' "$c1" "$zero" >"$tmp/hook-interrupt.in"
+for sig in INT TERM; do
+  name="hook-interrupt-$sig"
+  : >"$tmp/$name.log"
+  set -m
+  (
+    cd "$hook_repo"
+    exec env PATH="$tmp/bin:$PATH" CI_LOCAL_TEST_LOG="$tmp/$name.log" CI_LOCAL_DOCKER_BLOCK="$tmp/$name.blocked" \
+      "$repo_root/.githooks/pre-push" origin example.invalid <"$tmp/hook-interrupt.in" >"$tmp/$name.out" 2>&1
+  ) &
+  job=$!
+  set +m
+  waited=0
+  until [ -e "$tmp/$name.blocked" ]; do
+    waited=$((waited + 1))
+    if [ "$waited" -gt 100 ]; then
+      printf '%s: gate never started\n' "$name" >&2
+      kill -s KILL -- "-$job" 2>/dev/null || true
+      exit 1
+    fi
+    sleep 0.1
+  done
+  kill -s "$sig" -- "-$job"
+  set +e
+  wait "$job"
+  ci_status=$?
+  set -e
+  case "$sig" in
+    INT) assert_status "$name" 130 ;;
+    TERM) assert_status "$name" 143 ;;
+  esac
+  run_line="$(sed -n 1p "$tmp/$name.log")"
+  container="$(printf '%s\n' "$run_line" | sed -n 's/.* --name \(go-llm-prepush-[0-9]*\) .*/\1/p')"
+  if ! is_gate_cmd "${run_line#*|}" || [ -z "$container" ]; then
+    printf '%s: gate run was %s\n' "$name" "$run_line" >&2
+    exit 1
+  fi
+  if [ "$(sed -n 2p "$tmp/$name.log" | cut -d'|' -f2-)" != "rm -f $container" ]; then
+    printf '%s: container %s was not removed; docker calls:\n' "$name" "$container" >&2
+    cat "$tmp/$name.log" >&2
+    exit 1
+  fi
+  if [ -e "${run_line%%|*}" ]; then
+    printf '%s: export %s was not removed\n' "$name" "${run_line%%|*}" >&2
+    exit 1
+  fi
+done
 
 mkdir -p "$tmp/misplaced/scripts"
 cp "$script_dir/ci-local" "$tmp/misplaced/scripts/ci-local"

@@ -67,9 +67,13 @@ fi
 # caller's umask or git config.
 umask 022
 work="$(mktemp -d)"
+# An interrupt (Ctrl-C reaches the whole push) kills docker compose, but
+# compose runs without a TTY here and leaves its container running against the
+# export the EXIT trap removes. Name the container so the traps can remove it.
+name="go-llm-prepush-$$"
 trap 'rm -rf "$work"' EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
+trap 'docker rm -f "$name" >/dev/null 2>&1; exit 130' INT
+trap 'docker rm -f "$name" >/dev/null 2>&1; exit 143' TERM
 for tree in $trees; do
   mkdir "$work/$tree"
   # Through a file, not a pipe: sh has no pipefail, and some tar
@@ -79,5 +83,5 @@ for tree in $trees; do
   tar -xf "$work/$tree.tar" -C "$work/$tree"
   rm -f "$work/$tree.tar"
   printf 'pre-push: gating tree %s in %s\n' "$tree" "$work/$tree" >&2
-  (cd "$work/$tree" && docker compose -f docker-compose.ci.yml run --build --rm ci ./scripts/ci-local --mode full)
+  (cd "$work/$tree" && docker compose -f docker-compose.ci.yml run --build --rm --name "$name" ci ./scripts/ci-local --mode full)
 done
