@@ -263,38 +263,131 @@ func TestAgentflowFreshPlanRefusesOpenStepWork_RealCLI(t *testing.T) {
 		t.Fatalf("after run 1: state=%q err=%v, want an open attempt in validation_missing", state.State, err)
 	}
 
-	// Run 2: a fresh -plan through the production entry. The recording caller
-	// proves the model is never asked; an empty scriptCaller alone answers.
-	caller := &recordingCaller{next: &scriptCaller{}}
-	sess := &replSession{orch: agent.New(caller, agent.ContextManager{}), maxSteps: 4, clock: time.Now}
-	var stdout, stderr bytes.Buffer
-	err = runAgentflowTask(ctx, &stdout, &stderr, nil, sess, flags{
-		planPath: planPath, approveEdits: true, approveGates: true,
-		agentflowSrc: os.Getenv("AGENTFLOW_SRC"),
-	}, dir)
-	if !errors.Is(err, errAgentflowTaskFailed) {
-		t.Fatalf("run 2 error = %v, want errAgentflowTaskFailed\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+	// Run 2: a fresh driver over the same tree. The production entry now
+	// refuses this tree before any AgentFlow call (#643), so the driver is
+	// called directly to keep proving #651's post-loop guard against real
+	// AgentFlow.
+	steps := 0
+	second := &driver{
+		af: client, plan: &plan, planPath: planPath,
+		taskBrief: agentflow.TaskBriefFromPlan(plan, "feature"), out: io.Discard,
+		runStep: func(context.Context, agentflow.Step, string, string) error {
+			steps++
+			return nil
+		},
 	}
-	if len(caller.reqs) != 0 {
-		t.Fatalf("run 2 called the model %d times", len(caller.reqs))
+	proof, err := second.run(ctx)
+	if err == nil || proof != "" {
+		t.Fatalf("run 2 proof=%q err=%v, want a refusal", proof, err)
 	}
-	if strings.Contains(stdout.String(), "proof pack:") {
-		t.Fatalf("run 2 reported success:\n%s", stdout.String())
+	if steps != 0 {
+		t.Fatalf("run 2 ran %d steps", steps)
 	}
 	// The refusal must not claim resume can recover: this failed gate is one
 	// resume cannot settle yet (#652). Status reports that verdict.
-	_, refusal, _ := strings.Cut(stderr.String(), "agentflow task failed: ")
-	refusal, _, _ = strings.Cut(refusal, "\n")
-	for _, want := range []string{"still reports step work before finish-run", `state \"validation_missing\" step \"P1\"`} {
-		if !strings.Contains(refusal, want) {
-			t.Fatalf("run 2 refusal %q does not mention %s\nstderr:\n%s", refusal, want, stderr.String())
+	for _, want := range []string{"still reports step work before finish-run", `state "validation_missing" step "P1"`} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("run 2 refusal %q does not mention %s", err, want)
 		}
 	}
-	if !strings.HasSuffix(refusal, "; run -agentflow-status to see whether -agentflow-resume can recover it") {
-		t.Fatalf("run 2 refusal %q, want it to defer the resume verdict to -agentflow-status", refusal)
+	if !strings.HasSuffix(err.Error(), "; run -agentflow-status to see whether -agentflow-resume can recover it") {
+		t.Fatalf("run 2 refusal %q, want it to defer the resume verdict to -agentflow-status", err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, ".agent", "proof-pack.json")); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("proof-pack.json stat err = %v, want it never built", err)
+	}
+}
+
+// #643 T6: a real run to a verified proof, then a second fresh -plan over the
+// same tree, is refused before any AgentFlow call and leaves .agent/
+// byte-identical. Run 1 starts from AgentFlow's real pristine init scaffold,
+// which the guard must accept.
+func TestAgentflowFreshPlanRefusesExecutionHistory_RealCLI(t *testing.T) {
+	dir := t.TempDir()
+	copyTree(t, "../../testdata/agentflow", dir)
+	gitInit(t, dir)
+	runner := agentflowRunnerOrSkip(t, dir)
+	ctx := context.Background()
+	if out, errOut, exit, err := runner.Run(ctx, []string{"init", "--root", dir}, nil); err != nil || exit != 0 {
+		t.Fatalf("agentflow init: exit=%d err=%v stdout=%s stderr=%s", exit, err, out, errOut)
+	}
+	planPath := filepath.Join(dir, "plan.json")
+	taskFlags := flags{planPath: planPath, approveEdits: true, approveGates: true, agentflowSrc: os.Getenv("AGENTFLOW_SRC")}
+
+	write := provider.ChatResponse{ToolCalls: []provider.ToolCall{{
+		ID: "write-1", Type: "function",
+		Function: provider.ToolCallFunction{Name: "write_file", Arguments: json.RawMessage(`{"path":"src/answer.txt","content":"expected\n"}`)},
+	}}}
+	first := &replSession{orch: agent.New(&scriptCaller{responses: []agent.ModelResult{
+		{Response: write},
+		{Response: provider.ChatResponse{Content: "done"}},
+	}}, agent.ContextManager{}), maxSteps: 4, clock: time.Now}
+	var stdout, stderr bytes.Buffer
+	if err := runAgentflowTask(ctx, &stdout, &stderr, nil, first, taskFlags, dir); err != nil {
+		t.Fatalf("run 1: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "proof pack:") {
+		t.Fatalf("run 1 did not finish:\n%s", stdout.String())
+	}
+	if state, err := agentflow.NewClient(runner, dir).NextAction(ctx); err != nil || state.State != "complete" {
+		t.Fatalf("after run 1: state=%q err=%v, want complete", state.State, err)
+	}
+
+	before := snapshotSmokeAgentTree(t, dir)
+	caller := &recordingCaller{next: &scriptCaller{}}
+	second := &replSession{orch: agent.New(caller, agent.ContextManager{}), maxSteps: 4, clock: time.Now}
+	stdout.Reset()
+	stderr.Reset()
+	err := runAgentflowTask(ctx, &stdout, &stderr, nil, second, taskFlags, dir)
+	want := "refusing a fresh -plan run: .agent/ holds AgentFlow execution history (.agent/execution.contract.json); run -agentflow-status to see whether -agentflow-resume can continue it, or move .agent/ aside to start over"
+	if err == nil || err.Error() != want {
+		t.Fatalf("run 2 err = %v\nwant %s", err, want)
+	}
+	if len(caller.reqs) != 0 || strings.Contains(stdout.String(), "proof pack:") {
+		t.Fatalf("run 2 reached the model (%d requests) or reported success:\n%s", len(caller.reqs), stdout.String())
+	}
+	if after := snapshotSmokeAgentTree(t, dir); !reflect.DeepEqual(after, before) {
+		t.Fatal("run 2 changed .agent/")
+	}
+
+	// Run 3: the documented post-run review round, -plan with the same plan
+	// and a review manifest, still proceeds over the history (the #643 review
+	// exemption). The manifest has no findings, so no amendment and no model
+	// call; the run re-runs finish-run to a proof.
+	stateDir := filepath.Join(".agent", "review-contract")
+	if err := os.MkdirAll(filepath.Join(dir, stateDir), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, stateDir, "findings-final.json"), []byte(`{"findings":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := json.Marshal(map[string]any{
+		"schema_version": "1.0.0", "review_run_id": "RR-20261010T120000Z-643a643b",
+		"state_dir": stateDir, "gate_status": "pass", "active_blocking": []string{},
+		"depth_profile": "none", "amendment_ready": true,
+		"findings":  map[string]any{"counts_by_severity": map[string]int{}, "counts_by_status": map[string]int{}, "index": []any{}},
+		"artifacts": []map[string]string{{"path": "findings-final.json"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reviewFlags := taskFlags
+	reviewFlags.reviewManifest = filepath.Join(dir, stateDir, "review-manifest.json")
+	if err := os.WriteFile(reviewFlags.reviewManifest, manifest, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	reviewCaller := &recordingCaller{next: &scriptCaller{}}
+	third := &replSession{orch: agent.New(reviewCaller, agent.ContextManager{}), maxSteps: 4, clock: time.Now}
+	stdout.Reset()
+	stderr.Reset()
+	if err := runAgentflowTask(ctx, &stdout, &stderr, nil, third, reviewFlags, dir); err != nil {
+		t.Fatalf("run 3 (review round over the same plan): %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "review RR-20261010T120000Z-643a643b") || !strings.Contains(stdout.String(), "proof pack:") || len(reviewCaller.reqs) != 0 {
+		t.Fatalf("run 3 did not record the review and finish (model requests %d):\n%s", len(reviewCaller.reqs), stdout.String())
+	}
+	if state, err := agentflow.NewClient(runner, dir).NextAction(ctx); err != nil || state.State != "complete" {
+		t.Fatalf("after run 3: state=%q err=%v, want complete", state.State, err)
 	}
 }
 
