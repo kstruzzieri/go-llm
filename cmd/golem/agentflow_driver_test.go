@@ -332,7 +332,7 @@ func TestDriver_RefusesFinishRunWhileStepWorkRemains(t *testing.T) {
 func TestDriver_FinishRunGateByNextActionState(t *testing.T) {
 	// Resume's verdict needs its owned projection, so the refusal never
 	// predicts it: every refusal sends the user to status, which runs resume's
-	// checks and reports whether resume can recover.
+	// state and projection checks and reports whether resume can recover.
 	const hint = "; run -agentflow-status to see whether -agentflow-resume can recover it"
 	for _, tt := range []struct {
 		state   string

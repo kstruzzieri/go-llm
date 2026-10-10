@@ -419,8 +419,9 @@ For an external plan, the task driver order is:
    (for example an attempt left open by an earlier run), or a failed
    `next-action` call, exits 1 without running `finish-run`. The error names the
    state and step and sends you to `-agentflow-status`, which runs resume's
-   checks and reports whether `-agentflow-resume` can recover. An attempt whose
-   gate already failed is one resume cannot settle yet (#652).
+   state and projection checks (not its plan and contract bindings, which need
+   the supplied `-plan`) and reports whether `-agentflow-resume` can recover.
+   An attempt whose gate already failed is one resume cannot settle yet (#652).
 6. Let `finish-run` build and verify proof under the materialized policy.
 
 For a planning-mode handoff, Golem first validates the saved recommendation,

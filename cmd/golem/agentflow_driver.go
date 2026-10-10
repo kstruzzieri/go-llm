@@ -229,9 +229,9 @@ func (d *driver) requireNoStepWork(ctx context.Context) error {
 	if state.StepID != nil {
 		where += fmt.Sprintf(" step %q", *state.StepID)
 	}
-	// Resume's verdict needs its owned projection (agent, recovery actions,
-	// digests), which this unowned query lacks, so the refusal defers it to
-	// -agentflow-status rather than predicting it.
+	// Resume's verdict needs its owned projection (agent identity and that
+	// agent's recovery actions), which this unowned query lacks, so the
+	// refusal defers it to -agentflow-status rather than predicting it.
 	return fmt.Errorf("agentflow still reports step work before finish-run: %s; no proof was built; run -agentflow-status to see whether -agentflow-resume can recover it", where)
 }
 
