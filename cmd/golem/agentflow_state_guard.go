@@ -89,6 +89,12 @@ func agentflowExecutionHistory(root string) (string, error) {
 	return "", nil
 }
 
+// executionHistoryRefusal is the one refusal both fresh entries print, so
+// task mode and -goal cannot drift (#643 S4).
+func executionHistoryRefusal(prefix, artifact string) error {
+	return fmt.Errorf("%s: .agent/ holds AgentFlow execution history (%s); run -agentflow-status to see whether -agentflow-resume can continue it, or move .agent/ aside to start over", prefix, artifact)
+}
+
 // readAgentflowState reads only regular files and returns nil, nil for an absent
 // file. The Unix open is nonblocking so a FIFO cannot stall the guard before
 // the opened file's type is checked.

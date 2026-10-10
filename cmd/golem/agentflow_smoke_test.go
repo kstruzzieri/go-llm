@@ -263,35 +263,35 @@ func TestAgentflowFreshPlanRefusesOpenStepWork_RealCLI(t *testing.T) {
 		t.Fatalf("after run 1: state=%q err=%v, want an open attempt in validation_missing", state.State, err)
 	}
 
-	// Run 2: a fresh -plan through the production entry. The recording caller
-	// proves the model is never asked; an empty scriptCaller alone answers.
-	caller := &recordingCaller{next: &scriptCaller{}}
-	sess := &replSession{orch: agent.New(caller, agent.ContextManager{}), maxSteps: 4, clock: time.Now}
-	var stdout, stderr bytes.Buffer
-	err = runAgentflowTask(ctx, &stdout, &stderr, nil, sess, flags{
-		planPath: planPath, approveEdits: true, approveGates: true,
-		agentflowSrc: os.Getenv("AGENTFLOW_SRC"),
-	}, dir)
-	if !errors.Is(err, errAgentflowTaskFailed) {
-		t.Fatalf("run 2 error = %v, want errAgentflowTaskFailed\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+	// Run 2: a fresh driver over the same tree. The production entry now
+	// refuses this tree before any AgentFlow call (#643), so the driver is
+	// called directly to keep proving #651's post-loop guard against real
+	// AgentFlow.
+	steps := 0
+	second := &driver{
+		af: client, plan: &plan, planPath: planPath,
+		taskBrief: agentflow.TaskBriefFromPlan(plan, "feature"), out: io.Discard,
+		runStep: func(context.Context, agentflow.Step, string, string) error {
+			steps++
+			return nil
+		},
 	}
-	if len(caller.reqs) != 0 {
-		t.Fatalf("run 2 called the model %d times", len(caller.reqs))
+	proof, err := second.run(ctx)
+	if err == nil || proof != "" {
+		t.Fatalf("run 2 proof=%q err=%v, want a refusal", proof, err)
 	}
-	if strings.Contains(stdout.String(), "proof pack:") {
-		t.Fatalf("run 2 reported success:\n%s", stdout.String())
+	if steps != 0 {
+		t.Fatalf("run 2 ran %d steps", steps)
 	}
 	// The refusal must not claim resume can recover: this failed gate is one
 	// resume cannot settle yet (#652). Status reports that verdict.
-	_, refusal, _ := strings.Cut(stderr.String(), "agentflow task failed: ")
-	refusal, _, _ = strings.Cut(refusal, "\n")
-	for _, want := range []string{"still reports step work before finish-run", `state \"validation_missing\" step \"P1\"`} {
-		if !strings.Contains(refusal, want) {
-			t.Fatalf("run 2 refusal %q does not mention %s\nstderr:\n%s", refusal, want, stderr.String())
+	for _, want := range []string{"still reports step work before finish-run", `state "validation_missing" step "P1"`} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("run 2 refusal %q does not mention %s", err, want)
 		}
 	}
-	if !strings.HasSuffix(refusal, "; run -agentflow-status to see whether -agentflow-resume can recover it") {
-		t.Fatalf("run 2 refusal %q, want it to defer the resume verdict to -agentflow-status", refusal)
+	if !strings.HasSuffix(err.Error(), "; run -agentflow-status to see whether -agentflow-resume can recover it") {
+		t.Fatalf("run 2 refusal %q, want it to defer the resume verdict to -agentflow-status", err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, ".agent", "proof-pack.json")); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("proof-pack.json stat err = %v, want it never built", err)

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -281,5 +282,157 @@ func TestAgentflowExecutionHistory(t *testing.T) {
 				t.Fatalf("agentflowExecutionHistory = %q, %v; want %q", got, err, tt.want)
 			}
 		})
+	}
+}
+
+// runFreshTaskOverFixture runs task mode against root with a fake AgentFlow on
+// PATH and returns the error and the fake's call log path.
+func runFreshTaskOverFixture(t *testing.T, root string, f flags) (calls string, err error) {
+	t.Helper()
+	calls = fakeAgentflowOnPath(t, "1.0.0")
+	if f.planPath == "" {
+		planBytes, err := json.Marshal(agentflow.Compile(validTraceableIR()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.planPath = filepath.Join(t.TempDir(), "plan.json")
+		if err := os.WriteFile(f.planPath, planBytes, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f.approveEdits, f.approveGates = true, true
+	sess := &replSession{orch: agent.New(&scriptCaller{}, agent.ContextManager{})}
+	var stdout, stderr bytes.Buffer
+	return calls, runAgentflowTask(context.Background(), &stdout, &stderr, nil, sess, f, root)
+}
+
+// #643 T2: a fresh -plan refuses retained execution history before any
+// AgentFlow call and leaves .agent/ byte-identical; R5's incompatible-state
+// refusal keeps precedence; a missing .agent/ and the pristine scaffold still
+// reach AgentFlow.
+func TestRunAgentflowTask_FreshPlanRefusesExecutionHistory(t *testing.T) {
+	const r5 = "this workspace holds incompatible AgentFlow state (%s unreadable); finish that run, or build its proof, with the AgentFlow version that wrote it, then move .agent/ aside before starting an AgentFlow 1.x run"
+	const history = "refusing a fresh -plan run: .agent/ holds AgentFlow execution history (%s); run -agentflow-status to see whether -agentflow-resume can continue it, or move .agent/ aside to start over"
+	type file struct{ name, body string }
+	for _, tt := range []struct {
+		name  string
+		files []file
+		dirs  []string
+		want  string // "" means the run must reach AgentFlow
+	}{
+		{name: "history: contract", files: []file{{"plan.lock.json", v1Lock}, {"execution.contract.json", v1Contract}},
+			want: fmt.Sprintf(history, ".agent/execution.contract.json")},
+		{name: "history: step runs", files: []file{{"plan.lock.json", v1Lock}, {"step-runs.jsonl", v1Row + "\n"}},
+			want: fmt.Sprintf(history, ".agent/step-runs.jsonl has 1 entries")},
+		{name: "precedence: empty contract", files: []file{{"plan.lock.json", v1Lock}, {"execution.contract.json", ""}},
+			want: fmt.Sprintf(r5, ".agent/execution.contract.json")},
+		{name: "precedence: malformed row", files: []file{{"step-runs.jsonl", "{\n"}},
+			want: fmt.Sprintf(r5, ".agent/step-runs.jsonl:1")},
+		{name: "precedence: contract is a directory", dirs: []string{"execution.contract.json"},
+			want: fmt.Sprintf(r5, ".agent/execution.contract.json")},
+		{name: "proceeds: no .agent"},
+		{name: "proceeds: pristine scaffold", files: []file{{"scaffold", ""}}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			for _, f := range tt.files {
+				if f.name == "scaffold" {
+					writePristineScaffold(t, root)
+					continue
+				}
+				writeAgentFile(t, root, f.name, f.body)
+			}
+			for _, d := range tt.dirs {
+				if err := os.MkdirAll(filepath.Join(root, ".agent", d), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var before map[string]auditFixtureEntry
+			if len(tt.files)+len(tt.dirs) > 0 {
+				before = snapshotAuditFixtureTree(t, filepath.Join(root, ".agent"))
+			}
+			calls, err := runFreshTaskOverFixture(t, root, flags{})
+			if tt.want == "" {
+				if err != nil && strings.Contains(err.Error(), "execution history") {
+					t.Fatalf("history guard refused a fresh workspace: %v", err)
+				}
+				if _, statErr := os.Stat(calls); statErr != nil {
+					t.Fatalf("run never reached AgentFlow (err=%v)", err)
+				}
+				return
+			}
+			if err == nil || err.Error() != tt.want {
+				t.Fatalf("err = %v\nwant %s", err, tt.want)
+			}
+			if _, statErr := os.Stat(calls); !os.IsNotExist(statErr) {
+				got, _ := os.ReadFile(calls)
+				t.Fatalf("AgentFlow ran before the guard: %q", got)
+			}
+			if after := snapshotAuditFixtureTree(t, filepath.Join(root, ".agent")); !reflect.DeepEqual(after, before) {
+				t.Fatal("refusal changed .agent/")
+			}
+		})
+	}
+}
+
+// #643 T3: the -goal handoff state (locked plan, materialized workflow
+// contract, no execution contract) passes the handoff bindings and the history
+// guard, so the printed "execute separately" command keeps working.
+func TestRunAgentflowTask_HandoffStatePassesHistoryGuard(t *testing.T) {
+	root := t.TempDir()
+	plan := agentflow.Compile(validTraceableIR())
+	planBytes, err := json.Marshal(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	planPath := filepath.Join(t.TempDir(), "plan.json")
+	if err := os.WriteFile(planPath, planBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	recommendation := defaultWorkflowRecommendation()
+	handoffPath, err := saveApprovedWorkflowHandoff(root, plan, agentflow.TaskBriefFromPlan(plan, "feature"), recommendation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	contract, err := json.Marshal(recommendation.Contract)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeAgentFile(t, root, "workflow.contract.json", string(contract))
+	var locked map[string]any
+	if err := json.Unmarshal(planBytes, &locked); err != nil {
+		t.Fatal(err)
+	}
+	locked["locked"] = true
+	lockBytes, err := json.Marshal(locked)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeAgentFile(t, root, "plan.lock.json", string(lockBytes))
+	writeAgentFile(t, root, "evidence.jsonl", "")
+
+	calls, err := runFreshTaskOverFixture(t, root, flags{planPath: planPath, workflowHandoffPath: handoffPath})
+	if err != nil && (strings.Contains(err.Error(), "execution history") || strings.Contains(err.Error(), "approved workflow handoff")) {
+		t.Fatalf("handoff state was refused before AgentFlow: %v", err)
+	}
+	if _, statErr := os.Stat(calls); statErr != nil {
+		t.Fatalf("handoff run never reached AgentFlow (err=%v)", err)
+	}
+}
+
+// #643 T4: resume is the recovery path, so the fresh-run history guard must
+// not refuse it.
+func TestRunAgentflowTask_ResumeIsNotRefusedByHistoryGuard(t *testing.T) {
+	root := t.TempDir()
+	writeAgentFile(t, root, "plan.lock.json", v1Lock)
+	writeAgentFile(t, root, "execution.contract.json", v1Contract)
+	writeAgentFile(t, root, "step-runs.jsonl", v1Row+"\n")
+	calls, err := runFreshTaskOverFixture(t, root, flags{agentflowResume: true})
+	if err != nil && strings.Contains(err.Error(), "execution history") {
+		t.Fatalf("resume was refused by the fresh-run guard: %v", err)
+	}
+	got, readErr := os.ReadFile(calls)
+	if readErr != nil || !strings.Contains(string(got), "--version") {
+		t.Fatalf("resume never reached the AgentFlow version probe: calls=%q err=%v runErr=%v", got, readErr, err)
 	}
 }
