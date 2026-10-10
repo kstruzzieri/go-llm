@@ -281,7 +281,7 @@ func TestAgentflowFreshPlanRefusesOpenStepWork_RealCLI(t *testing.T) {
 	if strings.Contains(stdout.String(), "proof pack:") {
 		t.Fatalf("run 2 reported success:\n%s", stdout.String())
 	}
-	for _, want := range []string{"validation_missing", "-agentflow-resume"} {
+	for _, want := range []string{"still reports step work before finish-run", `state \"validation_missing\" step \"P1\"`, "-agentflow-resume"} {
 		if !strings.Contains(stderr.String(), want) {
 			t.Fatalf("run 2 stderr does not mention %s:\n%s", want, stderr.String())
 		}

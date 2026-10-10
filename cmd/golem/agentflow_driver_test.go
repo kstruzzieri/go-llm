@@ -330,27 +330,31 @@ func TestDriver_RefusesFinishRunWhileStepWorkRemains(t *testing.T) {
 }
 
 func TestDriver_FinishRunGateByNextActionState(t *testing.T) {
+	// hint is the recovery advice a refusal must carry: resume only for the
+	// states resume can continue from, status otherwise.
+	const resume, status = "recover with -agentflow-resume", "inspect with -agentflow-status"
 	for _, tt := range []struct {
 		state   string
 		proceed bool
+		hint    string
 	}{
-		{"run_unverified", true},
-		{"drift_failing", true},
-		{"proof_missing", true},
-		{"proof_stale", true},
-		{"proof_failing", true},
-		{"complete", true},
-		{"step_unclaimed", false},
-		{"file_receipts_missing", false},
-		{"validation_missing", false},
-		{"step_unverified", false},
-		{"step_uncompleted", false},
-		{"state_invalid", false},
-		{"uninitialized", false},
-		{"plan_unlocked", false},
-		{"execution_uninitialized", false},
-		{"", false},
-		{"some_future_state", false},
+		{"run_unverified", true, ""},
+		{"drift_failing", true, ""},
+		{"proof_missing", true, ""},
+		{"proof_stale", true, ""},
+		{"proof_failing", true, ""},
+		{"complete", true, ""},
+		{"step_unclaimed", false, resume},
+		{"validation_missing", false, resume},
+		{"step_unverified", false, resume},
+		{"step_uncompleted", false, resume},
+		{"file_receipts_missing", false, status},
+		{"state_invalid", false, status},
+		{"uninitialized", false, status},
+		{"plan_unlocked", false, status},
+		{"execution_uninitialized", false, status},
+		{"", false, status},
+		{"some_future_state", false, status},
 	} {
 		t.Run("state="+tt.state, func(t *testing.T) {
 			af := &fakeAF{nextActions: []agentflow.NextActionState{{State: tt.state}}}
@@ -366,8 +370,12 @@ func TestDriver_FinishRunGateByNextActionState(t *testing.T) {
 				}
 				return
 			}
-			if err == nil || proof != "" || slices.Contains(af.seq, "finish-run") {
-				t.Fatalf("proof=%q err=%v seq=%v, want a refusal before finish-run", proof, err, af.seq)
+			if err == nil || !strings.Contains(err.Error(), "still reports step work") || proof != "" ||
+				af.seq[len(af.seq)-1] != "next-action" || slices.Contains(af.seq, "finish-run") {
+				t.Fatalf("proof=%q err=%v seq=%v, want the guard's refusal after next-action", proof, err, af.seq)
+			}
+			if !strings.Contains(err.Error(), tt.hint) || tt.hint == status && strings.Contains(err.Error(), "-agentflow-resume") {
+				t.Fatalf("error %q, want recovery hint %q only", err, tt.hint)
 			}
 		})
 	}

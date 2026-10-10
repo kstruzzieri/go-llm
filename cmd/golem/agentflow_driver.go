@@ -229,7 +229,11 @@ func (d *driver) requireNoStepWork(ctx context.Context) error {
 	if state.StepID != nil {
 		where += fmt.Sprintf(" step %q", *state.StepID)
 	}
-	return fmt.Errorf("agentflow still reports step work before finish-run: %s; no proof was built; recover with -agentflow-resume", where)
+	hint := "inspect with -agentflow-status"
+	if resumeDisposition(state.State).action == resumeSerial {
+		hint = "recover with -agentflow-resume"
+	}
+	return fmt.Errorf("agentflow still reports step work before finish-run: %s; no proof was built; %s", where, hint)
 }
 
 func (d *driver) runSerialSteps(ctx context.Context) error {
