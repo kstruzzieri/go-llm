@@ -24,8 +24,7 @@ var (
 // (#612 R5). Absent files and empty ledgers pass. The drift report and proof
 // pack are not checked (finish regenerates the first; the second has its own
 // historical rule). ponytail: a preflight for one operator, not a lock against
-// a concurrent writer; lock .agent/ if concurrent runs ever matter (relock
-// policy is #643).
+// a concurrent writer; lock .agent/ if concurrent runs ever matter.
 func checkAgentflowStateMajor(root string) error {
 	dir := filepath.Join(root, ".agent")
 	for _, name := range agentflowStateDocs {
@@ -89,10 +88,17 @@ func agentflowExecutionHistory(root string) (string, error) {
 	return "", nil
 }
 
-// executionHistoryRefusal is the one refusal both fresh entries print, so
-// task mode and -goal cannot drift (#643 S4).
-func executionHistoryRefusal(prefix, artifact string) error {
-	return fmt.Errorf("%s: .agent/ holds AgentFlow execution history (%s); run -agentflow-status to see whether -agentflow-resume can continue it, or move .agent/ aside to start over", prefix, artifact)
+// refuseAgentflowExecutionHistory is the one check both fresh entries run, so
+// task mode and -goal cannot drift (#643 S2, S4).
+func refuseAgentflowExecutionHistory(root, prefix string) error {
+	history, err := agentflowExecutionHistory(root)
+	if err != nil {
+		return err
+	}
+	if history == "" {
+		return nil
+	}
+	return fmt.Errorf("%s: .agent/ holds AgentFlow execution history (%s); run -agentflow-status to see whether -agentflow-resume can continue it, or move .agent/ aside to start over", prefix, history)
 }
 
 // readAgentflowState reads only regular files and returns nil, nil for an absent

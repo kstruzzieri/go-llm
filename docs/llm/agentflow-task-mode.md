@@ -80,7 +80,9 @@ silently replacing or inheriting the human-approved route. For scripted or CI
 use,
 `-approve-plan-lock` prints the same preview and approves the lock without
 prompting. `-goal` never executes the plan or edits source files, and it refuses
-to replace a locked plan, a non-empty draft, or an unrecognized plan file.
+to replace a locked plan, a non-empty draft, or an unrecognized plan file, and
+to plan over a workspace that holds AgentFlow execution history (see
+"Re-running a plan").
 
 Golem planning mode compiles plan schema `1.0.0`, and task mode requires a plan
 whose `schema_version` major is 1. A plan written for AgentFlow 0.x (`0.3.0` or
@@ -416,7 +418,7 @@ For an external plan, the task driver order is:
    `drift_failing`, `proof_missing`, `proof_stale`, `proof_failing`,
    `complete`). AgentFlow's `next-step` returns nothing both when every step is
    done and when the remaining steps hold open attempts, so any other state
-   (for example an attempt left open by an earlier run), or a failed
+   (for example an attempt another writer opened during the run), or a failed
    `next-action` call, exits 1 without running `finish-run`. The error names the
    state and step and sends you to `-agentflow-status`, which runs resume's
    state and projection checks (not its plan and contract bindings, which need

@@ -315,10 +315,11 @@ func TestRunAgentflowTask_FreshPlanRefusesExecutionHistory(t *testing.T) {
 	const history = "refusing a fresh -plan run: .agent/ holds AgentFlow execution history (%s); run -agentflow-status to see whether -agentflow-resume can continue it, or move .agent/ aside to start over"
 	type file struct{ name, body string }
 	for _, tt := range []struct {
-		name  string
-		files []file
-		dirs  []string
-		want  string // "" means the run must reach AgentFlow
+		name     string
+		scaffold bool
+		files    []file
+		dirs     []string
+		want     string // "" means the run must reach AgentFlow
 	}{
 		{name: "history: contract", files: []file{{"plan.lock.json", v1Lock}, {"execution.contract.json", v1Contract}},
 			want: fmt.Sprintf(history, ".agent/execution.contract.json")},
@@ -331,15 +332,14 @@ func TestRunAgentflowTask_FreshPlanRefusesExecutionHistory(t *testing.T) {
 		{name: "precedence: contract is a directory", dirs: []string{"execution.contract.json"},
 			want: fmt.Sprintf(r5, ".agent/execution.contract.json")},
 		{name: "proceeds: no .agent"},
-		{name: "proceeds: pristine scaffold", files: []file{{"scaffold", ""}}},
+		{name: "proceeds: pristine scaffold", scaffold: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			root := t.TempDir()
+			if tt.scaffold {
+				writePristineScaffold(t, root)
+			}
 			for _, f := range tt.files {
-				if f.name == "scaffold" {
-					writePristineScaffold(t, root)
-					continue
-				}
 				writeAgentFile(t, root, f.name, f.body)
 			}
 			for _, d := range tt.dirs {
@@ -348,7 +348,7 @@ func TestRunAgentflowTask_FreshPlanRefusesExecutionHistory(t *testing.T) {
 				}
 			}
 			var before map[string]auditFixtureEntry
-			if len(tt.files)+len(tt.dirs) > 0 {
+			if tt.scaffold || len(tt.files)+len(tt.dirs) > 0 {
 				before = snapshotAuditFixtureTree(t, filepath.Join(root, ".agent"))
 			}
 			calls, err := runFreshTaskOverFixture(t, root, flags{})
@@ -376,21 +376,20 @@ func TestRunAgentflowTask_FreshPlanRefusesExecutionHistory(t *testing.T) {
 }
 
 // #643 T3: the -goal handoff state (locked plan, materialized workflow
-// contract, no execution contract) passes the handoff bindings and the history
-// guard, so the printed "execute separately" command keeps working.
+// contract, saved task brief, no execution contract) passes the handoff
+// bindings and the history guard when run the way -goal's "execute
+// separately" line prints it: -plan .agent/plan.lock.json with -task-brief
+// and -workflow-handoff (agentflow_author.go, the lockedPath branch).
 func TestRunAgentflowTask_HandoffStatePassesHistoryGuard(t *testing.T) {
 	root := t.TempDir()
 	plan := agentflow.Compile(validTraceableIR())
-	planBytes, err := json.Marshal(plan)
+	brief := agentflow.TaskBriefFromPlan(plan, "feature")
+	recommendation := defaultWorkflowRecommendation()
+	handoffPath, err := saveApprovedWorkflowHandoff(root, plan, brief, recommendation)
 	if err != nil {
 		t.Fatal(err)
 	}
-	planPath := filepath.Join(t.TempDir(), "plan.json")
-	if err := os.WriteFile(planPath, planBytes, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	recommendation := defaultWorkflowRecommendation()
-	handoffPath, err := saveApprovedWorkflowHandoff(root, plan, agentflow.TaskBriefFromPlan(plan, "feature"), recommendation)
+	briefPath, err := saveApprovedTaskBrief(root, brief)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -399,11 +398,16 @@ func TestRunAgentflowTask_HandoffStatePassesHistoryGuard(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeAgentFile(t, root, "workflow.contract.json", string(contract))
+	planBytes, err := json.Marshal(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
 	var locked map[string]any
 	if err := json.Unmarshal(planBytes, &locked); err != nil {
 		t.Fatal(err)
 	}
 	locked["locked"] = true
+	locked["locked_at"] = "2026-10-10T00:00:00+00:00"
 	lockBytes, err := json.Marshal(locked)
 	if err != nil {
 		t.Fatal(err)
@@ -411,8 +415,10 @@ func TestRunAgentflowTask_HandoffStatePassesHistoryGuard(t *testing.T) {
 	writeAgentFile(t, root, "plan.lock.json", string(lockBytes))
 	writeAgentFile(t, root, "evidence.jsonl", "")
 
-	calls, err := runFreshTaskOverFixture(t, root, flags{planPath: planPath, workflowHandoffPath: handoffPath})
-	if err != nil && (strings.Contains(err.Error(), "execution history") || strings.Contains(err.Error(), "approved workflow handoff")) {
+	calls, err := runFreshTaskOverFixture(t, root, flags{
+		planPath: filepath.Join(root, ".agent", "plan.lock.json"), taskBriefPath: briefPath, workflowHandoffPath: handoffPath,
+	})
+	if err != nil && (strings.Contains(err.Error(), "execution history") || strings.Contains(err.Error(), "handoff") || strings.Contains(err.Error(), "task brief")) {
 		t.Fatalf("handoff state was refused before AgentFlow: %v", err)
 	}
 	if _, statErr := os.Stat(calls); statErr != nil {
@@ -454,6 +460,8 @@ func TestRunAgentflowAuthor_RefusesExecutionHistory(t *testing.T) {
 		{name: "no lock, step runs", ledger: [2]string{"step-runs.jsonl", v1Row + "\n"}, want: fmt.Sprintf(history, ".agent/step-runs.jsonl has 1 entries")},
 		{name: "scaffold, contract", scaffold: true, ledger: [2]string{"execution.contract.json", v1Contract}, want: fmt.Sprintf(history, ".agent/execution.contract.json")},
 		{name: "scaffold, step runs", scaffold: true, ledger: [2]string{"step-runs.jsonl", v1Row + "\n"}, want: fmt.Sprintf(history, ".agent/step-runs.jsonl has 1 entries")},
+		{name: "locked plan, history", lock: v1Lock, ledger: [2]string{"step-runs.jsonl", v1Row + "\n"}, want: fmt.Sprintf(history, ".agent/step-runs.jsonl has 1 entries")},
+		{name: "0.x contract keeps R5", ledger: [2]string{"execution.contract.json", `{"schema_version":"0.3.0"}`}, want: "r5"},
 		{name: "locked plan, no history", lock: v1Lock, want: "already locked"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -472,12 +480,19 @@ func TestRunAgentflowAuthor_RefusesExecutionHistory(t *testing.T) {
 			caller := &scriptCaller{responses: []agent.ModelResult{submitPlanCall(validIRJSON(t))}}
 			client := &stubLocker{}
 			err := runAgentflowAuthorWithClient(context.Background(), &bytes.Buffer{}, &bytes.Buffer{}, nil, newTestSession(t, caller, root), flags{goal: "x", goalSet: true}, root, client, nil)
-			if tt.want == "already locked" {
+			switch tt.want {
+			case "already locked":
 				if err == nil || !strings.Contains(err.Error(), "is already locked") {
 					t.Fatalf("err = %v, want the locked-plan refusal", err)
 				}
-			} else if err == nil || err.Error() != tt.want {
-				t.Fatalf("err = %v\nwant %s", err, tt.want)
+			case "r5":
+				if err == nil || !strings.HasPrefix(err.Error(), `this workspace holds incompatible AgentFlow state (.agent/execution.contract.json schema_version "0.3.0")`) {
+					t.Fatalf("err = %v, want R5's incompatible-state refusal", err)
+				}
+			default:
+				if err == nil || err.Error() != tt.want {
+					t.Fatalf("err = %v\nwant %s", err, tt.want)
+				}
 			}
 			if client.probes+client.workflowProbes+client.recommendations+client.inits+client.locks+client.materializations != 0 || len(client.sequence) != 0 || caller.i != 0 {
 				t.Fatalf("refusal reached AgentFlow or the model: client=%+v model=%d", client, caller.i)

@@ -570,12 +570,8 @@ func runAgentflowTask(ctx context.Context, stdout, stderr io.Writer, interrupts 
 	// #643: a fresh run must not relock over retained execution state; resume
 	// is the recovery path for it.
 	if !f.agentflowResume {
-		history, err := agentflowExecutionHistory(root)
-		if err != nil {
+		if err := refuseAgentflowExecutionHistory(root, "refusing a fresh -plan run"); err != nil {
 			return err
-		}
-		if history != "" {
-			return executionHistoryRefusal("refusing a fresh -plan run", history)
 		}
 	}
 	evidence, err := readEvidenceSidecar(f.evidencePath)
