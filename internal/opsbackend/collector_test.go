@@ -999,7 +999,7 @@ func TestCollectorWorkerPanicReachesTheCaller(t *testing.T) {
 	clock.Mono = func() time.Duration {
 		// Panic once, on the first reading taken while reading the backend,
 		// never on one of Tick's own.
-		if strings.Contains(string(debug.Stack()), ").pollBackend(") && armed.CompareAndSwap(true, false) {
+		if armed.Load() && strings.Contains(string(debug.Stack()), ").pollBackend(") && armed.CompareAndSwap(true, false) {
 			panic("worker clock")
 		}
 		return mono()
