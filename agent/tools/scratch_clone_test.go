@@ -982,3 +982,64 @@ func TestCloneTreeDanglingChainDotDotThroughSymlinkStaysIsolated(t *testing.T) {
 		t.Fatalf("fixture: host link must resolve to project/created.txt, got %q err=%v", got, err)
 	}
 }
+
+// TestCloneTreeDanglingChainOntoExistingExternalObjectFailsClosed pins the
+// external gates for a chain that dangles midway but names an existing
+// object (#660 review): ext/leaf -> missing/../<name> dangles on the host,
+// and its lexical composition is the existing ext/<name>. Reporting it
+// incomplete skipped the regular-file and link-count gates and linked the
+// reference to an external directory or a shared file.
+func TestCloneTreeDanglingChainOntoExistingExternalObjectFailsClosed(t *testing.T) {
+	if !scratchIdentitySupported {
+		t.Skip("incomplete external targets are rejected outright without file identity")
+	}
+	for _, tc := range []struct {
+		name, want string
+		make       func(t *testing.T, ext string)
+	}{
+		{"directory", "is not a regular file", func(t *testing.T, ext string) {
+			if err := os.Mkdir(filepath.Join(ext, "obj"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"multiply linked file", "has no provably unrelated identity", func(t *testing.T, ext string) {
+			if err := os.WriteFile(filepath.Join(ext, "obj"), []byte("x"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Link(filepath.Join(ext, "obj"), filepath.Join(ext, "twin")); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			parent, err := CanonicalWorkspaceRoot(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			src, ext := filepath.Join(parent, "project"), filepath.Join(parent, "ext")
+			for _, d := range []string{src, ext} {
+				if err := os.Mkdir(d, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			tc.make(t, ext)
+			sep := string(filepath.Separator)
+			leaf := filepath.Join(ext, "leaf")
+			if err := os.Symlink("missing"+sep+".."+sep+"obj", leaf); err != nil {
+				t.Skipf("symlinks unsupported: %v", err)
+			}
+			if err := os.Symlink(leaf, filepath.Join(src, "through")); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Stat(filepath.Join(src, "through")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("fixture: host link must dangle, stat err=%v", err)
+			}
+			dst := filepath.Join(t.TempDir(), "clone")
+			_, err = snapshotCanonical(context.Background(), src, dst, cloneFixtureConfig(), cloneFile)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				target, _ := os.Readlink(filepath.Join(dst, "through"))
+				t.Fatalf("snapshot err=%v (clone target %q), want %q", err, target, tc.want)
+			}
+		})
+	}
+}

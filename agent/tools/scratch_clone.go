@@ -599,11 +599,12 @@ func relativeToCanonicalIdentity(ctx context.Context, target string, canonicalEn
 
 // resolveSymlinkTarget resolves every existing symlink component while
 // preserving a missing suffix. filepath.EvalSymlinks alone cannot resolve a
-// dangling link whose target itself passes through a workspace alias.
+// dangling link whose target itself passes through a workspace alias. The
+// bool reports whether the final path exists: a chain that dangles midway
+// but names an existing object is complete, so the external gates apply.
 func resolveSymlinkTarget(ctx context.Context, target string) (string, bool, error) {
 	const maxDanglingLinks = 255
 	current := filepath.Clean(target)
-	complete := true
 	var suffix []string
 	for links := 0; ; {
 		if err := ctx.Err(); err != nil {
@@ -617,12 +618,11 @@ func resolveSymlinkTarget(ctx context.Context, target string) (string, bool, err
 			for i := len(suffix) - 1; i >= 0; i-- {
 				resolved = filepath.Join(resolved, suffix[i])
 			}
-			return resolved, complete, nil
+			return resolved, len(suffix) == 0, nil
 		}
 		if !errors.Is(err, fs.ErrNotExist) {
 			return "", false, err
 		}
-		complete = false
 		fi, statErr := os.Lstat(current)
 		if statErr == nil && fi.Mode()&fs.ModeSymlink != 0 {
 			if links >= maxDanglingLinks {
