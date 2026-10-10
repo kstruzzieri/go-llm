@@ -483,8 +483,9 @@ func rewriteSymlinkTarget(ctx context.Context, srcRoot, rel, target string, cano
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	linkDir := filepath.Dir(filepath.Join(srcRoot, filepath.FromSlash(rel)))
-	absTarget := composeLinkTarget(linkDir, target)
+	link := filepath.Join(srcRoot, filepath.FromSlash(rel))
+	linkDir := filepath.Dir(link)
+	absTarget := composeLinkTarget(link, target)
 	inside := func(root, p string) bool {
 		return p == root || strings.HasPrefix(p, root+string(filepath.Separator))
 	}
@@ -541,18 +542,15 @@ func rewriteSymlinkTarget(ctx context.Context, srcRoot, rel, target string, cano
 	return resolved, nil
 }
 
-// composeLinkTarget joins a symlink's target text onto the directory holding
-// the link as the kernel walks it (#660). The raw prefix through the last
-// ".." is resolved by filepath.EvalSymlinks, which pops each ".." off the
-// physical path and fails (ENOENT, ENOTDIR, ELOOP, ...) where the host's
-// walk would; the components after it carry no ".." and are appended as
-// spelled. A target without "..", or one whose prefix the host cannot
-// resolve for any reason (the host link is unusable there), is the lexical
-// join, so only links the host resolves change from the pre-#660 rewrite.
-func composeLinkTarget(dir, target string) string {
+// composeLinkTarget joins target text onto its source link's directory (#660).
+// The host lookup includes the enclosing link in the kernel's traversal limit;
+// EvalSymlinks alone permits more hops. A missing suffix can still compose from
+// the resolved prefix through the last "..". Any other host lookup error, an
+// unresolved prefix, or a target without ".." retains the pre-#660 lexical join.
+func composeLinkTarget(link, target string) string {
 	raw := target
 	if !filepath.IsAbs(target) {
-		raw = dir + string(filepath.Separator) + target
+		raw = filepath.Dir(link) + string(filepath.Separator) + target
 	}
 	parts := strings.Split(filepath.ToSlash(raw), "/")
 	i := len(parts) - 1
@@ -560,6 +558,9 @@ func composeLinkTarget(dir, target string) string {
 		i--
 	}
 	if i < 0 {
+		return filepath.Clean(raw)
+	}
+	if _, err := os.Stat(link); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return filepath.Clean(raw)
 	}
 	prefix, err := filepath.EvalSymlinks(filepath.FromSlash(strings.Join(parts[:i+1], "/")))
@@ -634,7 +635,7 @@ func resolveSymlinkTarget(ctx context.Context, target string) (string, bool, err
 			if err != nil {
 				return "", false, err
 			}
-			next := composeLinkTarget(filepath.Dir(current), link)
+			next := composeLinkTarget(current, link)
 			for i := len(suffix) - 1; i >= 0; i-- {
 				next = filepath.Join(next, suffix[i])
 			}

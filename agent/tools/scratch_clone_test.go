@@ -807,6 +807,81 @@ func TestRewriteSymlinkTargetUnresolvableDotDotStaysLexical(t *testing.T) {
 	}
 }
 
+// TestRewriteSymlinkTargetHostDepthLimitStaysLexical includes the enclosing
+// link's hop: checking only the prefix would accept an unusable host link.
+func TestRewriteSymlinkTargetHostDepthLimitStaysLexical(t *testing.T) {
+	src, err := CanonicalWorkspaceRoot(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := filepath.Join(src, "a")
+	if err := os.MkdirAll(filepath.Join(a, "deep", "er"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, dir := range []string{src, a} {
+		if err := os.WriteFile(filepath.Join(dir, "x"), []byte(dir), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sep := string(filepath.Separator)
+	var prefix string
+	for hops := 1; hops <= 128; hops++ {
+		name := fmt.Sprintf("s%d", hops)
+		target := filepath.Join("deep", "er")
+		if hops > 1 {
+			target = fmt.Sprintf("s%d", hops-1)
+		}
+		if err := os.Symlink(target, filepath.Join(a, name)); err != nil {
+			t.Skipf("symlinks unsupported: %v", err)
+		}
+		prefix = name + sep + ".." + sep + ".."
+		link := filepath.Join(a, fmt.Sprintf("probe%d", hops))
+		if err := os.Symlink(prefix+sep+"x", link); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Stat(link); errors.Is(err, syscall.ELOOP) {
+			t.Logf("host rejects a link through %d prefix symlinks", hops)
+			break
+		} else if err != nil {
+			t.Skipf("host does not report ELOOP for symlink depth: %v", err)
+		}
+		if hops == 128 {
+			t.Skip("host symlink limit exceeds fixture budget")
+		}
+	}
+	// The prefix alone still succeeds: the enclosing link consumes one hop.
+	if _, err := os.Stat(a + sep + prefix); err != nil {
+		t.Fatalf("fixture: prefix lookup must succeed: %v", err)
+	}
+	for _, tc := range []struct{ name, target, want string }{
+		{"relative", prefix + sep + "x", filepath.Join("..", "x")},
+		{"absolute", a + sep + prefix + sep + "x", filepath.Join("..", "x")},
+		{"dangling chain", prefix + sep + "missing", filepath.Join("..", "missing")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rel := filepath.Join("a", tc.name)
+			link := filepath.Join(src, rel)
+			if err := os.Symlink(tc.target, link); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Stat(link); !errors.Is(err, syscall.ELOOP) {
+				t.Fatalf("fixture: host link must fail with ELOOP, got %v", err)
+			}
+			got, err := rewriteSymlinkTarget(context.Background(), src, filepath.ToSlash(rel), tc.target, nil)
+			if err != nil || got != tc.want {
+				t.Fatalf("rewrite = %q err=%v, want lexical %q", got, err, tc.want)
+			}
+			if tc.name == "dangling chain" {
+				got, complete, err := resolveSymlinkTarget(context.Background(), link)
+				want := filepath.Join(src, "missing")
+				if err != nil || complete || got != want {
+					t.Fatalf("resolve = %q complete=%v err=%v, want %q incomplete", got, complete, err, want)
+				}
+			}
+		})
+	}
+}
+
 // TestCloneTreeDotDotThroughSymlinkMatchesHost pins kernel ".." semantics
 // (#660): with a/s -> deep/er, a/l -> s/../../x pops out of deep/er, so the
 // host reads a/x. A lexical clean pointed the clone at the root x instead.
