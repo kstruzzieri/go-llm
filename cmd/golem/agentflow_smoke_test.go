@@ -281,8 +281,8 @@ func TestAgentflowFreshPlanRefusesOpenStepWork_RealCLI(t *testing.T) {
 	if strings.Contains(stdout.String(), "proof pack:") {
 		t.Fatalf("run 2 reported success:\n%s", stdout.String())
 	}
-	// The gate failed, which resume cannot settle yet (#652), so the refusal
-	// must not send the user to -agentflow-resume.
+	// The refusal must not claim resume can recover: this failed gate is one
+	// resume cannot settle yet (#652). Status reports that verdict.
 	_, refusal, _ := strings.Cut(stderr.String(), "agentflow task failed: ")
 	refusal, _, _ = strings.Cut(refusal, "\n")
 	for _, want := range []string{"still reports step work before finish-run", `state \"validation_missing\" step \"P1\"`} {
@@ -290,8 +290,8 @@ func TestAgentflowFreshPlanRefusesOpenStepWork_RealCLI(t *testing.T) {
 			t.Fatalf("run 2 refusal %q does not mention %s\nstderr:\n%s", refusal, want, stderr.String())
 		}
 	}
-	if !strings.HasSuffix(refusal, "; inspect with -agentflow-status") {
-		t.Fatalf("run 2 refusal %q, want only the -agentflow-status hint", refusal)
+	if !strings.HasSuffix(refusal, "; run -agentflow-status to see whether -agentflow-resume can recover it") {
+		t.Fatalf("run 2 refusal %q, want it to defer the resume verdict to -agentflow-status", refusal)
 	}
 	if _, err := os.Stat(filepath.Join(dir, ".agent", "proof-pack.json")); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("proof-pack.json stat err = %v, want it never built", err)

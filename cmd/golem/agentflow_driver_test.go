@@ -318,7 +318,7 @@ func TestDriver_RefusesFinishRunWhileStepWorkRemains(t *testing.T) {
 	if err == nil || proof != "" {
 		t.Fatalf("proof=%q err=%v, want a refusal", proof, err)
 	}
-	for _, want := range []string{`"validation_missing"`, `"P1"`, "inspect with -agentflow-status"} {
+	for _, want := range []string{`"validation_missing"`, `"P1"`, "run -agentflow-status"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("error %q does not mention %s", err, want)
 		}
@@ -330,51 +330,34 @@ func TestDriver_RefusesFinishRunWhileStepWorkRemains(t *testing.T) {
 }
 
 func TestDriver_FinishRunGateByNextActionState(t *testing.T) {
-	// hint is the recovery advice a refusal must carry: status always, and
-	// resume only when resume would accept the state (its disposition, gate
-	// and lease checks).
-	const resume, status = "inspect with -agentflow-status, then recover with -agentflow-resume", "inspect with -agentflow-status"
-	gates := func(gateStatus string) *agentflow.ResumabilityProjection {
-		return &agentflow.ResumabilityProjection{
-			Step:  &agentflow.ResumabilityStep{ID: "P1"},
-			Gates: []agentflow.ResumabilityGate{{Kind: "command", Label: "go test ./src/a", Status: gateStatus}},
-		}
-	}
-	enforce, expires := "enforce", "2026-10-10T12:00:00Z"
-	liveEnforcedLease := &agentflow.ResumabilityProjection{
-		Step:  &agentflow.ResumabilityStep{ID: "P1"},
-		Lease: &agentflow.ResumabilityLease{Policy: &enforce, State: "live", ExpiresAt: &expires},
-	}
+	// Resume's verdict needs its owned projection, so the refusal never
+	// predicts it: every refusal sends the user to status, which runs resume's
+	// checks and reports whether resume can recover.
+	const hint = "; run -agentflow-status to see whether -agentflow-resume can recover it"
 	for _, tt := range []struct {
-		state      string
-		name       string
-		projection *agentflow.ResumabilityProjection
-		proceed    bool
-		hint       string
+		state   string
+		proceed bool
 	}{
-		{state: "run_unverified", proceed: true},
-		{state: "drift_failing", proceed: true},
-		{state: "proof_missing", proceed: true},
-		{state: "proof_stale", proceed: true},
-		{state: "proof_failing", proceed: true},
-		{state: "complete", proceed: true},
-		{state: "step_unclaimed", hint: resume},
-		{state: "validation_missing", name: "missing gate", projection: gates("missing"), hint: resume},
-		{state: "validation_missing", name: "failed gate", projection: gates("failed"), hint: status},
-		{state: "validation_missing", name: "no projection", hint: status},
-		{state: "step_unverified", hint: resume},
-		{state: "step_unverified", name: "live enforced lease", projection: liveEnforcedLease, hint: status},
-		{state: "step_uncompleted", hint: resume},
-		{state: "file_receipts_missing", hint: status},
-		{state: "state_invalid", hint: status},
-		{state: "uninitialized", hint: status},
-		{state: "plan_unlocked", hint: status},
-		{state: "execution_uninitialized", hint: status},
-		{state: "", hint: status},
-		{state: "some_future_state", hint: status},
+		{"run_unverified", true},
+		{"drift_failing", true},
+		{"proof_missing", true},
+		{"proof_stale", true},
+		{"proof_failing", true},
+		{"complete", true},
+		{"step_unclaimed", false},
+		{"file_receipts_missing", false},
+		{"validation_missing", false},
+		{"step_unverified", false},
+		{"step_uncompleted", false},
+		{"state_invalid", false},
+		{"uninitialized", false},
+		{"plan_unlocked", false},
+		{"execution_uninitialized", false},
+		{"", false},
+		{"some_future_state", false},
 	} {
-		t.Run("state="+tt.state+"/"+tt.name, func(t *testing.T) {
-			af := &fakeAF{nextActions: []agentflow.NextActionState{{State: tt.state, Resumability: tt.projection}}}
+		t.Run("state="+tt.state, func(t *testing.T) {
+			af := &fakeAF{nextActions: []agentflow.NextActionState{{State: tt.state}}}
 			d := &driver{
 				af: af, plan: reviewPlan(), planPath: "plan.json", out: io.Discard,
 				runStep: func(context.Context, agentflow.Step, string, string) error { return nil },
@@ -387,12 +370,9 @@ func TestDriver_FinishRunGateByNextActionState(t *testing.T) {
 				}
 				return
 			}
-			if err == nil || !strings.Contains(err.Error(), "still reports step work") || proof != "" ||
-				af.seq[len(af.seq)-1] != "next-action" || slices.Contains(af.seq, "finish-run") {
-				t.Fatalf("proof=%q err=%v seq=%v, want the guard's refusal after next-action", proof, err, af.seq)
-			}
-			if !strings.HasSuffix(err.Error(), "; "+tt.hint) {
-				t.Fatalf("error %q, want it to end with recovery hint %q", err, tt.hint)
+			if err == nil || !strings.Contains(err.Error(), "still reports step work") || !strings.HasSuffix(err.Error(), hint) ||
+				proof != "" || af.seq[len(af.seq)-1] != "next-action" || slices.Contains(af.seq, "finish-run") {
+				t.Fatalf("proof=%q err=%v seq=%v, want the guard's refusal after next-action ending %q", proof, err, af.seq, hint)
 			}
 		})
 	}

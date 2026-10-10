@@ -11,7 +11,6 @@ open attempts, and a non-strict `finish-run` does not require completed steps
 Before `finish-run`, task mode now asks AgentFlow's `next-action` and continues
 only when every step has completed and no attempt is open. Otherwise it exits 1
 without running `finish-run` or building a proof, names the AgentFlow state and
-step, and points at `-agentflow-status`, plus `-agentflow-resume` when resume
-would accept that state. An attempt whose gate already failed is not resumable
-yet (#652), so that case points at `-agentflow-status` only. Runs whose steps
-all complete are unaffected.
+step, and sends you to `-agentflow-status`, which reports whether
+`-agentflow-resume` can recover. An attempt whose gate already failed is one
+resume cannot settle yet (#652). Runs whose steps all complete are unaffected.

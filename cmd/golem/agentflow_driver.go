@@ -229,28 +229,10 @@ func (d *driver) requireNoStepWork(ctx context.Context) error {
 	if state.StepID != nil {
 		where += fmt.Sprintf(" step %q", *state.StepID)
 	}
-	hint := "inspect with -agentflow-status"
-	if resumeCanContinue(d.plan, state) {
-		hint += ", then recover with -agentflow-resume"
-	}
-	return fmt.Errorf("agentflow still reports step work before finish-run: %s; no proof was built; %s", where, hint)
-}
-
-// resumeCanContinue reports whether -agentflow-resume would accept state,
-// using the disposition and pre-mutation checks status and resume run: gate
-// statuses resume cannot settle yet (#652) and finite enforced leases refuse.
-// Owner checks need resume's owned projection, so an attempt held by another
-// agent still gets the resume hint and resume itself refuses it.
-func resumeCanContinue(plan *agentflow.Plan, state agentflow.NextActionState) bool {
-	if resumeDisposition(state.State).action != resumeSerial {
-		return false
-	}
-	if state.State == "validation_missing" {
-		if _, _, err := projectedCommandGates(plan, state); err != nil {
-			return false
-		}
-	}
-	return validateRecoveryMutationSafety(state) == nil
+	// Resume's verdict needs its owned projection (agent, recovery actions,
+	// digests), which this unowned query lacks, so the refusal defers it to
+	// -agentflow-status rather than predicting it.
+	return fmt.Errorf("agentflow still reports step work before finish-run: %s; no proof was built; run -agentflow-status to see whether -agentflow-resume can recover it", where)
 }
 
 func (d *driver) runSerialSteps(ctx context.Context) error {
