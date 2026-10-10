@@ -339,6 +339,12 @@ func (w *Workspace) openDir(p string) (*os.File, error) {
 }
 func (w *Workspace) openReadDir(p string) (*os.File, string, error) { return w.openRead(p, true) }
 
+// canonicalName returns part's on-disk spelling in parent, the spelling the
+// ScopeGuard sees; target is the caller's fstatat of part. A constant-time
+// platform proof (provenSpelling, #558) is used when it applies; otherwise
+// the parent is listed: an exact name, then a unique case-folded match, then
+// the entry with target's identity. An unlistable parent is an error the
+// callers turn into a denial.
 func (w *Workspace) canonicalName(parent *os.File, part string, target *unix.Stat_t) (string, error) {
 	if part == "." {
 		return part, nil

@@ -147,3 +147,42 @@ func BenchmarkReachabilityGlob2000(b *testing.B) {
 		})
 	}
 }
+
+// BenchmarkReadSiblings measures one point read of dir/target.txt whose parent
+// holds n siblings (#558). GO_LLM_BENCH_PARENT places the tree on a chosen
+// filesystem, for example a case-sensitive APFS image or /dev/shm.
+func BenchmarkReadSiblings(b *testing.B) {
+	for _, n := range []int{3000, 30000, 100000} {
+		b.Run(fmt.Sprint(n), func(b *testing.B) {
+			root := b.TempDir()
+			if parent := os.Getenv("GO_LLM_BENCH_PARENT"); parent != "" {
+				var err error
+				if root, err = os.MkdirTemp(parent, "bench-siblings-"); err != nil {
+					b.Fatal(err)
+				}
+				b.Cleanup(func() { _ = os.RemoveAll(root) })
+			}
+			dir := filepath.Join(root, "dir")
+			if err := os.Mkdir(dir, 0o700); err != nil {
+				b.Fatal(err)
+			}
+			for i := 0; i < n; i++ {
+				f, err := os.Create(filepath.Join(dir, fmt.Sprintf("sib%06d", i)))
+				if err != nil {
+					b.Fatal(err)
+				}
+				_ = f.Close()
+			}
+			benchWrite(b, filepath.Join(dir, "target.txt"), "x\n")
+			ws, err := NewWorkspace(root)
+			if err != nil {
+				b.Fatal(err)
+			}
+			for b.Loop() {
+				if _, err := ws.readAll("dir/target.txt"); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
