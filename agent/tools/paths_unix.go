@@ -261,7 +261,7 @@ func (w *Workspace) openReadMode(p string, directory, pin bool) (file *os.File, 
 		if err := unix.Fstatat(int(parent.Fd()), part, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
 			return nil, "", err
 		}
-		name, err := workspaceCanonicalName(parent, part, &st)
+		name, err := w.canonicalName(parent, part, &st)
 		if err != nil {
 			if errors.Is(err, fs.ErrPermission) {
 				// The parent cannot be enumerated, so the on-disk spelling cannot
@@ -339,9 +339,15 @@ func (w *Workspace) openDir(p string) (*os.File, error) {
 }
 func (w *Workspace) openReadDir(p string) (*os.File, string, error) { return w.openRead(p, true) }
 
-func workspaceCanonicalName(parent *os.File, part string, target *unix.Stat_t) (string, error) {
+func (w *Workspace) canonicalName(parent *os.File, part string, target *unix.Stat_t) (string, error) {
 	if part == "." {
 		return part, nil
+	}
+	if name, ok, err := provenSpelling(parent, part, target); err != nil || ok {
+		return name, err
+	}
+	if w.beforeNameScan != nil {
+		w.beforeNameScan()
 	}
 	fd, err := unix.Openat(int(parent.Fd()), ".", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
 	if err != nil {

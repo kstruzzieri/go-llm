@@ -2,7 +2,11 @@
 
 package tools
 
-import "golang.org/x/sys/unix"
+import (
+	"os"
+
+	"golang.org/x/sys/unix"
+)
 
 // Darwin SDK sys/fcntl.h: O_SEARCH = O_EXEC (0x40000000) | O_DIRECTORY.
 // https://github.com/apple-oss-distributions/xnu/blob/main/bsd/sys/fcntl.h
@@ -12,3 +16,6 @@ const workspaceSearchFlags = 0x40000000 | unix.O_DIRECTORY
 // openat can verify a run of components (#613). It replaces O_NOFOLLOW, which
 // XNU rejects (EINVAL) in combination with it.
 const workspaceNoFollowAny = unix.O_NOFOLLOW_ANY
+
+// provenSpelling is replaced in Task 2.
+func provenSpelling(*os.File, string, *unix.Stat_t) (string, bool, error) { return "", false, nil }
