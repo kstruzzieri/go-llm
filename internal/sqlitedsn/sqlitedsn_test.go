@@ -117,7 +117,7 @@ func TestWithBusyTimeoutKeepsCallerBusyTimeout(t *testing.T) {
 // the first release with the WAL-reset corruption fix
 // (https://www.sqlite.org/wal.html, section 11). go-llm's stores run in WAL
 // mode and can share a file across processes, the bug's trigger, so a go.mod
-// downgrade of modernc.org/sqlite below v1.46.2 must not pass CI. modernc
+// downgrade of modernc.org/sqlite below v1.46.2 must not pass CI. modernc v1.46.2
 // still embeds SQLite 3.40.0 on netbsd/amd64 and 3.41.2 on freebsd/386 and
 // freebsd/arm; this test fails there by design, because those targets do not
 // have the fix.
