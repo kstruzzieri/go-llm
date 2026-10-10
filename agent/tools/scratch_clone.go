@@ -546,9 +546,9 @@ func rewriteSymlinkTarget(ctx context.Context, srcRoot, rel, target string, cano
 // ".." is resolved by filepath.EvalSymlinks, which pops each ".." off the
 // physical path and fails (ENOENT, ENOTDIR, ELOOP, ...) where the host's
 // walk would; the components after it carry no ".." and are appended as
-// spelled. A target without "..", or one whose prefix does not resolve (the
-// host link dangles there), is the lexical join, so only links the host
-// resolves change from the pre-#660 rewrite.
+// spelled. A target without "..", or one whose prefix the host cannot
+// resolve for any reason (the host link is unusable there), is the lexical
+// join, so only links the host resolves change from the pre-#660 rewrite.
 func composeLinkTarget(dir, target string) string {
 	raw := target
 	if !filepath.IsAbs(target) {

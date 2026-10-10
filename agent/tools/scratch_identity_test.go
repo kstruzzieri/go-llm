@@ -525,6 +525,28 @@ func TestScratchSourceBeginControls(t *testing.T) {
 				t.Fatal("fixture: the host must resolve a/l to a/x")
 			}
 		}, ""},
+		{"dotdot through internal link as cwd resolves like the host", func(t *testing.T, canon string, spec *execSpec) {
+			// a/ld -> s/../../d resolves through a/s -> deep/er to a/d, not
+			// the root d, so the reference copy of a/d is the approved cwd
+			// (#660).
+			a := filepath.Join(canon, "a")
+			for _, d := range []string{filepath.Join(a, "deep/er"), filepath.Join(a, "d"), filepath.Join(canon, "d")} {
+				if err := os.MkdirAll(d, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.Symlink("deep/er", filepath.Join(a, "s")); err != nil {
+				t.Fatal(err)
+			}
+			spec.Dir = filepath.Join(a, "ld")
+			if err := os.Symlink("s/../../d", spec.Dir); err != nil {
+				t.Fatal(err)
+			}
+			spec.DirIdentity = execIdentityOf(t, spec.Dir)
+			if !os.SameFile(spec.DirIdentity, execIdentityOf(t, filepath.Join(a, "d"))) {
+				t.Fatal("fixture: the host must resolve a/ld to a/d")
+			}
+		}, ""},
 		{"approved executable moved within the workspace", func(t *testing.T, canon string, spec *execSpec) {
 			// The approved inode is still in the snapshot, but under
 			// moved.sh; the approved spelling now names a different file.
