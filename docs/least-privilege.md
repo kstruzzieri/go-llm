@@ -52,8 +52,9 @@ Existing names are checked against canonical on-disk spelling. On APFS the
 spelling of a directory or single-link file is the stored name the filesystem
 reports for the object the lookup reached, bound to that object's identity in
 the same call; elsewhere, and for mount points, multiply-linked files and other
-entry types, the parent directory is listed. With a ScopeGuard,
-unverifiable names under an unenumerable directory fail closed. Without a guard,
+entry types, the parent directory is listed. Mount status comes from that same
+reply, since APFS volume-group members can share a logical device ID. With a
+ScopeGuard, unverifiable names under an unenumerable directory fail closed. Without a guard,
 search-only parents remain usable. A missing name has no canonical spelling:
 hosts reserving names must cover the filesystem's case/normalization-equivalent
 spellings or conservatively restrict accepted names. Workspace imposes no global

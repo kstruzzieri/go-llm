@@ -21,6 +21,12 @@ const workspaceSearchFlags = 0x40000000 | unix.O_DIRECTORY
 // XNU rejects (EINVAL) in combination with it.
 const workspaceNoFollowAny = unix.O_NOFOLLOW_ANY
 
+// Darwin SDK sys/attr.h; x/sys does not export these directory attributes.
+const (
+	attrDirMountStatus = 0x00000004
+	dirMountPoint      = 0x00000001
+)
+
 // storedNameFS reports whether the filesystem answers name lookups with the
 // object's stored spelling (#558). Only APFS was examined; HFS+ has directory
 // hardlinks, and other volumes keep the listing scan.
@@ -51,9 +57,11 @@ func requireEnumerable(parent *os.File) error {
 // the object a lookup of part reaches together with that object's device,
 // file ID and (for regular files) link count. Binding the identity to target,
 // the caller's fstatat of part, makes the name belong to the object the
-// caller then opens and re-verifies. Only directories and single-link regular
-// files on the parent's own APFS volume qualify: another link's name is never
-// evidence (#556), and a mount point's name comes from the mounted volume.
+// caller then opens and re-verifies. Only non-mount-point directories and
+// single-link regular files on the parent's logical APFS device qualify:
+// another link's name is never evidence (#556), and a mount point's name
+// comes from the mounted volume. Mount status is checked in the same reply
+// because APFS volume-group members can share a logical device ID.
 // Anything else, and any query failure, returns ok=false so the caller lists
 // parent. A parent that cannot be listed fails as the scan does; a name that
 // belongs to another object is errFileChanged.
@@ -78,7 +86,7 @@ func provenSpelling(parent *os.File, part string, target *unix.Stat_t) (string, 
 		return "", false, err
 	}
 	e, err := storedName(int(parent.Fd()), part, regular)
-	if err != nil || (regular && e.links != 1) {
+	if err != nil || e.mountPoint || (regular && e.links != 1) {
 		return "", false, nil
 	}
 	if e.dev != target.Dev || e.ino != target.Ino {
@@ -89,10 +97,11 @@ func provenSpelling(parent *os.File, part string, target *unix.Stat_t) (string, 
 
 // storedEntry is one decoded getattrlist reply.
 type storedEntry struct {
-	name  string
-	dev   int32
-	ino   uint64
-	links uint32
+	name       string
+	dev        int32
+	ino        uint64
+	links      uint32
+	mountPoint bool
 }
 
 var errMalformedAttrs = errors.New("tools: malformed getattrlist reply")
@@ -107,6 +116,8 @@ func storedName(dirfd int, name string, regular bool) (storedEntry, error) {
 	al := unix.Attrlist{Bitmapcount: unix.ATTR_BIT_MAP_COUNT, Commonattr: unix.ATTR_CMN_NAME | unix.ATTR_CMN_DEVID | unix.ATTR_CMN_FILEID}
 	if regular {
 		al.Fileattr = unix.ATTR_FILE_LINKCOUNT
+	} else {
+		al.Dirattr = attrDirMountStatus
 	}
 	var buf [28 + 1024]byte
 	if e := getattrlistat(dirfd, p, &al, &buf[0], len(buf), unix.FSOPT_NOFOLLOW); e != 0 {
@@ -116,16 +127,13 @@ func storedName(dirfd int, name string, regular bool) (storedEntry, error) {
 }
 
 // parseStoredEntry decodes storedName's reply. Attributes arrive in bitmap
-// order, common before file, each 4-byte aligned: u_int32 length; the name's
+// order, common before directory/file, each 4-byte aligned: u_int32 length; the name's
 // attrreference_t {int32 offset from the reference itself, u_int32 length
-// including the NUL}; dev_t; u_int64 file ID; for regular files a u_int32
-// link count; then the name bytes. Every bound is checked: a malformed reply
-// is an error, never a guess.
+// including the NUL}; dev_t; u_int64 file ID; a u_int32 mount status for
+// directories or link count for regular files; then the name bytes. Every
+// bound is checked: a malformed reply is an error, never a guess.
 func parseStoredEntry(buf []byte, regular bool) (storedEntry, error) {
-	fixed := 24
-	if regular {
-		fixed = 28
-	}
+	const fixed = 28
 	if len(buf) < fixed {
 		return storedEntry{}, errMalformedAttrs
 	}
@@ -140,6 +148,8 @@ func parseStoredEntry(buf []byte, regular bool) (storedEntry, error) {
 	e := storedEntry{name: string(buf[start : start+n-1]), dev: int32(ne.Uint32(buf[12:16])), ino: ne.Uint64(buf[16:24])}
 	if regular {
 		e.links = ne.Uint32(buf[24:28])
+	} else {
+		e.mountPoint = ne.Uint32(buf[24:28])&dirMountPoint != 0
 	}
 	if e.name == "." || e.name == ".." || strings.ContainsAny(e.name, "/\x00") {
 		return storedEntry{}, errMalformedAttrs

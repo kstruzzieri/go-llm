@@ -69,10 +69,7 @@ func TestStoredNameFS(t *testing.T) {
 
 // storedReply builds a getattrlist reply for storedName's request.
 func storedReply(name string, dev int32, ino uint64, links *uint32) []byte {
-	fixed := 24
-	if links != nil {
-		fixed = 28
-	}
+	const fixed = 28
 	b := make([]byte, fixed+len(name)+1)
 	ne := binary.NativeEndian
 	ne.PutUint32(b[0:], uint32(len(b)))
@@ -95,18 +92,24 @@ func TestParseStoredEntry(t *testing.T) {
 	if e, err := parseStoredEntry(storedReply("File", 7, 43, &one), true); err != nil || e != (storedEntry{name: "File", dev: 7, ino: 43, links: 1}) {
 		t.Fatalf("file reply = %+v, %v", e, err)
 	}
+	mounted := storedReply("Volume", 7, 44, nil)
+	binary.NativeEndian.PutUint32(mounted[24:28], 1)
+	if e, err := parseStoredEntry(mounted, false); err != nil || e != (storedEntry{name: "Volume", dev: 7, ino: 44, mountPoint: true}) {
+		t.Fatalf("mount-point reply = %+v, %v", e, err)
+	}
 	mutate := func(f func([]byte) []byte) []byte { return f(storedReply("ok", 1, 1, nil)) }
 	ne := binary.NativeEndian
 	// Each row breaks exactly one bound and is otherwise well formed, so
 	// removing that bound makes the row parse (D-M10).
 	for name, buf := range map[string][]byte{
-		"short buffer":      make([]byte, 10),
+		"short buffer":      make([]byte, 27),
 		"total past buffer": mutate(func(b []byte) []byte { ne.PutUint32(b[0:], uint32(len(b)+1)); return b }),
-		// Offset 16 puts the name over the file ID ("AAAA") and runs into
+		// Offset 20 puts the name over mount status ("AAAA") and runs into
 		// "ok\0", so only the start-inside-fixed bound rejects it.
 		"name inside fixed": func() []byte {
-			b := storedReply("ok", 1, 0x4141414141414141, nil)
-			ne.PutUint32(b[4:], 16)
+			b := storedReply("ok", 1, 1, nil)
+			ne.PutUint32(b[24:], 0x41414141)
+			ne.PutUint32(b[4:], 20)
 			ne.PutUint32(b[8:], 7)
 			return b
 		}(),
@@ -227,6 +230,44 @@ func TestProvenSpellingFallbacks(t *testing.T) {
 		if name, ok, err := provenSpelling(parent, "A", &own); !ok || err != nil || name != "a" {
 			t.Fatalf("own identity: %q ok=%v err=%v, want a", name, ok, err)
 		}
+	}
+}
+
+// A macOS system/data volume group can expose the same logical device for
+// both volumes. Use the existing read-only mount as an independent witness.
+func TestCanonicalNameAPFSVolumeGroupMountScans(t *testing.T) {
+	const root = "/System/Volumes"
+	const mounted = root + "/Data"
+	requireAPFS(t, root)
+	var fs unix.Statfs_t
+	if err := unix.Statfs(mounted, &fs); err != nil || unix.ByteSliceToString(fs.Mntonname[:]) != mounted {
+		t.Skip("system/data volume-group mount not available")
+	}
+	var parent, target unix.Stat_t
+	if err := unix.Stat(root, &parent); err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Stat(mounted, &target); err != nil {
+		t.Fatal(err)
+	}
+	if parent.Dev != target.Dev {
+		t.Skip("system/data volumes do not share a logical device")
+	}
+	ws, err := NewWorkspace(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scans := 0
+	ws.beforeNameScan = func() { scans++ }
+	var seen string
+	ws.SetScopeGuard(func(rel string, _ bool) error { seen = rel; return nil })
+	f, canonical, err := ws.openRead("Data", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+	if canonical != "Data" || seen != "Data" || scans != 1 {
+		t.Fatalf("canonical=%q guard=%q scans=%d, want Data, Data, 1", canonical, seen, scans)
 	}
 }
 

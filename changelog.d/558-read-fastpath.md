@@ -10,4 +10,5 @@ millisecond regardless of directory size (measured: 78-142 us from 3,000 to
 100,000 siblings, against 1.6-112 ms before). Policy sees the same spelling, and
 directories that cannot be listed are still denied. Linux, other
 filesystems, mount points, multiply-linked files and other entry types keep
-the listing.
+the listing, including APFS volume-group mount points that share a logical
+device ID with their parent.
