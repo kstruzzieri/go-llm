@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"net/http/httputil"
 	"net/url"
+	"runtime/debug"
 	"slices"
 	"strings"
 	"sync"
@@ -962,7 +963,13 @@ func TestCollectorUnstartedRequestIsNotAnObservation(t *testing.T) {
 // read as a timeout. Since #662 only a backend's own reads can leave it short.
 func TestCollectorOwnBudgetIsNotBlamedOnTheLastSurface(t *testing.T) {
 	f := opsfixture.NewLlamaSwap(t)
+	// Counted on arrival, before the delay: a request the tick deadline
+	// cuts short inside the delay never reaches f.
+	var models atomic.Int64
 	base := front(t, f, func(_ http.ResponseWriter, r *http.Request) bool {
+		if r.URL.Path == "/v1/models" {
+			models.Add(1)
+		}
 		select {
 		case <-time.After(1300 * time.Millisecond):
 		case <-r.Context().Done():
@@ -972,10 +979,10 @@ func TestCollectorOwnBudgetIsNotBlamedOnTheLastSurface(t *testing.T) {
 	c := NewCollector([]BackendSpec{lsSpec(base)}, Options{Interval: 2 * time.Second, Clock: newFakeClock().clock()})
 	b := c.Tick(context.Background()).Backends[0]
 	if b.Reachable == nil || !b.Reachable.Value || b.ReachCode != "" || slices.ContainsFunc(b.Surfaces, func(s Surface) bool { return s.LastError != "" }) {
-		t.Fatalf("a read the backend's own budget deferred was read as a failure: reachable=%+v code=%q surfaces=%+v", b.Reachable, b.ReachCode, b.Surfaces)
+		t.Errorf("a read the backend's own budget deferred was read as a failure: reachable=%+v code=%q surfaces=%+v", b.Reachable, b.ReachCode, b.Surfaces)
 	}
-	if n := countURI(f, "/v1/models"); n != 0 {
-		t.Fatalf("requests = %v: /v1/models started with under one request timeout of budget left", f.Requests())
+	if n := models.Load(); n != 0 {
+		t.Fatalf("/v1/models started %d times with under one request timeout of budget left; requests = %v", n, f.Requests())
 	}
 }
 
@@ -987,11 +994,12 @@ func TestCollectorWorkerPanicReachesTheCaller(t *testing.T) {
 	f := opsfixture.NewLlamaSwap(t)
 	clock := newFakeClock().clock()
 	mono := clock.Mono
-	var calls atomic.Int64
+	var armed atomic.Bool
+	armed.Store(true)
 	clock.Mono = func() time.Duration {
-		// Call 1 is Tick's own reading; call 2 is the first fetch, made
-		// while reading the backend.
-		if calls.Add(1) == 2 {
+		// Panic once, on the first reading taken while reading the backend,
+		// never on one of Tick's own.
+		if strings.Contains(string(debug.Stack()), ").pollBackend(") && armed.CompareAndSwap(true, false) {
 			panic("worker clock")
 		}
 		return mono()

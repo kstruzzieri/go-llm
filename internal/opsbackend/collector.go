@@ -318,8 +318,9 @@ func (c *Collector) Tick(ctx context.Context) Observations {
 	}
 	c.lastWall, c.lastMono, c.ticked = wall, mono, true
 
-	// Every collector field a worker reads is written above and only read
-	// until Wait returns; each worker writes only its own backend.
+	// Every collector field a worker reads is written above or in
+	// NewCollector and only read until Wait returns; each worker writes only
+	// its own backend.
 	c.tickEnd = time.Now().Add(TickTimeout)
 	tctx, cancel := context.WithDeadline(ctx, c.tickEnd)
 	defer cancel()
@@ -355,8 +356,9 @@ func (c *Collector) Tick(ctx context.Context) Observations {
 }
 
 // pollBackend reads one backend in its fixed order: identity, then residency
-// (/running or /api/ps), then the telemetry that takes turns. It runs in its
-// own goroutine and writes only b; mono is the tick's start.
+// (/running or /api/ps), then a llama-swap's telemetry that takes turns, or
+// an Ollama's version probe after a /api/ps timeout. It runs in its own
+// goroutine and writes only b; mono is the tick's start.
 func (c *Collector) pollBackend(callerCtx, ctx context.Context, b *backendState, mono time.Duration) {
 	// Peer confirmation fails closed: only a listing read on this tick
 	// counts (spec §5.4).
