@@ -66,13 +66,13 @@ func (b builder) fresh(mono time.Duration) bool {
 
 // failureFresh reports whether a failure reading is still current: it is
 // until the retry its failure scheduled has had time to answer and be
-// published (spec §5.4). Ticks run backends serially, so the first tick at or
-// after retry can start up to one interval plus one running tick
-// (opsbackend.TickTimeout) later; that tick can itself take a full
-// TickTimeout, its requests bounded by opsbackend.RequestTimeout, and watch
-// and serve publish only when it ends. One second of grace absorbs jitter.
-// Without this, reachability would flip between unreachable and unknown
-// between backoff retries.
+// published (spec §5.4). The first tick at or after retry can start up to one
+// interval plus one running tick (opsbackend.TickTimeout) later; that tick
+// lasts as long as its slowest backend, up to a full TickTimeout, its
+// requests bounded by opsbackend.RequestTimeout, and watch and serve publish
+// only when it ends. One second of grace absorbs jitter. Without this,
+// reachability would flip between unreachable and unknown between backoff
+// retries.
 func (b builder) failureFresh(retry time.Duration) bool {
 	if b.in.Mode == ModeOnce {
 		return true

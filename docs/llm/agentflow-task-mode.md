@@ -80,7 +80,9 @@ silently replacing or inheriting the human-approved route. For scripted or CI
 use,
 `-approve-plan-lock` prints the same preview and approves the lock without
 prompting. `-goal` never executes the plan or edits source files, and it refuses
-to replace a locked plan, a non-empty draft, or an unrecognized plan file.
+to replace a locked plan, a non-empty draft, or an unrecognized plan file, and
+to plan over a workspace that holds AgentFlow execution history (see
+"Re-running a plan").
 
 Golem planning mode compiles plan schema `1.0.0`, and task mode requires a plan
 whose `schema_version` major is 1. A plan written for AgentFlow 0.x (`0.3.0` or
@@ -411,7 +413,18 @@ For an external plan, the task driver order is:
    recommendation once through AgentFlow.
 4. Initialize execution, run plan steps and declared gates, and print the same
    route again immediately before review-manifest ingestion.
-5. Let `finish-run` build and verify proof under the materialized policy.
+5. After the steps and any review amendments, ask `next-action` whether step
+   work remains, and continue only from a run-phase state (`run_unverified`,
+   `drift_failing`, `proof_missing`, `proof_stale`, `proof_failing`,
+   `complete`). AgentFlow's `next-step` returns nothing both when every step is
+   done and when the remaining steps hold open attempts, so any other state
+   (for example an attempt another writer opened during the run), or a failed
+   `next-action` call, exits 1 without running `finish-run`. The error names the
+   state and step and sends you to `-agentflow-status`, which runs resume's
+   state and projection checks (not its plan and contract bindings, which need
+   the supplied `-plan`) and reports whether `-agentflow-resume` can recover.
+   An attempt whose gate already failed is one resume cannot settle yet (#652).
+6. Let `finish-run` build and verify proof under the materialized policy.
 
 For a planning-mode handoff, Golem first validates the saved recommendation,
 matches the loaded plan and task brief to their approved digests, and compares
@@ -419,6 +432,43 @@ the candidate with AgentFlow's existing workflow contract before any AgentFlow
 call. The driver then probes the CLI, prints the saved route, and follows the
 same execution sequence while skipping both `recommend-workflow` and
 `workflow-contract`; the approved candidate is not materialized twice.
+
+### Re-running a plan
+
+A fresh `-plan` or `-goal` needs a workspace with no AgentFlow execution
+history. Before any AgentFlow call, Golem refuses one whose `.agent/` still
+holds AgentFlow's canonical execution state: `execution.contract.json`, or rows
+in `step-runs.jsonl`, `command-receipts.jsonl`, `file-receipts.jsonl` or
+`verification-runs.jsonl`. AgentFlow's `lock-plan` would otherwise overwrite the
+locked plan under the ledgers recorded against it. The refusal names the first
+artifact found and exits 1:
+
+```text
+golem: refusing a fresh -plan run: .agent/ holds AgentFlow execution history (.agent/step-runs.jsonl has 3 entries); run -agentflow-status to see whether -agentflow-resume can continue it, or move .agent/ aside to start over
+```
+
+This includes repeating the same plan after it finished. The one exception is
+review ingestion: `-plan <plan> -review-manifest <manifest>` still runs over a
+workspace with history when `<plan>` is the same plan as the locked
+`.agent/plan.lock.json`, compared without its lock fields, because
+`-agentflow-resume` does not take review manifests and relocking an identical
+plan keeps the ledgers and the execution contract consistent. The condition is
+"same plan plus a manifest", not "the run finished": over an unfinished run the
+same command first runs the remaining steps, as `-review-manifest` documents.
+Repeat the original `-task-brief`, `-workflow-profile` and `-workflow-reason`,
+or `-workflow-handoff`, on that run: without a handoff Golem materializes the
+workflow route from those flags again, so changed flags would replace the proof
+policy under the finished work. The relock restamps `locked_at`, so a verified
+proof becomes `proof_stale` until the round's `finish-run` rebuilds it; if the
+round stops before that, run it again. A review manifest with a different plan
+is refused, with a note that the plan must match. A locked plan with no execution contract, which is
+the state a `-goal` handoff leaves, still runs, and so do a missing `.agent/`
+and AgentFlow's pristine `init` scaffold.
+`-agentflow-resume` is not affected. Moving `.agent/` aside keeps the earlier
+run's history, but does not undo the source changes that run made. The check
+reads only those five files, so a partial manual cleanup that keeps attempt
+pointers or receipts elsewhere under `.agent/` is not detected. It is a
+single-operator preflight, not a lock against a concurrent writer.
 
 The workflow contract may require gates or capabilities beyond what the loaded
 plan/run supplies. Golem does not invent a security scanner, review agent,
@@ -573,8 +623,8 @@ Still deferred:
   glob/directory ownership, and merge or conflict automation. This is not a
   scheduler or general parallel execution mode.
 
-AgentFlow's `next-action` output is surfaced to the operator on a failed run
-for recovery context, but it is advisory only: Golem prints the suggested
-state, reason, and command, and never executes it. Proof state stays
-entirely adapter-driven, through the same typed calls the driver made on the
-way in.
+Golem reads `next-action`'s state to choose a resume disposition and, before
+`finish-run`, to confirm no step work remains. Its suggested command is
+advisory only: on a failed run Golem prints the state, reason, and command for
+recovery context and never executes the command. Proof state stays entirely
+adapter-driven, through the same typed calls the driver made on the way in.

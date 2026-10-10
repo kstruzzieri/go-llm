@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -145,7 +146,9 @@ func (f *fakeAF) NextAction(context.Context) (agentflow.NextActionState, error) 
 		f.nextActionIndex++
 		return state, f.failure("next-action")
 	}
-	return agentflow.NextActionState{}, nil
+	// Unscripted calls report the run phase, so d.run's pre-finish-run guard
+	// (#651) passes in tests that do not exercise it.
+	return agentflow.NextActionState{State: "run_unverified"}, nil
 }
 
 func marshalPlanJSON(t *testing.T, plan agentflow.Plan) []byte {
@@ -181,7 +184,7 @@ func TestDriver_HappyPathOrdering(t *testing.T) {
 	want := []string{
 		"probe", "probe-workflow", "recommend", "init", "evidence:E1", "lock:plan.json", "materialize", "init-exec", "doctor",
 		"next-step", "claim:P1", "gate:P1:go test", "finish-step:P1:A-P1",
-		"next-step", "finish-run",
+		"next-step", "next-action", "finish-run",
 	}
 	if !equalSeq(af.seq, want) {
 		t.Fatalf("seq =\n%v\nwant\n%v", af.seq, want)
@@ -257,7 +260,7 @@ func TestDriver_ParallelCohortRunsBeforeSerialWork(t *testing.T) {
 	}
 	want := []string{
 		"probe", "probe-parallel", "probe-workflow", "recommend", "init", "lock:plan.json", "materialize", "init-exec", "doctor", "parallel-cohort",
-		"next-step", "claim:P1", "gate:P1:test one", "finish-step:P1:A-P1", "next-step", "finish-run",
+		"next-step", "claim:P1", "gate:P1:test one", "finish-step:P1:A-P1", "next-step", "next-action", "finish-run",
 	}
 	if !equalSeq(af.seq, want) {
 		t.Fatalf("seq =\n%v\nwant\n%v", af.seq, want)
@@ -302,6 +305,97 @@ func TestDriver_ParallelCohortFailuresAbortBeforeSerialWork(t *testing.T) {
 	}
 }
 
+// #651: next-step also returns nothing when the remaining step holds an open
+// attempt, so the serial loop ending is not proof the work is done.
+func TestDriver_RefusesFinishRunWhileStepWorkRemains(t *testing.T) {
+	stepID := "P1"
+	af := &fakeAF{nextActions: []agentflow.NextActionState{{State: "validation_missing", StepID: &stepID}}}
+	d := &driver{
+		af: af, plan: reviewPlan(), planPath: "plan.json", out: io.Discard,
+		runStep: func(context.Context, agentflow.Step, string, string) error { return nil },
+	}
+	proof, err := d.run(context.Background())
+	if err == nil || proof != "" {
+		t.Fatalf("proof=%q err=%v, want a refusal", proof, err)
+	}
+	for _, want := range []string{`"validation_missing"`, `"P1"`, "run -agentflow-status"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error %q does not mention %s", err, want)
+		}
+	}
+	wantTail := []string{"doctor", "next-step", "next-action"}
+	if len(af.seq) < len(wantTail) || !equalSeq(af.seq[len(af.seq)-len(wantTail):], wantTail) {
+		t.Fatalf("seq = %v, want it to end %v with no finish-run", af.seq, wantTail)
+	}
+}
+
+func TestDriver_FinishRunGateByNextActionState(t *testing.T) {
+	// Resume's verdict needs its owned projection, so the refusal never
+	// predicts it: every refusal sends the user to status, which runs resume's
+	// state and projection checks and reports whether resume can recover.
+	const hint = "; run -agentflow-status to see whether -agentflow-resume can recover it"
+	for _, tt := range []struct {
+		state   string
+		proceed bool
+	}{
+		{"run_unverified", true},
+		{"drift_failing", true},
+		{"proof_missing", true},
+		{"proof_stale", true},
+		{"proof_failing", true},
+		{"complete", true},
+		{"step_unclaimed", false},
+		{"file_receipts_missing", false},
+		{"validation_missing", false},
+		{"step_unverified", false},
+		{"step_uncompleted", false},
+		{"state_invalid", false},
+		{"uninitialized", false},
+		{"plan_unlocked", false},
+		{"execution_uninitialized", false},
+		{"", false},
+		{"some_future_state", false},
+	} {
+		t.Run("state="+tt.state, func(t *testing.T) {
+			af := &fakeAF{nextActions: []agentflow.NextActionState{{State: tt.state}}}
+			d := &driver{
+				af: af, plan: reviewPlan(), planPath: "plan.json", out: io.Discard,
+				runStep: func(context.Context, agentflow.Step, string, string) error { return nil },
+			}
+			proof, err := d.run(context.Background())
+			ranFinish := len(af.seq) > 0 && af.seq[len(af.seq)-1] == "finish-run"
+			if tt.proceed {
+				if err != nil || proof != "proof-pack.md" || !ranFinish {
+					t.Fatalf("proof=%q err=%v seq=%v, want finish-run to run", proof, err, af.seq)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), "still reports step work") || !strings.HasSuffix(err.Error(), hint) ||
+				proof != "" || af.seq[len(af.seq)-1] != "next-action" || slices.Contains(af.seq, "finish-run") {
+				t.Fatalf("proof=%q err=%v seq=%v, want the guard's refusal after next-action ending %q", proof, err, af.seq, hint)
+			}
+		})
+	}
+}
+
+func TestDriver_NextActionErrorBlocksFinishRun(t *testing.T) {
+	sentinel := errors.New("next-action unavailable")
+	// The fake returns failAt's error only with a scripted state, so script a
+	// state the guard would otherwise accept: the error must still win.
+	af := &fakeAF{
+		nextActions: []agentflow.NextActionState{{State: "run_unverified"}},
+		failAt:      map[string]error{"next-action": sentinel},
+	}
+	d := &driver{
+		af: af, plan: reviewPlan(), planPath: "plan.json", out: io.Discard,
+		runStep: func(context.Context, agentflow.Step, string, string) error { return nil },
+	}
+	proof, err := d.run(context.Background())
+	if !errors.Is(err, sentinel) || !strings.Contains(err.Error(), "before finish-run") || proof != "" || slices.Contains(af.seq, "finish-run") {
+		t.Fatalf("proof=%q err=%v seq=%v, want the wrapped next-action error and no finish-run", proof, err, af.seq)
+	}
+}
+
 func TestDriver_PreapprovedWorkflowIsReusedWithoutRecommendationOrMaterialization(t *testing.T) {
 	af := &fakeAF{}
 	recommendation := defaultWorkflowRecommendation()
@@ -313,7 +407,7 @@ func TestDriver_PreapprovedWorkflowIsReusedWithoutRecommendationOrMaterializatio
 	if _, err := d.run(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"probe", "probe-workflow", "init", "lock:plan.json", "init-exec", "doctor", "next-step", "finish-run"}
+	want := []string{"probe", "probe-workflow", "init", "lock:plan.json", "init-exec", "doctor", "next-step", "next-action", "finish-run"}
 	if !equalSeq(af.seq, want) {
 		t.Fatalf("seq = %v, want %v", af.seq, want)
 	}
@@ -719,7 +813,7 @@ func TestDriver_AmendmentReadyFindingUsesExistingAttemptLifecycle(t *testing.T) 
 	ref := "RR-20260714T120000Z-1234abcd#RF-1"
 	want := []string{
 		"probe", "probe-workflow", "recommend", "probe-review", "init", "lock:plan.json", "materialize", "init-exec", "doctor", "next-step",
-		"record-review:review.json", "amend:P1:" + ref, "gate:P1:test one", "finish-step:P1:AM-P1", "finish-run",
+		"record-review:review.json", "amend:P1:" + ref, "gate:P1:test one", "finish-step:P1:AM-P1", "next-action", "finish-run",
 	}
 	if !equalSeq(af.seq, want) {
 		t.Fatalf("seq=%v want=%v", af.seq, want)

@@ -67,6 +67,8 @@ func TestProjectTrustAgentflowProcess(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(stateDir, "step"), []byte(strconv.Itoa(step+1)), 0600); err != nil {
 			os.Exit(2)
 		}
+	case args[0] == "next-action":
+		reply = `{"state":"run_unverified"}`
 	case args[0] == "finish-run":
 		reply = `{"ok":true}`
 	}

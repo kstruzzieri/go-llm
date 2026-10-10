@@ -24,8 +24,7 @@ var (
 // (#612 R5). Absent files and empty ledgers pass. The drift report and proof
 // pack are not checked (finish regenerates the first; the second has its own
 // historical rule). ponytail: a preflight for one operator, not a lock against
-// a concurrent writer; lock .agent/ if concurrent runs ever matter (relock
-// policy is #643).
+// a concurrent writer; lock .agent/ if concurrent runs ever matter.
 func checkAgentflowStateMajor(root string) error {
 	dir := filepath.Join(root, ".agent")
 	for _, name := range agentflowStateDocs {
@@ -55,6 +54,67 @@ func checkAgentflowStateMajor(root string) error {
 		}
 	}
 	return nil
+}
+
+// agentflowExecutionHistory reports the first of AgentFlow's canonical
+// execution artifacts (EXECUTION_ARTIFACT_PATHS) that a workspace retains: the
+// execution contract, then any ledger with rows. "" means no history. It does
+// not inspect attempts/, receipts/ or other ledgers, so a partial manual
+// cleanup that keeps only those is not detected (#643 S1).
+func agentflowExecutionHistory(root string) (string, error) {
+	dir := filepath.Join(root, ".agent")
+	contract, err := readAgentflowState(dir, agentflowStateDocs[1])
+	if err != nil {
+		return "", err
+	}
+	if contract != nil {
+		return ".agent/" + agentflowStateDocs[1], nil
+	}
+	for _, name := range agentflowStateLedgers {
+		b, err := readAgentflowState(dir, name)
+		if err != nil {
+			return "", err
+		}
+		rows := 0
+		for _, line := range bytes.Split(b, []byte("\n")) {
+			if len(bytes.TrimSpace(line)) != 0 {
+				rows++
+			}
+		}
+		if rows > 0 {
+			return fmt.Sprintf(".agent/%s has %d entries", name, rows), nil
+		}
+	}
+	return "", nil
+}
+
+// refuseAgentflowExecutionHistory is the one check both fresh entries run, so
+// task mode and -goal cannot drift (#643 S2, S4).
+func refuseAgentflowExecutionHistory(root, prefix string) error {
+	history, err := agentflowExecutionHistory(root)
+	if err != nil {
+		return err
+	}
+	if history == "" {
+		return nil
+	}
+	return fmt.Errorf("%s: .agent/ holds AgentFlow execution history (%s); run -agentflow-status to see whether -agentflow-resume can continue it, or move .agent/ aside to start over", prefix, history)
+}
+
+// lockedPlanMatches reports whether .agent/plan.lock.json holds the same plan
+// as planJSON, ignoring the lock fields. Any read or parse failure is a
+// mismatch, so the caller's refusal stands.
+func lockedPlanMatches(root string, planJSON []byte) bool {
+	lock, err := readAgentflowState(filepath.Join(root, ".agent"), agentflowStateDocs[0])
+	if err != nil || lock == nil {
+		return false
+	}
+	lockDigest, err := canonicalPlanJSONSHA256(lock)
+	if err != nil {
+		return false
+	}
+	planDigest, err := canonicalPlanJSONSHA256(planJSON)
+	return err == nil && planDigest == lockDigest
 }
 
 // readAgentflowState reads only regular files and returns nil, nil for an absent

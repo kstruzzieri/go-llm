@@ -205,7 +205,34 @@ func (d *driver) run(ctx context.Context) (string, error) {
 			return "", err
 		}
 	}
+	if err := d.requireNoStepWork(ctx); err != nil {
+		return "", err
+	}
 	return d.af.FinishRun(ctx)
+}
+
+// requireNoStepWork refuses finish-run while AgentFlow still reports step or
+// attempt work (#651). next-step returns nothing both when every step is done
+// and when the remaining steps hold open attempts, and non-strict finish-run
+// does not require completed steps; only next-action's run-phase states prove
+// that every step completed and no attempt is open.
+func (d *driver) requireNoStepWork(ctx context.Context) error {
+	state, err := d.af.NextAction(ctx)
+	if err != nil {
+		return fmt.Errorf("check step work before finish-run: %w", err)
+	}
+	switch state.State {
+	case "run_unverified", "drift_failing", "proof_missing", "proof_stale", "proof_failing", "complete":
+		return nil
+	}
+	where := fmt.Sprintf("state %q", state.State)
+	if state.StepID != nil {
+		where += fmt.Sprintf(" step %q", *state.StepID)
+	}
+	// Resume's verdict needs its owned projection (agent identity and that
+	// agent's recovery actions), which this unowned query lacks, so the
+	// refusal defers it to -agentflow-status rather than predicting it.
+	return fmt.Errorf("agentflow still reports step work before finish-run: %s; no proof was built; run -agentflow-status to see whether -agentflow-resume can recover it", where)
 }
 
 func (d *driver) runSerialSteps(ctx context.Context) error {
@@ -539,6 +566,22 @@ func runAgentflowTask(ctx context.Context, stdout, stderr io.Writer, interrupts 
 	// #612 R5: refuse retained non-1.x AgentFlow state before any AgentFlow call.
 	if err := checkAgentflowStateMajor(root); err != nil {
 		return err
+	}
+	// #643: a fresh run must not relock over retained execution state; resume
+	// is the recovery path for it. The exception is a -review-manifest run with
+	// the same plan as the locked one, which is how review is ingested over
+	// existing work (resume rejects review manifests): its relock rewrites an
+	// identical plan, so the ledgers and the execution contract stay
+	// consistent. It does not hold the workflow contract fixed; that follows
+	// the run's routing flags or -workflow-handoff, as on any run.
+	reviewOfLockedPlan := f.reviewManifest != "" && lockedPlanMatches(root, planBytes)
+	if !f.agentflowResume && !reviewOfLockedPlan {
+		if err := refuseAgentflowExecutionHistory(root, "refusing a fresh -plan run"); err != nil {
+			if f.reviewManifest != "" {
+				return fmt.Errorf("%w; a -review-manifest round over this history needs the same plan as .agent/plan.lock.json", err)
+			}
+			return err
+		}
 	}
 	evidence, err := readEvidenceSidecar(f.evidencePath)
 	if err != nil {

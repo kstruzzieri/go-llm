@@ -610,8 +610,10 @@ func (c *Client) ProofSummary(ctx context.Context) (ProofSummary, error) {
 	return summary, nil
 }
 
-// NextActionState is the advisory recovery hint agentflow's next-action reports.
-// It is printed, never executed: proof state stays adapter-driven.
+// NextActionState is agentflow's next-action projection. Golem branches on
+// State (resume dispositions, the pre-finish-run step-work check); Command and
+// Args are an advisory hint, printed and never executed: proof state stays
+// adapter-driven.
 type NextActionState struct {
 	State        string                  `json:"state"`
 	Reason       string                  `json:"reason"`
