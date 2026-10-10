@@ -447,9 +447,15 @@ artifact found and exits 1:
 golem: refusing a fresh -plan run: .agent/ holds AgentFlow execution history (.agent/step-runs.jsonl has 3 entries); run -agentflow-status to see whether -agentflow-resume can continue it, or move .agent/ aside to start over
 ```
 
-This includes repeating the same plan after it finished. A locked plan with no
-execution contract, which is the state a `-goal` handoff leaves, still runs, and
-so do a missing `.agent/` and AgentFlow's pristine `init` scaffold.
+This includes repeating the same plan after it finished. One exception is the
+post-run review round: `-plan <plan> -review-manifest <manifest>` still runs
+over a workspace with history when `<plan>` is the same plan as the locked
+`.agent/plan.lock.json` (compared without its lock fields), because
+`-agentflow-resume` does not take review manifests and relocking an identical
+plan keeps the ledgers consistent. A review manifest with a different plan is
+refused like any other run. A locked plan with no execution contract, which is
+the state a `-goal` handoff leaves, still runs, and so do a missing `.agent/`
+and AgentFlow's pristine `init` scaffold.
 `-agentflow-resume` is not affected. Moving `.agent/` aside keeps the earlier
 run's history, but does not undo the source changes that run made. The check
 reads only those five files, so a partial manual cleanup that keeps attempt

@@ -15,6 +15,8 @@ and `-agentflow-resume`, or at moving `.agent/` aside.
 
 **Upgrade note:** a script that re-runs `-plan` in the same workspace,
 including after a finished run, must now resume the run or start from a
-workspace without `.agent/` execution state. The `-goal` handoff (a locked plan
-with no execution contract), a missing `.agent/`, the pristine `agentflow init`
-scaffold, and `-agentflow-resume` are unaffected.
+workspace without `.agent/` execution state. The post-run review round,
+`-plan` with `-review-manifest` and the same plan as the locked one, still runs
+over the history. The `-goal` handoff (a locked plan with no execution
+contract), a missing `.agent/`, the pristine `agentflow init` scaffold, and
+`-agentflow-resume` are unaffected.

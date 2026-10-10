@@ -101,6 +101,22 @@ func refuseAgentflowExecutionHistory(root, prefix string) error {
 	return fmt.Errorf("%s: .agent/ holds AgentFlow execution history (%s); run -agentflow-status to see whether -agentflow-resume can continue it, or move .agent/ aside to start over", prefix, history)
 }
 
+// lockedPlanMatches reports whether .agent/plan.lock.json holds the same plan
+// as planJSON, ignoring the lock fields. Any read or parse failure is a
+// mismatch, so the caller's refusal stands.
+func lockedPlanMatches(root string, planJSON []byte) bool {
+	lock, err := readAgentflowState(filepath.Join(root, ".agent"), agentflowStateDocs[0])
+	if err != nil || lock == nil {
+		return false
+	}
+	lockDigest, err := canonicalPlanJSONSHA256(lock)
+	if err != nil {
+		return false
+	}
+	planDigest, err := canonicalPlanJSONSHA256(planJSON)
+	return err == nil && planDigest == lockDigest
+}
+
 // readAgentflowState reads only regular files and returns nil, nil for an absent
 // file. The Unix open is nonblocking so a FIFO cannot stall the guard before
 // the opened file's type is checked.

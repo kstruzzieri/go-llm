@@ -524,3 +524,81 @@ func TestAgentflowExecutionHistory_CaseFoldedAgentDir(t *testing.T) {
 		t.Fatalf("agentflowExecutionHistory = %q, %v; want the case-folded contract", got, err)
 	}
 }
+
+// #643 review exemption (Keith, 2026-10-10): the documented post-run review
+// flow is a fresh -plan -review-manifest over the finished workspace (resume
+// rejects review manifests). It may proceed over history only when the
+// supplied plan canonically equals the locked plan, so the relock rewrites an
+// identical plan; a different plan, or no manifest, is still refused.
+func TestRunAgentflowTask_ReviewRoundOverSameLockedPlan(t *testing.T) {
+	const history = "refusing a fresh -plan run: .agent/ holds AgentFlow execution history (.agent/execution.contract.json); run -agentflow-status to see whether -agentflow-resume can continue it, or move .agent/ aside to start over"
+	plan := agentflow.Compile(validTraceableIR())
+	other := plan
+	other.Objective = "a different plan"
+	for _, tt := range []struct {
+		name     string
+		supplied agentflow.Plan
+		manifest bool
+		refused  bool
+	}{
+		{name: "review over the same plan proceeds", supplied: plan, manifest: true},
+		{name: "review over a different plan is refused", supplied: other, manifest: true, refused: true},
+		{name: "same plan without a review is refused", supplied: plan, refused: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			planBytes, err := json.Marshal(plan)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var locked map[string]any
+			if err := json.Unmarshal(planBytes, &locked); err != nil {
+				t.Fatal(err)
+			}
+			locked["locked"] = true
+			locked["locked_at"] = "2026-10-10T00:00:00+00:00"
+			lockBytes, err := json.Marshal(locked)
+			if err != nil {
+				t.Fatal(err)
+			}
+			writeAgentFile(t, root, "plan.lock.json", string(lockBytes))
+			writeAgentFile(t, root, "execution.contract.json", v1Contract)
+			writeAgentFile(t, root, "step-runs.jsonl", v1Row+"\n")
+			before := snapshotAuditFixtureTree(t, filepath.Join(root, ".agent"))
+
+			suppliedBytes, err := json.Marshal(tt.supplied)
+			if err != nil {
+				t.Fatal(err)
+			}
+			f := flags{planPath: filepath.Join(t.TempDir(), "plan.json")}
+			if err := os.WriteFile(f.planPath, suppliedBytes, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if tt.manifest {
+				f.reviewManifest = filepath.Join(t.TempDir(), "review-manifest.json")
+				if err := os.WriteFile(f.reviewManifest, []byte("{}"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			calls, err := runFreshTaskOverFixture(t, root, f)
+			if tt.refused {
+				if err == nil || err.Error() != history {
+					t.Fatalf("err = %v\nwant %s", err, history)
+				}
+				if _, statErr := os.Stat(calls); !os.IsNotExist(statErr) {
+					t.Fatal("AgentFlow ran before the refusal")
+				}
+				if after := snapshotAuditFixtureTree(t, filepath.Join(root, ".agent")); !reflect.DeepEqual(after, before) {
+					t.Fatal("refusal changed .agent/")
+				}
+				return
+			}
+			if err != nil && strings.Contains(err.Error(), "execution history") {
+				t.Fatalf("review round over the same plan was refused: %v", err)
+			}
+			if _, statErr := os.Stat(calls); statErr != nil {
+				t.Fatalf("review round never reached AgentFlow (err=%v)", err)
+			}
+		})
+	}
+}

@@ -349,6 +349,43 @@ func TestAgentflowFreshPlanRefusesExecutionHistory_RealCLI(t *testing.T) {
 	if after := snapshotSmokeAgentTree(t, dir); !reflect.DeepEqual(after, before) {
 		t.Fatal("run 2 changed .agent/")
 	}
+
+	// Run 3: the documented post-run review round, -plan with the same plan
+	// and a review manifest, still proceeds over the history (the #643 review
+	// exemption). The manifest has no findings, so no amendment and no model
+	// call; the run re-runs finish-run to a proof.
+	stateDir := filepath.Join(".agent", "review-contract")
+	if err := os.MkdirAll(filepath.Join(dir, stateDir), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, stateDir, "findings-final.json"), []byte(`{"findings":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := json.Marshal(map[string]any{
+		"schema_version": "1.0.0", "review_run_id": "RR-20261010T120000Z-643a643b",
+		"state_dir": stateDir, "gate_status": "pass", "active_blocking": []string{},
+		"depth_profile": "none", "amendment_ready": true,
+		"findings":  map[string]any{"counts_by_severity": map[string]int{}, "counts_by_status": map[string]int{}, "index": []any{}},
+		"artifacts": []map[string]string{{"path": "findings-final.json"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reviewFlags := taskFlags
+	reviewFlags.reviewManifest = filepath.Join(dir, stateDir, "review-manifest.json")
+	if err := os.WriteFile(reviewFlags.reviewManifest, manifest, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	reviewCaller := &recordingCaller{next: &scriptCaller{}}
+	third := &replSession{orch: agent.New(reviewCaller, agent.ContextManager{}), maxSteps: 4, clock: time.Now}
+	stdout.Reset()
+	stderr.Reset()
+	if err := runAgentflowTask(ctx, &stdout, &stderr, nil, third, reviewFlags, dir); err != nil {
+		t.Fatalf("run 3 (review round over the same plan): %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "review RR-20261010T120000Z-643a643b") || !strings.Contains(stdout.String(), "proof pack:") || len(reviewCaller.reqs) != 0 {
+		t.Fatalf("run 3 did not record the review and finish (model requests %d):\n%s", len(reviewCaller.reqs), stdout.String())
+	}
 }
 
 // #612 R-new: AgentFlow 1.0 rejects a 0.x plan before it looks at execution

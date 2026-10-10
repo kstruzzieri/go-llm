@@ -568,8 +568,11 @@ func runAgentflowTask(ctx context.Context, stdout, stderr io.Writer, interrupts 
 		return err
 	}
 	// #643: a fresh run must not relock over retained execution state; resume
-	// is the recovery path for it.
-	if !f.agentflowResume {
+	// is the recovery path for it. A -review-manifest round over the same
+	// locked plan is the documented post-run review flow (resume rejects review
+	// manifests); its relock rewrites an identical plan, so the ledgers stay
+	// consistent.
+	if !f.agentflowResume && !(f.reviewManifest != "" && lockedPlanMatches(root, planBytes)) {
 		if err := refuseAgentflowExecutionHistory(root, "refusing a fresh -plan run"); err != nil {
 			return err
 		}
