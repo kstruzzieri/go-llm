@@ -954,36 +954,28 @@ func TestCollectorUnstartedRequestIsNotAnObservation(t *testing.T) {
 	}
 }
 
-// TestCollectorTickBudgetIsNotBlamedOnTheLastBackend: two hung neighbors
-// spend 4 s of the 5 s tick. A healthy backend that answers /running in
-// 1.2 s is not started, rather than cut short by the tick deadline and read
-// as down.
-func TestCollectorTickBudgetIsNotBlamedOnTheLastBackend(t *testing.T) {
-	hung := func() string {
-		f := opsfixture.NewLlamaSwap(t)
-		f.HoldFor(t, "/api/version")
-		return f.URL()
-	}
-	ok := opsfixture.NewLlamaSwap(t)
-	slow := front(t, ok, func(_ http.ResponseWriter, r *http.Request) bool {
-		if r.URL.Path == "/running" {
-			select {
-			case <-time.After(1200 * time.Millisecond):
-			case <-r.Context().Done():
-			}
+// TestCollectorOwnBudgetIsNotBlamedOnTheLastSurface: a backend whose reads
+// take 1.3 s each spends its own tick budget on version, /running and
+// /api/metrics. /v1/models would start with about 1.1 s left; it is deferred
+// to a later tick, not started and then cut short by the tick deadline and
+// read as a timeout. Since #662 only a backend's own reads can leave it short.
+func TestCollectorOwnBudgetIsNotBlamedOnTheLastSurface(t *testing.T) {
+	f := opsfixture.NewLlamaSwap(t)
+	base := front(t, f, func(_ http.ResponseWriter, r *http.Request) bool {
+		select {
+		case <-time.After(1300 * time.Millisecond):
+		case <-r.Context().Done():
 		}
 		return false
 	})
-	c := NewCollector([]BackendSpec{
-		{Provider: "a1-hung", BaseURL: hung(), APIFormat: "openai-compat"},
-		{Provider: "a2-hung", BaseURL: hung(), APIFormat: "openai-compat"},
-		{Provider: "c-slow", BaseURL: slow, APIFormat: "openai-compat"},
-	}, Options{Interval: 2 * time.Second, Clock: newFakeClock().clock()})
-	b := c.Tick(context.Background()).Backends[2]
-	if b.Reachable != nil || b.ReachCode != "" || slices.ContainsFunc(b.Surfaces, func(s Surface) bool { return s.LastError != "" }) {
-		t.Fatalf("a backend the tick budget never reached was read as down: reachable=%+v code=%q surfaces=%+v", b.Reachable, b.ReachCode, b.Surfaces)
+	c := NewCollector([]BackendSpec{lsSpec(base)}, Options{Interval: 2 * time.Second, Clock: newFakeClock().clock()})
+	b := c.Tick(context.Background()).Backends[0]
+	if b.Reachable == nil || !b.Reachable.Value || b.ReachCode != "" || slices.ContainsFunc(b.Surfaces, func(s Surface) bool { return s.LastError != "" }) {
+		t.Fatalf("a read the backend's own budget deferred was read as a failure: reachable=%+v code=%q surfaces=%+v", b.Reachable, b.ReachCode, b.Surfaces)
 	}
-	assertRequests(t, ok)
+	if n := countURI(f, "/v1/models"); n != 0 {
+		t.Fatalf("requests = %v: /v1/models started with under one request timeout of budget left", f.Requests())
+	}
 }
 
 // Every request succeeds within its own deadline, but neither slow backend
