@@ -513,7 +513,11 @@ for bad in 'garbage' 'x 0' 'a b c' "r 85e3 refs/heads/x $zero" "r $c1 notref $ze
   run_hook "hook-malformed-$n" "$hook_repo" 0
   assert_status "hook-malformed-$n" 1
   assert_gate_runs "hook-malformed-$n" 0
-  grep -Fq 'pre-push: malformed ref update from git:' "$tmp/hook-malformed-$n.out"
+  if ! grep -Fq 'pre-push: malformed ref update from git:' "$tmp/hook-malformed-$n.out"; then
+    printf 'hook-malformed-%s: rejected without the malformed diagnostic:\n' "$n" >&2
+    cat "$tmp/hook-malformed-$n.out" >&2
+    exit 1
+  fi
 done
 
 # An id git cannot peel to a tree fails the push before Docker.
