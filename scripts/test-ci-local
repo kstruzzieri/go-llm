@@ -651,18 +651,18 @@ assert_status hook-replace 0
 assert_gate_runs hook-replace 1
 assert_gated hook-replace 1 "$c1"
 
-# Ctrl-C reaches the whole foreground job. compose dies, but its container
+# Ctrl-C (or a closed terminal's SIGHUP) reaches the whole foreground job. compose dies, but its container
 # (no TTY here) would keep running against the removed export, so the hook's
-# INT/TERM traps remove the named container. The job gets its own process
+# INT/TERM/HUP traps remove the named container. The job gets its own process
 # group (set -m) and the subshell execs the hook, so the job is the hook.
 printf 'refs/heads/main %s refs/heads/main %s\n' "$c1" "$zero" >"$tmp/hook-interrupt.in"
-for sig in INT TERM; do
+for sig in INT TERM HUP; do
   name="hook-interrupt-$sig"
   : >"$tmp/$name.log"
   set -m
   (
     cd "$hook_repo"
-    exec env PATH="$tmp/bin:$PATH" CI_LOCAL_TEST_LOG="$tmp/$name.log" CI_LOCAL_DOCKER_BLOCK="$tmp/$name.blocked" \
+    exec env GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 PATH="$tmp/bin:$PATH" CI_LOCAL_TEST_LOG="$tmp/$name.log" CI_LOCAL_DOCKER_BLOCK="$tmp/$name.blocked" \
       "$repo_root/.githooks/pre-push" origin example.invalid <"$tmp/hook-interrupt.in" >"$tmp/$name.out" 2>&1
   ) &
   job=$!
@@ -685,6 +685,7 @@ for sig in INT TERM; do
   case "$sig" in
     INT) assert_status "$name" 130 ;;
     TERM) assert_status "$name" 143 ;;
+    HUP) assert_status "$name" 129 ;;
   esac
   run_line="$(sed -n 1p "$tmp/$name.log")"
   container="$(printf '%s\n' "$run_line" | sed -n 's/.* --name \(go-llm-prepush-[0-9]*\) .*/\1/p')"

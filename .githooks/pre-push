@@ -66,12 +66,14 @@ fi
 # user: umask and tar.umask keep the export world-readable whatever the
 # caller's umask or git config.
 umask 022
-work="$(mktemp -d)"
-# An interrupt (Ctrl-C reaches the whole push) kills docker compose, but
-# compose runs without a TTY here and leaves its container running against the
-# export the EXIT trap removes. Name the container so the traps can remove it.
+# An interrupt (Ctrl-C, or SIGHUP from a closed terminal, reaches the whole
+# push) kills docker compose, but compose runs without a TTY here and leaves
+# its container running against the export the EXIT trap removes. Name the
+# container so the traps can remove it.
 name="go-llm-prepush-$$"
+work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
+trap 'docker rm -f "$name" >/dev/null 2>&1; exit 129' HUP
 trap 'docker rm -f "$name" >/dev/null 2>&1; exit 130' INT
 trap 'docker rm -f "$name" >/dev/null 2>&1; exit 143' TERM
 for tree in $trees; do

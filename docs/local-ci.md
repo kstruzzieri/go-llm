@@ -190,7 +190,7 @@ expression containing a newline cannot be parsed, so push such a source by its
 id. Local `git replace` mappings are ignored: the gate checks the objects git
 sends.
 
-An interrupted push (Ctrl-C) removes the gate's container, named
+An interrupted push (Ctrl-C, or a closed terminal) removes the gate's container, named
 `go-llm-prepush-<pid>`, and the export; without that, compose would exit and
 leave the container running.
 
