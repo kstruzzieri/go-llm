@@ -28,6 +28,8 @@ type assignedWorkerRunner struct {
 	calls      [][]string
 	nextAction string
 	blocks     []blockCall
+	runExit    int    // exit code of a "run" (gate) call
+	runStderr  string // stderr of a "run" call
 }
 
 type aggregationRootRunner struct{ calls [][]string }
@@ -64,7 +66,9 @@ func (r *assignedWorkerRunner) Run(ctx context.Context, args []string, _ []byte)
 		return []byte(r.nextAction), nil, 0, nil
 	case "claim-step":
 		return []byte(`{"attempt_id":"A1"}`), nil, 0, nil
-	case "record-file-change", "run", "finish-step":
+	case "run":
+		return []byte(`{}`), []byte(r.runStderr), r.runExit, nil
+	case "record-file-change", "finish-step":
 		return []byte(`{}`), nil, 0, nil
 	case "block-step":
 		r.blocks = append(r.blocks, newBlockCall(ctx))
@@ -158,6 +162,37 @@ func TestAssignedParallelWorkerBlocksCancelledAttemptAsItsOwner(t *testing.T) {
 		t.Fatalf("block call = %q, want the cancelled reason as the owning worker", block)
 	}
 	assertFreshBlockContext(t, runner.blocks)
+}
+
+// #642 A9: a worker's timed-out gate is blocked, and the report names the
+// worker root whose ledger retains the receipt.
+func TestAssignedParallelWorkerGateTimeoutNamesWorkerRoot(t *testing.T) {
+	workerRoot := t.TempDir()
+	writeAgentFile(t, workerRoot, "command-receipts.jsonl", timeoutReceiptCR1+"\n")
+	plan := &agentflow.Plan{AllowedFiles: []string{"worker.go"}, Steps: []agentflow.Step{{
+		ID: "P2", Files: []string{"worker.go"}, Validation: []string{"unit"},
+		Gates: []agentflow.Gate{{Kind: "command", Run: []string{"go", "test", "./worker"}}},
+	}}}
+	runner := &assignedWorkerRunner{
+		nextAction: `{"resumability":{"contract":{"plan_sha256":"plan","locked":true,"execution_contract_sha256":"execution"},"agent_id":"golem-w2","step":{"id":"P1","state":"pending","completed":false},"attempt":null,"diagnostics":[]}}`,
+		runExit:    124, runStderr: "command timed out after 1 seconds",
+	}
+	sess := &replSession{maxSteps: 2, newOrchestrator: func() *agent.Orchestrator {
+		return agent.New(&scriptCaller{responses: []agent.ModelResult{{Response: provider.ChatResponse{Content: "done"}}}}, agent.ContextManager{})
+	}}
+	run := newAssignedParallelWorker(plan, sess, true, io.Discard, func(string) agentflow.Runner { return runner })
+	err := run(context.Background(), parallelWorker{step: plan.Steps[0], root: workerRoot, ownerID: "golem-w2", sourceID: "w2"})
+	want := `step P2 attempt A1: gate "unit" failed: agentflow run: exit 124: command timed out after 1 seconds; attempt recorded as blocked; ` + wantTimeoutReport(workerRoot, "CR1")
+	if err == nil || err.Error() != want {
+		t.Fatalf("err = %v\nwant %s", err, want)
+	}
+	var commands []string
+	for _, call := range runner.calls {
+		commands = append(commands, call[0])
+	}
+	if want := []string{"next-action", "claim-step", "run", "block-step"}; !reflect.DeepEqual(commands, want) {
+		t.Fatalf("Agentflow commands = %v, want %v", commands, want)
+	}
 }
 
 func TestAssignedParallelWorkerRejectsNonFreshProjectionBeforeClaim(t *testing.T) {

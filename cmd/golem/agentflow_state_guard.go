@@ -101,6 +101,64 @@ func refuseAgentflowExecutionHistory(root, prefix string) error {
 	return fmt.Errorf("%s: .agent/ holds AgentFlow execution history (%s); run -agentflow-status to see whether -agentflow-resume can continue it, or move .agent/ aside to start over", prefix, history)
 }
 
+// retainedTimedOutReceipt returns the first command receipt root retains that
+// AgentFlow 1.0 counts as timed out (decision "timeout" or timed_out true,
+// execution_coverage.py _receipt_timed_out), or "". The id is the receipt's
+// own when it is a nonempty string, else the ledger line. Read-only: it
+// never edits or deletes receipts.
+func retainedTimedOutReceipt(root string) (string, error) {
+	const name = "command-receipts.jsonl"
+	b, err := readAgentflowState(filepath.Join(root, ".agent"), name)
+	if err != nil {
+		return "", err
+	}
+	for i, line := range bytes.Split(b, []byte("\n")) {
+		if len(bytes.TrimSpace(line)) == 0 {
+			continue // AgentFlow skips blank lines too
+		}
+		where := fmt.Sprintf(".agent/%s:%d", name, i+1)
+		value, err := parseAgentflowJSON(line)
+		row, isObject := value.(agentflowJSONObject)
+		if err != nil || !isObject {
+			return "", incompatibleAgentflowState(where, "unreadable")
+		}
+		id, timedOut := where, false
+		for _, member := range row { // the parser already folds duplicate keys, last wins
+			switch {
+			case agentflowJSONStringEqualASCII(member.key, "id"):
+				if s, ok := member.value.(agentflowJSONString); ok && len(s) != 0 {
+					id = string(s)
+				}
+			case agentflowJSONStringEqualASCII(member.key, "decision"):
+				if s, ok := member.value.(agentflowJSONString); ok && agentflowJSONStringEqualASCII(s, "timeout") {
+					timedOut = true
+				}
+			case agentflowJSONStringEqualASCII(member.key, "timed_out"):
+				if v, ok := member.value.(bool); ok && v {
+					timedOut = true
+				}
+			}
+		}
+		if timedOut {
+			return id, nil
+		}
+	}
+	return "", nil
+}
+
+// refuseRetainedTimeout reports a timed-out command receipt that root retains.
+// AgentFlow 1.0's verify-run rejects every such receipt, superseded or not
+// (agentflow#60), so no recovery of that root reaches a proof (#642 A9). Golem
+// never points at init-execution --force: that overwrites the contract and
+// ledgers.
+func refuseRetainedTimeout(root string) error {
+	id, err := retainedTimedOutReceipt(root)
+	if err != nil || id == "" {
+		return err
+	}
+	return fmt.Errorf("retained timeout receipt %s in %s prevents this root's ledger from passing AgentFlow 1.0 run verification; preserve the complete .agent/ directory by archiving it outside the working tree, then initialize and validate a new run; do not delete individual receipts", id, root)
+}
+
 // lockedPlanMatches reports whether .agent/plan.lock.json holds the same plan
 // as planJSON, ignoring the lock fields. Any read or parse failure is a
 // mismatch, so the caller's refusal stands.

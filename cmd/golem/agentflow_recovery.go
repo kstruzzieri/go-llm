@@ -131,6 +131,12 @@ func runAgentflowStatusWithRunner(ctx context.Context, out io.Writer, root strin
 			disposition = recoveryDisposition{failClosed, 3, "blocked by unsafe or malformed projection: " + err.Error()}
 		}
 	}
+	// #642 A9: after validateStatusRecovery, so earlier projection refusals keep precedence (D9).
+	if disposition.action == resumeSerial {
+		if err := refuseRetainedTimeout(root); err != nil {
+			disposition = recoveryDisposition{failClosed, 3, "blocked: " + err.Error()}
+		}
+	}
 	var proof *agentflow.ProofSummary
 	if disposition.action == reportComplete {
 		summary, err := verifiedAgentflowProofSummary(ctx, client)
@@ -501,7 +507,7 @@ func settleAgentflowAttempt(ctx context.Context, client afClient, root string, p
 				continue
 			}
 			if err := client.RunGate(ctx, stepID, attemptID, command.Label, command.Argv); err != nil {
-				return true, blockAttempt(ctx, client, stepID, attemptID, gateBlockReason, fmt.Errorf("gate %q failed: %w", command.Label, err))
+				return true, blockFailedGate(ctx, client, root, stepID, attemptID, fmt.Errorf("gate %q failed: %w", command.Label, err))
 			}
 		}
 		if err := client.FinishStep(ctx, stepID, attemptID); err != nil {
@@ -534,6 +540,11 @@ func (d *driver) resume(ctx context.Context, root string, planJSON []byte, appro
 	}
 	if disposition.action == reportComplete {
 		return state, nil
+	}
+	// #642 A9: no recovery of a root that retains a timed-out receipt can
+	// pass AgentFlow 1.0's run verification, so refuse before any mutation.
+	if err := refuseRetainedTimeout(root); err != nil {
+		return agentflow.NextActionState{}, err
 	}
 
 	settled, err := settleAgentflowAttempt(ctx, d.af, root, d.plan, state)

@@ -991,7 +991,7 @@ func TestDriver_AmendmentFailuresStayIncomplete(t *testing.T) {
 			if tt.failAt != "" {
 				af.failAt = map[string]error{tt.failAt: errors.New(tt.failAt + " failed")}
 			}
-			d := &driver{af: af, plan: reviewPlan(), planPath: "plan.json", reviewManifest: "review.json", out: io.Discard,
+			d := &driver{af: af, plan: reviewPlan(), planPath: "plan.json", reviewManifest: "review.json", out: io.Discard, root: t.TempDir(),
 				runStep: func(context.Context, agentflow.Step, string, string) error { return tt.runErr }}
 			if _, err := d.run(context.Background()); err == nil {
 				t.Fatal("expected failure")
@@ -2271,4 +2271,66 @@ func TestTaskStepRunnerRunErrorsBlockAttempt(t *testing.T) {
 		}
 		assertFreshBlockContext(t, af.blocks)
 	})
+}
+
+// #642 A9 (T1 timeout rows): after blocking a failed gate, the error reports a
+// timed-out receipt the driver's root retains, since verify-run will reject
+// it whatever runs next; a read refusal is appended, never in place of the gate
+// or block error, and the one block still runs.
+func TestRunAttemptGateTimeoutReportsRetainedReceipt(t *testing.T) {
+	const prefix = `step P1 attempt A-P1: gate "go test" failed: agentflow run: exit 124: command timed out after 1 seconds`
+	const unreadable = "this workspace holds incompatible AgentFlow state (.agent/command-receipts.jsonl unreadable); finish that run, or build its proof, with the AgentFlow version that wrote it, then move .agent/ aside before starting an AgentFlow 1.x run"
+	errBlock := errors.New("block rejected")
+	for _, tt := range []struct {
+		name       string
+		receipts   string // command-receipts.jsonl body; "" means a directory there
+		blockErr   error
+		wantSuffix func(root string) string
+	}{
+		{"timeout", timeoutReceiptCR1 + "\n", nil, func(root string) string {
+			return "; attempt recorded as blocked; " + wantTimeoutReport(root, "CR1")
+		}},
+		{"timeout, block fails", timeoutReceiptCR1 + "\n", errBlock, func(root string) string {
+			return "; record blocked attempt: block rejected; " + wantTimeoutReport(root, "CR1")
+		}},
+		{"exit-1 receipt", exitOneReceiptCR1 + "\n", nil, func(string) string {
+			return "; attempt recorded as blocked"
+		}},
+		{"unreadable receipts", "", nil, func(string) string {
+			return "; attempt recorded as blocked; " + unreadable
+		}},
+		{"unreadable receipts, block fails", "", errBlock, func(string) string {
+			return "; record blocked attempt: block rejected; " + unreadable
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			if tt.receipts != "" {
+				writeAgentFile(t, root, "command-receipts.jsonl", tt.receipts)
+			} else if err := os.MkdirAll(filepath.Join(root, ".agent", "command-receipts.jsonl"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			gateErr := &agentflow.CommandError{Cmd: "run", Exit: 124, Stderr: "command timed out after 1 seconds"}
+			af := &fakeAF{failAt: map[string]error{"gate": gateErr, "block-step": tt.blockErr}}
+			plan := stopTestPlan()
+			d := &driver{af: af, plan: plan, root: root, runStep: func(context.Context, agentflow.Step, string, string) error {
+				return nil
+			}}
+			err := d.runAttempt(context.Background(), plan.Steps[0], "A-P1", "goal")
+			if want := prefix + tt.wantSuffix(root); err == nil || err.Error() != want {
+				t.Fatalf("err = %v\nwant %s", err, want)
+			}
+			var asCommand *agentflow.CommandError
+			if !errors.Is(err, gateErr) || !errors.As(err, &asCommand) {
+				t.Fatalf("err = %v lost the gate error", err)
+			}
+			if tt.blockErr != nil && !errors.Is(err, tt.blockErr) {
+				t.Fatalf("err = %v lost the block error", err)
+			}
+			if want := []string{"gate:P1:go test", "block-step:P1:A-P1:golem: gate execution failed"}; !equalSeq(af.seq, want) {
+				t.Fatalf("agentflow calls = %v, want %v", af.seq, want)
+			}
+			assertFreshBlockContext(t, af.blocks)
+		})
+	}
 }

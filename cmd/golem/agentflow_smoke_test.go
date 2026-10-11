@@ -1176,7 +1176,7 @@ func TestAgentflowStoppedStepIsBlockedAndResumes_RealCLI(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	d := &driver{af: client, plan: &plan, runStep: runStep}
+	d := &driver{af: client, plan: &plan, runStep: runStep, root: dir}
 	final, err := d.resume(runCtx, dir, planBytes, nil)
 	if err != nil || final.State != "complete" {
 		t.Fatalf("resume state=%q err=%v", final.State, err)
@@ -1212,7 +1212,7 @@ func TestAgentflowStoppedStepPartialEditFailsClosed_RealCLI(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	d := &driver{af: client, plan: &plan, runStep: runStep}
+	d := &driver{af: client, plan: &plan, runStep: runStep, root: dir}
 	if _, err := d.resume(runCtx, dir, planBytes, nil); err == nil || !strings.Contains(err.Error(), "reached state \"file_receipts_missing\" before gates") {
 		t.Fatalf("want the before-gates refusal in state file_receipts_missing, got resume err = %v", err)
 	}
@@ -1250,7 +1250,7 @@ func TestAgentflowStoppedStepPartialEditFailsClosed_RealCLI(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	d = &driver{af: client, plan: &plan, runStep: runStep}
+	d = &driver{af: client, plan: &plan, runStep: runStep, root: dir}
 	final, err := d.resume(runCtx, dir, planBytes, nil)
 	if err != nil || final.State != "complete" {
 		t.Fatalf("resume after the remedy: state=%q err=%v", final.State, err)

@@ -114,6 +114,17 @@ func blockAttempt(ctx context.Context, af afClient, step, attempt, reason string
 	return fmt.Errorf("%w; attempt recorded as blocked", err)
 }
 
+// blockFailedGate blocks the attempt whose gate errored (#642 A2), then reads
+// root's command receipts (A9). It appends the timed-out receipt report, or
+// the receipt read error, after the gate and block errors, which stay wrapped.
+func blockFailedGate(ctx context.Context, af afClient, root, step, attempt string, cause error) error {
+	err := blockAttempt(ctx, af, step, attempt, gateBlockReason, cause)
+	if terr := refuseRetainedTimeout(root); terr != nil {
+		return fmt.Errorf("%w; %w", err, terr)
+	}
+	return err
+}
+
 // agentflowUnavailableError marks a failed version gate or capability probe.
 // A refused AgentFlow is not asked for recovery advice (#612 R10).
 type agentflowUnavailableError struct{ err error }
@@ -338,7 +349,7 @@ func (d *driver) runAttempt(ctx context.Context, step agentflow.Step, attempt, g
 	}
 	for _, g := range gates {
 		if err := d.af.RunGate(ctx, step.ID, attempt, g.Label, g.Argv); err != nil {
-			return blockAttempt(ctx, d.af, step.ID, attempt, gateBlockReason, fmt.Errorf("gate %q failed: %w", g.Label, err))
+			return blockFailedGate(ctx, d.af, d.root, step.ID, attempt, fmt.Errorf("gate %q failed: %w", g.Label, err))
 		}
 	}
 	return d.af.FinishStep(ctx, step.ID, attempt) // #642 A4: a FinishStep error leaves the attempt open
@@ -630,6 +641,13 @@ func runAgentflowTask(ctx context.Context, stdout, stderr io.Writer, interrupts 
 			return err
 		}
 	}
+	if !f.agentflowResume && reviewOfLockedPlan {
+		// #642 A9: the same-plan review exception above skips the history
+		// guard, so it must not mutate a ledger that can never verify.
+		if err := refuseRetainedTimeout(root); err != nil {
+			return fmt.Errorf("refusing a -review-manifest round: %w", err)
+		}
+	}
 	evidence, err := readEvidenceSidecar(f.evidencePath)
 	if err != nil {
 		return err
@@ -693,7 +711,7 @@ func runAgentflowTask(ctx context.Context, stdout, stderr io.Writer, interrupts 
 		af: client, plan: &plan, planPath: planPath, reviewManifest: reviewManifest,
 		taskBrief: taskBrief, workflowProfile: f.workflowProfile, workflowReason: f.workflowReason,
 		approvedRecommendation: approvedRecommendation,
-		evidence:               evidence, runStep: runStep, out: stdout,
+		evidence:               evidence, runStep: runStep, out: stdout, root: root,
 	}
 	if f.agentflowResume {
 		final, err := d.resume(runCtx, root, planBytes, approvedRecommendation)
