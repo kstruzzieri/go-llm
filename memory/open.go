@@ -197,12 +197,7 @@ func OpenRecordStore(ctx context.Context, path string, config RecordStoreConfig)
 		return nil, err
 	}
 	if config.KeyDir == "" && config.Signer == nil && config.Verifiers == nil {
-		if disk == "" {
-			_ = db.Close()
-			return nil, fmt.Errorf("memory: record store %q names no database file to keep signing keys beside; set RecordStoreConfig.KeyDir or inject credentials", path)
-		}
-		config.KeyDir = disk + ".keys"
-		if err := checkLegacyKeyDir(path, config.KeyDir); err != nil {
+		if config.KeyDir, err = DefaultRecordKeyDir(path); err != nil {
 			_ = db.Close()
 			return nil, err
 		}
@@ -219,6 +214,27 @@ func OpenRecordStore(ctx context.Context, path string, config RecordStoreConfig)
 		return nil, err
 	}
 	return &RecordRuntime{store: store, db: db, dbPath: disk}, nil
+}
+
+// DefaultRecordKeyDir is the signing-key directory OpenRecordStore uses when
+// the caller supplies none: a ".keys" directory beside the database file
+// SQLite opens for path. Callers that open the database themselves and pass
+// KeyDir use it to get the same location. It fails when path names no file
+// (an in-memory database), and while the keys are still in the directory
+// derived from the raw path, where go-llm kept them before #648.
+func DefaultRecordKeyDir(path string) (string, error) {
+	disk, err := diskPath(path)
+	if err != nil {
+		return "", err
+	}
+	if disk == "" {
+		return "", fmt.Errorf("memory: record store %q names no database file to keep signing keys beside; set RecordStoreConfig.KeyDir or inject credentials", path)
+	}
+	keyDir := disk + ".keys"
+	if err := checkLegacyKeyDir(path, keyDir); err != nil {
+		return "", err
+	}
+	return keyDir, nil
 }
 
 // checkLegacyKeyDir refuses to start a new signing identity in keyDir while

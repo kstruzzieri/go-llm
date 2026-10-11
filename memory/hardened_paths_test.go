@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -73,12 +74,52 @@ func TestOpenRecordStoreRefusesLegacyKeyDir(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(legacy, "trusted"), 0o700); err != nil {
 		t.Skipf("cannot create the legacy key directory name here: %v", err)
 	}
-	_, err := OpenRecordStore(context.Background(), input, RecordStoreConfig{})
-	if err == nil || !strings.Contains(err.Error(), legacy) || !strings.Contains(err.Error(), path+".keys") {
-		t.Fatalf("OpenRecordStore = %v, want an error naming %q and %q", err, legacy, path+".keys")
+	dir, err := filepath.EvalSymlinks(filepath.Dir(path))
+	if err != nil {
+		t.Fatal(err)
 	}
-	if _, err := os.Stat(path + ".keys"); !os.IsNotExist(err) {
+	keyDir := filepath.Join(dir, "records.db.keys") // beside the file SQLite opens
+	_, err = OpenRecordStore(context.Background(), input, RecordStoreConfig{})
+	want := fmt.Sprintf("(mv %q %q)", legacy, keyDir)
+	if err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("OpenRecordStore = %v, want an error containing %s", err, want)
+	}
+	if _, err := os.Stat(keyDir); !os.IsNotExist(err) {
 		t.Fatalf("a new key directory was created beside the database: %v", err)
+	}
+}
+
+// TestOpenRecordStoreReopensWithoutLegacyRefusal: the legacy-key check must not
+// refuse a healthy store whose keys already sit beside the database, however
+// the path is spelled: a file: URI, a symlinked parent directory, or a relative
+// plain path.
+func TestOpenRecordStoreReopensWithoutLegacyRefusal(t *testing.T) {
+	base := t.TempDir()
+	real := filepath.Join(base, "real")
+	if err := os.MkdirAll(real, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	inputs := map[string]string{
+		"file URI":         fileURI(filepath.ToSlash(filepath.Join(real, "a.db"))),
+		"relative plain":   "b.db",
+		"symlinked parent": filepath.Join(base, "link", "c.db"),
+	}
+	if err := os.Symlink(real, filepath.Join(base, "link")); err != nil {
+		delete(inputs, "symlinked parent")
+	}
+	t.Chdir(real)
+	for name, input := range inputs {
+		t.Run(name, func(t *testing.T) {
+			for i := range 2 {
+				rt, err := OpenRecordStore(context.Background(), input, RecordStoreConfig{})
+				if err != nil {
+					t.Fatalf("open %d of %q: %v", i+1, input, err)
+				}
+				if err := rt.Close(); err != nil {
+					t.Fatal(err)
+				}
+			}
+		})
 	}
 }
 
