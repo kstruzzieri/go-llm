@@ -2293,10 +2293,10 @@ func TestRunAttemptGateTimeoutReportsRetainedReceipt(t *testing.T) {
 			return "; attempt recorded as blocked"
 		}},
 		{"unreadable receipts", "", nil, func(string) string {
-			return "; attempt recorded as blocked; read command receipts for the timeout check: " + unreadable
+			return "; attempt recorded as blocked; read command receipts for the timeout check: " + unreadable + "; run -agentflow-status"
 		}},
 		{"unreadable receipts, block fails", "", errBlock, func(string) string {
-			return "; record blocked attempt: block rejected; read command receipts for the timeout check: " + unreadable
+			return "; record blocked attempt: block rejected; read command receipts for the timeout check: " + unreadable + "; run -agentflow-status"
 		}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -2336,9 +2336,13 @@ func TestRunAttemptGateTimeoutReportsRetainedReceipt(t *testing.T) {
 // state_invalid. So a failed run or gate whose attempt root's ledger already
 // closed (an operator's break-glass fail-step, say) is reported and not
 // blocked, nor is an attempt whose ledger cannot be read. A terminal event for
-// another attempt or step is no reason to skip the block.
+// another attempt or step, and every non-terminal event AgentFlow 1.0 reads
+// (execution.py OPEN_EVENTS and LEASE_EVENTS), is no reason to skip the block.
 func TestBlockAttemptSkipsClosedAttempt(t *testing.T) {
 	const claimed = `{"schema_version":"1.0.0","step_id":"P1","attempt_id":"A-P1","event":"claimed"}` + "\n"
+	event := func(name string) string {
+		return `{"schema_version":"1.0.0","step_id":"P1","attempt_id":"A-P1","event":"` + name + `"}` + "\n"
+	}
 	rows := []struct {
 		name, ledger string
 		suffix       string // after the cause; "" means the block runs
@@ -2348,9 +2352,16 @@ func TestBlockAttemptSkipsClosedAttempt(t *testing.T) {
 		{"failed", claimed + `{"schema_version":"1.0.0","step_id":"P1","attempt_id":"A-P1","event":"failed"}` + "\n", "; attempt already closed (failed); not blocked"},
 		{"abandoned", claimed + `{"schema_version":"1.0.0","step_id":"P1","attempt_id":"A-P1","event":"abandoned"}` + "\n", "; attempt already closed (abandoned); not blocked"},
 		{"control: open attempt", claimed, ""},
+		{"control: amendment_started", event("amendment_started"), ""},
+		{"control: lease_renewed", claimed + event("lease_renewed"), ""},
+		{"control: verified", claimed + event("verified"), ""},
+		{"control: in_progress", claimed + event("in_progress"), ""},
 		{"control: another attempt failed", claimed + `{"schema_version":"1.0.0","step_id":"P1","attempt_id":"A-P2","event":"failed"}` + "\n", ""},
-		{"control: another step failed", claimed + `{"schema_version":"1.0.0","step_id":"P2","attempt_id":"A-P1","event":"failed"}` + "\n", ""},
-		{"malformed row", claimed + "{\n", "; check attempt state before blocking: this workspace holds incompatible AgentFlow state (.agent/step-runs.jsonl:2 unreadable); finish that run, or build its proof, with the AgentFlow version that wrote it, then move .agent/ aside before starting an AgentFlow 1.x run; attempt not blocked"},
+		// Defence in depth, not a reachable state: attempt ids are global, so
+		// AgentFlow rejects this ledger ("attempt ... belongs to multiple
+		// steps", porcelain.py); Golem still matches on both ids.
+		{"defence in depth: same attempt id failed under another step", claimed + `{"schema_version":"1.0.0","step_id":"P2","attempt_id":"A-P1","event":"failed"}` + "\n", ""},
+		{"malformed row", claimed + "{\n", "; check attempt state before blocking: this workspace holds incompatible AgentFlow state (.agent/step-runs.jsonl:2 unreadable); finish that run, or build its proof, with the AgentFlow version that wrote it, then move .agent/ aside before starting an AgentFlow 1.x run; attempt not blocked; run -agentflow-status"},
 	}
 	providerDown, gateDown := errors.New("provider down"), errors.New("gate down")
 	paths := []struct {
@@ -2392,4 +2403,25 @@ func TestBlockAttemptSkipsClosedAttempt(t *testing.T) {
 			})
 		}
 	}
+	// A review amendment as AgentFlow 1.0 writes it (execution.py claim_step,
+	// _close_step, amend_step): the step's earlier attempt completed, and the
+	// amendment's own failed gate must still block the amendment attempt.
+	t.Run("gate error/amendment attempt", func(t *testing.T) {
+		root := t.TempDir()
+		writeAgentFile(t, root, "step-runs.jsonl", `{"schema_version":"1.0.0","recorded_at":"2026-10-11T10:00:00Z","event":"claimed","step_id":"P1","attempt_id":"A1","agent_id":"golem","lease_expires_at":null}`+"\n"+
+			`{"schema_version":"1.0.0","recorded_at":"2026-10-11T10:01:00Z","event":"completed","step_id":"P1","attempt_id":"A1"}`+"\n"+
+			`{"schema_version":"1.0.0","recorded_at":"2026-10-11T10:02:00Z","event":"amendment_started","step_id":"P1","attempt_id":"A2","amends_attempt":"A1","amends_completed_at":"2026-10-11T10:01:00Z","agent_id":"golem","reason":"review RR-20261011T100200Z-0123abcd"}`+"\n")
+		af := &fakeAF{failAt: map[string]error{"gate": gateDown}}
+		plan := stopTestPlan()
+		d := &driver{af: af, plan: plan, root: root, runStep: func(context.Context, agentflow.Step, string, string) error {
+			return nil
+		}}
+		err := d.runAttempt(context.Background(), plan.Steps[0], "A2", "goal")
+		if want := `step P1 attempt A2: gate "go test" failed: gate down; attempt recorded as blocked`; err == nil || err.Error() != want {
+			t.Fatalf("err = %v\nwant %s", err, want)
+		}
+		if want := []string{"gate:P1:go test", "block-step:P1:A2:golem: gate execution failed"}; !equalSeq(af.seq, want) {
+			t.Fatalf("agentflow calls = %v, want %v", af.seq, want)
+		}
+	})
 }

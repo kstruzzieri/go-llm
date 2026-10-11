@@ -1773,8 +1773,11 @@ func TestAgentflowSupersededTimeoutStillFailsVerify_RealCLI(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeAndRecordAnswer(t, client, dir, a1, "expected\n")
-	if err := client.RunGate(ctx, "P1", a1, "slow-gate", argv); err == nil {
-		t.Fatal("A1 gate did not time out")
+	// Only an AgentFlow timeout (exit 124) makes the finish-run below a test of
+	// agentflow#60; any other A1 failure is reported as itself.
+	var timedOut *agentflow.CommandError
+	if err := client.RunGate(ctx, "P1", a1, "slow-gate", argv); !errors.As(err, &timedOut) || timedOut.Exit != 124 {
+		t.Fatalf("A1 gate err = %v, want an AgentFlow exit-124 timeout", err)
 	}
 	if err := client.BlockStep(ctx, "P1", a1, gateBlockReason); err != nil {
 		t.Fatal(err)

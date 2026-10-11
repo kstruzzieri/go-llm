@@ -110,12 +110,13 @@ func blockAttempt(ctx context.Context, af afClient, root, step, attempt, reason 
 	// #642: AgentFlow 1.0 blocks an attempt that is already closed (by an
 	// operator's break-glass fail-step, say), which leaves the ledger
 	// state_invalid. An unreadable ledger is not blocked blind: an open attempt
-	// is the documented recoverable residual. The check narrows, but cannot
+	// is the documented recoverable residual. rerr carries R5's pre-run advice,
+	// so the error ends with the mid-run next step. The check narrows, but cannot
 	// close, the window against a concurrent writer; AgentFlow does not refuse
 	// the block itself.
 	event, rerr := closedAttemptEvent(root, step, attempt)
 	if rerr != nil {
-		return fmt.Errorf("%w; check attempt state before blocking: %w; attempt not blocked", err, rerr)
+		return fmt.Errorf("%w; check attempt state before blocking: %w; attempt not blocked; run -agentflow-status", err, rerr)
 	}
 	if event != "" {
 		return fmt.Errorf("%w; attempt already closed (%s); not blocked", err, event)
@@ -136,7 +137,7 @@ func blockFailedGate(ctx context.Context, af afClient, root, step, attempt strin
 	err := blockAttempt(ctx, af, root, step, attempt, gateBlockReason, cause)
 	id, terr := retainedTimedOutReceipt(root)
 	if terr != nil {
-		return fmt.Errorf("%w; read command receipts for the timeout check: %w", err, terr)
+		return fmt.Errorf("%w; read command receipts for the timeout check: %w; run -agentflow-status", err, terr)
 	}
 	if id != "" {
 		return fmt.Errorf("%w; %w", err, retainedTimeoutReport(root, id))

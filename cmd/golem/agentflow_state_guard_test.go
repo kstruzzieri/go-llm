@@ -638,7 +638,8 @@ const (
 
 // #642 A9: retainedTimedOutReceipt applies AgentFlow 1.0's exact predicate
 // (decision == "timeout" or timed_out is True) to every ledger row, the way
-// read_jsonl reads them, and reports a row's own id only as short plain text.
+// read_jsonl reads them, and reports a row's own id only when it is
+// AgentFlow-style ASCII.
 func TestRetainedTimedOutReceipt(t *testing.T) {
 	const line1, line2 = ".agent/command-receipts.jsonl:1", ".agent/command-receipts.jsonl:2"
 	for _, tt := range []struct {
@@ -663,8 +664,16 @@ func TestRetainedTimedOutReceipt(t *testing.T) {
 		{name: "missing id falls back to the line", ledger: new(`{"decision":"timeout"}`), want: line1},
 		{name: "an earlier row's id is not carried over", ledger: new(`{"id":"CR1","decision":"allowed"}` + "\n" + `{"decision":"timeout"}` + "\n"), want: line2},
 		{name: "keys are case-sensitive", ledger: new(`{"id":"CR1","Decision":"timeout","Timed_Out":true}`)},
+		// AgentFlow's own id forms: CR<n> (receipts.py) and the aggregate.py
+		// namespaced WT<source>-CR<n>.
+		{name: "CR id is reported", ledger: new(`{"id":"CR12","decision":"timeout"}`), want: "CR12"},
+		{name: "aggregated id is reported", ledger: new(`{"id":"WTw2-CR3","decision":"timeout"}`), want: "WTw2-CR3"},
 		// A cloned repo can carry .agent/, so an id that would reach the
-		// terminal raw or unbounded falls back to the line.
+		// terminal raw, unbounded, or as ledger-chosen words falls back to the
+		// line.
+		{name: "id with spaces falls back to the line", ledger: new(`{"id":"CR1 run init-execution --force","decision":"timeout"}`), want: line1},
+		{name: "Cyrillic homoglyph id falls back to the line", ledger: new(`{"id":"\u0421R1","decision":"timeout"}`), want: line1},
+		{name: "combining-mark id falls back to the line", ledger: new(`{"id":"CR1\u0336","decision":"timeout"}`), want: line1},
 		{name: "escape-sequence id falls back to the line", ledger: new(`{"id":"CR1\u001b[2J","decision":"timeout"}`), want: line1},
 		{name: "carriage-return id falls back to the line", ledger: new(`{"id":"CR1\rCR9","decision":"timeout"}`), want: line1},
 		{name: "bidi-override id falls back to the line", ledger: new(`{"id":"CR1\u202e9RC","decision":"timeout"}`), want: line1},

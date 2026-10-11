@@ -7,6 +7,7 @@ import (
 	"io"
 	"io/fs"
 	"path/filepath"
+	"regexp"
 
 	"github.com/kstruzzieri/go-llm/agentflow"
 )
@@ -101,13 +102,18 @@ func refuseAgentflowExecutionHistory(root, prefix string) error {
 	return fmt.Errorf("%s: .agent/ holds AgentFlow execution history (%s); run -agentflow-status to see whether -agentflow-resume can continue it, or move .agent/ aside to start over", prefix, history)
 }
 
+// receiptIDPattern admits only AgentFlow-style receipt ids: CR<n>
+// (receipts.py), or WT<source>-CR<n> after aggregate.py namespaces them. A
+// cloned repo can carry .agent/ and main.go prints Golem's errors raw, so
+// ledger text must not choose the words shown: spaces, combining marks and
+// homoglyphs all pass a display-escape check.
+var receiptIDPattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`)
+
 // retainedTimedOutReceipt returns the first command receipt root retains that
 // AgentFlow 1.0 counts as timed out (decision "timeout" or timed_out true,
 // execution_coverage.py _receipt_timed_out), or "". The id is the receipt's
-// own when it is a string of 1 to 128 characters that displays as itself
-// (recoveryDisplayText escapes nothing), else the ledger line: a cloned repo
-// can carry .agent/, and the id reaches the terminal raw in Golem's errors.
-// Read-only: it never edits or deletes receipts.
+// own when it matches receiptIDPattern, else the ledger line. Read-only: it
+// never edits or deletes receipts.
 func retainedTimedOutReceipt(root string) (string, error) {
 	const name = "command-receipts.jsonl"
 	b, err := readAgentflowState(filepath.Join(root, ".agent"), name)
@@ -128,7 +134,7 @@ func retainedTimedOutReceipt(root string) (string, error) {
 		for _, member := range row { // the parser already folds duplicate keys, last wins
 			switch {
 			case agentflowJSONStringEqualASCII(member.key, "id"):
-				if s, ok := member.value.(agentflowJSONString); ok && len(s) != 0 && len(s) <= 128 && recoveryDisplayText(string(s)) == string(s) {
+				if s, ok := member.value.(agentflowJSONString); ok && receiptIDPattern.MatchString(string(s)) {
 					id = string(s)
 				}
 			case agentflowJSONStringEqualASCII(member.key, "decision"):
