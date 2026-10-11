@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -79,6 +80,24 @@ func (s *mcpToolSchemaSource) buildTransport(ctx context.Context) (mcp.Transport
 	return nil, fmt.Errorf("mcp snapshot: nil transport")
 }
 
+// ownedTransport records the connection its transport opened, so Snapshot can
+// close it when Client.Connect returns no session: go-sdk v1.6.1 returns the
+// unsupported-protocol-version error without closing the session it built
+// (#406).
+//
+// ponytail: local copy of mcpclient's ownedTransport; delete both when go-sdk
+// >= v1.8.0, which closes on this path.
+type ownedTransport struct {
+	mcp.Transport
+	conn mcp.Connection
+}
+
+func (t *ownedTransport) Connect(ctx context.Context) (mcp.Connection, error) {
+	conn, err := t.Transport.Connect(ctx)
+	t.conn = conn
+	return conn, err
+}
+
 func (s *mcpToolSchemaSource) Snapshot(ctx context.Context) ([]json.RawMessage, error) {
 	transport, err := s.buildTransport(ctx)
 	if err != nil {
@@ -89,9 +108,14 @@ func (s *mcpToolSchemaSource) Snapshot(ctx context.Context) ([]json.RawMessage, 
 		clientName = mcpClientName
 	}
 	client := mcp.NewClient(&mcp.Implementation{Name: clientName, Version: mcpClientVersion}, nil)
-	session, err := client.Connect(ctx, transport, nil)
+	owned := &ownedTransport{Transport: transport}
+	session, err := client.Connect(ctx, owned, nil)
 	if err != nil {
-		return nil, fmt.Errorf("mcp snapshot: connect: %w", err)
+		var closeErr error
+		if owned.conn != nil {
+			closeErr = owned.conn.Close()
+		}
+		return nil, fmt.Errorf("mcp snapshot: connect: %w", errors.Join(err, closeErr))
 	}
 	defer func() { _ = session.Close() }()
 

@@ -4,8 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	mcp "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -90,6 +93,46 @@ func TestMCPToolSchemaSourceSnapshotPaginates(t *testing.T) {
 	got, _ := src.Snapshot(context.Background())
 	if len(got) != 2 {
 		t.Fatalf("len(got)=%d; want 2 tools across paginated pages", len(got))
+	}
+}
+
+// go-sdk v1.6.1 returns the unsupported-protocol-version error from Connect
+// without closing the session it built, so Snapshot must DELETE the
+// server-side session itself (#406).
+func TestMCPToolSchemaSourceSnapshotUnsupportedProtocolDeletesSession(t *testing.T) {
+	var deletes, strays atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			if r.Header.Get("Mcp-Session-Id") == "s1" {
+				deletes.Add(1)
+			} else {
+				strays.Add(1)
+			}
+			return
+		}
+		var msg struct {
+			ID     json.RawMessage `json:"id"`
+			Method string          `json:"method"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&msg)
+		if msg.Method != "initialize" {
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Mcp-Session-Id", "s1")
+		_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": msg.ID, "result": map[string]any{
+			"protocolVersion": "1999-01-01", "capabilities": map[string]any{}, "serverInfo": map[string]any{"name": "old", "version": "1"},
+		}})
+	}))
+	defer srv.Close()
+
+	src := &mcpToolSchemaSource{httpURL: srv.URL + "/mcp", clientName: "llm-bench-test"}
+	if _, err := src.Snapshot(context.Background()); err == nil {
+		t.Fatal("Snapshot succeeded against a server speaking an unsupported protocol version")
+	}
+	if got, stray := deletes.Load(), strays.Load(); got != 1 || stray != 0 {
+		t.Fatalf("DELETE for session s1 = %d, without it = %d; want 1 and 0", got, stray)
 	}
 }
 
