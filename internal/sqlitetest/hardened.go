@@ -10,6 +10,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/kstruzzieri/go-llm/internal/sqlitedsn"
 )
 
 // HardenedPathsOptions configures RunHardenedPaths.
@@ -148,13 +150,15 @@ func RunHardenedPaths(t *testing.T, opts HardenedPathsOptions) {
 // opens it, which would hide an opener that never secures them.
 func seedLooseWAL(t *testing.T, path string) {
 	t.Helper()
-	// A plain path with a query: modernc applies and strips the query.
-	db, err := sql.Open("sqlite", path+"?_pragma=journal_mode(WAL)")
+	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	db.SetMaxOpenConns(1)
 	t.Cleanup(func() { _ = db.Close() })
+	if err := sqlitedsn.EnableWAL(t.Context(), db); err != nil {
+		t.Fatalf("seed %s: %v", path, err)
+	}
 	if _, err := db.Exec("CREATE TABLE zz_seed (x); DROP TABLE zz_seed"); err != nil {
 		t.Fatalf("seed %s: %v", path, err)
 	}
