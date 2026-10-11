@@ -541,9 +541,16 @@ func TestRunAgentflowTask_ReviewRoundOverSameLockedPlan(t *testing.T) {
 		supplied agentflow.Plan
 		manifest bool
 		noLock   bool
+		receipts string // command-receipts.jsonl body, if any
+		timeout  bool   // want the #642 A9 refusal for CR1 in root
 		want     string // "" means the review round proceeds
 	}{
 		{name: "review over the same plan proceeds", supplied: plan, manifest: true},
+		// #642 D8: this exception skips the history guard, so it must not
+		// mutate a ledger that can never verify; an ordinary failed gate
+		// receipt does not stop it.
+		{name: "review over a retained timeout is refused", supplied: plan, manifest: true, receipts: timeoutReceiptCR1 + "\n", timeout: true},
+		{name: "review over an exit-1 receipt proceeds", supplied: plan, manifest: true, receipts: exitOneReceiptCR1 + "\n"},
 		{name: "review over a different plan is refused", supplied: other, manifest: true, want: history + reviewHint},
 		{name: "review with no locked plan is refused", supplied: plan, manifest: true, noLock: true, want: history + reviewHint},
 		{name: "same plan without a review is refused", supplied: plan, want: history},
@@ -569,7 +576,14 @@ func TestRunAgentflowTask_ReviewRoundOverSameLockedPlan(t *testing.T) {
 			}
 			writeAgentFile(t, root, "execution.contract.json", v1Contract)
 			writeAgentFile(t, root, "step-runs.jsonl", v1Row+"\n")
+			if tt.receipts != "" {
+				writeAgentFile(t, root, "command-receipts.jsonl", tt.receipts)
+			}
 			before := snapshotAuditFixtureTree(t, filepath.Join(root, ".agent"))
+			want := tt.want
+			if tt.timeout {
+				want = "refusing a -review-manifest round: " + wantTimeoutReport(root, "CR1")
+			}
 
 			suppliedBytes, err := json.Marshal(tt.supplied)
 			if err != nil {
@@ -586,9 +600,9 @@ func TestRunAgentflowTask_ReviewRoundOverSameLockedPlan(t *testing.T) {
 				}
 			}
 			calls, err := runFreshTaskOverFixture(t, root, f)
-			if tt.want != "" {
-				if err == nil || err.Error() != tt.want {
-					t.Fatalf("err = %v\nwant %s", err, tt.want)
+			if want != "" {
+				if err == nil || err.Error() != want {
+					t.Fatalf("err = %v\nwant %s", err, want)
 				}
 				if _, statErr := os.Stat(calls); !os.IsNotExist(statErr) {
 					t.Fatal("AgentFlow ran before the refusal")
@@ -605,5 +619,138 @@ func TestRunAgentflowTask_ReviewRoundOverSameLockedPlan(t *testing.T) {
 				t.Fatalf("review round never reached AgentFlow (err=%v)", err)
 			}
 		})
+	}
+}
+
+// wantTimeoutReport is the #642 A9 report, written out so a test never derives
+// its expectation from the code under test.
+func wantTimeoutReport(root, id string) string {
+	return "retained timeout receipt " + id + " in " + root + " prevents this root's ledger from passing AgentFlow 1.0 run verification; preserve the complete .agent/ directory by archiving it outside the working tree, then initialize and validate a new run; do not delete individual receipts"
+}
+
+// Real AgentFlow 1.0 receipt rows (execution_coverage.py reads decision and
+// timed_out; schema_version keeps R5 quiet where it runs first).
+const (
+	timeoutReceiptCR1  = `{"schema_version":"1.0.0","id":"CR1","step_id":"P1","attempt_id":"A1","decision":"timeout","timed_out":true,"exit_code":null,"timeout_seconds":1}`
+	exitOneReceiptCR1  = `{"schema_version":"1.0.0","id":"CR1","step_id":"P1","attempt_id":"A1","decision":"allowed","timed_out":false,"exit_code":1}`
+	incompatibleLedger = "this workspace holds incompatible AgentFlow state (.agent/command-receipts.jsonl:1 unreadable); finish that run, or build its proof, with the AgentFlow version that wrote it, then move .agent/ aside before starting an AgentFlow 1.x run"
+)
+
+// #642 A9: retainedTimedOutReceipt applies AgentFlow 1.0's exact predicate
+// (decision == "timeout" or timed_out is True) to every ledger row, the way
+// read_jsonl reads them, and reports a row's own id only when it is
+// AgentFlow-style ASCII.
+func TestRetainedTimedOutReceipt(t *testing.T) {
+	const line1, line2 = ".agent/command-receipts.jsonl:1", ".agent/command-receipts.jsonl:2"
+	for _, tt := range []struct {
+		name    string
+		ledger  *string // nil: no .agent/ at all
+		dir     bool    // command-receipts.jsonl is a directory
+		want    string
+		wantErr string
+	}{
+		{name: "no .agent"},
+		{name: "empty file", ledger: new("")},
+		{name: "allowed exit 1", ledger: new(`{"id":"CR1","decision":"allowed","timed_out":false,"exit_code":1}`)},
+		{name: "decision only", ledger: new(`{"id":"CR1","decision":"timeout","timed_out":false}`), want: "CR1"},
+		{name: "flag only", ledger: new(`{"id":"CR1","decision":"allowed","timed_out":true}`), want: "CR1"},
+		{name: "string flag is not True", ledger: new(`{"id":"CR1","timed_out":"true"}`)},
+		{name: "decision is case-sensitive", ledger: new(`{"id":"CR1","decision":"Timeout"}`)},
+		{name: "duplicate decision: last wins", ledger: new(`{"id":"CR1","decision":"timeout","decision":"allowed"}`)},
+		{name: "Python NaN", ledger: new(`{"id":"CR1","decision":"timeout","timeout_seconds":NaN}`), want: "CR1"},
+		{name: "first timeout; blank and CRLF lines skipped", ledger: new(`{"id":"CR1","decision":"allowed"}` + "\r\n\n" + `{"id":"CR2","decision":"timeout"}` + "\n" + `{"id":"CR3","decision":"timeout"}`), want: "CR2"},
+		{name: "numeric id falls back to the line", ledger: new("\n" + `{"id":7,"decision":"timeout"}`), want: line2},
+		{name: "empty id falls back to the line", ledger: new(`{"id":"","decision":"timeout"}`), want: line1},
+		{name: "missing id falls back to the line", ledger: new(`{"decision":"timeout"}`), want: line1},
+		{name: "an earlier row's id is not carried over", ledger: new(`{"id":"CR1","decision":"allowed"}` + "\n" + `{"decision":"timeout"}` + "\n"), want: line2},
+		{name: "keys are case-sensitive", ledger: new(`{"id":"CR1","Decision":"timeout","Timed_Out":true}`)},
+		// AgentFlow's own id forms: CR<n> (receipts.py) and the aggregate.py
+		// namespaced WT<source>-CR<n>.
+		{name: "CR id is reported", ledger: new(`{"id":"CR12","decision":"timeout"}`), want: "CR12"},
+		{name: "aggregated id is reported", ledger: new(`{"id":"WTw2-CR3","decision":"timeout"}`), want: "WTw2-CR3"},
+		// A cloned repo can carry .agent/, so an id that would reach the
+		// terminal raw, unbounded, or as ledger-chosen words falls back to the
+		// line.
+		{name: "id with spaces falls back to the line", ledger: new(`{"id":"CR1 run init-execution --force","decision":"timeout"}`), want: line1},
+		{name: "Cyrillic homoglyph id falls back to the line", ledger: new(`{"id":"\u0421R1","decision":"timeout"}`), want: line1},
+		{name: "combining-mark id falls back to the line", ledger: new(`{"id":"CR1\u0336","decision":"timeout"}`), want: line1},
+		{name: "escape-sequence id falls back to the line", ledger: new(`{"id":"CR1\u001b[2J","decision":"timeout"}`), want: line1},
+		{name: "carriage-return id falls back to the line", ledger: new(`{"id":"CR1\rCR9","decision":"timeout"}`), want: line1},
+		{name: "bidi-override id falls back to the line", ledger: new(`{"id":"CR1\u202e9RC","decision":"timeout"}`), want: line1},
+		{name: "129-character id falls back to the line", ledger: new(`{"id":"` + strings.Repeat("A", 129) + `","decision":"timeout"}`), want: line1},
+		{name: "128-character id is reported", ledger: new(`{"id":"` + strings.Repeat("A", 128) + `","decision":"timeout"}`), want: strings.Repeat("A", 128)},
+		{name: "numeric flag is not True", ledger: new(`{"id":"CR1","timed_out":1}`)},
+		{name: "duplicate flag: last wins", ledger: new(`{"id":"CR1","timed_out":true,"timed_out":false}`)},
+		{name: "top-level null", ledger: new("null"), wantErr: incompatibleLedger},
+		{name: "top-level array", ledger: new("[]"), wantErr: incompatibleLedger},
+		{name: "top-level true", ledger: new("true"), wantErr: incompatibleLedger},
+		{name: "malformed row", ledger: new("{"), wantErr: incompatibleLedger},
+		{name: "ledger is a directory", dir: true, wantErr: "(.agent/command-receipts.jsonl unreadable)"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			if tt.ledger != nil {
+				writeAgentFile(t, root, "command-receipts.jsonl", *tt.ledger)
+			}
+			if tt.dir {
+				if err := os.MkdirAll(filepath.Join(root, ".agent", "command-receipts.jsonl"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			got, err := retainedTimedOutReceipt(root)
+			switch {
+			case tt.dir:
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("err = %v, want one containing %q", err, tt.wantErr)
+				}
+			case tt.wantErr != "":
+				if err == nil || err.Error() != tt.wantErr {
+					t.Fatalf("err = %v\nwant %s", err, tt.wantErr)
+				}
+			default:
+				if err != nil || got != tt.want {
+					t.Fatalf("retainedTimedOutReceipt = %q, %v; want %q", got, err, tt.want)
+				}
+			}
+		})
+	}
+}
+
+// #642 A9: verify-run rejects every retained timed-out receipt, superseded or
+// not, so the scan has no current-attempt or provenance filter and picks no
+// newest receipt; and it reads only root's own ledger.
+func TestRetainedTimedOutReceiptIgnoresAttemptSupersession(t *testing.T) {
+	later := "\n" + `{"schema_version":"1.0.0","id":"CR2","step_id":"P1","attempt_id":"A2","provenance":"observed","decision":"allowed","timed_out":false,"exit_code":0}` +
+		"\n" + `{"schema_version":"1.0.0","id":"CR3","step_id":"P2","attempt_id":"A1","provenance":"observed","decision":"allowed","timed_out":false,"exit_code":0}` + "\n"
+	for name, first := range map[string]string{
+		"flag only":     `{"schema_version":"1.0.0","id":"CR1","step_id":"P1","attempt_id":"A1","provenance":"observed","decision":"allowed","timed_out":true}`,
+		"decision only": `{"schema_version":"1.0.0","id":"CR1","step_id":"P1","attempt_id":"A1","provenance":"observed","decision":"timeout","timed_out":false}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			writeAgentFile(t, root, "command-receipts.jsonl", first+later)
+			if got, err := retainedTimedOutReceipt(root); err != nil || got != "CR1" {
+				t.Fatalf("retainedTimedOutReceipt = %q, %v; want CR1", got, err)
+			}
+			clean := t.TempDir()
+			writeAgentFile(t, clean, "command-receipts.jsonl", strings.TrimPrefix(later, "\n"))
+			writeAgentFile(t, filepath.Join(clean, "nested"), "command-receipts.jsonl", first+"\n") // a walk would find this
+			if got, err := retainedTimedOutReceipt(clean); err != nil || got != "" {
+				t.Fatalf("clean root: retainedTimedOutReceipt = %q, %v; want none", got, err)
+			}
+		})
+	}
+}
+
+func TestRefuseRetainedTimeout(t *testing.T) {
+	root := t.TempDir()
+	writeAgentFile(t, root, "command-receipts.jsonl", `{"id":"CR1","decision":"allowed"}`+"\r\n\n"+`{"id":"CR2","decision":"timeout"}`+"\n"+`{"id":"CR3","decision":"timeout"}`)
+	if err := refuseRetainedTimeout(root); err == nil || err.Error() != wantTimeoutReport(root, "CR2") {
+		t.Fatalf("err = %v\nwant %s", err, wantTimeoutReport(root, "CR2"))
+	}
+	clean := t.TempDir()
+	writeAgentFile(t, clean, "command-receipts.jsonl", `{"id":"CR1","decision":"allowed","timed_out":false,"exit_code":1}`)
+	if err := refuseRetainedTimeout(clean); err != nil {
+		t.Fatalf("exit-1 receipt refused: %v", err)
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"io"
 	"io/fs"
 	"path/filepath"
+	"regexp"
 
 	"github.com/kstruzzieri/go-llm/agentflow"
 )
@@ -99,6 +100,127 @@ func refuseAgentflowExecutionHistory(root, prefix string) error {
 		return nil
 	}
 	return fmt.Errorf("%s: .agent/ holds AgentFlow execution history (%s); run -agentflow-status to see whether -agentflow-resume can continue it, or move .agent/ aside to start over", prefix, history)
+}
+
+// receiptIDPattern admits only AgentFlow-style receipt ids: CR<n>
+// (receipts.py), or WT<source>-CR<n> after aggregate.py namespaces them. A
+// cloned repo can carry .agent/ and main.go prints Golem's errors raw, so
+// ledger text must not choose the words shown: spaces, combining marks and
+// homoglyphs all pass a display-escape check.
+var receiptIDPattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`)
+
+// retainedTimedOutReceipt returns the first command receipt root retains that
+// AgentFlow 1.0 counts as timed out (decision "timeout" or timed_out true,
+// execution_coverage.py _receipt_timed_out), or "". The id is the receipt's
+// own when it matches receiptIDPattern, else the ledger line. Read-only: it
+// never edits or deletes receipts.
+func retainedTimedOutReceipt(root string) (string, error) {
+	const name = "command-receipts.jsonl"
+	b, err := readAgentflowState(filepath.Join(root, ".agent"), name)
+	if err != nil {
+		return "", err
+	}
+	for i, line := range bytes.Split(b, []byte("\n")) {
+		if len(bytes.TrimSpace(line)) == 0 {
+			continue // AgentFlow skips blank lines too
+		}
+		where := fmt.Sprintf(".agent/%s:%d", name, i+1)
+		value, err := parseAgentflowJSON(line)
+		row, isObject := value.(agentflowJSONObject)
+		if err != nil || !isObject {
+			return "", incompatibleAgentflowState(where, "unreadable")
+		}
+		id, timedOut := where, false
+		for _, member := range row { // the parser already folds duplicate keys, last wins
+			switch {
+			case agentflowJSONStringEqualASCII(member.key, "id"):
+				if s, ok := member.value.(agentflowJSONString); ok && receiptIDPattern.MatchString(string(s)) {
+					id = string(s)
+				}
+			case agentflowJSONStringEqualASCII(member.key, "decision"):
+				if s, ok := member.value.(agentflowJSONString); ok && agentflowJSONStringEqualASCII(s, "timeout") {
+					timedOut = true
+				}
+			case agentflowJSONStringEqualASCII(member.key, "timed_out"):
+				if v, ok := member.value.(bool); ok && v {
+					timedOut = true
+				}
+			}
+		}
+		if timedOut {
+			return id, nil
+		}
+	}
+	return "", nil
+}
+
+// refuseRetainedTimeout reports a timed-out command receipt that root retains.
+// AgentFlow 1.0's verify-run rejects every such receipt, superseded or not
+// (agentflow#60), so no recovery of that root reaches a proof (#642 A9). Golem
+// never points at init-execution --force: that overwrites the contract and
+// ledgers.
+func refuseRetainedTimeout(root string) error {
+	id, err := retainedTimedOutReceipt(root)
+	if err != nil || id == "" {
+		return err
+	}
+	return retainedTimeoutReport(root, id)
+}
+
+// retainedTimeoutReport is the one text of the A9 report.
+func retainedTimeoutReport(root, id string) error {
+	return fmt.Errorf("retained timeout receipt %s in %s prevents this root's ledger from passing AgentFlow 1.0 run verification; preserve the complete .agent/ directory by archiving it outside the working tree, then initialize and validate a new run; do not delete individual receipts", id, root)
+}
+
+// closedAttemptEvent returns the first terminal event (AgentFlow 1.0
+// execution.py TERMINAL_EVENTS: completed, blocked, failed, abandoned) that
+// root's step-run ledger records for step's attempt, or "". AgentFlow's
+// block-step checks only that the attempt was opened, and its ledger reader
+// rejects any event after a terminal one ("attempt ... has events after a
+// terminal event", porcelain.py) as state_invalid. An event outside AgentFlow
+// 1.0's terminal, open and lease sets is an error, so the caller does not
+// block. Read-only.
+func closedAttemptEvent(root, step, attempt string) (string, error) {
+	const name = "step-runs.jsonl"
+	b, err := readAgentflowState(filepath.Join(root, ".agent"), name)
+	if err != nil {
+		return "", err
+	}
+	for i, line := range bytes.Split(b, []byte("\n")) {
+		if len(bytes.TrimSpace(line)) == 0 {
+			continue // AgentFlow skips blank lines too
+		}
+		value, err := parseAgentflowJSON(line)
+		row, isObject := value.(agentflowJSONObject)
+		if err != nil || !isObject {
+			return "", incompatibleAgentflowState(fmt.Sprintf(".agent/%s:%d", name, i+1), "unreadable")
+		}
+		var ofStep, ofAttempt bool
+		var event string
+		for _, member := range row { // the parser already folds duplicate keys, last wins
+			s, isString := member.value.(agentflowJSONString)
+			switch {
+			case !isString:
+			case agentflowJSONStringEqualASCII(member.key, "step_id"):
+				ofStep = string(s) == step
+			case agentflowJSONStringEqualASCII(member.key, "attempt_id"):
+				ofAttempt = string(s) == attempt
+			case agentflowJSONStringEqualASCII(member.key, "event"):
+				event = string(s)
+			}
+		}
+		if ofStep && ofAttempt {
+			switch event {
+			case "completed", "blocked", "failed", "abandoned":
+				return event, nil
+			case "claimed", "amendment_started", "in_progress", "verified", "lease_renewed":
+			default:
+				// A newer AgentFlow 1.x may add a terminal event: fail closed.
+				return "", fmt.Errorf("attempt %s has an event this Golem does not know (%q)", attempt, event)
+			}
+		}
+	}
+	return "", nil
 }
 
 // lockedPlanMatches reports whether .agent/plan.lock.json holds the same plan
