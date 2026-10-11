@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"net/url"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -13,12 +12,18 @@ import (
 	"time"
 
 	"modernc.org/sqlite"
+
+	"github.com/kstruzzieri/go-llm/internal/sqlitedsn"
 )
 
 // openFeedbackFileDB opens a caller-owned file database for the deadline tests.
 func openFeedbackFileDB(t *testing.T, path, query string, maxConns int) *sql.DB {
 	t.Helper()
-	u := url.URL{Scheme: "file", Path: path, RawQuery: query}
+	u, err := sqlitedsn.FileURL(path) // builds a URI SQLite accepts on Windows too
+	if err != nil {
+		t.Fatal(err)
+	}
+	u.RawQuery = query
 	db, err := sql.Open("sqlite", u.String())
 	if err != nil {
 		t.Fatal(err)

@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"net/url"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -13,6 +12,8 @@ import (
 	"time"
 
 	"modernc.org/sqlite"
+
+	"github.com/kstruzzieri/go-llm/internal/sqlitedsn"
 )
 
 // newMigrationTestDB opens an isolated in-memory database that survives
@@ -192,7 +193,11 @@ func TestFeedbackSignalsTableCheckConstraints(t *testing.T) {
 
 func openMigrationDB(t *testing.T, path string) *sql.DB {
 	t.Helper()
-	u := url.URL{Scheme: "file", Path: path, RawQuery: "_pragma=busy_timeout(5000)"}
+	u, err := sqlitedsn.FileURL(path) // builds a URI SQLite accepts on Windows too
+	if err != nil {
+		t.Fatal(err)
+	}
+	u.RawQuery = "_pragma=busy_timeout(5000)"
 	db, err := sql.Open("sqlite", u.String())
 	if err != nil {
 		t.Fatal(err)
@@ -445,7 +450,11 @@ func TestMigrationCurrentSchemaReadOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("current schema behind writer: %v", err)
 	}
-	u := url.URL{Scheme: "file", Path: path, RawQuery: "mode=ro&_pragma=busy_timeout(5000)"}
+	u, err := sqlitedsn.FileURL(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u.RawQuery = "mode=ro&_pragma=busy_timeout(5000)"
 	ro, err := sql.Open("sqlite", u.String())
 	if err != nil {
 		t.Fatal(err)

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -425,8 +426,12 @@ func TestRecordKeyLifecycle(t *testing.T) {
 }
 
 func TestRecordRetainedVerifierValidation(t *testing.T) {
+	modeOnly := map[string]bool{"loose file": true, "loose directory": true, "empty loose directory": true}
 	for _, failure := range []string{"invalid current duplicate", "misnamed", "loose file", "loose directory", "empty loose directory", "symlink directory"} {
 		t.Run(failure, func(t *testing.T) {
+			if runtime.GOOS == "windows" && modeOnly[failure] {
+				t.Skip("Windows has no POSIX mode bits; retained-verifier trust there relies on profile ACLs (signing/keyfile_other.go)")
+			}
 			path := filepath.Join(t.TempDir(), "records.db")
 			rt, err := OpenRecordStore(context.Background(), path, RecordStoreConfig{})
 			if err != nil {

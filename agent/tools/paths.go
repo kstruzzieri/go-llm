@@ -134,6 +134,9 @@ type Workspace struct {
 	beforeReadDir func(rel string)
 	// beforeReadOpen is a per-workspace deterministic race-test seam.
 	beforeReadOpen func()
+	// beforeNameScan is a per-workspace test seam fired before canonicalName
+	// lists a parent directory to prove a spelling (#558).
+	beforeNameScan func()
 	beforeMutation func(mutationPhase, string) error // private deterministic phase/failure seam
 	// noReplaceRename replaces the platform no-replace install in tests only, so
 	// an unsupported-filesystem result is observed at the real call site.

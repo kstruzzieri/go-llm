@@ -76,15 +76,31 @@ jobs:
       # vet type-checks every package with its test files, so a test naming a
       # symbol declared only in a build-tagged file fails here. windows checks
       # the !unix files; freebsd is the only lane where unix holds but linux
-      # and darwin do not. scripts/ci-local --mode full runs the same vets.
+      # and darwin do not. The builds link every binary .goreleaser.yaml ships
+      # for every release target with cgo off (race tests use cgo), so a
+      # dependency that drops a target (modernc sqlite ships per-target files)
+      # fails here, not at release. darwin is built and vetted for both arches
+      # cgo-off, as release builds it: the macOS Compile Smoke job builds only
+      # the runner's arm64 with cgo on and runs only go test's vet subset, and
+      # release does not vet. Build output is discarded, so -buildvcs=false
+      # skips VCS stamping (it fails when git refuses a checkout owned by
+      # another uid). scripts/ci-local --mode full runs the same builds and
+      # vets.
       - name: Cross-platform compile smoke
         env:
           GOARCH: amd64
           CGO_ENABLED: "0"
         run: |
-          GOOS=windows go build -o /dev/null ./cmd/golem
+          GOOS=windows go build -buildvcs=false -o /dev/null ./cmd/golem ./cmd/go-llm-mcp
           GOOS=windows go vet ./...
+          GOOS=windows GOARCH=arm64 go build -buildvcs=false -o /dev/null ./cmd/golem ./cmd/go-llm-mcp
           GOOS=freebsd go vet ./...
+          GOOS=linux GOARCH=amd64 go build -buildvcs=false -o /dev/null ./cmd/golem ./cmd/go-llm-mcp
+          GOOS=linux GOARCH=arm64 go build -buildvcs=false -o /dev/null ./cmd/golem ./cmd/go-llm-mcp
+          GOOS=darwin GOARCH=amd64 go build -buildvcs=false -o /dev/null ./cmd/golem ./cmd/go-llm-mcp
+          GOOS=darwin GOARCH=amd64 go vet ./...
+          GOOS=darwin GOARCH=arm64 go build -buildvcs=false -o /dev/null ./cmd/golem ./cmd/go-llm-mcp
+          GOOS=darwin GOARCH=arm64 go vet ./...
 
       # Validate .goreleaser.yaml on every PR so a schema error surfaces here,
       # not at tag-push time when it would fail the actual release.
@@ -214,12 +230,17 @@ jobs:
           go-version-file: go.mod
 
       # Linux CI only builds and vets for Windows. This runs the SQLite URI
-      # tests natively: Windows path resolution, SQLite's URI parser and the
-      # Windows VFS (#619).
-      - name: Test internal/sqlitedsn on Windows
+      # helpers and the store packages built on them natively: Windows path
+      # resolution, SQLite's URI parser, the Windows VFS, and each opener's
+      # own tests (concurrent first opens, fail-closed WAL, sidecars,
+      # read-only opens) (#619, #653). -p 1 runs one package at a time: the
+      # lock-budget tests measure wall-clock waits, and running the packages
+      # in parallel (with the cross-process open tests' child processes) on
+      # this runner overran a 1s budget by 0.5s that it meets alone.
+      - name: Test SQLite helpers and store packages on Windows
         env:
           CGO_ENABLED: "0"
-        run: go test -count=1 -v ./internal/sqlitedsn
+        run: go test -count=1 -p 1 -v ./internal/sqlitedsn ./internal/sqlitetest ./transcript ./memory ./provider ./rag
 
       # Windows loads path-based FileInfo identities lazily. Compile smoke
       # cannot detect a replaced root being mistaken for the original (#658).
