@@ -3,9 +3,11 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -98,41 +100,58 @@ func TestMCPToolSchemaSourceSnapshotPaginates(t *testing.T) {
 
 // go-sdk v1.6.1 returns the unsupported-protocol-version error from Connect
 // without closing the session it built, so Snapshot must DELETE the
-// server-side session itself (#406).
+// server-side session itself (#406). In the abort case the DELETE drops the
+// connection, so the close fails and its *url.Error must stay in the chain
+// (the SDK ignores HTTP status codes, so a 500 would not fail the close).
 func TestMCPToolSchemaSourceSnapshotUnsupportedProtocolDeletesSession(t *testing.T) {
-	var deletes, strays atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodDelete {
-			if r.Header.Get("Mcp-Session-Id") == "s1" {
-				deletes.Add(1)
-			} else {
-				strays.Add(1)
-			}
-			return
-		}
-		var msg struct {
-			ID     json.RawMessage `json:"id"`
-			Method string          `json:"method"`
-		}
-		_ = json.NewDecoder(r.Body).Decode(&msg)
-		if msg.Method != "initialize" {
-			w.WriteHeader(http.StatusAccepted)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("Mcp-Session-Id", "s1")
-		_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": msg.ID, "result": map[string]any{
-			"protocolVersion": "1999-01-01", "capabilities": map[string]any{}, "serverInfo": map[string]any{"name": "old", "version": "1"},
-		}})
-	}))
-	defer srv.Close()
+	for _, tt := range []struct {
+		name  string
+		abort bool
+	}{{"plain", false}, {"abort", true}} {
+		t.Run(tt.name, func(t *testing.T) {
+			var deletes, strays atomic.Int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodDelete {
+					if r.Header.Get("Mcp-Session-Id") == "s1" {
+						deletes.Add(1)
+					} else {
+						strays.Add(1)
+					}
+					if tt.abort {
+						panic(http.ErrAbortHandler)
+					}
+					return
+				}
+				var msg struct {
+					ID     json.RawMessage `json:"id"`
+					Method string          `json:"method"`
+				}
+				_ = json.NewDecoder(r.Body).Decode(&msg)
+				if msg.Method != "initialize" {
+					w.WriteHeader(http.StatusAccepted)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("Mcp-Session-Id", "s1")
+				_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": msg.ID, "result": map[string]any{
+					"protocolVersion": "1999-01-01", "capabilities": map[string]any{}, "serverInfo": map[string]any{"name": "old", "version": "1"},
+				}})
+			}))
+			defer srv.Close()
 
-	src := &mcpToolSchemaSource{httpURL: srv.URL + "/mcp", clientName: "llm-bench-test"}
-	if _, err := src.Snapshot(context.Background()); err == nil {
-		t.Fatal("Snapshot succeeded against a server speaking an unsupported protocol version")
-	}
-	if got, stray := deletes.Load(), strays.Load(); got != 1 || stray != 0 {
-		t.Fatalf("DELETE for session s1 = %d, without it = %d; want 1 and 0", got, stray)
+			src := &mcpToolSchemaSource{httpURL: srv.URL + "/mcp", clientName: "llm-bench-test"}
+			_, err := src.Snapshot(context.Background())
+			if err == nil {
+				t.Fatal("Snapshot succeeded against a server speaking an unsupported protocol version")
+			}
+			if got, stray := deletes.Load(), strays.Load(); got != 1 || stray != 0 {
+				t.Fatalf("DELETE for session s1 = %d, without it = %d; want 1 and 0", got, stray)
+			}
+			var ue *url.Error
+			if got := errors.As(err, &ue) && ue.Op == "Delete"; got != tt.abort {
+				t.Fatalf("close error in chain = %v, want %v (err: %v)", got, tt.abort, err)
+			}
+		})
 	}
 }
 
