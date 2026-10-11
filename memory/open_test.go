@@ -83,18 +83,18 @@ func TestRecordRuntimeSecureRechmodsSidecars(t *testing.T) {
 		t.Fatalf("no -wal sidecar after committed write (%v); WAL pragma not applied", err)
 	}
 	// File mode bits are not portable on Windows: there Secure must still
-	// succeed, but the loosen-then-check below cannot be observed.
-	if runtime.GOOS == "windows" {
-		if err := rt.Secure(); err != nil {
-			t.Fatalf("Secure() error = %v", err)
+	// succeed, but the loosen-then-check cannot be observed.
+	windows := runtime.GOOS == "windows"
+	if !windows {
+		if err := os.Chmod(wal, 0o644); err != nil {
+			t.Fatalf("chmod loosen: %v", err)
 		}
-		return
-	}
-	if err := os.Chmod(wal, 0o644); err != nil {
-		t.Fatalf("chmod loosen: %v", err)
 	}
 	if err := rt.Secure(); err != nil {
 		t.Fatalf("Secure() error = %v", err)
+	}
+	if windows {
+		return
 	}
 	info, err := os.Stat(wal)
 	if err != nil {
