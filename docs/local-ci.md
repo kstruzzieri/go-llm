@@ -70,7 +70,7 @@ Run the faster pre-push subset directly on the host:
 scripts/ci-local --mode pre-push
 ```
 
-Run the full suite directly on the host. This includes all `pre-push` checks plus compile smoke, which also runs `go vet ./...` with `GOOS=windows`, `GOOS=freebsd` and `GOOS=darwin` (amd64 and arm64) so code or tests that only type-check on one platform fail locally, and links `cmd/golem` and `cmd/go-llm-mcp` for Windows and both darwin arches with `CGO_ENABLED=0`, as the release does:
+Run the full suite directly on the host. This includes all `pre-push` checks plus compile smoke, which also runs `go vet ./...` with `GOOS=windows`, `GOOS=freebsd` and `GOOS=darwin` (amd64 and arm64) so code or tests that only type-check on one platform fail locally, and links `cmd/golem` and `cmd/go-llm-mcp` for every release target except linux/amd64 (Windows and darwin amd64/arm64, linux/arm64) with `CGO_ENABLED=0`, as the release does:
 
 ```bash
 scripts/ci-local --mode full
@@ -241,7 +241,7 @@ immediately before each run:
 
 | Check | Toolchain | Checks |
 | --- | --- | --- |
-| `Lint & Test` | `go-version-file: go.mod` (the `toolchain` directive) | CI/changelog self-tests and guards, lint, formatting, security contracts, race tests, cross-platform compile smoke (`cmd/golem` and `cmd/go-llm-mcp` builds plus `go vet ./...` for Windows and darwin amd64/arm64, and `go vet ./...` for FreeBSD, all cgo-off), and GoReleaser config validation |
+| `Lint & Test` | `go-version-file: go.mod` (the `toolchain` directive) | CI/changelog self-tests and guards, lint, formatting, security contracts, race tests, cross-platform compile smoke (`cmd/golem` and `cmd/go-llm-mcp` builds for every release target except linux/amd64, plus `go vet ./...` for Windows, FreeBSD and darwin amd64/arm64, all cgo-off), and GoReleaser config validation |
 | `Test (oldest supported Go)` | `actions/setup-go` resolves the `go-version: '1.N.x'` query in `ci.yml` | `go test -race ./...` only |
 | `Windows SQLite URIs` | `go-version-file: go.mod` on `windows-latest` | `go test -count=1 -v ./internal/sqlitedsn` with `CGO_ENABLED=0`: native Windows path resolution, SQLite URI parsing and the Windows VFS, which the Linux compile smoke cannot exercise; `-v` keeps the lock-holder tests' logged timings visible |
 

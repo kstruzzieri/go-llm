@@ -22,13 +22,22 @@ for platform in windows freebsd "darwin GOARCH=amd64" "darwin GOARCH=arm64"; do
 done
 # The smoke builds link every binary GoReleaser ships, in .goreleaser.yaml's
 # order, so adding a release binary fails here until the smoke builds it too.
-release_mains="$(sed -n 's|^    main: \(\./cmd/[a-z0-9-][a-z0-9-]*\)$|\1|p' "$repo_root/.goreleaser.yaml" | tr '\n' ' ')"
+release_mains="$(sed -n 's/^[[:space:]]*main:[[:space:]]*//p' "$repo_root/.goreleaser.yaml" | tr -d '\r' | tr '\n' ' ')"
 release_mains="${release_mains% }"
 if [ -z "$release_mains" ]; then
   printf 'no "main: ./cmd/..." builds found in .goreleaser.yaml\n' >&2
   exit 1
 fi
-for platform in windows "darwin GOARCH=amd64" "darwin GOARCH=arm64"; do
+# The builds cover GoReleaser's release matrix except linux/amd64, which the
+# test lane compiles natively; a changed matrix fails here until the builds
+# follow it.
+if ! grep -Eq '^[[:space:]]*goos:' "$repo_root/.goreleaser.yaml" \
+  || grep -E '^[[:space:]]*(goos|goarch):' "$repo_root/.goreleaser.yaml" \
+  | grep -Fxv -e '    goos: [linux, darwin, windows]' -e '    goarch: [amd64, arm64]' | grep -q .; then
+  printf '.goreleaser.yaml release matrix changed; update the compile smoke builds\n' >&2
+  exit 1
+fi
+for platform in windows "windows GOARCH=arm64" "linux GOARCH=arm64" "darwin GOARCH=amd64" "darwin GOARCH=arm64"; do
   if ! grep -Fxq "          GOOS=$platform go build -buildvcs=false -o /dev/null $release_mains" "$repo_root/.github/workflows/ci.yml"; then
     printf 'GitHub CI is missing the %s release-binary build\n' "$platform" >&2
     exit 1
@@ -219,7 +228,9 @@ EOF
 $module|test -run ^$ ./...
 $module|GOOS=windows GOARCH=amd64 CGO_ENABLED=0 build -buildvcs=false -o /dev/null $release_mains
 $module|GOOS=windows GOARCH=amd64 CGO_ENABLED=0 vet ./...
+$module|GOOS=windows GOARCH=arm64 CGO_ENABLED=0 build -buildvcs=false -o /dev/null $release_mains
 $module|GOOS=freebsd GOARCH=amd64 CGO_ENABLED=0 vet ./...
+$module|GOOS=linux GOARCH=arm64 CGO_ENABLED=0 build -buildvcs=false -o /dev/null $release_mains
 $module|GOOS=darwin GOARCH=amd64 CGO_ENABLED=0 build -buildvcs=false -o /dev/null $release_mains
 $module|GOOS=darwin GOARCH=amd64 CGO_ENABLED=0 vet ./...
 $module|GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 build -buildvcs=false -o /dev/null $release_mains

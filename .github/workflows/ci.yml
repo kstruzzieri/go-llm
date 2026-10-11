@@ -76,15 +76,16 @@ jobs:
       # vet type-checks every package with its test files, so a test naming a
       # symbol declared only in a build-tagged file fails here. windows checks
       # the !unix files; freebsd is the only lane where unix holds but linux
-      # and darwin do not. darwin covers both release arches cgo-off, as
-      # .goreleaser.yaml builds them: the macOS Compile Smoke job builds only
-      # the runner's arm64 with cgo on and runs only go test's vet subset, so
-      # darwin/amd64 and the cgo-off release link would otherwise first build
-      # at release, and full darwin vet would never run (release does not
-      # vet). The builds link every binary .goreleaser.yaml ships; their
-      # output is discarded, so -buildvcs=false skips VCS stamping (it fails
-      # when git refuses a checkout owned by another uid). scripts/ci-local
-      # --mode full runs the same builds and vets.
+      # and darwin do not. The builds link every binary .goreleaser.yaml ships
+      # for every release target but linux/amd64 (the test lane above), so a
+      # dependency that drops a target (modernc sqlite ships per-target files)
+      # fails here, not at release. darwin is built and vetted for both arches
+      # cgo-off, as release builds it: the macOS Compile Smoke job builds only
+      # the runner's arm64 with cgo on and runs only go test's vet subset, and
+      # release does not vet. Build output is discarded, so -buildvcs=false
+      # skips VCS stamping (it fails when git refuses a checkout owned by
+      # another uid). scripts/ci-local --mode full runs the same builds and
+      # vets.
       - name: Cross-platform compile smoke
         env:
           GOARCH: amd64
@@ -92,7 +93,9 @@ jobs:
         run: |
           GOOS=windows go build -buildvcs=false -o /dev/null ./cmd/golem ./cmd/go-llm-mcp
           GOOS=windows go vet ./...
+          GOOS=windows GOARCH=arm64 go build -buildvcs=false -o /dev/null ./cmd/golem ./cmd/go-llm-mcp
           GOOS=freebsd go vet ./...
+          GOOS=linux GOARCH=arm64 go build -buildvcs=false -o /dev/null ./cmd/golem ./cmd/go-llm-mcp
           GOOS=darwin GOARCH=amd64 go build -buildvcs=false -o /dev/null ./cmd/golem ./cmd/go-llm-mcp
           GOOS=darwin GOARCH=amd64 go vet ./...
           GOOS=darwin GOARCH=arm64 go build -buildvcs=false -o /dev/null ./cmd/golem ./cmd/go-llm-mcp
