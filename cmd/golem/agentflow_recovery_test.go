@@ -804,7 +804,7 @@ func TestResumeCrashWindows(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			af := &fakeAF{}
-			mutated, err := settleAgentflowAttempt(context.Background(), af, recoveryPlan(), test.state)
+			mutated, err := settleAgentflowAttempt(context.Background(), af, t.TempDir(), recoveryPlan(), test.state)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -819,6 +819,40 @@ func TestResumeCrashWindows(t *testing.T) {
 					t.Fatalf("executed advisory argv: %q", argv)
 				}
 			}
+		})
+	}
+}
+
+// #642 A2: a settlement gate error blocks the attempt with the one fixed
+// reason, runs no later gate and no finish, and blocks on a fresh bounded
+// context, since settlement runs on resume's run context.
+func TestSettleAgentflowAttemptBlocksOnGateError(t *testing.T) {
+	for _, c := range callerContexts {
+		t.Run(c.name, func(t *testing.T) {
+			ctx := c.ctx(t)
+			if ctx.Err() != c.wantErr {
+				t.Fatalf("fixture context err = %v, want %v", ctx.Err(), c.wantErr)
+			}
+			gateErr := errors.New("gate failed")
+			af := &fakeAF{failAt: map[string]error{"gate": gateErr}}
+			state := recoveryAttemptState("validation_missing", []agentflow.ResumabilityGate{
+				{Kind: "command", Label: "go test ./...", Status: "missing"},
+				{Kind: "command", Label: "go vet ./...", Status: "missing"},
+			})
+			mutated, err := settleAgentflowAttempt(ctx, af, t.TempDir(), recoveryPlan(), state)
+			if !mutated {
+				t.Fatal("mutated = false, want true")
+			}
+			if want := []string{"gate:P1:unit-tests", "block-step:P1:A1:golem: gate execution failed"}; !reflect.DeepEqual(af.seq, want) {
+				t.Fatalf("seq = %v, want %v", af.seq, want)
+			}
+			if want := `step P1 attempt A1: gate "unit-tests" failed: gate failed; attempt recorded as blocked`; err == nil || err.Error() != want {
+				t.Fatalf("err = %v, want %q", err, want)
+			}
+			if !errors.Is(err, gateErr) {
+				t.Fatalf("err = %v does not wrap the gate error", err)
+			}
+			assertFreshBlockContext(t, af.blocks)
 		})
 	}
 }
@@ -849,7 +883,7 @@ func TestProjectedCommandGatesRejectsDuplicateArgv(t *testing.T) {
 		{Kind: "command", Label: "make check", Status: "missing"},
 	})
 	af := &fakeAF{}
-	if _, err := settleAgentflowAttempt(context.Background(), af, plan, state); err == nil || !strings.Contains(err.Error(), "duplicate command-gate argv") {
+	if _, err := settleAgentflowAttempt(context.Background(), af, t.TempDir(), plan, state); err == nil || !strings.Contains(err.Error(), "duplicate command-gate argv") {
 		t.Fatalf("err = %v, want duplicate command-gate argv rejection", err)
 	}
 	if len(af.seq) != 0 {
@@ -865,7 +899,7 @@ func TestResumeGatePairingUsesFilteredPositionAndPlanArgv(t *testing.T) {
 		{Kind: "command", Label: "go vet ./...", Status: "missing"},
 	})
 	af := &fakeAF{}
-	mutated, err := settleAgentflowAttempt(context.Background(), af, recoveryPlan(), state)
+	mutated, err := settleAgentflowAttempt(context.Background(), af, t.TempDir(), recoveryPlan(), state)
 	if err != nil || !mutated {
 		t.Fatalf("mutated=%t err=%v", mutated, err)
 	}
@@ -896,7 +930,7 @@ func TestSettleAgentflowAttemptRejectsAmbiguousGatesBeforeMutation(t *testing.T)
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			af := &fakeAF{}
-			if _, err := settleAgentflowAttempt(context.Background(), af, recoveryPlan(), recoveryAttemptState("validation_missing", test.gates)); err == nil {
+			if _, err := settleAgentflowAttempt(context.Background(), af, t.TempDir(), recoveryPlan(), recoveryAttemptState("validation_missing", test.gates)); err == nil {
 				t.Fatal("settleAgentflowAttempt() unexpectedly succeeded")
 			}
 			if len(af.seq) != 0 {

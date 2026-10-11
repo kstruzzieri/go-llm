@@ -75,6 +75,11 @@ func (e *unreceiptedEditError) Unwrap() error { return e.err }
 // (#642 A3). ponytail: fixed budget, no flag.
 const blockStepTimeout = 30 * time.Second
 
+// gateBlockReason is the one ledger reason for any RunGate error (#642 A2). A
+// CommandError only means the CLI exited nonzero, and a gate label can be a
+// full argv, so neither the outcome nor the label is recorded.
+const gateBlockReason = "golem: gate execution failed"
+
 // stepRunBlockReason is the fixed ledger reason for a failed step run (#642
 // A1), checked in this order. Raw error text never reaches the ledger; the
 // returned error keeps it.
@@ -333,7 +338,7 @@ func (d *driver) runAttempt(ctx context.Context, step agentflow.Step, attempt, g
 	}
 	for _, g := range gates {
 		if err := d.af.RunGate(ctx, step.ID, attempt, g.Label, g.Argv); err != nil {
-			return fmt.Errorf("gate %q failed: %w", g.Label, err)
+			return blockAttempt(ctx, d.af, step.ID, attempt, gateBlockReason, fmt.Errorf("gate %q failed: %w", g.Label, err))
 		}
 	}
 	return d.af.FinishStep(ctx, step.ID, attempt) // #642 A4: a FinishStep error leaves the attempt open

@@ -223,10 +223,10 @@ func TestAgentflowResumeStatusAndProof_RealCLI(t *testing.T) {
 	}
 }
 
-// #651: a fresh -plan over a workspace whose only step holds an attempt left
-// open by a failed gate must not report success. next-step skips the open
-// step and a non-strict finish-run would pass (agentflow#58), so before the
-// fix this printed a proof pack recording steps_completed 0 of 1.
+// #651: a fresh -plan over a workspace whose only step holds an open attempt
+// must not report success. next-step skips the open step and a non-strict
+// finish-run would pass (agentflow#58), so before the fix this printed a proof
+// pack recording steps_completed 0 of 1.
 func TestAgentflowFreshPlanRefusesOpenStepWork_RealCLI(t *testing.T) {
 	dir := t.TempDir()
 	copyTree(t, "../../testdata/agentflow", dir)
@@ -244,20 +244,34 @@ func TestAgentflowFreshPlanRefusesOpenStepWork_RealCLI(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Run 1: the step writes the wrong token, so its gate fails and the
-	// attempt stays open.
-	first := &driver{
-		af: client, plan: &plan, planPath: planPath,
-		taskBrief: agentflow.TaskBriefFromPlan(plan, "feature"), out: io.Discard,
-		runStep: func(ctx context.Context, step agentflow.Step, attempt, _ string) error {
-			if err := os.WriteFile(filepath.Join(dir, "src", "answer.txt"), []byte("wrong\n"), 0o600); err != nil {
-				return err
-			}
-			return client.RecordFileChange(ctx, step.ID, attempt, "src/answer.txt")
-		},
+	// Run 1 opens the attempt by hand and runs no gate: a fresh run's failed
+	// gate now blocks its attempt (#642), so an open attempt stands for a
+	// block failure or crash.
+	recommendation, err := client.RecommendWorkflow(ctx, agentflow.TaskBriefFromPlan(plan, "feature"), "", "")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if _, err := first.run(ctx); err == nil || !strings.Contains(err.Error(), "gate") {
-		t.Fatalf("run 1 error = %v, want the failed gate", err)
+	if err := client.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.LockPlan(ctx, planPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.MaterializeWorkflowContract(ctx, recommendation); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.InitExecution(ctx); err != nil {
+		t.Fatal(err)
+	}
+	attempt, err := client.ClaimStep(ctx, "P1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "src", "answer.txt"), []byte("wrong\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.RecordFileChange(ctx, "P1", attempt, "src/answer.txt"); err != nil {
+		t.Fatal(err)
 	}
 	if state, err := client.NextAction(ctx); err != nil || state.State != "validation_missing" {
 		t.Fatalf("after run 1: state=%q err=%v, want an open attempt in validation_missing", state.State, err)
@@ -283,8 +297,8 @@ func TestAgentflowFreshPlanRefusesOpenStepWork_RealCLI(t *testing.T) {
 	if steps != 0 {
 		t.Fatalf("run 2 ran %d steps", steps)
 	}
-	// The refusal must not claim resume can recover: this failed gate is one
-	// resume cannot settle yet (#652). Status reports that verdict.
+	// The refusal must not claim resume can recover: this unowned query cannot
+	// tell. Status reports that verdict.
 	for _, want := range []string{"still reports step work before finish-run", `state "validation_missing" step "P1"`} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("run 2 refusal %q does not mention %s", err, want)

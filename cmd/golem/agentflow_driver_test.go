@@ -1006,8 +1006,8 @@ func TestDriver_AmendmentFailuresStayIncomplete(t *testing.T) {
 			if (tt.runErr != nil || tt.failAt == "gate" || tt.failAt == "finish-step") && !strings.Contains(seq, "amend:P1:") {
 				t.Fatalf("failure did not leave an opened amendment: %v", af.seq)
 			}
-			// #642 A1: a failed amendment run blocks its attempt; a FinishStep
-			// error does not (A4).
+			// #642 A1, A2: a failed amendment run or gate blocks its attempt; a
+			// FinishStep error does not (A4).
 			switch tt.name {
 			case "model":
 				if !slices.Contains(af.seq, "block-step:P1:AM-P1:golem: agent run failed") {
@@ -1016,6 +1016,10 @@ func TestDriver_AmendmentFailuresStayIncomplete(t *testing.T) {
 			case "receipt":
 				if !slices.Contains(af.seq, "block-step:P1:AM-P1:golem: unreceipted edit aborted the run") {
 					t.Fatalf("unreceipted amendment edit was not blocked: %v", af.seq)
+				}
+			case "gate":
+				if !slices.Contains(af.seq, "block-step:P1:AM-P1:golem: gate execution failed") {
+					t.Fatalf("failed amendment gate was not blocked: %v", af.seq)
 				}
 			case "finish step":
 				if strings.Contains(seq, "block-step") {
@@ -2041,6 +2045,26 @@ func TestBlockStepTimeoutBudget(t *testing.T) {
 	}
 }
 
+// callerContexts are the states a caller's context can be in when an attempt
+// fails: the block must run on a fresh bounded context in each (#642 A3).
+var callerContexts = []struct {
+	name    string
+	ctx     func(t *testing.T) context.Context
+	wantErr error
+}{
+	{"live", func(*testing.T) context.Context { return context.Background() }, nil},
+	{"cancelled", func(*testing.T) context.Context {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		return ctx
+	}, context.Canceled},
+	{"deadline exceeded", func(t *testing.T) context.Context {
+		ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+		t.Cleanup(cancel)
+		return ctx
+	}, context.DeadlineExceeded},
+}
+
 // #642 A1, A3 (T1): every step-run error blocks the attempt with a fixed reason
 // for its class, checked in order, on a fresh bounded context whatever state
 // the caller's context is in. Raw error text stays in the returned error only.
@@ -2061,24 +2085,7 @@ func TestRunAttemptRunErrorsBlockWithClassReason(t *testing.T) {
 		{"exhausted", fmt.Errorf("compact: %w", agent.ErrContextExhausted), "golem: agent run exhausted its context", nil},
 		{"other", errors.New("provider down: token=sk-test-123"), "golem: agent run failed", nil},
 	}
-	contexts := []struct {
-		name    string
-		ctx     func(t *testing.T) context.Context
-		wantErr error
-	}{
-		{"live", func(*testing.T) context.Context { return context.Background() }, nil},
-		{"cancelled", func(*testing.T) context.Context {
-			ctx, cancel := context.WithCancel(context.Background())
-			cancel()
-			return ctx
-		}, context.Canceled},
-		{"deadline exceeded", func(t *testing.T) context.Context {
-			ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
-			t.Cleanup(cancel)
-			return ctx
-		}, context.DeadlineExceeded},
-	}
-	for _, c := range contexts {
+	for _, c := range callerContexts {
 		for _, tt := range tests {
 			t.Run(c.name+"/"+tt.name, func(t *testing.T) {
 				ctx := c.ctx(t)
@@ -2099,6 +2106,63 @@ func TestRunAttemptRunErrorsBlockWithClassReason(t *testing.T) {
 				}
 				if !errors.Is(err, tt.err) {
 					t.Fatalf("err = %v does not wrap the step error", err)
+				}
+				if tt.as != nil && !errors.As(err, tt.as) {
+					t.Fatalf("err = %v lost its typed cause %T", err, tt.as)
+				}
+				assertFreshBlockContext(t, af.blocks)
+			})
+		}
+	}
+}
+
+// #642 A2, A3 (T1 gate rows): every RunGate error blocks the attempt with the
+// one fixed reason, on a fresh bounded context, and runs no later gate. Neither
+// the gate outcome nor its label reaches the ledger; the returned error keeps
+// both.
+func TestRunAttemptGateErrorsBlock(t *testing.T) {
+	tests := []struct {
+		name    string
+		err     error
+		wantErr string
+		as      any // errors.As target for a typed error, or nil
+	}{
+		{
+			"command error", &agentflow.CommandError{Cmd: "run", Exit: 1, Stderr: "grep: no match"},
+			`step P1 attempt A-P1: gate "go test" failed: agentflow run: exit 1: grep: no match; attempt recorded as blocked`,
+			new(*agentflow.CommandError),
+		},
+		{
+			"exec error", errors.New("exec: \"agentflow\": executable file not found in $PATH"),
+			`step P1 attempt A-P1: gate "go test" failed: exec: "agentflow": executable file not found in $PATH; attempt recorded as blocked`,
+			nil,
+		},
+	}
+	for _, c := range callerContexts {
+		for _, tt := range tests {
+			t.Run(c.name+"/"+tt.name, func(t *testing.T) {
+				ctx := c.ctx(t)
+				if ctx.Err() != c.wantErr {
+					t.Fatalf("fixture context err = %v, want %v", ctx.Err(), c.wantErr)
+				}
+				// A second gate pins stopping at the first failure: failAt
+				// fails every gate, so a later gate run shows in the sequence.
+				plan := stopTestPlan()
+				plan.Steps[0].Validation = append(plan.Steps[0].Validation, "lint")
+				plan.Steps[0].Gates = append(plan.Steps[0].Gates, agentflow.Gate{Kind: "command", Run: []string{"go", "vet"}})
+				af := &fakeAF{failAt: map[string]error{"gate": tt.err}}
+				d := &driver{af: af, plan: plan, root: t.TempDir(), runStep: func(context.Context, agentflow.Step, string, string) error {
+					return nil
+				}}
+				err := d.runAttempt(ctx, plan.Steps[0], "A-P1", "goal")
+				if want := []string{"gate:P1:go test", "block-step:P1:A-P1:golem: gate execution failed"}; !equalSeq(af.seq, want) {
+					t.Fatalf("agentflow calls = %v, want %v", af.seq, want)
+				}
+				if err == nil || err.Error() != tt.wantErr {
+					t.Fatalf("err = %v, want %q", err, tt.wantErr)
+				}
+				if !errors.Is(err, tt.err) {
+					t.Fatalf("err = %v does not wrap the gate error", err)
 				}
 				if tt.as != nil && !errors.As(err, tt.as) {
 					t.Fatalf("err = %v lost its typed cause %T", err, tt.as)

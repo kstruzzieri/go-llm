@@ -464,7 +464,7 @@ func validateRecoveryMutationSafety(state agentflow.NextActionState) error {
 	return nil
 }
 
-func settleAgentflowAttempt(ctx context.Context, client afClient, plan *agentflow.Plan, state agentflow.NextActionState) (bool, error) {
+func settleAgentflowAttempt(ctx context.Context, client afClient, root string, plan *agentflow.Plan, state agentflow.NextActionState) (bool, error) {
 	switch state.State {
 	case "step_unclaimed", "run_unverified", "proof_missing", "complete":
 		return false, nil
@@ -501,7 +501,7 @@ func settleAgentflowAttempt(ctx context.Context, client afClient, plan *agentflo
 				continue
 			}
 			if err := client.RunGate(ctx, stepID, attemptID, command.Label, command.Argv); err != nil {
-				return true, fmt.Errorf("gate %q failed: %w", command.Label, err)
+				return true, blockAttempt(ctx, client, stepID, attemptID, gateBlockReason, fmt.Errorf("gate %q failed: %w", command.Label, err))
 			}
 		}
 		if err := client.FinishStep(ctx, stepID, attemptID); err != nil {
@@ -536,7 +536,7 @@ func (d *driver) resume(ctx context.Context, root string, planJSON []byte, appro
 		return state, nil
 	}
 
-	settled, err := settleAgentflowAttempt(ctx, d.af, d.plan, state)
+	settled, err := settleAgentflowAttempt(ctx, d.af, root, d.plan, state)
 	if err != nil {
 		return agentflow.NextActionState{}, err
 	}
