@@ -19,9 +19,12 @@ This covers the transcript store (`transcript.Open`, `go-llm-mcp
 `OpenHardenedDB`, `PrepareDBFile`, `SecureDBFiles`, `go-llm-mcp
 -agent-memory-db`), MCP retrieval feedback, and Golem's session, feedback,
 index, checkpoint and memory stores. Each now resolves the file SQLite will
-open first, the way SQLite does, secures that file and its sidecars, and
-fails the open if SQLite then reports a different file. A relative `file:`
-URI is pinned to the working directory at open time.
+open first, the way SQLite does, and secures that file and its sidecars;
+the stores that open the database themselves also fail the open if SQLite
+then reports a different file. A relative `file:` URI is pinned to the
+working directory at open time. `memory.OpenHardenedDB` now also secures
+existing `-wal` and `-shm` files during the open, so one it cannot chmod
+fails the open rather than the caller's next `SecureDBFiles`.
 
 Related fixes:
 
@@ -40,5 +43,5 @@ Related fixes:
 
 Newly rejected before anything is created: `file:` URIs with a `vfs`
 parameter, a repeated `mode` parameter, a NUL byte, a host other than
-`localhost`, or a query Go and SQLite would read differently (such as one
-containing `;`).
+`localhost` or any user information, a `#` fragment, or a query Go and
+SQLite would read differently (such as one containing `;`).

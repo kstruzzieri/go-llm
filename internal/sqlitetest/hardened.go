@@ -3,6 +3,7 @@ package sqlitetest
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"io"
 	"io/fs"
 	"os"
@@ -45,6 +46,9 @@ func RunHardenedPaths(t *testing.T, opts HardenedPathsOptions) {
 	type hardenedCase struct {
 		name  string
 		setup func(t *testing.T, base string) (input, want string)
+		// forbid, relative to base, must not exist after the open: the file
+		// the raw input names when the kernel resolves it differently.
+		forbid string
 	}
 	link := func(t *testing.T, target, name string) {
 		t.Helper()
@@ -63,10 +67,10 @@ func RunHardenedPaths(t *testing.T, opts HardenedPathsOptions) {
 		{"absolute file URI", func(t *testing.T, base string) (string, string) {
 			want := filepath.Join(base, "real", "t.db")
 			return opts.URI(slash(want)), want
-		}},
+		}, ""},
 		{"relative file URI", func(t *testing.T, base string) (string, string) {
 			return opts.URI("t.db"), filepath.Join(base, "cwd", "t.db")
-		}},
+		}, ""},
 		{"plain dotdot after symlink", func(t *testing.T, base string) (string, string) {
 			link(t, filepath.Join(base, "real", "sub"), filepath.Join(base, "cwd", "link"))
 			// FileURL cleans a plain path lexically before SQLite sees it; the
@@ -74,7 +78,7 @@ func RunHardenedPaths(t *testing.T, opts HardenedPathsOptions) {
 			// filepath.Join would clean the ".." away before the opener sees it.
 			sep := string(filepath.Separator)
 			return "link" + sep + ".." + sep + "t.db", filepath.Join(base, "cwd", "t.db")
-		}},
+		}, filepath.Join("real", "t.db")},
 		{"URI dotdot after symlink", func(t *testing.T, base string) (string, string) {
 			link(t, filepath.Join(base, "real", "sub"), filepath.Join(base, "cwd", "link"))
 			if runtime.GOOS == "windows" { // GetFullPathNameW is lexical
@@ -82,7 +86,7 @@ func RunHardenedPaths(t *testing.T, opts HardenedPathsOptions) {
 			}
 			// SQLite follows link to real/sub, then ".." to real.
 			return opts.URI(slash(filepath.Join(base, "cwd")) + "/link/../t.db"), filepath.Join(base, "real", "t.db")
-		}},
+		}, ""},
 		{"symlinked final component", func(t *testing.T, base string) (string, string) {
 			target := filepath.Join(base, "real", "real.db")
 			link(t, target, filepath.Join(base, "cwd", "t.db"))
@@ -90,7 +94,7 @@ func RunHardenedPaths(t *testing.T, opts HardenedPathsOptions) {
 				t.Skip("Windows SQLite names the database and its sidecars after the link, not the target")
 			}
 			return "t.db", target
-		}},
+		}, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -113,6 +117,11 @@ func RunHardenedPaths(t *testing.T, opts HardenedPathsOptions) {
 				}
 			}
 			assertNoDecoy(t, filepath.Join(base, "cwd"), input)
+			if tc.forbid != "" {
+				if _, err := os.Lstat(filepath.Join(base, tc.forbid)); !errors.Is(err, fs.ErrNotExist) {
+					t.Errorf("open %q created %s, the file the raw path names, not the one SQLite opens (err %v)", input, tc.forbid, err)
+				}
+			}
 		})
 	}
 	t.Run("input naming no file", func(t *testing.T) {
