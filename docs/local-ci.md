@@ -243,7 +243,7 @@ immediately before each run:
 | --- | --- | --- |
 | `Lint & Test` | `go-version-file: go.mod` (the `toolchain` directive) | CI/changelog self-tests and guards, lint, formatting, security contracts, race tests, cross-platform compile smoke (a Windows `cmd/golem` build plus `go vet ./...` for Windows and FreeBSD), and GoReleaser config validation |
 | `Test (oldest supported Go)` | `actions/setup-go` resolves the `go-version: '1.N.x'` query in `ci.yml` | `go test -race ./...` only |
-| `Windows SQLite URIs` | `go-version-file: go.mod` on `windows-latest` | `go test -count=1 -v ./internal/sqlitedsn` with `CGO_ENABLED=0`: native Windows path resolution, SQLite URI parsing and the Windows VFS, which the Linux compile smoke cannot exercise; `-v` keeps the lock-holder tests' logged timings visible |
+| `Windows SQLite URIs` | `go-version-file: go.mod` on `windows-latest` | With `CGO_ENABLED=0`: `go test -count=1 -v` on `./internal/sqlitedsn ./internal/sqlitetest ./transcript ./memory ./provider ./rag`, covering native Windows path resolution, SQLite URI parsing, the Windows VFS and each store opener's own tests (concurrent first opens, fail-closed WAL, sidecars), which the Linux compile smoke cannot exercise; then the workspace identity and undo tests in `./agent/tools` and `./cmd/golem` (#658). `-v` keeps the lock-holder tests' logged timings visible |
 
 The compatibility job sets `GOTOOLCHAIN=local` for both its version log and tests,
 so the newer `toolchain` directive cannot silently replace the compiler selected
