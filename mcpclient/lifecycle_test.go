@@ -99,7 +99,9 @@ func lifecycleServer(t *testing.T, mode string) (Server, string) {
 		t.Fatal(err)
 	}
 	dir := t.TempDir()
-	return StdioServer("life", []string{exe, "-test.run=^TestMCPClientLifecycleHelper$", "--", lifecycleMarker, mode, dir}), dir
+	s := StdioServer("life", []string{exe, "-test.run=^TestMCPClientLifecycleHelper$", "--", lifecycleMarker, mode, dir})
+	// Under -race every exit sleeps 1s by default, eating Close's grace before SIGTERM.
+	return s.WithEnv(SetEnv("GORACE", "atexit_sleep_ms=0")), dir
 }
 
 // waitMarker reports whether the helper touched name within 10s. It returns
@@ -143,12 +145,18 @@ func connectLifecycle(t *testing.T, ctx context.Context, s Server) (*Manager, []
 	return m, warns
 }
 
-func wantAdmission(t *testing.T, m *Manager, warns []error) {
+// wantAdmission requires the lone warning to be an *AdmissionError with the
+// given reason and returns it.
+func wantAdmission(t *testing.T, m *Manager, warns []error, reason string) *AdmissionError {
 	t.Helper()
-	var ae *AdmissionError
-	if len(m.Tools()) != 0 || len(warns) != 1 || !errors.As(warns[0], &ae) {
+	if len(m.Tools()) != 0 || len(warns) != 1 {
 		t.Fatalf("got tools=%d warnings=%v, want one admission failure", len(m.Tools()), warns)
 	}
+	failure := admission(t, warns)
+	if failure.Reason != reason {
+		t.Fatalf("admission reason = %q, want %q", failure.Reason, reason)
+	}
+	return failure
 }
 
 // The #406 bug: go-sdk v1.6.1 returns the unsupported-version error without
@@ -156,7 +164,7 @@ func wantAdmission(t *testing.T, m *Manager, warns []error) {
 func TestConnectUnsupportedProtocolReleasesChild(t *testing.T) {
 	s, dir := lifecycleServer(t, "unsupported")
 	m, warns := connectLifecycle(t, context.Background(), s)
-	wantAdmission(t, m, warns)
+	_ = wantAdmission(t, m, warns, "unavailable")
 	if err := waitMarker(dir, "eof"); err != nil {
 		t.Fatalf("%v: child not released", err)
 	}
@@ -171,7 +179,7 @@ func TestConnectCanceledDuringInitializeReleasesChild(t *testing.T) {
 	if err := <-reached; err != nil {
 		t.Fatal(err)
 	}
-	wantAdmission(t, m, warns)
+	_ = wantAdmission(t, m, warns, "canceled")
 	if err := waitMarker(dir, "eof"); err != nil {
 		t.Fatalf("%v: child not released", err)
 	}
@@ -187,7 +195,7 @@ func TestConnectCanceledDuringListReleasesChild(t *testing.T) {
 	if err := <-reached; err != nil {
 		t.Fatal(err)
 	}
-	wantAdmission(t, m, warns)
+	_ = wantAdmission(t, m, warns, "canceled")
 	if err := waitMarker(dir, "eof"); err != nil {
 		t.Fatalf("%v: child not released", err)
 	}
@@ -257,36 +265,52 @@ func TestSessionLifecycleAfterSetup(t *testing.T) {
 }
 
 // HTTP: the same failure must delete the server-side session it was assigned.
+// The redirect case answers that DELETE with a refused redirect, so Close
+// fails with errRedirectRefused: the close error must stay in the chain
+// without renaming the reason.
 func TestConnectUnsupportedProtocolDeletesHTTPSession(t *testing.T) {
-	var deletes, strays atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodDelete {
-			if r.Header.Get("Mcp-Session-Id") == "s1" {
-				deletes.Add(1)
-			} else {
-				strays.Add(1)
+	for _, tt := range []struct {
+		name     string
+		redirect bool
+	}{{"plain", false}, {"redirect", true}} {
+		t.Run(tt.name, func(t *testing.T) {
+			var deletes, strays atomic.Int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodDelete {
+					if r.Header.Get("Mcp-Session-Id") == "s1" {
+						deletes.Add(1)
+					} else {
+						strays.Add(1)
+					}
+					if tt.redirect {
+						http.Redirect(w, r, "/elsewhere", http.StatusFound)
+					}
+					return
+				}
+				var msg struct {
+					ID     json.RawMessage `json:"id"`
+					Method string          `json:"method"`
+				}
+				_ = json.NewDecoder(r.Body).Decode(&msg)
+				if msg.Method != "initialize" {
+					w.WriteHeader(http.StatusAccepted)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("Mcp-Session-Id", "s1")
+				_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": msg.ID, "result": map[string]any{
+					"protocolVersion": "1999-01-01", "capabilities": map[string]any{}, "serverInfo": map[string]any{"name": "old", "version": "1"},
+				}})
+			}))
+			defer srv.Close()
+			m, warns := connectLifecycle(t, context.Background(), HTTPServer("api", srv.URL+"/mcp"))
+			failure := wantAdmission(t, m, warns, "unavailable")
+			if got, stray := deletes.Load(), strays.Load(); got != 1 || stray != 0 {
+				t.Fatalf("DELETE for session s1 = %d, without it = %d; want 1 and 0", got, stray)
 			}
-			return
-		}
-		var msg struct {
-			ID     json.RawMessage `json:"id"`
-			Method string          `json:"method"`
-		}
-		_ = json.NewDecoder(r.Body).Decode(&msg)
-		if msg.Method != "initialize" {
-			w.WriteHeader(http.StatusAccepted)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("Mcp-Session-Id", "s1")
-		_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": msg.ID, "result": map[string]any{
-			"protocolVersion": "1999-01-01", "capabilities": map[string]any{}, "serverInfo": map[string]any{"name": "old", "version": "1"},
-		}})
-	}))
-	defer srv.Close()
-	m, warns := connectLifecycle(t, context.Background(), HTTPServer("api", srv.URL+"/mcp"))
-	wantAdmission(t, m, warns)
-	if got, stray := deletes.Load(), strays.Load(); got != 1 || stray != 0 {
-		t.Fatalf("DELETE for session s1 = %d, without it = %d; want 1 and 0", got, stray)
+			if got := errors.Is(failure, errRedirectRefused); got != tt.redirect {
+				t.Fatalf("errors.Is(failure, errRedirectRefused) = %v, want %v (failure: %v)", got, tt.redirect, failure)
+			}
+		})
 	}
 }
