@@ -39,7 +39,8 @@ if [ -z "$floor_minor" ] || [ "$compat_minor" != "$floor_minor" ]; then
   exit 1
 fi
 
-tmp="$(cd "$(mktemp -d)" && pwd -P)"
+tmp="$(mktemp -d)"
+tmp="$(cd "$tmp" && pwd -P)"
 trap 'rm -rf "$tmp"' EXIT
 
 module="$tmp/module"
@@ -96,7 +97,33 @@ STUB
 
 cat >"$tmp/bin/docker" <<'STUB'
 #!/usr/bin/env sh
-printf '%s\n' "$*" >>"$CI_LOCAL_TEST_LOG"
+source_dir=${GO_LLM_CI_SOURCE:-$PWD}
+printf '%s|%s\n' "$source_dir" "$*" >>"$CI_LOCAL_TEST_LOG"
+if [ "$1" = compose ] && [ -n "${CI_LOCAL_DOCKER_TRUSTED_ROOT-}" ]; then
+  if [ "$PWD" = "$source_dir" ] || [ -e .env ] || [ -e .dockerignore ] \
+    || ! cmp docker-compose.ci.yml "$CI_LOCAL_DOCKER_TRUSTED_ROOT/docker-compose.ci.yml" \
+    || ! cmp Dockerfile.ci "$CI_LOCAL_DOCKER_TRUSTED_ROOT/Dockerfile.ci"; then
+    printf 'gate loaded untrusted Docker configuration\n' >&2
+    exit 91
+  fi
+fi
+# Copy the tree the gate would mount (the hook removes its export), and list
+# entries the container's uid 1000 could not read on a Linux host.
+if [ -n "${CI_LOCAL_DOCKER_SNAPSHOT-}" ]; then
+  snap="$CI_LOCAL_DOCKER_SNAPSHOT/$(wc -l <"$CI_LOCAL_TEST_LOG" | tr -d ' ')"
+  (cd "$source_dir" && find . \( -type f ! -perm -004 \) -o \( -type d ! -perm -005 \)) >"$snap.unreadable"
+  mkdir "$snap"
+  (cd "$source_dir" && tar -cf - .) | tar -xf - -C "$snap"
+fi
+if [ "$1" = rm ] && [ -n "${CI_LOCAL_DOCKER_RM_ERROR-}" ]; then
+  printf '%s\n' "$CI_LOCAL_DOCKER_RM_ERROR" >&2
+  exit 1
+fi
+# Stand in for a long gate: block until the test signals the job.
+if [ "$1" = compose ] && [ -n "${CI_LOCAL_DOCKER_BLOCK-}" ]; then
+  : >"$CI_LOCAL_DOCKER_BLOCK"
+  while :; do sleep 1; done
+fi
 exit "${CI_LOCAL_DOCKER_STATUS:-0}"
 STUB
 chmod +x "$tmp/bin/golangci-lint" "$tmp/bin/go" "$tmp/bin/python3" "$tmp/bin/docker"
@@ -411,20 +438,425 @@ assert_status root-security 0
 write_expected expected-root-security security
 diff -u "$tmp/expected-root-security" "$tmp/root-security.log"
 
-for docker_status in 0 35; do
-  : >"$tmp/hook-$docker_status.log"
+# The pre-push hook gates the trees being pushed, never this checkout's files
+# (#630). The fixture repository commits a tree, then adds a gitignored
+# package, an untracked file and an uncommitted edit, none of which may reach
+# the gate; a linked worktree of it holds a second commit. Needs git >= 2.32
+# (GIT_CONFIG_GLOBAL).
+# Repository-local variables (GIT_DIR, GIT_INDEX_FILE, ...) inherited from a
+# caller would redirect the fixture's git commands; clear them.
+unset $(git rev-parse --local-env-vars)
+# The oracle (expected manifests and contents) disables replacements, so it
+# cannot share a replacement defect with the hook.
+fixture_git() {
+  GIT_NO_REPLACE_OBJECTS=1 GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git \
+    -c user.name=test-ci-local -c user.email=test-ci-local@localhost \
+    -c commit.gpgsign=false -c tag.gpgsign=false "$@"
+}
+hook_repo="$tmp/hook-repo"
+mkdir -p "$hook_repo"
+fixture_git -C "$hook_repo" init -q --template=
+printf 'ignored/\n' >"$hook_repo/.gitignore"
+printf 'module example.com/fixture\n' >"$hook_repo/go.mod"
+printf 'package fixture\n' >"$hook_repo/tracked.go"
+fixture_git -C "$hook_repo" add -A
+fixture_git -C "$hook_repo" commit -qm one
+c1="$(fixture_git -C "$hook_repo" rev-parse HEAD)"
+fixture_git -C "$hook_repo" tag -a v1 -m v1
+tag1="$(fixture_git -C "$hook_repo" rev-parse v1)"
+hook_wt="$tmp/hook-wt"
+fixture_git -C "$hook_repo" worktree add -q -b wt "$hook_wt"
+printf 'package fixture\n\nfunc Second() {}\n' >"$hook_wt/second.go"
+fixture_git -C "$hook_wt" add second.go
+fixture_git -C "$hook_wt" commit -qm two
+c2="$(fixture_git -C "$hook_wt" rev-parse HEAD)"
+for checkout in "$hook_repo" "$hook_wt"; do
+  mkdir -p "$checkout/ignored"
+  printf 'package ignored\nfunc  Bad(){}\n' >"$checkout/ignored/bad.go"
+  printf 'package fixture\n' >"$checkout/untracked.go"
+  printf 'func  Dirty(){}\n' >>"$checkout/tracked.go"
+done
+zero=0000000000000000000000000000000000000000
+# The gate command, with the container named after the hook's pid so an
+# interrupt can remove it.
+gate_re='^compose --env-file /dev/null -f docker-compose\.ci\.yml run --build --rm --name go-llm-prepush-[0-9][0-9]* ci \./scripts/ci-local --mode full$'
+is_gate_cmd() { printf '%s\n' "$1" | grep -Eq "$gate_re"; }
+
+# run_hook NAME CHECKOUT DOCKER_STATUS runs the hook from CHECKOUT with
+# $tmp/NAME.in as git's stdin, under a hostile umask and a hostile tar.umask
+# (command-scope config, which an explicit `git -c` overrides).
+run_hook() {
+  : >"$tmp/$1.log"
+  rm -rf "$tmp/$1.snap"
+  mkdir "$tmp/$1.snap"
   set +e
   (
-    cd "$repo_root"
-    PATH="$tmp/bin:$PATH" CI_LOCAL_TEST_LOG="$tmp/hook-$docker_status.log" \
-      CI_LOCAL_DOCKER_STATUS="$docker_status" .githooks/pre-push
-  )
+    cd "$2"
+    umask 077
+    GIT_CONFIG_GLOBAL="${hook_global_config:-/dev/null}" GIT_CONFIG_NOSYSTEM=1 \
+      GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=tar.umask GIT_CONFIG_VALUE_0=0077 \
+      PATH="$tmp/bin:$PATH" CI_LOCAL_TEST_LOG="$tmp/$1.log" CI_LOCAL_DOCKER_SNAPSHOT="$tmp/$1.snap" \
+      CI_LOCAL_DOCKER_TRUSTED_ROOT="${hook_trusted_root-}" \
+      CI_LOCAL_FILTER_MARKER="$tmp/filter-ran" \
+      CI_LOCAL_DOCKER_STATUS="$3" "$repo_root/.githooks/pre-push" origin example.invalid <"$tmp/$1.in"
+  ) >"$tmp/$1.out" 2>&1
   ci_status=$?
   set -e
-  assert_status "hook-$docker_status" "$docker_status"
-  printf '%s\n' 'compose -f docker-compose.ci.yml run --build --rm ci ./scripts/ci-local --mode full' >"$tmp/expected-hook"
-  diff -u "$tmp/expected-hook" "$tmp/hook-$docker_status.log"
+}
+
+assert_gate_runs() {
+  got="$(wc -l <"$tmp/$1.log" | tr -d ' ')"
+  if [ "$got" != "$2" ]; then
+    printf '%s: %s gate runs, want %s\n' "$1" "$got" "$2" >&2
+    cat "$tmp/$1.log" "$tmp/$1.out" >&2
+    exit 1
+  fi
+}
+
+# Up to date: git runs the hook with empty stdin.
+: >"$tmp/hook-empty.in"
+run_hook hook-empty "$hook_repo" 0
+assert_status hook-empty 0
+assert_gate_runs hook-empty 0
+
+# Deletion only, SHA-1 and SHA-256 zero ids.
+printf '(delete) %s refs/heads/gone %s\n(delete) %s%s refs/heads/gone256 %s\n' \
+  "$zero" "$c1" "$zero" 000000000000000000000000 "$c1" >"$tmp/hook-delete.in"
+run_hook hook-delete "$hook_repo" 0
+assert_status hook-delete 0
+assert_gate_runs hook-delete 0
+
+# Malformed input fails closed before Docker.
+n=0
+# 7: an abbreviated id git would resolve; 8: a short remote id; 9: 40
+# characters that are not hex.
+for bad in 'garbage' 'x 0' 'a b c' "r 85e3 refs/heads/x $zero" "r $c1 notref $zero" " $c1 refs/heads/x $zero" \
+  "r ${c1%?} refs/heads/x $zero" "r $c1 refs/heads/x 00" "r ${c1%?}g refs/heads/x $zero"; do
+  n=$((n + 1))
+  printf '%s\n' "$bad" >"$tmp/hook-malformed-$n.in"
+  run_hook "hook-malformed-$n" "$hook_repo" 0
+  assert_status "hook-malformed-$n" 1
+  assert_gate_runs "hook-malformed-$n" 0
+  if ! grep -Fq 'pre-push: malformed ref update from git:' "$tmp/hook-malformed-$n.out"; then
+    printf 'hook-malformed-%s: rejected without the malformed diagnostic:\n' "$n" >&2
+    cat "$tmp/hook-malformed-$n.out" >&2
+    exit 1
+  fi
 done
+
+# An id git cannot peel to a tree fails the push before Docker.
+printf 'refs/heads/main %s refs/heads/main %s\n' ffffffffffffffffffffffffffffffffffffffff "$zero" >"$tmp/hook-missing.in"
+run_hook hook-missing "$hook_repo" 0
+assert_status hook-missing 1
+assert_gate_runs hook-missing 0
+
+# The source field is the user's expression and may contain spaces and a
+# lone 0 (`git push origin 'HEAD^{/one| 0 }:refs/heads/expr'`); the line is
+# split from the right, so it is still an update. The last line has no newline.
+printf 'HEAD^{/one| 0 } %s refs/heads/expr %s\nHEAD^{/fix it} %s refs/heads/expr2 %s' \
+  "$c1" "$zero" "$c1" "$zero" >"$tmp/hook-expr.in"
+run_hook hook-expr "$hook_repo" 0
+assert_status hook-expr 0
+assert_gate_runs hook-expr 1
+
+# A lone update without its terminating newline is still gated.
+printf 'refs/heads/main %s refs/heads/main %s' "$c1" "$zero" >"$tmp/hook-nonl.in"
+run_hook hook-nonl "$hook_repo" 0
+assert_status hook-nonl 0
+assert_gate_runs hook-nonl 1
+
+# An update runs the gate once, and its status is the hook's.
+printf 'refs/heads/main %s refs/heads/main %s\n' "$c1" "$zero" >"$tmp/hook-update.in"
+for docker_status in 0 35; do
+  cp "$tmp/hook-update.in" "$tmp/hook-update-$docker_status.in"
+  run_hook "hook-update-$docker_status" "$hook_repo" "$docker_status"
+  assert_status "hook-update-$docker_status" "$docker_status"
+  assert_gate_runs "hook-update-$docker_status" 1
+  if ! is_gate_cmd "$(cut -d'|' -f2- "$tmp/hook-update-$docker_status.log")"; then
+    printf 'hook-update-%s: gate run was %s\n' "$docker_status" "$(cat "$tmp/hook-update-$docker_status.log")" >&2
+    exit 1
+  fi
+done
+
+# A failed temporary directory allocation must not gate or clean the checkout.
+# Stub removal too, so this regression remains safe against the broken hook.
+printf '#!/bin/sh\nexit 73\n' >"$tmp/bin/mktemp"
+printf '#!/bin/sh\nprintf "unexpected cleanup\\n" >>"$CI_LOCAL_TEST_LOG"\n' >"$tmp/bin/rm"
+chmod +x "$tmp/bin/mktemp" "$tmp/bin/rm"
+cp "$tmp/hook-update.in" "$tmp/hook-mktemp-failure.in"
+run_hook hook-mktemp-failure "$hook_repo" 0
+rm "$tmp/bin/mktemp" "$tmp/bin/rm"
+assert_status hook-mktemp-failure 73
+assert_gate_runs hook-mktemp-failure 0
+
+# A branch and its annotated tag name one tree: one gate run. Two refs at one
+# commit, mixed with a deletion: one gate run.
+printf 'refs/heads/main %s refs/heads/main %s\nrefs/tags/v1 %s refs/tags/v1 %s\n(delete) %s refs/heads/gone %s\nrefs/heads/copy %s refs/heads/copy %s\n' \
+  "$c1" "$zero" "$tag1" "$zero" "$zero" "$c1" "$c1" "$zero" >"$tmp/hook-dedupe.in"
+run_hook hook-dedupe "$hook_repo" 0
+assert_status hook-dedupe 0
+assert_gate_runs hook-dedupe 1
+
+# assert_gated NAME N TREEISH: gate run N used the exact compose command from
+# a directory outside both checkouts that the hook removed afterwards; the
+# tree it mounted was readable by any uid; and it held exactly TREEISH's
+# files with the committed tracked.go: no gitignored, untracked or
+# uncommitted content, no .git.
+assert_gated() {
+  line="$(sed -n "${2}p" "$tmp/$1.log")"
+  cwd="${line%%|*}"
+  if ! is_gate_cmd "${line#*|}"; then
+    printf '%s: gate run %s was %s\n' "$1" "$2" "$line" >&2
+    exit 1
+  fi
+  case "$cwd" in
+    "$hook_repo" | "$hook_repo"/* | "$hook_wt" | "$hook_wt"/*)
+      printf '%s: gate run %s used checkout %s\n' "$1" "$2" "$cwd" >&2
+      exit 1
+      ;;
+  esac
+  if [ -e "$cwd" ]; then
+    printf '%s: export %s was not removed\n' "$1" "$cwd" >&2
+    exit 1
+  fi
+  if [ -s "$tmp/$1.snap/$2.unreadable" ]; then
+    printf '%s: export entries unreadable by the container:\n' "$1" >&2
+    cat "$tmp/$1.snap/$2.unreadable" >&2
+    exit 1
+  fi
+  fixture_git -C "$hook_repo" ls-tree -r --name-only "$3" | LC_ALL=C sort >"$tmp/$1.want-$2"
+  (cd "$tmp/$1.snap/$2" && find . \( -type f -o -type l \) | sed 's|^\./||' | LC_ALL=C sort) >"$tmp/$1.got-$2"
+  diff -u "$tmp/$1.want-$2" "$tmp/$1.got-$2"
+  fixture_git -C "$hook_repo" show "$3:tracked.go" | cmp - "$tmp/$1.snap/$2/tracked.go"
+}
+
+assert_gated hook-update-0 1 "$c1"
+assert_gated hook-update-35 1 "$c1"
+assert_gated hook-expr 1 "$c1"
+assert_gated hook-dedupe 1 "$c1"
+
+# Two trees gate in stdin order, each on its own files, even when one is not
+# this checkout's HEAD.
+printf 'refs/heads/main %s refs/heads/main %s\nrefs/heads/wt %s refs/heads/wt %s\n' \
+  "$c1" "$zero" "$c2" "$zero" >"$tmp/hook-two.in"
+run_hook hook-two "$hook_repo" 0
+assert_status hook-two 0
+assert_gate_runs hook-two 2
+assert_gated hook-two 1 "$c1"
+assert_gated hook-two 2 "$c2"
+
+# The first failure stops the push; later trees are not gated.
+cp "$tmp/hook-two.in" "$tmp/hook-two-fail.in"
+run_hook hook-two-fail "$hook_repo" 35
+assert_status hook-two-fail 35
+assert_gate_runs hook-two-fail 1
+assert_gated hook-two-fail 1 "$c1"
+
+# An annotated tag alone gates the tree it names.
+printf 'refs/tags/v1 %s refs/tags/v1 %s\n' "$tag1" "$zero" >"$tmp/hook-tag.in"
+run_hook hook-tag "$hook_repo" 0
+assert_status hook-tag 0
+assert_gate_runs hook-tag 1
+assert_gated hook-tag 1 "$c1"
+
+# From a linked worktree (#306): .git is a pointer file there, and the pushed
+# commit is not the main repository's HEAD.
+printf 'refs/heads/wt %s refs/heads/wt %s\n' "$c2" "$zero" >"$tmp/hook-worktree.in"
+run_hook hook-worktree "$hook_wt" 0
+assert_status hook-worktree 0
+assert_gate_runs hook-worktree 1
+assert_gated hook-worktree 1 "$c2"
+
+# A local replace ref must not change what is gated: git push sends c1's real
+# objects. Without the hook's GIT_NO_REPLACE_OBJECTS, c1 would peel to c2's
+# tree and the export would hold second.go.
+fixture_git -C "$hook_repo" replace "$c1" "$c2"
+printf 'refs/heads/main %s refs/heads/main %s\n' "$c1" "$zero" >"$tmp/hook-replace.in"
+run_hook hook-replace "$hook_repo" 0
+fixture_git -C "$hook_repo" replace -d "$c1" >/dev/null
+assert_status hook-replace 0
+assert_gate_runs hook-replace 1
+assert_gated hook-replace 1 "$c1"
+
+# Forwarding a foreign tree must not load its host-side Docker settings,
+# Dockerfile, dotenv file, or build-context ignore rules.
+fixture_git -C "$hook_wt" checkout -q -- tracked.go
+cat >"$hook_wt/docker-compose.ci.yml" <<'HOSTILE'
+services:
+  ci:
+    image: alpine
+    user: '0'
+    privileged: true
+    entrypoint: [sh, -c, 'exit 0']
+    volumes: ['/:/host']
+HOSTILE
+printf 'FROM scratch\nENTRYPOINT ["untrusted"]\n' >"$hook_wt/Dockerfile.ci"
+printf 'COMPOSE_FILE=hostile.yml\nDOCKER_HOST=tcp://example.invalid:2375\n' >"$hook_wt/.env"
+printf '*\n' >"$hook_wt/.dockerignore"
+fixture_git -C "$hook_wt" add docker-compose.ci.yml Dockerfile.ci .env .dockerignore
+fixture_git -C "$hook_wt" commit -qm 'foreign Docker configuration'
+foreign="$(fixture_git -C "$hook_wt" rev-parse HEAD)"
+printf 'refs/heads/foreign %s refs/heads/foreign %s\n' "$foreign" "$zero" >"$tmp/hook-foreign.in"
+hook_trusted_root=$repo_root
+run_hook hook-foreign "$hook_repo" 0
+unset hook_trusted_root
+assert_status hook-foreign 0
+assert_gate_runs hook-foreign 1
+assert_gated hook-foreign 1 "$foreign"
+
+# Symlink forms are also just source files; Docker must not follow them.
+for file in docker-compose.ci.yml Dockerfile.ci .env .dockerignore; do
+  mv "$hook_wt/$file" "$tmp/foreign-$file"
+  ln -s "$tmp/foreign-$file" "$hook_wt/$file"
+done
+fixture_git -C "$hook_wt" add docker-compose.ci.yml Dockerfile.ci .env .dockerignore
+fixture_git -C "$hook_wt" commit -qm 'foreign Docker symlinks'
+foreign_links="$(fixture_git -C "$hook_wt" rev-parse HEAD)"
+printf 'refs/heads/foreign %s refs/heads/foreign %s\n' "$foreign_links" "$zero" >"$tmp/hook-foreign-links.in"
+hook_trusted_root=$repo_root
+run_hook hook-foreign-links "$hook_repo" 0
+unset hook_trusted_root
+assert_status hook-foreign-links 0
+assert_gated hook-foreign-links 1 "$foreign_links"
+
+# Local and global packaging attributes cannot exclude committed failures.
+mkdir -p "$hook_repo/.git/info"
+printf 'tracked.go export-ignore\n' >"$hook_repo/.git/info/attributes"
+cp "$tmp/hook-update.in" "$tmp/hook-info-attributes.in"
+run_hook hook-info-attributes "$hook_repo" 0
+assert_status hook-info-attributes 0
+assert_gated hook-info-attributes 1 "$c1"
+rm "$hook_repo/.git/info/attributes"
+printf 'tracked.go export-ignore\n' >"$tmp/global-attributes"
+printf '[core]\n\tattributesFile = %s\n\tautocrlf = true\n' "$tmp/global-attributes" >"$tmp/gitconfig"
+hook_global_config=$tmp/gitconfig
+cp "$tmp/hook-update.in" "$tmp/hook-global-attributes.in"
+run_hook hook-global-attributes "$hook_repo" 0
+unset hook_global_config
+assert_status hook-global-attributes 0
+assert_gated hook-global-attributes 1 "$c1"
+
+# Relative alternate object paths retain the caller's Git resolution rules.
+fixture_git init -q --template= "$tmp/consumer"
+(
+  export GIT_ALTERNATE_OBJECT_DIRECTORIES=../hook-repo/.git/objects
+  cp "$tmp/hook-update.in" "$tmp/hook-alternate.in"
+  run_hook hook-alternate "$tmp/consumer" 0
+  unset GIT_ALTERNATE_OBJECT_DIRECTORIES
+  assert_status hook-alternate 0
+  assert_gated hook-alternate 1 "$c1"
+)
+
+printf 'tracked.go filter=hostile\n' >"$hook_repo/.git/info/attributes"
+fixture_git -C "$hook_repo" config filter.hostile.smudge 'printf invoked >"$CI_LOCAL_FILTER_MARKER"; cat'
+cp "$tmp/hook-update.in" "$tmp/hook-smudge.in"
+run_hook hook-smudge "$hook_repo" 0
+assert_status hook-smudge 0
+assert_gated hook-smudge 1 "$c1"
+test ! -e "$tmp/filter-ran"
+rm "$hook_repo/.git/info/attributes"
+
+# Committed attributes cannot omit nested files or transform raw blob bytes.
+mkdir "$hook_wt/nested"
+printf '$Id$\ncaf\303\251\n' >"$hook_wt/encoded.txt"
+printf '\000\001\377\n' >"$hook_wt/nested/binary space.bin"
+printf '#!/bin/sh\nexit 0\n' >"$hook_wt/run.sh"
+chmod +x "$hook_wt/run.sh"
+ln -s tracked.go "$hook_wt/link"
+fixture_git -C "$hook_wt" add encoded.txt nested run.sh link
+printf 'tracked.go export-ignore\nencoded.txt text eol=crlf ident working-tree-encoding=ISO-8859-1\n' >"$hook_wt/.gitattributes"
+printf '* export-ignore\n' >"$hook_wt/nested/.gitattributes"
+fixture_git -C "$hook_wt" add .gitattributes nested/.gitattributes
+fixture_git -C "$hook_wt" commit -qm 'packaging and checkout attributes'
+attributes="$(fixture_git -C "$hook_wt" rev-parse HEAD)"
+printf 'refs/heads/attrs %s refs/heads/attrs %s\n' "$attributes" "$zero" >"$tmp/hook-committed-attributes.in"
+run_hook hook-committed-attributes "$hook_wt" 0
+assert_status hook-committed-attributes 0
+assert_gated hook-committed-attributes 1 "$attributes"
+for file in encoded.txt 'nested/binary space.bin' run.sh; do
+  fixture_git -C "$hook_wt" show "$attributes:$file" | cmp - "$tmp/hook-committed-attributes.snap/1/$file"
+done
+test -x "$tmp/hook-committed-attributes.snap/1/run.sh"
+test "$(readlink "$tmp/hook-committed-attributes.snap/1/link")" = tracked.go
+
+# Git hooks can inherit a linked worktree's metadata, index and attr source.
+(
+  export GIT_DIR="$(fixture_git -C "$hook_wt" rev-parse --absolute-git-dir)"
+  export GIT_INDEX_FILE="$GIT_DIR/index" GIT_ATTR_SOURCE="$attributes"
+  cp "$tmp/hook-committed-attributes.in" "$tmp/hook-inherited-git.in"
+  run_hook hook-inherited-git "$hook_wt" 0
+  assert_status hook-inherited-git 0
+  assert_gated hook-inherited-git 1 "$attributes"
+)
+
+# Ctrl-C (or a closed terminal's SIGHUP) reaches the whole foreground job.
+# compose dies, but its container (no TTY here) would keep running against the
+# removed export, so the hook's INT/TERM/HUP traps remove the named container
+# and report a removal that failed for any reason but "No such container" (an
+# interrupt before compose created it). The job gets its own process group
+# (set -m) and the subshell execs the hook, so the job is the hook.
+printf 'refs/heads/main %s refs/heads/main %s\n' "$c1" "$zero" >"$tmp/hook-interrupt.in"
+# run_interrupt NAME SIG STATUS [RM_ERROR]: signal the hook's job mid-gate; the
+# stubbed `docker rm` fails with RM_ERROR when it is given.
+run_interrupt() {
+  : >"$tmp/$1.log"
+  set -m
+  (
+    cd "$hook_repo"
+    exec env GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 PATH="$tmp/bin:$PATH" \
+      CI_LOCAL_TEST_LOG="$tmp/$1.log" CI_LOCAL_DOCKER_BLOCK="$tmp/$1.blocked" CI_LOCAL_DOCKER_RM_ERROR="${4-}" \
+      "$repo_root/.githooks/pre-push" origin example.invalid <"$tmp/hook-interrupt.in" >"$tmp/$1.out" 2>&1
+  ) &
+  job=$!
+  set +m
+  waited=0
+  until [ -e "$tmp/$1.blocked" ]; do
+    waited=$((waited + 1))
+    if [ "$waited" -gt 300 ]; then
+      printf '%s: gate never started\n' "$1" >&2
+      kill -s KILL -- "-$job" 2>/dev/null || true
+      exit 1
+    fi
+    sleep 0.1
+  done
+  kill -s "$2" -- "-$job"
+  set +e
+  wait "$job"
+  ci_status=$?
+  set -e
+  assert_status "$1" "$3"
+  run_line="$(sed -n 1p "$tmp/$1.log")"
+  container="$(printf '%s\n' "$run_line" | sed -n 's/.* --name \(go-llm-prepush-[0-9]*\) .*/\1/p')"
+  if ! is_gate_cmd "${run_line#*|}" || [ -z "$container" ]; then
+    printf '%s: gate run was %s\n' "$1" "$run_line" >&2
+    exit 1
+  fi
+  if [ "$(sed -n 2p "$tmp/$1.log" | cut -d'|' -f2-)" != "rm -f $container" ]; then
+    printf '%s: container %s was not removed; docker calls:\n' "$1" "$container" >&2
+    cat "$tmp/$1.log" >&2
+    exit 1
+  fi
+  if [ -e "${run_line%%|*}" ]; then
+    printf '%s: export %s was not removed\n' "$1" "${run_line%%|*}" >&2
+    exit 1
+  fi
+}
+run_interrupt hook-interrupt-INT INT 130
+run_interrupt hook-interrupt-TERM TERM 143
+run_interrupt hook-interrupt-HUP HUP 129
+# A container that never started is not worth a warning; a failed removal is.
+run_interrupt hook-interrupt-absent INT 130 'Error response from daemon: No such container: x'
+if grep -Fq 'could not remove container' "$tmp/hook-interrupt-absent.out"; then
+  printf 'hook-interrupt-absent: warned about a container that never existed\n' >&2
+  cat "$tmp/hook-interrupt-absent.out" >&2
+  exit 1
+fi
+run_interrupt hook-interrupt-rm-fails INT 130 'Cannot connect to the Docker daemon at unix:///var/run/docker.sock'
+if ! grep -Eq '^pre-push: could not remove container go-llm-prepush-[0-9]+: Cannot connect to the Docker daemon' "$tmp/hook-interrupt-rm-fails.out"; then
+  printf 'hook-interrupt-rm-fails: the failed removal was not reported:\n' >&2
+  cat "$tmp/hook-interrupt-rm-fails.out" >&2
+  exit 1
+fi
 
 mkdir -p "$tmp/misplaced/scripts"
 cp "$script_dir/ci-local" "$tmp/misplaced/scripts/ci-local"

@@ -24,8 +24,9 @@ docker compose -f docker-compose.ci.yml run --build --rm ci ./scripts/ci-local -
 ```
 
 The Docker runner builds from `Dockerfile.ci`, mounts the repository at `/workspace`, and keeps named cache volumes for Go modules, Go build output, and golangci-lint data. The compose file pins the project name to `go-llm`, so linked worktrees share the same image and cache volumes as the main checkout.
-Rebuilding from another branch replaces that shared image. The hook builds from
-its own checkout before testing, but this does not isolate concurrent builds:
+Rebuilding from another branch replaces that shared image. The hook builds the
+image from the installed hook's trusted `Dockerfile.ci` before testing, but this does not
+isolate concurrent builds:
 coordinate builds across worktrees when their Dockerfiles differ. For a manual
 run with a separate image and cache volumes, use an explicit project name:
 
@@ -43,12 +44,14 @@ On a Linux host the bind-mounted checkout must be readable by uid 1000; the gate
 
 ## Linked Worktrees
 
-`scripts/ci-local` resolves the module root from its own location and validates that the root contains `go.mod` (declaring this module) and `docker-compose.ci.yml`, instead of asking Git. Linked worktrees store `.git` as a file pointing at host-only metadata that is not visible inside the container, so Git-based root discovery would fail there. The Docker gate and the pre-push hook therefore work from both normal checkouts and `git worktree add` checkouts.
+`scripts/ci-local` resolves the module root from its own location and validates that the root contains `go.mod` (declaring this module) and `docker-compose.ci.yml`, instead of asking Git. Linked worktrees store `.git` as a file pointing at host-only metadata that is not visible inside the container, so Git-based root discovery would fail there. The Docker gate and the pre-push hook therefore work from both normal checkouts and `git worktree add` checkouts. The pre-push hook mounts only an export of each pushed tree, which has no `.git`; its isolated `git archive` ignores local and committed attributes.
 
 `scripts/test-ci-local` is a hermetic regression harness for the local gate. It
-stubs the external commands, needs no toolchain or Docker, and covers root
+stubs the external commands, needs no Go toolchain or Docker (only git 2.32 or
+newer, for the hook's fixture repository), and covers root
 discovery, exact phase ordering, prerequisites, failure status propagation, the
-pre-push hook, the native Darwin selectors and requirement environment, and the
+pre-push hook's ref parsing, complete tree export and trusted Docker settings (against a fixture repository and
+a linked worktree of it), the native Darwin selectors and requirement environment, and the
 Windows and FreeBSD vets shared by `--mode full` and the `CI` workflow. The
 `CI` workflow runs it on every pull request.
 
@@ -56,7 +59,7 @@ Windows and FreeBSD vets shared by `--mode full` and the `CI` workflow. The
 
 1. Make code changes normally.
 2. Run `scripts/ci-local --mode pre-push` for a faster host-side check while iterating, or use the Docker command above when you want the pinned CI toolchain.
-3. Push the branch. The `.githooks/pre-push` hook automatically builds the current checkout's CI image and runs the Docker-backed `full` suite and blocks the push on failure.
+3. Push the branch. The `.githooks/pre-push` hook exports each pushed tree, builds the trusted CI image and runs the Docker-backed `full` suite on that export, and blocks the push on failure.
 4. GitHub runs the required `Lint & Test`, `Test (oldest supported Go)`, `Linux Sandbox (bwrap)`, and `macOS Compile Smoke` checks on PRs to satisfy branch protection. Ordinary push-triggered Actions remain disabled.
 
 ## Command Contract
@@ -164,14 +167,64 @@ test ...'` execs its final command, leaving `go` as PID 1) never reaps them and
 
 ## Git Hook
 
-The pre-push hook lives at `.githooks/pre-push` and runs the full Docker-backed suite:
+The pre-push hook lives at `.githooks/pre-push`. Git passes it one
+`<local ref> <local oid> <remote ref> <remote oid>` line per updated ref. The
+hook peels each updated id to its tree and exports each distinct tree under a
+fresh `mktemp -d` directory. It uses isolated Git metadata with export exclusions
+and checkout conversions disabled: local, global and committed attributes cannot exclude tracked files,
+transform their bytes or run host-side smudge filters. Executable bits and
+symlinks are preserved. The source objects must be available locally; a partial
+clone with missing objects fails the gate until those objects are fetched.
+
+The hook snapshots `docker-compose.ci.yml` and `Dockerfile.ci` from its own
+installation's repository into a separate, minimal build directory. From there
+it runs the equivalent of:
 
 ```bash
-docker compose -f docker-compose.ci.yml run --build --rm ci ./scripts/ci-local --mode full
+GO_LLM_CI_SOURCE=/path/to/export docker compose --env-file /dev/null -f docker-compose.ci.yml run --build --rm ci ./scripts/ci-local --mode full
 ```
 
-That means pushes fail locally if the image build, security contracts, lint, race
-tests, or compile-smoke checks fail.
+The container therefore sees exactly the pushed source tree: gitignored files (such as
+the Go snapshots under `docs/superpowers/` in a main checkout), untracked files
+and uncommitted source edits cannot change its input. `scripts/ci-local` and the
+tests come from the pushed tree, but host-side Docker settings come only from
+the trusted hook installation. Pushed Compose, Dockerfile, `.env` and
+`.dockerignore` files are never loaded as host configuration. This matters when
+forwarding another person's fetched branch: its Compose file must not be able
+to grant itself host mounts or privileged execution. Review CI tooling changes
+in the hook installation's checkout before using them; an absolute
+`core.hooksPath` can point there from other worktrees. The minimal build directory
+contains only the trusted Compose and Dockerfile, so changes that add Dockerfile
+`COPY` inputs must update the hook as well. Manual Docker commands still use the
+current checkout's configuration and source. A tree without the local-CI script
+and module markers, such as an old tag, cannot pass the hook. Only ref tips are gated,
+not the commits between them; a branch and its tag at one commit are gated
+once; several trees are gated in the order git lists them, and the first
+failure blocks the push. A push that only deletes remote refs, or updates
+nothing, runs no gate. A line that is not git's four-field shape (two 40- or
+64-hex ids, a `refs/` remote ref, a non-empty source) fails the push; a source
+expression containing a newline cannot be parsed, so push such a source by its
+id. Local `git replace` mappings are ignored: the gate checks the objects git
+sends.
+
+An interrupted push (Ctrl-C, or a closed terminal) removes the gate's container, named
+`go-llm-prepush-<pid>`, and the export; without that, compose would exit and
+leave the container running. If the removal fails (the Docker daemon is
+unreachable, say), the hook prints the `docker rm -f` command to run.
+
+The export lives under `$TMPDIR`, which the Docker host must be able to
+bind-mount. Docker Desktop shares it by default; on another runtime, point
+`TMPDIR` at a shared directory for the push.
+
+The manual commands above gate the working tree, uncommitted edits included.
+To gate a commit exactly as a push does:
+
+```bash
+printf 'manual %s refs/heads/manual 0000000000000000000000000000000000000000\n' "$(git rev-parse HEAD)" | .githooks/pre-push
+```
+
+Pushes fail locally if the image build, security contracts, lint, race tests,
+or compile-smoke checks fail for a pushed tree.
 
 The setup script only updates this clone's local Git config:
 
