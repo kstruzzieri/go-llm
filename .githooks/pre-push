@@ -72,6 +72,7 @@ umask 022
 # container so the traps can remove it.
 name="go-llm-prepush-$$"
 work="$(mktemp -d)"
+work="$(cd "$work" && pwd -P)"
 trap 'rm -rf "$work"' EXIT
 # "No such container" means the interrupt came before compose created it; any
 # other failure leaves a container running, so report it. The || keeps set -e
@@ -90,14 +91,35 @@ remove_container() {
 trap 'remove_container; exit 129' HUP
 trap 'remove_container; exit 130' INT
 trap 'remove_container; exit 143' TERM
+# Only the hook installation supplies host-side Docker settings. The pushed
+# tree supplies code to test, never Compose, dotenv, or build configuration.
+hook_dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)"
+mkdir "$work/runner"
+cp "$hook_dir/../docker-compose.ci.yml" "$hook_dir/../Dockerfile.ci" "$work/runner/"
 for tree in $trees; do
   mkdir "$work/$tree"
   # Through a file, not a pipe: sh has no pipefail, and some tar
   # implementations (bsdtar, measured) accept the empty output of a failed
   # archive.
-  git -c tar.umask=0022 archive --format=tar -o "$work/$tree.tar" "$tree"
+  (
+    objects="$(git rev-parse --path-format=absolute --git-path objects)"
+    object_format="$(git rev-parse --show-object-format)"
+    alternates=${GIT_ALTERNATE_OBJECT_DIRECTORIES-}
+    unset $(git rev-parse --local-env-vars) GIT_ATTR_SOURCE
+    export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_ATTR_NOSYSTEM=1 GIT_NO_REPLACE_OBJECTS=1
+    git init -q --bare --template= --object-format="$object_format" "$work/archive.git"
+    # Highest-priority attributes disable exclusions and every checkout
+    # conversion, including host-side smudge filters. Keep the caller's cwd
+    # so relative alternate object paths keep resolving as they do for push.
+    mkdir -p "$work/archive.git/info"
+    printf '* -export-ignore -export-subst -text -eol -ident -filter -working-tree-encoding\n' >"$work/archive.git/info/attributes"
+    GIT_OBJECT_DIRECTORY="$objects" GIT_ALTERNATE_OBJECT_DIRECTORIES="$alternates" \
+      git --git-dir="$work/archive.git" \
+      -c core.attributesFile=/dev/null -c tar.umask=0022 \
+      archive --format=tar -o "$work/$tree.tar" "$tree"
+  )
   tar -xf "$work/$tree.tar" -C "$work/$tree"
   rm -f "$work/$tree.tar"
   printf 'pre-push: gating tree %s in %s\n' "$tree" "$work/$tree" >&2
-  (cd "$work/$tree" && docker compose -f docker-compose.ci.yml run --build --rm --name "$name" ci ./scripts/ci-local --mode full)
+  (cd "$work/runner" && GO_LLM_CI_SOURCE="$work/$tree" docker compose --env-file /dev/null -f docker-compose.ci.yml run --build --rm --name "$name" ci ./scripts/ci-local --mode full)
 done

@@ -39,7 +39,8 @@ if [ -z "$floor_minor" ] || [ "$compat_minor" != "$floor_minor" ]; then
   exit 1
 fi
 
-tmp="$(cd "$(mktemp -d)" && pwd -P)"
+tmp="$(mktemp -d)"
+tmp="$(cd "$tmp" && pwd -P)"
 trap 'rm -rf "$tmp"' EXIT
 
 module="$tmp/module"
@@ -96,14 +97,23 @@ STUB
 
 cat >"$tmp/bin/docker" <<'STUB'
 #!/usr/bin/env sh
-printf '%s|%s\n' "$PWD" "$*" >>"$CI_LOCAL_TEST_LOG"
+source_dir=${GO_LLM_CI_SOURCE:-$PWD}
+printf '%s|%s\n' "$source_dir" "$*" >>"$CI_LOCAL_TEST_LOG"
+if [ "$1" = compose ] && [ -n "${CI_LOCAL_DOCKER_TRUSTED_ROOT-}" ]; then
+  if [ "$PWD" = "$source_dir" ] || [ -e .env ] || [ -e .dockerignore ] \
+    || ! cmp docker-compose.ci.yml "$CI_LOCAL_DOCKER_TRUSTED_ROOT/docker-compose.ci.yml" \
+    || ! cmp Dockerfile.ci "$CI_LOCAL_DOCKER_TRUSTED_ROOT/Dockerfile.ci"; then
+    printf 'gate loaded untrusted Docker configuration\n' >&2
+    exit 91
+  fi
+fi
 # Copy the tree the gate would mount (the hook removes its export), and list
 # entries the container's uid 1000 could not read on a Linux host.
 if [ -n "${CI_LOCAL_DOCKER_SNAPSHOT-}" ]; then
   snap="$CI_LOCAL_DOCKER_SNAPSHOT/$(wc -l <"$CI_LOCAL_TEST_LOG" | tr -d ' ')"
-  find . \( -type f ! -perm -004 \) -o \( -type d ! -perm -005 \) >"$snap.unreadable"
+  (cd "$source_dir" && find . \( -type f ! -perm -004 \) -o \( -type d ! -perm -005 \)) >"$snap.unreadable"
   mkdir "$snap"
-  tar -cf - . | tar -xf - -C "$snap"
+  (cd "$source_dir" && tar -cf - .) | tar -xf - -C "$snap"
 fi
 if [ "$1" = rm ] && [ -n "${CI_LOCAL_DOCKER_RM_ERROR-}" ]; then
   printf '%s\n' "$CI_LOCAL_DOCKER_RM_ERROR" >&2
@@ -469,7 +479,7 @@ done
 zero=0000000000000000000000000000000000000000
 # The gate command, with the container named after the hook's pid so an
 # interrupt can remove it.
-gate_re='^compose -f docker-compose\.ci\.yml run --build --rm --name go-llm-prepush-[0-9][0-9]* ci \./scripts/ci-local --mode full$'
+gate_re='^compose --env-file /dev/null -f docker-compose\.ci\.yml run --build --rm --name go-llm-prepush-[0-9][0-9]* ci \./scripts/ci-local --mode full$'
 is_gate_cmd() { printf '%s\n' "$1" | grep -Eq "$gate_re"; }
 
 # run_hook NAME CHECKOUT DOCKER_STATUS runs the hook from CHECKOUT with
@@ -483,9 +493,11 @@ run_hook() {
   (
     cd "$2"
     umask 077
-    GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
+    GIT_CONFIG_GLOBAL="${hook_global_config:-/dev/null}" GIT_CONFIG_NOSYSTEM=1 \
       GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=tar.umask GIT_CONFIG_VALUE_0=0077 \
       PATH="$tmp/bin:$PATH" CI_LOCAL_TEST_LOG="$tmp/$1.log" CI_LOCAL_DOCKER_SNAPSHOT="$tmp/$1.snap" \
+      CI_LOCAL_DOCKER_TRUSTED_ROOT="${hook_trusted_root-}" \
+      CI_LOCAL_FILTER_MARKER="$tmp/filter-ran" \
       CI_LOCAL_DOCKER_STATUS="$3" "$repo_root/.githooks/pre-push" origin example.invalid <"$tmp/$1.in"
   ) >"$tmp/$1.out" 2>&1
   ci_status=$?
@@ -565,6 +577,17 @@ for docker_status in 0 35; do
     exit 1
   fi
 done
+
+# A failed temporary directory allocation must not gate or clean the checkout.
+# Stub removal too, so this regression remains safe against the broken hook.
+printf '#!/bin/sh\nexit 73\n' >"$tmp/bin/mktemp"
+printf '#!/bin/sh\nprintf "unexpected cleanup\\n" >>"$CI_LOCAL_TEST_LOG"\n' >"$tmp/bin/rm"
+chmod +x "$tmp/bin/mktemp" "$tmp/bin/rm"
+cp "$tmp/hook-update.in" "$tmp/hook-mktemp-failure.in"
+run_hook hook-mktemp-failure "$hook_repo" 0
+rm "$tmp/bin/mktemp" "$tmp/bin/rm"
+assert_status hook-mktemp-failure 73
+assert_gate_runs hook-mktemp-failure 0
 
 # A branch and its annotated tag name one tree: one gate run. Two refs at one
 # commit, mixed with a deletion: one gate run.
@@ -654,6 +677,117 @@ fixture_git -C "$hook_repo" replace -d "$c1" >/dev/null
 assert_status hook-replace 0
 assert_gate_runs hook-replace 1
 assert_gated hook-replace 1 "$c1"
+
+# Forwarding a foreign tree must not load its host-side Docker settings,
+# Dockerfile, dotenv file, or build-context ignore rules.
+fixture_git -C "$hook_wt" checkout -q -- tracked.go
+cat >"$hook_wt/docker-compose.ci.yml" <<'HOSTILE'
+services:
+  ci:
+    image: alpine
+    user: '0'
+    privileged: true
+    entrypoint: [sh, -c, 'exit 0']
+    volumes: ['/:/host']
+HOSTILE
+printf 'FROM scratch\nENTRYPOINT ["untrusted"]\n' >"$hook_wt/Dockerfile.ci"
+printf 'COMPOSE_FILE=hostile.yml\nDOCKER_HOST=tcp://example.invalid:2375\n' >"$hook_wt/.env"
+printf '*\n' >"$hook_wt/.dockerignore"
+fixture_git -C "$hook_wt" add docker-compose.ci.yml Dockerfile.ci .env .dockerignore
+fixture_git -C "$hook_wt" commit -qm 'foreign Docker configuration'
+foreign="$(fixture_git -C "$hook_wt" rev-parse HEAD)"
+printf 'refs/heads/foreign %s refs/heads/foreign %s\n' "$foreign" "$zero" >"$tmp/hook-foreign.in"
+hook_trusted_root=$repo_root
+run_hook hook-foreign "$hook_repo" 0
+unset hook_trusted_root
+assert_status hook-foreign 0
+assert_gate_runs hook-foreign 1
+assert_gated hook-foreign 1 "$foreign"
+
+# Symlink forms are also just source files; Docker must not follow them.
+for file in docker-compose.ci.yml Dockerfile.ci .env .dockerignore; do
+  mv "$hook_wt/$file" "$tmp/foreign-$file"
+  ln -s "$tmp/foreign-$file" "$hook_wt/$file"
+done
+fixture_git -C "$hook_wt" add docker-compose.ci.yml Dockerfile.ci .env .dockerignore
+fixture_git -C "$hook_wt" commit -qm 'foreign Docker symlinks'
+foreign_links="$(fixture_git -C "$hook_wt" rev-parse HEAD)"
+printf 'refs/heads/foreign %s refs/heads/foreign %s\n' "$foreign_links" "$zero" >"$tmp/hook-foreign-links.in"
+hook_trusted_root=$repo_root
+run_hook hook-foreign-links "$hook_repo" 0
+unset hook_trusted_root
+assert_status hook-foreign-links 0
+assert_gated hook-foreign-links 1 "$foreign_links"
+
+# Local and global packaging attributes cannot exclude committed failures.
+mkdir -p "$hook_repo/.git/info"
+printf 'tracked.go export-ignore\n' >"$hook_repo/.git/info/attributes"
+cp "$tmp/hook-update.in" "$tmp/hook-info-attributes.in"
+run_hook hook-info-attributes "$hook_repo" 0
+assert_status hook-info-attributes 0
+assert_gated hook-info-attributes 1 "$c1"
+rm "$hook_repo/.git/info/attributes"
+printf 'tracked.go export-ignore\n' >"$tmp/global-attributes"
+printf '[core]\n\tattributesFile = %s\n\tautocrlf = true\n' "$tmp/global-attributes" >"$tmp/gitconfig"
+hook_global_config=$tmp/gitconfig
+cp "$tmp/hook-update.in" "$tmp/hook-global-attributes.in"
+run_hook hook-global-attributes "$hook_repo" 0
+unset hook_global_config
+assert_status hook-global-attributes 0
+assert_gated hook-global-attributes 1 "$c1"
+
+# Relative alternate object paths retain the caller's Git resolution rules.
+fixture_git init -q --template= "$tmp/consumer"
+(
+  export GIT_ALTERNATE_OBJECT_DIRECTORIES=../hook-repo/.git/objects
+  cp "$tmp/hook-update.in" "$tmp/hook-alternate.in"
+  run_hook hook-alternate "$tmp/consumer" 0
+  unset GIT_ALTERNATE_OBJECT_DIRECTORIES
+  assert_status hook-alternate 0
+  assert_gated hook-alternate 1 "$c1"
+)
+
+printf 'tracked.go filter=hostile\n' >"$hook_repo/.git/info/attributes"
+fixture_git -C "$hook_repo" config filter.hostile.smudge 'printf invoked >"$CI_LOCAL_FILTER_MARKER"; cat'
+cp "$tmp/hook-update.in" "$tmp/hook-smudge.in"
+run_hook hook-smudge "$hook_repo" 0
+assert_status hook-smudge 0
+assert_gated hook-smudge 1 "$c1"
+test ! -e "$tmp/filter-ran"
+rm "$hook_repo/.git/info/attributes"
+
+# Committed attributes cannot omit nested files or transform raw blob bytes.
+mkdir "$hook_wt/nested"
+printf '$Id$\ncaf\303\251\n' >"$hook_wt/encoded.txt"
+printf '\000\001\377\n' >"$hook_wt/nested/binary space.bin"
+printf '#!/bin/sh\nexit 0\n' >"$hook_wt/run.sh"
+chmod +x "$hook_wt/run.sh"
+ln -s tracked.go "$hook_wt/link"
+fixture_git -C "$hook_wt" add encoded.txt nested run.sh link
+printf 'tracked.go export-ignore\nencoded.txt text eol=crlf ident working-tree-encoding=ISO-8859-1\n' >"$hook_wt/.gitattributes"
+printf '* export-ignore\n' >"$hook_wt/nested/.gitattributes"
+fixture_git -C "$hook_wt" add .gitattributes nested/.gitattributes
+fixture_git -C "$hook_wt" commit -qm 'packaging and checkout attributes'
+attributes="$(fixture_git -C "$hook_wt" rev-parse HEAD)"
+printf 'refs/heads/attrs %s refs/heads/attrs %s\n' "$attributes" "$zero" >"$tmp/hook-committed-attributes.in"
+run_hook hook-committed-attributes "$hook_wt" 0
+assert_status hook-committed-attributes 0
+assert_gated hook-committed-attributes 1 "$attributes"
+for file in encoded.txt 'nested/binary space.bin' run.sh; do
+  fixture_git -C "$hook_wt" show "$attributes:$file" | cmp - "$tmp/hook-committed-attributes.snap/1/$file"
+done
+test -x "$tmp/hook-committed-attributes.snap/1/run.sh"
+test "$(readlink "$tmp/hook-committed-attributes.snap/1/link")" = tracked.go
+
+# Git hooks can inherit a linked worktree's metadata, index and attr source.
+(
+  export GIT_DIR="$(fixture_git -C "$hook_wt" rev-parse --absolute-git-dir)"
+  export GIT_INDEX_FILE="$GIT_DIR/index" GIT_ATTR_SOURCE="$attributes"
+  cp "$tmp/hook-committed-attributes.in" "$tmp/hook-inherited-git.in"
+  run_hook hook-inherited-git "$hook_wt" 0
+  assert_status hook-inherited-git 0
+  assert_gated hook-inherited-git 1 "$attributes"
+)
 
 # Ctrl-C (or a closed terminal's SIGHUP) reaches the whole foreground job.
 # compose dies, but its container (no TTY here) would keep running against the
