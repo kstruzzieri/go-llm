@@ -194,3 +194,34 @@ func isFile(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && !info.IsDir()
 }
+
+// TestHardenedOpenersResolveDiskPath: the openers that promise private
+// database files must take the file they prepare and chmod from Resolve, and
+// confirm after the open that SQLite opened it (#648). A WithBusyTimeout DSN
+// paired with the raw path is the bug: the two name different files for file:
+// URIs, ".." after a symlink, and a symlinked final component. This is a
+// static check: each file must contain the calls, which RunHardenedPaths then
+// exercises.
+func TestHardenedOpenersResolveDiskPath(t *testing.T) {
+	root := moduleRoot(t)
+	for _, f := range []string{
+		"cmd/golem/feedback.go",
+		"cmd/golem/session.go",
+		"mcp/server.go",
+		"memory/open.go",
+		"transcript/store.go",
+	} {
+		src, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(f)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, call := range []string{"sqlitedsn.Resolve(", "sqlitedsn.CheckMainFile("} {
+			if !bytes.Contains(src, []byte(call)) {
+				t.Errorf("hardened opener %s does not call %s...)", f, call)
+			}
+		}
+		if bytes.Contains(src, []byte("sqlitedsn.WithBusyTimeout(")) {
+			t.Errorf("hardened opener %s calls sqlitedsn.WithBusyTimeout; use sqlitedsn.Resolve so prepare and chmod act on the file SQLite opens", f)
+		}
+	}
+}
