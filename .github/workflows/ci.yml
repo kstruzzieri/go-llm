@@ -217,11 +217,14 @@ jobs:
       # helpers and the store packages built on them natively: Windows path
       # resolution, SQLite's URI parser, the Windows VFS, and each opener's
       # own tests (concurrent first opens, fail-closed WAL, sidecars,
-      # read-only opens) (#619, #653).
+      # read-only opens) (#619, #653). -p 1 runs one package at a time: the
+      # lock-budget tests measure wall-clock waits, and running the packages
+      # in parallel (with the cross-process open tests' child processes) on
+      # this runner overran a 1s budget by 0.5s that it meets alone.
       - name: Test SQLite helpers and store packages on Windows
         env:
           CGO_ENABLED: "0"
-        run: go test -count=1 -v ./internal/sqlitedsn ./internal/sqlitetest ./transcript ./memory ./provider ./rag
+        run: go test -count=1 -p 1 -v ./internal/sqlitedsn ./internal/sqlitetest ./transcript ./memory ./provider ./rag
 
       # Windows loads path-based FileInfo identities lazily. Compile smoke
       # cannot detect a replaced root being mistaken for the original (#658).

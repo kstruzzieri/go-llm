@@ -403,8 +403,10 @@ func TestResolveToolCall_TimestampsSeparateOrderingFromExpiry(t *testing.T) {
 				t.Fatal("expected persisted row")
 			}
 			entry := prober.entry()
-			if !row.TestedAt.Before(entry) {
-				t.Fatalf("TestedAt = %v, want before probe entry %v for stale-write ordering", row.TestedAt, entry)
+			// Not after, rather than strictly before: Windows' monotonic clock
+			// ticks about once a millisecond, so both reads can be equal.
+			if row.TestedAt.After(entry) {
+				t.Fatalf("TestedAt = %v, want no later than probe entry %v for stale-write ordering", row.TestedAt, entry)
 			}
 			if earliest := tc.wantExpiry(entry); row.ExpiresAt.Before(earliest) {
 				t.Fatalf("ExpiresAt = %v, want at least %v (derived after the probe)", row.ExpiresAt, earliest)
