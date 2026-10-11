@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"net/url"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -13,6 +12,8 @@ import (
 	"time"
 
 	"modernc.org/sqlite"
+
+	"github.com/kstruzzieri/go-llm/internal/sqlitedsn"
 )
 
 func TestMigrations_StrictlyIncreasingVersions(t *testing.T) {
@@ -376,14 +377,18 @@ func TestRunMigrations_FastPathAndReadOnly(t *testing.T) {
 	if openErr != nil {
 		t.Fatalf("NewStore(current schema, competing writer): %v", openErr)
 	}
-	uri := url.URL{Scheme: "file", Path: path, RawQuery: "mode=ro"}
+	uri, err := sqlitedsn.FileURL(path) // builds a URI SQLite accepts on Windows too
+	if err != nil {
+		t.Fatal(err)
+	}
+	uri.RawQuery = "mode=ro"
 	ro := openMigrationDB(t, uri.String())
 	if _, err := NewStore(t.Context(), ro); err != nil {
 		t.Fatalf("NewStore(current mode=ro): %v", err)
 	}
 	assertMigrationVersions(t, ro, "1,2,3")
 	// A real pending step requires a write, even though the old schema is readable.
-	err := runMigrationsWith(t.Context(), ro, []migration{{version: 9, description: "pending", fn: func(tx *sql.Tx) error {
+	err = runMigrationsWith(t.Context(), ro, []migration{{version: 9, description: "pending", fn: func(tx *sql.Tx) error {
 		_, err := tx.Exec("CREATE TABLE forbidden (id INTEGER)")
 		return err
 	}}})
