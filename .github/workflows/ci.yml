@@ -77,7 +77,7 @@ jobs:
       # symbol declared only in a build-tagged file fails here. windows checks
       # the !unix files; freebsd is the only lane where unix holds but linux
       # and darwin do not. The builds link every binary .goreleaser.yaml ships
-      # for every release target but linux/amd64 (the test lane above), so a
+      # for every release target with cgo off (race tests use cgo), so a
       # dependency that drops a target (modernc sqlite ships per-target files)
       # fails here, not at release. darwin is built and vetted for both arches
       # cgo-off, as release builds it: the macOS Compile Smoke job builds only
@@ -95,6 +95,7 @@ jobs:
           GOOS=windows go vet ./...
           GOOS=windows GOARCH=arm64 go build -buildvcs=false -o /dev/null ./cmd/golem ./cmd/go-llm-mcp
           GOOS=freebsd go vet ./...
+          GOOS=linux GOARCH=amd64 go build -buildvcs=false -o /dev/null ./cmd/golem ./cmd/go-llm-mcp
           GOOS=linux GOARCH=arm64 go build -buildvcs=false -o /dev/null ./cmd/golem ./cmd/go-llm-mcp
           GOOS=darwin GOARCH=amd64 go build -buildvcs=false -o /dev/null ./cmd/golem ./cmd/go-llm-mcp
           GOOS=darwin GOARCH=amd64 go vet ./...
