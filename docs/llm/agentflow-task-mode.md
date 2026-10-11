@@ -239,7 +239,9 @@ and checks all of these bindings:
 - an open attempt has a non-empty id, is owned exactly by `golem`, has a live
   or no-deadline lease, and exposes one allowed automatic non-break-glass
   `continue` action. The independent owner check also applies under advisory
-  lease policy.
+  lease policy;
+- the root retains no timed-out command receipt (see
+  [Timed-out gates](#timed-out-gates)).
 
 The plan digest now uses AgentFlow's exact Python JSON encoding. Workflow
 handoffs saved by earlier Golem versions recorded a Go-canonicalized digest, so
@@ -280,7 +282,7 @@ The complete disposition table is:
 | `state_invalid` | 3 | Fail closed with diagnostics. |
 | `step_unclaimed` | 2 | Enter the existing serial step loop; claim only immediately before model work. |
 | `file_receipts_missing` | 3 | Fail closed; edits cannot be reconstructed safely. |
-| `validation_missing` | 2 | Run only typed missing command gates, then finish the owned attempt. |
+| `validation_missing` | 2 | Run only typed missing command gates, then finish the owned attempt; a gate error blocks it instead. |
 | `step_unverified` | 2 | Call the fixed `FinishStep` adapter for the owned attempt. |
 | `step_uncompleted` | 2 | Call the fixed `CompleteStep` adapter without re-verifying. |
 | `drift_failing` | 3 | Fail closed for operator inspection. |
@@ -300,8 +302,8 @@ command receipt, and resume refuses it before any change (see
 A failed run or gate closes its attempt (see
 [Failed step runs](#failed-step-runs)), so `validation_missing` and
 `step_unverified` now come mostly from a block that itself failed, a process
-that died mid-attempt, a `FinishStep` failure, an interrupted settlement, or a
-tree written by an older Golem.
+that died mid-attempt, a resume that refused before its gates, a `FinishStep`
+failure, an interrupted settlement, or a tree written by an older Golem.
 
 Unknown future states fail closed. Resume never initializes, locks, records
 evidence or reviews, renews/reclaims leases, re-runs a model for an open
@@ -318,8 +320,8 @@ validation gates, including a gate that simply fails. A run stops without an
 error when it used up `-max-steps`, hit three consecutive tool errors (default
 guard denials count), repeated the same tool call with the same result three
 times, or exhausted a run token budget. In every case Golem runs no further
-gate and no `finish-step`, records the attempt as `blocked` in AgentFlow's
-ledger with a fixed reason, and exits 1:
+gate and no `finish-step`, attempts to record the attempt as `blocked` in
+AgentFlow's ledger with a fixed reason, and exits 1:
 
 | Cause | Ledger reason |
 |---|---|
@@ -335,7 +337,7 @@ reported as the unreceipted edit, not as a cancellation. The reasons are fixed
 strings. The detail (the provider error, the gate label, its exit status)
 stays in the printed error, not in the ledger: a gate label can be a full argv,
 and a nonzero exit from the `run` CLI does not prove the gate ran. The display
-escapes `"` as `\"`:
+escapes quotes, backslashes and control characters Go-style (`"` as `\"`):
 
 ```text
 agentflow task failed: step P1 attempt A1: agent run stopped: tool_error_cap_reached; attempt recorded as blocked
@@ -348,14 +350,33 @@ and the `-p` result's `stopReason`. On `-agentflow-resume` the same error
 follows `agentflow resume failed:`. For a parallel worker it appears inside the
 cohort failure, after `run parallel cohort:` and `worker <id>:`.
 
-Ctrl-C during a step cancels the run, and Golem then attempts to close the
-attempt with the reason `golem: agent run cancelled`. The `block-step` call
-runs on its own 30-second deadline, independent of that cancellation (and of a
-failed parallel sibling or the journal's cancel), and the runner gives the
-AgentFlow subprocess up to 5 more seconds to exit after it. A second Ctrl-C
-does not cancel that call. This bounds the block call only: it does not
-guarantee the block is written, and it does not bound the recovery report that
-follows or the total time before Golem exits.
+Ctrl-C during the model run cancels it, and Golem then attempts to close the
+attempt with the reason `golem: agent run cancelled`. Ctrl-C during one of the
+step's gates ends that `run` call, and Golem attempts to close the attempt with
+`golem: gate execution failed`. The `block-step` call runs on its own
+30-second deadline, independent of that cancellation (and of a failed parallel
+sibling or the journal's cancel), and the runner gives the AgentFlow
+subprocess up to 5 more seconds to exit after it. On Unix a second Ctrl-C does
+not reach that call, because AgentFlow runs in its own process group. On
+Windows the console also delivers Ctrl-C to AgentFlow, which can interrupt the
+block. This bounds the block call only: it does not guarantee the block is
+written, and it does not bound the recovery report that follows or the total
+time before Golem exits.
+
+Before blocking, Golem reads the attempt's events in `.agent/step-runs.jsonl`.
+When the ledger already shows the attempt closed, for example because an
+operator ran `agentflow fail-step` while Golem was running, Golem does not
+block it again, because AgentFlow 1.0 treats any event after a terminal one as
+invalid state. The error then ends
+`...; attempt already closed (<event>); not blocked`. When the step-run ledger
+cannot be read, Golem does not block either, the attempt stays open, and the
+error ends
+`...; check attempt state before blocking: <error>; attempt not blocked`. The
+check narrows, but cannot close, the window against a concurrent writer.
+
+A gate AgentFlow refuses by its risk policy (`risk_policy: block`) is refused
+the same way on every attempt, so resuming runs the model again and fails
+again. Change the plan or the policy first.
 
 A blocked attempt is closed, so `-agentflow-status` reports `step_unclaimed`
 (exit `2`, unless the root retains a timed-out receipt or the lease policy is
@@ -379,10 +400,11 @@ the model. Block the open attempt first, then restore, then resume:
 agentflow block-step <step> --root <workspace> --attempt <open attempt> --reason "<text>" --agent golem
 ```
 
-An attempt can still stay open: when recording the block itself fails, when
-the process dies mid-attempt, when resume's safety check before the gates
-refuses (as it does for inherited edits without new receipts), or when
-`FinishStep` fails. A failed block reports both errors
+An attempt can still stay open: when recording the block itself fails or the
+step-run ledger cannot be read to check it, when the process dies mid-attempt,
+when resume's safety check before the gates refuses (as it does for inherited
+edits without new receipts), or when `FinishStep` fails. A failed block
+reports both errors
 (`...; record blocked attempt: <agentflow error>`). `-agentflow-status` reports
 AgentFlow's authoritative state, and resume may settle an eligible open attempt
 on its gates without running the model again; that does not make every open
@@ -398,19 +420,28 @@ the step as not completed, and non-strict verification shows them as warnings.
 Addressing them needs a successful amendment from a new review-backed task. A
 failed parallel worker blocks only its own worktree's ledger: the cohort
 fails, the worktree is preserved and its path printed, and the canonical ledger
-is untouched. A worker's timeout report names that preserved worktree root.
+is untouched. A worker's timeout report names that preserved worktree root and
+concerns only that scratch worktree: a failed cohort returns before promotion
+and aggregation, so the canonical root holds no timeout receipt,
+`-agentflow-status` and `-agentflow-resume` there do not report one, and the
+report's archive remedy does not apply to the canonical root. Only the first
+worker error is reported, so a sibling's earlier failure can hide the report.
 
 Planning mode names a stop reason too:
 `golem: the planner did not submit a plan: agent run stopped: step_cap_reached`.
 
 #### Timed-out gates
 
-A gate that outlives its `timeout_seconds` fails with exit 124, and AgentFlow
-keeps its command receipt with `decision: "timeout"` (or `timed_out: true`).
-AgentFlow 1.0's run verification rejects every retained timeout receipt, even
-after a later attempt's gate passes (kstruzzieri/agentflow#60), so that root's
-ledger can no longer reach a verified proof. Golem reads the root's command
-receipts and reports the first timed-out one by its `id` (or its ledger line):
+A gate times out after its command timeout: the gate's `timeout_seconds` in
+the plan, else the execution contract's
+`command_policy.command_timeout_seconds` (600 by default). AgentFlow's `run`
+then exits 124 and keeps the command receipt with `decision: "timeout"` (or
+`timed_out: true`). AgentFlow 1.0's run verification rejects every retained
+timeout receipt, even after a later attempt's gate passes
+(kstruzzieri/agentflow#60), so that root's ledger can no longer reach a
+verified proof. Golem reads the root's command receipts and reports the first
+timed-out one by its `id` when that is plain printable text of at most 128
+characters, otherwise by its ledger line (`.agent/command-receipts.jsonl:<n>`):
 
 - After a gate error, the run error gains the report:
 
@@ -424,17 +455,26 @@ receipts and reports the first timed-out one by its `id` (or its ledger line):
   line. Refusals that status checks first (an unsafe or malformed projection,
   a foreign owner, a lease) keep their own reasons.
 - `-agentflow-resume` refuses with the report before any change and exits `1`
-  (`agentflow resume failed: <report>`).
+  (`agentflow resume failed: <report>`). It reports the timeout only after its
+  own earlier refusals (a fail-closed state, the plan and contract bindings,
+  the owner and lease checks), which keep their messages.
 - A same-plan `-review-manifest` round, which skips the history check in
-  [Re-running a plan](#re-running-a-plan), refuses with
-  `refusing a -review-manifest round: <report>` before any AgentFlow call.
+  [Re-running a plan](#re-running-a-plan), prints
+  `golem: refusing a -review-manifest round: <report>` and exits `1` before any
+  AgentFlow call.
+
+If the command-receipt ledger cannot be read, each of these reports the read
+error instead: status as `resume: blocked: <error>`, resume and the review
+round in their refusal, and a gate error as
+`...; read command receipts for the timeout check: <error>`.
 
 The remedy is a new run. Archive the complete `.agent/` directory outside the
-working tree, then initialize and validate a new run. Do not delete individual
-receipts, and do not use `agentflow init-execution --force`: it overwrites the
-execution contract and ledgers. Golem never deletes receipts and never
-suggests that command. As with any move of `.agent/`, the source changes the
-earlier run made stay in the workspace.
+working tree, then start a fresh run (`golem -plan ...`, which initializes
+it). Do not delete individual receipts, and do not use
+`agentflow init-execution --force`: it overwrites the execution contract and
+ledgers. Golem never deletes receipts and never suggests that command. As
+with any move of `.agent/`, the source changes the earlier run made stay in the
+workspace.
 
 ## Upgrading from AgentFlow 0.x
 
@@ -504,7 +544,10 @@ For an external plan, the task driver order is:
    state and step and sends you to `-agentflow-status`, which runs resume's
    state and projection checks (not its plan and contract bindings, which need
    the supplied `-plan`) and reports whether `-agentflow-resume` can recover.
-   An attempt whose gate already failed is one resume cannot settle yet (#652).
+   An attempt left open after its gate failed (the block itself failed, the
+   process died, or an older Golem wrote it) is one resume cannot settle yet
+   (#652); Golem otherwise blocks such an attempt (see
+   [Failed step runs](#failed-step-runs)).
 6. Let `finish-run` build and verify proof under the materialized policy.
 
 For a planning-mode handoff, Golem first validates the saved recommendation,
@@ -533,7 +576,9 @@ review ingestion: `-plan <plan> -review-manifest <manifest>` still runs over a
 workspace with history when `<plan>` is the same plan as the locked
 `.agent/plan.lock.json`, compared without its lock fields, because
 `-agentflow-resume` does not take review manifests and relocking an identical
-plan keeps the ledgers and the execution contract consistent. The condition is
+plan keeps the ledgers and the execution contract consistent. That round still
+refuses a root that retains a timed-out command receipt (see
+[Timed-out gates](#timed-out-gates)). The condition is
 "same plan plus a manifest", not "the run finished": over an unfinished run the
 same command first runs the remaining steps, as `-review-manifest` documents.
 Repeat the original `-task-brief`, `-workflow-profile` and `-workflow-reason`,
