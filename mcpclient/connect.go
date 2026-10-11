@@ -309,6 +309,23 @@ func preflightConnection(current pinEntry, rev pinRevision, candidate *connectio
 	return checkConnection(current, candidate)
 }
 
+// ownedTransport records the connection its transport opened, so discover can
+// close it when Client.Connect returns no session: go-sdk v1.6.1 returns the
+// unsupported-protocol-version error without closing the session it built
+// (#406). The SDK receives the original Connection, keeping the optional
+// interfaces it type-asserts. Both SDK connection types close once: closing
+// one the SDK already closed returns that close's error and waits no longer.
+type ownedTransport struct {
+	gomcp.Transport
+	conn gomcp.Connection
+}
+
+func (t *ownedTransport) Connect(ctx context.Context) (gomcp.Connection, error) {
+	conn, err := t.Transport.Connect(ctx)
+	t.conn = conn
+	return conn, err
+}
+
 // discover owns the candidate session until a complete catalog is returned.
 // The caller closes successful candidates or transfers ownership to Manager.
 func discover(ctx context.Context, impl Implementation, p preparedServer) (*gomcp.ClientSession, []*gomcp.Tool, toolCatalog, []error, error) {
@@ -321,9 +338,15 @@ func discover(ctx context.Context, impl Implementation, p preparedServer) (*gomc
 	}
 	// Empty capabilities disables roots, sampling and elicitation.
 	client := gomcp.NewClient(&gomcp.Implementation{Name: impl.Name, Version: impl.Version}, &gomcp.ClientOptions{Capabilities: &gomcp.ClientCapabilities{}})
-	session, err := client.Connect(ctx, p.transport, nil)
+	owned := &ownedTransport{Transport: p.transport}
+	session, err := client.Connect(ctx, owned, nil)
 	if err != nil {
-		return nil, nil, toolCatalog{}, nil, fail("unavailable", err)
+		failure := fail("unavailable", err)
+		if owned.conn != nil {
+			// The close error stays in the chain; it must not rename the reason.
+			failure.cause = errors.Join(err, owned.conn.Close())
+		}
+		return nil, nil, toolCatalog{}, nil, failure
 	}
 	remote, failures := listAllTools(ctx, session, p.alias)
 	var catalog toolCatalog
