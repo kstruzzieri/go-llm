@@ -150,6 +150,22 @@ func RunHardenedPaths(t *testing.T, opts HardenedPathsOptions) {
 		}
 		assertNoFiles(t, base, input)
 	})
+	for _, mode := range []string{"ro", "rw"} {
+		t.Run("missing file mode="+mode, func(t *testing.T) {
+			base := hardenedTree(t)
+			t.Chdir(filepath.Join(base, "cwd"))
+			parent := filepath.Join(base, "missing-parent")
+			input := opts.URI(slash(filepath.Join(parent, "t.db"))) + "?mode=" + mode
+			if store, err := opts.Open(t.Context(), input); err == nil {
+				_ = store.Close()
+				t.Errorf("open %q succeeded, want a missing-file error", input)
+			}
+			if _, err := os.Stat(parent); !errors.Is(err, fs.ErrNotExist) {
+				t.Errorf("open %q left parent directory (stat error %v), want it absent", input, err)
+			}
+			assertNoFiles(t, base, input)
+		})
+	}
 }
 
 // seedLooseWAL leaves a loose (0644) WAL database at path with non-empty -wal

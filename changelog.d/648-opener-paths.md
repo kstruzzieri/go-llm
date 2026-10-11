@@ -40,6 +40,10 @@ Related fixes:
   passed the check and wrote inside the workspace.
 - Golem's feedback store with a `file:` path failed after creating the real
   database at 0644; its writer and reader now use the same file.
+- Golem's feedback workspace check preserves the URI options passed to the
+  opener, including read-only mode, locking and busy timeout settings.
+- Hardened openers require an existing database for URI `mode=rw` or
+  `mode=ro`, before preparing any file or directory.
 
 Newly rejected before anything is created: `file:` URIs with a `vfs`
 parameter, a repeated `mode` parameter, a NUL byte, a host other than

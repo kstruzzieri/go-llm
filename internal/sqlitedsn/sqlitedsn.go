@@ -19,6 +19,9 @@ import (
 	sqlite3 "modernc.org/sqlite/lib"
 )
 
+// IsFileURI reports whether path uses SQLite's case-sensitive file: URI prefix.
+func IsFileURI(path string) bool { return strings.HasPrefix(path, "file:") }
+
 // FileURL returns the file: URL that opens path. A plain path is made
 // absolute; a "file:" URI is parsed and kept, query included. Callers add
 // their own query parameters (mode=ro, immutable=1, _pragma=..., _txlock=...).

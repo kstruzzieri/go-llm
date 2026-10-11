@@ -13,6 +13,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -246,6 +247,10 @@ func checkLegacyKeyDir(path, keyDir string) error {
 	legacy := path + ".keys"
 	if _, err := os.Lstat(keyDir); err == nil || !errors.Is(err, fs.ErrNotExist) {
 		return err // keys already beside the database (or an error to report)
+	}
+	// A raw file: URI was never a valid Windows key-directory path.
+	if runtime.GOOS == "windows" && sqlitedsn.IsFileURI(path) {
+		return nil
 	}
 	legacyInfo, err := os.Lstat(legacy)
 	if errors.Is(err, fs.ErrNotExist) {

@@ -72,6 +72,45 @@ func TestOpenFeedbackServiceRejectsNonWAL(t *testing.T) {
 	assertEmptyDir(t, cwd)
 }
 
+func TestOpenConfiguredFeedbackPreservesURIOptions(t *testing.T) {
+	for _, tc := range []struct {
+		name, query, wantError string
+	}{
+		{"no locking", "nolock=1", `journal_mode is "delete", want wal`},
+		{"read only", "mode=ro", "readonly"},
+		{"busy timeout", "_pragma=busy_timeout(37)", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.ToSlash(filepath.Join(t.TempDir(), "feedback.db"))
+			if err := os.WriteFile(path, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			input := golemFileURI(path) + "?" + tc.query
+			svc, warning := openConfiguredFeedback(t.Context(), true, t.TempDir(), input,
+				func(string) string { return "" }, func(string) {}, openFeedbackService)
+			if svc != nil {
+				t.Cleanup(func() { _, _ = svc.close() })
+			}
+			if tc.wantError != "" {
+				if svc != nil || !strings.Contains(warning, tc.wantError) {
+					t.Fatalf("openConfiguredFeedback(%q): service=%v, warning=%q; want disabled with %q", input, svc != nil, warning, tc.wantError)
+				}
+				return
+			}
+			if svc == nil || warning != "" {
+				t.Fatalf("openConfiguredFeedback(%q): service=%v, warning=%q; want enabled", input, svc != nil, warning)
+			}
+			var timeout int
+			if err := svc.writer.QueryRowContext(t.Context(), "PRAGMA busy_timeout").Scan(&timeout); err != nil {
+				t.Fatal(err)
+			}
+			if timeout != 37 {
+				t.Errorf("configured feedback busy_timeout = %d, want URI option 37", timeout)
+			}
+		})
+	}
+}
+
 func assertEmptyDir(t *testing.T, dir string) {
 	t.Helper()
 	if entries, err := os.ReadDir(dir); err != nil || len(entries) != 0 {

@@ -3,10 +3,12 @@ package sqlitedsn
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -233,9 +235,10 @@ func TestCheckMainFile(t *testing.T) {
 	if err := CheckMainFile(context.Background(), db, disk); err != nil {
 		t.Fatalf("CheckMainFile(predicted): %v", err)
 	}
-	other := filepath.Join(base, "b.db")
-	if err := CheckMainFile(context.Background(), db, other); err == nil || !strings.Contains(err.Error(), other) {
-		t.Fatalf("CheckMainFile(other) = %v, want an error naming %q", err, other)
+	for _, other := range []string{filepath.Join(base, "b.db"), `C:\data\b.db`} {
+		if err := CheckMainFile(context.Background(), db, other); err == nil || !strings.Contains(err.Error(), strconv.Quote(other)) {
+			t.Fatalf("CheckMainFile(%q) = %v, want an error naming %q", other, err, other)
+		}
 	}
 }
 
@@ -253,5 +256,35 @@ func TestResolveWindowsDriveRelative(t *testing.T) {
 	}
 	if got := sqliteMainFile(t, dsn); got != disk {
 		t.Fatalf("Resolve(%q) = disk %q, SQLite opened %q", input, disk, got)
+	}
+}
+
+func TestResolveRequiresExistingFileForReadModes(t *testing.T) {
+	for _, mode := range []string{"ro", "rw"} {
+		for _, name := range []string{"missing.db", "missing-parent/missing.db"} {
+			t.Run(mode+"/"+name, func(t *testing.T) {
+				base := t.TempDir()
+				path := filepath.Join(base, name)
+				input := "file:" + uriPath(path) + "?mode=" + mode
+				if _, _, err := Resolve(input, time.Second); !errors.Is(err, os.ErrNotExist) {
+					t.Errorf("Resolve(%q) = %v, want a missing-file error", input, err)
+				}
+				if entries, err := os.ReadDir(base); err != nil || len(entries) != 0 {
+					t.Errorf("Resolve(%q) left %v, %v; want no files or directories", input, entries, err)
+				}
+			})
+		}
+		t.Run(mode+"/existing", func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "existing.db")
+			want := sqliteMainFile(t, path)
+			input := "file:" + uriPath(path) + "?mode=" + mode
+			dsn, disk, err := Resolve(input, time.Second)
+			if err != nil {
+				t.Fatalf("Resolve(%q) = %v, want existing database accepted", input, err)
+			}
+			if got := sqliteMainFile(t, dsn); got != disk || got != want {
+				t.Errorf("Resolve(%q) = disk %q, SQLite opened %q; want %q", input, disk, got, want)
+			}
+		})
 	}
 }

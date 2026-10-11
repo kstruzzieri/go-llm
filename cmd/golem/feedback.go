@@ -185,11 +185,12 @@ func openConfiguredFeedback(ctx context.Context, enabled bool, root, explicitDB 
 	} else {
 		// Guard the file SQLite opens, not the raw input: a file: URI or a
 		// ".." after a symlink can name a file inside the workspace while
-		// the raw string looks outside it (#648). The opener gets the same
-		// resolved path, so guard and open agree.
-		dbPath, err = feedbackDiskPath(dbPath)
+		// the raw string looks outside it (#648). Keep the URI options for
+		// the opener while checking its resolved file.
+		var disk string
+		disk, err = feedbackDiskPath(dbPath)
 		if err == nil {
-			err = validatePathOutsideWorkspace(dbPath, root)
+			err = validatePathOutsideWorkspace(disk, root)
 		}
 	}
 	if err != nil {

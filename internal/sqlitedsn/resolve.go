@@ -41,8 +41,9 @@ const maxSymlinks = 200
 // in the decoded filename or query, more than one mode parameter, a vfs
 // parameter, a query Go's parser would drop pairs from (such as one with ";"),
 // a user or a host other than localhost, a fragment, and everything FileURL
-// rejects. The file a
-// symlink names can still change between Resolve and the open; CheckMainFile
+// rejects. A mode=ro or mode=rw URI requires an existing file, so preparing
+// the resolved path cannot silently create a database the URI forbids.
+// The file can still change between Resolve and the open; CheckMainFile
 // detects SQLite and Resolve disagreeing, not a concurrent swap.
 func Resolve(input string, busy time.Duration) (dsn, diskPath string, err error) {
 	if input == "" || input == ":memory:" {
@@ -72,6 +73,11 @@ func Resolve(input string, busy time.Duration) (dsn, diskPath string, err error)
 	}
 	if err != nil {
 		return "", "", fmt.Errorf("sqlitedsn: resolve %q: %w", input, err)
+	}
+	if mode := u.Query().Get("mode"); mode == "ro" || mode == "rw" {
+		if _, err := os.Stat(diskPath); err != nil {
+			return "", "", fmt.Errorf("sqlitedsn: URI %q requires an existing database for mode=%s: %w", input, mode, err)
+		}
 	}
 	return withBusyTimeout(u, busy), diskPath, nil
 }
