@@ -140,7 +140,7 @@ func newAssignedParallelWorker(plan *agentflow.Plan, sess *replSession, approveE
 		if err != nil {
 			return err
 		}
-		d := &driver{af: client, plan: plan, runStep: runStep}
+		d := &driver{af: client, plan: plan, runStep: runStep, root: worker.root}
 		return d.runOneStep(runCtx, worker.step.ID)
 	}
 }
