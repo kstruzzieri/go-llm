@@ -13,10 +13,50 @@ if ! grep -Fxq '        run: ./scripts/ci-local --mode security' "$repo_root/.gi
   printf 'GitHub CI is missing the server-side security-contract gate\n' >&2
   exit 1
 fi
-# The full-mode expectations below pin ci-local's copy of these vets.
-for platform in windows freebsd; do
+# The full-mode expectations below pin ci-local's copy of these builds and vets.
+for platform in windows freebsd "darwin GOARCH=amd64" "darwin GOARCH=arm64"; do
   if ! grep -Fxq "          GOOS=$platform go vet ./..." "$repo_root/.github/workflows/ci.yml"; then
     printf 'GitHub CI is missing the %s cross-platform vet\n' "$platform" >&2
+    exit 1
+  fi
+done
+# The smoke builds link every binary GoReleaser ships, in .goreleaser.yaml's
+# order, so adding a release binary fails here until the smoke builds it too.
+release_mains="$(sed -n 's/^[[:space:]]*main:[[:space:]]*//p' "$repo_root/.goreleaser.yaml" | tr -d '\r' | tr '\n' ' ')"
+release_mains="${release_mains% }"
+if [ -z "$release_mains" ]; then
+  printf 'no "main: ./cmd/..." builds found in .goreleaser.yaml\n' >&2
+  exit 1
+fi
+# A changed release matrix fails here until the smoke builds follow it.
+check_release_matrix() {
+  # shortcut: pins the current YAML block layout; update this guard if it changes.
+  awk '
+    function finish_build() {
+      if (build && (goos != 1 || goarch != 1)) bad = 1
+    }
+    /^builds:$/ { builds = 1; next }
+    builds && /^[^[:space:]#]/ { finish_build(); builds = build = 0 }
+    !builds { next }
+    /^  - / { finish_build(); build = 1; count++; goos = goarch = 0 }
+    /^[[:space:]]*goos:/ {
+      goos++
+      if ($0 != "    goos: [linux, darwin, windows]") bad = 1
+    }
+    /^[[:space:]]*goarch:/ {
+      goarch++
+      if ($0 != "    goarch: [amd64, arm64]") bad = 1
+    }
+    END { finish_build(); exit (bad || !count) }
+  ' "$1"
+}
+if ! check_release_matrix "$repo_root/.goreleaser.yaml"; then
+  printf '.goreleaser.yaml release matrix changed; update the compile smoke builds\n' >&2
+  exit 1
+fi
+for platform in windows "windows GOARCH=arm64" "linux GOARCH=amd64" "linux GOARCH=arm64" "darwin GOARCH=amd64" "darwin GOARCH=arm64"; do
+  if ! grep -Fxq "          GOOS=$platform go build -buildvcs=false -o /dev/null $release_mains" "$repo_root/.github/workflows/ci.yml"; then
+    printf 'GitHub CI is missing the %s release-binary build\n' "$platform" >&2
     exit 1
   fi
 done
@@ -42,6 +82,22 @@ fi
 tmp="$(mktemp -d)"
 tmp="$(cd "$tmp" && pwd -P)"
 trap 'rm -rf "$tmp"' EXIT
+
+# Omitting either field in either build must not silently select GoReleaser's
+# defaults. Check each build separately, including removal of both fields.
+for build in golem go-llm-mcp; do
+  for field in goos goarch 'goos|goarch'; do
+    awk -v build="$build" -v field="$field" '
+      /^  - id:/ { selected = ($3 == build) }
+      selected && $0 ~ "^    (" field "):" { next }
+      { print }
+    ' "$repo_root/.goreleaser.yaml" >"$tmp/release-matrix.yaml"
+    if check_release_matrix "$tmp/release-matrix.yaml"; then
+      printf 'release matrix accepted missing %s in %s\n' "$field" "$build" >&2
+      exit 1
+    fi
+  done
+done
 
 module="$tmp/module"
 mkdir -p "$module/scripts" "$tmp/bin" "$tmp/outside"
@@ -203,8 +259,16 @@ EOF
   if [ "$2" = full ]; then
     cat >>"$tmp/$1" <<EOF
 $module|test -run ^$ ./...
+$module|GOOS=windows GOARCH=amd64 CGO_ENABLED=0 build -buildvcs=false -o /dev/null $release_mains
 $module|GOOS=windows GOARCH=amd64 CGO_ENABLED=0 vet ./...
+$module|GOOS=windows GOARCH=arm64 CGO_ENABLED=0 build -buildvcs=false -o /dev/null $release_mains
 $module|GOOS=freebsd GOARCH=amd64 CGO_ENABLED=0 vet ./...
+$module|GOOS=linux GOARCH=amd64 CGO_ENABLED=0 build -buildvcs=false -o /dev/null $release_mains
+$module|GOOS=linux GOARCH=arm64 CGO_ENABLED=0 build -buildvcs=false -o /dev/null $release_mains
+$module|GOOS=darwin GOARCH=amd64 CGO_ENABLED=0 build -buildvcs=false -o /dev/null $release_mains
+$module|GOOS=darwin GOARCH=amd64 CGO_ENABLED=0 vet ./...
+$module|GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 build -buildvcs=false -o /dev/null $release_mains
+$module|GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 vet ./...
 EOF
   fi
 }
