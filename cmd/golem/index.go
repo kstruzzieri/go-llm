@@ -13,6 +13,7 @@ import (
 	"github.com/kstruzzieri/go-llm/config"
 	"github.com/kstruzzieri/go-llm/internal/providerbootstrap"
 	"github.com/kstruzzieri/go-llm/internal/secretscan"
+	"github.com/kstruzzieri/go-llm/internal/sqlitedsn"
 	"github.com/kstruzzieri/go-llm/provider"
 	"github.com/kstruzzieri/go-llm/rag"
 )
@@ -167,7 +168,16 @@ func fileExists(p string) bool {
 }
 
 func chmodIndexDBFiles(dbPath string) error {
-	for _, p := range []string{dbPath, dbPath + "-wal", dbPath + "-shm"} {
+	// SQLite opens, and names the sidecars after, the file a symlinked index
+	// path points to; secure those (#648).
+	_, disk, err := sqlitedsn.Resolve(dbPath, 0)
+	if err != nil {
+		return fmt.Errorf("golem: resolve index db %q: %w", dbPath, err)
+	}
+	if disk == "" {
+		return nil
+	}
+	for _, p := range []string{disk, disk + "-wal", disk + "-shm"} {
 		if err := os.Chmod(p, 0o600); err != nil {
 			if os.IsNotExist(err) {
 				continue
