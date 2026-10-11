@@ -1,0 +1,3 @@
+### Fixed — MCP servers with an unsupported protocol version no longer leak (#406)
+
+When an MCP server answered `initialize` with a protocol version the client does not support, `mcpclient.Connect` reported it unavailable but left its stdio subprocess running (or, for HTTP, its session open), because the MCP SDK returns that error without closing the connection. mcpclient now closes the connection itself whenever the SDK's `Connect` fails. Tests now pin the related lifecycle guarantees: a cancelled or partial startup releases the server, a server that exits during startup is reaped, a session outlives its setup context, cancelling one tool call leaves the server running, and closing a manager twice is safe.
