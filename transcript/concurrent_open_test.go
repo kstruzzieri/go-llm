@@ -91,17 +91,14 @@ func TestChmodTranscriptDBFilesRejectsSidecarDirectory(t *testing.T) {
 	}
 }
 
-// A connection that cannot use WAL must fail the open, not run the store with
-// a rollback journal: nolock=1 turns locking off, and SQLite then reports
-// journal mode "delete". The working directory is a temp dir because the
-// opener prepares the raw path string, which for a file: URI is a relative
-// path (#648).
+// TestOpenRejectsNonWAL: a database that cannot run in WAL mode fails the open
+// instead of continuing on a rollback journal: nolock=1 turns locking off, and
+// SQLite then reports journal mode "delete". The working directory is empty so
+// a decoy named after the raw URI would show (#648).
 func TestOpenRejectsNonWAL(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("#648: the opener prepares the raw file: string, which Windows rejects as a file name")
-	}
 	path := filepath.ToSlash(filepath.Join(t.TempDir(), "x.db"))
-	t.Chdir(t.TempDir())
+	cwd := t.TempDir()
+	t.Chdir(cwd)
 	s, err := Open(t.Context(), "file:"+path+"?nolock=1")
 	if err == nil {
 		_ = s.Close()
@@ -110,4 +107,24 @@ func TestOpenRejectsNonWAL(t *testing.T) {
 	if !strings.Contains(err.Error(), `journal_mode is "delete", want wal`) {
 		t.Fatalf("err = %v, want the WAL-mode error", err)
 	}
+	if entries, err := os.ReadDir(cwd); err != nil || len(entries) != 0 {
+		t.Fatalf("working directory after the open: %v, %v; want it empty", entries, err)
+	}
+}
+
+// TestOpenHardensTheFileSQLiteOpens: the transcript holds unredacted prompts,
+// so the 0600 promise must cover the file SQLite opens for every input form,
+// not the raw string (#648).
+func TestOpenHardensTheFileSQLiteOpens(t *testing.T) {
+	sqlitetest.RunHardenedPaths(t, sqlitetest.HardenedPathsOptions{
+		URI:      func(name string) string { return "file:" + name },
+		MemoryOK: true,
+		Open: func(ctx context.Context, input string) (io.Closer, error) {
+			s, err := Open(ctx, input)
+			if err != nil {
+				return nil, err
+			}
+			return s, nil
+		},
+	})
 }

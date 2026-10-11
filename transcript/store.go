@@ -49,14 +49,15 @@ func Open(ctx context.Context, path string) (*Store, error) {
 	}
 	// The DSN gives every connection a 5s busy_timeout, including
 	// replacements database/sql opens after a context-cancelled statement.
-	// It is built before the file is prepared, so a path it rejects is never
-	// created.
-	dsn, err := sqlitedsn.WithBusyTimeout(path, 5*time.Second)
+	// disk is the file SQLite opens for it ("" for none); every prepare and
+	// chmod below uses it, never the raw path (#648). Resolve runs before
+	// anything is created, so an input it rejects leaves nothing behind.
+	dsn, disk, err := sqlitedsn.Resolve(path, 5*time.Second)
 	if err != nil {
 		return nil, fmt.Errorf("transcript: open sqlite %q: %w", path, err)
 	}
-	if path != ":memory:" {
-		if err := prepareTranscriptDBFile(path); err != nil {
+	if disk != "" {
+		if err := prepareTranscriptDBFile(disk); err != nil {
 			return nil, err
 		}
 	}
@@ -73,7 +74,13 @@ func Open(ctx context.Context, path string) (*Store, error) {
 			_ = db.Close()
 			return nil, fmt.Errorf("transcript: PRAGMA journal_mode=WAL: %w", err)
 		}
-		if err := chmodTranscriptDBFiles(path); err != nil {
+		if err := sqlitedsn.CheckMainFile(ctx, db, disk); err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("transcript: open sqlite %q: %w", path, err)
+		}
+	}
+	if disk != "" {
+		if err := chmodTranscriptDBFiles(disk); err != nil {
 			_ = db.Close()
 			return nil, err
 		}
@@ -82,8 +89,8 @@ func Open(ctx context.Context, path string) (*Store, error) {
 		_ = db.Close()
 		return nil, err
 	}
-	if path != ":memory:" {
-		if err := chmodTranscriptDBFiles(path); err != nil {
+	if disk != "" {
+		if err := chmodTranscriptDBFiles(disk); err != nil {
 			_ = db.Close()
 			return nil, err
 		}
@@ -91,7 +98,7 @@ func Open(ctx context.Context, path string) (*Store, error) {
 	return &Store{
 		db:             db,
 		ownDB:          true,
-		path:           dbPath(path),
+		path:           disk,
 		now:            time.Now,
 		leaseWindow:    defaultLeaseWindow,
 		shortThreshold: defaultShortThreshold,
@@ -121,13 +128,6 @@ func prepareTranscriptDBFile(path string) error {
 		return fmt.Errorf("transcript: close sqlite %q: %w", path, err)
 	}
 	return nil
-}
-
-func dbPath(path string) string {
-	if path == ":memory:" {
-		return ""
-	}
-	return path
 }
 
 func chmodTranscriptDBFiles(path string) error {
