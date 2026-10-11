@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	mcp "github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -103,22 +104,43 @@ func TestMCPToolSchemaSourceSnapshotPaginates(t *testing.T) {
 // server-side session itself (#406). In the abort case the DELETE drops the
 // connection, so the close fails and its *url.Error must stay in the chain
 // (the SDK ignores HTTP status codes, so a 500 would not fail the close).
+// A stalled DELETE is bounded even after caller cancellation; a redirect
+// cannot escape the cleanup timeout by turning DELETE into GET.
 func TestMCPToolSchemaSourceSnapshotUnsupportedProtocolDeletesSession(t *testing.T) {
-	for _, tt := range []struct {
-		name  string
-		abort bool
-	}{{"plain", false}, {"abort", true}} {
-		t.Run(tt.name, func(t *testing.T) {
-			var deletes, strays atomic.Int32
+	for _, mode := range []string{"plain", "abort", "stall", "redirect"} {
+		t.Run(mode, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			release := make(chan struct{})
+			var deletes, strays, redirected atomic.Int32
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/elsewhere" {
+					redirected.Add(1)
+					select {
+					case <-r.Context().Done():
+					case <-release:
+					}
+					return
+				}
 				if r.Method == http.MethodDelete {
 					if r.Header.Get("Mcp-Session-Id") == "s1" {
 						deletes.Add(1)
 					} else {
 						strays.Add(1)
 					}
-					if tt.abort {
+					if mode == "abort" {
 						panic(http.ErrAbortHandler)
+					}
+					if mode == "redirect" {
+						http.Redirect(w, r, "/elsewhere", http.StatusFound)
+					}
+					if mode == "stall" {
+						// Cleanup must have its own bound after the caller cancels.
+						cancel()
+						select {
+						case <-r.Context().Done():
+						case <-release:
+						}
 					}
 					return
 				}
@@ -138,18 +160,35 @@ func TestMCPToolSchemaSourceSnapshotUnsupportedProtocolDeletesSession(t *testing
 				}})
 			}))
 			defer srv.Close()
+			defer close(release) // release the handler even if cleanup is unbounded
 
 			src := &mcpToolSchemaSource{httpURL: srv.URL + "/mcp", clientName: "llm-bench-test"}
-			_, err := src.Snapshot(context.Background())
-			if err == nil {
-				t.Fatal("Snapshot succeeded against a server speaking an unsupported protocol version")
+			done := make(chan error, 1)
+			go func() {
+				_, err := src.Snapshot(ctx)
+				done <- err
+			}()
+			var err error
+			select {
+			case err = <-done:
+			case <-time.After(10 * time.Second):
+				t.Fatal("Snapshot did not return from HTTP session cleanup within 10s")
+			}
+			if err == nil || !strings.Contains(err.Error(), "unsupported protocol version") {
+				t.Fatalf("Snapshot error = %v, want unsupported protocol version", err)
 			}
 			if got, stray := deletes.Load(), strays.Load(); got != 1 || stray != 0 {
 				t.Fatalf("DELETE for session s1 = %d, without it = %d; want 1 and 0", got, stray)
 			}
 			var ue *url.Error
-			if got := errors.As(err, &ue) && ue.Op == "Delete"; got != tt.abort {
-				t.Fatalf("close error in chain = %v, want %v (err: %v)", got, tt.abort, err)
+			if got, want := errors.As(err, &ue) && ue.Op == "Delete", mode != "plain"; got != want {
+				t.Fatalf("close error in chain = %v, want %v (err: %v)", got, want, err)
+			}
+			if mode == "stall" && !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("Snapshot stalled DELETE error = %v, want cleanup deadline exceeded", err)
+			}
+			if got := redirected.Load(); got != 0 {
+				t.Fatalf("Snapshot cleanup followed %d redirects, want 0", got)
 			}
 		})
 	}

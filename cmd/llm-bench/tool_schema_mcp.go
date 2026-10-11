@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/kstruzzieri/go-llm/internal/mcpstdio"
 	mcp "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -18,7 +20,8 @@ const (
 	// maxToolListPages caps pagination so a misbehaving MCP server can't
 	// keep llm-bench in tools/list forever. 1000 pages × typical page
 	// sizes is far above any plausible real tool catalog.
-	maxToolListPages = 1000
+	maxToolListPages       = 1000
+	mcpSessionCloseTimeout = 5 * time.Second
 )
 
 // mcpToolSchemaSource implements toolSchemaSource against an external
@@ -75,9 +78,42 @@ func (s *mcpToolSchemaSource) buildTransport(ctx context.Context) (mcp.Transport
 		return &mcp.CommandTransport{Command: exec.CommandContext(ctx, s.stdioCmd[0], s.stdioCmd[1:]...)}, nil
 	}
 	if s.httpURL != "" {
-		return &mcp.StreamableClientTransport{Endpoint: s.httpURL}, nil
+		client := *http.DefaultClient
+		base := client.Transport
+		if base == nil {
+			base = http.DefaultTransport
+		}
+		client.Transport = mcpSessionTransport{RoundTripper: base}
+		return &mcp.StreamableClientTransport{Endpoint: s.httpURL, HTTPClient: &client}, nil
 	}
 	return nil, fmt.Errorf("mcp snapshot: nil transport")
+}
+
+// mcpSessionTransport bounds cleanup on the SDK's detached context without
+// shortening the caller's initialization or tool-listing budget.
+type mcpSessionTransport struct {
+	http.RoundTripper
+}
+
+func (t mcpSessionTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.Method != http.MethodDelete {
+		return t.RoundTripper.RoundTrip(req)
+	}
+	ctx, cancel := context.WithTimeout(req.Context(), mcpSessionCloseTimeout)
+	defer cancel()
+	resp, err := t.RoundTripper.RoundTrip(req.WithContext(ctx))
+	if resp != nil {
+		if resp.Body != nil {
+			_ = resp.Body.Close()
+		}
+		resp.Body = http.NoBody
+		// A redirect could change DELETE to GET and escape the cleanup bound.
+		switch resp.StatusCode {
+		case http.StatusMovedPermanently, http.StatusFound, http.StatusSeeOther, http.StatusTemporaryRedirect, http.StatusPermanentRedirect:
+			return nil, errors.New("mcp snapshot: HTTP session cleanup redirect refused")
+		}
+	}
+	return resp, err
 }
 
 // ownedTransport records the connection its transport opened, so Snapshot can
