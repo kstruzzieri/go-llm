@@ -42,7 +42,10 @@ type Store struct {
 // avoid the default-string footgun). The returned store owns the *sql.DB and
 // closes it on Close. The open switches the database to WAL and fails if the
 // connection cannot use it (for example a file: URI with immutable=1 or
-// nolock=1).
+// nolock=1). path may be a plain path or a file: URI; the file created 0600
+// (parent directory 0700) and kept 0600 with its -wal and -shm is the one
+// SQLite opens for it, and inputs sqlitedsn.Resolve rejects (a vfs or repeated
+// mode parameter, a NUL, a foreign host) fail before anything is created.
 func Open(ctx context.Context, path string) (*Store, error) {
 	if path == "" {
 		return nil, fmt.Errorf("transcript: Open requires non-empty path; pass \":memory:\" explicitly")

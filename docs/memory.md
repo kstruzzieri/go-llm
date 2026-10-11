@@ -20,7 +20,7 @@ defer runtime.Close()
 records := runtime.Store()
 ```
 
-When no credentials are supplied, `OpenRecordStore` uses `<database path>.keys`, opens the SQLite database with the package's hardened settings, runs migrations, and secures the database and WAL sidecars. Call `runtime.Secure()` after every direct write attempt through `runtime.Store()`, including failed attempts.
+When no credentials are supplied, `OpenRecordStore` uses `<database file>.keys`, opens the SQLite database with the package's hardened settings, runs migrations, and secures the database and WAL sidecars. `<database file>` is the file SQLite opens for the path given, which differs from the path itself for a `file:` URI, a `..` after a symlink, or a symlinked final component; an input that names no file (an in-memory database) needs an explicit `KeyDir` or injected credentials. A store whose keys are still in the directory derived from the raw path, where go-llm kept them before #648, fails to open with an error that names the `mv` to run. Call `runtime.Secure()` after every direct write attempt through `runtime.Store()`, including failed attempts.
 
 The source-level constructor change is the added config argument:
 
@@ -177,7 +177,7 @@ Golem and MCP expose no bypass flag. Do not delete the witness or silently re-ba
 The default layout is (Unix modes shown):
 
 ```text
-<database path>.keys/                 0700
+<database file>.keys/                 0700
   current.pem                         current Ed25519 private key, 0600
   trusted/
     <key-id>.pem                      retained Ed25519 public verifier, 0600
