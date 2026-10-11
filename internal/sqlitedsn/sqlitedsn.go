@@ -152,15 +152,7 @@ func WithBusyTimeout(path string, timeout time.Duration) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	q := u.Query()
-	for _, p := range q["_pragma"] {
-		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(p)), "busy_timeout") {
-			return u.String(), nil
-		}
-	}
-	q.Add("_pragma", fmt.Sprintf("busy_timeout(%d)", timeout.Milliseconds()))
-	u.RawQuery = q.Encode()
-	return u.String(), nil
+	return withBusyTimeout(u, timeout), nil
 }
 
 // EnableWAL switches db's database to WAL journal mode. The switch upgrades a
