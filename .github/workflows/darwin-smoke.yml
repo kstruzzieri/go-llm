@@ -43,6 +43,23 @@ jobs:
       - name: Workspace mutation boundary
         run: go test -race -count=1 -run '^TestMutation' ./agent/tools ./cmd/golem
 
+      # APFS stored spelling (#558): require native execution of the eight
+      # proof, parser and fallback tests. The foreign-filesystem fixture is
+      # optional and is deliberately outside this selection.
+      - name: APFS stored spelling
+        shell: bash
+        run: |
+          go test -race -count=1 -v -run '^(TestStoredNameFS|TestParseStoredEntry|TestCanonicalName(Stored|Hardlink|Symlink|APFS)|TestCanonicalPathForUndoUsesStoredName|TestProvenSpellingFallbacks)' ./agent/tools | tee "$RUNNER_TEMP/apfs-spelling.txt"
+          if grep -q -- '--- SKIP' "$RUNNER_TEMP/apfs-spelling.txt"; then
+            echo "::error::APFS spelling tests skipped: this runner must exercise every selected case"
+            exit 1
+          fi
+          passed=$(grep -c -- '^--- PASS: Test' "$RUNNER_TEMP/apfs-spelling.txt" || true)
+          if [ "$passed" -ne 8 ]; then
+            echo "::error::expected 8 passing APFS spelling tests, saw $passed"
+            exit 1
+          fi
+
       # Credential tripwire aliases (#627) on APFS: case and Unicode fold
       # spellings of a protected directory resolve to the directory itself
       # only on a case-insensitive volume, so these cases exercise the
