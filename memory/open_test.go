@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -40,7 +41,11 @@ func TestOpenRecordStoreCreatesHardenedDB(t *testing.T) {
 		t.Fatalf("Search() = %v, want the created record", got)
 	}
 
-	// DB file is 0600, parent dir 0700.
+	// DB file is 0600, parent dir 0700. File mode bits are not portable on
+	// Windows, so only the round-trip above runs there.
+	if runtime.GOOS == "windows" {
+		return
+	}
 	info, err := os.Stat(path)
 	if err != nil {
 		t.Fatalf("stat db: %v", err)
@@ -77,6 +82,14 @@ func TestRecordRuntimeSecureRechmodsSidecars(t *testing.T) {
 	if _, err := os.Stat(wal); err != nil {
 		t.Fatalf("no -wal sidecar after committed write (%v); WAL pragma not applied", err)
 	}
+	// File mode bits are not portable on Windows: there Secure must still
+	// succeed, but the loosen-then-check below cannot be observed.
+	if runtime.GOOS == "windows" {
+		if err := rt.Secure(); err != nil {
+			t.Fatalf("Secure() error = %v", err)
+		}
+		return
+	}
 	if err := os.Chmod(wal, 0o644); err != nil {
 		t.Fatalf("chmod loosen: %v", err)
 	}
@@ -105,6 +118,9 @@ func TestSecureDBFilesSkipsMissingSidecars(t *testing.T) {
 }
 
 func TestPrepareDBFileLeavesExistingDirMode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("file mode bits are not portable on Windows")
+	}
 	dir := filepath.Join(t.TempDir(), "loose")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatalf("mkdir loose: %v", err)
@@ -162,6 +178,9 @@ func TestRecordFailedOpenSecuresExistingSidecars(t *testing.T) {
 	cancel()
 	if _, err := OpenRecordStore(ctx, path, RecordStoreConfig{}); !errors.Is(err, context.Canceled) {
 		t.Fatalf("open: %v", err)
+	}
+	if runtime.GOOS == "windows" {
+		return // file mode bits are not portable on Windows
 	}
 	for _, suffix := range []string{"-wal", "-shm"} {
 		info, err := os.Stat(path + suffix)
