@@ -79,8 +79,9 @@ jobs:
       # and darwin do not. darwin covers both release arches cgo-off, as
       # .goreleaser.yaml builds them: the macOS Compile Smoke job builds only
       # the runner's arm64 with cgo on and runs only go test's vet subset, so
-      # amd64 assembly and the release link would otherwise first meet a
-      # compiler at release. The builds link both release binaries; their
+      # darwin/amd64 and the cgo-off release link would otherwise first build
+      # at release, and full darwin vet would never run (release does not
+      # vet). The builds link every binary .goreleaser.yaml ships; their
       # output is discarded, so -buildvcs=false skips VCS stamping (it fails
       # when git refuses a checkout owned by another uid). scripts/ci-local
       # --mode full runs the same builds and vets.

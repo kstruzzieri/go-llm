@@ -20,8 +20,16 @@ for platform in windows freebsd "darwin GOARCH=amd64" "darwin GOARCH=arm64"; do
     exit 1
   fi
 done
+# The smoke builds link every binary GoReleaser ships, in .goreleaser.yaml's
+# order, so adding a release binary fails here until the smoke builds it too.
+release_mains="$(sed -n 's|^    main: \(\./cmd/[a-z0-9-][a-z0-9-]*\)$|\1|p' "$repo_root/.goreleaser.yaml" | tr '\n' ' ')"
+release_mains="${release_mains% }"
+if [ -z "$release_mains" ]; then
+  printf 'no "main: ./cmd/..." builds found in .goreleaser.yaml\n' >&2
+  exit 1
+fi
 for platform in windows "darwin GOARCH=amd64" "darwin GOARCH=arm64"; do
-  if ! grep -Fxq "          GOOS=$platform go build -buildvcs=false -o /dev/null ./cmd/golem ./cmd/go-llm-mcp" "$repo_root/.github/workflows/ci.yml"; then
+  if ! grep -Fxq "          GOOS=$platform go build -buildvcs=false -o /dev/null $release_mains" "$repo_root/.github/workflows/ci.yml"; then
     printf 'GitHub CI is missing the %s release-binary build\n' "$platform" >&2
     exit 1
   fi
@@ -209,12 +217,12 @@ EOF
   if [ "$2" = full ]; then
     cat >>"$tmp/$1" <<EOF
 $module|test -run ^$ ./...
-$module|GOOS=windows GOARCH=amd64 CGO_ENABLED=0 build -buildvcs=false -o /dev/null ./cmd/golem ./cmd/go-llm-mcp
+$module|GOOS=windows GOARCH=amd64 CGO_ENABLED=0 build -buildvcs=false -o /dev/null $release_mains
 $module|GOOS=windows GOARCH=amd64 CGO_ENABLED=0 vet ./...
 $module|GOOS=freebsd GOARCH=amd64 CGO_ENABLED=0 vet ./...
-$module|GOOS=darwin GOARCH=amd64 CGO_ENABLED=0 build -buildvcs=false -o /dev/null ./cmd/golem ./cmd/go-llm-mcp
+$module|GOOS=darwin GOARCH=amd64 CGO_ENABLED=0 build -buildvcs=false -o /dev/null $release_mains
 $module|GOOS=darwin GOARCH=amd64 CGO_ENABLED=0 vet ./...
-$module|GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 build -buildvcs=false -o /dev/null ./cmd/golem ./cmd/go-llm-mcp
+$module|GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 build -buildvcs=false -o /dev/null $release_mains
 $module|GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 vet ./...
 EOF
   fi
