@@ -36,6 +36,37 @@ type fakeAF struct {
 	gateArgv           [][]string
 	nextActions        []agentflow.NextActionState
 	nextActionIndex    int
+	blocks             []blockCall
+}
+
+// blockCall snapshots a block-step context at call time: blockAttempt cancels
+// that context once the call returns (#642 A3).
+type blockCall struct {
+	remaining   time.Duration
+	hasDeadline bool
+	err         error
+}
+
+func newBlockCall(ctx context.Context) blockCall {
+	c := blockCall{err: ctx.Err()}
+	if deadline, ok := ctx.Deadline(); ok {
+		c.remaining, c.hasDeadline = time.Until(deadline), true
+	}
+	return c
+}
+
+// assertFreshBlockContext checks that the one block-step ran on a live context
+// bounded by the 30-second budget, not on the caller's context (#642 A3).
+func assertFreshBlockContext(t *testing.T, blocks []blockCall) {
+	t.Helper()
+	if len(blocks) != 1 {
+		t.Fatalf("block-step calls = %d, want 1", len(blocks))
+	}
+	// remaining is measured microseconds after the deadline is set, so the
+	// 20-second floor leaves 10 seconds of slack and still rejects a short budget.
+	if b := blocks[0]; !b.hasDeadline || b.err != nil || b.remaining <= 20*time.Second || b.remaining > 30*time.Second {
+		t.Fatalf("block-step context = %+v, want a live context with a deadline in (20s, 30s]", b)
+	}
 }
 
 func (f *fakeAF) failure(name string) error {
@@ -120,8 +151,9 @@ func (f *fakeAF) CompleteStep(_ context.Context, id, attempt string) error {
 	f.seq = append(f.seq, "complete-step:"+id+":"+attempt)
 	return f.failure("complete-step")
 }
-func (f *fakeAF) BlockStep(_ context.Context, id, attempt, reason string) error {
+func (f *fakeAF) BlockStep(ctx context.Context, id, attempt, reason string) error {
 	f.seq = append(f.seq, "block-step:"+id+":"+attempt+":"+reason)
+	f.blocks = append(f.blocks, newBlockCall(ctx))
 	return f.failure("block-step")
 }
 func (f *fakeAF) FinishRun(context.Context) (string, error) {
@@ -133,7 +165,7 @@ func (f *fakeAF) FinishRun(context.Context) (string, error) {
 }
 func (f *fakeAF) RecordFileChange(_ context.Context, step, attempt, path string) error {
 	f.seq = append(f.seq, "record-file-change:"+step+":"+attempt+":"+path)
-	return nil
+	return f.failure("record-file-change")
 }
 func (f *fakeAF) RecordEvidence(_ context.Context, e agentflow.EvidenceEntry) error {
 	f.seq = append(f.seq, "evidence:"+e.ID)
@@ -949,7 +981,7 @@ func TestDriver_AmendmentFailuresStayIncomplete(t *testing.T) {
 		{"record review command", "record-review", nil},
 		{"amend command", "amend-step", nil},
 		{"model", "", errors.New("model failed")},
-		{"receipt", "", errors.New("unreceipted edit aborted the run")},
+		{"receipt", "", &unreceiptedEditError{err: errors.New("record rejected")}},
 		{"gate", "gate", nil},
 		{"finish step", "finish-step", nil},
 	}
@@ -973,6 +1005,22 @@ func TestDriver_AmendmentFailuresStayIncomplete(t *testing.T) {
 			}
 			if (tt.runErr != nil || tt.failAt == "gate" || tt.failAt == "finish-step") && !strings.Contains(seq, "amend:P1:") {
 				t.Fatalf("failure did not leave an opened amendment: %v", af.seq)
+			}
+			// #642 A1: a failed amendment run blocks its attempt; a FinishStep
+			// error does not (A4).
+			switch tt.name {
+			case "model":
+				if !slices.Contains(af.seq, "block-step:P1:AM-P1:golem: agent run failed") {
+					t.Fatalf("failed amendment run was not blocked: %v", af.seq)
+				}
+			case "receipt":
+				if !slices.Contains(af.seq, "block-step:P1:AM-P1:golem: unreceipted edit aborted the run") {
+					t.Fatalf("unreceipted amendment edit was not blocked: %v", af.seq)
+				}
+			case "finish step":
+				if strings.Contains(seq, "block-step") {
+					t.Fatalf("finish-step failure blocked the attempt: %v", af.seq)
+				}
 			}
 		})
 	}
@@ -1985,42 +2033,178 @@ func TestRunAttemptBlockFailureNamesBothCauses(t *testing.T) {
 	}
 }
 
-// D8: any other step-run error keeps today's behavior: returned as is, attempt
-// left open, no block.
-func TestRunAttemptOtherStepErrorsLeaveAttemptOpen(t *testing.T) {
-	af := &fakeAF{}
-	providerDown := errors.New("provider down")
-	d := &driver{af: af, plan: stopTestPlan(), runStep: func(context.Context, agentflow.Step, string, string) error {
-		return providerDown
-	}}
-	if err := d.runOneStep(context.Background(), "P1"); err != providerDown {
-		t.Fatalf("err = %v, want the step error unchanged", err)
-	}
-	if want := []string{"claim:P1"}; !equalSeq(af.seq, want) {
-		t.Fatalf("agentflow calls = %v, want %v", af.seq, want)
+// #642 A3: pins the contractual block budget constant. Whether blockAttempt
+// uses it is checked by assertFreshBlockContext's deadline bounds.
+func TestBlockStepTimeoutBudget(t *testing.T) {
+	if blockStepTimeout != 30*time.Second {
+		t.Fatalf("blockStepTimeout = %v, want 30s", blockStepTimeout)
 	}
 }
 
-// D8 through the production runner: a provider failure returns its error,
-// leaves the attempt open, and never consults StopReason (which is the zero
-// value, Completed, on error paths).
-func TestTaskStepRunnerProviderErrorLeavesAttemptOpen(t *testing.T) {
-	root := t.TempDir()
-	plan := stopTestPlan()
-	providerDown := errors.New("provider down")
-	af := &fakeAF{}
-	runCtx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	orch := agent.New(&failingCaller{err: providerDown}, agent.ContextManager{})
-	runStep, err := newTaskStepRunner(root, plan, af, orch, &replSession{maxSteps: 4}, true, io.Discard, nil, cancel)
-	if err != nil {
-		t.Fatal(err)
+// #642 A1, A3 (T1): every step-run error blocks the attempt with a fixed reason
+// for its class, checked in order, on a fresh bounded context whatever state
+// the caller's context is in. Raw error text stays in the returned error only.
+func TestRunAttemptRunErrorsBlockWithClassReason(t *testing.T) {
+	errRecord := errors.New("record rejected")
+	tests := []struct {
+		name   string
+		err    error
+		reason string
+		as     any // errors.As target for a typed error, or nil
+	}{
+		{"unreceipted edit", fmt.Errorf("run: %w", &unreceiptedEditError{err: errRecord}), "golem: unreceipted edit aborted the run", new(*unreceiptedEditError)},
+		{"unreceipted edit over cancel", &unreceiptedEditError{err: fmt.Errorf("record: %w", context.Canceled)}, "golem: unreceipted edit aborted the run", new(*unreceiptedEditError)},
+		{"stopped", &runStoppedError{reason: agent.ToolErrorCapReached}, "golem: agent run stopped: tool_error_cap_reached", new(*runStoppedError)},
+		{"cancelled", fmt.Errorf("chat: %w", context.Canceled), "golem: agent run cancelled", nil},
+		{"cancel over exhaustion", errors.Join(context.Canceled, agent.ErrContextExhausted), "golem: agent run cancelled", nil},
+		{"deadline is not cancel", fmt.Errorf("chat: %w", context.DeadlineExceeded), "golem: agent run failed", nil},
+		{"exhausted", fmt.Errorf("compact: %w", agent.ErrContextExhausted), "golem: agent run exhausted its context", nil},
+		{"other", errors.New("provider down: token=sk-test-123"), "golem: agent run failed", nil},
 	}
-	d := &driver{af: af, plan: plan, runStep: runStep}
-	if err := d.runOneStep(runCtx, "P1"); !errors.Is(err, providerDown) {
-		t.Fatalf("err = %v, want the provider error", err)
+	contexts := []struct {
+		name    string
+		ctx     func(t *testing.T) context.Context
+		wantErr error
+	}{
+		{"live", func(*testing.T) context.Context { return context.Background() }, nil},
+		{"cancelled", func(*testing.T) context.Context {
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			return ctx
+		}, context.Canceled},
+		{"deadline exceeded", func(t *testing.T) context.Context {
+			ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+			t.Cleanup(cancel)
+			return ctx
+		}, context.DeadlineExceeded},
 	}
-	if want := []string{"claim:P1"}; !equalSeq(af.seq, want) {
-		t.Fatalf("agentflow calls = %v, want %v", af.seq, want)
+	for _, c := range contexts {
+		for _, tt := range tests {
+			t.Run(c.name+"/"+tt.name, func(t *testing.T) {
+				ctx := c.ctx(t)
+				if ctx.Err() != c.wantErr {
+					t.Fatalf("fixture context err = %v, want %v", ctx.Err(), c.wantErr)
+				}
+				plan := stopTestPlan()
+				af := &fakeAF{}
+				d := &driver{af: af, plan: plan, root: t.TempDir(), runStep: func(context.Context, agentflow.Step, string, string) error {
+					return tt.err
+				}}
+				err := d.runAttempt(ctx, plan.Steps[0], "A-P1", "goal")
+				if want := []string{"block-step:P1:A-P1:" + tt.reason}; !equalSeq(af.seq, want) {
+					t.Fatalf("agentflow calls = %v, want %v", af.seq, want)
+				}
+				if want := "step P1 attempt A-P1: " + tt.err.Error() + "; attempt recorded as blocked"; err == nil || err.Error() != want {
+					t.Fatalf("err = %v, want %q", err, want)
+				}
+				if !errors.Is(err, tt.err) {
+					t.Fatalf("err = %v does not wrap the step error", err)
+				}
+				if tt.as != nil && !errors.As(err, tt.as) {
+					t.Fatalf("err = %v lost its typed cause %T", err, tt.as)
+				}
+				assertFreshBlockContext(t, af.blocks)
+			})
+		}
 	}
+}
+
+// #642 A4, A5 (T2): beforeGates and FinishStep errors keep today's exits, and a
+// failed block on any step-run error names both errors.
+func TestRunAttemptUnchangedExits(t *testing.T) {
+	runOK := func(context.Context, agentflow.Step, string, string) error { return nil }
+	t.Run("before gates", func(t *testing.T) {
+		errGuard := errors.New("receipt-safety refusal")
+		plan := stopTestPlan()
+		af := &fakeAF{}
+		d := &driver{af: af, plan: plan, runStep: runOK, beforeGates: func(context.Context, agentflow.Step, string) error {
+			return errGuard
+		}}
+		if err := d.runAttempt(context.Background(), plan.Steps[0], "A-P1", "goal"); err != errGuard {
+			t.Fatalf("err = %v, want the guard error itself", err)
+		}
+		if len(af.seq) != 0 {
+			t.Fatalf("agentflow calls = %v, want none", af.seq)
+		}
+	})
+	t.Run("finish step", func(t *testing.T) {
+		errFinish := errors.New("finish-step rejected")
+		plan := stopTestPlan()
+		af := &fakeAF{failAt: map[string]error{"finish-step": errFinish}}
+		d := &driver{af: af, plan: plan, runStep: runOK}
+		if err := d.runAttempt(context.Background(), plan.Steps[0], "A-P1", "goal"); err != errFinish {
+			t.Fatalf("err = %v, want the finish-step error itself", err)
+		}
+		if want := []string{"gate:P1:go test", "finish-step:P1:A-P1"}; !equalSeq(af.seq, want) {
+			t.Fatalf("agentflow calls = %v, want %v", af.seq, want)
+		}
+	})
+	t.Run("block failure", func(t *testing.T) {
+		providerDown := errors.New("provider down")
+		errBlock := errors.New("block rejected")
+		plan := stopTestPlan()
+		af := &fakeAF{failAt: map[string]error{"block-step": errBlock}}
+		d := &driver{af: af, plan: plan, runStep: func(context.Context, agentflow.Step, string, string) error {
+			return providerDown
+		}}
+		err := d.runAttempt(context.Background(), plan.Steps[0], "A-P1", "goal")
+		if want := "step P1 attempt A-P1: provider down; record blocked attempt: block rejected"; err == nil || err.Error() != want {
+			t.Fatalf("err = %v, want %q", err, want)
+		}
+		if !errors.Is(err, providerDown) || !errors.Is(err, errBlock) {
+			t.Fatalf("err = %v does not wrap both the step and block errors", err)
+		}
+		if want := []string{"block-step:P1:A-P1:golem: agent run failed"}; !equalSeq(af.seq, want) {
+			t.Fatalf("agentflow calls = %v, want %v", af.seq, want)
+		}
+	})
+}
+
+// #642 A1, A7 (T3) through the production runner: a provider failure after an
+// edit, and an edit AgentFlow refused to record, both block the attempt. The
+// journal cancels the run context on the refused receipt, so that block must
+// not run on the run context.
+func TestTaskStepRunnerRunErrorsBlockAttempt(t *testing.T) {
+	write := toolStep("w1", "write_file", `{"path":"out.txt","content":"partial\n"}`)
+	setup := func(t *testing.T, caller agent.ModelCaller, af *fakeAF) (*driver, context.Context) {
+		t.Helper()
+		plan := stopTestPlan()
+		runCtx, cancel := context.WithCancel(context.Background())
+		t.Cleanup(cancel)
+		runStep, err := newTaskStepRunner(t.TempDir(), plan, af, agent.New(caller, agent.ContextManager{}), &replSession{maxSteps: 4}, true, io.Discard, nil, cancel)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return &driver{af: af, plan: plan, runStep: runStep}, runCtx
+	}
+	t.Run("provider", func(t *testing.T) {
+		providerDown := errors.New("provider down")
+		af := &fakeAF{}
+		caller := &errAfterCaller{inner: &scriptCaller{responses: []agent.ModelResult{write}}, failAt: 1, err: providerDown}
+		d, runCtx := setup(t, caller, af)
+		err := d.runOneStep(runCtx, "P1")
+		if want := []string{"claim:P1", "record-file-change:P1:A-P1:out.txt", "block-step:P1:A-P1:golem: agent run failed"}; !equalSeq(af.seq, want) {
+			t.Fatalf("agentflow calls = %v, want %v", af.seq, want)
+		}
+		if !errors.Is(err, providerDown) || !strings.HasPrefix(err.Error(), "step P1 attempt A-P1: ") || !strings.HasSuffix(err.Error(), "; attempt recorded as blocked") {
+			t.Fatalf("err = %v, want the provider error inside the blocked-attempt shape", err)
+		}
+		assertFreshBlockContext(t, af.blocks)
+	})
+	t.Run("fatal receipt", func(t *testing.T) {
+		errRecord := errors.New("record rejected")
+		af := &fakeAF{failAt: map[string]error{"record-file-change": errRecord}}
+		d, runCtx := setup(t, &scriptCaller{responses: []agent.ModelResult{write, answerStep("done")}}, af)
+		err := d.runOneStep(runCtx, "P1")
+		if want := []string{"claim:P1", "record-file-change:P1:A-P1:out.txt", "block-step:P1:A-P1:golem: unreceipted edit aborted the run"}; !equalSeq(af.seq, want) {
+			t.Fatalf("agentflow calls = %v, want %v", af.seq, want)
+		}
+		if want := "step P1 attempt A-P1: unreceipted edit aborted the run: record rejected; attempt recorded as blocked"; err == nil || err.Error() != want {
+			t.Fatalf("err = %v, want %q", err, want)
+		}
+		if runCtx.Err() != context.Canceled {
+			t.Fatalf("run context err = %v, want the journal's cancel before the block", runCtx.Err())
+		}
+		assertFreshBlockContext(t, af.blocks)
+	})
 }

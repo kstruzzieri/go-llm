@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/kstruzzieri/go-llm/agent"
 	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
@@ -61,6 +62,53 @@ type runStoppedError struct{ reason agent.StopReason }
 
 func (e *runStoppedError) Error() string { return "agent run stopped: " + e.reason.String() }
 
+// unreceiptedEditError is a run the journal aborted because AgentFlow did not
+// record an edit the model made. It wins over the run's own error.
+type unreceiptedEditError struct{ err error }
+
+func (e *unreceiptedEditError) Error() string {
+	return "unreceipted edit aborted the run: " + e.err.Error()
+}
+func (e *unreceiptedEditError) Unwrap() error { return e.err }
+
+// blockStepTimeout bounds the block-step call that closes a failed attempt
+// (#642 A3). ponytail: fixed budget, no flag.
+const blockStepTimeout = 30 * time.Second
+
+// stepRunBlockReason is the fixed ledger reason for a failed step run (#642
+// A1), checked in this order. Raw error text never reaches the ledger; the
+// returned error keeps it.
+func stepRunBlockReason(err error) string {
+	var fatal *unreceiptedEditError
+	var stopped *runStoppedError
+	switch {
+	case errors.As(err, &fatal):
+		return "golem: unreceipted edit aborted the run"
+	case errors.As(err, &stopped):
+		return "golem: " + stopped.Error()
+	case errors.Is(err, context.Canceled):
+		return "golem: agent run cancelled"
+	case errors.Is(err, agent.ErrContextExhausted):
+		return "golem: agent run exhausted its context"
+	default:
+		return "golem: agent run failed"
+	}
+}
+
+// blockAttempt closes a failed attempt so recovery runs a new one instead of
+// settling this one on its gates (#611, #642). The block runs on a fresh
+// bounded context: by now the caller's context may be cancelled by an
+// interrupt, a sibling worker's failure, or the journal's fatal-receipt cancel.
+func blockAttempt(ctx context.Context, af afClient, step, attempt, reason string, cause error) error {
+	err := fmt.Errorf("step %s attempt %s: %w", step, attempt, cause)
+	bctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), blockStepTimeout)
+	defer cancel()
+	if berr := af.BlockStep(bctx, step, attempt, reason); berr != nil {
+		return fmt.Errorf("%w; record blocked attempt: %w", err, berr)
+	}
+	return fmt.Errorf("%w; attempt recorded as blocked", err)
+}
+
 // agentflowUnavailableError marks a failed version gate or capability probe.
 // A refused AgentFlow is not asked for recovery advice (#612 R10).
 type agentflowUnavailableError struct{ err error }
@@ -91,6 +139,9 @@ type driver struct {
 	beforeGates            beforeGatesFunc
 	parallelCohort         func(context.Context) error
 	out                    io.Writer
+	// root is the workspace whose .agent/ ledger this driver writes; read for
+	// retained timeout receipts (#642 A9).
+	root string
 }
 
 // validateFreshWorkerProjection rejects copied worktrees that have begun or
@@ -268,21 +319,12 @@ func (d *driver) runOneStep(ctx context.Context, id string) error {
 
 func (d *driver) runAttempt(ctx context.Context, step agentflow.Step, attempt, goal string) error {
 	if err := d.runStep(ctx, step, attempt, goal); err != nil {
-		var stopped *runStoppedError
-		if !errors.As(err, &stopped) {
-			return err // includes a fatal record-file-change failure surfaced via ctx cancel
-		}
-		// #611: close the stopped attempt so recovery re-runs the step instead
-		// of settling it on its gates alone.
-		err = fmt.Errorf("step %s attempt %s: %w", step.ID, attempt, err)
-		if berr := d.af.BlockStep(ctx, step.ID, attempt, "golem: "+stopped.Error()); berr != nil {
-			return fmt.Errorf("%w; record blocked attempt: %w", err, berr)
-		}
-		return fmt.Errorf("%w; attempt recorded as blocked", err)
+		// #611, #642: every failed run closes its attempt.
+		return blockAttempt(ctx, d.af, step.ID, attempt, stepRunBlockReason(err), err)
 	}
 	if d.beforeGates != nil {
 		if err := d.beforeGates(ctx, step, attempt); err != nil {
-			return err
+			return err // #642 A4: a binding, ownership or receipt-safety refusal; no mutation
 		}
 	}
 	gates, err := agentflow.ExtractCommandGates(step)
@@ -294,7 +336,7 @@ func (d *driver) runAttempt(ctx context.Context, step agentflow.Step, attempt, g
 			return fmt.Errorf("gate %q failed: %w", g.Label, err)
 		}
 	}
-	return d.af.FinishStep(ctx, step.ID, attempt)
+	return d.af.FinishStep(ctx, step.ID, attempt) // #642 A4: a FinishStep error leaves the attempt open
 }
 
 type reviewAmendment struct {
@@ -509,7 +551,7 @@ func newTaskStepRunner(root string, plan *agentflow.Plan, af afClient, orch *age
 		}
 		res, runErr := orch.Run(stepCtx, req, agent.Observer(newRenderer(out, false, sess.maxSteps, sess.clock, sess.mixed)))
 		if fatal := afJournal.fatalErr(); fatal != nil {
-			return fmt.Errorf("unreceipted edit aborted the run: %w", fatal)
+			return &unreceiptedEditError{err: fatal}
 		}
 		if runErr != nil {
 			return runErr

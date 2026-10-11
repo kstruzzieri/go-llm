@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -26,6 +27,7 @@ import (
 type assignedWorkerRunner struct {
 	calls      [][]string
 	nextAction string
+	blocks     []blockCall
 }
 
 type aggregationRootRunner struct{ calls [][]string }
@@ -52,7 +54,7 @@ func (w *concurrentWriteDetector) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-func (r *assignedWorkerRunner) Run(_ context.Context, args []string, _ []byte) ([]byte, []byte, int, error) {
+func (r *assignedWorkerRunner) Run(ctx context.Context, args []string, _ []byte) ([]byte, []byte, int, error) {
 	r.calls = append(r.calls, append([]string(nil), args...))
 	if len(args) == 0 {
 		return nil, nil, 0, errors.New("unexpected empty Agentflow command")
@@ -63,6 +65,9 @@ func (r *assignedWorkerRunner) Run(_ context.Context, args []string, _ []byte) (
 	case "claim-step":
 		return []byte(`{"attempt_id":"A1"}`), nil, 0, nil
 	case "record-file-change", "run", "finish-step":
+		return []byte(`{}`), nil, 0, nil
+	case "block-step":
+		r.blocks = append(r.blocks, newBlockCall(ctx))
 		return []byte(`{}`), nil, 0, nil
 	default:
 		return nil, nil, 0, fmt.Errorf("unexpected Agentflow command %q", args[0])
@@ -106,6 +111,53 @@ func TestAssignedParallelWorkerRunsOnlyItsOwnedFreshStep(t *testing.T) {
 	if got := strings.Join(runner.calls[1], " "); !strings.Contains(got, "claim-step P2") {
 		t.Fatalf("assigned claim = %q", got)
 	}
+}
+
+// cancelParentCaller cancels the worker's parent context mid-run, as the
+// errgroup does when a sibling worker fails.
+type cancelParentCaller struct{ cancel context.CancelFunc }
+
+func (c *cancelParentCaller) Chat(ctx context.Context, _ provider.ChatRequest, _ func(provider.ChatResponse) error) (agent.ModelResult, error) {
+	c.cancel()
+	return agent.ModelResult{}, ctx.Err()
+}
+
+// #642 A3, A7: a worker whose parent is cancelled mid-run still blocks its
+// claimed attempt, as that attempt's owner, on a fresh bounded context.
+func TestAssignedParallelWorkerBlocksCancelledAttemptAsItsOwner(t *testing.T) {
+	plan := &agentflow.Plan{AllowedFiles: []string{"worker.go"}, Steps: []agentflow.Step{{
+		ID: "P2", Files: []string{"worker.go"}, Validation: []string{"unit"},
+		Gates: []agentflow.Gate{{Kind: "command", Run: []string{"go", "test", "./worker"}}},
+	}}}
+	runner := &assignedWorkerRunner{nextAction: `{"resumability":{"contract":{"plan_sha256":"plan","locked":true,"execution_contract_sha256":"execution"},"agent_id":"golem-w2","step":{"id":"P1","state":"pending","completed":false},"attempt":null,"diagnostics":[]}}`}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sess := &replSession{maxSteps: 2, newOrchestrator: func() *agent.Orchestrator {
+		return agent.New(&cancelParentCaller{cancel: cancel}, agent.ContextManager{})
+	}}
+	run := newAssignedParallelWorker(plan, sess, true, io.Discard, func(string) agentflow.Runner { return runner })
+	err := run(ctx, parallelWorker{step: plan.Steps[0], root: t.TempDir(), ownerID: "golem-w2", sourceID: "w2"})
+	if !errors.Is(err, context.Canceled) || !strings.HasSuffix(err.Error(), "; attempt recorded as blocked") {
+		t.Fatalf("err = %v, want the cancel inside the blocked-attempt shape", err)
+	}
+	var commands []string
+	for _, call := range runner.calls {
+		commands = append(commands, call[0])
+	}
+	if want := []string{"next-action", "claim-step", "block-step"}; !reflect.DeepEqual(commands, want) {
+		t.Fatalf("Agentflow commands = %v, want %v", commands, want)
+	}
+	block := runner.calls[2]
+	flag := func(name string) string {
+		if i := slices.Index(block, name); i >= 0 && i+1 < len(block) {
+			return block[i+1]
+		}
+		return ""
+	}
+	if flag("--reason") != "golem: agent run cancelled" || flag("--agent") != "golem-w2" {
+		t.Fatalf("block call = %q, want the cancelled reason as the owning worker", block)
+	}
+	assertFreshBlockContext(t, runner.blocks)
 }
 
 func TestAssignedParallelWorkerRejectsNonFreshProjectionBeforeClaim(t *testing.T) {
