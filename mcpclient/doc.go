@@ -12,6 +12,9 @@
 // description-truncation notices are ordinary warnings. Healthy aliases retain
 // configuration order in Manager.Tools. Callers must close the Manager, and
 // strict all-alias admission callers must reject any AdmissionError themselves.
+// A rejected alias holds nothing open: whatever it launched or opened, a stdio
+// child or an HTTP session, is closed before Connect, Inspect or Approve
+// returns, including when the MCP handshake itself fails.
 //
 // Server.WithTools selects exact original tool names per alias. Selection
 // applies after complete-catalog admission: pins, diffs and Inspect always
