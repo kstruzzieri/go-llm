@@ -52,7 +52,7 @@ newer, for the hook's fixture repository), and covers root
 discovery, exact phase ordering, prerequisites, failure status propagation, the
 pre-push hook's ref parsing, complete tree export and trusted Docker settings (against a fixture repository and
 a linked worktree of it), the native Darwin selectors and requirement environment, and the
-Windows and FreeBSD vets shared by `--mode full` and the `CI` workflow. The
+cross-platform builds and vets shared by `--mode full` and the `CI` workflow. The
 `CI` workflow runs it on every pull request.
 
 ## Typical Workflow
@@ -70,7 +70,7 @@ Run the faster pre-push subset directly on the host:
 scripts/ci-local --mode pre-push
 ```
 
-Run the full suite directly on the host. This includes all `pre-push` checks plus compile smoke, which also runs `go vet ./...` with `GOOS=windows` and `GOOS=freebsd` so code or tests that only type-check on Linux or macOS fail locally:
+Run the full suite directly on the host. This includes all `pre-push` checks plus compile smoke, which also runs `go vet ./...` with `GOOS=windows`, `GOOS=freebsd` and `GOOS=darwin` (amd64 and arm64) so code or tests that only type-check on one platform fail locally, and links `cmd/golem` and `cmd/go-llm-mcp` for Windows and both darwin arches with `CGO_ENABLED=0`, as the release does:
 
 ```bash
 scripts/ci-local --mode full
@@ -241,7 +241,7 @@ immediately before each run:
 
 | Check | Toolchain | Checks |
 | --- | --- | --- |
-| `Lint & Test` | `go-version-file: go.mod` (the `toolchain` directive) | CI/changelog self-tests and guards, lint, formatting, security contracts, race tests, cross-platform compile smoke (a Windows `cmd/golem` build plus `go vet ./...` for Windows and FreeBSD), and GoReleaser config validation |
+| `Lint & Test` | `go-version-file: go.mod` (the `toolchain` directive) | CI/changelog self-tests and guards, lint, formatting, security contracts, race tests, cross-platform compile smoke (`cmd/golem` and `cmd/go-llm-mcp` builds plus `go vet ./...` for Windows and darwin amd64/arm64, and `go vet ./...` for FreeBSD, all cgo-off), and GoReleaser config validation |
 | `Test (oldest supported Go)` | `actions/setup-go` resolves the `go-version: '1.N.x'` query in `ci.yml` | `go test -race ./...` only |
 | `Windows SQLite URIs` | `go-version-file: go.mod` on `windows-latest` | `go test -count=1 -v ./internal/sqlitedsn` with `CGO_ENABLED=0`: native Windows path resolution, SQLite URI parsing and the Windows VFS, which the Linux compile smoke cannot exercise; `-v` keeps the lock-holder tests' logged timings visible |
 

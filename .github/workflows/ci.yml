@@ -76,15 +76,26 @@ jobs:
       # vet type-checks every package with its test files, so a test naming a
       # symbol declared only in a build-tagged file fails here. windows checks
       # the !unix files; freebsd is the only lane where unix holds but linux
-      # and darwin do not. scripts/ci-local --mode full runs the same vets.
+      # and darwin do not. darwin covers both release arches cgo-off, as
+      # .goreleaser.yaml builds them: the macOS Compile Smoke job builds only
+      # the runner's arm64 with cgo on and runs only go test's vet subset, so
+      # amd64 assembly and the release link would otherwise first meet a
+      # compiler at release. The builds link both release binaries; their
+      # output is discarded, so -buildvcs=false skips VCS stamping (it fails
+      # when git refuses a checkout owned by another uid). scripts/ci-local
+      # --mode full runs the same builds and vets.
       - name: Cross-platform compile smoke
         env:
           GOARCH: amd64
           CGO_ENABLED: "0"
         run: |
-          GOOS=windows go build -o /dev/null ./cmd/golem
+          GOOS=windows go build -buildvcs=false -o /dev/null ./cmd/golem ./cmd/go-llm-mcp
           GOOS=windows go vet ./...
           GOOS=freebsd go vet ./...
+          GOOS=darwin GOARCH=amd64 go build -buildvcs=false -o /dev/null ./cmd/golem ./cmd/go-llm-mcp
+          GOOS=darwin GOARCH=amd64 go vet ./...
+          GOOS=darwin GOARCH=arm64 go build -buildvcs=false -o /dev/null ./cmd/golem ./cmd/go-llm-mcp
+          GOOS=darwin GOARCH=arm64 go vet ./...
 
       # Validate .goreleaser.yaml on every PR so a schema error surfaces here,
       # not at tag-push time when it would fail the actual release.
