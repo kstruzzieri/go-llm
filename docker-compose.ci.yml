@@ -16,7 +16,9 @@ services:
     # -ci suffix so they are created fresh with that ownership rather than
     # reusing the root-owned volumes of the earlier image.
     volumes:
-      - .:/workspace
+      - type: bind
+        source: ${GO_LLM_CI_SOURCE:-.}
+        target: /workspace
       - go-build-cache-ci:/home/ci/.cache/go-build
       - go-mod-cache-ci:/go/pkg/mod
       - golangci-lint-cache-ci:/home/ci/.cache/golangci-lint
