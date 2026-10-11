@@ -185,6 +185,8 @@ func TestResolveRejects(t *testing.T) {
 		"semicolon pair":     {"file:x.db?a=1;b=2", "read differently"},
 		"bad query escape":   {"file:x.db?a=%zz", "read differently"},
 		"foreign host":       {"file://server/x.db", "names host"},
+		"user in authority":  {"file://user@localhost/x.db", "names host"},
+		"fragment":           {"file:x.db#frag", "has a fragment"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, _, err := Resolve(tc.input, time.Second)

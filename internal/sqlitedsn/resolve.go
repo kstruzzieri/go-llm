@@ -40,7 +40,8 @@ const maxSymlinks = 200
 // cannot be predicted or that SQLite reads differently from Go: a NUL anywhere
 // in the decoded filename or query, more than one mode parameter, a vfs
 // parameter, a query Go's parser would drop pairs from (such as one with ";"),
-// a host other than localhost, and everything FileURL rejects. The file a
+// a user or a host other than localhost, a fragment, and everything FileURL
+// rejects. The file a
 // symlink names can still change between Resolve and the open; CheckMainFile
 // detects SQLite and Resolve disagreeing, not a concurrent swap.
 func Resolve(input string, busy time.Duration) (dsn, diskPath string, err error) {
@@ -78,8 +79,13 @@ func Resolve(input string, busy time.Duration) (dsn, diskPath string, err error)
 // checkURI validates a parsed file: URI and returns its decoded filename and
 // whether it names no file (memory or temporary database).
 func checkURI(u *url.URL) (name string, memory bool, err error) {
-	if u.Host != "" && u.Host != "localhost" {
+	if u.User != nil || u.Host != "" && u.Host != "localhost" {
 		return "", false, fmt.Errorf("sqlitedsn: URI %q names host %q; only localhost is allowed", u.String(), u.Host)
+	}
+	// modernc reads everything after the first "?" as the query, so a
+	// fragment would end up inside the last query value (#680).
+	if u.Fragment != "" {
+		return "", false, fmt.Errorf("sqlitedsn: URI %q has a fragment; remove the #...", u.String())
 	}
 	name = u.Path
 	if u.Opaque != "" {
@@ -190,9 +196,11 @@ func sqliteUnixFullPath(name string) (string, error) {
 			if info.Mode()&fs.ModeSymlink == 0 {
 				continue
 			}
-			if links++; links > maxSymlinks {
+			// SQLite tests the count before incrementing it.
+			if links > maxSymlinks {
 				return fmt.Errorf("more than %d symlinks", maxSymlinks)
 			}
+			links++
 			target, err := os.Readlink(cur)
 			if err != nil {
 				return err
