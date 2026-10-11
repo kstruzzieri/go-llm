@@ -134,7 +134,13 @@ func openMemoryRuntime(ctx context.Context, getenv func(string) string, root str
 		rt.user = store
 	}
 	if wantRecords {
-		rs, rerr := memory.NewMemoryRecordStore(ctx, db, memory.RecordStoreConfig{KeyDir: dbPath + ".keys", Writer: memory.WriterGolem})
+		// The keys live beside the file SQLite opens, as with OpenRecordStore
+		// (#648): a symlinked memories.db keeps them beside its target.
+		keyDir, rerr := memory.DefaultRecordKeyDir(dbPath)
+		var rs *memory.MemoryRecordStore
+		if rerr == nil {
+			rs, rerr = memory.NewMemoryRecordStore(ctx, db, memory.RecordStoreConfig{KeyDir: keyDir, Writer: memory.WriterGolem})
+		}
 		if rerr != nil {
 			rt.warns = append(rt.warns, "agent memory disabled: "+rerr.Error())
 		} else {

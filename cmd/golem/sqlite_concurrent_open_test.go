@@ -157,8 +157,8 @@ func TestFeedbackGuardChecksTheFileSQLiteOpens(t *testing.T) {
 			if called || svc != nil {
 				t.Fatalf("openConfiguredFeedback(%q) reached the opener; want the workspace guard to refuse it", db)
 			}
-			if !strings.Contains(warning, "behavioral feedback disabled") {
-				t.Fatalf("warning = %q, want feedback disabled by the guard", warning)
+			if !strings.Contains(warning, "behavioral feedback disabled") || !strings.Contains(warning, "resolves inside root") && !strings.Contains(warning, "must be outside root") {
+				t.Fatalf("warning = %q, want feedback disabled by the workspace guard", warning)
 			}
 		})
 	}
@@ -192,5 +192,48 @@ func TestChmodIndexDBFilesFollowsTheFileSQLiteOpens(t *testing.T) {
 		if info, err := os.Stat(p); err != nil || info.Mode().Perm() != 0o600 {
 			t.Fatalf("%s = %v, %v; want 0600", p, info, err)
 		}
+	}
+}
+
+// TestOpenMemoryRuntimeKeysBesideTheFileSQLiteOpens: Golem's agent-memory keys
+// follow a symlinked memories.db to its target, as OpenRecordStore's do (#648).
+func TestOpenMemoryRuntimeKeysBesideTheFileSQLiteOpens(t *testing.T) {
+	home := t.TempDir()
+	getenv := func(k string) string {
+		if k == "HOME" {
+			return home
+		}
+		return ""
+	}
+	dbPath, err := memoryDBPath(getenv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	targetDir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(targetDir, "memories.db")
+	// An existing target, as a dotfile-managed link would have; the workspace
+	// guard refuses a dangling link.
+	if err := os.WriteFile(target, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, dbPath); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	rt := openMemoryRuntime(t.Context(), getenv, "/some/workspace/root", false, true)
+	if rt.records == nil {
+		t.Fatalf("agent memory not opened: %v", rt.warns)
+	}
+	t.Cleanup(func() { _ = rt.db.Close() })
+	if _, err := os.Stat(filepath.Join(target+".keys", "current.pem")); err != nil {
+		t.Fatalf("signing key not beside the symlink's target: %v", err)
+	}
+	if _, err := os.Lstat(dbPath + ".keys"); !os.IsNotExist(err) {
+		t.Fatalf("key directory created beside the link: %v", err)
 	}
 }
