@@ -95,7 +95,7 @@ func (w *Workspace) openMutationTarget(p string) (target *mutationTarget, result
 		if err != nil {
 			return nil, err
 		}
-		name, err := workspaceCanonicalName(parent, part, &st)
+		name, err := w.canonicalName(parent, part, &st)
 		if errors.Is(err, fs.ErrPermission) {
 			if w.guard != nil {
 				return nil, w.denyScope()
