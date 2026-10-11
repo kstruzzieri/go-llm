@@ -2362,6 +2362,11 @@ func TestBlockAttemptSkipsClosedAttempt(t *testing.T) {
 		// steps", porcelain.py); Golem still matches on both ids.
 		{"defence in depth: same attempt id failed under another step", claimed + `{"schema_version":"1.0.0","step_id":"P2","attempt_id":"A-P1","event":"failed"}` + "\n", ""},
 		{"malformed row", claimed + "{\n", "; check attempt state before blocking: this workspace holds incompatible AgentFlow state (.agent/step-runs.jsonl:2 unreadable); finish that run, or build its proof, with the AgentFlow version that wrote it, then move .agent/ aside before starting an AgentFlow 1.x run; attempt not blocked; run -agentflow-status"},
+		// A newer AgentFlow 1.x may add a terminal event; an event Golem does not
+		// know fails closed (no block) rather than risk an event after a
+		// terminal one.
+		{"unknown event", claimed + event("cancelled"), `; check attempt state before blocking: attempt A-P1 has an event this Golem does not know ("cancelled"); attempt not blocked; run -agentflow-status`},
+		{"unknown event is escaped", claimed + event(`x\u001b[2J`), `; check attempt state before blocking: attempt A-P1 has an event this Golem does not know ("x\x1b[2J"); attempt not blocked; run -agentflow-status`},
 	}
 	providerDown, gateDown := errors.New("provider down"), errors.New("gate down")
 	paths := []struct {

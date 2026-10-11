@@ -177,7 +177,9 @@ func retainedTimeoutReport(root, id string) error {
 // root's step-run ledger records for step's attempt, or "". AgentFlow's
 // block-step checks only that the attempt was opened, and its ledger reader
 // rejects any event after a terminal one ("attempt ... has events after a
-// terminal event", porcelain.py) as state_invalid. Read-only.
+// terminal event", porcelain.py) as state_invalid. An event outside AgentFlow
+// 1.0's terminal, open and lease sets is an error, so the caller does not
+// block. Read-only.
 func closedAttemptEvent(root, step, attempt string) (string, error) {
 	const name = "step-runs.jsonl"
 	b, err := readAgentflowState(filepath.Join(root, ".agent"), name)
@@ -211,6 +213,10 @@ func closedAttemptEvent(root, step, attempt string) (string, error) {
 			switch event {
 			case "completed", "blocked", "failed", "abandoned":
 				return event, nil
+			case "claimed", "amendment_started", "in_progress", "verified", "lease_renewed":
+			default:
+				// A newer AgentFlow 1.x may add a terminal event: fail closed.
+				return "", fmt.Errorf("attempt %s has an event this Golem does not know (%q)", attempt, event)
 			}
 		}
 	}

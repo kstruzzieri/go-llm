@@ -369,8 +369,9 @@ operator ran `agentflow fail-step` while Golem was running, Golem does not
 block it again, because AgentFlow 1.0 treats any event after a terminal one as
 invalid state. The error then ends
 `...; attempt already closed (<event>); not blocked`. When the step-run ledger
-cannot be read, Golem does not block either, the attempt stays open, and the
-error ends
+cannot be read, or shows an event for the attempt that this Golem does not
+know (a newer AgentFlow 1.x may add one), Golem does not block either, the
+attempt stays open, and the error ends
 `...; check attempt state before blocking: <error>; attempt not blocked; run -agentflow-status`.
 The `<error>` carries the pre-run advice for incompatible state; mid-run, run
 `-agentflow-status` to see what AgentFlow reports. The check narrows, but
