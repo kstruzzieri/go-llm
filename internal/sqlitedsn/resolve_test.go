@@ -176,19 +176,20 @@ func TestResolveKeepsMemoryURISpelling(t *testing.T) {
 // reads differently from Go, are refused before an opener creates anything.
 func TestResolveRejects(t *testing.T) {
 	t.Chdir(t.TempDir())
-	for name, input := range map[string]string{
-		"NUL in filename":    "file:a%00b.db",
-		"NUL in query key":   "file:x.db?mode=memory&mode%00x=rwc",
-		"duplicate mode":     "file:x.db?mode=ro&mode=rwc",
-		"vfs parameter":      "file:x.db?vfs=unix-none",
-		"semicolon pair":     "file:x.db?a=1;b=2",
-		"bad query escape":   "file:x.db?a=%zz",
-		"foreign host":       "file://server/x.db",
-		"duplicate mode mem": "file:x.db?mode=memory&mode=rwc",
+	for name, tc := range map[string]struct{ input, want string }{
+		"NUL in filename":    {"file:a%00b.db", "NUL in its filename"},
+		"NUL in query key":   {"file:x.db?mode=memory&mode%00x=rwc", "NUL in its query"},
+		"duplicate mode":     {"file:x.db?mode=ro&mode=rwc", "repeats mode"},
+		"duplicate mode mem": {"file:x.db?mode=memory&mode=rwc", "repeats mode"},
+		"vfs parameter":      {"file:x.db?vfs=unix-none", "selects a VFS"},
+		"semicolon pair":     {"file:x.db?a=1;b=2", "read differently"},
+		"bad query escape":   {"file:x.db?a=%zz", "read differently"},
+		"foreign host":       {"file://server/x.db", "names host"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if _, _, err := Resolve(input, time.Second); err == nil {
-				t.Fatalf("Resolve(%q) accepted", input)
+			_, _, err := Resolve(tc.input, time.Second)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Resolve(%q) = %v, want an error containing %q", tc.input, err, tc.want)
 			}
 		})
 	}
