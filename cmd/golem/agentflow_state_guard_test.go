@@ -638,7 +638,7 @@ const (
 
 // #642 A9: retainedTimedOutReceipt applies AgentFlow 1.0's exact predicate
 // (decision == "timeout" or timed_out is True) to every ledger row, the way
-// read_jsonl reads them.
+// read_jsonl reads them, and reports a row's own id only as short plain text.
 func TestRetainedTimedOutReceipt(t *testing.T) {
 	const line1, line2 = ".agent/command-receipts.jsonl:1", ".agent/command-receipts.jsonl:2"
 	for _, tt := range []struct {
@@ -661,6 +661,15 @@ func TestRetainedTimedOutReceipt(t *testing.T) {
 		{name: "numeric id falls back to the line", ledger: new("\n" + `{"id":7,"decision":"timeout"}`), want: line2},
 		{name: "empty id falls back to the line", ledger: new(`{"id":"","decision":"timeout"}`), want: line1},
 		{name: "missing id falls back to the line", ledger: new(`{"decision":"timeout"}`), want: line1},
+		{name: "an earlier row's id is not carried over", ledger: new(`{"id":"CR1","decision":"allowed"}` + "\n" + `{"decision":"timeout"}` + "\n"), want: line2},
+		{name: "keys are case-sensitive", ledger: new(`{"id":"CR1","Decision":"timeout","Timed_Out":true}`)},
+		// A cloned repo can carry .agent/, so an id that would reach the
+		// terminal raw or unbounded falls back to the line.
+		{name: "escape-sequence id falls back to the line", ledger: new(`{"id":"CR1\u001b[2J","decision":"timeout"}`), want: line1},
+		{name: "carriage-return id falls back to the line", ledger: new(`{"id":"CR1\rCR9","decision":"timeout"}`), want: line1},
+		{name: "bidi-override id falls back to the line", ledger: new(`{"id":"CR1\u202e9RC","decision":"timeout"}`), want: line1},
+		{name: "129-character id falls back to the line", ledger: new(`{"id":"` + strings.Repeat("A", 129) + `","decision":"timeout"}`), want: line1},
+		{name: "128-character id is reported", ledger: new(`{"id":"` + strings.Repeat("A", 128) + `","decision":"timeout"}`), want: strings.Repeat("A", 128)},
 		{name: "numeric flag is not True", ledger: new(`{"id":"CR1","timed_out":1}`)},
 		{name: "duplicate flag: last wins", ledger: new(`{"id":"CR1","timed_out":true,"timed_out":false}`)},
 		{name: "top-level null", ledger: new("null"), wantErr: incompatibleLedger},

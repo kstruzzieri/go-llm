@@ -977,13 +977,14 @@ func TestDriver_AmendmentFailuresStayIncomplete(t *testing.T) {
 		name   string
 		failAt string
 		runErr error
+		block  string // the one block-step call, or "" for none
 	}{
-		{"record review command", "record-review", nil},
-		{"amend command", "amend-step", nil},
-		{"model", "", errors.New("model failed")},
-		{"receipt", "", &unreceiptedEditError{err: errors.New("record rejected")}},
-		{"gate", "gate", nil},
-		{"finish step", "finish-step", nil},
+		{"record review command", "record-review", nil, ""},
+		{"amend command", "amend-step", nil, ""},
+		{"model", "", errors.New("model failed"), "block-step:P1:AM-P1:golem: agent run failed"},
+		{"receipt", "", &unreceiptedEditError{err: errors.New("record rejected")}, "block-step:P1:AM-P1:golem: unreceipted edit aborted the run"},
+		{"gate", "gate", nil, "block-step:P1:AM-P1:golem: gate execution failed"},
+		{"finish step", "finish-step", nil, ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1006,25 +1007,20 @@ func TestDriver_AmendmentFailuresStayIncomplete(t *testing.T) {
 			if (tt.runErr != nil || tt.failAt == "gate" || tt.failAt == "finish-step") && !strings.Contains(seq, "amend:P1:") {
 				t.Fatalf("failure did not leave an opened amendment: %v", af.seq)
 			}
-			// #642 A1, A2: a failed amendment run or gate blocks its attempt; a
-			// FinishStep error does not (A4).
-			switch tt.name {
-			case "model":
-				if !slices.Contains(af.seq, "block-step:P1:AM-P1:golem: agent run failed") {
-					t.Fatalf("failed amendment run was not blocked: %v", af.seq)
+			// #642 A1, A2: a failed amendment run or gate blocks exactly its own
+			// attempt; a record-review, amend-step or FinishStep error (A4)
+			// blocks nothing.
+			var blocks, want []string
+			for _, call := range af.seq {
+				if strings.HasPrefix(call, "block-step:") {
+					blocks = append(blocks, call)
 				}
-			case "receipt":
-				if !slices.Contains(af.seq, "block-step:P1:AM-P1:golem: unreceipted edit aborted the run") {
-					t.Fatalf("unreceipted amendment edit was not blocked: %v", af.seq)
-				}
-			case "gate":
-				if !slices.Contains(af.seq, "block-step:P1:AM-P1:golem: gate execution failed") {
-					t.Fatalf("failed amendment gate was not blocked: %v", af.seq)
-				}
-			case "finish step":
-				if strings.Contains(seq, "block-step") {
-					t.Fatalf("finish-step failure blocked the attempt: %v", af.seq)
-				}
+			}
+			if tt.block != "" {
+				want = []string{tt.block}
+			}
+			if !slices.Equal(blocks, want) {
+				t.Fatalf("block-step calls = %q, want %q (all calls: %v)", blocks, want, af.seq)
 			}
 		})
 	}
@@ -2297,10 +2293,10 @@ func TestRunAttemptGateTimeoutReportsRetainedReceipt(t *testing.T) {
 			return "; attempt recorded as blocked"
 		}},
 		{"unreadable receipts", "", nil, func(string) string {
-			return "; attempt recorded as blocked; " + unreadable
+			return "; attempt recorded as blocked; read command receipts for the timeout check: " + unreadable
 		}},
 		{"unreadable receipts, block fails", "", errBlock, func(string) string {
-			return "; record blocked attempt: block rejected; " + unreadable
+			return "; record blocked attempt: block rejected; read command receipts for the timeout check: " + unreadable
 		}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -2332,5 +2328,68 @@ func TestRunAttemptGateTimeoutReportsRetainedReceipt(t *testing.T) {
 			}
 			assertFreshBlockContext(t, af.blocks)
 		})
+	}
+}
+
+// #642: AgentFlow 1.0's block-step only checks that the attempt was opened,
+// and its ledger reader then rejects an event after a terminal one as
+// state_invalid. So a failed run or gate whose attempt root's ledger already
+// closed (an operator's break-glass fail-step, say) is reported and not
+// blocked, nor is an attempt whose ledger cannot be read. A terminal event for
+// another attempt or step is no reason to skip the block.
+func TestBlockAttemptSkipsClosedAttempt(t *testing.T) {
+	const claimed = `{"schema_version":"1.0.0","step_id":"P1","attempt_id":"A-P1","event":"claimed"}` + "\n"
+	rows := []struct {
+		name, ledger string
+		suffix       string // after the cause; "" means the block runs
+	}{
+		{"completed", claimed + `{"schema_version":"1.0.0","step_id":"P1","attempt_id":"A-P1","event":"completed"}` + "\n", "; attempt already closed (completed); not blocked"},
+		{"blocked", claimed + `{"schema_version":"1.0.0","step_id":"P1","attempt_id":"A-P1","event":"blocked"}` + "\n", "; attempt already closed (blocked); not blocked"},
+		{"failed", claimed + `{"schema_version":"1.0.0","step_id":"P1","attempt_id":"A-P1","event":"failed"}` + "\n", "; attempt already closed (failed); not blocked"},
+		{"abandoned", claimed + `{"schema_version":"1.0.0","step_id":"P1","attempt_id":"A-P1","event":"abandoned"}` + "\n", "; attempt already closed (abandoned); not blocked"},
+		{"control: open attempt", claimed, ""},
+		{"control: another attempt failed", claimed + `{"schema_version":"1.0.0","step_id":"P1","attempt_id":"A-P2","event":"failed"}` + "\n", ""},
+		{"control: another step failed", claimed + `{"schema_version":"1.0.0","step_id":"P2","attempt_id":"A-P1","event":"failed"}` + "\n", ""},
+		{"malformed row", claimed + "{\n", "; check attempt state before blocking: this workspace holds incompatible AgentFlow state (.agent/step-runs.jsonl:2 unreadable); finish that run, or build its proof, with the AgentFlow version that wrote it, then move .agent/ aside before starting an AgentFlow 1.x run; attempt not blocked"},
+	}
+	providerDown, gateDown := errors.New("provider down"), errors.New("gate down")
+	paths := []struct {
+		name   string
+		runErr error
+		failAt map[string]error
+		cause  error
+		prefix string
+		before []string // calls before the block
+		block  string
+	}{
+		{"run error", providerDown, nil, providerDown, "step P1 attempt A-P1: provider down", nil, "block-step:P1:A-P1:golem: agent run failed"},
+		{"gate error", nil, map[string]error{"gate": gateDown}, gateDown, `step P1 attempt A-P1: gate "go test" failed: gate down`, []string{"gate:P1:go test"}, "block-step:P1:A-P1:golem: gate execution failed"},
+	}
+	for _, p := range paths {
+		for _, tt := range rows {
+			t.Run(p.name+"/"+tt.name, func(t *testing.T) {
+				root := t.TempDir()
+				writeAgentFile(t, root, "step-runs.jsonl", tt.ledger)
+				af := &fakeAF{failAt: p.failAt}
+				plan := stopTestPlan()
+				d := &driver{af: af, plan: plan, root: root, runStep: func(context.Context, agentflow.Step, string, string) error {
+					return p.runErr
+				}}
+				err := d.runAttempt(context.Background(), plan.Steps[0], "A-P1", "goal")
+				want, wantSeq := p.prefix+tt.suffix, p.before
+				if tt.suffix == "" {
+					want, wantSeq = p.prefix+"; attempt recorded as blocked", append(slices.Clone(p.before), p.block)
+				}
+				if err == nil || err.Error() != want {
+					t.Fatalf("err = %v\nwant %s", err, want)
+				}
+				if !errors.Is(err, p.cause) {
+					t.Fatalf("err = %v does not wrap the cause", err)
+				}
+				if !equalSeq(af.seq, wantSeq) {
+					t.Fatalf("agentflow calls = %v, want %v", af.seq, wantSeq)
+				}
+			})
+		}
 	}
 }

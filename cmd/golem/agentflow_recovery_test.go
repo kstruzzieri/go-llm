@@ -1503,3 +1503,113 @@ func TestResumeRefusesRetainedTimeoutBeforeMutation(t *testing.T) {
 		}
 	})
 }
+
+// #642 D9: resume keeps its earlier refusals (a fail-closed state, the
+// projection and binding checks, a finite enforced lease) ahead of the A9
+// timeout refusal.
+func TestResumeKeepsEarlierRefusalsOverRetainedTimeout(t *testing.T) {
+	missing := []agentflow.ResumabilityGate{
+		{Kind: "command", Label: "go test ./...", Status: "missing"},
+		{Kind: "command", Label: "go vet ./...", Status: "missing"},
+	}
+	validationMissing := func(t *testing.T, f *resumeFixture) agentflow.NextActionState {
+		return f.attemptState(t, "validation_missing", missing)
+	}
+	for _, tt := range []struct {
+		name     string
+		advisory bool
+		state    func(t *testing.T, f *resumeFixture) agentflow.NextActionState
+		mutate   func(f *resumeFixture)
+		want     string
+	}{
+		{name: "fail-closed state", advisory: true, state: func(t *testing.T, f *resumeFixture) agentflow.NextActionState {
+			return f.noAttemptState(t, "drift_failing", false)
+		}, want: `agentflow resume blocked in state "drift_failing": blocked by drift findings`},
+		{name: "foreign owner", advisory: true, state: validationMissing, mutate: func(f *resumeFixture) {
+			f.projection()["attempt"].(map[string]any)["owner"] = "other"
+		}, want: `agentflow resumability attempt "A1" is owned by "other", want "golem"`},
+		{name: "plan digest mismatch", advisory: true, state: validationMissing, mutate: func(f *resumeFixture) {
+			f.projection()["contract"].(map[string]any)["plan_sha256"] = "other"
+		}, want: "task plan does not match Agentflow resumability contract"},
+		{name: "finite enforced live lease", state: validationMissing,
+			want: "agentflow resume blocks validation_missing under a finite enforced lease because Agentflow cannot guarantee duplicate-free, no-renew recovery"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			fixture := newResumeFixture(t)
+			if tt.advisory {
+				fixture.useAdvisoryLease()
+			}
+			_ = tt.state(t, &fixture)
+			if tt.mutate != nil {
+				tt.mutate(&fixture)
+			}
+			writeAgentFile(t, fixture.root, "command-receipts.jsonl", timeoutReceiptCR1+"\n")
+			af := &fakeAF{nextActions: []agentflow.NextActionState{fixture.state(t)}}
+			d := &driver{af: af, plan: recoveryPlan(), root: fixture.root}
+			_, err := d.resume(context.Background(), fixture.root, fixture.planJSON, nil)
+			if err == nil || err.Error() != tt.want {
+				t.Fatalf("err = %v\nwant %s", err, tt.want)
+			}
+			if want := []string{"probe", "next-action"}; !reflect.DeepEqual(af.seq, want) {
+				t.Fatalf("seq = %v, want %v", af.seq, want)
+			}
+		})
+	}
+}
+
+// timeoutGateAF is AgentFlow whose run appends a timed-out receipt to root and
+// exits 124, as a settlement gate that outlives its timeout_seconds does.
+type timeoutGateAF struct {
+	*fakeAF
+	t    *testing.T
+	root string
+}
+
+func (a timeoutGateAF) RunGate(ctx context.Context, step, attempt, gate string, argv []string) error {
+	writeAgentFile(a.t, a.root, "command-receipts.jsonl", timeoutReceiptCR1+"\n")
+	_ = a.fakeAF.RunGate(ctx, step, attempt, gate, argv)
+	return &agentflow.CommandError{Cmd: "run", Exit: 124, Stderr: "command timed out after 1 seconds"}
+}
+
+// #642 A9: resume's settlement reads the root resume was given, not the
+// driver's, so a settlement gate that times out reports that root's receipt.
+func TestResumeSettlementGateTimeoutReportsResumeRoot(t *testing.T) {
+	fixture := newResumeFixture(t)
+	fixture.useAdvisoryLease()
+	state := fixture.attemptState(t, "validation_missing", []agentflow.ResumabilityGate{
+		{Kind: "command", Label: "go test ./...", Status: "missing"},
+		{Kind: "command", Label: "go vet ./...", Status: "missing"},
+	})
+	af := &fakeAF{nextActions: []agentflow.NextActionState{state}}
+	d := &driver{af: timeoutGateAF{fakeAF: af, t: t, root: fixture.root}, plan: recoveryPlan(), root: t.TempDir()}
+	_, err := d.resume(context.Background(), fixture.root, fixture.planJSON, nil)
+	want := `step P1 attempt A1: gate "unit-tests" failed: agentflow run: exit 124: command timed out after 1 seconds; attempt recorded as blocked; ` + wantTimeoutReport(fixture.root, "CR1")
+	if err == nil || err.Error() != want {
+		t.Fatalf("err = %v\nwant %s", err, want)
+	}
+	if want := []string{"probe", "next-action", "gate:P1:unit-tests", "block-step:P1:A1:golem: gate execution failed"}; !reflect.DeepEqual(af.seq, want) {
+		t.Fatalf("seq = %v, want %v", af.seq, want)
+	}
+}
+
+// #642 A9: status blocks an otherwise-resumable state whose command-receipt
+// ledger cannot be read, rather than reading it as no timeout.
+func TestAgentflowStatus_UnreadableReceiptsBlocksResume(t *testing.T) {
+	fixture := newResumeFixture(t)
+	fixture.useAdvisoryLease()
+	state := fixture.noAttemptState(t, "step_unclaimed", true)
+	writeAgentFile(t, fixture.root, "command-receipts.jsonl", "{\n")
+	payload, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	err = runAgentflowStatusWithRunner(context.Background(), &out, fixture.root, false, &recoveryRunner{payload: payload})
+	var exit *agentflowStatusExit
+	if !errors.As(err, &exit) || exit.ExitCode() != 3 || exit.diagnostic != "" {
+		t.Fatalf("err = %v, want status exit 3 without a diagnostic\n%s", err, out.String())
+	}
+	if want := "\nresume: blocked: " + incompatibleLedger + "\n"; !strings.Contains(out.String(), want) {
+		t.Fatalf("output missing %q:\n%s", want, out.String())
+	}
+}

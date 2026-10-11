@@ -1464,14 +1464,10 @@ func TestAgentflowFailedGateIsBlockedAndResumes_RealCLI(t *testing.T) {
 	}
 }
 
-// runTimedOutGateFixture gives the fixture's P1 a gate that outlives its
-// gate-level timeout_seconds (honored by AgentFlow) and drives one task run:
-// the model writes the answer, the gate times out, and Golem blocks A1 and
-// reports the retained timeout receipt (#642 A2, A9).
-func runTimedOutGateFixture(t *testing.T) (string, agentflow.Runner) {
+// setSlowGate rewrites dir/plan.json so P1's one validation gate runs argv
+// under a gate-level timeout_seconds of 1, which AgentFlow honors.
+func setSlowGate(t *testing.T, dir string, argv []string) {
 	t.Helper()
-	dir := t.TempDir()
-	copyTree(t, "../../testdata/agentflow", dir)
 	planPath := filepath.Join(dir, "plan.json")
 	planBytes, err := os.ReadFile(planPath)
 	if err != nil {
@@ -1483,13 +1479,24 @@ func runTimedOutGateFixture(t *testing.T) (string, agentflow.Runner) {
 	}
 	step := plan["steps"].([]any)[0].(map[string]any)
 	step["validation"] = []string{"slow-gate"}
-	step["gates"] = []map[string]any{{"kind": "command", "run": []string{"sleep", "5"}, "timeout_seconds": 1}}
+	step["gates"] = []map[string]any{{"kind": "command", "run": argv, "timeout_seconds": 1}}
 	if planBytes, err = json.Marshal(plan); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(planPath, planBytes, 0o600); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// runTimedOutGateFixture gives the fixture's P1 a gate that outlives its
+// gate-level timeout_seconds (honored by AgentFlow) and drives one task run:
+// the model writes the answer, the gate times out, and Golem blocks A1 and
+// reports the retained timeout receipt (#642 A2, A9).
+func runTimedOutGateFixture(t *testing.T) (string, agentflow.Runner) {
+	t.Helper()
+	dir := t.TempDir()
+	copyTree(t, "../../testdata/agentflow", dir)
+	setSlowGate(t, dir, []string{"sleep", "5"})
 	gitInit(t, dir)
 	runner := agentflowRunnerOrSkip(t, dir)
 
@@ -1588,5 +1595,205 @@ func TestAgentflowReviewRefusesRetainedGateTimeout_RealCLI(t *testing.T) {
 	}
 	if after := snapshotSmokeAgentTree(t, dir); !reflect.DeepEqual(after, before) {
 		t.Fatal("refused review changed .agent/")
+	}
+}
+
+// startFixtureExecution commits dir, then locks its plan and initializes
+// execution through an owned golem client, as a task run does before its
+// first claim.
+func startFixtureExecution(t *testing.T, dir string) (agentflow.Runner, *agentflow.Client, agentflow.Plan, []byte) {
+	t.Helper()
+	gitInit(t, dir)
+	runner := agentflowRunnerOrSkip(t, dir)
+	client := agentflow.NewOwnedClient(runner, dir, "golem")
+	planPath := filepath.Join(dir, "plan.json")
+	planBytes, err := os.ReadFile(planPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var plan agentflow.Plan
+	if err := json.Unmarshal(planBytes, &plan); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	recommendation, err := client.RecommendWorkflow(ctx, agentflow.TaskBriefFromPlan(plan, "feature"), "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.LockPlan(ctx, planPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.MaterializeWorkflowContract(ctx, recommendation); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.InitExecution(ctx); err != nil {
+		t.Fatal(err)
+	}
+	return runner, client, plan, planBytes
+}
+
+// writeAndRecordAnswer writes src/answer.txt and records it against attempt.
+func writeAndRecordAnswer(t *testing.T, client *agentflow.Client, dir, attempt, answer string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, "src", "answer.txt"), []byte(answer), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.RecordFileChange(context.Background(), "P1", attempt, "src/answer.txt"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// #642: an operator's break-glass fail-step closes a live Golem attempt, so
+// Golem's next failure on it must not block it: AgentFlow 1.0's block-step
+// would still append, and its ledger reader rejects any event after a terminal
+// one as state_invalid, which no recovery path accepts.
+func TestAgentflowBlockSkipsAttemptClosedByOperator_RealCLI(t *testing.T) {
+	dir := t.TempDir()
+	copyTree(t, "../../testdata/agentflow", dir)
+	runner, client, plan, _ := startFixtureExecution(t, dir)
+	ctx := context.Background()
+	attempt, err := client.ClaimStep(ctx, "P1")
+	if err != nil || attempt != "A1" {
+		t.Fatalf("claim = %q, %v; want A1", attempt, err)
+	}
+	argv := []string{"fail-step", "P1", "--root", dir, "--attempt", "A1", "--reason", "operator: break-glass", "--agent", "operator"}
+	if out, errOut, exit, err := runner.Run(ctx, argv, nil); err != nil || exit != 0 {
+		t.Fatalf("fail-step: exit=%d err=%v stdout=%s stderr=%s", exit, err, out, errOut)
+	}
+	step, _ := findStep(&plan, "P1")
+	d := &driver{af: client, plan: &plan, root: dir, runStep: func(context.Context, agentflow.Step, string, string) error {
+		return errors.New("provider down")
+	}}
+	// Errorf, not Fatalf: without the check the ledger outcome below is the
+	// evidence that matters.
+	if err := d.runAttempt(ctx, step, "A1", "goal"); err == nil || err.Error() != "step P1 attempt A1: provider down; attempt already closed (failed); not blocked" {
+		t.Errorf("runAttempt err = %v", err)
+	}
+	events := readStepRunEvents(t, dir)
+	if got := lastStepRunEvent(events, "A1"); got.Event != "failed" || countStepRunEvents(events, "blocked") != 0 {
+		t.Errorf("A1 last event = %+v, blocked events = %d; want failed and none", got, countStepRunEvents(events, "blocked"))
+	}
+	if state, err := client.NextAction(ctx); err != nil || state.State != "step_unclaimed" {
+		t.Fatalf("next-action state = %q, err = %v; want step_unclaimed, not state_invalid", state.State, err)
+	}
+}
+
+// openSettlementAttempt claims P1 as golem in a fresh fixture (with slowGate
+// as P1's gate when set), then writes and records answer, so resume finds an
+// owned validation_missing attempt to settle.
+func openSettlementAttempt(t *testing.T, slowGate []string, answer string) (string, agentflow.Runner, *agentflow.Client, agentflow.Plan, []byte) {
+	t.Helper()
+	dir := t.TempDir()
+	copyTree(t, "../../testdata/agentflow", dir)
+	if slowGate != nil {
+		setSlowGate(t, dir, slowGate)
+	}
+	runner, client, plan, planBytes := startFixtureExecution(t, dir)
+	ctx := context.Background()
+	attempt, err := client.ClaimStep(ctx, "P1")
+	if err != nil || attempt != "A1" {
+		t.Fatalf("claim = %q, %v; want A1", attempt, err)
+	}
+	writeAndRecordAnswer(t, client, dir, attempt, answer)
+	if state, err := client.NextAction(ctx); err != nil || state.State != "validation_missing" {
+		t.Fatalf("setup state = %q, err = %v; want validation_missing", state.State, err)
+	}
+	return dir, runner, client, plan, planBytes
+}
+
+// #642 A2 (D2): a gate resume's own settlement runs fails, so resume blocks
+// that attempt; a second resume runs the model in a new attempt to complete.
+func TestAgentflowResumeSettlementGateFailureBlocks_RealCLI(t *testing.T) {
+	dir, runner, client, plan, planBytes := openSettlementAttempt(t, nil, "wrong\n")
+	ctx := context.Background()
+	d := &driver{af: client, plan: &plan, root: dir, runStep: func(context.Context, agentflow.Step, string, string) error {
+		return errors.New("settlement ran the model")
+	}}
+	_, err := d.resume(ctx, dir, planBytes, nil)
+	if want := `step P1 attempt A1: gate "unit-tests" failed: agentflow run: exit 1; attempt recorded as blocked`; err == nil || err.Error() != want {
+		t.Fatalf("resume 1 err = %v\nwant %s", err, want)
+	}
+	if got := lastStepRunEvent(readStepRunEvents(t, dir), "A1"); got.Event != "blocked" || got.Reason != "golem: gate execution failed" {
+		t.Fatalf("A1 last event = %+v, want blocked with the gate reason", got)
+	}
+	var status bytes.Buffer
+	statusErr := runAgentflowStatusWithRunner(ctx, &status, dir, false, runner)
+	var exit *agentflowStatusExit
+	if !errors.As(statusErr, &exit) || exit.ExitCode() != 2 {
+		t.Fatalf("status = %v, want exit 2\n%s", statusErr, status.String())
+	}
+	models := 0
+	d = &driver{af: client, plan: &plan, root: dir, runStep: func(ctx context.Context, step agentflow.Step, attempt, _ string) error {
+		models++
+		writeAndRecordAnswer(t, client, dir, attempt, "expected\n")
+		return nil
+	}}
+	if final, err := d.resume(ctx, dir, planBytes, nil); err != nil || final.State != "complete" || models != 1 {
+		t.Fatalf("resume 2 state = %q, err = %v, model runs = %d; want complete after one", final.State, err, models)
+	}
+}
+
+// #642 A9: a settlement gate that times out reports the resume root's
+// retained receipt. The driver's own root is a different, clean directory, so
+// reading it would report nothing.
+func TestAgentflowResumeSettlementGateTimeoutReportsRoot_RealCLI(t *testing.T) {
+	dir, runner, client, plan, planBytes := openSettlementAttempt(t, []string{"sleep", "5"}, "expected\n")
+	ctx := context.Background()
+	d := &driver{af: client, plan: &plan, root: t.TempDir(), runStep: func(context.Context, agentflow.Step, string, string) error {
+		return errors.New("settlement ran the model")
+	}}
+	_, err := d.resume(ctx, dir, planBytes, nil)
+	if err == nil || !strings.HasPrefix(err.Error(), `step P1 attempt A1: gate "slow-gate" failed: agentflow run: exit 124: `) ||
+		!strings.HasSuffix(err.Error(), "; attempt recorded as blocked; "+wantTimeoutReport(dir, "CR1")) {
+		t.Fatalf("resume err = %v", err)
+	}
+	var status bytes.Buffer
+	statusErr := runAgentflowStatusWithRunner(ctx, &status, dir, false, runner)
+	var exit *agentflowStatusExit
+	if !errors.As(statusErr, &exit) || exit.ExitCode() != 3 || !strings.Contains(status.String(), "\nresume: blocked: "+wantTimeoutReport(dir, "CR1")+"\n") {
+		t.Fatalf("status = %v, want exit 3 with the timeout report\n%s", statusErr, status.String())
+	}
+}
+
+// #642 A9's premise (agentflow#60): AgentFlow 1.0 rejects a timed-out receipt
+// even after a later attempt of the same step passes that gate and finishes.
+func TestAgentflowSupersededTimeoutStillFailsVerify_RealCLI(t *testing.T) {
+	dir := t.TempDir()
+	copyTree(t, "../../testdata/agentflow", dir)
+	marker := filepath.Join(t.TempDir(), "fast")
+	argv := []string{"sh", "-c", "test -e " + marker + " || sleep 5"}
+	setSlowGate(t, dir, argv)
+	_, client, _, _ := startFixtureExecution(t, dir)
+	ctx := context.Background()
+	a1, err := client.ClaimStep(ctx, "P1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeAndRecordAnswer(t, client, dir, a1, "expected\n")
+	if err := client.RunGate(ctx, "P1", a1, "slow-gate", argv); err == nil {
+		t.Fatal("A1 gate did not time out")
+	}
+	if err := client.BlockStep(ctx, "P1", a1, gateBlockReason); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(marker, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a2, err := client.ClaimStep(ctx, "P1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeAndRecordAnswer(t, client, dir, a2, "expected\n")
+	if err := client.RunGate(ctx, "P1", a2, "slow-gate", argv); err != nil {
+		t.Fatalf("A2 gate: %v", err)
+	}
+	if err := client.FinishStep(ctx, "P1", a2); err != nil {
+		t.Fatalf("A2 finish-step: %v", err)
+	}
+	if proof, err := client.FinishRun(ctx); err == nil || !strings.Contains(err.Error(), "command receipt CR1 for P1 timed out after 1 seconds") {
+		t.Fatalf("finish-run proof = %q, err = %v: if this passes verification, AgentFlow fixed agentflow#60 and Golem's #642 A9 refusals (status/resume/review) must be revisited", proof, err)
 	}
 }
