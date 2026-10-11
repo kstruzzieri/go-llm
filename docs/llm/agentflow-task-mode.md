@@ -299,11 +299,11 @@ So does any state that would exit `2` while the root retains a timed-out
 command receipt, and resume refuses it before any change (see
 [Timed-out gates](#timed-out-gates)).
 
-A failed run or gate closes its attempt (see
+A failed run or gate blocks its attempt when it can (see
 [Failed step runs](#failed-step-runs)), so `validation_missing` and
-`step_unverified` now come mostly from a block that itself failed, a process
-that died mid-attempt, a resume that refused before its gates, a `FinishStep`
-failure, an interrupted settlement, or a tree written by an older Golem.
+`step_unverified` now come mostly from a block that itself failed or a
+step-run ledger Golem could not read, a process that died mid-attempt, a
+`FinishStep` failure, or a tree written by an older Golem.
 
 Unknown future states fail closed. Resume never initializes, locks, records
 evidence or reviews, renews/reclaims leases, re-runs a model for an open
@@ -371,19 +371,26 @@ invalid state. The error then ends
 `...; attempt already closed (<event>); not blocked`. When the step-run ledger
 cannot be read, Golem does not block either, the attempt stays open, and the
 error ends
-`...; check attempt state before blocking: <error>; attempt not blocked`. The
-check narrows, but cannot close, the window against a concurrent writer.
+`...; check attempt state before blocking: <error>; attempt not blocked; run -agentflow-status`.
+The `<error>` carries the pre-run advice for incompatible state; mid-run, run
+`-agentflow-status` to see what AgentFlow reports. The check narrows, but
+cannot close, the window against a concurrent writer.
 
-A gate AgentFlow refuses by its risk policy (`risk_policy: block`) is refused
-the same way on every attempt, so resuming runs the model again and fails
-again. Change the plan or the policy first.
+A high-risk gate command under `risk_policy: block` (`command_policy.risk_policy`
+in `.agent/execution.contract.json`) is refused the same way on every attempt,
+so resuming runs the model again and fails again. Golem passes
+`--confirm-risk`, so the default `require-confirmation` policy runs such a
+command. Change the policy before resuming. A plan change needs a new run:
+archive `.agent/` first, because a fresh `-plan` refuses the history and resume
+requires the locked plan.
 
-A blocked attempt is closed, so `-agentflow-status` reports `step_unclaimed`
-(exit `2`, unless the root retains a timed-out receipt or the lease policy is
-`enforce`; see below), and `-agentflow-resume` claims a new attempt and runs
-the model again. Resume never settles the failed attempt on its gates. When a
-gate errors while resume settles a `validation_missing` attempt, resume blocks
-that attempt the same way.
+A blocked attempt is closed, so, unless it was a review amendment (see below),
+`-agentflow-status` reports `step_unclaimed` (exit `2`, unless the root
+retains a timed-out receipt or the lease policy is `enforce`; see below), and
+`-agentflow-resume` claims a new attempt and runs the model again. Resume does
+not settle a blocked attempt on its gates. When a gate errors while resume
+settles a `validation_missing` attempt, resume blocks that attempt the same
+way.
 
 Edits the failed run made stay in the workspace, including an edit AgentFlow
 never receipted. To retry from a clean tree, restore the modified tracked files
@@ -440,8 +447,10 @@ then exits 124 and keeps the command receipt with `decision: "timeout"` (or
 timeout receipt, even after a later attempt's gate passes
 (kstruzzieri/agentflow#60), so that root's ledger can no longer reach a
 verified proof. Golem reads the root's command receipts and reports the first
-timed-out one by its `id` when that is plain printable text of at most 128
-characters, otherwise by its ledger line (`.agent/command-receipts.jsonl:<n>`):
+timed-out one by its `id` when that is an AgentFlow-style id (ASCII letters,
+digits, `.`, `_`, `-`; 1 to 128 characters, such as `CR3` or the aggregated
+`WTw2-CR3`), otherwise by its ledger line
+(`.agent/command-receipts.jsonl:<n>`):
 
 - After a gate error, the run error gains the report:
 
@@ -466,7 +475,7 @@ characters, otherwise by its ledger line (`.agent/command-receipts.jsonl:<n>`):
 If the command-receipt ledger cannot be read, each of these reports the read
 error instead: status as `resume: blocked: <error>`, resume and the review
 round in their refusal, and a gate error as
-`...; read command receipts for the timeout check: <error>`.
+`...; read command receipts for the timeout check: <error>; run -agentflow-status`.
 
 The remedy is a new run. Archive the complete `.agent/` directory outside the
 working tree, then start a fresh run (`golem -plan ...`, which initializes
@@ -474,7 +483,11 @@ it). Do not delete individual receipts, and do not use
 `agentflow init-execution --force`: it overwrites the execution contract and
 ledgers. Golem never deletes receipts and never suggests that command. As
 with any move of `.agent/`, the source changes the earlier run made stay in the
-workspace.
+workspace: restore or commit them before the new run, because run verification
+needs a receipt in the new ledger for every file `git status` shows changed.
+If the run came from a planning handoff, re-plan with `-goal`, or run `-plan`
+without `-workflow-handoff`: the handoff check reads
+`.agent/workflow.contract.json`, which went with the archive.
 
 ## Upgrading from AgentFlow 0.x
 
@@ -545,8 +558,9 @@ For an external plan, the task driver order is:
    state and projection checks (not its plan and contract bindings, which need
    the supplied `-plan`) and reports whether `-agentflow-resume` can recover.
    An attempt left open after its gate failed (the block itself failed, the
-   process died, or an older Golem wrote it) is one resume cannot settle yet
-   (#652); Golem otherwise blocks such an attempt (see
+   step-run ledger could not be read, the process died, or an older Golem
+   wrote it) is one resume cannot settle yet (#652); Golem otherwise blocks
+   such an attempt (see
    [Failed step runs](#failed-step-runs)).
 6. Let `finish-run` build and verify proof under the materialized policy.
 
