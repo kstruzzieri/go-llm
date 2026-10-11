@@ -368,6 +368,27 @@ func TestAgentflowFreshPlanRefusesExecutionHistory_RealCLI(t *testing.T) {
 	// and a review manifest, still proceeds over the history (the #643 review
 	// exemption). The manifest has no findings, so no amendment and no model
 	// call; the run re-runs finish-run to a proof.
+	reviewFlags := taskFlags
+	reviewFlags.reviewManifest = writeNoFindingsReviewManifest(t, dir)
+	reviewCaller := &recordingCaller{next: &scriptCaller{}}
+	third := &replSession{orch: agent.New(reviewCaller, agent.ContextManager{}), maxSteps: 4, clock: time.Now}
+	stdout.Reset()
+	stderr.Reset()
+	if err := runAgentflowTask(ctx, &stdout, &stderr, nil, third, reviewFlags, dir); err != nil {
+		t.Fatalf("run 3 (review round over the same plan): %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "review RR-20261010T120000Z-643a643b") || !strings.Contains(stdout.String(), "proof pack:") || len(reviewCaller.reqs) != 0 {
+		t.Fatalf("run 3 did not record the review and finish (model requests %d):\n%s", len(reviewCaller.reqs), stdout.String())
+	}
+	if state, err := agentflow.NewClient(runner, dir).NextAction(ctx); err != nil || state.State != "complete" {
+		t.Fatalf("after run 3: state=%q err=%v, want complete", state.State, err)
+	}
+}
+
+// writeNoFindingsReviewManifest writes a valid review manifest with no
+// findings under dir/.agent/review-contract and returns its path.
+func writeNoFindingsReviewManifest(t *testing.T, dir string) string {
+	t.Helper()
 	stateDir := filepath.Join(".agent", "review-contract")
 	if err := os.MkdirAll(filepath.Join(dir, stateDir), 0o700); err != nil {
 		t.Fatal(err)
@@ -385,24 +406,11 @@ func TestAgentflowFreshPlanRefusesExecutionHistory_RealCLI(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	reviewFlags := taskFlags
-	reviewFlags.reviewManifest = filepath.Join(dir, stateDir, "review-manifest.json")
-	if err := os.WriteFile(reviewFlags.reviewManifest, manifest, 0o600); err != nil {
+	path := filepath.Join(dir, stateDir, "review-manifest.json")
+	if err := os.WriteFile(path, manifest, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	reviewCaller := &recordingCaller{next: &scriptCaller{}}
-	third := &replSession{orch: agent.New(reviewCaller, agent.ContextManager{}), maxSteps: 4, clock: time.Now}
-	stdout.Reset()
-	stderr.Reset()
-	if err := runAgentflowTask(ctx, &stdout, &stderr, nil, third, reviewFlags, dir); err != nil {
-		t.Fatalf("run 3 (review round over the same plan): %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
-	}
-	if !strings.Contains(stdout.String(), "review RR-20261010T120000Z-643a643b") || !strings.Contains(stdout.String(), "proof pack:") || len(reviewCaller.reqs) != 0 {
-		t.Fatalf("run 3 did not record the review and finish (model requests %d):\n%s", len(reviewCaller.reqs), stdout.String())
-	}
-	if state, err := agentflow.NewClient(runner, dir).NextAction(ctx); err != nil || state.State != "complete" {
-		t.Fatalf("after run 3: state=%q err=%v, want complete", state.State, err)
-	}
+	return path
 }
 
 // #612 R-new: AgentFlow 1.0 rejects a 0.x plan before it looks at execution
@@ -1267,5 +1275,318 @@ func TestAgentflowStoppedStepPartialEditFailsClosed_RealCLI(t *testing.T) {
 	}
 	if claims != 3 {
 		t.Fatalf("claim events = %d, want three (A1, A2, A3)", claims)
+	}
+}
+
+// fixtureTaskFlags are the #643 T6 production-entry flags over dir/plan.json.
+func fixtureTaskFlags(dir string) flags {
+	return flags{planPath: filepath.Join(dir, "plan.json"), approveEdits: true, approveGates: true, agentflowSrc: os.Getenv("AGENTFLOW_SRC")}
+}
+
+// runFixtureTask drives the production task entry over dir with a fresh
+// session whose model is caller, and returns its stdout, stderr and error.
+func runFixtureTask(t *testing.T, dir string, caller agent.ModelCaller, f flags) (string, string, error) {
+	t.Helper()
+	sess := &replSession{orch: agent.New(caller, agent.ContextManager{}), maxSteps: 4, clock: time.Now}
+	var stdout, stderr bytes.Buffer
+	err := runAgentflowTask(context.Background(), &stdout, &stderr, nil, sess, f, dir)
+	return stdout.String(), stderr.String(), err
+}
+
+// commandReceipt is the subset of an AgentFlow command-receipts.jsonl row the
+// #642 tests read.
+type commandReceipt struct {
+	ID        string `json:"id"`
+	AttemptID string `json:"attempt_id"`
+	Decision  string `json:"decision"`
+	TimedOut  bool   `json:"timed_out"`
+	ExitCode  *int   `json:"exit_code"`
+}
+
+// readCommandReceipts returns the command-receipt ledger's rows, raw and
+// parsed.
+func readCommandReceipts(t *testing.T, dir string) ([]string, []commandReceipt) {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(dir, ".agent", "command-receipts.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var lines []string
+	var receipts []commandReceipt
+	for _, line := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+		if line == "" {
+			continue
+		}
+		var receipt commandReceipt
+		if err := json.Unmarshal([]byte(line), &receipt); err != nil {
+			t.Fatal(err)
+		}
+		lines = append(lines, line)
+		receipts = append(receipts, receipt)
+	}
+	return lines, receipts
+}
+
+// failureLine is stderr's "agentflow task failed: " line. The step's model
+// transcript renders to the same stream before it.
+func failureLine(stderr string) string {
+	for _, line := range strings.Split(stderr, "\n") {
+		if strings.HasPrefix(line, "agentflow task failed: ") {
+			return line
+		}
+	}
+	return ""
+}
+
+func countStepRunEvents(events []stepRunEvent, kind string) int {
+	n := 0
+	for _, event := range events {
+		if event.Event == kind {
+			n++
+		}
+	}
+	return n
+}
+
+// #642 A1: a failed model run blocks its attempt, so resume runs the model in
+// a new attempt. A1's partial write already satisfies the grep gate: before
+// the fix, resume settled A1 on that gate without the model.
+func TestAgentflowFailedStepRunIsBlockedAndResumes_RealCLI(t *testing.T) {
+	dir := t.TempDir()
+	copyTree(t, "../../testdata/agentflow", dir)
+	gitInit(t, dir)
+	runner := agentflowRunnerOrSkip(t, dir)
+
+	write := toolStep("w1", "write_file", `{"path":"src/answer.txt","content":"expected\n"}`)
+	failing := &errAfterCaller{inner: &scriptCaller{responses: []agent.ModelResult{write}}, failAt: 1, err: errors.New("provider down")}
+	_, stderr, err := runFixtureTask(t, dir, failing, fixtureTaskFlags(dir))
+	if line := failureLine(stderr); !errors.Is(err, errAgentflowTaskFailed) || !strings.HasPrefix(line, "agentflow task failed: step P1 attempt A1: ") || !strings.Contains(line, "; attempt recorded as blocked") {
+		t.Fatalf("run 1 err = %v\nstderr:\n%s", err, stderr)
+	}
+	if got := lastStepRunEvent(readStepRunEvents(t, dir), "A1"); got.Event != "blocked" || got.Reason != "golem: agent run failed" {
+		t.Fatalf("A1 last event = %+v, want blocked with the Golem reason", got)
+	}
+	if n := commandReceiptCount(t, dir); n != 0 {
+		t.Fatalf("command receipts = %d, want 0: a gate ran after the failed run", n)
+	}
+	if b, err := os.ReadFile(filepath.Join(dir, "src", "answer.txt")); err != nil || string(b) != "expected\n" {
+		t.Fatalf("src/answer.txt = %q, err=%v; want the partial write %q", b, err, "expected\n")
+	}
+
+	resume := fixtureTaskFlags(dir)
+	resume.agentflowResume = true
+	caller := &recordingCaller{next: &scriptCaller{responses: []agent.ModelResult{
+		toolStep("w2", "write_file", `{"path":"src/answer.txt","content":"expected\n"}`),
+		answerStep("done"),
+	}}}
+	stdout, stderr, err := runFixtureTask(t, dir, caller, resume)
+	if err != nil || len(caller.reqs) < 1 {
+		t.Fatalf("run 2 err = %v, model requests = %d\nstdout:\n%s\nstderr:\n%s", err, len(caller.reqs), stdout, stderr)
+	}
+	events := readStepRunEvents(t, dir)
+	if n := countStepRunEvents(events, "claimed"); n != 2 || lastStepRunEvent(events, "A1").Event != "blocked" || lastStepRunEvent(events, "A2").Event != "completed" {
+		t.Fatalf("claims=%d A1=%+v A2=%+v, want two claims, A1 blocked, A2 completed", n, lastStepRunEvent(events, "A1"), lastStepRunEvent(events, "A2"))
+	}
+	if _, receipts := readCommandReceipts(t, dir); len(receipts) != 1 || receipts[0].AttemptID != "A2" {
+		t.Fatalf("command receipts = %+v, want only A2's gate", receipts)
+	}
+	if state, err := agentflow.NewClient(runner, dir).NextAction(context.Background()); err != nil || state.State != "complete" {
+		t.Fatalf("after resume: state=%q err=%v, want complete", state.State, err)
+	}
+}
+
+// #642 A2: an ordinary failed gate blocks its attempt and keeps its receipt;
+// resume runs the model in a new attempt whose own gate receipt passes. This
+// is the non-timeout retry contract, not #652's recovery of an open
+// failed-gate attempt.
+func TestAgentflowFailedGateIsBlockedAndResumes_RealCLI(t *testing.T) {
+	dir := t.TempDir()
+	copyTree(t, "../../testdata/agentflow", dir)
+	gitInit(t, dir)
+	runner := agentflowRunnerOrSkip(t, dir)
+
+	_, stderr, err := runFixtureTask(t, dir, &scriptCaller{responses: []agent.ModelResult{
+		toolStep("w1", "write_file", `{"path":"src/answer.txt","content":"wrong\n"}`),
+		answerStep("done"),
+	}}, fixtureTaskFlags(dir))
+	// The display quotes the label as \" (recoveryDisplayText), and no timeout
+	// report follows the block.
+	if line := failureLine(stderr); !errors.Is(err, errAgentflowTaskFailed) ||
+		line != `agentflow task failed: step P1 attempt A1: gate \"unit-tests\" failed: agentflow run: exit 1; attempt recorded as blocked` {
+		t.Fatalf("run 1 err = %v\nstderr:\n%s", err, stderr)
+	}
+	if got := lastStepRunEvent(readStepRunEvents(t, dir), "A1"); got.Event != "blocked" || got.Reason != "golem: gate execution failed" {
+		t.Fatalf("A1 last event = %+v, want blocked with the gate reason", got)
+	}
+	lines, receipts := readCommandReceipts(t, dir)
+	if len(receipts) != 1 || receipts[0].AttemptID != "A1" || receipts[0].Decision == "timeout" || receipts[0].TimedOut {
+		t.Fatalf("command receipts = %+v, want A1's one non-timeout gate receipt", receipts)
+	}
+	a1Receipt := lines[0]
+
+	var status bytes.Buffer
+	statusErr := runAgentflowStatusWithRunner(context.Background(), &status, dir, false, runner)
+	var exit *agentflowStatusExit
+	if !errors.As(statusErr, &exit) || exit.ExitCode() != 2 {
+		t.Fatalf("status before resume = %v, want exit 2\n%s", statusErr, status.String())
+	}
+
+	resume := fixtureTaskFlags(dir)
+	resume.agentflowResume = true
+	caller := &recordingCaller{next: &scriptCaller{responses: []agent.ModelResult{
+		toolStep("w2", "write_file", `{"path":"src/answer.txt","content":"expected\n"}`),
+		answerStep("done"),
+	}}}
+	stdout, stderr, err := runFixtureTask(t, dir, caller, resume)
+	if err != nil || len(caller.reqs) < 1 {
+		t.Fatalf("run 2 err = %v, model requests = %d\nstdout:\n%s\nstderr:\n%s", err, len(caller.reqs), stdout, stderr)
+	}
+	events := readStepRunEvents(t, dir)
+	if lastStepRunEvent(events, "A1").Event != "blocked" || lastStepRunEvent(events, "A2").Event != "completed" {
+		t.Fatalf("A1=%+v A2=%+v, want A1 blocked and A2 completed", lastStepRunEvent(events, "A1"), lastStepRunEvent(events, "A2"))
+	}
+	if state, err := agentflow.NewClient(runner, dir).NextAction(context.Background()); err != nil || state.State != "complete" {
+		t.Fatalf("after resume: state=%q err=%v, want complete", state.State, err)
+	}
+	lines, receipts = readCommandReceipts(t, dir)
+	var a1, a2 []int
+	for i, receipt := range receipts {
+		switch receipt.AttemptID {
+		case "A1":
+			a1 = append(a1, i)
+		case "A2":
+			a2 = append(a2, i)
+		}
+	}
+	if len(receipts) != 2 || len(a1) != 1 || lines[a1[0]] != a1Receipt || len(a2) != 1 ||
+		receipts[a2[0]].ExitCode == nil || *receipts[a2[0]].ExitCode != 0 {
+		t.Fatalf("command receipts = %q, want A1's original row unchanged plus one passing A2 row", lines)
+	}
+}
+
+// runTimedOutGateFixture gives the fixture's P1 a gate that outlives its
+// gate-level timeout_seconds (honored by AgentFlow) and drives one task run:
+// the model writes the answer, the gate times out, and Golem blocks A1 and
+// reports the retained timeout receipt (#642 A2, A9).
+func runTimedOutGateFixture(t *testing.T) (string, agentflow.Runner) {
+	t.Helper()
+	dir := t.TempDir()
+	copyTree(t, "../../testdata/agentflow", dir)
+	planPath := filepath.Join(dir, "plan.json")
+	planBytes, err := os.ReadFile(planPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var plan map[string]any
+	if err := json.Unmarshal(planBytes, &plan); err != nil {
+		t.Fatal(err)
+	}
+	step := plan["steps"].([]any)[0].(map[string]any)
+	step["validation"] = []string{"slow-gate"}
+	step["gates"] = []map[string]any{{"kind": "command", "run": []string{"sleep", "5"}, "timeout_seconds": 1}}
+	if planBytes, err = json.Marshal(plan); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(planPath, planBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitInit(t, dir)
+	runner := agentflowRunnerOrSkip(t, dir)
+
+	_, stderr, err := runFixtureTask(t, dir, &scriptCaller{responses: []agent.ModelResult{
+		toolStep("w1", "write_file", `{"path":"src/answer.txt","content":"expected\n"}`),
+		answerStep("done"),
+	}}, fixtureTaskFlags(dir))
+	if line := failureLine(stderr); !errors.Is(err, errAgentflowTaskFailed) ||
+		!strings.HasPrefix(line, `agentflow task failed: step P1 attempt A1: gate \"slow-gate\" failed: agentflow run: exit 124: `) ||
+		!strings.HasSuffix(line, "; attempt recorded as blocked; "+wantTimeoutReport(dir, "CR1")) {
+		t.Fatalf("run 1 err = %v\nstderr:\n%s", err, stderr)
+	}
+	if got := lastStepRunEvent(readStepRunEvents(t, dir), "A1"); got.Event != "blocked" || got.Reason != "golem: gate execution failed" {
+		t.Fatalf("A1 last event = %+v, want blocked with the gate reason", got)
+	}
+	if _, receipts := readCommandReceipts(t, dir); len(receipts) != 1 || receipts[0].ID != "CR1" || (receipts[0].Decision != "timeout" && !receipts[0].TimedOut) {
+		t.Fatalf("command receipts = %+v, want the one timed-out receipt CR1", receipts)
+	}
+	return dir, runner
+}
+
+// #642 A9: a retained timed-out receipt turns status into exit 3 in both
+// modes and refuses resume before the model or any mutation.
+func TestAgentflowGateTimeoutIsBlockedAndReported_RealCLI(t *testing.T) {
+	dir, runner := runTimedOutGateFixture(t)
+	ctx := context.Background()
+	report := wantTimeoutReport(dir, "CR1")
+	ledger, err := os.ReadFile(filepath.Join(dir, ".agent", "command-receipts.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := snapshotSmokeAgentTree(t, dir)
+
+	var outputs [2]string
+	for i := range outputs {
+		var status bytes.Buffer
+		statusErr := runAgentflowStatusWithRunner(ctx, &status, dir, false, runner)
+		var exit *agentflowStatusExit
+		if !errors.As(statusErr, &exit) || exit.ExitCode() != 3 || !strings.Contains(status.String(), "resume: blocked: "+report) {
+			t.Fatalf("status %d = %v\n%s", i+1, statusErr, status.String())
+		}
+		outputs[i] = status.String()
+	}
+	if outputs[0] != outputs[1] {
+		t.Fatalf("status outputs differ:\n%s\n---\n%s", outputs[0], outputs[1])
+	}
+	if after := snapshotSmokeAgentTree(t, dir); !reflect.DeepEqual(after, before) {
+		t.Fatal("human status changed .agent/")
+	}
+
+	state, err := agentflow.NewOwnedClient(runner, dir, "golem").NextAction(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var jsonOut bytes.Buffer
+	statusErr := runAgentflowStatusWithRunner(ctx, &jsonOut, dir, true, runner)
+	var exit *agentflowStatusExit
+	if !errors.As(statusErr, &exit) || exit.ExitCode() != 3 || exit.diagnostic != "" || !bytes.Equal(jsonOut.Bytes(), state.RawJSON) {
+		t.Fatalf("JSON status = %#v\ngot  %s\nwant %s", statusErr, jsonOut.Bytes(), state.RawJSON)
+	}
+	if after := snapshotSmokeAgentTree(t, dir); !reflect.DeepEqual(after, before) {
+		t.Fatal("JSON status changed .agent/")
+	}
+
+	resume := fixtureTaskFlags(dir)
+	resume.agentflowResume = true
+	caller := &recordingCaller{next: &scriptCaller{}}
+	_, stderr, err := runFixtureTask(t, dir, caller, resume)
+	if !errors.Is(err, errAgentflowTaskFailed) || !strings.HasPrefix(stderr, "agentflow resume failed: "+report+"\n") || len(caller.reqs) != 0 {
+		t.Fatalf("resume err = %v, model requests = %d\nstderr:\n%s", err, len(caller.reqs), stderr)
+	}
+	if after := snapshotSmokeAgentTree(t, dir); !reflect.DeepEqual(after, before) {
+		t.Fatal("refused resume changed .agent/")
+	}
+	if got, err := os.ReadFile(filepath.Join(dir, ".agent", "command-receipts.jsonl")); err != nil || !bytes.Equal(got, ledger) {
+		t.Fatalf("command receipts changed: err=%v\n%s", err, got)
+	}
+}
+
+// #642 A9: the same-plan review round skips the #643 history guard, so it
+// must refuse a root that retains a timed-out receipt before any AgentFlow
+// call. TestAgentflowFreshPlanRefusesExecutionHistory_RealCLI's run 3 is the
+// no-timeout control.
+func TestAgentflowReviewRefusesRetainedGateTimeout_RealCLI(t *testing.T) {
+	dir, _ := runTimedOutGateFixture(t)
+	review := fixtureTaskFlags(dir)
+	review.reviewManifest = writeNoFindingsReviewManifest(t, dir)
+	before := snapshotSmokeAgentTree(t, dir)
+	caller := &recordingCaller{next: &scriptCaller{}}
+	stdout, _, err := runFixtureTask(t, dir, caller, review)
+	if want := "refusing a -review-manifest round: " + wantTimeoutReport(dir, "CR1"); err == nil || err.Error() != want {
+		t.Fatalf("review err = %v\nwant %s", err, want)
+	}
+	if len(caller.reqs) != 0 || strings.Contains(stdout, "Agentflow workflow route") {
+		t.Fatalf("review reached the model (%d requests) or AgentFlow:\n%s", len(caller.reqs), stdout)
+	}
+	if after := snapshotSmokeAgentTree(t, dir); !reflect.DeepEqual(after, before) {
+		t.Fatal("refused review changed .agent/")
 	}
 }
