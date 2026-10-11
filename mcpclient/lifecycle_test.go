@@ -146,17 +146,15 @@ func connectLifecycle(t *testing.T, ctx context.Context, s Server) (*Manager, []
 }
 
 // wantAdmission requires the lone warning to be an *AdmissionError with the
-// given reason and returns it.
-func wantAdmission(t *testing.T, m *Manager, warns []error, reason string) *AdmissionError {
+// given reason.
+func wantAdmission(t *testing.T, m *Manager, warns []error, reason string) {
 	t.Helper()
 	if len(m.Tools()) != 0 || len(warns) != 1 {
 		t.Fatalf("got tools=%d warnings=%v, want one admission failure", len(m.Tools()), warns)
 	}
-	failure := admission(t, warns)
-	if failure.Reason != reason {
-		t.Fatalf("admission reason = %q, want %q", failure.Reason, reason)
+	if got := admission(t, warns).Reason; got != reason {
+		t.Fatalf("admission reason = %q, want %q", got, reason)
 	}
-	return failure
 }
 
 // The #406 bug: go-sdk v1.6.1 returns the unsupported-version error without
@@ -164,7 +162,7 @@ func wantAdmission(t *testing.T, m *Manager, warns []error, reason string) *Admi
 func TestConnectUnsupportedProtocolReleasesChild(t *testing.T) {
 	s, dir := lifecycleServer(t, "unsupported")
 	m, warns := connectLifecycle(t, context.Background(), s)
-	_ = wantAdmission(t, m, warns, "unavailable")
+	wantAdmission(t, m, warns, "unavailable")
 	if err := waitMarker(dir, "eof"); err != nil {
 		t.Fatalf("%v: child not released", err)
 	}
@@ -179,7 +177,7 @@ func TestConnectCanceledDuringInitializeReleasesChild(t *testing.T) {
 	if err := <-reached; err != nil {
 		t.Fatal(err)
 	}
-	_ = wantAdmission(t, m, warns, "canceled")
+	wantAdmission(t, m, warns, "canceled")
 	if err := waitMarker(dir, "eof"); err != nil {
 		t.Fatalf("%v: child not released", err)
 	}
@@ -195,7 +193,7 @@ func TestConnectCanceledDuringListReleasesChild(t *testing.T) {
 	if err := <-reached; err != nil {
 		t.Fatal(err)
 	}
-	_ = wantAdmission(t, m, warns, "canceled")
+	wantAdmission(t, m, warns, "canceled")
 	if err := waitMarker(dir, "eof"); err != nil {
 		t.Fatalf("%v: child not released", err)
 	}
@@ -304,10 +302,11 @@ func TestConnectUnsupportedProtocolDeletesHTTPSession(t *testing.T) {
 			}))
 			defer srv.Close()
 			m, warns := connectLifecycle(t, context.Background(), HTTPServer("api", srv.URL+"/mcp"))
-			failure := wantAdmission(t, m, warns, "unavailable")
+			wantAdmission(t, m, warns, "unavailable")
 			if got, stray := deletes.Load(), strays.Load(); got != 1 || stray != 0 {
 				t.Fatalf("DELETE for session s1 = %d, without it = %d; want 1 and 0", got, stray)
 			}
+			failure := admission(t, warns)
 			if got := errors.Is(failure, errRedirectRefused); got != tt.redirect {
 				t.Fatalf("errors.Is(failure, errRedirectRefused) = %v, want %v (failure: %v)", got, tt.redirect, failure)
 			}

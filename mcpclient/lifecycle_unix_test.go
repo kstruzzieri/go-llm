@@ -19,7 +19,7 @@ import (
 func TestConnectStartupExitReapsChild(t *testing.T) {
 	s, dir := lifecycleServer(t, "exit")
 	m, warns := connectLifecycle(t, context.Background(), s)
-	_ = wantAdmission(t, m, warns, "unavailable")
+	wantAdmission(t, m, warns, "unavailable")
 	raw, err := os.ReadFile(filepath.Join(dir, "pid"))
 	if err != nil {
 		t.Fatal(err)
