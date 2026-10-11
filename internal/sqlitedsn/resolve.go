@@ -85,7 +85,7 @@ func checkURI(u *url.URL) (name string, memory bool, err error) {
 	// modernc reads everything after the first "?" as the query, so a
 	// fragment would end up inside the last query value (#680).
 	if u.Fragment != "" {
-		return "", false, fmt.Errorf("sqlitedsn: URI %q has a fragment; remove the #...", u.String())
+		return "", false, fmt.Errorf("sqlitedsn: URI %q has a fragment, which modernc would read into the query", u.String())
 	}
 	name = u.Path
 	if u.Opaque != "" {
