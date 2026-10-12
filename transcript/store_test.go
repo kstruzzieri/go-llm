@@ -83,6 +83,33 @@ func TestOpen_FileUsesPrivatePermissions(t *testing.T) {
 	}
 }
 
+// TestRecordResecuresTheFileSQLiteOpens: Record re-secures the database on
+// every write, so the store must remember the file SQLite opened, not a
+// file: URI it was given (#648).
+func TestRecordResecuresTheFileSQLiteOpens(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("file mode bits are not portable on Windows")
+	}
+	path := filepath.Join(t.TempDir(), "t.db")
+	t.Chdir(t.TempDir())
+	s, err := Open(context.Background(), "file:"+filepath.ToSlash(path))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Record(context.Background(), RecordInput{
+		Request:  []conversation.Message{{Role: "user", Content: "hello"}},
+		Response: conversation.Message{Role: "assistant", Content: "hi"},
+	}); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	assertPerm(t, path, transcriptFileMode)
+	assertPerm(t, path+"-wal", transcriptFileMode)
+}
+
 func assertPerm(t *testing.T, path string, want os.FileMode) {
 	t.Helper()
 	info, err := os.Stat(path)

@@ -20,7 +20,7 @@ defer runtime.Close()
 records := runtime.Store()
 ```
 
-When no credentials are supplied, `OpenRecordStore` uses `<database path>.keys`, opens the SQLite database with the package's hardened settings, runs migrations, and secures the database and WAL sidecars. Call `runtime.Secure()` after every direct write attempt through `runtime.Store()`, including failed attempts.
+When no credentials are supplied, `OpenRecordStore` uses `<database file>.keys`, opens the SQLite database with the package's hardened settings, runs migrations, and secures the database and WAL sidecars. `<database file>` is the file SQLite opens for the path given, which differs from the path itself for a `file:` URI, a `..` after a symlink, or a symlinked final component; an input that names no file (an in-memory database) needs an explicit `KeyDir` or injected credentials. A store whose keys are still in the directory derived from the raw path, where go-llm kept them before #648, fails to open with an error that names the `mv` to run. Call `runtime.Secure()` after every direct write attempt through `runtime.Store()`, including failed attempts.
 
 The source-level constructor change is the added config argument:
 
@@ -177,7 +177,7 @@ Golem and MCP expose no bypass flag. Do not delete the witness or silently re-ba
 The default layout is (Unix modes shown):
 
 ```text
-<database path>.keys/                 0700
+<database file>.keys/                 0700
   current.pem                         current Ed25519 private key, 0600
   trusted/
     <key-id>.pem                      retained Ed25519 public verifier, 0600
@@ -186,6 +186,8 @@ The default layout is (Unix modes shown):
 `current.pem` contains one PKCS#8 `PRIVATE KEY`; retained keys contain one PKIX/RFC 8410 `PUBLIC KEY` and use the verifier's derived key ID as the filename. Loaders enforce typed PEM, regular key files, and rejection of symlinked key files and leaf key directories. On Unix, they also enforce current-user ownership and no group/other permission bits.
 
 On Windows and other non-Unix hosts, the loaders do not validate ownership or ACLs. The deployment must restrict the database, sidecars, key directory, and retained-verifier directory to trusted principals through OS ACLs. Use a private user-profile location or explicitly provision equivalent ACLs before enabling agent memory; a shared workspace location is not made private by the Unix modes above.
+
+Hardened database openers compare SQLite's reported main filename with the prepared path before enabling WAL or running migrations. A mismatch stops initialization, but opening the SQLite connection and applying URI pragmas can already create or modify files. This is a pathname consistency check, not a file-identity check: it does not detect replacement at the same pathname or prevent concurrent symlink changes. Keep the database and its parent directories under trusted control.
 
 Back up the database and key directory together. The default adjacent key directory protects against database-only changes while the key material stays trusted; it does not isolate keys from a process with unrestricted access as the same OS user. Hosts can select a separately protected `KeyDir` or inject credentials, but a different path alone does not create an access boundary.
 
