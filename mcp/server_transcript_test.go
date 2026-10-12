@@ -5,6 +5,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -52,5 +53,22 @@ func TestWithTranscriptStore_OpenFailureIsFatal(t *testing.T) {
 	if err == nil {
 		_ = s.Close()
 		t.Fatal("NewServer should fail when the transcript DB path cannot be opened")
+	}
+}
+
+// TestWithTranscriptStore_FileURICreatesNoDecoy: go-llm-mcp -conversation-db
+// accepts a file: URI; startup must create the database's directory, not a
+// directory named after the raw URI in the working directory (#648).
+func TestWithTranscriptStore_FileURICreatesNoDecoy(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "nested", "conv.db")
+	cwd := t.TempDir()
+	t.Chdir(cwd)
+	_, cleanup := newMockedServer(t, WithTranscriptStore("file:"+filepath.ToSlash(path)))
+	defer cleanup()
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("transcript database not at %s: %v", path, err)
+	}
+	if entries, err := os.ReadDir(cwd); err != nil || len(entries) != 0 {
+		t.Fatalf("working directory after startup: %v, %v; want it empty", entries, err)
 	}
 }

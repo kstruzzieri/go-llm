@@ -316,26 +316,6 @@ func defaultRAGPath() string {
 	return filepath.Join(home, ".local", "share", "go-llm", "rag.db")
 }
 
-// prepareRetrievalFeedbackDB creates the feedback DB's parent dir (0700) and the
-// DB file (0600) before sql.Open. Feedback data is behavioral telemetry; it must
-// stay private (mirrors the session/feedback DB handling elsewhere).
-func prepareRetrievalFeedbackDB(path string) error {
-	if dir := filepath.Dir(path); dir != "" && dir != "." {
-		if err := os.MkdirAll(dir, 0o700); err != nil {
-			return fmt.Errorf("create retrieval feedback dir %q: %w", dir, err)
-		}
-	}
-	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
-	if err != nil {
-		return fmt.Errorf("create retrieval feedback db %q: %w", path, err)
-	}
-	if err := f.Chmod(0o600); err != nil {
-		_ = f.Close()
-		return fmt.Errorf("chmod retrieval feedback db %q: %w", path, err)
-	}
-	return f.Close()
-}
-
 // openRetrievalFeedbackWeighter best-effort opens the feedback DB and returns a
 // consume-only weighter plus the owning *sql.DB. It is hardened the same way as
 // the Golem path: single connection, WAL + busy_timeout, private 0600 files
@@ -345,13 +325,15 @@ func prepareRetrievalFeedbackDB(path string) error {
 func openRetrievalFeedbackWeighter(ctx context.Context, path string) (*sql.DB, rag.BehavioralWeighter, error) {
 	// The DSN gives every connection a 5s busy_timeout, including
 	// replacements database/sql opens after a context-cancelled statement.
-	// It is built before the file is prepared, so a path it rejects is never
-	// created.
-	dsn, err := sqlitedsn.WithBusyTimeout(path, 5*time.Second)
+	// disk is the file SQLite opens for it; feedback data is behavioral
+	// telemetry, so that file (0600, parent 0700) is the one prepared and
+	// secured, never the raw path (#648). Resolve runs before anything is
+	// created, so an input it rejects leaves nothing behind.
+	dsn, disk, err := sqlitedsn.Resolve(path, 5*time.Second)
 	if err != nil {
 		return nil, nil, fmt.Errorf("open retrieval feedback db %q: %w", path, err)
 	}
-	if err := prepareRetrievalFeedbackDB(path); err != nil {
+	if err := memory.PrepareDBFile(disk); err != nil {
 		return nil, nil, err
 	}
 	db, err := sql.Open("sqlite", dsn)
@@ -359,6 +341,10 @@ func openRetrievalFeedbackWeighter(ctx context.Context, path string) (*sql.DB, r
 		return nil, nil, fmt.Errorf("open retrieval feedback db %q: %w", path, err)
 	}
 	db.SetMaxOpenConns(1)
+	if err := sqlitedsn.CheckMainFile(ctx, db, disk); err != nil {
+		_ = db.Close()
+		return nil, nil, fmt.Errorf("open retrieval feedback db %q: %w", path, err)
+	}
 	// EnableWAL retries the switch when another opener races it.
 	if err := sqlitedsn.EnableWAL(ctx, db); err != nil {
 		_ = db.Close()
@@ -372,7 +358,7 @@ func openRetrievalFeedbackWeighter(ctx context.Context, path string) (*sql.DB, r
 	// SQLite creates WAL/SHM sidecars with the DB file's mode, but sidecars
 	// left by an earlier, looser DB keep theirs: re-secure all three to 0600.
 	// Telemetry must never leak through a sidecar.
-	if err := memory.SecureDBFiles(path); err != nil {
+	if err := memory.SecureDBFiles(disk); err != nil {
 		_ = db.Close()
 		return nil, nil, err
 	}
@@ -496,12 +482,9 @@ func NewServer(ctx context.Context, opts ...Option) (*Server, error) {
 	// Step 4b: open the optional transcript store (off unless WithTranscriptStore
 	// is set). Failure is fatal: the caller explicitly asked to persist here.
 	if s.transcriptDBPath != "" {
-		if dir := filepath.Dir(s.transcriptDBPath); dir != "" && dir != "." {
-			if err := os.MkdirAll(dir, 0o700); err != nil {
-				cleanupStartupFailure()
-				return nil, fmt.Errorf("mcp: create transcript directory %q: %w", dir, err)
-			}
-		}
+		// transcript.Open creates the parent directory (0700) of the file
+		// SQLite opens; a MkdirAll of the raw path here made a decoy
+		// directory for a file: URI (#648).
 		ts, err := transcript.Open(ctx, s.transcriptDBPath)
 		if err != nil {
 			cleanupStartupFailure()

@@ -3,6 +3,8 @@ package sqlitedsn
 import (
 	"bytes"
 	"fmt"
+	"go/ast"
+	"go/parser"
 	"go/scanner"
 	"go/token"
 	"io/fs"
@@ -193,4 +195,71 @@ func moduleRoot(t *testing.T) string {
 func isFile(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && !info.IsDir()
+}
+
+// TestHardenedOpenersResolveDiskPath: the openers that promise private
+// database files must take the file they prepare and chmod from Resolve, and
+// confirm before switching to WAL that SQLite opened it (#648). A WithBusyTimeout DSN
+// paired with the raw path is the bug: the two name different files for file:
+// URIs, ".." after a symlink, and a symlinked final component. This is a
+// static check of calls and their source order in each opener, not a proof of
+// control flow or argument identity. RunHardenedPaths exercises the openers.
+func TestHardenedOpenersResolveDiskPath(t *testing.T) {
+	root := moduleRoot(t)
+	for _, opener := range []struct{ file, function string }{
+		{"cmd/golem/feedback.go", "openFeedbackService"},
+		{"cmd/golem/session.go", "openSession"},
+		{"mcp/server.go", "openRetrievalFeedbackWeighter"},
+		{"memory/open.go", "openHardenedDB"},
+		{"transcript/store.go", "Open"},
+	} {
+		t.Run(opener.file+"/"+opener.function, func(t *testing.T) {
+			fset := token.NewFileSet()
+			file, err := parser.ParseFile(fset, filepath.Join(root, filepath.FromSlash(opener.file)), nil, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var body *ast.BlockStmt
+			for _, decl := range file.Decls {
+				if fn, ok := decl.(*ast.FuncDecl); ok && fn.Recv == nil && fn.Name.Name == opener.function {
+					body = fn.Body
+				}
+			}
+			if body == nil {
+				t.Fatalf("hardened opener %s was not found; update the inventory if it moved", opener.function)
+			}
+			calls := map[string]token.Pos{}
+			ast.Inspect(body, func(node ast.Node) bool {
+				if _, ok := node.(*ast.FuncLit); ok {
+					return false
+				}
+				call, ok := node.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				selector, ok := call.Fun.(*ast.SelectorExpr)
+				if !ok {
+					return true
+				}
+				pkg, ok := selector.X.(*ast.Ident)
+				if ok && pkg.Name == "sqlitedsn" && calls[selector.Sel.Name] == token.NoPos {
+					calls[selector.Sel.Name] = call.Pos()
+				}
+				return true
+			})
+			var previous token.Pos
+			for _, name := range []string{"Resolve", "CheckMainFile", "EnableWAL"} {
+				pos := calls[name]
+				if pos == token.NoPos {
+					t.Errorf("hardened opener %s does not call sqlitedsn.%s", opener.function, name)
+				} else if pos < previous {
+					t.Errorf("hardened opener %s calls sqlitedsn.%s out of order at %s; want Resolve, CheckMainFile, EnableWAL", opener.function, name, fset.Position(pos))
+				}
+				previous = pos
+			}
+			if calls["WithBusyTimeout"] != token.NoPos {
+				t.Errorf("hardened opener %s calls sqlitedsn.WithBusyTimeout; use Resolve so preparation acts on the file SQLite opens", opener.function)
+			}
+		})
+	}
 }

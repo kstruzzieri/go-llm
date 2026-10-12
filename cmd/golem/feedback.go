@@ -183,7 +183,15 @@ func openConfiguredFeedback(ctx context.Context, enabled bool, root, explicitDB 
 	if dbPath == "" {
 		dbPath, err = feedbackDBPathForWorkspace(getenv, root)
 	} else {
-		err = validatePathOutsideWorkspace(dbPath, root)
+		// Guard the file SQLite opens, not the raw input: a file: URI or a
+		// ".." after a symlink can name a file inside the workspace while
+		// the raw string looks outside it (#648). Keep the URI options for
+		// the opener while checking its resolved file.
+		var disk string
+		disk, err = feedbackDiskPath(dbPath)
+		if err == nil {
+			err = validatePathOutsideWorkspace(disk, root)
+		}
 	}
 	if err != nil {
 		return nil, "behavioral feedback disabled: " + err.Error()
@@ -195,16 +203,35 @@ func openConfiguredFeedback(ctx context.Context, enabled bool, root, explicitDB 
 	return svc, ""
 }
 
+// feedbackDiskPath is the file SQLite opens for a -feedback-db value. The
+// weight reader opens that file directly, so an input naming none (an
+// in-memory database) is refused.
+func feedbackDiskPath(dbPath string) (string, error) {
+	_, disk, err := sqlitedsn.Resolve(dbPath, 0)
+	if err != nil {
+		return "", fmt.Errorf("open %q: %w", dbPath, err)
+	}
+	if disk == "" {
+		return "", fmt.Errorf("open %q: names no database file; the feedback store needs one", dbPath)
+	}
+	return disk, nil
+}
+
 func openFeedbackService(ctx context.Context, root, dbPath string, warn func(string)) (*feedbackService, error) {
 	// The DSN gives every connection a 1s busy_timeout, including
 	// replacements database/sql opens after a context-cancelled statement.
-	// It is built before the file is prepared, so a path it rejects is never
-	// created.
-	dsn, err := sqlitedsn.WithBusyTimeout(dbPath, time.Second)
+	// disk is the file SQLite opens for it: the writer prepares and secures
+	// it and the weight reader opens it, never the raw path (#648). Resolve
+	// runs before anything is created, so an input it rejects leaves nothing
+	// behind.
+	dsn, disk, err := sqlitedsn.Resolve(dbPath, time.Second)
 	if err != nil {
 		return nil, fmt.Errorf("open %q: %w", dbPath, err)
 	}
-	if err := prepareDBFile(dbPath); err != nil {
+	if disk == "" {
+		return nil, fmt.Errorf("open %q: names no database file; the feedback store needs one", dbPath)
+	}
+	if err := prepareDBFile(disk); err != nil {
 		return nil, err
 	}
 	writer, err := sql.Open("sqlite", dsn)
@@ -218,6 +245,9 @@ func openFeedbackService(ctx context.Context, root, dbPath string, warn func(str
 			_ = writer.Close()
 		}
 	}()
+	if err := sqlitedsn.CheckMainFile(ctx, writer, disk); err != nil {
+		return nil, fmt.Errorf("open %q: %w", dbPath, err)
+	}
 	// EnableWAL retries the switch when another opener races it.
 	if err := sqlitedsn.EnableWAL(ctx, writer); err != nil {
 		return nil, fmt.Errorf("PRAGMA journal_mode=WAL: %w", err)
@@ -226,18 +256,18 @@ func openFeedbackService(ctx context.Context, root, dbPath string, warn func(str
 	if err != nil {
 		return nil, err
 	}
-	if err := chmodDBFiles(dbPath); err != nil {
+	if err := chmodDBFiles(disk); err != nil {
 		return nil, err
 	}
 	collector := feedback.NewManualCollector(store, feedback.DefaultConfig())
-	reader, err := feedback.NewSQLiteWeightReader(ctx, dbPath, feedback.DefaultConfig())
+	reader, err := feedback.NewSQLiteWeightReader(ctx, disk, feedback.DefaultConfig())
 	if err != nil {
 		collector.DiscardOpen()
 		return nil, err
 	}
 	workerCtx, cancel := context.WithCancel(context.Background())
 	s := &feedbackService{
-		root: root, dbPath: dbPath, collector: collector, weighter: reader, writer: writer, reader: reader,
+		root: root, dbPath: disk, collector: collector, weighter: reader, writer: writer, reader: reader,
 		events: make(chan feedbackEvent, feedbackQueueSize), stop: make(chan struct{}), done: make(chan struct{}),
 		cancel: cancel, now: time.Now, warn: newFeedbackNotifier(warn),
 		report: feedbackReport{reasons: make(map[string]int)},

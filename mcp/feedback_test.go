@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/kstruzzieri/go-llm/internal/sqlitetest"
+	"github.com/kstruzzieri/go-llm/memory"
 )
 
 func TestWithRetrievalFeedbackSetsPath(t *testing.T) {
@@ -130,7 +131,7 @@ func TestOpenRetrievalFeedbackWeighterResecuresLooseSidecars(t *testing.T) {
 		t.Skip("file mode bits are not portable on Windows")
 	}
 	path := filepath.Join(t.TempDir(), "feedback.db")
-	if err := prepareRetrievalFeedbackDB(path); err != nil {
+	if err := memory.PrepareDBFile(path); err != nil {
 		t.Fatalf("prepare: %v", err)
 	}
 	// An open WAL connection keeps the sidecars on disk.
