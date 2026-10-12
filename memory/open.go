@@ -104,14 +104,15 @@ func openHardenedDB(ctx context.Context, path string) (*sql.DB, string, error) {
 		return nil, "", fmt.Errorf("memory: open db %q: %w", path, err)
 	}
 	db.SetMaxOpenConns(1)
+	if err := sqlitedsn.CheckMainFile(ctx, db, disk); err != nil {
+		_ = db.Close()
+		_ = secureDiskFiles(disk)
+		return nil, "", fmt.Errorf("memory: open db %q: %w", path, err)
+	}
 	if err := sqlitedsn.EnableWAL(ctx, db); err != nil {
 		_ = db.Close()
 		_ = secureDiskFiles(disk)
 		return nil, "", fmt.Errorf("memory: db PRAGMA journal_mode=WAL: %w", err)
-	}
-	if err := sqlitedsn.CheckMainFile(ctx, db, disk); err != nil {
-		_ = db.Close()
-		return nil, "", fmt.Errorf("memory: open db %q: %w", path, err)
 	}
 	// Sidecars an older run left loose keep their bits when SQLite reopens
 	// them; secure them now rather than at the caller's first SecureDBFiles.

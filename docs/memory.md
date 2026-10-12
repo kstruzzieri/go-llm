@@ -187,6 +187,8 @@ The default layout is (Unix modes shown):
 
 On Windows and other non-Unix hosts, the loaders do not validate ownership or ACLs. The deployment must restrict the database, sidecars, key directory, and retained-verifier directory to trusted principals through OS ACLs. Use a private user-profile location or explicitly provision equivalent ACLs before enabling agent memory; a shared workspace location is not made private by the Unix modes above.
 
+Hardened database openers compare SQLite's reported main filename with the prepared path before enabling WAL or running migrations. A mismatch stops initialization, but opening the SQLite connection and applying URI pragmas can already create or modify files. This is a pathname consistency check, not a file-identity check: it does not detect replacement at the same pathname or prevent concurrent symlink changes. Keep the database and its parent directories under trusted control.
+
 Back up the database and key directory together. The default adjacent key directory protects against database-only changes while the key material stays trusted; it does not isolate keys from a process with unrestricted access as the same OS user. Hosts can select a separately protected `KeyDir` or inject credentials, but a different path alone does not create an access boundary.
 
 Rotation is an offline procedure:

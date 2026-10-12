@@ -153,14 +153,14 @@ func openSession(ctx context.Context, dbPath, id string) (*session, sessionInfo,
 	}
 	// One connection serializes writes.
 	db.SetMaxOpenConns(1)
+	if err := sqlitedsn.CheckMainFile(ctx, db, disk); err != nil {
+		_ = db.Close()
+		return nil, sessionInfo{}, fmt.Errorf("golem: open session db %q: %w", dbPath, err)
+	}
 	// EnableWAL retries the switch when another opener races it.
 	if err := sqlitedsn.EnableWAL(ctx, db); err != nil {
 		_ = db.Close()
 		return nil, sessionInfo{}, fmt.Errorf("golem: session db PRAGMA journal_mode=WAL: %w", err)
-	}
-	if err := sqlitedsn.CheckMainFile(ctx, db, disk); err != nil {
-		_ = db.Close()
-		return nil, sessionInfo{}, fmt.Errorf("golem: open session db %q: %w", dbPath, err)
 	}
 	store, err := conversation.NewStore(ctx, db) // runs migrations (may create -wal/-shm)
 	if err != nil {

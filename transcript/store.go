@@ -71,16 +71,14 @@ func Open(ctx context.Context, path string) (*Store, error) {
 	// One connection serializes writes and keeps :memory: from opening a
 	// fresh private DB per connection.
 	db.SetMaxOpenConns(1)
-	if path != ":memory:" {
-		// EnableWAL retries the switch when another opener races it.
-		if err := sqlitedsn.EnableWAL(ctx, db); err != nil {
-			_ = db.Close()
-			return nil, fmt.Errorf("transcript: PRAGMA journal_mode=WAL: %w", err)
-		}
-		if err := sqlitedsn.CheckMainFile(ctx, db, disk); err != nil {
-			_ = db.Close()
-			return nil, fmt.Errorf("transcript: open sqlite %q: %w", path, err)
-		}
+	if err := sqlitedsn.CheckMainFile(ctx, db, disk); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("transcript: open sqlite %q: %w", path, err)
+	}
+	// EnableWAL retries the switch when another opener races it and accepts memory databases.
+	if err := sqlitedsn.EnableWAL(ctx, db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("transcript: PRAGMA journal_mode=WAL: %w", err)
 	}
 	if disk != "" {
 		if err := chmodTranscriptDBFiles(disk); err != nil {

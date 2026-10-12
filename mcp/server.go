@@ -341,14 +341,14 @@ func openRetrievalFeedbackWeighter(ctx context.Context, path string) (*sql.DB, r
 		return nil, nil, fmt.Errorf("open retrieval feedback db %q: %w", path, err)
 	}
 	db.SetMaxOpenConns(1)
+	if err := sqlitedsn.CheckMainFile(ctx, db, disk); err != nil {
+		_ = db.Close()
+		return nil, nil, fmt.Errorf("open retrieval feedback db %q: %w", path, err)
+	}
 	// EnableWAL retries the switch when another opener races it.
 	if err := sqlitedsn.EnableWAL(ctx, db); err != nil {
 		_ = db.Close()
 		return nil, nil, fmt.Errorf("retrieval feedback PRAGMA journal_mode=WAL: %w", err)
-	}
-	if err := sqlitedsn.CheckMainFile(ctx, db, disk); err != nil {
-		_ = db.Close()
-		return nil, nil, fmt.Errorf("open retrieval feedback db %q: %w", path, err)
 	}
 	store, err := feedback.NewSignalStore(ctx, db)
 	if err != nil {

@@ -21,8 +21,13 @@ This covers the transcript store (`transcript.Open`, `go-llm-mcp
 index, checkpoint and memory stores. Each now resolves the file SQLite will
 open first, the way SQLite does, and secures that file and its sidecars;
 the stores that open the database themselves also fail the open if SQLite
-then reports a different file. A relative `file:` URI is pinned to the
-working directory at open time. `memory.OpenHardenedDB` now also secures
+then reports a different file, before enabling WAL or running migrations.
+Opening the connection and applying URI pragmas can still create or modify
+files before that check; it compares pathnames, not file identity, and does
+not protect against concurrent path replacement. The filename check uses
+`PRAGMA database_list` directly so a schema lock or a table with the pragma's
+name cannot interfere. A relative `file:` URI is pinned to the working
+directory at open time. `memory.OpenHardenedDB` now also secures
 existing `-wal` and `-shm` files during the open, so one it cannot chmod
 fails the open rather than the caller's next `SecureDBFiles`.
 
@@ -44,6 +49,10 @@ Related fixes:
   opener, including read-only mode, locking and busy timeout settings.
 - Hardened openers require an existing database for URI `mode=rw` or
   `mode=ro`, before preparing any file or directory.
+- Index database hardening rejects a directory at the main, WAL or SHM path
+  without changing that directory's permissions.
+- Transcript applies the same filename and journal-mode checks to every
+  in-memory spelling, including literal `:memory:`.
 
 Newly rejected before anything is created: `file:` URIs with a `vfs`
 parameter, a repeated `mode` parameter, a NUL byte, a host other than

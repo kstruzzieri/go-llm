@@ -245,12 +245,12 @@ func openFeedbackService(ctx context.Context, root, dbPath string, warn func(str
 			_ = writer.Close()
 		}
 	}()
+	if err := sqlitedsn.CheckMainFile(ctx, writer, disk); err != nil {
+		return nil, fmt.Errorf("open %q: %w", dbPath, err)
+	}
 	// EnableWAL retries the switch when another opener races it.
 	if err := sqlitedsn.EnableWAL(ctx, writer); err != nil {
 		return nil, fmt.Errorf("PRAGMA journal_mode=WAL: %w", err)
-	}
-	if err := sqlitedsn.CheckMainFile(ctx, writer, disk); err != nil {
-		return nil, fmt.Errorf("open %q: %w", dbPath, err)
 	}
 	store, err := feedback.NewSignalStore(ctx, writer)
 	if err != nil {

@@ -242,6 +242,80 @@ func TestCheckMainFile(t *testing.T) {
 	}
 }
 
+func TestCheckMainFileRejectsBeforeWALInitialization(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "fresh.db")
+	dsn, _, err := Resolve(path, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	db.SetMaxOpenConns(1)
+	if err := CheckMainFile(t.Context(), db, filepath.Join(t.TempDir(), "other.db")); err == nil {
+		t.Fatal("CheckMainFile with a different path succeeded, want a mismatch error")
+	}
+	// Opening the lazy connection can create a file, but checking its name
+	// must not initialize the database header or create WAL sidecars.
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Size() != 0 {
+		t.Errorf("CheckMainFile initialized %q to %d bytes, want an empty file", path, info.Size())
+	}
+	for _, suffix := range []string{"-wal", "-shm", "-journal"} {
+		if _, err := os.Stat(path + suffix); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("CheckMainFile left %q (stat error %v), want no sidecar", path+suffix, err)
+		}
+	}
+}
+
+func TestCheckMainFileWhileDatabaseLocked(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "locked.db")
+	holder := pinnedHolder(t, path)
+	execConn(t, holder, "BEGIN EXCLUSIVE", "CREATE TABLE t (x)")
+	dsn, disk, err := Resolve(path, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	db.SetMaxOpenConns(1)
+	var tables int
+	assertBusy(t, db.QueryRow("SELECT COUNT(*) FROM sqlite_schema").Scan(&tables))
+	if err := CheckMainFile(t.Context(), db, disk); err != nil {
+		t.Fatalf("CheckMainFile(%q) under an exclusive lock = %v, want filename check without reading the schema", disk, err)
+	}
+}
+
+func TestCheckMainFileIgnoresShadowTable(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "shadow.db")
+	dsn, disk, err := Resolve(path, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	if _, err := db.Exec("CREATE TABLE pragma_database_list (name TEXT, file TEXT); INSERT INTO pragma_database_list VALUES ('main', 'spoofed.db')"); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckMainFile(t.Context(), db, disk); err != nil {
+		t.Fatalf("CheckMainFile(%q) with a shadow table = %v, want SQLite's actual filename", disk, err)
+	}
+	if err := CheckMainFile(t.Context(), db, "spoofed.db"); err == nil {
+		t.Fatal("CheckMainFile accepted the shadow table's spoofed filename, want a mismatch error")
+	}
+}
+
 func TestResolveWindowsDriveRelative(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("drive-relative paths exist only on Windows")

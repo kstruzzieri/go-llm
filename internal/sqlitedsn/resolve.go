@@ -14,11 +14,11 @@ import (
 	"time"
 )
 
-// maxSymlinks is SQLite's SQLITE_MAX_SYMLINK: unixFullPathname fails an open
-// that follows more links than this.
+// maxSymlinks is SQLite's SQLITE_MAX_SYMLINK. Its pre-increment check allows
+// 201 followed links and rejects the next one.
 const maxSymlinks = 200
 
-// Resolve returns, from one parse of input, the DSN that opens it with every
+// Resolve returns the DSN that opens input with every
 // connection's busy_timeout set to busy (as WithBusyTimeout does) and the
 // on-disk path SQLite will open for that DSN. Store openers that promise
 // private database files prepare, chmod and derive paths from diskPath, never
@@ -241,19 +241,35 @@ func sqliteUnixFullPath(name string) (string, error) {
 
 // CheckMainFile returns an error unless db's main database is the file
 // diskPath names ("" for none), as SQLite reports it. Store openers call it on
-// their first connection after the open, so a Resolve that disagrees with
-// SQLite fails the open instead of leaving an unhardened file in use. It
-// compares names, not file identity, and does not detect a file swapped
-// between the open and the check.
+// their first connection before EnableWAL or migrations, so a Resolve that
+// disagrees with SQLite fails the open instead of leaving an unhardened file
+// in use. Opening the connection (including URI pragmas) can already create
+// or modify files. This compares names, not file identity, and does not detect
+// replacement at the same pathname or make concurrent path changes safe.
 func CheckMainFile(ctx context.Context, db *sql.DB, diskPath string) error {
-	var file string
-	if err := db.QueryRowContext(ctx, `SELECT file FROM pragma_database_list WHERE name = 'main'`).Scan(&file); err != nil {
+	// The table-valued form loads the schema and can be shadowed by a user table.
+	rows, err := db.QueryContext(ctx, "PRAGMA database_list")
+	if err != nil {
 		return fmt.Errorf("sqlitedsn: read main database file: %w", err)
 	}
-	if file != diskPath {
-		return fmt.Errorf("sqlitedsn: SQLite opened %q, not the hardened file %q", file, diskPath)
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var seq int
+		var name, file string
+		if err := rows.Scan(&seq, &name, &file); err != nil {
+			return fmt.Errorf("sqlitedsn: read main database file: %w", err)
+		}
+		if name == "main" {
+			if file != diskPath {
+				return fmt.Errorf("sqlitedsn: SQLite opened %q, not the hardened file %q", file, diskPath)
+			}
+			return nil
+		}
 	}
-	return nil
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("sqlitedsn: read main database file: %w", err)
+	}
+	return fmt.Errorf("sqlitedsn: read main database file: %w", sql.ErrNoRows)
 }
 
 // withBusyTimeout renders u with a busy_timeout pragma unless its query

@@ -24,6 +24,37 @@ func TestOpenConcurrentFirstOpens(t *testing.T) {
 	})
 }
 
+func TestOpenMemoryForms(t *testing.T) {
+	for _, input := range []string{":memory:", "file::memory:", "file::memory:?cache=shared", "file:named.db?mode=memory"} {
+		t.Run(input, func(t *testing.T) {
+			cwd := t.TempDir()
+			t.Chdir(cwd)
+			s, err := Open(t.Context(), input)
+			if err != nil {
+				t.Fatalf("Open(%q): %v", input, err)
+			}
+			defer func() { _ = s.Close() }()
+			recordTurn(t, s, nil, "memory response")
+			if got := countConversations(t, s); got != 1 {
+				t.Errorf("Open(%q): recorded conversations = %d, want 1", input, got)
+			}
+			var mode, file string
+			if err := s.db.QueryRow("PRAGMA journal_mode").Scan(&mode); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.db.QueryRow(`SELECT file FROM pragma_database_list WHERE name = 'main'`).Scan(&file); err != nil {
+				t.Fatal(err)
+			}
+			if mode != "memory" || file != "" || s.path != "" {
+				t.Errorf("Open(%q): journal=%q, file=%q, store path=%q; want memory and no paths", input, mode, file, s.path)
+			}
+			if entries, err := os.ReadDir(cwd); err != nil || len(entries) != 0 {
+				t.Errorf("Open(%q): working directory contains %v, %v; want no artifacts", input, entries, err)
+			}
+		})
+	}
+}
+
 // Another connection's last close unlinks the WAL sidecars; when that lands
 // between a sidecar's Stat and its Chmod, the open must treat it as absent.
 func TestChmodTranscriptDBFilesSkipsSidecarRemovedAfterStat(t *testing.T) {
