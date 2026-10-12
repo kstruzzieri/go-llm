@@ -49,19 +49,31 @@ func Resolve(input string, busy time.Duration) (dsn, diskPath string, err error)
 	if input == "" || input == ":memory:" {
 		return input, "", nil
 	}
+	isURI := strings.HasPrefix(input, "file:")
+	var name string
+	var memory bool
+	if isURI {
+		// checkURI runs before FileURL so a rejection gives the same reason on
+		// every OS: on Windows FileURL resolves the filename with
+		// filepath.Abs, which fails a NUL with "invalid argument".
+		pu, err := url.Parse(input)
+		if err != nil {
+			return "", "", fmt.Errorf("sqlitedsn: parse URI %q: %w", input, err)
+		}
+		if name, memory, err = checkURI(pu); err != nil {
+			return "", "", err
+		}
+	}
 	u, err := FileURL(input)
 	if err != nil {
 		return "", "", err
 	}
-	name := u.Path
-	if strings.HasPrefix(input, "file:") {
-		var memory bool
-		if name, memory, err = checkURI(u); err != nil {
-			return "", "", err
-		}
-		if memory {
-			return withBusyTimeout(u, busy), "", nil
-		}
+	switch {
+	case !isURI:
+		name = u.Path
+	case memory:
+		return withBusyTimeout(u, busy), "", nil
+	default:
 		if err := absolutizeURI(u, &name); err != nil {
 			return "", "", err
 		}
