@@ -1820,9 +1820,11 @@ func TestAgentflowResumeBlocksOpenFailedGateAttempt_RealCLI(t *testing.T) {
 	}
 }
 
-// #652 A6: under an enforced lease, an open attempt whose gate failed is not
-// blocked: the block would leave step_unclaimed, which enforce refuses. Status
-// and resume both refuse and leave the ledgers unchanged.
+// #652 A6: under a live finite enforced lease, an open attempt whose gate
+// failed is not blocked. AgentFlow 1.0 gives every enforced claim a deadline,
+// so the existing finite-enforce refusal fires first here; the refusal for an
+// enforced lease without a deadline (legacy histories only) is covered by the
+// unit rows. Status and resume both refuse and leave the ledgers unchanged.
 func TestAgentflowResumeRefusesFailedGateUnderFiniteEnforce_RealCLI(t *testing.T) {
 	dir, runner, client, plan, planBytes := openEnforcedAttempt(t, "wrong\n")
 	ctx := context.Background()

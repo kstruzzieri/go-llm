@@ -469,7 +469,8 @@ func projectedCommandGates(plan *agentflow.Plan, state agentflow.NextActionState
 const resumeFailedGateBlockReason = "golem: resume found failed command gate"
 
 // hasFailedCommandGate reports whether a validation_missing projection holds a
-// command gate AgentFlow reports failed: a nonzero exit, a timeout, or an
+// command gate AgentFlow reports failed: a nonzero exit, a timeout, a run that
+// risk_policy: block refused (exit_code null, decision "blocked"), or an
 // attested receipt under strict policy (execution_coverage.py verify_step).
 // AgentFlow credits an attempt's first matching receipt, so neither re-running
 // the gate nor finish-step can settle that attempt (#652 A6).

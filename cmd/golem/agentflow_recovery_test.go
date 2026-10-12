@@ -1699,7 +1699,9 @@ func TestAgentflowStatus_RetainedTimeoutBlocksResumableStates(t *testing.T) {
 }
 
 // #642 D9: the projection checks keep precedence over the timeout report, and
-// complete keeps its verified-proof path. (#652 moved the failed-gate row to retainedTimeoutStates: with failed known, status reaches the A9 report as resume does.)
+// complete keeps its verified-proof path. (#652 moved the failed-gate row to
+// retainedTimeoutStates: with failed known, status reaches the A9 report as
+// resume does.)
 func TestAgentflowStatus_RetainedTimeoutKeepsEarlierRefusals(t *testing.T) {
 	for _, tt := range []struct {
 		name   string

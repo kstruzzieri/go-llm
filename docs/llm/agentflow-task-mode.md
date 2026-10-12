@@ -285,7 +285,7 @@ The complete disposition table is:
 | `state_invalid` | 3 | Fail closed with diagnostics. |
 | `step_unclaimed` | 2 | Enter the existing serial step loop; claim only immediately before model work. |
 | `file_receipts_missing` | 3 | Fail closed; edits cannot be reconstructed safely. |
-| `validation_missing` | 2 | Run only typed missing command gates, then finish the owned attempt; a gate error blocks it instead. |
+| `validation_missing` (no failed command gate) | 2 | Run only typed missing command gates, then finish the owned attempt; a gate error blocks it instead. |
 | `validation_missing` with a `failed` command gate | 2 | Block the owned attempt with `golem: resume found failed command gate`, run none of its gates, then claim a new attempt and run the model. |
 | `step_unverified` | 2 | Call the fixed `FinishStep` adapter for the owned attempt. |
 | `step_uncompleted` | 2 | Call the fixed `CompleteStep` adapter without re-verifying. |
