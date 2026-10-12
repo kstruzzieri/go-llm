@@ -130,7 +130,19 @@ func runAgentflowStatusWithRunner(ctx context.Context, out io.Writer, root strin
 		if err := validateStatusRecovery(root, state); err != nil {
 			disposition = recoveryDisposition{failClosed, 3, "blocked by unsafe or malformed projection: " + err.Error()}
 		} else if hasFailedCommandGate(state) {
-			disposition.description = "block the attempt whose gate failed, then re-run the step serially" // #652 A6
+			// #652 A6: resume reads the step-run ledger before it blocks
+			// (recordBlocked), so offer the recovery only when that read
+			// would let it block. validateStatusRecovery guarantees the
+			// projected step and attempt.
+			event, err := closedAttemptEvent(root, state.Resumability.Step.ID, state.Resumability.Attempt.ID)
+			switch {
+			case err != nil:
+				disposition = recoveryDisposition{failClosed, 3, "blocked: check attempt state before blocking: " + err.Error()}
+			case event != "":
+				disposition = recoveryDisposition{failClosed, 3, "blocked: the step-run ledger already shows this attempt closed (" + event + ")"}
+			default:
+				disposition.description = "block the attempt whose gate failed, then re-run the step serially" // #652 A6
+			}
 		}
 	}
 	// #642 A9: after validateStatusRecovery, so earlier projection refusals keep precedence (D9).

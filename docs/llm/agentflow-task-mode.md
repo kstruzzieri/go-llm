@@ -306,7 +306,10 @@ attempt until the policy changes (see [Failed step runs](#failed-step-runs)).
 A timed-out gate is never offered a retry: the retained timeout receipt exits
 `3` first (see [Timed-out gates](#timed-out-gates)). After the block, plan
 order and `depends_on` choose which eligible step the serial loop claims
-first, which need not be the step just blocked.
+first, which need not be the step just blocked. Status exits `3` for that row
+instead when Golem cannot read `.agent/step-runs.jsonl`, or the ledger already
+shows the attempt closed, because resume checks the same ledger before it
+blocks and would refuse.
 
 The lease-safety rule above overrides this table: `step_unclaimed` under an
 `enforce` lease policy, `validation_missing` with a failed command gate under

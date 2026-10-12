@@ -320,6 +320,7 @@ func TestAgentflowStatus_FailedGateDisposition(t *testing.T) {
 		advisory bool
 		mutate   func(f *resumeFixture)
 		gates    []agentflow.ResumabilityGate // nil means failedGateState
+		stepRuns string                       // non-empty: written to .agent/step-runs.jsonl first
 		code     int
 		want     string
 	}
@@ -328,6 +329,15 @@ func TestAgentflowStatus_FailedGateDisposition(t *testing.T) {
 	for _, r := range failedGateRefusals {
 		rows = append(rows, row{name: r.name, advisory: r.advisory, mutate: r.mutate, code: 3, want: "\nresume: blocked " + r.status})
 	}
+	// resume reads the step-run ledger before it blocks (recordBlocked), so
+	// status must not offer a recovery that read would refuse.
+	rows = append(rows,
+		row{name: "unreadable step-run ledger", advisory: true, stepRuns: "{\n", code: 3,
+			want: "\nresume: blocked: check attempt state before blocking: this workspace holds incompatible AgentFlow state (.agent/step-runs.jsonl:1 unreadable)"},
+		row{name: "attempt closed in step-run ledger", advisory: true, code: 3,
+			stepRuns: `{"schema_version":"1.0.0","step_id":"P1","attempt_id":"A1","event":"claimed"}` + "\n" +
+				`{"schema_version":"1.0.0","step_id":"P1","attempt_id":"A1","event":"blocked"}` + "\n",
+			want: "\nresume: blocked: the step-run ledger already shows this attempt closed (blocked)\n"})
 	rows = append(rows, row{name: "unknown status", advisory: true, gates: []agentflow.ResumabilityGate{
 		{Kind: "command", Label: "go test ./...", Status: "missing"},
 		{Kind: "command", Label: "go vet ./...", Status: "future"},
@@ -346,6 +356,9 @@ func TestAgentflowStatus_FailedGateDisposition(t *testing.T) {
 				}
 				if tt.mutate != nil {
 					tt.mutate(&fixture)
+				}
+				if tt.stepRuns != "" {
+					writeAgentFile(t, fixture.root, "step-runs.jsonl", tt.stepRuns)
 				}
 				payload, err := json.Marshal(fixture.payload)
 				if err != nil {
