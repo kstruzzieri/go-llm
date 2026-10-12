@@ -52,8 +52,10 @@ without the model, except a gate whose `run` call left a receipt. Under the
 `enforce` lease policy recovery stays manual (exit 3). Edits from the failed
 run stay in the workspace: restore or delete them before resuming, or the new
 attempt must write each still-changed in-scope file again. Attempts an older
-Golem left open are not closed after the fact, and resume may still settle an
-eligible one on its gates; block one with `agentflow block-step` to abandon it.
+Golem left open are not closed after the fact, except that since #652 resume
+blocks one whose command gate failed and re-runs the step; resume may still
+settle any other eligible one on its gates. Block one with
+`agentflow block-step` to abandon it.
 An attempt can still remain open after a failed block, a step-run ledger Golem
 could not read, process death, a resume safety refusal before its gates, or a
 `finish-step` error. Golem does not block an attempt the ledger already shows

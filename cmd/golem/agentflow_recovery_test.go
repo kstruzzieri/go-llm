@@ -311,23 +311,80 @@ func TestAgentflowStatus_FiniteEnforcedRecoveryIsBlocked(t *testing.T) {
 	}
 }
 
-func TestAgentflowStatus_RejectsUnknownGateStatusForAdvisoryLease(t *testing.T) {
-	fixture := newResumeFixture(t)
-	lease := fixture.projection()["lease"].(map[string]any)
-	lease["policy"], lease["state"], lease["expires_at"], lease["exclusive"] = "advisory", "no_deadline", nil, false
-	state := fixture.attemptState(t, "validation_missing", []agentflow.ResumabilityGate{
-		{Kind: "command", Label: "go test ./...", Status: "failed"},
-		{Kind: "command", Label: "go vet ./...", Status: "satisfied"},
-	})
-	payload, err := json.Marshal(state)
-	if err != nil {
-		t.Fatal(err)
+// #652 A6: status offers the failed-gate recovery (exit 2) only when resume
+// would perform it; each exception, and a genuinely unknown status, exits 3.
+// JSON mode relays AgentFlow's bytes either way.
+func TestAgentflowStatus_FailedGateDisposition(t *testing.T) {
+	type row struct {
+		name     string
+		advisory bool
+		mutate   func(f *resumeFixture)
+		gates    []agentflow.ResumabilityGate // nil means failedGateState
+		stepRuns string                       // non-empty: written to .agent/step-runs.jsonl first
+		code     int
+		want     string
 	}
-	var out bytes.Buffer
-	err = runAgentflowStatusWithRunner(context.Background(), &out, fixture.root, false, &recoveryRunner{payload: payload})
-	var statusErr *agentflowStatusExit
-	if !errors.As(err, &statusErr) || statusErr.ExitCode() != 3 || !strings.Contains(out.String(), "resume: blocked") {
-		t.Fatalf("unknown advisory gate status was not blocked: err=%v\n%s", err, out.String())
+	rows := []row{{name: "advisory owned attempt", advisory: true, code: 2,
+		want: "\nresume: block the attempt whose gate failed, then re-run the step serially\n"}}
+	for _, r := range failedGateRefusals {
+		rows = append(rows, row{name: r.name, advisory: r.advisory, mutate: r.mutate, code: 3, want: "\nresume: blocked " + r.status})
+	}
+	// resume reads the step-run ledger before it blocks (recordBlocked), so
+	// status must not offer a recovery that read would refuse.
+	rows = append(rows,
+		row{name: "unreadable step-run ledger", advisory: true, stepRuns: "{\n", code: 3,
+			want: "\nresume: blocked: check attempt state before blocking: this workspace holds incompatible AgentFlow state (.agent/step-runs.jsonl:1 unreadable)"},
+		row{name: "attempt closed in step-run ledger", advisory: true, code: 3,
+			stepRuns: `{"schema_version":"1.0.0","step_id":"P1","attempt_id":"A1","event":"claimed"}` + "\n" +
+				`{"schema_version":"1.0.0","step_id":"P1","attempt_id":"A1","event":"blocked"}` + "\n",
+			want: "\nresume: blocked: the step-run ledger already shows this attempt closed (blocked)\n"})
+	rows = append(rows, row{name: "unknown status", advisory: true, gates: []agentflow.ResumabilityGate{
+		{Kind: "command", Label: "go test ./...", Status: "missing"},
+		{Kind: "command", Label: "go vet ./...", Status: "future"},
+	}, code: 3, want: `resume: blocked by unsafe or malformed projection: agentflow gate \"go vet ./...\" has unknown status \"future\"`})
+	for _, tt := range rows {
+		for _, jsonOutput := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/json=%t", tt.name, jsonOutput), func(t *testing.T) {
+				fixture := newResumeFixture(t)
+				if tt.advisory {
+					fixture.useAdvisoryLease()
+				}
+				if tt.gates != nil {
+					_ = fixture.attemptState(t, "validation_missing", tt.gates)
+				} else {
+					_ = failedGateState(t, &fixture)
+				}
+				if tt.mutate != nil {
+					tt.mutate(&fixture)
+				}
+				if tt.stepRuns != "" {
+					writeAgentFile(t, fixture.root, "step-runs.jsonl", tt.stepRuns)
+				}
+				payload, err := json.Marshal(fixture.payload)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var out bytes.Buffer
+				err = runAgentflowStatusWithRunner(context.Background(), &out, fixture.root, jsonOutput, &recoveryRunner{payload: payload})
+				var exit *agentflowStatusExit
+				if !errors.As(err, &exit) || exit.ExitCode() != tt.code || exit.diagnostic != "" {
+					t.Fatalf("err = %v, want status exit %d without a diagnostic\n%s", err, tt.code, out.String())
+				}
+				if jsonOutput {
+					if !bytes.Equal(out.Bytes(), payload) {
+						t.Fatalf("JSON output = %q, want exact payload %q", out.Bytes(), payload)
+					}
+					return
+				}
+				// Exactly one resume line, and a refusal never also offers the
+				// recovery (consult: Contains alone accepts an appended line).
+				const offer = "block the attempt whose gate failed"
+				if !strings.Contains(out.String(), tt.want) || strings.Count(out.String(), "\nresume: ") != 1 ||
+					(tt.code == 3 && strings.Contains(out.String(), offer)) {
+					t.Fatalf("output lacks %q, has other than one resume line, or offers recovery under exit 3:\n%s", tt.want, out.String())
+				}
+			})
+		}
 	}
 }
 
@@ -878,16 +935,65 @@ func TestProjectedCommandGatesRejectsDuplicateArgv(t *testing.T) {
 			{Kind: "command", Run: []string{"make", "check"}},
 		},
 	}}}
-	state := recoveryAttemptState("validation_missing", []agentflow.ResumabilityGate{
-		{Kind: "command", Label: "make check", Status: "satisfied"},
-		{Kind: "command", Label: "make check", Status: "missing"},
-	})
-	af := &fakeAF{}
-	if _, err := settleAgentflowAttempt(context.Background(), af, t.TempDir(), plan, state); err == nil || !strings.Contains(err.Error(), "duplicate command-gate argv") {
-		t.Fatalf("err = %v, want duplicate command-gate argv rejection", err)
+	for _, statuses := range [][2]string{{"satisfied", "missing"}, {"failed", "missing"}} {
+		t.Run(statuses[0], func(t *testing.T) {
+			state := recoveryAttemptState("validation_missing", []agentflow.ResumabilityGate{
+				{Kind: "command", Label: "make check", Status: statuses[0]},
+				{Kind: "command", Label: "make check", Status: statuses[1]},
+			})
+			af := &fakeAF{}
+			if _, err := settleAgentflowAttempt(context.Background(), af, t.TempDir(), plan, state); err == nil || !strings.Contains(err.Error(), "duplicate command-gate argv") {
+				t.Fatalf("err = %v, want duplicate command-gate argv rejection", err)
+			}
+			if len(af.seq) != 0 {
+				t.Fatalf("mutated before rejecting duplicate argv: %v", af.seq)
+			}
+		})
 	}
-	if len(af.seq) != 0 {
-		t.Fatalf("mutated before rejecting duplicate argv: %v", af.seq)
+}
+
+// #652 A6: failed is AgentFlow's third gate status. A failed command gate is
+// flagged; a genuinely unknown status is still refused.
+func TestProjectedCommandGatesKnowsFailed(t *testing.T) {
+	state := recoveryAttemptState("validation_missing", []agentflow.ResumabilityGate{
+		{Kind: "command", Label: "go test ./...", Status: "missing"},
+		{Kind: "command", Label: "go vet ./...", Status: "failed"},
+	})
+	commands, projected, err := projectedCommandGates(recoveryPlan(), state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(commands) != 2 || commands[1].Label != "lint" || projected[0].Status != "missing" || projected[1].Status != "failed" {
+		t.Fatalf("commands = %+v, projected = %+v", commands, projected)
+	}
+	if !hasFailedCommandGate(state) {
+		t.Fatal("hasFailedCommandGate = false for a failed command gate")
+	}
+	for _, tt := range []struct {
+		name  string
+		state agentflow.NextActionState
+	}{
+		{"no failed gate", recoveryAttemptState("validation_missing", []agentflow.ResumabilityGate{
+			{Kind: "command", Label: "go test ./...", Status: "satisfied"},
+			{Kind: "command", Label: "go vet ./...", Status: "missing"},
+		})},
+		{"not validation_missing", recoveryAttemptState("step_unverified", []agentflow.ResumabilityGate{
+			{Kind: "command", Label: "go test ./...", Status: "failed"},
+		})},
+		{"failed non-command gate", recoveryAttemptState("validation_missing", []agentflow.ResumabilityGate{
+			{Kind: "inspection", Label: "review notes", Status: "failed"},
+		})},
+	} {
+		if hasFailedCommandGate(tt.state) {
+			t.Errorf("%s: hasFailedCommandGate = true, want false", tt.name)
+		}
+	}
+	_, _, err = projectedCommandGates(recoveryPlan(), recoveryAttemptState("validation_missing", []agentflow.ResumabilityGate{
+		{Kind: "command", Label: "go test ./...", Status: "missing"},
+		{Kind: "command", Label: "go vet ./...", Status: "future"},
+	}))
+	if want := `agentflow gate "go vet ./..." has unknown status "future"`; err == nil || err.Error() != want {
+		t.Fatalf("err = %v, want %q", err, want)
 	}
 }
 
@@ -917,15 +1023,34 @@ func TestSettleAgentflowAttemptRejectsAmbiguousGatesBeforeMutation(t *testing.T)
 		gates []agentflow.ResumabilityGate
 	}{
 		{name: "unknown kind", gates: []agentflow.ResumabilityGate{{Kind: "future", Label: "x", Status: "missing"}}},
-		{name: "failed status", gates: []agentflow.ResumabilityGate{
+		{name: "unknown status", gates: []agentflow.ResumabilityGate{
 			{Kind: "command", Label: "go test ./...", Status: "missing"},
-			{Kind: "command", Label: "go vet ./...", Status: "failed"},
+			{Kind: "command", Label: "go vet ./...", Status: "future"},
 		}},
 		{name: "label mismatch", gates: []agentflow.ResumabilityGate{
 			{Kind: "command", Label: "unit-tests", Status: "missing"},
 			{Kind: "command", Label: "go vet ./...", Status: "missing"},
 		}},
 		{name: "count mismatch", gates: []agentflow.ResumabilityGate{{Kind: "command", Label: "go test ./...", Status: "missing"}}},
+		// #652: validation before the block. A failed command gate beside a
+		// malformed one must be refused with zero mutations, so the A6 block can
+		// never run ahead of projectedCommandGates.
+		{name: "failed plus unknown kind", gates: []agentflow.ResumabilityGate{
+			{Kind: "command", Label: "go test ./...", Status: "failed"},
+			{Kind: "command", Label: "go vet ./...", Status: "missing"},
+			{Kind: "future", Label: "x", Status: "missing"},
+		}},
+		{name: "failed plus unknown status", gates: []agentflow.ResumabilityGate{
+			{Kind: "command", Label: "go test ./...", Status: "failed"},
+			{Kind: "command", Label: "go vet ./...", Status: "future"},
+		}},
+		{name: "failed plus label mismatch", gates: []agentflow.ResumabilityGate{
+			{Kind: "command", Label: "go test ./...", Status: "failed"},
+			{Kind: "command", Label: "lint", Status: "missing"},
+		}},
+		{name: "failed plus count mismatch", gates: []agentflow.ResumabilityGate{
+			{Kind: "command", Label: "go test ./...", Status: "failed"},
+		}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -1096,8 +1221,12 @@ func TestResumeRejectsFiniteEnforcedRecoveryBeforeMutation(t *testing.T) {
 			af := &fakeAF{nextSteps: []string{"P1"}, nextActions: []agentflow.NextActionState{state}}
 			d := &driver{af: af, plan: recoveryPlan(), runStep: func(context.Context, agentflow.Step, string, string) error { return nil }}
 
-			if _, err := d.resume(context.Background(), fixture.root, fixture.planJSON, nil); err == nil || !strings.Contains(err.Error(), "finite enforced lease") {
-				t.Fatalf("resume error = %v, want finite enforced lease refusal", err)
+			want := "finite enforced lease"
+			if stateName == "step_unclaimed" {
+				want = "agentflow resume blocks step_unclaimed under an enforced lease because claiming would enter non-atomic gate recovery"
+			}
+			if _, err := d.resume(context.Background(), fixture.root, fixture.planJSON, nil); err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("resume error = %v, want %q", err, want)
 			}
 			if want := []string{"probe", "next-action"}; !reflect.DeepEqual(af.seq, want) {
 				t.Fatalf("mutations before lease refusal = %v, want %v", af.seq, want)
@@ -1106,35 +1235,40 @@ func TestResumeRejectsFiniteEnforcedRecoveryBeforeMutation(t *testing.T) {
 	}
 }
 
-func TestResumeReentryRefusesAlreadySatisfiedGateInsteadOfDuplicatingIt(t *testing.T) {
-	initialFixture := newResumeFixture(t)
-	initialFixture.useAdvisoryLease()
-	initial := initialFixture.noAttemptState(t, "step_unclaimed", true)
+func TestResumeReentryRefusesRecordedGateInsteadOfDuplicatingIt(t *testing.T) {
+	for _, status := range []string{"satisfied", "failed"} {
+		t.Run(status, func(t *testing.T) {
+			initialFixture := newResumeFixture(t)
+			initialFixture.useAdvisoryLease()
+			initial := initialFixture.noAttemptState(t, "step_unclaimed", true)
 
-	inFlightFixture := newResumeFixture(t)
-	inFlightFixture.useAdvisoryLease()
-	inFlight := inFlightFixture.attemptState(t, "validation_missing", []agentflow.ResumabilityGate{
-		{Kind: "command", Label: "go test ./...", Status: "satisfied"},
-		{Kind: "command", Label: "go vet ./...", Status: "missing"},
-	})
-	inFlight.Resumability.Attempt.ID = "A-P1"
+			inFlightFixture := newResumeFixture(t)
+			inFlightFixture.useAdvisoryLease()
+			inFlight := inFlightFixture.attemptState(t, "validation_missing", []agentflow.ResumabilityGate{
+				{Kind: "command", Label: "go test ./...", Status: status},
+				{Kind: "command", Label: "go vet ./...", Status: "missing"},
+			})
+			inFlight.Resumability.Attempt.ID = "A-P1"
 
-	af := &fakeAF{
-		nextSteps:   []string{"P1"},
-		nextActions: []agentflow.NextActionState{initial, inFlight},
-	}
-	d := &driver{af: af, plan: recoveryPlan()}
-	d.runStep = func(_ context.Context, step agentflow.Step, _, _ string) error {
-		af.seq = append(af.seq, "model:"+step.ID)
-		return nil
-	}
+			af := &fakeAF{
+				nextSteps:   []string{"P1"},
+				nextActions: []agentflow.NextActionState{initial, inFlight},
+			}
+			d := &driver{af: af, plan: recoveryPlan()}
+			d.runStep = func(_ context.Context, step agentflow.Step, _, _ string) error {
+				af.seq = append(af.seq, "model:"+step.ID)
+				return nil
+			}
 
-	if _, err := d.resume(context.Background(), initialFixture.root, initialFixture.planJSON, nil); err == nil || !strings.Contains(err.Error(), "refusing duplicate execution") {
-		t.Fatalf("resume error = %v, want duplicate gate refusal", err)
-	}
-	want := []string{"probe", "next-action", "next-step", "claim:P1", "model:P1", "next-action"}
-	if !reflect.DeepEqual(af.seq, want) || len(af.gateArgv) != 0 {
-		t.Fatalf("calls before duplicate refusal = %v argv=%v, want %v and no gate argv", af.seq, af.gateArgv, want)
+			want := fmt.Sprintf(`agentflow resumed step "P1" already has %s command gate "go test ./..."; refusing duplicate execution`, status)
+			if _, err := d.resume(context.Background(), initialFixture.root, initialFixture.planJSON, nil); err == nil || err.Error() != want {
+				t.Fatalf("resume error = %v, want %q", err, want)
+			}
+			wantSeq := []string{"probe", "next-action", "next-step", "claim:P1", "model:P1", "next-action"}
+			if !reflect.DeepEqual(af.seq, wantSeq) || len(af.gateArgv) != 0 {
+				t.Fatalf("calls before duplicate refusal = %v argv=%v, want %v and no gate argv", af.seq, af.gateArgv, wantSeq)
+			}
+		})
 	}
 }
 
@@ -1234,6 +1368,221 @@ func TestResumeBlockedStatesDoNotMutate(t *testing.T) {
 	}
 }
 
+// #652 A6: resume blocks an open attempt whose command gate failed, runs no
+// gate on it (not even the missing one before the failed one), then claims a
+// new attempt and runs the model.
+func TestResumeBlocksFailedGateAttemptThenRerunsStep(t *testing.T) {
+	fixture := newResumeFixture(t)
+	fixture.useAdvisoryLease()
+	initial := fixture.attemptState(t, "validation_missing", []agentflow.ResumabilityGate{
+		{Kind: "command", Label: "go test ./...", Status: "missing"},
+		{Kind: "command", Label: "go vet ./...", Status: "failed"},
+	})
+	complete := fixture.noAttemptState(t, "complete", false)
+	unclaimedFixture := newResumeFixture(t)
+	unclaimedFixture.useAdvisoryLease()
+	unclaimed := unclaimedFixture.noAttemptState(t, "step_unclaimed", true)
+	unclaimed.Resumability.Step.State = "blocked"
+	inFlightFixture := newResumeFixture(t)
+	inFlightFixture.useAdvisoryLease()
+	inFlight := inFlightFixture.attemptState(t, "validation_missing", []agentflow.ResumabilityGate{
+		{Kind: "command", Label: "go test ./...", Status: "missing"},
+		{Kind: "command", Label: "go vet ./...", Status: "missing"},
+	})
+	inFlight.Resumability.Attempt.ID = "A-P1"
+	af := &fakeAF{nextSteps: []string{"P1"}, nextActions: []agentflow.NextActionState{initial, unclaimed, inFlight, complete}}
+	d := &driver{af: af, plan: recoveryPlan()}
+	d.runStep = func(_ context.Context, step agentflow.Step, _, _ string) error {
+		af.seq = append(af.seq, "model:"+step.ID)
+		return nil
+	}
+
+	final, err := d.resume(context.Background(), fixture.root, fixture.planJSON, nil)
+	if err != nil || final.State != "complete" {
+		t.Fatalf("state = %q, err = %v", final.State, err)
+	}
+	want := []string{
+		"probe", "next-action",
+		"block-step:P1:A1:golem: resume found failed command gate",
+		"next-action", "next-step", "claim:P1", "model:P1",
+		"next-action", "gate:P1:unit-tests", "gate:P1:lint", "finish-step:P1:A-P1",
+		"next-step", "finish-run", "next-action",
+	}
+	if !reflect.DeepEqual(af.seq, want) {
+		t.Fatalf("seq = %v\nwant %v", af.seq, want)
+	}
+	assertFreshBlockContext(t, af.blocks)
+}
+
+// failedGateRefusals are #652 A6's exceptions: each refuses before any
+// mutation. status is the text human status shows after "resume: blocked";
+// recoveryDisplayText prints a quote as \".
+var failedGateRefusals = []struct {
+	name, resume, status string
+	advisory             bool
+	mutate               func(f *resumeFixture)
+}{
+	{name: "finite enforced live lease",
+		resume: "agentflow resume blocks validation_missing under a finite enforced lease because Agentflow cannot guarantee duplicate-free, no-renew recovery",
+		status: "by unsafe or malformed projection: agentflow resume blocks validation_missing under a finite enforced lease"},
+	{name: "enforced no-deadline lease", mutate: func(f *resumeFixture) {
+		lease := f.projection()["lease"].(map[string]any)
+		lease["state"], lease["expires_at"] = "no_deadline", nil
+	},
+		resume: "agentflow resume blocks validation_missing with a failed command gate under an enforced lease because blocking the attempt would leave step_unclaimed, which an enforced lease refuses",
+		status: "by unsafe or malformed projection: agentflow resume blocks validation_missing with a failed command gate under an enforced lease"},
+	{name: "foreign owner", advisory: true, mutate: func(f *resumeFixture) {
+		f.projection()["attempt"].(map[string]any)["owner"] = "other"
+	},
+		resume: `agentflow resumability attempt "A1" is owned by "other", want "golem"`,
+		status: `by unsafe or malformed projection: agentflow resumability attempt \"A1\" is owned by \"other\", want \"golem\"`},
+	{name: "continue not allowed", advisory: true, mutate: func(f *resumeFixture) {
+		f.projection()["recovery_actions"].([]any)[0].(map[string]any)["allowed"] = false
+	},
+		resume: "agentflow resumability does not allow automatic non-break-glass continue",
+		status: "by unsafe or malformed projection: agentflow resumability does not allow automatic non-break-glass continue"},
+	{name: "continue not automatic", advisory: true, mutate: func(f *resumeFixture) {
+		f.projection()["recovery_actions"].([]any)[0].(map[string]any)["automatic"] = false
+	},
+		resume: "agentflow resumability does not allow automatic non-break-glass continue",
+		status: "by unsafe or malformed projection: agentflow resumability does not allow automatic non-break-glass continue"},
+	{name: "continue break-glass", advisory: true, mutate: func(f *resumeFixture) {
+		f.projection()["recovery_actions"].([]any)[0].(map[string]any)["break_glass"] = true
+	},
+		resume: "agentflow resumability does not allow automatic non-break-glass continue",
+		status: "by unsafe or malformed projection: agentflow resumability does not allow automatic non-break-glass continue"},
+}
+
+// failedGateState is resumeFixture's owned A1 with a missing gate before a
+// failed one.
+func failedGateState(t *testing.T, f *resumeFixture) agentflow.NextActionState {
+	return f.attemptState(t, "validation_missing", []agentflow.ResumabilityGate{
+		{Kind: "command", Label: "go test ./...", Status: "missing"},
+		{Kind: "command", Label: "go vet ./...", Status: "failed"},
+	})
+}
+
+func TestResumeRefusesFailedGateRecoveryBeforeMutation(t *testing.T) {
+	for _, tt := range failedGateRefusals {
+		t.Run(tt.name, func(t *testing.T) {
+			fixture := newResumeFixture(t)
+			if tt.advisory {
+				fixture.useAdvisoryLease()
+			}
+			_ = failedGateState(t, &fixture)
+			if tt.mutate != nil {
+				tt.mutate(&fixture)
+			}
+			af := &fakeAF{nextSteps: []string{"P1"}, nextActions: []agentflow.NextActionState{fixture.state(t)}}
+			models := 0
+			d := &driver{af: af, plan: recoveryPlan(), runStep: func(context.Context, agentflow.Step, string, string) error {
+				models++
+				return nil
+			}}
+			_, err := d.resume(context.Background(), fixture.root, fixture.planJSON, nil)
+			if err == nil || err.Error() != tt.resume {
+				t.Fatalf("err = %v\nwant %s", err, tt.resume)
+			}
+			if want := []string{"probe", "next-action"}; !reflect.DeepEqual(af.seq, want) || models != 0 || len(af.blocks) != 0 {
+				t.Fatalf("seq = %v, model runs = %d, blocks = %d; want %v and none", af.seq, models, len(af.blocks), want)
+			}
+		})
+	}
+}
+
+// #652 A6: a block that fails or finds the attempt already closed names the
+// failed gate and the block outcome, runs nothing more, and exits through the
+// error (#611 D6).
+func TestResumeFailedGateBlockFailures(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		blockErr  error
+		stepRuns  string
+		want      string
+		wantSeq   []string
+		wantBlock int
+	}{
+		{name: "block rejected", blockErr: errors.New("block rejected"),
+			want:      `step P1 attempt A1: gate "lint" already failed; record blocked attempt: block rejected`,
+			wantSeq:   []string{"probe", "next-action", "block-step:P1:A1:golem: resume found failed command gate"},
+			wantBlock: 1},
+		{name: "attempt already closed",
+			stepRuns: `{"schema_version":"1.0.0","step_id":"P1","attempt_id":"A1","event":"claimed"}` + "\n" +
+				`{"schema_version":"1.0.0","step_id":"P1","attempt_id":"A1","event":"blocked"}` + "\n",
+			want:    `step P1 attempt A1: gate "lint" already failed; attempt already closed (blocked); not blocked`,
+			wantSeq: []string{"probe", "next-action"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			fixture := newResumeFixture(t)
+			fixture.useAdvisoryLease()
+			state := failedGateState(t, &fixture)
+			if tt.stepRuns != "" {
+				writeAgentFile(t, fixture.root, "step-runs.jsonl", tt.stepRuns)
+			}
+			af := &fakeAF{nextSteps: []string{"P1"}, nextActions: []agentflow.NextActionState{state}}
+			if tt.blockErr != nil {
+				af.failAt = map[string]error{"block-step": tt.blockErr}
+			}
+			models := 0
+			d := &driver{af: af, plan: recoveryPlan(), runStep: func(context.Context, agentflow.Step, string, string) error {
+				models++
+				return nil
+			}}
+			_, err := d.resume(context.Background(), fixture.root, fixture.planJSON, nil)
+			if err == nil || err.Error() != tt.want {
+				t.Fatalf("err = %v\nwant %s", err, tt.want)
+			}
+			if tt.blockErr != nil && !errors.Is(err, tt.blockErr) {
+				t.Fatalf("err = %v does not wrap the block error", err)
+			}
+			if !reflect.DeepEqual(af.seq, tt.wantSeq) || models != 0 || len(af.blocks) != tt.wantBlock {
+				t.Fatalf("seq = %v, model runs = %d, blocks = %d; want %v, none, %d", af.seq, models, len(af.blocks), tt.wantSeq, tt.wantBlock)
+			}
+		})
+	}
+}
+
+// #652 D1: an open review-amendment attempt sits on a step AgentFlow already
+// counts completed, so recovery refuses it before the gate projection, failed
+// gate or not. A6 never blocks it.
+func TestFailedGateAmendmentAttemptStaysRefused(t *testing.T) {
+	const reason = "agentflow resumability open attempt belongs to a completed step"
+	amendment := func(t *testing.T) resumeFixture {
+		fixture := newResumeFixture(t)
+		fixture.useAdvisoryLease()
+		_ = failedGateState(t, &fixture)
+		projection := fixture.projection()
+		projection["step"].(map[string]any)["state"] = "amendment_started"
+		projection["step"].(map[string]any)["completed"] = true
+		projection["attempt"].(map[string]any)["state"] = "amendment_started"
+		return fixture
+	}
+	t.Run("status", func(t *testing.T) {
+		fixture := amendment(t)
+		payload, err := json.Marshal(fixture.payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out bytes.Buffer
+		err = runAgentflowStatusWithRunner(context.Background(), &out, fixture.root, false, &recoveryRunner{payload: payload})
+		var exit *agentflowStatusExit
+		if !errors.As(err, &exit) || exit.ExitCode() != 3 || !strings.Contains(out.String(), "\nresume: blocked by unsafe or malformed projection: "+reason+"\n") {
+			t.Fatalf("err = %v, want exit 3 with the completed-step refusal\n%s", err, out.String())
+		}
+	})
+	t.Run("resume", func(t *testing.T) {
+		fixture := amendment(t)
+		af := &fakeAF{nextActions: []agentflow.NextActionState{fixture.state(t)}}
+		d := &driver{af: af, plan: recoveryPlan()}
+		if _, err := d.resume(context.Background(), fixture.root, fixture.planJSON, nil); err == nil || err.Error() != reason {
+			t.Fatalf("err = %v, want %q", err, reason)
+		}
+		if want := []string{"probe", "next-action"}; !reflect.DeepEqual(af.seq, want) {
+			t.Fatalf("seq = %v, want %v", af.seq, want)
+		}
+	})
+}
+
 // #642 A9: a settlement gate error over a root that retains a timed-out
 // receipt reports it after the block.
 func TestSettleAgentflowAttemptGateTimeoutReportsRetainedReceipt(t *testing.T) {
@@ -1293,6 +1642,7 @@ var retainedTimeoutStates = []struct {
 	{"proof_missing", func(t *testing.T, f *resumeFixture) agentflow.NextActionState {
 		return f.noAttemptState(t, "proof_missing", false)
 	}},
+	{"validation_missing with a failed gate", failedGateState},
 }
 
 // #642 A9: status turns every otherwise-resumable state into a blocked exit 3
@@ -1349,22 +1699,16 @@ func TestAgentflowStatus_RetainedTimeoutBlocksResumableStates(t *testing.T) {
 }
 
 // #642 D9: the projection checks keep precedence over the timeout report, and
-// complete keeps its verified-proof path.
+// complete keeps its verified-proof path. (#652 moved the failed-gate row to
+// retainedTimeoutStates: with failed known, status reaches the A9 report as
+// resume does.)
 func TestAgentflowStatus_RetainedTimeoutKeepsEarlierRefusals(t *testing.T) {
-	failedGate := func(t *testing.T, f *resumeFixture) agentflow.NextActionState {
-		return f.attemptState(t, "validation_missing", []agentflow.ResumabilityGate{
-			{Kind: "command", Label: "go test ./...", Status: "failed"},
-			{Kind: "command", Label: "go vet ./...", Status: "satisfied"},
-		})
-	}
 	for _, tt := range []struct {
 		name   string
 		state  func(t *testing.T, f *resumeFixture) agentflow.NextActionState
 		mutate func(f *resumeFixture)
 		want   string
 	}{
-		{name: "older open attempt with a failed gate", state: failedGate,
-			want: "resume: blocked by unsafe or malformed projection: agentflow gate "},
 		{name: "foreign owner", state: retainedTimeoutStates[1].state, mutate: func(f *resumeFixture) {
 			f.projection()["attempt"].(map[string]any)["owner"] = "other"
 		}, want: "resume: blocked by unsafe or malformed projection: agentflow resumability attempt "},
@@ -1441,12 +1785,6 @@ func TestResumeRefusesRetainedTimeoutBeforeMutation(t *testing.T) {
 	}
 	rows = append(rows,
 		row{"empty-id timeout", retainedTimeoutStates[0].state, `{"schema_version":"1.0.0","id":"","decision":"timeout","timed_out":true}`, ".agent/command-receipts.jsonl:1"},
-		row{"older open attempt with a failed gate", func(t *testing.T, f *resumeFixture) agentflow.NextActionState {
-			return f.attemptState(t, "validation_missing", []agentflow.ResumabilityGate{
-				{Kind: "command", Label: "go test ./...", Status: "failed"},
-				{Kind: "command", Label: "go vet ./...", Status: "satisfied"},
-			})
-		}, timeoutReceiptCR1, "CR1"},
 	)
 	for _, tt := range rows {
 		t.Run(tt.name, func(t *testing.T) {

@@ -129,6 +129,20 @@ func runAgentflowStatusWithRunner(ctx context.Context, out io.Writer, root strin
 	if disposition.action != failClosed {
 		if err := validateStatusRecovery(root, state); err != nil {
 			disposition = recoveryDisposition{failClosed, 3, "blocked by unsafe or malformed projection: " + err.Error()}
+		} else if hasFailedCommandGate(state) {
+			// #652 A6: resume reads the step-run ledger before it blocks
+			// (recordBlocked), so offer the recovery only when that read
+			// would let it block. validateStatusRecovery guarantees the
+			// projected step and attempt.
+			event, err := closedAttemptEvent(root, state.Resumability.Step.ID, state.Resumability.Attempt.ID)
+			switch {
+			case err != nil:
+				disposition = recoveryDisposition{failClosed, 3, "blocked: check attempt state before blocking: " + err.Error()}
+			case event != "":
+				disposition = recoveryDisposition{failClosed, 3, "blocked: the step-run ledger already shows this attempt closed (" + event + ")"}
+			default:
+				disposition.description = "block the attempt whose gate failed, then re-run the step serially" // #652 A6
+			}
 		}
 	}
 	// #642 A9: after validateStatusRecovery, so earlier projection refusals keep precedence (D9).
@@ -424,7 +438,9 @@ func projectedCommandGates(plan *agentflow.Plan, state agentflow.NextActionState
 	}
 	projected := make([]agentflow.ResumabilityGate, 0, len(state.Resumability.Gates))
 	for _, gate := range state.Resumability.Gates {
-		if gate.Status != "missing" && gate.Status != "satisfied" {
+		switch gate.Status {
+		case "missing", "satisfied", "failed": // AgentFlow 1.0 verify_step's vocabulary (#652)
+		default:
 			return nil, nil, fmt.Errorf("agentflow gate %q has unknown status %q", gate.Label, gate.Status)
 		}
 		switch gate.Kind {
@@ -447,25 +463,54 @@ func projectedCommandGates(plan *agentflow.Plan, state agentflow.NextActionState
 	return commands, projected, nil
 }
 
+// resumeFailedGateBlockReason is the ledger reason when resume blocks an open
+// attempt whose command gate AgentFlow reports failed (#652 A6). As with
+// gateBlockReason, the gate's label stays out of the ledger.
+const resumeFailedGateBlockReason = "golem: resume found failed command gate"
+
+// hasFailedCommandGate reports whether a validation_missing projection holds a
+// command gate AgentFlow reports failed: a nonzero exit, a timeout, a run that
+// risk_policy: block refused (exit_code null, decision "blocked"), or an
+// attested receipt under strict policy (execution_coverage.py verify_step).
+// AgentFlow credits an attempt's first matching receipt, so neither re-running
+// the gate nor finish-step can settle that attempt (#652 A6).
+func hasFailedCommandGate(state agentflow.NextActionState) bool {
+	if state.State != "validation_missing" || state.Resumability == nil {
+		return false
+	}
+	for _, gate := range state.Resumability.Gates {
+		if gate.Kind == "command" && gate.Status == "failed" {
+			return true
+		}
+	}
+	return false
+}
+
 // validateRecoveryMutationSafety rejects finite enforced recovery when the
 // fixed Agentflow operation is not atomic with its final lease check. A time
 // estimate cannot prove safety: run may append lease_renewed after a pause,
 // finish-step records verification before rechecking expiry, and complete-step
 // checks expiry before taking the separate close lock. Advisory and no-deadline
-// attempts do not have these races.
+// attempts do not have these races. It also rejects, under any enforce policy, a
+// failed-gate attempt whose block would leave step_unclaimed (#652 A6).
 func validateRecoveryMutationSafety(state agentflow.NextActionState) error {
 	projection := state.Resumability
 	if projection == nil || projection.Lease == nil || projection.Lease.Policy == nil || *projection.Lease.Policy != "enforce" {
 		return nil
 	}
 	if state.State == "step_unclaimed" {
-		return fmt.Errorf("agentflow resume blocks step_unclaimed under a finite enforced lease because claiming would enter non-atomic gate recovery")
+		return fmt.Errorf("agentflow resume blocks step_unclaimed under an enforced lease because claiming would enter non-atomic gate recovery")
 	}
 	if projection.Lease.State == "live" && projection.Lease.ExpiresAt != nil {
 		switch state.State {
 		case "validation_missing", "step_unverified", "step_uncompleted":
 			return fmt.Errorf("agentflow resume blocks %s under a finite enforced lease because Agentflow cannot guarantee duplicate-free, no-renew recovery", state.State)
 		}
+	}
+	// #652 A6: blocking a failed-gate attempt leaves step_unclaimed, which the
+	// first check refuses under any enforce policy, so refuse before the block.
+	if hasFailedCommandGate(state) {
+		return fmt.Errorf("agentflow resume blocks validation_missing with a failed command gate under an enforced lease because blocking the attempt would leave step_unclaimed, which an enforced lease refuses")
 	}
 	return nil
 }
@@ -501,6 +546,19 @@ func settleAgentflowAttempt(ctx context.Context, client afClient, root string, p
 		commands, projected, err := projectedCommandGates(plan, state)
 		if err != nil {
 			return false, err
+		}
+		// #652 A6: a failed gate's receipt stays this attempt's (AgentFlow
+		// credits the first matching one), so no gate run or finish-step can
+		// settle it. Block it and run no gate, not even a missing one; the
+		// serial loop then claims a new attempt and runs the model again.
+		for i, command := range commands {
+			if projected[i].Status != "failed" {
+				continue
+			}
+			if err := recordBlocked(ctx, client, root, stepID, attemptID, resumeFailedGateBlockReason); err != nil {
+				return true, fmt.Errorf("step %s attempt %s: gate %q already failed; %w", stepID, attemptID, command.Label, err)
+			}
+			return true, nil
 		}
 		for i, command := range commands {
 			if projected[i].Status != "missing" {
@@ -602,7 +660,7 @@ func (d *driver) resume(ctx context.Context, root string, planJSON []byte, appro
 		}
 		for _, gate := range gates {
 			if gate.Status != "missing" {
-				return fmt.Errorf("agentflow resumed step %q already has satisfied command gate %q; refusing duplicate execution", step.ID, gate.Label)
+				return fmt.Errorf("agentflow resumed step %q already has %s command gate %q; refusing duplicate execution", step.ID, gate.Status, gate.Label)
 			}
 		}
 		return validateRecoveryMutationSafety(projected)

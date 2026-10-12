@@ -100,31 +100,41 @@ func stepRunBlockReason(err error) string {
 	}
 }
 
-// blockAttempt closes a failed attempt so recovery runs a new one instead of
-// settling this one on its gates (#611, #642). The block runs on a fresh
+// recordBlocked closes an open attempt with reason, so recovery runs a new
+// attempt instead of settling this one on its gates (#611, #642, #652). It
+// returns nil once AgentFlow recorded the block. The block runs on a fresh
 // bounded context: by now the caller's context may be cancelled by an
 // interrupt, a sibling worker's failure, or the journal's fatal-receipt cancel.
 // root is the workspace whose ledger af writes.
-func blockAttempt(ctx context.Context, af afClient, root, step, attempt, reason string, cause error) error {
-	err := fmt.Errorf("step %s attempt %s: %w", step, attempt, cause)
+func recordBlocked(ctx context.Context, af afClient, root, step, attempt, reason string) error {
 	// #642: AgentFlow 1.0 blocks an attempt that is already closed (by an
 	// operator's break-glass fail-step, say), which leaves the ledger
 	// state_invalid. An unreadable ledger is not blocked blind: an open attempt
-	// is the documented recoverable residual. rerr carries R5's pre-run advice,
-	// so the error ends with the mid-run next step. The check narrows, but cannot
-	// close, the window against a concurrent writer; AgentFlow does not refuse
-	// the block itself.
-	event, rerr := closedAttemptEvent(root, step, attempt)
-	if rerr != nil {
-		return fmt.Errorf("%w; check attempt state before blocking: %w; attempt not blocked; run -agentflow-status", err, rerr)
+	// is the documented recoverable residual. The error carries R5's pre-run
+	// advice, so it ends with the mid-run next step. The check narrows, but
+	// cannot close, the window against a concurrent writer; AgentFlow does not
+	// refuse the block itself.
+	event, err := closedAttemptEvent(root, step, attempt)
+	if err != nil {
+		return fmt.Errorf("check attempt state before blocking: %w; attempt not blocked; run -agentflow-status", err)
 	}
 	if event != "" {
-		return fmt.Errorf("%w; attempt already closed (%s); not blocked", err, event)
+		return fmt.Errorf("attempt already closed (%s); not blocked", event)
 	}
 	bctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), blockStepTimeout)
 	defer cancel()
-	if berr := af.BlockStep(bctx, step, attempt, reason); berr != nil {
-		return fmt.Errorf("%w; record blocked attempt: %w", err, berr)
+	if err := af.BlockStep(bctx, step, attempt, reason); err != nil {
+		return fmt.Errorf("record blocked attempt: %w", err)
+	}
+	return nil
+}
+
+// blockAttempt closes the attempt a failure ended and returns that failure
+// with the block's outcome appended. It never returns nil.
+func blockAttempt(ctx context.Context, af afClient, root, step, attempt, reason string, cause error) error {
+	err := fmt.Errorf("step %s attempt %s: %w", step, attempt, cause)
+	if berr := recordBlocked(ctx, af, root, step, attempt, reason); berr != nil {
+		return fmt.Errorf("%w; %w", err, berr)
 	}
 	return fmt.Errorf("%w; attempt recorded as blocked", err)
 }

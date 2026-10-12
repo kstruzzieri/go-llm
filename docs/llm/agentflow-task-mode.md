@@ -251,12 +251,13 @@ plan is unchanged; re-run planning to refresh the handoff.
 
 For `validation_missing`, projected command gates are paired by their filtered
 plan order, not by the human validation label. Each projected label must equal
-the joined plan argv; Golem runs only `missing` gates with plan-owned argv and
-never repeats a `satisfied` receipt. Known inspection/legacy projections do not
-participate in command pairing, and unknown kinds or statuses fail closed. A
-step whose plan declares two command gates with identical argv also fails
-closed during recovery, because positional pairing could not be proven
-unambiguous under reordering.
+the joined plan argv. Golem knows AgentFlow's gate statuses `missing`,
+`satisfied` and `failed`; it runs only `missing` gates with plan-owned argv and
+never repeats a `satisfied` or `failed` receipt. Known inspection/legacy
+projections do not participate in command pairing, and unknown kinds or
+statuses fail closed. A step whose plan declares two command gates with
+identical argv also fails closed during recovery, because positional pairing
+could not be proven unambiguous under reordering.
 The `enforce` lease policy fails closed for `step_unclaimed` even before any
 lease exists, because claiming would enter a new finite enforced lease
 mid-recovery; enforce-policy runs are therefore only ever settled up to their
@@ -266,8 +267,10 @@ also fails closed for `validation_missing`, `step_unverified`, and
 verification before its final expiry check, and `complete-step` checks expiry
 before taking its separate close lock. A time estimate therefore cannot prove
 no-renew, duplicate-free recovery. An operator must resolve that lease
-explicitly outside Golem. Advisory and no-deadline attempts retain the normal
-serial recovery path.
+explicitly outside Golem. Under any `enforce` policy, a `validation_missing`
+attempt with a failed command gate also fails closed: blocking it would leave
+`step_unclaimed`. Advisory and no-deadline attempts retain the normal serial
+recovery path, except an `enforce` attempt whose command gate failed (above).
 After any attempt settlement, Golem performs one read-only progress check and
 refuses to repeat a mutation when the state did not change. No-settle states go
 directly into the existing serial step/tail driver.
@@ -282,7 +285,8 @@ The complete disposition table is:
 | `state_invalid` | 3 | Fail closed with diagnostics. |
 | `step_unclaimed` | 2 | Enter the existing serial step loop; claim only immediately before model work. |
 | `file_receipts_missing` | 3 | Fail closed; edits cannot be reconstructed safely. |
-| `validation_missing` | 2 | Run only typed missing command gates, then finish the owned attempt; a gate error blocks it instead. |
+| `validation_missing` (no failed command gate) | 2 | Run only typed missing command gates, then finish the owned attempt; a gate error blocks it instead. |
+| `validation_missing` with a `failed` command gate | 2 | Block the owned attempt with `golem: resume found failed command gate`, run none of its gates, then claim a new attempt and run the model. |
 | `step_unverified` | 2 | Call the fixed `FinishStep` adapter for the owned attempt. |
 | `step_uncompleted` | 2 | Call the fixed `CompleteStep` adapter without re-verifying. |
 | `drift_failing` | 3 | Fail closed for operator inspection. |
@@ -292,9 +296,26 @@ The complete disposition table is:
 | `proof_failing` | 3 | Fail closed; preserve the failing proof. |
 | `complete` | 0 | Report verified proof and perform no mutation. |
 
+Status shows the failed-gate row as
+`resume: block the attempt whose gate failed, then re-run the step serially`.
+Exit `2` there offers an eligible retry, not a guaranteed proof. AgentFlow
+credits an attempt's first matching gate receipt, so the failed receipt stays
+with the blocked attempt and the new attempt gets its own gate runs. A gate
+that the `risk_policy: block` setting refuses is refused again on the new
+attempt until the policy changes (see [Failed step runs](#failed-step-runs)).
+A timed-out gate is never offered a retry: the retained timeout receipt exits
+`3` first (see [Timed-out gates](#timed-out-gates)). After the block, plan
+order and `depends_on` choose which eligible step the serial loop claims
+first, which need not be the step just blocked. Status exits `3` for that row
+instead when Golem cannot read `.agent/step-runs.jsonl`, or the ledger already
+shows the attempt closed, because resume checks the same ledger before it
+blocks and would refuse.
+
 The lease-safety rule above overrides this table: `step_unclaimed` under an
-`enforce` lease policy, and `validation_missing`/`step_unverified`/
+`enforce` lease policy, `validation_missing` with a failed command gate under
+any `enforce` policy, and `validation_missing`/`step_unverified`/
 `step_uncompleted` under a live finite enforced lease, exit `3` instead of `2`.
+(A live finite enforced lease keeps its own message for the failed-gate case.)
 So does any state that would exit `2` while the root retains a timed-out
 command receipt, and resume refuses it before any change (see
 [Timed-out gates](#timed-out-gates)).
@@ -307,8 +328,9 @@ step-run ledger Golem could not read, a process that died mid-attempt, a
 
 Unknown future states fail closed. Resume never initializes, locks, records
 evidence or reviews, renews/reclaims leases, re-runs a model for an open
-attempt, executes advisory command strings, rebuilds stale/failing proof, or
-starts parallel recovery. Normal interactive startup only detects a
+attempt (an open attempt whose gate failed is blocked first; the model then
+runs in a new attempt), executes advisory command strings, rebuilds
+stale/failing proof, or starts parallel recovery. Normal interactive startup only detects a
 case-insensitive `.agent` directory and prints the status/resume commands; it
 does not inspect or mutate the ledgers.
 
@@ -415,7 +437,11 @@ edits without new receipts), or when `FinishStep` fails. A failed block
 reports both errors
 (`...; record blocked attempt: <agentflow error>`). `-agentflow-status` reports
 AgentFlow's authoritative state, and resume may settle an eligible open attempt
-on its gates without running the model again; that does not make every open
+on its gates without running the model again, unless one of its command gates
+already failed: resume then blocks it with
+`golem: resume found failed command gate` and re-runs the step in a new
+attempt. An open review-amendment attempt is refused, as before: its step
+already counts as completed. Settling on gates does not make every open
 attempt's partial work safe to settle. Check `-agentflow-status` first, and to
 abandon an owned partial attempt, block it with the command above before
 restoring files.
@@ -560,8 +586,10 @@ For an external plan, the task driver order is:
    the supplied `-plan`) and reports whether `-agentflow-resume` can recover.
    An attempt left open after its gate failed (the block itself failed, the
    step-run ledger could not be read, the process died, or an older Golem
-   wrote it) is one resume cannot settle yet (#652); Golem otherwise blocks
-   such an attempt (see
+   wrote it) is blocked by `-agentflow-resume`, which then re-runs the step in a
+   new attempt (see the failed-gate row in
+   [Inspecting and resuming an existing run](#inspecting-and-resuming-an-existing-run));
+   Golem otherwise blocks such an attempt itself (see
    [Failed step runs](#failed-step-runs)).
 6. Let `finish-run` build and verify proof under the materialized policy.
 

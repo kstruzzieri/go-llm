@@ -492,37 +492,15 @@ func TestAgentflowStatusReportsZeroXState_RealCLI(t *testing.T) {
 	}
 }
 
-func TestAgentflowResumeRefusesFiniteEnforcedRecovery_RealCLI(t *testing.T) {
+// openEnforcedAttempt claims P1 as golem in a fresh fixture whose contract
+// enforces a 1-minute lease with no grace, then writes and records answer, so
+// the attempt is an owned validation_missing one under a live finite lease.
+func openEnforcedAttempt(t *testing.T, answer string) (string, agentflow.Runner, *agentflow.Client, agentflow.Plan, []byte) {
+	t.Helper()
 	dir := t.TempDir()
 	copyTree(t, "../../testdata/agentflow", dir)
-	gitInit(t, dir)
-	runner := agentflowRunnerOrSkip(t, dir)
-	client := agentflow.NewOwnedClient(runner, dir, "golem")
+	runner, client, plan, planBytes := startFixtureExecution(t, dir)
 	ctx := context.Background()
-	planBytes, err := os.ReadFile(filepath.Join(dir, "plan.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var plan agentflow.Plan
-	if err := json.Unmarshal(planBytes, &plan); err != nil {
-		t.Fatal(err)
-	}
-	recommendation, err := client.RecommendWorkflow(ctx, agentflow.TaskBriefFromPlan(plan, "feature"), "", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := client.Init(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if err := client.LockPlan(ctx, filepath.Join(dir, "plan.json")); err != nil {
-		t.Fatal(err)
-	}
-	if err := client.MaterializeWorkflowContract(ctx, recommendation); err != nil {
-		t.Fatal(err)
-	}
-	if err := client.InitExecution(ctx); err != nil {
-		t.Fatal(err)
-	}
 
 	contractPath := filepath.Join(dir, ".agent", "execution.contract.json")
 	contractBytes, err := os.ReadFile(contractPath)
@@ -546,15 +524,16 @@ func TestAgentflowResumeRefusesFiniteEnforcedRecovery_RealCLI(t *testing.T) {
 	}
 
 	attempt, err := client.ClaimStep(ctx, "P1")
-	if err != nil {
-		t.Fatal(err)
+	if err != nil || attempt != "A1" {
+		t.Fatalf("claim = %q, %v; want A1", attempt, err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "src", "answer.txt"), []byte("expected\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := client.RecordFileChange(ctx, "P1", attempt, "src/answer.txt"); err != nil {
-		t.Fatal(err)
-	}
+	writeAndRecordAnswer(t, client, dir, attempt, answer)
+	return dir, runner, client, plan, planBytes
+}
+
+func TestAgentflowResumeRefusesFiniteEnforcedRecovery_RealCLI(t *testing.T) {
+	dir, runner, client, plan, planBytes := openEnforcedAttempt(t, "expected\n")
+	ctx := context.Background()
 	state, err := client.NextAction(ctx)
 	if err != nil || state.State != "validation_missing" || state.Resumability == nil || state.Resumability.Lease == nil {
 		t.Fatalf("state=%q projection=%+v err=%v", state.State, state.Resumability, err)
@@ -1755,6 +1734,134 @@ func TestAgentflowResumeSettlementGateTimeoutReportsRoot_RealCLI(t *testing.T) {
 	var exit *agentflowStatusExit
 	if !errors.As(statusErr, &exit) || exit.ExitCode() != 3 || !strings.Contains(status.String(), "\nresume: blocked: "+wantTimeoutReport(dir, "CR1")+"\n") {
 		t.Fatalf("status = %v, want exit 3 with the timeout report\n%s", statusErr, status.String())
+	}
+}
+
+// #652 A6: an attempt left open after its gate failed (opened by hand: Golem
+// itself now blocks such an attempt unless the block fails) is offered by
+// status and blocked by resume, which then runs the model in a new attempt.
+func TestAgentflowResumeBlocksOpenFailedGateAttempt_RealCLI(t *testing.T) {
+	dir, runner, client, plan, _ := openSettlementAttempt(t, nil, "wrong\n")
+	ctx := context.Background()
+	gates, err := agentflow.ExtractCommandGates(plan.Steps[0])
+	if err != nil || len(gates) != 1 {
+		t.Fatalf("gates = %+v, err = %v; want the fixture's one gate", gates, err)
+	}
+	var gateErr *agentflow.CommandError
+	if err := client.RunGate(ctx, "P1", "A1", gates[0].Label, gates[0].Argv); !errors.As(err, &gateErr) || gateErr.Exit != 1 {
+		t.Fatalf("gate = %v, want exit 1", err)
+	}
+	state, err := client.NextAction(ctx)
+	if err != nil || state.State != "validation_missing" || state.Resumability == nil || state.Resumability.Attempt == nil ||
+		state.Resumability.Attempt.ID != "A1" || !state.Resumability.Attempt.Open || len(state.Resumability.Gates) != 1 ||
+		state.Resumability.Gates[0].Kind != "command" || state.Resumability.Gates[0].Status != "failed" {
+		t.Fatalf("setup state = %+v, err = %v; want open A1 in validation_missing with one failed command gate", state, err)
+	}
+	lines, receipts := readCommandReceipts(t, dir)
+	if len(receipts) != 1 || receipts[0].AttemptID != "A1" || receipts[0].ExitCode == nil || *receipts[0].ExitCode != 1 {
+		t.Fatalf("command receipts = %+v, want A1's one exit-1 receipt", receipts)
+	}
+	a1Receipt := lines[0]
+	before := snapshotSmokeAgentTree(t, dir)
+
+	var status bytes.Buffer
+	statusErr := runAgentflowStatusWithRunner(ctx, &status, dir, false, runner)
+	var exit *agentflowStatusExit
+	if !errors.As(statusErr, &exit) || exit.ExitCode() != 2 ||
+		!strings.Contains(status.String(), "\nresume: block the attempt whose gate failed, then re-run the step serially\n") {
+		t.Fatalf("status = %v, want exit 2 with the failed-gate disposition\n%s", statusErr, status.String())
+	}
+	owned, err := agentflow.NewOwnedClient(runner, dir, "golem").NextAction(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var jsonOut bytes.Buffer
+	statusErr = runAgentflowStatusWithRunner(ctx, &jsonOut, dir, true, runner)
+	if !errors.As(statusErr, &exit) || exit.ExitCode() != 2 || exit.diagnostic != "" || !bytes.Equal(jsonOut.Bytes(), owned.RawJSON) {
+		t.Fatalf("JSON status = %#v\ngot  %s\nwant %s", statusErr, jsonOut.Bytes(), owned.RawJSON)
+	}
+	if after := snapshotSmokeAgentTree(t, dir); !reflect.DeepEqual(after, before) {
+		t.Fatal("status changed .agent/")
+	}
+
+	resume := fixtureTaskFlags(dir)
+	resume.agentflowResume = true
+	caller := &recordingCaller{next: &scriptCaller{responses: []agent.ModelResult{
+		toolStep("w2", "write_file", `{"path":"src/answer.txt","content":"expected\n"}`),
+		answerStep("done"),
+	}}}
+	stdout, stderr, err := runFixtureTask(t, dir, caller, resume)
+	if err != nil || len(caller.reqs) < 1 {
+		t.Fatalf("resume err = %v, model requests = %d\nstdout:\n%s\nstderr:\n%s", err, len(caller.reqs), stdout, stderr)
+	}
+	events := readStepRunEvents(t, dir)
+	if got := lastStepRunEvent(events, "A1"); got.Event != "blocked" || got.Reason != "golem: resume found failed command gate" {
+		t.Fatalf("A1 last event = %+v, want blocked with the resume reason", got)
+	}
+	if lastStepRunEvent(events, "A2").Event != "completed" || countStepRunEvents(events, "claimed") != 2 {
+		t.Fatalf("events = %+v, want a second claim (A2) that completed", events)
+	}
+	if state, err := agentflow.NewClient(runner, dir).NextAction(ctx); err != nil || state.State != "complete" {
+		t.Fatalf("after resume: state = %q, err = %v; want complete", state.State, err)
+	}
+	lines, receipts = readCommandReceipts(t, dir)
+	var a1, a2 []int
+	for i, receipt := range receipts {
+		switch receipt.AttemptID {
+		case "A1":
+			a1 = append(a1, i)
+		case "A2":
+			a2 = append(a2, i)
+		}
+	}
+	if len(receipts) != 2 || len(a1) != 1 || lines[a1[0]] != a1Receipt || len(a2) != 1 ||
+		receipts[a2[0]].ExitCode == nil || *receipts[a2[0]].ExitCode != 0 {
+		t.Fatalf("command receipts = %q, want A1's original row unchanged plus one passing A2 row", lines)
+	}
+}
+
+// #652 A6: under a live finite enforced lease, an open attempt whose gate
+// failed is not blocked. AgentFlow 1.0 gives every enforced claim a deadline,
+// so the existing finite-enforce refusal fires first here; the refusal for an
+// enforced lease without a deadline (legacy histories only) is covered by the
+// unit rows. Status and resume both refuse and leave the ledgers unchanged.
+func TestAgentflowResumeRefusesFailedGateUnderFiniteEnforce_RealCLI(t *testing.T) {
+	dir, runner, client, plan, planBytes := openEnforcedAttempt(t, "wrong\n")
+	ctx := context.Background()
+	gates, err := agentflow.ExtractCommandGates(plan.Steps[0])
+	if err != nil || len(gates) != 1 {
+		t.Fatalf("gates = %+v, err = %v; want the fixture's one gate", gates, err)
+	}
+	var gateErr *agentflow.CommandError
+	if err := client.RunGate(ctx, "P1", "A1", gates[0].Label, gates[0].Argv); !errors.As(err, &gateErr) || gateErr.Exit != 1 {
+		t.Fatalf("gate = %v, want exit 1", err)
+	}
+	state, err := client.NextAction(ctx)
+	if err != nil || state.State != "validation_missing" || state.Resumability == nil || state.Resumability.Lease == nil ||
+		state.Resumability.Lease.Policy == nil || *state.Resumability.Lease.Policy != "enforce" || state.Resumability.Lease.State != "live" ||
+		len(state.Resumability.Gates) != 1 || state.Resumability.Gates[0].Status != "failed" {
+		t.Fatalf("setup state = %+v, err = %v; want a live enforced lease with one failed gate", state, err)
+	}
+	before := snapshotSmokeAgentTree(t, dir)
+
+	const refusal = "agentflow resume blocks validation_missing under a finite enforced lease because Agentflow cannot guarantee duplicate-free, no-renew recovery"
+	var status bytes.Buffer
+	statusErr := runAgentflowStatusWithRunner(ctx, &status, dir, false, runner)
+	var exit *agentflowStatusExit
+	if !errors.As(statusErr, &exit) || exit.ExitCode() != 3 ||
+		!strings.Contains(status.String(), "\nresume: blocked by unsafe or malformed projection: "+refusal+"\n") {
+		t.Fatalf("status = %v, want exit 3 with the finite-enforce refusal\n%s", statusErr, status.String())
+	}
+	models := 0
+	d := &driver{af: client, plan: &plan, root: dir, runStep: func(context.Context, agentflow.Step, string, string) error {
+		models++
+		return nil
+	}}
+	if _, err := d.resume(ctx, dir, planBytes, nil); err == nil || err.Error() != refusal || models != 0 {
+		t.Fatalf("resume err = %v, model runs = %d; want %q and none", err, models, refusal)
+	}
+	if after := snapshotSmokeAgentTree(t, dir); !reflect.DeepEqual(after, before) {
+		t.Fatal("status or resume changed .agent/ under an enforced lease")
 	}
 }
 
