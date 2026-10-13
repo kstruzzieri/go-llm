@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -84,6 +85,27 @@ func assertOneSequence(t *testing.T, opts replayAttemptOptions, srv *compatServe
 	}
 }
 
+// attemptStr reads a nullable string field, rendering null as "<null>" so a
+// nil never panics a comparison.
+func attemptStr(p *string) string {
+	if p == nil {
+		return "<null>"
+	}
+	return *p
+}
+
+// assertUTCInstant: a published instant is set and already UTC, so
+// attempt.json carries the same offset everywhere.
+func assertUTCInstant(t *testing.T, what string, at time.Time) {
+	t.Helper()
+	if at.IsZero() {
+		t.Fatalf("%s is the zero time", what)
+	}
+	if at.Location() != time.UTC {
+		t.Fatalf("%s location %v; want UTC", what, at.Location())
+	}
+}
+
 func assertAttemptError(t *testing.T, rec attemptRecord, code, stage string, ordinal int) {
 	t.Helper()
 	if rec.Status != attemptStatusFailed || rec.Error == nil || rec.Error.Code != code || rec.Error.Stage != stage || rec.Error.RequestOrdinal != ordinal {
@@ -108,10 +130,10 @@ func TestReplayAttempt_CompletedScriptedToolRoute(t *testing.T) {
 		}
 	}
 	traceBytes, _ := os.ReadFile(fixtureToolRouteTrace)
-	if rec.Trace.ID != "tool-canary-01" || rec.Trace.SHA256 != sha256Hex(traceBytes) || rec.ReplayKind != "scripted" {
-		t.Fatalf("trace %+v kind %q", rec.Trace, rec.ReplayKind)
+	if attemptStr(rec.Trace.ID) != "tool-canary-01" || attemptStr(rec.Trace.SHA256) != sha256Hex(traceBytes) || attemptStr(rec.ReplayKind) != "scripted" {
+		t.Fatalf("trace id %s sha %s kind %s", attemptStr(rec.Trace.ID), attemptStr(rec.Trace.SHA256), attemptStr(rec.ReplayKind))
 	}
-	if rec.Settings.Transport != openAICompatTransport || rec.Settings.Endpoint != srv.URL || rec.Settings.Model != "openai-compat/cand" || rec.Settings.Temperature != nil || rec.Settings.TimeoutMs != 10000 {
+	if rec.Settings.Transport != openAICompatTransport || attemptStr(rec.Settings.Endpoint) != srv.URL || rec.Settings.Model != "openai-compat/cand" || rec.Settings.Temperature != nil || rec.Settings.TimeoutMs != 10000 {
 		t.Fatalf("settings %+v", rec.Settings)
 	}
 	if rec.Build.GoVersion == "" || rec.EndedAt.Before(rec.StartedAt) || rec.ElapsedMs < 0 {
@@ -136,11 +158,20 @@ func TestReplayAttempt_PrefilledRecordsTemperature(t *testing.T) {
 	srv := newCompatServer(t, compatExchange{Body: compatText("The drift detector averages over a 35 minute window.", "")})
 	opts := attemptTestOptions(t, srv.URL, fixturePrefilledTrace)
 	code, rec := runAttempt(t, context.Background(), opts)
-	if code != 0 || rec.Status != attemptStatusCompleted || rec.ReplayKind != "prefilled" || rec.Settings.Temperature == nil || *rec.Settings.Temperature != 0 {
-		t.Fatalf("exit %d status %q kind %q temperature %v", code, rec.Status, rec.ReplayKind, rec.Settings.Temperature)
+	if code != 0 || rec.Status != attemptStatusCompleted || attemptStr(rec.ReplayKind) != "prefilled" || rec.Settings.Temperature == nil || *rec.Settings.Temperature != 0 {
+		t.Fatalf("exit %d status %q kind %s temperature %v", code, rec.Status, attemptStr(rec.ReplayKind), rec.Settings.Temperature)
 	}
-	if !bytes.Contains(srv.Received()[0].Body, []byte(`"temperature":0`)) {
-		t.Fatalf("wire request did not carry temperature 0: %s", srv.Received()[0].Body)
+	// Decode rather than substring-match: "temperature":0 is also a prefix of 0.5.
+	var wire struct {
+		Temperature *float64 `json:"temperature"`
+	}
+	err := json.Unmarshal(srv.Received()[0].Body, &wire)
+	if err != nil || wire.Temperature == nil || *wire.Temperature != 0 {
+		got := "absent"
+		if wire.Temperature != nil {
+			got = fmt.Sprint(*wire.Temperature)
+		}
+		t.Fatalf("wire request temperature %s (decode error %v); want exactly 0", got, err)
 	}
 	if rec.Requests[0].Usage != nil {
 		t.Fatalf("usage %+v; an omitted usage object must stay null", rec.Requests[0].Usage)
@@ -163,6 +194,16 @@ func TestReplayAttempt_ArgumentDecodeKeepsUsageAndTiming(t *testing.T) {
 	}
 	if row.HeadersAt == nil || row.EndedAt.Before(row.StartedAt) || row.ErrorCode != nil {
 		t.Fatalf("row %+v", row)
+	}
+	// Acceptance 2: a failed attempt still reports its timing. The ordering
+	// checks above pass for zero times, so pin that every instant is set and UTC.
+	assertUTCInstant(t, "record started_at", rec.StartedAt)
+	assertUTCInstant(t, "record ended_at", rec.EndedAt)
+	assertUTCInstant(t, "row started_at", row.StartedAt)
+	assertUTCInstant(t, "row ended_at", row.EndedAt)
+	assertUTCInstant(t, "row headers_at", *row.HeadersAt)
+	if rec.EndedAt.Before(rec.StartedAt) {
+		t.Fatalf("record ended %v before it started %v", rec.EndedAt, rec.StartedAt)
 	}
 }
 
@@ -260,6 +301,11 @@ func TestReplayAttempt_Canceled(t *testing.T) {
 		if rec.Error.CancelSource != attemptCancelTimeout || rec.ElapsedMs >= 4000 {
 			t.Fatalf("source %q elapsed %d", rec.Error.CancelSource, rec.ElapsedMs)
 		}
+		// The deadline is 200ms, so a measured elapsed far below it means the
+		// timing was dropped or never measured (acceptance 2).
+		if rec.ElapsedMs < 150 || rec.Requests[0].ElapsedMs < 150 {
+			t.Fatalf("elapsed record %dms row %dms; want at least 150 for a 200ms timeout", rec.ElapsedMs, rec.Requests[0].ElapsedMs)
+		}
 	})
 	t.Run("signal", func(t *testing.T) {
 		srv := newCompatServer(t, compatExchange{Delay: 5 * time.Second})
@@ -314,7 +360,9 @@ func TestReplayAttempt_DivergenceCompletes(t *testing.T) {
 func TestReplayAttempt_RedactsEchoedKey(t *testing.T) {
 	srv := newCompatServer(t,
 		compatExchange{Body: compatToolCall("rag_search", `{"query":"`+attemptTestKey+`"}`, "")},
-		compatExchange{Body: compatText("your key is "+attemptTestKey, "")},
+		// The key also comes back in the reasoning channel, which the
+		// openai-compat path lifts into the transcript's Thinking.
+		compatExchange{Body: strings.Replace(compatText("your key is "+attemptTestKey, ""), `"role":"assistant",`, `"role":"assistant","reasoning_content":"the key is `+attemptTestKey+`",`, 1)},
 	)
 	opts := attemptTestOptions(t, srv.URL, fixtureToolRouteTrace)
 	code, rec := runAttempt(t, context.Background(), opts) // runAttempt fails on a key in attempt.json
@@ -346,6 +394,9 @@ func TestReplayAttempt_RedactsEchoedKey(t *testing.T) {
 	}
 	if got := rec.Transcript[2].Content; got != "your key is [REDACTED]" {
 		t.Fatalf("transcript answer %q", got)
+	}
+	if got := rec.Transcript[2].Thinking; got != "the key is [REDACTED]" {
+		t.Fatalf("transcript thinking %q; the reasoning channel must be redacted too", got)
 	}
 }
 
@@ -425,23 +476,43 @@ func TestReplayAttempt_InputErrors(t *testing.T) {
 	if err := os.WriteFile(invalidJSON, []byte("{"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// A parseable trace that validateTrace rejects: no system prompt.
+	noSystem := filepath.Join(t.TempDir(), "no-system.json")
+	if err := os.WriteFile(noSystem, []byte(`{"id":"no-system-001","system":"","turns":[{"role":"user","content":"hi"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// known is how far the run learned the record's nullable identity before
+	// it failed. Each stage keeps the earlier ones; everything later is null,
+	// never "" (an empty string breaks the scripted|prefilled enum and the
+	// hex digest format).
+	type known int
+	const (
+		knownNothing  known = iota // failed before the base URL validated
+		knownEndpoint              // base URL validated; the trace is unreadable
+		knownDigest                // trace read: sha256 set; not JSON
+		knownID                    // trace parsed: id set; validateTrace rejected it
+		knownKind                  // trace validated: replay_kind set; the replay then refused it
+	)
+	hexDigest := regexp.MustCompile(`^[0-9a-f]{64}$`)
 	cases := []struct {
-		name string
-		mut  func(*replayAttemptOptions)
+		name  string
+		mut   func(*replayAttemptOptions)
+		known known
 	}{
-		{"attempt id with a space", func(o *replayAttemptOptions) { o.AttemptID = "has space" }},
-		{"attempt id of 129 bytes", func(o *replayAttemptOptions) { o.AttemptID = strings.Repeat("a", 129) }},
-		{"empty arm", func(o *replayAttemptOptions) { o.Arm = "" }},
-		{"arm with a control character", func(o *replayAttemptOptions) { o.Arm = "a\nb" }},
-		{"ollama target", func(o *replayAttemptOptions) { o.Models = "ollama/m" }},
-		{"two targets", func(o *replayAttemptOptions) { o.Models = "openai-compat/a,openai-compat/b" }},
-		{"empty base url", func(o *replayAttemptOptions) { o.BaseURL = "" }},
-		{"non-http base url", func(o *replayAttemptOptions) { o.BaseURL = "ftp://localhost" }},
-		{"non-positive timeout", func(o *replayAttemptOptions) { o.Timeout = 0 }},
-		{"trace is a directory", func(o *replayAttemptOptions) { o.TracePath = t.TempDir() }},
-		{"trace missing", func(o *replayAttemptOptions) { o.TracePath = filepath.Join(t.TempDir(), "absent.json") }},
-		{"trace not json", func(o *replayAttemptOptions) { o.TracePath = invalidJSON }},
-		{"prefilled fixture with bad tool arguments", func(o *replayAttemptOptions) { o.TracePath = badArgs }},
+		{"attempt id with a space", func(o *replayAttemptOptions) { o.AttemptID = "has space" }, knownNothing},
+		{"attempt id of 129 bytes", func(o *replayAttemptOptions) { o.AttemptID = strings.Repeat("a", 129) }, knownNothing},
+		{"empty arm", func(o *replayAttemptOptions) { o.Arm = "" }, knownNothing},
+		{"arm with a control character", func(o *replayAttemptOptions) { o.Arm = "a\nb" }, knownNothing},
+		{"ollama target", func(o *replayAttemptOptions) { o.Models = "ollama/m" }, knownNothing},
+		{"two targets", func(o *replayAttemptOptions) { o.Models = "openai-compat/a,openai-compat/b" }, knownNothing},
+		{"empty base url", func(o *replayAttemptOptions) { o.BaseURL = "" }, knownNothing},
+		{"non-http base url", func(o *replayAttemptOptions) { o.BaseURL = "ftp://localhost" }, knownNothing},
+		{"non-positive timeout", func(o *replayAttemptOptions) { o.Timeout = 0 }, knownNothing},
+		{"trace is a directory", func(o *replayAttemptOptions) { o.TracePath = t.TempDir() }, knownEndpoint},
+		{"trace missing", func(o *replayAttemptOptions) { o.TracePath = filepath.Join(t.TempDir(), "absent.json") }, knownEndpoint},
+		{"trace not json", func(o *replayAttemptOptions) { o.TracePath = invalidJSON }, knownDigest},
+		{"trace rejected by validateTrace", func(o *replayAttemptOptions) { o.TracePath = noSystem }, knownID},
+		{"prefilled fixture with bad tool arguments", func(o *replayAttemptOptions) { o.TracePath = badArgs }, knownKind},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -454,6 +525,35 @@ func TestReplayAttempt_InputErrors(t *testing.T) {
 			assertAttemptError(t, rec, attemptCodeInput, attemptStageInput, 0)
 			if len(rec.Requests) != 0 {
 				t.Fatalf("requests %v; nothing may reach the wire", rec.Requests)
+			}
+			if rec.Settings.Transport != openAICompatTransport {
+				t.Fatalf("transport %q; it is fixed, never null", rec.Settings.Transport)
+			}
+			if (rec.Settings.Endpoint != nil) != (tc.known >= knownEndpoint) || (rec.Trace.SHA256 != nil) != (tc.known >= knownDigest) ||
+				(rec.Trace.ID != nil) != (tc.known >= knownID) || (rec.ReplayKind != nil) != (tc.known >= knownKind) {
+				t.Fatalf("known %d but endpoint %s sha256 %s id %s replay_kind %s; each is null until learned",
+					tc.known, attemptStr(rec.Settings.Endpoint), attemptStr(rec.Trace.SHA256), attemptStr(rec.Trace.ID), attemptStr(rec.ReplayKind))
+			}
+			if tc.known >= knownEndpoint && *rec.Settings.Endpoint != srv.URL {
+				t.Fatalf("endpoint %q; want %q", *rec.Settings.Endpoint, srv.URL)
+			}
+			if tc.known >= knownDigest {
+				file, err := os.ReadFile(opts.TracePath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got := *rec.Trace.SHA256; !hexDigest.MatchString(got) || got != sha256Hex(file) {
+					t.Fatalf("sha256 %q; want the lowercase hex digest of the file bytes %s", got, sha256Hex(file))
+				}
+				if tc.known >= knownID {
+					var tr Trace
+					if err := json.Unmarshal(file, &tr); err != nil || tr.ID == "" || *rec.Trace.ID != tr.ID {
+						t.Fatalf("trace id %q (%v); want the parsed id %q", *rec.Trace.ID, err, tr.ID)
+					}
+				}
+			}
+			if tc.known >= knownKind && *rec.ReplayKind != "prefilled" {
+				t.Fatalf("replay_kind %q; want prefilled", *rec.ReplayKind)
 			}
 		})
 	}

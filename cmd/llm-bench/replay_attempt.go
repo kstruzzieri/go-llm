@@ -60,7 +60,7 @@ type attemptRecord struct {
 	AttemptID           string              `json:"attempt_id"`
 	Arm                 string              `json:"arm"`
 	Trace               attemptTraceRef     `json:"trace"`
-	ReplayKind          string              `json:"replay_kind"`
+	ReplayKind          *string             `json:"replay_kind"` // scripted | prefilled; null until the trace validates
 	Build               attemptBuild        `json:"build"`
 	Settings            attemptSettings     `json:"settings"`
 	StartedAt           time.Time           `json:"started_at"`
@@ -77,10 +77,12 @@ type attemptRecord struct {
 }
 
 // attemptTraceRef identifies the replayed trace; SHA256 hashes the file
-// bytes exactly as read (the same bytes that were then parsed).
+// bytes exactly as read (the same bytes that were then parsed). Each field is
+// null until the run learns it, so an input failure never publishes an empty
+// string where the schema promises an id or a hex digest.
 type attemptTraceRef struct {
-	ID     string `json:"id"`
-	SHA256 string `json:"sha256"`
+	ID     *string `json:"id"`
+	SHA256 *string `json:"sha256"`
 }
 
 type attemptBuild struct {
@@ -92,7 +94,7 @@ type attemptBuild struct {
 
 type attemptSettings struct {
 	Transport   string   `json:"transport"`
-	Endpoint    string   `json:"endpoint"`
+	Endpoint    *string  `json:"endpoint"` // null until the base URL validates
 	Model       string   `json:"model"`
 	Temperature *float64 `json:"temperature"`
 	TimeoutMs   int64    `json:"timeout_ms"`
@@ -245,27 +247,30 @@ func loadAttemptInputs(opts replayAttemptOptions, rec *attemptRecord) (Trace, Mo
 	if u, _ := url.Parse(endpoint); u.Scheme != "http" && u.Scheme != "https" {
 		return Trace{}, ModelTarget{}, errors.New("-candidate-base-url must be an absolute http or https URL")
 	}
-	rec.Settings.Endpoint = endpoint
+	rec.Settings.Endpoint = &endpoint
 	data, err := os.ReadFile(opts.TracePath)
 	if err != nil {
 		return Trace{}, ModelTarget{}, fmt.Errorf("read -attempt-trace: %w", err)
 	}
 	sum := sha256.Sum256(data)
-	rec.Trace.SHA256 = hex.EncodeToString(sum[:])
+	digest := hex.EncodeToString(sum[:])
+	rec.Trace.SHA256 = &digest
 	var trace Trace
 	if err := json.Unmarshal(data, &trace); err != nil {
 		return Trace{}, ModelTarget{}, fmt.Errorf("parse -attempt-trace: %w", err)
 	}
-	rec.Trace.ID = trace.ID
+	id := trace.ID
+	rec.Trace.ID = &id
 	if err := validateTrace(trace); err != nil {
 		return Trace{}, ModelTarget{}, fmt.Errorf("trace %q: %w", trace.ID, err)
 	}
-	rec.ReplayKind = "scripted"
+	kind := "scripted"
 	if prefilledAssemblyMode(trace) {
-		rec.ReplayKind = "prefilled"
+		kind = "prefilled"
 		temp := assemblyCaptureTemperature
 		rec.Settings.Temperature = &temp
 	}
+	rec.ReplayKind = &kind
 	return trace, target, nil
 }
 
@@ -403,7 +408,7 @@ func redactAttemptJSONValue(v any, key string) any {
 func reportAttemptDetail(stderr io.Writer, err error, apiKey string) {
 	msg := err.Error()
 	if apiKey != "" {
-		msg = strings.ReplaceAll(msg, apiKey, "[REDACTED]")
+		msg = strings.ReplaceAll(msg, apiKey, attemptRedacted)
 	}
 	_, _ = fmt.Fprintf(stderr, "llm-bench: replay-attempt: %s\n", msg)
 }
