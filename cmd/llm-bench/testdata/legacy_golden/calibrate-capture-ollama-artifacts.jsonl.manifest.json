@@ -1,0 +1,102 @@
+{
+  "schema_version": "mixed-capture-manifest/v2",
+  "created_at": "2026-10-12T00:00:00Z",
+  "endpoint": "http://golden.invalid",
+  "transport": "ollama",
+  "model_targets": [
+    {
+      "selector": "ollama/golden-model",
+      "resolved_digest": ""
+    }
+  ],
+  "server_probe": {},
+  "decoding": {
+    "temperature": 0,
+    "seed_supported": false
+  },
+  "counterbalance_scheme": "pairs sorted by fnv1a64(pair_id) ascending; first arm alternates by position (even=legacy-first, odd=mixed-first)",
+  "artifact_count": 4,
+  "per_artifact": [
+    {
+      "trace_id": "smoke-minimal-001",
+      "artifact_hash": "sha256:7e2f8a02622343b47de810feac9035ef36fc665df6cdbffee447f8ff370ee228",
+      "provenance_hash": "sha256:c0c9c57b65c59a5bfae0d34618b50cad6fd608b22b0853cb4068dd5038ccf322",
+      "order_index": 0,
+      "usage_present": true
+    },
+    {
+      "trace_id": "tool-canary-01",
+      "artifact_hash": "sha256:e84dafa9b563af13fb15e701a56ab2d347b1349a38d874523a60ef0178497cf3",
+      "provenance_hash": "sha256:c0c9c57b65c59a5bfae0d34618b50cad6fd608b22b0853cb4068dd5038ccf322",
+      "order_index": 1,
+      "usage_present": true
+    },
+    {
+      "trace_id": "chain-drift-window-pair-legacy",
+      "artifact_hash": "sha256:143031cc551469a7826552dfe1e8d3a2f075e5aef088126cbc28297860d7e6c8",
+      "provenance_hash": "sha256:e035a1c47ade2b06ec0f423acfb52aaa7c6d764dca35f4d6f1009b85a0be2230",
+      "order_index": 2,
+      "usage_present": true
+    },
+    {
+      "trace_id": "chain-drift-window-pair-mixed",
+      "artifact_hash": "sha256:65aafb17507635d2d5150036874fab3d998fd1312d20acf172b3059ba1618570",
+      "provenance_hash": "sha256:0723bc256baf54e22fdfc95b76d636f68c37ec741a118f4beb4e236bae25e5a5",
+      "order_index": 3,
+      "usage_present": true
+    }
+  ],
+  "expected_count": 4,
+  "expected": [
+    {
+      "trace_id": "smoke-minimal-001",
+      "model": "ollama/golden-model",
+      "status": "captured",
+      "attempts": 2,
+      "artifact_hash": "sha256:7e2f8a02622343b47de810feac9035ef36fc665df6cdbffee447f8ff370ee228"
+    },
+    {
+      "trace_id": "tool-canary-01",
+      "model": "ollama/golden-model",
+      "status": "captured",
+      "attempts": 1,
+      "artifact_hash": "sha256:e84dafa9b563af13fb15e701a56ab2d347b1349a38d874523a60ef0178497cf3"
+    },
+    {
+      "trace_id": "chain-drift-window-pair-legacy",
+      "model": "ollama/golden-model",
+      "pair_id": "chain-drift-window-pair",
+      "arm": "legacy",
+      "status": "captured",
+      "attempts": 1,
+      "artifact_hash": "sha256:143031cc551469a7826552dfe1e8d3a2f075e5aef088126cbc28297860d7e6c8"
+    },
+    {
+      "trace_id": "chain-drift-window-pair-mixed",
+      "model": "ollama/golden-model",
+      "pair_id": "chain-drift-window-pair",
+      "arm": "mixed",
+      "status": "captured",
+      "attempts": 1,
+      "artifact_hash": "sha256:65aafb17507635d2d5150036874fab3d998fd1312d20acf172b3059ba1618570"
+    }
+  ],
+  "requested_traces": [
+    {
+      "trace_id": "smoke-minimal-001"
+    },
+    {
+      "trace_id": "tool-canary-01"
+    },
+    {
+      "trace_id": "chain-drift-window-pair-legacy",
+      "pair_id": "chain-drift-window-pair",
+      "arm": "legacy"
+    },
+    {
+      "trace_id": "chain-drift-window-pair-mixed",
+      "pair_id": "chain-drift-window-pair",
+      "arm": "mixed"
+    }
+  ]
+}
