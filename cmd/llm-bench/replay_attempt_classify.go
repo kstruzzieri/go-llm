@@ -10,27 +10,34 @@ import (
 // facts frozen when the failure happened: the replay error, the recorder
 // rows, and the attempt context's cause captured when replayWith returned.
 // It never consults live context state, so a deadline that fires after an
-// argument failure cannot relabel that failure.
+// argument failure cannot relabel that failure. The message depends on the
+// code alone (attemptErrorMessage), never on the error text.
 func classifyAttempt(err error, rows []*recordedRequest, attemptCause error) *attemptError {
 	if err == nil {
 		return nil
 	}
-	msg := redactErrorMessage(err.Error())
+	f := classifyFailure(err, rows, attemptCause)
+	f.Message = attemptErrorMessage(f.Code)
+	return f
+}
+
+func classifyFailure(err error, rows []*recordedRequest, attemptCause error) *attemptError {
 	if len(rows) == 0 {
-		// Nothing reached the wire: fixture or config work failed, or the
-		// attempt was cancelled before its first request.
-		if isContextError(err) {
-			return &attemptError{Code: attemptCodeCanceled, Stage: attemptStageRequest, CancelSource: attemptCancelSource(attemptCause), RequestOrdinal: 1, Message: msg}
+		// Nothing reached the wire: fixture or config work failed. The
+		// cancellation branch is defensive and unreachable through the CLI:
+		// http.Client always invokes the recorder, so a request cancelled
+		// before it is sent still records a row.
+		if isCancellation(err, attemptCause) {
+			return &attemptError{Code: attemptCodeCanceled, Stage: attemptStageRequest, CancelSource: attemptCancelSource(attemptCause), RequestOrdinal: 1}
 		}
-		return &attemptError{Code: attemptCodeInput, Stage: attemptStageInput, Message: msg}
+		return &attemptError{Code: attemptCodeInput, Stage: attemptStageInput}
 	}
 	// The replay stops at a failed request, so only the last row can fail.
 	last := rows[len(rows)-1]
 	if f := rowFailure(last); f != nil {
-		f.Message = msg
 		return f
 	}
-	f := &attemptError{Code: attemptCodeInternal, Stage: attemptStageReplay, RequestOrdinal: last.Ordinal, Message: msg}
+	f := &attemptError{Code: attemptCodeInternal, Stage: attemptStageReplay, RequestOrdinal: last.Ordinal}
 	var argErr *toolArgumentsError
 	var typeErr *json.UnmarshalTypeError
 	var syntaxErr *json.SyntaxError
@@ -48,8 +55,10 @@ func classifyAttempt(err error, rows []*recordedRequest, attemptCause error) *at
 		f.Code = attemptCodeReplayDivergence
 	case errors.Is(err, errMissingToolResult), errors.Is(err, errMissingScriptedAssistant), errors.Is(err, errUnsupportedTurns):
 		f.Code = attemptCodeInput
-	case isContextError(err):
-		// The next request was refused before it reached the recorder.
+	case isCancellation(err, attemptCause):
+		// Defensive and unreachable through the CLI: http.Client always
+		// invokes the recorder, so a refused next request still records a
+		// row and is classified by rowFailure above.
 		f.Code, f.Stage = attemptCodeCanceled, attemptStageRequest
 		f.CancelSource, f.RequestOrdinal = attemptCancelSource(attemptCause), last.Ordinal+1
 	}
@@ -92,4 +101,12 @@ func attemptCancelSource(cause error) string {
 
 func isContextError(err error) bool {
 	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+}
+
+// isCancellation reports whether err is a cancellation of the attempt.
+// isContextError alone matches only context.Canceled and DeadlineExceeded,
+// but the transport returns context.Cause(ctx): errAttemptTimeout for the
+// deadline, or the parent's signal error.
+func isCancellation(err, attemptCause error) bool {
+	return isContextError(err) || (attemptCause != nil && errors.Is(err, attemptCause))
 }

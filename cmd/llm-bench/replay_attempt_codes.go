@@ -37,6 +37,34 @@ const (
 // errAttemptTimeout is the cause the attempt deadline cancels with.
 var errAttemptTimeout = errors.New("replay-attempt: attempt timeout")
 
+// attemptErrorMessage is error.message for an execution failure: one fixed
+// sentence per code. It never derives from the underlying error text, which
+// holds paths and the server's own words (a 500 body that says "timeout" must
+// not change it); that detail goes to stderr. artifact_write has its own text
+// (publish.go) and is not covered here.
+func attemptErrorMessage(code string) string {
+	switch code {
+	case attemptCodeInput:
+		return "an input to the attempt was invalid"
+	case attemptCodeConnection:
+		return "the connection to the endpoint failed"
+	case attemptCodeHTTPStatus:
+		return "the server returned a non-2xx status"
+	case attemptCodeCanceled:
+		return "the attempt was canceled"
+	case attemptCodeResponseDecode:
+		return "the server's response could not be decoded"
+	case attemptCodeArgumentDecode:
+		return "a tool call's arguments could not be decoded"
+	case attemptCodeEmptyResponse:
+		return "the candidate returned no reply"
+	case attemptCodeReplayDivergence:
+		return "the candidate's tool calls did not match the scripted route"
+	default:
+		return "an internal error occurred"
+	}
+}
+
 // attemptError is one classified failure in attempt.json.
 type attemptError struct {
 	Code           string `json:"code"`

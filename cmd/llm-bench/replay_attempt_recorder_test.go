@@ -127,6 +127,18 @@ func TestValidateChatEnvelope(t *testing.T) {
 		{"missing choices", `{}`, attemptCodeResponseDecode},
 		{"null choices", `{"choices":null}`, attemptCodeResponseDecode},
 		{"zero choices", `{"choices":[]}`, attemptCodeEmptyResponse},
+		// Member names match case-insensitively, as the provider's struct
+		// decode does (the end-to-end rows are in TestReplayAttempt_CaseVariantMembers).
+		{"upper-case choices alone is the choices array", `{"CHOICES":` + choice + `}`, ""},
+		{"mixed-case choices alone, empty", `{"Choices":[]}`, attemptCodeEmptyResponse},
+		{"case-variant duplicate choices is ambiguous", `{"choices":` + choice + `,"CHOICES":[]}`, attemptCodeResponseDecode},
+		{"case-variant duplicate, empty first", `{"CHOICES":[],"choices":` + choice + `}`, attemptCodeResponseDecode},
+		{"case-variant duplicate with null", `{"choices":` + choice + `,"Choices":null}`, attemptCodeResponseDecode},
+		{"exact duplicate choices: the last wins, as in the provider", `{"choices":` + choice + `,"choices":[]}`, attemptCodeEmptyResponse},
+		{"capitalised error member beside choices", `{"Error":{"message":"x"},"choices":` + choice + `}`, attemptCodeResponseDecode},
+		{"upper-case error member beside choices", `{"ERROR":"overloaded","choices":` + choice + `}`, attemptCodeResponseDecode},
+		{"null capitalised error member accepted", `{"Error":null,"choices":` + choice + `}`, ""},
+		{"error member and ambiguous choices", `{"error":{"m":1},"choices":[],"Choices":[]}`, attemptCodeResponseDecode},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -309,5 +321,19 @@ func TestAttemptRecorder_FreezesCauseAtTheFailedRead(t *testing.T) {
 	row := rec.Rows()[0]
 	if !errors.Is(row.ReadErr, io.ErrUnexpectedEOF) || row.CancelCause != nil {
 		t.Fatalf("readErr %v cause %v; the read failed while the context was live, so this is connection, not cancellation", row.ReadErr, row.CancelCause)
+	}
+}
+
+// The recorder's transport dials the endpoint itself: http.DefaultTransport's
+// proxy-from-environment would put an unrecorded hop between llm-bench and the
+// gateway. A loopback test server bypasses ProxyFromEnvironment anyway, so
+// the field is the only thing a test can pin.
+func TestAttemptBaseTransportDialsDirectly(t *testing.T) {
+	tr := newAttemptBaseTransport()
+	if tr.Proxy != nil {
+		t.Fatal("newAttemptBaseTransport().Proxy is set; -replay-attempt must ignore HTTP(S)_PROXY")
+	}
+	if !tr.DisableCompression {
+		t.Fatal("compression is on; recorded bytes would not be the wire bytes")
 	}
 }

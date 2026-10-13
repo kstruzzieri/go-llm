@@ -161,7 +161,7 @@ func runReplayAttempt(parent context.Context, opts replayAttemptOptions, stderr 
 	trace, target, err := loadAttemptInputs(opts, &rec)
 	if err != nil {
 		reportAttemptDetail(stderr, err, opts.APIKey)
-		rec.Error = &attemptError{Code: attemptCodeInput, Stage: attemptStageInput, Message: redactErrorMessage(err.Error())}
+		rec.Error = &attemptError{Code: attemptCodeInput, Stage: attemptStageInput, Message: attemptErrorMessage(attemptCodeInput)}
 	} else {
 		out, rows, rec.Error = executeAttempt(parent, opts, trace, target, stderr)
 	}
@@ -214,7 +214,7 @@ func executeAttempt(parent context.Context, opts replayAttemptOptions, trace Tra
 	})
 	if err != nil {
 		reportAttemptDetail(stderr, err, opts.APIKey)
-		return replayOutput{}, nil, &attemptError{Code: attemptCodeInput, Stage: attemptStageInput, Message: redactErrorMessage(err.Error())}
+		return replayOutput{}, nil, &attemptError{Code: attemptCodeInput, Stage: attemptStageInput, Message: attemptErrorMessage(attemptCodeInput)}
 	}
 	ctx, cancel := context.WithTimeoutCause(parent, opts.Timeout, errAttemptTimeout)
 	out, err := replayWith(ctx, transport.chat, target.Model, trace, replayOptions{})
@@ -238,8 +238,16 @@ func loadAttemptInputs(opts replayAttemptOptions, rec *attemptRecord) (Trace, Mo
 	if err := validateAttemptArm(opts.Arm); err != nil {
 		return Trace{}, ModelTarget{}, err
 	}
-	if opts.Timeout <= 0 {
-		return Trace{}, ModelTarget{}, errors.New("-timeout must be positive")
+	// timeout_ms is whole milliseconds, so a shorter timeout would be
+	// recorded as 0 while still bounding the attempt.
+	if opts.Timeout < time.Millisecond {
+		return Trace{}, ModelTarget{}, errors.New("-timeout must be at least 1ms")
+	}
+	// net/http refuses such a header before the wire, which would read as a
+	// candidate connection failure. The transport trims the key, so this
+	// checks the key that is sent. The text never carries the key.
+	if strings.ContainsFunc(strings.TrimSpace(opts.APIKey), func(r rune) bool { return r < 0x20 || r == 0x7f }) {
+		return Trace{}, ModelTarget{}, errors.New("candidate API key contains a control character")
 	}
 	targets, err := parseModelTargets(opts.Models)
 	if err != nil {
@@ -253,15 +261,23 @@ func loadAttemptInputs(opts replayAttemptOptions, rec *attemptRecord) (Trace, Mo
 		return Trace{}, ModelTarget{}, fmt.Errorf("-replay-attempt supports only %s targets, got %q", openAICompatTransport, target.Display)
 	}
 	rec.Settings.Model = target.Display
-	endpoint, err := sanitizeCaptureEndpoint(opts.BaseURL)
-	if err != nil || endpoint == "" {
+	raw := strings.TrimSpace(opts.BaseURL)
+	u, err := url.Parse(raw)
+	// Only http and https: any other scheme would reach the transport and
+	// fail there as a connection error.
+	if err != nil || !u.IsAbs() || u.Host == "" || u.Opaque != "" || (u.Scheme != "http" && u.Scheme != "https") {
 		return Trace{}, ModelTarget{}, errors.New("-candidate-base-url must be an absolute http or https URL")
 	}
-	// sanitizeCaptureEndpoint accepts any scheme; anything but http(s) would
-	// reach the transport and fail there as a connection error.
-	if u, _ := url.Parse(endpoint); u.Scheme != "http" && u.Scheme != "https" {
-		return Trace{}, ModelTarget{}, errors.New("-candidate-base-url must be an absolute http or https URL")
+	// The provider appends its path to this string, so a query or fragment
+	// would swallow that path, and userinfo would be sent as Basic auth yet
+	// kept out of the record. The raw string is checked: a bare "#" parses to
+	// an empty Fragment. What is refused here is never sanitized away, so
+	// settings.endpoint is the URL the requests used. The error never carries
+	// the URL.
+	if u.User != nil || strings.Contains(raw, "?") || strings.Contains(raw, "#") {
+		return Trace{}, ModelTarget{}, errors.New("-candidate-base-url must not carry userinfo, a query or a fragment")
 	}
+	endpoint := u.String()
 	rec.Settings.Endpoint = &endpoint
 	data, err := os.ReadFile(opts.TracePath)
 	if err != nil {
@@ -450,13 +466,45 @@ func redactAttemptJSONValue(v any, key string) (any, bool) {
 	return v, false
 }
 
-// reportAttemptDetail writes the full error, key redacted, to stderr: that
-// is supervisor evidence, while attempt.json carries only the category
-// stub (spec amendment A4).
+// reportAttemptDetail writes the full error, key redacted, to stderr as
+// exactly one line: that is supervisor evidence, while attempt.json carries
+// only the category stub (spec amendment A4). The error text can hold a
+// server's error body, so control characters are escaped, or a body could
+// forge evidence lines or drive the terminal. The key is redacted first, so
+// escaping cannot split it.
 func reportAttemptDetail(stderr io.Writer, err error, apiKey string) {
 	msg := err.Error()
 	if apiKey != "" {
 		msg = strings.ReplaceAll(msg, apiKey, attemptRedacted)
 	}
-	_, _ = fmt.Fprintf(stderr, "llm-bench: replay-attempt: %s\n", msg)
+	_, _ = fmt.Fprintf(stderr, "llm-bench: replay-attempt: %s\n", escapeControls(msg))
+}
+
+// escapeControls returns s as one line of printable text. Newline, carriage
+// return and tab become \n, \r and \t; the other C0 controls, DEL and bytes
+// that are not valid UTF-8 become \xNN; C1 controls and the line separators
+// U+2028 and U+2029 become \uNNNN. Printable non-ASCII is kept as is.
+func escapeControls(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); {
+		r, n := utf8.DecodeRuneInString(s[i:])
+		switch {
+		case r == '\n':
+			b.WriteString(`\n`)
+		case r == '\r':
+			b.WriteString(`\r`)
+		case r == '\t':
+			b.WriteString(`\t`)
+		case r == utf8.RuneError && n == 1:
+			_, _ = fmt.Fprintf(&b, `\x%02x`, s[i])
+		case r < 0x20 || r == 0x7f:
+			_, _ = fmt.Fprintf(&b, `\x%02x`, r)
+		case r >= 0x80 && r < 0xa0, r == 0x2028, r == 0x2029:
+			_, _ = fmt.Fprintf(&b, `\u%04x`, r)
+		default:
+			b.WriteString(s[i : i+n])
+		}
+		i += n
+	}
+	return b.String()
 }

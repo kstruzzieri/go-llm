@@ -145,6 +145,34 @@ func TestMainReplayAttemptSIGINT(t *testing.T) {
 	}
 }
 
+// A supervisor whose stderr reader has gone away must not stop publication:
+// stderr is written before attempt.json, and Go kills a process with SIGPIPE
+// on a broken-pipe write to fd 2 unless SIGPIPE is ignored. The read end is
+// closed before the child starts, so its first stderr write is a broken pipe.
+func TestMainReplayAttemptClosedStderrStillPublishes(t *testing.T) {
+	srv := newCompatServer(t, compatExchange{Status: 500, Body: "boom"})
+	dir := filepath.Join(t.TempDir(), "attempt")
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Close(); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(os.Args[0], replayAttemptArgs(srv.URL, dir)...)
+	cmd.Env = append(os.Environ(), "LLM_BENCH_TEST_MAIN=1")
+	var stdout bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, w
+	runErr := cmd.Run()
+	_ = w.Close()
+	if runErr != nil {
+		t.Fatalf("llm-bench: %v; a closed stderr must not kill it before attempt.json is published (stdout %q)", runErr, stdout.String())
+	}
+	if rec := readTerminal(t, dir); rec.Status != attemptStatusFailed || rec.Error == nil || rec.Error.Code != attemptCodeHTTPStatus {
+		t.Fatalf("record status %q error %+v; want failed http_status", rec.Status, rec.Error)
+	}
+}
+
 func TestMainReplayAttemptExistingDirExitsOne(t *testing.T) {
 	srv := newCompatServer(t)
 	dir := t.TempDir() // exists

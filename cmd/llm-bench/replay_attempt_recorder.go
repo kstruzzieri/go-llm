@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -73,13 +74,16 @@ func newAttemptRecorder(base http.RoundTripper, attemptID string, maxBody int64)
 	return &attemptRecorder{base: base, attemptID: attemptID, maxBody: maxBody}
 }
 
-// newAttemptBaseTransport clones http.DefaultTransport with compression off.
-// Go only sends Accept-Encoding: gzip, and only then decodes transparently,
-// when compression is on; with it off the recorded bytes are the wire bytes
-// the gateway hashes (spec amendment A2).
+// newAttemptBaseTransport clones http.DefaultTransport with compression off
+// and no proxy. Go only sends Accept-Encoding: gzip, and only then decodes
+// transparently, when compression is on; with it off the recorded bytes are
+// the wire bytes the gateway hashes (spec amendment A2). The clone would
+// otherwise honor HTTP(S)_PROXY, an unrecorded hop between llm-bench and the
+// gateway, so every request dials the endpoint directly.
 func newAttemptBaseTransport() *http.Transport {
 	t := http.DefaultTransport.(*http.Transport).Clone()
 	t.DisableCompression = true
+	t.Proxy = nil
 	return t
 }
 
@@ -182,7 +186,11 @@ func doneCause(ctx context.Context) error {
 // validateChatEnvelope checks a 2xx chat body's outer shape only: exactly
 // one JSON object, no non-null error member, and a choices array with at
 // least one element. Tool-call arguments are left to the provider, so a
-// genuine argument failure still classifies as argument_decode.
+// genuine argument failure still classifies as argument_decode. Member names
+// match case-insensitively, as the provider's struct decode does: "CHOICES"
+// is its choices array. Two members that fold to "choices" are ambiguous and
+// rejected, so the recorder never accepts a body the provider reads another
+// way.
 func validateChatEnvelope(raw []byte) (code, reason string) {
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	var top map[string]json.RawMessage
@@ -192,11 +200,25 @@ func validateChatEnvelope(raw []byte) (code, reason string) {
 	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
 		return attemptCodeResponseDecode, "2xx body has data after its JSON value"
 	}
-	if e, ok := top["error"]; ok && !bytes.Equal(bytes.TrimSpace(e), []byte("null")) {
+	var choicesRaw json.RawMessage
+	choicesMembers, errorMember := 0, false
+	for name, member := range top {
+		switch {
+		case strings.EqualFold(name, "error"):
+			errorMember = errorMember || !bytes.Equal(bytes.TrimSpace(member), []byte("null"))
+		case strings.EqualFold(name, "choices"):
+			choicesRaw = member
+			choicesMembers++
+		}
+	}
+	if errorMember {
 		return attemptCodeResponseDecode, "2xx body carries an error member"
 	}
+	if choicesMembers > 1 {
+		return attemptCodeResponseDecode, "2xx body has more than one choices member"
+	}
 	var choices []json.RawMessage
-	if err := json.Unmarshal(top["choices"], &choices); err != nil || choices == nil {
+	if err := json.Unmarshal(choicesRaw, &choices); err != nil || choices == nil {
 		return attemptCodeResponseDecode, "2xx body has no choices array"
 	}
 	if len(choices) == 0 {

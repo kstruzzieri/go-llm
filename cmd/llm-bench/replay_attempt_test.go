@@ -260,6 +260,102 @@ func TestReplayAttempt_ResponseDecode(t *testing.T) {
 	}
 }
 
+// The recorder reads member names as the provider's struct decode does. A
+// body the provider reads differently must not pass the envelope check and
+// then fail as internal.
+func TestReplayAttempt_CaseVariantMembers(t *testing.T) {
+	msg := `[{"index":0,"message":{"role":"assistant","content":"smoke-ok"},"finish_reason":"stop"}]`
+	cases := []struct {
+		name, body, code, stage string // code "": the attempt completes
+	}{
+		{"CHOICES alone is read by the provider", `{"CHOICES":` + msg + `}`, "", ""},
+		{"CHOICES alone, empty", `{"CHOICES":[]}`, attemptCodeEmptyResponse, attemptStageResponse},
+		{"choices and a case-variant empty twin", `{"choices":` + msg + `,"CHOICES":[]}`, attemptCodeResponseDecode, attemptStageResponse},
+		{"capitalised Error beside choices", `{"Error":{"message":"overloaded"},"choices":` + msg + `}`, attemptCodeResponseDecode, attemptStageResponse},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := newCompatServer(t, compatExchange{Body: tc.body})
+			opts := attemptTestOptions(t, srv.URL, fixtureSmokeTrace)
+			_, rec := runAttempt(t, context.Background(), opts)
+			if tc.code == "" {
+				if rec.Status != attemptStatusCompleted || len(rec.Transcript) == 0 || rec.Transcript[len(rec.Transcript)-1].Content != "smoke-ok" {
+					t.Fatalf("status %q error %+v transcript %+v; want the provider's view of CHOICES, completed with smoke-ok", rec.Status, rec.Error, rec.Transcript)
+				}
+				return
+			}
+			assertAttemptError(t, rec, tc.code, tc.stage, 1)
+			if rec.Requests[0].ErrorCode == nil || *rec.Requests[0].ErrorCode != tc.code {
+				t.Fatalf("row error_code %s; the recorder must reject this body at the HTTP layer", attemptStr(rec.Requests[0].ErrorCode))
+			}
+			assertOneSequence(t, opts, srv, rec)
+		})
+	}
+}
+
+// Stderr is evidence, and a server's error body reaches it: every diagnostic
+// must stay exactly one line, so a body cannot forge a second evidence line
+// or drive the supervisor's terminal.
+func TestReplayAttempt_StderrDetailIsOneLine(t *testing.T) {
+	// The provider trims the body's edges, so the newline is inside it.
+	body := "upstream failure\nllm-bench: replay-attempt: write raw/0001.response.body: forged cause\x1b]0;owned\x07"
+	srv := newCompatServer(t, compatExchange{Status: http.StatusBadGateway, Body: body})
+	code, rec, stderr := runAttemptStderr(t, context.Background(), attemptTestOptions(t, srv.URL, fixtureSmokeTrace))
+	assertAttemptError(t, rec, attemptCodeHTTPStatus, attemptStageResponse, 1)
+	if code != 0 {
+		t.Fatalf("exit %d", code)
+	}
+	for i := 0; i < len(stderr); i++ {
+		if b := stderr[i]; (b < 0x20 && b != '\n') || b == 0x7f {
+			t.Fatalf("stderr holds the raw control byte 0x%02x at %d: %q", b, i, stderr)
+		}
+	}
+	lines := strings.Split(strings.TrimSuffix(stderr, "\n"), "\n")
+	if len(lines) != 1 || !strings.HasPrefix(lines[0], "llm-bench: replay-attempt: ") || !strings.HasSuffix(stderr, "\n") {
+		t.Fatalf("stderr is %d lines, want one starting with the prefix and ending in a newline: %q", len(lines), stderr)
+	}
+	// The body appears, escaped, inside that one line.
+	if want := `upstream failure\nllm-bench: replay-attempt: write raw/0001.response.body: forged cause\x1b]0;owned\x07`; !strings.Contains(stderr, want) {
+		t.Fatalf("stderr %q does not hold the escaped body %q", stderr, want)
+	}
+}
+
+func TestEscapeControls(t *testing.T) {
+	cases := []struct{ name, in, want string }{
+		{"plain", "write raw/0001.response.body: disk full", "write raw/0001.response.body: disk full"},
+		{"newline", "a\nb", `a\nb`},
+		{"carriage return and newline", "a\r\nb", `a\r\nb`},
+		{"tab", "a\tb", `a\tb`},
+		{"escape sequence", "\x1b[31mred", `\x1b[31mred`},
+		{"BEL and NUL", "\x07\x00", `\x07\x00`},
+		{"DEL", "a\x7fb", `a\x7fb`},
+		{"C1 NEL as UTF-8", "a\u0085b", `a\u0085b`},
+		{"C1 CSI as UTF-8", "a\u009bb", `a\u009bb`},
+		{"lone C1 byte is not valid UTF-8", "a\x9bb", `a\x9bb`},
+		{"truncated multibyte sequence", "a\xe2\x82", `a\xe2\x82`},
+		{"line separator", "a\u2028b\u2029c", `a\u2028b\u2029c`},
+		{"printable non-ASCII is kept", "h\u00e9llo \u2713 \U0001F600", "h\u00e9llo \u2713 \U0001F600"},
+		{"backslashes are not doubled", `C:\dir\n`, `C:\dir\n`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := escapeControls(tc.in); got != tc.want {
+				t.Fatalf("escapeControls(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// The key is redacted before escaping: escaping first would turn a key that
+// holds a control character into text the key no longer matches.
+func TestReportAttemptDetailRedactsBeforeEscaping(t *testing.T) {
+	var buf bytes.Buffer
+	reportAttemptDetail(&buf, errors.New("bad ab\ncd key\nnext"), "ab\ncd")
+	if want := "llm-bench: replay-attempt: bad [REDACTED] key\\nnext\n"; buf.String() != want {
+		t.Fatalf("got %q, want %q", buf.String(), want)
+	}
+}
+
 func TestReplayAttempt_EmptyResponse(t *testing.T) {
 	t.Run("zero choices", func(t *testing.T) {
 		srv := newCompatServer(t, compatExchange{Body: `{"choices":[],"usage":{"prompt_tokens":9,"completion_tokens":0}}`})
@@ -803,7 +899,16 @@ func TestReplayAttempt_InputErrors(t *testing.T) {
 		{"two targets", func(o *replayAttemptOptions) { o.Models = "openai-compat/a,openai-compat/b" }, knownNothing},
 		{"empty base url", func(o *replayAttemptOptions) { o.BaseURL = "" }, knownNothing},
 		{"non-http base url", func(o *replayAttemptOptions) { o.BaseURL = "ftp://localhost" }, knownNothing},
+		{"base url with userinfo", func(o *replayAttemptOptions) {
+			o.BaseURL = "http://user:hunter2@" + strings.TrimPrefix(srv.URL, "http://")
+		}, knownNothing},
+		{"base url with userinfo and no password", func(o *replayAttemptOptions) { o.BaseURL = "http://token@" + strings.TrimPrefix(srv.URL, "http://") }, knownNothing},
+		{"base url with a query", func(o *replayAttemptOptions) { o.BaseURL = srv.URL + "?x=1" }, knownNothing},
+		{"base url with a bare question mark", func(o *replayAttemptOptions) { o.BaseURL = srv.URL + "?" }, knownNothing},
+		{"base url with a fragment", func(o *replayAttemptOptions) { o.BaseURL = srv.URL + "/#frag" }, knownNothing},
+		{"base url with a bare hash", func(o *replayAttemptOptions) { o.BaseURL = srv.URL + "#" }, knownNothing},
 		{"non-positive timeout", func(o *replayAttemptOptions) { o.Timeout = 0 }, knownNothing},
+		{"timeout under a millisecond", func(o *replayAttemptOptions) { o.Timeout = 999 * time.Microsecond }, knownNothing},
 		{"trace is a directory", func(o *replayAttemptOptions) { o.TracePath = t.TempDir() }, knownEndpoint},
 		{"trace missing", func(o *replayAttemptOptions) { o.TracePath = filepath.Join(t.TempDir(), "absent.json") }, knownEndpoint},
 		{"trace not json", func(o *replayAttemptOptions) { o.TracePath = invalidJSON }, knownDigest},
@@ -856,6 +961,141 @@ func TestReplayAttempt_InputErrors(t *testing.T) {
 	}
 	if n := len(srv.Received()); n != 0 {
 		t.Fatalf("server received %d requests during input failures", n)
+	}
+}
+
+// A refused input never echoes the value that was refused: the base URL may
+// carry credentials, and the key is never named.
+func TestReplayAttempt_RefusedBaseURLIsNeverEchoed(t *testing.T) {
+	srv := newCompatServer(t)
+	host := strings.TrimPrefix(srv.URL, "http://")
+	for _, base := range []string{"http://user:hunter2@" + host, "http://hunter2@" + host, srv.URL + "?token=hunter2", srv.URL + "/#hunter2"} {
+		t.Run(base, func(t *testing.T) {
+			opts := attemptTestOptions(t, base, fixtureSmokeTrace)
+			code, rec, stderr := runAttemptStderr(t, context.Background(), opts)
+			assertAttemptError(t, rec, attemptCodeInput, attemptStageInput, 0)
+			if code != 0 || rec.Settings.Endpoint != nil {
+				t.Fatalf("exit %d endpoint %s; a refused URL is input with a null endpoint", code, attemptStr(rec.Settings.Endpoint))
+			}
+			terminal, err := os.ReadFile(filepath.Join(opts.AttemptDir, attemptTerminalName))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(stderr, "hunter2") || bytes.Contains(terminal, []byte("hunter2")) {
+				t.Fatalf("a credential from the refused URL leaked.\nstderr: %s\nattempt.json: %s", stderr, terminal)
+			}
+			if want := "llm-bench: replay-attempt: -candidate-base-url must not carry userinfo, a query or a fragment\n"; stderr != want {
+				t.Fatalf("stderr %q, want %q", stderr, want)
+			}
+		})
+	}
+	if n := len(srv.Received()); n != 0 {
+		t.Fatalf("server received %d requests", n)
+	}
+}
+
+// net/http refuses a header value with a control byte before the wire, which
+// would otherwise read as a candidate connection failure. Neither the key nor
+// a piece of it may appear in stderr or attempt.json.
+func TestReplayAttempt_ControlCharacterKeyIsInput(t *testing.T) {
+	srv := newCompatServer(t)
+	isControl := func(r rune) bool { return r < 0x20 || r == 0x7f }
+	for name, key := range map[string]string{
+		"newline": "kQ7vZpR2\nwXm9Tb4LsN6",
+		"ESC":     "kQ7vZpR2\x1bwXm9Tb4LsN6",
+		"DEL":     "kQ7vZpR2\x7fwXm9Tb4LsN6",
+		"tab":     "kQ7vZpR2\twXm9Tb4LsN6",
+		"NUL":     "kQ7vZpR2\x00wXm9Tb4LsN6",
+	} {
+		t.Run(name, func(t *testing.T) {
+			opts := attemptTestOptions(t, srv.URL, fixtureSmokeTrace)
+			opts.APIKey = key
+			code, rec, stderr := runAttemptStderr(t, context.Background(), opts)
+			assertAttemptError(t, rec, attemptCodeInput, attemptStageInput, 0)
+			if code != 0 || len(rec.Requests) != 0 {
+				t.Fatalf("exit %d, %d requests; a bad key is input and nothing reaches the wire", code, len(rec.Requests))
+			}
+			if want := "llm-bench: replay-attempt: candidate API key contains a control character\n"; stderr != want {
+				t.Fatalf("stderr %q, want %q", stderr, want)
+			}
+			terminal, err := os.ReadFile(filepath.Join(opts.AttemptDir, attemptTerminalName))
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, segment := range strings.FieldsFunc(key, isControl) {
+				for i := 0; i+5 <= len(segment); i++ {
+					if piece := segment[i : i+5]; strings.Contains(stderr, piece) || bytes.Contains(terminal, []byte(piece)) {
+						t.Fatalf("the key piece %q leaked.\nstderr: %s\nattempt.json: %s", piece, stderr, terminal)
+					}
+				}
+			}
+		})
+	}
+	if n := len(srv.Received()); n != 0 {
+		t.Fatalf("server received %d requests", n)
+	}
+	// Surrounding whitespace is trimmed before the key is sent, so it is not
+	// a control character in the credential.
+	t.Run("trailing newline is trimmed, not refused", func(t *testing.T) {
+		srv := newCompatServer(t, compatExchange{Body: compatText("smoke-ok", "")})
+		opts := attemptTestOptions(t, srv.URL, fixtureSmokeTrace)
+		opts.APIKey = "kQ7vZpR2wXm9Tb4LsN6\n"
+		code, rec := runAttempt(t, context.Background(), opts)
+		if got := srv.Received(); code != 0 || rec.Status != attemptStatusCompleted || len(got) != 1 || got[0].Authorization != "Bearer kQ7vZpR2wXm9Tb4LsN6" {
+			t.Fatalf("exit %d status %q error %+v requests %+v", code, rec.Status, rec.Error, got)
+		}
+	})
+}
+
+// The refusal bound is 1ms: timeout_ms is whole milliseconds.
+func TestReplayAttempt_OneMillisecondTimeoutIsAccepted(t *testing.T) {
+	srv := newCompatServer(t, compatExchange{Delay: 5 * time.Second})
+	opts := attemptTestOptions(t, srv.URL, fixtureSmokeTrace)
+	opts.Timeout = time.Millisecond
+	_, rec := runAttempt(t, context.Background(), opts)
+	assertAttemptError(t, rec, attemptCodeCanceled, attemptStageRequest, 1)
+	if rec.Settings.TimeoutMs != 1 || rec.Error.CancelSource != attemptCancelTimeout {
+		t.Fatalf("timeout_ms %d source %q; want 1 and attempt_timeout", rec.Settings.TimeoutMs, rec.Error.CancelSource)
+	}
+}
+
+// error.message follows the code, not the text of the error: a server body
+// that says "timeout" must not change it.
+func TestReplayAttempt_ErrorMessageFollowsTheCode(t *testing.T) {
+	t.Run("server body steering", func(t *testing.T) {
+		srv := newCompatServer(t, compatExchange{Status: http.StatusInternalServerError, Body: "upstream timeout: connection refused: json: cannot unmarshal parse"})
+		_, rec := runAttempt(t, context.Background(), attemptTestOptions(t, srv.URL, fixtureSmokeTrace))
+		assertAttemptError(t, rec, attemptCodeHTTPStatus, attemptStageResponse, 1)
+		if rec.Error.Message != "the server returned a non-2xx status" {
+			t.Fatalf("message %q", rec.Error.Message)
+		}
+	})
+	t.Run("input", func(t *testing.T) {
+		opts := attemptTestOptions(t, newCompatServer(t).URL, filepath.Join(t.TempDir(), "absent-trace.json"))
+		_, rec := runAttempt(t, context.Background(), opts)
+		assertAttemptError(t, rec, attemptCodeInput, attemptStageInput, 0)
+		if rec.Error.Message != "an input to the attempt was invalid" {
+			t.Fatalf("message %q", rec.Error.Message)
+		}
+	})
+}
+
+// newCandidateTransport can only fail here on an empty base URL, which
+// loadAttemptInputs has refused already, so this site is reachable only by
+// calling executeAttempt directly.
+func TestExecuteAttemptTransportErrorIsInput(t *testing.T) {
+	targets, err := parseModelTargets("openai-compat/cand")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stderr bytes.Buffer
+	opts := replayAttemptOptions{AttemptID: "att-1", Timeout: time.Second} // no BaseURL
+	_, rows, aerr := executeAttempt(context.Background(), opts, loadFixtureTrace(t, fixtureSmokeTrace), targets[0], &stderr)
+	if len(rows) != 0 || aerr == nil || aerr.Code != attemptCodeInput || aerr.Stage != attemptStageInput || aerr.Message != "an input to the attempt was invalid" {
+		t.Fatalf("rows %d error %+v; want an input failure with the fixed message", len(rows), aerr)
+	}
+	if want := "llm-bench: replay-attempt: candidate openai-compat transport requires -candidate-base-url\n"; stderr.String() != want {
+		t.Fatalf("stderr %q, want %q", stderr.String(), want)
 	}
 }
 

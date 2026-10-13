@@ -196,6 +196,11 @@ func main() {
 	defer cancel()
 
 	if *replayAttempt {
+		// stderr carries evidence before attempt.json is published. Without
+		// this, Go kills the process with SIGPIPE on a write to a closed
+		// stderr pipe, leaving a claimed directory with no terminal. Write
+		// errors are already discarded.
+		signal.Ignore(syscall.SIGPIPE)
 		code := runReplayAttempt(ctx, replayAttemptOptions{
 			AttemptDir: *attemptDir,
 			AttemptID:  *attemptID,
