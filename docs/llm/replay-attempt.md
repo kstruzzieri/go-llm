@@ -43,7 +43,8 @@ whitespace-trimmed.
 
 `0` once `attempt.json` is published and synced, whatever the attempt status. That includes
 problems found after the directory is claimed, such as an invalid `-attempt-id`, `-timeout 0s` or
-an unreadable trace: they are recorded as an `input` failure.
+an unreadable trace: they are recorded as an `input` failure. Exit 0 means "terminal published"
+only for an actual `-replay-attempt` run: `llm-bench -h` also exits 0 and publishes nothing.
 
 `1` when there is no durable terminal. Usage errors exit 1 with nothing written: a stray
 `-attempt-*` flag, `-replay-attempt` combined with another mode, a missing `-attempt-dir`, an
@@ -70,7 +71,15 @@ attempt exists.
 | `divergences`, `sentinel_substituted` | Scored divergences (`tool_route_bypassed`, `plain_chat_tool_call`, `prefilled_tool_call`) and whether llm-bench replaced the candidate's content with its divergence sentinel, `__LLM_BENCH_TOOL_DIVERGENCE_8F3E0B2C__`. A substituted sentinel is never a candidate answer. |
 | `requests[]` | One row per logical request; see Request rows |
 
-A scored divergence still completes the attempt (`status` `completed`, `error` null).
+A scored divergence does not by itself fail the attempt, and `status` `completed` does not mean
+every turn of the trace was replayed. What the replay does next depends on the kind:
+
+- `plain_chat_tool_call`: the replay ends at that turn. A 2-user-turn plain-chat trace sends 1
+  request and the transcript has one turn, with `sentinel_substituted` true.
+- `tool_route_bypassed`: the scripted tool group is skipped and the replay continues with the
+  next user turn. A later failure still fails the attempt, and `divergences` keeps the kind.
+- `prefilled_tool_call`: a prefilled replay sends one request, so nothing follows.
+
 `replay_divergence` is different: a strict mismatch between the candidate's tool calls and the
 scripted route, which fails the attempt.
 
@@ -104,11 +113,14 @@ not redacted; stderr says so.
   `request` is null when its file could not be written. `response` is null when no response
   arrived or its file could not be written.
 - `response.complete` false means the stored body is a truncated prefix of what the server sent:
-  the body read failed or reached the 64 MiB cap. It is about the server's body, not the file;
-  every referenced file is fully written.
+  the body read failed or the body exceeded the 64 MiB cap (a body of exactly 64 MiB is
+  complete). It is about the server's body, not the file; every referenced file is fully
+  written.
 - `usage` is `{prompt_tokens, completion_tokens, reasoning_tokens}`, each an integer or null.
   `reasoning_tokens` is read from `usage.completion_tokens_details.reasoning_tokens`. The whole
-  object is null when the response has no `usage` object or the body is unparseable.
+  object is null when the response has no `usage` object, the body is unparseable, or any of
+  those three counts is not an integer (for example `7.0` or `"7"`). The provider's own decode
+  rejects such a response too, so that attempt fails as `response_decode`.
 - `error_code` is set only for failures the HTTP layer sees: `connection`, `canceled`,
   `http_status`, and the envelope-level `response_decode` and `empty_response`. It stays null for
   failures found after a 2xx body was accepted (`argument_decode`, a wrong-typed field
