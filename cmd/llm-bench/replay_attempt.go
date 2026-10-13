@@ -128,6 +128,10 @@ type attemptRequestRow struct {
 // published and synced, whatever the attempt's status; 1 when no durable
 // terminal exists.
 func runReplayAttempt(parent context.Context, opts replayAttemptOptions, stderr io.Writer) int {
+	// The transport sends the trimmed key, so the control-character check, the
+	// redaction, its 16-byte threshold and the stderr redaction all use that
+	// form. Any other would leave the echoed key unredacted.
+	opts.APIKey = strings.TrimSpace(opts.APIKey)
 	goos := opts.goos
 	if goos == "" {
 		goos = runtime.GOOS
@@ -243,10 +247,11 @@ func loadAttemptInputs(opts replayAttemptOptions, rec *attemptRecord) (Trace, Mo
 	if opts.Timeout < time.Millisecond {
 		return Trace{}, ModelTarget{}, errors.New("-timeout must be at least 1ms")
 	}
-	// net/http refuses such a header before the wire, which would read as a
-	// candidate connection failure. The transport trims the key, so this
-	// checks the key that is sent. The text never carries the key.
-	if strings.ContainsFunc(strings.TrimSpace(opts.APIKey), func(r rune) bool { return r < 0x20 || r == 0x7f }) {
+	// A control character in a credential is a paste error, tab included, so
+	// llm-bench refuses it as input; for most of them net/http would refuse the
+	// header, which would read as a candidate connection failure. The key is
+	// already trimmed (runReplayAttempt). The text never carries the key.
+	if strings.ContainsFunc(opts.APIKey, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
 		return Trace{}, ModelTarget{}, errors.New("candidate API key contains a control character")
 	}
 	targets, err := parseModelTargets(opts.Models)
@@ -483,12 +488,16 @@ func reportAttemptDetail(stderr io.Writer, err error, apiKey string) {
 // escapeControls returns s as one line of printable text. Newline, carriage
 // return and tab become \n, \r and \t; the other C0 controls, DEL and bytes
 // that are not valid UTF-8 become \xNN; C1 controls and the line separators
-// U+2028 and U+2029 become \uNNNN. Printable non-ASCII is kept as is.
+// U+2028 and U+2029 become \uNNNN. A backslash becomes two, so the escaping is
+// reversible: a body holding the two characters \n stays distinct from an
+// escaped newline. Printable non-ASCII is kept as is.
 func escapeControls(s string) string {
 	var b strings.Builder
 	for i := 0; i < len(s); {
 		r, n := utf8.DecodeRuneInString(s[i:])
 		switch {
+		case r == '\\':
+			b.WriteString(`\\`)
 		case r == '\n':
 			b.WriteString(`\n`)
 		case r == '\r':

@@ -271,6 +271,10 @@ func TestReplayAttempt_CaseVariantMembers(t *testing.T) {
 		{"CHOICES alone is read by the provider", `{"CHOICES":` + msg + `}`, "", ""},
 		{"CHOICES alone, empty", `{"CHOICES":[]}`, attemptCodeEmptyResponse, attemptStageResponse},
 		{"choices and a case-variant empty twin", `{"choices":` + msg + `,"CHOICES":[]}`, attemptCodeResponseDecode, attemptStageResponse},
+		// An exact repeat is one map entry in the recorder and the last value in
+		// the provider's decode, so both read the same array.
+		{"exact repeat, the last choices is read", `{"choices":[],"choices":` + msg + `}`, "", ""},
+		{"exact repeat, the last choices is empty", `{"choices":` + msg + `,"choices":[]}`, attemptCodeEmptyResponse, attemptStageResponse},
 		{"capitalised Error beside choices", `{"Error":{"message":"overloaded"},"choices":` + msg + `}`, attemptCodeResponseDecode, attemptStageResponse},
 	}
 	for _, tc := range cases {
@@ -298,7 +302,9 @@ func TestReplayAttempt_CaseVariantMembers(t *testing.T) {
 // or drive the supervisor's terminal.
 func TestReplayAttempt_StderrDetailIsOneLine(t *testing.T) {
 	// The provider trims the body's edges, so the newline is inside it.
-	body := "upstream failure\nllm-bench: replay-attempt: write raw/0001.response.body: forged cause\x1b]0;owned\x07"
+	// It also holds the two characters backslash and n, which must stay
+	// distinct from the escaped newline (backslashes are doubled).
+	body := "upstream failure\nllm-bench: replay-attempt: write raw/0001.response.body: forged cause\x1b]0;owned\x07 literal \\n kept"
 	srv := newCompatServer(t, compatExchange{Status: http.StatusBadGateway, Body: body})
 	code, rec, stderr := runAttemptStderr(t, context.Background(), attemptTestOptions(t, srv.URL, fixtureSmokeTrace))
 	assertAttemptError(t, rec, attemptCodeHTTPStatus, attemptStageResponse, 1)
@@ -315,7 +321,7 @@ func TestReplayAttempt_StderrDetailIsOneLine(t *testing.T) {
 		t.Fatalf("stderr is %d lines, want one starting with the prefix and ending in a newline: %q", len(lines), stderr)
 	}
 	// The body appears, escaped, inside that one line.
-	if want := `upstream failure\nllm-bench: replay-attempt: write raw/0001.response.body: forged cause\x1b]0;owned\x07`; !strings.Contains(stderr, want) {
+	if want := `upstream failure\nllm-bench: replay-attempt: write raw/0001.response.body: forged cause\x1b]0;owned\x07 literal \\n kept`; !strings.Contains(stderr, want) {
 		t.Fatalf("stderr %q does not hold the escaped body %q", stderr, want)
 	}
 }
@@ -335,7 +341,10 @@ func TestEscapeControls(t *testing.T) {
 		{"truncated multibyte sequence", "a\xe2\x82", `a\xe2\x82`},
 		{"line separator", "a\u2028b\u2029c", `a\u2028b\u2029c`},
 		{"printable non-ASCII is kept", "h\u00e9llo \u2713 \U0001F600", "h\u00e9llo \u2713 \U0001F600"},
-		{"backslashes are not doubled", `C:\dir\n`, `C:\dir\n`},
+		{"backslash is doubled", `C:\dir\n`, `C:\\dir\\n`},
+		{"a literal backslash-n differs from a newline", `a\nb`, `a\\nb`},
+		{"a lone backslash", `\`, `\\`},
+		{"a backslash before a real newline", "\\\n", `\\\n`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -994,9 +1003,10 @@ func TestReplayAttempt_RefusedBaseURLIsNeverEchoed(t *testing.T) {
 	}
 }
 
-// net/http refuses a header value with a control byte before the wire, which
-// would otherwise read as a candidate connection failure. Neither the key nor
-// a piece of it may appear in stderr or attempt.json.
+// llm-bench refuses a key with any control character, tab included, as a
+// paste error (net/http would also refuse most of them, which would read as a
+// candidate connection failure). Neither the key nor a piece of it may appear
+// in stderr or attempt.json.
 func TestReplayAttempt_ControlCharacterKeyIsInput(t *testing.T) {
 	srv := newCompatServer(t)
 	isControl := func(r rune) bool { return r < 0x20 || r == 0x7f }
@@ -1047,6 +1057,17 @@ func TestReplayAttempt_ControlCharacterKeyIsInput(t *testing.T) {
 	})
 }
 
+// timeout_ms is the timeout truncated toward zero to whole milliseconds.
+func TestReplayAttempt_TimeoutMsTruncatesTowardZero(t *testing.T) {
+	srv := newCompatServer(t, compatExchange{Delay: 5 * time.Second})
+	opts := attemptTestOptions(t, srv.URL, fixtureSmokeTrace)
+	opts.Timeout = 1900 * time.Microsecond
+	_, rec := runAttempt(t, context.Background(), opts)
+	if rec.Settings.TimeoutMs != 1 {
+		t.Fatalf("timeout_ms %d for a 1900us timeout; want 1", rec.Settings.TimeoutMs)
+	}
+}
+
 // The refusal bound is 1ms: timeout_ms is whole milliseconds.
 func TestReplayAttempt_OneMillisecondTimeoutIsAccepted(t *testing.T) {
 	srv := newCompatServer(t, compatExchange{Delay: 5 * time.Second})
@@ -1057,6 +1078,59 @@ func TestReplayAttempt_OneMillisecondTimeoutIsAccepted(t *testing.T) {
 	if rec.Settings.TimeoutMs != 1 || rec.Error.CancelSource != attemptCancelTimeout {
 		t.Fatalf("timeout_ms %d source %q; want 1 and attempt_timeout", rec.Settings.TimeoutMs, rec.Error.CancelSource)
 	}
+}
+
+// The transport sends the trimmed key, so redaction, its 16-byte threshold
+// and the stderr redaction must all use that form. A key with trailing
+// whitespace that is echoed back must not survive in any evidence.
+func TestReplayAttempt_TrailingWhitespaceKeyIsRedactedAsSent(t *testing.T) {
+	t.Run("echoed key in raw files and attempt.json", func(t *testing.T) {
+		srv := newCompatServer(t, compatExchange{Body: compatText("your key is "+attemptTestKey, "")})
+		opts := attemptTestOptions(t, srv.URL, fixtureSmokeTrace)
+		opts.APIKey = attemptTestKey + "\n"
+		// runAttemptStderr fails if stderr or attempt.json holds the key.
+		code, rec, _ := runAttemptStderr(t, context.Background(), opts)
+		if got := srv.Received(); code != 0 || rec.Status != attemptStatusCompleted || len(got) != 1 || got[0].Authorization != "Bearer "+attemptTestKey {
+			t.Fatalf("exit %d status %q error %+v requests %+v; want the trimmed key sent and the attempt completed", code, rec.Status, rec.Error, got)
+		}
+		entries, err := os.ReadDir(filepath.Join(opts.AttemptDir, "raw"))
+		if err != nil || len(entries) == 0 {
+			t.Fatalf("raw entries %d (%v)", len(entries), err)
+		}
+		for _, e := range entries {
+			if b, _ := os.ReadFile(filepath.Join(opts.AttemptDir, "raw", e.Name())); bytes.Contains(b, []byte(attemptTestKey)) {
+				t.Fatalf("raw/%s holds the key", e.Name())
+			}
+		}
+		if got := rec.Transcript[0].Content; got != "your key is [REDACTED]" || !rec.Requests[0].Response.Redacted {
+			t.Fatalf("transcript %q, response redacted %v; want the echoed key redacted", got, rec.Requests[0].Response.Redacted)
+		}
+	})
+	t.Run("stderr", func(t *testing.T) {
+		srv := newCompatServer(t, compatExchange{Status: http.StatusInternalServerError, Body: "rejected key " + attemptTestKey})
+		opts := attemptTestOptions(t, srv.URL, fixtureSmokeTrace)
+		opts.APIKey = attemptTestKey + "\n"
+		_, rec, stderr := runAttemptStderr(t, context.Background(), opts) // fails on a key in stderr
+		assertAttemptError(t, rec, attemptCodeHTTPStatus, attemptStageResponse, 1)
+		if !strings.Contains(stderr, "rejected key [REDACTED]") {
+			t.Fatalf("stderr %q; want the sent key redacted in the server's body", stderr)
+		}
+	})
+	// 15 bytes once trimmed, 16 with the newline: the threshold counts the key
+	// that is sent.
+	t.Run("threshold counts the trimmed key", func(t *testing.T) {
+		key := "key-" + strings.Repeat("x", 11)
+		srv := newCompatServer(t, compatExchange{Body: compatText("echo "+key, "")})
+		opts := attemptTestOptions(t, srv.URL, fixtureSmokeTrace)
+		opts.APIKey = key + "\n"
+		code, rec, stderr := runAttemptStderr(t, context.Background(), opts)
+		if code != 0 || rec.Status != attemptStatusCompleted {
+			t.Fatalf("exit %d status %q error %+v", code, rec.Status, rec.Error)
+		}
+		if !strings.Contains(stderr, "not redacted") || rec.Transcript[0].Content != "echo "+key {
+			t.Fatalf("stderr %q transcript %q; a 15-byte key is below the threshold and stays as is", stderr, rec.Transcript[0].Content)
+		}
+	})
 }
 
 // error.message follows the code, not the text of the error: a server body

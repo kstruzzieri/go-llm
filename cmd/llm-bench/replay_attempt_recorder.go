@@ -188,9 +188,10 @@ func doneCause(ctx context.Context) error {
 // least one element. Tool-call arguments are left to the provider, so a
 // genuine argument failure still classifies as argument_decode. Member names
 // match case-insensitively, as the provider's struct decode does: "CHOICES"
-// is its choices array. Two members that fold to "choices" are ambiguous and
-// rejected, so the recorder never accepts a body the provider reads another
-// way.
+// is its choices array. Two members whose names differ in case but fold to
+// "choices" are ambiguous and rejected, so the recorder never accepts a body
+// the provider reads another way. An exact repeat of one name is a single
+// entry whose last value wins, as in the provider's decode.
 func validateChatEnvelope(raw []byte) (code, reason string) {
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	var top map[string]json.RawMessage
