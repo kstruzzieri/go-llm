@@ -163,7 +163,12 @@ func runReplayAttempt(parent context.Context, opts replayAttemptOptions, stderr 
 	rec.Divergences = append([]string{}, out.Divergences...)
 	rec.SentinelSubstituted = out.SentinelSubstituted
 
-	refs, artifactErr := pub.writeRaw(rows, opts.APIKey)
+	refs, artifactErr, causes := pub.writeRaw(rows, opts.APIKey)
+	// attempt.json carries only the category; the causes are supervisor
+	// evidence (A4). causes is non-empty exactly when artifactErr is set.
+	for _, cause := range causes {
+		reportAttemptDetail(stderr, cause, opts.APIKey)
+	}
 	rec.Requests = buildAttemptRequestRows(rows, refs)
 	rec.ArtifactError = artifactErr
 	rec.Status = attemptStatusCompleted

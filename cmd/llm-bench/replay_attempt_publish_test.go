@@ -41,6 +41,22 @@ func publishRows() []*recordedRequest {
 	}
 }
 
+// assertCause: some returned cause carries every want string. The causes are
+// the stderr evidence, so each must name its file and keep the OS text.
+func assertCause(t *testing.T, causes []error, want ...string) {
+	t.Helper()
+	for _, c := range causes {
+		ok := true
+		for _, w := range want {
+			ok = ok && strings.Contains(c.Error(), w)
+		}
+		if ok {
+			return
+		}
+	}
+	t.Fatalf("causes %v; want one containing %q", causes, want)
+}
+
 func TestAttemptPublisherClaim(t *testing.T) {
 	t.Run("fresh dir is created 0700", func(t *testing.T) {
 		dir := claimTemp(t)
@@ -84,9 +100,9 @@ func TestAttemptPublisherClaim(t *testing.T) {
 
 func TestAttemptPublisherWriteRaw(t *testing.T) {
 	dir := claimTemp(t)
-	refs, aerr := newAttemptPublisher(dir).writeRaw(publishRows(), publishTestKey)
-	if aerr != nil {
-		t.Fatalf("artifact error: %+v", aerr)
+	refs, aerr, causes := newAttemptPublisher(dir).writeRaw(publishRows(), publishTestKey)
+	if aerr != nil || len(causes) != 0 {
+		t.Fatalf("artifact error: %+v causes %v", aerr, causes)
 	}
 	req := refs[0].Request
 	if req == nil || req.Path != "raw/0001.request.json" || req.SHA256 != sha256Hex([]byte(`{"n":1}`)) || req.Bytes != 7 || req.Redacted {
@@ -121,7 +137,7 @@ func TestAttemptPublisherWriteRaw(t *testing.T) {
 func TestAttemptPublisherShortKeyIsNotRedacted(t *testing.T) {
 	dir := claimTemp(t)
 	rows := []*recordedRequest{{Ordinal: 1, RequestBody: []byte(`{"n":10}`), HeadersAt: time.Now(), HTTPStatus: 200, ResponseBody: []byte(`{"tokens":100}`), ResponseComplete: true}}
-	refs, aerr := newAttemptPublisher(dir).writeRaw(rows, "0")
+	refs, aerr, _ := newAttemptPublisher(dir).writeRaw(rows, "0")
 	if aerr != nil || refs[0].Request.Redacted || refs[0].Response.Redacted {
 		t.Fatalf("refs %+v %+v err %+v; a key below minRedactableKeyLen must leave evidence untouched", refs[0].Request, refs[0].Response, aerr)
 	}
@@ -139,13 +155,18 @@ func TestAttemptPublisherWriteRawFailureIsExplicit(t *testing.T) {
 		}
 		return write(path, data)
 	}
-	refs, aerr := p.writeRaw(publishRows(), "")
-	if aerr == nil || aerr.Code != attemptCodeArtifactWrite || aerr.Stage != attemptStagePublish || !strings.Contains(aerr.Message, "raw/0001.response.body") {
+	refs, aerr, causes := p.writeRaw(publishRows(), "")
+	if aerr == nil || aerr.Code != attemptCodeArtifactWrite || aerr.Stage != attemptStagePublish || aerr.Message != "unreferenced evidence: raw/0001.response.body" {
 		t.Fatalf("artifact error %+v", aerr)
 	}
 	if refs[0].Response != nil || refs[0].Request == nil || refs[1].Request == nil {
 		t.Fatalf("refs %+v %+v; only the failed file may be null", refs[0], refs[1])
 	}
+	// The message is llm-bench's own text; the OS text lives in the cause.
+	if strings.Contains(aerr.Message, "disk full") {
+		t.Fatalf("artifact error message %q carries the underlying cause", aerr.Message)
+	}
+	assertCause(t, causes, "raw/0001.response.body", "disk full")
 }
 
 func TestAttemptPublisherRawDirSyncFailureNullsEveryRef(t *testing.T) {
@@ -157,7 +178,7 @@ func TestAttemptPublisherRawDirSyncFailureNullsEveryRef(t *testing.T) {
 		}
 		return syncDir(dir)
 	}
-	refs, aerr := p.writeRaw(publishRows(), "")
+	refs, aerr, causes := p.writeRaw(publishRows(), "")
 	if aerr == nil || !strings.Contains(aerr.Message, "raw/") {
 		t.Fatalf("artifact error %+v", aerr)
 	}
@@ -166,10 +187,46 @@ func TestAttemptPublisherRawDirSyncFailureNullsEveryRef(t *testing.T) {
 			t.Fatalf("ref %d %+v survived an unsynced raw dir", i, r)
 		}
 	}
+	assertCause(t, causes, "sync raw/", "fsync failed")
 }
 
-// Every evidence file, the terminal temp, raw/, the attempt dir and the
-// claim's parent are fsynced; observed through the sync seams, not through
+// raw/'s entry in the attempt dir is fsynced before any file in raw/ is
+// written, so attempt.json cannot outlive the directory that holds its
+// evidence. When that fsync fails nothing may be referenced. The injection
+// fails the attempt dir's first sync only: publishTerminal syncs it again
+// after the rename, which must keep working.
+func TestAttemptPublisherAttemptDirSyncFailureBeforeRawNullsEveryRef(t *testing.T) {
+	dir := claimTemp(t)
+	p := newAttemptPublisher(dir)
+	syncDir := p.syncDir
+	var attemptDirSyncs int
+	p.syncDir = func(d string) error {
+		if d == dir {
+			attemptDirSyncs++
+			if attemptDirSyncs == 1 {
+				return errors.New("fsync failed")
+			}
+		}
+		return syncDir(d)
+	}
+	refs, aerr, causes := p.writeRaw(publishRows(), "")
+	if aerr == nil || aerr.Code != attemptCodeArtifactWrite || aerr.Message != "unreferenced evidence: raw/" {
+		t.Fatalf("artifact error %+v; want artifact_write naming raw/", aerr)
+	}
+	for i, r := range refs {
+		if r.Request != nil || r.Response != nil {
+			t.Fatalf("ref %d %+v references a file in a raw/ whose directory entry is not durable", i, r)
+		}
+	}
+	assertCause(t, causes, "sync attempt dir", "fsync failed")
+	if err := p.publishTerminal([]byte("{}\n")); err != nil {
+		t.Fatalf("publishTerminal after the injected failure: %v", err)
+	}
+}
+
+// Every evidence file, the terminal temp, raw/, the attempt dir (after raw/
+// is created and again after the terminal rename) and the claim's parent are
+// fsynced; observed through the sync seams, not through
 // writeFile, so dropping an fsync cannot hide behind a successful write.
 func TestAttemptPublisherSyncsEveryFileAndTheClaimParent(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "attempt")
@@ -181,7 +238,7 @@ func TestAttemptPublisherSyncsEveryFileAndTheClaimParent(t *testing.T) {
 	if err := p.claim(); err != nil {
 		t.Fatal(err)
 	}
-	if _, aerr := p.writeRaw(publishRows(), publishTestKey); aerr != nil {
+	if _, aerr, _ := p.writeRaw(publishRows(), publishTestKey); aerr != nil {
 		t.Fatalf("artifact error %+v", aerr)
 	}
 	if err := p.publishTerminal([]byte("{}\n")); err != nil {
@@ -190,15 +247,15 @@ func TestAttemptPublisherSyncsEveryFileAndTheClaimParent(t *testing.T) {
 	if want := []string{"0001.request.json", "0001.response.body", "0002.request.json", "." + attemptTerminalName + ".tmp"}; !reflect.DeepEqual(files, want) {
 		t.Fatalf("fsynced files %v, want %v", files, want)
 	}
-	if want := []string{filepath.Dir(dir), filepath.Join(dir, "raw"), dir}; !reflect.DeepEqual(dirs, want) {
+	if want := []string{filepath.Dir(dir), dir, filepath.Join(dir, "raw"), dir}; !reflect.DeepEqual(dirs, want) {
 		t.Fatalf("fsynced dirs %v, want %v", dirs, want)
 	}
 }
 
 func TestAttemptPublisherNoRowsWritesNoRawDir(t *testing.T) {
 	dir := claimTemp(t)
-	if refs, aerr := newAttemptPublisher(dir).writeRaw(nil, ""); len(refs) != 0 || aerr != nil {
-		t.Fatalf("refs %v err %+v", refs, aerr)
+	if refs, aerr, causes := newAttemptPublisher(dir).writeRaw(nil, ""); len(refs) != 0 || aerr != nil || len(causes) != 0 {
+		t.Fatalf("refs %v err %+v causes %v", refs, aerr, causes)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "raw")); !os.IsNotExist(err) {
 		t.Fatalf("raw dir exists for an attempt with no requests: %v", err)
@@ -277,13 +334,14 @@ func TestAttemptPublisherFileSyncFailureIsExplicit(t *testing.T) {
 		}
 		return syncFile(f)
 	}
-	refs, aerr := p.writeRaw(publishRows(), "")
+	refs, aerr, causes := p.writeRaw(publishRows(), "")
 	if aerr == nil || aerr.Code != attemptCodeArtifactWrite || aerr.Stage != attemptStagePublish || !strings.Contains(aerr.Message, "raw/0001.response.body") {
 		t.Fatalf("artifact error %+v", aerr)
 	}
 	if refs[0].Response != nil || refs[0].Request == nil || refs[1].Request == nil {
 		t.Fatalf("refs %+v %+v; only the file whose fsync failed may be null", refs[0], refs[1])
 	}
+	assertCause(t, causes, "raw/0001.response.body", "fsync failed")
 }
 
 // attempt.json is the proof that everything it references is durable, so a
@@ -327,7 +385,7 @@ func TestAttemptPublisherResponseCompleteIsRecorded(t *testing.T) {
 		{Ordinal: 1, RequestBody: []byte(`{"n":1}`), HeadersAt: now, HTTPStatus: 200, ResponseBody: []byte(`{"ok":true}`), ResponseComplete: true},
 		{Ordinal: 2, RequestBody: []byte(`{"n":2}`), HeadersAt: now, HTTPStatus: 200, ResponseBody: []byte(`{"cut`), ResponseComplete: false, ReadErr: errors.New("unexpected EOF")},
 	}
-	refs, aerr := newAttemptPublisher(claimTemp(t)).writeRaw(rows, "")
+	refs, aerr, _ := newAttemptPublisher(claimTemp(t)).writeRaw(rows, "")
 	if aerr != nil {
 		t.Fatalf("artifact error %+v", aerr)
 	}

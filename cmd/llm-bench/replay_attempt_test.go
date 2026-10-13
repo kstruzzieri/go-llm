@@ -37,6 +37,14 @@ func attemptTestOptions(t *testing.T, baseURL, tracePath string) replayAttemptOp
 // It fails the test if the key leaks into stderr or attempt.json.
 func runAttempt(t *testing.T, ctx context.Context, opts replayAttemptOptions) (int, attemptRecord) {
 	t.Helper()
+	code, rec, _ := runAttemptStderr(t, ctx, opts)
+	return code, rec
+}
+
+// runAttemptStderr is runAttempt that also returns what the run wrote to
+// stderr, the supervisor's evidence channel (spec amendment A4).
+func runAttemptStderr(t *testing.T, ctx context.Context, opts replayAttemptOptions) (int, attemptRecord, string) {
+	t.Helper()
 	var stderr bytes.Buffer
 	code := runReplayAttempt(ctx, opts, &stderr)
 	if strings.Contains(stderr.String(), attemptTestKey) {
@@ -56,7 +64,7 @@ func runAttempt(t *testing.T, ctx context.Context, opts replayAttemptOptions) (i
 	if rec.Schema != replayAttemptSchema || rec.AttemptID != opts.AttemptID {
 		t.Fatalf("schema %q attempt %q", rec.Schema, rec.AttemptID)
 	}
-	return code, rec
+	return code, rec, stderr.String()
 }
 
 // assertOneSequence: the server received exactly the requests the record
@@ -611,12 +619,51 @@ func TestReplayAttempt_ArtifactWriteFailureStillPublishes(t *testing.T) {
 		return write(path, data)
 	}
 	opts.publisher = p
-	code, rec := runAttempt(t, context.Background(), opts)
+	code, rec, stderr := runAttemptStderr(t, context.Background(), opts)
 	if code != 0 || rec.Status != attemptStatusFailed || rec.Error != nil || rec.ArtifactError == nil || rec.ArtifactError.Code != attemptCodeArtifactWrite {
 		t.Fatalf("exit %d status %q error %+v artifact %+v", code, rec.Status, rec.Error, rec.ArtifactError)
 	}
 	if rec.Requests[0].Response != nil || rec.Requests[0].Request == nil {
 		t.Fatalf("row %+v", rec.Requests[0])
+	}
+	// The record carries llm-bench's own text; the cause goes to stderr (A4).
+	if rec.ArtifactError.Message != "unreferenced evidence: raw/0001.response.body" {
+		t.Fatalf("artifact_error message %q", rec.ArtifactError.Message)
+	}
+	if !strings.Contains(stderr, "raw/0001.response.body") || !strings.Contains(stderr, "disk full") {
+		t.Fatalf("stderr %q; an artifact_write failure must name the file and its cause", stderr)
+	}
+}
+
+// The attempt dir's fsync after raw/ is created fails, so no row may
+// reference a file in raw/. The terminal still publishes: its own sync of the
+// attempt dir, after the rename, succeeds, so this is exit 0 and a failed
+// record whose artifact_error says why.
+func TestReplayAttempt_AttemptDirSyncFailureBeforeRawPublishesNoRefs(t *testing.T) {
+	srv := newCompatServer(t, compatExchange{Body: compatText("smoke-ok", "")})
+	opts := attemptTestOptions(t, srv.URL, fixtureSmokeTrace)
+	p := newAttemptPublisher(opts.AttemptDir)
+	syncDir := p.syncDir
+	var attemptDirSyncs int
+	p.syncDir = func(d string) error {
+		if d == opts.AttemptDir {
+			attemptDirSyncs++
+			if attemptDirSyncs == 1 {
+				return errors.New("fsync failed")
+			}
+		}
+		return syncDir(d)
+	}
+	opts.publisher = p
+	code, rec, stderr := runAttemptStderr(t, context.Background(), opts)
+	if code != 0 || rec.Status != attemptStatusFailed || rec.Error != nil || rec.ArtifactError == nil || rec.ArtifactError.Code != attemptCodeArtifactWrite || rec.ArtifactError.Message != "unreferenced evidence: raw/" {
+		t.Fatalf("exit %d status %q error %+v artifact %+v", code, rec.Status, rec.Error, rec.ArtifactError)
+	}
+	if len(rec.Requests) != 1 || rec.Requests[0].Request != nil || rec.Requests[0].Response != nil {
+		t.Fatalf("rows %+v; no ref may point into a raw/ whose directory entry is not durable", rec.Requests)
+	}
+	if !strings.Contains(stderr, "fsync failed") {
+		t.Fatalf("stderr %q; the sync failure's cause must reach the supervisor", stderr)
 	}
 }
 
@@ -644,7 +691,7 @@ func TestReplayAttempt_TerminalPublishedLast(t *testing.T) {
 	if code, _ := runAttempt(t, context.Background(), opts); code != 0 {
 		t.Fatalf("exit %d", code)
 	}
-	want := []string{"sync .."}
+	want := []string{"sync ..", "sync ."}
 	for _, f := range []string{"raw/0001.request.json", "raw/0001.response.body", "raw/0002.request.json", "raw/0002.response.body"} {
 		want = append(want, "write "+f, "fsync "+f)
 	}
@@ -658,8 +705,13 @@ func TestReplayAttempt_DirSyncFailureAfterRenameExitsOne(t *testing.T) {
 	srv := newCompatServer(t, compatExchange{Body: compatText("smoke-ok", "")})
 	opts := attemptTestOptions(t, srv.URL, fixtureSmokeTrace)
 	p := newAttemptPublisher(opts.AttemptDir)
+	rename := p.rename
+	var renamed bool
+	p.rename = func(o, n string) error { renamed = true; return rename(o, n) }
+	// Only the sync after the rename fails: the attempt dir is also synced
+	// before it, when raw/ is created, and that one must stay out of this test.
 	p.syncDir = func(d string) error {
-		if d == opts.AttemptDir {
+		if d == opts.AttemptDir && renamed {
 			return errors.New("fsync failed")
 		}
 		return syncDirectory(d)

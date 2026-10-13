@@ -82,24 +82,34 @@ func (p *attemptPublisher) claim() error {
 // writeRaw writes every row's request and response bytes under raw/, then
 // syncs raw/. Both directions are redacted: a key the server echoes in reply
 // N re-enters the conversation and reaches request N+1. A ref is set only for
-// a file written and synced; every failure is named in the returned
-// artifact_write error, and writing continues so one bad file costs only
-// itself.
-func (p *attemptPublisher) writeRaw(rows []*recordedRequest, apiKey string) ([]attemptRawRefs, *attemptError) {
+// a file written and synced, and only a ref makes a file evidence. Every path
+// without a ref is named in the returned artifact_write error, though a file
+// may exist there (partial, or unsynced). Writing continues after a bad file,
+// so it costs only itself. The error's message is llm-bench's own text; the
+// underlying causes, OS text included, come back as the last value for the
+// caller to put on stderr (spec amendment A4).
+func (p *attemptPublisher) writeRaw(rows []*recordedRequest, apiKey string) ([]attemptRawRefs, *attemptError, []error) {
 	refs := make([]attemptRawRefs, len(rows))
 	if len(rows) == 0 {
-		return refs, nil
+		return refs, nil, nil
 	}
 	rawDir := filepath.Join(p.dir, "raw")
 	if err := os.Mkdir(rawDir, 0o700); err != nil {
-		return refs, &attemptError{Code: attemptCodeArtifactWrite, Stage: attemptStagePublish, Message: "unwritten evidence: raw/"}
+		return refs, unreferencedEvidence("raw/"), []error{fmt.Errorf("create raw/: %w", err)}
+	}
+	// raw/'s own entry in the attempt dir must be durable before any file in it
+	// is referenced, or attempt.json could outlive the directory holding its
+	// evidence. Like an unsynced raw/, a failure references nothing.
+	if err := p.syncDir(p.dir); err != nil {
+		return refs, unreferencedEvidence("raw/"), []error{fmt.Errorf("sync attempt dir after creating raw/: %w", err)}
 	}
 	var failed []string
+	var causes []error
 	for i, row := range rows {
 		name := fmt.Sprintf("raw/%04d.request.json", row.Ordinal)
 		body, redacted := redactAttemptKey(row.RequestBody, apiKey)
 		if ref, err := p.writeRef(name, body, redacted); err != nil {
-			failed = append(failed, name)
+			failed, causes = append(failed, name), append(causes, err)
 		} else {
 			refs[i].Request = ref
 		}
@@ -109,7 +119,7 @@ func (p *attemptPublisher) writeRaw(rows []*recordedRequest, apiKey string) ([]a
 		name = fmt.Sprintf("raw/%04d.response.body", row.Ordinal)
 		body, redacted = redactAttemptKey(row.ResponseBody, apiKey)
 		if ref, err := p.writeRef(name, body, redacted); err != nil {
-			failed = append(failed, name)
+			failed, causes = append(failed, name), append(causes, err)
 		} else {
 			refs[i].Response = &attemptResponseRef{attemptFileRef: *ref, Complete: row.ResponseComplete}
 		}
@@ -117,17 +127,24 @@ func (p *attemptPublisher) writeRaw(rows []*recordedRequest, apiKey string) ([]a
 	if err := p.syncDir(rawDir); err != nil {
 		// Unsynced entries are not durable evidence: reference none of them.
 		refs = make([]attemptRawRefs, len(rows))
-		failed = append(failed, "raw/")
+		failed, causes = append(failed, "raw/"), append(causes, fmt.Errorf("sync raw/: %w", err))
 	}
 	if len(failed) == 0 {
-		return refs, nil
+		return refs, nil, nil
 	}
-	return refs, &attemptError{Code: attemptCodeArtifactWrite, Stage: attemptStagePublish, Message: "unwritten evidence: " + strings.Join(failed, ", ")}
+	return refs, unreferencedEvidence(failed...), causes
+}
+
+// unreferencedEvidence is the artifact_write error naming paths that no ref
+// in requests[] points at. The paths are not evidence even when a file exists
+// there: it may be partial, or fully written but not durable.
+func unreferencedEvidence(paths ...string) *attemptError {
+	return &attemptError{Code: attemptCodeArtifactWrite, Stage: attemptStagePublish, Message: "unreferenced evidence: " + strings.Join(paths, ", ")}
 }
 
 func (p *attemptPublisher) writeRef(name string, data []byte, redacted bool) (*attemptFileRef, error) {
 	if err := p.writeFile(filepath.Join(p.dir, filepath.FromSlash(name)), data); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("write %s: %w", name, err)
 	}
 	sum := sha256.Sum256(data)
 	return &attemptFileRef{Path: name, SHA256: hex.EncodeToString(sum[:]), Bytes: len(data), Redacted: redacted}, nil
