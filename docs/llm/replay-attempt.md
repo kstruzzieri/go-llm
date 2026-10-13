@@ -12,9 +12,11 @@ llm-bench -replay-attempt \
   -attempt-id <id> -attempt-arm <opaque> -attempt-dir <new dir> [-timeout 5m]
 ```
 
-The Bearer credential is optional: without one no `Authorization` header is sent. It comes from
-`-candidate-api-key`, else from `LLM_BENCH_CANDIDATE_API_KEY`. The flag wins, and both are
-whitespace-trimmed.
+The Bearer credential is optional. It comes from `-candidate-api-key`, else from
+`LLM_BENCH_CANDIDATE_API_KEY`; the flag wins, and both are whitespace-trimmed. Without one no
+`Authorization` header is sent, unless `-candidate-base-url` carries userinfo
+(`http://user:pass@host`): Go then sends Basic auth, and `settings.endpoint` is sanitized, so the
+record does not show it. A Bearer credential wins over userinfo. Keep credentials out of the URL.
 
 ## Guarantees
 
@@ -34,9 +36,10 @@ whitespace-trimmed.
 - **Unknown usage stays unknown.** Usage comes from the raw response, and absent fields are
   `null`.
 - **Immutable output.** `-attempt-dir` must not exist, and its parent must already exist (only
-  the directory itself is created). Files are written exclusively and fsynced; `attempt.json` is
-  published last by rename, so its presence means every file it references is fully written and
-  synced.
+  the directory itself is created). Files are written exclusively and fsynced, and so are the directories that
+  hold them: the attempt directory's parent once the directory is created, the attempt directory
+  once `raw/` is created in it, and `raw/` once its files are written. `attempt.json` is published
+  last by rename, so its presence means every file it references is fully written and synced.
 - **Platforms.** darwin and linux. On windows the mode refuses and exits 1.
 
 ## Exit code
@@ -74,14 +77,19 @@ attempt exists.
 A scored divergence does not by itself fail the attempt, and `status` `completed` does not mean
 every turn of the trace was replayed. What the replay does next depends on the kind:
 
-- `plain_chat_tool_call`: the replay ends at that turn. A 2-user-turn plain-chat trace sends 1
-  request and the transcript has one turn, with `sentinel_substituted` true.
+- `plain_chat_tool_call`: the replay ends after the diverging turn, and `sentinel_substituted` is
+  true. A 2-user-turn plain-chat trace sends 1 request, with one transcript turn, when the first
+  user turn diverges, and 2 requests when only the second does.
 - `tool_route_bypassed`: the scripted tool group is skipped and the replay continues with the
   next user turn. A later failure still fails the attempt, and `divergences` keeps the kind.
 - `prefilled_tool_call`: a prefilled replay sends one request, so nothing follows.
 
 `replay_divergence` is different: a strict mismatch between the candidate's tool calls and the
 scripted route, which fails the attempt.
+
+**Formats.** Every `sha256` (`trace.sha256` and each ref's) is lowercase hex with no prefix.
+Every timestamp (`started_at`, `ended_at`, `headers_at`) is RFC 3339 in UTC with a `Z` suffix and
+fractional seconds of up to nanosecond precision, trailing zeros trimmed.
 
 **Null until known.** An `input` failure can end the run before it has learned some identity
 fields, so these are JSON `null` until the run learns them, never an empty string:
@@ -93,8 +101,13 @@ base URL passes the http/https check. `settings.transport` is always `openai-com
 `error.message` is one of four fixed stubs, `<error: timeout>`, `<error: network>`,
 `<error: parse>` or `<error: other>`, chosen by substring match on the underlying error text, not
 derived from `code` (an `input` error that mentions `-timeout` reads `<error: timeout>`).
-`artifact_error.message` is `unwritten evidence: ` followed by the raw paths that were not
-written. The full error, with the key redacted, goes to stderr.
+`artifact_error.message` is `unreferenced evidence: ` followed by the raw paths that no
+`requests[]` ref points at, for example `raw/0001.response.body`. The name `raw/` means the
+directory could not be created, or a sync of `raw/` or of the attempt directory failed, and then
+no row has a ref. A listed path is not evidence even if a file exists there (it may be partial,
+or fully written but not confirmed durable): only a `request` or `response` ref in `requests[]`
+makes a file evidence. The full error, with the key redacted, goes to stderr, one line per
+failure, with the underlying OS error for each file that could not be written.
 
 Redaction: when the candidate key is at least 16 bytes, its exact occurrences become
 `[REDACTED]` in raw request and response files (a key echoed in one reply re-enters the next
@@ -119,13 +132,23 @@ not redacted; stderr says so.
 - `usage` is `{prompt_tokens, completion_tokens, reasoning_tokens}`, each an integer or null.
   `reasoning_tokens` is read from `usage.completion_tokens_details.reasoning_tokens`. The whole
   object is null when the response has no `usage` object, the body is unparseable, or any of
-  those three counts is not an integer (for example `7.0` or `"7"`). The provider's own decode
-  rejects such a response too, so that attempt fails as `response_decode`.
+  those three counts is not an integer (for example `7.0` or `"7"`). A 2xx response that passes
+  the envelope check and carries such a count fails as `response_decode`, because the provider's
+  own decode rejects it too. A non-2xx response keeps its `http_status` failure and zero choices
+  keeps `empty_response`; `usage` is null on those rows as well.
 - `error_code` is set only for failures the HTTP layer sees: `connection`, `canceled`,
   `http_status`, and the envelope-level `response_decode` and `empty_response`. It stays null for
   failures found after a 2xx body was accepted (`argument_decode`, a wrong-typed field
   `response_decode`, an empty assistant message, `replay_divergence`, an `input` failure
   mid-replay), where only `error.code` carries the class. When it is set, it equals `error.code`.
+
+`error.http_status` is set when the failing request's response headers arrived and the failure is
+one the HTTP layer sees, or a wrong-typed-field `response_decode`. Its presence does not imply
+`code` `http_status`: it also appears on every `response_decode` (the 64 MiB cap included), on
+zero-choices `empty_response`, and on `connection` or `canceled` failures during the body read. It
+is absent when no response arrived, and for the other failures found after a 2xx body was accepted
+(`argument_decode`, `replay_divergence`, an empty assistant message, a mid-replay `input` failure,
+`internal`); there only the row's `http_status` carries the status.
 
 `error.request_ordinal` is the ordinal of the failing row. A request cancelled before it reached
 the wire (for example by `-timeout`) still gets a row: `headers_at`, `http_status` and `response`
