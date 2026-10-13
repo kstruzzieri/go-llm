@@ -302,6 +302,13 @@ func (d *driver) run(ctx context.Context) (string, error) {
 			return "", err
 		}
 	}
+	return d.finishRun(ctx)
+}
+
+// finishRun runs AgentFlow's finish-run once next-action reports no step or
+// attempt work. Fresh runs and resume both end here, so neither can skip the
+// check (#651, #688).
+func (d *driver) finishRun(ctx context.Context) (string, error) {
 	if err := d.requireNoStepWork(ctx); err != nil {
 		return "", err
 	}

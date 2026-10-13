@@ -1907,3 +1907,104 @@ func TestAgentflowSupersededTimeoutStillFailsVerify_RealCLI(t *testing.T) {
 		t.Fatalf("finish-run proof = %q, err = %v: if this passes verification, AgentFlow fixed agentflow#60 and Golem's #642 A9 refusals (status/resume/review) must be revisited", proof, err)
 	}
 }
+
+// concurrentClaimAF is a second writer: right after the first FinishStep
+// succeeds it claims claimStep, as another Golem process could under an
+// advisory lease (#688).
+type concurrentClaimAF struct {
+	afClient
+	claimStep string
+	claimed   string
+}
+
+func (c *concurrentClaimAF) FinishStep(ctx context.Context, step, attempt string) error {
+	if err := c.afClient.FinishStep(ctx, step, attempt); err != nil {
+		return err
+	}
+	if c.claimed == "" {
+		claimed, err := c.ClaimStep(ctx, c.claimStep)
+		if err != nil {
+			return fmt.Errorf("concurrent claim of %s: %w", c.claimStep, err)
+		}
+		c.claimed = claimed
+	}
+	return nil
+}
+
+// addSecondStep appends an independent step P2, with its own command gate, to
+// the fixture plan.
+func addSecondStep(t *testing.T, dir string) {
+	t.Helper()
+	planPath := filepath.Join(dir, "plan.json")
+	planBytes, err := os.ReadFile(planPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var plan map[string]any
+	if err := json.Unmarshal(planBytes, &plan); err != nil {
+		t.Fatal(err)
+	}
+	plan["steps"] = append(plan["steps"].([]any), map[string]any{
+		"id":            "P2",
+		"action":        "create src/second.txt",
+		"files":         []string{"src/second.txt"},
+		"preconditions": []string{},
+		"expected_diff": []string{"src/second.txt created"},
+		"validation":    []string{"second-exists"},
+		"evidence_ids":  []string{},
+		"gates":         []map[string]any{{"kind": "command", "run": []string{"test", "-f", "src/second.txt"}}},
+	})
+	plan["validation_gates"] = []string{"unit-tests", "second-exists"}
+	if planBytes, err = json.Marshal(plan); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(planPath, planBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// #688: another writer claims P2 between resume's P1 finish-step and its
+// next-step, so next-step finds nothing while P2's attempt is open. Resume
+// refuses before finish-run, which AgentFlow 1.0 would otherwise pass
+// (kstruzzieri/agentflow#58), writing .agent/proof-pack.json over the open
+// attempt before resume's final check failed.
+func TestAgentflowResumeRefusesFinishRunWhileStepWorkRemains_RealCLI(t *testing.T) {
+	dir := t.TempDir()
+	copyTree(t, "../../testdata/agentflow", dir)
+	addSecondStep(t, dir)
+	runner, client, plan, planBytes := startFixtureExecution(t, dir)
+	ctx := context.Background()
+	if state, err := client.NextAction(ctx); err != nil || state.State != "step_unclaimed" {
+		t.Fatalf("setup state = %q, err = %v; want step_unclaimed", state.State, err)
+	}
+	af := &concurrentClaimAF{afClient: client, claimStep: "P2"}
+	d := &driver{af: af, plan: &plan, root: dir, runStep: func(_ context.Context, _ agentflow.Step, attempt, _ string) error {
+		writeAndRecordAnswer(t, client, dir, attempt, "expected\n")
+		return nil
+	}}
+	_, err := d.resume(ctx, dir, planBytes, nil)
+	want := `agentflow still reports step work before finish-run: state "validation_missing" step "P2"; no proof was built; run -agentflow-status to see whether -agentflow-resume can recover it`
+	if err == nil || err.Error() != want || af.claimed != "A2" {
+		t.Fatalf("resume err = %v, concurrent claim = %q\nwant error %s and claim A2", err, af.claimed, want)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".agent", "proof-pack.json")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("proof-pack.json stat err = %v, want it never built", err)
+	}
+	events := readStepRunEvents(t, dir)
+	if lastStepRunEvent(events, "A1").Event != "completed" || lastStepRunEvent(events, "A2").Event != "claimed" {
+		t.Fatalf("events = %+v, want A1 completed and A2 still open", events)
+	}
+	state, err := agentflow.NewClient(runner, dir).NextAction(ctx)
+	if err != nil || state.State != "validation_missing" || state.StepID == nil || *state.StepID != "P2" {
+		t.Fatalf("after resume: state = %+v, err = %v; want validation_missing on P2", state, err)
+	}
+	// The refusal sends the user to -agentflow-status: it offers resume for
+	// the open attempt (exit 2), as for any owned validation_missing attempt.
+	var status bytes.Buffer
+	statusErr := runAgentflowStatusWithRunner(ctx, &status, dir, false, runner)
+	var exit *agentflowStatusExit
+	if !errors.As(statusErr, &exit) || exit.ExitCode() != 2 ||
+		!strings.Contains(status.String(), "\nresume: settle missing command gates, then continue serially\n") {
+		t.Fatalf("status = %v, want exit 2 offering to settle P2's missing gate\n%s", statusErr, status.String())
+	}
+}
