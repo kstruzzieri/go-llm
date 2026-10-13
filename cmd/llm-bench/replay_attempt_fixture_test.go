@@ -144,8 +144,13 @@ func compatText(content, usage string) string {
 // compatToolCall is a 2xx chat body with one tool call whose wire arguments
 // string is args (deliberately not validated, so tests can send bad JSON).
 func compatToolCall(name, args, usage string) string {
-	return `{"id":"r","object":"chat.completion","model":"cand","choices":[{"index":0,"message":{"role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":` +
-		jsonQuote(name) + `,"arguments":` + jsonQuote(args) + `}}]},"finish_reason":"tool_calls"}]` + compatUsage(usage) + `}`
+	return compatToolCallID("call_1", name, args, usage)
+}
+
+// compatToolCallID is compatToolCall with a chosen tool-call id.
+func compatToolCallID(id, name, args, usage string) string {
+	return `{"id":"r","object":"chat.completion","model":"cand","choices":[{"index":0,"message":{"role":"assistant","content":"","tool_calls":[{"id":` + jsonQuote(id) +
+		`,"type":"function","function":{"name":` + jsonQuote(name) + `,"arguments":` + jsonQuote(args) + `}}]},"finish_reason":"tool_calls"}]` + compatUsage(usage) + `}`
 }
 
 // attemptRoundTripFunc adapts a function to http.RoundTripper.

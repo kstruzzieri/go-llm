@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"os"
@@ -10,7 +11,9 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
 
 func runLLMBenchMain(t *testing.T, env []string, args ...string) (int, string) {
@@ -80,6 +83,61 @@ func TestMainReplayAttemptFailedAttemptExitsZero(t *testing.T) {
 	}
 	if rec := readTerminal(t, dir); rec.Status != attemptStatusFailed || rec.Error.Code != attemptCodeHTTPStatus {
 		t.Fatalf("record %+v", rec)
+	}
+}
+
+// main hands runReplayAttempt the SIGINT/SIGTERM context. Only a signal sent
+// to the real binary shows it: with context.Background() in that call the
+// signal is swallowed and the attempt runs on until the server answers.
+func TestMainReplayAttemptSIGINT(t *testing.T) {
+	const delay = 5 * time.Second
+	srv := newCompatServer(t, compatExchange{Delay: delay})
+	dir := filepath.Join(t.TempDir(), "attempt")
+	cmd := exec.Command(os.Args[0], replayAttemptArgs(srv.URL, dir)...)
+	cmd.Env = append(os.Environ(), "LLM_BENCH_TEST_MAIN=1")
+	var out bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &out
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start llm-bench: %v", err)
+	}
+	exited := make(chan struct{})
+	var waitErr error // read only after exited is closed
+	go func() { waitErr = cmd.Wait(); close(exited) }()
+	// A failed assertion must not leave the subprocess running; Kill after a
+	// normal exit is a harmless error.
+	t.Cleanup(func() { _ = cmd.Process.Kill(); <-exited })
+
+	// Signal only once the request is in flight. By then main has installed
+	// its handler; an earlier SIGINT would take the default action and kill
+	// the process instead of cancelling the attempt.
+	for deadline := time.Now().Add(10 * time.Second); len(srv.Received()) == 0; {
+		select {
+		case <-exited:
+			t.Fatalf("llm-bench exited before sending a request: %v\n%s", waitErr, out.String())
+		case <-time.After(10 * time.Millisecond):
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no request within 10s\n%s", out.String())
+		}
+	}
+	signalled := time.Now()
+	if err := cmd.Process.Signal(syscall.SIGINT); err != nil {
+		t.Fatalf("signal llm-bench: %v", err)
+	}
+	select {
+	case <-exited:
+	case <-time.After(delay + 10*time.Second):
+		t.Fatalf("llm-bench still running %v after SIGINT\n%s", delay+10*time.Second, out.String())
+	}
+	if waitErr != nil {
+		t.Fatalf("llm-bench: %v; a signalled attempt publishes its terminal and exits 0\n%s", waitErr, out.String())
+	}
+	if took := time.Since(signalled); took > delay-2*time.Second {
+		t.Fatalf("llm-bench took %v to exit after SIGINT; the server's delay is %v", took, delay)
+	}
+	rec := readTerminal(t, dir)
+	if rec.Status != attemptStatusFailed || rec.Error == nil || rec.Error.Code != attemptCodeCanceled || rec.Error.CancelSource != attemptCancelSignal {
+		t.Fatalf("status %q error %+v; want failed, canceled by signal", rec.Status, rec.Error)
 	}
 }
 

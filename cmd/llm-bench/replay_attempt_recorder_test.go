@@ -213,6 +213,29 @@ func TestAttemptRecorder_CapsResponse(t *testing.T) {
 			}
 		})
 	}
+	// "A body of exactly the cap is complete" (the contract's wording for
+	// 64 MiB). A 500 body passes through the recorder untouched, so the
+	// caller receiving all 16 bytes shows the body was not rejected.
+	t.Run("exactly the cap", func(t *testing.T) {
+		const body = `{"error":"1234"}`
+		if len(body) != 16 {
+			t.Fatalf("fixture body is %d bytes; want the cap, 16", len(body))
+		}
+		srv := newCompatServer(t, compatExchange{Status: http.StatusInternalServerError, Body: body})
+		rec := newAttemptRecorder(newAttemptBaseTransport(), "att-1", 16)
+		resp, err := recorderPost(t, context.Background(), newRecorderClient(rec), srv.URL, `{}`)
+		if err != nil {
+			t.Fatalf("a body of exactly the cap was refused: %v", err)
+		}
+		if got := string(drain(t, resp)); got != body {
+			t.Fatalf("caller received %q; want the whole %d-byte body", got, len(body))
+		}
+		row := rec.Rows()[0]
+		if string(row.ResponseBody) != body || !row.ResponseComplete || row.Rejected != "" || row.HTTPStatus != http.StatusInternalServerError {
+			t.Fatalf("row kept %q complete=%v rejected=%q status=%d; want the whole body, complete, not rejected, status 500",
+				row.ResponseBody, row.ResponseComplete, row.Rejected, row.HTTPStatus)
+		}
+	})
 }
 
 func TestAttemptRecorder_TransportErrorIsNotCancellation(t *testing.T) {

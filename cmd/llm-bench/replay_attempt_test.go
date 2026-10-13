@@ -391,7 +391,9 @@ func TestReplayAttempt_DivergenceCompletes(t *testing.T) {
 // the conversation, reaches request 2, and is echoed again in the answer.
 func TestReplayAttempt_RedactsEchoedKey(t *testing.T) {
 	srv := newCompatServer(t,
-		compatExchange{Body: compatToolCall("rag_search", `{"query":"`+attemptTestKey+`"}`, "")},
+		// The key is echoed in the arguments and as the tool-call id, which the
+		// replay copies onto the tool turn and the next request.
+		compatExchange{Body: compatToolCallID(attemptTestKey, "rag_search", `{"query":"`+attemptTestKey+`"}`, "")},
 		// The key also comes back in the reasoning channel, which the
 		// openai-compat path lifts into the transcript's Thinking.
 		compatExchange{Body: strings.Replace(compatText("your key is "+attemptTestKey, ""), `"role":"assistant",`, `"role":"assistant","reasoning_content":"the key is `+attemptTestKey+`",`, 1)},
@@ -423,6 +425,9 @@ func TestReplayAttempt_RedactsEchoedKey(t *testing.T) {
 	}
 	if args := compacted.String(); args != `{"query":"[REDACTED]"}` {
 		t.Fatalf("transcript arguments %s", args)
+	}
+	if got := rec.Transcript[1].ToolCallID; got != attemptRedacted {
+		t.Fatalf("transcript tool_call_id %q; the candidate's call id is candidate text", got)
 	}
 	if got := rec.Transcript[2].Content; got != "your key is [REDACTED]" {
 		t.Fatalf("transcript answer %q", got)
@@ -457,6 +462,83 @@ func TestReplayAttempt_ShortKeyLeavesRecordIntact(t *testing.T) {
 	row := rec.Requests[0]
 	if rec.Status != attemptStatusCompleted || *row.Usage.PromptTokens != 10 || *row.Usage.CompletionTokens != 20 || row.Response.Redacted || rec.Transcript[0].Content != "smoke-ok 0 0" || rec.Settings.TimeoutMs != 10000 {
 		t.Fatalf("record altered: status %q usage %+v redacted %v content %q timeout %d", rec.Status, row.Usage, row.Response.Redacted, rec.Transcript[0].Content, rec.Settings.TimeoutMs)
+	}
+}
+
+// The candidate names a tool after the key. On a plain-chat trace the call
+// stays on the transcript as a divergence; on a scripted route it stays as the
+// mismatch that fails the attempt.
+func TestReplayAttempt_RedactsKeyInToolName(t *testing.T) {
+	cases := []struct {
+		name  string
+		trace string
+		code  string // want error code, "" for a completed attempt
+	}{
+		{"plain-chat divergence", fixtureSmokeTrace, ""},
+		{"scripted route mismatch", fixtureToolRouteTrace, attemptCodeReplayDivergence},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := newCompatServer(t, compatExchange{Body: compatToolCall(attemptTestKey, `{}`, "")})
+			opts := attemptTestOptions(t, srv.URL, tc.trace)
+			code, rec := runAttempt(t, context.Background(), opts) // fails on a key in attempt.json or stderr
+			if code != 0 {
+				t.Fatalf("exit %d", code)
+			}
+			if (tc.code == "") != (rec.Error == nil) || (rec.Error != nil && rec.Error.Code != tc.code) {
+				t.Fatalf("error %+v; want code %q", rec.Error, tc.code)
+			}
+			if got := rec.Transcript[len(rec.Transcript)-1].ToolCalls[0].Name; got != attemptRedacted {
+				t.Fatalf("transcript tool call name %q; the candidate's tool name is candidate text", got)
+			}
+		})
+	}
+}
+
+// The 16-byte threshold (spec amendment A8) is a published contract: a key of
+// 16 bytes is redacted, one of 15 is not and says so. The lengths are literals
+// on purpose; derived from minRedactableKeyLen they would follow it wherever
+// it was moved.
+func TestReplayAttempt_RedactionThreshold(t *testing.T) {
+	cases := []struct {
+		name     string
+		keyLen   int
+		redacted bool
+	}{
+		{"15 bytes", 15, false},
+		{"16 bytes", 16, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			key := "key-" + strings.Repeat("x", tc.keyLen-4)
+			if len(key) != tc.keyLen {
+				t.Fatalf("fixture key is %d bytes; want %d", len(key), tc.keyLen)
+			}
+			srv := newCompatServer(t, compatExchange{Body: compatText("echo "+key, "")})
+			opts := attemptTestOptions(t, srv.URL, fixtureSmokeTrace)
+			opts.APIKey = key
+			code, rec, stderr := runAttemptStderr(t, context.Background(), opts)
+			if code != 0 || rec.Status != attemptStatusCompleted {
+				t.Fatalf("exit %d status %q error %+v", code, rec.Status, rec.Error)
+			}
+			if got := strings.Contains(stderr, "not redacted"); got == tc.redacted {
+				t.Fatalf("stderr %q; the not-redacted warning must appear exactly when the key is below the threshold", stderr)
+			}
+			wantContent := "echo " + key
+			if tc.redacted {
+				wantContent = "echo " + attemptRedacted
+			}
+			raw, err := os.ReadFile(filepath.Join(opts.AttemptDir, filepath.FromSlash(rec.Requests[0].Response.Path)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := rec.Transcript[0].Content; got != wantContent {
+				t.Fatalf("transcript content %q; want %q", got, wantContent)
+			}
+			if rec.Requests[0].Response.Redacted != tc.redacted || bytes.Contains(raw, []byte(key)) == tc.redacted {
+				t.Fatalf("response redacted flag %v, raw holds key %v; want redacted %v", rec.Requests[0].Response.Redacted, bytes.Contains(raw, []byte(key)), tc.redacted)
+			}
+		})
 	}
 }
 
@@ -511,6 +593,41 @@ func TestReplayAttempt_RedactsKeyInTraceRaw(t *testing.T) {
 				t.Fatalf("transcript raw %s; want %s", compacted.String(), tc.want)
 			}
 		})
+	}
+}
+
+// redactRecordKey rewrites every text field of the transcript and notes. Some
+// are unreachable end to end: a reply's assistant turn never carries a
+// tool-call id, and a tool turn's name must equal the trace's declared tool.
+// A replacement dropped from one of them would otherwise go unnoticed.
+func TestRedactRecordKeyCoversEveryTextField(t *testing.T) {
+	const key = attemptTestKey
+	rec := attemptRecord{
+		Transcript: []Turn{{
+			Role: "tool", Content: "content " + key, Thinking: "thinking " + key, Name: "name " + key, ToolCallID: "id " + key,
+			Raw: json.RawMessage(`{"` + key + `":["` + key + `",1.50]}`),
+			ToolCalls: []ToolCall{{
+				ID: "call id " + key, Name: "call name " + key, Arguments: json.RawMessage(`{"` + key + `":["` + key + `",1.50]}`),
+			}},
+		}},
+		Notes: []string{"note " + key},
+	}
+	redactRecordKey(&rec, key)
+	turn, call := rec.Transcript[0], rec.Transcript[0].ToolCalls[0]
+	for _, f := range []struct{ field, got, want string }{
+		{"content", turn.Content, "content [REDACTED]"},
+		{"thinking", turn.Thinking, "thinking [REDACTED]"},
+		{"name", turn.Name, "name [REDACTED]"},
+		{"tool_call_id", turn.ToolCallID, "id [REDACTED]"},
+		{"raw", string(turn.Raw), `{"[REDACTED]":["[REDACTED]",1.50]}`},
+		{"call id", call.ID, "call id [REDACTED]"},
+		{"call name", call.Name, "call name [REDACTED]"},
+		{"call arguments", string(call.Arguments), `{"[REDACTED]":["[REDACTED]",1.50]}`},
+		{"note", rec.Notes[0], "note [REDACTED]"},
+	} {
+		if f.got != f.want {
+			t.Errorf("%s = %q; want %q", f.field, f.got, f.want)
+		}
 	}
 }
 
@@ -649,6 +766,9 @@ func TestReplayAttempt_InputErrors(t *testing.T) {
 		{"attempt id of 129 bytes", func(o *replayAttemptOptions) { o.AttemptID = strings.Repeat("a", 129) }, knownNothing},
 		{"empty arm", func(o *replayAttemptOptions) { o.Arm = "" }, knownNothing},
 		{"arm with a control character", func(o *replayAttemptOptions) { o.Arm = "a\nb" }, knownNothing},
+		{"arm of 257 bytes", func(o *replayAttemptOptions) { o.Arm = strings.Repeat("a", 257) }, knownNothing},
+		{"arm that is not UTF-8", func(o *replayAttemptOptions) { o.Arm = "a\xffb" }, knownNothing},
+		{"arm of 258 bytes in 129 runes", func(o *replayAttemptOptions) { o.Arm = strings.Repeat("\u00e9", 129) }, knownNothing},
 		{"ollama target", func(o *replayAttemptOptions) { o.Models = "ollama/m" }, knownNothing},
 		{"two targets", func(o *replayAttemptOptions) { o.Models = "openai-compat/a,openai-compat/b" }, knownNothing},
 		{"empty base url", func(o *replayAttemptOptions) { o.BaseURL = "" }, knownNothing},
@@ -716,6 +836,21 @@ func TestReplayAttempt_MaxLengthAttemptID(t *testing.T) {
 	code, rec := runAttempt(t, context.Background(), opts)
 	if code != 0 || rec.Status != attemptStatusCompleted || len(srv.Received()[0].Correlation) != 130 {
 		t.Fatalf("exit %d status %q correlation %q", code, rec.Status, srv.Received()[0].Correlation)
+	}
+}
+
+// The arm limit is 256 bytes, not runes: this one is 255 runes, and it is
+// recorded exactly as given.
+func TestReplayAttempt_MaxLengthArm(t *testing.T) {
+	srv := newCompatServer(t, compatExchange{Body: compatText("smoke-ok", "")})
+	opts := attemptTestOptions(t, srv.URL, fixtureSmokeTrace)
+	opts.Arm = strings.Repeat("a", 254) + "\u00e9"
+	if len(opts.Arm) != 256 {
+		t.Fatalf("fixture arm is %d bytes; want 256", len(opts.Arm))
+	}
+	code, rec := runAttempt(t, context.Background(), opts)
+	if code != 0 || rec.Status != attemptStatusCompleted || rec.Arm != opts.Arm {
+		t.Fatalf("exit %d status %q error %+v arm %q; a 256-byte arm is accepted and recorded verbatim", code, rec.Status, rec.Error, rec.Arm)
 	}
 }
 
