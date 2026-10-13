@@ -65,7 +65,7 @@ attempt exists.
 
 | Field | Meaning |
 |---|---|
-| `schema`, `attempt_id`, `arm` | Identity; `arm` is recorded verbatim |
+| `schema`, `attempt_id`, `arm` | Identity; an accepted `arm` is recorded verbatim (a rejected one fails `input`, and invalid UTF-8 in it is recorded as U+FFFD, since JSON cannot carry it) |
 | `trace.id`, `trace.sha256` | Trace id and the sha256 of the trace file bytes |
 | `replay_kind` | `scripted` or `prefilled` |
 | `build` | `{go_version, module_version, vcs_revision, vcs_modified}`; `module_version` is the main module version Go embeds (`(devel)` is kept as Go reports it) and is `null` when build info is unavailable or carries no version; the `vcs_*` fields are `null` without VCS stamping |
@@ -110,9 +110,9 @@ directory could not be created, or a sync of `raw/` or of the attempt directory 
 no row has a ref. A listed path is not evidence even if a file exists there (it may be partial,
 or fully written but not confirmed durable): only a `request` or `response` ref in `requests[]`
 makes a file evidence. The full error, with the key redacted, goes to stderr. For `artifact_write`
-that is one line per cause, with the underlying OS error for each file that could not be written.
-An execution error is reported there too, and it spans several lines when the server's error body
-does.
+that is one line per cause (unless a path itself contains a newline), with the underlying OS error
+for each file that could not be written. An execution error is reported there too, and it spans
+several lines when the server's error body does.
 
 Redaction: when the candidate key is at least 16 bytes, its exact occurrences become
 `[REDACTED]` in raw request and response files (a key echoed in one reply re-enters the next

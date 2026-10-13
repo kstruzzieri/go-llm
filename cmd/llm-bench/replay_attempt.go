@@ -96,8 +96,8 @@ type attemptBuild struct {
 }
 
 // attemptSettings is what the attempt ran with. Only two fields can be null:
-// endpoint, until the base URL validates, and temperature, unless the replay
-// sent one (prefilled replays send 0).
+// endpoint, until the base URL validates, and temperature, which is 0 once the
+// trace validates as prefilled and null otherwise.
 type attemptSettings struct {
 	Transport   string   `json:"transport"`
 	Endpoint    *string  `json:"endpoint"` // null until the base URL validates
