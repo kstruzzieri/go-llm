@@ -9,3 +9,7 @@ stays `null`. Every request carries `X-Client-Correlation: <attempt-id>/<ordinal
 retries and no followed redirects. The process exits 0 once `attempt.json` is published, whatever
 the attempt's status. The mode runs on darwin and linux and refuses on windows. Legacy
 `-calibrate-capture` and replay output is unchanged. See `docs/llm/replay-attempt.md`.
+
+Protocol upgrades are closed immediately, duplicate `choices` members are rejected, and malformed
+frozen tool-result names are classified as fixture errors. Diagnostic redaction also recognizes
+Go-quoted credentials, so escaped quotes and backslashes cannot expose an echoed key on stderr.

@@ -83,6 +83,7 @@ func TestClassifyAttempt(t *testing.T) {
 		{"argument decode survives a later timeout", fmt.Errorf("w: %w", argErr), []*recordedRequest{ok(1)}, errAttemptTimeout, attemptCodeArgumentDecode, attemptStageReplay, "", 0, 1},
 		{"empty assistant reply", fmt.Errorf("trace: %w", errEmptyAssistantReply), []*recordedRequest{ok(1)}, nil, attemptCodeEmptyResponse, attemptStageReplay, "", 0, 1},
 		{"tool call mismatch", fmt.Errorf("trace: %w", errToolCallMismatch), []*recordedRequest{ok(1)}, nil, attemptCodeReplayDivergence, attemptStageReplay, "", 0, 1},
+		{"frozen result name mismatch", fmt.Errorf("trace: %w", &frozenToolResultNameError{err: errToolCallMismatch}), []*recordedRequest{ok(1)}, nil, attemptCodeInput, attemptStageReplay, "", 0, 1},
 		{"mid-replay fixture defect", fmt.Errorf("trace: %w", errMissingToolResult), []*recordedRequest{ok(1)}, nil, attemptCodeInput, attemptStageReplay, "", 0, 1},
 		{"mid-replay missing scripted assistant", fmt.Errorf("trace: %w", errMissingScriptedAssistant), []*recordedRequest{ok(1)}, nil, attemptCodeInput, attemptStageReplay, "", 0, 1},
 		{"mid-replay unsupported turns", fmt.Errorf("trace: %w", errUnsupportedTurns), []*recordedRequest{ok(1)}, nil, attemptCodeInput, attemptStageReplay, "", 0, 1},

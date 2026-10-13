@@ -47,6 +47,13 @@ var (
 	errNoAssistantFinalAnswer   = errors.New("judge scorer requires an assistant final answer")
 )
 
+// frozenToolResultNameError marks a fixture defect while preserving the
+// legacy error text and errToolCallMismatch identity used by runner callers.
+type frozenToolResultNameError struct{ err error }
+
+func (e *frozenToolResultNameError) Error() string { return e.err.Error() }
+func (e *frozenToolResultNameError) Unwrap() error { return e.err }
+
 // Runner executes traces against a list of candidate models and collects
 // per-trace, per-model Results.
 type Runner struct {
@@ -613,8 +620,8 @@ func frozenToolResults(traceID string, expectedIndex int, expected Turn, turns [
 		}
 		resultName := strings.TrimSpace(result.Name)
 		if resultName != "" && resultName != callName {
-			return nil, nil, start, fmt.Errorf("trace %q assistant turn %d tool %d result: got %q, want %q: %w",
-				traceID, expectedIndex, i, resultName, callName, errToolCallMismatch)
+			return nil, nil, start, &frozenToolResultNameError{err: fmt.Errorf("trace %q assistant turn %d tool %d result: got %q, want %q: %w",
+				traceID, expectedIndex, i, resultName, callName, errToolCallMismatch)}
 		}
 
 		messages = append(messages, ollama.ChatMessage{

@@ -113,6 +113,39 @@ func TestAttemptRecorder_ResendsTheSnapshotViaGetBody(t *testing.T) {
 	}
 }
 
+// An upgraded body is a raw connection. Even a context deadline does not
+// bound its Read, so rejecting the status must close it without reading.
+func TestAttemptRecorder_RejectsUpgradeWithoutReading(t *testing.T) {
+	body := &upgradeRecorderBody{}
+	base := attemptRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusSwitchingProtocols, Header: http.Header{}, Body: body, Request: r}, nil
+	})
+	rec := newAttemptRecorder(base, "att-1", maxAttemptResponseBytes)
+	req, _ := http.NewRequest(http.MethodPost, "http://example.invalid/v1/chat/completions", strings.NewReader("{}"))
+	resp, err := rec.RoundTrip(req)
+	if body.read || !body.closed {
+		t.Fatalf("upgrade body read=%v closed=%v; want closed without reading", body.read, body.closed)
+	}
+	if err == nil || resp != nil {
+		t.Fatalf("RoundTrip = (%v, %v); want upgrade rejected", resp, err)
+	}
+	row := rec.Rows()[0]
+	if row.HTTPStatus != 101 || len(row.ResponseBody) != 0 || row.ResponseComplete || row.ReadErr != nil || row.CancelCause != nil {
+		t.Fatalf("upgrade row %+v; want status 101 and zero incomplete response bytes", row)
+	}
+	if row.HeadersAt.IsZero() || row.EndedAt.Before(row.HeadersAt) {
+		t.Fatalf("upgrade timing headers=%v ended=%v", row.HeadersAt, row.EndedAt)
+	}
+	if failure := classifyAttempt(err, rec.Rows(), nil); failure == nil || failure.Code != attemptCodeHTTPStatus {
+		t.Fatalf("upgrade failure %+v; want http_status", failure)
+	}
+}
+
+type upgradeRecorderBody struct{ read, closed bool }
+
+func (b *upgradeRecorderBody) Read([]byte) (int, error) { b.read = true; return 0, io.EOF }
+func (b *upgradeRecorderBody) Close() error             { b.closed = true; return nil }
+
 func TestValidateChatEnvelope(t *testing.T) {
 	choice := `[{"index":0,"message":{"role":"assistant","content":"x"}}]`
 	cases := []struct{ name, body, want string }{
@@ -120,6 +153,9 @@ func TestValidateChatEnvelope(t *testing.T) {
 		{"trailing whitespace", `{"choices":` + choice + "}\n\t ", ""},
 		{"null error member accepted (A7)", `{"error":null,"choices":` + choice + `}`, ""},
 		{"trailing value", `{"choices":` + choice + `}{}`, attemptCodeResponseDecode},
+		{"missing object close", `{"choices":` + choice, attemptCodeResponseDecode},
+		{"trailing comma", `{"choices":` + choice + `,}`, attemptCodeResponseDecode},
+		{"missing member separator", `{"choices":` + choice + ` "usage":{}}`, attemptCodeResponseDecode},
 		{"array", `[]`, attemptCodeResponseDecode},
 		{"null", `null`, attemptCodeResponseDecode},
 		{"not json", `not json`, attemptCodeResponseDecode},
@@ -130,11 +166,18 @@ func TestValidateChatEnvelope(t *testing.T) {
 		// Member names match case-insensitively, as the provider's struct
 		// decode does (the end-to-end rows are in TestReplayAttempt_CaseVariantMembers).
 		{"upper-case choices alone is the choices array", `{"CHOICES":` + choice + `}`, ""},
+		{"escaped choices alone is the choices array", `{"cho\u0069ces":` + choice + `}`, ""},
+		{"nested choices is not another top-level member", `{"choices":` + choice + `,"metadata":{"choices":[]}}`, ""},
 		{"mixed-case choices alone, empty", `{"Choices":[]}`, attemptCodeEmptyResponse},
 		{"case-variant duplicate choices is ambiguous", `{"choices":` + choice + `,"CHOICES":[]}`, attemptCodeResponseDecode},
 		{"case-variant duplicate, empty first", `{"CHOICES":[],"choices":` + choice + `}`, attemptCodeResponseDecode},
 		{"case-variant duplicate with null", `{"choices":` + choice + `,"Choices":null}`, attemptCodeResponseDecode},
-		{"exact duplicate choices: the last wins, as in the provider", `{"choices":` + choice + `,"choices":[]}`, attemptCodeEmptyResponse},
+		{"exact duplicate choices", `{"choices":` + choice + `,"choices":[]}`, attemptCodeResponseDecode},
+		{"exact duplicate choices, empty first", `{"choices":[],"choices":` + choice + `}`, attemptCodeResponseDecode},
+		{"exact duplicate choices can retain stale content", `{"choices":` + choice + `,"choices":[{"message":{}}]}`, attemptCodeResponseDecode},
+		{"exact duplicate choices can retain stale content through null", `{"choices":` + choice + `,"choices":[null]}`, attemptCodeResponseDecode},
+		{"escaped duplicate choices", `{"choices":` + choice + `,"cho\u0069ces":` + choice + `}`, attemptCodeResponseDecode},
+		{"escaped case-variant duplicate choices", `{"choices":` + choice + `,"\u0043HOICES":` + choice + `}`, attemptCodeResponseDecode},
 		{"capitalised error member beside choices", `{"Error":{"message":"x"},"choices":` + choice + `}`, attemptCodeResponseDecode},
 		{"upper-case error member beside choices", `{"ERROR":"overloaded","choices":` + choice + `}`, attemptCodeResponseDecode},
 		{"null capitalised error member accepted", `{"Error":null,"choices":` + choice + `}`, ""},

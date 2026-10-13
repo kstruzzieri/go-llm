@@ -41,6 +41,7 @@ func classifyFailure(err error, rows []*recordedRequest, attemptCause error) *at
 	var argErr *toolArgumentsError
 	var typeErr *json.UnmarshalTypeError
 	var syntaxErr *json.SyntaxError
+	var resultNameErr *frozenToolResultNameError
 	switch {
 	case errors.As(err, &argErr):
 		f.Code = attemptCodeArgumentDecode
@@ -51,6 +52,10 @@ func classifyFailure(err error, rows []*recordedRequest, attemptCause error) *at
 		f.Code, f.Stage, f.HTTPStatus = attemptCodeResponseDecode, attemptStageResponse, last.HTTPStatus
 	case errors.Is(err, errEmptyAssistantReply):
 		f.Code = attemptCodeEmptyResponse
+	case errors.As(err, &resultNameErr):
+		// The runner retains errToolCallMismatch for legacy callers, but
+		// a bad frozen result name is an input defect, not candidate drift.
+		f.Code = attemptCodeInput
 	case errors.Is(err, errToolCallMismatch):
 		f.Code = attemptCodeReplayDivergence
 	case errors.Is(err, errMissingToolResult), errors.Is(err, errMissingScriptedAssistant), errors.Is(err, errUnsupportedTurns):

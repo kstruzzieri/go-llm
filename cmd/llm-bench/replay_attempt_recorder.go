@@ -134,6 +134,14 @@ func (r *attemptRecorder) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 	row.HeadersAt = time.Now()
 	row.HTTPStatus = resp.StatusCode
+	if resp.StatusCode == http.StatusSwitchingProtocols {
+		// A 101 body is the upgraded connection, whose reads are no longer
+		// bounded by the request context. No switched-protocol bytes are
+		// HTTP response evidence; keep an empty, incomplete body and fail.
+		_ = resp.Body.Close()
+		row.EndedAt = time.Now()
+		return nil, errors.New("replay-attempt: HTTP 101 protocol upgrade is not supported")
+	}
 	raw, readErr := io.ReadAll(io.LimitReader(resp.Body, r.maxBody+1))
 	var readCause error
 	if readErr != nil {
@@ -188,28 +196,47 @@ func doneCause(ctx context.Context) error {
 // least one element. Tool-call arguments are left to the provider, so a
 // genuine argument failure still classifies as argument_decode. Member names
 // match case-insensitively, as the provider's struct decode does: "CHOICES"
-// is its choices array. Two members whose names differ in case but fold to
-// "choices" are ambiguous and rejected, so the recorder never accepts a body
-// the provider reads another way. An exact repeat of one name is a single
-// entry whose last value wins, as in the provider's decode.
+// is its choices array. All repeated choices members are rejected, including
+// exact repeats and escaped names: the provider can merge repeated arrays
+// into reused struct elements, retaining fields from an earlier member.
 func validateChatEnvelope(raw []byte) (code, reason string) {
 	dec := json.NewDecoder(bytes.NewReader(raw))
-	var top map[string]json.RawMessage
-	if err := dec.Decode(&top); err != nil || top == nil {
+	if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
+		return attemptCodeResponseDecode, "2xx body is not a JSON object"
+	}
+	top := make(map[string]json.RawMessage)
+	choicesMembers := 0
+	for dec.More() {
+		tok, err := dec.Token()
+		name, ok := tok.(string)
+		if err != nil || !ok {
+			return attemptCodeResponseDecode, "2xx body is not a JSON object"
+		}
+		var member json.RawMessage
+		if err := dec.Decode(&member); err != nil {
+			return attemptCodeResponseDecode, "2xx body is not a JSON object"
+		}
+		// Count before map assignment loses exact repeats. Token returns
+		// the unescaped member name, so equivalent JSON spellings count too.
+		if strings.EqualFold(name, "choices") {
+			choicesMembers++
+		}
+		top[name] = member
+	}
+	if tok, err := dec.Token(); err != nil || tok != json.Delim('}') {
 		return attemptCodeResponseDecode, "2xx body is not a JSON object"
 	}
 	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
 		return attemptCodeResponseDecode, "2xx body has data after its JSON value"
 	}
 	var choicesRaw json.RawMessage
-	choicesMembers, errorMember := 0, false
+	errorMember := false
 	for name, member := range top {
 		switch {
 		case strings.EqualFold(name, "error"):
 			errorMember = errorMember || !bytes.Equal(bytes.TrimSpace(member), []byte("null"))
 		case strings.EqualFold(name, "choices"):
 			choicesRaw = member
-			choicesMembers++
 		}
 	}
 	if errorMember {

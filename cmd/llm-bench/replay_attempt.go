@@ -475,12 +475,20 @@ func redactAttemptJSONValue(v any, key string) (any, bool) {
 // exactly one line: that is supervisor evidence, while attempt.json carries
 // only the category stub (spec amendment A4). The error text can hold a
 // server's error body, so control characters are escaped, or a body could
-// forge evidence lines or drive the terminal. The key is redacted first, so
-// escaping cannot split it.
+// forge evidence lines or drive the terminal. The key's raw and Go-quoted
+// forms are redacted first, so escaping cannot split either representation.
 func reportAttemptDetail(stderr io.Writer, err error, apiKey string) {
 	msg := err.Error()
 	if apiKey != "" {
-		msg = strings.ReplaceAll(msg, apiKey, attemptRedacted)
+		quoted := strconv.Quote(apiKey)
+		quoted = quoted[1 : len(quoted)-1]
+		if quoted == apiKey {
+			msg = strings.ReplaceAll(msg, apiKey, attemptRedacted)
+		} else {
+			// %q tool names can overlap the raw key; replace the escaped
+			// form first in one pass, without rewriting the replacement.
+			msg = strings.NewReplacer(quoted, attemptRedacted, apiKey, attemptRedacted).Replace(msg)
+		}
 	}
 	_, _ = fmt.Fprintf(stderr, "llm-bench: replay-attempt: %s\n", escapeControls(msg))
 }

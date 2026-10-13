@@ -43,6 +43,10 @@ mode always dials the endpoint directly and ignores `HTTP_PROXY`, `HTTPS_PROXY` 
   wire, except where its ref says `redacted`, and except that a response over 64 MiB is stored
   truncated to 64 MiB. That cap bounds one response body, not the attempt: all request and
   response bodies are held in memory until publication.
+- **No protocol upgrades.** An HTTP `101 Switching Protocols` response is closed immediately
+  and fails as `http_status`. The upgraded connection is never read: its response evidence is
+  an empty file with `complete: false`, so a server cannot hold publication open after switching
+  away from HTTP.
 - **Unknown usage stays unknown.** Usage comes from the raw response, and absent fields are
   `null`.
 - **Immutable output.** `-attempt-dir` must not exist, and its parent must already exist (only
@@ -101,7 +105,8 @@ every turn of the trace was replayed. What the replay does next depends on the k
 - `prefilled_tool_call`: a prefilled replay sends one request, so nothing follows.
 
 `replay_divergence` is different: a strict mismatch between the candidate's tool calls and the
-scripted route, which fails the attempt.
+scripted route, which fails the attempt. A frozen tool result whose name disagrees with the
+scripted tool call is a fixture defect and fails as `input`, even when discovered mid-replay.
 
 **Formats.** Every `sha256` (`trace.sha256` and each ref's) is lowercase hex with no prefix.
 Every timestamp (`started_at`, `ended_at`, `headers_at`) is RFC 3339 in UTC with a `Z` suffix and
@@ -123,8 +128,10 @@ server wording and a server's error body cannot steer it.
 directory could not be created, or a sync of `raw/` or of the attempt directory failed, and then
 no row has a ref. A listed path is not evidence even if a file exists there (it may be partial,
 or fully written but not confirmed durable): only a `request` or `response` ref in `requests[]`
-makes a file evidence. The full error, with the key redacted, goes to stderr. Each diagnostic
-there is exactly one line, because control characters in it are escaped: a newline is written
+makes a file evidence. The full error, with the key redacted, goes to stderr. Redaction there
+recognizes both the literal key and its Go-quoted form in diagnostics, including escaped quotes
+and backslashes, before applying the one-line escaping. Each diagnostic there is exactly one
+line, because control characters in it are escaped: a newline is written
 as the two characters backslash and `n`, a carriage return and a tab likewise, other C0
 controls, DEL and bytes that are not valid UTF-8 as `\xNN`, and C1 controls, U+2028 and U+2029
 as `\uNNNN`. A backslash is written as two, so the escaping is reversible: a body that holds the
@@ -151,8 +158,9 @@ not redacted; stderr says so.
   arrived or its file could not be written.
 - `response.complete` false means the stored body is a truncated prefix of what the server sent:
   the body read failed or the body exceeded the 64 MiB cap (a body of exactly 64 MiB is
-  complete). It is about the server's body, not the file; every referenced file is fully
-  written.
+  complete). An HTTP 101 has an empty, incomplete response because the upgraded connection is
+  closed without reading. It is about the server's body, not the file; every referenced file
+  is fully written.
 - `usage` is `{prompt_tokens, completion_tokens, reasoning_tokens}`, each an integer or null.
   `reasoning_tokens` is read from `usage.completion_tokens_details.reasoning_tokens`. The whole
   object is null when the response has no `usage` object, the body is unparseable, or any of
@@ -187,9 +195,9 @@ the first request), and a consumer must not assume a row exists for it.
 |---|---|---|
 | `input` | Invalid flag, config (including a non-http(s) base URL, a base URL with userinfo, a query or a fragment, or a key with a control character), or trace fixture (nothing was sent, or the fixture broke mid-replay) | `an input to the attempt was invalid` |
 | `connection` | Connection, TLS, or response-body read failure that is not a cancellation | `the connection to the endpoint failed` |
-| `http_status` | Non-2xx response, 3xx included | `the server returned a non-2xx status` |
+| `http_status` | Non-2xx response, including 3xx and a refused 101 protocol upgrade | `the server returned a non-2xx status` |
 | `canceled` | A timeout or signal during a request or its response-body read: `cancel_source` `attempt_timeout` (`-timeout`, which bounds the whole attempt across all requests) or `signal` (SIGINT/SIGTERM) | `the attempt was canceled` |
-| `response_decode` | A 2xx body that is not one JSON object, carries a non-null `error` member, has no `choices` array or two members whose names differ in case but fold to `choices`, has a wrong-typed field, or exceeds 64 MiB. Member names match case-insensitively, as the provider's decode does: `CHOICES` is the `choices` array and `Error` is an `error` member. An exact repeat of one name is not ambiguous: the last value wins, as in the provider. | `the server's response could not be decoded` |
+| `response_decode` | A 2xx body that is not one JSON object, carries a non-null `error` member, has no `choices` array or more than one `choices` member, has a wrong-typed field, or exceeds 64 MiB. Member names match case-insensitively, as the provider's decode does: `CHOICES` is the `choices` array and `Error` is an `error` member. Duplicate `choices` members are rejected even with identical spelling or JSON-escaped names, because the provider can merge earlier values into later ones. | `the server's response could not be decoded` |
 | `argument_decode` | A tool call whose arguments do not decode to a JSON object | `a tool call's arguments could not be decoded` |
 | `empty_response` | Zero choices, or an assistant reply with no content and no tool calls. Whitespace-only content counts as empty for prefilled replays only; a scripted replay treats it as content. | `the candidate returned no reply` |
 | `replay_divergence` | The candidate's tool calls do not match the scripted route | `the candidate's tool calls did not match the scripted route` |

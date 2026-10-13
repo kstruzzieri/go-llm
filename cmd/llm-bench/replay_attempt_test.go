@@ -271,10 +271,8 @@ func TestReplayAttempt_CaseVariantMembers(t *testing.T) {
 		{"CHOICES alone is read by the provider", `{"CHOICES":` + msg + `}`, "", ""},
 		{"CHOICES alone, empty", `{"CHOICES":[]}`, attemptCodeEmptyResponse, attemptStageResponse},
 		{"choices and a case-variant empty twin", `{"choices":` + msg + `,"CHOICES":[]}`, attemptCodeResponseDecode, attemptStageResponse},
-		// An exact repeat is one map entry in the recorder and the last value in
-		// the provider's decode, so both read the same array.
-		{"exact repeat, the last choices is read", `{"choices":[],"choices":` + msg + `}`, "", ""},
-		{"exact repeat, the last choices is empty", `{"choices":` + msg + `,"choices":[]}`, attemptCodeEmptyResponse, attemptStageResponse},
+		{"exact repeat, empty first", `{"choices":[],"choices":` + msg + `}`, attemptCodeResponseDecode, attemptStageResponse},
+		{"exact repeat, empty last", `{"choices":` + msg + `,"choices":[]}`, attemptCodeResponseDecode, attemptStageResponse},
 		{"capitalised Error beside choices", `{"Error":{"message":"overloaded"},"choices":` + msg + `}`, attemptCodeResponseDecode, attemptStageResponse},
 	}
 	for _, tc := range cases {
