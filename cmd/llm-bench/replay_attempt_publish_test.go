@@ -263,3 +263,78 @@ func TestWriteSyncedRefusesExisting(t *testing.T) {
 		t.Fatalf("file %q; evidence must be immutable", got)
 	}
 }
+
+// A file whose fsync failed is not durable evidence: its ref must be null and
+// the failure named, while its neighbours keep theirs. The seam fails only the
+// fsync, so the write itself succeeds and a swallowed error would still hand
+// back a ref with a hash.
+func TestAttemptPublisherFileSyncFailureIsExplicit(t *testing.T) {
+	p := newAttemptPublisher(claimTemp(t))
+	syncFile := p.syncFile
+	p.syncFile = func(f *os.File) error {
+		if filepath.Base(f.Name()) == "0001.response.body" {
+			return errors.New("fsync failed")
+		}
+		return syncFile(f)
+	}
+	refs, aerr := p.writeRaw(publishRows(), "")
+	if aerr == nil || aerr.Code != attemptCodeArtifactWrite || aerr.Stage != attemptStagePublish || !strings.Contains(aerr.Message, "raw/0001.response.body") {
+		t.Fatalf("artifact error %+v", aerr)
+	}
+	if refs[0].Response != nil || refs[0].Request == nil || refs[1].Request == nil {
+		t.Fatalf("refs %+v %+v; only the file whose fsync failed may be null", refs[0], refs[1])
+	}
+}
+
+// attempt.json is the proof that everything it references is durable, so a
+// terminal temp file that failed its fsync must never be renamed into place.
+func TestAttemptPublisherTerminalFileSyncFailureIsNotPublished(t *testing.T) {
+	dir := claimTemp(t)
+	p := newAttemptPublisher(dir)
+	p.syncFile = func(*os.File) error { return errors.New("fsync failed") }
+	if err := p.publishTerminal([]byte("{}\n")); err == nil {
+		t.Fatal("publishTerminal succeeded with a failing file fsync")
+	}
+	if _, err := os.Stat(filepath.Join(dir, attemptTerminalName)); !os.IsNotExist(err) {
+		t.Fatalf("attempt.json published from an unsynced temp file: %v", err)
+	}
+}
+
+// The claim is only durable once its parent is synced; a failure there must
+// surface rather than report a claim that a crash could undo.
+func TestAttemptPublisherClaimParentSyncFailureIsReported(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "attempt")
+	parent := filepath.Dir(dir)
+	errSync := errors.New("fsync failed")
+	p := newAttemptPublisher(dir)
+	syncDir := p.syncDir
+	p.syncDir = func(d string) error {
+		if d == parent {
+			return errSync
+		}
+		return syncDir(d)
+	}
+	if err := p.claim(); !errors.Is(err, errSync) {
+		t.Fatalf("claim error %v; want the parent fsync failure", err)
+	}
+}
+
+// Complete mirrors the recorder: false when the body read failed or hit the
+// cap. Both values must reach the ref, so neither can be hard-coded.
+func TestAttemptPublisherResponseCompleteIsRecorded(t *testing.T) {
+	now := time.Now()
+	rows := []*recordedRequest{
+		{Ordinal: 1, RequestBody: []byte(`{"n":1}`), HeadersAt: now, HTTPStatus: 200, ResponseBody: []byte(`{"ok":true}`), ResponseComplete: true},
+		{Ordinal: 2, RequestBody: []byte(`{"n":2}`), HeadersAt: now, HTTPStatus: 200, ResponseBody: []byte(`{"cut`), ResponseComplete: false, ReadErr: errors.New("unexpected EOF")},
+	}
+	refs, aerr := newAttemptPublisher(claimTemp(t)).writeRaw(rows, "")
+	if aerr != nil {
+		t.Fatalf("artifact error %+v", aerr)
+	}
+	if refs[0].Response == nil || !refs[0].Response.Complete {
+		t.Fatalf("complete row ref %+v; want Complete=true", refs[0].Response)
+	}
+	if refs[1].Response == nil || refs[1].Response.Complete {
+		t.Fatalf("incomplete row ref %+v; want Complete=false", refs[1].Response)
+	}
+}
