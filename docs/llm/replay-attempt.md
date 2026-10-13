@@ -14,8 +14,10 @@ llm-bench -replay-attempt \
 
 The Bearer credential is optional. It comes from `-candidate-api-key`, else from
 `LLM_BENCH_CANDIDATE_API_KEY`; the flag wins, and both are whitespace-trimmed. Without one no
-`Authorization` header is sent. A key with a control character (any byte below 0x20, or DEL) is
-refused as `input`: it could not be sent as a header.
+`Authorization` header is sent. llm-bench refuses a key containing any control character (a byte
+below 0x20, tab included, or DEL) as `input`. That is llm-bench's own policy: such a key is a paste
+error. Redaction, its 16-byte threshold and the stderr redaction all use the trimmed key, the one
+that is sent.
 
 `-candidate-base-url` must be an absolute http or https URL with no userinfo
 (`http://user:pass@host`), no query (a bare `?` included) and no fragment (a bare `#` included);
@@ -80,7 +82,7 @@ attempt exists.
 | `trace.id`, `trace.sha256` | Trace id and the sha256 of the trace file bytes |
 | `replay_kind` | `scripted` or `prefilled` |
 | `build` | `{go_version, module_version, vcs_revision, vcs_modified}`; `module_version` is the main module version Go embeds (`(devel)` is kept as Go reports it) and is `null` when build info is unavailable or carries no version; the `vcs_*` fields are `null` without VCS stamping |
-| `settings` | `{transport, endpoint, model, temperature, timeout_ms}`: transport, endpoint, model selector, temperature (`0` for prefilled, else `null`), timeout in milliseconds (a `-timeout` under 1ms is refused as `input`) |
+| `settings` | `{transport, endpoint, model, temperature, timeout_ms}`: transport, endpoint, model selector, temperature (`0` for prefilled, else `null`), timeout in whole milliseconds, truncated toward zero (`-timeout 1900us` is recorded as `1`; a `-timeout` under 1ms is refused as `input`) |
 | `started_at`, `ended_at`, `elapsed_ms` | Attempt timing; `elapsed_ms` is whole milliseconds |
 | `status` | `failed` if and only if `error` or `artifact_error` is non-null, else `completed` |
 | `error`, `artifact_error` | Execution failure and evidence-write failure, kept separate; each `null` or `{code, stage, http_status?, cancel_source?, request_ordinal?, message}` |
@@ -125,7 +127,9 @@ makes a file evidence. The full error, with the key redacted, goes to stderr. Ea
 there is exactly one line, because control characters in it are escaped: a newline is written
 as the two characters backslash and `n`, a carriage return and a tab likewise, other C0
 controls, DEL and bytes that are not valid UTF-8 as `\xNN`, and C1 controls, U+2028 and U+2029
-as `\uNNNN`. A server's error body therefore cannot forge a second evidence line or drive a
+as `\uNNNN`. A backslash is written as two, so the escaping is reversible: a body that holds the
+two characters backslash and `n` (`\\n` on stderr) is distinct from one that holds a newline
+(`\n`). A server's error body therefore cannot forge a second evidence line or drive a
 terminal. For `artifact_write` there is one line per cause, with the underlying OS error for
 each file that could not be written. An execution error is reported there too.
 
@@ -185,7 +189,7 @@ the first request), and a consumer must not assume a row exists for it.
 | `connection` | Connection, TLS, or response-body read failure that is not a cancellation | `the connection to the endpoint failed` |
 | `http_status` | Non-2xx response, 3xx included | `the server returned a non-2xx status` |
 | `canceled` | A timeout or signal during a request or its response-body read: `cancel_source` `attempt_timeout` (`-timeout`, which bounds the whole attempt across all requests) or `signal` (SIGINT/SIGTERM) | `the attempt was canceled` |
-| `response_decode` | A 2xx body that is not one JSON object, carries a non-null `error` member, has no `choices` array or more than one member named `choices`, has a wrong-typed field, or exceeds 64 MiB. Member names match case-insensitively, as the provider's decode does: `CHOICES` is the `choices` array and `Error` is an `error` member. | `the server's response could not be decoded` |
+| `response_decode` | A 2xx body that is not one JSON object, carries a non-null `error` member, has no `choices` array or two members whose names differ in case but fold to `choices`, has a wrong-typed field, or exceeds 64 MiB. Member names match case-insensitively, as the provider's decode does: `CHOICES` is the `choices` array and `Error` is an `error` member. An exact repeat of one name is not ambiguous: the last value wins, as in the provider. | `the server's response could not be decoded` |
 | `argument_decode` | A tool call whose arguments do not decode to a JSON object | `a tool call's arguments could not be decoded` |
 | `empty_response` | Zero choices, or an assistant reply with no content and no tool calls. Whitespace-only content counts as empty for prefilled replays only; a scripted replay treats it as content. | `the candidate returned no reply` |
 | `replay_divergence` | The candidate's tool calls do not match the scripted route | `the candidate's tool calls did not match the scripted route` |
