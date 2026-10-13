@@ -113,6 +113,16 @@ func assertAttemptError(t *testing.T, rec attemptRecord, code, stage string, ord
 	}
 }
 
+// assertUsage: the row kept the prompt and completion counts the server
+// returned, and reasoning stays unknown.
+func assertUsage(t *testing.T, row attemptRequestRow, prompt, completion int) {
+	t.Helper()
+	u := row.Usage
+	if u == nil || u.PromptTokens == nil || u.CompletionTokens == nil || *u.PromptTokens != prompt || *u.CompletionTokens != completion || u.ReasoningTokens != nil {
+		t.Fatalf("row %d usage %+v; want prompt %d completion %d, reasoning null", row.Ordinal, u, prompt, completion)
+	}
+}
+
 func TestReplayAttempt_CompletedScriptedToolRoute(t *testing.T) {
 	srv := newCompatServer(t,
 		compatExchange{Body: compatToolCall("rag_search", `{"query":"retry budget"}`, `{"prompt_tokens":20,"completion_tokens":5}`)},
@@ -209,9 +219,12 @@ func TestReplayAttempt_ArgumentDecodeKeepsUsageAndTiming(t *testing.T) {
 
 func TestReplayAttempt_ResponseDecode(t *testing.T) {
 	body := compatText("ok", "") + "garbage"
-	cases := []struct{ name, body string }{
-		{"trailing data", body},
-		{"error envelope in a 200", `{"error":{"message":"overloaded"},"choices":[{"index":0,"message":{"role":"assistant","content":"x"}}]}`},
+	cases := []struct {
+		name, body string
+		wantUsage  bool // the body is parseable JSON carrying usage 11/3
+	}{
+		{"trailing data", body, false},
+		{"error envelope in a 200", `{"error":{"message":"overloaded"},"choices":[{"index":0,"message":{"role":"assistant","content":"x"}}],"usage":{"prompt_tokens":11,"completion_tokens":3}}`, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -227,15 +240,21 @@ func TestReplayAttempt_ResponseDecode(t *testing.T) {
 			if resp == nil || resp.SHA256 != sha256Hex([]byte(tc.body)) || !resp.Complete {
 				t.Fatalf("response ref %+v; want the full body", resp)
 			}
+			// Spec 6.1 step 7: usage is parsed for any status, before the envelope
+			// check, so a rejected body still reports what the server returned.
+			if tc.wantUsage {
+				assertUsage(t, rec.Requests[0], 11, 3)
+			}
 		})
 	}
 }
 
 func TestReplayAttempt_EmptyResponse(t *testing.T) {
 	t.Run("zero choices", func(t *testing.T) {
-		srv := newCompatServer(t, compatExchange{Body: `{"choices":[]}`})
+		srv := newCompatServer(t, compatExchange{Body: `{"choices":[],"usage":{"prompt_tokens":9,"completion_tokens":0}}`})
 		_, rec := runAttempt(t, context.Background(), attemptTestOptions(t, srv.URL, fixtureSmokeTrace))
 		assertAttemptError(t, rec, attemptCodeEmptyResponse, attemptStageResponse, 1)
+		assertUsage(t, rec.Requests[0], 9, 0)
 	})
 	t.Run("empty assistant reply", func(t *testing.T) {
 		srv := newCompatServer(t, compatExchange{Body: compatText("", "")})
@@ -330,7 +349,7 @@ func TestReplayAttempt_ReplayDivergence(t *testing.T) {
 func TestReplayAttempt_SecondRequestFailureKeepsPartial(t *testing.T) {
 	srv := newCompatServer(t,
 		compatExchange{Body: compatToolCall("rag_search", `{"query":"retry budget"}`, `{"prompt_tokens":20,"completion_tokens":5}`)},
-		compatExchange{Status: http.StatusBadGateway, Body: "upstream down"},
+		compatExchange{Status: http.StatusBadGateway, Body: `{"error":{"message":"upstream down"},"usage":{"prompt_tokens":31,"completion_tokens":2}}`},
 	)
 	opts := attemptTestOptions(t, srv.URL, fixtureToolRouteTrace)
 	_, rec := runAttempt(t, context.Background(), opts)
@@ -345,6 +364,8 @@ func TestReplayAttempt_SecondRequestFailureKeepsPartial(t *testing.T) {
 	if rec.Requests[1].Response == nil {
 		t.Fatalf("the 502 body must be kept as evidence")
 	}
+	// Acceptance 2: a non-2xx response still reports the usage it carried.
+	assertUsage(t, rec.Requests[1], 31, 2)
 }
 
 func TestReplayAttempt_DivergenceCompletes(t *testing.T) {
