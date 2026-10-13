@@ -273,7 +273,23 @@ attempt with a failed command gate also fails closed: blocking it would leave
 recovery path, except an `enforce` attempt whose command gate failed (above).
 After any attempt settlement, Golem performs one read-only progress check and
 refuses to repeat a mutation when the state did not change. No-settle states go
-directly into the existing serial step/tail driver.
+directly into the existing serial step/tail driver. Before that tail calls
+`finish-run`, resume asks `next-action` once more, as a fresh run does (step 5
+of the task driver order in
+[Workflow routing in task mode](#workflow-routing-in-task-mode)). If AgentFlow
+still reports step or attempt work at that check, resume exits 1 without
+running `finish-run` or building a proof, names the state and step, and sends
+you to `-agentflow-status`, which reports whether `-agentflow-resume` can
+recover. With Golem as the only writer this cannot happen; it catches an
+attempt another writer opened while resume ran. A failed check call also stops
+resume with exit 1 before `finish-run`. The check and `finish-run` are two
+calls, so a writer that opens an attempt between them still reaches
+`finish-run`, and resume's final check then exits 1 (kstruzzieri/agentflow#58).
+The check lets every run-phase state through, as in a fresh run: when resume's
+own steps leave an older proof stale or failing, `finish-run` replaces it once
+drift and run verification pass. The `drift_failing`, `proof_stale` and
+`proof_failing` rows below describe the state resume finds on entry or after a
+settlement.
 
 The complete disposition table is:
 
@@ -290,8 +306,8 @@ The complete disposition table is:
 | `step_unverified` | 2 | Call the fixed `FinishStep` adapter for the owned attempt. |
 | `step_uncompleted` | 2 | Call the fixed `CompleteStep` adapter without re-verifying. |
 | `drift_failing` | 3 | Fail closed for operator inspection. |
-| `run_unverified` | 2 | Enter the serial tail and call `FinishRun` once. |
-| `proof_missing` | 2 | Call `FinishRun` once to generate and verify the first proof. |
+| `run_unverified` | 2 | Enter the serial tail; after the step-work check, call `FinishRun` once. |
+| `proof_missing` | 2 | After the step-work check, call `FinishRun` once to generate and verify the first proof. |
 | `proof_stale` | 3 | Fail closed; do not overwrite proof after changed inputs. |
 | `proof_failing` | 3 | Fail closed; preserve the failing proof. |
 | `complete` | 0 | Report verified proof and perform no mutation. |
@@ -329,8 +345,9 @@ step-run ledger Golem could not read, a process that died mid-attempt, a
 Unknown future states fail closed. Resume never initializes, locks, records
 evidence or reviews, renews/reclaims leases, re-runs a model for an open
 attempt (an open attempt whose gate failed is blocked first; the model then
-runs in a new attempt), executes advisory command strings, rebuilds
-stale/failing proof, or starts parallel recovery. Normal interactive startup only detects a
+runs in a new attempt), executes advisory command strings, rebuilds a proof
+when the state it reads on entry or after a settlement is `proof_stale` or
+`proof_failing`, or starts parallel recovery. Normal interactive startup only detects a
 case-insensitive `.agent` directory and prints the status/resume commands; it
 does not inspect or mutate the ledgers.
 
