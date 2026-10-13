@@ -18,9 +18,12 @@ import (
 // most 256 bytes) and never trusts it for attribution (#687).
 const attemptCorrelationHeader = "X-Client-Correlation"
 
-// maxAttemptResponseBytes caps one buffered response body. A body past it
-// is response_decode: it guards memory against a runaway server for the
-// length of -timeout.
+// maxAttemptResponseBytes bounds ONE response body. A body past it is
+// response_decode, so a runaway server cannot feed a single read without limit
+// for the length of -timeout. It is not an aggregate cap: every request and
+// response body stays in memory until publication (D2), and request k+1
+// carries every earlier reply. -timeout bounds the run, and the caller is a
+// trusted local harness, so there is no total-bytes limit.
 const maxAttemptResponseBytes = 64 << 20
 
 // recordedRequest is one logical RoundTrip of a -replay-attempt. Failure

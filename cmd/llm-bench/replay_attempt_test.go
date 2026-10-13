@@ -11,7 +11,10 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
+	"runtime"
+	"runtime/debug"
 	"strings"
 	"testing"
 	"time"
@@ -457,6 +460,60 @@ func TestReplayAttempt_ShortKeyLeavesRecordIntact(t *testing.T) {
 	}
 }
 
+// tool-canary-01's tool-result turn (index 2) carries raw: the trace's own
+// JSON, copied verbatim into the transcript. The trace file can hold the key
+// only if the supervisor put it there, but then it must not reach attempt.json.
+func TestReplayAttempt_RedactsKeyInTraceRaw(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+		want string // compacted transcript raw
+	}{
+		{"holding the key", `{"auth":"` + attemptTestKey + `"}`, `{"auth":"[REDACTED]"}`},
+		{"holding the key in an array", `["x",{"a":["` + attemptTestKey + `"]}]`, `["x",{"a":["[REDACTED]"]}]`},
+		{"holding the key as a member name", `{"` + attemptTestKey + `":1}`, `{"[REDACTED]":1}`},
+		// The key as the trace file stores it is not byte-for-byte the key.
+		{"holding the key JSON-escaped", `{"auth":"lab-attempt-key-\u0030123456789"}`, `{"auth":"[REDACTED]"}`},
+		// A raw that never held the key is not re-encoded: that would sort
+		// its members and reformat its numbers.
+		{"without the key", `{"z":1,"a":[2,1.50,"x"]}`, `{"z":1,"a":[2,1.50,"x"]}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			data, err := os.ReadFile(fixtureToolRouteTrace)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var tr map[string]any
+			if err := json.Unmarshal(data, &tr); err != nil {
+				t.Fatal(err)
+			}
+			tr["turns"].([]any)[2].(map[string]any)["raw"] = json.RawMessage(tc.raw)
+			data, _ = json.Marshal(tr)
+			tracePath := filepath.Join(t.TempDir(), "trace.json")
+			if err := os.WriteFile(tracePath, data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			srv := newCompatServer(t,
+				compatExchange{Body: compatToolCall("rag_search", `{"query":"q"}`, "")},
+				compatExchange{Body: compatText("done", "")},
+			)
+			opts := attemptTestOptions(t, srv.URL, tracePath)
+			code, rec := runAttempt(t, context.Background(), opts) // fails on a key in attempt.json
+			if code != 0 || rec.Status != attemptStatusCompleted {
+				t.Fatalf("exit %d status %q error %+v", code, rec.Status, rec.Error)
+			}
+			var compacted bytes.Buffer
+			if err := json.Compact(&compacted, rec.Transcript[1].Raw); err != nil {
+				t.Fatalf("transcript raw %q is not JSON: %v", rec.Transcript[1].Raw, err)
+			}
+			if compacted.String() != tc.want {
+				t.Fatalf("transcript raw %s; want %s", compacted.String(), tc.want)
+			}
+		})
+	}
+}
+
 // A 2xx body that is one JSON object but has a wrong-typed field passes the
 // recorder and fails the provider's decode: response_decode, not internal.
 func TestReplayAttempt_WrongTypedFieldIsResponseDecode(t *testing.T) {
@@ -476,6 +533,61 @@ func TestLoadAttemptInputsRefusesOllama(t *testing.T) {
 	if _, _, err := loadAttemptInputs(opts, &attemptRecord{}); err == nil || !strings.Contains(err.Error(), "supports only openai-compat targets") {
 		t.Fatalf("err = %v; want the explicit unsupported-provider refusal", err)
 	}
+}
+
+// Test binaries are not VCS-stamped, so provenance is pinned through the
+// function that reads it from a *debug.BuildInfo.
+func TestAttemptBuildFrom(t *testing.T) {
+	strp := func(s string) *string { return &s }
+	boolp := func(b bool) *bool { return &b }
+	vcs := func(rev, modified string) []debug.BuildSetting {
+		return []debug.BuildSetting{{Key: "vcs", Value: "git"}, {Key: "vcs.revision", Value: rev}, {Key: "vcs.time", Value: "2026-10-12T00:00:00Z"}, {Key: "vcs.modified", Value: modified}}
+	}
+	cases := []struct {
+		name string
+		info *debug.BuildInfo
+		want attemptBuild
+	}{
+		{"build info unavailable", nil, attemptBuild{GoVersion: runtime.Version()}},
+		{"stamped and modified", &debug.BuildInfo{GoVersion: "go1.27.1", Main: debug.Module{Version: "v0.1.1-0.20261012000000-abcdef123456+dirty"}, Settings: vcs("abcdef1234567890", "true")},
+			attemptBuild{GoVersion: "go1.27.1", ModuleVersion: strp("v0.1.1-0.20261012000000-abcdef123456+dirty"), VCSRevision: strp("abcdef1234567890"), VCSModified: boolp(true)}},
+		{"stamped and clean", &debug.BuildInfo{GoVersion: "go1.27.1", Main: debug.Module{Version: "v0.2.0"}, Settings: vcs("0123456789abcdef", "false")},
+			attemptBuild{GoVersion: "go1.27.1", ModuleVersion: strp("v0.2.0"), VCSRevision: strp("0123456789abcdef"), VCSModified: boolp(false)}},
+		{"no vcs settings and no module version", &debug.BuildInfo{GoVersion: "go1.27.1", Settings: []debug.BuildSetting{{Key: "-compiler", Value: "gc"}}},
+			attemptBuild{GoVersion: "go1.27.1"}},
+		{"devel module version is kept verbatim", &debug.BuildInfo{GoVersion: "go1.27.1", Main: debug.Module{Version: "(devel)"}},
+			attemptBuild{GoVersion: "go1.27.1", ModuleVersion: strp("(devel)")}},
+		{"tagged module version", &debug.BuildInfo{GoVersion: "go1.27.1", Main: debug.Module{Version: "v1.2.3"}},
+			attemptBuild{GoVersion: "go1.27.1", ModuleVersion: strp("v1.2.3")}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := attemptBuildFrom(tc.info); !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("attemptBuildFrom = %s\nwant %s", describeAttemptBuild(got), describeAttemptBuild(tc.want))
+			}
+		})
+	}
+	// Unknown is null on the wire, never an empty string.
+	data, err := json.Marshal(attemptBuildFrom(nil))
+	if err != nil || !strings.Contains(string(data), `"module_version":null,"vcs_revision":null,"vcs_modified":null`) {
+		t.Fatalf("encoded %s (%v); unknown provenance must be null", data, err)
+	}
+}
+
+// describeAttemptBuild renders a build with its pointers dereferenced, so a
+// failing comparison shows values, not addresses.
+func describeAttemptBuild(b attemptBuild) string {
+	out := "{go " + b.GoVersion
+	if b.ModuleVersion != nil {
+		out += " module " + *b.ModuleVersion
+	}
+	if b.VCSRevision != nil {
+		out += " rev " + *b.VCSRevision
+	}
+	if b.VCSModified != nil {
+		out += fmt.Sprintf(" modified %v", *b.VCSModified)
+	}
+	return out + "}"
 }
 
 func TestReplayAttempt_InputErrors(t *testing.T) {
@@ -772,10 +884,8 @@ func TestReplayAttempt_TerminalRenameFailureExitsOne(t *testing.T) {
 }
 
 func TestReplayAttempt_RefusesOnWindows(t *testing.T) {
-	saved := replayAttemptGOOS
-	replayAttemptGOOS = "windows"
-	t.Cleanup(func() { replayAttemptGOOS = saved })
 	opts := attemptTestOptions(t, "http://127.0.0.1:1", fixtureSmokeTrace)
+	opts.goos = "windows"
 	var stderr bytes.Buffer
 	if code := runReplayAttempt(context.Background(), opts, &stderr); code != 1 || !strings.Contains(stderr.String(), "windows") {
 		t.Fatalf("exit %d stderr %q", code, stderr.String())

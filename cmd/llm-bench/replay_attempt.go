@@ -35,12 +35,9 @@ const (
 // 149 bytes (128 + "/" + a 20-digit ordinal), under the lab gateway's 256.
 var attemptIDPattern = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,128}$`)
 
-// replayAttemptGOOS is runtime.GOOS, a variable so tests can exercise the
-// windows refusal (decision W).
-var replayAttemptGOOS = runtime.GOOS
-
-// replayAttemptOptions are the -replay-attempt inputs. publisher is a test
-// seam for injecting file-operation failures; nil is production behavior.
+// replayAttemptOptions are the -replay-attempt inputs. publisher and goos are
+// test seams (file-operation failures, the windows refusal of decision W);
+// their zero values are production behavior.
 type replayAttemptOptions struct {
 	AttemptDir string
 	AttemptID  string
@@ -52,6 +49,7 @@ type replayAttemptOptions struct {
 	Timeout    time.Duration
 
 	publisher *attemptPublisher // nil: newAttemptPublisher(AttemptDir)
+	goos      string            // "": runtime.GOOS
 }
 
 // attemptRecord is attempt.json, schema llm-bench.replay-attempt/v1.
@@ -85,13 +83,21 @@ type attemptTraceRef struct {
 	SHA256 *string `json:"sha256"`
 }
 
+// attemptBuild identifies the llm-bench binary. go_version is always set. The
+// other three are null when the binary does not report them: module_version
+// when build info is unavailable or the main module has no version (Go's
+// "(devel)" is kept verbatim), vcs_revision and vcs_modified when the build
+// was not VCS-stamped.
 type attemptBuild struct {
 	GoVersion     string  `json:"go_version"`
-	ModuleVersion string  `json:"module_version"`
+	ModuleVersion *string `json:"module_version"`
 	VCSRevision   *string `json:"vcs_revision"`
 	VCSModified   *bool   `json:"vcs_modified"`
 }
 
+// attemptSettings is what the attempt ran with. Only two fields can be null:
+// endpoint, until the base URL validates, and temperature, unless the replay
+// sent one (prefilled replays send 0).
 type attemptSettings struct {
 	Transport   string   `json:"transport"`
 	Endpoint    *string  `json:"endpoint"` // null until the base URL validates
@@ -122,7 +128,11 @@ type attemptRequestRow struct {
 // published and synced, whatever the attempt's status; 1 when no durable
 // terminal exists.
 func runReplayAttempt(parent context.Context, opts replayAttemptOptions, stderr io.Writer) int {
-	if replayAttemptGOOS == "windows" {
+	goos := opts.goos
+	if goos == "" {
+		goos = runtime.GOOS
+	}
+	if goos == "windows" {
 		_, _ = fmt.Fprintln(stderr, "llm-bench: -replay-attempt is not supported on windows: it needs atomic rename and directory fsync")
 		return 1
 	}
@@ -292,13 +302,21 @@ func validateAttemptArm(arm string) error {
 }
 
 func readAttemptBuild() attemptBuild {
+	info, _ := debug.ReadBuildInfo() // nil when unavailable
+	return attemptBuildFrom(info)
+}
+
+// attemptBuildFrom projects build info onto the record; nil means build info
+// is unavailable.
+func attemptBuildFrom(info *debug.BuildInfo) attemptBuild {
 	b := attemptBuild{GoVersion: runtime.Version()}
-	info, ok := debug.ReadBuildInfo()
-	if !ok {
+	if info == nil {
 		return b
 	}
 	b.GoVersion = info.GoVersion
-	b.ModuleVersion = info.Main.Version
+	if v := info.Main.Version; v != "" {
+		b.ModuleVersion = &v
+	}
 	for _, s := range info.Settings {
 		switch s.Key {
 		case "vcs.revision":
@@ -352,7 +370,7 @@ func encodeAttemptRecord(rec attemptRecord, apiKey string) ([]byte, error) {
 }
 
 // redactRecordKey replaces a redactable key in the transcript and notes, the
-// only fields that carry candidate or server text.
+// only fields that carry candidate, server or trace text.
 func redactRecordKey(rec *attemptRecord, key string) {
 	if !redactableKey(key) {
 		return
@@ -361,10 +379,16 @@ func redactRecordKey(rec *attemptRecord, key string) {
 	for i := range rec.Transcript {
 		t := &rec.Transcript[i]
 		t.Content, t.Thinking, t.Name, t.ToolCallID = r(t.Content), r(t.Thinking), r(t.Name), r(t.ToolCallID)
+		// Raw is the trace's own tool-turn JSON, copied in verbatim. It is
+		// rewritten only when it holds the key: re-encoding sorts object keys
+		// and would reformat fixture JSON that never held one.
+		if red, held := redactJSONStrings(t.Raw, key); held {
+			t.Raw = red
+		}
 		for j := range t.ToolCalls {
 			c := &t.ToolCalls[j]
 			c.ID, c.Name = r(c.ID), r(c.Name)
-			c.Arguments = redactJSONStrings(c.Arguments, key)
+			c.Arguments, _ = redactJSONStrings(c.Arguments, key)
 		}
 	}
 	for i := range rec.Notes {
@@ -373,43 +397,57 @@ func redactRecordKey(rec *attemptRecord, key string) {
 }
 
 // redactJSONStrings rewrites string values and object keys inside raw JSON,
-// leaving numbers and structure intact. Transcript arguments come from
-// json.Marshal of a map, so decoding and re-encoding them (numbers kept as
-// json.Number) reproduces their bytes apart from the redaction.
-func redactJSONStrings(raw json.RawMessage, key string) json.RawMessage {
+// leaving numbers and structure intact, and reports whether any held the key.
+// Transcript arguments come from json.Marshal of a map, so decoding and
+// re-encoding them (numbers kept as json.Number) reproduces their bytes apart
+// from the redaction. A caller that must keep key-free JSON byte-for-byte
+// ignores the result when held is false.
+func redactJSONStrings(raw json.RawMessage, key string) (out json.RawMessage, held bool) {
 	if len(raw) == 0 {
-		return raw
+		return raw, false
 	}
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.UseNumber()
 	var v any
+	// unreachable: transcript arguments are json.Marshal output of a map
+	// (assistantTurnFromMessage) and a trace's raw is valid JSON (the trace
+	// was parsed), so both decode and re-encode. Replacing what would not
+	// with "[REDACTED]", rather than passing unredacted bytes through, is
+	// deliberate: it fails closed, and writes nothing to stderr.
 	if err := dec.Decode(&v); err != nil {
-		return json.RawMessage(strconv.Quote(attemptRedacted))
+		return json.RawMessage(strconv.Quote(attemptRedacted)), true
 	}
-	out, err := json.Marshal(redactAttemptJSONValue(v, key))
+	v, held = redactAttemptJSONValue(v, key)
+	out, err := json.Marshal(v)
 	if err != nil {
-		return json.RawMessage(strconv.Quote(attemptRedacted))
+		return json.RawMessage(strconv.Quote(attemptRedacted)), true
 	}
-	return out
+	return out, held
 }
 
-func redactAttemptJSONValue(v any, key string) any {
+func redactAttemptJSONValue(v any, key string) (any, bool) {
 	switch x := v.(type) {
 	case string:
-		return strings.ReplaceAll(x, key, attemptRedacted)
+		return strings.ReplaceAll(x, key, attemptRedacted), strings.Contains(x, key)
 	case []any:
+		held := false
 		for i := range x {
-			x[i] = redactAttemptJSONValue(x[i], key)
+			var h bool
+			x[i], h = redactAttemptJSONValue(x[i], key)
+			held = held || h
 		}
-		return x
+		return x, held
 	case map[string]any:
 		out := make(map[string]any, len(x))
+		held := false
 		for k, val := range x {
-			out[strings.ReplaceAll(k, key, attemptRedacted)] = redactAttemptJSONValue(val, key)
+			nv, h := redactAttemptJSONValue(val, key)
+			out[strings.ReplaceAll(k, key, attemptRedacted)] = nv
+			held = held || h || strings.Contains(k, key)
 		}
-		return out
+		return out, held
 	}
-	return v
+	return v, false
 }
 
 // reportAttemptDetail writes the full error, key redacted, to stderr: that
