@@ -1118,7 +1118,10 @@ func (f *resumeFixture) attemptState(t *testing.T, state string, gates []agentfl
 }
 
 // finishRunGuard is the run-phase state resume's pre-finish-run check reads
-// when no step work remains (#651, #688).
+// when no step work remains (#651, #688). A resume test that reaches
+// finish-run scripts it before its final state: without it the check consumes
+// that state, and resume's last next-action gets fakeAF's bare unscripted
+// default, failing with "agentflow resumability projection is missing".
 var finishRunGuard = agentflow.NextActionState{State: "run_unverified"}
 
 func TestResumeReentersExistingSerialStepLoop(t *testing.T) {
