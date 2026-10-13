@@ -344,8 +344,9 @@ step-run ledger Golem could not read, a process that died mid-attempt, a
 Unknown future states fail closed. Resume never initializes, locks, records
 evidence or reviews, renews/reclaims leases, re-runs a model for an open
 attempt (an open attempt whose gate failed is blocked first; the model then
-runs in a new attempt), executes advisory command strings, rebuilds
-a stale or failing proof it finds on entry or after a settlement, or starts parallel recovery. Normal interactive startup only detects a
+runs in a new attempt), executes advisory command strings, rebuilds a proof
+when the state it reads on entry or after a settlement is `proof_stale` or
+`proof_failing`, or starts parallel recovery. Normal interactive startup only detects a
 case-insensitive `.agent` directory and prints the status/resume commands; it
 does not inspect or mutate the ledgers.
 

@@ -1352,6 +1352,30 @@ func TestResumeNextActionErrorBlocksFinishRun(t *testing.T) {
 	}
 }
 
+// #688: a writer that opens an attempt after resume's pre-finish-run check
+// still reaches finish-run (kstruzzieri/agentflow#58). Resume's final check is
+// then the only refusal, so it must reject the non-complete state rather than
+// report success over an open attempt.
+func TestResumeFinalCheckRefusesAttemptOpenedAfterCheck(t *testing.T) {
+	fixture := newResumeFixture(t)
+	initial := fixture.noAttemptState(t, "run_unverified", false)
+	openedFixture := newResumeFixture(t)
+	openedFixture.useAdvisoryLease()
+	opened := openedFixture.attemptState(t, "validation_missing", []agentflow.ResumabilityGate{
+		{Kind: "command", Label: "go test ./...", Status: "missing"},
+		{Kind: "command", Label: "go vet ./...", Status: "missing"},
+	})
+	af := &fakeAF{nextActions: []agentflow.NextActionState{initial, finishRunGuard, opened}}
+	d := &driver{af: af, plan: recoveryPlan(), runStep: func(context.Context, agentflow.Step, string, string) error { return nil }}
+	final, err := d.resume(context.Background(), fixture.root, fixture.planJSON, nil)
+	if want := `agentflow resume finished in state "validation_missing", want complete`; err == nil || err.Error() != want || final.State != "" {
+		t.Fatalf("state = %q, err = %v\nwant error %s", final.State, err, want)
+	}
+	if want := []string{"probe", "next-action", "next-step", "next-action", "finish-run", "next-action"}; !reflect.DeepEqual(af.seq, want) {
+		t.Fatalf("seq = %v, want %v", af.seq, want)
+	}
+}
+
 func TestResumeProgressReadOccursOnlyAfterSettlement(t *testing.T) {
 	t.Run("settlement rereads and rejects unchanged state", func(t *testing.T) {
 		fixture := newResumeFixture(t)

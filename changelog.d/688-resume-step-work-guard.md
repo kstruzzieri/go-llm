@@ -1,4 +1,4 @@
-### Fixed — -agentflow-resume no longer builds a proof while step work remains (#688)
+### Fixed — -agentflow-resume checks for step work before building a proof (#688)
 
 `-agentflow-resume` ran AgentFlow's `finish-run` without the step-work check a
 fresh `-plan` run makes since #651. When another writer opened an attempt while
