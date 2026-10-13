@@ -14,9 +14,15 @@ llm-bench -replay-attempt \
 
 The Bearer credential is optional. It comes from `-candidate-api-key`, else from
 `LLM_BENCH_CANDIDATE_API_KEY`; the flag wins, and both are whitespace-trimmed. Without one no
-`Authorization` header is sent, unless `-candidate-base-url` carries userinfo
-(`http://user:pass@host`): Go then sends Basic auth, and `settings.endpoint` is sanitized, so the
-record does not show it. A Bearer credential wins over userinfo. Keep credentials out of the URL.
+`Authorization` header is sent. A key with a control character (any byte below 0x20, or DEL) is
+refused as `input`: it could not be sent as a header.
+
+`-candidate-base-url` must be an absolute http or https URL with no userinfo
+(`http://user:pass@host`), no query (a bare `?` included) and no fragment (a bare `#` included);
+any of those is refused as `input`. The provider appends its request path to the URL string, so a
+query or fragment would send the requests to a different path, and userinfo would be sent as Basic
+auth that the record did not show. `settings.endpoint` is the base URL the requests used. The
+mode always dials the endpoint directly and ignores `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY`.
 
 ## Guarantees
 
@@ -48,9 +54,14 @@ record does not show it. A Bearer credential wins over userinfo. Keep credential
 ## Exit code
 
 `0` once `attempt.json` is published and synced, whatever the attempt status. That includes
-problems found after the directory is claimed, such as an invalid `-attempt-id`, `-timeout 0s` or
-an unreadable trace: they are recorded as an `input` failure. Exit 0 means "terminal published"
-only for an actual `-replay-attempt` run: `llm-bench -h` also exits 0 and publishes nothing.
+problems found after the directory is claimed, such as an invalid `-attempt-id`, a `-timeout`
+under 1ms or an unreadable trace: they are recorded as an `input` failure. Exit 0 means
+"terminal published" only for an actual `-replay-attempt` run: `llm-bench -h` also exits 0 and
+publishes nothing.
+
+A closed stderr does not prevent publication: the mode ignores SIGPIPE, and a failed write to
+stderr is discarded, so a supervisor whose stderr reader has gone away still gets its
+`attempt.json`.
 
 `1` when there is no durable terminal. Usage errors exit 1 with nothing written: a stray
 `-attempt-*` flag, `-replay-attempt` combined with another mode, a missing `-attempt-dir`, an
@@ -69,7 +80,7 @@ attempt exists.
 | `trace.id`, `trace.sha256` | Trace id and the sha256 of the trace file bytes |
 | `replay_kind` | `scripted` or `prefilled` |
 | `build` | `{go_version, module_version, vcs_revision, vcs_modified}`; `module_version` is the main module version Go embeds (`(devel)` is kept as Go reports it) and is `null` when build info is unavailable or carries no version; the `vcs_*` fields are `null` without VCS stamping |
-| `settings` | `{transport, endpoint, model, temperature, timeout_ms}`: transport, sanitized endpoint, model selector, temperature (`0` for prefilled, else `null`), timeout in milliseconds |
+| `settings` | `{transport, endpoint, model, temperature, timeout_ms}`: transport, endpoint, model selector, temperature (`0` for prefilled, else `null`), timeout in milliseconds (a `-timeout` under 1ms is refused as `input`) |
 | `started_at`, `ended_at`, `elapsed_ms` | Attempt timing; `elapsed_ms` is whole milliseconds |
 | `status` | `failed` if and only if `error` or `artifact_error` is non-null, else `completed` |
 | `error`, `artifact_error` | Execution failure and evidence-write failure, kept separate; each `null` or `{code, stage, http_status?, cancel_source?, request_ordinal?, message}` |
@@ -98,21 +109,25 @@ fractional seconds of up to nanosecond precision, trailing zeros trimmed.
 fields, so these are JSON `null` until the run learns them, never an empty string:
 `trace.sha256` is set once the trace file is read, `trace.id` once the trace parses with a
 non-empty id, `replay_kind` once the trace passes validation, and `settings.endpoint` once the
-base URL passes the http/https check. `settings.transport` is always `openai-compat`, and
-`settings.model` is the `-models` selector as given, with surrounding whitespace trimmed.
+base URL passes validation (an absolute http or https URL with no userinfo, query or fragment).
+`settings.transport` is always `openai-compat`, and `settings.model` is the `-models` selector as
+given, with surrounding whitespace trimmed.
 
-`error.message` is one of four fixed stubs, `<error: timeout>`, `<error: network>`,
-`<error: parse>` or `<error: other>`, chosen by substring match on the underlying error text, not
-derived from `code` (an `input` error that mentions `-timeout` reads `<error: timeout>`).
+`error.message` is one fixed sentence per `code`, listed in the error codes table below. It is
+derived from the code alone, never from the underlying error text, so it carries no path, key or
+server wording and a server's error body cannot steer it.
 `artifact_error.message` is `unreferenced evidence: ` followed by the raw paths that no
 `requests[]` ref points at, for example `raw/0001.response.body`. The name `raw/` means the
 directory could not be created, or a sync of `raw/` or of the attempt directory failed, and then
 no row has a ref. A listed path is not evidence even if a file exists there (it may be partial,
 or fully written but not confirmed durable): only a `request` or `response` ref in `requests[]`
-makes a file evidence. The full error, with the key redacted, goes to stderr. For `artifact_write`
-that is one line per cause (unless a path itself contains a newline), with the underlying OS error
-for each file that could not be written. An execution error is reported there too, and it spans
-several lines when the server's error body does.
+makes a file evidence. The full error, with the key redacted, goes to stderr. Each diagnostic
+there is exactly one line, because control characters in it are escaped: a newline is written
+as the two characters backslash and `n`, a carriage return and a tab likewise, other C0
+controls, DEL and bytes that are not valid UTF-8 as `\xNN`, and C1 controls, U+2028 and U+2029
+as `\uNNNN`. A server's error body therefore cannot forge a second evidence line or drive a
+terminal. For `artifact_write` there is one line per cause, with the underlying OS error for
+each file that could not be written. An execution error is reported there too.
 
 Redaction: when the candidate key is at least 16 bytes, its exact occurrences become
 `[REDACTED]` in raw request and response files (a key echoed in one reply re-enters the next
@@ -164,18 +179,18 @@ the first request), and a consumer must not assume a row exists for it.
 
 ## Error codes
 
-| Code | Meaning |
-|---|---|
-| `input` | Invalid flag, config (including a non-http(s) base URL), or trace fixture (nothing was sent, or the fixture broke mid-replay) |
-| `connection` | Connection, TLS, or response-body read failure that is not a cancellation |
-| `http_status` | Non-2xx response, 3xx included |
-| `canceled` | A timeout or signal during a request or its response-body read: `cancel_source` `attempt_timeout` (`-timeout`, which bounds the whole attempt across all requests) or `signal` (SIGINT/SIGTERM) |
-| `response_decode` | A 2xx body that is not one JSON object, carries a non-null `error` member, has no `choices` array, has a wrong-typed field, or exceeds 64 MiB |
-| `argument_decode` | A tool call whose arguments do not decode to a JSON object |
-| `empty_response` | Zero choices, or an assistant reply with no content and no tool calls. Whitespace-only content counts as empty for prefilled replays only; a scripted replay treats it as content. |
-| `replay_divergence` | The candidate's tool calls do not match the scripted route |
-| `internal` | Anything else |
-| `artifact_write` | An evidence file could not be written (in `artifact_error`) |
+| Code | Meaning | `error.message` |
+|---|---|---|
+| `input` | Invalid flag, config (including a non-http(s) base URL, a base URL with userinfo, a query or a fragment, or a key with a control character), or trace fixture (nothing was sent, or the fixture broke mid-replay) | `an input to the attempt was invalid` |
+| `connection` | Connection, TLS, or response-body read failure that is not a cancellation | `the connection to the endpoint failed` |
+| `http_status` | Non-2xx response, 3xx included | `the server returned a non-2xx status` |
+| `canceled` | A timeout or signal during a request or its response-body read: `cancel_source` `attempt_timeout` (`-timeout`, which bounds the whole attempt across all requests) or `signal` (SIGINT/SIGTERM) | `the attempt was canceled` |
+| `response_decode` | A 2xx body that is not one JSON object, carries a non-null `error` member, has no `choices` array or more than one member named `choices`, has a wrong-typed field, or exceeds 64 MiB. Member names match case-insensitively, as the provider's decode does: `CHOICES` is the `choices` array and `Error` is an `error` member. | `the server's response could not be decoded` |
+| `argument_decode` | A tool call whose arguments do not decode to a JSON object | `a tool call's arguments could not be decoded` |
+| `empty_response` | Zero choices, or an assistant reply with no content and no tool calls. Whitespace-only content counts as empty for prefilled replays only; a scripted replay treats it as content. | `the candidate returned no reply` |
+| `replay_divergence` | The candidate's tool calls do not match the scripted route | `the candidate's tool calls did not match the scripted route` |
+| `internal` | Anything else | `an internal error occurred` |
+| `artifact_write` | An evidence file could not be written (in `artifact_error`) | `unreferenced evidence: ` and the paths, as above |
 
 Stages: `input`, `request`, `response`, `replay`, `publish`. One code can carry different
 stages: `empty_response` is stage `response` for zero choices and stage `replay` for an empty
