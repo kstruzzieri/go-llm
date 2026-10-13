@@ -86,7 +86,11 @@ func TestMainReplayAttemptFailedAttemptExitsZero(t *testing.T) {
 func TestMainReplayAttemptExistingDirExitsOne(t *testing.T) {
 	srv := newCompatServer(t)
 	dir := t.TempDir() // exists
-	if code, out := runLLMBenchMain(t, nil, replayAttemptArgs(srv.URL, dir)...); code != 1 {
+	// The output pins the exit-1 path to the claim refusing an existing dir:
+	// a missing parent, a missing -attempt-dir, or a bare -replay-attempt
+	// also exit 1 but print a different cause.
+	code, out := runLLMBenchMain(t, nil, replayAttemptArgs(srv.URL, dir)...)
+	if code != 1 || !strings.Contains(out, "claim attempt dir") || !strings.Contains(out, "file exists") {
 		t.Fatalf("exit %d output %q", code, out)
 	}
 	if _, err := os.Stat(filepath.Join(dir, attemptTerminalName)); !os.IsNotExist(err) {
@@ -109,8 +113,10 @@ func TestMainReplayAttemptIsExclusive(t *testing.T) {
 }
 
 func TestStrayAttemptFlags(t *testing.T) {
-	got := strayAttemptFlags(map[string]bool{"attempt-dir": true, "models": true, "attempt-trace": true})
-	if want := []string{"-attempt-trace", "-attempt-dir"}; !reflect.DeepEqual(got, want) {
+	got := strayAttemptFlags(map[string]bool{
+		"attempt-dir": true, "attempt-arm": true, "models": true, "attempt-id": true, "attempt-trace": true,
+	})
+	if want := []string{"-attempt-trace", "-attempt-id", "-attempt-arm", "-attempt-dir"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("strayAttemptFlags = %v, want %v", got, want)
 	}
 	if got := strayAttemptFlags(map[string]bool{"models": true}); len(got) != 0 {
