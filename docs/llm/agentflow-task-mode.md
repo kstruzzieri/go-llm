@@ -281,8 +281,9 @@ still reports step or attempt work at that check, resume exits 1 without
 running `finish-run` or building a proof, names the state and step, and sends
 you to `-agentflow-status`, which reports whether `-agentflow-resume` can
 recover. With Golem as the only writer this cannot happen; it catches an
-attempt another writer opened while resume ran. The check and `finish-run` are
-two calls, so a writer that opens an attempt between them still reaches
+attempt another writer opened while resume ran. A failed check call also stops
+resume with exit 1 before `finish-run`. The check and `finish-run` are two
+calls, so a writer that opens an attempt between them still reaches
 `finish-run`, and resume's final check then exits 1 (kstruzzieri/agentflow#58).
 The check lets every run-phase state through, as in a fresh run: when resume's
 own steps leave an older proof stale or failing, `finish-run` replaces it once
