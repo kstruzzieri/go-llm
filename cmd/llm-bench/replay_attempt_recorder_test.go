@@ -213,6 +213,14 @@ func TestAttemptRecorder_CapsResponse(t *testing.T) {
 			}
 		})
 	}
+	// The contract says 64 MiB. The literal is deliberate: every other test
+	// passes the constant through or uses a 16-byte cap, so none would notice
+	// the constant moving.
+	t.Run("cap is 64 MiB", func(t *testing.T) {
+		if maxAttemptResponseBytes != 67108864 {
+			t.Fatalf("maxAttemptResponseBytes = %d; the documented cap is 64 MiB (67108864)", maxAttemptResponseBytes)
+		}
+	})
 	// "A body of exactly the cap is complete" (the contract's wording for
 	// 64 MiB). A 500 body passes through the recorder untouched, so the
 	// caller receiving all 16 bytes shows the body was not rejected.

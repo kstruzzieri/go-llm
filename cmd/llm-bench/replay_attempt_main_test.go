@@ -103,9 +103,11 @@ func TestMainReplayAttemptSIGINT(t *testing.T) {
 	exited := make(chan struct{})
 	var waitErr error // read only after exited is closed
 	go func() { waitErr = cmd.Wait(); close(exited) }()
-	// A failed assertion must not leave the subprocess running; Kill after a
-	// normal exit is a harmless error.
-	t.Cleanup(func() { _ = cmd.Process.Kill(); <-exited })
+	// stop kills the child and waits for it. Until it has exited, exec may
+	// still be writing to out, so a failure path reads out only after stop.
+	// Kill after a normal exit is a harmless error.
+	stop := func() { _ = cmd.Process.Kill(); <-exited }
+	t.Cleanup(stop)
 
 	// Signal only once the request is in flight. By then main has installed
 	// its handler; an earlier SIGINT would take the default action and kill
@@ -117,6 +119,7 @@ func TestMainReplayAttemptSIGINT(t *testing.T) {
 		case <-time.After(10 * time.Millisecond):
 		}
 		if time.Now().After(deadline) {
+			stop()
 			t.Fatalf("no request within 10s\n%s", out.String())
 		}
 	}
@@ -127,6 +130,7 @@ func TestMainReplayAttemptSIGINT(t *testing.T) {
 	select {
 	case <-exited:
 	case <-time.After(delay + 10*time.Second):
+		stop()
 		t.Fatalf("llm-bench still running %v after SIGINT\n%s", delay+10*time.Second, out.String())
 	}
 	if waitErr != nil {

@@ -596,10 +596,40 @@ func TestReplayAttempt_RedactsKeyInTraceRaw(t *testing.T) {
 	}
 }
 
-// redactRecordKey rewrites every text field of the transcript and notes. Some
-// are unreachable end to end: a reply's assistant turn never carries a
-// tool-call id, and a tool turn's name must equal the trace's declared tool.
-// A replacement dropped from one of them would otherwise go unnoticed.
+// A trace that declares a tool named with the key: the candidate must call
+// that name, so it reaches the assistant turn's tool call and the tool turn.
+func TestReplayAttempt_RedactsKeyInTraceToolName(t *testing.T) {
+	data, err := os.ReadFile(fixtureToolRouteTrace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tracePath := filepath.Join(t.TempDir(), "trace.json")
+	if err := os.WriteFile(tracePath, []byte(strings.ReplaceAll(string(data), "rag_search", attemptTestKey)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	srv := newCompatServer(t,
+		compatExchange{Body: compatToolCall(attemptTestKey, `{"query":"q"}`, "")},
+		compatExchange{Body: compatText("done", "")},
+	)
+	opts := attemptTestOptions(t, srv.URL, tracePath)
+	code, rec := runAttempt(t, context.Background(), opts) // fails on a key in attempt.json
+	if code != 0 || rec.Status != attemptStatusCompleted {
+		t.Fatalf("exit %d status %q error %+v", code, rec.Status, rec.Error)
+	}
+	if got := rec.Transcript[0].ToolCalls[0].Name; got != attemptRedacted {
+		t.Fatalf("assistant tool call name %q", got)
+	}
+	if got := rec.Transcript[1].Name; got != attemptRedacted {
+		t.Fatalf("tool turn name %q; a trace-declared tool name is trace text", got)
+	}
+}
+
+// redactRecordKey rewrites every text field of the transcript and notes. One
+// is unreachable end to end: a reply's assistant turn is built without a
+// tool-call id, so r(c.ID) is covered only here. A tool turn's name is
+// reachable only through a trace that declares a tool named with the key
+// (TestReplayAttempt_RedactsKeyInTraceToolName); this test hits it directly
+// with the rest, so a dropped replacement in any of them is caught.
 func TestRedactRecordKeyCoversEveryTextField(t *testing.T) {
 	const key = attemptTestKey
 	rec := attemptRecord{
