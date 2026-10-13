@@ -18,6 +18,10 @@ type candidateTransportOptions struct {
 	openAICompatBaseURL string
 	openAICompatAPIKey  string
 	timeout             time.Duration
+	// httpClient, when non-nil, replaces the timeout-only client on the
+	// openai-compat branch: -replay-attempt injects its recording client
+	// (#687). Every legacy caller leaves it nil.
+	httpClient *http.Client
 }
 
 type candidateTransport struct {
@@ -75,7 +79,10 @@ func newCandidateTransport(target ModelTarget, opts candidateTransportOptions) (
 			return candidateTransport{}, fmt.Errorf("candidate %s transport requires -candidate-base-url", openAICompatTransport)
 		}
 		clientOpts := []openaicompat.ClientOption{}
-		if opts.timeout > 0 {
+		switch {
+		case opts.httpClient != nil:
+			clientOpts = append(clientOpts, openaicompat.WithHTTPClient(opts.httpClient))
+		case opts.timeout > 0:
 			clientOpts = append(clientOpts, openaicompat.WithHTTPClient(&http.Client{Timeout: opts.timeout}))
 		}
 		if key := strings.TrimSpace(opts.openAICompatAPIKey); key != "" {
@@ -273,7 +280,7 @@ func toOllamaCandidateToolCalls(in []provider.ToolCall) ([]ollama.ToolCall, erro
 		args := map[string]any{}
 		if len(tc.Function.Arguments) > 0 {
 			if err := json.Unmarshal(tc.Function.Arguments, &args); err != nil {
-				return nil, fmt.Errorf("openai-compat candidate tool %q arguments: %w", tc.Function.Name, err)
+				return nil, &toolArgumentsError{name: tc.Function.Name, err: err}
 			}
 		}
 		out[i] = ollama.ToolCall{
@@ -288,6 +295,21 @@ func toOllamaCandidateToolCalls(in []provider.ToolCall) ([]ollama.ToolCall, erro
 	}
 	return out, nil
 }
+
+// toolArgumentsError is a candidate tool call whose arguments do not decode
+// to a JSON object. Error() keeps the pre-#687 message byte for byte (legacy
+// output is pinned by the legacy goldens); -replay-attempt finds it with
+// errors.As and classifies it argument_decode.
+type toolArgumentsError struct {
+	name string
+	err  error
+}
+
+func (e *toolArgumentsError) Error() string {
+	return fmt.Sprintf("openai-compat candidate tool %q arguments: %v", e.name, e.err)
+}
+
+func (e *toolArgumentsError) Unwrap() error { return e.err }
 
 func firstNonEmpty(values ...string) string {
 	for _, v := range values {
