@@ -23,6 +23,12 @@ func TestClassifyAttempt(t *testing.T) {
 	signal := errors.New("interrupt signal received")
 	var typed struct{ Content string }
 	wrongTyped := json.Unmarshal([]byte(`{"Content":123}`), &typed) // *json.UnmarshalTypeError
+	var anyVal any
+	badSyntax := json.Unmarshal([]byte(`{"a":}`), &anyVal) // *json.SyntaxError
+	var syn *json.SyntaxError
+	if !errors.As(badSyntax, &syn) {
+		t.Fatalf("fixture error %T is not a *json.SyntaxError", badSyntax)
+	}
 	// Like production, the argument error wraps a JSON decode error, so the
 	// argument case must be checked before the generic decode case.
 	argErr := &toolArgumentsError{name: "lookup", err: wrongTyped}
@@ -43,7 +49,7 @@ func TestClassifyAttempt(t *testing.T) {
 		{"body read cancelled by signal", errors.New("x"), failed(func(r *recordedRequest) {
 			r.HeadersAt, r.HTTPStatus, r.ReadErr, r.CancelCause = now, 200, errors.New("x"), signal
 		}), nil, attemptCodeCanceled, attemptStageResponse, attemptCancelSignal, 200, 2},
-		{"body read error", errors.New("x"), failed(func(r *recordedRequest) { r.HeadersAt, r.HTTPStatus, r.ReadErr = now, 200, errors.New("reset") }), nil, attemptCodeConnection, attemptStageResponse, "", 200, 2},
+		{"body read error", errors.New("read /Users/x/y.json: reset"), failed(func(r *recordedRequest) { r.HeadersAt, r.HTTPStatus, r.ReadErr = now, 200, errors.New("reset") }), nil, attemptCodeConnection, attemptStageResponse, "", 200, 2},
 		{"recorder rejected decode", errors.New("x"), failed(func(r *recordedRequest) { r.HeadersAt, r.HTTPStatus, r.Rejected = now, 200, attemptCodeResponseDecode }), nil, attemptCodeResponseDecode, attemptStageResponse, "", 200, 2},
 		{"recorder rejected empty", errors.New("x"), failed(func(r *recordedRequest) { r.HeadersAt, r.HTTPStatus, r.Rejected = now, 200, attemptCodeEmptyResponse }), nil, attemptCodeEmptyResponse, attemptStageResponse, "", 200, 2},
 		{"http 500", errors.New("x"), failed(func(r *recordedRequest) { r.HeadersAt, r.HTTPStatus, r.ResponseComplete = now, 500, true }), nil, attemptCodeHTTPStatus, attemptStageResponse, "", 500, 2},
@@ -55,8 +61,11 @@ func TestClassifyAttempt(t *testing.T) {
 		{"empty assistant reply", fmt.Errorf("trace: %w", errEmptyAssistantReply), []*recordedRequest{ok(1)}, nil, attemptCodeEmptyResponse, attemptStageReplay, "", 0, 1},
 		{"tool call mismatch", fmt.Errorf("trace: %w", errToolCallMismatch), []*recordedRequest{ok(1)}, nil, attemptCodeReplayDivergence, attemptStageReplay, "", 0, 1},
 		{"mid-replay fixture defect", fmt.Errorf("trace: %w", errMissingToolResult), []*recordedRequest{ok(1)}, nil, attemptCodeInput, attemptStageReplay, "", 0, 1},
+		{"mid-replay missing scripted assistant", fmt.Errorf("trace: %w", errMissingScriptedAssistant), []*recordedRequest{ok(1)}, nil, attemptCodeInput, attemptStageReplay, "", 0, 1},
+		{"mid-replay unsupported turns", fmt.Errorf("trace: %w", errUnsupportedTurns), []*recordedRequest{ok(1)}, nil, attemptCodeInput, attemptStageReplay, "", 0, 1},
+		{"syntax-error response", fmt.Errorf("openaicompat: decode response: %w", badSyntax), []*recordedRequest{ok(1)}, nil, attemptCodeResponseDecode, attemptStageResponse, "", 200, 1},
 		{"next request refused before the recorder", fmt.Errorf("w: %w", context.DeadlineExceeded), []*recordedRequest{ok(1)}, errAttemptTimeout, attemptCodeCanceled, attemptStageRequest, attemptCancelTimeout, 0, 2},
-		{"unmatched", errors.New("marshal tool call arguments"), []*recordedRequest{ok(1)}, nil, attemptCodeInternal, attemptStageReplay, "", 0, 1},
+		{"unmatched", errors.New("marshal tool call arguments for /Users/x/y.json"), []*recordedRequest{ok(1)}, nil, attemptCodeInternal, attemptStageReplay, "", 0, 1},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -69,6 +78,13 @@ func TestClassifyAttempt(t *testing.T) {
 			}
 			if got == nil || got.Code != tc.code || got.Stage != tc.stage || got.CancelSource != tc.source || got.HTTPStatus != tc.status || got.RequestOrdinal != tc.ordinal {
 				t.Fatalf("got %+v\nwant code=%s stage=%s source=%q status=%d ordinal=%d", got, tc.code, tc.stage, tc.source, tc.status, tc.ordinal)
+			}
+			// A4: every message is the redacted category stub, never the raw error.
+			if want := redactErrorMessage(tc.err.Error()); got.Message != want || got.Message == tc.err.Error() {
+				t.Fatalf("message %q, want the redacted stub %q (raw %q)", got.Message, want, tc.err.Error())
+			}
+			if strings.Contains(tc.err.Error(), "/Users/x/y.json") && strings.Contains(got.Message, "/Users/") {
+				t.Fatalf("message %q leaks the raw path", got.Message)
 			}
 		})
 	}
