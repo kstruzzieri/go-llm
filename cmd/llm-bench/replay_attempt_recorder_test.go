@@ -186,14 +186,32 @@ func TestAttemptRecorder_NonSuccessBodyPassesThrough(t *testing.T) {
 	}
 }
 
+// The cap guard is the only protection for a non-2xx body: without it a
+// truncated 500 body would reach the provider's error reader with a nil
+// error. A 2xx body is also rejected by envelope validation, so only the 500
+// case can tell the guard from validateChatEnvelope.
 func TestAttemptRecorder_CapsResponse(t *testing.T) {
-	srv := newCompatServer(t, compatExchange{Body: compatText(strings.Repeat("x", 100), "")})
-	rec := newAttemptRecorder(newAttemptBaseTransport(), "att-1", 16)
-	if _, err := recorderPost(t, context.Background(), newRecorderClient(rec), srv.URL, `{}`); err == nil {
-		t.Fatal("an oversized body reached the caller")
+	cases := []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{"2xx", http.StatusOK, compatText(strings.Repeat("x", 100), "")},
+		{"500", http.StatusInternalServerError, `{"error":{"message":"` + strings.Repeat("x", 100) + `"}}`},
 	}
-	if row := rec.Rows()[0]; len(row.ResponseBody) != 16 || row.ResponseComplete || row.Rejected != attemptCodeResponseDecode {
-		t.Fatalf("row kept %d bytes complete=%v rejected=%q; want 16 bytes, incomplete, response_decode", len(row.ResponseBody), row.ResponseComplete, row.Rejected)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := newCompatServer(t, compatExchange{Status: tc.status, Body: tc.body})
+			rec := newAttemptRecorder(newAttemptBaseTransport(), "att-1", 16)
+			if _, err := recorderPost(t, context.Background(), newRecorderClient(rec), srv.URL, `{}`); err == nil {
+				t.Fatal("an oversized body reached the caller")
+			}
+			row := rec.Rows()[0]
+			if len(row.ResponseBody) != 16 || row.ResponseComplete || row.Rejected != attemptCodeResponseDecode || row.HTTPStatus != tc.status {
+				t.Fatalf("row kept %d bytes complete=%v rejected=%q status=%d; want 16 bytes, incomplete, response_decode, status %d",
+					len(row.ResponseBody), row.ResponseComplete, row.Rejected, row.HTTPStatus, tc.status)
+			}
+		})
 	}
 }
 
