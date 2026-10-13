@@ -27,19 +27,22 @@ record does not show it. A Bearer credential wins over userinfo. Keep credential
   it never wrote (or retry an HTTP/2 refused stream); such a resend carries the same correlation
   value.
 - **Correlation.** Every request carries `X-Client-Correlation: <attempt-id>/<ordinal>`.
-  `-attempt-id` must match `[A-Za-z0-9._:-]{1,128}`.
+  `-attempt-id` must match `[A-Za-z0-9._:-]{1,128}`. `-attempt-arm` is opaque and never sent to
+  the server; it must be 1-256 bytes of valid UTF-8 with no control characters.
 - **Raw files are bodies.** `raw/NNNN.request.json` and `raw/NNNN.response.body` hold the request
   and response bodies only, with no headers or status line. Compression is disabled and a
   response is read to EOF before it is parsed, so a stored body is the bytes that crossed the
   wire, except where its ref says `redacted`, and except that a response over 64 MiB is stored
-  truncated to 64 MiB.
+  truncated to 64 MiB. That cap bounds one response body, not the attempt: all request and
+  response bodies are held in memory until publication.
 - **Unknown usage stays unknown.** Usage comes from the raw response, and absent fields are
   `null`.
 - **Immutable output.** `-attempt-dir` must not exist, and its parent must already exist (only
-  the directory itself is created). Files are written exclusively and fsynced, and so are the directories that
-  hold them: the attempt directory's parent once the directory is created, the attempt directory
-  once `raw/` is created in it, and `raw/` once its files are written. `attempt.json` is published
-  last by rename, so its presence means every file it references is fully written and synced.
+  the directory itself is created). Files are written exclusively and fsynced, and so are the
+  directories that hold them: the attempt directory's parent once the directory is created, the
+  attempt directory once `raw/` is created in it, and `raw/` once its files are written.
+  `attempt.json` is published last by rename, so its presence means every file it references is
+  fully written and synced.
 - **Platforms.** darwin and linux. On windows the mode refuses and exits 1.
 
 ## Exit code
@@ -65,7 +68,7 @@ attempt exists.
 | `schema`, `attempt_id`, `arm` | Identity; `arm` is recorded verbatim |
 | `trace.id`, `trace.sha256` | Trace id and the sha256 of the trace file bytes |
 | `replay_kind` | `scripted` or `prefilled` |
-| `build` | `{go_version, module_version, vcs_revision, vcs_modified}`; the `vcs_*` fields are `null` without VCS stamping |
+| `build` | `{go_version, module_version, vcs_revision, vcs_modified}`; `module_version` is the main module version Go embeds (`(devel)` is kept as Go reports it) and is `null` when build info is unavailable or carries no version; the `vcs_*` fields are `null` without VCS stamping |
 | `settings` | `{transport, endpoint, model, temperature, timeout_ms}`: transport, sanitized endpoint, model selector, temperature (`0` for prefilled, else `null`), timeout in milliseconds |
 | `started_at`, `ended_at`, `elapsed_ms` | Attempt timing; `elapsed_ms` is whole milliseconds |
 | `status` | `failed` if and only if `error` or `artifact_error` is non-null, else `completed` |
@@ -106,8 +109,10 @@ derived from `code` (an `input` error that mentions `-timeout` reads `<error: ti
 directory could not be created, or a sync of `raw/` or of the attempt directory failed, and then
 no row has a ref. A listed path is not evidence even if a file exists there (it may be partial,
 or fully written but not confirmed durable): only a `request` or `response` ref in `requests[]`
-makes a file evidence. The full error, with the key redacted, goes to stderr, one line per
-failure, with the underlying OS error for each file that could not be written.
+makes a file evidence. The full error, with the key redacted, goes to stderr. For `artifact_write`
+that is one line per cause, with the underlying OS error for each file that could not be written.
+An execution error is reported there too, and it spans several lines when the server's error body
+does.
 
 Redaction: when the candidate key is at least 16 bytes, its exact occurrences become
 `[REDACTED]` in raw request and response files (a key echoed in one reply re-enters the next
