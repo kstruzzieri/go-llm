@@ -481,6 +481,11 @@ func TestReplayAttempt_InputErrors(t *testing.T) {
 	if err := os.WriteFile(noSystem, []byte(`{"id":"no-system-001","system":"","turns":[{"role":"user","content":"hi"}]}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// Parses, but its id is empty: the id is unknown, so trace.id stays null.
+	noID := filepath.Join(t.TempDir(), "no-id.json")
+	if err := os.WriteFile(noID, []byte(`{"id":"","system":"s","turns":[{"role":"user","content":"hi"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	// known is how far the run learned the record's nullable identity before
 	// it failed. Each stage keeps the earlier ones; everything later is null,
 	// never "" (an empty string breaks the scripted|prefilled enum and the
@@ -511,6 +516,7 @@ func TestReplayAttempt_InputErrors(t *testing.T) {
 		{"trace is a directory", func(o *replayAttemptOptions) { o.TracePath = t.TempDir() }, knownEndpoint},
 		{"trace missing", func(o *replayAttemptOptions) { o.TracePath = filepath.Join(t.TempDir(), "absent.json") }, knownEndpoint},
 		{"trace not json", func(o *replayAttemptOptions) { o.TracePath = invalidJSON }, knownDigest},
+		{"trace with an empty id", func(o *replayAttemptOptions) { o.TracePath = noID }, knownDigest},
 		{"trace rejected by validateTrace", func(o *replayAttemptOptions) { o.TracePath = noSystem }, knownID},
 		{"prefilled fixture with bad tool arguments", func(o *replayAttemptOptions) { o.TracePath = badArgs }, knownKind},
 	}

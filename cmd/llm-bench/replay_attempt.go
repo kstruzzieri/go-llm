@@ -259,8 +259,13 @@ func loadAttemptInputs(opts replayAttemptOptions, rec *attemptRecord) (Trace, Mo
 	if err := json.Unmarshal(data, &trace); err != nil {
 		return Trace{}, ModelTarget{}, fmt.Errorf("parse -attempt-trace: %w", err)
 	}
-	id := trace.ID
-	rec.Trace.ID = &id
+	// An empty id is unknown, not a value: it stays null (validateTrace then
+	// refuses the trace). A real id is published even when validateTrace
+	// rejects the trace for another reason.
+	if trace.ID != "" {
+		id := trace.ID
+		rec.Trace.ID = &id
+	}
 	if err := validateTrace(trace); err != nil {
 		return Trace{}, ModelTarget{}, fmt.Errorf("trace %q: %w", trace.ID, err)
 	}
