@@ -290,9 +290,12 @@ fresh run. AgentFlow's proof hashes the `.agent` ledgers, so anything resume
 records, in a settlement or a step, leaves an older proof `proof_stale`; once
 resume's own work exposes that state, whether its settlement or its serial loop
 completed the last step, `finish-run` replaces the proof after drift and run
-verification pass. A `proof_failing` proof (malformed, from a newer AgentFlow,
-or failing for another reason resume did not cause) is never replaced: resume
-exits 1 after a settlement exposes it, or at the check before `finish-run`.
+verification pass. A proof AgentFlow reports as `proof_failing` (malformed,
+from a newer AgentFlow, or failing for another reason resume did not cause) is
+not replaced: resume exits 1 after a settlement exposes it, or at the check
+before `finish-run`. AgentFlow checks run verification first, so a run with no
+recorded run verification reports `run_unverified` instead, and `finish-run`
+rebuilds any proof there.
 Drift exposed by a settlement is also refused; after the serial loop,
 `finish-run`'s drift audit stops before building a proof. The table describes
 the state resume finds on entry.
@@ -352,8 +355,8 @@ Unknown future states fail closed. Resume never initializes, locks, records
 evidence or reviews, renews/reclaims leases, re-runs a model for an open
 attempt (an open attempt whose gate failed is blocked first; the model then
 runs in a new attempt), executes advisory command strings, rebuilds a proof it
-finds `proof_stale` on entry, replaces a `proof_failing` proof, or starts
-parallel recovery. Normal interactive startup only detects a
+finds `proof_stale` on entry, replaces a proof AgentFlow reports as
+`proof_failing`, or starts parallel recovery. Normal interactive startup only detects a
 case-insensitive `.agent` directory and prints the status/resume commands; it
 does not inspect or mutate the ledgers.
 
