@@ -244,7 +244,7 @@ func TestRecordLegacyRollback(t *testing.T) {
 }
 
 func TestRecordInitializationAuthorization(t *testing.T) {
-	for _, state := range []string{"empty injected denied", "initialized injected denied", "partial signer", "partial ring", "conflict", "filesystem initialize", "writer", "wrong ring", "wrong binding", "signed row", "mixed rows", "algorithm only", "key only", "bytes only", "marker changed"} {
+	for _, state := range []string{"empty injected denied", "initialized injected denied", "partial signer", "partial ring", "conflict", "filesystem initialize", "writer", "wrong ring", "wrong binding", "signed row", "mixed rows", "algorithm only", "key only", "bytes only"} {
 		t.Run(state, func(t *testing.T) {
 			db := legacyRecordDB(t, ":memory:", 0)
 			config := recordTestConfig(t)
@@ -303,23 +303,42 @@ func TestRecordInitializationAuthorization(t *testing.T) {
 						t.Fatal(err)
 					}
 				}
-			case "marker changed":
-				if _, err := NewStore(ctx, db); err != nil {
-					t.Fatal(err)
-				}
-				config.Signer = &countingRecordSigner{Signer: config.Signer, beforeSign: func() {
-					if _, err := db.Exec(`INSERT INTO memory_record_signing VALUES (1, 1)`); err != nil {
-						t.Fatal(err)
-					}
-				}}
 			}
 			if _, err := NewMemoryRecordStore(ctx, db, config); err == nil {
 				t.Fatal("invalid initialization allowed")
-			} else if state == "marker changed" && err.Error() != "memory: record initialization changed during import" {
-				t.Fatalf("marker was not rechecked before import: %v", err)
 			}
 		})
 	}
+}
+
+// The initialization claim holds the database write lock while initialization
+// signs, so no other connection can commit a marker in that window and the
+// import needs no recheck (#631).
+func TestRecordInitializationClaimHoldsWriteLock(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "records.db")
+	db := legacyRecordDB(t, path, 0)
+	ctx := context.Background()
+	if _, err := NewStore(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	other, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other.SetMaxOpenConns(1)
+	t.Cleanup(func() { _ = other.Close() })
+	if _, err := other.Exec("PRAGMA busy_timeout=0"); err != nil {
+		t.Fatal(err)
+	}
+	config := recordTestConfig(t)
+	var insertErr error
+	config.Signer = &countingRecordSigner{Signer: config.Signer, beforeSign: func() {
+		_, insertErr = other.Exec(`INSERT INTO memory_record_signing VALUES (1, 1)`)
+	}}
+	if _, err := NewMemoryRecordStore(ctx, db, config); err != nil {
+		t.Fatalf("initialize: %v", err)
+	}
+	assertMigrationSQLiteError(t, insertErr, 5) // SQLITE_BUSY
 }
 
 type wrongBindingSigner struct{ signing.Signer }
