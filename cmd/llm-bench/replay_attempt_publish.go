@@ -8,7 +8,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"unicode/utf16"
+	"unicode/utf8"
 )
 
 // attemptTerminalName is the terminal record. It is published last, so its
@@ -189,14 +192,132 @@ func (p *attemptPublisher) writeSynced(path string, data []byte) error {
 	return f.Close()
 }
 
-// redactAttemptKey replaces exact occurrences of a redactable key in raw
-// bytes. Raw evidence has no structure to respect, so this is byte-level;
-// attempt.json is redacted field by field instead (redactRecordKey).
+// redactAttemptKey replaces credential spans in JSON strings without changing
+// any surrounding evidence, including duplicate members and escape spellings.
+// The string scanner also handles malformed bodies and unterminated strings.
+// Literal occurrences elsewhere retain the original byte-level redaction.
 func redactAttemptKey(data []byte, key string) ([]byte, bool) {
-	if !redactableKey(key) || !bytes.Contains(data, []byte(key)) {
+	if !redactableKey(key) {
 		return data, false
 	}
-	return bytes.ReplaceAll(data, []byte(key), []byte(attemptRedacted)), true
+	literal := func(src []byte) ([]byte, bool) {
+		if !bytes.Contains(src, []byte(key)) {
+			return src, false
+		}
+		return bytes.ReplaceAll(src, []byte(key), []byte(attemptRedacted)), true
+	}
+	// KMP matches decoded bytes in linear time. The ring holds source offsets
+	// for only the last key-length bytes, not an offset for every body byte.
+	prefix, starts := make([]int, len(key)), make([]int, len(key))
+	for i, matched := 1, 0; i < len(key); i++ {
+		for matched > 0 && key[i] != key[matched] {
+			matched = prefix[matched-1]
+		}
+		if key[i] == key[matched] {
+			matched++
+		}
+		prefix[i] = matched
+	}
+	var out []byte
+	var decoded [utf8.UTFMax]byte
+	keyIsUTF8 := utf8.ValidString(key)
+	quoted, matched, seen, copied := false, 0, 0, 0
+	for i := 0; i < len(data); {
+		if data[i] == '"' {
+			quoted, matched, seen = !quoted, 0, 0
+			i++
+			continue
+		}
+		if !quoted {
+			i++
+			continue
+		}
+		r, width := attemptJSONRune(data[i:])
+		chars := utf8.AppendRune(decoded[:0], r)
+		if !keyIsUTF8 && r == utf8.RuneError && width == 1 {
+			// JSON cannot escape invalid UTF-8 credential bytes, but a body
+			// may contain them literally (and json.Valid accepts them).
+			chars = data[i : i+1]
+		}
+		for j, b := range chars {
+			starts[seen%len(key)] = i
+			if j != 0 {
+				starts[seen%len(key)] = -1 // a match must start at a rune boundary
+			}
+			seen++
+			for matched > 0 && b != key[matched] {
+				matched = prefix[matched-1]
+			}
+			if b == key[matched] {
+				matched++
+			}
+			if matched != len(key) {
+				continue
+			}
+			start := starts[(seen-len(key))%len(key)]
+			if start < 0 || j != len(chars)-1 {
+				matched = prefix[matched-1]
+				continue
+			}
+			if out == nil {
+				out = make([]byte, 0, len(data))
+			}
+			// Only inspect original bytes: a replacement adjacent to original
+			// text might itself resemble the key and must not be redacted again.
+			segment, _ := literal(data[copied:start])
+			out = append(out, segment...)
+			out = append(out, attemptRedacted...)
+			copied, matched = i+width, 0
+		}
+		i += width
+	}
+	if out == nil {
+		return literal(data)
+	}
+	segment, _ := literal(data[copied:])
+	out = append(out, segment...)
+	return out, true
+}
+
+// attemptJSONRune returns one decoded JSON character and its original width.
+// Invalid or incomplete escapes are consumed literally so a malformed response
+// still retains its evidence while complete credential spans can be removed.
+func attemptJSONRune(data []byte) (rune, int) {
+	if data[0] != '\\' || len(data) < 2 {
+		return utf8.DecodeRune(data)
+	}
+	switch data[1] {
+	case '"', '\\', '/':
+		return rune(data[1]), 2
+	case 'b':
+		return '\b', 2
+	case 'f':
+		return '\f', 2
+	case 'n':
+		return '\n', 2
+	case 'r':
+		return '\r', 2
+	case 't':
+		return '\t', 2
+	case 'u':
+		if len(data) >= 6 {
+			if v, err := strconv.ParseUint(string(data[2:6]), 16, 16); err == nil {
+				r := rune(v)
+				if !utf16.IsSurrogate(r) {
+					return r, 6
+				}
+				if len(data) >= 12 && data[6] == '\\' && data[7] == 'u' {
+					if low, err := strconv.ParseUint(string(data[8:12]), 16, 16); err == nil {
+						if pair := utf16.DecodeRune(r, rune(low)); pair != utf8.RuneError {
+							return pair, 12
+						}
+					}
+				}
+				return utf8.RuneError, 6
+			}
+		}
+	}
+	return '\\', 1
 }
 
 // syncDirectory fsyncs a directory so its entries are durable.

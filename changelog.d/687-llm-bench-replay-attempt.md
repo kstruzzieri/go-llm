@@ -13,3 +13,6 @@ the attempt's status. The mode runs on darwin and linux and refuses on windows. 
 Protocol upgrades are closed immediately, duplicate `choices` members are rejected, and malformed
 frozen tool-result names are classified as fixture errors. Diagnostic redaction also recognizes
 Go-quoted credentials, so escaped quotes and backslashes cannot expose an echoed key on stderr.
+Raw artifacts redact equivalent JSON-escaped credentials while preserving unrelated evidence
+bytes; their hashes and redaction flags describe the stored, redacted content. The consumer
+contract explicitly preserves valid reported usage on failed HTTP responses and empty choices.

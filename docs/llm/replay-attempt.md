@@ -140,11 +140,15 @@ two characters backslash and `n` (`\\n` on stderr) is distinct from one that hol
 terminal. For `artifact_write` there is one line per cause, with the underlying OS error for
 each file that could not be written. An execution error is reported there too.
 
-Redaction: when the candidate key is at least 16 bytes, its exact occurrences become
-`[REDACTED]` in raw request and response files (a key echoed in one reply re-enters the next
-request) and in `attempt.json`'s transcript and notes. Raw refs carry `redacted`, and their
-`sha256` hashes the stored bytes. A shorter key cannot be told apart from ordinary data, so it is
-not redacted; stderr says so.
+Redaction: when the candidate key is at least 16 bytes, its occurrences become `[REDACTED]`
+in raw request and response files (a key echoed in one reply re-enters the next request) and
+in `attempt.json`'s transcript and notes. Raw-file redaction replaces literal occurrences
+anywhere in the body and also recognizes equivalent JSON string encodings, including mixed
+literal characters and Unicode escapes, escaped quotes and backslashes, and surrogate pairs.
+It replaces only the credential's source bytes, preserving unrelated whitespace, escapes, and
+duplicate members. Complete credential occurrences are also redacted in a truncated JSON
+string. Raw refs carry `redacted`, and their `sha256` hashes the stored bytes. A shorter key
+cannot be told apart from ordinary data, so it is not redacted; stderr says so.
 
 ## Request rows
 
@@ -162,12 +166,14 @@ not redacted; stderr says so.
   closed without reading. It is about the server's body, not the file; every referenced file
   is fully written.
 - `usage` is `{prompt_tokens, completion_tokens, reasoning_tokens}`, each an integer or null.
-  `reasoning_tokens` is read from `usage.completion_tokens_details.reasoning_tokens`. The whole
-  object is null when the response has no `usage` object, the body is unparseable, or any of
-  those three counts is not an integer (for example `7.0` or `"7"`). A 2xx response that passes
-  the envelope check and carries such a count fails as `response_decode`, because the provider's
-  own decode rejects it too. A non-2xx response keeps its `http_status` failure and zero choices
-  keeps `empty_response`; `usage` is null on those rows as well.
+  `reasoning_tokens` is read from `usage.completion_tokens_details.reasoning_tokens`. When
+  `usage` parses successfully, it is retained regardless of HTTP status or envelope validity,
+  including non-2xx responses and zero choices. The whole object is null when the response has
+  no `usage` object, the body is unparseable, or any of those three counts is not an integer
+  (for example `7.0` or `"7"`). A 2xx response that passes the envelope check and carries such a
+  count fails as `response_decode`, because the provider's own decode rejects it too. With such
+  an invalid count, a non-2xx response keeps its `http_status` failure and zero choices keeps
+  `empty_response`, while `usage` is null.
 - `error_code` is set only for failures the HTTP layer sees: `connection`, `canceled`,
   `http_status`, and the envelope-level `response_decode` and `empty_response`. It stays null for
   failures found after a 2xx body was accepted (`argument_decode`, a wrong-typed field
