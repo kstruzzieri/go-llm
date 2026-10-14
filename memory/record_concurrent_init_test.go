@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"database/sql"
 	"io"
 	"path/filepath"
 	"testing"
@@ -17,6 +18,72 @@ func TestOpenRecordStoreConcurrentFirstOpens(t *testing.T) {
 	sqlitetest.RunConcurrentFirstOpens(t, 4, 5, func(ctx context.Context, path string) (io.Closer, error) {
 		return OpenRecordStore(ctx, path, RecordStoreConfig{Writer: WriterMCP})
 	})
+}
+
+// An opener that finds no marker and then loses the claim to an initializer
+// committing while it waits opens the store as initialized, and releases the
+// write lock before it signs (#631).
+func TestRecordInitializationLostClaim(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "records.db")
+	ctx := t.Context()
+	db, err := OpenHardenedDB(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if _, err := NewStore(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	initializer, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = initializer.Close() })
+	for _, statement := range []string{"BEGIN IMMEDIATE", `INSERT INTO memory_record_signing VALUES (1, 1)`} {
+		if _, err := initializer.ExecContext(ctx, statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	committed := make(chan error, 1)
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		_, err := initializer.ExecContext(context.Background(), "COMMIT")
+		committed <- err
+	}()
+	other, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other.SetMaxOpenConns(1)
+	t.Cleanup(func() { _ = other.Close() })
+	if _, err := other.Exec("PRAGMA busy_timeout=0"); err != nil {
+		t.Fatal(err)
+	}
+	config := recordTestConfig(t)
+	config.Initialize = false
+	var lockErr error
+	signer := &countingRecordSigner{Signer: config.Signer, beforeSign: func() {
+		if _, lockErr = other.Exec("BEGIN IMMEDIATE"); lockErr == nil {
+			_, lockErr = other.Exec("ROLLBACK")
+		}
+	}}
+	config.Signer = signer
+	rt, err := OpenRecordStore(ctx, path, config)
+	if cerr := <-committed; cerr != nil {
+		t.Fatalf("commit initializer: %v", cerr)
+	}
+	if err != nil {
+		t.Fatalf("open after losing the claim: %v", err)
+	}
+	if err := rt.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if signer.calls != 1 {
+		t.Fatalf("signer calls = %d, want the configuration challenge only", signer.calls)
+	}
+	if lockErr != nil {
+		t.Fatalf("write lock held while signing on the initialized path: %v", lockErr)
+	}
 }
 
 // A first-time open that meets another connection's write transaction waits
