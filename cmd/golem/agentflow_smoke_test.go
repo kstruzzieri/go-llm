@@ -2008,3 +2008,94 @@ func TestAgentflowResumeRefusesFinishRunWhileStepWorkRemains_RealCLI(t *testing.
 		t.Fatalf("status = %v, want exit 2 offering to settle P2's missing gate\n%s", statusErr, status.String())
 	}
 }
+
+// #689: an older proof (built by a non-strict finish-run over the open
+// attempt, as a pre-#651 Golem or a hand-run `agentflow finish-run` would) is
+// hidden behind step work at resume entry. Golem's own ledger writes make a
+// valid one proof_stale, and resume replaces it whichever path completes the
+// step. A proof from a newer AgentFlow surfaces as proof_failing, and resume
+// preserves it on both paths.
+func TestAgentflowResumeProofDisposition_RealCLI(t *testing.T) {
+	const newerSchema = `{"schema_version":"99.0.0"}`
+	for _, test := range []struct {
+		name, answer string
+		failGate     bool
+		proof        string // replaces the staged proof when set
+		models       int
+		wantErr      string
+	}{
+		{name: "settlement replaces stale", answer: "expected\n"},
+		{name: "serial loop replaces stale", answer: "wrong\n", failGate: true, models: 1},
+		{name: "settlement preserves newer schema", answer: "expected\n", proof: newerSchema,
+			wantErr: `agentflow resume blocked after settlement in state "proof_failing": blocked by failing proof`},
+		{name: "serial loop preserves newer schema", answer: "wrong\n", failGate: true, proof: newerSchema, models: 1,
+			wantErr: "agentflow reports a failing proof before finish-run; finish-run would replace it, so no proof was built; inspect .agent/proof-pack.json"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dir, runner, client, plan, planBytes := openSettlementAttempt(t, nil, test.answer)
+			ctx := context.Background()
+			if test.failGate {
+				gates, err := agentflow.ExtractCommandGates(plan.Steps[0])
+				if err != nil || len(gates) != 1 {
+					t.Fatalf("gates = %+v, err = %v; want the fixture's one gate", gates, err)
+				}
+				var gateErr *agentflow.CommandError
+				if err := client.RunGate(ctx, "P1", "A1", gates[0].Label, gates[0].Argv); !errors.As(err, &gateErr) || gateErr.Exit != 1 {
+					t.Fatalf("gate = %v, want exit 1", err)
+				}
+			}
+			if _, err := client.FinishRun(ctx); err != nil {
+				t.Fatalf("staging finish-run: %v", err)
+			}
+			proofPath := filepath.Join(dir, ".agent", "proof-pack.json")
+			if test.proof != "" {
+				if err := os.WriteFile(proofPath, []byte(test.proof), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			old, err := os.ReadFile(proofPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if state, err := client.NextAction(ctx); err != nil || state.State != "validation_missing" {
+				t.Fatalf("staged state = %q, err = %v; want the proof hidden behind validation_missing", state.State, err)
+			}
+
+			models := 0
+			d := &driver{af: client, plan: &plan, root: dir, runStep: func(ctx context.Context, step agentflow.Step, attempt, _ string) error {
+				models++
+				writeAndRecordAnswer(t, client, dir, attempt, "expected\n")
+				return nil
+			}}
+			final, err := d.resume(ctx, dir, planBytes, nil)
+			if models != test.models {
+				t.Fatalf("model runs = %d, want %d", models, test.models)
+			}
+			after, readErr := os.ReadFile(proofPath)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if test.wantErr != "" {
+				if err == nil || err.Error() != test.wantErr {
+					t.Fatalf("resume err = %v\nwant %s", err, test.wantErr)
+				}
+				if !bytes.Equal(after, old) {
+					t.Fatalf("proof-pack.json changed to %q, want the staged bytes preserved", after)
+				}
+				return
+			}
+			if err != nil || final.State != "complete" {
+				t.Fatalf("resume state = %q, err = %v; want complete", final.State, err)
+			}
+			if bytes.Equal(after, old) {
+				t.Fatal("proof-pack.json is the staged proof, want a replacement")
+			}
+			if out, errOut, exitCode, err := runner.Run(ctx, []string{"verify-proof", "--root", dir}, nil); err != nil || exitCode != 0 {
+				t.Fatalf("verify-proof: exit=%d err=%v stdout=%s stderr=%s", exitCode, err, out, errOut)
+			}
+			if state, err := agentflow.NewClient(runner, dir).NextAction(ctx); err != nil || state.State != "complete" {
+				t.Fatalf("after resume: state = %q, err = %v; want complete", state.State, err)
+			}
+		})
+	}
+}

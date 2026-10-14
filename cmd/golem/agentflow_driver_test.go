@@ -374,7 +374,6 @@ func TestDriver_FinishRunGateByNextActionState(t *testing.T) {
 		{"drift_failing", true},
 		{"proof_missing", true},
 		{"proof_stale", true},
-		{"proof_failing", true},
 		{"complete", true},
 		{"step_unclaimed", false},
 		{"file_receipts_missing", false},
@@ -407,6 +406,25 @@ func TestDriver_FinishRunGateByNextActionState(t *testing.T) {
 				t.Fatalf("proof=%q err=%v seq=%v, want the guard's refusal after next-action ending %q", proof, err, af.seq, hint)
 			}
 		})
+	}
+}
+
+// #689: Golem's own ledger writes leave an older proof proof_stale, so a
+// failing proof at the pre-finish-run check is one Golem cannot explain
+// (malformed, newer schema). finish-run would overwrite it; refuse instead.
+func TestDriver_FinishRunPreservesFailingProof(t *testing.T) {
+	af := &fakeAF{nextActions: []agentflow.NextActionState{{State: "proof_failing"}}}
+	d := &driver{
+		af: af, plan: reviewPlan(), planPath: "plan.json", out: io.Discard,
+		runStep: func(context.Context, agentflow.Step, string, string) error { return nil },
+	}
+	proof, err := d.run(context.Background())
+	const want = "agentflow reports a failing proof before finish-run; finish-run would replace it, so no proof was built; inspect .agent/proof-pack.json"
+	if err == nil || err.Error() != want || proof != "" {
+		t.Fatalf("proof=%q err=%v\nwant %s", proof, err, want)
+	}
+	if slices.Contains(af.seq, "finish-run") || af.seq[len(af.seq)-1] != "next-action" {
+		t.Fatalf("seq = %v, want it to stop at the pre-finish-run next-action", af.seq)
 	}
 }
 

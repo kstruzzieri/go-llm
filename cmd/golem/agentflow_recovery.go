@@ -259,7 +259,7 @@ func validateRecoveryProjection(state agentflow.NextActionState) error {
 			if err := validateAutomaticRecoveryAction(projection, "claim"); err != nil {
 				return err
 			}
-		case "run_unverified", "proof_missing", "complete":
+		case "run_unverified", "drift_failing", "proof_missing", "proof_stale", "proof_failing", "complete":
 			if projection.Step != nil {
 				return fmt.Errorf("agentflow state %q unexpectedly projects a step", state.State)
 			}
@@ -624,16 +624,21 @@ func (d *driver) resume(ctx context.Context, root string, planJSON []byte, appro
 			return agentflow.NextActionState{}, err
 		}
 		state = progressed
-		disposition = resumeDisposition(state.State)
-		if disposition.action == failClosed {
-			return agentflow.NextActionState{}, fmt.Errorf("agentflow resume blocked after settlement in state %q: %s", state.State, disposition.description)
-		}
-		if disposition.action == reportComplete {
-			return state, nil
-		}
 		switch state.State {
+		case "complete":
+			return state, nil
 		case "step_unclaimed", "run_unverified", "proof_missing":
+		case "proof_stale":
+			// #689: settlement appended to the .agent ledgers an older proof
+			// hashes, and AgentFlow reports any hash mismatch as proof_stale.
+			// The tail's finish-run replaces it once drift and run
+			// verification pass, as after the serial loop. On entry it still
+			// fails closed; proof_failing still does here.
 		default:
+			disposition = resumeDisposition(state.State)
+			if disposition.action == failClosed {
+				return agentflow.NextActionState{}, fmt.Errorf("agentflow resume blocked after settlement in state %q: %s", state.State, disposition.description)
+			}
 			return agentflow.NextActionState{}, fmt.Errorf("agentflow settlement progressed to unsupported in-flight state %q", state.State)
 		}
 	}
