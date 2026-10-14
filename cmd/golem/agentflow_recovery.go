@@ -669,7 +669,7 @@ func (d *driver) resume(ctx context.Context, root string, planJSON []byte, appro
 	if err := d.runSerialSteps(ctx); err != nil {
 		return agentflow.NextActionState{}, err
 	}
-	if _, err := d.af.FinishRun(ctx); err != nil {
+	if _, err := d.finishRun(ctx); err != nil {
 		return agentflow.NextActionState{}, err
 	}
 	final, err := d.af.NextAction(ctx)

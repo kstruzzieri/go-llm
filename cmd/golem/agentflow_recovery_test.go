@@ -1117,6 +1117,13 @@ func (f *resumeFixture) attemptState(t *testing.T, state string, gates []agentfl
 	return f.state(t)
 }
 
+// finishRunGuard is the run-phase state resume's pre-finish-run check reads
+// when no step work remains (#651, #688). A resume test that reaches
+// finish-run scripts it before its final state: without it the check consumes
+// that state, and resume's last next-action gets fakeAF's bare unscripted
+// default, failing with "agentflow resumability projection is missing".
+var finishRunGuard = agentflow.NextActionState{State: "run_unverified"}
+
 func TestResumeReentersExistingSerialStepLoop(t *testing.T) {
 	fixture := newResumeFixture(t)
 	fixture.useAdvisoryLease()
@@ -1129,7 +1136,7 @@ func TestResumeReentersExistingSerialStepLoop(t *testing.T) {
 		{Kind: "command", Label: "go vet ./...", Status: "missing"},
 	})
 	inFlight.Resumability.Attempt.ID = "A-P1"
-	af := &fakeAF{nextSteps: []string{"P1"}, nextActions: []agentflow.NextActionState{initial, inFlight, complete}}
+	af := &fakeAF{nextSteps: []string{"P1"}, nextActions: []agentflow.NextActionState{initial, inFlight, finishRunGuard, complete}}
 	d := &driver{af: af, plan: recoveryPlan()}
 	d.runStep = func(_ context.Context, step agentflow.Step, _, _ string) error {
 		af.seq = append(af.seq, "model:"+step.ID)
@@ -1144,7 +1151,7 @@ func TestResumeReentersExistingSerialStepLoop(t *testing.T) {
 		"probe", "next-action", "next-step", "claim:P1", "model:P1",
 		"next-action",
 		"gate:P1:unit-tests", "gate:P1:lint", "finish-step:P1:A-P1",
-		"next-step", "finish-run", "next-action",
+		"next-step", "next-action", "finish-run", "next-action",
 	}
 	if !reflect.DeepEqual(af.seq, want) {
 		t.Fatalf("seq = %v, want %v", af.seq, want)
@@ -1177,7 +1184,7 @@ func TestResumeRunsMultipleRemainingStepsSerially(t *testing.T) {
 
 	af := &fakeAF{
 		nextSteps:   []string{"P1", "P2"},
-		nextActions: []agentflow.NextActionState{initial, inFlightP1, inFlightP2, complete},
+		nextActions: []agentflow.NextActionState{initial, inFlightP1, inFlightP2, finishRunGuard, complete},
 	}
 	d := &driver{af: af, plan: recoveryPlanTwoSteps()}
 	d.runStep = func(_ context.Context, step agentflow.Step, _, _ string) error {
@@ -1194,7 +1201,7 @@ func TestResumeRunsMultipleRemainingStepsSerially(t *testing.T) {
 		"next-action", "gate:P1:unit-tests", "gate:P1:lint", "finish-step:P1:A-P1",
 		"next-step", "claim:P2", "model:P2",
 		"next-action", "gate:P2:unit-tests-2", "finish-step:P2:A-P2",
-		"next-step", "finish-run", "next-action",
+		"next-step", "next-action", "finish-run", "next-action",
 	}
 	if !reflect.DeepEqual(af.seq, want) {
 		t.Fatalf("seq = %v, want %v", af.seq, want)
@@ -1272,6 +1279,106 @@ func TestResumeReentryRefusesRecordedGateInsteadOfDuplicatingIt(t *testing.T) {
 	}
 }
 
+// #688: resume runs #651's step-work check before finish-run, as a fresh run
+// does. Another writer claimed P2 while P1 ran, so next-step finds nothing and
+// next-action reports P2's open attempt: resume refuses and never calls
+// finish-run, so no proof is built over the unfinished work.
+func TestResumeRefusesFinishRunWhileStepWorkRemains(t *testing.T) {
+	fixture := newResumeFixtureWithPlan(t, recoveryPlanTwoSteps())
+	fixture.useAdvisoryLease()
+	initial := fixture.noAttemptState(t, "step_unclaimed", true)
+	inFlightFixture := newResumeFixtureWithPlan(t, recoveryPlanTwoSteps())
+	inFlightFixture.useAdvisoryLease()
+	inFlight := inFlightFixture.attemptState(t, "validation_missing", []agentflow.ResumabilityGate{
+		{Kind: "command", Label: "go test ./...", Status: "missing"},
+		{Kind: "command", Label: "go vet ./...", Status: "missing"},
+	})
+	inFlight.Resumability.Attempt.ID = "A-P1"
+	stepID2 := "P2"
+	af := &fakeAF{nextSteps: []string{"P1"}, nextActions: []agentflow.NextActionState{
+		initial, inFlight, {State: "validation_missing", StepID: &stepID2},
+	}}
+	d := &driver{af: af, plan: recoveryPlanTwoSteps()}
+	d.runStep = func(_ context.Context, step agentflow.Step, _, _ string) error {
+		af.seq = append(af.seq, "model:"+step.ID)
+		return nil
+	}
+
+	final, err := d.resume(context.Background(), fixture.root, fixture.planJSON, nil)
+	want := `agentflow still reports step work before finish-run: state "validation_missing" step "P2"; no proof was built; run -agentflow-status to see whether -agentflow-resume can recover it`
+	if err == nil || err.Error() != want || final.State != "" {
+		t.Fatalf("state = %q, err = %v\nwant error %s", final.State, err, want)
+	}
+	wantSeq := []string{
+		"probe", "next-action", "next-step", "claim:P1", "model:P1",
+		"next-action", "gate:P1:unit-tests", "gate:P1:lint", "finish-step:P1:A-P1",
+		"next-step", "next-action",
+	}
+	if !reflect.DeepEqual(af.seq, wantSeq) {
+		t.Fatalf("seq = %v\nwant %v", af.seq, wantSeq)
+	}
+}
+
+// nextActionErrAt fails the call-th NextAction with err and serves every
+// other call from fakeAF, so a test can fail only resume's pre-finish-run
+// check (#688). fakeAF.failAt would fail every scripted call.
+type nextActionErrAt struct {
+	*fakeAF
+	call, calls int
+	err         error
+}
+
+func (f *nextActionErrAt) NextAction(ctx context.Context) (agentflow.NextActionState, error) {
+	f.calls++
+	if f.calls == f.call {
+		f.seq = append(f.seq, "next-action")
+		return agentflow.NextActionState{}, f.err
+	}
+	return f.fakeAF.NextAction(ctx)
+}
+
+// #688: when the pre-finish-run next-action fails, resume stops before
+// finish-run and keeps the error's identity, which reportAgentflowRecovery
+// inspects with errors.As.
+func TestResumeNextActionErrorBlocksFinishRun(t *testing.T) {
+	fixture := newResumeFixture(t)
+	initial := fixture.noAttemptState(t, "run_unverified", false)
+	sentinel := errors.New("next-action unavailable")
+	af := &nextActionErrAt{fakeAF: &fakeAF{nextActions: []agentflow.NextActionState{initial}}, call: 2, err: sentinel}
+	d := &driver{af: af, plan: recoveryPlan(), runStep: func(context.Context, agentflow.Step, string, string) error { return nil }}
+	_, err := d.resume(context.Background(), fixture.root, fixture.planJSON, nil)
+	if !errors.Is(err, sentinel) || err.Error() != "check step work before finish-run: next-action unavailable" {
+		t.Fatalf("err = %v, want the wrapped next-action error", err)
+	}
+	if want := []string{"probe", "next-action", "next-step", "next-action"}; !reflect.DeepEqual(af.seq, want) {
+		t.Fatalf("seq = %v, want %v", af.seq, want)
+	}
+}
+
+// #688: a writer that opens an attempt after resume's pre-finish-run check
+// still reaches finish-run (kstruzzieri/agentflow#58). Resume's final check is
+// then the only refusal, so it must reject the non-complete state rather than
+// report success over an open attempt.
+func TestResumeFinalCheckRefusesAttemptOpenedAfterCheck(t *testing.T) {
+	fixture := newResumeFixture(t)
+	initial := fixture.noAttemptState(t, "run_unverified", false)
+	openedFixture := newResumeFixture(t)
+	openedFixture.useAdvisoryLease()
+	opened := openedFixture.attemptState(t, "validation_missing", []agentflow.ResumabilityGate{
+		{Kind: "command", Label: "go test ./...", Status: "missing"},
+		{Kind: "command", Label: "go vet ./...", Status: "missing"},
+	})
+	af := &fakeAF{nextActions: []agentflow.NextActionState{initial, finishRunGuard, opened}}
+	d := &driver{af: af, plan: recoveryPlan(), runStep: func(context.Context, agentflow.Step, string, string) error { return nil }}
+	final, err := d.resume(context.Background(), fixture.root, fixture.planJSON, nil)
+	if want := `agentflow resume finished in state "validation_missing", want complete`; err == nil || err.Error() != want || final.State != "" {
+		t.Fatalf("state = %q, err = %v\nwant error %s", final.State, err, want)
+	}
+	if want := []string{"probe", "next-action", "next-step", "next-action", "finish-run", "next-action"}; !reflect.DeepEqual(af.seq, want) {
+		t.Fatalf("seq = %v, want %v", af.seq, want)
+	}
+}
+
 func TestResumeProgressReadOccursOnlyAfterSettlement(t *testing.T) {
 	t.Run("settlement rereads and rejects unchanged state", func(t *testing.T) {
 		fixture := newResumeFixture(t)
@@ -1296,12 +1403,12 @@ func TestResumeProgressReadOccursOnlyAfterSettlement(t *testing.T) {
 			fixture := newResumeFixture(t)
 			initial := fixture.noAttemptState(t, stateName, false)
 			complete := fixture.noAttemptState(t, "complete", false)
-			af := &fakeAF{nextActions: []agentflow.NextActionState{initial, complete}}
+			af := &fakeAF{nextActions: []agentflow.NextActionState{initial, finishRunGuard, complete}}
 			d := &driver{af: af, plan: recoveryPlan(), runStep: func(context.Context, agentflow.Step, string, string) error { return nil }}
 			if _, err := d.resume(context.Background(), fixture.root, fixture.planJSON, nil); err != nil {
 				t.Fatal(err)
 			}
-			want := []string{"probe", "next-action", "next-step", "finish-run", "next-action"}
+			want := []string{"probe", "next-action", "next-step", "next-action", "finish-run", "next-action"}
 			if !reflect.DeepEqual(af.seq, want) {
 				t.Fatalf("seq = %v, want %v", af.seq, want)
 			}
@@ -1321,15 +1428,15 @@ func TestResumeSettlementContinuesSeriallyWithoutRepeatingMutation(t *testing.T)
 				{Kind: "command", Label: "go test ./...", Status: "satisfied"},
 				{Kind: "command", Label: "go vet ./...", Status: "missing"},
 			},
-			want: []string{"probe", "next-action", "gate:P1:lint", "finish-step:P1:A1", "next-action", "next-step", "finish-run", "next-action"},
+			want: []string{"probe", "next-action", "gate:P1:lint", "finish-step:P1:A1", "next-action", "next-step", "next-action", "finish-run", "next-action"},
 		},
 		{
 			state: "step_unverified",
-			want:  []string{"probe", "next-action", "finish-step:P1:A1", "next-action", "next-step", "finish-run", "next-action"},
+			want:  []string{"probe", "next-action", "finish-step:P1:A1", "next-action", "next-step", "next-action", "finish-run", "next-action"},
 		},
 		{
 			state: "step_uncompleted",
-			want:  []string{"probe", "next-action", "complete-step:P1:A1", "next-action", "next-step", "finish-run", "next-action"},
+			want:  []string{"probe", "next-action", "complete-step:P1:A1", "next-action", "next-step", "next-action", "finish-run", "next-action"},
 		},
 	}
 	for _, test := range tests {
@@ -1339,7 +1446,7 @@ func TestResumeSettlementContinuesSeriallyWithoutRepeatingMutation(t *testing.T)
 			initial := fixture.attemptState(t, test.state, test.gates)
 			progressed := fixture.noAttemptState(t, "run_unverified", false)
 			complete := fixture.noAttemptState(t, "complete", false)
-			af := &fakeAF{nextActions: []agentflow.NextActionState{initial, progressed, complete}}
+			af := &fakeAF{nextActions: []agentflow.NextActionState{initial, progressed, finishRunGuard, complete}}
 			d := &driver{af: af, plan: recoveryPlan(), runStep: func(context.Context, agentflow.Step, string, string) error { return nil }}
 			if _, err := d.resume(context.Background(), fixture.root, fixture.planJSON, nil); err != nil {
 				t.Fatal(err)
@@ -1390,7 +1497,7 @@ func TestResumeBlocksFailedGateAttemptThenRerunsStep(t *testing.T) {
 		{Kind: "command", Label: "go vet ./...", Status: "missing"},
 	})
 	inFlight.Resumability.Attempt.ID = "A-P1"
-	af := &fakeAF{nextSteps: []string{"P1"}, nextActions: []agentflow.NextActionState{initial, unclaimed, inFlight, complete}}
+	af := &fakeAF{nextSteps: []string{"P1"}, nextActions: []agentflow.NextActionState{initial, unclaimed, inFlight, finishRunGuard, complete}}
 	d := &driver{af: af, plan: recoveryPlan()}
 	d.runStep = func(_ context.Context, step agentflow.Step, _, _ string) error {
 		af.seq = append(af.seq, "model:"+step.ID)
@@ -1406,7 +1513,7 @@ func TestResumeBlocksFailedGateAttemptThenRerunsStep(t *testing.T) {
 		"block-step:P1:A1:golem: resume found failed command gate",
 		"next-action", "next-step", "claim:P1", "model:P1",
 		"next-action", "gate:P1:unit-tests", "gate:P1:lint", "finish-step:P1:A-P1",
-		"next-step", "finish-run", "next-action",
+		"next-step", "next-action", "finish-run", "next-action",
 	}
 	if !reflect.DeepEqual(af.seq, want) {
 		t.Fatalf("seq = %v\nwant %v", af.seq, want)
@@ -1830,12 +1937,12 @@ func TestResumeRefusesRetainedTimeoutBeforeMutation(t *testing.T) {
 		progressed := fixture.noAttemptState(t, "run_unverified", false)
 		complete := fixture.noAttemptState(t, "complete", false)
 		writeAgentFile(t, fixture.root, "command-receipts.jsonl", exitOneReceiptCR1+"\n")
-		af := &fakeAF{nextActions: []agentflow.NextActionState{initial, progressed, complete}}
+		af := &fakeAF{nextActions: []agentflow.NextActionState{initial, progressed, finishRunGuard, complete}}
 		d := &driver{af: af, plan: recoveryPlan(), root: fixture.root, runStep: func(context.Context, agentflow.Step, string, string) error { return nil }}
 		if _, err := d.resume(context.Background(), fixture.root, fixture.planJSON, nil); err != nil {
 			t.Fatal(err)
 		}
-		want := []string{"probe", "next-action", "gate:P1:unit-tests", "gate:P1:lint", "finish-step:P1:A1", "next-action", "next-step", "finish-run", "next-action"}
+		want := []string{"probe", "next-action", "gate:P1:unit-tests", "gate:P1:lint", "finish-step:P1:A1", "next-action", "next-step", "next-action", "finish-run", "next-action"}
 		if !reflect.DeepEqual(af.seq, want) {
 			t.Fatalf("seq = %v, want %v", af.seq, want)
 		}
