@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kstruzzieri/go-llm/internal/sqlitedsn"
 	"github.com/kstruzzieri/go-llm/internal/sqlitetest"
 )
 
@@ -18,6 +19,30 @@ func TestOpenRecordStoreConcurrentFirstOpens(t *testing.T) {
 	sqlitetest.RunConcurrentFirstOpens(t, 4, 5, func(ctx context.Context, path string) (io.Closer, error) {
 		return OpenRecordStore(ctx, path, RecordStoreConfig{Writer: WriterMCP})
 	})
+}
+
+// Reopening an initialized store only reads, so a read-only handle opens it
+// and no reopen takes the claim's write lock (#631).
+func TestOpenRecordStoreReopenReadOnly(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "records.db")
+	config := RecordStoreConfig{KeyDir: path + ".keys", Writer: WriterMCP}
+	first, err := OpenRecordStore(t.Context(), path, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = first.Close() })
+	uri, err := sqlitedsn.FileURL(path) // builds a URI SQLite accepts on Windows too
+	if err != nil {
+		t.Fatal(err)
+	}
+	uri.RawQuery = "mode=ro"
+	rt, err := OpenRecordStore(t.Context(), uri.String(), config)
+	if err != nil {
+		t.Fatalf("read-only reopen: %v", err)
+	}
+	if err := rt.Close(); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // An opener that finds no marker and then loses the claim to an initializer
