@@ -512,6 +512,66 @@ func TestClient_BlockStep_SurfacesCommandError(t *testing.T) {
 	}
 }
 
+func TestClient_VerifyProof_Argv(t *testing.T) {
+	t.Parallel()
+	f := &fakeRunner{replies: map[string]fakeReply{
+		"verify-proof": {stdout: []byte("proof verified\n")},
+	}}
+	c := NewOwnedClient(f, "/workspace with spaces", "golem")
+	if err := c.VerifyProof(context.Background()); err != nil {
+		t.Fatalf("VerifyProof() = %v, want nil", err)
+	}
+	want := [][]string{{"verify-proof", "--root", "/workspace with spaces"}}
+	if !reflect.DeepEqual(f.calls, want) {
+		t.Errorf("VerifyProof() calls = %v, want %v", f.calls, want)
+	}
+	if len(f.inputs) != 1 || len(f.inputs[0]) != 0 {
+		t.Errorf("VerifyProof() stdin = %q, want one empty input", f.inputs)
+	}
+}
+
+func TestClient_VerifyProof_SurfacesCommandError(t *testing.T) {
+	t.Parallel()
+	c, _ := newTestClient(map[string]fakeReply{
+		"verify-proof": {stdout: []byte("error: proof canonical core checksum mismatch\n"), exit: 1},
+	})
+	err := c.VerifyProof(context.Background())
+	var ce *CommandError
+	if !errors.As(err, &ce) || ce.Cmd != "verify-proof" || ce.Exit != 1 {
+		t.Errorf("VerifyProof() = %v, want *CommandError for verify-proof with exit 1", err)
+	}
+}
+
+func TestClient_VerifyProof_PreservesRunnerError(t *testing.T) {
+	t.Parallel()
+	want := errors.New("cannot launch agentflow")
+	c, _ := newTestClient(map[string]fakeReply{"verify-proof": {err: want}})
+	if err := c.VerifyProof(context.Background()); !errors.Is(err, want) {
+		t.Errorf("VerifyProof() = %v, want runner error %v", err, want)
+	}
+}
+
+type verifyProofContextRunner struct{ called bool }
+
+func (r *verifyProofContextRunner) Run(ctx context.Context, _ []string, _ []byte) ([]byte, []byte, int, error) {
+	r.called = true
+	return nil, nil, 0, ctx.Err()
+}
+
+func TestClient_VerifyProof_PropagatesCancellation(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cancel()
+	r := &verifyProofContextRunner{}
+	if err := NewClient(r, "/ws").VerifyProof(ctx); !errors.Is(err, context.Canceled) {
+		t.Errorf("VerifyProof(cancelled context) = %v, want context.Canceled", err)
+	}
+	if !r.called {
+		t.Error("VerifyProof(cancelled context) did not pass the context to the runner")
+	}
+}
+
 func TestClient_FinishRun_StopReportsStoppedAt(t *testing.T) {
 	c, _ := newTestClient(map[string]fakeReply{
 		"finish-run": {stdout: []byte(`{"ok":false,"stopped_at":"verify-proof","diagnostics":["bad proof"]}`), exit: 1},
