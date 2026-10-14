@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/kstruzzieri/go-llm/signing"
+	sqlite3 "modernc.org/sqlite/lib"
 )
 
 func recordTestConfig(t *testing.T) RecordStoreConfig {
@@ -338,7 +339,7 @@ func TestRecordInitializationClaimHoldsWriteLock(t *testing.T) {
 	if _, err := NewMemoryRecordStore(ctx, db, config); err != nil {
 		t.Fatalf("initialize: %v", err)
 	}
-	assertMigrationSQLiteError(t, insertErr, 5) // SQLITE_BUSY
+	assertMigrationSQLiteError(t, insertErr, sqlite3.SQLITE_BUSY)
 }
 
 type wrongBindingSigner struct{ signing.Signer }

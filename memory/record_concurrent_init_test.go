@@ -44,12 +44,12 @@ func TestRecordInitializationLostClaim(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// The hold leaves a slow runner time to reach the claim before the commit.
 	committed := make(chan error, 1)
-	go func() {
-		time.Sleep(300 * time.Millisecond)
+	time.AfterFunc(time.Second, func() {
 		_, err := initializer.ExecContext(context.Background(), "COMMIT")
 		committed <- err
-	}()
+	})
 	other, err := sql.Open("sqlite", path)
 	if err != nil {
 		t.Fatal(err)
@@ -68,7 +68,9 @@ func TestRecordInitializationLostClaim(t *testing.T) {
 		}
 	}}
 	config.Signer = signer
+	start := time.Now()
 	rt, err := OpenRecordStore(ctx, path, config)
+	t.Logf("elapsed %v", time.Since(start))
 	if cerr := <-committed; cerr != nil {
 		t.Fatalf("commit initializer: %v", cerr)
 	}
@@ -112,13 +114,15 @@ func TestOpenRecordStoreFirstOpenWaitsForWriter(t *testing.T) {
 	if _, err := writer.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
 		t.Fatal(err)
 	}
+	// The hold leaves a slow runner time to reach the claim before the release.
 	released := make(chan error, 1)
-	go func() {
-		time.Sleep(300 * time.Millisecond)
+	time.AfterFunc(time.Second, func() {
 		_, err := writer.ExecContext(context.Background(), "ROLLBACK")
 		released <- err
-	}()
+	})
+	start := time.Now()
 	rt, err := OpenRecordStore(ctx, path, RecordStoreConfig{Writer: WriterMCP})
+	t.Logf("elapsed %v", time.Since(start))
 	if rerr := <-released; rerr != nil {
 		t.Fatalf("release writer: %v", rerr)
 	}
