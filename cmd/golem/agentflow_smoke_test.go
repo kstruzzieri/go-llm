@@ -2029,7 +2029,7 @@ func TestAgentflowResumeProofDisposition_RealCLI(t *testing.T) {
 		{name: "settlement preserves newer schema", answer: "expected\n", proof: newerSchema,
 			wantErr: `agentflow resume blocked after settlement in state "proof_failing": blocked by failing proof`},
 		{name: "serial loop preserves newer schema", answer: "wrong\n", failGate: true, proof: newerSchema, models: 1,
-			wantErr: "agentflow reports a failing proof before finish-run; finish-run would replace it, so no proof was built; inspect .agent/proof-pack.json"},
+			wantErr: "agentflow reports a failing proof before finish-run; finish-run would replace it, so no proof was built; inspect .agent/proof-pack.json, move it out of the workspace, then run -agentflow-status to see whether -agentflow-resume can build a new proof"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			dir, runner, client, plan, planBytes := openSettlementAttempt(t, nil, test.answer)
@@ -2081,6 +2081,25 @@ func TestAgentflowResumeProofDisposition_RealCLI(t *testing.T) {
 				}
 				if !bytes.Equal(after, old) {
 					t.Fatalf("proof-pack.json changed to %q, want the staged bytes preserved", after)
+				}
+				// The documented way on: move the preserved proof out of the
+				// workspace. next-action then reports proof_missing, and resume
+				// builds a new proof without running the model again.
+				kept := filepath.Join(t.TempDir(), "proof-pack.json")
+				if err := os.Rename(proofPath, kept); err != nil {
+					t.Fatal(err)
+				}
+				rebuild := &driver{af: client, plan: &plan, root: dir, runStep: func(context.Context, agentflow.Step, string, string) error {
+					return errors.New("rebuilding the proof ran the model")
+				}}
+				if final, err := rebuild.resume(ctx, dir, planBytes, nil); err != nil || final.State != "complete" {
+					t.Fatalf("resume after moving the proof out: state = %q, err = %v; want complete", final.State, err)
+				}
+				if moved, err := os.ReadFile(kept); err != nil || !bytes.Equal(moved, old) {
+					t.Fatalf("moved proof = %q, err = %v; want the staged bytes", moved, err)
+				}
+				if out, errOut, exitCode, err := runner.Run(ctx, []string{"verify-proof", "--root", dir}, nil); err != nil || exitCode != 0 {
+					t.Fatalf("verify-proof after rebuild: exit=%d err=%v stdout=%s stderr=%s", exitCode, err, out, errOut)
 				}
 				return
 			}

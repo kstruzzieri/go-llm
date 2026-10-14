@@ -419,7 +419,7 @@ func TestDriver_FinishRunPreservesFailingProof(t *testing.T) {
 		runStep: func(context.Context, agentflow.Step, string, string) error { return nil },
 	}
 	proof, err := d.run(context.Background())
-	const want = "agentflow reports a failing proof before finish-run; finish-run would replace it, so no proof was built; inspect .agent/proof-pack.json"
+	const want = "agentflow reports a failing proof before finish-run; finish-run would replace it, so no proof was built; inspect .agent/proof-pack.json, move it out of the workspace, then run -agentflow-status to see whether -agentflow-resume can build a new proof"
 	if err == nil || err.Error() != want || proof != "" {
 		t.Fatalf("proof=%q err=%v\nwant %s", proof, err, want)
 	}

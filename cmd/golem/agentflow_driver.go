@@ -335,7 +335,7 @@ func (d *driver) requireNoStepWork(ctx context.Context) error {
 		// (AgentFlow reports any hash or mismatch error as stale), so a
 		// failing proof here is malformed, from a newer AgentFlow, or failing
 		// for reasons Golem did not cause. finish-run would overwrite it.
-		return errors.New("agentflow reports a failing proof before finish-run; finish-run would replace it, so no proof was built; inspect .agent/proof-pack.json")
+		return errors.New("agentflow reports a failing proof before finish-run; finish-run would replace it, so no proof was built; inspect .agent/proof-pack.json, move it out of the workspace, then run -agentflow-status to see whether -agentflow-resume can build a new proof")
 	}
 	where := fmt.Sprintf("state %q", state.State)
 	if state.StepID != nil {

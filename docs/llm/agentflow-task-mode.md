@@ -293,9 +293,11 @@ completed the last step, `finish-run` replaces the proof after drift and run
 verification pass. A proof AgentFlow reports as `proof_failing` (malformed,
 from a newer AgentFlow, or failing for another reason resume did not cause) is
 not replaced: resume exits 1 after a settlement exposes it, or at the check
-before `finish-run`. AgentFlow checks run verification first, so a run with no
-recorded run verification reports `run_unverified` instead, and `finish-run`
-rebuilds any proof there.
+before `finish-run`. To build a new proof, move `.agent/proof-pack.json` out of
+the workspace; `next-action` then reports `proof_missing`, and resume builds one
+without running the model again. AgentFlow checks run verification first, so
+a run with no recorded run verification reports `run_unverified` instead, and
+`finish-run` rebuilds any proof there.
 Drift exposed by a settlement is also refused; after the serial loop,
 `finish-run`'s drift audit stops before building a proof. The table describes
 the state resume finds on entry.
@@ -318,7 +320,7 @@ The complete disposition table is:
 | `run_unverified` | 2 | Enter the serial tail; after the step-work check, call `FinishRun` once. |
 | `proof_missing` | 2 | After the step-work check, call `FinishRun` once to generate and verify the first proof. |
 | `proof_stale` | 3 | Fail closed; do not overwrite a proof resume has not touched. When resume's own settlement or steps make an older proof stale, the tail replaces it. |
-| `proof_failing` | 3 | Fail closed; preserve the failing proof, on entry and after resume's own work. |
+| `proof_failing` | 3 | Fail closed; preserve the failing proof, on entry and after resume's own work. Moving it out of the workspace leaves `proof_missing`. |
 | `complete` | 0 | Report verified proof and perform no mutation. |
 
 Status shows the failed-gate row as
