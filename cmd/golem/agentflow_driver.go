@@ -44,6 +44,7 @@ type afClient interface {
 	FinishStep(context.Context, string, string) error
 	CompleteStep(context.Context, string, string) error
 	BlockStep(context.Context, string, string, string) error
+	VerifyProof(context.Context) error
 	FinishRun(context.Context) (string, error)
 	RecordFileChange(context.Context, string, string, string) error
 	RecordEvidence(context.Context, agentflow.EvidenceEntry) error
@@ -302,15 +303,21 @@ func (d *driver) run(ctx context.Context) (string, error) {
 			return "", err
 		}
 	}
-	return d.finishRun(ctx)
+	return d.finishRun(ctx, nil)
 }
 
 // finishRun runs AgentFlow's finish-run once next-action reports no step or
 // attempt work. Fresh runs and resume reach finish-run only through it, so
-// neither can skip the check (#651, #688).
-func (d *driver) finishRun(ctx context.Context) (string, error) {
+// neither can skip the check (#651, #688), and both refuse an exposed
+// proof_failing state (#689). Resume also guards its pre-verified proof.
+func (d *driver) finishRun(ctx context.Context, proof *resumeProofGuard) (string, error) {
 	if err := d.requireNoStepWork(ctx); err != nil {
 		return "", err
+	}
+	if proof != nil {
+		if err := proof.checkUnchanged(); err != nil {
+			return "", err
+		}
 	}
 	return d.af.FinishRun(ctx)
 }
@@ -319,15 +326,22 @@ func (d *driver) finishRun(ctx context.Context) (string, error) {
 // attempt work (#651). next-step returns nothing both when every step is done
 // and when the remaining steps hold open attempts, and non-strict finish-run
 // does not require completed steps; only next-action's run-phase states prove
-// that every step completed and no attempt is open.
+// that every step completed and no attempt is open. It also refuses
+// proof_failing, which finish-run would overwrite (#689).
 func (d *driver) requireNoStepWork(ctx context.Context) error {
 	state, err := d.af.NextAction(ctx)
 	if err != nil {
 		return fmt.Errorf("check step work before finish-run: %w", err)
 	}
 	switch state.State {
-	case "run_unverified", "drift_failing", "proof_missing", "proof_stale", "proof_failing", "complete":
+	case "run_unverified", "drift_failing", "proof_missing", "proof_stale", "complete":
 		return nil
+	case "proof_failing":
+		// #689: Golem's own ledger writes leave an older proof proof_stale
+		// (AgentFlow reports any hash or mismatch error as stale), so a
+		// failing proof here is malformed, from a newer AgentFlow, or failing
+		// for reasons Golem did not cause. finish-run would overwrite it.
+		return errors.New("agentflow reports a failing proof before finish-run; finish-run would replace it, so no proof was built; inspect .agent/proof-pack.json, move it out of the workspace, then run -agentflow-status to see whether -agentflow-resume can build a new proof")
 	}
 	where := fmt.Sprintf("state %q", state.State)
 	if state.StepID != nil {

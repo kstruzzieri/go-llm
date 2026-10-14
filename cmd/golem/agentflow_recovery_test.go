@@ -1475,6 +1475,202 @@ func TestResumeBlockedStatesDoNotMutate(t *testing.T) {
 	}
 }
 
+// #689: settlement appends to the .agent ledgers an older proof hashes, so
+// AgentFlow reports that proof proof_stale. Resume continues to the same tail
+// as after the serial loop, and finish-run replaces it.
+func TestResumeSettlementReplacesProofItsWorkMadeStale(t *testing.T) {
+	fixture := newResumeFixture(t)
+	fixture.useAdvisoryLease()
+	initial := fixture.attemptState(t, "step_uncompleted", nil)
+	stale := fixture.noAttemptState(t, "proof_stale", false)
+	complete := fixture.noAttemptState(t, "complete", false)
+	// The pre-finish-run check reads the same stale state again.
+	af := &fakeAF{nextActions: []agentflow.NextActionState{initial, stale, stale, complete}}
+	d := &driver{af: af, plan: recoveryPlan(), runStep: func(context.Context, agentflow.Step, string, string) error {
+		t.Error("resume ran the model")
+		return nil
+	}}
+	final, err := d.resume(context.Background(), fixture.root, fixture.planJSON, nil)
+	if err != nil || final.State != "complete" {
+		t.Fatalf("resume state = %q, err = %v; want complete", final.State, err)
+	}
+	want := []string{"probe", "next-action", "complete-step:P1:A1", "next-action", "next-step", "next-action", "finish-run", "next-action"}
+	if !reflect.DeepEqual(af.seq, want) {
+		t.Fatalf("seq = %v, want %v", af.seq, want)
+	}
+}
+
+// #689: Golem's own ledger writes make an older proof proof_stale, never
+// proof_failing, so a failing proof exposed by settlement (malformed, newer
+// schema) is not Golem's to replace. Nothing after the progress read runs.
+func TestResumeSettlementPreservesFailingProof(t *testing.T) {
+	fixture := newResumeFixture(t)
+	fixture.useAdvisoryLease()
+	initial := fixture.attemptState(t, "step_uncompleted", nil)
+	failing := fixture.noAttemptState(t, "proof_failing", false)
+	af := &fakeAF{nextActions: []agentflow.NextActionState{initial, failing}}
+	d := &driver{af: af, plan: recoveryPlan()}
+	_, err := d.resume(context.Background(), fixture.root, fixture.planJSON, nil)
+	if want := `agentflow resume blocked after settlement in state "proof_failing": blocked by failing proof`; err == nil || err.Error() != want {
+		t.Fatalf("resume err = %v\nwant %s", err, want)
+	}
+	if want := []string{"probe", "next-action", "complete-step:P1:A1", "next-action"}; !reflect.DeepEqual(af.seq, want) {
+		t.Fatalf("seq = %v, want %v", af.seq, want)
+	}
+}
+
+// #689 D2: drift exposed by settlement still fails closed; nothing after the
+// progress read runs.
+func TestResumeSettlementStillRefusesDrift(t *testing.T) {
+	fixture := newResumeFixture(t)
+	fixture.useAdvisoryLease()
+	initial := fixture.attemptState(t, "step_uncompleted", nil)
+	drift := fixture.noAttemptState(t, "drift_failing", false)
+	af := &fakeAF{nextActions: []agentflow.NextActionState{initial, drift}}
+	d := &driver{af: af, plan: recoveryPlan()}
+	_, err := d.resume(context.Background(), fixture.root, fixture.planJSON, nil)
+	if want := `agentflow resume blocked after settlement in state "drift_failing": blocked by drift findings`; err == nil || err.Error() != want {
+		t.Fatalf("resume err = %v\nwant %s", err, want)
+	}
+	if want := []string{"probe", "next-action", "complete-step:P1:A1", "next-action"}; !reflect.DeepEqual(af.seq, want) {
+		t.Fatalf("seq = %v, want %v", af.seq, want)
+	}
+}
+
+// #689: when the replacement proof fails, resume reports finish-run's error
+// and never reads a final state.
+func TestResumeSettlementReplacementProofFailureStopsResume(t *testing.T) {
+	fixture := newResumeFixture(t)
+	fixture.useAdvisoryLease()
+	initial := fixture.attemptState(t, "step_uncompleted", nil)
+	stale := fixture.noAttemptState(t, "proof_stale", false)
+	af := &fakeAF{
+		nextActions: []agentflow.NextActionState{initial, stale, stale},
+		proofError:  errors.New("finish-run stopped at verify-proof"),
+	}
+	d := &driver{af: af, plan: recoveryPlan()}
+	if _, err := d.resume(context.Background(), fixture.root, fixture.planJSON, nil); err == nil || !strings.Contains(err.Error(), "finish-run stopped at verify-proof") {
+		t.Fatalf("resume err = %v, want finish-run's error", err)
+	}
+	if want := []string{"probe", "next-action", "complete-step:P1:A1", "next-action", "next-step", "next-action", "finish-run"}; !reflect.DeepEqual(af.seq, want) {
+		t.Fatalf("seq = %v, want %v", af.seq, want)
+	}
+}
+
+// #689: settlement completes P1 of two; the serial loop runs P2; the tail
+// replaces the proof that work made stale.
+func TestResumeSettlementThenSerialStepReplacesStaleProof(t *testing.T) {
+	fixture := newResumeFixtureWithPlan(t, recoveryPlanTwoSteps())
+	fixture.useAdvisoryLease()
+	initial := fixture.attemptState(t, "step_uncompleted", nil)
+	unclaimedP2 := fixture.noAttemptState(t, "step_unclaimed", true)
+	stepID2 := "P2"
+	unclaimedP2.StepID = &stepID2
+	unclaimedP2.Resumability.Step.ID = "P2"
+	stale := fixture.noAttemptState(t, "proof_stale", false)
+	complete := fixture.noAttemptState(t, "complete", false)
+
+	inFlightP2Fixture := newResumeFixtureWithPlan(t, recoveryPlanTwoSteps())
+	inFlightP2Fixture.useAdvisoryLease()
+	inFlightP2 := inFlightP2Fixture.attemptState(t, "validation_missing", []agentflow.ResumabilityGate{
+		{Kind: "command", Label: "go test ./second/...", Status: "missing"},
+	})
+	inFlightP2.StepID = &stepID2
+	inFlightP2.Resumability.Step.ID = "P2"
+	inFlightP2.Resumability.Attempt.ID = "A-P2"
+
+	af := &fakeAF{
+		nextSteps:   []string{"P2"},
+		nextActions: []agentflow.NextActionState{initial, unclaimedP2, inFlightP2, stale, complete},
+	}
+	d := &driver{af: af, plan: recoveryPlanTwoSteps()}
+	d.runStep = func(_ context.Context, step agentflow.Step, _, _ string) error {
+		af.seq = append(af.seq, "model:"+step.ID)
+		return nil
+	}
+	final, err := d.resume(context.Background(), fixture.root, fixture.planJSON, nil)
+	if err != nil || final.State != "complete" {
+		t.Fatalf("resume state = %q, err = %v; want complete", final.State, err)
+	}
+	want := []string{
+		"probe", "next-action", "complete-step:P1:A1", "next-action",
+		"next-step", "claim:P2", "model:P2",
+		"next-action", "gate:P2:unit-tests-2", "finish-step:P2:A-P2",
+		"next-step", "next-action", "finish-run", "next-action",
+	}
+	if !reflect.DeepEqual(af.seq, want) {
+		t.Fatalf("seq = %v, want %v", af.seq, want)
+	}
+}
+
+// #689: a progressed run-phase state is validated before resume acts on it.
+// A projected step, or a contract from another plan, is refused before
+// next-step or finish-run.
+func TestResumeRefusesMalformedProgressedProofState(t *testing.T) {
+	for _, test := range []struct {
+		name, want string
+		progressed func(t *testing.T) agentflow.NextActionState
+	}{
+		{
+			name: "projected step",
+			want: `agentflow state "proof_stale" unexpectedly projects a step`,
+			progressed: func(t *testing.T) agentflow.NextActionState {
+				f := newResumeFixture(t)
+				f.useAdvisoryLease()
+				state := f.noAttemptState(t, "proof_stale", true)
+				state.StepID = nil
+				return state
+			},
+		},
+		{
+			name: "foreign plan contract",
+			want: "task plan does not match Agentflow resumability contract",
+			progressed: func(t *testing.T) agentflow.NextActionState {
+				f := newResumeFixtureWithPlan(t, recoveryPlanTwoSteps())
+				f.useAdvisoryLease()
+				return f.noAttemptState(t, "proof_stale", false)
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newResumeFixture(t)
+			fixture.useAdvisoryLease()
+			initial := fixture.attemptState(t, "step_uncompleted", nil)
+			af := &fakeAF{nextActions: []agentflow.NextActionState{initial, test.progressed(t)}}
+			d := &driver{af: af, plan: recoveryPlan()}
+			if _, err := d.resume(context.Background(), fixture.root, fixture.planJSON, nil); err == nil || err.Error() != test.want {
+				t.Fatalf("resume err = %v\nwant %s", err, test.want)
+			}
+			if want := []string{"probe", "next-action", "complete-step:P1:A1", "next-action"}; !reflect.DeepEqual(af.seq, want) {
+				t.Fatalf("seq = %v, want %v", af.seq, want)
+			}
+		})
+	}
+}
+
+// #689: entry dispositions are unchanged. With a valid run-phase projection
+// (so only the disposition can refuse), each state is refused read-only with
+// its own description.
+func TestResumeEntryRunPhaseRefusalsAreExact(t *testing.T) {
+	for state, want := range map[string]string{
+		"proof_stale":   `agentflow resume blocked in state "proof_stale": blocked by stale proof`,
+		"proof_failing": `agentflow resume blocked in state "proof_failing": blocked by failing proof`,
+		"drift_failing": `agentflow resume blocked in state "drift_failing": blocked by drift findings`,
+	} {
+		t.Run(state, func(t *testing.T) {
+			fixture := newResumeFixture(t)
+			af := &fakeAF{nextActions: []agentflow.NextActionState{fixture.noAttemptState(t, state, false)}}
+			d := &driver{af: af, plan: recoveryPlan()}
+			if _, err := d.resume(context.Background(), fixture.root, fixture.planJSON, nil); err == nil || err.Error() != want {
+				t.Fatalf("resume err = %v\nwant %s", err, want)
+			}
+			if seq := []string{"probe", "next-action"}; !reflect.DeepEqual(af.seq, seq) {
+				t.Fatalf("seq = %v, want read-only %v", af.seq, seq)
+			}
+		})
+	}
+}
+
 // #652 A6: resume blocks an open attempt whose command gate failed, runs no
 // gate on it (not even the missing one before the failed one), then claims a
 // new attempt and runs the model.

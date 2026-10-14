@@ -151,6 +151,11 @@ func runAgentflowStatusWithRunner(ctx context.Context, out io.Writer, root strin
 			disposition = recoveryDisposition{failClosed, 3, "blocked: " + err.Error()}
 		}
 	}
+	if disposition.action == resumeSerial {
+		if _, err := newResumeProofGuard(ctx, client, root); err != nil {
+			disposition = recoveryDisposition{failClosed, 3, "blocked: " + err.Error()}
+		}
+	}
 	var proof *agentflow.ProofSummary
 	if disposition.action == reportComplete {
 		summary, err := verifiedAgentflowProofSummary(ctx, client)
@@ -259,7 +264,7 @@ func validateRecoveryProjection(state agentflow.NextActionState) error {
 			if err := validateAutomaticRecoveryAction(projection, "claim"); err != nil {
 				return err
 			}
-		case "run_unverified", "proof_missing", "complete":
+		case "run_unverified", "drift_failing", "proof_missing", "proof_stale", "proof_failing", "complete":
 			if projection.Step != nil {
 				return fmt.Errorf("agentflow state %q unexpectedly projects a step", state.State)
 			}
@@ -604,6 +609,10 @@ func (d *driver) resume(ctx context.Context, root string, planJSON []byte, appro
 	if err := refuseRetainedTimeout(root); err != nil {
 		return agentflow.NextActionState{}, err
 	}
+	proof, err := newResumeProofGuard(ctx, d.af, root)
+	if err != nil {
+		return agentflow.NextActionState{}, err
+	}
 
 	settled, err := settleAgentflowAttempt(ctx, d.af, root, d.plan, state)
 	if err != nil {
@@ -624,16 +633,19 @@ func (d *driver) resume(ctx context.Context, root string, planJSON []byte, appro
 			return agentflow.NextActionState{}, err
 		}
 		state = progressed
-		disposition = resumeDisposition(state.State)
-		if disposition.action == failClosed {
-			return agentflow.NextActionState{}, fmt.Errorf("agentflow resume blocked after settlement in state %q: %s", state.State, disposition.description)
-		}
-		if disposition.action == reportComplete {
-			return state, nil
-		}
 		switch state.State {
+		case "complete":
+			return state, nil
 		case "step_unclaimed", "run_unverified", "proof_missing":
+		case "proof_stale":
+			// #689: the retained proof verified before settlement. The tail
+			// also checks its bytes have not changed before replacing it;
+			// proof_stale alone cannot establish either fact.
 		default:
+			disposition = resumeDisposition(state.State)
+			if disposition.action == failClosed {
+				return agentflow.NextActionState{}, fmt.Errorf("agentflow resume blocked after settlement in state %q: %s", state.State, disposition.description)
+			}
 			return agentflow.NextActionState{}, fmt.Errorf("agentflow settlement progressed to unsupported in-flight state %q", state.State)
 		}
 	}
@@ -669,7 +681,7 @@ func (d *driver) resume(ctx context.Context, root string, planJSON []byte, appro
 	if err := d.runSerialSteps(ctx); err != nil {
 		return agentflow.NextActionState{}, err
 	}
-	if _, err := d.finishRun(ctx); err != nil {
+	if _, err := d.finishRun(ctx, proof); err != nil {
 		return agentflow.NextActionState{}, err
 	}
 	final, err := d.af.NextAction(ctx)

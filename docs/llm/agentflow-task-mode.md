@@ -184,8 +184,9 @@ step/gate, attempt owner and lease, typed gate statuses, diagnostics, and the
 serial resume disposition. Any suggested command is labeled display-only and
 is never executed. JSON mode relays AgentFlow's exact `next-action --json`
 bytes. Both forms use actor `golem`. Status first runs `agentflow --version` and
-refuses an AgentFlow outside 1.x; otherwise it makes only the read-only
-`next-action` call.
+refuses an AgentFlow outside 1.x; it then reads `next-action` and, before
+offering recovery, independently checks any existing proof with the read-only
+`verify-proof` command.
 Before returning exit `0` or `2`, status validates the typed projection's
 contract fields, actor, attempt owner, lease, and recovery permissions. A
 foreign, expired, malformed, or otherwise unsafe projection is displayed as
@@ -243,6 +244,14 @@ and checks all of these bindings:
 - the root retains no timed-out command receipt (see
   [Timed-out gates](#timed-out-gates)).
 
+Before offering or starting recovery, status and resume also independently
+run `verify-proof` on any existing `.agent/proof-pack.json`. An invalid,
+malformed, or unverifiable proof blocks recovery even when `next-action`
+hides it behind step work or `run_unverified`: status exits `3`, and resume
+exits `1` before any recovery mutation. No proof is required when the file is
+absent. Resume snapshots the proof's existence and digest and checks that it
+stayed unchanged during verification.
+
 The plan digest now uses AgentFlow's exact Python JSON encoding. Workflow
 handoffs saved by earlier Golem versions recorded a Go-canonicalized digest, so
 a pre-existing handoff for a plan containing `<`, `>`, `&`, non-ASCII text, or
@@ -282,18 +291,35 @@ running `finish-run` or building a proof, names the state and step, and sends
 you to `-agentflow-status`, which reports whether `-agentflow-resume` can
 recover. With Golem as the only writer this cannot happen; it catches an
 attempt another writer opened while resume ran. A failed check call also stops
-resume with exit 1 before `finish-run`. The check and `finish-run` are two
-calls, so a writer that opens an attempt between them still reaches
-`finish-run`, and resume's final check then exits 1 (kstruzzieri/agentflow#58).
-The check lets every run-phase state through, as in a fresh run: when resume's
-own steps leave an older proof stale or failing, `finish-run` replaces it once
-drift and run verification pass. The `drift_failing`, `proof_stale` and
-`proof_failing` rows below describe the state resume finds on entry or after a
-settlement.
+resume with exit 1 before `finish-run`.
+
+The check lets every run-phase state except `proof_failing` through. An older
+proof that passed resume's initial verification may become `proof_stale`
+after settlement or serial step work changes the `.agent` ledgers; the tail
+can replace it after drift and run verification pass. After the final
+`next-action` check and before `finish-run`, resume compares the proof's
+existence and digest with its initial snapshot. A new, replaced, or removed
+proof stops resume before `finish-run`.
+
+These checks are not atomic with other writers: the snapshot does not detect
+concurrent changes to other proof inputs, and a writer can still change state
+between the final check and `finish-run` (kstruzzieri/agentflow#58). For
+example, an attempt opened in that window can reach `finish-run`, then fail
+resume's final state check.
+
+If a proof blocks recovery, inspect it and move `.agent/proof-pack.json` out
+of the workspace before running `-agentflow-status` and `-agentflow-resume`
+again. The remaining state determines whether recovery must settle an
+attempt, run a model in a new attempt, or only build a proof. A fresh `-plan`
+run uses the `next-action` check without resume's proof preflight; it can
+therefore rebuild a proof hidden by `run_unverified`.
+Drift exposed by a settlement is also refused; after the serial loop,
+`finish-run`'s drift audit stops before building a proof. The table describes
+the state resume finds on entry.
 
 The complete disposition table is:
 
-| AgentFlow state | Exit | Resume behavior |
+| AgentFlow state | Status exit | Resume behavior |
 |---|---:|---|
 | `uninitialized` | 3 | Setup required; never call `init`. |
 | `plan_unlocked` | 3 | Setup required; never relock. |
@@ -307,9 +333,9 @@ The complete disposition table is:
 | `step_uncompleted` | 2 | Call the fixed `CompleteStep` adapter without re-verifying. |
 | `drift_failing` | 3 | Fail closed for operator inspection. |
 | `run_unverified` | 2 | Enter the serial tail; after the step-work check, call `FinishRun` once. |
-| `proof_missing` | 2 | After the step-work check, call `FinishRun` once to generate and verify the first proof. |
-| `proof_stale` | 3 | Fail closed; do not overwrite proof after changed inputs. |
-| `proof_failing` | 3 | Fail closed; preserve the failing proof. |
+| `proof_missing` | 2 | After the step-work check, call `FinishRun` once to generate and verify a proof. |
+| `proof_stale` | 3 | Fail closed on entry. An initially verified proof may be replaced after settlement or serial step work, subject to the snapshot check. |
+| `proof_failing` | 3 | Fail closed; preserve the failing proof. Inspect it and move it aside before retrying recovery. |
 | `complete` | 0 | Report verified proof and perform no mutation. |
 
 Status shows the failed-gate row as
@@ -335,6 +361,9 @@ any `enforce` policy, and `validation_missing`/`step_unverified`/
 So does any state that would exit `2` while the root retains a timed-out
 command receipt, and resume refuses it before any change (see
 [Timed-out gates](#timed-out-gates)).
+An existing proof that fails independent verification also overrides any
+exit-`2` row, including `run_unverified`: status exits `3` and resume refuses
+before any recovery mutation.
 
 A failed run or gate blocks its attempt when it can (see
 [Failed step runs](#failed-step-runs)), so `validation_missing` and
@@ -345,11 +374,10 @@ step-run ledger Golem could not read, a process that died mid-attempt, a
 Unknown future states fail closed. Resume never initializes, locks, records
 evidence or reviews, renews/reclaims leases, re-runs a model for an open
 attempt (an open attempt whose gate failed is blocked first; the model then
-runs in a new attempt), executes advisory command strings, rebuilds a proof
-when the state it reads on entry or after a settlement is `proof_stale` or
-`proof_failing`, or starts parallel recovery. Normal interactive startup only detects a
-case-insensitive `.agent` directory and prints the status/resume commands; it
-does not inspect or mutate the ledgers.
+runs in a new attempt), executes advisory command strings, replaces a proof
+that fails initial verification, or starts parallel recovery. Normal
+interactive startup only detects a case-insensitive `.agent` directory and
+prints the status/resume commands; it does not inspect or mutate the ledgers.
 
 ### Failed step runs
 
@@ -593,14 +621,15 @@ For an external plan, the task driver order is:
    route again immediately before review-manifest ingestion.
 5. After the steps and any review amendments, ask `next-action` whether step
    work remains, and continue only from a run-phase state (`run_unverified`,
-   `drift_failing`, `proof_missing`, `proof_stale`, `proof_failing`,
-   `complete`). AgentFlow's `next-step` returns nothing both when every step is
-   done and when the remaining steps hold open attempts, so any other state
-   (for example an attempt another writer opened during the run), or a failed
-   `next-action` call, exits 1 without running `finish-run`. The error names the
-   state and step and sends you to `-agentflow-status`, which runs resume's
-   state and projection checks (not its plan and contract bindings, which need
-   the supplied `-plan`) and reports whether `-agentflow-resume` can recover.
+   `drift_failing`, `proof_missing`, `proof_stale`, `complete`).
+   `proof_failing` exits 1 and points at `.agent/proof-pack.json`, preserving
+   that proof. AgentFlow's `next-step` returns nothing both when every step is
+   done and when remaining steps hold open attempts, so any other state or a
+   failed `next-action` call also stops before `finish-run`. A remaining-work
+   error names the state and step and sends you to `-agentflow-status` for
+   recovery checks, including independent verification of an existing proof.
+   Status does not check resume's supplied-plan and handoff bindings, which
+   require those inputs.
    An attempt left open after its gate failed (the block itself failed, the
    step-run ledger could not be read, the process died, or an older Golem
    wrote it) is blocked by `-agentflow-resume`, which then re-runs the step in a
