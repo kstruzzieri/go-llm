@@ -489,6 +489,13 @@ func requireAggregationJSONKind(fields map[string]json.RawMessage, name string, 
 	return nil
 }
 
+// VerifyProof checks the existing proof pack without rebuilding it. A nonzero
+// CLI exit returns a *CommandError.
+func (c *Client) VerifyProof(ctx context.Context) error {
+	_, err := c.call(ctx, "verify-proof", append([]string{"verify-proof"}, c.rootArgs()...), false)
+	return err
+}
+
 // FinishRun runs the terminal gates. On success it returns the deterministic
 // proof-pack path; AgentFlow's finish-run JSON reports ok/stopped_at/gates, not
 // the path. On a stop, it returns *FinishRunError with stopped_at/diagnostics

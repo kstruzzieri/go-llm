@@ -151,6 +151,11 @@ func runAgentflowStatusWithRunner(ctx context.Context, out io.Writer, root strin
 			disposition = recoveryDisposition{failClosed, 3, "blocked: " + err.Error()}
 		}
 	}
+	if disposition.action == resumeSerial {
+		if _, err := newResumeProofGuard(ctx, client, root); err != nil {
+			disposition = recoveryDisposition{failClosed, 3, "blocked: " + err.Error()}
+		}
+	}
 	var proof *agentflow.ProofSummary
 	if disposition.action == reportComplete {
 		summary, err := verifiedAgentflowProofSummary(ctx, client)
@@ -604,6 +609,10 @@ func (d *driver) resume(ctx context.Context, root string, planJSON []byte, appro
 	if err := refuseRetainedTimeout(root); err != nil {
 		return agentflow.NextActionState{}, err
 	}
+	proof, err := newResumeProofGuard(ctx, d.af, root)
+	if err != nil {
+		return agentflow.NextActionState{}, err
+	}
 
 	settled, err := settleAgentflowAttempt(ctx, d.af, root, d.plan, state)
 	if err != nil {
@@ -629,11 +638,9 @@ func (d *driver) resume(ctx context.Context, root string, planJSON []byte, appro
 			return state, nil
 		case "step_unclaimed", "run_unverified", "proof_missing":
 		case "proof_stale":
-			// #689: settlement appended to the .agent ledgers an older proof
-			// hashes, and AgentFlow reports any hash mismatch as proof_stale.
-			// The tail's finish-run replaces it once drift and run
-			// verification pass, as after the serial loop. On entry it still
-			// fails closed; proof_failing still does here.
+			// #689: the retained proof verified before settlement. The tail
+			// also checks its bytes have not changed before replacing it;
+			// proof_stale alone cannot establish either fact.
 		default:
 			disposition = resumeDisposition(state.State)
 			if disposition.action == failClosed {
@@ -674,7 +681,7 @@ func (d *driver) resume(ctx context.Context, root string, planJSON []byte, appro
 	if err := d.runSerialSteps(ctx); err != nil {
 		return agentflow.NextActionState{}, err
 	}
-	if _, err := d.finishRun(ctx); err != nil {
+	if _, err := d.finishRun(ctx, proof); err != nil {
 		return agentflow.NextActionState{}, err
 	}
 	final, err := d.af.NextAction(ctx)

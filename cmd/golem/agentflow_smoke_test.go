@@ -2009,12 +2009,65 @@ func TestAgentflowResumeRefusesFinishRunWhileStepWorkRemains_RealCLI(t *testing.
 	}
 }
 
-// #689: an older proof (built by a non-strict finish-run over the open
-// attempt, as a pre-#651 Golem or a hand-run `agentflow finish-run` would) is
-// hidden behind step work at resume entry. Golem's own ledger writes make a
-// valid one proof_stale, and resume replaces it whichever path completes the
-// step. A proof from a newer AgentFlow surfaces as proof_failing, and resume
-// preserves it on both paths.
+// #689: a proof already invalid at entry must be preserved even when
+// next-action hides it behind unfinished step work.
+func TestAgentflowResumePreservesAlreadyStaleProof_RealCLI(t *testing.T) {
+	for _, stale := range []string{"ledger changed", "core checksum changed"} {
+		t.Run(stale, func(t *testing.T) {
+			dir, runner, client, plan, planBytes := openSettlementAttempt(t, nil, "expected\n")
+			ctx := context.Background()
+			if _, err := client.FinishRun(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if stale == "ledger changed" {
+				path := filepath.Join(dir, ".agent", "step-runs.jsonl")
+				data, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, append(data, '\n'), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				path := filepath.Join(dir, ".agent", "proof-pack.json")
+				data, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var proof map[string]any
+				if err := json.Unmarshal(data, &proof); err != nil {
+					t.Fatal(err)
+				}
+				proof["core_sha256"] = strings.Repeat("0", 64)
+				data, err = json.Marshal(proof)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, data, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, _, exit, err := runner.Run(ctx, []string{"verify-proof", "--root", dir}, nil); err != nil || exit != 1 {
+				t.Fatalf("stale proof verification: exit=%d err=%v, want exit 1", exit, err)
+			}
+			if state, err := client.NextAction(ctx); err != nil || state.State != "validation_missing" {
+				t.Fatalf("staged state=%q err=%v, want hidden stale proof", state.State, err)
+			}
+			before := snapshotSmokeAgentTree(t, dir)
+			d := &driver{af: client, plan: &plan, root: dir, runStep: func(context.Context, agentflow.Step, string, string) error {
+				t.Fatal("resume ran the model over an already stale proof")
+				return nil
+			}}
+			if _, err := d.resume(ctx, dir, planBytes, nil); err == nil || !strings.Contains(err.Error(), "verify existing proof before resume") {
+				t.Errorf("resume err=%v, want refusal before mutation", err)
+			}
+			if after := snapshotSmokeAgentTree(t, dir); !reflect.DeepEqual(after, before) {
+				t.Error("resume changed .agent while preserving an already stale proof")
+			}
+		})
+	}
+}
+
 func TestAgentflowResumeProofDisposition_RealCLI(t *testing.T) {
 	const newerSchema = `{"schema_version":"99.0.0"}`
 	for _, test := range []struct {
@@ -2022,14 +2075,15 @@ func TestAgentflowResumeProofDisposition_RealCLI(t *testing.T) {
 		failGate     bool
 		proof        string // replaces the staged proof when set
 		models       int
+		retryModels  int
 		wantErr      string
 	}{
 		{name: "settlement replaces stale", answer: "expected\n"},
 		{name: "serial loop replaces stale", answer: "wrong\n", failGate: true, models: 1},
 		{name: "settlement preserves newer schema", answer: "expected\n", proof: newerSchema,
-			wantErr: `agentflow resume blocked after settlement in state "proof_failing": blocked by failing proof`},
-		{name: "serial loop preserves newer schema", answer: "wrong\n", failGate: true, proof: newerSchema, models: 1,
-			wantErr: "agentflow reports a failing proof before finish-run; finish-run would replace it, so no proof was built; inspect .agent/proof-pack.json, move it out of the workspace, then run -agentflow-status to see whether -agentflow-resume can build a new proof"},
+			wantErr: "verify existing proof before resume"},
+		{name: "serial loop preserves newer schema", answer: "wrong\n", failGate: true, proof: newerSchema, retryModels: 1,
+			wantErr: "verify existing proof before resume"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			dir, runner, client, plan, planBytes := openSettlementAttempt(t, nil, test.answer)
@@ -2060,6 +2114,20 @@ func TestAgentflowResumeProofDisposition_RealCLI(t *testing.T) {
 			if state, err := client.NextAction(ctx); err != nil || state.State != "validation_missing" {
 				t.Fatalf("staged state = %q, err = %v; want the proof hidden behind validation_missing", state.State, err)
 			}
+			before := snapshotSmokeAgentTree(t, dir)
+			if test.wantErr != "" {
+				for _, jsonOutput := range []bool{false, true} {
+					var status bytes.Buffer
+					var exit *agentflowStatusExit
+					err := runAgentflowStatusWithRunner(ctx, &status, dir, jsonOutput, runner)
+					if !errors.As(err, &exit) || exit.ExitCode() != 3 {
+						t.Fatalf("status err=%v, want blocked exit 3\n%s", err, status.String())
+					}
+					if !jsonOutput && !strings.Contains(status.String(), test.wantErr) {
+						t.Fatalf("status omitted proof refusal: %s", status.String())
+					}
+				}
+			}
 
 			models := 0
 			d := &driver{af: client, plan: &plan, root: dir, runStep: func(ctx context.Context, step agentflow.Step, attempt, _ string) error {
@@ -2076,24 +2144,27 @@ func TestAgentflowResumeProofDisposition_RealCLI(t *testing.T) {
 				t.Fatal(readErr)
 			}
 			if test.wantErr != "" {
-				if err == nil || err.Error() != test.wantErr {
+				if err == nil || !strings.Contains(err.Error(), test.wantErr) {
 					t.Fatalf("resume err = %v\nwant %s", err, test.wantErr)
+				}
+				if after := snapshotSmokeAgentTree(t, dir); !reflect.DeepEqual(after, before) {
+					t.Fatal("status or resume changed .agent before rejecting the existing proof")
 				}
 				if !bytes.Equal(after, old) {
 					t.Fatalf("proof-pack.json changed to %q, want the staged bytes preserved", after)
 				}
 				// The documented way on: move the preserved proof out of the
-				// workspace. next-action then reports proof_missing, and resume
-				// builds a new proof without running the model again.
+				// workspace. Resume then settles or retries the pending step
+				// and builds a new proof.
 				kept := filepath.Join(t.TempDir(), "proof-pack.json")
 				if err := os.Rename(proofPath, kept); err != nil {
 					t.Fatal(err)
 				}
-				rebuild := &driver{af: client, plan: &plan, root: dir, runStep: func(context.Context, agentflow.Step, string, string) error {
-					return errors.New("rebuilding the proof ran the model")
-				}}
-				if final, err := rebuild.resume(ctx, dir, planBytes, nil); err != nil || final.State != "complete" {
+				if final, err := d.resume(ctx, dir, planBytes, nil); err != nil || final.State != "complete" {
 					t.Fatalf("resume after moving the proof out: state = %q, err = %v; want complete", final.State, err)
+				}
+				if models != test.retryModels {
+					t.Fatalf("model runs after moving proof = %d, want %d", models, test.retryModels)
 				}
 				if moved, err := os.ReadFile(kept); err != nil || !bytes.Equal(moved, old) {
 					t.Fatalf("moved proof = %q, err = %v; want the staged bytes", moved, err)

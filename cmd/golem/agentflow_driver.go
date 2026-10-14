@@ -44,6 +44,7 @@ type afClient interface {
 	FinishStep(context.Context, string, string) error
 	CompleteStep(context.Context, string, string) error
 	BlockStep(context.Context, string, string, string) error
+	VerifyProof(context.Context) error
 	FinishRun(context.Context) (string, error)
 	RecordFileChange(context.Context, string, string, string) error
 	RecordEvidence(context.Context, agentflow.EvidenceEntry) error
@@ -302,16 +303,21 @@ func (d *driver) run(ctx context.Context) (string, error) {
 			return "", err
 		}
 	}
-	return d.finishRun(ctx)
+	return d.finishRun(ctx, nil)
 }
 
 // finishRun runs AgentFlow's finish-run once next-action reports no step or
 // attempt work. Fresh runs and resume reach finish-run only through it, so
-// neither can skip the check (#651, #688), and neither overwrites a failing
-// proof (#689).
-func (d *driver) finishRun(ctx context.Context) (string, error) {
+// neither can skip the check (#651, #688), and both refuse an exposed
+// proof_failing state (#689). Resume also guards its pre-verified proof.
+func (d *driver) finishRun(ctx context.Context, proof *resumeProofGuard) (string, error) {
 	if err := d.requireNoStepWork(ctx); err != nil {
 		return "", err
+	}
+	if proof != nil {
+		if err := proof.checkUnchanged(); err != nil {
+			return "", err
+		}
 	}
 	return d.af.FinishRun(ctx)
 }
@@ -320,8 +326,8 @@ func (d *driver) finishRun(ctx context.Context) (string, error) {
 // attempt work (#651). next-step returns nothing both when every step is done
 // and when the remaining steps hold open attempts, and non-strict finish-run
 // does not require completed steps; only next-action's run-phase states prove
-// that every step completed and no attempt is open. It also refuses a
-// failing proof, which finish-run would overwrite (#689).
+// that every step completed and no attempt is open. It also refuses
+// proof_failing, which finish-run would overwrite (#689).
 func (d *driver) requireNoStepWork(ctx context.Context) error {
 	state, err := d.af.NextAction(ctx)
 	if err != nil {

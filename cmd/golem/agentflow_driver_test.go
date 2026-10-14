@@ -156,6 +156,10 @@ func (f *fakeAF) BlockStep(ctx context.Context, id, attempt, reason string) erro
 	f.blocks = append(f.blocks, newBlockCall(ctx))
 	return f.failure("block-step")
 }
+func (f *fakeAF) VerifyProof(context.Context) error {
+	f.seq = append(f.seq, "verify-proof")
+	return f.failure("verify-proof")
+}
 func (f *fakeAF) FinishRun(context.Context) (string, error) {
 	f.seq = append(f.seq, "finish-run")
 	if f.proofError != nil {
