@@ -285,15 +285,21 @@ attempt another writer opened while resume ran. A failed check call also stops
 resume with exit 1 before `finish-run`. The check and `finish-run` are two
 calls, so a writer that opens an attempt between them still reaches
 `finish-run`, and resume's final check then exits 1 (kstruzzieri/agentflow#58).
-The check lets every run-phase state through, as in a fresh run: when resume's
-own steps leave an older proof stale or failing, `finish-run` replaces it once
-drift and run verification pass. The `drift_failing`, `proof_stale` and
-`proof_failing` rows below describe the state resume finds on entry or after a
-settlement.
+The check lets every run-phase state except `proof_failing` through, as in a
+fresh run. AgentFlow's proof hashes the `.agent` ledgers, so anything resume
+records, in a settlement or a step, leaves an older proof `proof_stale`; once
+resume's own work exposes that state, whether its settlement or its serial loop
+completed the last step, `finish-run` replaces the proof after drift and run
+verification pass. A `proof_failing` proof (malformed, from a newer AgentFlow,
+or failing for another reason resume did not cause) is never replaced: resume
+exits 1 after a settlement exposes it, or at the check before `finish-run`.
+Drift exposed by a settlement is also refused; after the serial loop,
+`finish-run`'s drift audit stops before building a proof. The table describes
+the state resume finds on entry.
 
 The complete disposition table is:
 
-| AgentFlow state | Exit | Resume behavior |
+| AgentFlow state | Status exit | Resume behavior |
 |---|---:|---|
 | `uninitialized` | 3 | Setup required; never call `init`. |
 | `plan_unlocked` | 3 | Setup required; never relock. |
@@ -308,8 +314,8 @@ The complete disposition table is:
 | `drift_failing` | 3 | Fail closed for operator inspection. |
 | `run_unverified` | 2 | Enter the serial tail; after the step-work check, call `FinishRun` once. |
 | `proof_missing` | 2 | After the step-work check, call `FinishRun` once to generate and verify the first proof. |
-| `proof_stale` | 3 | Fail closed; do not overwrite proof after changed inputs. |
-| `proof_failing` | 3 | Fail closed; preserve the failing proof. |
+| `proof_stale` | 3 | Fail closed; do not overwrite a proof resume has not touched. When resume's own settlement or steps make an older proof stale, the tail replaces it. |
+| `proof_failing` | 3 | Fail closed; preserve the failing proof, on entry and after resume's own work. |
 | `complete` | 0 | Report verified proof and perform no mutation. |
 
 Status shows the failed-gate row as
@@ -345,9 +351,9 @@ step-run ledger Golem could not read, a process that died mid-attempt, a
 Unknown future states fail closed. Resume never initializes, locks, records
 evidence or reviews, renews/reclaims leases, re-runs a model for an open
 attempt (an open attempt whose gate failed is blocked first; the model then
-runs in a new attempt), executes advisory command strings, rebuilds a proof
-when the state it reads on entry or after a settlement is `proof_stale` or
-`proof_failing`, or starts parallel recovery. Normal interactive startup only detects a
+runs in a new attempt), executes advisory command strings, rebuilds a proof it
+finds `proof_stale` on entry, replaces a `proof_failing` proof, or starts
+parallel recovery. Normal interactive startup only detects a
 case-insensitive `.agent` directory and prints the status/resume commands; it
 does not inspect or mutate the ledgers.
 
@@ -593,8 +599,10 @@ For an external plan, the task driver order is:
    route again immediately before review-manifest ingestion.
 5. After the steps and any review amendments, ask `next-action` whether step
    work remains, and continue only from a run-phase state (`run_unverified`,
-   `drift_failing`, `proof_missing`, `proof_stale`, `proof_failing`,
-   `complete`). AgentFlow's `next-step` returns nothing both when every step is
+   `drift_failing`, `proof_missing`, `proof_stale`, `complete`).
+   `proof_failing` also exits 1 without running `finish-run`, which would
+   overwrite that proof; the error points at `.agent/proof-pack.json`.
+   AgentFlow's `next-step` returns nothing both when every step is
    done and when the remaining steps hold open attempts, so any other state
    (for example an attempt another writer opened during the run), or a failed
    `next-action` call, exits 1 without running `finish-run`. The error names the
