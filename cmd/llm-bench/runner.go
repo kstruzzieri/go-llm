@@ -18,6 +18,13 @@ const benchKeepAlive = "30m"
 
 const plainChatToolDivergenceFinal = "__LLM_BENCH_TOOL_DIVERGENCE_8F3E0B2C__"
 
+// Divergence kinds recorded on replayOutput.Divergences (#687).
+const (
+	divergenceToolRouteBypassed = "tool_route_bypassed"
+	divergencePlainChatToolCall = "plain_chat_tool_call"
+	divergencePrefilledToolCall = "prefilled_tool_call"
+)
+
 // Sentinel errors so tests assert on identity rather than message text.
 var (
 	errNoUserTurn               = errors.New("trace has no user turn")
@@ -39,6 +46,13 @@ var (
 	errOffGridJudgeScore        = errors.New("off-grid judge answer_quality")
 	errNoAssistantFinalAnswer   = errors.New("judge scorer requires an assistant final answer")
 )
+
+// frozenToolResultNameError marks a fixture defect while preserving the
+// legacy error text and errToolCallMismatch identity used by runner callers.
+type frozenToolResultNameError struct{ err error }
+
+func (e *frozenToolResultNameError) Error() string { return e.err.Error() }
+func (e *frozenToolResultNameError) Unwrap() error { return e.err }
 
 // Runner executes traces against a list of candidate models and collects
 // per-trace, per-model Results.
@@ -184,6 +198,14 @@ type replayOutput struct {
 	GenTokens        int
 	ThinkingTokens   int
 	ThinkingComputed bool // true once any turn reported isolated thinking tokens
+	// Divergences names each scored-divergence branch the replay executed,
+	// in order; SentinelSubstituted is true when one of them replaced the
+	// candidate's content with plainChatToolDivergenceFinal. Both are set in
+	// the branch itself, never inferred from content (a candidate can emit
+	// the sentinel string). No legacy writer serializes replayOutput; they
+	// exist for -replay-attempt (#687).
+	Divergences         []string
+	SentinelSubstituted bool
 }
 
 // addUsage folds one chat turn's token usage into the replay totals.
@@ -310,6 +332,7 @@ func replayWith(ctx context.Context, client candidateChatClient, model string, t
 						out.Notes = append(out.Notes,
 							fmt.Sprintf("trace %q user turn %d: candidate bypassed scripted tool route (%d turn(s) skipped from index %d)",
 								trace.ID, userIndex, skipped, i))
+						out.Divergences = append(out.Divergences, divergenceToolRouteBypassed)
 					}
 					i = next
 				}
@@ -406,8 +429,10 @@ func replayPrefilled(ctx context.Context, client candidateChatClient, model stri
 		// recorded and scored on its content, never errored.
 		out.Notes = append(out.Notes,
 			fmt.Sprintf("prefilled trace %q: candidate emitted %d tool call(s); scored on content", trace.ID, n))
+		out.Divergences = append(out.Divergences, divergencePrefilledToolCall)
 		if strings.TrimSpace(msg.Content) == "" {
 			out.Transcript[len(out.Transcript)-1].Content = plainChatToolDivergenceFinal
+			out.SentinelSubstituted = true
 		}
 	}
 	if note := thinkMarkupResidueNote(lastAssistantContent(out.Transcript)); note != "" {
@@ -491,7 +516,9 @@ func scorePlainChatToolDivergence(out replayOutput, traceID string, userIndex, t
 	// divergence.
 	if n := len(out.Transcript); n > 0 {
 		out.Transcript[n-1].Content = plainChatToolDivergenceFinal
+		out.SentinelSubstituted = true
 	}
+	out.Divergences = append(out.Divergences, divergencePlainChatToolCall)
 	out.Notes = append(out.Notes,
 		fmt.Sprintf("trace %q user turn %d: candidate called %d tool(s) on a plain-chat trace (%s); scored as divergence",
 			traceID, userIndex, toolCallCount, reason))
@@ -593,8 +620,8 @@ func frozenToolResults(traceID string, expectedIndex int, expected Turn, turns [
 		}
 		resultName := strings.TrimSpace(result.Name)
 		if resultName != "" && resultName != callName {
-			return nil, nil, start, fmt.Errorf("trace %q assistant turn %d tool %d result: got %q, want %q: %w",
-				traceID, expectedIndex, i, resultName, callName, errToolCallMismatch)
+			return nil, nil, start, &frozenToolResultNameError{err: fmt.Errorf("trace %q assistant turn %d tool %d result: got %q, want %q: %w",
+				traceID, expectedIndex, i, resultName, callName, errToolCallMismatch)}
 		}
 
 		messages = append(messages, ollama.ChatMessage{

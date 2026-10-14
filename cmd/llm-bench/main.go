@@ -115,6 +115,11 @@ func main() {
 	reportPath := flag.String("report", "", "Output report path (default: stdout)")
 	ollamaURL := flag.String("ollama-url", "http://localhost:11434", "Ollama base URL")
 	timeout := flag.Duration("timeout", 5*time.Minute, "Per-replay timeout for candidate model calls")
+	replayAttempt := flag.Bool("replay-attempt", false, "Run exactly one replay attempt of -attempt-trace against one openai-compat -models target and publish an immutable -attempt-dir holding raw/ evidence and attempt.json (schema llm-bench.replay-attempt/v1); exits 0 once attempt.json is published, whatever the attempt's status (#687)")
+	attemptTrace := flag.String("attempt-trace", "", "With -replay-attempt: the one trace JSON file to replay (a literal path, not a glob)")
+	attemptID := flag.String("attempt-id", "", "With -replay-attempt: caller-supplied attempt id matching [A-Za-z0-9._:-]{1,128}; sent as X-Client-Correlation <id>/<ordinal>")
+	attemptArm := flag.String("attempt-arm", "", "With -replay-attempt: opaque arm selector, recorded verbatim")
+	attemptDir := flag.String("attempt-dir", "", "With -replay-attempt: output directory, which must not exist")
 	flag.Parse()
 	providedFlags := map[string]bool{}
 	flag.Visit(func(f *flag.Flag) {
@@ -175,12 +180,40 @@ func main() {
 	if *assemblyBuildPath != "" {
 		modes++
 	}
+	if *replayAttempt {
+		modes++
+	}
 	if modes > 1 {
-		log.Fatalf("llm-bench: -capture, -calibrate-capture, -calibrate, -manual-report, -paired-report, -assembly-report, -fim-latency, -blind-render, -blind-ingest, -fc-render, -fc-ingest, -fc-sidemap-generate, -adjudicate-render, -adjudicate-ingest, -discrimination-report, -import-xlam, -assembly-build are mutually exclusive")
+		log.Fatalf("llm-bench: -capture, -calibrate-capture, -calibrate, -manual-report, -paired-report, -assembly-report, -fim-latency, -blind-render, -blind-ingest, -fc-render, -fc-ingest, -fc-sidemap-generate, -adjudicate-render, -adjudicate-ingest, -discrimination-report, -import-xlam, -assembly-build, -replay-attempt are mutually exclusive")
+	}
+	if !*replayAttempt {
+		if stray := strayAttemptFlags(providedFlags); len(stray) > 0 {
+			log.Fatalf("llm-bench: %s require -replay-attempt", strings.Join(stray, ", "))
+		}
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
+
+	if *replayAttempt {
+		// stderr carries evidence before attempt.json is published. Without
+		// this, Go kills the process with SIGPIPE on a write to a closed
+		// stderr pipe, leaving a claimed directory with no terminal. Write
+		// errors are already discarded.
+		signal.Ignore(syscall.SIGPIPE)
+		code := runReplayAttempt(ctx, replayAttemptOptions{
+			AttemptDir: *attemptDir,
+			AttemptID:  *attemptID,
+			Arm:        *attemptArm,
+			TracePath:  *attemptTrace,
+			Models:     *modelsArg,
+			BaseURL:    ct.baseURL,
+			APIKey:     ct.apiKey,
+			Timeout:    *timeout,
+		}, os.Stderr)
+		cancel()
+		os.Exit(code)
+	}
 
 	if *assemblyBuildPath != "" {
 		if err := assemblyBuildDispatch(ctx, *assemblyBuildPath, *assemblyOut, *assemblyOutMixed); err != nil {
@@ -1268,4 +1301,16 @@ func resolveToolSchemaSource(stdioCmd, httpURL string) (toolSchemaSource, error)
 		return newMCPToolSchemaSourceHTTP(httpURL)
 	}
 	return nil, nil
+}
+
+// strayAttemptFlags lists the -attempt-* flags set without -replay-attempt,
+// which would otherwise be silently ignored by a legacy mode (#687).
+func strayAttemptFlags(provided map[string]bool) []string {
+	var stray []string
+	for _, name := range []string{"attempt-trace", "attempt-id", "attempt-arm", "attempt-dir"} {
+		if provided[name] {
+			stray = append(stray, "-"+name)
+		}
+	}
+	return stray
 }
