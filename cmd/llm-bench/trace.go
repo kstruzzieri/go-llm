@@ -32,6 +32,9 @@ type Trace struct {
 	// AssemblyEval is present only on assembly-corpus traces (#331); nil for
 	// every other trace and omitted from their JSON.
 	AssemblyEval *AssemblyEval `json:"assembly_eval,omitempty"`
+	// Injection marks a #452 frozen-wire injection trace (spec §4). Mutually
+	// exclusive with AssemblyEval.
+	Injection *InjectionEval `json:"injection,omitempty"`
 }
 
 // Turn represents a single role/content pair, optionally with tool calls or
@@ -118,6 +121,9 @@ func validateTrace(t Trace) error {
 		if _, ok := validRestraintDifficulties[d]; !ok {
 			return fmt.Errorf("golden.difficulty %q invalid (want obvious, tempting, adversarial, or empty)", d)
 		}
+	}
+	if t.Injection != nil {
+		return validateInjectionTrace(t) // injection traces never take the assembly path
 	}
 	if t.AssemblyEval != nil {
 		ae := t.AssemblyEval
