@@ -177,8 +177,25 @@ func (r injectionRegistration) validate() error {
 		if d.NumPredict <= 0 || strings.TrimSpace(d.ServingStack) == "" {
 			return fmt.Errorf("model %q decoding needs num_predict > 0 and serving_stack", m)
 		}
+		if d.Temperature != 0 {
+			return fmt.Errorf("decoding for %q: temperature must be 0 (#452 global constraint); got %v", m, d.Temperature)
+		}
 		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(d.ServingStack)), "hosted") && d.Hosted == nil {
 			return fmt.Errorf("model %q serving_stack %q is hosted but has no hosted block", m, d.ServingStack)
+		}
+		if h := d.Hosted; h != nil {
+			for name, v := range map[string]string{
+				"endpoint": h.Endpoint, "capture_window": h.CaptureWindow, "think_fields": h.ThinkFields,
+				"parser_policy": h.ParserPolicy, "tool_call_envelope": h.ToolCallEnvelope,
+				"time_limit": h.TimeLimit, "session_header_policy": h.SessionHeaderPolicy,
+			} {
+				if strings.TrimSpace(v) == "" {
+					return fmt.Errorf("model %q hosted.%s is required", m, name)
+				}
+			}
+			if h.UnavailableControls == nil {
+				return fmt.Errorf("model %q hosted.unavailable_controls must be present (may be empty)", m)
+			}
 		}
 	}
 	want := registeredDecoderPolicy{

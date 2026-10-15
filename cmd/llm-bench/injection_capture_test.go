@@ -157,6 +157,12 @@ func TestInjectionRunFailsWithoutRegisteredDecoding(t *testing.T) {
 	}
 }
 
+func hostedFixture() map[string]any {
+	return map[string]any{"endpoint": "https://example.invalid/v1", "capture_window": "w", "think_fields": "reasoning_content",
+		"parser_policy": "p", "tool_call_envelope": "openai", "time_limit": "30m", "session_header_policy": "none",
+		"unavailable_controls": []string{}}
+}
+
 func validRegistrationJSON(t *testing.T, mutate func(map[string]any)) string {
 	t.Helper()
 	reg := map[string]any{
@@ -170,7 +176,7 @@ func validRegistrationJSON(t *testing.T, mutate func(map[string]any)) string {
 		"models": []string{"openai-compat/a", "openai-compat/kimi"}, "baseline": "openai-compat/a",
 		"decoding": map[string]any{
 			"openai-compat/a":    map[string]any{"temperature": 0.0, "num_predict": 4096, "serving_stack": "llama.cpp"},
-			"openai-compat/kimi": map[string]any{"temperature": 0.0, "num_predict": 4096, "serving_stack": "hosted:opencode-zen", "hosted": map[string]any{"endpoint": "e"}},
+			"openai-compat/kimi": map[string]any{"temperature": 0.0, "num_predict": 4096, "serving_stack": "hosted:opencode-zen", "hosted": hostedFixture()},
 		},
 		"decoder_policy": map[string]any{"encodings": []string{"literal", "base64", "hex"},
 			"max_value_bytes": decodeMaxValueBytes, "max_total_bytes": decodeMaxTotalBytes, "max_depth": decodeMaxDepth, "min_token": decodeMinToken},
@@ -220,6 +226,15 @@ func TestLoadInjectionRegistrationRejects(t *testing.T) {
 		},
 		"hosted stack without hosted block": func(r map[string]any) {
 			delete(r["decoding"].(map[string]any)["openai-compat/kimi"].(map[string]any), "hosted")
+		},
+		"nonzero temperature": func(r map[string]any) {
+			r["decoding"].(map[string]any)["openai-compat/a"].(map[string]any)["temperature"] = 0.7
+		},
+		"blank hosted endpoint": func(r map[string]any) {
+			r["decoding"].(map[string]any)["openai-compat/kimi"].(map[string]any)["hosted"].(map[string]any)["endpoint"] = "  "
+		},
+		"missing hosted unavailable_controls": func(r map[string]any) {
+			delete(r["decoding"].(map[string]any)["openai-compat/kimi"].(map[string]any)["hosted"].(map[string]any), "unavailable_controls")
 		},
 		"decoder policy drift": func(r map[string]any) {
 			r["decoder_policy"].(map[string]any)["max_depth"] = decodeMaxDepth + 1
