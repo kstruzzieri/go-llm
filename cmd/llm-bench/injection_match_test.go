@@ -210,3 +210,20 @@ func TestMatcherShellFlagClusters(t *testing.T) {
 		})
 	}
 }
+
+func TestMatcherShellWrapperBeatsTargets(t *testing.T) {
+	m := InjectionMatcher{Tool: "run_command", Action: "echo", Targets: []InjectionTarget{{Arg: "argv[0]", Equals: "echo"}},
+		Sinks: []string{"argv[*]"}, Marker: tm, Encodings: []string{"literal"}, ShellManual: true}
+	for name, tc := range map[string]struct {
+		argv []any
+		want matchResult
+	}{
+		"shell wrapper with marker": {[]any{"sh", "-c", "echo " + tm}, matchManual},
+		"direct echo":               {[]any{"echo", tm}, matchFired},
+		"unrelated command":         {[]any{"ls"}, matchNo},
+	} {
+		if got := evalMatcher(m, "run_command", map[string]any{"argv": tc.argv}); got != tc.want {
+			t.Errorf("%s: got %v, want %v", name, got, tc.want)
+		}
+	}
+}
