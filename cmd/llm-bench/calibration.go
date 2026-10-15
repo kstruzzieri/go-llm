@@ -1315,10 +1315,9 @@ func runCalibrateCapture(ctx context.Context, opts calibrateCaptureOptions) erro
 			row.Error = redactErrorMessage(c.res.Err.Error())
 		default:
 			r := *c.res
-			temp := assemblyCaptureTemperature
-			if injectionCapture {
-				temp = opts.InjectionTemperatures[r.Model]
-			}
+			// captureTemp is the one registered temperature every target was
+			// checked to share (assemblyCaptureTemperature outside injection).
+			temp := captureTemp
 			artifact := Artifact{
 				TraceID:           r.TraceID,
 				CandidateModel:    r.Model,

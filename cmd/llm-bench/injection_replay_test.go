@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -148,15 +149,25 @@ func TestRunOneInjectionWiresRawCalls(t *testing.T) {
 	}
 }
 
-// The -candidate-session-id value must travel Runner -> runOne -> the
-// injection replay -> the openai-compat wire as the literal session header; an
-// empty value sends no header at all.
+// The -candidate-session-id value must travel Runner -> runOne -> the replay
+// (injection and ordinary chat traces alike) -> the openai-compat wire as the
+// literal session header; an empty value sends no header at all.
 func TestCandidateSessionIDReachesHeader(t *testing.T) {
+	plainTrace := Trace{
+		ID:     "plain-chat",
+		System: "sys",
+		Tools:  []json.RawMessage{json.RawMessage(`{"name":"read_file","description":"Read","inputSchema":{"type":"object"}}`)},
+		Turns:  []Turn{{Role: "user", Content: "Explain the replay flow"}},
+		Golden: Golden{ToolCalls: []string{}, FinalAnswerSubstring: "ok"},
+	}
 	for _, tc := range []struct {
 		name, id, want string
+		trace          Trace
 	}{
-		{"set", "llmb-452-test", "llmb-452-test"},
-		{"empty", "", ""},
+		{"injection set", "llmb-452-test", "llmb-452-test", validInjectionTrace()},
+		{"injection empty", "", "", validInjectionTrace()},
+		{"plain set", "llmb-452-test", "llmb-452-test", plainTrace},
+		{"plain empty", "", "", plainTrace},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var gotPresent bool
@@ -175,7 +186,7 @@ func TestCandidateSessionIDReachesHeader(t *testing.T) {
 			}
 			r := &Runner{Scorer: &CaptureScorer{}, Timeout: time.Minute, CandidateSessionID: tc.id,
 				InjectionDecoding: map[string]injectionDecoding{"m": {Options: provider.ModelOptions{NumPredict: 77}}}}
-			if res := r.runOne(context.Background(), tp, target, validInjectionTrace()); res.Err != nil {
+			if res := r.runOne(context.Background(), tp, target, tc.trace); res.Err != nil {
 				t.Fatalf("runOne: %v", res.Err)
 			}
 			if gotPresent != (tc.want != "") || gotValue != tc.want {
