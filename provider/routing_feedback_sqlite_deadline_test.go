@@ -228,12 +228,15 @@ func TestSQLiteFeedbackStoreDeadlineBoundsLockWait(t *testing.T) {
 	}
 }
 
-// Test 4: time spent waiting for a pool connection comes out of the budget.
+// Test 4: time spent waiting for a pool connection comes out of the budget:
+// the cap read back after the handover is at most the time that was left at
+// the handover.
 func TestSQLiteFeedbackStoreDeductsPoolWait(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feedback.db")
 	db := openFeedbackFileDB(t, path, "_pragma=busy_timeout(5000)", 1)
 	execFeedbackSQL(t, db, "PRAGMA journal_mode=WAL")
 	store := newFileFeedbackStore(t, db)
+	caps := recordedCaps(t, store)
 	_ = holdFeedbackLock(t, path, "BEGIN IMMEDIATE")
 	pinned, err := db.Conn(t.Context())
 	if err != nil {
@@ -242,6 +245,7 @@ func TestSQLiteFeedbackStoreDeductsPoolWait(t *testing.T) {
 	start := time.Now()
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
+	deadline, _ := ctx.Deadline()
 	done := make(chan error, 1)
 	acquired := make(chan struct{})
 	item := testFeedbackItem("m")
@@ -259,6 +263,9 @@ func TestSQLiteFeedbackStoreDeductsPoolWait(t *testing.T) {
 	// write really started after the handover.
 	waitUntil(t, func() bool { return db.Stats().WaitCount > 0 })
 	time.Sleep(1200*time.Millisecond - time.Since(start))
+	// The cap goes on after the pool hands this connection over, so the
+	// budget left now bounds it from above.
+	releaseLeft := time.Until(deadline)
 	_ = pinned.Close()
 	var recErr error
 	select {
@@ -267,14 +274,21 @@ func TestSQLiteFeedbackStoreDeductsPoolWait(t *testing.T) {
 		t.Fatal("runInTx did not return")
 	}
 	elapsed := time.Since(start)
-	t.Logf("ELAPSED pool-wait %v", elapsed)
+	t.Logf("ELAPSED pool-wait %v caps %v releaseLeft %v", elapsed, caps, releaseLeft)
 	select {
 	case <-acquired:
 	default:
 		t.Fatalf("fixture invalid: returned before acquiring the pool connection: %v", recErr)
 	}
-	// The write must spend the rest of the budget waiting, not less.
-	assertContendedFailure(t, recErr, elapsed, 1500*time.Millisecond, 2600*time.Millisecond)
+	// A budget measured before the pool wait would read back near the full
+	// 2s; one that deducts it reads back at most what was left at handover.
+	if got := caps[capBeforeBegin]; len(got) != 1 || got[0] > releaseLeft.Milliseconds() {
+		t.Fatalf("busy_timeout %s = %v ms, want one cap of at most %dms (the budget left when the pool connection was released)", capBeforeBegin, got, releaseLeft.Milliseconds())
+	}
+	// The write must spend the rest of the budget waiting, not less. 5s is a
+	// gross ceiling only (#693): slow lock I/O stretches the wait past the
+	// cap, and no cap at all would wait the DSN's 5s on top of the 1.2s hold.
+	assertContendedFailure(t, recErr, elapsed, 1500*time.Millisecond, 5*time.Second)
 }
 
 // Test 5: the cap is refreshed before COMMIT, which in rollback-journal mode
