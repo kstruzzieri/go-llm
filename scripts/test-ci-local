@@ -9,10 +9,60 @@ if ! grep -Fq 'run: golangci-lint fmt --diff' "$repo_root/.github/workflows/ci.y
   printf 'GitHub CI is missing the all-file formatting gate\n' >&2
   exit 1
 fi
-if ! grep -Fxq '        run: ./scripts/ci-local --mode security' "$repo_root/.github/workflows/ci.yml"; then
-  printf 'GitHub CI is missing the server-side security-contract gate\n' >&2
-  exit 1
-fi
+# require_step FILE NAME LINE...: workflow FILE has a step NAME holding each
+# exact LINE (so a commented-out or moved line cannot satisfy the pin).
+require_step() {
+  file="$repo_root/.github/workflows/$1"
+  name="      - name: $2"
+  shift 2
+  for want in "$@"; do
+    if ! awk -v name="$name" -v want="$want" '
+      /^      - / { step = ($0 == name) }
+      step && $0 == want { found = 1 }
+      END { exit !found }
+    ' "$file"; then
+      printf '%s: step "%s" is missing: %s\n' "$file" "${name#      - name: }" "$want" >&2
+      exit 1
+    fi
+  done
+}
+# Every containment profile has its checker step in CI, bound to the commit
+# under test, and every job publishes its evidence (#452).
+tree_env='GO_LLM_CI_TREE="$(git rev-parse "${GITHUB_SHA}^{tree}")"'
+checker='go run ./internal/containmentinv/check -inventory docs/security/containment-inventory.json'
+commit_env='          GO_LLM_CI_COMMIT: ${{ github.sha }}'
+upload='        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2'
+require_step ci.yml 'Security contracts' "$commit_env" \
+  "          $tree_env ./scripts/ci-local --mode security" \
+  '          cp "${TMPDIR:-/tmp}/containment-evidence.json" "$RUNNER_TEMP/containment-linux-host.json"'
+require_step ci.yml 'Containment inventory (bwrap)' '          GO_LLM_REQUIRE_BWRAP: "1"' "$commit_env" \
+  "        run: $tree_env $checker -profile bwrap -evidence-out \"\$RUNNER_TEMP/containment-bwrap.json\""
+for af in installed source; do
+  require_step ci.yml "Agentflow compatibility ($af)" "$commit_env" \
+    "          $tree_env $checker -profile agentflow-integration -evidence-out \"\$RUNNER_TEMP/containment-agentflow-integration-$af.json\""
+done
+require_step ci.yml 'Containment inventory (windows)' "$commit_env" \
+  "        run: $tree_env $checker -profile windows -evidence-out \"\$RUNNER_TEMP/containment-windows.json\""
+require_step darwin-smoke.yml 'Containment inventory (darwin-host)' "$commit_env" \
+  "        run: $tree_env $checker -profile darwin-host -evidence-out \"\$RUNNER_TEMP/containment-darwin-host.json\""
+require_step darwin-smoke.yml 'Containment inventory (seatbelt)' '          GO_LLM_REQUIRE_SEATBELT: "1"' "$commit_env" \
+  "        run: $tree_env $checker -profile seatbelt -evidence-out \"\$RUNNER_TEMP/containment-seatbelt.json\""
+require_step ci.yml 'Upload containment evidence' "$upload" \
+  '          path: ${{ runner.temp }}/containment-linux-host.json' \
+  '          path: ${{ runner.temp }}/containment-bwrap.json' \
+  '            ${{ runner.temp }}/containment-agentflow-integration-installed.json' \
+  '            ${{ runner.temp }}/containment-agentflow-integration-source.json' \
+  '          path: ${{ runner.temp }}/containment-windows.json'
+require_step darwin-smoke.yml 'Upload containment evidence' "$upload" \
+  '            ${{ runner.temp }}/containment-darwin-host.json' \
+  '            ${{ runner.temp }}/containment-seatbelt.json'
+# One upload per job that runs the checker: four in ci.yml, one in darwin-smoke.
+for pin in ci.yml:4 darwin-smoke.yml:1; do
+  if [ "$(grep -Fxc -- "$upload" "$repo_root/.github/workflows/${pin%:*}")" != "${pin#*:}" ]; then
+    printf '%s must upload containment evidence from %s jobs\n' "${pin%:*}" "${pin#*:}" >&2
+    exit 1
+  fi
+done
 # The full-mode expectations below pin ci-local's copy of these builds and vets.
 for platform in windows freebsd "darwin GOARCH=amd64" "darwin GOARCH=arm64"; do
   if ! grep -Fxq "          GOOS=$platform go vet ./..." "$repo_root/.github/workflows/ci.yml"; then
@@ -136,6 +186,10 @@ case "$*" in
     printf '%s\n' "$CI_LOCAL_SECURITY_OUTPUT"
     exit "$CI_LOCAL_SECURITY_STATUS"
     ;;
+  'run ./internal/containmentinv/check -inventory docs/security/containment-inventory.json -profile linux-host -evidence-out '*)
+    printf 'stub: containment check\n' >&2
+    exit "${CI_LOCAL_CONTAINMENT_STATUS:-0}"
+    ;;
   'test -race ./...')
     exit "$CI_LOCAL_RACE_STATUS"
     ;;
@@ -155,6 +209,10 @@ cat >"$tmp/bin/docker" <<'STUB'
 #!/usr/bin/env sh
 source_dir=${GO_LLM_CI_SOURCE:-$PWD}
 printf '%s|%s\n' "$source_dir" "$*" >>"$CI_LOCAL_TEST_LOG"
+# The source identity each gate run forwards to the container.
+if [ "$1" = compose ]; then
+  printf '%s %s\n' "${GO_LLM_CI_TREE-unset}" "${GO_LLM_CI_COMMIT-unset}" >>"$CI_LOCAL_TEST_LOG.env"
+fi
 if [ "$1" = compose ] && [ -n "${CI_LOCAL_DOCKER_TRUSTED_ROOT-}" ]; then
   if [ "$PWD" = "$source_dir" ] || [ -e .env ] || [ -e .dockerignore ] \
     || ! cmp docker-compose.ci.yml "$CI_LOCAL_DOCKER_TRUSTED_ROOT/docker-compose.ci.yml" \
@@ -195,6 +253,7 @@ passing_output="$budget_line"'
     --- SKIP: TestHardeningContracts/ZT-605_#434_quarantine (0.00s)'
 security_output="$passing_output"
 race_status=0
+containment_status=0
 caller_goroot=''
 caller_goflags='-skip=Test'
 ci_status=0
@@ -219,6 +278,7 @@ run_ci() {
       CI_LOCAL_SECURITY_STATUS="$security_status" \
       CI_LOCAL_SECURITY_OUTPUT="$security_output" \
       CI_LOCAL_RACE_STATUS="$race_status" \
+      CI_LOCAL_CONTAINMENT_STATUS="$containment_status" \
       "$module/scripts/ci-local" "$@"
   ) >"$tmp/$name.out" 2>&1
   ci_status=$?
@@ -247,6 +307,7 @@ write_expected() {
   cat >"$tmp/$1" <<EOF
 $module|test -list ^TestHardeningContracts$ ./agent
 $module|test -count=1 -timeout 60s -v -run ^TestHardeningContracts$ ./agent -args -hardening-budget
+$module|run ./internal/containmentinv/check -inventory docs/security/containment-inventory.json -profile linux-host -evidence-out ${TMPDIR:-/tmp}/containment-evidence.json
 EOF
   if [ "$2" = security ]; then
     return
@@ -276,6 +337,8 @@ EOF
 write_expected expected-security security
 write_expected expected-pre-push pre-push
 write_expected expected-full full
+# A failed aggregate stops ci-local before the containment check.
+head -n 2 "$tmp/expected-security" >"$tmp/expected-aggregate"
 
 run_ci default
 assert_status default 0
@@ -345,7 +408,7 @@ for mode in security pre-push full; do
     assert_status "aggregate-$outcome-$mode" 1
     grep -Fxq "$pass_message" "$tmp/aggregate-$outcome-$mode.out"
     grep -Fxq -- "$(printf '%s\n' "$security_output" | tail -n 1)" "$tmp/aggregate-$outcome-$mode.out"
-    diff -u "$tmp/expected-security" "$tmp/aggregate-$outcome-$mode.log"
+    diff -u "$tmp/expected-aggregate" "$tmp/aggregate-$outcome-$mode.log"
   done
   # A skip anywhere under Active, or an undeclared boundary skip, fails even
   # though both required PASS lines are present.
@@ -363,7 +426,7 @@ $skip_line"
     assert_status "aggregate-$outcome-$mode" 1
     grep -Fxq "$skip_message" "$tmp/aggregate-$outcome-$mode.out"
     grep -Fxq -- "$skip_line" "$tmp/aggregate-$outcome-$mode.out"
-    diff -u "$tmp/expected-security" "$tmp/aggregate-$outcome-$mode.log"
+    diff -u "$tmp/expected-aggregate" "$tmp/aggregate-$outcome-$mode.log"
   done
   # The run must also report that it enforced its wall-clock budget; a missing
   # or false report means the budget block or the flag did not reach it.
@@ -375,7 +438,7 @@ $skip_line"
     run_ci "aggregate-$outcome-$mode" --mode "$mode"
     assert_status "aggregate-$outcome-$mode" 1
     grep -Fxq "$budget_message" "$tmp/aggregate-$outcome-$mode.out"
-    diff -u "$tmp/expected-security" "$tmp/aggregate-$outcome-$mode.log"
+    diff -u "$tmp/expected-aggregate" "$tmp/aggregate-$outcome-$mode.log"
   done
   security_output="$budget_line"'
 --- PASS: TestHardeningContracts (0.01s)
@@ -426,10 +489,21 @@ for mode in security pre-push full; do
   run_ci "security-failure-$mode" --mode "$mode"
   assert_status "security-failure-$mode" 37
   grep -Fxq -- "$(printf '%s\n' "$security_output" | head -n 1)" "$tmp/security-failure-$mode.out"
-  diff -u "$tmp/expected-security" "$tmp/security-failure-$mode.log"
+  diff -u "$tmp/expected-aggregate" "$tmp/security-failure-$mode.log"
 done
 
 security_status=0
+# A failed containment check fails every mode with its own message, after the
+# aggregate passed and before any later phase.
+containment_status=1
+for mode in security pre-push full; do
+  run_ci "containment-failure-$mode" --mode "$mode"
+  assert_status "containment-failure-$mode" 1
+  grep -Fxq 'containment inventory check failed (profile linux-host)' "$tmp/containment-failure-$mode.out"
+  diff -u "$tmp/expected-security" "$tmp/containment-failure-$mode.log"
+done
+containment_status=0
+
 for mode in pre-push full; do
   race_status=36
   run_ci "race-failure-$mode" --mode "$mode"
@@ -528,12 +602,14 @@ fixture_git -C "$hook_repo" commit -qm one
 c1="$(fixture_git -C "$hook_repo" rev-parse HEAD)"
 fixture_git -C "$hook_repo" tag -a v1 -m v1
 tag1="$(fixture_git -C "$hook_repo" rev-parse v1)"
+t1="$(fixture_git -C "$hook_repo" rev-parse "$c1^{tree}")"
 hook_wt="$tmp/hook-wt"
 fixture_git -C "$hook_repo" worktree add -q -b wt "$hook_wt"
 printf 'package fixture\n\nfunc Second() {}\n' >"$hook_wt/second.go"
 fixture_git -C "$hook_wt" add second.go
 fixture_git -C "$hook_wt" commit -qm two
 c2="$(fixture_git -C "$hook_wt" rev-parse HEAD)"
+t2="$(fixture_git -C "$hook_wt" rev-parse "$c2^{tree}")"
 for checkout in "$hook_repo" "$hook_wt"; do
   mkdir -p "$checkout/ignored"
   printf 'package ignored\nfunc  Bad(){}\n' >"$checkout/ignored/bad.go"
@@ -699,6 +775,17 @@ assert_gated hook-update-35 1 "$c1"
 assert_gated hook-expr 1 "$c1"
 assert_gated hook-dedupe 1 "$c1"
 
+# assert_forwarded NAME PAIRS: the gate runs received exactly these
+# "GO_LLM_CI_TREE GO_LLM_CI_COMMIT" pairs, in order.
+assert_forwarded() {
+  if ! printf '%s\n' "$2" | diff -u - "$tmp/$1.log.env"; then
+    printf '%s: wrong source identity forwarded to the gate\n' "$1" >&2
+    exit 1
+  fi
+}
+assert_forwarded hook-update-0 "$t1 $c1"
+assert_forwarded hook-dedupe "$t1 $c1"
+
 # Two trees gate in stdin order, each on its own files, even when one is not
 # this checkout's HEAD.
 printf 'refs/heads/main %s refs/heads/main %s\nrefs/heads/wt %s refs/heads/wt %s\n' \
@@ -708,6 +795,8 @@ assert_status hook-two 0
 assert_gate_runs hook-two 2
 assert_gated hook-two 1 "$c1"
 assert_gated hook-two 2 "$c2"
+assert_forwarded hook-two "$t1 $c1
+$t2 $c2"
 
 # The first failure stops the push; later trees are not gated.
 cp "$tmp/hook-two.in" "$tmp/hook-two-fail.in"
@@ -722,6 +811,8 @@ run_hook hook-tag "$hook_repo" 0
 assert_status hook-tag 0
 assert_gate_runs hook-tag 1
 assert_gated hook-tag 1 "$c1"
+# The annotated tag forwards the commit it peels to, never the tag object.
+assert_forwarded hook-tag "$t1 $c1"
 
 # From a linked worktree (#306): .git is a pointer file there, and the pushed
 # commit is not the main repository's HEAD.

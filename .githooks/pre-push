@@ -8,6 +8,10 @@ set -eu
 # so the line is split from the right. An all-zero local oid deletes a remote
 # ref and pushes no code; empty stdin (nothing to update) pushes nothing.
 # Refs at one tree, such as a branch and its tag, are gated once (#630).
+# Each gate run receives its tree and the pushed commit (an annotated tag
+# peeled to its commit; the first ref at a tree wins) as GO_LLM_CI_TREE and
+# GO_LLM_CI_COMMIT, binding the containment evidence to them (#452). A tag of
+# a bare tree has no commit; its evidence records commit unknown.
 # git push transfers the real objects, never what refs/replace maps them to,
 # so peel and export with replacements off.
 export GIT_NO_REPLACE_OBJECTS=1
@@ -49,9 +53,10 @@ while IFS= read -r line || [ -n "$line" ]; do
     printf 'pre-push: %s (%s) names no tree to gate\n' "$local_ref" "$local_oid" >&2
     exit 1
   fi
-  case " $trees " in
-    *" $tree "*) ;;
-    *) trees="$trees $tree" ;;
+  commit="$(git rev-parse --verify --quiet "$local_oid^{commit}")" || commit=
+  case " $trees" in
+    *" $tree:"*) ;;
+    *) trees="$trees $tree:$commit" ;;
   esac
 done
 if [ -z "$trees" ]; then
@@ -96,7 +101,9 @@ trap 'remove_container; exit 143' TERM
 hook_dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)"
 mkdir "$work/runner"
 cp "$hook_dir/../docker-compose.ci.yml" "$hook_dir/../Dockerfile.ci" "$work/runner/"
-for tree in $trees; do
+for pair in $trees; do
+  tree=${pair%%:*}
+  commit=${pair#*:}
   mkdir "$work/$tree"
   # Through a file, not a pipe: sh has no pipefail, and some tar
   # implementations (bsdtar, measured) accept the empty output of a failed
@@ -121,5 +128,5 @@ for tree in $trees; do
   tar -xf "$work/$tree.tar" -C "$work/$tree"
   rm -f "$work/$tree.tar"
   printf 'pre-push: gating tree %s in %s\n' "$tree" "$work/$tree" >&2
-  (cd "$work/runner" && GO_LLM_CI_SOURCE="$work/$tree" docker compose --env-file /dev/null -f docker-compose.ci.yml run --build --rm --name "$name" ci ./scripts/ci-local --mode full)
+  (cd "$work/runner" && GO_LLM_CI_SOURCE="$work/$tree" GO_LLM_CI_TREE="$tree" GO_LLM_CI_COMMIT="$commit" docker compose --env-file /dev/null -f docker-compose.ci.yml run --build --rm --name "$name" ci ./scripts/ci-local --mode full)
 done

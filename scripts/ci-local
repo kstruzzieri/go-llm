@@ -144,6 +144,17 @@ if [ -n "$unexpected_skips" ]; then
   printf 'unexpected skip inside TestHardeningContracts:\n%s\n' "$unexpected_skips" >&2
   exit 1
 fi
+
+# The execution checker is the single runner of the containment inventory:
+# every ref mandatory on linux-host, TestContainment's scenario leaves
+# included, must run and pass with no skip (docs/local-ci.md).
+section "containment inventory"
+containment_status=0
+go run ./internal/containmentinv/check -inventory docs/security/containment-inventory.json -profile linux-host -evidence-out "${TMPDIR:-/tmp}/containment-evidence.json" || containment_status=$?
+if [ "$containment_status" -ne 0 ]; then
+  printf 'containment inventory check failed (profile linux-host)\n' >&2
+  exit "$containment_status"
+fi
 if [ "$mode" = security ]; then
   exit 0
 fi

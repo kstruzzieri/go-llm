@@ -12,7 +12,7 @@
         "exec",
         "symlink"
       ],
-      "timeout": "120s",
+      "timeout": "15s",
       "allowed_skips": []
     },
     {
@@ -23,7 +23,7 @@
       "caps": [
         "bwrap"
       ],
-      "timeout": "",
+      "timeout": "15s",
       "allowed_skips": []
     },
     {
@@ -32,7 +32,7 @@
       "tags": [],
       "race": false,
       "caps": [],
-      "timeout": "",
+      "timeout": "15s",
       "allowed_skips": []
     },
     {
@@ -41,7 +41,7 @@
       "tags": [],
       "race": false,
       "caps": [],
-      "timeout": "",
+      "timeout": "15s",
       "allowed_skips": []
     },
     {
@@ -52,7 +52,7 @@
       ],
       "race": false,
       "caps": [],
-      "timeout": "",
+      "timeout": "15s",
       "allowed_skips": []
     },
     {
@@ -61,7 +61,7 @@
       "tags": [],
       "race": false,
       "caps": [],
-      "timeout": "",
+      "timeout": "15s",
       "allowed_skips": [
         "TestContainment/E1=capability:unix",
         "TestContainment/X2a=capability:bash",
@@ -2691,15 +2691,39 @@
       "id": "META-GATE",
       "source": "issue-452:60",
       "requirement": "The deterministic suite runs under go test ./... and the local CI security gate with bounded runtime, no live model, no Docker requirement and no external network.",
-      "status": "pending(#452)",
-      "owner": "#452",
+      "status": "verified",
+      "owner": "",
       "layer": "focused",
-      "exempt": "administrative: gate wiring, not a security guard; it lands with #452's execution checker task",
+      "exempt": "administrative: gate wiring, not a security guard; the checker tests and the security-phase run are the evidence",
       "scenarios": [],
-      "refs": [],
-      "profiles": [],
+      "refs": [
+        {
+          "package": "./internal/containmentinv",
+          "test": "TestCheckerRequiresEachEvent",
+          "file": "internal/containmentinv/checker_test.go",
+          "func": "TestCheckerRequiresEachEvent"
+        },
+        {
+          "package": "./internal/containmentinv",
+          "test": "TestCheckerRejectsSkipOnLinuxHost",
+          "file": "internal/containmentinv/checker_test.go",
+          "func": "TestCheckerRejectsSkipOnLinuxHost"
+        },
+        {
+          "package": "./internal/containmentinv",
+          "test": "TestCheckerSourceIdentityFromEnv",
+          "file": "internal/containmentinv/checker_test.go",
+          "func": "TestCheckerSourceIdentityFromEnv"
+        }
+      ],
+      "profiles": [
+        "linux-host"
+      ],
       "mutations": [],
-      "artifacts": []
+      "artifacts": [
+        "scripts/ci-local",
+        "internal/containmentinv/check/main.go"
+      ]
     }
   ]
 }

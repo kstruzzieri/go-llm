@@ -102,6 +102,7 @@ docker compose -f docker-compose.ci.yml run --build --rm ci ./scripts/ci-local -
 
 - compiled discovery of `TestHardeningContracts`, followed by a fresh,
   verbose, non-race run of that aggregate with its 500 ms budget enforced
+- the containment inventory check, profile `linux-host` (below)
 - `golangci-lint fmt --diff` (all Go files, including inactive build tags)
 - `golangci-lint run`
 - `go test -race ./...`
@@ -156,6 +157,50 @@ script fails `scripts/test-ci-local`, which pins the exact command, and fails
 the log check; deleting the budget block fails the log check. Deleting or
 inverting only the assertion remains a review responsibility.
 
+### Containment inventory check (#452)
+
+After the aggregate passes, every mode (`security` included) runs the
+execution checker for the `linux-host` profile of
+`docs/security/containment-inventory.json`:
+
+```bash
+go run ./internal/containmentinv/check -inventory docs/security/containment-inventory.json -profile linux-host -evidence-out "${TMPDIR:-/tmp}/containment-evidence.json"
+```
+
+The checker is the single runner of `TestContainment` in this phase, and of
+every other test leaf a row of the inventory makes mandatory on the profile. It
+groups those refs by package and runs each package once with
+`go test -count=1 -json -timeout <profile timeout> [-race] [-tags ...] -run <pattern>`,
+where the pattern anchors and quotes each `/`-separated component of the
+leaf names. It decides from the complete event stream: every cited leaf needs a
+`run` and a terminal `pass` event, the package needs its own `pass`, and
+`go test` must exit 0. A missing leaf, a skip, a malformed or truncated stream,
+text build output, a build failure or a timeout fails the profile. `linux-host`
+allows no skip; other profiles allow only their enumerated
+`<leaf>=capability:<cap>` entries, matched against the reason the test logs
+when it skips. A failure prints the failed tests' output and
+`containment inventory check failed (profile linux-host)`, and ends `ci-local`
+before formatting. The checker's own tests (`internal/containmentinv`) feed it
+recorded event streams; no ordinary package test launches `go test`.
+
+Each profile's `-timeout` lives in the inventory: 15 s, about four times the
+slowest package run measured (`./cmd/golem`, 3.6 s wall on an M3 Max).
+
+Each run writes evidence JSON. It is CI output, never committed:
+
+| Field | Meaning |
+| --- | --- |
+| `source_digest` | SHA-256 over the sorted `path\|sha256(content)` lines of every tracked file, hidden directories such as `.github` included: `git ls-files` in a checkout, every file but `.git` in the hook's export, so both digest the same tree alike. A symlink digests its target. |
+| `tree`, `commit` | `GO_LLM_CI_TREE` and `GO_LLM_CI_COMMIT`, set by the pre-push hook and the CI checker steps |
+| `dirty` | `true` when either variable is absent; `commit` is then `unknown` |
+| `inventory_digest` | SHA-256 of the inventory file |
+| `profile`, `flags` | the profile and the `go test` flags every package run shared |
+| `executed` | `<package> <leaf>` for every leaf that passed, sorted; an allowed skip is not listed |
+
+A manual run (`scripts/ci-local` on a working tree, or Docker without the
+hook) has no forwarded identity, so it records `"commit": "unknown"` and
+`"dirty": true` and is never treated as CI evidence.
+
 The local Docker service runs as an unprivileged user (uid 1000), so the
 permission-denial tests that skip under root execute in the gate exactly as they
 do on the GitHub runner. Native CI workflows still separately enforce real Linux
@@ -184,8 +229,14 @@ installation's repository into a separate, minimal build directory. From there
 it runs the equivalent of:
 
 ```bash
-GO_LLM_CI_SOURCE=/path/to/export docker compose --env-file /dev/null -f docker-compose.ci.yml run --build --rm ci ./scripts/ci-local --mode full
+GO_LLM_CI_SOURCE=/path/to/export GO_LLM_CI_TREE=<tree> GO_LLM_CI_COMMIT=<commit> docker compose --env-file /dev/null -f docker-compose.ci.yml run --build --rm ci ./scripts/ci-local --mode full
 ```
+
+`GO_LLM_CI_TREE` and `GO_LLM_CI_COMMIT` name the gated tree and the pushed
+commit; the Compose service passes both through, and the containment evidence
+records them. An annotated tag forwards the commit it peels to, and when
+several refs name one tree the first listed supplies the commit. A tag of a
+bare tree has no commit, so its evidence records `commit: unknown`.
 
 The container therefore sees exactly the pushed source tree: gitignored files (such as
 the Go snapshots under `docs/superpowers/` in a main checkout), untracked files
@@ -237,7 +288,7 @@ git config core.hooksPath .githooks
 
 ## GitHub Actions
 
-The `CI` workflow runs on `pull_request` so protected branches receive the required `Lint & Test` status. It does not run on ordinary pushes. Its `Security contracts` step runs `scripts/ci-local --mode security`, the same discovery, exact-`PASS`, and skip-allowlist gate the pre-push hook runs, so a renamed, skipped, or hollowed-out aggregate cannot pass the required check by bypassing the local hook.
+The `CI` workflow runs on `pull_request` so protected branches receive the required `Lint & Test` status. It does not run on ordinary pushes. Its `Security contracts` step runs `scripts/ci-local --mode security`, the same discovery, exact-`PASS`, and skip-allowlist gate the pre-push hook runs, so a renamed, skipped, or hollowed-out aggregate cannot pass the required check by bypassing the local hook. That includes the containment inventory check for `linux-host`.
 
 The workflow runs the full race-test suite on two toolchains, logging `go version`
 immediately before each run:
@@ -272,6 +323,27 @@ The Darwin background-exec selector also runs the #481 exit-observer
 regressions (`TestProcessExitObserverAlreadyExitedChildRecovers` and
 `TestProcessExitObserverRegistrationFailsClosed`); `scripts/test-ci-local` pins
 that selector alongside the Seatbelt ones.
+
+### Containment inventory profiles (#452)
+
+Each inventory profile runs the containment checker in the job that has its
+platform and capabilities:
+
+| Profile | Runs in | Notes |
+| --- | --- | --- |
+| `linux-host` | `Lint & Test`, `Security contracts` step (through `ci-local`); the pre-push hook; manual `ci-local` | no skips |
+| `bwrap` | `Linux Sandbox (bwrap)`, `Containment inventory (bwrap)` | `GO_LLM_REQUIRE_BWRAP=1` |
+| `agentflow-integration` | `Agentflow compatibility`, inside both the installed and source steps | `-tags agentflow_integration`; a separate step would lack the venv or `AGENTFLOW_SRC`, and its required tests would skip |
+| `windows` | `Windows SQLite URIs`, `Containment inventory (windows)` | exec scenarios skip with their enumerated capability reasons |
+| `darwin-host` | `macOS Compile Smoke`, `Containment inventory (darwin-host)` | no skips |
+| `seatbelt` | `macOS Compile Smoke`, `Containment inventory (seatbelt)` | `GO_LLM_REQUIRE_SEATBELT=1`, no race |
+
+Every checker step sets `GO_LLM_CI_COMMIT` to `github.sha` and resolves
+`GO_LLM_CI_TREE` in the step with `git rev-parse "${GITHUB_SHA}^{tree}"`. It
+writes `$RUNNER_TEMP/containment-<profile>.json` (the agentflow steps add
+`-installed` or `-source`), and each job uploads its files as a
+`containment-*` artifact. `scripts/test-ci-local` pins every checker step and
+upload, so removing one fails the self-test.
 
 ### Linux sandbox confinement (#441)
 
