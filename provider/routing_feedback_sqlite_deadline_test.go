@@ -195,7 +195,8 @@ func assertContendedFailure(t *testing.T, err error, elapsed, minWait, maxWait t
 // Test 1: a short deadline bounds the lock wait on a caller-owned pool whose
 // busy_timeout is 5s. Under _txlock=immediate, BEGIN itself takes the write
 // lock, so the cap must be in place before BEGIN, not just before the first
-// write.
+// write. The cap read back before BEGIN is at most the deadline; the wall
+// clock keeps a 2s ceiling for a cap that lands on another connection.
 func TestSQLiteFeedbackStoreDeadlineBoundsLockWait(t *testing.T) {
 	for _, tc := range []struct{ name, query, phase string }{
 		{"deferred", "_pragma=busy_timeout(5000)", "insert signal"},
@@ -206,6 +207,7 @@ func TestSQLiteFeedbackStoreDeadlineBoundsLockWait(t *testing.T) {
 			db := openFeedbackFileDB(t, path, tc.query, 2)
 			execFeedbackSQL(t, db, "PRAGMA journal_mode=WAL")
 			store := newFileFeedbackStore(t, db)
+			caps := recordedCaps(t, store)
 			release := holdFeedbackLock(t, path, "BEGIN IMMEDIATE")
 			start := time.Now()
 			ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
@@ -213,14 +215,23 @@ func TestSQLiteFeedbackStoreDeadlineBoundsLockWait(t *testing.T) {
 			err := store.RecordBatch(ctx, []FeedbackItem{testFeedbackItem("m")})
 			elapsed := time.Since(start)
 			release()
-			t.Logf("ELAPSED deadline-bounds/%s %v", tc.name, elapsed)
+			t.Logf("ELAPSED deadline-bounds/%s %v caps %v", tc.name, elapsed, caps)
 			if err != nil && strings.Contains(err.Error(), "cap busy_timeout") {
 				t.Skipf("fixture invalid: stalled past the deadline before the first cap: %v", err)
 			}
 			if err == nil || !strings.Contains(err.Error(), tc.phase) {
 				t.Fatalf("fixture invalid: err = %v, want the lock wait in %q", err, tc.phase)
 			}
-			assertContendedFailure(t, err, elapsed, 100*time.Millisecond, 600*time.Millisecond)
+			if got := caps[capBeforeBegin]; len(got) != 1 || got[0] > 200 {
+				t.Fatalf("busy_timeout %s = %v ms, want one cap of at most the 200ms deadline", capBeforeBegin, got)
+			}
+			// 100ms: the write waited out its budget. 2s is a gross ceiling
+			// (#693) that still catches a cap applied through another pooled
+			// connection: it reads back correctly through the hook while this
+			// connection waits the DSN's 5s. A cap moved after BEGIN never
+			// reaches the hook under _txlock=immediate (BEGIN fails first);
+			// the deferred subtest cannot see ordering at all.
+			assertContendedFailure(t, err, elapsed, 100*time.Millisecond, 2*time.Second)
 			if n := feedbackRows(t, db); n != 0 {
 				t.Fatalf("signals after a failed write = %d, want 0", n)
 			}
