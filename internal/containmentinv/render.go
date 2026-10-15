@@ -95,6 +95,12 @@ func evidence(r Row) []string {
 	for _, a := range r.Artifacts {
 		parts = append(parts, "artifact: "+a)
 	}
+	if len(r.Mutations) > 0 {
+		parts = append(parts, "mutations: "+strings.Join(r.Mutations, ", "))
+	}
+	if r.Exempt != "" {
+		parts = append(parts, "mutation exempt: "+r.Exempt)
+	}
 	return parts
 }
 

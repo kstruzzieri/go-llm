@@ -136,7 +136,9 @@
         "linux-host",
         "darwin-host"
       ],
-      "mutations": [],
+      "mutations": [
+        "M-001"
+      ],
       "artifacts": []
     },
     {
@@ -180,7 +182,9 @@
         "linux-host",
         "darwin-host"
       ],
-      "mutations": [],
+      "mutations": [
+        "M-002"
+      ],
       "artifacts": []
     },
     {
@@ -210,7 +214,9 @@
         "linux-host",
         "darwin-host"
       ],
-      "mutations": [],
+      "mutations": [
+        "M-003"
+      ],
       "artifacts": []
     },
     {
@@ -240,7 +246,9 @@
         "linux-host",
         "darwin-host"
       ],
-      "mutations": [],
+      "mutations": [
+        "M-004"
+      ],
       "artifacts": []
     },
     {
@@ -284,7 +292,9 @@
         "linux-host",
         "darwin-host"
       ],
-      "mutations": [],
+      "mutations": [
+        "M-005"
+      ],
       "artifacts": []
     },
     {
@@ -320,7 +330,9 @@
         "linux-host",
         "darwin-host"
       ],
-      "mutations": [],
+      "mutations": [
+        "M-006"
+      ],
       "artifacts": []
     },
     {
@@ -350,7 +362,9 @@
         "linux-host",
         "darwin-host"
       ],
-      "mutations": [],
+      "mutations": [
+        "M-007"
+      ],
       "artifacts": []
     },
     {
@@ -476,7 +490,9 @@
         "linux-host",
         "darwin-host"
       ],
-      "mutations": [],
+      "mutations": [
+        "M-008"
+      ],
       "artifacts": []
     },
     {
@@ -530,7 +546,9 @@
         "linux-host",
         "darwin-host"
       ],
-      "mutations": [],
+      "mutations": [
+        "M-008"
+      ],
       "artifacts": []
     },
     {
@@ -584,7 +602,9 @@
         "linux-host",
         "darwin-host"
       ],
-      "mutations": [],
+      "mutations": [
+        "M-008"
+      ],
       "artifacts": []
     },
     {
@@ -611,7 +631,9 @@
         "darwin-host",
         "windows"
       ],
-      "mutations": [],
+      "mutations": [
+        "M-009"
+      ],
       "artifacts": []
     },
     {
@@ -640,7 +662,9 @@
       "profiles": [
         "agentflow-integration"
       ],
-      "mutations": [],
+      "mutations": [
+        "M-010"
+      ],
       "artifacts": []
     },
     {
@@ -664,7 +688,9 @@
         "linux-host",
         "darwin-host"
       ],
-      "mutations": [],
+      "mutations": [
+        "M-011"
+      ],
       "artifacts": []
     },
     {
@@ -674,7 +700,7 @@
       "status": "verified",
       "owner": "",
       "layer": "focused",
-      "exempt": "",
+      "exempt": "the native-profile mutation needs a Linux host with bwrap: PR #478 (e4d580b3) records bwrap confinement mutations but none for the payload environment set",
       "scenarios": [],
       "refs": [
         {
@@ -722,7 +748,9 @@
       "profiles": [
         "seatbelt"
       ],
-      "mutations": [],
+      "mutations": [
+        "M-012"
+      ],
       "artifacts": []
     },
     {
@@ -764,7 +792,9 @@
         "linux-host",
         "darwin-host"
       ],
-      "mutations": [],
+      "mutations": [
+        "M-013"
+      ],
       "artifacts": []
     },
     {
@@ -800,7 +830,9 @@
         "linux-host",
         "darwin-host"
       ],
-      "mutations": [],
+      "mutations": [
+        "M-013"
+      ],
       "artifacts": []
     },
     {
@@ -843,7 +875,10 @@
         "darwin-host",
         "windows"
       ],
-      "mutations": [],
+      "mutations": [
+        "M-014",
+        "M-025"
+      ],
       "artifacts": []
     },
     {
@@ -870,7 +905,10 @@
         "darwin-host",
         "windows"
       ],
-      "mutations": [],
+      "mutations": [
+        "M-015",
+        "M-025"
+      ],
       "artifacts": []
     },
     {
@@ -897,7 +935,10 @@
         "darwin-host",
         "windows"
       ],
-      "mutations": [],
+      "mutations": [
+        "M-016",
+        "M-025"
+      ],
       "artifacts": []
     },
     {
@@ -924,7 +965,10 @@
         "darwin-host",
         "windows"
       ],
-      "mutations": [],
+      "mutations": [
+        "M-017",
+        "M-025"
+      ],
       "artifacts": []
     },
     {
@@ -948,7 +992,9 @@
         "linux-host",
         "darwin-host"
       ],
-      "mutations": [],
+      "mutations": [
+        "M-018"
+      ],
       "artifacts": []
     },
     {
@@ -975,7 +1021,9 @@
         "darwin-host",
         "windows"
       ],
-      "mutations": [],
+      "mutations": [
+        "M-019"
+      ],
       "artifacts": []
     },
     {
@@ -1002,7 +1050,9 @@
         "darwin-host",
         "windows"
       ],
-      "mutations": [],
+      "mutations": [
+        "M-020"
+      ],
       "artifacts": []
     },
     {
@@ -1029,7 +1079,10 @@
         "darwin-host",
         "windows"
       ],
-      "mutations": [],
+      "mutations": [
+        "M-021",
+        "M-025"
+      ],
       "artifacts": []
     },
     {
@@ -1056,7 +1109,9 @@
         "darwin-host",
         "windows"
       ],
-      "mutations": [],
+      "mutations": [
+        "M-022"
+      ],
       "artifacts": []
     },
     {
@@ -1083,7 +1138,10 @@
         "darwin-host",
         "windows"
       ],
-      "mutations": [],
+      "mutations": [
+        "M-023",
+        "M-025"
+      ],
       "artifacts": []
     },
     {
@@ -1110,7 +1168,10 @@
         "darwin-host",
         "windows"
       ],
-      "mutations": [],
+      "mutations": [
+        "M-023",
+        "M-025"
+      ],
       "artifacts": []
     },
     {
@@ -1137,7 +1198,11 @@
         "darwin-host",
         "windows"
       ],
-      "mutations": [],
+      "mutations": [
+        "M-023",
+        "M-024",
+        "M-025"
+      ],
       "artifacts": []
     },
     {
@@ -1185,7 +1250,9 @@
         "linux-host",
         "darwin-host"
       ],
-      "mutations": [],
+      "mutations": [
+        "M-023"
+      ],
       "artifacts": []
     },
     {
@@ -1212,7 +1279,9 @@
         "darwin-host",
         "windows"
       ],
-      "mutations": [],
+      "mutations": [
+        "M-025"
+      ],
       "artifacts": []
     },
     {
@@ -1239,7 +1308,9 @@
         "darwin-host",
         "windows"
       ],
-      "mutations": [],
+      "mutations": [
+        "M-026"
+      ],
       "artifacts": []
     },
     {
@@ -1269,7 +1340,9 @@
         "linux-host",
         "darwin-host"
       ],
-      "mutations": [],
+      "mutations": [
+        "M-027"
+      ],
       "artifacts": []
     },
     {
@@ -1293,7 +1366,9 @@
         "linux-host",
         "darwin-host"
       ],
-      "mutations": [],
+      "mutations": [
+        "M-028"
+      ],
       "artifacts": []
     },
     {
@@ -1329,7 +1404,9 @@
         "linux-host",
         "darwin-host"
       ],
-      "mutations": [],
+      "mutations": [
+        "M-029"
+      ],
       "artifacts": []
     },
     {
@@ -1377,7 +1454,9 @@
         "linux-host",
         "darwin-host"
       ],
-      "mutations": [],
+      "mutations": [
+        "M-030"
+      ],
       "artifacts": []
     },
     {
@@ -1401,7 +1480,9 @@
         "linux-host",
         "darwin-host"
       ],
-      "mutations": [],
+      "mutations": [
+        "M-031"
+      ],
       "artifacts": []
     },
     {
@@ -1431,7 +1512,9 @@
         "linux-host",
         "darwin-host"
       ],
-      "mutations": [],
+      "mutations": [
+        "M-032"
+      ],
       "artifacts": []
     },
     {
@@ -1461,7 +1544,9 @@
         "linux-host",
         "darwin-host"
       ],
-      "mutations": [],
+      "mutations": [
+        "M-033"
+      ],
       "artifacts": []
     },
     {
@@ -1491,7 +1576,9 @@
         "linux-host",
         "darwin-host"
       ],
-      "mutations": [],
+      "mutations": [
+        "M-034"
+      ],
       "artifacts": []
     },
     {
@@ -1575,7 +1662,9 @@
         "linux-host",
         "darwin-host"
       ],
-      "mutations": [],
+      "mutations": [
+        "M-035"
+      ],
       "artifacts": []
     },
     {
@@ -1617,7 +1706,9 @@
         "linux-host",
         "darwin-host"
       ],
-      "mutations": [],
+      "mutations": [
+        "M-036"
+      ],
       "artifacts": []
     },
     {
@@ -1695,7 +1786,10 @@
         "linux-host",
         "darwin-host"
       ],
-      "mutations": [],
+      "mutations": [
+        "M-037",
+        "M-038"
+      ],
       "artifacts": []
     },
     {
@@ -1809,7 +1903,9 @@
         "linux-host",
         "darwin-host"
       ],
-      "mutations": [],
+      "mutations": [
+        "M-039"
+      ],
       "artifacts": []
     },
     {
@@ -1917,7 +2013,9 @@
         "linux-host",
         "darwin-host"
       ],
-      "mutations": [],
+      "mutations": [
+        "M-040"
+      ],
       "artifacts": []
     },
     {
@@ -1971,7 +2069,11 @@
         "linux-host",
         "darwin-host"
       ],
-      "mutations": [],
+      "mutations": [
+        "M-038",
+        "M-041",
+        "M-042"
+      ],
       "artifacts": []
     },
     {
@@ -1995,7 +2097,9 @@
         "linux-host",
         "darwin-host"
       ],
-      "mutations": [],
+      "mutations": [
+        "M-043"
+      ],
       "artifacts": []
     },
     {
@@ -2025,7 +2129,9 @@
         "linux-host",
         "darwin-host"
       ],
-      "mutations": [],
+      "mutations": [
+        "M-044"
+      ],
       "artifacts": []
     },
     {
@@ -2052,7 +2158,9 @@
         "darwin-host",
         "windows"
       ],
-      "mutations": [],
+      "mutations": [
+        "M-045"
+      ],
       "artifacts": []
     },
     {
@@ -2079,7 +2187,9 @@
         "darwin-host",
         "windows"
       ],
-      "mutations": [],
+      "mutations": [
+        "M-045"
+      ],
       "artifacts": []
     },
     {
@@ -2106,7 +2216,10 @@
         "darwin-host",
         "windows"
       ],
-      "mutations": [],
+      "mutations": [
+        "M-037",
+        "M-038"
+      ],
       "artifacts": []
     },
     {
@@ -2133,7 +2246,9 @@
         "darwin-host",
         "windows"
       ],
-      "mutations": [],
+      "mutations": [
+        "M-020"
+      ],
       "artifacts": []
     },
     {
@@ -2160,7 +2275,9 @@
         "darwin-host",
         "windows"
       ],
-      "mutations": [],
+      "mutations": [
+        "M-046"
+      ],
       "artifacts": []
     },
     {
@@ -2187,7 +2304,9 @@
         "darwin-host",
         "windows"
       ],
-      "mutations": [],
+      "mutations": [
+        "M-047"
+      ],
       "artifacts": []
     },
     {
@@ -2214,7 +2333,10 @@
         "darwin-host",
         "windows"
       ],
-      "mutations": [],
+      "mutations": [
+        "M-025",
+        "M-047"
+      ],
       "artifacts": []
     },
     {
@@ -2238,7 +2360,10 @@
         "linux-host",
         "darwin-host"
       ],
-      "mutations": [],
+      "mutations": [
+        "M-048",
+        "M-049"
+      ],
       "artifacts": []
     },
     {
@@ -2290,7 +2415,9 @@
         "linux-host",
         "darwin-host"
       ],
-      "mutations": [],
+      "mutations": [
+        "M-050"
+      ],
       "artifacts": []
     },
     {
@@ -2657,7 +2784,7 @@
       "status": "verified",
       "owner": "",
       "layer": "focused",
-      "exempt": "administrative: the inventory gate checks declarations, not a security guard",
+      "exempt": "administrative: the inventory gate checks declarations, not a security guard; its rule mutations are the Administrative evidence in docs/security/containment-mutations.md",
       "scenarios": [],
       "refs": [
         {
@@ -2671,21 +2798,34 @@
         "linux-host"
       ],
       "mutations": [],
-      "artifacts": []
+      "artifacts": [
+        "docs/security/containment-mutations.md"
+      ]
     },
     {
       "id": "META-MUTATION",
       "source": "issue-452:59",
       "requirement": "Every security assertion has recorded red-on-revert or equivalent targeted mutation evidence in the committed ledger.",
-      "status": "pending(#452)",
-      "owner": "#452",
+      "status": "verified",
+      "owner": "",
       "layer": "focused",
-      "exempt": "administrative: the ledger is the evidence; it lands with #452's mutation ledger task",
+      "exempt": "administrative: the ledger is the evidence; the inventory lint requires every verified or uncontained row outside the model layer to cite an existing ledger entry or carry an exempt reason",
       "scenarios": [],
-      "refs": [],
-      "profiles": [],
+      "refs": [
+        {
+          "package": "./internal/containmentinv",
+          "test": "TestCommittedInventory",
+          "file": "internal/containmentinv/inventory_test.go",
+          "func": "TestCommittedInventory"
+        }
+      ],
+      "profiles": [
+        "linux-host"
+      ],
       "mutations": [],
-      "artifacts": []
+      "artifacts": [
+        "docs/security/containment-mutations.md"
+      ]
     },
     {
       "id": "META-GATE",
@@ -2694,7 +2834,7 @@
       "status": "verified",
       "owner": "",
       "layer": "focused",
-      "exempt": "administrative: gate wiring, not a security guard; the checker tests and the security-phase run are the evidence",
+      "exempt": "administrative: gate wiring, not a security guard; the checker tests and the security-phase run are the evidence; its checker mutations are the Administrative evidence in docs/security/containment-mutations.md",
       "scenarios": [],
       "refs": [
         {
@@ -2722,7 +2862,8 @@
       "mutations": [],
       "artifacts": [
         "scripts/ci-local",
-        "internal/containmentinv/check/main.go"
+        "internal/containmentinv/check/main.go",
+        "docs/security/containment-mutations.md"
       ]
     }
   ]

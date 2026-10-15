@@ -42,7 +42,7 @@ func TestOther(t *testing.T) {
 }`)
 	inv := Inventory{Rows: []Row{{ID: "PATH-ABS", Status: "verified", Layer: "focused",
 		Refs: []Ref{{Package: "./pkg", Test: "TestCited", File: "pkg/a_test.go", Func: "TestCited"}}}}}
-	errs := Lint(inv, root, nil)
+	errs := Lint(inv, root, nil, nil)
 	if !containsErr(errs, "PATH-ABS") || !containsErr(errs, "TestCited") {
 		t.Fatalf("marker in the wrong function passed lint: %v", errs)
 	}
@@ -54,10 +54,13 @@ func boundInventory() Inventory {
 	return Inventory{
 		Profiles: []Profile{{Name: "linux-host", GOOS: "linux"}},
 		Rows: []Row{{ID: "PATH-ABS", Source: "issue-452:52", Requirement: "absolute paths rejected",
-			Status: "verified", Layer: "focused", Profiles: []string{"linux-host"},
+			Status: "verified", Layer: "focused", Profiles: []string{"linux-host"}, Mutations: []string{"M-001"},
 			Refs: []Ref{{Package: "./pkg", Test: "TestCited", File: "pkg/a_test.go", Func: "TestCited"}}}},
 	}
 }
+
+// fixtureLedger is the mutation ledger the fixtures cite.
+var fixtureLedger = []string{"M-001"}
 
 const boundTree = `package pkg
 import "testing"
@@ -70,7 +73,7 @@ func TestCited(t *testing.T) {
 func TestInventoryOrphanMarkerFails(t *testing.T) {
 	root := t.TempDir()
 	writeGo(t, root, "pkg/a_test.go", boundTree)
-	if errs := Lint(boundInventory(), root, nil); len(errs) != 0 {
+	if errs := Lint(boundInventory(), root, nil, fixtureLedger); len(errs) != 0 {
 		t.Fatalf("clean fixture rejected: %v", errs)
 	}
 	writeGo(t, root, "pkg/b_test.go", `package pkg
@@ -81,7 +84,7 @@ func TestStray(t *testing.T) {
 }
 `)
 	// The orphan must be reported as an unknown ID, not merely as an unbound marker.
-	errs := Lint(boundInventory(), root, nil)
+	errs := Lint(boundInventory(), root, nil, fixtureLedger)
 	if len(errs) != 1 || !containsErr(errs, "PATH-GHOST") || !containsErr(errs, "names no inventory row") {
 		t.Fatalf("marker naming no inventory row: got %v, want exactly one error naming PATH-GHOST as unknown", errs)
 	}
@@ -89,7 +92,7 @@ func TestStray(t *testing.T) {
 
 func TestInventoryScenarioStatusDerived(t *testing.T) {
 	inv := Inventory{Rows: []Row{{ID: "FP-SCRIPT-CONTENT", Scenarios: []string{"X3"}, Status: "verified"}}}
-	errs := Lint(inv, t.TempDir(), []ScenarioDecl{{ID: "X3", Declared: "uncontained", Owner: "#420"}})
+	errs := Lint(inv, t.TempDir(), []ScenarioDecl{{ID: "X3", Declared: "uncontained", Owner: "#420"}}, nil)
 	if !containsErr(errs, "derived") {
 		t.Fatalf("stored status disagreeing with the registry passed: %v", errs)
 	}
@@ -100,13 +103,13 @@ func TestInventoryPendingNeedsOwnerAndNoRefs(t *testing.T) {
 		return Row{ID: "QUARANTINE", Source: "issue-452:45", Requirement: "quarantine of untrusted content",
 			Status: "pending(#434)", Owner: "#434", Layer: "focused"}
 	}
-	if errs := Lint(Inventory{Rows: []Row{pending()}}, t.TempDir(), nil); len(errs) != 0 {
+	if errs := Lint(Inventory{Rows: []Row{pending()}}, t.TempDir(), nil, nil); len(errs) != 0 {
 		t.Fatalf("clean pending row rejected: %v", errs)
 	}
 
 	blank := pending()
 	blank.Owner = ""
-	if errs := Lint(Inventory{Rows: []Row{blank}}, t.TempDir(), nil); !containsErr(errs, "QUARANTINE") || !containsErr(errs, "owner") {
+	if errs := Lint(Inventory{Rows: []Row{blank}}, t.TempDir(), nil, nil); !containsErr(errs, "QUARANTINE") || !containsErr(errs, "owner") {
 		t.Fatalf("pending row without an owner passed: %v", errs)
 	}
 
@@ -117,7 +120,7 @@ func TestInventoryPendingNeedsOwnerAndNoRefs(t *testing.T) {
 	withRefs.Profiles = []string{"linux-host"}
 	withRefs.Refs = []Ref{{Package: "./pkg", Test: "TestCited", File: "pkg/a_test.go", Func: "TestCited"}}
 	inv := Inventory{Profiles: []Profile{{Name: "linux-host", GOOS: "linux"}}, Rows: []Row{withRefs}}
-	if errs := Lint(inv, root, nil); !containsErr(errs, "QUARANTINE") || !containsErr(errs, "refs") {
+	if errs := Lint(inv, root, nil, nil); !containsErr(errs, "QUARANTINE") || !containsErr(errs, "refs") {
 		t.Fatalf("pending row with refs passed: %v", errs)
 	}
 }
@@ -137,7 +140,7 @@ func scenarioFixture() (Inventory, []ScenarioDecl) {
 	inv := Inventory{
 		Profiles: []Profile{{Name: "linux-host", GOOS: "linux"}},
 		Rows: []Row{{ID: "FP-SCRIPT-CONTENT", Source: "issue-452:56", Requirement: "script change needs approval",
-			Layer: "scenario", Scenarios: []string{"X3"}, Profiles: []string{"linux-host"},
+			Layer: "scenario", Scenarios: []string{"X3"}, Profiles: []string{"linux-host"}, Mutations: []string{"M-001"},
 			Refs: []Ref{{Package: "./pkg", Test: "TestContainment/X3", File: "pkg/a_test.go", Func: "x3"}}}},
 	}
 	return inv, []ScenarioDecl{{ID: "X3", Reqs: []string{"FP-SCRIPT-CONTENT"}, Declared: "uncontained", Owner: "#420"}}
@@ -224,6 +227,15 @@ func TestInventoryLintRules(t *testing.T) {
 		{name: "scenario claims unknown row", scenario: true, edit: func(_ *Inventory, sc *[]ScenarioDecl) {
 			*sc = append(*sc, ScenarioDecl{ID: "X5", Reqs: []string{"FP-GHOST"}, Declared: "contained"})
 		}, want: "scenario X5 claims FP-GHOST, which has no inventory row"},
+		{name: "mutation missing", edit: func(inv *Inventory, _ *[]ScenarioDecl) { inv.Rows[0].Mutations = nil },
+			want: "PATH-ABS: verified row cites no mutation ledger entry"},
+		{name: "mutation missing on uncontained", scenario: true, edit: func(inv *Inventory, _ *[]ScenarioDecl) { inv.Rows[0].Mutations = nil },
+			want: "FP-SCRIPT-CONTENT: uncontained row cites no mutation ledger entry"},
+		{name: "mutation unknown", edit: func(inv *Inventory, _ *[]ScenarioDecl) { inv.Rows[0].Mutations = []string{"M-001", "M-999"} },
+			want: "mutation M-999 is not an entry of the mutation ledger"},
+		{name: "exempt row needs no mutation", edit: func(inv *Inventory, _ *[]ScenarioDecl) {
+			inv.Rows[0].Mutations, inv.Rows[0].Exempt = nil, "administrative: fixture"
+		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			inv, sc, tree := boundInventory(), []ScenarioDecl(nil), boundTree
@@ -238,7 +250,7 @@ func TestInventoryLintRules(t *testing.T) {
 			root := t.TempDir()
 			writeGo(t, root, "pkg/a_test.go", tree)
 			tc.edit(&inv, &sc)
-			errs := Lint(inv, root, sc)
+			errs := Lint(inv, root, sc, fixtureLedger)
 			if tc.want == "" {
 				if len(errs) != 0 {
 					t.Fatalf("clean fixture rejected: %v", errs)
@@ -249,6 +261,19 @@ func TestInventoryLintRules(t *testing.T) {
 				t.Fatalf("want an error containing %q, got %v", tc.want, errs)
 			}
 		})
+	}
+}
+
+func TestLoadLedger(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "ledger.md")
+	writeGo(t, dir, "ledger.md", "# Ledger\n\n## M-001 — one\ntext ## M-009 — inline\n### M-008 — deeper\n## M-002 — two\n")
+	if ids, err := LoadLedger(path); err != nil || strings.Join(ids, ",") != "M-001,M-002" {
+		t.Fatalf("LoadLedger = %v, %v, want [M-001 M-002]", ids, err)
+	}
+	writeGo(t, dir, "ledger.md", "## M-001 — one\n## M-001 — again\n")
+	if _, err := LoadLedger(path); err == nil || !strings.Contains(err.Error(), "duplicate ledger entry M-001") {
+		t.Fatalf("duplicate entry: err = %v, want duplicate ledger entry M-001", err)
 	}
 }
 
@@ -295,8 +320,13 @@ func TestCommittedInventory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	ledger, err := LoadLedger(filepath.Join(root, "docs", "security", "containment-mutations.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	// containment: META-INVENTORY
-	for _, err := range Lint(inv, root, scenarios) {
+	// containment: META-MUTATION
+	for _, err := range Lint(inv, root, scenarios, ledger) {
 		t.Error(err)
 	}
 	premerge := os.Getenv("GO_LLM_INVENTORY_PREMERGE") == "1"

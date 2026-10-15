@@ -12,6 +12,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"regexp"
+	"slices"
 )
 
 // Schema is the only inventory schema Load accepts.
@@ -26,8 +28,10 @@ type Inventory struct {
 
 // Row is one requirement. A row backed by Scenarios stores no status of its
 // own (or exactly the derived one): the cmd/golem registry owns the outcome.
-// Exempt is a non-empty reason that releases an administrative, pending,
-// unobserved or out-of-scope row from the mutation requirement (spec §6.4).
+// Mutations names the row's entries in the mutation ledger
+// (docs/security/containment-mutations.md); Exempt is a non-empty reason that
+// releases an administrative, pending, unobserved or out-of-scope row from
+// that requirement (spec §6.4).
 type Row struct {
 	ID          string   `json:"id"`
 	Source      string   `json:"source"`
@@ -108,6 +112,28 @@ func LoadScenarios(path string) ([]ScenarioDecl, error) {
 		return nil, err
 	}
 	return decls, nil
+}
+
+// ledgerHeading is one mutation ledger entry heading: `## M-NNN — <property>`.
+var ledgerHeading = regexp.MustCompile(`(?m)^## (M-[0-9]{3}) `)
+
+// LoadLedger returns the entry IDs of a mutation ledger
+// (docs/security/containment-mutations.md) in file order, rejecting a
+// duplicate ID so a row's citation is never ambiguous.
+func LoadLedger(path string) ([]string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("containmentinv: %w", err)
+	}
+	var ids []string
+	for _, m := range ledgerHeading.FindAllSubmatch(data, -1) {
+		id := string(m[1])
+		if slices.Contains(ids, id) {
+			return nil, fmt.Errorf("containmentinv: %s: duplicate ledger entry %s", path, id)
+		}
+		ids = append(ids, id)
+	}
+	return ids, nil
 }
 
 func decodeStrict(path string, v any) error {

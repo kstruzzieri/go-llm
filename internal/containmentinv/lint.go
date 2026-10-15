@@ -39,12 +39,19 @@ type source struct {
 //   - scenario-backed statuses are derived from the registry, never contradicted;
 //   - a row cites TestContainment/<X> for each executable scenario it lists, and only those;
 //   - pending and out-of-scope rows carry no refs; pending and uncontained need an owner;
-//   - model rows list artifacts, rows with refs list known mandatory profiles.
-func Lint(inv Inventory, repoRoot string, scenarios []ScenarioDecl) []error {
+//   - model rows list artifacts, rows with refs list known mandatory profiles;
+//   - a verified or uncontained row outside the model layer with no Exempt
+//     reason cites at least one entry of the mutation ledger, and every cited
+//     entry exists in ledger (the IDs LoadLedger returns).
+func Lint(inv Inventory, repoRoot string, scenarios []ScenarioDecl, ledger []string) []error {
 	src, errs := scanTests(repoRoot)
 	decls := make(map[string]ScenarioDecl, len(scenarios))
 	for _, s := range scenarios {
 		decls[s.ID] = s
+	}
+	entries := make(map[string]bool, len(ledger))
+	for _, id := range ledger {
+		entries[id] = true
 	}
 	profiles := map[string]bool{}
 	for _, p := range inv.Profiles {
@@ -57,7 +64,7 @@ func Lint(inv Inventory, repoRoot string, scenarios []ScenarioDecl) []error {
 			errs = append(errs, fmt.Errorf("%s: duplicate row ID", r.ID))
 		}
 		rows[r.ID] = r
-		errs = append(errs, lintRow(r, decls, profiles)...)
+		errs = append(errs, lintRow(r, decls, profiles, entries)...)
 		for _, ref := range r.Refs {
 			cited[site{r.ID, ref.File, ref.Func}] = true
 			errs = append(errs, lintRef(r.ID, ref, src)...)
@@ -83,7 +90,7 @@ func hasRow(rows map[string]Row, id string) bool {
 	return ok
 }
 
-func lintRow(r Row, decls map[string]ScenarioDecl, profiles map[string]bool) []error {
+func lintRow(r Row, decls map[string]ScenarioDecl, profiles, ledger map[string]bool) []error {
 	var errs []error
 	add := func(format string, args ...any) {
 		errs = append(errs, fmt.Errorf("%s: "+format, append([]any{r.ID}, args...)...))
@@ -117,6 +124,16 @@ func lintRow(r Row, decls map[string]ScenarioDecl, profiles map[string]bool) []e
 	}
 	if (kind == "verified" || kind == "uncontained") && len(r.Refs) == 0 && len(r.Artifacts) == 0 {
 		add("%s row has no refs and no artifacts", kind)
+	}
+	// Spec §6.4: model rows are evidenced by artifacts, and pending,
+	// unobserved, out-of-scope and administrative rows by their Exempt reason.
+	if (kind == "verified" || kind == "uncontained") && r.Layer != "model" && r.Exempt == "" && len(r.Mutations) == 0 {
+		add("%s row cites no mutation ledger entry and has no exempt reason", kind)
+	}
+	for _, m := range r.Mutations {
+		if !ledger[m] {
+			add("mutation %s is not an entry of the mutation ledger", m)
+		}
 	}
 	if len(r.Refs) > 0 && len(r.Profiles) == 0 {
 		add("row has refs but lists no mandatory profile")
