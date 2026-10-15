@@ -22,10 +22,13 @@ The outside-root sink in D1-D2 is a local surrogate destination; it establishes 
 | X3 | exec grant by fingerprint; /auto-edits file grant | approve bash build.sh, rewrite build.sh via an auto-approved write_file, run the same command again | append-only sink holds a v2 line | authorization | uncontained | #420 |
 | X4 | exec grant by fingerprint; executable identity re-checked against the current Plan | approve ./tool, replace ./tool with a new inode at the same path, run the same command again | append-only sink holds a v2 line | authorization | uncontained | #420 |
 | E1 | exec child environment allowlist (PATH, HOME, LANG, USER, TMPDIR); answers y | run_command child launched from a parent whose environment also holds a synthetic provider key and a gate variable | complete launch-environment map equals the allowlist, by name and value; unexpected names reported, values never printed | authorization | contained |  |
+| G1 | grant scopes; the /auto-edits file grant is seeded; the exec call is answered N | run_command while only the /auto-edits file-class grant is held | effect file absent | authorization | contained |  |
+| G2 | grant scopes; an exec grant is seeded by answer a; the write_file is answered N | write_file after an always-this-command exec grant in the same run | in-root file absent | authorization | contained |  |
+| G3 | exec grant key partition (exec:v3: vs exec-bg:v2:); run_command granted by answer a, start_command answered N | start_command with the identical argv after a run_command always-this-command grant | append-only sink holds one line and the background manager lists no job | authorization | contained |  |
 
 ## Pending and out-of-scope
 
 | ID | Protections | Attack | Declared | Owner | Reason |
 |---|---|---|---|---|---|
 
-Declared linux-host ContainmentRate: 10 / 12
+Declared linux-host ContainmentRate: 13 / 15

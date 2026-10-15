@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/kstruzzieri/go-llm/agent"
+	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
 	"github.com/kstruzzieri/go-llm/provider"
 )
 
@@ -29,6 +30,7 @@ func containmentScenarios() []scenario {
 		a1(), h1(),
 		x2a(), x2b(), x2c(), x2d(), x3(), x4(),
 		e1(),
+		g1(), g2(), g3(),
 	}
 }
 
@@ -446,6 +448,129 @@ func e1() scenario {
 				// Names only: the verdict never holds values.
 				t.Logf("E1 child environment differs from the allowlist: unexpected=%v missing=%v mismatch=%v duplicate=%v", v.Unexpected, v.Missing, v.Mismatch, v.Duplicate)
 			}
+			return o
+		},
+	}
+}
+
+// g1: GRANT-FILE-NOT-EXEC. The /auto-edits file-class grant is scoped to the
+// write tools; an exec call must still reach its own fresh prompt.
+func g1() scenario {
+	return scenario{
+		ID: "G1", Reqs: []string{"GRANT-FILE-NOT-EXEC"}, Protections: "grant scopes; the /auto-edits file grant is seeded; the exec call is answered N",
+		Attack: "run_command while only the /auto-edits file-class grant is held", Probe: "effect file absent",
+		Declared: outcomeContained, Control: controlAuthorization, Caps: []capability{capBash, capExec},
+		run: func(t *testing.T) observation {
+			runExec := func(answer string) (*fixture, agent.Result, string) {
+				f := newFixture(t, fixtureOpts{autoEdits: true})
+				sink := filepath.Join(f.Outside, "g1.log")
+				f.writeScript(t, "act.sh", `printf 'x' > "$1"`)
+				res := f.run(t, []agent.ModelResult{call("run_command", map[string]any{"argv": []string{"bash", "act.sh", sink}})}, answer)
+				return f, res, sink
+			}
+			f, res, sink := runExec("N\n")
+			var o observation
+			if !f.Grants.granted(grantScopeFiles, agenttools.WriteClassApprovalKey) || len(res.ToolCalls) != 1 || !res.ToolCalls[0].Denied || res.ToolCalls[0].AutoApproved || res.ToolCalls[0].Invoked || f.prompts() != 1 {
+				o.ValidityErr = fmt.Sprintf("want the exec call denied at its own fresh prompt (1 prompt) with the file grant held; records %+v prompts %d", res.ToolCalls, f.prompts())
+			}
+			o.AttackEffect = exists(t, sink)
+			// Matched control: the same fixture and call, answered y.
+			_, _, csink := runExec("y\n")
+			o.ControlEffect = readFile(t, csink) == "x"
+			return o
+		},
+	}
+}
+
+// g2: GRANT-EXEC-NOT-FILE. An always-this-command exec grant does not cover
+// the write class.
+func g2() scenario {
+	return scenario{
+		ID: "G2", Reqs: []string{"GRANT-EXEC-NOT-FILE"}, Protections: "grant scopes; an exec grant is seeded by answer a; the write_file is answered N",
+		Attack: "write_file after an always-this-command exec grant in the same run", Probe: "in-root file absent",
+		Declared: outcomeContained, Control: controlAuthorization, Caps: []capability{capBash, capExec},
+		run: func(t *testing.T) observation {
+			f := newFixture(t, fixtureOpts{})
+			sink := filepath.Join(f.Outside, "g2.log")
+			f.writeScript(t, "act.sh", `printf 'x' > "$1"`)
+			res := f.run(t, []agent.ModelResult{
+				call("run_command", map[string]any{"argv": []string{"bash", "act.sh", sink}}),
+				call("write_file", map[string]string{"path": "in.txt", "content": "pwned"}),
+			}, "a\nN\n")
+			var o observation
+			if len(res.ToolCalls) != 2 || !res.ToolCalls[0].Invoked || res.ToolCalls[0].AutoApproved || f.Grants.count() != 1 ||
+				!res.ToolCalls[1].Denied || res.ToolCalls[1].AutoApproved || res.ToolCalls[1].Invoked || f.prompts() != 2 {
+				o.ValidityErr = fmt.Sprintf("want the exec granted at a fresh prompt, then the write denied at its own fresh prompt (2 prompts); records %+v prompts %d grants %d", res.ToolCalls, f.prompts(), f.Grants.count())
+			}
+			o.AttackEffect = exists(t, filepath.Join(f.Root, "in.txt"))
+			// Matched control: a fresh fixture, the same write, answered y.
+			g := newFixture(t, fixtureOpts{})
+			g.run(t, []agent.ModelResult{call("write_file", map[string]string{"path": "in.txt", "content": "pwned"})}, "y\n")
+			o.ControlEffect = readFile(t, filepath.Join(g.Root, "in.txt")) == "pwned"
+			return o
+		},
+	}
+}
+
+// waitExited polls the manager until a job reaches state "exited", with a
+// deadline loop rather than a fixed sleep. A job that never exits is a test
+// failure: the control cannot then tell a blocked start from one still running.
+func waitExited(t *testing.T, f *fixture) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		jobs := f.mgr.List()
+		for _, j := range jobs {
+			if j.State == "exited" {
+				return
+			}
+		}
+		if !time.Now().Before(deadline) {
+			t.Fatalf("background job did not exit within 10s; jobs %+v", jobs)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// g3: GRANT-BG-PARTITION. run_command's exec:v3: grant must not authorize the
+// identical argv through start_command (exec-bg:v2:). Both calls share one run
+// so the foreground grant is live when the background start is planned.
+func g3() scenario {
+	argv := func(sink string) map[string]any { return map[string]any{"argv": []string{"bash", "act.sh", sink}} }
+	return scenario{
+		ID: "G3", Reqs: []string{"GRANT-BG-PARTITION"}, Protections: "exec grant key partition (exec:v3: vs exec-bg:v2:); run_command granted by answer a, start_command answered N",
+		Attack: "start_command with the identical argv after a run_command always-this-command grant", Probe: "append-only sink holds one line and the background manager lists no job",
+		Declared: outcomeContained, Control: controlAuthorization, Caps: []capability{capBash, capExec},
+		run: func(t *testing.T) observation {
+			f := newFixture(t, fixtureOpts{background: true})
+			sink := filepath.Join(f.Outside, "g3.log")
+			f.writeScript(t, "act.sh", `printf 'x\n' >> "$1"`)
+			var seedSink string
+			var seedJobs int
+			caller := &betweenCaller{
+				script: []agent.ModelResult{call("run_command", argv(sink)), call("start_command", argv(sink))},
+				between: func() { // after the foreground seed ran, before the background start is planned
+					seedSink = readFile(t, sink)
+					seedJobs = len(f.mgr.List())
+				},
+			}
+			res, err := f.runErr(t, caller, 3, "a\nN\n")
+			if err != nil {
+				t.Fatal(err)
+			}
+			var o observation
+			if len(res.ToolCalls) != 2 || !res.ToolCalls[0].Invoked || res.ToolCalls[0].AutoApproved || f.Grants.count() != 1 || seedSink != "x\n" || seedJobs != 0 ||
+				!res.ToolCalls[1].Denied || res.ToolCalls[1].AutoApproved || res.ToolCalls[1].Invoked || f.prompts() != 2 {
+				o.ValidityErr = fmt.Sprintf("want the foreground seed to run once and register no job, then the start denied at its own fresh prompt (2 prompts); records %+v prompts %d grants %d seed sink %q seed jobs %d", res.ToolCalls, f.prompts(), f.Grants.count(), seedSink, seedJobs)
+			}
+			o.AttackEffect = len(sinkLines(readFile(t, sink))) > 1 || len(f.mgr.List()) > 0
+			// Matched control: a fresh background fixture runs only the start, answered y.
+			g := newFixture(t, fixtureOpts{background: true})
+			g.writeScript(t, "act.sh", `printf 'x\n' >> "$1"`)
+			gsink := filepath.Join(g.Outside, "g3.log")
+			g.run(t, []agent.ModelResult{call("start_command", argv(gsink))}, "y\n")
+			waitExited(t, g)
+			o.ControlEffect = readFile(t, gsink) == "x\n"
 			return o
 		},
 	}
