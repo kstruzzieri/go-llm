@@ -700,7 +700,7 @@
       "status": "verified",
       "owner": "",
       "layer": "focused",
-      "exempt": "the native-profile mutation needs a Linux host with bwrap: PR #478 (e4d580b3) records bwrap confinement mutations but none for the payload environment set",
+      "exempt": "the native-profile mutation needs a Linux host with bwrap: PR #478 (e4d580b3) records bwrap confinement mutations but none for the payload environment set. Follow-up, tracked in the PR body: on a Linux host with bwrap, apply an M-ledger-style mutation that lets a parent variable through the bwrap payload environment, run GO_LLM_REQUIRE_BWRAP=1 go test -count=1 -run '^TestBwrapPayloadEnvironment$' ./agent/tools, record it in docs/security/containment-mutations.md and cite it here",
       "scenarios": [],
       "refs": [
         {
@@ -1529,12 +1529,6 @@
       "refs": [
         {
           "package": "./cmd/golem",
-          "test": "TestProjectTrustLiveConsentAndFreshness",
-          "file": "cmd/golem/projectcontext_cli_test.go",
-          "func": "TestProjectTrustLiveConsentAndFreshness"
-        },
-        {
-          "package": "./cmd/golem",
           "test": "TestProjectContextInputsExactNormalizedWire",
           "file": "cmd/golem/projectcontext_trust_test.go",
           "func": "TestProjectContextInputsExactNormalizedWire"
@@ -2334,8 +2328,7 @@
         "windows"
       ],
       "mutations": [
-        "M-025",
-        "M-047"
+        "M-025"
       ],
       "artifacts": []
     },
@@ -2805,11 +2798,11 @@
     {
       "id": "META-MUTATION",
       "source": "issue-452:59",
-      "requirement": "Every security assertion has recorded red-on-revert or equivalent targeted mutation evidence in the committed ledger.",
+      "requirement": "Every non-exempt security assertion has recorded red-on-revert or equivalent targeted mutation evidence in the committed ledger; ENV-BWRAP is the one verified row whose mutation awaits a Linux host, see its Exempt reason.",
       "status": "verified",
       "owner": "",
       "layer": "focused",
-      "exempt": "administrative: the ledger is the evidence; the inventory lint requires every verified or uncontained row outside the model layer to cite an existing ledger entry or carry an exempt reason",
+      "exempt": "administrative: the ledger is the evidence; the inventory lint requires every verified or uncontained row outside the model layer to cite an existing ledger entry or carry an exempt reason. The one declared exception among verified rows is ENV-BWRAP, whose mutation awaits a Linux host with bwrap (see its Exempt reason)",
       "scenarios": [],
       "refs": [
         {

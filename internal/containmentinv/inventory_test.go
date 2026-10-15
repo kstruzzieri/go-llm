@@ -236,6 +236,9 @@ func TestInventoryLintRules(t *testing.T) {
 		{name: "exempt row needs no mutation", edit: func(inv *Inventory, _ *[]ScenarioDecl) {
 			inv.Rows[0].Mutations, inv.Rows[0].Exempt = nil, "administrative: fixture"
 		}},
+		{name: "model row needs no mutation", edit: func(inv *Inventory, _ *[]ScenarioDecl) {
+			inv.Rows = append(inv.Rows, Row{ID: "MODEL-STRATA", Status: "verified", Layer: "model", Artifacts: []string{"a.md"}})
+		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			inv, sc, tree := boundInventory(), []ScenarioDecl(nil), boundTree
