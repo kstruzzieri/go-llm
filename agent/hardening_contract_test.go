@@ -356,6 +356,7 @@ func runInvariantContracts(t *testing.T) {
 			got[i] = row.Tool + "/" + row.Name + "/" + row.Field
 		}
 		want := []string{"write_file/protected_path/path", "edit_file/protected_path/path", "promote_artifact/protected_path/path", "read_file/credential_path/path", "run_command/remote_script_execution/argv", "start_command/remote_script_execution/argv"}
+		// containment: INVARIANTS
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("DefaultInvariants() = %v, want %v", got, want)
 		}
@@ -391,13 +392,13 @@ func runInvariantContracts(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Invariants.InspectToolCall(%s): %v", tc.name, err)
 			}
+			// containment: INVARIANTS
 			if !tc.blocked {
 				if got != nil {
 					t.Errorf("Invariants.InspectToolCall(%s) finding count = %d, want 0", tc.name, len(got))
 				}
 				return
 			}
-			// containment: INVARIANTS
 			want := []agent.Finding{contractFinding(tc.rule, agent.VerdictBlock, 30, tc.detail, agent.OriginModel, agent.TargetToolCall, -1, "i1")}
 			contractFindingsEqual(t, tc.name, got, want, false)
 		})
@@ -435,13 +436,13 @@ func runEgressContracts(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Egress.InspectToolCall(%s): %v", tc.name, err)
 			}
+			// containment: EGRESS
 			if tc.rule == "" {
 				if got != nil {
 					t.Errorf("Egress.InspectToolCall(%s) finding count = %d, want 0", tc.name, len(got))
 				}
 				return
 			}
-			// containment: EGRESS
 			want := []agent.Finding{contractFinding(tc.rule, agent.VerdictTag, tc.risk, tc.detail, agent.OriginModel, agent.TargetToolCall, -1, "e9")}
 			contractFindingsEqual(t, tc.name, got, want, false)
 		})
@@ -700,6 +701,7 @@ func runDefaultPipelineContracts(t *testing.T) {
 		mc := &contractCaller{responses: []agent.ModelResult{contractFinal()}}
 		res, err := agent.New(mc, agent.ContextManager{}, agent.WithInterceptors(interceptor.Defaults()...)).Run(context.Background(), agent.Request{Goal: goal}, nil)
 		var blocked *agent.BlockedError
+		// containment: PIPELINE-ORDER
 		if err == nil || !errors.As(err, &blocked) || len(mc.requests) != 0 {
 			t.Errorf("Run(composed input) blocked/calls = %t/%d, want true/0", blocked != nil, len(mc.requests))
 		}

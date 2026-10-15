@@ -370,7 +370,6 @@ func TestProjectContextRenderingOmitsUnfitHeaderAndCountsBoundaries(t *testing.T
 	exactBudget := len(header) + len(projectContextTruncatedLine) + 2 + 7
 	block, bodyBytes, statuses := renderProjectContext(fence, docs, exactBudget)
 	body := keyedContextBody(t, block, "PROJECT_CONTEXT")
-	// containment: GUIDANCE-TRUST
 	if bodyBytes != exactBudget || len(body) != exactBudget || statuses[0] != projectContextTruncated {
 		t.Fatalf("renderProjectContext(exact boundary) = bytes %d body %d status %q, want %d/%d/truncated", bodyBytes, len(body), statuses[0], exactBudget, exactBudget)
 	}
@@ -432,7 +431,7 @@ func TestProjectContextInputsExactNormalizedWire(t *testing.T) {
 		"recent commits (newest first): (none)\n" +
 		"working tree: clean\n" +
 		">>>GIT_CONTEXT TESTKEY00000"
-	// containment: GUIDANCE-TRUST
+	// containment: GUIDANCE-SYSTEM-CONTEXT
 	if normalized := normalize(got.projectContext); normalized != wantProject {
 		t.Fatalf("projectContextInputs project wire = %q, want %q", normalized, wantProject)
 	}

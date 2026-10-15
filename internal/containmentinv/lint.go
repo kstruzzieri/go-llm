@@ -37,6 +37,7 @@ type source struct {
 //   - each ref names an existing function whose body holds the row's marker;
 //   - each marker names a row and sits in a function one of that row's refs cites;
 //   - scenario-backed statuses are derived from the registry, never contradicted;
+//   - a row cites TestContainment/<X> for each executable scenario it lists, and only those;
 //   - pending and out-of-scope rows carry no refs; pending and uncontained need an owner;
 //   - model rows list artifacts, rows with refs list known mandatory profiles.
 func Lint(inv Inventory, repoRoot string, scenarios []ScenarioDecl) []error {
@@ -123,6 +124,11 @@ func lintRow(r Row, decls map[string]ScenarioDecl, profiles map[string]bool) []e
 	for _, p := range r.Profiles {
 		if !profiles[p] {
 			add("unknown profile %q", p)
+		}
+	}
+	for _, ref := range r.Refs {
+		if id, ok := strings.CutPrefix(ref.Test, "TestContainment/"); ok && !slices.Contains(r.Scenarios, id) {
+			add("ref %s cites scenario %s, which this row does not list", ref.Test, id)
 		}
 	}
 	for _, id := range r.Scenarios {

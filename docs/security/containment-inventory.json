@@ -1407,7 +1407,7 @@
     {
       "id": "GUIDANCE-TRUST",
       "source": "issue-452:43",
-      "requirement": "Project guidance reaches the model only with matching live consent; a changed or unapproved document is omitted, and rendering is bounded (#431).",
+      "requirement": "Project guidance reaches the model only with matching live consent; a changed or unapproved document is omitted (#431).",
       "status": "verified",
       "owner": "",
       "layer": "focused",
@@ -1425,18 +1425,6 @@
           "test": "TestProjectContextInputsUntrustedOmitsProject",
           "file": "cmd/golem/projectcontext_trust_test.go",
           "func": "TestProjectContextInputsUntrustedOmitsProject"
-        },
-        {
-          "package": "./cmd/golem",
-          "test": "TestProjectContextRenderingOmitsUnfitHeaderAndCountsBoundaries",
-          "file": "cmd/golem/projectcontext_trust_test.go",
-          "func": "TestProjectContextRenderingOmitsUnfitHeaderAndCountsBoundaries"
-        },
-        {
-          "package": "./cmd/golem",
-          "test": "TestProjectContextInputsExactNormalizedWire",
-          "file": "cmd/golem/projectcontext_trust_test.go",
-          "func": "TestProjectContextInputsExactNormalizedWire"
         }
       ],
       "profiles": [
@@ -1461,6 +1449,12 @@
           "test": "TestProjectTrustLiveConsentAndFreshness",
           "file": "cmd/golem/projectcontext_cli_test.go",
           "func": "TestProjectTrustLiveConsentAndFreshness"
+        },
+        {
+          "package": "./cmd/golem",
+          "test": "TestProjectContextInputsExactNormalizedWire",
+          "file": "cmd/golem/projectcontext_trust_test.go",
+          "func": "TestProjectContextInputsExactNormalizedWire"
         }
       ],
       "profiles": [
@@ -2697,18 +2691,15 @@
       "id": "META-GATE",
       "source": "issue-452:60",
       "requirement": "The deterministic suite runs under go test ./... and the local CI security gate with bounded runtime, no live model, no Docker requirement and no external network.",
-      "status": "verified",
-      "owner": "",
+      "status": "pending(#452)",
+      "owner": "#452",
       "layer": "focused",
-      "exempt": "administrative: gate wiring, not a security guard",
+      "exempt": "administrative: gate wiring, not a security guard; it lands with #452's execution checker task",
       "scenarios": [],
       "refs": [],
       "profiles": [],
       "mutations": [],
-      "artifacts": [
-        "scripts/ci-local",
-        "scripts/test-ci-local"
-      ]
+      "artifacts": []
     }
   ]
 }

@@ -122,6 +122,164 @@ func TestInventoryPendingNeedsOwnerAndNoRefs(t *testing.T) {
 	}
 }
 
+// scenarioTree and scenarioFixture are a lint-clean scenario-backed row: X3
+// claims FP-SCRIPT-CONTENT, the row lists X3 and cites its TestContainment leaf,
+// and the marker sits in the scenario function.
+const scenarioTree = `package pkg
+import "testing"
+func TestContainment(t *testing.T) {}
+func x3() {
+	// containment: FP-SCRIPT-CONTENT
+}
+`
+
+func scenarioFixture() (Inventory, []ScenarioDecl) {
+	inv := Inventory{
+		Profiles: []Profile{{Name: "linux-host", GOOS: "linux"}},
+		Rows: []Row{{ID: "FP-SCRIPT-CONTENT", Source: "issue-452:56", Requirement: "script change needs approval",
+			Layer: "scenario", Scenarios: []string{"X3"}, Profiles: []string{"linux-host"},
+			Refs: []Ref{{Package: "./pkg", Test: "TestContainment/X3", File: "pkg/a_test.go", Func: "x3"}}}},
+	}
+	return inv, []ScenarioDecl{{ID: "X3", Reqs: []string{"FP-SCRIPT-CONTENT"}, Declared: "uncontained", Owner: "#420"}}
+}
+
+// TestInventoryLintRules breaks one rule per case, starting from a fixture
+// that lints clean, and requires the rule's own message.
+func TestInventoryLintRules(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		scenario bool   // start from scenarioFixture instead of boundInventory
+		tree     string // replaces the fixture's pkg/a_test.go when set
+		edit     func(inv *Inventory, sc *[]ScenarioDecl)
+		want     string
+	}{
+		{name: "clean bound fixture", edit: func(*Inventory, *[]ScenarioDecl) {}},
+		{name: "clean scenario fixture", scenario: true, edit: func(*Inventory, *[]ScenarioDecl) {}},
+		{name: "ref fields", edit: func(inv *Inventory, _ *[]ScenarioDecl) { inv.Rows[0].Refs[0].Func = "" },
+			want: "needs package, test, file and func"},
+		{name: "ref package", edit: func(inv *Inventory, _ *[]ScenarioDecl) { inv.Rows[0].Refs[0].Package = "./other" },
+			want: "package ./other, want ./pkg"},
+		{name: "ref file", edit: func(inv *Inventory, _ *[]ScenarioDecl) { inv.Rows[0].Refs[0].File = "pkg/missing_test.go" },
+			want: "pkg/missing_test.go is not a scanned _test.go file"},
+		{name: "ref function", edit: func(inv *Inventory, _ *[]ScenarioDecl) { inv.Rows[0].Refs[0].Func = "TestNope" },
+			want: "function TestNope not found"},
+		{name: "ref top-level test", edit: func(inv *Inventory, _ *[]ScenarioDecl) { inv.Rows[0].Refs[0].Test = "TestMissing/leaf" },
+			want: "top-level test TestMissing not found"},
+		{name: "marker outside any function", tree: boundTree + "\n// containment: PATH-ABS\nvar _ = 1\n",
+			edit: func(*Inventory, *[]ScenarioDecl) {}, want: "PATH-ABS marker sits outside any function"},
+		{name: "duplicate row", edit: func(inv *Inventory, _ *[]ScenarioDecl) { inv.Rows = append(inv.Rows, inv.Rows[0]) },
+			want: "PATH-ABS: duplicate row ID"},
+		{name: "family", edit: func(inv *Inventory, _ *[]ScenarioDecl) {
+			inv.Rows = append(inv.Rows, Row{ID: "BOGUS-1", Status: "verified", Layer: "focused", Artifacts: []string{"a.md"}})
+		}, want: "BOGUS-1: ID belongs to no inventory family"},
+		{name: "layer", edit: func(inv *Inventory, _ *[]ScenarioDecl) { inv.Rows[0].Layer = "unit" },
+			want: `layer "unit"`},
+		{name: "stored status form", edit: func(inv *Inventory, _ *[]ScenarioDecl) { inv.Rows[0].Status = "done" },
+			want: `status "done", want verified`},
+		{name: "owner mismatch", edit: func(inv *Inventory, _ *[]ScenarioDecl) {
+			inv.Rows = append(inv.Rows, Row{ID: "QUARANTINE", Status: "pending(#434)", Owner: "#999", Layer: "focused"})
+		}, want: `does not name the row owner "#999"`},
+		{name: "evidence", edit: func(inv *Inventory, _ *[]ScenarioDecl) {
+			inv.Rows = append(inv.Rows, Row{ID: "PATH-NUL", Status: "verified", Layer: "focused"})
+		}, want: "PATH-NUL: verified row has no refs and no artifacts"},
+		{name: "model artifacts", edit: func(inv *Inventory, _ *[]ScenarioDecl) {
+			inv.Rows = append(inv.Rows, Row{ID: "MODEL-STRATA", Status: "verified", Layer: "model"})
+		}, want: "MODEL-STRATA: model row lists no artifacts"},
+		{name: "mandatory profile", edit: func(inv *Inventory, _ *[]ScenarioDecl) { inv.Rows[0].Profiles = nil },
+			want: "lists no mandatory profile"},
+		{name: "unknown profile", edit: func(inv *Inventory, _ *[]ScenarioDecl) { inv.Rows[0].Profiles = []string{"mars"} },
+			want: `unknown profile "mars"`},
+		{name: "profile name", edit: func(inv *Inventory, _ *[]ScenarioDecl) {
+			inv.Profiles = append(inv.Profiles, Profile{Name: "linux-host"})
+		}, want: "empty or duplicate name"},
+		{name: "allowed skip form", edit: func(inv *Inventory, _ *[]ScenarioDecl) { inv.Profiles[0].AllowedSkips = []string{"TestCited"} },
+			want: "want <leaf>=<reason>"},
+		{name: "allowed skip leaf", edit: func(inv *Inventory, _ *[]ScenarioDecl) {
+			inv.Profiles[0].AllowedSkips = []string{"TestCited=capability:bash", "TestOther=capability:bash"}
+		}, want: "allowed skip for TestOther, which no row mandatory on linux-host cites"},
+		{name: "scenario-backed owner", scenario: true, edit: func(inv *Inventory, _ *[]ScenarioDecl) { inv.Rows[0].Owner = "#420" },
+			want: "stores owner"},
+		{name: "undeclared scenario", scenario: true, edit: func(inv *Inventory, _ *[]ScenarioDecl) { inv.Rows[0].Scenarios = []string{"X3", "X9"} },
+			want: "scenario X9 is not declared"},
+		{name: "scenario outcome", scenario: true, edit: func(_ *Inventory, sc *[]ScenarioDecl) { (*sc)[0].Declared = "maybe" },
+			want: `unknown outcome "maybe"`},
+		{name: "scenario owner", scenario: true, edit: func(_ *Inventory, sc *[]ScenarioDecl) { (*sc)[0].Owner = "" },
+			want: "X3 is uncontained without an owner or reason"},
+		{name: "split row", scenario: true, edit: func(inv *Inventory, sc *[]ScenarioDecl) {
+			inv.Rows[0].Scenarios, inv.Rows[0].Refs = []string{"S1", "O1"}, nil
+			*sc = []ScenarioDecl{{ID: "S1", Reqs: []string{"FP-SCRIPT-CONTENT"}, Declared: "pending", Owner: "#584"},
+				{ID: "O1", Reqs: []string{"FP-SCRIPT-CONTENT"}, Declared: "out-of-scope", Reason: "outside the guarantee"}}
+		}, want: "split the row"},
+		{name: "executable scenario ref", scenario: true, edit: func(inv *Inventory, _ *[]ScenarioDecl) { inv.Rows[0].Refs = nil },
+			want: "executable scenario X3 has no TestContainment/X3 ref"},
+		{name: "ref to an unlisted scenario", scenario: true, edit: func(inv *Inventory, sc *[]ScenarioDecl) {
+			inv.Rows[0].Refs = append(inv.Rows[0].Refs, Ref{Package: "./pkg", Test: "TestContainment/X4", File: "pkg/a_test.go", Func: "x3"})
+		}, want: "ref TestContainment/X4 cites scenario X4, which this row does not list"},
+		{name: "row scenario not claiming it", scenario: true, edit: func(_ *Inventory, sc *[]ScenarioDecl) {
+			(*sc)[0].Reqs = []string{"FP-SCRIPT-CONTENT-OTHER"}
+		}, want: "scenario X3 does not list this row in its reqs"},
+		{name: "scenario claim not listed", scenario: true, edit: func(_ *Inventory, sc *[]ScenarioDecl) {
+			*sc = append(*sc, ScenarioDecl{ID: "X4", Reqs: []string{"FP-SCRIPT-CONTENT"}, Declared: "uncontained", Owner: "#420"})
+		}, want: "FP-SCRIPT-CONTENT: row does not list scenario X4"},
+		{name: "scenario claims unknown row", scenario: true, edit: func(_ *Inventory, sc *[]ScenarioDecl) {
+			*sc = append(*sc, ScenarioDecl{ID: "X5", Reqs: []string{"FP-GHOST"}, Declared: "contained"})
+		}, want: "scenario X5 claims FP-GHOST, which has no inventory row"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			inv, sc, tree := boundInventory(), []ScenarioDecl(nil), boundTree
+			inv.Profiles[0].AllowedSkips = []string{"TestCited=capability:bash"}
+			if tc.scenario {
+				inv, sc = scenarioFixture()
+				tree = scenarioTree
+			}
+			if tc.tree != "" {
+				tree = tc.tree
+			}
+			root := t.TempDir()
+			writeGo(t, root, "pkg/a_test.go", tree)
+			tc.edit(&inv, &sc)
+			errs := Lint(inv, root, sc)
+			if tc.want == "" {
+				if len(errs) != 0 {
+					t.Fatalf("clean fixture rejected: %v", errs)
+				}
+				return
+			}
+			if !containsErr(errs, tc.want) {
+				t.Fatalf("want an error containing %q, got %v", tc.want, errs)
+			}
+		})
+	}
+}
+
+func TestInventoryLoadRejects(t *testing.T) {
+	const row = `{"id": "PATH-ABS"}`
+	for _, tc := range []struct{ name, doc, want string }{
+		{"clean", `{"schema": "containment-inventory/v1", "profiles": [], "rows": [` + row + `]}`, ""},
+		{"unknown field", `{"schema": "containment-inventory/v1", "profiles": [], "rows": [{"id": "PATH-ABS", "statsu": "verified"}]}`, `unknown field "statsu"`},
+		{"schema", `{"schema": "containment-inventory/v0", "profiles": [], "rows": [` + row + `]}`, `schema "containment-inventory/v0"`},
+		{"duplicate ID", `{"schema": "containment-inventory/v1", "profiles": [], "rows": [` + row + `, ` + row + `]}`, "duplicate row ID PATH-ABS"},
+		{"trailing data", `{"schema": "containment-inventory/v1", "profiles": [], "rows": [` + row + `]} {}`, "trailing data"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "inv.json")
+			if err := os.WriteFile(path, []byte(tc.doc), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			inv, err := Load(path)
+			if tc.want == "" {
+				if err != nil || len(inv.Rows) != 1 || inv.Rows[0].ID != "PATH-ABS" {
+					t.Fatalf("clean inventory: %+v, %v", inv, err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("want an error containing %q, got %v", tc.want, err)
+			}
+		})
+	}
+}
+
 // TestCommittedInventory is the inventory gate: the committed JSON lints clean
 // against this tree and the scenario registry, every artifact exists, and the
 // committed Markdown is the rendering of the JSON. MODEL-* artifacts land with
