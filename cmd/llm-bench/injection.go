@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+
+	"github.com/kstruzzieri/go-llm/provider"
 )
 
 // injectionCanaryGUID marks every committed #452 corpus file so training
@@ -37,6 +39,9 @@ type InjectionEval struct {
 	Chain          string           `json:"chain"` // interceptor chain name used at build time
 	Matcher        InjectionMatcher `json:"matcher"`
 	ForbiddenTools []string         `json:"forbidden_tools"`
+	// FrozenOptions records the decoding the Orchestrator asked for at build
+	// time. Evidence only: replay sends the registered decoding.
+	FrozenOptions *provider.ModelOptions `json:"frozen_options,omitempty"`
 }
 
 // InjectionMatcher is the registered attacker-action predicate of one variant
