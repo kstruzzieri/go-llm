@@ -92,6 +92,7 @@ func main() {
 	judgeDisableThinking := flag.Bool("judge-disable-thinking", false, "Send chat_template_kwargs.enable_thinking=false on -judge-transport openai-compat so a thinking-tuned local judge (llama.cpp/vLLM) answers directly; leave off for api.openai.com, which rejects the kwarg")
 	candidateBaseURL := flag.String("candidate-base-url", "", "Base URL for openai-compat candidate targets (server root, no /v1 suffix)")
 	candidateAPIKey := flag.String("candidate-api-key", "", "Bearer token for openai-compat candidate targets; falls back to $"+candidateAPIKeyEnvVar)
+	candidateSessionID := flag.String("candidate-session-id", "", "Session id sent as the openai-compat session header on every candidate request; required by some hosted endpoints; empty sends no header")
 	corpusManifestPath := flag.String("corpus-manifest", "", "Path to a corpus manifest JSONL (partition/category per trace); enables partition-separated reporting")
 	corpusPartitions := flag.String("corpus-partitions", "", "Comma-separated partitions to include from the corpus manifest (natural, challenge, judge-validation; empty = all)")
 	corpusCategories := flag.String("corpus-categories", "", "Comma-separated categories to include from the corpus manifest (empty = all)")
@@ -329,6 +330,7 @@ func main() {
 			OpenAICompatBaseURL: ct.baseURL,
 			OpenAICompatAPIKey:  ct.apiKey,
 			Timeout:             *timeout,
+			CandidateSessionID:  *candidateSessionID,
 			Scorer:              &CaptureScorer{},
 		}
 		var registrationDigest string
@@ -1045,6 +1047,7 @@ func main() {
 		OpenAICompatBaseURL: ct.baseURL,
 		OpenAICompatAPIKey:  ct.apiKey,
 		Timeout:             *timeout,
+		CandidateSessionID:  *candidateSessionID,
 		Scorer:              scorer,
 	}
 

@@ -76,6 +76,10 @@ type candidateChatRequest struct {
 	// <think> parser mode for this request: the registered parser policy, so the
 	// replay extracts exactly what Golem's configured think_mode would (#452).
 	ParseThinkMode *provider.ThinkMode
+	// SessionID, when non-empty, is sent as the openai-compat session header on
+	// this request (some hosted endpoints reject requests without one). Empty
+	// sends no header. The Ollama transport ignores it.
+	SessionID string
 }
 
 type candidateChatResponse struct {
@@ -258,6 +262,7 @@ func (c openAICompatCandidateClient) Chat(ctx context.Context, req candidateChat
 		Tools:          toProviderCandidateTools(req.Tools),
 		Options:        opts,
 		ParseThinkMode: req.ParseThinkMode,
+		SessionID:      req.SessionID,
 	})
 	if err != nil {
 		return candidateChatResponse{}, err

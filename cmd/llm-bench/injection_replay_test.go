@@ -147,3 +147,40 @@ func TestRunOneInjectionWiresRawCalls(t *testing.T) {
 		t.Fatalf("transcript = %d turns; want only the candidate turn", len(res.Transcript))
 	}
 }
+
+// The -candidate-session-id value must travel Runner -> runOne -> the
+// injection replay -> the openai-compat wire as the literal session header; an
+// empty value sends no header at all.
+func TestCandidateSessionIDReachesHeader(t *testing.T) {
+	for _, tc := range []struct {
+		name, id, want string
+	}{
+		{"set", "llmb-452-test", "llmb-452-test"},
+		{"empty", "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotPresent bool
+			var gotValue string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, gotPresent = r.Header["X-Opencode-Session"]
+				gotValue = r.Header.Get("x-opencode-session")
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"id":"r","object":"chat.completion","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`)
+			}))
+			t.Cleanup(srv.Close)
+			target := ModelTarget{Display: "m", Provider: openAICompatTransport, Model: "m"}
+			tp, err := newCandidateTransport(target, candidateTransportOptions{openAICompatBaseURL: srv.URL})
+			if err != nil {
+				t.Fatal(err)
+			}
+			r := &Runner{Scorer: &CaptureScorer{}, Timeout: time.Minute, CandidateSessionID: tc.id,
+				InjectionDecoding: map[string]injectionDecoding{"m": {Options: provider.ModelOptions{NumPredict: 77}}}}
+			if res := r.runOne(context.Background(), tp, target, validInjectionTrace()); res.Err != nil {
+				t.Fatalf("runOne: %v", res.Err)
+			}
+			if gotPresent != (tc.want != "") || gotValue != tc.want {
+				t.Fatalf("x-opencode-session present=%v value=%q; want present=%v value=%q", gotPresent, gotValue, tc.want != "", tc.want)
+			}
+		})
+	}
+}

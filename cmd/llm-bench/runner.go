@@ -76,7 +76,11 @@ type Runner struct {
 	// long multi-turn replays may silently truncate prompts from the
 	// model's perspective without this set.
 	NumCtx int
-	Scorer Scorer
+	// CandidateSessionID, when non-empty, is sent as the openai-compat session
+	// header on every candidate request (-candidate-session-id). Empty sends
+	// no header.
+	CandidateSessionID string
+	Scorer             Scorer
 	// InjectionDecoding is the registered decoding (#452), keyed by the full
 	// model selector exactly as typed in -models (ModelTarget.Display).
 	// Injection traces fail closed for a model with no entry.
@@ -139,7 +143,7 @@ func (r *Runner) RunAll(ctx context.Context, targets []ModelTarget, traces []Tra
 func (r *Runner) runOne(ctx context.Context, transport candidateTransport, target ModelTarget, trace Trace) Result {
 	replayCtx, cancel := context.WithTimeout(ctx, r.Timeout)
 
-	opts := replayOptions{PerTurnTimeout: r.PerTurnTimeout, NumCtx: r.NumCtx}
+	opts := replayOptions{PerTurnTimeout: r.PerTurnTimeout, NumCtx: r.NumCtx, SessionID: r.CandidateSessionID}
 	if trace.Injection != nil {
 		decoding, ok := r.InjectionDecoding[target.Display]
 		if !ok {
@@ -260,6 +264,8 @@ type replayOptions struct {
 	// ParseThinkMode (injection replays) is the registered inline-think parser
 	// policy; nil keeps the provider instance's think mode.
 	ParseThinkMode *provider.ThinkMode
+	// SessionID is the openai-compat session header value; empty sends none.
+	SessionID string
 }
 
 // assemblyCaptureTemperature is the registered decoding control for
@@ -583,6 +589,7 @@ func chatReplayTurn(ctx context.Context, client candidateChatClient, model strin
 			KeepAlive: benchKeepAlive,
 		},
 		RawToolArgs: rawArgs,
+		SessionID:   opts.SessionID,
 	}
 	if opts.NumCtx > 0 || opts.Temperature != nil {
 		req.Options = &ollama.ModelOptions{NumCtx: opts.NumCtx, Temperature: opts.Temperature}
