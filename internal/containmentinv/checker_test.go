@@ -164,6 +164,8 @@ func TestDecideRun(t *testing.T) {
 		{name: "clean", out: clean},
 		{name: "benign build-output", out: `{"ImportPath":"` + pkg + ` [` + pkg + `.test]","Action":"build-output","Output":"ld: warning: x\n"}` + "\n" + clean},
 		{name: "unknown field", out: `{"Action":"output","Package":"` + pkg + `","Output":"x","Extra":1}` + "\n" + clean},
+		{name: "attr event", out: `{"Action":"attr","Package":"` + pkg + `","Test":"TestContainment/A1","Key":"k","Value":"v"}` + "\n" + clean},
+		{name: "artifacts event", out: `{"Action":"artifacts","Package":"` + pkg + `","Test":"TestContainment/A1","Path":"/tmp/a"}` + "\n" + clean},
 		{name: "clean stream, go test failed", out: clean, runErr: exit1, want: "go test: exit status 1"},
 		{name: "build failure", out: buildFail, runErr: exit1, want: "malformed go test -json stream after 1 events: build failed"},
 		{name: "build-fail on a green stream", out: clean + `{"ImportPath":"x","Action":"build-fail"}` + "\n", want: "after 8 events: build failed (x)"},

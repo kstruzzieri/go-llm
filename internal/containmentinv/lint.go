@@ -43,6 +43,12 @@ type source struct {
 	registrars map[string]map[string][]string
 }
 
+// scenarioFile is the only file whose registrations a TestContainment ref may
+// cite, and registryRoots are its registry functions.
+const scenarioFile = "cmd/golem/containment_scenarios_test.go"
+
+var registryRoots = []string{"containmentScenarios", "executableScenarios", "pendingScenarios"}
+
 // observationFields are the containment observation's outcome fields.
 var observationFields = []string{"ValidityErr", "ControlEffect", "AttackEffect"}
 
@@ -323,6 +329,9 @@ func lintRef(id string, ref Ref, src source) []error {
 		return errs
 	}
 	scenario, _, _ = strings.Cut(scenario, "/")
+	if ref.File != scenarioFile {
+		return append(errs, fmt.Errorf("%s: ref %s: file %s, want %s, the scenario registry", id, ref.Test, ref.File, scenarioFile))
+	}
 	switch fns := src.registrars[ref.File][scenario]; {
 	case len(fns) == 0:
 		errs = append(errs, fmt.Errorf("%s: ref %s: no function in %s registers scenario %s", id, ref.Test, ref.File, scenario))
@@ -497,8 +506,32 @@ func (s *source) addFile(fset *token.FileSet, rel string, f *ast.File) {
 	s.funcs[rel] = fns
 	s.lastObs[rel] = map[string]token.Pos{}
 	s.registrars[rel] = map[string][]string{}
+	regs := map[string]map[string][]string{} // function -> scenario ID -> bound functions
+	callees := map[string][]string{}
 	for _, fn := range decls {
-		s.scanFunc(rel, fn, fns)
+		regs[funcName(fn)], callees[funcName(fn)] = s.scanFunc(rel, fn, fns)
+	}
+	// Only registry entries count: registrations in functions the registry
+	// roots reach through this file's calls, never a test's own literal.
+	reached := map[string]bool{}
+	queue := slices.Clone(registryRoots)
+	for len(queue) > 0 {
+		fn := queue[0]
+		queue = queue[1:]
+		if reached[fn] || !fns[fn] {
+			continue
+		}
+		reached[fn] = true
+		queue = append(queue, callees[fn]...)
+	}
+	for _, fn := range slices.Sorted(maps.Keys(reached)) {
+		for id, bound := range regs[fn] {
+			for _, b := range bound {
+				if !slices.Contains(s.registrars[rel][id], b) {
+					s.registrars[rel][id] = append(s.registrars[rel][id], b)
+				}
+			}
+		}
 	}
 	for _, cg := range f.Comments {
 		for _, c := range cg.List {
@@ -518,14 +551,17 @@ func (s *source) addFile(fset *token.FileSet, rel string, f *ast.File) {
 	}
 }
 
-// scanFunc records fn's last observation statement and the scenarios it
-// registers. A scenario is registered by a composite literal with
-// `ID: "<X>"`, or by a call to a function of this file whose first string
-// literal argument is "<X>" (wScenario, pendingRow). The functions bound to
-// the registration are fn itself, the called helper, and every function of
-// this file called by name inside the literal or call (d1's readExport).
-func (s *source) scanFunc(rel string, fn *ast.FuncDecl, fns map[string]bool) {
+// scanFunc records fn's last observation statement and returns the
+// scenarios it registers and the functions of this file it calls. A scenario
+// is registered by a `scenario` composite literal that sets `ID: "<X>"` and
+// `run:`, or by a call to a function of this file whose first string literal
+// argument is "<X>" (wScenario, pendingRow). The functions bound to the
+// registration are fn itself, the called helper, and every function of this
+// file called by name inside the literal or call (d1's readExport).
+func (s *source) scanFunc(rel string, fn *ast.FuncDecl, fns map[string]bool) (map[string][]string, []string) {
 	name := funcName(fn)
+	regs := map[string][]string{}
+	var callees []string
 	register := func(id string, node ast.Node, helper string) {
 		bound := []string{name}
 		if helper != "" {
@@ -540,8 +576,8 @@ func (s *source) scanFunc(rel string, fn *ast.FuncDecl, fns map[string]bool) {
 			return true
 		})
 		for _, b := range bound {
-			if !slices.Contains(s.registrars[rel][id], b) {
-				s.registrars[rel][id] = append(s.registrars[rel][id], b)
+			if !slices.Contains(regs[id], b) {
+				regs[id] = append(regs[id], b)
 			}
 		}
 	}
@@ -552,20 +588,34 @@ func (s *source) scanFunc(rel string, fn *ast.FuncDecl, fns map[string]bool) {
 				s.lastObs[rel][name] = max(s.lastObs[rel][name], x.Pos())
 			}
 		case *ast.CompositeLit:
-			if t, ok := x.Type.(*ast.Ident); ok && t.Name == "observation" {
+			t, _ := x.Type.(*ast.Ident)
+			if t != nil && t.Name == "observation" {
 				s.lastObs[rel][name] = max(s.lastObs[rel][name], x.Pos())
 			}
+			if t == nil || t.Name != "scenario" {
+				break
+			}
+			var id string
+			var hasID, hasRun bool
 			for _, elt := range x.Elts {
-				if kv, ok := elt.(*ast.KeyValueExpr); ok {
-					if key, ok := kv.Key.(*ast.Ident); ok && key.Name == "ID" {
-						if id, ok := stringLit(kv.Value); ok {
-							register(id, x, "")
-						}
-					}
+				kv, ok := elt.(*ast.KeyValueExpr)
+				if !ok {
+					continue
 				}
+				switch key, _ := kv.Key.(*ast.Ident); {
+				case key == nil:
+				case key.Name == "ID":
+					id, hasID = stringLit(kv.Value)
+				case key.Name == "run":
+					hasRun = true
+				}
+			}
+			if hasID && hasRun {
+				register(id, x, "")
 			}
 		case *ast.CallExpr:
 			if callee, ok := x.Fun.(*ast.Ident); ok && fns[callee.Name] {
+				callees = append(callees, callee.Name)
 				for _, arg := range x.Args {
 					if id, ok := stringLit(arg); ok {
 						register(id, x, callee.Name)
@@ -576,6 +626,7 @@ func (s *source) scanFunc(rel string, fn *ast.FuncDecl, fns map[string]bool) {
 		}
 		return true
 	})
+	return regs, callees
 }
 
 func stringLit(e ast.Expr) (string, bool) {

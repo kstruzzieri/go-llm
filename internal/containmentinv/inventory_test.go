@@ -163,12 +163,40 @@ type scenario struct {
 	run func() observation
 }
 func TestContainment(t *testing.T) {}
+func executableScenarios() []scenario { return []scenario{x3()} }
 func x3() scenario {
 	return scenario{ID: "X3", run: func() observation {
 		var o observation
 		// containment: FP-SCRIPT-CONTENT
 		o.AttackEffect = true
 		return o
+	}}
+}
+`
+
+// testLiteral is a test's own scenario literal (no run:), as in
+// TestContainmentDeclaredMismatchMessage; unreachableLiteral sets run: but no
+// registry root calls it. Neither is a registry entry.
+const testLiteral = `func TestMismatch(t *testing.T) {
+	_ = scenario{ID: "X3"}
+	// containment: FP-SCRIPT-CONTENT
+	_ = observation{}
+}
+`
+
+// noRunLiteral is reached from the registry but its literal sets no run:.
+const noRunLiteral = `func noRun() scenario {
+	_ = scenario{ID: "X3"}
+	// containment: FP-SCRIPT-CONTENT
+	_ = observation{}
+	return scenario{}
+}
+`
+
+const unreachableLiteral = `func stray() scenario {
+	return scenario{ID: "X3", run: func() observation {
+		// containment: FP-SCRIPT-CONTENT
+		return observation{}
 	}}
 }
 `
@@ -187,7 +215,7 @@ const helperTree = `func wScenario(id string) scenario {
 		return observation{}
 	}}
 }
-func all() []scenario { return []scenario{x3(), wScenario("X4")} }
+func pendingScenarios() []scenario { return []scenario{wScenario("X4")} }
 `
 
 func scenarioFixture() (Inventory, []ScenarioDecl) {
@@ -195,7 +223,7 @@ func scenarioFixture() (Inventory, []ScenarioDecl) {
 		Profiles: []Profile{{Name: "linux-host", GOOS: "linux"}},
 		Rows: []Row{{ID: "FP-SCRIPT-CONTENT", Source: "issue-452:56", Requirement: "script change needs approval",
 			Layer: "scenario", Scenarios: []string{"X3"}, Profiles: []string{"linux-host"}, Mutations: []string{"M-001"},
-			Refs: []Ref{{Package: "./pkg", Test: "TestContainment/X3", File: "pkg/a_test.go", Func: "x3"}}}},
+			Refs: []Ref{{Package: "./cmd/golem", Test: "TestContainment/X3", File: scenarioFile, Func: "x3"}}}},
 	}
 	return inv, []ScenarioDecl{{ID: "X3", Reqs: []string{"FP-SCRIPT-CONTENT"}, Declared: "uncontained", Owner: "#420", Caps: []string{"bash", "exec"}}}
 }
@@ -214,9 +242,10 @@ func TestInventoryLintRules(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
 		scenario bool   // start from scenarioFixture instead of boundInventory
-		tree     string // replaces the fixture's pkg/a_test.go when set
+		tree     string // replaces the fixture's test file when set
 		edit     func(inv *Inventory, sc *[]ScenarioDecl)
 		ledger   []LedgerEntry // replaces fixtureLedger when set
+		extra    string        // written to cmd/golem/containment_test.go when set
 		want     string
 	}{
 		{name: "clean bound fixture", edit: func(*Inventory, *[]ScenarioDecl) {}},
@@ -282,14 +311,27 @@ func TestInventoryLintRules(t *testing.T) {
 		{name: "ref to a function not bound to the registration", scenario: true, tree: scenarioTree + probeFunc, edit: func(inv *Inventory, _ *[]ScenarioDecl) {
 			inv.Rows[0].Refs[0].Func = "probe"
 		}, want: "probe is not bound to scenario X3's registration (x3)"},
+		{name: "test literal without run is no registration", scenario: true, tree: scenarioTree + testLiteral, edit: func(inv *Inventory, _ *[]ScenarioDecl) {
+			inv.Rows[0].Refs[0].Func = "TestMismatch"
+		}, want: "TestMismatch is not bound to scenario X3's registration (x3)"},
+		{name: "reachable literal without run is no registration", scenario: true,
+			tree: strings.Replace(scenarioTree, "return []scenario{x3()}", "return []scenario{x3(), noRun()}", 1) + noRunLiteral,
+			edit: func(inv *Inventory, _ *[]ScenarioDecl) { inv.Rows[0].Refs[0].Func = "noRun" },
+			want: "noRun is not bound to scenario X3's registration (x3)"},
+		{name: "unreachable literal with run is no registration", scenario: true, tree: scenarioTree + unreachableLiteral, edit: func(inv *Inventory, _ *[]ScenarioDecl) {
+			inv.Rows[0].Refs[0].Func = "stray"
+		}, want: "stray is not bound to scenario X3's registration (x3)"},
+		{name: "scenario ref outside the registry file", scenario: true, extra: testLiteral, edit: func(inv *Inventory, _ *[]ScenarioDecl) {
+			inv.Rows[0].Refs[0].File, inv.Rows[0].Refs[0].Func = "cmd/golem/containment_test.go", "TestMismatch"
+		}, want: "file cmd/golem/containment_test.go, want " + scenarioFile},
 		{name: "ref to an unregistered scenario", scenario: true, edit: func(inv *Inventory, sc *[]ScenarioDecl) {
 			inv.Rows[0].Scenarios = []string{"X3", "X5"}
-			inv.Rows[0].Refs = append(inv.Rows[0].Refs, Ref{Package: "./pkg", Test: "TestContainment/X5", File: "pkg/a_test.go", Func: "x3"})
+			inv.Rows[0].Refs = append(inv.Rows[0].Refs, Ref{Package: "./cmd/golem", Test: "TestContainment/X5", File: scenarioFile, Func: "x3"})
 			*sc = append(*sc, ScenarioDecl{ID: "X5", Reqs: []string{"FP-SCRIPT-CONTENT"}, Declared: "uncontained", Owner: "#420"})
-		}, want: "no function in pkg/a_test.go registers scenario X5"},
+		}, want: "no function in " + scenarioFile + " registers scenario X5"},
 		{name: "ref to a helper-registered scenario", scenario: true, tree: scenarioTree + helperTree, edit: func(inv *Inventory, sc *[]ScenarioDecl) {
 			inv.Rows[0].Scenarios = []string{"X3", "X4"}
-			inv.Rows[0].Refs = append(inv.Rows[0].Refs, Ref{Package: "./pkg", Test: "TestContainment/X4", File: "pkg/a_test.go", Func: "wScenario"})
+			inv.Rows[0].Refs = append(inv.Rows[0].Refs, Ref{Package: "./cmd/golem", Test: "TestContainment/X4", File: scenarioFile, Func: "wScenario"})
 			*sc = append(*sc, ScenarioDecl{ID: "X4", Reqs: []string{"FP-SCRIPT-CONTENT"}, Declared: "uncontained", Owner: "#420"})
 		}},
 		{name: "marker after the last observation", scenario: true,
@@ -329,7 +371,7 @@ func TestInventoryLintRules(t *testing.T) {
 		{name: "executable scenario ref", scenario: true, edit: func(inv *Inventory, _ *[]ScenarioDecl) { inv.Rows[0].Refs = nil },
 			want: "executable scenario X3 has no TestContainment/X3 ref"},
 		{name: "ref to an unlisted scenario", scenario: true, edit: func(inv *Inventory, sc *[]ScenarioDecl) {
-			inv.Rows[0].Refs = append(inv.Rows[0].Refs, Ref{Package: "./pkg", Test: "TestContainment/X4", File: "pkg/a_test.go", Func: "x3"})
+			inv.Rows[0].Refs = append(inv.Rows[0].Refs, Ref{Package: "./cmd/golem", Test: "TestContainment/X4", File: scenarioFile, Func: "x3"})
 		}, want: "ref TestContainment/X4 cites scenario X4, which this row does not list"},
 		{name: "row scenario not claiming it", scenario: true, edit: func(_ *Inventory, sc *[]ScenarioDecl) {
 			(*sc)[0].Reqs = []string{"FP-SCRIPT-CONTENT-OTHER"}
@@ -368,7 +410,14 @@ func TestInventoryLintRules(t *testing.T) {
 				tree = tc.tree
 			}
 			root := t.TempDir()
-			writeGo(t, root, "pkg/a_test.go", tree)
+			file := "pkg/a_test.go"
+			if tc.scenario {
+				file = scenarioFile
+			}
+			writeGo(t, root, file, tree)
+			if tc.extra != "" {
+				writeGo(t, root, "cmd/golem/containment_test.go", "package pkg\nimport \"testing\"\n"+tc.extra)
+			}
 			tc.edit(&inv, &sc)
 			if tc.ledger != nil {
 				ledger = tc.ledger

@@ -20,9 +20,10 @@ import (
 	"time"
 )
 
-// TestEvent is one event of a `go test -json` stream: a cmd/test2json test
-// event or one of the go command's build events (build-output, build-fail),
-// which carry ImportPath instead of Package. Package events (start, the
+// TestEvent is one event of a `go test -json` stream: a cmd/test2json event
+// (test actions, plus the attr and artifacts actions newer toolchains emit,
+// carrying Key/Value or Path, which the checker ignores) or one of the go command's build events
+// (build-output, build-fail), which carry ImportPath instead of Package. Package events (start, the
 // package's own pass/fail) have an empty Test. DecodeEvents ignores fields it
 // does not know, so a newer toolchain's additions never fail a run.
 type TestEvent struct {
@@ -40,9 +41,9 @@ type TestEvent struct {
 	Path        string
 }
 
-// eventActions are the actions DecodeEvents accepts: test2json's test actions
-// and the go command's build actions.
-var eventActions = []string{"start", "run", "pause", "cont", "pass", "fail", "skip", "output", "bench", "build-output", "build-fail"}
+// eventActions are the actions DecodeEvents accepts: test2json's actions and
+// the go command's build actions.
+var eventActions = []string{"start", "run", "pause", "cont", "pass", "fail", "skip", "output", "bench", "attr", "artifacts", "build-output", "build-fail"}
 
 // PackageRun is one `go test` invocation of the execution checker: every
 // mandatory leaf a profile cites in one package.

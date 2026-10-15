@@ -4,7 +4,7 @@ Each entry proves one security property's assertions can fail. Entries are point
 
 Platform: every proof in this ledger ran on darwin (arm64, go1.27.1) unless its entry's `Platform:` line names another; none has run on Linux or Windows yet. The plan is a Linux re-stamp at the rebase onto the model-resistance PR: re-run every entry on a Linux host (Docker `ci-local` or the GitHub runner), record that revision as each entry's baseline, and add `linux` to its `Platform:` line.
 
-Every entry below was run at `317d351a` on a darwin host (the two attack-only variants added in review, M-045 B and M-047 B, at `9db725e7`, whose production and scenario trees are identical; M-051 to M-053 at the commit that adds them, whose parent is `be03ef59`; M-054 to M-058 at the commit that adds them, whose parent is `12b63eb0`): the baseline passed, the mutant failed as shown, and the tree was restored with `git checkout` and passed again. Entries quote test output, the containment judge's message text and line numbers included, as it read at their baseline; later wording changes do not rewrite them. Entries carried over from the PR 2 delivery record name the draft entry they were first recorded as; they were re-run here so every command, diff and line number matches one revision. Apply a patch with `git apply`, run the command, then restore with `git checkout -- <file>`. `guard` entries remove or weaken the protection the refs assert. `effect-detection` entries change the effect path of an uncontained scenario: they show its probe can read a change in outcome, not that a guard is absent. Rows exempt from this ledger (pending, out-of-scope, unobserved such as ENV-BWRAP, whose native bwrap profile needs a Linux host, and administrative META- rows; the inventory lint allows no other verified or uncontained row an exemption) carry their exempt reason in the inventory (`docs/security/containment-inventory.json`, rendered in `docs/security/containment-inventory.md`).
+Every entry below was run at `317d351a` on a darwin host (the two attack-only variants added in review, M-045 B and M-047 B, at `9db725e7`, whose production and scenario trees are identical; M-051 to M-053 at the commit that adds them, whose parent is `be03ef59`; M-054 to M-058 at the commit that adds them, whose parent is `12b63eb0`; M-059 at the commit that adds it, whose parent is `1390239b`): the baseline passed, the mutant failed as shown, and the tree was restored with `git checkout` and passed again. Entries quote test output, the containment judge's message text and line numbers included, as it read at their baseline; later wording changes do not rewrite them. Entries carried over from the PR 2 delivery record name the draft entry they were first recorded as; they were re-run here so every command, diff and line number matches one revision. Apply a patch with `git apply`, run the command, then restore with `git checkout -- <file>`. `guard` entries remove or weaken the protection the refs assert. `effect-detection` entries change the effect path of an uncontained scenario: they show its probe can read a change in outcome, not that a guard is absent. Rows exempt from this ledger (pending, out-of-scope, unobserved such as ENV-BWRAP, whose native bwrap profile needs a Linux host, and administrative META- rows; the inventory lint allows no other verified or uncontained row an exemption) carry their exempt reason in the inventory (`docs/security/containment-inventory.json`, rendered in `docs/security/containment-inventory.md`).
 
 ## M-001 — Absolute paths are rejected by the workspace path cleaner
 - Affected refs: PATH-ABS: `TestHardeningContracts/Active/Workspace/confinement_and_arguments/public_confinement/owned_absolute_sibling`, `TestWorkspaceCleanRelContainment/absolute_escape`, `TestContainment/W1`
@@ -1709,9 +1709,63 @@ Every entry below was run at `317d351a` on a darwin host (the two attack-only va
 - Notes: Data mutation of the committed ledger: `FP-CWD: ` removed from M-015's Affected refs line turned `TestCommittedInventory` red (`inventory_test.go:457: ledger M-015 lists no inventory row in its Affected refs` and `inventory_test.go:457: FP-CWD: cites M-015, whose Affected refs do not list this row`); restored byte-identical. An entry's rows are the upper-case IDs on its first Affected refs line once backtick-quoted test names are removed (`TestLoadLedger`). The committed inventory and ledger already agreed when the rule landed.
 
 
+## M-059 — Only registry entries in the scenario file bind a scenario ref
+- Affected refs: META-INVENTORY: `TestCommittedInventory` (data mutation below); rule cases `TestInventoryLintRules/reachable_literal_without_run_is_no_registration`, `/unreachable_literal_with_run_is_no_registration`, `/scenario_ref_outside_the_registry_file`, `/test_literal_without_run_is_no_registration`
+- Baseline: the commit that adds this entry (parent `1390239b`); first recorded as PR2-R1a, PR2-R1b and PR2-R1c (wave 2 residuals)
+- Platform: darwin (arm64, go1.27.1)
+- Profile / command: darwin-host / `go test -count=1 -run '^TestInventoryLintRules$' -v ./internal/containmentinv`
+- Patch (A, a scenario literal without run: registers):
+  ```diff
+  diff --git a/internal/containmentinv/lint.go b/internal/containmentinv/lint.go
+  --- a/internal/containmentinv/lint.go
+  +++ b/internal/containmentinv/lint.go
+  @@ -610,7 +610,7 @@ func (s *source) scanFunc(rel string, fn *ast.FuncDecl, fns map[string]bool) (ma
+   					hasRun = true
+   				}
+   			}
+  -			if hasID && hasRun {
+  +			if hasID && (hasRun || true) {
+   				register(id, x, "")
+   			}
+   		case *ast.CallExpr:
+  ```
+- Patch (B, registrations outside the registry call graph count):
+  ```diff
+  diff --git a/internal/containmentinv/lint.go b/internal/containmentinv/lint.go
+  --- a/internal/containmentinv/lint.go
+  +++ b/internal/containmentinv/lint.go
+  @@ -524,7 +524,7 @@ func (s *source) addFile(fset *token.FileSet, rel string, f *ast.File) {
+   		reached[fn] = true
+   		queue = append(queue, callees[fn]...)
+   	}
+  -	for _, fn := range slices.Sorted(maps.Keys(reached)) {
+  +	for _, fn := range slices.Sorted(maps.Keys(regs)) {
+   		for id, bound := range regs[fn] {
+   			for _, b := range bound {
+   				if !slices.Contains(s.registrars[rel][id], b) {
+  ```
+- Patch (C, a scenario ref may cite any file):
+  ```diff
+  diff --git a/internal/containmentinv/lint.go b/internal/containmentinv/lint.go
+  --- a/internal/containmentinv/lint.go
+  +++ b/internal/containmentinv/lint.go
+  @@ -329,7 +329,7 @@ func lintRef(id string, ref Ref, src source) []error {
+   		return errs
+   	}
+   	scenario, _, _ = strings.Cut(scenario, "/")
+  -	if ref.File != scenarioFile {
+  +	if false && ref.File != scenarioFile {
+   		return append(errs, fmt.Errorf("%s: ref %s: file %s, want %s, the scenario registry", id, ref.Test, ref.File, scenarioFile))
+   	}
+   	switch fns := src.registrars[ref.File][scenario]; {
+  ```
+- Baseline: pass. Mutant A: FAIL `TestInventoryLintRules/reachable_literal_without_run_is_no_registration` (`inventory_test.go:433: want an error containing "noRun is not bound to scenario X3's registration (x3)", got [cmd/golem/containment_scenarios_test.go:13: FP-SCRIPT-CONTENT marker in x3 is not cited by any FP-SCRIPT-CONTENT ref]`). Mutant B: FAIL `/unreachable_literal_with_run_is_no_registration` (`inventory_test.go:433: want an error containing "stray is not bound to scenario X3's registration (x3)", got [... marker in x3 is not cited ...]`). Mutant C: FAIL `/scenario_ref_outside_the_registry_file` (`inventory_test.go:433: want an error containing "file cmd/golem/containment_test.go, want cmd/golem/containment_scenarios_test.go", got [FP-SCRIPT-CONTENT: ref TestContainment/X3: no function in cmd/golem/containment_test.go registers scenario X3 ...]`). Restored: pass.
+- Kind: guard
+- Notes: Closes a gap in M-057 found in review: at `1390239b` any `ID: "<X>"` literal registered X, so the FP-SCRIPT-CONTENT marker and its X3 ref moved into `TestContainmentDeclaredMismatchMessage` (cmd/golem/containment_test.go, which holds `scenario{ID: "X3"}` and an `observation{}` literal) passed lint. Data mutation, that reproduction on the committed tree: `TestCommittedInventory` is red (`inventory_test.go:506: FP-SCRIPT-CONTENT: ref TestContainment/X3: file cmd/golem/containment_test.go, want cmd/golem/containment_scenarios_test.go, the scenario registry`, plus the stale-Markdown check); under mutant C as well it stays red on the binding rule (`inventory_test.go:506: FP-SCRIPT-CONTENT: ref TestContainment/X3: no function in cmd/golem/containment_test.go registers scenario X3`); restored byte-identical. A registration is now a `scenario` literal setting `ID` and `run:`, or a same-file helper call (`wScenario`), inside a function that `containmentScenarios`, `executableScenarios` or `pendingScenarios` reach through same-file calls.
+
 ## Administrative evidence
 
-These mutations prove the harness, inventory lint, checker and gate rules can fail. They are not security properties and carry no M entry; META-INVENTORY and META-GATE cite this section. The exceptions are the gate rules whose regression would let the security gate pass a skipped, exempted, unbound or unmeasured security assertion: the checker's child-skip rule (M-051), the exemption rule (M-052), the profile skip pins (M-053), measured evidence cleanliness (M-054), the skip-allowed row rule (M-055), the first-missing-capability skip rule (M-056), scenario registration binding (M-057) and the bidirectional ledger rule (M-058). Each row names the rule, the test that pins it and the first failing line observed under its mutation, quoted at the revision where it was recorded; line numbers may have moved since. The full diffs and commands live in the maintainer's gitignored delivery record (docs/superpowers/evidence/452/mutations-pr2.md in the maintainer's checkout), which is not in the repository.
+These mutations prove the harness, inventory lint, checker and gate rules can fail. They are not security properties and carry no M entry; META-INVENTORY and META-GATE cite this section. The exceptions are the gate rules whose regression would let the security gate pass a skipped, exempted, unbound or unmeasured security assertion: the checker's child-skip rule (M-051), the exemption rule (M-052), the profile skip pins (M-053), measured evidence cleanliness (M-054), the skip-allowed row rule (M-055), the first-missing-capability skip rule (M-056), scenario registration binding (M-057, M-059) and the bidirectional ledger rule (M-058). Each row names the rule, the test that pins it and the first failing line observed under its mutation, quoted at the revision where it was recorded; line numbers may have moved since. The full diffs and commands live in the maintainer's gitignored delivery record (docs/superpowers/evidence/452/mutations-pr2.md in the maintainer's checkout), which is not in the repository.
 
 | Rule | Test | First failing line under its mutation |
 |---|---|---|
@@ -1740,6 +1794,7 @@ These mutations prove the harness, inventory lint, checker and gate rules can fa
 | Checker: a build-fail event fails the run, even after a green stream | `TestDecideRun/build_failure`, `/build-fail_on_a_green_stream` | `checker_test.go:184: want an error containing "after 8 events: build failed (x)" and nothing executed, got executed [TestContainment/A1 TestContainment/X2a] errs []` (fix wave 2, PR2-FW2-3: the build-fail case removed from DecodeEvents) |
 | Checker: an unknown or empty action fails the run | `TestDecideRun/unknown_action`, `/event_without_an_action` | `checker_test.go:184: want an error containing "unknown action \"teleport\"" and nothing executed, got executed [TestContainment/A1 TestContainment/X2a] errs []` (PR2-FW2-4) |
 | Checker: unknown fields and build-output events are tolerated | `TestDecideRun/unknown_field`, `/benign_build-output` | `checker_test.go:179: clean run: executed [] errs [... malformed go test -json stream after 0 events: json: unknown field "Extra"], want executed [TestContainment/A1 TestContainment/X2a]` (PR2-FW2-5: DisallowUnknownFields restored) |
+| Checker: attr and artifacts events are accepted and inert | `TestDecideRun/attr_event`, `/artifacts_event` | `checker_test.go:181: clean run: executed [] errs [... malformed go test -json stream after 0 events: unknown action "attr"], want executed [TestContainment/A1 TestContainment/X2a]` (PR2-R2a: "attr" removed from eventActions); likewise `unknown action "artifacts"` (PR2-R2b) |
 | Checker: a text line fails the run even after a complete stream | `TestDecideRun/text_line_after_the_package_pass` | `checker_test.go:183: want an error containing "malformed go test -json stream after 8 events" and nothing executed, got executed [TestContainment/A1 TestContainment/X2a] errs []` (recorded before fix wave 2; the decoder still rejects any non-JSON line) |
 | Lint: a verified or uncontained row outside the model layer cites an existing ledger entry | `TestInventoryLintRules/mutation_missing`, `/mutation_missing_on_uncontained`, `/mutation_unknown` | `inventory_test.go:261: want an error containing "PATH-ABS: verified row cites no mutation ledger entry", got []`; unknown entry: `inventory_test.go:261: want an error containing "mutation M-999 is not an entry of the mutation ledger", got []` |
 | Lint: an exempt administrative row needs no mutation | `TestInventoryLintRules/exempt_row_needs_no_mutation` | `inventory_test.go:256: clean fixture rejected: [PATH-ABS: verified row cites no mutation ledger entry and has no exempt reason]` (recorded when the fixture was a PATH row; it is a META- row since M-052) |

@@ -2742,7 +2742,7 @@
       "status": "verified",
       "owner": "",
       "layer": "focused",
-      "exempt": "administrative: the inventory gate checks declarations, not a security guard; its profile skip pins (linux-host allows no skip, other skips name a capability) are ledger entry M-053, the skip-allowed row rule M-055, the first-missing-capability skip rule M-056 and scenario registration binding M-057, and its other rule mutations are the Administrative evidence in docs/security/containment-mutations.md",
+      "exempt": "administrative: the inventory gate checks declarations, not a security guard; its profile skip pins (linux-host allows no skip, other skips name a capability) are ledger entry M-053, the skip-allowed row rule M-055, the first-missing-capability skip rule M-056 and scenario registration binding M-057 and M-059, and its other rule mutations are the Administrative evidence in docs/security/containment-mutations.md",
       "scenarios": [],
       "refs": [
         {
@@ -2759,7 +2759,8 @@
         "M-053",
         "M-055",
         "M-056",
-        "M-057"
+        "M-057",
+        "M-059"
       ],
       "artifacts": [
         "docs/security/containment-mutations.md"
