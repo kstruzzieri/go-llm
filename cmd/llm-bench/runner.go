@@ -86,6 +86,9 @@ type Result struct {
 	Score             Score
 	Err               error
 	Transcript        []Turn
+	// RawToolCalls preserves the candidate's tool calls before map conversion
+	// (#452); only injection traces read it.
+	RawToolCalls []injectionRawCall
 }
 
 // RunAll replays every trace against every model. Iterates models in the
