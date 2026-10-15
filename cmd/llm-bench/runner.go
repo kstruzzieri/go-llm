@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/kstruzzieri/go-llm/ollama"
+	"github.com/kstruzzieri/go-llm/provider"
 )
 
 // benchKeepAlive is the Ollama keep_alive directive used for benchmark runs.
@@ -147,6 +148,7 @@ func (r *Runner) runOne(ctx context.Context, transport candidateTransport, targe
 		TraceID:           trace.ID,
 		CandidateProvider: transport.providerName,
 		Transcript:        out.Transcript,
+		RawToolCalls:      out.RawToolCalls,
 	})
 	scorerMs := time.Since(scoreStart).Milliseconds()
 	if err != nil {
@@ -177,6 +179,7 @@ func (r *Runner) runOne(ctx context.Context, transport candidateTransport, targe
 		CandidateProvider: transport.providerName,
 		Score:             score,
 		Transcript:        out.Transcript,
+		RawToolCalls:      out.RawToolCalls,
 	}
 }
 
@@ -209,6 +212,8 @@ type replayOutput struct {
 	// exist for -replay-attempt (#687).
 	Divergences         []string
 	SentinelSubstituted bool
+	// RawToolCalls is the injection raw side channel (#452); empty elsewhere.
+	RawToolCalls []injectionRawCall
 }
 
 // addUsage folds one chat turn's token usage into the replay totals.
@@ -236,6 +241,9 @@ type replayOptions struct {
 	// transport's options shape supports one, so temperature-0 is the sole
 	// registered decoding control.
 	Temperature *float64
+	// ProviderOptions (injection replays) is sent verbatim on the openai-compat
+	// wire: the registered decoding (#452).
+	ProviderOptions *provider.ModelOptions
 }
 
 // assemblyCaptureTemperature is the registered decoding control for
@@ -278,6 +286,9 @@ func replay(ctx context.Context, client *ollama.Client, model string, trace Trac
 // All accumulated divergence notes are appended to the resulting Score's
 // Notes so aggregate consumers can see why a candidate diverged.
 func replayWith(ctx context.Context, client candidateChatClient, model string, trace Trace, opts replayOptions) (replayOutput, error) {
+	if trace.Injection != nil {
+		return replayInjection(ctx, client, model, trace, opts)
+	}
 	if prefilledAssemblyMode(trace) {
 		return replayPrefilled(ctx, client, model, trace, opts)
 	}

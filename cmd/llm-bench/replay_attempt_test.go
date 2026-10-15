@@ -1371,3 +1371,28 @@ func TestReplayAttempt_RefusesOnWindows(t *testing.T) {
 		t.Fatalf("attempt dir created on windows: %v", err)
 	}
 }
+
+// Injection traces run through -calibrate-capture; attempt.json v1 has no
+// injection replay kind, so loadAttemptInputs refuses them (#452).
+func TestReplayAttemptRefusesInjectionTrace(t *testing.T) {
+	srv := newCompatServer(t)
+	path := filepath.Join(t.TempDir(), "inj.json")
+	data, err := json.Marshal(validInjectionTrace())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code, rec, stderr := runAttemptStderr(t, context.Background(), attemptTestOptions(t, srv.URL, path))
+	if code != 0 {
+		t.Fatalf("exit %d; an input failure still publishes its terminal", code)
+	}
+	assertAttemptError(t, rec, attemptCodeInput, attemptStageInput, 0)
+	if len(rec.Requests) != 0 || len(srv.Received()) != 0 {
+		t.Fatalf("requests %v; nothing may reach the wire", rec.Requests)
+	}
+	if want := "llm-bench: replay-attempt: injection traces are not supported by -replay-attempt; use -calibrate-capture\n"; stderr != want {
+		t.Fatalf("stderr %q, want %q", stderr, want)
+	}
+}

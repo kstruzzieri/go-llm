@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -45,6 +47,13 @@ type candidateChatClient interface {
 type candidateChatRequest struct {
 	ollama.ChatRequest
 	RawToolArgs [][]json.RawMessage
+	// KeepRawCalls (injection traces only): return tool calls through
+	// RawToolCalls even when their arguments do not decode, instead of failing
+	// the whole response (spec §4.6).
+	KeepRawCalls bool
+	// ProviderOptions, when set, is sent verbatim on the openai-compat wire in
+	// place of the ollama-option conversion: the registered decoding (§4.9).
+	ProviderOptions *provider.ModelOptions
 }
 
 type candidateChatResponse struct {
@@ -59,6 +68,67 @@ type candidateChatResponse struct {
 	EvalCount              int
 	ThinkingTokens         int
 	ThinkingTokensComputed bool
+	// RawToolCalls is the injection raw side channel, read from the HTTP body
+	// before provider normalization. Set only when KeepRawCalls was requested.
+	RawToolCalls []injectionRawCall
+}
+
+// rawResponseSlot receives the response body of the request whose context
+// carries it. Injection replays attach one; every other request passes through.
+type rawResponseSlot struct{ body []byte }
+
+type rawSlotKey struct{}
+
+type rawResponseRecorder struct{ next http.RoundTripper }
+
+func (r rawResponseRecorder) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := r.next.RoundTrip(req)
+	slot, _ := req.Context().Value(rawSlotKey{}).(*rawResponseSlot)
+	if err != nil || slot == nil || resp.Body == nil {
+		return resp, err
+	}
+	b, rerr := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	_ = resp.Body.Close()
+	if rerr != nil {
+		return nil, rerr
+	}
+	slot.body = b
+	resp.Body = io.NopCloser(bytes.NewReader(b))
+	return resp, nil
+}
+
+// rawCallsFromResponseBody parses choices[0].message.tool_calls from the raw
+// chat-completion body, preserving argument presence and exact text.
+// DecodeOK is true only when arguments is a JSON object, or a JSON string
+// whose content parses to a JSON object.
+func rawCallsFromResponseBody(body []byte) ([]injectionRawCall, error) {
+	var env struct {
+		Choices []struct {
+			Message struct {
+				ToolCalls []struct {
+					ID       string `json:"id"`
+					Function struct {
+						Name      string          `json:"name"`
+						Arguments json.RawMessage `json:"arguments"`
+					} `json:"function"`
+				} `json:"tool_calls"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(body, &env); err != nil {
+		return nil, fmt.Errorf("raw tool calls: %w", err)
+	}
+	if len(env.Choices) == 0 {
+		return nil, nil
+	}
+	var out []injectionRawCall
+	for _, tc := range env.Choices[0].Message.ToolCalls {
+		raw := tc.Function.Arguments // nil when the key is absent
+		c := injectionRawCall{ID: tc.ID, Name: tc.Function.Name, Arguments: string(raw), ArgumentsPresent: raw != nil}
+		_, c.DecodeOK = decodeRawArgs(c.Arguments)
+		out = append(out, c)
+	}
+	return out, nil
 }
 
 func newCandidateTransport(target ModelTarget, opts candidateTransportOptions) (candidateTransport, error) {
@@ -79,12 +149,19 @@ func newCandidateTransport(target ModelTarget, opts candidateTransportOptions) (
 			return candidateTransport{}, fmt.Errorf("candidate %s transport requires -candidate-base-url", openAICompatTransport)
 		}
 		clientOpts := []openaicompat.ClientOption{}
-		switch {
-		case opts.httpClient != nil:
-			clientOpts = append(clientOpts, openaicompat.WithHTTPClient(opts.httpClient))
-		case opts.timeout > 0:
-			clientOpts = append(clientOpts, openaicompat.WithHTTPClient(&http.Client{Timeout: opts.timeout}))
+		// The recorder is always installed; requests without a slot pass
+		// through untouched.
+		base := opts.httpClient
+		if base == nil {
+			base = &http.Client{Timeout: opts.timeout}
 		}
+		next := base.Transport
+		if next == nil {
+			next = http.DefaultTransport
+		}
+		wrapped := *base
+		wrapped.Transport = rawResponseRecorder{next: next}
+		clientOpts = append(clientOpts, openaicompat.WithHTTPClient(&wrapped))
 		if key := strings.TrimSpace(opts.openAICompatAPIKey); key != "" {
 			clientOpts = append(clientOpts, openaicompat.WithAPIKey(key))
 		}
@@ -117,6 +194,11 @@ type ollamaCandidateClient struct {
 // args are achievable only on transports whose frozen types accept raw JSON
 // (see openAICompatCandidateClient).
 func (c ollamaCandidateClient) Chat(ctx context.Context, req candidateChatRequest) (candidateChatResponse, error) {
+	if req.KeepRawCalls {
+		// Native ollama decodes arguments server-side, so the raw evidence is
+		// gone: fail closed.
+		return candidateChatResponse{}, fmt.Errorf("injection traces require the openai-compat transport")
+	}
 	resp, err := c.client.Chat(ctx, req.ChatRequest)
 	if err != nil {
 		return candidateChatResponse{}, err
@@ -143,11 +225,20 @@ type openAICompatCandidateClient struct {
 }
 
 func (c openAICompatCandidateClient) Chat(ctx context.Context, req candidateChatRequest) (candidateChatResponse, error) {
+	opts := toProviderCandidateOptions(req.Options)
+	if req.ProviderOptions != nil {
+		opts = *req.ProviderOptions
+	}
+	var slot *rawResponseSlot
+	if req.KeepRawCalls {
+		slot = &rawResponseSlot{}
+		ctx = context.WithValue(ctx, rawSlotKey{}, slot)
+	}
 	presp, err := c.provider.Chat(ctx, provider.ChatRequest{
 		Model:    req.Model,
 		Messages: toProviderCandidateMessages(req.Messages, req.RawToolArgs),
 		Tools:    toProviderCandidateTools(req.Tools),
-		Options:  toProviderCandidateOptions(req.Options),
+		Options:  opts,
 	})
 	if err != nil {
 		return candidateChatResponse{}, err
@@ -155,9 +246,18 @@ func (c openAICompatCandidateClient) Chat(ctx context.Context, req candidateChat
 	if presp == nil {
 		return candidateChatResponse{}, fmt.Errorf("openai-compat candidate: nil response")
 	}
+	var raw []injectionRawCall
+	if slot != nil {
+		if raw, err = rawCallsFromResponseBody(slot.body); err != nil {
+			return candidateChatResponse{}, err
+		}
+	}
 	toolCalls, err := toOllamaCandidateToolCalls(presp.ToolCalls)
 	if err != nil {
-		return candidateChatResponse{}, err
+		if !req.KeepRawCalls {
+			return candidateChatResponse{}, err
+		}
+		toolCalls = nil // malformed: the raw channel is the evidence
 	}
 	// Map provider reasoning tokens onto the bench's thinking-token accounting.
 	// ThinkingTokensComputed gates whether downstream treats the count as a
@@ -178,6 +278,7 @@ func (c openAICompatCandidateClient) Chat(ctx context.Context, req candidateChat
 		EvalCount:              presp.Usage.CompletionTokens,
 		ThinkingTokens:         reasoning,
 		ThinkingTokensComputed: presp.Usage.ReasoningTokensReported,
+		RawToolCalls:           raw,
 	}, nil
 }
 

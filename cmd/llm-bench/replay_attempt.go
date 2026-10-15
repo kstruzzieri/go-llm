@@ -305,6 +305,11 @@ func loadAttemptInputs(opts replayAttemptOptions, rec *attemptRecord) (Trace, Mo
 	if err := validateTrace(trace); err != nil {
 		return Trace{}, ModelTarget{}, fmt.Errorf("trace %q: %w", trace.ID, err)
 	}
+	if trace.Injection != nil {
+		// #452 plan-review cut: injection traces run through -calibrate-capture
+		// (manifest v3); attempt.json v1 has no injection replay kind.
+		return Trace{}, ModelTarget{}, fmt.Errorf("injection traces are not supported by -replay-attempt; use -calibrate-capture")
+	}
 	kind := "scripted"
 	if prefilledAssemblyMode(trace) {
 		kind = "prefilled"
