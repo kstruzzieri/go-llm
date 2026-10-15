@@ -295,3 +295,25 @@ func TestContainmentRegistryIntegrity(t *testing.T) {
 		}
 	}
 }
+
+// TestContainmentDeclaredRate pins the declared outcome counts as literals
+// (not derived from the registry) so a row cannot be added, dropped or flipped
+// without the spec 5.3 totals being revisited in review.
+func TestContainmentDeclaredRate(t *testing.T) {
+	var c, u, p, o int
+	for _, s := range containmentScenarios() {
+		switch s.Declared {
+		case outcomeContained:
+			c++
+		case outcomeUncontained:
+			u++
+		case outcomePending:
+			p++
+		case outcomeOutOfScope:
+			o++
+		}
+	}
+	if c != 17 || u != 6 || p != 17 || o != 1 {
+		t.Fatalf("declared %d/%d/%d/%d, want 17 contained, 6 uncontained, 17 pending, 1 out-of-scope (spec §5.3)", c, u, p, o)
+	}
+}

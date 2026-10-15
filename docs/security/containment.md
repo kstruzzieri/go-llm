@@ -38,5 +38,23 @@ The outside-root sink in D1-D2 is a local surrogate destination; it establishes 
 
 | ID | Protections | Attack | Declared | Owner | Reason |
 |---|---|---|---|---|---|
+| S1 | Pending #584: strict mode for write and edit calls | Pending #584: a write_file or edit_file call under strict mode | pending | #584 |  |
+| S2 | Pending #584: strict mode for foreground exec | Pending #584: a foreground run_command call under strict mode | pending | #584 |  |
+| S3 | Pending #584: strict mode for background start, including the start-time recheck | Pending #584: a start_command call under strict mode | pending | #584 |  |
+| S4 | Pending #584: strict mode for the verifier | Pending #584: a verify_command call under strict mode | pending | #584 |  |
+| S5 | Pending #584: strict mode for headless runs | Pending #584: a gated call in a headless run under strict mode | pending | #584 |  |
+| S6 | Pending #584: strict mode for a one-time approval without trust reset | Pending #584: a call repeated after a one-time approval under strict mode | pending | #584 |  |
+| S7 | Pending #584: strict mode against the /auto-edits bypass | Pending #584: an edit that /auto-edits would approve under strict mode | pending | #584 |  |
+| C1 | Pending #582/#583: exposure carried through child results | Pending #582/#583: foreign content returned in a child result | pending | #582/#583 |  |
+| C2 | Pending #582/#583: exposure carried through model answers | Pending #582/#583: foreign content restated in a model answer | pending | #582/#583 |  |
+| C3 | Pending #582/#583: exposure carried through mixed-context assembly | Pending #582/#583: foreign content assembled into a mixed context | pending | #582/#583 |  |
+| C4 | Pending #582/#583: exposure carried through summary replacement | Pending #582/#583: foreign content folded into a replacement summary | pending | #582/#583 |  |
+| C5 | Pending #582/#583: exposure carried through subsequent turns | Pending #582/#583: foreign content reaching a later turn | pending | #582/#583 |  |
+| C6 | Pending #582/#583: exposure carried through resume | Pending #582/#583: foreign content reaching a resumed session | pending | #582/#583 |  |
+| R1 | Pending #471: approval-gated memory promotion | Pending #471: a memory promotion without an approval | pending | #471 |  |
+| Q1 | Pending #434: quarantine of untrusted content | Pending #434: untrusted content used without quarantine | pending | #434 |  |
+| Q2 | Pending #435: retrieval screening | Pending #435: an unscreened retrieval result | pending | #435 |  |
+| PV1 | Pending #387: preview-profile neutralization beyond the current approver tests | Pending #387: a preview that is not neutralized by the profile | pending | #387 |  |
+| O1 | Out of scope: grant revocation for an already-running background job | Out of scope: a background job started under a grant keeps running after the grant is revoked | out-of-scope | #581 | already-running background jobs are outside grant revocation's containment guarantee (#581) |
 
 Declared linux-host ContainmentRate: 17 / 23

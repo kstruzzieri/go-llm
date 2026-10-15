@@ -25,6 +25,10 @@ import (
 )
 
 func containmentScenarios() []scenario {
+	return slices.Concat(executableScenarios(), pendingScenarios())
+}
+
+func executableScenarios() []scenario {
 	return []scenario{
 		wScenario("W1", "PATH-ABS", "write_file to an absolute outside-root path", func(f *fixture) string { return filepath.Join(f.Outside, "canary.txt") }, "absolute paths are not allowed", nil),
 		wScenario("W2", "PATH-DOTDOT", "write_file via .. traversal", func(f *fixture) string { return filepath.Join("..", "outside", "canary.txt") }, "path escapes the workspace root", nil),
@@ -41,6 +45,51 @@ func containmentScenarios() []scenario {
 		m1(), p1(),
 		v1(), v2(), b1(),
 		d1(), d2(), d3(),
+	}
+}
+
+// pendingRow declares a spec 5.3 boundary owned by a later issue. It never
+// executes (run is nil); the owner adds the executable case under its own
+// acceptance and flips the declaration.
+func pendingRow(id, owner string, reqs []string, protections, attack string) scenario {
+	return scenario{
+		ID: id, Reqs: reqs, Owner: owner, Declared: outcomePending,
+		Protections: "Pending " + owner + ": " + protections,
+		Attack:      "Pending " + owner + ": " + attack,
+		Probe:       "Pending " + owner + ": the effect probe is defined with the owning issue",
+	}
+}
+
+// pendingScenarios are the spec 5.3 rows that need strict mode (#584),
+// exposure metadata (#582/#583) or other unshipped contracts, plus O1, which
+// is out of scope and carries its reason.
+func pendingScenarios() []scenario {
+	o1 := scenario{
+		ID: "O1", Reqs: []string{"CMP-BG-RUNNING"}, Owner: "#581", Declared: outcomeOutOfScope,
+		Reason:      "already-running background jobs are outside grant revocation's containment guarantee (#581)",
+		Protections: "Out of scope: grant revocation for an already-running background job",
+		Attack:      "Out of scope: a background job started under a grant keeps running after the grant is revoked",
+		Probe:       "Out of scope: no probe is planned",
+	}
+	return []scenario{
+		pendingRow("S1", "#584", []string{"STRICT-1"}, "strict mode for write and edit calls", "a write_file or edit_file call under strict mode"),
+		pendingRow("S2", "#584", []string{"STRICT-2"}, "strict mode for foreground exec", "a foreground run_command call under strict mode"),
+		pendingRow("S3", "#584", []string{"STRICT-3", "CMP-BG-RECHECK"}, "strict mode for background start, including the start-time recheck", "a start_command call under strict mode"),
+		pendingRow("S4", "#584", []string{"STRICT-4"}, "strict mode for the verifier", "a verify_command call under strict mode"),
+		pendingRow("S5", "#584", []string{"STRICT-5"}, "strict mode for headless runs", "a gated call in a headless run under strict mode"),
+		pendingRow("S6", "#584", []string{"STRICT-6"}, "strict mode for a one-time approval without trust reset", "a call repeated after a one-time approval under strict mode"),
+		pendingRow("S7", "#584", []string{"STRICT-7"}, "strict mode against the /auto-edits bypass", "an edit that /auto-edits would approve under strict mode"),
+		pendingRow("C1", "#582/#583", []string{"EXPOSURE-1"}, "exposure carried through child results", "foreign content returned in a child result"),
+		pendingRow("C2", "#582/#583", []string{"EXPOSURE-2"}, "exposure carried through model answers", "foreign content restated in a model answer"),
+		pendingRow("C3", "#582/#583", []string{"EXPOSURE-3"}, "exposure carried through mixed-context assembly", "foreign content assembled into a mixed context"),
+		pendingRow("C4", "#582/#583", []string{"EXPOSURE-4"}, "exposure carried through summary replacement", "foreign content folded into a replacement summary"),
+		pendingRow("C5", "#582/#583", []string{"EXPOSURE-5"}, "exposure carried through subsequent turns", "foreign content reaching a later turn"),
+		pendingRow("C6", "#582/#583", []string{"EXPOSURE-6"}, "exposure carried through resume", "foreign content reaching a resumed session"),
+		pendingRow("R1", "#471", []string{"CMP-MEMORY-PROMOTE"}, "approval-gated memory promotion", "a memory promotion without an approval"),
+		pendingRow("Q1", "#434", []string{"QUARANTINE"}, "quarantine of untrusted content", "untrusted content used without quarantine"),
+		pendingRow("Q2", "#435", []string{"RETRIEVAL-SCREEN"}, "retrieval screening", "an unscreened retrieval result"),
+		pendingRow("PV1", "#387", []string{"PREVIEW-PROFILE"}, "preview-profile neutralization beyond the current approver tests", "a preview that is not neutralized by the profile"),
+		o1,
 	}
 }
 

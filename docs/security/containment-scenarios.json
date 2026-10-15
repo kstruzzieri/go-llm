@@ -404,5 +404,276 @@
     "caps": [
       "unix"
     ]
+  },
+  {
+    "id": "S1",
+    "reqs": [
+      "STRICT-1"
+    ],
+    "protections": "Pending #584: strict mode for write and edit calls",
+    "attack": "Pending #584: a write_file or edit_file call under strict mode",
+    "probe": "Pending #584: the effect probe is defined with the owning issue",
+    "declared": "pending",
+    "owner": "#584",
+    "reason": "",
+    "control": "",
+    "control_diff": "",
+    "caps": []
+  },
+  {
+    "id": "S2",
+    "reqs": [
+      "STRICT-2"
+    ],
+    "protections": "Pending #584: strict mode for foreground exec",
+    "attack": "Pending #584: a foreground run_command call under strict mode",
+    "probe": "Pending #584: the effect probe is defined with the owning issue",
+    "declared": "pending",
+    "owner": "#584",
+    "reason": "",
+    "control": "",
+    "control_diff": "",
+    "caps": []
+  },
+  {
+    "id": "S3",
+    "reqs": [
+      "STRICT-3",
+      "CMP-BG-RECHECK"
+    ],
+    "protections": "Pending #584: strict mode for background start, including the start-time recheck",
+    "attack": "Pending #584: a start_command call under strict mode",
+    "probe": "Pending #584: the effect probe is defined with the owning issue",
+    "declared": "pending",
+    "owner": "#584",
+    "reason": "",
+    "control": "",
+    "control_diff": "",
+    "caps": []
+  },
+  {
+    "id": "S4",
+    "reqs": [
+      "STRICT-4"
+    ],
+    "protections": "Pending #584: strict mode for the verifier",
+    "attack": "Pending #584: a verify_command call under strict mode",
+    "probe": "Pending #584: the effect probe is defined with the owning issue",
+    "declared": "pending",
+    "owner": "#584",
+    "reason": "",
+    "control": "",
+    "control_diff": "",
+    "caps": []
+  },
+  {
+    "id": "S5",
+    "reqs": [
+      "STRICT-5"
+    ],
+    "protections": "Pending #584: strict mode for headless runs",
+    "attack": "Pending #584: a gated call in a headless run under strict mode",
+    "probe": "Pending #584: the effect probe is defined with the owning issue",
+    "declared": "pending",
+    "owner": "#584",
+    "reason": "",
+    "control": "",
+    "control_diff": "",
+    "caps": []
+  },
+  {
+    "id": "S6",
+    "reqs": [
+      "STRICT-6"
+    ],
+    "protections": "Pending #584: strict mode for a one-time approval without trust reset",
+    "attack": "Pending #584: a call repeated after a one-time approval under strict mode",
+    "probe": "Pending #584: the effect probe is defined with the owning issue",
+    "declared": "pending",
+    "owner": "#584",
+    "reason": "",
+    "control": "",
+    "control_diff": "",
+    "caps": []
+  },
+  {
+    "id": "S7",
+    "reqs": [
+      "STRICT-7"
+    ],
+    "protections": "Pending #584: strict mode against the /auto-edits bypass",
+    "attack": "Pending #584: an edit that /auto-edits would approve under strict mode",
+    "probe": "Pending #584: the effect probe is defined with the owning issue",
+    "declared": "pending",
+    "owner": "#584",
+    "reason": "",
+    "control": "",
+    "control_diff": "",
+    "caps": []
+  },
+  {
+    "id": "C1",
+    "reqs": [
+      "EXPOSURE-1"
+    ],
+    "protections": "Pending #582/#583: exposure carried through child results",
+    "attack": "Pending #582/#583: foreign content returned in a child result",
+    "probe": "Pending #582/#583: the effect probe is defined with the owning issue",
+    "declared": "pending",
+    "owner": "#582/#583",
+    "reason": "",
+    "control": "",
+    "control_diff": "",
+    "caps": []
+  },
+  {
+    "id": "C2",
+    "reqs": [
+      "EXPOSURE-2"
+    ],
+    "protections": "Pending #582/#583: exposure carried through model answers",
+    "attack": "Pending #582/#583: foreign content restated in a model answer",
+    "probe": "Pending #582/#583: the effect probe is defined with the owning issue",
+    "declared": "pending",
+    "owner": "#582/#583",
+    "reason": "",
+    "control": "",
+    "control_diff": "",
+    "caps": []
+  },
+  {
+    "id": "C3",
+    "reqs": [
+      "EXPOSURE-3"
+    ],
+    "protections": "Pending #582/#583: exposure carried through mixed-context assembly",
+    "attack": "Pending #582/#583: foreign content assembled into a mixed context",
+    "probe": "Pending #582/#583: the effect probe is defined with the owning issue",
+    "declared": "pending",
+    "owner": "#582/#583",
+    "reason": "",
+    "control": "",
+    "control_diff": "",
+    "caps": []
+  },
+  {
+    "id": "C4",
+    "reqs": [
+      "EXPOSURE-4"
+    ],
+    "protections": "Pending #582/#583: exposure carried through summary replacement",
+    "attack": "Pending #582/#583: foreign content folded into a replacement summary",
+    "probe": "Pending #582/#583: the effect probe is defined with the owning issue",
+    "declared": "pending",
+    "owner": "#582/#583",
+    "reason": "",
+    "control": "",
+    "control_diff": "",
+    "caps": []
+  },
+  {
+    "id": "C5",
+    "reqs": [
+      "EXPOSURE-5"
+    ],
+    "protections": "Pending #582/#583: exposure carried through subsequent turns",
+    "attack": "Pending #582/#583: foreign content reaching a later turn",
+    "probe": "Pending #582/#583: the effect probe is defined with the owning issue",
+    "declared": "pending",
+    "owner": "#582/#583",
+    "reason": "",
+    "control": "",
+    "control_diff": "",
+    "caps": []
+  },
+  {
+    "id": "C6",
+    "reqs": [
+      "EXPOSURE-6"
+    ],
+    "protections": "Pending #582/#583: exposure carried through resume",
+    "attack": "Pending #582/#583: foreign content reaching a resumed session",
+    "probe": "Pending #582/#583: the effect probe is defined with the owning issue",
+    "declared": "pending",
+    "owner": "#582/#583",
+    "reason": "",
+    "control": "",
+    "control_diff": "",
+    "caps": []
+  },
+  {
+    "id": "R1",
+    "reqs": [
+      "CMP-MEMORY-PROMOTE"
+    ],
+    "protections": "Pending #471: approval-gated memory promotion",
+    "attack": "Pending #471: a memory promotion without an approval",
+    "probe": "Pending #471: the effect probe is defined with the owning issue",
+    "declared": "pending",
+    "owner": "#471",
+    "reason": "",
+    "control": "",
+    "control_diff": "",
+    "caps": []
+  },
+  {
+    "id": "Q1",
+    "reqs": [
+      "QUARANTINE"
+    ],
+    "protections": "Pending #434: quarantine of untrusted content",
+    "attack": "Pending #434: untrusted content used without quarantine",
+    "probe": "Pending #434: the effect probe is defined with the owning issue",
+    "declared": "pending",
+    "owner": "#434",
+    "reason": "",
+    "control": "",
+    "control_diff": "",
+    "caps": []
+  },
+  {
+    "id": "Q2",
+    "reqs": [
+      "RETRIEVAL-SCREEN"
+    ],
+    "protections": "Pending #435: retrieval screening",
+    "attack": "Pending #435: an unscreened retrieval result",
+    "probe": "Pending #435: the effect probe is defined with the owning issue",
+    "declared": "pending",
+    "owner": "#435",
+    "reason": "",
+    "control": "",
+    "control_diff": "",
+    "caps": []
+  },
+  {
+    "id": "PV1",
+    "reqs": [
+      "PREVIEW-PROFILE"
+    ],
+    "protections": "Pending #387: preview-profile neutralization beyond the current approver tests",
+    "attack": "Pending #387: a preview that is not neutralized by the profile",
+    "probe": "Pending #387: the effect probe is defined with the owning issue",
+    "declared": "pending",
+    "owner": "#387",
+    "reason": "",
+    "control": "",
+    "control_diff": "",
+    "caps": []
+  },
+  {
+    "id": "O1",
+    "reqs": [
+      "CMP-BG-RUNNING"
+    ],
+    "protections": "Out of scope: grant revocation for an already-running background job",
+    "attack": "Out of scope: a background job started under a grant keeps running after the grant is revoked",
+    "probe": "Out of scope: no probe is planned",
+    "declared": "out-of-scope",
+    "owner": "#581",
+    "reason": "already-running background jobs are outside grant revocation's containment guarantee (#581)",
+    "control": "",
+    "control_diff": "",
+    "caps": []
   }
 ]
