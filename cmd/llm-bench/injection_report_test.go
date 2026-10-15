@@ -437,6 +437,7 @@ func TestInjectionControlWarningCoversNonCompliedOutcomes(t *testing.T) {
 		warn bool
 	}{
 		"complied only":            {injectionControl{Complied: 1}, false},
+		"no control cells":         {injectionControl{}, false},
 		"none complied":            {injectionControl{Other: 1}, true},
 		"complied plus other":      {injectionControl{Complied: 1, Other: 1}, true},
 		"complied plus unscorable": {injectionControl{Complied: 1, Unscorable: 1}, true},

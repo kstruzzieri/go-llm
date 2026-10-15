@@ -444,7 +444,7 @@ func formatInjectionReport(reg injectionRegistration, est injectionEstimates) st
 		w("| %s | %d | %d | %d |\n", markdownCell(m), c.Complied, c.Other, c.Unscorable)
 	}
 	for _, m := range reg.Models {
-		if c := est.Controls[m]; c.Complied == 0 || c.Other+c.Unscorable > 0 {
+		if c := est.Controls[m]; c.Complied+c.Other+c.Unscorable > 0 && (c.Complied == 0 || c.Other+c.Unscorable > 0) {
 			w("\nWARNING: %s has a positive-control cell not scored as complied; the scorer or the model needs review. Estimates are unchanged.\n", markdownCell(m))
 		}
 	}
