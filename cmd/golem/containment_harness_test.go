@@ -4,10 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -47,8 +50,15 @@ type fixture struct {
 
 func newFixture(t *testing.T, opts fixtureOpts) *fixture {
 	t.Helper()
-	base := t.TempDir()
-	f := &fixture{Root: filepath.Join(base, "ws"), Outside: filepath.Join(base, "outside"), Grants: newApprovalGrants(), Out: &strings.Builder{}, opts: opts, t: t}
+	return newFixtureAt(t, filepath.Join(t.TempDir(), "ws"), opts)
+}
+
+// newFixtureAt builds the fixture with the workspace at root and the outside
+// directory as its sibling. E1's isolated parent uses it because its TMPDIR is
+// synthetic and the workspace must live at a path the parent chose.
+func newFixtureAt(t *testing.T, root string, opts fixtureOpts) *fixture {
+	t.Helper()
+	f := &fixture{Root: root, Outside: filepath.Join(filepath.Dir(root), "outside"), Grants: newApprovalGrants(), Out: &strings.Builder{}, opts: opts, t: t}
 	for _, d := range []string{f.Root, f.Outside} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			t.Fatal(err)
@@ -176,4 +186,165 @@ func readFile(t *testing.T, p string) string {
 		t.Fatalf("read %s: %v", p, err)
 	}
 	return string(b)
+}
+
+// syntheticProviderKey is byte-identical to the openai_token fixture in
+// agent/hardening_contract_test.go syntheticSecrets (the shape
+// agent/interceptor/secrets.go detects). It is synthetic: no real credential.
+const syntheticProviderKey = "sk-" + "aB3_dE7-fG9_hJ2-kL4"
+
+// compareEnv compares raw KEY=VALUE entries with the expected environment map.
+// Duplicates are counted from the raw entries before any map is built, so a
+// repeated name cannot collapse into one. A name with any occurrence that
+// differs from the expected value is a mismatch. Only names are returned, sorted;
+// values never leave this function.
+func compareEnv(entries []string, want map[string]string) (unexpected, missing, mismatch, duplicate []string) {
+	vals := map[string][]string{}
+	for _, e := range entries {
+		name, val, _ := strings.Cut(e, "=")
+		vals[name] = append(vals[name], val)
+	}
+	for name, vs := range vals {
+		if len(vs) > 1 {
+			duplicate = append(duplicate, name)
+		}
+		w, ok := want[name]
+		if !ok {
+			unexpected = append(unexpected, name)
+			continue
+		}
+		if slices.ContainsFunc(vs, func(v string) bool { return v != w }) {
+			mismatch = append(mismatch, name)
+		}
+	}
+	for name := range want {
+		if _, ok := vals[name]; !ok {
+			missing = append(missing, name)
+		}
+	}
+	for _, l := range [][]string{unexpected, missing, mismatch, duplicate} {
+		sort.Strings(l)
+	}
+	return unexpected, missing, mismatch, duplicate
+}
+
+// e1Verdict is what the isolated E1 parent writes to <work>/verdict.json:
+// names only, never environment values.
+type e1Verdict struct {
+	Ran        bool     `json:"ran"`
+	Names      []string `json:"names"`
+	Unexpected []string `json:"unexpected"`
+	Missing    []string `json:"missing"`
+	Mismatch   []string `json:"mismatch"`
+	Duplicate  []string `json:"duplicate"`
+}
+
+// TestContainmentHelper is argv-gated (the exec allowlist strips env vars):
+// <bin> -test.run=^TestContainmentHelper$ -- __containment_helper__ dumpenv <out>
+// In an ordinary go test run flag.Args() is empty and it returns at once.
+func TestContainmentHelper(t *testing.T) {
+	args := flag.Args()
+	if len(args) < 3 || args[0] != "__containment_helper__" || args[1] != "dumpenv" {
+		return
+	}
+	// Raw entries, not a map: duplicate names must survive to the comparison
+	// (spec 5.3 E1 rejects duplicates).
+	raw, _ := json.Marshal(os.Environ())
+	if err := os.WriteFile(args[2], raw, 0o600); err != nil {
+		os.Exit(3)
+	}
+	os.Exit(0)
+}
+
+// TestContainmentE1Parent runs the orchestrator inside a process whose whole
+// environment is synthetic, so a mutation run can never dump a developer's
+// real credentials. Gated by GO_LLM_CONTAINMENT_E1_PARENT=<workdir>; inert
+// otherwise. It prints no environment value anywhere.
+func TestContainmentE1Parent(t *testing.T) {
+	work, ok := os.LookupEnv("GO_LLM_CONTAINMENT_E1_PARENT")
+	if !ok {
+		return
+	}
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ws := filepath.Join(work, "ws")
+	if err := os.MkdirAll(ws, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A regular file inside the workspace: resolveExecutable Lstat-rejects symlinks.
+	bin, err := os.ReadFile(self)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ws, "helper"), bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	childJSON := filepath.Join(work, "child.json")
+	f := newFixtureAt(t, ws, fixtureOpts{})
+	res := f.run(t, []agent.ModelResult{call("run_command", map[string]any{"argv": []string{"./helper", "-test.run=^TestContainmentHelper$", "--", "__containment_helper__", "dumpenv", childJSON}})}, "y\n")
+
+	v := e1Verdict{Ran: len(res.ToolCalls) == 1 && res.ToolCalls[0].Invoked && exists(t, childJSON)}
+	want := map[string]string{
+		"HOME":   filepath.Join(work, "home"),
+		"LANG":   "C",
+		"USER":   "containment",
+		"PATH":   filepath.Join(work, "bin") + ":/usr/bin:/bin",
+		"TMPDIR": filepath.Join(work, "tmp"),
+	}
+	if v.Ran {
+		var entries []string
+		if err := json.Unmarshal([]byte(readFile(t, childJSON)), &entries); err != nil {
+			t.Fatalf("child.json: %v", err) // json errors never echo the input values
+		}
+		for _, e := range entries {
+			name, _, _ := strings.Cut(e, "=")
+			v.Names = append(v.Names, name)
+		}
+		sort.Strings(v.Names)
+		v.Unexpected, v.Missing, v.Mismatch, v.Duplicate = compareEnv(entries, want)
+	}
+	for _, l := range []*[]string{&v.Names, &v.Unexpected, &v.Missing, &v.Mismatch, &v.Duplicate} {
+		if *l == nil {
+			*l = []string{} // render [] rather than null
+		}
+	}
+	raw, _ := json.Marshal(v)
+	if err := os.WriteFile(filepath.Join(work, "verdict.json"), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	os.Exit(0) // keep the gated test from running the rest of the suite
+}
+
+// TestCompareEnv pins compareEnv with independently written inputs: each case
+// breaks exactly one rule, so a comparison that skips duplicates, extras,
+// absences or value changes fails a named case.
+func TestCompareEnv(t *testing.T) {
+	want := map[string]string{"HOME": "/h", "LANG": "C", "USER": "u", "PATH": "/b:/usr/bin"}
+	cases := []struct {
+		name                                    string
+		entries                                 []string
+		unexpected, missing, mismatch, dupnames []string
+	}{
+		{"exact", []string{"HOME=/h", "LANG=C", "USER=u", "PATH=/b:/usr/bin"}, nil, nil, nil, nil},
+		{"duplicate PATH", []string{"HOME=/h", "LANG=C", "USER=u", "PATH=/b:/usr/bin", "PATH=/b:/usr/bin"}, nil, nil, nil, []string{"PATH"}},
+		{"extra SECRET", []string{"HOME=/h", "LANG=C", "USER=u", "PATH=/b:/usr/bin", "SECRET=x"}, []string{"SECRET"}, nil, nil, nil},
+		{"missing LANG", []string{"HOME=/h", "USER=u", "PATH=/b:/usr/bin"}, nil, []string{"LANG"}, nil, nil},
+		{"changed USER", []string{"HOME=/h", "LANG=C", "USER=other", "PATH=/b:/usr/bin"}, nil, nil, []string{"USER"}, nil},
+		{"value containing =", []string{"HOME=/h", "LANG=C", "USER=u", "PATH=/b:/usr/bin", "X=a=b"}, []string{"X"}, nil, nil, nil},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			un, mi, mm, du := compareEnv(c.entries, want)
+			for _, g := range []struct {
+				label     string
+				got, want []string
+			}{{"unexpected", un, c.unexpected}, {"missing", mi, c.missing}, {"mismatch", mm, c.mismatch}, {"duplicate", du, c.dupnames}} {
+				if !slices.Equal(g.got, g.want) {
+					t.Errorf("%s = %v, want %v", g.label, g.got, g.want)
+				}
+			}
+		})
+	}
 }

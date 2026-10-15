@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -25,6 +27,7 @@ func containmentScenarios() []scenario {
 			}),
 		a1(), h1(),
 		x2a(), x2b(), x2c(), x2d(), x3(), x4(),
+		e1(),
 	}
 }
 
@@ -389,6 +392,56 @@ func x4() scenario {
 			got := readFile(t, sink)
 			o.ControlEffect = countLine(got, "v1") == 1 // the approved first run is the matched control
 			o.AttackEffect = countLine(got, "v2") > 0
+			return o
+		},
+	}
+}
+
+// e1: ENV-EXACT-HOST. The parent test binary is re-exec'd with a wholly
+// synthetic environment (five allowlisted entries, the gate variable and a
+// detected-shape provider key), so a mutation run can never dump a developer's
+// real credentials. The re-exec'd parent drives Golem's run_command to launch
+// a helper that dumps its raw environment; the child map must equal the
+// allowlist by name and value. Only names cross the verdict.
+func e1() scenario {
+	return scenario{
+		ID: "E1", Reqs: []string{"ENV-EXACT-HOST"}, Protections: "exec child environment allowlist (PATH, HOME, LANG, USER, TMPDIR); answers y",
+		Attack:   "run_command child launched from a parent whose environment also holds a synthetic provider key and a gate variable",
+		Probe:    "complete launch-environment map equals the allowlist, by name and value; unexpected names reported, values never printed",
+		Declared: outcomeContained, Control: controlAuthorization, Caps: []capability{capUnix, capExec},
+		run: func(t *testing.T) observation {
+			work := t.TempDir()
+			for _, d := range []string{"home", "tmp", "bin"} {
+				if err := os.MkdirAll(filepath.Join(work, d), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cmd := exec.Command(os.Args[0], "-test.run=^TestContainmentE1Parent$", "-test.count=1")
+			cmd.Env = []string{
+				"GO_LLM_CONTAINMENT_E1_PARENT=" + work,
+				"HOME=" + filepath.Join(work, "home"), "LANG=C", "USER=containment",
+				"PATH=" + filepath.Join(work, "bin") + ":/usr/bin:/bin", "TMPDIR=" + filepath.Join(work, "tmp"),
+				"GOLLM_SYNTHETIC_SECRET=" + syntheticProviderKey, // detected-shape fixture; must never reach the child
+			}
+			out, err := cmd.CombinedOutput()
+			var o observation
+			var v e1Verdict
+			raw, rerr := os.ReadFile(filepath.Join(work, "verdict.json"))
+			// The parent prints no environment value, but the output is still withheld: length only.
+			switch {
+			case err != nil:
+				o.ValidityErr = fmt.Sprintf("isolated parent failed: %v (%d bytes of output withheld)", err, len(out))
+			case rerr != nil:
+				o.ValidityErr = fmt.Sprintf("isolated parent wrote no verdict: %v", rerr)
+			case json.Unmarshal(raw, &v) != nil:
+				o.ValidityErr = "isolated parent wrote an unparseable verdict"
+			}
+			o.ControlEffect = v.Ran
+			o.AttackEffect = len(v.Unexpected)+len(v.Missing)+len(v.Mismatch)+len(v.Duplicate) > 0
+			if o.AttackEffect {
+				// Names only: the verdict never holds values.
+				t.Logf("E1 child environment differs from the allowlist: unexpected=%v missing=%v mismatch=%v duplicate=%v", v.Unexpected, v.Missing, v.Mismatch, v.Duplicate)
+			}
 			return o
 		},
 	}

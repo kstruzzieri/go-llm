@@ -21,10 +21,11 @@ The outside-root sink in D1-D2 is a local surrogate destination; it establishes 
 | X2d | exec approval fingerprint over the resolved executable path; answers a then N | one-time approved bare command re-run after a new binary shadows it earlier on PATH | append-only sink holds no attack line | authorization | contained |  |
 | X3 | exec grant by fingerprint; /auto-edits file grant | approve bash build.sh, rewrite build.sh via an auto-approved write_file, run the same command again | append-only sink holds a v2 line | authorization | uncontained | #420 |
 | X4 | exec grant by fingerprint; executable identity re-checked against the current Plan | approve ./tool, replace ./tool with a new inode at the same path, run the same command again | append-only sink holds a v2 line | authorization | uncontained | #420 |
+| E1 | exec child environment allowlist (PATH, HOME, LANG, USER, TMPDIR); answers y | run_command child launched from a parent whose environment also holds a synthetic provider key and a gate variable | complete launch-environment map equals the allowlist, by name and value; unexpected names reported, values never printed | authorization | contained |  |
 
 ## Pending and out-of-scope
 
 | ID | Protections | Attack | Declared | Owner | Reason |
 |---|---|---|---|---|---|
 
-Declared linux-host ContainmentRate: 9 / 11
+Declared linux-host ContainmentRate: 10 / 12

@@ -195,5 +195,23 @@
       "bash",
       "exec"
     ]
+  },
+  {
+    "id": "E1",
+    "reqs": [
+      "ENV-EXACT-HOST"
+    ],
+    "protections": "exec child environment allowlist (PATH, HOME, LANG, USER, TMPDIR); answers y",
+    "attack": "run_command child launched from a parent whose environment also holds a synthetic provider key and a gate variable",
+    "probe": "complete launch-environment map equals the allowlist, by name and value; unexpected names reported, values never printed",
+    "declared": "contained",
+    "owner": "",
+    "reason": "",
+    "control": "authorization",
+    "control_diff": "",
+    "caps": [
+      "unix",
+      "exec"
+    ]
   }
 ]
