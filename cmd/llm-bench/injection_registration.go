@@ -47,11 +47,15 @@ type registeredTrace struct {
 }
 
 type registeredDecoding struct {
-	Temperature  float64           `json:"temperature"`
-	TopP         *float64          `json:"top_p,omitempty"`
-	TopK         *int              `json:"top_k,omitempty"`
-	NumPredict   int               `json:"num_predict"`
-	Think        *bool             `json:"think,omitempty"`
+	Temperature float64  `json:"temperature"`
+	TopP        *float64 `json:"top_p,omitempty"`
+	TopK        *int     `json:"top_k,omitempty"`
+	NumPredict  int      `json:"num_predict"`
+	Think       *bool    `json:"think,omitempty"`
+	// ThinkMode is the model's registered inline-think parser mode (none,
+	// always, toggle, auto). Required: capture must never fall back to a
+	// transport default that differs from Golem's configured think_mode.
+	ThinkMode    string            `json:"think_mode"`
 	ThinkEffort  string            `json:"think_effort,omitempty"`
 	ServingStack string            `json:"serving_stack"`
 	Hosted       *registeredHosted `json:"hosted,omitempty"`
@@ -87,6 +91,22 @@ func (d registeredDecoding) providerOptions() provider.ModelOptions {
 		Think:       d.Think,
 		ThinkEffort: d.ThinkEffort,
 	}
+}
+
+// injectionDecoding is the registered decoding plus parser policy for one
+// model: what Runner.InjectionDecoding carries per selector.
+type injectionDecoding struct {
+	Options   provider.ModelOptions
+	ThinkMode provider.ThinkMode
+}
+
+// decoding returns the wire options and the parser mode the registration pins.
+func (d registeredDecoding) decoding() (injectionDecoding, error) {
+	mode, err := provider.ParseThinkModeStrict(d.ThinkMode)
+	if err != nil {
+		return injectionDecoding{}, err
+	}
+	return injectionDecoding{Options: d.providerOptions(), ThinkMode: mode}, nil
 }
 
 // corpusIDs returns the census entries of the scored corpus population.
@@ -180,6 +200,16 @@ func (r injectionRegistration) validate() error {
 		if d.Temperature != 0 {
 			return fmt.Errorf("decoding for %q: temperature must be 0 (#452 global constraint); got %v", m, d.Temperature)
 		}
+		mode, err := provider.ParseThinkModeStrict(d.ThinkMode)
+		if err != nil {
+			return fmt.Errorf("model %q decoding: %w", m, err)
+		}
+		if mode == provider.ThinkNone && (d.Think != nil || d.ThinkEffort != "") {
+			return fmt.Errorf("model %q decoding: think_mode none cannot set think or think_effort (production clears them)", m)
+		}
+		if mode == provider.ThinkToggle && d.Think == nil {
+			return fmt.Errorf("model %q decoding: think_mode toggle requires an explicit think (an unset toggle parses as auto in production)", m)
+		}
 		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(d.ServingStack)), "hosted") && d.Hosted == nil {
 			return fmt.Errorf("model %q serving_stack %q is hosted but has no hosted block", m, d.ServingStack)
 		}
@@ -237,7 +267,7 @@ func anyInjectionTrace(traces []Trace) bool {
 // bindCapture fails closed unless every selected trace is in the census with
 // its registered canonicalTraceHash and every target has a registered
 // decoding. It returns the Runner.InjectionDecoding map keyed by selector.
-func (r injectionRegistration) bindCapture(traces []Trace, targets []ModelTarget) (map[string]provider.ModelOptions, error) {
+func (r injectionRegistration) bindCapture(traces []Trace, targets []ModelTarget) (map[string]injectionDecoding, error) {
 	census := make(map[string]string, len(r.Census))
 	for _, c := range r.Census {
 		census[c.ID] = strings.TrimPrefix(c.SHA256, "sha256:")
@@ -251,13 +281,17 @@ func (r injectionRegistration) bindCapture(traces []Trace, targets []ModelTarget
 			return nil, fmt.Errorf("registration: trace %q hash %s does not match the registered %s", t.ID, got, want)
 		}
 	}
-	out := make(map[string]provider.ModelOptions, len(targets))
+	out := make(map[string]injectionDecoding, len(targets))
 	for _, tg := range targets {
 		d, ok := r.Decoding[tg.Display]
 		if !ok {
 			return nil, fmt.Errorf("registration: model %q has no registered decoding", tg.Display)
 		}
-		out[tg.Display] = d.providerOptions()
+		dec, err := d.decoding()
+		if err != nil {
+			return nil, fmt.Errorf("registration: model %q: %w", tg.Display, err)
+		}
+		out[tg.Display] = dec
 	}
 	return out, nil
 }

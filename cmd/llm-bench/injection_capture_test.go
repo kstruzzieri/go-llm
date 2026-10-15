@@ -131,7 +131,7 @@ func TestInjectionCaptureSendsRegisteredDecoding(t *testing.T) {
 	sel := "openai-compat/fixture-model"
 	temp := 0.0
 	runner := &Runner{OpenAICompatBaseURL: srv.URL, Timeout: 10 * time.Second, Scorer: &CaptureScorer{},
-		InjectionDecoding: map[string]provider.ModelOptions{sel: {Temperature: &temp, NumPredict: 4096}}}
+		InjectionDecoding: map[string]injectionDecoding{sel: {Options: provider.ModelOptions{Temperature: &temp, NumPredict: 4096}}}}
 	target, err := parseModelTarget(sel) // target.go:37; Display is the full selector
 	if err != nil {
 		t.Fatal(err)
@@ -145,6 +145,46 @@ func TestInjectionCaptureSendsRegisteredDecoding(t *testing.T) {
 	// provider/openaicompat/openaicompat.go near :740 before running).
 	if body["temperature"] != 0.0 || body["max_tokens"] != 4096.0 {
 		t.Fatalf("registered decoding not on the wire: temperature=%v max_tokens=%v", body["temperature"], body["max_tokens"])
+	}
+}
+
+// The registered think_mode, not the transport default, decides whether the
+// capture splits inline <think> out of the content (matches Golem's parser).
+func TestInjectionCaptureRespectsRegisteredThinkMode(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"r","object":"chat.completion","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"<think>reason</think>answer"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`)
+	}))
+	t.Cleanup(srv.Close)
+	yes := true
+	temp := 0.0
+	arms := []struct {
+		name         string
+		dec          injectionDecoding
+		wantThinking string
+		wantContent  string
+	}{
+		{"none passes tags through", injectionDecoding{Options: provider.ModelOptions{Temperature: &temp, NumPredict: 64}, ThinkMode: provider.ThinkNone}, "", "<think>reason</think>answer"},
+		{"toggle enabled extracts", injectionDecoding{Options: provider.ModelOptions{Temperature: &temp, NumPredict: 64, Think: &yes}, ThinkMode: provider.ThinkToggle}, "reason", "answer"},
+	}
+	for _, arm := range arms {
+		t.Run(arm.name, func(t *testing.T) {
+			sel := "openai-compat/fixture-model"
+			runner := &Runner{OpenAICompatBaseURL: srv.URL, Timeout: 10 * time.Second, Scorer: &CaptureScorer{},
+				InjectionDecoding: map[string]injectionDecoding{sel: arm.dec}}
+			target, err := parseModelTarget(sel)
+			if err != nil {
+				t.Fatal(err)
+			}
+			res, err := runner.RunAll(context.Background(), []ModelTarget{target}, []Trace{validInjectionTrace()})
+			if err != nil || len(res) != 1 || res[0].Err != nil || len(res[0].Transcript) != 1 {
+				t.Fatalf("run: %v %+v", err, res)
+			}
+			turn := res[0].Transcript[0]
+			if turn.Thinking != arm.wantThinking || turn.Content != arm.wantContent {
+				t.Fatalf("transcript turn = (%q,%q), want (%q,%q)", turn.Thinking, turn.Content, arm.wantThinking, arm.wantContent)
+			}
+		})
 	}
 }
 
@@ -175,8 +215,8 @@ func validRegistrationJSON(t *testing.T, mutate func(map[string]any)) string {
 		},
 		"models": []string{"openai-compat/a", "openai-compat/kimi"}, "baseline": "openai-compat/a",
 		"decoding": map[string]any{
-			"openai-compat/a":    map[string]any{"temperature": 0.0, "num_predict": 4096, "serving_stack": "llama.cpp"},
-			"openai-compat/kimi": map[string]any{"temperature": 0.0, "num_predict": 4096, "serving_stack": "hosted:opencode-zen", "hosted": hostedFixture()},
+			"openai-compat/a":    map[string]any{"temperature": 0.0, "num_predict": 4096, "serving_stack": "llama.cpp", "think_mode": "none"},
+			"openai-compat/kimi": map[string]any{"temperature": 0.0, "num_predict": 4096, "serving_stack": "hosted:opencode-zen", "think_mode": "none", "hosted": hostedFixture()},
 		},
 		"decoder_policy": map[string]any{"encodings": []string{"literal", "base64", "hex"},
 			"max_value_bytes": decodeMaxValueBytes, "max_total_bytes": decodeMaxTotalBytes, "max_depth": decodeMaxDepth, "min_token": decodeMinToken},
@@ -235,6 +275,18 @@ func TestLoadInjectionRegistrationRejects(t *testing.T) {
 		},
 		"missing hosted unavailable_controls": func(r map[string]any) {
 			delete(r["decoding"].(map[string]any)["openai-compat/kimi"].(map[string]any)["hosted"].(map[string]any), "unavailable_controls")
+		},
+		"unknown think_mode": func(r map[string]any) {
+			r["decoding"].(map[string]any)["openai-compat/a"].(map[string]any)["think_mode"] = "sometimes"
+		},
+		"missing think_mode": func(r map[string]any) {
+			delete(r["decoding"].(map[string]any)["openai-compat/a"].(map[string]any), "think_mode")
+		},
+		"none with think set": func(r map[string]any) {
+			r["decoding"].(map[string]any)["openai-compat/a"].(map[string]any)["think"] = true
+		},
+		"toggle with think nil": func(r map[string]any) {
+			r["decoding"].(map[string]any)["openai-compat/a"].(map[string]any)["think_mode"] = "toggle"
 		},
 		"decoder policy drift": func(r map[string]any) {
 			r["decoder_policy"].(map[string]any)["max_depth"] = decodeMaxDepth + 1
@@ -327,11 +379,11 @@ func TestRegistrationBindCaptureFailsClosed(t *testing.T) {
 	tr := validInjectionTrace()
 	reg := injectionRegistration{
 		Census:   []registeredTrace{{ID: tr.ID, SHA256: canonicalTraceHash(tr), Population: "corpus"}},
-		Decoding: map[string]registeredDecoding{"openai-compat/a": {NumPredict: 128}},
+		Decoding: map[string]registeredDecoding{"openai-compat/a": {NumPredict: 128, ThinkMode: "none"}},
 	}
 	targets := []ModelTarget{{Display: "openai-compat/a"}}
 	dec, err := reg.bindCapture([]Trace{tr}, targets)
-	if err != nil || dec["openai-compat/a"].NumPredict != 128 {
+	if err != nil || dec["openai-compat/a"].Options.NumPredict != 128 {
 		t.Fatalf("bind: %v %+v", err, dec)
 	}
 	tampered := tr

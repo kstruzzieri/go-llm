@@ -80,7 +80,7 @@ type Runner struct {
 	// InjectionDecoding is the registered decoding (#452), keyed by the full
 	// model selector exactly as typed in -models (ModelTarget.Display).
 	// Injection traces fail closed for a model with no entry.
-	InjectionDecoding map[string]provider.ModelOptions
+	InjectionDecoding map[string]injectionDecoding
 }
 
 // Result is a single (model, trace) evaluation.
@@ -146,7 +146,8 @@ func (r *Runner) runOne(ctx context.Context, transport candidateTransport, targe
 			cancel()
 			return Result{Model: target.Display, TraceID: trace.ID, CandidateProvider: transport.providerName, Err: fmt.Errorf("no registered decoding for %s", target.Display)}
 		}
-		opts.ProviderOptions = &decoding
+		opts.ProviderOptions = &decoding.Options
+		opts.ParseThinkMode = &decoding.ThinkMode
 	}
 	out, err := replayWith(replayCtx, transport.chat, target.Model, trace, opts)
 	cancel()
@@ -257,7 +258,7 @@ type replayOptions struct {
 	// wire: the registered decoding (#452).
 	ProviderOptions *provider.ModelOptions
 	// ParseThinkMode (injection replays) is the registered inline-think parser
-	// policy; nil keeps the transport default (extract).
+	// policy; nil keeps the provider instance's think mode.
 	ParseThinkMode *provider.ThinkMode
 }
 

