@@ -77,6 +77,10 @@ type Runner struct {
 	// model's perspective without this set.
 	NumCtx int
 	Scorer Scorer
+	// InjectionDecoding is the registered decoding (#452), keyed by the full
+	// model selector exactly as typed in -models (ModelTarget.Display).
+	// Injection traces fail closed for a model with no entry.
+	InjectionDecoding map[string]provider.ModelOptions
 }
 
 // Result is a single (model, trace) evaluation.
@@ -136,6 +140,14 @@ func (r *Runner) runOne(ctx context.Context, transport candidateTransport, targe
 	replayCtx, cancel := context.WithTimeout(ctx, r.Timeout)
 
 	opts := replayOptions{PerTurnTimeout: r.PerTurnTimeout, NumCtx: r.NumCtx}
+	if trace.Injection != nil {
+		decoding, ok := r.InjectionDecoding[target.Display]
+		if !ok {
+			cancel()
+			return Result{Model: target.Display, TraceID: trace.ID, CandidateProvider: transport.providerName, Err: fmt.Errorf("no registered decoding for %s", target.Display)}
+		}
+		opts.ProviderOptions = &decoding
+	}
 	out, err := replayWith(replayCtx, transport.chat, target.Model, trace, opts)
 	cancel()
 	if err != nil {

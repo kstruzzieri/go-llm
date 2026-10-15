@@ -73,6 +73,7 @@ func main() {
 	calibrateAgreement := flag.String("calibrate-agreement", string(calibrationAgreementExact), "Calibration agreement mode: exact or tolerance")
 	judgeStabilityRuns := flag.Int("judge-stability-runs", 0, "When >1, run the judge that many times per artifact (cache bypassed) and report spread as a diagnostic")
 
+	registrationPath := flag.String("registration", "", "With -calibrate-capture over injection traces: the committed pre-registration JSON (llm-bench.injection-registration/v1); its census, decoding and digest bind the capture (#452)")
 	tracesGlob := flag.String("traces", "", "Glob pattern for trace JSON files (required for normal runs and -calibrate-capture)")
 	modelsArg := flag.String("models", "", "Comma-separated model selectors (provider/model or bare model name; required)")
 	scorerName := flag.String("scorer", "exact-match", "Scoring strategy: exact-match, llm-judge, manual")
@@ -288,8 +289,9 @@ func main() {
 		}
 		// The artifacts output (and its manifest sibling) must never clobber
 		// a trace input.
-		refuseOutputAlias("calibrate-capture", "-labels-out", *labelsOut, pathListInputs("-traces", tracePaths))
-		refuseOutputAlias("calibrate-capture", "-labels-out capture manifest", captureManifestPath(*labelsOut), pathListInputs("-traces", tracePaths))
+		captureInputs := append(pathListInputs("-traces", tracePaths), [2]string{"-registration", *registrationPath})
+		refuseOutputAlias("calibrate-capture", "-labels-out", *labelsOut, captureInputs)
+		refuseOutputAlias("calibrate-capture", "-labels-out capture manifest", captureManifestPath(*labelsOut), captureInputs)
 		// ... and the two outputs must differ from EACH OTHER (round-2 review
 		// P1): a pre-existing hardlink/symlink between <labels-out> and its
 		// .manifest.json sibling would leave the artifacts path holding the
@@ -311,6 +313,24 @@ func main() {
 			Timeout:             *timeout,
 			Scorer:              &CaptureScorer{},
 		}
+		var registrationDigest string
+		if anyInjectionTrace(traces) {
+			if strings.TrimSpace(*registrationPath) == "" {
+				log.Fatalf("llm-bench: -calibrate-capture over injection traces requires -registration")
+			}
+			reg, digest, err := loadInjectionRegistration(*registrationPath)
+			if err != nil {
+				log.Fatalf("llm-bench: calibrate-capture: %v", err)
+			}
+			decoding, err := reg.bindCapture(traces, targets)
+			if err != nil {
+				log.Fatalf("llm-bench: calibrate-capture: %v", err)
+			}
+			runner.InjectionDecoding = decoding
+			registrationDigest = digest
+		} else if strings.TrimSpace(*registrationPath) != "" {
+			log.Fatalf("llm-bench: -registration applies only to injection traces")
+		}
 		// Model digests feed assembly-artifact capture provenance only, so
 		// resolution (an /api/show round-trip per ollama target) is skipped
 		// entirely when the trace set has no prefilled assembly arms.
@@ -326,6 +346,7 @@ func main() {
 			ModelDigests:        modelDigests,
 			OllamaURL:           *ollamaURL,
 			OpenAICompatBaseURL: ct.baseURL,
+			RegistrationDigest:  registrationDigest,
 		}); err != nil {
 			log.Fatalf("llm-bench: calibrate-capture: %v", err)
 		}
@@ -889,6 +910,9 @@ func main() {
 	traces, err := loadTraces(tracePaths)
 	if err != nil {
 		log.Fatalf("llm-bench: load traces: %v", err)
+	}
+	if err := refuseJudgeOnInjection(*scorerName, traces); err != nil {
+		log.Fatalf("llm-bench: %v", err)
 	}
 
 	var corpusData *corpusReportData
