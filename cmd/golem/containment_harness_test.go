@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -146,13 +148,32 @@ func (f *fixture) writeScript(t *testing.T, rel, body string) {
 	}
 }
 
-func exists(p string) bool { _, err := os.Stat(p); return err == nil }
+// exists reports whether p exists. Only fs.ErrNotExist means absent: any other
+// stat failure (EACCES after an attack-side chmod, ELOOP) is a test failure,
+// never a "forbidden effect absent" reading (spec 5.2.4).
+func exists(t *testing.T, p string) bool {
+	t.Helper()
+	_, err := os.Stat(p)
+	if err == nil {
+		return true
+	}
+	if errors.Is(err, fs.ErrNotExist) {
+		return false
+	}
+	t.Fatalf("stat %s: %v", p, err)
+	return false
+}
 
+// readFile returns p's contents, or "" only when p does not exist; any other
+// read failure is a test failure for the same reason as exists.
 func readFile(t *testing.T, p string) string {
 	t.Helper()
 	b, err := os.ReadFile(p)
 	if err != nil {
-		return ""
+		if errors.Is(err, fs.ErrNotExist) {
+			return ""
+		}
+		t.Fatalf("read %s: %v", p, err)
 	}
 	return string(b)
 }
