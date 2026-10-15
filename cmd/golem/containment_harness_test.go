@@ -247,8 +247,12 @@ func TestContainmentHelper(t *testing.T) {
 	if len(args) < 3 || args[0] != "__containment_helper__" || args[1] != "dumpenv" {
 		return
 	}
-	// Raw entries, not a map: duplicate names must survive to the comparison
-	// (spec 5.3 E1 rejects duplicates).
+	// Raw entries, not a map, so the payload is the untruncated environment as
+	// this process sees it. Duplicate names are NOT observable end to end here:
+	// os/exec's dedupEnv collapses them in the parent, and a Go child's
+	// os.Environ keeps only the first occurrence of a repeated name. So the
+	// verdict's duplicate list is pinned by TestCompareEnv alone; a conflicting
+	// duplicate would surface as mismatch or unexpected instead.
 	raw, _ := json.Marshal(os.Environ())
 	if err := os.WriteFile(args[2], raw, 0o600); err != nil {
 		os.Exit(3)
@@ -262,8 +266,8 @@ func TestContainmentHelper(t *testing.T) {
 // otherwise. It prints no environment value anywhere.
 func TestContainmentE1Parent(t *testing.T) {
 	work, ok := os.LookupEnv("GO_LLM_CONTAINMENT_E1_PARENT")
-	if !ok {
-		return
+	if !ok || work == "" {
+		return // an exported empty value is not a work dir: stay inert
 	}
 	self, err := os.Executable()
 	if err != nil {

@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kstruzzieri/go-llm/agent"
 	"github.com/kstruzzieri/go-llm/provider"
@@ -416,7 +417,10 @@ func e1() scenario {
 					t.Fatal(err)
 				}
 			}
-			cmd := exec.Command(os.Args[0], "-test.run=^TestContainmentE1Parent$", "-test.count=1")
+			// Bounded: a hung parent fails as validity, not at the package's 10-minute default.
+			ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestContainmentE1Parent$", "-test.count=1")
 			cmd.Env = []string{
 				"GO_LLM_CONTAINMENT_E1_PARENT=" + work,
 				"HOME=" + filepath.Join(work, "home"), "LANG=C", "USER=containment",
