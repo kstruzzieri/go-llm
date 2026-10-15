@@ -324,8 +324,9 @@ func TestSQLiteFeedbackStoreRefreshesCapBeforeCommit(t *testing.T) {
 	markConn(t, db)
 	caps := recordedCaps(t, store)
 	release := holdFeedbackLock(t, path, "BEGIN", "SELECT COUNT(*) FROM routing_feedback_signals")
+	const budget = 2 * time.Second
 	start := time.Now()
-	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), budget)
 	defer cancel()
 	const fnSleep = 1200 * time.Millisecond
 	item := testFeedbackItem("m")
@@ -360,9 +361,16 @@ func TestSQLiteFeedbackStoreRefreshesCapBeforeCommit(t *testing.T) {
 	}
 	// fn slept at least fnSleep between the two caps, so the time left, and
 	// with it the cap, dropped by at least that many whole milliseconds
-	// (Milliseconds truncates). A stale cap reads back equal to beginCap.
+	// (Milliseconds truncates; exact while the DSN's busy_timeout exceeds the
+	// budget, so the saved clamp never applies). A stale cap reads back equal
+	// to beginCap.
 	if commitCap > beginCap-slept {
 		t.Fatalf("busy_timeout %s = %dms, want at most %dms (%s cap %dms minus the %dms spent in fn): the cap was not refreshed", capBeforeCommit, commitCap, beginCap-slept, capBeforeBegin, beginCap, slept)
+	}
+	// A hook that ran before its PRAGMA would report the DSN's 5000 here and
+	// the stale pre-BEGIN value at COMMIT, which the relation above accepts.
+	if beginCap > budget.Milliseconds() {
+		t.Fatalf("busy_timeout %s = %dms, want at most the %dms budget: the value read back was not set by the cap", capBeforeBegin, beginCap, budget.Milliseconds())
 	}
 	if elapsed < 1500*time.Millisecond || elapsed > 5*time.Second {
 		t.Fatalf("returned after %v, want 1.5s..5s (COMMIT waits out the rest of the budget; no cap at all would wait the DSN's 5s)", elapsed)
