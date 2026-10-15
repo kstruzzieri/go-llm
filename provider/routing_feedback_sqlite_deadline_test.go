@@ -209,8 +209,9 @@ func TestSQLiteFeedbackStoreDeadlineBoundsLockWait(t *testing.T) {
 			store := newFileFeedbackStore(t, db)
 			caps := recordedCaps(t, store)
 			release := holdFeedbackLock(t, path, "BEGIN IMMEDIATE")
+			const budget = 200 * time.Millisecond
 			start := time.Now()
-			ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
+			ctx, cancel := context.WithTimeout(t.Context(), budget)
 			defer cancel()
 			err := store.RecordBatch(ctx, []FeedbackItem{testFeedbackItem("m")})
 			elapsed := time.Since(start)
@@ -222,8 +223,8 @@ func TestSQLiteFeedbackStoreDeadlineBoundsLockWait(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), tc.phase) {
 				t.Fatalf("fixture invalid: err = %v, want the lock wait in %q", err, tc.phase)
 			}
-			if got := caps[capBeforeBegin]; len(got) != 1 || got[0] > 200 {
-				t.Fatalf("busy_timeout %s = %v ms, want one cap of at most the 200ms deadline", capBeforeBegin, got)
+			if got := caps[capBeforeBegin]; len(got) != 1 || got[0] > budget.Milliseconds() {
+				t.Fatalf("busy_timeout %s = %v ms, want one cap of at most the %dms deadline", capBeforeBegin, got, budget.Milliseconds())
 			}
 			// 100ms: the write waited out its budget. 2s is a gross ceiling
 			// (#693) that still catches a cap applied through another pooled
@@ -256,7 +257,10 @@ func TestSQLiteFeedbackStoreDeductsPoolWait(t *testing.T) {
 	start := time.Now()
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
-	deadline, _ := ctx.Deadline()
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		t.Fatal("fixture invalid: ctx carries no deadline")
+	}
 	done := make(chan error, 1)
 	acquired := make(chan struct{})
 	item := testFeedbackItem("m")
@@ -323,6 +327,7 @@ func TestSQLiteFeedbackStoreRefreshesCapBeforeCommit(t *testing.T) {
 	start := time.Now()
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
+	const fnSleep = 1200 * time.Millisecond
 	item := testFeedbackItem("m")
 	insertedLive := false
 	err := store.runInTx(ctx, func(tx *sql.Tx) error {
@@ -330,7 +335,7 @@ func TestSQLiteFeedbackStoreRefreshesCapBeforeCommit(t *testing.T) {
 			return err
 		}
 		insertedLive = ctx.Err() == nil
-		time.Sleep(1200 * time.Millisecond)
+		time.Sleep(fnSleep)
 		return nil
 	})
 	elapsed := time.Since(start)
@@ -349,14 +354,15 @@ func TestSQLiteFeedbackStoreRefreshesCapBeforeCommit(t *testing.T) {
 		t.Fatalf("caps = %v, want exactly one %s and one %s", caps, capBeforeBegin, capBeforeCommit)
 	}
 	beginCap, commitCap := caps[capBeforeBegin][0], caps[capBeforeCommit][0]
-	if beginCap <= 1200 {
-		t.Fatalf("fixture invalid: busy_timeout %s = %dms, want more than the 1200ms fn sleeps", capBeforeBegin, beginCap)
+	slept := fnSleep.Milliseconds()
+	if beginCap <= slept {
+		t.Fatalf("fixture invalid: busy_timeout %s = %dms, want more than the %dms fn sleeps", capBeforeBegin, beginCap, slept)
 	}
-	// fn slept at least 1200ms between the two caps, so the time left, and
-	// with it the cap, dropped by at least 1200 whole milliseconds
+	// fn slept at least fnSleep between the two caps, so the time left, and
+	// with it the cap, dropped by at least that many whole milliseconds
 	// (Milliseconds truncates). A stale cap reads back equal to beginCap.
-	if commitCap > beginCap-1200 {
-		t.Fatalf("busy_timeout %s = %dms, want at most %dms (%s cap %dms minus the 1200ms spent in fn): the cap was not refreshed", capBeforeCommit, commitCap, beginCap-1200, capBeforeBegin, beginCap)
+	if commitCap > beginCap-slept {
+		t.Fatalf("busy_timeout %s = %dms, want at most %dms (%s cap %dms minus the %dms spent in fn): the cap was not refreshed", capBeforeCommit, commitCap, beginCap-slept, capBeforeBegin, beginCap, slept)
 	}
 	if elapsed < 1500*time.Millisecond || elapsed > 5*time.Second {
 		t.Fatalf("returned after %v, want 1.5s..5s (COMMIT waits out the rest of the budget; no cap at all would wait the DSN's 5s)", elapsed)
