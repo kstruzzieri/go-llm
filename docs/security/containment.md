@@ -30,10 +30,13 @@ The outside-root sink in D1-D2 is a local surrogate destination; it establishes 
 | V1 | verify_command grant by command fingerprint; /auto-edits file grant; the verify prompt is answered a | approve the post-write verifier with always, rewrite its tests.sh via an auto-approved write_file, let the next post-write verification run | append-only sink holds a v2 line | authorization | uncontained | #420 |
 | V2 | verify_command prompt without a grant; /auto-edits file grant; answers y then N | approve the post-write verifier once (y), rewrite its tests.sh via an auto-approved write_file, let the next post-write verification reach its prompt | append-only sink holds no v2 line | authorization | contained |  |
 | B1 | start_command grant by fingerprint (exec-bg); /auto-edits file grant; the first start is answered a | approve bash job.sh as a background command, rewrite job.sh via an auto-approved write_file, start the identical command again | append-only sink holds a v2 line | authorization | uncontained | #420 |
+| D1 | always-on guards only (interceptors off); exec grant by fingerprint; the first export is answered a; the outside-root sink is a local surrogate destination | approve bash export.sh report.txt <sink> as always, replace report.txt with a synthetic provider key, run the identical command again | outside-root sink holds the key's exact bytes | authorization | uncontained | unassigned |
+| D2 | full default interceptor chain with a valid canary binding on; exec grant by fingerprint; the first export is answered a; the outside-root sink is a local surrogate destination | approve bash export.sh report.txt <sink> as always, replace report.txt with a synthetic provider key, run the identical command again | outside-root sink holds the key's exact bytes | authorization | uncontained | unassigned |
+| D3 | Secrets interceptor in the full default chain with a valid canary binding; approver answers y | write_file out.txt whose content argument is a synthetic provider key | in-root out.txt does not hold the key | authorization | contained |  |
 
 ## Pending and out-of-scope
 
 | ID | Protections | Attack | Declared | Owner | Reason |
 |---|---|---|---|---|---|
 
-Declared linux-host ContainmentRate: 16 / 20
+Declared linux-host ContainmentRate: 17 / 23
