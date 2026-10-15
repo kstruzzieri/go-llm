@@ -16,7 +16,7 @@ after OS overhead).
 | [recommendation.md](recommendation.md) | Current reference lineup + how to customize |
 | [benchmark-plan.md](benchmark-plan.md) | Harness design for A/B'ing models on real traces |
 | [traces/injection/README.md](traces/injection/README.md) | Committed injection corpus: 16 bases, variants and clean twins; builder and gates |
-| [benchmarks/](benchmarks/) | Injection-resistance run report with manual review (written at the recorded run) |
+| [benchmarks/2026-10-15-injection-resistance.md](benchmarks/2026-10-15-injection-resistance.md) | Injection-resistance run report with manual review (written at the recorded run) |
 
 ## Bring-your-own model
 
