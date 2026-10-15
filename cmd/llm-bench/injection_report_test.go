@@ -78,10 +78,17 @@ func TestInjectionTwinContrast(t *testing.T) {
 
 func TestInjectionReportMissingModelStaysVisible(t *testing.T) {
 	cells := []injCell{{Model: "m", Base: "A", Trace: "a1", Outcome: outcomeResisted}}
-	reg := injectionRegistration{Models: []string{"m", "kimi"}, Baseline: "m", Census: []registeredTrace{{ID: "a1", Population: "corpus"}}}
+	reg := injectionRegistration{Models: []string{"m", "kimi"}, Baseline: "m", Census: []registeredTrace{{ID: "a1", Population: "corpus"}},
+		Decoding: map[string]registeredDecoding{
+			"m":    {ServingStack: "llama.cpp", Temperature: 0},
+			"kimi": {ServingStack: "hosted:opencode-zen", Temperature: 1},
+		}}
 	md := formatInjectionReport(reg, computeInjectionEstimates(reg, cells))
-	if !strings.Contains(md, "| kimi | 0/1 |") {
-		t.Fatalf("fully failed model is not listed with 0/N completeness:\n%s", md)
+	if !strings.Contains(md, "| kimi | hosted:opencode-zen | 1 | 0/1 |") {
+		t.Fatalf("fully failed model is not listed with its serving stack, registered temperature and 0/N completeness:\n%s", md)
+	}
+	if !strings.Contains(md, "| m | llama.cpp | 0 | 1/1 |") {
+		t.Fatalf("local model row lacks its serving stack and temperature 0:\n%s", md)
 	}
 }
 
@@ -183,6 +190,7 @@ func captureWithReply(t *testing.T, dir string, traces []Trace, regDigest string
 		Runner: &scriptedCaptureRunner{rounds: rounds}, Targets: []ModelTarget{{Display: sel, Provider: openAICompatTransport, Model: "m"}},
 		Traces: traces, OutputPath: out, Clock: func() time.Time { return time.Unix(0, 0).UTC() },
 		OpenAICompatBaseURL: "http://127.0.0.1:8090", RegistrationDigest: regDigest, Stdout: io.Discard,
+		InjectionTemperatures: map[string]float64{sel: 0},
 	})
 	if err != nil {
 		t.Fatalf("capture: %v", err)
@@ -301,7 +309,7 @@ func TestInjectionReportAllModelsMissingOneTrace(t *testing.T) {
 	if err != nil {
 		t.Fatalf("missing trace treated as drift: %v", err)
 	}
-	if !strings.Contains(md, "| openai-compat/m | 1/2 |") {
+	if !strings.Contains(md, "| openai-compat/m | llama.cpp | 0 | 1/2 |") {
 		t.Fatalf("completeness must show 1/2:\n%s", md)
 	}
 }
@@ -317,6 +325,7 @@ func cancelledCapture(t *testing.T, dir string, traces []Trace, regDigest, done 
 		Targets: []ModelTarget{{Display: sel, Provider: openAICompatTransport, Model: "m"}},
 		Traces:  traces, OutputPath: out, Clock: func() time.Time { return time.Unix(0, 0).UTC() },
 		OpenAICompatBaseURL: "http://127.0.0.1:8090", RegistrationDigest: regDigest, Stdout: io.Discard,
+		InjectionTemperatures: map[string]float64{sel: 0},
 	})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancelled capture: %v", err)
@@ -345,7 +354,7 @@ func TestInjectionReportGapFillSupersedesUnattempted(t *testing.T) {
 		if err != nil {
 			t.Fatalf("gap-fill capture rejected: %v", err)
 		}
-		if !strings.Contains(md, "| openai-compat/m | 2/3 |") {
+		if !strings.Contains(md, "| openai-compat/m | llama.cpp | 0 | 2/3 |") {
 			t.Fatalf("completeness must show a and b scored after the gap fill:\n%s", md)
 		}
 		if !strings.Contains(md, "| openai-compat/m | 2 | 0 | 0 | 0 | 0 |") {
@@ -419,7 +428,7 @@ func TestInjectionReportFailedTwinStaysTwin(t *testing.T) {
 	if !strings.Contains(md, "| openai-compat/m | 1 | 0 | 0 | 0 | 1 |") {
 		t.Fatalf("outcome table must hold exactly the two attack cells:\n%s", md)
 	}
-	if !strings.Contains(md, "| openai-compat/m | 1/4 |") {
+	if !strings.Contains(md, "| openai-compat/m | llama.cpp | 0 | 1/4 |") {
 		t.Fatalf("completeness must show the missing cells:\n%s", md)
 	}
 	if !strings.Contains(md, "| openai-compat/m | 0/0 | 1 |") {
@@ -505,9 +514,9 @@ func TestInjectionReportControlFromCensus(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		ctlRow, attackRow, compl := "| openai-compat/m | 0 | 1 | 0 |", "| openai-compat/m | 1 | 0 | 0 | 0 | 0 |", "| openai-compat/m | 1/1 |"
+		ctlRow, attackRow, compl := "| openai-compat/m | 0 | 1 | 0 |", "| openai-compat/m | 1 | 0 | 0 | 0 | 0 |", "| openai-compat/m | llama.cpp | 0 | 1/1 |"
 		if pop == "corpus" {
-			ctlRow, attackRow, compl = "| openai-compat/m | 0 | 0 | 0 |", "| openai-compat/m | 2 | 0 | 0 | 0 | 0 |", "| openai-compat/m | 2/2 |"
+			ctlRow, attackRow, compl = "| openai-compat/m | 0 | 0 | 0 |", "| openai-compat/m | 2 | 0 | 0 | 0 | 0 |", "| openai-compat/m | llama.cpp | 0 | 2/2 |"
 		}
 		for _, want := range []string{ctlRow, attackRow, compl} {
 			if !strings.Contains(md, want) {

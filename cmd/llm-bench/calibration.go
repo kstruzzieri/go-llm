@@ -241,6 +241,10 @@ type calibrateCaptureOptions struct {
 	// pre-registration file (#452); required for injection captures and
 	// recorded on the v3 manifest.
 	RegistrationDigest string
+	// InjectionTemperatures is the registered temperature per target Display
+	// selector (#452); required for injection captures. It is stamped on each
+	// artifact's provenance and, being common to the capture, on the manifest.
+	InjectionTemperatures map[string]float64
 }
 
 // Capture run manifest (#331 W3). A -calibrate-capture over traces
@@ -1096,6 +1100,19 @@ func runCalibrateCapture(ctx context.Context, opts calibrateCaptureOptions) erro
 			return errors.New("calibrate-capture: an injection capture requires a registration digest (-registration)")
 		}
 	}
+	captureTemp := assemblyCaptureTemperature
+	if injectionCapture {
+		for i, target := range opts.Targets {
+			temp, ok := opts.InjectionTemperatures[target.Display]
+			if !ok {
+				return fmt.Errorf("calibrate-capture: model %q has no registered temperature", target.Display)
+			}
+			if i > 0 && temp != captureTemp {
+				return errors.New("calibrate-capture: injection capture mixes registered temperatures; run one capture per temperature")
+			}
+			captureTemp = temp
+		}
+	}
 	var endpoint, transport string
 	if assemblyCapture || injectionCapture {
 		var err error
@@ -1298,6 +1315,10 @@ func runCalibrateCapture(ctx context.Context, opts calibrateCaptureOptions) erro
 			row.Error = redactErrorMessage(c.res.Err.Error())
 		default:
 			r := *c.res
+			temp := assemblyCaptureTemperature
+			if injectionCapture {
+				temp = opts.InjectionTemperatures[r.Model]
+			}
 			artifact := Artifact{
 				TraceID:           r.TraceID,
 				CandidateModel:    r.Model,
@@ -1306,7 +1327,7 @@ func runCalibrateCapture(ctx context.Context, opts calibrateCaptureOptions) erro
 				ActualToolCalls:   extractToolNames(r.Transcript),
 				ActualTranscript:  r.Transcript,
 				CapturedAt:        now(),
-				Capture:           captureProvenance(c.trace, r, orderIndex, capturedOrders, modelDigests),
+				Capture:           captureProvenance(c.trace, r, temp, orderIndex, capturedOrders, modelDigests),
 
 				ActualRawToolCalls: r.RawToolCalls,
 			}
@@ -1363,7 +1384,7 @@ func runCalibrateCapture(ctx context.Context, opts calibrateCaptureOptions) erro
 		if injectionCapture {
 			manifest.SchemaVersion = captureManifestSchemaVersionV3
 			manifest.RegistrationDigest = opts.RegistrationDigest
-			manifest.Decoding = captureDecoding{Temperature: 0}
+			manifest.Decoding = captureDecoding{Temperature: captureTemp}
 		}
 		manifestPath = captureManifestPath(opts.OutputPath)
 		var err error
@@ -1528,12 +1549,13 @@ func counterbalancePairOrder(pairIDs []string) ([]string, map[string]string) {
 // byte-identical to the pre-3c shape. Prompt/gen tokens come from the
 // replay usage carried on Result.Score; capturedOrders is the label map the
 // actual capture order was derived from (counterbalanceCaptureTraces), the
-// single source for CapturedOrder.
-func captureProvenance(trace Trace, r Result, orderIndex map[string]int, capturedOrders map[string]string, digests map[string]string) *CaptureProvenance {
+// single source for CapturedOrder. temp is the temperature the request was
+// sent with: assemblyCaptureTemperature, or the model's registered injection
+// temperature.
+func captureProvenance(trace Trace, r Result, temp float64, orderIndex map[string]int, capturedOrders map[string]string, digests map[string]string) *CaptureProvenance {
 	if !prefilledAssemblyMode(trace) && trace.Injection == nil {
 		return nil
 	}
-	temp := assemblyCaptureTemperature
 	prov := &CaptureProvenance{
 		OrderIndex:   orderIndex[trace.ID],
 		Temperature:  &temp,

@@ -382,10 +382,11 @@ func formatInjectionReport(reg injectionRegistration, est injectionEstimates) st
 	w("Baseline: %s. Estimand: equal-base weighting (variants within base, then bases); CIs are base-cluster bootstrap, seed %d, B = %d.\n\n",
 		markdownCell(reg.Baseline), pairedBootstrapSeed, pairedBootstrapN)
 
-	w("## Completeness\n\n| Model | Corpus cells scored |\n|---|---|\n")
+	w("## Completeness\n\n| Model | Serving stack | Temperature | Corpus cells scored |\n|---|---|---|---|\n")
 	for _, m := range reg.Models {
 		c := est.Completeness[m]
-		w("| %s | %d/%d |\n", markdownCell(m), c.K, c.N)
+		d := reg.Decoding[m]
+		w("| %s | %s | %g | %d/%d |\n", markdownCell(m), markdownCell(d.ServingStack), d.Temperature, c.K, c.N)
 	}
 	for _, m := range reg.Models {
 		if n := est.Completeness[m].Unplaced; n > 0 {

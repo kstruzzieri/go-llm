@@ -42,6 +42,7 @@ func TestInjectionCaptureWritesV3AndKeepsEveryCell(t *testing.T) {
 		Runner: runner, Targets: []ModelTarget{{Display: "m", Provider: openAICompatTransport, Model: "m"}},
 		Traces: []Trace{tr}, OutputPath: out, Clock: func() time.Time { return time.Unix(0, 0).UTC() },
 		OpenAICompatBaseURL: "http://127.0.0.1:8090", RegistrationDigest: "sha256:abc",
+		InjectionTemperatures: map[string]float64{"m": 0},
 	})
 	if err == nil {
 		t.Fatal("an all-failed capture must still return an error after publishing the ledger")
@@ -98,6 +99,7 @@ func TestInjectionCapturePublishesPartialOnCancel(t *testing.T) {
 		Runner: runner, Targets: []ModelTarget{{Display: "m", Provider: openAICompatTransport, Model: "m"}},
 		Traces: []Trace{a, b}, OutputPath: out, Clock: func() time.Time { return time.Unix(0, 0).UTC() },
 		OpenAICompatBaseURL: "http://127.0.0.1:8090", RegistrationDigest: "sha256:abc",
+		InjectionTemperatures: map[string]float64{"m": 0},
 	})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancellation must surface after publishing: %v", err)
@@ -200,7 +202,7 @@ func TestInjectionRunFailsWithoutRegisteredDecoding(t *testing.T) {
 func hostedFixture() map[string]any {
 	return map[string]any{"endpoint": "https://example.invalid/v1", "capture_window": "w", "think_fields": "reasoning_content",
 		"parser_policy": "p", "tool_call_envelope": "openai", "time_limit": "30m", "session_header_policy": "none",
-		"unavailable_controls": []string{}}
+		"host_fixed_decoding": "temperature=1 is fixed by the host", "unavailable_controls": []string{}}
 }
 
 func validRegistrationJSON(t *testing.T, mutate func(map[string]any)) string {
@@ -256,6 +258,118 @@ func TestLoadInjectionRegistration(t *testing.T) {
 	}
 }
 
+// A hosted model registers the temperature its host fixes, and that value
+// reaches the wire.
+func TestHostedRegistrationAtTemperatureOneReachesWire(t *testing.T) {
+	p := validRegistrationJSON(t, func(r map[string]any) {
+		r["decoding"].(map[string]any)["openai-compat/kimi"].(map[string]any)["temperature"] = 1.0
+	})
+	reg, _, err := loadInjectionRegistration(p)
+	if err != nil {
+		t.Fatalf("hosted model at temperature 1 rejected: %v", err)
+	}
+	dec, err := reg.Decoding["openai-compat/kimi"].decoding()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"r","object":"chat.completion","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`)
+	}))
+	t.Cleanup(srv.Close)
+	sel := "openai-compat/kimi"
+	runner := &Runner{OpenAICompatBaseURL: srv.URL, Timeout: 10 * time.Second, Scorer: &CaptureScorer{},
+		InjectionDecoding: map[string]injectionDecoding{sel: dec}}
+	target, err := parseModelTarget(sel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := runner.RunAll(context.Background(), []ModelTarget{target}, []Trace{validInjectionTrace()})
+	if err != nil || len(res) != 1 || res[0].Err != nil {
+		t.Fatalf("run: %v %+v", err, res)
+	}
+	if body["temperature"] != 1.0 {
+		t.Fatalf("wire temperature = %v, want 1", body["temperature"])
+	}
+}
+
+// Each injection artifact's provenance and the manifest record the model's
+// registered temperature; a capture whose models disagree is refused.
+func TestInjectionCaptureRecordsRegisteredTemperature(t *testing.T) {
+	tr := validInjectionTrace()
+	for _, tc := range []struct {
+		name string
+		sel  string
+		temp float64
+	}{
+		{"hosted at 1", "openai-compat/kimi", 1},
+		{"local at 0", "openai-compat/a", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out := filepath.Join(t.TempDir(), "art.jsonl")
+			runner := &scriptedCaptureRunner{rounds: [][]Result{
+				{{Model: tc.sel, TraceID: tr.ID, Transcript: []Turn{{Role: "assistant", Content: "answer"}}}},
+			}}
+			err := runCalibrateCapture(context.Background(), calibrateCaptureOptions{
+				Runner: runner, Targets: []ModelTarget{{Display: tc.sel, Provider: openAICompatTransport, Model: "m"}},
+				Traces: []Trace{tr}, OutputPath: out, Clock: func() time.Time { return time.Unix(0, 0).UTC() },
+				OpenAICompatBaseURL: "http://127.0.0.1:8090", RegistrationDigest: "sha256:abc", Stdout: io.Discard,
+				InjectionTemperatures: map[string]float64{tc.sel: tc.temp},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			arts, err := loadArtifacts(out)
+			if err != nil || len(arts) != 1 || arts[0].Capture == nil || arts[0].Capture.Temperature == nil {
+				t.Fatalf("artifacts: %v %+v", err, arts)
+			}
+			if got := *arts[0].Capture.Temperature; got != tc.temp {
+				t.Fatalf("artifact capture.temperature = %v, want %v", got, tc.temp)
+			}
+			m, err := readCaptureManifestV3(captureManifestPath(out))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if m.Decoding.Temperature != tc.temp {
+				t.Fatalf("manifest decoding.temperature = %v, want %v", m.Decoding.Temperature, tc.temp)
+			}
+		})
+	}
+	for name, temps := range map[string]map[string]float64{
+		"mixed temperatures":       {"openai-compat/a": 0, "openai-compat/kimi": 1},
+		"unregistered temperature": {"openai-compat/a": 0},
+	} {
+		t.Run(name, func(t *testing.T) {
+			out := filepath.Join(t.TempDir(), "art.jsonl")
+			err := runCalibrateCapture(context.Background(), calibrateCaptureOptions{
+				// A runnable round, so a dropped refusal fails the assertion below.
+				Runner: &scriptedCaptureRunner{rounds: [][]Result{{
+					{Model: "openai-compat/a", TraceID: tr.ID, Transcript: []Turn{{Role: "assistant", Content: "answer"}}},
+					{Model: "openai-compat/kimi", TraceID: tr.ID, Transcript: []Turn{{Role: "assistant", Content: "answer"}}},
+				}}},
+				Targets: []ModelTarget{
+					{Display: "openai-compat/a", Provider: openAICompatTransport, Model: "a"},
+					{Display: "openai-compat/kimi", Provider: openAICompatTransport, Model: "kimi"},
+				},
+				Traces: []Trace{tr}, OutputPath: out, OpenAICompatBaseURL: "http://127.0.0.1:8090",
+				RegistrationDigest: "sha256:abc", InjectionTemperatures: temps, Stdout: io.Discard,
+			})
+			want := map[string]string{
+				"mixed temperatures":       "calibrate-capture: injection capture mixes registered temperatures; run one capture per temperature",
+				"unregistered temperature": `calibrate-capture: model "openai-compat/kimi" has no registered temperature`,
+			}[name]
+			if err == nil || err.Error() != want {
+				t.Fatalf("err = %v, want %q", err, want)
+			}
+			if _, statErr := os.Stat(out); !os.IsNotExist(statErr) {
+				t.Fatalf("refused capture wrote evidence: %v", statErr)
+			}
+		})
+	}
+}
+
 func TestLoadInjectionRegistrationRejects(t *testing.T) {
 	cases := map[string]func(map[string]any){
 		"wrong canary":    func(r map[string]any) { r["canary_guid"] = "x" },
@@ -267,8 +381,14 @@ func TestLoadInjectionRegistrationRejects(t *testing.T) {
 		"hosted stack without hosted block": func(r map[string]any) {
 			delete(r["decoding"].(map[string]any)["openai-compat/kimi"].(map[string]any), "hosted")
 		},
-		"nonzero temperature": func(r map[string]any) {
-			r["decoding"].(map[string]any)["openai-compat/a"].(map[string]any)["temperature"] = 0.7
+		"nonzero temperature on a local model": func(r map[string]any) {
+			r["decoding"].(map[string]any)["openai-compat/a"].(map[string]any)["temperature"] = 1.0
+		},
+		"negative hosted temperature": func(r map[string]any) {
+			r["decoding"].(map[string]any)["openai-compat/kimi"].(map[string]any)["temperature"] = -1.0
+		},
+		"missing hosted host_fixed_decoding": func(r map[string]any) {
+			delete(r["decoding"].(map[string]any)["openai-compat/kimi"].(map[string]any)["hosted"].(map[string]any), "host_fixed_decoding")
 		},
 		"blank hosted endpoint": func(r map[string]any) {
 			r["decoding"].(map[string]any)["openai-compat/kimi"].(map[string]any)["hosted"].(map[string]any)["endpoint"] = "  "

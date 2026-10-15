@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"slices"
 	"strings"
@@ -62,13 +63,17 @@ type registeredDecoding struct {
 }
 
 type registeredHosted struct {
-	Endpoint            string   `json:"endpoint"`
-	CaptureWindow       string   `json:"capture_window"`
-	ThinkFields         string   `json:"think_fields"`
-	ParserPolicy        string   `json:"parser_policy"`
-	ToolCallEnvelope    string   `json:"tool_call_envelope"`
-	TimeLimit           string   `json:"time_limit"`
-	SessionHeaderPolicy string   `json:"session_header_policy"`
+	Endpoint            string `json:"endpoint"`
+	CaptureWindow       string `json:"capture_window"`
+	ThinkFields         string `json:"think_fields"`
+	ParserPolicy        string `json:"parser_policy"`
+	ToolCallEnvelope    string `json:"tool_call_envelope"`
+	TimeLimit           string `json:"time_limit"`
+	SessionHeaderPolicy string `json:"session_header_policy"`
+	// HostFixedDecoding documents decoding values the host imposes (for
+	// example a temperature it refuses to vary); the registered temperature
+	// must be the host-fixed value, recorded truthfully.
+	HostFixedDecoding   string   `json:"host_fixed_decoding"`
 	UnavailableControls []string `json:"unavailable_controls"`
 }
 
@@ -197,8 +202,14 @@ func (r injectionRegistration) validate() error {
 		if d.NumPredict <= 0 || strings.TrimSpace(d.ServingStack) == "" {
 			return fmt.Errorf("model %q decoding needs num_predict > 0 and serving_stack", m)
 		}
-		if d.Temperature != 0 {
-			return fmt.Errorf("decoding for %q: temperature must be 0 (#452 global constraint); got %v", m, d.Temperature)
+		hosted := strings.HasPrefix(strings.ToLower(strings.TrimSpace(d.ServingStack)), "hosted")
+		// Local models are pinned at temperature 0. A hosted model may register
+		// the temperature its host fixes (hosted.host_fixed_decoding says why).
+		switch {
+		case hosted && (math.IsNaN(d.Temperature) || math.IsInf(d.Temperature, 0) || d.Temperature < 0):
+			return fmt.Errorf("decoding for %q: hosted temperature must be a finite value >= 0; got %v", m, d.Temperature)
+		case !hosted && d.Temperature != 0:
+			return fmt.Errorf("decoding for %q: temperature must be 0 for a local serving stack (#452 global constraint); got %v", m, d.Temperature)
 		}
 		mode, err := provider.ParseThinkModeStrict(d.ThinkMode)
 		if err != nil {
@@ -210,7 +221,7 @@ func (r injectionRegistration) validate() error {
 		if mode == provider.ThinkToggle && d.Think == nil {
 			return fmt.Errorf("model %q decoding: think_mode toggle requires an explicit think (an unset toggle parses as auto in production)", m)
 		}
-		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(d.ServingStack)), "hosted") && d.Hosted == nil {
+		if hosted && d.Hosted == nil {
 			return fmt.Errorf("model %q serving_stack %q is hosted but has no hosted block", m, d.ServingStack)
 		}
 		if h := d.Hosted; h != nil {
@@ -218,6 +229,7 @@ func (r injectionRegistration) validate() error {
 				"endpoint": h.Endpoint, "capture_window": h.CaptureWindow, "think_fields": h.ThinkFields,
 				"parser_policy": h.ParserPolicy, "tool_call_envelope": h.ToolCallEnvelope,
 				"time_limit": h.TimeLimit, "session_header_policy": h.SessionHeaderPolicy,
+				"host_fixed_decoding": h.HostFixedDecoding,
 			} {
 				if strings.TrimSpace(v) == "" {
 					return fmt.Errorf("model %q hosted.%s is required", m, name)

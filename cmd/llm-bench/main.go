@@ -334,6 +334,7 @@ func main() {
 			Scorer:              &CaptureScorer{},
 		}
 		var registrationDigest string
+		var injectionTemps map[string]float64
 		if anyInjectionTrace(traces) {
 			if strings.TrimSpace(*registrationPath) == "" {
 				log.Fatalf("llm-bench: -calibrate-capture over injection traces requires -registration")
@@ -348,6 +349,10 @@ func main() {
 			}
 			runner.InjectionDecoding = decoding
 			registrationDigest = digest
+			injectionTemps = make(map[string]float64, len(decoding))
+			for sel, d := range decoding {
+				injectionTemps[sel] = *d.Options.Temperature // providerOptions always sets it
+			}
 		} else if strings.TrimSpace(*registrationPath) != "" {
 			log.Fatalf("llm-bench: -registration applies only to injection traces")
 		}
@@ -359,14 +364,15 @@ func main() {
 			modelDigests = resolveCaptureModelDigests(ctx, *ollamaURL, targets)
 		}
 		if err := runCalibrateCapture(ctx, calibrateCaptureOptions{
-			Runner:              runner,
-			Targets:             targets,
-			Traces:              traces,
-			OutputPath:          *labelsOut,
-			ModelDigests:        modelDigests,
-			OllamaURL:           *ollamaURL,
-			OpenAICompatBaseURL: ct.baseURL,
-			RegistrationDigest:  registrationDigest,
+			Runner:                runner,
+			Targets:               targets,
+			Traces:                traces,
+			OutputPath:            *labelsOut,
+			ModelDigests:          modelDigests,
+			OllamaURL:             *ollamaURL,
+			OpenAICompatBaseURL:   ct.baseURL,
+			RegistrationDigest:    registrationDigest,
+			InjectionTemperatures: injectionTemps,
 		}); err != nil {
 			log.Fatalf("llm-bench: calibrate-capture: %v", err)
 		}
