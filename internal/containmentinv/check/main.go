@@ -64,8 +64,9 @@ func check(ctx context.Context, invPath, profile string) (containmentinv.Evidenc
 	if ev, err = containmentinv.SourceIdentity(os.Getenv, "."); err != nil {
 		return ev, err
 	}
+	ev = containmentinv.WithProfile(ev, p)
 	sum := sha256.Sum256(data)
-	ev.InventoryDigest, ev.Profile = hex.EncodeToString(sum[:]), profile
+	ev.InventoryDigest = hex.EncodeToString(sum[:])
 	ev.Flags = []string{"-count=1", "-json", "-timeout", p.Timeout}
 	if p.Race {
 		ev.Flags = append(ev.Flags, "-race")
@@ -90,6 +91,11 @@ func check(ctx context.Context, invPath, profile string) (containmentinv.Evidenc
 		}
 		if len(errs) > 0 {
 			failed++
+			if decodeErr != nil {
+				// Not a test stream, such as Go 1.24+ build-output events
+				// carrying a compiler error: show it as captured.
+				_, _ = os.Stderr.Write(out)
+			}
 			failureOutput(os.Stderr, events)
 			for _, err := range errs {
 				_, _ = fmt.Fprintf(os.Stderr, "containment check: %s: %v\n", r.Package, err)

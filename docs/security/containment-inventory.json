@@ -12,7 +12,7 @@
         "exec",
         "symlink"
       ],
-      "timeout": "15s",
+      "timeout": "120s",
       "allowed_skips": []
     },
     {
@@ -23,7 +23,7 @@
       "caps": [
         "bwrap"
       ],
-      "timeout": "15s",
+      "timeout": "120s",
       "allowed_skips": []
     },
     {
@@ -32,7 +32,7 @@
       "tags": [],
       "race": false,
       "caps": [],
-      "timeout": "15s",
+      "timeout": "120s",
       "allowed_skips": []
     },
     {
@@ -41,7 +41,7 @@
       "tags": [],
       "race": false,
       "caps": [],
-      "timeout": "15s",
+      "timeout": "120s",
       "allowed_skips": []
     },
     {
@@ -52,7 +52,7 @@
       ],
       "race": false,
       "caps": [],
-      "timeout": "15s",
+      "timeout": "120s",
       "allowed_skips": []
     },
     {
@@ -61,7 +61,7 @@
       "tags": [],
       "race": false,
       "caps": [],
-      "timeout": "15s",
+      "timeout": "120s",
       "allowed_skips": [
         "TestContainment/E1=capability:unix",
         "TestContainment/X2a=capability:bash",

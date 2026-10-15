@@ -71,7 +71,8 @@ jobs:
         env:
           GO_LLM_CI_COMMIT: ${{ github.sha }}
         run: |
-          GO_LLM_CI_TREE="$(git rev-parse "${GITHUB_SHA}^{tree}")" ./scripts/ci-local --mode security
+          tree="$(git rev-parse "${GITHUB_SHA}^{tree}")"
+          GO_LLM_CI_TREE="$tree" ./scripts/ci-local --mode security
           cp "${TMPDIR:-/tmp}/containment-evidence.json" "$RUNNER_TEMP/containment-linux-host.json"
 
       - name: Upload containment evidence
@@ -193,7 +194,9 @@ jobs:
         env:
           GO_LLM_REQUIRE_BWRAP: "1"
           GO_LLM_CI_COMMIT: ${{ github.sha }}
-        run: GO_LLM_CI_TREE="$(git rev-parse "${GITHUB_SHA}^{tree}")" go run ./internal/containmentinv/check -inventory docs/security/containment-inventory.json -profile bwrap -evidence-out "$RUNNER_TEMP/containment-bwrap.json"
+        run: |
+          tree="$(git rev-parse "${GITHUB_SHA}^{tree}")"
+          GO_LLM_CI_TREE="$tree" go run ./internal/containmentinv/check -inventory docs/security/containment-inventory.json -profile bwrap -evidence-out "$RUNNER_TEMP/containment-bwrap.json"
 
       - name: Upload containment evidence
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -244,7 +247,8 @@ jobs:
         run: |
           export PATH="$RUNNER_TEMP/agentflow-venv/bin:$PATH"
           go test -tags=agentflow_integration -count=1 -run "$AGENTFLOW_TESTS" ./agentflow ./cmd/golem
-          GO_LLM_CI_TREE="$(git rev-parse "${GITHUB_SHA}^{tree}")" go run ./internal/containmentinv/check -inventory docs/security/containment-inventory.json -profile agentflow-integration -evidence-out "$RUNNER_TEMP/containment-agentflow-integration-installed.json"
+          tree="$(git rev-parse "${GITHUB_SHA}^{tree}")"
+          GO_LLM_CI_TREE="$tree" go run ./internal/containmentinv/check -inventory docs/security/containment-inventory.json -profile agentflow-integration -evidence-out "$RUNNER_TEMP/containment-agentflow-integration-installed.json"
 
       - name: Agentflow compatibility (source)
         env:
@@ -253,7 +257,8 @@ jobs:
           GO_LLM_CI_COMMIT: ${{ github.sha }}
         run: |
           go test -tags=agentflow_integration -count=1 -run "$AGENTFLOW_TESTS" ./agentflow ./cmd/golem
-          GO_LLM_CI_TREE="$(git rev-parse "${GITHUB_SHA}^{tree}")" go run ./internal/containmentinv/check -inventory docs/security/containment-inventory.json -profile agentflow-integration -evidence-out "$RUNNER_TEMP/containment-agentflow-integration-source.json"
+          tree="$(git rev-parse "${GITHUB_SHA}^{tree}")"
+          GO_LLM_CI_TREE="$tree" go run ./internal/containmentinv/check -inventory docs/security/containment-inventory.json -profile agentflow-integration -evidence-out "$RUNNER_TEMP/containment-agentflow-integration-source.json"
 
       - name: Upload containment evidence
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -301,7 +306,9 @@ jobs:
         env:
           CGO_ENABLED: "0"
           GO_LLM_CI_COMMIT: ${{ github.sha }}
-        run: GO_LLM_CI_TREE="$(git rev-parse "${GITHUB_SHA}^{tree}")" go run ./internal/containmentinv/check -inventory docs/security/containment-inventory.json -profile windows -evidence-out "$RUNNER_TEMP/containment-windows.json"
+        run: |
+          tree="$(git rev-parse "${GITHUB_SHA}^{tree}")"
+          GO_LLM_CI_TREE="$tree" go run ./internal/containmentinv/check -inventory docs/security/containment-inventory.json -profile windows -evidence-out "$RUNNER_TEMP/containment-windows.json"
 
       - name: Upload containment evidence
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

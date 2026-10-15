@@ -171,8 +171,9 @@ The checker is the single runner of `TestContainment` in this phase, and of
 every other test leaf a row of the inventory makes mandatory on the profile. It
 groups those refs by package and runs each package once with
 `go test -count=1 -json -timeout <profile timeout> [-race] [-tags ...] -run <pattern>`,
-where the pattern anchors and quotes each `/`-separated component of the
-leaf names. It decides from the complete event stream: every cited leaf needs a
+where the pattern has one `|` alternative per cited leaf, each
+`/`-separated component anchored and quoted, so it selects exactly the cited
+leaves and every subtest of a cited parent. It decides from the complete event stream: every cited leaf needs a
 `run` and a terminal `pass` event, the package needs its own `pass`, and
 `go test` must exit 0. A missing leaf, a skip, a malformed or truncated stream,
 text build output, a build failure or a timeout fails the profile. `linux-host`
@@ -183,23 +184,30 @@ when it skips. A failure prints the failed tests' output and
 before formatting. The checker's own tests (`internal/containmentinv`) feed it
 recorded event streams; no ordinary package test launches `go test`.
 
-Each profile's `-timeout` lives in the inventory: 15 s, about four times the
-slowest package run measured (`./cmd/golem`, 3.6 s wall on an M3 Max).
+Each profile's `-timeout` lives in the inventory: 120 s for every profile. It
+is a hang bound, not a performance budget. The slowest package measured
+locally (`./cmd/golem`) took 3.6 s wall on an M3 Max, but GitHub runners and
+Docker on macOS are several times slower and the bwrap and Windows runs were
+never measured; tighten the bound from the `Elapsed` that CI runs report.
 
 Each run writes evidence JSON. It is CI output, never committed:
 
 | Field | Meaning |
 | --- | --- |
-| `source_digest` | SHA-256 over the sorted `path\|sha256(content)` lines of every tracked file, hidden directories such as `.github` included: `git ls-files` in a checkout, every file but `.git` in the hook's export, so both digest the same tree alike. A symlink digests its target. |
+| `source_digest` | SHA-256 over the sorted `path\|sha256(content)` lines of every tracked file, hidden directories such as `.github` included: `git ls-files` in a checkout, every file but `.git` in the hook's export, so both digest the same tree alike. A symlink digests its target. A manual run whose digest fails records `unknown` (below); with a forwarded identity the failure fails the run. |
 | `tree`, `commit` | `GO_LLM_CI_TREE` and `GO_LLM_CI_COMMIT`, set by the pre-push hook and the CI checker steps |
-| `dirty` | `true` when either variable is absent; `commit` is then `unknown` |
+| `dirty` | `true` when either variable is absent (`commit` is then `unknown`), or when the running GOOS differs from the profile's, such as `linux-host` on a darwin host |
+| `goos`, `goarch`, `go_version` | the platform and Go toolchain that ran the checker (`runtime.GOOS`, `runtime.GOARCH`, `runtime.Version()`) |
 | `inventory_digest` | SHA-256 of the inventory file |
 | `profile`, `flags` | the profile and the `go test` flags every package run shared |
 | `executed` | `<package> <leaf>` for every leaf that passed, sorted; an allowed skip is not listed |
 
 A manual run (`scripts/ci-local` on a working tree, or Docker without the
 hook) has no forwarded identity, so it records `"commit": "unknown"` and
-`"dirty": true` and is never treated as CI evidence.
+`"dirty": true` and is never treated as CI evidence. When its digest cannot be
+computed, as when the Docker gate runs from a linked worktree whose `.git`
+pointer names host-only metadata, or git refuses a checkout another uid owns,
+it records `"source_digest": "unknown"` and the check still runs.
 
 The local Docker service runs as an unprivileged user (uid 1000), so the
 permission-denial tests that skip under root execute in the gate exactly as they
@@ -339,11 +347,18 @@ platform and capabilities:
 | `seatbelt` | `macOS Compile Smoke`, `Containment inventory (seatbelt)` | `GO_LLM_REQUIRE_SEATBELT=1`, no race |
 
 Every checker step sets `GO_LLM_CI_COMMIT` to `github.sha` and resolves
-`GO_LLM_CI_TREE` in the step with `git rev-parse "${GITHUB_SHA}^{tree}"`. It
+`GO_LLM_CI_TREE` in the step with `git rev-parse "${GITHUB_SHA}^{tree}"`, as
+its own statement so a failed resolution fails the step under `bash -e`. It
 writes `$RUNNER_TEMP/containment-<profile>.json` (the agentflow steps add
 `-installed` or `-source`), and each job uploads its files as a
 `containment-*` artifact. `scripts/test-ci-local` pins every checker step and
 upload, so removing one fails the self-test.
+
+The Windows checkout converts line endings (the runner's git sets
+`core.autocrlf`, and the repository has no `.gitattributes`), so the windows
+profile's `source_digest` differs from the other profiles' for the same
+commit. Evidence from different profiles binds to one source through `tree`
+and `commit`; `source_digest` compares runs within a platform.
 
 ### Linux sandbox confinement (#441)
 

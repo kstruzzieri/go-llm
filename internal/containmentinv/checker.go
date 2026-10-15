@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
 	"strings"
 	"time"
@@ -45,13 +46,17 @@ type PackageRun struct {
 }
 
 // Evidence is the observed record of one checker run, bound to the tested
-// source, the inventory and the go test flags. It is CI output, never
-// committed. Executed lists "<package> <leaf>" for every leaf that passed.
+// source, the platform and toolchain that ran it, the inventory and the go
+// test flags. It is CI output, never committed. Executed lists
+// "<package> <leaf>" for every leaf that passed.
 type Evidence struct {
 	SourceDigest    string   `json:"source_digest"`
 	Tree            string   `json:"tree"`
 	Commit          string   `json:"commit"`
 	Dirty           bool     `json:"dirty"`
+	GOOS            string   `json:"goos"`
+	GOARCH          string   `json:"goarch"`
+	GoVersion       string   `json:"go_version"`
 	InventoryDigest string   `json:"inventory_digest"`
 	Profile         string   `json:"profile"`
 	Flags           []string `json:"flags"`
@@ -88,37 +93,24 @@ func PlanRuns(inv Inventory, profile string) ([]PackageRun, error) {
 	return runs, nil
 }
 
-// RunPattern builds the -run pattern for leaves. Go splits -run on unbracketed
-// `/` and matches each level of a test name independently, so level i is the
-// anchored alternation of every leaf's i-th component, each QuoteMeta'd. That
-// cross product can select tests the leaves do not name; Evaluate's exact-leaf
-// check is what makes the run precise.
-//
-// Ceiling: the deeper levels also filter the subtests of a leaf shorter than
-// the deepest one, so a cited parent whose assertions live in its subtests
-// would pass without running them. Cite the subtest leaves; per-leaf
-// top-level `|` alternatives, which Go also accepts, are the upgrade path.
+// RunPattern builds the -run pattern that selects exactly leaves, in one run.
+// Go's testing package splits -run on unbracketed `|` into alternatives and
+// each alternative on unbracketed `/` into per-level patterns; a test runs
+// when any alternative matches its name level by level, and levels past an
+// alternative's end match everything. So each leaf is its own alternative of
+// anchored, QuoteMeta'd components: a cited parent runs all its subtests, and
+// a deeper leaf elsewhere cannot filter them away, as one pattern per level
+// would.
 func RunPattern(leaves []string) string {
-	var levels [][]string
-	for _, leaf := range leaves {
-		for i, c := range strings.Split(leaf, "/") {
-			if i == len(levels) {
-				levels = append(levels, nil)
-			}
-			if !slices.Contains(levels[i], c) {
-				levels[i] = append(levels[i], c)
-			}
-		}
-	}
-	parts := make([]string, len(levels))
-	for i, comps := range levels {
-		slices.Sort(comps)
+	alts := make([]string, len(leaves))
+	for i, leaf := range leaves {
+		comps := strings.Split(leaf, "/")
 		for j, c := range comps {
-			comps[j] = regexp.QuoteMeta(c)
+			comps[j] = "^(" + regexp.QuoteMeta(c) + ")$"
 		}
-		parts[i] = "^(" + strings.Join(comps, "|") + ")$"
+		alts[i] = strings.Join(comps, "/")
 	}
-	return strings.Join(parts, "/")
+	return strings.Join(alts, "|")
 }
 
 // skipLine is the line t.Skip(reason) prints: "    file.go:NN: reason".
@@ -176,20 +168,39 @@ func skipReason(lines []string) string {
 	return reason
 }
 
-// SourceIdentity binds evidence to the tested source: its content digest plus
-// the tree and commit forwarded by the pre-push hook or CI in GO_LLM_CI_TREE
-// and GO_LLM_CI_COMMIT. Without both, the run is manual: commit "unknown",
-// dirty, and never CI evidence.
+// SourceIdentity binds evidence to the tested source and the running
+// platform: the source's content digest, the tree and commit forwarded by the
+// pre-push hook or CI in GO_LLM_CI_TREE and GO_LLM_CI_COMMIT, and GOOS,
+// GOARCH and the Go version. Without both variables the run is manual: commit
+// "unknown", dirty, and never CI evidence. A manual run whose digest fails
+// (git refusing a linked worktree's .git pointer inside Docker, say) records
+// source_digest "unknown"; with a forwarded identity the error is fatal.
 func SourceIdentity(getenv func(string) string, root string) (Evidence, error) {
-	digest, err := SourceDigest(root)
-	if err != nil {
-		return Evidence{}, err
-	}
-	ev := Evidence{SourceDigest: digest, Tree: getenv("GO_LLM_CI_TREE"), Commit: getenv("GO_LLM_CI_COMMIT")}
+	ev := Evidence{Tree: getenv("GO_LLM_CI_TREE"), Commit: getenv("GO_LLM_CI_COMMIT"),
+		GOOS: runtime.GOOS, GOARCH: runtime.GOARCH, GoVersion: runtime.Version()}
 	if ev.Tree == "" || ev.Commit == "" {
 		ev.Commit, ev.Dirty = "unknown", true
 	}
+	digest, err := SourceDigest(root)
+	switch {
+	case err == nil:
+		ev.SourceDigest = digest
+	case ev.Dirty:
+		ev.SourceDigest = "unknown"
+	default:
+		return Evidence{}, err
+	}
 	return ev, nil
+}
+
+// WithProfile binds ev to profile p. A run on another GOOS than the profile
+// declares, such as linux-host on a darwin host, is a manual run: dirty.
+func WithProfile(ev Evidence, p Profile) Evidence {
+	ev.Profile = p.Name
+	if p.GOOS != "" && p.GOOS != ev.GOOS {
+		ev.Dirty = true
+	}
+	return ev
 }
 
 // SourceDigest is the SHA-256 over sorted "path|sha256(content)" lines for

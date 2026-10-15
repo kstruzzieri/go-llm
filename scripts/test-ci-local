@@ -28,25 +28,27 @@ require_step() {
 }
 # Every containment profile has its checker step in CI, bound to the commit
 # under test, and every job publishes its evidence (#452).
-tree_env='GO_LLM_CI_TREE="$(git rev-parse "${GITHUB_SHA}^{tree}")"'
+# The tree is its own statement, so bash -e fails the step if it cannot resolve.
+tree_stmt='          tree="$(git rev-parse "${GITHUB_SHA}^{tree}")"'
+tree_env='GO_LLM_CI_TREE="$tree"'
 checker='go run ./internal/containmentinv/check -inventory docs/security/containment-inventory.json'
 commit_env='          GO_LLM_CI_COMMIT: ${{ github.sha }}'
 upload='        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2'
-require_step ci.yml 'Security contracts' "$commit_env" \
+require_step ci.yml 'Security contracts' "$commit_env" "$tree_stmt" \
   "          $tree_env ./scripts/ci-local --mode security" \
   '          cp "${TMPDIR:-/tmp}/containment-evidence.json" "$RUNNER_TEMP/containment-linux-host.json"'
-require_step ci.yml 'Containment inventory (bwrap)' '          GO_LLM_REQUIRE_BWRAP: "1"' "$commit_env" \
-  "        run: $tree_env $checker -profile bwrap -evidence-out \"\$RUNNER_TEMP/containment-bwrap.json\""
+require_step ci.yml 'Containment inventory (bwrap)' '          GO_LLM_REQUIRE_BWRAP: "1"' "$commit_env" "$tree_stmt" \
+  "          $tree_env $checker -profile bwrap -evidence-out \"\$RUNNER_TEMP/containment-bwrap.json\""
 for af in installed source; do
-  require_step ci.yml "Agentflow compatibility ($af)" "$commit_env" \
+  require_step ci.yml "Agentflow compatibility ($af)" "$commit_env" "$tree_stmt" \
     "          $tree_env $checker -profile agentflow-integration -evidence-out \"\$RUNNER_TEMP/containment-agentflow-integration-$af.json\""
 done
-require_step ci.yml 'Containment inventory (windows)' "$commit_env" \
-  "        run: $tree_env $checker -profile windows -evidence-out \"\$RUNNER_TEMP/containment-windows.json\""
-require_step darwin-smoke.yml 'Containment inventory (darwin-host)' "$commit_env" \
-  "        run: $tree_env $checker -profile darwin-host -evidence-out \"\$RUNNER_TEMP/containment-darwin-host.json\""
-require_step darwin-smoke.yml 'Containment inventory (seatbelt)' '          GO_LLM_REQUIRE_SEATBELT: "1"' "$commit_env" \
-  "        run: $tree_env $checker -profile seatbelt -evidence-out \"\$RUNNER_TEMP/containment-seatbelt.json\""
+require_step ci.yml 'Containment inventory (windows)' "$commit_env" "$tree_stmt" \
+  "          $tree_env $checker -profile windows -evidence-out \"\$RUNNER_TEMP/containment-windows.json\""
+require_step darwin-smoke.yml 'Containment inventory (darwin-host)' "$commit_env" "$tree_stmt" \
+  "          $tree_env $checker -profile darwin-host -evidence-out \"\$RUNNER_TEMP/containment-darwin-host.json\""
+require_step darwin-smoke.yml 'Containment inventory (seatbelt)' '          GO_LLM_REQUIRE_SEATBELT: "1"' "$commit_env" "$tree_stmt" \
+  "          $tree_env $checker -profile seatbelt -evidence-out \"\$RUNNER_TEMP/containment-seatbelt.json\""
 require_step ci.yml 'Upload containment evidence' "$upload" \
   '          path: ${{ runner.temp }}/containment-linux-host.json' \
   '          path: ${{ runner.temp }}/containment-bwrap.json' \
@@ -113,6 +115,9 @@ done
 # Anchored (-x) so a commented-out line cannot satisfy the pin.
 grep -Fxq 'CMD ["./scripts/ci-local", "--mode", "pre-push"]' "$repo_root/Dockerfile.ci"
 grep -Fxq '    command: ["./scripts/ci-local", "--mode", "pre-push"]' "$repo_root/docker-compose.ci.yml"
+# The hook's forwarded source identity must reach the container (#452).
+grep -Fxq '      - GO_LLM_CI_TREE' "$repo_root/docker-compose.ci.yml"
+grep -Fxq '      - GO_LLM_CI_COMMIT' "$repo_root/docker-compose.ci.yml"
 
 # The compatibility lane must run setup-go's compiler (without GOTOOLCHAIN=local
 # the toolchain directive silently swaps in the newer Go) and test the oldest Go
@@ -493,12 +498,13 @@ for mode in security pre-push full; do
 done
 
 security_status=0
-# A failed containment check fails every mode with its own message, after the
-# aggregate passed and before any later phase.
-containment_status=1
+# A failed containment check fails every mode with its own message and status,
+# after the aggregate passed and before any later phase. 41 is used by no
+# other stub (39 is the toolchain-override refusal).
+containment_status=41
 for mode in security pre-push full; do
   run_ci "containment-failure-$mode" --mode "$mode"
-  assert_status "containment-failure-$mode" 1
+  assert_status "containment-failure-$mode" 41
   grep -Fxq 'containment inventory check failed (profile linux-host)' "$tmp/containment-failure-$mode.out"
   diff -u "$tmp/expected-security" "$tmp/containment-failure-$mode.log"
 done
@@ -603,6 +609,9 @@ c1="$(fixture_git -C "$hook_repo" rev-parse HEAD)"
 fixture_git -C "$hook_repo" tag -a v1 -m v1
 tag1="$(fixture_git -C "$hook_repo" rev-parse v1)"
 t1="$(fixture_git -C "$hook_repo" rev-parse "$c1^{tree}")"
+# A second commit with c1's tree: refs at one tree forward the first ref's
+# commit, so a last-wins hook would forward this one.
+c1b="$(fixture_git -C "$hook_repo" commit-tree -p "$c1" -m 'same tree' "$t1")"
 hook_wt="$tmp/hook-wt"
 fixture_git -C "$hook_repo" worktree add -q -b wt "$hook_wt"
 printf 'package fixture\n\nfunc Second() {}\n' >"$hook_wt/second.go"
@@ -730,9 +739,10 @@ assert_status hook-mktemp-failure 73
 assert_gate_runs hook-mktemp-failure 0
 
 # A branch and its annotated tag name one tree: one gate run. Two refs at one
-# commit, mixed with a deletion: one gate run.
-printf 'refs/heads/main %s refs/heads/main %s\nrefs/tags/v1 %s refs/tags/v1 %s\n(delete) %s refs/heads/gone %s\nrefs/heads/copy %s refs/heads/copy %s\n' \
-  "$c1" "$zero" "$tag1" "$zero" "$zero" "$c1" "$c1" "$zero" >"$tmp/hook-dedupe.in"
+# commit, mixed with a deletion, and a later commit with the same tree: one
+# gate run.
+printf 'refs/heads/main %s refs/heads/main %s\nrefs/tags/v1 %s refs/tags/v1 %s\n(delete) %s refs/heads/gone %s\nrefs/heads/copy %s refs/heads/copy %s\nrefs/heads/same %s refs/heads/same %s\n' \
+  "$c1" "$zero" "$tag1" "$zero" "$zero" "$c1" "$c1" "$zero" "$c1b" "$zero" >"$tmp/hook-dedupe.in"
 run_hook hook-dedupe "$hook_repo" 0
 assert_status hook-dedupe 0
 assert_gate_runs hook-dedupe 1
