@@ -48,13 +48,13 @@ func TestHardeningContracts(t *testing.T) {
 		runMCPTrustContract(t)
 	})
 	for _, boundary := range []string{
-		"ZT-602_#431_project_trust",
 		"ZT-605_#434_quarantine",
 		"ZT-606_#435_retrieval_screening",
 	} {
 		t.Run(boundary, func(t *testing.T) { t.Skip("deferred boundary coverage; tracked separately") })
 	}
 	// #433's CLI presentation boundary is covered by cmd/golem/render_sanitization_test.go.
+	// #431's project-trust boundary is covered by cmd/golem (TestProjectTrustLiveConsentAndFreshness) and the projectcontext tests.
 	elapsed := time.Since(started)
 	t.Logf("hardening contracts elapsed: %s (budget enforced: %t)", elapsed, *enforceHardeningBudget)
 	if *enforceHardeningBudget && elapsed >= hardeningBudget {
@@ -945,6 +945,7 @@ func runWorkspaceContracts(t *testing.T) {
 				{"owned_absolute_sibling", outPath, "path is outside the workspace", "absolute paths are not allowed", nil, ""},
 				{"symlink_leaf", "leaf-link", "symlinks are not followed", "symlinks are not followed", func(t *testing.T) { makeSymlink(t, outPath, leafLink) }, leafLink},
 				{"symlink_ancestor", filepath.Join("dir-link", "out.txt"), "symlinks are not followed", "symlinks are not followed", func(t *testing.T) { makeSymlink(t, sibling, dirLink) }, dirLink},
+				{"nul_byte", "in\x00.txt", "path is outside the workspace", "path contains NUL byte", nil, ""},
 				{"valid_in_root", "in.txt", "workspace sentinel\n", "", nil, ""},
 			} {
 				t.Run(tc.name, func(t *testing.T) {

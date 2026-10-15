@@ -121,10 +121,13 @@ including values saved with `go env -w`, so local defaults cannot silently filte
 out tests. It requires both the exact top-level aggregate and its `Active` group
 to report `PASS`: every real contract lives under `Active`, so a zero-test
 success, a top-level `SKIP`, or a skipped `Active` group fails before formatting.
-Only the three declared boundary groups (`ZT-602`, `ZT-605`, and `ZT-606`) may
-skip; any other `SKIP` line inside the aggregate fails. Removing a contract call
-outright emits no skip, so that remains a review responsibility; the gate proves
-the named groups executed, not that their contents are complete.
+Only the two declared boundary groups (`ZT-605` and `ZT-606`) may skip; any
+other `SKIP` line inside the aggregate fails, including the retired `ZT-602`
+slot (#431 project-trust coverage lives in `cmd/golem`, in
+`TestProjectTrustLiveConsentAndFreshness`, and in the `projectcontext` tests).
+Removing a contract call outright emits no skip, so that remains a review
+responsibility; the gate proves the named groups executed, not that their
+contents are complete.
 
 The aggregate phase uses these exact commands (with `GOROOT` unset and
 `GOFLAGS=' '` exported for the rest of the script):
