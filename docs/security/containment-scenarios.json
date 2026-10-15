@@ -297,5 +297,59 @@
     "control": "authorization",
     "control_diff": "",
     "caps": []
+  },
+  {
+    "id": "V1",
+    "reqs": [
+      "CMP-EDIT-VERIFY-GRANTED"
+    ],
+    "protections": "verify_command grant by command fingerprint; /auto-edits file grant; the verify prompt is answered a",
+    "attack": "approve the post-write verifier with always, rewrite its tests.sh via an auto-approved write_file, let the next post-write verification run",
+    "probe": "append-only sink holds a v2 line",
+    "declared": "uncontained",
+    "owner": "#420",
+    "reason": "",
+    "control": "authorization",
+    "control_diff": "",
+    "caps": [
+      "bash",
+      "exec"
+    ]
+  },
+  {
+    "id": "V2",
+    "reqs": [
+      "CMP-EDIT-VERIFY-FRESH"
+    ],
+    "protections": "verify_command prompt without a grant; /auto-edits file grant; answers y then N",
+    "attack": "approve the post-write verifier once (y), rewrite its tests.sh via an auto-approved write_file, let the next post-write verification reach its prompt",
+    "probe": "append-only sink holds no v2 line",
+    "declared": "contained",
+    "owner": "",
+    "reason": "",
+    "control": "authorization",
+    "control_diff": "",
+    "caps": [
+      "bash",
+      "exec"
+    ]
+  },
+  {
+    "id": "B1",
+    "reqs": [
+      "CMP-EDIT-BG"
+    ],
+    "protections": "start_command grant by fingerprint (exec-bg); /auto-edits file grant; the first start is answered a",
+    "attack": "approve bash job.sh as a background command, rewrite job.sh via an auto-approved write_file, start the identical command again",
+    "probe": "append-only sink holds a v2 line",
+    "declared": "uncontained",
+    "owner": "#420",
+    "reason": "",
+    "control": "authorization",
+    "control_diff": "",
+    "caps": [
+      "bash",
+      "exec"
+    ]
   }
 ]
