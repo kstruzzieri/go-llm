@@ -163,6 +163,8 @@ Initial import includes live, expired, and soft-deleted rows. It preserves IDs, 
 
 The 128-row batch size bounds the record buffer, not transaction duration or WAL disk growth. The import occupies the store's single database connection and serializes other writers. Before upgrading a large store, stop writers, take a consistent backup, and rehearse initialization on a copy to provision disk space and a sufficient startup deadline. Committing individual batches would lose the all-or-nothing snapshot and marker guarantee.
 
+Concurrent first opens of one database wait for the opener that is initializing, up to the connection's busy timeout (5 s with `OpenRecordStore`), and then open the initialized store.
+
 If the first attempt creates `current.pem` but fails before commit, later filesystem opens return `ErrIncompleteInitialization`. A failed import and a removed initialization marker cannot be safely distinguished from those two files alone. Recovery requires an operator:
 
 1. Stop writers and preserve a consistent database snapshot and the complete key directory before changing either.

@@ -82,8 +82,62 @@ func (s *MemoryRecordStore) initializeSigning(ctx context.Context, config Record
 	if err := s.db.QueryRowContext(ctx, recordInitializedQuery).Scan(&initialized); err != nil {
 		return fmt.Errorf("memory: inspect signing initialization: %w", err)
 	}
+	if initialized {
+		_, err := s.configureSigning(ctx, config, true)
+		return err
+	}
+	// The marker row is the claim (#631), and inserting it must be the
+	// transaction's first statement: a first write waits for SQLite's write
+	// lock under the busy timeout, while a write after a read fails at once
+	// when another connection holds that lock. A concurrent opener therefore
+	// waits here instead of finding a key with no marker, and an uncommitted
+	// claim is invisible, so key-without-marker still means a crashed or
+	// failed initialization. Until commit nothing may use s.db: the claim
+	// holds the store's only connection on the OpenRecordStore path, and a
+	// caller's handle would block on the lock the claim holds.
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("memory: initialize record signing: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	claim, err := tx.ExecContext(ctx, `INSERT INTO memory_record_signing (id, initialized_at) VALUES (1, ?) ON CONFLICT(id) DO NOTHING`, time.Now().UnixMilli())
+	if err != nil {
+		return fmt.Errorf("memory: initialize record signing: %w", err)
+	}
+	claimed, err := claim.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("memory: initialize record signing: %w", err)
+	}
+	if claimed == 0 {
+		// Another opener committed initialization while this one waited.
+		if err := tx.Rollback(); err != nil {
+			return fmt.Errorf("memory: initialize record signing: rollback: %w", err)
+		}
+		_, err := s.configureSigning(ctx, config, true)
+		return err
+	}
+	created, err := s.configureSigning(ctx, config, false)
+	if err != nil {
+		return err
+	}
+	if err := s.importLegacyRecords(ctx, tx); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("memory: commit record import: %w", err)
+	}
+	if created {
+		s.createdKeyID = s.signer.KeyID()
+	}
+	return nil
+}
+
+// configureSigning loads or creates the filesystem identity, or takes the
+// injected pair, challenges it, and installs it on s. It reports whether it
+// created the identity. It must not use s.db; see initializeSigning.
+func (s *MemoryRecordStore) configureSigning(ctx context.Context, config RecordStoreConfig, initialized bool) (bool, error) {
 	if initialized && config.Initialize {
-		return errors.New("memory: record signing initialization already complete")
+		return false, errors.New("memory: record signing initialization already complete")
 	}
 	var created bool
 	if config.KeyDir != "" {
@@ -96,15 +150,15 @@ func (s *MemoryRecordStore) initializeSigning(ctx context.Context, config Record
 			current, created, err = signing.LoadOrCreateEd25519(currentPath)
 		}
 		if err != nil {
-			return fmt.Errorf("memory: load signing identity: %w", err)
+			return false, fmt.Errorf("memory: load signing identity: %w", err)
 		}
 		if !initialized && !created {
-			return ErrIncompleteInitialization
+			return false, ErrIncompleteInitialization
 		}
 		config.Signer = current
 		config.Verifiers, err = loadRecordVerifiers(config.KeyDir, current.Verifier())
 		if err != nil {
-			return err
+			return false, err
 		}
 	}
 	// Challenge the actual signer and ring, including the signature's binding to
@@ -112,28 +166,19 @@ func (s *MemoryRecordStore) initializeSigning(ctx context.Context, config Record
 	challenge := []byte(`{"purpose":"memory-record-configuration"}`)
 	sig, err := config.Signer.Sign(ctx, MemoryRecordDomain, challenge)
 	if err != nil {
-		return fmt.Errorf("memory: signing configuration: %w", err)
+		return false, fmt.Errorf("memory: signing configuration: %w", err)
 	}
 	if config.Signer.KeyID() == "" || config.Signer.Algorithm() == "" || sig.KeyID != config.Signer.KeyID() || sig.Alg != config.Signer.Algorithm() {
-		return fmt.Errorf("memory: signing configuration: %w", signing.ErrKeyMismatch)
+		return false, fmt.Errorf("memory: signing configuration: %w", signing.ErrKeyMismatch)
 	}
 	if err := config.Verifiers.Verify(ctx, MemoryRecordDomain, challenge, sig); err != nil {
-		return fmt.Errorf("memory: signing configuration: %w", err)
+		return false, fmt.Errorf("memory: signing configuration: %w", err)
 	}
 	s.signer, s.verifiers = config.Signer, config.Verifiers
-	if initialized {
-		return nil
+	if !initialized && !created && !config.Initialize {
+		return false, errors.New("memory: initial record import authorization required")
 	}
-	if !created && !config.Initialize {
-		return errors.New("memory: initial record import authorization required")
-	}
-	if err := s.importLegacyRecords(ctx); err != nil {
-		return err
-	}
-	if created {
-		s.createdKeyID = config.Signer.KeyID()
-	}
-	return nil
+	return created, nil
 }
 
 func loadRecordVerifiers(keyDir string, current *signing.Ed25519Verifier) (*signing.Keyring, error) {
@@ -174,19 +219,9 @@ func loadRecordVerifiers(keyDir string, current *signing.Ed25519Verifier) (*sign
 	return ring, nil
 }
 
-func (s *MemoryRecordStore) importLegacyRecords(ctx context.Context) error {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("memory: import records: begin: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-	var initialized bool
-	if err := tx.QueryRowContext(ctx, recordInitializedQuery).Scan(&initialized); err != nil {
-		return fmt.Errorf("memory: import records: inspect initialization: %w", err)
-	}
-	if initialized {
-		return errors.New("memory: record initialization changed during import")
-	}
+// importLegacyRecords signs every existing row as a legacy record inside the
+// caller's claim transaction, which commits them with the marker.
+func (s *MemoryRecordStore) importLegacyRecords(ctx context.Context, tx *sql.Tx) error {
 	lastID, first := "", true
 	for {
 		batch, err := readLegacyBatch(ctx, tx, lastID, first)
@@ -219,12 +254,6 @@ func (s *MemoryRecordStore) importLegacyRecords(ctx context.Context) error {
 			}
 		}
 		lastID, first = batch[len(batch)-1].ID, false
-	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO memory_record_signing (id, initialized_at) VALUES (1, ?)`, time.Now().UnixMilli()); err != nil {
-		return fmt.Errorf("memory: initialize record signing: %w", err)
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("memory: commit record import: %w", err)
 	}
 	return nil
 }
