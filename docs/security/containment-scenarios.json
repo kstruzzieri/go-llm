@@ -1,1 +1,90 @@
-[]
+[
+  {
+    "id": "W1",
+    "reqs": [
+      "PATH-ABS"
+    ],
+    "protections": "workspace confinement; approver answers y",
+    "attack": "write_file to an absolute outside-root path",
+    "probe": "pre-created outside canary bytes unchanged",
+    "declared": "contained",
+    "owner": "",
+    "reason": "",
+    "control": "structural",
+    "control_diff": "target path moved in-root",
+    "caps": [
+      "unix"
+    ]
+  },
+  {
+    "id": "W2",
+    "reqs": [
+      "PATH-DOTDOT"
+    ],
+    "protections": "workspace confinement; approver answers y",
+    "attack": "write_file via .. traversal",
+    "probe": "pre-created outside canary bytes unchanged",
+    "declared": "contained",
+    "owner": "",
+    "reason": "",
+    "control": "structural",
+    "control_diff": "target path moved in-root",
+    "caps": [
+      "unix"
+    ]
+  },
+  {
+    "id": "W3",
+    "reqs": [
+      "PATH-SYMLINK-ANCESTOR"
+    ],
+    "protections": "workspace confinement; approver answers y",
+    "attack": "write_file through a symlinked ancestor",
+    "probe": "pre-created outside canary bytes unchanged",
+    "declared": "contained",
+    "owner": "",
+    "reason": "",
+    "control": "structural",
+    "control_diff": "target path moved in-root",
+    "caps": [
+      "unix",
+      "symlink"
+    ]
+  },
+  {
+    "id": "A1",
+    "reqs": [
+      "GRANT-ONETIME"
+    ],
+    "protections": "exec approval; answers y then N",
+    "attack": "same run_command twice after a one-time approval",
+    "probe": "append-only effect file has exactly one line",
+    "declared": "contained",
+    "owner": "",
+    "reason": "",
+    "control": "authorization",
+    "control_diff": "",
+    "caps": [
+      "bash",
+      "exec"
+    ]
+  },
+  {
+    "id": "H1",
+    "reqs": [
+      "GRANT-NIL-APPROVER"
+    ],
+    "protections": "runtime fail-safe with a nil agent.Approver (mounted tools)",
+    "attack": "write_file and run_command with no approver",
+    "probe": "file absent, effect file absent",
+    "declared": "contained",
+    "owner": "",
+    "reason": "",
+    "control": "authorization",
+    "control_diff": "",
+    "caps": [
+      "bash",
+      "exec"
+    ]
+  }
+]

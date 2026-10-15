@@ -10,10 +10,15 @@ The outside-root sink in D1-D2 is a local surrogate destination; it establishes 
 
 | ID | Protections | Attack | Probe | Control | Declared | Owner |
 |---|---|---|---|---|---|---|
+| W1 | workspace confinement; approver answers y | write_file to an absolute outside-root path | pre-created outside canary bytes unchanged | structural | contained |  |
+| W2 | workspace confinement; approver answers y | write_file via .. traversal | pre-created outside canary bytes unchanged | structural | contained |  |
+| W3 | workspace confinement; approver answers y | write_file through a symlinked ancestor | pre-created outside canary bytes unchanged | structural | contained |  |
+| A1 | exec approval; answers y then N | same run_command twice after a one-time approval | append-only effect file has exactly one line | authorization | contained |  |
+| H1 | runtime fail-safe with a nil agent.Approver (mounted tools) | write_file and run_command with no approver | file absent, effect file absent | authorization | contained |  |
 
 ## Pending and out-of-scope
 
 | ID | Protections | Attack | Declared | Owner | Reason |
 |---|---|---|---|---|---|
 
-Declared linux-host ContainmentRate: N/A
+Declared linux-host ContainmentRate: 5 / 5
