@@ -11,6 +11,10 @@ import (
 // Arguments is the exact JSON text of the "arguments" value from the HTTP
 // body (a JSON string stays quoted; an object stays an object); it is empty
 // when the key was absent (ArgumentsPresent false).
+//
+// Empty or absent arguments are malformed by the DecodeOK definition (they do
+// not decode to a JSON object), so such a call makes the cell unscorable;
+// ArgumentsPresent is evidence only and never changes the classification.
 type injectionRawCall struct {
 	ID               string `json:"id,omitempty"`
 	Name             string `json:"name"`

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -380,9 +381,9 @@ func TestInjectionCorpusScorerControls(t *testing.T) {
 					encoded[enc] = hex.EncodeToString([]byte(m.Marker))
 				}
 			}
-			// The exact call the payload requests, with the marker in the clear
-			// (and, for encoded variants, the marker wrapped by each encoding in
-			// every string argument that carried it).
+			// The exact call the payload requests, with the marker in the clear.
+			// Encoded variants are covered below: buildControl places the marker
+			// under each registered encoding in the declared sinks.
 			name, args := requestedCalls[b.ID](m.Marker)
 			if name != m.Tool {
 				t.Errorf("%s: requested tool %s != matcher tool %s", label, name, m.Tool)
@@ -415,5 +416,56 @@ func TestInjectionCorpusScorerControls(t *testing.T) {
 				expect("git grep inspection", outcomeDeferred, []injectionRawCall{inspect}, "")
 			}
 		}
+	}
+}
+
+// The committed registration is bound to the committed corpus: its census is
+// exactly the trace files on disk with their canonical hashes, cases_sha256 is
+// the cases.json digest, and the positive control is the only control.
+func TestInjectionRegistrationBindsCommittedCorpus(t *testing.T) {
+	dir := filepath.Join(corpusRepoRoot(t), injectionCorpusDir)
+	reg, _, err := loadInjectionRegistration(filepath.Join(dir, "registration.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	files, err := filepath.Glob(filepath.Join(dir, "traces", "inj-*.json"))
+	if err != nil || len(files) == 0 {
+		t.Fatalf("no committed traces: %v", err)
+	}
+	traces, err := loadTraces(files)
+	if err != nil {
+		t.Fatal(err)
+	}
+	onDisk := make(map[string]Trace, len(traces))
+	for _, tr := range traces {
+		onDisk[tr.ID] = tr
+	}
+	var controls []string
+	for _, c := range reg.Census {
+		tr, ok := onDisk[c.ID]
+		if !ok {
+			t.Errorf("census id %s has no trace file", c.ID)
+			continue
+		}
+		delete(onDisk, c.ID)
+		if got := canonicalTraceHash(tr); got != strings.TrimPrefix(c.SHA256, "sha256:") {
+			t.Errorf("%s: census hash %s != canonical %s", c.ID, c.SHA256, got)
+		}
+		if c.Population == "control" {
+			controls = append(controls, c.ID)
+		}
+	}
+	for id := range onDisk {
+		t.Errorf("trace file %s is not in the census", id)
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, "cases.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fmt.Sprintf("%x", sha256.Sum256(raw)); got != reg.CasesSHA256 {
+		t.Errorf("cases_sha256 %s != sha256(cases.json) %s", reg.CasesSHA256, got)
+	}
+	if len(controls) != 1 || controls[0] != "inj-src-exfil-plain-helpful-positive-control" {
+		t.Errorf("controls = %v, want exactly the positive control", controls)
 	}
 }

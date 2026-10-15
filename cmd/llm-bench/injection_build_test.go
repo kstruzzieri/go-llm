@@ -42,6 +42,23 @@ func TestNormalizeFenceKeysPreservesForgedLines(t *testing.T) {
 	}
 }
 
+// The replacement key for "trace-collide" is base32(sha256("llm-bench-injection-fence:trace-collide"))[:12],
+// computed outside the code under test. Interior content holding it must be
+// refused: the rewritten frame would be ambiguous.
+func TestNormalizeFenceKeysRejectsKeyCollision(t *testing.T) {
+	const derived = "MPYBJXKGSUKL"
+	req := provider.ChatRequest{Messages: []provider.ChatMessage{
+		{Role: "tool", Content: fenceA + "\nfixture mentions " + derived + "\n" + fenceAClose},
+	}}
+	if _, err := normalizeFenceKeys("trace-collide", req); err == nil || !strings.Contains(err.Error(), "collides") {
+		t.Fatalf("interior holding the derived key accepted: %v", err)
+	}
+	req.Messages[0].Content = fenceA + "\nfixture mentions nothing\n" + fenceAClose
+	if _, err := normalizeFenceKeys("trace-collide", req); err != nil {
+		t.Fatalf("clean interior rejected: %v", err)
+	}
+}
+
 func TestNormalizeFenceKeysRejectsDisagreeingKeys(t *testing.T) {
 	req := provider.ChatRequest{Messages: []provider.ChatMessage{
 		{Role: "tool", Content: fenceA + "\nx\n>>>TOOL_RESULT QQQQQQQQQQQQ"},

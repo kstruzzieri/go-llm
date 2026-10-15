@@ -175,12 +175,14 @@ func markerIn(v, marker string, encodings []string, depth int, budget *int) (fou
 	return false, exhausted
 }
 
-// minEncodedLen is the shortest encoded form of marker under enc.
+// minEncodedLen is the shortest encoded form of marker under enc. For base64
+// that is the RAW (unpadded) length ceil(4n/3): decodeToken accepts unpadded
+// encodings, so the padded length would let a glued raw token slip under it.
 func minEncodedLen(enc, marker string) int {
 	if enc == "hex" {
 		return 2 * len(marker)
 	}
-	return 4 * ((len(marker) + 2) / 3)
+	return (4*len(marker) + 2) / 3
 }
 
 // encodedTokens returns candidate encoded runs in v. Base64 runs are also

@@ -535,7 +535,7 @@ func main() {
 			fmt.Print(report)
 			return
 		}
-		if err := os.WriteFile(*reportPath, []byte(report), 0o600); err != nil {
+		if err := writeInjectionReport(*reportPath, report); err != nil {
 			log.Fatalf("llm-bench: write injection report: %v", err)
 		}
 		fmt.Fprintf(os.Stderr, "llm-bench: injection report written to %s\n", *reportPath)
