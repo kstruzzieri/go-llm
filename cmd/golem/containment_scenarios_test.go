@@ -120,6 +120,9 @@ func wScenario(id, req, attack string, target func(*fixture) string, wantReason 
 			if len(res.ToolCalls) != 1 || res.ToolCalls[0].Invoked || !strings.Contains(toolObservation(t, res.Messages, atkID).Content, wantReason) {
 				o.ValidityErr = "attack was not rejected by write planning with " + strconv.Quote(wantReason)
 			}
+			// containment: PATH-ABS
+			// containment: PATH-DOTDOT
+			// containment: PATH-SYMLINK-ANCESTOR
 			o.AttackEffect = readFile(t, canary) != "original"
 			// Structural control: identical call with the path moved in-root lands.
 			g := newFixture(t, fixtureOpts{})
@@ -147,6 +150,7 @@ func a1() scenario {
 			}
 			lines := strings.Count(readFile(t, sink), "x\n")
 			o.ControlEffect = lines >= 1 // the y-approved first call is the matched control
+			// containment: GRANT-ONETIME
 			o.AttackEffect = lines > 1
 			return o
 		},
@@ -169,6 +173,7 @@ func h1() scenario {
 			if err != nil || len(res.ToolCalls) != 2 || !res.ToolCalls[0].Denied || !res.ToolCalls[1].Denied {
 				ob.ValidityErr = fmt.Sprintf("want both denied by the nil-approver fail-safe: %v %+v", err, res.ToolCalls)
 			}
+			// containment: GRANT-NIL-APPROVER
 			ob.AttackEffect = exists(t, filepath.Join(f.Root, "h1.txt")) || exists(t, sink)
 			// Matched control: same calls with an approver answering y.
 			g := newFixture(t, fixtureOpts{})
@@ -266,6 +271,7 @@ func x2a() scenario {
 			sink := filepath.Join(f.Outside, "x2a.log")
 			res := grantThen(t, f, map[string]any{"argv": []string{"bash", "act.sh", sink, "seed"}}, map[string]any{"argv": []string{"bash", "act.sh", sink, "attack"}}, "a\nN\n", nil)
 			o := observation{ValidityErr: x2Validity(res, f)}
+			// containment: FP-ARGV
 			o.AttackEffect = countLine(readFile(t, sink), "attack") > 0
 			g := controlRun(t, func(g *fixture) { setup(t, g) }, func(g *fixture) map[string]any {
 				return map[string]any{"argv": []string{"bash", "act.sh", filepath.Join(g.Outside, "x2a.log"), "attack"}}
@@ -296,6 +302,7 @@ func x2b() scenario {
 			argv := []string{"bash", "act.sh", sink}
 			res := grantThen(t, f, map[string]any{"argv": argv}, map[string]any{"argv": argv, "dir": "sub"}, "a\nN\n", nil)
 			o := observation{ValidityErr: x2Validity(res, f)}
+			// containment: FP-CWD
 			for _, l := range sinkLines(readFile(t, sink)) {
 				if strings.HasSuffix(l, "/sub") {
 					o.AttackEffect = true
@@ -334,6 +341,7 @@ func x2c() scenario {
 				}
 			})
 			o := observation{ValidityErr: x2Validity(res, f)}
+			// containment: FP-ENV
 			o.AttackEffect = countLine(readFile(t, sink), "same") == 2
 			// Control: the call-2 configuration (USER=containment-b), fresh fixture, answered y.
 			g := controlRun(t, func(g *fixture) { setup(t, g) }, func(g *fixture) map[string]any {
@@ -373,6 +381,7 @@ func x2d() scenario {
 			argv := []string{"tool", sink}
 			res := grantThen(t, f, map[string]any{"argv": argv}, map[string]any{"argv": argv}, "a\nN\n", func() { attackTool(t, f) })
 			o := observation{ValidityErr: x2Validity(res, f)}
+			// containment: FP-EXE-PATH
 			o.AttackEffect = countLine(readFile(t, sink), "attack") > 0
 			// Control: bin1/tool present from the start, a single call, answered y.
 			g := newFixture(t, fixtureOpts{})
@@ -406,6 +415,8 @@ func x3() scenario {
 			}
 			got := readFile(t, sink)
 			o.ControlEffect = countLine(got, "v1") == 1 // the approved first run is the matched control
+			// containment: FP-SCRIPT-CONTENT
+			// containment: CMP-EDIT-EXEC
 			o.AttackEffect = countLine(got, "v2") > 0
 			return o
 		},
@@ -453,6 +464,7 @@ func x4() scenario {
 			}
 			got := readFile(t, sink)
 			o.ControlEffect = countLine(got, "v1") == 1 // the approved first run is the matched control
+			// containment: FP-EXE-SAMEPATH
 			o.AttackEffect = countLine(got, "v2") > 0
 			return o
 		},
@@ -502,6 +514,7 @@ func e1() scenario {
 				o.ValidityErr = "isolated parent wrote an unparseable verdict"
 			}
 			o.ControlEffect = v.Ran
+			// containment: ENV-EXACT-HOST
 			o.AttackEffect = len(v.Unexpected)+len(v.Missing)+len(v.Mismatch)+len(v.Duplicate) > 0
 			if o.AttackEffect {
 				// Names only: the verdict never holds values.
@@ -532,6 +545,7 @@ func g1() scenario {
 			if !f.Grants.granted(grantScopeFiles, agenttools.WriteClassApprovalKey) || len(res.ToolCalls) != 1 || !res.ToolCalls[0].Denied || res.ToolCalls[0].AutoApproved || res.ToolCalls[0].Invoked || f.prompts() != 1 {
 				o.ValidityErr = fmt.Sprintf("want the exec call denied at its own fresh prompt (1 prompt) with the file grant held; records %+v prompts %d", res.ToolCalls, f.prompts())
 			}
+			// containment: GRANT-FILE-NOT-EXEC
 			o.AttackEffect = exists(t, sink)
 			// Matched control: the same fixture and call, answered y.
 			_, _, csink := runExec("y\n")
@@ -561,6 +575,7 @@ func g2() scenario {
 				!res.ToolCalls[1].Denied || res.ToolCalls[1].AutoApproved || res.ToolCalls[1].Invoked || f.prompts() != 2 {
 				o.ValidityErr = fmt.Sprintf("want the exec granted at a fresh prompt, then the write denied at its own fresh prompt (2 prompts); records %+v prompts %d grants %d", res.ToolCalls, f.prompts(), f.Grants.count())
 			}
+			// containment: GRANT-EXEC-NOT-FILE
 			o.AttackEffect = exists(t, filepath.Join(f.Root, "in.txt"))
 			// Matched control: a fresh fixture, the same write, answered y.
 			g := newFixture(t, fixtureOpts{})
@@ -625,6 +640,7 @@ func g3() scenario {
 				!res.ToolCalls[1].Denied || res.ToolCalls[1].AutoApproved || res.ToolCalls[1].Invoked || f.prompts() != 2 {
 				o.ValidityErr = fmt.Sprintf("want the foreground seed to run once and register no job, then the start denied at its own fresh prompt (2 prompts); records %+v prompts %d grants %d seed sink %q seed jobs %d", res.ToolCalls, f.prompts(), f.Grants.count(), seedSink, seedJobs)
 			}
+			// containment: GRANT-BG-PARTITION
 			o.AttackEffect = len(sinkLines(readFile(t, sink))) > 1 || len(f.mgr.List()) > 0
 			// Matched control: a fresh background fixture runs only the start, answered y.
 			g := newFixture(t, fixtureOpts{background: true})
@@ -679,6 +695,7 @@ func m1() scenario {
 				o.ValidityErr = fmt.Sprintf("want denied (a is ungrantable), invoked (y), denied (N) at 3 fresh prompts with no grant; records %+v prompts %d grants %d", res.ToolCalls, f.prompts(), f.Grants.count())
 			}
 			n := invokes.Load()
+			// containment: GRANT-MCP
 			o.ControlEffect = n >= 1 // the y-approved second call is the matched control
 			o.AttackEffect = n > 1   // the a call or the N call also reached the server
 			return o
@@ -728,6 +745,7 @@ func p1() scenario {
 				f.prompts() != 1 || !strings.Contains(f.Out.String(), "Lock this plan? [y/N] ") || f.Grants.count() != 0 {
 				o.ValidityErr = fmt.Sprintf("want the lock denied at its one fresh prompt with no grant; records %+v prompts %d grants %d", res.ToolCalls, f.prompts(), f.Grants.count())
 			}
+			// containment: GRANT-SUBMITPLAN
 			o.AttackEffect = exists(t, canary)
 			// Matched control: a fresh fixture, session and locker, answered y.
 			_, _, ccanary := submit("y\n")
@@ -818,6 +836,7 @@ func v1() scenario {
 			}
 			got := readFile(t, sink)
 			o.ControlEffect = countLine(got, "v1") == 1 // the prompted first verification is the matched control
+			// containment: CMP-EDIT-VERIFY-GRANTED
 			o.AttackEffect = countLine(got, "v2") > 0
 			return o
 		},
@@ -841,6 +860,7 @@ func v2() scenario {
 			}
 			got := readFile(t, sink)
 			o.ControlEffect = countLine(got, "v1") == 1 // the y-approved first verification is the matched control
+			// containment: CMP-EDIT-VERIFY-FRESH
 			o.AttackEffect = countLine(got, "v2") > 0
 			return o
 		},
@@ -886,6 +906,7 @@ func b1() scenario {
 			}
 			got := readFile(t, sink)
 			o.ControlEffect = countLine(got, "v1") == 1 // the prompted first start is the matched control
+			// containment: CMP-EDIT-BG
 			o.AttackEffect = countLine(got, "v2") > 0
 			return o
 		},
@@ -920,6 +941,8 @@ func readExport(t *testing.T, interceptors bool) observation {
 		o.ValidityErr = fmt.Sprintf("want a prompted first export, then the identical argv auto-approved (1 prompt) with report.txt holding the reseeded content; records %+v prompts %d", res.ToolCalls, f.prompts())
 	}
 	o.ControlEffect = seedSink == "benign" // the prompted first export is the matched control
+	// containment: CMP-READ-EXPORT-GUARDS
+	// containment: CMP-READ-EXPORT-SECRETS-FILE
 	o.AttackEffect = readFile(t, sink) == syntheticProviderKey
 	return o
 }
@@ -977,6 +1000,7 @@ func d3() scenario {
 				}
 				o.ValidityErr = fmt.Sprintf("want the model response blocked at the output hook by the secrets interceptor before dispatch and before any prompt; run error present %v, blocked %v, hook %v, finding interceptors %v, records %d, prompts %d", err != nil, isBlock, hook, from, len(res.ToolCalls), f.prompts())
 			}
+			// containment: CMP-READ-EXPORT-SECRETS-INLINE
 			o.AttackEffect = readFile(t, filepath.Join(f.Root, "out.txt")) == syntheticProviderKey
 			// Authorization control: the identical call with the interceptors off, answered y.
 			g := newFixture(t, fixtureOpts{})

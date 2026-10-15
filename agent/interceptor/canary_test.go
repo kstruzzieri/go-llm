@@ -157,6 +157,7 @@ func TestCanaryInspectOutput(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Canary.InspectOutput(%s) error = %v, want nil", tc.name, err)
 			}
+			// containment: CANARY
 			assertCanaryFindings(t, got, tc.want)
 		})
 	}

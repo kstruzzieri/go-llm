@@ -122,6 +122,7 @@ func runDetectorContracts(t *testing.T) {
 				if err != nil {
 					t.Fatalf("ZeroWidth.InspectInput(%s): %v", origin, err)
 				}
+				// containment: DETECT-ZW
 				contractFindingsEqual(t, tc.name, got, directInputFinding(tc.rule, verdict, tc.risk, tc.detail, origin), false)
 			}
 		})
@@ -154,6 +155,7 @@ func runDetectorContracts(t *testing.T) {
 				if err != nil {
 					t.Fatalf("Encoding.InspectInput(%s): %v", origin, err)
 				}
+				// containment: DETECT-ENC
 				contractFindingsEqual(t, tc.name, got, directInputFinding(tc.rule, verdict, tc.risk, tc.detail, origin), false)
 			}
 		})
@@ -179,6 +181,7 @@ func runDetectorContracts(t *testing.T) {
 				if err != nil {
 					t.Fatalf("Typoglycemia.InspectInput(%s): %v", origin, err)
 				}
+				// containment: DETECT-TYPO
 				contractFindingsEqual(t, tc.name, got, directInputFinding(tc.rule, verdict, tc.risk, tc.detail, origin), false)
 			}
 		})
@@ -272,6 +275,7 @@ func runSecretsContracts(t *testing.T) {
 					if err != nil {
 						t.Fatalf("Secrets.InspectInput(%s) returned an error", tc.kind)
 					}
+					// containment: SECRETS
 					contractFindingsEqual(t, tc.kind, got, secretWant(tc.kind, origin, agent.TargetMessage, 4, ""), true)
 				}
 				got, err := (interceptor.Secrets{}).InspectInput(context.Background(), inputMessage(agent.OriginForeign, tc.clean))
@@ -393,6 +397,7 @@ func runInvariantContracts(t *testing.T) {
 				}
 				return
 			}
+			// containment: INVARIANTS
 			want := []agent.Finding{contractFinding(tc.rule, agent.VerdictBlock, 30, tc.detail, agent.OriginModel, agent.TargetToolCall, -1, "i1")}
 			contractFindingsEqual(t, tc.name, got, want, false)
 		})
@@ -436,6 +441,7 @@ func runEgressContracts(t *testing.T) {
 				}
 				return
 			}
+			// containment: EGRESS
 			want := []agent.Finding{contractFinding(tc.rule, agent.VerdictTag, tc.risk, tc.detail, agent.OriginModel, agent.TargetToolCall, -1, "e9")}
 			contractFindingsEqual(t, tc.name, got, want, false)
 		})
@@ -678,6 +684,7 @@ func runDefaultPipelineContracts(t *testing.T) {
 			names[i] = chain[i].Name()
 		}
 		want := []string{"zero_width", "encoding", "typoglycemia", "invariants", "egress", "secrets", "child_scope_denials"}
+		// containment: PIPELINE-ORDER
 		if !reflect.DeepEqual(names, want) {
 			t.Errorf("Defaults names = %v, want %v", names, want)
 		}
@@ -793,6 +800,7 @@ func runSecretPipelineContracts(t *testing.T) {
 		if err == nil || !errors.As(err, &blocked) || blocked.Hook != agent.HookOutput {
 			t.Errorf("Run(secret output arguments) output-blocked = %t, want true", blocked != nil && blocked.Hook == agent.HookOutput)
 		}
+		// containment: SECRETS
 		if tool.plans != 0 || tool.invokes != 0 || len(approver.risks) != 0 || len(rec.Steps) != 0 || len(res.ToolCalls) != 0 {
 			t.Errorf("Run(secret output arguments) Plan/Invoke/approval/step/record = %d/%d/%d/%d/%d, want all zero", tool.plans, tool.invokes, len(approver.risks), len(rec.Steps), len(res.ToolCalls))
 		}
@@ -958,6 +966,12 @@ func runWorkspaceContracts(t *testing.T) {
 						t.Fatalf("ReadFile.Invoke(%q): %v", tc.path, err)
 					}
 					wantReadError := tc.wantPlan != ""
+					// containment: PATH-ABS
+					// containment: PATH-DOTDOT
+					// containment: PATH-NUL
+					// containment: PATH-SEPPREFIX
+					// containment: PATH-SYMLINK-ANCESTOR
+					// containment: PATH-SYMLINK-FINAL
 					if readResult.IsError != wantReadError || readResult.Content != tc.wantRead {
 						t.Errorf("ReadFile.Invoke(%q) = {%t %q}, want {%t %q}", tc.path, readResult.IsError, readResult.Content, wantReadError, tc.wantRead)
 					}

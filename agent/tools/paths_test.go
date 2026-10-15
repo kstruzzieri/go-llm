@@ -41,6 +41,9 @@ func TestWorkspaceCleanRelContainment(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			got, err := ws.cleanRel(tt.input)
 			if tt.wantErr != nil {
+				// containment: PATH-ABS
+				// containment: PATH-DOTDOT
+				// containment: PATH-NUL
 				if !errors.Is(err, tt.wantErr) {
 					t.Fatalf("cleanRel(%q) error = %v, want %v", tt.input, err, tt.wantErr)
 				}
@@ -157,6 +160,7 @@ func TestWorkspaceUnderRootPrefixSibling(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// containment: PATH-SEPPREFIX
 	if ws.underRoot(filepath.Join(siblingCanon, "f.txt")) {
 		t.Fatalf("underRoot leaked across prefix-sibling: %q accepted", siblingCanon)
 	}
@@ -415,6 +419,7 @@ func TestResolveFileRejectsSymlinkAndKind(t *testing.T) {
 	}
 	// "evil" is an in-root symlink whose target is OUTSIDE root; rejected as a
 	// symlink by Lstat, not by containment (cleanRel passes the in-root link path).
+	// containment: PATH-SYMLINK-FINAL
 	if _, _, err := ws.resolveFile("evil"); !errors.Is(err, errSymlink) {
 		t.Fatalf("resolveFile on out-of-root-pointing symlink: got %v, want errSymlink", err)
 	}
@@ -473,6 +478,7 @@ func TestResolveFileRejectsIntermediateSymlink(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// containment: PATH-SYMLINK-ANCESTOR
 	if _, _, err := ws.resolveFile("linkdir/secret.txt"); !errors.Is(err, errSymlink) {
 		t.Fatalf("resolveFile through intermediate symlink: got %v, want errSymlink", err)
 	}
@@ -667,6 +673,7 @@ func TestWriteFileAtomicRejectsSymlinkLeaf(t *testing.T) {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
 	ws := mustWorkspace(t, root)
+	// containment: PATH-SYMLINK-FINAL
 	if err := ws.WriteFileAtomic("evil", []byte("x")); !errors.Is(err, errSymlink) {
 		t.Fatalf("write through symlink leaf: got %v want errSymlink", err)
 	}
@@ -715,6 +722,7 @@ func TestWriteFileAtomicRejectsSymlinkAncestor(t *testing.T) {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
 	ws := mustWorkspace(t, root)
+	// containment: PATH-SYMLINK-ANCESTOR
 	if err := ws.WriteFileAtomic("linkdir/new.txt", []byte("x")); !errors.Is(err, errSymlink) {
 		t.Fatalf("write through symlink ancestor: got %v want errSymlink", err)
 	}

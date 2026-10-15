@@ -264,6 +264,7 @@ func TestSeatbeltChildEnvReplacesTMPDIR(t *testing.T) {
 			rest = append(rest, e)
 		}
 	}
+	// containment: ENV-SEATBELT
 	if len(tmpdirs) != 1 || tmpdirs[0] != "TMPDIR=/private/tmp/pt1" {
 		t.Fatalf("TMPDIR entries = %q, want exactly the private directory", tmpdirs)
 	}

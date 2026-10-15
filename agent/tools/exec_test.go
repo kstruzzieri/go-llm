@@ -699,6 +699,7 @@ func TestInvokeExecutableChangedFailsClosed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// containment: FP-PLAN-INVOKE-SWAP
 	if !res.IsError {
 		t.Error("executable swapped: want IsError=true")
 	}

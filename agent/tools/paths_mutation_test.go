@@ -126,6 +126,9 @@ func TestMutationParentCapability(t *testing.T) {
 					} else {
 						mutationMust(t, err)
 					}
+					// containment: MUT-WRITE
+					// containment: MUT-DELETE
+					// containment: MUT-CLEANUP
 					mutationBytes(t, filepath.Join(outside, "file"), "OUTSIDE\n")
 					mutationBytes(t, filepath.Join(denied, "file"), "DENIED\n")
 					switch phase {

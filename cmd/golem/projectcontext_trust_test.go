@@ -370,6 +370,7 @@ func TestProjectContextRenderingOmitsUnfitHeaderAndCountsBoundaries(t *testing.T
 	exactBudget := len(header) + len(projectContextTruncatedLine) + 2 + 7
 	block, bodyBytes, statuses := renderProjectContext(fence, docs, exactBudget)
 	body := keyedContextBody(t, block, "PROJECT_CONTEXT")
+	// containment: GUIDANCE-TRUST
 	if bodyBytes != exactBudget || len(body) != exactBudget || statuses[0] != projectContextTruncated {
 		t.Fatalf("renderProjectContext(exact boundary) = bytes %d body %d status %q, want %d/%d/truncated", bodyBytes, len(body), statuses[0], exactBudget, exactBudget)
 	}
@@ -406,6 +407,7 @@ func TestProjectContextInputsUntrustedOmitsProject(t *testing.T) {
 	docs := []projectcontext.Document{{Source: "workspace", Path: "/ws/AGENTS.md", Content: "secret rule"}}
 	gitSnap := gitContextSnapshot{Block: "present", State: gitState{Branch: "main"}}
 	got := projectContextInputs(systemInputs{}, docs, gitSnap, false)
+	// containment: GUIDANCE-TRUST
 	if got.projectContext != "" || !strings.Contains(got.gitContext, "branch: main") {
 		t.Fatalf("projectContextInputs(untrusted) = project %q git %q, want no project and retained Git", got.projectContext, got.gitContext)
 	}
@@ -430,6 +432,7 @@ func TestProjectContextInputsExactNormalizedWire(t *testing.T) {
 		"recent commits (newest first): (none)\n" +
 		"working tree: clean\n" +
 		">>>GIT_CONTEXT TESTKEY00000"
+	// containment: GUIDANCE-TRUST
 	if normalized := normalize(got.projectContext); normalized != wantProject {
 		t.Fatalf("projectContextInputs project wire = %q, want %q", normalized, wantProject)
 	}

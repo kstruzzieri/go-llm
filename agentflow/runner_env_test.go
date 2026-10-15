@@ -75,6 +75,7 @@ func TestBuildChildEnv(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			// containment: ENV-AGENTFLOW
 			if got == nil || !reflect.DeepEqual(got, tc.want) {
 				t.Fatalf("env = %#v, want %#v (non-nil)", got, tc.want)
 			}

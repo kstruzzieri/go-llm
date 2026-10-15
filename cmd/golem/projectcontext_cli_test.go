@@ -62,11 +62,13 @@ func TestProjectTrustLiveConsentAndFreshness(t *testing.T) {
 	digest := trustFixtureDigest(t, sess.root)
 	for _, line := range []string{"/trust", "/trust bad", "/trust sha256:" + strings.Repeat("0", 64)} {
 		trustSlash(t, sess, line)
+		// containment: GUIDANCE-TRUST
 		if system := trustGoal(t, sess, caller); strings.Contains(system, "original-guidance") {
 			t.Fatalf("%s admitted docs: %s", line, system)
 		}
 	}
 	trustSlash(t, sess, "/trust "+digest)
+	// containment: GUIDANCE-SYSTEM-CONTEXT
 	if system := trustGoal(t, sess, caller); !strings.Contains(system, "original-guidance") || !strings.Contains(system, "<<<PROJECT_CONTEXT ") {
 		t.Fatalf("matching consent not on wire: %s", system)
 	}

@@ -61,6 +61,7 @@ func TestCanaryEntropy(t *testing.T) {
 		t.Fatalf("ForRun = %q, %v", extra, err)
 	}
 	found, err := d.InspectOutput(t.Context(), agent.OutputInspection{Content: canaryNonceA})
+	// containment: CANARY
 	if err != nil || len(found) != 1 || found[0].Rule != "canary_in_content" || found[0].Verdict != agent.VerdictAbort {
 		t.Fatalf("detector A = %+v, %v", found, err)
 	}

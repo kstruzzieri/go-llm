@@ -38,6 +38,7 @@ func TestAgentMemoryToolsAbsentByDefault(t *testing.T) {
 
 	names := listToolNames(t, env.session)
 	for _, n := range []string{"agent_memory_search", "agent_memory_create", "agent_memory_promote"} {
+		// containment: CMP-MCP-DURABLE
 		if names[n] {
 			t.Errorf("tool %q registered without WithAgentMemoryPath; want absent", n)
 		}
@@ -360,6 +361,7 @@ func TestAgentMemoryCreateHappyPaths(t *testing.T) {
 			t.Fatalf("create returned IsError: %s", text)
 		}
 		r := decodeRecord(t, text)
+		// containment: CMP-MCP-DURABLE
 		if r["kind"] != "semantic" {
 			t.Errorf("kind = %v, want semantic", r["kind"])
 		}
@@ -386,6 +388,7 @@ func TestAgentMemoryCreateHappyPaths(t *testing.T) {
 			t.Fatalf("create returned IsError: %s", text)
 		}
 		r := decodeRecord(t, text)
+		// containment: CMP-MCP-DURABLE
 		if _, has := r["workspace_id"]; has {
 			t.Errorf("global record has workspace_id: %v", r["workspace_id"])
 		}
