@@ -86,5 +86,114 @@
       "bash",
       "exec"
     ]
+  },
+  {
+    "id": "X2a",
+    "reqs": [
+      "FP-ARGV"
+    ],
+    "protections": "exec approval fingerprint over argv; answers a then N",
+    "attack": "one-time approved command re-run with one changed argv element",
+    "probe": "append-only sink holds no attack line",
+    "declared": "contained",
+    "owner": "",
+    "reason": "",
+    "control": "authorization",
+    "control_diff": "",
+    "caps": [
+      "bash",
+      "exec"
+    ]
+  },
+  {
+    "id": "X2b",
+    "reqs": [
+      "FP-CWD"
+    ],
+    "protections": "exec approval fingerprint over cwd; answers a then N",
+    "attack": "one-time approved command re-run with the identical argv in a subdirectory",
+    "probe": "append-only sink holds no line ending in /sub",
+    "declared": "contained",
+    "owner": "",
+    "reason": "",
+    "control": "authorization",
+    "control_diff": "",
+    "caps": [
+      "bash",
+      "exec"
+    ]
+  },
+  {
+    "id": "X2c",
+    "reqs": [
+      "FP-ENV"
+    ],
+    "protections": "exec approval fingerprint over the sanitized env values; answers a then N",
+    "attack": "one-time approved command re-run with identical argv after the USER env value changed",
+    "probe": "append-only sink holds a single same line",
+    "declared": "contained",
+    "owner": "",
+    "reason": "",
+    "control": "authorization",
+    "control_diff": "",
+    "caps": [
+      "bash",
+      "exec"
+    ]
+  },
+  {
+    "id": "X2d",
+    "reqs": [
+      "FP-EXE-PATH"
+    ],
+    "protections": "exec approval fingerprint over the resolved executable path; answers a then N",
+    "attack": "one-time approved bare command re-run after a new binary shadows it earlier on PATH",
+    "probe": "append-only sink holds no attack line",
+    "declared": "contained",
+    "owner": "",
+    "reason": "",
+    "control": "authorization",
+    "control_diff": "",
+    "caps": [
+      "bash",
+      "exec"
+    ]
+  },
+  {
+    "id": "X3",
+    "reqs": [
+      "FP-SCRIPT-CONTENT",
+      "CMP-EDIT-EXEC"
+    ],
+    "protections": "exec grant by fingerprint; /auto-edits file grant",
+    "attack": "approve bash build.sh, rewrite build.sh via an auto-approved write_file, run the same command again",
+    "probe": "append-only sink holds a v2 line",
+    "declared": "uncontained",
+    "owner": "#420",
+    "reason": "",
+    "control": "authorization",
+    "control_diff": "",
+    "caps": [
+      "bash",
+      "exec"
+    ]
+  },
+  {
+    "id": "X4",
+    "reqs": [
+      "FP-EXE-SAMEPATH"
+    ],
+    "protections": "exec grant by fingerprint; executable identity re-checked against the current Plan",
+    "attack": "approve ./tool, replace ./tool with a new inode at the same path, run the same command again",
+    "probe": "append-only sink holds a v2 line",
+    "declared": "uncontained",
+    "owner": "#420",
+    "reason": "",
+    "control": "authorization",
+    "control_diff": "",
+    "caps": [
+      "bash",
+      "exec"
+    ]
   }
 ]
