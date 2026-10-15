@@ -33,20 +33,21 @@ tree_stmt='          tree="$(git rev-parse "${GITHUB_SHA}^{tree}")"'
 tree_env='GO_LLM_CI_TREE="$tree"'
 checker='go run ./internal/containmentinv/check -inventory docs/security/containment-inventory.json'
 commit_env='          GO_LLM_CI_COMMIT: ${{ github.sha }}'
+pr_head_env='          GO_LLM_CI_PR_HEAD: ${{ github.event.pull_request.head.sha }}'
 upload='        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2'
-require_step ci.yml 'Security contracts' "$commit_env" "$tree_stmt" \
+require_step ci.yml 'Security contracts' "$commit_env" "$pr_head_env" "$tree_stmt" \
   "          $tree_env ./scripts/ci-local --mode security --evidence-out \"\$RUNNER_TEMP/containment-linux-host.json\""
-require_step ci.yml 'Containment inventory (bwrap)' '          GO_LLM_REQUIRE_BWRAP: "1"' "$commit_env" "$tree_stmt" \
+require_step ci.yml 'Containment inventory (bwrap)' '          GO_LLM_REQUIRE_BWRAP: "1"' "$commit_env" "$pr_head_env" "$tree_stmt" \
   "          $tree_env $checker -profile bwrap -evidence-out \"\$RUNNER_TEMP/containment-bwrap.json\""
 for af in installed source; do
-  require_step ci.yml "Agentflow compatibility ($af)" "$commit_env" "$tree_stmt" \
+  require_step ci.yml "Agentflow compatibility ($af)" "$commit_env" "$pr_head_env" "$tree_stmt" \
     "          $tree_env $checker -profile agentflow-integration -evidence-out \"\$RUNNER_TEMP/containment-agentflow-integration-$af.json\""
 done
-require_step ci.yml 'Containment inventory (windows)' "$commit_env" "$tree_stmt" \
+require_step ci.yml 'Containment inventory (windows)' "$commit_env" "$pr_head_env" "$tree_stmt" \
   "          $tree_env $checker -profile windows -evidence-out \"\$RUNNER_TEMP/containment-windows.json\""
-require_step darwin-smoke.yml 'Containment inventory (darwin-host)' "$commit_env" "$tree_stmt" \
+require_step darwin-smoke.yml 'Containment inventory (darwin-host)' "$commit_env" "$pr_head_env" "$tree_stmt" \
   "          $tree_env $checker -profile darwin-host -evidence-out \"\$RUNNER_TEMP/containment-darwin-host.json\""
-require_step darwin-smoke.yml 'Containment inventory (seatbelt)' '          GO_LLM_REQUIRE_SEATBELT: "1"' "$commit_env" "$tree_stmt" \
+require_step darwin-smoke.yml 'Containment inventory (seatbelt)' '          GO_LLM_REQUIRE_SEATBELT: "1"' "$commit_env" "$pr_head_env" "$tree_stmt" \
   "          $tree_env $checker -profile seatbelt -evidence-out \"\$RUNNER_TEMP/containment-seatbelt.json\""
 require_step ci.yml 'Upload containment evidence' "$upload" \
   '          path: ${{ runner.temp }}/containment-linux-host.json' \
@@ -57,10 +58,12 @@ require_step ci.yml 'Upload containment evidence' "$upload" \
 require_step darwin-smoke.yml 'Upload containment evidence' "$upload" \
   '            ${{ runner.temp }}/containment-darwin-host.json' \
   '            ${{ runner.temp }}/containment-seatbelt.json'
-# One upload per job that runs the checker: four in ci.yml, one in darwin-smoke.
+# One upload per job that runs the checker: four in ci.yml, one in darwin-smoke,
+# each under if: always() so a failed run still publishes its evidence.
 for pin in ci.yml:4 darwin-smoke.yml:1; do
-  if [ "$(grep -Fxc -- "$upload" "$repo_root/.github/workflows/${pin%:*}")" != "${pin#*:}" ]; then
-    printf '%s must upload containment evidence from %s jobs\n' "${pin%:*}" "${pin#*:}" >&2
+  if [ "$(grep -Fxc -- "$upload" "$repo_root/.github/workflows/${pin%:*}")" != "${pin#*:}" ] ||
+    [ "$(grep -A1 -Fx -- '      - name: Upload containment evidence' "$repo_root/.github/workflows/${pin%:*}" | grep -Fxc -- '        if: always()')" != "${pin#*:}" ]; then
+    printf '%s must upload containment evidence from %s jobs, each if: always()\n' "${pin%:*}" "${pin#*:}" >&2
     exit 1
   fi
 done

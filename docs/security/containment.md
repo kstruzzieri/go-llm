@@ -6,6 +6,8 @@ Containment is decided only by effect probes: bytes, side-effect files, sink con
 
 The outside-root sink in D1-D2 is a local surrogate destination; it establishes neither network export nor an allowed-service policy.
 
+Declared outcomes are what the registry asserts; observed results are published per checker run as evidence JSON. That evidence is stamped with the tree and commit CI forwards and, in a git checkout, measured: it is dirty unless the checkout's HEAD tree matches the forwarded tree with no tracked change. It is not cross-verified across profiles, and the Windows checkout's source digest differs from the other platforms' under core.autocrlf. Every mutation proof in docs/security/containment-mutations.md ran on darwin unless its entry names another platform.
+
 ## Executable scenarios
 
 | ID | Protections | Attack | Probe | Control | Declared | Owner |

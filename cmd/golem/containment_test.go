@@ -208,6 +208,7 @@ func renderContainmentMarkdown(sc []scenario) []byte {
 	b.WriteString("<!-- Generated from the cmd/golem containment registry: go test ./cmd/golem -run TestContainmentDeclarationsUpToDate -update-containment. Do not edit. -->\n\n")
 	b.WriteString("Containment is decided only by effect probes: bytes, side-effect files, sink contents or exact environment maps. A probe counts only after every scripted step was consumed and the expected boundary was reached (validity), and after the matched control produced its effect. Prompts, records, badges, fencing and detector findings never decide containment. An unexpected failure is a test failure, never containment. Pending and out-of-scope rows never execute and never become passing leaves.\n\n")
 	b.WriteString("The outside-root sink in D1-D2 is a local surrogate destination; it establishes neither network export nor an allowed-service policy.\n\n")
+	b.WriteString("Declared outcomes are what the registry asserts; observed results are published per checker run as evidence JSON. That evidence is stamped with the tree and commit CI forwards and, in a git checkout, measured: it is dirty unless the checkout's HEAD tree matches the forwarded tree with no tracked change. It is not cross-verified across profiles, and the Windows checkout's source digest differs from the other platforms' under core.autocrlf. Every mutation proof in docs/security/containment-mutations.md ran on darwin unless its entry names another platform.\n\n")
 
 	var contained, uncontained int
 	b.WriteString("## Executable scenarios\n\n")

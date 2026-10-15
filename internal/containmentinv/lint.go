@@ -6,10 +6,13 @@ import (
 	"go/parser"
 	"go/token"
 	"io/fs"
+	"maps"
+	"os"
 	"path"
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 )
 
@@ -23,7 +26,8 @@ type site struct{ id, file, fn string }
 
 type marker struct {
 	site
-	pos string // file:line
+	pos    string    // file:line
+	offset token.Pos // position in the scan's file set
 }
 
 // source is what the lint needs from the scanned test files.
@@ -31,7 +35,16 @@ type source struct {
 	funcs   map[string]map[string]bool // slash path -> top-level function names
 	sites   map[site]bool
 	markers []marker
+	// lastObs is, per slash path and function, the position of the last
+	// reference to an observation field or observation literal.
+	lastObs map[string]map[string]token.Pos
+	// registrars is, per slash path and scenario ID, the functions bound to
+	// the scenario's registration (registrationFuncs).
+	registrars map[string]map[string][]string
 }
+
+// observationFields are the containment observation's outcome fields.
+var observationFields = []string{"ValidityErr", "ControlEffect", "AttackEffect"}
 
 // Lint checks inv against the *_test.go files under repoRoot and the
 // registry's scenario declarations, and returns every violation:
@@ -41,21 +54,25 @@ type source struct {
 //   - a row cites TestContainment/<X> for each executable scenario it lists, and only those;
 //   - pending and out-of-scope rows carry no refs; pending and uncontained need an owner;
 //   - model rows list artifacts, rows with refs list known mandatory profiles;
+//   - a TestContainment/<X> ref cites a function bound to scenario X's
+//     registration, and its marker precedes an observation statement there;
 //   - a verified or uncontained row outside the model layer cites at least one
-//     entry of the mutation ledger, and every cited entry exists in ledger (the
-//     IDs LoadLedger returns); only an administrative META- row may carry an
-//     Exempt reason instead;
-//   - the linux-host profile allows no skip, and every other allowed skip's
-//     reason is capability:<cap>.
-func Lint(inv Inventory, repoRoot string, scenarios []ScenarioDecl, ledger []string) []error {
+//     entry of the mutation ledger, every cited entry exists in ledger and
+//     lists the row in its Affected refs, and every row an entry lists cites
+//     it; only an administrative META- row may carry an Exempt reason instead;
+//   - the linux-host profile allows no skip, every other allowed skip is
+//     capability:<cap> for a cited leaf, a scenario leaf's cap is the first of
+//     its caps the profile lacks, and a row lists a profile only if one of its
+//     refs is not an allowed skip there.
+func Lint(inv Inventory, repoRoot string, scenarios []ScenarioDecl, ledger []LedgerEntry) []error {
 	src, errs := scanTests(repoRoot)
 	decls := make(map[string]ScenarioDecl, len(scenarios))
 	for _, s := range scenarios {
 		decls[s.ID] = s
 	}
 	entries := make(map[string]bool, len(ledger))
-	for _, id := range ledger {
-		entries[id] = true
+	for _, e := range ledger {
+		entries[e.ID] = true
 	}
 	profiles := map[string]bool{}
 	for _, p := range inv.Profiles {
@@ -75,7 +92,8 @@ func Lint(inv Inventory, repoRoot string, scenarios []ScenarioDecl, ledger []str
 		}
 	}
 	errs = append(errs, lintScenarioReqs(rows, scenarios)...)
-	errs = append(errs, lintProfiles(inv)...)
+	errs = append(errs, lintLedger(rows, ledger)...)
+	errs = append(errs, lintProfiles(inv, decls)...)
 	for _, m := range src.markers {
 		switch {
 		case !hasRow(rows, m.id):
@@ -84,6 +102,36 @@ func Lint(inv Inventory, repoRoot string, scenarios []ScenarioDecl, ledger []str
 			errs = append(errs, fmt.Errorf("%s: %s marker sits outside any function", m.pos, m.id))
 		case !cited[m.site]:
 			errs = append(errs, fmt.Errorf("%s: %s marker in %s is not cited by any %s ref", m.pos, m.id, m.fn, m.id))
+		}
+	}
+	return errs
+}
+
+// lintLedger: a row's cited entries list it in their Affected refs, and every
+// row an entry lists cites the entry.
+func lintLedger(rows map[string]Row, ledger []LedgerEntry) []error {
+	var errs []error
+	listed := map[string][]string{}
+	for _, e := range ledger {
+		listed[e.ID] = e.Rows
+		if len(e.Rows) == 0 {
+			errs = append(errs, fmt.Errorf("ledger %s lists no inventory row in its Affected refs", e.ID))
+		}
+		for _, id := range e.Rows {
+			r, ok := rows[id]
+			switch {
+			case !ok:
+				errs = append(errs, fmt.Errorf("ledger %s lists %s, which has no inventory row", e.ID, id))
+			case !slices.Contains(r.Mutations, e.ID):
+				errs = append(errs, fmt.Errorf("%s: ledger %s lists this row, which does not cite it", id, e.ID))
+			}
+		}
+	}
+	for _, id := range slices.Sorted(maps.Keys(rows)) {
+		for _, m := range rows[id].Mutations {
+			if rs, ok := listed[m]; ok && !slices.Contains(rs, id) {
+				errs = append(errs, fmt.Errorf("%s: cites %s, whose Affected refs do not list this row", id, m))
+			}
 		}
 	}
 	return errs
@@ -268,7 +316,23 @@ func lintRef(id string, ref Ref, src source) []error {
 		errs = append(errs, fmt.Errorf("%s: ref %s: top-level test %s not found in package %s", id, ref.Test, top, ref.Package))
 	}
 	if !src.sites[site{id, ref.File, ref.Func}] {
-		errs = append(errs, fmt.Errorf("%s: no `%s%s` marker inside %s (%s) for %s", id, markerPrefix, id, ref.Func, ref.File, ref.Test))
+		return append(errs, fmt.Errorf("%s: no `%s%s` marker inside %s (%s) for %s", id, markerPrefix, id, ref.Func, ref.File, ref.Test))
+	}
+	scenario, ok := strings.CutPrefix(ref.Test, "TestContainment/")
+	if !ok {
+		return errs
+	}
+	scenario, _, _ = strings.Cut(scenario, "/")
+	switch fns := src.registrars[ref.File][scenario]; {
+	case len(fns) == 0:
+		errs = append(errs, fmt.Errorf("%s: ref %s: no function in %s registers scenario %s", id, ref.Test, ref.File, scenario))
+	case !slices.Contains(fns, ref.Func):
+		errs = append(errs, fmt.Errorf("%s: ref %s: %s is not bound to scenario %s's registration (%s)", id, ref.Test, ref.Func, scenario, strings.Join(fns, ", ")))
+	}
+	if !slices.ContainsFunc(src.markers, func(m marker) bool {
+		return m.site == site{id, ref.File, ref.Func} && m.offset < src.lastObs[ref.File][ref.Func]
+	}) {
+		errs = append(errs, fmt.Errorf("%s: ref %s: no `%s%s` marker in %s precedes an observation statement", id, ref.Test, markerPrefix, id, ref.Func))
 	}
 	return errs
 }
@@ -302,10 +366,13 @@ func lintScenarioReqs(rows map[string]Row, scenarios []ScenarioDecl) []error {
 // missingCapabilityReason form t.Skip logs.
 var capabilitySkip = regexp.MustCompile(`^capability:[a-z]+$`)
 
-// lintProfiles: names are unique, linux-host allows no skip, and every
-// allowed skip is `<leaf>=capability:<cap>` for a leaf some row mandatory on
-// that profile cites.
-func lintProfiles(inv Inventory) []error {
+// lintProfiles: names are unique and linux-host allows no skip. Every allowed
+// skip is `<leaf>=capability:<cap>` for a leaf some row cites; for a
+// TestContainment/<X> leaf, cap is the first of X's caps the profile lacks,
+// the only reason X can report there. A row lists a profile only when one of
+// its refs is not an allowed skip there: a row whose every ref may skip is
+// skip-allowed (the checker still runs it), not mandatory.
+func lintProfiles(inv Inventory, decls map[string]ScenarioDecl) []error {
 	var errs []error
 	seen := map[string]bool{}
 	for _, p := range inv.Profiles {
@@ -324,28 +391,59 @@ func lintProfiles(inv Inventory) []error {
 			}
 			if !capabilitySkip.MatchString(reason) {
 				errs = append(errs, fmt.Errorf("profile %s: allowed skip reason %q, want capability:<cap>", p.Name, reason))
+			} else if id, ok := strings.CutPrefix(leaf, "TestContainment/"); ok {
+				errs = append(errs, lintScenarioSkip(p, id, strings.TrimPrefix(reason, "capability:"), decls)...)
 			}
-			if !mandatoryLeaf(inv.Rows, p.Name, leaf) {
-				errs = append(errs, fmt.Errorf("profile %s: allowed skip for %s, which no row mandatory on %s cites", p.Name, leaf, p.Name))
+			if !citedLeaf(inv.Rows, leaf) {
+				errs = append(errs, fmt.Errorf("profile %s: allowed skip for %s, which no row cites", p.Name, leaf))
+			}
+		}
+		for _, r := range inv.Rows {
+			if len(r.Refs) > 0 && slices.Contains(r.Profiles, p.Name) && !slices.ContainsFunc(r.Refs, func(ref Ref) bool { return !skipAllowed(p, ref.Test) }) {
+				errs = append(errs, fmt.Errorf("%s: lists profile %s, but every ref is an allowed skip there; the row is skip-allowed, not mandatory", r.ID, p.Name))
 			}
 		}
 	}
 	return errs
 }
 
-func mandatoryLeaf(rows []Row, profile, leaf string) bool {
-	for _, r := range rows {
-		if slices.Contains(r.Profiles, profile) && slices.ContainsFunc(r.Refs, func(ref Ref) bool { return ref.Test == leaf }) {
-			return true
-		}
+// lintScenarioSkip: missingCapabilityReason reports the first of a scenario's
+// caps the host lacks, so the profile may allow exactly that one.
+func lintScenarioSkip(p Profile, id, c string, decls map[string]ScenarioDecl) []error {
+	d, ok := decls[id]
+	if !ok {
+		return []error{fmt.Errorf("profile %s: allowed skip for scenario %s, which is not declared", p.Name, id)}
 	}
-	return false
+	if !slices.Contains(d.Caps, c) {
+		return []error{fmt.Errorf("profile %s: allowed skip for %s names capability %s, which the scenario does not require (caps %s)", p.Name, id, c, strings.Join(d.Caps, ", "))}
+	}
+	if slices.Contains(p.Caps, c) {
+		return []error{fmt.Errorf("profile %s: allowed skip for %s names capability %s, which the profile provides", p.Name, id, c)}
+	}
+	if first := d.Caps[slices.IndexFunc(d.Caps, func(x string) bool { return !slices.Contains(p.Caps, x) })]; c != first {
+		return []error{fmt.Errorf("profile %s: allowed skip for %s names capability %s, but the scenario reports the first cap the profile lacks, %s", p.Name, id, c, first)}
+	}
+	return nil
 }
 
-// scanTests parses every *_test.go under root, skipping dot-directories,
-// testdata, docs and vendor, and records top-level functions and markers.
+// skipAllowed reports whether leaf has an allowed skip on p.
+func skipAllowed(p Profile, leaf string) bool {
+	return slices.ContainsFunc(p.AllowedSkips, func(s string) bool { return strings.HasPrefix(s, leaf+"=") })
+}
+
+func citedLeaf(rows []Row, leaf string) bool {
+	return slices.ContainsFunc(rows, func(r Row) bool {
+		return slices.ContainsFunc(r.Refs, func(ref Ref) bool { return ref.Test == leaf })
+	})
+}
+
+// scanTests parses every *_test.go under root, skipping dot- and
+// underscore-prefixed directories, testdata, docs, vendor and nested modules
+// (a directory with its own go.mod), and records top-level functions, markers,
+// observation statements and scenario registrations.
 func scanTests(root string) (source, []error) {
-	src := source{funcs: map[string]map[string]bool{}, sites: map[site]bool{}}
+	src := source{funcs: map[string]map[string]bool{}, sites: map[site]bool{},
+		lastObs: map[string]map[string]token.Pos{}, registrars: map[string]map[string][]string{}}
 	var errs []error
 	fset := token.NewFileSet()
 	walkErr := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
@@ -354,7 +452,13 @@ func scanTests(root string) (source, []error) {
 		}
 		if d.IsDir() {
 			name := d.Name()
-			if p != root && (strings.HasPrefix(name, ".") || name == "testdata" || name == "docs" || name == "vendor") {
+			if p == root {
+				return nil
+			}
+			if strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_") || name == "testdata" || name == "docs" || name == "vendor" {
+				return filepath.SkipDir
+			}
+			if _, err := os.Lstat(filepath.Join(p, "go.mod")); err == nil {
 				return filepath.SkipDir
 			}
 			return nil
@@ -391,13 +495,18 @@ func (s *source) addFile(fset *token.FileSet, rel string, f *ast.File) {
 		}
 	}
 	s.funcs[rel] = fns
+	s.lastObs[rel] = map[string]token.Pos{}
+	s.registrars[rel] = map[string][]string{}
+	for _, fn := range decls {
+		s.scanFunc(rel, fn, fns)
+	}
 	for _, cg := range f.Comments {
 		for _, c := range cg.List {
 			id, ok := strings.CutPrefix(c.Text, markerPrefix)
 			if !ok {
 				continue
 			}
-			m := marker{site{id, rel, ""}, fmt.Sprintf("%s:%d", rel, fset.Position(c.Pos()).Line)}
+			m := marker{site{id, rel, ""}, fmt.Sprintf("%s:%d", rel, fset.Position(c.Pos()).Line), c.Pos()}
 			for _, fn := range decls {
 				if fn.Pos() <= c.Pos() && c.Pos() < fn.End() {
 					m.fn = funcName(fn)
@@ -407,6 +516,75 @@ func (s *source) addFile(fset *token.FileSet, rel string, f *ast.File) {
 			s.sites[m.site] = true
 		}
 	}
+}
+
+// scanFunc records fn's last observation statement and the scenarios it
+// registers. A scenario is registered by a composite literal with
+// `ID: "<X>"`, or by a call to a function of this file whose first string
+// literal argument is "<X>" (wScenario, pendingRow). The functions bound to
+// the registration are fn itself, the called helper, and every function of
+// this file called by name inside the literal or call (d1's readExport).
+func (s *source) scanFunc(rel string, fn *ast.FuncDecl, fns map[string]bool) {
+	name := funcName(fn)
+	register := func(id string, node ast.Node, helper string) {
+		bound := []string{name}
+		if helper != "" {
+			bound = append(bound, helper)
+		}
+		ast.Inspect(node, func(n ast.Node) bool {
+			if call, ok := n.(*ast.CallExpr); ok {
+				if callee, ok := call.Fun.(*ast.Ident); ok && fns[callee.Name] {
+					bound = append(bound, callee.Name)
+				}
+			}
+			return true
+		})
+		for _, b := range bound {
+			if !slices.Contains(s.registrars[rel][id], b) {
+				s.registrars[rel][id] = append(s.registrars[rel][id], b)
+			}
+		}
+	}
+	ast.Inspect(fn, func(n ast.Node) bool {
+		switch x := n.(type) {
+		case *ast.SelectorExpr:
+			if slices.Contains(observationFields, x.Sel.Name) {
+				s.lastObs[rel][name] = max(s.lastObs[rel][name], x.Pos())
+			}
+		case *ast.CompositeLit:
+			if t, ok := x.Type.(*ast.Ident); ok && t.Name == "observation" {
+				s.lastObs[rel][name] = max(s.lastObs[rel][name], x.Pos())
+			}
+			for _, elt := range x.Elts {
+				if kv, ok := elt.(*ast.KeyValueExpr); ok {
+					if key, ok := kv.Key.(*ast.Ident); ok && key.Name == "ID" {
+						if id, ok := stringLit(kv.Value); ok {
+							register(id, x, "")
+						}
+					}
+				}
+			}
+		case *ast.CallExpr:
+			if callee, ok := x.Fun.(*ast.Ident); ok && fns[callee.Name] {
+				for _, arg := range x.Args {
+					if id, ok := stringLit(arg); ok {
+						register(id, x, callee.Name)
+						break
+					}
+				}
+			}
+		}
+		return true
+	})
+}
+
+func stringLit(e ast.Expr) (string, bool) {
+	lit, ok := e.(*ast.BasicLit)
+	if !ok || lit.Kind != token.STRING {
+		return "", false
+	}
+	v, err := strconv.Unquote(lit.Value)
+	return v, err == nil
 }
 
 // funcName is a function's name, or Type.Method for a method.

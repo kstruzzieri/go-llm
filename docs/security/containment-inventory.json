@@ -60,42 +60,28 @@
       "goos": "windows",
       "tags": [],
       "race": false,
-      "caps": [],
+      "caps": [
+        "bash"
+      ],
       "timeout": "120s",
       "allowed_skips": [
         "TestContainment/E1=capability:unix",
-        "TestContainment/X2a=capability:bash",
         "TestContainment/X2a=capability:exec",
-        "TestContainment/X2b=capability:bash",
         "TestContainment/X2b=capability:exec",
-        "TestContainment/X2c=capability:bash",
         "TestContainment/X2c=capability:exec",
-        "TestContainment/X2d=capability:bash",
         "TestContainment/X2d=capability:exec",
-        "TestContainment/X4=capability:bash",
         "TestContainment/X4=capability:exec",
-        "TestContainment/X3=capability:bash",
         "TestContainment/X3=capability:exec",
-        "TestContainment/G1=capability:bash",
         "TestContainment/G1=capability:exec",
-        "TestContainment/G2=capability:bash",
         "TestContainment/G2=capability:exec",
-        "TestContainment/G3=capability:bash",
         "TestContainment/G3=capability:exec",
-        "TestContainment/A1=capability:bash",
         "TestContainment/A1=capability:exec",
-        "TestContainment/H1=capability:bash",
         "TestContainment/H1=capability:exec",
-        "TestContainment/D1=capability:bash",
         "TestContainment/D1=capability:exec",
-        "TestContainment/D2=capability:bash",
         "TestContainment/D2=capability:exec",
         "TestContainment/D3=capability:unix",
-        "TestContainment/B1=capability:bash",
         "TestContainment/B1=capability:exec",
-        "TestContainment/V1=capability:bash",
         "TestContainment/V1=capability:exec",
-        "TestContainment/V2=capability:bash",
         "TestContainment/V2=capability:exec"
       ]
     }
@@ -628,8 +614,7 @@
       ],
       "profiles": [
         "linux-host",
-        "darwin-host",
-        "windows"
+        "darwin-host"
       ],
       "mutations": [
         "M-009"
@@ -872,8 +857,7 @@
       ],
       "profiles": [
         "linux-host",
-        "darwin-host",
-        "windows"
+        "darwin-host"
       ],
       "mutations": [
         "M-014",
@@ -902,8 +886,7 @@
       ],
       "profiles": [
         "linux-host",
-        "darwin-host",
-        "windows"
+        "darwin-host"
       ],
       "mutations": [
         "M-015",
@@ -932,8 +915,7 @@
       ],
       "profiles": [
         "linux-host",
-        "darwin-host",
-        "windows"
+        "darwin-host"
       ],
       "mutations": [
         "M-016",
@@ -962,8 +944,7 @@
       ],
       "profiles": [
         "linux-host",
-        "darwin-host",
-        "windows"
+        "darwin-host"
       ],
       "mutations": [
         "M-017",
@@ -1018,8 +999,7 @@
       ],
       "profiles": [
         "linux-host",
-        "darwin-host",
-        "windows"
+        "darwin-host"
       ],
       "mutations": [
         "M-019"
@@ -1047,8 +1027,7 @@
       ],
       "profiles": [
         "linux-host",
-        "darwin-host",
-        "windows"
+        "darwin-host"
       ],
       "mutations": [
         "M-020"
@@ -1076,8 +1055,7 @@
       ],
       "profiles": [
         "linux-host",
-        "darwin-host",
-        "windows"
+        "darwin-host"
       ],
       "mutations": [
         "M-021",
@@ -1106,8 +1084,7 @@
       ],
       "profiles": [
         "linux-host",
-        "darwin-host",
-        "windows"
+        "darwin-host"
       ],
       "mutations": [
         "M-022"
@@ -1135,8 +1112,7 @@
       ],
       "profiles": [
         "linux-host",
-        "darwin-host",
-        "windows"
+        "darwin-host"
       ],
       "mutations": [
         "M-023",
@@ -1165,8 +1141,7 @@
       ],
       "profiles": [
         "linux-host",
-        "darwin-host",
-        "windows"
+        "darwin-host"
       ],
       "mutations": [
         "M-023",
@@ -1195,8 +1170,7 @@
       ],
       "profiles": [
         "linux-host",
-        "darwin-host",
-        "windows"
+        "darwin-host"
       ],
       "mutations": [
         "M-023",
@@ -1276,8 +1250,7 @@
       ],
       "profiles": [
         "linux-host",
-        "darwin-host",
-        "windows"
+        "darwin-host"
       ],
       "mutations": [
         "M-025"
@@ -1305,8 +1278,7 @@
       ],
       "profiles": [
         "linux-host",
-        "darwin-host",
-        "windows"
+        "darwin-host"
       ],
       "mutations": [
         "M-026"
@@ -2149,8 +2121,7 @@
       ],
       "profiles": [
         "linux-host",
-        "darwin-host",
-        "windows"
+        "darwin-host"
       ],
       "mutations": [
         "M-045"
@@ -2178,8 +2149,7 @@
       ],
       "profiles": [
         "linux-host",
-        "darwin-host",
-        "windows"
+        "darwin-host"
       ],
       "mutations": [
         "M-045"
@@ -2207,8 +2177,7 @@
       ],
       "profiles": [
         "linux-host",
-        "darwin-host",
-        "windows"
+        "darwin-host"
       ],
       "mutations": [
         "M-037",
@@ -2237,8 +2206,7 @@
       ],
       "profiles": [
         "linux-host",
-        "darwin-host",
-        "windows"
+        "darwin-host"
       ],
       "mutations": [
         "M-020"
@@ -2266,8 +2234,7 @@
       ],
       "profiles": [
         "linux-host",
-        "darwin-host",
-        "windows"
+        "darwin-host"
       ],
       "mutations": [
         "M-046"
@@ -2295,8 +2262,7 @@
       ],
       "profiles": [
         "linux-host",
-        "darwin-host",
-        "windows"
+        "darwin-host"
       ],
       "mutations": [
         "M-047"
@@ -2324,8 +2290,7 @@
       ],
       "profiles": [
         "linux-host",
-        "darwin-host",
-        "windows"
+        "darwin-host"
       ],
       "mutations": [
         "M-025"
@@ -2777,7 +2742,7 @@
       "status": "verified",
       "owner": "",
       "layer": "focused",
-      "exempt": "administrative: the inventory gate checks declarations, not a security guard; its profile skip pins (linux-host allows no skip, other skips name a capability) are ledger entry M-053, and its other rule mutations are the Administrative evidence in docs/security/containment-mutations.md",
+      "exempt": "administrative: the inventory gate checks declarations, not a security guard; its profile skip pins (linux-host allows no skip, other skips name a capability) are ledger entry M-053, the skip-allowed row rule M-055, the first-missing-capability skip rule M-056 and scenario registration binding M-057, and its other rule mutations are the Administrative evidence in docs/security/containment-mutations.md",
       "scenarios": [],
       "refs": [
         {
@@ -2791,7 +2756,10 @@
         "linux-host"
       ],
       "mutations": [
-        "M-053"
+        "M-053",
+        "M-055",
+        "M-056",
+        "M-057"
       ],
       "artifacts": [
         "docs/security/containment-mutations.md"
@@ -2804,7 +2772,7 @@
       "status": "verified",
       "owner": "",
       "layer": "focused",
-      "exempt": "administrative: the ledger is the evidence; the inventory lint requires every verified or uncontained row outside the model layer to cite an existing ledger entry, and allows an exempt reason on such a row only for an administrative META- row (ledger entry M-052)",
+      "exempt": "administrative: the ledger is the evidence; the inventory lint requires every verified or uncontained row outside the model layer to cite an existing ledger entry, and allows an exempt reason on such a row only for an administrative META- row (ledger entry M-052); the ledger and the inventory must cite each other (M-058)",
       "scenarios": [],
       "refs": [
         {
@@ -2818,7 +2786,8 @@
         "linux-host"
       ],
       "mutations": [
-        "M-052"
+        "M-052",
+        "M-058"
       ],
       "artifacts": [
         "docs/security/containment-mutations.md"
@@ -2831,7 +2800,7 @@
       "status": "verified",
       "owner": "",
       "layer": "focused",
-      "exempt": "administrative: gate wiring, not a security guard; the checker tests and the security-phase run are the evidence; the checker's child-skip rule is ledger entry M-051, and its other checker mutations are the Administrative evidence in docs/security/containment-mutations.md",
+      "exempt": "administrative: gate wiring, not a security guard; the checker tests and the security-phase run are the evidence; the checker's child-skip rule is ledger entry M-051, measured evidence cleanliness M-054, and its other checker mutations are the Administrative evidence in docs/security/containment-mutations.md",
       "scenarios": [],
       "refs": [
         {
@@ -2857,13 +2826,20 @@
           "test": "TestCheckerSourceIdentityFromEnv",
           "file": "internal/containmentinv/checker_test.go",
           "func": "TestCheckerSourceIdentityFromEnv"
+        },
+        {
+          "package": "./internal/containmentinv",
+          "test": "TestCheckerSourceIdentityMeasured",
+          "file": "internal/containmentinv/checker_test.go",
+          "func": "TestCheckerSourceIdentityMeasured"
         }
       ],
       "profiles": [
         "linux-host"
       ],
       "mutations": [
-        "M-051"
+        "M-051",
+        "M-054"
       ],
       "artifacts": [
         "scripts/ci-local",

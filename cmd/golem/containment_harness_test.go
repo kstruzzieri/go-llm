@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/kstruzzieri/go-llm/agent"
@@ -139,7 +140,7 @@ func (f *fixture) run(t *testing.T, calls []agent.ModelResult, answers string) a
 	return res
 }
 
-var callSeq int
+var callSeq atomic.Int64
 
 // call scripts one compliant tool call. callID returns the same call with its
 // ID so validity checks can read that call's observation via toolObservation.
@@ -149,8 +150,7 @@ func call(name string, args any) agent.ModelResult {
 }
 
 func callID(name string, args any) (agent.ModelResult, string) {
-	callSeq++
-	id := "c" + strconv.Itoa(callSeq)
+	id := "c" + strconv.FormatInt(callSeq.Add(1), 10)
 	raw, _ := json.Marshal(args)
 	return agent.ModelResult{Response: provider.ChatResponse{ToolCalls: []provider.ToolCall{{
 		ID: id, Type: "function",

@@ -20,14 +20,16 @@ import (
 	"time"
 )
 
-// TestEvent is one `go test -json` event, with every field cmd/test2json
-// emits (Go 1.25 added OutputType), so a strict decoder accepts any test event
-// and rejects anything else, such as the go command's build events. Package
-// events (start, the package's own pass/fail) have an empty Test.
+// TestEvent is one event of a `go test -json` stream: a cmd/test2json test
+// event or one of the go command's build events (build-output, build-fail),
+// which carry ImportPath instead of Package. Package events (start, the
+// package's own pass/fail) have an empty Test. DecodeEvents ignores fields it
+// does not know, so a newer toolchain's additions never fail a run.
 type TestEvent struct {
 	Time        time.Time
 	Action      string
 	Package     string
+	ImportPath  string
 	Test        string
 	Elapsed     float64
 	Output      string
@@ -37,6 +39,10 @@ type TestEvent struct {
 	Value       string
 	Path        string
 }
+
+// eventActions are the actions DecodeEvents accepts: test2json's test actions
+// and the go command's build actions.
+var eventActions = []string{"start", "run", "pause", "cont", "pass", "fail", "skip", "output", "bench", "build-output", "build-fail"}
 
 // PackageRun is one `go test` invocation of the execution checker: every
 // mandatory leaf a profile cites in one package.
@@ -51,11 +57,15 @@ type PackageRun struct {
 // Evidence is the observed record of one checker run, bound to the tested
 // source, the platform and toolchain that ran it, the inventory and the go
 // test flags. It is CI output, never committed. Executed lists
-// "<package> <leaf>" for every leaf that passed.
+// "<package> <leaf>" for every leaf that passed; a failed run lists why in
+// Failures. Tree and Commit are the forwarded identity (stamped, not
+// verified); MeasuredTree is the checkout's own HEAD tree when it has .git.
 type Evidence struct {
 	SourceDigest    string   `json:"source_digest"`
 	Tree            string   `json:"tree"`
 	Commit          string   `json:"commit"`
+	MeasuredTree    string   `json:"measured_tree,omitempty"`
+	PRHead          string   `json:"pr_head,omitempty"`
 	Dirty           bool     `json:"dirty"`
 	GOOS            string   `json:"goos"`
 	GOARCH          string   `json:"goarch"`
@@ -64,9 +74,12 @@ type Evidence struct {
 	Profile         string   `json:"profile"`
 	Flags           []string `json:"flags"`
 	Executed        []string `json:"executed"`
+	Failures        []string `json:"failures,omitempty"`
 }
 
-// PlanRuns groups the refs of every row mandatory on profile by package:
+// PlanRuns groups the refs of every row mandatory on profile, and every
+// skip-allowed leaf the profile's allowed skips name (run there, so a skip
+// must carry its allowed reason, but no row's mandatory claim), by package:
 // one PackageRun per package, packages and leaves sorted.
 func PlanRuns(inv Inventory, profile string) ([]PackageRun, error) {
 	i := slices.IndexFunc(inv.Profiles, func(p Profile) bool { return p.Name == profile })
@@ -76,17 +89,15 @@ func PlanRuns(inv Inventory, profile string) ([]PackageRun, error) {
 	p := inv.Profiles[i]
 	leaves := map[string][]string{}
 	for _, r := range inv.Rows {
-		if !slices.Contains(r.Profiles, profile) {
-			continue
-		}
+		mandatory := slices.Contains(r.Profiles, profile)
 		for _, ref := range r.Refs {
-			if !slices.Contains(leaves[ref.Package], ref.Test) {
+			if (mandatory || skipAllowed(p, ref.Test)) && !slices.Contains(leaves[ref.Package], ref.Test) {
 				leaves[ref.Package] = append(leaves[ref.Package], ref.Test)
 			}
 		}
 	}
 	if len(leaves) == 0 {
-		return nil, fmt.Errorf("containmentinv: profile %s has no mandatory refs", profile)
+		return nil, fmt.Errorf("containmentinv: profile %s has no mandatory or skip-allowed refs", profile)
 	}
 	var runs []PackageRun
 	for _, pkg := range slices.Sorted(maps.Keys(leaves)) {
@@ -172,8 +183,8 @@ func Evaluate(events []TestEvent, leaves []string, allowedSkips []string) []erro
 }
 
 // DecideRun decides one package run of the checker from `go test -json`'s
-// complete output and exit error. The output must decode strictly as test
-// events (DecodeEvents), go test must have exited 0, and Evaluate must accept
+// complete output and exit error. The output must decode as a go test -json
+// stream with no build failure (DecodeEvents), go test must have exited 0, and Evaluate must accept
 // the events. On success executed is the sorted leaves that passed; an allowed
 // skip is not listed. On any error executed is nil.
 func DecideRun(out []byte, runErr error, leaves, allowed []string) (executed []string, errs []error) {
@@ -196,14 +207,14 @@ func DecideRun(out []byte, runErr error, leaves, allowed []string) (executed []s
 	return executed, nil
 }
 
-// DecodeEvents strictly decodes a complete `go test -json` stream. Anything
-// that is not a test event fails: a text line, an unknown field (the go
-// command's build events carry ImportPath), an event without an Action, or a
-// build-output or build-fail action. The events before the failure are
-// returned with the error.
+// DecodeEvents decodes a complete `go test -json` stream, ignoring unknown
+// fields. It fails only on a line that is not a JSON event, an event whose
+// Action is not one of eventActions (an empty one included), or a build-fail
+// event. build-output events are kept: their text joins a failed run's
+// output, and alone they never fail a run (a linker warning, say). The events
+// before the failure are returned with the error.
 func DecodeEvents(out []byte) ([]TestEvent, error) {
 	dec := json.NewDecoder(bytes.NewReader(out))
-	dec.DisallowUnknownFields()
 	var events []TestEvent
 	for {
 		var e TestEvent
@@ -211,8 +222,12 @@ func DecodeEvents(out []byte) ([]TestEvent, error) {
 		if errors.Is(err, io.EOF) {
 			return events, nil
 		}
-		if err == nil && (e.Action == "" || strings.HasPrefix(e.Action, "build-")) {
-			err = fmt.Errorf("not a test event (action %q)", e.Action)
+		switch {
+		case err != nil:
+		case e.Action == "build-fail":
+			err = fmt.Errorf("build failed (%s)", e.ImportPath)
+		case !slices.Contains(eventActions, e.Action):
+			err = fmt.Errorf("unknown action %q", e.Action)
 		}
 		if err != nil {
 			return events, fmt.Errorf("malformed go test -json stream after %d events: %w", len(events), err)
@@ -235,27 +250,70 @@ func skipReason(lines []string) string {
 
 // SourceIdentity binds evidence to the tested source and the running
 // platform: the source's content digest, the tree and commit forwarded by the
-// pre-push hook or CI in GO_LLM_CI_TREE and GO_LLM_CI_COMMIT, and GOOS,
-// GOARCH and the Go version. Without both variables the run is manual: commit
-// "unknown", dirty, and never CI evidence. A manual run whose digest fails
-// (git refusing a linked worktree's .git pointer inside Docker, say) records
-// source_digest "unknown"; with a forwarded identity the error is fatal.
+// pre-push hook or CI in GO_LLM_CI_TREE and GO_LLM_CI_COMMIT, the PR head
+// (GO_LLM_CI_PR_HEAD, when set), and GOOS, GOARCH and the Go version. Without
+// both variables the run is manual: commit "unknown", dirty, and never CI
+// evidence. In a checkout (root has .git) cleanliness is measured: the run is
+// dirty unless HEAD's tree equals the forwarded tree and `git status` lists no
+// tracked change. The hook's .git-free export cannot be measured; it is clean
+// by construction, `git archive` of the forwarded tree. A manual run whose
+// digest or measurement fails (git refusing a linked worktree's .git pointer
+// inside Docker, say) records source_digest "unknown"; with a forwarded
+// identity either error is fatal, as is a tracked file missing from the
+// checkout.
 func SourceIdentity(getenv func(string) string, root string) (Evidence, error) {
-	ev := Evidence{Tree: getenv("GO_LLM_CI_TREE"), Commit: getenv("GO_LLM_CI_COMMIT"),
+	ev := Evidence{Tree: getenv("GO_LLM_CI_TREE"), Commit: getenv("GO_LLM_CI_COMMIT"), PRHead: getenv("GO_LLM_CI_PR_HEAD"),
 		GOOS: runtime.GOOS, GOARCH: runtime.GOARCH, GoVersion: runtime.Version()}
-	if ev.Tree == "" || ev.Commit == "" {
+	forwarded := ev.Tree != "" && ev.Commit != ""
+	if !forwarded {
 		ev.Commit, ev.Dirty = "unknown", true
 	}
-	digest, err := SourceDigest(root)
+	digest, err := SourceDigest(root, forwarded)
+	if err == nil && hasGit(root) {
+		var clean bool
+		if ev.MeasuredTree, clean, err = measureCheckout(root); err == nil && (!clean || ev.MeasuredTree != ev.Tree) {
+			ev.Dirty = true
+		}
+	}
 	switch {
 	case err == nil:
 		ev.SourceDigest = digest
-	case ev.Dirty:
+	case !forwarded:
 		ev.SourceDigest = "unknown"
 	default:
 		return Evidence{}, err
 	}
 	return ev, nil
+}
+
+func hasGit(root string) bool {
+	_, err := os.Lstat(filepath.Join(root, ".git"))
+	return err == nil
+}
+
+// measureCheckout returns the checkout's HEAD tree and whether `git status`
+// lists no tracked change (untracked files do not count: they are not in the
+// digest either).
+func measureCheckout(root string) (tree string, clean bool, err error) {
+	git := func(args ...string) (string, error) {
+		var stderr bytes.Buffer
+		cmd := exec.Command("git", append([]string{"-C", root}, args...)...)
+		cmd.Stderr = &stderr
+		out, err := cmd.Output()
+		if err != nil {
+			return "", fmt.Errorf("containmentinv: git %s: %w: %s", args[0], err, strings.TrimSpace(stderr.String()))
+		}
+		return string(out), nil
+	}
+	tree, err = git("rev-parse", "HEAD^{tree}")
+	if err != nil {
+		return "", false, err
+	}
+	status, err := git("status", "--porcelain", "--untracked-files=no")
+	if err != nil {
+		return "", false, err
+	}
+	return strings.TrimSpace(tree), status == "", nil
 }
 
 // WithProfile binds ev to profile p. A run on another GOOS than the profile
@@ -271,10 +329,12 @@ func WithProfile(ev Evidence, p Profile) Evidence {
 // SourceDigest is the SHA-256 over sorted "path|sha256(content)" lines for
 // every tracked file under root, hidden directories included: `git ls-files`
 // when root has .git, otherwise (the hook's .git-free export) every file
-// except .git. A symlink digests its target string, as git stores it.
-func SourceDigest(root string) (string, error) {
+// except .git. A symlink digests its target string, as git stores it. A
+// tracked file missing from the checkout is left out, unless strict (a
+// forwarded identity), when it is an error.
+func SourceDigest(root string, strict bool) (string, error) {
 	var files []string
-	if _, err := os.Lstat(filepath.Join(root, ".git")); err == nil {
+	if hasGit(root) {
 		var stderr bytes.Buffer
 		cmd := exec.Command("git", "-C", root, "ls-files", "-z")
 		cmd.Stderr = &stderr
@@ -308,8 +368,8 @@ func SourceDigest(root string) (string, error) {
 	h := sha256.New()
 	for _, f := range files {
 		sum, err := fileSum(filepath.Join(root, filepath.FromSlash(f)))
-		if errors.Is(err, fs.ErrNotExist) {
-			continue // tracked but deleted in a dirty checkout: not in the tested tree
+		if errors.Is(err, fs.ErrNotExist) && !strict {
+			continue // tracked but deleted in a manual run's checkout: not in the tested tree
 		}
 		if err != nil {
 			return "", fmt.Errorf("containmentinv: %w", err)

@@ -1,10 +1,11 @@
 // Command check is the #452 execution checker. It runs every ref mandatory on
 // one inventory profile, one `go test -count=1 -json` per package, decides
 // each run from its complete output and exit status with
-// containmentinv.DecideRun, and writes the source-bound evidence JSON. Its
-// success line names the evidence's tree, commit and source digest, so a run
-// whose evidence file is discarded (the pre-push container) still shows them.
-// Run it from the module root, as scripts/ci-local and the CI workflows do.
+// containmentinv.DecideRun, and writes the source-bound evidence JSON, on
+// failure too, with a failures list. Its success line names the evidence's
+// tree, commit and source digest, so a run whose evidence file is discarded
+// (the pre-push container) still shows them. Run it from the module root, as
+// scripts/ci-local and the CI workflows do.
 package main
 
 import (
@@ -20,6 +21,7 @@ import (
 	"os/signal"
 	"slices"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/kstruzzieri/go-llm/internal/containmentinv"
@@ -30,11 +32,14 @@ func main() {
 	profile := flag.String("profile", "", "inventory profile to run")
 	evidenceOut := flag.String("evidence-out", "", "evidence JSON path; stdout when empty")
 	flag.Parse()
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	ev, err := check(ctx, *inventory, *profile)
 	stop()
-	if err == nil {
-		err = writeEvidence(ev, *evidenceOut)
+	if err != nil {
+		ev.Failures = append(ev.Failures, err.Error())
+	}
+	if werr := writeEvidence(ev, *evidenceOut); err == nil {
+		err = werr
 	}
 	if err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "containment check: %v\n", err)
@@ -53,12 +58,13 @@ func orNone(s string) string {
 }
 
 func check(ctx context.Context, invPath, profile string) (containmentinv.Evidence, error) {
-	var ev containmentinv.Evidence
+	// Until the source identity is bound, failure evidence is a manual run's.
+	ev := containmentinv.Evidence{Profile: profile, Commit: "unknown", Dirty: true}
 	data, err := os.ReadFile(invPath)
 	if err != nil {
 		return ev, fmt.Errorf("containmentinv: read inventory: %w", err)
 	}
-	inv, err := containmentinv.Load(invPath)
+	inv, err := containmentinv.Parse(data, invPath) // the bytes inventory_digest names
 	if err != nil {
 		return ev, err
 	}
@@ -70,10 +76,11 @@ func check(ctx context.Context, invPath, profile string) (containmentinv.Evidenc
 	if _, err := time.ParseDuration(p.Timeout); err != nil {
 		return ev, fmt.Errorf("profile %s: timeout: %w", profile, err)
 	}
-	if ev, err = containmentinv.SourceIdentity(os.Getenv, "."); err != nil {
+	id, err := containmentinv.SourceIdentity(os.Getenv, ".")
+	if err != nil {
 		return ev, err
 	}
-	ev = containmentinv.WithProfile(ev, p)
+	ev = containmentinv.WithProfile(id, p)
 	sum := sha256.Sum256(data)
 	ev.InventoryDigest = hex.EncodeToString(sum[:])
 	ev.Flags = []string{"-count=1", "-json", "-timeout", p.Timeout}
@@ -89,19 +96,21 @@ func check(ctx context.Context, invPath, profile string) (containmentinv.Evidenc
 		args := append(append([]string{"test"}, ev.Flags...), "-run", r.Pattern, r.Package)
 		cmd := exec.CommandContext(ctx, "go", args...)
 		cmd.Stderr = os.Stderr
+		cmd.WaitDelay = 10 * time.Second // a test binary holding stdout open past cancellation
 		out, runErr := cmd.Output()
 		executed, errs := containmentinv.DecideRun(out, runErr, r.Leaves, p.AllowedSkips)
 		if len(errs) > 0 {
 			failed++
-			events, decodeErr := containmentinv.DecodeEvents(out)
-			if decodeErr != nil {
-				// Not a test stream, such as Go 1.24+ build-output events
-				// carrying a compiler error: show it as captured.
+			if events, decodeErr := containmentinv.DecodeEvents(out); decodeErr != nil {
+				// Not a complete test stream (a build failure, a text
+				// line): show it as captured.
 				_, _ = os.Stderr.Write(out)
+			} else {
+				failureOutput(os.Stderr, events)
 			}
-			failureOutput(os.Stderr, events)
 			for _, err := range errs {
 				_, _ = fmt.Fprintf(os.Stderr, "containment check: %s: %v\n", r.Package, err)
+				ev.Failures = append(ev.Failures, r.Package+": "+err.Error())
 			}
 			continue
 		}
@@ -116,7 +125,8 @@ func check(ctx context.Context, invPath, profile string) (containmentinv.Evidenc
 	return ev, nil
 }
 
-// failureOutput prints the output of the package and of every failed test.
+// failureOutput prints the build output, and the output of the package and
+// of every failed test.
 func failureOutput(w io.Writer, events []containmentinv.TestEvent) {
 	failed := map[string]bool{"": true}
 	for _, e := range events {
@@ -125,7 +135,7 @@ func failureOutput(w io.Writer, events []containmentinv.TestEvent) {
 		}
 	}
 	for _, e := range events {
-		if e.Action == "output" && failed[e.Test] {
+		if e.Action == "build-output" || e.Action == "output" && failed[e.Test] {
 			_, _ = io.WriteString(w, e.Output)
 		}
 	}

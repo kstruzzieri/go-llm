@@ -180,14 +180,25 @@ where the pattern has one `|` alternative per cited leaf, each
 leaves and every subtest of a cited parent. It decides from the complete event stream: every cited leaf needs a
 `run` and a terminal `pass` event, the package needs its own `pass`, and
 `go test` must exit 0. A missing leaf, a skip of a cited leaf or of any
-subtest under it, a malformed or truncated stream, text build output, a build
-failure, a nonzero `go test` exit or a timeout fails the profile. `go test`
+subtest under it, a truncated stream, a line that is not a JSON event, an
+event with an action `go test -json` does not emit, a `build-fail` event, a
+nonzero `go test` exit or a timeout fails the profile. Unknown fields are
+ignored, and `build-output` events (a linker warning, say) never fail a run by
+themselves; on a failed run their text is printed with the failed tests'
+output. `go test`
 reports a parent whose subtest skipped as passing, so the checker counts a
 skip or failure anywhere under a cited leaf as that leaf's own. `linux-host`
 allows no skip; other profiles allow only their enumerated
 `<leaf>=capability:<cap>` entries, matched against the reason the test logs
 when it skips. The inventory lint enforces both: an allowed skip on
-`linux-host`, or a reason of any other form, fails `TestCommittedInventory`. A failure prints the failed tests' output and
+`linux-host`, or a reason of any other form, fails `TestCommittedInventory`.
+For a `TestContainment/<X>` leaf the capability must be the first of
+scenario X's caps that the profile's `caps` lack, the only reason X can log
+there. A row whose every ref is an allowed skip on a profile is skip-allowed
+there, not mandatory, and may not list that profile; the checker still runs
+the profile's skip-allowed leaves, so each must pass or skip with its allowed
+reason. A failure prints either the captured stream, when it does not decode,
+or the failed tests' output, and
 `containment inventory check failed (profile linux-host)`, and ends `ci-local`
 before formatting. The checker's own tests (`internal/containmentinv`) feed it
 recorded event streams; no ordinary package test launches `go test`.
@@ -198,8 +209,11 @@ locally (`./cmd/golem`) took 3.6 s wall on an M3 Max, but GitHub runners and
 Docker on macOS are several times slower and the bwrap and Windows runs were
 never measured; tighten the bound from the `Elapsed` that CI runs report.
 
-Each run writes evidence JSON. It is CI output, never committed. The
-checker's success line, `containment check: <profile> <n> leaves passed (tree
+Each run writes evidence JSON, on failure too (with `failures`). It is CI
+output, never committed. Evidence is identity-stamped and, in a git checkout,
+measured for cleanliness; it is not cross-verified across profiles, and no
+step compares one profile's evidence with another's. The checker's success
+line, `containment check: <profile> <n> leaves passed (tree
 <tree> commit <commit> source_digest <digest>)`, repeats its identity fields
 (`none` when empty), so a run whose evidence file is discarded still shows
 what it bound:
@@ -207,12 +221,15 @@ what it bound:
 | Field | Meaning |
 | --- | --- |
 | `source_digest` | SHA-256 over the sorted `path\|sha256(content)` lines of every tracked file, hidden directories such as `.github` included: `git ls-files` in a checkout, every file but `.git` in the hook's export, so both digest the same tree alike. A symlink digests its target. A manual run whose digest fails records `unknown` (below); with a forwarded identity the failure fails the run. |
-| `tree`, `commit` | `GO_LLM_CI_TREE` and `GO_LLM_CI_COMMIT`, set by the pre-push hook and the CI checker steps |
-| `dirty` | `true` when either variable is absent (`commit` is then `unknown`), or when the running GOOS differs from the profile's, such as `linux-host` on a darwin host |
+| `tree`, `commit` | `GO_LLM_CI_TREE` and `GO_LLM_CI_COMMIT`, set by the pre-push hook and the CI checker steps: stamped as forwarded |
+| `measured_tree` | in a git checkout, `git rev-parse HEAD^{tree}`; absent in the hook's `.git`-free export, which is clean by construction (`git archive` of the forwarded tree) |
+| `pr_head` | `GO_LLM_CI_PR_HEAD`, the pull request's head commit, which the CI checker steps set; absent when empty (the hook, a manual run, `workflow_dispatch`) |
+| `dirty` | `true` when either identity variable is absent (`commit` is then `unknown`), when the running GOOS differs from the profile's, such as `linux-host` on a darwin host, or, in a checkout, unless `measured_tree` equals `tree` and `git status --porcelain --untracked-files=no` is empty. With a forwarded identity, a tracked file missing from the checkout or a failing `git` fails the run |
 | `goos`, `goarch`, `go_version` | the platform and Go toolchain that ran the checker (`runtime.GOOS`, `runtime.GOARCH`, `runtime.Version()`) |
 | `inventory_digest` | SHA-256 of the inventory file |
 | `profile`, `flags` | the profile and the `go test` flags every package run shared |
 | `executed` | `<package> <leaf>` for every leaf that passed, sorted; an allowed skip is not listed |
+| `failures` | on a failed run, each package run's errors and the final error; absent on success |
 
 A manual run (`scripts/ci-local` on a working tree, or Docker without the
 hook) has no forwarded identity, so it records `"commit": "unknown"` and
@@ -357,23 +374,32 @@ platform and capabilities:
 | `linux-host` | `Lint & Test`, `Security contracts` step (through `ci-local`); the pre-push hook; manual `ci-local` | no skips |
 | `bwrap` | `Linux Sandbox (bwrap)`, `Containment inventory (bwrap)` | `GO_LLM_REQUIRE_BWRAP=1` |
 | `agentflow-integration` | `Agentflow compatibility`, inside both the installed and source steps | `-tags agentflow_integration`; a separate step would lack the venv or `AGENTFLOW_SRC`, and its required tests would skip |
-| `windows` | `Windows SQLite URIs`, `Containment inventory (windows)` | exec scenarios skip with their enumerated capability reasons |
+| `windows` | `Windows SQLite URIs`, `Containment inventory (windows)` | no mandatory rows yet: every listed leaf is skip-allowed (`caps: bash`, Git Bash on the runner's PATH; the exec and unix scenarios skip for `capability:exec` or `capability:unix`) |
 | `darwin-host` | `macOS Compile Smoke`, `Containment inventory (darwin-host)` | no skips |
 | `seatbelt` | `macOS Compile Smoke`, `Containment inventory (seatbelt)` | `GO_LLM_REQUIRE_SEATBELT=1`, no race |
 
-Every checker step sets `GO_LLM_CI_COMMIT` to `github.sha` and resolves
+Rows expected to pass on Windows but not yet observed green there, and so
+not mandatory on `windows`: `GRANT-MCP` (`TestContainment/M1`) and
+`GRANT-SUBMITPLAN` (`TestContainment/P1`), which need no capability, and
+`PATH-ABS` and `PATH-DOTDOT` (`W1`, `W2`, gated on `capability:unix` until
+then). List each on `windows` after a Windows CI run shows it green.
+
+Every checker step sets `GO_LLM_CI_COMMIT` to `github.sha`,
+`GO_LLM_CI_PR_HEAD` to `github.event.pull_request.head.sha`, and resolves
 `GO_LLM_CI_TREE` in the step with `git rev-parse "${GITHUB_SHA}^{tree}"`, as
 its own statement so a failed resolution fails the step under `bash -e`. It
 writes `$RUNNER_TEMP/containment-<profile>.json` (the agentflow steps add
 `-installed` or `-source`), and each job uploads its files as a
-`containment-*` artifact. `scripts/test-ci-local` pins every checker step and
-upload, so removing one fails the self-test.
+`containment-*` artifact under `if: always()`, so a failed run's evidence is
+published too. `scripts/test-ci-local` pins every checker step and upload, so
+removing one fails the self-test.
 
 The Windows checkout converts line endings (the runner's git sets
 `core.autocrlf`, and the repository has no `.gitattributes`), so the windows
 profile's `source_digest` differs from the other profiles' for the same
-commit. Evidence from different profiles binds to one source through `tree`
-and `commit`; `source_digest` compares runs within a platform.
+commit. Evidence from different profiles names one source through `tree`
+and `commit`; `source_digest` compares runs within a platform. Nothing checks
+the profiles against each other.
 
 ### Linux sandbox confinement (#441)
 

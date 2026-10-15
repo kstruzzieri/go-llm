@@ -2,7 +2,9 @@
 
 Each entry proves one security property's assertions can fail. Entries are point-in-time evidence at their baseline revision.
 
-Every entry below was run at `317d351a` on a darwin host (the two attack-only variants added in review, M-045 B and M-047 B, at `9db725e7`, whose production and scenario trees are identical; M-051 to M-053 at the commit that adds them, whose parent is `be03ef59`): the baseline passed, the mutant failed as shown, and the tree was restored with `git checkout` and passed again. Entries quote test output, the containment judge's message text and line numbers included, as it read at their baseline; later wording changes do not rewrite them. Entries carried over from the PR 2 delivery record name the draft entry they were first recorded as; they were re-run here so every command, diff and line number matches one revision. Apply a patch with `git apply`, run the command, then restore with `git checkout -- <file>`. `guard` entries remove or weaken the protection the refs assert. `effect-detection` entries change the effect path of an uncontained scenario: they show its probe can read a change in outcome, not that a guard is absent. Rows exempt from this ledger (pending, out-of-scope, unobserved such as ENV-BWRAP, whose native bwrap profile needs a Linux host, and administrative META- rows; the inventory lint allows no other verified or uncontained row an exemption) carry their exempt reason in the inventory (`docs/security/containment-inventory.json`, rendered in `docs/security/containment-inventory.md`).
+Platform: every proof in this ledger ran on darwin (arm64, go1.27.1) unless its entry's `Platform:` line names another; none has run on Linux or Windows yet. The plan is a Linux re-stamp at the rebase onto the model-resistance PR: re-run every entry on a Linux host (Docker `ci-local` or the GitHub runner), record that revision as each entry's baseline, and add `linux` to its `Platform:` line.
+
+Every entry below was run at `317d351a` on a darwin host (the two attack-only variants added in review, M-045 B and M-047 B, at `9db725e7`, whose production and scenario trees are identical; M-051 to M-053 at the commit that adds them, whose parent is `be03ef59`; M-054 to M-058 at the commit that adds them, whose parent is `12b63eb0`): the baseline passed, the mutant failed as shown, and the tree was restored with `git checkout` and passed again. Entries quote test output, the containment judge's message text and line numbers included, as it read at their baseline; later wording changes do not rewrite them. Entries carried over from the PR 2 delivery record name the draft entry they were first recorded as; they were re-run here so every command, diff and line number matches one revision. Apply a patch with `git apply`, run the command, then restore with `git checkout -- <file>`. `guard` entries remove or weaken the protection the refs assert. `effect-detection` entries change the effect path of an uncontained scenario: they show its probe can read a change in outcome, not that a guard is absent. Rows exempt from this ledger (pending, out-of-scope, unobserved such as ENV-BWRAP, whose native bwrap profile needs a Linux host, and administrative META- rows; the inventory lint allows no other verified or uncontained row an exemption) carry their exempt reason in the inventory (`docs/security/containment-inventory.json`, rendered in `docs/security/containment-inventory.md`).
 
 ## M-001 — Absolute paths are rejected by the workspace path cleaner
 - Affected refs: PATH-ABS: `TestHardeningContracts/Active/Workspace/confinement_and_arguments/public_confinement/owned_absolute_sibling`, `TestWorkspaceCleanRelContainment/absolute_escape`, `TestContainment/W1`
@@ -1457,6 +1459,7 @@ Every entry below was run at `317d351a` on a darwin host (the two attack-only va
 ## M-051 — A skip or failure under a cited parent leaf counts as that leaf's own
 - Affected refs: META-GATE: `TestCheckerRejectsSkippedChildOfCitedParent`
 - Baseline: the commit that adds this entry (parent `be03ef59`); first recorded as PR2-FW-1 (fix wave)
+- Platform: darwin (arm64, go1.27.1)
 - Profile / command: darwin-host / `go test -count=1 -run '^(TestChecker|TestDecideRun)' -v ./internal/containmentinv`
 - Patch:
   ```diff
@@ -1480,6 +1483,7 @@ Every entry below was run at `317d351a` on a darwin host (the two attack-only va
 ## M-052 — Only an administrative META- row may claim a mutation exemption
 - Affected refs: META-MUTATION: `TestCommittedInventory` (data mutation below); rule cases `TestInventoryLintRules/exempt_reason_on_a_verified_security_row`, `TestInventoryLintRules/exempt_reason_on_an_uncontained_row`
 - Baseline: the commit that adds this entry (parent `be03ef59`); first recorded as PR2-FW-7 (fix wave)
+- Platform: darwin (arm64, go1.27.1)
 - Profile / command: darwin-host / `go test -count=1 -run '^TestInventoryLintRules$' -v ./internal/containmentinv`
 - Patch:
   ```diff
@@ -1503,6 +1507,7 @@ Every entry below was run at `317d351a` on a darwin host (the two attack-only va
 ## M-053 — linux-host allows no skip, and every allowed skip names a capability
 - Affected refs: META-INVENTORY: `TestCommittedInventory` (data mutations below); rule cases `TestInventoryLintRules/linux-host_allows_no_skip`, `TestInventoryLintRules/allowed_skip_reason`
 - Baseline: the commit that adds this entry (parent `be03ef59`); first recorded as PR2-FW-8 and PR2-FW-9 (fix wave)
+- Platform: darwin (arm64, go1.27.1)
 - Profile / command: darwin-host / `go test -count=1 -run '^TestInventoryLintRules$' -v ./internal/containmentinv`
 - Patch (A, linux-host may allow a skip):
   ```diff
@@ -1538,9 +1543,175 @@ Every entry below was run at `317d351a` on a darwin host (the two attack-only va
 - Kind: guard
 - Notes: Data mutations of the committed inventory, each turning `go test -count=1 -run '^TestCommittedInventory$' ./internal/containmentinv` red and restored byte-identical: an allowed skip `TestContainment/W3=capability:symlink` added to linux-host (`inventory_test.go:346: profile linux-host must allow no skip, allows TestContainment/W3=capability:symlink`); the windows skip `TestContainment/E1=capability:unix` changed to `TestContainment/E1=unix` (`inventory_test.go:346: profile windows: allowed skip reason "unix", want capability:<cap>`). The checker matches every skip, including one under a cited parent (M-051), against the profile's list (`TestCheckerRejectsSkipOnLinuxHost`); this lint keeps that list empty on linux-host and capability-shaped elsewhere.
 
+## M-054 — Checker evidence in a checkout is measured, not only stamped
+- Affected refs: META-GATE: `TestCheckerSourceIdentityMeasured/mismatching_tree`, `/modified_tracked_file`, `/untracked_file`, `/missing_tracked_file`
+- Baseline: the commit that adds this entry (parent `12b63eb0`); first recorded as PR2-FW2-1a, PR2-FW2-1b, PR2-FW2-1c and PR2-FW2-2 (fix wave 2)
+- Platform: darwin (arm64, go1.27.1)
+- Profile / command: darwin-host / `go test -count=1 -run '^TestCheckerSourceIdentityMeasured$' -v ./internal/containmentinv`
+- Patch (A, a forwarded tree is trusted without comparing HEAD):
+  ```diff
+  diff --git a/internal/containmentinv/checker.go b/internal/containmentinv/checker.go
+  --- a/internal/containmentinv/checker.go
+  +++ b/internal/containmentinv/checker.go
+  @@ -271,7 +271,7 @@ func SourceIdentity(getenv func(string) string, root string) (Evidence, error) {
+   	digest, err := SourceDigest(root, forwarded)
+   	if err == nil && hasGit(root) {
+   		var clean bool
+  -		if ev.MeasuredTree, clean, err = measureCheckout(root); err == nil && (!clean || ev.MeasuredTree != ev.Tree) {
+  +		if ev.MeasuredTree, clean, err = measureCheckout(root); err == nil && !clean {
+   			ev.Dirty = true
+   		}
+   	}
+  ```
+- Patch (B, tracked changes do not dirty the run):
+  ```diff
+  diff --git a/internal/containmentinv/checker.go b/internal/containmentinv/checker.go
+  --- a/internal/containmentinv/checker.go
+  +++ b/internal/containmentinv/checker.go
+  @@ -271,7 +271,7 @@ func SourceIdentity(getenv func(string) string, root string) (Evidence, error) {
+   	digest, err := SourceDigest(root, forwarded)
+   	if err == nil && hasGit(root) {
+   		var clean bool
+  -		if ev.MeasuredTree, clean, err = measureCheckout(root); err == nil && (!clean || ev.MeasuredTree != ev.Tree) {
+  +		if ev.MeasuredTree, clean, err = measureCheckout(root); err == nil && ev.MeasuredTree != ev.Tree {
+   			ev.Dirty = true
+   		}
+   	}
+  ```
+- Patch (C, untracked files dirty the run): in `measureCheckout`, `"status", "--porcelain", "--untracked-files=no"` becomes `"status", "--porcelain"`.
+- Patch (D, a forwarded identity tolerates a missing tracked file):
+  ```diff
+  diff --git a/internal/containmentinv/checker.go b/internal/containmentinv/checker.go
+  --- a/internal/containmentinv/checker.go
+  +++ b/internal/containmentinv/checker.go
+  @@ -368,7 +368,7 @@ func SourceDigest(root string, strict bool) (string, error) {
+   	h := sha256.New()
+   	for _, f := range files {
+   		sum, err := fileSum(filepath.Join(root, filepath.FromSlash(f)))
+  -		if errors.Is(err, fs.ErrNotExist) && !strict {
+  +		if errors.Is(err, fs.ErrNotExist) {
+   			continue // tracked but deleted in a manual run's checkout: not in the tested tree
+   		}
+   		if err != nil {
+  ```
+- Baseline: pass. Mutant A: FAIL `TestCheckerSourceIdentityMeasured/mismatching_tree` (`checker_test.go:259: evidence {... Tree:0000000000000000000000000000000000000000 Commit:def456 MeasuredTree:4d96... Dirty:false ...} err <nil>, want dirty true measured_tree 4d96...`). Mutant B: FAIL `TestCheckerSourceIdentityMeasured/modified_tracked_file` (`checker_test.go:259: evidence {... Dirty:false ...} err <nil>, want dirty true ...`). Mutant C: FAIL `TestCheckerSourceIdentityMeasured/untracked_file` (`checker_test.go:259: evidence {... Dirty:true ...}`, want dirty false: an untracked file is not in the digest). Mutant D: FAIL `TestCheckerSourceIdentityMeasured/missing_tracked_file` (`checker_test.go:254: want an error naming b.go, got {... Dirty:true ...}, <nil>`). Restored: pass.
+- Kind: guard
+- Notes: Before this entry the checker stamped `GO_LLM_CI_TREE` and `GO_LLM_CI_COMMIT` as forwarded and reported `dirty: false` for any checkout. Tree hashes are abbreviated here; the test builds a fresh repository per case. The hook's `.git`-free export is not measured; it is `git archive` of the forwarded tree, clean by construction.
+
+## M-055 — A row whose every ref may skip on a profile is not mandatory there
+- Affected refs: META-INVENTORY: `TestCommittedInventory` (data mutation below); rule case `TestInventoryLintRules/skip-allowed_row_lists_the_profile`
+- Baseline: the commit that adds this entry (parent `12b63eb0`); first recorded as PR2-FW2-6 (fix wave 2)
+- Platform: darwin (arm64, go1.27.1)
+- Profile / command: darwin-host / `go test -count=1 -run '^TestInventoryLintRules$' -v ./internal/containmentinv`
+- Patch:
+  ```diff
+  diff --git a/internal/containmentinv/lint.go b/internal/containmentinv/lint.go
+  --- a/internal/containmentinv/lint.go
+  +++ b/internal/containmentinv/lint.go
+  @@ -399,7 +399,7 @@ func lintProfiles(inv Inventory, decls map[string]ScenarioDecl) []error {
+   			}
+   		}
+   		for _, r := range inv.Rows {
+  -			if len(r.Refs) > 0 && slices.Contains(r.Profiles, p.Name) && !slices.ContainsFunc(r.Refs, func(ref Ref) bool { return !skipAllowed(p, ref.Test) }) {
+  +			if false && len(r.Refs) > 0 && slices.Contains(r.Profiles, p.Name) && !slices.ContainsFunc(r.Refs, func(ref Ref) bool { return !skipAllowed(p, ref.Test) }) {
+   				errs = append(errs, fmt.Errorf("%s: lists profile %s, but every ref is an allowed skip there; the row is skip-allowed, not mandatory", r.ID, p.Name))
+   			}
+   		}
+  ```
+- Baseline: pass. Mutant: FAIL `TestInventoryLintRules/skip-allowed_row_lists_the_profile` (`inventory_test.go:384: want an error containing "PATH-ABS: lists profile windows, but every ref is an allowed skip there", got []`). Restored: pass.
+- Kind: guard
+- Notes: Data mutation of the committed inventory: `windows` added back to ENV-EXACT-HOST's profiles turned `go test -count=1 -run '^TestCommittedInventory$' ./internal/containmentinv` red (`inventory_test.go:457: ENV-EXACT-HOST: lists profile windows, but every ref is an allowed skip there; the row is skip-allowed, not mandatory`, plus the stale-Markdown check); restored byte-identical. Every windows row was skip-allowed under this rule, and M1 and P1 were dropped from windows until observed green there (docs/local-ci.md), so windows has no mandatory row; the checker still runs its skip-allowed leaves (`TestPlanRunsGroupsByPackage`).
+
+## M-056 — A scenario skip names the first capability the profile lacks
+- Affected refs: META-INVENTORY: `TestCommittedInventory` (data mutation below); rule cases `TestInventoryLintRules/scenario_skip_for_a_cap_the_scenario_lacks`, `/scenario_skip_for_a_cap_the_profile_provides`, `/scenario_skip_for_a_later_missing_cap`, `/scenario_skip_for_an_undeclared_scenario`
+- Baseline: the commit that adds this entry (parent `12b63eb0`); first recorded as PR2-FW2-7 (fix wave 2)
+- Platform: darwin (arm64, go1.27.1)
+- Profile / command: darwin-host / `go test -count=1 -run '^TestInventoryLintRules$' -v ./internal/containmentinv`
+- Patch:
+  ```diff
+  diff --git a/internal/containmentinv/lint.go b/internal/containmentinv/lint.go
+  --- a/internal/containmentinv/lint.go
+  +++ b/internal/containmentinv/lint.go
+  @@ -392,7 +392,7 @@ func lintProfiles(inv Inventory, decls map[string]ScenarioDecl) []error {
+   			if !capabilitySkip.MatchString(reason) {
+   				errs = append(errs, fmt.Errorf("profile %s: allowed skip reason %q, want capability:<cap>", p.Name, reason))
+   			} else if id, ok := strings.CutPrefix(leaf, "TestContainment/"); ok {
+  -				errs = append(errs, lintScenarioSkip(p, id, strings.TrimPrefix(reason, "capability:"), decls)...)
+  +				_ = id
+   			}
+   			if !citedLeaf(inv.Rows, leaf) {
+   				errs = append(errs, fmt.Errorf("profile %s: allowed skip for %s, which no row cites", p.Name, leaf))
+  ```
+- Baseline: pass. Mutant: FAIL `TestInventoryLintRules/scenario_skip_for_a_cap_the_scenario_lacks` (`inventory_test.go:384: want an error containing "names capability symlink, which the scenario does not require (caps bash, exec)", got []`); FAIL `/scenario_skip_for_a_cap_the_profile_provides` (`... "names capability bash, which the profile provides", got []`); FAIL `/scenario_skip_for_a_later_missing_cap` (`... "names capability exec, but the scenario reports the first cap the profile lacks, bash", got []`); FAIL `/scenario_skip_for_an_undeclared_scenario` (`... "allowed skip for scenario X9, which is not declared", got [profile windows: allowed skip for TestContainment/X9, which no row cites]`). Restored: pass.
+- Kind: guard
+- Notes: Data mutation of the committed inventory: `TestContainment/X2a=capability:bash` added back to the windows profile (whose caps now declare bash, Git Bash on the runner's PATH) turned `TestCommittedInventory` red (`inventory_test.go:457: profile windows: allowed skip for X2a names capability bash, which the profile provides`, plus the stale-Markdown check); restored byte-identical. This rule removed the 16 dead `capability:bash` windows entries.
+
+## M-057 — A scenario ref cites the scenario's registration, ahead of an observation
+- Affected refs: META-INVENTORY: `TestCommittedInventory` (data mutations below); rule cases `TestInventoryLintRules/ref_to_a_function_not_bound_to_the_registration`, `TestInventoryLintRules/marker_after_the_last_observation`
+- Baseline: the commit that adds this entry (parent `12b63eb0`); first recorded as PR2-FW2-8 and PR2-FW2-9 (fix wave 2)
+- Platform: darwin (arm64, go1.27.1)
+- Profile / command: darwin-host / `go test -count=1 -run '^TestInventoryLintRules$' -v ./internal/containmentinv`
+- Patch (A, any function holding the marker satisfies a scenario ref):
+  ```diff
+  diff --git a/internal/containmentinv/lint.go b/internal/containmentinv/lint.go
+  --- a/internal/containmentinv/lint.go
+  +++ b/internal/containmentinv/lint.go
+  @@ -326,7 +326,7 @@ func lintRef(id string, ref Ref, src source) []error {
+   	switch fns := src.registrars[ref.File][scenario]; {
+   	case len(fns) == 0:
+   		errs = append(errs, fmt.Errorf("%s: ref %s: no function in %s registers scenario %s", id, ref.Test, ref.File, scenario))
+  -	case !slices.Contains(fns, ref.Func):
+  +	case false && !slices.Contains(fns, ref.Func):
+   		errs = append(errs, fmt.Errorf("%s: ref %s: %s is not bound to scenario %s's registration (%s)", id, ref.Test, ref.Func, scenario, strings.Join(fns, ", ")))
+   	}
+   	if !slices.ContainsFunc(src.markers, func(m marker) bool {
+  ```
+- Patch (B, a marker after the last observation statement counts):
+  ```diff
+  diff --git a/internal/containmentinv/lint.go b/internal/containmentinv/lint.go
+  --- a/internal/containmentinv/lint.go
+  +++ b/internal/containmentinv/lint.go
+  @@ -330,7 +330,7 @@ func lintRef(id string, ref Ref, src source) []error {
+   		errs = append(errs, fmt.Errorf("%s: ref %s: %s is not bound to scenario %s's registration (%s)", id, ref.Test, ref.Func, scenario, strings.Join(fns, ", ")))
+   	}
+   	if !slices.ContainsFunc(src.markers, func(m marker) bool {
+  -		return m.site == site{id, ref.File, ref.Func} && m.offset < src.lastObs[ref.File][ref.Func]
+  +		return m.site == site{id, ref.File, ref.Func}
+   	}) {
+   		errs = append(errs, fmt.Errorf("%s: ref %s: no `%s%s` marker in %s precedes an observation statement", id, ref.Test, markerPrefix, id, ref.Func))
+   	}
+  ```
+- Baseline: pass. Mutant A: FAIL `TestInventoryLintRules/ref_to_a_function_not_bound_to_the_registration` (`inventory_test.go:384: want an error containing "probe is not bound to scenario X3's registration (x3)", got [pkg/a_test.go:12: FP-SCRIPT-CONTENT marker in x3 is not cited by any FP-SCRIPT-CONTENT ref]`). Mutant B: FAIL `TestInventoryLintRules/marker_after_the_last_observation` (``inventory_test.go:384: want an error containing "no `// containment: FP-SCRIPT-CONTENT` marker in x3 precedes an observation statement", got []``). Restored: pass.
+- Kind: guard
+- Notes: Data mutations of the committed tree, each turning `TestCommittedInventory` red and restored byte-identical: CMP-READ-EXPORT-GUARDS's D1 ref pointed at `d2`, with its marker moved from `readExport` into d2 ahead of an observation statement (`inventory_test.go:457: CMP-READ-EXPORT-GUARDS: ref TestContainment/D1: d2 is not bound to scenario D1's registration (d1, readExport)`); the GRANT-SUBMITPLAN marker in `p1` moved after its last observation statement (``inventory_test.go:457: GRANT-SUBMITPLAN: ref TestContainment/P1: no `// containment: GRANT-SUBMITPLAN` marker in p1 precedes an observation statement``). A registration is a composite literal with `ID: "<X>"` or a call to a same-file helper whose first string literal is `"<X>"` (`wScenario`); its bound functions are the registering function, that helper, and the same-file functions called by name inside the literal or call (`readExport` for D1 and D2).
+
+## M-058 — The ledger and the inventory cite each other
+- Affected refs: META-MUTATION: `TestCommittedInventory` (data mutation below); rule cases `TestInventoryLintRules/ledger_entry_not_listing_a_citing_row`, `/ledger_entry_listing_a_row_that_does_not_cite_it`, `/ledger_entry_listing_no_row`, `/ledger_entry_listing_an_unknown_row`
+- Baseline: the commit that adds this entry (parent `12b63eb0`); first recorded as PR2-FW2-10 (fix wave 2)
+- Platform: darwin (arm64, go1.27.1)
+- Profile / command: darwin-host / `go test -count=1 -run '^TestInventoryLintRules$' -v ./internal/containmentinv`
+- Patch:
+  ```diff
+  diff --git a/internal/containmentinv/lint.go b/internal/containmentinv/lint.go
+  --- a/internal/containmentinv/lint.go
+  +++ b/internal/containmentinv/lint.go
+  @@ -92,7 +92,6 @@ func Lint(inv Inventory, repoRoot string, scenarios []ScenarioDecl, ledger []Led
+   		}
+   	}
+   	errs = append(errs, lintScenarioReqs(rows, scenarios)...)
+  -	errs = append(errs, lintLedger(rows, ledger)...)
+   	errs = append(errs, lintProfiles(inv, decls)...)
+   	for _, m := range src.markers {
+   		switch {
+  ```
+- Baseline: pass. Mutant: FAIL `TestInventoryLintRules/ledger_entry_not_listing_a_citing_row` (`inventory_test.go:384: want an error containing "PATH-ABS: cites M-002, whose Affected refs do not list this row", got []`); likewise `/ledger_entry_listing_a_row_that_does_not_cite_it` (`"PATH-ABS: ledger M-002 lists this row, which does not cite it"`), `/ledger_entry_listing_no_row` (`"ledger M-002 lists no inventory row"`), `/ledger_entry_listing_an_unknown_row` (`"ledger M-001 lists PATH-GHOST, which has no inventory row"`), each `got []`. Restored: pass.
+- Kind: guard
+- Notes: Data mutation of the committed ledger: `FP-CWD: ` removed from M-015's Affected refs line turned `TestCommittedInventory` red (`inventory_test.go:457: ledger M-015 lists no inventory row in its Affected refs` and `inventory_test.go:457: FP-CWD: cites M-015, whose Affected refs do not list this row`); restored byte-identical. An entry's rows are the upper-case IDs on its first Affected refs line once backtick-quoted test names are removed (`TestLoadLedger`). The committed inventory and ledger already agreed when the rule landed.
+
+
 ## Administrative evidence
 
-These mutations prove the harness, inventory lint, checker and gate rules can fail. They are not security properties and carry no M entry; META-INVENTORY and META-GATE cite this section. The exceptions are the gate rules whose regression would let the security gate pass a skipped or exempted security assertion: the checker's child-skip rule (M-051), the exemption rule (M-052) and the profile skip pins (M-053). Each row names the rule, the test that pins it and the first failing line observed under its mutation, quoted at the revision where it was recorded; line numbers may have moved since. The full diffs and commands live in the maintainer's gitignored delivery record (docs/superpowers/evidence/452/mutations-pr2.md in the maintainer's checkout), which is not in the repository.
+These mutations prove the harness, inventory lint, checker and gate rules can fail. They are not security properties and carry no M entry; META-INVENTORY and META-GATE cite this section. The exceptions are the gate rules whose regression would let the security gate pass a skipped, exempted, unbound or unmeasured security assertion: the checker's child-skip rule (M-051), the exemption rule (M-052), the profile skip pins (M-053), measured evidence cleanliness (M-054), the skip-allowed row rule (M-055), the first-missing-capability skip rule (M-056), scenario registration binding (M-057) and the bidirectional ledger rule (M-058). Each row names the rule, the test that pins it and the first failing line observed under its mutation, quoted at the revision where it was recorded; line numbers may have moved since. The full diffs and commands live in the maintainer's gitignored delivery record (docs/superpowers/evidence/452/mutations-pr2.md in the maintainer's checkout), which is not in the repository.
 
 | Rule | Test | First failing line under its mutation |
 |---|---|---|
@@ -1566,14 +1737,18 @@ These mutations prove the harness, inventory lint, checker and gate rules can fa
 | Checker: runs are planned per package, once per leaf | `TestPlanRunsGroupsByPackage` | `checker_test.go:126: PlanRuns` (a third run for the other profile's package, `{Package:./c Pattern:^(TestC)$ ...}`) |
 | Checker: the skip reason is the skip line | `TestCheckerSkipReasonIsTheSkipLine` | `checker_test.go:151: skip with its own reason rejected: [TestContainment/W3: skipped (capability:bash), not an allowed skip]` |
 | Checker: a nonzero go test exit fails a clean-looking stream | `TestDecideRun/clean_stream,_go_test_failed` | `checker_test.go:183: want an error containing "go test: exit status 1" and nothing executed, got executed [TestContainment/A1 TestContainment/X2a] errs []` |
-| Checker: the stream decodes strictly (both checks removed) | `TestDecideRun/build_failure`, `/build_event_with_ImportPath`, `/unknown_field`, `/build_action_without_ImportPath`, `/event_without_an_action` | `checker_test.go:183: want an error containing "malformed go test -json stream" and nothing executed, got executed [] errs [TestContainment/X2a: never ran TestContainment/A1: never ran package did not pass (terminal action "fail") go test: exit status 1]` |
-| Checker: an event with a field test2json does not emit is rejected | `TestDecideRun/unknown_field` | `checker_test.go:183: want an error containing "unknown field \"Extra\"" and nothing executed, got executed [TestContainment/A1 TestContainment/X2a] errs []` |
-| Checker: a build action or an empty action is not a test event | `TestDecideRun/build_action_without_ImportPath`, `/event_without_an_action` | `checker_test.go:183: want an error containing "not a test event (action \"build-fail\")" and nothing executed, got executed [TestContainment/A1 TestContainment/X2a] errs []` |
-| Checker: a decode failure fails the run even after a complete stream | `TestDecideRun/text_line_after_the_package_pass` (the only case no other check catches) and the five decode cases | first: the same `build_failure` line as the row above; the isolating case: `checker_test.go:183: want an error containing "malformed go test -json stream after 8 events" and nothing executed, got executed [TestContainment/A1 TestContainment/X2a] errs []` |
+| Checker: a build-fail event fails the run, even after a green stream | `TestDecideRun/build_failure`, `/build-fail_on_a_green_stream` | `checker_test.go:184: want an error containing "after 8 events: build failed (x)" and nothing executed, got executed [TestContainment/A1 TestContainment/X2a] errs []` (fix wave 2, PR2-FW2-3: the build-fail case removed from DecodeEvents) |
+| Checker: an unknown or empty action fails the run | `TestDecideRun/unknown_action`, `/event_without_an_action` | `checker_test.go:184: want an error containing "unknown action \"teleport\"" and nothing executed, got executed [TestContainment/A1 TestContainment/X2a] errs []` (PR2-FW2-4) |
+| Checker: unknown fields and build-output events are tolerated | `TestDecideRun/unknown_field`, `/benign_build-output` | `checker_test.go:179: clean run: executed [] errs [... malformed go test -json stream after 0 events: json: unknown field "Extra"], want executed [TestContainment/A1 TestContainment/X2a]` (PR2-FW2-5: DisallowUnknownFields restored) |
+| Checker: a text line fails the run even after a complete stream | `TestDecideRun/text_line_after_the_package_pass` | `checker_test.go:183: want an error containing "malformed go test -json stream after 8 events" and nothing executed, got executed [TestContainment/A1 TestContainment/X2a] errs []` (recorded before fix wave 2; the decoder still rejects any non-JSON line) |
 | Lint: a verified or uncontained row outside the model layer cites an existing ledger entry | `TestInventoryLintRules/mutation_missing`, `/mutation_missing_on_uncontained`, `/mutation_unknown` | `inventory_test.go:261: want an error containing "PATH-ABS: verified row cites no mutation ledger entry", got []`; unknown entry: `inventory_test.go:261: want an error containing "mutation M-999 is not an entry of the mutation ledger", got []` |
 | Lint: an exempt administrative row needs no mutation | `TestInventoryLintRules/exempt_row_needs_no_mutation` | `inventory_test.go:256: clean fixture rejected: [PATH-ABS: verified row cites no mutation ledger entry and has no exempt reason]` (recorded when the fixture was a PATH row; it is a META- row since M-052) |
 | Lint: the mutation rule excludes model-layer rows | `TestInventoryLintRules/model_row_needs_no_mutation` | `inventory_test.go:259: clean fixture rejected: [MODEL-STRATA: verified row cites no mutation ledger entry and has no exempt reason]` |
 | Ledger loader rejects a duplicate entry | `TestLoadLedger` | `inventory_test.go:276: duplicate entry: err = <nil>, want duplicate ledger entry M-001` |
+| Ledger loader reads each entry's rows from its Affected refs line, test names excluded | `TestLoadLedger` | `inventory_test.go:399: LoadLedger = [{ID:M-001 Rows:[PATH-ABS ONE-TWO FP-SCRIPT-CONTENT CMP-EDIT-EXEC SECRETS]} ...]` (PR2-FW2-14: backticked test names not stripped) |
+| Checker: a profile's skip-allowed leaves are planned on it | `TestPlanRunsGroupsByPackage` | `checker_test.go:307: PlanRuns(win)` (got `[]` and `profile win has no mandatory or skip-allowed refs`; PR2-FW2-13) |
+| Lint: the scan skips underscore-prefixed directories and nested modules | `TestInventoryScanSkipsForeignTrees` | `inventory_test.go:112: foreign trees scanned: [_agentflow/x/a_test.go:4: marker "PATH-GHOST" names no inventory row]` (PR2-FW2-11); the nested-module skip removed: `[nested/a_test.go:4: ...]` (PR2-FW2-12) |
+| Checker command: a failed run writes evidence with `failures` and prints its output once | manual `go run ./internal/containmentinv/check -inventory docs/security/containment-inventory.json -profile darwin-host` under M-001's patch | exit 1, `containment check: profile darwin-host: 3 of 6 package runs failed`; the evidence lists the nine package errors and that line under `failures`, `dirty: true`; W1's validity line printed once. The SIGTERM handler and the 10 s `WaitDelay` are not exercised by any test |
 | ci-local writes the containment evidence to a fresh mktemp file | `scripts/test-ci-local` (`default`) | the expected-log diff: `-evidence-out <mktemp>` expected, `-evidence-out <TMPDIR>/containment-evidence.json` logged |
 | ci-local prints the evidence path | `scripts/test-ci-local` (`security`) | `security: evidence went to <TMPDIR>/containment-evidence.<random>, want <TMPDIR>/containment-evidence.<random> printed as such` |
 | The pre-push hook forwards a bare-tree tag's tree with an empty commit | `scripts/test-ci-local` (`hook-tree-tag`) | `hook-tree-tag: got exit 1, want 0` |

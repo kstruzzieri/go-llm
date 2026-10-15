@@ -143,7 +143,7 @@ func streamBytes(t *testing.T, events []TestEvent) string {
 
 // TestDecideRun breaks one rule per case. Except for the realistic build
 // failure, each broken stream is otherwise clean, so only the named check
-// can reject it.
+// can reject it; the accepted cases add noise the decoder must tolerate.
 func TestDecideRun(t *testing.T) {
 	const pkg = "github.com/kstruzzieri/go-llm/cmd/golem"
 	clean := streamBytes(t, passingStream())
@@ -162,12 +162,13 @@ func TestDecideRun(t *testing.T) {
 		want   string // a substring of one error; empty: accepted
 	}{
 		{name: "clean", out: clean},
+		{name: "benign build-output", out: `{"ImportPath":"` + pkg + ` [` + pkg + `.test]","Action":"build-output","Output":"ld: warning: x\n"}` + "\n" + clean},
+		{name: "unknown field", out: `{"Action":"output","Package":"` + pkg + `","Output":"x","Extra":1}` + "\n" + clean},
 		{name: "clean stream, go test failed", out: clean, runErr: exit1, want: "go test: exit status 1"},
-		{name: "build failure", out: buildFail, runErr: exit1, want: "malformed go test -json stream"},
-		{name: "build event with ImportPath", out: `{"ImportPath":"` + pkg + `","Action":"build-output","Output":"x"}` + "\n" + clean, want: "malformed go test -json stream after 0 events"},
-		{name: "unknown field", out: `{"Action":"output","Package":"` + pkg + `","Output":"x","Extra":1}` + "\n" + clean, want: `unknown field "Extra"`},
-		{name: "build action without ImportPath", out: `{"Action":"build-fail"}` + "\n" + clean, want: `not a test event (action "build-fail")`},
-		{name: "event without an action", out: "null\n" + clean, want: `not a test event (action "")`},
+		{name: "build failure", out: buildFail, runErr: exit1, want: "malformed go test -json stream after 1 events: build failed"},
+		{name: "build-fail on a green stream", out: clean + `{"ImportPath":"x","Action":"build-fail"}` + "\n", want: "after 8 events: build failed (x)"},
+		{name: "unknown action", out: `{"Action":"teleport","Package":"` + pkg + `"}` + "\n" + clean, want: `unknown action "teleport"`},
+		{name: "event without an action", out: "null\n" + clean, want: `unknown action ""`},
 		{name: "text line after the package pass", out: clean + "FAIL\t" + pkg + " [build failed]\n", want: "malformed go test -json stream after 8 events"},
 		{name: "truncated, no package pass", out: truncated, want: "package did not pass"},
 	} {
@@ -186,12 +187,87 @@ func TestDecideRun(t *testing.T) {
 	}
 }
 
+// gitRepo creates a committed repository holding files and returns its root
+// and a git runner isolated from the user's configuration.
+func gitRepo(t *testing.T, files map[string]string) (string, func(args ...string) string) {
+	t.Helper()
+	repo := t.TempDir()
+	git := func(args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", repo, "-c", "user.name=t", "-c", "user.email=t@localhost", "-c", "commit.gpgsign=false"}, args...)...)
+		cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL="+os.DevNull, "GIT_CONFIG_NOSYSTEM=1")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	git("init", "-q")
+	for rel, src := range files {
+		writeGo(t, repo, rel, src)
+	}
+	git("add", "-A")
+	git("commit", "-qm", "one")
+	return repo, git
+}
+
+// TestCheckerSourceIdentityMeasured: in a checkout the forwarded tree is
+// checked against HEAD and the worktree, not just stamped.
+func TestCheckerSourceIdentityMeasured(t *testing.T) {
+	env := func(tree string) func(string) string {
+		return func(k string) string {
+			return map[string]string{"GO_LLM_CI_TREE": tree, "GO_LLM_CI_COMMIT": "def456"}[k]
+		}
+	}
+	files := map[string]string{"a.go": "package a\n", "b.go": "package a\n"}
+	for _, tc := range []struct {
+		name      string
+		edit      func(repo string)
+		tree      string // forwarded tree; empty: the repository's HEAD tree
+		wantDirty bool
+		wantErr   string
+	}{
+		{name: "clean, matching tree"},
+		{name: "untracked file", edit: func(repo string) { writeGo(t, repo, "new.txt", "x") }},
+		{name: "modified tracked file", edit: func(repo string) { writeGo(t, repo, "a.go", "package b\n") }, wantDirty: true},
+		{name: "mismatching tree", tree: "0000000000000000000000000000000000000000", wantDirty: true},
+		{name: "missing tracked file", edit: func(repo string) {
+			if err := os.Remove(filepath.Join(repo, "b.go")); err != nil {
+				t.Fatal(err)
+			}
+		}, wantErr: "b.go"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo, git := gitRepo(t, files)
+			head := git("rev-parse", "HEAD^{tree}")
+			if tc.edit != nil {
+				tc.edit(repo)
+			}
+			tree := tc.tree
+			if tree == "" {
+				tree = head
+			}
+			// containment: META-GATE
+			ev, err := SourceIdentity(env(tree), repo)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("want an error naming %s, got %+v, %v", tc.wantErr, ev, err)
+				}
+				return
+			}
+			if err != nil || ev.Dirty != tc.wantDirty || ev.MeasuredTree != head || ev.Tree != tree {
+				t.Fatalf("evidence %+v err %v, want dirty %v measured_tree %s", ev, err, tc.wantDirty, head)
+			}
+		})
+	}
+}
+
 func TestCheckerSourceIdentityFromEnv(t *testing.T) {
 	ev, err := SourceIdentity(func(k string) string {
-		return map[string]string{"GO_LLM_CI_TREE": "abc123", "GO_LLM_CI_COMMIT": "def456"}[k]
+		return map[string]string{"GO_LLM_CI_TREE": "abc123", "GO_LLM_CI_COMMIT": "def456", "GO_LLM_CI_PR_HEAD": "fed789"}[k]
 	}, t.TempDir())
 	// containment: META-GATE
-	if err != nil || ev.Tree != "abc123" || ev.Commit != "def456" || ev.Dirty || ev.SourceDigest == "" {
+	if err != nil || ev.Tree != "abc123" || ev.Commit != "def456" || ev.PRHead != "fed789" || ev.MeasuredTree != "" || ev.Dirty || ev.SourceDigest == "" {
 		t.Fatalf("evidence %+v err %v", ev, err)
 	}
 	ev, _ = SourceIdentity(func(string) string { return "" }, t.TempDir())
@@ -223,6 +299,12 @@ func TestPlanRunsGroupsByPackage(t *testing.T) {
 	}
 	if _, err := PlanRuns(inv, "mars"); err == nil {
 		t.Fatal("unknown profile accepted")
+	}
+	// A skip-allowed leaf runs on its profile without any row listing it.
+	inv.Profiles = append(inv.Profiles, Profile{Name: "win", AllowedSkips: []string{"TestC=capability:exec"}})
+	got, err = PlanRuns(inv, "win")
+	if want := []PackageRun{{Package: "./c", Pattern: `^(TestC)$`, Leaves: []string{"TestC"}}}; err != nil || !reflect.DeepEqual(got, want) {
+		t.Fatalf("PlanRuns(win)\n got %+v, %v\nwant %+v", got, err, want)
 	}
 }
 
@@ -323,11 +405,11 @@ func TestSourceDigestCheckoutMatchesExport(t *testing.T) {
 		t.Fatalf("tar: %v\n%s", err, out)
 	}
 
-	checkout, err := SourceDigest(repo)
+	checkout, err := SourceDigest(repo, true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	exported, err := SourceDigest(export)
+	exported, err := SourceDigest(export, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -336,7 +418,7 @@ func TestSourceDigestCheckoutMatchesExport(t *testing.T) {
 	}
 	// The hidden directory is part of the digest.
 	writeGo(t, export, ".github/x.yml", "on: pull_request\n")
-	if changed, err := SourceDigest(export); err != nil || changed == exported {
+	if changed, err := SourceDigest(export, true); err != nil || changed == exported {
 		t.Fatalf("edit under .github did not change the digest (%s, %v)", changed, err)
 	}
 }

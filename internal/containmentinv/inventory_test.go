@@ -5,6 +5,7 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -49,20 +50,25 @@ func TestOther(t *testing.T) {
 }
 
 // boundInventory is a lint-clean inventory over the fixture written by
-// boundTree: one verified row whose single ref has its marker. Its profile is
-// windows because linux-host may allow no skip and the lint cases give the
-// profile one.
+// boundTree: one verified row whose two refs share their marker. Its profile
+// is windows because linux-host may allow no skip and the lint cases give the
+// profile one, for TestCited/sub, so TestCited keeps the row mandatory.
 func boundInventory() Inventory {
 	return Inventory{
 		Profiles: []Profile{{Name: "windows", GOOS: "windows"}},
 		Rows: []Row{{ID: "PATH-ABS", Source: "issue-452:52", Requirement: "absolute paths rejected",
 			Status: "verified", Layer: "focused", Profiles: []string{"windows"}, Mutations: []string{"M-001"},
-			Refs: []Ref{{Package: "./pkg", Test: "TestCited", File: "pkg/a_test.go", Func: "TestCited"}}}},
+			Refs: []Ref{{Package: "./pkg", Test: "TestCited", File: "pkg/a_test.go", Func: "TestCited"},
+				{Package: "./pkg", Test: "TestCited/sub", File: "pkg/a_test.go", Func: "TestCited"}}}},
 	}
 }
 
-// fixtureLedger is the mutation ledger the fixtures cite.
-var fixtureLedger = []string{"M-001"}
+// fixtureLedger is the mutation ledger the bound fixture cites;
+// scenarioLedger is the scenario fixture's.
+var (
+	fixtureLedger  = []LedgerEntry{{ID: "M-001", Rows: []string{"PATH-ABS"}}}
+	scenarioLedger = []LedgerEntry{{ID: "M-001", Rows: []string{"FP-SCRIPT-CONTENT"}}}
+)
 
 const boundTree = `package pkg
 import "testing"
@@ -89,6 +95,25 @@ func TestStray(t *testing.T) {
 	errs := Lint(boundInventory(), root, nil, fixtureLedger)
 	if len(errs) != 1 || !containsErr(errs, "PATH-GHOST") || !containsErr(errs, "names no inventory row") {
 		t.Fatalf("marker naming no inventory row: got %v, want exactly one error naming PATH-GHOST as unknown", errs)
+	}
+}
+
+// TestInventoryScanSkipsForeignTrees: markers under an underscore-prefixed
+// directory (CI's _agentflow checkout) or a nested module are not this
+// module's and are never scanned.
+func TestInventoryScanSkipsForeignTrees(t *testing.T) {
+	root := t.TempDir()
+	writeGo(t, root, "pkg/a_test.go", boundTree)
+	stray := strings.Replace(boundTree, "PATH-ABS", "PATH-GHOST", 1)
+	writeGo(t, root, "_agentflow/x/a_test.go", stray)
+	writeGo(t, root, "nested/go.mod", "module nested\n")
+	writeGo(t, root, "nested/a_test.go", stray)
+	if errs := Lint(boundInventory(), root, nil, fixtureLedger); len(errs) != 0 {
+		t.Fatalf("foreign trees scanned: %v", errs)
+	}
+	writeGo(t, root, "inmodule/a_test.go", stray)
+	if errs := Lint(boundInventory(), root, nil, fixtureLedger); !containsErr(errs, "PATH-GHOST") {
+		t.Fatalf("a marker in this module was not scanned: %v", errs)
 	}
 }
 
@@ -129,13 +154,40 @@ func TestInventoryPendingNeedsOwnerAndNoRefs(t *testing.T) {
 
 // scenarioTree and scenarioFixture are a lint-clean scenario-backed row: X3
 // claims FP-SCRIPT-CONTENT, the row lists X3 and cites its TestContainment leaf,
-// and the marker sits in the scenario function.
+// and the marker sits in x3, which registers X3, before its observation.
 const scenarioTree = `package pkg
 import "testing"
-func TestContainment(t *testing.T) {}
-func x3() {
-	// containment: FP-SCRIPT-CONTENT
+type observation struct{ AttackEffect bool }
+type scenario struct {
+	ID  string
+	run func() observation
 }
+func TestContainment(t *testing.T) {}
+func x3() scenario {
+	return scenario{ID: "X3", run: func() observation {
+		var o observation
+		// containment: FP-SCRIPT-CONTENT
+		o.AttackEffect = true
+		return o
+	}}
+}
+`
+
+// probeFunc marks FP-SCRIPT-CONTENT in a function that registers no
+// scenario; helperTree registers X4 through a wScenario call.
+const probeFunc = `func probe() observation {
+	// containment: FP-SCRIPT-CONTENT
+	return observation{AttackEffect: true}
+}
+`
+
+const helperTree = `func wScenario(id string) scenario {
+	return scenario{ID: id, run: func() observation {
+		// containment: FP-SCRIPT-CONTENT
+		return observation{}
+	}}
+}
+func all() []scenario { return []scenario{x3(), wScenario("X4")} }
 `
 
 func scenarioFixture() (Inventory, []ScenarioDecl) {
@@ -145,7 +197,15 @@ func scenarioFixture() (Inventory, []ScenarioDecl) {
 			Layer: "scenario", Scenarios: []string{"X3"}, Profiles: []string{"linux-host"}, Mutations: []string{"M-001"},
 			Refs: []Ref{{Package: "./pkg", Test: "TestContainment/X3", File: "pkg/a_test.go", Func: "x3"}}}},
 	}
-	return inv, []ScenarioDecl{{ID: "X3", Reqs: []string{"FP-SCRIPT-CONTENT"}, Declared: "uncontained", Owner: "#420"}}
+	return inv, []ScenarioDecl{{ID: "X3", Reqs: []string{"FP-SCRIPT-CONTENT"}, Declared: "uncontained", Owner: "#420", Caps: []string{"bash", "exec"}}}
+}
+
+// scenarioSkip adds a windows profile providing caps (comma-separated) that
+// allows skip; X3's row stays mandatory only on linux-host.
+func scenarioSkip(caps, skip string) func(*Inventory, *[]ScenarioDecl) {
+	return func(inv *Inventory, _ *[]ScenarioDecl) {
+		inv.Profiles = append(inv.Profiles, Profile{Name: "windows", GOOS: "windows", Caps: strings.FieldsFunc(caps, func(r rune) bool { return r == ',' }), AllowedSkips: []string{skip}})
+	}
 }
 
 // TestInventoryLintRules breaks one rule per case, starting from a fixture
@@ -156,6 +216,7 @@ func TestInventoryLintRules(t *testing.T) {
 		scenario bool   // start from scenarioFixture instead of boundInventory
 		tree     string // replaces the fixture's pkg/a_test.go when set
 		edit     func(inv *Inventory, sc *[]ScenarioDecl)
+		ledger   []LedgerEntry // replaces fixtureLedger when set
 		want     string
 	}{
 		{name: "clean bound fixture", edit: func(*Inventory, *[]ScenarioDecl) {}},
@@ -200,8 +261,51 @@ func TestInventoryLintRules(t *testing.T) {
 		{name: "allowed skip form", edit: func(inv *Inventory, _ *[]ScenarioDecl) { inv.Profiles[0].AllowedSkips = []string{"TestCited"} },
 			want: "want <leaf>=<reason>"},
 		{name: "allowed skip leaf", edit: func(inv *Inventory, _ *[]ScenarioDecl) {
-			inv.Profiles[0].AllowedSkips = []string{"TestCited=capability:bash", "TestOther=capability:bash"}
-		}, want: "allowed skip for TestOther, which no row mandatory on windows cites"},
+			inv.Profiles[0].AllowedSkips = []string{"TestCited/sub=capability:bash", "TestOther=capability:bash"}
+		}, want: "allowed skip for TestOther, which no row cites"},
+		{name: "skip-allowed row lists the profile", edit: func(inv *Inventory, _ *[]ScenarioDecl) {
+			inv.Rows[0].Refs = inv.Rows[0].Refs[1:]
+		}, want: "PATH-ABS: lists profile windows, but every ref is an allowed skip there"},
+		{name: "skip-allowed row on its other profile", edit: func(inv *Inventory, _ *[]ScenarioDecl) {
+			inv.Rows[0].Refs, inv.Rows[0].Profiles = inv.Rows[0].Refs[1:], []string{"linux-host"}
+			inv.Profiles = append(inv.Profiles, Profile{Name: "linux-host", GOOS: "linux"})
+		}},
+		{name: "scenario skip names the first missing cap", scenario: true, edit: scenarioSkip("bash", "TestContainment/X3=capability:exec")},
+		{name: "scenario skip for a cap the scenario lacks", scenario: true, edit: scenarioSkip("bash", "TestContainment/X3=capability:symlink"),
+			want: "names capability symlink, which the scenario does not require (caps bash, exec)"},
+		{name: "scenario skip for a cap the profile provides", scenario: true, edit: scenarioSkip("bash", "TestContainment/X3=capability:bash"),
+			want: "names capability bash, which the profile provides"},
+		{name: "scenario skip for a later missing cap", scenario: true, edit: scenarioSkip("", "TestContainment/X3=capability:exec"),
+			want: "names capability exec, but the scenario reports the first cap the profile lacks, bash"},
+		{name: "scenario skip for an undeclared scenario", scenario: true, edit: scenarioSkip("", "TestContainment/X9=capability:bash"),
+			want: "allowed skip for scenario X9, which is not declared"},
+		{name: "ref to a function not bound to the registration", scenario: true, tree: scenarioTree + probeFunc, edit: func(inv *Inventory, _ *[]ScenarioDecl) {
+			inv.Rows[0].Refs[0].Func = "probe"
+		}, want: "probe is not bound to scenario X3's registration (x3)"},
+		{name: "ref to an unregistered scenario", scenario: true, edit: func(inv *Inventory, sc *[]ScenarioDecl) {
+			inv.Rows[0].Scenarios = []string{"X3", "X5"}
+			inv.Rows[0].Refs = append(inv.Rows[0].Refs, Ref{Package: "./pkg", Test: "TestContainment/X5", File: "pkg/a_test.go", Func: "x3"})
+			*sc = append(*sc, ScenarioDecl{ID: "X5", Reqs: []string{"FP-SCRIPT-CONTENT"}, Declared: "uncontained", Owner: "#420"})
+		}, want: "no function in pkg/a_test.go registers scenario X5"},
+		{name: "ref to a helper-registered scenario", scenario: true, tree: scenarioTree + helperTree, edit: func(inv *Inventory, sc *[]ScenarioDecl) {
+			inv.Rows[0].Scenarios = []string{"X3", "X4"}
+			inv.Rows[0].Refs = append(inv.Rows[0].Refs, Ref{Package: "./pkg", Test: "TestContainment/X4", File: "pkg/a_test.go", Func: "wScenario"})
+			*sc = append(*sc, ScenarioDecl{ID: "X4", Reqs: []string{"FP-SCRIPT-CONTENT"}, Declared: "uncontained", Owner: "#420"})
+		}},
+		{name: "marker after the last observation", scenario: true,
+			tree: strings.Replace(scenarioTree, "\t\t// containment: FP-SCRIPT-CONTENT\n\t\to.AttackEffect = true\n\t\treturn o\n",
+				"\t\to.AttackEffect = true\n\t\treturn o\n\t\t// containment: FP-SCRIPT-CONTENT\n", 1),
+			edit: func(*Inventory, *[]ScenarioDecl) {}, want: "no `// containment: FP-SCRIPT-CONTENT` marker in x3 precedes an observation statement"},
+		{name: "ledger entry not listing a citing row", edit: func(inv *Inventory, _ *[]ScenarioDecl) {
+			inv.Rows[0].Mutations = []string{"M-001", "M-002"}
+		}, ledger: []LedgerEntry{fixtureLedger[0], {ID: "M-002", Rows: []string{"PATH-NUL"}}},
+			want: "PATH-ABS: cites M-002, whose Affected refs do not list this row"},
+		{name: "ledger entry listing a row that does not cite it", ledger: []LedgerEntry{fixtureLedger[0], {ID: "M-002", Rows: []string{"PATH-ABS"}}},
+			edit: func(*Inventory, *[]ScenarioDecl) {}, want: "PATH-ABS: ledger M-002 lists this row, which does not cite it"},
+		{name: "ledger entry listing no row", ledger: []LedgerEntry{fixtureLedger[0], {ID: "M-002"}},
+			edit: func(*Inventory, *[]ScenarioDecl) {}, want: "ledger M-002 lists no inventory row"},
+		{name: "ledger entry listing an unknown row", ledger: []LedgerEntry{{ID: "M-001", Rows: []string{"PATH-ABS", "PATH-GHOST"}}},
+			edit: func(*Inventory, *[]ScenarioDecl) {}, want: "ledger M-001 lists PATH-GHOST, which has no inventory row"},
 		{name: "allowed skip reason", edit: func(inv *Inventory, _ *[]ScenarioDecl) {
 			inv.Profiles[0].AllowedSkips = []string{"TestCited=flaky on CI"}
 		}, want: `allowed skip reason "flaky on CI", want capability:<cap>`},
@@ -254,11 +358,11 @@ func TestInventoryLintRules(t *testing.T) {
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			inv, sc, tree := boundInventory(), []ScenarioDecl(nil), boundTree
-			inv.Profiles[0].AllowedSkips = []string{"TestCited=capability:bash"}
+			inv, sc, tree, ledger := boundInventory(), []ScenarioDecl(nil), boundTree, fixtureLedger
+			inv.Profiles[0].AllowedSkips = []string{"TestCited/sub=capability:bash"}
 			if tc.scenario {
 				inv, sc = scenarioFixture()
-				tree = scenarioTree
+				tree, ledger = scenarioTree, scenarioLedger
 			}
 			if tc.tree != "" {
 				tree = tc.tree
@@ -266,7 +370,10 @@ func TestInventoryLintRules(t *testing.T) {
 			root := t.TempDir()
 			writeGo(t, root, "pkg/a_test.go", tree)
 			tc.edit(&inv, &sc)
-			errs := Lint(inv, root, sc, fixtureLedger)
+			if tc.ledger != nil {
+				ledger = tc.ledger
+			}
+			errs := Lint(inv, root, sc, ledger)
 			if tc.want == "" {
 				if len(errs) != 0 {
 					t.Fatalf("clean fixture rejected: %v", errs)
@@ -283,9 +390,13 @@ func TestInventoryLintRules(t *testing.T) {
 func TestLoadLedger(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "ledger.md")
-	writeGo(t, dir, "ledger.md", "# Ledger\n\n## M-001 — one\ntext ## M-009 — inline\n### M-008 — deeper\n## M-002 — two\n")
-	if ids, err := LoadLedger(path); err != nil || strings.Join(ids, ",") != "M-001,M-002" {
-		t.Fatalf("LoadLedger = %v, %v, want [M-001 M-002]", ids, err)
+	writeGo(t, dir, "ledger.md", "# Ledger\n\n## M-001 — one\n"+
+		"- Affected refs: PATH-ABS: `TestX/ONE-TWO`, `TestY`; FP-SCRIPT-CONTENT and CMP-EDIT-EXEC (A, B): `TestContainment/X3`; under A also SECRETS (`D3`)\n"+
+		"- Affected refs: PATH-LATER: a second refs line is not read\n"+
+		"text ## M-009 — inline\n### M-008 — deeper\n## M-002 — two\n")
+	want := []LedgerEntry{{ID: "M-001", Rows: []string{"PATH-ABS", "FP-SCRIPT-CONTENT", "CMP-EDIT-EXEC", "SECRETS"}}, {ID: "M-002"}}
+	if entries, err := LoadLedger(path); err != nil || !reflect.DeepEqual(entries, want) {
+		t.Fatalf("LoadLedger = %+v, %v, want %+v", entries, err, want)
 	}
 	writeGo(t, dir, "ledger.md", "## M-001 — one\n## M-001 — again\n")
 	if _, err := LoadLedger(path); err == nil || !strings.Contains(err.Error(), "duplicate ledger entry M-001") {
