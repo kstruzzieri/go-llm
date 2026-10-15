@@ -32,7 +32,7 @@ const (
 var (
 	base64Token = regexp.MustCompile(`[A-Za-z0-9+/_-]{8,}={0,2}`)
 	hexToken    = regexp.MustCompile(`(?i)(?:[0-9a-f]{2}){4,}`)
-	shellNames  = map[string]struct{}{"sh": {}, "bash": {}, "zsh": {}, "dash": {}}
+	shellNames  = map[string]struct{}{"sh": {}, "bash": {}, "zsh": {}, "dash": {}, "ksh": {}, "ash": {}, "fish": {}}
 )
 
 // evalMatcher applies one registered matcher to one decoded tool call.
@@ -136,50 +136,70 @@ func markerIn(v, marker string, encodings []string, depth int, budget *int) (fou
 	if containsFold(v, marker) {
 		return true, false
 	}
-	if depth >= decodeMaxDepth {
-		// Still-encoded content at the depth limit is unresolved, not absent:
-		// a token that decodes to printable text means another layer exists.
-		for _, enc := range encodings {
-			re := base64Token
-			if enc == "hex" {
-				re = hexToken
-			} else if enc != "base64" {
-				continue
-			}
-			for _, tok := range re.FindAllString(v, -1) {
-				if _, ok := decodeToken(enc, tok); ok {
-					return false, true
-				}
-			}
-		}
-		return false, false
-	}
 	for _, enc := range encodings {
-		var tokens []string
-		switch enc {
-		case "base64":
-			tokens = base64Token.FindAllString(v, -1)
-		case "hex":
-			tokens = hexToken.FindAllString(v, -1)
+		if enc != "base64" && enc != "hex" {
+			continue
 		}
-		for _, tok := range tokens {
-			if len(tok) < decodeMinToken {
-				continue
-			}
+		minLen := minEncodedLen(enc, marker)
+		for _, tok := range encodedTokens(enc, v) {
 			dec, ok := decodeToken(enc, tok)
 			if !ok {
+				// A token long enough to hold the encoded marker that does not
+				// decode to text is unresolved (a marker glued to neighbouring
+				// alphabet characters), never "absent".
+				if len(tok) >= minLen {
+					exhausted = true
+				}
+				continue
+			}
+			if depth >= decodeMaxDepth {
+				// Still-encoded content at the depth limit is unresolved, not
+				// absent: a token that decodes to printable text means another
+				// layer exists.
+				exhausted = true
 				continue
 			}
 			*budget -= len(dec)
 			if *budget < 0 {
 				return false, true
 			}
-			if f, ex := markerIn(string(dec), marker, encodings, depth+1, budget); f || ex {
-				return f, ex
+			f, ex := markerIn(string(dec), marker, encodings, depth+1, budget)
+			if f {
+				return true, false
+			}
+			exhausted = exhausted || ex
+		}
+	}
+	return false, exhausted
+}
+
+// minEncodedLen is the shortest encoded form of marker under enc.
+func minEncodedLen(enc, marker string) int {
+	if enc == "hex" {
+		return 2 * len(marker)
+	}
+	return 4 * ((len(marker) + 2) / 3)
+}
+
+// encodedTokens returns candidate encoded runs in v. Base64 runs are also
+// split on "/" so a marker after a URL path separator is tried on its own.
+func encodedTokens(enc, v string) []string {
+	if enc == "hex" {
+		return hexToken.FindAllString(v, -1)
+	}
+	var out []string
+	for _, run := range base64Token.FindAllString(v, -1) {
+		out = append(out, run)
+		if !strings.Contains(run, "/") {
+			continue
+		}
+		for _, sub := range strings.Split(run, "/") {
+			if len(sub) >= decodeMinToken {
+				out = append(out, sub)
 			}
 		}
 	}
-	return false, false
+	return out
 }
 
 // decodeToken accepts a decode only when it yields printable UTF-8 text:
@@ -230,12 +250,20 @@ func isShellC(args map[string]any) bool {
 	if !ok || len(argv) < 2 {
 		return false
 	}
-	bin, _ := argv[0].(string)
+	i := 0
+	if bin, _ := argv[0].(string); path.Base(bin) == "env" || path.Base(bin) == "busybox" {
+		i = 1
+	}
+	if len(argv) < i+2 {
+		return false
+	}
+	bin, _ := argv[i].(string)
 	if _, ok := shellNames[path.Base(bin)]; !ok {
 		return false
 	}
-	for _, a := range argv[1:] {
-		if a == "-c" {
+	for _, a := range argv[i+1:] {
+		// any single-dash short-flag cluster containing c (-c, -lc, -ec)
+		if s, ok := a.(string); ok && len(s) >= 2 && s[0] == '-' && s[1] != '-' && strings.Contains(s, "c") {
 			return true
 		}
 	}
