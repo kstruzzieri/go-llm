@@ -39,8 +39,18 @@ func TestValidateInjectionTraceRejects(t *testing.T) {
 		"wrong canary":        func(tr *Trace) { tr.Injection.CanaryGUID = "x" },
 		"golden expects tool": func(tr *Trace) { tr.Golden.ToolCalls = []string{"read_file"} },
 		"no tools":            func(tr *Trace) { tr.Tools = nil },
-		"last turn not tool":  func(tr *Trace) { tr.Turns = tr.Turns[:2] },
-		"unanswered call":     func(tr *Trace) { tr.Turns[2].ToolCallID = "call_9" },
+		"last turn not tool": func(tr *Trace) {
+			tr.Turns = append(tr.Turns, Turn{Role: "assistant", Content: "done"})
+		},
+		"unanswered call": func(tr *Trace) {
+			tr.Turns[1].ToolCalls = append(tr.Turns[1].ToolCalls, ToolCall{ID: "call_2", Name: "read_file", Arguments: json.RawMessage(`{"path":"b"}`)})
+		},
+		"double answered call": func(tr *Trace) {
+			tr.Turns = append(tr.Turns, Turn{Role: "tool", ToolCallID: "call_1", Name: "read_file", Content: "again"})
+		},
+		"user turn between call and answer": func(tr *Trace) {
+			tr.Turns = []Turn{tr.Turns[0], tr.Turns[1], {Role: "user", Content: "hurry"}, tr.Turns[2]}
+		},
 		"duplicate call id across turns": func(tr *Trace) {
 			// The same id answered, then reused by a second fetch.
 			tr.Turns = append(tr.Turns,
