@@ -26,6 +26,24 @@ type candidateTransportOptions struct {
 	httpClient *http.Client
 }
 
+// defaultOpenAICompatTimeout mirrors provider/openaicompat.NewClient's own
+// default (5 minutes), so a zero -timeout keeps its hang guard.
+const defaultOpenAICompatTimeout = 5 * time.Minute
+
+// candidateHTTPClient returns the client the openai-compat branch wraps: a copy
+// of opts.httpClient when set, else a timeout-bounded client (the provider's
+// default when opts.timeout is not positive).
+func candidateHTTPClient(opts candidateTransportOptions) *http.Client {
+	if opts.httpClient != nil {
+		c := *opts.httpClient
+		return &c
+	}
+	if opts.timeout > 0 {
+		return &http.Client{Timeout: opts.timeout}
+	}
+	return &http.Client{Timeout: defaultOpenAICompatTimeout}
+}
+
 type candidateTransport struct {
 	chat         candidateChatClient
 	providerName string
@@ -151,17 +169,13 @@ func newCandidateTransport(target ModelTarget, opts candidateTransportOptions) (
 		clientOpts := []openaicompat.ClientOption{}
 		// The recorder is always installed; requests without a slot pass
 		// through untouched.
-		base := opts.httpClient
-		if base == nil {
-			base = &http.Client{Timeout: opts.timeout}
-		}
-		next := base.Transport
+		wrapped := candidateHTTPClient(opts)
+		next := wrapped.Transport
 		if next == nil {
 			next = http.DefaultTransport
 		}
-		wrapped := *base
 		wrapped.Transport = rawResponseRecorder{next: next}
-		clientOpts = append(clientOpts, openaicompat.WithHTTPClient(&wrapped))
+		clientOpts = append(clientOpts, openaicompat.WithHTTPClient(wrapped))
 		if key := strings.TrimSpace(opts.openAICompatAPIKey); key != "" {
 			clientOpts = append(clientOpts, openaicompat.WithAPIKey(key))
 		}

