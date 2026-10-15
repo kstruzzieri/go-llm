@@ -62,6 +62,15 @@ type SQLiteFeedbackStore struct {
 	// Close twice on a store opened via OpenSQLiteFeedbackStore does not
 	// double-close.
 	closeOnce sync.Once
+
+	// capHook, when non-nil, runs after runInTxBefore has capped busy_timeout
+	// at each phase, with the connection or transaction the cap went through,
+	// so a test can read back the value SQLite will use at BEGIN and at COMMIT
+	// instead of inferring it from elapsed time (#693). Test seam (precedent:
+	// queuedHook on slotAdmission); nil in production. Read unguarded: tests
+	// set it before the store's first deadline-bearing write and never change
+	// it afterward.
+	capHook func(capPhase, sqlExecer)
 }
 
 // NewSQLiteFeedbackStore wraps a caller-owned *sql.DB. Runs the schema
@@ -328,10 +337,22 @@ func (s *SQLiteFeedbackStore) RecordBatch(ctx context.Context, items []FeedbackI
 	})
 }
 
-// sqlExecer is the ExecContext method shared by *sql.Conn and *sql.Tx.
+// sqlExecer is the ExecContext and QueryRowContext pair shared by *sql.Conn
+// (the pinned connection before BEGIN) and *sql.Tx (the transaction before
+// COMMIT).
 type sqlExecer interface {
 	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
 }
+
+// capPhase names the point in a deadline-bearing write at which runInTxBefore
+// caps busy_timeout to the time left.
+type capPhase string
+
+const (
+	capBeforeBegin  capPhase = "before BEGIN"
+	capBeforeCommit capPhase = "before COMMIT"
+)
 
 func (s *SQLiteFeedbackStore) runInTx(ctx context.Context, fn func(*sql.Tx) error) error {
 	if deadline, ok := ctx.Deadline(); ok {
@@ -413,14 +434,17 @@ func (s *SQLiteFeedbackStore) runInTxBefore(ctx context.Context, deadline time.T
 		}
 		_ = conn.Close()
 	}()
-	capBusy := func(e sqlExecer) error {
+	capBusy := func(phase capPhase, e sqlExecer) error {
 		ms := min(max(time.Until(deadline).Milliseconds(), 0), saved)
 		if _, err := e.ExecContext(ctx, fmt.Sprintf("PRAGMA busy_timeout = %d", ms)); err != nil {
 			return fmt.Errorf("provider: SQLiteFeedbackStore cap busy_timeout: %w", err)
 		}
+		if s.capHook != nil {
+			s.capHook(phase, e)
+		}
 		return nil
 	}
-	if err := capBusy(conn); err != nil {
+	if err := capBusy(capBeforeBegin, conn); err != nil {
 		return err
 	}
 	tx, err = conn.BeginTx(context.WithoutCancel(ctx), nil)
@@ -433,7 +457,7 @@ func (s *SQLiteFeedbackStore) runInTxBefore(ctx context.Context, deadline time.T
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf("provider: SQLiteFeedbackStore before commit: %w", err)
 	}
-	if err := capBusy(tx); err != nil {
+	if err := capBusy(capBeforeCommit, tx); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {

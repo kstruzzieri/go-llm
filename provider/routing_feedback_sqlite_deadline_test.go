@@ -132,6 +132,28 @@ func assertBusyTimeouts(t *testing.T, db *sql.DB, n int, want int64) {
 	}
 }
 
+// recordedCaps installs store.capHook and returns, per phase and in order, the
+// busy_timeout SQLite reports on the write's own connection right after the
+// store capped it: ground truth for the cap in effect at BEGIN and at COMMIT,
+// with no wall clock involved (#693). The map is written from the write's
+// goroutine, so read it only after the write has returned, and record one
+// deadline-bearing write per store.
+func recordedCaps(t *testing.T, store *SQLiteFeedbackStore) map[capPhase][]int64 {
+	t.Helper()
+	caps := map[capPhase][]int64{}
+	store.capHook = func(phase capPhase, e sqlExecer) {
+		var got int64
+		// Background, not the write's ctx: an interrupt raised here by an
+		// expiring ctx would stay on the pinned connection (see runInTxBefore).
+		if err := e.QueryRowContext(context.Background(), "PRAGMA busy_timeout").Scan(&got); err != nil {
+			t.Errorf("read busy_timeout %s: %v", phase, err)
+			return
+		}
+		caps[phase] = append(caps[phase], got)
+	}
+	return caps
+}
+
 func testFeedbackItem(model string) FeedbackItem {
 	return FeedbackItem{
 		Key:    FeedbackKey{Provider: "p", Model: model, UseCase: "chat"},
@@ -256,13 +278,22 @@ func TestSQLiteFeedbackStoreDeductsPoolWait(t *testing.T) {
 }
 
 // Test 5: the cap is refreshed before COMMIT, which in rollback-journal mode
-// needs EXCLUSIVE and waits on readers.
+// needs EXCLUSIVE and waits on readers. The proof is the busy_timeout SQLite
+// reports right after each cap: the one before COMMIT must sit at least the
+// 1200ms fn slept below the one before BEGIN. Elapsed time is not the proof:
+// SQLite charges only its requested sleeps against busy_timeout, so slow lock
+// I/O stretches the wait past the cap (3.43s on a hosted Windows runner, #693)
+// while the stale-cap defect lands near 3.2s; no ceiling separates them. What
+// remains of the wall clock is a lower bound (slow I/O only lengthens a wait)
+// and a gross 5s ceiling under the 6.2s a write with no cap at all takes with
+// the DSN's 5000ms.
 func TestSQLiteFeedbackStoreRefreshesCapBeforeCommit(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feedback.db")
 	db := openFeedbackFileDB(t, path, "_pragma=busy_timeout(5000)", 1)
 	execFeedbackSQL(t, db, "PRAGMA journal_mode=DELETE")
 	store := newFileFeedbackStore(t, db)
 	markConn(t, db)
+	caps := recordedCaps(t, store)
 	release := holdFeedbackLock(t, path, "BEGIN", "SELECT COUNT(*) FROM routing_feedback_signals")
 	start := time.Now()
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
@@ -279,16 +310,31 @@ func TestSQLiteFeedbackStoreRefreshesCapBeforeCommit(t *testing.T) {
 	})
 	elapsed := time.Since(start)
 	release()
-	t.Logf("ELAPSED refresh-before-commit %v", elapsed)
+	t.Logf("ELAPSED refresh-before-commit %v caps %v", elapsed, caps)
 	if !insertedLive {
 		t.Fatal("fixture invalid: the INSERT did not finish while the deadline was live")
 	}
+	// A deadline that expired inside fn returns the ctx error from the
+	// "before commit" check, not a *sqlite.Error, and stops here.
 	var se *sqlite.Error
 	if !errors.As(err, &se) || se.Code()&255 != 5 {
 		t.Fatalf("fixture invalid: err = %v, want SQLITE_BUSY from the contended COMMIT", err)
 	}
-	if elapsed < 1500*time.Millisecond || elapsed > 2600*time.Millisecond {
-		t.Fatalf("returned after %v, want 1.5s..2.6s (COMMIT waits out the rest of the budget)", elapsed)
+	if len(caps[capBeforeBegin]) != 1 || len(caps[capBeforeCommit]) != 1 {
+		t.Fatalf("caps = %v, want exactly one %s and one %s", caps, capBeforeBegin, capBeforeCommit)
+	}
+	beginCap, commitCap := caps[capBeforeBegin][0], caps[capBeforeCommit][0]
+	if beginCap <= 1200 {
+		t.Fatalf("fixture invalid: busy_timeout %s = %dms, want more than the 1200ms fn sleeps", capBeforeBegin, beginCap)
+	}
+	// fn slept at least 1200ms between the two caps, so the time left, and
+	// with it the cap, dropped by at least 1200 whole milliseconds
+	// (Milliseconds truncates). A stale cap reads back equal to beginCap.
+	if commitCap > beginCap-1200 {
+		t.Fatalf("busy_timeout %s = %dms, want at most %dms (%s cap %dms minus the 1200ms spent in fn): the cap was not refreshed", capBeforeCommit, commitCap, beginCap-1200, capBeforeBegin, beginCap)
+	}
+	if elapsed < 1500*time.Millisecond || elapsed > 5*time.Second {
+		t.Fatalf("returned after %v, want 1.5s..5s (COMMIT waits out the rest of the budget; no cap at all would wait the DSN's 5s)", elapsed)
 	}
 	// modernc rolled the failed COMMIT back, so the store keeps the
 	// connection, and that connection is outside any transaction.
