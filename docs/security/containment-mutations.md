@@ -2,7 +2,7 @@
 
 Each entry proves one security property's assertions can fail. Entries are point-in-time evidence at their baseline revision.
 
-Every entry below was run at `317d351a` on a darwin host (the two attack-only variants added in review, M-045 B and M-047 B, at `9db725e7`, whose production and scenario trees are identical): the baseline passed, the mutant failed as shown, and the tree was restored with `git checkout` and passed again. Entries carried over from the PR 2 delivery record name the draft entry they were first recorded as; they were re-run here so every command, diff and line number matches one revision. Apply a patch with `git apply`, run the command, then restore with `git checkout -- <file>`. `guard` entries remove or weaken the protection the refs assert. `effect-detection` entries change the effect path of an uncontained scenario: they show its probe can read a change in outcome, not that a guard is absent. Rows exempt from this ledger (pending, unobserved, out-of-scope, administrative, and ENV-BWRAP, whose native profile needs a Linux host) carry their exempt reason in the inventory (`docs/security/containment-inventory.json`, rendered in `docs/security/containment-inventory.md`).
+Every entry below was run at `317d351a` on a darwin host (the two attack-only variants added in review, M-045 B and M-047 B, at `9db725e7`, whose production and scenario trees are identical; M-051 to M-053 at the commit that adds them, whose parent is `be03ef59`): the baseline passed, the mutant failed as shown, and the tree was restored with `git checkout` and passed again. Entries quote test output, the containment judge's message text and line numbers included, as it read at their baseline; later wording changes do not rewrite them. Entries carried over from the PR 2 delivery record name the draft entry they were first recorded as; they were re-run here so every command, diff and line number matches one revision. Apply a patch with `git apply`, run the command, then restore with `git checkout -- <file>`. `guard` entries remove or weaken the protection the refs assert. `effect-detection` entries change the effect path of an uncontained scenario: they show its probe can read a change in outcome, not that a guard is absent. Rows exempt from this ledger (pending, out-of-scope, unobserved such as ENV-BWRAP, whose native bwrap profile needs a Linux host, and administrative META- rows; the inventory lint allows no other verified or uncontained row an exemption) carry their exempt reason in the inventory (`docs/security/containment-inventory.json`, rendered in `docs/security/containment-inventory.md`).
 
 ## M-001 — Absolute paths are rejected by the workspace path cleaner
 - Affected refs: PATH-ABS: `TestHardeningContracts/Active/Workspace/confinement_and_arguments/public_confinement/owned_absolute_sibling`, `TestWorkspaceCleanRelContainment/absolute_escape`, `TestContainment/W1`
@@ -1454,29 +1454,126 @@ Every entry below was run at `317d351a` on a darwin host (the two attack-only va
 - Kind: guard
 - Notes: registerMemoryTools registers the tools without a configured store. The row's `TestAgentMemoryCreateHappyPaths/durable_workspace` and `/durable_global_with_explicit_scope` refs stay green: they are positive controls for the configured surface, not detectors of this gate.
 
+## M-051 — A skip or failure under a cited parent leaf counts as that leaf's own
+- Affected refs: META-GATE: `TestCheckerRejectsSkippedChildOfCitedParent`
+- Baseline: the commit that adds this entry (parent `be03ef59`); first recorded as PR2-FW-1 (fix wave)
+- Profile / command: darwin-host / `go test -count=1 -run '^(TestChecker|TestDecideRun)' -v ./internal/containmentinv`
+- Patch:
+  ```diff
+  diff --git a/internal/containmentinv/checker.go b/internal/containmentinv/checker.go
+  --- a/internal/containmentinv/checker.go
+  +++ b/internal/containmentinv/checker.go
+  @@ -152,7 +152,7 @@ func Evaluate(events []TestEvent, leaves []string, allowedSkips []string) []erro
+   			continue
+   		}
+   		for _, test := range tests {
+  -			if test != leaf && !strings.HasPrefix(test, leaf+"/") {
+  +			if test != leaf {
+   				continue
+   			}
+   			switch final[test] {
+  ```
+- Baseline: pass. Mutant: FAIL `TestCheckerRejectsSkippedChildOfCitedParent` (`checker_test.go:110: a skipped subtest of a cited parent accepted: []`). Restored: pass.
+- Kind: guard
+- Notes: The mutant is the checker as it stood before the fix wave: `go test` reports a parent whose subtest skipped as pass, so a cited parent hid the skip. Every other checker test stays green under it; the review's proof stream (run TestP, run TestP/child, skip TestP/child with `capability:bash`, pass TestP, pass the package, empty allow-list) is the test's first case.
+
+## M-052 — Only an administrative META- row may claim a mutation exemption
+- Affected refs: META-MUTATION: `TestCommittedInventory` (data mutation below); rule cases `TestInventoryLintRules/exempt_reason_on_a_verified_security_row`, `TestInventoryLintRules/exempt_reason_on_an_uncontained_row`
+- Baseline: the commit that adds this entry (parent `be03ef59`); first recorded as PR2-FW-7 (fix wave)
+- Profile / command: darwin-host / `go test -count=1 -run '^TestInventoryLintRules$' -v ./internal/containmentinv`
+- Patch:
+  ```diff
+  diff --git a/internal/containmentinv/lint.go b/internal/containmentinv/lint.go
+  --- a/internal/containmentinv/lint.go
+  +++ b/internal/containmentinv/lint.go
+  @@ -135,7 +135,7 @@ func lintRow(r Row, decls map[string]ScenarioDecl, profiles, ledger map[string]b
+   	// administrative (META-); any other such row cites the ledger.
+   	if kind == "verified" || kind == "uncontained" {
+   		switch {
+  -		case r.Exempt != "" && !strings.HasPrefix(r.ID, "META-"):
+  +		case false:
+   			add("%s row carries an exempt reason; only an administrative META- row may, any other cites a mutation ledger entry", kind)
+   		case r.Layer != "model" && r.Exempt == "" && len(r.Mutations) == 0:
+   			add("%s row cites no mutation ledger entry and has no exempt reason", kind)
+  ```
+- Baseline: pass. Mutant: FAIL `TestInventoryLintRules/exempt_reason_on_a_verified_security_row` (`inventory_test.go:277: want an error containing "PATH-ABS: verified row carries an exempt reason; only an administrative META- row may", got []`); FAIL `TestInventoryLintRules/exempt_reason_on_an_uncontained_row` (`inventory_test.go:277: want an error containing "FP-SCRIPT-CONTENT: uncontained row carries an exempt reason", got []`). Restored: pass.
+- Kind: guard
+- Notes: Data mutation of the committed inventory: ENV-BWRAP's status set back to `verified` (its Exempt reason kept, as before the fix wave) turned `go test -count=1 -run '^TestCommittedInventory$' ./internal/containmentinv` red (`inventory_test.go:346: ENV-BWRAP: verified row carries an exempt reason; only an administrative META- row may, any other cites a mutation ledger entry`, plus the stale-Markdown check); restored byte-identical. ENV-BWRAP is now `unobserved(bwrap)` until its mutation runs on a Linux host with bwrap.
+
+## M-053 — linux-host allows no skip, and every allowed skip names a capability
+- Affected refs: META-INVENTORY: `TestCommittedInventory` (data mutations below); rule cases `TestInventoryLintRules/linux-host_allows_no_skip`, `TestInventoryLintRules/allowed_skip_reason`
+- Baseline: the commit that adds this entry (parent `be03ef59`); first recorded as PR2-FW-8 and PR2-FW-9 (fix wave)
+- Profile / command: darwin-host / `go test -count=1 -run '^TestInventoryLintRules$' -v ./internal/containmentinv`
+- Patch (A, linux-host may allow a skip):
+  ```diff
+  diff --git a/internal/containmentinv/lint.go b/internal/containmentinv/lint.go
+  --- a/internal/containmentinv/lint.go
+  +++ b/internal/containmentinv/lint.go
+  @@ -313,7 +313,7 @@ func lintProfiles(inv Inventory) []error {
+   			errs = append(errs, fmt.Errorf("profile %q: empty or duplicate name", p.Name))
+   		}
+   		seen[p.Name] = true
+  -		if p.Name == "linux-host" && len(p.AllowedSkips) > 0 {
+  +		if false && p.Name == "linux-host" && len(p.AllowedSkips) > 0 {
+   			errs = append(errs, fmt.Errorf("profile linux-host must allow no skip, allows %s", strings.Join(p.AllowedSkips, ", ")))
+   		}
+   		for _, skip := range p.AllowedSkips {
+  ```
+- Patch (B, a skip reason may take any form):
+  ```diff
+  diff --git a/internal/containmentinv/lint.go b/internal/containmentinv/lint.go
+  --- a/internal/containmentinv/lint.go
+  +++ b/internal/containmentinv/lint.go
+  @@ -322,7 +322,7 @@ func lintProfiles(inv Inventory) []error {
+   				errs = append(errs, fmt.Errorf("profile %s: allowed skip %q, want <leaf>=<reason>", p.Name, skip))
+   				continue
+   			}
+  -			if !capabilitySkip.MatchString(reason) {
+  +			if false && !capabilitySkip.MatchString(reason) {
+   				errs = append(errs, fmt.Errorf("profile %s: allowed skip reason %q, want capability:<cap>", p.Name, reason))
+   			}
+   			if !mandatoryLeaf(inv.Rows, p.Name, leaf) {
+  ```
+- Baseline: pass. Mutant A: FAIL `TestInventoryLintRules/linux-host_allows_no_skip` (`inventory_test.go:277: want an error containing "profile linux-host must allow no skip, allows TestCited=capability:bash", got []`). Mutant B: FAIL `TestInventoryLintRules/allowed_skip_reason` (`inventory_test.go:277: want an error containing "allowed skip reason \"flaky on CI\", want capability:<cap>", got []`). Restored: pass.
+- Kind: guard
+- Notes: Data mutations of the committed inventory, each turning `go test -count=1 -run '^TestCommittedInventory$' ./internal/containmentinv` red and restored byte-identical: an allowed skip `TestContainment/W3=capability:symlink` added to linux-host (`inventory_test.go:346: profile linux-host must allow no skip, allows TestContainment/W3=capability:symlink`); the windows skip `TestContainment/E1=capability:unix` changed to `TestContainment/E1=unix` (`inventory_test.go:346: profile windows: allowed skip reason "unix", want capability:<cap>`). The checker matches every skip, including one under a cited parent (M-051), against the profile's list (`TestCheckerRejectsSkipOnLinuxHost`); this lint keeps that list empty on linux-host and capability-shaped elsewhere.
+
 ## Administrative evidence
 
-These mutations prove the harness, inventory lint, checker and gate rules can fail. They are not security properties and carry no M entry; META-INVENTORY and META-GATE cite this section. IDs refer to the PR 2 delivery draft, which records each diff, command and first failing line; PR2-T15-* are this ledger's own lint rule. The draft is the gitignored delivery record at docs/superpowers/evidence/452/mutations-pr2.md in the maintainer's checkout and is not in the repository.
+These mutations prove the harness, inventory lint, checker and gate rules can fail. They are not security properties and carry no M entry; META-INVENTORY and META-GATE cite this section. The exceptions are the gate rules whose regression would let the security gate pass a skipped or exempted security assertion: the checker's child-skip rule (M-051), the exemption rule (M-052) and the profile skip pins (M-053). Each row names the rule, the test that pins it and the first failing line observed under its mutation, quoted at the revision where it was recorded; line numbers may have moved since. The full diffs and commands live in the maintainer's gitignored delivery record (docs/superpowers/evidence/452/mutations-pr2.md in the maintainer's checkout), which is not in the repository.
 
-| Rule | Test | Draft entry |
+| Rule | Test | First failing line under its mutation |
 |---|---|---|
-| The judge rejects an invalid fixture (validity before outcome) | `TestContainmentValidityRejectsWrongBoundary` | PR2-T1-1 |
-| The judge requires the matched control's effect | `TestContainmentControlMustSucceed` | PR2-T1-2 |
-| compareEnv reports each result class (duplicate, unexpected, mismatch, missing) | `TestCompareEnv` | PR2-T4-2 |
-| Declared outcome counts are pinned | `TestContainmentDeclaredRate` | PR2-T9-1 |
-| Pending and out-of-scope rows never execute | `TestContainmentRegistryIntegrity` | PR2-T9-2 |
-| The security gate rejects the retired #431 skip | `scripts/test-ci-local` (`aggregate-completed-431-security`) | PR2-T10-2 |
-| The system-position assertion is non-vacuous (test-side edit) | `TestContainmentSignedPoisonedMemory` | PR2-T12-2 |
-| Markers sit in the cited function; orphans are reported | `TestCommittedInventory` | PR2-T13-1 to PR2-T13-3 |
-| Lint: marker placement, unknown IDs, derived status, pending owner and refs | `TestInventoryMarkerMustSitInCitedFunction`, `TestInventoryOrphanMarkerFails`, `TestInventoryScenarioStatusDerived`, `TestInventoryPendingNeedsOwnerAndNoRefs` | PR2-T13-4 to PR2-T13-8 |
-| Lint: one rule per case (refs, markers, IDs, layers, statuses, owners, evidence, profiles, skips, scenarios) | `TestInventoryLintRules/<case>` | PR2-T13-9 to PR2-T13-37 |
-| Load: unknown fields, other schema, duplicate IDs, trailing data | `TestInventoryLoadRejects/<case>` | PR2-T13-38 to PR2-T13-41 |
-| Checker: a skip needs an allowed reason; each leaf needs its events | `TestCheckerRejectsSkipOnLinuxHost`, `TestCheckerRequiresEachEvent` | PR2-T14-1, PR2-T14-2 |
-| Checker: run patterns quote each component | `TestRunPatternQuotesEachComponent` | PR2-T14-3 |
-| Checker: source digest failure rule | `TestCheckerSourceDigestFailure` | PR2-T14-4 |
-| Checker: evidence binds the platform | `TestCheckerEvidenceBindsPlatform` | PR2-T14-5 |
-| Checker: runs are planned per package, once per leaf | `TestPlanRunsGroupsByPackage` | PR2-T14-6 |
-| Checker: the skip reason is the skip line | `TestCheckerSkipReasonIsTheSkipLine` | PR2-T14-7 |
-| Lint: a non-exempt verified or uncontained row cites an existing ledger entry | `TestInventoryLintRules/mutation_missing`, `/mutation_missing_on_uncontained`, `/mutation_unknown`, `/exempt_row_needs_no_mutation` | PR2-T15-1 to PR2-T15-3 |
-| Lint: the mutation rule excludes model-layer rows | `TestInventoryLintRules/model_row_needs_no_mutation` | PR2-T15-5 |
-| Ledger loader rejects a duplicate entry | `TestLoadLedger` | PR2-T15-4 |
+| The judge rejects an invalid fixture (validity before outcome) | `TestContainmentValidityRejectsWrongBoundary` | `containment_test.go:227: invalid fixture reported as containment: <nil>` |
+| The judge requires the matched control's effect | `TestContainmentControlMustSucceed` | `containment_test.go:234: a failed control passed: <nil>` |
+| compareEnv reports each result class (duplicate, unexpected, mismatch, missing) | `TestCompareEnv` | one mutation per class, for example duplicates dropped: `TestCompareEnv/duplicate_PATH`: `duplicate = [], want [PATH]`; likewise `unexpected = [], want [SECRET]`, `mismatch = [], want [USER]`, `missing = [], want [LANG]` |
+| Declared outcome counts are pinned | `TestContainmentDeclaredRate` | `containment_test.go:317: declared 17/6/16/1, want 17 contained, 6 uncontained, 17 pending, 1 out-of-scope (spec §5.3)` |
+| Pending and out-of-scope rows never execute | `TestContainmentRegistryIntegrity` | `containment_test.go:288: S1: run present=true but declared pending` |
+| The security gate rejects the retired #431 skip | `scripts/test-ci-local` (`aggregate-completed-431-security`) | `aggregate-completed-431-security: got exit 0, want 1` |
+| The system-position assertion is non-vacuous (test-side edit) | `TestContainmentSignedPoisonedMemory` | `agent_memory_signed_test.go:87: request 1: system message carries the canary: ...` (the record text, canary included) |
+| Markers sit in the cited function; orphans are reported | `TestCommittedInventory` | ``inventory_test.go:142: FP-PLAN-INVOKE-SWAP: no `// containment: FP-PLAN-INVOKE-SWAP` marker inside TestInvokeExecutableChangedFailsClosed (agent/tools/exec_test.go) for TestInvokeExecutableChangedFailsClosed`` (a marker moved to the neighbouring function); a deleted marker fails the same way; an orphan: `inventory_test.go:142: cmd/golem/headless_test.go:263: marker "GRANT-HEADLESS-BOGUS" names no inventory row` |
+| Lint: a marker must sit in the cited function | `TestInventoryMarkerMustSitInCitedFunction` | `inventory_test.go:47: marker in the wrong function passed lint: [PATH-ABS: row has refs but lists no mandatory profile pkg/a_test.go:5: PATH-ABS marker in TestOther is not cited by any PATH-ABS ref]` |
+| Lint: an unknown marker ID is reported as unknown | `TestInventoryOrphanMarkerFails` | `inventory_test.go:86: marker naming no inventory row: got [pkg/b_test.go:4: PATH-GHOST marker in TestStray is not cited by any PATH-GHOST ref], want exactly one error naming PATH-GHOST as unknown` |
+| Lint: a stored status may not contradict the registry | `TestInventoryScenarioStatusDerived` | `inventory_test.go:94: stored status disagreeing with the registry passed: [...]` (the remaining errors, none naming the derived status) |
+| Lint: a pending row needs an owner and carries no refs | `TestInventoryPendingNeedsOwnerAndNoRefs` | owner rule: `inventory_test.go:110: pending row without an owner passed: []`; refs rule: `inventory_test.go:121: pending row with refs passed: []` |
+| Lint: one rule per case (refs, markers, IDs, layers, statuses, owners, evidence, profiles, skips, scenarios) | `TestInventoryLintRules/<case>` | each case fails with its own message, for example `inventory_test.go:249: want an error containing "PATH-ABS: duplicate row ID", got []`; the allowed-skip leaf check's positive control fails as `inventory_test.go:244: clean fixture rejected: [profile linux-host: allowed skip for TestCited, which no row mandatory on linux-host cites]` |
+| Load: unknown fields, other schema, duplicate IDs, trailing data | `TestInventoryLoadRejects/<case>` | `inventory_test.go:277: want an error containing "unknown field \"statsu\"", got <nil>`; likewise for the schema, duplicate ID and trailing data cases |
+| Checker: a skip needs an allowed reason | `TestCheckerRejectsSkipOnLinuxHost` | `checker_test.go:83: skip accepted with an empty allow-list` |
+| Checker: each leaf needs its events | `TestCheckerRequiresEachEvent` | `checker_test.go:67: stream without leaf pass accepted` |
+| Checker: run patterns quote each component | `TestRunPatternQuotesEachComponent` | `checker_test.go:18: pattern` (the TestX alternative was `^(a+b(c))$`, want `^(a\+b\(c\))$`) |
+| Checker: source digest failure rule | `TestCheckerSourceDigestFailure` | `checker_test.go:172: forwarded identity with an unreadable checkout accepted: {SourceDigest:unknown Tree:abc123 Commit:def456 Dirty:false ...}` |
+| Checker: evidence binds the platform | `TestCheckerEvidenceBindsPlatform` | `checker_test.go:198: linux-host on darwin: dirty false profile "linux-host", want dirty true profile linux-host` |
+| Checker: runs are planned per package, once per leaf | `TestPlanRunsGroupsByPackage` | `checker_test.go:126: PlanRuns` (a third run for the other profile's package, `{Package:./c Pattern:^(TestC)$ ...}`) |
+| Checker: the skip reason is the skip line | `TestCheckerSkipReasonIsTheSkipLine` | `checker_test.go:151: skip with its own reason rejected: [TestContainment/W3: skipped (capability:bash), not an allowed skip]` |
+| Checker: a nonzero go test exit fails a clean-looking stream | `TestDecideRun/clean_stream,_go_test_failed` | `checker_test.go:183: want an error containing "go test: exit status 1" and nothing executed, got executed [TestContainment/A1 TestContainment/X2a] errs []` |
+| Checker: the stream decodes strictly (both checks removed) | `TestDecideRun/build_failure`, `/build_event_with_ImportPath`, `/unknown_field`, `/build_action_without_ImportPath`, `/event_without_an_action` | `checker_test.go:183: want an error containing "malformed go test -json stream" and nothing executed, got executed [] errs [TestContainment/X2a: never ran TestContainment/A1: never ran package did not pass (terminal action "fail") go test: exit status 1]` |
+| Checker: an event with a field test2json does not emit is rejected | `TestDecideRun/unknown_field` | `checker_test.go:183: want an error containing "unknown field \"Extra\"" and nothing executed, got executed [TestContainment/A1 TestContainment/X2a] errs []` |
+| Checker: a build action or an empty action is not a test event | `TestDecideRun/build_action_without_ImportPath`, `/event_without_an_action` | `checker_test.go:183: want an error containing "not a test event (action \"build-fail\")" and nothing executed, got executed [TestContainment/A1 TestContainment/X2a] errs []` |
+| Checker: a decode failure fails the run even after a complete stream | `TestDecideRun/text_line_after_the_package_pass` (the only case no other check catches) and the five decode cases | first: the same `build_failure` line as the row above; the isolating case: `checker_test.go:183: want an error containing "malformed go test -json stream after 8 events" and nothing executed, got executed [TestContainment/A1 TestContainment/X2a] errs []` |
+| Lint: a verified or uncontained row outside the model layer cites an existing ledger entry | `TestInventoryLintRules/mutation_missing`, `/mutation_missing_on_uncontained`, `/mutation_unknown` | `inventory_test.go:261: want an error containing "PATH-ABS: verified row cites no mutation ledger entry", got []`; unknown entry: `inventory_test.go:261: want an error containing "mutation M-999 is not an entry of the mutation ledger", got []` |
+| Lint: an exempt administrative row needs no mutation | `TestInventoryLintRules/exempt_row_needs_no_mutation` | `inventory_test.go:256: clean fixture rejected: [PATH-ABS: verified row cites no mutation ledger entry and has no exempt reason]` (recorded when the fixture was a PATH row; it is a META- row since M-052) |
+| Lint: the mutation rule excludes model-layer rows | `TestInventoryLintRules/model_row_needs_no_mutation` | `inventory_test.go:259: clean fixture rejected: [MODEL-STRATA: verified row cites no mutation ledger entry and has no exempt reason]` |
+| Ledger loader rejects a duplicate entry | `TestLoadLedger` | `inventory_test.go:276: duplicate entry: err = <nil>, want duplicate ledger entry M-001` |
+| ci-local writes the containment evidence to a fresh mktemp file | `scripts/test-ci-local` (`default`) | the expected-log diff: `-evidence-out <mktemp>` expected, `-evidence-out <TMPDIR>/containment-evidence.json` logged |
+| ci-local prints the evidence path | `scripts/test-ci-local` (`security`) | `security: evidence went to <TMPDIR>/containment-evidence.<random>, want <TMPDIR>/containment-evidence.<random> printed as such` |
+| The pre-push hook forwards a bare-tree tag's tree with an empty commit | `scripts/test-ci-local` (`hook-tree-tag`) | `hook-tree-tag: got exit 1, want 0` |

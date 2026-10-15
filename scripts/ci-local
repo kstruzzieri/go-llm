@@ -5,15 +5,19 @@ set -euo pipefail
 # bwrap and Seatbelt confinement.
 
 mode="pre-push"
+evidence_out=""
 
 usage() {
   cat <<'USAGE'
-Usage: scripts/ci-local [--mode security|pre-push|full]
+Usage: scripts/ci-local [--mode security|pre-push|full] [--evidence-out PATH]
 
 Modes:
   security  Run only the hardening-contract phase (used by the GitHub CI job).
   pre-push  Run fast deterministic checks intended for every push.
   full      Run pre-push checks plus slower compile smoke checks.
+
+--evidence-out names the containment evidence file; without it the evidence
+goes to a fresh mktemp file. Either way the path is printed.
 USAGE
 }
 
@@ -43,6 +47,15 @@ while [ "$#" -gt 0 ]; do
     --mode=*)
       mode="${1#*=}"
       shift
+      ;;
+    --evidence-out)
+      if [ "$#" -lt 2 ] || [ -z "$2" ]; then
+        printf '%s\n' '--evidence-out requires a path' >&2
+        usage >&2
+        exit 2
+      fi
+      evidence_out="$2"
+      shift 2
       ;;
     -h|--help)
       usage
@@ -149,14 +162,21 @@ fi
 
 # The execution checker is the single runner of the containment inventory:
 # every ref mandatory on linux-host, TestContainment's scenario leaves
-# included, must run and pass with no skip (docs/local-ci.md).
+# included, must run and pass with no skip (docs/local-ci.md). The evidence
+# goes to a fresh mktemp file unless --evidence-out names one (the CI job);
+# the checker's success line repeats its tree, commit and source digest for
+# runs whose file is discarded, such as the pre-push container.
 section "containment inventory"
+if [ -z "$evidence_out" ]; then
+  evidence_out="$(mktemp "${TMPDIR:-/tmp}/containment-evidence.XXXXXXXX")"
+fi
 containment_status=0
-go run ./internal/containmentinv/check -inventory docs/security/containment-inventory.json -profile linux-host -evidence-out "${TMPDIR:-/tmp}/containment-evidence.json" || containment_status=$?
+go run ./internal/containmentinv/check -inventory docs/security/containment-inventory.json -profile linux-host -evidence-out "$evidence_out" || containment_status=$?
 if [ "$containment_status" -ne 0 ]; then
   printf 'containment inventory check failed (profile linux-host)\n' >&2
   exit "$containment_status"
 fi
+printf 'containment evidence: %s\n' "$evidence_out"
 if [ "$mode" = security ]; then
   exit 0
 fi

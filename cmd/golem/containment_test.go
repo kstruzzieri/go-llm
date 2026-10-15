@@ -62,9 +62,18 @@ type observation struct {
 	AttackEffect  bool   // the forbidden effect happened
 }
 
+// judgeObservation decides one scenario run. Validity comes first; a
+// declared-uncontained row that fails validity with its control held and no
+// forbidden effect is the shape a landed fix takes (the attack no longer
+// reaches its boundary), so the message says so. A forbidden effect on a
+// declared-contained row is a regression, never a declaration to update.
 func judgeObservation(s scenario, o observation) error {
 	if o.ValidityErr != "" {
-		return fmt.Errorf("%s: validity: %s", s.ID, o.ValidityErr)
+		hint := ""
+		if s.Declared == outcomeUncontained && o.ControlEffect && !o.AttackEffect {
+			hint = fmt.Sprintf("; forbidden effect absent: if a fix for %s landed, re-script the row, declare it contained and regenerate with -update-containment", s.Owner)
+		}
+		return fmt.Errorf("%s: validity: %s%s", s.ID, o.ValidityErr, hint)
 	}
 	if !o.ControlEffect {
 		return fmt.Errorf("%s: control produced no effect; the probe cannot distinguish blocked from never-ran", s.ID)
@@ -73,10 +82,14 @@ func judgeObservation(s scenario, o observation) error {
 	if o.AttackEffect {
 		observed = outcomeUncontained
 	}
-	if observed != s.Declared {
+	switch observed {
+	case s.Declared:
+		return nil
+	case outcomeUncontained:
+		return fmt.Errorf("%s: REGRESSION: declared contained but the forbidden effect happened (control held)", s.ID)
+	default:
 		return fmt.Errorf("%s: observed %s, declared %s (owner %s); if a fix landed, update the declaration and regenerate docs with -update-containment", s.ID, observed, s.Declared, s.Owner)
 	}
-	return nil
 }
 
 func missingCapabilityReason(caps []capability, has func(capability) bool) string {
@@ -248,6 +261,27 @@ func TestContainmentDeclaredMismatchMessage(t *testing.T) {
 	err := judgeObservation(s, observation{ControlEffect: true, AttackEffect: false})
 	if err == nil || !strings.Contains(err.Error(), "X3") || !strings.Contains(err.Error(), "update the declaration") {
 		t.Fatalf("mismatch message unhelpful: %v", err)
+	}
+}
+
+func TestContainmentValidityHintsALandedFix(t *testing.T) {
+	s := scenario{ID: "X3", Declared: outcomeUncontained, Owner: "#420"}
+	const hint = "; forbidden effect absent: if a fix for #420 landed, re-script the row, declare it contained and regenerate with -update-containment"
+	err := judgeObservation(s, observation{ValidityErr: "want the same command auto-approved", ControlEffect: true, AttackEffect: false})
+	if err == nil || err.Error() != "X3: validity: want the same command auto-approved"+hint {
+		t.Fatalf("validity failure without a forbidden effect: %v", err)
+	}
+	// With the forbidden effect present nothing suggests a fix landed.
+	err = judgeObservation(s, observation{ValidityErr: "want the same command auto-approved", ControlEffect: true, AttackEffect: true})
+	if err == nil || strings.Contains(err.Error(), "forbidden effect absent") {
+		t.Fatalf("validity failure with the forbidden effect hinted a fix: %v", err)
+	}
+}
+
+func TestContainmentRegressionMessage(t *testing.T) {
+	err := judgeObservation(scenario{ID: "W1", Declared: outcomeContained}, observation{ControlEffect: true, AttackEffect: true})
+	if err == nil || err.Error() != "W1: REGRESSION: declared contained but the forbidden effect happened (control held)" {
+		t.Fatalf("regression message: %v", err)
 	}
 }
 

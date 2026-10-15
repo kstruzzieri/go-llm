@@ -164,8 +164,12 @@ execution checker for the `linux-host` profile of
 `docs/security/containment-inventory.json`:
 
 ```bash
-go run ./internal/containmentinv/check -inventory docs/security/containment-inventory.json -profile linux-host -evidence-out "${TMPDIR:-/tmp}/containment-evidence.json"
+go run ./internal/containmentinv/check -inventory docs/security/containment-inventory.json -profile linux-host -evidence-out "$evidence_out"
 ```
+
+`$evidence_out` is a fresh `mktemp` file under `$TMPDIR`, or the path
+`--evidence-out` names (the CI job passes `$RUNNER_TEMP/containment-linux-host.json`);
+`ci-local` prints it as `containment evidence: <path>` after the check passes.
 
 The checker is the single runner of `TestContainment` in this phase, and of
 every other test leaf a row of the inventory makes mandatory on the profile. It
@@ -175,11 +179,15 @@ where the pattern has one `|` alternative per cited leaf, each
 `/`-separated component anchored and quoted, so it selects exactly the cited
 leaves and every subtest of a cited parent. It decides from the complete event stream: every cited leaf needs a
 `run` and a terminal `pass` event, the package needs its own `pass`, and
-`go test` must exit 0. A missing leaf, a skip, a malformed or truncated stream,
-text build output, a build failure or a timeout fails the profile. `linux-host`
+`go test` must exit 0. A missing leaf, a skip of a cited leaf or of any
+subtest under it, a malformed or truncated stream, text build output, a build
+failure, a nonzero `go test` exit or a timeout fails the profile. `go test`
+reports a parent whose subtest skipped as passing, so the checker counts a
+skip or failure anywhere under a cited leaf as that leaf's own. `linux-host`
 allows no skip; other profiles allow only their enumerated
 `<leaf>=capability:<cap>` entries, matched against the reason the test logs
-when it skips. A failure prints the failed tests' output and
+when it skips. The inventory lint enforces both: an allowed skip on
+`linux-host`, or a reason of any other form, fails `TestCommittedInventory`. A failure prints the failed tests' output and
 `containment inventory check failed (profile linux-host)`, and ends `ci-local`
 before formatting. The checker's own tests (`internal/containmentinv`) feed it
 recorded event streams; no ordinary package test launches `go test`.
@@ -190,7 +198,11 @@ locally (`./cmd/golem`) took 3.6 s wall on an M3 Max, but GitHub runners and
 Docker on macOS are several times slower and the bwrap and Windows runs were
 never measured; tighten the bound from the `Elapsed` that CI runs report.
 
-Each run writes evidence JSON. It is CI output, never committed:
+Each run writes evidence JSON. It is CI output, never committed. The
+checker's success line, `containment check: <profile> <n> leaves passed (tree
+<tree> commit <commit> source_digest <digest>)`, repeats its identity fields
+(`none` when empty), so a run whose evidence file is discarded still shows
+what it bound:
 
 | Field | Meaning |
 | --- | --- |
@@ -242,9 +254,12 @@ GO_LLM_CI_SOURCE=/path/to/export GO_LLM_CI_TREE=<tree> GO_LLM_CI_COMMIT=<commit>
 
 `GO_LLM_CI_TREE` and `GO_LLM_CI_COMMIT` name the gated tree and the pushed
 commit; the Compose service passes both through, and the containment evidence
-records them. An annotated tag forwards the commit it peels to, and when
-several refs name one tree the first listed supplies the commit. A tag of a
-bare tree has no commit, so its evidence records `commit: unknown`.
+records them. The evidence file is written inside the container and discarded
+with it, so the hook's output carries the identity instead: the checker's
+success line names the tree, commit and source digest it bound. An annotated
+tag forwards the commit it peels to, and when several refs name one tree the
+first listed supplies the commit. A tag of a bare tree has no commit, so its
+evidence records `commit: unknown`.
 
 The container therefore sees exactly the pushed source tree: gitignored files (such as
 the Go snapshots under `docs/superpowers/` in a main checkout), untracked files

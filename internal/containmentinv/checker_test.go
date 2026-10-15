@@ -1,11 +1,14 @@
 package containmentinv
 
 import (
+	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -87,6 +90,99 @@ func TestCheckerRejectsSkipOnLinuxHost(t *testing.T) {
 	}
 	if errs := Evaluate(skipped, []string{"TestContainment/W3"}, []string{"TestContainment/W3=capability:bash"}); len(errs) == 0 {
 		t.Fatal("skip for a different capability accepted")
+	}
+}
+
+// TestCheckerRejectsSkippedChildOfCitedParent: go test reports a parent whose
+// subtest skipped as pass, so a cited parent's pass must not hide the skip.
+func TestCheckerRejectsSkippedChildOfCitedParent(t *testing.T) {
+	const p = "github.com/kstruzzieri/go-llm/internal/x"
+	stream := []TestEvent{
+		{Action: "run", Package: p, Test: "TestP"},
+		{Action: "run", Package: p, Test: "TestP/child"},
+		{Action: "output", Package: p, Test: "TestP/child", Output: "    x_test.go:9: capability:bash\n"},
+		{Action: "skip", Package: p, Test: "TestP/child"},
+		{Action: "pass", Package: p, Test: "TestP"},
+		{Action: "pass", Package: p},
+	}
+	// containment: META-GATE
+	if errs := Evaluate(stream, []string{"TestP"}, nil); !containsErr(errs, "TestP/child: skipped (capability:bash), not an allowed skip") {
+		t.Fatalf("a skipped subtest of a cited parent accepted: %v", errs)
+	}
+	if errs := Evaluate(stream, []string{"TestP"}, []string{"TestP=capability:bash"}); len(errs) != 0 {
+		t.Fatalf("an allowed skip under a cited parent rejected: %v", errs)
+	}
+	// TestP2 shares the prefix but is not under TestP.
+	sibling := []TestEvent{
+		{Action: "run", Package: p, Test: "TestP"},
+		{Action: "pass", Package: p, Test: "TestP"},
+		{Action: "run", Package: p, Test: "TestP2"},
+		{Action: "skip", Package: p, Test: "TestP2"},
+		{Action: "pass", Package: p},
+	}
+	if errs := Evaluate(sibling, []string{"TestP"}, nil); len(errs) != 0 {
+		t.Fatalf("a skip of an uncited sibling counted against TestP: %v", errs)
+	}
+}
+
+// streamBytes renders events as the newline-delimited JSON go test -json
+// prints.
+func streamBytes(t *testing.T, events []TestEvent) string {
+	t.Helper()
+	var b strings.Builder
+	for _, e := range events {
+		raw, err := json.Marshal(e)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b.Write(raw)
+		b.WriteByte('\n')
+	}
+	return b.String()
+}
+
+// TestDecideRun breaks one rule per case. Except for the realistic build
+// failure, each broken stream is otherwise clean, so only the named check
+// can reject it.
+func TestDecideRun(t *testing.T) {
+	const pkg = "github.com/kstruzzieri/go-llm/cmd/golem"
+	clean := streamBytes(t, passingStream())
+	exit1 := errors.New("exit status 1")
+	buildFail := `{"ImportPath":"` + pkg + ` [` + pkg + `.test]","Action":"build-output","Output":"# ` + pkg + `\n"}
+{"ImportPath":"` + pkg + ` [` + pkg + `.test]","Action":"build-fail"}
+{"Time":"2026-10-15T12:00:00Z","Action":"start","Package":"` + pkg + `"}
+{"Time":"2026-10-15T12:00:00Z","Action":"output","Package":"` + pkg + `","Output":"FAIL\t` + pkg + ` [build failed]\n"}
+{"Time":"2026-10-15T12:00:00Z","Action":"fail","Package":"` + pkg + `","Elapsed":0,"FailedBuild":"` + pkg + ` [` + pkg + `.test]"}
+`
+	truncated := streamBytes(t, without(passingStream(), func(e TestEvent) bool { return e.Action == "pass" && e.Test == "" }))
+	for _, tc := range []struct {
+		name   string
+		out    string
+		runErr error
+		want   string // a substring of one error; empty: accepted
+	}{
+		{name: "clean", out: clean},
+		{name: "clean stream, go test failed", out: clean, runErr: exit1, want: "go test: exit status 1"},
+		{name: "build failure", out: buildFail, runErr: exit1, want: "malformed go test -json stream"},
+		{name: "build event with ImportPath", out: `{"ImportPath":"` + pkg + `","Action":"build-output","Output":"x"}` + "\n" + clean, want: "malformed go test -json stream after 0 events"},
+		{name: "unknown field", out: `{"Action":"output","Package":"` + pkg + `","Output":"x","Extra":1}` + "\n" + clean, want: `unknown field "Extra"`},
+		{name: "build action without ImportPath", out: `{"Action":"build-fail"}` + "\n" + clean, want: `not a test event (action "build-fail")`},
+		{name: "event without an action", out: "null\n" + clean, want: `not a test event (action "")`},
+		{name: "text line after the package pass", out: clean + "FAIL\t" + pkg + " [build failed]\n", want: "malformed go test -json stream after 8 events"},
+		{name: "truncated, no package pass", out: truncated, want: "package did not pass"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			executed, errs := DecideRun([]byte(tc.out), tc.runErr, []string{"TestContainment/X2a", "TestContainment/A1"}, nil)
+			if tc.want == "" {
+				if len(errs) != 0 || !reflect.DeepEqual(executed, twoLeaves) {
+					t.Fatalf("clean run: executed %v errs %v, want executed %v", executed, errs, twoLeaves)
+				}
+				return
+			}
+			if !containsErr(errs, tc.want) || executed != nil {
+				t.Fatalf("want an error containing %q and nothing executed, got executed %v errs %v", tc.want, executed, errs)
+			}
+		})
 	}
 }
 

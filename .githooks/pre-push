@@ -128,5 +128,8 @@ for pair in $trees; do
   tar -xf "$work/$tree.tar" -C "$work/$tree"
   rm -f "$work/$tree.tar"
   printf 'pre-push: gating tree %s in %s\n' "$tree" "$work/$tree" >&2
+  # The containment evidence file stays in the discarded container; the
+  # checker's success line in this output names the tree, commit and source
+  # digest it bound.
   (cd "$work/runner" && GO_LLM_CI_SOURCE="$work/$tree" GO_LLM_CI_TREE="$tree" GO_LLM_CI_COMMIT="$commit" docker compose --env-file /dev/null -f docker-compose.ci.yml run --build --rm --name "$name" ci ./scripts/ci-local --mode full)
 done

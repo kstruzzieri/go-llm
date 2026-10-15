@@ -1,10 +1,13 @@
 package containmentinv
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"maps"
 	"os"
@@ -119,7 +122,10 @@ var skipLine = regexp.MustCompile(`^\s+\S+\.go:\d+: (.*)$`)
 // Evaluate decides one package run from its complete event stream: every leaf
 // needs a run event and a terminal pass, or a terminal skip whose reason
 // matches an allowedSkips entry "<leaf>=<reason>"; the package itself must
-// pass. A truncated stream has no package pass and fails.
+// pass. A leaf's outcome covers its subtests: Go reports a parent whose
+// subtest skipped as pass, so a skip or fail of any test under the leaf counts
+// as the leaf's own, with skip reasons checked against the leaf's entries. A
+// truncated stream has no package pass and fails.
 func Evaluate(events []TestEvent, leaves []string, allowedSkips []string) []error {
 	ran := map[string]bool{}
 	final := map[string]string{}
@@ -134,26 +140,85 @@ func Evaluate(events []TestEvent, leaves []string, allowedSkips []string) []erro
 			final[e.Test] = e.Action
 		}
 	}
+	tests := slices.Sorted(maps.Keys(final))
 	var errs []error
 	for _, leaf := range leaves {
 		switch {
 		case !ran[leaf]:
 			errs = append(errs, fmt.Errorf("%s: never ran", leaf))
-		case final[leaf] == "pass":
-		case final[leaf] == "skip":
-			if reason := skipReason(output[leaf]); !slices.Contains(allowedSkips, leaf+"="+reason) {
-				errs = append(errs, fmt.Errorf("%s: skipped (%s), not an allowed skip", leaf, reason))
-			}
+			continue
 		case final[leaf] == "":
 			errs = append(errs, fmt.Errorf("%s: no terminal event", leaf))
-		default:
-			errs = append(errs, fmt.Errorf("%s: %s", leaf, final[leaf]))
+			continue
+		}
+		for _, test := range tests {
+			if test != leaf && !strings.HasPrefix(test, leaf+"/") {
+				continue
+			}
+			switch final[test] {
+			case "fail":
+				errs = append(errs, fmt.Errorf("%s: fail", test))
+			case "skip":
+				if reason := skipReason(output[test]); !slices.Contains(allowedSkips, leaf+"="+reason) {
+					errs = append(errs, fmt.Errorf("%s: skipped (%s), not an allowed skip", test, reason))
+				}
+			}
 		}
 	}
 	if final[""] != "pass" {
 		errs = append(errs, fmt.Errorf("package did not pass (terminal action %q)", final[""]))
 	}
 	return errs
+}
+
+// DecideRun decides one package run of the checker from `go test -json`'s
+// complete output and exit error. The output must decode strictly as test
+// events (DecodeEvents), go test must have exited 0, and Evaluate must accept
+// the events. On success executed is the sorted leaves that passed; an allowed
+// skip is not listed. On any error executed is nil.
+func DecideRun(out []byte, runErr error, leaves, allowed []string) (executed []string, errs []error) {
+	events, decodeErr := DecodeEvents(out)
+	errs = Evaluate(events, leaves, allowed)
+	if decodeErr != nil {
+		errs = append(errs, decodeErr)
+	}
+	if runErr != nil {
+		errs = append(errs, fmt.Errorf("go test: %w", runErr))
+	}
+	if len(errs) > 0 {
+		return nil, errs
+	}
+	for _, leaf := range slices.Sorted(slices.Values(leaves)) {
+		if slices.ContainsFunc(events, func(e TestEvent) bool { return e.Action == "pass" && e.Test == leaf }) {
+			executed = append(executed, leaf)
+		}
+	}
+	return executed, nil
+}
+
+// DecodeEvents strictly decodes a complete `go test -json` stream. Anything
+// that is not a test event fails: a text line, an unknown field (the go
+// command's build events carry ImportPath), an event without an Action, or a
+// build-output or build-fail action. The events before the failure are
+// returned with the error.
+func DecodeEvents(out []byte) ([]TestEvent, error) {
+	dec := json.NewDecoder(bytes.NewReader(out))
+	dec.DisallowUnknownFields()
+	var events []TestEvent
+	for {
+		var e TestEvent
+		err := dec.Decode(&e)
+		if errors.Is(err, io.EOF) {
+			return events, nil
+		}
+		if err == nil && (e.Action == "" || strings.HasPrefix(e.Action, "build-")) {
+			err = fmt.Errorf("not a test event (action %q)", e.Action)
+		}
+		if err != nil {
+			return events, fmt.Errorf("malformed go test -json stream after %d events: %w", len(events), err)
+		}
+		events = append(events, e)
+	}
 }
 
 // skipReason is the last "file.go:NN: message" line a leaf printed: the
@@ -210,9 +275,12 @@ func WithProfile(ev Evidence, p Profile) Evidence {
 func SourceDigest(root string) (string, error) {
 	var files []string
 	if _, err := os.Lstat(filepath.Join(root, ".git")); err == nil {
-		out, err := exec.Command("git", "-C", root, "ls-files", "-z").Output()
+		var stderr bytes.Buffer
+		cmd := exec.Command("git", "-C", root, "ls-files", "-z")
+		cmd.Stderr = &stderr
+		out, err := cmd.Output()
 		if err != nil {
-			return "", fmt.Errorf("containmentinv: git ls-files: %w", err)
+			return "", fmt.Errorf("containmentinv: git ls-files: %w: %s", err, strings.TrimSpace(stderr.String()))
 		}
 		files = strings.FieldsFunc(string(out), func(r rune) bool { return r == 0 })
 	} else {

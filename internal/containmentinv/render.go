@@ -61,7 +61,7 @@ func RenderMarkdown(inv Inventory, scenarios []ScenarioDecl) []byte {
 		if len(rows) == 0 {
 			continue
 		}
-		fmt.Fprintf(&b, "## %s\n\n", f.name)
+		_, _ = fmt.Fprintf(&b, "## %s\n\n", f.name)
 		b.WriteString("| ID | Requirement | Status | Layer | Refs / Scenarios | Profiles |\n|---|---|---|---|---|---|\n")
 		for _, r := range rows {
 			status, err := rowStatus(r, decls)
@@ -111,7 +111,7 @@ func row(b *strings.Builder, cells ...string) {
 		if c == "" {
 			c = "-"
 		}
-		fmt.Fprintf(b, " %s |", strings.ReplaceAll(strings.ReplaceAll(c, "\n", " "), "|", `\|`))
+		_, _ = fmt.Fprintf(b, " %s |", strings.ReplaceAll(strings.ReplaceAll(c, "\n", " "), "|", `\|`))
 	}
 	b.WriteString("\n")
 }

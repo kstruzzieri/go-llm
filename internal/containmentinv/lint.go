@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"path"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 )
@@ -40,9 +41,12 @@ type source struct {
 //   - a row cites TestContainment/<X> for each executable scenario it lists, and only those;
 //   - pending and out-of-scope rows carry no refs; pending and uncontained need an owner;
 //   - model rows list artifacts, rows with refs list known mandatory profiles;
-//   - a verified or uncontained row outside the model layer with no Exempt
-//     reason cites at least one entry of the mutation ledger, and every cited
-//     entry exists in ledger (the IDs LoadLedger returns).
+//   - a verified or uncontained row outside the model layer cites at least one
+//     entry of the mutation ledger, and every cited entry exists in ledger (the
+//     IDs LoadLedger returns); only an administrative META- row may carry an
+//     Exempt reason instead;
+//   - the linux-host profile allows no skip, and every other allowed skip's
+//     reason is capability:<cap>.
 func Lint(inv Inventory, repoRoot string, scenarios []ScenarioDecl, ledger []string) []error {
 	src, errs := scanTests(repoRoot)
 	decls := make(map[string]ScenarioDecl, len(scenarios))
@@ -127,8 +131,15 @@ func lintRow(r Row, decls map[string]ScenarioDecl, profiles, ledger map[string]b
 	}
 	// Spec §6.4: model rows are evidenced by artifacts, and pending,
 	// unobserved, out-of-scope and administrative rows by their Exempt reason.
-	if (kind == "verified" || kind == "uncontained") && r.Layer != "model" && r.Exempt == "" && len(r.Mutations) == 0 {
-		add("%s row cites no mutation ledger entry and has no exempt reason", kind)
+	// A verified or uncontained row may claim an exemption only when it is
+	// administrative (META-); any other such row cites the ledger.
+	if kind == "verified" || kind == "uncontained" {
+		switch {
+		case r.Exempt != "" && !strings.HasPrefix(r.ID, "META-"):
+			add("%s row carries an exempt reason; only an administrative META- row may, any other cites a mutation ledger entry", kind)
+		case r.Layer != "model" && r.Exempt == "" && len(r.Mutations) == 0:
+			add("%s row cites no mutation ledger entry and has no exempt reason", kind)
+		}
 	}
 	for _, m := range r.Mutations {
 		if !ledger[m] {
@@ -287,8 +298,13 @@ func lintScenarioReqs(rows map[string]Row, scenarios []ScenarioDecl) []error {
 	return errs
 }
 
-// lintProfiles: names are unique and every allowed skip is `<leaf>=<reason>`
-// for a leaf some row mandatory on that profile cites.
+// capabilitySkip is the only skip reason a profile may allow: the
+// missingCapabilityReason form t.Skip logs.
+var capabilitySkip = regexp.MustCompile(`^capability:[a-z]+$`)
+
+// lintProfiles: names are unique, linux-host allows no skip, and every
+// allowed skip is `<leaf>=capability:<cap>` for a leaf some row mandatory on
+// that profile cites.
 func lintProfiles(inv Inventory) []error {
 	var errs []error
 	seen := map[string]bool{}
@@ -297,11 +313,17 @@ func lintProfiles(inv Inventory) []error {
 			errs = append(errs, fmt.Errorf("profile %q: empty or duplicate name", p.Name))
 		}
 		seen[p.Name] = true
+		if p.Name == "linux-host" && len(p.AllowedSkips) > 0 {
+			errs = append(errs, fmt.Errorf("profile linux-host must allow no skip, allows %s", strings.Join(p.AllowedSkips, ", ")))
+		}
 		for _, skip := range p.AllowedSkips {
 			leaf, reason, ok := strings.Cut(skip, "=")
 			if !ok || leaf == "" || reason == "" {
 				errs = append(errs, fmt.Errorf("profile %s: allowed skip %q, want <leaf>=<reason>", p.Name, skip))
 				continue
+			}
+			if !capabilitySkip.MatchString(reason) {
+				errs = append(errs, fmt.Errorf("profile %s: allowed skip reason %q, want capability:<cap>", p.Name, reason))
 			}
 			if !mandatoryLeaf(inv.Rows, p.Name, leaf) {
 				errs = append(errs, fmt.Errorf("profile %s: allowed skip for %s, which no row mandatory on %s cites", p.Name, leaf, p.Name))
@@ -347,14 +369,14 @@ func scanTests(root string) (source, []error) {
 		rel = filepath.ToSlash(rel)
 		f, err := parser.ParseFile(fset, p, nil, parser.ParseComments|parser.SkipObjectResolution)
 		if err != nil {
-			errs = append(errs, fmt.Errorf("parse %s: %w", rel, err))
+			errs = append(errs, fmt.Errorf("containmentinv: parse %s: %w", rel, err))
 			return nil
 		}
 		src.addFile(fset, rel, f)
 		return nil
 	})
 	if walkErr != nil {
-		errs = append(errs, fmt.Errorf("scan %s: %w", root, walkErr))
+		errs = append(errs, fmt.Errorf("containmentinv: scan %s: %w", root, walkErr))
 	}
 	return src, errs
 }

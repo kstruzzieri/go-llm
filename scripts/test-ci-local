@@ -35,8 +35,7 @@ checker='go run ./internal/containmentinv/check -inventory docs/security/contain
 commit_env='          GO_LLM_CI_COMMIT: ${{ github.sha }}'
 upload='        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2'
 require_step ci.yml 'Security contracts' "$commit_env" "$tree_stmt" \
-  "          $tree_env ./scripts/ci-local --mode security" \
-  '          cp "${TMPDIR:-/tmp}/containment-evidence.json" "$RUNNER_TEMP/containment-linux-host.json"'
+  "          $tree_env ./scripts/ci-local --mode security --evidence-out \"\$RUNNER_TEMP/containment-linux-host.json\""
 require_step ci.yml 'Containment inventory (bwrap)' '          GO_LLM_REQUIRE_BWRAP: "1"' "$commit_env" "$tree_stmt" \
   "          $tree_env $checker -profile bwrap -evidence-out \"\$RUNNER_TEMP/containment-bwrap.json\""
 for af in installed source; do
@@ -155,7 +154,7 @@ for build in golem go-llm-mcp; do
 done
 
 module="$tmp/module"
-mkdir -p "$module/scripts" "$tmp/bin" "$tmp/outside"
+mkdir -p "$module/scripts" "$tmp/bin" "$tmp/outside" "$tmp/tmpdir"
 cp "$script_dir/ci-local" "$module/scripts/ci-local"
 printf 'module github.com/kstruzzieri/go-llm\n' >"$module/go.mod"
 touch "$module/docker-compose.ci.yml"
@@ -176,7 +175,24 @@ if [ "${GOROOT+x}" = x ] || [ "${GOFLAGS-}" != ' ' ]; then
   printf 'go received caller toolchain overrides\n' >&2
   exit 39
 fi
-printf '%s|%s%s\n' "$PWD" "${GOOS:+GOOS=$GOOS GOARCH=${GOARCH-} CGO_ENABLED=${CGO_ENABLED-} }" "$*" >>"$CI_LOCAL_TEST_LOG"
+args=$*
+# The checker's evidence path: a fresh, empty mktemp file under TMPDIR logs as
+# <mktemp>; the raw path goes to a side file so a test can match the path
+# ci-local prints.
+case "$args" in
+  'run ./internal/containmentinv/check '*' -evidence-out '*)
+    evidence=${args##* -evidence-out }
+    printf '%s\n' "$evidence" >>"$CI_LOCAL_TEST_LOG.evidence"
+    case "$evidence" in
+      "${TMPDIR:-/tmp}"/containment-evidence.????????)
+        if [ -f "$evidence" ] && [ ! -s "$evidence" ]; then
+          args="${args% -evidence-out *} -evidence-out <mktemp>"
+        fi
+        ;;
+    esac
+    ;;
+esac
+printf '%s|%s%s\n' "$PWD" "${GOOS:+GOOS=$GOOS GOARCH=${GOARCH-} CGO_ENABLED=${CGO_ENABLED-} }" "$args" >>"$CI_LOCAL_TEST_LOG"
 case "$*" in
   'test -list ^TestHardeningContracts$ ./agent')
     printf 'stub: security discovery\n' >&2
@@ -275,7 +291,7 @@ run_ci() {
     else
       unset GOROOT
     fi
-    GOFLAGS="$caller_goflags" PATH="$tmp/bin:$PATH" \
+    GOFLAGS="$caller_goflags" PATH="$tmp/bin:$PATH" TMPDIR="$tmp/tmpdir" \
       CI_LOCAL_TEST_LOG="$tmp/$name.log" \
       CI_LOCAL_DISCOVERY_OUTPUT="$discovery_output" \
       CI_LOCAL_DISCOVERY_STATUS="$discovery_status" \
@@ -312,7 +328,7 @@ write_expected() {
   cat >"$tmp/$1" <<EOF
 $module|test -list ^TestHardeningContracts$ ./agent
 $module|test -count=1 -timeout 60s -v -run ^TestHardeningContracts$ ./agent -args -hardening-budget
-$module|run ./internal/containmentinv/check -inventory docs/security/containment-inventory.json -profile linux-host -evidence-out ${TMPDIR:-/tmp}/containment-evidence.json
+$module|run ./internal/containmentinv/check -inventory docs/security/containment-inventory.json -profile linux-host -evidence-out <mktemp>
 EOF
   if [ "$2" = security ]; then
     return
@@ -362,7 +378,7 @@ touch "$tmp/decoy/docker-compose.ci.yml"
 set +e
 (
   cd "$module"
-  CDPATH="$tmp/decoy" PATH="$tmp/bin:$PATH" \
+  CDPATH="$tmp/decoy" PATH="$tmp/bin:$PATH" TMPDIR="$tmp/tmpdir" \
     CI_LOCAL_TEST_LOG="$tmp/hostile-cdpath.log" \
     CI_LOCAL_DISCOVERY_OUTPUT=TestHardeningContracts \
     CI_LOCAL_DISCOVERY_STATUS=0 \
@@ -385,6 +401,44 @@ run_ci security --mode security
 assert_status security 0
 diff -u "$tmp/expected-security" "$tmp/security.log"
 assert_scope_notice security
+
+# assert_evidence NAME PATH: the checker wrote its evidence to PATH and
+# ci-local printed that path.
+assert_evidence() {
+  if [ "$(cat "$tmp/$1.log.evidence")" != "$2" ] || ! grep -Fxq "containment evidence: $2" "$tmp/$1.out"; then
+    printf '%s: evidence went to %s, want %s printed as such\n' "$1" "$(cat "$tmp/$1.log.evidence")" "$2" >&2
+    cat "$tmp/$1.out" >&2
+    exit 1
+  fi
+}
+# Without --evidence-out the evidence goes to a fresh mktemp file (the log
+# above shows <mktemp> only for one), never a fixed shared path.
+evidence="$(cat "$tmp/security.log.evidence")"
+case "$evidence" in
+  "$tmp/tmpdir/containment-evidence."????????) ;;
+  *)
+    printf 'security: evidence path %s is not a fresh mktemp file under TMPDIR\n' "$evidence" >&2
+    exit 1
+    ;;
+esac
+assert_evidence security "$evidence"
+run_ci default-evidence --mode pre-push
+assert_status default-evidence 0
+if [ "$(cat "$tmp/default-evidence.log.evidence")" = "$evidence" ]; then
+  printf 'default-evidence: two runs shared the evidence path %s\n' "$evidence" >&2
+  exit 1
+fi
+assert_evidence default-evidence "$(cat "$tmp/default-evidence.log.evidence")"
+# --evidence-out names the file, as the CI job does.
+run_ci evidence-out --mode security --evidence-out "$tmp/explicit-evidence.json"
+assert_status evidence-out 0
+sed "s|-evidence-out <mktemp>\$|-evidence-out $tmp/explicit-evidence.json|" "$tmp/expected-security" >"$tmp/expected-evidence-out"
+diff -u "$tmp/expected-evidence-out" "$tmp/evidence-out.log"
+assert_evidence evidence-out "$tmp/explicit-evidence.json"
+run_ci evidence-out-missing --mode security --evidence-out
+assert_status evidence-out-missing 2
+grep -Fxq -- '--evidence-out requires a path' "$tmp/evidence-out-missing.out"
+test ! -s "$tmp/evidence-out-missing.log"
 
 caller_goroot=/poisoned
 run_ci poisoned-goroot --mode full
@@ -557,7 +611,7 @@ run_ci_as_root() {
   (
     cd "$tmp/outside"
     unset GOROOT
-    GOFLAGS="$caller_goflags" PATH="$tmp/root-bin:$tmp/bin:$PATH" \
+    GOFLAGS="$caller_goflags" PATH="$tmp/root-bin:$tmp/bin:$PATH" TMPDIR="$tmp/tmpdir" \
       CI_LOCAL_TEST_LOG="$tmp/$name.log" \
       CI_LOCAL_DISCOVERY_OUTPUT="$discovery_output" \
       CI_LOCAL_DISCOVERY_STATUS="$discovery_status" \
@@ -823,6 +877,19 @@ assert_gate_runs hook-tag 1
 assert_gated hook-tag 1 "$c1"
 # The annotated tag forwards the commit it peels to, never the tag object.
 assert_forwarded hook-tag "$t1 $c1"
+
+# A tag of a bare tree has no commit: the hook gates the tree and forwards an
+# empty commit (the evidence then records commit unknown). Without the
+# hook's `|| commit=` fallback the failed peel ends it under set -e.
+fixture_git -C "$hook_repo" tag -a treetag -m 'bare tree' "$t1"
+treetag="$(fixture_git -C "$hook_repo" rev-parse treetag)"
+fixture_git -C "$hook_repo" tag -d treetag >/dev/null
+printf 'refs/tags/treetag %s refs/tags/treetag %s\n' "$treetag" "$zero" >"$tmp/hook-tree-tag.in"
+run_hook hook-tree-tag "$hook_repo" 0
+assert_status hook-tree-tag 0
+assert_gate_runs hook-tree-tag 1
+assert_gated hook-tree-tag 1 "$t1"
+assert_forwarded hook-tree-tag "$t1 "
 
 # From a linked worktree (#306): .git is a pointer file there, and the pushed
 # commit is not the main repository's HEAD.

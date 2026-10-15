@@ -35,7 +35,6 @@ type fixtureOpts struct {
 	interceptors bool // full chain + canary (D2/D3)
 	autoEdits    bool // seed the /auto-edits file grant
 	verifier     agent.Verifier
-	background   bool
 }
 
 type fixture struct {
@@ -46,6 +45,7 @@ type fixture struct {
 	opts          fixtureOpts
 	t             *testing.T
 	mgr           *agenttools.BackgroundManager
+	journal       *checkpointJournal
 }
 
 func newFixture(t *testing.T, opts fixtureOpts) *fixture {
@@ -64,26 +64,21 @@ func newFixtureAt(t *testing.T, root string, opts fixtureOpts) *fixture {
 			t.Fatal(err)
 		}
 	}
-	ws, err := agenttools.NewWorkspace(f.Root)
+	// Golem's own seams with zero options, as -allow-write and -allow-exec
+	// mount them: the journaled write tools over a per-fixture checkpoint
+	// store, and the foreground plus background exec set over one manager.
+	store := openTestStore(t, f.Root)
+	writeTools, journal, _, err := buildWriteTools(f.Root, store, testStoreGetenv(store))
 	if err != nil {
 		t.Fatal(err)
 	}
-	f.tools = append(f.tools, agenttools.NewMutatingTools(ws, nil)...)
-	if opts.background {
-		f.mgr = agenttools.NewBackgroundManager()
-		t.Cleanup(f.mgr.Shutdown)
-		exe, err := agenttools.NewExecToolsWithBackground(f.Root, f.mgr)
-		if err != nil {
-			t.Fatal(err)
-		}
-		f.tools = append(f.tools, exe...)
-	} else {
-		exe, err := agenttools.NewExecTools(f.Root)
-		if err != nil {
-			t.Fatal(err)
-		}
-		f.tools = append(f.tools, exe...)
+	f.tools, f.journal = append(f.tools, writeTools...), journal
+	mgr, exe, err := buildExecMount(f.Root, agenttools.ExecToolsOptions{})
+	if err != nil {
+		t.Fatal(err)
 	}
+	t.Cleanup(mgr.Shutdown)
+	f.tools, f.mgr = append(f.tools, exe...), mgr
 	if opts.autoEdits {
 		f.Grants.grant(grantScopeFiles, agenttools.WriteClassApprovalKey)
 	}
@@ -109,11 +104,28 @@ func (f *fixture) orchestrator(t *testing.T, caller agent.ModelCaller) *agent.Or
 	return newOrchestratorFactory(caller, flags{allowWrite: true, allowExec: true, interceptors: f.opts.interceptors}, f.opts.verifier, canary)()
 }
 
+// runWith drives one run of the real Golem factory as a REPL turn does: the
+// checkpoint journal is armed before Run and sealed after it. approver may be
+// a nil interface (H1).
+func (f *fixture) runWith(t *testing.T, caller agent.ModelCaller, approver agent.Approver, maxSteps int) (agent.Result, error) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := f.journal.beginTurn(ctx, "containment", cancel); err != nil {
+		t.Fatalf("checkpoint journal: %v", err)
+	}
+	res, err := f.orchestrator(t, caller).Run(ctx, agent.Request{Goal: "containment", Tools: f.tools, Approver: approver, MaxSteps: maxSteps}, nil)
+	if serr := f.journal.sealTurn(context.Background()); serr != nil {
+		t.Fatalf("checkpoint journal seal: %v", serr)
+	}
+	return res, err
+}
+
 // runErr drives the real Golem factory with a scripted compliant caller and
 // returns the run error (D3 expects an *agent.BlockedError).
 func (f *fixture) runErr(t *testing.T, caller agent.ModelCaller, maxSteps int, answers string) (agent.Result, error) {
 	t.Helper()
-	return f.orchestrator(t, caller).Run(context.Background(), agent.Request{Goal: "containment", Tools: f.tools, Approver: f.approver(answers), MaxSteps: maxSteps}, nil)
+	return f.runWith(t, caller, f.approver(answers), maxSteps)
 }
 
 // run is runErr with a scripted list of calls; any run error fails the test.

@@ -49,12 +49,14 @@ func TestOther(t *testing.T) {
 }
 
 // boundInventory is a lint-clean inventory over the fixture written by
-// boundTree: one verified row whose single ref has its marker.
+// boundTree: one verified row whose single ref has its marker. Its profile is
+// windows because linux-host may allow no skip and the lint cases give the
+// profile one.
 func boundInventory() Inventory {
 	return Inventory{
-		Profiles: []Profile{{Name: "linux-host", GOOS: "linux"}},
+		Profiles: []Profile{{Name: "windows", GOOS: "windows"}},
 		Rows: []Row{{ID: "PATH-ABS", Source: "issue-452:52", Requirement: "absolute paths rejected",
-			Status: "verified", Layer: "focused", Profiles: []string{"linux-host"}, Mutations: []string{"M-001"},
+			Status: "verified", Layer: "focused", Profiles: []string{"windows"}, Mutations: []string{"M-001"},
 			Refs: []Ref{{Package: "./pkg", Test: "TestCited", File: "pkg/a_test.go", Func: "TestCited"}}}},
 	}
 }
@@ -193,13 +195,20 @@ func TestInventoryLintRules(t *testing.T) {
 		{name: "unknown profile", edit: func(inv *Inventory, _ *[]ScenarioDecl) { inv.Rows[0].Profiles = []string{"mars"} },
 			want: `unknown profile "mars"`},
 		{name: "profile name", edit: func(inv *Inventory, _ *[]ScenarioDecl) {
-			inv.Profiles = append(inv.Profiles, Profile{Name: "linux-host"})
+			inv.Profiles = append(inv.Profiles, Profile{Name: "windows"})
 		}, want: "empty or duplicate name"},
 		{name: "allowed skip form", edit: func(inv *Inventory, _ *[]ScenarioDecl) { inv.Profiles[0].AllowedSkips = []string{"TestCited"} },
 			want: "want <leaf>=<reason>"},
 		{name: "allowed skip leaf", edit: func(inv *Inventory, _ *[]ScenarioDecl) {
 			inv.Profiles[0].AllowedSkips = []string{"TestCited=capability:bash", "TestOther=capability:bash"}
-		}, want: "allowed skip for TestOther, which no row mandatory on linux-host cites"},
+		}, want: "allowed skip for TestOther, which no row mandatory on windows cites"},
+		{name: "allowed skip reason", edit: func(inv *Inventory, _ *[]ScenarioDecl) {
+			inv.Profiles[0].AllowedSkips = []string{"TestCited=flaky on CI"}
+		}, want: `allowed skip reason "flaky on CI", want capability:<cap>`},
+		{name: "linux-host allows no skip", edit: func(inv *Inventory, _ *[]ScenarioDecl) {
+			inv.Profiles = append(inv.Profiles, Profile{Name: "linux-host", GOOS: "linux", AllowedSkips: []string{"TestCited=capability:bash"}})
+			inv.Rows[0].Profiles = append(inv.Rows[0].Profiles, "linux-host")
+		}, want: "profile linux-host must allow no skip, allows TestCited=capability:bash"},
 		{name: "scenario-backed owner", scenario: true, edit: func(inv *Inventory, _ *[]ScenarioDecl) { inv.Rows[0].Owner = "#420" },
 			want: "stores owner"},
 		{name: "undeclared scenario", scenario: true, edit: func(inv *Inventory, _ *[]ScenarioDecl) { inv.Rows[0].Scenarios = []string{"X3", "X9"} },
@@ -234,8 +243,12 @@ func TestInventoryLintRules(t *testing.T) {
 		{name: "mutation unknown", edit: func(inv *Inventory, _ *[]ScenarioDecl) { inv.Rows[0].Mutations = []string{"M-001", "M-999"} },
 			want: "mutation M-999 is not an entry of the mutation ledger"},
 		{name: "exempt row needs no mutation", edit: func(inv *Inventory, _ *[]ScenarioDecl) {
-			inv.Rows[0].Mutations, inv.Rows[0].Exempt = nil, "administrative: fixture"
+			inv.Rows = append(inv.Rows, Row{ID: "META-GATE", Status: "verified", Layer: "focused", Exempt: "administrative: fixture", Artifacts: []string{"a.md"}})
 		}},
+		{name: "exempt reason on a verified security row", edit: func(inv *Inventory, _ *[]ScenarioDecl) { inv.Rows[0].Exempt = "administrative: fixture" },
+			want: "PATH-ABS: verified row carries an exempt reason; only an administrative META- row may"},
+		{name: "exempt reason on an uncontained row", scenario: true, edit: func(inv *Inventory, _ *[]ScenarioDecl) { inv.Rows[0].Exempt = "owned by #420" },
+			want: "FP-SCRIPT-CONTENT: uncontained row carries an exempt reason"},
 		{name: "model row needs no mutation", edit: func(inv *Inventory, _ *[]ScenarioDecl) {
 			inv.Rows = append(inv.Rows, Row{ID: "MODEL-STRATA", Status: "verified", Layer: "model", Artifacts: []string{"a.md"}})
 		}},

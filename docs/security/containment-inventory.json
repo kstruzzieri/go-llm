@@ -697,7 +697,7 @@
       "id": "ENV-BWRAP",
       "source": "issue-452:54",
       "requirement": "A bwrap-confined payload sees exactly the approved environment set (PATH, HOME, TMPDIR and the PWD bwrap sets); a parent sentinel never appears.",
-      "status": "verified",
+      "status": "unobserved(bwrap)",
       "owner": "",
       "layer": "focused",
       "exempt": "the native-profile mutation needs a Linux host with bwrap: PR #478 (e4d580b3) records bwrap confinement mutations but none for the payload environment set. Follow-up, tracked in the PR body: on a Linux host with bwrap, apply an M-ledger-style mutation that lets a parent variable through the bwrap payload environment, run GO_LLM_REQUIRE_BWRAP=1 go test -count=1 -run '^TestBwrapPayloadEnvironment$' ./agent/tools, record it in docs/security/containment-mutations.md and cite it here",
@@ -2777,7 +2777,7 @@
       "status": "verified",
       "owner": "",
       "layer": "focused",
-      "exempt": "administrative: the inventory gate checks declarations, not a security guard; its rule mutations are the Administrative evidence in docs/security/containment-mutations.md",
+      "exempt": "administrative: the inventory gate checks declarations, not a security guard; its profile skip pins (linux-host allows no skip, other skips name a capability) are ledger entry M-053, and its other rule mutations are the Administrative evidence in docs/security/containment-mutations.md",
       "scenarios": [],
       "refs": [
         {
@@ -2790,7 +2790,9 @@
       "profiles": [
         "linux-host"
       ],
-      "mutations": [],
+      "mutations": [
+        "M-053"
+      ],
       "artifacts": [
         "docs/security/containment-mutations.md"
       ]
@@ -2798,11 +2800,11 @@
     {
       "id": "META-MUTATION",
       "source": "issue-452:59",
-      "requirement": "Every non-exempt security assertion has recorded red-on-revert or equivalent targeted mutation evidence in the committed ledger; ENV-BWRAP is the one verified row whose mutation awaits a Linux host, see its Exempt reason.",
+      "requirement": "Every non-exempt security assertion has recorded red-on-revert or equivalent targeted mutation evidence in the committed ledger.",
       "status": "verified",
       "owner": "",
       "layer": "focused",
-      "exempt": "administrative: the ledger is the evidence; the inventory lint requires every verified or uncontained row outside the model layer to cite an existing ledger entry or carry an exempt reason. The one declared exception among verified rows is ENV-BWRAP, whose mutation awaits a Linux host with bwrap (see its Exempt reason)",
+      "exempt": "administrative: the ledger is the evidence; the inventory lint requires every verified or uncontained row outside the model layer to cite an existing ledger entry, and allows an exempt reason on such a row only for an administrative META- row (ledger entry M-052)",
       "scenarios": [],
       "refs": [
         {
@@ -2815,7 +2817,9 @@
       "profiles": [
         "linux-host"
       ],
-      "mutations": [],
+      "mutations": [
+        "M-052"
+      ],
       "artifacts": [
         "docs/security/containment-mutations.md"
       ]
@@ -2827,7 +2831,7 @@
       "status": "verified",
       "owner": "",
       "layer": "focused",
-      "exempt": "administrative: gate wiring, not a security guard; the checker tests and the security-phase run are the evidence; its checker mutations are the Administrative evidence in docs/security/containment-mutations.md",
+      "exempt": "administrative: gate wiring, not a security guard; the checker tests and the security-phase run are the evidence; the checker's child-skip rule is ledger entry M-051, and its other checker mutations are the Administrative evidence in docs/security/containment-mutations.md",
       "scenarios": [],
       "refs": [
         {
@@ -2844,6 +2848,12 @@
         },
         {
           "package": "./internal/containmentinv",
+          "test": "TestCheckerRejectsSkippedChildOfCitedParent",
+          "file": "internal/containmentinv/checker_test.go",
+          "func": "TestCheckerRejectsSkippedChildOfCitedParent"
+        },
+        {
+          "package": "./internal/containmentinv",
           "test": "TestCheckerSourceIdentityFromEnv",
           "file": "internal/containmentinv/checker_test.go",
           "func": "TestCheckerSourceIdentityFromEnv"
@@ -2852,7 +2862,9 @@
       "profiles": [
         "linux-host"
       ],
-      "mutations": [],
+      "mutations": [
+        "M-051"
+      ],
       "artifacts": [
         "scripts/ci-local",
         "internal/containmentinv/check/main.go",

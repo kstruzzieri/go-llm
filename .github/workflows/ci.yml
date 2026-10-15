@@ -72,8 +72,7 @@ jobs:
           GO_LLM_CI_COMMIT: ${{ github.sha }}
         run: |
           tree="$(git rev-parse "${GITHUB_SHA}^{tree}")"
-          GO_LLM_CI_TREE="$tree" ./scripts/ci-local --mode security
-          cp "${TMPDIR:-/tmp}/containment-evidence.json" "$RUNNER_TEMP/containment-linux-host.json"
+          GO_LLM_CI_TREE="$tree" ./scripts/ci-local --mode security --evidence-out "$RUNNER_TEMP/containment-linux-host.json"
 
       - name: Upload containment evidence
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
