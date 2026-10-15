@@ -256,6 +256,9 @@ type replayOptions struct {
 	// ProviderOptions (injection replays) is sent verbatim on the openai-compat
 	// wire: the registered decoding (#452).
 	ProviderOptions *provider.ModelOptions
+	// ParseThinkMode (injection replays) is the registered inline-think parser
+	// policy; nil keeps the transport default (extract).
+	ParseThinkMode *provider.ThinkMode
 }
 
 // assemblyCaptureTemperature is the registered decoding control for

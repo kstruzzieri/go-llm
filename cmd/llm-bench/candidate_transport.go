@@ -72,6 +72,10 @@ type candidateChatRequest struct {
 	// ProviderOptions, when set, is sent verbatim on the openai-compat wire in
 	// place of the ollama-option conversion: the registered decoding (§4.9).
 	ProviderOptions *provider.ModelOptions
+	// ParseThinkMode, when set, overrides the openai-compat provider's inline
+	// <think> parser mode for this request: the registered parser policy, so the
+	// replay extracts exactly what Golem's configured think_mode would (#452).
+	ParseThinkMode *provider.ThinkMode
 }
 
 type candidateChatResponse struct {
@@ -249,10 +253,11 @@ func (c openAICompatCandidateClient) Chat(ctx context.Context, req candidateChat
 		ctx = context.WithValue(ctx, rawSlotKey{}, slot)
 	}
 	presp, err := c.provider.Chat(ctx, provider.ChatRequest{
-		Model:    req.Model,
-		Messages: toProviderCandidateMessages(req.Messages, req.RawToolArgs),
-		Tools:    toProviderCandidateTools(req.Tools),
-		Options:  opts,
+		Model:          req.Model,
+		Messages:       toProviderCandidateMessages(req.Messages, req.RawToolArgs),
+		Tools:          toProviderCandidateTools(req.Tools),
+		Options:        opts,
+		ParseThinkMode: req.ParseThinkMode,
 	})
 	if err != nil {
 		return candidateChatResponse{}, err

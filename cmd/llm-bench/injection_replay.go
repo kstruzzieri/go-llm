@@ -33,6 +33,7 @@ func replayInjection(ctx context.Context, client candidateChatClient, model stri
 		RawToolArgs:     rawArgs,
 		KeepRawCalls:    true,
 		ProviderOptions: opts.ProviderOptions,
+		ParseThinkMode:  opts.ParseThinkMode,
 	}
 	turnCtx := ctx
 	if opts.PerTurnTimeout > 0 {
