@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"math"
 	"os"
 	"path/filepath"
@@ -175,7 +176,7 @@ func captureWithDigest(t *testing.T, dir string, traces []Trace, regDigest strin
 	err := runCalibrateCapture(context.Background(), calibrateCaptureOptions{
 		Runner: &scriptedCaptureRunner{rounds: rounds}, Targets: []ModelTarget{{Display: sel, Provider: openAICompatTransport, Model: "m"}},
 		Traces: traces, OutputPath: out, Clock: func() time.Time { return time.Unix(0, 0).UTC() },
-		OpenAICompatBaseURL: "http://127.0.0.1:8090", RegistrationDigest: regDigest,
+		OpenAICompatBaseURL: "http://127.0.0.1:8090", RegistrationDigest: regDigest, Stdout: io.Discard,
 	})
 	if err != nil {
 		t.Fatalf("capture: %v", err)
@@ -255,5 +256,46 @@ func TestInjectionReportNeverPrintsMarkerOrArguments(t *testing.T) {
 		if !strings.Contains(strings.ToLower(md), want) {
 			t.Fatalf("refuse-to-claim item %q missing", want)
 		}
+	}
+}
+
+func TestInjectionReportRejectsRegistrationDrift(t *testing.T) {
+	tr := validInjectionTrace()
+	reg, _ := testRegistration(t, []registeredTrace{{ID: tr.ID, SHA256: canonicalTraceHash(tr), Population: "corpus"}})
+	art := captureWithDigest(t, t.TempDir(), []Trace{tr}, "sha256:not-the-file", nil)
+	_, err := runInjectionReport(injectionReportOptions{RegistrationPath: reg, Captures: []string{art}})
+	if err == nil || !strings.Contains(err.Error(), "registration digest") {
+		t.Fatalf("drifted registration accepted: %v", err)
+	}
+}
+
+func TestInjectionReportRejectsCensusMismatch(t *testing.T) {
+	tr := validInjectionTrace()
+	reg, digest := testRegistration(t, []registeredTrace{{ID: tr.ID, SHA256: "0000", Population: "corpus"}})
+	art := captureWithDigest(t, t.TempDir(), []Trace{tr}, digest, nil)
+	_, err := runInjectionReport(injectionReportOptions{RegistrationPath: reg, Captures: []string{art}})
+	if err == nil || !strings.Contains(err.Error(), "census") {
+		t.Fatalf("artifact trace with a hash outside the census accepted: %v", err)
+	}
+}
+
+// A trace that failed for EVERY model has no artifact. That is missingness,
+// never corpus drift: the report must succeed and show the cell as missing.
+func TestInjectionReportAllModelsMissingOneTrace(t *testing.T) {
+	a := validInjectionTrace()
+	b := validInjectionTrace()
+	b.ID = "inj-src-exfil-plain-helpful"
+	census := []registeredTrace{
+		{ID: a.ID, SHA256: canonicalTraceHash(a), Population: "corpus"},
+		{ID: b.ID, SHA256: canonicalTraceHash(b), Population: "corpus"},
+	}
+	reg, digest := testRegistration(t, census)
+	art := captureWithDigest(t, t.TempDir(), []Trace{a, b}, digest, map[string]bool{b.ID: true})
+	md, err := runInjectionReport(injectionReportOptions{RegistrationPath: reg, Captures: []string{art}})
+	if err != nil {
+		t.Fatalf("missing trace treated as drift: %v", err)
+	}
+	if !strings.Contains(md, "| openai-compat/m | 1/2 |") {
+		t.Fatalf("completeness must show 1/2:\n%s", md)
 	}
 }
