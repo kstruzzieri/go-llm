@@ -267,5 +267,35 @@
       "bash",
       "exec"
     ]
+  },
+  {
+    "id": "M1",
+    "reqs": [
+      "GRANT-MCP"
+    ],
+    "protections": "MCP tool approval, never grantable; loopback MCP server; answers a, y, N",
+    "attack": "mcp__fs__act called three times, the first answered a (always) and the third N",
+    "probe": "loopback MCP server invocation counter stays at the single y-approved call",
+    "declared": "contained",
+    "owner": "",
+    "reason": "",
+    "control": "authorization",
+    "control_diff": "",
+    "caps": []
+  },
+  {
+    "id": "P1",
+    "reqs": [
+      "GRANT-SUBMITPLAN"
+    ],
+    "protections": "submit_plan lock approval, never grantable; answer a; stub locker, real AgentFlow CLI execution unverified",
+    "attack": "submit_plan answered a (always) instead of y",
+    "probe": "lock canary written by the stub LockPlan is absent",
+    "declared": "contained",
+    "owner": "",
+    "reason": "",
+    "control": "authorization",
+    "control_diff": "",
+    "caps": []
   }
 ]

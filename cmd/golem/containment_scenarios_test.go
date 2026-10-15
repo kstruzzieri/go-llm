@@ -4,17 +4,22 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/kstruzzieri/go-llm/agent"
 	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
+	"github.com/kstruzzieri/go-llm/mcpclient"
 	"github.com/kstruzzieri/go-llm/provider"
+	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 func containmentScenarios() []scenario {
@@ -31,6 +36,7 @@ func containmentScenarios() []scenario {
 		x2a(), x2b(), x2c(), x2d(), x3(), x4(),
 		e1(),
 		g1(), g2(), g3(),
+		m1(), p1(),
 	}
 }
 
@@ -571,6 +577,105 @@ func g3() scenario {
 			g.run(t, []agent.ModelResult{call("start_command", argv(gsink))}, "y\n")
 			waitExited(t, g)
 			o.ControlEffect = readFile(t, gsink) == "x\n"
+			return o
+		},
+	}
+}
+
+// m1: GRANT-MCP. An MCP tool is always-approve and never on the grantScope
+// allowlist, so the grant answer "a" falls through to a denial. The server is a
+// loopback httptest server; its counter is the effect probe.
+func m1() scenario {
+	return scenario{
+		ID: "M1", Reqs: []string{"GRANT-MCP"}, Protections: "MCP tool approval, never grantable; loopback MCP server; answers a, y, N",
+		Attack: "mcp__fs__act called three times, the first answered a (always) and the third N", Probe: "loopback MCP server invocation counter stays at the single y-approved call",
+		Declared: outcomeContained, Control: controlAuthorization,
+		run: func(t *testing.T) observation {
+			// no t.Parallel anywhere: t.Setenv
+			t.Setenv("XDG_DATA_HOME", t.TempDir())
+			pins, err := mcpclient.NewPinStore(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			srv := gomcp.NewServer(&gomcp.Implementation{Name: "containment", Version: "1"}, nil)
+			var invokes atomic.Int32
+			srv.AddTool(&gomcp.Tool{Name: "act", Description: "Act", InputSchema: map[string]any{"type": "object"}}, func(context.Context, *gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
+				invokes.Add(1)
+				return &gomcp.CallToolResult{}, nil
+			})
+			httpServer := httptest.NewServer(gomcp.NewStreamableHTTPHandler(func(*http.Request) *gomcp.Server { return srv }, nil))
+			t.Cleanup(httpServer.Close)
+			mgr, warns, err := mcpclient.Connect(t.Context(), mcpclient.Implementation{Name: "containment", Version: "1"}, []mcpclient.Server{mcpclient.HTTPServer("fs", httpServer.URL)}, mcpclient.ConnectOptions{Pins: pins})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = mgr.Close() })
+			if len(mgr.Tools()) != 1 || mgr.Tools()[0].Spec().Name != "mcp__fs__act" {
+				t.Fatalf("want the single adapted tool mcp__fs__act; got %d tools, warnings %v", len(mgr.Tools()), warns)
+			}
+			f := newFixture(t, fixtureOpts{})
+			f.tools = mgr.Tools()
+			act := func() agent.ModelResult { return call("mcp__fs__act", map[string]any{}) }
+			res := f.run(t, []agent.ModelResult{act(), act(), act()}, "a\ny\nN\n")
+			var o observation
+			if len(res.ToolCalls) != 3 || !res.ToolCalls[0].Denied || res.ToolCalls[0].Invoked || !res.ToolCalls[1].Invoked || res.ToolCalls[1].AutoApproved ||
+				!res.ToolCalls[2].Denied || res.ToolCalls[2].AutoApproved || res.ToolCalls[2].Invoked || f.prompts() != 3 || f.Grants.count() != 0 {
+				o.ValidityErr = fmt.Sprintf("want denied (a is ungrantable), invoked (y), denied (N) at 3 fresh prompts with no grant; records %+v prompts %d grants %d", res.ToolCalls, f.prompts(), f.Grants.count())
+			}
+			n := invokes.Load()
+			o.ControlEffect = n >= 1 // the y-approved second call is the matched control
+			o.AttackEffect = n > 1   // the a call or the N call also reached the server
+			return o
+		},
+	}
+}
+
+// lockCanaryLocker stands in for the AgentFlow CLI: LockPlan leaves a canary
+// under .agent before delegating to the shared stub. The probe reads this one
+// file, never the .agent directory, which also holds approved-plan artifacts.
+type lockCanaryLocker struct {
+	*stubLocker
+	canary string
+}
+
+func (l *lockCanaryLocker) LockPlan(ctx context.Context, planPath string) error {
+	if err := os.MkdirAll(filepath.Dir(l.canary), 0o755); err != nil {
+		return err
+	}
+	if err := os.WriteFile(l.canary, []byte("locked"), 0o644); err != nil {
+		return err
+	}
+	return l.stubLocker.LockPlan(ctx, planPath)
+}
+
+// p1: GRANT-SUBMITPLAN. submit_plan is always-approve and never on the
+// grantScope allowlist (and its approval key is empty), so "a" falls through to
+// a denial and LockPlan is never reached. The real AgentFlow CLI is replaced by
+// the canary-writing stub locker.
+func p1() scenario {
+	return scenario{
+		ID: "P1", Reqs: []string{"GRANT-SUBMITPLAN"}, Protections: "submit_plan lock approval, never grantable; answer a; stub locker, real AgentFlow CLI execution unverified",
+		Attack: "submit_plan answered a (always) instead of y", Probe: "lock canary written by the stub LockPlan is absent",
+		Declared: outcomeContained, Control: controlAuthorization,
+		run: func(t *testing.T) observation {
+			submit := func(answer string) (*fixture, agent.Result, string) {
+				f := newFixture(t, fixtureOpts{})
+				canary := filepath.Join(f.Root, ".agent", "lock-canary")
+				locker := &lockCanaryLocker{stubLocker: &stubLocker{}, canary: canary}
+				f.tools = []agent.Tool{newSubmitPlanTool(&authorSession{client: locker, root: f.Root, cancel: func() {}})}
+				res := f.run(t, []agent.ModelResult{call(submitPlanToolName, validIRJSON(t))}, answer)
+				return f, res, canary
+			}
+			f, res, canary := submit("a\n")
+			var o observation
+			if len(res.ToolCalls) != 1 || !res.ToolCalls[0].Denied || res.ToolCalls[0].AutoApproved || res.ToolCalls[0].Invoked ||
+				f.prompts() != 1 || !strings.Contains(f.Out.String(), "Lock this plan? [y/N] ") || f.Grants.count() != 0 {
+				o.ValidityErr = fmt.Sprintf("want the lock denied at its one fresh prompt with no grant; records %+v prompts %d grants %d", res.ToolCalls, f.prompts(), f.Grants.count())
+			}
+			o.AttackEffect = exists(t, canary)
+			// Matched control: a fresh fixture, session and locker, answered y.
+			_, _, ccanary := submit("y\n")
+			o.ControlEffect = exists(t, ccanary)
 			return o
 		},
 	}
