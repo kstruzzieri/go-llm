@@ -75,6 +75,9 @@ func main() {
 	calibrateAgreement := flag.String("calibrate-agreement", string(calibrationAgreementExact), "Calibration agreement mode: exact or tolerance")
 	judgeStabilityRuns := flag.Int("judge-stability-runs", 0, "When >1, run the judge that many times per artifact (cache bypassed) and report spread as a diagnostic")
 
+	injectionReport := flag.Bool("injection-report", false, "Emit the injection-resistance report from -captures (artifacts JSONL files, comma-separated, each with its .manifest.json) bound to -registration (#452)")
+	capturesFlag := flag.String("captures", "", "With -injection-report: comma-separated injection capture artifacts paths (local and hosted captures are separate files)")
+	injectionAdjudications := flag.String("injection-adjudications", "", "With -injection-report: optional JSONL of {trace_id, model, outcome, reviewer, note}; may only replace manual cells")
 	registrationPath := flag.String("registration", "", "With -calibrate-capture over injection traces: the committed pre-registration JSON (llm-bench.injection-registration/v1); its census, decoding and digest bind the capture (#452)")
 	tracesGlob := flag.String("traces", "", "Glob pattern for trace JSON files (required for normal runs and -calibrate-capture)")
 	modelsArg := flag.String("models", "", "Comma-separated model selectors (provider/model or bare model name; required)")
@@ -186,11 +189,14 @@ func main() {
 	if *injectionBuildPath != "" {
 		modes++
 	}
+	if *injectionReport {
+		modes++
+	}
 	if *replayAttempt {
 		modes++
 	}
 	if modes > 1 {
-		log.Fatalf("llm-bench: -capture, -calibrate-capture, -calibrate, -manual-report, -paired-report, -assembly-report, -fim-latency, -blind-render, -blind-ingest, -fc-render, -fc-ingest, -fc-sidemap-generate, -adjudicate-render, -adjudicate-ingest, -discrimination-report, -import-xlam, -assembly-build, -build-injection-corpus, -replay-attempt are mutually exclusive")
+		log.Fatalf("llm-bench: -capture, -calibrate-capture, -calibrate, -manual-report, -paired-report, -assembly-report, -fim-latency, -blind-render, -blind-ingest, -fc-render, -fc-ingest, -fc-sidemap-generate, -adjudicate-render, -adjudicate-ingest, -discrimination-report, -import-xlam, -assembly-build, -build-injection-corpus, -injection-report, -replay-attempt are mutually exclusive")
 	}
 	if !*replayAttempt {
 		if stray := strayAttemptFlags(providedFlags); len(stray) > 0 {
@@ -498,6 +504,41 @@ func main() {
 			log.Fatalf("llm-bench: write assembly report: %v", err)
 		}
 		fmt.Fprintf(os.Stderr, "llm-bench: assembly report written to %s\n", *reportPath)
+		return
+	}
+
+	if *injectionReport {
+		var captures []string
+		for _, c := range strings.Split(*capturesFlag, ",") {
+			if c = strings.TrimSpace(c); c != "" {
+				captures = append(captures, c)
+			}
+		}
+		if len(captures) == 0 || strings.TrimSpace(*registrationPath) == "" {
+			log.Fatalf("llm-bench: -injection-report requires -captures and -registration")
+		}
+		inputs := [][2]string{{"-registration", *registrationPath}, {"-injection-adjudications", *injectionAdjudications}}
+		inputs = append(inputs, pathListInputs("-captures", captures)...)
+		for _, c := range captures {
+			inputs = append(inputs, [2]string{"-captures manifest", captureManifestPath(c)})
+		}
+		refuseReportAlias("injection-report", *reportPath, inputs)
+		report, err := runInjectionReport(injectionReportOptions{
+			RegistrationPath: *registrationPath,
+			Captures:         captures,
+			Adjudications:    *injectionAdjudications,
+		})
+		if err != nil {
+			log.Fatalf("llm-bench: %v", err)
+		}
+		if *reportPath == "" {
+			fmt.Print(report)
+			return
+		}
+		if err := os.WriteFile(*reportPath, []byte(report), 0o600); err != nil {
+			log.Fatalf("llm-bench: write injection report: %v", err)
+		}
+		fmt.Fprintf(os.Stderr, "llm-bench: injection report written to %s\n", *reportPath)
 		return
 	}
 
