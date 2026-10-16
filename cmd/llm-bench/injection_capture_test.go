@@ -520,3 +520,56 @@ func TestRegistrationBindCaptureFailsClosed(t *testing.T) {
 		t.Fatal("unregistered model accepted")
 	}
 }
+
+func TestInjectionManifestRejectsTrailingData(t *testing.T) {
+	t.Parallel()
+	tr := validInjectionTrace()
+	reg, digest := testRegistration(t, []registeredTrace{{ID: tr.ID, SHA256: canonicalTraceHash(tr), Population: "corpus"}})
+	for name, tail := range map[string]string{"second value": "{}\n", "closing brace": "}", "garbage": "invalid"} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			art := captureWithDigest(t, t.TempDir(), []Trace{tr}, digest, nil)
+			path := captureManifestPath(art)
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, append(raw, []byte(tail)...), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, err = runInjectionReport(injectionReportOptions{RegistrationPath: reg, Captures: []string{art}})
+			if err == nil || !strings.Contains(err.Error(), "trailing data") {
+				t.Errorf("runInjectionReport(manifest with %q tail) error = %v, want trailing-data error", tail, err)
+			}
+		})
+	}
+}
+
+func TestInjectionCaptureMissingRetryResultKeepsValidLedger(t *testing.T) {
+	t.Parallel()
+	tr := validInjectionTrace()
+	tr2 := validInjectionTrace()
+	tr2.ID += "-second"
+	out := filepath.Join(t.TempDir(), "art.jsonl")
+	err := runCalibrateCapture(context.Background(), calibrateCaptureOptions{
+		Runner: &scriptedCaptureRunner{rounds: [][]Result{{
+			{Model: "openai-compat/m", TraceID: tr.ID, Err: errors.New("dial tcp: timeout")},
+			{Model: "openai-compat/m", TraceID: tr2.ID, Transcript: []Turn{{Role: "assistant", Content: "Answer"}}},
+		}, {}}},
+		Targets: []ModelTarget{{Display: "openai-compat/m", Provider: openAICompatTransport, Model: "m"}},
+		Traces:  []Trace{tr, tr2}, OutputPath: out, OpenAICompatBaseURL: "http://127.0.0.1:8090",
+		RegistrationDigest: "sha256:abc", InjectionTemperatures: map[string]float64{"openai-compat/m": 0}, Stdout: io.Discard,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := readCaptureManifestV3(captureManifestPath(out))
+	if err != nil {
+		t.Fatalf("readCaptureManifestV3(after missing retry result) error = %v, want valid ledger", err)
+	}
+	row := m.Expected[0]
+	if row.Status != "failed" || row.Attempts != 2 || row.Error != "<error: no-result>" ||
+		len(row.AttemptErrors) != 2 || row.AttemptErrors[0] != "<error: timeout>" || row.AttemptErrors[1] != "<error: no-result>" {
+		t.Errorf("capture ledger after missing retry result = %+v, want failed with timeout then no-result", row)
+	}
+}

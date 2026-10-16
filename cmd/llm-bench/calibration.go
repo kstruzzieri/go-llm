@@ -900,6 +900,9 @@ func decodeCaptureManifestV3(path string, raw []byte) (captureManifest, error) {
 	if err := dec.Decode(&m); err != nil {
 		return captureManifest{}, fmt.Errorf("capture-manifest: decode %q: %w", path, err)
 	}
+	if err := requireJSONDecoderEOF(dec, "capture-manifest"); err != nil {
+		return captureManifest{}, fmt.Errorf("%q: %w", path, err)
+	}
 	if m.SchemaVersion != captureManifestSchemaVersionV3 {
 		return captureManifest{}, fmt.Errorf("capture-manifest: %q schema_version %q (want %q)", path, m.SchemaVersion, captureManifestSchemaVersionV3)
 	}
@@ -1299,6 +1302,7 @@ func runCalibrateCapture(ctx context.Context, opts calibrateCaptureOptions) erro
 		}
 		for k, stillPending := range pending {
 			if stillPending {
+				cells[k].res = nil    // the retry produced no result; discard the first attempt's failure
 				cells[k].attempts = 2 // the retry was attempted, result or not
 				cells[k].errs = append(cells[k].errs, "<error: no-result>")
 			}

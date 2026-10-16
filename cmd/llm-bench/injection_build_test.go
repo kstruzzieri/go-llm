@@ -233,3 +233,66 @@ func TestBuildInjectionCorpusExplicitChain(t *testing.T) {
 		t.Fatalf("a chain with an empty name was not refused up front: %v", err)
 	}
 }
+
+func TestBuildInjectionCorpusRejectsUnsafeNameSegments(t *testing.T) {
+	t.Parallel()
+	raw, err := os.ReadFile(filepath.FromSlash("testdata/injection/one-base.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name   string
+		mutate func(*injectionCases)
+	}{
+		{"base traversal", func(c *injectionCases) { c.Bases[0].ID = "x/../../escaped" }},
+		{"base backslash", func(c *injectionCases) { c.Bases[0].ID = `x\..\..\escaped` }},
+		{"base absolute path", func(c *injectionCases) { c.Bases[0].ID = "/tmp/escaped" }},
+		{"technique traversal", func(c *injectionCases) { c.Bases[0].Variants[0].Technique = "x/../../escaped" }},
+		{"technique backslash", func(c *injectionCases) { c.Bases[0].Variants[0].Technique = `x\..\..\escaped` }},
+		{"form traversal", func(c *injectionCases) { c.Bases[0].Variants[0].Form = "x/../../escaped" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var cases injectionCases
+			if err := json.Unmarshal(raw, &cases); err != nil {
+				t.Fatal(err)
+			}
+			tc.mutate(&cases)
+			dir := t.TempDir()
+			out := filepath.Join(dir, "corpus")
+			if err := os.Mkdir(out, 0755); err != nil {
+				t.Fatal(err)
+			}
+			sentinels := []string{filepath.Join(out, "inj-old.json"), filepath.Join(dir, "escaped-twin.json"), filepath.Join(dir, "escaped-blunt.json")}
+			for _, name := range sentinels {
+				if err := os.WriteFile(name, []byte("unchanged"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			body, err := json.Marshal(cases)
+			if err != nil {
+				t.Fatal(err)
+			}
+			casesPath := filepath.Join(dir, "cases.json")
+			if err := os.WriteFile(casesPath, body, 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := buildInjectionCorpus(t.Context(), casesPath, out); err == nil {
+				t.Errorf("buildInjectionCorpus(%s) succeeded, want invalid-name error", tc.name)
+			}
+			for _, name := range sentinels {
+				got, err := os.ReadFile(name)
+				if err != nil || string(got) != "unchanged" {
+					t.Errorf("buildInjectionCorpus(%s) changed %s: got %q, %v; want unchanged", tc.name, filepath.Base(name), got, err)
+				}
+			}
+			entries, err := os.ReadDir(out)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(entries) != 1 || entries[0].Name() != "inj-old.json" {
+				t.Errorf("buildInjectionCorpus(%s) changed output contents: got %v, want only inj-old.json", tc.name, entries)
+			}
+		})
+	}
+}

@@ -211,6 +211,9 @@ func buildInjectionCorpus(ctx context.Context, casesPath, outDir string) error {
 
 const injectionPayloadSlot = "{{PAYLOAD}}"
 
+// These segments become filenames; reject path syntax before publishing any files.
+var injectionNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]*$`)
+
 func loadInjectionCases(path string) (injectionCases, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -231,14 +234,19 @@ func loadInjectionCases(path string) (injectionCases, error) {
 	ids := map[string]bool{}
 	for _, b := range c.Bases {
 		switch {
-		case strings.TrimSpace(b.ID) == "" || ids[b.ID]:
-			return injectionCases{}, injectionErr("blank or duplicate base id %q", b.ID)
+		case !injectionNamePattern.MatchString(b.ID) || ids[b.ID]:
+			return injectionCases{}, injectionErr("invalid or duplicate base id %q", b.ID)
 		case strings.Count(b.Observation, injectionPayloadSlot) != 1:
 			return injectionCases{}, injectionErr("base %s: observation needs exactly one %s", b.ID, injectionPayloadSlot)
 		case strings.TrimSpace(b.Rationale) == "" || strings.TrimSpace(b.Anchor) == "":
 			return injectionCases{}, injectionErr("base %s: blank rationale or anchor", b.ID)
 		case len(b.Variants) == 0:
 			return injectionCases{}, injectionErr("base %s: no variants", b.ID)
+		}
+		for _, v := range b.Variants {
+			if !injectionNamePattern.MatchString(v.Technique) || !injectionNamePattern.MatchString(v.Form) {
+				return injectionCases{}, injectionErr("base %s: invalid variant technique %q or form %q", b.ID, v.Technique, v.Form)
+			}
 		}
 		ids[b.ID] = true
 	}
