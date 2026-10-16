@@ -1203,8 +1203,8 @@ func runCalibrateCapture(ctx context.Context, opts calibrateCaptureOptions) erro
 	isCtxErr := func(err error) bool {
 		return injectionCapture && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded))
 	}
-	cutOff := func(err error) bool {
-		return injectionCapture && ctx.Err() != nil && errors.Is(err, context.Canceled)
+	cutOff := func(err error) bool { // only consulted once interrupted is set
+		return injectionCapture && errors.Is(err, context.Canceled)
 	}
 	results, err := opts.Runner.RunAll(ctx, opts.Targets, ordered)
 	if err == nil && injectionCapture && ctx.Err() != nil {

@@ -711,7 +711,10 @@ func TestInjectionCaptureCancelDuringRetryKeepsFirstAttempt(t *testing.T) {
 	tr, rows, err := runCancelledCapture(t, time.Minute, func(n int32, cancel context.CancelFunc, w http.ResponseWriter, r *http.Request) {
 		switch n {
 		case 1:
-			http.Error(w, "boom", http.StatusInternalServerError)
+			// A parse failure: a category the cancel itself can never
+			// produce, so the row's error proves which attempt it kept.
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"choices":5}`)
 			return
 		case 4: // the retry of cell 1
 			cancel()
@@ -724,7 +727,7 @@ func TestInjectionCaptureCancelDuringRetryKeepsFirstAttempt(t *testing.T) {
 		t.Fatalf("capture error = %v; want the interrupt (context.Canceled)", err)
 	}
 	want := map[string]string{
-		tr[0].ID: "failed attempts 1 [<error: other>]",
+		tr[0].ID: "failed attempts 1 [<error: parse>]",
 		tr[1].ID: "captured attempts 1 []",
 		tr[2].ID: "captured attempts 1 []",
 	}
@@ -733,16 +736,22 @@ func TestInjectionCaptureCancelDuringRetryKeepsFirstAttempt(t *testing.T) {
 			t.Errorf("ledger %s = %q; want %q", id, got, w)
 		}
 	}
+	// The row's error is the first attempt's, not the cut-off retry's.
+	if got := rows[tr[0].ID].Error; got != "<error: parse>" {
+		t.Errorf("row error = %q; want %q", got, "<error: parse>")
+	}
 }
 
 // A real per-request timeout on cell 1 (DeadlineExceeded) followed by a
 // cancel on cell 2: the timeout stays a recorded failure, only the cut-off
 // cell and the never-run cell are unattempted.
 func TestInjectionCaptureRealTimeoutSurvivesLaterCancel(t *testing.T) {
-	tr, rows, err := runCancelledCapture(t, 300*time.Millisecond, func(n int32, cancel context.CancelFunc, w http.ResponseWriter, r *http.Request) {
+	// One second: cell 1 must time out, and cell 2's request must reach the
+	// handler well inside the same timeout on a loaded -race host.
+	tr, rows, err := runCancelledCapture(t, time.Second, func(n int32, cancel context.CancelFunc, w http.ResponseWriter, r *http.Request) {
 		switch n {
 		case 1:
-			hangUntilCancelled(r) // the runner's 300ms timeout fires
+			hangUntilCancelled(r) // the runner's timeout fires
 			return
 		case 2:
 			cancel()
