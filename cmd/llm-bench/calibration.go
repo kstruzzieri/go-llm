@@ -1193,11 +1193,23 @@ func runCalibrateCapture(ctx context.Context, opts calibrateCaptureOptions) erro
 	// An injection capture keeps what a cancelled run already finished (the
 	// recorded run is long and expensive): partial results are published with
 	// the never-run cells marked unattempted, then the cancellation surfaces.
+	//
+	// The interrupt is read from the context, not RunAll's return: RunAll
+	// checks ctx only before each cell, so a cancel that lands on the last
+	// cell comes back as (results, nil). Only context.Canceled marks a cell
+	// as cut off (main's ctx is a signal.NotifyContext); a per-request
+	// timeout is context.DeadlineExceeded and stays a real failure.
 	var interrupted error
 	isCtxErr := func(err error) bool {
 		return injectionCapture && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded))
 	}
+	cutOff := func(err error) bool {
+		return injectionCapture && ctx.Err() != nil && errors.Is(err, context.Canceled)
+	}
 	results, err := opts.Runner.RunAll(ctx, opts.Targets, ordered)
+	if err == nil && injectionCapture && ctx.Err() != nil {
+		err = ctx.Err()
+	}
 	if err != nil {
 		if !isCtxErr(err) {
 			return fmt.Errorf("calibrate-capture: run: %s", redactErrorMessage(err.Error()))
@@ -1213,7 +1225,7 @@ func runCalibrateCapture(ctx context.Context, opts calibrateCaptureOptions) erro
 		if c.res != nil {
 			return fmt.Errorf("calibrate-capture: duplicate result for %s/%s", r.TraceID, r.Model)
 		}
-		if interrupted != nil && isCtxErr(r.Err) {
+		if interrupted != nil && cutOff(r.Err) {
 			// The cancellation cut this cell off mid-flight: it never finished,
 			// so it stays unattempted (and gap-fillable), not failed.
 			continue
@@ -1246,6 +1258,9 @@ func runCalibrateCapture(ctx context.Context, opts calibrateCaptureOptions) erro
 			continue
 		}
 		retryResults, err := opts.Runner.RunAll(ctx, []ModelTarget{target}, retryTraces)
+		if err == nil && injectionCapture && ctx.Err() != nil {
+			err = ctx.Err()
+		}
 		if err != nil {
 			if !isCtxErr(err) {
 				return fmt.Errorf("calibrate-capture: retry run: %s", redactErrorMessage(err.Error()))
@@ -1261,6 +1276,12 @@ func runCalibrateCapture(ctx context.Context, opts calibrateCaptureOptions) erro
 			k := cellKey{r.Model, r.TraceID}
 			// Only the retried cells may be updated (canned test runners can
 			// replay unrelated results), and only once each.
+			if pending[k] && interrupted != nil && cutOff(r.Err) {
+				// The cancellation cut this retry off: the cell keeps its
+				// first attempt and that attempt's error only.
+				pending[k] = false
+				continue
+			}
 			if pending[k] {
 				cells[k].res = r
 				cells[k].attempts = 2
@@ -1271,7 +1292,10 @@ func runCalibrateCapture(ctx context.Context, opts calibrateCaptureOptions) erro
 			}
 		}
 		if interrupted != nil {
-			break // cells the cancelled retry never answered keep attempts 1
+			// Cells the cancelled retry never answered, or that it cut off,
+			// keep attempts 1 and their first error; the capture then
+			// returns the interrupt.
+			break
 		}
 		for k, stillPending := range pending {
 			if stillPending {

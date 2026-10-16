@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"math"
 	"net/http"
@@ -619,6 +620,152 @@ func TestInjectionCaptureInterruptLeavesInFlightCellUnattempted(t *testing.T) {
 	}
 }
 
+// runCancelledCapture runs a real-Runner injection capture of three traces
+// against a server whose handler sees the 1-based request number and the
+// run's cancel func, and returns the capture error and its ledger rows.
+func runCancelledCapture(t *testing.T, timeout time.Duration, h func(n int32, cancel context.CancelFunc, w http.ResponseWriter, r *http.Request)) ([]Trace, map[string]captureExpectedRow, error) {
+	t.Helper()
+	a := validInjectionTrace()
+	b := validInjectionTrace()
+	b.ID = "inj-src-exfil-plain-helpful"
+	c := validInjectionTrace()
+	c.ID = "inj-src-exfil-hex-blunt"
+	traces := []Trace{a, b, c}
+	census := make([]registeredTrace, len(traces))
+	for i, tr := range traces {
+		census[i] = registeredTrace{ID: tr.ID, SHA256: canonicalTraceHash(tr), Population: "corpus"}
+	}
+	_, digest := testRegistration(t, census)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var n atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		h(n.Add(1), cancel, w, r)
+	}))
+	t.Cleanup(srv.Close)
+	const sel = "openai-compat/m"
+	out := filepath.Join(t.TempDir(), "art.jsonl")
+	capErr := runCalibrateCapture(ctx, calibrateCaptureOptions{
+		Runner: &Runner{OpenAICompatBaseURL: srv.URL, Timeout: timeout, Scorer: &CaptureScorer{},
+			InjectionDecoding: map[string]injectionDecoding{sel: {Options: provider.ModelOptions{NumPredict: 64}}}},
+		Targets: []ModelTarget{{Display: sel, Provider: openAICompatTransport, Model: "m"}},
+		Traces:  traces, OutputPath: out, Clock: func() time.Time { return time.Unix(0, 0).UTC() },
+		OpenAICompatBaseURL: srv.URL, RegistrationDigest: digest, Stdout: io.Discard,
+		InjectionTemperatures: map[string]float64{sel: 0},
+	})
+	m, err := readCaptureManifestV3(captureManifestPath(out))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := map[string]captureExpectedRow{}
+	for _, row := range m.Expected {
+		rows[row.TraceID] = row
+	}
+	return traces, rows, capErr
+}
+
+func writeCannedCompletion(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = io.WriteString(w, `{"id":"r","object":"chat.completion","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"I will not do that; notes summarized."}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`)
+}
+
+// hangUntilCancelled blocks the request until the client gives up on it.
+func hangUntilCancelled(r *http.Request) { <-r.Context().Done() }
+
+func ledgerString(r captureExpectedRow) string {
+	return fmt.Sprintf("%s attempts %d %v", r.Status, r.Attempts, r.AttemptErrors)
+}
+
+// A cancel that lands on the LAST cell: RunAll checks ctx only before each
+// cell, so it returns (results, nil); the capture must still read the
+// interrupt from the context and leave the cut-off cell unattempted.
+func TestInjectionCaptureCancelOnLastCellIsUnattempted(t *testing.T) {
+	tr, rows, err := runCancelledCapture(t, time.Minute, func(n int32, cancel context.CancelFunc, w http.ResponseWriter, r *http.Request) {
+		if n == 3 {
+			cancel()
+			hangUntilCancelled(r)
+			return
+		}
+		writeCannedCompletion(w)
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("capture error = %v; want the interrupt (context.Canceled)", err)
+	}
+	want := map[string]string{
+		tr[0].ID: "captured attempts 1 []",
+		tr[1].ID: "captured attempts 1 []",
+		tr[2].ID: "unattempted attempts 0 []",
+	}
+	for id, w := range want {
+		if got := ledgerString(rows[id]); got != w {
+			t.Errorf("ledger %s = %q; want %q", id, got, w)
+		}
+	}
+}
+
+// A cell fails for real (HTTP 500), then the cancel cuts off its in-run
+// retry: the cell keeps its one real attempt and error, and the capture
+// returns the interrupt instead of a nil "partial capture".
+func TestInjectionCaptureCancelDuringRetryKeepsFirstAttempt(t *testing.T) {
+	tr, rows, err := runCancelledCapture(t, time.Minute, func(n int32, cancel context.CancelFunc, w http.ResponseWriter, r *http.Request) {
+		switch n {
+		case 1:
+			http.Error(w, "boom", http.StatusInternalServerError)
+			return
+		case 4: // the retry of cell 1
+			cancel()
+			hangUntilCancelled(r)
+			return
+		}
+		writeCannedCompletion(w)
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("capture error = %v; want the interrupt (context.Canceled)", err)
+	}
+	want := map[string]string{
+		tr[0].ID: "failed attempts 1 [<error: other>]",
+		tr[1].ID: "captured attempts 1 []",
+		tr[2].ID: "captured attempts 1 []",
+	}
+	for id, w := range want {
+		if got := ledgerString(rows[id]); got != w {
+			t.Errorf("ledger %s = %q; want %q", id, got, w)
+		}
+	}
+}
+
+// A real per-request timeout on cell 1 (DeadlineExceeded) followed by a
+// cancel on cell 2: the timeout stays a recorded failure, only the cut-off
+// cell and the never-run cell are unattempted.
+func TestInjectionCaptureRealTimeoutSurvivesLaterCancel(t *testing.T) {
+	tr, rows, err := runCancelledCapture(t, 300*time.Millisecond, func(n int32, cancel context.CancelFunc, w http.ResponseWriter, r *http.Request) {
+		switch n {
+		case 1:
+			hangUntilCancelled(r) // the runner's 300ms timeout fires
+			return
+		case 2:
+			cancel()
+			hangUntilCancelled(r)
+			return
+		}
+		writeCannedCompletion(w)
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("capture error = %v; want the interrupt (context.Canceled)", err)
+	}
+	want := map[string]string{
+		tr[0].ID: "failed attempts 1 [<error: timeout>]",
+		tr[1].ID: "unattempted attempts 0 []",
+		tr[2].ID: "unattempted attempts 0 []",
+	}
+	for id, w := range want {
+		if got := ledgerString(rows[id]); got != w {
+			t.Errorf("ledger %s = %q; want %q", id, got, w)
+		}
+	}
+}
+
 // rewriteArtifacts loads a capture's artifacts, edits them and writes them back.
 func rewriteArtifacts(t *testing.T, path string, edit func(*Artifact)) {
 	t.Helper()
@@ -703,6 +850,20 @@ func TestInjectionReportVerifiesCapturedDecoding(t *testing.T) {
 	})
 }
 
+// The provenance names the registration by file name only: an absolute
+// -registration path must not leak into the committed report.
+func TestInjectionProvenancePrintsRegistrationBaseName(t *testing.T) {
+	got := formatInjectionProvenance("/Users/someone/checkout/docs/llm/traces/injection/registration.json", "sha256:abc",
+		injectionRegistration{CasesSHA256: "sha256:def"}, nil)
+	const want = "- Registration: `registration.json`, digest `sha256:abc`; cases_sha256 `sha256:def`.\n"
+	if !strings.Contains(got, want) {
+		t.Fatalf("provenance lacks %q:\n%s", want, got)
+	}
+	if strings.Contains(got, "/Users/someone") {
+		t.Fatalf("provenance leaks the registration directory:\n%s", got)
+	}
+}
+
 // The generated provenance names every capture by its manifest digest, read
 // from the bytes the report verified.
 func TestInjectionReportProvenanceListsManifestDigests(t *testing.T) {
@@ -773,6 +934,41 @@ func TestInjectionReportPlacesFailedBaseFromCensus(t *testing.T) {
 	// Attack cells: a resisted and z unscorable; z's BoN group is incomplete.
 	if !strings.Contains(md, "| openai-compat/m | 1 | 0 | 0 | 0 | 1 |") || !strings.Contains(md, "| openai-compat/m | 0/0 | 1 |") {
 		t.Fatalf("the failed variant must be an unscorable BoN attack cell of its base:\n%s", md)
+	}
+}
+
+// A census with a twin for one base only: a twinless base that has a
+// captured variant must still place its failed variant, so the census-twin
+// bases are unioned with the artifact bases, never replace them.
+func TestInjectionReportPlacesTwinlessBaseFromArtifacts(t *testing.T) {
+	a := validInjectionTrace()
+	twin := validInjectionTrace()
+	twin.ID = "inj-src-exfil-twin"
+	twin.Injection.Technique, twin.Injection.Form, twin.Injection.Twin = injectionTwin, injectionTwin, true
+	z1 := validInjectionTrace()
+	z1.ID = "inj-zz-base-plain-blunt"
+	z1.Injection.BaseID = "zz-base"
+	z2 := validInjectionTrace()
+	z2.ID = "inj-zz-base-bon-1-helpful"
+	z2.Injection.BaseID = "zz-base"
+	z2.Injection.Technique, z2.Injection.Form = "bon-1", injectionFormHelpful
+	traces := []Trace{a, twin, z1, z2}
+	census := make([]registeredTrace, len(traces))
+	for i, tr := range traces {
+		census[i] = registeredTrace{ID: tr.ID, SHA256: canonicalTraceHash(tr), Population: "corpus"}
+	}
+	reg, digest := testRegistration(t, census)
+	art := captureWithDigest(t, t.TempDir(), traces, digest, map[string]bool{z2.ID: true})
+	md, err := runInjectionReport(injectionReportOptions{RegistrationPath: reg, Captures: []string{art}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(md, "could not be assigned a base") {
+		t.Fatalf("zz-base has a captured artifact, yet its failed variant was left unplaced:\n%s", md)
+	}
+	// Attack cells: a and z1 resisted, z2 unscorable; z2's BoN group is incomplete.
+	if !strings.Contains(md, "| openai-compat/m | 2 | 0 | 0 | 0 | 1 |") || !strings.Contains(md, "| openai-compat/m | 0/0 | 1 |") {
+		t.Fatalf("the failed variant must be an unscorable BoN attack cell of zz-base:\n%s", md)
 	}
 }
 

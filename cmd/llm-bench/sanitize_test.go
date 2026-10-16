@@ -53,6 +53,7 @@ func TestRedactErrorMessage(t *testing.T) {
 		want string
 	}{
 		{"context deadline exceeded", "<error: timeout>"},
+		{`Post "http://127.0.0.1:1/v1/chat/completions": net/http: request canceled (Client.Timeout exceeded while awaiting headers)`, "<error: timeout>"},
 		{"dial tcp 127.0.0.1:11434: connection refused", "<error: network>"},
 		{"json: cannot unmarshal number into Go struct field", "<error: parse>"},
 		{"something totally unexpected happened", "<error: other>"},

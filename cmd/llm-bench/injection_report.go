@@ -368,7 +368,10 @@ var injectionRefuseToClaim = []string{
 
 // claimLines renders the registered claim gates, one line each in
 // registration order, expanding a gate to its built-in explanation when one
-// exists; with no registered gates it falls back to the built-in list.
+// exists. The explanation after a gate's colon is built-in prose, not covered
+// by the registration digest. The built-in list itself is reached only by
+// zero-value registrations in unit tests: validation rejects an empty
+// claim_gates.
 func claimLines(gates []string) []string {
 	if len(gates) == 0 {
 		return injectionRefuseToClaim
@@ -523,7 +526,9 @@ func formatInjectionProvenance(regPath, regDigest string, reg injectionRegistrat
 	var b strings.Builder
 	w := func(format string, a ...any) { _, _ = fmt.Fprintf(&b, format, a...) }
 	w("## Provenance\n\n")
-	w("- Registration: `%s`, digest `%s`; cases_sha256 `%s`.\n", markdownCell(regPath), regDigest, markdownCell(reg.CasesSHA256))
+	// Only the file name: the path as typed would make the doc's diff depend
+	// on the working directory, and the digest already identifies the file.
+	w("- Registration: `%s`, digest `%s`; cases_sha256 `%s`.\n", markdownCell(filepath.Base(regPath)), regDigest, markdownCell(reg.CasesSHA256))
 	w("- Builder revision `%s`; scorer revision `%s` (as registered).\n\n", markdownCell(reg.BuilderRevision), markdownCell(reg.ScorerRevision))
 	w("| Capture | manifest_digest | Created (UTC) | Endpoint | Transport | Temperature | Models | Captured | Failed | Unattempted |\n|---|---|---|---|---|---|---|---|---|---|\n")
 	for _, c := range caps {
@@ -719,10 +724,9 @@ func runInjectionReport(opts injectionReportOptions) (string, error) {
 			cells = append(cells, cell)
 		}
 	}
-	// Base IDs come from the census twins ("inj-<base>-twin"), which name
-	// every base exactly whether or not any of its cells produced an
-	// artifact; the artifact-derived set is the fallback for a census
-	// without twins.
+	// Base IDs are the union of the census twins ("inj-<base>-twin"), which
+	// name a base whether or not any of its cells produced an artifact, and
+	// the bases of the captured artifacts, which cover a base without a twin.
 	bases := map[string]bool{}
 	for _, c := range reg.Census {
 		if rest, ok := strings.CutPrefix(c.ID, "inj-"); ok {
@@ -731,10 +735,8 @@ func runInjectionReport(opts injectionReportOptions) (string, error) {
 			}
 		}
 	}
-	if len(bases) == 0 {
-		for _, md := range meta {
-			bases[md.Base] = true
-		}
+	for _, md := range meta {
+		bases[md.Base] = true
 	}
 	for _, p := range ledgerOnly {
 		if !p.attempted && seenCell[[2]string{p.model, p.trace}].attempted {

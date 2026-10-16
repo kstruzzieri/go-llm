@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -941,5 +942,36 @@ func TestValidateCandidateSessionID(t *testing.T) {
 		if err := validateCandidateSessionID(id); (err == nil) != ok {
 			t.Errorf("validateCandidateSessionID(%q) = %v; want ok=%v", id, err, ok)
 		}
+	}
+}
+
+// main must reject a malformed -candidate-session-id before any network use:
+// the binary exits non-zero with the validation message and the candidate
+// server never sees a request.
+func TestMainRejectsCandidateSessionIDBeforeNetwork(t *testing.T) {
+	var hits atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+	cmd := exec.Command(os.Args[0],
+		"-traces", "testdata/smoke/minimal.json",
+		"-models", "fake",
+		"-ollama-url", server.URL,
+		"-judge-cache", "",
+		"-candidate-session-id", " llmb-452",
+		"-report", filepath.Join(t.TempDir(), "report.md"),
+	)
+	cmd.Env = append(os.Environ(), "LLM_BENCH_TEST_MAIN=1")
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("llm-bench accepted a leading-space session id:\n%s", out)
+	}
+	if !strings.Contains(string(out), "llm-bench: -candidate-session-id has leading or trailing whitespace") {
+		t.Fatalf("missing the validation message:\n%s", out)
+	}
+	if n := hits.Load(); n != 0 {
+		t.Fatalf("candidate server saw %d request(s) before the session id was rejected", n)
 	}
 }
