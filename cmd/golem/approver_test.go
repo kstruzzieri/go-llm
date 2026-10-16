@@ -154,6 +154,7 @@ func TestApproverGrantPreviewNeutralizesTerminalControls(t *testing.T) {
 			}
 
 			got := out.String()
+			// containment: TERM-PREVIEW
 			for _, raw := range []string{"\x1b[2J", "\u009b", "\r", "\b", "\t", "\u202e"} {
 				if strings.Contains(got, raw) {
 					t.Fatalf("approval output retained terminal control %q: %q", raw, got)
@@ -568,6 +569,7 @@ func TestApproverBackgroundPreviewsNeutralizeTerminalControls(t *testing.T) {
 				t.Fatalf("ApproveKeyed: d=%+v err=%v", d, err)
 			}
 			got := out.String()
+			// containment: TERM-PREVIEW
 			for _, raw := range []string{"\x1b[2J", "\u009b", "\r", "\u202e"} {
 				if strings.Contains(got, raw) {
 					t.Fatalf("%s approval retained terminal control %q: %q", tc.name, raw, got)
@@ -639,6 +641,7 @@ func TestVerifyGrantsDoNotCrossAuthorize(t *testing.T) {
 			if !grants.granted(grantScope(tc.grantedTool), sharedKey) {
 				t.Fatal("fixture invalid: the grant was not stored")
 			}
+			// containment: GRANT-VERIFY-PARTITION
 			if grants.granted(grantScope(tc.attemptedTool), sharedKey) {
 				t.Fatalf("a %s grant must not authorize %s", tc.grantedTool, tc.attemptedTool)
 			}

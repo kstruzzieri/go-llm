@@ -57,6 +57,7 @@ func runMCPTrustContract(t *testing.T) {
 		set("Read\nfiles")
 		mgr, warns = connect(0, true)
 		var rejection *mcpclient.AdmissionError
+		// containment: MCP-TOFU
 		if len(warns) != 1 || !errors.As(warns[0], &rejection) || rejection.Reason != "catalog_changed" || rejection.PinnedDigest != "sha256:d076c0d77d90e89d7022d158c501320cb52ff0acfb18157506f397b195feb99e" || rejection.CandidateDigest != "sha256:5ed6cdea197afcbc274e95c7b9eb7fa76263b49fb300dd5a43409054e2ae9bf3" {
 			t.Fatalf("mismatch=%v", warns)
 		}

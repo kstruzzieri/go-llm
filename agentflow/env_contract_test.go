@@ -66,6 +66,7 @@ func TestAgentflowEnv_RealCLI_GateSeesOnlyThePolicy(t *testing.T) {
 		t.Fatal(err)
 	}
 	report := readEnvProbe(t, out)
+	// containment: ENV-AGENTFLOW
 	if report.Canary || slices.Contains(report.Names, "OPENAI_API_KEY") {
 		t.Fatalf("parent secret reached the gate; names=%v", report.Names)
 	}

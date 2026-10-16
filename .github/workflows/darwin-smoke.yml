@@ -43,6 +43,16 @@ jobs:
       - name: Workspace mutation boundary
         run: go test -race -count=1 -run '^TestMutation' ./agent/tools ./cmd/golem
 
+      # The containment inventory's darwin-host profile: every mandatory ref
+      # must run and pass natively, no skip allowed (#452).
+      - name: Containment inventory (darwin-host)
+        env:
+          GO_LLM_CI_COMMIT: ${{ github.sha }}
+          GO_LLM_CI_PR_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          tree="$(git rev-parse "${GITHUB_SHA}^{tree}")"
+          GO_LLM_CI_TREE="$tree" go run ./internal/containmentinv/check -inventory docs/security/containment-inventory.json -profile darwin-host -evidence-out "$RUNNER_TEMP/containment-darwin-host.json"
+
       # APFS stored spelling (#558): require native execution of the eight
       # proof, parser and fallback tests. The foreign-filesystem fixture is
       # optional and is deliberately outside this selection.
@@ -131,3 +141,24 @@ jobs:
         env:
           GO_LLM_REQUIRE_SEATBELT: "1"
         run: go test -race -count=1 -run '^(TestSeatbelt|TestSBPL|TestProbeSeatbelt|TestScratchSeatbelt|TestNewExecBackendSeatbelt)' ./agent/tools
+
+      # The containment inventory's seatbelt profile, without race: its
+      # helper-process legs skip under race instrumentation (#452).
+      - name: Containment inventory (seatbelt)
+        env:
+          GO_LLM_REQUIRE_SEATBELT: "1"
+          GO_LLM_CI_COMMIT: ${{ github.sha }}
+          GO_LLM_CI_PR_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          tree="$(git rev-parse "${GITHUB_SHA}^{tree}")"
+          GO_LLM_CI_TREE="$tree" go run ./internal/containmentinv/check -inventory docs/security/containment-inventory.json -profile seatbelt -evidence-out "$RUNNER_TEMP/containment-seatbelt.json"
+
+      - name: Upload containment evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: containment-darwin
+          path: |
+            ${{ runner.temp }}/containment-darwin-host.json
+            ${{ runner.temp }}/containment-seatbelt.json
+          if-no-files-found: error

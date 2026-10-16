@@ -48,13 +48,13 @@ func TestHardeningContracts(t *testing.T) {
 		runMCPTrustContract(t)
 	})
 	for _, boundary := range []string{
-		"ZT-602_#431_project_trust",
 		"ZT-605_#434_quarantine",
 		"ZT-606_#435_retrieval_screening",
 	} {
 		t.Run(boundary, func(t *testing.T) { t.Skip("deferred boundary coverage; tracked separately") })
 	}
 	// #433's CLI presentation boundary is covered by cmd/golem/render_sanitization_test.go.
+	// #431's project-trust boundary is covered by cmd/golem (TestProjectTrustLiveConsentAndFreshness) and the projectcontext tests.
 	elapsed := time.Since(started)
 	t.Logf("hardening contracts elapsed: %s (budget enforced: %t)", elapsed, *enforceHardeningBudget)
 	if *enforceHardeningBudget && elapsed >= hardeningBudget {
@@ -122,6 +122,7 @@ func runDetectorContracts(t *testing.T) {
 				if err != nil {
 					t.Fatalf("ZeroWidth.InspectInput(%s): %v", origin, err)
 				}
+				// containment: DETECT-ZW
 				contractFindingsEqual(t, tc.name, got, directInputFinding(tc.rule, verdict, tc.risk, tc.detail, origin), false)
 			}
 		})
@@ -154,6 +155,7 @@ func runDetectorContracts(t *testing.T) {
 				if err != nil {
 					t.Fatalf("Encoding.InspectInput(%s): %v", origin, err)
 				}
+				// containment: DETECT-ENC
 				contractFindingsEqual(t, tc.name, got, directInputFinding(tc.rule, verdict, tc.risk, tc.detail, origin), false)
 			}
 		})
@@ -179,6 +181,7 @@ func runDetectorContracts(t *testing.T) {
 				if err != nil {
 					t.Fatalf("Typoglycemia.InspectInput(%s): %v", origin, err)
 				}
+				// containment: DETECT-TYPO
 				contractFindingsEqual(t, tc.name, got, directInputFinding(tc.rule, verdict, tc.risk, tc.detail, origin), false)
 			}
 		})
@@ -272,6 +275,7 @@ func runSecretsContracts(t *testing.T) {
 					if err != nil {
 						t.Fatalf("Secrets.InspectInput(%s) returned an error", tc.kind)
 					}
+					// containment: SECRETS
 					contractFindingsEqual(t, tc.kind, got, secretWant(tc.kind, origin, agent.TargetMessage, 4, ""), true)
 				}
 				got, err := (interceptor.Secrets{}).InspectInput(context.Background(), inputMessage(agent.OriginForeign, tc.clean))
@@ -352,6 +356,7 @@ func runInvariantContracts(t *testing.T) {
 			got[i] = row.Tool + "/" + row.Name + "/" + row.Field
 		}
 		want := []string{"write_file/protected_path/path", "edit_file/protected_path/path", "promote_artifact/protected_path/path", "read_file/credential_path/path", "run_command/remote_script_execution/argv", "start_command/remote_script_execution/argv"}
+		// containment: INVARIANTS
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("DefaultInvariants() = %v, want %v", got, want)
 		}
@@ -387,6 +392,7 @@ func runInvariantContracts(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Invariants.InspectToolCall(%s): %v", tc.name, err)
 			}
+			// containment: INVARIANTS
 			if !tc.blocked {
 				if got != nil {
 					t.Errorf("Invariants.InspectToolCall(%s) finding count = %d, want 0", tc.name, len(got))
@@ -430,6 +436,7 @@ func runEgressContracts(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Egress.InspectToolCall(%s): %v", tc.name, err)
 			}
+			// containment: EGRESS
 			if tc.rule == "" {
 				if got != nil {
 					t.Errorf("Egress.InspectToolCall(%s) finding count = %d, want 0", tc.name, len(got))
@@ -678,6 +685,7 @@ func runDefaultPipelineContracts(t *testing.T) {
 			names[i] = chain[i].Name()
 		}
 		want := []string{"zero_width", "encoding", "typoglycemia", "invariants", "egress", "secrets", "child_scope_denials"}
+		// containment: PIPELINE-ORDER
 		if !reflect.DeepEqual(names, want) {
 			t.Errorf("Defaults names = %v, want %v", names, want)
 		}
@@ -693,6 +701,7 @@ func runDefaultPipelineContracts(t *testing.T) {
 		mc := &contractCaller{responses: []agent.ModelResult{contractFinal()}}
 		res, err := agent.New(mc, agent.ContextManager{}, agent.WithInterceptors(interceptor.Defaults()...)).Run(context.Background(), agent.Request{Goal: goal}, nil)
 		var blocked *agent.BlockedError
+		// containment: PIPELINE-ORDER
 		if err == nil || !errors.As(err, &blocked) || len(mc.requests) != 0 {
 			t.Errorf("Run(composed input) blocked/calls = %t/%d, want true/0", blocked != nil, len(mc.requests))
 		}
@@ -793,6 +802,7 @@ func runSecretPipelineContracts(t *testing.T) {
 		if err == nil || !errors.As(err, &blocked) || blocked.Hook != agent.HookOutput {
 			t.Errorf("Run(secret output arguments) output-blocked = %t, want true", blocked != nil && blocked.Hook == agent.HookOutput)
 		}
+		// containment: SECRETS
 		if tool.plans != 0 || tool.invokes != 0 || len(approver.risks) != 0 || len(rec.Steps) != 0 || len(res.ToolCalls) != 0 {
 			t.Errorf("Run(secret output arguments) Plan/Invoke/approval/step/record = %d/%d/%d/%d/%d, want all zero", tool.plans, tool.invokes, len(approver.risks), len(rec.Steps), len(res.ToolCalls))
 		}
@@ -945,6 +955,7 @@ func runWorkspaceContracts(t *testing.T) {
 				{"owned_absolute_sibling", outPath, "path is outside the workspace", "absolute paths are not allowed", nil, ""},
 				{"symlink_leaf", "leaf-link", "symlinks are not followed", "symlinks are not followed", func(t *testing.T) { makeSymlink(t, outPath, leafLink) }, leafLink},
 				{"symlink_ancestor", filepath.Join("dir-link", "out.txt"), "symlinks are not followed", "symlinks are not followed", func(t *testing.T) { makeSymlink(t, sibling, dirLink) }, dirLink},
+				{"nul_byte", "in\x00.txt", "path is outside the workspace", "path contains NUL byte", nil, ""},
 				{"valid_in_root", "in.txt", "workspace sentinel\n", "", nil, ""},
 			} {
 				t.Run(tc.name, func(t *testing.T) {
@@ -957,6 +968,12 @@ func runWorkspaceContracts(t *testing.T) {
 						t.Fatalf("ReadFile.Invoke(%q): %v", tc.path, err)
 					}
 					wantReadError := tc.wantPlan != ""
+					// containment: PATH-ABS
+					// containment: PATH-DOTDOT
+					// containment: PATH-NUL
+					// containment: PATH-SEPPREFIX
+					// containment: PATH-SYMLINK-ANCESTOR
+					// containment: PATH-SYMLINK-FINAL
 					if readResult.IsError != wantReadError || readResult.Content != tc.wantRead {
 						t.Errorf("ReadFile.Invoke(%q) = {%t %q}, want {%t %q}", tc.path, readResult.IsError, readResult.Content, wantReadError, tc.wantRead)
 					}

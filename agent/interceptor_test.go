@@ -316,6 +316,7 @@ func TestRunHookRunsEveryInterceptorAfterBlockAndError(t *testing.T) {
 	if err == nil || err.Error() != "agent: interceptor bad input: boom" {
 		t.Fatalf("err = %v", err)
 	}
+	// containment: PIPELINE-ORDER
 	if len(tail.inputs) != 1 {
 		t.Fatalf("tail ran %d times after an error and a block, want 1 (spec D1)", len(tail.inputs))
 	}
@@ -508,6 +509,7 @@ func TestRunHookSnapshotsAndEvents(t *testing.T) {
 	}
 	e1.Risk.Findings[0].Risk = 999
 	e1.Findings[0].Risk = 999
+	// containment: RISK-SNAPSHOT
 	if r.risk.Findings[0].Risk != 30 {
 		t.Fatal("observer wrote through to the run's report: snapshot missing")
 	}
@@ -1002,6 +1004,7 @@ func TestToolCallBlockSerialNeverPlansInvokesOrPrompts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v (a tool-call block is a model-visible observation, not a run error)", err)
 	}
+	// containment: PIPELINE-ORDER
 	if tool.planned != 0 || tool.invoked != 0 {
 		t.Fatalf("planned=%d invoked=%d, want 0/0", tool.planned, tool.invoked)
 	}
@@ -1269,6 +1272,7 @@ func TestToolResultBlockReplacesTheObservationBeforeTheObserver(t *testing.T) {
 			}
 			const content = "tool result blocked by interceptor guard (poison)"
 			last := rec.toolResults[len(rec.toolResults)-1]
+			// containment: PIPELINE-ORDER
 			if last.Call.Function.Name != "evil" || last.Result.Content != content || !last.Blocked || !last.Invoked || last.Result.Attrib != nil || last.Result.Context != nil {
 				t.Fatalf("observer saw %+v, want the replaced observation", last)
 			}

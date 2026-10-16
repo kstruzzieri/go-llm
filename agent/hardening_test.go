@@ -193,6 +193,7 @@ func runHardeningFrameBytes(t *testing.T) {
 		var requestKey string
 		for i, name := range names {
 			got := req.Messages[i+2]
+			// containment: FENCE-FORGED
 			key := hardeningFrame(t, name, got.Content, wants[i])
 			if i == 0 {
 				requestKey = key

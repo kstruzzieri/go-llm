@@ -1,0 +1,679 @@
+[
+  {
+    "id": "W1",
+    "reqs": [
+      "PATH-ABS"
+    ],
+    "protections": "workspace confinement; approver answers y",
+    "attack": "write_file to an absolute outside-root path",
+    "probe": "pre-created outside canary bytes unchanged",
+    "declared": "contained",
+    "owner": "",
+    "reason": "",
+    "control": "structural",
+    "control_diff": "target path moved in-root",
+    "caps": [
+      "unix"
+    ]
+  },
+  {
+    "id": "W2",
+    "reqs": [
+      "PATH-DOTDOT"
+    ],
+    "protections": "workspace confinement; approver answers y",
+    "attack": "write_file via .. traversal",
+    "probe": "pre-created outside canary bytes unchanged",
+    "declared": "contained",
+    "owner": "",
+    "reason": "",
+    "control": "structural",
+    "control_diff": "target path moved in-root",
+    "caps": [
+      "unix"
+    ]
+  },
+  {
+    "id": "W3",
+    "reqs": [
+      "PATH-SYMLINK-ANCESTOR"
+    ],
+    "protections": "workspace confinement; approver answers y",
+    "attack": "write_file through a symlinked ancestor",
+    "probe": "pre-created outside canary bytes unchanged",
+    "declared": "contained",
+    "owner": "",
+    "reason": "",
+    "control": "structural",
+    "control_diff": "target path moved in-root",
+    "caps": [
+      "unix",
+      "symlink"
+    ]
+  },
+  {
+    "id": "A1",
+    "reqs": [
+      "GRANT-ONETIME"
+    ],
+    "protections": "exec approval; answers y then N",
+    "attack": "same run_command twice after a one-time approval",
+    "probe": "append-only effect file has exactly one line",
+    "declared": "contained",
+    "owner": "",
+    "reason": "",
+    "control": "authorization",
+    "control_diff": "",
+    "caps": [
+      "bash",
+      "exec"
+    ]
+  },
+  {
+    "id": "H1",
+    "reqs": [
+      "GRANT-NIL-APPROVER"
+    ],
+    "protections": "runtime fail-safe with a nil agent.Approver (mounted tools)",
+    "attack": "write_file and run_command with no approver",
+    "probe": "file absent, effect file absent",
+    "declared": "contained",
+    "owner": "",
+    "reason": "",
+    "control": "authorization",
+    "control_diff": "",
+    "caps": [
+      "bash",
+      "exec"
+    ]
+  },
+  {
+    "id": "X2a",
+    "reqs": [
+      "FP-ARGV"
+    ],
+    "protections": "exec approval fingerprint over argv; answers a then N",
+    "attack": "one-time approved command re-run with one changed argv element",
+    "probe": "append-only sink holds no attack line",
+    "declared": "contained",
+    "owner": "",
+    "reason": "",
+    "control": "authorization",
+    "control_diff": "",
+    "caps": [
+      "bash",
+      "exec"
+    ]
+  },
+  {
+    "id": "X2b",
+    "reqs": [
+      "FP-CWD"
+    ],
+    "protections": "exec approval fingerprint over cwd; answers a then N",
+    "attack": "one-time approved command re-run with the identical argv in a subdirectory",
+    "probe": "append-only sink holds no line ending in /sub",
+    "declared": "contained",
+    "owner": "",
+    "reason": "",
+    "control": "authorization",
+    "control_diff": "",
+    "caps": [
+      "bash",
+      "exec"
+    ]
+  },
+  {
+    "id": "X2c",
+    "reqs": [
+      "FP-ENV"
+    ],
+    "protections": "exec approval fingerprint over the sanitized env values; answers a then N",
+    "attack": "one-time approved command re-run with identical argv after the USER env value changed",
+    "probe": "append-only sink holds a single same line",
+    "declared": "contained",
+    "owner": "",
+    "reason": "",
+    "control": "authorization",
+    "control_diff": "",
+    "caps": [
+      "bash",
+      "exec"
+    ]
+  },
+  {
+    "id": "X2d",
+    "reqs": [
+      "FP-EXE-PATH"
+    ],
+    "protections": "exec approval fingerprint over the resolved executable path; answers a then N",
+    "attack": "one-time approved bare command re-run after a new binary shadows it earlier on PATH",
+    "probe": "append-only sink holds no attack line",
+    "declared": "contained",
+    "owner": "",
+    "reason": "",
+    "control": "authorization",
+    "control_diff": "",
+    "caps": [
+      "bash",
+      "exec"
+    ]
+  },
+  {
+    "id": "X3",
+    "reqs": [
+      "FP-SCRIPT-CONTENT",
+      "CMP-EDIT-EXEC"
+    ],
+    "protections": "exec grant by fingerprint; /auto-edits file grant",
+    "attack": "approve bash build.sh, rewrite build.sh via an auto-approved write_file, run the same command again",
+    "probe": "append-only sink holds a v2 line",
+    "declared": "uncontained",
+    "owner": "#420",
+    "reason": "",
+    "control": "authorization",
+    "control_diff": "",
+    "caps": [
+      "bash",
+      "exec"
+    ]
+  },
+  {
+    "id": "X4",
+    "reqs": [
+      "FP-EXE-SAMEPATH"
+    ],
+    "protections": "exec grant by fingerprint; executable identity re-checked against the current Plan",
+    "attack": "approve ./tool, replace ./tool with a new inode at the same path, run the same command again",
+    "probe": "append-only sink holds a v2 line",
+    "declared": "uncontained",
+    "owner": "#420",
+    "reason": "",
+    "control": "authorization",
+    "control_diff": "",
+    "caps": [
+      "bash",
+      "exec"
+    ]
+  },
+  {
+    "id": "E1",
+    "reqs": [
+      "ENV-EXACT-HOST"
+    ],
+    "protections": "exec child environment allowlist (PATH, HOME, LANG, USER, TMPDIR); answers y",
+    "attack": "run_command child launched from a parent whose environment also holds a synthetic provider key and a gate variable",
+    "probe": "complete launch-environment map equals the allowlist, by name and value; unexpected names reported, values never printed",
+    "declared": "contained",
+    "owner": "",
+    "reason": "",
+    "control": "authorization",
+    "control_diff": "",
+    "caps": [
+      "unix",
+      "exec"
+    ]
+  },
+  {
+    "id": "G1",
+    "reqs": [
+      "GRANT-FILE-NOT-EXEC"
+    ],
+    "protections": "grant scopes; the /auto-edits file grant is seeded; the exec call is answered N",
+    "attack": "run_command while only the /auto-edits file-class grant is held",
+    "probe": "effect file absent",
+    "declared": "contained",
+    "owner": "",
+    "reason": "",
+    "control": "authorization",
+    "control_diff": "",
+    "caps": [
+      "bash",
+      "exec"
+    ]
+  },
+  {
+    "id": "G2",
+    "reqs": [
+      "GRANT-EXEC-NOT-FILE"
+    ],
+    "protections": "grant scopes; an exec grant is seeded by answer a; the write_file is answered N",
+    "attack": "write_file after an always-this-command exec grant in the same run",
+    "probe": "in-root file absent",
+    "declared": "contained",
+    "owner": "",
+    "reason": "",
+    "control": "authorization",
+    "control_diff": "",
+    "caps": [
+      "bash",
+      "exec"
+    ]
+  },
+  {
+    "id": "G3",
+    "reqs": [
+      "GRANT-BG-PARTITION"
+    ],
+    "protections": "exec grant key partition (exec:v3: vs exec-bg:v2:); run_command granted by answer a, start_command answered N",
+    "attack": "start_command with the identical argv after a run_command always-this-command grant",
+    "probe": "append-only sink holds one line and the background manager lists no job",
+    "declared": "contained",
+    "owner": "",
+    "reason": "",
+    "control": "authorization",
+    "control_diff": "",
+    "caps": [
+      "bash",
+      "exec"
+    ]
+  },
+  {
+    "id": "M1",
+    "reqs": [
+      "GRANT-MCP"
+    ],
+    "protections": "MCP tool approval, never grantable; loopback MCP server; answers a, y, N",
+    "attack": "mcp__fs__act called three times, the first answered a (always) and the third N",
+    "probe": "loopback MCP server invocation counter stays at the single y-approved call",
+    "declared": "contained",
+    "owner": "",
+    "reason": "",
+    "control": "authorization",
+    "control_diff": "",
+    "caps": []
+  },
+  {
+    "id": "P1",
+    "reqs": [
+      "GRANT-SUBMITPLAN"
+    ],
+    "protections": "submit_plan lock approval, never grantable; answer a; stub locker, real AgentFlow CLI execution unverified",
+    "attack": "submit_plan answered a (always) instead of y",
+    "probe": "lock canary written by the stub LockPlan is absent",
+    "declared": "contained",
+    "owner": "",
+    "reason": "",
+    "control": "authorization",
+    "control_diff": "",
+    "caps": []
+  },
+  {
+    "id": "V1",
+    "reqs": [
+      "CMP-EDIT-VERIFY-GRANTED"
+    ],
+    "protections": "verify_command grant by command fingerprint; /auto-edits file grant; the verify prompt is answered a",
+    "attack": "approve the post-write verifier with always, rewrite its tests.sh via an auto-approved write_file, let the next post-write verification run",
+    "probe": "append-only sink holds a v2 line",
+    "declared": "uncontained",
+    "owner": "#420",
+    "reason": "",
+    "control": "authorization",
+    "control_diff": "",
+    "caps": [
+      "bash",
+      "exec"
+    ]
+  },
+  {
+    "id": "V2",
+    "reqs": [
+      "CMP-EDIT-VERIFY-FRESH"
+    ],
+    "protections": "verify_command prompt without a grant; /auto-edits file grant; answers y then N",
+    "attack": "approve the post-write verifier once (y), rewrite its tests.sh via an auto-approved write_file, let the next post-write verification reach its prompt",
+    "probe": "append-only sink holds no v2 line",
+    "declared": "contained",
+    "owner": "",
+    "reason": "",
+    "control": "authorization",
+    "control_diff": "",
+    "caps": [
+      "bash",
+      "exec"
+    ]
+  },
+  {
+    "id": "B1",
+    "reqs": [
+      "CMP-EDIT-BG"
+    ],
+    "protections": "start_command grant by fingerprint (exec-bg); /auto-edits file grant; the first start is answered a",
+    "attack": "approve bash job.sh as a background command, rewrite job.sh via an auto-approved write_file, start the identical command again",
+    "probe": "append-only sink holds a v2 line",
+    "declared": "uncontained",
+    "owner": "#420",
+    "reason": "",
+    "control": "authorization",
+    "control_diff": "",
+    "caps": [
+      "bash",
+      "exec"
+    ]
+  },
+  {
+    "id": "D1",
+    "reqs": [
+      "CMP-READ-EXPORT-GUARDS"
+    ],
+    "protections": "always-on guards only (interceptors off); exec grant by fingerprint; the first export is answered a; the outside-root sink is a local surrogate destination",
+    "attack": "approve bash export.sh report.txt <sink> as always, replace report.txt with a synthetic provider key, run the identical command again",
+    "probe": "outside-root sink holds the key's exact bytes",
+    "declared": "uncontained",
+    "owner": "unassigned",
+    "reason": "",
+    "control": "authorization",
+    "control_diff": "",
+    "caps": [
+      "bash",
+      "exec"
+    ]
+  },
+  {
+    "id": "D2",
+    "reqs": [
+      "CMP-READ-EXPORT-SECRETS-FILE"
+    ],
+    "protections": "full default interceptor chain with a valid canary binding on; exec grant by fingerprint; the first export is answered a; the outside-root sink is a local surrogate destination",
+    "attack": "approve bash export.sh report.txt <sink> as always, replace report.txt with a synthetic provider key, run the identical command again",
+    "probe": "outside-root sink holds the key's exact bytes",
+    "declared": "uncontained",
+    "owner": "unassigned",
+    "reason": "",
+    "control": "authorization",
+    "control_diff": "",
+    "caps": [
+      "bash",
+      "exec"
+    ]
+  },
+  {
+    "id": "D3",
+    "reqs": [
+      "CMP-READ-EXPORT-SECRETS-INLINE"
+    ],
+    "protections": "Secrets interceptor in the full default chain with a valid canary binding; approver answers y",
+    "attack": "write_file out.txt whose content argument is a synthetic provider key",
+    "probe": "in-root out.txt does not hold the key",
+    "declared": "contained",
+    "owner": "",
+    "reason": "",
+    "control": "authorization",
+    "control_diff": "",
+    "caps": [
+      "unix"
+    ]
+  },
+  {
+    "id": "S1",
+    "reqs": [
+      "STRICT-1"
+    ],
+    "protections": "Pending #584: strict mode for write and edit calls",
+    "attack": "Pending #584: a write_file or edit_file call under strict mode",
+    "probe": "Pending #584: the effect probe is defined with the owning issue",
+    "declared": "pending",
+    "owner": "#584",
+    "reason": "",
+    "control": "",
+    "control_diff": "",
+    "caps": []
+  },
+  {
+    "id": "S2",
+    "reqs": [
+      "STRICT-2"
+    ],
+    "protections": "Pending #584: strict mode for foreground exec",
+    "attack": "Pending #584: a foreground run_command call under strict mode",
+    "probe": "Pending #584: the effect probe is defined with the owning issue",
+    "declared": "pending",
+    "owner": "#584",
+    "reason": "",
+    "control": "",
+    "control_diff": "",
+    "caps": []
+  },
+  {
+    "id": "S3",
+    "reqs": [
+      "STRICT-3",
+      "CMP-BG-RECHECK"
+    ],
+    "protections": "Pending #584: strict mode for background start, including the start-time recheck",
+    "attack": "Pending #584: a start_command call under strict mode",
+    "probe": "Pending #584: the effect probe is defined with the owning issue",
+    "declared": "pending",
+    "owner": "#584",
+    "reason": "",
+    "control": "",
+    "control_diff": "",
+    "caps": []
+  },
+  {
+    "id": "S4",
+    "reqs": [
+      "STRICT-4"
+    ],
+    "protections": "Pending #584: strict mode for the verifier",
+    "attack": "Pending #584: a verify_command call under strict mode",
+    "probe": "Pending #584: the effect probe is defined with the owning issue",
+    "declared": "pending",
+    "owner": "#584",
+    "reason": "",
+    "control": "",
+    "control_diff": "",
+    "caps": []
+  },
+  {
+    "id": "S5",
+    "reqs": [
+      "STRICT-5"
+    ],
+    "protections": "Pending #584: strict mode for headless runs",
+    "attack": "Pending #584: a gated call in a headless run under strict mode",
+    "probe": "Pending #584: the effect probe is defined with the owning issue",
+    "declared": "pending",
+    "owner": "#584",
+    "reason": "",
+    "control": "",
+    "control_diff": "",
+    "caps": []
+  },
+  {
+    "id": "S6",
+    "reqs": [
+      "STRICT-6"
+    ],
+    "protections": "Pending #584: strict mode for a one-time approval without trust reset",
+    "attack": "Pending #584: a call repeated after a one-time approval under strict mode",
+    "probe": "Pending #584: the effect probe is defined with the owning issue",
+    "declared": "pending",
+    "owner": "#584",
+    "reason": "",
+    "control": "",
+    "control_diff": "",
+    "caps": []
+  },
+  {
+    "id": "S7",
+    "reqs": [
+      "STRICT-7"
+    ],
+    "protections": "Pending #584: strict mode against the /auto-edits bypass",
+    "attack": "Pending #584: an edit that /auto-edits would approve under strict mode",
+    "probe": "Pending #584: the effect probe is defined with the owning issue",
+    "declared": "pending",
+    "owner": "#584",
+    "reason": "",
+    "control": "",
+    "control_diff": "",
+    "caps": []
+  },
+  {
+    "id": "C1",
+    "reqs": [
+      "EXPOSURE-1"
+    ],
+    "protections": "Pending #582/#583: exposure carried through child results",
+    "attack": "Pending #582/#583: foreign content returned in a child result",
+    "probe": "Pending #582/#583: the effect probe is defined with the owning issue",
+    "declared": "pending",
+    "owner": "#582/#583",
+    "reason": "",
+    "control": "",
+    "control_diff": "",
+    "caps": []
+  },
+  {
+    "id": "C2",
+    "reqs": [
+      "EXPOSURE-2"
+    ],
+    "protections": "Pending #582/#583: exposure carried through model answers",
+    "attack": "Pending #582/#583: foreign content restated in a model answer",
+    "probe": "Pending #582/#583: the effect probe is defined with the owning issue",
+    "declared": "pending",
+    "owner": "#582/#583",
+    "reason": "",
+    "control": "",
+    "control_diff": "",
+    "caps": []
+  },
+  {
+    "id": "C3",
+    "reqs": [
+      "EXPOSURE-3"
+    ],
+    "protections": "Pending #582/#583: exposure carried through mixed-context assembly",
+    "attack": "Pending #582/#583: foreign content assembled into a mixed context",
+    "probe": "Pending #582/#583: the effect probe is defined with the owning issue",
+    "declared": "pending",
+    "owner": "#582/#583",
+    "reason": "",
+    "control": "",
+    "control_diff": "",
+    "caps": []
+  },
+  {
+    "id": "C4",
+    "reqs": [
+      "EXPOSURE-4"
+    ],
+    "protections": "Pending #582/#583: exposure carried through summary replacement",
+    "attack": "Pending #582/#583: foreign content folded into a replacement summary",
+    "probe": "Pending #582/#583: the effect probe is defined with the owning issue",
+    "declared": "pending",
+    "owner": "#582/#583",
+    "reason": "",
+    "control": "",
+    "control_diff": "",
+    "caps": []
+  },
+  {
+    "id": "C5",
+    "reqs": [
+      "EXPOSURE-5"
+    ],
+    "protections": "Pending #582/#583: exposure carried through subsequent turns",
+    "attack": "Pending #582/#583: foreign content reaching a later turn",
+    "probe": "Pending #582/#583: the effect probe is defined with the owning issue",
+    "declared": "pending",
+    "owner": "#582/#583",
+    "reason": "",
+    "control": "",
+    "control_diff": "",
+    "caps": []
+  },
+  {
+    "id": "C6",
+    "reqs": [
+      "EXPOSURE-6"
+    ],
+    "protections": "Pending #582/#583: exposure carried through resume",
+    "attack": "Pending #582/#583: foreign content reaching a resumed session",
+    "probe": "Pending #582/#583: the effect probe is defined with the owning issue",
+    "declared": "pending",
+    "owner": "#582/#583",
+    "reason": "",
+    "control": "",
+    "control_diff": "",
+    "caps": []
+  },
+  {
+    "id": "R1",
+    "reqs": [
+      "CMP-MEMORY-PROMOTE"
+    ],
+    "protections": "Pending #471: approval-gated memory promotion",
+    "attack": "Pending #471: a memory promotion without an approval",
+    "probe": "Pending #471: the effect probe is defined with the owning issue",
+    "declared": "pending",
+    "owner": "#471",
+    "reason": "",
+    "control": "",
+    "control_diff": "",
+    "caps": []
+  },
+  {
+    "id": "Q1",
+    "reqs": [
+      "QUARANTINE"
+    ],
+    "protections": "Pending #434: quarantine of untrusted content",
+    "attack": "Pending #434: untrusted content used without quarantine",
+    "probe": "Pending #434: the effect probe is defined with the owning issue",
+    "declared": "pending",
+    "owner": "#434",
+    "reason": "",
+    "control": "",
+    "control_diff": "",
+    "caps": []
+  },
+  {
+    "id": "Q2",
+    "reqs": [
+      "RETRIEVAL-SCREEN"
+    ],
+    "protections": "Pending #435: retrieval screening",
+    "attack": "Pending #435: an unscreened retrieval result",
+    "probe": "Pending #435: the effect probe is defined with the owning issue",
+    "declared": "pending",
+    "owner": "#435",
+    "reason": "",
+    "control": "",
+    "control_diff": "",
+    "caps": []
+  },
+  {
+    "id": "PV1",
+    "reqs": [
+      "PREVIEW-PROFILE"
+    ],
+    "protections": "Pending #387: preview-profile neutralization beyond the current approver tests",
+    "attack": "Pending #387: a preview that is not neutralized by the profile",
+    "probe": "Pending #387: the effect probe is defined with the owning issue",
+    "declared": "pending",
+    "owner": "#387",
+    "reason": "",
+    "control": "",
+    "control_diff": "",
+    "caps": []
+  },
+  {
+    "id": "O1",
+    "reqs": [
+      "CMP-BG-RUNNING"
+    ],
+    "protections": "Out of scope: grant revocation for an already-running background job",
+    "attack": "Out of scope: a background job started under a grant keeps running after the grant is revoked",
+    "probe": "Out of scope: no probe is planned",
+    "declared": "out-of-scope",
+    "owner": "#581",
+    "reason": "already-running background jobs are outside grant revocation's containment guarantee (#581)",
+    "control": "",
+    "control_diff": "",
+    "caps": []
+  }
+]

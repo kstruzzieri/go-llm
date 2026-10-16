@@ -322,6 +322,7 @@ func TestSeatbeltRunHostileAmbientTMPDIR(t *testing.T) {
 				t.Fatal(err)
 			}
 			childTemp := tmpdirOf(t, fake.spec.Env)
+			// containment: ENV-SEATBELT
 			if childTemp == hostile || filepath.Dir(childTemp) != base {
 				t.Fatalf("child TMPDIR %q not the private directory", childTemp)
 			}

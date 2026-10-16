@@ -59,9 +59,11 @@ contracts run either way. `docs/local-ci.md` explains the split and where
 isolated outliers have come from. Exact byte fixtures and named deferred skips
 are intentional parts of this contract.
 
-Deferred coverage: ZT-602/#431 project trust, ZT-605/#434 quarantine, and
-ZT-606/#435 retrieval screening. These are explicit skipped subtests, not
-implementation claims. ZT-603/#432 is active. ZT-604/#433 terminal presentation is covered in
+Deferred coverage: ZT-605/#434 quarantine and ZT-606/#435 retrieval
+screening. These are explicit skipped subtests, not implementation claims.
+ZT-602/#431 project trust is covered in `cmd/golem`
+(`TestProjectTrustLiveConsentAndFreshness` and the projectcontext tests).
+ZT-603/#432 is active. ZT-604/#433 terminal presentation is covered in
 `cmd/golem/render_sanitization_test.go`; ANSI preservation at the agent boundary
 does not test a terminal.
 Framing is structural; these tests do not establish model obedience.

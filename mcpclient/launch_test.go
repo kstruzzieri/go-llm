@@ -330,6 +330,7 @@ func TestStdioServerReceivesOnlyPolicyEnvironment(t *testing.T) {
 	want, _ := filepath.EvalSymlinks(dir)
 	report := runEnvProbe(t, probeServer(t).WithDir(dir).WithEnv(InheritEnv("PROBE_TOKEN"), SetEnv("PROBE_SET", "explicit")),
 		testLaunchEnv(map[string]string{"PATH": "/usr/bin:/bin", "HOME": dir, "CANARY_SECRET": "canary", "PROBE_TOKEN": "tok"}))
+	// containment: ENV-MCPSTDIO
 	if wantNames := []string{"HOME", "PATH", "PROBE_SET", "PROBE_TOKEN"}; !slices.Equal(report.Names, wantNames) {
 		t.Fatalf("child env names = %q, want exactly %q", report.Names, wantNames)
 	}
