@@ -2742,7 +2742,7 @@
       "status": "verified",
       "owner": "",
       "layer": "focused",
-      "exempt": "administrative: the inventory gate checks declarations, not a security guard; its profile skip pins (linux-host allows no skip, other skips name a capability) are ledger entry M-053, the skip-allowed row rule M-055, the first-missing-capability skip rule M-056, scenario registration binding M-057 and M-059, and non-scenario ref reachability M-060; its other rule mutations are the Administrative evidence in docs/security/containment-mutations.md",
+      "exempt": "administrative: the inventory gate checks declarations, not a security guard; its profile skip pins (linux-host allows no skip, other skips name a capability) are ledger entry M-053, the skip-allowed row rule M-055, the first-missing-capability skip rule M-056, scenario registration binding M-057 and M-059, non-scenario ref reachability M-060 and the AttackEffect-assignment marker rule M-062; its other rule mutations are the Administrative evidence in docs/security/containment-mutations.md",
       "scenarios": [],
       "refs": [
         {
@@ -2797,7 +2797,8 @@
         "M-056",
         "M-057",
         "M-059",
-        "M-060"
+        "M-060",
+        "M-062"
       ],
       "artifacts": [
         "docs/security/containment-mutations.md"
@@ -2838,7 +2839,7 @@
       "status": "verified",
       "owner": "",
       "layer": "focused",
-      "exempt": "administrative: gate wiring, not a security guard; the checker tests and the security-phase run are the evidence; the checker's child-skip rule is ledger entry M-051, measured evidence cleanliness M-054, and allowed descendant skips omitted from executed evidence M-061; its other checker mutations are the Administrative evidence in docs/security/containment-mutations.md",
+      "exempt": "administrative: gate wiring, not a security guard; the checker tests and the security-phase run are the evidence; the checker's child-skip rule is ledger entry M-051, measured evidence cleanliness M-054, allowed descendant skips omitted from executed evidence M-061 and forwarded dirty evidence rejection M-063; its other checker mutations are the Administrative evidence in docs/security/containment-mutations.md",
       "scenarios": [],
       "refs": [
         {
@@ -2890,7 +2891,8 @@
       "mutations": [
         "M-051",
         "M-054",
-        "M-061"
+        "M-061",
+        "M-063"
       ],
       "artifacts": [
         "scripts/ci-local",

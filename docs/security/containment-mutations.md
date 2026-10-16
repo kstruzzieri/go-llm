@@ -1,10 +1,10 @@
 # Containment mutation ledger (#452)
 
-Each entry proves one security property's assertions can fail. Entries are point-in-time evidence at their baseline revision. The ledger contains 61 entries: 56 guard and five effect-detection entries.
+Each entry proves one security property's assertions can fail. Entries are point-in-time evidence at their baseline revision. The ledger contains 63 entries: 58 guard and five effect-detection entries.
 
 Platform: every proof in this ledger ran on darwin (arm64, go1.27.1). After the rebase onto the model-resistance PR, the entries whose patches touch build-tagged or platform-sensitive code (M-005 to M-008, the unix path walks; M-009 and M-014 to M-018, the host exec path; M-011, the MCP stdio child environment) were re-run on Linux (arm64, go1.27.1, the Docker `ci-local` image) at their baseline: each entry's `Platform:` line records the result, and a Linux line that differs would be recorded beside the darwin evidence, never in place of it. M-010 (it needs an AgentFlow source checkout) and M-012 (Seatbelt is darwin-native) were not re-run on Linux, and no entry has run on Windows.
 
-Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-only variants added in review, M-045 B and M-047 B, at `34b2ff38`, whose production and scenario trees are identical; M-051 to M-053 at `731f2d1d`, the commit that adds them; M-054 to M-058 at `3d423ce1`, the commit that adds them; M-059 at `1166b276`, the commit that adds it): the baseline passed, the mutant failed as shown, and the tree was restored with `git checkout` and passed again. Entries M-060 and M-061 ran in isolated exports of immutable code commit `23f0c0bbca83f0c9d6e02163dd09c4856698ddcd`: each baseline passed, its mutant failed, and restored files matched the baseline bytes and passed again. Entries quote test output, the containment judge's message text and line numbers included, as it read at their baseline; later wording changes do not rewrite them. Entries carried over from the PR 2 delivery record name the draft entry they were first recorded as; they were re-run here so every command, diff and line number matches one revision. Apply a patch with `git apply`, run the command, then restore with `git checkout -- <file>`. `guard` entries remove or weaken the protection the refs assert. `effect-detection` entries change the effect path of an uncontained scenario: they show its probe can read a change in outcome, not that a guard is absent. Rows exempt from this ledger (pending, out-of-scope, unobserved such as ENV-BWRAP, whose native bwrap profile needs a Linux host, and administrative META- rows; the inventory lint allows no other verified or uncontained row an exemption) carry their exempt reason in the inventory (`docs/security/containment-inventory.json`, rendered in `docs/security/containment-inventory.md`).
+Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-only variants added in review, M-045 B and M-047 B, at `34b2ff38`, whose production and scenario trees are identical; M-051 to M-053 at `731f2d1d`, the commit that adds them; M-054 to M-058 at `3d423ce1`, the commit that adds them; M-059 at `1166b276`, the commit that adds it): the baseline passed, the mutant failed as shown, and the tree was restored with `git checkout` and passed again. Entries M-060 and M-061 ran in isolated exports of immutable code commit `23f0c0bbca83f0c9d6e02163dd09c4856698ddcd`: each baseline passed, its mutant failed, and restored files matched the baseline bytes and passed again. Entries M-062 and M-063 ran on this branch at `dbe5c315b40f8b973b96cf623d5cdcbe00c616fc`, the commit that adds their rules: each baseline passed, its mutant failed, and `git checkout -- <file>` restored the baseline bytes, which passed again; M-062's comparison against the previous rule ran in an isolated `git archive` export of `ac053567`. Entries quote test output, the containment judge's message text and line numbers included, as it read at their baseline; later wording changes do not rewrite them. Entries carried over from the PR 2 delivery record name the draft entry they were first recorded as; they were re-run here so every command, diff and line number matches one revision. Apply a patch with `git apply`, run the command, then restore with `git checkout -- <file>`. `guard` entries remove or weaken the protection the refs assert. `effect-detection` entries change the effect path of an uncontained scenario: they show its probe can read a change in outcome, not that a guard is absent. Rows exempt from this ledger (pending, out-of-scope, unobserved such as ENV-BWRAP, whose native bwrap profile needs a Linux host, and administrative META- rows; the inventory lint allows no other verified or uncontained row an exemption) carry their exempt reason in the inventory (`docs/security/containment-inventory.json`, rendered in `docs/security/containment-inventory.md`).
 
 ## M-001 — Absolute paths are rejected by the workspace path cleaner
 - Affected refs: PATH-ABS: `TestHardeningContracts/Active/Workspace/confinement_and_arguments/public_confinement/owned_absolute_sibling`, `TestWorkspaceCleanRelContainment/absolute_escape`, `TestContainment/W1`
@@ -1822,9 +1822,56 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
 - Kind: guard
 - Notes: Run only in a separate isolated `/tmp` export of the same baseline paths. The patch passed `git apply --check` and was applied with `git apply`; the fail branch was unchanged. After restoring the captured original `checker.go`, every exported file matched its baseline bytes before and after the final passing run. This mutation makes an allowed skipped aggregate appear executed despite its unchanged passing siblings; acceptance and evidence must use the same descendant-aware outcome.
 
+## M-062 — A scenario marker precedes an AttackEffect assignment, not any observation statement
+- Affected refs: META-INVENTORY: `TestCommittedInventory`, `TestInventoryLintRules/control_write_after_the_marker_is_not_an_AttackEffect_assignment`, `TestInventoryLintRules/AttackEffect_read_after_the_marker_is_not_an_assignment`
+- Baseline: `dbe5c315b40f8b973b96cf623d5cdcbe00c616fc` (the commit that adds the rule)
+- Platform: darwin (arm64, go1.27.1)
+- Profile / command: darwin-host / `go test -count=1 -run '^TestCommittedInventory$' -v ./internal/containmentinv`, then `go test -count=1 -run '^TestContainment$/^X2c$' -v ./cmd/golem` under the same mutant
+- Patch (data mutation of the committed scenario file: X2c's probe deleted):
+  ```diff
+  diff --git a/cmd/golem/containment_scenarios_test.go b/cmd/golem/containment_scenarios_test.go
+  --- a/cmd/golem/containment_scenarios_test.go
+  +++ b/cmd/golem/containment_scenarios_test.go
+  @@ -346,7 +346,6 @@ func x2c() scenario {
+   			})
+   			o := observation{ValidityErr: x2Validity(res, f)}
+   			// containment: FP-ENV
+  -			o.AttackEffect = countLine(readFile(t, sink), "same") == 2
+   			// Control: the call-2 configuration (USER=containment-b), fresh fixture, answered y.
+   			g := controlRun(t, func(g *fixture) { setup(t, g) }, func(g *fixture) map[string]any {
+   				return map[string]any{"argv": []string{"bash", "act.sh", filepath.Join(g.Outside, "x2c.log"), "same"}}
+  ```
+- Baseline: pass (exit 0). Mutant: FAIL `TestCommittedInventory` (``inventory_test.go:607: FP-ENV: ref TestContainment/X2c: no `// containment: FP-ENV` marker in x2c precedes an AttackEffect assignment``), exit 1; under the same mutant `TestContainment/X2c` passes (`--- PASS: TestContainment/X2c (0.20s)`, exit 0): with the probe deleted, AttackEffect keeps its zero value, which judgeObservation reads as contained, so the scenario leaf cannot see its own hollowing. In an isolated `git archive` export of `ac053567`, whose rule only required the marker ahead of any observation statement, the same mutant passed `TestCommittedInventory` (`ok`, exit 0): X2c's ControlEffect write follows the marker and satisfied it. Restored with `git checkout -- cmd/golem/containment_scenarios_test.go`: byte-identical, pass (exit 0).
+- Kind: guard
+- Notes: Of the 17 contained scenarios at `ac053567`, 14 (W1-W3, H1, X2a-X2d, G1-G3, M1, P1, D3) write ControlEffect after the marker and were open to this mutation; A1, E1 and V2 write it before the marker and were not. The rule binds the marker to an assignment (a `.AttackEffect =` statement or an `observation{AttackEffect: ...}` literal key) in the registering function; a read of AttackEffect after the marker does not satisfy it. The rule does not detect a probe replaced by a constant (`o.AttackEffect = false`); each scenario row's own guard entries are what show the probe reads the guard.
+
+## M-063 — A forwarded identity measured dirty fails the run
+- Affected refs: META-GATE: `TestCheckerRequireClean`
+- Baseline: `dbe5c315b40f8b973b96cf623d5cdcbe00c616fc` (the commit that adds the rule)
+- Platform: darwin (arm64, go1.27.1)
+- Profile / command: darwin-host / `go test -count=1 -run '^TestCheckerRequireClean$' -v ./internal/containmentinv`
+- Patch:
+  ```diff
+  diff --git a/internal/containmentinv/checker.go b/internal/containmentinv/checker.go
+  --- a/internal/containmentinv/checker.go
+  +++ b/internal/containmentinv/checker.go
+  @@ -407,7 +407,7 @@ func fileSum(path string) ([sha256.Size]byte, error) {
+   // of publishing evidence stamped as that commit's. A manual run (commit
+   // "unknown") is dirty by definition and never fails for it.
+   func RequireClean(ev Evidence) error {
+  -	if ev.Commit == "unknown" || !ev.Dirty {
+  +	if ev.Commit == "unknown" || ev.Dirty {
+   		return nil
+   	}
+   	return fmt.Errorf("containmentinv: forwarded identity (tree %s, commit %s) measured dirty: measured tree %q, GOOS %s, profile %s", ev.Tree, ev.Commit, ev.MeasuredTree, ev.GOOS, ev.Profile)
+  ```
+- Baseline: pass (exit 0). Mutant: FAIL `TestCheckerRequireClean` (`checker_test.go:360: forwarded clean: RequireClean({SourceDigest: Tree:abc123 Commit:def456 MeasuredTree: PRHead: Dirty:false ...}) = containmentinv: forwarded identity (tree abc123, commit def456) measured dirty: measured tree "", GOOS , profile , want error false` and `checker_test.go:360: forwarded dirty: RequireClean({SourceDigest: Tree:abc123 Commit:def456 MeasuredTree:0000 PRHead: Dirty:true ...}) = <nil>, want error true`), exit 1. Restored with `git checkout -- internal/containmentinv/checker.go`: byte-identical, pass (exit 0).
+- Kind: guard
+- Notes: The checker command calls RequireClean after WithProfile and before any package run, so a forwarded run whose checkout tree differs from the forwarded tree, whose tracked files are modified, or whose GOOS is not the profile's exits 1 with the failure in its evidence and runs nothing. Observed on this checkout at the baseline: `GO_LLM_CI_TREE=0000000000000000000000000000000000000000 GO_LLM_CI_COMMIT=deadbeef go run ./internal/containmentinv/check -inventory docs/security/containment-inventory.json -profile darwin-host` printed `containment check: containmentinv: forwarded identity (tree 0000000000000000000000000000000000000000, commit deadbeef) measured dirty: measured tree "39ec6d5eaa6f45dcee7adc77a8a29cf16225bc7a", GOOS darwin, profile darwin-host` and exited 1. A manual run (commit `unknown`) is dirty by definition and is unchanged. Before this rule the evidence recorded `"dirty": true` and the command exited 0; nothing in scripts/ci-local, the CI workflows or the pre-push hook read the flag.
+
 ## Administrative evidence
 
-These mutations prove the harness, inventory lint, checker and gate rules can fail. They are not security properties and carry no M entry; META-INVENTORY and META-GATE cite this section. The exceptions are the gate rules whose regression would let the security gate pass a skipped, exempted, unbound or unmeasured security assertion: the checker's child-skip rule (M-051), the exemption rule (M-052), the profile skip pins (M-053), measured evidence cleanliness (M-054), the skip-allowed row rule (M-055), the first-missing-capability skip rule (M-056), scenario registration binding (M-057, M-059), the bidirectional ledger rule (M-058), non-scenario ref reachability (M-060) and omission of allowed descendant skips from executed evidence (M-061). Each row names the rule, the test that pins it and the first failing line observed under its mutation, quoted at the revision where it was recorded; line numbers may have moved since. The full diffs and commands live in the maintainer's gitignored delivery record (docs/superpowers/evidence/452/mutations-pr2.md in the maintainer's checkout), which is not in the repository.
+These mutations prove the harness, inventory lint, checker and gate rules can fail. They are not security properties and carry no M entry; META-INVENTORY and META-GATE cite this section. The exceptions are the gate rules whose regression would let the security gate pass a skipped, exempted, unbound or unmeasured security assertion: the checker's child-skip rule (M-051), the exemption rule (M-052), the profile skip pins (M-053), measured evidence cleanliness (M-054), the skip-allowed row rule (M-055), the first-missing-capability skip rule (M-056), scenario registration binding (M-057, M-059), the bidirectional ledger rule (M-058), non-scenario ref reachability (M-060), omission of allowed descendant skips from executed evidence (M-061), the AttackEffect-assignment marker rule (M-062) and rejection of forwarded dirty evidence (M-063). Each row names the rule, the test that pins it and the first failing line observed under its mutation, quoted at the revision where it was recorded; line numbers may have moved since. The full diffs and commands live in the maintainer's gitignored delivery record (docs/superpowers/evidence/452/mutations-pr2.md in the maintainer's checkout), which is not in the repository.
 
 | Rule | Test | First failing line under its mutation |
 |---|---|---|
