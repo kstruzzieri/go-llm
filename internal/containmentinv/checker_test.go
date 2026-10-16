@@ -190,6 +190,7 @@ func TestDecideRun(t *testing.T) {
 }
 
 func TestDecideRunSkippedDescendantsAreNotExecuted(t *testing.T) {
+	// containment: META-GATE
 	t.Parallel()
 	const pkg = "github.com/kstruzzieri/go-llm/internal/x"
 	leaves := []string{"TestP2", "TestP/passing", "TestP"}

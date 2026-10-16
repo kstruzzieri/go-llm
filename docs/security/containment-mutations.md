@@ -1,10 +1,10 @@
 # Containment mutation ledger (#452)
 
-Each entry proves one security property's assertions can fail. Entries are point-in-time evidence at their baseline revision.
+Each entry proves one security property's assertions can fail. Entries are point-in-time evidence at their baseline revision. The ledger contains 61 entries: 56 guard and five effect-detection entries.
 
 Platform: every proof in this ledger ran on darwin (arm64, go1.27.1). After the rebase onto the model-resistance PR, the entries whose patches touch build-tagged or platform-sensitive code (M-005 to M-008, the unix path walks; M-009 and M-014 to M-018, the host exec path; M-011, the MCP stdio child environment) were re-run on Linux (arm64, go1.27.1, the Docker `ci-local` image) at their baseline: each entry's `Platform:` line records the result, and a Linux line that differs would be recorded beside the darwin evidence, never in place of it. M-010 (it needs an AgentFlow source checkout) and M-012 (Seatbelt is darwin-native) were not re-run on Linux, and no entry has run on Windows.
 
-Every entry below was run at `a6114bff` on a darwin host (the two attack-only variants added in review, M-045 B and M-047 B, at `34b2ff38`, whose production and scenario trees are identical; M-051 to M-053 at `731f2d1d`, the commit that adds them; M-054 to M-058 at `3d423ce1`, the commit that adds them; M-059 at `1166b276`, the commit that adds it): the baseline passed, the mutant failed as shown, and the tree was restored with `git checkout` and passed again. Entries quote test output, the containment judge's message text and line numbers included, as it read at their baseline; later wording changes do not rewrite them. Entries carried over from the PR 2 delivery record name the draft entry they were first recorded as; they were re-run here so every command, diff and line number matches one revision. Apply a patch with `git apply`, run the command, then restore with `git checkout -- <file>`. `guard` entries remove or weaken the protection the refs assert. `effect-detection` entries change the effect path of an uncontained scenario: they show its probe can read a change in outcome, not that a guard is absent. Rows exempt from this ledger (pending, out-of-scope, unobserved such as ENV-BWRAP, whose native bwrap profile needs a Linux host, and administrative META- rows; the inventory lint allows no other verified or uncontained row an exemption) carry their exempt reason in the inventory (`docs/security/containment-inventory.json`, rendered in `docs/security/containment-inventory.md`).
+Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-only variants added in review, M-045 B and M-047 B, at `34b2ff38`, whose production and scenario trees are identical; M-051 to M-053 at `731f2d1d`, the commit that adds them; M-054 to M-058 at `3d423ce1`, the commit that adds them; M-059 at `1166b276`, the commit that adds it): the baseline passed, the mutant failed as shown, and the tree was restored with `git checkout` and passed again. Entries M-060 and M-061 ran in isolated exports of immutable code commit `23f0c0bbca83f0c9d6e02163dd09c4856698ddcd`: each baseline passed, its mutant failed, and restored files matched the baseline bytes and passed again. Entries quote test output, the containment judge's message text and line numbers included, as it read at their baseline; later wording changes do not rewrite them. Entries carried over from the PR 2 delivery record name the draft entry they were first recorded as; they were re-run here so every command, diff and line number matches one revision. Apply a patch with `git apply`, run the command, then restore with `git checkout -- <file>`. `guard` entries remove or weaken the protection the refs assert. `effect-detection` entries change the effect path of an uncontained scenario: they show its probe can read a change in outcome, not that a guard is absent. Rows exempt from this ledger (pending, out-of-scope, unobserved such as ENV-BWRAP, whose native bwrap profile needs a Linux host, and administrative META- rows; the inventory lint allows no other verified or uncontained row an exemption) carry their exempt reason in the inventory (`docs/security/containment-inventory.json`, rendered in `docs/security/containment-inventory.md`).
 
 ## M-001 — Absolute paths are rejected by the workspace path cleaner
 - Affected refs: PATH-ABS: `TestHardeningContracts/Active/Workspace/confinement_and_arguments/public_confinement/owned_absolute_sibling`, `TestWorkspaceCleanRelContainment/absolute_escape`, `TestContainment/W1`
@@ -1774,9 +1774,57 @@ Every entry below was run at `a6114bff` on a darwin host (the two attack-only va
 - Kind: guard
 - Notes: Closes a gap in M-057 found in review: at `3d423ce1` any `ID: "<X>"` literal registered X, so the FP-SCRIPT-CONTENT marker and its X3 ref moved into `TestContainmentDeclaredMismatchMessage` (cmd/golem/containment_test.go, which holds `scenario{ID: "X3"}` and an `observation{}` literal) passed lint. Data mutation, that reproduction on the committed tree: `TestCommittedInventory` is red (`inventory_test.go:506: FP-SCRIPT-CONTENT: ref TestContainment/X3: file cmd/golem/containment_test.go, want cmd/golem/containment_scenarios_test.go, the scenario registry`, plus the stale-Markdown check); under mutant C as well it stays red on the binding rule (`inventory_test.go:506: FP-SCRIPT-CONTENT: ref TestContainment/X3: no function in cmd/golem/containment_test.go registers scenario X3`); restored byte-identical. A registration is now a `scenario` literal setting `ID` and `run:`, or a same-file helper call (`wScenario`), inside a function that `containmentScenarios`, `executableScenarios` or `pendingScenarios` reach through same-file calls.
 
+## M-060 — A non-scenario ref reaches its marked assertion function
+- Affected refs: META-INVENTORY: `TestInventoryRefMustReachMarkedFunction`, `TestInventoryRefRejectsUnrelatedTopLevelTest`, `TestInventoryRefExternalTestBridge`
+- Baseline: `23f0c0bbca83f0c9d6e02163dd09c4856698ddcd` (immutable code commit preceding this ledger entry)
+- Platform: darwin (arm64, go1.27.1)
+- Profile / command: darwin-host / `rtk proxy env GOCACHE=/tmp/pr698-review-go-cache go test -count=1 -run '^TestInventoryRef(MustReachMarkedFunction|RejectsUnrelatedTopLevelTest|ExternalTestBridge)$' -v ./internal/containmentinv`
+- Patch:
+  ```diff
+  diff --git a/internal/containmentinv/lint.go b/internal/containmentinv/lint.go
+  --- a/internal/containmentinv/lint.go
+  +++ b/internal/containmentinv/lint.go
+  @@ -333,7 +333,7 @@
+   	scenario, ok := strings.CutPrefix(ref.Test, "TestContainment/")
+   	if !ok {
+   		top, _, _ := strings.Cut(ref.Test, "/")
+  -		if !src.reaches(path.Dir(ref.File), top, functionKey{path.Dir(ref.File), src.packages[ref.File], ref.Func}) {
+  +		if false && !src.reaches(path.Dir(ref.File), top, functionKey{path.Dir(ref.File), src.packages[ref.File], ref.Func}) {
+   			errs = append(errs, fmt.Errorf("%s: ref %s: marked function %s (%s) is not reachable from test %s", id, ref.Test, ref.Func, ref.File, top))
+   		}
+   		return errs
+  ```
+- Baseline: pass (exit 0). Mutant: FAIL `TestInventoryRefMustReachMarkedFunction/unrelated_test`, `/shadowed_helper` and `/unrelated_field_key`, each with `inventory_test.go:86: Lint(unrelated marked function) = [], want unreachable-function error`; FAIL `TestInventoryRefRejectsUnrelatedTopLevelTest` (`inventory_test.go:101: Lint(misbound top-level test) = [], want unreachable-function error`); FAIL `TestInventoryRefExternalTestBridge/example.test/foreign/pkg` (`inventory_test.go:135: Lint(foreign import) = [], want unreachable-function error`). The direct helper, transitive helper, registered callback, callback in a selector receiver and local external-test bridge controls still pass. Mutant exit 1. Restored: pass (exit 0).
+- Kind: guard
+- Notes: Run only in an isolated `/tmp` export of the baseline's `go.mod`, `go.sum` and `internal/containmentinv`. The patch was checked with `rtk proxy git apply --check M-060.patch`, applied with `rtk proxy git apply M-060.patch`, then reversed with `rtk proxy git apply --reverse M-060.patch`; `cmp` confirmed the restored file matched its baseline bytes before the final run. The rule proves structural references from the cited top-level test to the marked function, including callbacks and the same-package external-test bridge; it does not prove execution of each statement or subtest path.
+
+## M-061 — An allowed descendant skip is omitted from executed evidence
+- Affected refs: META-GATE: `TestDecideRunSkippedDescendantsAreNotExecuted`
+- Baseline: `23f0c0bbca83f0c9d6e02163dd09c4856698ddcd` (immutable code commit preceding this ledger entry)
+- Platform: darwin (arm64, go1.27.1)
+- Profile / command: darwin-host / `rtk proxy env GOCACHE=/tmp/pr698-review-go-cache go test -count=1 -run '^TestDecideRunSkippedDescendantsAreNotExecuted$' -v ./internal/containmentinv`
+- Patch:
+  ```diff
+  diff --git a/internal/containmentinv/checker.go b/internal/containmentinv/checker.go
+  --- a/internal/containmentinv/checker.go
+  +++ b/internal/containmentinv/checker.go
+  @@ -179,7 +179,7 @@
+   				passed = false
+   				errs = append(errs, fmt.Errorf("%s: fail", test))
+   			case "skip":
+  -				passed = false
+  +				passed = true
+   				if reason := skipReason(output[test]); !slices.Contains(allowedSkips, leaf+"="+reason) {
+   					errs = append(errs, fmt.Errorf("%s: skipped (%s), not an allowed skip", test, reason))
+   				}
+  ```
+- Baseline: pass (exit 0). Mutant: FAIL `TestDecideRunSkippedDescendantsAreNotExecuted/allowed_child` (`checker_test.go:241: DecideRun(skip "TestP/child", allowed [TestP=capability:bash]) executed = [TestP TestP/passing TestP2], want [TestP/passing TestP2]`); FAIL `/allowed_nested_descendant` (`checker_test.go:241: DecideRun(skip "TestP/child/nested", allowed [TestP=capability:bash]) executed = [TestP TestP/passing TestP2], want [TestP/passing TestP2]`); FAIL `/allowed_prefix_sibling_descendant` (`checker_test.go:241: DecideRun(skip "TestP2/child", allowed [TestP2=capability:bash]) executed = [TestP TestP/passing TestP2], want [TestP TestP/passing]`). The disallowed-child and different-allowed-reason cases still pass. Mutant exit 1. Restored: pass (exit 0).
+- Kind: guard
+- Notes: Run only in a separate isolated `/tmp` export of the same baseline paths. The patch passed `rtk proxy git apply --check` and was applied with `rtk proxy git apply`; the fail branch was unchanged. After restoring the captured original `checker.go`, every exported file matched its baseline bytes before and after the final passing run. This mutation makes an allowed skipped aggregate appear executed despite its unchanged passing siblings; acceptance and evidence must use the same descendant-aware outcome.
+
 ## Administrative evidence
 
-These mutations prove the harness, inventory lint, checker and gate rules can fail. They are not security properties and carry no M entry; META-INVENTORY and META-GATE cite this section. The exceptions are the gate rules whose regression would let the security gate pass a skipped, exempted, unbound or unmeasured security assertion: the checker's child-skip rule (M-051), the exemption rule (M-052), the profile skip pins (M-053), measured evidence cleanliness (M-054), the skip-allowed row rule (M-055), the first-missing-capability skip rule (M-056), scenario registration binding (M-057, M-059) and the bidirectional ledger rule (M-058). Each row names the rule, the test that pins it and the first failing line observed under its mutation, quoted at the revision where it was recorded; line numbers may have moved since. The full diffs and commands live in the maintainer's gitignored delivery record (docs/superpowers/evidence/452/mutations-pr2.md in the maintainer's checkout), which is not in the repository.
+These mutations prove the harness, inventory lint, checker and gate rules can fail. They are not security properties and carry no M entry; META-INVENTORY and META-GATE cite this section. The exceptions are the gate rules whose regression would let the security gate pass a skipped, exempted, unbound or unmeasured security assertion: the checker's child-skip rule (M-051), the exemption rule (M-052), the profile skip pins (M-053), measured evidence cleanliness (M-054), the skip-allowed row rule (M-055), the first-missing-capability skip rule (M-056), scenario registration binding (M-057, M-059), the bidirectional ledger rule (M-058), non-scenario ref reachability (M-060) and omission of allowed descendant skips from executed evidence (M-061). Each row names the rule, the test that pins it and the first failing line observed under its mutation, quoted at the revision where it was recorded; line numbers may have moved since. The full diffs and commands live in the maintainer's gitignored delivery record (docs/superpowers/evidence/452/mutations-pr2.md in the maintainer's checkout), which is not in the repository.
 
 | Rule | Test | First failing line under its mutation |
 |---|---|---|

@@ -50,6 +50,7 @@ func TestOther(t *testing.T) {
 }
 
 func TestInventoryRefMustReachMarkedFunction(t *testing.T) {
+	// containment: META-INVENTORY
 	for _, tc := range []struct {
 		name    string
 		body    string
@@ -93,6 +94,7 @@ func marked(t *testing.T) {
 }
 
 func TestInventoryRefRejectsUnrelatedTopLevelTest(t *testing.T) {
+	// containment: META-INVENTORY
 	root := t.TempDir()
 	writeGo(t, root, "pkg/a_test.go", boundTree+"\nfunc TestOther(t *testing.T) {}\n")
 	inv := boundInventory()
@@ -103,6 +105,7 @@ func TestInventoryRefRejectsUnrelatedTopLevelTest(t *testing.T) {
 }
 
 func TestInventoryRefExternalTestBridge(t *testing.T) {
+	// containment: META-INVENTORY
 	for _, importPath := range []string{"example.test/repo/pkg", "example.test/foreign/pkg"} {
 		t.Run(importPath, func(t *testing.T) {
 			t.Parallel()
