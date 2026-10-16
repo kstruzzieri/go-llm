@@ -247,7 +247,7 @@ func captureTarget(t *testing.T, dir string, traces []Trace, regDigest string, f
 			retry = append(retry, Result{Model: sel, TraceID: tr.ID, Err: errors.New("dial tcp: timeout")})
 			continue
 		}
-		first = append(first, Result{Model: sel, TraceID: tr.ID, Transcript: []Turn{{Role: "assistant", Content: reply}}})
+		first = append(first, Result{Model: sel, TraceID: tr.ID, CandidateProvider: openAICompatCandidateProviderName(baseURL), Transcript: []Turn{{Role: "assistant", Content: reply}}})
 	}
 	rounds := [][]Result{first}
 	if len(retry) > 0 {
@@ -389,7 +389,7 @@ func cancelledCapture(t *testing.T, dir string, traces []Trace, regDigest, done 
 	const sel = "openai-compat/m"
 	out := filepath.Join(dir, "art.jsonl")
 	err := runCalibrateCapture(context.Background(), calibrateCaptureOptions{
-		Runner:  cancelingRunner{done: Result{Model: sel, TraceID: done, Transcript: []Turn{{Role: "assistant", Content: "notes summarized."}}}},
+		Runner:  cancelingRunner{done: Result{Model: sel, TraceID: done, CandidateProvider: openAICompatCandidateProviderName("http://127.0.0.1:8090"), Transcript: []Turn{{Role: "assistant", Content: "notes summarized."}}}},
 		Targets: []ModelTarget{{Display: sel, Provider: openAICompatTransport, Model: "m"}},
 		Traces:  traces, OutputPath: out, Clock: func() time.Time { return time.Unix(0, 0).UTC() },
 		OpenAICompatBaseURL: "http://127.0.0.1:8090", RegistrationDigest: regDigest, Stdout: io.Discard,
@@ -1071,5 +1071,116 @@ func TestInjectionReportRendersRegisteredClaimGates(t *testing.T) {
 	want := "## What this report does not claim\n\n- " + injectionRefuseToClaim[1] + "\n- a gate with no built-in text\n"
 	if !strings.HasSuffix(md, want) {
 		t.Fatalf("claims section is not the registered gates in order:\n%s", md[strings.Index(md, "## What this report"):])
+	}
+}
+
+func TestInjectionReportRejectsInconsistentSealedProvenance(t *testing.T) {
+	tr := validInjectionTrace()
+	reg, digest := testRegistration(t, []registeredTrace{{ID: tr.ID, SHA256: canonicalTraceHash(tr), Population: "corpus"}})
+	for name, tc := range map[string]struct {
+		edit func(*Artifact, *captureManifest)
+		want string
+	}{
+		"missing capture":    {func(a *Artifact, _ *captureManifest) { a.Capture = nil }, "capture.temperature"},
+		"model":              {func(a *Artifact, _ *captureManifest) { a.Capture.Model = "openai-compat/other" }, "capture.model"},
+		"transport":          {func(a *Artifact, m *captureManifest) { a.Capture.Transport = m.Transport }, "capture.transport"},
+		"artifact order":     {func(a *Artifact, _ *captureManifest) { a.Capture.OrderIndex = 2 }, "order_index"},
+		"sealed order":       {func(a *Artifact, m *captureManifest) { a.Capture.OrderIndex = 2; m.PerArtifact[0].OrderIndex = 2 }, "order_index"},
+		"manifest transport": {func(_ *Artifact, m *captureManifest) { m.Transport = "ollama" }, "transport"},
+		"manifest endpoint":  {func(_ *Artifact, m *captureManifest) { m.Endpoint = "http://other.invalid" }, "capture.transport"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			art := captureWithDigest(t, t.TempDir(), []Trace{tr}, digest, nil)
+			if _, err := runInjectionReport(injectionReportOptions{RegistrationPath: reg, Captures: []string{art}}); err != nil {
+				t.Fatalf("runInjectionReport(untampered capture) error = %v, want nil", err)
+			}
+			m, err := readCaptureManifestV3(captureManifestPath(art))
+			if err != nil {
+				t.Fatal(err)
+			}
+			rewriteArtifacts(t, art, func(a *Artifact) {
+				tc.edit(a, &m)
+				m.PerArtifact[0].ProvenanceHash = captureProvenanceHash(*a)
+			})
+			if err := writeCaptureManifest(captureManifestPath(art), m, io.Discard); err != nil {
+				t.Fatal(err)
+			}
+			_, err = runInjectionReport(injectionReportOptions{RegistrationPath: reg, Captures: []string{art}})
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("runInjectionReport(inconsistent sealed %s) error = %v, want %q error", name, err, tc.want)
+			}
+		})
+	}
+}
+
+func TestInjectionReportWarnsForOmittedRegisteredControl(t *testing.T) {
+	for _, registered := range []bool{false, true} {
+		t.Run(fmt.Sprintf("registered=%v", registered), func(t *testing.T) {
+			tr := validInjectionTrace()
+			census := []registeredTrace{{ID: tr.ID, SHA256: canonicalTraceHash(tr), Population: "corpus"}}
+			if registered {
+				control := validInjectionTrace()
+				control.ID += "-positive-control"
+				census = append(census, registeredTrace{ID: control.ID, SHA256: canonicalTraceHash(control), Population: "control"})
+			}
+			reg, digest := testRegistration(t, census)
+			art := captureWithDigest(t, t.TempDir(), []Trace{tr}, digest, nil)
+			md, err := runInjectionReport(injectionReportOptions{RegistrationPath: reg, Captures: []string{art}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := strings.Contains(md, "WARNING"); got != registered {
+				t.Errorf("runInjectionReport(control registered=%v) warning = %v, want %v", registered, got, registered)
+			}
+			if registered && !strings.Contains(md, "| openai-compat/m | 0 | 0 | 1 |") {
+				t.Errorf("runInjectionReport(omitted registered control) missing unscorable control row:\n%s", md)
+			}
+			if !strings.Contains(md, "| openai-compat/m | llama.cpp | 0 | 1/1 |") {
+				t.Errorf("runInjectionReport(control registered=%v) changed corpus completeness:\n%s", registered, md)
+			}
+		})
+	}
+}
+
+func TestInjectionReportTransportIdentities(t *testing.T) {
+	const ollamaURL = "http://127.0.0.1:11434"
+	const compatURL = "https://host.invalid/openai"
+	for name, tc := range map[string]struct {
+		transport, endpoint string
+		models              []string
+		want                map[string]string
+	}{
+		"ollama": {"ollama", ollamaURL, []string{"m"}, map[string]string{modelKey("m"): "ollama"}},
+		"compat": {"openai-compat", compatURL, []string{"openai-compat/m"}, map[string]string{modelKey("openai-compat/m"): openAICompatCandidateProviderName(compatURL)}},
+		"mixed with reversed targets": {"mixed", ollamaURL + " " + compatURL, []string{"openai-compat/c", "ollama/o"}, map[string]string{
+			modelKey("openai-compat/c"): openAICompatCandidateProviderName(compatURL), modelKey("ollama/o"): "ollama",
+		}},
+		"mixed needs two endpoints":       {"mixed", compatURL, []string{"openai-compat/c", "ollama/o"}, nil},
+		"transport disagrees with target": {"ollama", compatURL, []string{"openai-compat/m"}, nil},
+	} {
+		t.Run(name, func(t *testing.T) {
+			m := captureManifest{Transport: tc.transport, Endpoint: tc.endpoint}
+			for _, model := range tc.models {
+				m.ModelTargets = append(m.ModelTargets, captureManifestTarget{Selector: model})
+			}
+			got, err := injectionCaptureTransports(m)
+			if tc.want == nil {
+				if err == nil {
+					t.Error("injectionCaptureTransports(inconsistent manifest) error = nil, want error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("injectionCaptureTransports(%s) error = %v, want nil", name, err)
+			}
+			if len(got) != len(tc.want) {
+				t.Errorf("injectionCaptureTransports(%s) = %v, want %v", name, got, tc.want)
+			}
+			for model, want := range tc.want {
+				if got[model] != want {
+					t.Errorf("injectionCaptureTransports(%s)[%s] = %q, want %q", name, model, got[model], want)
+				}
+			}
+		})
 	}
 }

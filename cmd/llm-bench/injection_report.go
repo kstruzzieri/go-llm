@@ -544,6 +544,39 @@ type injectionTraceMeta struct {
 	Twin, BoN                            bool
 }
 
+// injectionCaptureTransports derives the provider identity each artifact must
+// carry from its model target and the manifest's recorded endpoint.
+func injectionCaptureTransports(m captureManifest) (map[string]string, error) {
+	targets := make([]ModelTarget, 0, len(m.ModelTargets))
+	for _, row := range m.ModelTargets {
+		target, err := parseModelTarget(row.Selector)
+		if err != nil {
+			return nil, fmt.Errorf("manifest model target: %w", err)
+		}
+		targets = append(targets, target)
+	}
+	endpoints := strings.Fields(m.Endpoint)
+	if len(endpoints) == 0 || len(endpoints) > 2 {
+		return nil, errors.New("manifest endpoint must contain one URL, or two for mixed transport")
+	}
+	endpoint, transport, err := captureEndpointTransport(targets, endpoints[0], endpoints[len(endpoints)-1])
+	if err != nil {
+		return nil, err
+	}
+	if m.Endpoint != endpoint || m.Transport != transport {
+		return nil, errors.New("manifest endpoint/transport does not match model_targets")
+	}
+	out := make(map[string]string, len(targets))
+	for _, target := range targets {
+		provider := target.Provider
+		if provider == openAICompatTransport {
+			provider = openAICompatCandidateProviderName(endpoints[len(endpoints)-1])
+		}
+		out[modelKey(target.Display)] = provider
+	}
+	return out, nil
+}
+
 // runInjectionReport loads, binds and verifies the captures against the
 // registration BEFORE any computation, then renders the report.
 func runInjectionReport(opts injectionReportOptions) (string, error) {
@@ -596,6 +629,10 @@ func runInjectionReport(opts injectionReportOptions) (string, error) {
 		if m.RegistrationDigest != digest {
 			return "", fmt.Errorf("injection-report: capture %s registration digest %s != %s", path, m.RegistrationDigest, digest)
 		}
+		transports, err := injectionCaptureTransports(m)
+		if err != nil {
+			return "", fmt.Errorf("injection-report: capture %s: %w", path, err)
+		}
 		sum := sha256.Sum256(raw)
 		summary := injectionCaptureSummary{Name: filepath.Base(path), ManifestDigest: "sha256:" + hex.EncodeToString(sum[:]),
 			Endpoint: m.Endpoint, Transport: m.Transport, CreatedAt: m.CreatedAt, Temperature: m.Decoding.Temperature}
@@ -634,7 +671,9 @@ func runInjectionReport(opts injectionReportOptions) (string, error) {
 		}
 		// Census: the registered ID and canonicalTraceHash of every requested
 		// trace; independent of which traces happened to produce artifacts.
-		for _, rt := range m.RequestedTraces {
+		traceOrder := make(map[string]int, len(m.RequestedTraces))
+		for i, rt := range m.RequestedTraces {
+			traceOrder[rt.TraceID] = i
 			if _, ok := census[rt.TraceID]; !ok {
 				return "", fmt.Errorf("injection-report: capture %s requested trace %q is not in the registration census", path, rt.TraceID)
 			}
@@ -665,7 +704,17 @@ func runInjectionReport(opts injectionReportOptions) (string, error) {
 			if want := reg.Decoding[name].Temperature; a.Capture == nil || a.Capture.Temperature == nil || *a.Capture.Temperature != want {
 				return "", fmt.Errorf("injection-report: capture %s model %s artifact %s: capture.temperature is not the registered %v", path, name, a.TraceID, want)
 			}
-			if captureProvenanceHash(a) != perArtifact[a.ArtifactHash].ProvenanceHash {
+			if modelKey(a.Capture.Model) != modelKey(a.CandidateModel) {
+				return "", fmt.Errorf("injection-report: capture %s model %s artifact %s: capture.model does not match the captured ledger row", path, name, a.TraceID)
+			}
+			if a.Capture.Transport != transports[modelKey(row.Model)] {
+				return "", fmt.Errorf("injection-report: capture %s model %s artifact %s: capture.transport does not match its model target and endpoint", path, name, a.TraceID)
+			}
+			pa := perArtifact[a.ArtifactHash]
+			if pa.OrderIndex != traceOrder[a.TraceID] || a.Capture.OrderIndex != pa.OrderIndex {
+				return "", fmt.Errorf("injection-report: capture %s model %s artifact %s: order_index does not match requested_traces", path, name, a.TraceID)
+			}
+			if captureProvenanceHash(a) != pa.ProvenanceHash {
 				return "", fmt.Errorf("injection-report: capture %s model %s artifact %s: provenance_hash does not match its manifest per_artifact row", path, name, a.TraceID)
 			}
 			if a.Trace.ID != a.TraceID || a.Trace.Injection == nil {
@@ -724,11 +773,11 @@ func runInjectionReport(opts injectionReportOptions) (string, error) {
 			cells = append(cells, cell)
 		}
 	}
-	// Cells omitted from every capture still belong to the registered corpus;
-	// retaining them keeps entirely absent BoN groups visible as incomplete.
+	// Cells omitted from every capture still belong to the registered census;
+	// retain missing BoN groups and positive controls in their respective tables.
 	for _, model := range reg.Models {
 		for _, trace := range reg.Census {
-			if _, seen := seenCell[[2]string{model, trace.ID}]; !seen && trace.Population == "corpus" {
+			if _, seen := seenCell[[2]string{model, trace.ID}]; !seen {
 				ledgerOnly = append(ledgerOnly, pending{model, trace.ID, false})
 			}
 		}
