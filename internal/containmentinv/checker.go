@@ -400,3 +400,15 @@ func fileSum(path string) ([sha256.Size]byte, error) {
 	data, err := os.ReadFile(path)
 	return sha256.Sum256(data), err
 }
+
+// RequireClean rejects evidence that claims a forwarded identity but measured
+// dirty: a CI or hook run whose checkout, tree or GOOS does not match the
+// identity it forwards has tested something else, so the run fails instead
+// of publishing evidence stamped as that commit's. A manual run (commit
+// "unknown") is dirty by definition and never fails for it.
+func RequireClean(ev Evidence) error {
+	if ev.Commit == "unknown" || !ev.Dirty {
+		return nil
+	}
+	return fmt.Errorf("containmentinv: forwarded identity (tree %s, commit %s) measured dirty: measured tree %q, GOOS %s, profile %s", ev.Tree, ev.Commit, ev.MeasuredTree, ev.GOOS, ev.Profile)
+}

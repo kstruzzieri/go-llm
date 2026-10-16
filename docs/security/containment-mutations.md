@@ -1778,7 +1778,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
 - Affected refs: META-INVENTORY: `TestInventoryRefMustReachMarkedFunction`, `TestInventoryRefRejectsUnrelatedTopLevelTest`, `TestInventoryRefExternalTestBridge`
 - Baseline: `23f0c0bbca83f0c9d6e02163dd09c4856698ddcd` (immutable code commit preceding this ledger entry)
 - Platform: darwin (arm64, go1.27.1)
-- Profile / command: darwin-host / `rtk proxy env GOCACHE=/tmp/pr698-review-go-cache go test -count=1 -run '^TestInventoryRef(MustReachMarkedFunction|RejectsUnrelatedTopLevelTest|ExternalTestBridge)$' -v ./internal/containmentinv`
+- Profile / command: darwin-host / `env GOCACHE=/tmp/pr698-review-go-cache go test -count=1 -run '^TestInventoryRef(MustReachMarkedFunction|RejectsUnrelatedTopLevelTest|ExternalTestBridge)$' -v ./internal/containmentinv`
 - Patch:
   ```diff
   diff --git a/internal/containmentinv/lint.go b/internal/containmentinv/lint.go
@@ -1796,13 +1796,13 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
   ```
 - Baseline: pass (exit 0). Mutant: FAIL `TestInventoryRefMustReachMarkedFunction/unrelated_test`, `/shadowed_helper` and `/unrelated_field_key`, each with `inventory_test.go:86: Lint(unrelated marked function) = [], want unreachable-function error`; FAIL `TestInventoryRefRejectsUnrelatedTopLevelTest` (`inventory_test.go:101: Lint(misbound top-level test) = [], want unreachable-function error`); FAIL `TestInventoryRefExternalTestBridge/example.test/foreign/pkg` (`inventory_test.go:135: Lint(foreign import) = [], want unreachable-function error`). The direct helper, transitive helper, registered callback, callback in a selector receiver and local external-test bridge controls still pass. Mutant exit 1. Restored: pass (exit 0).
 - Kind: guard
-- Notes: Run only in an isolated `/tmp` export of the baseline's `go.mod`, `go.sum` and `internal/containmentinv`. The patch was checked with `rtk proxy git apply --check M-060.patch`, applied with `rtk proxy git apply M-060.patch`, then reversed with `rtk proxy git apply --reverse M-060.patch`; `cmp` confirmed the restored file matched its baseline bytes before the final run. The rule proves structural references from the cited top-level test to the marked function, including callbacks and the same-package external-test bridge; it does not prove execution of each statement or subtest path.
+- Notes: Run only in an isolated `/tmp` export of the baseline's `go.mod`, `go.sum` and `internal/containmentinv`. The patch was checked with `git apply --check M-060.patch`, applied with `git apply M-060.patch`, then reversed with `git apply --reverse M-060.patch`; `cmp` confirmed the restored file matched its baseline bytes before the final run. The rule proves structural references from the cited top-level test to the marked function, including callbacks and the same-package external-test bridge; it does not prove execution of each statement or subtest path.
 
 ## M-061 — An allowed descendant skip is omitted from executed evidence
 - Affected refs: META-GATE: `TestDecideRunSkippedDescendantsAreNotExecuted`
 - Baseline: `23f0c0bbca83f0c9d6e02163dd09c4856698ddcd` (immutable code commit preceding this ledger entry)
 - Platform: darwin (arm64, go1.27.1)
-- Profile / command: darwin-host / `rtk proxy env GOCACHE=/tmp/pr698-review-go-cache go test -count=1 -run '^TestDecideRunSkippedDescendantsAreNotExecuted$' -v ./internal/containmentinv`
+- Profile / command: darwin-host / `env GOCACHE=/tmp/pr698-review-go-cache go test -count=1 -run '^TestDecideRunSkippedDescendantsAreNotExecuted$' -v ./internal/containmentinv`
 - Patch:
   ```diff
   diff --git a/internal/containmentinv/checker.go b/internal/containmentinv/checker.go
@@ -1820,7 +1820,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
   ```
 - Baseline: pass (exit 0). Mutant: FAIL `TestDecideRunSkippedDescendantsAreNotExecuted/allowed_child` (`checker_test.go:241: DecideRun(skip "TestP/child", allowed [TestP=capability:bash]) executed = [TestP TestP/passing TestP2], want [TestP/passing TestP2]`); FAIL `/allowed_nested_descendant` (`checker_test.go:241: DecideRun(skip "TestP/child/nested", allowed [TestP=capability:bash]) executed = [TestP TestP/passing TestP2], want [TestP/passing TestP2]`); FAIL `/allowed_prefix_sibling_descendant` (`checker_test.go:241: DecideRun(skip "TestP2/child", allowed [TestP2=capability:bash]) executed = [TestP TestP/passing TestP2], want [TestP TestP/passing]`). The disallowed-child and different-allowed-reason cases still pass. Mutant exit 1. Restored: pass (exit 0).
 - Kind: guard
-- Notes: Run only in a separate isolated `/tmp` export of the same baseline paths. The patch passed `rtk proxy git apply --check` and was applied with `rtk proxy git apply`; the fail branch was unchanged. After restoring the captured original `checker.go`, every exported file matched its baseline bytes before and after the final passing run. This mutation makes an allowed skipped aggregate appear executed despite its unchanged passing siblings; acceptance and evidence must use the same descendant-aware outcome.
+- Notes: Run only in a separate isolated `/tmp` export of the same baseline paths. The patch passed `git apply --check` and was applied with `git apply`; the fail branch was unchanged. After restoring the captured original `checker.go`, every exported file matched its baseline bytes before and after the final passing run. This mutation makes an allowed skipped aggregate appear executed despite its unchanged passing siblings; acceptance and evidence must use the same descendant-aware outcome.
 
 ## Administrative evidence
 

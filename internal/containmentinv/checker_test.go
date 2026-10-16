@@ -341,6 +341,27 @@ func TestCheckerSourceIdentityFromEnv(t *testing.T) {
 	}
 }
 
+// TestCheckerRequireClean: evidence that claims a forwarded identity but
+// measured dirty is a failed run, not evidence of that commit; a manual run
+// (commit unknown) is dirty by definition and is never failed for it.
+func TestCheckerRequireClean(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		ev      Evidence
+		wantErr bool
+	}{
+		{"forwarded clean", Evidence{Tree: "abc123", Commit: "def456"}, false},
+		{"forwarded dirty", Evidence{Tree: "abc123", Commit: "def456", Dirty: true, MeasuredTree: "0000"}, true},
+		{"manual dirty", Evidence{Commit: "unknown", Dirty: true}, false},
+	} {
+		// containment: META-GATE
+		err := RequireClean(tc.ev)
+		if (err != nil) != tc.wantErr {
+			t.Errorf("%s: RequireClean(%+v) = %v, want error %v", tc.name, tc.ev, err, tc.wantErr)
+		}
+	}
+}
+
 // TestPlanRunsGroupsByPackage: one run per package, a duplicate ref cited
 // once, rows mandatory on another profile left out, the profile's tags and
 // race mode copied, packages and leaves sorted.

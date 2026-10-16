@@ -90,9 +90,15 @@ func check(ctx context.Context, invPath, profile string) (containmentinv.Evidenc
 	if len(p.Tags) > 0 {
 		ev.Flags = append(ev.Flags, "-tags", strings.Join(p.Tags, ","))
 	}
+	if err := containmentinv.RequireClean(ev); err != nil {
+		return ev, err // CI and hook evidence is clean or absent; a manual run stays dirty
+	}
 
 	failed := 0
 	for _, r := range runs {
+		if err := ctx.Err(); err != nil {
+			return ev, fmt.Errorf("profile %s: %w", profile, err) // interrupted: do not run the rest against a dead context
+		}
 		args := append(append([]string{"test"}, ev.Flags...), "-run", r.Pattern, r.Package)
 		cmd := exec.CommandContext(ctx, "go", args...)
 		cmd.Stderr = os.Stderr

@@ -232,7 +232,7 @@ what it bound:
 | `tree`, `commit` | `GO_LLM_CI_TREE` and `GO_LLM_CI_COMMIT`, set by the pre-push hook and the CI checker steps: stamped as forwarded |
 | `measured_tree` | in a git checkout, `git rev-parse HEAD^{tree}`; absent in the hook's `.git`-free export, which is clean by construction (`git archive` of the forwarded tree) |
 | `pr_head` | `GO_LLM_CI_PR_HEAD`, the pull request's head commit, which the CI checker steps set; absent when empty (the hook, a manual run, `workflow_dispatch`) |
-| `dirty` | `true` when either identity variable is absent (`commit` is then `unknown`), when the running GOOS differs from the profile's, such as `linux-host` on a darwin host, or, in a checkout, unless `measured_tree` equals `tree` and `git status --porcelain --untracked-files=no` is empty. With a forwarded identity, a tracked file missing from the checkout or a failing `git` fails the run |
+| `dirty` | `true` when either identity variable is absent (`commit` is then `unknown`), when the running GOOS differs from the profile's, such as `linux-host` on a darwin host, or, in a checkout, unless `measured_tree` equals `tree` and `git status --porcelain --untracked-files=no` is empty. With a forwarded identity, a tracked file missing from the checkout, a failing `git` or a dirty measurement fails the run: the checker exits non-zero instead of publishing evidence stamped as that commit's |
 | `goos`, `goarch`, `go_version` | the platform and Go toolchain that ran the checker (`runtime.GOOS`, `runtime.GOARCH`, `runtime.Version()`) |
 | `inventory_digest` | SHA-256 of the inventory file |
 | `profile`, `flags` | the profile and the `go test` flags every package run shared |
@@ -241,7 +241,8 @@ what it bound:
 
 A manual run (`scripts/ci-local` on a working tree, or Docker without the
 hook) has no forwarded identity, so it records `"commit": "unknown"` and
-`"dirty": true` and is never treated as CI evidence. When its digest cannot be
+`"dirty": true` and is never treated as CI evidence; a run that forwards an
+identity but measures dirty fails instead. When its digest cannot be
 computed, as when the Docker gate runs from a linked worktree whose `.git`
 pointer names host-only metadata, or git refuses a checkout another uid owns,
 it records `"source_digest": "unknown"` and the check still runs.

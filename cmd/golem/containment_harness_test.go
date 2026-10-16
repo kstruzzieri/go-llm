@@ -269,7 +269,6 @@ func TestContainmentHelper(t *testing.T) {
 	if err := os.WriteFile(args[2], raw, 0o600); err != nil {
 		os.Exit(3)
 	}
-	os.Exit(0)
 }
 
 // TestContainmentE1Parent runs the orchestrator inside a process whose whole
@@ -330,7 +329,8 @@ func TestContainmentE1Parent(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(work, "verdict.json"), raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	os.Exit(0) // keep the gated test from running the rest of the suite
+	// Return, not os.Exit: -test.run already scopes this binary to the parent,
+	// and returning lets t.Cleanup shut the background manager and store down.
 }
 
 // TestCompareEnv pins compareEnv with independently written inputs: each case

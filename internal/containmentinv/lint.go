@@ -40,9 +40,12 @@ type source struct {
 	module       string
 	sites        map[site]bool
 	markers      []marker
-	// lastObs is, per slash path and function, the position of the last
-	// reference to an observation field or observation literal.
-	lastObs map[string]map[string]token.Pos
+	// lastAttack is, per slash path and function, the position of the last
+	// assignment to the observation's AttackEffect field: a `.AttackEffect =`
+	// statement or an `observation{AttackEffect: ...}` literal. Reads and the
+	// other fields do not count, so a deleted probe cannot leave the marker
+	// bound to a control write while AttackEffect defaults to contained.
+	lastAttack map[string]map[string]token.Pos
 	// registrars is, per slash path and scenario ID, the functions bound to
 	// the scenario's registration (registrationFuncs).
 	registrars map[string]map[string][]string
@@ -54,9 +57,6 @@ const scenarioFile = "cmd/golem/containment_scenarios_test.go"
 
 var registryRoots = []string{"containmentScenarios", "executableScenarios", "pendingScenarios"}
 
-// observationFields are the containment observation's outcome fields.
-var observationFields = []string{"ValidityErr", "ControlEffect", "AttackEffect"}
-
 // Lint checks inv against the *_test.go files under repoRoot and the
 // registry's scenario declarations, and returns every violation:
 //   - each ref names an existing function whose body holds the row's marker;
@@ -67,7 +67,7 @@ var observationFields = []string{"ValidityErr", "ControlEffect", "AttackEffect"}
 //   - pending and out-of-scope rows carry no refs; pending and uncontained need an owner;
 //   - model rows list artifacts, rows with refs list known mandatory profiles;
 //   - a TestContainment/<X> ref cites a function bound to scenario X's
-//     registration, and its marker precedes an observation statement there;
+//     registration, and its marker precedes an AttackEffect assignment there;
 //   - a verified or uncontained row outside the model layer cites at least one
 //     entry of the mutation ledger, every cited entry exists in ledger and
 //     lists the row in its Affected refs, and every row an entry lists cites
@@ -349,9 +349,9 @@ func lintRef(id string, ref Ref, src source) []error {
 		errs = append(errs, fmt.Errorf("%s: ref %s: %s is not bound to scenario %s's registration (%s)", id, ref.Test, ref.Func, scenario, strings.Join(fns, ", ")))
 	}
 	if !slices.ContainsFunc(src.markers, func(m marker) bool {
-		return m.site == site{id, ref.File, ref.Func} && m.offset < src.lastObs[ref.File][ref.Func]
+		return m.site == site{id, ref.File, ref.Func} && m.offset < src.lastAttack[ref.File][ref.Func]
 	}) {
-		errs = append(errs, fmt.Errorf("%s: ref %s: no `%s%s` marker in %s precedes an observation statement", id, ref.Test, markerPrefix, id, ref.Func))
+		errs = append(errs, fmt.Errorf("%s: ref %s: no `%s%s` marker in %s precedes an AttackEffect assignment", id, ref.Test, markerPrefix, id, ref.Func))
 	}
 	return errs
 }
@@ -488,7 +488,7 @@ func citedLeaf(rows []Row, leaf string) bool {
 func scanTests(root string) (source, []error) {
 	src := source{funcs: map[string]map[string]bool{}, sites: map[site]bool{},
 		packages: map[string]string{}, dependencies: map[functionKey][]functionKey{},
-		lastObs: map[string]map[string]token.Pos{}, registrars: map[string]map[string][]string{}}
+		lastAttack: map[string]map[string]token.Pos{}, registrars: map[string]map[string][]string{}}
 	if data, err := os.ReadFile(filepath.Join(root, "go.mod")); err == nil {
 		for _, line := range strings.Split(string(data), "\n") {
 			if fields := strings.Fields(line); len(fields) >= 2 && fields[0] == "module" {
@@ -592,7 +592,7 @@ func (s *source) addFile(fset *token.FileSet, rel string, f *ast.File) {
 		}
 	}
 	s.funcs[rel] = fns
-	s.lastObs[rel] = map[string]token.Pos{}
+	s.lastAttack[rel] = map[string]token.Pos{}
 	s.registrars[rel] = map[string][]string{}
 	regs := map[string]map[string][]string{} // function -> scenario ID -> bound functions
 	callees := map[string][]string{}
@@ -671,14 +671,22 @@ func (s *source) scanFunc(rel string, fn *ast.FuncDecl, fns map[string]bool) (ma
 	}
 	ast.Inspect(fn, func(n ast.Node) bool {
 		switch x := n.(type) {
-		case *ast.SelectorExpr:
-			if slices.Contains(observationFields, x.Sel.Name) {
-				s.lastObs[rel][name] = max(s.lastObs[rel][name], x.Pos())
+		case *ast.AssignStmt:
+			for _, lhs := range x.Lhs {
+				if sel, ok := lhs.(*ast.SelectorExpr); ok && sel.Sel.Name == "AttackEffect" {
+					s.lastAttack[rel][name] = max(s.lastAttack[rel][name], x.Pos())
+				}
 			}
 		case *ast.CompositeLit:
 			t, _ := x.Type.(*ast.Ident)
 			if t != nil && t.Name == "observation" {
-				s.lastObs[rel][name] = max(s.lastObs[rel][name], x.Pos())
+				for _, elt := range x.Elts {
+					if kv, ok := elt.(*ast.KeyValueExpr); ok {
+						if key, _ := kv.Key.(*ast.Ident); key != nil && key.Name == "AttackEffect" {
+							s.lastAttack[rel][name] = max(s.lastAttack[rel][name], x.Pos())
+						}
+					}
+				}
 			}
 			if t == nil || t.Name != "scenario" {
 				break

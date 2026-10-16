@@ -151,6 +151,7 @@ func TestContainmentDeclarationsUpToDate(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: %v (run go test ./cmd/golem -run TestContainmentDeclarationsUpToDate -update-containment)", path, err)
 		}
+		// containment: META-INVENTORY
 		if !bytes.Equal(got, want) {
 			t.Fatalf("%s is stale; regenerate with -update-containment", path)
 		}
@@ -293,6 +294,7 @@ func TestContainmentCapabilitySkipNamesCapability(t *testing.T) {
 }
 
 func TestContainmentRegistryIntegrity(t *testing.T) {
+	// containment: META-INVENTORY
 	seen := map[string]bool{}
 	for _, s := range containmentScenarios() {
 		if seen[s.ID] {
@@ -348,6 +350,7 @@ func TestContainmentDeclaredRate(t *testing.T) {
 			o++
 		}
 	}
+	// containment: META-INVENTORY
 	if c != 17 || u != 6 || p != 17 || o != 1 {
 		t.Fatalf("declared %d/%d/%d/%d, want 17 contained, 6 uncontained, 17 pending, 1 out-of-scope (spec §5.3)", c, u, p, o)
 	}

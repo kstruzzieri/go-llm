@@ -2768,6 +2768,24 @@
           "test": "TestInventoryRefExternalTestBridge",
           "file": "internal/containmentinv/inventory_test.go",
           "func": "TestInventoryRefExternalTestBridge"
+        },
+        {
+          "package": "./cmd/golem",
+          "test": "TestContainmentDeclarationsUpToDate",
+          "file": "cmd/golem/containment_test.go",
+          "func": "TestContainmentDeclarationsUpToDate"
+        },
+        {
+          "package": "./cmd/golem",
+          "test": "TestContainmentRegistryIntegrity",
+          "file": "cmd/golem/containment_test.go",
+          "func": "TestContainmentRegistryIntegrity"
+        },
+        {
+          "package": "./cmd/golem",
+          "test": "TestContainmentDeclaredRate",
+          "file": "cmd/golem/containment_test.go",
+          "func": "TestContainmentDeclaredRate"
         }
       ],
       "profiles": [
@@ -2858,6 +2876,12 @@
           "test": "TestCheckerSourceIdentityMeasured",
           "file": "internal/containmentinv/checker_test.go",
           "func": "TestCheckerSourceIdentityMeasured"
+        },
+        {
+          "package": "./internal/containmentinv",
+          "test": "TestCheckerRequireClean",
+          "file": "internal/containmentinv/checker_test.go",
+          "func": "TestCheckerRequireClean"
         }
       ],
       "profiles": [

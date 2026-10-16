@@ -249,7 +249,7 @@ func TestInventoryPendingNeedsOwnerAndNoRefs(t *testing.T) {
 // and the marker sits in x3, which registers X3, before its observation.
 const scenarioTree = `package pkg
 import "testing"
-type observation struct{ AttackEffect bool }
+type observation struct{ ControlEffect, AttackEffect bool }
 type scenario struct {
 	ID  string
 	run func() observation
@@ -304,7 +304,7 @@ const probeFunc = `func probe() observation {
 const helperTree = `func wScenario(id string) scenario {
 	return scenario{ID: id, run: func() observation {
 		// containment: FP-SCRIPT-CONTENT
-		return observation{}
+		return observation{AttackEffect: true}
 	}}
 }
 func pendingScenarios() []scenario { return []scenario{wScenario("X4")} }
@@ -429,7 +429,18 @@ func TestInventoryLintRules(t *testing.T) {
 		{name: "marker after the last observation", scenario: true,
 			tree: strings.Replace(scenarioTree, "\t\t// containment: FP-SCRIPT-CONTENT\n\t\to.AttackEffect = true\n\t\treturn o\n",
 				"\t\to.AttackEffect = true\n\t\treturn o\n\t\t// containment: FP-SCRIPT-CONTENT\n", 1),
-			edit: func(*Inventory, *[]ScenarioDecl) {}, want: "no `// containment: FP-SCRIPT-CONTENT` marker in x3 precedes an observation statement"},
+			edit: func(*Inventory, *[]ScenarioDecl) {}, want: "no `// containment: FP-SCRIPT-CONTENT` marker in x3 precedes an AttackEffect assignment"},
+		{name: "control write after the marker is not an AttackEffect assignment", scenario: true,
+			tree: strings.Replace(scenarioTree, "\t\to.AttackEffect = true\n", "\t\to.ControlEffect = true\n", 1),
+			edit: func(*Inventory, *[]ScenarioDecl) {}, want: "no `// containment: FP-SCRIPT-CONTENT` marker in x3 precedes an AttackEffect assignment"},
+		{name: "AttackEffect read after the marker is not an assignment", scenario: true,
+			tree: strings.Replace(scenarioTree, "\t\t// containment: FP-SCRIPT-CONTENT\n\t\to.AttackEffect = true\n",
+				"\t\to.AttackEffect = true\n\t\t// containment: FP-SCRIPT-CONTENT\n\t\t_ = o.AttackEffect\n", 1),
+			edit: func(*Inventory, *[]ScenarioDecl) {}, want: "no `// containment: FP-SCRIPT-CONTENT` marker in x3 precedes an AttackEffect assignment"},
+		{name: "AttackEffect literal key after the marker is an assignment", scenario: true,
+			tree: strings.Replace(scenarioTree, "\t\tvar o observation\n\t\t// containment: FP-SCRIPT-CONTENT\n\t\to.AttackEffect = true\n\t\treturn o\n",
+				"\t\t// containment: FP-SCRIPT-CONTENT\n\t\treturn observation{AttackEffect: true}\n", 1),
+			edit: func(*Inventory, *[]ScenarioDecl) {}},
 		{name: "ledger entry not listing a citing row", edit: func(inv *Inventory, _ *[]ScenarioDecl) {
 			inv.Rows[0].Mutations = []string{"M-001", "M-002"}
 		}, ledger: []LedgerEntry{fixtureLedger[0], {ID: "M-002", Rows: []string{"PATH-NUL"}}},
