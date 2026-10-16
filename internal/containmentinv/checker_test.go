@@ -189,6 +189,68 @@ func TestDecideRun(t *testing.T) {
 	}
 }
 
+func TestDecideRunSkippedDescendantsAreNotExecuted(t *testing.T) {
+	t.Parallel()
+	const pkg = "github.com/kstruzzieri/go-llm/internal/x"
+	leaves := []string{"TestP2", "TestP/passing", "TestP"}
+	for _, tc := range []struct {
+		name    string
+		skipped string
+		allowed []string
+		want    []string
+		wantErr string
+	}{
+		{
+			name: "allowed child", skipped: "TestP/child",
+			allowed: []string{"TestP=capability:bash"}, want: []string{"TestP/passing", "TestP2"},
+		},
+		{
+			name: "allowed nested descendant", skipped: "TestP/child/nested",
+			allowed: []string{"TestP=capability:bash"}, want: []string{"TestP/passing", "TestP2"},
+		},
+		{
+			name: "allowed prefix sibling descendant", skipped: "TestP2/child",
+			allowed: []string{"TestP2=capability:bash"}, want: []string{"TestP", "TestP/passing"},
+		},
+		{
+			name: "disallowed child", skipped: "TestP/child",
+			wantErr: "TestP/child: skipped (capability:bash), not an allowed skip",
+		},
+		{
+			name: "different allowed reason", skipped: "TestP/child",
+			allowed: []string{"TestP=capability:symlink"},
+			wantErr: "TestP/child: skipped (capability:bash), not an allowed skip",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			stream := []TestEvent{
+				{Action: "run", Package: pkg, Test: "TestP"},
+				{Action: "run", Package: pkg, Test: "TestP/passing"},
+				{Action: "pass", Package: pkg, Test: "TestP/passing"},
+				{Action: "run", Package: pkg, Test: "TestP2"},
+				{Action: "run", Package: pkg, Test: tc.skipped},
+				{Action: "output", Package: pkg, Test: tc.skipped, Output: "    x_test.go:9: capability:bash\n"},
+				{Action: "skip", Package: pkg, Test: tc.skipped},
+				{Action: "pass", Package: pkg, Test: "TestP"},
+				{Action: "pass", Package: pkg, Test: "TestP2"},
+				{Action: "pass", Package: pkg},
+			}
+			executed, errs := DecideRun([]byte(streamBytes(t, stream)), nil, leaves, tc.allowed)
+			if !reflect.DeepEqual(executed, tc.want) {
+				t.Errorf("DecideRun(skip %q, allowed %v) executed = %v, want %v", tc.skipped, tc.allowed, executed, tc.want)
+			}
+			if tc.wantErr == "" {
+				if len(errs) != 0 {
+					t.Errorf("DecideRun(skip %q, allowed %v) errors = %v, want none", tc.skipped, tc.allowed, errs)
+				}
+			} else if !containsErr(errs, tc.wantErr) {
+				t.Errorf("DecideRun(skip %q, allowed %v) errors = %v, want error containing %q", tc.skipped, tc.allowed, errs, tc.wantErr)
+			}
+		})
+	}
+}
+
 // gitRepo creates a committed repository holding files and returns its root
 // and a git runner isolated from the user's configuration.
 func gitRepo(t *testing.T, files map[string]string) (string, func(args ...string) string) {

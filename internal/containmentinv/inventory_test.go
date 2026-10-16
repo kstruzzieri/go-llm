@@ -49,6 +49,95 @@ func TestOther(t *testing.T) {
 	}
 }
 
+func TestInventoryRefMustReachMarkedFunction(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		body    string
+		wantErr bool
+	}{
+		{name: "unrelated test", body: "", wantErr: true},
+		{name: "shadowed helper", body: "marked := func(*testing.T) {}; marked(t)", wantErr: true},
+		{name: "unrelated field key", body: "_ = struct{ marked bool }{marked: true}", wantErr: true},
+		{name: "direct helper", body: "marked(t)"},
+		{name: "transitive helper", body: "bridge(t)"},
+		{name: "registered callback", body: `t.Run("proof", marked)`},
+		{name: "callback in selector receiver", body: "struct{ run func(*testing.T) }{run: marked}.run(t)"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			root := t.TempDir()
+			writeGo(t, root, "pkg/a_test.go", `package pkg
+import "testing"
+func TestCited(t *testing.T) { `+tc.body+` }
+func bridge(t *testing.T) { marked(t) }
+`)
+			writeGo(t, root, "pkg/proof_test.go", `package pkg
+import "testing"
+func marked(t *testing.T) {
+	// containment: PATH-ABS
+	if true { t.Fatal("proof ran") }
+}
+`)
+			inv := boundInventory()
+			inv.Rows[0].Refs = []Ref{{Package: "./pkg", Test: "TestCited", File: "pkg/proof_test.go", Func: "marked"}}
+			errs := Lint(inv, root, nil, fixtureLedger)
+			if tc.wantErr {
+				if !containsErr(errs, "not reachable from test TestCited") {
+					t.Fatalf("Lint(unrelated marked function) = %v, want unreachable-function error", errs)
+				}
+			} else if len(errs) > 0 {
+				t.Fatalf("Lint(reachable marked function) = %v, want no errors", errs)
+			}
+		})
+	}
+}
+
+func TestInventoryRefRejectsUnrelatedTopLevelTest(t *testing.T) {
+	root := t.TempDir()
+	writeGo(t, root, "pkg/a_test.go", boundTree+"\nfunc TestOther(t *testing.T) {}\n")
+	inv := boundInventory()
+	inv.Rows[0].Refs[0].Test = "TestOther"
+	if errs := Lint(inv, root, nil, fixtureLedger); !containsErr(errs, "not reachable from test TestOther") {
+		t.Fatalf("Lint(misbound top-level test) = %v, want unreachable-function error", errs)
+	}
+}
+
+func TestInventoryRefExternalTestBridge(t *testing.T) {
+	for _, importPath := range []string{"example.test/repo/pkg", "example.test/foreign/pkg"} {
+		t.Run(importPath, func(t *testing.T) {
+			t.Parallel()
+			root := t.TempDir()
+			writeGo(t, root, "go.mod", "module example.test/repo\n")
+			writeGo(t, root, "pkg/aggregate_test.go", `package pkg_test
+import (
+	"testing"
+	inside "`+importPath+`"
+)
+func TestCited(t *testing.T) { inside.RunProofs(t) }
+`)
+			writeGo(t, root, "pkg/bridge_test.go", `package pkg
+import "testing"
+func RunProofs(t *testing.T) {
+	for _, proof := range []struct {name string; run func(*testing.T)}{{"proof", TestProof}} {
+		t.Run(proof.name, proof.run)
+	}
+}
+`)
+			writeGo(t, root, "pkg/proof_test.go", strings.ReplaceAll(boundTree, "TestCited", "TestProof"))
+			inv := boundInventory()
+			inv.Rows[0].Refs = []Ref{{Package: "./pkg", Test: "TestCited/proof", File: "pkg/proof_test.go", Func: "TestProof"}}
+			errs := Lint(inv, root, nil, fixtureLedger)
+			if importPath == "example.test/repo/pkg" {
+				if len(errs) != 0 {
+					t.Fatalf("Lint(local external-test bridge) = %v, want no errors", errs)
+				}
+			} else if !containsErr(errs, "not reachable from test TestCited") {
+				t.Fatalf("Lint(foreign import) = %v, want unreachable-function error", errs)
+			}
+		})
+	}
+}
+
 // boundInventory is a lint-clean inventory over the fixture written by
 // boundTree: one verified row whose two refs share their marker. Its profile
 // is windows because linux-host may allow no skip and the lint cases give the

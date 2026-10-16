@@ -30,11 +30,16 @@ type marker struct {
 	offset token.Pos // position in the scan's file set
 }
 
+type functionKey struct{ dir, pkg, name string }
+
 // source is what the lint needs from the scanned test files.
 type source struct {
-	funcs   map[string]map[string]bool // slash path -> top-level function names
-	sites   map[site]bool
-	markers []marker
+	funcs        map[string]map[string]bool    // slash path -> top-level function names
+	packages     map[string]string             // slash path -> Go package name
+	dependencies map[functionKey][]functionKey // calls and registered function values
+	module       string
+	sites        map[site]bool
+	markers      []marker
 	// lastObs is, per slash path and function, the position of the last
 	// reference to an observation field or observation literal.
 	lastObs map[string]map[string]token.Pos
@@ -55,6 +60,7 @@ var observationFields = []string{"ValidityErr", "ControlEffect", "AttackEffect"}
 // Lint checks inv against the *_test.go files under repoRoot and the
 // registry's scenario declarations, and returns every violation:
 //   - each ref names an existing function whose body holds the row's marker;
+//   - non-scenario refs reach that function through static function references;
 //   - each marker names a row and sits in a function one of that row's refs cites;
 //   - scenario-backed statuses are derived from the registry, never contradicted;
 //   - a row cites TestContainment/<X> for each executable scenario it lists, and only those;
@@ -326,6 +332,10 @@ func lintRef(id string, ref Ref, src source) []error {
 	}
 	scenario, ok := strings.CutPrefix(ref.Test, "TestContainment/")
 	if !ok {
+		top, _, _ := strings.Cut(ref.Test, "/")
+		if !src.reaches(path.Dir(ref.File), top, functionKey{path.Dir(ref.File), src.packages[ref.File], ref.Func}) {
+			errs = append(errs, fmt.Errorf("%s: ref %s: marked function %s (%s) is not reachable from test %s", id, ref.Test, ref.Func, ref.File, top))
+		}
 		return errs
 	}
 	scenario, _, _ = strings.Cut(scenario, "/")
@@ -344,6 +354,31 @@ func lintRef(id string, ref Ref, src source) []error {
 		errs = append(errs, fmt.Errorf("%s: ref %s: no `%s%s` marker in %s precedes an observation statement", id, ref.Test, markerPrefix, id, ref.Func))
 	}
 	return errs
+}
+
+// reaches checks structural references, including table-driven callbacks and
+// external-test bridges. It does not prove control flow inside a test body.
+func (s source) reaches(dir, test string, target functionKey) bool {
+	var queue []functionKey
+	for fn := range s.dependencies {
+		if fn.dir == dir && fn.name == test {
+			queue = append(queue, fn)
+		}
+	}
+	seen := map[functionKey]bool{}
+	for len(queue) > 0 {
+		fn := queue[0]
+		queue = queue[1:]
+		if seen[fn] {
+			continue
+		}
+		seen[fn] = true
+		if fn == target {
+			return true
+		}
+		queue = append(queue, s.dependencies[fn]...)
+	}
+	return false
 }
 
 func (s source) hasFunc(dir, name string) bool {
@@ -452,7 +487,19 @@ func citedLeaf(rows []Row, leaf string) bool {
 // observation statements and scenario registrations.
 func scanTests(root string) (source, []error) {
 	src := source{funcs: map[string]map[string]bool{}, sites: map[site]bool{},
+		packages: map[string]string{}, dependencies: map[functionKey][]functionKey{},
 		lastObs: map[string]map[string]token.Pos{}, registrars: map[string]map[string][]string{}}
+	if data, err := os.ReadFile(filepath.Join(root, "go.mod")); err == nil {
+		for _, line := range strings.Split(string(data), "\n") {
+			if fields := strings.Fields(line); len(fields) >= 2 && fields[0] == "module" {
+				src.module = fields[1]
+				if unquoted, err := strconv.Unquote(src.module); err == nil {
+					src.module = unquoted
+				}
+				break
+			}
+		}
+	}
 	var errs []error
 	fset := token.NewFileSet()
 	walkErr := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
@@ -480,7 +527,7 @@ func scanTests(root string) (source, []error) {
 			return err
 		}
 		rel = filepath.ToSlash(rel)
-		f, err := parser.ParseFile(fset, p, nil, parser.ParseComments|parser.SkipObjectResolution)
+		f, err := parser.ParseFile(fset, p, nil, parser.ParseComments)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("containmentinv: parse %s: %w", rel, err))
 			return nil
@@ -495,12 +542,53 @@ func scanTests(root string) (source, []error) {
 }
 
 func (s *source) addFile(fset *token.FileSet, rel string, f *ast.File) {
+	s.packages[rel] = f.Name.Name
+	localImports := map[string]bool{}
+	for _, imp := range f.Imports {
+		importPath, err := strconv.Unquote(imp.Path.Value)
+		if err != nil || s.module == "" || importPath != path.Join(s.module, path.Dir(rel)) {
+			continue
+		}
+		alias := path.Base(importPath)
+		if imp.Name != nil {
+			alias = imp.Name.Name
+		}
+		localImports[alias] = true
+	}
 	fns := map[string]bool{}
 	var decls []*ast.FuncDecl
 	for _, d := range f.Decls {
 		if fn, ok := d.(*ast.FuncDecl); ok {
 			fns[funcName(fn)] = true
 			decls = append(decls, fn)
+			key := functionKey{path.Dir(rel), f.Name.Name, funcName(fn)}
+			s.dependencies[key] = nil
+			var inspect func(ast.Node) bool
+			inspect = func(n ast.Node) bool {
+				switch x := n.(type) {
+				case *ast.SelectorExpr:
+					if pkg, ok := x.X.(*ast.Ident); ok && pkg.Obj == nil && localImports[pkg.Name] {
+						s.dependencies[key] = append(s.dependencies[key], functionKey{key.dir, strings.TrimSuffix(key.pkg, "_test"), x.Sel.Name})
+					}
+					if _, name := x.X.(*ast.Ident); !name {
+						ast.Inspect(x.X, inspect)
+					}
+					return false
+				case *ast.KeyValueExpr:
+					// A bare key can name a struct field, never a function value.
+					if _, name := x.Key.(*ast.Ident); !name {
+						ast.Inspect(x.Key, inspect)
+					}
+					ast.Inspect(x.Value, inspect)
+					return false
+				case *ast.Ident:
+					if x.Obj == nil || x.Obj.Kind == ast.Fun {
+						s.dependencies[key] = append(s.dependencies[key], functionKey{key.dir, key.pkg, x.Name})
+					}
+				}
+				return true
+			}
+			ast.Inspect(fn.Body, inspect)
 		}
 	}
 	s.funcs[rel] = fns

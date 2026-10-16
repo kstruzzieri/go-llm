@@ -171,6 +171,12 @@ go run ./internal/containmentinv/check -inventory docs/security/containment-inve
 `--evidence-out` names (the CI job passes `$RUNNER_TEMP/containment-linux-host.json`);
 `ci-local` prints it as `containment evidence: <path>` after the check passes.
 
+The inventory lint checks non-scenario refs for a structural path from the named top-level test
+to the marked function, including helper calls, registered function values,
+and imports of the package's test bridge. Unrelated tests cannot stand in for
+the marked assertion. This is static reference validation, not a proof of
+control flow inside each test; scenario refs retain their registry binding.
+
 The checker is the single runner of `TestContainment` in this phase, and of
 every other test leaf a row of the inventory makes mandatory on the profile. It
 groups those refs by package and runs each package once with
@@ -197,7 +203,9 @@ scenario X's caps that the profile's `caps` lack, the only reason X can log
 there. A row whose every ref is an allowed skip on a profile is skip-allowed
 there, not mandatory, and may not list that profile; the checker still runs
 the profile's skip-allowed leaves, so each must pass or skip with its allowed
-reason. A failure prints either the captured stream, when it does not decode,
+reason. An allowed descendant skip also excludes its cited parent from the
+successful `executed` evidence. A failure prints either the captured stream,
+when it does not decode,
 or the failed tests' output, and
 `containment inventory check failed (profile linux-host)`, and ends `ci-local`
 before formatting. The checker's own tests (`internal/containmentinv`) feed it

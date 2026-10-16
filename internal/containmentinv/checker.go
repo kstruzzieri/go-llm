@@ -139,6 +139,13 @@ var skipLine = regexp.MustCompile(`^\s+\S+\.go:\d+: (.*)$`)
 // as the leaf's own, with skip reasons checked against the leaf's entries. A
 // truncated stream has no package pass and fails.
 func Evaluate(events []TestEvent, leaves []string, allowedSkips []string) []error {
+	_, errs := evaluate(events, leaves, allowedSkips)
+	return errs
+}
+
+// evaluate derives passing leaves and errors from the same descendant-aware
+// outcome: an allowed skip accepts the run but is not passing evidence.
+func evaluate(events []TestEvent, leaves []string, allowedSkips []string) (executed []string, errs []error) {
 	ran := map[string]bool{}
 	final := map[string]string{}
 	output := map[string][]string{}
@@ -153,7 +160,6 @@ func Evaluate(events []TestEvent, leaves []string, allowedSkips []string) []erro
 		}
 	}
 	tests := slices.Sorted(maps.Keys(final))
-	var errs []error
 	for _, leaf := range leaves {
 		switch {
 		case !ran[leaf]:
@@ -163,24 +169,31 @@ func Evaluate(events []TestEvent, leaves []string, allowedSkips []string) []erro
 			errs = append(errs, fmt.Errorf("%s: no terminal event", leaf))
 			continue
 		}
+		passed := true
 		for _, test := range tests {
 			if test != leaf && !strings.HasPrefix(test, leaf+"/") {
 				continue
 			}
 			switch final[test] {
 			case "fail":
+				passed = false
 				errs = append(errs, fmt.Errorf("%s: fail", test))
 			case "skip":
+				passed = false
 				if reason := skipReason(output[test]); !slices.Contains(allowedSkips, leaf+"="+reason) {
 					errs = append(errs, fmt.Errorf("%s: skipped (%s), not an allowed skip", test, reason))
 				}
 			}
 		}
+		if passed {
+			executed = append(executed, leaf)
+		}
 	}
 	if final[""] != "pass" {
 		errs = append(errs, fmt.Errorf("package did not pass (terminal action %q)", final[""]))
 	}
-	return errs
+	slices.Sort(executed)
+	return executed, errs
 }
 
 // DecideRun decides one package run of the checker from `go test -json`'s
@@ -190,7 +203,7 @@ func Evaluate(events []TestEvent, leaves []string, allowedSkips []string) []erro
 // skip is not listed. On any error executed is nil.
 func DecideRun(out []byte, runErr error, leaves, allowed []string) (executed []string, errs []error) {
 	events, decodeErr := DecodeEvents(out)
-	errs = Evaluate(events, leaves, allowed)
+	executed, errs = evaluate(events, leaves, allowed)
 	if decodeErr != nil {
 		errs = append(errs, decodeErr)
 	}
@@ -199,11 +212,6 @@ func DecideRun(out []byte, runErr error, leaves, allowed []string) (executed []s
 	}
 	if len(errs) > 0 {
 		return nil, errs
-	}
-	for _, leaf := range slices.Sorted(slices.Values(leaves)) {
-		if slices.ContainsFunc(events, func(e TestEvent) bool { return e.Action == "pass" && e.Test == leaf }) {
-			executed = append(executed, leaf)
-		}
 	}
 	return executed, nil
 }
