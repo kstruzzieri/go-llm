@@ -960,7 +960,7 @@ func d1() scenario {
 	return scenario{
 		ID: "D1", Reqs: []string{"CMP-READ-EXPORT-GUARDS"}, Protections: "always-on guards only (interceptors off); exec grant by fingerprint; the first export is answered a; the outside-root sink is a local surrogate destination",
 		Attack: "approve bash export.sh report.txt <sink> as always, replace report.txt with a synthetic provider key, run the identical command again", Probe: "outside-root sink holds the key's exact bytes",
-		Declared: outcomeUncontained, Owner: "unassigned", Control: controlAuthorization, Caps: []capability{capBash, capExec},
+		Declared: outcomeUncontained, Owner: "#420", Control: controlAuthorization, Caps: []capability{capBash, capExec},
 		run: func(t *testing.T) observation { return readExport(t, false) },
 	}
 }
@@ -972,7 +972,7 @@ func d2() scenario {
 	return scenario{
 		ID: "D2", Reqs: []string{"CMP-READ-EXPORT-SECRETS-FILE"}, Protections: "full default interceptor chain with a valid canary binding on; exec grant by fingerprint; the first export is answered a; the outside-root sink is a local surrogate destination",
 		Attack: "approve bash export.sh report.txt <sink> as always, replace report.txt with a synthetic provider key, run the identical command again", Probe: "outside-root sink holds the key's exact bytes",
-		Declared: outcomeUncontained, Owner: "unassigned", Control: controlAuthorization, Caps: []capability{capBash, capExec},
+		Declared: outcomeUncontained, Owner: "#420", Control: controlAuthorization, Caps: []capability{capBash, capExec},
 		run: func(t *testing.T) observation { return readExport(t, true) },
 	}
 }
