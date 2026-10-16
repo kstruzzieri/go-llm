@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -929,5 +930,128 @@ func TestOfflineCorpusFilter_PassesSourcesThrough(t *testing.T) {
 	keep := filter.Manifest.Select(filter.Selection)
 	if !reflect.DeepEqual(keep, []string{"a"}) {
 		t.Fatalf("selection keeps %v; want [a] (round3 source only)", keep)
+	}
+}
+
+func TestValidateCandidateSessionID(t *testing.T) {
+	for id, ok := range map[string]bool{
+		"": true, "llmb-452-pr1": true, "a b": true,
+		" a": false, "a ": false, "\ta": false, "a\t": false,
+		"a\nb": false, "a\x7fb": false, "a\u0085b": false,
+	} {
+		if err := validateCandidateSessionID(id); (err == nil) != ok {
+			t.Errorf("validateCandidateSessionID(%q) = %v; want ok=%v", id, err, ok)
+		}
+	}
+}
+
+// main must reject a malformed -candidate-session-id before any network use:
+// the binary exits non-zero with the validation message and the candidate
+// server never sees a request.
+func TestMainRejectsCandidateSessionIDBeforeNetwork(t *testing.T) {
+	var hits atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+	cmd := exec.Command(os.Args[0],
+		"-traces", "testdata/smoke/minimal.json",
+		"-models", "fake",
+		"-ollama-url", server.URL,
+		"-judge-cache", "",
+		"-candidate-session-id", " llmb-452",
+		"-report", filepath.Join(t.TempDir(), "report.md"),
+	)
+	cmd.Env = append(os.Environ(), "LLM_BENCH_TEST_MAIN=1")
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("llm-bench accepted a leading-space session id:\n%s", out)
+	}
+	if !strings.Contains(string(out), "llm-bench: -candidate-session-id has leading or trailing whitespace") {
+		t.Fatalf("missing the validation message:\n%s", out)
+	}
+	if n := hits.Load(); n != 0 {
+		t.Fatalf("candidate server saw %d request(s) before the session id was rejected", n)
+	}
+}
+
+func TestMainInjectionRequiresRegisteredCaptureFlow(t *testing.T) {
+	var hits atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		http.Error(w, "unexpected request", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+	dir := t.TempDir()
+	tracePath := filepath.Join(dir, "injection.json")
+	raw, err := json.Marshal(validInjectionTrace())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(tracePath, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, scorer := range []string{"exact-match", "manual", "llm-judge"} {
+		t.Run(scorer, func(t *testing.T) {
+			outDir := t.TempDir()
+			reportPath := filepath.Join(outDir, "report.md")
+			cachePath := filepath.Join(outDir, "judge-cache.db")
+			cmd := exec.Command(os.Args[0],
+				"-traces", tracePath, "-models", "fake", "-scorer", scorer,
+				"-ollama-url", server.URL, "-judge-ollama-url", server.URL, "-judge-model", "fake",
+				"-judge-cache", cachePath, "-labels", filepath.Join(outDir, "missing-labels.jsonl"),
+				"-report", reportPath,
+			)
+			cmd.Env = append(os.Environ(), "LLM_BENCH_TEST_MAIN=1")
+			out, err := cmd.CombinedOutput()
+			if err == nil || !strings.Contains(string(out), "injection traces require -calibrate-capture with -registration, then -injection-report") {
+				t.Fatalf("ordinary injection run did not fail with capture/report guidance: %v\n%s", err, out)
+			}
+			for _, path := range []string{reportPath, cachePath} {
+				if _, err := os.Stat(path); !os.IsNotExist(err) {
+					t.Errorf("ordinary injection run created %s before refusing: %v", filepath.Base(path), err)
+				}
+			}
+		})
+	}
+	// Both supported modes must consume the registration rather than reject
+	// its flag or silently continue when its file does not exist.
+	for mode, args := range map[string][]string{
+		"calibrate-capture": {"-calibrate-capture", "-traces", tracePath, "-models", "fake", "-labels-out", filepath.Join(dir, "artifacts.jsonl")},
+		"injection-report":  {"-injection-report", "-captures", filepath.Join(dir, "missing-artifacts.jsonl")},
+	} {
+		t.Run(mode, func(t *testing.T) {
+			args = append(args, "-registration", filepath.Join(dir, "missing-registration.json"))
+			cmd := exec.Command(os.Args[0], args...)
+			cmd.Env = append(os.Environ(), "LLM_BENCH_TEST_MAIN=1")
+			out, err := cmd.CombinedOutput()
+			if err == nil || !strings.Contains(string(out), "registration: read") {
+				t.Fatalf("supported mode did not validate the registration file: %v\n%s", err, out)
+			}
+		})
+	}
+	if n := hits.Load(); n != 0 {
+		t.Fatalf("candidate/judge server saw %d requests before the injection run was rejected", n)
+	}
+}
+
+func TestMainRejectsRegistrationInUnsupportedModes(t *testing.T) {
+	for name, args := range map[string][]string{
+		"ordinary":       {"-registration", "unused.json"},
+		"empty ordinary": {"-registration="},
+		"capture":        {"-capture", "-registration", "unused.json"},
+		"report":         {"-manual-report", "-artifacts", "missing-artifacts.jsonl", "-registration", "unused.json"},
+		"build":          {"-build-injection-corpus", "missing-cases.json", "-registration", "unused.json"},
+		"replay attempt": {"-replay-attempt", "-registration", "unused.json"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cmd := exec.Command(os.Args[0], args...)
+			cmd.Env = append(os.Environ(), "LLM_BENCH_TEST_MAIN=1")
+			out, err := cmd.CombinedOutput()
+			if err == nil || !strings.Contains(string(out), "-registration requires -calibrate-capture or -injection-report") {
+				t.Fatalf("unsupported mode did not reject -registration: %v\n%s", err, out)
+			}
+		})
 	}
 }

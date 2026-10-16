@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/kstruzzieri/go-llm/ollama"
+	"github.com/kstruzzieri/go-llm/provider"
 )
 
 // benchKeepAlive is the Ollama keep_alive directive used for benchmark runs.
@@ -75,7 +76,15 @@ type Runner struct {
 	// long multi-turn replays may silently truncate prompts from the
 	// model's perspective without this set.
 	NumCtx int
-	Scorer Scorer
+	// CandidateSessionID, when non-empty, is sent as the openai-compat session
+	// header on every candidate request (-candidate-session-id). Empty sends
+	// no header.
+	CandidateSessionID string
+	Scorer             Scorer
+	// InjectionDecoding is the registered decoding (#452), keyed by the full
+	// model selector exactly as typed in -models (ModelTarget.Display).
+	// Injection traces fail closed for a model with no entry.
+	InjectionDecoding map[string]injectionDecoding
 }
 
 // Result is a single (model, trace) evaluation.
@@ -86,6 +95,9 @@ type Result struct {
 	Score             Score
 	Err               error
 	Transcript        []Turn
+	// RawToolCalls preserves the candidate's tool calls before map conversion
+	// (#452); only injection traces read it.
+	RawToolCalls []injectionRawCall
 }
 
 // RunAll replays every trace against every model. Iterates models in the
@@ -131,7 +143,16 @@ func (r *Runner) RunAll(ctx context.Context, targets []ModelTarget, traces []Tra
 func (r *Runner) runOne(ctx context.Context, transport candidateTransport, target ModelTarget, trace Trace) Result {
 	replayCtx, cancel := context.WithTimeout(ctx, r.Timeout)
 
-	opts := replayOptions{PerTurnTimeout: r.PerTurnTimeout, NumCtx: r.NumCtx}
+	opts := replayOptions{PerTurnTimeout: r.PerTurnTimeout, NumCtx: r.NumCtx, SessionID: r.CandidateSessionID}
+	if trace.Injection != nil {
+		decoding, ok := r.InjectionDecoding[target.Display]
+		if !ok {
+			cancel()
+			return Result{Model: target.Display, TraceID: trace.ID, CandidateProvider: transport.providerName, Err: fmt.Errorf("no registered decoding for %s", target.Display)}
+		}
+		opts.ProviderOptions = &decoding.Options
+		opts.ParseThinkMode = &decoding.ThinkMode
+	}
 	out, err := replayWith(replayCtx, transport.chat, target.Model, trace, opts)
 	cancel()
 	if err != nil {
@@ -144,6 +165,7 @@ func (r *Runner) runOne(ctx context.Context, transport candidateTransport, targe
 		TraceID:           trace.ID,
 		CandidateProvider: transport.providerName,
 		Transcript:        out.Transcript,
+		RawToolCalls:      out.RawToolCalls,
 	})
 	scorerMs := time.Since(scoreStart).Milliseconds()
 	if err != nil {
@@ -174,6 +196,7 @@ func (r *Runner) runOne(ctx context.Context, transport candidateTransport, targe
 		CandidateProvider: transport.providerName,
 		Score:             score,
 		Transcript:        out.Transcript,
+		RawToolCalls:      out.RawToolCalls,
 	}
 }
 
@@ -206,6 +229,8 @@ type replayOutput struct {
 	// exist for -replay-attempt (#687).
 	Divergences         []string
 	SentinelSubstituted bool
+	// RawToolCalls is the injection raw side channel (#452); empty elsewhere.
+	RawToolCalls []injectionRawCall
 }
 
 // addUsage folds one chat turn's token usage into the replay totals.
@@ -233,6 +258,14 @@ type replayOptions struct {
 	// transport's options shape supports one, so temperature-0 is the sole
 	// registered decoding control.
 	Temperature *float64
+	// ProviderOptions (injection replays) is sent verbatim on the openai-compat
+	// wire: the registered decoding (#452).
+	ProviderOptions *provider.ModelOptions
+	// ParseThinkMode (injection replays) is the registered inline-think parser
+	// policy; nil keeps the provider instance's think mode.
+	ParseThinkMode *provider.ThinkMode
+	// SessionID is the openai-compat session header value; empty sends none.
+	SessionID string
 }
 
 // assemblyCaptureTemperature is the registered decoding control for
@@ -275,6 +308,9 @@ func replay(ctx context.Context, client *ollama.Client, model string, trace Trac
 // All accumulated divergence notes are appended to the resulting Score's
 // Notes so aggregate consumers can see why a candidate diverged.
 func replayWith(ctx context.Context, client candidateChatClient, model string, trace Trace, opts replayOptions) (replayOutput, error) {
+	if trace.Injection != nil {
+		return replayInjection(ctx, client, model, trace, opts)
+	}
 	if prefilledAssemblyMode(trace) {
 		return replayPrefilled(ctx, client, model, trace, opts)
 	}
@@ -553,6 +589,7 @@ func chatReplayTurn(ctx context.Context, client candidateChatClient, model strin
 			KeepAlive: benchKeepAlive,
 		},
 		RawToolArgs: rawArgs,
+		SessionID:   opts.SessionID,
 	}
 	if opts.NumCtx > 0 || opts.Temperature != nil {
 		req.Options = &ollama.ModelOptions{NumCtx: opts.NumCtx, Temperature: opts.Temperature}

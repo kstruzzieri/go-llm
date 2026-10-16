@@ -14,6 +14,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -23,6 +24,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode"
 
 	"github.com/kstruzzieri/go-llm/config"
 	"github.com/kstruzzieri/go-llm/ollama"
@@ -46,6 +48,8 @@ func main() {
 	importXlamN := flag.Int("import-xlam-n", 300, "Number of eligible records to sample for -import-xlam (<=0 = all eligible)")
 	importXlamSeed := flag.Int64("import-xlam-seed", 42, "Deterministic sampling seed for -import-xlam")
 	assemblyBuildPath := flag.String("assembly-build", "", "Build assembly traces from this case-fixture JSON (#331): a JSON array is the 3a flat/progressive corpus; a JSON object is the 3c mixed-assembly fixture (paired legacy/mixed arms + optional topline)")
+	injectionBuildPath := flag.String("build-injection-corpus", "", "Build frozen-real-wire injection traces from this cases JSON (#452)")
+	injectionOut := flag.String("injection-out", filepath.Join("docs", "llm", "traces", "injection", "traces"), "Output directory for -build-injection-corpus")
 	assemblyOut := flag.String("assembly-out", filepath.Join("docs", "llm", "assembly-corpus", "traces"), "Output directory for -assembly-build with a 3a JSON-array fixture")
 	assemblyOutMixed := flag.String("assembly-out-mixed", filepath.Join("docs", "llm", "assembly-corpus", "mixed", "traces"), "Output directory for -assembly-build with a 3c mixed-assembly object fixture (the mixed corpus keeps its own manifest, separate from -assembly-out)")
 
@@ -73,6 +77,10 @@ func main() {
 	calibrateAgreement := flag.String("calibrate-agreement", string(calibrationAgreementExact), "Calibration agreement mode: exact or tolerance")
 	judgeStabilityRuns := flag.Int("judge-stability-runs", 0, "When >1, run the judge that many times per artifact (cache bypassed) and report spread as a diagnostic")
 
+	injectionReport := flag.Bool("injection-report", false, "Emit the injection-resistance report from -captures (artifacts JSONL files, comma-separated, each with its .manifest.json) bound to -registration (#452)")
+	capturesFlag := flag.String("captures", "", "With -injection-report: comma-separated injection capture artifacts paths (local and hosted captures are separate files)")
+	injectionAdjudications := flag.String("injection-adjudications", "", "With -injection-report: optional JSONL of {trace_id, model, outcome, reviewer, note}; may only replace manual cells")
+	registrationPath := flag.String("registration", "", "With -calibrate-capture over injection traces or -injection-report: the committed pre-registration JSON (llm-bench.injection-registration/v1); its census, decoding and digest bind captures and reports (#452)")
 	tracesGlob := flag.String("traces", "", "Glob pattern for trace JSON files (required for normal runs and -calibrate-capture)")
 	modelsArg := flag.String("models", "", "Comma-separated model selectors (provider/model or bare model name; required)")
 	scorerName := flag.String("scorer", "exact-match", "Scoring strategy: exact-match, llm-judge, manual")
@@ -86,6 +94,7 @@ func main() {
 	judgeDisableThinking := flag.Bool("judge-disable-thinking", false, "Send chat_template_kwargs.enable_thinking=false on -judge-transport openai-compat so a thinking-tuned local judge (llama.cpp/vLLM) answers directly; leave off for api.openai.com, which rejects the kwarg")
 	candidateBaseURL := flag.String("candidate-base-url", "", "Base URL for openai-compat candidate targets (server root, no /v1 suffix)")
 	candidateAPIKey := flag.String("candidate-api-key", "", "Bearer token for openai-compat candidate targets; falls back to $"+candidateAPIKeyEnvVar)
+	candidateSessionID := flag.String("candidate-session-id", "", "Session id sent as the openai-compat session header on every candidate request; required by some hosted endpoints; empty sends no header")
 	corpusManifestPath := flag.String("corpus-manifest", "", "Path to a corpus manifest JSONL (partition/category per trace); enables partition-separated reporting")
 	corpusPartitions := flag.String("corpus-partitions", "", "Comma-separated partitions to include from the corpus manifest (natural, challenge, judge-validation; empty = all)")
 	corpusCategories := flag.String("corpus-categories", "", "Comma-separated categories to include from the corpus manifest (empty = all)")
@@ -127,6 +136,9 @@ func main() {
 	})
 
 	ct := resolveCandidateTransportConfig(*candidateBaseURL, *candidateAPIKey, os.Getenv)
+	if err := validateCandidateSessionID(*candidateSessionID); err != nil {
+		log.Fatalf("llm-bench: %v", err)
+	}
 
 	modes := 0
 	if *capture {
@@ -180,11 +192,20 @@ func main() {
 	if *assemblyBuildPath != "" {
 		modes++
 	}
+	if *injectionBuildPath != "" {
+		modes++
+	}
+	if *injectionReport {
+		modes++
+	}
 	if *replayAttempt {
 		modes++
 	}
 	if modes > 1 {
-		log.Fatalf("llm-bench: -capture, -calibrate-capture, -calibrate, -manual-report, -paired-report, -assembly-report, -fim-latency, -blind-render, -blind-ingest, -fc-render, -fc-ingest, -fc-sidemap-generate, -adjudicate-render, -adjudicate-ingest, -discrimination-report, -import-xlam, -assembly-build, -replay-attempt are mutually exclusive")
+		log.Fatalf("llm-bench: -capture, -calibrate-capture, -calibrate, -manual-report, -paired-report, -assembly-report, -fim-latency, -blind-render, -blind-ingest, -fc-render, -fc-ingest, -fc-sidemap-generate, -adjudicate-render, -adjudicate-ingest, -discrimination-report, -import-xlam, -assembly-build, -build-injection-corpus, -injection-report, -replay-attempt are mutually exclusive")
+	}
+	if providedFlags["registration"] && !*calibrateCapture && !*injectionReport {
+		log.Fatalf("llm-bench: -registration requires -calibrate-capture or -injection-report")
 	}
 	if !*replayAttempt {
 		if stray := strayAttemptFlags(providedFlags); len(stray) > 0 {
@@ -209,6 +230,7 @@ func main() {
 			Models:     *modelsArg,
 			BaseURL:    ct.baseURL,
 			APIKey:     ct.apiKey,
+			SessionID:  *candidateSessionID,
 			Timeout:    *timeout,
 		}, os.Stderr)
 		cancel()
@@ -218,6 +240,13 @@ func main() {
 	if *assemblyBuildPath != "" {
 		if err := assemblyBuildDispatch(ctx, *assemblyBuildPath, *assemblyOut, *assemblyOutMixed); err != nil {
 			log.Fatalf("llm-bench: assembly-build: %v", err)
+		}
+		return
+	}
+
+	if *injectionBuildPath != "" {
+		if err := buildInjectionCorpus(ctx, *injectionBuildPath, *injectionOut); err != nil {
+			log.Fatalf("llm-bench: build-injection-corpus: %v", err)
 		}
 		return
 	}
@@ -288,8 +317,9 @@ func main() {
 		}
 		// The artifacts output (and its manifest sibling) must never clobber
 		// a trace input.
-		refuseOutputAlias("calibrate-capture", "-labels-out", *labelsOut, pathListInputs("-traces", tracePaths))
-		refuseOutputAlias("calibrate-capture", "-labels-out capture manifest", captureManifestPath(*labelsOut), pathListInputs("-traces", tracePaths))
+		captureInputs := append(pathListInputs("-traces", tracePaths), [2]string{"-registration", *registrationPath})
+		refuseOutputAlias("calibrate-capture", "-labels-out", *labelsOut, captureInputs)
+		refuseOutputAlias("calibrate-capture", "-labels-out capture manifest", captureManifestPath(*labelsOut), captureInputs)
 		// ... and the two outputs must differ from EACH OTHER (round-2 review
 		// P1): a pre-existing hardlink/symlink between <labels-out> and its
 		// .manifest.json sibling would leave the artifacts path holding the
@@ -309,7 +339,31 @@ func main() {
 			OpenAICompatBaseURL: ct.baseURL,
 			OpenAICompatAPIKey:  ct.apiKey,
 			Timeout:             *timeout,
+			CandidateSessionID:  *candidateSessionID,
 			Scorer:              &CaptureScorer{},
+		}
+		var registrationDigest string
+		var injectionTemps map[string]float64
+		if anyInjectionTrace(traces) {
+			if strings.TrimSpace(*registrationPath) == "" {
+				log.Fatalf("llm-bench: -calibrate-capture over injection traces requires -registration")
+			}
+			reg, digest, err := loadInjectionRegistration(*registrationPath)
+			if err != nil {
+				log.Fatalf("llm-bench: calibrate-capture: %v", err)
+			}
+			decoding, err := reg.bindCapture(traces, targets)
+			if err != nil {
+				log.Fatalf("llm-bench: calibrate-capture: %v", err)
+			}
+			runner.InjectionDecoding = decoding
+			registrationDigest = digest
+			injectionTemps = make(map[string]float64, len(decoding))
+			for sel, d := range decoding {
+				injectionTemps[sel] = *d.Options.Temperature // providerOptions always sets it
+			}
+		} else if strings.TrimSpace(*registrationPath) != "" {
+			log.Fatalf("llm-bench: -registration applies only to injection traces")
 		}
 		// Model digests feed assembly-artifact capture provenance only, so
 		// resolution (an /api/show round-trip per ollama target) is skipped
@@ -319,13 +373,15 @@ func main() {
 			modelDigests = resolveCaptureModelDigests(ctx, *ollamaURL, targets)
 		}
 		if err := runCalibrateCapture(ctx, calibrateCaptureOptions{
-			Runner:              runner,
-			Targets:             targets,
-			Traces:              traces,
-			OutputPath:          *labelsOut,
-			ModelDigests:        modelDigests,
-			OllamaURL:           *ollamaURL,
-			OpenAICompatBaseURL: ct.baseURL,
+			Runner:                runner,
+			Targets:               targets,
+			Traces:                traces,
+			OutputPath:            *labelsOut,
+			ModelDigests:          modelDigests,
+			OllamaURL:             *ollamaURL,
+			OpenAICompatBaseURL:   ct.baseURL,
+			RegistrationDigest:    registrationDigest,
+			InjectionTemperatures: injectionTemps,
 		}); err != nil {
 			log.Fatalf("llm-bench: calibrate-capture: %v", err)
 		}
@@ -465,6 +521,41 @@ func main() {
 			log.Fatalf("llm-bench: write assembly report: %v", err)
 		}
 		fmt.Fprintf(os.Stderr, "llm-bench: assembly report written to %s\n", *reportPath)
+		return
+	}
+
+	if *injectionReport {
+		var captures []string
+		for _, c := range strings.Split(*capturesFlag, ",") {
+			if c = strings.TrimSpace(c); c != "" {
+				captures = append(captures, c)
+			}
+		}
+		if len(captures) == 0 || strings.TrimSpace(*registrationPath) == "" {
+			log.Fatalf("llm-bench: -injection-report requires -captures and -registration")
+		}
+		inputs := [][2]string{{"-registration", *registrationPath}, {"-injection-adjudications", *injectionAdjudications}}
+		inputs = append(inputs, pathListInputs("-captures", captures)...)
+		for _, c := range captures {
+			inputs = append(inputs, [2]string{"-captures manifest", captureManifestPath(c)})
+		}
+		refuseReportAlias("injection-report", *reportPath, inputs)
+		report, err := runInjectionReport(injectionReportOptions{
+			RegistrationPath: *registrationPath,
+			Captures:         captures,
+			Adjudications:    *injectionAdjudications,
+		})
+		if err != nil {
+			log.Fatalf("llm-bench: %v", err)
+		}
+		if *reportPath == "" {
+			fmt.Print(report)
+			return
+		}
+		if err := writeInjectionReport(*reportPath, report); err != nil {
+			log.Fatalf("llm-bench: write injection report: %v", err)
+		}
+		fmt.Fprintf(os.Stderr, "llm-bench: injection report written to %s\n", *reportPath)
 		return
 	}
 
@@ -890,6 +981,9 @@ func main() {
 	if err != nil {
 		log.Fatalf("llm-bench: load traces: %v", err)
 	}
+	if anyInjectionTrace(traces) {
+		log.Fatalf("llm-bench: injection traces require -calibrate-capture with -registration, then -injection-report")
+	}
 
 	var corpusData *corpusReportData
 	if strings.TrimSpace(*corpusManifestPath) != "" {
@@ -968,6 +1062,7 @@ func main() {
 		OpenAICompatBaseURL: ct.baseURL,
 		OpenAICompatAPIKey:  ct.apiKey,
 		Timeout:             *timeout,
+		CandidateSessionID:  *candidateSessionID,
 		Scorer:              scorer,
 	}
 
@@ -1176,6 +1271,20 @@ func defaultJudgeCachePath() string {
 		return ""
 	}
 	return filepath.Join(base, "go-llm", "judge-cache.db")
+}
+
+// validateCandidateSessionID refuses a -candidate-session-id that would not
+// travel as typed: surrounding spaces or tabs (a paste error that changes the
+// session) or any control character (net/http refuses it as a header value,
+// which would read as a candidate connection failure on every request).
+func validateCandidateSessionID(id string) error {
+	if strings.Trim(id, " \t") != id {
+		return errors.New("-candidate-session-id has leading or trailing whitespace")
+	}
+	if strings.ContainsFunc(id, unicode.IsControl) {
+		return errors.New("-candidate-session-id contains a control character")
+	}
+	return nil
 }
 
 // validateCaptureSampleAndLimit rejects the case where both flags are

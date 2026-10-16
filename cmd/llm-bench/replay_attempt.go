@@ -46,6 +46,7 @@ type replayAttemptOptions struct {
 	Models     string
 	BaseURL    string
 	APIKey     string
+	SessionID  string // -candidate-session-id; empty sends no session header
 	Timeout    time.Duration
 
 	publisher *attemptPublisher // nil: newAttemptPublisher(AttemptDir)
@@ -221,7 +222,7 @@ func executeAttempt(parent context.Context, opts replayAttemptOptions, trace Tra
 		return replayOutput{}, nil, &attemptError{Code: attemptCodeInput, Stage: attemptStageInput, Message: attemptErrorMessage(attemptCodeInput)}
 	}
 	ctx, cancel := context.WithTimeoutCause(parent, opts.Timeout, errAttemptTimeout)
-	out, err := replayWith(ctx, transport.chat, target.Model, trace, replayOptions{})
+	out, err := replayWith(ctx, transport.chat, target.Model, trace, replayOptions{SessionID: opts.SessionID})
 	// Captured before cancel(): afterwards an unexpired context reports
 	// context.Canceled, which would read as a signal.
 	cause := context.Cause(ctx)
@@ -304,6 +305,11 @@ func loadAttemptInputs(opts replayAttemptOptions, rec *attemptRecord) (Trace, Mo
 	}
 	if err := validateTrace(trace); err != nil {
 		return Trace{}, ModelTarget{}, fmt.Errorf("trace %q: %w", trace.ID, err)
+	}
+	if trace.Injection != nil {
+		// #452 plan-review cut: injection traces run through -calibrate-capture
+		// (manifest v3); attempt.json v1 has no injection replay kind.
+		return Trace{}, ModelTarget{}, fmt.Errorf("injection traces are not supported by -replay-attempt; use -calibrate-capture")
 	}
 	kind := "scripted"
 	if prefilledAssemblyMode(trace) {

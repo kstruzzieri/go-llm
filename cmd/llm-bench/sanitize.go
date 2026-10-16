@@ -58,7 +58,8 @@ func redactString(s string) string {
 // failure" without leaking host/path/internal details.
 func redactErrorMessage(s string) string {
 	switch {
-	case strings.Contains(s, "context deadline exceeded") || strings.Contains(s, "timeout"):
+	// net/http reports its own client timeout as "Client.Timeout exceeded".
+	case strings.Contains(s, "context deadline exceeded") || strings.Contains(s, "timeout") || strings.Contains(s, "Client.Timeout"):
 		return "<error: timeout>"
 	case strings.Contains(s, "connection refused") || strings.Contains(s, "no such host") || strings.Contains(s, "dial "):
 		return "<error: network>"

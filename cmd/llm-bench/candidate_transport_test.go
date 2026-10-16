@@ -400,3 +400,26 @@ func TestOpenAICompatCandidateClient_StripsInlineThinkTags(t *testing.T) {
 		t.Errorf("Thinking = %q; want the stripped reasoning captured rather than dropped", resp.Thinking)
 	}
 }
+
+func TestCandidateHTTPClientDefaultTimeout(t *testing.T) {
+	if got := candidateHTTPClient(candidateTransportOptions{}).Timeout; got != 5*time.Minute {
+		t.Fatalf("zero timeout -> %v; want the provider default 5m0s", got)
+	}
+	if got := candidateHTTPClient(candidateTransportOptions{timeout: 7 * time.Second}).Timeout; got != 7*time.Second {
+		t.Fatalf("positive timeout -> %v; want 7s", got)
+	}
+}
+
+func TestOllamaCandidateRefusesRawCalls(t *testing.T) {
+	var hits int
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { hits++ }))
+	t.Cleanup(srv.Close)
+	c := ollamaCandidateClient{client: ollama.NewClient(ollama.WithBaseURL(srv.URL))}
+	_, err := c.Chat(context.Background(), candidateChatRequest{ChatRequest: ollama.ChatRequest{Model: "m"}, KeepRawCalls: true})
+	if err == nil || !strings.Contains(err.Error(), "injection traces require the openai-compat transport") {
+		t.Fatalf("err = %v; want the fail-closed refusal", err)
+	}
+	if hits != 0 {
+		t.Fatalf("%d requests sent; the refusal must precede the wire", hits)
+	}
+}
