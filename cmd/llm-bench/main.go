@@ -14,6 +14,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -23,6 +24,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode"
 
 	"github.com/kstruzzieri/go-llm/config"
 	"github.com/kstruzzieri/go-llm/ollama"
@@ -134,6 +136,9 @@ func main() {
 	})
 
 	ct := resolveCandidateTransportConfig(*candidateBaseURL, *candidateAPIKey, os.Getenv)
+	if err := validateCandidateSessionID(*candidateSessionID); err != nil {
+		log.Fatalf("llm-bench: %v", err)
+	}
 
 	modes := 0
 	if *capture {
@@ -222,6 +227,7 @@ func main() {
 			Models:     *modelsArg,
 			BaseURL:    ct.baseURL,
 			APIKey:     ct.apiKey,
+			SessionID:  *candidateSessionID,
 			Timeout:    *timeout,
 		}, os.Stderr)
 		cancel()
@@ -1262,6 +1268,20 @@ func defaultJudgeCachePath() string {
 		return ""
 	}
 	return filepath.Join(base, "go-llm", "judge-cache.db")
+}
+
+// validateCandidateSessionID refuses a -candidate-session-id that would not
+// travel as typed: surrounding spaces or tabs (a paste error that changes the
+// session) or any control character (net/http refuses it as a header value,
+// which would read as a candidate connection failure on every request).
+func validateCandidateSessionID(id string) error {
+	if strings.Trim(id, " \t") != id {
+		return errors.New("-candidate-session-id has leading or trailing whitespace")
+	}
+	if strings.ContainsFunc(id, unicode.IsControl) {
+		return errors.New("-candidate-session-id contains a control character")
+	}
+	return nil
 }
 
 // validateCaptureSampleAndLimit rejects the case where both flags are

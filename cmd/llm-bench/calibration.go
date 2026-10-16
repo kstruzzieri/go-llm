@@ -888,6 +888,12 @@ func readCaptureManifestV3(path string) (captureManifest, error) {
 	if err != nil {
 		return captureManifest{}, fmt.Errorf("capture-manifest: read %q: %w", path, err)
 	}
+	return decodeCaptureManifestV3(path, raw)
+}
+
+// decodeCaptureManifestV3 is readCaptureManifestV3 over bytes already read,
+// so a caller can digest exactly the bytes it validated.
+func decodeCaptureManifestV3(path string, raw []byte) (captureManifest, error) {
 	var m captureManifest
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
@@ -1207,6 +1213,11 @@ func runCalibrateCapture(ctx context.Context, opts calibrateCaptureOptions) erro
 		if c.res != nil {
 			return fmt.Errorf("calibrate-capture: duplicate result for %s/%s", r.TraceID, r.Model)
 		}
+		if interrupted != nil && isCtxErr(r.Err) {
+			// The cancellation cut this cell off mid-flight: it never finished,
+			// so it stays unattempted (and gap-fillable), not failed.
+			continue
+		}
 		c.res = r
 		c.attempts = 1
 		if r.Err != nil {
@@ -1293,7 +1304,8 @@ func runCalibrateCapture(ctx context.Context, opts calibrateCaptureOptions) erro
 		switch {
 		case c.res == nil && c.attempts == 0:
 			// Only reachable on an interrupted injection capture: the cell was
-			// never run, which is not the same as a run that failed.
+			// never run, or the cancellation cut it off before it finished,
+			// which is not the same as a run that failed.
 			row.Status = "unattempted"
 		case c.res == nil:
 			// The runner returned no Result for this cell on either attempt.

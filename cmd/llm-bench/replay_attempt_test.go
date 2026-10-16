@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -1394,5 +1395,31 @@ func TestReplayAttemptRefusesInjectionTrace(t *testing.T) {
 	}
 	if want := "llm-bench: replay-attempt: injection traces are not supported by -replay-attempt; use -calibrate-capture\n"; stderr != want {
 		t.Fatalf("stderr %q, want %q", stderr, want)
+	}
+}
+
+// -candidate-session-id reaches the wire on -replay-attempt exactly as on
+// runOne and -calibrate-capture; empty sends no header at all.
+func TestReplayAttempt_SessionIDReachesHeader(t *testing.T) {
+	for _, id := range []string{"llmb-452-test", ""} {
+		t.Run("id="+id, func(t *testing.T) {
+			var present bool
+			var value string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, present = r.Header["X-Opencode-Session"]
+				value = r.Header.Get("x-opencode-session")
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(compatText("ok", "")))
+			}))
+			t.Cleanup(srv.Close)
+			opts := attemptTestOptions(t, srv.URL, fixtureSmokeTrace)
+			opts.SessionID = id
+			if code, rec := runAttempt(t, context.Background(), opts); code != 0 || rec.Status != attemptStatusCompleted {
+				t.Fatalf("exit %d status %q error %+v", code, rec.Status, rec.Error)
+			}
+			if present != (id != "") || value != id {
+				t.Fatalf("x-opencode-session present=%v value=%q; want present=%v value=%q", present, value, id != "", id)
+			}
+		})
 	}
 }

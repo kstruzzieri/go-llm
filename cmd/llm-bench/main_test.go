@@ -931,3 +931,15 @@ func TestOfflineCorpusFilter_PassesSourcesThrough(t *testing.T) {
 		t.Fatalf("selection keeps %v; want [a] (round3 source only)", keep)
 	}
 }
+
+func TestValidateCandidateSessionID(t *testing.T) {
+	for id, ok := range map[string]bool{
+		"": true, "llmb-452-pr1": true, "a b": true,
+		" a": false, "a ": false, "\ta": false, "a\t": false,
+		"a\nb": false, "a\x7fb": false, "a\u0085b": false,
+	} {
+		if err := validateCandidateSessionID(id); (err == nil) != ok {
+			t.Errorf("validateCandidateSessionID(%q) = %v; want ok=%v", id, err, ok)
+		}
+	}
+}

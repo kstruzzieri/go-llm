@@ -46,6 +46,7 @@ type replayAttemptOptions struct {
 	Models     string
 	BaseURL    string
 	APIKey     string
+	SessionID  string // -candidate-session-id; empty sends no session header
 	Timeout    time.Duration
 
 	publisher *attemptPublisher // nil: newAttemptPublisher(AttemptDir)
@@ -221,7 +222,7 @@ func executeAttempt(parent context.Context, opts replayAttemptOptions, trace Tra
 		return replayOutput{}, nil, &attemptError{Code: attemptCodeInput, Stage: attemptStageInput, Message: attemptErrorMessage(attemptCodeInput)}
 	}
 	ctx, cancel := context.WithTimeoutCause(parent, opts.Timeout, errAttemptTimeout)
-	out, err := replayWith(ctx, transport.chat, target.Model, trace, replayOptions{})
+	out, err := replayWith(ctx, transport.chat, target.Model, trace, replayOptions{SessionID: opts.SessionID})
 	// Captured before cancel(): afterwards an unexpired context reports
 	// context.Canceled, which would read as a signal.
 	cause := context.Cause(ctx)
