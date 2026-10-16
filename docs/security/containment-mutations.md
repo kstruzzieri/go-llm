@@ -2,13 +2,13 @@
 
 Each entry proves one security property's assertions can fail. Entries are point-in-time evidence at their baseline revision.
 
-Platform: every proof in this ledger ran on darwin (arm64, go1.27.1) unless its entry's `Platform:` line names another; none has run on Linux or Windows yet. The plan is a Linux re-stamp at the rebase onto the model-resistance PR: re-run every entry on a Linux host (Docker `ci-local` or the GitHub runner), record that revision as each entry's baseline, and add `linux` to its `Platform:` line.
+Platform: every proof in this ledger ran on darwin (arm64, go1.27.1). After the rebase onto the model-resistance PR, the entries whose patches touch build-tagged or platform-sensitive code (M-005 to M-008, the unix path walks; M-009 and M-014 to M-018, the host exec path; M-011, the MCP stdio child environment) were re-run on Linux (arm64, go1.27.1, the Docker `ci-local` image) at their baseline: each entry's `Platform:` line records the result, and a Linux line that differs would be recorded beside the darwin evidence, never in place of it. M-010 (it needs an AgentFlow source checkout) and M-012 (Seatbelt is darwin-native) were not re-run on Linux, and no entry has run on Windows.
 
-Every entry below was run at `317d351a` on a darwin host (the two attack-only variants added in review, M-045 B and M-047 B, at `9db725e7`, whose production and scenario trees are identical; M-051 to M-053 at the commit that adds them, whose parent is `be03ef59`; M-054 to M-058 at the commit that adds them, whose parent is `12b63eb0`; M-059 at the commit that adds it, whose parent is `1390239b`): the baseline passed, the mutant failed as shown, and the tree was restored with `git checkout` and passed again. Entries quote test output, the containment judge's message text and line numbers included, as it read at their baseline; later wording changes do not rewrite them. Entries carried over from the PR 2 delivery record name the draft entry they were first recorded as; they were re-run here so every command, diff and line number matches one revision. Apply a patch with `git apply`, run the command, then restore with `git checkout -- <file>`. `guard` entries remove or weaken the protection the refs assert. `effect-detection` entries change the effect path of an uncontained scenario: they show its probe can read a change in outcome, not that a guard is absent. Rows exempt from this ledger (pending, out-of-scope, unobserved such as ENV-BWRAP, whose native bwrap profile needs a Linux host, and administrative META- rows; the inventory lint allows no other verified or uncontained row an exemption) carry their exempt reason in the inventory (`docs/security/containment-inventory.json`, rendered in `docs/security/containment-inventory.md`).
+Every entry below was run at `a6114bff` on a darwin host (the two attack-only variants added in review, M-045 B and M-047 B, at `34b2ff38`, whose production and scenario trees are identical; M-051 to M-053 at `731f2d1d`, the commit that adds them; M-054 to M-058 at `3d423ce1`, the commit that adds them; M-059 at `1166b276`, the commit that adds it): the baseline passed, the mutant failed as shown, and the tree was restored with `git checkout` and passed again. Entries quote test output, the containment judge's message text and line numbers included, as it read at their baseline; later wording changes do not rewrite them. Entries carried over from the PR 2 delivery record name the draft entry they were first recorded as; they were re-run here so every command, diff and line number matches one revision. Apply a patch with `git apply`, run the command, then restore with `git checkout -- <file>`. `guard` entries remove or weaken the protection the refs assert. `effect-detection` entries change the effect path of an uncontained scenario: they show its probe can read a change in outcome, not that a guard is absent. Rows exempt from this ledger (pending, out-of-scope, unobserved such as ENV-BWRAP, whose native bwrap profile needs a Linux host, and administrative META- rows; the inventory lint allows no other verified or uncontained row an exemption) carry their exempt reason in the inventory (`docs/security/containment-inventory.json`, rendered in `docs/security/containment-inventory.md`).
 
 ## M-001 — Absolute paths are rejected by the workspace path cleaner
 - Affected refs: PATH-ABS: `TestHardeningContracts/Active/Workspace/confinement_and_arguments/public_confinement/owned_absolute_sibling`, `TestWorkspaceCleanRelContainment/absolute_escape`, `TestContainment/W1`
-- Baseline: `317d351a`; first recorded as PR2-T2-1 (Task 2, 6c611c8e)
+- Baseline: `a6114bff`; first recorded as PR2-T2-1 (Task 2, 266cea9f)
 - Profile / command: darwin-host / `go test -count=1 -run '^TestHardeningContracts$/^Active$/^Workspace$/^confinement_and_arguments$/^public_confinement$/^owned_absolute_sibling$' ./agent`; `go test -count=1 -run '^TestWorkspaceCleanRelContainment$/^absolute_escape$' ./agent/tools`; `go test -count=1 -run '^TestContainment$/^W1$' ./cmd/golem`
 - Patch:
   ```diff
@@ -31,7 +31,7 @@ Every entry below was run at `317d351a` on a darwin host (the two attack-only va
 
 ## M-002 — A `..` traversal out of the workspace is rejected
 - Affected refs: PATH-DOTDOT: `TestHardeningContracts/Active/Workspace/confinement_and_arguments/public_confinement/shared_prefix_relative_escape`, `TestWorkspaceCleanRelContainment/parent_escape`, `TestWorkspaceCleanRelContainment/midpath_escape`, `TestContainment/W2`
-- Baseline: `317d351a`
+- Baseline: `a6114bff`
 - Profile / command: darwin-host / `go test -count=1 -run '^TestHardeningContracts$/^Active$/^Workspace$/^confinement_and_arguments$/^public_confinement$/^shared_prefix_relative_escape$' ./agent`; `go test -count=1 -run '^(TestWorkspaceCleanRelContainment|TestWorkspaceUnderRootPrefixSibling)$' ./agent/tools`; `go test -count=1 -run '^TestContainment$' ./cmd/golem`
 - Patch:
   ```diff
@@ -54,7 +54,7 @@ Every entry below was run at `317d351a` on a darwin host (the two attack-only va
 
 ## M-003 — A path containing a NUL byte is rejected
 - Affected refs: PATH-NUL: `TestHardeningContracts/Active/Workspace/confinement_and_arguments/public_confinement/nul_byte`, `TestWorkspaceCleanRelContainment/nul_byte`
-- Baseline: `317d351a`; first recorded as PR2-T10-1 (Task 10, 25362035)
+- Baseline: `a6114bff`; first recorded as PR2-T10-1 (Task 10, 64d96198)
 - Profile / command: darwin-host / `go test -count=1 -run '^TestHardeningContracts$/^Active$/^Workspace$/^confinement_and_arguments$/^public_confinement$/^nul_byte$' ./agent`; `go test -count=1 -run '^TestWorkspaceCleanRelContainment$/^nul_byte$' ./agent/tools`
 - Patch:
   ```diff
@@ -77,7 +77,7 @@ Every entry below was run at `317d351a` on a darwin host (the two attack-only va
 
 ## M-004 — A sibling sharing the root's name prefix is outside the workspace
 - Affected refs: PATH-SEPPREFIX: `TestHardeningContracts/Active/Workspace/confinement_and_arguments/public_confinement/shared_prefix_relative_escape`, `TestWorkspaceUnderRootPrefixSibling`
-- Baseline: `317d351a`
+- Baseline: `a6114bff`
 - Profile / command: darwin-host / `go test -count=1 -run '^TestHardeningContracts$/^Active$/^Workspace$/^confinement_and_arguments$/^public_confinement$/^shared_prefix_relative_escape$' ./agent`; `go test -count=1 -run '^(TestWorkspaceUnderRootPrefixSibling|TestWorkspaceCleanRelContainment)$' ./agent/tools`
 - Patch:
   ```diff
@@ -100,7 +100,8 @@ Every entry below was run at `317d351a` on a darwin host (the two attack-only va
 
 ## M-005 — A symlinked ancestor directory is never followed
 - Affected refs: PATH-SYMLINK-ANCESTOR: `TestHardeningContracts/Active/Workspace/confinement_and_arguments/public_confinement/symlink_ancestor`, `TestResolveFileRejectsIntermediateSymlink`, `TestWriteFileAtomicRejectsSymlinkAncestor`, `TestContainment/W3`
-- Baseline: `317d351a`
+- Baseline: `a6114bff`
+- Platform: darwin; linux (re-run at `a6114bff`: same)
 - Profile / command: darwin-host / `go test -count=1 -run '^TestHardeningContracts$/^Active$/^Workspace$/^confinement_and_arguments$/^public_confinement$/^symlink_(ancestor|leaf)$' ./agent`; `go test -count=1 -run '^(TestResolveFileRejectsIntermediateSymlink|TestWriteFileAtomicRejectsSymlinkAncestor|TestResolveFileRejectsSymlinkAndKind|TestWriteFileAtomicRejectsSymlinkLeaf)$' ./agent/tools`; `go test -count=1 -run '^TestContainment$/^W3$' ./cmd/golem`
 - Patch:
   ```diff
@@ -147,7 +148,8 @@ Every entry below was run at `317d351a` on a darwin host (the two attack-only va
 
 ## M-006 — A symlink as the final path component is never followed
 - Affected refs: PATH-SYMLINK-FINAL: `TestHardeningContracts/Active/Workspace/confinement_and_arguments/public_confinement/symlink_leaf`, `TestResolveFileRejectsSymlinkAndKind`, `TestWriteFileAtomicRejectsSymlinkLeaf`
-- Baseline: `317d351a`
+- Baseline: `a6114bff`
+- Platform: darwin; linux (re-run at `a6114bff`: same)
 - Profile / command: darwin-host / `go test -count=1 -run '^TestHardeningContracts$/^Active$/^Workspace$/^confinement_and_arguments$/^public_confinement$/^symlink_(ancestor|leaf)$' ./agent`; `go test -count=1 -run '^(TestResolveFileRejectsIntermediateSymlink|TestWriteFileAtomicRejectsSymlinkAncestor|TestResolveFileRejectsSymlinkAndKind|TestWriteFileAtomicRejectsSymlinkLeaf)$' ./agent/tools`; `go test -count=1 -run '^TestContainment$/^W3$' ./cmd/golem`
 - Patch:
   ```diff
@@ -194,7 +196,8 @@ Every entry below was run at `317d351a` on a darwin host (the two attack-only va
 
 ## M-007 — A directory swapped after the scope guard decided fails closed for read and list
 - Affected refs: PATH-TOCTOU-READ: `TestWorkspacePinnedDuringPolicy/read`, `TestWorkspacePinnedDuringPolicy/list`
-- Baseline: `317d351a`
+- Baseline: `a6114bff`
+- Platform: darwin; linux (re-run at `a6114bff`: same)
 - Profile / command: darwin-host / `go test -count=1 -run '^TestWorkspacePinnedDuringPolicy$' ./agent/tools`
 - Patch:
   ```diff
@@ -217,7 +220,8 @@ Every entry below was run at `317d351a` on a darwin host (the two attack-only va
 
 ## M-008 — Workspace mutations stay anchored to the pinned parent descriptor
 - Affected refs: MUT-WRITE: the 18 `TestMutationParentCapability/<outside|denied>/<directory|symlink|moved>/<before-temp|after-temp|before-rename>` leaves; MUT-DELETE: the 6 `.../before-remove` leaves; MUT-CLEANUP: the 6 `.../before-cleanup` leaves
-- Baseline: `317d351a`
+- Baseline: `a6114bff`
+- Platform: darwin; linux (re-run at `a6114bff`: same; all 30 leaves, the same lines; temporary paths differ)
 - Profile / command: darwin-host / `go test -count=1 -run '^TestMutationParentCapability$' ./agent/tools`
 - Patch:
   ```diff
@@ -302,7 +306,8 @@ Every entry below was run at `317d351a` on a darwin host (the two attack-only va
 
 ## M-009 — The host exec child environment is exactly the allowlist
 - Affected refs: ENV-EXACT-HOST: `TestContainment/E1`
-- Baseline: `317d351a`; first recorded as PR2-T4-1 (Task 4, cf3c95f6)
+- Baseline: `a6114bff`; first recorded as PR2-T4-1 (Task 4, a800f8cd)
+- Platform: darwin; linux (re-run at `a6114bff`: same)
 - Profile / command: darwin-host / `go test -count=1 -run '^TestContainment$' ./cmd/golem`
 - Patch:
   ```diff
@@ -324,7 +329,7 @@ Every entry below was run at `317d351a` on a darwin host (the two attack-only va
 
 ## M-010 — Agentflow children receive only the baseline and approved environment
 - Affected refs: ENV-AGENTFLOW: `TestBuildChildEnv/baseline_forwarded_when_set,_unrelated_names_dropped`, `TestAgentflowEnv_RealCLI_GateSeesOnlyThePolicy`
-- Baseline: `317d351a`
+- Baseline: `a6114bff`
 - Profile / command: agentflow-integration / `AGENTFLOW_SRC="$AGENTFLOW_SRC" GO_LLM_REQUIRE_AGENTFLOW=source go test -count=1 -tags agentflow_integration -run '^(TestBuildChildEnv|TestAgentflowEnv_RealCLI_GateSeesOnlyThePolicy)$' ./agentflow`
 - Patch:
   ```diff
@@ -347,7 +352,8 @@ Every entry below was run at `317d351a` on a darwin host (the two attack-only va
 
 ## M-011 — An MCP stdio server child receives only the policy environment
 - Affected refs: ENV-MCPSTDIO: `TestStdioServerReceivesOnlyPolicyEnvironment`
-- Baseline: `317d351a`
+- Baseline: `a6114bff`
+- Platform: darwin; linux (re-run at `a6114bff`: same; the listed names are the container environment's, elided here as on darwin)
 - Profile / command: darwin-host / `go test -count=1 -run '^TestStdioServerReceivesOnlyPolicyEnvironment$' ./mcpclient`
 - Patch:
   ```diff
@@ -370,7 +376,7 @@ Every entry below was run at `317d351a` on a darwin host (the two attack-only va
 
 ## M-012 — The Seatbelt backend replaces every inherited TMPDIR with the private directory
 - Affected refs: ENV-SEATBELT: `TestSeatbeltChildEnvReplacesTMPDIR`, `TestSeatbeltRunHostileAmbientTMPDIR/volume_root`, `TestSeatbeltRunHostileAmbientTMPDIR/home`
-- Baseline: `317d351a`
+- Baseline: `a6114bff`
 - Profile / command: seatbelt / `GO_LLM_REQUIRE_SEATBELT=1 go test -count=1 -run '^(TestSeatbeltChildEnvReplacesTMPDIR|TestSeatbeltRunHostileAmbientTMPDIR)$' ./agent/tools`
 - Patch:
   ```diff
@@ -393,7 +399,7 @@ Every entry below was run at `317d351a` on a darwin host (the two attack-only va
 
 ## M-013 — Terminal previews and streamed output render control sequences inert
 - Affected refs: TERM-PREVIEW: `TestApproverGrantPreviewNeutralizesTerminalControls/diff`, `/exec`, `TestApproverBackgroundPreviewsNeutralizeTerminalControls/start`, `/stop`; TERM-STREAM: `TestRendererTerminalTokenQuotesOSC52WithoutColor`, `TestRendererSynchronizedTerminalQuotesModelOutput`, `TestRendererTerminalToolResultQuotesPreviewControls`
-- Baseline: `317d351a`
+- Baseline: `a6114bff`
 - Profile / command: darwin-host / `go test -count=1 -run '^(TestApproverGrantPreviewNeutralizesTerminalControls|TestApproverBackgroundPreviewsNeutralizeTerminalControls|TestRendererTerminalTokenQuotesOSC52WithoutColor|TestRendererSynchronizedTerminalQuotesModelOutput|TestRendererTerminalToolResultQuotesPreviewControls)$' ./cmd/golem`
 - Patch:
   ```diff
@@ -416,7 +422,8 @@ Every entry below was run at `317d351a` on a darwin host (the two attack-only va
 
 ## M-014 — The exec fingerprint covers the argv elements
 - Affected refs: FP-ARGV: `TestContainment/X2a`
-- Baseline: `317d351a`; first recorded as PR2-T3-5 (Task 3, 7b015d2e)
+- Baseline: `a6114bff`; first recorded as PR2-T3-5 (Task 3, 13c57209)
+- Platform: darwin; linux (re-run at `a6114bff`: same)
 - Profile / command: darwin-host / `go test -count=1 -run '^TestContainment$' ./cmd/golem`
 - Patch:
   ```diff
@@ -439,7 +446,8 @@ Every entry below was run at `317d351a` on a darwin host (the two attack-only va
 
 ## M-015 — The exec fingerprint covers the working directory value
 - Affected refs: FP-CWD: `TestContainment/X2b`
-- Baseline: `317d351a`; first recorded as PR2-T3-1 (Task 3, 7b015d2e)
+- Baseline: `a6114bff`; first recorded as PR2-T3-1 (Task 3, 13c57209)
+- Platform: darwin; linux (re-run at `a6114bff`: same)
 - Profile / command: darwin-host / `go test -count=1 -run '^TestContainment$' ./cmd/golem`
 - Patch:
   ```diff
@@ -461,7 +469,8 @@ Every entry below was run at `317d351a` on a darwin host (the two attack-only va
 
 ## M-016 — The exec fingerprint covers the sanitized NAME=value pairs
 - Affected refs: FP-ENV: `TestContainment/X2c`
-- Baseline: `317d351a`; first recorded as PR2-T3-2 (Task 3, 7b015d2e)
+- Baseline: `a6114bff`; first recorded as PR2-T3-2 (Task 3, 13c57209)
+- Platform: darwin; linux (re-run at `a6114bff`: same)
 - Profile / command: darwin-host / `go test -count=1 -run '^TestContainment$' ./cmd/golem`
 - Patch:
   ```diff
@@ -484,7 +493,8 @@ Every entry below was run at `317d351a` on a darwin host (the two attack-only va
 
 ## M-017 — The exec fingerprint covers the resolved executable path
 - Affected refs: FP-EXE-PATH: `TestContainment/X2d`
-- Baseline: `317d351a`; first recorded as PR2-T3-3 (Task 3, 7b015d2e)
+- Baseline: `a6114bff`; first recorded as PR2-T3-3 (Task 3, 13c57209)
+- Platform: darwin; linux (re-run at `a6114bff`: same)
 - Profile / command: darwin-host / `go test -count=1 -run '^TestContainment$' ./cmd/golem`
 - Patch:
   ```diff
@@ -506,7 +516,8 @@ Every entry below was run at `317d351a` on a darwin host (the two attack-only va
 
 ## M-018 — An executable swapped between Plan and Invoke fails closed
 - Affected refs: FP-PLAN-INVOKE-SWAP: `TestInvokeExecutableChangedFailsClosed`
-- Baseline: `317d351a`
+- Baseline: `a6114bff`
+- Platform: darwin; linux (re-run at `a6114bff`: same)
 - Profile / command: darwin-host / `go test -count=1 -run '^TestInvokeExecutableChangedFailsClosed$' ./agent/tools`; `go test -count=1 -run '^TestContainment$' ./cmd/golem`
 - Patch:
   ```diff
@@ -529,7 +540,7 @@ Every entry below was run at `317d351a` on a darwin host (the two attack-only va
 
 ## M-019 — X4 effect detection: a same-path executable replacement is observed
 - Affected refs: FP-EXE-SAMEPATH: `TestContainment/X4`
-- Baseline: `317d351a`
+- Baseline: `a6114bff`
 - Profile / command: darwin-host / `go test -count=1 -run '^TestContainment$' ./cmd/golem`
 - Patch:
   ```diff
@@ -552,7 +563,7 @@ Every entry below was run at `317d351a` on a darwin host (the two attack-only va
 
 ## M-020 — X3 effect detection: a rewritten granted script is observed
 - Affected refs: FP-SCRIPT-CONTENT and CMP-EDIT-EXEC: `TestContainment/X3`
-- Baseline: `317d351a`; first recorded as PR2-T3-4 for variant A (Task 3, 7b015d2e)
+- Baseline: `a6114bff`; first recorded as PR2-T3-4 for variant A (Task 3, 13c57209)
 - Profile / command: darwin-host / `go test -count=1 -run '^TestContainment$' ./cmd/golem`
 - Patch (A, v1 and v2 write elsewhere):
   ```diff
@@ -594,7 +605,7 @@ Every entry below was run at `317d351a` on a darwin host (the two attack-only va
 
 ## M-021 — MCP tool approvals are never grantable
 - Affected refs: GRANT-MCP: `TestContainment/M1`
-- Baseline: `317d351a`; first recorded as PR2-T6-2 (Task 6, 7eb20296)
+- Baseline: `a6114bff`; first recorded as PR2-T6-2 (Task 6, 5e947fca)
 - Profile / command: darwin-host / `go test -count=1 -run '^TestContainment$' ./cmd/golem`
 - Patch:
   ```diff
@@ -618,7 +629,7 @@ Every entry below was run at `317d351a` on a darwin host (the two attack-only va
 
 ## M-022 — submit_plan lock approvals are never grantable
 - Affected refs: GRANT-SUBMITPLAN: `TestContainment/P1`
-- Baseline: `317d351a`; first recorded as PR2-T6-1 (Task 6, 7eb20296)
+- Baseline: `a6114bff`; first recorded as PR2-T6-1 (Task 6, 5e947fca)
 - Profile / command: darwin-host / `go test -count=1 -run '^TestContainment$' ./cmd/golem`
 - Patch:
   ```diff
@@ -642,7 +653,7 @@ Every entry below was run at `317d351a` on a darwin host (the two attack-only va
 
 ## M-023 — A grant authorizes only its own scope and key
 - Affected refs: GRANT-VERIFY-PARTITION (A, B): the five `TestVerifyGrantsDoNotCrossAuthorize/*` leaves; GRANT-FILE-NOT-EXEC (B): `TestContainment/G1`; GRANT-EXEC-NOT-FILE (B): `TestContainment/G2`; GRANT-BG-PARTITION (B): `TestContainment/G3`
-- Baseline: `317d351a`; first recorded as PR2-T5-2 steps 2a and 2b (Task 5, 6761e11e)
+- Baseline: `a6114bff`; first recorded as PR2-T5-2 steps 2a and 2b (Task 5, 806c047d)
 - Profile / command: darwin-host / `go test -count=1 -run '^(TestVerifyGrantsDoNotCrossAuthorize|TestContainment)$' ./cmd/golem`
 - Patch (A, lookup ignores the scope):
   ```diff
@@ -687,7 +698,7 @@ Every entry below was run at `317d351a` on a darwin host (the two attack-only va
 
 ## M-024 — A foreground exec grant never authorizes a background start
 - Affected refs: GRANT-BG-PARTITION: `TestContainment/G3`
-- Baseline: `317d351a`; first recorded as PR2-T5-1 step 1b (Task 5, 6761e11e)
+- Baseline: `a6114bff`; first recorded as PR2-T5-1 step 1b (Task 5, 806c047d)
 - Profile / command: darwin-host / `go test -count=1 -run '^(TestContainment|TestVerifyGrantsDoNotCrossAuthorize)$' ./cmd/golem`
 - Patch:
   ```diff
@@ -726,7 +737,7 @@ Every entry below was run at `317d351a` on a darwin host (the two attack-only va
 
 ## M-025 — A denial is honored: a one-time approval covers exactly one call
 - Affected refs: GRANT-ONETIME: `TestContainment/A1`; CMP-EDIT-VERIFY-FRESH (A, B): `TestContainment/V2`; under A also FP-ARGV, FP-CWD, FP-ENV, FP-EXE-PATH (`X2a` to `X2d`), GRANT-FILE-NOT-EXEC (`G1`), GRANT-EXEC-NOT-FILE (`G2`), GRANT-BG-PARTITION (`G3`), GRANT-MCP (`M1`)
-- Baseline: `317d351a`; first recorded as PR2-T2-2 for variant A (Task 2, 6c611c8e)
+- Baseline: `a6114bff`; first recorded as PR2-T2-2 for variant A (Task 2, 266cea9f)
 - Profile / command: darwin-host / `go test -count=1 -run '^TestContainment$' ./cmd/golem`
 - Patch (A, the approver reads n as approval):
   ```diff
@@ -764,7 +775,7 @@ Every entry below was run at `317d351a` on a darwin host (the two attack-only va
 
 ## M-026 — With a nil approver, mounted write and exec tools fail safe
 - Affected refs: GRANT-NIL-APPROVER: `TestContainment/H1`
-- Baseline: `317d351a`; first recorded as PR2-T2-3 (Task 2, 6c611c8e)
+- Baseline: `a6114bff`; first recorded as PR2-T2-3 (Task 2, 266cea9f)
 - Profile / command: darwin-host / `go test -count=1 -run '^TestContainment$' ./cmd/golem`
 - Patch:
   ```diff
@@ -787,7 +798,7 @@ Every entry below was run at `317d351a` on a darwin host (the two attack-only va
 
 ## M-027 — A headless run mounts no write or exec tool without -allow-tool
 - Affected refs: GRANT-HEADLESS-NOAUTH: `TestAllowToolSetAuthorizesNothingWhenEmpty`, `TestFilterAllowedToolsMountsOnlyNamedPlusUngatedCompanions/#00`
-- Baseline: `317d351a`
+- Baseline: `a6114bff`
 - Profile / command: darwin-host / `go test -count=1 -run '^(TestAllowToolSetAuthorizesNothingWhenEmpty|TestFilterAllowedToolsMountsOnlyNamedPlusUngatedCompanions)$' ./cmd/golem`
 - Patch:
   ```diff
@@ -811,7 +822,7 @@ Every entry below was run at `317d351a` on a darwin host (the two attack-only va
 
 ## M-028 — Tool observations are framed under a per-request nonce
 - Affected refs: FENCE-FORGED: `TestHardeningContracts/Active/Framing/literal_bytes_and_request_nonce`
-- Baseline: `317d351a`
+- Baseline: `a6114bff`
 - Profile / command: darwin-host / `go test -count=1 -run '^TestHardeningContracts$/^Active$/^Framing$/^literal_bytes_and_request_nonce$' ./agent`
 - Patch:
   ```diff
@@ -840,7 +851,7 @@ Every entry below was run at `317d351a` on a darwin host (the two attack-only va
 
 ## M-029 — MCP tool descriptions are normalized and capped at 8 KiB
 - Affected refs: MCP-DESC-CAP: `TestContainmentMCPDescriptionCap/desc_hostile` (A, B), `TestContainmentMCPDescriptionCap/desc_multibyte` (B)
-- Baseline: `317d351a`; first recorded as PR2-T11-2 for variant A (Task 11, c01017d5)
+- Baseline: `a6114bff`; first recorded as PR2-T11-2 for variant A (Task 11, 13d4d1e1)
 - Profile / command: darwin-host / `go test -count=1 -run '^TestContainmentMCPDescriptionCap$' ./mcpclient`
 - Patch (A, the `<<<` fence opener is no longer replaced):
   ```diff
@@ -877,7 +888,7 @@ Every entry below was run at `317d351a` on a darwin host (the two attack-only va
 
 ## M-030 — MCP tool results reach the model capped at 32 KiB with a whole-rune prefix
 - Affected refs: MCP-RESULT-CAP: `TestContainmentMCPResultCap/above` (A), `TestContainmentMCPResultCap/straddle` (A, B)
-- Baseline: `317d351a`; first recorded as PR2-T11-1 and PR2-T11-3 (Task 11, c01017d5 and 829ae3bf)
+- Baseline: `a6114bff`; first recorded as PR2-T11-1 and PR2-T11-3 (Task 11, 13d4d1e1 and 70e87a8d)
 - Profile / command: darwin-host / `go test -count=1 -run '^TestContainmentMCPResultCap$' ./mcpclient`
 - Patch (A, the result cap doubled to 64 KiB):
   ```diff
@@ -915,7 +926,7 @@ Every entry below was run at `317d351a` on a darwin host (the two attack-only va
 
 ## M-031 — A changed MCP catalog is refused against its trust-on-first-use pin
 - Affected refs: MCP-TOFU: `TestHardeningContracts/Active/ZT-603_#432_MCP_description_catalog_trust`
-- Baseline: `317d351a`
+- Baseline: `a6114bff`
 - Profile / command: darwin-host / `go test -count=1 -run '^TestHardeningContracts$/^Active$/^ZT-603_#432_MCP_description_catalog_trust$' ./agent`
 - Patch:
   ```diff
@@ -938,7 +949,7 @@ Every entry below was run at `317d351a` on a darwin host (the two attack-only va
 
 ## M-032 — Project guidance reaches the model only with matching live consent
 - Affected refs: GUIDANCE-TRUST: `TestProjectTrustLiveConsentAndFreshness`, `TestProjectContextInputsUntrustedOmitsProject`
-- Baseline: `317d351a`
+- Baseline: `a6114bff`
 - Profile / command: darwin-host / `go test -count=1 -run '^(TestProjectTrustLiveConsentAndFreshness|TestProjectContextInputsUntrustedOmitsProject|TestProjectContextInputsExactNormalizedWire)$' ./cmd/golem`
 - Patch:
   ```diff
@@ -961,7 +972,7 @@ Every entry below was run at `317d351a` on a darwin host (the two attack-only va
 
 ## M-033 — Approved guidance enters the system message fenced as PROJECT_CONTEXT
 - Affected refs: GUIDANCE-SYSTEM-CONTEXT: `TestProjectContextInputsExactNormalizedWire`
-- Baseline: `317d351a`
+- Baseline: `a6114bff`
 - Profile / command: darwin-host / `go test -count=1 -run '^(TestProjectTrustLiveConsentAndFreshness|TestProjectContextInputsUntrustedOmitsProject|TestProjectContextInputsExactNormalizedWire)$' ./cmd/golem`
 - Patch:
   ```diff
@@ -984,7 +995,7 @@ Every entry below was run at `317d351a` on a darwin host (the two attack-only va
 
 ## M-034 — The zero-width detector reports raw and escaped zero-width code points
 - Affected refs: DETECT-ZW: `TestHardeningContracts/Active/Detectors/zero_width/raw`, `.../escaped`
-- Baseline: `317d351a`
+- Baseline: `a6114bff`
 - Profile / command: darwin-host / `go test -count=1 -run '^TestHardeningContracts$/^Active$/^Detectors$/^zero_width$' ./agent`
 - Patch:
   ```diff
@@ -1007,7 +1018,7 @@ Every entry below was run at `317d351a` on a darwin host (the two attack-only va
 
 ## M-035 — The encoding detector reports base64 and hex encoded instructions
 - Affected refs: DETECT-ENC: all eleven `TestHardeningContracts/Active/Detectors/encoding/*` leaves
-- Baseline: `317d351a`
+- Baseline: `a6114bff`
 - Profile / command: darwin-host / `go test -count=1 -run '^TestHardeningContracts$/^Active$/^Detectors$/^encoding$' ./agent`
 - Patch:
   ```diff
@@ -1030,7 +1041,7 @@ Every entry below was run at `317d351a` on a darwin host (the two attack-only va
 
 ## M-036 — The typoglycemia detector reports exact and scrambled instruction phrases
 - Affected refs: DETECT-TYPO: `TestHardeningContracts/Active/Detectors/typoglycemia/exact`, `/scrambled`, `/weak`, `/strong_over_weak`
-- Baseline: `317d351a`
+- Baseline: `a6114bff`
 - Profile / command: darwin-host / `go test -count=1 -run '^TestHardeningContracts$/^Active$/^Detectors$/^typoglycemia$' ./agent`
 - Patch:
   ```diff
@@ -1053,7 +1064,7 @@ Every entry below was run at `317d351a` on a darwin host (the two attack-only va
 
 ## M-037 — Secrets block all nine kinds at every origin and before dispatch
 - Affected refs: SECRETS: the nine `TestHardeningContracts/Active/Secrets/all_nine_kinds_and_origins/*` leaves and `TestHardeningContracts/Active/Secrets/output_arguments_block_before_dispatch`; CMP-READ-EXPORT-SECRETS-INLINE: `TestContainment/D3`
-- Baseline: `317d351a`
+- Baseline: `a6114bff`
 - Profile / command: darwin-host / `go test -count=1 -run '^TestHardeningContracts$/^Active$/^Secrets$' ./agent`; `go test -count=1 -run '^TestContainment$' ./cmd/golem`
 - Patch:
   ```diff
@@ -1074,7 +1085,7 @@ Every entry below was run at `317d351a` on a darwin host (the two attack-only va
 
 ## M-038 — The default interceptor chain includes Secrets
 - Affected refs: CMP-READ-EXPORT-SECRETS-INLINE: `TestContainment/D3`; PIPELINE-ORDER: `TestHardeningContracts/Active/Defaults/names_order_and_explicit_opt_in`, `TestHardeningContracts/Active/Defaults/composed_input_order_and_initial_block`; SECRETS: `TestHardeningContracts/Active/Secrets/output_arguments_block_before_dispatch`
-- Baseline: `317d351a`; first recorded as PR2-T8-1 (Task 8, 7e220ddc)
+- Baseline: `a6114bff`; first recorded as PR2-T8-1 (Task 8, 4085368c)
 - Profile / command: darwin-host / `go test -count=1 -run '^TestHardeningContracts$/^Active$/^(Pipeline|Defaults|Secrets)$' ./agent`; `go test -count=1 -run '^TestContainment$' ./cmd/golem`
 - Patch:
   ```diff
@@ -1095,7 +1106,7 @@ Every entry below was run at `317d351a` on a darwin host (the two attack-only va
 
 ## M-039 — Default argument invariants block protected paths and piped remote scripts
 - Affected refs: INVARIANTS: `TestHardeningContracts/Active/Invariants/write_git`, `/edit_ssh`, `/promote_aws`, `/read_env`, `/read_kube`, `/run_remote_script`, `/start_remote_script`, `/run_remote_script_option_form`
-- Baseline: `317d351a`
+- Baseline: `a6114bff`
 - Profile / command: darwin-host / `go test -count=1 -run '^TestHardeningContracts$/^Active$/^Invariants$' ./agent`
 - Patch:
   ```diff
@@ -1118,7 +1129,7 @@ Every entry below was run at `317d351a` on a darwin host (the two attack-only va
 
 ## M-040 — Exec egress classification tags and never denies
 - Affected refs: EGRESS: the twelve classifying `TestHardeningContracts/Active/Egress/*` leaves (`privileged`, `network`, `package_manager`, `interpreter`, `unknown`, `unknown_bounded`, `unknown_escaped`, `wrapper`, `git`, `go`, `shell_option_network`, `shell_unsupported_form`)
-- Baseline: `317d351a`
+- Baseline: `a6114bff`
 - Profile / command: darwin-host / `go test -count=1 -run '^TestHardeningContracts$/^Active$/^Egress$' ./agent`
 - Patch:
   ```diff
@@ -1139,7 +1150,7 @@ Every entry below was run at `317d351a` on a darwin host (the two attack-only va
 
 ## M-041 — Every interceptor runs after a block or an error
 - Affected refs: PIPELINE-ORDER: `TestHardeningContracts/Active/Pipeline/runs_after_block_and_error`
-- Baseline: `317d351a`
+- Baseline: `a6114bff`
 - Profile / command: darwin-host / `go test -count=1 -run '^TestHardeningContracts$/^Active$/^(Pipeline|Defaults)$' ./agent`
 - Patch:
   ```diff
@@ -1163,7 +1174,7 @@ Every entry below was run at `317d351a` on a darwin host (the two attack-only va
 
 ## M-042 — A tool-call block precedes dispatch and a tool-result block precedes the observation
 - Affected refs: PIPELINE-ORDER: `TestHardeningContracts/Active/Pipeline/tool_call_block_precedes_dispatch`, `TestHardeningContracts/Active/Pipeline/tool_result_block_precedes_observation/serial`, `.../parallel`
-- Baseline: `317d351a`
+- Baseline: `a6114bff`
 - Profile / command: darwin-host / `go test -count=1 -run '^TestHardeningContracts$/^Active$/^(Pipeline|Defaults)$' ./agent`
 - Patch:
   ```diff
@@ -1195,7 +1206,7 @@ Every entry below was run at `317d351a` on a darwin host (the two attack-only va
 
 ## M-043 — Each hook's RiskReport snapshot is owned by the run
 - Affected refs: RISK-SNAPSHOT: `TestHardeningContracts/Active/Pipeline/owns_risk_snapshots`
-- Baseline: `317d351a`
+- Baseline: `a6114bff`
 - Profile / command: darwin-host / `go test -count=1 -run '^TestHardeningContracts$/^Active$/^Pipeline$/^owns_risk_snapshots$' ./agent`
 - Patch:
   ```diff
@@ -1218,7 +1229,7 @@ Every entry below was run at `317d351a` on a darwin host (the two attack-only va
 
 ## M-044 — The canary detector finds the run nonce in any case
 - Affected refs: CANARY: `TestCanaryInspectOutput` (all 17 cases), `TestCanaryEntropy`
-- Baseline: `317d351a`
+- Baseline: `a6114bff`
 - Profile / command: darwin-host / `go test -count=1 -run '^TestCanaryInspectOutput$' ./agent/interceptor`; `go test -count=1 -run '^TestCanaryEntropy$' ./cmd/golem`
 - Patch:
   ```diff
@@ -1239,7 +1250,7 @@ Every entry below was run at `317d351a` on a darwin host (the two attack-only va
 
 ## M-045 — D1/D2 effect detection: a granted export is observed
 - Affected refs: CMP-READ-EXPORT-GUARDS: `TestContainment/D1`; CMP-READ-EXPORT-SECRETS-FILE: `TestContainment/D2`
-- Baseline: `317d351a`; first recorded as PR2-T8-2 (Task 8, 7e220ddc); variant B was run at `9db725e7` (Task 15 fix round 1), whose agent, cmd, mcp, mcpclient and agentflow trees are identical to `317d351a`
+- Baseline: `a6114bff`; first recorded as PR2-T8-2 (Task 8, 4085368c); variant B was run at `34b2ff38` (Task 15 fix round 1), whose agent, cmd, mcp, mcpclient and agentflow trees are identical to `a6114bff`
 - Profile / command: darwin-host / `go test -count=1 -run '^TestContainment$' ./cmd/golem`
 - Patch (A, export.sh copies nothing):
   ```diff
@@ -1277,7 +1288,7 @@ Every entry below was run at `317d351a` on a darwin host (the two attack-only va
 
 ## M-046 — B1 effect detection: a rewritten granted background job is observed
 - Affected refs: CMP-EDIT-BG: `TestContainment/B1`
-- Baseline: `317d351a`
+- Baseline: `a6114bff`
 - Profile / command: darwin-host / `go test -count=1 -run '^TestContainment$' ./cmd/golem`
 - Patch:
   ```diff
@@ -1309,7 +1320,7 @@ Every entry below was run at `317d351a` on a darwin host (the two attack-only va
 
 ## M-047 — V1 effect detection: a rewritten granted verification script is observed
 - Affected refs: CMP-EDIT-VERIFY-GRANTED: `TestContainment/V1`
-- Baseline: `317d351a`; first recorded as PR2-T7-1 for variant A (Task 7, c5223571); variant B was run at `9db725e7` (Task 15 fix round 1), whose agent, cmd, mcp, mcpclient and agentflow trees are identical to `317d351a`
+- Baseline: `a6114bff`; first recorded as PR2-T7-1 for variant A (Task 7, 09f75cdc); variant B was run at `34b2ff38` (Task 15 fix round 1), whose agent, cmd, mcp, mcpclient and agentflow trees are identical to `a6114bff`
 - Profile / command: darwin-host / `go test -count=1 -run '^TestContainment$' ./cmd/golem`
 - Patch (A, the verify runner approves but never runs the command):
   ```diff
@@ -1356,7 +1367,7 @@ Every entry below was run at `317d351a` on a darwin host (the two attack-only va
 
 ## M-048 — A signed poisoned memory is recalled under its unreviewed provenance label
 - Affected refs: CMP-MEMORY-SIGNED: `TestContainmentSignedPoisonedMemory`
-- Baseline: `317d351a`; first recorded as PR2-T12-1 for variant A (Task 12, 72d0b0f9) and PR2-T12-4 for variant B (bc1f0f45)
+- Baseline: `a6114bff`; first recorded as PR2-T12-1 for variant A (Task 12, 280ba23c) and PR2-T12-4 for variant B (ff6f1c3a)
 - Profile / command: darwin-host / `go test -count=1 -run '^TestContainmentSignedPoisonedMemory$' ./agent/tools`
 - Patch (A, RecordRecallLabel relabels agent-written records as reviewed):
   ```diff
@@ -1393,11 +1404,11 @@ Every entry below was run at `317d351a` on a darwin host (the two attack-only va
   ```
 - Baseline: pass. Mutant A: FAIL `TestContainmentSignedPoisonedMemory` (`agent_memory_signed_test.go:134: recalled line lacks the unreviewed label: "trust=reviewed; unreviewed; origin=golem.agent_memory_create; session=host-session · <id> · working · <date> · <poisoned record content> LLMB-MEM-CANARY"`). Mutant B: FAIL `TestContainmentSignedPoisonedMemory` (`agent_memory_signed_test.go:136: label does not precede the content on the recalled line: "<poisoned record content> LLMB-MEM-CANARY · <id> · working · <date> · trust=agent-written; unreviewed; ..."`). Restored: pass.
 - Kind: guard
-- Notes: The fence, canary-count and system-position assertions stay green under both; only the label literal (A) and the label-before-content index (B) can tell. A was recorded at line 130 on 72d0b0f9; the fix round moved it to 134.
+- Notes: The fence, canary-count and system-position assertions stay green under both; only the label literal (A) and the label-before-content index (B) can tell. A was recorded at line 130 on 280ba23c; the fix round moved it to 134.
 
 ## M-049 — A recalled record appears once, inside its tool frame
 - Affected refs: CMP-MEMORY-SIGNED: `TestContainmentSignedPoisonedMemory`
-- Baseline: `317d351a`; first recorded as PR2-T12-3 (Task 12 fix round, bc1f0f45)
+- Baseline: `a6114bff`; first recorded as PR2-T12-3 (Task 12 fix round, ff6f1c3a)
 - Profile / command: darwin-host / `go test -count=1 -run '^TestContainmentSignedPoisonedMemory$' ./agent/tools`
 - Patch (A, the content is echoed after the close line):
   ```diff
@@ -1435,7 +1446,7 @@ Every entry below was run at `317d351a` on a darwin host (the two attack-only va
 
 ## M-050 — MCP direct-durable memory tools exist only when configured
 - Affected refs: CMP-MCP-DURABLE: `TestAgentMemoryToolsAbsentByDefault`
-- Baseline: `317d351a`
+- Baseline: `a6114bff`
 - Profile / command: darwin-host / `go test -count=1 -run '^(TestAgentMemoryToolsAbsentByDefault|TestAgentMemoryCreateHappyPaths)$' ./mcp`
 - Patch:
   ```diff
@@ -1458,7 +1469,7 @@ Every entry below was run at `317d351a` on a darwin host (the two attack-only va
 
 ## M-051 — A skip or failure under a cited parent leaf counts as that leaf's own
 - Affected refs: META-GATE: `TestCheckerRejectsSkippedChildOfCitedParent`
-- Baseline: the commit that adds this entry (parent `be03ef59`); first recorded as PR2-FW-1 (fix wave)
+- Baseline: `731f2d1d` (the commit that adds this entry); first recorded as PR2-FW-1 (fix wave)
 - Platform: darwin (arm64, go1.27.1)
 - Profile / command: darwin-host / `go test -count=1 -run '^(TestChecker|TestDecideRun)' -v ./internal/containmentinv`
 - Patch:
@@ -1482,7 +1493,7 @@ Every entry below was run at `317d351a` on a darwin host (the two attack-only va
 
 ## M-052 — Only an administrative META- row may claim a mutation exemption
 - Affected refs: META-MUTATION: `TestCommittedInventory` (data mutation below); rule cases `TestInventoryLintRules/exempt_reason_on_a_verified_security_row`, `TestInventoryLintRules/exempt_reason_on_an_uncontained_row`
-- Baseline: the commit that adds this entry (parent `be03ef59`); first recorded as PR2-FW-7 (fix wave)
+- Baseline: `731f2d1d` (the commit that adds this entry); first recorded as PR2-FW-7 (fix wave)
 - Platform: darwin (arm64, go1.27.1)
 - Profile / command: darwin-host / `go test -count=1 -run '^TestInventoryLintRules$' -v ./internal/containmentinv`
 - Patch:
@@ -1506,7 +1517,7 @@ Every entry below was run at `317d351a` on a darwin host (the two attack-only va
 
 ## M-053 — linux-host allows no skip, and every allowed skip names a capability
 - Affected refs: META-INVENTORY: `TestCommittedInventory` (data mutations below); rule cases `TestInventoryLintRules/linux-host_allows_no_skip`, `TestInventoryLintRules/allowed_skip_reason`
-- Baseline: the commit that adds this entry (parent `be03ef59`); first recorded as PR2-FW-8 and PR2-FW-9 (fix wave)
+- Baseline: `731f2d1d` (the commit that adds this entry); first recorded as PR2-FW-8 and PR2-FW-9 (fix wave)
 - Platform: darwin (arm64, go1.27.1)
 - Profile / command: darwin-host / `go test -count=1 -run '^TestInventoryLintRules$' -v ./internal/containmentinv`
 - Patch (A, linux-host may allow a skip):
@@ -1545,7 +1556,7 @@ Every entry below was run at `317d351a` on a darwin host (the two attack-only va
 
 ## M-054 — Checker evidence in a checkout is measured, not only stamped
 - Affected refs: META-GATE: `TestCheckerSourceIdentityMeasured/mismatching_tree`, `/modified_tracked_file`, `/untracked_file`, `/missing_tracked_file`
-- Baseline: the commit that adds this entry (parent `12b63eb0`); first recorded as PR2-FW2-1a, PR2-FW2-1b, PR2-FW2-1c and PR2-FW2-2 (fix wave 2)
+- Baseline: `3d423ce1` (the commit that adds this entry); first recorded as PR2-FW2-1a, PR2-FW2-1b, PR2-FW2-1c and PR2-FW2-2 (fix wave 2)
 - Platform: darwin (arm64, go1.27.1)
 - Profile / command: darwin-host / `go test -count=1 -run '^TestCheckerSourceIdentityMeasured$' -v ./internal/containmentinv`
 - Patch (A, a forwarded tree is trusted without comparing HEAD):
@@ -1600,7 +1611,7 @@ Every entry below was run at `317d351a` on a darwin host (the two attack-only va
 
 ## M-055 — A row whose every ref may skip on a profile is not mandatory there
 - Affected refs: META-INVENTORY: `TestCommittedInventory` (data mutation below); rule case `TestInventoryLintRules/skip-allowed_row_lists_the_profile`
-- Baseline: the commit that adds this entry (parent `12b63eb0`); first recorded as PR2-FW2-6 (fix wave 2)
+- Baseline: `3d423ce1` (the commit that adds this entry); first recorded as PR2-FW2-6 (fix wave 2)
 - Platform: darwin (arm64, go1.27.1)
 - Profile / command: darwin-host / `go test -count=1 -run '^TestInventoryLintRules$' -v ./internal/containmentinv`
 - Patch:
@@ -1624,7 +1635,7 @@ Every entry below was run at `317d351a` on a darwin host (the two attack-only va
 
 ## M-056 — A scenario skip names the first capability the profile lacks
 - Affected refs: META-INVENTORY: `TestCommittedInventory` (data mutation below); rule cases `TestInventoryLintRules/scenario_skip_for_a_cap_the_scenario_lacks`, `/scenario_skip_for_a_cap_the_profile_provides`, `/scenario_skip_for_a_later_missing_cap`, `/scenario_skip_for_an_undeclared_scenario`
-- Baseline: the commit that adds this entry (parent `12b63eb0`); first recorded as PR2-FW2-7 (fix wave 2)
+- Baseline: `3d423ce1` (the commit that adds this entry); first recorded as PR2-FW2-7 (fix wave 2)
 - Platform: darwin (arm64, go1.27.1)
 - Profile / command: darwin-host / `go test -count=1 -run '^TestInventoryLintRules$' -v ./internal/containmentinv`
 - Patch:
@@ -1648,7 +1659,7 @@ Every entry below was run at `317d351a` on a darwin host (the two attack-only va
 
 ## M-057 — A scenario ref cites the scenario's registration, ahead of an observation
 - Affected refs: META-INVENTORY: `TestCommittedInventory` (data mutations below); rule cases `TestInventoryLintRules/ref_to_a_function_not_bound_to_the_registration`, `TestInventoryLintRules/marker_after_the_last_observation`
-- Baseline: the commit that adds this entry (parent `12b63eb0`); first recorded as PR2-FW2-8 and PR2-FW2-9 (fix wave 2)
+- Baseline: `3d423ce1` (the commit that adds this entry); first recorded as PR2-FW2-8 and PR2-FW2-9 (fix wave 2)
 - Platform: darwin (arm64, go1.27.1)
 - Profile / command: darwin-host / `go test -count=1 -run '^TestInventoryLintRules$' -v ./internal/containmentinv`
 - Patch (A, any function holding the marker satisfies a scenario ref):
@@ -1687,7 +1698,7 @@ Every entry below was run at `317d351a` on a darwin host (the two attack-only va
 
 ## M-058 — The ledger and the inventory cite each other
 - Affected refs: META-MUTATION: `TestCommittedInventory` (data mutation below); rule cases `TestInventoryLintRules/ledger_entry_not_listing_a_citing_row`, `/ledger_entry_listing_a_row_that_does_not_cite_it`, `/ledger_entry_listing_no_row`, `/ledger_entry_listing_an_unknown_row`
-- Baseline: the commit that adds this entry (parent `12b63eb0`); first recorded as PR2-FW2-10 (fix wave 2)
+- Baseline: `3d423ce1` (the commit that adds this entry); first recorded as PR2-FW2-10 (fix wave 2)
 - Platform: darwin (arm64, go1.27.1)
 - Profile / command: darwin-host / `go test -count=1 -run '^TestInventoryLintRules$' -v ./internal/containmentinv`
 - Patch:
@@ -1711,7 +1722,7 @@ Every entry below was run at `317d351a` on a darwin host (the two attack-only va
 
 ## M-059 — Only registry entries in the scenario file bind a scenario ref
 - Affected refs: META-INVENTORY: `TestCommittedInventory` (data mutation below); rule cases `TestInventoryLintRules/reachable_literal_without_run_is_no_registration`, `/unreachable_literal_with_run_is_no_registration`, `/scenario_ref_outside_the_registry_file`, `/test_literal_without_run_is_no_registration`
-- Baseline: the commit that adds this entry (parent `1390239b`); first recorded as PR2-R1a, PR2-R1b and PR2-R1c (wave 2 residuals)
+- Baseline: `1166b276` (the commit that adds this entry); first recorded as PR2-R1a, PR2-R1b and PR2-R1c (wave 2 residuals)
 - Platform: darwin (arm64, go1.27.1)
 - Profile / command: darwin-host / `go test -count=1 -run '^TestInventoryLintRules$' -v ./internal/containmentinv`
 - Patch (A, a scenario literal without run: registers):
@@ -1761,7 +1772,7 @@ Every entry below was run at `317d351a` on a darwin host (the two attack-only va
   ```
 - Baseline: pass. Mutant A: FAIL `TestInventoryLintRules/reachable_literal_without_run_is_no_registration` (`inventory_test.go:433: want an error containing "noRun is not bound to scenario X3's registration (x3)", got [cmd/golem/containment_scenarios_test.go:13: FP-SCRIPT-CONTENT marker in x3 is not cited by any FP-SCRIPT-CONTENT ref]`). Mutant B: FAIL `/unreachable_literal_with_run_is_no_registration` (`inventory_test.go:433: want an error containing "stray is not bound to scenario X3's registration (x3)", got [... marker in x3 is not cited ...]`). Mutant C: FAIL `/scenario_ref_outside_the_registry_file` (`inventory_test.go:433: want an error containing "file cmd/golem/containment_test.go, want cmd/golem/containment_scenarios_test.go", got [FP-SCRIPT-CONTENT: ref TestContainment/X3: no function in cmd/golem/containment_test.go registers scenario X3 ...]`). Restored: pass.
 - Kind: guard
-- Notes: Closes a gap in M-057 found in review: at `1390239b` any `ID: "<X>"` literal registered X, so the FP-SCRIPT-CONTENT marker and its X3 ref moved into `TestContainmentDeclaredMismatchMessage` (cmd/golem/containment_test.go, which holds `scenario{ID: "X3"}` and an `observation{}` literal) passed lint. Data mutation, that reproduction on the committed tree: `TestCommittedInventory` is red (`inventory_test.go:506: FP-SCRIPT-CONTENT: ref TestContainment/X3: file cmd/golem/containment_test.go, want cmd/golem/containment_scenarios_test.go, the scenario registry`, plus the stale-Markdown check); under mutant C as well it stays red on the binding rule (`inventory_test.go:506: FP-SCRIPT-CONTENT: ref TestContainment/X3: no function in cmd/golem/containment_test.go registers scenario X3`); restored byte-identical. A registration is now a `scenario` literal setting `ID` and `run:`, or a same-file helper call (`wScenario`), inside a function that `containmentScenarios`, `executableScenarios` or `pendingScenarios` reach through same-file calls.
+- Notes: Closes a gap in M-057 found in review: at `3d423ce1` any `ID: "<X>"` literal registered X, so the FP-SCRIPT-CONTENT marker and its X3 ref moved into `TestContainmentDeclaredMismatchMessage` (cmd/golem/containment_test.go, which holds `scenario{ID: "X3"}` and an `observation{}` literal) passed lint. Data mutation, that reproduction on the committed tree: `TestCommittedInventory` is red (`inventory_test.go:506: FP-SCRIPT-CONTENT: ref TestContainment/X3: file cmd/golem/containment_test.go, want cmd/golem/containment_scenarios_test.go, the scenario registry`, plus the stale-Markdown check); under mutant C as well it stays red on the binding rule (`inventory_test.go:506: FP-SCRIPT-CONTENT: ref TestContainment/X3: no function in cmd/golem/containment_test.go registers scenario X3`); restored byte-identical. A registration is now a `scenario` literal setting `ID` and `run:`, or a same-file helper call (`wScenario`), inside a function that `containmentScenarios`, `executableScenarios` or `pendingScenarios` reach through same-file calls.
 
 ## Administrative evidence
 

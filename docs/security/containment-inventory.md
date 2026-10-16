@@ -146,11 +146,11 @@ A row backed by containment scenarios takes its status from the scenario registr
 
 | ID | Requirement | Status | Layer | Refs / Scenarios | Profiles |
 |---|---|---|---|---|---|
-| MODEL-STRATA | Labeled tool-loop traces cover the four attacker goals in blunt and helpful forms across the original #452 strata, with allowed behavior and attack-success criteria per stratum. | verified | model | artifact: docs/llm/traces/injection/registration.json<br>artifact: docs/llm/benchmarks/2026-10-XX-injection-resistance.md | - |
-| MODEL-METRICS | Per-model InjectionResistance and RestraintUnderAttack are reported alongside AnswerQuality with paired deltas and bootstrap confidence intervals. | verified | model | artifact: docs/llm/traces/injection/registration.json<br>artifact: docs/llm/benchmarks/2026-10-XX-injection-resistance.md | - |
-| MODEL-CANARY | Marker validation reuses the integrity-canary approach; fixtures carry no live secrets and reports do not expose planted values. | verified | model | artifact: docs/llm/traces/injection/registration.json<br>artifact: docs/llm/benchmarks/2026-10-XX-injection-resistance.md | - |
-| MODEL-SEPARATION | Model resistance is reported separately from runtime containment, which the scenario registry evaluates independently. | verified | model | artifact: docs/llm/traces/injection/registration.json<br>artifact: docs/llm/benchmarks/2026-10-XX-injection-resistance.md | - |
-| MODEL-REVIEW | At least one end-to-end artifact per stratum is manually reviewed and recorded, with the corpus stratification documented. | verified | model | artifact: docs/llm/traces/injection/registration.json<br>artifact: docs/llm/benchmarks/2026-10-XX-injection-resistance.md | - |
+| MODEL-STRATA | Labeled tool-loop traces cover the four attacker goals in blunt and helpful forms across the original #452 strata, with allowed behavior and attack-success criteria per stratum. | verified | model | artifact: docs/llm/traces/injection/registration.json<br>artifact: docs/llm/benchmarks/2026-10-15-injection-resistance.md | - |
+| MODEL-METRICS | Per-model InjectionResistance and RestraintUnderAttack are reported alongside AnswerQuality with paired deltas and bootstrap confidence intervals. | verified | model | artifact: docs/llm/traces/injection/registration.json<br>artifact: docs/llm/benchmarks/2026-10-15-injection-resistance.md | - |
+| MODEL-CANARY | Marker validation reuses the integrity-canary approach; fixtures carry no live secrets and reports do not expose planted values. | verified | model | artifact: docs/llm/traces/injection/registration.json<br>artifact: docs/llm/benchmarks/2026-10-15-injection-resistance.md | - |
+| MODEL-SEPARATION | Model resistance is reported separately from runtime containment, which the scenario registry evaluates independently. | verified | model | artifact: docs/llm/traces/injection/registration.json<br>artifact: docs/llm/benchmarks/2026-10-15-injection-resistance.md | - |
+| MODEL-REVIEW | At least one end-to-end artifact per stratum is manually reviewed and recorded, with the corpus stratification documented. | verified | model | artifact: docs/llm/traces/injection/registration.json<br>artifact: docs/llm/benchmarks/2026-10-15-injection-resistance.md | - |
 
 ## Meta
 

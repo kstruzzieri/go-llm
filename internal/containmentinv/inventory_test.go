@@ -483,9 +483,7 @@ func TestInventoryLoadRejects(t *testing.T) {
 
 // TestCommittedInventory is the inventory gate: the committed JSON lints clean
 // against this tree and the scenario registry, every artifact exists, and the
-// committed Markdown is the rendering of the JSON. MODEL-* artifacts land with
-// the #452 model-resistance PR; GO_LLM_INVENTORY_PREMERGE=1 skips only those
-// until this branch is rebased onto it. Never set it in CI or a script.
+// committed Markdown is the rendering of the JSON.
 func TestCommittedInventory(t *testing.T) {
 	root := filepath.Join("..", "..")
 	inv, err := Load(filepath.Join(root, "docs", "security", "containment-inventory.json"))
@@ -505,11 +503,7 @@ func TestCommittedInventory(t *testing.T) {
 	for _, err := range Lint(inv, root, scenarios, ledger) {
 		t.Error(err)
 	}
-	premerge := os.Getenv("GO_LLM_INVENTORY_PREMERGE") == "1"
 	for _, r := range inv.Rows {
-		if premerge && strings.HasPrefix(r.ID, "MODEL-") {
-			continue
-		}
 		for _, a := range r.Artifacts {
 			if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(a))); err != nil {
 				t.Errorf("%s: artifact %s: %v", r.ID, a, err)
