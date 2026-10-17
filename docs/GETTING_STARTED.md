@@ -173,12 +173,12 @@ Pull the new model (`ollama pull llama3.3:70b`) and restart your application.
 ### Trained context vs. served window
 
 Some models are served with a longer window than they were trained on. The
-ordinary Qwen2.5 checkpoints, for example, ship a config set for 32,768 tokens
-and reach 131,072 only with YaRN. When a trained-context ceiling is known for
-a model, the quality-sensitive use cases (`chat`, `reasoning`, `code-review`,
-`planning`, `analysis`) budget against it; `agent`, `fim`, `embedding`, and
-side tasks always get the full window. The MCP `generate` tool routes as
-`chat`, so it is quality-sensitive too.
+Qwen2.5-7B-Instruct and larger instruct checkpoints, for example, ship a
+config set for 32,768 tokens and reach 131,072 only with YaRN. When a
+trained-context ceiling is known for a model, the quality-sensitive use cases
+(`chat`, `reasoning`, `code-review`, `planning`, `analysis`) budget against it;
+`agent`, `fim`, `embedding`, and side tasks always get the full window. The
+MCP `generate` tool routes as `chat`, so it is quality-sensitive too.
 
 A ceiling cuts the budget only when it is below the served `context_window`,
 or when the window is unknown, in which case the ceiling is the budget for the

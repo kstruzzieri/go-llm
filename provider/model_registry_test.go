@@ -2585,7 +2585,8 @@ func TestModelRegistry_QualityCtxCeilingOverrideCoversUnknownFamily(t *testing.T
 // TestModelRegistry_Lookup_AmbiguousFamiliesHaveNoFabricatedCeiling guards the
 // deliberately unseeded qwen3 and qwen2.5 families. Each family key also covers
 // 256K-trained releases, because "-coder" is a known variant suffix and the
-// catalog lookup never consults the tag:
+// ceiling is a family-level catalog value, so a tag such as -instruct-1m or
+// -2507 cannot select a different ceiling:
 //
 //	qwen3:   qwen3-coder:* and qwen3:*-2507 are "Context Length: 262,144
 //	         natively" (Qwen3-Coder-30B-A3B-Instruct, Qwen3-30B-A3B-Instruct-2507);

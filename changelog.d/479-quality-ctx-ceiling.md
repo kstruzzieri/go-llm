@@ -10,6 +10,8 @@ over the catalog.
 
 #### Behavior change
 
+- `planning` and `analysis` are now quality-sensitive; `agent`, `fim`,
+  `embedding`, and side tasks are unchanged.
 - `chat`, `reasoning`, `code-review`, `planning`, and `analysis` are the
   quality-sensitive use cases; `agent`, `fim`, `embedding`, and side tasks are
   unchanged. The MCP `generate` tool routes as `chat`, so it is

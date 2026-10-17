@@ -670,7 +670,7 @@ func (cfg *Config) validate() error {
 
 		if m.QualityCtxCeiling < 0 {
 			return diagWrap(CodeModelInvalid, SubjectRole, role,
-				fmt.Errorf("config: model %q: quality_ctx_ceiling must be >= 1", role))
+				fmt.Errorf("config: model %q: quality_ctx_ceiling must not be negative", role))
 		}
 
 		// Validate slots (#400 admission-capacity override). Bootstrap

@@ -1176,7 +1176,7 @@ func TestLoad_QualityCtxCeilingValidation(t *testing.T) {
 		t.Fatal("want Load error for negative quality_ctx_ceiling")
 	}
 	assertDiag(t, err, CodeModelInvalid, SubjectRole, "default")
-	if !contains(err.Error(), "default") || !contains(err.Error(), "quality_ctx_ceiling must be >= 1") {
+	if !contains(err.Error(), "default") || !contains(err.Error(), "quality_ctx_ceiling must not be negative") {
 		t.Fatalf("error %q must name the role and the rule", err)
 	}
 }
