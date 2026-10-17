@@ -313,12 +313,11 @@ func TestResolveInputCeilingRecomputesForChangedChain(t *testing.T) {
 }
 
 func TestResolveInputCeiling_HonorsTheCallersUseCase(t *testing.T) {
-	// The probe use case is "reasoning", NOT "planning". Planning and agent
-	// agree on both functions under test today -- neither is in
-	// qualitySensitiveUseCases, and neither has a defaultExpectedOutputs entry
-	// -- so a planning-vs-agent comparison could not fail whichever literal
-	// the implementation used. "reasoning" differs on both axes, which is what
-	// makes a hard-coded "agent" detectable at all.
+	// The probe use case is "reasoning", NOT "planning". Since #479 planning
+	// honors QualityCtxCeiling too, but planning and agent still share chat's
+	// 2048 implicit reserve (neither has a defaultExpectedOutputs entry), so
+	// only "reasoning" differs from "agent" on BOTH axes -- which is what makes
+	// a hard-coded "agent" detectable through either function.
 	//
 	//	EffectiveContextWindow: reasoning honors QualityCtxCeiling; agent does not.
 	//	DefaultExpectedOutput:  reasoning is 4096; agent falls back to chat's 2048.

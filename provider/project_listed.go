@@ -27,25 +27,30 @@ type ListedModelFacts struct {
 	// configview.InventoryModel.ProfileSource, the slice-4 wire field.
 	ProfileSource string
 	ContextWindow int
+	// QualityCtxCeiling is the merged trained-context ceiling (#479); feeds
+	// configview.InventoryModel.QualityCtxCeiling.
+	QualityCtxCeiling int
 }
 
 type listedProjectionPolicy struct {
-	override        CapabilityOverride
-	floor           CapabilityFloor
-	thinkOverride   ThinkOverride
-	contextOverride ContextWindowOverride
-	rejectionHook   OverrideRejectionHook
+	override               CapabilityOverride
+	floor                  CapabilityFloor
+	thinkOverride          ThinkOverride
+	contextOverride        ContextWindowOverride
+	qualityCeilingOverride QualityCtxCeilingOverride
+	rejectionHook          OverrideRejectionHook
 }
 
 func (r *ModelRegistry) snapshotListedProjectionPolicy() listedProjectionPolicy {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return listedProjectionPolicy{
-		override:        r.capOverride,
-		floor:           r.capFloor,
-		thinkOverride:   r.thinkOverride,
-		contextOverride: r.contextOverride,
-		rejectionHook:   r.rejectionHook,
+		override:               r.capOverride,
+		floor:                  r.capFloor,
+		thinkOverride:          r.thinkOverride,
+		contextOverride:        r.contextOverride,
+		qualityCeilingOverride: r.qualityCeilingOverride,
+		rejectionHook:          r.rejectionHook,
 	}
 }
 
@@ -118,13 +123,14 @@ func (r *ModelRegistry) projectListedModel(
 		}
 	}
 
-	profile := r.merge(key, &info, static, fp, parsed, policy.override, policy.floor, policy.thinkOverride, policy.contextOverride, policy.rejectionHook, probeYes)
+	profile := r.merge(key, &info, static, fp, parsed, policy.override, policy.floor, policy.thinkOverride, policy.contextOverride, policy.qualityCeilingOverride, policy.rejectionHook, probeYes)
 	return ListedModelFacts{
-		Key:           key,
-		Family:        profile.Family,
-		Caps:          profile.Caps,
-		KnownMask:     profile.Caps | known,
-		ProfileSource: profile.Source.String(),
-		ContextWindow: profile.ContextWindow,
+		Key:               key,
+		Family:            profile.Family,
+		Caps:              profile.Caps,
+		KnownMask:         profile.Caps | known,
+		ProfileSource:     profile.Source.String(),
+		ContextWindow:     profile.ContextWindow,
+		QualityCtxCeiling: profile.QualityCtxCeiling,
 	}
 }

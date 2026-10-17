@@ -324,3 +324,23 @@ func TestBuildThinkOverridesSameKeyCompatibility(t *testing.T) {
 		})
 	}
 }
+
+func TestBuildQualityCtxCeilingOverrides(t *testing.T) {
+	cfg := &config.Config{Models: map[string]config.ModelConfig{
+		"agent": {Provider: "lc", Name: "qwen", QualityCtxCeiling: 32_768},
+		"chat":  {Provider: "lc", Name: "qwen", QualityCtxCeiling: 32_768},
+		"other": {Provider: "lc", Name: "plain"},
+	}}
+	got, err := buildQualityCtxCeilingOverrides(cfg)
+	if err != nil {
+		t.Fatalf("buildQualityCtxCeilingOverrides: %v", err)
+	}
+	want := map[provider.ModelKey]int{{Provider: "lc", Model: "qwen"}: 32_768}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	cfg.Models["chat"] = config.ModelConfig{Provider: "lc", Name: "qwen", QualityCtxCeiling: 24_576}
+	if _, err := buildQualityCtxCeilingOverrides(cfg); err == nil || !strings.Contains(err.Error(), "conflicting quality_ctx_ceiling") {
+		t.Fatalf("err = %v, want conflicting quality_ctx_ceiling", err)
+	}
+}

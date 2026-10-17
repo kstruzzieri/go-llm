@@ -3,7 +3,10 @@
 // reads no clocks, and mutates nothing; all knowledge arrives via BuildInput.
 //
 // The JSON field names on the types below ARE the versioned wire contract
-// (v1) — the golden test pins them; changing any is a contract break
+// (v1) — the golden test pins them. Extension policy: v1 may gain optional
+// fields tagged omitempty, so consumers must ignore unknown members (a
+// strict decoder that rejects them is not a supported v1 consumer).
+// Renaming, removing, or retyping a field is still a contract break
 // requiring a v2 resource.
 package configview
 
@@ -44,6 +47,10 @@ type InventoryModel struct {
 	KnownMask     provider.Capability `json:"known_mask"`
 	ProfileSource string              `json:"profile_source,omitempty"`
 	ContextWindow int                 `json:"context_window,omitempty"`
+	// QualityCtxCeiling is the raw merged trained-context ceiling (catalog
+	// default, then a configured quality_ctx_ceiling), not a per-use-case
+	// effective window; it may exceed ContextWindow. 0 means none known.
+	QualityCtxCeiling int `json:"quality_ctx_ceiling,omitempty"`
 }
 
 // InventoryProvider reports provider reachability from an explicit refresh.
@@ -110,6 +117,12 @@ type ModelSummary struct {
 	Caps          []string `json:"caps,omitempty"`
 	ProfileSource string   `json:"profile_source,omitempty"`
 	ContextWindow int      `json:"context_window,omitempty"`
+	// QualityCtxCeiling is the raw merged trained-context ceiling, not a
+	// per-use-case effective window; it may exceed ContextWindow. An
+	// inventory-backed summary copies the merged value, catalog defaults
+	// included; a config-only summary (no inventory, as in the MCP resource)
+	// shows only a configured quality_ctx_ceiling, never a catalog default.
+	QualityCtxCeiling int `json:"quality_ctx_ceiling,omitempty"`
 }
 
 // ProviderSummary is one provider card. Endpoint is normalized to
@@ -306,12 +319,14 @@ func buildModelSummaries(cfg *config.Config, inv map[string]InventoryModel, sele
 			ms.Family = m.Family
 			ms.ProfileSource = m.ProfileSource
 			ms.ContextWindow = m.ContextWindow
+			ms.QualityCtxCeiling = m.QualityCtxCeiling
 		} else {
 			ms.Provider = selectorProvider(sel)
 			ms.ProfileSource = "config"
 			if mc, ok := configModelBySelector(cfg, sel); ok {
 				ms.ContextWindow = mc.ContextWindow
 			}
+			ms.QualityCtxCeiling = configQualityCtxCeiling(cfg, sel)
 		}
 		out = append(out, ms)
 	}

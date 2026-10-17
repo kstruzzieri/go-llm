@@ -58,7 +58,11 @@ func resolveInputCeiling(ctx context.Context, reg capChecker, chain []string, us
 	usedFallback := false
 	add := func(profile *provider.ModelProfile) {
 		window := agent.DefaultInputCeiling
-		if profile != nil && profile.ContextWindow > 0 {
+		eff := 0
+		if profile != nil {
+			eff = profile.EffectiveContextWindow(useCase)
+		}
+		if eff > 0 {
 			// Mirror the router's admission budget: it validates input against
 			// EffectiveContextWindow(useCase) minus the request's expected
 			// output, and a zero -output-reserve leaves ExpectedOutput unset,
@@ -67,8 +71,11 @@ func resolveInputCeiling(ctx context.Context, reg capChecker, chain []string, us
 			// router budget and routing fails with ErrBudgetAdaptationRequired
 			// instead of compacting. A nonzero -output-reserve is already
 			// subtracted on both sides (turnBudget and ExpectedOutput), so the
-			// full window is correct then.
-			window = profile.EffectiveContextWindow(useCase)
+			// full window is correct then. The guard is the effective window,
+			// not ContextWindow: with an unknown served window a configured
+			// QualityCtxCeiling is the router's budget for a quality-sensitive
+			// use case (#479), so Golem must size against it too.
+			window = eff
 			reserve := outputReserve
 			if reserve <= 0 {
 				reserve = provider.DefaultExpectedOutput(useCase)

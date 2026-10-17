@@ -750,3 +750,40 @@ func TestCanonicalCapabilityNames_Stable(t *testing.T) {
 		}
 	}
 }
+
+// TestCatalogQualityCtxCeilingSeeds pins every family's quality_ctx_ceiling.
+// Rule (spec D1.6): seed a family only when its model card itself
+// distinguishes a native length from a longer RoPE-scaled one, and every
+// release the family name matches shares that native length. Card quotes:
+//
+//	qwen3.5 "Context Length: 262,144 natively and extensible up to 1,010,000 tokens." (Qwen/Qwen3.5-9B, Qwen/Qwen3.5-27B)
+//	qwen3.6 "Context Length: 262,144 natively and extensible up to 1,010,000 tokens." (Qwen/Qwen3.6-35B-A3B)
+//
+// qwen2.5 and qwen3 carry no key: each family name also matches a 256K-trained
+// release. qwen2.5:*-instruct-1m (Qwen2.5-1M) is trained progressively to
+// 256K, and qwen3-coder:* and qwen3:*-2507 are 262,144 native, so one family
+// value (32768 for the ordinary checkpoints) would fabricate a ceiling for them.
+//
+// Every other family must carry 0 (qwen3-coder-next's card states no scaled
+// length; gemma3/llama3.x/deepseek-r1 reach their window in training).
+func TestCatalogQualityCtxCeilingSeeds(t *testing.T) {
+	want := map[string]int{"qwen3.5": 262144, "qwen3.6": 262144}
+	cat, err := loadCatalog()
+	if err != nil {
+		t.Fatalf("loadCatalog: %v", err)
+	}
+	for name := range want {
+		if _, ok := cat.Families[name]; !ok {
+			t.Errorf("seeded family %q missing from catalog", name)
+		}
+	}
+	for name, fam := range cat.Families {
+		if fam.QualityCtxCeiling != want[name] {
+			t.Errorf("family %q quality_ctx_ceiling = %d, want %d", name, fam.QualityCtxCeiling, want[name])
+		}
+	}
+	sc := newStaticCatalog(cat)
+	if p := sc.lookup("qwen3.5", "9b"); p == nil || p.QualityCtxCeiling != 262144 {
+		t.Errorf("static lookup qwen3.5:9b QualityCtxCeiling = %v, want 262144", p)
+	}
+}

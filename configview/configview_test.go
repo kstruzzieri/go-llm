@@ -312,3 +312,84 @@ func TestBound64CutsOnARuneBoundary(t *testing.T) {
 		}
 	}
 }
+
+// #479: quality_ctx_ceiling is projected additively (v1, omitempty) from the
+// inventory when present, else from config. The frozen golden is unchanged
+// because its model sets no ceiling.
+func TestModelSummaryQualityCtxCeiling(t *testing.T) {
+	cfg := &config.Config{
+		Providers: map[string]config.ProviderConfig{"p": {BaseURL: "http://h:1", APIFormat: "openai-compat"}},
+		Models: map[string]config.ModelConfig{
+			"agent": {Name: "m", Provider: "p", Type: "dense", QualityCtxCeiling: 24576},
+			"chat":  {Name: "q", Provider: "p", Type: "dense"},
+		},
+		Defaults: map[string]string{"agent": "agent", "chat": "chat"},
+	}
+	in := BuildInput{
+		Doc: DocSnapshot{Config: cfg, Origin: config.Origin{Source: config.OriginProgrammatic}},
+		Inventory: Inventory{Models: []InventoryModel{{
+			Key: provider.ModelKey{Provider: "p", Model: "q"}, Family: "qwen2.5",
+			ContextWindow: 131072, QualityCtxCeiling: 32768,
+		}}},
+	}
+	snap := Build(in)
+	got := map[string]int{}
+	for _, m := range snap.Models {
+		got[m.Selector] = m.QualityCtxCeiling
+	}
+	if got["p/m"] != 24576 || got["p/q"] != 32768 {
+		t.Fatalf("QualityCtxCeiling by selector = %v, want p/m 24576 (config), p/q 32768 (inventory)", got)
+	}
+	raw, err := json.Marshal(snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"quality_ctx_ceiling":32768`) {
+		t.Fatalf("wire key missing: %s", raw)
+	}
+}
+
+// #479 R5: InventoryModel's wire key is pinned directly (Golem's models -json
+// emits it), present when nonzero and absent at 0 (omitempty keeps v1
+// additive for zero-valued output).
+func TestInventoryModelQualityCtxCeilingWire(t *testing.T) {
+	m := InventoryModel{Key: provider.ModelKey{Provider: "p", Model: "q"}, QualityCtxCeiling: 32768}
+	raw, err := json.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"quality_ctx_ceiling":32768`) {
+		t.Fatalf("nonzero wire key missing: %s", raw)
+	}
+	m.QualityCtxCeiling = 0
+	if raw, err = json.Marshal(m); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "quality_ctx_ceiling") {
+		t.Fatalf("key present at 0, want omitted: %s", raw)
+	}
+}
+
+// #479 R3: with no inventory, a selector shared by several roles shows the
+// ceiling any of them sets (zero means unset), as bootstrap installs it, not
+// just the first sorted role's value.
+func TestModelSummaryQualityCtxCeilingSharedSelector(t *testing.T) {
+	cfg := &config.Config{
+		Providers: map[string]config.ProviderConfig{"p": {BaseURL: "http://h:1", APIFormat: "openai-compat"}},
+		Models: map[string]config.ModelConfig{
+			"a": {Name: "m", Provider: "p", Type: "dense"},
+			"b": {Name: "m", Provider: "p", Type: "dense", QualityCtxCeiling: 24576},
+		},
+		Defaults: map[string]string{"agent": "a", "chat": "b"},
+	}
+	snap := Build(BuildInput{Doc: DocSnapshot{Config: cfg, Origin: config.Origin{Source: config.OriginProgrammatic}}})
+	for _, m := range snap.Models {
+		if m.Selector == "p/m" {
+			if m.QualityCtxCeiling != 24576 {
+				t.Fatalf("p/m QualityCtxCeiling = %d, want 24576 (role b)", m.QualityCtxCeiling)
+			}
+			return
+		}
+	}
+	t.Fatalf("no p/m summary in %+v", snap.Models)
+}

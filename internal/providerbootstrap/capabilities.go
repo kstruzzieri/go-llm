@@ -16,12 +16,16 @@ type modelDefaultsEntry struct {
 	opts provider.SamplingDefaults
 }
 
-type contextWindowEntry struct {
-	role   string
-	window int
+type intOverrideEntry struct {
+	role  string
+	value int
 }
 
-func buildContextWindowOverrides(cfg *config.Config) (map[provider.ModelKey]int, error) {
+// buildIntOverrides maps each provider/model key to a per-model int field
+// (context_window, quality_ctx_ceiling). Sorted-role walk; roles without a
+// provider, name, or value are skipped; a negative value or two roles giving
+// one key different values is an error naming the field.
+func buildIntOverrides(cfg *config.Config, field string, value func(config.ModelConfig) int) (map[provider.ModelKey]int, error) {
 	out := make(map[provider.ModelKey]int)
 	if cfg == nil {
 		return out, nil
@@ -31,26 +35,35 @@ func buildContextWindowOverrides(cfg *config.Config) (map[provider.ModelKey]int,
 		roles = append(roles, role)
 	}
 	sort.Strings(roles)
-	seen := make(map[provider.ModelKey]contextWindowEntry)
+	seen := make(map[provider.ModelKey]intOverrideEntry)
 	for _, role := range roles {
 		model := cfg.Models[role]
-		if model.Provider == "" || model.Name == "" || model.ContextWindow == 0 {
+		v := value(model)
+		if model.Provider == "" || model.Name == "" || v == 0 {
 			continue
 		}
-		if model.ContextWindow < 0 {
-			return nil, fmt.Errorf("providerbootstrap: model %q context_window must be positive", role)
+		if v < 0 {
+			return nil, fmt.Errorf("providerbootstrap: model %q %s must be positive", role, field)
 		}
 		key := provider.ModelKey{Provider: model.Provider, Model: model.Name}
-		if existing, ok := seen[key]; ok && existing.window != model.ContextWindow {
+		if existing, ok := seen[key]; ok && existing.value != v {
 			return nil, fmt.Errorf(
-				"providerbootstrap: conflicting context_window for %s: models %q and %q",
-				key, existing.role, role,
+				"providerbootstrap: conflicting %s for %s: models %q and %q",
+				field, key, existing.role, role,
 			)
 		}
-		seen[key] = contextWindowEntry{role: role, window: model.ContextWindow}
-		out[key] = model.ContextWindow
+		seen[key] = intOverrideEntry{role: role, value: v}
+		out[key] = v
 	}
 	return out, nil
+}
+
+func buildContextWindowOverrides(cfg *config.Config) (map[provider.ModelKey]int, error) {
+	return buildIntOverrides(cfg, "context_window", func(m config.ModelConfig) int { return m.ContextWindow })
+}
+
+func buildQualityCtxCeilingOverrides(cfg *config.Config) (map[provider.ModelKey]int, error) {
+	return buildIntOverrides(cfg, "quality_ctx_ceiling", func(m config.ModelConfig) int { return m.QualityCtxCeiling })
 }
 
 func installContextWindowOverrides(mr *provider.ModelRegistry, cfg *config.Config) error {
@@ -63,6 +76,20 @@ func installContextWindowOverrides(mr *provider.ModelRegistry, cfg *config.Confi
 	}
 	if len(overrides) > 0 {
 		mr.SetContextWindowOverride(func(key provider.ModelKey) int { return overrides[key] })
+	}
+	return nil
+}
+
+func installQualityCtxCeilingOverrides(mr *provider.ModelRegistry, cfg *config.Config) error {
+	if mr == nil || cfg == nil {
+		return nil
+	}
+	overrides, err := buildQualityCtxCeilingOverrides(cfg)
+	if err != nil {
+		return err
+	}
+	if len(overrides) > 0 {
+		mr.SetQualityCtxCeilingOverride(func(key provider.ModelKey) int { return overrides[key] })
 	}
 	return nil
 }

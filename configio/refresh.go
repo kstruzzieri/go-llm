@@ -93,12 +93,13 @@ func RefreshInventory(ctx context.Context, providers ProviderLister, models List
 		inv.Providers = append(inv.Providers, configview.InventoryProvider{Name: name, Reachable: true})
 		for _, f := range facts {
 			inv.Models = append(inv.Models, configview.InventoryModel{
-				Key:           f.Key,
-				Family:        f.Family,
-				Caps:          f.Caps,
-				KnownMask:     f.KnownMask,
-				ProfileSource: f.ProfileSource,
-				ContextWindow: f.ContextWindow,
+				Key:               f.Key,
+				Family:            f.Family,
+				Caps:              f.Caps,
+				KnownMask:         f.KnownMask,
+				ProfileSource:     f.ProfileSource,
+				ContextWindow:     f.ContextWindow,
+				QualityCtxCeiling: f.QualityCtxCeiling,
 			})
 		}
 	}

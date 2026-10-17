@@ -212,6 +212,9 @@ func New(ctx context.Context, opts Options) (*Bundle, error) {
 	if err := installContextWindowOverrides(mr, effCfg); err != nil {
 		return nil, err
 	}
+	if err := installQualityCtxCeilingOverrides(mr, effCfg); err != nil {
+		return nil, err
+	}
 	if err := installCapabilityOverrides(mr, effCfg); err != nil {
 		return nil, err
 	}

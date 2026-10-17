@@ -90,6 +90,7 @@ endpoint and cached in the fingerprint store (SQLite).
 | `provider` | no | Defaults to `"ollama"`; any key from the `providers` map |
 | `type` | yes | `"dense"`, `"moe"`, or `"embedding"` (validates fallback compatibility) |
 | `context_window` | no | Observed/overridden at runtime by fingerprint if wrong |
+| `quality_ctx_ceiling` | no | Trained-context ceiling for quality-sensitive use cases (`chat`, `reasoning`, `code-review`, `planning`, `analysis`); cuts the budget only when below the served `context_window` (or when the window is unknown). `0` or omitted means unset; a positive value overrides the catalog; negative values are rejected. Two roles on one provider/model with different nonzero values conflict. Set equal to `context_window` to opt out |
 | `dimensions` | no | For embedding models |
 | `capabilities` | no | Explicit capability list; **replaces** the type-derived default. See below. |
 | `fallbacks` | no | Role names to degrade to when the primary is unavailable |

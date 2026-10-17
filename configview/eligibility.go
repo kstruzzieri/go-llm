@@ -56,6 +56,20 @@ func configModelBySelector(cfg *config.Config, sel string) (config.ModelConfig, 
 	return config.ModelConfig{}, false
 }
 
+// configQualityCtxCeiling returns the first nonzero quality_ctx_ceiling across
+// every role on sel, in sorted role order. Zero means unset and Load rejects
+// different nonzero values on one selector, so any role that sets it speaks
+// for the whole selector, as provider bootstrap installs it.
+func configQualityCtxCeiling(cfg *config.Config, sel string) int {
+	for _, role := range sortedKeys(cfg.Models) {
+		m := cfg.Models[role]
+		if m.Provider+"/"+m.Name == sel && m.QualityCtxCeiling != 0 {
+			return m.QualityCtxCeiling
+		}
+	}
+	return 0
+}
+
 func allCanonicalBits() provider.Capability {
 	return provider.CanonicalCaps()
 }
