@@ -8,6 +8,7 @@
       "think_mode": "none",
       "caps": ["completion", "tools"],
       "context_window": 32768,
+      "quality_ctx_ceiling": 32768,
       "variants": {
         "0.5b": { "ram_required": 1.0, "ram_recommended": 1.5, "vram_recommended": 1.0, "quality": "basic", "speed": "fast" },
         "1.5b": { "ram_required": 1.5, "ram_recommended": 2.5, "vram_recommended": 1.5, "quality": "basic", "speed": "fast" },
@@ -27,6 +28,7 @@
       "think_tags": { "open": "<think>", "close": "</think>" },
       "caps": ["completion", "tools"],
       "context_window": 40960,
+      "quality_ctx_ceiling": 32768,
       "variants": {
         "0.6b": { "ram_required": 1.5, "ram_recommended": 2.0, "vram_recommended": 1.5, "quality": "basic", "speed": "fast" },
         "1.7b": { "ram_required": 2.0, "ram_recommended": 3.0, "vram_recommended": 2.0, "quality": "basic", "speed": "fast" },
@@ -47,6 +49,7 @@
       "think_tags": { "open": "<think>", "close": "</think>" },
       "caps": ["completion", "tools"],
       "context_window": 131072,
+      "quality_ctx_ceiling": 262144,
       "variants": {
         "7b":  { "ram_required": 5.0, "ram_recommended": 8.0, "vram_recommended": 5.0, "quality": "good", "speed": "fast" },
         "9b":  { "ram_required": 6.0, "ram_recommended": 9.0, "vram_recommended": 6.0, "quality": "good", "speed": "fast" },
@@ -64,6 +67,7 @@
       "think_tags": { "open": "<think>", "close": "</think>" },
       "caps": ["completion", "tools"],
       "context_window": 256000,
+      "quality_ctx_ceiling": 262144,
       "variants": {
         "35b": { "ram_required": 20.0, "ram_recommended": 28.0, "vram_recommended": 20.0, "quality": "best", "speed": "fast" }
       }

@@ -1253,6 +1253,11 @@ func (r *ModelRegistry) merge(
 		if static.ContextWindow > 0 {
 			profile.ContextWindow = static.ContextWindow
 		}
+
+		// The trained context (#479). Only the catalog and the config
+		// override (applied after all discovery layers) write it: fingerprint
+		// and runtime layers carry no trained-length signal.
+		profile.QualityCtxCeiling = static.QualityCtxCeiling
 	}
 
 	// Capability floor (lowest precedence, OR-merge). Guarantees baseline

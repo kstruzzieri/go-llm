@@ -750,3 +750,38 @@ func TestCanonicalCapabilityNames_Stable(t *testing.T) {
 		}
 	}
 }
+
+// TestCatalogQualityCtxCeilingSeeds pins every family's quality_ctx_ceiling.
+// Rule (spec D1.6): seed a family only when its model card itself
+// distinguishes a native length from a longer RoPE-scaled one. Card quotes,
+// re-read 2026-10-15:
+//
+//	qwen3   "Context Length: 32,768 natively and 131,072 tokens with YaRN." (Qwen/Qwen3-8B)
+//	qwen2.5 "The current config.json is set for context length up to 32,768 tokens."
+//	        + YaRN example original_max_position_embeddings 32768 (Qwen/Qwen2.5-7B-Instruct)
+//	qwen3.5 "Context Length: 262,144 natively and extensible up to 1,010,000 tokens." (Qwen/Qwen3.5-27B)
+//	qwen3.6 "Context Length: 262,144 natively and extensible up to 1,010,000 tokens." (Qwen/Qwen3.6-35B-A3B)
+//
+// Every other family must carry 0 (qwen3-coder-next's card states no scaled
+// length; gemma3/llama3.x/deepseek-r1 reach their window in training).
+func TestCatalogQualityCtxCeilingSeeds(t *testing.T) {
+	want := map[string]int{"qwen3": 32768, "qwen2.5": 32768, "qwen3.5": 262144, "qwen3.6": 262144}
+	cat, err := loadCatalog()
+	if err != nil {
+		t.Fatalf("loadCatalog: %v", err)
+	}
+	for name := range want {
+		if _, ok := cat.Families[name]; !ok {
+			t.Errorf("seeded family %q missing from catalog", name)
+		}
+	}
+	for name, fam := range cat.Families {
+		if fam.QualityCtxCeiling != want[name] {
+			t.Errorf("family %q quality_ctx_ceiling = %d, want %d", name, fam.QualityCtxCeiling, want[name])
+		}
+	}
+	sc := newStaticCatalog(cat)
+	if p := sc.lookup("qwen3", "8b"); p == nil || p.QualityCtxCeiling != 32768 {
+		t.Errorf("static lookup qwen3:8b QualityCtxCeiling = %v, want 32768", p)
+	}
+}
