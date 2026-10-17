@@ -2009,6 +2009,47 @@ func TestAgentflowResumeRefusesFinishRunWhileStepWorkRemains_RealCLI(t *testing.
 	}
 }
 
+// stageRetainedProof leaves dir as AgentFlow 1.0's non-strict finish-run left
+// it over an open attempt: a drift report, a recorded run verification and a
+// proof that verify-proof accepts. AgentFlow with kstruzzieri/agentflow#58
+// refuses to build that proof but still verifies one, so it is built in a copy
+// without the execution contract, where build-proof checks no execution
+// ledger for completeness, and hashes the same ledger bytes as dir.
+func stageRetainedProof(t *testing.T, runner agentflow.Runner, dir string) {
+	t.Helper()
+	ctx := context.Background()
+	if out, errOut, exit, err := runner.Run(ctx, []string{"audit-drift", "--root", dir}, nil); err != nil || exit != 0 {
+		t.Fatalf("audit-drift: exit=%d err=%v stdout=%s stderr=%s", exit, err, out, errOut)
+	}
+	// verify-run records its verdict either way: a warning before #58 (exit 0)
+	// and a failure from #58 on (exit 1). Resume's settlement needs a recorded
+	// run verification to reach proof_stale rather than run_unverified.
+	if out, errOut, exit, err := runner.Run(ctx, []string{"verify-run", "--root", dir}, nil); err != nil || exit > 1 {
+		t.Fatalf("verify-run: exit=%d err=%v stdout=%s stderr=%s", exit, err, out, errOut)
+	}
+	if runs, err := os.ReadFile(filepath.Join(dir, ".agent", "verification-runs.jsonl")); err != nil || !bytes.Contains(runs, []byte(`"scope": "run"`)) {
+		t.Fatalf("verification runs = %s, err = %v; want a recorded run verification", runs, err)
+	}
+	scratch := t.TempDir()
+	copyTree(t, dir, scratch)
+	if err := os.Remove(filepath.Join(scratch, ".agent", "execution.contract.json")); err != nil {
+		t.Fatal(err)
+	}
+	if out, errOut, exit, err := runner.Run(ctx, []string{"build-proof", "--root", scratch}, nil); err != nil || exit != 0 {
+		t.Fatalf("build-proof without the execution contract: exit=%d err=%v stdout=%s stderr=%s", exit, err, out, errOut)
+	}
+	proof, err := os.ReadFile(filepath.Join(scratch, ".agent", "proof-pack.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".agent", "proof-pack.json"), proof, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if out, errOut, exit, err := runner.Run(ctx, []string{"verify-proof", "--root", dir}, nil); err != nil || exit != 0 {
+		t.Fatalf("retained proof verification: exit=%d err=%v stdout=%s stderr=%s", exit, err, out, errOut)
+	}
+}
+
 // #689: a proof already invalid at entry must be preserved even when
 // next-action hides it behind unfinished step work.
 func TestAgentflowResumePreservesAlreadyStaleProof_RealCLI(t *testing.T) {
@@ -2016,9 +2057,7 @@ func TestAgentflowResumePreservesAlreadyStaleProof_RealCLI(t *testing.T) {
 		t.Run(stale, func(t *testing.T) {
 			dir, runner, client, plan, planBytes := openSettlementAttempt(t, nil, "expected\n")
 			ctx := context.Background()
-			if _, err := client.FinishRun(ctx); err != nil {
-				t.Fatal(err)
-			}
+			stageRetainedProof(t, runner, dir)
 			if stale == "ledger changed" {
 				path := filepath.Join(dir, ".agent", "step-runs.jsonl")
 				data, err := os.ReadFile(path)
@@ -2098,9 +2137,7 @@ func TestAgentflowResumeProofDisposition_RealCLI(t *testing.T) {
 					t.Fatalf("gate = %v, want exit 1", err)
 				}
 			}
-			if _, err := client.FinishRun(ctx); err != nil {
-				t.Fatalf("staging finish-run: %v", err)
-			}
+			stageRetainedProof(t, runner, dir)
 			proofPath := filepath.Join(dir, ".agent", "proof-pack.json")
 			if test.proof != "" {
 				if err := os.WriteFile(proofPath, []byte(test.proof), 0o600); err != nil {
