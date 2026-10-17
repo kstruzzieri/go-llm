@@ -156,6 +156,10 @@ func selectorStateDrop(cfg *Config, removedRole string) (string, string) {
 		return m.ContextWindow == removed.ContextWindow
 	}):
 		return survivorNames[0], "context_window"
+	case removed.QualityCtxCeiling != 0 && !preserved(func(m ModelConfig) bool {
+		return m.QualityCtxCeiling == removed.QualityCtxCeiling
+	}):
+		return survivorNames[0], "quality_ctx_ceiling"
 	case removed.Options != nil && !preserved(func(m ModelConfig) bool {
 		return m.Options != nil && reflect.DeepEqual(m.Options, removed.Options)
 	}):
@@ -305,6 +309,7 @@ func (d *Document) ForkRoleModel(sourceRole, role string, facts ModelFacts, opts
 		m.Type = facts.Type
 		m.Parameters = facts.Parameters
 		m.ContextWindow = facts.ContextWindow
+		m.QualityCtxCeiling = 0 // per-model trained length; never carried to another model (#479)
 		m.Dimensions = facts.Dimensions
 		applyRoleOverridesFromOpts(&m, opts.SetRoleModelOpts)
 		a.Models[role] = m

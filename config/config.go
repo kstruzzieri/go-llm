@@ -74,16 +74,23 @@ type ProviderConfig struct {
 // /v1/completions. When empty, capabilities derive from Type per
 // ResolvedCapabilities. See validCapabilityNames for the accepted vocabulary.
 type ModelConfig struct {
-	Name          string           `json:"name"`
-	Provider      string           `json:"provider,omitempty"`
-	Description   string           `json:"description,omitempty"`
-	Type          string           `json:"type"`
-	Parameters    string           `json:"parameters,omitempty"`
-	ContextWindow int              `json:"context_window,omitempty"`
-	Dimensions    int              `json:"dimensions,omitempty"`
-	Capabilities  []string         `json:"capabilities,omitempty"`
-	Fallbacks     []string         `json:"fallbacks,omitempty"`
-	Options       *SamplingOptions `json:"options,omitempty"`
+	Name          string `json:"name"`
+	Provider      string `json:"provider,omitempty"`
+	Description   string `json:"description,omitempty"`
+	Type          string `json:"type"`
+	Parameters    string `json:"parameters,omitempty"`
+	ContextWindow int    `json:"context_window,omitempty"`
+	// QualityCtxCeiling optionally sets this model's trained context (#479):
+	// quality-sensitive use cases (chat, reasoning, code-review, planning,
+	// analysis) budget against min(this, the served window). Overrides the
+	// catalog's per-family value. 0 = unset (JSON cannot distinguish an
+	// explicit 0 from absent); set it equal to context_window to opt out of a
+	// catalog ceiling. Must be >= 1 when present.
+	QualityCtxCeiling int              `json:"quality_ctx_ceiling,omitempty"`
+	Dimensions        int              `json:"dimensions,omitempty"`
+	Capabilities      []string         `json:"capabilities,omitempty"`
+	Fallbacks         []string         `json:"fallbacks,omitempty"`
+	Options           *SamplingOptions `json:"options,omitempty"`
 	// Slots optionally pins backend parallel-slot capacity for this
 	// model, overriding runtime discovery (#400). Requires the model's
 	// provider to opt into slot_discovery; validated at load and
@@ -660,6 +667,11 @@ func (cfg *Config) validate() error {
 				fmt.Errorf("config: model %q: provider %q not found", role, providerKey))
 		}
 
+		if m.QualityCtxCeiling < 0 {
+			return diagWrap(CodeModelInvalid, SubjectRole, role,
+				fmt.Errorf("config: model %q: quality_ctx_ceiling must be >= 1", role))
+		}
+
 		// Validate slots (#400 admission-capacity override). Bootstrap
 		// rechecks for programmatic Configs that bypass Load.
 		if m.Slots < 0 {
@@ -835,6 +847,9 @@ func selectorPairConflict(sel, ra, rb string, a, b ModelConfig) error {
 	}
 	if a.ContextWindow != 0 && b.ContextWindow != 0 && a.ContextWindow != b.ContextWindow {
 		return conflict("context_window")
+	}
+	if a.QualityCtxCeiling != 0 && b.QualityCtxCeiling != 0 && a.QualityCtxCeiling != b.QualityCtxCeiling {
+		return conflict("quality_ctx_ceiling")
 	}
 	if a.Options != nil && b.Options != nil && !reflect.DeepEqual(a.Options, b.Options) {
 		return diagWrap(CodeSelectorConflict, SubjectRole, ra,

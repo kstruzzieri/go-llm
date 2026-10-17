@@ -564,3 +564,23 @@ func TestBindUseCaseMissingRole(t *testing.T) {
 		t.Fatal("failed bind mutated authored")
 	}
 }
+
+// #479: a quality_ctx_ceiling is a fact about one model; re-pointing the
+// role must not carry it to the new model, and the drop is reported.
+func TestSetRoleModelDropsQualityCtxCeiling(t *testing.T) {
+	d := loadTestDoc(t, `{
+  "providers": {"local": {"base_url": "http://localhost:1", "api_format": "openai-compat"}},
+  "models": {"agent": {"name": "m1", "provider": "local", "type": "dense", "quality_ctx_ceiling": 32768}},
+  "defaults": {"agent": "agent"}
+}`)
+	res, err := d.SetRoleModel("agent", agentFacts(), SetRoleModelOpts{ConfirmUnknown: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.DroppedQualityCtxCeiling {
+		t.Errorf("DroppedQualityCtxCeiling = false, want true")
+	}
+	if got := d.authored.Models["agent"].QualityCtxCeiling; got != 0 {
+		t.Errorf("QualityCtxCeiling = %d after SetRoleModel to m9, want 0", got)
+	}
+}

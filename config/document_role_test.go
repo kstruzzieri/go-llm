@@ -112,6 +112,7 @@ func TestRemoveRoleRefusesSelectorStateDrop(t *testing.T) {
 		field string
 	}{
 		{"context window", `"context_window": 8192`},
+		{"quality ctx ceiling", `"quality_ctx_ceiling": 32768`},
 		{"sampling options", `"options": {"temperature": 0.2}`},
 		{"capabilities", `"capabilities": ["chat"]`},
 		{"think mode", `"think_mode": "always"`},
@@ -1239,5 +1240,23 @@ func TestSetRoleOverridesFinalizeFailureTransactional(t *testing.T) {
 	assertDiag(t, err, CodeThinkInvalid, SubjectRole, "agent")
 	if !reflect.DeepEqual(beforeEffective, d.Config()) || beforeRender != renderToString(t, d) {
 		t.Fatal("finalize refusal changed the document")
+	}
+}
+
+// #479: a fork targets a different model; the source's ceiling stays behind.
+func TestForkRoleModelClearsQualityCtxCeiling(t *testing.T) {
+	d := loadTestDoc(t, `{
+  "providers": {"local": {"base_url": "http://localhost:1", "api_format": "openai-compat"}},
+  "models": {"agent": {"name": "m1", "provider": "local", "type": "dense", "quality_ctx_ceiling": 32768}},
+  "defaults": {"agent": "agent"}
+}`)
+	if err := d.ForkRoleModel("agent", "agent-m", forkFacts(), forkOpts()); err != nil {
+		t.Fatal(err)
+	}
+	if got := d.authored.Models["agent-m"].QualityCtxCeiling; got != 0 {
+		t.Errorf("fork QualityCtxCeiling = %d, want 0", got)
+	}
+	if got := d.authored.Models["agent"].QualityCtxCeiling; got != 32768 {
+		t.Errorf("source QualityCtxCeiling = %d, want 32768 untouched", got)
 	}
 }

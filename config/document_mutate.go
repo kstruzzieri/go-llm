@@ -114,6 +114,7 @@ type SetRoleModelResult struct {
 	DroppedThinkMode          bool
 	DroppedThinkTags          bool
 	DroppedSlots              bool
+	DroppedQualityCtxCeiling  bool
 	Verdict                   provider.CapVerdict
 }
 
@@ -259,6 +260,7 @@ func (d *Document) SetRoleModel(role string, facts ModelFacts, opts SetRoleModel
 			DroppedThinkMode:          m.ThinkMode != "" && opts.ThinkMode == "",
 			DroppedThinkTags:          m.ThinkTags != nil && opts.ThinkTags == nil,
 			DroppedSlots:              m.Slots != 0,
+			DroppedQualityCtxCeiling:  m.QualityCtxCeiling != 0,
 			Verdict:                   verdict,
 		}
 
@@ -266,6 +268,7 @@ func (d *Document) SetRoleModel(role string, facts ModelFacts, opts SetRoleModel
 		m.Type = facts.Type
 		m.Parameters = facts.Parameters
 		m.ContextWindow = facts.ContextWindow
+		m.QualityCtxCeiling = 0 // per-model trained length; never carried to another model (#479)
 		m.Dimensions = facts.Dimensions
 		applyRoleOverridesFromOpts(&m, opts)
 		a.Models[role] = m
