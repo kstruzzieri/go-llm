@@ -348,3 +348,27 @@ func TestModelSummaryQualityCtxCeiling(t *testing.T) {
 		t.Fatalf("wire key missing: %s", raw)
 	}
 }
+
+// #479 R3: with no inventory, a selector shared by several roles shows the
+// ceiling any of them sets (zero means unset), as bootstrap installs it, not
+// just the first sorted role's value.
+func TestModelSummaryQualityCtxCeilingSharedSelector(t *testing.T) {
+	cfg := &config.Config{
+		Providers: map[string]config.ProviderConfig{"p": {BaseURL: "http://h:1", APIFormat: "openai-compat"}},
+		Models: map[string]config.ModelConfig{
+			"a": {Name: "m", Provider: "p", Type: "dense"},
+			"b": {Name: "m", Provider: "p", Type: "dense", QualityCtxCeiling: 24576},
+		},
+		Defaults: map[string]string{"agent": "a", "chat": "b"},
+	}
+	snap := Build(BuildInput{Doc: DocSnapshot{Config: cfg, Origin: config.Origin{Source: config.OriginProgrammatic}}})
+	for _, m := range snap.Models {
+		if m.Selector == "p/m" {
+			if m.QualityCtxCeiling != 24576 {
+				t.Fatalf("p/m QualityCtxCeiling = %d, want 24576 (role b)", m.QualityCtxCeiling)
+			}
+			return
+		}
+	}
+	t.Fatalf("no p/m summary in %+v", snap.Models)
+}

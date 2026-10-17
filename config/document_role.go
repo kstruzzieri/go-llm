@@ -309,7 +309,9 @@ func (d *Document) ForkRoleModel(sourceRole, role string, facts ModelFacts, opts
 		m.Type = facts.Type
 		m.Parameters = facts.Parameters
 		m.ContextWindow = facts.ContextWindow
-		m.QualityCtxCeiling = 0 // per-model trained length; never carried to another model (#479)
+		if !sameModelIdentity(src, facts.Key) {
+			m.QualityCtxCeiling = 0 // per-model trained length; never carried to another model (#479)
+		}
 		m.Dimensions = facts.Dimensions
 		applyRoleOverridesFromOpts(&m, opts.SetRoleModelOpts)
 		a.Models[role] = m

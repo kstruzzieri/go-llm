@@ -314,8 +314,8 @@ func buildModelSummaries(cfg *config.Config, inv map[string]InventoryModel, sele
 			ms.ProfileSource = "config"
 			if mc, ok := configModelBySelector(cfg, sel); ok {
 				ms.ContextWindow = mc.ContextWindow
-				ms.QualityCtxCeiling = mc.QualityCtxCeiling
 			}
+			ms.QualityCtxCeiling = configQualityCtxCeiling(cfg, sel)
 		}
 		out = append(out, ms)
 	}

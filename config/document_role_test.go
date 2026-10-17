@@ -1260,3 +1260,22 @@ func TestForkRoleModelClearsQualityCtxCeiling(t *testing.T) {
 		t.Errorf("source QualityCtxCeiling = %d, want 32768 untouched", got)
 	}
 }
+
+// #479 R4: a fork onto the source's own provider/model keeps the ceiling,
+// which is a fact about that model.
+func TestForkRoleModelSameModelKeepsQualityCtxCeiling(t *testing.T) {
+	d := loadTestDoc(t, `{
+  "providers": {"local": {"base_url": "http://localhost:1", "api_format": "openai-compat"}},
+  "models": {"agent": {"name": "m7", "provider": "local", "type": "moe", "quality_ctx_ceiling": 32768}},
+  "defaults": {"agent": "agent"}
+}`)
+	if err := d.ForkRoleModel("agent", "agent-m", forkFacts(), forkOpts()); err != nil { // forkFacts: local/m7, moe
+		t.Fatal(err)
+	}
+	if got := d.authored.Models["agent-m"].QualityCtxCeiling; got != 32768 {
+		t.Errorf("same-model fork QualityCtxCeiling = %d, want 32768 kept", got)
+	}
+	if got := d.authored.Models["agent"].QualityCtxCeiling; got != 32768 {
+		t.Errorf("source QualityCtxCeiling = %d, want 32768 untouched", got)
+	}
+}

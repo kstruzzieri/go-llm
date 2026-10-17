@@ -114,8 +114,12 @@ type SetRoleModelResult struct {
 	DroppedThinkMode          bool
 	DroppedThinkTags          bool
 	DroppedSlots              bool
-	DroppedQualityCtxCeiling  bool
-	Verdict                   provider.CapVerdict
+	// DroppedQualityCtxCeiling reports that a nonzero quality_ctx_ceiling
+	// was cleared because the role moved to a different provider/model. A
+	// SetRoleModel that keeps the role's provider/model preserves the
+	// ceiling and leaves this false.
+	DroppedQualityCtxCeiling bool
+	Verdict                  provider.CapVerdict
 }
 
 // validateRoleFacts applies the shared facts argument checks. op names the
@@ -224,9 +228,11 @@ func applyRoleOverridesFromOpts(m *ModelConfig, opts SetRoleModelOpts) {
 // SetRoleModel points role at a different provider/model. Preservation:
 // Fallbacks/Description/Options preserved (role-level intent); identity and
 // capacity replaced from facts (empty = unknown, never stale);
-// Capabilities, ThinkMode, ThinkTags CLEARED unless re-asserted; Slots and
-// QualityCtxCeiling CLEARED unconditionally (per-model values with no
-// re-assertion option) — a stale override carried across models could
+// Capabilities, ThinkMode, ThinkTags CLEARED unless re-asserted; Slots
+// CLEARED unconditionally; QualityCtxCeiling CLEARED only when the role's
+// effective provider/model changes (an empty Provider means "ollama"), since
+// it is a fact about one model with no re-assertion option and a same-model
+// call must not lose it — a stale override carried across models could
 // falsely assert tool_call, fabricate a trained-context ceiling, or violate
 // the per-selector invariants. The eligibility gate and the
 // finalize gate (whose validate includes the static selector-conflict
@@ -257,12 +263,13 @@ func (d *Document) SetRoleModel(role string, facts ModelFacts, opts SetRoleModel
 			return gerr
 		}
 
+		sameModel := sameModelIdentity(m, facts.Key)
 		drops := SetRoleModelResult{
 			DroppedCapabilityOverride: len(m.Capabilities) > 0 && len(opts.Capabilities) == 0,
 			DroppedThinkMode:          m.ThinkMode != "" && opts.ThinkMode == "",
 			DroppedThinkTags:          m.ThinkTags != nil && opts.ThinkTags == nil,
 			DroppedSlots:              m.Slots != 0,
-			DroppedQualityCtxCeiling:  m.QualityCtxCeiling != 0,
+			DroppedQualityCtxCeiling:  m.QualityCtxCeiling != 0 && !sameModel,
 			Verdict:                   verdict,
 		}
 
@@ -270,7 +277,9 @@ func (d *Document) SetRoleModel(role string, facts ModelFacts, opts SetRoleModel
 		m.Type = facts.Type
 		m.Parameters = facts.Parameters
 		m.ContextWindow = facts.ContextWindow
-		m.QualityCtxCeiling = 0 // per-model trained length; never carried to another model (#479)
+		if !sameModel {
+			m.QualityCtxCeiling = 0 // per-model trained length; never carried to another model (#479)
+		}
 		m.Dimensions = facts.Dimensions
 		applyRoleOverridesFromOpts(&m, opts)
 		a.Models[role] = m
@@ -281,6 +290,16 @@ func (d *Document) SetRoleModel(role string, facts ModelFacts, opts SetRoleModel
 		return zero, err
 	}
 	return res, nil
+}
+
+// sameModelIdentity reports whether m already points at key. An empty
+// Provider means "ollama", the convention selectorStateDrop uses.
+func sameModelIdentity(m ModelConfig, key provider.ModelKey) bool {
+	providerName := m.Provider
+	if providerName == "" {
+		providerName = "ollama"
+	}
+	return providerName == key.Provider && m.Name == key.Model
 }
 
 // aggregateVerdict computes the affected use-case set — every default whose
