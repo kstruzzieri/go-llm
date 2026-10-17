@@ -28,7 +28,6 @@
       "think_tags": { "open": "<think>", "close": "</think>" },
       "caps": ["completion", "tools"],
       "context_window": 40960,
-      "quality_ctx_ceiling": 32768,
       "variants": {
         "0.6b": { "ram_required": 1.5, "ram_recommended": 2.0, "vram_recommended": 1.5, "quality": "basic", "speed": "fast" },
         "1.7b": { "ram_required": 2.0, "ram_recommended": 3.0, "vram_recommended": 2.0, "quality": "basic", "speed": "fast" },

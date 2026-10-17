@@ -285,7 +285,7 @@ func TestTokenBudgetZeroContextWindow(t *testing.T) {
 //	chat:  budget 32768 - 2048 = 30720; 40000 < 1.5*30720 -> BudgetTruncate
 //	agent: budget 131072 - 2048 = 129024; 40000 fits      -> BudgetOK
 func TestTokenBudget_QualityCtxCeilingFromLookup(t *testing.T) {
-	profile := lookupQwen3YaRN(t)
+	profile := lookupQwen25YaRN(t)
 	v := NewTokenBudgetValidator()
 	prompt := strings.Repeat("a", 160_000)
 

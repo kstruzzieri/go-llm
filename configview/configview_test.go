@@ -328,7 +328,7 @@ func TestModelSummaryQualityCtxCeiling(t *testing.T) {
 	in := BuildInput{
 		Doc: DocSnapshot{Config: cfg, Origin: config.Origin{Source: config.OriginProgrammatic}},
 		Inventory: Inventory{Models: []InventoryModel{{
-			Key: provider.ModelKey{Provider: "p", Model: "q"}, Family: "qwen3",
+			Key: provider.ModelKey{Provider: "p", Model: "q"}, Family: "qwen2.5",
 			ContextWindow: 131072, QualityCtxCeiling: 32768,
 		}}},
 	}

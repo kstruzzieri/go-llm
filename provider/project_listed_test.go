@@ -316,7 +316,7 @@ func TestProjectListedModels_QualityCtxCeiling(t *testing.T) {
 		return 0
 	})
 	facts, err := mr.ProjectListedModels(context.Background(), "prov", []ModelInfo{
-		{Name: "qwen3:8b", ContextWindow: 131072},
+		{Name: "qwen2.5:7b", ContextWindow: 131072},
 		{Name: "nonesuch-9b", ContextWindow: 131072},
 	})
 	if err != nil {

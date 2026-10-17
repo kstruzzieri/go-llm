@@ -2450,23 +2450,23 @@ func TestSetCapabilityFloor_NilClearsFloor(t *testing.T) {
 	}
 }
 
-// lookupQwen3YaRN returns the production-merged profile for qwen3:8b served
+// lookupQwen25YaRN returns the production-merged profile for qwen2.5:7b served
 // with a YaRN-extended window of 131072 (runtime layer), on a registry with no
 // overrides. Shared by the #479 end-to-end tests.
-func lookupQwen3YaRN(t *testing.T) *ModelProfile {
+func lookupQwen25YaRN(t *testing.T) *ModelProfile {
 	t.Helper()
-	return lookupQwen3YaRNOn(t, nil)
+	return lookupQwen25YaRNOn(t, nil)
 }
 
-// lookupQwen3YaRNOn is lookupQwen3YaRN with a hook to configure the registry
+// lookupQwen25YaRNOn is lookupQwen25YaRN with a hook to configure the registry
 // before the first Lookup.
-func lookupQwen3YaRNOn(t *testing.T, configure func(*ModelRegistry)) *ModelProfile {
+func lookupQwen25YaRNOn(t *testing.T, configure func(*ModelRegistry)) *ModelProfile {
 	t.Helper()
 	prov := &mrMockProvider{
 		name: "ollama",
 		caps: CapChat | CapGenerate | CapStream,
 		models: []ModelInfo{{
-			Name: "qwen3:8b", Family: "qwen3", ParameterSize: "8B",
+			Name: "qwen2.5:7b", Family: "qwen2.5", ParameterSize: "7B",
 			ContextWindow: 131072, Capabilities: []string{"completion", "tools"},
 		}},
 	}
@@ -2477,7 +2477,7 @@ func lookupQwen3YaRNOn(t *testing.T, configure func(*ModelRegistry)) *ModelProfi
 	if configure != nil {
 		configure(mr)
 	}
-	profile, err := mr.Lookup(context.Background(), ModelKey{Provider: "ollama", Model: "qwen3:8b"})
+	profile, err := mr.Lookup(context.Background(), ModelKey{Provider: "ollama", Model: "qwen2.5:7b"})
 	if err != nil {
 		t.Fatalf("Lookup: %v", err)
 	}
@@ -2488,10 +2488,11 @@ func lookupQwen3YaRNOn(t *testing.T, configure func(*ModelRegistry)) *ModelProfi
 // regression: before the fix nothing outside tests wrote QualityCtxCeiling,
 // so every quality-sensitive use case received the advertised window. The
 // value must arrive through Lookup's production merge, never set by hand.
-// 32768 is the Qwen3 card's native length ("Context Length: 32,768 natively
-// and 131,072 tokens with YaRN", huggingface.co/Qwen/Qwen3-8B).
+// 32768 is the Qwen2.5 card's shipped length (Qwen/Qwen2.5-7B-Instruct: "The
+// current config.json is set for context length up to 32,768 tokens", YaRN
+// original_max_position_embeddings 32768, "Full 131,072 tokens").
 func TestModelRegistry_Lookup_QualityCtxCeilingFromCatalog(t *testing.T) {
-	profile := lookupQwen3YaRN(t)
+	profile := lookupQwen25YaRN(t)
 	if profile.ContextWindow != 131072 {
 		t.Fatalf("ContextWindow = %d, want runtime 131072 (fixture broken)", profile.ContextWindow)
 	}
@@ -2528,9 +2529,9 @@ func TestModelRegistry_Lookup_UnknownFamilyHasNoQualityCtxCeiling(t *testing.T) 
 // Config wins over the catalog, and installing the override after a profile
 // was cached must take effect (the setter flushes the profile cache).
 func TestModelRegistry_QualityCtxCeilingOverrideWins(t *testing.T) {
-	key := ModelKey{Provider: "ollama", Model: "qwen3:8b"}
+	key := ModelKey{Provider: "ollama", Model: "qwen2.5:7b"}
 	var mr *ModelRegistry
-	before := lookupQwen3YaRNOn(t, func(r *ModelRegistry) { mr = r })
+	before := lookupQwen25YaRNOn(t, func(r *ModelRegistry) { mr = r })
 	if before.QualityCtxCeiling != 32768 {
 		t.Fatalf("pre-override QualityCtxCeiling = %d, want catalog 32768", before.QualityCtxCeiling)
 	}
@@ -2572,5 +2573,34 @@ func TestModelRegistry_QualityCtxCeilingOverrideCoversUnknownFamily(t *testing.T
 	}
 	if profile.QualityCtxCeiling != 16384 {
 		t.Fatalf("QualityCtxCeiling = %d, want configured 16384", profile.QualityCtxCeiling)
+	}
+}
+
+// TestModelRegistry_Lookup_Qwen3FamilyHasNoFabricatedCeiling guards the
+// deliberately unseeded qwen3 family. The family key is ambiguous: "-coder" is
+// a known variant suffix, so qwen3-coder:30b parses to family qwen3, and so do
+// the qwen3:*-2507 refresh tags. Their cards (Qwen3-Coder-30B-A3B-Instruct,
+// Qwen3-30B-A3B-Instruct-2507) state "Context Length: 262,144 natively", while
+// original-release Qwen3 is 32,768 native. One family value would fabricate an
+// 8x budget cut for the 262,144-native models, so the catalog carries none.
+func TestModelRegistry_Lookup_Qwen3FamilyHasNoFabricatedCeiling(t *testing.T) {
+	for _, model := range []string{"qwen3:8b", "qwen3-coder:30b", "qwen3:30b-a3b-instruct-2507"} {
+		t.Run(model, func(t *testing.T) {
+			prov := &mrMockProvider{name: "ollama", models: []ModelInfo{{Name: model, ContextWindow: 262144}}}
+			mr, err := NewModelRegistry(&mrMockProviderRegistry{providers: map[string]Provider{"ollama": prov}}, newMrMockFingerprintStore())
+			if err != nil {
+				t.Fatalf("NewModelRegistry: %v", err)
+			}
+			profile, err := mr.Lookup(context.Background(), ModelKey{Provider: "ollama", Model: model})
+			if err != nil {
+				t.Fatalf("Lookup: %v", err)
+			}
+			if profile.QualityCtxCeiling != 0 {
+				t.Errorf("QualityCtxCeiling = %d, want 0 (qwen3 is unseeded)", profile.QualityCtxCeiling)
+			}
+			if got := profile.EffectiveContextWindow("chat"); got != 262144 {
+				t.Errorf("EffectiveContextWindow(chat) = %d, want full 262144", got)
+			}
+		})
 	}
 }

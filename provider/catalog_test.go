@@ -756,16 +756,19 @@ func TestCanonicalCapabilityNames_Stable(t *testing.T) {
 // distinguishes a native length from a longer RoPE-scaled one. Card quotes,
 // re-read 2026-10-15:
 //
-//	qwen3   "Context Length: 32,768 natively and 131,072 tokens with YaRN." (Qwen/Qwen3-8B)
 //	qwen2.5 "The current config.json is set for context length up to 32,768 tokens."
 //	        + YaRN example original_max_position_embeddings 32768 (Qwen/Qwen2.5-7B-Instruct)
 //	qwen3.5 "Context Length: 262,144 natively and extensible up to 1,010,000 tokens." (Qwen/Qwen3.5-27B)
 //	qwen3.6 "Context Length: 262,144 natively and extensible up to 1,010,000 tokens." (Qwen/Qwen3.6-35B-A3B)
 //
+// qwen3 carries no key: the family name also matches qwen3-coder:* and the
+// qwen3:*-2507 refresh, which are 262,144 native, so one family value would
+// fabricate a ceiling for them.
+//
 // Every other family must carry 0 (qwen3-coder-next's card states no scaled
 // length; gemma3/llama3.x/deepseek-r1 reach their window in training).
 func TestCatalogQualityCtxCeilingSeeds(t *testing.T) {
-	want := map[string]int{"qwen3": 32768, "qwen2.5": 32768, "qwen3.5": 262144, "qwen3.6": 262144}
+	want := map[string]int{"qwen2.5": 32768, "qwen3.5": 262144, "qwen3.6": 262144}
 	cat, err := loadCatalog()
 	if err != nil {
 		t.Fatalf("loadCatalog: %v", err)
@@ -781,7 +784,7 @@ func TestCatalogQualityCtxCeilingSeeds(t *testing.T) {
 		}
 	}
 	sc := newStaticCatalog(cat)
-	if p := sc.lookup("qwen3", "8b"); p == nil || p.QualityCtxCeiling != 32768 {
-		t.Errorf("static lookup qwen3:8b QualityCtxCeiling = %v, want 32768", p)
+	if p := sc.lookup("qwen2.5", "7b"); p == nil || p.QualityCtxCeiling != 32768 {
+		t.Errorf("static lookup qwen2.5:7b QualityCtxCeiling = %v, want 32768", p)
 	}
 }

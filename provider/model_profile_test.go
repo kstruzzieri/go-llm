@@ -374,6 +374,8 @@ func TestEffectiveContextWindow_ClampAndMembership(t *testing.T) {
 		{"fim gets full window", 131072, 32768, "fim", 131072},
 		{"embedding gets full window", 131072, 32768, "embedding", 131072},
 		{"summarize gets full window", 131072, 32768, "summarize", 131072},
+		{"coding gets full window", 131072, 32768, "coding", 131072},
+		{"generate gets full window", 131072, 32768, "generate", 131072},
 		{"unknown use case gets full window", 131072, 32768, "nonesuch", 131072},
 		{"ceiling above window clamps to window", 131072, 262144, "chat", 131072},
 		{"ceiling equal to window is the opt-out", 65536, 65536, "chat", 65536},

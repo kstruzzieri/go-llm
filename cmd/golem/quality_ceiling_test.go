@@ -9,6 +9,9 @@ import (
 )
 
 // qwenYaRNProvider lists one catalog-known model served with a YaRN window.
+// qwen2.5's catalog ceiling is 32768 (Qwen/Qwen2.5-7B-Instruct: "The current
+// config.json is set for context length up to 32,768 tokens", YaRN
+// original_max_position_embeddings 32768, "Full 131,072 tokens").
 type qwenYaRNProvider struct{}
 
 func (qwenYaRNProvider) Name() string { return "yarn" }
@@ -18,7 +21,7 @@ func (qwenYaRNProvider) Capabilities() provider.Capability {
 func (qwenYaRNProvider) Health(context.Context) error { return nil }
 func (qwenYaRNProvider) Models(context.Context) ([]provider.ModelInfo, error) {
 	return []provider.ModelInfo{{
-		Name: "qwen3:8b", Family: "qwen3", ParameterSize: "8B",
+		Name: "qwen2.5:7b", Family: "qwen2.5", ParameterSize: "7B",
 		ContextWindow: 131072, Capabilities: []string{"completion", "tools"},
 	}}, nil
 }
@@ -38,9 +41,9 @@ func (qwenYaRNProvider) Embed(context.Context, provider.EmbedRequest) (*provider
 	return nil, errors.New("unused")
 }
 
-// newQwen3YaRNRegistry builds the REAL provider and model registries (no
+// newQwen25YaRNRegistry builds the REAL provider and model registries (no
 // fakes past the wire) so the ceiling arrives through the production merge.
-func newQwen3YaRNRegistry(t *testing.T) (*provider.Registry, *provider.ModelRegistry) {
+func newQwen25YaRNRegistry(t *testing.T) (*provider.Registry, *provider.ModelRegistry) {
 	t.Helper()
 	providers := provider.NewRegistry()
 	if err := providers.Register(qwenYaRNProvider{}); err != nil {
@@ -62,8 +65,8 @@ func newQwen3YaRNRegistry(t *testing.T) (*provider.Registry, *provider.ModelRegi
 //	chat, planning: 32768 - 2048 (implicit chat-default reserve) = 30720
 //	agent:          131072 - 2048                                 = 129024
 func TestResolveInputCeiling_QualityCtxCeilingFromCatalog(t *testing.T) {
-	_, models := newQwen3YaRNRegistry(t)
-	chain := []string{"yarn/qwen3:8b"}
+	_, models := newQwen25YaRNRegistry(t)
+	chain := []string{"yarn/qwen2.5:7b"}
 	for useCase, want := range map[string]int{"chat": 30720, "planning": 30720, "agent": 129024} {
 		got := resolveInputCeiling(context.Background(), models, chain, useCase, 0, 0, false)
 		if got.ceiling != want || got.source != inputCeilingChainMinimum {
@@ -74,7 +77,7 @@ func TestResolveInputCeiling_QualityCtxCeilingFromCatalog(t *testing.T) {
 
 // #479: golem models -json inventory carries the merged ceiling.
 func TestBuildInventoryFromRegistry_QualityCtxCeiling(t *testing.T) {
-	providers, models := newQwen3YaRNRegistry(t)
+	providers, models := newQwen25YaRNRegistry(t)
 	inv, err := buildInventoryFromRegistry(context.Background(), providers, models, nil)
 	if err != nil {
 		t.Fatalf("buildInventoryFromRegistry: %v", err)
