@@ -498,9 +498,18 @@ func TestOpenJudgeCache_ConcurrentOpenersMigrateOnce(t *testing.T) {
 				}
 				close(start)
 				// Drain both openers before failing so neither handle leaks.
+				// The deadline turns an opener stuck on the single pooled
+				// connection (a step that kept its transaction) into a
+				// failure instead of a hang until the test binary's timeout.
+				deadline := time.After(time.Minute)
 				var c *sqliteJudgeCache
 				for range 2 {
-					r := <-results
+					var r opened
+					select {
+					case r = <-results:
+					case <-deadline:
+						t.Fatalf("round %d: an opener is still blocked after 1m", round)
+					}
 					if r.c != nil {
 						cleanupJudgeCache(t, r.c)
 						c = r.c
