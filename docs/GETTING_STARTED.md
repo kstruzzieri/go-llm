@@ -216,6 +216,23 @@ Three things in this config are easy to get wrong:
   `stream`. `tool_call` is never derived from the model `type`; without it the
   agent loop rejects the model.
 
+### Trained context vs. served window
+
+Some model families advertise a longer window than they were trained on
+(Qwen3 is trained at 32,768 tokens and reaches 131,072 with YaRN). For the
+quality-sensitive use cases (`chat`, `reasoning`, `code-review`, `planning`,
+`analysis`) go-llm budgets against the trained length, clamped to the served
+`context_window`; `agent`, `fim`, `embedding`, and side tasks always get the
+full window. go-llm knows the trained length for the Qwen3, Qwen2.5,
+Qwen3.5, and Qwen3.6 families. For any other model set it per model:
+
+```json
+"quality_ctx_ceiling": 32768
+```
+
+To opt a known family out, set `quality_ctx_ceiling` equal to its
+`context_window`.
+
 ### Secrets
 
 Set `api_key` to a `${ENV_VAR}` reference and export the variable before
