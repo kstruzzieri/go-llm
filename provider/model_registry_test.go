@@ -2450,24 +2450,27 @@ func TestSetCapabilityFloor_NilClearsFloor(t *testing.T) {
 	}
 }
 
-// lookupQwen25YaRN returns the production-merged profile for qwen2.5:7b served
-// with a YaRN-extended window of 131072 (runtime layer), on a registry with no
-// overrides. Shared by the #479 end-to-end tests.
-func lookupQwen25YaRN(t *testing.T) *ModelProfile {
+// lookupQwen35YaRN returns the production-merged profile for qwen3.5:9b served
+// with a YaRN-extended window of 1010000 (runtime layer), on a registry with no
+// overrides. Shared by the #479 end-to-end tests. The Qwen3.5 cards
+// (Qwen/Qwen3.5-9B, Qwen/Qwen3.5-27B) state "Context Length: 262,144 natively
+// and extensible up to 1,010,000 tokens", and the catalog qwen3.5 family lists
+// variant 9b.
+func lookupQwen35YaRN(t *testing.T) *ModelProfile {
 	t.Helper()
-	return lookupQwen25YaRNOn(t, nil)
+	return lookupQwen35YaRNOn(t, nil)
 }
 
-// lookupQwen25YaRNOn is lookupQwen25YaRN with a hook to configure the registry
+// lookupQwen35YaRNOn is lookupQwen35YaRN with a hook to configure the registry
 // before the first Lookup.
-func lookupQwen25YaRNOn(t *testing.T, configure func(*ModelRegistry)) *ModelProfile {
+func lookupQwen35YaRNOn(t *testing.T, configure func(*ModelRegistry)) *ModelProfile {
 	t.Helper()
 	prov := &mrMockProvider{
 		name: "ollama",
 		caps: CapChat | CapGenerate | CapStream,
 		models: []ModelInfo{{
-			Name: "qwen2.5:7b", Family: "qwen2.5", ParameterSize: "7B",
-			ContextWindow: 131072, Capabilities: []string{"completion", "tools"},
+			Name: "qwen3.5:9b", Family: "qwen3.5", ParameterSize: "9B",
+			ContextWindow: 1010000, Capabilities: []string{"completion", "tools"},
 		}},
 	}
 	mr, err := NewModelRegistry(&mrMockProviderRegistry{providers: map[string]Provider{"ollama": prov}}, newMrMockFingerprintStore())
@@ -2477,7 +2480,7 @@ func lookupQwen25YaRNOn(t *testing.T, configure func(*ModelRegistry)) *ModelProf
 	if configure != nil {
 		configure(mr)
 	}
-	profile, err := mr.Lookup(context.Background(), ModelKey{Provider: "ollama", Model: "qwen2.5:7b"})
+	profile, err := mr.Lookup(context.Background(), ModelKey{Provider: "ollama", Model: "qwen3.5:9b"})
 	if err != nil {
 		t.Fatalf("Lookup: %v", err)
 	}
@@ -2488,22 +2491,25 @@ func lookupQwen25YaRNOn(t *testing.T, configure func(*ModelRegistry)) *ModelProf
 // regression: before the fix nothing outside tests wrote QualityCtxCeiling,
 // so every quality-sensitive use case received the advertised window. The
 // value must arrive through Lookup's production merge, never set by hand.
-// 32768 is the Qwen2.5 card's shipped length (Qwen/Qwen2.5-7B-Instruct: "The
-// current config.json is set for context length up to 32,768 tokens", YaRN
-// original_max_position_embeddings 32768, "Full 131,072 tokens").
+// 262144 is the Qwen3.5 cards' native length (Qwen/Qwen3.5-9B,
+// Qwen/Qwen3.5-27B: "Context Length: 262,144 natively and extensible up to
+// 1,010,000 tokens").
+//
+//	chat:  min(window 1010000, ceiling 262144) = 262144
+//	agent: full window                         = 1010000
 func TestModelRegistry_Lookup_QualityCtxCeilingFromCatalog(t *testing.T) {
-	profile := lookupQwen25YaRN(t)
-	if profile.ContextWindow != 131072 {
-		t.Fatalf("ContextWindow = %d, want runtime 131072 (fixture broken)", profile.ContextWindow)
+	profile := lookupQwen35YaRN(t)
+	if profile.ContextWindow != 1010000 {
+		t.Fatalf("ContextWindow = %d, want runtime 1010000 (fixture broken)", profile.ContextWindow)
 	}
-	if profile.QualityCtxCeiling != 32768 {
-		t.Fatalf("QualityCtxCeiling = %d, want catalog 32768", profile.QualityCtxCeiling)
+	if profile.QualityCtxCeiling != 262144 {
+		t.Fatalf("QualityCtxCeiling = %d, want catalog 262144", profile.QualityCtxCeiling)
 	}
-	if got := profile.EffectiveContextWindow("chat"); got != 32768 {
-		t.Errorf("EffectiveContextWindow(chat) = %d, want 32768", got)
+	if got := profile.EffectiveContextWindow("chat"); got != 262144 {
+		t.Errorf("EffectiveContextWindow(chat) = %d, want 262144", got)
 	}
-	if got := profile.EffectiveContextWindow("agent"); got != 131072 {
-		t.Errorf("EffectiveContextWindow(agent) = %d, want 131072", got)
+	if got := profile.EffectiveContextWindow("agent"); got != 1010000 {
+		t.Errorf("EffectiveContextWindow(agent) = %d, want 1010000", got)
 	}
 }
 
@@ -2529,11 +2535,11 @@ func TestModelRegistry_Lookup_UnknownFamilyHasNoQualityCtxCeiling(t *testing.T) 
 // Config wins over the catalog, and installing the override after a profile
 // was cached must take effect (the setter flushes the profile cache).
 func TestModelRegistry_QualityCtxCeilingOverrideWins(t *testing.T) {
-	key := ModelKey{Provider: "ollama", Model: "qwen2.5:7b"}
+	key := ModelKey{Provider: "ollama", Model: "qwen3.5:9b"}
 	var mr *ModelRegistry
-	before := lookupQwen25YaRNOn(t, func(r *ModelRegistry) { mr = r })
-	if before.QualityCtxCeiling != 32768 {
-		t.Fatalf("pre-override QualityCtxCeiling = %d, want catalog 32768", before.QualityCtxCeiling)
+	before := lookupQwen35YaRNOn(t, func(r *ModelRegistry) { mr = r })
+	if before.QualityCtxCeiling != 262144 {
+		t.Fatalf("pre-override QualityCtxCeiling = %d, want catalog 262144", before.QualityCtxCeiling)
 	}
 	mr.SetQualityCtxCeilingOverride(func(got ModelKey) int {
 		if got == key {
@@ -2546,7 +2552,7 @@ func TestModelRegistry_QualityCtxCeilingOverrideWins(t *testing.T) {
 		t.Fatalf("Lookup: %v", err)
 	}
 	if after.QualityCtxCeiling != 24576 {
-		t.Fatalf("QualityCtxCeiling = %d, want configured 24576 over catalog 32768", after.QualityCtxCeiling)
+		t.Fatalf("QualityCtxCeiling = %d, want configured 24576 over catalog 262144", after.QualityCtxCeiling)
 	}
 	if got := after.EffectiveContextWindow("chat"); got != 24576 {
 		t.Errorf("EffectiveContextWindow(chat) = %d, want 24576", got)
@@ -2576,27 +2582,45 @@ func TestModelRegistry_QualityCtxCeilingOverrideCoversUnknownFamily(t *testing.T
 	}
 }
 
-// TestModelRegistry_Lookup_Qwen3FamilyHasNoFabricatedCeiling guards the
-// deliberately unseeded qwen3 family. The family key is ambiguous: "-coder" is
-// a known variant suffix, so qwen3-coder:30b parses to family qwen3, and so do
-// the qwen3:*-2507 refresh tags. Their cards (Qwen3-Coder-30B-A3B-Instruct,
-// Qwen3-30B-A3B-Instruct-2507) state "Context Length: 262,144 natively", while
-// original-release Qwen3 is 32,768 native. One family value would fabricate an
-// 8x budget cut for the 262,144-native models, so the catalog carries none.
-func TestModelRegistry_Lookup_Qwen3FamilyHasNoFabricatedCeiling(t *testing.T) {
-	for _, model := range []string{"qwen3:8b", "qwen3-coder:30b", "qwen3:30b-a3b-instruct-2507"} {
-		t.Run(model, func(t *testing.T) {
-			prov := &mrMockProvider{name: "ollama", models: []ModelInfo{{Name: model, ContextWindow: 262144}}}
+// TestModelRegistry_Lookup_AmbiguousFamiliesHaveNoFabricatedCeiling guards the
+// deliberately unseeded qwen3 and qwen2.5 families. Each family key also covers
+// 256K-trained releases, because "-coder" is a known variant suffix and the
+// catalog lookup never consults the tag:
+//
+//	qwen3:   qwen3-coder:* and qwen3:*-2507 are "Context Length: 262,144
+//	         natively" (Qwen3-Coder-30B-A3B-Instruct, Qwen3-30B-A3B-Instruct-2507);
+//	         original-release Qwen3 is 32,768 native.
+//	qwen2.5: qwen2.5:*-instruct-1m (Qwen2.5-1M) is trained progressively to
+//	         256K; ordinary Qwen2.5 ships a 32,768 config.
+//
+// One family value would fabricate an 8x budget cut for the 256K-trained
+// models, so the catalog carries none. Every row asserts its family first, so
+// a parser change that moved a name out of the family cannot pass vacuously.
+func TestModelRegistry_Lookup_AmbiguousFamiliesHaveNoFabricatedCeiling(t *testing.T) {
+	for _, tt := range []struct{ model, family string }{
+		{"qwen3:8b", "qwen3"},
+		{"qwen3-coder:30b", "qwen3"},
+		{"qwen3:30b-a3b-instruct-2507", "qwen3"},
+		{"qwen2.5:7b", "qwen2.5"},
+		{"qwen2.5:7b-instruct-1m", "qwen2.5"},
+		{"qwen2.5:14b-instruct-1m-q4_K_M", "qwen2.5"},
+		{"qwen2.5-coder:32b", "qwen2.5"},
+	} {
+		t.Run(tt.model, func(t *testing.T) {
+			prov := &mrMockProvider{name: "ollama", models: []ModelInfo{{Name: tt.model, ContextWindow: 262144}}}
 			mr, err := NewModelRegistry(&mrMockProviderRegistry{providers: map[string]Provider{"ollama": prov}}, newMrMockFingerprintStore())
 			if err != nil {
 				t.Fatalf("NewModelRegistry: %v", err)
 			}
-			profile, err := mr.Lookup(context.Background(), ModelKey{Provider: "ollama", Model: model})
+			profile, err := mr.Lookup(context.Background(), ModelKey{Provider: "ollama", Model: tt.model})
 			if err != nil {
 				t.Fatalf("Lookup: %v", err)
 			}
+			if profile.Family != tt.family {
+				t.Fatalf("Family = %q, want %q (row no longer exercises the family key)", profile.Family, tt.family)
+			}
 			if profile.QualityCtxCeiling != 0 {
-				t.Errorf("QualityCtxCeiling = %d, want 0 (qwen3 is unseeded)", profile.QualityCtxCeiling)
+				t.Errorf("QualityCtxCeiling = %d, want 0 (%s is unseeded)", profile.QualityCtxCeiling, tt.family)
 			}
 			if got := profile.EffectiveContextWindow("chat"); got != 262144 {
 				t.Errorf("EffectiveContextWindow(chat) = %d, want full 262144", got)

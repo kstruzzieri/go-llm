@@ -316,13 +316,13 @@ func TestProjectListedModels_QualityCtxCeiling(t *testing.T) {
 		return 0
 	})
 	facts, err := mr.ProjectListedModels(context.Background(), "prov", []ModelInfo{
-		{Name: "qwen2.5:7b", ContextWindow: 131072},
+		{Name: "qwen3.5:9b", ContextWindow: 1010000},
 		{Name: "nonesuch-9b", ContextWindow: 131072},
 	})
 	if err != nil {
 		t.Fatalf("ProjectListedModels: %v", err)
 	}
-	if facts[0].QualityCtxCeiling != 32768 || facts[1].QualityCtxCeiling != 16384 {
-		t.Fatalf("QualityCtxCeiling = %d, %d; want 32768 (catalog), 16384 (config override)", facts[0].QualityCtxCeiling, facts[1].QualityCtxCeiling)
+	if facts[0].QualityCtxCeiling != 262144 || facts[1].QualityCtxCeiling != 16384 {
+		t.Fatalf("QualityCtxCeiling = %d, %d; want 262144 (catalog), 16384 (config override)", facts[0].QualityCtxCeiling, facts[1].QualityCtxCeiling)
 	}
 }

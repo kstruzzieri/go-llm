@@ -8,7 +8,6 @@
       "think_mode": "none",
       "caps": ["completion", "tools"],
       "context_window": 32768,
-      "quality_ctx_ceiling": 32768,
       "variants": {
         "0.5b": { "ram_required": 1.0, "ram_recommended": 1.5, "vram_recommended": 1.0, "quality": "basic", "speed": "fast" },
         "1.5b": { "ram_required": 1.5, "ram_recommended": 2.5, "vram_recommended": 1.5, "quality": "basic", "speed": "fast" },
