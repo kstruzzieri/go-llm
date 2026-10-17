@@ -513,6 +513,11 @@ func TestOpenJudgeCache_ConcurrentOpenersMigrateOnce(t *testing.T) {
 					if r.c != nil {
 						cleanupJudgeCache(t, r.c)
 						c = r.c
+						// A handle returned with its one connection held
+						// would block every later query on it.
+						if inUse := r.c.db.Stats().InUse; inUse != 0 {
+							t.Errorf("round %d: opener returned with %d connection(s) in use", round, inUse)
+						}
 					}
 					if r.err != nil {
 						t.Errorf("round %d: concurrent open: %v", round, r.err)
