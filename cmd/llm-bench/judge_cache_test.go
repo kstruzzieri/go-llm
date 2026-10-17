@@ -438,3 +438,128 @@ func TestOpenJudgeCache_MemoryStaysInMemory(t *testing.T) {
 		t.Fatalf(":memory: created an on-disk file (stat err %v)", err)
 	}
 }
+
+const judgeCacheVersionsQuery = "SELECT COALESCE(group_concat(version), '') FROM (SELECT version FROM judge_cache_schema_version ORDER BY version)"
+
+// seedJudgeCacheV1 writes a schema-v1 judge cache by hand, independent of the
+// migration code under test: version row 1 and the v1 table holding one
+// entry, without the judge_provider column v2 adds.
+func seedJudgeCacheV1(t *testing.T, path string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	const v1 = `
+CREATE TABLE judge_cache_schema_version (version INTEGER PRIMARY KEY, description TEXT NOT NULL, applied_at INTEGER NOT NULL);
+INSERT INTO judge_cache_schema_version VALUES (1, 'initial judge_cache table', 1);
+CREATE TABLE judge_cache (
+	cache_key TEXT PRIMARY KEY, judge_model TEXT NOT NULL, judge_model_digest TEXT NOT NULL DEFAULT '',
+	trace_id TEXT NOT NULL, candidate_model TEXT NOT NULL, prompt_hash TEXT NOT NULL,
+	request_json TEXT NOT NULL, response_content TEXT NOT NULL, answer_quality REAL NOT NULL,
+	justification TEXT NOT NULL, created_at INTEGER NOT NULL, last_used_at INTEGER NOT NULL,
+	hit_count INTEGER NOT NULL DEFAULT 0);
+CREATE INDEX idx_judge_cache_model_trace ON judge_cache(judge_model, trace_id);
+INSERT INTO judge_cache VALUES ('v1key', 'm', '', 't', 'c', 'ph', '{}', '{}', 0.5, 'j', 1, 1, 0);`
+	if _, err := db.Exec(v1); err != nil {
+		t.Fatalf("seed v1: %v", err)
+	}
+}
+
+// Two llm-bench runs sharing the default cache path open it at once. One
+// round rarely interleaves (measured ~3.5% for the pre-#593 runner once
+// busy_timeout was set), so run many;
+// TestApplyJudgeCacheMigration_SkipsCommittedStep is the deterministic check.
+func TestOpenJudgeCache_ConcurrentOpenersMigrateOnce(t *testing.T) {
+	for _, fixture := range []struct {
+		name string
+		seed func(*testing.T, string)
+	}{
+		{"fresh", func(*testing.T, string) {}},
+		{"v1", seedJudgeCacheV1},
+	} {
+		t.Run(fixture.name, func(t *testing.T) {
+			dir := t.TempDir()
+			for round := range 25 {
+				path := filepath.Join(dir, fmt.Sprintf("judge-%d.db", round))
+				fixture.seed(t, path)
+				type opened struct {
+					c   *sqliteJudgeCache
+					err error
+				}
+				start, results := make(chan struct{}), make(chan opened, 2)
+				for range 2 {
+					go func() {
+						<-start
+						c, err := openJudgeCache(path)
+						results <- opened{c, err}
+					}()
+				}
+				close(start)
+				// Drain both openers before failing so neither handle leaks.
+				var c *sqliteJudgeCache
+				for range 2 {
+					r := <-results
+					if r.c != nil {
+						cleanupJudgeCache(t, r.c)
+						c = r.c
+					}
+					if r.err != nil {
+						t.Errorf("round %d: concurrent open: %v", round, r.err)
+					}
+				}
+				if t.Failed() {
+					return
+				}
+				if got := judgeCacheQuery(t, c.db, judgeCacheVersionsQuery); got != "1,2" {
+					t.Fatalf("round %d: versions = %q, want 1,2", round, got)
+				}
+				if got := judgeCacheQuery(t, c.db, "SELECT COUNT(*) FROM pragma_table_info('judge_cache') WHERE name = 'judge_provider'"); got != "1" {
+					t.Fatalf("round %d: judge_provider columns = %s, want 1", round, got)
+				}
+				if fixture.name == "v1" {
+					if got := judgeCacheQuery(t, c.db, "SELECT COUNT(*) FROM judge_cache WHERE cache_key = 'v1key' AND judge_provider = ''"); got != "1" {
+						t.Fatalf("round %d: v1 row after v2 = %s, want 1", round, got)
+					}
+				}
+			}
+		})
+	}
+}
+
+// An opener that read the schema version before another opener committed
+// holds a stale decision to run every step. Replaying each step against a
+// migrated cache must skip it, not rerun its non-idempotent DDL.
+func TestApplyJudgeCacheMigration_SkipsCommittedStep(t *testing.T) {
+	c, _ := newTestCache(t)
+	for _, m := range judgeCacheMigrations {
+		if err := applyJudgeCacheMigration(c.db, m); err != nil {
+			t.Errorf("stale v%d: %v", m.version, err)
+		}
+	}
+	if inUse := c.db.Stats().InUse; inUse != 0 {
+		t.Fatalf("retained connections = %d", inUse)
+	}
+	if got := judgeCacheQuery(t, c.db, judgeCacheVersionsQuery); got != "1,2" {
+		t.Fatalf("versions = %q, want 1,2", got)
+	}
+}
+
+// The claim commits with the DDL: a failed step leaves no version row, so the
+// next open retries it instead of skipping a step that never ran. The failure
+// is a runtime primary-key conflict, not a prepare error, so the CREATE before
+// it has really executed and must be rolled back.
+func TestApplyJudgeCacheMigration_FailedStepLeavesNoClaim(t *testing.T) {
+	c, _ := newTestCache(t)
+	bad := judgeCacheMigration{version: 9, description: "fails", ddl: "CREATE TABLE tentative (v TEXT); INSERT INTO judge_cache_schema_version VALUES (1, 'dup', 0);"}
+	if err := applyJudgeCacheMigration(c.db, bad); err == nil {
+		t.Fatal("failing step returned nil")
+	}
+	if got := judgeCacheQuery(t, c.db, judgeCacheVersionsQuery); got != "1,2" {
+		t.Fatalf("versions = %q, want 1,2", got)
+	}
+	if got := judgeCacheQuery(t, c.db, "SELECT COUNT(*) FROM sqlite_schema WHERE name = 'tentative'"); got != "0" {
+		t.Fatalf("tentative tables = %s, want 0", got)
+	}
+}

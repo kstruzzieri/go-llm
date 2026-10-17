@@ -185,11 +185,12 @@ func openJudgeCache(path string) (*sqliteJudgeCache, error) {
 	return &sqliteJudgeCache{db: db}, nil
 }
 
-// migrateJudgeCache applies pending DDL migrations using the
-// judge_cache_schema_version table to track applied versions. The pattern
-// matches feedback/migration.go and rag/migration.go: each migration runs
-// in its own transaction so a mid-list failure leaves the DB in a known
-// state.
+// migrateJudgeCache applies pending migrations, tracking applied versions in
+// judge_cache_schema_version, with the claim-first runner of
+// conversation/migration.go and feedback/migration.go. The version read here
+// only skips steps already applied; each step's own claim decides whether it
+// runs, so two llm-bench runs opening one cache at once apply every step
+// exactly once.
 func migrateJudgeCache(db *sql.DB) error {
 	const createVersionTable = `CREATE TABLE IF NOT EXISTS judge_cache_schema_version (
         version     INTEGER PRIMARY KEY,
@@ -254,21 +255,39 @@ var judgeCacheMigrations = []judgeCacheMigration{
 	},
 }
 
-func applyJudgeCacheMigration(db *sql.DB, m judgeCacheMigration) error {
+// applyJudgeCacheMigration runs m in one transaction whose first statement
+// claims m's version row. Being first, the claim takes the write lock without
+// upgrading a read lock, so it waits out another writer under busy_timeout
+// instead of failing at once. A claim that inserts nothing means another
+// opener already committed m, and the step is skipped. The claim commits with
+// the DDL, so a failed step leaves no version row behind.
+func applyJudgeCacheMigration(db *sql.DB, m judgeCacheMigration) (err error) {
 	tx, err := db.Begin()
 	if err != nil {
 		return fmt.Errorf("begin tx for v%d: %w", m.version, err)
 	}
-	if _, err := tx.Exec(m.ddl); err != nil {
-		_ = tx.Rollback()
-		return fmt.Errorf("apply v%d: %w", m.version, err)
-	}
-	if _, err := tx.Exec(
-		`INSERT INTO judge_cache_schema_version (version, description, applied_at) VALUES (?, ?, ?)`,
+	defer func() {
+		if rbErr := tx.Rollback(); rbErr != nil && !errors.Is(rbErr, sql.ErrTxDone) {
+			err = errors.Join(err, fmt.Errorf("rollback v%d: %w", m.version, rbErr))
+		}
+	}()
+	res, err := tx.Exec(
+		`INSERT INTO judge_cache_schema_version (version, description, applied_at)
+		 VALUES (?, ?, ?) ON CONFLICT(version) DO NOTHING`,
 		m.version, m.description, time.Now().UnixNano(),
-	); err != nil {
-		_ = tx.Rollback()
-		return fmt.Errorf("record v%d: %w", m.version, err)
+	)
+	if err != nil {
+		return fmt.Errorf("claim v%d: %w", m.version, err)
+	}
+	claimed, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("claim v%d rows: %w", m.version, err)
+	}
+	if claimed == 0 {
+		return nil
+	}
+	if _, err := tx.Exec(m.ddl); err != nil {
+		return fmt.Errorf("apply v%d: %w", m.version, err)
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit v%d: %w", m.version, err)
