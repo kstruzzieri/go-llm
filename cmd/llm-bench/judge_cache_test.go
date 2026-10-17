@@ -467,10 +467,8 @@ INSERT INTO judge_cache VALUES ('v1key', 'm', '', 't', 'c', 'ph', '{}', '{}', 0.
 	}
 }
 
-// Two llm-bench runs sharing the default cache path open it at once. One
-// round rarely interleaves (measured ~3.5% for the pre-#593 runner once
-// busy_timeout was set), so run many;
-// TestApplyJudgeCacheMigration_SkipsCommittedStep is the deterministic check.
+// Exercise both fresh and upgrading concurrent openers. The held-writer test
+// below separately forces contention instead of relying on their scheduling.
 func TestOpenJudgeCache_ConcurrentOpenersMigrateOnce(t *testing.T) {
 	for _, fixture := range []struct {
 		name string
@@ -482,60 +480,64 @@ func TestOpenJudgeCache_ConcurrentOpenersMigrateOnce(t *testing.T) {
 		t.Run(fixture.name, func(t *testing.T) {
 			dir := t.TempDir()
 			for round := range 25 {
-				path := filepath.Join(dir, fmt.Sprintf("judge-%d.db", round))
-				fixture.seed(t, path)
-				type opened struct {
-					c   *sqliteJudgeCache
-					err error
-				}
-				start, results := make(chan struct{}), make(chan opened, 2)
-				for range 2 {
-					go func() {
-						<-start
-						c, err := openJudgeCache(path)
-						results <- opened{c, err}
-					}()
-				}
-				close(start)
-				// Drain both openers before failing so neither handle leaks.
-				// The deadline turns an opener stuck on the single pooled
-				// connection (a step that kept its transaction) into a
-				// failure instead of a hang until the test binary's timeout.
-				deadline := time.After(time.Minute)
-				var c *sqliteJudgeCache
-				for range 2 {
-					var r opened
-					select {
-					case r = <-results:
-					case <-deadline:
-						t.Fatalf("round %d: an opener is still blocked after 1m", round)
+				if !t.Run(fmt.Sprintf("round-%d", round), func(t *testing.T) {
+					path := filepath.Join(dir, fmt.Sprintf("judge-%d.db", round))
+					fixture.seed(t, path)
+					type opened struct {
+						c   *sqliteJudgeCache
+						err error
 					}
-					if r.c != nil {
-						cleanupJudgeCache(t, r.c)
-						c = r.c
-						// A handle returned with its one connection held
-						// would block every later query on it.
-						if inUse := r.c.db.Stats().InUse; inUse != 0 {
-							t.Errorf("round %d: opener returned with %d connection(s) in use", round, inUse)
+					start, results := make(chan struct{}), make(chan opened, 2)
+					for range 2 {
+						go func() {
+							<-start
+							c, err := openJudgeCache(path)
+							results <- opened{c, err}
+						}()
+					}
+					close(start)
+					// Drain both openers before failing so neither handle leaks.
+					// The deadline turns an opener stuck on the single pooled
+					// connection (a step that kept its transaction) into a
+					// failure instead of a hang until the test binary's timeout.
+					deadline := time.After(time.Minute)
+					var c *sqliteJudgeCache
+					for range 2 {
+						var r opened
+						select {
+						case r = <-results:
+						case <-deadline:
+							t.Fatalf("round %d: an opener is still blocked after 1m", round)
+						}
+						if r.c != nil {
+							cleanupJudgeCache(t, r.c)
+							c = r.c
+							// A handle returned with its one connection held
+							// would block every later query on it.
+							if inUse := r.c.db.Stats().InUse; inUse != 0 {
+								t.Errorf("round %d: opener returned with %d connection(s) in use", round, inUse)
+							}
+						}
+						if r.err != nil {
+							t.Errorf("round %d: concurrent open: %v", round, r.err)
 						}
 					}
-					if r.err != nil {
-						t.Errorf("round %d: concurrent open: %v", round, r.err)
+					if t.Failed() {
+						return
 					}
-				}
-				if t.Failed() {
+					if got := judgeCacheQuery(t, c.db, judgeCacheVersionsQuery); got != "1,2" {
+						t.Fatalf("round %d: versions = %q, want 1,2", round, got)
+					}
+					if got := judgeCacheQuery(t, c.db, "SELECT COUNT(*) FROM pragma_table_info('judge_cache') WHERE name = 'judge_provider'"); got != "1" {
+						t.Fatalf("round %d: judge_provider columns = %s, want 1", round, got)
+					}
+					if fixture.name == "v1" {
+						if got := judgeCacheQuery(t, c.db, "SELECT COUNT(*) FROM judge_cache WHERE cache_key = 'v1key' AND judge_provider = ''"); got != "1" {
+							t.Fatalf("round %d: v1 row after v2 = %s, want 1", round, got)
+						}
+					}
+				}) {
 					return
-				}
-				if got := judgeCacheQuery(t, c.db, judgeCacheVersionsQuery); got != "1,2" {
-					t.Fatalf("round %d: versions = %q, want 1,2", round, got)
-				}
-				if got := judgeCacheQuery(t, c.db, "SELECT COUNT(*) FROM pragma_table_info('judge_cache') WHERE name = 'judge_provider'"); got != "1" {
-					t.Fatalf("round %d: judge_provider columns = %s, want 1", round, got)
-				}
-				if fixture.name == "v1" {
-					if got := judgeCacheQuery(t, c.db, "SELECT COUNT(*) FROM judge_cache WHERE cache_key = 'v1key' AND judge_provider = ''"); got != "1" {
-						t.Fatalf("round %d: v1 row after v2 = %s, want 1", round, got)
-					}
 				}
 			}
 		})
@@ -587,14 +589,9 @@ func TestApplyJudgeCacheMigration_FailedStepLeavesNoClaim(t *testing.T) {
 // must not leave the fragment after it, where modernc would read it as part
 // of the pragma value and fail the open.
 func TestOpenJudgeCache_FileURIFragmentIgnored(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("a file: URI of a drive path needs a leading slash; the fragment handling is OS-independent")
-	}
 	path := filepath.Join(t.TempDir(), "judge.db")
-	// openJudgeCache creates filepath.Dir of its raw input, which for a file:
-	// URI is a relative "file:..." directory; keep it out of the package dir.
 	t.Chdir(t.TempDir())
-	c, err := openJudgeCache("file:" + path + "#frag")
+	c, err := openJudgeCache(judgeCacheFileURI(t, path) + "#frag")
 	if err != nil {
 		t.Fatalf("openJudgeCache(file URI with fragment): %v", err)
 	}
@@ -604,5 +601,81 @@ func TestOpenJudgeCache_FileURIFragmentIgnored(t *testing.T) {
 	}
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("cache not at the URI's path: %v", err)
+	}
+	entries, err := os.ReadDir(".")
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("URI open created working-directory entries: %v, err=%v", entries, err)
+	}
+}
+
+func TestJudgeCacheMigrations_StrictlyIncreasingVersions(t *testing.T) {
+	previous := 0
+	for _, m := range judgeCacheMigrations {
+		if m.version <= previous {
+			t.Fatalf("migration v%d follows v%d; versions must increase", m.version, previous)
+		}
+		previous = m.version
+	}
+}
+
+func TestApplyJudgeCacheMigration_WaitsForWriterThenSkips(t *testing.T) {
+	a, path := newTestCache(t)
+	b, err := openJudgeCache(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanupJudgeCache(t, b)
+	tx, err := a.db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.Exec("INSERT INTO judge_cache_schema_version VALUES (9, 'winner', 1)"); err != nil {
+		t.Fatal(err)
+	}
+	result := make(chan error, 1)
+	go func() {
+		result <- applyJudgeCacheMigration(b.db, judgeCacheMigration{
+			version: 9, description: "loser", ddl: "CREATE TABLE must_not_run (id INTEGER)",
+		})
+	}()
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	for b.db.Stats().InUse == 0 {
+		select {
+		case err := <-result:
+			t.Fatalf("competitor returned before acquiring its connection: %v", err)
+		case <-ctx.Done():
+			t.Fatal(ctx.Err())
+		default:
+			runtime.Gosched()
+		}
+	}
+	// Keep the claim uncommitted long enough to catch an immediate lock-upgrade
+	// failure; InUse alone does not prove the statement reached SQLite.
+	select {
+	case err := <-result:
+		t.Fatalf("competitor returned before winner committed: %v", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	if inUse := b.db.Stats().InUse; inUse != 0 {
+		t.Fatalf("skipped migration retained %d connections", inUse)
+	}
+	if got := judgeCacheQuery(t, b.db, "SELECT description FROM judge_cache_schema_version WHERE version=9"); got != "winner" {
+		t.Fatalf("claim owner = %q, want winner", got)
+	}
+	if got := judgeCacheQuery(t, b.db, "SELECT COUNT(*) FROM sqlite_schema WHERE name='must_not_run'"); got != "0" {
+		t.Fatalf("competing migration executed DDL: tables=%s", got)
 	}
 }

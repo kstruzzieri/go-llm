@@ -340,8 +340,22 @@ func TestResolveRequiresExistingFileForReadModes(t *testing.T) {
 				base := t.TempDir()
 				path := filepath.Join(base, name)
 				input := "file:" + uriPath(path) + "?mode=" + mode
-				if _, _, err := Resolve(input, time.Second); !errors.Is(err, os.ErrNotExist) {
+				dsn, disk, err := Resolve(input, time.Second)
+				if !errors.Is(err, os.ErrNotExist) {
 					t.Errorf("Resolve(%q) = %v, want a missing-file error", input, err)
+				}
+				// Callers checking output collisions still need the future target,
+				// even though this URI cannot currently open a database.
+				want, err := filepath.Abs(base)
+				if runtime.GOOS != "windows" {
+					want, err = filepath.EvalSymlinks(base)
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				want = filepath.Join(want, name)
+				if dsn != "" || disk != want {
+					t.Errorf("Resolve(%q) = DSN %q, disk %q; want empty DSN and disk %q", input, dsn, disk, want)
 				}
 				if entries, err := os.ReadDir(base); err != nil || len(entries) != 0 {
 					t.Errorf("Resolve(%q) left %v, %v; want no files or directories", input, entries, err)

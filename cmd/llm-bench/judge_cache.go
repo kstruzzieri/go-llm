@@ -138,52 +138,57 @@ type sqliteJudgeCache struct {
 	misses atomic.Int64
 }
 
+// resolveJudgeCachePath gives the opener and output guards the same target.
+// Convert plain paths to URIs before Resolve so symlink/.. is not cleaned.
+func resolveJudgeCachePath(path string) (dsn, diskPath string, err error) {
+	if strings.TrimSpace(path) == "" {
+		return "", "", nil
+	}
+	if path == ":memory:" {
+		return path, "", nil
+	}
+	u, err := sqlitedsn.FileURLPreservingPath(path)
+	if err != nil {
+		return "", "", err
+	}
+	// SQLite ignores fragments; modernc would include one in the last pragma.
+	u.Fragment, u.RawFragment = "", ""
+	return sqlitedsn.Resolve(u.String(), 5*time.Second)
+}
+
 // openJudgeCache opens (and migrates) the judge cache DB at path. Empty
 // path returns (nil, nil) so callers can disable the cache by passing "".
 // Callers MUST check for a nil concrete pointer before assigning to a
 // judgeCacheStore interface variable to avoid the typed-nil interface trap.
 func openJudgeCache(path string) (*sqliteJudgeCache, error) {
-	if strings.TrimSpace(path) == "" {
+	dsn, diskPath, err := resolveJudgeCachePath(path)
+	if err != nil {
+		return nil, fmt.Errorf("%w %q: %w", errJudgeCacheOpen, path, err)
+	}
+	if dsn == "" {
 		return nil, nil
 	}
-	if dir := filepath.Dir(path); dir != "." && dir != "" {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			return nil, fmt.Errorf("%w %q: mkdir parent: %v", errJudgeCacheOpen, path, err)
+	if diskPath != "" {
+		if err := os.MkdirAll(filepath.Dir(diskPath), 0o755); err != nil {
+			return nil, fmt.Errorf("%w %q: mkdir parent: %w", errJudgeCacheOpen, path, err)
 		}
-	}
-	// busy_timeout rides in the DSN so every pooled connection gets it,
-	// replacements included: another llm-bench run sharing the cache then
-	// makes this one wait for its write lock instead of failing at once.
-	// Not sqlitedsn.WithBusyTimeout or Resolve: their FileURL cleans ".."
-	// lexically, but SQLite and the -report collision guard
-	// (canonicalFuturePath) resolve symlinks first, so the cache would open a
-	// file the guard never checked.
-	dsn := path
-	if path != ":memory:" {
-		u, err := sqlitedsn.FileURLPreservingPath(path)
-		if err != nil {
-			return nil, fmt.Errorf("%w %q: %v", errJudgeCacheOpen, path, err)
-		}
-		q := u.Query()
-		q.Add("_pragma", "busy_timeout(5000)")
-		u.RawQuery = q.Encode()
-		// SQLite ignores a URI fragment, but after the query modernc would
-		// read it as part of the pragma value and fail the open.
-		u.Fragment, u.RawFragment = "", ""
-		dsn = u.String()
 	}
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
-		return nil, fmt.Errorf("%w %q: %v", errJudgeCacheOpen, path, err)
+		return nil, fmt.Errorf("%w %q: %w", errJudgeCacheOpen, path, err)
 	}
 	db.SetMaxOpenConns(1) // SQLite does not support concurrent writers; serialize all ops.
 	if err := db.Ping(); err != nil {
 		_ = db.Close()
-		return nil, fmt.Errorf("%w %q: %v", errJudgeCacheOpen, path, err)
+		return nil, fmt.Errorf("%w %q: %w", errJudgeCacheOpen, path, err)
+	}
+	if err := sqlitedsn.CheckMainFile(context.Background(), db, diskPath); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("%w %q: %w", errJudgeCacheOpen, path, err)
 	}
 	if err := migrateJudgeCache(db); err != nil {
 		_ = db.Close()
-		return nil, fmt.Errorf("%w: %v", errJudgeCacheMigrate, err)
+		return nil, fmt.Errorf("%w: %w", errJudgeCacheMigrate, err)
 	}
 	return &sqliteJudgeCache{db: db}, nil
 }

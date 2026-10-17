@@ -43,6 +43,8 @@ const maxSymlinks = 200
 // a user or a host other than localhost, a fragment, and everything FileURL
 // rejects. A mode=ro or mode=rw URI requires an existing file, so preparing
 // the resolved path cannot silently create a database the URI forbids.
+// If that existence check fails, diskPath still identifies the target for
+// collision checks, but dsn is empty and the error must prevent opening it.
 // The file can still change between Resolve and the open; CheckMainFile
 // detects SQLite and Resolve disagreeing, not a concurrent swap.
 func Resolve(input string, busy time.Duration) (dsn, diskPath string, err error) {
@@ -88,7 +90,7 @@ func Resolve(input string, busy time.Duration) (dsn, diskPath string, err error)
 	}
 	if mode := u.Query().Get("mode"); mode == "ro" || mode == "rw" {
 		if _, err := os.Stat(diskPath); err != nil {
-			return "", "", fmt.Errorf("sqlitedsn: URI %q requires an existing database for mode=%s: %w", input, mode, err)
+			return "", diskPath, fmt.Errorf("sqlitedsn: URI %q requires an existing database for mode=%s: %w", input, mode, err)
 		}
 	}
 	return withBusyTimeout(u, busy), diskPath, nil

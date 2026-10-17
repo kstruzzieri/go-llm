@@ -1213,12 +1213,22 @@ func refuseOutputAlias(mode, outFlag, outPath string, inputs [][2]string) {
 		if strings.TrimSpace(inPath) == "" {
 			continue
 		}
+		if inFlag == "-judge-cache" {
+			_, diskPath, _ := resolveJudgeCachePath(inPath)
+			if diskPath == "" {
+				// Memory caches and invalid URIs without a target name no file.
+				continue
+			}
+			// Protect a known future target even when mode=ro/rw currently
+			// cannot open it: another process could create it before the report.
+			inPath = diskPath
+		}
 		same, err := pathsAlias(outPath, inPath)
 		if err != nil {
 			log.Fatalf("llm-bench: %s: cannot resolve %s or %s: %v", mode, outFlag, inFlag, err)
 		}
 		if same {
-			if filepath.Clean(outPath) == filepath.Clean(inPath) {
+			if filepath.Clean(outPath) == filepath.Clean(in[1]) {
 				log.Fatalf("llm-bench: %s: %s must differ from %s (it would overwrite the input)", mode, outFlag, inFlag)
 			}
 			log.Fatalf("llm-bench: %s: %s resolves to the same file as %s; choose a different output path", mode, outFlag, inFlag)
