@@ -81,6 +81,40 @@ func TestResolveInputCeiling_QualityCtxCeilingFromCatalog(t *testing.T) {
 	}
 }
 
+// #479 R2: with no served window, a configured ceiling is the router's budget
+// for a quality-sensitive use case (window 0, ceiling > 0 gives
+// EffectiveContextWindow = ceiling), so Golem must size against it rather
+// than the 8192 safe fallback. A capacity use case still has no window.
+//
+//	planning: 6144 - 2048 (implicit chat-default reserve) = 4096, chain minimum
+//	agent:    no effective window -> 8192 (agent.DefaultInputCeiling), safe fallback
+func TestResolveInputCeiling_ConfigCeilingWithUnknownWindow(t *testing.T) {
+	key := provider.ModelKey{Provider: "yarn", Model: "nonesuch-9b"}
+	_, models := newListedRegistry(t, provider.ModelInfo{
+		Name: key.Model, Capabilities: []string{"completion", "tools"},
+	})
+	models.SetQualityCtxCeilingOverride(func(k provider.ModelKey) int {
+		if k == key {
+			return 6144
+		}
+		return 0
+	})
+	chain := []string{"yarn/nonesuch-9b"}
+	for _, tt := range []struct {
+		useCase string
+		ceiling int
+		source  inputCeilingSource
+	}{
+		{"planning", 4096, inputCeilingChainMinimum},
+		{"agent", 8192, inputCeilingSafeFallback},
+	} {
+		got := resolveInputCeiling(context.Background(), models, chain, tt.useCase, 0, 0, false)
+		if got.ceiling != tt.ceiling || got.source != tt.source {
+			t.Errorf("%s: ceiling=%d source=%q, want %d %q", tt.useCase, got.ceiling, got.source, tt.ceiling, tt.source)
+		}
+	}
+}
+
 // #479: golem models -json inventory carries the merged ceiling.
 func TestBuildInventoryFromRegistry_QualityCtxCeiling(t *testing.T) {
 	providers, models := newQwen35YaRNRegistry(t)
