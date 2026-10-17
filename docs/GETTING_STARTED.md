@@ -207,9 +207,10 @@ or original-release Qwen3 checkpoint served with a YaRN window:
 }
 ```
 
-`0` or omitted means unset; a positive value overrides the catalog; negative
-values are rejected. Two roles on one provider/model with different nonzero
-values conflict at load. To opt a seeded family out, set
+`0` or omitted means unset and preserves any catalog ceiling; zero does not
+disable it. A positive value overrides the catalog; negative values are
+rejected. Two roles on one provider/model with different nonzero values
+conflict at load. To opt a seeded family out, set
 `quality_ctx_ceiling` equal to its `context_window`.
 
 A smaller budget also lowers the router's headroom score, which can change
