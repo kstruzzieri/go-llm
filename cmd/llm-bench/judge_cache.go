@@ -203,15 +203,30 @@ func migrateJudgeCache(db *sql.DB) error {
 	if err := db.QueryRow(`SELECT COALESCE(MAX(version),0) FROM judge_cache_schema_version`).Scan(&current); err != nil {
 		return fmt.Errorf("read schema version: %w", err)
 	}
-	migrations := []struct {
-		version     int
-		description string
-		ddl         string
-	}{
-		{
-			version:     1,
-			description: "initial judge_cache table",
-			ddl: `
+	for _, m := range judgeCacheMigrations {
+		if m.version <= current {
+			continue
+		}
+		if err := applyJudgeCacheMigration(db, m); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// judgeCacheMigration is one schema step. ddl may hold several statements and
+// need not be idempotent: applyJudgeCacheMigration runs it at most once.
+type judgeCacheMigration struct {
+	version     int
+	description string
+	ddl         string
+}
+
+var judgeCacheMigrations = []judgeCacheMigration{
+	{
+		version:     1,
+		description: "initial judge_cache table",
+		ddl: `
             CREATE TABLE judge_cache (
                 cache_key          TEXT PRIMARY KEY,
                 judge_model        TEXT NOT NULL,
@@ -229,37 +244,34 @@ func migrateJudgeCache(db *sql.DB) error {
             );
             CREATE INDEX idx_judge_cache_model_trace ON judge_cache(judge_model, trace_id);
             `,
-		},
-		{
-			version:     2,
-			description: "add judge_provider column for provider-instance provenance",
-			ddl: `
+	},
+	{
+		version:     2,
+		description: "add judge_provider column for provider-instance provenance",
+		ddl: `
             ALTER TABLE judge_cache ADD COLUMN judge_provider TEXT NOT NULL DEFAULT '';
             `,
-		},
+	},
+}
+
+func applyJudgeCacheMigration(db *sql.DB, m judgeCacheMigration) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin tx for v%d: %w", m.version, err)
 	}
-	for _, m := range migrations {
-		if m.version <= current {
-			continue
-		}
-		tx, err := db.Begin()
-		if err != nil {
-			return fmt.Errorf("begin tx for v%d: %w", m.version, err)
-		}
-		if _, err := tx.Exec(m.ddl); err != nil {
-			_ = tx.Rollback()
-			return fmt.Errorf("apply v%d: %w", m.version, err)
-		}
-		if _, err := tx.Exec(
-			`INSERT INTO judge_cache_schema_version (version, description, applied_at) VALUES (?, ?, ?)`,
-			m.version, m.description, time.Now().UnixNano(),
-		); err != nil {
-			_ = tx.Rollback()
-			return fmt.Errorf("record v%d: %w", m.version, err)
-		}
-		if err := tx.Commit(); err != nil {
-			return fmt.Errorf("commit v%d: %w", m.version, err)
-		}
+	if _, err := tx.Exec(m.ddl); err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("apply v%d: %w", m.version, err)
+	}
+	if _, err := tx.Exec(
+		`INSERT INTO judge_cache_schema_version (version, description, applied_at) VALUES (?, ?, ?)`,
+		m.version, m.description, time.Now().UnixNano(),
+	); err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("record v%d: %w", m.version, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit v%d: %w", m.version, err)
 	}
 	return nil
 }
