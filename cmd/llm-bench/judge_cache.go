@@ -167,6 +167,9 @@ func openJudgeCache(path string) (*sqliteJudgeCache, error) {
 		q := u.Query()
 		q.Add("_pragma", "busy_timeout(5000)")
 		u.RawQuery = q.Encode()
+		// SQLite ignores a URI fragment, but after the query modernc would
+		// read it as part of the pragma value and fail the open.
+		u.Fragment, u.RawFragment = "", ""
 		dsn = u.String()
 	}
 	db, err := sql.Open("sqlite", dsn)

@@ -537,9 +537,11 @@ func TestApplyJudgeCacheMigration_SkipsCommittedStep(t *testing.T) {
 		if err := applyJudgeCacheMigration(c.db, m); err != nil {
 			t.Errorf("stale v%d: %v", m.version, err)
 		}
-	}
-	if inUse := c.db.Stats().InUse; inUse != 0 {
-		t.Fatalf("retained connections = %d", inUse)
+		// The pool holds one connection: a skipped step that kept its
+		// transaction open would block the next Begin forever.
+		if inUse := c.db.Stats().InUse; inUse != 0 {
+			t.Fatalf("after stale v%d: retained connections = %d", m.version, inUse)
+		}
 	}
 	if got := judgeCacheQuery(t, c.db, judgeCacheVersionsQuery); got != "1,2" {
 		t.Fatalf("versions = %q, want 1,2", got)
@@ -556,10 +558,34 @@ func TestApplyJudgeCacheMigration_FailedStepLeavesNoClaim(t *testing.T) {
 	if err := applyJudgeCacheMigration(c.db, bad); err == nil {
 		t.Fatal("failing step returned nil")
 	}
+	if inUse := c.db.Stats().InUse; inUse != 0 {
+		t.Fatalf("retained connections = %d", inUse)
+	}
 	if got := judgeCacheQuery(t, c.db, judgeCacheVersionsQuery); got != "1,2" {
 		t.Fatalf("versions = %q, want 1,2", got)
 	}
 	if got := judgeCacheQuery(t, c.db, "SELECT COUNT(*) FROM sqlite_schema WHERE name = 'tentative'"); got != "0" {
 		t.Fatalf("tentative tables = %s, want 0", got)
+	}
+}
+
+// SQLite ignores a file: URI's fragment. Appending the busy_timeout query
+// must not leave the fragment after it, where modernc would read it as part
+// of the pragma value and fail the open.
+func TestOpenJudgeCache_FileURIFragmentIgnored(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("a file: URI of a drive path needs a leading slash; the fragment handling is OS-independent")
+	}
+	path := filepath.Join(t.TempDir(), "judge.db")
+	c, err := openJudgeCache("file:" + path + "#frag")
+	if err != nil {
+		t.Fatalf("openJudgeCache(file URI with fragment): %v", err)
+	}
+	cleanupJudgeCache(t, c)
+	if got := judgeCacheQuery(t, c.db, "PRAGMA busy_timeout"); got != "5000" {
+		t.Fatalf("busy_timeout = %s, want 5000", got)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("cache not at the URI's path: %v", err)
 	}
 }
