@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -375,5 +377,64 @@ func TestJudgeCacheGetPreservesVerdictOnHit(t *testing.T) {
 	}
 	if got.Justification != want.Justification {
 		t.Fatalf("Get returned Justification=%q; want %q", got.Justification, want.Justification)
+	}
+}
+
+func judgeCacheQuery(t *testing.T, db *sql.DB, query string) string {
+	t.Helper()
+	var got string
+	if err := db.QueryRow(query).Scan(&got); err != nil {
+		t.Fatalf("Query(%q): %v", query, err)
+	}
+	return got
+}
+
+func TestOpenJudgeCache_BusyTimeoutOnEveryConnection(t *testing.T) {
+	c, _ := newTestCache(t)
+	// Drop idle connections so each query runs on a connection opened after
+	// openJudgeCache returned; a one-off PRAGMA at open would not reach it.
+	c.db.SetMaxIdleConns(0)
+	for i := range 2 {
+		if got := judgeCacheQuery(t, c.db, "PRAGMA busy_timeout"); got != "5000" {
+			t.Fatalf("query %d: busy_timeout = %s, want 5000", i, got)
+		}
+	}
+}
+
+// The cache must open the file the -report collision guard resolved:
+// symlinks first, then "..", as SQLite does, not lexical cleaning.
+func TestOpenJudgeCache_ResolvesSymlinkBeforeDotDot(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlinks need privileges on Windows; FileURLPreservingPath defers to FileURL there")
+	}
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "real", "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(root, "real", "sub"), filepath.Join(root, "link")); err != nil {
+		t.Fatal(err)
+	}
+	c, err := openJudgeCache(filepath.Join(root, "link") + "/../judge.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanupJudgeCache(t, c)
+	if _, err := os.Stat(filepath.Join(root, "real", "judge.db")); err != nil {
+		t.Fatalf("cache not at the symlink-resolved path: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "judge.db")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("cache opened at the lexically cleaned path (stat err %v)", err)
+	}
+}
+
+func TestOpenJudgeCache_MemoryStaysInMemory(t *testing.T) {
+	t.Chdir(t.TempDir())
+	c, err := openJudgeCache(":memory:")
+	if err != nil {
+		t.Fatalf("openJudgeCache(:memory:): %v", err)
+	}
+	cleanupJudgeCache(t, c)
+	if _, err := os.Stat(":memory:"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf(":memory: created an on-disk file (stat err %v)", err)
 	}
 }

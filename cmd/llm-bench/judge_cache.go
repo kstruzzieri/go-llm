@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/kstruzzieri/go-llm/internal/sqlitedsn"
 	_ "modernc.org/sqlite"
 )
 
@@ -150,7 +151,25 @@ func openJudgeCache(path string) (*sqliteJudgeCache, error) {
 			return nil, fmt.Errorf("%w %q: mkdir parent: %v", errJudgeCacheOpen, path, err)
 		}
 	}
-	db, err := sql.Open("sqlite", path)
+	// busy_timeout rides in the DSN so every pooled connection gets it,
+	// replacements included: another llm-bench run sharing the cache then
+	// makes this one wait for its write lock instead of failing at once.
+	// Not sqlitedsn.WithBusyTimeout or Resolve: their FileURL cleans ".."
+	// lexically, but SQLite and the -report collision guard
+	// (canonicalFuturePath) resolve symlinks first, so the cache would open a
+	// file the guard never checked.
+	dsn := path
+	if path != ":memory:" {
+		u, err := sqlitedsn.FileURLPreservingPath(path)
+		if err != nil {
+			return nil, fmt.Errorf("%w %q: %v", errJudgeCacheOpen, path, err)
+		}
+		q := u.Query()
+		q.Add("_pragma", "busy_timeout(5000)")
+		u.RawQuery = q.Encode()
+		dsn = u.String()
+	}
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("%w %q: %v", errJudgeCacheOpen, path, err)
 	}
