@@ -2524,3 +2524,53 @@ func TestModelRegistry_Lookup_UnknownFamilyHasNoQualityCtxCeiling(t *testing.T) 
 		t.Errorf("EffectiveContextWindow(chat) = %d, want full 131072", got)
 	}
 }
+
+// Config wins over the catalog, and installing the override after a profile
+// was cached must take effect (the setter flushes the profile cache).
+func TestModelRegistry_QualityCtxCeilingOverrideWins(t *testing.T) {
+	key := ModelKey{Provider: "ollama", Model: "qwen3:8b"}
+	var mr *ModelRegistry
+	before := lookupQwen3YaRNOn(t, func(r *ModelRegistry) { mr = r })
+	if before.QualityCtxCeiling != 32768 {
+		t.Fatalf("pre-override QualityCtxCeiling = %d, want catalog 32768", before.QualityCtxCeiling)
+	}
+	mr.SetQualityCtxCeilingOverride(func(got ModelKey) int {
+		if got == key {
+			return 24576
+		}
+		return 0
+	})
+	after, err := mr.Lookup(context.Background(), key)
+	if err != nil {
+		t.Fatalf("Lookup: %v", err)
+	}
+	if after.QualityCtxCeiling != 24576 {
+		t.Fatalf("QualityCtxCeiling = %d, want configured 24576 over catalog 32768", after.QualityCtxCeiling)
+	}
+	if got := after.EffectiveContextWindow("chat"); got != 24576 {
+		t.Errorf("EffectiveContextWindow(chat) = %d, want 24576", got)
+	}
+}
+
+// The override covers models the catalog does not know (local BYO, cloud).
+func TestModelRegistry_QualityCtxCeilingOverrideCoversUnknownFamily(t *testing.T) {
+	key := ModelKey{Provider: "ollama", Model: "nonesuch-9b"}
+	prov := &mrMockProvider{name: "ollama", models: []ModelInfo{{Name: key.Model, ContextWindow: 131072}}}
+	mr, err := NewModelRegistry(&mrMockProviderRegistry{providers: map[string]Provider{"ollama": prov}}, newMrMockFingerprintStore())
+	if err != nil {
+		t.Fatalf("NewModelRegistry: %v", err)
+	}
+	mr.SetQualityCtxCeilingOverride(func(got ModelKey) int {
+		if got == key {
+			return 16384
+		}
+		return 0
+	})
+	profile, err := mr.Lookup(context.Background(), key)
+	if err != nil {
+		t.Fatalf("Lookup: %v", err)
+	}
+	if profile.QualityCtxCeiling != 16384 {
+		t.Fatalf("QualityCtxCeiling = %d, want configured 16384", profile.QualityCtxCeiling)
+	}
+}

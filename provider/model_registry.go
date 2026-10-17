@@ -50,19 +50,20 @@ type ProviderResolver interface {
 // Sharing a registry across live Routers is unsupported; if that
 // topology is ever needed, admission moves to a shared owner first.
 type ModelRegistry struct {
-	mu              sync.RWMutex
-	profiles        map[ModelKey]*ModelProfile
-	catalog         *staticCatalog
-	fpStore         fingerprint.Store
-	fpProberFactory FingerprintProberFactory
-	fpReadOnly      bool
-	providers       ProviderResolver
-	capOverride     CapabilityOverride
-	capFloor        CapabilityFloor
-	thinkOverride   ThinkOverride
-	contextOverride ContextWindowOverride
-	overrideVersion uint64 // bumped by policy setters and invalidateProfile; guards stale cache writes in buildProfile
-	rejectionHook   OverrideRejectionHook
+	mu                     sync.RWMutex
+	profiles               map[ModelKey]*ModelProfile
+	catalog                *staticCatalog
+	fpStore                fingerprint.Store
+	fpProberFactory        FingerprintProberFactory
+	fpReadOnly             bool
+	providers              ProviderResolver
+	capOverride            CapabilityOverride
+	capFloor               CapabilityFloor
+	thinkOverride          ThinkOverride
+	contextOverride        ContextWindowOverride
+	qualityCeilingOverride QualityCtxCeilingOverride
+	overrideVersion        uint64 // bumped by policy setters and invalidateProfile; guards stale cache writes in buildProfile
+	rejectionHook          OverrideRejectionHook
 
 	// Capability-probe resolution (ResolveToolCall). Both fields are set
 	// only at construction via options and never mutated afterward, so
@@ -318,6 +319,23 @@ func (r *ModelRegistry) SetContextWindowOverride(fn ContextWindowOverride) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.contextOverride = fn
+	r.overrideVersion++
+	clear(r.profiles)
+}
+
+// QualityCtxCeilingOverride returns the configured trained-context ceiling
+// for a model (models.json quality_ctx_ceiling, #479). A value <= 0 leaves
+// the catalog value intact.
+type QualityCtxCeilingOverride func(key ModelKey) int
+
+// SetQualityCtxCeilingOverride installs (or clears) configured quality
+// ceilings. Config is authoritative, so the override applies after all
+// discovery layers. Same invalidation and version-guard semantics as
+// SetContextWindowOverride.
+func (r *ModelRegistry) SetQualityCtxCeilingOverride(fn QualityCtxCeilingOverride) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.qualityCeilingOverride = fn
 	r.overrideVersion++
 	clear(r.profiles)
 }
@@ -924,6 +942,7 @@ func (r *ModelRegistry) buildProfile(ctx context.Context, key ModelKey) (*ModelP
 	floor := r.capFloor
 	thinkOverride := r.thinkOverride
 	contextOverride := r.contextOverride
+	qualityCeilingOverride := r.qualityCeilingOverride
 	overrideVer := r.overrideVersion
 	rejectionHook := r.rejectionHook
 	r.mu.RUnlock()
@@ -949,7 +968,7 @@ func (r *ModelRegistry) buildProfile(ctx context.Context, key ModelKey) (*ModelP
 
 	// Merge layers using the (override, floor, rejectionHook) snapshot
 	// taken at function entry.
-	profile := r.merge(key, runtimeInfo, staticProfile, fpProfile, parsed, override, floor, thinkOverride, contextOverride, rejectionHook, capProbeCaps)
+	profile := r.merge(key, runtimeInfo, staticProfile, fpProfile, parsed, override, floor, thinkOverride, contextOverride, qualityCeilingOverride, rejectionHook, capProbeCaps)
 
 	// Cache the result iff the override snapshot is still current.
 	r.mu.Lock()
@@ -1227,6 +1246,7 @@ func (r *ModelRegistry) merge(
 	floor CapabilityFloor,
 	thinkOverride ThinkOverride,
 	contextOverride ContextWindowOverride,
+	qualityCeilingOverride QualityCtxCeilingOverride,
 	rejectionHook OverrideRejectionHook,
 	capProbeCaps Capability,
 ) *ModelProfile {
@@ -1340,6 +1360,11 @@ func (r *ModelRegistry) merge(
 	if contextOverride != nil {
 		if configured := contextOverride(key); configured > 0 {
 			profile.ContextWindow = configured
+		}
+	}
+	if qualityCeilingOverride != nil {
+		if configured := qualityCeilingOverride(key); configured > 0 {
+			profile.QualityCtxCeiling = configured
 		}
 	}
 
