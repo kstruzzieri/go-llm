@@ -38,12 +38,13 @@ type DocSnapshot struct {
 // InventoryModel is one discovered model. KnownMask carries the bits that
 // have a definitive answer; a set Caps bit always counts as known.
 type InventoryModel struct {
-	Key           provider.ModelKey   `json:"key"`
-	Family        string              `json:"family,omitempty"`
-	Caps          provider.Capability `json:"caps"`
-	KnownMask     provider.Capability `json:"known_mask"`
-	ProfileSource string              `json:"profile_source,omitempty"`
-	ContextWindow int                 `json:"context_window,omitempty"`
+	Key               provider.ModelKey   `json:"key"`
+	Family            string              `json:"family,omitempty"`
+	Caps              provider.Capability `json:"caps"`
+	KnownMask         provider.Capability `json:"known_mask"`
+	ProfileSource     string              `json:"profile_source,omitempty"`
+	ContextWindow     int                 `json:"context_window,omitempty"`
+	QualityCtxCeiling int                 `json:"quality_ctx_ceiling,omitempty"`
 }
 
 // InventoryProvider reports provider reachability from an explicit refresh.
@@ -103,13 +104,14 @@ type RoleBinding struct {
 // ModelSummary is one model card. Type is "" when config roles disagree on
 // the selector's type (a selector_type_conflict diagnostic is emitted).
 type ModelSummary struct {
-	Selector      string   `json:"selector"`
-	Provider      string   `json:"provider"`
-	Type          string   `json:"type,omitempty"`
-	Family        string   `json:"family,omitempty"`
-	Caps          []string `json:"caps,omitempty"`
-	ProfileSource string   `json:"profile_source,omitempty"`
-	ContextWindow int      `json:"context_window,omitempty"`
+	Selector          string   `json:"selector"`
+	Provider          string   `json:"provider"`
+	Type              string   `json:"type,omitempty"`
+	Family            string   `json:"family,omitempty"`
+	Caps              []string `json:"caps,omitempty"`
+	ProfileSource     string   `json:"profile_source,omitempty"`
+	ContextWindow     int      `json:"context_window,omitempty"`
+	QualityCtxCeiling int      `json:"quality_ctx_ceiling,omitempty"`
 }
 
 // ProviderSummary is one provider card. Endpoint is normalized to
@@ -306,11 +308,13 @@ func buildModelSummaries(cfg *config.Config, inv map[string]InventoryModel, sele
 			ms.Family = m.Family
 			ms.ProfileSource = m.ProfileSource
 			ms.ContextWindow = m.ContextWindow
+			ms.QualityCtxCeiling = m.QualityCtxCeiling
 		} else {
 			ms.Provider = selectorProvider(sel)
 			ms.ProfileSource = "config"
 			if mc, ok := configModelBySelector(cfg, sel); ok {
 				ms.ContextWindow = mc.ContextWindow
+				ms.QualityCtxCeiling = mc.QualityCtxCeiling
 			}
 		}
 		out = append(out, ms)

@@ -71,3 +71,15 @@ func TestResolveInputCeiling_QualityCtxCeilingFromCatalog(t *testing.T) {
 		}
 	}
 }
+
+// #479: golem models -json inventory carries the merged ceiling.
+func TestBuildInventoryFromRegistry_QualityCtxCeiling(t *testing.T) {
+	providers, models := newQwen3YaRNRegistry(t)
+	inv, err := buildInventoryFromRegistry(context.Background(), providers, models, nil)
+	if err != nil {
+		t.Fatalf("buildInventoryFromRegistry: %v", err)
+	}
+	if len(inv.Models) != 1 || inv.Models[0].QualityCtxCeiling != 32768 {
+		t.Fatalf("inventory = %+v, want one model with QualityCtxCeiling 32768", inv.Models)
+	}
+}

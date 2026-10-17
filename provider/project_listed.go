@@ -27,6 +27,9 @@ type ListedModelFacts struct {
 	// configview.InventoryModel.ProfileSource, the slice-4 wire field.
 	ProfileSource string
 	ContextWindow int
+	// QualityCtxCeiling is the merged trained-context ceiling (#479); feeds
+	// configview.InventoryModel.QualityCtxCeiling.
+	QualityCtxCeiling int
 }
 
 type listedProjectionPolicy struct {
@@ -122,11 +125,12 @@ func (r *ModelRegistry) projectListedModel(
 
 	profile := r.merge(key, &info, static, fp, parsed, policy.override, policy.floor, policy.thinkOverride, policy.contextOverride, policy.qualityCeilingOverride, policy.rejectionHook, probeYes)
 	return ListedModelFacts{
-		Key:           key,
-		Family:        profile.Family,
-		Caps:          profile.Caps,
-		KnownMask:     profile.Caps | known,
-		ProfileSource: profile.Source.String(),
-		ContextWindow: profile.ContextWindow,
+		Key:               key,
+		Family:            profile.Family,
+		Caps:              profile.Caps,
+		KnownMask:         profile.Caps | known,
+		ProfileSource:     profile.Source.String(),
+		ContextWindow:     profile.ContextWindow,
+		QualityCtxCeiling: profile.QualityCtxCeiling,
 	}
 }

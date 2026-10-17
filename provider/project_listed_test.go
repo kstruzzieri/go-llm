@@ -298,3 +298,31 @@ func TestProjectListedModels_CancellationReturnsNothing(t *testing.T) {
 		t.Fatalf("ProjectListedModels(cancelled, empty) = %v, %v; want nil facts + context.Canceled", facts, err)
 	}
 }
+
+// #479: the read-only projection carries the merged ceiling like the window:
+// the catalog value for a known family, and the registry's config override for
+// a family the catalog does not know.
+func TestProjectListedModels_QualityCtxCeiling(t *testing.T) {
+	mr, err := NewModelRegistry(&mrMockProviderRegistry{providers: map[string]Provider{
+		"prov": &mrMockProvider{name: "prov"},
+	}}, nil)
+	if err != nil {
+		t.Fatalf("NewModelRegistry: %v", err)
+	}
+	mr.SetQualityCtxCeilingOverride(func(k ModelKey) int {
+		if k.Model == "nonesuch-9b" {
+			return 16384
+		}
+		return 0
+	})
+	facts, err := mr.ProjectListedModels(context.Background(), "prov", []ModelInfo{
+		{Name: "qwen3:8b", ContextWindow: 131072},
+		{Name: "nonesuch-9b", ContextWindow: 131072},
+	})
+	if err != nil {
+		t.Fatalf("ProjectListedModels: %v", err)
+	}
+	if facts[0].QualityCtxCeiling != 32768 || facts[1].QualityCtxCeiling != 16384 {
+		t.Fatalf("QualityCtxCeiling = %d, %d; want 32768 (catalog), 16384 (config override)", facts[0].QualityCtxCeiling, facts[1].QualityCtxCeiling)
+	}
+}

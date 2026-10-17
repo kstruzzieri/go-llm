@@ -312,3 +312,39 @@ func TestBound64CutsOnARuneBoundary(t *testing.T) {
 		}
 	}
 }
+
+// #479: quality_ctx_ceiling is projected additively (v1, omitempty) from the
+// inventory when present, else from config. The frozen golden is unchanged
+// because its model sets no ceiling.
+func TestModelSummaryQualityCtxCeiling(t *testing.T) {
+	cfg := &config.Config{
+		Providers: map[string]config.ProviderConfig{"p": {BaseURL: "http://h:1", APIFormat: "openai-compat"}},
+		Models: map[string]config.ModelConfig{
+			"agent": {Name: "m", Provider: "p", Type: "dense", QualityCtxCeiling: 24576},
+			"chat":  {Name: "q", Provider: "p", Type: "dense"},
+		},
+		Defaults: map[string]string{"agent": "agent", "chat": "chat"},
+	}
+	in := BuildInput{
+		Doc: DocSnapshot{Config: cfg, Origin: config.Origin{Source: config.OriginProgrammatic}},
+		Inventory: Inventory{Models: []InventoryModel{{
+			Key: provider.ModelKey{Provider: "p", Model: "q"}, Family: "qwen3",
+			ContextWindow: 131072, QualityCtxCeiling: 32768,
+		}}},
+	}
+	snap := Build(in)
+	got := map[string]int{}
+	for _, m := range snap.Models {
+		got[m.Selector] = m.QualityCtxCeiling
+	}
+	if got["p/m"] != 24576 || got["p/q"] != 32768 {
+		t.Fatalf("QualityCtxCeiling by selector = %v, want p/m 24576 (config), p/q 32768 (inventory)", got)
+	}
+	raw, err := json.Marshal(snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"quality_ctx_ceiling":32768`) {
+		t.Fatalf("wire key missing: %s", raw)
+	}
+}
