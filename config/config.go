@@ -82,10 +82,11 @@ type ModelConfig struct {
 	ContextWindow int    `json:"context_window,omitempty"`
 	// QualityCtxCeiling optionally sets this model's trained context (#479):
 	// quality-sensitive use cases (chat, reasoning, code-review, planning,
-	// analysis) budget against min(this, the served window). Overrides the
-	// catalog's per-family value. 0 = unset (JSON cannot distinguish an
+	// analysis) budget against this, clamped to a known served window; with
+	// an unknown window it is their budget. Overrides the catalog's
+	// per-family value. 0 = unset (JSON cannot distinguish an
 	// explicit 0 from absent); set it equal to context_window to opt out of a
-	// catalog ceiling. Must be >= 1 when present.
+	// catalog ceiling. Positive values override; negative values are rejected.
 	QualityCtxCeiling int              `json:"quality_ctx_ceiling,omitempty"`
 	Dimensions        int              `json:"dimensions,omitempty"`
 	Capabilities      []string         `json:"capabilities,omitempty"`

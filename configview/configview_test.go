@@ -349,6 +349,27 @@ func TestModelSummaryQualityCtxCeiling(t *testing.T) {
 	}
 }
 
+// #479 R5: InventoryModel's wire key is pinned directly (Golem's models -json
+// emits it), present when nonzero and absent at 0 (omitempty keeps v1
+// additive for zero-valued output).
+func TestInventoryModelQualityCtxCeilingWire(t *testing.T) {
+	m := InventoryModel{Key: provider.ModelKey{Provider: "p", Model: "q"}, QualityCtxCeiling: 32768}
+	raw, err := json.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"quality_ctx_ceiling":32768`) {
+		t.Fatalf("nonzero wire key missing: %s", raw)
+	}
+	m.QualityCtxCeiling = 0
+	if raw, err = json.Marshal(m); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "quality_ctx_ceiling") {
+		t.Fatalf("key present at 0, want omitted: %s", raw)
+	}
+}
+
 // #479 R3: with no inventory, a selector shared by several roles shows the
 // ceiling any of them sets (zero means unset), as bootstrap installs it, not
 // just the first sorted role's value.

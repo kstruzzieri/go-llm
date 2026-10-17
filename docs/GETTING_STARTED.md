@@ -172,14 +172,28 @@ Pull the new model (`ollama pull llama3.3:70b`) and restart your application.
 
 ### Trained context vs. served window
 
-Some models are served with a longer window than they were trained on.
-Qwen2.5's shipped config is set for 32,768 tokens and reaches 131,072 with
-YaRN. For the quality-sensitive use cases (`chat`, `reasoning`,
-`code-review`, `planning`, `analysis`) go-llm budgets against the trained
-length, clamped to the served `context_window`; `agent`, `fim`, `embedding`,
-and side tasks always get the full window. go-llm knows the trained length
-for the Qwen2.5, Qwen3.5, and Qwen3.6 families. For any other model, set
-`quality_ctx_ceiling` on its entry:
+Some models are served with a longer window than they were trained on. The
+ordinary Qwen2.5 checkpoints, for example, ship a config set for 32,768 tokens
+and reach 131,072 only with YaRN. When a trained-context ceiling is known for
+a model, the quality-sensitive use cases (`chat`, `reasoning`, `code-review`,
+`planning`, `analysis`) budget against it; `agent`, `fim`, `embedding`, and
+side tasks always get the full window. The MCP `generate` tool routes as
+`chat`, so it is quality-sensitive too.
+
+A ceiling cuts the budget only when it is below the served `context_window`,
+or when the window is unknown, in which case the ceiling is the budget for the
+quality-sensitive use cases. A ceiling at or above a known window changes
+nothing, and a model with no ceiling gets the full window everywhere.
+
+go-llm ships curated ceilings of 262,144 tokens for names that parse to the
+Qwen3.5 and Qwen3.6 families (for example `qwen3.5:27b` or
+`qwen3.6:35b-a3b`). Catalog defaults match by parsed family name, so Hugging
+Face repository names and GGUF file identifiers may not match. Qwen2.5 and
+Qwen3 are deliberately not seeded: the `qwen2.5` name also matches the
+Qwen2.5-1M models (trained to 256K), and `qwen3` also matches Qwen3-Coder and
+the 2507 refresh (262,144 native). For those, and for any other model, set
+`quality_ctx_ceiling` on its entry, for example 32768 for an ordinary Qwen2.5
+or original-release Qwen3 checkpoint served with a YaRN window:
 
 ```json
 "models": {
@@ -193,11 +207,16 @@ for the Qwen2.5, Qwen3.5, and Qwen3.6 families. For any other model, set
 }
 ```
 
-Original-release Qwen3 (32,768 native, 131,072 with YaRN) is deliberately not
-seeded: the `qwen3` name also matches Qwen3-Coder and the 2507 refresh, which
-are 262,144 native, so set `quality_ctx_ceiling: 32768` for it explicitly as
-above. To opt a known family out, set `quality_ctx_ceiling` equal to its
-`context_window`. The value must be at least 1.
+`0` or omitted means unset; a positive value overrides the catalog; negative
+values are rejected. Two roles on one provider/model with different nonzero
+values conflict at load. To opt a seeded family out, set
+`quality_ctx_ceiling` equal to its `context_window`.
+
+A smaller budget also lowers the router's headroom score, which can change
+model selection, sticky routing, and fallback order before admission fails.
+Golem's per-turn input ceiling follows the active route's use case: in
+`-goal` mode that is `planning`, so Golem compacts against the reduced
+budget; the ordinary agent loop is unaffected.
 
 ## Running Golem against a hosted API
 
