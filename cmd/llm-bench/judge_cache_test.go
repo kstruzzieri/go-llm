@@ -591,6 +591,9 @@ func TestOpenJudgeCache_FileURIFragmentIgnored(t *testing.T) {
 		t.Skip("a file: URI of a drive path needs a leading slash; the fragment handling is OS-independent")
 	}
 	path := filepath.Join(t.TempDir(), "judge.db")
+	// openJudgeCache creates filepath.Dir of its raw input, which for a file:
+	// URI is a relative "file:..." directory; keep it out of the package dir.
+	t.Chdir(t.TempDir())
 	c, err := openJudgeCache("file:" + path + "#frag")
 	if err != nil {
 		t.Fatalf("openJudgeCache(file URI with fragment): %v", err)
