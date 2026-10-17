@@ -1221,8 +1221,8 @@ func TestValidateSlotPolicies(t *testing.T) {
 
 func TestValidateSelectorConflicts(t *testing.T) {
 	// Each case creates two roles sharing one selector. Think is one design
-	// family with separate mode/tag branches, so the five families produce
-	// six branch cases here.
+	// family with separate mode/tag branches, so the six families produce
+	// seven branch cases here.
 	families := []struct {
 		name   string
 		mutate func(base, a, b map[string]any)

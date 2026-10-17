@@ -224,9 +224,11 @@ func applyRoleOverridesFromOpts(m *ModelConfig, opts SetRoleModelOpts) {
 // SetRoleModel points role at a different provider/model. Preservation:
 // Fallbacks/Description/Options preserved (role-level intent); identity and
 // capacity replaced from facts (empty = unknown, never stale);
-// Capabilities, ThinkMode, ThinkTags, Slots CLEARED unless re-asserted —
-// a stale override carried across models could falsely assert tool_call or
-// violate the per-selector invariants. The eligibility gate and the
+// Capabilities, ThinkMode, ThinkTags CLEARED unless re-asserted; Slots and
+// QualityCtxCeiling CLEARED unconditionally (per-model values with no
+// re-assertion option) — a stale override carried across models could
+// falsely assert tool_call, fabricate a trained-context ceiling, or violate
+// the per-selector invariants. The eligibility gate and the
 // finalize gate (whose validate includes the static selector-conflict
 // check) run under the document lock; any failure leaves the document
 // unchanged.

@@ -793,10 +793,10 @@ func validateSamplingOptions(role string, opts *SamplingOptions) error {
 	return nil
 }
 
-// validateSelectorConflicts enforces the five per-selector conflict
+// validateSelectorConflicts enforces the six per-selector conflict
 // families statically (spec §1): roles sharing one effective
 // provider/model selector cannot disagree on non-zero context_window,
-// non-nil options, explicit capabilities, non-empty think_mode, non-nil
+// non-zero quality_ctx_ceiling, non-nil options, explicit capabilities, non-empty think_mode, non-nil
 // think_tags, or non-zero slots. Missing values mean "no override".
 // Deterministic: sorted roles, first conflicting sorted pair errors.
 // Bootstrap keeps its copies as defense in depth for programmatic Configs.
