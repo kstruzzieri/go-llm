@@ -5,9 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"strconv"
 	"strings"
-	"unicode"
 
 	"github.com/kstruzzieri/go-llm/agent"
 	"github.com/kstruzzieri/go-llm/agent/interceptor"
@@ -163,17 +161,11 @@ func (a *replApprover) ApproveWithRisk(ctx context.Context, call provider.ToolCa
 	}
 }
 
+// sanitizeApprovalPreview keeps its name for the callers that render untrusted
+// text (this approver, render.go, ops_table.go); the shared implementation
+// lives in agent.SanitizePreview so embedded approvers get the same rules.
 func sanitizeApprovalPreview(preview string) string {
-	var safe strings.Builder
-	for _, r := range preview {
-		if r == '\n' || unicode.IsGraphic(r) {
-			safe.WriteRune(r)
-			continue
-		}
-		quoted := strconv.QuoteToGraphic(string(r))
-		safe.WriteString(quoted[1 : len(quoted)-1])
-	}
-	return safe.String()
+	return agent.SanitizePreview(preview)
 }
 
 // grantQuestion appends the grant answer only when this call can be granted.

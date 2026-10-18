@@ -379,11 +379,15 @@ func (o *Orchestrator) dispatch(ctx context.Context, reg *toolRegistry, call pro
 // A RiskApprover receives the run's cumulative RiskReport snapshot (#436); a
 // KeyedApprover receives the plan's structural ApprovalKey and returns the full
 // decision; a plain Approver keeps its existing signature, its bare bool
-// lifted into a decision with no grant provenance.
+// lifted into a decision with no grant provenance. The preview is display
+// data: every tier receives SanitizePreview(preview) (#387), so an embedded
+// approver sees the same inert text as the CLI. The key, the call and the
+// planned arguments pass through byte-identical.
 func approve(ctx context.Context, approver Approver, call provider.ToolCall, preview, approvalKey string, risk RiskReport) (ApprovalDecision, error) {
 	if approver == nil {
 		return ApprovalDecision{}, nil
 	}
+	preview = SanitizePreview(preview)
 	if ra, ok := approver.(RiskApprover); ok {
 		return ra.ApproveWithRisk(ctx, call, preview, approvalKey, risk)
 	}
