@@ -95,21 +95,41 @@ func TestReplaceEnforcesProfile(t *testing.T) {
 
 func TestReplaceCannotWidenAllowlist(t *testing.T) {
 	allowlist := []string{"read_file", "search", "glob", "list", "run_command"}
+	// Rows with several extras pin the per-extra loop: a check that stops after,
+	// or only looks at, one position still passes every single-extra row.
 	tests := []struct {
-		extra string
-		want  []string // nil: rejected
+		name      string
+		allowlist []string
+		extras    []string
+		owned     []string // owned reads the allowlist leaves mounted
+		want      []string // first-turn tools after admission; nil: rejected
 	}{
-		{"run_command", []string{"read_file", "search", "glob", "list", "run_command"}},
-		{"write_file", nil},
+		{"run_command", allowlist, []string{"run_command"}, ownedReads, []string{"read_file", "search", "glob", "list", "run_command"}},
+		{"write_file", allowlist, []string{"write_file"}, ownedReads, nil},
+		{"run_command+write_file", allowlist, []string{"run_command", "write_file"}, ownedReads, nil},
+		{"write_file+run_command", allowlist, []string{"write_file", "run_command"}, ownedReads, nil},
+		{"lookup+run_command", append([]string{"lookup"}, allowlist...), []string{"lookup", "run_command"}, ownedReads, []string{"read_file", "search", "glob", "list", "lookup", "run_command"}},
+		// dispatch is second, so rule (b) must read the second extra's own name.
+		{"lookup+dispatch without read_file", []string{"dispatch", "lookup", "search", "glob", "list"}, []string{"lookup", "dispatch"}, []string{"search", "glob", "list"}, nil},
 	}
 	for _, path := range admissionPaths {
 		for _, tc := range tests {
-			t.Run(path+"/"+tc.extra, func(t *testing.T) {
-				spy := &profileSpyTool{name: tc.extra, effect: agent.Effect{Class: agent.Exec}}
-				rt, caller, err := admitVia(t, path, golem.Options{Profile: golem.ProfileTrusted, ToolAllowlist: allowlist}, []agent.Tool{spy})
+			t.Run(path+"/"+tc.name, func(t *testing.T) {
+				var extras []agent.Tool
+				var spies []*profileSpyTool
+				for _, name := range tc.extras {
+					if name == "dispatch" {
+						extras = append(extras, realDispatch(t))
+						continue
+					}
+					spy := &profileSpyTool{name: name, effect: agent.Effect{Class: agent.Exec}}
+					spies = append(spies, spy)
+					extras = append(extras, spy)
+				}
+				rt, caller, err := admitVia(t, path, golem.Options{Profile: golem.ProfileTrusted, ToolAllowlist: tc.allowlist}, extras)
 				if tc.want != nil {
 					if err != nil {
-						t.Fatalf("%s %s error = %v, want nil", path, tc.extra, err)
+						t.Fatalf("%s %s error = %v, want nil", path, tc.name, err)
 					}
 					if got := firstTurnToolNames(t, rt, caller); !slices.Equal(got, tc.want) {
 						t.Fatalf("first-turn tools = %v, want %v", got, tc.want)
@@ -117,13 +137,18 @@ func TestReplaceCannotWidenAllowlist(t *testing.T) {
 					return
 				}
 				if !errors.Is(err, golem.ErrProfileIncompatible) {
-					t.Fatalf("%s %s error = %v, want ErrProfileIncompatible", path, tc.extra, err)
+					t.Fatalf("%s %s error = %v, want ErrProfileIncompatible", path, tc.name, err)
+				}
+				for _, spy := range spies {
+					if plans, invokes := spy.plans.Load(), spy.invokes.Load(); plans != 0 || invokes != 0 {
+						t.Fatalf("%s Plan/Invoke calls = %d/%d, want 0/0", spy.name, plans, invokes)
+					}
 				}
 				if rt == nil {
 					return // New refused: there is no runtime to widen.
 				}
-				if got := firstTurnToolNames(t, rt, caller); !slices.Equal(got, ownedReads) {
-					t.Fatalf("next-turn tools = %v, want %v", got, ownedReads)
+				if got := firstTurnToolNames(t, rt, caller); !slices.Equal(got, tc.owned) {
+					t.Fatalf("next-turn tools = %v, want %v", got, tc.owned)
 				}
 			})
 		}
