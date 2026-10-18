@@ -121,7 +121,8 @@ func filterOwned(owned []agent.Tool, ceiling map[string]struct{}) []agent.Tool {
 // extra is never planned or invoked. It enforces, in order: the profile, the
 // nil/name/duplicate checks, and per extra the frozen allowlist ceiling,
 // dispatch's need for all four reads, and dispatch's incompatibility with a
-// ScopeGuard.
+// ScopeGuard. Only then are the admitted extras published through floorWrap, so
+// every check sees the caller's own tool and the model sees the approval floor.
 func (r *Runtime) admitTools(extras []agent.Tool) ([]agent.Tool, error) {
 	if err := checkProfile(r.profile, extras); err != nil {
 		return nil, err
@@ -137,6 +138,9 @@ func (r *Runtime) admitTools(extras []agent.Tool) ([]agent.Tool, error) {
 		if err := r.checkExtra(tool, names[len(r.fileTools)+i]); err != nil {
 			return nil, err
 		}
+	}
+	for i := len(r.fileTools); i < len(combined); i++ {
+		combined[i] = floorWrap(combined[i])
 	}
 	return combined, nil
 }

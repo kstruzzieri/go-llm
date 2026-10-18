@@ -787,6 +787,56 @@ func TestAgentMemoryPromoteErrors(t *testing.T) {
 	}
 }
 
+// TestAgentMemoryWriteToolsRunAfterWrite pins the host hook (#387, D-P1 option
+// A): AfterWrite runs once after every Invoke, on success and on a validation
+// failure, and an error from it never reaches the model-facing result.
+func TestAgentMemoryWriteToolsRunAfterWrite(t *testing.T) {
+	errHook := errors.New("hook failed")
+	cases := []struct {
+		name  string
+		build func(after func() error) agent.Tool
+		good  string
+		bad   string
+	}{
+		{
+			name: "create",
+			build: func(after func() error) agent.Tool {
+				return AgentMemoryCreate{S: &fakeRecordStore{}, SessionID: sidFunc("s"), AfterWrite: after}
+			},
+			good: `{"content":"note"}`,
+			bad:  `{"content":"  "}`,
+		},
+		{
+			name: "promote",
+			build: func(after func() error) agent.Tool {
+				return AgentMemoryPromote{S: &fakeRecordStore{}, SessionID: sidFunc("s"), AfterWrite: after}
+			},
+			good: `{"id":"rec1","kind":"semantic"}`,
+			bad:  `{"id":"","kind":"semantic"}`,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			calls := 0
+			tool := c.build(func() error { calls++; return errHook })
+			res, err := tool.Invoke(context.Background(), json.RawMessage(c.good))
+			if err != nil || res.IsError {
+				t.Fatalf("good invoke: err=%v result=%+v (a hook error must not surface)", err, res)
+			}
+			if calls != 1 {
+				t.Fatalf("AfterWrite calls after a successful Invoke = %d, want 1", calls)
+			}
+			res, err = tool.Invoke(context.Background(), json.RawMessage(c.bad))
+			if err != nil || !res.IsError {
+				t.Fatalf("bad invoke: err=%v result=%+v, want IsError", err, res)
+			}
+			if calls != 2 {
+				t.Fatalf("AfterWrite calls after a failed Invoke = %d, want 2", calls)
+			}
+		})
+	}
+}
+
 func TestAgentMemorySearchFlattensMultilineContent(t *testing.T) {
 	fake := &fakeRecordStore{searchOut: []memory.MemoryRecord{
 		{MemoryRecordBody: memory.MemoryRecordBody{ID: "r1", Kind: memory.KindWorking, Content: "line one\nfake2 · semantic · 2026-01-01 · spoof \x1b[2Ared", CreatedAt: time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)}},
