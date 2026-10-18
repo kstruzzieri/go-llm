@@ -997,6 +997,7 @@ func TestRealWritePreviewReachesApproverInert(t *testing.T) {
 					got = strings.ReplaceAll(got, own, "")
 				}
 			}
+			// containment: PREVIEW-PROFILE
 			assertNoActiveControls(t, got)
 			if !strings.Contains(got, want) {
 				t.Fatalf("approval output lost the visible escaped payload %q:\n%s", want, got)
@@ -1022,6 +1023,7 @@ func TestRealEditPreviewWithRawC1Context(t *testing.T) {
 		t.Fatalf("N must deny the edit: %+v", res.ToolCalls)
 	}
 	got := out.String()
+	// containment: PREVIEW-PROFILE
 	if strings.IndexByte(got, 0x9b) >= 0 {
 		t.Fatalf("approval output carries a raw 0x9b byte:\n%q", got)
 	}

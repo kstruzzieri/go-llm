@@ -207,6 +207,7 @@ func TestApproveSanitizesForEmbeddedApprovers(t *testing.T) {
 					t.Fatalf("%s run: approver key = %q, want %q", name, got.key, previewKey)
 				}
 			}
+			// containment: PREVIEW-PROFILE
 			if atkSeen.preview != wantClean {
 				t.Fatalf("approver preview = %q, want %q", atkSeen.preview, wantClean)
 			}

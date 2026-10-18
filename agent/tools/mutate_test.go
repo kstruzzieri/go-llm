@@ -268,6 +268,7 @@ func TestWritePreviewHeadersExact(t *testing.T) {
 				seed(t, root, tc.path)
 			}
 			got := plan(t, NewWriteFile(mustWorkspace(t, root), nil), map[string]string{"path": tc.path, "content": "new\n"})
+			// containment: PREVIEW-PROFILE
 			if got != tc.want {
 				t.Fatalf("write_file preview:\n got %q\nwant %q", got, tc.want)
 			}

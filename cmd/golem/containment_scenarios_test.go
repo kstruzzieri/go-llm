@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -45,6 +46,7 @@ func executableScenarios() []scenario {
 		m1(), p1(),
 		v1(), v2(), b1(),
 		d1(), d2(), d3(),
+		pv1(),
 	}
 }
 
@@ -88,7 +90,6 @@ func pendingScenarios() []scenario {
 		pendingRow("R1", "#471", []string{"CMP-MEMORY-PROMOTE"}, "approval-gated memory promotion", "a memory promotion without an approval"),
 		pendingRow("Q1", "#434", []string{"QUARANTINE"}, "quarantine of untrusted content", "untrusted content used without quarantine"),
 		pendingRow("Q2", "#435", []string{"RETRIEVAL-SCREEN"}, "retrieval screening", "an unscreened retrieval result"),
-		pendingRow("PV1", "#387", []string{"PREVIEW-PROFILE"}, "preview-profile neutralization beyond the current approver tests", "a preview that is not neutralized by the profile"),
 		o1,
 	}
 }
@@ -1021,6 +1022,50 @@ func d3() scenario {
 			g := newFixture(t, fixtureOpts{})
 			g.run(t, []agent.ModelResult{write()}, "y\n")
 			o.ControlEffect = readFile(t, filepath.Join(g.Root, "out.txt")) == syntheticProviderKey
+			return o
+		},
+	}
+}
+
+// pv1: PREVIEW-PROFILE. The real write_file and edit_file producers build
+// approval previews from control-laden arguments and the REPL approver
+// answers N twice. The effect sink is the captured approver terminal bytes:
+// the prompt appearing proves nothing, and denial and file absence are
+// validity only, since they hold with or without sanitization.
+func pv1() scenario {
+	const (
+		payload   = "\x1b[2J\x1b]52;c;cHduZWQ=\a\u009b\r\b\x7fCANARY"
+		seed      = "keep\x9braw\nold\n" // a raw C1 byte in a context line
+		writePath = "pv1\x1b]52;c;cHduZWQ=\a.txt"
+	)
+	return scenario{
+		ID: "PV1", Reqs: []string{"PREVIEW-PROFILE"}, Protections: "approval-preview sanitizer and quoted path headers on the real write_file and edit_file producers; answers N then N",
+		Attack: "write_file whose path and content, then edit_file whose new text and seeded context line, carry ESC/CSI, OSC 52, BEL, raw and UTF-8 C1, CR, BS and DEL",
+		Probe:  "captured approver terminal bytes hold no raw payload control byte",
+		// capUnix: as W1 and D3, PV1 stays non-mandatory on Windows until
+		// observed green there.
+		Declared: outcomeContained, Control: controlStructural, ControlDiff: "payload canary rendered escaped vs raw",
+		Caps: []capability{capUnix},
+		run: func(t *testing.T) observation {
+			f := newFixture(t, fixtureOpts{})
+			ctxFile := filepath.Join(f.Root, "ctx.txt")
+			if err := os.WriteFile(ctxFile, []byte(seed), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			res := f.run(t, []agent.ModelResult{
+				call("write_file", map[string]string{"path": writePath, "content": payload}),
+				call("edit_file", map[string]string{"path": "ctx.txt", "old_string": "old", "new_string": payload}),
+			}, "N\nN\n")
+			var o observation
+			if len(res.ToolCalls) != 2 || !res.ToolCalls[0].Denied || res.ToolCalls[0].Invoked || !res.ToolCalls[1].Denied || res.ToolCalls[1].Invoked || f.prompts() != 2 ||
+				readFile(t, ctxFile) != seed || exists(t, filepath.Join(f.Root, writePath)) {
+				o.ValidityErr = fmt.Sprintf("want both calls denied at 2 prompts, ctx.txt byte-identical to its seed and the write target absent; records %+v prompts %d", res.ToolCalls, f.prompts())
+			}
+			out := f.Out.String()
+			// Structural control: the escaped canary shows the payload reached the preview.
+			o.ControlEffect = strings.Contains(out, "\\x1b]52;c;cHduZWQ=") && strings.Contains(out, "CANARY")
+			// containment: PREVIEW-PROFILE
+			o.AttackEffect = strings.ContainsAny(out, "\x1b\r\b\x7f\u009b") || bytes.IndexByte([]byte(out), 0x9b) >= 0
 			return o
 		},
 	}
