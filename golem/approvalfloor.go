@@ -13,7 +13,8 @@ import (
 // is a type switch, never a name or Effect test: a caller cannot claim library
 // status by naming a tool, declaring a Read effect or embedding a library tool
 // (an embedding type is a different concrete type). A typed nil pointer is not
-// library: it reaches no library code, so it takes the floor.
+// library: it reaches no library code, so it takes the floor. Being a library
+// tool is not the approval exemption; floorExempt names the four of those.
 func libraryTool(t agent.Tool) bool {
 	if rv := reflect.ValueOf(t); rv.Kind() == reflect.Pointer && rv.IsNil() {
 		return false
@@ -46,11 +47,11 @@ func needsApproval(p agent.ApprovalPolicy, c agent.EffectClass) bool {
 	}
 }
 
-// floorEffect is the Trusted approval floor for an opaque tool (#387, spec
-// 3.3). A plain Read effect is unchanged. Anything else that the loop would let
-// run without approval, including a Write or Exec that asks for ApprovalNever
-// and a Network effect, is forced to ApprovalAlways. A stronger existing
-// approval is kept, and every other Effect field is preserved.
+// floorEffect is the Trusted approval floor for a tool that is not floorExempt
+// (#387, spec 3.3). A plain Read effect is unchanged. Anything else that the
+// loop would let run without approval, including a Write or Exec that asks for
+// ApprovalNever and a Network effect, is forced to ApprovalAlways. A stronger
+// existing approval is kept, and every other Effect field is preserved.
 func floorEffect(e agent.Effect) agent.Effect {
 	if e.Class == agent.Read {
 		return e
@@ -93,11 +94,30 @@ func (f floorPlanningTool) Plan(ctx context.Context, args json.RawMessage) (agen
 	return plan, err
 }
 
-// floorWrap returns t unchanged when it is a library tool and otherwise a
-// floor wrapper that is a PlanningTool exactly when t is. Those two optional
-// interfaces (PlanningTool, OriginTool) are the only ones the loop consults.
+// floorExempt reports whether t is one of the four library types that spec 3.3
+// exempts from the floor and lets keep its own ApprovalNever: the two
+// agent-memory writes (they write only the memory DB, D-P1 option A) and
+// delegate_code and dispatch (their Network effect is model-provider traffic
+// under the destination policy). It is not "any library tool": every other
+// library tool goes through the floor, which leaves it unchanged only because it
+// already gates or is plain Read. A typed nil pointer is not exempt.
+func floorExempt(t agent.Tool) bool {
+	if !libraryTool(t) {
+		return false
+	}
+	switch t.(type) {
+	case agenttools.AgentMemoryCreate, agenttools.AgentMemoryPromote, *agenttools.DelegateCode, *agenttools.Dispatch:
+		return true
+	}
+	return false
+}
+
+// floorWrap returns t unchanged when it is one of the four spec-exempt library
+// types and otherwise a floor wrapper that is a PlanningTool exactly when t is.
+// Those two optional interfaces (PlanningTool, OriginTool) are the only ones the
+// loop consults.
 func floorWrap(t agent.Tool) agent.Tool {
-	if libraryTool(t) {
+	if floorExempt(t) {
 		return t
 	}
 	if _, ok := t.(agent.PlanningTool); ok {

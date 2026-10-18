@@ -294,28 +294,32 @@ const (
 // TestFloorNeverUpgradesTrust runs wrapped tools through the default
 // detectors: the wrapper must forward the wrapped tool's provenance exactly.
 // An undeclared tool stays unknown (blocked), a declared one is tagged, and a
-// per-invocation foreign reclassification still reaches the pipeline.
+// per-invocation foreign reclassification still reaches the pipeline. Each row
+// also pins the risk report the pipeline built, including the origin it
+// attributed the finding to: a wrapper that rewrote one blocking origin into
+// another would keep the observation and Blocked flag and change only that.
 func TestFloorNeverUpgradesTrust(t *testing.T) {
 	cases := []struct {
 		name        string
 		tool        agent.Tool
 		want        string
 		wantBlocked bool
+		wantOrigin  agent.Origin
 	}{
 		{
 			"undeclared stays blocked",
 			&floorStub{name: "opaque", effect: agent.Effect{Class: agent.Read}, result: agent.ToolResult{Content: floorInjection}},
-			floorBlocked, true,
+			floorBlocked, true, agent.OriginUnknown,
 		},
 		{
 			"declared workspace is tagged",
 			floorOriginStub{&floorStub{name: "opaque", effect: agent.Effect{Class: agent.Read}, result: agent.ToolResult{Content: floorInjection}}, agent.OriginWorkspace},
-			floorTagged, false,
+			floorTagged, false, agent.OriginWorkspace,
 		},
 		{
 			"per-invocation foreign is blocked",
 			floorOriginStub{&floorStub{name: "opaque", effect: agent.Effect{Class: agent.Read}, result: agent.ToolResult{Content: floorInjection, Origin: agent.OriginForeign}}, agent.OriginWorkspace},
-			floorBlocked, true,
+			floorBlocked, true, agent.OriginForeign,
 		},
 	}
 	for _, tc := range cases {
@@ -330,8 +334,158 @@ func TestFloorNeverUpgradesTrust(t *testing.T) {
 			if res.ToolCalls[0].Blocked != tc.wantBlocked {
 				t.Fatalf("record = %+v, want Blocked=%v", res.ToolCalls[0], tc.wantBlocked)
 			}
+			if res.Risk == nil || res.Risk.Score != 30 || len(res.Risk.Findings) != 1 {
+				t.Fatalf("risk = %+v record = %+v, want score 30 and exactly one finding", res.Risk, res.ToolCalls[0])
+			}
+			if got := res.Risk.Findings[0].Origin; got != tc.wantOrigin {
+				t.Fatalf("finding origin = %s, want %s", got, tc.wantOrigin)
+			}
 		})
 	}
+}
+
+// floorPromotionJournal is the smallest write-ahead journal that makes the exec
+// builder register promote_artifact.
+type floorPromotionJournal struct{}
+
+func (floorPromotionJournal) Record(agenttools.MutationRecord) {}
+
+func (floorPromotionJournal) Prepare(agenttools.MutationRecord) (agenttools.PreparedMutation, error) {
+	return floorPrepared{}, nil
+}
+
+type floorPrepared struct{}
+
+func (floorPrepared) Commit() error { return nil }
+func (floorPrepared) Abort() error  { return nil }
+
+// TestFloorWrapsNonExemptLibraryTools: spec 3.3 exempts exactly four library
+// types (the two agent-memory writes, delegate_code, dispatch). Every other
+// library tool, built by the real constructors, goes through the floor; the
+// floor leaves each unchanged only because it already gates or is plain Read,
+// so a library tool's approval is never a coincidence of its type.
+func TestFloorWrapsNonExemptLibraryTools(t *testing.T) {
+	root := t.TempDir()
+	reads, err := agenttools.NewFileTools(root)
+	if err != nil {
+		t.Fatalf("NewFileTools: %v", err)
+	}
+	ws, err := agenttools.NewWorkspace(root)
+	if err != nil {
+		t.Fatalf("NewWorkspace: %v", err)
+	}
+	mgr := agenttools.NewBackgroundManager()
+	defer mgr.Shutdown()
+	execs, err := agenttools.NewExecToolsWithBackgroundOptions(root, mgr, agenttools.ExecToolsOptions{
+		Scratch:          agenttools.ScratchConfig{Enabled: true},
+		PromotionJournal: floorPromotionJournal{},
+	})
+	if err != nil {
+		t.Fatalf("NewExecToolsWithBackgroundOptions: %v", err)
+	}
+	var built []agent.Tool
+	built = append(built, reads...)
+	built = append(built, agenttools.NewMutatingTools(ws, nil)...)
+	built = append(built, execs...)
+	built = append(built, agenttools.Retrieve{}, agenttools.MemorySearch{}, agenttools.AgentMemorySearch{})
+
+	type want struct {
+		planning bool
+		approval agent.ApprovalPolicy
+	}
+	wants := map[string]want{
+		"read_file": {false, agent.ApprovalNever}, "search": {false, agent.ApprovalNever},
+		"glob": {false, agent.ApprovalNever}, "list": {false, agent.ApprovalNever},
+		"write_file": {true, agent.ApprovalOnWrite}, "edit_file": {true, agent.ApprovalOnWrite},
+		"run_command": {true, agent.ApprovalAlways}, "start_command": {true, agent.ApprovalAlways},
+		"command_status": {false, agent.ApprovalNever}, "command_tail": {false, agent.ApprovalNever},
+		"stop_command": {true, agent.ApprovalAlways}, "scratch_changes": {false, agent.ApprovalNever},
+		"promote_artifact": {true, agent.ApprovalAlways},
+		"retrieve":         {false, agent.ApprovalNever}, "memory_search": {false, agent.ApprovalNever},
+		"agent_memory_search": {false, agent.ApprovalNever},
+	}
+	if len(built) != len(wants) {
+		t.Fatalf("built %d tools, table has %d", len(built), len(wants))
+	}
+	seen := map[string]bool{}
+	for _, tool := range built {
+		name := tool.Spec().Name
+		w, ok := wants[name]
+		if !ok || seen[name] {
+			t.Fatalf("unexpected or duplicate tool %q", name)
+		}
+		seen[name] = true
+		t.Run(name, func(t *testing.T) {
+			if !libraryTool(tool) {
+				t.Fatalf("%T is not a library tool; the case proves nothing", tool)
+			}
+			if _, planning := tool.(agent.PlanningTool); planning != w.planning {
+				t.Fatalf("library %s PlanningTool = %v, want %v", name, planning, w.planning)
+			}
+			got := floorWrap(tool)
+			if !isFloored(got) {
+				t.Fatalf("floorWrap(%T) = %T, want a floor wrapper", tool, got)
+			}
+			if _, planning := got.(agent.PlanningTool); planning != w.planning {
+				t.Fatalf("wrapper PlanningTool = %v, want %v", planning, w.planning)
+			}
+			if a := got.Effect().Approval; a != w.approval {
+				t.Fatalf("floored approval = %v, want %v", a, w.approval)
+			}
+			if !reflect.DeepEqual(got.Effect(), tool.Effect()) {
+				t.Fatalf("the floor changed a library Effect: %+v -> %+v", tool.Effect(), got.Effect())
+			}
+			ot, ok := got.(agent.OriginTool)
+			if !ok || ot.Origin() != agent.OriginWorkspace {
+				t.Fatalf("wrapper Origin = %v (ok=%v), want %s", ot, ok, agent.OriginWorkspace)
+			}
+		})
+	}
+	t.Run("write_file plan passes through unchanged", func(t *testing.T) {
+		var tool agent.Tool
+		for _, b := range built {
+			if b.Spec().Name == "write_file" {
+				tool = b
+			}
+		}
+		args := json.RawMessage(`{"path":"floor.txt","content":"x"}`)
+		inner, err := tool.(agent.PlanningTool).Plan(context.Background(), args)
+		if err != nil {
+			t.Fatalf("inner Plan: %v", err)
+		}
+		wrapped, err := floorWrap(tool).(agent.PlanningTool).Plan(context.Background(), args)
+		if err != nil {
+			t.Fatalf("wrapped Plan: %v", err)
+		}
+		if inner.ApprovalKey == "" || !reflect.DeepEqual(wrapped, inner) {
+			t.Fatalf("wrapped plan = %+v, want the inner plan %+v with its approval key", wrapped, inner)
+		}
+		if wrapped.Effect.Approval != agent.ApprovalOnWrite {
+			t.Fatalf("plan approval = %v, want ApprovalOnWrite", wrapped.Effect.Approval)
+		}
+	})
+	t.Run("the four exempt types are returned unchanged", func(t *testing.T) {
+		exempt := []agent.Tool{agenttools.AgentMemoryCreate{}, agenttools.AgentMemoryPromote{}, &agenttools.DelegateCode{}, &agenttools.Dispatch{}}
+		for _, tool := range exempt {
+			got := floorWrap(tool)
+			if isFloored(got) || reflect.TypeOf(got) != reflect.TypeOf(tool) {
+				t.Errorf("floorWrap(%T) = %T, want the identical tool", tool, got)
+			}
+			if reflect.TypeOf(tool).Kind() == reflect.Pointer && got != tool {
+				t.Errorf("floorWrap(%T) returned a different pointer", tool)
+			}
+			if a := got.Effect().Approval; a != agent.ApprovalNever {
+				t.Errorf("%T approval = %v, want ApprovalNever", tool, a)
+			}
+		}
+	})
+	t.Run("a typed nil exempt pointer is floored", func(t *testing.T) {
+		for _, tool := range []agent.Tool{(*agenttools.DelegateCode)(nil), (*agenttools.Dispatch)(nil)} {
+			if got := floorWrap(tool); !isFloored(got) {
+				t.Errorf("floorWrap(%T nil) = %T, want a floor wrapper", tool, got)
+			}
+		}
+	})
 }
 
 // floorMemStore stands in for the memory record store behind the library
@@ -406,8 +560,9 @@ func TestAdmitToolsFloorsEveryPath(t *testing.T) {
 }
 
 // TestAgentMemoryToolsStayLibrary: the CLI's agent-memory write tools are
-// library types (D-P1 option A), so admission leaves them unwrapped and
-// ApprovalNever, and a nil approver still lets them run.
+// library types that spec 3.3 exempts by name (D-P1 option A), so admission
+// leaves them unwrapped and ApprovalNever, and a nil approver still lets them
+// run.
 func TestAgentMemoryToolsStayLibrary(t *testing.T) {
 	var hooks atomic.Int32
 	after := func() error { hooks.Add(1); return nil }

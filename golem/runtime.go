@@ -79,11 +79,13 @@ type Options struct {
 	System string
 	// Tools are the caller-supplied extra tools. They are admitted only under
 	// ProfileTrusted: Inspect (the zero Profile) requires this to be empty.
-	// Trusted raises an approval floor on every tool agent/tools did not build
-	// (identified by concrete type): its Effect, and its Plan's Effect, become
-	// ApprovalAlways unless it is plain Read or already requires approval, so a
-	// tool or plan that asks for ApprovalNever still needs an Approver.
-	// Library-built tools keep their own approval policy.
+	// Trusted raises an approval floor under every extra: its Effect, and its
+	// Plan's Effect, become ApprovalAlways unless it is plain Read or already
+	// requires approval, so a tool or plan that asks for ApprovalNever still
+	// needs an Approver. Only four library types (identified by concrete type)
+	// are exempt and keep ApprovalNever: agent_memory_create,
+	// agent_memory_promote, delegate_code and dispatch. Every other library tool
+	// is floored too, which leaves it unchanged because it already gates.
 	Tools []agent.Tool
 	// Profile selects the authority the runtime grants its model (#387). The
 	// zero value is ProfileInspect: the four runtime-owned reads and no caller
