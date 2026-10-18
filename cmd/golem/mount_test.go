@@ -217,38 +217,49 @@ func countLateMountConstructions(t *testing.T) (stores, execs *int) {
 	return stores, execs
 }
 
-// Under Inspect a late mount is refused before anything is opened: the
+// Under any profile but Trusted (Inspect, and fail-closed Preview and unknown
+// values) a late mount is refused before anything is opened: the
 // refusal is the first check (ahead of usage, already-enabled and the
 // terminal requirement), no store or signing key is created, and the session
 // is untouched. The XDG data dir is fresh per session, so it staying empty
 // proves no checkpoint directory or key was created either.
 func TestAllowWriteRefusedInInspect(t *testing.T) {
-	const want = "/allow-write is unavailable in profile inspect: restart with -profile trusted -allow-write\n"
+	const inspect = "/allow-write is unavailable in profile inspect: restart with -profile trusted -allow-write\n"
 	for _, tc := range []struct {
 		name    string
+		profile golemruntime.Profile
 		command string
 		mutate  func(*replSession)
+		want    string
 	}{
-		{"plain", "/allow-write", func(*replSession) {}},
-		{"extra argument", "/allow-write now", func(*replSession) {}},
-		{"already enabled", "/allow-write", func(s *replSession) { s.allowWrite = true }},
-		{"non-interactive stdin", "/allow-write", func(s *replSession) { s.stdinTerminal = false }},
+		{"plain", golemruntime.ProfileInspect, "/allow-write", func(*replSession) {}, inspect},
+		{"extra argument", golemruntime.ProfileInspect, "/allow-write now", func(*replSession) {}, inspect},
+		{"already enabled", golemruntime.ProfileInspect, "/allow-write", func(s *replSession) { s.allowWrite = true }, inspect},
+		{"non-interactive stdin", golemruntime.ProfileInspect, "/allow-write", func(s *replSession) { s.stdinTerminal = false }, inspect},
+		// Fail closed: the refusal is "anything but Trusted", so an
+		// unconstructible Preview and an unknown value are refused too, and the
+		// message names the profile it saw. A check written as "== Inspect"
+		// would let both through.
+		{"preview", golemruntime.ProfilePreview, "/allow-write", func(*replSession) {},
+			"/allow-write is unavailable in profile preview: restart with -profile trusted -allow-write\n"},
+		{"unknown profile", golemruntime.Profile(200), "/allow-write", func(*replSession) {},
+			"/allow-write is unavailable in profile profile(200): restart with -profile trusted -allow-write\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			stores, _ := countLateMountConstructions(t)
 			sess := newMountSession(t, &captureCaller{answer: "ok"}, t.TempDir())
-			sess.profile = golemruntime.ProfileInspect
+			sess.profile = tc.profile
 			tc.mutate(sess)
 			tools, system, allowWrite := strings.Join(names(sess.tools), ","), sess.baseSystem, sess.allowWrite
 			var out strings.Builder
 			_, _ = dispatchSlash(context.Background(), &out, sess, tc.command)
 			// Errorf, not Fatalf: the counter below is asserted independently of
 			// the refusal line, so a missing check trips both.
-			if out.String() != want {
-				t.Errorf("out = %q, want %q", out.String(), want)
+			if out.String() != tc.want {
+				t.Errorf("out = %q, want %q", out.String(), tc.want)
 			}
 			if *stores != 0 {
-				t.Errorf("checkpoint store opened %d time(s) under Inspect", *stores)
+				t.Errorf("checkpoint store opened %d time(s) under a non-Trusted profile", *stores)
 			}
 			if entries, err := os.ReadDir(os.Getenv("XDG_DATA_HOME")); err != nil || len(entries) != 0 {
 				t.Errorf("data dir not empty after a refused mount: %v (err %v)", entries, err)
@@ -264,30 +275,37 @@ func TestAllowWriteRefusedInInspect(t *testing.T) {
 // The exec twin: the refusal comes before the manager is built, so no
 // BackgroundManager (and no goroutine) exists to shut down.
 func TestAllowExecRefusedInInspect(t *testing.T) {
-	const want = "/allow-exec is unavailable in profile inspect: restart with -profile trusted -allow-exec\n"
+	const inspect = "/allow-exec is unavailable in profile inspect: restart with -profile trusted -allow-exec\n"
 	for _, tc := range []struct {
 		name    string
+		profile golemruntime.Profile
 		command string
 		mutate  func(*replSession)
+		want    string
 	}{
-		{"plain", "/allow-exec", func(*replSession) {}},
-		{"extra argument", "/allow-exec x", func(*replSession) {}},
-		{"already enabled", "/allow-exec", func(s *replSession) { s.allowExec = true }},
-		{"non-interactive stdin", "/allow-exec", func(s *replSession) { s.stdinTerminal = false }},
+		{"plain", golemruntime.ProfileInspect, "/allow-exec", func(*replSession) {}, inspect},
+		{"extra argument", golemruntime.ProfileInspect, "/allow-exec x", func(*replSession) {}, inspect},
+		{"already enabled", golemruntime.ProfileInspect, "/allow-exec", func(s *replSession) { s.allowExec = true }, inspect},
+		{"non-interactive stdin", golemruntime.ProfileInspect, "/allow-exec", func(s *replSession) { s.stdinTerminal = false }, inspect},
+		// Fail closed, exec twin of the write table above.
+		{"preview", golemruntime.ProfilePreview, "/allow-exec", func(*replSession) {},
+			"/allow-exec is unavailable in profile preview: restart with -profile trusted -allow-exec\n"},
+		{"unknown profile", golemruntime.Profile(200), "/allow-exec", func(*replSession) {},
+			"/allow-exec is unavailable in profile profile(200): restart with -profile trusted -allow-exec\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, execs := countLateMountConstructions(t)
 			sess := newMountSession(t, &captureCaller{answer: "ok"}, t.TempDir())
-			sess.profile = golemruntime.ProfileInspect
+			sess.profile = tc.profile
 			tc.mutate(sess)
 			tools, system, allowExec := strings.Join(names(sess.tools), ","), sess.baseSystem, sess.allowExec
 			var out strings.Builder
 			_, _ = dispatchSlash(context.Background(), &out, sess, tc.command)
-			if out.String() != want {
-				t.Errorf("out = %q, want %q", out.String(), want)
+			if out.String() != tc.want {
+				t.Errorf("out = %q, want %q", out.String(), tc.want)
 			}
 			if *execs != 0 {
-				t.Errorf("exec mount built %d time(s) under Inspect", *execs)
+				t.Errorf("exec mount built %d time(s) under a non-Trusted profile", *execs)
 			}
 			if got := strings.Join(names(sess.tools), ","); got != tools || sess.baseSystem != system || sess.allowExec != allowExec ||
 				sess.bgManager != nil || sess.lateManager != nil {
