@@ -225,6 +225,7 @@ type CompactionReport struct {
 type turnSnapshot struct {
 	system       string
 	tools        []agent.Tool
+	permissions  []ToolPermission // projection of tools, published with them
 	modelOptions provider.ModelOptions
 	orchestrator *agent.Orchestrator
 	budget       agent.Budget
@@ -266,6 +267,7 @@ type Runtime struct {
 	// for the profile's whole universe; guarded records a non-nil ScopeGuard.
 	profile         Profile
 	ceiling         map[string]struct{}
+	ceilingNames    []string // sorted ceiling for EffectivePermissions, nil with no allowlist
 	guarded         bool
 	snap            *turnSnapshot
 	maxSteps        int
@@ -316,13 +318,14 @@ func New(ctx context.Context, opts Options) (*Runtime, error) {
 	}
 	ws.SetScopeGuard(opts.ScopeGuard)
 	r := &Runtime{
-		root:      root,
-		profile:   opts.Profile,
-		ceiling:   ceiling,
-		guarded:   opts.ScopeGuard != nil,
-		fileTools: filterOwned(agenttools.NewFileToolsForWorkspace(ws), ceiling),
+		root:         root,
+		profile:      opts.Profile,
+		ceiling:      ceiling,
+		ceilingNames: sortedCeiling(ceiling),
+		guarded:      opts.ScopeGuard != nil,
+		fileTools:    filterOwned(agenttools.NewFileToolsForWorkspace(ws), ceiling),
 	}
-	tools, err := r.admitTools(opts.Tools)
+	tools, permissions, err := r.admitTools(opts.Tools)
 	if err != nil {
 		return nil, err
 	}
@@ -355,7 +358,7 @@ func New(ctx context.Context, opts Options) (*Runtime, error) {
 	if opts.SessionStore != nil {
 		sessions = &threadStore{store: opts.SessionStore}
 	}
-	r.snap = &turnSnapshot{system: opts.System, tools: tools, modelOptions: opts.ModelOptions.Clone(), orchestrator: orchestrator, budget: opts.Budget}
+	r.snap = &turnSnapshot{system: opts.System, tools: tools, permissions: permissions, modelOptions: opts.ModelOptions.Clone(), orchestrator: orchestrator, budget: opts.Budget}
 	r.maxSteps = opts.MaxSteps
 	r.maxMessageBytes = maxMessage
 	r.summarizer = summarizer
@@ -782,8 +785,8 @@ func (r *Runtime) Cancel(runID string) bool {
 // frozen ToolAllowlist ceiling, else ErrProfileIncompatible, and a rejected tool
 // is never planned or invoked. ErrClosed takes precedence over validation
 // errors, including when Close completes while validation is running. tools is
-// copied. Tool.Spec is never called while the runtime lock is held. Safe for
-// concurrent use with Run, Cancel, Close, and other Replace calls.
+// copied. Tool.Spec and Tool.Effect are never called while the runtime lock is
+// held. Safe for concurrent use with Run, Cancel, Close, and other Replace calls.
 //
 // Omitting modelOptions preserves the options current at publication, after
 // tool validation. One value replaces all options; an explicit zero clears them.
@@ -808,14 +811,15 @@ func (r *Runtime) Replace(system string, tools []agent.Tool, modelOptions ...pro
 	if system == "" {
 		system = SystemPrompt(false, false)
 	}
-	// Validation calls external Tool.Spec implementations, so it runs
-	// unlocked; its error is retained until the closed state is rechecked.
+	// Validation calls external Tool.Spec and Tool.Effect implementations, so it
+	// runs unlocked; its error is retained until the closed state is rechecked.
 	var combined []agent.Tool
+	var permissions []ToolPermission
 	var validationErr error
 	if len(modelOptions) > 1 {
 		validationErr = fmt.Errorf("%w: Replace accepts at most one model options value", ErrInvalidRequest)
 	} else {
-		combined, validationErr = r.admitTools(tools)
+		combined, permissions, validationErr = r.admitTools(tools)
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -833,6 +837,7 @@ func (r *Runtime) Replace(system string, tools []agent.Tool, modelOptions ...pro
 	r.snap = &turnSnapshot{
 		system:       system,
 		tools:        combined,
+		permissions:  permissions,
 		modelOptions: options,
 		orchestrator: current.orchestrator,
 		budget:       current.budget,
@@ -873,9 +878,9 @@ type Configuration struct {
 // Nothing is installed on failure. ErrClosed takes precedence over every other
 // error, including when Close completes while validation is running. ctx is
 // checked at entry and again under the publication lock after validation, so a
-// cancellation raised while Tool.Spec runs installs nothing either. Tool.Spec is
-// never called while the runtime lock is held, and this method performs no
-// provider I/O.
+// cancellation raised while Tool.Spec runs installs nothing either. Tool.Spec and
+// Tool.Effect are never called while the runtime lock is held, and this method
+// performs no provider I/O.
 //
 // The tool and option values are copied; callers must not mutate the supplied
 // slices concurrently with this call reading them. Safe for concurrent use with
@@ -894,14 +899,15 @@ func (r *Runtime) ReplaceConfiguration(ctx context.Context, cfg Configuration) e
 	if system == "" {
 		system = SystemPrompt(false, false)
 	}
-	// Validation calls external Tool.Spec implementations, so it runs
-	// unlocked; its error is retained until the closed state is rechecked.
+	// Validation calls external Tool.Spec and Tool.Effect implementations, so it
+	// runs unlocked; its error is retained until the closed state is rechecked.
 	var combined []agent.Tool
+	var permissions []ToolPermission
 	var validationErr error
 	if cfg.Orchestrator == nil {
 		validationErr = fmt.Errorf("%w: orchestrator is required", ErrInvalidRequest)
 	} else {
-		combined, validationErr = r.admitTools(cfg.Tools)
+		combined, permissions, validationErr = r.admitTools(cfg.Tools)
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -917,6 +923,7 @@ func (r *Runtime) ReplaceConfiguration(ctx context.Context, cfg Configuration) e
 	r.snap = &turnSnapshot{
 		system:       system,
 		tools:        combined,
+		permissions:  permissions,
 		modelOptions: cfg.ModelOptions.Clone(),
 		orchestrator: cfg.Orchestrator,
 		budget:       cfg.Budget,

@@ -123,26 +123,43 @@ func filterOwned(owned []agent.Tool, ceiling map[string]struct{}) []agent.Tool {
 // dispatch's need for all four reads, and dispatch's incompatibility with a
 // ScopeGuard. Only then are the admitted extras published through floorWrap, so
 // every check sees the caller's own tool and the model sees the approval floor.
-func (r *Runtime) admitTools(extras []agent.Tool) ([]agent.Tool, error) {
+//
+// It also returns the ToolPermission projection of the published list, in the
+// same order, so a snapshot can carry the two together. Provenance is decided on
+// the caller's raw tool, before wrapping; Class and Approval come from the
+// published tool's Effect, so Approval is the approval after the floor. This is
+// the only place EffectivePermissions' data is computed: it runs only after every
+// rejection, so a rejected tool never has Effect called.
+func (r *Runtime) admitTools(extras []agent.Tool) ([]agent.Tool, []ToolPermission, error) {
 	if err := checkProfile(r.profile, extras); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	combined := make([]agent.Tool, 0, len(r.fileTools)+len(extras))
 	combined = append(combined, r.fileTools...)
 	combined = append(combined, extras...)
 	names, err := validateTools(combined)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	for i, tool := range extras {
 		if err := r.checkExtra(tool, names[len(r.fileTools)+i]); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
-	for i := len(r.fileTools); i < len(combined); i++ {
-		combined[i] = floorWrap(combined[i])
+	perms := make([]ToolPermission, len(combined))
+	for i := range combined {
+		provenance := ProvenanceRuntime
+		if i >= len(r.fileTools) {
+			provenance = ProvenanceHostExtension
+			if libraryTool(combined[i]) {
+				provenance = ProvenanceLibrary
+			}
+			combined[i] = floorWrap(combined[i])
+		}
+		effect := combined[i].Effect()
+		perms[i] = ToolPermission{Name: names[i], Class: effect.Class, Approval: effect.Approval, Provenance: provenance}
 	}
-	return combined, nil
+	return combined, perms, nil
 }
 
 // checkExtra applies the ceiling rules to one caller tool named name.
