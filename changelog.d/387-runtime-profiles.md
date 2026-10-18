@@ -7,8 +7,8 @@ and nothing else. Trusted is the explicit opt-in that admits caller tools,
 writes, commands and the rest. Preview is reserved for the staged-workspace
 runtime (#388, #389) and is always rejected, with
 `Preview unavailable: staged-workspace runtime requires #388/#389`. Admission
-runs at `New`, `Replace` and `ReplaceConfiguration`, before any tool method,
-workspace construction or model bootstrap. `Options.ToolAllowlist` is a frozen
+runs at `New`, `Replace` and `ReplaceConfiguration`, before any tool's
+`Effect`, `Plan` or `Invoke` runs and before model bootstrap. `Options.ToolAllowlist` is a frozen
 ceiling that no replacement can widen, and it may name tools that are not
 mounted yet. `Runtime.EffectivePermissions()` returns a copied snapshot of the
 profile, root, ceiling, mounted tools (each with its effect class, approval

@@ -40,7 +40,7 @@ Choose the profile with `-profile inspect|trusted`:
 - **Preview is reserved.** `-profile preview` exits with `Preview unavailable: staged-workspace runtime requires #388/#389` and starts no session.
 - **`-sandbox` is not available yet.** Native Seatbelt and Bubblewrap command sandboxes for Trusted arrive with #576; until then Trusted commands run on the host.
 
-Every interactive or one-shot session (AgentFlow modes excepted) prints one line to stderr with the effective permissions, after any `profile: trusted (selected by ...)` line. For example, with no flags and then with `-allow-exec`:
+Every interactive or one-shot session (AgentFlow modes excepted) prints one line to stderr with the effective permissions, after any `profile: trusted (selected by ...)` line. For example, with no flags and then with `-allow-exec -no-rag -no-memory`; the Trusted tool list varies with the flags and also includes `retrieve`, `memory_search` and the other tools whose features are on:
 
 ```text
 permissions: profile=inspect tools=read_file,search,glob,list commands=n/a; restart with -profile trusted to enable retrieval, memory tools, writes or commands
@@ -173,11 +173,11 @@ golem -root /path/to/project -allow-write -allow-exec
 golem -root /path/to/project -profile trusted -allow-write -allow-exec
 ```
 
-Trusted commands run on the host with your filesystem and network authority; approval is the only gate. Native sandbox runtimes arrive with #576.
+Trusted commands run on the host with your filesystem and network authority; approval decides each call (the always-on argument invariants also refuse some), but nothing confines the process. Native sandbox runtimes arrive with #576.
 
 ## REPL commands
 
-Inside the REPL, `/help` lists every command: sessions (`/new`, `/clear`, `/resume`, `/sessions`, `/search-sessions`, `/checkpoints`, `/undo`, `/compact`), memory (`/remember`, `/memories`, `/records`, `/forget`), approvals (`/trust`, `/grants`, `/auto-edits`, and `/allow-write` / `/allow-exec` to enable the guarded tools mid-session without restarting), background jobs (`/jobs`), the repository snapshot (`/git-context refresh`), one external judgment staged for the next goal (`/consult <name> <prompt>`, requires `-interceptors` and a configured consultant), plus `/context`, `/think`, `/model`, `/tools`, `/edit`, and `/exit`. Any other line is sent to the agent as the current goal.
+Inside the REPL, `/help` lists every command: sessions (`/new`, `/clear`, `/resume`, `/sessions`, `/search-sessions`, `/checkpoints`, `/undo`, `/compact`), memory (`/remember`, `/memories`, `/records`, `/forget`), approvals (`/trust`, `/grants`, `/auto-edits`, and `/allow-write` / `/allow-exec` to enable the guarded tools mid-session without restarting, Trusted profile only; Inspect needs a restart), background jobs (`/jobs`), the repository snapshot (`/git-context refresh`), one external judgment staged for the next goal (`/consult <name> <prompt>`, requires `-interceptors` and a configured consultant), plus `/context`, `/think`, `/model`, `/tools`, `/edit`, and `/exit`. Any other line is sent to the agent as the current goal.
 
 `/context` accepts no arguments and reads the last assembled request from the latest attempted runtime turn, without calling a model, summarizer, registry, or session store. It shows estimated input tokens against that assembly's retained budget, pressure classification, and the five retained bucket estimates when available. These are estimates, not provider-measured usage. The configured input ceiling and explicit output reserve are printed separately; a zero explicit reserve does not imply that the provider reserves no output. The command works with `--no-session` and pressure warnings disabled. Successful `/new`, `/clear`, and `/resume` clear the sample; failed or disabled session commands preserve it. A runtime turn that fails before assembly has no sample. Manual or automatic compaction, `/think`, and system/tool changes leave the historical sample intact, so it may predate the current configuration and cannot predict the next goal. The next real turn replaces it with its actual assembly estimate. `/compact` reports its separate stored-history estimates, and `/git-context refresh` retains its existing meaning.
 

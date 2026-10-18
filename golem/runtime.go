@@ -90,8 +90,10 @@ type Options struct {
 	// Profile selects the authority the runtime grants its model (#387). The
 	// zero value is ProfileInspect: the four runtime-owned reads and no caller
 	// tools. ProfilePreview is reserved and rejected with ErrProfileUnavailable;
-	// an unknown value is rejected with ErrInvalidRequest. Admission runs before
-	// any tool method, workspace construction or model bootstrap.
+	// an unknown value is rejected with ErrInvalidRequest. The profile and allowlist-name
+	// checks run before the workspace is built, and the per-tool admission checks
+	// before any tool's Effect, Plan or Invoke and before model bootstrap; only
+	// Spec is read first, to check names and duplicates.
 	Profile Profile
 	// ToolAllowlist is an exact, frozen ceiling on tool names (#387). Nil means
 	// the profile's whole universe; non-nil bounds it, and non-nil empty mounts
@@ -295,9 +297,10 @@ func New(ctx context.Context, opts Options) (*Runtime, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("golem: initialize runtime: %w", err)
 	}
-	// Admission precedes everything with a side effect: no caller tool method
-	// runs, no workspace is built and no model is bootstrapped for a request the
-	// profile refuses.
+	// Admission precedes everything with a side effect: the profile and ceiling
+	// checks run before the workspace is built, and admitTools runs before any
+	// tool's Effect, Plan or Invoke (only Spec is read first) and before model
+	// bootstrap, so a request the profile refuses has none of those effects.
 	if err := checkProfile(opts.Profile, opts.Tools); err != nil {
 		return nil, err
 	}
