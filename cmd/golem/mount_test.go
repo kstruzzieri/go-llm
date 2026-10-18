@@ -177,6 +177,9 @@ func newMountSession(t *testing.T, caller agent.ModelCaller, root string, host .
 	slot := &lateVerifier{}
 	orch := agent.New(caller, agent.ContextManager{}, agent.WithVerifier(slot))
 	sess := &replSession{
+		// Late mounts are Trusted-only (#387); the runtime below is Trusted
+		// too (newTestRuntime), so the session profile matches it.
+		profile:       golemruntime.ProfileTrusted,
 		orch:          orch,
 		runtime:       newTestRuntime(t, root, system, orch, host),
 		tools:         append(append([]agent.Tool(nil), fileTools...), host...),
@@ -193,6 +196,135 @@ func newMountSession(t *testing.T, caller agent.ModelCaller, root string, host .
 	}
 	t.Cleanup(func() { _ = sess.closeLateMounts() })
 	return sess
+}
+
+// countLateMountConstructions wraps the two late-mount construction seams
+// with counters and restores them on cleanup. Tests using it must not run in
+// parallel.
+func countLateMountConstructions(t *testing.T) (stores, execs *int) {
+	t.Helper()
+	origStore, origExec := openCheckpointStoreFn, buildExecMountFn
+	stores, execs = new(int), new(int)
+	openCheckpointStoreFn = func(ctx context.Context, getenv func(string) string, root string) (*checkpointStore, error) {
+		*stores++
+		return origStore(ctx, getenv, root)
+	}
+	buildExecMountFn = func(root string, opts agenttools.ExecToolsOptions) (*agenttools.BackgroundManager, []agent.Tool, error) {
+		*execs++
+		return origExec(root, opts)
+	}
+	t.Cleanup(func() { openCheckpointStoreFn, buildExecMountFn = origStore, origExec })
+	return stores, execs
+}
+
+// Under Inspect a late mount is refused before anything is opened: the
+// refusal is the first check (ahead of usage, already-enabled and the
+// terminal requirement), no store or signing key is created, and the session
+// is untouched. The XDG data dir is fresh per session, so it staying empty
+// proves no checkpoint directory or key was created either.
+func TestAllowWriteRefusedInInspect(t *testing.T) {
+	const want = "/allow-write is unavailable in profile inspect: restart with -profile trusted -allow-write\n"
+	for _, tc := range []struct {
+		name    string
+		command string
+		mutate  func(*replSession)
+	}{
+		{"plain", "/allow-write", func(*replSession) {}},
+		{"extra argument", "/allow-write now", func(*replSession) {}},
+		{"already enabled", "/allow-write", func(s *replSession) { s.allowWrite = true }},
+		{"non-interactive stdin", "/allow-write", func(s *replSession) { s.stdinTerminal = false }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stores, _ := countLateMountConstructions(t)
+			sess := newMountSession(t, &captureCaller{answer: "ok"}, t.TempDir())
+			sess.profile = golemruntime.ProfileInspect
+			tc.mutate(sess)
+			tools, system, allowWrite := strings.Join(names(sess.tools), ","), sess.baseSystem, sess.allowWrite
+			var out strings.Builder
+			_, _ = dispatchSlash(context.Background(), &out, sess, tc.command)
+			// Errorf, not Fatalf: the counter below is asserted independently of
+			// the refusal line, so a missing check trips both.
+			if out.String() != want {
+				t.Errorf("out = %q, want %q", out.String(), want)
+			}
+			if *stores != 0 {
+				t.Errorf("checkpoint store opened %d time(s) under Inspect", *stores)
+			}
+			if entries, err := os.ReadDir(os.Getenv("XDG_DATA_HOME")); err != nil || len(entries) != 0 {
+				t.Errorf("data dir not empty after a refused mount: %v (err %v)", entries, err)
+			}
+			if got := strings.Join(names(sess.tools), ","); got != tools || sess.baseSystem != system || sess.allowWrite != allowWrite ||
+				sess.journal != nil || sess.lateStore != nil || sess.writeToolCount != 0 {
+				t.Fatal("a refused mount changed the session")
+			}
+		})
+	}
+}
+
+// The exec twin: the refusal comes before the manager is built, so no
+// BackgroundManager (and no goroutine) exists to shut down.
+func TestAllowExecRefusedInInspect(t *testing.T) {
+	const want = "/allow-exec is unavailable in profile inspect: restart with -profile trusted -allow-exec\n"
+	for _, tc := range []struct {
+		name    string
+		command string
+		mutate  func(*replSession)
+	}{
+		{"plain", "/allow-exec", func(*replSession) {}},
+		{"extra argument", "/allow-exec x", func(*replSession) {}},
+		{"already enabled", "/allow-exec", func(s *replSession) { s.allowExec = true }},
+		{"non-interactive stdin", "/allow-exec", func(s *replSession) { s.stdinTerminal = false }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, execs := countLateMountConstructions(t)
+			sess := newMountSession(t, &captureCaller{answer: "ok"}, t.TempDir())
+			sess.profile = golemruntime.ProfileInspect
+			tc.mutate(sess)
+			tools, system, allowExec := strings.Join(names(sess.tools), ","), sess.baseSystem, sess.allowExec
+			var out strings.Builder
+			_, _ = dispatchSlash(context.Background(), &out, sess, tc.command)
+			if out.String() != want {
+				t.Errorf("out = %q, want %q", out.String(), want)
+			}
+			if *execs != 0 {
+				t.Errorf("exec mount built %d time(s) under Inspect", *execs)
+			}
+			if got := strings.Join(names(sess.tools), ","); got != tools || sess.baseSystem != system || sess.allowExec != allowExec ||
+				sess.bgManager != nil || sess.lateManager != nil {
+				t.Fatal("a refused mount changed the session")
+			}
+		})
+	}
+}
+
+// Trusted is unchanged: the late mount proceeds and constructs exactly once.
+func TestAllowWriteTrustedUnchanged(t *testing.T) {
+	stores, _ := countLateMountConstructions(t)
+	sess := newMountSession(t, &captureCaller{answer: "ok"}, t.TempDir())
+	sess.profile = golemruntime.ProfileTrusted
+	var out strings.Builder
+	_, _ = dispatchSlash(context.Background(), &out, sess, "/allow-write")
+	// The first mount also announces the new signing identity, so match anywhere.
+	if !strings.Contains(out.String(), "writes enabled") || !sess.allowWrite {
+		t.Fatalf("out = %q, allowWrite = %v", out.String(), sess.allowWrite)
+	}
+	if *stores != 1 {
+		t.Fatalf("checkpoint store opened %d time(s), want 1", *stores)
+	}
+}
+
+func TestAllowExecTrustedUnchanged(t *testing.T) {
+	_, execs := countLateMountConstructions(t)
+	sess := newMountSession(t, &captureCaller{answer: "ok"}, t.TempDir())
+	sess.profile = golemruntime.ProfileTrusted
+	var out strings.Builder
+	_, _ = dispatchSlash(context.Background(), &out, sess, "/allow-exec")
+	if !strings.HasPrefix(out.String(), "exec enabled") || !sess.allowExec {
+		t.Fatalf("out = %q, allowExec = %v", out.String(), sess.allowExec)
+	}
+	if *execs != 1 {
+		t.Fatalf("exec mount built %d time(s), want 1", *execs)
+	}
 }
 
 func TestAllowWriteMountsWriteToolsAndPrompt(t *testing.T) {

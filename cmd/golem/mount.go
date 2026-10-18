@@ -96,6 +96,25 @@ func (s *replSession) mount(at int, add []agent.Tool, in systemInputs) error {
 	return nil
 }
 
+// Seams for the late-mount handlers: tests count constructions through them to
+// prove a refused mount opens nothing (#387). Production never reassigns them.
+var (
+	buildExecMountFn      = buildExecMount
+	openCheckpointStoreFn = openCheckpointStore
+)
+
+// refuseLateMountOutsideTrusted prints the restart guidance and reports true
+// when the session profile is anything but Trusted. It fails closed (Inspect,
+// the zero value, and the unconstructible Preview all refuse) and is the first
+// check of both handlers, so a refused mount opens no store, key or manager.
+func refuseLateMountOutsideTrusted(out io.Writer, sess *replSession, command, flag string) bool {
+	if sess.profile == golemruntime.ProfileTrusted {
+		return false
+	}
+	_, _ = fmt.Fprintf(out, "%s is unavailable in profile %s: restart with -profile trusted %s\n", command, sess.profile, flag)
+	return true
+}
+
 // handleAllowWrite implements /allow-write (#372): the startup -allow-write
 // sequence (store, journal, recovery, then the verifier) applied to the
 // live session, atomically with the recomposed system prompt. Recovery runs
@@ -104,6 +123,9 @@ func (s *replSession) mount(at int, add []agent.Tool, in systemInputs) error {
 // workspace lease is never leaked. Mounting never grants approval: the first
 // write prompts exactly as it would after the flag.
 func handleAllowWrite(ctx context.Context, out io.Writer, sess *replSession, fields []string) {
+	if refuseLateMountOutsideTrusted(out, sess, "/allow-write", "-allow-write") {
+		return
+	}
 	if len(fields) != 1 {
 		_, _ = fmt.Fprintln(out, "usage: /allow-write")
 		return
@@ -129,7 +151,7 @@ func handleAllowWrite(ctx context.Context, out io.Writer, sess *replSession, fie
 	}
 	// D6 parity: -allow-write fails closed on ANY checkpoint lifecycle
 	// failure; here that means nothing mounts and the session is unchanged.
-	store, err := openCheckpointStore(ctx, os.Getenv, sess.root)
+	store, err := openCheckpointStoreFn(ctx, os.Getenv, sess.root)
 	if err != nil {
 		fail(fmt.Errorf("checkpoint store: %w", err), nil)
 		return
@@ -232,6 +254,9 @@ func (s *replSession) closeLateMounts() error {
 // zero-option legacy one. A rejected replacement shuts the unpublished
 // manager down and leaves the session unchanged.
 func handleAllowExec(ctx context.Context, out io.Writer, sess *replSession, fields []string) {
+	if refuseLateMountOutsideTrusted(out, sess, "/allow-exec", "-allow-exec") {
+		return
+	}
 	if len(fields) != 1 {
 		_, _ = fmt.Fprintln(out, "usage: /allow-exec")
 		return
@@ -244,7 +269,7 @@ func handleAllowExec(ctx context.Context, out io.Writer, sess *replSession, fiel
 		_, _ = fmt.Fprintln(out, "/allow-exec requires an interactive terminal; for scripted input, start with -allow-exec")
 		return
 	}
-	manager, execTools, err := buildExecMount(sess.root, agenttools.ExecToolsOptions{})
+	manager, execTools, err := buildExecMountFn(sess.root, agenttools.ExecToolsOptions{})
 	if err != nil {
 		_, _ = fmt.Fprintf(out, "exec not enabled: %v\n", err)
 		return

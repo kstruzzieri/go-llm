@@ -108,13 +108,44 @@ func TestAllowCommandsMatchStartupFlags(t *testing.T) {
 	}
 }
 
-func TestRunRejectsAllowCommandsFromPipedInput(t *testing.T) {
+// The default profile is Inspect, where a late mount is refused before the
+// terminal requirement is even consulted: run() must carry the resolved profile
+// into the session handlers read (#387).
+func TestRunRefusesAllowCommandsInDefaultInspect(t *testing.T) {
 	for _, command := range []string{"/allow-write", "/allow-exec"} {
 		t.Run(command, func(t *testing.T) {
 			configPath, root := writeRunLifecycleConfig(t)
 			stdin, stdout, stderr := stdinFileWith(t, command+"\n")
 			var sess *replSession
 			err := run([]string{"-config", configPath, "-root", root, "-no-probe", "-no-cap-probe",
+				"-no-session", "-no-memory", "-no-rag", "-no-project-context", "-no-auto-index"},
+				stdin, stdout, stderr, runHooks{
+					afterSessionReady: func(ready *replSession) error {
+						sess = ready
+						return nil
+					},
+				})
+			if err != nil {
+				t.Fatalf("run = %v (stderr: %s)", err, readRunTestFile(t, stderr))
+			}
+			if sess == nil || sess.allowWrite || sess.allowExec {
+				t.Fatalf("session = %+v, want captured with no capability enabled", sess)
+			}
+			want := command + " is unavailable in profile inspect: restart with -profile trusted -" + strings.TrimPrefix(command, "/") + "\n"
+			if got := readRunTestFile(t, stdout); !strings.Contains(got, want) {
+				t.Fatalf("stdout = %q, want it to contain %q", got, want)
+			}
+		})
+	}
+}
+
+func TestRunRejectsAllowCommandsFromPipedInput(t *testing.T) {
+	for _, command := range []string{"/allow-write", "/allow-exec"} {
+		t.Run(command, func(t *testing.T) {
+			configPath, root := writeRunLifecycleConfig(t)
+			stdin, stdout, stderr := stdinFileWith(t, command+"\n")
+			var sess *replSession
+			err := run([]string{"-profile", "trusted", "-config", configPath, "-root", root, "-no-probe", "-no-cap-probe",
 				"-no-session", "-no-memory", "-no-rag", "-no-project-context", "-no-auto-index"},
 				stdin, stdout, stderr, runHooks{
 					afterSessionReady: func(ready *replSession) error {
