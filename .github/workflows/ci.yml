@@ -224,12 +224,12 @@ jobs:
         with:
           go-version-file: go.mod
 
-      # Pinned to the Agentflow 1.0.0 release commit (tag v1.0.0), the version
-      # Golem develop is verified against (#612). Golem supports Agentflow 1.x only.
+      # Pinned to the Agentflow 1.1.0 release commit (tag v1.1.0), the version
+      # Golem develop is verified against. Golem supports Agentflow 1.x from 1.1.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: kstruzzieri/agentflow
-          ref: bf48d63abeeaff2d7929972455c5512cb9051f60
+          ref: 4100a6c83fb57a84fc0d4b0a4ff41728d3daa083
           path: _agentflow
           persist-credentials: false
 

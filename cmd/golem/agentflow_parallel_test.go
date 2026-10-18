@@ -164,9 +164,10 @@ func TestAssignedParallelWorkerBlocksCancelledAttemptAsItsOwner(t *testing.T) {
 	assertFreshBlockContext(t, runner.blocks)
 }
 
-// #642 A9: a worker's timed-out gate is blocked, and the report names the
-// worker root whose ledger retains the receipt.
-func TestAssignedParallelWorkerGateTimeoutNamesWorkerRoot(t *testing.T) {
+// #642 A2: a worker's timed-out gate is blocked as any failed gate is. Its
+// receipt stays in the worker root, and nothing more is reported: AgentFlow 1.1
+// supersedes it once a later attempt of the step completes (agentflow#60).
+func TestAssignedParallelWorkerGateTimeoutIsBlocked(t *testing.T) {
 	workerRoot := t.TempDir()
 	writeAgentFile(t, workerRoot, "command-receipts.jsonl", timeoutReceiptCR1+"\n")
 	plan := &agentflow.Plan{AllowedFiles: []string{"worker.go"}, Steps: []agentflow.Step{{
@@ -182,7 +183,7 @@ func TestAssignedParallelWorkerGateTimeoutNamesWorkerRoot(t *testing.T) {
 	}}
 	run := newAssignedParallelWorker(plan, sess, true, io.Discard, func(string) agentflow.Runner { return runner })
 	err := run(context.Background(), parallelWorker{step: plan.Steps[0], root: workerRoot, ownerID: "golem-w2", sourceID: "w2"})
-	want := `step P2 attempt A1: gate "unit" failed: agentflow run: exit 124: command timed out after 1 seconds; attempt recorded as blocked; ` + wantTimeoutReport(workerRoot, "CR1")
+	want := `step P2 attempt A1: gate "unit" failed: agentflow run: exit 124: command timed out after 1 seconds; attempt recorded as blocked`
 	if err == nil || err.Error() != want {
 		t.Fatalf("err = %v\nwant %s", err, want)
 	}

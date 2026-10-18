@@ -1163,7 +1163,7 @@ func TestAgentflowStoppedStepIsBlockedAndResumes_RealCLI(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	d := &driver{af: client, plan: &plan, runStep: runStep, root: dir}
+	d := &driver{af: client, plan: &plan, runStep: runStep}
 	final, err := d.resume(runCtx, dir, planBytes, nil)
 	if err != nil || final.State != "complete" {
 		t.Fatalf("resume state=%q err=%v", final.State, err)
@@ -1199,7 +1199,7 @@ func TestAgentflowStoppedStepPartialEditFailsClosed_RealCLI(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	d := &driver{af: client, plan: &plan, runStep: runStep, root: dir}
+	d := &driver{af: client, plan: &plan, runStep: runStep}
 	if _, err := d.resume(runCtx, dir, planBytes, nil); err == nil || !strings.Contains(err.Error(), "reached state \"file_receipts_missing\" before gates") {
 		t.Fatalf("want the before-gates refusal in state file_receipts_missing, got resume err = %v", err)
 	}
@@ -1237,7 +1237,7 @@ func TestAgentflowStoppedStepPartialEditFailsClosed_RealCLI(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	d = &driver{af: client, plan: &plan, runStep: runStep, root: dir}
+	d = &driver{af: client, plan: &plan, runStep: runStep}
 	final, err := d.resume(runCtx, dir, planBytes, nil)
 	if err != nil || final.State != "complete" {
 		t.Fatalf("resume after the remedy: state=%q err=%v", final.State, err)
@@ -1467,15 +1467,33 @@ func setSlowGate(t *testing.T, dir string, argv []string) {
 	}
 }
 
-// runTimedOutGateFixture gives the fixture's P1 a gate that outlives its
-// gate-level timeout_seconds (honored by AgentFlow) and drives one task run:
-// the model writes the answer, the gate times out, and Golem blocks A1 and
-// reports the retained timeout receipt (#642 A2, A9).
-func runTimedOutGateFixture(t *testing.T) (string, agentflow.Runner) {
+// markerGate gives the fixture's P1 one gate that outlives its 1-second
+// timeout_seconds until marker exists, so a later attempt can pass it. It
+// returns marker and the gate's argv.
+func markerGate(t *testing.T, dir string) (string, []string) {
+	t.Helper()
+	marker := filepath.Join(t.TempDir(), "fast")
+	argv := []string{"sh", "-c", "test -e " + marker + " || sleep 5"}
+	setSlowGate(t, dir, argv)
+	return marker, argv
+}
+
+func touchFile(t *testing.T, path string) {
+	t.Helper()
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// runTimedOutGateFixture drives one task run whose P1 gate times out: the model
+// writes the answer, the gate outlives its timeout_seconds (honored by
+// AgentFlow), and Golem blocks A1 (#642 A2). It returns the marker that lets a
+// later attempt's gate pass.
+func runTimedOutGateFixture(t *testing.T) (string, agentflow.Runner, string) {
 	t.Helper()
 	dir := t.TempDir()
 	copyTree(t, "../../testdata/agentflow", dir)
-	setSlowGate(t, dir, []string{"sleep", "5"})
+	marker, _ := markerGate(t, dir)
 	gitInit(t, dir)
 	runner := agentflowRunnerOrSkip(t, dir)
 
@@ -1485,7 +1503,7 @@ func runTimedOutGateFixture(t *testing.T) (string, agentflow.Runner) {
 	}}, fixtureTaskFlags(dir))
 	if line := failureLine(stderr); !errors.Is(err, errAgentflowTaskFailed) ||
 		!strings.HasPrefix(line, `agentflow task failed: step P1 attempt A1: gate \"slow-gate\" failed: agentflow run: exit 124: `) ||
-		!strings.HasSuffix(line, "; attempt recorded as blocked; "+wantTimeoutReport(dir, "CR1")) {
+		!strings.HasSuffix(line, "; attempt recorded as blocked") {
 		t.Fatalf("run 1 err = %v\nstderr:\n%s", err, stderr)
 	}
 	if got := lastStepRunEvent(readStepRunEvents(t, dir), "A1"); got.Event != "blocked" || got.Reason != "golem: gate execution failed" {
@@ -1494,50 +1512,100 @@ func runTimedOutGateFixture(t *testing.T) (string, agentflow.Runner) {
 	if _, receipts := readCommandReceipts(t, dir); len(receipts) != 1 || receipts[0].ID != "CR1" || (receipts[0].Decision != "timeout" && !receipts[0].TimedOut) {
 		t.Fatalf("command receipts = %+v, want the one timed-out receipt CR1", receipts)
 	}
-	return dir, runner
+	return dir, runner, marker
 }
 
-// #642 A9: a retained timed-out receipt turns status into exit 3 in both
-// modes and refuses resume before the model or any mutation.
-func TestAgentflowGateTimeoutIsBlockedAndReported_RealCLI(t *testing.T) {
-	dir, runner := runTimedOutGateFixture(t)
+// agentflow#60: a gate timeout leaves a blocked attempt that status offers to
+// the serial loop (exit 2). Resume's new attempt supersedes the retained
+// receipt, so the run verifies and its proof passes. This replaces #642's
+// canary, which pinned AgentFlow 1.0 failing exactly this run.
+func TestAgentflowGateTimeoutIsBlockedAndResumes_RealCLI(t *testing.T) {
+	dir, runner, marker := runTimedOutGateFixture(t)
 	ctx := context.Background()
-	report := wantTimeoutReport(dir, "CR1")
-	ledger, err := os.ReadFile(filepath.Join(dir, ".agent", "command-receipts.jsonl"))
+	timedOut, _ := readCommandReceipts(t, dir)
+
+	var status bytes.Buffer
+	statusErr := runAgentflowStatusWithRunner(ctx, &status, dir, false, runner)
+	var exit *agentflowStatusExit
+	if !errors.As(statusErr, &exit) || exit.ExitCode() != 2 || !strings.Contains(status.String(), "\nresume: enter the serial step loop\n") {
+		t.Fatalf("status = %v, want exit 2 into the serial loop\n%s", statusErr, status.String())
+	}
+
+	touchFile(t, marker)
+	resume := fixtureTaskFlags(dir)
+	resume.agentflowResume = true
+	caller := &recordingCaller{next: &scriptCaller{responses: []agent.ModelResult{
+		toolStep("w2", "write_file", `{"path":"src/answer.txt","content":"expected again\n"}`),
+		answerStep("done"),
+	}}}
+	stdout, stderr, err := runFixtureTask(t, dir, caller, resume)
+	if err != nil || len(caller.reqs) < 1 {
+		t.Fatalf("resume err = %v, model requests = %d\nstdout:\n%s\nstderr:\n%s", err, len(caller.reqs), stdout, stderr)
+	}
+	events := readStepRunEvents(t, dir)
+	if lastStepRunEvent(events, "A1").Event != "blocked" || lastStepRunEvent(events, "A2").Event != "completed" {
+		t.Fatalf("A1=%+v A2=%+v, want A1 blocked and A2 completed", lastStepRunEvent(events, "A1"), lastStepRunEvent(events, "A2"))
+	}
+	lines, receipts := readCommandReceipts(t, dir)
+	if len(receipts) != 2 || lines[0] != timedOut[0] || receipts[1].AttemptID != "A2" || receipts[1].ExitCode == nil || *receipts[1].ExitCode != 0 {
+		t.Fatalf("command receipts = %q, want CR1 unchanged plus one passing A2 row", lines)
+	}
+	client := agentflow.NewClient(runner, dir)
+	if state, err := client.NextAction(ctx); err != nil || state.State != "complete" {
+		t.Fatalf("after resume: state = %q, err = %v; want complete", state.State, err)
+	}
+	if err := client.VerifyProof(ctx); err != nil {
+		t.Fatalf("verify-proof: %v", err)
+	}
+}
+
+// #642 A9: a timed-out receipt in an attempt that completed can never be
+// superseded. Only AgentFlow 1.0 recorded that completion (1.1 refuses it,
+// agentflow#70), so the row is written by hand, as AgentFlow's own legacy
+// fixtures do. Status (exit 3), resume and a same-plan review round all refuse
+// before any mutation or model call.
+func TestAgentflowUnrecoverableTimeoutIsRefused_RealCLI(t *testing.T) {
+	dir := t.TempDir()
+	copyTree(t, "../../testdata/agentflow", dir)
+	_, argv := markerGate(t, dir)
+	runner, client, _, _ := startFixtureExecution(t, dir)
+	ctx := context.Background()
+	attempt, err := client.ClaimStep(ctx, "P1")
+	if err != nil || attempt != "A1" {
+		t.Fatalf("claim = %q, %v; want A1", attempt, err)
+	}
+	writeAndRecordAnswer(t, client, dir, attempt, "expected\n")
+	var timedOut *agentflow.CommandError
+	if err := client.RunGate(ctx, "P1", attempt, "slow-gate", argv); !errors.As(err, &timedOut) || timedOut.Exit != 124 {
+		t.Fatalf("A1 gate err = %v, want an AgentFlow exit-124 timeout", err)
+	}
+	stepRuns, err := os.OpenFile(filepath.Join(dir, ".agent", "step-runs.jsonl"), os.O_APPEND|os.O_WRONLY, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
+	completed := `{"schema_version":"1.0.0","recorded_at":"` + time.Now().UTC().Format("2006-01-02T15:04:05+00:00") + `","event":"completed","step_id":"P1","attempt_id":"A1"}` + "\n"
+	if _, err := stepRuns.WriteString(completed); err != nil {
+		t.Fatal(err)
+	}
+	if err := stepRuns.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(dir, ".agent", "attempts", "P1.current")); err != nil {
+		t.Fatal(err)
+	}
+	if state, err := client.NextAction(ctx); err != nil || state.State != "run_unverified" {
+		t.Fatalf("setup state = %q, err = %v; want run_unverified", state.State, err)
+	}
+	report := wantTimeoutReport(dir, "CR1")
+	review := fixtureTaskFlags(dir)
+	review.reviewManifest = writeNoFindingsReviewManifest(t, dir) // writes under .agent/
 	before := snapshotSmokeAgentTree(t, dir)
 
-	var outputs [2]string
-	for i := range outputs {
-		var status bytes.Buffer
-		statusErr := runAgentflowStatusWithRunner(ctx, &status, dir, false, runner)
-		var exit *agentflowStatusExit
-		if !errors.As(statusErr, &exit) || exit.ExitCode() != 3 || !strings.Contains(status.String(), "resume: blocked: "+report) {
-			t.Fatalf("status %d = %v\n%s", i+1, statusErr, status.String())
-		}
-		outputs[i] = status.String()
-	}
-	if outputs[0] != outputs[1] {
-		t.Fatalf("status outputs differ:\n%s\n---\n%s", outputs[0], outputs[1])
-	}
-	if after := snapshotSmokeAgentTree(t, dir); !reflect.DeepEqual(after, before) {
-		t.Fatal("human status changed .agent/")
-	}
-
-	state, err := agentflow.NewOwnedClient(runner, dir, "golem").NextAction(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var jsonOut bytes.Buffer
-	statusErr := runAgentflowStatusWithRunner(ctx, &jsonOut, dir, true, runner)
+	var status bytes.Buffer
+	statusErr := runAgentflowStatusWithRunner(ctx, &status, dir, false, runner)
 	var exit *agentflowStatusExit
-	if !errors.As(statusErr, &exit) || exit.ExitCode() != 3 || exit.diagnostic != "" || !bytes.Equal(jsonOut.Bytes(), state.RawJSON) {
-		t.Fatalf("JSON status = %#v\ngot  %s\nwant %s", statusErr, jsonOut.Bytes(), state.RawJSON)
-	}
-	if after := snapshotSmokeAgentTree(t, dir); !reflect.DeepEqual(after, before) {
-		t.Fatal("JSON status changed .agent/")
+	if !errors.As(statusErr, &exit) || exit.ExitCode() != 3 || !strings.Contains(status.String(), "\nresume: blocked: "+report+"\n") {
+		t.Fatalf("status = %v, want exit 3 with the timeout report\n%s", statusErr, status.String())
 	}
 
 	resume := fixtureTaskFlags(dir)
@@ -1547,33 +1615,16 @@ func TestAgentflowGateTimeoutIsBlockedAndReported_RealCLI(t *testing.T) {
 	if !errors.Is(err, errAgentflowTaskFailed) || !strings.HasPrefix(stderr, "agentflow resume failed: "+report+"\n") || len(caller.reqs) != 0 {
 		t.Fatalf("resume err = %v, model requests = %d\nstderr:\n%s", err, len(caller.reqs), stderr)
 	}
-	if after := snapshotSmokeAgentTree(t, dir); !reflect.DeepEqual(after, before) {
-		t.Fatal("refused resume changed .agent/")
-	}
-	if got, err := os.ReadFile(filepath.Join(dir, ".agent", "command-receipts.jsonl")); err != nil || !bytes.Equal(got, ledger) {
-		t.Fatalf("command receipts changed: err=%v\n%s", err, got)
-	}
-}
 
-// #642 A9: the same-plan review round skips the #643 history guard, so it
-// must refuse a root that retains a timed-out receipt before any AgentFlow
-// call. TestAgentflowFreshPlanRefusesExecutionHistory_RealCLI's run 3 is the
-// no-timeout control.
-func TestAgentflowReviewRefusesRetainedGateTimeout_RealCLI(t *testing.T) {
-	dir, _ := runTimedOutGateFixture(t)
-	review := fixtureTaskFlags(dir)
-	review.reviewManifest = writeNoFindingsReviewManifest(t, dir)
-	before := snapshotSmokeAgentTree(t, dir)
-	caller := &recordingCaller{next: &scriptCaller{}}
 	stdout, _, err := runFixtureTask(t, dir, caller, review)
-	if want := "refusing a -review-manifest round: " + wantTimeoutReport(dir, "CR1"); err == nil || err.Error() != want {
+	if want := "refusing a -review-manifest round: " + report; err == nil || err.Error() != want {
 		t.Fatalf("review err = %v\nwant %s", err, want)
 	}
 	if len(caller.reqs) != 0 || strings.Contains(stdout, "Agentflow workflow route") {
 		t.Fatalf("review reached the model (%d requests) or AgentFlow:\n%s", len(caller.reqs), stdout)
 	}
 	if after := snapshotSmokeAgentTree(t, dir); !reflect.DeepEqual(after, before) {
-		t.Fatal("refused review changed .agent/")
+		t.Fatal("a refusal changed .agent/")
 	}
 }
 
@@ -1625,11 +1676,10 @@ func writeAndRecordAnswer(t *testing.T, client *agentflow.Client, dir, attempt, 
 	}
 }
 
-// #642: an operator's break-glass fail-step closes a live Golem attempt, so
-// Golem's next failure on it must not block it: AgentFlow 1.0's block-step
-// would still append, and its ledger reader rejects any event after a terminal
-// one as state_invalid, which no recovery path accepts.
-func TestAgentflowBlockSkipsAttemptClosedByOperator_RealCLI(t *testing.T) {
+// agentflow#61: an operator's break-glass fail-step closes a live Golem
+// attempt, and AgentFlow 1.1 refuses Golem's later block of it (exit 2) and
+// appends nothing, so the ledger stays readable and the step claimable.
+func TestAgentflowBlockOfAttemptClosedByOperatorIsRefused_RealCLI(t *testing.T) {
 	dir := t.TempDir()
 	copyTree(t, "../../testdata/agentflow", dir)
 	runner, client, plan, _ := startFixtureExecution(t, dir)
@@ -1643,13 +1693,14 @@ func TestAgentflowBlockSkipsAttemptClosedByOperator_RealCLI(t *testing.T) {
 		t.Fatalf("fail-step: exit=%d err=%v stdout=%s stderr=%s", exit, err, out, errOut)
 	}
 	step, _ := findStep(&plan, "P1")
-	d := &driver{af: client, plan: &plan, root: dir, runStep: func(context.Context, agentflow.Step, string, string) error {
+	d := &driver{af: client, plan: &plan, runStep: func(context.Context, agentflow.Step, string, string) error {
 		return errors.New("provider down")
 	}}
-	// Errorf, not Fatalf: without the check the ledger outcome below is the
-	// evidence that matters.
-	if err := d.runAttempt(ctx, step, "A1", "goal"); err == nil || err.Error() != "step P1 attempt A1: provider down; attempt already closed (failed); not blocked" {
-		t.Errorf("runAttempt err = %v", err)
+	// Errorf, not Fatalf: the ledger outcome below is the evidence that matters.
+	err = d.runAttempt(ctx, step, "A1", "goal")
+	var refused *agentflow.CommandError
+	if err == nil || !strings.HasPrefix(err.Error(), "step P1 attempt A1: provider down; record blocked attempt: ") || !errors.As(err, &refused) || refused.Exit != 2 {
+		t.Errorf("runAttempt err = %v, want the run error and AgentFlow's exit-2 block refusal", err)
 	}
 	events := readStepRunEvents(t, dir)
 	if got := lastStepRunEvent(events, "A1"); got.Event != "failed" || countStepRunEvents(events, "blocked") != 0 {
@@ -1688,7 +1739,7 @@ func openSettlementAttempt(t *testing.T, slowGate []string, answer string) (stri
 func TestAgentflowResumeSettlementGateFailureBlocks_RealCLI(t *testing.T) {
 	dir, runner, client, plan, planBytes := openSettlementAttempt(t, nil, "wrong\n")
 	ctx := context.Background()
-	d := &driver{af: client, plan: &plan, root: dir, runStep: func(context.Context, agentflow.Step, string, string) error {
+	d := &driver{af: client, plan: &plan, runStep: func(context.Context, agentflow.Step, string, string) error {
 		return errors.New("settlement ran the model")
 	}}
 	_, err := d.resume(ctx, dir, planBytes, nil)
@@ -1705,7 +1756,7 @@ func TestAgentflowResumeSettlementGateFailureBlocks_RealCLI(t *testing.T) {
 		t.Fatalf("status = %v, want exit 2\n%s", statusErr, status.String())
 	}
 	models := 0
-	d = &driver{af: client, plan: &plan, root: dir, runStep: func(ctx context.Context, step agentflow.Step, attempt, _ string) error {
+	d = &driver{af: client, plan: &plan, runStep: func(ctx context.Context, step agentflow.Step, attempt, _ string) error {
 		models++
 		writeAndRecordAnswer(t, client, dir, attempt, "expected\n")
 		return nil
@@ -1715,25 +1766,244 @@ func TestAgentflowResumeSettlementGateFailureBlocks_RealCLI(t *testing.T) {
 	}
 }
 
-// #642 A9: a settlement gate that times out reports the resume root's
-// retained receipt. The driver's own root is a different, clean directory, so
-// reading it would report nothing.
-func TestAgentflowResumeSettlementGateTimeoutReportsRoot_RealCLI(t *testing.T) {
-	dir, runner, client, plan, planBytes := openSettlementAttempt(t, []string{"sleep", "5"}, "expected\n")
+// #642 A2: a settlement gate that times out is blocked as a failed one is;
+// status then offers the serial loop, and a second resume completes the step
+// in a new attempt whose gate passes (agentflow#60).
+func TestAgentflowResumeSettlementGateTimeoutBlocks_RealCLI(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "fast")
+	dir, runner, client, plan, planBytes := openSettlementAttempt(t, []string{"sh", "-c", "test -e " + marker + " || sleep 5"}, "expected\n")
 	ctx := context.Background()
-	d := &driver{af: client, plan: &plan, root: t.TempDir(), runStep: func(context.Context, agentflow.Step, string, string) error {
+	d := &driver{af: client, plan: &plan, runStep: func(context.Context, agentflow.Step, string, string) error {
 		return errors.New("settlement ran the model")
 	}}
 	_, err := d.resume(ctx, dir, planBytes, nil)
 	if err == nil || !strings.HasPrefix(err.Error(), `step P1 attempt A1: gate "slow-gate" failed: agentflow run: exit 124: `) ||
-		!strings.HasSuffix(err.Error(), "; attempt recorded as blocked; "+wantTimeoutReport(dir, "CR1")) {
-		t.Fatalf("resume err = %v", err)
+		!strings.HasSuffix(err.Error(), "; attempt recorded as blocked") {
+		t.Fatalf("resume 1 err = %v", err)
 	}
 	var status bytes.Buffer
 	statusErr := runAgentflowStatusWithRunner(ctx, &status, dir, false, runner)
 	var exit *agentflowStatusExit
-	if !errors.As(statusErr, &exit) || exit.ExitCode() != 3 || !strings.Contains(status.String(), "\nresume: blocked: "+wantTimeoutReport(dir, "CR1")+"\n") {
-		t.Fatalf("status = %v, want exit 3 with the timeout report\n%s", statusErr, status.String())
+	if !errors.As(statusErr, &exit) || exit.ExitCode() != 2 {
+		t.Fatalf("status = %v, want exit 2\n%s", statusErr, status.String())
+	}
+	touchFile(t, marker)
+	models := 0
+	d = &driver{af: client, plan: &plan, runStep: func(ctx context.Context, step agentflow.Step, attempt, _ string) error {
+		models++
+		writeAndRecordAnswer(t, client, dir, attempt, "expected again\n")
+		return nil
+	}}
+	if final, err := d.resume(ctx, dir, planBytes, nil); err != nil || final.State != "complete" || models != 1 {
+		t.Fatalf("resume 2 state = %q, err = %v, model runs = %d; want complete after one", final.State, err, models)
+	}
+}
+
+// agentflow#70: an attempt left open holding a timed-out receipt (the process
+// died before Golem blocked it) is attempt_timed_out. Status offers the block
+// (exit 2); resume blocks it, then claims a new attempt and runs the model.
+func TestAgentflowResumeBlocksTimedOutAttempt_RealCLI(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "fast")
+	argv := []string{"sh", "-c", "test -e " + marker + " || sleep 5"}
+	dir, runner, client, plan, planBytes := openSettlementAttempt(t, argv, "expected\n")
+	ctx := context.Background()
+	var timedOut *agentflow.CommandError
+	if err := client.RunGate(ctx, "P1", "A1", "slow-gate", argv); !errors.As(err, &timedOut) || timedOut.Exit != 124 {
+		t.Fatalf("A1 gate err = %v, want an AgentFlow exit-124 timeout", err)
+	}
+	if state, err := client.NextAction(ctx); err != nil || state.State != "attempt_timed_out" || state.Resumability == nil ||
+		state.Resumability.Attempt == nil || state.Resumability.Attempt.ID != "A1" || !state.Resumability.Attempt.Open {
+		t.Fatalf("setup state = %+v, err = %v; want open A1 in attempt_timed_out", state, err)
+	}
+	before := snapshotSmokeAgentTree(t, dir)
+	var status bytes.Buffer
+	statusErr := runAgentflowStatusWithRunner(ctx, &status, dir, false, runner)
+	var exit *agentflowStatusExit
+	if !errors.As(statusErr, &exit) || exit.ExitCode() != 2 ||
+		!strings.Contains(status.String(), "\nresume: block the timed-out attempt, then re-run the step serially\n") {
+		t.Fatalf("status = %v, want exit 2 with the timed-out disposition\n%s", statusErr, status.String())
+	}
+	if after := snapshotSmokeAgentTree(t, dir); !reflect.DeepEqual(after, before) {
+		t.Fatal("status changed .agent/")
+	}
+
+	touchFile(t, marker)
+	models := 0
+	d := &driver{af: client, plan: &plan, runStep: func(ctx context.Context, step agentflow.Step, attempt, _ string) error {
+		models++
+		writeAndRecordAnswer(t, client, dir, attempt, "expected again\n")
+		return nil
+	}}
+	if final, err := d.resume(ctx, dir, planBytes, nil); err != nil || final.State != "complete" || models != 1 {
+		t.Fatalf("resume state = %q, err = %v, model runs = %d; want complete after one", final.State, err, models)
+	}
+	events := readStepRunEvents(t, dir)
+	if got := lastStepRunEvent(events, "A1"); got.Event != "blocked" || got.Reason != "golem: resume found timed-out gate" {
+		t.Fatalf("A1 last event = %+v, want blocked with the timed-out reason", got)
+	}
+	if lastStepRunEvent(events, "A2").Event != "completed" || countStepRunEvents(events, "claimed") != 2 {
+		t.Fatalf("events = %+v, want a second claim (A2) that completed", events)
+	}
+}
+
+// openTimedOutAmendment completes P1 (A1) behind a marker gate, then opens an
+// amendment A2 whose gate times out and leaves it open: attempt_timed_out on a
+// completed step. findings nil opens a plain amendment; otherwise a review
+// amendment linked to those refs, as Golem's review round opens one.
+func openTimedOutAmendment(t *testing.T, findings []string) (string, string, agentflow.Runner, *agentflow.Client, agentflow.Plan, []byte, string) {
+	t.Helper()
+	dir := t.TempDir()
+	copyTree(t, "../../testdata/agentflow", dir)
+	marker, argv := markerGate(t, dir)
+	runner, client, plan, planBytes := startFixtureExecution(t, dir)
+	ctx := context.Background()
+	touchFile(t, marker)
+	a1, err := client.ClaimStep(ctx, "P1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeAndRecordAnswer(t, client, dir, a1, "expected\n")
+	if err := client.RunGate(ctx, "P1", a1, "slow-gate", argv); err != nil {
+		t.Fatalf("A1 gate: %v", err)
+	}
+	if err := client.FinishStep(ctx, "P1", a1); err != nil {
+		t.Fatalf("A1 finish-step: %v", err)
+	}
+	if err := os.Remove(marker); err != nil {
+		t.Fatal(err)
+	}
+	var a2 string
+	if findings == nil {
+		a2, err = client.AmendCompletedStep(ctx, "P1", "test: amendment")
+	} else {
+		a2, err = client.AmendStep(ctx, "P1", findings)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeAndRecordAnswer(t, client, dir, a2, "amended\n")
+	var timedOut *agentflow.CommandError
+	if err := client.RunGate(ctx, "P1", a2, "slow-gate", argv); !errors.As(err, &timedOut) || timedOut.Exit != 124 {
+		t.Fatalf("A2 gate err = %v, want an AgentFlow exit-124 timeout", err)
+	}
+	if state, err := client.NextAction(ctx); err != nil || state.State != "attempt_timed_out" || state.Resumability == nil ||
+		state.Resumability.Step == nil || state.Resumability.Step.Completed == nil || !*state.Resumability.Step.Completed ||
+		state.Resumability.Attempt == nil || state.Resumability.Attempt.ID != a2 {
+		t.Fatalf("setup state = %+v, err = %v; want open %s in attempt_timed_out on a completed step", state, err, a2)
+	}
+	return dir, marker, runner, client, plan, planBytes, a2
+}
+
+// A timed-out review amendment is not replaced: resume would rerun the step's
+// own goal and drop the findings. Status exits 3 and resume refuses, both
+// before any change.
+func TestAgentflowResumeRefusesTimedOutReviewAmendment_RealCLI(t *testing.T) {
+	dir, marker, runner, client, plan, planBytes, _ := openTimedOutAmendment(t, []string{"RR-20261010T120000Z-643a643b#F1"})
+	ctx := context.Background()
+	touchFile(t, marker)
+	const refusal = "step P1 has an unfinished review amendment; resume would replace it with the step's own goal and drop the review findings, so it changes nothing; block the attempt if it is still open, then address the findings in a new -review-manifest round over the same plan"
+	before := snapshotSmokeAgentTree(t, dir)
+	var status bytes.Buffer
+	statusErr := runAgentflowStatusWithRunner(ctx, &status, dir, false, runner)
+	var exit *agentflowStatusExit
+	if !errors.As(statusErr, &exit) || exit.ExitCode() != 3 || !strings.Contains(status.String(), "\nresume: blocked: "+refusal+"\n") {
+		t.Fatalf("status = %v, want exit 3 with the review refusal\n%s", statusErr, status.String())
+	}
+	d := &driver{af: client, plan: &plan, runStep: func(context.Context, agentflow.Step, string, string) error {
+		t.Fatal("resume ran the model")
+		return nil
+	}}
+	if _, err := d.resume(ctx, dir, planBytes, nil); err == nil || err.Error() != refusal {
+		t.Fatalf("resume err = %v\nwant %s", err, refusal)
+	}
+	if after := snapshotSmokeAgentTree(t, dir); !reflect.DeepEqual(after, before) {
+		t.Fatal("a refusal changed .agent/")
+	}
+}
+
+// agentflow#70: a verified attempt is still open, so a later command in it can
+// time out. Resume blocks it like any timed-out attempt, then reruns the step.
+func TestAgentflowResumeBlocksTimedOutVerifiedAttempt_RealCLI(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "fast")
+	argv := []string{"sh", "-c", "test -e " + marker + " || sleep 5"}
+	touchFile(t, marker)
+	dir, runner, client, plan, planBytes := openSettlementAttempt(t, argv, "expected\n")
+	ctx := context.Background()
+	if err := client.RunGate(ctx, "P1", "A1", "slow-gate", argv); err != nil {
+		t.Fatalf("A1 gate: %v", err)
+	}
+	verify := []string{"verify-step", "P1", "--root", dir, "--attempt", "A1", "--agent", "golem", "--json"}
+	if out, errOut, exit, err := runner.Run(ctx, verify, nil); err != nil || exit != 0 {
+		t.Fatalf("verify-step: exit=%d err=%v stdout=%s stderr=%s", exit, err, out, errOut)
+	}
+	if err := os.Remove(marker); err != nil {
+		t.Fatal(err)
+	}
+	var timedOut *agentflow.CommandError
+	if err := client.RunGate(ctx, "P1", "A1", "slow-gate", argv); !errors.As(err, &timedOut) || timedOut.Exit != 124 {
+		t.Fatalf("A1 second gate err = %v, want an AgentFlow exit-124 timeout", err)
+	}
+	if state, err := client.NextAction(ctx); err != nil || state.State != "attempt_timed_out" || state.Resumability == nil ||
+		state.Resumability.Attempt == nil || state.Resumability.Attempt.State != "verified" {
+		t.Fatalf("setup state = %+v, err = %v; want a verified A1 in attempt_timed_out", state, err)
+	}
+	var status bytes.Buffer
+	statusErr := runAgentflowStatusWithRunner(ctx, &status, dir, false, runner)
+	var exit *agentflowStatusExit
+	if !errors.As(statusErr, &exit) || exit.ExitCode() != 2 {
+		t.Fatalf("status = %v, want exit 2\n%s", statusErr, status.String())
+	}
+	touchFile(t, marker)
+	models := 0
+	d := &driver{af: client, plan: &plan, runStep: func(ctx context.Context, step agentflow.Step, attempt, _ string) error {
+		models++
+		writeAndRecordAnswer(t, client, dir, attempt, "expected again\n")
+		return nil
+	}}
+	if final, err := d.resume(ctx, dir, planBytes, nil); err != nil || final.State != "complete" || models != 1 {
+		t.Fatalf("resume state = %q, err = %v, model runs = %d; want complete after one", final.State, err, models)
+	}
+	if got := lastStepRunEvent(readStepRunEvents(t, dir), "A1"); got.Event != "blocked" || got.Reason != "golem: resume found timed-out gate" {
+		t.Fatalf("A1 last event = %+v, want blocked with the timed-out reason", got)
+	}
+}
+
+// agentflow#70: a review-style amendment of a completed step whose gate timed
+// out is attempt_timed_out on a completed step. Resume blocks it, which leaves
+// step_amendment_needed, then amends the step and runs the model for the
+// replacement, whose gates run under resume's pre-gate check.
+func TestAgentflowResumeAmendsAfterTimedOutAmendment_RealCLI(t *testing.T) {
+	dir, marker, runner, client, plan, planBytes, a2 := openTimedOutAmendment(t, nil)
+	ctx := context.Background()
+	var status bytes.Buffer
+	statusErr := runAgentflowStatusWithRunner(ctx, &status, dir, false, runner)
+	var exit *agentflowStatusExit
+	if !errors.As(statusErr, &exit) || exit.ExitCode() != 2 ||
+		!strings.Contains(status.String(), "\nresume: block the timed-out attempt, then re-run the step serially\n") {
+		t.Fatalf("status = %v, want exit 2 with the timed-out disposition\n%s", statusErr, status.String())
+	}
+	touchFile(t, marker)
+	var attempts []string
+	d := &driver{af: client, plan: &plan, runStep: func(ctx context.Context, step agentflow.Step, attempt, _ string) error {
+		attempts = append(attempts, attempt)
+		writeAndRecordAnswer(t, client, dir, attempt, "amended again\n")
+		return nil
+	}}
+	if final, err := d.resume(ctx, dir, planBytes, nil); err != nil || final.State != "complete" || len(attempts) != 1 {
+		t.Fatalf("resume state = %q, err = %v, model attempts = %v; want complete after one", final.State, err, attempts)
+	}
+	events := readStepRunEvents(t, dir)
+	if got := lastStepRunEvent(events, a2); got.Event != "blocked" || got.Reason != "golem: resume found timed-out gate" {
+		t.Fatalf("%s last event = %+v, want blocked with the timed-out reason", a2, got)
+	}
+	a3 := attempts[0]
+	if a3 == a2 || lastStepRunEvent(events, a3).Event != "completed" || countStepRunEvents(events, "amendment_started") != 2 || countStepRunEvents(events, "claimed") != 1 {
+		t.Fatalf("events = %+v, want a second amendment (%s) that completed and no new claim", events, a3)
+	}
+	for _, event := range events {
+		if event.AttemptID == a3 && event.Event == "amendment_started" && event.Reason != "golem: resume replaces the step's attempt" {
+			t.Fatalf("%s amendment reason = %q", a3, event.Reason)
+		}
 	}
 }
 
@@ -1853,7 +2123,7 @@ func TestAgentflowResumeRefusesFailedGateUnderFiniteEnforce_RealCLI(t *testing.T
 		t.Fatalf("status = %v, want exit 3 with the finite-enforce refusal\n%s", statusErr, status.String())
 	}
 	models := 0
-	d := &driver{af: client, plan: &plan, root: dir, runStep: func(context.Context, agentflow.Step, string, string) error {
+	d := &driver{af: client, plan: &plan, runStep: func(context.Context, agentflow.Step, string, string) error {
 		models++
 		return nil
 	}}
@@ -1865,46 +2135,50 @@ func TestAgentflowResumeRefusesFailedGateUnderFiniteEnforce_RealCLI(t *testing.T
 	}
 }
 
-// #642 A9's premise (agentflow#60): AgentFlow 1.0 rejects a timed-out receipt
-// even after a later attempt of the same step passes that gate and finishes.
-func TestAgentflowSupersededTimeoutStillFailsVerify_RealCLI(t *testing.T) {
-	dir := t.TempDir()
-	copyTree(t, "../../testdata/agentflow", dir)
-	marker := filepath.Join(t.TempDir(), "fast")
-	argv := []string{"sh", "-c", "test -e " + marker + " || sleep 5"}
-	setSlowGate(t, dir, argv)
-	_, client, _, _ := startFixtureExecution(t, dir)
-	ctx := context.Background()
-	a1, err := client.ClaimStep(ctx, "P1")
+// AgentFlow 1.1 lists the next-action states and recovery actions in
+// docs/cli-contract.json value_sets, and a minor release may add values
+// (docs/stability.md). Golem fails closed on a state it does not know; this
+// pins that it knows every state and action the pinned AgentFlow publishes, so
+// moving the pin to a release that adds one fails here first. Source mode
+// only: an installed AgentFlow ships no docs.
+func TestAgentflowNextActionValueSets_RealCLI(t *testing.T) {
+	src := os.Getenv("AGENTFLOW_SRC")
+	if src == "" {
+		t.Skip("set AGENTFLOW_SRC=<checkout> to read its docs/cli-contract.json")
+	}
+	b, err := os.ReadFile(filepath.Join(src, "docs", "cli-contract.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	writeAndRecordAnswer(t, client, dir, a1, "expected\n")
-	// Only an AgentFlow timeout (exit 124) makes the finish-run below a test of
-	// agentflow#60; any other A1 failure is reported as itself.
-	var timedOut *agentflow.CommandError
-	if err := client.RunGate(ctx, "P1", a1, "slow-gate", argv); !errors.As(err, &timedOut) || timedOut.Exit != 124 {
-		t.Fatalf("A1 gate err = %v, want an AgentFlow exit-124 timeout", err)
+	var contract struct {
+		ValueSets map[string][]string `json:"value_sets"`
 	}
-	if err := client.BlockStep(ctx, "P1", a1, gateBlockReason); err != nil {
+	if err := json.Unmarshal(b, &contract); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(marker, nil, 0o600); err != nil {
-		t.Fatal(err)
+	states := contract.ValueSets["next-action.state"]
+	actions := contract.ValueSets["next-action.resumability.recovery_actions.action"]
+	if len(states) == 0 || len(actions) == 0 {
+		t.Fatalf("value_sets = %v, want next-action states and recovery actions", contract.ValueSets)
 	}
-	a2, err := client.ClaimStep(ctx, "P1")
-	if err != nil {
-		t.Fatal(err)
+	unknown := resumeDisposition("not an AgentFlow state")
+	for _, state := range states {
+		if resumeDisposition(state) == unknown {
+			t.Errorf("Golem has no disposition for AgentFlow next-action state %q", state)
+		}
 	}
-	writeAndRecordAnswer(t, client, dir, a2, "expected\n")
-	if err := client.RunGate(ctx, "P1", a2, "slow-gate", argv); err != nil {
-		t.Fatalf("A2 gate: %v", err)
+	// Golem takes claim, continue, block and amend; it never renews, reclaims
+	// or fails an attempt.
+	known := []string{"claim", "continue", "renew", "reclaim", "fail", "block", "amend"}
+	for _, action := range actions {
+		if !slices.Contains(known, action) {
+			t.Errorf("AgentFlow recovery action %q is new to Golem", action)
+		}
 	}
-	if err := client.FinishStep(ctx, "P1", a2); err != nil {
-		t.Fatalf("A2 finish-step: %v", err)
-	}
-	if proof, err := client.FinishRun(ctx); err == nil || !strings.Contains(err.Error(), "command receipt CR1 for P1 timed out after 1 seconds") {
-		t.Fatalf("finish-run proof = %q, err = %v: if this passes verification, AgentFlow fixed agentflow#60 and Golem's #642 A9 refusals (status/resume/review) must be revisited", proof, err)
+	for _, action := range []string{"claim", "continue", "block", "amend"} {
+		if !slices.Contains(actions, action) {
+			t.Errorf("AgentFlow no longer publishes recovery action %q, which Golem takes", action)
+		}
 	}
 }
 
@@ -1978,7 +2252,7 @@ func TestAgentflowResumeRefusesFinishRunWhileStepWorkRemains_RealCLI(t *testing.
 		t.Fatalf("setup state = %q, err = %v; want step_unclaimed", state.State, err)
 	}
 	af := &concurrentClaimAF{afClient: client, claimStep: "P2"}
-	d := &driver{af: af, plan: &plan, root: dir, runStep: func(_ context.Context, _ agentflow.Step, attempt, _ string) error {
+	d := &driver{af: af, plan: &plan, runStep: func(_ context.Context, _ agentflow.Step, attempt, _ string) error {
 		writeAndRecordAnswer(t, client, dir, attempt, "expected\n")
 		return nil
 	}}
@@ -2093,7 +2367,7 @@ func TestAgentflowResumePreservesAlreadyStaleProof_RealCLI(t *testing.T) {
 				t.Fatalf("staged state=%q err=%v, want hidden stale proof", state.State, err)
 			}
 			before := snapshotSmokeAgentTree(t, dir)
-			d := &driver{af: client, plan: &plan, root: dir, runStep: func(context.Context, agentflow.Step, string, string) error {
+			d := &driver{af: client, plan: &plan, runStep: func(context.Context, agentflow.Step, string, string) error {
 				t.Fatal("resume ran the model over an already stale proof")
 				return nil
 			}}
@@ -2167,7 +2441,7 @@ func TestAgentflowResumeProofDisposition_RealCLI(t *testing.T) {
 			}
 
 			models := 0
-			d := &driver{af: client, plan: &plan, root: dir, runStep: func(ctx context.Context, step agentflow.Step, attempt, _ string) error {
+			d := &driver{af: client, plan: &plan, runStep: func(ctx context.Context, step agentflow.Step, attempt, _ string) error {
 				models++
 				writeAndRecordAnswer(t, client, dir, attempt, "expected\n")
 				return nil

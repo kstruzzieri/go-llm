@@ -157,7 +157,7 @@ func TestRunAgentflowTask_RefusesZeroXStateBeforeAgentflow(t *testing.T) {
 			writeAgentFile(t, root, "plan.lock.json", v1Lock)
 			writeAgentFile(t, root, "execution.contract.json", `{"schema_version":"0.3.0"}`)
 			before := snapshotAuditFixtureTree(t, filepath.Join(root, ".agent"))
-			calls := fakeAgentflowOnPath(t, "1.0.0")
+			calls := fakeAgentflowOnPath(t, "1.1.0")
 			planBytes, err := json.Marshal(agentflow.Compile(validTraceableIR()))
 			if err != nil {
 				t.Fatal(err)
@@ -289,7 +289,7 @@ func TestAgentflowExecutionHistory(t *testing.T) {
 // PATH and returns the error and the fake's call log path.
 func runFreshTaskOverFixture(t *testing.T, root string, f flags) (calls string, err error) {
 	t.Helper()
-	calls = fakeAgentflowOnPath(t, "1.0.0")
+	calls = fakeAgentflowOnPath(t, "1.1.0")
 	if f.planPath == "" {
 		planBytes, err := json.Marshal(agentflow.Compile(validTraceableIR()))
 		if err != nil {
@@ -542,14 +542,18 @@ func TestRunAgentflowTask_ReviewRoundOverSameLockedPlan(t *testing.T) {
 		manifest bool
 		noLock   bool
 		receipts string // command-receipts.jsonl body, if any
+		stepRuns string // step-runs.jsonl body; "" means v1Row
 		timeout  bool   // want the #642 A9 refusal for CR1 in root
 		want     string // "" means the review round proceeds
 	}{
 		{name: "review over the same plan proceeds", supplied: plan, manifest: true},
 		// #642 D8: this exception skips the history guard, so it must not
 		// mutate a ledger that can never verify; an ordinary failed gate
-		// receipt does not stop it.
-		{name: "review over a retained timeout is refused", supplied: plan, manifest: true, receipts: timeoutReceiptCR1 + "\n", timeout: true},
+		// receipt, or a timeout a later attempt can supersede, does not stop it.
+		{name: "review over an unrecoverable timeout is refused", supplied: plan, manifest: true, receipts: timeoutReceiptCR1 + "\n", timeout: true},
+		{name: "review over a recoverable timeout proceeds", supplied: plan, manifest: true, receipts: timeoutReceiptCR1 + "\n", stepRuns: blockedA1Rows},
+		{name: "review over a timeout in an attempt closed twice is refused", supplied: plan, manifest: true, receipts: timeoutReceiptCR1 + "\n", timeout: true,
+			stepRuns: blockedA1Rows + `{"schema_version":"1.0.0","step_id":"P1","attempt_id":"A1","event":"failed"}` + "\n"},
 		{name: "review over an exit-1 receipt proceeds", supplied: plan, manifest: true, receipts: exitOneReceiptCR1 + "\n"},
 		{name: "review over a different plan is refused", supplied: other, manifest: true, want: history + reviewHint},
 		{name: "review with no locked plan is refused", supplied: plan, manifest: true, noLock: true, want: history + reviewHint},
@@ -575,7 +579,11 @@ func TestRunAgentflowTask_ReviewRoundOverSameLockedPlan(t *testing.T) {
 				writeAgentFile(t, root, "plan.lock.json", string(lockBytes))
 			}
 			writeAgentFile(t, root, "execution.contract.json", v1Contract)
-			writeAgentFile(t, root, "step-runs.jsonl", v1Row+"\n")
+			stepRuns := v1Row + "\n"
+			if tt.stepRuns != "" {
+				stepRuns = tt.stepRuns
+			}
+			writeAgentFile(t, root, "step-runs.jsonl", stepRuns)
 			if tt.receipts != "" {
 				writeAgentFile(t, root, "command-receipts.jsonl", tt.receipts)
 			}
@@ -625,22 +633,28 @@ func TestRunAgentflowTask_ReviewRoundOverSameLockedPlan(t *testing.T) {
 // wantTimeoutReport is the #642 A9 report, written out so a test never derives
 // its expectation from the code under test.
 func wantTimeoutReport(root, id string) string {
-	return "retained timeout receipt " + id + " in " + root + " prevents this root's ledger from passing AgentFlow 1.0 run verification; preserve the complete .agent/ directory by archiving it outside the working tree, then initialize and validate a new run; do not delete individual receipts"
+	return "retained timeout receipt " + id + " in " + root + " cannot be superseded by a later attempt, so this root's ledger cannot pass AgentFlow run verification; preserve the complete .agent/ directory by archiving it outside the working tree, then initialize and validate a new run; do not delete individual receipts"
 }
 
-// Real AgentFlow 1.0 receipt rows (execution_coverage.py reads decision and
-// timed_out; schema_version keeps R5 quiet where it runs first).
+// Real AgentFlow 1.x receipt rows (execution_coverage.py reads decision and
+// timed_out; schema_version keeps R5 quiet where it runs first). With no
+// step-run ledger, CR1's attempt is unknown, so its timeout is unrecoverable.
 const (
 	timeoutReceiptCR1  = `{"schema_version":"1.0.0","id":"CR1","step_id":"P1","attempt_id":"A1","decision":"timeout","timed_out":true,"exit_code":null,"timeout_seconds":1}`
 	exitOneReceiptCR1  = `{"schema_version":"1.0.0","id":"CR1","step_id":"P1","attempt_id":"A1","decision":"allowed","timed_out":false,"exit_code":1}`
 	incompatibleLedger = "this workspace holds incompatible AgentFlow state (.agent/command-receipts.jsonl:1 unreadable); finish that run, or build its proof, with the AgentFlow version that wrote it, then move .agent/ aside before starting an AgentFlow 1.x run"
+	// blockedA1Rows close CR1's attempt as blocked, so a later attempt can
+	// supersede its timeout (agentflow#60).
+	blockedA1Rows = `{"schema_version":"1.0.0","step_id":"P1","attempt_id":"A1","event":"claimed"}` + "\n" +
+		`{"schema_version":"1.0.0","step_id":"P1","attempt_id":"A1","event":"blocked"}` + "\n"
 )
 
-// #642 A9: retainedTimedOutReceipt applies AgentFlow 1.0's exact predicate
-// (decision == "timeout" or timed_out is True) to every ledger row, the way
-// read_jsonl reads them, and reports a row's own id only when it is
-// AgentFlow-style ASCII.
-func TestRetainedTimedOutReceipt(t *testing.T) {
+// #642 A9: unrecoverableTimedOutReceipt applies AgentFlow's exact timeout
+// predicate (decision == "timeout" or timed_out is True) to every ledger row,
+// the way read_jsonl reads them, and reports a row's own id only when it is
+// AgentFlow-style ASCII. No row here names an attempt the (absent) step-run
+// ledger records, so every timeout is unrecoverable.
+func TestUnrecoverableTimedOutReceipt(t *testing.T) {
 	const line1, line2 = ".agent/command-receipts.jsonl:1", ".agent/command-receipts.jsonl:2"
 	for _, tt := range []struct {
 		name    string
@@ -697,7 +711,7 @@ func TestRetainedTimedOutReceipt(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			got, err := retainedTimedOutReceipt(root)
+			got, err := unrecoverableTimedOutReceipt(root)
 			switch {
 			case tt.dir:
 				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
@@ -709,48 +723,84 @@ func TestRetainedTimedOutReceipt(t *testing.T) {
 				}
 			default:
 				if err != nil || got != tt.want {
-					t.Fatalf("retainedTimedOutReceipt = %q, %v; want %q", got, err, tt.want)
+					t.Fatalf("unrecoverableTimedOutReceipt = %q, %v; want %q", got, err, tt.want)
 				}
 			}
 		})
 	}
 }
 
-// #642 A9: verify-run rejects every retained timed-out receipt, superseded or
-// not, so the scan has no current-attempt or provenance filter and picks no
-// newest receipt; and it reads only root's own ledger.
-func TestRetainedTimedOutReceiptIgnoresAttemptSupersession(t *testing.T) {
-	later := "\n" + `{"schema_version":"1.0.0","id":"CR2","step_id":"P1","attempt_id":"A2","provenance":"observed","decision":"allowed","timed_out":false,"exit_code":0}` +
-		"\n" + `{"schema_version":"1.0.0","id":"CR3","step_id":"P2","attempt_id":"A1","provenance":"observed","decision":"allowed","timed_out":false,"exit_code":0}` + "\n"
-	for name, first := range map[string]string{
-		"flag only":     `{"schema_version":"1.0.0","id":"CR1","step_id":"P1","attempt_id":"A1","provenance":"observed","decision":"allowed","timed_out":true}`,
-		"decision only": `{"schema_version":"1.0.0","id":"CR1","step_id":"P1","attempt_id":"A1","provenance":"observed","decision":"timeout","timed_out":false}`,
+// AgentFlow 1.1 (agentflow#60, #70) verifies a timed-out receipt a later
+// completed attempt supersedes and leads a closed or still-open attempt to its
+// replacement, so only a receipt whose attempt completed, or that the step-run
+// ledger does not record under the receipt's step, stays unrecoverable
+// (execution_coverage.py _classify_timeout_receipt).
+func TestUnrecoverableTimedOutReceiptClassifiesAttempts(t *testing.T) {
+	row := func(step, attempt, event string) string {
+		return `{"schema_version":"1.0.0","step_id":"` + step + `","attempt_id":"` + attempt + `","event":"` + event + `"}` + "\n"
+	}
+	cr := func(id, attempt string) string {
+		return `{"schema_version":"1.0.0","id":"` + id + `","step_id":"P1","attempt_id":"` + attempt + `","decision":"timeout","timed_out":true}` + "\n"
+	}
+	for _, tt := range []struct {
+		name, receipts, stepRuns string
+		want, wantErr            string
+	}{
+		{name: "completed attempt", receipts: cr("CR1", "A1"), stepRuns: row("P1", "A1", "claimed") + row("P1", "A1", "completed"), want: "CR1"},
+		{name: "blocked attempt", receipts: cr("CR1", "A1"), stepRuns: row("P1", "A1", "claimed") + row("P1", "A1", "blocked")},
+		{name: "failed attempt", receipts: cr("CR1", "A1"), stepRuns: row("P1", "A1", "claimed") + row("P1", "A1", "failed")},
+		{name: "abandoned attempt", receipts: cr("CR1", "A1"), stepRuns: row("P1", "A1", "claimed") + row("P1", "A1", "abandoned")},
+		{name: "superseded by a later attempt", receipts: cr("CR1", "A1"), stepRuns: row("P1", "A1", "claimed") + row("P1", "A1", "blocked") + row("P1", "A2", "claimed") + row("P1", "A2", "completed")},
+		{name: "open claimed attempt", receipts: cr("CR1", "A1"), stepRuns: row("P1", "A1", "claimed")},
+		{name: "open amendment", receipts: cr("CR1", "A2"), stepRuns: row("P1", "A1", "claimed") + row("P1", "A1", "completed") + row("P1", "A2", "amendment_started")},
+		{name: "open verified attempt", receipts: cr("CR1", "A1"), stepRuns: row("P1", "A1", "claimed") + row("P1", "A1", "verified")},
+		{name: "open in_progress attempt", receipts: cr("CR1", "A1"), stepRuns: row("P1", "A1", "claimed") + row("P1", "A1", "in_progress")},
+		{name: "lease renewal is not the last event", receipts: cr("CR1", "A1"), stepRuns: row("P1", "A1", "claimed") + row("P1", "A1", "completed") + row("P1", "A1", "lease_renewed"), want: "CR1"},
+		{name: "attempt the ledger does not record", receipts: cr("CR1", "A9"), stepRuns: row("P1", "A1", "claimed"), want: "CR1"},
+		{name: "attempt recorded under another step", receipts: cr("CR1", "A1"), stepRuns: row("P2", "A1", "claimed") + row("P2", "A1", "blocked"), want: "CR1"},
+		// execution_coverage.py _ledger_attempts: an attempt id two steps name,
+		// or one closed twice (possible before agentflow#61), is inconsistent.
+		{name: "attempt also recorded under another step", receipts: cr("CR1", "A1"), stepRuns: row("P1", "A1", "claimed") + row("P2", "A1", "claimed") + row("P1", "A1", "blocked"), want: "CR1"},
+		{name: "attempt closed twice", receipts: cr("CR1", "A1"), stepRuns: row("P1", "A1", "claimed") + row("P1", "A1", "blocked") + row("P1", "A1", "failed"), want: "CR1"},
+		{name: "first unrecoverable after a recoverable one", receipts: cr("CR1", "A1") + cr("CR2", "A2"), stepRuns: row("P1", "A1", "claimed") + row("P1", "A1", "blocked") + row("P1", "A2", "claimed") + row("P1", "A2", "completed"), want: "CR2"},
+		{name: "unknown event fails closed", receipts: cr("CR1", "A1"), stepRuns: row("P1", "A1", "claimed") + row("P1", "A1", "cancelled"), wantErr: `attempt A1 has an event this Golem does not know ("cancelled")`},
+		{name: "unknown event is escaped", receipts: cr("CR1", "A1"), stepRuns: row("P1", "A1", "claimed") + row("P1", "A1", `x\u001b[2J`), wantErr: `attempt A1 has an event this Golem does not know ("x\x1b[2J")`},
+		{name: "malformed step-run row", receipts: cr("CR1", "A1"), stepRuns: row("P1", "A1", "claimed") + "{\n", wantErr: "this workspace holds incompatible AgentFlow state (.agent/step-runs.jsonl:2 unreadable); finish that run, or build its proof, with the AgentFlow version that wrote it, then move .agent/ aside before starting an AgentFlow 1.x run"},
+		{name: "no timeout leaves the step-run ledger unread", receipts: exitOneReceiptCR1 + "\n", stepRuns: "{\n"},
 	} {
-		t.Run(name, func(t *testing.T) {
+		t.Run(tt.name, func(t *testing.T) {
 			root := t.TempDir()
-			writeAgentFile(t, root, "command-receipts.jsonl", first+later)
-			if got, err := retainedTimedOutReceipt(root); err != nil || got != "CR1" {
-				t.Fatalf("retainedTimedOutReceipt = %q, %v; want CR1", got, err)
+			writeAgentFile(t, root, "command-receipts.jsonl", tt.receipts)
+			writeAgentFile(t, root, "step-runs.jsonl", tt.stepRuns)
+			got, err := unrecoverableTimedOutReceipt(root)
+			if tt.wantErr != "" {
+				if err == nil || err.Error() != tt.wantErr {
+					t.Fatalf("err = %v\nwant %s", err, tt.wantErr)
+				}
+				return
 			}
-			clean := t.TempDir()
-			writeAgentFile(t, clean, "command-receipts.jsonl", strings.TrimPrefix(later, "\n"))
-			writeAgentFile(t, filepath.Join(clean, "nested"), "command-receipts.jsonl", first+"\n") // a walk would find this
-			if got, err := retainedTimedOutReceipt(clean); err != nil || got != "" {
-				t.Fatalf("clean root: retainedTimedOutReceipt = %q, %v; want none", got, err)
+			if err != nil || got != tt.want {
+				t.Fatalf("unrecoverableTimedOutReceipt = %q, %v; want %q", got, err, tt.want)
 			}
 		})
 	}
 }
 
-func TestRefuseRetainedTimeout(t *testing.T) {
+func TestRefuseUnrecoverableTimeout(t *testing.T) {
 	root := t.TempDir()
 	writeAgentFile(t, root, "command-receipts.jsonl", `{"id":"CR1","decision":"allowed"}`+"\r\n\n"+`{"id":"CR2","decision":"timeout"}`+"\n"+`{"id":"CR3","decision":"timeout"}`)
-	if err := refuseRetainedTimeout(root); err == nil || err.Error() != wantTimeoutReport(root, "CR2") {
+	if err := refuseUnrecoverableTimeout(root); err == nil || err.Error() != wantTimeoutReport(root, "CR2") {
 		t.Fatalf("err = %v\nwant %s", err, wantTimeoutReport(root, "CR2"))
 	}
-	clean := t.TempDir()
-	writeAgentFile(t, clean, "command-receipts.jsonl", `{"id":"CR1","decision":"allowed","timed_out":false,"exit_code":1}`)
-	if err := refuseRetainedTimeout(clean); err != nil {
-		t.Fatalf("exit-1 receipt refused: %v", err)
+	for name, receipts := range map[string]string{
+		"exit-1 receipt":      exitOneReceiptCR1,
+		"recoverable timeout": timeoutReceiptCR1,
+	} {
+		clean := t.TempDir()
+		writeAgentFile(t, clean, "command-receipts.jsonl", receipts+"\n")
+		writeAgentFile(t, clean, "step-runs.jsonl", blockedA1Rows)
+		if err := refuseUnrecoverableTimeout(clean); err != nil {
+			t.Fatalf("%s refused: %v", name, err)
+		}
 	}
 }

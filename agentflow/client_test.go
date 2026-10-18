@@ -790,6 +790,28 @@ func TestClient_AmendStep_PreservesEveryFindingReference(t *testing.T) {
 	}
 }
 
+// AmendCompletedStep is amend-step with no review linkage (agentflow#70), and
+// it validates the success projection as AmendStep does.
+func TestClient_AmendCompletedStep(t *testing.T) {
+	c, f := newTestClient(map[string]fakeReply{
+		"amend-step": {stdout: []byte(`{"event":"amendment_started","step_id":"P1","attempt_id":"A3"}`), exit: 0},
+	})
+	attempt, err := c.AmendCompletedStep(context.Background(), "P1", "golem: replace the step's attempt")
+	if err != nil || attempt != "A3" {
+		t.Fatalf("attempt=%q err=%v", attempt, err)
+	}
+	want := []string{"amend-step", "P1", "--root", "/ws", "--agent", "golem", "--reason", "golem: replace the step's attempt", "--json"}
+	if !reflect.DeepEqual(f.calls[0], want) {
+		t.Fatalf("argv = %v, want %v", f.calls[0], want)
+	}
+	c, _ = newTestClient(map[string]fakeReply{
+		"amend-step": {stdout: []byte(`{"event":"claimed","step_id":"P1","attempt_id":"A3"}`), exit: 0},
+	})
+	if attempt, err := c.AmendCompletedStep(context.Background(), "P1", "reason"); err == nil {
+		t.Fatalf("attempt = %q, want malformed success error", attempt)
+	}
+}
+
 func TestClient_AmendStep_RejectsMalformedSuccessProjection(t *testing.T) {
 	tests := []struct {
 		name string

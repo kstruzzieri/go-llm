@@ -40,6 +40,7 @@ type afClient interface {
 	ClaimStep(context.Context, string) (string, error)
 	RecordReview(context.Context, string) (agentflow.ReviewRun, error)
 	AmendStep(context.Context, string, []string) (string, error)
+	AmendCompletedStep(context.Context, string, string) (string, error)
 	RunGate(context.Context, string, string, string, []string) error
 	FinishStep(context.Context, string, string) error
 	CompleteStep(context.Context, string, string) error
@@ -103,25 +104,13 @@ func stepRunBlockReason(err error) string {
 
 // recordBlocked closes an open attempt with reason, so recovery runs a new
 // attempt instead of settling this one on its gates (#611, #642, #652). It
-// returns nil once AgentFlow recorded the block. The block runs on a fresh
-// bounded context: by now the caller's context may be cancelled by an
-// interrupt, a sibling worker's failure, or the journal's fatal-receipt cancel.
-// root is the workspace whose ledger af writes.
-func recordBlocked(ctx context.Context, af afClient, root, step, attempt, reason string) error {
-	// #642: AgentFlow 1.0 blocks an attempt that is already closed (by an
-	// operator's break-glass fail-step, say), which leaves the ledger
-	// state_invalid. An unreadable ledger is not blocked blind: an open attempt
-	// is the documented recoverable residual. The error carries R5's pre-run
-	// advice, so it ends with the mid-run next step. The check narrows, but
-	// cannot close, the window against a concurrent writer; AgentFlow does not
-	// refuse the block itself.
-	event, err := closedAttemptEvent(root, step, attempt)
-	if err != nil {
-		return fmt.Errorf("check attempt state before blocking: %w; attempt not blocked; run -agentflow-status", err)
-	}
-	if event != "" {
-		return fmt.Errorf("attempt already closed (%s); not blocked", event)
-	}
+// returns nil once AgentFlow recorded the block. AgentFlow 1.1 refuses to block
+// an attempt that is already closed (an operator's break-glass fail-step, say)
+// and appends nothing (agentflow#61), so the refusal is the error. The block
+// runs on a fresh bounded context: by now the caller's context may be cancelled
+// by an interrupt, a sibling worker's failure, or the journal's fatal-receipt
+// cancel.
+func recordBlocked(ctx context.Context, af afClient, step, attempt, reason string) error {
 	bctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), blockStepTimeout)
 	defer cancel()
 	if err := af.BlockStep(bctx, step, attempt, reason); err != nil {
@@ -131,29 +120,15 @@ func recordBlocked(ctx context.Context, af afClient, root, step, attempt, reason
 }
 
 // blockAttempt closes the attempt a failure ended and returns that failure
-// with the block's outcome appended. It never returns nil.
-func blockAttempt(ctx context.Context, af afClient, root, step, attempt, reason string, cause error) error {
+// with the block's outcome appended. It never returns nil. A gate that timed
+// out needs nothing more: AgentFlow 1.1 supersedes its receipt once a later
+// attempt of the step completes (agentflow#60).
+func blockAttempt(ctx context.Context, af afClient, step, attempt, reason string, cause error) error {
 	err := fmt.Errorf("step %s attempt %s: %w", step, attempt, cause)
-	if berr := recordBlocked(ctx, af, root, step, attempt, reason); berr != nil {
+	if berr := recordBlocked(ctx, af, step, attempt, reason); berr != nil {
 		return fmt.Errorf("%w; %w", err, berr)
 	}
 	return fmt.Errorf("%w; attempt recorded as blocked", err)
-}
-
-// blockFailedGate blocks the attempt whose gate errored (#642 A2), then reads
-// root's command receipts (A9). It appends the timed-out receipt report, or
-// the labelled receipt read error, after the gate and block errors, which
-// stay wrapped.
-func blockFailedGate(ctx context.Context, af afClient, root, step, attempt string, cause error) error {
-	err := blockAttempt(ctx, af, root, step, attempt, gateBlockReason, cause)
-	id, terr := retainedTimedOutReceipt(root)
-	if terr != nil {
-		return fmt.Errorf("%w; read command receipts for the timeout check: %w; run -agentflow-status", err, terr)
-	}
-	if id != "" {
-		return fmt.Errorf("%w; %w", err, retainedTimeoutReport(root, id))
-	}
-	return err
 }
 
 // agentflowUnavailableError marks a failed version gate or capability probe.
@@ -186,9 +161,6 @@ type driver struct {
 	beforeGates            beforeGatesFunc
 	parallelCohort         func(context.Context) error
 	out                    io.Writer
-	// root is the workspace whose .agent/ ledger this driver writes; read for
-	// retained timeout receipts (#642 A9).
-	root string
 }
 
 // validateFreshWorkerProjection rejects copied worktrees that have begun or
@@ -388,7 +360,7 @@ func (d *driver) runOneStep(ctx context.Context, id string) error {
 func (d *driver) runAttempt(ctx context.Context, step agentflow.Step, attempt, goal string) error {
 	if err := d.runStep(ctx, step, attempt, goal); err != nil {
 		// #611, #642: every failed run closes its attempt.
-		return blockAttempt(ctx, d.af, d.root, step.ID, attempt, stepRunBlockReason(err), err)
+		return blockAttempt(ctx, d.af, step.ID, attempt, stepRunBlockReason(err), err)
 	}
 	if d.beforeGates != nil {
 		if err := d.beforeGates(ctx, step, attempt); err != nil {
@@ -401,7 +373,7 @@ func (d *driver) runAttempt(ctx context.Context, step agentflow.Step, attempt, g
 	}
 	for _, g := range gates {
 		if err := d.af.RunGate(ctx, step.ID, attempt, g.Label, g.Argv); err != nil {
-			return blockFailedGate(ctx, d.af, d.root, step.ID, attempt, fmt.Errorf("gate %q failed: %w", g.Label, err))
+			return blockAttempt(ctx, d.af, step.ID, attempt, gateBlockReason, fmt.Errorf("gate %q failed: %w", g.Label, err))
 		}
 	}
 	return d.af.FinishStep(ctx, step.ID, attempt) // #642 A4: not blocked: finish-step can fail after closing the attempt
@@ -696,7 +668,7 @@ func runAgentflowTask(ctx context.Context, stdout, stderr io.Writer, interrupts 
 	if !f.agentflowResume && reviewOfLockedPlan {
 		// #642 A9: the same-plan review exception above skips the history
 		// guard, so it must not mutate a ledger that can never verify.
-		if err := refuseRetainedTimeout(root); err != nil {
+		if err := refuseUnrecoverableTimeout(root); err != nil {
 			return fmt.Errorf("refusing a -review-manifest round: %w", err)
 		}
 	}
@@ -763,7 +735,7 @@ func runAgentflowTask(ctx context.Context, stdout, stderr io.Writer, interrupts 
 		af: client, plan: &plan, planPath: planPath, reviewManifest: reviewManifest,
 		taskBrief: taskBrief, workflowProfile: f.workflowProfile, workflowReason: f.workflowReason,
 		approvedRecommendation: approvedRecommendation,
-		evidence:               evidence, runStep: runStep, out: stdout, root: root,
+		evidence:               evidence, runStep: runStep, out: stdout,
 	}
 	if f.agentflowResume {
 		final, err := d.resume(runCtx, root, planBytes, approvedRecommendation)
