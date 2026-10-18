@@ -277,3 +277,28 @@ func TestTokenBudgetZeroContextWindow(t *testing.T) {
 		t.Errorf("Reason = %q, want 'model has no context window configured'", result.Reason)
 	}
 }
+
+// #479 end to end: a profile whose ceiling arrived through Lookup (qwen3.5:9b,
+// catalog ceiling 262144, YaRN window 1010000) shrinks the router's admission
+// budget for a quality-sensitive use case only.
+// 1200000 bytes = 300000 estimated tokens (estimateTokens is len/4).
+//
+//	chat:  budget 262144 - 2048 = 260096; 300000 < 1.5*260096 = 390144 -> BudgetTruncate
+//	agent: budget 1010000 - 2048 = 1007952; 300000 fits                -> BudgetOK
+func TestTokenBudget_QualityCtxCeilingFromLookup(t *testing.T) {
+	profile := lookupQwen35YaRN(t)
+	v := NewTokenBudgetValidator()
+	prompt := strings.Repeat("a", 1_200_000)
+
+	chat := v.Validate(RoutingRequest{UseCase: "chat", Prompt: prompt}, profile)
+	if chat.RequestTokens != 300000 {
+		t.Fatalf("chat: RequestTokens = %d, want 300000 (fixture broken)", chat.RequestTokens)
+	}
+	if chat.BudgetTokens != 260096 || chat.Decision != BudgetTruncate {
+		t.Errorf("chat: budget=%d decision=%v, want 260096 BudgetTruncate", chat.BudgetTokens, chat.Decision)
+	}
+	agent := v.Validate(RoutingRequest{UseCase: "agent", Prompt: prompt}, profile)
+	if agent.BudgetTokens != 1007952 || agent.Decision != BudgetOK {
+		t.Errorf("agent: budget=%d decision=%v, want 1007952 BudgetOK", agent.BudgetTokens, agent.Decision)
+	}
+}

@@ -128,7 +128,7 @@ type ModelProfile struct {
 	Quality           Tier            // basic, good, great, best
 	Speed             Tier            // basic=slow, good=medium, great=fast, best=fastest
 	ContextWindow     int             // max context tokens
-	QualityCtxCeiling int             // 0 = same as ContextWindow; quality degrades above this
+	QualityCtxCeiling int             // trained context from catalog or config (#479); 0 = none known
 	Dimensions        int             // embedding dimensions, 0 if not embedding model
 	Template          string          // live provider template when available
 	Source            ProfileSource   // static, fingerprint, runtime, merged
@@ -136,22 +136,33 @@ type ModelProfile struct {
 	UpdatedAt         time.Time       // when this profile was last computed
 }
 
-// qualitySensitiveUseCases identifies use cases where output quality degrades
-// when the context window exceeds the model's training context. Models like
-// Qwen3 are trained on 32K but advertise 128K via YaRN — quality is lower
-// above the training context for tasks that require high fidelity.
+// qualitySensitiveUseCases identifies use cases whose call is single-shot and
+// judged on the fidelity of one answer, so they assemble against the model's
+// trained context rather than a window reached by inference-time RoPE scaling
+// (YaRN). Use cases that must hold accumulated or verbatim material -- the
+// agent loop's tool trace (agent, tool-use), the FIM prefix, embedding input,
+// the transcript a summarize call compresses -- are capacity-sensitive and
+// always receive the full ContextWindow (#479).
 var qualitySensitiveUseCases = map[string]bool{
 	"chat":        true,
 	"reasoning":   true,
 	"code-review": true,
+	"planning":    true,
+	"analysis":    true,
 }
 
 // EffectiveContextWindow returns the usable context window for a given use case.
-// For quality-sensitive use cases (chat, reasoning, code-review), it returns
-// QualityCtxCeiling when set. For quantity-sensitive use cases (fim, embedding)
-// or when QualityCtxCeiling is 0, it returns the full ContextWindow.
+// For quality-sensitive use cases it returns QualityCtxCeiling when one is set,
+// clamped to ContextWindow when that is known, so a trained length longer than
+// the served window never widens the budget. QualityCtxCeiling is written only
+// by the static catalog (provider/catalog.json quality_ctx_ceiling, per family)
+// and the models.json quality_ctx_ceiling override. Every other use case, and
+// any profile without a ceiling, gets ContextWindow.
 func (p *ModelProfile) EffectiveContextWindow(useCase string) int {
 	if p.QualityCtxCeiling > 0 && qualitySensitiveUseCases[useCase] {
+		if p.ContextWindow > 0 && p.ContextWindow < p.QualityCtxCeiling {
+			return p.ContextWindow
+		}
 		return p.QualityCtxCeiling
 	}
 	return p.ContextWindow

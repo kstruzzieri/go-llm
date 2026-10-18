@@ -20,13 +20,16 @@ type catalogData struct {
 // Each family defines shared policy defaults (FIM stops/budget, think mode,
 // context window) and a map of size-keyed variants with resource requirements.
 type catalogFamily struct {
-	FIM           *FIMConfig                `json:"fim"`
-	ThinkMode     string                    `json:"think_mode"`
-	ThinkTags     *catalogThinkTags         `json:"think_tags"`
-	Caps          []string                  `json:"caps"`
-	ContextWindow int                       `json:"context_window"`
-	Dimensions    int                       `json:"dimensions"`
-	Variants      map[string]catalogVariant `json:"variants"`
+	FIM           *FIMConfig        `json:"fim"`
+	ThinkMode     string            `json:"think_mode"`
+	ThinkTags     *catalogThinkTags `json:"think_tags"`
+	Caps          []string          `json:"caps"`
+	ContextWindow int               `json:"context_window"`
+	// QualityCtxCeiling is the family's trained context when its model card
+	// distinguishes it from a longer RoPE-scaled window (#479). 0 = none.
+	QualityCtxCeiling int                       `json:"quality_ctx_ceiling"`
+	Dimensions        int                       `json:"dimensions"`
+	Variants          map[string]catalogVariant `json:"variants"`
 }
 
 // catalogThinkTags is the JSON representation of thinking delimiters.
@@ -111,12 +114,13 @@ func (sc *staticCatalog) families() []string {
 // only family-level data is populated and resource fields remain zero-valued.
 func (sc *staticCatalog) buildProfile(family string, fam *catalogFamily, variant *catalogVariant) *ModelProfile {
 	p := &ModelProfile{
-		Family:        family,
-		ThinkMode:     parseThinkMode(fam.ThinkMode),
-		Caps:          parseCaps(fam.Caps),
-		ContextWindow: fam.ContextWindow,
-		Dimensions:    fam.Dimensions,
-		Source:        SourceStatic,
+		Family:            family,
+		ThinkMode:         parseThinkMode(fam.ThinkMode),
+		Caps:              parseCaps(fam.Caps),
+		ContextWindow:     fam.ContextWindow,
+		QualityCtxCeiling: fam.QualityCtxCeiling,
+		Dimensions:        fam.Dimensions,
+		Source:            SourceStatic,
 	}
 
 	if fam.FIM != nil {

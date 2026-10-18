@@ -74,12 +74,13 @@ func buildInventoryFromRegistry(ctx context.Context, providers *provider.Registr
 				return configview.Inventory{}, fmt.Errorf("load model %q from provider %q for -json inventory: %w", info.Name, name, err)
 			}
 			inv.Models = append(inv.Models, configview.InventoryModel{
-				Key:           profile.Key,
-				Family:        profile.Family,
-				Caps:          profile.Caps,
-				KnownMask:     profile.Caps, // merged registry knowledge; present-only mask
-				ProfileSource: profile.Source.String(),
-				ContextWindow: profile.ContextWindow,
+				Key:               profile.Key,
+				Family:            profile.Family,
+				Caps:              profile.Caps,
+				KnownMask:         profile.Caps, // merged registry knowledge; present-only mask
+				ProfileSource:     profile.Source.String(),
+				ContextWindow:     profile.ContextWindow,
+				QualityCtxCeiling: profile.QualityCtxCeiling,
 			})
 		}
 	}

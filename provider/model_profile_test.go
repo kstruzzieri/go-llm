@@ -352,3 +352,52 @@ func TestRecommendOptsConstruction(t *testing.T) {
 		t.Error("RequiredCaps should have CapChat|CapStream")
 	}
 }
+
+// TestEffectiveContextWindow_ClampAndMembership pins the #479 read-site
+// contract: the quality-sensitive set (single-shot fidelity calls), the clamp
+// to a known served window, the equal-to-window opt-out, and the
+// unknown-window case where the operator's ceiling is the only number known.
+func TestEffectiveContextWindow_ClampAndMembership(t *testing.T) {
+	tests := []struct {
+		name            string
+		window, ceiling int
+		useCase         string
+		want            int
+	}{
+		{"chat honors ceiling", 131072, 32768, "chat", 32768},
+		{"reasoning honors ceiling", 131072, 32768, "reasoning", 32768},
+		{"code-review honors ceiling", 131072, 32768, "code-review", 32768},
+		{"planning honors ceiling", 131072, 32768, "planning", 32768},
+		{"analysis honors ceiling", 131072, 32768, "analysis", 32768},
+		{"agent gets full window", 131072, 32768, "agent", 131072},
+		{"tool-use gets full window", 131072, 32768, "tool-use", 131072},
+		{"fim gets full window", 131072, 32768, "fim", 131072},
+		{"embedding gets full window", 131072, 32768, "embedding", 131072},
+		{"summarize gets full window", 131072, 32768, "summarize", 131072},
+		{"coding gets full window", 131072, 32768, "coding", 131072},
+		{"generate gets full window", 131072, 32768, "generate", 131072},
+		{"unknown use case gets full window", 131072, 32768, "nonesuch", 131072},
+		{"route gets full window", 131072, 32768, "route", 131072},
+		{"rerank gets full window", 131072, 32768, "rerank", 131072},
+		{"verify gets full window", 131072, 32768, "verify", 131072},
+		{"extract gets full window", 131072, 32768, "extract", 131072},
+		{"approval gets full window", 131072, 32768, "approval", 131072},
+		{"vision gets full window", 131072, 32768, "vision", 131072},
+		{"empty use case gets full window", 131072, 32768, "", 131072},
+		{"case variant Chat gets full window (exact-string set)", 131072, 32768, "Chat", 131072},
+		{"ceiling above window clamps to window", 131072, 262144, "chat", 131072},
+		{"ceiling equal to window is the opt-out", 65536, 65536, "chat", 65536},
+		{"unknown window keeps operator ceiling", 0, 24576, "chat", 24576},
+		{"unknown window, capacity use case stays 0", 0, 24576, "agent", 0},
+		{"no ceiling: chat gets window", 40960, 0, "chat", 40960},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := ModelProfile{ContextWindow: tt.window, QualityCtxCeiling: tt.ceiling}
+			if got := p.EffectiveContextWindow(tt.useCase); got != tt.want {
+				t.Errorf("EffectiveContextWindow(%q) window=%d ceiling=%d = %d, want %d",
+					tt.useCase, tt.window, tt.ceiling, got, tt.want)
+			}
+		})
+	}
+}

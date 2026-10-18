@@ -1153,6 +1153,34 @@ func TestLoad_SlotsValidation(t *testing.T) {
 	}
 }
 
+func TestLoad_QualityCtxCeilingValidation(t *testing.T) {
+	valid := writeTempJSON(t, `{
+  "providers": { "lc": { "base_url": "http://127.0.0.1:8090", "api_format": "openai-compat" } },
+  "models": { "default": { "name": "m1", "provider": "lc", "type": "dense", "quality_ctx_ceiling": 32768 } },
+  "defaults": { "chat": "default" }
+}`)
+	cfg, err := Load(valid)
+	if err != nil {
+		t.Fatalf("Load with quality_ctx_ceiling 32768: %v", err)
+	}
+	if got := cfg.Models["default"].QualityCtxCeiling; got != 32768 {
+		t.Fatalf("QualityCtxCeiling = %d after Load, want 32768 (json tag round-trip)", got)
+	}
+	invalid := writeTempJSON(t, `{
+  "providers": { "lc": { "base_url": "http://127.0.0.1:8090", "api_format": "openai-compat" } },
+  "models": { "default": { "name": "m1", "provider": "lc", "type": "dense", "quality_ctx_ceiling": -1 } },
+  "defaults": { "chat": "default" }
+}`)
+	_, err = Load(invalid)
+	if err == nil {
+		t.Fatal("want Load error for negative quality_ctx_ceiling")
+	}
+	assertDiag(t, err, CodeModelInvalid, SubjectRole, "default")
+	if !contains(err.Error(), "default") || !contains(err.Error(), "quality_ctx_ceiling must not be negative") {
+		t.Fatalf("error %q must name the role and the rule", err)
+	}
+}
+
 func TestValidateRejectsNegativeCapacity(t *testing.T) {
 	for name, body := range map[string]string{
 		"negative context_window": `{"providers":{"local":{"base_url":"http://localhost:1"}},
@@ -1194,13 +1222,17 @@ func TestValidateSlotPolicies(t *testing.T) {
 
 func TestValidateSelectorConflicts(t *testing.T) {
 	// Each case creates two roles sharing one selector. Think is one design
-	// family with separate mode/tag branches, so the five families produce
-	// six branch cases here.
+	// family with separate mode/tag branches, so the six families produce
+	// seven branch cases here.
 	families := []struct {
 		name   string
 		mutate func(base, a, b map[string]any)
 	}{
 		{"context_window", func(_ map[string]any, a, b map[string]any) { a["context_window"] = 1024; b["context_window"] = 2048 }},
+		{"quality_ctx_ceiling", func(_ map[string]any, a, b map[string]any) {
+			a["quality_ctx_ceiling"] = 32768
+			b["quality_ctx_ceiling"] = 24576
+		}},
 		{"options", func(_ map[string]any, a, b map[string]any) {
 			a["options"] = map[string]any{"temperature": 0.1}
 			b["options"] = map[string]any{"temperature": 0.9}
