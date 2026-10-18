@@ -1,4 +1,4 @@
-### Changed — Golem requires AgentFlow 1.1 and resumes timed-out gates (#0000)
+### Changed — Golem requires AgentFlow 1.1 and resumes timed-out gates (#705)
 
 Golem now requires AgentFlow 1.1.0 or a later 1.x. AgentFlow 1.0 is refused
 before any other AgentFlow call (`agentflow 1.0 is too old; need >= 1.1`), so
