@@ -247,7 +247,9 @@ func newCanarySession(t *testing.T, caller agent.ModelCaller) *replSession {
 	sess.baseSystem = composeSystem(sess.sysInputs)
 	sess.readToolCount = len(sess.tools)
 	sess.orch = agent.New(caller, agent.ContextManager{}, agent.WithInterceptors(sess.canary))
-	installCompactRuntime(t, sess, golemruntime.Options{})
+	// Canary renewal and /allow-write republish the session's extra tools
+	// through Replace, which the zero (Inspect) profile refuses.
+	installCompactRuntime(t, sess, golemruntime.Options{Profile: golemruntime.ProfileTrusted})
 	return sess
 }
 

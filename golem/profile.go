@@ -8,6 +8,7 @@ import (
 	"unicode"
 
 	"github.com/kstruzzieri/go-llm/agent"
+	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
 )
 
 // ErrProfileUnavailable reports a profile this release cannot construct.
@@ -115,13 +116,49 @@ func filterOwned(owned []agent.Tool, ceiling map[string]struct{}) []agent.Tool {
 }
 
 // admitTools returns the complete tool list a snapshot may publish: the
-// runtime-owned prefix followed by extras, after nil/name/duplicate validation.
+// runtime-owned prefix followed by extras. New, Replace and ReplaceConfiguration
+// all admit through here, before any tool beyond Spec is touched, so a rejected
+// extra is never planned or invoked. It enforces, in order: the profile, the
+// nil/name/duplicate checks, and per extra the frozen allowlist ceiling,
+// dispatch's need for all four reads, and dispatch's incompatibility with a
+// ScopeGuard.
 func (r *Runtime) admitTools(extras []agent.Tool) ([]agent.Tool, error) {
+	if err := checkProfile(r.profile, extras); err != nil {
+		return nil, err
+	}
 	combined := make([]agent.Tool, 0, len(r.fileTools)+len(extras))
 	combined = append(combined, r.fileTools...)
 	combined = append(combined, extras...)
-	if err := validateTools(combined); err != nil {
+	names, err := validateTools(combined)
+	if err != nil {
 		return nil, err
 	}
+	for i, tool := range extras {
+		if err := r.checkExtra(tool, names[len(r.fileTools)+i]); err != nil {
+			return nil, err
+		}
+	}
 	return combined, nil
+}
+
+// checkExtra applies the ceiling rules to one caller tool named name.
+func (r *Runtime) checkExtra(tool agent.Tool, name string) error {
+	if r.ceiling != nil {
+		if _, ok := r.ceiling[name]; !ok {
+			return fmt.Errorf("%w: tool %q is outside the frozen allowlist", ErrProfileIncompatible, name)
+		}
+		// dispatch builds its own child readers, which the allowlist cannot
+		// narrow, so the allowlist must already admit every read.
+		if name == agenttools.DispatchToolName {
+			for _, read := range inspectReads {
+				if _, ok := r.ceiling[read]; !ok {
+					return fmt.Errorf("%w: allowlist admits %s without %q, but its child readers are not bound by the allowlist", ErrProfileIncompatible, name, read)
+				}
+			}
+		}
+	}
+	if _, ok := tool.(*agenttools.Dispatch); ok && r.guarded {
+		return fmt.Errorf("%w: %s cannot run beside a ScopeGuard, its child readers do not share the guarded workspace", ErrProfileIncompatible, agenttools.DispatchToolName)
+	}
+	return nil
 }

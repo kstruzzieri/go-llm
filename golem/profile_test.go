@@ -198,14 +198,25 @@ func TestUnknownProfileRejected(t *testing.T) {
 
 func TestAdmissionRunsBeforeBootstrap(t *testing.T) {
 	spy := &profileSpyTool{name: "lookup", effect: agent.Effect{Class: agent.Read, Approval: agent.ApprovalNever}}
-	_, err := golem.New(context.Background(), golem.Options{
-		Root:       t.TempDir(),
-		ConfigPath: filepath.Join(t.TempDir(), "missing-models.json"),
-		Profile:    golem.ProfileInspect,
-		Tools:      []agent.Tool{spy},
-	})
-	if !errors.Is(err, golem.ErrProfileIncompatible) {
-		t.Fatalf("New error = %v, want ErrProfileIncompatible (not a config error)", err)
+	tests := []struct {
+		name string
+		opts golem.Options
+	}{
+		{"inspect caller tool", golem.Options{Profile: golem.ProfileInspect, Tools: []agent.Tool{spy}}},
+		{"inspect allowlist outside the reads", golem.Options{Profile: golem.ProfileInspect, ToolAllowlist: []string{"run_command"}}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			// No Orchestrator: bootstrap would load the missing config and
+			// fail with a config error, so ErrProfileIncompatible proves
+			// admission ran first.
+			tc.opts.Root = t.TempDir()
+			tc.opts.ConfigPath = filepath.Join(t.TempDir(), "missing-models.json")
+			_, err := golem.New(context.Background(), tc.opts)
+			if !errors.Is(err, golem.ErrProfileIncompatible) {
+				t.Fatalf("New error = %v, want ErrProfileIncompatible (not a config error)", err)
+			}
+		})
 	}
 }
 

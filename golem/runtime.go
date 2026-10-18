@@ -92,7 +92,12 @@ type Options struct {
 	// authenticate a tool that merely shares a name. It may name tools that are
 	// not mounted yet. Under Inspect every name must be one of read_file, search,
 	// glob or list (else ErrProfileIncompatible); under Trusted any non-empty name
-	// without control characters is valid. The slice is copied.
+	// without control characters is valid. The slice is copied. The ceiling
+	// also bounds Options.Tools and every later Replace and ReplaceConfiguration:
+	// a tool outside it is rejected with ErrProfileIncompatible, so it can never
+	// be widened. A tool named dispatch is admitted only when the allowlist
+	// names all four reads, because its child readers are built outside the
+	// runtime and cannot be narrowed.
 	ToolAllowlist []string
 	// ScopeGuard is installed on the runtime-owned Workspace backing every
 	// built-in file tool. It executes inside each tool, below approval
@@ -101,7 +106,10 @@ type Options struct {
 	// synchronously. Point lookups pass only the final cleaned
 	// workspace-relative path — never its ancestors — so a guard must deny
 	// descendants itself (e.g. deny "secrets" AND "secrets/..."); directory
-	// walks consult it per directory and deny by skipping the subtree.
+	// walks consult it per directory and deny by skipping the subtree. It binds
+	// the runtime-owned tools only: a library-built dispatch tool builds its own
+	// unguarded child readers, so one is rejected with ErrProfileIncompatible
+	// while a ScopeGuard is set.
 	ScopeGuard agenttools.ScopeGuard
 	// FailureMessage presents the public message placed in run.failed. When
 	// nil, Runtime preserves the existing truncated err.Error() behavior. The
@@ -356,22 +364,26 @@ func New(ctx context.Context, opts Options) (*Runtime, error) {
 	return r, nil
 }
 
-func validateTools(tools []agent.Tool) error {
-	names := make(map[string]struct{}, len(tools))
+// validateTools rejects a nil tool, an empty name and a duplicate name, and
+// returns each tool's name in order. Spec is called exactly once per tool.
+func validateTools(tools []agent.Tool) ([]string, error) {
+	seen := make(map[string]struct{}, len(tools))
+	names := make([]string, len(tools))
 	for i, tool := range tools {
 		if tool == nil {
-			return fmt.Errorf("golem: nil tool at index %d", i)
+			return nil, fmt.Errorf("golem: nil tool at index %d", i)
 		}
 		name := tool.Spec().Name
 		if name == "" {
-			return fmt.Errorf("golem: tool with empty name")
+			return nil, fmt.Errorf("golem: tool with empty name")
 		}
-		if _, ok := names[name]; ok {
-			return fmt.Errorf("golem: duplicate tool name %q", name)
+		if _, ok := seen[name]; ok {
+			return nil, fmt.Errorf("golem: duplicate tool name %q", name)
 		}
-		names[name] = struct{}{}
+		seen[name] = struct{}{}
+		names[i] = name
 	}
-	return nil
+	return names, nil
 }
 
 // Run executes one turn and emits ordered protocol events.
@@ -757,12 +769,14 @@ func (r *Runtime) Cancel(runID string) bool {
 // system and tools have the meaning of Options.System and Options.Tools:
 // an empty system selects SystemPrompt(false, false), and the runtime's own
 // file tools (over its ScopeGuard-bound workspace) always precede tools.
-// Validation matches New (nil tool, empty name, duplicate name — including
-// against the runtime's own file tools) and installs nothing on failure;
-// ErrClosed takes precedence over validation errors, including when Close
-// completes while validation is running. tools is copied. Tool.Spec is
-// never called while the runtime lock is held. Safe for concurrent use with
-// Run, Cancel, Close, and other Replace calls.
+// Validation matches New (profile admission, nil tool, empty name, duplicate
+// name — including against the runtime's own file tools) and installs nothing
+// on failure: tools must be empty under ProfileInspect and must lie inside the
+// frozen ToolAllowlist ceiling, else ErrProfileIncompatible, and a rejected tool
+// is never planned or invoked. ErrClosed takes precedence over validation
+// errors, including when Close completes while validation is running. tools is
+// copied. Tool.Spec is never called while the runtime lock is held. Safe for
+// concurrent use with Run, Cancel, Close, and other Replace calls.
 //
 // Omitting modelOptions preserves the options current at publication, after
 // tool validation. One value replaces all options; an explicit zero clears them.
@@ -789,14 +803,12 @@ func (r *Runtime) Replace(system string, tools []agent.Tool, modelOptions ...pro
 	}
 	// Validation calls external Tool.Spec implementations, so it runs
 	// unlocked; its error is retained until the closed state is rechecked.
-	combined := make([]agent.Tool, 0, len(r.fileTools)+len(tools))
-	combined = append(combined, r.fileTools...)
-	combined = append(combined, tools...)
+	var combined []agent.Tool
 	var validationErr error
 	if len(modelOptions) > 1 {
 		validationErr = fmt.Errorf("%w: Replace accepts at most one model options value", ErrInvalidRequest)
 	} else {
-		validationErr = validateTools(combined)
+		combined, validationErr = r.admitTools(tools)
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -848,14 +860,15 @@ type Configuration struct {
 // steps, so no run ever observes a mixed configuration. Reservation is the
 // linearization point, exactly as for Replace.
 //
-// Validation matches New and Replace (nil tool, empty name, duplicate name —
-// including against the runtime's own file tools) and additionally rejects a
-// nil Orchestrator with ErrInvalidRequest. Nothing is installed on failure.
-// ErrClosed takes precedence over every other error, including when Close
-// completes while validation is running. ctx is checked at entry and again
-// under the publication lock after validation, so a cancellation raised while
-// Tool.Spec runs installs nothing either. Tool.Spec is never called while the
-// runtime lock is held, and this method performs no provider I/O.
+// Validation matches New and Replace (profile admission, frozen ceiling, nil
+// tool, empty name, duplicate name — including against the runtime's own file
+// tools) and additionally rejects a nil Orchestrator with ErrInvalidRequest.
+// Nothing is installed on failure. ErrClosed takes precedence over every other
+// error, including when Close completes while validation is running. ctx is
+// checked at entry and again under the publication lock after validation, so a
+// cancellation raised while Tool.Spec runs installs nothing either. Tool.Spec is
+// never called while the runtime lock is held, and this method performs no
+// provider I/O.
 //
 // The tool and option values are copied; callers must not mutate the supplied
 // slices concurrently with this call reading them. Safe for concurrent use with
@@ -876,14 +889,12 @@ func (r *Runtime) ReplaceConfiguration(ctx context.Context, cfg Configuration) e
 	}
 	// Validation calls external Tool.Spec implementations, so it runs
 	// unlocked; its error is retained until the closed state is rechecked.
-	combined := make([]agent.Tool, 0, len(r.fileTools)+len(cfg.Tools))
-	combined = append(combined, r.fileTools...)
-	combined = append(combined, cfg.Tools...)
+	var combined []agent.Tool
 	var validationErr error
 	if cfg.Orchestrator == nil {
 		validationErr = fmt.Errorf("%w: orchestrator is required", ErrInvalidRequest)
 	} else {
-		validationErr = validateTools(combined)
+		combined, validationErr = r.admitTools(cfg.Tools)
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
