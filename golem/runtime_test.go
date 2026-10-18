@@ -436,6 +436,7 @@ func TestRunEmitsToolEventsFromDisplayPreviews(t *testing.T) {
 	runtime, err := golem.New(context.Background(), golem.Options{
 		Root:         t.TempDir(),
 		Orchestrator: agent.New(&toolCaller{}, agent.ContextManager{}),
+		Profile:      golem.ProfileTrusted,
 		Tools:        []agent.Tool{previewTool{}},
 	})
 	if err != nil {
@@ -504,6 +505,7 @@ func TestRunReportsToolErrorInToolFinished(t *testing.T) {
 	runtime, err := golem.New(context.Background(), golem.Options{
 		Root:         t.TempDir(),
 		Orchestrator: agent.New(&toolCaller{}, agent.ContextManager{}),
+		Profile:      golem.ProfileTrusted,
 		Tools:        []agent.Tool{failingTool{}},
 	})
 	if err != nil {
@@ -620,6 +622,7 @@ func TestRunBoundsToolDisplayPreviews(t *testing.T) {
 	runtime, err := golem.New(context.Background(), golem.Options{
 		Root:         t.TempDir(),
 		Orchestrator: agent.New(&toolCaller{}, agent.ContextManager{}),
+		Profile:      golem.ProfileTrusted,
 		Tools:        []agent.Tool{largePreviewTool{}},
 	})
 	if err != nil {
@@ -1853,6 +1856,7 @@ func TestUnansweredRunDoesNotPersistPartialTurn(t *testing.T) {
 	runtime, err := golem.New(context.Background(), golem.Options{
 		Root:         root,
 		MaxSteps:     1,
+		Profile:      golem.ProfileTrusted,
 		Tools:        []agent.Tool{previewTool{}},
 		SessionStore: store,
 		Orchestrator: agent.New(&toolCaller{}, agent.ContextManager{}),
@@ -2427,6 +2431,7 @@ func TestNewRejectsDuplicateToolNames(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			runtime, err := golem.New(context.Background(), golem.Options{
 				Root:         t.TempDir(),
+				Profile:      golem.ProfileTrusted,
 				Tools:        tt.tools,
 				Orchestrator: agent.New(&countingCaller{}, agent.ContextManager{}),
 			})
@@ -2854,6 +2859,7 @@ func TestRuntimeFramesObservationsPerRenderAcrossThreads(t *testing.T) {
 	runtime, err := golem.New(context.Background(), golem.Options{
 		Root:         t.TempDir(),
 		System:       "HOST PROMPT",
+		Profile:      golem.ProfileTrusted,
 		Tools:        []agent.Tool{previewTool{}},
 		Orchestrator: agent.New(caller, agent.ContextManager{}),
 		SessionStore: store,

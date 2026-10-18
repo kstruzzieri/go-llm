@@ -277,7 +277,7 @@ func TestCanaryPersistenceAbortDoesNotGroundOrDemote(t *testing.T) {
 	sess.baseSystem = composeSystem(sess.sysInputs)
 	trip := &agent.BlockedError{Findings: []agent.Finding{{Interceptor: "canary", Verdict: agent.VerdictAbort}}}
 	side := errors.New("sensitive persistence error")
-	installCompactRuntime(t, sess, golemruntime.Options{Tools: sess.tools, SessionStore: secretSaveFailureStore{err: errors.Join(trip, side)}, FailureMessage: runFailureMessage})
+	installCompactRuntime(t, sess, golemruntime.Options{Profile: golemruntime.ProfileTrusted, Tools: sess.tools, SessionStore: secretSaveFailureStore{err: errors.Join(trip, side)}, FailureMessage: runFailureMessage})
 	res, err := runOnce(t.Context(), e.out, nil, sess, "retrieve and answer", nil)
 	if !errors.Is(err, golemruntime.ErrSessionPersistence) || !errors.Is(err, trip) || !errors.Is(err, side) {
 		t.Errorf("persistence abort = %v, want complete non-demoted error tree", err)

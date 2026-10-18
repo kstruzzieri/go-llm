@@ -147,6 +147,7 @@ func newTestRuntime(t *testing.T, root, system string, orch *agent.Orchestrator,
 	runtime, err := golemruntime.New(context.Background(), golemruntime.Options{
 		Root:           root,
 		System:         system,
+		Profile:        golemruntime.ProfileTrusted,
 		Tools:          tools,
 		MaxSteps:       16,
 		Orchestrator:   orch,

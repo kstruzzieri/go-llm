@@ -77,7 +77,23 @@ type Options struct {
 	// false). agent.Run appends agent.ToolTrustContract after it on every
 	// turn (#430), so a host never composes the base contract itself.
 	System string
-	Tools  []agent.Tool
+	// Tools are the caller-supplied extra tools. They are admitted only under
+	// ProfileTrusted: Inspect (the zero Profile) requires this to be empty.
+	Tools []agent.Tool
+	// Profile selects the authority the runtime grants its model (#387). The
+	// zero value is ProfileInspect: the four runtime-owned reads and no caller
+	// tools. ProfilePreview is reserved and rejected with ErrProfileUnavailable;
+	// an unknown value is rejected with ErrInvalidRequest. Admission runs before
+	// any tool method, workspace construction or model bootstrap.
+	Profile Profile
+	// ToolAllowlist is an exact, frozen ceiling on tool names (#387). Nil means
+	// the profile's whole universe; non-nil bounds it, and non-nil empty mounts
+	// no model tools. It only removes tools: it constructs none and does not
+	// authenticate a tool that merely shares a name. It may name tools that are
+	// not mounted yet. Under Inspect every name must be one of read_file, search,
+	// glob or list (else ErrProfileIncompatible); under Trusted any non-empty name
+	// without control characters is valid. The slice is copied.
+	ToolAllowlist []string
 	// ScopeGuard is installed on the runtime-owned Workspace backing every
 	// built-in file tool. It executes inside each tool, below approval
 	// handling. Nil preserves current behavior exactly. Concurrent runs may
@@ -230,7 +246,12 @@ type Runtime struct {
 	// the current {System, Tools, ModelOptions, Orchestrator, Budget} value,
 	// guarded by mu: reserve reads it, Replace and ReplaceConfiguration swap
 	// it (#372, #376).
-	fileTools       []agent.Tool
+	fileTools []agent.Tool
+	// profile, ceiling and guarded are frozen at New (#387). ceiling is nil
+	// for the profile's whole universe; guarded records a non-nil ScopeGuard.
+	profile         Profile
+	ceiling         map[string]struct{}
+	guarded         bool
 	snap            *turnSnapshot
 	maxSteps        int
 	maxMessageBytes int
@@ -257,6 +278,16 @@ func New(ctx context.Context, opts Options) (*Runtime, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("golem: initialize runtime: %w", err)
 	}
+	// Admission precedes everything with a side effect: no caller tool method
+	// runs, no workspace is built and no model is bootstrapped for a request the
+	// profile refuses.
+	if err := checkProfile(opts.Profile, opts.Tools); err != nil {
+		return nil, err
+	}
+	ceiling, err := newCeiling(opts.Profile, opts.ToolAllowlist)
+	if err != nil {
+		return nil, err
+	}
 	root, err := canonicalRoot(opts.Root)
 	if err != nil {
 		return nil, err
@@ -269,9 +300,15 @@ func New(ctx context.Context, opts Options) (*Runtime, error) {
 		return nil, fmt.Errorf("golem: build workspace tools: %w", err)
 	}
 	ws.SetScopeGuard(opts.ScopeGuard)
-	fileTools := agenttools.NewFileToolsForWorkspace(ws)
-	tools := append(fileTools, opts.Tools...)
-	if err := validateTools(tools); err != nil {
+	r := &Runtime{
+		root:      root,
+		profile:   opts.Profile,
+		ceiling:   ceiling,
+		guarded:   opts.ScopeGuard != nil,
+		fileTools: filterOwned(agenttools.NewFileToolsForWorkspace(ws), ceiling),
+	}
+	tools, err := r.admitTools(opts.Tools)
+	if err != nil {
 		return nil, err
 	}
 	orchestrator := opts.Orchestrator
@@ -303,23 +340,20 @@ func New(ctx context.Context, opts Options) (*Runtime, error) {
 	if opts.SessionStore != nil {
 		sessions = &threadStore{store: opts.SessionStore}
 	}
-	return &Runtime{
-		root:            root,
-		fileTools:       fileTools,
-		snap:            &turnSnapshot{system: opts.System, tools: tools, modelOptions: opts.ModelOptions.Clone(), orchestrator: orchestrator, budget: opts.Budget},
-		maxSteps:        opts.MaxSteps,
-		maxMessageBytes: maxMessage,
-		summarizer:      summarizer,
-		compress:        !opts.DisableCompression && summarizer != nil,
-		retainReasoning: opts.RetainReasoning,
-		onWarning:       opts.OnWarning,
-		failureMessage:  opts.FailureMessage,
-		active:          make(map[string]*activeRun),
-		activeThreads:   make(map[string]*activeRun),
-		closeDone:       make(chan struct{}),
-		sessions:        sessions,
-		bundle:          bundle,
-	}, nil
+	r.snap = &turnSnapshot{system: opts.System, tools: tools, modelOptions: opts.ModelOptions.Clone(), orchestrator: orchestrator, budget: opts.Budget}
+	r.maxSteps = opts.MaxSteps
+	r.maxMessageBytes = maxMessage
+	r.summarizer = summarizer
+	r.compress = !opts.DisableCompression && summarizer != nil
+	r.retainReasoning = opts.RetainReasoning
+	r.onWarning = opts.OnWarning
+	r.failureMessage = opts.FailureMessage
+	r.active = make(map[string]*activeRun)
+	r.activeThreads = make(map[string]*activeRun)
+	r.closeDone = make(chan struct{})
+	r.sessions = sessions
+	r.bundle = bundle
+	return r, nil
 }
 
 func validateTools(tools []agent.Tool) error {

@@ -180,6 +180,7 @@ func runWiringTurn(t *testing.T, progressive bool, host agent.Observer) (int32, 
 		Root:        t.TempDir(),
 		ConfigPath:  writeAgentConfig(t, srv.URL),
 		Progressive: progressive,
+		Profile:     golem.ProfileTrusted,
 		Tools:       []agent.Tool{wiringTool{}},
 	})
 	if err != nil {

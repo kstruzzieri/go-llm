@@ -1736,8 +1736,11 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		summarizer = agent.NewRouterSummarizer(bundle.Router, summarizeChain)
 	}
 	runtime, err := golemruntime.New(ctx, golemruntime.Options{
-		Root:     root,
-		System:   baseSystem,
+		Root:   root,
+		System: baseSystem,
+		// Temporary: keeps today's CLI authority until the resolved profile
+		// replaces it (#387).
+		Profile:  golemruntime.ProfileTrusted,
 		Tools:    tools[readToolCount:],
 		MaxSteps: f.maxSteps,
 		Budget:   budget,
