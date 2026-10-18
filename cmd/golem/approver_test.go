@@ -1082,6 +1082,7 @@ func TestRealExecPreviewKeepsOneLogicalLine(t *testing.T) {
 		t.Fatalf("N must deny the command: %+v", res.ToolCalls)
 	}
 	got := f.Out.String()
+	// containment: PREVIEW-PROFILE
 	assertNoActiveControls(t, got)
 
 	lines := strings.Split(got, "\n")
@@ -1173,6 +1174,7 @@ func TestVerifyApprovalPreviewSanitized(t *testing.T) {
 		if err != nil || !d.Approved {
 			t.Fatalf("approveVerify: d=%+v err=%v", d, err)
 		}
+		// containment: PREVIEW-PROFILE
 		if ap.preview != want {
 			t.Fatalf("preview = %q, want %q", ap.preview, want)
 		}

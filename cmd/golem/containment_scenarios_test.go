@@ -1042,8 +1042,8 @@ func pv1() scenario {
 		ID: "PV1", Reqs: []string{"PREVIEW-PROFILE"}, Protections: "approval-preview sanitizer and quoted path headers on the real write_file and edit_file producers; answers N then N",
 		Attack: "write_file whose path and content, then edit_file whose new text and seeded context line, carry ESC/CSI, OSC 52, BEL, raw and UTF-8 C1, CR, BS and DEL",
 		Probe:  "captured approver terminal bytes hold no raw payload control byte",
-		// capUnix: as W1 and D3, PV1 stays non-mandatory on Windows until
-		// observed green there.
+		// capUnix: as W1, PV1 stays non-mandatory on Windows until observed
+		// green there.
 		Declared: outcomeContained, Control: controlStructural, ControlDiff: "payload canary rendered escaped vs raw",
 		Caps: []capability{capUnix},
 		run: func(t *testing.T) observation {
@@ -1062,10 +1062,14 @@ func pv1() scenario {
 				o.ValidityErr = fmt.Sprintf("want both calls denied at 2 prompts, ctx.txt byte-identical to its seed and the write target absent; records %+v prompts %d", res.ToolCalls, f.prompts())
 			}
 			out := f.Out.String()
-			// Structural control: the escaped canary shows the payload reached the preview.
-			o.ControlEffect = strings.Contains(out, "\\x1b]52;c;cHduZWQ=") && strings.Contains(out, "CANARY")
+			// Structural control: both previews rendered the payload, shown by
+			// the escaped OSC (the write path header quotes it before any
+			// sanitizer runs), one CANARY per call and the edit's context line.
+			// None of these depends on the sanitizer, so the control holds
+			// when it is removed.
+			o.ControlEffect = strings.Contains(out, "\\x1b]52;c;cHduZWQ=") && strings.Count(out, "CANARY") == 2 && strings.Contains(out, "\n keep")
 			// containment: PREVIEW-PROFILE
-			o.AttackEffect = strings.ContainsAny(out, "\x1b\r\b\x7f\u009b") || bytes.IndexByte([]byte(out), 0x9b) >= 0
+			o.AttackEffect = strings.ContainsAny(out, "\x1b\a\r\b\x7f\u009b") || bytes.IndexByte([]byte(out), 0x9b) >= 0
 			return o
 		},
 	}

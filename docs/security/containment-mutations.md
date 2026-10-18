@@ -1,10 +1,10 @@
 # Containment mutation ledger (#452)
 
-Each entry proves one security property's assertions can fail. Entries are point-in-time evidence at their baseline revision. The ledger contains 65 entries: 60 guard and five effect-detection entries.
+Each entry proves one security property's assertions can fail. Entries are point-in-time evidence at their baseline revision. The ledger contains 66 entries: 61 guard and five effect-detection entries.
 
 Platform: every proof in this ledger ran on darwin (arm64, go1.27.1). After the rebase onto the model-resistance PR, the entries whose patches touch build-tagged or platform-sensitive code (M-005 to M-008, the unix path walks; M-009 and M-014 to M-018, the host exec path; M-011, the MCP stdio child environment) were re-run on Linux (arm64, go1.27.1, the Docker `ci-local` image) at their baseline: each entry's `Platform:` line records the result, and a Linux line that differs would be recorded beside the darwin evidence, never in place of it. M-010 (it needs an AgentFlow source checkout) and M-012 (Seatbelt is darwin-native) were not re-run on Linux, and no entry has run on Windows.
 
-Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-only variants added in review, M-045 B and M-047 B, at `34b2ff38`, whose production and scenario trees are identical; M-051 to M-053 at `731f2d1d`, the commit that adds them; M-054 to M-058 at `3d423ce1`, the commit that adds them; M-059 at `1166b276`, the commit that adds it): the baseline passed, the mutant failed as shown, and the tree was restored with `git checkout` and passed again. Entries M-060 and M-061 ran in isolated exports of immutable code commit `23f0c0bbca83f0c9d6e02163dd09c4856698ddcd`: each baseline passed, its mutant failed, and restored files matched the baseline bytes and passed again. Entries M-062 and M-063 ran on this branch at `dbe5c315b40f8b973b96cf623d5cdcbe00c616fc`, the commit that adds their rules: each baseline passed, its mutant failed, and `git checkout -- <file>` restored the baseline bytes, which passed again; M-062's comparison against the previous rule ran in an isolated `git archive` export of `ac053567`. Entries M-064 and M-065 ran on the #387 branch at `b9cea9154746758026fd9bb58d467f665be5952f`, the commit that makes PV1 executable: each baseline passed, its mutant failed, and `git checkout -- <file>` restored the baseline bytes, which passed again. Entries quote test output, the containment judge's message text and line numbers included, as it read at their baseline; later wording changes do not rewrite them. Entries carried over from the PR 2 delivery record name the draft entry they were first recorded as; they were re-run here so every command, diff and line number matches one revision. Apply a patch with `git apply`, run the command, then restore with `git checkout -- <file>`. `guard` entries remove or weaken the protection the refs assert. `effect-detection` entries change the effect path of an uncontained scenario: they show its probe can read a change in outcome, not that a guard is absent. Rows exempt from this ledger (pending, out-of-scope, unobserved such as ENV-BWRAP, whose native bwrap profile needs a Linux host, and administrative META- rows; the inventory lint allows no other verified or uncontained row an exemption) carry their exempt reason in the inventory (`docs/security/containment-inventory.json`, rendered in `docs/security/containment-inventory.md`).
+Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-only variants added in review, M-045 B and M-047 B, at `34b2ff38`, whose production and scenario trees are identical; M-051 to M-053 at `731f2d1d`, the commit that adds them; M-054 to M-058 at `3d423ce1`, the commit that adds them; M-059 at `1166b276`, the commit that adds it): the baseline passed, the mutant failed as shown, and the tree was restored with `git checkout` and passed again. Entries M-060 and M-061 ran in isolated exports of immutable code commit `23f0c0bbca83f0c9d6e02163dd09c4856698ddcd`: each baseline passed, its mutant failed, and restored files matched the baseline bytes and passed again. Entries M-062 and M-063 ran on this branch at `dbe5c315b40f8b973b96cf623d5cdcbe00c616fc`, the commit that adds their rules: each baseline passed, its mutant failed, and `git checkout -- <file>` restored the baseline bytes, which passed again; M-062's comparison against the previous rule ran in an isolated `git archive` export of `ac053567`. Entries M-064 to M-066 ran on the #387 branch at `<commit of this step>`, the commit that tightens PV1's probe and cites the exec and verification preview tests (M-064 and M-065 were first recorded at `b9cea9154746758026fd9bb58d467f665be5952f`, the commit that makes PV1 executable): each baseline passed, its mutant failed, and `git checkout -- <file>` restored the baseline bytes, which passed again. Entries quote test output, the containment judge's message text and line numbers included, as it read at their baseline; later wording changes do not rewrite them. Entries carried over from the PR 2 delivery record name the draft entry they were first recorded as; they were re-run here so every command, diff and line number matches one revision. Apply a patch with `git apply`, run the command, then restore with `git checkout -- <file>`. `guard` entries remove or weaken the protection the refs assert. `effect-detection` entries change the effect path of an uncontained scenario: they show its probe can read a change in outcome, not that a guard is absent. Rows exempt from this ledger (pending, out-of-scope, unobserved such as ENV-BWRAP, whose native bwrap profile needs a Linux host, and administrative META- rows; the inventory lint allows no other verified or uncontained row an exemption) carry their exempt reason in the inventory (`docs/security/containment-inventory.json`, rendered in `docs/security/containment-inventory.md`).
 
 ## M-001 — Absolute paths are rejected by the workspace path cleaner
 - Affected refs: PATH-ABS: `TestHardeningContracts/Active/Workspace/confinement_and_arguments/public_confinement/owned_absolute_sibling`, `TestWorkspaceCleanRelContainment/absolute_escape`, `TestContainment/W1`
@@ -1870,10 +1870,10 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
 - Notes: The checker command calls RequireClean after WithProfile and before any package run, so a forwarded run whose checkout tree differs from the forwarded tree, whose tracked files are modified, or whose GOOS is not the profile's exits 1 with the failure in its evidence and runs nothing. Observed on this checkout at the baseline: `GO_LLM_CI_TREE=0000000000000000000000000000000000000000 GO_LLM_CI_COMMIT=deadbeef go run ./internal/containmentinv/check -inventory docs/security/containment-inventory.json -profile darwin-host` printed `containment check: containmentinv: forwarded identity (tree 0000000000000000000000000000000000000000, commit deadbeef) measured dirty: measured tree "39ec6d5eaa6f45dcee7adc77a8a29cf16225bc7a", GOOS darwin, profile darwin-host` and exited 1. A manual run (commit `unknown`) is dirty by definition and is unchanged. Before this rule the evidence recorded `"dirty": true` and the command exited 0; nothing in scripts/ci-local, the CI workflows or the pre-push hook read the flag.
 
 ## M-064 — Approval previews on the real producer paths render terminal controls inert
-- Affected refs: PREVIEW-PROFILE: `TestContainment/PV1`, `TestRealWritePreviewReachesApproverInert`, `TestRealEditPreviewWithRawC1Context`, `TestApproveSanitizesForEmbeddedApprovers`
-- Baseline: `b9cea9154746758026fd9bb58d467f665be5952f` (the commit that makes PV1 executable)
+- Affected refs: PREVIEW-PROFILE: `TestContainment/PV1`, `TestRealWritePreviewReachesApproverInert`, `TestRealEditPreviewWithRawC1Context`, `TestVerifyApprovalPreviewSanitized`, `TestApproveSanitizesForEmbeddedApprovers`
+- Baseline: `<commit of this step>` (the commit that tightens PV1's probe; first recorded at `b9cea9154746758026fd9bb58d467f665be5952f`)
 - Platform: darwin (arm64, go1.27.1)
-- Profile / command: darwin-host / `go test -count=1 -run '^(TestContainment|TestRealWritePreviewReachesApproverInert|TestRealEditPreviewWithRawC1Context)$' ./cmd/golem`; `go test -count=1 -run '^TestApproveSanitizesForEmbeddedApprovers$' ./agent`
+- Profile / command: darwin-host / `go test -count=1 -run '^(TestContainment|TestRealWritePreviewReachesApproverInert|TestRealEditPreviewWithRawC1Context|TestVerifyApprovalPreviewSanitized)$' ./cmd/golem`; `go test -count=1 -run '^TestApproveSanitizesForEmbeddedApprovers$' ./agent`
 - Patch:
   ```diff
   diff --git a/agent/preview.go b/agent/preview.go
@@ -1888,15 +1888,15 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
    	for _, r := range preview {
    		if r == '\n' || unicode.IsGraphic(r) {
   ```
-- Baseline: pass (exit 0). Mutant: FAIL `TestContainment/PV1` (`containment_test.go:116: PV1: REGRESSION: declared contained but the forbidden effect happened (control held)`), while the other 23 TestContainment leaves pass; FAIL `TestRealWritePreviewReachesApproverInert/color_off` and `/color_on` (`approver_test.go:1001: approval output carries active control "\x1b":`); FAIL `TestRealEditPreviewWithRawC1Context` (`approver_test.go:1028: approval output carries a raw 0x9b byte:`), the `./cmd/golem` command exit 1; FAIL `TestApproveSanitizesForEmbeddedApprovers/plain_Approver`, `/KeyedApprover` and `/RiskApprover` (`preview_test.go:212: approver preview = "+x\x1b[31mred\x1b[0m\n\x1b]52;c;cHduZWQ=\a\u009b\r\b\x7f", want "+x\\x1b[31mred\\x1b[0m\n\\x1b]52;c;cHduZWQ=\\a\\u009b\\r\\b\\x7f"`), the `./agent` command exit 1. Restored with `git checkout -- agent/preview.go`: byte-identical, pass (exit 0).
+- Baseline: pass (exit 0). Mutant: <first failing lines observed at the baseline>. Restored with `git checkout -- agent/preview.go`: byte-identical, pass (exit 0).
 - Kind: guard
-- Notes: The patch removes every sanitizer on the tested path at once. The CLI approver's call (`sanitizeApprovalPreview` in cmd/golem/approver.go), the runtime's call for every approver tier (`approve` in agent/dispatch.go) and the verifier's call (cmd/golem/verify.go) all route through `agent.SanitizePreview`, so neither call site is left to mask the other. PV1's control stays true under the mutant: the write_file path header is quoted by `quoteArgForPreview` before any sanitizer runs, so the escaped canary still appears, while the raw content line carries the payload's controls; the judge therefore reads a regression, not a failed control.
+- Notes: The patch removes every sanitizer on the tested path at once. The CLI approver's call (`sanitizeApprovalPreview` in cmd/golem/approver.go), the runtime's call for every approver tier (`approve` in agent/dispatch.go) and the verifier's call (`approveVerify` in cmd/golem/verify.go) all route through `agent.SanitizePreview`, so neither call site is left to mask the other. PV1's control stays true under the mutant because none of its three parts depends on the sanitizer: the write_file path header is quoted by `quoteArgForPreview` before any sanitizer runs, so the escaped OSC still appears, and both CANARY lines and the edit's context line still render. The raw content lines carry the payload's controls, BEL included, so the judge reads a regression, not a failed control.
 
 ## M-065 — The write and edit preview header quotes a hostile path
-- Affected refs: PREVIEW-PROFILE: `TestWritePreviewHeadersExact`
-- Baseline: `b9cea9154746758026fd9bb58d467f665be5952f` (the commit that makes PV1 executable)
+- Affected refs: PREVIEW-PROFILE: `TestWritePreviewHeadersExact`, `TestRealWritePreviewReachesApproverInert`
+- Baseline: `<commit of this step>` (the commit that tightens PV1's probe; first recorded at `b9cea9154746758026fd9bb58d467f665be5952f`)
 - Platform: darwin (arm64, go1.27.1)
-- Profile / command: darwin-host / `go test -count=1 -run '^TestWritePreviewHeadersExact$' ./agent/tools`
+- Profile / command: darwin-host / `go test -count=1 -run '^TestWritePreviewHeadersExact$' ./agent/tools`; `go test -count=1 -run '^TestRealWritePreviewReachesApproverInert$' ./cmd/golem`
 - Patch:
   ```diff
   diff --git a/agent/tools/mutate.go b/agent/tools/mutate.go
@@ -1912,9 +1912,32 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
    	if !beforeExists {
    		fmt.Fprintf(&b, "new file: %s\n", display)
   ```
-- Baseline: pass (exit 0). Mutant: FAIL `TestWritePreviewHeadersExact/spaced_overwrite` (`mutate_test.go:273: write_file preview:` got `"--- my file.txt\n+++ my file.txt\n-old\n+new\n"`, want `"--- \"my file.txt\"\n+++ \"my file.txt\"\n-old\n+new\n"`); FAIL `/LF_overwrite` and `/LF_new_file` (`mutate_test.go:273: write_file preview:`, the raw LF splitting the header: got `"--- a\nb.txt\n+++ a\nb.txt\n-old\n+new\n"` and `"new file: a\nb.txt\n+new\n"`); FAIL `/emptied_file` (`mutate_test.go:288: emptied preview:` got `"empty file: my file.txt\n-old\n"`); `/ordinary_overwrite` and `/ordinary_new_file` pass; exit 1. Restored with `git checkout -- agent/tools/mutate.go`: byte-identical, pass (exit 0).
+- Baseline: pass (exit 0). Mutant: <first failing lines observed at the baseline>. Restored with `git checkout -- agent/tools/mutate.go`: byte-identical, pass (exit 0).
 - Kind: guard
-- Notes: The sanitizer cannot compensate for the unquoted header: it keeps LF on purpose, so an LF in a path starts a forged heading line, and it does not quote spaces. Only the spaced, LF and emptied-file cases, which assert the quoted header exactly, see the patch; ordinary paths render unchanged. Under the same mutant `TestContainment/PV1` passes (`--- PASS: TestContainment/PV1`, from `go test -count=1 -v -run '^(TestContainment|TestRealWritePreviewReachesApproverInert)$/^(PV1|color off|color on)$' ./cmd/golem`, which exits 1 on the second test): the sanitizer still renders PV1's raw ESC and BEL path bytes inert, so the header quoting needs this entry of its own; `TestRealWritePreviewReachesApproverInert` goes red there (`approver_test.go:1003: approval output lost the visible escaped payload "new file: \"pv\\x1b[31m.txt\"\n+\\x1b]52;c;cHduZWQ=\\a\\u009b\\r\\b\\x7f\n":`) because it pins the quoted header exactly.
+- Notes: The sanitizer cannot compensate for the unquoted header: it keeps LF on purpose, so an LF in a path starts a forged heading line, and it does not quote spaces. Only the cases that assert the quoted header exactly see the patch; ordinary paths render unchanged. <PV1 observation under the same mutant>
+
+## M-066 — Exec and file preview fields quote arguments that carry whitespace or controls
+- Affected refs: PREVIEW-PROFILE: `TestRealExecPreviewKeepsOneLogicalLine`, `TestWritePreviewHeadersExact`, `TestRealWritePreviewReachesApproverInert`
+- Baseline: `<commit of this step>` (the commit that cites the exec preview test)
+- Platform: darwin (arm64, go1.27.1)
+- Profile / command: darwin-host / `go test -count=1 -run '^(TestRealExecPreviewKeepsOneLogicalLine|TestRealWritePreviewReachesApproverInert)$' ./cmd/golem`; `go test -count=1 -run '^TestWritePreviewHeadersExact$' ./agent/tools`
+- Patch:
+  ```diff
+  diff --git a/agent/tools/exec.go b/agent/tools/exec.go
+  --- a/agent/tools/exec.go
+  +++ b/agent/tools/exec.go
+  @@ -732,6 +732,7 @@ func fmtTimeout(d time.Duration) string {
+   // whitespace or a non-graphic rune, so every dynamic approval value stays on
+   // one visible line with exact argument boundaries. Simple arguments stay bare.
+   func quoteArgForPreview(arg string) string {
+  +	return arg
+   	if arg == "" {
+   		return `""`
+   	}
+  ```
+- Baseline: pass (exit 0). Mutant: <first failing lines observed at the baseline>. Restored with `git checkout -- agent/tools/exec.go`: byte-identical, pass (exit 0).
+- Kind: guard
+- Notes: The biting input is the argv element `a\nb`: the sanitizer keeps LF on purpose, so an unquoted element splits the argv field across two lines and forges a field-shaped line. The cwd `d\x1b[2J` alone would not bite, because the downstream sanitizer still renders its ESC inert. `quoteArgForPreview` is shared with `unifiedDiff`, the background start preview and the verification preview, so the write header refs go red too. <observations under the same mutant>
 
 ## Administrative evidence
 
