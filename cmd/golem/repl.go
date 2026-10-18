@@ -27,6 +27,8 @@ import (
 
 // replSession holds the per-process state the REPL needs.
 type replSession struct {
+	// profile is the resolved permission profile the runtime was built with (#387).
+	profile         golemruntime.Profile
 	commandsDir     string
 	recipes         map[string]recipe.Recipe
 	recipeHint      *recipeInvocationHint

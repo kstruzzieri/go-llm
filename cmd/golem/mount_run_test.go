@@ -209,7 +209,8 @@ func TestRunReleasesLateMountsAfterRuntimeClose(t *testing.T) {
 	stdin, stdout, stderr := runTestFiles(t)
 	errStop := errors.New("stop after startup")
 	var events []string
-	err := run([]string{"-config", configPath, "-root", root, "-no-probe", "-no-cap-probe", "-no-session",
+	// A late mount needs the Trusted ceiling (#387).
+	err := run([]string{"-config", configPath, "-root", root, "-profile", "trusted", "-no-probe", "-no-cap-probe", "-no-session",
 		"-no-memory", "-no-project-context", "-no-auto-index"}, stdin, stdout, stderr, runHooks{
 		startAutoIndex: func() func() { return func() {} },
 		afterSessionReady: func(sess *replSession) error {
@@ -262,7 +263,10 @@ func TestRunMutationSigningLifecycle(t *testing.T) {
 				return sseAnswer("done")
 			})
 			data := os.Getenv("XDG_DATA_HOME")
-			args := []string{"-config", configPath, "-root", root, "-no-probe", "-no-cap-probe",
+			// Every mode keeps the pre-#387 host Trusted session: the late
+			// mount needs its ceiling, and read-only stays the same session
+			// minus writes.
+			args := []string{"-config", configPath, "-root", root, "-profile", "trusted", "-no-probe", "-no-cap-probe",
 				"-no-rag", "-no-session", "-no-memory", "-no-project-context", "-no-auto-index"}
 			if mode == "startup" {
 				args = append(args, "-allow-write")

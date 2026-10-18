@@ -109,6 +109,13 @@ type flags struct {
 	trustProjectContextSet bool
 
 	consultantsConfig string // -consultants-config: explicit consultants.json path (#382)
+
+	profile    string // -profile: inspect|preview|trusted (#387)
+	profileSet bool   // -profile was passed (distinguishes an explicit empty value)
+	// suppressAutoTools is resolved, not parsed: true under the Inspect
+	// profile, it keeps automatic retrieval and the model memory tools from
+	// initializing (applyProfileGates).
+	suppressAutoTools bool
 }
 
 // parseQuietly parses args without the flag package's own error output, which
@@ -201,6 +208,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.StringVar(&f.goal, "goal", "", "AgentFlow planning mode (requires AgentFlow 1.x): author and preview a traceable plan, require approval to lock it, then stop")
 	fs.BoolVar(&f.approvePlanLock, "approve-plan-lock", false, "planning mode: print the plan preview and approve the lock without prompting (non-interactive -goal)")
 	fs.StringVar(&f.outputFormat, "output-format", "text", "one-shot mode: stdout format — text (the final answer), json (one golem.result.v1 record), or stream-json (one protocol-v1 event per line, then the same record); requires -p")
+	fs.StringVar(&f.profile, "profile", "", "permission profile: inspect (default, workspace reads only) or trusted; preview is reserved")
 	fs.Var(&f.allowTools, "allow-tool", "one-shot mode: mount and non-interactively approve one exact built-in gated tool by name (repeatable; write_file, edit_file, run_command, start_command, stop_command); creates no session grants; MCP tools and submit_plan are never eligible; requires -p")
 	// main() prefixes "golem: " when it prints the error.
 	if err := parseQuietly(fs, args, nil); err != nil {
@@ -237,6 +245,8 @@ func parseFlags(args []string) (flags, error) {
 			f.wfProfileSet = true
 		case "workflow-reason":
 			f.wfReasonSet = true
+		case "profile":
+			f.profileSet = true
 		}
 	})
 	return f, nil
@@ -246,7 +256,7 @@ func parseFlags(args []string) (flags, error) {
 // background auto-index job. Flags only: auto-path and embed-chain errors are
 // handled at the wiring site.
 func shouldStartAutoIndex(f flags) bool {
-	return !f.promptSet && !f.goalSet && !f.noAutoIndex && !f.noRag && f.ragDB == ""
+	return !f.promptSet && !f.goalSet && !f.noAutoIndex && !f.noRag && f.ragDB == "" && !f.suppressAutoTools
 }
 
 func shouldPlanSummarize(f flags, autoErr, embChainErr error) bool {
@@ -266,6 +276,11 @@ func autoIndexEnabled(f flags, autoErr, embChainErr error) bool {
 
 // validateFlags rejects flag values flag.Parse cannot police.
 func validateFlags(f flags) error {
+	// First, so a profile error is never shadowed by a later mode check and
+	// always runs before one-shot normalization drops a conflicting flag.
+	if err := validateProfile(f); err != nil {
+		return err
+	}
 	if err := agentflow.ValidateEnvNames(f.agentflowEnv); err != nil {
 		return fmt.Errorf("golem: -agentflow-env: %w", err)
 	}
@@ -918,6 +933,10 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	taskWarns = append(taskWarns, goalWarns...)
 	f, oneShotWarns := applyOneShotMode(f)
 	oneShotWarns = append(taskWarns, oneShotWarns...)
+	// #387: resolved after normalization, so a dropped flag selects nothing.
+	profile, profileNotice := resolveProfile(f)
+	f = applyProfileGates(f, profile)
+	retrievalEnabled := !f.suppressAutoTools && !f.noRag
 
 	root, err := filepath.Abs(f.root)
 	if err != nil {
@@ -979,7 +998,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		}
 		routes = append(routes, summarizeRoute)
 	}
-	if embChainErr == nil && !f.noRag {
+	if embChainErr == nil && retrievalEnabled {
 		routes = append(routes, providerbootstrap.PlannedRoute{UseCase: "embedding", Chain: embChain})
 	}
 	if f.grounding && cfg != nil {
@@ -1199,7 +1218,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	thinkOpts, thinkLine := prep.thinkOpts, prep.thinkNotice
 	inputCeiling := prep.ceiling
 
-	if autoErr != nil && !f.noRag && f.ragDB == "" {
+	if autoErr != nil && retrievalEnabled && f.ragDB == "" {
 		warns = append(warns, "retrieve auto-index disabled: "+autoErr.Error())
 	}
 	feedbackOpener := hooks.openFeedback
@@ -1273,7 +1292,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		// Defensive only: the non-nil wrapper already makes retrieveOmitted
 		// false, which is what actually suppresses the generic no-index notice.
 		retrieveRequested = true
-	} else {
+	} else if retrievalEnabled {
 		rr := enableRetrieve(ctx, bundle.Config, bundle.Router, retrieveOpts{
 			noRag:       f.noRag,
 			ragDB:       f.ragDB,
@@ -1320,7 +1339,9 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	if retrieve != nil {
 		tools = append(tools, retrieve)
 	}
-	retrieveOmitted := retrieve == nil
+	// Under Inspect retrieval is excluded by profile, not missing an index, so
+	// neither the startup notice nor /tools reports it as omitted.
+	retrieveOmitted := retrieve == nil && !f.suppressAutoTools
 
 	// A warming readyRetrieve counts as available: its later generation is built
 	// through the same recorder.
@@ -1402,9 +1423,11 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	}
 	mrt := openMemoryRuntime(ctx, os.Getenv, root, !f.noMemory, wantAgentMemory)
 	warns = append(warns, mrt.warns...)
+	// Human memory (/remember, /forget, /memories) stays open under Inspect;
+	// only the model-facing tool and its prompt fragment are gated (#387).
 	memoryEnabled := mrt.user != nil
 	agentMemoryEnabled := mrt.records != nil
-	if memoryEnabled {
+	if memoryEnabled && !f.suppressAutoTools {
 		tools = append(tools, agenttools.MemorySearch{S: mrt.user, WorkspaceID: workspaceID(root), Limit: 8})
 	}
 	defer func() {
@@ -1588,7 +1611,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		allowExec:  f.allowExec,
 		delegate:   f.delegate,
 		dispatch:   f.dispatch,
-		memory:     memoryEnabled,
+		memory:     memoryEnabled && !f.suppressAutoTools,
 	}
 	if canary != nil {
 		sysIn.canary = canary.active.fragment
@@ -1736,11 +1759,9 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		summarizer = agent.NewRouterSummarizer(bundle.Router, summarizeChain)
 	}
 	runtime, err := golemruntime.New(ctx, golemruntime.Options{
-		Root:   root,
-		System: baseSystem,
-		// Temporary: keeps today's CLI authority until the resolved profile
-		// replaces it (#387).
-		Profile:  golemruntime.ProfileTrusted,
+		Root:     root,
+		System:   baseSystem,
+		Profile:  profile,
 		Tools:    tools[readToolCount:],
 		MaxSteps: f.maxSteps,
 		Budget:   budget,
@@ -1767,12 +1788,21 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 			hooks.closed("runtime")
 		}
 	}()
+	// #387: stderr only, so machine output keeps its schema. AgentFlow modes
+	// keep their own tool policy and make no profile claim.
+	if !agentflowMode(f) {
+		if profileNotice != "" {
+			_, _ = fmt.Fprintln(stderr, profileNotice)
+		}
+		_, _ = fmt.Fprintln(stderr, renderPermissions(runtime.EffectivePermissions()))
+	}
 
 	renderOut := stdout
 	if f.promptSet {
 		renderOut = stderr
 	}
 	sess = &replSession{
+		profile:          profile,
 		canary:           canary,
 		orch:             orch,
 		runtime:          runtime,
