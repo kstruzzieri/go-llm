@@ -127,6 +127,40 @@ func TestNew_ConfigQualityCtxCeilingPopulatesMergedProfile(t *testing.T) {
 		t.Fatalf("EffectiveContextWindow(chat) = %d, want 32768", got)
 	}
 }
+
+func TestNew_ImplicitOllamaQualityCtxCeilingPopulatesMergedProfile(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/models" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{"id":"byo-model"}]}`))
+	}))
+	defer srv.Close()
+	cfg := &config.Config{
+		Providers: map[string]config.ProviderConfig{"ollama": {APIFormat: "openai-compat", BaseURL: srv.URL}},
+		Models: map[string]config.ModelConfig{
+			"agent": {Name: "byo-model", ContextWindow: 131_072, QualityCtxCeiling: 32_768},
+		},
+	}
+	bundle, err := New(t.Context(), Options{Config: cfg})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() { _ = bundle.Close() }()
+	profile, err := bundle.Models.Lookup(t.Context(), provider.ModelKey{Provider: "ollama", Model: "byo-model"})
+	if err != nil {
+		t.Fatalf("Lookup: %v", err)
+	}
+	if profile.ContextWindow != 131_072 || profile.QualityCtxCeiling != 32_768 {
+		t.Errorf("ContextWindow/QualityCtxCeiling = %d/%d, want 131072/32768", profile.ContextWindow, profile.QualityCtxCeiling)
+	}
+	if got := profile.EffectiveContextWindow("chat"); got != 32_768 {
+		t.Errorf("EffectiveContextWindow(chat) = %d, want 32768", got)
+	}
+}
+
 func TestNew_FingerprintProfileStoreReadsWithoutProfiling(t *testing.T) {
 	ctx := context.Background()
 	var chatCalls atomic.Int32

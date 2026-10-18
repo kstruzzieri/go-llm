@@ -22,9 +22,9 @@ type intOverrideEntry struct {
 }
 
 // buildIntOverrides maps each provider/model key to a per-model int field
-// (context_window, quality_ctx_ceiling). Sorted-role walk; roles without a
-// provider, name, or value are skipped; a negative value or two roles giving
-// one key different values is an error naming the field.
+// (context_window, quality_ctx_ceiling). Sorted-role walk; an empty provider
+// means ollama. Roles without a name or value are skipped; a negative value or
+// two roles giving one key different values is an error naming the field.
 func buildIntOverrides(cfg *config.Config, field string, value func(config.ModelConfig) int) (map[provider.ModelKey]int, error) {
 	out := make(map[provider.ModelKey]int)
 	if cfg == nil {
@@ -39,8 +39,11 @@ func buildIntOverrides(cfg *config.Config, field string, value func(config.Model
 	for _, role := range roles {
 		model := cfg.Models[role]
 		v := value(model)
-		if model.Provider == "" || model.Name == "" || v == 0 {
+		if model.Name == "" || v == 0 {
 			continue
+		}
+		if model.Provider == "" {
+			model.Provider = "ollama"
 		}
 		if v < 0 {
 			return nil, fmt.Errorf("providerbootstrap: model %q %s must be positive", role, field)
