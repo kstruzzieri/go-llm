@@ -774,7 +774,7 @@ func dispatchSlash(ctx context.Context, out io.Writer, sess *replSession, line s
 		handleModel(ctx, out, sess, fields)
 	case "/undo":
 		if sess.journal == nil {
-			_, _ = fmt.Fprintln(out, "writes disabled; run /allow-write or start with -allow-write")
+			_, _ = fmt.Fprintln(out, disabledHint(sess, "writes", "/allow-write", "-allow-write"))
 			return "", false
 		}
 		n := 1
@@ -794,7 +794,7 @@ func dispatchSlash(ctx context.Context, out io.Writer, sess *replSession, line s
 		sess.journal.undo(ctx, out, n)
 	case "/checkpoints":
 		if sess.journal == nil {
-			_, _ = fmt.Fprintln(out, "writes disabled; run /allow-write or start with -allow-write")
+			_, _ = fmt.Fprintln(out, disabledHint(sess, "writes", "/allow-write", "-allow-write"))
 		} else if len(fields) == 1 || (len(fields) == 2 && fields[1] == "list") {
 			sess.journal.listCheckpoints(ctx, out)
 		} else {
@@ -822,7 +822,7 @@ func dispatchSlash(ctx context.Context, out io.Writer, sess *replSession, line s
 		}
 	case "/auto-edits":
 		if !sess.allowWrite {
-			_, _ = fmt.Fprintln(out, "writes disabled; run /allow-write or start with -allow-write")
+			_, _ = fmt.Fprintln(out, disabledHint(sess, "writes", "/allow-write", "-allow-write"))
 			return "", false
 		}
 		if sess.grants == nil {
@@ -917,7 +917,7 @@ func dispatchSlash(ctx context.Context, out io.Writer, sess *replSession, line s
 // requested rather than printing a raw context error.
 func handleJobs(ctx context.Context, out io.Writer, sess *replSession, fields []string) {
 	if sess.bgManager == nil {
-		_, _ = fmt.Fprintln(out, "exec disabled; run /allow-exec or start with -allow-exec")
+		_, _ = fmt.Fprintln(out, disabledHint(sess, "exec", "/allow-exec", "-allow-exec"))
 		return
 	}
 	switch {
@@ -1005,6 +1005,18 @@ func renderJobArgv(argv []string) string {
 	return line
 }
 
+// disabledHint is the "capability not mounted" message for /undo, /checkpoints,
+// /auto-edits and /jobs. Only a Trusted session can mount the capability
+// in-session with the matching /allow-* command; every other profile refuses
+// that command (refuseLateMountOutsideTrusted), so they get a restart hint
+// instead. Like that refusal it fails closed: anything but Trusted restarts (#387).
+func disabledHint(sess *replSession, what, command, flag string) string {
+	if sess.profile == golemruntime.ProfileTrusted {
+		return fmt.Sprintf("%s disabled; run %s or start with %s", what, command, flag)
+	}
+	return fmt.Sprintf("%s disabled in profile %s: restart with -profile trusted %s", what, sess.profile, flag)
+}
+
 // autoEditState reports the write-class grant as a toggle state. The "a"
 // answer on a write/edit prompt and /auto-edits on set the same grant, so
 // this is the single source of truth for both.
@@ -1046,8 +1058,8 @@ const golemHelp = `commands:
                  inspect project documents or approve their exact snapshot
   /grants [clear]
                  count active session approval grants, or revoke them all
-  /allow-write   enable the approval-gated write_file/edit_file tools for the rest of this session
-  /allow-exec    enable the approval-gated command tools for the rest of this session
+  /allow-write   enable the approval-gated write_file/edit_file tools for the rest of this session (Trusted profile only)
+  /allow-exec    enable the approval-gated command tools for the rest of this session (Trusted profile only)
   /git-context refresh
                  re-capture the repository snapshot (branch, status, recent commits) in the system prompt
   /think [off|on|low|medium|high|default]

@@ -1606,7 +1606,9 @@ func TestAutoEditsLazyInitStoresForReal(t *testing.T) {
 }
 
 func TestAutoEditsRequiresAllowWrite(t *testing.T) {
-	sess := &replSession{allowWrite: false, grants: newApprovalGrants()}
+	// The in-session /allow-write hint is the Trusted text (#387); the Inspect
+	// and Preview variants are pinned in TestCapabilityHintsFollowProfile.
+	sess := &replSession{profile: golemruntime.ProfileTrusted, allowWrite: false, grants: newApprovalGrants()}
 	var out strings.Builder
 	_, _ = dispatchSlash(context.Background(), &out, sess, "/auto-edits on")
 	if !strings.Contains(out.String(), "writes disabled; run /allow-write or start with -allow-write") {
@@ -1675,7 +1677,9 @@ func TestGrantsCommandBadArgUsage(t *testing.T) {
 // --- /jobs (#346): pull-based visibility and user-direct stop ---
 
 func TestJobsDisabledWithoutManager(t *testing.T) {
-	sess := &replSession{}
+	// The in-session /allow-exec hint is the Trusted text (#387); the Inspect
+	// and Preview variants are pinned in TestCapabilityHintsFollowProfile.
+	sess := &replSession{profile: golemruntime.ProfileTrusted}
 	var out strings.Builder
 	if _, exit := dispatchSlash(context.Background(), &out, sess, "/jobs"); exit {
 		t.Fatal("/jobs must not exit")
@@ -1785,6 +1789,79 @@ func TestRenderJobArgvTruncatesRuneSafely(t *testing.T) {
 	}
 }
 
+// TestCapabilityHintsFollowProfile pins the "capability not mounted" hints per
+// profile with literal expectations (#387). Only Trusted can mount the
+// capability in-session; /allow-write and /allow-exec refuse in every other
+// profile, so those hints must name a restart, not the refusing command. The
+// zero profile is Inspect, and Preview (unconstructible, but a fail-closed
+// value) must restart as well.
+func TestCapabilityHintsFollowProfile(t *testing.T) {
+	const (
+		trustedWrite = "writes disabled; run /allow-write or start with -allow-write"
+		trustedExec  = "exec disabled; run /allow-exec or start with -allow-exec"
+	)
+	commands := []struct {
+		name string
+		line string
+		kind string // "write" or "exec"
+	}{
+		{"undo", "/undo", "write"},
+		{"checkpoints", "/checkpoints", "write"},
+		{"auto-edits", "/auto-edits on", "write"},
+		{"jobs", "/jobs", "exec"},
+	}
+	profiles := []struct {
+		name        string
+		profile     golemruntime.Profile
+		write, exec string
+	}{
+		{"trusted", golemruntime.ProfileTrusted, trustedWrite, trustedExec},
+		{"inspect", golemruntime.ProfileInspect,
+			"writes disabled in profile inspect: restart with -profile trusted -allow-write",
+			"exec disabled in profile inspect: restart with -profile trusted -allow-exec"},
+		{"preview", golemruntime.ProfilePreview,
+			"writes disabled in profile preview: restart with -profile trusted -allow-write",
+			"exec disabled in profile preview: restart with -profile trusted -allow-exec"},
+	}
+	for _, p := range profiles {
+		for _, c := range commands {
+			t.Run(p.name+"/"+c.name, func(t *testing.T) {
+				sess := &replSession{profile: p.profile, grants: newApprovalGrants()}
+				want := p.write
+				if c.kind == "exec" {
+					want = p.exec
+				}
+				var out strings.Builder
+				_, _ = dispatchSlash(context.Background(), &out, sess, c.line)
+				if got := strings.TrimSpace(out.String()); got != want {
+					t.Fatalf("%s under %s printed %q, want %q", c.line, p.name, got, want)
+				}
+			})
+		}
+	}
+	t.Run("zero-value session is Inspect", func(t *testing.T) {
+		var out strings.Builder
+		_, _ = dispatchSlash(context.Background(), &out, &replSession{}, "/undo")
+		want := "writes disabled in profile inspect: restart with -profile trusted -allow-write"
+		if got := strings.TrimSpace(out.String()); got != want {
+			t.Fatalf("/undo on a zero-value session printed %q, want %q", got, want)
+		}
+	})
+}
+
+// TestHelpMarksAllowCommandsTrustedOnly pins that /help does not offer the
+// in-session mounts unconditionally: they refuse outside Trusted (#387).
+func TestHelpMarksAllowCommandsTrustedOnly(t *testing.T) {
+	for _, line := range []string{
+		"/allow-write   enable the approval-gated write_file/edit_file tools for the rest of this session (Trusted profile only)",
+		"/allow-exec    enable the approval-gated command tools for the rest of this session (Trusted profile only)",
+	} {
+		if !strings.Contains(golemHelp, line) {
+			t.Errorf("help must carry %q", line)
+		}
+	}
+}
+
 func TestHelpListsJobs(t *testing.T) {
 	if !strings.Contains(golemHelp, "/jobs [stop <handle>]") {
 		t.Fatalf("help must document /jobs:\n%s", golemHelp)
@@ -1793,7 +1870,9 @@ func TestHelpListsJobs(t *testing.T) {
 
 func TestDispatchUndoAndCheckpoints(t *testing.T) {
 	t.Run("nil journal capability messages", func(t *testing.T) {
-		sess := &replSession{}
+		// The in-session /allow-write hint is the Trusted text (#387); the
+		// Inspect and Preview variants are pinned in TestCapabilityHintsFollowProfile.
+		sess := &replSession{profile: golemruntime.ProfileTrusted}
 		for _, line := range []string{"/undo", "/undo 3", "/checkpoints", "/checkpoints list"} {
 			var out strings.Builder
 			_, _ = dispatchSlash(context.Background(), &out, sess, line)
