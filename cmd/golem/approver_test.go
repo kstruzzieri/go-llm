@@ -659,7 +659,7 @@ func TestReplApproverVerifyPromptIsPlainAndGrantable(t *testing.T) {
 	ap.grants = newApprovalGrants()
 
 	preview := "post-write verification command:\n  argv:    go test ./...\n"
-	d, err := ap.ApproveKeyed(context.Background(), verifyToolCall(), preview, "verify:v1:abc")
+	d, err := ap.ApproveKeyed(context.Background(), verifyToolCall(), preview, "verify:v2:abc")
 	if err != nil || !d.Approved {
 		t.Fatalf("approve: d=%+v err=%v", d, err)
 	}
@@ -684,7 +684,7 @@ func TestReplApproverVerifyGrantAutoApprovesTheSameCommandOnly(t *testing.T) {
 	ap := newReplApprover(src, &out, false)
 	ap.grants = newApprovalGrants()
 
-	if d, err := ap.ApproveKeyed(context.Background(), verifyToolCall(), "preview", "verify:v1:abc"); err != nil || !d.Approved {
+	if d, err := ap.ApproveKeyed(context.Background(), verifyToolCall(), "preview", "verify:v2:abc"); err != nil || !d.Approved {
 		t.Fatalf("grant turn: d=%+v err=%v", d, err)
 	}
 	if ap.grants.count() != 1 {
@@ -693,13 +693,13 @@ func TestReplApproverVerifyGrantAutoApprovesTheSameCommandOnly(t *testing.T) {
 
 	// A second batch with the SAME command auto-approves with no input left.
 	ap.src = newScannerSource(strings.NewReader(""), &out)
-	d, err := ap.ApproveKeyed(context.Background(), verifyToolCall(), "preview", "verify:v1:abc")
+	d, err := ap.ApproveKeyed(context.Background(), verifyToolCall(), "preview", "verify:v2:abc")
 	if err != nil || !d.Approved || !d.ViaGrant {
 		t.Fatalf("same command must auto-approve via grant: d=%+v err=%v", d, err)
 	}
 
 	// A CHANGED command (different key) must prompt again, and EOF denies.
-	d, err = ap.ApproveKeyed(context.Background(), verifyToolCall(), "preview", "verify:v1:changed")
+	d, err = ap.ApproveKeyed(context.Background(), verifyToolCall(), "preview", "verify:v2:changed")
 	if err != nil || d.Approved {
 		t.Fatalf("a changed verify command must not inherit the grant: d=%+v err=%v", d, err)
 	}
@@ -707,12 +707,12 @@ func TestReplApproverVerifyGrantAutoApprovesTheSameCommandOnly(t *testing.T) {
 
 func TestVerifyGrantsAreClearedWithTheSession(t *testing.T) {
 	grants := newApprovalGrants()
-	grants.grant(grantScopeVerify, "verify:v1:abc")
+	grants.grant(grantScopeVerify, "verify:v2:abc")
 	if grants.count() != 1 {
 		t.Fatalf("count = %d, want 1", grants.count())
 	}
 	grants.clear()
-	if grants.count() != 0 || grants.granted(grantScopeVerify, "verify:v1:abc") {
+	if grants.count() != 0 || grants.granted(grantScopeVerify, "verify:v2:abc") {
 		t.Fatal("verify grants must not survive a session clear")
 	}
 }
@@ -1159,7 +1159,7 @@ func TestVerifyApprovalPreviewSanitized(t *testing.T) {
 		// The key and the call's arguments carry runes the sanitizer WOULD
 		// change (ESC, tab, raw U+009B, raw U+202E); a clean literal could not
 		// show that approveVerify leaves them alone.
-		key  = "verify:v1:k\x1b[2J\t\u009b"
+		key  = "verify:v2:k\x1b[2J\t\u009b"
 		args = "{\"cmd\":\t\"go test\u009b\u202e\"}"
 	)
 	if !strings.ContainsAny(key, "\x1b\t\u009b") || !strings.ContainsAny(args, "\t\u009b\u202e") {

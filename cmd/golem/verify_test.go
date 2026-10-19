@@ -30,7 +30,7 @@ func (s *stubVerifyExec) Command() string {
 func (s *stubVerifyExec) Preview() string {
 	return "post-write verification command:\n  argv: go test ./...\n"
 }
-func (s *stubVerifyExec) ApprovalKey() string { return "verify:v1:deadbeef" }
+func (s *stubVerifyExec) ApprovalKey() string { return "verify:v2:deadbeef" }
 
 func (s *stubVerifyExec) Run(context.Context) (agenttools.VerifyResult, error) {
 	s.runs++

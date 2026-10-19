@@ -3,6 +3,7 @@ package tools
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"math"
 	"slices"
@@ -30,6 +31,14 @@ const SandboxRuntimeSeatbelt SandboxRuntime = "seatbelt"
 // or on a host whose namespace-capability probe fails, fails closed at
 // construction.
 const SandboxRuntimeBwrap SandboxRuntime = "bwrap"
+
+// ErrSandboxPolicy reports that a selected sandbox policy cannot be honored
+// here: its backend could not be constructed (an invalid config, a runtime
+// unsupported on this OS, a failed capability probe) or the workspace root
+// cannot safely bound it. Constructors wrap it with the cause; test with
+// errors.Is. Command errors (a missing executable, an invalid cwd) never wrap
+// it.
+var ErrSandboxPolicy = errors.New("tools: sandbox policy unavailable")
 
 // SandboxConfig is a permission ceiling for a non-host execution runtime: a
 // backend may enforce stricter isolation but must never silently provide
