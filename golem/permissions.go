@@ -4,6 +4,7 @@ import (
 	"slices"
 
 	"github.com/kstruzzieri/go-llm/agent"
+	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
 )
 
 // Provenance says who built a mounted tool, which is what a consumer needs to
@@ -22,8 +23,22 @@ const (
 )
 
 // hostCommandWarning is spec section 7's required description of the host
-// backend, the only command runtime this release can construct.
+// backend.
 const hostCommandWarning = "unsandboxed; runs with the host user's filesystem and network authority"
+
+// Spec section 7's native backend descriptions. commandPermissions builds each
+// runtime and network value's list whole, never by appending to another's.
+const (
+	limitSeatbeltProfile  = "deny-default profile with reviewed system reads, allowed workspace and private temp"
+	limitNetworkDenied    = "network operations denied"
+	limitNoQuota          = "no memory/CPU quota"
+	limitNetworkAllowed   = "networking explicitly allowed by policy; filesystem limits remain"
+	limitBwrapIPDenied    = "IP network namespace isolated"
+	limitBwrapUnixSockets = "pathname Unix sockets reachable inside the shared workspace remain a channel"
+	limitBwrapMounts      = "reviewed read-only system mounts, workspace/snapshot and private temp"
+	limitBwrapCaps        = "all capabilities dropped by the backend"
+	limitBwrapMemory      = "RLIMIT_AS per-process virtual address space plus separate private tmpfs quotas; not aggregate process-tree memory"
+)
 
 // ToolPermission describes one mounted tool as the model is offered it.
 type ToolPermission struct {
@@ -42,13 +57,32 @@ type ToolPermission struct {
 
 // CommandPermissions describes where commands run and what network they get.
 type CommandPermissions struct {
-	// Runtime is "n/a" under Inspect (no commands run) and "host" otherwise.
+	// Runtime is "n/a" under Inspect (no commands run), otherwise the frozen
+	// sandbox runtime: "host", "seatbelt" or "bwrap".
 	Runtime string
-	// Network is "n/a" under Inspect and "unrestricted" on the host runtime.
+	// Network is "n/a" under Inspect, "unrestricted" on host, and "denied"
+	// (seatbelt), "ip-denied" (bwrap) or "allowed" on a native runtime.
 	Network string
 	// Warning is the required disclosure for the selected runtime, empty when
 	// none applies.
 	Warning string
+	// Limits are the native backend's material limits, in display order; nil
+	// for Inspect and host.
+	Limits []string
+}
+
+// Verification describes post-write verification as the runtime would run it
+// now.
+type Verification struct {
+	// State is "none" when no verifier is installed or the profile has no
+	// post-write verification (Inspect); "absent", "disabled" or "armed" for an
+	// agenttools.VerifierSlot, as its State reports; and "host-verifier" for
+	// any other verifier, which only a Trusted host session runs (a native one
+	// fails every turn while it is installed).
+	State string
+	// Target is the canonical workspace a slot's verification checks; empty
+	// for "none" and "host-verifier".
+	Target string
 }
 
 // EffectivePermissions is a copied snapshot of what a Runtime currently grants,
@@ -65,6 +99,12 @@ type EffectivePermissions struct {
 	Tools []ToolPermission
 	// Command describes command execution.
 	Command CommandPermissions
+	// Scratch reports whether the mounted command tools run in a scratch
+	// snapshot: the library's own scratch_changes, which every scratch-enabled
+	// exec factory mounts, is published.
+	Scratch bool
+	// Verification describes post-write verification.
+	Verification Verification
 }
 
 // EffectivePermissions returns a deep copy of the runtime's current permission
@@ -74,16 +114,57 @@ type EffectivePermissions struct {
 func (r *Runtime) EffectivePermissions() EffectivePermissions {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	command := CommandPermissions{Runtime: "host", Network: "unrestricted", Warning: hostCommandWarning}
-	if r.profile == ProfileInspect {
-		command = CommandPermissions{Runtime: "n/a", Network: "n/a"}
-	}
 	return EffectivePermissions{
 		Profile: r.profile,
 		Root:    r.root,
 		Ceiling: slices.Clone(r.ceilingNames),
 		Tools:   slices.Clone(r.snap.permissions),
-		Command: command,
+		Command: commandPermissions(r.profile, r.sandbox),
+		Scratch: slices.ContainsFunc(r.snap.permissions, func(p ToolPermission) bool {
+			return p.Name == "scratch_changes" && p.Provenance == ProvenanceLibrary
+		}),
+		Verification: verificationOf(r.profile, r.snap.orchestrator),
+	}
+}
+
+// commandPermissions projects the frozen sandbox policy (spec section 7).
+func commandPermissions(p Profile, s agenttools.SandboxConfig) CommandPermissions {
+	if p == ProfileInspect {
+		return CommandPermissions{Runtime: "n/a", Network: "n/a"}
+	}
+	switch s.Runtime {
+	case agenttools.SandboxRuntimeSeatbelt:
+		if s.AllowNetwork {
+			return CommandPermissions{Runtime: "seatbelt", Network: "allowed", Limits: []string{limitSeatbeltProfile, limitNetworkAllowed, limitNoQuota}}
+		}
+		return CommandPermissions{Runtime: "seatbelt", Network: "denied", Limits: []string{limitSeatbeltProfile, limitNetworkDenied, limitNoQuota}}
+	case agenttools.SandboxRuntimeBwrap:
+		c := CommandPermissions{Runtime: "bwrap", Network: "ip-denied", Limits: []string{limitBwrapIPDenied, limitBwrapUnixSockets, limitBwrapMounts, limitBwrapCaps}}
+		if s.AllowNetwork {
+			c = CommandPermissions{Runtime: "bwrap", Network: "allowed", Limits: []string{limitNetworkAllowed, limitBwrapMounts, limitBwrapCaps}}
+		}
+		if s.MemoryCapMB > 0 {
+			c.Limits = append(c.Limits, limitBwrapMemory)
+		}
+		return c
+	}
+	return CommandPermissions{Runtime: "host", Network: "unrestricted", Warning: hostCommandWarning}
+}
+
+// verificationOf reports the verifier the orchestrator would run. It reads
+// only the slot's own state: no I/O, no tool method.
+func verificationOf(p Profile, orch *agent.Orchestrator) Verification {
+	if p == ProfileInspect {
+		return Verification{State: "none"}
+	}
+	switch v := orch.Verifier().(type) {
+	case nil:
+		return Verification{State: "none"}
+	case *agenttools.VerifierSlot:
+		state, target := v.State()
+		return Verification{State: state, Target: target}
+	default:
+		return Verification{State: "host-verifier"}
 	}
 }
 

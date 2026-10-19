@@ -3,6 +3,7 @@ package golem_test
 import (
 	"context"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"testing"
 
@@ -78,7 +79,7 @@ func TestEffectivePermissionsInspect(t *testing.T) {
 		t.Errorf("Tools = %+v, want %+v", got.Tools, want)
 	}
 	// Inspect runs no commands, so it must not imply any sandbox or host runtime.
-	if want := (golem.CommandPermissions{Runtime: "n/a", Network: "n/a", Warning: ""}); got.Command != want {
+	if want := (golem.CommandPermissions{Runtime: "n/a", Network: "n/a", Warning: ""}); !reflect.DeepEqual(got.Command, want) {
 		t.Errorf("Command = %+v, want %+v", got.Command, want)
 	}
 }
@@ -111,7 +112,7 @@ func TestEffectivePermissionsTrustedHost(t *testing.T) {
 				t.Errorf("Tools = %+v, want %+v", got.Tools, want)
 			}
 			wantCommand := golem.CommandPermissions{Runtime: "host", Network: "unrestricted", Warning: hostWarning}
-			if got.Command != wantCommand {
+			if !reflect.DeepEqual(got.Command, wantCommand) {
 				t.Errorf("Command = %+v, want %+v", got.Command, wantCommand)
 			}
 		})
