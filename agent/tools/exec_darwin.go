@@ -70,8 +70,9 @@ func probeSeatbelt(ctx context.Context, execPath string) error {
 }
 
 // seatbeltNetsrcControl names the kernel control libSystem's resolver opens
-// in this process on its first hostname lookup (a lookup of "localhost" is
-// enough) and leaves without FD_CLOEXEC; the Go runtime cannot mark it.
+// in this process after a hostname lookup that returns several addresses
+// ("localhost", for one; a single-address lookup was not seen to open it) and
+// leaves without FD_CLOEXEC; the Go runtime cannot mark it.
 const seatbeltNetsrcControl = "com.apple.netsrc"
 
 // sysprotoControl is SYSPROTO_CONTROL from <sys/sys_domain.h>, which
@@ -81,7 +82,7 @@ const sysprotoControl = 2
 // seatbeltRejectInheritableFDs is the shared descriptor audit over macOS's
 // per-process descriptor directory (#576). Its one exemption is libSystem's
 // own netsrc control socket: refusing it would refuse every command after
-// the process resolves a hostname. That socket is a routing-query channel,
+// such a lookup. That socket is a routing-query channel,
 // not a filesystem or IP path. Every other descriptor is refused, including
 // any other kernel control (a launcher-leaked utun control socket is IP
 // packet egress).

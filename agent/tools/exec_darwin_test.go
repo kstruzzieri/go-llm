@@ -2549,8 +2549,9 @@ func TestSeatbeltRefusesOtherKernelControlSocket(t *testing.T) {
 }
 
 // libSystem's resolver leaves a non-CLOEXEC com.apple.netsrc control socket in
-// the process after its first hostname lookup, even of "localhost". The
-// carve-out keeps every later command from being refused.
+// the process after a lookup that returns several addresses; "localhost"
+// (::1 and 127.0.0.1) is one. The carve-out keeps every later command from
+// being refused.
 func TestSeatbeltRunsAfterLocalhostLookup(t *testing.T) {
 	requireSeatbeltCapability(t)
 	if _, err := net.LookupHost("localhost"); err != nil {

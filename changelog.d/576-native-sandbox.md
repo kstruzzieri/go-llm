@@ -76,15 +76,18 @@ sandbox (-sandbox)".
   wrapping `ErrSandboxPolicy` instead of advertising a backend that refuses
   every command. Mark your own descriptors close-on-exec before building a
   native session. The one exemption, on macOS, is the `com.apple.netsrc`
-  kernel-control socket libSystem's resolver leaves open after the process's
-  first hostname lookup. It still reaches Seatbelt commands: a routing-query
-  channel, not a filesystem or IP path.
+  kernel-control socket libSystem's resolver leaves open after a hostname
+  lookup that returns several addresses (`localhost`, for one). It still
+  reaches Seatbelt commands: a routing-query channel, not a filesystem or IP
+  path.
 - `golem.New` validates every session's sandbox policy, the host included, so
   the host runtime with any constraint (network, memory, CPU or capabilities)
   fails `New` with an error wrapping `agenttools.ErrSandboxPolicy`.
 - `golem.CommandPermissions` is no longer comparable with `==`: it gained
   `Limits []string`.
-- `agenttools.VerifyCommand.Run` returns the partial `VerifyResult`, `Notes`
-  included, alongside its error once the command was launched.
+- `agenttools.VerifyCommand.Run` returns a `VerifyResult` alongside every
+  error: the partial result, `Notes` included, once the command was launched,
+  and a zero `VerifyResult` (exit code 0) for a refusal before launch, such
+  as the descriptor refusal. Check the error before the exit code.
 - Hosts that leave `Sandbox` zero keep host execution and the existing
   admission (Firn, which runs Inspect, is unaffected).

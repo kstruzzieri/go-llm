@@ -626,9 +626,12 @@ func TestNativeWiringToolchainMatrix(t *testing.T) {
 			t.Logf("%s: not on PATH; not probed", tc.argv[0])
 			continue
 		}
-		// Bounded: a version-manager shim can hang on first use.
+		// Bounded: a version-manager shim can hang on first use, and a
+		// grandchild holding the output pipe must not outlive the kill.
 		vctx, vcancel := context.WithTimeout(context.Background(), 30*time.Second)
-		version, _ := exec.CommandContext(vctx, path, tc.version...).CombinedOutput()
+		vcmd := exec.CommandContext(vctx, path, tc.version...)
+		vcmd.WaitDelay = 5 * time.Second
+		version, _ := vcmd.CombinedOutput()
 		vcancel()
 		writeVerifyArgv(t, sess.root, tc.argv)
 		cmd, notice, err := buildVerifier(sess.root, policy)

@@ -117,10 +117,10 @@ func TestNativeWiringClearsInheritedDescriptors(t *testing.T) {
 }
 
 // TestNativeWiringLocalhostProvider reproduces the libSystem netsrc case
-// through golem's own path: a provider at a hostname that resolves makes the
-// first model request look it up, which on macOS leaves a non-CLOEXEC
-// com.apple.netsrc control socket in golem's process after the startup
-// sanitizer ran. The native command after that turn must still run. The
+// through golem's own path: a provider at a hostname that resolves to several
+// addresses makes the first model request look it up, which on macOS leaves a
+// non-CLOEXEC com.apple.netsrc control socket in golem's process after the
+// startup sanitizer ran. The native command after that turn must still run. The
 // provider is "localhost." (the FQDN spelling): golem's destination guard
 // dials plain "localhost" as 127.0.0.1 and ::1 without resolving it (#665),
 // while "localhost." is a remote destination resolved through the system,
