@@ -1,11 +1,15 @@
 package tools
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"runtime"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/kstruzzieri/go-llm/agent"
 )
 
 // enabledScratchConfig returns a fully explicit enabled config so tests can
@@ -104,7 +108,7 @@ func TestScratchRuntimeRejectsWorkspaceAtTempBase(t *testing.T) {
 	if err != nil {
 		t.Skipf("scratch temp base unavailable: %v", err)
 	}
-	if _, err := newScratchRuntime(base, ScratchConfig{Enabled: true}, nil); err == nil {
+	if _, err := newScratchRuntime(base, ScratchConfig{Enabled: true}, nil, SandboxRuntimeHost); err == nil {
 		t.Fatalf("scratch runtime accepted workspace equal to temp base %q", base)
 	}
 }
@@ -140,7 +144,7 @@ func TestScratchOuterTimeoutOverflow(t *testing.T) {
 }
 
 func TestScratchApprovalDisabledIsZeroIdentity(t *testing.T) {
-	a, err := approvalForScratch(ScratchConfig{}, false)
+	a, err := approvalForScratch(ScratchConfig{}, false, SandboxRuntimeHost)
 	if err != nil {
 		t.Fatalf("approval for disabled config: %v", err)
 	}
@@ -150,7 +154,7 @@ func TestScratchApprovalDisabledIsZeroIdentity(t *testing.T) {
 }
 
 func TestScratchApprovalComponentShape(t *testing.T) {
-	a, err := approvalForScratch(ScratchConfig{Enabled: true}, false)
+	a, err := approvalForScratch(ScratchConfig{Enabled: true}, false, SandboxRuntimeHost)
 	if err != nil {
 		t.Fatalf("approval: %v", err)
 	}
@@ -167,7 +171,7 @@ func TestScratchApprovalComponentShape(t *testing.T) {
 }
 
 func TestScratchApprovalEveryFieldRekeys(t *testing.T) {
-	base, err := approvalForScratch(enabledScratchConfig(), false)
+	base, err := approvalForScratch(enabledScratchConfig(), false, SandboxRuntimeHost)
 	if err != nil {
 		t.Fatalf("base approval: %v", err)
 	}
@@ -188,7 +192,7 @@ func TestScratchApprovalEveryFieldRekeys(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := enabledScratchConfig()
 			tc.mut(&cfg)
-			got, err := approvalForScratch(cfg, false)
+			got, err := approvalForScratch(cfg, false, SandboxRuntimeHost)
 			if err != nil {
 				t.Fatalf("approval: %v", err)
 			}
@@ -200,11 +204,11 @@ func TestScratchApprovalEveryFieldRekeys(t *testing.T) {
 }
 
 func TestScratchApprovalPromotionAvailabilityRekeys(t *testing.T) {
-	off, err := approvalForScratch(enabledScratchConfig(), false)
+	off, err := approvalForScratch(enabledScratchConfig(), false, SandboxRuntimeHost)
 	if err != nil {
 		t.Fatalf("approval: %v", err)
 	}
-	on, err := approvalForScratch(enabledScratchConfig(), true)
+	on, err := approvalForScratch(enabledScratchConfig(), true, SandboxRuntimeHost)
 	if err != nil {
 		t.Fatalf("approval: %v", err)
 	}
@@ -224,44 +228,163 @@ func TestScratchTempBaseRekeys(t *testing.T) {
 }
 
 func TestScratchApprovalPreviewContent(t *testing.T) {
-	a, err := approvalForScratch(enabledScratchConfig(), true)
-	if err != nil {
-		t.Fatalf("approval: %v", err)
+	const hostLead = "disposable cwd copy; host process remains unrestricted"
+	rows := []struct {
+		name    string
+		runtime SandboxRuntime
+		lead    string // literal lead of the scratch line for this runtime
+		forbid  string // wording this runtime must never claim
+	}{
+		{"host", SandboxRuntimeHost, hostLead, ""},
+		{"unset runtime is host", "", hostLead, ""},
+		{"seatbelt", SandboxRuntimeSeatbelt, "disposable cwd copy under the seatbelt sandbox", "host process remains unrestricted"},
+		{"bwrap", SandboxRuntimeBwrap, "disposable cwd copy under the bwrap sandbox", "host process remains unrestricted"},
 	}
-	for _, want := range []string{
-		"disposable cwd copy",
-		"host process remains unrestricted",
-		"sessions<=2",
-		"setup<=30s",
-		"capture<=30s",
-		"cleanup<=30s",
-		"grace=5s",
-		"git-metadata=omitted",
-		"promote=available",
-	} {
-		if !strings.Contains(a.preview, want) {
-			t.Fatalf("preview missing %q:\n%s", want, a.preview)
-		}
-	}
-	if runtime.GOOS == "darwin" || runtime.GOOS == "linux" {
-		if !strings.Contains(a.preview, "temp=private") {
-			t.Fatalf("preview missing fixed private temp policy:\n%s", a.preview)
-		}
-		// The ephemeral root is created long after Plan and never appears.
-		for _, forbid := range []string{"/tmp", "/private", "go-llm-scratch"} {
-			if strings.Contains(a.preview, forbid) {
-				t.Fatalf("preview leaks ephemeral path material %q:\n%s", forbid, a.preview)
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			a, err := approvalForScratch(enabledScratchConfig(), true, row.runtime)
+			if err != nil {
+				t.Fatalf("approval: %v", err)
 			}
+			for _, want := range []string{
+				row.lead + " git-metadata=omitted",
+				"sessions<=2",
+				"setup<=30s",
+				"capture<=30s",
+				"cleanup<=30s",
+				"grace=5s",
+				"promote=available",
+			} {
+				if !strings.Contains(a.preview, want) {
+					t.Fatalf("preview missing %q:\n%s", want, a.preview)
+				}
+			}
+			if row.forbid != "" && strings.Contains(a.preview, row.forbid) {
+				t.Fatalf("%s preview claims %q:\n%s", row.name, row.forbid, a.preview)
+			}
+			if runtime.GOOS == "darwin" || runtime.GOOS == "linux" {
+				if !strings.Contains(a.preview, "temp=private") {
+					t.Fatalf("preview missing fixed private temp policy:\n%s", a.preview)
+				}
+				// The ephemeral root is created long after Plan and never appears.
+				for _, forbid := range []string{"/tmp", "/private", "go-llm-scratch"} {
+					if strings.Contains(a.preview, forbid) {
+						t.Fatalf("preview leaks ephemeral path material %q:\n%s", forbid, a.preview)
+					}
+				}
+			} else if !strings.Contains(a.preview, fmt.Sprintf("temp=%q", a.tempBase)) {
+				t.Fatalf("preview omits environment-selected temp policy %q:\n%s", a.tempBase, a.preview)
+			}
+		})
+	}
+}
+
+// scratchPreview plans a trivial argv through the named tool of set and
+// returns the rendered approval preview.
+func scratchPreview(t *testing.T, set []agent.Tool, name string) string {
+	t.Helper()
+	planner, ok := toolNamed(t, set, name).(agent.PlanningTool)
+	if !ok {
+		t.Fatalf("%s is not a planning tool", name)
+	}
+	plan, err := planner.Plan(context.Background(), json.RawMessage(`{"argv":["go","version"]}`))
+	if err != nil {
+		t.Fatalf("plan %s: %v", name, err)
+	}
+	return plan.Preview
+}
+
+// TestScratchPreviewNativeForegroundAndBackground drives the real RunCommand
+// and StartCommand previews over a seatbelt-bound normalized stub manager: the
+// scratch line must name the native runtime next to the sandbox line and must
+// never claim the host process is unrestricted.
+func TestScratchPreviewNativeForegroundAndBackground(t *testing.T) {
+	set := execSet(t, canonicalTempRoot(t), stubManager(t, bindingSeatbelt), true)
+	rows := []struct {
+		tool   string
+		sbLine string // label padding differs between the two preview renderers
+		scLine string
+	}{
+		{"run_command", `  sandbox: runtime="seatbelt" `, "  scratch: disposable cwd copy under the seatbelt sandbox git-metadata=omitted "},
+		{"start_command", `  sandbox:  runtime="seatbelt" `, "  scratch:  disposable cwd copy under the seatbelt sandbox git-metadata=omitted "},
+	}
+	for _, row := range rows {
+		t.Run(row.tool, func(t *testing.T) {
+			preview := scratchPreview(t, set, row.tool)
+			for _, want := range []string{row.sbLine, row.scLine} {
+				if !strings.Contains(preview, want) {
+					t.Fatalf("%s preview missing %q:\n%s", row.tool, want, preview)
+				}
+			}
+			if strings.Contains(preview, "host process remains unrestricted") {
+				t.Fatalf("%s native preview claims the host is unrestricted:\n%s", row.tool, preview)
+			}
+		})
+	}
+}
+
+// TestScratchPreviewHostKeepsUnrestrictedWording pins the host side of the
+// same boundary on every host construction path: no sandbox line, and the
+// scratch line keeps saying the host process is unrestricted.
+func TestScratchPreviewHostKeepsUnrestrictedWording(t *testing.T) {
+	const lead = "disposable cwd copy; host process remains unrestricted git-metadata=omitted "
+	root := canonicalTempRoot(t)
+	hostSet, err := NewExecToolsWithOptions(root, ExecToolsOptions{Scratch: ScratchConfig{Enabled: true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sandboxedHost, err := NewSandboxedExecToolsWithOptions(root, SandboxConfig{}, ExecToolsOptions{Scratch: ScratchConfig{Enabled: true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hostManager := execSet(t, root, stubManager(t, SandboxConfig{}), true)
+	cases := []struct {
+		name string
+		set  []agent.Tool
+		tool string
+		want string // label padding differs between the two preview renderers
+	}{
+		{"host factory run_command", hostSet, "run_command", "  scratch: " + lead},
+		{"sandboxed factory with host config run_command", sandboxedHost, "run_command", "  scratch: " + lead},
+		{"host manager run_command", hostManager, "run_command", "  scratch: " + lead},
+		{"host manager start_command", hostManager, "start_command", "  scratch:  " + lead},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			preview := scratchPreview(t, tc.set, tc.tool)
+			if !strings.Contains(preview, tc.want) {
+				t.Fatalf("host preview missing %q:\n%s", tc.want, preview)
+			}
+			if strings.Contains(preview, "sandbox:") {
+				t.Fatalf("host preview carries a sandbox line:\n%s", preview)
+			}
+		})
+	}
+}
+
+// TestScratchApprovalRuntimeKeepsKeyComponent pins that the runtime wording is
+// presentation only: the scratch key component (the sandbox component already
+// carries the runtime identity) is identical for every runtime.
+func TestScratchApprovalRuntimeKeepsKeyComponent(t *testing.T) {
+	host, err := approvalForScratch(enabledScratchConfig(), true, SandboxRuntimeHost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, rt := range []SandboxRuntime{SandboxRuntimeSeatbelt, SandboxRuntimeBwrap} {
+		got, err := approvalForScratch(enabledScratchConfig(), true, rt)
+		if err != nil {
+			t.Fatal(err)
 		}
-	} else if !strings.Contains(a.preview, fmt.Sprintf("temp=%q", a.tempBase)) {
-		t.Fatalf("preview omits environment-selected temp policy %q:\n%s", a.tempBase, a.preview)
+		if got.keyComponent != host.keyComponent {
+			t.Fatalf("%s re-keyed scratch: %q vs host %q", rt, got.keyComponent, host.keyComponent)
+		}
 	}
 }
 
 func TestScratchApprovalRejectsInvalidConfig(t *testing.T) {
 	cfg := enabledScratchConfig()
 	cfg.MaxChangedFiles = -1
-	if _, err := approvalForScratch(cfg, false); err == nil {
+	if _, err := approvalForScratch(cfg, false, SandboxRuntimeHost); err == nil {
 		t.Fatal("approvalForScratch must reject invalid config")
 	}
 }

@@ -28,7 +28,7 @@ func newTestScratchRuntime(t *testing.T, cfg ScratchConfig) (*scratchRuntime, st
 			t.Fatal(err)
 		}
 	}
-	rt, err := newScratchRuntime(canon, cfg, nil)
+	rt, err := newScratchRuntime(canon, cfg, nil, SandboxRuntimeHost)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -230,7 +230,7 @@ func NewExecToolsWithOptions(root string, opts ExecToolsOptions) ([]agent.Tool, 
 	if err != nil {
 		return nil, fmt.Errorf("tools: build exec tools: %w", err)
 	}
-	rt, err := newScratchRuntime(root, opts.Scratch, opts.PromotionJournal)
+	rt, err := newScratchRuntime(root, opts.Scratch, opts.PromotionJournal, SandboxRuntimeHost)
 	if err != nil {
 		return nil, err
 	}
@@ -265,7 +265,7 @@ func NewSandboxedExecToolsWithOptions(root string, sandbox SandboxConfig, opts E
 	if err != nil {
 		return nil, fmt.Errorf("tools: build exec tools: %w", err)
 	}
-	rt, err := newScratchRuntime(root, opts.Scratch, opts.PromotionJournal)
+	rt, err := newScratchRuntime(root, opts.Scratch, opts.PromotionJournal, backend.sandbox.Runtime)
 	if err != nil {
 		return nil, err
 	}

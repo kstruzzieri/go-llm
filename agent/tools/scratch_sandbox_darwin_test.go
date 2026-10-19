@@ -3,6 +3,8 @@
 package tools
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -28,6 +30,25 @@ func scratchSeatbeltTools(t *testing.T, root string) (*RunCommand, *scratchRunti
 	// binds its write allowance to the rewritten workspace root, and the
 	// metadata-ancestor allowances assume the platform base.
 	return rc, rc.scratchRT
+}
+
+// TestScratchSeatbeltPreviewNamesRuntime covers the native production caller of the
+// runtime-aware scratch wording: the real sandboxed factory must hand the
+// scratch engine the backend's own runtime, so the preview names seatbelt, not
+// the host.
+func TestScratchSeatbeltPreviewNamesRuntime(t *testing.T) {
+	rc, _ := scratchSeatbeltTools(t, buildIsolationWorkspace(t))
+	plan, err := rc.Plan(context.Background(), json.RawMessage(`{"argv":["sh","-c","true"]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = "scratch: disposable cwd copy under the seatbelt sandbox git-metadata=omitted "
+	if !strings.Contains(plan.Preview, want) {
+		t.Fatalf("preview missing %q:\n%s", want, plan.Preview)
+	}
+	if strings.Contains(plan.Preview, "host process remains unrestricted") {
+		t.Fatalf("native preview claims the host is unrestricted:\n%s", plan.Preview)
+	}
 }
 
 // TestScratchSeatbeltComposition proves the enforced-isolation claim on real

@@ -206,7 +206,7 @@ func scratchFingerprint(cfg ScratchConfig, promotable bool, tempBase string) str
 // preview line, so a grant never crosses the scratch boundary in either
 // direction. promotable records whether a promotion journal is wired: making
 // promotion available is a policy change and must re-key.
-func approvalForScratch(cfg ScratchConfig, promotable bool) (scratchApproval, error) {
+func approvalForScratch(cfg ScratchConfig, promotable bool, sandbox SandboxRuntime) (scratchApproval, error) {
 	normalized, err := normalizeScratchConfig(cfg)
 	if err != nil {
 		return scratchApproval{}, err
@@ -220,17 +220,19 @@ func approvalForScratch(cfg ScratchConfig, promotable bool) (scratchApproval, er
 	}
 	return scratchApproval{
 		keyComponent: "scr:" + scratchFingerprint(normalized, promotable, tempBase) + ":",
-		preview:      renderScratchLine(normalized, promotable, tempBase),
+		preview:      renderScratchLine(normalized, promotable, tempBase, sandbox),
 		tempBase:     tempBase,
 	}, nil
 }
 
 // renderScratchLine renders the scratch policy the user is approving.
-// Presentation only, never parsed. The wording states the host-runtime truth
-// (#443 threat model): the copy protects against cwd-relative accidents, and
-// only a composed sandbox line upgrades that to an enforced boundary. No
-// ephemeral path material may ever appear here.
-func renderScratchLine(cfg ScratchConfig, promotable bool, tempBase string) string {
+// Presentation only, never parsed. The wording names the runtime that will
+// actually run the command (#443 threat model, #576): under host execution the
+// copy only protects against cwd-relative accidents and says the process stays
+// unrestricted; under a native sandbox it says the copy runs under that
+// runtime, whose own line carries the enforced boundary. No ephemeral path
+// material may ever appear here.
+func renderScratchLine(cfg ScratchConfig, promotable bool, tempBase string, sandbox SandboxRuntime) string {
 	promote := "promote=unavailable"
 	if promotable {
 		promote = "promote=available"
@@ -239,11 +241,14 @@ func renderScratchLine(cfg ScratchConfig, promotable bool, tempBase string) stri
 	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
 		temp = fmt.Sprintf("temp=%q", tempBase)
 	}
+	lead := "disposable cwd copy; host process remains unrestricted"
+	if sandbox != "" && sandbox != SandboxRuntimeHost {
+		lead = fmt.Sprintf("disposable cwd copy under the %s sandbox", sandbox)
+	}
 	return fmt.Sprintf(
-		"disposable cwd copy; host process remains unrestricted"+
-			" git-metadata=omitted files<=%d tree-bytes<=%d changes<=%d change-bytes<=%d/%d sessions<=%d"+
+		"%s git-metadata=omitted files<=%d tree-bytes<=%d changes<=%d change-bytes<=%d/%d sessions<=%d"+
 			" setup<=%s capture<=%s cleanup<=%s grace=%s %s %s",
-		cfg.MaxWorkspaceFiles, cfg.MaxWorkspaceBytes, cfg.MaxChangedFiles,
+		lead, cfg.MaxWorkspaceFiles, cfg.MaxWorkspaceBytes, cfg.MaxChangedFiles,
 		cfg.MaxFileBytes, cfg.MaxTotalBytes, cfg.MaxConcurrentSessions,
 		cfg.SnapshotTimeout, cfg.CaptureTimeout, cfg.CaptureTimeout, scratchEffectGrace, temp, promote,
 	)
@@ -497,7 +502,7 @@ type scratchRuntime struct {
 }
 
 // newScratchRuntime builds the shared scratch engine for one factory.
-func newScratchRuntime(root string, cfg ScratchConfig, journal PreparingJournal) (*scratchRuntime, error) {
+func newScratchRuntime(root string, cfg ScratchConfig, journal PreparingJournal, sandbox SandboxRuntime) (*scratchRuntime, error) {
 	normalized, err := normalizeScratchConfig(cfg)
 	if err != nil {
 		return nil, err
@@ -508,7 +513,7 @@ func newScratchRuntime(root string, cfg ScratchConfig, journal PreparingJournal)
 	if journal != nil && !scratchPromotionSupported {
 		return nil, fmt.Errorf("tools: scratch promotion is unsupported on this platform; construct without a promotion journal (S5)")
 	}
-	approval, err := approvalForScratch(normalized, journal != nil)
+	approval, err := approvalForScratch(normalized, journal != nil, sandbox)
 	if err != nil {
 		return nil, err
 	}

@@ -97,7 +97,7 @@ func NewExecToolsWithBackgroundOptions(root string, manager *BackgroundManager, 
 	if err != nil {
 		return nil, fmt.Errorf("tools: build exec tools: %w", err)
 	}
-	rt, err := newScratchRuntime(root, opts.Scratch, opts.PromotionJournal)
+	rt, err := newScratchRuntime(root, opts.Scratch, opts.PromotionJournal, manager.backend.sandbox.Runtime)
 	if err != nil {
 		return nil, err
 	}
