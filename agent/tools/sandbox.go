@@ -373,8 +373,10 @@ func CheckSandboxBindings(tools []agent.Tool, cfg SandboxConfig, root, scratchKe
 		return got == frozen
 	}
 	// Pass 1 admits every tool whose binding is its own state and records the
-	// managers and scratch runtimes the admitted command tools carry; pass 2
-	// admits the tools whose provenance is one of those.
+	// managers and scratch runtimes the admitted command tools carry; it defers
+	// the tools whose provenance is one of those, and pass 2 admits a deferred
+	// tool only through its own case. A deferred type without one is rejected.
+	deferred := make([]bool, len(tools))
 	for i, tool := range tools {
 		if rv := reflect.ValueOf(tool); rv.Kind() == reflect.Pointer && rv.IsNil() {
 			return "", errNotAdmitted(i, tool)
@@ -402,6 +404,7 @@ func CheckSandboxBindings(tools []agent.Tool, cfg SandboxConfig, root, scratchKe
 				managers[t.manager] = true
 			}
 		case *CommandStatus, *CommandTail, *StopCommand, ScratchChanges, *ScratchChanges, *PromoteArtifact:
+			deferred[i] = true
 			continue
 		}
 		if !ok {
@@ -409,6 +412,9 @@ func CheckSandboxBindings(tools []agent.Tool, cfg SandboxConfig, root, scratchKe
 		}
 	}
 	for i, tool := range tools {
+		if !deferred[i] {
+			continue
+		}
 		var ok bool
 		switch t := tool.(type) {
 		case *CommandStatus:
@@ -423,8 +429,6 @@ func CheckSandboxBindings(tools []agent.Tool, cfg SandboxConfig, root, scratchKe
 			ok = scratch[t.rt]
 		case *PromoteArtifact:
 			ok = inRoot(t.ws) && scratch[t.rt]
-		default:
-			continue
 		}
 		if !ok {
 			return "", errNotAdmitted(i, tool)

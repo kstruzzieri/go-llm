@@ -75,6 +75,18 @@ func boundRunCommand(t *testing.T, root string, cfg SandboxConfig) *RunCommand {
 	return rc
 }
 
+// foreignFileTool returns the named library file tool built over a fresh
+// directory that is not the session root.
+func foreignFileTool(t *testing.T, name string) agent.Tool {
+	t.Helper()
+	dir := t.TempDir()
+	reads, err := NewFileTools(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return toolNamed(t, append(reads, NewMutatingTools(mustWorkspace(t, dir), nil)...), name)
+}
+
 // opaqueWrapper is a floor-style wrapper around a real admitted tool: a
 // concrete type this package did not build.
 type opaqueWrapper struct{ inner agent.Tool }
@@ -165,6 +177,26 @@ func TestCheckSandboxBindings(t *testing.T) {
 			}
 			return fixture{root: root, tools: reads[:1]}
 		}},
+		{name: "foreign root search", cfg: bindingSeatbelt, reject: "search", build: func(t *testing.T, root string) fixture {
+			return fixture{root: root, tools: []agent.Tool{foreignFileTool(t, "search")}}
+		}},
+		{name: "foreign root glob", cfg: bindingSeatbelt, reject: "glob", build: func(t *testing.T, root string) fixture {
+			return fixture{root: root, tools: []agent.Tool{foreignFileTool(t, "glob")}}
+		}},
+		{name: "foreign root list", cfg: bindingSeatbelt, reject: "list", build: func(t *testing.T, root string) fixture {
+			return fixture{root: root, tools: []agent.Tool{foreignFileTool(t, "list")}}
+		}},
+		{name: "foreign root write_file", cfg: bindingSeatbelt, reject: "write_file", build: func(t *testing.T, root string) fixture {
+			return fixture{root: root, tools: []agent.Tool{foreignFileTool(t, "write_file")}}
+		}},
+		{name: "foreign root edit_file", cfg: bindingSeatbelt, reject: "edit_file", build: func(t *testing.T, root string) fixture {
+			return fixture{root: root, tools: []agent.Tool{foreignFileTool(t, "edit_file")}}
+		}},
+		{name: "foreign root promote_artifact over an admitted rt", cfg: bindingSeatbelt, reject: "promote_artifact", build: func(t *testing.T, root string) fixture {
+			set := execSet(t, root, stubManager(t, bindingSeatbelt), true)
+			rt := set[0].(*RunCommand).scratchRT
+			return fixture{root: root, tools: append(set[:6], NewPromoteArtifact(mustWorkspace(t, t.TempDir()), rt))}
+		}},
 		{name: "foreign root run_command", cfg: bindingSeatbelt, reject: "run_command", build: func(t *testing.T, root string) fixture {
 			return fixture{root: root, tools: []agent.Tool{boundRunCommand(t, canonicalTempRoot(t), bindingSeatbelt)}}
 		}},
@@ -219,6 +251,12 @@ func TestCheckSandboxBindings(t *testing.T) {
 			rc := boundRunCommand(t, root, bindingSeatbelt)
 			rc.scratchRT = foreign[0].(*RunCommand).scratchRT
 			return fixture{root: root, tools: []agent.Tool{rc}}
+		}},
+		{name: "start_command scratch runtime for another root", cfg: bindingSeatbelt, reject: "start_command", build: func(t *testing.T, root string) fixture {
+			foreign := execSet(t, canonicalTempRoot(t), stubManager(t, bindingSeatbelt), true)
+			sc := NewStartCommand(mustWorkspace(t, root), stubManager(t, bindingSeatbelt))
+			sc.scratchRT = foreign[0].(*RunCommand).scratchRT
+			return fixture{root: root, tools: []agent.Tool{sc}}
 		}},
 		{name: "changed scratchKey", cfg: bindingSeatbelt, reject: "run_command", build: func(t *testing.T, root string) fixture {
 			return fixture{root: root, tools: execSet(t, root, stubManager(t, bindingSeatbelt), true), key: "scr:other:"}
@@ -307,10 +345,11 @@ func TestValidateSandboxUnavailable(t *testing.T) {
 	}
 }
 
-// TestValidateSandboxRootBound needs this OS's native backend: a probe that
-// passes still refuses a root the backend cannot bound. GO_LLM_REQUIRE_SEATBELT
-// or GO_LLM_REQUIRE_BWRAP=1 turns an unavailable backend into a failure.
-func TestValidateSandboxRootBound(t *testing.T) {
+// TestNativeBackendValidateSandboxRootBound needs this OS's native backend: a
+// probe that passes still refuses a root the backend cannot bound. Both native
+// CI jobs select the TestNativeBackend prefix with GO_LLM_REQUIRE_SEATBELT or
+// GO_LLM_REQUIRE_BWRAP=1, which turns an unavailable backend into a failure.
+func TestNativeBackendValidateSandboxRootBound(t *testing.T) {
 	cfg, require := SandboxConfig{Runtime: SandboxRuntimeSeatbelt}, "GO_LLM_REQUIRE_SEATBELT"
 	switch runtime.GOOS {
 	case "darwin":

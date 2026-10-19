@@ -182,12 +182,12 @@ jobs:
       - name: Bwrap confinement (non-race)
         env:
           GO_LLM_REQUIRE_BWRAP: "1"
-        run: go test -count=1 -run '^(TestBwrap|TestBuildBwrap|TestCollectBwrap|TestProbeBwrap|TestExistingPolicyPaths)' ./agent/tools
+        run: go test -count=1 -run '^(TestBwrap|TestBuildBwrap|TestCollectBwrap|TestProbeBwrap|TestExistingPolicyPaths|TestNativeBackend)' ./agent/tools ./golem
 
       - name: Bwrap confinement (race)
         env:
           GO_LLM_REQUIRE_BWRAP: "1"
-        run: go test -race -count=1 -run '^(TestBwrap|TestBuildBwrap|TestCollectBwrap|TestProbeBwrap|TestExistingPolicyPaths)' ./agent/tools
+        run: go test -race -count=1 -run '^(TestBwrap|TestBuildBwrap|TestCollectBwrap|TestProbeBwrap|TestExistingPolicyPaths|TestNativeBackend)' ./agent/tools ./golem
 
       # The containment inventory's bwrap profile: every mandatory ref must
       # run and pass under the real sandbox, no skip allowed (#452).

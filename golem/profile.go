@@ -37,9 +37,13 @@ const (
 
 const previewUnavailable = "Preview unavailable: staged-workspace runtime requires #388/#389"
 
-// validateSandbox is agenttools.ValidateSandbox, replaceable only by this
-// package's tests so a native policy constructs on every OS.
-var validateSandbox = agenttools.ValidateSandbox
+// validateSandbox and checkSandboxBindings are the agenttools functions,
+// replaceable only by this package's tests so a native policy constructs, and
+// golem's own native rules run, on every OS without a real backend.
+var (
+	validateSandbox      = agenttools.ValidateSandbox
+	checkSandboxBindings = agenttools.CheckSandboxBindings
+)
 
 // nativeRuntime reports whether cfg selects a sandbox runtime other than host.
 func nativeRuntime(cfg agenttools.SandboxConfig) bool {
@@ -164,7 +168,7 @@ func (r *Runtime) admitTools(extras []agent.Tool) ([]agent.Tool, []ToolPermissio
 	native := nativeRuntime(r.sandbox)
 	var scratchKey string
 	if native {
-		if scratchKey, err = agenttools.CheckSandboxBindings(extras, r.sandbox, r.root, r.scratchKey); err != nil {
+		if scratchKey, err = checkSandboxBindings(extras, r.sandbox, r.root, r.scratchKey); err != nil {
 			return nil, nil, "", fmt.Errorf("%w: %w", ErrProfileIncompatible, err)
 		}
 	}

@@ -536,6 +536,37 @@ func newScratchRuntime(root string, cfg ScratchConfig, journal PreparingJournal)
 	}, nil
 }
 
+// CommandsRunInScratch reports whether tools mount at least one library
+// run_command or start_command and every one of them runs its commands in a
+// scratch snapshot (#443, #576). It decides by concrete type and private state
+// and calls no tool method: scratch_changes alone, a wrapper or an opaque tool
+// never counts, and one command tool on the live workspace makes it false.
+func CommandsRunInScratch(tools []agent.Tool) bool {
+	mounted := false
+	for _, tool := range tools {
+		var rt *scratchRuntime
+		switch t := tool.(type) {
+		case *RunCommand:
+			if t == nil {
+				continue
+			}
+			rt = t.scratchRT
+		case *StartCommand:
+			if t == nil {
+				continue
+			}
+			rt = t.scratchRT
+		default:
+			continue
+		}
+		if rt == nil {
+			return false
+		}
+		mounted = true
+	}
+	return mounted
+}
+
 // ScratchChanges is the read-only, approval-free query tool for scratch
 // outcomes: status, bounded per-change metadata, and reasons — never
 // artifact bytes or previews (those appear only inside a promotion prompt).

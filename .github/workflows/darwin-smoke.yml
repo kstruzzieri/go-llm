@@ -131,16 +131,18 @@ jobs:
       # nested sandbox) fails the gate rather than silently passing. The
       # non-race pass exercises the helper-process legs (a race-instrumented
       # child cannot initialize inside the profile); the race pass covers the
-      # rest under the detector.
+      # rest under the detector. ./golem adds the native-session tests that
+      # need this backend (TestNativeBackend*) or this filesystem
+      # (TestSeatbeltSession*, case-insensitive APFS) (#576).
       - name: Seatbelt confinement (non-race)
         env:
           GO_LLM_REQUIRE_SEATBELT: "1"
-        run: go test -count=1 -run '^(TestSeatbelt|TestSBPL|TestProbeSeatbelt|TestScratchSeatbelt|TestNewExecBackendSeatbelt)' ./agent/tools
+        run: go test -count=1 -run '^(TestSeatbelt|TestSBPL|TestProbeSeatbelt|TestScratchSeatbelt|TestNewExecBackendSeatbelt|TestNativeBackend)' ./agent/tools ./golem
 
       - name: Seatbelt confinement (race)
         env:
           GO_LLM_REQUIRE_SEATBELT: "1"
-        run: go test -race -count=1 -run '^(TestSeatbelt|TestSBPL|TestProbeSeatbelt|TestScratchSeatbelt|TestNewExecBackendSeatbelt)' ./agent/tools
+        run: go test -race -count=1 -run '^(TestSeatbelt|TestSBPL|TestProbeSeatbelt|TestScratchSeatbelt|TestNewExecBackendSeatbelt|TestNativeBackend)' ./agent/tools ./golem
 
       # The containment inventory's seatbelt profile, without race: its
       # helper-process legs skip under race instrumentation (#452).

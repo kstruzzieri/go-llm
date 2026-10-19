@@ -1120,11 +1120,11 @@ awk '
   $0 == "      - name: Seatbelt confinement (non-race)" { step = "non-race"; next }
   $0 == "      - name: Seatbelt confinement (race)" { step = "race"; next }
   step && $0 == "          GO_LLM_REQUIRE_SEATBELT: \"1\"" { env = 1; next }
-  step == "non-race" && $0 == "        run: go test -count=1 -run '\''^(TestSeatbelt|TestSBPL|TestProbeSeatbelt|TestScratchSeatbelt|TestNewExecBackendSeatbelt)'\'' ./agent/tools" {
+  step == "non-race" && $0 == "        run: go test -count=1 -run '\''^(TestSeatbelt|TestSBPL|TestProbeSeatbelt|TestScratchSeatbelt|TestNewExecBackendSeatbelt|TestNativeBackend)'\'' ./agent/tools ./golem" {
     nonrace = env
     step = ""
   }
-  step == "race" && $0 == "        run: go test -race -count=1 -run '\''^(TestSeatbelt|TestSBPL|TestProbeSeatbelt|TestScratchSeatbelt|TestNewExecBackendSeatbelt)'\'' ./agent/tools" {
+  step == "race" && $0 == "        run: go test -race -count=1 -run '\''^(TestSeatbelt|TestSBPL|TestProbeSeatbelt|TestScratchSeatbelt|TestNewExecBackendSeatbelt|TestNativeBackend)'\'' ./agent/tools ./golem" {
     race = env
     step = ""
   }

@@ -100,8 +100,9 @@ type EffectivePermissions struct {
 	// Command describes command execution.
 	Command CommandPermissions
 	// Scratch reports whether the mounted command tools run in a scratch
-	// snapshot: the library's own scratch_changes, which every scratch-enabled
-	// exec factory mounts, is published.
+	// snapshot: at least one library run_command or start_command is mounted
+	// and every one of them carries a scratch runtime
+	// (agenttools.CommandsRunInScratch).
 	Scratch bool
 	// Verification describes post-write verification.
 	Verification Verification
@@ -115,14 +116,12 @@ func (r *Runtime) EffectivePermissions() EffectivePermissions {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return EffectivePermissions{
-		Profile: r.profile,
-		Root:    r.root,
-		Ceiling: slices.Clone(r.ceilingNames),
-		Tools:   slices.Clone(r.snap.permissions),
-		Command: commandPermissions(r.profile, r.sandbox),
-		Scratch: slices.ContainsFunc(r.snap.permissions, func(p ToolPermission) bool {
-			return p.Name == "scratch_changes" && p.Provenance == ProvenanceLibrary
-		}),
+		Profile:      r.profile,
+		Root:         r.root,
+		Ceiling:      slices.Clone(r.ceilingNames),
+		Tools:        slices.Clone(r.snap.permissions),
+		Command:      commandPermissions(r.profile, r.sandbox),
+		Scratch:      agenttools.CommandsRunInScratch(unfloored(r.snap.tools)),
 		Verification: verificationOf(r.profile, r.snap.orchestrator),
 	}
 }

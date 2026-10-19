@@ -243,51 +243,133 @@ func TestNativeAdmissionAllPaths(t *testing.T) {
 			t.Fatalf("New = %v, want the dispatch child-ceiling rule to report retrieve", err)
 		}
 	})
+}
 
-	t.Run("scratch change across replacement", func(t *testing.T) {
-		policy := nativePolicyOrSkip(t)
-		for _, path := range []string{"Replace", "ReplaceConfiguration"} {
-			t.Run(path, func(t *testing.T) {
-				dir := t.TempDir()
+// TestNativeBackendScratchFrozenAcrossReplacement runs golem's frozen-scratch
+// and unwrapped-publication rules against command tools a real native backend
+// built, through the real binder. Both native CI jobs select the
+// TestNativeBackend prefix with GO_LLM_REQUIRE_SEATBELT or
+// GO_LLM_REQUIRE_BWRAP=1, where an unavailable backend fails instead of
+// skipping. TestNativeScratchFrozenAtNew pins the same rules on every OS over a
+// stubbed binder.
+func TestNativeBackendScratchFrozenAcrossReplacement(t *testing.T) {
+	policy := nativePolicyOrSkip(t)
+	for _, path := range []string{"Replace", "ReplaceConfiguration"} {
+		t.Run(path, func(t *testing.T) {
+			dir := t.TempDir()
+			caller := &countingCaller{}
+			// New mounts no command tools, so the frozen scratch identity is none.
+			rt, err := newNative(t, dir, policy, caller, nil)
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			err = replacePaths[path](rt, caller, nativeExecSet(t, dir, policy, true))
+			if !errors.Is(err, ErrProfileIncompatible) || !strings.Contains(err.Error(), "scratch policy is frozen") {
+				t.Fatalf("%s with a scratch set = %v, want the frozen scratch policy to refuse it", path, err)
+			}
+			// The same set without scratch is admissible, so the refusal was
+			// the scratch change alone. It is published unwrapped.
+			plain := nativeExecSet(t, dir, policy, false)
+			if err := replacePaths[path](rt, caller, plain); err != nil {
+				t.Fatalf("%s with the plain native set: %v", path, err)
+			}
+			rt.mu.Lock()
+			published := rt.snap.tools[len(rt.fileTools):]
+			rt.mu.Unlock()
+			if !slices.Equal(published, plain) {
+				t.Fatalf("published %v, want the caller's own tools %v unwrapped", published, plain)
+			}
+		})
+	}
+
+	// A session frozen with scratch refuses command tools without it.
+	dir := t.TempDir()
+	caller := &countingCaller{}
+	rt, err := newNative(t, dir, policy, caller, nativeExecSet(t, dir, policy, true))
+	if err != nil {
+		t.Fatalf("New with a scratch set: %v", err)
+	}
+	if err := rt.Replace("", nativeExecSet(t, dir, policy, false)); !errors.Is(err, ErrProfileIncompatible) {
+		t.Fatalf("Replace dropping scratch = %v, want ErrProfileIncompatible", err)
+	}
+	if err := rt.Replace("", nil); err != nil {
+		t.Fatalf("Replace unmounting every command tool: %v", err)
+	}
+}
+
+// stubBinder replaces checkSandboxBindings for the rest of the test: it admits
+// every set, records the arguments golem passed, and returns *key.
+type stubBinder struct {
+	key     string // returned scratch identity
+	gotKey  string // last scratchKey argument
+	gotRoot string
+	gotCfg  agenttools.SandboxConfig
+}
+
+func installStubBinder(t *testing.T) *stubBinder {
+	t.Helper()
+	b := &stubBinder{}
+	saved := checkSandboxBindings
+	checkSandboxBindings = func(_ []agent.Tool, cfg agenttools.SandboxConfig, root, scratchKey string) (string, error) {
+		b.gotKey, b.gotRoot, b.gotCfg = scratchKey, root, cfg
+		return b.key, nil
+	}
+	t.Cleanup(func() { checkSandboxBindings = saved })
+	return b
+}
+
+// TestNativeScratchFrozenAtNew pins golem's own native rules on every OS, over
+// a binder stub: New freezes the scratch identity the binder returns and hands
+// it back on every replacement, a replacement whose identity differs (including
+// from a frozen "") is refused and publishes nothing, and admitted extras are
+// published unwrapped.
+func TestNativeScratchFrozenAtNew(t *testing.T) {
+	stubValidateSandbox(t)
+	for _, path := range []string{"Replace", "ReplaceConfiguration"} {
+		t.Run(path, func(t *testing.T) {
+			for _, tc := range []struct{ frozen, other string }{
+				{frozen: "scr:frozen:", other: ""},
+				{frozen: "", other: "scr:other:"},
+			} {
+				dir, root := canonicalDir(t)
+				binder := installStubBinder(t)
+				binder.key = tc.frozen
 				caller := &countingCaller{}
-				// New mounts no command tools, so the frozen scratch identity is none.
-				rt, err := newNative(t, dir, policy, caller, nil)
+				rt, err := newNative(t, dir, seatbeltPolicy, caller, nil)
 				if err != nil {
 					t.Fatalf("New: %v", err)
 				}
-				err = replacePaths[path](rt, caller, nativeExecSet(t, dir, policy, true))
-				if !errors.Is(err, ErrProfileIncompatible) || !strings.Contains(err.Error(), "scratch policy is frozen") {
-					t.Fatalf("%s with a scratch set = %v, want the frozen scratch policy to refuse it", path, err)
+				if binder.gotKey != "" || binder.gotRoot != root || binder.gotCfg.Runtime != agenttools.SandboxRuntimeSeatbelt {
+					t.Fatalf("New passed key %q, root %q, cfg %+v; want \"\", %q, seatbelt", binder.gotKey, binder.gotRoot, binder.gotCfg, root)
 				}
-				// The same set without scratch is admissible, so the refusal was
-				// the scratch change alone. It is published unwrapped.
-				plain := nativeExecSet(t, dir, policy, false)
-				if err := replacePaths[path](rt, caller, plain); err != nil {
-					t.Fatalf("%s with the plain native set: %v", path, err)
+				before := rt.EffectivePermissions()
+
+				binder.key = tc.other
+				err = replacePaths[path](rt, caller, nil)
+				if !errors.Is(err, ErrProfileIncompatible) || !strings.Contains(err.Error(), "scratch policy is frozen") {
+					t.Fatalf("frozen %q, %s returning %q = %v, want the frozen scratch policy to refuse it", tc.frozen, path, tc.other, err)
+				}
+				if binder.gotKey != tc.frozen {
+					t.Fatalf("%s passed scratch key %q, want the frozen %q", path, binder.gotKey, tc.frozen)
+				}
+				if after := rt.EffectivePermissions(); !reflect.DeepEqual(after, before) {
+					t.Fatalf("a refused %s published %+v, want %+v", path, after, before)
+				}
+
+				binder.key = tc.frozen
+				opaque := &floorStub{name: "lookup", effect: agent.Effect{Class: agent.Exec, Approval: agent.ApprovalNever}}
+				if err := replacePaths[path](rt, caller, []agent.Tool{opaque}); err != nil {
+					t.Fatalf("frozen %q, %s returning it: %v", tc.frozen, path, err)
 				}
 				rt.mu.Lock()
-				published := rt.snap.tools[len(rt.fileTools):]
+				published := rt.snap.tools[len(rt.fileTools)]
 				rt.mu.Unlock()
-				if !slices.Equal(published, plain) {
-					t.Fatalf("published %v, want the caller's own tools %v unwrapped", published, plain)
+				if published != agent.Tool(opaque) {
+					t.Fatalf("published %T, want the admitted tool itself, unwrapped", published)
 				}
-			})
-		}
-
-		// A session frozen with scratch refuses command tools without it.
-		dir := t.TempDir()
-		caller := &countingCaller{}
-		rt, err := newNative(t, dir, policy, caller, nativeExecSet(t, dir, policy, true))
-		if err != nil {
-			t.Fatalf("New with a scratch set: %v", err)
-		}
-		if err := rt.Replace("", nativeExecSet(t, dir, policy, false)); !errors.Is(err, ErrProfileIncompatible) {
-			t.Fatalf("Replace dropping scratch = %v, want ErrProfileIncompatible", err)
-		}
-		if err := rt.Replace("", nil); err != nil {
-			t.Fatalf("Replace unmounting every command tool: %v", err)
-		}
-	})
+			}
+		})
+	}
 }
 
 func TestNativeVerifierBinding(t *testing.T) {
@@ -356,9 +438,19 @@ func TestNativeVerifierBinding(t *testing.T) {
 		if err != nil {
 			t.Fatalf("New: %v", err)
 		}
+		rt.mu.Lock()
+		snap := rt.snap
+		rt.mu.Unlock()
+		before := rt.EffectivePermissions()
 		mismatched := agent.New(caller, agent.ContextManager{}, agent.WithVerifier(mustSlot(t, otherRoot, seatbeltPolicy)))
 		if err := rt.ReplaceConfiguration(context.Background(), Configuration{Orchestrator: mismatched}); !errors.Is(err, ErrProfileIncompatible) {
 			t.Fatalf("ReplaceConfiguration with a mismatched slot = %v, want ErrProfileIncompatible", err)
+		}
+		rt.mu.Lock()
+		unchanged := rt.snap == snap
+		rt.mu.Unlock()
+		if after := rt.EffectivePermissions(); !unchanged || !reflect.DeepEqual(after, before) {
+			t.Fatalf("a refused ReplaceConfiguration published (snapshot unchanged %v): %+v, want %+v", unchanged, after, before)
 		}
 		bound := agent.New(caller, agent.ContextManager{}, agent.WithVerifier(mustSlot(t, dir, seatbeltPolicy)))
 		if err := rt.ReplaceConfiguration(context.Background(), Configuration{Orchestrator: bound}); err != nil {
@@ -493,6 +585,14 @@ func TestVerificationState(t *testing.T) {
 
 func TestEffectivePermissionsScratch(t *testing.T) {
 	dir := t.TempDir()
+	scratchOn := agenttools.ExecToolsOptions{Scratch: agenttools.ScratchConfig{Enabled: true}}
+	withScratch := func() []agent.Tool { return hostExecSet(t, dir, scratchOn) }
+	without := func(set []agent.Tool, name string) []agent.Tool {
+		return slices.DeleteFunc(set, func(tool agent.Tool) bool { return tool.Spec().Name == name })
+	}
+	named := func(set []agent.Tool, name string) agent.Tool {
+		return set[slices.IndexFunc(set, func(tool agent.Tool) bool { return tool.Spec().Name == name })]
+	}
 	tests := []struct {
 		name  string
 		tools []agent.Tool
@@ -500,9 +600,14 @@ func TestEffectivePermissionsScratch(t *testing.T) {
 	}{
 		{"no command tools", nil, false},
 		{"command tools without scratch", hostExecSet(t, dir, agenttools.ExecToolsOptions{}), false},
-		{"command tools with scratch", hostExecSet(t, dir, agenttools.ExecToolsOptions{Scratch: agenttools.ScratchConfig{Enabled: true}}), true},
-		// Only the library's own scratch_changes says scratch is on.
-		{"opaque tool named scratch_changes", []agent.Tool{&floorStub{name: "scratch_changes", effect: agent.Effect{Class: agent.Read}}}, false},
+		{"command tools with scratch", withScratch(), true},
+		// The command tools decide, not the query tool: scratch_changes may be
+		// left out, and one from another set says nothing about these commands.
+		{"scratch command tools without scratch_changes", without(withScratch(), "scratch_changes"), true},
+		{"plain command tools beside another set's scratch_changes", append(hostExecSet(t, dir, agenttools.ExecToolsOptions{}), named(withScratch(), "scratch_changes")), false},
+		// One command tool on the live workspace makes it false.
+		{"scratch run_command beside a plain start_command", []agent.Tool{named(withScratch(), "run_command"), named(hostExecSet(t, dir, agenttools.ExecToolsOptions{}), "start_command")}, false},
+		{"opaque tool named run_command", []agent.Tool{&floorStub{name: "run_command", effect: agent.Effect{Class: agent.Exec}}}, false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -542,15 +647,21 @@ func TestNativeConstructionFailsClosed(t *testing.T) {
 	}
 }
 
-// TestNativeBindsCanonicalRootSpelling needs a case-insensitive filesystem: a
-// differently cased root resolves to the same directory, but native tools and
-// the verifier slot carry the workspace's own spelling, so the session must
-// bind to that.
-func TestNativeBindsCanonicalRootSpelling(t *testing.T) {
+// TestSeatbeltSessionBindsCanonicalRootSpelling needs a case-insensitive
+// filesystem: a differently cased root resolves to the same directory, but
+// native tools and the verifier slot carry the workspace's own spelling, so the
+// session must bind to that. The darwin Seatbelt CI job selects it with
+// GO_LLM_REQUIRE_SEATBELT=1, where a case-sensitive filesystem fails instead of
+// skipping. On a case-sensitive filesystem (Linux) both spellings always agree,
+// so the rule cannot be observed there.
+func TestSeatbeltSessionBindsCanonicalRootSpelling(t *testing.T) {
 	stubValidateSandbox(t)
 	dir, canonical := canonicalDir(t)
 	alias := strings.ToUpper(canonical)
 	if _, err := os.Stat(alias); alias == canonical || err != nil {
+		if os.Getenv("GO_LLM_REQUIRE_SEATBELT") == "1" {
+			t.Fatalf("GO_LLM_REQUIRE_SEATBELT=1 but %q does not resolve: the filesystem is case-sensitive", alias)
+		}
 		t.Skip("needs a case-insensitive filesystem")
 	}
 	rt, err := newNative(t, alias, seatbeltPolicy, &countingCaller{}, nil, agent.WithVerifier(mustSlot(t, dir, seatbeltPolicy)))
