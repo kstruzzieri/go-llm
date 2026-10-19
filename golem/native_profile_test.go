@@ -344,8 +344,11 @@ func TestNativeScratchFrozenAtNew(t *testing.T) {
 				}
 				before := rt.EffectivePermissions()
 
+				// A non-nil refused set: publishing it would change the
+				// snapshot, so the check below can fail.
 				binder.key = tc.other
-				err = replacePaths[path](rt, caller, nil)
+				refused := &floorStub{name: "refused", effect: agent.Effect{Class: agent.Exec, Approval: agent.ApprovalNever}}
+				err = replacePaths[path](rt, caller, []agent.Tool{refused})
 				if !errors.Is(err, ErrProfileIncompatible) || !strings.Contains(err.Error(), "scratch policy is frozen") {
 					t.Fatalf("frozen %q, %s returning %q = %v, want the frozen scratch policy to refuse it", tc.frozen, path, tc.other, err)
 				}

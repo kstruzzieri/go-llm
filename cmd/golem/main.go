@@ -1584,7 +1584,9 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		mgr, et, eerr := buildExecMount(root, sandbox, execOpts)
 		if eerr != nil {
 			if hooks.closed != nil {
-				hooks.closed("background") // the manager existed and was reaped
+				// buildExecMount already shut down any manager it built; none
+				// exists when the backend itself could not be constructed.
+				hooks.closed("background")
 			}
 			return eerr
 		}
@@ -1761,6 +1763,14 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	// runner, so a native runtime can accept only nil or this slot. One-shot
 	// carries none. The interface is assigned only from a non-nil pointer so
 	// a typed nil never reaches the factory.
+	//
+	// An unarmed slot verifies nothing, but it is not byte-identical to a nil
+	// verifier: agent.verifyBatch still runs its post-Verify ctx.Err() check.
+	// That is reachable only once writes are mounted with the slot unarmed (a
+	// startup -allow-write, or a later /allow-write, that found no
+	// .golem.json): a cancellation landing during a write batch then surfaces
+	// from verifyBatch instead of from the next model call. Both end the run
+	// as canceled.
 	var orchVerifier agent.Verifier
 	var verifySlot *agenttools.VerifierSlot
 	if isREPLMode(f) || f.allowWrite {

@@ -74,7 +74,8 @@ type replSession struct {
 	// bound to the session root and sandbox policy; the orchestrator verifies
 	// through it. Every REPL session has one (armed or disabled at startup
 	// under -allow-write, absent until /allow-write otherwise). nil outside
-	// the REPL and in narrow tests: every method is nil-safe.
+	// the REPL and in narrow tests: every method is nil-safe. An unarmed slot
+	// still lets verifyBatch run its post-Verify ctx.Err() check (see run()).
 	verifier *tools.VerifierSlot
 	// sandbox is the session's frozen sandbox policy (resolveSandbox): what
 	// /allow-write builds the verifier under and /allow-exec builds its

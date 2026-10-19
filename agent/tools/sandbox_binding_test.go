@@ -325,17 +325,19 @@ func TestCheckSandboxBindingsRejectsInvalidPolicy(t *testing.T) {
 }
 
 func TestValidateSandboxUnavailable(t *testing.T) {
-	// The backend for the other OS: bwrap off Linux fails on darwin, seatbelt
-	// off darwin fails on Linux and Windows.
-	other := SandboxRuntimeSeatbelt
-	if runtime.GOOS == "darwin" {
-		other = SandboxRuntimeBwrap
-	}
-	for _, cfg := range []SandboxConfig{
-		{Runtime: other},
+	// Every backend for another OS: seatbelt off darwin, bwrap off Linux, so
+	// Windows (the CI windows job runs this) refuses both (spec section 10).
+	cfgs := []SandboxConfig{
 		{Runtime: "container"},
 		{AllowNetwork: true}, // host accepts no constraints
-	} {
+	}
+	if runtime.GOOS != "darwin" {
+		cfgs = append(cfgs, SandboxConfig{Runtime: SandboxRuntimeSeatbelt})
+	}
+	if runtime.GOOS != "linux" {
+		cfgs = append(cfgs, SandboxConfig{Runtime: SandboxRuntimeBwrap})
+	}
+	for _, cfg := range cfgs {
 		if err := ValidateSandbox(cfg, t.TempDir()); !errors.Is(err, ErrSandboxPolicy) {
 			t.Errorf("ValidateSandbox(%+v) = %v, want ErrSandboxPolicy", cfg, err)
 		}

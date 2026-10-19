@@ -606,11 +606,12 @@ func cancelScratchRun(t *testing.T, sess *replSession) {
 // the native session's verifier and logs what happened, for the toolchain
 // record: the host version, the native outcome and any dyld text. A tool
 // failing under the sandbox is a finding to record, never a test failure; the
-// test fails only when no tool could be probed.
+// test fails only when no tool's command launched (status passed or failed;
+// a status: error spawn refusal launched nothing).
 func TestNativeWiringToolchainMatrix(t *testing.T) {
 	policy := nativePolicyForTest(t, canonicalDir(t, t.TempDir()))
 	sess := newNativeSession(t, policy)
-	probed := 0
+	launched := 0
 	for _, tc := range []struct{ argv, version []string }{
 		{[]string{"go", "version"}, []string{"version"}},
 		{[]string{"python3", "-c", "1"}, []string{"--version"}},
@@ -625,7 +626,10 @@ func TestNativeWiringToolchainMatrix(t *testing.T) {
 			t.Logf("%s: not on PATH; not probed", tc.argv[0])
 			continue
 		}
-		version, _ := exec.Command(path, tc.version...).CombinedOutput()
+		// Bounded: a version-manager shim can hang on first use.
+		vctx, vcancel := context.WithTimeout(context.Background(), 30*time.Second)
+		version, _ := exec.CommandContext(vctx, path, tc.version...).CombinedOutput()
+		vcancel()
 		writeVerifyArgv(t, sess.root, tc.argv)
 		cmd, notice, err := buildVerifier(sess.root, policy)
 		if err != nil {
@@ -642,7 +646,6 @@ func TestNativeWiringToolchainMatrix(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: Verify: %v", tc.argv[0], err)
 		}
-		probed++
 		status := "unknown"
 		var dyld []string
 		for _, line := range strings.Split(obs, "\n") {
@@ -653,10 +656,13 @@ func TestNativeWiringToolchainMatrix(t *testing.T) {
 				dyld = append(dyld, line)
 			}
 		}
+		if status == "passed" || status == "failed" {
+			launched++
+		}
 		t.Logf("%s: path=%s host=%q %s=%s dyld=%q\n%s", strings.Join(tc.argv, " "), path,
 			strings.TrimSpace(string(version)), policy.Runtime, status, dyld, obs)
 	}
-	if probed == 0 {
-		t.Fatal("no toolchain tool could be probed")
+	if launched == 0 {
+		t.Fatal("no toolchain tool's command launched under the native backend")
 	}
 }

@@ -302,7 +302,7 @@ func verifyOutputBody(res VerifyResult) (string, bool) {
 // runner reports its first failure first, and that is the actionable one. The
 // cut lands on a rune boundary so the model never reads a split rune.
 func capVerifyOutput(s string, limit int) (string, bool) {
-	s = strings.ToValidUTF8(s, "�")
+	s = strings.ToValidUTF8(s, "\uFFFD")
 	if len(s) <= limit {
 		return s, false
 	}

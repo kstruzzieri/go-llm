@@ -109,9 +109,11 @@ type EffectivePermissions struct {
 }
 
 // EffectivePermissions returns a deep copy of the runtime's current permission
-// snapshot. It reads state published at admission, so it calls no tool method
-// and performs no I/O; Replace and ReplaceConfiguration publish the tools and
-// this projection together. Like ModelOptions, it works after Close.
+// snapshot. Tools and command policy are the state published at admission
+// (Replace and ReplaceConfiguration publish the tools and this projection
+// together); Verification is the installed VerifierSlot's live state, which
+// /allow-write can change without a replacement. It calls no tool method and
+// performs no I/O. Like ModelOptions, it works after Close.
 func (r *Runtime) EffectivePermissions() EffectivePermissions {
 	r.mu.Lock()
 	defer r.mu.Unlock()

@@ -198,8 +198,9 @@ func renderPermissions(ep golemruntime.EffectivePermissions) string {
 	if ep.Command.Warning != "" {
 		line += " (" + ep.Command.Warning + ")"
 	}
-	// Limits are nil for Inspect and host, never for a native backend.
-	if len(ep.Command.Limits) > 0 {
+	// Keyed on the runtime, not on Limits: a native projection that ever
+	// came without limits must still show its network policy.
+	if rt := agenttools.SandboxRuntime(ep.Command.Runtime); rt == agenttools.SandboxRuntimeSeatbelt || rt == agenttools.SandboxRuntimeBwrap {
 		line += " network=" + ep.Command.Network + " limits=" + strings.Join(ep.Command.Limits, "; ")
 	}
 	scratch := "off"

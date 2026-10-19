@@ -377,6 +377,9 @@ func TestRenderPermissionsFormat(t *testing.T) {
 			Command: golemruntime.CommandPermissions{Runtime: "bwrap", Network: "ip-denied", Limits: []string{"L1", "L2"}},
 			Scratch: true, Verification: golemruntime.Verification{State: "disabled", Target: "/r"}},
 			"permissions: profile=trusted tools=read_file,list commands=bwrap network=ip-denied limits=L1; L2 scratch=on verification=disabled"},
+		{"native without limits", golemruntime.EffectivePermissions{Profile: golemruntime.ProfileTrusted, Tools: read,
+			Command: golemruntime.CommandPermissions{Runtime: "seatbelt", Network: "allowed"}, Verification: golemruntime.Verification{State: "none"}},
+			"permissions: profile=trusted tools=read_file,list commands=seatbelt network=allowed limits= scratch=off verification=none"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := renderPermissions(tc.ep); got != tc.want {
