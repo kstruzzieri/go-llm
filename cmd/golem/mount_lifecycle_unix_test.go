@@ -59,7 +59,7 @@ func TestCloseLateMountsShutsDownJobs(t *testing.T) {
 func TestCloseLateMountsLeavesStartupManagerAlone(t *testing.T) {
 	requireBinary(t, "true")
 	root := t.TempDir()
-	mgr, execTools, err := buildExecMount(root, agenttools.ExecToolsOptions{})
+	mgr, execTools, err := buildExecMount(root, agenttools.SandboxConfig{}, agenttools.ExecToolsOptions{})
 	if err != nil {
 		t.Fatalf("exec set: %v", err)
 	}

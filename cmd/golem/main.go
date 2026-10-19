@@ -112,9 +112,16 @@ type flags struct {
 
 	profile    string // -profile: inspect|preview|trusted (#387)
 	profileSet bool   // -profile was passed (distinguishes an explicit empty value)
+	// -sandbox host|seatbelt|bwrap and -sandbox-network denied|allowed (#576);
+	// the Set fields distinguish an explicit value (an explicit -sandbox host
+	// still selects Trusted). resolveSandbox turns them into the one policy.
+	sandbox           string
+	sandboxSet        bool
+	sandboxNetwork    string
+	sandboxNetworkSet bool
 	// suppressAutoTools is resolved, not parsed: true under the Inspect
-	// profile, it keeps automatic retrieval and the model memory tools from
-	// initializing (applyProfileGates).
+	// profile and in a native sandbox session, it keeps automatic retrieval
+	// and the model memory tools from initializing (applyProfileGates).
 	suppressAutoTools bool
 }
 
@@ -209,6 +216,8 @@ func parseFlags(args []string) (flags, error) {
 	fs.BoolVar(&f.approvePlanLock, "approve-plan-lock", false, "planning mode: print the plan preview and approve the lock without prompting (non-interactive -goal)")
 	fs.StringVar(&f.outputFormat, "output-format", "text", "one-shot mode: stdout format — text (the final answer), json (one golem.result.v1 record), or stream-json (one protocol-v1 event per line, then the same record); requires -p")
 	fs.StringVar(&f.profile, "profile", "", "permission profile: inspect (default, workspace reads only) or trusted; preview is reserved")
+	fs.StringVar(&f.sandbox, "sandbox", "", "command sandbox for Trusted sessions: host (default), seatbelt (macOS) or bwrap (Linux); fails closed when unavailable; does not confine /consult, git context, MCP servers or the /edit editor")
+	fs.StringVar(&f.sandboxNetwork, "sandbox-network", "", "network policy for -sandbox seatbelt|bwrap: denied (default) or allowed")
 	fs.Var(&f.allowTools, "allow-tool", "one-shot mode: mount and non-interactively approve one exact built-in gated tool by name (repeatable; write_file, edit_file, run_command, start_command, stop_command); creates no session grants; MCP tools and submit_plan are never eligible; requires -p")
 	// main() prefixes "golem: " when it prints the error.
 	if err := parseQuietly(fs, args, nil); err != nil {
@@ -247,6 +256,10 @@ func parseFlags(args []string) (flags, error) {
 			f.wfReasonSet = true
 		case "profile":
 			f.profileSet = true
+		case "sandbox":
+			f.sandboxSet = true
+		case "sandbox-network":
+			f.sandboxNetworkSet = true
 		}
 	})
 	return f, nil
@@ -279,6 +292,9 @@ func validateFlags(f flags) error {
 	// First, so a profile error is never shadowed by a later mode check and
 	// always runs before one-shot normalization drops a conflicting flag.
 	if err := validateProfile(f); err != nil {
+		return err
+	}
+	if err := validateSandboxFlags(f); err != nil {
 		return err
 	}
 	if err := agentflow.ValidateEnvNames(f.agentflowEnv); err != nil {
@@ -928,7 +944,10 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	oneShotWarns = append(taskWarns, oneShotWarns...)
 	// #387: resolved after normalization, so a dropped flag selects nothing.
 	profile, profileNotice := resolveProfile(f)
-	f = applyProfileGates(f, profile)
+	// #576: the one frozen policy every exec mount, verifier, slot and the
+	// runtime receive; validateFlags already rejected bad values.
+	sandbox := resolveSandbox(f)
+	f = applyProfileGates(f, profile, sandbox)
 	retrievalEnabled := !f.suppressAutoTools && !f.noRag
 
 	root, err := filepath.Abs(f.root)
@@ -937,6 +956,14 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	}
 	if root, err = filepath.EvalSymlinks(root); err != nil {
 		return maybeUsageError(fmt.Errorf("resolve root: %w", err), headlessExitApplies(f))
+	}
+	// #576: a native backend this host cannot honor fails here, before any
+	// config, store, session, MCP connection or provider is touched, and never
+	// falls back to host.
+	if nativeSandbox(sandbox) {
+		if err := agenttools.ValidateSandbox(sandbox, root); err != nil {
+			return fmt.Errorf("golem: sandbox: %w", err)
+		}
 	}
 	mcpServers, merr = withMCPPolicy(root, mcpServers, len(f.mcpStdio), f.mcpEnv)
 	if merr != nil {
@@ -1467,9 +1494,6 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	writeToolCount := 0
 
 	var journal *checkpointJournal
-	// #576: the session sandbox policy every verifier is built under and the
-	// slot is bound to. Host until -sandbox threads one.
-	var sandbox agenttools.SandboxConfig
 	var verifyCmd *agenttools.VerifyCommand
 	var verifyNotice string
 	if buildWrite {
@@ -1523,7 +1547,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		// verify_command is not an -allow-tool name.
 		if f.allowWrite {
 			var verr error
-			if verifyCmd, verifyNotice, verr = buildVerifier(root, sandbox); verr != nil {
+			if verifyCmd, verifyNotice, verr = buildVerifierFn(root, sandbox); verr != nil {
 				return fmt.Errorf("golem: verifier: %w", verr)
 			}
 			if verifyNotice != "" {
@@ -1555,7 +1579,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		scratchLine = line
 		// #372: the same seam /allow-exec uses; a build failure has already
 		// shut the unpublished manager down.
-		mgr, et, eerr := buildExecMount(root, execOpts)
+		mgr, et, eerr := buildExecMount(root, sandbox, execOpts)
 		if eerr != nil {
 			if hooks.closed != nil {
 				hooks.closed("background") // the manager existed and was reaped
@@ -1767,6 +1791,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		Root:     root,
 		System:   baseSystem,
 		Profile:  profile,
+		Sandbox:  sandbox,
 		Tools:    tools[readToolCount:],
 		MaxSteps: f.maxSteps,
 		Budget:   budget,

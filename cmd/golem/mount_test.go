@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"runtime/debug"
 	"slices"
@@ -229,9 +230,9 @@ func countLateMountConstructions(t *testing.T) (stores, execs *int) {
 		*stores++
 		return origStore(ctx, getenv, root)
 	}
-	buildExecMountFn = func(root string, opts agenttools.ExecToolsOptions) (*agenttools.BackgroundManager, []agent.Tool, error) {
+	buildExecMountFn = func(root string, sandbox agenttools.SandboxConfig, opts agenttools.ExecToolsOptions) (*agenttools.BackgroundManager, []agent.Tool, error) {
 		*execs++
-		return origExec(root, opts)
+		return origExec(root, sandbox, opts)
 	}
 	t.Cleanup(func() { openCheckpointStoreFn, buildExecMountFn = origStore, origExec })
 	return stores, execs
@@ -819,7 +820,7 @@ func TestAllowWriteKeepsStartupScratchExecSet(t *testing.T) {
 	root := t.TempDir()
 	caller := &captureCaller{answer: "ok"}
 	opts, _ := scratchExecOptions(true, nil)
-	mgr, execTools, err := buildExecMount(root, opts)
+	mgr, execTools, err := buildExecMount(root, agenttools.SandboxConfig{}, opts)
 	if err != nil {
 		t.Fatalf("scratch exec set: %v", err)
 	}
@@ -1035,9 +1036,79 @@ func TestAllowWriteDisabledVerifierStillMounts(t *testing.T) {
 }
 
 func TestBuildExecMountFailsClosedOnBadRoot(t *testing.T) {
-	mgr, tools, err := buildExecMount(filepath.Join(t.TempDir(), "missing"), agenttools.ExecToolsOptions{})
+	mgr, tools, err := buildExecMount(filepath.Join(t.TempDir(), "missing"), agenttools.SandboxConfig{}, agenttools.ExecToolsOptions{})
 	if err == nil || mgr != nil || tools != nil {
 		t.Fatalf("buildExecMount on a missing root = %v, %v, %v; want nil, nil, error", mgr, tools, err)
+	}
+}
+
+// buildExecMount resolves the manager from the policy it is given (#576): a
+// backend this OS cannot provide fails closed with no manager, never a host
+// set.
+func TestBuildExecMountFailsClosedOnUnavailableBackend(t *testing.T) {
+	mgr, tools, err := buildExecMount(t.TempDir(), otherOSBackend(), agenttools.ExecToolsOptions{})
+	if err == nil || mgr != nil || tools != nil {
+		t.Fatalf("buildExecMount(%+v) = %v, %v, %v; want nil, nil, error", otherOSBackend(), mgr, tools, err)
+	}
+}
+
+// /allow-exec builds its manager under the session's frozen policy, never a
+// fresh host one (#576).
+func TestLateExecUsesSessionPolicy(t *testing.T) {
+	root := t.TempDir()
+	sess := newMountSession(t, &captureCaller{answer: "ok"}, root)
+	sess.sandbox = agenttools.SandboxConfig{Runtime: agenttools.SandboxRuntimeBwrap, AllowNetwork: true}
+	orig := buildExecMountFn
+	t.Cleanup(func() { buildExecMountFn = orig })
+	var got []agenttools.SandboxConfig
+	buildExecMountFn = func(_ string, sandbox agenttools.SandboxConfig, _ agenttools.ExecToolsOptions) (*agenttools.BackgroundManager, []agent.Tool, error) {
+		got = append(got, sandbox)
+		return nil, nil, errors.New("stub: no backend")
+	}
+	var out strings.Builder
+	_, _ = dispatchSlash(context.Background(), &out, sess, "/allow-exec")
+	want := []agenttools.SandboxConfig{{Runtime: agenttools.SandboxRuntimeBwrap, AllowNetwork: true}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("buildExecMountFn sandbox = %+v, want %+v", got, want)
+	}
+	if out.String() != "exec not enabled: stub: no backend\n" || sess.allowExec {
+		t.Fatalf("out = %q allowExec = %t", out.String(), sess.allowExec)
+	}
+}
+
+// A verifier the slot refuses after the writes are published is never
+// silently dropped (#576): the slot is disabled with a visible notice, and
+// the permissions line reads disabled, not absent.
+func TestAllowWriteLateSetFailureDisablesVisibly(t *testing.T) {
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	writeGolemJSON(t, root, `{"verify":{"argv":["`+self+`","__golem_exec_helper__","echo","ok"]}}`)
+	sess := newMountSession(t, &captureCaller{answer: "ok"}, root)
+	var notices []string
+	sess.notice = func(line string) { notices = append(notices, line) }
+	orig := setVerifierFn
+	t.Cleanup(func() { setVerifierFn = orig })
+	calls := 0
+	setVerifierFn = func(*agenttools.VerifierSlot, *agenttools.VerifyCommand) error {
+		calls++
+		return errors.New("stub refusal")
+	}
+	var out strings.Builder
+	_, _ = dispatchSlash(context.Background(), &out, sess, "/allow-write")
+	if calls != 1 || !sess.allowWrite {
+		t.Fatalf("setVerifierFn calls = %d, allowWrite = %t; want 1, true", calls, sess.allowWrite)
+	}
+	if !strings.Contains(out.String(), "verification disabled: stub refusal\n") {
+		t.Fatalf("out = %q, want the disabled notice", out.String())
+	}
+	if got := slotState(sess); got != "disabled" {
+		t.Fatalf("slot state = %q, want disabled", got)
+	}
+	if len(notices) != 1 || !strings.HasSuffix(notices[0], " verification=disabled") {
+		t.Fatalf("permissions notices = %q, want one ending verification=disabled", notices)
 	}
 }
 

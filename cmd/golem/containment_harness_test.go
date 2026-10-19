@@ -74,7 +74,7 @@ func newFixtureAt(t *testing.T, root string, opts fixtureOpts) *fixture {
 		t.Fatal(err)
 	}
 	f.tools, f.journal = append(f.tools, writeTools...), journal
-	mgr, exe, err := buildExecMount(f.Root, agenttools.ExecToolsOptions{})
+	mgr, exe, err := buildExecMount(f.Root, agenttools.SandboxConfig{}, agenttools.ExecToolsOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}

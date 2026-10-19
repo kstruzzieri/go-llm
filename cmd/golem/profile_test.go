@@ -2,15 +2,20 @@ package main
 
 import (
 	"errors"
+	"flag"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
 
+	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
 	golemruntime "github.com/kstruzzieri/go-llm/golem"
 	"github.com/kstruzzieri/go-llm/provider"
 )
@@ -34,6 +39,9 @@ var trustedSelectors = []struct {
 	{"-mcp-http", []string{"-mcp-http", "srv=https://mcp.invalid"}},
 	{"-progressive", []string{"-progressive"}},
 	{"-grounding", []string{"-grounding"}},
+	// An explicit -sandbox selects Trusted even when it names host (spec
+	// section 4: "a sandbox flag also selects Trusted").
+	{"-sandbox", []string{"-sandbox", "host"}},
 }
 
 // agentflowInvocations are the four AgentFlow modes, which keep their own tool
@@ -179,11 +187,273 @@ func TestResolveProfileIgnoresNormalizedFlags(t *testing.T) {
 // auto-index job, Trusted keeps today's default.
 func TestShouldStartAutoIndexSuppressed(t *testing.T) {
 	var f flags
-	if !shouldStartAutoIndex(applyProfileGates(f, golemruntime.ProfileTrusted)) {
+	if !shouldStartAutoIndex(applyProfileGates(f, golemruntime.ProfileTrusted, agenttools.SandboxConfig{})) {
 		t.Fatal("Trusted with default flags must keep the auto-index default")
 	}
-	if shouldStartAutoIndex(applyProfileGates(f, golemruntime.ProfileInspect)) {
+	if shouldStartAutoIndex(applyProfileGates(f, golemruntime.ProfileInspect, agenttools.SandboxConfig{})) {
 		t.Fatal("Inspect must not start the auto-index job")
+	}
+}
+
+// nativeUnadmitted are spec section 3.2's extension requests a native
+// session rejects at validation (#576): MCP, retrieval, model memory,
+// delegate and dispatch. The args reuse trustedSelectors' argv.
+var nativeUnadmitted = []string{"-mcp-stdio", "-mcp-http", "-rag-db", "-agent-memory", "-delegate", "-dispatch", "-progressive", "-grounding"}
+
+func TestValidateFlagsSandbox(t *testing.T) {
+	type row struct {
+		name string
+		args []string
+		want string // "" means valid
+	}
+	const (
+		badRuntime     = "golem: -sandbox must be host, seatbelt, or bwrap"
+		badNetwork     = "golem: -sandbox-network must be denied or allowed"
+		networkNative  = "golem: -sandbox-network requires -sandbox seatbelt or -sandbox bwrap"
+		sandboxAF      = "golem: -sandbox does not apply to AgentFlow modes (-plan, -goal, -agentflow-status, -agentflow-resume)"
+		sandboxNetAF   = "golem: -sandbox-network does not apply to AgentFlow modes (-plan, -goal, -agentflow-status, -agentflow-resume)"
+		inspectSandbox = "golem: -profile inspect conflicts with -sandbox"
+	)
+	rows := []row{
+		// Positive controls: validation never probes a backend, so every
+		// runtime name is valid on every OS.
+		{"host", []string{"-sandbox", "host"}, ""},
+		{"seatbelt", []string{"-sandbox", "seatbelt"}, ""},
+		{"bwrap", []string{"-sandbox", "bwrap"}, ""},
+		{"seatbelt network denied", []string{"-sandbox", "seatbelt", "-sandbox-network", "denied"}, ""},
+		{"bwrap network allowed", []string{"-sandbox", "bwrap", "-sandbox-network", "allowed"}, ""},
+		{"trusted seatbelt", []string{"-profile", "trusted", "-sandbox", "seatbelt"}, ""},
+		{"native writes and exec", []string{"-sandbox", "bwrap", "-allow-write", "-allow-exec", "-scratch"}, ""},
+		{"host keeps extensions", []string{"-sandbox", "host", "-delegate", "-rag-db", "x.db"}, ""},
+		// Sessionless and one-shot -agent-memory is dropped by normalization,
+		// so it requests nothing a native session must refuse.
+		{"native sessionless agent memory", []string{"-sandbox", "seatbelt", "-agent-memory", "-no-session"}, ""},
+		{"native one-shot agent memory", []string{"-sandbox", "seatbelt", "-p", "hi", "-agent-memory"}, ""},
+		{"native one-shot allowed tool", []string{"-sandbox", "bwrap", "-p", "hi", "-allow-tool", "run_command"}, ""},
+
+		{"bad runtime", []string{"-sandbox", "bogus"}, badRuntime},
+		{"runtime is case-sensitive", []string{"-sandbox", "Seatbelt"}, badRuntime},
+		{"empty runtime", []string{"-sandbox", ""}, badRuntime},
+		{"bad network", []string{"-sandbox", "seatbelt", "-sandbox-network", "open"}, badNetwork},
+		{"empty network", []string{"-sandbox", "bwrap", "-sandbox-network", ""}, badNetwork},
+		{"network without sandbox", []string{"-sandbox-network", "denied"}, networkNative},
+		{"network with host", []string{"-sandbox", "host", "-sandbox-network", "allowed"}, networkNative},
+		{"inspect seatbelt", []string{"-profile", "inspect", "-sandbox", "seatbelt"}, inspectSandbox},
+	}
+	for _, rt := range []string{"seatbelt", "bwrap"} {
+		for _, sel := range trustedSelectors {
+			if !slices.Contains(nativeUnadmitted, sel.flag) {
+				continue
+			}
+			rows = append(rows, row{rt + " with " + sel.flag,
+				append([]string{"-sandbox", rt}, sel.args...),
+				"golem: -sandbox " + rt + " does not admit " + sel.flag})
+		}
+	}
+	for _, af := range agentflowInvocations {
+		rows = append(rows,
+			row{"sandbox with " + af.name, append([]string{"-sandbox", "seatbelt"}, af.args...), sandboxAF},
+			row{"host sandbox with " + af.name, append([]string{"-sandbox", "host"}, af.args...), sandboxAF},
+			row{"sandbox network with " + af.name, append([]string{"-sandbox-network", "allowed"}, af.args...), sandboxNetAF})
+	}
+	for _, tc := range rows {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateArgs(t, tc.args...)
+			if tc.want == "" {
+				if err != nil {
+					t.Fatalf("validateFlags(%q) = %v, want nil", tc.args, err)
+				}
+				return
+			}
+			if err == nil || err.Error() != tc.want {
+				t.Fatalf("validateFlags(%q) = %v, want %q", tc.args, err, tc.want)
+			}
+		})
+	}
+	// Every native-unadmitted flag has a row: a selector rename cannot
+	// silently drop one from the table above.
+	for _, flag := range nativeUnadmitted {
+		if !slices.ContainsFunc(trustedSelectors, func(sel struct {
+			flag string
+			args []string
+		}) bool {
+			return sel.flag == flag
+		}) {
+			t.Fatalf("no trustedSelectors argv for %s", flag)
+		}
+	}
+}
+
+func TestResolveProfileSandboxSelectsTrusted(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		args   []string
+		notice string
+	}{
+		{"seatbelt", []string{"-sandbox", "seatbelt"}, "profile: trusted (selected by -sandbox)"},
+		{"bwrap with network", []string{"-sandbox", "bwrap", "-sandbox-network", "allowed"}, "profile: trusted (selected by -sandbox)"},
+		{"one-shot seatbelt", []string{"-p", "hi", "-sandbox", "seatbelt"}, "profile: trusted (selected by -sandbox)"},
+		{"explicit trusted", []string{"-profile", "trusted", "-sandbox", "seatbelt"}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, notice := resolveArgs(t, tc.args...)
+			if got != golemruntime.ProfileTrusted || notice != tc.notice {
+				t.Fatalf("resolveProfile(%q) = (%s, %q), want (trusted, %q)", tc.args, got, notice, tc.notice)
+			}
+		})
+	}
+}
+
+// resolveSandbox maps the flags to the one policy every construction path
+// receives. "" (the zero flags value tests use) and "host" are the host zero
+// value; network is denied unless explicitly allowed.
+func TestResolveSandbox(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		f    flags
+		want agenttools.SandboxConfig
+	}{
+		{"zero flags", flags{}, agenttools.SandboxConfig{}},
+		{"host", flags{sandbox: "host", sandboxSet: true}, agenttools.SandboxConfig{}},
+		{"seatbelt", flags{sandbox: "seatbelt", sandboxSet: true}, agenttools.SandboxConfig{Runtime: agenttools.SandboxRuntimeSeatbelt}},
+		{"seatbelt denied", flags{sandbox: "seatbelt", sandboxSet: true, sandboxNetwork: "denied", sandboxNetworkSet: true},
+			agenttools.SandboxConfig{Runtime: agenttools.SandboxRuntimeSeatbelt}},
+		{"bwrap allowed", flags{sandbox: "bwrap", sandboxSet: true, sandboxNetwork: "allowed", sandboxNetworkSet: true},
+			agenttools.SandboxConfig{Runtime: agenttools.SandboxRuntimeBwrap, AllowNetwork: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := resolveSandbox(tc.f); !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("resolveSandbox = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+// A native session suppresses automatic retrieval and the model memory tools
+// like Inspect (spec section 4); host Trusted keeps today's defaults.
+func TestApplyProfileGatesNative(t *testing.T) {
+	trusted := golemruntime.ProfileTrusted
+	for _, tc := range []struct {
+		name     string
+		profile  golemruntime.Profile
+		policy   agenttools.SandboxConfig
+		suppress bool
+	}{
+		{"host zero value", trusted, agenttools.SandboxConfig{}, false},
+		{"explicit host", trusted, agenttools.SandboxConfig{Runtime: agenttools.SandboxRuntimeHost}, false},
+		{"seatbelt", trusted, agenttools.SandboxConfig{Runtime: agenttools.SandboxRuntimeSeatbelt}, true},
+		{"bwrap allowed", trusted, agenttools.SandboxConfig{Runtime: agenttools.SandboxRuntimeBwrap, AllowNetwork: true}, true},
+		{"inspect", golemruntime.ProfileInspect, agenttools.SandboxConfig{}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := applyProfileGates(flags{}, tc.profile, tc.policy)
+			if got.suppressAutoTools != tc.suppress {
+				t.Fatalf("suppressAutoTools = %t, want %t", got.suppressAutoTools, tc.suppress)
+			}
+			if shouldStartAutoIndex(got) == tc.suppress {
+				t.Fatalf("shouldStartAutoIndex = %t with suppressAutoTools %t", !tc.suppress, tc.suppress)
+			}
+		})
+	}
+}
+
+// The native fields render between the command runtime and scratch; Inspect's
+// restart guidance stays last. Inputs are literal projections, so the format
+// is pinned on every OS.
+func TestRenderPermissionsFormat(t *testing.T) {
+	read := []golemruntime.ToolPermission{{Name: "read_file"}, {Name: "list"}}
+	for _, tc := range []struct {
+		name string
+		ep   golemruntime.EffectivePermissions
+		want string
+	}{
+		{"inspect", golemruntime.EffectivePermissions{Profile: golemruntime.ProfileInspect, Tools: read,
+			Command: golemruntime.CommandPermissions{Runtime: "n/a", Network: "n/a"}, Verification: golemruntime.Verification{State: "none"}},
+			"permissions: profile=inspect tools=read_file,list commands=n/a scratch=off verification=none; restart with -profile trusted to enable retrieval, memory tools, writes or commands"},
+		{"host", golemruntime.EffectivePermissions{Profile: golemruntime.ProfileTrusted, Tools: read,
+			Command: golemruntime.CommandPermissions{Runtime: "host", Network: "unrestricted", Warning: "W"}, Verification: golemruntime.Verification{State: "armed", Target: "/r"}},
+			"permissions: profile=trusted tools=read_file,list commands=host (W) scratch=off verification=armed"},
+		{"native", golemruntime.EffectivePermissions{Profile: golemruntime.ProfileTrusted, Tools: read,
+			Command: golemruntime.CommandPermissions{Runtime: "bwrap", Network: "ip-denied", Limits: []string{"L1", "L2"}},
+			Scratch: true, Verification: golemruntime.Verification{State: "disabled", Target: "/r"}},
+			"permissions: profile=trusted tools=read_file,list commands=bwrap network=ip-denied limits=L1; L2 scratch=on verification=disabled"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := renderPermissions(tc.ep); got != tc.want {
+				t.Fatalf("renderPermissions =\n %q\nwant\n %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// -help states each flag's values and that -sandbox confines only the model's
+// commands, not host services (spec section 7).
+func TestParseFlags_SandboxHelp(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := os.Stderr
+	t.Cleanup(func() { os.Stderr = original })
+	os.Stderr = w
+	_, parseErr := parseFlags([]string{"-help"})
+	os.Stderr = original
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = r.Close() }()
+	help, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !errors.Is(parseErr, flag.ErrHelp) {
+		t.Fatalf("parse error = %v", parseErr)
+	}
+	// The flag package wraps nothing: each usage string is one line after
+	// its "  -name string" header.
+	for _, want := range []string{
+		"  -sandbox string\n    \tcommand sandbox for Trusted sessions: host (default), seatbelt (macOS) or bwrap (Linux); fails closed when unavailable; does not confine /consult, git context, MCP servers or the /edit editor\n",
+		"  -sandbox-network string\n    \tnetwork policy for -sandbox seatbelt|bwrap: denied (default) or allowed\n",
+	} {
+		if !strings.Contains(string(help), want) {
+			t.Fatalf("help lacks %q:\n%s", want, help)
+		}
+	}
+}
+
+// A backend this OS cannot provide fails run before any resource opens: no
+// checkpoint store (the startup -allow-write path would open one first), no
+// session, fingerprint or other data under XDG_DATA_HOME, and no host
+// fallback. Native rejects MCP at validation, so no MCP flag is needed to
+// prove no connection was made.
+func TestNativeProbeBeforeResources(t *testing.T) {
+	isolateRunEnv(t)
+	configPath, root := writeRunLifecycleConfig(t)
+	data := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", data)
+	backend, want := "bwrap", `tools: sandbox runtime "bwrap" requires Linux`
+	if runtime.GOOS == "linux" {
+		backend, want = "seatbelt", `tools: sandbox runtime "seatbelt" requires macOS`
+	}
+	stdin, stdout, stderr := runTestFiles(t)
+	opens, ready := 0, false
+	err := run([]string{"-config", configPath, "-root", root, "-no-probe", "-no-cap-probe",
+		"-no-project-context", "-allow-write", "-sandbox", backend}, stdin, stdout, stderr, runHooks{
+		afterCheckpointOpen: func(*checkpointStore) error { opens++; return nil },
+		afterSessionReady:   func(*replSession) error { ready = true; return nil },
+	})
+	if !errors.Is(err, agenttools.ErrSandboxPolicy) || !strings.Contains(err.Error(), want) {
+		t.Fatalf("run = %v, want ErrSandboxPolicy naming %q\nstderr:\n%s", err, want, readRunTestFile(t, stderr))
+	}
+	if opens != 0 || ready {
+		t.Fatalf("checkpoint store opens = %d, session ready = %t; want 0, false", opens, ready)
+	}
+	entries, rerr := os.ReadDir(data)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("XDG_DATA_HOME has %d entries (first %q), want none", len(entries), entries[0].Name())
 	}
 }
 
@@ -355,7 +625,7 @@ func TestStartupNoticeInspectNamesTrustedRestore(t *testing.T) {
 		t.Fatalf("run = %v\nstderr:\n%s", err, readRunTestFile(t, stderr))
 	}
 	lines := stderrLines(t, stderr)
-	want := "permissions: profile=inspect tools=read_file,search,glob,list commands=n/a; restart with -profile trusted to enable retrieval, memory tools, writes or commands"
+	want := "permissions: profile=inspect tools=read_file,search,glob,list commands=n/a scratch=off verification=none; restart with -profile trusted to enable retrieval, memory tools, writes or commands"
 	if !slices.Contains(lines, want) {
 		t.Fatalf("stderr lines = %q, want %q", lines, want)
 	}
@@ -389,7 +659,7 @@ func TestStartupNoticeTrustedHost(t *testing.T) {
 		lines := stderrLines(t, stderr)
 		for _, want := range []string{
 			"profile: trusted (selected by -allow-exec)",
-			"permissions: profile=trusted tools=read_file,search,glob,list,run_command,start_command,command_status,command_tail,stop_command " + host,
+			"permissions: profile=trusted tools=read_file,search,glob,list,run_command,start_command,command_status,command_tail,stop_command " + host + " scratch=off verification=absent",
 		} {
 			if !slices.Contains(lines, want) {
 				t.Errorf("stderr lines = %q, want %q", lines, want)
@@ -422,7 +692,8 @@ func TestStartupNoticeTrustedHost(t *testing.T) {
 			t.Fatalf("result record carries the notice: %s", out)
 		}
 		lines := stderrLines(t, stderr)
-		if want := "permissions: profile=trusted tools=read_file,search,glob,list " + host; !slices.Contains(lines, want) {
+		// One-shot carries no verifier slot, so verification is "none".
+		if want := "permissions: profile=trusted tools=read_file,search,glob,list " + host + " scratch=off verification=none"; !slices.Contains(lines, want) {
 			t.Fatalf("stderr lines = %q, want %q", lines, want)
 		}
 		for _, line := range lines {

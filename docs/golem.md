@@ -43,8 +43,8 @@ Choose the profile with `-profile inspect|trusted`:
 Every interactive or one-shot session (AgentFlow modes excepted) prints a startup line to stderr with the effective permissions, after any `profile: trusted (selected by ...)` line. For example, with no flags and then with `-allow-exec -no-rag -no-memory`; the Trusted tool list varies with the flags and also includes `retrieve`, `memory_search` and the other tools whose features are on:
 
 ```text
-permissions: profile=inspect tools=read_file,search,glob,list commands=n/a; restart with -profile trusted to enable retrieval, memory tools, writes or commands
-permissions: profile=trusted tools=read_file,search,glob,list,run_command,start_command,command_status,command_tail,stop_command commands=host (unsandboxed; runs with the host user's filesystem and network authority)
+permissions: profile=inspect tools=read_file,search,glob,list commands=n/a scratch=off verification=none; restart with -profile trusted to enable retrieval, memory tools, writes or commands
+permissions: profile=trusted tools=read_file,search,glob,list,run_command,start_command,command_status,command_tail,stop_command commands=host (unsandboxed; runs with the host user's filesystem and network authority) scratch=off verification=absent
 ```
 
 A successful `/allow-write` or `/allow-exec` prints the updated permissions to stderr. Repeated, refused or failed mounts print no additional permissions line.

@@ -526,3 +526,83 @@ func TestRunLateMountPermissionsNotice(t *testing.T) {
 		}
 	}
 }
+
+// A successful late mount prints the whole updated permissions line, scratch
+// and verification included (#576). Literal lines: the late write mount reads
+// absent without a .golem.json and armed with a valid one.
+func TestPermissionsNoticeAfterMount(t *testing.T) {
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	const host = " commands=host (unsandboxed; runs with the host user's filesystem and network authority) scratch=off verification="
+	const startup = "permissions: profile=trusted tools=read_file,search,glob,list" + host + "absent"
+	for _, tc := range []struct {
+		name, command, golemJSON, want string
+	}{
+		{"write", "/allow-write", "",
+			"permissions: profile=trusted tools=read_file,search,glob,list,write_file,edit_file" + host + "absent"},
+		{"write armed", "/allow-write", `{"verify":{"argv":["` + self + `","__golem_exec_helper__","echo","ok"]}}`,
+			"permissions: profile=trusted tools=read_file,search,glob,list,write_file,edit_file" + host + "armed"},
+		{"exec", "/allow-exec", "",
+			"permissions: profile=trusted tools=read_file,search,glob,list,run_command,start_command,command_status,command_tail,stop_command" + host + "absent"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			configPath, root := writeRunLifecycleConfig(t)
+			if tc.golemJSON != "" {
+				writeGolemJSON(t, root, tc.golemJSON)
+			}
+			stdin, stdout, stderr := stdinFileWith(t, tc.command+"\n")
+			err := run([]string{"-profile", "trusted", "-config", configPath, "-root", root,
+				"-no-probe", "-no-cap-probe", "-no-session", "-no-memory", "-no-rag",
+				"-no-project-context", "-no-auto-index"}, stdin, stdout, stderr, runHooks{
+				afterSessionReady: func(ready *replSession) error {
+					ready.stdinTerminal = true
+					return nil
+				},
+			})
+			if err != nil {
+				t.Fatalf("run: %v; stderr: %s", err, readRunTestFile(t, stderr))
+			}
+			var got []string
+			for _, line := range stderrLines(t, stderr) {
+				if strings.HasPrefix(line, "permissions:") {
+					got = append(got, line)
+				}
+			}
+			if want := []string{startup, tc.want}; !reflect.DeepEqual(got, want) {
+				t.Fatalf("permissions lines =\n %q\nwant\n %q", got, want)
+			}
+		})
+	}
+}
+
+// A sandbox-policy error from the startup verifier aborts startup before the
+// session is published (spec section 5): never a notice, never a session.
+func TestStartupVerifierPolicyErrorAbortsStartup(t *testing.T) {
+	configPath, root := writeRunLifecycleConfig(t)
+	orig := buildVerifierFn
+	t.Cleanup(func() { buildVerifierFn = orig })
+	calls := 0
+	buildVerifierFn = func(string, agenttools.SandboxConfig) (*agenttools.VerifyCommand, string, error) {
+		calls++
+		return nil, "", fmt.Errorf("stub backend: %w", agenttools.ErrSandboxPolicy)
+	}
+	stdin, stdout, stderr := runTestFiles(t)
+	ready := false
+	err := run([]string{"-config", configPath, "-root", root, "-no-probe", "-no-cap-probe", "-no-session",
+		"-no-memory", "-no-rag", "-no-project-context", "-no-auto-index", "-allow-write"}, stdin, stdout, stderr,
+		runHooks{afterSessionReady: func(*replSession) error { ready = true; return nil }})
+	if calls != 1 {
+		t.Fatalf("buildVerifierFn calls = %d, want 1", calls)
+	}
+	if !errors.Is(err, agenttools.ErrSandboxPolicy) || err.Error() != "golem: verifier: stub backend: tools: sandbox policy unavailable" {
+		t.Fatalf("run = %v, want the wrapped policy error", err)
+	}
+	if ready {
+		t.Fatal("startup published a session after a verifier policy error")
+	}
+	if strings.Contains(readRunTestFile(t, stderr), "permissions:") {
+		t.Fatalf("startup printed permissions after a verifier policy error:\n%s", readRunTestFile(t, stderr))
+	}
+}

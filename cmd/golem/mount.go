@@ -96,13 +96,15 @@ func (s *replSession) mount(at int, add []agent.Tool, in systemInputs) error {
 	return nil
 }
 
-// Seams for the late-mount handlers: tests count constructions through them to
-// prove a refused mount opens nothing (#387), and inject a verifier the slot
-// must refuse (#576). Production never reassigns them.
+// Seams for the mount paths: tests count constructions through them to prove
+// a refused mount opens nothing (#387), inject a verifier the slot must refuse
+// or a startup policy failure (#576), and a slot refusal after the writes
+// publish. Production never reassigns them.
 var (
 	buildExecMountFn      = buildExecMount
 	openCheckpointStoreFn = openCheckpointStore
 	buildVerifierFn       = buildVerifier
+	setVerifierFn         = (*agenttools.VerifierSlot).Set
 )
 
 // refuseLateMountOutsideTrusted prints the restart guidance and reports true
@@ -207,12 +209,17 @@ func handleAllowWrite(ctx context.Context, out io.Writer, sess *replSession, fie
 	}
 	sess.writeToolCount = len(writeTools)
 	sess.journal, sess.lateStore, sess.allowWrite = journal, store, true
-	// The command lands in the slot the REPL orchestrator was built with;
-	// Accepts above means Set cannot refuse it now.
+	// The command lands in the slot the REPL orchestrator was built with.
+	// Accepts above means Set should not refuse it now; if it ever does, the
+	// writes are already published, so the slot is disabled visibly rather
+	// than left looking absent.
+	if vwarn == "" {
+		if err := setVerifierFn(sess.verifier, verifier); err != nil {
+			vwarn = "verification disabled: " + err.Error()
+		}
+	}
 	if vwarn != "" {
 		sess.verifier.Disable(vwarn)
-	} else {
-		_ = sess.verifier.Set(verifier)
 	}
 	_, _ = fmt.Fprintln(out, "writes enabled (approval per change; /auto-edits, /undo, /checkpoints available)")
 	if sess.notice != nil {
@@ -290,7 +297,8 @@ func handleAllowExec(ctx context.Context, out io.Writer, sess *replSession, fiel
 		_, _ = fmt.Fprintln(out, "/allow-exec requires an interactive terminal; for scripted input, start with -allow-exec")
 		return
 	}
-	manager, execTools, err := buildExecMountFn(sess.root, agenttools.ExecToolsOptions{})
+	// The session's frozen policy, the one startup used (#576).
+	manager, execTools, err := buildExecMountFn(sess.root, sess.sandbox, agenttools.ExecToolsOptions{})
 	if err != nil {
 		_, _ = fmt.Fprintf(out, "exec not enabled: %v\n", err)
 		return
