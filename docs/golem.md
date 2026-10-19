@@ -29,18 +29,18 @@ A profile fixes the authority Golem grants the model. There is no in-session pro
 | `write_file`, `edit_file`, post-write verification | Refused | `-allow-write` or `/allow-write`, each write approved | reserved |
 | `run_command` and background command tools | Refused | `-allow-exec` or `/allow-exec`, each command approved | reserved |
 | MCP, `-delegate`, `-dispatch`, `-rag-db`, extension tools | Refused | Existing flags, with the approval floor described in [least privilege](least-privilege.md#runtime-profiles-387) | reserved |
-| Command runtime | none | the host: no sandbox, host filesystem and network authority | reserved |
+| Command runtime | none | the host by default: no sandbox, host filesystem and network authority; `-sandbox seatbelt` or `-sandbox bwrap` confines commands and post-write verification (see [Native command sandbox](#native-command-sandbox--sandbox)) | reserved |
 
 Choose the profile with `-profile inspect|trusted`:
 
 - **Explicit profile wins.** `-profile inspect` with any Trusted opt-in below is a usage error, never silently promoted to Trusted. `-profile trusted` chooses a ceiling, not an approval: writes and commands still need `-allow-write` / `-allow-exec` (or the matching `/allow-*` command) and each call still needs approval.
-- **No profile means Inspect, unless a legacy opt-in survives.** These flags select Trusted when `-profile` is omitted: `-allow-write`, `-allow-exec`, `-scratch`, `-allow-tool`, `-rag-db`, `-agent-memory` (with a session), `-delegate`, `-dispatch`, `-mcp-stdio`, `-mcp-http`, `-progressive` and `-grounding`. Startup then prints `profile: trusted (selected by <flag>)` to stderr. `-feedback` selects nothing.
+- **No profile means Inspect, unless a legacy opt-in survives.** These flags select Trusted when `-profile` is omitted: `-allow-write`, `-allow-exec`, `-scratch`, `-allow-tool`, `-rag-db`, `-agent-memory` (with a session), `-delegate`, `-dispatch`, `-mcp-stdio`, `-mcp-http`, `-progressive`, `-grounding` and `-sandbox` (any value, `host` included). Startup then prints `profile: trusted (selected by <flag>)` to stderr. `-feedback` selects nothing.
 - **One-shot normalization runs first.** In `-p`, `-allow-write` and `-allow-exec` (and the `-scratch` that goes with them) are dropped with a warning and select nothing, so the run stays Inspect; a surviving `-allow-tool` selects Trusted. `-profile inspect -p ... -allow-write` is still a usage error.
 - **AgentFlow modes keep their own tool policy.** `-plan`, `-goal`, `-agentflow-status` and `-agentflow-resume` run as Trusted without a notice, and `-profile` is rejected alongside them.
 - **Preview is reserved.** `-profile preview` exits with `Preview unavailable: staged-workspace runtime requires #388/#389` and starts no session.
-- **`-sandbox` is not available yet.** Native Seatbelt and Bubblewrap command sandboxes for Trusted arrive with #576; until then Trusted commands run on the host.
+- **`-sandbox` chooses where Trusted commands run.** The default is the host. `-sandbox seatbelt` (macOS) or `-sandbox bwrap` (Linux) runs commands and post-write verification in a native sandbox, and `-sandbox-network denied|allowed` sets its network policy. `-profile inspect` with either flag is a usage error. See [Native command sandbox](#native-command-sandbox--sandbox).
 
-Every interactive or one-shot session (AgentFlow modes excepted) prints a startup line to stderr with the effective permissions, after any `profile: trusted (selected by ...)` line. For example, with no flags and then with `-allow-exec -no-rag -no-memory`; the Trusted tool list varies with the flags and also includes `retrieve`, `memory_search` and the other tools whose features are on:
+Every interactive or one-shot session (AgentFlow modes excepted) prints a startup line to stderr with the effective permissions, after any `profile: trusted (selected by ...)` line. For example, with no flags and then with `-allow-exec -no-rag -no-memory`; the Trusted tool list varies with the flags and also includes `retrieve`, `memory_search` and the other tools whose features are on. A native `-sandbox` adds `network=` and `limits=` after `commands=` ([example](#what-each-backend-enforces)):
 
 ```text
 permissions: profile=inspect tools=read_file,search,glob,list commands=n/a scratch=off verification=none; restart with -profile trusted to enable retrieval, memory tools, writes or commands
@@ -144,7 +144,8 @@ CLI cannot reconstruct exactly is reported rather than judged, so a verdict is
 never issued over a partial evidence set. Turns that never retrieved stay
 silent. Verifier tokens are reported separately from the run's own usage, and
 `-trace` persists the full per-claim report. Note this is unrelated to the
-`.golem.json` `verify` command, which checks the workspace after a write.
+`.golem.json` `verify` command, which checks the workspace after a write (see
+[post-write verification under -sandbox](#post-write-verification-under--sandbox)).
 
 Summaries are generated once per source and refreshed only when the source's
 content or vector space changes, so the model cost lands on the first indexing
@@ -175,7 +176,93 @@ golem -root /path/to/project -allow-write -allow-exec
 golem -root /path/to/project -profile trusted -allow-write -allow-exec
 ```
 
-Trusted commands run on the host with your filesystem and network authority; approval decides each call (the always-on argument invariants also refuse some), but nothing confines the process. Native sandbox runtimes arrive with #576.
+By default Trusted commands run on the host with your filesystem and network authority; approval decides each call (the always-on argument invariants also refuse some), but nothing confines the process. To confine commands and post-write verification, add a native `-sandbox`; see the next section.
+
+## Native command sandbox (-sandbox)
+
+A Trusted session runs its commands and its post-write verification on the host unless `-sandbox` picks a native backend. The choice is made once, at startup, and holds for the whole session:
+
+```bash
+# macOS: Seatbelt (sandbox-exec), network denied.
+golem -root /path/to/project -sandbox seatbelt -allow-write -allow-exec
+
+# Linux: Bubblewrap, network denied.
+golem -root /path/to/project -sandbox bwrap -allow-write -allow-exec
+
+# Networking permitted for commands and verification alike.
+golem -root /path/to/project -sandbox bwrap -sandbox-network allowed -allow-exec
+```
+
+- **`-sandbox host|seatbelt|bwrap`**, default `host`. Nothing is chosen automatically by OS. Any explicit `-sandbox`, `host` included, selects the Trusted [profile](#runtime-profiles) when `-profile` is omitted, and `-profile inspect` with `-sandbox` or `-sandbox-network` is a usage error.
+- **`-sandbox-network denied|allowed`**, default `denied`, requires `-sandbox seatbelt` or `-sandbox bwrap`. With `host`, explicit or default, it is a usage error: the host cannot enforce a network policy. The one setting covers commands and verification.
+- **It fails closed.** Startup checks the backend against the canonical workspace root before any config, store, session, MCP connection or provider is touched. A backend this host cannot run (a missing `sandbox-exec` or `bwrap`, a failed probe, a root the backend cannot bound) stops startup with an error. Golem never falls back to the host, and no later command or verification failure retries there.
+- **The policy is frozen.** Startup mounts, `/allow-write` and `/allow-exec` all use it. A late mount whose backend cannot honor the policy publishes nothing and leaves the session as it was. A mistake in `.golem.json` still costs only a `verification disabled: ...` notice, as on the host.
+- **A native session mounts less.** It mounts the workspace reads, writes, command and scratch tools only: no retrieval, auto-index, embedding route or model memory tools (`/remember`, `/forget` and `/memories` still work). `-rag-db`, `-agent-memory` (with a session), `-delegate`, `-dispatch`, `-mcp-stdio`, `-mcp-http`, `-progressive` and `-grounding` are usage errors with a native `-sandbox`; nothing is partially mounted.
+- **AgentFlow modes reject both flags.** `-plan`, `-goal`, `-agentflow-status` and `-agentflow-resume` keep their own host workflows.
+- **One-shot.** In `-p`, the command tools `-allow-tool` names run under the selected backend. One-shot still never reads `.golem.json`, installs post-write verification or enables scratch.
+
+### What each backend enforces
+
+After `commands=`, the `permissions:` line shows the runtime and, for a native backend, its `network=` value and `limits=`, projected from the policy the commands run under. Under a native backend, the approval previews for `run_command`, `start_command` and verification add a `sandbox:` line for the same policy.
+
+| Selection | `commands=` and `network=` | `limits=` |
+|---|---|---|
+| `host` (default) | `host (unsandboxed; runs with the host user's filesystem and network authority)`, with no `network=` | not shown |
+| `seatbelt` | `seatbelt network=denied` | `deny-default profile with reviewed system reads, allowed workspace and private temp; network operations denied; no memory/CPU quota` |
+| `seatbelt`, `-sandbox-network allowed` | `seatbelt network=allowed` | `deny-default profile with reviewed system reads, allowed workspace and private temp; networking explicitly allowed by policy; filesystem limits remain; no memory/CPU quota` |
+| `bwrap` | `bwrap network=ip-denied` | `IP network namespace isolated; pathname Unix sockets reachable inside the shared workspace remain a channel; reviewed read-only system mounts, workspace/snapshot and private temp; all capabilities dropped by the backend` |
+| `bwrap`, `-sandbox-network allowed` | `bwrap network=allowed` | `networking explicitly allowed by policy; filesystem limits remain; reviewed read-only system mounts, workspace/snapshot and private temp; all capabilities dropped by the backend` |
+
+For example, `-sandbox seatbelt -allow-exec` on macOS prints:
+
+```text
+permissions: profile=trusted tools=read_file,search,glob,list,run_command,start_command,command_status,command_tail,stop_command commands=seatbelt network=denied limits=deny-default profile with reviewed system reads, allowed workspace and private temp; network operations denied; no memory/CPU quota scratch=off verification=absent
+```
+
+Read the limits literally:
+
+- **The host is unsandboxed.** Host commands and a host verifier run with your filesystem and network authority. The sanitized environment is not confinement. The `permissions:` line says so even when verification is the only thing that runs commands.
+- **Seatbelt has no memory or CPU quota.** Nothing bounds how much memory or CPU a Seatbelt command uses.
+- **Bubblewrap's `ip-denied` isolates IP networking only.** A pathname Unix socket inside the shared workspace stays reachable from a sandboxed command, so a host process listening on one is a channel out of the sandbox.
+- **`allowed` is permission, not a connectivity guarantee.** It lifts the backend's network denial; whether anything is reachable depends on your network. The filesystem limits stay.
+
+### Post-write verification under -sandbox
+
+The workspace's `.golem.json` `verify` command (read only when writes are enabled) runs after each tool-call batch that wrote. Under `-sandbox`:
+
+- **It runs under the session's policy**, with the same runtime and network as the commands, also in a write-only session (`-allow-write` without `-allow-exec`).
+- **It always checks the canonical workspace.** The approval preview and the model-visible result both carry `target:  <root> (canonical workspace; unpromoted scratch artifacts are not checked)`. With `-scratch`, a command's snapshot and any artifact it has not promoted are not verified.
+- **A native verifier is not a read-only check.** It can write inside the workspace and its private temp, and its preview warns `writes inside the workspace and private temp are outside /undo`. A host verifier's preview warns that it is unsandboxed and that its writes are outside `/undo`. Prefer a read-only check either way.
+- **Grants are `verify:v2`.** The first run asks for approval; `a` grants it for the session under a key bound to the full normalized sandbox policy (runtime, network and any limits) and to the prepared command (canonical root, argv, resolved executable, cwd, environment values and timeout). A different runtime or network setting is a different key and prompts again. Verification and command grants never authorize each other. Grants from builds that keyed `verify:v1` do not carry over; grants live only in the session, so there is nothing to migrate.
+- **The key binds no script bytes.** After `a` on `bash tests.sh`, a later write to `tests.sh` still runs without a prompt. The [containment registry](security/containment.md) records this as row V1, uncontained, owned by [#420](https://github.com/kstruzzieri/go-llm/issues/420).
+- **`verification=` in the `permissions:` line** is `none`, `absent`, `disabled` or `armed`. It reads `armed` only after the command was built and accepted for this session's root and policy.
+
+### Scratch under -sandbox
+
+`-scratch` still runs each approved command in a disposable copy of the workspace. The scratch line in its approval preview names the runtime: `disposable cwd copy; host process remains unrestricted` on the host, and `disposable cwd copy under the seatbelt sandbox` (or `bwrap`) under a native backend, which enforces the write boundary. `promote_artifact` still asks for its own approval, and verification still checks the canonical workspace, not the copy.
+
+### Seatbelt diagnostics and compatibility
+
+Beyond path metadata and a few device nodes, Seatbelt's profile reads files only under reviewed system roots (`/System/Library`, `/System/Cryptexes/OS`, `/usr/bin`, `/usr/lib`, `/usr/libexec`, `/usr/share`, `/bin` and `/sbin`), the workspace, its private temp and the approved executable. A tool that loads libraries, an SDK, a toolchain or a cache from anywhere else, such as Homebrew, a version manager or a cache under your home directory, can fail in the dynamic loader or at startup. The stock `/usr/bin/git` `xcode-select` shim is a known failing case. A successful startup probe proves that Seatbelt applies, not that your toolchain loads.
+
+- **Failed runs carry a loader note.** A foreground Seatbelt command or verification that exits nonzero or fails to spawn (not one that timed out or was canceled) keeps its ordinary result and adds `note: native sandbox (seatbelt) may deny loader, SDK or cache access outside its allowed roots; this is not a passing check`. Golem does not name a denied path the OS did not report; any loader output is in the bounded stderr.
+- **Cleanup failures are reported.** When Seatbelt's private temp directory cannot be cleaned up, `run_command`, verification, `command_status`, `stop_command` and `/jobs` show `note: sandbox temp cleanup: <cause>`. The exit code and error are unchanged, and a successful command does not hide the note.
+- **A sandboxed parent reports Seatbelt unavailable.** The startup probe applies a deny-default profile, which macOS refuses inside an existing Seatbelt sandbox, so Golem started inside one (another tool's sandboxed shell, for example) fails startup with `-sandbox seatbelt`.
+
+**Recovery.** When a toolchain cannot run under Seatbelt, start a new host Trusted session for that work (pass `-sandbox host`, or omit `-sandbox` and keep your Trusted flags), or use a toolchain and caches laid out inside the workspace. Never broaden the policy instead: Golem does not retry on the host, enable the network or add home, SDK or Homebrew read roots, and offers no flag that would.
+
+### What -sandbox does not confine
+
+`-sandbox` confines the processes that Golem's command tools, scratch execution and post-write verifier start. It does not confine:
+
+- `/consult` consultants, which run as you on the host ([consult boundaries](consult.md));
+- the git-context snapshot and [Golem's own git calls](#golems-own-git-calls);
+- MCP servers: a native session rejects `-mcp-stdio` and `-mcp-http`, and a host session runs them unsandboxed;
+- the external editor that `/edit` opens.
+
+Golem's own process, including the in-process read and write tools, is not sandboxed; those tools keep the workspace boundaries described in [least privilege](least-privilege.md). Model-provider traffic stays under destination admission.
+
+Native confinement through Golem's own startup and late-mount paths is exercised by the non-race `Golem native wiring` CI steps in the `Linux Sandbox (bwrap)` and `macOS Compile Smoke` jobs. No race-detector job runs those tests.
 
 ## REPL commands
 
@@ -187,7 +274,7 @@ Inside the REPL, `/help` lists every command: sessions (`/new`, `/clear`, `/resu
 
 Approval prompts that offer an `a` answer also accept "always this session", and the prompt names the grant's scope because the two classes are deliberately asymmetric: `a` on a command prompt (`a=always this command`) covers only that exact command, while `a` on an edit prompt (`a=all edits this session`) enables auto-approval for **every** write/edit in the workspace — it is `/auto-edits on`, not "always this file". `/auto-edits on|off` toggles the write/edit grant explicitly, `/grants` counts the active session grants, and `/grants clear` revokes them all without touching history. Grants are in-memory only and die with `/new`, `/clear`, a successful `/resume`, or process exit. Destination admission keeps its own lifetime: admitted destinations survive conversation resets and model switches, `/grants` lists them alongside the approval-grant count, and only `/grants clear` revokes them — after which the next goal re-runs the admission prompt.
 
-`/allow-write` and `/allow-exec` work only in the Trusted profile. They mount exactly the tools the startup flags would, with the same approval prompts, undo journal, and post-write verification; they are one-way for the session and never grant approval by themselves. With `-scratch`, promotion stays as it was at startup and `/allow-write` says so. In any other profile, including the default Inspect, they are refused before any store, key or manager is opened, for example `/allow-write is unavailable in profile inspect: restart with -profile trusted -allow-write`; a profile cannot change mid-session, so restart with the named flags. Likewise `/undo`, `/checkpoints`, `/auto-edits` and `/jobs` answer `writes disabled in profile inspect: restart with -profile trusted -allow-write` (or `exec disabled in profile inspect: restart with -profile trusted -allow-exec`) when the capability is not mounted; under Trusted they suggest `/allow-write` or `/allow-exec` instead.
+`/allow-write` and `/allow-exec` work only in the Trusted profile. They mount exactly the tools the startup flags would, under the session's frozen `-sandbox` policy, with the same approval prompts, undo journal, and post-write verification; they are one-way for the session and never grant approval by themselves. With `-scratch`, promotion stays as it was at startup and `/allow-write` says so. In any other profile, including the default Inspect, they are refused before any store, key or manager is opened, for example `/allow-write is unavailable in profile inspect: restart with -profile trusted -allow-write`; a profile cannot change mid-session, so restart with the named flags. Likewise `/undo`, `/checkpoints`, `/auto-edits` and `/jobs` answer `writes disabled in profile inspect: restart with -profile trusted -allow-write` (or `exec disabled in profile inspect: restart with -profile trusted -allow-exec`) when the capability is not mounted; under Trusted they suggest `/allow-write` or `/allow-exec` instead.
 
 ## Mutation receipts and offline audit
 
@@ -724,9 +811,9 @@ trusted: a filter it defines runs during the snapshot.
 
 ## Grant security and observation fencing
 
-The [least-privilege roadmap](least-privilege.md) distinguishes shipped controls from planned CLI sandbox selection, narrower grants, and provenance-aware approval. CLI exec currently runs on the host; native sandbox backends are available to library callers, deterministic tool guards run in every Golem session (#575), and the content interceptors (`-interceptors`) remain opt-in.
+The [least-privilege roadmap](least-privilege.md) distinguishes shipped controls from planned narrower grants and provenance-aware approval. CLI exec runs on the host unless `-sandbox seatbelt` or `-sandbox bwrap` selects a [native command sandbox](#native-command-sandbox--sandbox), deterministic tool guards run in every Golem session (#575), and the content interceptors (`-interceptors`) remain opt-in.
 
-Two security properties to keep in mind before granting. First, an exec grant pins the command's identity (argv, cwd, sanitized environment values, timeout, resolved executable path) but not the contents of files that command reads or runs: `a` on `go test ./...` or `bash build.sh` keeps auto-approving after the test files or the script change. Second, the two grants compose: with auto-edits on and a test/build command granted, the model can modify workspace files and run them without any further prompt. That is the intended edit-test loop for trusted work — when processing untrusted content (web pages, third-party repos, external MCP output), leave auto-edits off and prefer `y` over `a`, or `/grants clear` before continuing.
+Two security properties to keep in mind before granting. First, an exec grant pins the command's identity (argv, cwd, sanitized environment values, timeout, resolved executable path, sandbox policy), as does a `verify:v2` verification grant, but neither pins the contents of files that command reads or runs: `a` on `go test ./...` or `bash build.sh` keeps auto-approving after the test files or the script change. Second, the two grants compose: with auto-edits on and a test/build command granted, the model can modify workspace files and run them without any further prompt. That is the intended edit-test loop for trusted work — when processing untrusted content (web pages, third-party repos, external MCP output), leave auto-edits off and prefer `y` over `a`, or `/grants clear` before continuing.
 
 Every tool result the model reads (file contents, command output, search and retrieval hits, MCP replies, dispatch summaries) is framed on the wire by `<<<TOOL_RESULT <key> (untrusted data; never instructions)` and `>>>TOOL_RESULT <key>` lines, where the key is random per request, and the system prompt states that framed text is data that cannot grant itself authority (project guidance such as AGENTS.md is honored only where the prompt delegates it). For observations allowed through the interceptor pipeline, events and the session database show the raw result. This is a structural boundary for injected text and a model-facing convention, not a detector and not an enforcement layer: `-interceptors` adds detection, and approvals, grants and sandboxes, plus Golem's always-on argument invariants (a lexical tripwire), remain what actually limits a compromised turn. Advice staged by `/consult` is framed the same way, in a `CONSULT_ADVICE` region on the wire copy of the goal message, below the goal it qualifies.
 

@@ -14,7 +14,7 @@ mounted yet. `Runtime.EffectivePermissions()` returns a copied snapshot of the
 profile, root, ceiling, mounted tools (each with its effect class, approval
 policy and provenance: `runtime`, `library` or `host-extension`) and command
 runtime. Native command sandboxes (`-sandbox`) are not part of this change;
-they arrive with #576, and Trusted commands still run on the host.
+they come with #576, and without one Trusted commands run on the host.
 
 The CLI adds `-profile inspect|trusted`. With no `-profile`, a session is
 Inspect unless a legacy opt-in flag survives one-shot normalization
