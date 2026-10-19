@@ -192,11 +192,23 @@ jobs:
       # Golem's own construction paths under real bwrap (#576): startup and
       # late exec, scratch and verification, each after a host positive
       # control. Non-race only: no race job runs these with bwrap present.
+      # A rename would match nothing and pass, so the step requires exactly
+      # this OS's top-level tests to pass and none to skip.
       - name: Golem native wiring (non-race)
         shell: bash
         env:
           GO_LLM_REQUIRE_BWRAP: "1"
-        run: set -o pipefail; go test -count=1 -run '^TestNativeWiring' -v ./cmd/golem | tee "$RUNNER_TEMP/native-wiring-linux.txt"
+        run: |
+          set -o pipefail; go test -count=1 -run '^TestNativeWiring' -v ./cmd/golem | tee "$RUNNER_TEMP/native-wiring-linux.txt"
+          if grep -q -- '--- SKIP' "$RUNNER_TEMP/native-wiring-linux.txt"; then
+            echo "::error::native wiring tests skipped: a skip is not confinement evidence"
+            exit 1
+          fi
+          passed=$(grep -cE -- '^--- PASS: TestNativeWiring[A-Za-z]+ ' "$RUNNER_TEMP/native-wiring-linux.txt" || true)
+          if [ "$passed" -ne 9 ]; then
+            echo "::error::expected 9 passing top-level native wiring tests, saw $passed"
+            exit 1
+          fi
 
       - name: Upload native wiring evidence
         if: always()

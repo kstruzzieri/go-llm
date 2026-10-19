@@ -70,6 +70,25 @@ func TestProbeSeatbeltNestedSandboxShape(t *testing.T) {
 	}
 }
 
+// TestProbeSeatbeltAppliesDenyDefaultProfile pins the probe's argv: an
+// allow-default probe still applies inside an allow-default parent sandbox,
+// where every deny-default command profile is then refused.
+func TestProbeSeatbeltAppliesDenyDefaultProfile(t *testing.T) {
+	argsFile := filepath.Join(t.TempDir(), "args")
+	fake := writeFakeSandboxExec(t, "printf '%s\\n' \"$@\" > '"+argsFile+"'\n")
+	if err := probeSeatbelt(context.Background(), fake); err != nil {
+		t.Fatalf("probe of a working applier failed: %v", err)
+	}
+	got, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = "-p\n(version 1)(deny default)(allow process-exec*)(allow file-read*)\n/usr/bin/true\n"
+	if string(got) != want {
+		t.Fatalf("probe argv =\n%s\nwant\n%s", got, want)
+	}
+}
+
 func TestProbeSeatbeltTimeout(t *testing.T) {
 	fake := writeFakeSandboxExec(t, "sleep 5\n")
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)

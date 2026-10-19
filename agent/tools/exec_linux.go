@@ -40,8 +40,8 @@ type bwrapProbeFunc func(ctx context.Context, argv []string) error
 // probeBwrapArgv builds the production-prefix probe invocation for one
 // config: the exact isolation/capability prefix production uses, an empty
 // environment declaration, a broad read-only root acceptable only because
-// the probe runs the trusted /bin/true (mirroring Seatbelt's allow-default
-// probe), both private tmpfs mounts with their production quotas, the argv0
+// the probe runs the trusted /bin/true (mirroring Seatbelt's probe, which
+// allows every read), both private tmpfs mounts with their production quotas, the argv0
 // override used to separate command identity from process-visible spelling,
 // and the prlimit chain exactly when the config caps memory.
 func probeBwrapArgv(bwrapPath, prlimitPath string, cfg SandboxConfig, capBytes int64) []string {

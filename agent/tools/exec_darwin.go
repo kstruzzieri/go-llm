@@ -28,13 +28,20 @@ const (
 	seatbeltProbeTimeout = 5 * time.Second
 	// seatbeltProbeOutputCap bounds captured probe diagnostics.
 	seatbeltProbeOutputCap = 1024
+	// seatbeltProbeProfile is the probe's profile: deny-default like every
+	// profile the backend renders, with only what /usr/bin/true needs. It is
+	// used for the probe alone and grants real commands nothing.
+	seatbeltProbeProfile = "(version 1)(deny default)(allow process-exec*)(allow file-read*)"
 )
 
 // probeSeatbelt actively verifies the host can apply a Seatbelt profile:
-// file checks first, then a harmless allow-default run of /usr/bin/true.
-// Existence does not imply usability — a process that is already sandboxed
-// has an executable sandbox-exec that fails with "sandbox_apply: Operation
-// not permitted", so a stat-only check would be a false positive.
+// file checks first, then a run of /usr/bin/true under a deny-default
+// profile. Existence does not imply usability: inside a sandbox, applying a
+// deny-default profile fails with "sandbox_apply: Operation not permitted",
+// so a stat-only check would be a false positive. The probe must be
+// deny-default too: an allow-default profile still applies inside an
+// allow-default parent, so it would report a backend every command then
+// fails under.
 func probeSeatbelt(ctx context.Context, execPath string) error {
 	fi, err := os.Stat(execPath)
 	if err != nil {
@@ -43,7 +50,7 @@ func probeSeatbelt(ctx context.Context, execPath string) error {
 	if !isExecutableFile(fi) {
 		return fmt.Errorf("tools: seatbelt requires %s: %w", execPath, errNotExecutable)
 	}
-	cmd := exec.CommandContext(ctx, execPath, "-p", "(version 1)(allow default)", "/usr/bin/true")
+	cmd := exec.CommandContext(ctx, execPath, "-p", seatbeltProbeProfile, "/usr/bin/true")
 	out := &cappedBuffer{cap: seatbeltProbeOutputCap}
 	cmd.Stdout = out
 	cmd.Stderr = out

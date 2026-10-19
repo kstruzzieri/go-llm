@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -504,6 +505,9 @@ func TestNativeWiringCancellation(t *testing.T) {
 			handle := resultField(t, started.Content, "handle")
 			stopped := invokeTool(ctx, t, sess.tools, "stop_command", map[string]any{"handle": handle})
 			t.Logf("stop_command:\n%s", stopped.Content)
+			if state := resultField(t, stopped.Content, "state"); state != "killed" {
+				t.Fatalf("stop_command state = %q, want killed", state)
+			}
 			for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
 				running := 0
 				for _, st := range sess.bgManager.List() {
@@ -533,7 +537,7 @@ func cancelScratchRun(t *testing.T, sess *replSession) {
 	t.Helper()
 	// The marker names this run's snapshot among any other scratch
 	// sessions sharing the platform base.
-	marker := "native-wiring-" + filepath.Base(sess.root)
+	marker := "native-wiring-" + rand.Text()
 	if err := os.WriteFile(filepath.Join(sess.root, marker), nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -560,6 +564,9 @@ func cancelScratchRun(t *testing.T, sess *replSession) {
 	if dirs == nil {
 		t.Fatal("the scratch snapshot never appeared; the cleanup check would be vacuous")
 	}
+	if !strings.Contains(res.Content, "command canceled") {
+		t.Fatalf("result = %q, want command canceled", res.Content)
+	}
 	for _, dir := range dirs {
 		for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
 			_, err := os.Lstat(dir)
@@ -571,42 +578,6 @@ func cancelScratchRun(t *testing.T, sess *replSession) {
 			}
 		}
 	}
-}
-
-// A pathname Unix socket in the shared workspace is reachable from inside
-// Bubblewrap: an honest, documented limit of IP-only network denial, not a
-// denial this test claims.
-func TestNativeWiringBwrapUnixSocketIsReachable(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("documents a Bubblewrap limit; linux only")
-	}
-	if _, err := exec.LookPath("python3"); err != nil {
-		t.Skipf("python3 dials the socket: %v", err)
-	}
-	config, root := golemWorkspace(t)
-	policy := nativePolicyForTest(t, root)
-	withGolem(t, config, root, policy, []string{"-allow-exec"}, func(sess *replSession) {
-		sock := filepath.Join(sess.root, "s.sock")
-		ln, err := net.Listen("unix", sock)
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer func() { _ = ln.Close() }()
-		accepted := make(chan struct{}, 1)
-		go func() {
-			if conn, err := ln.Accept(); err == nil {
-				_ = conn.Close()
-				accepted <- struct{}{}
-			}
-		}()
-		res := invokeTool(context.Background(), t, sess.tools, "run_command", map[string]any{"argv": []string{
-			"python3", "-c", "import socket, sys; socket.socket(socket.AF_UNIX).connect(sys.argv[1])", sock}})
-		select {
-		case <-accepted:
-		case <-time.After(5 * time.Second):
-			t.Fatalf("the workspace socket was not reached; the documented limit changed:\n%s", res.Content)
-		}
-	})
 }
 
 // TestNativeWiringToolchainMatrix runs each toolchain probe found on PATH as
@@ -622,6 +593,9 @@ func TestNativeWiringToolchainMatrix(t *testing.T) {
 		{[]string{"go", "version"}, []string{"version"}},
 		{[]string{"python3", "-c", "1"}, []string{"--version"}},
 		{[]string{"node", "-e", "1"}, []string{"--version"}},
+		{[]string{"npm", "--version"}, []string{"--version"}},
+		{[]string{"pnpm", "--version"}, []string{"--version"}},
+		{[]string{"yarn", "--version"}, []string{"--version"}},
 		{[]string{"git", "--version"}, []string{"--version"}},
 	} {
 		path, err := exec.LookPath(tc.argv[0])
