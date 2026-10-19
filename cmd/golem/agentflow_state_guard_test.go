@@ -547,6 +547,14 @@ func TestRunAgentflowTask_ReviewRoundOverSameLockedPlan(t *testing.T) {
 		want     string // "" means the review round proceeds
 	}{
 		{name: "review over the same plan proceeds", supplied: plan, manifest: true},
+		{name: "review refusal escapes attempt terminal controls", supplied: plan, manifest: true,
+			receipts: strings.ReplaceAll(timeoutReceiptCR1, "A1", `A1\u001b[2J\nFORGED`),
+			stepRuns: `{"schema_version":"1.0.0","step_id":"P1","attempt_id":"A1\u001b[2J\nFORGED","event":"cancelled"}`,
+			want:     `refusing a -review-manifest round: attempt "A1\x1b[2J\nFORGED" has an event this Golem does not know ("cancelled")`},
+		{name: "review refusal escapes attempt direction controls", supplied: plan, manifest: true,
+			receipts: strings.ReplaceAll(timeoutReceiptCR1, "A1", `A1\u202eFORGED`),
+			stepRuns: `{"schema_version":"1.0.0","step_id":"P1","attempt_id":"A1\u202eFORGED","event":"cancelled"}`,
+			want:     `refusing a -review-manifest round: attempt "A1\u202eFORGED" has an event this Golem does not know ("cancelled")`},
 		// #642 D8: this exception skips the history guard, so it must not
 		// mutate a ledger that can never verify; an ordinary failed gate
 		// receipt, or a timeout a later attempt can supersede, does not stop it.
@@ -763,8 +771,8 @@ func TestUnrecoverableTimedOutReceiptClassifiesAttempts(t *testing.T) {
 		{name: "attempt also recorded under another step", receipts: cr("CR1", "A1"), stepRuns: row("P1", "A1", "claimed") + row("P2", "A1", "claimed") + row("P1", "A1", "blocked"), want: "CR1"},
 		{name: "attempt closed twice", receipts: cr("CR1", "A1"), stepRuns: row("P1", "A1", "claimed") + row("P1", "A1", "blocked") + row("P1", "A1", "failed"), want: "CR1"},
 		{name: "first unrecoverable after a recoverable one", receipts: cr("CR1", "A1") + cr("CR2", "A2"), stepRuns: row("P1", "A1", "claimed") + row("P1", "A1", "blocked") + row("P1", "A2", "claimed") + row("P1", "A2", "completed"), want: "CR2"},
-		{name: "unknown event fails closed", receipts: cr("CR1", "A1"), stepRuns: row("P1", "A1", "claimed") + row("P1", "A1", "cancelled"), wantErr: `attempt A1 has an event this Golem does not know ("cancelled")`},
-		{name: "unknown event is escaped", receipts: cr("CR1", "A1"), stepRuns: row("P1", "A1", "claimed") + row("P1", "A1", `x\u001b[2J`), wantErr: `attempt A1 has an event this Golem does not know ("x\x1b[2J")`},
+		{name: "unknown event fails closed", receipts: cr("CR1", "A1"), stepRuns: row("P1", "A1", "claimed") + row("P1", "A1", "cancelled"), wantErr: `attempt "A1" has an event this Golem does not know ("cancelled")`},
+		{name: "unknown event is escaped", receipts: cr("CR1", "A1"), stepRuns: row("P1", "A1", "claimed") + row("P1", "A1", `x\u001b[2J`), wantErr: `attempt "A1" has an event this Golem does not know ("x\x1b[2J")`},
 		{name: "malformed step-run row", receipts: cr("CR1", "A1"), stepRuns: row("P1", "A1", "claimed") + "{\n", wantErr: "this workspace holds incompatible AgentFlow state (.agent/step-runs.jsonl:2 unreadable); finish that run, or build its proof, with the AgentFlow version that wrote it, then move .agent/ aside before starting an AgentFlow 1.x run"},
 		{name: "no timeout leaves the step-run ledger unread", receipts: exitOneReceiptCR1 + "\n", stepRuns: "{\n"},
 	} {

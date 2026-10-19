@@ -43,6 +43,8 @@ AgentFlow 1.1 can recover a gate that timed out (kstruzzieri/agentflow#60,
   `retained timeout receipt <id> in <root> cannot be superseded by a later
   attempt, so this root's ledger cannot pass AgentFlow run verification; ...`,
   with the same archive remedy.
+- Unknown-event diagnostics quote ledger-supplied attempt IDs so terminal
+  escape sequences, newlines, and direction controls cannot spoof the output.
 - Golem no longer reads `.agent/step-runs.jsonl` before it blocks an attempt:
   AgentFlow 1.1 refuses to block an attempt that is already closed and writes
   nothing (kstruzzieri/agentflow#61). The endings

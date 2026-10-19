@@ -187,7 +187,7 @@ func unrecoverableTimedOutReceipt(root string) (string, error) {
 		case "blocked", "failed", "abandoned", "claimed", "amendment_started", "in_progress", "verified":
 		default:
 			// A newer AgentFlow 1.x may add an event: fail closed.
-			return "", fmt.Errorf("attempt %s has an event this Golem does not know (%q)", r.attempt, a.last)
+			return "", fmt.Errorf("attempt %q has an event this Golem does not know (%q)", r.attempt, a.last)
 		}
 	}
 	return "", nil
