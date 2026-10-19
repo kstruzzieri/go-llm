@@ -19,7 +19,7 @@ func TestProbe_OKWhenAllPresent(t *testing.T) {
 func probeReplies(topHelp string) map[string]fakeReply {
 	allFlags := []byte("--root --json --from-json --agent --step --attempt --path --gate --confirm-risk --reason")
 	replies := map[string]fakeReply{
-		"--version": {stdout: []byte("agentflow 1.0.0\n")},
+		"--version": {stdout: []byte("agentflow 1.1.0\n")},
 		"--help":    {stdout: []byte(topHelp)},
 	}
 	for _, sub := range []string{
@@ -34,7 +34,7 @@ func probeReplies(topHelp string) map[string]fakeReply {
 func TestProbe_FailsOnMissingSubcommand(t *testing.T) {
 	help := "usage: agentflow {init,doctor}" // lock-plan etc missing
 	f := &fakeRunner{replies: map[string]fakeReply{
-		"--version": {stdout: []byte("agentflow 1.0.0\n")},
+		"--version": {stdout: []byte("agentflow 1.1.0\n")},
 		"--help":    {stdout: []byte(help)},
 	}}
 	err := NewClient(f, "/ws").Probe(context.Background())
@@ -223,12 +223,15 @@ const fullProbeHelp = "usage: agentflow {init,init-execution,lock-plan,record-fi
 // a *VersionError, so status may show it where it hides runner errors.
 func TestCheckVersion(t *testing.T) {
 	for _, tt := range []struct{ out, want string }{
-		{"agentflow 1.0.0\n", ""},
+		{"agentflow 1.1.0\n", ""},
 		{"agentflow 1.7.3\n", ""},
-		{"agentflow 1.0.0rc1\n", ""},
-		{"agentflow 1.0.0.dev1+gabc\n", ""},
-		{"agentflow 0.3.0\n", "agentflow 0.3 is too old; need >= 1.0"},
-		{"agentflow 0.4.0\n", "agentflow 0.4 is too old; need >= 1.0"},
+		{"agentflow 1.1.0rc1\n", ""},
+		{"agentflow 1.1.0.dev1+gabc\n", ""},
+		// 1.1 is the floor: Golem relies on its recovery states (agentflow#60, #70).
+		{"agentflow 1.0.0\n", "agentflow 1.0 is too old; need >= 1.1"},
+		{"agentflow 1.0.9\n", "agentflow 1.0 is too old; need >= 1.1"},
+		{"agentflow 0.3.0\n", "agentflow 0.3 is too old; need >= 1.1"},
+		{"agentflow 0.4.0\n", "agentflow 0.4 is too old; need >= 1.1"},
 		{"agentflow 2.0.0\n", "agentflow 2.0 is newer than this Golem supports; need 1.x"},
 		{"agentflow x.0.0\n", `cannot parse agentflow version "x.0.0"`},
 		{"agentflow 1.x\n", `cannot parse agentflow version "1.x"`},
@@ -242,8 +245,8 @@ func TestCheckVersion(t *testing.T) {
 		{"agentflow\n", `cannot parse agentflow version from "agentflow"`},
 		// Only the first line is the version; later lines (warnings, paths) are
 		// neither parsed nor echoed (#612).
-		{"agentflow 1.0.0\nwarning: deprecated /Users/x/y\n", ""},
-		{"\n  agentflow 1.0.0 (python 3.12)\n", ""},
+		{"agentflow 1.1.0\nwarning: deprecated /Users/x/y\n", ""},
+		{"\n  agentflow 1.1.0 (python 3.12)\n", ""},
 		{"agentflow 2.0.0\nwarning: /Users/x/y\n", "agentflow 2.0 is newer than this Golem supports; need 1.x"},
 		{"agentflow\nwarning: /Users/x/y\n", `cannot parse agentflow version from "agentflow"`},
 		// A real AgentFlow prints about 16 bytes; anything echoed is clipped.

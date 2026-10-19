@@ -39,6 +39,10 @@ func resumeDisposition(state string) recoveryDisposition {
 		return recoveryDisposition{failClosed, 3, "blocked by invalid Agentflow state"}
 	case "step_unclaimed":
 		return recoveryDisposition{resumeSerial, 2, "enter the serial step loop"}
+	case "step_amendment_needed":
+		return recoveryDisposition{resumeSerial, 2, "amend the completed step, then continue serially"}
+	case "attempt_timed_out":
+		return recoveryDisposition{resumeSerial, 2, "block the timed-out attempt, then re-run the step serially"}
 	case "file_receipts_missing":
 		return recoveryDisposition{failClosed, 3, "blocked by missing file receipts"}
 	case "validation_missing":
@@ -130,24 +134,14 @@ func runAgentflowStatusWithRunner(ctx context.Context, out io.Writer, root strin
 		if err := validateStatusRecovery(root, state); err != nil {
 			disposition = recoveryDisposition{failClosed, 3, "blocked by unsafe or malformed projection: " + err.Error()}
 		} else if hasFailedCommandGate(state) {
-			// #652 A6: resume reads the step-run ledger before it blocks
-			// (recordBlocked), so offer the recovery only when that read
-			// would let it block. validateStatusRecovery guarantees the
-			// projected step and attempt.
-			event, err := closedAttemptEvent(root, state.Resumability.Step.ID, state.Resumability.Attempt.ID)
-			switch {
-			case err != nil:
-				disposition = recoveryDisposition{failClosed, 3, "blocked: check attempt state before blocking: " + err.Error()}
-			case event != "":
-				disposition = recoveryDisposition{failClosed, 3, "blocked: the step-run ledger already shows this attempt closed (" + event + ")"}
-			default:
-				disposition.description = "block the attempt whose gate failed, then re-run the step serially" // #652 A6
-			}
+			disposition.description = "block the attempt whose gate failed, then re-run the step serially" // #652 A6
 		}
 	}
 	// #642 A9: after validateStatusRecovery, so earlier projection refusals keep precedence (D9).
 	if disposition.action == resumeSerial {
-		if err := refuseRetainedTimeout(root); err != nil {
+		if err := refuseReviewAmendmentReplacement(root, state); err != nil {
+			disposition = recoveryDisposition{failClosed, 3, "blocked: " + err.Error()}
+		} else if err := refuseUnrecoverableTimeout(root); err != nil {
 			disposition = recoveryDisposition{failClosed, 3, "blocked: " + err.Error()}
 		}
 	}
@@ -255,7 +249,7 @@ func validateRecoveryProjection(state agentflow.NextActionState) error {
 	attempt := projection.Attempt
 	if attempt == nil {
 		switch state.State {
-		case "file_receipts_missing", "validation_missing", "step_unverified", "step_uncompleted":
+		case "file_receipts_missing", "validation_missing", "step_unverified", "step_uncompleted", "attempt_timed_out":
 			return fmt.Errorf("agentflow state %q requires an open attempt", state.State)
 		case "step_unclaimed":
 			if projection.Step == nil || *projection.Step.Completed || !isEligibleUnclaimedStepState(projection.Step.State) {
@@ -264,15 +258,24 @@ func validateRecoveryProjection(state agentflow.NextActionState) error {
 			if err := validateAutomaticRecoveryAction(projection, "claim"); err != nil {
 				return err
 			}
+		case "step_amendment_needed":
+			// AgentFlow 1.1 (agentflow#70): a completed step needs a
+			// replacement attempt, which only amend-step opens.
+			if projection.Step == nil || !*projection.Step.Completed {
+				return fmt.Errorf("agentflow step_amendment_needed projection has no completed step")
+			}
+			if err := validateAutomaticRecoveryAction(projection, "amend"); err != nil {
+				return err
+			}
 		case "run_unverified", "drift_failing", "proof_missing", "proof_stale", "proof_failing", "complete":
 			if projection.Step != nil {
 				return fmt.Errorf("agentflow state %q unexpectedly projects a step", state.State)
 			}
 			// No recovery-action requirement here: Agentflow's action
-			// vocabulary (claim/continue/renew/reclaim/fail) covers attempt
-			// lifecycle only and projects every action as not allowed in these
-			// terminal phases. FinishRun re-enters Agentflow's own terminal
-			// gates, which enforce their own policy.
+			// vocabulary (claim/continue/renew/reclaim/fail/block/amend) covers
+			// attempt lifecycle only and projects every action as not allowed
+			// in these terminal phases. FinishRun re-enters Agentflow's own
+			// terminal gates, which enforce their own policy.
 		}
 		if lease.State != "not_applicable" || lease.ExpiresAt != nil {
 			return fmt.Errorf("agentflow resumability lease is inconsistent without an attempt")
@@ -283,13 +286,10 @@ func validateRecoveryProjection(state agentflow.NextActionState) error {
 		return fmt.Errorf("agentflow resumability attempt has no step")
 	}
 	switch state.State {
-	case "validation_missing", "step_unverified", "step_uncompleted":
+	case "validation_missing", "step_unverified", "step_uncompleted", "attempt_timed_out":
 		// These are the only resumable states backed by an existing attempt.
 	default:
 		return fmt.Errorf("agentflow state %q unexpectedly projects an open attempt", state.State)
-	}
-	if *projection.Step.Completed {
-		return fmt.Errorf("agentflow resumability open attempt belongs to a completed step")
 	}
 	if strings.TrimSpace(attempt.ID) == "" || strings.TrimSpace(attempt.State) == "" {
 		return fmt.Errorf("agentflow resumability attempt identity is incomplete")
@@ -304,6 +304,12 @@ func validateRecoveryProjection(state agentflow.NextActionState) error {
 		}
 	case "validation_missing", "step_unverified":
 		if attempt.State != "claimed" && attempt.State != "amendment_started" && attempt.State != "in_progress" {
+			return fmt.Errorf("agentflow %s attempt has state %q", state.State, attempt.State)
+		}
+	case "attempt_timed_out":
+		// A verified attempt is still open (execution.py OPEN_EVENTS); a later
+		// command in it can time out.
+		if attempt.State != "claimed" && attempt.State != "amendment_started" && attempt.State != "in_progress" && attempt.State != "verified" {
 			return fmt.Errorf("agentflow %s attempt has state %q", state.State, attempt.State)
 		}
 	}
@@ -322,10 +328,58 @@ func validateRecoveryProjection(state agentflow.NextActionState) error {
 		if lease.ExpiresAt != nil {
 			return fmt.Errorf("agentflow no-deadline lease has a deadline")
 		}
+	case "expired":
+		// AgentFlow lets a timed-out advisory attempt be blocked whatever its
+		// lease (porcelain.py _timeout_close); an expired enforced one is
+		// reclaim-only, which Golem never does.
+		if state.State != "attempt_timed_out" || *lease.Policy != "advisory" || lease.ExpiresAt == nil || strings.TrimSpace(*lease.ExpiresAt) == "" {
+			return fmt.Errorf("agentflow resumability lease state %q is not recoverable", lease.State)
+		}
 	default:
 		return fmt.Errorf("agentflow resumability lease state %q is not recoverable", lease.State)
 	}
+	if state.State == "attempt_timed_out" {
+		// The attempt can never complete; block-step is the close AgentFlow
+		// allows this caller (agentflow#70). Golem never reclaims: AgentFlow
+		// offers that only for an expired enforced lease, refused above.
+		return validateAutomaticRecoveryAction(projection, "block")
+	}
 	return validateAutomaticRecoveryAction(projection, "continue")
+}
+
+// refuseCompletedStepAttempt refuses an open attempt on a step AgentFlow
+// already counts completed: an amendment, such as a review amendment, that
+// settlement would finish on its gates alone, without the work it was opened
+// for (#652 D1). Status and resume run it on the projection they start from,
+// not on an amendment resume opens itself. A timed-out one is only blocked, so
+// it passes.
+func refuseCompletedStepAttempt(state agentflow.NextActionState) error {
+	projection := state.Resumability
+	if projection == nil || projection.Attempt == nil || projection.Step == nil || projection.Step.Completed == nil ||
+		!*projection.Step.Completed || state.State == "attempt_timed_out" {
+		return nil
+	}
+	return fmt.Errorf("agentflow resumability open attempt belongs to a completed step")
+}
+
+// refuseReviewAmendmentReplacement refuses to replace an attempt of a step
+// whose review-linked amendment never completed. Resume replaces an attempt
+// with the step's own goal, so the review findings would go unaddressed while
+// the replacement supersedes the amendment (agentflow#70; golem-integration.md
+// review cycle). Read-only; it runs before resume blocks or amends anything.
+func refuseReviewAmendmentReplacement(root string, state agentflow.NextActionState) error {
+	if state.State != "attempt_timed_out" && state.State != "step_amendment_needed" {
+		return nil
+	}
+	if state.Resumability == nil || state.Resumability.Step == nil {
+		return fmt.Errorf("agentflow %s projection has no step", state.State)
+	}
+	step := state.Resumability.Step.ID
+	review, err := unfinishedReviewAmendment(root, step)
+	if err != nil || !review {
+		return err
+	}
+	return fmt.Errorf("step %s has an unfinished review amendment; resume would replace it with the step's own goal and drop the review findings, so it changes nothing; block the attempt if it is still open, then address the findings in a new -review-manifest round over the same plan", step)
 }
 
 func validateAutomaticRecoveryAction(projection *agentflow.ResumabilityProjection, action string) error {
@@ -356,6 +410,9 @@ func isEligibleUnclaimedStepState(state string) bool {
 
 func validateStatusRecovery(root string, state agentflow.NextActionState) error {
 	if err := validateRecoveryProjection(state); err != nil {
+		return err
+	}
+	if err := refuseCompletedStepAttempt(state); err != nil {
 		return err
 	}
 	if resumeDisposition(state.State).action == resumeSerial {
@@ -473,10 +530,19 @@ func projectedCommandGates(plan *agentflow.Plan, state agentflow.NextActionState
 // gateBlockReason, the gate's label stays out of the ledger.
 const resumeFailedGateBlockReason = "golem: resume found failed command gate"
 
+// resumeTimedOutBlockReason is the ledger reason when resume blocks an open
+// attempt AgentFlow reports attempt_timed_out (agentflow#70).
+const resumeTimedOutBlockReason = "golem: resume found timed-out gate"
+
+// resumeAmendReason is the ledger reason when resume opens the replacement
+// attempt AgentFlow reports step_amendment_needed for (agentflow#70).
+const resumeAmendReason = "golem: resume replaces the step's attempt"
+
 // hasFailedCommandGate reports whether a validation_missing projection holds a
-// command gate AgentFlow reports failed: a nonzero exit, a timeout, a run that
+// command gate AgentFlow reports failed: a nonzero exit, a run that
 // risk_policy: block refused (exit_code null, decision "blocked"), or an
-// attested receipt under strict policy (execution_coverage.py verify_step).
+// attested receipt under strict policy (execution_coverage.py verify_step). An
+// attempt with a timed-out gate reports attempt_timed_out instead (agentflow#70).
 // AgentFlow credits an attempt's first matching receipt, so neither re-running
 // the gate nor finish-step can settle that attempt (#652 A6).
 func hasFailedCommandGate(state agentflow.NextActionState) bool {
@@ -503,8 +569,15 @@ func validateRecoveryMutationSafety(state agentflow.NextActionState) error {
 	if projection == nil || projection.Lease == nil || projection.Lease.Policy == nil || *projection.Lease.Policy != "enforce" {
 		return nil
 	}
-	if state.State == "step_unclaimed" {
+	switch state.State {
+	case "step_unclaimed":
 		return fmt.Errorf("agentflow resume blocks step_unclaimed under an enforced lease because claiming would enter non-atomic gate recovery")
+	case "step_amendment_needed":
+		return fmt.Errorf("agentflow resume blocks step_amendment_needed under an enforced lease because amending would enter non-atomic gate recovery")
+	case "attempt_timed_out":
+		// Blocking leaves step_unclaimed or step_amendment_needed, which an
+		// enforced lease refuses above, so refuse before the block.
+		return fmt.Errorf("agentflow resume blocks attempt_timed_out under an enforced lease because blocking the attempt would leave a step to claim or amend, which an enforced lease refuses")
 	}
 	if projection.Lease.State == "live" && projection.Lease.ExpiresAt != nil {
 		switch state.State {
@@ -520,11 +593,11 @@ func validateRecoveryMutationSafety(state agentflow.NextActionState) error {
 	return nil
 }
 
-func settleAgentflowAttempt(ctx context.Context, client afClient, root string, plan *agentflow.Plan, state agentflow.NextActionState) (bool, error) {
+func settleAgentflowAttempt(ctx context.Context, client afClient, plan *agentflow.Plan, state agentflow.NextActionState) (bool, error) {
 	switch state.State {
-	case "step_unclaimed", "run_unverified", "proof_missing", "complete":
+	case "step_unclaimed", "step_amendment_needed", "run_unverified", "proof_missing", "complete":
 		return false, nil
-	case "validation_missing", "step_unverified", "step_uncompleted":
+	case "validation_missing", "step_unverified", "step_uncompleted", "attempt_timed_out":
 		// Settled below with fixed adapter methods.
 	default:
 		return false, fmt.Errorf("agentflow state %q has no automatic settlement", state.State)
@@ -539,6 +612,12 @@ func settleAgentflowAttempt(ctx context.Context, client afClient, root string, p
 	}
 
 	switch state.State {
+	case "attempt_timed_out":
+		// AgentFlow 1.1 refuses to complete the attempt; blocking it lets a
+		// replacement supersede its timed-out receipt (agentflow#60, #70).
+		if err := recordBlocked(ctx, client, stepID, attemptID, resumeTimedOutBlockReason); err != nil {
+			return true, fmt.Errorf("step %s attempt %s: gate timed out; %w", stepID, attemptID, err)
+		}
 	case "step_unverified":
 		if err := client.FinishStep(ctx, stepID, attemptID); err != nil {
 			return true, err
@@ -560,7 +639,7 @@ func settleAgentflowAttempt(ctx context.Context, client afClient, root string, p
 			if projected[i].Status != "failed" {
 				continue
 			}
-			if err := recordBlocked(ctx, client, root, stepID, attemptID, resumeFailedGateBlockReason); err != nil {
+			if err := recordBlocked(ctx, client, stepID, attemptID, resumeFailedGateBlockReason); err != nil {
 				return true, fmt.Errorf("step %s attempt %s: gate %q already failed; %w", stepID, attemptID, command.Label, err)
 			}
 			return true, nil
@@ -570,7 +649,7 @@ func settleAgentflowAttempt(ctx context.Context, client afClient, root string, p
 				continue
 			}
 			if err := client.RunGate(ctx, stepID, attemptID, command.Label, command.Argv); err != nil {
-				return true, blockFailedGate(ctx, client, root, stepID, attemptID, fmt.Errorf("gate %q failed: %w", command.Label, err))
+				return true, blockAttempt(ctx, client, stepID, attemptID, gateBlockReason, fmt.Errorf("gate %q failed: %w", command.Label, err))
 			}
 		}
 		if err := client.FinishStep(ctx, stepID, attemptID); err != nil {
@@ -598,15 +677,22 @@ func (d *driver) resume(ctx context.Context, root string, planJSON []byte, appro
 	if err := validateResumeProjection(root, planJSON, state, approved); err != nil {
 		return agentflow.NextActionState{}, err
 	}
+	if err := refuseCompletedStepAttempt(state); err != nil {
+		return agentflow.NextActionState{}, err
+	}
 	if err := validateRecoveryMutationSafety(state); err != nil {
 		return agentflow.NextActionState{}, err
 	}
 	if disposition.action == reportComplete {
 		return state, nil
 	}
-	// #642 A9: no recovery of a root that retains a timed-out receipt can
-	// pass AgentFlow 1.0's run verification, so refuse before any mutation.
-	if err := refuseRetainedTimeout(root); err != nil {
+	if err := refuseReviewAmendmentReplacement(root, state); err != nil {
+		return agentflow.NextActionState{}, err
+	}
+	// #642 A9: no recovery of a root that retains a timed-out receipt no
+	// attempt can supersede passes run verification, so refuse before any
+	// mutation.
+	if err := refuseUnrecoverableTimeout(root); err != nil {
 		return agentflow.NextActionState{}, err
 	}
 	proof, err := newResumeProofGuard(ctx, d.af, root)
@@ -614,7 +700,7 @@ func (d *driver) resume(ctx context.Context, root string, planJSON []byte, appro
 		return agentflow.NextActionState{}, err
 	}
 
-	settled, err := settleAgentflowAttempt(ctx, d.af, root, d.plan, state)
+	settled, err := settleAgentflowAttempt(ctx, d.af, d.plan, state)
 	if err != nil {
 		return agentflow.NextActionState{}, err
 	}
@@ -636,7 +722,7 @@ func (d *driver) resume(ctx context.Context, root string, planJSON []byte, appro
 		switch state.State {
 		case "complete":
 			return state, nil
-		case "step_unclaimed", "run_unverified", "proof_missing":
+		case "step_unclaimed", "step_amendment_needed", "run_unverified", "proof_missing":
 		case "proof_stale":
 			// #689: the retained proof verified before settlement. The tail
 			// also checks its bytes have not changed before replacing it;
@@ -678,6 +764,13 @@ func (d *driver) resume(ctx context.Context, root string, planJSON []byte, appro
 		return validateRecoveryMutationSafety(projected)
 	}
 	defer func() { d.beforeGates = previousBeforeGates }()
+	if state.State == "step_amendment_needed" {
+		// The serial loop never selects a completed step, so resume opens its
+		// replacement attempt and runs the model for it here (agentflow#70).
+		if err := d.amendCompletedStep(ctx, root, state); err != nil {
+			return agentflow.NextActionState{}, err
+		}
+	}
 	if err := d.runSerialSteps(ctx); err != nil {
 		return agentflow.NextActionState{}, err
 	}
@@ -695,6 +788,34 @@ func (d *driver) resume(ctx context.Context, root string, planJSON []byte, appro
 		return agentflow.NextActionState{}, fmt.Errorf("agentflow resume finished in state %q, want complete", final.State)
 	}
 	return final, nil
+}
+
+// amendCompletedStep opens a replacement attempt for the completed step a
+// step_amendment_needed state projects and runs it as the serial loop runs a
+// claimed one: the step's own goal, then its gates and finish-step. It refuses
+// a step with an unfinished review amendment first, also when settlement led
+// here. validateRecoveryProjection has checked the step and that AgentFlow
+// allows the amend. One amendment per resume: a second step that needs one
+// stops resume at the step-work check before finish-run, and the next resume
+// amends it.
+func (d *driver) amendCompletedStep(ctx context.Context, root string, state agentflow.NextActionState) error {
+	if err := refuseReviewAmendmentReplacement(root, state); err != nil {
+		return err
+	}
+	stepID := state.Resumability.Step.ID
+	step, ok := findStep(d.plan, stepID)
+	if !ok {
+		return fmt.Errorf("agentflow returned unknown step %q", stepID)
+	}
+	goal, err := stepGoal(d.plan, step)
+	if err != nil {
+		return err
+	}
+	attempt, err := d.af.AmendCompletedStep(ctx, stepID, resumeAmendReason)
+	if err != nil {
+		return err
+	}
+	return d.runAttempt(ctx, step, attempt, goal)
 }
 
 func renderAgentflowStatus(out io.Writer, state agentflow.NextActionState, proof *agentflow.ProofSummary, disposition recoveryDisposition) {

@@ -138,6 +138,10 @@ func (f *fakeAF) AmendStep(_ context.Context, id string, refs []string) (string,
 	f.seq = append(f.seq, "amend:"+id+":"+strings.Join(refs, ","))
 	return "AM-" + id, f.failure("amend-step")
 }
+func (f *fakeAF) AmendCompletedStep(_ context.Context, id, reason string) (string, error) {
+	f.seq = append(f.seq, "amend-completed:"+id+":"+reason)
+	return "AM-" + id, f.failure("amend-step")
+}
 func (f *fakeAF) RunGate(_ context.Context, step, attempt, gate string, argv []string) error {
 	f.seq = append(f.seq, "gate:"+step+":"+gate)
 	f.gateArgv = append(f.gateArgv, append([]string(nil), argv...))
@@ -1014,7 +1018,7 @@ func TestDriver_AmendmentFailuresStayIncomplete(t *testing.T) {
 			if tt.failAt != "" {
 				af.failAt = map[string]error{tt.failAt: errors.New(tt.failAt + " failed")}
 			}
-			d := &driver{af: af, plan: reviewPlan(), planPath: "plan.json", reviewManifest: "review.json", out: io.Discard, root: t.TempDir(),
+			d := &driver{af: af, plan: reviewPlan(), planPath: "plan.json", reviewManifest: "review.json", out: io.Discard,
 				runStep: func(context.Context, agentflow.Step, string, string) error { return tt.runErr }}
 			if _, err := d.run(context.Background()); err == nil {
 				t.Fatal("expected failure")
@@ -1186,7 +1190,7 @@ func TestRunAgentflowTask_RejectsInvalidTraceabilityBeforeClientUse(t *testing.T
 
 // #612 R4: a 0.x plan file is refused before any AgentFlow call.
 func TestRunAgentflowTask_RejectsZeroXPlanBeforeClientUse(t *testing.T) {
-	calls := fakeAgentflowOnPath(t, "1.0.0")
+	calls := fakeAgentflowOnPath(t, "1.1.0")
 	plan := agentflow.Compile(validTraceableIR())
 	plan.SchemaVersion = "0.3.0"
 	planBytes, err := json.Marshal(plan)
@@ -1238,7 +1242,7 @@ func TestRunAgentflowTask_RejectedVersionMakesNoOtherCall(t *testing.T) {
 			if !errors.Is(err, errAgentflowTaskFailed) {
 				t.Fatalf("err = %v, want errAgentflowTaskFailed", err)
 			}
-			if !strings.Contains(stderr.String(), "agentflow 0.4 is too old; need >= 1.0") {
+			if !strings.Contains(stderr.String(), "agentflow 0.4 is too old; need >= 1.1") {
 				t.Fatalf("stderr = %q, want the version rejection", stderr.String())
 			}
 			got, err := os.ReadFile(calls)
@@ -2112,7 +2116,7 @@ func TestRunAttemptRunErrorsBlockWithClassReason(t *testing.T) {
 				}
 				plan := stopTestPlan()
 				af := &fakeAF{}
-				d := &driver{af: af, plan: plan, root: t.TempDir(), runStep: func(context.Context, agentflow.Step, string, string) error {
+				d := &driver{af: af, plan: plan, runStep: func(context.Context, agentflow.Step, string, string) error {
 					return tt.err
 				}}
 				err := d.runAttempt(ctx, plan.Steps[0], "A-P1", "goal")
@@ -2169,7 +2173,7 @@ func TestRunAttemptGateErrorsBlock(t *testing.T) {
 				plan.Steps[0].Validation = append(plan.Steps[0].Validation, "lint")
 				plan.Steps[0].Gates = append(plan.Steps[0].Gates, agentflow.Gate{Kind: "command", Run: []string{"go", "vet"}})
 				af := &fakeAF{failAt: map[string]error{"gate": tt.err}}
-				d := &driver{af: af, plan: plan, root: t.TempDir(), runStep: func(context.Context, agentflow.Step, string, string) error {
+				d := &driver{af: af, plan: plan, runStep: func(context.Context, agentflow.Step, string, string) error {
 					return nil
 				}}
 				err := d.runAttempt(ctx, plan.Steps[0], "A-P1", "goal")
@@ -2288,167 +2292,5 @@ func TestTaskStepRunnerRunErrorsBlockAttempt(t *testing.T) {
 			t.Fatalf("run context err = %v, want the journal's cancel before the block", runCtx.Err())
 		}
 		assertFreshBlockContext(t, af.blocks)
-	})
-}
-
-// #642 A9 (T1 timeout rows): after blocking a failed gate, the error reports a
-// timed-out receipt the driver's root retains, since verify-run will reject
-// it whatever runs next; a read refusal is appended, never in place of the gate
-// or block error, and the one block still runs.
-func TestRunAttemptGateTimeoutReportsRetainedReceipt(t *testing.T) {
-	const prefix = `step P1 attempt A-P1: gate "go test" failed: agentflow run: exit 124: command timed out after 1 seconds`
-	const unreadable = "this workspace holds incompatible AgentFlow state (.agent/command-receipts.jsonl unreadable); finish that run, or build its proof, with the AgentFlow version that wrote it, then move .agent/ aside before starting an AgentFlow 1.x run"
-	errBlock := errors.New("block rejected")
-	for _, tt := range []struct {
-		name       string
-		receipts   string // command-receipts.jsonl body; "" means a directory there
-		blockErr   error
-		wantSuffix func(root string) string
-	}{
-		{"timeout", timeoutReceiptCR1 + "\n", nil, func(root string) string {
-			return "; attempt recorded as blocked; " + wantTimeoutReport(root, "CR1")
-		}},
-		{"timeout, block fails", timeoutReceiptCR1 + "\n", errBlock, func(root string) string {
-			return "; record blocked attempt: block rejected; " + wantTimeoutReport(root, "CR1")
-		}},
-		{"exit-1 receipt", exitOneReceiptCR1 + "\n", nil, func(string) string {
-			return "; attempt recorded as blocked"
-		}},
-		{"unreadable receipts", "", nil, func(string) string {
-			return "; attempt recorded as blocked; read command receipts for the timeout check: " + unreadable + "; run -agentflow-status"
-		}},
-		{"unreadable receipts, block fails", "", errBlock, func(string) string {
-			return "; record blocked attempt: block rejected; read command receipts for the timeout check: " + unreadable + "; run -agentflow-status"
-		}},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			root := t.TempDir()
-			if tt.receipts != "" {
-				writeAgentFile(t, root, "command-receipts.jsonl", tt.receipts)
-			} else if err := os.MkdirAll(filepath.Join(root, ".agent", "command-receipts.jsonl"), 0o700); err != nil {
-				t.Fatal(err)
-			}
-			gateErr := &agentflow.CommandError{Cmd: "run", Exit: 124, Stderr: "command timed out after 1 seconds"}
-			af := &fakeAF{failAt: map[string]error{"gate": gateErr, "block-step": tt.blockErr}}
-			plan := stopTestPlan()
-			d := &driver{af: af, plan: plan, root: root, runStep: func(context.Context, agentflow.Step, string, string) error {
-				return nil
-			}}
-			err := d.runAttempt(context.Background(), plan.Steps[0], "A-P1", "goal")
-			if want := prefix + tt.wantSuffix(root); err == nil || err.Error() != want {
-				t.Fatalf("err = %v\nwant %s", err, want)
-			}
-			var asCommand *agentflow.CommandError
-			if !errors.Is(err, gateErr) || !errors.As(err, &asCommand) {
-				t.Fatalf("err = %v lost the gate error", err)
-			}
-			if tt.blockErr != nil && !errors.Is(err, tt.blockErr) {
-				t.Fatalf("err = %v lost the block error", err)
-			}
-			if want := []string{"gate:P1:go test", "block-step:P1:A-P1:golem: gate execution failed"}; !equalSeq(af.seq, want) {
-				t.Fatalf("agentflow calls = %v, want %v", af.seq, want)
-			}
-			assertFreshBlockContext(t, af.blocks)
-		})
-	}
-}
-
-// #642: AgentFlow 1.0's block-step only checks that the attempt was opened,
-// and its ledger reader then rejects an event after a terminal one as
-// state_invalid. So a failed run or gate whose attempt root's ledger already
-// closed (an operator's break-glass fail-step, say) is reported and not
-// blocked, nor is an attempt whose ledger cannot be read. A terminal event for
-// another attempt or step, and every non-terminal event AgentFlow 1.0 reads
-// (execution.py OPEN_EVENTS and LEASE_EVENTS), is no reason to skip the block.
-func TestBlockAttemptSkipsClosedAttempt(t *testing.T) {
-	const claimed = `{"schema_version":"1.0.0","step_id":"P1","attempt_id":"A-P1","event":"claimed"}` + "\n"
-	event := func(name string) string {
-		return `{"schema_version":"1.0.0","step_id":"P1","attempt_id":"A-P1","event":"` + name + `"}` + "\n"
-	}
-	rows := []struct {
-		name, ledger string
-		suffix       string // after the cause; "" means the block runs
-	}{
-		{"completed", claimed + `{"schema_version":"1.0.0","step_id":"P1","attempt_id":"A-P1","event":"completed"}` + "\n", "; attempt already closed (completed); not blocked"},
-		{"blocked", claimed + `{"schema_version":"1.0.0","step_id":"P1","attempt_id":"A-P1","event":"blocked"}` + "\n", "; attempt already closed (blocked); not blocked"},
-		{"failed", claimed + `{"schema_version":"1.0.0","step_id":"P1","attempt_id":"A-P1","event":"failed"}` + "\n", "; attempt already closed (failed); not blocked"},
-		{"abandoned", claimed + `{"schema_version":"1.0.0","step_id":"P1","attempt_id":"A-P1","event":"abandoned"}` + "\n", "; attempt already closed (abandoned); not blocked"},
-		{"control: open attempt", claimed, ""},
-		{"control: amendment_started", event("amendment_started"), ""},
-		{"control: lease_renewed", claimed + event("lease_renewed"), ""},
-		{"control: verified", claimed + event("verified"), ""},
-		{"control: in_progress", claimed + event("in_progress"), ""},
-		{"control: another attempt failed", claimed + `{"schema_version":"1.0.0","step_id":"P1","attempt_id":"A-P2","event":"failed"}` + "\n", ""},
-		// Defence in depth, not a reachable state: attempt ids are global, so
-		// AgentFlow rejects this ledger ("attempt ... belongs to multiple
-		// steps", porcelain.py); Golem still matches on both ids.
-		{"defence in depth: same attempt id failed under another step", claimed + `{"schema_version":"1.0.0","step_id":"P2","attempt_id":"A-P1","event":"failed"}` + "\n", ""},
-		{"malformed row", claimed + "{\n", "; check attempt state before blocking: this workspace holds incompatible AgentFlow state (.agent/step-runs.jsonl:2 unreadable); finish that run, or build its proof, with the AgentFlow version that wrote it, then move .agent/ aside before starting an AgentFlow 1.x run; attempt not blocked; run -agentflow-status"},
-		// A newer AgentFlow 1.x may add a terminal event; an event Golem does not
-		// know fails closed (no block) rather than risk an event after a
-		// terminal one.
-		{"unknown event", claimed + event("cancelled"), `; check attempt state before blocking: attempt A-P1 has an event this Golem does not know ("cancelled"); attempt not blocked; run -agentflow-status`},
-		{"unknown event is escaped", claimed + event(`x\u001b[2J`), `; check attempt state before blocking: attempt A-P1 has an event this Golem does not know ("x\x1b[2J"); attempt not blocked; run -agentflow-status`},
-	}
-	providerDown, gateDown := errors.New("provider down"), errors.New("gate down")
-	paths := []struct {
-		name   string
-		runErr error
-		failAt map[string]error
-		cause  error
-		prefix string
-		before []string // calls before the block
-		block  string
-	}{
-		{"run error", providerDown, nil, providerDown, "step P1 attempt A-P1: provider down", nil, "block-step:P1:A-P1:golem: agent run failed"},
-		{"gate error", nil, map[string]error{"gate": gateDown}, gateDown, `step P1 attempt A-P1: gate "go test" failed: gate down`, []string{"gate:P1:go test"}, "block-step:P1:A-P1:golem: gate execution failed"},
-	}
-	for _, p := range paths {
-		for _, tt := range rows {
-			t.Run(p.name+"/"+tt.name, func(t *testing.T) {
-				root := t.TempDir()
-				writeAgentFile(t, root, "step-runs.jsonl", tt.ledger)
-				af := &fakeAF{failAt: p.failAt}
-				plan := stopTestPlan()
-				d := &driver{af: af, plan: plan, root: root, runStep: func(context.Context, agentflow.Step, string, string) error {
-					return p.runErr
-				}}
-				err := d.runAttempt(context.Background(), plan.Steps[0], "A-P1", "goal")
-				want, wantSeq := p.prefix+tt.suffix, p.before
-				if tt.suffix == "" {
-					want, wantSeq = p.prefix+"; attempt recorded as blocked", append(slices.Clone(p.before), p.block)
-				}
-				if err == nil || err.Error() != want {
-					t.Fatalf("err = %v\nwant %s", err, want)
-				}
-				if !errors.Is(err, p.cause) {
-					t.Fatalf("err = %v does not wrap the cause", err)
-				}
-				if !equalSeq(af.seq, wantSeq) {
-					t.Fatalf("agentflow calls = %v, want %v", af.seq, wantSeq)
-				}
-			})
-		}
-	}
-	// A review amendment as AgentFlow 1.0 writes it (execution.py claim_step,
-	// _close_step, amend_step): the step's earlier attempt completed, and the
-	// amendment's own failed gate must still block the amendment attempt.
-	t.Run("gate error/amendment attempt", func(t *testing.T) {
-		root := t.TempDir()
-		writeAgentFile(t, root, "step-runs.jsonl", `{"schema_version":"1.0.0","recorded_at":"2026-10-11T10:00:00Z","event":"claimed","step_id":"P1","attempt_id":"A1","agent_id":"golem","lease_expires_at":null}`+"\n"+
-			`{"schema_version":"1.0.0","recorded_at":"2026-10-11T10:01:00Z","event":"completed","step_id":"P1","attempt_id":"A1"}`+"\n"+
-			`{"schema_version":"1.0.0","recorded_at":"2026-10-11T10:02:00Z","event":"amendment_started","step_id":"P1","attempt_id":"A2","amends_attempt":"A1","amends_completed_at":"2026-10-11T10:01:00Z","agent_id":"golem","reason":"review RR-20261011T100200Z-0123abcd"}`+"\n")
-		af := &fakeAF{failAt: map[string]error{"gate": gateDown}}
-		plan := stopTestPlan()
-		d := &driver{af: af, plan: plan, root: root, runStep: func(context.Context, agentflow.Step, string, string) error {
-			return nil
-		}}
-		err := d.runAttempt(context.Background(), plan.Steps[0], "A2", "goal")
-		if want := `step P1 attempt A2: gate "go test" failed: gate down; attempt recorded as blocked`; err == nil || err.Error() != want {
-			t.Fatalf("err = %v\nwant %s", err, want)
-		}
-		if want := []string{"gate:P1:go test", "block-step:P1:A2:golem: gate execution failed"}; !equalSeq(af.seq, want) {
-			t.Fatalf("agentflow calls = %v, want %v", af.seq, want)
-		}
 	})
 }
