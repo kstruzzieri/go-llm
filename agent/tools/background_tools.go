@@ -614,5 +614,6 @@ func renderStopResult(st JobStatus) string {
 	if st.ExitKnown {
 		fmt.Fprintf(&b, "exit_code: %d\n", st.ExitCode)
 	}
+	b.WriteString(renderNotes(st.Notes))
 	return b.String()
 }

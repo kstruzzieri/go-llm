@@ -203,8 +203,8 @@ func (v *VerifyCommand) Preview() string {
 // A non-zero exit and the verifier's own timeout are outcomes and return a nil
 // error. Parent cancellation, a parent deadline, and infra failures (spawn
 // error, identity re-check failure) return an error for the consumer to
-// classify; once the command was launched, the result returned with that
-// error still carries its Notes.
+// classify; once the command was launched, that error comes with the partial
+// result, including Notes.
 func (v *VerifyCommand) Run(ctx context.Context) (VerifyResult, error) {
 	spec, err := recheckExecPlan(v.ws, v.pending)
 	if err != nil {

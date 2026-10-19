@@ -2023,6 +2023,25 @@ func seatbeltTestManager(t *testing.T, b *seatbeltBackend) *BackgroundManager {
 	return m
 }
 
+// seatbeltBgTools builds the background exec tool set over b, keyed by tool
+// name, optionally with scratch on a canonical snapshot base.
+func seatbeltBgTools(t *testing.T, b *seatbeltBackend, scratch bool) map[string]agent.Tool {
+	t.Helper()
+	toolsList, err := NewExecToolsWithBackgroundOptions(buildIsolationWorkspace(t), seatbeltTestManager(t, b),
+		ExecToolsOptions{Scratch: ScratchConfig{Enabled: scratch}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName := map[string]agent.Tool{}
+	for _, tool := range toolsList {
+		byName[tool.Spec().Name] = tool
+	}
+	if scratch {
+		canonicalScratchBase(t, byName["start_command"].(*StartCommand).scratchRT)
+	}
+	return byName
+}
+
 // canonicalScratchBase points rt's snapshots at a symlink-free base: Seatbelt
 // requires the rewritten workspace root to be canonical.
 func canonicalScratchBase(t *testing.T, rt *scratchRuntime) {
@@ -2132,16 +2151,7 @@ func TestSeatbeltCleanupNoteSurvivesScratchBackground(t *testing.T) {
 		proc:   &fakeProcess{pid: 4242, code: 5},
 		during: func(s execSpec) { temp = replacePrivateTemp(t, tmpdirOf(t, s.Env)) },
 	}
-	toolsList, err := NewExecToolsWithBackgroundOptions(buildIsolationWorkspace(t), seatbeltTestManager(t, b),
-		ExecToolsOptions{Scratch: ScratchConfig{Enabled: true}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	byName := map[string]agent.Tool{}
-	for _, tool := range toolsList {
-		byName[tool.Spec().Name] = tool
-	}
-	canonicalScratchBase(t, byName["start_command"].(*StartCommand).scratchRT)
+	byName := seatbeltBgTools(t, b, true)
 	final := bgAwaitExit(t, byName, bgStart(t, byName, `{"argv":["/bin/echo","hi"]}`))
 	if want := "exit_code: 5\nnote: " + replacedNote(t, temp) + "\n"; !strings.HasSuffix(final, want) {
 		t.Fatalf("command_status:\n%s\nwant suffix %q", final, want)
@@ -2203,15 +2213,7 @@ func TestSeatbeltAbandonedStartNoteReachesStartResult(t *testing.T) {
 				temp = replacePrivateTemp(t, tmpdirOf(t, s.Env))
 				cancel()
 			}}
-			toolsList, err := NewExecToolsWithBackgroundOptions(buildIsolationWorkspace(t), seatbeltTestManager(t, b),
-				ExecToolsOptions{Scratch: ScratchConfig{Enabled: scratch}})
-			if err != nil {
-				t.Fatal(err)
-			}
-			sc := toolsList[1].(*StartCommand)
-			if scratch {
-				canonicalScratchBase(t, sc.scratchRT)
-			}
+			sc := seatbeltBgTools(t, b, scratch)["start_command"].(*StartCommand)
 			raw := json.RawMessage(`{"argv":["/bin/echo","hi"]}`)
 			if _, err := sc.Plan(context.Background(), raw); err != nil {
 				t.Fatal(err)
@@ -2277,5 +2279,91 @@ func TestSeatbeltVerifierErrorRendersNotes(t *testing.T) {
 	want := "status: error\nreason: spawn failed\nnote: " + wantLoaderNote + "\nnote: " + replacedNote(t, temp) + "\n"
 	if !strings.HasSuffix(out, want) {
 		t.Fatalf("observation:\n%s\nwant suffix %q", out, want)
+	}
+}
+
+// TestSeatbeltCleanupNoteInStopResult: stop_command reports a job's final
+// state, so a refused cleanup must reach its result on both Stop branches:
+// a job the stop kills, and one that had already finished.
+func TestSeatbeltCleanupNoteInStopResult(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		proc  backgroundProcess
+		state string
+	}{
+		{"stopped", newFakeProc(4242), "state: killed\nexit_code: -1\n"},
+		{"already finished", &fakeProcess{pid: 4242, code: 5}, "state: exited\nexit_code: 5\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b, _ := testSeatbeltBackend(t, nil)
+			var temp string
+			b.starter = &captureStarter{proc: tc.proc, during: func(s execSpec) { temp = replacePrivateTemp(t, tmpdirOf(t, s.Env)) }}
+			byName := seatbeltBgTools(t, b, false)
+			handle := bgStart(t, byName, `{"argv":["/bin/echo","hi"]}`)
+			if tc.name == "already finished" {
+				bgAwaitExit(t, byName, handle)
+			}
+			res, err := byName["stop_command"].Invoke(context.Background(), json.RawMessage(fmt.Sprintf(`{"handle":%q}`, handle)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := "handle: " + handle + "\n" + tc.state + "note: " + replacedNote(t, temp) + "\n"
+			if res.IsError || res.Content != want {
+				t.Fatalf("stop result = %+v\nwant %q", res, want)
+			}
+		})
+	}
+}
+
+// TestSeatbeltSpawnFailureRendersNotes: run_command's own spawn failure is
+// where the loader note matters most; it renders after the failure text,
+// followed by the refused cleanup.
+func TestSeatbeltSpawnFailureRendersNotes(t *testing.T) {
+	b, _ := testSeatbeltBackend(t, nil)
+	var temp string
+	b.runner = &captureRunner{
+		err:    errors.New("spawn failed"),
+		during: func(s execSpec) { temp = replacePrivateTemp(t, tmpdirOf(t, s.Env)) },
+	}
+	rc := NewRunCommand(mustWorkspace(t, canonTempDirT(t)), b)
+	res := planAndInvoke(t, rc, `{"argv":["/bin/echo","hi"]}`)
+	want := "command failed to run: spawn failed\nnote: " + wantLoaderNote + "\nnote: " + replacedNote(t, temp)
+	if !res.IsError || res.Content != want {
+		t.Fatalf("result = %+v\nwant error %q", res, want)
+	}
+}
+
+// TestSeatbeltScratchSpawnFailureKeepsNotes: the scratched runErr branch
+// renders the same notes after the scratch line.
+func TestSeatbeltScratchSpawnFailureKeepsNotes(t *testing.T) {
+	rc, rt, _ := scratchExecTools(t, buildIsolationWorkspace(t), ScratchConfig{Enabled: true})
+	canonicalScratchBase(t, rt)
+	b, _ := testSeatbeltBackend(t, nil)
+	var temp string
+	b.runner = &captureRunner{
+		err:    errors.New("spawn failed"),
+		during: func(s execSpec) { temp = replacePrivateTemp(t, tmpdirOf(t, s.Env)) },
+	}
+	rc.runner = b
+	res := planAndInvoke(t, rc, `{"argv":["/bin/echo","hi"]}`)
+	want := "command failed to run: spawn failed\nnote: " + wantLoaderNote + "\nnote: " + replacedNote(t, temp)
+	if !res.IsError || !strings.HasPrefix(res.Content, "scratch: id=") || !strings.HasSuffix(res.Content, "\n"+want) {
+		t.Fatalf("result = %+v\nwant scratch line then %q", res, want)
+	}
+}
+
+// TestSeatbeltCanceledRunCarriesNoLoaderNote: a run the caller canceled says
+// nothing about the loader, so it carries no note; the error stays the
+// cancellation.
+func TestSeatbeltCanceledRunCarriesNoLoaderNote(t *testing.T) {
+	b, _ := testSeatbeltBackend(t, &captureRunner{res: execResult{ExitCode: -1}, err: context.Canceled})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	res, err := b.Run(ctx, seatbeltSpec(t, canonTempDirT(t)))
+	if !errors.Is(err, context.Canceled) || res.ExitCode != -1 {
+		t.Fatalf("Run = %+v, %v; want the canceled result unchanged", res, err)
+	}
+	if res.Notes != nil {
+		t.Fatalf("canceled run carries notes %q; want none", res.Notes)
 	}
 }

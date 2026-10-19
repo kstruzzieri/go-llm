@@ -364,3 +364,11 @@ func TestSeatbeltCleanupNoteIsBoundedAndControlSafe(t *testing.T) {
 			got, len(got), want)
 	}
 }
+
+// TestSeatbeltCleanupNoteNeverWrapsNilError: a note with no error to carry it
+// returns nil, never an error value whose Error() would dereference nil.
+func TestSeatbeltCleanupNoteNeverWrapsNilError(t *testing.T) {
+	if err := withCleanupNote(nil, "sandbox temp cleanup: x"); err != nil {
+		t.Fatalf("withCleanupNote(nil, note) = %#v; want nil", err)
+	}
+}

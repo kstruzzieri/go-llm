@@ -326,9 +326,10 @@ type cleanupNoteError struct {
 func (e *cleanupNoteError) Error() string { return e.err.Error() + "; " + e.note }
 func (e *cleanupNoteError) Unwrap() error { return e.err }
 
-// withCleanupNote joins note onto err; an empty note returns err unchanged.
+// withCleanupNote joins note onto err. A nil err or an empty note returns err
+// unchanged: a note never manufactures an error of its own.
 func withCleanupNote(err error, note string) error {
-	if note == "" {
+	if err == nil || note == "" {
 		return err
 	}
 	return &cleanupNoteError{err: err, note: note}

@@ -1764,6 +1764,41 @@ func TestRenderJobLineShowsExitCodeWhenKnown(t *testing.T) {
 	}
 }
 
+// TestRenderJobNotes pins backend notes (#576) in the human /jobs views: a
+// refused sandbox cleanup is a security signal, so the listing entry and both
+// final stop results show it, one indented line per note. Without notes the
+// renderings are unchanged.
+func TestRenderJobNotes(t *testing.T) {
+	notes := []string{"sandbox temp cleanup: replaced", "second"}
+	st := tools.JobStatus{Handle: "bg-3", State: "exited", PID: 9, ExitCode: 0, ExitKnown: true,
+		Argv: []string{"true"}, Notes: notes}
+	if got, want := renderJobLine(st),
+		"bg-3  exited exit=0  pid=9  true\n  note: sandbox temp cleanup: replaced\n  note: second"; got != want {
+		t.Errorf("renderJobLine = %q, want %q", got, want)
+	}
+	st.Notes = nil
+	if got, want := renderJobLine(st), "bg-3  exited exit=0  pid=9  true"; got != want {
+		t.Errorf("renderJobLine without notes = %q, want %q", got, want)
+	}
+	for _, tc := range []struct {
+		st   tools.JobStatus
+		want string
+	}{
+		{tools.JobStatus{Handle: "bg-4", State: "killed", ExitCode: -1, ExitKnown: true, Notes: notes},
+			"stopped bg-4 (killed)\n  note: sandbox temp cleanup: replaced\n  note: second\n"},
+		{tools.JobStatus{Handle: "bg-5", State: "exited", ExitCode: 5, ExitKnown: true, Notes: notes},
+			"already finished: bg-5 (exit 5)\n  note: sandbox temp cleanup: replaced\n  note: second\n"},
+		{tools.JobStatus{Handle: "bg-6", State: "exited", ExitCode: 5, ExitKnown: true},
+			"already finished: bg-6 (exit 5)\n"},
+	} {
+		var out strings.Builder
+		renderJobStopResult(&out, tc.st, nil)
+		if got := out.String(); got != tc.want {
+			t.Errorf("renderJobStopResult(%s) = %q, want %q", tc.st.Handle, got, tc.want)
+		}
+	}
+}
+
 func TestRenderJobArgvTruncatesRuneSafely(t *testing.T) {
 	// Multibyte runes at the cut boundary must never be split.
 	for _, r := range []string{"界", "\U0001F680"} { // CJK, emoji

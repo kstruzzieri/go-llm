@@ -969,16 +969,25 @@ func renderJobStopResult(out io.Writer, st tools.JobStatus, err error) {
 	default:
 		_, _ = fmt.Fprintf(out, "already finished: %s (%s)\n", st.Handle, st.State)
 	}
+	for _, n := range st.Notes {
+		_, _ = fmt.Fprintf(out, "  note: %s\n", n)
+	}
 }
 
-// renderJobLine renders one /jobs listing line: handle, state (with exit code
-// when known), pid, then argv through the dedicated control-safe renderer.
+// renderJobLine renders one /jobs listing entry: a line with the handle, state
+// (with exit code when known), pid, then argv through the dedicated
+// control-safe renderer, followed by one indented line per backend note
+// (#576). Notes arrive one-line and control-safe from agent/tools.
 func renderJobLine(st tools.JobStatus) string {
 	state := st.State
 	if st.ExitKnown {
 		state = fmt.Sprintf("%s exit=%d", st.State, st.ExitCode)
 	}
-	return fmt.Sprintf("%s  %s  pid=%d  %s", st.Handle, state, st.PID, renderJobArgv(st.Argv))
+	line := fmt.Sprintf("%s  %s  pid=%d  %s", st.Handle, state, st.PID, renderJobArgv(st.Argv))
+	for _, n := range st.Notes {
+		line += "\n  note: " + n
+	}
+	return line
 }
 
 // jobArgvDisplayCap bounds the rendered argv to one terminal-friendly line.
