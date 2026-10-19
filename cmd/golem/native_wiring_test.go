@@ -272,7 +272,9 @@ func golemWorkspace(t *testing.T) (configPath, root string) {
 
 // withGolem starts golem through run(), the production construction path,
 // with -profile trusted, the policy's -sandbox flags and extra, then calls fn
-// on the session run built and stops the run.
+// on the session run built and stops the run. It also pins the runtime's
+// policy: run() must hand the golem runtime the selected backend, and its
+// startup permissions: line must name it.
 func withGolem(t *testing.T, configPath, root string, policy agenttools.SandboxConfig, extra []string, fn func(*replSession)) {
 	t.Helper()
 	args := []string{"-config", configPath, "-root", root, "-profile", "trusted",
@@ -287,8 +289,15 @@ func withGolem(t *testing.T, configPath, root string, policy agenttools.SandboxC
 	args = append(args, extra...)
 	stdin, stdout, stderr := runTestFiles(t)
 	errStop := errors.New("stop after the wiring probe")
+	runtimeName := "host"
+	if nativeSandbox(policy) {
+		runtimeName = string(policy.Runtime)
+	}
 	err := run(args, stdin, stdout, stderr, runHooks{
 		afterSessionReady: func(sess *replSession) error {
+			if got := sess.runtime.EffectivePermissions().Command.Runtime; got != runtimeName {
+				t.Errorf("runtime command policy = %q, want %q", got, runtimeName)
+			}
 			fn(sess)
 			return errStop
 		},
@@ -296,10 +305,15 @@ func withGolem(t *testing.T, configPath, root string, policy agenttools.SandboxC
 	if !errors.Is(err, errStop) {
 		t.Fatalf("run %q = %v, want the probe stop\nstderr:\n%s", args, err, readRunTestFile(t, stderr))
 	}
+	var permissions []string
 	for _, line := range strings.Split(readRunTestFile(t, stderr), "\n") {
 		if strings.HasPrefix(line, "permissions: ") {
 			t.Logf("%s", line)
+			permissions = append(permissions, line)
 		}
+	}
+	if len(permissions) == 0 || !strings.Contains(permissions[0], " commands="+runtimeName+" ") {
+		t.Fatalf("startup permissions: lines %q, want the first to carry \" commands=%s \"", permissions, runtimeName)
 	}
 }
 
@@ -432,34 +446,42 @@ func TestNativeWiringStartupWriteOnlyVerification(t *testing.T) {
 	})
 }
 
-// lateMountProbes mounts order on a session under policy, then runs the
-// foreground probe through the late run_command and the verifier probe
-// through the slot /allow-write armed.
+// lateMountProbes starts golem through run() under policy with nothing
+// mounted, so both mounts take the REPL's late paths on the session run()
+// built (its sess.sandbox from main.go), then runs the foreground probe
+// through the late run_command and the verifier probe through the slot
+// /allow-write armed.
 func lateMountProbes(t *testing.T, policy agenttools.SandboxConfig, order []string, wantSink bool, wantConnects int) {
 	t.Helper()
 	ctx := context.Background()
-	sess := newNativeSession(t, policy)
+	config, root := golemWorkspace(t)
 	fg, verify := newWiringProbe(t), newWiringProbe(t)
-	verifyControl := filepath.Join(sess.root, "verified.txt")
-	writeVerifyArgv(t, sess.root, verify.argv(verifyControl))
-	for _, command := range order {
-		var out strings.Builder
-		_, _ = dispatchSlash(ctx, &out, sess, command)
-		want := map[string]string{"/allow-exec": "exec enabled (", "/allow-write": "writes enabled ("}[command]
-		if !strings.Contains(out.String(), want) {
-			t.Fatalf("%s = %q, want it to report %q", command, out.String(), want)
-		}
-	}
+	verifyControl := filepath.Join(root, "verified.txt")
 	label := "host"
 	if nativeSandbox(policy) {
 		label = string(policy.Runtime)
 	}
-	fg.check(t, label+" exec", foregroundProbe(t, sess, fg), wantSink, wantConnects)
-	obs, err := sess.verifier.Verify(ctx, allowAllApprover{})
-	if err != nil {
-		t.Fatalf("Verify: %v", err)
-	}
-	t.Logf("verification:\n%s", obs)
+	fgControl := ""
+	withGolem(t, config, root, policy, nil, func(sess *replSession) {
+		// Stands in for the user at a terminal, which late mounts require.
+		sess.stdinTerminal = true
+		writeVerifyArgv(t, sess.root, verify.argv(verifyControl))
+		for _, command := range order {
+			var out strings.Builder
+			_, _ = dispatchSlash(ctx, &out, sess, command)
+			want := map[string]string{"/allow-exec": "exec enabled (", "/allow-write": "writes enabled ("}[command]
+			if !strings.Contains(out.String(), want) {
+				t.Fatalf("%s = %q, want it to report %q", command, out.String(), want)
+			}
+		}
+		fgControl = foregroundProbe(t, sess, fg)
+		obs, err := sess.verifier.Verify(ctx, allowAllApprover{})
+		if err != nil {
+			t.Fatalf("Verify: %v", err)
+		}
+		t.Logf("verification:\n%s", obs)
+	})
+	fg.check(t, label+" exec", fgControl, wantSink, wantConnects)
 	verify.check(t, label+" verifier", verifyControl, wantSink, wantConnects)
 }
 
