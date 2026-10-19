@@ -6,12 +6,15 @@ package tools
 // probe and process wiring live in exec_darwin.go.
 
 import (
+	"errors"
 	"fmt"
 	"path"
 	"path/filepath"
 	"slices"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/kstruzzieri/go-llm/agent"
 )
 
 // posixCleanAbs reports whether p is an absolute POSIX path in canonical
@@ -264,6 +267,78 @@ func seatbeltConfigSupport(cfg SandboxConfig) error {
 	}
 	if len(unsupported) != 0 {
 		return fmt.Errorf("tools: seatbelt cannot enforce %s", strings.Join(unsupported, ", "))
+	}
+	return nil
+}
+
+// seatbeltLoaderNote accompanies every nonzero-exit or spawn-failed Seatbelt
+// foreground run (#576): the deny-default profile may have refused the
+// dynamic loader, an SDK or a cache, and the OS does not always say so. The
+// failure keeps its ordinary observation; the note only stops it from
+// reading as the command's whole story, and never as a pass.
+const seatbeltLoaderNote = "native sandbox (seatbelt) may deny loader, SDK or cache access outside its allowed roots; this is not a passing check"
+
+// cleanupNoteMax bounds one cleanup note so a long cause cannot crowd the
+// observation it rides on.
+const cleanupNoteMax = 256
+
+// cleanupNote renders a private-temp cleanup failure as one bounded,
+// control-safe note line: agent.SanitizePreview escapes, a line break is
+// escaped too, and the text is cut to cleanupNoteMax bytes on a rune
+// boundary. A nil err (cleanup succeeded) renders "".
+func cleanupNote(err error) string {
+	if err == nil {
+		return ""
+	}
+	n := "sandbox temp cleanup: " + strings.ReplaceAll(agent.SanitizePreview(err.Error()), "\n", `\n`)
+	if len(n) <= cleanupNoteMax {
+		return n
+	}
+	end := cleanupNoteMax
+	for end > 0 && !utf8.RuneStart(n[end]) {
+		end--
+	}
+	return n[:end]
+}
+
+// cleanupReporter is a background process whose Wait runs a guarded cleanup:
+// *seatbeltProcess, and *scratchProcess by delegation. After Wait returns,
+// cleanupNote is that cleanup's note, or "" when it succeeded.
+type cleanupReporter interface{ cleanupNote() string }
+
+// cleanupNoteOf returns p's cleanup note once p's Wait has returned, or ""
+// when p reports none.
+func cleanupNoteOf(p backgroundProcess) string {
+	if r, ok := p.(cleanupReporter); ok {
+		return r.cleanupNote()
+	}
+	return ""
+}
+
+// cleanupNoteError joins a cleanup note onto the error it accompanies.
+// errors.Is and errors.As still reach the wrapped error, and a caller that
+// renders only its own text for that error recovers the note with notesOf.
+type cleanupNoteError struct {
+	err  error
+	note string
+}
+
+func (e *cleanupNoteError) Error() string { return e.err.Error() + "; " + e.note }
+func (e *cleanupNoteError) Unwrap() error { return e.err }
+
+// withCleanupNote joins note onto err; an empty note returns err unchanged.
+func withCleanupNote(err error, note string) error {
+	if note == "" {
+		return err
+	}
+	return &cleanupNoteError{err: err, note: note}
+}
+
+// notesOf returns the cleanup note err carries, if any, as a notes list.
+func notesOf(err error) []string {
+	var ne *cleanupNoteError
+	if errors.As(err, &ne) {
+		return []string{ne.note}
 	}
 	return nil
 }

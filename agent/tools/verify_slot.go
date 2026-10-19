@@ -204,7 +204,7 @@ func (s *VerifierSlot) Verify(ctx context.Context, approver agent.Approver) (str
 			errors.Is(runErr, context.DeadlineExceeded) {
 			return "", runErr
 		}
-		return verifyRender(e, "error", "reason: "+sanitizeVerifyLine(runErr.Error())+"\n"), nil
+		return verifyRender(e, "error", "reason: "+sanitizeVerifyLine(runErr.Error())+"\n"+renderNotes(res.Notes)), nil
 	}
 	return verifyRenderResult(e, res), nil
 }
@@ -237,12 +237,14 @@ func verifyRender(e verifyExecutor, status, tail string) string {
 	return out
 }
 
-// verifyRenderResult renders a completed run. A pass carries status and exit
-// code only: its output is noise the model pays for. A failure carries the
-// bounded streams, because that is the whole point of the check.
+// verifyRenderResult renders a completed run. A pass carries status, exit
+// code and backend notes only: its output is noise the model pays for, but a
+// cleanup failure must not hide behind a pass. A failure carries the notes
+// and then the bounded streams, because that is the whole point of the check.
 func verifyRenderResult(e verifyExecutor, res VerifyResult) string {
+	notes := renderNotes(res.Notes)
 	if res.ExitCode == 0 && !res.TimedOut {
-		return verifyRender(e, "passed", "exit_code: 0\n")
+		return verifyRender(e, "passed", "exit_code: 0\n"+notes)
 	}
 	body, capped := verifyOutputBody(res)
 	// exit_code is omitted on a timeout: the process was killed, so the
@@ -253,11 +255,11 @@ func verifyRenderResult(e verifyExecutor, res VerifyResult) string {
 		head = ""
 	}
 	truncated := res.Truncated || capped
-	tail := fmt.Sprintf("%stimed_out: %t\noutput_truncated: %t\n", head, res.TimedOut, truncated)
+	tail := fmt.Sprintf("%stimed_out: %t\noutput_truncated: %t\n", head, res.TimedOut, truncated) + notes
 	body, observationCapped := capVerifyOutput(body, verifyObservationCap-len(verifyRender(e, "failed", tail)))
 	if observationCapped {
 		truncated = true
-		tail = fmt.Sprintf("%stimed_out: %t\noutput_truncated: %t\n", head, res.TimedOut, truncated)
+		tail = fmt.Sprintf("%stimed_out: %t\noutput_truncated: %t\n", head, res.TimedOut, truncated) + notes
 	}
 	return verifyRender(e, "failed", tail+body)
 }

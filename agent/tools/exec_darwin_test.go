@@ -5,6 +5,7 @@ package tools
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1979,4 +1981,301 @@ func TestSeatbeltSymlinkChainResolvesDotDotPhysically(t *testing.T) {
 		t.Errorf("directory link %s literal is under %q; want file-read-metadata", dl, rule)
 	}
 	assertEmptyDir(t, base)
+}
+
+// --- #576: Seatbelt cleanup diagnostics and the loader note ---
+
+// wantLoaderNote is seatbeltLoaderNote written out, so a reworded constant
+// cannot pass these tests.
+const wantLoaderNote = "native sandbox (seatbelt) may deny loader, SDK or cache access outside its allowed roots; this is not a passing check"
+
+// replacePrivateTemp swaps the private temp at dir for a foreign directory
+// at the same pathname, so the guarded cleanup must refuse it and report why.
+func replacePrivateTemp(t *testing.T, dir string) string {
+	t.Helper()
+	if err := os.Rename(dir, dir+"-stolen"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// replacedNote is the note a replaced private temp at dir must produce,
+// written out from the guard's error text. The fixture path must leave the
+// note under the 256-byte cut, or the comparison would test truncation.
+func replacedNote(t *testing.T, dir string) string {
+	t.Helper()
+	note := "sandbox temp cleanup: tools: seatbelt temp " + dir + " was replaced; cleanup abandoned"
+	if len(note) > 256 {
+		t.Fatalf("fixture temp path too long for an uncut note (%d bytes): %s", len(note), dir)
+	}
+	return note
+}
+
+// seatbeltTestManager is a manager over b bound to the normalized Seatbelt
+// policy, the pairing newExecBackend produces, with b's fake delegates.
+func seatbeltTestManager(t *testing.T, b *seatbeltBackend) *BackgroundManager {
+	t.Helper()
+	m := newBackgroundManagerWithBackend(bindExecBackend(b, mustNormalizeSandbox(t, seatbeltTestCfg())), rand.Reader)
+	t.Cleanup(m.Shutdown)
+	return m
+}
+
+// canonicalScratchBase points rt's snapshots at a symlink-free base: Seatbelt
+// requires the rewritten workspace root to be canonical.
+func canonicalScratchBase(t *testing.T, rt *scratchRuntime) {
+	t.Helper()
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt.tempBase = base
+}
+
+// TestSeatbeltCleanupFailureIsReported: the foreground replacement race
+// leaves the command's result untouched and reports the refused cleanup as
+// the only note (exit 0 adds no loader note).
+func TestSeatbeltCleanupFailureIsReported(t *testing.T) {
+	b, _ := testSeatbeltBackend(t, nil)
+	var temp string
+	b.runner = &captureRunner{during: func(s execSpec) { temp = replacePrivateTemp(t, tmpdirOf(t, s.Env)) }}
+	res, err := b.Run(context.Background(), seatbeltSpec(t, canonTempDirT(t)))
+	if err != nil || res.ExitCode != 0 || res.TimedOut {
+		t.Fatalf("cleanup outcome overwrote the command result: res=%+v err=%v", res, err)
+	}
+	if want := []string{replacedNote(t, temp)}; !slices.Equal(res.Notes, want) {
+		t.Fatalf("Notes = %q, want %q", res.Notes, want)
+	}
+}
+
+// TestSeatbeltCleanupNoteJoinsPrepareFailure: a prepare failure whose own
+// cleanup is refused keeps its error class and carries the note, on both
+// lifetimes. The collector hook is the last step before the failure, so it
+// can swap the temp prepare just made.
+func TestSeatbeltCleanupNoteJoinsPrepareFailure(t *testing.T) {
+	for _, lifetime := range seatbeltLifetimes {
+		t.Run(lifetime, func(t *testing.T) {
+			b, base := testSeatbeltBackend(t, &captureRunner{})
+			b.starter = &captureStarter{proc: &fakeProcess{}}
+			collectorErr := errors.New("collector down")
+			var temp string
+			b.systemRoots = func(string) ([]string, error) {
+				made, err := filepath.Glob(filepath.Join(base, "go-llm-seatbelt-*"))
+				if err != nil || len(made) != 1 {
+					t.Fatalf("private temps = %q, %v; want exactly one", made, err)
+				}
+				temp = replacePrivateTemp(t, made[0])
+				return nil, collectorErr
+			}
+			var err error
+			if lifetime == "foreground" {
+				_, err = b.Run(context.Background(), seatbeltSpec(t, canonTempDirT(t)))
+			} else {
+				_, err = b.Start(seatbeltSpec(t, canonTempDirT(t)), io.Discard, io.Discard)
+			}
+			if !errors.Is(err, collectorErr) {
+				t.Fatalf("err = %v; want it to wrap %v", err, collectorErr)
+			}
+			if want := "collector down; " + replacedNote(t, temp); err.Error() != want {
+				t.Fatalf("err = %q\nwant %q", err, want)
+			}
+		})
+	}
+}
+
+// TestSeatbeltCleanupNoteOnTimeout: a timed-out run_command still reports
+// the refused cleanup after its timeout text.
+func TestSeatbeltCleanupNoteOnTimeout(t *testing.T) {
+	b, _ := testSeatbeltBackend(t, nil)
+	var temp string
+	b.runner = &captureRunner{
+		res:    execResult{ExitCode: -1, TimedOut: true},
+		err:    context.DeadlineExceeded,
+		during: func(s execSpec) { temp = replacePrivateTemp(t, tmpdirOf(t, s.Env)) },
+	}
+	rc := NewRunCommand(mustWorkspace(t, canonTempDirT(t)), b)
+	res := planAndInvoke(t, rc, `{"argv":["/bin/echo","hi"],"timeout_seconds":7}`)
+	if want := "command timed out after 7s\nnote: " + replacedNote(t, temp); !res.IsError || res.Content != want {
+		t.Fatalf("result = %+v\nwant error %q", res, want)
+	}
+}
+
+// TestSeatbeltCleanupNoteOnScratchForeground: the scratched foreground path
+// renders the same notes as the plain one, with the exit code unchanged.
+func TestSeatbeltCleanupNoteOnScratchForeground(t *testing.T) {
+	rc, rt, _ := scratchExecTools(t, buildIsolationWorkspace(t), ScratchConfig{Enabled: true})
+	canonicalScratchBase(t, rt)
+	b, _ := testSeatbeltBackend(t, nil)
+	var temp string
+	b.runner = &captureRunner{
+		res:    execResult{ExitCode: 4},
+		during: func(s execSpec) { temp = replacePrivateTemp(t, tmpdirOf(t, s.Env)) },
+	}
+	rc.runner = b
+	res := planAndInvoke(t, rc, `{"argv":["/bin/echo","hi"]}`)
+	want := "exit code: 4\nnote: " + wantLoaderNote + "\nnote: " + replacedNote(t, temp) +
+		"\n--- stdout ---\n\n--- stderr ---\n"
+	if res.IsError || !strings.HasPrefix(res.Content, "scratch: id=") || !strings.HasSuffix(res.Content, want) {
+		t.Fatalf("result = %+v\nwant scratch line then %q", res, want)
+	}
+}
+
+// TestSeatbeltCleanupNoteSurvivesScratchBackground: scratch plus background
+// plus a refused cleanup reaches command_status after the unchanged exit
+// code, through the scratchProcess wrapper.
+func TestSeatbeltCleanupNoteSurvivesScratchBackground(t *testing.T) {
+	b, _ := testSeatbeltBackend(t, nil)
+	var temp string
+	b.starter = &captureStarter{
+		proc:   &fakeProcess{pid: 4242, code: 5},
+		during: func(s execSpec) { temp = replacePrivateTemp(t, tmpdirOf(t, s.Env)) },
+	}
+	toolsList, err := NewExecToolsWithBackgroundOptions(buildIsolationWorkspace(t), seatbeltTestManager(t, b),
+		ExecToolsOptions{Scratch: ScratchConfig{Enabled: true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName := map[string]agent.Tool{}
+	for _, tool := range toolsList {
+		byName[tool.Spec().Name] = tool
+	}
+	canonicalScratchBase(t, byName["start_command"].(*StartCommand).scratchRT)
+	final := bgAwaitExit(t, byName, bgStart(t, byName, `{"argv":["/bin/echo","hi"]}`))
+	if want := "exit_code: 5\nnote: " + replacedNote(t, temp) + "\n"; !strings.HasSuffix(final, want) {
+		t.Fatalf("command_status:\n%s\nwant suffix %q", final, want)
+	}
+}
+
+// TestSeatbeltStartFailureJoinsCleanup: a spawn failure whose cleanup is
+// refused keeps the starter's error class and carries the note.
+func TestSeatbeltStartFailureJoinsCleanup(t *testing.T) {
+	spawnErr := errors.New("spawn failed")
+	b, _ := testSeatbeltBackend(t, nil)
+	var temp string
+	b.starter = &captureStarter{err: spawnErr, during: func(s execSpec) { temp = replacePrivateTemp(t, tmpdirOf(t, s.Env)) }}
+	proc, err := b.Start(seatbeltSpec(t, canonTempDirT(t)), io.Discard, io.Discard)
+	if proc != nil || !errors.Is(err, spawnErr) {
+		t.Fatalf("Start = %v, %v; want no process and the spawn error", proc, err)
+	}
+	if want := "spawn failed; " + replacedNote(t, temp); err.Error() != want {
+		t.Fatalf("err = %q\nwant %q", err, want)
+	}
+}
+
+// TestSeatbeltAbandonedStartJoinsCleanup: a start canceled between spawn and
+// registration is reaped synchronously; its refused cleanup joins the
+// cancellation without hiding it.
+func TestSeatbeltAbandonedStartJoinsCleanup(t *testing.T) {
+	b, _ := testSeatbeltBackend(t, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var temp string
+	inner := &fakeProcess{pid: 4242}
+	b.starter = &captureStarter{proc: inner, during: func(s execSpec) {
+		temp = replacePrivateTemp(t, tmpdirOf(t, s.Env))
+		cancel()
+	}}
+	st, err := seatbeltTestManager(t, b).start(ctx, seatbeltSpec(t, canonTempDirT(t)), "(workspace root)")
+	if st.Handle != "" || !errors.Is(err, context.Canceled) {
+		t.Fatalf("start = %+v, %v; want no job and the cancellation", st, err)
+	}
+	if want := "context canceled; " + replacedNote(t, temp); err.Error() != want {
+		t.Fatalf("err = %q\nwant %q", err, want)
+	}
+	if inner.killCalls != 1 {
+		t.Fatalf("abandoned process kills = %d, want 1", inner.killCalls)
+	}
+}
+
+// TestSeatbeltAbandonedStartNoteReachesStartResult: the abandoned job is
+// never registered, so command_status cannot show its note; start_command's
+// canceled result must, on the plain and the scratched path.
+func TestSeatbeltAbandonedStartNoteReachesStartResult(t *testing.T) {
+	for _, scratch := range []bool{false, true} {
+		t.Run(fmt.Sprintf("scratch=%t", scratch), func(t *testing.T) {
+			b, _ := testSeatbeltBackend(t, nil)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			var temp string
+			b.starter = &captureStarter{proc: &fakeProcess{pid: 4242}, during: func(s execSpec) {
+				temp = replacePrivateTemp(t, tmpdirOf(t, s.Env))
+				cancel()
+			}}
+			toolsList, err := NewExecToolsWithBackgroundOptions(buildIsolationWorkspace(t), seatbeltTestManager(t, b),
+				ExecToolsOptions{Scratch: ScratchConfig{Enabled: scratch}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			sc := toolsList[1].(*StartCommand)
+			if scratch {
+				canonicalScratchBase(t, sc.scratchRT)
+			}
+			raw := json.RawMessage(`{"argv":["/bin/echo","hi"]}`)
+			if _, err := sc.Plan(context.Background(), raw); err != nil {
+				t.Fatal(err)
+			}
+			res, err := sc.Invoke(ctx, raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if want := "start canceled\nnote: " + replacedNote(t, temp); !res.IsError || res.Content != want {
+				t.Fatalf("result = %+v\nwant error %q", res, want)
+			}
+		})
+	}
+}
+
+// TestSeatbeltVerifierLoaderFailureIsNotPass runs a real failing command
+// through a Seatbelt verifier slot: the observation is a failure carrying the
+// loader note, never the pass marker.
+func TestSeatbeltVerifierLoaderFailureIsNotPass(t *testing.T) {
+	requireSeatbeltCapability(t)
+	root := canonTempDirT(t)
+	slot := newTestSlot(t, root, seatbeltTestCfg())
+	cmd, err := NewSandboxedVerifyCommand(mustWorkspace(t, root), seatbeltTestCfg(), []string{"/usr/bin/false"}, "", 30*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := slot.Set(cmd); err != nil {
+		t.Fatal(err)
+	}
+	out, err := slot.Verify(context.Background(), approved())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "status: failed\nexit_code: 1\ntimed_out: false\noutput_truncated: false\nnote: " + wantLoaderNote + "\n"
+	if !strings.HasSuffix(out, want) || strings.Contains(out, "status: passed\nexit_code: 0\n") {
+		t.Fatalf("observation:\n%s\nwant suffix %q and no pass marker", out, want)
+	}
+}
+
+// TestSeatbeltVerifierErrorRendersNotes: a verifier spawn failure is an error
+// observation that still carries the loader note and the refused cleanup.
+func TestSeatbeltVerifierErrorRendersNotes(t *testing.T) {
+	b, _ := testSeatbeltBackend(t, nil)
+	var temp string
+	b.runner = &captureRunner{
+		err:    errors.New("spawn failed"),
+		during: func(s execSpec) { temp = replacePrivateTemp(t, tmpdirOf(t, s.Env)) },
+	}
+	root := canonTempDirT(t)
+	cmd, err := newVerifyCommandWithBackend(mustWorkspace(t, root),
+		bindExecBackend(b, mustNormalizeSandbox(t, seatbeltTestCfg())), []string{"/bin/echo", "hi"}, "", 30*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	slot := newTestSlot(t, root, seatbeltTestCfg())
+	if err := slot.Set(cmd); err != nil {
+		t.Fatal(err)
+	}
+	out, err := slot.Verify(context.Background(), approved())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "status: error\nreason: spawn failed\nnote: " + wantLoaderNote + "\nnote: " + replacedNote(t, temp) + "\n"
+	if !strings.HasSuffix(out, want) {
+		t.Fatalf("observation:\n%s\nwant suffix %q", out, want)
+	}
 }

@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -345,5 +346,21 @@ func TestRenderSandboxLineSeatbeltTempPrivate(t *testing.T) {
 	want := `runtime="seatbelt" network=denied memory_cap=none cpu_limit=none drop_caps=[] temp=private`
 	if got != want {
 		t.Fatalf("renderSandboxLine() = %q, want %q", got, want)
+	}
+}
+
+// TestSeatbeltCleanupNoteIsBoundedAndControlSafe pins the cleanup note text
+// (#576): control bytes, including a line break, render as inert escapes, and
+// a long cause is cut to 256 bytes on a rune boundary. The 4-byte rune makes
+// a plain byte cut at 256 split one.
+func TestSeatbeltCleanupNoteIsBoundedAndControlSafe(t *testing.T) {
+	got := cleanupNote(errors.New("temp\x1b[2J\r\ngone"))
+	if want := `sandbox temp cleanup: temp\x1b[2J\r\ngone`; got != want {
+		t.Fatalf("control bytes not neutralized\n got: %q\nwant: %q", got, want)
+	}
+	got = cleanupNote(errors.New(strings.Repeat("\U0001D11E", 100)))
+	if want := "sandbox temp cleanup: " + strings.Repeat("\U0001D11E", 58); got != want {
+		t.Fatalf("long note not cut at the last whole rune within 256 bytes\n got: %q (%d bytes)\nwant: %q",
+			got, len(got), want)
 	}
 }

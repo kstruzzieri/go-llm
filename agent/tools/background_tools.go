@@ -248,7 +248,7 @@ func (t *StartCommand) Invoke(ctx context.Context, raw json.RawMessage) (agent.T
 	st, err := t.manager.start(ctx, spec, bgCwdDisplay(pp.dirLabel))
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return errResult("start canceled"), nil
+			return startCanceled(err), nil
 		}
 		return errResult(err.Error()), nil
 	}
@@ -278,13 +278,20 @@ func (t *StartCommand) invokeScratched(ctx context.Context, pp execPending, spec
 	if err != nil {
 		session.discard()
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return errResult("start canceled"), nil
+			return startCanceled(err), nil
 		}
 		return errResult(err.Error()), nil
 	}
 	return agent.ToolResult{
 		Content: renderScratchResultLine(t.scratchRT, session.id) + renderStartResult(st),
 	}, nil
+}
+
+// startCanceled renders a canceled start. The abandoned job was never
+// registered, so a cleanup note its synchronous reap reported reaches the
+// model only here (#576).
+func startCanceled(err error) agent.ToolResult {
+	return execErr("start canceled", notesOf(err))
 }
 
 // renderStartPreview is the human approval preview for start_command — kept
@@ -564,6 +571,7 @@ func renderStatusResult(st JobStatus) (string, bool) {
 	if st.ExitKnown {
 		tail += fmt.Sprintf("exit_code: %d\n", st.ExitCode)
 	}
+	tail += renderNotes(st.Notes) // inside the budget below
 	cwd := fmt.Sprintf("%q", st.Cwd)
 	const marker = `"[truncated]"`
 	const argvMarker = `["[truncated]"]`

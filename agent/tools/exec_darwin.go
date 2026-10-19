@@ -167,9 +167,10 @@ func seatbeltTempCleanup(dir string, created os.FileInfo) func() error {
 
 // prepare builds the per-invocation private temp directory, SBPL profile, and
 // wrapper spec. On success the returned cleanup is the guarded temp remover;
-// on failure prepare has already attempted guarded cleanup itself and nothing
-// may spawn. The stamped WorkspaceRoot is consumed as-is — re-resolving it
-// here could silently change the policy after approval.
+// on failure prepare has already attempted guarded cleanup itself, joined a
+// refused cleanup's note onto the error it returns, and nothing may spawn.
+// The stamped WorkspaceRoot is consumed as-is — re-resolving it here could
+// silently change the policy after approval.
 //
 // Before constructing the profile, prepare requires the executable target it
 // resolves to be the approved object (spec.ExeIdentity, os.SameFile): the
@@ -204,8 +205,7 @@ func (b *seatbeltBackend) prepare(spec execSpec) (execSpec, func() error, error)
 	}
 	cleanup := seatbeltTempCleanup(tempDir, created)
 	fail := func(err error) (execSpec, func() error, error) {
-		_ = cleanup()
-		return execSpec{}, nil, err
+		return execSpec{}, nil, withCleanupNote(err, cleanupNote(cleanup()))
 	}
 	canonTemp, err := filepath.EvalSymlinks(tempDir)
 	if err != nil {
@@ -329,15 +329,23 @@ func seatbeltSymlinkChain(spelled, canonExe string) ([]string, error) {
 }
 
 // Run executes one foreground command under its per-invocation profile. A
-// cleanup failure never overwrites the command's observed result: the private
-// directory is 0700 and host temp reaping is the documented fallback.
+// cleanup failure never overwrites the command's observed result (the
+// private directory is 0700 and host temp reaping is the documented
+// fallback); it is reported as a note. A nonzero exit or a spawn failure
+// also carries seatbeltLoaderNote. Exit code, TimedOut and the error are
+// returned exactly as the delegate produced them.
 func (b *seatbeltBackend) Run(ctx context.Context, spec execSpec) (execResult, error) {
 	wrapped, cleanup, err := b.prepare(spec)
 	if err != nil {
 		return execResult{}, err
 	}
 	res, runErr := b.runner.Run(ctx, wrapped)
-	_ = cleanup()
+	if (runErr == nil && res.ExitCode != 0) || (runErr != nil && !res.TimedOut && ctx.Err() == nil) {
+		res.Notes = append(res.Notes, seatbeltLoaderNote)
+	}
+	if n := cleanupNote(cleanup()); n != "" {
+		res.Notes = append(res.Notes, n)
+	}
 	return res, runErr
 }
 
@@ -345,21 +353,28 @@ func (b *seatbeltBackend) Run(ctx context.Context, spec execSpec) (execResult, e
 // private-temp cleanup, run exactly once after the underlying Wait. PID and
 // Kill delegate unchanged via embedding; the manager's group-termination and
 // reap semantics are untouched. A cleanup failure never rewrites the
-// process's exit code, managerKilled flag, or error taxonomy.
+// process's exit code, managerKilled flag, or error taxonomy; it is reported
+// through cleanupNote.
 type seatbeltProcess struct {
 	backgroundProcess
 	cleanup func() error
+	note    string // set by Wait; read only after Wait returns
 }
 
 func (p *seatbeltProcess) Wait() (int, bool, error) {
 	code, managerKilled, err := p.backgroundProcess.Wait()
-	_ = p.cleanup()
+	p.note = cleanupNote(p.cleanup())
 	return code, managerKilled, err
 }
 
+// cleanupNote implements cleanupReporter: the note for a refused or failed
+// private-temp cleanup, or "".
+func (p *seatbeltProcess) cleanupNote() string { return p.note }
+
 // Start launches one background command under its per-invocation profile
-// through the same preparation as Run. Spawn failure cleans the private temp;
-// after publication the returned process owns cleanup at Wait/reap time.
+// through the same preparation as Run. Spawn failure cleans the private temp
+// and joins a refused cleanup's note onto the starter's error; after
+// publication the returned process owns cleanup at Wait/reap time.
 func (b *seatbeltBackend) Start(spec execSpec, stdout, stderr io.Writer) (backgroundProcess, error) {
 	wrapped, cleanup, err := b.prepare(spec)
 	if err != nil {
@@ -367,8 +382,7 @@ func (b *seatbeltBackend) Start(spec execSpec, stdout, stderr io.Writer) (backgr
 	}
 	proc, err := b.starter.Start(wrapped, stdout, stderr)
 	if err != nil {
-		_ = cleanup()
-		return nil, err
+		return nil, withCleanupNote(err, cleanupNote(cleanup()))
 	}
 	return &seatbeltProcess{backgroundProcess: proc, cleanup: cleanup}, nil
 }

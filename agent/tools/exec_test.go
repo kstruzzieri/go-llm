@@ -167,6 +167,22 @@ func TestFormatExecResultTruncationMarkers(t *testing.T) {
 	}
 }
 
+// TestFormatExecResultNotes pins the backend note lines (#576): no notes
+// renders byte-identically to the pre-notes format, and each note gets its
+// own line ahead of the command-controlled streams, where output cannot
+// forge one.
+func TestFormatExecResultNotes(t *testing.T) {
+	res := execResult{ExitCode: 3, Stdout: []byte("out"), Stderr: []byte("err")}
+	if got, want := formatExecResult(res), "exit code: 3\n--- stdout ---\nout\n--- stderr ---\nerr"; got != want {
+		t.Fatalf("empty notes changed the rendering\n got: %q\nwant: %q", got, want)
+	}
+	res.Notes = []string{"first note", "second note"}
+	want := "exit code: 3\nnote: first note\nnote: second note\n--- stdout ---\nout\n--- stderr ---\nerr"
+	if got := formatExecResult(res); got != want {
+		t.Fatalf("notes rendering\n got: %q\nwant: %q", got, want)
+	}
+}
+
 func TestRenderExecPreview(t *testing.T) {
 	p := execPending{
 		path:        "/usr/local/go/bin/go",

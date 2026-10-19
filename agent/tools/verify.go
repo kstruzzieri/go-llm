@@ -47,6 +47,10 @@ type VerifyResult struct {
 	// TimedOut reports that the command exceeded the verifier's OWN deadline.
 	// It is an outcome, not a failure: Run returns a nil error for it.
 	TimedOut bool
+	// Notes are backend diagnostics for this run (#576): the Seatbelt loader
+	// note on a failed run, a refused private-temp cleanup. Run fills them
+	// alongside an infra error too; they never change ExitCode or TimedOut.
+	Notes []string
 }
 
 // VerifyCommand is a prepared, bounded post-write verification command (#347).
@@ -199,7 +203,8 @@ func (v *VerifyCommand) Preview() string {
 // A non-zero exit and the verifier's own timeout are outcomes and return a nil
 // error. Parent cancellation, a parent deadline, and infra failures (spawn
 // error, identity re-check failure) return an error for the consumer to
-// classify.
+// classify; once the command was launched, the result returned with that
+// error still carries its Notes.
 func (v *VerifyCommand) Run(ctx context.Context) (VerifyResult, error) {
 	spec, err := recheckExecPlan(v.ws, v.pending)
 	if err != nil {
@@ -215,6 +220,7 @@ func (v *VerifyCommand) Run(ctx context.Context) (VerifyResult, error) {
 		Stderr:    res.Stderr,
 		Truncated: res.StdoutTruncated || res.StderrTruncated,
 		TimedOut:  res.TimedOut,
+		Notes:     res.Notes,
 	}
 	if runErr == nil {
 		return out, nil
@@ -224,5 +230,5 @@ func (v *VerifyCommand) Run(ctx context.Context) (VerifyResult, error) {
 	if res.TimedOut && ctx.Err() == nil {
 		return out, nil
 	}
-	return VerifyResult{}, runErr
+	return out, runErr
 }

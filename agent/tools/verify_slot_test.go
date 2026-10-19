@@ -770,3 +770,44 @@ func TestNewVerifierSlotRejectsBadInput(t *testing.T) {
 		t.Fatalf("missing root: err = %v, want a non-policy error", err)
 	}
 }
+
+// TestVerifierSlotRendersNotes pins backend notes (#576) on every completed
+// outcome: a pass must not hide a cleanup failure, a failure keeps its notes
+// ahead of the captured streams, and an infra error still reports them.
+func TestVerifierSlotRendersNotes(t *testing.T) {
+	const head = "\n--- post-batch verification (ran after all calls in this batch) ---\n" +
+		"command: go test ./...\n" + stubTargetLine + "\n"
+	cases := []struct {
+		name string
+		exec *stubVerifyExec
+		want string
+	}{
+		{
+			name: "passed",
+			exec: &stubVerifyExec{res: VerifyResult{ExitCode: 0, Notes: []string{"n1"}}},
+			want: head + "status: passed\nexit_code: 0\nnote: n1\n",
+		},
+		{
+			name: "failed",
+			exec: &stubVerifyExec{res: VerifyResult{ExitCode: 1, Stderr: []byte("boom\n"), Notes: []string{"n1", "n2"}}},
+			want: head + "status: failed\nexit_code: 1\ntimed_out: false\noutput_truncated: false\n" +
+				"note: n1\nnote: n2\n--- stderr ---\nboom\n",
+		},
+		{
+			name: "error",
+			exec: &stubVerifyExec{res: VerifyResult{Notes: []string{"n1"}}, err: errors.New("spawn failed")},
+			want: head + "status: error\nreason: spawn failed\nnote: n1\n",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := armedSlot(t, tc.exec).Verify(context.Background(), approved())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if out != tc.want {
+				t.Fatalf("observation mismatch\n got: %q\nwant: %q", out, tc.want)
+			}
+		})
+	}
+}
