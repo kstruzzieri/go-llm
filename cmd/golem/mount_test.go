@@ -6,7 +6,9 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"runtime/debug"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -162,7 +164,7 @@ func TestComposeSystemHeadlessCarriesGitContext(t *testing.T) {
 
 // newMountSession mirrors main.go's REPL session: file tools first, then
 // any host tools the test injects (the runtime receives the same extras),
-// the #372 bookkeeping fields, a lateVerifier wired into the orchestrator,
+// the #372 bookkeeping fields, a host VerifierSlot wired into the orchestrator,
 // and checkpoint/trace data isolated under a temp XDG_DATA_HOME. Tool order
 // is read with the existing order-preserving names() helper.
 func newMountSession(t *testing.T, caller agent.ModelCaller, root string, host ...agent.Tool) *replSession {
@@ -174,7 +176,7 @@ func newMountSession(t *testing.T, caller agent.ModelCaller, root string, host .
 	}
 	var in systemInputs
 	system := composeSystem(in)
-	slot := &lateVerifier{}
+	slot := newTestVerifierSlot(t, root)
 	orch := agent.New(caller, agent.ContextManager{}, agent.WithVerifier(slot))
 	sess := &replSession{
 		// Late mounts are Trusted-only (#387); the runtime below is Trusted
@@ -196,6 +198,24 @@ func newMountSession(t *testing.T, caller agent.ModelCaller, root string, host .
 	}
 	t.Cleanup(func() { _ = sess.closeLateMounts() })
 	return sess
+}
+
+// newTestVerifierSlot is the slot main.go builds for a REPL session: bound to
+// root and the host policy every session uses until -sandbox threads one.
+func newTestVerifierSlot(t *testing.T, root string) *agenttools.VerifierSlot {
+	t.Helper()
+	slot, err := agenttools.NewVerifierSlot(root, agenttools.SandboxConfig{})
+	if err != nil {
+		t.Fatalf("NewVerifierSlot: %v", err)
+	}
+	return slot
+}
+
+// slotState reads the verifier slot's state; target is checked where the
+// test cares about it.
+func slotState(sess *replSession) string {
+	state, _ := sess.verifier.State()
+	return state
 }
 
 // countLateMountConstructions wraps the two late-mount construction seams
@@ -514,7 +534,7 @@ func TestAllowWriteFailsClosedAfterConstruction(t *testing.T) {
 	}
 	if sess.allowWrite || sess.journal != nil || sess.lateStore != nil || sess.writeToolCount != 0 ||
 		sess.baseSystem != system || strings.Join(names(sess.tools), ",") != before ||
-		sess.verifier.runner != nil || sess.grants.count() != 0 {
+		slotState(sess) != "absent" || sess.grants.count() != 0 {
 		t.Fatal("a rejected replacement changed the session")
 	}
 	store, err := openCheckpointStore(context.Background(), os.Getenv, root)
@@ -729,6 +749,9 @@ func TestAllowWriteInstallsPostWriteVerifier(t *testing.T) {
 	if strings.Contains(out.String(), "verification disabled") {
 		t.Fatalf("verifier not built: %q", out.String())
 	}
+	if got := slotState(sess); got != "armed" {
+		t.Fatalf("slot state after /allow-write = %q, want armed", got)
+	}
 	src := &stubAnswerSource{line: "y", ok: true} // approves the write and the verify prompt
 	if _, err := runOnce(context.Background(), &out, nil, sess, "write w", src); err != nil {
 		t.Fatalf("runOnce: %v\n%s", err, out.String())
@@ -776,13 +799,10 @@ func TestAllowWriteReportsRecoveryEvenWhenTheMountFails(t *testing.T) {
 }
 
 func TestNonNilVerifierNormalizesTypedNils(t *testing.T) {
-	if got := nonNilVerifier((*verifyRunner)(nil)); got != nil {
-		t.Fatalf("typed-nil *verifyRunner leaked as %#v", got)
+	if got := nonNilVerifier((*agenttools.VerifierSlot)(nil)); got != nil {
+		t.Fatalf("typed-nil *agenttools.VerifierSlot leaked as %#v", got)
 	}
-	if got := nonNilVerifier((*lateVerifier)(nil)); got != nil {
-		t.Fatalf("typed-nil *lateVerifier leaked as %#v", got)
-	}
-	slot := &lateVerifier{}
+	slot := newTestVerifierSlot(t, t.TempDir())
 	if got := nonNilVerifier(slot); got != agent.Verifier(slot) {
 		t.Fatal("a real verifier must pass through unchanged")
 	}
@@ -882,8 +902,135 @@ func TestAllowWriteReportsVerifierWarning(t *testing.T) {
 	if !strings.Contains(out.String(), "writes enabled") || !strings.Contains(out.String(), "verification disabled") {
 		t.Fatalf("out = %q", out.String())
 	}
-	if sess.verifier.runner != nil {
-		t.Fatal("a verifier that could not be armed must not be installed")
+	if got := slotState(sess); got != "disabled" {
+		t.Fatalf("slot state = %q; a verifier that could not be armed must read disabled, never armed", got)
+	}
+}
+
+// otherOSBackend is a sandbox runtime this OS never supports, so selecting it
+// always fails backend construction with ErrSandboxPolicy.
+func otherOSBackend() agenttools.SandboxConfig {
+	if runtime.GOOS == "linux" {
+		return agenttools.SandboxConfig{Runtime: agenttools.SandboxRuntimeSeatbelt}
+	}
+	return agenttools.SandboxConfig{Runtime: agenttools.SandboxRuntimeBwrap}
+}
+
+// A verifier that cannot be bound to the session (#576) refuses the whole
+// mount: a backend the policy cannot honor, or a command bound to another root
+// than the slot, is detected after the store, journal and write tools are
+// built but before anything publishes. The session, its slot and the runtime
+// are unchanged, and the handler closed the store it opened.
+func TestAllowWritePolicyFailurePublishesNothing(t *testing.T) {
+	// No GC, so a leaked store's finalizer cannot release the lease for it.
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	valid := `{"verify":{"argv":["` + self + `","__golem_exec_helper__","echo","ok"]}}`
+	for _, tc := range []struct {
+		name  string
+		build func(t *testing.T, root string, policy agenttools.SandboxConfig) (*agenttools.VerifyCommand, string, error)
+		want  string
+	}{
+		{
+			name: "unsupported backend",
+			build: func(_ *testing.T, root string, _ agenttools.SandboxConfig) (*agenttools.VerifyCommand, string, error) {
+				return buildVerifier(root, otherOSBackend())
+			},
+			want: "writes not enabled: verifier: tools: verify command backend: tools: sandbox policy unavailable: ",
+		},
+		{
+			name: "command bound to another root",
+			build: func(t *testing.T, _ string, policy agenttools.SandboxConfig) (*agenttools.VerifyCommand, string, error) {
+				other := t.TempDir()
+				writeGolemJSON(t, other, valid)
+				return buildVerifier(other, policy)
+			},
+			want: "writes not enabled: verifier: tools: verify command does not match the session root or sandbox policy\n",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			writeGolemJSON(t, root, valid)
+			caller := &captureCaller{answer: "ok"}
+			sess := newMountSession(t, caller, root)
+			orig := buildVerifierFn
+			t.Cleanup(func() { buildVerifierFn = orig })
+			calls := 0
+			buildVerifierFn = func(r string, p agenttools.SandboxConfig) (*agenttools.VerifyCommand, string, error) {
+				calls++
+				return tc.build(t, r, p)
+			}
+			before, system := strings.Join(names(sess.tools), ","), sess.baseSystem
+			var out strings.Builder
+			_, _ = dispatchSlash(context.Background(), &out, sess, "/allow-write")
+			if calls != 1 {
+				t.Fatalf("buildVerifierFn calls = %d, want 1", calls)
+			}
+			// The new-signing-identity notice may precede it: the write tools
+			// are built before the verifier.
+			if !strings.Contains(out.String(), tc.want) {
+				t.Fatalf("out = %q, want it to contain %q", out.String(), tc.want)
+			}
+			if strings.Contains(out.String(), "writes enabled") {
+				t.Fatalf("a refused verifier still reported writes enabled: %q", out.String())
+			}
+			if sess.allowWrite || sess.journal != nil || sess.lateStore != nil || sess.writeToolCount != 0 ||
+				sess.baseSystem != system || strings.Join(names(sess.tools), ",") != before {
+				t.Fatal("a refused verifier published the write mount")
+			}
+			if state, _ := sess.verifier.State(); state != "absent" {
+				t.Fatalf("slot state = %q, want absent", state)
+			}
+			store, err := openCheckpointStore(context.Background(), os.Getenv, root)
+			if err != nil {
+				t.Fatalf("checkpoint lease not released after the refused mount: %v", err)
+			}
+			_ = store.Close()
+			if _, err := runOnce(context.Background(), &out, nil, sess, "hello", nil); err != nil {
+				t.Fatalf("runOnce: %v", err)
+			}
+			if caller.system != system {
+				t.Fatalf("runtime snapshot changed on a refused mount: %q", caller.system)
+			}
+		})
+	}
+}
+
+// A repository verification mistake is not a policy failure (#576): writes
+// still mount, the bounded notice is printed, and the slot reads disabled,
+// never armed. Today's behavior, pinned for the config and the command-prep
+// failure classes.
+func TestAllowWriteDisabledVerifierStillMounts(t *testing.T) {
+	for _, tc := range []struct{ name, body, notice string }{
+		{"malformed config", `{"verify":`,
+			"verification disabled: .golem.json: invalid JSON: unexpected EOF\n"},
+		{"missing executable", `{"verify":{"argv":["definitely-not-on-path-347"]}}`,
+			`verification disabled: tools: verify command: resolve "definitely-not-on-path-347": executable "definitely-not-on-path-347" not found in PATH` + "\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			writeGolemJSON(t, root, tc.body)
+			sess := newMountSession(t, &captureCaller{answer: "ok"}, root)
+			var out strings.Builder
+			_, _ = dispatchSlash(context.Background(), &out, sess, "/allow-write")
+			for _, want := range []string{
+				"writes enabled (approval per change; /auto-edits, /undo, /checkpoints available)\n",
+				tc.notice,
+			} {
+				if !strings.Contains(out.String(), want) {
+					t.Fatalf("out = %q, want it to contain %q", out.String(), want)
+				}
+			}
+			if !sess.allowWrite || !slices.Contains(names(sess.tools), "write_file") || !slices.Contains(names(sess.tools), "edit_file") {
+				t.Fatalf("writes not mounted: allowWrite=%t tools=%v", sess.allowWrite, names(sess.tools))
+			}
+			if got := slotState(sess); got != "disabled" {
+				t.Fatalf("slot state = %q, want disabled", got)
+			}
+		})
 	}
 }
 
@@ -939,7 +1086,7 @@ func TestAllowWriteSigningFailurePreservesRuntime(t *testing.T) {
 	}
 	if sess.allowWrite || sess.journal != nil || sess.lateStore != nil || sess.writeToolCount != 0 ||
 		sess.runtime != runtime || sess.baseSystem != system || strings.Join(names(sess.tools), ",") != before ||
-		sess.verifier.runner != nil || sess.grants.count() != 1 || !sess.grants.granted(grantScopeFiles, agenttools.WriteClassApprovalKey) {
+		slotState(sess) != "absent" || sess.grants.count() != 1 || !sess.grants.granted(grantScopeFiles, agenttools.WriteClassApprovalKey) {
 		t.Fatal("signing failure changed the active runtime, verifier or approval state")
 	}
 	if _, err := os.Lstat(keyPath); !os.IsNotExist(err) {

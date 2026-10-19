@@ -718,7 +718,7 @@ func interceptorsNotice(full bool, ics []agent.Interceptor) string {
 // It always installs interceptorsFor's chain: the deterministic guards, or
 // the full default chain with -interceptors (#514/#439/#575).
 // A typed-nil verifier would satisfy the interface and panic on first use
-// (#347); the factory normalizes the two concrete types it can receive so
+// (#347); the factory normalizes the concrete slot type it can receive so
 // that guarantee does not rest on every call site.
 func newOrchestratorFactory(caller agent.ModelCaller, f flags, verifier agent.Verifier, canary *canaryBinding) func() *agent.Orchestrator {
 	var opts []agent.Option
@@ -750,26 +750,19 @@ func newOrchestratorFactory(caller agent.ModelCaller, f flags, verifier agent.Ve
 // isREPLMode reports the plain interactive REPL: not one-shot, not task or
 // planning mode, not an Agentflow status/resume query. It is the only mode
 // that dispatches slash commands, so it is the only mode whose orchestrator
-// carries the #372 late verifier slot.
+// carries the #372 verifier slot.
 func isREPLMode(f flags) bool {
 	return !f.promptSet && f.planPath == "" && !f.goalSet && !f.agentflowStatus && !f.agentflowResume
 }
 
 func shouldShowAgentflowHint(f flags) bool { return isREPLMode(f) }
 
-// nonNilVerifier maps a typed-nil *verifyRunner or *lateVerifier to a true
-// nil interface, so agent.WithVerifier is never handed a value that would
-// panic on first use (#347).
+// nonNilVerifier maps a typed-nil *agenttools.VerifierSlot to a true nil
+// interface, so agent.WithVerifier is never handed a value that only looks
+// installed (#347).
 func nonNilVerifier(v agent.Verifier) agent.Verifier {
-	switch c := v.(type) {
-	case *verifyRunner:
-		if c == nil {
-			return nil
-		}
-	case *lateVerifier:
-		if c == nil {
-			return nil
-		}
+	if s, ok := v.(*agenttools.VerifierSlot); ok && s == nil {
+		return nil
 	}
 	return v
 }
@@ -1474,7 +1467,11 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	writeToolCount := 0
 
 	var journal *checkpointJournal
-	var verifier *verifyRunner
+	// #576: the session sandbox policy every verifier is built under and the
+	// slot is bound to. Host until -sandbox threads one.
+	var sandbox agenttools.SandboxConfig
+	var verifyCmd *agenttools.VerifyCommand
+	var verifyNotice string
 	if buildWrite {
 		// D6: -allow-write fails closed on ANY checkpoint lifecycle failure
 		// (store, lease, migration, recovery, state query, hardening) rather
@@ -1525,9 +1522,12 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		// must not read .golem.json or mount post-write verification —
 		// verify_command is not an -allow-tool name.
 		if f.allowWrite {
-			var vwarn string
-			if verifier, vwarn = buildVerifier(root); vwarn != "" {
-				warns = append(warns, vwarn)
+			var verr error
+			if verifyCmd, verifyNotice, verr = buildVerifier(root, sandbox); verr != nil {
+				return fmt.Errorf("golem: verifier: %w", verr)
+			}
+			if verifyNotice != "" {
+				warns = append(warns, verifyNotice)
 			}
 		}
 	}
@@ -1729,21 +1729,26 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		sourceSummarizer = routerSourceSummaryGenerator(bundle.Router, summarizeChain)
 	}
 
-	// #372: a REPL session that started WITHOUT -allow-write may enable writes
-	// later, so its orchestrator carries an empty late-bound verifier slot.
-	// A session that already has writes keeps the real verifier (or none)
-	// bound directly: /allow-write is idempotent there and never needs the
-	// slot, and the orchestrator stays byte-identical to before #372. The
-	// interface is assigned only from a non-nil pointer so a typed nil never
-	// reaches the factory.
+	// #372/#576: every REPL session verifies through one library slot bound
+	// to the root and sandbox policy: armed or disabled here under a startup
+	// -allow-write, absent until /allow-write otherwise. There is no direct
+	// runner, so a native runtime can accept only nil or this slot. One-shot
+	// carries none. The interface is assigned only from a non-nil pointer so
+	// a typed nil never reaches the factory.
 	var orchVerifier agent.Verifier
-	if verifier != nil {
-		orchVerifier = verifier
-	}
-	var verifySlot *lateVerifier
-	if isREPLMode(f) && !f.allowWrite {
-		verifySlot = &lateVerifier{}
-		orchVerifier = verifySlot
+	var verifySlot *agenttools.VerifierSlot
+	if isREPLMode(f) || f.allowWrite {
+		slot, serr := agenttools.NewVerifierSlot(root, sandbox)
+		if serr != nil {
+			return fmt.Errorf("golem: verifier slot: %w", serr)
+		}
+		if verifyNotice != "" {
+			slot.Disable(verifyNotice)
+		}
+		if serr := slot.Set(verifyCmd); serr != nil {
+			return fmt.Errorf("golem: verifier: %w", serr)
+		}
+		verifySlot, orchVerifier = slot, slot
 	}
 	newOrchestrator := newOrchestratorFactory(prep.caller, f, orchVerifier, canary)
 	orch := newOrchestrator()
@@ -1821,6 +1826,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		writeToolCount:   writeToolCount,
 		scratch:          f.scratch,
 		verifier:         verifySlot,
+		sandbox:          sandbox,
 		maxSteps:         f.maxSteps,
 		startupBudget:    budget,
 		color:            colorEnabled(renderOut, f.noColor),

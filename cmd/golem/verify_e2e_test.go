@@ -63,9 +63,13 @@ func TestBreakingEditSurfacesInTheSameTurn(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	verifier, warn := buildVerifier(root)
-	if warn != "" || verifier == nil {
-		t.Fatalf("buildVerifier: verifier=%v warn=%q", verifier, warn)
+	cmd, warn, err := buildVerifier(root, agenttools.SandboxConfig{})
+	if err != nil || warn != "" || cmd == nil {
+		t.Fatalf("buildVerifier: cmd=%v warn=%q err=%v", cmd, warn, err)
+	}
+	verifier := newTestVerifierSlot(t, root)
+	if err := verifier.Set(cmd); err != nil {
+		t.Fatalf("Set: %v", err)
 	}
 	ws, err := agenttools.NewWorkspace(root)
 	if err != nil {

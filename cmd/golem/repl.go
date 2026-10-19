@@ -70,11 +70,15 @@ type replSession struct {
 	// when -allow-exec owned the manager at startup.
 	lateManager *tools.BackgroundManager
 	lateStop    func() bool
-	// verifier is the REPL-mode post-write verification slot (#372). nil
-	// outside the REPL, for a REPL session started with -allow-write (its
-	// verifier is bound directly, and /allow-write is idempotent there), and
-	// in narrow tests (set is nil-safe).
-	verifier *lateVerifier
+	// verifier is the REPL-mode post-write verification slot (#372, #576),
+	// bound to the session root and sandbox policy; the orchestrator verifies
+	// through it. Every REPL session has one (armed or disabled at startup
+	// under -allow-write, absent until /allow-write otherwise). nil outside
+	// the REPL and in narrow tests: every method is nil-safe.
+	verifier *tools.VerifierSlot
+	// sandbox is the session's sandbox policy: what /allow-write builds the
+	// verifier under. Host until -sandbox threads one.
+	sandbox  tools.SandboxConfig
 	maxSteps int
 	// startupBudget is the budget resolved at startup. It is IMMUTABLE and
 	// exists only for the AgentFlow planner/driver, which freeze their own

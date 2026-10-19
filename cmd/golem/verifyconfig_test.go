@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -229,9 +230,9 @@ func TestBuildVerifierFromWorkspace(t *testing.T) {
 	}
 	writeGolemJSON(t, root, `{"verify":{"argv":["`+self+`","__golem_exec_helper__","echo","ok"]}}`)
 
-	v, warn := buildVerifier(root)
-	if warn != "" {
-		t.Fatalf("unexpected warning: %s", warn)
+	v, warn, err := buildVerifier(root, agenttools.SandboxConfig{})
+	if err != nil || warn != "" {
+		t.Fatalf("unexpected err %v / warning %q", err, warn)
 	}
 	if v == nil {
 		t.Fatal("a valid config must arm a verifier")
@@ -239,9 +240,9 @@ func TestBuildVerifierFromWorkspace(t *testing.T) {
 }
 
 func TestBuildVerifierAbsentConfigArmsNothingQuietly(t *testing.T) {
-	v, warn := buildVerifier(t.TempDir())
-	if v != nil {
-		t.Fatalf("expected no verifier, got %+v", v)
+	v, warn, err := buildVerifier(t.TempDir(), agenttools.SandboxConfig{})
+	if v != nil || err != nil {
+		t.Fatalf("expected no verifier and no error, got %+v, %v", v, err)
 	}
 	if warn != "" {
 		t.Fatalf("an absent config must be silent, got %q", warn)
@@ -258,15 +259,74 @@ func TestBuildVerifierInvalidConfigWarnsAndDisables(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			root := t.TempDir()
 			writeGolemJSON(t, root, body)
-			v, warn := buildVerifier(root)
-			if v != nil {
-				t.Fatalf("an invalid config must arm nothing, got %+v", v)
+			v, warn, err := buildVerifier(root, agenttools.SandboxConfig{})
+			if v != nil || err != nil {
+				t.Fatalf("an invalid config must arm nothing and stay non-fatal, got %+v, %v", v, err)
 			}
 			if warn == "" {
 				t.Fatal("an invalid config must warn")
 			}
 			if !strings.Contains(warn, "verification disabled") {
 				t.Fatalf("warning must say verification is off: %q", warn)
+			}
+		})
+	}
+}
+
+// TestBuildVerifierClassification pins the two failure classes (#576): a
+// repository mistake is a bounded "verification disabled" notice that still
+// lets writes mount, while a sandbox policy that cannot be honored is fatal.
+// The config rows use the host policy; the backend row uses the other OS's
+// backend, which is never available here.
+func TestBuildVerifierClassification(t *testing.T) {
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	host := agenttools.SandboxConfig{}
+	unsupported := agenttools.SandboxConfig{Runtime: agenttools.SandboxRuntimeBwrap}
+	if runtime.GOOS == "linux" {
+		unsupported.Runtime = agenttools.SandboxRuntimeSeatbelt
+	}
+	valid := `{"verify":{"argv":["` + self + `","__golem_exec_helper__","echo","ok"]}}`
+	for _, tc := range []struct {
+		name      string
+		body      string // "" writes no .golem.json
+		policy    agenttools.SandboxConfig
+		wantCmd   bool
+		notice    string
+		policyErr bool
+	}{
+		{name: "absent config", policy: host},
+		{name: "valid config arms a command", body: valid, policy: host, wantCmd: true},
+		{name: "malformed config", body: `{"verify":`, policy: host,
+			notice: "verification disabled: .golem.json: invalid JSON: unexpected EOF"},
+		{name: "missing command", body: `{"verify":{"argv":[]}}`, policy: host,
+			notice: "verification disabled: .golem.json: verify: argv is required and must be non-empty"},
+		{name: "invalid declaration", body: `{"verify":{"argv":["go"],"dir":"../out"}}`, policy: host,
+			notice: `verification disabled: .golem.json: verify: dir "../out" escapes the workspace`},
+		{name: "missing executable", body: `{"verify":{"argv":["definitely-not-on-path-347"]}}`, policy: host,
+			notice: `verification disabled: tools: verify command: resolve "definitely-not-on-path-347": executable "definitely-not-on-path-347" not found in PATH`},
+		{name: "unsupported backend for this OS", body: valid, policy: unsupported, policyErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			if tc.body != "" {
+				writeGolemJSON(t, root, tc.body)
+			}
+			cmd, notice, err := buildVerifier(root, tc.policy)
+			if (cmd != nil) != tc.wantCmd {
+				t.Fatalf("command = %v, want present=%t", cmd, tc.wantCmd)
+			}
+			if notice != tc.notice {
+				t.Fatalf("notice = %q, want %q", notice, tc.notice)
+			}
+			if tc.policyErr {
+				if !errors.Is(err, agenttools.ErrSandboxPolicy) {
+					t.Fatalf("err = %v, want ErrSandboxPolicy", err)
+				}
+			} else if err != nil {
+				t.Fatalf("err = %v, want nil", err)
 			}
 		})
 	}
@@ -313,14 +373,14 @@ func TestVerifierIsFrozenAtStartup(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeGolemJSON(t, root, `{"verify":{"argv":["`+self+`","__golem_exec_helper__","echo","first"]}}`)
-	v, warn := buildVerifier(root)
-	if warn != "" || v == nil {
-		t.Fatalf("buildVerifier: v=%v warn=%q", v, warn)
+	v, warn, err := buildVerifier(root, agenttools.SandboxConfig{})
+	if err != nil || warn != "" || v == nil {
+		t.Fatalf("buildVerifier: v=%v warn=%q err=%v", v, warn, err)
 	}
-	before := v.cmd.Command()
+	before := v.Command()
 
 	writeGolemJSON(t, root, `{"verify":{"argv":["`+self+`","__golem_exec_helper__","echo","second"]}}`)
-	if after := v.cmd.Command(); after != before {
+	if after := v.Command(); after != before {
 		t.Fatalf("a mid-session config rewrite changed the verifier: %q -> %q", before, after)
 	}
 	if !strings.Contains(before, "first") {
@@ -329,7 +389,7 @@ func TestVerifierIsFrozenAtStartup(t *testing.T) {
 }
 
 // TestOrchestratorFactoryWithoutVerifierDoesNotArmATypedNil guards the classic
-// Go trap: a (*verifyRunner)(nil) stored in the agent.Verifier interface is
+// Go trap: a (*agenttools.VerifierSlot)(nil) stored in the agent.Verifier interface is
 // non-nil to the runtime and would panic on the first mutating batch.
 func TestOrchestratorFactoryWithoutVerifierDoesNotArmATypedNil(t *testing.T) {
 	caller := &scriptCaller{responses: []agent.ModelResult{

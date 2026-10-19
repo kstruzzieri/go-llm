@@ -805,7 +805,11 @@ func verifierFixture(t *testing.T) (f *fixture, cv *decisionCounter, verifyKey, 
 	if err != nil {
 		t.Fatal(err)
 	}
-	cv = &decisionCounter{inner: newVerifyRunner(cmd)}
+	slot := newTestVerifierSlot(t, root)
+	if err := slot.Set(cmd); err != nil {
+		t.Fatal(err)
+	}
+	cv = &decisionCounter{inner: slot}
 	return newFixtureAt(t, root, fixtureOpts{verifier: cv, autoEdits: true}), cv, cmd.ApprovalKey(), sink
 }
 

@@ -67,6 +67,12 @@ func New(model ModelCaller, ctxMgr ContextManager, opts ...Option) *Orchestrator
 	return o
 }
 
+// Verifier returns the installed post-write verification hook, or nil (#576).
+// It reads the live value: Option is an exported func(*Orchestrator), so
+// WithVerifier can be applied after New, and a runtime that must bind
+// verification to its policy re-checks this at every turn start.
+func (o *Orchestrator) Verifier() Verifier { return o.verifier }
+
 func initState(req Request) State {
 	msgs := make([]Message, 0, len(req.History)+1)
 	for _, h := range req.History {
