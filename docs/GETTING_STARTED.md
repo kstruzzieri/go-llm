@@ -318,8 +318,10 @@ server without `/v1/completions` is fine — the Router never sends it
 unsupported requests.
 
 RAG is optional. To index and use `retrieve`, add a hosted embedding model
-(`"type": "embedding"`) and set `defaults.embedding` to it. Without one, golem
-runs with file tools only.
+(`"type": "embedding"`) and set `defaults.embedding` to it, and start golem with
+`-profile trusted` or a retrieval opt-in (`-progressive`, `-grounding` or
+`-rag-db`), because the default Inspect profile mounts no `retrieve` tool. Without
+an embedding model, golem runs with file tools only.
 
 ### Verify the setup
 

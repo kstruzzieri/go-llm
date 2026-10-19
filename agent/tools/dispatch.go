@@ -214,6 +214,17 @@ func NewDispatch(caller agent.ModelCaller, ctxMgr agent.ContextManager, availabl
 	return &Dispatch{caller: caller, ctxMgr: ctxMgr, tools: tools, limits: limits, interceptors: append([]agent.Interceptor(nil), interceptors...), slots: make(chan struct{}, limits.MaxConcurrent)}, nil
 }
 
+// ChildToolNames returns the names of the tools a child may be offered, in
+// order: the four file readers, then retrieve when one was supplied. Scoped
+// tasks get only the readers. The slice is a fresh copy on every call.
+func (d *Dispatch) ChildToolNames() []string {
+	names := make([]string, len(d.tools))
+	for i, tool := range d.tools {
+		names[i] = tool.Spec().Name
+	}
+	return names
+}
+
 // invokeConcurrency resolves one invocation's fan-out: the static
 // MaxConcurrent, lowered by the Concurrency governor when one is set. The
 // clamp to [1, MaxConcurrent] means a misbehaving governor can only waste

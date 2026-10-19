@@ -2,8 +2,11 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -931,4 +934,268 @@ func TestApproverZeroScoreFindingStillPrintsThroughPrompt(t *testing.T) {
 	if out.String() != want {
 		t.Fatalf("prompt = %q, want %q", out.String(), want)
 	}
+}
+
+// previewPayload is the control-laden content shared by the real-producer
+// tests below: OSC 52, BEL, a UTF-8 C1 CSI, CR, BS and DEL.
+const previewPayload = "\x1b]52;c;cHduZWQ=\a\u009b\r\b\x7f"
+
+// previewPayloadInert is previewPayload as the approver must show it: every
+// control a visible escape, written as literal text.
+const previewPayloadInert = `\x1b]52;c;cHduZWQ=\a\u009b\r\b\x7f`
+
+// runCall drives one scripted tool call through the real Golem orchestrator
+// factory with the given approver.
+func (f *fixture) runCall(t *testing.T, ap agent.Approver, name string, args any) agent.Result {
+	t.Helper()
+	caller := &scriptCaller{responses: []agent.ModelResult{
+		call(name, args),
+		{Response: provider.ChatResponse{Content: "done", Done: true}},
+	}}
+	res, err := f.runWith(t, caller, ap, 2)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	return res
+}
+
+// assertNoActiveControls fails when got holds any byte or rune a terminal
+// would act on: ESC, CR, BS, DEL, or a U+009B (as UTF-8 or as a raw byte).
+func assertNoActiveControls(t *testing.T, got string) {
+	t.Helper()
+	for _, raw := range []string{"\x1b", "\r", "\b", "\x7f", "\u009b", "\x9b"} {
+		if strings.Contains(got, raw) {
+			t.Fatalf("approval output carries active control %q:\n%q", raw, got)
+		}
+	}
+}
+
+func TestRealWritePreviewReachesApproverInert(t *testing.T) {
+	const (
+		path = "pv\x1b[31m.txt"
+		want = "new file: \"pv\\x1b[31m.txt\"\n+" + previewPayloadInert + "\n"
+	)
+	args := map[string]string{"path": path, "content": previewPayload}
+	for _, color := range []bool{false, true} {
+		name := "color off"
+		if color {
+			name = "color on"
+		}
+		t.Run(name, func(t *testing.T) {
+			f := newFixture(t, fixtureOpts{})
+			var out strings.Builder
+			ap := newReplApprover(newScannerSource(strings.NewReader("N\n"), &out), &out, color)
+			ap.grants = f.Grants
+			res := f.runCall(t, ap, "write_file", args)
+			if len(res.ToolCalls) != 1 || !res.ToolCalls[0].Denied || res.ToolCalls[0].Invoked {
+				t.Fatalf("N must deny the write: %+v", res.ToolCalls)
+			}
+			got := out.String()
+			if color {
+				// Only the CLI's own diff coloring may remain; user data may not.
+				for _, own := range []string{"\x1b[32m", "\x1b[31m", "\x1b[0m"} {
+					got = strings.ReplaceAll(got, own, "")
+				}
+			}
+			// containment: PREVIEW-PROFILE
+			assertNoActiveControls(t, got)
+			if !strings.Contains(got, want) {
+				t.Fatalf("approval output lost the visible escaped payload %q:\n%s", want, got)
+			}
+			if exists(t, filepath.Join(f.Root, path)) {
+				t.Fatal("denied write created the file")
+			}
+		})
+	}
+}
+
+func TestRealEditPreviewWithRawC1Context(t *testing.T) {
+	f := newFixture(t, fixtureOpts{})
+	seed := "keep\x9braw\nold\n"
+	if err := os.WriteFile(filepath.Join(f.Root, "ctx.txt"), []byte(seed), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var out strings.Builder
+	ap := newReplApprover(newScannerSource(strings.NewReader("N\n"), &out), &out, false)
+	ap.grants = f.Grants
+	res := f.runCall(t, ap, "edit_file", map[string]string{"path": "ctx.txt", "old_string": "old", "new_string": "new"})
+	if len(res.ToolCalls) != 1 || !res.ToolCalls[0].Denied {
+		t.Fatalf("N must deny the edit: %+v", res.ToolCalls)
+	}
+	got := out.String()
+	// containment: PREVIEW-PROFILE
+	if strings.IndexByte(got, 0x9b) >= 0 {
+		t.Fatalf("approval output carries a raw 0x9b byte:\n%q", got)
+	}
+	// The context line survives, with the invalid byte shown as U+FFFD.
+	if want := "--- ctx.txt\n+++ ctx.txt\n keep\uFFFDraw\n-old\n+new\n"; !strings.Contains(got, want) {
+		t.Fatalf("approval output lost the diff %q:\n%q", want, got)
+	}
+	if b := readFile(t, filepath.Join(f.Root, "ctx.txt")); b != seed {
+		t.Fatalf("denied edit changed the file: %q", b)
+	}
+}
+
+func TestRealApprovedWriteStoresExactBytes(t *testing.T) {
+	f := newFixture(t, fixtureOpts{})
+	res := f.runCall(t, f.approver("y\n"), "write_file", map[string]string{"path": "ok.txt", "content": previewPayload})
+	if len(res.ToolCalls) != 1 || !res.ToolCalls[0].Invoked || res.ToolCalls[0].Denied {
+		t.Fatalf("y must apply the write: %+v", res.ToolCalls)
+	}
+	// The approver saw an inert preview; the file holds the original bytes.
+	assertNoActiveControls(t, f.Out.String())
+	if got := readFile(t, filepath.Join(f.Root, "ok.txt")); got != previewPayload {
+		t.Fatalf("file bytes = %q, want %q", got, previewPayload)
+	}
+}
+
+// keyTap forwards to a replApprover and records the key and preview the
+// runtime handed it, so a test can compare them with an independent Plan.
+type keyTap struct {
+	inner   *replApprover
+	key     string
+	preview string
+}
+
+func (k *keyTap) Approve(ctx context.Context, c provider.ToolCall, preview string) (bool, error) {
+	return k.inner.Approve(ctx, c, preview)
+}
+
+func (k *keyTap) ApproveKeyed(ctx context.Context, c provider.ToolCall, preview, key string) (agent.ApprovalDecision, error) {
+	k.key, k.preview = key, preview
+	return k.inner.ApproveKeyed(ctx, c, preview, key)
+}
+
+func TestRealExecPreviewKeepsOneLogicalLine(t *testing.T) {
+	if !hostHasCapability(capExec) {
+		t.Skip("exec runner unsupported on this host")
+	}
+	f := newFixture(t, fixtureOpts{})
+	const dir = "d\x1b[2J"
+	if err := os.Mkdir(filepath.Join(f.Root, dir), 0o755); err != nil {
+		t.Skipf("filesystem refuses the directory name %q: %v", dir, err)
+	}
+	args := map[string]any{"argv": []string{"echo", "a\nb"}, "dir": dir}
+	tap := &keyTap{inner: f.approver("N\n")}
+	res := f.runCall(t, tap, "run_command", args)
+	if len(res.ToolCalls) != 1 || !res.ToolCalls[0].Denied || res.ToolCalls[0].Invoked {
+		t.Fatalf("N must deny the command: %+v", res.ToolCalls)
+	}
+	got := f.Out.String()
+	// containment: PREVIEW-PROFILE
+	assertNoActiveControls(t, got)
+
+	lines := strings.Split(got, "\n")
+	at := -1
+	for i, ln := range lines {
+		if strings.HasPrefix(ln, "  argv:") {
+			if at >= 0 {
+				t.Fatalf("two argv fields: the argument newline forged a line:\n%s", got)
+			}
+			at = i
+		}
+	}
+	if at < 0 || at+3 >= len(lines) {
+		t.Fatalf("no argv field in:\n%s", got)
+	}
+	if want := "  argv:    echo \"a\\nb\""; lines[at] != want {
+		t.Fatalf("argv line = %q, want %q", lines[at], want)
+	}
+	if !strings.HasPrefix(lines[at+1], "  exe:     echo -> ") {
+		t.Fatalf("line after argv = %q, want the exe field", lines[at+1])
+	}
+	if want := "  cwd:     \"d\\x1b[2J\""; lines[at+2] != want {
+		t.Fatalf("cwd line = %q, want %q", lines[at+2], want)
+	}
+	if !strings.HasPrefix(lines[at+3], "  timeout: ") {
+		t.Fatalf("line after cwd = %q, want the timeout field", lines[at+3])
+	}
+
+	// The structural key is the planner's, untouched by display handling. An
+	// exec key is a prefix plus a hex digest, so it cannot carry controls and
+	// this comparison alone cannot show that the key is left unsanitized;
+	// TestApproveSanitizesForEmbeddedApprovers and
+	// TestVerifyApprovalPreviewSanitized pin that with a control-bearing key.
+	var runTool agent.PlanningTool
+	for _, tl := range f.tools {
+		if tl.Spec().Name == "run_command" {
+			runTool = tl.(agent.PlanningTool)
+		}
+	}
+	raw, _ := json.Marshal(args)
+	control, err := runTool.Plan(context.Background(), raw)
+	if err != nil {
+		t.Fatalf("control Plan: %v", err)
+	}
+	if tap.key == "" || tap.key != control.ApprovalKey {
+		t.Fatalf("approver key = %q, control plan key = %q", tap.key, control.ApprovalKey)
+	}
+}
+
+// plainTap is an Approver with no key support; it records what it received.
+type plainTap struct{ preview, args string }
+
+func (p *plainTap) Approve(_ context.Context, call provider.ToolCall, preview string) (bool, error) {
+	p.preview, p.args = preview, string(call.Function.Arguments)
+	return true, nil
+}
+
+// keyedTap is a KeyedApprover that records what it received.
+type keyedTap struct{ preview, key, args string }
+
+func (k *keyedTap) Approve(context.Context, provider.ToolCall, string) (bool, error) {
+	return false, errors.New("plain Approve must not be used: the key would be dropped")
+}
+
+func (k *keyedTap) ApproveKeyed(_ context.Context, call provider.ToolCall, preview, key string) (agent.ApprovalDecision, error) {
+	k.preview, k.key, k.args = preview, key, string(call.Function.Arguments)
+	return agent.ApprovalDecision{Approved: true}, nil
+}
+
+func TestVerifyApprovalPreviewSanitized(t *testing.T) {
+	const (
+		dirty = "post-write verification command:\n  argv: go test \x1b[2J\x1b]52;c;cHduZWQ=\a \u009b\r\b\x7f\n"
+		want  = "post-write verification command:\n  argv: go test \\x1b[2J\\x1b]52;c;cHduZWQ=\\a \\u009b\\r\\b\\x7f\n"
+		// The key and the call's arguments carry runes the sanitizer WOULD
+		// change (ESC, tab, raw U+009B, raw U+202E); a clean literal could not
+		// show that approveVerify leaves them alone.
+		key  = "verify:v1:k\x1b[2J\t\u009b"
+		args = "{\"cmd\":\t\"go test\u009b\u202e\"}"
+	)
+	if !strings.ContainsAny(key, "\x1b\t\u009b") || !strings.ContainsAny(args, "\t\u009b\u202e") {
+		t.Fatalf("fixtures must carry controls: key %q args %q", key, args)
+	}
+	call := verifyToolCall()
+	call.Function.Arguments = json.RawMessage(args)
+
+	t.Run("plain Approver", func(t *testing.T) {
+		ap := &plainTap{}
+		d, err := approveVerify(context.Background(), ap, call, dirty, key)
+		if err != nil || !d.Approved {
+			t.Fatalf("approveVerify: d=%+v err=%v", d, err)
+		}
+		// containment: PREVIEW-PROFILE
+		if ap.preview != want {
+			t.Fatalf("preview = %q, want %q", ap.preview, want)
+		}
+		if ap.args != args {
+			t.Fatalf("call arguments = %q, want %q untouched", ap.args, args)
+		}
+	})
+	t.Run("KeyedApprover", func(t *testing.T) {
+		ap := &keyedTap{}
+		d, err := approveVerify(context.Background(), ap, call, dirty, key)
+		if err != nil || !d.Approved {
+			t.Fatalf("approveVerify: d=%+v err=%v", d, err)
+		}
+		if ap.preview != want {
+			t.Fatalf("preview = %q, want %q", ap.preview, want)
+		}
+		if ap.key != key {
+			t.Fatalf("key = %q, want %q untouched", ap.key, key)
+		}
+		if ap.args != args {
+			t.Fatalf("call arguments = %q, want %q untouched", ap.args, args)
+		}
+	})
 }

@@ -58,6 +58,13 @@ type promoteFixture struct {
 
 func newPromoteFixture(t *testing.T) *promoteFixture {
 	t.Helper()
+	return newPromoteFixtureWith(t, nil)
+}
+
+// newPromoteFixtureWith is newPromoteFixture plus extra scratch-side files
+// (workspace-relative name to content) created before the capture.
+func newPromoteFixtureWith(t *testing.T, extra map[string]string) *promoteFixture {
+	t.Helper()
 	root := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(root, "dir"), 0o755); err != nil {
 		t.Fatal(err)
@@ -92,6 +99,11 @@ func newPromoteFixture(t *testing.T) *promoteFixture {
 	if err := os.WriteFile(filepath.Join(session.work, "binary.bin"), []byte{0xff, 0x00, 0x01}, 0o644); err != nil {
 		t.Fatal(err)
 	}
+	for name, body := range extra {
+		if err := os.WriteFile(filepath.Join(session.work, name), []byte(body), 0o640); err != nil {
+			t.Skipf("filesystem refuses the name %q: %v", name, err)
+		}
+	}
 	session.finish(context.Background())
 	if _, status := rt.store.get(session.id); status != scratchStatusCaptured {
 		t.Fatal("fixture capture failed")
@@ -124,6 +136,27 @@ func TestPromoteArtifactEffectAndKey(t *testing.T) {
 		if !strings.Contains(plan.Preview, want) {
 			t.Fatalf("preview missing %q:\n%s", want, plan.Preview)
 		}
+	}
+}
+
+// TestPromotePreviewInert covers an existing guard: the promotion preview
+// prints the path with %q, so a path carrying ESC reaches the approver as the
+// visible text \x1b, and the shared sanitizer leaves that rendering untouched.
+func TestPromotePreviewInert(t *testing.T) {
+	f := newPromoteFixtureWith(t, map[string]string{"pv\x1b[31m.txt": "body\n"})
+	plan, err := f.tool.Plan(context.Background(), promoteArgs(f.id, "pv\x1b[31m.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	shown := agent.SanitizePreview(plan.Preview)
+	if strings.ContainsRune(shown, 0x1b) {
+		t.Fatalf("sanitized promote preview carries a raw ESC: %q", shown)
+	}
+	if want := "  path:   \"pv\\x1b[31m.txt\"\n"; !strings.Contains(shown, want) {
+		t.Fatalf("promote preview lost the %%q-quoted path %q:\n%s", want, shown)
+	}
+	if strings.ContainsRune(plan.Preview, 0x1b) {
+		t.Fatalf("producer already emitted a raw ESC: %q", plan.Preview)
 	}
 }
 

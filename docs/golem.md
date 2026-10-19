@@ -15,11 +15,45 @@ Run Golem against a workspace:
 golem -root /path/to/project
 ```
 
-Golem starts in a read-only mode by default. It can inspect files, search the workspace, route through the configured `agent` model chain, and keep a persistent per-workspace session. Project guidance found in `AGENTS.md`-style files is excluded until you approve its current snapshot; see [Project-context trust](#project-context-trust).
+Golem starts in the read-only **Inspect** profile by default (#387). It can inspect files with the four workspace read tools, route through the configured `agent` model chain, and keep a persistent per-workspace session. It mounts no retrieval, embedding route, model memory tools, writes, commands or extension tools; see [Runtime profiles](#runtime-profiles) for what each profile grants and how to opt in. Project guidance found in `AGENTS.md`-style files is excluded until you approve its current snapshot; see [Project-context trust](#project-context-trust).
+
+## Runtime profiles
+
+A profile fixes the authority Golem grants the model. There is no in-session profile switch: a different profile means a restart.
+
+| | Inspect (default) | Trusted | Preview |
+|---|---|---|---|
+| `list`, `glob`, `search`, `read_file` | Yes | Yes | reserved |
+| `retrieve`, startup auto-index, the embedding route | Not started | Existing defaults (on unless `-no-rag`) | reserved |
+| Model memory tools (`memory_search`, `agent_memory_*`) | Not mounted; `/remember`, `/forget` and `/memories` still work | Existing defaults and flags | reserved |
+| `write_file`, `edit_file`, post-write verification | Refused | `-allow-write` or `/allow-write`, each write approved | reserved |
+| `run_command` and background command tools | Refused | `-allow-exec` or `/allow-exec`, each command approved | reserved |
+| MCP, `-delegate`, `-dispatch`, `-rag-db`, extension tools | Refused | Existing flags, with the approval floor described in [least privilege](least-privilege.md#runtime-profiles-387) | reserved |
+| Command runtime | none | the host: no sandbox, host filesystem and network authority | reserved |
+
+Choose the profile with `-profile inspect|trusted`:
+
+- **Explicit profile wins.** `-profile inspect` with any Trusted opt-in below is a usage error, never silently promoted to Trusted. `-profile trusted` chooses a ceiling, not an approval: writes and commands still need `-allow-write` / `-allow-exec` (or the matching `/allow-*` command) and each call still needs approval.
+- **No profile means Inspect, unless a legacy opt-in survives.** These flags select Trusted when `-profile` is omitted: `-allow-write`, `-allow-exec`, `-scratch`, `-allow-tool`, `-rag-db`, `-agent-memory` (with a session), `-delegate`, `-dispatch`, `-mcp-stdio`, `-mcp-http`, `-progressive` and `-grounding`. Startup then prints `profile: trusted (selected by <flag>)` to stderr. `-feedback` selects nothing.
+- **One-shot normalization runs first.** In `-p`, `-allow-write` and `-allow-exec` (and the `-scratch` that goes with them) are dropped with a warning and select nothing, so the run stays Inspect; a surviving `-allow-tool` selects Trusted. `-profile inspect -p ... -allow-write` is still a usage error.
+- **AgentFlow modes keep their own tool policy.** `-plan`, `-goal`, `-agentflow-status` and `-agentflow-resume` run as Trusted without a notice, and `-profile` is rejected alongside them.
+- **Preview is reserved.** `-profile preview` exits with `Preview unavailable: staged-workspace runtime requires #388/#389` and starts no session.
+- **`-sandbox` is not available yet.** Native Seatbelt and Bubblewrap command sandboxes for Trusted arrive with #576; until then Trusted commands run on the host.
+
+Every interactive or one-shot session (AgentFlow modes excepted) prints a startup line to stderr with the effective permissions, after any `profile: trusted (selected by ...)` line. For example, with no flags and then with `-allow-exec -no-rag -no-memory`; the Trusted tool list varies with the flags and also includes `retrieve`, `memory_search` and the other tools whose features are on:
+
+```text
+permissions: profile=inspect tools=read_file,search,glob,list commands=n/a; restart with -profile trusted to enable retrieval, memory tools, writes or commands
+permissions: profile=trusted tools=read_file,search,glob,list,run_command,start_command,command_status,command_tail,stop_command commands=host (unsandboxed; runs with the host user's filesystem and network authority)
+```
+
+A successful `/allow-write` or `/allow-exec` prints the updated permissions to stderr. Repeated, refused or failed mounts print no additional permissions line.
+
+Result JSON and stream events are unchanged; the notices go to stderr only. No index, memory database or stored conversation is migrated or deleted: Inspect only stops mounting the tools that read them. Library hosts get the same information from `Runtime.EffectivePermissions()`; see [least privilege](least-privilege.md#runtime-profiles-387).
 
 ## Workspace RAG index
 
-Golem builds and refreshes the workspace RAG index automatically in the background on startup; `retrieve` reports that it is warming until the index is ready. Manual control is still available:
+In the Trusted profile Golem builds and refreshes the workspace RAG index automatically in the background on startup; `retrieve` reports that it is warming until the index is ready. The default Inspect profile starts no index, mounts no `retrieve` tool and uses no embedding route, so `golem -root ...` alone does no retrieval; `-progressive`, `-grounding` and `-rag-db` are explicit retrieval opt-ins that select Trusted (see [Runtime profiles](#runtime-profiles)). Manual control is still available:
 
 ```bash
 golem index -root /path/to/project              # explicit index rebuild
@@ -128,7 +162,7 @@ golem -root /path/to/project -ollama-url http://gpu-server:11434
 
 ## Opt in to write and exec
 
-Opt in to project mutation explicitly:
+Opt in to project mutation explicitly. Either flag selects the Trusted [profile](#runtime-profiles) when `-profile` is omitted and prints `profile: trusted (selected by <flag>)`; add `-profile trusted` to say so explicitly.
 
 ```bash
 # Show diffs and apply write/edit tool calls only after approval.
@@ -136,11 +170,16 @@ golem -root /path/to/project -allow-write
 
 # Run shell commands only after approval.
 golem -root /path/to/project -allow-write -allow-exec
+
+# The same, with the profile named explicitly.
+golem -root /path/to/project -profile trusted -allow-write -allow-exec
 ```
+
+Trusted commands run on the host with your filesystem and network authority; approval decides each call (the always-on argument invariants also refuse some), but nothing confines the process. Native sandbox runtimes arrive with #576.
 
 ## REPL commands
 
-Inside the REPL, `/help` lists every command: sessions (`/new`, `/clear`, `/resume`, `/sessions`, `/search-sessions`, `/checkpoints`, `/undo`, `/compact`), memory (`/remember`, `/memories`, `/records`, `/forget`), approvals (`/trust`, `/grants`, `/auto-edits`, and `/allow-write` / `/allow-exec` to enable the guarded tools mid-session without restarting), background jobs (`/jobs`), the repository snapshot (`/git-context refresh`), one external judgment staged for the next goal (`/consult <name> <prompt>`, requires `-interceptors` and a configured consultant), plus `/context`, `/think`, `/model`, `/tools`, `/edit`, and `/exit`. Any other line is sent to the agent as the current goal.
+Inside the REPL, `/help` lists every command: sessions (`/new`, `/clear`, `/resume`, `/sessions`, `/search-sessions`, `/checkpoints`, `/undo`, `/compact`), memory (`/remember`, `/memories`, `/records`, `/forget`), approvals (`/trust`, `/grants`, `/auto-edits`, and `/allow-write` / `/allow-exec` to enable the guarded tools mid-session without restarting, Trusted profile only; Inspect needs a restart), background jobs (`/jobs`), the repository snapshot (`/git-context refresh`), one external judgment staged for the next goal (`/consult <name> <prompt>`, requires `-interceptors` and a configured consultant), plus `/context`, `/think`, `/model`, `/tools`, `/edit`, and `/exit`. Any other line is sent to the agent as the current goal.
 
 `/context` accepts no arguments and reads the last assembled request from the latest attempted runtime turn, without calling a model, summarizer, registry, or session store. It shows estimated input tokens against that assembly's retained budget, pressure classification, and the five retained bucket estimates when available. These are estimates, not provider-measured usage. The configured input ceiling and explicit output reserve are printed separately; a zero explicit reserve does not imply that the provider reserves no output. The command works with `--no-session` and pressure warnings disabled. Successful `/new`, `/clear`, and `/resume` clear the sample; failed or disabled session commands preserve it. A runtime turn that fails before assembly has no sample. Manual or automatic compaction, `/think`, and system/tool changes leave the historical sample intact, so it may predate the current configuration and cannot predict the next goal. The next real turn replaces it with its actual assembly estimate. `/compact` reports its separate stored-history estimates, and `/git-context refresh` retains its existing meaning.
 
@@ -148,7 +187,7 @@ Inside the REPL, `/help` lists every command: sessions (`/new`, `/clear`, `/resu
 
 Approval prompts that offer an `a` answer also accept "always this session", and the prompt names the grant's scope because the two classes are deliberately asymmetric: `a` on a command prompt (`a=always this command`) covers only that exact command, while `a` on an edit prompt (`a=all edits this session`) enables auto-approval for **every** write/edit in the workspace — it is `/auto-edits on`, not "always this file". `/auto-edits on|off` toggles the write/edit grant explicitly, `/grants` counts the active session grants, and `/grants clear` revokes them all without touching history. Grants are in-memory only and die with `/new`, `/clear`, a successful `/resume`, or process exit. Destination admission keeps its own lifetime: admitted destinations survive conversation resets and model switches, `/grants` lists them alongside the approval-grant count, and only `/grants clear` revokes them — after which the next goal re-runs the admission prompt.
 
-`/allow-write` and `/allow-exec` mount exactly the tools the startup flags would, with the same approval prompts, undo journal, and post-write verification; they are one-way for the session and never grant approval by themselves. With `-scratch`, promotion stays as it was at startup and `/allow-write` says so.
+`/allow-write` and `/allow-exec` work only in the Trusted profile. They mount exactly the tools the startup flags would, with the same approval prompts, undo journal, and post-write verification; they are one-way for the session and never grant approval by themselves. With `-scratch`, promotion stays as it was at startup and `/allow-write` says so. In any other profile, including the default Inspect, they are refused before any store, key or manager is opened, for example `/allow-write is unavailable in profile inspect: restart with -profile trusted -allow-write`; a profile cannot change mid-session, so restart with the named flags. Likewise `/undo`, `/checkpoints`, `/auto-edits` and `/jobs` answer `writes disabled in profile inspect: restart with -profile trusted -allow-write` (or `exec disabled in profile inspect: restart with -profile trusted -allow-exec`) when the capability is not mounted; under Trusted they suggest `/allow-write` or `/allow-exec` instead.
 
 ## Mutation receipts and offline audit
 
@@ -813,6 +852,15 @@ warnings, and errors go to stderr. One-shot implies
 memory DB is opened), and `-allow-write`/`-allow-exec` are ignored because
 there is no interactive approver to answer the prompt — use `-allow-tool`
 instead.
+
+A one-shot run starts in the read-only Inspect [profile](#runtime-profiles)
+unless a surviving explicit opt-in selects Trusted: `-allow-write` and
+`-allow-exec` (with their `-scratch`) are dropped with a warning and select
+nothing, while `-allow-tool` (and the other Trusted opt-ins) select Trusted and print
+`profile: trusted (selected by <flag>)`. The profile notice and the
+`permissions:` line go to stderr, so captured stdout and the JSON and
+stream-JSON outputs keep their schema. `-profile inspect` combined with a flag
+that would select Trusted is a usage error.
 
 Generate a commit message from a staged diff:
 

@@ -823,17 +823,67 @@
     {
       "id": "PREVIEW-PROFILE",
       "source": "issue-452:55",
-      "requirement": "Preview-profile neutralization beyond the current approver tests (#387).",
-      "status": "",
+      "requirement": "Approval previews render terminal controls inert on the real producer paths (write_file path and content, edit_file content and context, path headers, exec argv and cwd) and, for verification commands, at the approveVerify boundary (#387).",
+      "status": "verified",
       "owner": "",
       "layer": "scenario",
-      "exempt": "pending #387: no shipped guard to mutate",
+      "exempt": "",
       "scenarios": [
         "PV1"
       ],
-      "refs": [],
-      "profiles": [],
-      "mutations": [],
+      "refs": [
+        {
+          "package": "./cmd/golem",
+          "test": "TestContainment/PV1",
+          "file": "cmd/golem/containment_scenarios_test.go",
+          "func": "pv1"
+        },
+        {
+          "package": "./cmd/golem",
+          "test": "TestRealWritePreviewReachesApproverInert",
+          "file": "cmd/golem/approver_test.go",
+          "func": "TestRealWritePreviewReachesApproverInert"
+        },
+        {
+          "package": "./cmd/golem",
+          "test": "TestRealEditPreviewWithRawC1Context",
+          "file": "cmd/golem/approver_test.go",
+          "func": "TestRealEditPreviewWithRawC1Context"
+        },
+        {
+          "package": "./cmd/golem",
+          "test": "TestRealExecPreviewKeepsOneLogicalLine",
+          "file": "cmd/golem/approver_test.go",
+          "func": "TestRealExecPreviewKeepsOneLogicalLine"
+        },
+        {
+          "package": "./cmd/golem",
+          "test": "TestVerifyApprovalPreviewSanitized",
+          "file": "cmd/golem/approver_test.go",
+          "func": "TestVerifyApprovalPreviewSanitized"
+        },
+        {
+          "package": "./agent",
+          "test": "TestApproveSanitizesForEmbeddedApprovers",
+          "file": "agent/preview_test.go",
+          "func": "TestApproveSanitizesForEmbeddedApprovers"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestWritePreviewHeadersExact",
+          "file": "agent/tools/mutate_test.go",
+          "func": "TestWritePreviewHeadersExact"
+        }
+      ],
+      "profiles": [
+        "linux-host",
+        "darwin-host"
+      ],
+      "mutations": [
+        "M-064",
+        "M-065",
+        "M-066"
+      ],
       "artifacts": []
     },
     {

@@ -225,6 +225,40 @@ func TestNewDispatchAppliesConservativeDefaults(t *testing.T) {
 	}
 }
 
+func TestDispatchChildToolNames(t *testing.T) {
+	read := agent.Effect{Class: agent.Read, Approval: agent.ApprovalNever}
+	reads := []agent.Tool{
+		dispatchNamedTool{name: "list", effect: read},
+		dispatchNamedTool{name: "glob", effect: read},
+		dispatchNamedTool{name: "search", effect: read},
+		dispatchNamedTool{name: "read_file", effect: read},
+	}
+	tests := []struct {
+		name      string
+		available []agent.Tool
+		want      []string
+	}{
+		{"reads only", reads, []string{"read_file", "search", "glob", "list"}},
+		{"reads and retrieve", append([]agent.Tool{dispatchNamedTool{name: "retrieve", effect: read}}, reads...), []string{"read_file", "search", "glob", "list", "retrieve"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			d, err := NewDispatch(&dispatchCaller{}, agent.ContextManager{}, tc.available, DispatchLimits{})
+			if err != nil {
+				t.Fatalf("NewDispatch: %v", err)
+			}
+			got := d.ChildToolNames()
+			if !slices.Equal(got, tc.want) {
+				t.Fatalf("ChildToolNames = %v, want %v", got, tc.want)
+			}
+			got[0] = "write_file"
+			if again := d.ChildToolNames(); !slices.Equal(again, tc.want) {
+				t.Fatalf("ChildToolNames after mutating a returned slice = %v, want %v", again, tc.want)
+			}
+		})
+	}
+}
+
 func TestNewDispatchRejectsUnusableResultCap(t *testing.T) {
 	read := agent.Effect{Class: agent.Read, Approval: agent.ApprovalNever}
 	available := []agent.Tool{

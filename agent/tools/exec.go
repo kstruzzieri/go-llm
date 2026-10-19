@@ -729,14 +729,14 @@ func fmtTimeout(d time.Duration) string {
 }
 
 // quoteArgForPreview returns a quoted form of arg when it is empty or contains
-// whitespace or a non-graphic rune, so every dynamic approval value stays on
-// one visible line with exact argument boundaries. Simple arguments stay bare.
+// whitespace, quotes, backslashes or a non-graphic rune, so escaped values
+// cannot impersonate literal arguments. Simple arguments stay bare.
 func quoteArgForPreview(arg string) string {
 	if arg == "" {
 		return `""`
 	}
 	for _, r := range arg {
-		if unicode.IsSpace(r) || !unicode.IsGraphic(r) {
+		if r == '"' || r == '\\' || unicode.IsSpace(r) || !unicode.IsGraphic(r) {
 			return strconv.QuoteToGraphic(arg)
 		}
 	}

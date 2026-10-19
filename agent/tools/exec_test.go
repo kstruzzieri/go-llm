@@ -1137,3 +1137,16 @@ func TestRecheckExecPlanRejectsReplacedWorkspaceRoot(t *testing.T) {
 		t.Errorf("err = %v, want exact root-changed message", err)
 	}
 }
+
+func TestQuoteArgForPreviewDistinguishesLiteralEscapes(t *testing.T) {
+	for _, tc := range []struct{ arg, want string }{
+		{"a\nb.txt", `"a\nb.txt"`},
+		{`"a\nb.txt"`, `"\"a\\nb.txt\""`},
+		{`a\nb.txt`, `"a\\nb.txt"`},
+		{`"plain"`, `"\"plain\""`},
+	} {
+		if got := quoteArgForPreview(tc.arg); got != tc.want {
+			t.Errorf("quoteArgForPreview(%q) = %q, want %q", tc.arg, got, tc.want)
+		}
+	}
+}

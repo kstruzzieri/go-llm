@@ -104,10 +104,13 @@ func (v *verifyRunner) Verify(ctx context.Context, approver agent.Approver) (str
 
 // approveVerify mirrors the runtime's own approval call: a KeyedApprover
 // receives the structural key, a plain Approver does not (and is therefore
-// never grantable).
+// never grantable). The preview is sanitized here too: the verifier approves
+// outside the orchestrator's own approval call, so it does not pass through
+// agent.approve.
 func approveVerify(ctx context.Context, approver agent.Approver, call provider.ToolCall,
 	preview, key string) (agent.ApprovalDecision, error) {
 
+	preview = agent.SanitizePreview(preview)
 	if ka, ok := approver.(agent.KeyedApprover); ok {
 		return ka.ApproveKeyed(ctx, call, preview, key)
 	}

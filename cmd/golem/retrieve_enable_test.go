@@ -254,7 +254,8 @@ func TestRun_ManagedReaderAdmissionWithNoAutoIndex(t *testing.T) {
 			}
 			seedIndex(t, dbPath, workspaceID, "test/qwen3-embedding:8b")
 			removeSQLiteSidecars(t, dbPath)
-			args := []string{"-config", configPath, "-root", root, "-no-probe", "-no-cap-probe", "-no-session", "-no-memory", "-no-project-context"}
+			// Automatic retrieval mounts only under Trusted (#387).
+			args := []string{"-config", configPath, "-root", root, "-profile", "trusted", "-no-probe", "-no-cap-probe", "-no-session", "-no-memory", "-no-project-context"}
 			if mode == "no-auto-index" {
 				args = append(args, "-no-auto-index")
 			}

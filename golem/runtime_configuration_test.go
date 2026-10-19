@@ -60,6 +60,7 @@ func newConfigurationRuntime(t *testing.T, caller agent.ModelCaller, tools ...ag
 	rt, err := golem.New(context.Background(), golem.Options{
 		Root:         t.TempDir(),
 		System:       "OLD SYSTEM",
+		Profile:      golem.ProfileTrusted,
 		Tools:        tools,
 		Orchestrator: agent.New(caller, agent.ContextManager{}),
 		ModelOptions: oldConfigOptions(),

@@ -1,10 +1,23 @@
 // Command golem is a terminal coding agent. It wires the shared
 // provider/router bootstrap and file tools into an agent.Orchestrator and
-// drives it from a line-based REPL. The workspace is read-only by default:
-// -allow-write and -allow-exec opt into approval-gated mutation and command
-// execution, and retrieve can be enabled for a prebuilt RAG index. Session,
-// memory, and agent-memory features write per-user databases outside the
-// workspace. For thinking-capable models, -think off|on|low|medium|high
+// drives it from a line-based REPL. It starts in the read-only Inspect
+// profile (#387): the four workspace read tools and nothing else, with no
+// retrieval or auto-index, embedding route, model memory tools, writes,
+// commands or extension tools (human /remember still works). -profile
+// inspect|trusted selects the profile; -profile preview is reserved and
+// rejected until the staged-workspace runtime ships (#388/#389). When -profile
+// is omitted, a surviving legacy opt-in (-allow-write, -allow-exec, -scratch,
+// -allow-tool, -rag-db, -agent-memory, -delegate, -dispatch, -mcp-stdio,
+// -mcp-http, -progressive, -grounding) selects Trusted and a "profile:
+// trusted (selected by <flag>)" notice goes to stderr; an explicit -profile
+// inspect with one of them is a usage error. In Trusted, -allow-write and
+// -allow-exec opt into approval-gated mutation and command execution (commands
+// run unsandboxed on the host until #576), and retrieve can be enabled for a
+// prebuilt RAG index. The REPL's /allow-write and /allow-exec work only in
+// Trusted and are refused in Inspect with restart guidance. Startup prints a
+// "permissions:" line to stderr naming the profile, mounted tools and command
+// runtime. Session, memory, and agent-memory features write per-user databases
+// outside the workspace. For thinking-capable models, -think off|on|low|medium|high
 // drives reasoning behavior and captured thinking renders dim above the
 // answer (a no-op with a notice when the model does not support thinking).
 // In the REPL, /think off|on|low|medium|high applies the same support gate to

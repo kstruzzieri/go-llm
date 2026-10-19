@@ -79,6 +79,7 @@ func newReplaceRuntime(t *testing.T, caller agent.ModelCaller, system string, to
 	rt, err := golem.New(context.Background(), golem.Options{
 		Root:         t.TempDir(),
 		System:       system,
+		Profile:      golem.ProfileTrusted,
 		Tools:        tools,
 		Orchestrator: agent.New(caller, agent.ContextManager{}),
 		ModelOptions: provider.ModelOptions{Think: provider.Ptr(false), NumCtx: 4096},

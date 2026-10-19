@@ -27,7 +27,7 @@ Use it directly in a terminal through **Golem**, the bundled local coding agent 
 ### What's included
 
 - **Model backends** — `openai-compat` provider (llama.cpp / vLLM / LM Studio) and a native Ollama REST client: chat, completions, embeddings, model management, tool calling, streaming
-- **Golem terminal agent** — read-only by default, with persistent per-workspace sessions and automatic workspace RAG retrieval; approval-gated write/exec with session grants, background jobs, project-context trust, signed mutation receipts, `/consult` to an external subscription CLI, and destination admission that shows reachable remote model endpoints before provider traffic
+- **Golem terminal agent** — read-only Inspect profile by default, with persistent per-workspace sessions, project-context trust, `/consult` to an external subscription CLI, and destination admission that shows reachable remote model endpoints before provider traffic; the Trusted profile (`-profile trusted`, or any opt-in flag) adds automatic workspace RAG retrieval and approval-gated write/exec with session grants, background jobs and signed mutation receipts
 - **Execution sandboxing (library)** — deny-default sandbox backends for the exec tools in `agent/`: macOS Seatbelt (`sandbox-exec` per-invocation profiles scoping reads/writes to the workspace plus a private temp directory) and Linux Bubblewrap (fresh user/mount/pid namespaces per invocation, network unshared unless allowed). Selecting a runtime the host cannot enforce fails closed. The Golem CLI currently executes commands on the host; selecting these backends from the CLI is planned
 - **Zero-trust agent runtime** — tool-observation fencing, always-on argument guards and egress labels in Golem (opt-in for library callers), opt-in injection and secret detectors (`-interceptors`), signed agent-memory provenance, and an offline audit verifier
 - **RAG pipeline** — code-aware chunking, SQLite vector store with hybrid search, concurrent `.gitignore`-aware indexing, context-building retrieval
@@ -77,7 +77,7 @@ Start your configured model backend first. The checked-in `models.json` defaults
 golem -root /path/to/project
 ```
 
-Golem starts read-only: it can inspect files, search the workspace, route through the configured `agent` model chain, and keep a persistent per-workspace session. `/help` lists every command. Opt in to project mutation explicitly:
+Golem starts in the read-only Inspect profile: it can inspect files, search the workspace, route through the configured `agent` model chain, and keep a persistent per-workspace session; retrieval, memory tools, writes and commands need the Trusted profile ([runtime profiles](docs/golem.md#runtime-profiles)). `/help` lists every command. Opt in to project mutation explicitly (these flags select Trusted):
 
 ```bash
 golem -root /path/to/project -allow-write              # apply write/edit calls after approval

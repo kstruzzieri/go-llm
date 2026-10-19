@@ -406,6 +406,23 @@
     ]
   },
   {
+    "id": "PV1",
+    "reqs": [
+      "PREVIEW-PROFILE"
+    ],
+    "protections": "approval-preview sanitizer and quoted path headers on the real write_file and edit_file producers; answers N then N",
+    "attack": "write_file whose path and content, then edit_file whose new text and seeded context line, carry ESC/CSI, OSC 52, BEL, raw and UTF-8 C1, CR, BS and DEL",
+    "probe": "captured approver terminal bytes hold no raw payload control byte",
+    "declared": "contained",
+    "owner": "",
+    "reason": "",
+    "control": "structural",
+    "control_diff": "payload canary rendered escaped vs raw",
+    "caps": [
+      "unix"
+    ]
+  },
+  {
     "id": "S1",
     "reqs": [
       "STRICT-1"
@@ -641,21 +658,6 @@
     "probe": "Pending #435: the effect probe is defined with the owning issue",
     "declared": "pending",
     "owner": "#435",
-    "reason": "",
-    "control": "",
-    "control_diff": "",
-    "caps": []
-  },
-  {
-    "id": "PV1",
-    "reqs": [
-      "PREVIEW-PROFILE"
-    ],
-    "protections": "Pending #387: preview-profile neutralization beyond the current approver tests",
-    "attack": "Pending #387: a preview that is not neutralized by the profile",
-    "probe": "Pending #387: the effect probe is defined with the owning issue",
-    "declared": "pending",
-    "owner": "#387",
     "reason": "",
     "control": "",
     "control_diff": "",

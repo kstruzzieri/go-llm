@@ -108,13 +108,44 @@ func TestAllowCommandsMatchStartupFlags(t *testing.T) {
 	}
 }
 
-func TestRunRejectsAllowCommandsFromPipedInput(t *testing.T) {
+// The default profile is Inspect, where a late mount is refused before the
+// terminal requirement is even consulted: run() must carry the resolved profile
+// into the session handlers read (#387).
+func TestRunRefusesAllowCommandsInDefaultInspect(t *testing.T) {
 	for _, command := range []string{"/allow-write", "/allow-exec"} {
 		t.Run(command, func(t *testing.T) {
 			configPath, root := writeRunLifecycleConfig(t)
 			stdin, stdout, stderr := stdinFileWith(t, command+"\n")
 			var sess *replSession
 			err := run([]string{"-config", configPath, "-root", root, "-no-probe", "-no-cap-probe",
+				"-no-session", "-no-memory", "-no-rag", "-no-project-context", "-no-auto-index"},
+				stdin, stdout, stderr, runHooks{
+					afterSessionReady: func(ready *replSession) error {
+						sess = ready
+						return nil
+					},
+				})
+			if err != nil {
+				t.Fatalf("run = %v (stderr: %s)", err, readRunTestFile(t, stderr))
+			}
+			if sess == nil || sess.allowWrite || sess.allowExec {
+				t.Fatalf("session = %+v, want captured with no capability enabled", sess)
+			}
+			want := command + " is unavailable in profile inspect: restart with -profile trusted -" + strings.TrimPrefix(command, "/") + "\n"
+			if got := readRunTestFile(t, stdout); !strings.Contains(got, want) {
+				t.Fatalf("stdout = %q, want it to contain %q", got, want)
+			}
+		})
+	}
+}
+
+func TestRunRejectsAllowCommandsFromPipedInput(t *testing.T) {
+	for _, command := range []string{"/allow-write", "/allow-exec"} {
+		t.Run(command, func(t *testing.T) {
+			configPath, root := writeRunLifecycleConfig(t)
+			stdin, stdout, stderr := stdinFileWith(t, command+"\n")
+			var sess *replSession
+			err := run([]string{"-profile", "trusted", "-config", configPath, "-root", root, "-no-probe", "-no-cap-probe",
 				"-no-session", "-no-memory", "-no-rag", "-no-project-context", "-no-auto-index"},
 				stdin, stdout, stderr, runHooks{
 					afterSessionReady: func(ready *replSession) error {
@@ -209,7 +240,8 @@ func TestRunReleasesLateMountsAfterRuntimeClose(t *testing.T) {
 	stdin, stdout, stderr := runTestFiles(t)
 	errStop := errors.New("stop after startup")
 	var events []string
-	err := run([]string{"-config", configPath, "-root", root, "-no-probe", "-no-cap-probe", "-no-session",
+	// A late mount needs the Trusted ceiling (#387).
+	err := run([]string{"-config", configPath, "-root", root, "-profile", "trusted", "-no-probe", "-no-cap-probe", "-no-session",
 		"-no-memory", "-no-project-context", "-no-auto-index"}, stdin, stdout, stderr, runHooks{
 		startAutoIndex: func() func() { return func() {} },
 		afterSessionReady: func(sess *replSession) error {
@@ -262,7 +294,10 @@ func TestRunMutationSigningLifecycle(t *testing.T) {
 				return sseAnswer("done")
 			})
 			data := os.Getenv("XDG_DATA_HOME")
-			args := []string{"-config", configPath, "-root", root, "-no-probe", "-no-cap-probe",
+			// Every mode keeps the pre-#387 host Trusted session: the late
+			// mount needs its ceiling, and read-only stays the same session
+			// minus writes.
+			args := []string{"-config", configPath, "-root", root, "-profile", "trusted", "-no-probe", "-no-cap-probe",
 				"-no-rag", "-no-session", "-no-memory", "-no-project-context", "-no-auto-index"}
 			if mode == "startup" {
 				args = append(args, "-allow-write")
@@ -399,5 +434,57 @@ func TestRunAllowWritePreservesScratchIdentity(t *testing.T) {
 		}})
 	if err != nil {
 		t.Fatalf("late scratch startup = %v; stderr: %s", err, readRunTestFile(t, stderr))
+	}
+}
+
+func TestRunLateMountPermissionsNotice(t *testing.T) {
+	for _, command := range []string{"/allow-write", "/allow-exec"} {
+		for _, mode := range []string{"success", "inspect", "pipe", "closed"} {
+			t.Run(command+"/"+mode, func(t *testing.T) {
+				configPath, root := writeRunLifecycleConfig(t)
+				// Repeating a successful command must not repeat the permissions notice.
+				stdin, stdout, stderr := stdinFileWith(t, command+"\n"+command+"\n")
+				profile := "trusted"
+				if mode == "inspect" {
+					profile = "inspect"
+				}
+				var sess *replSession
+				err := run([]string{"-profile", profile, "-config", configPath, "-root", root,
+					"-no-probe", "-no-cap-probe", "-no-session", "-no-memory", "-no-rag",
+					"-no-project-context", "-no-auto-index"}, stdin, stdout, stderr, runHooks{
+					afterSessionReady: func(ready *replSession) error {
+						sess = ready
+						sess.stdinTerminal = mode != "pipe"
+						if mode == "closed" {
+							return sess.runtime.Close()
+						}
+						return nil
+					},
+				})
+				if err != nil {
+					t.Fatalf("run: %v; stderr: %s", err, readRunTestFile(t, stderr))
+				}
+				out, notices := readRunTestFile(t, stdout), readRunTestFile(t, stderr)
+				if strings.Contains(out, "permissions:") {
+					t.Fatalf("permissions leaked to stdout: %s", out)
+				}
+				wantCount := 1
+				if mode == "success" {
+					wantCount = 2
+					if !strings.Contains(out, "already enabled") {
+						t.Fatalf("mount did not succeed: %s", out)
+					}
+					want := renderPermissions(sess.runtime.EffectivePermissions()) + "\n"
+					if strings.Count(notices, want) != 1 {
+						t.Errorf("missing updated permissions %q in stderr: %s", want, notices)
+					}
+				} else if sess.allowWrite || sess.allowExec {
+					t.Fatal("refused/failed mount enabled capabilities")
+				}
+				if got := strings.Count(notices, "permissions:"); got != wantCount {
+					t.Fatalf("permissions notices = %d, want %d: %s", got, wantCount, notices)
+				}
+			})
+		}
 	}
 }
