@@ -7,7 +7,17 @@ package golem
 import (
 	"context"
 	"encoding/json"
+	"go/ast"
+	"go/build"
+	"go/importer"
+	"go/parser"
+	"go/token"
+	"go/types"
+	"path"
+	"path/filepath"
 	"reflect"
+	"slices"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -282,6 +292,111 @@ func TestFloorPreservesOriginAndPlanning(t *testing.T) {
 				t.Fatalf("Spec().Name = %q, want x", got.Spec().Name)
 			}
 		})
+	}
+}
+
+// stubImporter imports the standard library for real and satisfies every
+// other import with an empty package: the guard below needs only package
+// agent's own Tool type, and module packages have no export data to load.
+type stubImporter struct{ std types.Importer }
+
+func (s stubImporter) Import(importPath string) (*types.Package, error) {
+	if !strings.Contains(strings.SplitN(importPath, "/", 2)[0], ".") {
+		return s.std.Import(importPath)
+	}
+	pkg := types.NewPackage(importPath, path.Base(importPath))
+	pkg.MarkComplete()
+	return pkg, nil
+}
+
+// TestFloorForwardsEveryOptionalToolInterface guards the floor wrappers against
+// a new optional interface. floorWrap wraps every non-exempt extra, so a type
+// the agent loop starts asserting a Tool to would be silently dropped from every
+// Trusted extra. It type-checks package agent's own files and collects every
+// type a Tool-typed value is asserted to, in a type assertion or a type switch.
+// That set must equal the set the wrappers forward. A new entry means
+// forwarding it in floorTool or floorPlanningTool and adding it to want here.
+func TestFloorForwardsEveryOptionalToolInterface(t *testing.T) {
+	pkg, err := build.ImportDir(filepath.Join("..", "agent"), 0)
+	if err != nil {
+		t.Fatalf("ImportDir: %v", err)
+	}
+	fset := token.NewFileSet()
+	var files []*ast.File
+	for _, name := range pkg.GoFiles {
+		f, err := parser.ParseFile(fset, filepath.Join(pkg.Dir, name), nil, 0)
+		if err != nil {
+			t.Fatalf("ParseFile %s: %v", name, err)
+		}
+		files = append(files, f)
+	}
+	info := &types.Info{Types: map[ast.Expr]types.TypeAndValue{}}
+	// Stubbed imports leave some expressions untyped, so errors are expected
+	// and ignored; an untyped asserted operand fails below instead.
+	conf := types.Config{Importer: stubImporter{std: importer.Default()}, Error: func(error) {}}
+	checked, _ := conf.Check("github.com/kstruzzieri/go-llm/agent", fset, files, info)
+	toolObj := checked.Scope().Lookup("Tool")
+	if toolObj == nil {
+		t.Fatal("package agent declares no Tool type")
+	}
+	toolIface := toolObj.Type().Underlying().(*types.Interface)
+
+	asserted := map[string]bool{}
+	for _, f := range files {
+		ast.Inspect(f, func(n ast.Node) bool {
+			var x ast.Expr
+			var targets []ast.Expr
+			switch n := n.(type) {
+			case *ast.TypeAssertExpr:
+				if n.Type == nil {
+					return true // a type switch guard, read from its statement
+				}
+				x, targets = n.X, []ast.Expr{n.Type}
+			case *ast.TypeSwitchStmt:
+				switch s := n.Assign.(type) {
+				case *ast.AssignStmt:
+					x = s.Rhs[0].(*ast.TypeAssertExpr).X
+				case *ast.ExprStmt:
+					x = s.X.(*ast.TypeAssertExpr).X
+				}
+				for _, clause := range n.Body.List {
+					targets = append(targets, clause.(*ast.CaseClause).List...)
+				}
+			default:
+				return true
+			}
+			tv, ok := info.Types[x]
+			if !ok || tv.Type == nil || tv.Type == types.Typ[types.Invalid] {
+				t.Errorf("%s: cannot type the asserted operand %s; extend this guard", fset.Position(x.Pos()), types.ExprString(x))
+				return true
+			}
+			if !types.Implements(tv.Type, toolIface) {
+				return true
+			}
+			for _, target := range targets {
+				if name := types.ExprString(target); name != "nil" {
+					asserted[name] = true
+				}
+			}
+			return true
+		})
+	}
+	got := make([]string, 0, len(asserted))
+	for name := range asserted {
+		got = append(got, name)
+	}
+	slices.Sort(got)
+	if want := []string{"OriginTool", "PlanningTool"}; !slices.Equal(got, want) {
+		t.Fatalf("package agent asserts tools to %v, the floor wrappers forward %v: forward the new type in floorTool or floorPlanningTool (golem/approvalfloor.go), then add it here", got, want)
+	}
+
+	// The forwarded set, checked on a wrapper around a tool that has both.
+	wrapped := floorWrap(floorPlanOriginStub{floorPlanStub{&floorStub{name: "x", effect: agent.Effect{Class: agent.Write}}, agent.ToolPlan{}}, agent.OriginForeign})
+	if _, ok := wrapped.(agent.PlanningTool); !ok {
+		t.Fatalf("%T does not forward PlanningTool", wrapped)
+	}
+	if ot, ok := wrapped.(agent.OriginTool); !ok || ot.Origin() != agent.OriginForeign {
+		t.Fatalf("%T does not forward OriginTool", wrapped)
 	}
 }
 

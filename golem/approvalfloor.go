@@ -115,7 +115,8 @@ func floorExempt(t agent.Tool) bool {
 // floorWrap returns t unchanged when it is one of the four spec-exempt library
 // types and otherwise a floor wrapper that is a PlanningTool exactly when t is.
 // Those two optional interfaces (PlanningTool, OriginTool) are the only ones the
-// loop consults.
+// loop consults; TestFloorForwardsEveryOptionalToolInterface fails if package
+// agent starts asserting a Tool to any other type.
 func floorWrap(t agent.Tool) agent.Tool {
 	if floorExempt(t) {
 		return t
