@@ -105,8 +105,10 @@ type Options struct {
 	// also bounds Options.Tools and every later Replace and ReplaceConfiguration:
 	// a tool outside it is rejected with ErrProfileIncompatible, so it can never
 	// be widened. A tool named dispatch is admitted only when the allowlist
-	// names all four reads, because its child readers are built outside the
-	// runtime and cannot be narrowed.
+	// names all four reads, and the library dispatch only when it also names
+	// every child tool the dispatch carries (Dispatch.ChildToolNames, which
+	// includes retrieve when one was supplied), because its children are built
+	// outside the runtime and cannot be narrowed.
 	ToolAllowlist []string
 	// ScopeGuard is installed on the runtime-owned Workspace backing every
 	// built-in file tool. It executes inside each tool, below approval

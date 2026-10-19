@@ -68,8 +68,9 @@ func TestValidateFlagsProfile(t *testing.T) {
 		{"trusted alone", []string{"-profile", "trusted"}, ""},
 		{"trusted with writes", []string{"-profile", "trusted", "-allow-write"}, ""},
 		{"inspect with feedback", []string{"-profile", "inspect", "-feedback"}, ""},
-		// Already dropped by normalization, so it promotes nothing to conflict with.
-		{"inspect with sessionless agent memory", []string{"-profile", "inspect", "-agent-memory", "-no-session"}, ""},
+		// -no-session stops -agent-memory promoting a profile, not conflicting
+		// with an explicit one (spec section 4: conflicts are errors).
+		{"inspect with sessionless agent memory", []string{"-profile", "inspect", "-agent-memory", "-no-session"}, "golem: -profile inspect conflicts with -agent-memory"},
 		{"preview", []string{"-profile", "preview"}, "golem: Preview unavailable: staged-workspace runtime requires #388/#389"},
 		{"preview with tools", []string{"-profile", "preview", "-allow-write"}, "golem: Preview unavailable: staged-workspace runtime requires #388/#389"},
 		// The conflict check runs before one-shot normalization drops -allow-write.

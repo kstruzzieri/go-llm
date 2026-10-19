@@ -2,6 +2,7 @@ package golem_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"slices"
 	"testing"
@@ -174,6 +175,84 @@ func TestDispatchRequiresFourReadsInAllowlist(t *testing.T) {
 				if tc.wantErr {
 					if !errors.Is(err, golem.ErrProfileIncompatible) {
 						t.Fatalf("%s error = %v, want ErrProfileIncompatible", path, err)
+					}
+					return
+				}
+				if err != nil {
+					t.Fatalf("%s error = %v, want nil", path, err)
+				}
+				want := []string{"read_file", "search", "glob", "list", "dispatch"}
+				if got := firstTurnToolNames(t, rt, caller); !slices.Equal(got, want) {
+					t.Fatalf("first-turn tools = %v, want %v", got, want)
+				}
+			})
+		}
+	}
+}
+
+// retrieveStub is a plain read-only retrieve tool. It is not a PlanningTool,
+// so NewDispatch accepts it as the optional child.
+type retrieveStub struct{}
+
+func (retrieveStub) Spec() agent.ToolSpec {
+	return agent.ToolSpec{Name: "retrieve", Parameters: json.RawMessage(`{"type":"object"}`)}
+}
+
+func (retrieveStub) Effect() agent.Effect {
+	return agent.Effect{Class: agent.Read, Approval: agent.ApprovalNever}
+}
+
+func (retrieveStub) Invoke(context.Context, json.RawMessage) (agent.ToolResult, error) {
+	return agent.ToolResult{Content: "index chunk"}, nil
+}
+
+// retrieveDispatch builds the library's dispatch over its own reads plus a
+// retrieve stub, so unscoped children can call retrieve.
+func retrieveDispatch(t *testing.T) agent.Tool {
+	t.Helper()
+	reads, err := agenttools.NewFileTools(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewFileTools: %v", err)
+	}
+	d, err := agenttools.NewDispatch(&captureCaller{answer: "ok"}, agent.ContextManager{}, append(reads, retrieveStub{}), agenttools.DispatchLimits{})
+	if err != nil {
+		t.Fatalf("NewDispatch: %v", err)
+	}
+	return d
+}
+
+// TestDispatchChildrenMustLieInsideAllowlist pins that a dispatch's children
+// are bound by the frozen ceiling: an unscoped child can call retrieve, so a
+// dispatch carrying it is admitted only when the allowlist names retrieve.
+func TestDispatchChildrenMustLieInsideAllowlist(t *testing.T) {
+	reads := []string{"read_file", "search", "glob", "list", "dispatch"}
+	tests := []struct {
+		name      string
+		allowlist []string
+		retrieve  bool   // dispatch carries a retrieve child
+		wantErr   string // "" means admitted
+	}{
+		{"retrieve child outside allowlist", reads, true, `golem: tool incompatible with profile: dispatch child tool "retrieve" is outside the frozen allowlist`},
+		{"retrieve child inside allowlist", append(slices.Clone(reads), "retrieve"), true, ""},
+		{"no retrieve child, allowlist without retrieve", reads, false, ""},
+	}
+	for _, path := range admissionPaths {
+		for _, tc := range tests {
+			t.Run(path+"/"+tc.name, func(t *testing.T) {
+				d := realDispatch(t)
+				if tc.retrieve {
+					d = retrieveDispatch(t)
+				}
+				rt, caller, err := admitVia(t, path, golem.Options{Profile: golem.ProfileTrusted, ToolAllowlist: tc.allowlist}, []agent.Tool{d})
+				if tc.wantErr != "" {
+					if !errors.Is(err, golem.ErrProfileIncompatible) || err.Error() != tc.wantErr {
+						t.Fatalf("%s error = %v, want %q", path, err, tc.wantErr)
+					}
+					if rt == nil {
+						return // New refused: there is no runtime to widen.
+					}
+					if got := firstTurnToolNames(t, rt, caller); !slices.Equal(got, ownedReads) {
+						t.Fatalf("next-turn tools = %v, want %v", got, ownedReads)
 					}
 					return
 				}

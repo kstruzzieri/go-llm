@@ -46,7 +46,9 @@ and stream events keep their schemas.
   agent-memory database under `-agent-memory`'s own guards) and `delegate_code`
   and `dispatch` (model-provider traffic under destination admission).
 - `dispatch` is rejected alongside a `ScopeGuard`, and an allowlist that admits
-  `dispatch` must name all four reads.
+  `dispatch` must name all four reads and every other child tool it carries
+  (an optional `retrieve`). The new `agenttools.Dispatch.ChildToolNames`
+  reports those children.
 - Approval previews pass through `agent.SanitizePreview`, which renders
   terminal controls as visible escapes, and diff headers quote paths that
   contain whitespace or controls.

@@ -120,8 +120,8 @@ func filterOwned(owned []agent.Tool, ceiling map[string]struct{}) []agent.Tool {
 // all admit through here, before any tool beyond Spec is touched, so a rejected
 // extra is never planned or invoked. It enforces, in order: the profile, the
 // nil/name/duplicate checks, and per extra the frozen allowlist ceiling,
-// dispatch's need for all four reads, and dispatch's incompatibility with a
-// ScopeGuard. Only then are the admitted extras published through floorWrap, so
+// dispatch's need for all four reads and for every child it carries, and
+// dispatch's incompatibility with a ScopeGuard. Only then are the admitted extras published through floorWrap, so
 // every check sees the caller's own tool and the model sees the approval floor.
 //
 // It also returns the ToolPermission projection of the published list, in the
@@ -174,6 +174,15 @@ func (r *Runtime) checkExtra(tool agent.Tool, name string) error {
 			for _, read := range inspectReads {
 				if _, ok := r.ceiling[read]; !ok {
 					return fmt.Errorf("%w: allowlist admits %s without %q, but its child readers are not bound by the allowlist", ErrProfileIncompatible, name, read)
+				}
+			}
+		}
+		// The library dispatch also hands unscoped children an optional
+		// retrieve, so every child it carries must lie inside the ceiling.
+		if d, ok := tool.(*agenttools.Dispatch); ok {
+			for _, child := range d.ChildToolNames() {
+				if _, ok := r.ceiling[child]; !ok {
+					return fmt.Errorf("%w: %s child tool %q is outside the frozen allowlist", ErrProfileIncompatible, name, child)
 				}
 			}
 		}

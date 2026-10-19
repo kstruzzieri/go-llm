@@ -12,7 +12,8 @@ import (
 // set. -agent-memory counts only with a session, since without one it is
 // dropped with a warning (agentMemoryRequest). resolveProfile calls it after
 // normalization, so a flag one-shot mode dropped selects nothing; validateFlags
-// calls it before, so an explicit -profile inspect still conflicts with it.
+// calls it before, with -no-session cleared, so an explicit -profile inspect
+// still conflicts with every one of them.
 func trustedOptIn(f flags) string {
 	switch {
 	case f.allowWrite:
@@ -67,6 +68,9 @@ func validateProfile(f flags) error {
 	case golemruntime.ProfilePreview:
 		return errors.New("golem: Preview unavailable: staged-workspace runtime requires #388/#389")
 	case golemruntime.ProfileInspect:
+		// -no-session only stops -agent-memory selecting a profile; against an
+		// explicit -profile inspect it is still a conflict (spec section 4).
+		f.noSession = false
 		if opt := trustedOptIn(f); opt != "" {
 			return errors.New("golem: -profile inspect conflicts with " + opt)
 		}
