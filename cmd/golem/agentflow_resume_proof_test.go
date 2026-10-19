@@ -28,7 +28,7 @@ func TestResumeRefusesUnverifiedExistingProofBeforeMutation(t *testing.T) {
 				failAt:      map[string]error{"verify-proof": verificationErr},
 			}
 			models := 0
-			d := &driver{af: af, plan: recoveryPlan(), root: fixture.root,
+			d := &driver{af: af, plan: recoveryPlan(),
 				runStep: func(context.Context, agentflow.Step, string, string) error {
 					models++
 					return nil
@@ -124,7 +124,7 @@ func TestResumeProofChangeBeforeFinishRun(t *testing.T) {
 					}
 				}
 				models := 0
-				d := &driver{af: af, plan: recoveryPlan(), root: fixture.root,
+				d := &driver{af: af, plan: recoveryPlan(),
 					runStep: func(context.Context, agentflow.Step, string, string) error {
 						models++
 						return nil
@@ -174,7 +174,7 @@ func TestResumeRefusesProofChangedDuringVerification(t *testing.T) {
 			writeAgentFile(t, fixture.root, "proof-pack.json", "unverified replacement")
 		},
 	}
-	d := &driver{af: af, plan: recoveryPlan(), root: fixture.root}
+	d := &driver{af: af, plan: recoveryPlan()}
 	_, err := d.resume(context.Background(), fixture.root, fixture.planJSON, nil)
 	if err == nil || !strings.Contains(err.Error(), "proof changed during resume") {
 		t.Errorf("resume(proof changed during verification) error = %v, want proof-change refusal", err)

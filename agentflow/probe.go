@@ -9,8 +9,11 @@ import (
 )
 
 // minVersion is the AgentFlow baseline this adapter is validated against;
-// maxMajor bounds it from above (#612: AgentFlow 1.x only).
-var minVersion = [2]int{1, 0}
+// maxMajor bounds it from above (#612: AgentFlow 1.x only). 1.1 ships the
+// recovery Golem relies on: superseded timeouts verify (agentflow#60),
+// next-action leads timed-out and replacement work to a close (#70), and
+// ledger writers refuse closed attempts (#61).
+var minVersion = [2]int{1, 1}
 
 const maxMajor = 1
 

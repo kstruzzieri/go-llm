@@ -308,12 +308,23 @@ func (c *Client) RecordReview(ctx context.Context, manifestPath string) (ReviewR
 // canonical finding reference and returns the new attempt id.
 func (c *Client) AmendStep(ctx context.Context, step string, findingRefs []string) (string, error) {
 	reason := "address review findings " + strings.Join(findingRefs, ", ")
-	args := append([]string{"amend-step", step}, c.rootArgs(
-		"--agent", c.agentName(), "--reason", reason, "--reason-code", "review_feedback")...)
+	extra := []string{"--reason-code", "review_feedback"}
 	for _, ref := range findingRefs {
-		args = append(args, "--finding", ref)
+		extra = append(extra, "--finding", ref)
 	}
-	args = append(args, "--json")
+	return c.amend(ctx, step, reason, extra)
+}
+
+// AmendCompletedStep opens a replacement attempt for a completed step that
+// next-action reports step_amendment_needed (AgentFlow 1.1, agentflow#70),
+// with no review linkage, and returns the new attempt id.
+func (c *Client) AmendCompletedStep(ctx context.Context, step, reason string) (string, error) {
+	return c.amend(ctx, step, reason, nil)
+}
+
+func (c *Client) amend(ctx context.Context, step, reason string, extra []string) (string, error) {
+	args := append([]string{"amend-step", step}, c.rootArgs("--agent", c.agentName(), "--reason", reason)...)
+	args = append(append(args, extra...), "--json")
 	out, err := c.call(ctx, "amend-step", args, true)
 	if err != nil {
 		return "", err
@@ -366,10 +377,10 @@ func (c *Client) CompleteStep(ctx context.Context, step, attempt string) error {
 
 // BlockStep closes an open attempt as blocked, recording reason in the ledger.
 // Like the other attempt commands it acts as this client's agent, so a parallel
-// worker blocks as its own owner. AgentFlow does not refuse an attempt that is
-// already closed, so call it only on an attempt the caller holds open. A non-nil
-// error does not prove the attempt is still open: AgentFlow appends the blocked
-// event before it clears the attempt pointer.
+// worker blocks as its own owner. AgentFlow 1.1 refuses an attempt that is
+// already closed (exit 2, nothing appended; agentflow#61). A non-nil error does
+// not prove the attempt is still open: AgentFlow appends the blocked event
+// before it clears the attempt pointer.
 func (c *Client) BlockStep(ctx context.Context, step, attempt, reason string) error {
 	args := append([]string{"block-step", step}, c.rootArgs("--attempt", attempt, "--reason", reason, "--agent", c.agentName(), "--json")...)
 	_, err := c.call(ctx, "block-step", args, true)
