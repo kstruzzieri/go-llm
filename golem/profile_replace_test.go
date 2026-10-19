@@ -190,6 +190,44 @@ func TestDispatchRequiresFourReadsInAllowlist(t *testing.T) {
 	}
 }
 
+// TestHostDispatchRequiresFourReadsInAllowlist pins rule (b) by name. A host
+// tool named dispatch is not a library Dispatch, so the child-ceiling check
+// cannot see any children and only rule (b) rejects it.
+func TestHostDispatchRequiresFourReadsInAllowlist(t *testing.T) {
+	tests := []struct {
+		name      string
+		allowlist []string
+		wantErr   bool
+	}{
+		{"missing read_file", []string{"dispatch", "search", "glob", "list"}, true},
+		{"missing search", []string{"dispatch", "read_file", "glob", "list"}, true},
+		{"missing glob", []string{"dispatch", "read_file", "search", "list"}, true},
+		{"missing list", []string{"dispatch", "read_file", "search", "glob"}, true},
+		{"all four reads", []string{"dispatch", "read_file", "search", "glob", "list"}, false},
+	}
+	for _, path := range admissionPaths {
+		for _, tc := range tests {
+			t.Run(path+"/"+tc.name, func(t *testing.T) {
+				host := &profileSpyTool{name: "dispatch", effect: agent.Effect{Class: agent.Read, Approval: agent.ApprovalNever}}
+				rt, caller, err := admitVia(t, path, golem.Options{Profile: golem.ProfileTrusted, ToolAllowlist: tc.allowlist}, []agent.Tool{host})
+				if tc.wantErr {
+					if !errors.Is(err, golem.ErrProfileIncompatible) {
+						t.Fatalf("%s error = %v, want ErrProfileIncompatible", path, err)
+					}
+					return
+				}
+				if err != nil {
+					t.Fatalf("%s error = %v, want nil", path, err)
+				}
+				want := []string{"read_file", "search", "glob", "list", "dispatch"}
+				if got := firstTurnToolNames(t, rt, caller); !slices.Equal(got, want) {
+					t.Fatalf("first-turn tools = %v, want %v", got, want)
+				}
+			})
+		}
+	}
+}
+
 // retrieveStub is a plain read-only retrieve tool. It is not a PlanningTool,
 // so NewDispatch accepts it as the optional child.
 type retrieveStub struct{}
