@@ -22,6 +22,8 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/sys/unix"
+
 	"github.com/kstruzzieri/go-llm/agent"
 )
 
@@ -2384,5 +2386,252 @@ func TestSeatbeltCanceledRunCarriesNoLoaderNote(t *testing.T) {
 	}
 	if res.Notes != nil {
 		t.Fatalf("canceled run carries notes %q; want none", res.Notes)
+	}
+}
+
+// --- Inherited descriptors (#576 final review I1/I2) ---
+//
+// None of these run in parallel: descriptor flags are process-global, and a
+// descriptor leaked here would reach any concurrent test's children.
+
+// leakFD returns fd with FD_CLOEXEC cleared, closed at cleanup, after
+// checking independently of the audit that a child would inherit it.
+func leakFD(t *testing.T, fd int) int {
+	t.Helper()
+	t.Cleanup(func() { _ = unix.Close(fd) })
+	if _, err := unix.FcntlInt(uintptr(fd), unix.F_SETFD, 0); err != nil {
+		t.Fatal(err)
+	}
+	if flags, err := unix.FcntlInt(uintptr(fd), unix.F_GETFD, 0); err != nil || flags&unix.FD_CLOEXEC != 0 {
+		t.Fatalf("precondition: fd %d flags=%d err=%v, want it inheritable", fd, flags, err)
+	}
+	return fd
+}
+
+// inheritableHostFDs lists the descriptors above stdio a child would
+// inherit, read without the audit's code.
+func inheritableHostFDs(t *testing.T) []int {
+	t.Helper()
+	f, err := os.Open("/dev/fd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	names, err := f.Readdirnames(-1)
+	_ = f.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fds []int
+	for _, name := range names {
+		var fd int
+		if _, err := fmt.Sscan(name, &fd); err != nil || fd <= 2 {
+			continue
+		}
+		if flags, err := unix.FcntlInt(uintptr(fd), unix.F_GETFD, 0); err == nil && flags&unix.FD_CLOEXEC == 0 {
+			fds = append(fds, fd)
+		}
+	}
+	return fds
+}
+
+// seatbeltShellSpec runs script under /bin/sh in ws.
+func seatbeltShellSpec(t *testing.T, ws, script string) execSpec {
+	t.Helper()
+	return execSpec{
+		Path:          "/bin/sh",
+		Argv:          []string{"/bin/sh", "-c", script},
+		Dir:           ws,
+		Env:           []string{"PATH=/usr/bin:/bin", "HOME=" + os.Getenv("HOME")},
+		WorkspaceRoot: ws,
+		ExeIdentity:   execIdentityOf(t, "/bin/sh"),
+	}
+}
+
+// The bypass the final review demonstrated: Seatbelt never re-checks a write
+// through an already-open descriptor, so a writable descriptor the launcher
+// leaked would carry a sandboxed write outside the workspace. The backend
+// refuses to spawn while one exists, and nothing lands.
+func TestSeatbeltRefusesInheritableHostFD(t *testing.T) {
+	requireSeatbeltCapability(t)
+	ws := canonTempDirT(t)
+	dir, _ := outsideCanaryDir(t, ws)
+	backend, err := newExecBackend(seatbeltTestCfg())
+	if err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(dir, "leaked.txt")
+	fd, err := unix.Open(outside, unix.O_WRONLY|unix.O_CREAT|unix.O_TRUNC, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leakFD(t, fd)
+
+	res, err := backend.Run(context.Background(), seatbeltShellSpec(t, ws, fmt.Sprintf("printf leaked >&%d", fd)))
+	if got, rerr := os.ReadFile(outside); rerr != nil || len(got) != 0 {
+		t.Fatalf("outside file = %q (err %v), want it empty: the write escaped through fd %d (Run = %+v, %v)", got, rerr, fd, res, err)
+	}
+	want := fmt.Sprintf("tools: seatbelt refuses to spawn with inheritable host fd %d (missing FD_CLOEXEC)", fd)
+	if err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("Run with inheritable fd %d = %+v, %v; want the refusal %q", fd, res, err, want)
+	}
+
+	// Control: with the descriptor close-on-exec the same command runs, and
+	// the descriptor is gone in the child.
+	if _, err := unix.FcntlInt(uintptr(fd), unix.F_SETFD, unix.FD_CLOEXEC); err != nil {
+		t.Fatal(err)
+	}
+	res, err = backend.Run(context.Background(), seatbeltShellSpec(t, ws, fmt.Sprintf("printf leaked >&%d", fd)))
+	if err != nil || res.ExitCode == 0 {
+		t.Fatalf("control Run = exit %d, %v; want a ran command whose write to fd %d fails", res.ExitCode, err, fd)
+	}
+	if got, _ := os.ReadFile(outside); len(got) != 0 {
+		t.Fatalf("outside file = %q after the control, want it empty", got)
+	}
+}
+
+// ValidateSandbox fails at construction, wrapped in ErrSandboxPolicy, where
+// every later spawn would be refused (I2): a library host learns before it
+// advertises the backend.
+func TestSeatbeltValidateSandboxRefusesInheritableFD(t *testing.T) {
+	requireSeatbeltCapability(t)
+	root := canonTempDirT(t)
+	fd, err := unix.Open("/dev/null", unix.O_RDONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leakFD(t, fd)
+	err = ValidateSandbox(seatbeltTestCfg(), root)
+	want := fmt.Sprintf("tools: seatbelt refuses to spawn with inheritable host fd %d (missing FD_CLOEXEC)", fd)
+	if !errors.Is(err, ErrSandboxPolicy) || !strings.Contains(err.Error(), want) {
+		t.Fatalf("ValidateSandbox with inheritable fd %d = %v, want ErrSandboxPolicy and %q", fd, err, want)
+	}
+	if _, err := unix.FcntlInt(uintptr(fd), unix.F_SETFD, unix.FD_CLOEXEC); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateSandbox(seatbeltTestCfg(), root); err != nil {
+		t.Fatalf("control ValidateSandbox = %v, want nil", err)
+	}
+}
+
+// The netsrc carve-out keys on the control's id, never on the socket family:
+// another kernel control a launcher leaks (here com.apple.network.statistics,
+// which an unprivileged process can connect; utun_control, IP egress, needs
+// root) is refused like any other descriptor.
+func TestSeatbeltRefusesOtherKernelControlSocket(t *testing.T) {
+	requireSeatbeltCapability(t)
+	ws := canonTempDirT(t)
+	backend, err := newExecBackend(seatbeltTestCfg())
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := kernelControlID("com.apple.network.statistics")
+	if err != nil {
+		t.Fatalf("resolve com.apple.network.statistics: %v", err)
+	}
+	fd, err := unix.Socket(unix.AF_SYSTEM, unix.SOCK_DGRAM, sysprotoControl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leakFD(t, fd)
+	if err := unix.Connect(fd, &unix.SockaddrCtl{ID: id}); err != nil {
+		t.Fatalf("connect com.apple.network.statistics: %v", err)
+	}
+	if sa, err := unix.Getpeername(fd); err != nil {
+		t.Fatalf("precondition: getpeername: %v", err)
+	} else if ctl, ok := sa.(*unix.SockaddrCtl); !ok || ctl.ID != id {
+		t.Fatalf("precondition: peer = %#v, want a kernel control with id %d", sa, id)
+	}
+	_, err = backend.Run(context.Background(), seatbeltShellSpec(t, ws, "true"))
+	want := fmt.Sprintf("tools: seatbelt refuses to spawn with inheritable host fd %d (missing FD_CLOEXEC)", fd)
+	if err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("Run with a leaked network.statistics control socket = %v, want %q", err, want)
+	}
+}
+
+// libSystem's resolver leaves a non-CLOEXEC com.apple.netsrc control socket in
+// the process after its first hostname lookup, even of "localhost". The
+// carve-out keeps every later command from being refused.
+func TestSeatbeltRunsAfterLocalhostLookup(t *testing.T) {
+	requireSeatbeltCapability(t)
+	if _, err := net.LookupHost("localhost"); err != nil {
+		t.Fatalf("LookupHost(localhost): %v", err)
+	}
+	if fds := inheritableHostFDs(t); len(fds) == 0 {
+		t.Fatal("precondition: the lookup left no inheritable descriptor, so this would test nothing")
+	}
+	res := realSeatbeltRun(t, seatbeltTestCfg(), canonTempDirT(t), []string{"/bin/echo", "hi"})
+	if res.ExitCode != 0 || string(res.Stdout) != "hi\n" {
+		t.Fatalf("exit=%d stdout=%q stderr=%q, want exit 0 and \"hi\\n\"", res.ExitCode, res.Stdout, res.Stderr)
+	}
+}
+
+// The exemption refuses on any doubt: a getpeername or id-resolution error,
+// a peer that is not a kernel control, or another control's id.
+func TestSeatbeltNetsrcExemptionRefusesOnDoubt(t *testing.T) {
+	const netsrc = 7
+	errBoom := errors.New("boom")
+	idOK := func(name string) (uint32, error) {
+		if name != "com.apple.netsrc" {
+			t.Fatalf("resolved control %q, want com.apple.netsrc", name)
+		}
+		return netsrc, nil
+	}
+	for _, tc := range []struct {
+		name string
+		id   func(string) (uint32, error)
+		peer func(int) (unix.Sockaddr, error)
+		want bool
+	}{
+		{"netsrc peer", idOK, func(int) (unix.Sockaddr, error) { return &unix.SockaddrCtl{ID: netsrc, Unit: 234}, nil }, true},
+		{"other control", idOK, func(int) (unix.Sockaddr, error) { return &unix.SockaddrCtl{ID: netsrc + 1}, nil }, false},
+		{"not a control", idOK, func(int) (unix.Sockaddr, error) { return &unix.SockaddrInet4{Port: 443}, nil }, false},
+		{"getpeername error", idOK, func(int) (unix.Sockaddr, error) { return nil, unix.ENOTSOCK }, false},
+		{"id error", func(string) (uint32, error) { return netsrc, errBoom }, func(int) (unix.Sockaddr, error) { return &unix.SockaddrCtl{ID: netsrc}, nil }, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := netsrcControlExemption(tc.id, tc.peer)(3); got != tc.want {
+				t.Fatalf("exempt = %t, want %t", got, tc.want)
+			}
+		})
+	}
+	t.Run("id resolved once per audit", func(t *testing.T) {
+		calls := 0
+		exempt := netsrcControlExemption(func(string) (uint32, error) { calls++; return netsrc, nil },
+			func(int) (unix.Sockaddr, error) { return &unix.SockaddrCtl{ID: netsrc}, nil })
+		exempt(3)
+		exempt(4)
+		if calls != 1 {
+			t.Fatalf("id resolutions = %d, want 1", calls)
+		}
+	})
+}
+
+// TestProbeSeatbeltUnavailableInsideASandbox runs the real probe in a child
+// confined by an allow-default Seatbelt profile, where macOS refuses to apply
+// the deny-default profile every command needs: the probe must report
+// Seatbelt unavailable. The parent's own probe passing is the control.
+func TestProbeSeatbeltUnavailableInsideASandbox(t *testing.T) {
+	if os.Getenv("GO_LLM_SEATBELT_PROBE_CHILD") == "1" {
+		err := probeSeatbelt(context.Background(), seatbeltExecPath)
+		fmt.Printf("PROBE-RESULT: %v\n", err)
+		return
+	}
+	requireSeatbeltCapability(t)
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, seatbeltExecPath, "-p", "(version 1)(allow default)",
+		exe, "-test.run=^TestProbeSeatbeltUnavailableInsideASandbox$", "-test.count=1")
+	cmd.Env = append(os.Environ(), "GO_LLM_SEATBELT_PROBE_CHILD=1")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("sandboxed child: %v\n%s", err, out)
+	}
+	const want = "PROBE-RESULT: tools: seatbelt unavailable on this host"
+	if !strings.Contains(string(out), want) {
+		t.Fatalf("sandboxed child output:\n%s\nwant a line starting %q", out, want)
 	}
 }

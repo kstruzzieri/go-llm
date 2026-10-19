@@ -16,7 +16,10 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -64,6 +67,75 @@ func probeSeatbelt(ctx context.Context, execPath string) error {
 		return fmt.Errorf("tools: seatbelt unavailable on this host: %w", err)
 	}
 	return nil
+}
+
+// seatbeltNetsrcControl names the kernel control libSystem's resolver opens
+// in this process on its first hostname lookup (a lookup of "localhost" is
+// enough) and leaves without FD_CLOEXEC; the Go runtime cannot mark it.
+const seatbeltNetsrcControl = "com.apple.netsrc"
+
+// sysprotoControl is SYSPROTO_CONTROL from <sys/sys_domain.h>, which
+// x/sys/unix does not export.
+const sysprotoControl = 2
+
+// seatbeltRejectInheritableFDs is the shared descriptor audit over macOS's
+// per-process descriptor directory (#576). Its one exemption is libSystem's
+// own netsrc control socket: refusing it would refuse every command after
+// the process resolves a hostname. That socket is a routing-query channel,
+// not a filesystem or IP path. Every other descriptor is refused, including
+// any other kernel control (a launcher-leaked utun control socket is IP
+// packet egress).
+func seatbeltRejectInheritableFDs() error {
+	return rejectInheritableFDs("seatbelt", "/dev/fd", netsrcControlExemption(kernelControlID, unix.Getpeername))
+}
+
+// netsrcControlExemption returns the audit's exemption: fd is a kernel
+// control socket (its peer address is AF_SYSTEM/AF_SYS_CONTROL, so it is a
+// SYSPROTO_CONTROL socket) connected to the netsrc control, whose id is
+// resolved at most once per audit. A family match alone is never enough,
+// and any getpeername or id-resolution error refuses. getsockname is not
+// consulted: kernel control sockets do not support it (EOPNOTSUPP).
+func netsrcControlExemption(controlID func(string) (uint32, error), peer func(int) (unix.Sockaddr, error)) func(int) bool {
+	var id uint32
+	var idErr error
+	resolved := false
+	return func(fd int) bool {
+		if !resolved {
+			resolved = true
+			id, idErr = controlID(seatbeltNetsrcControl)
+		}
+		if idErr != nil {
+			return false
+		}
+		sa, err := peer(fd)
+		if err != nil {
+			return false
+		}
+		ctl, ok := sa.(*unix.SockaddrCtl)
+		return ok && ctl.ID == id
+	}
+}
+
+// kernelControlID resolves a kernel control's id (CTLIOCGINFO) through a
+// temporary control socket, marked close-on-exec under ForkLock so no
+// concurrent spawn inherits it, and closed before returning.
+func kernelControlID(name string) (uint32, error) {
+	syscall.ForkLock.RLock()
+	s, err := unix.Socket(unix.AF_SYSTEM, unix.SOCK_DGRAM, sysprotoControl)
+	if err == nil {
+		unix.CloseOnExec(s)
+	}
+	syscall.ForkLock.RUnlock()
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = unix.Close(s) }()
+	var info unix.CtlInfo
+	copy(info.Name[:], name)
+	if err := unix.IoctlCtlInfo(s, &info); err != nil {
+		return 0, err
+	}
+	return info.Id, nil
 }
 
 // seatbeltProbeFunc is the injectable probe seam for deterministic unit tests.
@@ -117,6 +189,11 @@ func newSeatbeltExecBackend(cfg SandboxConfig) (execBackend, error) {
 
 func newSeatbeltExecBackendAt(execPath string, probe seatbeltProbeFunc, cfg SandboxConfig) (execBackend, error) {
 	if err := seatbeltConfigSupport(cfg); err != nil {
+		return nil, err
+	}
+	// The probe is this backend's first spawn, and construction (so
+	// ValidateSandbox) must fail where every later spawn would (#576).
+	if err := seatbeltRejectInheritableFDs(); err != nil {
 		return nil, err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), seatbeltProbeTimeout)
@@ -278,6 +355,11 @@ func (b *seatbeltBackend) prepare(spec execSpec) (execSpec, func() error, error)
 		return fail(err)
 	}
 	if err := validateSandboxWorkspaceLinks(spec.WorkspaceRoot); err != nil {
+		return fail(err)
+	}
+	// Last, as bwrap does: an inheritable descriptor crosses the profile's
+	// write and network boundary, which Seatbelt never re-checks on it.
+	if err := seatbeltRejectInheritableFDs(); err != nil {
 		return fail(err)
 	}
 	wrapped := spec

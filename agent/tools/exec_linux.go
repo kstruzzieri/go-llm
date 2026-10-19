@@ -18,7 +18,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -223,6 +222,11 @@ func newBwrapExecBackendAt(bwrapPath, prlimitPath string, probe bwrapProbeFunc, 
 			return nil, err
 		}
 	}
+	// The probe is this backend's first spawn, and construction (so
+	// ValidateSandbox) must fail where every later spawn would (#576).
+	if err := bwrapRejectInheritableFDs(); err != nil {
+		return nil, err
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), bwrapProbeTimeout)
 	defer cancel()
 	if err := probe(ctx, probeBwrapArgv(bwrapPath, prlimitPath, cfg, capBytes)); err != nil {
@@ -302,39 +306,10 @@ func safeEtcPolicyPaths(paths []string, workspaceRoot, home string) ([]string, e
 	return out, nil
 }
 
-// rejectInheritableFDs enumerates /proc/self/fd immediately before spawn and
-// fails closed on any host descriptor above stdio without FD_CLOEXEC: bwrap
-// passes inherited descriptors through to the payload. An EBADF entry that
-// vanished during the scan is ignored; the audit never mutates descriptors
-// it does not own. The scan and os/exec are not one kernel-atomic operation
-// — that residual interval is the documented D10 limitation.
-func rejectInheritableFDs() error {
-	entries, err := os.ReadDir("/proc/self/fd")
-	if err != nil {
-		return fmt.Errorf("tools: bwrap audit inherited fds: %w", err)
-	}
-	for _, e := range entries {
-		fd, convErr := strconv.Atoi(e.Name())
-		if convErr != nil {
-			return fmt.Errorf("tools: bwrap audit inherited fds: unexpected entry %q", e.Name())
-		}
-		if fd <= 2 {
-			continue
-		}
-		flags, _, errno := syscall.Syscall(syscall.SYS_FCNTL, uintptr(fd), syscall.F_GETFD, 0)
-		if errno == syscall.EBADF {
-			continue // closed between the directory read and inspection
-		}
-		if errno != 0 {
-			return fmt.Errorf("tools: bwrap audit fd %d: %w", fd, errno)
-		}
-		if flags&syscall.FD_CLOEXEC == 0 {
-			return fmt.Errorf("tools: bwrap refuses to spawn with inheritable host fd %d (missing FD_CLOEXEC); "+
-				"it was inherited from the process that launched this agent, which must set FD_CLOEXEC "+
-				"on its own descriptors before spawning", fd)
-		}
-	}
-	return nil
+// bwrapRejectInheritableFDs is the shared descriptor audit over Linux's
+// per-process descriptor directory, with no exemption.
+func bwrapRejectInheritableFDs() error {
+	return rejectInheritableFDs("bwrap", "/proc/self/fd", nil)
 }
 
 // prepare validates the re-checked spec, collects the per-invocation policy,
@@ -421,7 +396,7 @@ func (b *bwrapBackend) prepare(spec execSpec) (execSpec, error) {
 		wrapped.Argv = append([]string{"prlimit", "--as=" + strconv.FormatInt(b.capBytes, 10), b.bwrapPath}, wrapped.Argv[1:]...)
 		wrapped.Path = b.prlimitPath
 	}
-	if err := rejectInheritableFDs(); err != nil {
+	if err := bwrapRejectInheritableFDs(); err != nil {
 		return execSpec{}, err
 	}
 	return wrapped, nil
