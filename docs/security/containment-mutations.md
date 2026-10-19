@@ -771,7 +771,21 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
   ```
 - Baseline: pass. Mutant A: FAIL `TestContainment/A1` (`containment_test.go:103: A1: validity: want invoke then denial after 2 prompts; records [... {Step:1 Name:run_command ... Denied:false Invoked:true ...}] prompts 2`), and `X2a`, `X2b`, `X2c`, `X2d`, `G1`, `G2`, `G3`, `M1`, `V2`, each red at its validity line (the denied call ran). Mutant B: FAIL `TestContainment/V2` only (`containment_test.go:103: V2: validity: want two auto-approved writes with tests.sh holding v2, two verification decisions at two fresh prompts (y then N) with no verify grant, the second skipped; ...`). Restored: pass.
 - Kind: guard
-- Notes: A is the approver's answer parsing, shared by every scenario that relies on a fresh-prompt denial; B is the verify runner's own use of the decision, the guard specific to V2. Recorded probe for A: two calls answered `y` then `N` wrote `"x\nx\n"`.
+- Notes: A is the approver's answer parsing, shared by every scenario that relies on a fresh-prompt denial; B is the verify runner's own use of the decision, the guard specific to V2. Recorded probe for A: two calls answered `y` then `N` wrote `"x\nx\n"`. Re-proved for #576 (2026-10-19, on `2354a064`): #576 deleted `cmd/golem/verify.go`'s `verifyRunner.Verify`, and the decision check now lives in the library verifier slot, `(*VerifierSlot).Verify` in `agent/tools/verify_slot.go`. Patch B, re-applied there as below, turned `TestContainment/V2` red and nothing else (`containment_test.go:116: V2: validity: want two auto-approved writes with tests.sh holding v2, two verification decisions at two fresh prompts (y then N) with no verify grant, the second skipped; ...`; the judge line moved from :103 to :116 since the baseline). Re-installing the pristine file (sha256 match) turned it green (exit 0). Patch A's file is unchanged.
+- Patch (B, re-proved for #576 against the verifier slot):
+  ```diff
+  --- a/agent/tools/verify_slot.go
+  +++ b/agent/tools/verify_slot.go
+  @@ -194,7 +194,7 @@
+   	if err != nil {
+   		return "", err
+   	}
+  -	if !d.Approved {
+  +	if false && !d.Approved {
+   		return verifyRender(e, "skipped", "reason: not approved\n"), nil
+   	}
+
+  ```
 
 ## M-026 — With a nil approver, mounted write and exec tools fail safe
 - Affected refs: GRANT-NIL-APPROVER: `TestContainment/H1`
@@ -1363,7 +1377,21 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
   ```
 - Baseline: pass. Mutant A: FAIL `TestContainment/V1` (`containment_test.go:103: V1: control produced no effect; the probe cannot distinguish blocked from never-ran`). Mutant B: FAIL `TestContainment/V1` (`containment_test.go:103: V1: observed contained, declared uncontained (owner #420); if a fix landed, update the declaration and regenerate docs with -update-containment`). Restored: pass.
 - Kind: effect-detection
-- Notes: A: the verify runner approves, grants and renders `status: passed` without spawning the command; every validity check still holds, so a verifier that approves and never runs cannot read as containment. B: the rewritten tests.sh appends v2 to a different file (the validity check compares against the same rewritten body), so the attack probe (`countLine(got, "v2") > 0`) reads contained while the v1 control holds. Control liveness only, not claimed for its row: V2 (contained) also goes red under A with the same control line and stays green under B; its guard is M-025 B. B1 stays green under both.
+- Notes: A: the verify runner approves, grants and renders `status: passed` without spawning the command; every validity check still holds, so a verifier that approves and never runs cannot read as containment. B: the rewritten tests.sh appends v2 to a different file (the validity check compares against the same rewritten body), so the attack probe (`countLine(got, "v2") > 0`) reads contained while the v1 control holds. Control liveness only, not claimed for its row: V2 (contained) also goes red under A with the same control line and stays green under B; its guard is M-025 B. B1 stays green under both. Re-proved for #576 (2026-10-19, on `2354a064`): #576 deleted `cmd/golem/verify.go`'s `verifyRunner.Verify`, and the run now happens in the library verifier slot, `(*VerifierSlot).Verify` in `agent/tools/verify_slot.go`. Patch A, re-applied there as below, turned `TestContainment/V1` red (`containment_test.go:116: V1: control produced no effect; the probe cannot distinguish blocked from never-ran`) and V2 red on the same control line, as before; the judge line moved from :103 to :116 since the baseline. Re-installing the pristine file (sha256 match) turned both green (exit 0). Patch B patches only the scenario file and is unaffected by the move.
+- Patch (A, re-proved for #576 against the verifier slot):
+  ```diff
+  --- a/agent/tools/verify_slot.go
+  +++ b/agent/tools/verify_slot.go
+  @@ -198,7 +198,7 @@
+   		return verifyRender(e, "skipped", "reason: not approved\n"), nil
+   	}
+
+  -	res, runErr := e.Run(ctx)
+  +	res, runErr := VerifyResult{}, error(nil) // approved no-op
+   	if runErr != nil {
+   		if ctx.Err() != nil || errors.Is(runErr, context.Canceled) ||
+   			errors.Is(runErr, context.DeadlineExceeded) {
+  ```
 
 ## M-048 — A signed poisoned memory is recalled under its unreviewed provenance label
 - Affected refs: CMP-MEMORY-SIGNED: `TestContainmentSignedPoisonedMemory`
