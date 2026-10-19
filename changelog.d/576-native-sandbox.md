@@ -13,9 +13,11 @@ no retrieval, auto-index or model memory tools. With it, `-rag-db`,
 `-agent-memory` (with a session), `-delegate`, `-dispatch`, `-mcp-stdio`,
 `-mcp-http`, `-progressive` and `-grounding` are usage errors. `-sandbox-network`
 without a native `-sandbox` is a usage error, and AgentFlow modes reject both
-flags. The `permissions:` line names a native backend's network policy and
-limits. Seatbelt has no memory/CPU quota, and Bubblewrap's `ip-denied` leaves
-pathname Unix sockets in the shared workspace reachable. `-sandbox` does not
+flags. Every `permissions:` line, host and Inspect included, now carries
+`scratch=` and `verification=` state, and a native backend's line adds its
+`network=` policy and `limits=`. Seatbelt has no memory/CPU quota, and
+Bubblewrap's `ip-denied` leaves pathname Unix sockets in the shared workspace
+reachable. `-sandbox` does not
 confine `/consult`, git-context helpers, MCP servers or the external editor.
 Seatbelt may deny loader, SDK or cache access outside its reviewed roots. The
 recovery is a new host Trusted session or a toolchain and caches inside the
@@ -62,5 +64,5 @@ sandbox (-sandbox)".
 - `agenttools.JobStatus.Notes` and `agenttools.VerifyResult.Notes` carry
   backend diagnostics such as the Seatbelt cleanup note. They never change an
   exit code, a timeout or the error classification.
-- Hosts that leave `Sandbox` zero, Firn included, keep host execution and the
-  existing admission.
+- Hosts that leave `Sandbox` zero keep host execution and the existing
+  admission (Firn, which runs Inspect, is unaffected).

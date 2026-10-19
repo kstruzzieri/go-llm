@@ -23,8 +23,9 @@ type SandboxRuntime string
 const SandboxRuntimeHost SandboxRuntime = "host"
 
 // SandboxRuntimeSeatbelt selects the macOS Seatbelt (sandbox-exec) backend
-// (#442): per-invocation deny-default profiles scoping reads/writes to the
-// workspace plus a private temp directory. Selecting it off-darwin, or on a
+// (#442): per-invocation deny-default profiles scoping writes to the
+// workspace plus a private temp directory and reads to reviewed system roots,
+// the workspace and that temp. Selecting it off-darwin, or on a
 // host whose Seatbelt capability probe fails, fails closed at construction.
 const SandboxRuntimeSeatbelt SandboxRuntime = "seatbelt"
 
