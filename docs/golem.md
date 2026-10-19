@@ -40,12 +40,14 @@ Choose the profile with `-profile inspect|trusted`:
 - **Preview is reserved.** `-profile preview` exits with `Preview unavailable: staged-workspace runtime requires #388/#389` and starts no session.
 - **`-sandbox` is not available yet.** Native Seatbelt and Bubblewrap command sandboxes for Trusted arrive with #576; until then Trusted commands run on the host.
 
-Every interactive or one-shot session (AgentFlow modes excepted) prints one line to stderr with the effective permissions, after any `profile: trusted (selected by ...)` line. For example, with no flags and then with `-allow-exec -no-rag -no-memory`; the Trusted tool list varies with the flags and also includes `retrieve`, `memory_search` and the other tools whose features are on:
+Every interactive or one-shot session (AgentFlow modes excepted) prints a startup line to stderr with the effective permissions, after any `profile: trusted (selected by ...)` line. For example, with no flags and then with `-allow-exec -no-rag -no-memory`; the Trusted tool list varies with the flags and also includes `retrieve`, `memory_search` and the other tools whose features are on:
 
 ```text
 permissions: profile=inspect tools=read_file,search,glob,list commands=n/a; restart with -profile trusted to enable retrieval, memory tools, writes or commands
 permissions: profile=trusted tools=read_file,search,glob,list,run_command,start_command,command_status,command_tail,stop_command commands=host (unsandboxed; runs with the host user's filesystem and network authority)
 ```
+
+A successful `/allow-write` or `/allow-exec` prints the updated permissions to stderr. Repeated, refused or failed mounts print no additional permissions line.
 
 Result JSON and stream events are unchanged; the notices go to stderr only. No index, memory database or stored conversation is migrated or deleted: Inspect only stops mounting the tools that read them. Library hosts get the same information from `Runtime.EffectivePermissions()`; see [least privilege](least-privilege.md#runtime-profiles-387).
 

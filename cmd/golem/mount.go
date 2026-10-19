@@ -197,6 +197,9 @@ func handleAllowWrite(ctx context.Context, out io.Writer, sess *replSession, fie
 	verifier, vwarn := buildVerifier(sess.root)
 	sess.verifier.set(verifier)
 	_, _ = fmt.Fprintln(out, "writes enabled (approval per change; /auto-edits, /undo, /checkpoints available)")
+	if sess.notice != nil {
+		sess.notice(renderPermissions(sess.runtime.EffectivePermissions()))
+	}
 	if undoing > 0 {
 		_, _ = fmt.Fprintf(out, "an interrupted undo exists (%d checkpoint(s)); /undo resumes it\n", undoing)
 	}
@@ -291,4 +294,7 @@ func handleAllowExec(ctx context.Context, out io.Writer, sess *replSession, fiel
 	// shutdown on the normal exit path.
 	sess.lateStop = context.AfterFunc(ctx, manager.Shutdown)
 	_, _ = fmt.Fprintln(out, "exec enabled (approval per command; /jobs available)")
+	if sess.notice != nil {
+		sess.notice(renderPermissions(sess.runtime.EffectivePermissions()))
+	}
 }

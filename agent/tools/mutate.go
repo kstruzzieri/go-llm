@@ -54,9 +54,9 @@ func splitLines(s string) []string {
 // empty after renders as emptied (truncated to zero bytes).
 //
 // path is the raw workspace-relative path. It is quoted ONCE here, for display:
-// an ordinary path stays bare, one with whitespace or a non-graphic rune
-// (including LF) becomes a single quoted token, so a hostile name cannot forge
-// a heading or a diff line. Callers and pending plans keep the raw path.
+// an ordinary path stays bare; whitespace, controls, quotes and backslashes
+// become a single quoted token, so names cannot forge headings or impersonate
+// another escaped path. Callers and pending plans keep the raw path.
 func unifiedDiff(path string, before, after []byte, beforeExists bool) string {
 	display := quoteArgForPreview(path)
 	var b strings.Builder

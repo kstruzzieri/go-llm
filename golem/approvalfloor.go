@@ -27,7 +27,9 @@ func libraryTool(t agent.Tool) bool {
 		*agenttools.PromoteArtifact, *agenttools.DelegateCode, *agenttools.Dispatch:
 		return true
 	case agenttools.ScratchChanges, agenttools.Retrieve, agenttools.MemorySearch,
-		agenttools.AgentMemorySearch, agenttools.AgentMemoryCreate, agenttools.AgentMemoryPromote:
+		agenttools.AgentMemorySearch, agenttools.AgentMemoryCreate, agenttools.AgentMemoryPromote,
+		*agenttools.ScratchChanges, *agenttools.Retrieve, *agenttools.MemorySearch,
+		*agenttools.AgentMemorySearch, *agenttools.AgentMemoryCreate, *agenttools.AgentMemoryPromote:
 		return true
 	}
 	return false
@@ -109,7 +111,9 @@ func floorExempt(t agent.Tool) bool {
 		return false
 	}
 	switch t.(type) {
-	case agenttools.AgentMemoryCreate, agenttools.AgentMemoryPromote, *agenttools.DelegateCode, *agenttools.Dispatch:
+	case agenttools.AgentMemoryCreate, *agenttools.AgentMemoryCreate,
+		agenttools.AgentMemoryPromote, *agenttools.AgentMemoryPromote,
+		*agenttools.DelegateCode, *agenttools.Dispatch:
 		return true
 	}
 	return false

@@ -23,8 +23,8 @@ Inspect unless a legacy opt-in flag survives one-shot normalization
 `-progressive`, `-grounding`); it is then Trusted and startup prints
 `profile: trusted (selected by <flag>)`. An explicit `-profile inspect` with
 one of those flags is a usage error. AgentFlow modes stay Trusted and print no
-profile notice. Startup prints a `permissions:` line to stderr, and result JSON
-and stream events keep their schemas.
+profile notice. Startup and successful late mounts print a `permissions:` line
+to stderr, and result JSON and stream events keep their schemas.
 
 #### Behavior change
 
@@ -48,14 +48,16 @@ and stream events keep their schemas.
   destination admission). The exemption is by concrete type and trusts the
   store, model caller and hooks the host injects into those types: the floor
   guards against a tool that declares `ApprovalNever` for itself, not against
-  host code.
+  host code. Non-nil pointers to value-receiver library tools retain their
+  library provenance and the same approval policy as the equivalent values.
 - `dispatch` is rejected alongside a `ScopeGuard`, and an allowlist that admits
   `dispatch` must name all four reads and every other child tool it carries
   (an optional `retrieve`). The new `agenttools.Dispatch.ChildToolNames`
   reports those children.
 - Approval previews pass through `agent.SanitizePreview`, which renders
   terminal controls as visible escapes, and diff headers quote paths that
-  contain whitespace or controls.
+  contain whitespace, controls, quotes or backslashes, so literal escapes
+  cannot impersonate another filename.
 
 #### Consumers
 

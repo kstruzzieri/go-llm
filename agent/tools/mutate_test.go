@@ -255,6 +255,7 @@ func TestWritePreviewHeadersExact(t *testing.T) {
 		{"ordinary overwrite", "a/b.go", true, "--- a/b.go\n+++ a/b.go\n-old\n+new\n"},
 		{"spaced overwrite", "my file.txt", true, "--- \"my file.txt\"\n+++ \"my file.txt\"\n-old\n+new\n"},
 		{"LF overwrite", "a\nb.txt", true, "--- \"a\\nb.txt\"\n+++ \"a\\nb.txt\"\n-old\n+new\n"},
+		{"quoted escape overwrite", `"a\nb.txt"`, true, "--- \"\\\"a\\\\nb.txt\\\"\"\n+++ \"\\\"a\\\\nb.txt\\\"\"\n-old\n+new\n"},
 		{"ordinary new file", "a/b.go", false, "new file: a/b.go\n+new\n"},
 		{"LF new file", "a\nb.txt", false, "new file: \"a\\nb.txt\"\n+new\n"},
 	}

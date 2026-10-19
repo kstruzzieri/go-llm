@@ -436,3 +436,55 @@ func TestRunAllowWritePreservesScratchIdentity(t *testing.T) {
 		t.Fatalf("late scratch startup = %v; stderr: %s", err, readRunTestFile(t, stderr))
 	}
 }
+
+func TestRunLateMountPermissionsNotice(t *testing.T) {
+	for _, command := range []string{"/allow-write", "/allow-exec"} {
+		for _, mode := range []string{"success", "inspect", "pipe", "closed"} {
+			t.Run(command+"/"+mode, func(t *testing.T) {
+				configPath, root := writeRunLifecycleConfig(t)
+				// Repeating a successful command must not repeat the permissions notice.
+				stdin, stdout, stderr := stdinFileWith(t, command+"\n"+command+"\n")
+				profile := "trusted"
+				if mode == "inspect" {
+					profile = "inspect"
+				}
+				var sess *replSession
+				err := run([]string{"-profile", profile, "-config", configPath, "-root", root,
+					"-no-probe", "-no-cap-probe", "-no-session", "-no-memory", "-no-rag",
+					"-no-project-context", "-no-auto-index"}, stdin, stdout, stderr, runHooks{
+					afterSessionReady: func(ready *replSession) error {
+						sess = ready
+						sess.stdinTerminal = mode != "pipe"
+						if mode == "closed" {
+							return sess.runtime.Close()
+						}
+						return nil
+					},
+				})
+				if err != nil {
+					t.Fatalf("run: %v; stderr: %s", err, readRunTestFile(t, stderr))
+				}
+				out, notices := readRunTestFile(t, stdout), readRunTestFile(t, stderr)
+				if strings.Contains(out, "permissions:") {
+					t.Fatalf("permissions leaked to stdout: %s", out)
+				}
+				wantCount := 1
+				if mode == "success" {
+					wantCount = 2
+					if !strings.Contains(out, "already enabled") {
+						t.Fatalf("mount did not succeed: %s", out)
+					}
+					want := renderPermissions(sess.runtime.EffectivePermissions()) + "\n"
+					if strings.Count(notices, want) != 1 {
+						t.Errorf("missing updated permissions %q in stderr: %s", want, notices)
+					}
+				} else if sess.allowWrite || sess.allowExec {
+					t.Fatal("refused/failed mount enabled capabilities")
+				}
+				if got := strings.Count(notices, "permissions:"); got != wantCount {
+					t.Fatalf("permissions notices = %d, want %d: %s", got, wantCount, notices)
+				}
+			})
+		}
+	}
+}

@@ -1802,6 +1802,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		renderOut = stderr
 	}
 	sess = &replSession{
+		notice:           func(line string) { _, _ = fmt.Fprintln(stderr, line) },
 		profile:          profile,
 		canary:           canary,
 		orch:             orch,
@@ -1900,7 +1901,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	// one-shot (-p) path keeps the plain cancel-the-turn wiring and stderr
 	// notices.
 	replCtx := ctx
-	notice := func(line string) { _, _ = fmt.Fprintln(stderr, line) }
+	notice := sess.notice
 	onInterrupt := func() {
 		select {
 		case interrupts <- struct{}{}:
@@ -1927,6 +1928,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 			dispatchNotice.set(ctrl.notice)
 		}
 		notice = ctrl.notice
+		sess.notice = ctrl.notice
 		onInterrupt = ctrl.interrupt
 		if bgManager != nil {
 			// replCtx is the manager's host lifetime (#346): idle Ctrl-C quit

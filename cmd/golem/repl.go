@@ -162,6 +162,8 @@ type replSession struct {
 	// REPL turns and status use runtime.ModelOptions() instead.
 	startupModelOptions provider.ModelOptions
 
+	notice func(string) // stderr notices; rebound to control.notice in the REPL
+
 	// control coordinates the prompt, async notices, and Ctrl-C. nil in tests
 	// and non-interactive callers, where runREPL falls back to a plain prompt
 	// and the caller's interrupt wiring.

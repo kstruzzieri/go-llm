@@ -7,6 +7,7 @@ package golem
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"go/ast"
 	"go/build"
 	"go/importer"
@@ -179,6 +180,8 @@ func TestLibraryToolRecognizesConcreteTypes(t *testing.T) {
 		&agenttools.DelegateCode{}, &agenttools.Dispatch{},
 		agenttools.Retrieve{}, agenttools.MemorySearch{}, agenttools.AgentMemorySearch{},
 		agenttools.AgentMemoryCreate{}, agenttools.AgentMemoryPromote{},
+		&agenttools.ScratchChanges{}, &agenttools.Retrieve{}, &agenttools.MemorySearch{},
+		&agenttools.AgentMemorySearch{}, &agenttools.AgentMemoryCreate{}, &agenttools.AgentMemoryPromote{},
 	}
 	for _, tool := range library {
 		if !libraryTool(tool) {
@@ -186,13 +189,14 @@ func TestLibraryToolRecognizesConcreteTypes(t *testing.T) {
 		}
 	}
 	opaque := map[string]agent.Tool{
-		"nil interface":          nil,
-		"typed nil read_file":    (*agenttools.ReadFile)(nil),
-		"typed nil dispatch":     (*agenttools.Dispatch)(nil),
-		"stub":                   &floorStub{name: "x"},
-		"embeds a library tool":  floorEmbedsReadFile{&agenttools.ReadFile{}},
-		"pointer to value tool":  &agenttools.ScratchChanges{},
-		"floored wrapper itself": floorTool{inner: &floorStub{name: "x"}},
+		"nil interface":            nil,
+		"typed nil read_file":      (*agenttools.ReadFile)(nil),
+		"typed nil memory create":  (*agenttools.AgentMemoryCreate)(nil),
+		"typed nil memory promote": (*agenttools.AgentMemoryPromote)(nil),
+		"typed nil dispatch":       (*agenttools.Dispatch)(nil),
+		"stub":                     &floorStub{name: "x"},
+		"embeds a library tool":    floorEmbedsReadFile{&agenttools.ReadFile{}},
+		"floored wrapper itself":   floorTool{inner: &floorStub{name: "x"}},
 	}
 	for name, tool := range opaque {
 		if libraryTool(tool) {
@@ -580,7 +584,7 @@ func TestFloorWrapsNonExemptLibraryTools(t *testing.T) {
 		}
 	})
 	t.Run("the four exempt types are returned unchanged", func(t *testing.T) {
-		exempt := []agent.Tool{agenttools.AgentMemoryCreate{}, agenttools.AgentMemoryPromote{}, &agenttools.DelegateCode{}, &agenttools.Dispatch{}}
+		exempt := []agent.Tool{agenttools.AgentMemoryCreate{}, agenttools.AgentMemoryPromote{}, &agenttools.AgentMemoryCreate{}, &agenttools.AgentMemoryPromote{}, &agenttools.DelegateCode{}, &agenttools.Dispatch{}}
 		for _, tool := range exempt {
 			got := floorWrap(tool)
 			if isFloored(got) || reflect.TypeOf(got) != reflect.TypeOf(tool) {
@@ -595,7 +599,7 @@ func TestFloorWrapsNonExemptLibraryTools(t *testing.T) {
 		}
 	})
 	t.Run("a typed nil exempt pointer is floored", func(t *testing.T) {
-		for _, tool := range []agent.Tool{(*agenttools.DelegateCode)(nil), (*agenttools.Dispatch)(nil)} {
+		for _, tool := range []agent.Tool{(*agenttools.DelegateCode)(nil), (*agenttools.Dispatch)(nil), (*agenttools.AgentMemoryCreate)(nil), (*agenttools.AgentMemoryPromote)(nil)} {
 			if got := floorWrap(tool); !isFloored(got) {
 				t.Errorf("floorWrap(%T nil) = %T, want a floor wrapper", tool, got)
 			}
@@ -685,52 +689,67 @@ func TestAgentMemoryToolsStayLibrary(t *testing.T) {
 	cases := []struct {
 		name string
 		call provider.ToolCall
-		tool func(*floorMemStore) agent.Tool
+		tool func(*floorMemStore, bool) agent.Tool
 		done func(*floorMemStore) int32
 	}{
 		{
 			name: agenttools.AgentMemoryCreateToolName,
 			call: provider.ToolCall{ID: "c", Type: "function", Function: provider.ToolCallFunction{Name: agenttools.AgentMemoryCreateToolName, Arguments: json.RawMessage(`{"content":"note"}`)}},
-			tool: func(s *floorMemStore) agent.Tool {
-				return agenttools.AgentMemoryCreate{S: s, SessionID: sid, AfterWrite: after}
+			tool: func(s *floorMemStore, pointer bool) agent.Tool {
+				tool := agenttools.AgentMemoryCreate{S: s, SessionID: sid, AfterWrite: after}
+				if pointer {
+					return &tool
+				}
+				return tool
 			},
 			done: func(s *floorMemStore) int32 { return s.creates.Load() },
 		},
 		{
 			name: agenttools.AgentMemoryPromoteToolName,
 			call: provider.ToolCall{ID: "c", Type: "function", Function: provider.ToolCallFunction{Name: agenttools.AgentMemoryPromoteToolName, Arguments: json.RawMessage(`{"id":"rec1","kind":"semantic"}`)}},
-			tool: func(s *floorMemStore) agent.Tool {
-				return agenttools.AgentMemoryPromote{S: s, SessionID: sid, AfterWrite: after}
+			tool: func(s *floorMemStore, pointer bool) agent.Tool {
+				tool := agenttools.AgentMemoryPromote{S: s, SessionID: sid, AfterWrite: after}
+				if pointer {
+					return &tool
+				}
+				return tool
 			},
 			done: func(s *floorMemStore) int32 { return s.promotes.Load() },
 		},
 	}
 	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			hooks.Store(0)
-			store := &floorMemStore{}
-			tool := tc.tool(store)
-			if !libraryTool(tool) {
-				t.Fatalf("libraryTool(%T) = false", tool)
+		for _, pointer := range []bool{false, true} {
+			for _, path := range []string{"New", "Replace", "ReplaceConfiguration"} {
+				t.Run(fmt.Sprintf("%s/pointer=%t/%s", tc.name, pointer, path), func(t *testing.T) {
+					hooks.Store(0)
+					store := &floorMemStore{}
+					tool := tc.tool(store, pointer)
+					if !libraryTool(tool) {
+						t.Fatalf("libraryTool(%T) = false", tool)
+					}
+					rt := newFloorRuntime(t, path, &oneToolCaller{call: tc.call}, []agent.Tool{tool})
+					if got := rt.EffectivePermissions().Tools[len(rt.fileTools)].Provenance; got != ProvenanceLibrary {
+						t.Fatalf("provenance = %s, want library", got)
+					}
+					published := rt.snap.tools[len(rt.fileTools)]
+					if isFloored(published) {
+						t.Fatalf("published %T, want the unwrapped library tool", published)
+					}
+					if got := published.Effect().Approval; got != agent.ApprovalNever {
+						t.Fatalf("published approval = %v, want ApprovalNever", got)
+					}
+					res := runFloorTurn(t, rt)
+					if res.ToolCalls[0].Denied || !res.ToolCalls[0].Invoked {
+						t.Fatalf("record = %+v, want an invoked, undenied call", res.ToolCalls[0])
+					}
+					if got := tc.done(store); got != 1 {
+						t.Fatalf("store writes = %d, want 1", got)
+					}
+					if got := hooks.Load(); got != 1 {
+						t.Fatalf("AfterWrite calls = %d, want 1", got)
+					}
+				})
 			}
-			rt := newFloorRuntime(t, "New", &oneToolCaller{call: tc.call}, []agent.Tool{tool})
-			published := rt.snap.tools[len(rt.fileTools)]
-			if isFloored(published) {
-				t.Fatalf("published %T, want the unwrapped library tool", published)
-			}
-			if got := published.Effect().Approval; got != agent.ApprovalNever {
-				t.Fatalf("published approval = %v, want ApprovalNever", got)
-			}
-			res := runFloorTurn(t, rt)
-			if res.ToolCalls[0].Denied || !res.ToolCalls[0].Invoked {
-				t.Fatalf("record = %+v, want an invoked, undenied call", res.ToolCalls[0])
-			}
-			if got := tc.done(store); got != 1 {
-				t.Fatalf("store writes = %d, want 1", got)
-			}
-			if got := hooks.Load(); got != 1 {
-				t.Fatalf("AfterWrite calls = %d, want 1", got)
-			}
-		})
+		}
 	}
 }
