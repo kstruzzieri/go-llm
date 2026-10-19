@@ -959,8 +959,10 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	}
 	// #576: a native backend this host cannot honor fails here, before any
 	// config, store, session, MCP connection or provider is touched, and never
-	// falls back to host.
+	// falls back to host. Descriptors the launcher left inheritable are
+	// cleared first, before this probe or any spawn; host sessions keep them.
 	if nativeSandbox(sandbox) {
+		clearInheritedDescriptors()
 		if err := agenttools.ValidateSandbox(sandbox, root); err != nil {
 			return fmt.Errorf("golem: sandbox: %w", err)
 		}

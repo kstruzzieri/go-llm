@@ -61,7 +61,7 @@ require_step darwin-smoke.yml 'Upload containment evidence' "$upload" \
 # Golem's native wiring proof runs in both native jobs, fails on any skip or
 # on a top-level pass count other than that OS's test count, and publishes
 # its log even when it fails (#576).
-for pin in ci.yml:linux:BWRAP:9 darwin-smoke.yml:darwin:SEATBELT:8; do
+for pin in ci.yml:linux:BWRAP:11 darwin-smoke.yml:darwin:SEATBELT:10; do
   IFS=: read -r wf os require count <<<"$pin"
   log="\"\$RUNNER_TEMP/native-wiring-$os.txt\""
   require_step "$wf" 'Golem native wiring (non-race)' '        shell: bash' "          GO_LLM_REQUIRE_$require: \"1\"" \

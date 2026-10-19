@@ -48,6 +48,10 @@ sandbox (-sandbox)".
   carry a `target:` line naming the canonical workspace and saying unpromoted
   scratch artifacts are not checked. A native verifier's preview warns that its
   writes inside the workspace and private temp are outside `/undo`.
+- A native session marks every descriptor Golem inherited above stdio
+  close-on-exec before the startup probe, so a descriptor a launcher left open
+  (a CI runner's, a shell redirection) never reaches a sandboxed command.
+  Host sessions keep their inherited descriptors.
 
 #### Notes for library callers
 
@@ -64,5 +68,16 @@ sandbox (-sandbox)".
 - `agenttools.JobStatus.Notes` and `agenttools.VerifyResult.Notes` carry
   backend diagnostics such as the Seatbelt cleanup note. They never change an
   exit code, a timeout or the error classification.
+- The Seatbelt backend now refuses to spawn while any descriptor above stdio
+  lacks FD_CLOEXEC, as Bubblewrap already did, naming the descriptor: a
+  sandboxed command could otherwise write or connect through it whatever its
+  profile says. Both native backends also run the audit at construction, so
+  `agenttools.ValidateSandbox` (and with it `golem.New`) fails with an error
+  wrapping `ErrSandboxPolicy` instead of advertising a backend that refuses
+  every command. Mark your own descriptors close-on-exec before building a
+  native session. The one exemption, on macOS, is the `com.apple.netsrc`
+  kernel-control socket libSystem's resolver leaves open after the process's
+  first hostname lookup. It still reaches Seatbelt commands: a routing-query
+  channel, not a filesystem or IP path.
 - Hosts that leave `Sandbox` zero keep host execution and the existing
   admission (Firn, which runs Inspect, is unaffected).

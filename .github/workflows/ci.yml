@@ -205,8 +205,8 @@ jobs:
             exit 1
           fi
           passed=$(grep -cE -- '^--- PASS: TestNativeWiring[A-Za-z]+ ' "$RUNNER_TEMP/native-wiring-linux.txt" || true)
-          if [ "$passed" -ne 9 ]; then
-            echo "::error::expected 9 passing top-level native wiring tests, saw $passed"
+          if [ "$passed" -ne 11 ]; then
+            echo "::error::expected 11 passing top-level native wiring tests, saw $passed"
             exit 1
           fi
 
