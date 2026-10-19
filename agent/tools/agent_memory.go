@@ -293,9 +293,10 @@ type recordPromoter interface {
 	Promote(ctx context.Context, id string, acc memory.RecordAccess, to memory.MemoryKind) (memory.MemoryRecord, error)
 }
 
-// AgentMemoryCreate stores one working note scoped to the active session. It
-// writes only the per-user memory DB (never the workspace), so it is
-// Write-class but never approval-gated.
+// AgentMemoryCreate stores one working note scoped to the active session. Over
+// the real memory store it writes only the per-user memory DB (never the
+// workspace), so it is Write-class but never approval-gated. S and AfterWrite
+// are host code that runs unprompted; nothing here constrains them.
 type AgentMemoryCreate struct {
 	S           recordCreator
 	WorkspaceID string

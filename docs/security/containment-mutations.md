@@ -1869,7 +1869,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
 - Kind: guard
 - Notes: The checker command calls RequireClean after WithProfile and before any package run, so a forwarded run whose checkout tree differs from the forwarded tree, whose tracked files are modified, or whose GOOS is not the profile's exits 1 with the failure in its evidence and runs nothing. Observed on this checkout at the baseline: `GO_LLM_CI_TREE=0000000000000000000000000000000000000000 GO_LLM_CI_COMMIT=deadbeef go run ./internal/containmentinv/check -inventory docs/security/containment-inventory.json -profile darwin-host` printed `containment check: containmentinv: forwarded identity (tree 0000000000000000000000000000000000000000, commit deadbeef) measured dirty: measured tree "39ec6d5eaa6f45dcee7adc77a8a29cf16225bc7a", GOOS darwin, profile darwin-host` and exited 1. A manual run (commit `unknown`) is dirty by definition and is unchanged. Before this rule the evidence recorded `"dirty": true` and the command exited 0; nothing in scripts/ci-local, the CI workflows or the pre-push hook read the flag.
 
-## M-064 — Approval previews on the real producer paths render terminal controls inert
+## M-064 — Approval previews on the real producer paths and at the approveVerify boundary render terminal controls inert
 - Affected refs: PREVIEW-PROFILE: `TestContainment/PV1`, `TestRealWritePreviewReachesApproverInert`, `TestRealEditPreviewWithRawC1Context`, `TestVerifyApprovalPreviewSanitized`, `TestApproveSanitizesForEmbeddedApprovers`
 - Baseline: `72d0bedeb1d264b3da62cf812df7505a8bd7e776` (the commit that tightens PV1's probe; first recorded at `b9cea9154746758026fd9bb58d467f665be5952f`)
 - Platform: darwin (arm64, go1.27.1)

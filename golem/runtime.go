@@ -84,8 +84,10 @@ type Options struct {
 	// requires approval, so a tool or plan that asks for ApprovalNever still
 	// needs an Approver. Only four library types (identified by concrete type)
 	// are exempt and keep ApprovalNever: agent_memory_create,
-	// agent_memory_promote, delegate_code and dispatch. Every other library tool
-	// is floored too, which leaves it unchanged because it already gates.
+	// agent_memory_promote, delegate_code and dispatch. The exemption trusts the
+	// store, model caller and hooks the host injected into them. Every other
+	// library tool is floored too, which leaves it unchanged because it already
+	// gates.
 	Tools []agent.Tool
 	// Profile selects the authority the runtime grants its model (#387). The
 	// zero value is ProfileInspect: the four runtime-owned reads and no caller

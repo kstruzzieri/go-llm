@@ -31,8 +31,10 @@ type ToolPermission struct {
 	Name string
 	// Class is the tool's static effect class.
 	Class agent.EffectClass
-	// Approval is the policy after the Trusted approval floor: the policy the
-	// loop will apply, not the one the host declared.
+	// Approval is the static Effect's approval policy after the Trusted
+	// approval floor, not the one the host declared. A PlanningTool's per-call
+	// plan carries its own Effect, floored separately, so the policy the loop
+	// applies to a given call may differ.
 	Approval agent.ApprovalPolicy
 	// Provenance says who built the tool.
 	Provenance Provenance

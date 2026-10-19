@@ -42,9 +42,13 @@ and stream events keep their schemas.
 - Trusted raises an approval floor under every extra tool. Non-library tools
   that mutate or use the network always prompt, even if they or their plans ask
   for `ApprovalNever`. Four library types keep `ApprovalNever`:
-  `agent_memory_create` and `agent_memory_promote` (they write only the
-  agent-memory database under `-agent-memory`'s own guards) and `delegate_code`
-  and `dispatch` (model-provider traffic under destination admission).
+  `agent_memory_create` and `agent_memory_promote` (with the real memory store
+  they write only the agent-memory database under `-agent-memory`'s own
+  guards) and `delegate_code` and `dispatch` (model-provider traffic under
+  destination admission). The exemption is by concrete type and trusts the
+  store, model caller and hooks the host injects into those types: the floor
+  guards against a tool that declares `ApprovalNever` for itself, not against
+  host code.
 - `dispatch` is rejected alongside a `ScopeGuard`, and an allowlist that admits
   `dispatch` must name all four reads and every other child tool it carries
   (an optional `retrieve`). The new `agenttools.Dispatch.ChildToolNames`
@@ -55,6 +59,9 @@ and stream events keep their schemas.
 
 #### Consumers
 
-Firn sets `Profile: golem.ProfileInspect` at `internal/ai/runtime.go` and
-`internal/git/generator.go` when it bumps go-llm. Callers that pass
-`Options.Tools` must add `Profile: golem.ProfileTrusted`.
+Firn's two `golem.New` sites (`internal/ai/runtime.go` and
+`internal/git/generator.go`) pass no `Options.Tools` and never call `Replace`,
+so they already run as Inspect with no behavior change. Setting
+`Profile: golem.ProfileInspect` there explicitly is recommended for clarity
+when Firn bumps go-llm. Callers that pass `Options.Tools` must add
+`Profile: golem.ProfileTrusted`.

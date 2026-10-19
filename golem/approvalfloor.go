@@ -96,11 +96,14 @@ func (f floorPlanningTool) Plan(ctx context.Context, args json.RawMessage) (agen
 
 // floorExempt reports whether t is one of the four library types that spec 3.3
 // exempts from the floor and lets keep its own ApprovalNever: the two
-// agent-memory writes (they write only the memory DB, D-P1 option A) and
-// delegate_code and dispatch (their Network effect is model-provider traffic
-// under the destination policy). It is not "any library tool": every other
-// library tool goes through the floor, which leaves it unchanged only because it
-// already gates or is plain Read. A typed nil pointer is not exempt.
+// agent-memory writes (over the real store they write only the memory DB, D-P1
+// option A) and delegate_code and dispatch (their Network effect is
+// model-provider traffic under the destination policy). The exemption trusts
+// the store, caller and hooks the host injected into them: the floor guards
+// against self-declared ApprovalNever, not against host code. It is not "any
+// library tool": every other library tool goes through the floor, which leaves
+// it unchanged only because it already gates or is plain Read. A typed nil
+// pointer is not exempt.
 func floorExempt(t agent.Tool) bool {
 	if !libraryTool(t) {
 		return false

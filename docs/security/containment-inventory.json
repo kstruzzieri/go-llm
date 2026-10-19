@@ -823,7 +823,7 @@
     {
       "id": "PREVIEW-PROFILE",
       "source": "issue-452:55",
-      "requirement": "Approval previews on real producer paths (write_file path and content, edit_file content and context, path headers, exec argv and cwd, verification commands) render terminal controls inert (#387).",
+      "requirement": "Approval previews render terminal controls inert on the real producer paths (write_file path and content, edit_file content and context, path headers, exec argv and cwd) and, for verification commands, at the approveVerify boundary (#387).",
       "status": "verified",
       "owner": "",
       "layer": "scenario",
