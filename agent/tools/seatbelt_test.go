@@ -99,8 +99,13 @@ func mustProfile(t *testing.T, p seatbeltPolicy) string {
 func TestSeatbeltProfileGolden(t *testing.T) {
 	want := `(version 1)
 (deny default)
-(allow process-exec*)
 (allow process-fork)
+(allow process-exec*
+  (subpath "/bin")
+  (subpath "/usr/lib")
+  (subpath "/private/tmp/ws")
+  (subpath "/private/tmp/pt")
+  (literal "/bin/echo"))
 (allow file-read*
   (subpath "/bin")
   (subpath "/usr/lib")

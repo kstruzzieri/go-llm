@@ -244,7 +244,7 @@ func dispatchBatch(t *testing.T, mixed, parallel bool, set *ContextSet, outputCa
 	o := New(nil, ContextManager{Mixed: mixed})
 	var res Result
 	var state State
-	if err := o.runToolCalls(context.Background(), &res, &state, reg, calls, nil, normalizeObserver(nil), 0, &restraintGovernor{}, o.newInterceptorRun()); err != nil {
+	if err := o.runToolCalls(context.Background(), &res, &state, reg, calls, nil, normalizeObserver(nil), 0, &restraintGovernor{}, o.newInterceptorRun(), nil); err != nil {
 		t.Fatalf("runToolCalls: %v", err)
 	}
 	// Assert the path actually TAKEN, not the predicate that selects it: the
@@ -310,7 +310,7 @@ func TestInvokedToolsRemainRecordedWhenContextAdmissionFails(t *testing.T) {
 			o := New(nil, ContextManager{Mixed: true})
 			var res Result
 			var state State
-			err = o.runToolCalls(context.Background(), &res, &state, reg, calls, nil, normalizeObserver(nil), 0, &restraintGovernor{}, o.newInterceptorRun())
+			err = o.runToolCalls(context.Background(), &res, &state, reg, calls, nil, normalizeObserver(nil), 0, &restraintGovernor{}, o.newInterceptorRun(), nil)
 			if err == nil || !strings.Contains(err.Error(), "groups exceeds limit") {
 				t.Fatalf("runToolCalls error = %v", err)
 			}

@@ -114,8 +114,8 @@ func seatbeltAllowancePath(kind, p string) (string, error) {
 }
 
 // buildSeatbeltProfile renders the SBPL profile for one invocation:
-// deny-default, exec allowed, reads restricted to the reviewed system roots +
-// workspace + private temp + the exact executable and device literals,
+// deny-default, exec and reads restricted to the reviewed system roots +
+// workspace + private temp + the exact executable, with read-only device literals,
 // metadata scoped to allowed subtrees plus exact traversal ancestors, writes
 // restricted to workspace + private temp, and network denied unless the
 // approved config allows it. Rendering is deterministic: list inputs are
@@ -157,18 +157,24 @@ func buildSeatbeltProfile(p seatbeltPolicy) (string, error) {
 
 	var b strings.Builder
 	b.WriteString("(version 1)\n(deny default)\n")
-	b.WriteString("(allow process-exec*)\n(allow process-fork)\n")
+	b.WriteString("(allow process-fork)\n")
 
-	b.WriteString("(allow file-read*")
-	for _, q := range sysQ {
-		fmt.Fprintf(&b, "\n  (subpath %s)", q)
+	// Exec must be scoped separately: Seatbelt can execute unreadable binaries.
+	for _, op := range []string{"process-exec*", "file-read*"} {
+		fmt.Fprintf(&b, "(allow %s", op)
+		for _, q := range sysQ {
+			fmt.Fprintf(&b, "\n  (subpath %s)", q)
+		}
+		fmt.Fprintf(&b, "\n  (subpath %s)", wsQ)
+		fmt.Fprintf(&b, "\n  (subpath %s)", tempQ)
+		fmt.Fprintf(&b, "\n  (literal %s)", exeQ)
+		if op == "file-read*" {
+			b.WriteString("\n  (literal \"/dev/null\")")
+			b.WriteString("\n  (literal \"/dev/random\")")
+			b.WriteString("\n  (literal \"/dev/urandom\")")
+		}
+		b.WriteString(")\n")
 	}
-	fmt.Fprintf(&b, "\n  (subpath %s)", wsQ)
-	fmt.Fprintf(&b, "\n  (subpath %s)", tempQ)
-	fmt.Fprintf(&b, "\n  (literal %s)", exeQ)
-	b.WriteString("\n  (literal \"/dev/null\")")
-	b.WriteString("\n  (literal \"/dev/random\")")
-	b.WriteString("\n  (literal \"/dev/urandom\"))\n")
 
 	b.WriteString("(allow file-read-metadata")
 	for _, q := range ancQ {

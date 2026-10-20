@@ -653,6 +653,21 @@ func TestSeatbeltHelperProcess(t *testing.T) {
 	switch mode {
 	case "pid":
 		fmt.Printf("HELPER-PID: %d\n", os.Getpid())
+	case "netsrcclosed":
+		var fd int
+		var id uint32
+		if _, err := fmt.Sscan(args[1], &fd); err != nil {
+			fail(err)
+		}
+		if _, err := fmt.Sscan(args[2], &id); err != nil {
+			fail(err)
+		}
+		if sa, err := unix.Getpeername(fd); err == nil {
+			if ctl, ok := sa.(*unix.SockaddrCtl); ok && ctl.ID == id {
+				fail(errors.New("inherited parent's netsrc socket"))
+			}
+		}
+		fmt.Println("HELPER-OK: netsrc closed")
 	case "tmprw":
 		p := filepath.Join(os.TempDir(), "canary.txt")
 		if err := os.WriteFile(p, []byte("temp-canary"), 0o600); err != nil {
@@ -1855,8 +1870,13 @@ func TestSeatbeltProfileGrantsMetadataOnSymlinkChain(t *testing.T) {
 			}
 		}
 	}
-	if rule := seatbeltRuleOf(profile, `(literal "`+target+`")`); rule != "file-read*" {
-		t.Errorf("canonical target literal is under %q; want file-read*", rule)
+	remaining := profile
+	literal := `(literal "` + target + `")`
+	for _, want := range []string{"process-exec*", "file-read*"} {
+		if rule := seatbeltRuleOf(remaining, literal); rule != want {
+			t.Errorf("canonical target literal is under %q; want %s", rule, want)
+		}
+		_, remaining, _ = strings.Cut(remaining, literal)
 	}
 	if wrapped.Argv[3] != spelled {
 		t.Errorf("wrapper launches %q; want the approved spelling %q", wrapped.Argv[3], spelled)
@@ -2513,7 +2533,7 @@ func TestSeatbeltValidateSandboxRefusesInheritableFD(t *testing.T) {
 	}
 }
 
-// The netsrc carve-out keys on the control's id, never on the socket family:
+// The netsrc repair keys on the control's id, never on the socket family:
 // another kernel control a launcher leaks (here com.apple.network.statistics,
 // which an unprivileged process can connect; utun_control, IP egress, needs
 // root) is refused like any other descriptor.
@@ -2548,27 +2568,190 @@ func TestSeatbeltRefusesOtherKernelControlSocket(t *testing.T) {
 	}
 }
 
+func TestSeatbeltNetsrcNotInherited(t *testing.T) {
+	requireSeatbeltCapability(t)
+	if raceInstrumented {
+		t.Skip("helper legs run in the non-race pass")
+	}
+	id, err := kernelControlID(seatbeltNetsrcControl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fd, err := unix.Socket(unix.AF_SYSTEM, unix.SOCK_DGRAM, sysprotoControl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leakFD(t, fd)
+	if err := unix.Connect(fd, &unix.SockaddrCtl{ID: id}); err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.SetNonblock(fd, true); err != nil {
+		t.Fatal(err)
+	}
+	query := func() {
+		t.Helper()
+		// NETSRC v2 routing query for loopback; all bytes are synthetic.
+		request := [36]byte{0: 2, 8: 16, 9: unix.AF_INET, 12: 127, 15: 1}
+		if n, err := unix.Write(fd, request[:]); err != nil || n != len(request) {
+			t.Fatalf("parent netsrc query: n=%d err=%v", n, err)
+		}
+		var reply [128]byte
+		if n, err := unix.Read(fd, reply[:]); err != nil || n == 0 {
+			t.Fatalf("parent netsrc reply: n=%d err=%v", n, err)
+		}
+	}
+	query()
+	backend, err := newExecBackend(seatbeltTestCfg())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if flags, err := unix.FcntlInt(uintptr(fd), unix.F_GETFD, 0); err != nil || flags&unix.FD_CLOEXEC == 0 {
+		t.Errorf("construction left netsrc inheritable: flags=%d err=%v", flags, err)
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ws := canonTempDirT(t)
+	spec := execSpec{
+		Path: exe, Argv: []string{exe, "-test.run=^TestSeatbeltHelperProcess$", "--", "netsrcclosed", fmt.Sprint(fd), fmt.Sprint(id)},
+		Dir: ws, WorkspaceRoot: ws, ExeIdentity: execIdentityOf(t, exe),
+		Env: []string{"PATH=/usr/bin:/bin", "GO_LLM_SEATBELT_HELPER=1"},
+	}
+	for _, background := range []bool{false, true} {
+		t.Run(fmt.Sprintf("background=%t", background), func(t *testing.T) {
+			// Also repair resolver sockets created after backend construction.
+			if _, err := unix.FcntlInt(uintptr(fd), unix.F_SETFD, 0); err != nil {
+				t.Fatal(err)
+			}
+			if background {
+				out := &lockedBuffer{}
+				proc, err := backend.Start(spec, out, out)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer func() { _ = proc.Kill() }()
+				if code, _, err := proc.Wait(); err != nil || code != 0 || !strings.Contains(out.String(), "HELPER-OK: netsrc closed") {
+					t.Fatalf("background exit=%d err=%v output=%s", code, err, out.String())
+				}
+			} else {
+				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
+				res, err := backend.Run(ctx, spec)
+				if err != nil || res.ExitCode != 0 || !strings.Contains(string(res.Stdout), "HELPER-OK: netsrc closed") {
+					t.Fatalf("foreground result=%+v err=%v stdout=%s", res, err, res.Stdout)
+				}
+			}
+			query()
+		})
+	}
+}
+
+func TestSeatbeltExecRestrictedToAllowances(t *testing.T) {
+	requireSeatbeltCapability(t)
+	parent := canonTempDirT(t)
+	ws := filepath.Join(parent, "workspace")
+	outside := filepath.Join(parent, "workspace-sibling")
+	for _, dir := range []string{ws, outside} {
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const marker = "EXEC-ALLOWANCE-CONTROL"
+	foreignExe := filepath.Join(outside, "echo")
+	workspaceExe := filepath.Join(ws, "echo")
+	source := filepath.Join(parent, "echo.c")
+	if err := os.WriteFile(source, []byte("extern int puts(const char *);\nint main(void) { puts(\""+marker+"\"); return 0; }\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	build := exec.CommandContext(ctx, "/usr/bin/cc", source, "-o", foreignExe)
+	build.Env = []string{"PATH=/usr/bin:/bin", "TMPDIR=" + parent}
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build synthetic native executable: %v\n%s", err, out)
+	}
+	binary, err := os.ReadFile(foreignExe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(workspaceExe, binary, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(foreignExe, marker)
+	cmd.Env = []string{"PATH=/usr/bin:/bin"}
+	if out, err := cmd.CombinedOutput(); err != nil || string(out) != marker+"\n" {
+		t.Fatalf("host control: %q, %v", out, err)
+	}
+	for _, allowNetwork := range []bool{false, true} {
+		cfg := seatbeltTestCfg()
+		cfg.AllowNetwork = allowNetwork
+		for _, background := range []bool{false, true} {
+			t.Run(fmt.Sprintf("network=%t/background=%t", allowNetwork, background), func(t *testing.T) {
+				backend, err := newExecBackend(cfg)
+				if err != nil {
+					t.Fatal(err)
+				}
+				spec := seatbeltShellSpec(t, ws, fmt.Sprintf("exec %q %s", foreignExe, marker))
+				if background {
+					out := &lockedBuffer{}
+					proc, err := backend.Start(spec, out, out)
+					if err != nil {
+						t.Fatal(err)
+					}
+					defer func() { _ = proc.Kill() }()
+					if code, _, err := proc.Wait(); err != nil || code == 0 || strings.Contains(out.String(), marker) {
+						t.Fatalf("outside executable: exit=%d err=%v output=%s", code, err, out.String())
+					}
+				} else {
+					ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+					defer cancel()
+					res, err := backend.Run(ctx, spec)
+					if err != nil || res.ExitCode == 0 || strings.Contains(string(res.Stdout), marker) {
+						t.Fatalf("outside executable: result=%+v err=%v stdout=%s", res, err, res.Stdout)
+					}
+				}
+			})
+		}
+	}
+	for name, argv := range map[string][]string{
+		"approved external executable": {foreignExe, marker},
+		"system child":                 {"/bin/sh", "-c", "/bin/echo " + marker},
+		"workspace child":              {"/bin/sh", "-c", fmt.Sprintf("%q %s", workspaceExe, marker)},
+		"private temp child":           {"/bin/sh", "-c", fmt.Sprintf(`/bin/cp %q "$TMPDIR/echo" && "$TMPDIR/echo" %s`, workspaceExe, marker)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			res := realSeatbeltRun(t, seatbeltTestCfg(), ws, argv)
+			if res.ExitCode != 0 || string(res.Stdout) != marker+"\n" {
+				t.Fatalf("allowed executable: exit=%d stdout=%s stderr=%s", res.ExitCode, res.Stdout, res.Stderr)
+			}
+		})
+	}
+}
+
 // libSystem's resolver leaves a non-CLOEXEC com.apple.netsrc control socket in
 // the process after a lookup that returns several addresses; "localhost"
-// (::1 and 127.0.0.1) is one. The carve-out keeps every later command from
-// being refused.
+// (::1 and 127.0.0.1) is one. The audit repairs it without breaking DNS or commands.
 func TestSeatbeltRunsAfterLocalhostLookup(t *testing.T) {
 	requireSeatbeltCapability(t)
 	if _, err := net.LookupHost("localhost"); err != nil {
 		t.Fatalf("LookupHost(localhost): %v", err)
 	}
-	if fds := inheritableHostFDs(t); len(fds) == 0 {
-		t.Fatal("precondition: the lookup left no inheritable descriptor, so this would test nothing")
-	}
 	res := realSeatbeltRun(t, seatbeltTestCfg(), canonTempDirT(t), []string{"/bin/echo", "hi"})
 	if res.ExitCode != 0 || string(res.Stdout) != "hi\n" {
 		t.Fatalf("exit=%d stdout=%q stderr=%q, want exit 0 and \"hi\\n\"", res.ExitCode, res.Stdout, res.Stderr)
 	}
+	if fds := inheritableHostFDs(t); len(fds) != 0 {
+		t.Fatalf("command left inheritable descriptors: %v", fds)
+	}
+	if _, err := net.LookupHost("localhost"); err != nil {
+		t.Fatalf("LookupHost(localhost) after repair: %v", err)
+	}
 }
 
-// The exemption refuses on any doubt: a getpeername or id-resolution error,
+// The repair refuses on any doubt: a getpeername or id-resolution error,
 // a peer that is not a kernel control, or another control's id.
-func TestSeatbeltNetsrcExemptionRefusesOnDoubt(t *testing.T) {
+func TestSeatbeltNetsrcRepairRefusesOnDoubt(t *testing.T) {
 	const netsrc = 7
 	errBoom := errors.New("boom")
 	idOK := func(name string) (uint32, error) {
@@ -2588,19 +2771,20 @@ func TestSeatbeltNetsrcExemptionRefusesOnDoubt(t *testing.T) {
 		{"not a control", idOK, func(int) (unix.Sockaddr, error) { return &unix.SockaddrInet4{Port: 443}, nil }, false},
 		{"getpeername error", idOK, func(int) (unix.Sockaddr, error) { return nil, unix.ENOTSOCK }, false},
 		{"id error", func(string) (uint32, error) { return netsrc, errBoom }, func(int) (unix.Sockaddr, error) { return &unix.SockaddrCtl{ID: netsrc}, nil }, false},
+		{"zero id", func(string) (uint32, error) { return 0, nil }, func(int) (unix.Sockaddr, error) { return &unix.SockaddrCtl{}, nil }, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := netsrcControlExemption(tc.id, tc.peer)(3); got != tc.want {
-				t.Fatalf("exempt = %t, want %t", got, tc.want)
+			if got := netsrcControlSocket(tc.id, tc.peer)(3); got != tc.want {
+				t.Fatalf("may repair = %t, want %t", got, tc.want)
 			}
 		})
 	}
 	t.Run("id resolved once per audit", func(t *testing.T) {
 		calls := 0
-		exempt := netsrcControlExemption(func(string) (uint32, error) { calls++; return netsrc, nil },
+		mayRepair := netsrcControlSocket(func(string) (uint32, error) { calls++; return netsrc, nil },
 			func(int) (unix.Sockaddr, error) { return &unix.SockaddrCtl{ID: netsrc}, nil })
-		exempt(3)
-		exempt(4)
+		mayRepair(3)
+		mayRepair(4)
 		if calls != 1 {
 			t.Fatalf("id resolutions = %d, want 1", calls)
 		}

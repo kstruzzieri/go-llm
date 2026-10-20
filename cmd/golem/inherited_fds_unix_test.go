@@ -178,13 +178,16 @@ func localhostProviderChild(t *testing.T) {
 		if _, err := runOnce(ctx, &out, nil, sess, "hello", nil); err != nil {
 			t.Fatalf("turn: %v\n%s", err, out.String())
 		}
-		if fds := inheritableFDs(); runtime.GOOS == "darwin" && len(fds) == 0 {
-			t.Fatal("precondition: the localhost. turn left no inheritable libSystem descriptor, so this would test nothing")
-		} else {
-			t.Logf("inheritable after the localhost. turn: %v", fds)
-		}
+		// Construction may already have repaired the resolver's socket.
+		t.Logf("inheritable after the localhost. turn: %v", inheritableFDs())
 		res := invokeTool(ctx, t, sess.tools, "run_command", map[string]any{"argv": []string{"bash", "-c", "printf ok > in.txt"}})
 		t.Logf("run_command:\n%s", res.Content)
+		if fds := inheritableFDs(); len(fds) != 0 {
+			t.Fatalf("native command left inheritable descriptors: %v", fds)
+		}
+		if _, err := runOnce(ctx, &out, nil, sess, "hello again", nil); err != nil {
+			t.Fatalf("provider turn after native command: %v\n%s", err, out.String())
+		}
 	})
 	if got, err := os.ReadFile(filepath.Join(root, "in.txt")); err != nil || string(got) != "ok" {
 		t.Fatalf("in.txt = %q (err %v), want \"ok\" from the native command after the localhost. turn", got, err)

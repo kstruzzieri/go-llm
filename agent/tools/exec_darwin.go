@@ -80,23 +80,21 @@ const seatbeltNetsrcControl = "com.apple.netsrc"
 const sysprotoControl = 2
 
 // seatbeltRejectInheritableFDs is the shared descriptor audit over macOS's
-// per-process descriptor directory (#576). Its one exemption is libSystem's
-// own netsrc control socket: refusing it would refuse every command after
-// such a lookup. That socket is a routing-query channel,
-// not a filesystem or IP path. Every other descriptor is refused, including
-// any other kernel control (a launcher-leaked utun control socket is IP
-// packet egress).
+// per-process descriptor directory (#576). It marks libSystem's netsrc control
+// socket close-on-exec, preserving the parent's resolver while preventing
+// children from using or disrupting its socket. Every other descriptor is
+// refused, including other kernel controls (a leaked utun socket is IP egress).
 func seatbeltRejectInheritableFDs() error {
-	return rejectInheritableFDs("seatbelt", "/dev/fd", netsrcControlExemption(kernelControlID, unix.Getpeername))
+	return rejectInheritableFDs("seatbelt", "/dev/fd", netsrcControlSocket(kernelControlID, unix.Getpeername))
 }
 
-// netsrcControlExemption returns the audit's exemption: fd is a kernel
-// control socket (its peer address is AF_SYSTEM/AF_SYS_CONTROL, so it is a
-// SYSPROTO_CONTROL socket) connected to the netsrc control, whose id is
+// netsrcControlSocket identifies descriptors the audit may mark close-on-exec:
+// fd is a kernel control socket (AF_SYSTEM/AF_SYS_CONTROL, hence
+// SYSPROTO_CONTROL) connected to the netsrc control, whose id is
 // resolved at most once per audit. A family match alone is never enough,
 // and any getpeername or id-resolution error refuses. getsockname is not
 // consulted: kernel control sockets do not support it (EOPNOTSUPP).
-func netsrcControlExemption(controlID func(string) (uint32, error), peer func(int) (unix.Sockaddr, error)) func(int) bool {
+func netsrcControlSocket(controlID func(string) (uint32, error), peer func(int) (unix.Sockaddr, error)) func(int) bool {
 	var id uint32
 	var idErr error
 	resolved := false
@@ -105,7 +103,7 @@ func netsrcControlExemption(controlID func(string) (uint32, error), peer func(in
 			resolved = true
 			id, idErr = controlID(seatbeltNetsrcControl)
 		}
-		if idErr != nil {
+		if idErr != nil || id == 0 {
 			return false
 		}
 		sa, err := peer(fd)
@@ -124,7 +122,9 @@ func kernelControlID(name string) (uint32, error) {
 	syscall.ForkLock.RLock()
 	s, err := unix.Socket(unix.AF_SYSTEM, unix.SOCK_DGRAM, sysprotoControl)
 	if err == nil {
-		unix.CloseOnExec(s)
+		if _, err = unix.FcntlInt(uintptr(s), unix.F_SETFD, unix.FD_CLOEXEC); err != nil {
+			_ = unix.Close(s)
+		}
 	}
 	syscall.ForkLock.RUnlock()
 	if err != nil {

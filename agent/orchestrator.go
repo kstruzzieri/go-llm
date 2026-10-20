@@ -6,13 +6,14 @@ import (
 	"fmt"
 	"hash/fnv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/kstruzzieri/go-llm/internal/promptfence"
 	"github.com/kstruzzieri/go-llm/provider"
 )
 
-// Orchestrator runs the plan->act->observe loop.
+// Orchestrator runs the plan->act->observe loop. It must not be copied after use.
 type Orchestrator struct {
 	model     ModelCaller
 	ctxMgr    ContextManager
@@ -20,7 +21,8 @@ type Orchestrator struct {
 	toolLimit ToolInvocationLimit
 	// verifier is the optional post-write verification hook (#347). nil is the
 	// default and leaves every batch byte-for-byte unchanged.
-	verifier Verifier
+	verifierMu sync.RWMutex
+	verifier   Verifier
 	// interceptors is the deterministic middleware chain (#436), in
 	// registration order. Empty leaves every hook a no-op.
 	interceptors []Interceptor
@@ -67,11 +69,14 @@ func New(model ModelCaller, ctxMgr ContextManager, opts ...Option) *Orchestrator
 	return o
 }
 
-// Verifier returns the installed post-write verification hook, or nil (#576).
-// It reads the live value: Option is an exported func(*Orchestrator), so
-// WithVerifier can be applied after New, and a runtime that must bind
-// verification to its policy re-checks this at every turn start.
-func (o *Orchestrator) Verifier() Verifier { return o.verifier }
+// Verifier returns the currently installed hook, or nil. It is safe to call
+// concurrently with WithVerifier and Run. To validate and run the same hook,
+// pass this captured value to RunWithVerifier.
+func (o *Orchestrator) Verifier() Verifier {
+	o.verifierMu.RLock()
+	defer o.verifierMu.RUnlock()
+	return o.verifier
+}
 
 func initState(req Request) State {
 	msgs := make([]Message, 0, len(req.History)+1)
@@ -127,16 +132,24 @@ func buildChatRequest(st State, specs []provider.Tool, outputReserve int, opts p
 // errors. Nested Runs using the supplied context inherit capacities and finite
 // token allowances. Returning seals that scope and cancels its context; callers
 // must join nested work before returning to receive complete descendant usage.
-func (o *Orchestrator) Run(ctx context.Context, req Request, obs Observer) (res Result, err error) {
+func (o *Orchestrator) Run(ctx context.Context, req Request, obs Observer) (Result, error) {
+	return o.RunWithVerifier(ctx, req, obs, o.Verifier())
+}
+
+// RunWithVerifier runs with exactly the supplied verification hook for every
+// batch, including nil to disable verification. It never reads the installed
+// hook, allowing a caller to validate a captured value before running it.
+// The hook's internal state remains its own responsibility.
+func (o *Orchestrator) RunWithVerifier(ctx context.Context, req Request, obs Observer, verifier Verifier) (res Result, err error) {
 	ctx, req, budgetRun := newRunBudget(ctx, req)
 	defer func() { res.DescendantUsage = budgetRun.close() }()
 	ic := &interceptorRun{}
-	res, err = o.run(ctx, req, obs, ic, budgetRun)
+	res, err = o.run(ctx, req, obs, ic, budgetRun, verifier)
 	res.Risk = ic.result()
 	return res, err
 }
 
-func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *interceptorRun, budgetRun *runBudget) (Result, error) {
+func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *interceptorRun, budgetRun *runBudget, verifier Verifier) (Result, error) {
 	obs = normalizeObserver(obs)
 	if req.Goal == "" {
 		return Result{}, fmt.Errorf("agent: empty goal")
@@ -379,7 +392,7 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 		}
 
 		state.Messages = append(state.Messages, assistantMessage(resp))
-		if err := o.runToolCalls(ctx, &res, &state, reg, resp.ToolCalls, req.Approver, obs, step, gov, ic); err != nil {
+		if err := o.runToolCalls(ctx, &res, &state, reg, resp.ToolCalls, req.Approver, obs, step, gov, ic, verifier); err != nil {
 			return finishWithError(&res, state, historyLen, err)
 		}
 		if res.StopReason != Completed {

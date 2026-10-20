@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -38,6 +39,31 @@ func platformTestSetup() {
 		if fd, err := strconv.Atoi(name); err == nil && fd > 2 {
 			syscall.CloseOnExec(fd)
 		}
+	}
+}
+
+func TestInheritedFDAuditRejectsCloseOnExecFailure(t *testing.T) {
+	dir := t.TempDir()
+	fd, err := syscall.Open(dir, syscall.O_RDONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	closed := false
+	defer func() {
+		if !closed {
+			_ = syscall.Close(fd)
+		}
+	}()
+	if err := os.WriteFile(filepath.Join(dir, strconv.Itoa(fd)), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err = rejectInheritableFDs("test", dir, func(int) bool {
+		_ = syscall.Close(fd)
+		closed = true
+		return true
+	})
+	if err == nil {
+		t.Fatal("audit accepted an allowed repair whose F_SETFD cannot succeed")
 	}
 }
 

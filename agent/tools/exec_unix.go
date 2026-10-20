@@ -80,14 +80,15 @@ func (unixRunner) Run(ctx context.Context, spec execSpec) (execResult, error) {
 // and fails closed on any descriptor above stdio without FD_CLOEXEC. Both
 // native backends pass inherited descriptors through to the payload, and
 // neither re-checks writes or connects through an already-open descriptor
-// against its policy. exempt, when non-nil, may excuse one such descriptor;
-// it must refuse on any doubt. An entry that is gone by inspection (EBADF:
-// closed during the scan, or the listing's own descriptor) is ignored. The
-// audit never mutates descriptors it does not own. The names are read
+// against its policy. maySetCloexec, when non-nil, identifies descriptors that
+// may be marked close-on-exec instead of refused; it must refuse on any doubt.
+// An entry gone by inspection (EBADF: closed during the scan, or the listing's
+// own descriptor) is ignored. The audit changes no other descriptor flags
+// and never closes an audited descriptor. The names are read
 // without stat: fdescfs cannot stat some descriptors, a kqueue among them.
 // The scan and os/exec are not one kernel-atomic operation; that residual
 // interval is the documented D10 limitation.
-func rejectInheritableFDs(backend, dir string, exempt func(fd int) bool) error {
+func rejectInheritableFDs(backend, dir string, maySetCloexec func(fd int) bool) error {
 	f, err := os.Open(dir)
 	if err != nil {
 		return fmt.Errorf("tools: %s audit inherited fds: %w", backend, err)
@@ -112,7 +113,13 @@ func rejectInheritableFDs(backend, dir string, exempt func(fd int) bool) error {
 		if err != nil {
 			return fmt.Errorf("tools: %s audit fd %d: %w", backend, fd, err)
 		}
-		if flags&unix.FD_CLOEXEC != 0 || (exempt != nil && exempt(fd)) {
+		if flags&unix.FD_CLOEXEC != 0 {
+			continue
+		}
+		if maySetCloexec != nil && maySetCloexec(fd) {
+			if _, err := unix.FcntlInt(uintptr(fd), unix.F_SETFD, flags|unix.FD_CLOEXEC); err != nil {
+				return fmt.Errorf("tools: %s mark fd %d close-on-exec: %w", backend, fd, err)
+			}
 			continue
 		}
 		return fmt.Errorf("tools: %s refuses to spawn with inheritable host fd %d (missing FD_CLOEXEC); "+

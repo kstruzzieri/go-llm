@@ -205,13 +205,12 @@ func (r *Runtime) admitReplacement(extras []agent.Tool) ([]agent.Tool, []ToolPer
 
 // checkVerifier enforces spec 3.3's verifier binding for a native session: the
 // orchestrator's verifier must be nil or a VerifierSlot bound to the session's
-// root and frozen policy. A Trusted host session, and a nil orchestrator (one
-// New is about to bootstrap, which installs no verifier), pass unchecked.
-func (r *Runtime) checkVerifier(orch *agent.Orchestrator) error {
-	if !nativeRuntime(r.sandbox) || orch == nil {
+// root and frozen policy. A Trusted host session passes unchecked.
+func (r *Runtime) checkVerifier(verifier agent.Verifier) error {
+	if !nativeRuntime(r.sandbox) {
 		return nil
 	}
-	switch v := orch.Verifier().(type) {
+	switch v := verifier.(type) {
 	case nil:
 		return nil
 	case *agenttools.VerifierSlot:

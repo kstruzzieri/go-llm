@@ -21,6 +21,7 @@ import (
 
 	"github.com/kstruzzieri/go-llm/agent"
 	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
+	"github.com/kstruzzieri/go-llm/conversation"
 	"github.com/kstruzzieri/go-llm/provider"
 )
 
@@ -471,6 +472,104 @@ func TestNativeVerifierBinding(t *testing.T) {
 			t.Fatalf("Run: %v", err)
 		}
 	})
+}
+
+type swappingVerifierCaller struct {
+	swap  func()
+	calls int
+}
+
+func (c *swappingVerifierCaller) Chat(context.Context, provider.ChatRequest, func(provider.ChatResponse) error) (agent.ModelResult, error) {
+	c.calls++
+	if c.calls == 1 {
+		if c.swap != nil {
+			c.swap()
+		}
+		return agent.ModelResult{Response: provider.ChatResponse{ToolCalls: []provider.ToolCall{{
+			ID: "write", Type: "function", Function: provider.ToolCallFunction{
+				Name: "write_file", Arguments: []byte(`{"path":"fixture.txt","content":"synthetic fixture"}`),
+			},
+		}}}}, nil
+	}
+	return agent.ModelResult{Response: provider.ChatResponse{Content: "done", Done: true}}, nil
+}
+
+type invokedVerifier struct{ ran bool }
+
+func (v *invokedVerifier) Verify(context.Context, agent.Approver) (string, error) {
+	v.ran = true
+	return "unexpected host verifier", nil
+}
+
+type verifierSwapStore struct{ swap func() }
+
+func (s verifierSwapStore) Load(context.Context, string) (*conversation.Conversation, error) {
+	s.swap()
+	return nil, conversation.ErrNotFound
+}
+
+func (verifierSwapStore) Save(_ context.Context, c conversation.Conversation) (int64, error) {
+	return c.Revision + 1, nil
+}
+
+type approveVerifierWrite struct{}
+
+func (approveVerifierWrite) Approve(context.Context, provider.ToolCall, string) (bool, error) {
+	return true, nil
+}
+
+func TestNativeVerifierPinnedForWholeTurn(t *testing.T) {
+	stubValidateSandbox(t)
+	for _, initialNil := range []bool{false, true} {
+		for _, swapAt := range []string{"model callback", "session load"} {
+			t.Run(fmt.Sprintf("nil=%t/%s", initialNil, swapAt), func(t *testing.T) {
+				dir := t.TempDir()
+				ws, err := agenttools.NewWorkspace(dir)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var initial agent.Verifier
+				if !initialNil {
+					initial = mustSlot(t, dir, seatbeltPolicy)
+				}
+				replacement := &invokedVerifier{}
+				caller := &swappingVerifierCaller{}
+				orch := agent.New(caller, agent.ContextManager{}, agent.WithVerifier(initial))
+				swap := func() { agent.WithVerifier(replacement)(orch) }
+				opts := Options{
+					Root: dir, Profile: ProfileTrusted, Sandbox: seatbeltPolicy, Orchestrator: orch,
+					Tools: []agent.Tool{agenttools.NewWriteFile(ws, nil)},
+				}
+				turn := Turn{RunID: "pinned", Message: "write fixture", Approver: approveVerifierWrite{}}
+				if swapAt == "session load" {
+					opts.SessionStore = verifierSwapStore{swap: swap}
+					turn.ThreadID = "thread"
+				} else {
+					caller.swap = swap
+				}
+				rt, err := New(context.Background(), opts)
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { closeTestRuntime(t, rt) })
+				if _, err := rt.Run(context.Background(), turn, func(Event) error { return nil }); err != nil {
+					t.Fatal(err)
+				}
+				if replacement.ran {
+					t.Error("a verifier installed after validation ran in the active turn")
+				}
+				if data, err := os.ReadFile(filepath.Join(dir, "fixture.txt")); err != nil || string(data) != "synthetic fixture" {
+					t.Fatalf("admitted write = %q, %v", data, err)
+				}
+				if _, err := runNative(t, rt, "next"); !errors.Is(err, ErrProfileIncompatible) {
+					t.Fatalf("next turn accepted the replacement: %v", err)
+				}
+				if caller.calls != 2 {
+					t.Fatalf("model calls = %d, want 2 from the first turn only", caller.calls)
+				}
+			})
+		}
+	}
 }
 
 func TestNativePermissionsCopy(t *testing.T) {

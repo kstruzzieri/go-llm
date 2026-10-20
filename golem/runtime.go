@@ -379,10 +379,12 @@ func New(ctx context.Context, opts Options) (*Runtime, error) {
 	r.scratchKey = scratchKey
 	// A bootstrapped orchestrator installs no verifier, so only a supplied one
 	// can carry an unbound verifier into the session.
-	if err := r.checkVerifier(opts.Orchestrator); err != nil {
-		return nil, err
-	}
 	orchestrator := opts.Orchestrator
+	if orchestrator != nil {
+		if err := r.checkVerifier(orchestrator.Verifier()); err != nil {
+			return nil, err
+		}
+	}
 	var bundle *providerbootstrap.Bundle
 	summarizer := opts.Summarizer
 	if orchestrator == nil {
@@ -536,9 +538,9 @@ func (r *Runtime) Run(ctx context.Context, turn Turn, sink EventSink) (agent.Res
 	if err := runCtx.Err(); err != nil {
 		return agent.Result{}, finish("run.canceled", struct{}{}, err)
 	}
-	// agent.WithVerifier can swap the verifier after admission, so a native
-	// turn re-checks the one its reserved snapshot will run (#576).
-	if err := r.checkVerifier(snap.orchestrator); err != nil {
+	// Capture before validation and retain this identity across all callbacks.
+	verifier := snap.orchestrator.Verifier()
+	if err := r.checkVerifier(verifier); err != nil {
 		return agent.Result{}, finish("run.failed", r.runFailedPayload(err), err)
 	}
 	var thread *threadState
@@ -601,7 +603,7 @@ func (r *Runtime) Run(ctx context.Context, turn Turn, sink EventSink) (agent.Res
 		request.History = thread.history()
 		request.HistorySummary = thread.summary()
 	}
-	result, err := snap.orchestrator.Run(runCtx, request, observer)
+	result, err := snap.orchestrator.RunWithVerifier(runCtx, request, observer, verifier)
 	if !r.retainReasoning {
 		scrubReasoning(&result)
 	}
@@ -968,7 +970,7 @@ func (r *Runtime) ReplaceConfiguration(ctx context.Context, cfg Configuration) e
 	var validationErr error
 	if cfg.Orchestrator == nil {
 		validationErr = fmt.Errorf("%w: orchestrator is required", ErrInvalidRequest)
-	} else if validationErr = r.checkVerifier(cfg.Orchestrator); validationErr == nil {
+	} else if validationErr = r.checkVerifier(cfg.Orchestrator.Verifier()); validationErr == nil {
 		combined, permissions, validationErr = r.admitReplacement(cfg.Tools)
 	}
 	r.mu.Lock()

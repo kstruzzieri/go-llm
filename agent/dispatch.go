@@ -23,7 +23,7 @@ import (
 // capability are separate concepts.
 func (o *Orchestrator) runToolCalls(ctx context.Context, res *Result, state *State,
 	reg *toolRegistry, calls []provider.ToolCall, approver Approver, obs Observer, step int,
-	gov *restraintGovernor, ic *interceptorRun) error {
+	gov *restraintGovernor, ic *interceptorRun, verifier Verifier) error {
 
 	b := newBatch()
 	assistantIndex := len(state.Messages) - 1
@@ -65,7 +65,7 @@ func (o *Orchestrator) runToolCalls(ctx context.Context, res *Result, state *Sta
 		// gets no further turn, so the observation would never be read.
 		return nil
 	}
-	return o.verifyBatch(ctx, state, approver, &b, obs, step, ic)
+	return verifyBatch(ctx, state, approver, &b, obs, step, ic, verifier)
 }
 
 func (o *Orchestrator) runToolCallsSerial(ctx context.Context, res *Result, state *State,

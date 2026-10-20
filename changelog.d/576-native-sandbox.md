@@ -61,7 +61,11 @@ sandbox (-sandbox)".
   honored. It admits only library-built tools bound to the session's root and
   policy (`agenttools.CheckSandboxBindings`), and its verifier must be nil or an
   `agenttools.VerifierSlot` bound to the same root and policy, checked at
-  `New`, `ReplaceConfiguration` and every turn start.
+  `New`, `ReplaceConfiguration` and every turn start. Each turn retains the
+  verifier identity it validated, including an absent hook, across all callbacks.
+  `agent.WithVerifier` is safe concurrently with `Run`; replacement affects
+  subsequent runs. `agent.Orchestrator.RunWithVerifier` runs with an explicitly
+  captured hook so a host can validate it without a check/use gap.
 - `EffectivePermissions` adds `Command.Limits`, `Scratch` and
   `Verification{State, Target}`. `Command.Network` reports `denied`,
   `ip-denied` or `allowed` for a native runtime.
@@ -75,11 +79,13 @@ sandbox (-sandbox)".
   `agenttools.ValidateSandbox` (and with it `golem.New`) fails with an error
   wrapping `ErrSandboxPolicy` instead of advertising a backend that refuses
   every command. Mark your own descriptors close-on-exec before building a
-  native session. The one exemption, on macOS, is the `com.apple.netsrc`
-  kernel-control socket libSystem's resolver leaves open after a hostname
-  lookup that returns several addresses (`localhost`, for one). It still
-  reaches Seatbelt commands: a routing-query channel, not a filesystem or IP
-  path.
+  native session. On macOS, the audit marks libSystem's identified
+  `com.apple.netsrc` resolver socket close-on-exec, retaining the parent's
+  usable socket while preventing sandboxed children from inheriting it.
+  Failure to set the flag refuses the spawn.
+- Seatbelt execution is limited to the reviewed system roots, workspace,
+  private temp and exact approved executable. An unreadable executable
+  outside those allowances can no longer run as a child.
 - `golem.New` validates every session's sandbox policy, the host included, so
   the host runtime with any constraint (network, memory, CPU or capabilities)
   fails `New` with an error wrapping `agenttools.ErrSandboxPolicy`.
