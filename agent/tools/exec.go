@@ -86,6 +86,10 @@ type execResult struct {
 	StdoutTruncated bool
 	StderrTruncated bool
 	TimedOut        bool
+	// Notes are backend diagnostics (#576), such as a refused Seatbelt
+	// private-temp cleanup. They never change ExitCode, TimedOut or the
+	// runner's error.
+	Notes []string
 }
 
 // commandRunner is the OS-process seam. Run returns a non-nil error ONLY for infra
@@ -230,7 +234,7 @@ func NewExecToolsWithOptions(root string, opts ExecToolsOptions) ([]agent.Tool, 
 	if err != nil {
 		return nil, fmt.Errorf("tools: build exec tools: %w", err)
 	}
-	rt, err := newScratchRuntime(root, opts.Scratch, opts.PromotionJournal)
+	rt, err := newScratchRuntime(root, opts.Scratch, opts.PromotionJournal, SandboxRuntimeHost)
 	if err != nil {
 		return nil, err
 	}
@@ -265,7 +269,7 @@ func NewSandboxedExecToolsWithOptions(root string, sandbox SandboxConfig, opts E
 	if err != nil {
 		return nil, fmt.Errorf("tools: build exec tools: %w", err)
 	}
-	rt, err := newScratchRuntime(root, opts.Scratch, opts.PromotionJournal)
+	rt, err := newScratchRuntime(root, opts.Scratch, opts.PromotionJournal, backend.sandbox.Runtime)
 	if err != nil {
 		return nil, err
 	}
@@ -476,12 +480,12 @@ func (t *RunCommand) Invoke(ctx context.Context, raw json.RawMessage) (agent.Too
 	res, runErr := t.runner.Run(ctx, spec)
 	if runErr != nil {
 		if res.TimedOut {
-			return errResult(fmt.Sprintf("command timed out after %s", pp.timeout)), nil
+			return execErr(fmt.Sprintf("command timed out after %s", pp.timeout), res.Notes), nil
 		}
 		if errors.Is(runErr, context.Canceled) {
-			return errResult("command canceled"), nil
+			return execErr("command canceled", res.Notes), nil
 		}
-		return errResult("command failed to run: " + runErr.Error()), nil
+		return execErr("command failed to run: "+runErr.Error(), res.Notes), nil
 	}
 	return agent.ToolResult{Content: formatExecResult(res)}, nil
 }
@@ -508,9 +512,9 @@ func (t *RunCommand) invokeScratched(ctx context.Context, pp execPending, spec e
 	if ctx.Err() != nil {
 		session.discard()
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			return errResult("scratch effect budget exhausted; result discarded"), nil
+			return execErr("scratch effect budget exhausted; result discarded", res.Notes), nil
 		}
-		return errResult("command canceled"), nil
+		return execErr("command canceled", res.Notes), nil
 	}
 	if t.scratchRT.beforeCapture != nil {
 		t.scratchRT.beforeCapture()
@@ -521,20 +525,20 @@ func (t *RunCommand) invokeScratched(ctx context.Context, pp execPending, spec e
 	if ctx.Err() != nil {
 		session.discard()
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			return errResult("scratch effect budget exhausted; result discarded"), nil
+			return execErr("scratch effect budget exhausted; result discarded", res.Notes), nil
 		}
-		return errResult("command canceled"), nil
+		return execErr("command canceled", res.Notes), nil
 	}
 	summary := renderScratchResultLine(t.scratchRT, session.id)
 
 	if runErr != nil {
 		if res.TimedOut {
-			return errResult(summary + fmt.Sprintf("command timed out after %s", pp.timeout)), nil
+			return execErr(summary+fmt.Sprintf("command timed out after %s", pp.timeout), res.Notes), nil
 		}
 		if errors.Is(runErr, context.Canceled) {
-			return errResult(summary + "command canceled"), nil
+			return execErr(summary+"command canceled", res.Notes), nil
 		}
-		return errResult(summary + "command failed to run: " + runErr.Error()), nil
+		return execErr(summary+"command failed to run: "+runErr.Error(), res.Notes), nil
 	}
 	return agent.ToolResult{Content: summary + formatExecResult(res)}, nil
 }
@@ -799,6 +803,8 @@ func renderExecPreview(p execPending, originalArgv0 string) string {
 func formatExecResult(r execResult) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "exit code: %d\n", r.ExitCode)
+	// Notes precede the command-controlled streams, so output cannot forge one.
+	b.WriteString(renderNotes(r.Notes))
 	b.WriteString("--- stdout ---\n")
 	b.Write(r.Stdout)
 	if r.StdoutTruncated {
@@ -810,4 +816,22 @@ func formatExecResult(r execResult) string {
 		b.WriteString("\n… [truncated]")
 	}
 	return b.String()
+}
+
+// renderNotes renders one "note: " line per backend note; no notes renders "".
+func renderNotes(notes []string) string {
+	var b strings.Builder
+	for _, n := range notes {
+		b.WriteString("note: " + n + "\n")
+	}
+	return b.String()
+}
+
+// execErr is errResult with one "note: " line per backend note appended, so
+// a timeout, cancellation or spawn failure still reports them (#576).
+func execErr(msg string, notes []string) agent.ToolResult {
+	for _, n := range notes {
+		msg += "\nnote: " + n
+	}
+	return errResult(msg)
 }

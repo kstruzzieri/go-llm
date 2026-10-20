@@ -44,7 +44,7 @@ func (a *replApprover) Approve(ctx context.Context, call provider.ToolCall, prev
 
 // ApproveKeyed is the KeyedApprover entry point: the same prompt with no
 // interceptor report (the library prefers ApproveWithRisk, so this is reached
-// by the verifier's approveVerify and by tests).
+// by agenttools.VerifierSlot's approveVerify and by tests).
 func (a *replApprover) ApproveKeyed(ctx context.Context, call provider.ToolCall, preview, key string) (agent.ApprovalDecision, error) {
 	return a.ApproveWithRisk(ctx, call, preview, key, agent.RiskReport{})
 }

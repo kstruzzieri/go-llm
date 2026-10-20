@@ -3,6 +3,8 @@
 package tools
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -24,6 +26,25 @@ func scratchBwrapTools(t *testing.T, root string) (*RunCommand, *scratchRuntime)
 	}
 	rc := tools[0].(*RunCommand)
 	return rc, rc.scratchRT
+}
+
+// TestBwrapScratchPreviewNamesRuntime covers the native production caller of the
+// runtime-aware scratch wording: the real sandboxed factory must hand the
+// scratch engine the backend's own runtime, so the preview names bwrap, not
+// the host.
+func TestBwrapScratchPreviewNamesRuntime(t *testing.T) {
+	rc, _ := scratchBwrapTools(t, buildIsolationWorkspace(t))
+	plan, err := rc.Plan(context.Background(), json.RawMessage(`{"argv":["sh","-c","true"]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = "scratch: disposable cwd copy under the bwrap sandbox git-metadata=omitted "
+	if !strings.Contains(plan.Preview, want) {
+		t.Fatalf("preview missing %q:\n%s", want, plan.Preview)
+	}
+	if strings.Contains(plan.Preview, "host process remains unrestricted") {
+		t.Fatalf("native preview claims the host is unrestricted:\n%s", plan.Preview)
+	}
 }
 
 // TestBwrapScratchComposition is the Linux twin of the Seatbelt composition

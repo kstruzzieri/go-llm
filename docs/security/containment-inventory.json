@@ -857,9 +857,9 @@
           "func": "TestRealExecPreviewKeepsOneLogicalLine"
         },
         {
-          "package": "./cmd/golem",
+          "package": "./agent/tools",
           "test": "TestVerifyApprovalPreviewSanitized",
-          "file": "cmd/golem/approver_test.go",
+          "file": "agent/tools/verify_slot_test.go",
           "func": "TestVerifyApprovalPreviewSanitized"
         },
         {

@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/kstruzzieri/go-llm/contextdepth"
@@ -80,6 +82,70 @@ func observationFor(t *testing.T, msgs []provider.ChatMessage, id string) string
 }
 
 const verifyObs = "\n--- post-batch verification ---\nstatus: failed\n"
+
+func TestVerifierReplacementAppliesToNextRun(t *testing.T) {
+	for _, clear := range []bool{false, true} {
+		t.Run(map[bool]string{false: "replace", true: "clear"}[clear], func(t *testing.T) {
+			first := &fakeVerifier{out: "\nfirst verifier"}
+			next := &fakeVerifier{out: "\nnext verifier"}
+			var replacement Verifier = next
+			if clear {
+				replacement = nil
+			}
+			var o *Orchestrator
+			calls := 0
+			caller := budgetModelFunc(func(context.Context, provider.ChatRequest, func(provider.ChatResponse) error) (ModelResult, error) {
+				calls++
+				if calls%3 != 0 {
+					WithVerifier(replacement)(o)
+					return ModelResult{Response: provider.ChatResponse{ToolCalls: []provider.ToolCall{toolCall(fmt.Sprintf("w%d", calls%3), "write_file", "{}")}}}, nil
+				}
+				return ModelResult{Response: provider.ChatResponse{Content: "done"}}, nil
+			})
+			o = New(caller, ContextManager{}, WithVerifier(first))
+			req := Request{Goal: "write", Tools: []Tool{fakeWriteTool{name: "write_file", approval: ApprovalNever}}}
+			for run := range 2 {
+				res, err := o.Run(context.Background(), req, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				want := "wrote by write_file"
+				if run == 0 {
+					want += "\nfirst verifier"
+				} else if !clear {
+					want += "\nnext verifier"
+				}
+				for _, id := range []string{"w1", "w2"} {
+					if got := observationFor(t, res.Messages, id); got != want {
+						t.Fatalf("run %d, batch %s observation = %q, want %q", run, id, got, want)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestVerifierConcurrentReplacement(t *testing.T) {
+	o := New(budgetModelFunc(func(context.Context, provider.ChatRequest, func(provider.ChatResponse) error) (ModelResult, error) {
+		return ModelResult{Response: provider.ChatResponse{Content: "done"}}, nil
+	}), ContextManager{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for range 100 {
+			WithVerifier(&fakeVerifier{})(o)
+			WithVerifier(nil)(o)
+		}
+	}()
+	defer wg.Wait()
+	for range 100 {
+		_ = o.Verifier()
+		if _, err := o.Run(context.Background(), Request{Goal: "answer"}, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
 
 func TestVerifyRunsOnceOnLastSuccessfulWrite(t *testing.T) {
 	v := &fakeVerifier{out: verifyObs}
@@ -364,7 +430,7 @@ func TestVerifyBatchNeverAppendsWhenTheVerifierErrors(t *testing.T) {
 	b := batch{verifyAnchor: 0}
 	o := New(nil, ContextManager{}, WithVerifier(&fakeVerifier{out: verifyObs, err: sentinel}))
 
-	if err := o.verifyBatch(context.Background(), &st, nil, &b, nil, 0, o.newInterceptorRun()); !errors.Is(err, sentinel) {
+	if err := verifyBatch(context.Background(), &st, nil, &b, nil, 0, o.newInterceptorRun(), o.Verifier()); !errors.Is(err, sentinel) {
 		t.Fatalf("verifyBatch err = %v, want %v", err, sentinel)
 	}
 	if st.Messages[0].Content != "wrote" {
@@ -378,7 +444,7 @@ func TestVerifyBatchNeverAppendsAfterCancellation(t *testing.T) {
 	b := batch{verifyAnchor: 0}
 	o := New(nil, ContextManager{}, WithVerifier(&fakeVerifier{out: verifyObs, hook: cancel}))
 
-	if err := o.verifyBatch(ctx, &st, nil, &b, nil, 0, o.newInterceptorRun()); !errors.Is(err, context.Canceled) {
+	if err := verifyBatch(ctx, &st, nil, &b, nil, 0, o.newInterceptorRun(), o.Verifier()); !errors.Is(err, context.Canceled) {
 		t.Fatalf("verifyBatch err = %v, want context.Canceled", err)
 	}
 	if st.Messages[0].Content != "wrote" {
@@ -391,7 +457,7 @@ func TestVerifyBatchAppendsToTheAnchorOnSuccess(t *testing.T) {
 	b := batch{verifyAnchor: 0}
 	o := New(nil, ContextManager{}, WithVerifier(&fakeVerifier{out: verifyObs}))
 
-	if err := o.verifyBatch(context.Background(), &st, nil, &b, nil, 0, o.newInterceptorRun()); err != nil {
+	if err := verifyBatch(context.Background(), &st, nil, &b, nil, 0, o.newInterceptorRun(), o.Verifier()); err != nil {
 		t.Fatalf("verifyBatch: %v", err)
 	}
 	if want := "wrote" + verifyObs; st.Messages[0].Content != want {

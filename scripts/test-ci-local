@@ -58,10 +58,26 @@ require_step ci.yml 'Upload containment evidence' "$upload" \
 require_step darwin-smoke.yml 'Upload containment evidence' "$upload" \
   '            ${{ runner.temp }}/containment-darwin-host.json' \
   '            ${{ runner.temp }}/containment-seatbelt.json'
+# Golem's native wiring proof runs in both native jobs, fails on any skip or
+# on a top-level pass count other than that OS's test count, and publishes
+# its log even when it fails (#576).
+for pin in ci.yml:linux:BWRAP:11 darwin-smoke.yml:darwin:SEATBELT:10; do
+  IFS=: read -r wf os require count <<<"$pin"
+  log="\"\$RUNNER_TEMP/native-wiring-$os.txt\""
+  require_step "$wf" 'Golem native wiring (non-race)' '        shell: bash' "          GO_LLM_REQUIRE_$require: \"1\"" \
+    '        run: |' \
+    "          set -o pipefail; go test -count=1 -run '^TestNativeWiring' -v ./cmd/golem | tee $log" \
+    "          if grep -q -- '--- SKIP' $log; then" \
+    "          passed=\$(grep -cE -- '^--- PASS: TestNativeWiring[A-Za-z]+ ' $log || true)" \
+    "          if [ \"\$passed\" -ne $count ]; then"
+  require_step "$wf" 'Upload native wiring evidence' '        if: always()' "$upload" \
+    "          name: native-wiring-$os" "          path: \${{ runner.temp }}/native-wiring-$os.txt"
+done
 # One upload per job that runs the checker: four in ci.yml, one in darwin-smoke,
-# each under if: always() so a failed run still publishes its evidence.
+# each under if: always() so a failed run still publishes its evidence. The
+# pinned action appears once more per file for the native wiring log.
 for pin in ci.yml:4 darwin-smoke.yml:1; do
-  if [ "$(grep -Fxc -- "$upload" "$repo_root/.github/workflows/${pin%:*}")" != "${pin#*:}" ] ||
+  if [ "$(grep -Fxc -- "$upload" "$repo_root/.github/workflows/${pin%:*}")" != "$((${pin#*:} + 1))" ] ||
     [ "$(grep -A1 -Fx -- '      - name: Upload containment evidence' "$repo_root/.github/workflows/${pin%:*}" | grep -Fxc -- '        if: always()')" != "${pin#*:}" ]; then
     printf '%s must upload containment evidence from %s jobs, each if: always()\n' "${pin%:*}" "${pin#*:}" >&2
     exit 1
@@ -1120,11 +1136,11 @@ awk '
   $0 == "      - name: Seatbelt confinement (non-race)" { step = "non-race"; next }
   $0 == "      - name: Seatbelt confinement (race)" { step = "race"; next }
   step && $0 == "          GO_LLM_REQUIRE_SEATBELT: \"1\"" { env = 1; next }
-  step == "non-race" && $0 == "        run: go test -count=1 -run '\''^(TestSeatbelt|TestSBPL|TestProbeSeatbelt|TestScratchSeatbelt|TestNewExecBackendSeatbelt)'\'' ./agent/tools" {
+  step == "non-race" && $0 == "        run: go test -count=1 -run '\''^(TestSeatbelt|TestSBPL|TestProbeSeatbelt|TestScratchSeatbelt|TestNewExecBackendSeatbelt|TestNativeBackend)'\'' ./agent/tools ./golem" {
     nonrace = env
     step = ""
   }
-  step == "race" && $0 == "        run: go test -race -count=1 -run '\''^(TestSeatbelt|TestSBPL|TestProbeSeatbelt|TestScratchSeatbelt|TestNewExecBackendSeatbelt)'\'' ./agent/tools" {
+  step == "race" && $0 == "        run: go test -race -count=1 -run '\''^(TestSeatbelt|TestSBPL|TestProbeSeatbelt|TestScratchSeatbelt|TestNewExecBackendSeatbelt|TestNativeBackend)'\'' ./agent/tools ./golem" {
     race = env
     step = ""
   }

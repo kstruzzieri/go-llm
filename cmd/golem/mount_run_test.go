@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/kstruzzieri/go-llm/agent"
+	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
 )
 
 // startupShape is everything a mount must reproduce from the equivalent
@@ -33,10 +34,9 @@ type startupShape struct {
 // captureStartup runs golem to the point where the session exists, applies
 // commands, snapshots the shape, and stops. -agent-memory keeps a tool AFTER
 // the gated slot (agent-memory tools) and memory_search sits BEFORE it, so
-// an append-instead-of-insert mutation is visible. hasSlot reports the
-// late verifier slot separately: it is a wiring detail, not part of the
-// parity shape (a startup -allow-write session binds its verifier directly).
-func captureStartup(t *testing.T, extra []string, commands ...string) (startupShape, bool) {
+// an append-instead-of-insert mutation is visible. The verifier slot is not
+// part of the parity shape; TestVerifierSlotIsBoundForEveryREPLSession pins it.
+func captureStartup(t *testing.T, extra []string, commands ...string) startupShape {
 	t.Helper()
 	configPath, root := writeRunLifecycleConfig(t)
 	stdin, stdout, stderr := runTestFiles(t)
@@ -44,7 +44,6 @@ func captureStartup(t *testing.T, extra []string, commands ...string) (startupSh
 		"-no-project-context", "-no-auto-index", "-agent-memory"}, extra...)
 	errStop := errors.New("stop after startup")
 	var got startupShape
-	var hasSlot bool
 	err := run(args, stdin, stdout, stderr, runHooks{
 		startAutoIndex: func() func() { return func() {} },
 		afterSessionReady: func(sess *replSession) error {
@@ -66,14 +65,13 @@ func captureStartup(t *testing.T, extra []string, commands ...string) (startupSh
 				write: sess.allowWrite, exec: sess.allowExec,
 				hasJournal: sess.journal != nil, hasManager: sess.bgManager != nil,
 			}
-			hasSlot = sess.verifier != nil
 			return errStop
 		},
 	})
 	if !errors.Is(err, errStop) {
 		t.Fatalf("run = %v (stderr: %s)", err, readRunTestFile(t, stderr))
 	}
-	return got, hasSlot
+	return got
 }
 
 func TestAllowCommandsMatchStartupFlags(t *testing.T) {
@@ -95,8 +93,8 @@ func TestAllowCommandsMatchStartupFlags(t *testing.T) {
 		{"write with delegate in the tail", append(append([]string(nil), delegate...), "-allow-write"), delegate, []string{"/allow-write"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			startup, _ := captureStartup(t, tc.startup)
-			mid, _ := captureStartup(t, tc.mid, tc.commands...)
+			startup := captureStartup(t, tc.startup)
+			mid := captureStartup(t, tc.mid, tc.commands...)
 			if !reflect.DeepEqual(startup, mid) {
 				t.Fatalf("mid-session shape differs from startup flags:\n startup=%+v\n mid=%+v", startup, mid)
 			}
@@ -170,34 +168,74 @@ func TestRunRejectsAllowCommandsFromPipedInput(t *testing.T) {
 	}
 }
 
-// The slot exists exactly where /allow-write can still need it: a REPL
-// session that started without -allow-write. A startup -allow-write session
-// binds its verifier directly (byte-identical to pre-#372), and one-shot
-// never dispatches slash commands.
-func TestLateVerifierSlotIsREPLOnly(t *testing.T) {
-	if _, hasSlot := captureStartup(t, nil); !hasSlot {
-		t.Fatal("REPL session without -allow-write has no verifier slot")
+// The slot exists for every REPL session, and only there (#576): a REPL
+// session that starts without -allow-write carries it empty for a later
+// /allow-write (Inspect included, which never mounts writes), a startup
+// -allow-write session binds its verifier through the same root- and
+// policy-bound slot (armed, or disabled with the notice), and one-shot never
+// dispatches slash commands or mounts verification. The orchestrator verifies
+// through exactly that slot, never a separate runner.
+func TestVerifierSlotIsBoundForEveryREPLSession(t *testing.T) {
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
 	}
-	if _, hasSlot := captureStartup(t, []string{"-allow-write"}); hasSlot {
-		t.Fatal("a startup -allow-write session must bind its verifier directly, not through the slot")
-	}
-	configPath, root := writeRunLifecycleConfig(t)
-	stdin, stdout, stderr := runTestFiles(t)
-	errStop := errors.New("stop after startup")
-	var slot bool
-	err := run([]string{"-config", configPath, "-root", root, "-no-probe", "-no-cap-probe", "-no-session",
-		"-no-memory", "-no-project-context", "-no-auto-index", "-p", "hello"}, stdin, stdout, stderr, runHooks{
-		startAutoIndex: func() func() { return func() {} },
-		afterSessionReady: func(sess *replSession) error {
-			slot = sess.verifier != nil
-			return errStop
-		},
-	})
-	if !errors.Is(err, errStop) {
-		t.Fatalf("run = %v (stderr: %s)", err, readRunTestFile(t, stderr))
-	}
-	if slot {
-		t.Fatal("one-shot mode must not carry the verifier slot")
+	valid := `{"verify":{"argv":["` + self + `","__golem_exec_helper__","echo","ok"]}}`
+	for _, tc := range []struct {
+		name  string
+		body  string
+		extra []string
+		state string // "" means no slot at all
+	}{
+		// The config is present but unread: .golem.json is read only once
+		// writes are enabled.
+		{"REPL without -allow-write", valid, nil, "absent"},
+		{"REPL with -allow-write and a valid config", valid, []string{"-allow-write"}, "armed"},
+		{"REPL with -allow-write and a malformed config", `{"verify":`, []string{"-allow-write"}, "disabled"},
+		{"one-shot", valid, []string{"-p", "hello"}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			configPath, root := writeRunLifecycleConfig(t)
+			writeGolemJSON(t, root, tc.body)
+			canonRoot, err := filepath.EvalSymlinks(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			stdin, stdout, stderr := runTestFiles(t)
+			errStop := errors.New("stop after startup")
+			var slot *agenttools.VerifierSlot
+			var installed agent.Verifier
+			args := append([]string{"-config", configPath, "-root", root, "-no-probe", "-no-cap-probe", "-no-session",
+				"-no-memory", "-no-project-context", "-no-auto-index"}, tc.extra...)
+			err = run(args, stdin, stdout, stderr, runHooks{
+				startAutoIndex: func() func() { return func() {} },
+				afterSessionReady: func(sess *replSession) error {
+					slot, installed = sess.verifier, sess.orch.Verifier()
+					return errStop
+				},
+			})
+			if !errors.Is(err, errStop) {
+				t.Fatalf("run = %v (stderr: %s)", err, readRunTestFile(t, stderr))
+			}
+			if tc.state == "" {
+				if slot != nil || installed != nil {
+					t.Fatalf("one-shot carries slot %v and orchestrator verifier %v; want neither", slot, installed)
+				}
+				return
+			}
+			if slot == nil {
+				t.Fatal("REPL session has no verifier slot")
+			}
+			if installed != agent.Verifier(slot) {
+				t.Fatalf("orchestrator verifier = %#v, want the session's slot", installed)
+			}
+			if state, target := slot.State(); state != tc.state || target != canonRoot {
+				t.Fatalf("slot State = %q, %q; want %q, %q", state, target, tc.state, canonRoot)
+			}
+			if !slot.BoundTo(canonRoot, agenttools.SandboxConfig{}) {
+				t.Fatal("slot is not bound to the session root and the host policy")
+			}
+		})
 	}
 }
 
@@ -486,5 +524,85 @@ func TestRunLateMountPermissionsNotice(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// A successful late mount prints the whole updated permissions line, scratch
+// and verification included (#576). Literal lines: the late write mount reads
+// absent without a .golem.json and armed with a valid one.
+func TestPermissionsNoticeAfterMount(t *testing.T) {
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	const host = " commands=host (unsandboxed; runs with the host user's filesystem and network authority) scratch=off verification="
+	const startup = "permissions: profile=trusted tools=read_file,search,glob,list" + host + "absent"
+	for _, tc := range []struct {
+		name, command, golemJSON, want string
+	}{
+		{"write", "/allow-write", "",
+			"permissions: profile=trusted tools=read_file,search,glob,list,write_file,edit_file" + host + "absent"},
+		{"write armed", "/allow-write", `{"verify":{"argv":["` + self + `","__golem_exec_helper__","echo","ok"]}}`,
+			"permissions: profile=trusted tools=read_file,search,glob,list,write_file,edit_file" + host + "armed"},
+		{"exec", "/allow-exec", "",
+			"permissions: profile=trusted tools=read_file,search,glob,list,run_command,start_command,command_status,command_tail,stop_command" + host + "absent"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			configPath, root := writeRunLifecycleConfig(t)
+			if tc.golemJSON != "" {
+				writeGolemJSON(t, root, tc.golemJSON)
+			}
+			stdin, stdout, stderr := stdinFileWith(t, tc.command+"\n")
+			err := run([]string{"-profile", "trusted", "-config", configPath, "-root", root,
+				"-no-probe", "-no-cap-probe", "-no-session", "-no-memory", "-no-rag",
+				"-no-project-context", "-no-auto-index"}, stdin, stdout, stderr, runHooks{
+				afterSessionReady: func(ready *replSession) error {
+					ready.stdinTerminal = true
+					return nil
+				},
+			})
+			if err != nil {
+				t.Fatalf("run: %v; stderr: %s", err, readRunTestFile(t, stderr))
+			}
+			var got []string
+			for _, line := range stderrLines(t, stderr) {
+				if strings.HasPrefix(line, "permissions:") {
+					got = append(got, line)
+				}
+			}
+			if want := []string{startup, tc.want}; !reflect.DeepEqual(got, want) {
+				t.Fatalf("permissions lines =\n %q\nwant\n %q", got, want)
+			}
+		})
+	}
+}
+
+// A sandbox-policy error from the startup verifier aborts startup before the
+// session is published (spec section 5): never a notice, never a session.
+func TestStartupVerifierPolicyErrorAbortsStartup(t *testing.T) {
+	configPath, root := writeRunLifecycleConfig(t)
+	orig := buildVerifierFn
+	t.Cleanup(func() { buildVerifierFn = orig })
+	calls := 0
+	buildVerifierFn = func(string, agenttools.SandboxConfig) (*agenttools.VerifyCommand, string, error) {
+		calls++
+		return nil, "", fmt.Errorf("stub backend: %w", agenttools.ErrSandboxPolicy)
+	}
+	stdin, stdout, stderr := runTestFiles(t)
+	ready := false
+	err := run([]string{"-config", configPath, "-root", root, "-no-probe", "-no-cap-probe", "-no-session",
+		"-no-memory", "-no-rag", "-no-project-context", "-no-auto-index", "-allow-write"}, stdin, stdout, stderr,
+		runHooks{afterSessionReady: func(*replSession) error { ready = true; return nil }})
+	if calls != 1 {
+		t.Fatalf("buildVerifierFn calls = %d, want 1", calls)
+	}
+	if !errors.Is(err, agenttools.ErrSandboxPolicy) || err.Error() != "golem: verifier: stub backend: tools: sandbox policy unavailable" {
+		t.Fatalf("run = %v, want the wrapped policy error", err)
+	}
+	if ready {
+		t.Fatal("startup published a session after a verifier policy error")
+	}
+	if strings.Contains(readRunTestFile(t, stderr), "permissions:") {
+		t.Fatalf("startup printed permissions after a verifier policy error:\n%s", readRunTestFile(t, stderr))
 	}
 }

@@ -126,7 +126,7 @@ func TestScratchRuntimeRejectsDarwinDataVolumeTempAlias(t *testing.T) {
 	if baseErr != nil || aliasErr != nil || !os.SameFile(baseInfo, aliasInfo) {
 		t.Skipf("no equivalent Data-volume temp spelling: base=%v alias=%v", baseErr, aliasErr)
 	}
-	if _, err := newScratchRuntime(alias, ScratchConfig{Enabled: true}, nil); err == nil {
+	if _, err := newScratchRuntime(alias, ScratchConfig{Enabled: true}, nil, SandboxRuntimeHost); err == nil {
 		t.Fatal("scratch runtime accepted a filesystem alias of its temp base")
 	}
 }

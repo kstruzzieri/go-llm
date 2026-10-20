@@ -207,7 +207,7 @@ func TestCanaryMountedAndRenewedTraceProjection(t *testing.T) {
 			sess := newCanarySession(t, caller)
 			sess.stdinTerminal = true
 			sess.mountAt = sess.readToolCount
-			sess.verifier = &lateVerifier{}
+			sess.verifier = newTestVerifierSlot(t, sess.root)
 			sess.grants = newApprovalGrants()
 			t.Cleanup(func() { _ = sess.closeLateMounts() })
 			sess.sysInputs.projectContext = "project context retained"

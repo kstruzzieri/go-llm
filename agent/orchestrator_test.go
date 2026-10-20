@@ -176,3 +176,22 @@ func TestOnPressureErrorAbortsBeforeModelCall(t *testing.T) {
 		t.Fatalf("model should not be called when OnPressure errors, calls=%d", mc.calls)
 	}
 }
+
+// TestOrchestratorVerifierAccessor pins that Verifier reads the live field: a
+// runtime re-checks it at turn start, so an Option applied after New must be
+// visible, not a construction-time copy.
+func TestOrchestratorVerifierAccessor(t *testing.T) {
+	v := &fakeVerifier{}
+	if got := New(&scriptedCaller{}, ContextManager{}, WithVerifier(v)).Verifier(); got != Verifier(v) {
+		t.Fatalf("Verifier() = %#v, want the installed %#v", got, v)
+	}
+	o := New(&scriptedCaller{}, ContextManager{})
+	if got := o.Verifier(); got != nil {
+		t.Fatalf("Verifier() without WithVerifier = %#v, want nil", got)
+	}
+	swapped := &fakeVerifier{}
+	WithVerifier(swapped)(o)
+	if got := o.Verifier(); got != Verifier(swapped) {
+		t.Fatalf("Verifier() after a late WithVerifier = %#v, want %#v", got, swapped)
+	}
+}

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"strings"
 	"sync"
 
@@ -124,6 +125,24 @@ type Options struct {
 	// unguarded child readers, so one is rejected with ErrProfileIncompatible
 	// while a ScopeGuard is set.
 	ScopeGuard agenttools.ScopeGuard
+	// Sandbox selects where a Trusted session's commands run (#576). The zero
+	// value is the host runtime, which admits tools exactly as before. A native
+	// runtime (seatbelt or bwrap) requires ProfileTrusted, else
+	// ErrProfileIncompatible, and is validated and frozen before the workspace,
+	// any tool or the model is touched: a policy this host cannot honor fails
+	// New with an error wrapping agenttools.ErrSandboxPolicy, never falling back
+	// to host. The slice is copied.
+	//
+	// A native session admits only library-built workspace, command and scratch
+	// tools bound to its root and this policy (agenttools.CheckSandboxBindings),
+	// in New, Replace and ReplaceConfiguration alike; there is no approval floor
+	// because no admitted tool is opaque. Its scratch identity is frozen at New:
+	// every command tool a replacement mounts must carry the one New's tools
+	// carried (none, when New mounted no command tools). The orchestrator's
+	// verifier must be nil or an agenttools.VerifierSlot bound to the same root
+	// and policy; that is checked at New, at ReplaceConfiguration and at every
+	// turn start, where a mismatch fails the turn before any model call.
+	Sandbox agenttools.SandboxConfig
 	// FailureMessage presents the public message placed in run.failed. When
 	// nil, Runtime preserves the existing truncated err.Error() behavior. The
 	// error Run returns is never replaced by the presentation. Concurrent
@@ -269,12 +288,17 @@ type Runtime struct {
 	// guarded by mu: reserve reads it, Replace and ReplaceConfiguration swap
 	// it (#372, #376).
 	fileTools []agent.Tool
-	// profile, ceiling and guarded are frozen at New (#387). ceiling is nil
-	// for the profile's whole universe; guarded records a non-nil ScopeGuard.
+	// profile, ceiling, guarded, sandbox and scratchKey are frozen at New
+	// (#387, #576). ceiling is nil for the profile's whole universe; guarded
+	// records a non-nil ScopeGuard; sandbox is the caller's policy (DropCaps
+	// copied); scratchKey is the scratch identity a native session's command
+	// tools must carry.
 	profile         Profile
 	ceiling         map[string]struct{}
 	ceilingNames    []string // sorted ceiling for EffectivePermissions, nil with no allowlist
 	guarded         bool
+	sandbox         agenttools.SandboxConfig
+	scratchKey      string
 	snap            *turnSnapshot
 	maxSteps        int
 	maxMessageBytes int
@@ -308,6 +332,11 @@ func New(ctx context.Context, opts Options) (*Runtime, error) {
 	if err := checkProfile(opts.Profile, opts.Tools); err != nil {
 		return nil, err
 	}
+	sandbox := opts.Sandbox
+	sandbox.DropCaps = slices.Clone(sandbox.DropCaps)
+	if nativeRuntime(sandbox) && opts.Profile != ProfileTrusted {
+		return nil, fmt.Errorf("%w: sandbox runtime %q requires the %s profile", ErrProfileIncompatible, sandbox.Runtime, ProfileTrusted)
+	}
 	ceiling, err := newCeiling(opts.Profile, opts.ToolAllowlist)
 	if err != nil {
 		return nil, err
@@ -315,6 +344,16 @@ func New(ctx context.Context, opts Options) (*Runtime, error) {
 	root, err := canonicalRoot(opts.Root)
 	if err != nil {
 		return nil, err
+	}
+	if err := validateSandbox(sandbox, root); err != nil {
+		return nil, fmt.Errorf("golem: sandbox: %w", err)
+	}
+	if nativeRuntime(sandbox) {
+		// Native tools and the verifier slot carry the workspace's own
+		// canonical spelling, so bind the session to exactly that.
+		if root, err = agenttools.CanonicalWorkspaceRoot(root); err != nil {
+			return nil, fmt.Errorf("golem: canonicalize root: %w", err)
+		}
 	}
 	if opts.System == "" {
 		opts.System = SystemPrompt(false, false)
@@ -330,13 +369,22 @@ func New(ctx context.Context, opts Options) (*Runtime, error) {
 		ceiling:      ceiling,
 		ceilingNames: sortedCeiling(ceiling),
 		guarded:      opts.ScopeGuard != nil,
+		sandbox:      sandbox,
 		fileTools:    filterOwned(agenttools.NewFileToolsForWorkspace(ws), ceiling),
 	}
-	tools, permissions, err := r.admitTools(opts.Tools)
+	tools, permissions, scratchKey, err := r.admitTools(opts.Tools)
 	if err != nil {
 		return nil, err
 	}
+	r.scratchKey = scratchKey
+	// A bootstrapped orchestrator installs no verifier, so only a supplied one
+	// can carry an unbound verifier into the session.
 	orchestrator := opts.Orchestrator
+	if orchestrator != nil {
+		if err := r.checkVerifier(orchestrator.Verifier()); err != nil {
+			return nil, err
+		}
+	}
 	var bundle *providerbootstrap.Bundle
 	summarizer := opts.Summarizer
 	if orchestrator == nil {
@@ -490,6 +538,11 @@ func (r *Runtime) Run(ctx context.Context, turn Turn, sink EventSink) (agent.Res
 	if err := runCtx.Err(); err != nil {
 		return agent.Result{}, finish("run.canceled", struct{}{}, err)
 	}
+	// Capture before validation and retain this identity across all callbacks.
+	verifier := snap.orchestrator.Verifier()
+	if err := r.checkVerifier(verifier); err != nil {
+		return agent.Result{}, finish("run.failed", r.runFailedPayload(err), err)
+	}
 	var thread *threadState
 	if turn.ThreadID != "" {
 		var err error
@@ -550,7 +603,7 @@ func (r *Runtime) Run(ctx context.Context, turn Turn, sink EventSink) (agent.Res
 		request.History = thread.history()
 		request.HistorySummary = thread.summary()
 	}
-	result, err := snap.orchestrator.Run(runCtx, request, observer)
+	result, err := snap.orchestrator.RunWithVerifier(runCtx, request, observer, verifier)
 	if !r.retainReasoning {
 		scrubReasoning(&result)
 	}
@@ -790,10 +843,12 @@ func (r *Runtime) Cancel(runID string) bool {
 // name — including against the runtime's own file tools) and installs nothing
 // on failure: tools must be empty under ProfileInspect and must lie inside the
 // frozen ToolAllowlist ceiling, else ErrProfileIncompatible, and a rejected tool
-// is never planned or invoked. ErrClosed takes precedence over validation
-// errors, including when Close completes while validation is running. tools is
-// copied. Tool.Spec and Tool.Effect are never called while the runtime lock is
-// held. Safe for concurrent use with Run, Cancel, Close, and other Replace calls.
+// is never planned or invoked. A native session also applies Options.Sandbox's
+// bindings and frozen scratch identity. ErrClosed takes precedence over
+// validation errors, including when Close completes while validation is
+// running. tools is copied. Tool.Spec and Tool.Effect are never called while
+// the runtime lock is held. Safe for concurrent use with Run, Cancel, Close,
+// and other Replace calls.
 //
 // Omitting modelOptions preserves the options current at publication, after
 // tool validation. One value replaces all options; an explicit zero clears them.
@@ -826,7 +881,7 @@ func (r *Runtime) Replace(system string, tools []agent.Tool, modelOptions ...pro
 	if len(modelOptions) > 1 {
 		validationErr = fmt.Errorf("%w: Replace accepts at most one model options value", ErrInvalidRequest)
 	} else {
-		combined, permissions, validationErr = r.admitTools(tools)
+		combined, permissions, validationErr = r.admitReplacement(tools)
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -881,13 +936,15 @@ type Configuration struct {
 //
 // Validation matches New and Replace (profile admission, frozen ceiling, nil
 // tool, empty name, duplicate name — including against the runtime's own file
-// tools) and additionally rejects a nil Orchestrator with ErrInvalidRequest.
-// Nothing is installed on failure. ErrClosed takes precedence over every other
-// error, including when Close completes while validation is running. ctx is
-// checked at entry and again under the publication lock after validation, so a
-// cancellation raised while Tool.Spec runs installs nothing either. Tool.Spec and
-// Tool.Effect are never called while the runtime lock is held, and this method
-// performs no provider I/O.
+// tools) and additionally rejects a nil Orchestrator with ErrInvalidRequest
+// and, in a native session, an Orchestrator whose verifier is not bound to it
+// (Options.Sandbox) with ErrProfileIncompatible. Nothing is installed on
+// failure. ErrClosed takes precedence over every other error, including when
+// Close completes while validation is running. ctx is checked at entry and
+// again under the publication lock after validation, so a cancellation raised
+// while Tool.Spec runs installs nothing either. Tool.Spec and Tool.Effect are
+// never called while the runtime lock is held, and this method performs no
+// provider I/O.
 //
 // The tool and option values are copied; callers must not mutate the supplied
 // slices concurrently with this call reading them. Safe for concurrent use with
@@ -913,8 +970,8 @@ func (r *Runtime) ReplaceConfiguration(ctx context.Context, cfg Configuration) e
 	var validationErr error
 	if cfg.Orchestrator == nil {
 		validationErr = fmt.Errorf("%w: orchestrator is required", ErrInvalidRequest)
-	} else {
-		combined, permissions, validationErr = r.admitTools(cfg.Tools)
+	} else if validationErr = r.checkVerifier(cfg.Orchestrator.Verifier()); validationErr == nil {
+		combined, permissions, validationErr = r.admitReplacement(cfg.Tools)
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()

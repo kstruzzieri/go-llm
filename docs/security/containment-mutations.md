@@ -771,7 +771,21 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
   ```
 - Baseline: pass. Mutant A: FAIL `TestContainment/A1` (`containment_test.go:103: A1: validity: want invoke then denial after 2 prompts; records [... {Step:1 Name:run_command ... Denied:false Invoked:true ...}] prompts 2`), and `X2a`, `X2b`, `X2c`, `X2d`, `G1`, `G2`, `G3`, `M1`, `V2`, each red at its validity line (the denied call ran). Mutant B: FAIL `TestContainment/V2` only (`containment_test.go:103: V2: validity: want two auto-approved writes with tests.sh holding v2, two verification decisions at two fresh prompts (y then N) with no verify grant, the second skipped; ...`). Restored: pass.
 - Kind: guard
-- Notes: A is the approver's answer parsing, shared by every scenario that relies on a fresh-prompt denial; B is the verify runner's own use of the decision, the guard specific to V2. Recorded probe for A: two calls answered `y` then `N` wrote `"x\nx\n"`.
+- Notes: A is the approver's answer parsing, shared by every scenario that relies on a fresh-prompt denial; B is the verify runner's own use of the decision, the guard specific to V2. Recorded probe for A: two calls answered `y` then `N` wrote `"x\nx\n"`. Re-proved for #576 (2026-10-19, on `2354a064`): #576 deleted `cmd/golem/verify.go`'s `verifyRunner.Verify`, and the decision check now lives in the library verifier slot, `(*VerifierSlot).Verify` in `agent/tools/verify_slot.go`. Patch B, re-applied there as below, turned `TestContainment/V2` red and nothing else (`containment_test.go:116: V2: validity: want two auto-approved writes with tests.sh holding v2, two verification decisions at two fresh prompts (y then N) with no verify grant, the second skipped; ...`; the judge line moved from :103 to :116 since the baseline). Re-installing the pristine file (sha256 match) turned it green (exit 0). Patch A's file is unchanged.
+- Patch (B, re-proved for #576 against the verifier slot):
+  ```diff
+  --- a/agent/tools/verify_slot.go
+  +++ b/agent/tools/verify_slot.go
+  @@ -194,7 +194,7 @@
+   	if err != nil {
+   		return "", err
+   	}
+  -	if !d.Approved {
+  +	if false && !d.Approved {
+   		return verifyRender(e, "skipped", "reason: not approved\n"), nil
+   	}
+
+  ```
 
 ## M-026 — With a nil approver, mounted write and exec tools fail safe
 - Affected refs: GRANT-NIL-APPROVER: `TestContainment/H1`
@@ -1363,7 +1377,21 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
   ```
 - Baseline: pass. Mutant A: FAIL `TestContainment/V1` (`containment_test.go:103: V1: control produced no effect; the probe cannot distinguish blocked from never-ran`). Mutant B: FAIL `TestContainment/V1` (`containment_test.go:103: V1: observed contained, declared uncontained (owner #420); if a fix landed, update the declaration and regenerate docs with -update-containment`). Restored: pass.
 - Kind: effect-detection
-- Notes: A: the verify runner approves, grants and renders `status: passed` without spawning the command; every validity check still holds, so a verifier that approves and never runs cannot read as containment. B: the rewritten tests.sh appends v2 to a different file (the validity check compares against the same rewritten body), so the attack probe (`countLine(got, "v2") > 0`) reads contained while the v1 control holds. Control liveness only, not claimed for its row: V2 (contained) also goes red under A with the same control line and stays green under B; its guard is M-025 B. B1 stays green under both.
+- Notes: A: the verify runner approves, grants and renders `status: passed` without spawning the command; every validity check still holds, so a verifier that approves and never runs cannot read as containment. B: the rewritten tests.sh appends v2 to a different file (the validity check compares against the same rewritten body), so the attack probe (`countLine(got, "v2") > 0`) reads contained while the v1 control holds. Control liveness only, not claimed for its row: V2 (contained) also goes red under A with the same control line and stays green under B; its guard is M-025 B. B1 stays green under both. Re-proved for #576 (2026-10-19, on `2354a064`): #576 deleted `cmd/golem/verify.go`'s `verifyRunner.Verify`, and the run now happens in the library verifier slot, `(*VerifierSlot).Verify` in `agent/tools/verify_slot.go`. Patch A, re-applied there as below, turned `TestContainment/V1` red (`containment_test.go:116: V1: control produced no effect; the probe cannot distinguish blocked from never-ran`) and V2 red on the same control line, as before; the judge line moved from :103 to :116 since the baseline. Re-installing the pristine file (sha256 match) turned both green (exit 0). Patch B patches only the scenario file and is unaffected by the move.
+- Patch (A, re-proved for #576 against the verifier slot):
+  ```diff
+  --- a/agent/tools/verify_slot.go
+  +++ b/agent/tools/verify_slot.go
+  @@ -198,7 +198,7 @@
+   		return verifyRender(e, "skipped", "reason: not approved\n"), nil
+   	}
+
+  -	res, runErr := e.Run(ctx)
+  +	res, runErr := VerifyResult{}, error(nil) // approved no-op
+   	if runErr != nil {
+   		if ctx.Err() != nil || errors.Is(runErr, context.Canceled) ||
+   			errors.Is(runErr, context.DeadlineExceeded) {
+  ```
 
 ## M-048 — A signed poisoned memory is recalled under its unreviewed provenance label
 - Affected refs: CMP-MEMORY-SIGNED: `TestContainmentSignedPoisonedMemory`
@@ -1873,7 +1901,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
 - Affected refs: PREVIEW-PROFILE: `TestContainment/PV1`, `TestRealWritePreviewReachesApproverInert`, `TestRealEditPreviewWithRawC1Context`, `TestVerifyApprovalPreviewSanitized`, `TestApproveSanitizesForEmbeddedApprovers`
 - Baseline: `72d0bedeb1d264b3da62cf812df7505a8bd7e776` (the commit that tightens PV1's probe; first recorded at `b9cea9154746758026fd9bb58d467f665be5952f`)
 - Platform: darwin (arm64, go1.27.1)
-- Profile / command: darwin-host / `go test -count=1 -run '^(TestContainment|TestRealWritePreviewReachesApproverInert|TestRealEditPreviewWithRawC1Context|TestVerifyApprovalPreviewSanitized)$' ./cmd/golem`; `go test -count=1 -run '^TestApproveSanitizesForEmbeddedApprovers$' ./agent`
+- Profile / command: darwin-host / `go test -count=1 -run '^(TestContainment|TestRealWritePreviewReachesApproverInert|TestRealEditPreviewWithRawC1Context)$' ./cmd/golem`; `go test -count=1 -run '^TestVerifyApprovalPreviewSanitized$' ./agent/tools`; `go test -count=1 -run '^TestApproveSanitizesForEmbeddedApprovers$' ./agent`
 - Patch:
   ```diff
   diff --git a/agent/preview.go b/agent/preview.go
@@ -1888,9 +1916,9 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
    	for _, r := range preview {
    		if r == '\n' || unicode.IsGraphic(r) {
   ```
-- Baseline: pass (exit 0). Mutant: FAIL `TestContainment/PV1` (`containment_test.go:116: PV1: REGRESSION: declared contained but the forbidden effect happened (control held)`), while the other 23 TestContainment leaves pass; FAIL `TestRealWritePreviewReachesApproverInert/color_off` and `/color_on` (`approver_test.go:1001: approval output carries active control "\x1b":`); FAIL `TestRealEditPreviewWithRawC1Context` (`approver_test.go:1028: approval output carries a raw 0x9b byte:`); FAIL `TestVerifyApprovalPreviewSanitized/plain_Approver` (`approver_test.go:1179: preview = "post-write verification command:\n  argv: go test \x1b[2J\x1b]52;c;cHduZWQ=\a \u009b\r\b\x7f\n", want "post-write verification command:\n  argv: go test \\x1b[2J\\x1b]52;c;cHduZWQ=\\a \\u009b\\r\\b\\x7f\n"`) and `/KeyedApprover` (the same text at `approver_test.go:1192`); the `./cmd/golem` command exit 1. FAIL `TestApproveSanitizesForEmbeddedApprovers/plain_Approver`, `/KeyedApprover` and `/RiskApprover` (`preview_test.go:212: approver preview = "+x\x1b[31mred\x1b[0m\n\x1b]52;c;cHduZWQ=\a\u009b\r\b\x7f", want "+x\\x1b[31mred\\x1b[0m\n\\x1b]52;c;cHduZWQ=\\a\\u009b\\r\\b\\x7f"`), the `./agent` command exit 1. Restored with `git checkout -- agent/preview.go`: byte-identical, pass (exit 0).
+- Baseline: pass (exit 0). Mutant: FAIL `TestContainment/PV1` (`containment_test.go:116: PV1: REGRESSION: declared contained but the forbidden effect happened (control held)`), while the other 23 TestContainment leaves pass; FAIL `TestRealWritePreviewReachesApproverInert/color_off` and `/color_on` (`approver_test.go:1001: approval output carries active control "\x1b":`); FAIL `TestRealEditPreviewWithRawC1Context` (`approver_test.go:1028: approval output carries a raw 0x9b byte:`); the `./cmd/golem` command exit 1. FAIL `TestVerifyApprovalPreviewSanitized/plain_Approver` (`verify_slot_test.go:738: preview = "post-write verification command:\n  argv: go test \x1b[2J\x1b]52;c;cHduZWQ=\a \u009b\r\b\x7f\n", want "post-write verification command:\n  argv: go test \\x1b[2J\\x1b]52;c;cHduZWQ=\\a \\u009b\\r\\b\\x7f\n"`) and `/KeyedApprover` (the same text at `verify_slot_test.go:751`), the `./agent/tools` command exit 1. FAIL `TestApproveSanitizesForEmbeddedApprovers/plain_Approver`, `/KeyedApprover` and `/RiskApprover` (`preview_test.go:212: approver preview = "+x\x1b[31mred\x1b[0m\n\x1b]52;c;cHduZWQ=\a\u009b\r\b\x7f", want "+x\\x1b[31mred\\x1b[0m\n\\x1b]52;c;cHduZWQ=\\a\\u009b\\r\\b\\x7f"`), the `./agent` command exit 1. Restored with `git checkout -- agent/preview.go`: byte-identical, pass (exit 0).
 - Kind: guard
-- Notes: The patch removes every sanitizer on the tested path at once. The CLI approver's call (`sanitizeApprovalPreview` in cmd/golem/approver.go), the runtime's call for every approver tier (`approve` in agent/dispatch.go) and the verifier's call (`approveVerify` in cmd/golem/verify.go) all route through `agent.SanitizePreview`, so neither call site is left to mask the other. PV1's control stays true under the mutant because none of its three parts depends on the sanitizer: the write_file path header is quoted by `quoteArgForPreview` before any sanitizer runs, so the escaped OSC still appears, and both CANARY lines and the edit's context line still render. The raw content lines carry the payload's controls, BEL included, so the judge reads a regression, not a failed control.
+- Notes: The patch removes every sanitizer on the tested path at once. The CLI approver's call (`sanitizeApprovalPreview` in cmd/golem/approver.go), the runtime's call for every approver tier (`approve` in agent/dispatch.go) and the verifier's call (`approveVerify` in agent/tools/verify_slot.go) all route through `agent.SanitizePreview`, so neither call site is left to mask the other. PV1's control stays true under the mutant because none of its three parts depends on the sanitizer: the write_file path header is quoted by `quoteArgForPreview` before any sanitizer runs, so the escaped OSC still appears, and both CANARY lines and the edit's context line still render. The raw content lines carry the payload's controls, BEL included, so the judge reads a regression, not a failed control. Re-proved for #576 (2026-10-19, on `6c381927` plus the change that moved `approveVerify` and `TestVerifyApprovalPreviewSanitized` from cmd/golem into agent/tools with the library verifier slot): the same patch turned every listed ref red at the lines above, and re-installing the saved pristine `agent/preview.go` (sha256 match) turned them green (exit 0).
 
 ## M-065 — The write and edit preview header quotes a hostile path
 - Affected refs: PREVIEW-PROFILE: `TestWritePreviewHeadersExact`, `TestRealWritePreviewReachesApproverInert`

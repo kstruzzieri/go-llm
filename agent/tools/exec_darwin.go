@@ -16,7 +16,10 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -28,13 +31,20 @@ const (
 	seatbeltProbeTimeout = 5 * time.Second
 	// seatbeltProbeOutputCap bounds captured probe diagnostics.
 	seatbeltProbeOutputCap = 1024
+	// seatbeltProbeProfile is the probe's profile: deny-default like every
+	// profile the backend renders, with only what /usr/bin/true needs. It is
+	// used for the probe alone and grants real commands nothing.
+	seatbeltProbeProfile = "(version 1)(deny default)(allow process-exec*)(allow file-read*)"
 )
 
 // probeSeatbelt actively verifies the host can apply a Seatbelt profile:
-// file checks first, then a harmless allow-default run of /usr/bin/true.
-// Existence does not imply usability — a process that is already sandboxed
-// has an executable sandbox-exec that fails with "sandbox_apply: Operation
-// not permitted", so a stat-only check would be a false positive.
+// file checks first, then a run of /usr/bin/true under a deny-default
+// profile. Existence does not imply usability: inside a sandbox, applying a
+// deny-default profile fails with "sandbox_apply: Operation not permitted",
+// so a stat-only check would be a false positive. The probe must be
+// deny-default too: an allow-default profile still applies inside an
+// allow-default parent, so it would report a backend every command then
+// fails under.
 func probeSeatbelt(ctx context.Context, execPath string) error {
 	fi, err := os.Stat(execPath)
 	if err != nil {
@@ -43,7 +53,7 @@ func probeSeatbelt(ctx context.Context, execPath string) error {
 	if !isExecutableFile(fi) {
 		return fmt.Errorf("tools: seatbelt requires %s: %w", execPath, errNotExecutable)
 	}
-	cmd := exec.CommandContext(ctx, execPath, "-p", "(version 1)(allow default)", "/usr/bin/true")
+	cmd := exec.CommandContext(ctx, execPath, "-p", seatbeltProbeProfile, "/usr/bin/true")
 	out := &cappedBuffer{cap: seatbeltProbeOutputCap}
 	cmd.Stdout = out
 	cmd.Stderr = out
@@ -57,6 +67,76 @@ func probeSeatbelt(ctx context.Context, execPath string) error {
 		return fmt.Errorf("tools: seatbelt unavailable on this host: %w", err)
 	}
 	return nil
+}
+
+// seatbeltNetsrcControl names the kernel control libSystem's resolver opens
+// in this process after a hostname lookup that returns several addresses
+// ("localhost", for one; a single-address lookup was not seen to open it) and
+// leaves without FD_CLOEXEC; the Go runtime cannot mark it.
+const seatbeltNetsrcControl = "com.apple.netsrc"
+
+// sysprotoControl is SYSPROTO_CONTROL from <sys/sys_domain.h>, which
+// x/sys/unix does not export.
+const sysprotoControl = 2
+
+// seatbeltRejectInheritableFDs is the shared descriptor audit over macOS's
+// per-process descriptor directory (#576). It marks libSystem's netsrc control
+// socket close-on-exec, preserving the parent's resolver while preventing
+// children from using or disrupting its socket. Every other descriptor is
+// refused, including other kernel controls (a leaked utun socket is IP egress).
+func seatbeltRejectInheritableFDs() error {
+	return rejectInheritableFDs("seatbelt", "/dev/fd", netsrcControlSocket(kernelControlID, unix.Getpeername))
+}
+
+// netsrcControlSocket identifies descriptors the audit may mark close-on-exec:
+// fd is a kernel control socket (AF_SYSTEM/AF_SYS_CONTROL, hence
+// SYSPROTO_CONTROL) connected to the netsrc control, whose id is
+// resolved at most once per audit. A family match alone is never enough,
+// and any getpeername or id-resolution error refuses. getsockname is not
+// consulted: kernel control sockets do not support it (EOPNOTSUPP).
+func netsrcControlSocket(controlID func(string) (uint32, error), peer func(int) (unix.Sockaddr, error)) func(int) bool {
+	var id uint32
+	var idErr error
+	resolved := false
+	return func(fd int) bool {
+		if !resolved {
+			resolved = true
+			id, idErr = controlID(seatbeltNetsrcControl)
+		}
+		if idErr != nil || id == 0 {
+			return false
+		}
+		sa, err := peer(fd)
+		if err != nil {
+			return false
+		}
+		ctl, ok := sa.(*unix.SockaddrCtl)
+		return ok && ctl.ID == id
+	}
+}
+
+// kernelControlID resolves a kernel control's id (CTLIOCGINFO) through a
+// temporary control socket, marked close-on-exec under ForkLock so no
+// concurrent spawn inherits it, and closed before returning.
+func kernelControlID(name string) (uint32, error) {
+	syscall.ForkLock.RLock()
+	s, err := unix.Socket(unix.AF_SYSTEM, unix.SOCK_DGRAM, sysprotoControl)
+	if err == nil {
+		if _, err = unix.FcntlInt(uintptr(s), unix.F_SETFD, unix.FD_CLOEXEC); err != nil {
+			_ = unix.Close(s)
+		}
+	}
+	syscall.ForkLock.RUnlock()
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = unix.Close(s) }()
+	var info unix.CtlInfo
+	copy(info.Name[:], name)
+	if err := unix.IoctlCtlInfo(s, &info); err != nil {
+		return 0, err
+	}
+	return info.Id, nil
 }
 
 // seatbeltProbeFunc is the injectable probe seam for deterministic unit tests.
@@ -110,6 +190,11 @@ func newSeatbeltExecBackend(cfg SandboxConfig) (execBackend, error) {
 
 func newSeatbeltExecBackendAt(execPath string, probe seatbeltProbeFunc, cfg SandboxConfig) (execBackend, error) {
 	if err := seatbeltConfigSupport(cfg); err != nil {
+		return nil, err
+	}
+	// The probe is this backend's first spawn, and construction (so
+	// ValidateSandbox) must fail where every later spawn would (#576).
+	if err := seatbeltRejectInheritableFDs(); err != nil {
 		return nil, err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), seatbeltProbeTimeout)
@@ -167,9 +252,10 @@ func seatbeltTempCleanup(dir string, created os.FileInfo) func() error {
 
 // prepare builds the per-invocation private temp directory, SBPL profile, and
 // wrapper spec. On success the returned cleanup is the guarded temp remover;
-// on failure prepare has already attempted guarded cleanup itself and nothing
-// may spawn. The stamped WorkspaceRoot is consumed as-is — re-resolving it
-// here could silently change the policy after approval.
+// on failure prepare has already attempted guarded cleanup itself, joined a
+// refused cleanup's note onto the error it returns, and nothing may spawn.
+// The stamped WorkspaceRoot is consumed as-is — re-resolving it here could
+// silently change the policy after approval.
 //
 // Before constructing the profile, prepare requires the executable target it
 // resolves to be the approved object (spec.ExeIdentity, os.SameFile): the
@@ -204,8 +290,7 @@ func (b *seatbeltBackend) prepare(spec execSpec) (execSpec, func() error, error)
 	}
 	cleanup := seatbeltTempCleanup(tempDir, created)
 	fail := func(err error) (execSpec, func() error, error) {
-		_ = cleanup()
-		return execSpec{}, nil, err
+		return execSpec{}, nil, withCleanupNote(err, cleanupNote(cleanup()))
 	}
 	canonTemp, err := filepath.EvalSymlinks(tempDir)
 	if err != nil {
@@ -273,6 +358,11 @@ func (b *seatbeltBackend) prepare(spec execSpec) (execSpec, func() error, error)
 	if err := validateSandboxWorkspaceLinks(spec.WorkspaceRoot); err != nil {
 		return fail(err)
 	}
+	// Last, as bwrap does: an inheritable descriptor crosses the profile's
+	// write and network boundary, which Seatbelt never re-checks on it.
+	if err := seatbeltRejectInheritableFDs(); err != nil {
+		return fail(err)
+	}
 	wrapped := spec
 	wrapped.Env = sandboxChildEnv(spec.Env, canonTemp)
 	wrapped.Path = b.execPath
@@ -329,15 +419,23 @@ func seatbeltSymlinkChain(spelled, canonExe string) ([]string, error) {
 }
 
 // Run executes one foreground command under its per-invocation profile. A
-// cleanup failure never overwrites the command's observed result: the private
-// directory is 0700 and host temp reaping is the documented fallback.
+// cleanup failure never overwrites the command's observed result (the
+// private directory is 0700 and host temp reaping is the documented
+// fallback); it is reported as a note. A nonzero exit or a spawn failure
+// also carries seatbeltLoaderNote. Exit code, TimedOut and the error are
+// returned exactly as the delegate produced them.
 func (b *seatbeltBackend) Run(ctx context.Context, spec execSpec) (execResult, error) {
 	wrapped, cleanup, err := b.prepare(spec)
 	if err != nil {
 		return execResult{}, err
 	}
 	res, runErr := b.runner.Run(ctx, wrapped)
-	_ = cleanup()
+	if (runErr == nil && res.ExitCode != 0) || (runErr != nil && !res.TimedOut && ctx.Err() == nil) {
+		res.Notes = append(res.Notes, seatbeltLoaderNote)
+	}
+	if n := cleanupNote(cleanup()); n != "" {
+		res.Notes = append(res.Notes, n)
+	}
 	return res, runErr
 }
 
@@ -345,21 +443,28 @@ func (b *seatbeltBackend) Run(ctx context.Context, spec execSpec) (execResult, e
 // private-temp cleanup, run exactly once after the underlying Wait. PID and
 // Kill delegate unchanged via embedding; the manager's group-termination and
 // reap semantics are untouched. A cleanup failure never rewrites the
-// process's exit code, managerKilled flag, or error taxonomy.
+// process's exit code, managerKilled flag, or error taxonomy; it is reported
+// through cleanupNote.
 type seatbeltProcess struct {
 	backgroundProcess
 	cleanup func() error
+	note    string // set by Wait; read only after Wait returns
 }
 
 func (p *seatbeltProcess) Wait() (int, bool, error) {
 	code, managerKilled, err := p.backgroundProcess.Wait()
-	_ = p.cleanup()
+	p.note = cleanupNote(p.cleanup())
 	return code, managerKilled, err
 }
 
+// cleanupNote implements cleanupReporter: the note for a refused or failed
+// private-temp cleanup, or "".
+func (p *seatbeltProcess) cleanupNote() string { return p.note }
+
 // Start launches one background command under its per-invocation profile
-// through the same preparation as Run. Spawn failure cleans the private temp;
-// after publication the returned process owns cleanup at Wait/reap time.
+// through the same preparation as Run. Spawn failure cleans the private temp
+// and joins a refused cleanup's note onto the starter's error; after
+// publication the returned process owns cleanup at Wait/reap time.
 func (b *seatbeltBackend) Start(spec execSpec, stdout, stderr io.Writer) (backgroundProcess, error) {
 	wrapped, cleanup, err := b.prepare(spec)
 	if err != nil {
@@ -367,8 +472,7 @@ func (b *seatbeltBackend) Start(spec execSpec, stdout, stderr io.Writer) (backgr
 	}
 	proc, err := b.starter.Start(wrapped, stdout, stderr)
 	if err != nil {
-		_ = cleanup()
-		return nil, err
+		return nil, withCleanupNote(err, cleanupNote(cleanup()))
 	}
 	return &seatbeltProcess{backgroundProcess: proc, cleanup: cleanup}, nil
 }
