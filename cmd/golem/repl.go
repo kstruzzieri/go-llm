@@ -70,11 +70,17 @@ type replSession struct {
 	// when -allow-exec owned the manager at startup.
 	lateManager *tools.BackgroundManager
 	lateStop    func() bool
-	// verifier is the REPL-mode post-write verification slot (#372). nil
-	// outside the REPL, for a REPL session started with -allow-write (its
-	// verifier is bound directly, and /allow-write is idempotent there), and
-	// in narrow tests (set is nil-safe).
-	verifier *lateVerifier
+	// verifier is the REPL-mode post-write verification slot (#372, #576),
+	// bound to the session root and sandbox policy; the orchestrator verifies
+	// through it. Every REPL session has one (armed or disabled at startup
+	// under -allow-write, absent until /allow-write otherwise). nil outside
+	// the REPL and in narrow tests: every method is nil-safe. An unarmed slot
+	// still lets verifyBatch run its post-Verify ctx.Err() check (see run()).
+	verifier *tools.VerifierSlot
+	// sandbox is the session's frozen sandbox policy (resolveSandbox): what
+	// /allow-write builds the verifier under and /allow-exec builds its
+	// manager under, the same one startup used.
+	sandbox  tools.SandboxConfig
 	maxSteps int
 	// startupBudget is the budget resolved at startup. It is IMMUTABLE and
 	// exists only for the AgentFlow planner/driver, which freeze their own
@@ -964,16 +970,25 @@ func renderJobStopResult(out io.Writer, st tools.JobStatus, err error) {
 	default:
 		_, _ = fmt.Fprintf(out, "already finished: %s (%s)\n", st.Handle, st.State)
 	}
+	for _, n := range st.Notes {
+		_, _ = fmt.Fprintf(out, "  note: %s\n", n)
+	}
 }
 
-// renderJobLine renders one /jobs listing line: handle, state (with exit code
-// when known), pid, then argv through the dedicated control-safe renderer.
+// renderJobLine renders one /jobs listing entry: a line with the handle, state
+// (with exit code when known), pid, then argv through the dedicated
+// control-safe renderer, followed by one indented line per backend note
+// (#576). Notes arrive one-line and control-safe from agent/tools.
 func renderJobLine(st tools.JobStatus) string {
 	state := st.State
 	if st.ExitKnown {
 		state = fmt.Sprintf("%s exit=%d", st.State, st.ExitCode)
 	}
-	return fmt.Sprintf("%s  %s  pid=%d  %s", st.Handle, state, st.PID, renderJobArgv(st.Argv))
+	line := fmt.Sprintf("%s  %s  pid=%d  %s", st.Handle, state, st.PID, renderJobArgv(st.Argv))
+	for _, n := range st.Notes {
+		line += "\n  note: " + n
+	}
+	return line
 }
 
 // jobArgvDisplayCap bounds the rendered argv to one terminal-friendly line.

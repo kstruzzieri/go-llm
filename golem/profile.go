@@ -37,6 +37,19 @@ const (
 
 const previewUnavailable = "Preview unavailable: staged-workspace runtime requires #388/#389"
 
+// validateSandbox and checkSandboxBindings are the agenttools functions,
+// replaceable only by this package's tests so a native policy constructs, and
+// golem's own native rules run, on every OS without a real backend.
+var (
+	validateSandbox      = agenttools.ValidateSandbox
+	checkSandboxBindings = agenttools.CheckSandboxBindings
+)
+
+// nativeRuntime reports whether cfg selects a sandbox runtime other than host.
+func nativeRuntime(cfg agenttools.SandboxConfig) bool {
+	return cfg.Runtime != "" && cfg.Runtime != agenttools.SandboxRuntimeHost
+}
+
 // inspectReads is the Inspect universe: the runtime-owned read tools, in the
 // order agenttools.NewFileToolsForWorkspace builds them.
 var inspectReads = [...]string{"read_file", "search", "glob", "list"}
@@ -121,8 +134,14 @@ func filterOwned(owned []agent.Tool, ceiling map[string]struct{}) []agent.Tool {
 // extra is never planned or invoked. It enforces, in order: the profile, the
 // nil/name/duplicate checks, and per extra the frozen allowlist ceiling,
 // dispatch's need for all four reads and for every child it carries, and
-// dispatch's incompatibility with a ScopeGuard. Only then are the admitted extras published through floorWrap, so
-// every check sees the caller's own tool and the model sees the approval floor.
+// dispatch's incompatibility with a ScopeGuard, and in a native session the
+// sandbox bindings (agenttools.CheckSandboxBindings). Only then are the admitted
+// extras published, a Trusted host's through floorWrap, so every check sees the
+// caller's own tool and the model sees the approval floor. A native session
+// publishes its extras unwrapped: every one is a bound library tool.
+//
+// The third result is the scratch identity the native extras carry (always ""
+// on host); New freezes it and admitReplacement enforces it.
 //
 // It also returns the ToolPermission projection of the published list, in the
 // same order, so a snapshot can carry the two together. Provenance is decided on
@@ -130,20 +149,27 @@ func filterOwned(owned []agent.Tool, ceiling map[string]struct{}) []agent.Tool {
 // published tool's Effect, so Approval is the approval after the floor. This is
 // the only place EffectivePermissions' data is computed: it runs only after every
 // rejection, so a rejected tool never has Effect called.
-func (r *Runtime) admitTools(extras []agent.Tool) ([]agent.Tool, []ToolPermission, error) {
+func (r *Runtime) admitTools(extras []agent.Tool) ([]agent.Tool, []ToolPermission, string, error) {
 	if err := checkProfile(r.profile, extras); err != nil {
-		return nil, nil, err
+		return nil, nil, "", err
 	}
 	combined := make([]agent.Tool, 0, len(r.fileTools)+len(extras))
 	combined = append(combined, r.fileTools...)
 	combined = append(combined, extras...)
 	names, err := validateTools(combined)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, "", err
 	}
 	for i, tool := range extras {
 		if err := r.checkExtra(tool, names[len(r.fileTools)+i]); err != nil {
-			return nil, nil, err
+			return nil, nil, "", err
+		}
+	}
+	native := nativeRuntime(r.sandbox)
+	var scratchKey string
+	if native {
+		if scratchKey, err = checkSandboxBindings(extras, r.sandbox, r.root, r.scratchKey); err != nil {
+			return nil, nil, "", fmt.Errorf("%w: %w", ErrProfileIncompatible, err)
 		}
 	}
 	perms := make([]ToolPermission, len(combined))
@@ -154,12 +180,45 @@ func (r *Runtime) admitTools(extras []agent.Tool) ([]agent.Tool, []ToolPermissio
 			if libraryTool(combined[i]) {
 				provenance = ProvenanceLibrary
 			}
-			combined[i] = floorWrap(combined[i])
+			if !native {
+				combined[i] = floorWrap(combined[i])
+			}
 		}
 		effect := combined[i].Effect()
 		perms[i] = ToolPermission{Name: names[i], Class: effect.Class, Approval: effect.Approval, Provenance: provenance}
 	}
-	return combined, perms, nil
+	return combined, perms, scratchKey, nil
+}
+
+// admitReplacement is admitTools for Replace and ReplaceConfiguration. A native
+// session's scratch identity is frozen at New, so a replacement whose command
+// tools carry another one, or any one when New mounted none, is rejected. That
+// check follows admitTools' Effect reads, which in a native session only ever
+// reach bound library tools.
+func (r *Runtime) admitReplacement(extras []agent.Tool) ([]agent.Tool, []ToolPermission, error) {
+	tools, perms, scratchKey, err := r.admitTools(extras)
+	if err == nil && scratchKey != r.scratchKey {
+		return nil, nil, fmt.Errorf("%w: a native session's scratch policy is frozen at construction", ErrProfileIncompatible)
+	}
+	return tools, perms, err
+}
+
+// checkVerifier enforces spec 3.3's verifier binding for a native session: the
+// orchestrator's verifier must be nil or a VerifierSlot bound to the session's
+// root and frozen policy. A Trusted host session passes unchecked.
+func (r *Runtime) checkVerifier(verifier agent.Verifier) error {
+	if !nativeRuntime(r.sandbox) {
+		return nil
+	}
+	switch v := verifier.(type) {
+	case nil:
+		return nil
+	case *agenttools.VerifierSlot:
+		if v.BoundTo(r.root, r.sandbox) {
+			return nil
+		}
+	}
+	return fmt.Errorf("%w: the verifier is not a verifier slot bound to this session's root and %s policy", ErrProfileIncompatible, r.sandbox.Runtime)
 }
 
 // checkExtra applies the ceiling rules to one caller tool named name.

@@ -799,7 +799,7 @@ func TestScratchBackgroundWrapCoversAbandonedReap(t *testing.T) {
 	defer cancel()
 	manager := newBackgroundManager(cancelDuringStartStarter{inner: newPlatformStarter(), cancel: cancel}, cryptoRandReader(t))
 	defer manager.Shutdown()
-	rt, err := newScratchRuntime(root, ScratchConfig{Enabled: true}, nil)
+	rt, err := newScratchRuntime(root, ScratchConfig{Enabled: true}, nil, SandboxRuntimeHost)
 	if err != nil {
 		t.Fatal(err)
 	}

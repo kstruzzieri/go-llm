@@ -96,11 +96,15 @@ func (s *replSession) mount(at int, add []agent.Tool, in systemInputs) error {
 	return nil
 }
 
-// Seams for the late-mount handlers: tests count constructions through them to
-// prove a refused mount opens nothing (#387). Production never reassigns them.
+// Seams for the mount paths: tests count constructions through them to prove
+// a refused mount opens nothing (#387), inject a verifier the slot must refuse
+// or a startup policy failure (#576), and a slot refusal after the writes
+// publish. Production never reassigns them.
 var (
 	buildExecMountFn      = buildExecMount
 	openCheckpointStoreFn = openCheckpointStore
+	buildVerifierFn       = buildVerifier
+	setVerifierFn         = (*agenttools.VerifierSlot).Set
 )
 
 // refuseLateMountOutsideTrusted prints the restart guidance and reports true
@@ -119,9 +123,12 @@ func refuseLateMountOutsideTrusted(out io.Writer, sess *replSession, command, fl
 // sequence (store, journal, recovery, then the verifier) applied to the
 // live session, atomically with the recomposed system prompt. Recovery runs
 // before the mount exactly as at startup and is idempotent, so a retry after
-// a failed replacement is safe. Every failure path closes the store, so the
-// workspace lease is never leaked. Mounting never grants approval: the first
-// write prompts exactly as it would after the flag.
+// a failed replacement is safe. The verifier is built under the session's
+// sandbox policy and checked against the slot BEFORE the mount (#576): a
+// policy that cannot be honored, or a command the slot refuses, publishes
+// neither the writes nor the verifier. Every failure path closes the store,
+// so the workspace lease is never leaked. Mounting never grants approval: the
+// first write prompts exactly as it would after the flag.
 func handleAllowWrite(ctx context.Context, out io.Writer, sess *replSession, fields []string) {
 	if refuseLateMountOutsideTrusted(out, sess, "/allow-write", "-allow-write") {
 		return
@@ -180,6 +187,18 @@ func handleAllowWrite(ctx context.Context, out io.Writer, sess *replSession, fie
 		fail(fmt.Errorf("checkpoint state: %w", err), store)
 		return
 	}
+	// #347: .golem.json is read only once writes are enabled, as at startup.
+	// A repository mistake is a notice (vwarn); a policy failure, or a command
+	// the slot would refuse, fails the mount here, before anything publishes.
+	verifier, vwarn, err := buildVerifierFn(sess.root, sess.sandbox)
+	if err != nil {
+		fail(fmt.Errorf("verifier: %w", err), store)
+		return
+	}
+	if err := sess.verifier.Accepts(verifier); err != nil {
+		fail(fmt.Errorf("verifier: %w", err), store)
+		return
+	}
 	// Derived from the LIVE inputs: a fresh struct would erase the other
 	// capability and every other fragment.
 	next := sess.sysInputs
@@ -190,12 +209,18 @@ func handleAllowWrite(ctx context.Context, out io.Writer, sess *replSession, fie
 	}
 	sess.writeToolCount = len(writeTools)
 	sess.journal, sess.lateStore, sess.allowWrite = journal, store, true
-	// #347: .golem.json is read only once writes are enabled, as at startup;
-	// the runner lands in the slot the REPL orchestrator was built with. The
-	// slot is always present here: a REPL session without one started with
-	// -allow-write, and that session returned "already enabled" above.
-	verifier, vwarn := buildVerifier(sess.root)
-	sess.verifier.set(verifier)
+	// The command lands in the slot the REPL orchestrator was built with.
+	// Accepts above means Set should not refuse it now; if it ever does, the
+	// writes are already published, so the slot is disabled visibly rather
+	// than left looking absent.
+	if vwarn == "" {
+		if err := setVerifierFn(sess.verifier, verifier); err != nil {
+			vwarn = "verification disabled: " + err.Error()
+		}
+	}
+	if vwarn != "" {
+		sess.verifier.Disable(vwarn)
+	}
 	_, _ = fmt.Fprintln(out, "writes enabled (approval per change; /auto-edits, /undo, /checkpoints available)")
 	if sess.notice != nil {
 		sess.notice(renderPermissions(sess.runtime.EffectivePermissions()))
@@ -272,7 +297,8 @@ func handleAllowExec(ctx context.Context, out io.Writer, sess *replSession, fiel
 		_, _ = fmt.Fprintln(out, "/allow-exec requires an interactive terminal; for scripted input, start with -allow-exec")
 		return
 	}
-	manager, execTools, err := buildExecMountFn(sess.root, agenttools.ExecToolsOptions{})
+	// The session's frozen policy, the one startup used (#576).
+	manager, execTools, err := buildExecMountFn(sess.root, sess.sandbox, agenttools.ExecToolsOptions{})
 	if err != nil {
 		_, _ = fmt.Fprintf(out, "exec not enabled: %v\n", err)
 		return

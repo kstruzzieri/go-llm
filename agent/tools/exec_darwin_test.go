@@ -5,6 +5,7 @@ package tools
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,12 +14,15 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/kstruzzieri/go-llm/agent"
 )
@@ -65,6 +69,25 @@ func TestProbeSeatbeltNestedSandboxShape(t *testing.T) {
 	err := probeSeatbelt(context.Background(), fake)
 	if err == nil || !strings.Contains(err.Error(), "Operation not permitted") {
 		t.Fatalf("probe must surface the sandbox_apply diagnostic: %v", err)
+	}
+}
+
+// TestProbeSeatbeltAppliesDenyDefaultProfile pins the probe's argv: an
+// allow-default probe still applies inside an allow-default parent sandbox,
+// where every deny-default command profile is then refused.
+func TestProbeSeatbeltAppliesDenyDefaultProfile(t *testing.T) {
+	argsFile := filepath.Join(t.TempDir(), "args")
+	fake := writeFakeSandboxExec(t, "printf '%s\\n' \"$@\" > '"+argsFile+"'\n")
+	if err := probeSeatbelt(context.Background(), fake); err != nil {
+		t.Fatalf("probe of a working applier failed: %v", err)
+	}
+	got, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = "-p\n(version 1)(deny default)(allow process-exec*)(allow file-read*)\n/usr/bin/true\n"
+	if string(got) != want {
+		t.Fatalf("probe argv =\n%s\nwant\n%s", got, want)
 	}
 }
 
@@ -630,6 +653,21 @@ func TestSeatbeltHelperProcess(t *testing.T) {
 	switch mode {
 	case "pid":
 		fmt.Printf("HELPER-PID: %d\n", os.Getpid())
+	case "netsrcclosed":
+		var fd int
+		var id uint32
+		if _, err := fmt.Sscan(args[1], &fd); err != nil {
+			fail(err)
+		}
+		if _, err := fmt.Sscan(args[2], &id); err != nil {
+			fail(err)
+		}
+		if sa, err := unix.Getpeername(fd); err == nil {
+			if ctl, ok := sa.(*unix.SockaddrCtl); ok && ctl.ID == id {
+				fail(errors.New("inherited parent's netsrc socket"))
+			}
+		}
+		fmt.Println("HELPER-OK: netsrc closed")
 	case "tmprw":
 		p := filepath.Join(os.TempDir(), "canary.txt")
 		if err := os.WriteFile(p, []byte("temp-canary"), 0o600); err != nil {
@@ -1832,8 +1870,13 @@ func TestSeatbeltProfileGrantsMetadataOnSymlinkChain(t *testing.T) {
 			}
 		}
 	}
-	if rule := seatbeltRuleOf(profile, `(literal "`+target+`")`); rule != "file-read*" {
-		t.Errorf("canonical target literal is under %q; want file-read*", rule)
+	remaining := profile
+	literal := `(literal "` + target + `")`
+	for _, want := range []string{"process-exec*", "file-read*"} {
+		if rule := seatbeltRuleOf(remaining, literal); rule != want {
+			t.Errorf("canonical target literal is under %q; want %s", rule, want)
+		}
+		_, remaining, _ = strings.Cut(remaining, literal)
 	}
 	if wrapped.Argv[3] != spelled {
 		t.Errorf("wrapper launches %q; want the approved spelling %q", wrapped.Argv[3], spelled)
@@ -1979,4 +2022,801 @@ func TestSeatbeltSymlinkChainResolvesDotDotPhysically(t *testing.T) {
 		t.Errorf("directory link %s literal is under %q; want file-read-metadata", dl, rule)
 	}
 	assertEmptyDir(t, base)
+}
+
+// --- #576: Seatbelt cleanup diagnostics and the loader note ---
+
+// wantLoaderNote is seatbeltLoaderNote written out, so a reworded constant
+// cannot pass these tests.
+const wantLoaderNote = "native sandbox (seatbelt) may deny loader, SDK or cache access outside its allowed roots; this is not a passing check"
+
+// replacePrivateTemp swaps the private temp at dir for a foreign directory
+// at the same pathname, so the guarded cleanup must refuse it and report why.
+func replacePrivateTemp(t *testing.T, dir string) string {
+	t.Helper()
+	if err := os.Rename(dir, dir+"-stolen"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// replacedNote is the note a replaced private temp at dir must produce,
+// written out from the guard's error text. The fixture path must leave the
+// note under the 256-byte cut, or the comparison would test truncation.
+func replacedNote(t *testing.T, dir string) string {
+	t.Helper()
+	note := "sandbox temp cleanup: tools: seatbelt temp " + dir + " was replaced; cleanup abandoned"
+	if len(note) > 256 {
+		t.Fatalf("fixture temp path too long for an uncut note (%d bytes): %s", len(note), dir)
+	}
+	return note
+}
+
+// seatbeltTestManager is a manager over b bound to the normalized Seatbelt
+// policy, the pairing newExecBackend produces, with b's fake delegates.
+func seatbeltTestManager(t *testing.T, b *seatbeltBackend) *BackgroundManager {
+	t.Helper()
+	m := newBackgroundManagerWithBackend(bindExecBackend(b, mustNormalizeSandbox(t, seatbeltTestCfg())), rand.Reader)
+	t.Cleanup(m.Shutdown)
+	return m
+}
+
+// seatbeltBgTools builds the background exec tool set over b, keyed by tool
+// name, optionally with scratch on a canonical snapshot base.
+func seatbeltBgTools(t *testing.T, b *seatbeltBackend, scratch bool) map[string]agent.Tool {
+	t.Helper()
+	toolsList, err := NewExecToolsWithBackgroundOptions(buildIsolationWorkspace(t), seatbeltTestManager(t, b),
+		ExecToolsOptions{Scratch: ScratchConfig{Enabled: scratch}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName := map[string]agent.Tool{}
+	for _, tool := range toolsList {
+		byName[tool.Spec().Name] = tool
+	}
+	if scratch {
+		canonicalScratchBase(t, byName["start_command"].(*StartCommand).scratchRT)
+	}
+	return byName
+}
+
+// canonicalScratchBase points rt's snapshots at a symlink-free base: Seatbelt
+// requires the rewritten workspace root to be canonical.
+func canonicalScratchBase(t *testing.T, rt *scratchRuntime) {
+	t.Helper()
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt.tempBase = base
+}
+
+// TestSeatbeltCleanupFailureIsReported: the foreground replacement race
+// leaves the command's result untouched and reports the refused cleanup as
+// the only note (exit 0 adds no loader note).
+func TestSeatbeltCleanupFailureIsReported(t *testing.T) {
+	b, _ := testSeatbeltBackend(t, nil)
+	var temp string
+	b.runner = &captureRunner{during: func(s execSpec) { temp = replacePrivateTemp(t, tmpdirOf(t, s.Env)) }}
+	res, err := b.Run(context.Background(), seatbeltSpec(t, canonTempDirT(t)))
+	if err != nil || res.ExitCode != 0 || res.TimedOut {
+		t.Fatalf("cleanup outcome overwrote the command result: res=%+v err=%v", res, err)
+	}
+	if want := []string{replacedNote(t, temp)}; !slices.Equal(res.Notes, want) {
+		t.Fatalf("Notes = %q, want %q", res.Notes, want)
+	}
+}
+
+// TestSeatbeltCleanupNoteJoinsPrepareFailure: a prepare failure whose own
+// cleanup is refused keeps its error class and carries the note, on both
+// lifetimes. The collector hook is the last step before the failure, so it
+// can swap the temp prepare just made.
+func TestSeatbeltCleanupNoteJoinsPrepareFailure(t *testing.T) {
+	for _, lifetime := range seatbeltLifetimes {
+		t.Run(lifetime, func(t *testing.T) {
+			b, base := testSeatbeltBackend(t, &captureRunner{})
+			b.starter = &captureStarter{proc: &fakeProcess{}}
+			collectorErr := errors.New("collector down")
+			var temp string
+			b.systemRoots = func(string) ([]string, error) {
+				made, err := filepath.Glob(filepath.Join(base, "go-llm-seatbelt-*"))
+				if err != nil || len(made) != 1 {
+					t.Fatalf("private temps = %q, %v; want exactly one", made, err)
+				}
+				temp = replacePrivateTemp(t, made[0])
+				return nil, collectorErr
+			}
+			var err error
+			if lifetime == "foreground" {
+				_, err = b.Run(context.Background(), seatbeltSpec(t, canonTempDirT(t)))
+			} else {
+				_, err = b.Start(seatbeltSpec(t, canonTempDirT(t)), io.Discard, io.Discard)
+			}
+			if !errors.Is(err, collectorErr) {
+				t.Fatalf("err = %v; want it to wrap %v", err, collectorErr)
+			}
+			if want := "collector down; " + replacedNote(t, temp); err.Error() != want {
+				t.Fatalf("err = %q\nwant %q", err, want)
+			}
+		})
+	}
+}
+
+// TestSeatbeltCleanupNoteOnTimeout: a timed-out run_command still reports
+// the refused cleanup after its timeout text.
+func TestSeatbeltCleanupNoteOnTimeout(t *testing.T) {
+	b, _ := testSeatbeltBackend(t, nil)
+	var temp string
+	b.runner = &captureRunner{
+		res:    execResult{ExitCode: -1, TimedOut: true},
+		err:    context.DeadlineExceeded,
+		during: func(s execSpec) { temp = replacePrivateTemp(t, tmpdirOf(t, s.Env)) },
+	}
+	rc := NewRunCommand(mustWorkspace(t, canonTempDirT(t)), b)
+	res := planAndInvoke(t, rc, `{"argv":["/bin/echo","hi"],"timeout_seconds":7}`)
+	if want := "command timed out after 7s\nnote: " + replacedNote(t, temp); !res.IsError || res.Content != want {
+		t.Fatalf("result = %+v\nwant error %q", res, want)
+	}
+}
+
+// TestSeatbeltCleanupNoteOnScratchForeground: the scratched foreground path
+// renders the same notes as the plain one, with the exit code unchanged.
+func TestSeatbeltCleanupNoteOnScratchForeground(t *testing.T) {
+	rc, rt, _ := scratchExecTools(t, buildIsolationWorkspace(t), ScratchConfig{Enabled: true})
+	canonicalScratchBase(t, rt)
+	b, _ := testSeatbeltBackend(t, nil)
+	var temp string
+	b.runner = &captureRunner{
+		res:    execResult{ExitCode: 4},
+		during: func(s execSpec) { temp = replacePrivateTemp(t, tmpdirOf(t, s.Env)) },
+	}
+	rc.runner = b
+	res := planAndInvoke(t, rc, `{"argv":["/bin/echo","hi"]}`)
+	want := "exit code: 4\nnote: " + wantLoaderNote + "\nnote: " + replacedNote(t, temp) +
+		"\n--- stdout ---\n\n--- stderr ---\n"
+	if res.IsError || !strings.HasPrefix(res.Content, "scratch: id=") || !strings.HasSuffix(res.Content, want) {
+		t.Fatalf("result = %+v\nwant scratch line then %q", res, want)
+	}
+}
+
+// TestSeatbeltCleanupNoteSurvivesScratchBackground: scratch plus background
+// plus a refused cleanup reaches command_status after the unchanged exit
+// code, through the scratchProcess wrapper.
+func TestSeatbeltCleanupNoteSurvivesScratchBackground(t *testing.T) {
+	b, _ := testSeatbeltBackend(t, nil)
+	var temp string
+	b.starter = &captureStarter{
+		proc:   &fakeProcess{pid: 4242, code: 5},
+		during: func(s execSpec) { temp = replacePrivateTemp(t, tmpdirOf(t, s.Env)) },
+	}
+	byName := seatbeltBgTools(t, b, true)
+	final := bgAwaitExit(t, byName, bgStart(t, byName, `{"argv":["/bin/echo","hi"]}`))
+	if want := "exit_code: 5\nnote: " + replacedNote(t, temp) + "\n"; !strings.HasSuffix(final, want) {
+		t.Fatalf("command_status:\n%s\nwant suffix %q", final, want)
+	}
+}
+
+// TestSeatbeltStartFailureJoinsCleanup: a spawn failure whose cleanup is
+// refused keeps the starter's error class and carries the note.
+func TestSeatbeltStartFailureJoinsCleanup(t *testing.T) {
+	spawnErr := errors.New("spawn failed")
+	b, _ := testSeatbeltBackend(t, nil)
+	var temp string
+	b.starter = &captureStarter{err: spawnErr, during: func(s execSpec) { temp = replacePrivateTemp(t, tmpdirOf(t, s.Env)) }}
+	proc, err := b.Start(seatbeltSpec(t, canonTempDirT(t)), io.Discard, io.Discard)
+	if proc != nil || !errors.Is(err, spawnErr) {
+		t.Fatalf("Start = %v, %v; want no process and the spawn error", proc, err)
+	}
+	if want := "spawn failed; " + replacedNote(t, temp); err.Error() != want {
+		t.Fatalf("err = %q\nwant %q", err, want)
+	}
+}
+
+// TestSeatbeltAbandonedStartJoinsCleanup: a start canceled between spawn and
+// registration is reaped synchronously; its refused cleanup joins the
+// cancellation without hiding it.
+func TestSeatbeltAbandonedStartJoinsCleanup(t *testing.T) {
+	b, _ := testSeatbeltBackend(t, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var temp string
+	inner := &fakeProcess{pid: 4242}
+	b.starter = &captureStarter{proc: inner, during: func(s execSpec) {
+		temp = replacePrivateTemp(t, tmpdirOf(t, s.Env))
+		cancel()
+	}}
+	st, err := seatbeltTestManager(t, b).start(ctx, seatbeltSpec(t, canonTempDirT(t)), "(workspace root)")
+	if st.Handle != "" || !errors.Is(err, context.Canceled) {
+		t.Fatalf("start = %+v, %v; want no job and the cancellation", st, err)
+	}
+	if want := "context canceled; " + replacedNote(t, temp); err.Error() != want {
+		t.Fatalf("err = %q\nwant %q", err, want)
+	}
+	if inner.killCalls != 1 {
+		t.Fatalf("abandoned process kills = %d, want 1", inner.killCalls)
+	}
+}
+
+// TestSeatbeltAbandonedStartNoteReachesStartResult: the abandoned job is
+// never registered, so command_status cannot show its note; start_command's
+// canceled result must, on the plain and the scratched path.
+func TestSeatbeltAbandonedStartNoteReachesStartResult(t *testing.T) {
+	for _, scratch := range []bool{false, true} {
+		t.Run(fmt.Sprintf("scratch=%t", scratch), func(t *testing.T) {
+			b, _ := testSeatbeltBackend(t, nil)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			var temp string
+			b.starter = &captureStarter{proc: &fakeProcess{pid: 4242}, during: func(s execSpec) {
+				temp = replacePrivateTemp(t, tmpdirOf(t, s.Env))
+				cancel()
+			}}
+			sc := seatbeltBgTools(t, b, scratch)["start_command"].(*StartCommand)
+			raw := json.RawMessage(`{"argv":["/bin/echo","hi"]}`)
+			if _, err := sc.Plan(context.Background(), raw); err != nil {
+				t.Fatal(err)
+			}
+			res, err := sc.Invoke(ctx, raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if want := "start canceled\nnote: " + replacedNote(t, temp); !res.IsError || res.Content != want {
+				t.Fatalf("result = %+v\nwant error %q", res, want)
+			}
+		})
+	}
+}
+
+// TestSeatbeltVerifierLoaderFailureIsNotPass runs a real failing command
+// through a Seatbelt verifier slot: the observation is a failure carrying the
+// loader note, never the pass marker.
+func TestSeatbeltVerifierLoaderFailureIsNotPass(t *testing.T) {
+	requireSeatbeltCapability(t)
+	root := canonTempDirT(t)
+	slot := newTestSlot(t, root, seatbeltTestCfg())
+	cmd, err := NewSandboxedVerifyCommand(mustWorkspace(t, root), seatbeltTestCfg(), []string{"/usr/bin/false"}, "", 30*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := slot.Set(cmd); err != nil {
+		t.Fatal(err)
+	}
+	out, err := slot.Verify(context.Background(), approved())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "status: failed\nexit_code: 1\ntimed_out: false\noutput_truncated: false\nnote: " + wantLoaderNote + "\n"
+	if !strings.HasSuffix(out, want) || strings.Contains(out, "status: passed\nexit_code: 0\n") {
+		t.Fatalf("observation:\n%s\nwant suffix %q and no pass marker", out, want)
+	}
+}
+
+// TestSeatbeltVerifierErrorRendersNotes: a verifier spawn failure is an error
+// observation that still carries the loader note and the refused cleanup.
+func TestSeatbeltVerifierErrorRendersNotes(t *testing.T) {
+	b, _ := testSeatbeltBackend(t, nil)
+	var temp string
+	b.runner = &captureRunner{
+		err:    errors.New("spawn failed"),
+		during: func(s execSpec) { temp = replacePrivateTemp(t, tmpdirOf(t, s.Env)) },
+	}
+	root := canonTempDirT(t)
+	cmd, err := newVerifyCommandWithBackend(mustWorkspace(t, root),
+		bindExecBackend(b, mustNormalizeSandbox(t, seatbeltTestCfg())), []string{"/bin/echo", "hi"}, "", 30*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	slot := newTestSlot(t, root, seatbeltTestCfg())
+	if err := slot.Set(cmd); err != nil {
+		t.Fatal(err)
+	}
+	out, err := slot.Verify(context.Background(), approved())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "status: error\nreason: spawn failed\nnote: " + wantLoaderNote + "\nnote: " + replacedNote(t, temp) + "\n"
+	if !strings.HasSuffix(out, want) {
+		t.Fatalf("observation:\n%s\nwant suffix %q", out, want)
+	}
+}
+
+// TestSeatbeltCleanupNoteInStopResult: stop_command reports a job's final
+// state, so a refused cleanup must reach its result on both Stop branches:
+// a job the stop kills, and one that had already finished.
+func TestSeatbeltCleanupNoteInStopResult(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		proc  backgroundProcess
+		state string
+	}{
+		{"stopped", newFakeProc(4242), "state: killed\nexit_code: -1\n"},
+		{"already finished", &fakeProcess{pid: 4242, code: 5}, "state: exited\nexit_code: 5\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b, _ := testSeatbeltBackend(t, nil)
+			var temp string
+			b.starter = &captureStarter{proc: tc.proc, during: func(s execSpec) { temp = replacePrivateTemp(t, tmpdirOf(t, s.Env)) }}
+			byName := seatbeltBgTools(t, b, false)
+			handle := bgStart(t, byName, `{"argv":["/bin/echo","hi"]}`)
+			if tc.name == "already finished" {
+				bgAwaitExit(t, byName, handle)
+			}
+			res, err := byName["stop_command"].Invoke(context.Background(), json.RawMessage(fmt.Sprintf(`{"handle":%q}`, handle)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := "handle: " + handle + "\n" + tc.state + "note: " + replacedNote(t, temp) + "\n"
+			if res.IsError || res.Content != want {
+				t.Fatalf("stop result = %+v\nwant %q", res, want)
+			}
+		})
+	}
+}
+
+// TestSeatbeltSpawnFailureRendersNotes: run_command's own spawn failure is
+// where the loader note matters most; it renders after the failure text,
+// followed by the refused cleanup.
+func TestSeatbeltSpawnFailureRendersNotes(t *testing.T) {
+	b, _ := testSeatbeltBackend(t, nil)
+	var temp string
+	b.runner = &captureRunner{
+		err:    errors.New("spawn failed"),
+		during: func(s execSpec) { temp = replacePrivateTemp(t, tmpdirOf(t, s.Env)) },
+	}
+	rc := NewRunCommand(mustWorkspace(t, canonTempDirT(t)), b)
+	res := planAndInvoke(t, rc, `{"argv":["/bin/echo","hi"]}`)
+	want := "command failed to run: spawn failed\nnote: " + wantLoaderNote + "\nnote: " + replacedNote(t, temp)
+	if !res.IsError || res.Content != want {
+		t.Fatalf("result = %+v\nwant error %q", res, want)
+	}
+}
+
+// TestSeatbeltScratchSpawnFailureKeepsNotes: the scratched runErr branch
+// renders the same notes after the scratch line.
+func TestSeatbeltScratchSpawnFailureKeepsNotes(t *testing.T) {
+	rc, rt, _ := scratchExecTools(t, buildIsolationWorkspace(t), ScratchConfig{Enabled: true})
+	canonicalScratchBase(t, rt)
+	b, _ := testSeatbeltBackend(t, nil)
+	var temp string
+	b.runner = &captureRunner{
+		err:    errors.New("spawn failed"),
+		during: func(s execSpec) { temp = replacePrivateTemp(t, tmpdirOf(t, s.Env)) },
+	}
+	rc.runner = b
+	res := planAndInvoke(t, rc, `{"argv":["/bin/echo","hi"]}`)
+	want := "command failed to run: spawn failed\nnote: " + wantLoaderNote + "\nnote: " + replacedNote(t, temp)
+	if !res.IsError || !strings.HasPrefix(res.Content, "scratch: id=") || !strings.HasSuffix(res.Content, "\n"+want) {
+		t.Fatalf("result = %+v\nwant scratch line then %q", res, want)
+	}
+}
+
+// TestSeatbeltCanceledRunCarriesNoLoaderNote: a run the caller canceled says
+// nothing about the loader, so it carries no note; the error stays the
+// cancellation.
+func TestSeatbeltCanceledRunCarriesNoLoaderNote(t *testing.T) {
+	b, _ := testSeatbeltBackend(t, &captureRunner{res: execResult{ExitCode: -1}, err: context.Canceled})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	res, err := b.Run(ctx, seatbeltSpec(t, canonTempDirT(t)))
+	if !errors.Is(err, context.Canceled) || res.ExitCode != -1 {
+		t.Fatalf("Run = %+v, %v; want the canceled result unchanged", res, err)
+	}
+	if res.Notes != nil {
+		t.Fatalf("canceled run carries notes %q; want none", res.Notes)
+	}
+}
+
+// --- Inherited descriptors (#576 final review I1/I2) ---
+//
+// None of these run in parallel: descriptor flags are process-global, and a
+// descriptor leaked here would reach any concurrent test's children.
+
+// leakFD returns fd with FD_CLOEXEC cleared, closed at cleanup, after
+// checking independently of the audit that a child would inherit it.
+func leakFD(t *testing.T, fd int) int {
+	t.Helper()
+	t.Cleanup(func() { _ = unix.Close(fd) })
+	if _, err := unix.FcntlInt(uintptr(fd), unix.F_SETFD, 0); err != nil {
+		t.Fatal(err)
+	}
+	if flags, err := unix.FcntlInt(uintptr(fd), unix.F_GETFD, 0); err != nil || flags&unix.FD_CLOEXEC != 0 {
+		t.Fatalf("precondition: fd %d flags=%d err=%v, want it inheritable", fd, flags, err)
+	}
+	return fd
+}
+
+// inheritableHostFDs lists the descriptors above stdio a child would
+// inherit, read without the audit's code.
+func inheritableHostFDs(t *testing.T) []int {
+	t.Helper()
+	f, err := os.Open("/dev/fd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	names, err := f.Readdirnames(-1)
+	_ = f.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fds []int
+	for _, name := range names {
+		var fd int
+		if _, err := fmt.Sscan(name, &fd); err != nil || fd <= 2 {
+			continue
+		}
+		if flags, err := unix.FcntlInt(uintptr(fd), unix.F_GETFD, 0); err == nil && flags&unix.FD_CLOEXEC == 0 {
+			fds = append(fds, fd)
+		}
+	}
+	return fds
+}
+
+// seatbeltShellSpec runs script under /bin/sh in ws.
+func seatbeltShellSpec(t *testing.T, ws, script string) execSpec {
+	t.Helper()
+	return execSpec{
+		Path:          "/bin/sh",
+		Argv:          []string{"/bin/sh", "-c", script},
+		Dir:           ws,
+		Env:           []string{"PATH=/usr/bin:/bin", "HOME=" + os.Getenv("HOME")},
+		WorkspaceRoot: ws,
+		ExeIdentity:   execIdentityOf(t, "/bin/sh"),
+	}
+}
+
+// The bypass the final review demonstrated: Seatbelt never re-checks a write
+// through an already-open descriptor, so a writable descriptor the launcher
+// leaked would carry a sandboxed write outside the workspace. The backend
+// refuses to spawn while one exists, and nothing lands.
+func TestSeatbeltRefusesInheritableHostFD(t *testing.T) {
+	requireSeatbeltCapability(t)
+	ws := canonTempDirT(t)
+	dir, _ := outsideCanaryDir(t, ws)
+	backend, err := newExecBackend(seatbeltTestCfg())
+	if err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(dir, "leaked.txt")
+	fd, err := unix.Open(outside, unix.O_WRONLY|unix.O_CREAT|unix.O_TRUNC, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leakFD(t, fd)
+
+	res, err := backend.Run(context.Background(), seatbeltShellSpec(t, ws, fmt.Sprintf("printf leaked >&%d", fd)))
+	if got, rerr := os.ReadFile(outside); rerr != nil || len(got) != 0 {
+		t.Fatalf("outside file = %q (err %v), want it empty: the write escaped through fd %d (Run = %+v, %v)", got, rerr, fd, res, err)
+	}
+	want := fmt.Sprintf("tools: seatbelt refuses to spawn with inheritable host fd %d (missing FD_CLOEXEC)", fd)
+	if err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("Run with inheritable fd %d = %+v, %v; want the refusal %q", fd, res, err, want)
+	}
+
+	// Control: with the descriptor close-on-exec the same command runs, and
+	// the descriptor is gone in the child.
+	if _, err := unix.FcntlInt(uintptr(fd), unix.F_SETFD, unix.FD_CLOEXEC); err != nil {
+		t.Fatal(err)
+	}
+	res, err = backend.Run(context.Background(), seatbeltShellSpec(t, ws, fmt.Sprintf("printf leaked >&%d", fd)))
+	if err != nil || res.ExitCode == 0 {
+		t.Fatalf("control Run = exit %d, %v; want a ran command whose write to fd %d fails", res.ExitCode, err, fd)
+	}
+	if got, _ := os.ReadFile(outside); len(got) != 0 {
+		t.Fatalf("outside file = %q after the control, want it empty", got)
+	}
+}
+
+// ValidateSandbox fails at construction, wrapped in ErrSandboxPolicy, where
+// every later spawn would be refused (I2): a library host learns before it
+// advertises the backend.
+func TestSeatbeltValidateSandboxRefusesInheritableFD(t *testing.T) {
+	requireSeatbeltCapability(t)
+	root := canonTempDirT(t)
+	fd, err := unix.Open("/dev/null", unix.O_RDONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leakFD(t, fd)
+	err = ValidateSandbox(seatbeltTestCfg(), root)
+	want := fmt.Sprintf("tools: seatbelt refuses to spawn with inheritable host fd %d (missing FD_CLOEXEC)", fd)
+	if !errors.Is(err, ErrSandboxPolicy) || !strings.Contains(err.Error(), want) {
+		t.Fatalf("ValidateSandbox with inheritable fd %d = %v, want ErrSandboxPolicy and %q", fd, err, want)
+	}
+	if _, err := unix.FcntlInt(uintptr(fd), unix.F_SETFD, unix.FD_CLOEXEC); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateSandbox(seatbeltTestCfg(), root); err != nil {
+		t.Fatalf("control ValidateSandbox = %v, want nil", err)
+	}
+}
+
+// The netsrc repair keys on the control's id, never on the socket family:
+// another kernel control a launcher leaks (here com.apple.network.statistics,
+// which an unprivileged process can connect; utun_control, IP egress, needs
+// root) is refused like any other descriptor.
+func TestSeatbeltRefusesOtherKernelControlSocket(t *testing.T) {
+	requireSeatbeltCapability(t)
+	ws := canonTempDirT(t)
+	backend, err := newExecBackend(seatbeltTestCfg())
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := kernelControlID("com.apple.network.statistics")
+	if err != nil {
+		t.Fatalf("resolve com.apple.network.statistics: %v", err)
+	}
+	fd, err := unix.Socket(unix.AF_SYSTEM, unix.SOCK_DGRAM, sysprotoControl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leakFD(t, fd)
+	if err := unix.Connect(fd, &unix.SockaddrCtl{ID: id}); err != nil {
+		t.Fatalf("connect com.apple.network.statistics: %v", err)
+	}
+	if sa, err := unix.Getpeername(fd); err != nil {
+		t.Fatalf("precondition: getpeername: %v", err)
+	} else if ctl, ok := sa.(*unix.SockaddrCtl); !ok || ctl.ID != id {
+		t.Fatalf("precondition: peer = %#v, want a kernel control with id %d", sa, id)
+	}
+	_, err = backend.Run(context.Background(), seatbeltShellSpec(t, ws, "true"))
+	want := fmt.Sprintf("tools: seatbelt refuses to spawn with inheritable host fd %d (missing FD_CLOEXEC)", fd)
+	if err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("Run with a leaked network.statistics control socket = %v, want %q", err, want)
+	}
+}
+
+func TestSeatbeltNetsrcNotInherited(t *testing.T) {
+	requireSeatbeltCapability(t)
+	if raceInstrumented {
+		t.Skip("helper legs run in the non-race pass")
+	}
+	id, err := kernelControlID(seatbeltNetsrcControl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fd, err := unix.Socket(unix.AF_SYSTEM, unix.SOCK_DGRAM, sysprotoControl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leakFD(t, fd)
+	if err := unix.Connect(fd, &unix.SockaddrCtl{ID: id}); err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.SetNonblock(fd, true); err != nil {
+		t.Fatal(err)
+	}
+	query := func() {
+		t.Helper()
+		// NETSRC v2 routing query for loopback; all bytes are synthetic.
+		request := [36]byte{0: 2, 8: 16, 9: unix.AF_INET, 12: 127, 15: 1}
+		if n, err := unix.Write(fd, request[:]); err != nil || n != len(request) {
+			t.Fatalf("parent netsrc query: n=%d err=%v", n, err)
+		}
+		var reply [128]byte
+		if n, err := unix.Read(fd, reply[:]); err != nil || n == 0 {
+			t.Fatalf("parent netsrc reply: n=%d err=%v", n, err)
+		}
+	}
+	query()
+	backend, err := newExecBackend(seatbeltTestCfg())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if flags, err := unix.FcntlInt(uintptr(fd), unix.F_GETFD, 0); err != nil || flags&unix.FD_CLOEXEC == 0 {
+		t.Errorf("construction left netsrc inheritable: flags=%d err=%v", flags, err)
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ws := canonTempDirT(t)
+	spec := execSpec{
+		Path: exe, Argv: []string{exe, "-test.run=^TestSeatbeltHelperProcess$", "--", "netsrcclosed", fmt.Sprint(fd), fmt.Sprint(id)},
+		Dir: ws, WorkspaceRoot: ws, ExeIdentity: execIdentityOf(t, exe),
+		Env: []string{"PATH=/usr/bin:/bin", "GO_LLM_SEATBELT_HELPER=1"},
+	}
+	for _, background := range []bool{false, true} {
+		t.Run(fmt.Sprintf("background=%t", background), func(t *testing.T) {
+			// Also repair resolver sockets created after backend construction.
+			if _, err := unix.FcntlInt(uintptr(fd), unix.F_SETFD, 0); err != nil {
+				t.Fatal(err)
+			}
+			if background {
+				out := &lockedBuffer{}
+				proc, err := backend.Start(spec, out, out)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer func() { _ = proc.Kill() }()
+				if code, _, err := proc.Wait(); err != nil || code != 0 || !strings.Contains(out.String(), "HELPER-OK: netsrc closed") {
+					t.Fatalf("background exit=%d err=%v output=%s", code, err, out.String())
+				}
+			} else {
+				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
+				res, err := backend.Run(ctx, spec)
+				if err != nil || res.ExitCode != 0 || !strings.Contains(string(res.Stdout), "HELPER-OK: netsrc closed") {
+					t.Fatalf("foreground result=%+v err=%v stdout=%s", res, err, res.Stdout)
+				}
+			}
+			query()
+		})
+	}
+}
+
+func TestSeatbeltExecRestrictedToAllowances(t *testing.T) {
+	requireSeatbeltCapability(t)
+	parent := canonTempDirT(t)
+	ws := filepath.Join(parent, "workspace")
+	outside := filepath.Join(parent, "workspace-sibling")
+	for _, dir := range []string{ws, outside} {
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const marker = "EXEC-ALLOWANCE-CONTROL"
+	foreignExe := filepath.Join(outside, "echo")
+	workspaceExe := filepath.Join(ws, "echo")
+	source := filepath.Join(parent, "echo.c")
+	if err := os.WriteFile(source, []byte("extern int puts(const char *);\nint main(void) { puts(\""+marker+"\"); return 0; }\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	build := exec.CommandContext(ctx, "/usr/bin/cc", source, "-o", foreignExe)
+	build.Env = []string{"PATH=/usr/bin:/bin", "TMPDIR=" + parent}
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build synthetic native executable: %v\n%s", err, out)
+	}
+	binary, err := os.ReadFile(foreignExe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(workspaceExe, binary, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(foreignExe, marker)
+	cmd.Env = []string{"PATH=/usr/bin:/bin"}
+	if out, err := cmd.CombinedOutput(); err != nil || string(out) != marker+"\n" {
+		t.Fatalf("host control: %q, %v", out, err)
+	}
+	for _, allowNetwork := range []bool{false, true} {
+		cfg := seatbeltTestCfg()
+		cfg.AllowNetwork = allowNetwork
+		for _, background := range []bool{false, true} {
+			t.Run(fmt.Sprintf("network=%t/background=%t", allowNetwork, background), func(t *testing.T) {
+				backend, err := newExecBackend(cfg)
+				if err != nil {
+					t.Fatal(err)
+				}
+				spec := seatbeltShellSpec(t, ws, fmt.Sprintf("exec %q %s", foreignExe, marker))
+				if background {
+					out := &lockedBuffer{}
+					proc, err := backend.Start(spec, out, out)
+					if err != nil {
+						t.Fatal(err)
+					}
+					defer func() { _ = proc.Kill() }()
+					if code, _, err := proc.Wait(); err != nil || code == 0 || strings.Contains(out.String(), marker) {
+						t.Fatalf("outside executable: exit=%d err=%v output=%s", code, err, out.String())
+					}
+				} else {
+					ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+					defer cancel()
+					res, err := backend.Run(ctx, spec)
+					if err != nil || res.ExitCode == 0 || strings.Contains(string(res.Stdout), marker) {
+						t.Fatalf("outside executable: result=%+v err=%v stdout=%s", res, err, res.Stdout)
+					}
+				}
+			})
+		}
+	}
+	for name, argv := range map[string][]string{
+		"approved external executable": {foreignExe, marker},
+		"system child":                 {"/bin/sh", "-c", "/bin/echo " + marker},
+		"workspace child":              {"/bin/sh", "-c", fmt.Sprintf("%q %s", workspaceExe, marker)},
+		"private temp child":           {"/bin/sh", "-c", fmt.Sprintf(`/bin/cp %q "$TMPDIR/echo" && "$TMPDIR/echo" %s`, workspaceExe, marker)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			res := realSeatbeltRun(t, seatbeltTestCfg(), ws, argv)
+			if res.ExitCode != 0 || string(res.Stdout) != marker+"\n" {
+				t.Fatalf("allowed executable: exit=%d stdout=%s stderr=%s", res.ExitCode, res.Stdout, res.Stderr)
+			}
+		})
+	}
+}
+
+// libSystem's resolver leaves a non-CLOEXEC com.apple.netsrc control socket in
+// the process after a lookup that returns several addresses; "localhost"
+// (::1 and 127.0.0.1) is one. The audit repairs it without breaking DNS or commands.
+func TestSeatbeltRunsAfterLocalhostLookup(t *testing.T) {
+	requireSeatbeltCapability(t)
+	if _, err := net.LookupHost("localhost"); err != nil {
+		t.Fatalf("LookupHost(localhost): %v", err)
+	}
+	res := realSeatbeltRun(t, seatbeltTestCfg(), canonTempDirT(t), []string{"/bin/echo", "hi"})
+	if res.ExitCode != 0 || string(res.Stdout) != "hi\n" {
+		t.Fatalf("exit=%d stdout=%q stderr=%q, want exit 0 and \"hi\\n\"", res.ExitCode, res.Stdout, res.Stderr)
+	}
+	if fds := inheritableHostFDs(t); len(fds) != 0 {
+		t.Fatalf("command left inheritable descriptors: %v", fds)
+	}
+	if _, err := net.LookupHost("localhost"); err != nil {
+		t.Fatalf("LookupHost(localhost) after repair: %v", err)
+	}
+}
+
+// The repair refuses on any doubt: a getpeername or id-resolution error,
+// a peer that is not a kernel control, or another control's id.
+func TestSeatbeltNetsrcRepairRefusesOnDoubt(t *testing.T) {
+	const netsrc = 7
+	errBoom := errors.New("boom")
+	idOK := func(name string) (uint32, error) {
+		if name != "com.apple.netsrc" {
+			t.Fatalf("resolved control %q, want com.apple.netsrc", name)
+		}
+		return netsrc, nil
+	}
+	for _, tc := range []struct {
+		name string
+		id   func(string) (uint32, error)
+		peer func(int) (unix.Sockaddr, error)
+		want bool
+	}{
+		{"netsrc peer", idOK, func(int) (unix.Sockaddr, error) { return &unix.SockaddrCtl{ID: netsrc, Unit: 234}, nil }, true},
+		{"other control", idOK, func(int) (unix.Sockaddr, error) { return &unix.SockaddrCtl{ID: netsrc + 1}, nil }, false},
+		{"not a control", idOK, func(int) (unix.Sockaddr, error) { return &unix.SockaddrInet4{Port: 443}, nil }, false},
+		{"getpeername error", idOK, func(int) (unix.Sockaddr, error) { return nil, unix.ENOTSOCK }, false},
+		{"id error", func(string) (uint32, error) { return netsrc, errBoom }, func(int) (unix.Sockaddr, error) { return &unix.SockaddrCtl{ID: netsrc}, nil }, false},
+		{"zero id", func(string) (uint32, error) { return 0, nil }, func(int) (unix.Sockaddr, error) { return &unix.SockaddrCtl{}, nil }, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := netsrcControlSocket(tc.id, tc.peer)(3); got != tc.want {
+				t.Fatalf("may repair = %t, want %t", got, tc.want)
+			}
+		})
+	}
+	t.Run("id resolved once per audit", func(t *testing.T) {
+		calls := 0
+		mayRepair := netsrcControlSocket(func(string) (uint32, error) { calls++; return netsrc, nil },
+			func(int) (unix.Sockaddr, error) { return &unix.SockaddrCtl{ID: netsrc}, nil })
+		mayRepair(3)
+		mayRepair(4)
+		if calls != 1 {
+			t.Fatalf("id resolutions = %d, want 1", calls)
+		}
+	})
+}
+
+// TestProbeSeatbeltUnavailableInsideASandbox runs the real probe in a child
+// confined by an allow-default Seatbelt profile, where macOS refuses to apply
+// the deny-default profile every command needs: the probe must report
+// Seatbelt unavailable. The parent's own probe passing is the control.
+func TestProbeSeatbeltUnavailableInsideASandbox(t *testing.T) {
+	if os.Getenv("GO_LLM_SEATBELT_PROBE_CHILD") == "1" {
+		err := probeSeatbelt(context.Background(), seatbeltExecPath)
+		fmt.Printf("PROBE-RESULT: %v\n", err)
+		return
+	}
+	requireSeatbeltCapability(t)
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, seatbeltExecPath, "-p", "(version 1)(allow default)",
+		exe, "-test.run=^TestProbeSeatbeltUnavailableInsideASandbox$", "-test.count=1")
+	cmd.Env = append(os.Environ(), "GO_LLM_SEATBELT_PROBE_CHILD=1")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("sandboxed child: %v\n%s", err, out)
+	}
+	const want = "PROBE-RESULT: tools: seatbelt unavailable on this host"
+	if !strings.Contains(string(out), want) {
+		t.Fatalf("sandboxed child output:\n%s\nwant a line starting %q", out, want)
+	}
 }

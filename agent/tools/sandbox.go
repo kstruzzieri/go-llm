@@ -3,12 +3,16 @@ package tools
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"math"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
 	"unicode"
+
+	"github.com/kstruzzieri/go-llm/agent"
 )
 
 // SandboxRuntime names one execution-isolation runtime (#440).
@@ -19,8 +23,9 @@ type SandboxRuntime string
 const SandboxRuntimeHost SandboxRuntime = "host"
 
 // SandboxRuntimeSeatbelt selects the macOS Seatbelt (sandbox-exec) backend
-// (#442): per-invocation deny-default profiles scoping reads/writes to the
-// workspace plus a private temp directory. Selecting it off-darwin, or on a
+// (#442): per-invocation deny-default profiles scoping writes to the
+// workspace plus a private temp directory and reads to reviewed system roots,
+// the workspace and that temp. Selecting it off-darwin, or on a
 // host whose Seatbelt capability probe fails, fails closed at construction.
 const SandboxRuntimeSeatbelt SandboxRuntime = "seatbelt"
 
@@ -30,6 +35,16 @@ const SandboxRuntimeSeatbelt SandboxRuntime = "seatbelt"
 // or on a host whose namespace-capability probe fails, fails closed at
 // construction.
 const SandboxRuntimeBwrap SandboxRuntime = "bwrap"
+
+// ErrSandboxPolicy reports that a selected sandbox policy cannot be honored
+// here: its backend could not be constructed (an invalid config, a runtime
+// unsupported on this OS, a failed capability probe) or the workspace root
+// cannot safely bound it. ValidateSandbox, CheckSandboxBindings,
+// NewVerifierSlot and the verification constructors wrap it with the cause;
+// the exec tool constructors do not, so a session validates its policy with
+// ValidateSandbox first. Test with errors.Is. Command errors (a missing
+// executable, an invalid cwd) never wrap it.
+var ErrSandboxPolicy = errors.New("tools: sandbox policy unavailable")
 
 // SandboxConfig is a permission ceiling for a non-host execution runtime: a
 // backend may enforce stricter isolation but must never silently provide
@@ -279,4 +294,158 @@ func normalizeSandboxConfig(c SandboxConfig) (SandboxConfig, error) {
 		return SandboxConfig{}, fmt.Errorf("tools: sandbox host runtime accepts no constraints")
 	}
 	return c, nil
+}
+
+// ValidateSandbox reports whether cfg can bound a session over root on this
+// host, before any tool is built (#576): it normalizes cfg as every exec
+// constructor does, resolves its backend (the availability probe), and checks
+// that root, canonicalized as a Workspace does, can bound that backend. Every
+// failure wraps ErrSandboxPolicy, and there is no host fallback. It holds no
+// resources: a resolved backend owns nothing to close.
+func ValidateSandbox(cfg SandboxConfig, root string) error {
+	backend, err := newExecBackend(cfg)
+	if err != nil {
+		return fmt.Errorf("tools: validate sandbox: %w: %w", ErrSandboxPolicy, err)
+	}
+	canon, err := CanonicalWorkspaceRoot(root)
+	if err != nil {
+		return fmt.Errorf("tools: validate sandbox: %w: %w", ErrSandboxPolicy, err)
+	}
+	if err := backend.approval.validateWorkspace(canon); err != nil {
+		return fmt.Errorf("tools: validate sandbox: %w: %w", ErrSandboxPolicy, err)
+	}
+	return nil
+}
+
+// CheckSandboxBindings admits tools into a native sandbox session (#576, spec
+// 3.3) only when each is a library-built workspace, command or scratch tool
+// bound to root (canonical, as CanonicalWorkspaceRoot returns it) and to cfg.
+// It decides by concrete type and private state, never by name, Effect or a
+// caller-implementable interface, so a custom runner, an opaque wrapper or a
+// tool built for another root or policy cannot pass:
+//
+//   - read_file, search, glob, list, write_file, edit_file: their workspace is
+//     root;
+//   - run_command: its workspace is root, and both its runner (which must be a
+//     resolved backend, so NewRunCommand with a custom runner fails) and its
+//     approval identity carry cfg's;
+//   - start_command: its workspace is root and its manager's backend carries
+//     cfg's identity;
+//   - command_status, command_tail, stop_command: their manager is one an
+//     admitted start_command uses;
+//   - scratch_changes (value or pointer) and promote_artifact: their scratch
+//     runtime is one an admitted run_command or start_command carries, and
+//     promote_artifact's workspace is root.
+//
+// Any other tool, a nil one, a typed-nil pointer and a zero value are rejected
+// with an error naming the tool. A command tool's scratch runtime must also be
+// bound to root. scratchKey is the session's frozen scratch identity: when it
+// is non-empty every command tool's scratch identity ("" without scratch) must
+// equal it; when it is empty the command tools must agree with each other.
+// The result is the scratch identity in use, "" for none, for the caller to
+// freeze. A cfg that does not normalize wraps ErrSandboxPolicy. It performs no
+// I/O and calls no tool method except Spec, to name a rejected tool.
+func CheckSandboxBindings(tools []agent.Tool, cfg SandboxConfig, root, scratchKey string) (string, error) {
+	normalized, err := normalizeSandboxConfig(cfg)
+	if err != nil {
+		return "", fmt.Errorf("tools: check sandbox bindings: %w: %w", ErrSandboxPolicy, err)
+	}
+	key := approvalForSandbox(normalized).keyComponent
+	inRoot := func(ws *Workspace) bool { return ws != nil && ws.root == root }
+	runnerBound := func(runner commandRunner) bool {
+		b, ok := runner.(resolvedExecBackend)
+		return ok && b.execBackend != nil && b.approval.keyComponent == key
+	}
+	managers := make(map[*BackgroundManager]bool)
+	scratch := make(map[*scratchRuntime]bool)
+	frozen, decided := scratchKey, scratchKey != ""
+	scratchBound := func(rt *scratchRuntime) bool {
+		got := ""
+		if rt != nil {
+			if rt.root != root {
+				return false
+			}
+			got = rt.approval.keyComponent
+			scratch[rt] = true
+		}
+		if !decided {
+			frozen, decided = got, true
+		}
+		return got == frozen
+	}
+	// Pass 1 admits every tool whose binding is its own state and records the
+	// managers and scratch runtimes the admitted command tools carry; it defers
+	// the tools whose provenance is one of those, and pass 2 admits a deferred
+	// tool only through its own case. A deferred type without one is rejected.
+	deferred := make([]bool, len(tools))
+	for i, tool := range tools {
+		if rv := reflect.ValueOf(tool); rv.Kind() == reflect.Pointer && rv.IsNil() {
+			return "", errNotAdmitted(i, tool)
+		}
+		var ok bool
+		switch t := tool.(type) {
+		case *ReadFile:
+			ok = inRoot(t.ws)
+		case *Search:
+			ok = inRoot(t.ws)
+		case *Glob:
+			ok = inRoot(t.ws)
+		case *List:
+			ok = inRoot(t.ws)
+		case *WriteFile:
+			ok = inRoot(t.ws)
+		case *EditFile:
+			ok = inRoot(t.ws)
+		case *RunCommand:
+			ok = inRoot(t.ws) && runnerBound(t.runner) && t.sandbox.keyComponent == key && scratchBound(t.scratchRT)
+		case *StartCommand:
+			ok = inRoot(t.ws) && t.manager != nil && t.manager.backend.execBackend != nil &&
+				t.manager.backend.approval.keyComponent == key && scratchBound(t.scratchRT)
+			if ok {
+				managers[t.manager] = true
+			}
+		case *CommandStatus, *CommandTail, *StopCommand, ScratchChanges, *ScratchChanges, *PromoteArtifact:
+			deferred[i] = true
+			continue
+		}
+		if !ok {
+			return "", errNotAdmitted(i, tool)
+		}
+	}
+	for i, tool := range tools {
+		if !deferred[i] {
+			continue
+		}
+		var ok bool
+		switch t := tool.(type) {
+		case *CommandStatus:
+			ok = managers[t.manager]
+		case *CommandTail:
+			ok = managers[t.manager]
+		case *StopCommand:
+			ok = managers[t.manager]
+		case ScratchChanges:
+			ok = scratch[t.rt]
+		case *ScratchChanges:
+			ok = scratch[t.rt]
+		case *PromoteArtifact:
+			ok = inRoot(t.ws) && scratch[t.rt]
+		}
+		if !ok {
+			return "", errNotAdmitted(i, tool)
+		}
+	}
+	return frozen, nil
+}
+
+// errNotAdmitted names tool by its Spec, or by index and type when it is nil
+// or a typed nil whose Spec may not be safe to call.
+func errNotAdmitted(i int, tool agent.Tool) error {
+	name := fmt.Sprintf("tool at index %d", i)
+	if rv := reflect.ValueOf(tool); rv.Kind() == reflect.Pointer && rv.IsNil() {
+		name = fmt.Sprintf("%T at index %d", tool, i)
+	} else if tool != nil {
+		name = strconv.Quote(tool.Spec().Name)
+	}
+	return fmt.Errorf("tools: %s is not admitted in a native sandbox session", name)
 }

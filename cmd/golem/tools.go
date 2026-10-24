@@ -231,11 +231,16 @@ func buildExecTools(root string, manager *agenttools.BackgroundManager, opts age
 }
 
 // buildExecMount is the ONE exec-mount seam (#372 D11): the background
-// manager and the exec tool set built over it, for startup -allow-exec and
-// for /allow-exec alike, so a future sandbox selector lands here once. On
-// failure the manager is shut down and nothing is returned.
-func buildExecMount(root string, opts agenttools.ExecToolsOptions) (*agenttools.BackgroundManager, []agent.Tool, error) {
-	manager := agenttools.NewBackgroundManager()
+// manager resolved from the session's sandbox policy (#576) and the exec tool
+// set built over that manager's backend, for startup -allow-exec and for
+// /allow-exec alike, so foreground, background and scratch tools can never
+// split runtimes. A policy this host cannot honor fails closed with no host
+// fallback. On failure the manager is shut down and nothing is returned.
+func buildExecMount(root string, sandbox agenttools.SandboxConfig, opts agenttools.ExecToolsOptions) (*agenttools.BackgroundManager, []agent.Tool, error) {
+	manager, err := agenttools.NewSandboxedBackgroundManager(sandbox)
+	if err != nil {
+		return nil, nil, fmt.Errorf("golem: exec backend: %w", err)
+	}
 	tools, err := buildExecTools(root, manager, opts)
 	if err != nil {
 		manager.Shutdown()

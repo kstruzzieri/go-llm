@@ -2,21 +2,35 @@ package tools
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 )
 
 // verifyApprovalKeyPrefix namespaces post-write verification grants (#347) so
-// a verify command's fingerprint can never be mistaken for an exec grant, and
-// vice versa. The v1 tag names the recipe; changing it is an explicit
-// migration.
-//
-// It is correct only while verification is host-only. If a non-host sandbox
-// runtime is ever wired in here, this key must absorb an immutable digest of
-// the sandbox policy first — the same rule bindExecBackend states for exec
-// keys, whose non-host keys carry an "sb:<digest>:" component.
-const verifyApprovalKeyPrefix = "verify:v1:"
+// a verify key can never be mistaken for an exec grant, and vice versa. The v2
+// tag (#576) names the recipe for every runtime, host included:
+// verifyKeyDigest over the complete normalized sandboxFingerprint and the
+// prepared-command fingerprint (canonical root, argv, resolved executable,
+// cwd, environment values, timeout). v1 keyed the command fingerprint alone,
+// which was sound only while verification was host-only; v1 grants are not
+// reusable. Changing the recipe is an explicit migration. The key binds no
+// script bytes: an approved command still runs whatever the workspace holds.
+const verifyApprovalKeyPrefix = "verify:v2:"
+
+// verifyKeyDigest is the labeled, NUL-terminated digest behind a verify:v2
+// key: hex sha256("sandbox\0" + sandboxDigest + "\0command\0" + commandDigest + "\0").
+func verifyKeyDigest(sandboxDigest, commandDigest string) string {
+	h := sha256.New()
+	for _, s := range []string{"sandbox", sandboxDigest, "command", commandDigest} {
+		_, _ = h.Write([]byte(s))
+		_, _ = h.Write([]byte{0})
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
 
 // VerifyResult is one verification run's raw outcome. Rendering it for the
 // model — including the model-visible output cap — is the consumer's job.
@@ -33,6 +47,10 @@ type VerifyResult struct {
 	// TimedOut reports that the command exceeded the verifier's OWN deadline.
 	// It is an outcome, not a failure: Run returns a nil error for it.
 	TimedOut bool
+	// Notes are backend diagnostics for this run (#576): the Seatbelt loader
+	// note on a failed run, a refused private-temp cleanup. Run fills them
+	// alongside an infra error too; they never change ExitCode or TimedOut.
+	Notes []string
 }
 
 // VerifyCommand is a prepared, bounded post-write verification command (#347).
@@ -50,29 +68,46 @@ type VerifyResult struct {
 type VerifyCommand struct {
 	ws      *Workspace
 	runner  commandRunner
+	sandbox SandboxConfig // normalized; its approval metadata is pending.sandbox
 	pending execPending
 	argv0   string
 }
 
-// NewVerifyCommand prepares a verification command over ws. It resolves the
-// executable immediately, so a command that is not installed fails here rather
-// than once per batch.
-//
-// Execution goes through the #440 backend seam at the host runtime. Sandboxing
-// is deliberately not a parameter: host-mode verification cannot enforce a
-// read-only check, and giving callers a knob would imply otherwise.
+// NewVerifyCommand prepares a host verification command over ws. It is
+// NewSandboxedVerifyCommand with the host policy, SandboxConfig{}.
 func NewVerifyCommand(ws *Workspace, argv []string, dir string, timeout time.Duration) (*VerifyCommand, error) {
-	backend, err := newExecBackend(SandboxConfig{})
-	if err != nil {
-		return nil, fmt.Errorf("tools: verify command backend: %w", err)
-	}
-	return newVerifyCommand(ws, backend, argv, dir, timeout)
+	return NewSandboxedVerifyCommand(ws, SandboxConfig{}, argv, dir, timeout)
 }
 
-// newVerifyCommand is the runner-injecting constructor the tests use.
-func newVerifyCommand(ws *Workspace, runner commandRunner, argv []string, dir string,
+// NewSandboxedVerifyCommand prepares a verification command over ws that
+// runs under the isolation runtime selected by sandbox (#576), through the
+// same backend seam and normalizer as run_command. It resolves the executable
+// immediately, so a command that is not installed fails here rather than once
+// per batch.
+//
+// A policy that cannot be honored fails before any preview exists, with an
+// error wrapping ErrSandboxPolicy; there is no host fallback. A native
+// verifier is not a read-only check: it can write inside the workspace and
+// its private temp, outside /undo, and its preview says so.
+func NewSandboxedVerifyCommand(ws *Workspace, sandbox SandboxConfig, argv []string, dir string,
 	timeout time.Duration) (*VerifyCommand, error) {
 
+	backend, err := newExecBackend(sandbox)
+	if err != nil {
+		return nil, fmt.Errorf("tools: verify command backend: %w: %w", ErrSandboxPolicy, err)
+	}
+	return newVerifyCommandWithBackend(ws, backend, argv, dir, timeout)
+}
+
+// newVerifyCommandWithBackend is the backend-injecting constructor the tests
+// use. backend must come from newExecBackend or bindExecBackend over a
+// normalized config.
+func newVerifyCommandWithBackend(ws *Workspace, backend resolvedExecBackend, argv []string, dir string,
+	timeout time.Duration) (*VerifyCommand, error) {
+
+	if err := backend.approval.validateWorkspace(ws.root); err != nil {
+		return nil, fmt.Errorf("tools: verify command: %w: %w", ErrSandboxPolicy, err)
+	}
 	if timeout <= 0 || timeout > execMaxTimeout {
 		return nil, fmt.Errorf("tools: verify timeout must be positive and at most %s, got %s",
 			execMaxTimeout, timeout)
@@ -81,13 +116,33 @@ func newVerifyCommand(ws *Workspace, runner commandRunner, argv []string, dir st
 	if err != nil {
 		return nil, fmt.Errorf("tools: verify command: %w", err)
 	}
-	return &VerifyCommand{ws: ws, runner: runner, pending: pending, argv0: argv[0]}, nil
+	pending.sandbox = backend.approval
+	return &VerifyCommand{ws: ws, runner: backend, sandbox: backend.sandbox, pending: pending, argv0: argv[0]}, nil
 }
 
-// ApprovalKey is the opaque structural identity of this exact command, for
-// session-scoped approval grants (#341).
+// ApprovalKey is the opaque structural identity of this exact command under
+// its frozen sandbox policy, for session-scoped approval grants (#341).
 func (v *VerifyCommand) ApprovalKey() string {
-	return verifyApprovalKeyPrefix + v.pending.fingerprint
+	return verifyApprovalKeyPrefix + verifyKeyDigest(sandboxFingerprint(v.sandbox), v.pending.fingerprint)
+}
+
+// Sandbox returns a copy of the normalized policy this command runs under.
+// Mutating the result never reaches the command.
+func (v *VerifyCommand) Sandbox() SandboxConfig {
+	s := v.sandbox
+	s.DropCaps = slices.Clone(s.DropCaps)
+	return s
+}
+
+// Root is the canonical workspace root the command is bound to and checks.
+func (v *VerifyCommand) Root() string { return v.ws.root }
+
+// TargetLine names what a verification run checks, for the approval preview
+// and the model-visible result: the canonical workspace, never an unpromoted
+// scratch snapshot or artifact.
+func (v *VerifyCommand) TargetLine() string {
+	return "target:  " + quoteArgForPreview(v.ws.root) +
+		" (canonical workspace; unpromoted scratch artifacts are not checked)"
 }
 
 // Command renders the argv for the model-visible observation. It is the
@@ -122,9 +177,17 @@ func (v *VerifyCommand) Preview() string {
 	fmt.Fprintf(&b, "  cwd:     %s\n", dir)
 	fmt.Fprintf(&b, "  timeout: %s\n", fmtTimeout(v.pending.timeout))
 	fmt.Fprintf(&b, "  env:     %s\n", strings.Join(names, ", "))
+	if v.pending.sandbox.preview != "" {
+		fmt.Fprintf(&b, "  sandbox: %s\n", v.pending.sandbox.preview)
+	}
+	fmt.Fprintf(&b, "  %s\n", v.TargetLine())
 	fmt.Fprintf(&b, "  id:      %s\n", id)
-	b.WriteString("  warning: unsandboxed; runs with the host user's filesystem and network authority\n")
-	b.WriteString("           verifier writes are outside /undo\n")
+	if v.pending.sandbox.preview == "" {
+		b.WriteString("  warning: unsandboxed; runs with the host user's filesystem and network authority\n")
+		b.WriteString("           verifier writes are outside /undo\n")
+	} else {
+		b.WriteString("  warning: writes inside the workspace and private temp are outside /undo\n")
+	}
 	b.WriteString("  note:    declared by this workspace; later edits to files here\n")
 	b.WriteString("           may change the code this command runs\n")
 	return b.String()
@@ -140,7 +203,8 @@ func (v *VerifyCommand) Preview() string {
 // A non-zero exit and the verifier's own timeout are outcomes and return a nil
 // error. Parent cancellation, a parent deadline, and infra failures (spawn
 // error, identity re-check failure) return an error for the consumer to
-// classify.
+// classify; once the command was launched, that error comes with the partial
+// result, including Notes.
 func (v *VerifyCommand) Run(ctx context.Context) (VerifyResult, error) {
 	spec, err := recheckExecPlan(v.ws, v.pending)
 	if err != nil {
@@ -156,6 +220,7 @@ func (v *VerifyCommand) Run(ctx context.Context) (VerifyResult, error) {
 		Stderr:    res.Stderr,
 		Truncated: res.StdoutTruncated || res.StderrTruncated,
 		TimedOut:  res.TimedOut,
+		Notes:     res.Notes,
 	}
 	if runErr == nil {
 		return out, nil
@@ -165,5 +230,5 @@ func (v *VerifyCommand) Run(ctx context.Context) (VerifyResult, error) {
 	if res.TimedOut && ctx.Err() == nil {
 		return out, nil
 	}
-	return VerifyResult{}, runErr
+	return out, runErr
 }

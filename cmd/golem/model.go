@@ -205,7 +205,7 @@ type modelSelection struct {
 	resolver        toolCallResolver // nil under -no-cap-probe: no active probing
 	planOpts        providerbootstrap.PlanOptions
 	flags           flags
-	orchVerifier    agent.Verifier // the startup verifier, or the REPL's late-verifier slot
+	orchVerifier    agent.Verifier // the REPL's VerifierSlot (#576), or nil outside the REPL
 	dispatchNotify  func(string)   // newDispatchTool's completion-notice sink; nil when dispatch is off
 }
 

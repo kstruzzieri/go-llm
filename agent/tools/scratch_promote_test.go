@@ -73,7 +73,7 @@ func newPromoteFixtureWith(t *testing.T, extra map[string]string) *promoteFixtur
 		t.Fatal(err)
 	}
 	journal := &recordingJournal{}
-	rt, err := newScratchRuntime(root, ScratchConfig{Enabled: true}, journal)
+	rt, err := newScratchRuntime(root, ScratchConfig{Enabled: true}, journal, SandboxRuntimeHost)
 	if err != nil {
 		t.Fatal(err)
 	}

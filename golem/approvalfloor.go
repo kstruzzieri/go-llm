@@ -96,6 +96,23 @@ func (f floorPlanningTool) Plan(ctx context.Context, args json.RawMessage) (agen
 	return plan, err
 }
 
+// unfloored returns tools with every floor wrapper replaced by the tool it
+// wraps, so a concrete-type check sees the caller's own tool.
+func unfloored(tools []agent.Tool) []agent.Tool {
+	raw := make([]agent.Tool, len(tools))
+	for i, tool := range tools {
+		switch f := tool.(type) {
+		case floorTool:
+			raw[i] = f.inner
+		case floorPlanningTool:
+			raw[i] = f.inner
+		default:
+			raw[i] = tool
+		}
+	}
+	return raw
+}
+
 // floorExempt reports whether t is one of the four library types that spec 3.3
 // exempts from the floor and lets keep its own ApprovalNever: the two
 // agent-memory writes (over the real store they write only the memory DB, D-P1

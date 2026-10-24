@@ -112,9 +112,16 @@ type flags struct {
 
 	profile    string // -profile: inspect|preview|trusted (#387)
 	profileSet bool   // -profile was passed (distinguishes an explicit empty value)
+	// -sandbox host|seatbelt|bwrap and -sandbox-network denied|allowed (#576);
+	// the Set fields distinguish an explicit value (an explicit -sandbox host
+	// still selects Trusted). resolveSandbox turns them into the one policy.
+	sandbox           string
+	sandboxSet        bool
+	sandboxNetwork    string
+	sandboxNetworkSet bool
 	// suppressAutoTools is resolved, not parsed: true under the Inspect
-	// profile, it keeps automatic retrieval and the model memory tools from
-	// initializing (applyProfileGates).
+	// profile and in a native sandbox session, it keeps automatic retrieval
+	// and the model memory tools from initializing (applyProfileGates).
 	suppressAutoTools bool
 }
 
@@ -209,6 +216,8 @@ func parseFlags(args []string) (flags, error) {
 	fs.BoolVar(&f.approvePlanLock, "approve-plan-lock", false, "planning mode: print the plan preview and approve the lock without prompting (non-interactive -goal)")
 	fs.StringVar(&f.outputFormat, "output-format", "text", "one-shot mode: stdout format — text (the final answer), json (one golem.result.v1 record), or stream-json (one protocol-v1 event per line, then the same record); requires -p")
 	fs.StringVar(&f.profile, "profile", "", "permission profile: inspect (default, workspace reads only) or trusted; preview is reserved")
+	fs.StringVar(&f.sandbox, "sandbox", "", "command sandbox for Trusted sessions: host (default), seatbelt (macOS) or bwrap (Linux); fails closed when unavailable; does not confine /consult, git context, MCP servers or the /edit editor")
+	fs.StringVar(&f.sandboxNetwork, "sandbox-network", "", "network policy for -sandbox seatbelt|bwrap: denied (default) or allowed")
 	fs.Var(&f.allowTools, "allow-tool", "one-shot mode: mount and non-interactively approve one exact built-in gated tool by name (repeatable; write_file, edit_file, run_command, start_command, stop_command); creates no session grants; MCP tools and submit_plan are never eligible; requires -p")
 	// main() prefixes "golem: " when it prints the error.
 	if err := parseQuietly(fs, args, nil); err != nil {
@@ -247,6 +256,10 @@ func parseFlags(args []string) (flags, error) {
 			f.wfReasonSet = true
 		case "profile":
 			f.profileSet = true
+		case "sandbox":
+			f.sandboxSet = true
+		case "sandbox-network":
+			f.sandboxNetworkSet = true
 		}
 	})
 	return f, nil
@@ -279,6 +292,9 @@ func validateFlags(f flags) error {
 	// First, so a profile error is never shadowed by a later mode check and
 	// always runs before one-shot normalization drops a conflicting flag.
 	if err := validateProfile(f); err != nil {
+		return err
+	}
+	if err := validateSandboxFlags(f); err != nil {
 		return err
 	}
 	if err := agentflow.ValidateEnvNames(f.agentflowEnv); err != nil {
@@ -718,7 +734,7 @@ func interceptorsNotice(full bool, ics []agent.Interceptor) string {
 // It always installs interceptorsFor's chain: the deterministic guards, or
 // the full default chain with -interceptors (#514/#439/#575).
 // A typed-nil verifier would satisfy the interface and panic on first use
-// (#347); the factory normalizes the two concrete types it can receive so
+// (#347); the factory normalizes the concrete slot type it can receive so
 // that guarantee does not rest on every call site.
 func newOrchestratorFactory(caller agent.ModelCaller, f flags, verifier agent.Verifier, canary *canaryBinding) func() *agent.Orchestrator {
 	var opts []agent.Option
@@ -750,26 +766,19 @@ func newOrchestratorFactory(caller agent.ModelCaller, f flags, verifier agent.Ve
 // isREPLMode reports the plain interactive REPL: not one-shot, not task or
 // planning mode, not an Agentflow status/resume query. It is the only mode
 // that dispatches slash commands, so it is the only mode whose orchestrator
-// carries the #372 late verifier slot.
+// carries the #372 verifier slot.
 func isREPLMode(f flags) bool {
 	return !f.promptSet && f.planPath == "" && !f.goalSet && !f.agentflowStatus && !f.agentflowResume
 }
 
 func shouldShowAgentflowHint(f flags) bool { return isREPLMode(f) }
 
-// nonNilVerifier maps a typed-nil *verifyRunner or *lateVerifier to a true
-// nil interface, so agent.WithVerifier is never handed a value that would
-// panic on first use (#347).
+// nonNilVerifier maps a typed-nil *agenttools.VerifierSlot to a true nil
+// interface, so agent.WithVerifier is never handed a value that only looks
+// installed (#347).
 func nonNilVerifier(v agent.Verifier) agent.Verifier {
-	switch c := v.(type) {
-	case *verifyRunner:
-		if c == nil {
-			return nil
-		}
-	case *lateVerifier:
-		if c == nil {
-			return nil
-		}
+	if s, ok := v.(*agenttools.VerifierSlot); ok && s == nil {
+		return nil
 	}
 	return v
 }
@@ -935,7 +944,10 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	oneShotWarns = append(taskWarns, oneShotWarns...)
 	// #387: resolved after normalization, so a dropped flag selects nothing.
 	profile, profileNotice := resolveProfile(f)
-	f = applyProfileGates(f, profile)
+	// #576: the one frozen policy every exec mount, verifier, slot and the
+	// runtime receive; validateFlags already rejected bad values.
+	sandbox := resolveSandbox(f)
+	f = applyProfileGates(f, profile, sandbox)
 	retrievalEnabled := !f.suppressAutoTools && !f.noRag
 
 	root, err := filepath.Abs(f.root)
@@ -944,6 +956,16 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	}
 	if root, err = filepath.EvalSymlinks(root); err != nil {
 		return maybeUsageError(fmt.Errorf("resolve root: %w", err), headlessExitApplies(f))
+	}
+	// #576: a native backend this host cannot honor fails here, before any
+	// config, store, session, MCP connection or provider is touched, and never
+	// falls back to host. Descriptors the launcher left inheritable are
+	// cleared first, before this probe or any spawn; host sessions keep them.
+	if nativeSandbox(sandbox) {
+		clearInheritedDescriptors()
+		if err := agenttools.ValidateSandbox(sandbox, root); err != nil {
+			return fmt.Errorf("golem: sandbox: %w", err)
+		}
 	}
 	mcpServers, merr = withMCPPolicy(root, mcpServers, len(f.mcpStdio), f.mcpEnv)
 	if merr != nil {
@@ -1474,7 +1496,8 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	writeToolCount := 0
 
 	var journal *checkpointJournal
-	var verifier *verifyRunner
+	var verifyCmd *agenttools.VerifyCommand
+	var verifyNotice string
 	if buildWrite {
 		// D6: -allow-write fails closed on ANY checkpoint lifecycle failure
 		// (store, lease, migration, recovery, state query, hardening) rather
@@ -1525,9 +1548,12 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		// must not read .golem.json or mount post-write verification —
 		// verify_command is not an -allow-tool name.
 		if f.allowWrite {
-			var vwarn string
-			if verifier, vwarn = buildVerifier(root); vwarn != "" {
-				warns = append(warns, vwarn)
+			var verr error
+			if verifyCmd, verifyNotice, verr = buildVerifierFn(root, sandbox); verr != nil {
+				return fmt.Errorf("golem: verifier: %w", verr)
+			}
+			if verifyNotice != "" {
+				warns = append(warns, verifyNotice)
 			}
 		}
 	}
@@ -1555,10 +1581,12 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		scratchLine = line
 		// #372: the same seam /allow-exec uses; a build failure has already
 		// shut the unpublished manager down.
-		mgr, et, eerr := buildExecMount(root, execOpts)
+		mgr, et, eerr := buildExecMount(root, sandbox, execOpts)
 		if eerr != nil {
 			if hooks.closed != nil {
-				hooks.closed("background") // the manager existed and was reaped
+				// buildExecMount already shut down any manager it built; none
+				// exists when the backend itself could not be constructed.
+				hooks.closed("background")
 			}
 			return eerr
 		}
@@ -1729,21 +1757,34 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		sourceSummarizer = routerSourceSummaryGenerator(bundle.Router, summarizeChain)
 	}
 
-	// #372: a REPL session that started WITHOUT -allow-write may enable writes
-	// later, so its orchestrator carries an empty late-bound verifier slot.
-	// A session that already has writes keeps the real verifier (or none)
-	// bound directly: /allow-write is idempotent there and never needs the
-	// slot, and the orchestrator stays byte-identical to before #372. The
-	// interface is assigned only from a non-nil pointer so a typed nil never
-	// reaches the factory.
+	// #372/#576: every REPL session verifies through one library slot bound
+	// to the root and sandbox policy: armed or disabled here under a startup
+	// -allow-write, absent until /allow-write otherwise. There is no direct
+	// runner, so a native runtime can accept only nil or this slot. One-shot
+	// carries none. The interface is assigned only from a non-nil pointer so
+	// a typed nil never reaches the factory.
+	//
+	// An unarmed slot verifies nothing, but it is not byte-identical to a nil
+	// verifier: agent.verifyBatch still runs its post-Verify ctx.Err() check.
+	// That is reachable only once writes are mounted with the slot unarmed (a
+	// startup -allow-write, or a later /allow-write, that found no
+	// .golem.json): a cancellation landing during a write batch then surfaces
+	// from verifyBatch instead of from the next model call. Both end the run
+	// as canceled.
 	var orchVerifier agent.Verifier
-	if verifier != nil {
-		orchVerifier = verifier
-	}
-	var verifySlot *lateVerifier
-	if isREPLMode(f) && !f.allowWrite {
-		verifySlot = &lateVerifier{}
-		orchVerifier = verifySlot
+	var verifySlot *agenttools.VerifierSlot
+	if isREPLMode(f) || f.allowWrite {
+		slot, serr := agenttools.NewVerifierSlot(root, sandbox)
+		if serr != nil {
+			return fmt.Errorf("golem: verifier slot: %w", serr)
+		}
+		if verifyNotice != "" {
+			slot.Disable(verifyNotice)
+		}
+		if serr := slot.Set(verifyCmd); serr != nil {
+			return fmt.Errorf("golem: verifier: %w", serr)
+		}
+		verifySlot, orchVerifier = slot, slot
 	}
 	newOrchestrator := newOrchestratorFactory(prep.caller, f, orchVerifier, canary)
 	orch := newOrchestrator()
@@ -1762,6 +1803,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		Root:     root,
 		System:   baseSystem,
 		Profile:  profile,
+		Sandbox:  sandbox,
 		Tools:    tools[readToolCount:],
 		MaxSteps: f.maxSteps,
 		Budget:   budget,
@@ -1821,6 +1863,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		writeToolCount:   writeToolCount,
 		scratch:          f.scratch,
 		verifier:         verifySlot,
+		sandbox:          sandbox,
 		maxSteps:         f.maxSteps,
 		startupBudget:    budget,
 		color:            colorEnabled(renderOut, f.noColor),

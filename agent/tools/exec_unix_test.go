@@ -8,12 +8,64 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
 )
+
+// platformTestSetup makes the test process a clean native-sandbox parent. CI
+// runners (observed: GitHub Actions on Linux) leak an inheritable descriptor
+// into the test process, and both native backends' fail-closed descriptor
+// audit (rejectInheritableFDs) would then refuse every spawn. Marking an
+// inherited descriptor close-on-exec only changes what FUTURE children of
+// this process inherit; the owner's use of its own copy is untouched.
+// Production keeps the strict audit.
+func platformTestSetup() {
+	dir := "/dev/fd"
+	if runtime.GOOS == "linux" {
+		dir = "/proc/self/fd"
+	}
+	f, err := os.Open(dir)
+	if err != nil {
+		return
+	}
+	names, _ := f.Readdirnames(-1)
+	_ = f.Close()
+	for _, name := range names {
+		if fd, err := strconv.Atoi(name); err == nil && fd > 2 {
+			syscall.CloseOnExec(fd)
+		}
+	}
+}
+
+func TestInheritedFDAuditRejectsCloseOnExecFailure(t *testing.T) {
+	dir := t.TempDir()
+	fd, err := syscall.Open(dir, syscall.O_RDONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	closed := false
+	defer func() {
+		if !closed {
+			_ = syscall.Close(fd)
+		}
+	}()
+	if err := os.WriteFile(filepath.Join(dir, strconv.Itoa(fd)), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err = rejectInheritableFDs("test", dir, func(int) bool {
+		_ = syscall.Close(fd)
+		closed = true
+		return true
+	})
+	if err == nil {
+		t.Fatal("audit accepted an allowed repair whose F_SETFD cannot succeed")
+	}
+}
 
 // TestMain doubles as a hermetic helper binary: when invoked with the sentinel first
 // arg, it behaves as the child process the runner spawns, then exits.

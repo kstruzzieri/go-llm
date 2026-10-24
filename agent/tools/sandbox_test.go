@@ -103,6 +103,14 @@ func TestSandboxApprovalHostIsEmpty(t *testing.T) {
 	}
 }
 
+func TestSandboxFingerprintHostVector(t *testing.T) {
+	// printf 'runtime\0host\0allow_network\0false\0memory_cap_mb\0000\0cpu_limit\0000\0drop_caps\0' | shasum -a 256
+	got := sandboxFingerprint(mustNormalizeSandbox(t, SandboxConfig{}))
+	if want := "a396771a1742ed98ad837e2ba6ff902e5d725bf811708e3c3f9646e9fa4ed454"; got != want {
+		t.Fatalf("host sandboxFingerprint = %s, want %s", got, want)
+	}
+}
+
 func TestSandboxFingerprintVariesByEveryField(t *testing.T) {
 	base := mustNormalizeSandbox(t, SandboxConfig{Runtime: "container"})
 	baseFP := sandboxFingerprint(base)

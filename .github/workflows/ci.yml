@@ -182,12 +182,41 @@ jobs:
       - name: Bwrap confinement (non-race)
         env:
           GO_LLM_REQUIRE_BWRAP: "1"
-        run: go test -count=1 -run '^(TestBwrap|TestBuildBwrap|TestCollectBwrap|TestProbeBwrap|TestExistingPolicyPaths)' ./agent/tools
+        run: go test -count=1 -run '^(TestBwrap|TestBuildBwrap|TestCollectBwrap|TestProbeBwrap|TestExistingPolicyPaths|TestNativeBackend)' ./agent/tools ./golem
 
       - name: Bwrap confinement (race)
         env:
           GO_LLM_REQUIRE_BWRAP: "1"
-        run: go test -race -count=1 -run '^(TestBwrap|TestBuildBwrap|TestCollectBwrap|TestProbeBwrap|TestExistingPolicyPaths)' ./agent/tools
+        run: go test -race -count=1 -run '^(TestBwrap|TestBuildBwrap|TestCollectBwrap|TestProbeBwrap|TestExistingPolicyPaths|TestNativeBackend)' ./agent/tools ./golem
+
+      # Golem's own construction paths under real bwrap (#576): startup and
+      # late exec, scratch and verification, each after a host positive
+      # control. Non-race only: no race job runs these with bwrap present.
+      # A rename would match nothing and pass, so the step requires exactly
+      # this OS's top-level tests to pass and none to skip.
+      - name: Golem native wiring (non-race)
+        shell: bash
+        env:
+          GO_LLM_REQUIRE_BWRAP: "1"
+        run: |
+          set -o pipefail; go test -count=1 -run '^TestNativeWiring' -v ./cmd/golem | tee "$RUNNER_TEMP/native-wiring-linux.txt"
+          if grep -q -- '--- SKIP' "$RUNNER_TEMP/native-wiring-linux.txt"; then
+            echo "::error::native wiring tests skipped: a skip is not confinement evidence"
+            exit 1
+          fi
+          passed=$(grep -cE -- '^--- PASS: TestNativeWiring[A-Za-z]+ ' "$RUNNER_TEMP/native-wiring-linux.txt" || true)
+          if [ "$passed" -ne 11 ]; then
+            echo "::error::expected 11 passing top-level native wiring tests, saw $passed"
+            exit 1
+          fi
+
+      - name: Upload native wiring evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: native-wiring-linux
+          path: ${{ runner.temp }}/native-wiring-linux.txt
+          if-no-files-found: error
 
       # The containment inventory's bwrap profile: every mandatory ref must
       # run and pass under the real sandbox, no skip allowed (#452).
@@ -300,10 +329,12 @@ jobs:
 
       # Windows loads path-based FileInfo identities lazily. Compile smoke
       # cannot detect a replaced root being mistaken for the original (#658).
+      # TestValidateSandboxUnavailable proves Windows refuses both native
+      # sandbox selections (#576).
       - name: Test workspace identity and undo on Windows
         env:
           CGO_ENABLED: "0"
-        run: go test -count=1 -v -run '^(TestWorkspaceVerifyRoot.*|TestNewWorkspace.*|TestUndoCreatedFile.*|TestCheckpointUndoCreatedFile.*)$' ./agent/tools ./cmd/golem
+        run: go test -count=1 -v -run '^(TestWorkspaceVerifyRoot.*|TestNewWorkspace.*|TestUndoCreatedFile.*|TestCheckpointUndoCreatedFile.*|TestValidateSandboxUnavailable)$' ./agent/tools ./cmd/golem
 
       # The containment inventory's windows profile: exec scenarios skip only
       # with the profile's enumerated capability reasons (#452).
