@@ -12,7 +12,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -31,40 +30,122 @@ const (
 	seatbeltProbeTimeout = 5 * time.Second
 	// seatbeltProbeOutputCap bounds captured probe diagnostics.
 	seatbeltProbeOutputCap = 1024
-	// seatbeltProbeProfile is the probe's profile: deny-default like every
-	// profile the backend renders, with only what /usr/bin/true needs. It is
-	// used for the probe alone and grants real commands nothing.
-	seatbeltProbeProfile = "(version 1)(deny default)(allow process-exec*)(allow file-read*)"
+	// seatbeltProbeExe and its argv are what the probe runs under the rendered
+	// profile. Reaching /usr/bin/true through /usr/bin/env exercises the exec
+	// filter on a second binary: /usr/bin/true alone is masked by its own exe
+	// literal, so a broken exec scope would still let it run (probe-experiments
+	// in the #708 evidence).
+	seatbeltProbeExe = "/usr/bin/env"
 )
 
-// probeSeatbelt actively verifies the host can apply a Seatbelt profile:
-// file checks first, then a run of /usr/bin/true under a deny-default
-// profile. Existence does not imply usability: inside a sandbox, applying a
-// deny-default profile fails with "sandbox_apply: Operation not permitted",
-// so a stat-only check would be a false positive. The probe must be
-// deny-default too: an allow-default profile still applies inside an
-// allow-default parent, so it would report a backend every command then
-// fails under.
-func probeSeatbelt(ctx context.Context, execPath string) error {
-	fi, err := os.Stat(execPath)
+var seatbeltProbeArgv = []string{"env", "/usr/bin/true"}
+
+// probeSeatbelt actively verifies the host can apply the profile this backend
+// renders: file checks first, then a run of /usr/bin/env /usr/bin/true through
+// the backend's own prepare on a throwaway workspace. Existence does not imply
+// usability: inside a sandbox, applying a deny-default profile fails with
+// "sandbox_apply: Operation not permitted", so a stat-only check would be a
+// false positive. Rendering the real profile (not a fixed one) means a macOS
+// release that rejects any rule the backend uses fails startup here, rather
+// than passing and then failing every command. The probe stays deny-default by
+// construction (the rendered profile is), so nested-sandbox detection is
+// unchanged. It does NOT prove a given toolchain loads, nor detect read-root
+// drift: the dyld shared cache maps through the shared region, so /usr/bin/true
+// runs even under a narrowed read set.
+func probeSeatbelt(ctx context.Context, b *seatbeltBackend) error {
+	fi, err := os.Stat(b.execPath)
 	if err != nil {
-		return fmt.Errorf("tools: seatbelt requires %s: %w", execPath, err)
+		return fmt.Errorf("tools: seatbelt requires %s: %w", b.execPath, err)
 	}
 	if !isExecutableFile(fi) {
-		return fmt.Errorf("tools: seatbelt requires %s: %w", execPath, errNotExecutable)
+		return fmt.Errorf("tools: seatbelt requires %s: %w", b.execPath, errNotExecutable)
 	}
-	cmd := exec.CommandContext(ctx, execPath, "-p", seatbeltProbeProfile, "/usr/bin/true")
-	out := &cappedBuffer{cap: seatbeltProbeOutputCap}
-	cmd.Stdout = out
-	cmd.Stderr = out
-	// Bound Wait when a descendant of the probed binary outlives it while
-	// holding the stdio pipes open, mirroring the runners.
-	cmd.WaitDelay = execWaitDelay
-	if err := cmd.Run(); err != nil {
-		if detail := strings.TrimSpace(string(out.buf)); detail != "" {
-			return fmt.Errorf("tools: seatbelt unavailable on this host: %w: %s", err, detail)
+	ws, cleanupWS, err := b.newProbeWorkspace()
+	if err != nil {
+		return err
+	}
+	probeErr := b.runProbe(ctx, ws)
+	// The probe owns this workspace; a cleanup failure fails construction so a
+	// native session never starts over a leaked probe directory.
+	if cerr := cleanupWS(); cerr != nil {
+		cleanErr := fmt.Errorf("tools: seatbelt probe workspace cleanup failed: %w", cerr)
+		if probeErr != nil {
+			return errors.Join(probeErr, cleanErr)
 		}
+		return cleanErr
+	}
+	return probeErr
+}
+
+// newProbeWorkspace creates the throwaway 0700 workspace the probe prepares a
+// profile for, under the backend's temp base, with the same canonical-parent
+// and identity guard prepare uses for the private temp. The returned cleanup is
+// the identity-checked remover.
+func (b *seatbeltBackend) newProbeWorkspace() (string, func() error, error) {
+	canonBase, err := filepath.EvalSymlinks(b.tempBase)
+	if err != nil {
+		return "", nil, fmt.Errorf("tools: seatbelt probe temp base: %w", err)
+	}
+	dir, err := os.MkdirTemp(b.tempBase, "go-llm-seatbelt-probe-*")
+	if err != nil {
+		return "", nil, fmt.Errorf("tools: seatbelt probe workspace: %w", err)
+	}
+	created, err := os.Lstat(dir)
+	if err != nil {
+		_ = os.Remove(dir)
+		return "", nil, fmt.Errorf("tools: seatbelt probe workspace identity: %w", err)
+	}
+	canon, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		_ = os.RemoveAll(dir)
+		return "", nil, fmt.Errorf("tools: seatbelt probe workspace: %w", err)
+	}
+	if !posixCleanAbs(canon) || seatbeltBroadRoot(canon) || filepath.Dir(canon) != canonBase {
+		_ = os.RemoveAll(dir)
+		return "", nil, fmt.Errorf("tools: seatbelt probe workspace %q has an unexpected parent", canon)
+	}
+	// cleanup targets the created spelling, whose identity was recorded; canon
+	// is handed to prepare as the workspace root.
+	return canon, seatbeltTempCleanup(dir, created), nil
+}
+
+// runProbe renders the backend's profile for ws and runs the probe command
+// under it through the backend's own runner — the same path every command
+// takes. prepare's own private-temp cleanup runs here; its failure fails the
+// probe too.
+func (b *seatbeltBackend) runProbe(ctx context.Context, ws string) (err error) {
+	exeID, err := os.Stat(seatbeltProbeExe)
+	if err != nil {
+		return fmt.Errorf("tools: seatbelt requires %s: %w", seatbeltProbeExe, err)
+	}
+	wrapped, cleanup, err := b.prepare(execSpec{
+		Path:          seatbeltProbeExe,
+		Argv:          seatbeltProbeArgv,
+		Dir:           ws,
+		WorkspaceRoot: ws,
+		ExeIdentity:   exeID,
+	})
+	if err != nil {
 		return fmt.Errorf("tools: seatbelt unavailable on this host: %w", err)
+	}
+	defer func() {
+		if cleanupErr := cleanup(); cleanupErr != nil {
+			err = errors.Join(err, fmt.Errorf("tools: seatbelt probe private temp cleanup failed: %w", cleanupErr))
+		}
+	}()
+	res, runErr := b.runner.Run(ctx, wrapped)
+	if runErr != nil {
+		return fmt.Errorf("tools: seatbelt unavailable on this host: %w", runErr)
+	}
+	if res.ExitCode != 0 {
+		detail := strings.TrimSpace(string(res.Stderr) + " " + string(res.Stdout))
+		if len(detail) > seatbeltProbeOutputCap {
+			detail = detail[:seatbeltProbeOutputCap]
+		}
+		if detail != "" {
+			return fmt.Errorf("tools: seatbelt unavailable on this host: exit %d: %s", res.ExitCode, detail)
+		}
+		return fmt.Errorf("tools: seatbelt unavailable on this host: exit %d", res.ExitCode)
 	}
 	return nil
 }
@@ -140,7 +221,9 @@ func kernelControlID(name string) (uint32, error) {
 }
 
 // seatbeltProbeFunc is the injectable probe seam for deterministic unit tests.
-type seatbeltProbeFunc func(context.Context, string) error
+// It receives the constructed backend so the probe can render and apply the
+// backend's own profile.
+type seatbeltProbeFunc func(context.Context, *seatbeltBackend) error
 
 // seatbeltTempBase is the fixed parent for private per-invocation temp
 // directories. Deliberately NOT the ambient TMPDIR: inherited temp locations
@@ -192,17 +275,7 @@ func newSeatbeltExecBackendAt(execPath string, probe seatbeltProbeFunc, cfg Sand
 	if err := seatbeltConfigSupport(cfg); err != nil {
 		return nil, err
 	}
-	// The probe is this backend's first spawn, and construction (so
-	// ValidateSandbox) must fail where every later spawn would (#576).
-	if err := seatbeltRejectInheritableFDs(); err != nil {
-		return nil, err
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), seatbeltProbeTimeout)
-	defer cancel()
-	if err := probe(ctx, execPath); err != nil {
-		return nil, err
-	}
-	return &seatbeltBackend{
+	b := &seatbeltBackend{
 		execPath:     execPath,
 		allowNetwork: cfg.AllowNetwork,
 		runner:       unixRunner{},
@@ -221,7 +294,20 @@ func newSeatbeltExecBackendAt(execPath string, probe seatbeltProbeFunc, cfg Sand
 			}
 			return collectSystemRoots(seatbeltDefaultSystemRoots, workspaceRoot, home, seatbeltBroadRoot)
 		},
-	}, nil
+	}
+	// The probe is this backend's first spawn, and construction (so
+	// ValidateSandbox) must fail where every later spawn would (#576). The
+	// audit runs here before the probe and again inside prepare on every real
+	// spawn, the probe included.
+	if err := seatbeltRejectInheritableFDs(); err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), seatbeltProbeTimeout)
+	defer cancel()
+	if err := probe(ctx, b); err != nil {
+		return nil, err
+	}
+	return b, nil
 }
 
 // seatbeltTempCleanup returns the single-shot guarded remover for one private
