@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 
@@ -521,10 +522,14 @@ func (c *censusCaller) Chat(context.Context, provider.ChatRequest, func(provider
 // censusProbe is installed after interceptor.Defaults() and returns no
 // finding: as the last interceptor it sees exactly the content the chain
 // inspected at each tool or verifier ingress, and as the run's observer it
-// receives each hook's normalized findings right after that hook ran.
+// receives each hook's normalized findings right after that hook ran. It
+// never fails the run: a pairing error is kept in err and checked after Run,
+// because a hook error joined to a block would otherwise pass as a block.
 type censusProbe struct {
 	inspections []censusInspection
 	callFinds   []agent.Finding // tool-call and model-output hooks
+	all         []agent.Finding // every hook's findings, in pipeline order
+	err         error
 }
 
 type censusInspection struct {
@@ -553,19 +558,25 @@ func (*censusProbe) InspectToolCall(context.Context, agent.ToolCallInspection) (
 }
 
 func (p *censusProbe) OnInterception(_ context.Context, ev agent.InterceptionEvent) error {
+	p.all = append(p.all, ev.Findings...)
+	last := len(p.inspections) - 1
 	switch {
 	case ev.Hook != agent.HookInput:
 		p.callFinds = append(p.callFinds, ev.Findings...)
 	case ev.ToolCallID == "":
-		return errors.New("census: the scripted goal produced findings")
+		p.fail(errors.New("census: the scripted goal produced findings"))
+	case last < 0 || p.inspections[last].callID != ev.ToolCallID:
+		p.fail(fmt.Errorf("census: ingress findings for %q follow no matching inspection", ev.ToolCallID))
 	default:
-		last := len(p.inspections) - 1
-		if last < 0 || p.inspections[last].callID != ev.ToolCallID {
-			return fmt.Errorf("census: ingress findings for %q follow no matching inspection", ev.ToolCallID)
-		}
 		p.inspections[last].findings = append(p.inspections[last].findings, ev.Findings...)
 	}
 	return nil
+}
+
+func (p *censusProbe) fail(err error) {
+	if p.err == nil {
+		p.err = err
+	}
 }
 
 func (*censusProbe) OnStep(context.Context, agent.StepEvent) error         { return nil }
@@ -586,8 +597,20 @@ func (e *censusEnv) run(ctx context.Context, carrier, path string, tools []agent
 	res, err := agent.New(caller, agent.ContextManager{Mixed: carrier == "mixed"}, opts...).Run(ctx, agent.Request{
 		Goal: "census", Tools: tools, MaxSteps: len(script) + 1, Approver: approveAll{},
 	}, probe)
-	if blocked := (*agent.BlockedError)(nil); err != nil && !errors.As(err, &blocked) {
+	if probe.err != nil {
+		return censusObservation{}, probe.err
+	}
+	// Only a bare BlockedError is an observation (a terminal block of the
+	// scripted call); one joined with a hook error is a failure.
+	if blocked := (*agent.BlockedError)(nil); err != nil && (!errors.As(err, &blocked) || err != error(blocked)) {
 		return censusObservation{}, err
+	}
+	var risk []agent.Finding
+	if res.Risk != nil {
+		risk = res.Risk.Findings
+	}
+	if !slices.Equal(probe.all, risk) {
+		return censusObservation{}, fmt.Errorf("census: the probe saw %d finding(s), Result.Risk holds %d, or they differ", len(probe.all), len(risk))
 	}
 	if caller.last == nil {
 		return censusObservation{}, errors.New("the scripted call was never emitted")

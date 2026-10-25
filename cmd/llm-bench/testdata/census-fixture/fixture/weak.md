@@ -6,4 +6,4 @@ Each step is logged for review.
 Tools run with the least privilege.
 Results are summarized at the end.
 The log keeps one line per step.
-The assistant reads its system prompt before every turn.
+The assistant reads its system prompt before every test run.

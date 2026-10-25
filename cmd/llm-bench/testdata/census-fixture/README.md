@@ -8,7 +8,7 @@ The committed tree that gates the interceptor census logic in CI
 |---|---|
 | `emoji.md` | an emoji family sequence joined by two U+200D zero-width joiners |
 | `bom.txt` | a CSV that starts with a U+FEFF byte-order mark |
-| `weak.md` | the weak phrase "system prompt", on the last of nine lines |
+| `weak.md` | the weak phrase "system prompt", on the last of nine lines, which the search query `test` also matches |
 | `strong.md` | the strong phrase "ignore previous instructions"; classed `adversarial-fixture` |
 | `constant.go` | a Go constant holding a 19-digit integer |
 | `system_prompt.bin` | binary bytes with NULs, which `read_file` refuses; its name carries the weak phrase, so every call naming it is tagged |

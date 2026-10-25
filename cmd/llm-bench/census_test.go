@@ -119,6 +119,19 @@ func TestCensusFindingsByCarrier(t *testing.T) {
 	if got := censusFindingKeys(findCensusObservation(t, obs, "mixed", "clean.go")); len(got) != 0 {
 		t.Errorf("mixed clean.go findings = %v, want none", got)
 	}
+	// Every registered query runs (a rejected one would be a refusal) and
+	// renders path:line: text; the "test" query matches weak.md's last line,
+	// which carries the weak phrase.
+	for _, q := range []string{"func ", "TODO", "error", "return", "import", "config", "test", "http"} {
+		want := []string{}
+		if q == "test" {
+			want = []string{"typoglycemia/weak_phrase/tag/message"}
+		}
+		o := findCensusObservation(t, obs, "search", q)
+		if got := censusFindingKeys(o); o.Refused != "" || o.Bytes == 0 || !reflect.DeepEqual(got, want) {
+			t.Errorf("search %q refused/bytes/findings = %q/%d/%v, want \"\"/>0/%v", q, o.Refused, o.Bytes, got, want)
+		}
+	}
 	// The read_file credential-path invariant (a guard, not a detector) blocks
 	// the call itself, so nothing is inspected; exec and MCP read the bytes.
 	for _, carrier := range []string{"read_file", "mixed"} {

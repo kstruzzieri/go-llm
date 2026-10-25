@@ -48,7 +48,7 @@ classed.
 ## Fetch and reproduce
 
 ```sh
-ROOT=docs/superpowers/evidence/517/census-root   # gitignored
+ROOT=/Users/keith.struzzieri/projects/go-llm/census-root-517   # outside the checkout
 mkdir -p "$ROOT/go-llm" "$ROOT/go-src"
 git archive 92c2483aa8f51c7b419fb346fcc202d5f5867b4c | tar -x -C "$ROOT/go-llm"
 TC="$(go env GOMODCACHE)/golang.org/toolchain@v0.0.1-go1.27.1.darwin-arm64"
