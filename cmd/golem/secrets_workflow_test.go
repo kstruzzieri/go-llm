@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -56,14 +57,21 @@ import (
 //     "" elsewhere.
 //   - Message: the user- or model-visible text of the block: one of the four
 //     pinned texts (see pinnedMessage), "" when nothing was blocked. Row 12
-//     appends whether the blocked text had already streamed to the user.
-//   - ContinuationSucceeds: the row's completion probe (file bytes, a second
-//     run, the delivered answer). On the protection rows (14a-c) the probe is
-//     delivery (BC4): true means the surrogate reached the wire, the file or
-//     the MCP server.
+//     appends whether the blocked text had already streamed to the user; row
+//     9a appends whether replacing a mixed result was protection or an
+//     overblock.
+//   - ContinuationSucceeds: spec §5.5 "prescribed continuation succeeds", on
+//     every row: the row's completion probe (file bytes, a second run, the
+//     delivered answer).
+//   - Delivered: see the field.
 type secretsRowResult struct {
 	FirstBoundary, Hook, RunOutcome, ParentOutcome, Message string
 	ContinuationSucceeds                                    bool
+	// Delivered is meaningful only on the protection rows 14a-c (BC4): the
+	// surrogate reached its sink, read from the serialized next wire request
+	// (14a), the file bytes (14b) or the server-recorded MCP argument (14c).
+	// Every other row leaves it false.
+	Delivered bool
 }
 
 // secretsRow is one workflow row. ID is the spec §5.5 row number, lettered
@@ -155,13 +163,33 @@ func (f *fixture) continued(t *testing.T) bool {
 	return readFile(t, filepath.Join(f.Root, "DONE.txt")) == "done\n"
 }
 
+// wireRecorder keeps every request the scripted model receives, as sent.
+type wireRecorder struct {
+	agent.ModelCaller
+	reqs []provider.ChatRequest
+}
+
+func (w *wireRecorder) Chat(ctx context.Context, req provider.ChatRequest, onToken func(provider.ChatResponse) error) (agent.ModelResult, error) {
+	w.reqs = append(w.reqs, req)
+	return w.ModelCaller.Chat(ctx, req, onToken)
+}
+
+// request returns the i-th wire request (0 is the first model call).
+func (w *wireRecorder) request(t *testing.T, i int) provider.ChatRequest {
+	t.Helper()
+	if i >= len(w.reqs) {
+		t.Fatalf("wire request %d of %d", i, len(w.reqs))
+	}
+	return w.reqs[i]
+}
+
 // script runs calls, then a final answer, through the arm's orchestrator.
 // scriptCaller streams each response through onToken before returning it.
-func (f *fixture) script(t *testing.T, goal, answers string, calls ...agent.ModelResult) (agent.Result, *scriptCaller, error) {
+func (f *fixture) script(t *testing.T, goal, answers string, calls ...agent.ModelResult) (agent.Result, *wireRecorder, error) {
 	t.Helper()
-	caller := &scriptCaller{responses: append(calls, answer("done"))}
-	res, err := f.runRequest(t, caller, agent.Request{Goal: goal, Tools: f.tools, Approver: f.approver(answers), MaxSteps: len(calls) + 1}, nil)
-	return res, caller, err
+	w := &wireRecorder{ModelCaller: &scriptCaller{responses: append(calls, answer("done"))}}
+	res, err := f.runRequest(t, w, agent.Request{Goal: goal, Tools: f.tools, Approver: f.approver(answers), MaxSteps: len(calls) + 1}, nil)
+	return res, w, err
 }
 
 // observeRun reads a row result off one Run: the first block-or-higher
@@ -231,9 +259,20 @@ func blockedLine(msgs []provider.ChatMessage) string {
 	return ""
 }
 
-// carries reports whether any message of a wire request holds v.
-func carries(req provider.ChatRequest, v string) bool {
-	return slices.ContainsFunc(req.Messages, func(m provider.ChatMessage) bool { return strings.Contains(m.Content, v) })
+// wireCarries reports whether the serialized request holds s (ruling R23):
+// the probe reads the bytes a provider would receive, with s JSON-escaped the
+// same way, never the agent transcript.
+func wireCarries(t *testing.T, req provider.ChatRequest, s string) bool {
+	t.Helper()
+	b, err := json.Marshal(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	enc, err := json.Marshal(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return bytes.Contains(b, enc[1:len(enc)-1])
 }
 
 // readThenContinue reads paths with read_file, then writes DONE.txt.
@@ -322,6 +361,32 @@ func (m mixedRetrieve) Invoke(context.Context, json.RawMessage) (agent.ToolResul
 		group.Alternatives = append(group.Alternatives, agent.ContextAlternative{Desc: verbatim, Content: a})
 	}
 	return agent.ToolResult{Content: m.alts[0], Context: &agent.ContextSet{Groups: []agent.ContextGroup{group}}}, nil
+}
+
+// mixedRetrieval runs retrieve (mixedRetrieve over alts, mixed assembly on)
+// then the DONE continuation, and returns the row result with a probe over the
+// serialized request that follows the retrieval.
+func mixedRetrieval(t *testing.T, chain []agent.Interceptor, alts []string) (secretsRowResult, func(string) bool) {
+	t.Helper()
+	f := rowFixture(t, "", fixtureOpts{chain: chain, progressive: true}, nil)
+	f.tools = append(f.tools, mixedRetrieve{alts: alts})
+	res, w, err := f.script(t, "how does the billing client deploy?", "", call("retrieve", map[string]any{"query": "billing client deploy"}), done())
+	r := observeRun(t, res, err)
+	r.ContinuationSucceeds = f.continued(t)
+	next := w.request(t, 1)
+	return r, func(s string) bool { return wireCarries(t, next, s) }
+}
+
+// withoutSecrets is chain minus Secrets, order kept: the counterfactual a
+// G+S row compares against.
+func withoutSecrets(chain []agent.Interceptor) []agent.Interceptor {
+	var out []agent.Interceptor
+	for _, ic := range chain {
+		if _, ok := ic.(interceptor.Secrets); !ok {
+			out = append(out, ic)
+		}
+	}
+	return out
 }
 
 // rowEmbedder is index_test.go's fake embedder: one fixed vector in one
@@ -439,15 +504,23 @@ func secretsWorkflowRows() []secretsRow {
 				r.ContinuationSucceeds = f.continued(t)
 				return r
 			}},
-		{ID: "7a", Class: string(secrettest.ExpectedSensitive), Surface: "tool-call guard: read_file of .npmrc and .ssh/config",
+		// Row 7 reads one path per variant: observeRun records the first block
+		// only, so a second path in the same run could lose its refusal unseen.
+		{ID: "7a", Class: string(secrettest.ExpectedSensitive), Surface: "tool-call guard: read_file of .npmrc (credential basename)",
 			Run: func(t *testing.T, chain []agent.Interceptor) secretsRowResult {
-				files := map[string]string{".npmrc": npmrcWith(surrogate(t, "npm")), ".ssh/config": sshConfig}
-				return readThenContinue(t, chain, files, ".npmrc", ".ssh/config")
+				return readThenContinue(t, chain, map[string]string{".npmrc": npmrcWith(surrogate(t, "npm"))}, ".npmrc")
 			}},
-		{ID: "7b", Class: string(secrettest.SyntheticFixture), Surface: "tool observation: read_file of npmrc.fixture and testdata/ssh_config",
+		{ID: "7b", Class: string(secrettest.Benign), Surface: "tool-call guard: read_file of .ssh/config (credential directory; IdentityFile path only)",
 			Run: func(t *testing.T, chain []agent.Interceptor) secretsRowResult {
-				files := map[string]string{"npmrc.fixture": npmrcWith(surrogate(t, "npm")), "testdata/ssh_config": sshConfig}
-				return readThenContinue(t, chain, files, "npmrc.fixture", "testdata/ssh_config")
+				return readThenContinue(t, chain, map[string]string{".ssh/config": sshConfig}, ".ssh/config")
+			}},
+		{ID: "7c", Class: string(secrettest.SyntheticFixture), Surface: "tool observation: read_file of npmrc.fixture",
+			Run: func(t *testing.T, chain []agent.Interceptor) secretsRowResult {
+				return readThenContinue(t, chain, map[string]string{"npmrc.fixture": npmrcWith(surrogate(t, "npm"))}, "npmrc.fixture")
+			}},
+		{ID: "7d", Class: string(secrettest.Benign), Surface: "tool observation: read_file of testdata/ssh_config (IdentityFile path only)",
+			Run: func(t *testing.T, chain []agent.Interceptor) secretsRowResult {
+				return readThenContinue(t, chain, map[string]string{"testdata/ssh_config": sshConfig}, "testdata/ssh_config")
 			}},
 		{ID: "8", Class: string(secrettest.SyntheticFixture), Surface: "verifier observation: a failing test prints a snapshot holding a fake token after a write",
 			Run: func(t *testing.T, chain []agent.Interceptor) secretsRowResult {
@@ -476,17 +549,37 @@ func secretsWorkflowRows() []secretsRow {
 				r.ContinuationSucceeds = readFile(t, filepath.Join(f.Root, "render.go")) == render && f.continued(t)
 				return r
 			}},
-		{ID: "9a", Class: string(secrettest.ExpectedSensitive), Surface: "mixed-context alternatives: retrieval with one sensitive alternative among clean ones",
+		{ID: "9a", Class: string(secrettest.ExpectedSensitive), Surface: "mixed-context alternatives: retrieval with one sensitive alternative (not the one assembly selects) among clean ones",
 			Run: func(t *testing.T, chain []agent.Interceptor) secretsRowResult {
-				f := rowFixture(t, "", fixtureOpts{chain: chain, progressive: true}, nil)
-				f.tools = append(f.tools, mixedRetrieve{alts: []string{
-					"The billing client retries 429 responses with backoff.\n",
-					"Deploy with the service key " + surrogate(t, "openai") + ".\n",
-					"Invoices are generated nightly.\n",
-				}})
-				res, _, err := f.script(t, "how does the billing client deploy?", "", call("retrieve", map[string]any{"query": "billing client deploy"}), done())
-				r := observeRun(t, res, err)
-				r.ContinuationSucceeds = f.continued(t)
+				alts := []string{
+					"The billing client retries 429 responses with backoff.",
+					"Deploy with the service key " + surrogate(t, "openai") + ".",
+					"Invoices are generated nightly.",
+				}
+				r, wire := mixedRetrieval(t, chain, alts)
+				carried := func(w func(string) bool) [3]bool { return [3]bool{w(alts[0]), w(alts[1]), w(alts[2])} }
+				if !strings.HasPrefix(r.Message, "tool result blocked by interceptor ") {
+					// Accepted: the wire carries exactly the alternative assembly
+					// selects. mixed_alloc.go admits alternative 0, then upgrades to
+					// the cheapest affordable later-declared one (step 5): the third,
+					// shorter than the second, with nothing declared after it. So the
+					// sensitive second alternative never reaches the model.
+					if got := carried(wire); got != [3]bool{false, false, true} {
+						t.Fatalf("accepted mixed result: wire carries alternatives %v, want the third only", got)
+					}
+					return r
+				}
+				// Replaced: the blocked line is all that reaches the wire.
+				if got := carried(wire); !wire(r.Message) || got != [3]bool{} {
+					t.Fatalf("replaced mixed result: wire carries the blocked line %v and alternatives %v, want the line only", wire(r.Message), got)
+				}
+				// Protection or overblock: would the same result, assembled
+				// without Secrets, have put the sensitive alternative on the wire?
+				if _, shadow := mixedRetrieval(t, withoutSecrets(chain), alts); shadow(alts[1]) {
+					r.Message += " (protection: assembly delivers the sensitive alternative)"
+				} else {
+					r.Message += " (overblock: assembly never delivers the sensitive alternative)"
+				}
 				return r
 			}},
 		{ID: "9b", Class: string(secrettest.ExpectedSensitive), Surface: "index time (outside the hooks): real rag indexing of a doc holding a key, then progressive retrieval",
@@ -513,12 +606,12 @@ func secretsWorkflowRows() []secretsRow {
 				}
 				// Golem's retrieve tool shape (cmd/golem/tools.go), progressive.
 				f.tools = append(f.tools, &agenttools.Retrieve{R: retr, K: 5, MaxTokens: 2048, Progressive: true})
-				res, caller, err := f.script(t, "how does the billing client deploy?", "", call("retrieve", map[string]any{"query": "billing client deploy"}), done())
+				res, w, err := f.script(t, "how does the billing client deploy?", "", call("retrieve", map[string]any{"query": "billing client deploy"}), done())
 				r := observeRun(t, res, err)
 				// The indexer is the first effective boundary only if its scrub
 				// held: it reported a policy outcome and the value never reached
-				// the model.
-				if r.FirstBoundary == "" && scrubbed && !carries(caller.lastRequest, key) {
+				// the model (the request that follows the retrieval).
+				if r.FirstBoundary == "" && scrubbed && !wireCarries(t, w.request(t, 1), key) {
 					r.FirstBoundary = "indexer"
 				}
 				r.ContinuationSucceeds = f.continued(t)
@@ -633,14 +726,22 @@ func secretsWorkflowRows() []secretsRow {
 			Run: func(t *testing.T, chain []agent.Interceptor) secretsRowResult {
 				key := surrogate(t, "openai")
 				f := rowFixture(t, "", fixtureOpts{chain: chain}, map[string]string{"deploy/service.yaml": "endpoint: https://api.example.com\nkey: " + key + "\n"})
-				res, caller, err := f.script(t, "check the deploy config", "", call("read_file", map[string]string{"path": "deploy/service.yaml"}))
+				res, w, err := f.script(t, "check the deploy config", "", call("read_file", map[string]string{"path": "deploy/service.yaml"}), done())
 				r := observeRun(t, res, err)
-				r.ContinuationSucceeds = carries(caller.lastRequest, key)
+				r.Delivered = wireCarries(t, w.request(t, 1), key) // the request that follows the read
+				r.ContinuationSucceeds = f.continued(t)
 				return r
 			}},
 		{ID: "14b", Class: string(secrettest.ExpectedSensitive), Surface: "protection, write arguments: do the key's bytes reach the file?",
 			Run: func(t *testing.T, chain []agent.Interceptor) secretsRowResult {
-				return writeThenProbe(t, chain, "exports/creds.txt", "deploy key "+surrogate(t, "openai")+"\n")
+				key := surrogate(t, "openai")
+				f := rowFixture(t, "", fixtureOpts{chain: chain}, nil)
+				mkdirs(t, f.Root, "exports")
+				res, _, err := f.script(t, "export the deploy key", "", call("write_file", map[string]string{"path": "exports/creds.txt", "content": "deploy key " + key + "\n"}), done())
+				r := observeRun(t, res, err)
+				r.Delivered = strings.Contains(readFile(t, filepath.Join(f.Root, "exports/creds.txt")), key)
+				r.ContinuationSucceeds = f.continued(t)
+				return r
 			}},
 		{ID: "14c", Class: string(secrettest.ExpectedSensitive), Surface: "protection, MCP arguments: does the key reach the server-recorded argument?",
 			Run: func(t *testing.T, chain []agent.Interceptor) secretsRowResult {
@@ -673,11 +774,12 @@ func secretsWorkflowRows() []secretsRow {
 				}
 				f := rowFixture(t, "", fixtureOpts{chain: chain}, nil)
 				f.tools = append(f.tools, mgr.Tools()...)
-				res, _, err := f.script(t, "save the deploy key to my notes", "y\n", call("mcp__notes__record", map[string]string{"content": "deploy key " + key}))
+				res, _, err := f.script(t, "save the deploy key to my notes", "y\n", call("mcp__notes__record", map[string]string{"content": "deploy key " + key}), done())
 				r := observeRun(t, res, err)
 				mu.Lock()
 				defer mu.Unlock()
-				r.ContinuationSucceeds = slices.ContainsFunc(recorded, func(a string) bool { return strings.Contains(a, key) })
+				r.Delivered = slices.ContainsFunc(recorded, func(a string) bool { return strings.Contains(a, key) })
+				r.ContinuationSucceeds = f.continued(t)
 				return r
 			}},
 	}
@@ -755,6 +857,9 @@ func TestSecretsWorkflowTable(t *testing.T) {
 	replaced := func(msg string) secretsRowResult {
 		return secretsRowResult{FirstBoundary: "secrets", Hook: "input", RunOutcome: "completed", Message: msg, ContinuationSucceeds: true}
 	}
+	guarded := secretsRowResult{FirstBoundary: "guard", Hook: "tool_call", RunOutcome: "completed", Message: "tool call blocked by interceptor invariants (credential_path)", ContinuationSucceeds: true}
+	delivered := clean
+	delivered.Delivered = true
 	want := map[string][2]secretsRowResult{ // [G, G+S]
 		// Templates carry no supported shape: nothing acts under either arm.
 		"1": {clean, clean},
@@ -778,18 +883,21 @@ func TestSecretsWorkflowTable(t *testing.T) {
 		// observations is replaced, and three consecutive tool errors stop
 		// the run before the continuation.
 		"6": {clean, {FirstBoundary: "secrets", Hook: "input", RunOutcome: "tool_error_cap_reached", Message: resultOpen}},
-		// Guard first: the credential-path refusal happens under G, so it is
-		// the first boundary under both arms; the fixture copies reach Secrets.
-		"7a": {
-			{FirstBoundary: "guard", Hook: "tool_call", RunOutcome: "completed", Message: "tool call blocked by interceptor invariants (credential_path)", ContinuationSucceeds: true},
-			{FirstBoundary: "guard", Hook: "tool_call", RunOutcome: "completed", Message: "tool call blocked by interceptor invariants (credential_path)", ContinuationSucceeds: true},
-		},
-		"7b": {clean, replaced("tool result blocked by interceptor secrets (sensitive_npm_token)")},
+		// Guard first: each credential-path refusal (basename .npmrc, directory
+		// .ssh) happens under G, so it is the first boundary under both arms;
+		// the fixture copies reach Secrets, which blocks only the npm token.
+		"7a": {guarded, guarded},
+		"7b": {guarded, guarded},
+		"7c": {clean, replaced("tool result blocked by interceptor secrets (sensitive_npm_token)")},
+		"7d": {clean, clean},
 		// Verifier observation: recoverable after the mutation (the probe
 		// requires render.go written).
 		"8": {clean, replaced(resultOpen)},
-		// Mixed alternatives: one finding replaces the whole result.
-		"9a": {clean, replaced(resultOpen)},
+		// Mixed alternatives: one finding replaces the whole result. Here that
+		// is an overblock: assembly selects only the third alternative (the row
+		// checks the G wire), so the sensitive second one would never have
+		// reached the model.
+		"9a": {clean, replaced(resultOpen + " (overblock: assembly never delivers the sensitive alternative)")},
 		// The indexer scrubs at index time under both arms.
 		"9b": {
 			{FirstBoundary: "indexer", RunOutcome: "completed", ContinuationSucceeds: true},
@@ -812,11 +920,12 @@ func TestSecretsWorkflowTable(t *testing.T) {
 		},
 		"13b": {clean, terminal("input")},
 		// Protection (BC4): under G the surrogate reaches the wire, the file
-		// and the MCP server (ContinuationSucceeds is the delivery probe);
-		// under G+S it reaches none of them.
-		"14a": {clean, {FirstBoundary: "secrets", Hook: "input", RunOutcome: "completed", Message: resultOpen}},
-		"14b": {clean, terminal("output")},
-		"14c": {clean, terminal("output")},
+		// and the MCP server (Delivered); under G+S it reaches none of them.
+		// The continuation survives the recoverable observation block (14a)
+		// and not the terminal output blocks (14b, 14c).
+		"14a": {delivered, replaced(resultOpen)},
+		"14b": {delivered, terminal("output")},
+		"14c": {delivered, terminal("output")},
 	}
 
 	rows := secretsWorkflowRows()
