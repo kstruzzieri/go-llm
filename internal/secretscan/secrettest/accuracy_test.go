@@ -335,3 +335,137 @@ func TestOutcomeScoreFollowsCaseScore(t *testing.T) {
 		}
 	}
 }
+
+// TestEvaluateCarriesCoverageGap: a coverage gap stays outside the matrix end to
+// end. Evaluate must copy the flag onto every hook's Outcome; otherwise a gap
+// that fires nothing scores FN (R6).
+func TestEvaluateCarriesCoverageGap(t *testing.T) {
+	t.Parallel()
+	// Same non-firing value; only the flag differs.
+	gap := literalCase("unit-gap", ExpectedSensitive, "", "the build finished", Observation, ToolArgs)
+	gap.CoverageGap = true
+	counted := literalCase("unit-counted", ExpectedSensitive, "openai_token", "the build finished", Observation, ToolArgs)
+	outs := evaluate(t, gap, counted)
+	if len(outs) != 6 {
+		t.Fatalf("got %d outcomes, want 6", len(outs))
+	}
+	for _, o := range outs[:3] {
+		if !o.CoverageGap || o.Score() != "" {
+			t.Errorf("gap %s/%s: CoverageGap=%v Score=%q, want true and empty", o.Carrier, o.Hook, o.CoverageGap, o.Score())
+		}
+	}
+	for _, o := range outs[3:] {
+		if o.CoverageGap || o.Score() != "FN" {
+			t.Errorf("counted %s/%s: CoverageGap=%v Score=%q, want false and FN", o.Carrier, o.Hook, o.CoverageGap, o.Score())
+		}
+	}
+	if rows := Confusions(outs[:3]); len(rows) != 0 {
+		t.Errorf("gap outcomes produced rows: %+v", rows)
+	}
+	want := []Confusion{
+		{Kind: "openai_token", Carrier: Observation, Hook: "input", FN: 1},
+		{Kind: "openai_token", Carrier: ToolArgs, Hook: "output", FN: 1},
+		{Kind: "openai_token", Carrier: ToolArgs, Hook: "tool_call", FN: 1},
+	}
+	if got := Confusions(outs); !slices.Equal(got, want) {
+		t.Errorf("Confusions = %+v, want %+v", got, want)
+	}
+
+	// The committed gap rows, which fire nothing the matrix could count.
+	cases, err := Cases()
+	if err != nil {
+		t.Fatalf("Cases: %v", err)
+	}
+	gaps := map[string]bool{}
+	for _, c := range cases {
+		if c.CoverageGap {
+			gaps[c.ID] = true
+		}
+	}
+	if len(gaps) == 0 {
+		t.Fatal("the table holds no coverage-gap case")
+	}
+	var gapOuts []Outcome
+	for _, o := range evaluate(t, cases...) {
+		if gaps[o.CaseID] {
+			gapOuts = append(gapOuts, o)
+			if !o.CoverageGap {
+				t.Errorf("case %s %s/%s: CoverageGap not carried", o.CaseID, o.Carrier, o.Hook)
+			}
+		}
+	}
+	if len(gapOuts) < len(gaps) {
+		t.Fatalf("%d gap outcomes for %d gap cases", len(gapOuts), len(gaps))
+	}
+	if rows := Confusions(gapOuts); len(rows) != 0 {
+		t.Errorf("committed gap outcomes produced rows: %+v", rows)
+	}
+}
+
+func TestAttribution(t *testing.T) {
+	t.Parallel()
+	o := func(id string, class Class, kind string, carrier Carrier, hook string, kinds ...string) Outcome {
+		return Outcome{CaseID: id, Class: class, Kind: kind, Carrier: carrier, Hook: hook, Any: len(kinds) > 0, Kinds: kinds}
+	}
+	gap := o("gap", ExpectedSensitive, "github_token", Observation, "input", "github_token")
+	gap.CoverageGap = true
+	outs := []Outcome{
+		// One kind's row: fired under its own kind, under another, and among two.
+		o("own", ExpectedSensitive, "github_token", Observation, "input", "github_token"),
+		o("other", ExpectedSensitive, "github_token", Observation, "input", "secret_assignment"),
+		o("among", ExpectedSensitive, "github_token", Observation, "input", "private_key", "github_token"),
+		o("silent", ExpectedSensitive, "github_token", Observation, "input"),
+		// Outside the count even though they fire under the row's kind.
+		gap,
+		o("benign", Benign, "github_token", Observation, "input", "github_token"),
+		o("look", BenignLookalike, "github_token", Observation, "input", "github_token"),
+		o("fix", SyntheticFixture, "github_token", Observation, "input", "github_token"),
+		o("uncl", Unclassified, "github_token", Observation, "input", "github_token"),
+		// Rows split by carrier and hook and sort by kind, carrier, hook.
+		o("call", ExpectedSensitive, "openai_token", ToolArgs, "tool_call", "openai_token"),
+		o("emit", ExpectedSensitive, "openai_token", ToolArgs, "output", "openai_token"),
+		o("seen", ExpectedSensitive, "openai_token", Observation, "input", "secret_assignment"),
+		o("out", ExpectedSensitive, "bearer_token", ToolArgs, "output", "secret_assignment"),
+		// A kind that never fires has no row.
+		o("quiet", ExpectedSensitive, "npm_token", Observation, "input"),
+	}
+	want := []AttributionRow{
+		{Kind: "bearer_token", Carrier: ToolArgs, Hook: "output", Fired: 1, Attributed: 0},
+		{Kind: "github_token", Carrier: Observation, Hook: "input", Fired: 3, Attributed: 2},
+		{Kind: "openai_token", Carrier: Observation, Hook: "input", Fired: 1, Attributed: 0},
+		{Kind: "openai_token", Carrier: ToolArgs, Hook: "output", Fired: 1, Attributed: 1},
+		{Kind: "openai_token", Carrier: ToolArgs, Hook: "tool_call", Fired: 1, Attributed: 1},
+	}
+	if got := Attribution(outs); !slices.Equal(got, want) {
+		t.Errorf("Attribution =\n%+v\nwant\n%+v", got, want)
+	}
+}
+
+// TestAttributionOnTable pins the committed table: every expected-sensitive
+// case that fires does so under its own kind, on every carrier and hook. The
+// two literals are the TP counts of the private_key and secret_assignment
+// rows.
+func TestAttributionOnTable(t *testing.T) {
+	t.Parallel()
+	cases, err := Cases()
+	if err != nil {
+		t.Fatalf("Cases: %v", err)
+	}
+	rows := Attribution(evaluate(t, cases...))
+	if len(rows) == 0 {
+		t.Fatal("no attribution rows")
+	}
+	for _, r := range rows {
+		if r.Attributed != r.Fired {
+			t.Errorf("%s %s/%s: %d of %d fired outcomes attributed to the case's kind", r.Kind, r.Carrier, r.Hook, r.Attributed, r.Fired)
+		}
+	}
+	for _, want := range []AttributionRow{
+		{Kind: "private_key", Carrier: Observation, Hook: "input", Fired: 8, Attributed: 8},
+		{Kind: "secret_assignment", Carrier: ToolArgs, Hook: "tool_call", Fired: 18, Attributed: 18},
+	} {
+		if !slices.Contains(rows, want) {
+			t.Errorf("rows lack %+v", want)
+		}
+	}
+}

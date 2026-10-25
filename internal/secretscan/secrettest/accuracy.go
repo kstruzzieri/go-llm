@@ -197,6 +197,46 @@ func Confusions(outs []Outcome) []Confusion {
 	return rows
 }
 
+// AttributionRow separates "any sensitive finding" from kind attribution
+// (spec §5.4) for one kind on one carrier at one hook. Fired counts the
+// expected-sensitive, non-gap outcomes where any finding fired; Attributed
+// counts those whose findings named the case's own Kind. Scan merges
+// overlapping spans by precedence, so a case can fire under another kind.
+type AttributionRow struct {
+	Kind              string
+	Carrier           Carrier
+	Hook              string
+	Fired, Attributed int
+}
+
+// Attribution tallies AttributionRow for the expected-sensitive, non-gap
+// outcomes that fired. A row exists only if it counts an outcome, so a kind
+// whose cases all fell silent has none (its misses are the Confusions FN
+// cells). Rows are sorted by kind, carrier, then hook.
+func Attribution(outs []Outcome) []AttributionRow {
+	var rows []AttributionRow
+	for _, o := range outs {
+		if o.Class != ExpectedSensitive || o.CoverageGap || !o.Any {
+			continue
+		}
+		i := slices.IndexFunc(rows, func(r AttributionRow) bool {
+			return r.Kind == o.Kind && r.Carrier == o.Carrier && r.Hook == o.Hook
+		})
+		if i < 0 {
+			rows = append(rows, AttributionRow{Kind: o.Kind, Carrier: o.Carrier, Hook: o.Hook})
+			i = len(rows) - 1
+		}
+		rows[i].Fired++
+		if slices.Contains(o.Kinds, o.Kind) {
+			rows[i].Attributed++
+		}
+	}
+	slices.SortFunc(rows, func(a, b AttributionRow) int {
+		return cmp.Or(strings.Compare(a.Kind, b.Kind), strings.Compare(string(a.Carrier), string(b.Carrier)), strings.Compare(a.Hook, b.Hook))
+	})
+	return rows
+}
+
 // Tables splits out the outcomes tabulated apart from the confusion matrix:
 // benign lookalikes and synthetic fixtures, each in input order and including
 // coverage-gap rows.
