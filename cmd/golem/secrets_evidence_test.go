@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -323,43 +324,78 @@ func TestSecretsEvidenceSections(t *testing.T) {
 	}
 }
 
-// firedSecretsBlocks counts, per (stratum, carrier), the fired observations
-// carrying a Secrets block and no guard block, adversarial fixtures excluded,
-// and how many of those blocked the call: the test's own derivation, from the
-// fired rows rather than the aggregates the renderer reads.
-func firedSecretsBlocks(c censusResultsDoc) (blocks map[[2]string]int, callBlocks int) {
+// firedSecretsTally is the test's own derivation of the census's Secrets
+// side, from the committed fired rows and the manifest strata rather than the
+// aggregates and renderer code: an observation counts when a Secrets finding
+// blocks it, no guard blocks it (G would too) and no detector blocks its call
+// (G+S never reaches the hooks; cmd/llm-bench deriveArm).
+type firedSecretsTally struct {
+	blocks     map[[2]string]int             // (stratum, carrier): benign observations
+	callBlocks int                           // of those, blocks of the call
+	files      map[string]map[string]bool    // stratum: benign paths, any file carrier
+	ruleFiles  map[[2]string]map[string]bool // (stratum, rule without sensitive_): benign paths
+	advObs     map[string]int                // stratum: adversarial-fixture observations
+	advFiles   map[string]map[string]bool    // stratum: adversarial-fixture paths
+}
+
+func tallyFiredSecrets(c censusResultsDoc) firedSecretsTally {
 	adversarial := map[[2]string]bool{}
 	for _, s := range c.Strata {
 		for p := range s.Adversarial {
 			adversarial[[2]string{s.Name, p}] = true
 		}
 	}
-	blocks = map[[2]string]int{}
-	for _, o := range c.Fired {
-		if o.Carrier != "search" && adversarial[[2]string{o.Stratum, o.Path}] {
-			continue
+	add := func(m map[string]map[string]bool, k, path string) {
+		if m[k] == nil {
+			m[k] = map[string]bool{}
 		}
-		secrets, guard, call := false, false, false
+		m[k][path] = true
+	}
+	tally := firedSecretsTally{blocks: map[[2]string]int{}, files: map[string]map[string]bool{}, ruleFiles: map[[2]string]map[string]bool{},
+		advObs: map[string]int{}, advFiles: map[string]map[string]bool{}}
+	for _, o := range c.Fired {
+		var rules []string
+		guard, detectorCall, call := false, false, false
 		for _, f := range o.Findings {
 			if f.Verdict != "block" {
 				continue
 			}
+			ingress := f.Target == "message" || f.Target == "alternative"
 			switch f.Interceptor {
 			case "secrets":
-				secrets = true
-				call = call || (f.Target != "message" && f.Target != "alternative")
+				rules = append(rules, strings.TrimPrefix(f.Rule, "sensitive_"))
+				call = call || !ingress
 			case "invariants", "egress", "child_scope_denials":
 				guard = true
+			default:
+				detectorCall = detectorCall || !ingress
 			}
 		}
-		if secrets && !guard {
-			blocks[[2]string{o.Stratum, o.Carrier}]++
-			if call {
-				callBlocks++
+		if len(rules) == 0 || guard || detectorCall {
+			continue
+		}
+		if o.Carrier != "search" && adversarial[[2]string{o.Stratum, o.Path}] {
+			tally.advObs[o.Stratum]++
+			add(tally.advFiles, o.Stratum, o.Path)
+			continue
+		}
+		tally.blocks[[2]string{o.Stratum, o.Carrier}]++
+		if call {
+			tally.callBlocks++
+		}
+		if o.Carrier == "search" {
+			continue
+		}
+		add(tally.files, o.Stratum, o.Path)
+		for _, r := range rules {
+			k := [2]string{o.Stratum, r}
+			if tally.ruleFiles[k] == nil {
+				tally.ruleFiles[k] = map[string]bool{}
 			}
+			tally.ruleFiles[k][o.Path] = true
 		}
 	}
-	return blocks, callBlocks
+	return tally
 }
 
 // section returns the text of the "## " section headed h, up to the next one.
@@ -442,7 +478,8 @@ func TestSecretsGateEvaluation(t *testing.T) {
 				terminal++
 			}
 		}
-		sBlocks, sCallBlocks := firedSecretsBlocks(in.census)
+		tally := tallyFiredSecrets(in.census)
+		sBlocks, sCallBlocks := tally.blocks, tally.callBlocks
 		if terminal+sCallBlocks > k1TaskFailureBudget {
 			v[2] = false
 		}
@@ -474,18 +511,51 @@ func TestSecretsGateEvaluation(t *testing.T) {
 	if w := want(in); !maps.Equal(got, w) {
 		t.Errorf("committed inputs: gate items %v, want %v", got, w)
 	}
-	// The census table's Secrets blocks, read from the aggregates, equal the
-	// count re-derived from the committed fired rows.
-	blocks, _ := firedSecretsBlocks(in.census)
+	// Every census number the report prints, re-derived from the committed
+	// fired rows and manifest strata (spec §5.4: by observation and by file).
+	tally := tallyFiredSecrets(in.census)
 	censusText := section(t, doc, "## Census (Secrets side)")
+	advDenominator := map[string]int{}
 	for _, a := range in.census.Aggregates {
 		if a.Arm != "guards+secrets" {
 			continue
 		}
-		row := fmt.Sprintf("| %s | %s | %d | %d | %d/%d (", a.Stratum, a.Carrier, a.Observations, a.Files, blocks[[2]string{a.Stratum, a.Carrier}], a.Observations)
+		advDenominator[a.Stratum] += a.AdversarialFixture
+		row := fmt.Sprintf("| %s | %s | %d | %d | %d/%d (", a.Stratum, a.Carrier, a.Observations, a.Files, tally.blocks[[2]string{a.Stratum, a.Carrier}], a.Observations)
 		if !strings.Contains(censusText, row) {
-			t.Errorf("census table has no row starting %q", row)
+			t.Errorf("by-observation table has no row starting %q", row)
 		}
+	}
+	for _, s := range in.census.Strata {
+		n := s.Files - len(s.Adversarial)
+		if row := fmt.Sprintf("\n| %s | %d | %d/%d (", s.Name, n, len(tally.files[s.Name]), n); !strings.Contains(censusText, row) {
+			t.Errorf("by-file table has no row starting %q", row[1:])
+		}
+		want := fmt.Sprintf("\n- %s: no file is classed adversarial-fixture.\n", s.Name)
+		if len(s.Adversarial) > 0 {
+			want = fmt.Sprintf("\n- %s: Secrets blocks %d/%d (", s.Name, tally.advObs[s.Name], advDenominator[s.Name])
+			files := fmt.Sprintf(" in %d/%d (", len(tally.advFiles[s.Name]), len(s.Adversarial))
+			i := strings.Index(censusText, want)
+			if line, _, _ := strings.Cut(censusText[max(i, 0)+1:], "\n"); i < 0 || !strings.Contains(line, files) {
+				t.Errorf("adversarial-fixture line for %s: want %q with %q", s.Name, want[1:], files)
+			}
+			continue
+		}
+		if !strings.Contains(censusText, want) {
+			t.Errorf("adversarial-fixture line for %s: want %q", s.Name, want[1:])
+		}
+	}
+	gotRules := map[[2]string]int{}
+	for _, m := range regexp.MustCompile("(?m)^\\| (\\S+) \\| `([a-z_]+)` \\| (\\d+) \\|$").FindAllStringSubmatch(censusText, -1) {
+		n, _ := strconv.Atoi(m[3])
+		gotRules[[2]string{m[1], m[2]}] = n
+	}
+	wantRules := map[[2]string]int{}
+	for k, paths := range tally.ruleFiles {
+		wantRules[k] = len(paths)
+	}
+	if !maps.Equal(gotRules, wantRules) {
+		t.Errorf("per-rule file table %v, want %v", gotRules, wantRules)
 	}
 	line := decisionLine(t, doc)
 	for _, s := range []string{"Secrets default: retain opt-in", "item 4 (row 3 terminal", "item 6 (#518"} {
