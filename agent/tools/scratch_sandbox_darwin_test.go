@@ -125,3 +125,40 @@ func TestScratchSeatbeltClonedTreePassesLinkValidation(t *testing.T) {
 		t.Fatalf("command must see the cloned bytes: %s", res.Content)
 	}
 }
+
+// TestScratchSeatbeltExecConfinement is the exec analog of the composition
+// test (#708): under Seatbelt+scratch, a clone-local executable runs, while an
+// executable addressed by its absolute path in the canonical workspace is
+// refused. Scratch rewrites the workspace root, cwd and a workspace-local
+// executable to the clone, but leaves argv and the environment as approved, so
+// an absolute canonical child path is outside the scratch profile's exec
+// allowance. M-scratch (add the canonical root to the exec filter) turns the
+// refusal leg green and so is caught here.
+func TestScratchSeatbeltExecConfinement(t *testing.T) {
+	cc := seatbeltHasCC(t)
+	root := buildIsolationWorkspace(t)
+	canonExe := buildSeatbeltExe(t, cc, root, "canon-exe", markerExeSource())
+	rc, _ := scratchSeatbeltTools(t, root)
+
+	// Clone-local exec: copy a system binary into the scratch cwd and run it
+	// by a relative path. It lives in the clone, so the exec filter allows it.
+	res := planAndInvoke(t, rc, `{"argv":["sh","-c","cp /usr/bin/true ./clone-exe && ./clone-exe && echo CLONE-EXEC-OK"]}`)
+	if res.IsError {
+		t.Fatalf("clone-local exec is a normal observation, not an infra error: %s", res.Content)
+	}
+	if !strings.Contains(res.Content, "exit code: 0") || !strings.Contains(res.Content, "CLONE-EXEC-OK") {
+		t.Fatalf("clone-local executable must run under Seatbelt+scratch:\n%s", res.Content)
+	}
+
+	// Canonical absolute exec: the executable exists in the canonical tree,
+	// but that path is outside the scratch profile, so the launch is refused
+	// and its marker never appears.
+	raw := fmt.Sprintf(`{"argv":["sh","-c","%s"]}`, canonExe)
+	res = planAndInvoke(t, rc, raw)
+	if res.IsError {
+		t.Fatalf("denied exec is a normal non-zero observation: %s", res.Content)
+	}
+	if strings.Contains(res.Content, "exit code: 0") || strings.Contains(res.Content, seatbeltMarker) {
+		t.Fatalf("canonical absolute exec must be refused under Seatbelt+scratch:\n%s", res.Content)
+	}
+}

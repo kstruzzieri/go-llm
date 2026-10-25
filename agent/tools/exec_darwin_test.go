@@ -2693,6 +2693,13 @@ func TestSeatbeltExecRestrictedToAllowances(t *testing.T) {
 					t.Fatal(err)
 				}
 				spec := seatbeltShellSpec(t, ws, fmt.Sprintf("exec %q %s", foreignExe, marker))
+				// Route-specific refusal oracle (#708): a shell `exec` of an
+				// outside target is refused with exit 126 and a /bin/sh
+				// diagnostic naming the target. Assert that one diagnostic
+				// line, not all of stderr (the /private/var/select/sh selector
+				// line is unrelated noise).
+				const wantExit = 126
+				wantDiag := foreignExe + ": Operation not permitted"
 				if background {
 					out := &lockedBuffer{}
 					proc, err := backend.Start(spec, out, out)
@@ -2700,15 +2707,18 @@ func TestSeatbeltExecRestrictedToAllowances(t *testing.T) {
 						t.Fatal(err)
 					}
 					defer func() { _ = proc.Kill() }()
-					if code, _, err := proc.Wait(); err != nil || code == 0 || strings.Contains(out.String(), marker) {
-						t.Fatalf("outside executable: exit=%d err=%v output=%s", code, err, out.String())
+					code, _, err := proc.Wait()
+					if err != nil || code != wantExit || strings.Contains(out.String(), marker) ||
+						!strings.Contains(out.String(), wantDiag) {
+						t.Fatalf("outside executable: exit=%d (want %d) err=%v output=%s", code, wantExit, err, out.String())
 					}
 				} else {
 					ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 					defer cancel()
 					res, err := backend.Run(ctx, spec)
-					if err != nil || res.ExitCode == 0 || strings.Contains(string(res.Stdout), marker) {
-						t.Fatalf("outside executable: result=%+v err=%v stdout=%s", res, err, res.Stdout)
+					if err != nil || res.ExitCode != wantExit || strings.Contains(string(res.Stdout), marker) ||
+						!strings.Contains(string(res.Stderr), wantDiag) {
+						t.Fatalf("outside executable: result=%+v err=%v", res, err)
 					}
 				}
 			})
