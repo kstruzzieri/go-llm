@@ -76,6 +76,7 @@ func TestCasesValidate(t *testing.T) {
 		{"mandatory not sensitive", func(c *Case) { c.Mandatory, c.ExpectAny, c.ExpectKinds = true, true, []string{"openai_token"} }},
 		{"mandatory without expectation", func(c *Case) { c.Class, c.Mandatory = ExpectedSensitive, true }},
 		{"coverage gap expecting", func(c *Case) { c.CoverageGap, c.ExpectAny, c.ExpectKinds = true, true, []string{"openai_token"} }},
+		{"coverage gap with kind", func(c *Case) { c.CoverageGap, c.Kind = true, "secret_assignment" }},
 		{"template without marker", func(c *Case) { c.Template = "a" }},
 		{"template marker twice", func(c *Case) { c.Template = "{{VALUE}}{{VALUE}}" }},
 		{"unknown kind", func(c *Case) { c.Kind = "aws_key" }},
@@ -107,9 +108,12 @@ func TestCasesValidate(t *testing.T) {
 	}
 }
 
-// TestCasesMeetDetectionContract checks every authored expectation against
-// Scan of the rendered value. Failures name kinds only, never the value.
-func TestCasesMeetDetectionContract(t *testing.T) {
+// TestCasesConformToCurrentScanner is the conformance pin: every case's
+// ExpectAny and ExpectKinds prediction must equal Scan of the rendered value,
+// so any scanner change shows up as a diff here. It is a regression pin, not
+// accuracy truth: Class decides TP, FN, FP and TN (TestScoreTruthIsClass).
+// Failures name kinds only, never the value.
+func TestCasesConformToCurrentScanner(t *testing.T) {
 	t.Parallel()
 	cases, err := Cases()
 	if err != nil {
@@ -133,6 +137,74 @@ func TestCasesMeetDetectionContract(t *testing.T) {
 		if (len(kinds) > 0) != c.ExpectAny || !slices.Equal(kinds, c.ExpectKinds) {
 			t.Errorf("case %s: Scan kinds = %v, want %v", c.ID, kinds, c.ExpectKinds)
 		}
+	}
+}
+
+// TestScoreTruthIsClass pins spec §5.2 and ruling R6: truth is the Class,
+// never the ExpectAny prediction, and only coverage gaps leave the matrix.
+func TestScoreTruthIsClass(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		class          Class
+		expectAny, gap bool
+		fired          bool
+		want           string
+	}{
+		{ExpectedSensitive, false, false, false, "FN"},
+		{ExpectedSensitive, true, false, false, "FN"},
+		{ExpectedSensitive, false, false, true, "TP"},
+		{ExpectedSensitive, true, false, true, "TP"},
+		{Benign, false, false, true, "FP"},
+		{Benign, true, false, true, "FP"},
+		{Benign, false, false, false, "TN"},
+		{ExpectedSensitive, false, true, false, ""},
+		{SyntheticFixture, true, false, true, ""},
+		{BenignLookalike, true, false, true, ""},
+		{Unclassified, false, false, true, ""},
+	} {
+		c := Case{Class: tt.class, ExpectAny: tt.expectAny, CoverageGap: tt.gap}
+		if got := c.Score(tt.fired); got != tt.want {
+			t.Errorf("Score(class %s, expect_any %t, gap %t, fired %t) = %q, want %q", tt.class, tt.expectAny, tt.gap, tt.fired, got, tt.want)
+		}
+	}
+
+	// Real rows: sensitive misses the scanner predicts count as FN; only a
+	// family with no rule at all is excluded.
+	cases, err := Cases()
+	if err != nil {
+		t.Fatalf("Cases: %v", err)
+	}
+	want := map[string]string{
+		"openai-env-min-body":                "TP",
+		"openai-env-below-min-body":          "FN",
+		"openai-strings-glued":               "FN",
+		"openai-go-json-escaped-angle":       "FN",
+		"pem-pkcs8-truncated-head":           "FN",
+		"assign-weak-password":               "FN",
+		"card-mistyped-digit":                "FN",
+		"k8s-data-base64-private-key":        "FN",
+		"har-query-string-pair-access-token": "FN",
+		"go-json-escaped-access-token":       "FN",
+		"benign-go-source":                   "TN",
+		"gap-github-oauth-gho":               "",
+		"card-order-number-luhn-valid":       "",
+	}
+	for _, c := range cases {
+		cell, ok := want[c.ID]
+		if !ok {
+			continue
+		}
+		delete(want, c.ID)
+		value, err := c.Render()
+		if err != nil {
+			t.Fatalf("case %s: Render: %v", c.ID, err)
+		}
+		if got := c.Score(len(secretscan.Scan(value)) > 0); got != cell {
+			t.Errorf("case %s: Score = %q, want %q", c.ID, got, cell)
+		}
+	}
+	for id := range want {
+		t.Errorf("case %s missing from the table", id)
 	}
 }
 

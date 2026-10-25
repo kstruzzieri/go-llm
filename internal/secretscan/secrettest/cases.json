@@ -87,6 +87,19 @@
       "expect_any": false
     },
     {
+      "id": "openai-go-json-escaped-angle",
+      "class": "expected-sensitive",
+      "role": "OpenAI key wrapped in angle brackets inside a JSON log line whose encoder wrote them as \\u003c and \\u003e.",
+      "provenance": "Structured log of a Go gateway service, returned by read_file or written with write_file. Value: a surrogate generated at test time in place of a live credential.",
+      "rationale": "The log captured the key the gateway authenticates with; it is an operational credential.",
+      "kind": "openai_token",
+      "carriers": ["observation", "tool-args"],
+      "template": "{\"level\":\"warn\",\"msg\":\"upstream rejected key\",\"key\":\"\\u003c{{VALUE}}\\u003e\"}\n",
+      "generator": "provider",
+      "params": {"prefix_a": "s", "prefix_b": "k-", "len": "48", "charset": "alnum"},
+      "expect_any": false
+    },
+    {
       "id": "openai-task-identifier",
       "class": "benign-lookalike",
       "role": "Queue job identifier of the form task- followed by 24 alphanumerics in a worker log.",
@@ -236,6 +249,19 @@
       "kind": "github_token",
       "carriers": ["observation"],
       "template": "$ strings -n 16 bin/syncer | sed -n '2101,2102p'\nhttp: no Host in request URLdefaultToken{{VALUE}}\n",
+      "generator": "provider",
+      "params": {"prefix_a": "g", "prefix_b": "hp_", "len": "36", "charset": "alnum"},
+      "expect_any": false
+    },
+    {
+      "id": "github-go-json-escaped-html",
+      "class": "expected-sensitive",
+      "role": "GitHub token inside an HTML code element stored in a JSON document whose encoder wrote the angle brackets as \\u003c and \\u003e.",
+      "provenance": "Issue-tracker export written by a Go service, returned by read_file or written with write_file. Value: a surrogate generated at test time in place of a live credential.",
+      "rationale": "A user pasted the release token into an issue; it is an operational credential.",
+      "kind": "github_token",
+      "carriers": ["observation", "tool-args"],
+      "template": "{\"issue\":412,\"body_html\":\"\\u003cp\\u003eUse \\u003ccode\\u003e{{VALUE}}\\u003c/code\\u003e for the release job.\\u003c/p\\u003e\"}\n",
       "generator": "provider",
       "params": {"prefix_a": "g", "prefix_b": "hp_", "len": "36", "charset": "alnum"},
       "expect_any": false
@@ -627,6 +653,19 @@
       "template": "Authorization: Bearer {{VALUE}}\n",
       "generator": "literal",
       "params": {"text": "${API_TOKEN}"},
+      "expect_any": false
+    },
+    {
+      "id": "bearer-docs-underscore-placeholder",
+      "class": "benign-lookalike",
+      "role": "Placeholder text in an API guide's example Authorization header, written with underscores.",
+      "provenance": "docs/api.md in a public repository, returned by read_file.",
+      "rationale": "The words name a slot for the reader's own token; it authenticates nothing.",
+      "kind": "bearer_token",
+      "carriers": ["observation", "tool-args"],
+      "template": "Authorization: Bearer {{VALUE}}\n",
+      "generator": "literal",
+      "params": {"text": "YOUR_ACCESS_TOKEN_HERE"},
       "expect_any": false
     },
     {
@@ -1950,17 +1989,17 @@
       "mandatory": true
     },
     {
-      "id": "gap-k8s-data-base64-key",
+      "id": "k8s-data-base64-private-key",
       "class": "expected-sensitive",
       "role": "Base64-encoded TLS private key in the data block of a Kubernetes Secret manifest.",
       "provenance": "k8s/ingress-tls.yaml in an infrastructure repository, returned by read_file. Value: generated base64 surrogate.",
       "rationale": "The cluster serves production TLS with this key; it is an operational credential.",
+      "kind": "private_key",
       "carriers": ["observation", "tool-args"],
       "template": "apiVersion: v1\nkind: Secret\nmetadata:\n  name: ingress-tls\ntype: kubernetes.io/tls\ndata:\n  tls.key: {{VALUE}}\n",
       "generator": "provider",
       "params": {"prefix_a": "LS0tLS1CRUdJTiBQUklWQVRFIEtFWS0tLS0t", "prefix_b": "Ck1JSUV2UUlCQURBTkJna3Foa2lHOXcwQkFRRUZBQVND", "len": "240", "charset": "base64"},
-      "expect_any": false,
-      "coverage_gap": true
+      "expect_any": false
     },
     {
       "id": "k8s-data-base64-password",
@@ -2023,17 +2062,17 @@
       "mandatory": true
     },
     {
-      "id": "gap-har-query-string-pair",
+      "id": "har-query-string-pair-access-token",
       "class": "expected-sensitive",
       "role": "OAuth access token in a HAR recording's parsed queryString name and value pair.",
       "provenance": "HAR file exported from browser developer tools, returned by read_file. Value: a surrogate generated at test time in place of a live credential.",
       "rationale": "The recording captured a working access token; it is an operational credential.",
+      "kind": "secret_assignment",
       "carriers": ["observation", "tool-args"],
       "template": "{\n  \"log\": {\n    \"version\": \"1.2\",\n    \"creator\": {\n      \"name\": \"devtools\",\n      \"version\": \"1.0\"\n    },\n    \"entries\": [\n      {\n        \"request\": {\n          \"method\": \"GET\",\n          \"url\": \"https://api.example.com/v1/me\",\n          \"queryString\": [\n            {\n              \"name\": \"access_token\",\n              \"value\": \"{{VALUE}}\"\n            }\n          ]\n        }\n      }\n    ]\n  }\n}\n",
       "generator": "provider",
       "params": {"prefix_a": "", "prefix_b": "", "len": "40", "charset": "alnum"},
-      "expect_any": false,
-      "coverage_gap": true
+      "expect_any": false
     },
     {
       "id": "postman-bearer-header",
@@ -2051,17 +2090,17 @@
       "mandatory": true
     },
     {
-      "id": "gap-postman-environment-api-key",
+      "id": "postman-environment-api-key",
       "class": "expected-sensitive",
       "role": "API key stored as a secret-typed variable in a Postman environment export.",
       "provenance": "Postman environment export in a team repository, returned by read_file. Value: a surrogate generated at test time in place of a live credential.",
       "rationale": "The environment supplies a working key to every request; it is an operational credential.",
+      "kind": "secret_assignment",
       "carriers": ["observation", "tool-args"],
       "template": "{\n  \"name\": \"production\",\n  \"values\": [\n    {\n      \"key\": \"base_url\",\n      \"value\": \"https://api.example.com\",\n      \"enabled\": true\n    },\n    {\n      \"key\": \"api_key\",\n      \"value\": \"{{VALUE}}\",\n      \"type\": \"secret\",\n      \"enabled\": true\n    }\n  ]\n}\n",
       "generator": "provider",
       "params": {"prefix_a": "", "prefix_b": "", "len": "32", "charset": "alnum"},
-      "expect_any": false,
-      "coverage_gap": true
+      "expect_any": false
     },
     {
       "id": "gap-curl-x-api-key-header",
@@ -2077,17 +2116,17 @@
       "coverage_gap": true
     },
     {
-      "id": "gap-go-json-escaped-access-token",
+      "id": "go-json-escaped-access-token",
       "class": "expected-sensitive",
       "role": "Access token in a URL query inside a JSON log line whose encoder escaped the ampersand as \\u0026.",
       "provenance": "Structured log of a Go proxy service, returned by read_file. Value: a surrogate generated at test time in place of a live credential.",
       "rationale": "The log captured a working access token; it is an operational credential.",
+      "kind": "secret_assignment",
       "carriers": ["observation", "tool-args"],
       "template": "{\"level\":\"info\",\"msg\":\"proxy request\",\"url\":\"https://api.example.com/v1/items?page=2\\u0026access_token={{VALUE}}\"}\n",
       "generator": "provider",
       "params": {"prefix_a": "", "prefix_b": "", "len": "40", "charset": "alnum"},
-      "expect_any": false,
-      "coverage_gap": true
+      "expect_any": false
     },
     {
       "id": "ssh-config-identity-file",

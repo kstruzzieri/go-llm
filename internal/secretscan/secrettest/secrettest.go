@@ -16,7 +16,6 @@ import (
 	"fmt"
 	"io"
 	"maps"
-	"math/rand/v2"
 	"slices"
 	"strconv"
 	"strings"
@@ -50,12 +49,16 @@ const (
 	ToolArgs    Carrier = "tool-args"
 )
 
-// Case is one row of the table. Role, Provenance and Rationale justify Class
-// without reference to scanner output. Kind is the secretscan stratum the
-// case probes, or empty. ExpectAny and ExpectKinds state what the implemented
-// rules report for the rendered value scanned as plain text: kinds in source
-// order without repeats. Mandatory marks the supported expected-sensitive set
-// of spec §5.6 item 1; CoverageGap marks a family the rules do not cover.
+// Case is one row of the table. Class is the accuracy truth: it is assigned
+// from Role, Provenance and Rationale before any scanning, and Score turns it
+// and an observed result into a confusion cell. Kind is the secretscan
+// stratum the case probes, or empty. ExpectAny and ExpectKinds are a
+// conformance prediction, not truth: they pin what the current rules report
+// for the rendered value scanned as plain text (kinds in source order without
+// repeats), so a scanner change shows up as a diff. They never decide TP, FN,
+// FP or TN. Mandatory marks the supported expected-sensitive set of spec §5.6
+// item 1. CoverageGap marks a family the scanner has no rule for at all (no
+// prefix, kind or key); only those rows leave the confusion matrix.
 type Case struct {
 	ID          string            `json:"id"`
 	Class       Class             `json:"class"`
@@ -126,8 +129,8 @@ func (c Case) validate() error {
 		return errors.New("template must hold {{VALUE}} exactly once")
 	case c.Mandatory && (c.Class != ExpectedSensitive || !c.ExpectAny):
 		return errors.New("mandatory requires class expected-sensitive and expect_any")
-	case c.CoverageGap && c.ExpectAny:
-		return errors.New("a coverage gap cannot expect a finding")
+	case c.CoverageGap && (c.ExpectAny || c.Kind != ""):
+		return errors.New("a coverage gap has no supported kind and cannot expect a finding")
 	case c.ExpectAny != (len(c.ExpectKinds) > 0):
 		return errors.New("expect_any must hold exactly when expect_kinds is non-empty")
 	case len(c.Carriers) == 0:
@@ -151,6 +154,30 @@ func (c Case) validate() error {
 	return nil
 }
 
+// Score places the case in the confusion matrix, given whether any sensitive
+// finding fired on it. Truth is the Class alone: expected-sensitive scores
+// "TP" or "FN", and benign scores "FP" or "TN". Coverage gaps and every other
+// class score "": lookalikes and fixtures are tabulated separately, and
+// unclassified rows nowhere. The ExpectAny prediction never enters.
+func (c Case) Score(fired bool) string {
+	if c.CoverageGap {
+		return ""
+	}
+	switch c.Class {
+	case ExpectedSensitive:
+		if fired {
+			return "TP"
+		}
+		return "FN"
+	case Benign:
+		if fired {
+			return "FP"
+		}
+		return "TN"
+	}
+	return ""
+}
+
 // Render generates the case's value, seeded from its ID, and substitutes it
 // for {{VALUE}} in Template. The result is an expanded value: never commit or
 // print it.
@@ -169,7 +196,7 @@ func (c Case) Render() (string, error) {
 
 type generator struct {
 	params []string
-	run    func(src *rand.PCG, p map[string]string) (string, error)
+	run    func(src *stream, p map[string]string) (string, error)
 }
 
 // Generators and their params. Every param is optional unless noted.
@@ -194,13 +221,12 @@ var generators = map[string]generator{
 	"card":       {[]string{"digits", "valid", "lead", "sep", "group", "test_pan"}, genCard},
 	"assignment": {[]string{"key", "sep", "quote", "len"}, genAssignment},
 	"bearer":     {[]string{"len", "entropy"}, genBearer},
-	"literal":    {[]string{"text"}, func(_ *rand.PCG, p map[string]string) (string, error) { return required(p, "text") }},
+	"literal":    {[]string{"text"}, func(_ *stream, p map[string]string) (string, error) { return required(p, "text") }},
 }
 
 // Generate expands the named generator. The optional param "seed" selects the
-// deterministic stream (sha256 into a PCG), so equal inputs give equal bytes;
-// Render passes the case ID. Every other param must be one the generator
-// documents.
+// deterministic stream (see stream), so equal inputs give equal bytes; Render
+// passes the case ID. Every other param must be one the generator documents.
 func Generate(name string, params map[string]string) (string, error) {
 	g, ok := generators[name]
 	if !ok {
@@ -211,9 +237,7 @@ func Generate(name string, params map[string]string) (string, error) {
 			return "", fmt.Errorf("secrettest: generator %s: unknown param %q", name, k)
 		}
 	}
-	sum := sha256.Sum256([]byte(params["seed"]))
-	src := rand.NewPCG(binary.LittleEndian.Uint64(sum[:8]), binary.LittleEndian.Uint64(sum[8:16]))
-	value, err := g.run(src, params)
+	value, err := g.run(&stream{seed: params["seed"]}, params)
 	if err != nil {
 		return "", fmt.Errorf("secrettest: generator %s: %w", name, err)
 	}
@@ -231,7 +255,7 @@ var charsets = map[string]string{
 	"x":            "x",
 }
 
-func genProvider(src *rand.PCG, p map[string]string) (string, error) {
+func genProvider(src *stream, p map[string]string) (string, error) {
 	n, err := count(p, "len", "")
 	if err != nil {
 		return "", err
@@ -243,7 +267,7 @@ func genProvider(src *rand.PCG, p map[string]string) (string, error) {
 	return p["prefix_a"] + p["prefix_b"] + draw(src, set, n), nil
 }
 
-func genPEM(src *rand.PCG, p map[string]string) (string, error) {
+func genPEM(src *stream, p map[string]string) (string, error) {
 	label, err := required(p, "label")
 	if err != nil {
 		return "", err
@@ -285,7 +309,7 @@ var testPANs = map[string]string{
 	"jcb":        "35660020" + "20360505",
 }
 
-func genCard(src *rand.PCG, p map[string]string) (string, error) {
+func genCard(src *stream, p map[string]string) (string, error) {
 	var digits string
 	if name, ok := p["test_pan"]; ok {
 		if digits, ok = testPANs[name]; !ok {
@@ -348,7 +372,7 @@ func luhnCheckDigit(ds []byte) byte {
 	return byte('0' + (10-sum%10)%10)
 }
 
-func genAssignment(src *rand.PCG, p map[string]string) (string, error) {
+func genAssignment(src *stream, p map[string]string) (string, error) {
 	key, err := required(p, "key")
 	if err != nil {
 		return "", err
@@ -364,7 +388,7 @@ func genAssignment(src *rand.PCG, p map[string]string) (string, error) {
 	return key + sep + p["quote"] + distinct(src, alnum, n) + p["quote"], nil
 }
 
-func genBearer(src *rand.PCG, p map[string]string) (string, error) {
+func genBearer(src *stream, p map[string]string) (string, error) {
 	n, err := count(p, "len", "")
 	if err != nil {
 		return "", err
@@ -378,10 +402,30 @@ func genBearer(src *rand.PCG, p map[string]string) (string, error) {
 	return "", fmt.Errorf("entropy %q, want high or low", p["entropy"])
 }
 
-// draw returns n bytes drawn uniformly from set. It reads the PCG source
-// directly, whose output is fixed by its algorithm, so values are stable
-// across Go releases.
-func draw(src *rand.PCG, set string, n int) string {
+// stream is a deterministic byte source: block i is sha256(seed || i), with i
+// a big-endian uint64 counter. Render seeds it with the case ID, so a
+// regeneration is byte-identical on every platform and Go release.
+type stream struct {
+	seed    string
+	counter uint64
+	buf     []byte
+}
+
+// Uint64 returns the next eight bytes of the stream.
+func (s *stream) Uint64() uint64 {
+	if len(s.buf) < 8 {
+		block := binary.BigEndian.AppendUint64([]byte(s.seed), s.counter)
+		s.counter++
+		sum := sha256.Sum256(block)
+		s.buf = append(s.buf, sum[:]...)
+	}
+	v := binary.BigEndian.Uint64(s.buf)
+	s.buf = s.buf[8:]
+	return v
+}
+
+// draw returns n bytes drawn from set (modulo bias is irrelevant here).
+func draw(src *stream, set string, n int) string {
 	out := make([]byte, n)
 	for i := range out {
 		out[i] = set[src.Uint64()%uint64(len(set))]
@@ -392,7 +436,7 @@ func draw(src *rand.PCG, set string, n int) string {
 // distinct returns n bytes from successive shuffles of set, so byte counts
 // differ by at most one and entropy is at least log2(min(n, len(set))) bits
 // per byte.
-func distinct(src *rand.PCG, set string, n int) string {
+func distinct(src *stream, set string, n int) string {
 	var out []byte
 	for len(out) < n {
 		block := []byte(set)
