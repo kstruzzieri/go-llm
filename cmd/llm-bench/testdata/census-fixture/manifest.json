@@ -1,0 +1,22 @@
+{
+  "schema": "llm-bench.census-manifest/v1",
+  "strata": [
+    {
+      "name": "fixture",
+      "source": "cmd/llm-bench/testdata/census-fixture/fixture (synthetic, authored for #517)",
+      "commit": "",
+      "license": "Apache-2.0",
+      "files": [
+        {"path": ".npmrc", "sha256": "b4edf6d30dc952469733809d66f88788c54681d6eb6c84bb075fe461c46d9e8f"},
+        {"path": "bom.txt", "sha256": "43e079c93e8a57b1509bb538d66b7bca64c63257d53f3866a2c79325483d0bad"},
+        {"path": "clean.go", "sha256": "23b4b141091fe8268c3c3c79f4062056198053ae944b726344230f44b5ff5953"},
+        {"path": "constant.go", "sha256": "8bc2fd5e7315e206f497478e08752cb1036df2ee792652fdc2d2d7cf14a837b2"},
+        {"path": "emoji.md", "sha256": "bcf211641bc111c446545bf19003dbae5840b73f8dc0bc187b60f371b6dfd118"},
+        {"path": "large.txt", "sha256": "75795a52886435d5c07fd6ce41dc0930e3631d0b52a3c68901d5971687658739"},
+        {"path": "strong.md", "sha256": "03a3675a282d56200e6c63e919aee47481893d097d37b5b0f0ed57e51077572b", "class": "adversarial-fixture"},
+        {"path": "system_prompt.bin", "sha256": "cf9f4f8e79a2d5269eef04639b7ab66ad1e47e116d9d5456a720b214ae2cc957"},
+        {"path": "weak.md", "sha256": "9949cd9ab6c3cfd690d5c32fa210e7b0560a438544cd7cfcb2cd10080d38f86a"}
+      ]
+    }
+  ]
+}
