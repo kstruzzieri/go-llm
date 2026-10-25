@@ -288,6 +288,51 @@ func TestProbeSeatbeltCleanupFailureFailsConstruction(t *testing.T) {
 	}
 }
 
+func TestProbeSeatbeltPrivateTempCleanupJoinsFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		res  execResult
+		err  error
+		want string
+	}{
+		{name: "success"},
+		{name: "nonzero", res: execResult{ExitCode: 65}, want: "exit 65"},
+		{name: "diagnostic", res: execResult{ExitCode: 65, Stderr: []byte("synthetic profile rejection")}, want: "exit 65: synthetic profile rejection"},
+		{name: "timeout", err: context.DeadlineExceeded, want: "context deadline exceeded"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := probeBackend(t, writeFakeSandboxExec(t, "exit 0\n"))
+			var ws, temp string
+			b.runner = &captureRunner{
+				res: tc.res, err: tc.err,
+				during: func(s execSpec) {
+					ws = s.WorkspaceRoot
+					temp = replacePrivateTemp(t, tmpdirOf(t, s.Env))
+				},
+			}
+			err := probeSeatbelt(context.Background(), b)
+			if err == nil || !strings.Contains(err.Error(), "probe private temp cleanup failed") {
+				t.Fatalf("probe must report its refused private-temp cleanup: %v", err)
+			}
+			if tc.want != "" && !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("probe lost its original failure %q: %v", tc.want, err)
+			}
+			if tc.err != nil && !errors.Is(err, tc.err) {
+				t.Errorf("probe lost its error identity: %v", err)
+			}
+			if _, statErr := os.Stat(temp + "-stolen"); statErr != nil {
+				t.Errorf("original private temp must remain after refused cleanup: %v", statErr)
+			}
+			if _, statErr := os.Stat(temp); statErr != nil {
+				t.Errorf("cleanup must preserve the replacement directory: %v", statErr)
+			}
+			if _, statErr := os.Stat(ws); !errors.Is(statErr, os.ErrNotExist) {
+				t.Errorf("private-temp cleanup failure must not skip workspace cleanup: %v", statErr)
+			}
+		})
+	}
+}
+
 func TestSeatbeltConstructorRejectsUnenforceableBeforeProbe(t *testing.T) {
 	probeCalled := false
 	_, err := newSeatbeltExecBackendAt("/usr/bin/sandbox-exec",

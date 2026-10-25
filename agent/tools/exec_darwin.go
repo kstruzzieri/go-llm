@@ -113,7 +113,7 @@ func (b *seatbeltBackend) newProbeWorkspace() (string, func() error, error) {
 // under it through the backend's own runner — the same path every command
 // takes. prepare's own private-temp cleanup runs here; its failure fails the
 // probe too.
-func (b *seatbeltBackend) runProbe(ctx context.Context, ws string) error {
+func (b *seatbeltBackend) runProbe(ctx context.Context, ws string) (err error) {
 	exeID, err := os.Stat(seatbeltProbeExe)
 	if err != nil {
 		return fmt.Errorf("tools: seatbelt requires %s: %w", seatbeltProbeExe, err)
@@ -128,8 +128,12 @@ func (b *seatbeltBackend) runProbe(ctx context.Context, ws string) error {
 	if err != nil {
 		return fmt.Errorf("tools: seatbelt unavailable on this host: %w", err)
 	}
+	defer func() {
+		if cleanupErr := cleanup(); cleanupErr != nil {
+			err = errors.Join(err, fmt.Errorf("tools: seatbelt probe private temp cleanup failed: %w", cleanupErr))
+		}
+	}()
 	res, runErr := b.runner.Run(ctx, wrapped)
-	cleanupErr := cleanup()
 	if runErr != nil {
 		return fmt.Errorf("tools: seatbelt unavailable on this host: %w", runErr)
 	}
@@ -142,9 +146,6 @@ func (b *seatbeltBackend) runProbe(ctx context.Context, ws string) error {
 			return fmt.Errorf("tools: seatbelt unavailable on this host: exit %d: %s", res.ExitCode, detail)
 		}
 		return fmt.Errorf("tools: seatbelt unavailable on this host: exit %d", res.ExitCode)
-	}
-	if cleanupErr != nil {
-		return fmt.Errorf("tools: seatbelt probe private temp cleanup failed: %w", cleanupErr)
 	}
 	return nil
 }

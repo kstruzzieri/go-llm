@@ -144,6 +144,28 @@ func TestSeatbeltBehavioralExecViaWorkspaceSymlink(t *testing.T) {
 	})
 }
 
+// A refused PATH lookup must not be confused with an actually missing tool.
+func TestSeatbeltBehavioralExecViaPATH(t *testing.T) {
+	requireSeatbeltCapability(t)
+	cc := seatbeltHasCC(t)
+	ws := canonTempDirT(t)
+	outsideDir, _ := outsideCanaryDir(t, ws)
+	const name = "seatbelt-outside-path-tool"
+	buildSeatbeltExe(t, cc, outsideDir, name, markerExeSource())
+	argv := []string{"/usr/bin/env", "PATH=" + outsideDir, name}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	host := exec.CommandContext(ctx, argv[0], argv[1:]...)
+	host.Env = []string{"PATH=/usr/bin:/bin"}
+	if out, err := host.CombinedOutput(); err != nil || string(out) != seatbeltMarker+"\n" {
+		t.Fatalf("host PATH control must find and run the outside tool: output=%q err=%v", out, err)
+	}
+
+	res := realSeatbeltRun(t, seatbeltTestCfg(), ws, argv)
+	assertSeatbeltRefused(t, res, 127, "env: "+name+": No such file or directory")
+}
+
 // TestSeatbeltBehavioralExecOutsideInterpreter covers a workspace script whose
 // shebang names an interpreter outside the roots: process-exec* covers the
 // interpreter (process-exec-interpreter), so the launch is refused. The
