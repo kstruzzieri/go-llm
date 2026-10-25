@@ -343,6 +343,17 @@ func TestSecretsEvidenceSections(t *testing.T) {
 	if nGaps == 0 {
 		t.Error("the case table holds no coverage-gap case")
 	}
+	// R27: all six census strata, one per source, are listed and none is
+	// reported pending (Keith approved the four third-party sources).
+	census := section(t, doc, "## Census (Secrets side)")
+	for _, s := range []string{"go-llm", "go-src", "i18n-cldr-annotations", "i18n-gemoji", "llm-app-claude-cookbooks", "llm-app-openai-cookbook"} {
+		if !strings.Contains(census, "\n- `"+s+"`: ") {
+			t.Errorf("the census section does not list stratum %s", s)
+		}
+	}
+	if strings.Contains(census, "no rate here speaks for") {
+		t.Error("the census section reports a planned stratum as missing")
+	}
 	// R6/R9: n is printed beside every rate.
 	for _, line := range strings.Split(doc, "\n") {
 		if strings.Contains(line, "%") || regexp.MustCompile(`\b[01]\.\d\d\b`).MatchString(line) {
@@ -750,9 +761,10 @@ const (
 	issue518Landed = false
 )
 
-// censusStrataPlanned are the four census strata of spec §2.2; a planned
-// stratum missing from the results is reported as pending.
-var censusStrataPlanned = []string{"go-llm", "go-src", "llm-app", "i18n-emoji"}
+// censusStrataPlanned are the census strata of spec §2.2, one per source
+// (ruling R27: the spec's llm-app and i18n-emoji strata are two sources each);
+// a planned stratum missing from the results is reported as pending.
+var censusStrataPlanned = []string{"go-llm", "go-src", "i18n-cldr-annotations", "i18n-gemoji", "llm-app-claude-cookbooks", "llm-app-openai-cookbook"}
 
 // secretsCaseIndex is the embedded case table by ID, for each outcome's role
 // and mandatory flag.
@@ -1306,7 +1318,8 @@ func renderSecretsEvidence(acc []secrettest.Outcome, census censusResultsDoc, ro
 	var present []string
 	for _, s := range census.Strata {
 		present = append(present, s.Name)
-		p("- `%s`: %s, commit `%s`, %s; %d files, %d classed adversarial-fixture.\n", s.Name, s.Source, short(s.Commit), s.License, s.Files, len(s.Adversarial))
+		// The source is a code span: its sparse-checkout globs are not Markdown.
+		p("- `%s`: `%s`, commit `%s`, %s; %d files, %d classed adversarial-fixture.\n", s.Name, s.Source, short(s.Commit), s.License, s.Files, len(s.Adversarial))
 	}
 	var pending []string
 	for _, s := range censusStrataPlanned {
@@ -1315,7 +1328,7 @@ func renderSecretsEvidence(acc []secrettest.Outcome, census censusResultsDoc, ro
 		}
 	}
 	if len(pending) > 0 {
-		p("\nThese results cover the local strata only. The third-party strata %s are registered in the census README but await approval to download, and no rate here speaks for them.\n", strings.Join(pending, " and "))
+		p("\nThe planned strata %s are not in these results, and no rate here speaks for them.\n", strings.Join(pending, ", "))
 	}
 	p("\n### By observation\n\n")
 	p("| Stratum | Carrier | Benign observations | Files | Secrets blocks | Within %d/%d | At the call | Guard blocks (G) | Refused (not counted) | Unobserved | Adversarial fixture (excluded) |\n|---|---|---|---|---|---|---|---|---|---|---|\n", blockBudgetNum, blockBudgetDen)

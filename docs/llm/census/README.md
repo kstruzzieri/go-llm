@@ -19,10 +19,19 @@ license notice.
 |---|---|---|---|---|---|
 | `go-llm` | this repository, `git archive` of the PR1 base commit | `92c2483aa8f51c7b419fb346fcc202d5f5867b4c` | Apache-2.0 | 1970 | in the manifest |
 | `go-src` | `golang.org/toolchain@v0.0.1-go1.27.1.darwin-arm64` from the Go module cache: `LICENSE` and `src/`, every `testdata` directory excluded | `go1.27.1` | BSD-3-Clause | 7787 | in the manifest |
-| `llm-app` | two permissively licensed LLM-application repositories | | | | pending: needs Keith's approval to download |
-| `i18n-emoji` | two permissively licensed emoji and i18n sources | | | | pending: needs Keith's approval to download |
+| `i18n-cldr-annotations` | `https://github.com/unicode-org/cldr-json`, shallow sparse checkout of `cldr-json/cldr-annotations-full/**`, `README.md` and `LICENSE` | `91c267402229a59e3ef2774544f001bf959e8809` | Unicode-3.0 | 176 | in the manifest |
+| `i18n-gemoji` | `https://github.com/github/gemoji`, shallow sparse checkout of `db/emoji.json`, `README.md` and `LICENSE` | `fadaeaf1f1a9be82b321316a6c5502e43138b2f6` | MIT | 3 | in the manifest |
+| `llm-app-claude-cookbooks` | `https://github.com/anthropics/claude-cookbooks`, shallow sparse checkout of `**/*.md`, `**/*.py` and `LICENSE` | `bfe50e59dbb4f5546a0af9ca36ebb77e637c9ce1` | MIT | 195 | in the manifest |
+| `llm-app-openai-cookbook` | `https://github.com/openai/openai-cookbook`, shallow sparse checkout of `examples/**/*.md`, `examples/**/*.py` and `LICENSE` | `8495326b6f1b7cec94e7f5e393a4045e328a268e` | MIT | 626 | in the manifest |
 
 Each stratum is reported separately; there is no pooled rate (BC5).
+
+The spec's two third-party strata, LLM-application content (`llm-app`) and
+internationalized and emoji text (`i18n-emoji`), are registered one source per
+stratum, because a stratum holds one source, commit and license. Each
+third-party source is therefore its own stratum, named for its family, and
+the block budget is checked per source. A third-party stratum holds exactly
+the files of its sparse checkout at the commit, without `.git`.
 
 The `go-llm` stratum is every tracked regular file at the base commit (the
 `DEVELOPMENT_PRINCIPLES.md` symlink is not a regular file and is not listed).
@@ -41,9 +50,12 @@ denominator. In `go-llm` these are:
 - `agent/testdata/hardening/**`;
 - `docs/llm/traces/injection/**`.
 
-That is 169 files. The independent rater pass over this assignment (the
-protocol of the Secrets case table, spec §5.2) is pending. No `go-src` file is
-classed.
+That is 169 files. A blind rater pass over the fired `go-llm` files (the
+protocol of the Secrets case table, spec §5.2) agreed with this assignment on
+106 of 110 paths; Keith kept the four disputed
+`agent/interceptor/invariants_*_test.go` files as `adversarial-fixture`. No
+file of the other five strata is classed. The blind rater pass over the fired
+files of the four third-party strata is pending.
 
 ## Fetch and reproduce
 
@@ -54,6 +66,22 @@ git archive 92c2483aa8f51c7b419fb346fcc202d5f5867b4c | tar -x -C "$ROOT/go-llm"
 TC="$(go env GOMODCACHE)/golang.org/toolchain@v0.0.1-go1.27.1.darwin-arm64"
 cp "$TC/LICENSE" "$ROOT/go-src/LICENSE"
 (cd "$TC" && find src -type d -name testdata -prune -o -type f -print | tar -c -T - -f -) | tar -x -C "$ROOT/go-src"
+sparse() {  # sparse <stratum> <repository> <commit> <sparse-checkout pattern>...
+  d="$ROOT/$1" repo="$2" commit="$3"; shift 3
+  git init -q "$d" &&
+  git -C "$d" sparse-checkout set --no-cone "$@" &&
+  git -C "$d" fetch -q --depth 1 --filter=blob:none "$repo" "$commit" &&
+  git -C "$d" checkout -q FETCH_HEAD &&
+  rm -rf "$d/.git"   # the census refuses any file the manifest does not list
+}
+sparse i18n-cldr-annotations https://github.com/unicode-org/cldr-json 91c267402229a59e3ef2774544f001bf959e8809 \
+  '/cldr-json/cldr-annotations-full/**' /README.md /LICENSE
+sparse i18n-gemoji https://github.com/github/gemoji fadaeaf1f1a9be82b321316a6c5502e43138b2f6 \
+  /db/emoji.json /README.md /LICENSE
+sparse llm-app-claude-cookbooks https://github.com/anthropics/claude-cookbooks bfe50e59dbb4f5546a0af9ca36ebb77e637c9ce1 \
+  '/**/*.md' '/**/*.py' /LICENSE
+sparse llm-app-openai-cookbook https://github.com/openai/openai-cookbook 8495326b6f1b7cec94e7f5e393a4045e328a268e \
+  '/examples/**/*.md' '/examples/**/*.py' /LICENSE
 go run ./cmd/llm-bench -interceptor-census \
   -census-manifest docs/llm/census/manifest.json -census-root "$ROOT" \
   -census-out docs/llm/census
@@ -81,9 +109,7 @@ absolute stratum root, so `full_sha256` holds only for the same root path, and
 `fired` records every verifier row's `bytes` as 0; the rest of
 `census-results.json` does not depend on the root.
 
-The committed results cover the two local strata, `go-llm` and `go-src`. They
-are regenerated, with every count, when the pending strata are approved and
-added to the manifest.
+The committed results cover all six strata of the manifest.
 
 Each arm is a chain filtered from `interceptor.Defaults()` in library order,
 without the canary: `golem-default-guards` (G: `invariants`, `egress`,
@@ -159,3 +185,7 @@ Notes on fidelity:
 
 - `go-llm`: Apache License 2.0, `LICENSE` at the base commit.
 - `go-src`: the Go BSD-style license (BSD-3-Clause), `LICENSE` in the stratum.
+- `i18n-cldr-annotations`: Unicode License V3 (Unicode-3.0), `LICENSE` in the
+  stratum.
+- `i18n-gemoji`, `llm-app-claude-cookbooks` and `llm-app-openai-cookbook`: the
+  MIT License, `LICENSE` in each stratum.

@@ -7,10 +7,10 @@ This is the Secrets half of #517 (spec §5): an accuracy report and a workflow-d
 Inputs:
 
 - the case table `internal/secretscan/secrettest/cases.json`: 163 cases (expected-sensitive 96, synthetic-fixture 18, benign-lookalike 42, benign 7, unclassified 0), classed by documented role before any scanning (spec §5.2) and inspected by `secrettest.Evaluate`;
-- the committed census results `docs/llm/census/census-results.json` (`llm-bench.census-results/v1`, manifest sha256 `2429cd7c9aff…`);
+- the committed census results `docs/llm/census/census-results.json` (`llm-bench.census-results/v1`, manifest sha256 `de84f7a4bb2e…`);
 - the workflow table `cmd/golem/secrets_workflow_test.go`: 26 rows, each run under G (the always-on guards) and G+S (guards plus Secrets).
 
-**Secrets default: retain opt-in.** Failed criteria: item 3 (census false-block rate above 1/100 in 9 of 14 stratum and carrier cells), item 4 (row 3 terminal; also terminal: rows 2c, 11; continuation lost without a terminal block: row 6), item 6 (#518 not landed, spec §8.4).
+**Secrets default: retain opt-in.** Failed criteria: item 3 (census false-block rate above 1/100 in 22 of 42 stratum and carrier cells), item 4 (row 3 terminal; also terminal: rows 2c, 11; continuation lost without a terminal block: row 6), item 6 (#518 not landed, spec §8.4).
 
 ## Accuracy by kind and carrier
 
@@ -266,10 +266,12 @@ Secrets fired on 0/14 (0.00%) by case and 0/42 (0.00%) by outcome.
 
 The benign side of the accuracy report (spec §5.4): files as Golem's production tools render them, one observation per file per carrier (`search`: one per registered query), from `docs/llm/census/census-results.json`; `docs/llm/census/README.md` describes the carriers and every count. A Secrets block is an observation blocked under G+S (`guards+secrets`) and not under G (`golem-default-guards`): a guard's refusal is not Secrets disruption. Files classed `adversarial-fixture` (BC5) are excluded from every rate and reported apart.
 
-- `go-llm`: https://github.com/kstruzzieri/go-llm (git archive of the #517 PR1 base commit), commit `92c2483aa8f5`, Apache-2.0; 1970 files, 169 classed adversarial-fixture.
-- `go-src`: golang.org/toolchain@v0.0.1-go1.27.1.darwin-arm64 from the Go module cache: LICENSE and src/, every testdata directory excluded, commit `go1.27.1`, BSD-3-Clause; 7787 files, 0 classed adversarial-fixture.
-
-These results cover the local strata only. The third-party strata `llm-app` and `i18n-emoji` are registered in the census README but await approval to download, and no rate here speaks for them.
+- `go-llm`: `https://github.com/kstruzzieri/go-llm (git archive of the #517 PR1 base commit)`, commit `92c2483aa8f5`, Apache-2.0; 1970 files, 169 classed adversarial-fixture.
+- `go-src`: `golang.org/toolchain@v0.0.1-go1.27.1.darwin-arm64 from the Go module cache: LICENSE and src/, every testdata directory excluded`, commit `go1.27.1`, BSD-3-Clause; 7787 files, 0 classed adversarial-fixture.
+- `i18n-cldr-annotations`: `https://github.com/unicode-org/cldr-json (shallow sparse checkout: cldr-json/cldr-annotations-full/**, README.md, LICENSE)`, commit `91c267402229`, Unicode-3.0; 176 files, 0 classed adversarial-fixture.
+- `i18n-gemoji`: `https://github.com/github/gemoji (shallow sparse checkout: db/emoji.json, README.md, LICENSE)`, commit `fadaeaf1f1a9`, MIT; 3 files, 0 classed adversarial-fixture.
+- `llm-app-claude-cookbooks`: `https://github.com/anthropics/claude-cookbooks (shallow sparse checkout: **/*.md, **/*.py, LICENSE)`, commit `bfe50e59dbb4`, MIT; 195 files, 0 classed adversarial-fixture.
+- `llm-app-openai-cookbook`: `https://github.com/openai/openai-cookbook (shallow sparse checkout: examples/**/*.md, examples/**/*.py, LICENSE)`, commit `8495326b6f1b`, MIT; 626 files, 0 classed adversarial-fixture.
 
 ### By observation
 
@@ -289,6 +291,34 @@ These results cover the local strata only. The third-party strata `llm-app` and 
 | go-src | run_command | 7787 | 7787 | 108/7787 (1.39%) | no | 0 | 0 | 0 | 0 | 0 |
 | go-src | search | 8 | 0 | 0/8 (0.00%) | yes | 0 | 0 | 0 | 0 | 0 |
 | go-src | verifier | 7787 | 7787 | 42/7787 (0.54%) | yes | 0 | 0 | 0 | 0 | 0 |
+| i18n-cldr-annotations | command_tail | 176 | 176 | 0/176 (0.00%) | yes | 0 | 0 | 0 | 0 | 0 |
+| i18n-cldr-annotations | mcp | 176 | 176 | 0/176 (0.00%) | yes | 0 | 0 | 0 | 0 | 0 |
+| i18n-cldr-annotations | mixed | 176 | 176 | 0/176 (0.00%) | yes | 0 | 0 | 0 | 0 | 0 |
+| i18n-cldr-annotations | read_file | 176 | 176 | 0/176 (0.00%) | yes | 0 | 0 | 0 | 0 | 0 |
+| i18n-cldr-annotations | run_command | 176 | 176 | 0/176 (0.00%) | yes | 0 | 0 | 0 | 0 | 0 |
+| i18n-cldr-annotations | search | 8 | 0 | 0/8 (0.00%) | yes | 0 | 0 | 0 | 0 | 0 |
+| i18n-cldr-annotations | verifier | 176 | 176 | 0/176 (0.00%) | yes | 0 | 0 | 0 | 0 | 0 |
+| i18n-gemoji | command_tail | 3 | 3 | 0/3 (0.00%) | yes | 0 | 0 | 0 | 0 | 0 |
+| i18n-gemoji | mcp | 3 | 3 | 0/3 (0.00%) | yes | 0 | 0 | 0 | 0 | 0 |
+| i18n-gemoji | mixed | 3 | 3 | 0/3 (0.00%) | yes | 0 | 0 | 0 | 0 | 0 |
+| i18n-gemoji | read_file | 3 | 3 | 0/3 (0.00%) | yes | 0 | 0 | 0 | 0 | 0 |
+| i18n-gemoji | run_command | 3 | 3 | 0/3 (0.00%) | yes | 0 | 0 | 0 | 0 | 0 |
+| i18n-gemoji | search | 8 | 0 | 0/8 (0.00%) | yes | 0 | 0 | 0 | 0 | 0 |
+| i18n-gemoji | verifier | 3 | 3 | 0/3 (0.00%) | yes | 0 | 0 | 0 | 0 | 0 |
+| llm-app-claude-cookbooks | command_tail | 195 | 195 | 14/195 (7.18%) | no | 0 | 0 | 0 | 0 | 0 |
+| llm-app-claude-cookbooks | mcp | 195 | 195 | 16/195 (8.21%) | no | 0 | 0 | 0 | 0 | 0 |
+| llm-app-claude-cookbooks | mixed | 195 | 195 | 17/195 (8.72%) | no | 0 | 0 | 0 | 0 | 0 |
+| llm-app-claude-cookbooks | read_file | 195 | 195 | 17/195 (8.72%) | no | 0 | 0 | 0 | 0 | 0 |
+| llm-app-claude-cookbooks | run_command | 195 | 195 | 16/195 (8.21%) | no | 0 | 0 | 0 | 0 | 0 |
+| llm-app-claude-cookbooks | search | 8 | 0 | 0/8 (0.00%) | yes | 0 | 0 | 0 | 0 | 0 |
+| llm-app-claude-cookbooks | verifier | 195 | 195 | 11/195 (5.64%) | no | 0 | 0 | 0 | 0 | 0 |
+| llm-app-openai-cookbook | command_tail | 626 | 626 | 38/626 (6.07%) | no | 0 | 0 | 0 | 0 | 0 |
+| llm-app-openai-cookbook | mcp | 626 | 626 | 48/626 (7.67%) | no | 0 | 0 | 0 | 0 | 0 |
+| llm-app-openai-cookbook | mixed | 626 | 626 | 48/626 (7.67%) | no | 0 | 0 | 0 | 0 | 0 |
+| llm-app-openai-cookbook | read_file | 626 | 626 | 48/626 (7.67%) | no | 0 | 0 | 0 | 0 | 0 |
+| llm-app-openai-cookbook | run_command | 626 | 626 | 48/626 (7.67%) | no | 0 | 0 | 0 | 0 | 0 |
+| llm-app-openai-cookbook | search | 8 | 0 | 2/8 (25.00%) | no | 0 | 0 | 0 | 0 | 0 |
+| llm-app-openai-cookbook | verifier | 626 | 626 | 22/626 (3.51%) | no | 0 | 0 | 0 | 0 | 0 |
 
 Files equals benign observations for a file carrier by construction and is 0 for `search`, whose observations are per query. `At the call` counts blocks of the scripted call, at model output (terminal in production) or at the tool-call hook (recoverable); the census does not separate the two.
 
@@ -300,6 +330,10 @@ A file counts once if Secrets blocks any carrier's observation of it. The denomi
 |---|---|---|
 | go-llm | 1801 | 27/1801 (1.50%) |
 | go-src | 7787 | 123/7787 (1.58%) |
+| i18n-cldr-annotations | 176 | 0/176 (0.00%) |
+| i18n-gemoji | 3 | 0/3 (0.00%) |
+| llm-app-claude-cookbooks | 195 | 17/195 (8.72%) |
+| llm-app-openai-cookbook | 626 | 48/626 (7.67%) |
 
 Benign files by the Secrets rule that blocked them (a file blocked under two rules counts under both):
 
@@ -314,11 +348,18 @@ Benign files by the Secrets rule that blocked them (a file blocked under two rul
 | go-src | `payment_card` | 114 |
 | go-src | `private_key` | 2 |
 | go-src | `secret_assignment` | 7 |
+| llm-app-claude-cookbooks | `secret_assignment` | 17 |
+| llm-app-claude-cookbooks | `slack_token` | 1 |
+| llm-app-openai-cookbook | `secret_assignment` | 48 |
 
 ### Adversarial fixtures (BC5, reported apart)
 
 - go-llm: Secrets blocks 41/1006 (4.08%) of the adversarial-fixture observations, in 8/169 (4.73%) of those files.
 - go-src: no file is classed adversarial-fixture.
+- i18n-cldr-annotations: no file is classed adversarial-fixture.
+- i18n-gemoji: no file is classed adversarial-fixture.
+- llm-app-claude-cookbooks: no file is classed adversarial-fixture.
+- llm-app-openai-cookbook: no file is classed adversarial-fixture.
 
 ### Background job handles (a separate workflow effect)
 
@@ -431,12 +472,12 @@ Default-on Secrets requires all six items; if any fails, Secrets stays opt-in an
 
 - Item 1: PASS. Correct detection on every mandatory supported case. 55 mandatory cases (165 outcomes, every carrier and hook); missed: none.
 - Item 2: PASS. Zero terminal blocks on benign and lookalike sentinel workflows (K1 task-failure budget: 0). Benign and lookalike workflow rows (1, 7b, 7d) ending terminal under G+S: none. Census call blocks by Secrets, an upper bound on terminal blocks because `call_blocked` also counts recoverable tool-call blocks: 0. 14 lookalike cases fire at tool-args/output, which is terminal in production; no §5.5 sentinel row writes a lookalike, so item 2 measures the rows only.
-- Item 3: FAIL. The false-block rate on benign plus lookalike content, by observation, within K1's unnecessary-block budget of 1 per 100 in every stratum, on the census (the benign side, spec §5.4), checked per (stratum, carrier) cell. Over budget: go-llm/mcp 26/1801 (1.44%), go-llm/mixed 27/1801 (1.50%), go-llm/read_file 27/1801 (1.50%), go-llm/run_command 26/1801 (1.44%), go-src/command_tail 84/7787 (1.08%), go-src/mcp 108/7787 (1.39%), go-src/mixed 119/7764 (1.53%), go-src/read_file 120/7764 (1.55%), go-src/run_command 108/7787 (1.39%). Pooled per stratum over every carrier, the reading K1 and BC5 phrase (benign Secrets blocks / benign observations): go-llm 124/10814 (1.15%), go-src 581/46684 (1.24%); over budget read that way: go-llm, go-src. The verdict uses the per-cell reading, which fails whenever the per-stratum one does.
+- Item 3: FAIL. The false-block rate on benign plus lookalike content, by observation, within K1's unnecessary-block budget of 1 per 100 in every stratum, on the census (the benign side, spec §5.4), checked per (stratum, carrier) cell. Over budget: go-llm/mcp 26/1801 (1.44%), go-llm/mixed 27/1801 (1.50%), go-llm/read_file 27/1801 (1.50%), go-llm/run_command 26/1801 (1.44%), go-src/command_tail 84/7787 (1.08%), go-src/mcp 108/7787 (1.39%), go-src/mixed 119/7764 (1.53%), go-src/read_file 120/7764 (1.55%), go-src/run_command 108/7787 (1.39%), llm-app-claude-cookbooks/command_tail 14/195 (7.18%), llm-app-claude-cookbooks/mcp 16/195 (8.21%), llm-app-claude-cookbooks/mixed 17/195 (8.72%), llm-app-claude-cookbooks/read_file 17/195 (8.72%), llm-app-claude-cookbooks/run_command 16/195 (8.21%), llm-app-claude-cookbooks/verifier 11/195 (5.64%), llm-app-openai-cookbook/command_tail 38/626 (6.07%), llm-app-openai-cookbook/mcp 48/626 (7.67%), llm-app-openai-cookbook/mixed 48/626 (7.67%), llm-app-openai-cookbook/read_file 48/626 (7.67%), llm-app-openai-cookbook/run_command 48/626 (7.67%), llm-app-openai-cookbook/search 2/8 (25.00%), llm-app-openai-cookbook/verifier 22/626 (3.51%). Pooled per stratum over every carrier, the reading K1 and BC5 phrase (benign Secrets blocks / benign observations): go-llm 124/10814 (1.15%), go-src 581/46684 (1.24%), i18n-cldr-annotations 0/1064 (0.00%), i18n-gemoji 0/26 (0.00%), llm-app-claude-cookbooks 91/1178 (7.72%), llm-app-openai-cookbook 254/3764 (6.75%); over budget read that way: go-llm, go-src, llm-app-claude-cookbooks, llm-app-openai-cookbook. The verdict uses the per-cell reading, which fails whenever the per-stratum one does.
 - Item 4: FAIL. Fixture-workflow completion losses within the K4 decision: a terminal block on a deliberate fixture workflow disqualifies a default-on Secrets, and row 3 alone decides K4. Row 3 terminal under G+S: yes. Other synthetic-fixture rows terminal under G+S: 2c, 11. Fixture rows whose continuation G keeps and G+S loses without a terminal block: 6.
 - Item 5: PASS. A protection benefit on expected-sensitive surrogates, shown by the deterministic protection rows (BC4): the surrogate reaches its sink under G and not under G+S. Protected: rows 14a, 14b, 14c; not protected: none.
 - Item 6: FAIL. Spec §8.4 (a Secrets flip requires #518's versioned block reporting): not met. A Secrets default flip is hard-blocked on #518 (versioned bounded block reporting and the explicit v1/v2 selection path for Firn, coordinated with #506), with no interactive-only default; #518 has not landed.
 
-**Secrets default: retain opt-in.** Failed criteria: item 3 (census false-block rate above 1/100 in 9 of 14 stratum and carrier cells), item 4 (row 3 terminal; also terminal: rows 2c, 11; continuation lost without a terminal block: row 6), item 6 (#518 not landed, spec §8.4).
+**Secrets default: retain opt-in.** Failed criteria: item 3 (census false-block rate above 1/100 in 22 of 42 stratum and carrier cells), item 4 (row 3 terminal; also terminal: rows 2c, 11; continuation lost without a terminal block: row 6), item 6 (#518 not landed, spec §8.4).
 
 ## What this report does not claim
 
