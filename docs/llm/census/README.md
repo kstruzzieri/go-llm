@@ -48,14 +48,15 @@ classed.
 ## Fetch and reproduce
 
 ```sh
-ROOT=/Users/keith.struzzieri/projects/go-llm/census-root-517   # outside the checkout
+ROOT="$HOME/projects/go-llm/census-root-517"   # outside the checkout
 mkdir -p "$ROOT/go-llm" "$ROOT/go-src"
 git archive 92c2483aa8f51c7b419fb346fcc202d5f5867b4c | tar -x -C "$ROOT/go-llm"
 TC="$(go env GOMODCACHE)/golang.org/toolchain@v0.0.1-go1.27.1.darwin-arm64"
 cp "$TC/LICENSE" "$ROOT/go-src/LICENSE"
 (cd "$TC" && find src -type d -name testdata -prune -o -type f -print | tar -c -T - -f -) | tar -x -C "$ROOT/go-src"
 go run ./cmd/llm-bench -interceptor-census \
-  -census-manifest docs/llm/census/manifest.json -census-root "$ROOT"
+  -census-manifest docs/llm/census/manifest.json -census-root "$ROOT" \
+  -census-out docs/llm/census
 ```
 
 `-census-root` holds one subdirectory per stratum name. Before observing
@@ -67,8 +68,54 @@ a temporary directory for the run, so the loopback MCP server's trust pin
 never lands in the user's data directory. The census refuses to run on
 Windows, where the exec carriers are unsupported.
 
-`full/` holds the gitignored per-observation output; only aggregates are
-committed.
+`-census-out` receives `census-results.json` (committed) and
+`full/observations.jsonl` (gitignored), the full per-observation output, one
+JSON observation per line.
+
+## Results
+
+`census-results.json` (`llm-bench.census-results/v1`) holds no file content.
+`manifest_sha256` binds the manifest bytes and `full_sha256` the bytes of
+`full/observations.jsonl`. The verifier observation's byte count includes the
+absolute stratum root, so `full_sha256` holds only for the same root path; the
+aggregates and findings do not depend on it.
+
+The committed results cover the two local strata, `go-llm` and `go-src`. They
+are regenerated, with every count, when the pending strata are approved and
+added to the manifest.
+
+Each arm is a chain filtered from `interceptor.Defaults()` in library order,
+without the canary: `golem-default-guards` (G: `invariants`, `egress`,
+`child_scope_denials`), `guards+detectors` (G+D, adding `zero_width`,
+`encoding`, `typoglycemia`), `guards+secrets` (G+S, adding `secrets`) and
+`guards+detectors+secrets` (G+D+S). The census records every interceptor's
+findings once, under G+D+S, and derives each arm's outcome on each
+observation from its members' findings:
+
+| Outcome | Rule |
+|---|---|
+| `call_blocked` | a member blocks the scripted call, at model output or at the tool-call hook |
+| `blocked` | a member blocks the observation (message or alternative); the tags it carried are suppressed (F6) |
+| `trailer` | members tag the observation; one trailer per distinct (interceptor, rule) |
+| `identical` | none of the above; tags on the call itself are telemetry and add no trailer (F5) |
+| `unobserved` | a non-member blocked the call, so the hooks this arm would have reached never ran |
+
+`aggregates` has one row per (stratum, carrier, arm), sorted by those three
+names. Every observation counts in exactly one of `refused` (a tool refusal,
+never a denominator), `adversarial_fixture` (a file classed
+`adversarial-fixture`, excluded from every other count), `unobserved`, or
+`observations`, which splits into `trailer`, `blocked`, `call_blocked` and the
+identical remainder. `files` is the number of files behind `observations`
+(0 for `search`, whose observations are per query). `suppressed` counts the
+blocked observations that carried at least one member tag, and
+`trailer_bytes` sums the trailer bytes the arm adds. For mixed assembly the
+trailer bytes count every distinct pair across the alternatives, an upper
+bound on what any one selected alternative gains.
+
+`fired` lists every observation with at least one finding, including
+adversarial fixtures, sorted by stratum, carrier and path, with its findings
+and no content. The S-over-D interaction (F6) is the set of rows whose
+outcome is `trailer` under G+D and `blocked` under G+D+S.
 
 ## Carriers
 

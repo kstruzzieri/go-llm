@@ -216,11 +216,13 @@ func runCensus(ctx context.Context, m censusManifest, root string) ([]censusObse
 	return out, nil
 }
 
-// runCensusMode is the -interceptor-census CLI entry. The MCP trust pins go
-// to a throwaway data dir, never the user's.
-func runCensusMode(ctx context.Context, manifestPath, root string) error {
-	if root == "" {
-		return errors.New("-census-root is required")
+// runCensusMode is the -interceptor-census CLI entry. It writes
+// <out>/full/observations.jsonl (one observation per line, gitignored) and
+// then <out>/census-results.json, which binds the manifest's and the JSONL's
+// sha256. The MCP trust pins go to a throwaway data dir, never the user's.
+func runCensusMode(ctx context.Context, manifestPath, root, out string, stderr io.Writer) error {
+	if root == "" || out == "" {
+		return errors.New("-census-root and -census-out are required")
 	}
 	m, sum, err := loadCensusManifest(manifestPath)
 	if err != nil {
@@ -238,16 +240,35 @@ func runCensusMode(ctx context.Context, manifestPath, root string) error {
 	if err != nil {
 		return err
 	}
-	fired, refused := 0, 0
+	var full bytes.Buffer
+	refused := 0
 	for _, o := range obs {
-		if len(o.Findings) > 0 {
-			fired++
+		line, err := json.Marshal(o)
+		if err != nil {
+			return err
 		}
+		full.Write(append(line, '\n'))
 		if o.Refused != "" {
 			refused++
 		}
 	}
-	_, _ = fmt.Fprintf(os.Stderr, "llm-bench: interceptor census: manifest sha256 %s: %d observation(s), %d with findings, %d refused\n", sum, len(obs), fired, refused)
+	r := aggregateCensus(obs, m)
+	fullSum := sha256.Sum256(full.Bytes())
+	r.ManifestSHA256, r.FullSHA256 = sum, hex.EncodeToString(fullSum[:])
+	results, err := marshalCensusResults(r)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Join(out, "full"), 0o755); err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(out, "full", "observations.jsonl"), full.Bytes(), 0o644); err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(out, "census-results.json"), results, 0o644); err != nil {
+		return err
+	}
+	_, _ = fmt.Fprintf(stderr, "llm-bench: interceptor census: manifest sha256 %s: %d observation(s), %d with findings, %d refused; full sha256 %s\n", sum, len(obs), len(r.Fired), refused, r.FullSHA256)
 	return nil
 }
 

@@ -53,6 +53,7 @@ func main() {
 	interceptorCensus := flag.Bool("interceptor-census", false, "Run the deterministic interceptor census (#517): render every -census-manifest file through Golem's production tools under interceptor.Defaults() and report the findings per carrier")
 	censusManifestPath := flag.String("census-manifest", filepath.Join("docs", "llm", "census", "manifest.json"), "With -interceptor-census: the census manifest (llm-bench.census-manifest/v1)")
 	censusRoot := flag.String("census-root", "", "With -interceptor-census: directory holding one subdirectory per manifest stratum, fetched as docs/llm/census/README.md describes")
+	censusOut := flag.String("census-out", "", "With -interceptor-census: output directory for census-results.json (committed) and full/observations.jsonl (gitignored), e.g. docs/llm/census")
 	assemblyOut := flag.String("assembly-out", filepath.Join("docs", "llm", "assembly-corpus", "traces"), "Output directory for -assembly-build with a 3a JSON-array fixture")
 	assemblyOutMixed := flag.String("assembly-out-mixed", filepath.Join("docs", "llm", "assembly-corpus", "mixed", "traces"), "Output directory for -assembly-build with a 3c mixed-assembly object fixture (the mixed corpus keeps its own manifest, separate from -assembly-out)")
 
@@ -251,7 +252,7 @@ func main() {
 	}
 
 	if *interceptorCensus {
-		if err := runCensusMode(ctx, *censusManifestPath, *censusRoot); err != nil {
+		if err := runCensusMode(ctx, *censusManifestPath, *censusRoot, *censusOut, os.Stderr); err != nil {
 			log.Fatalf("llm-bench: interceptor-census: %v", err)
 		}
 		return
