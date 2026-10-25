@@ -948,7 +948,7 @@
       "path": "test",
       "carrier": "search",
       "origin": "workspace",
-      "bytes": 122,
+      "bytes": 71,
       "findings": [
         {
           "interceptor": "typoglycemia",

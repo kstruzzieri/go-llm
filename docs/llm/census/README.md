@@ -95,8 +95,14 @@ go run ./cmd/llm-bench -interceptor-census \
 `-census-root` holds one subdirectory per stratum name. Before observing
 anything, the census checks every listed file's sha256 and refuses any
 regular file the manifest does not list, naming the first mismatching path.
-The verifier carrier writes and then removes `.census-verify-scratch` in each
-stratum root, so the root must be writable. The CLI points `XDG_DATA_HOME` at
+Listed nonregular files and either reserved verifier path are refused before
+reading content. Each stratum is copied into an isolated workspace under
+`/tmp` (canonical `/tmp` or `/private/tmp`), with an 80-byte neutral canonical
+path. Copied bytes are checked against the manifest again. The verifier's
+scratch write and cleanup affect only this copy; the source may be read-only.
+After the file carriers finish, adversarial fixtures are removed from the
+copy before search, so they consume neither its output cap nor its benign
+denominator. The CLI points `XDG_DATA_HOME` at
 a temporary directory for the run, so the loopback MCP server's trust pin
 never lands in the user's data directory. The census refuses to run on
 Windows, where the exec carriers are unsupported.
@@ -109,10 +115,10 @@ JSON observation per line.
 
 `census-results.json` (`llm-bench.census-results/v1`) holds no file content.
 `manifest_sha256` binds the manifest bytes and `full_sha256` the bytes of
-`full/observations.jsonl`. The verifier observation's byte count includes the
-absolute stratum root, so `full_sha256` holds only for the same root path, and
-`fired` records every verifier row's `bytes` as 0; the rest of
-`census-results.json` does not depend on the root.
+`full/observations.jsonl`. The neutral workspace keeps the verifier's findings,
+rendered byte counts and truncation boundary independent of the source root.
+Both output files, including `full_sha256`, are root-independent. For v1
+format compatibility, `fired` still records verifier `bytes` as 0.
 
 The committed results cover all six strata of the manifest.
 
@@ -157,10 +163,10 @@ tool call (two calls for `command_tail`); the last turn ends the run.
 | Carrier | Production path | Origin |
 |---|---|---|
 | `read_file` | `agent/tools` `read_file` (256 KiB cap with marker, binary refusal) | workspace |
-| `search` | `agent/tools` `search`, once per registered query per stratum: `func `, `TODO`, `error`, `return`, `import`, `config`, `test`, `http` | workspace |
-| `run_command` | `cat <path>` through the host exec runtime (`SandboxConfig{}`), approved | workspace |
-| `command_tail` | `start_command` of `cat <path>`, then `command_tail` with default arguments once the job exits | workspace |
-| `verifier` | the session `VerifierSlot` armed with `cat <path> .census-verify-missing`, triggered by a `write_file` of an unrelated scratch file | workspace |
+| `search` | `agent/tools` `search` over the benign-only copy, once per registered query per stratum: `func `, `TODO`, `error`, `return`, `import`, `config`, `test`, `http` | workspace |
+| `run_command` | `cat ./<path>` through the host exec runtime (`SandboxConfig{}`), approved | workspace |
+| `command_tail` | `start_command` of `cat ./<path>`, then `command_tail` with default arguments once the job exits | workspace |
+| `verifier` | the session `VerifierSlot` armed with `cat ./<path> .census-verify-missing`, triggered by a `write_file` of an unrelated scratch file | workspace |
 | `mcp` | a loopback go-sdk streamable-HTTP server with one tool, `fetch(path)`, returning the file as text, connected through `mcpclient.Connect` | foreign |
 | `mixed` | the `read_file` rendering returned with a registered `ContextSet`: one group whose verbatim alternatives are the rendering's line thirds; the fallback is the first third | workspace |
 
@@ -171,11 +177,11 @@ Notes on fidelity:
   in order to render the file. Its observation is then the failing-check
   rendering: the header, the `command:` and `target:` lines, stderr, and the
   head of stdout within the 4 KiB observation cap. The `target:` line names
-  the absolute stratum root, so verifier bytes depend on where the root is
-  (`fired` records them as 0).
-- `command_tail` renders the job's random handle. A handle whose hex holds a
-  digit run that Secrets would flag by itself is redrawn, so findings remain a
-  function of the file.
+  the neutral copy's canonical root at a fixed width, so neither the
+  interceptors nor the cap depend on the caller's path.
+- `command_tail` renders the job's random handle. A handle that any default
+  interceptor flags by itself is redrawn, so findings remain a function of the
+  file.
 - Findings cover the scripted tool calls (for example the `read_file`
   credential-path guard, or a detector tagging a path) and the carrier's final
   observation; the `command_tail` start result and the verifier's triggering

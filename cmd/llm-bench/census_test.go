@@ -242,6 +242,15 @@ func TestCensusRejectsManifestDrift(t *testing.T) {
 				t.Fatal(err)
 			}
 		}},
+		{"listed symlink", "clean.go", func(t *testing.T, p string) {
+			target := filepath.Join(t.TempDir(), "clean.go")
+			if err := os.Rename(p, target); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(target, p); err != nil {
+				t.Fatal(err)
+			}
+		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m, root := censusFixtureCopy(t)
@@ -264,6 +273,70 @@ func TestCensusMixedAlternativeOnly(t *testing.T) {
 	want := []censusFinding{{Interceptor: "typoglycemia", Rule: "weak_phrase", Verdict: "tag", Target: "alternative", Group: 0, Alt: 2}}
 	if !reflect.DeepEqual(o.Findings, want) {
 		t.Errorf("mixed weak.md findings = %+v, want %+v", o.Findings, want)
+	}
+}
+
+func TestCensusSearchExcludesAdversarialFixtures(t *testing.T) {
+	m, root := censusFixtureCopy(t)
+	data := []byte("config \u200b\n")
+	path := filepath.Join(root, "fixture", "strong.md")
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for i := range m.Strata[0].Files {
+		if m.Strata[0].Files[i].Path == "strong.md" {
+			sum := sha256.Sum256(data)
+			m.Strata[0].Files[i].SHA256 = hex.EncodeToString(sum[:])
+		}
+	}
+	obs, err := runCensus(t.Context(), m, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := censusFindingKeys(findCensusObservation(t, obs, "search", "config")); len(got) != 0 {
+		t.Errorf("search config findings = %v, want none from the excluded fixture", got)
+	}
+	if got := censusFindingKeys(findCensusObservation(t, obs, "read_file", "strong.md")); len(got) != 1 {
+		t.Errorf("read_file strong.md findings = %v, want the fixture's zero-width finding", got)
+	}
+	if got, err := os.ReadFile(path); err != nil || string(got) != string(data) {
+		t.Errorf("source fixture after census = %q, %v; want unchanged", got, err)
+	}
+}
+
+func TestCensusIndependentOfRoot(t *testing.T) {
+	m, root := censusFixtureCopy(t)
+	want, err := runCensus(t.Context(), m, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A deliberately generated card-shaped directory and a longer root must
+	// not change verifier findings, byte counts, or the truncation boundary.
+	card := "4532" + "0151" + "1283" + "0366"
+	other := filepath.Join(t.TempDir(), card, strings.Repeat("long-", 30))
+	if err := os.CopyFS(other, os.DirFS(root)); err != nil {
+		t.Fatal(err)
+	}
+	got, err := runCensus(t.Context(), m, other)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range want {
+		if !reflect.DeepEqual(got[i], want[i]) {
+			t.Errorf("%s %s depends on root: findings %v / %v, bytes %d / %d", got[i].Carrier, got[i].Path,
+				censusFindingKeys(got[i]), censusFindingKeys(want[i]), got[i].Bytes, want[i].Bytes)
+		}
+	}
+}
+
+func TestCensusRejectsReservedSymlink(t *testing.T) {
+	m, root := censusFixtureCopy(t)
+	path := filepath.Join(root, "fixture", censusVerifyMissing)
+	if err := os.Symlink("clean.go", path); err != nil {
+		t.Fatal(err)
+	}
+	if obs, err := runCensus(t.Context(), m, root); err == nil || len(obs) != 0 {
+		t.Errorf("runCensus with reserved symlink = %d observations, %v; want refusal before observation", len(obs), err)
 	}
 }
 

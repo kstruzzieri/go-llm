@@ -26,7 +26,6 @@ import (
 	"github.com/kstruzzieri/go-llm/agent/interceptor"
 	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
 	"github.com/kstruzzieri/go-llm/contextdepth"
-	"github.com/kstruzzieri/go-llm/internal/secretscan"
 	"github.com/kstruzzieri/go-llm/mcpclient"
 	"github.com/kstruzzieri/go-llm/provider"
 )
@@ -167,7 +166,39 @@ func (m censusManifest) validate() error {
 func verifyCensusStratum(dir string, s censusStratum) error {
 	listed := make(map[string]bool, len(s.Files))
 	for _, f := range s.Files {
-		listed[f.Path] = true
+		listed[f.Path] = false
+	}
+	if err := filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(dir, p)
+		if err != nil {
+			return err
+		}
+		rel = filepath.ToSlash(rel)
+		if rel == censusVerifyScratch || rel == censusVerifyMissing {
+			return fmt.Errorf("census: %s: %s: path is reserved by the census", s.Name, rel)
+		}
+		_, expected := listed[rel]
+		if !d.Type().IsRegular() {
+			if expected {
+				return fmt.Errorf("census: %s: %s: not a regular file", s.Name, rel)
+			}
+			return nil
+		}
+		if !expected {
+			return fmt.Errorf("census: %s: %s: file is not in the manifest", s.Name, rel)
+		}
+		listed[rel] = true
+		return nil
+	}); err != nil {
+		return err
+	}
+	for _, f := range s.Files {
+		if !listed[f.Path] {
+			return fmt.Errorf("census: %s: %s: missing regular file", s.Name, f.Path)
+		}
 		data, err := os.ReadFile(filepath.Join(dir, filepath.FromSlash(f.Path)))
 		if err != nil {
 			return fmt.Errorf("census: %s: %s: %w", s.Name, f.Path, err)
@@ -176,19 +207,7 @@ func verifyCensusStratum(dir string, s censusStratum) error {
 			return fmt.Errorf("census: %s: %s: sha256 differs from the manifest", s.Name, f.Path)
 		}
 	}
-	return filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
-		if err != nil || !d.Type().IsRegular() {
-			return err
-		}
-		rel, err := filepath.Rel(dir, p)
-		if err != nil {
-			return err
-		}
-		if rel = filepath.ToSlash(rel); !listed[rel] {
-			return fmt.Errorf("census: %s: %s: file is not in the manifest", s.Name, rel)
-		}
-		return nil
-	})
+	return nil
 }
 
 // runCensus verifies every stratum under root (one subdirectory per stratum
@@ -283,6 +302,39 @@ type censusEnv struct {
 }
 
 func censusStratumRun(ctx context.Context, s censusStratum, dir string) ([]censusObservation, error) {
+	// The real verifier renders its canonical root before applying its cap.
+	// Use a neutral, fixed-width root so neither findings nor visible bytes
+	// depend on the caller's checkout path (including TMPDIR).
+	tmp, err := os.MkdirTemp("/tmp", "llm-bench-census-")
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = os.RemoveAll(tmp) }()
+	base, err := filepath.EvalSymlinks(tmp)
+	if err != nil {
+		return nil, err
+	}
+	if filepath.Dir(base) != "/tmp" && filepath.Dir(base) != "/private/tmp" {
+		return nil, errors.New("census: /tmp must resolve to /tmp or /private/tmp for neutral verifier rendering")
+	}
+	scratch := filepath.Join(base, strings.Repeat("w", 80-len(base)-1))
+	for _, f := range s.Files {
+		data, err := os.ReadFile(filepath.Join(dir, filepath.FromSlash(f.Path)))
+		if err != nil {
+			return nil, err
+		}
+		if sum := sha256.Sum256(data); hex.EncodeToString(sum[:]) != f.SHA256 {
+			return nil, fmt.Errorf("census: %s: %s: sha256 differs from the manifest", s.Name, f.Path)
+		}
+		path := filepath.Join(scratch, filepath.FromSlash(f.Path))
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			return nil, err
+		}
+		if err := os.WriteFile(path, data, 0o600); err != nil {
+			return nil, err
+		}
+	}
+	dir = scratch
 	ws, err := agenttools.NewWorkspace(dir)
 	if err != nil {
 		return nil, fmt.Errorf("census: %s: %w", s.Name, err)
@@ -312,6 +364,15 @@ func censusStratumRun(ctx context.Context, s censusStratum, dir string) ([]censu
 				return nil, fmt.Errorf("census: %s: %s %s: %w", s.Name, carrier, f.Path, err)
 			}
 			out = append(out, o)
+		}
+	}
+	// Search walks the whole workspace. Exclude fixtures before rendering,
+	// so they consume neither the benign denominator nor its output cap.
+	for _, f := range s.Files {
+		if f.Class == censusAdversarial {
+			if err := os.Remove(filepath.Join(dir, filepath.FromSlash(f.Path))); err != nil {
+				return nil, err
+			}
 		}
 	}
 	for _, q := range censusSearchQueries {
@@ -394,7 +455,7 @@ func (e *censusEnv) observe(ctx context.Context, carrier, path string) (censusOb
 	case "mcp":
 		return e.run(ctx, carrier, path, []agent.Tool{e.mcp}, nil, censusScript(censusCall(0, e.mcp.Spec().Name, pathArgs)))
 	case "run_command":
-		return e.run(ctx, carrier, path, []agent.Tool{e.runCmd}, nil, censusScript(censusCall(0, "run_command", map[string]any{"argv": []string{"cat", path}})))
+		return e.run(ctx, carrier, path, []agent.Tool{e.runCmd}, nil, censusScript(censusCall(0, "run_command", map[string]any{"argv": []string{"cat", "./" + path}})))
 	case "command_tail":
 		return e.commandTail(ctx, path)
 	case "verifier":
@@ -406,10 +467,8 @@ func (e *censusEnv) observe(ctx context.Context, carrier, path string) (censusOb
 // commandTail starts `cat <path>` in the background, waits for it to exit and
 // reads stdout with command_tail's default arguments, on a fresh manager so
 // its one job is unambiguous. The handle is random hex that command_tail
-// renders: a draw that Secrets would flag on its own (a Luhn-valid digit run)
-// is redrawn so findings stay a function of the file.
-// ponytail: only Scan is checked; a handle whose hex decodes to a phrase or a
-// zero-width rune (about 1e-5 per draw) still lands in the observation.
+// renders: a draw that any default interceptor flags on its own is redrawn
+// so findings stay a function of the file.
 func (e *censusEnv) commandTail(ctx context.Context, path string) (censusObservation, error) {
 	for range 8 {
 		mgr, tools, err := censusExecTools(e.root)
@@ -417,7 +476,7 @@ func (e *censusEnv) commandTail(ctx context.Context, path string) (censusObserva
 			return censusObservation{}, err
 		}
 		var handle string
-		start := censusCall(0, "start_command", map[string]any{"argv": []string{"cat", path}})
+		start := censusCall(0, "start_command", map[string]any{"argv": []string{"cat", "./" + path}})
 		tail := func() (*provider.ToolCall, error) {
 			var err error
 			handle, err = censusAwaitJob(ctx, mgr)
@@ -426,11 +485,31 @@ func (e *censusEnv) commandTail(ctx context.Context, path string) (censusObserva
 		o, err := e.run(ctx, "command_tail", path, []agent.Tool{tools[1], tools[3]}, nil,
 			[]func() (*provider.ToolCall, error){func() (*provider.ToolCall, error) { return start, nil }, tail})
 		mgr.Shutdown()
-		if err != nil || len(secretscan.Scan(handle)) == 0 {
+		if err != nil {
 			return o, err
 		}
+		flagged, err := censusHandleHasFindings(ctx, handle)
+		if err != nil {
+			return censusObservation{}, err
+		}
+		if !flagged {
+			return o, nil
+		}
 	}
-	return censusObservation{}, errors.New("every background handle drawn was secret-shaped")
+	return censusObservation{}, errors.New("every background handle drawn produced interceptor findings")
+}
+
+func censusHandleHasFindings(ctx context.Context, handle string) (bool, error) {
+	in := agent.InputInspection{Messages: []agent.InspectedMessage{{Role: "tool", Origin: agent.OriginWorkspace, Content: handle}}}
+	flagged := false
+	for _, ic := range interceptor.Defaults() {
+		findings, err := ic.InspectInput(ctx, in)
+		if err != nil {
+			return false, fmt.Errorf("census: background handle: %s: %w", ic.Name(), err)
+		}
+		flagged = flagged || len(findings) != 0
+	}
+	return flagged, nil
 }
 
 // censusAwaitJob waits until the manager's one job has exited.
@@ -458,7 +537,7 @@ func censusAwaitJob(ctx context.Context, mgr *agenttools.BackgroundManager) (str
 // verifier arms the session verifier with a failing `cat <path>` and triggers
 // it with a write_file of an unrelated scratch file, removed afterwards.
 func (e *censusEnv) verifier(ctx context.Context, path string) (censusObservation, error) {
-	cmd, err := agenttools.NewVerifyCommand(e.ws, []string{"cat", path, censusVerifyMissing}, "", 30*time.Second)
+	cmd, err := agenttools.NewVerifyCommand(e.ws, []string{"cat", "./" + path, censusVerifyMissing}, "", 30*time.Second)
 	if err != nil {
 		return censusObservation{}, err
 	}

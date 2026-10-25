@@ -1423,7 +1423,7 @@ func renderSecretsEvidence(acc []secrettest.Outcome, census censusResultsDoc, ro
 	p("p = %.4f%% per handle, about 1 in %.0f jobs (computed exactly from the 10/16 and 1/10 probabilities above, not sampled).\n\n", 100*pf, 1/pf)
 	p("The rule also exempts repeated digits and the 7 published test numbers, which lowers p by less than one part in ten billion, so p is a tight upper bound. " +
 		"Under a default-on Secrets every result that prints such a handle is replaced, whatever the job's output: the job runs, but the model never sees its handle or its output. " +
-		"The census redraws these handles so that its rates stay a function of the file, so this effect is not in the `command_tail` rates above and adds to them.\n")
+		"The census redraws these handles, and any handle flagged by a detector, so that its rates stay a function of the file. This effect is not in the `command_tail` rates above and adds to them.\n")
 
 	// Workflow table.
 	p("\n## Workflow table\n\n")

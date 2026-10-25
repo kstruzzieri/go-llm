@@ -1,7 +1,7 @@
 {
   "schema": "llm-bench.census-results/v1",
   "manifest_sha256": "de84f7a4bb2e6893ad86c14074bdcb868368590397d0533704cc5803cf315eb5",
-  "full_sha256": "93f84645ee2e961b97c77af2bd5994b2aaec3f5f0d666838e4353b031db0b85f",
+  "full_sha256": "86d8d5744404fc8339e76e067a0c3d76652655da50f6490502014afd6bfc65bc",
   "aggregates": [
     {
       "stratum": "go-llm",
@@ -324,11 +324,11 @@
       "arm": "guards+detectors",
       "observations": 8,
       "files": 0,
-      "trailer": 1,
+      "trailer": 0,
       "blocked": 0,
       "call_blocked": 0,
       "suppressed": 0,
-      "trailer_bytes": 89,
+      "trailer_bytes": 0,
       "adversarial_fixture": 0,
       "refused": 0,
       "unobserved": 0
@@ -339,11 +339,11 @@
       "arm": "guards+detectors+secrets",
       "observations": 8,
       "files": 0,
-      "trailer": 1,
+      "trailer": 0,
       "blocked": 0,
       "call_blocked": 0,
       "suppressed": 0,
-      "trailer_bytes": 89,
+      "trailer_bytes": 0,
       "adversarial_fixture": 0,
       "refused": 0,
       "unobserved": 0
@@ -14599,23 +14599,6 @@
         {
           "interceptor": "typoglycemia",
           "rule": "weak_phrase",
-          "verdict": "tag",
-          "target": "message",
-          "group": -1,
-          "alt": -1
-        }
-      ]
-    },
-    {
-      "stratum": "go-llm",
-      "path": "config",
-      "carrier": "search",
-      "origin": "workspace",
-      "bytes": 25375,
-      "findings": [
-        {
-          "interceptor": "zero_width",
-          "rule": "zero_width",
           "verdict": "tag",
           "target": "message",
           "group": -1,

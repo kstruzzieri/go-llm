@@ -22,8 +22,9 @@ is not a card number. For that reason this directory is deliberately not
 covered by `TestCommittedArtifactsCarryNoSecretShapes`. No provider token, PEM
 private key or bearer value is committed here.
 
-`results.golden.json` is the fixture's aggregated census results, with the
-verifier byte counts zeroed because they include the absolute stratum root.
+`results.golden.json` is the fixture's aggregated census results, retaining
+the v1 format's zero verifier byte counts. Rendering uses an isolated neutral
+workspace of fixed path length; search excludes `strong.md` before rendering.
 `TestCensusResultsRegen` regenerates it twice and byte-compares; after an
 intended change, rewrite it with
 `go test ./cmd/llm-bench -run TestCensusResultsRegen -update-census-golden`.

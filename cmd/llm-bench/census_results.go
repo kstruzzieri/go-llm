@@ -12,8 +12,8 @@ const censusResultsSchema = "llm-bench.census-results/v1"
 // per-(stratum, carrier, arm) aggregates and one row per observation with any
 // finding. It holds findings and counts, never observation content.
 // ManifestSHA256 binds the manifest bytes; FullSHA256 binds the gitignored
-// full/observations.jsonl. A verifier row's Bytes in Fired is 0: the
-// rendering names the absolute stratum root, so only the full output keeps it.
+// full/observations.jsonl. A verifier row's Bytes in Fired remains 0 for the
+// v1 committed format; the full output keeps its now root-independent count.
 type censusResults struct {
 	Schema         string              `json:"schema"`
 	ManifestSHA256 string              `json:"manifest_sha256"`
@@ -64,7 +64,7 @@ func aggregateCensus(obs []censusObservation, m censusManifest) censusResults {
 		if len(o.Findings) > 0 {
 			fired := o
 			if fired.Carrier == "verifier" {
-				fired.Bytes = 0 // the target: line names the absolute stratum root
+				fired.Bytes = 0 // preserve the v1 committed format
 			}
 			r.Fired = append(r.Fired, fired)
 		}
