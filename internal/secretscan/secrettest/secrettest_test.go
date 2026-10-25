@@ -71,7 +71,7 @@ func TestCasesValidate(t *testing.T) {
 	// A mandatory case may predict a miss: conformance pins it and the
 	// evidence report records spec §5.6 item 1 as FAIL.
 	missed := base
-	missed.Class, missed.Mandatory = ExpectedSensitive, true
+	missed.Class, missed.Mandatory, missed.Kind = ExpectedSensitive, true, "openai_token"
 	if _, err := parseCases(table(missed)); err != nil {
 		t.Errorf("parseCases(mandatory, expect_any false) = %v, want nil", err)
 	}
@@ -82,6 +82,8 @@ func TestCasesValidate(t *testing.T) {
 		{"missing role", func(c *Case) { c.Role = "" }},
 		{"unknown class", func(c *Case) { c.Class = "secret" }},
 		{"mandatory not sensitive", func(c *Case) { c.Mandatory, c.ExpectAny, c.ExpectKinds = true, true, []string{"openai_token"} }},
+		{"mandatory coverage gap", func(c *Case) { c.Class, c.Mandatory, c.CoverageGap = ExpectedSensitive, true, true }},
+		{"mandatory without kind", func(c *Case) { c.Class, c.Mandatory = ExpectedSensitive, true }},
 		{"coverage gap expecting", func(c *Case) { c.CoverageGap, c.ExpectAny, c.ExpectKinds = true, true, []string{"openai_token"} }},
 		{"coverage gap with kind", func(c *Case) { c.CoverageGap, c.Kind = true, "secret_assignment" }},
 		{"template without marker", func(c *Case) { c.Template = "a" }},
@@ -193,8 +195,14 @@ func TestScoreTruthIsClass(t *testing.T) {
 		"har-query-string-pair-access-token": "FN",
 		"go-json-escaped-access-token":       "FN",
 		"benign-go-source":                   "TN",
-		"gap-github-oauth-gho":               "",
-		"card-order-number-luhn-valid":       "",
+		// Keith's adjudication of the rater's four disagreements (R24): the
+		// public PEMs are benign, the empty and null fields stay lookalikes.
+		"pem-certificate":              "TN",
+		"pem-public-key":               "TN",
+		"benign-empty-password":        "",
+		"benign-null-token":            "",
+		"gap-github-oauth-gho":         "",
+		"card-order-number-luhn-valid": "",
 	}
 	for _, c := range cases {
 		cell, ok := want[c.ID]

@@ -6,7 +6,7 @@ This is the Secrets half of #517 (spec §5): an accuracy report and a workflow-d
 
 Inputs:
 
-- the case table `internal/secretscan/secrettest/cases.json`: 163 cases (expected-sensitive 96, synthetic-fixture 18, benign-lookalike 44, benign 5, unclassified 0), classed by documented role before any scanning (spec §5.2) and inspected by `secrettest.Evaluate`;
+- the case table `internal/secretscan/secrettest/cases.json`: 163 cases (expected-sensitive 96, synthetic-fixture 18, benign-lookalike 42, benign 7, unclassified 0), classed by documented role before any scanning (spec §5.2) and inspected by `secrettest.Evaluate`;
 - the committed census results `docs/llm/census/census-results.json` (`llm-bench.census-results/v1`, manifest sha256 `2429cd7c9aff…`);
 - the workflow table `cmd/golem/secrets_workflow_test.go`: 26 rows, each run under G (the always-on guards) and G+S (guards plus Secrets).
 
@@ -39,9 +39,9 @@ Truth is the case's class. `Outcome.Score` puts an expected-sensitive outcome in
 | `payment_card` | observation | input | 6 | 1 | 0.86 (6/7) | 0 | 0 | - (n=0) |
 | `payment_card` | tool-args | output | 6 | 1 | 0.86 (6/7) | 0 | 0 | - (n=0) |
 | `payment_card` | tool-args | tool_call | 6 | 1 | 0.86 (6/7) | 0 | 0 | - (n=0) |
-| `private_key` | observation | input | 8 | 4 | 0.67 (8/12) | 0 | 0 | - (n=0) |
-| `private_key` | tool-args | output | 8 | 1 | 0.89 (8/9) | 0 | 0 | - (n=0) |
-| `private_key` | tool-args | tool_call | 8 | 1 | 0.89 (8/9) | 0 | 0 | - (n=0) |
+| `private_key` | observation | input | 8 | 4 | 0.67 (8/12) | 0 | 2 | 0.00 (0/2) |
+| `private_key` | tool-args | output | 8 | 1 | 0.89 (8/9) | 0 | 2 | 0.00 (0/2) |
+| `private_key` | tool-args | tool_call | 8 | 1 | 0.89 (8/9) | 0 | 2 | 0.00 (0/2) |
 | `secret_assignment` | observation | input | 18 | 5 | 0.78 (18/23) | 0 | 0 | - (n=0) |
 | `secret_assignment` | tool-args | output | 18 | 5 | 0.78 (18/23) | 0 | 0 | - (n=0) |
 | `secret_assignment` | tool-args | tool_call | 18 | 5 | 0.78 (18/23) | 0 | 0 | - (n=0) |
@@ -150,7 +150,7 @@ Correct detection on every mandatory supported case. 55 mandatory cases (165 out
 
 Benign lookalikes: content proven not to be a credential, such as identifiers, checksums, order numbers, unresolved references, redactions and placeholders (spec §5.2). They stay out of the confusion matrix. A firing here is a block a default-on Secrets would impose on content that only looks like a secret. These are designed probes, not a population; the census below gives the rate. 14 lookalike cases fire at tool-args/output, which is terminal in production; no §5.5 sentinel row writes a lookalike, so item 2 measures the rows only.
 
-Secrets fired on 14/44 (31.82%) by case and 41/132 (31.06%) by outcome.
+Secrets fired on 14/42 (33.33%) by case and 41/126 (32.54%) by outcome.
 
 | Case | Kind | Coverage gap | observation/input | tool-args/output | tool-args/tool_call |
 |---|---|---|---|---|---|
@@ -181,8 +181,6 @@ Secrets fired on 14/44 (31.82%) by case and 41/132 (31.06%) by outcome.
 | `pem-ec-docs-header` | `private_key` | no | silent | silent | silent |
 | `pem-openssh-docs-header` | `private_key` | no | silent | silent | silent |
 | `pem-docs-skeleton-complete` | `private_key` | no | fired: private_key | fired: private_key | fired: private_key |
-| `pem-certificate` | `private_key` | no | silent | silent | silent |
-| `pem-public-key` | `private_key` | no | silent | silent | silent |
 | `card-order-number-luhn-valid` | `payment_card` | no | fired: payment_card | fired: payment_card | fired: payment_card |
 | `card-order-number-luhn-invalid` | `payment_card` | no | silent | silent | silent |
 | `card-ns-timestamp-luhn-valid` | `payment_card` | no | fired: payment_card | fired: payment_card | fired: payment_card |
@@ -228,7 +226,7 @@ Secrets fired on 2/18 (11.11%) by case and 6/54 (11.11%) by outcome.
 
 ## Coverage gaps
 
-Families the scanner has no rule for at all (spec F11), one case each, named by its documented role. They are reported, not counted as false negatives against the supported contract; a firing here comes from another rule.
+Families the scanner has no rule for at all (spec F11), each case named by its documented role (a family may have more than one case). They are reported, not counted as false negatives against the supported contract; a firing here comes from another rule.
 
 - `gap-github-oauth-gho`: GitHub OAuth token written by gh auth login into the CLI's hosts.yml.
 - `gap-github-user-to-server-ghu`: GitHub App user-to-server token held in an app's session store.

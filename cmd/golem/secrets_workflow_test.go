@@ -973,8 +973,14 @@ func TestSecretsWorkflowTable(t *testing.T) {
 		}
 	})
 	// Whichever test ran the rows, every result that ran was compared here
-	// (unless a -run subtest filter left some out).
-	if f := flag.Lookup("test.run"); f == nil || !strings.Contains(f.Value.String(), "/") {
+	// (unless a -run subtest filter or a -skip filter left some out).
+	filter := func(name string) string {
+		if f := flag.Lookup(name); f != nil {
+			return f.Value.String()
+		}
+		return ""
+	}
+	if !strings.Contains(filter("test.run"), "/") && filter("test.skip") == "" {
 		for _, run := range runs {
 			for arm, name := range secretsArmNames {
 				if run.ran[arm] && !compared[run.row.ID+"/"+name] {

@@ -131,6 +131,9 @@ func (c Case) validate() error {
 		// A mandatory case may predict a miss (expect_any false): conformance
 		// then pins the miss and the evidence report records item 1 as FAIL.
 		return errors.New("mandatory requires class expected-sensitive")
+	case c.Mandatory && c.Kind == "":
+		// A coverage gap has no kind, so this also rejects a mandatory gap.
+		return errors.New("a mandatory case needs a supported kind, so it cannot be a coverage gap")
 	case c.CoverageGap && (c.ExpectAny || c.Kind != ""):
 		return errors.New("a coverage gap has no supported kind and cannot expect a finding")
 	case c.ExpectAny != (len(c.ExpectKinds) > 0):

@@ -287,8 +287,9 @@ func TestSecretsEvidenceSections(t *testing.T) {
 	}
 
 	// R9: every FN is listed by case ID under the accuracy section, and the
-	// boundary probes among them are counted (20 of 28, from ruling R9; all
-	// four pending class disagreements are lookalike-versus-benign, never FN).
+	// boundary probes among them are counted (20 of 28, from ruling R9; the
+	// four rater disagreements Keith adjudicated were lookalike-versus-benign,
+	// never FN).
 	accuracy := section(t, doc, "## Accuracy by kind and carrier")
 	fn := map[string]bool{}
 	for _, o := range in.acc {
@@ -1285,7 +1286,7 @@ func renderSecretsEvidence(acc []secrettest.Outcome, census censusResultsDoc, ro
 		}
 	}
 	p("\n## Coverage gaps\n\n")
-	p("Families the scanner has no rule for at all (spec F11), one case each, named by its documented role. They are reported, not counted as false negatives against the supported contract; a firing here comes from another rule.\n\n")
+	p("Families the scanner has no rule for at all (spec F11), each case named by its documented role (a family may have more than one case). They are reported, not counted as false negatives against the supported contract; a firing here comes from another rule.\n\n")
 	var gapIDs []string
 	for _, o := range gaps {
 		if !slices.Contains(gapIDs, o.CaseID) {

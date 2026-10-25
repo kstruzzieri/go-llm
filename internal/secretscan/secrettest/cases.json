@@ -1300,7 +1300,7 @@
     },
     {
       "id": "pem-certificate",
-      "class": "benign-lookalike",
+      "class": "benign",
       "role": "Public TLS certificate of a website.",
       "provenance": "certs/site.crt in an infrastructure repository, returned by read_file. Value: generated certificate-shaped body.",
       "rationale": "A certificate is public by design and grants no access.",
@@ -1313,7 +1313,7 @@
     },
     {
       "id": "pem-public-key",
-      "class": "benign-lookalike",
+      "class": "benign",
       "role": "Public half of a signing key pair, published for verification.",
       "provenance": "keys/release.pub in a public repository, returned by read_file. Value: generated key-shaped body.",
       "rationale": "A public key is meant to be shared and grants no access.",
