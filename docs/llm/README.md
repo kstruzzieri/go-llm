@@ -17,6 +17,8 @@ after OS overhead).
 | [benchmark-plan.md](benchmark-plan.md) | Harness design for A/B'ing models on real traces |
 | [traces/injection/README.md](traces/injection/README.md) | Committed injection corpus: 16 bases, variants and clean twins; builder and gates |
 | [benchmarks/2026-10-15-injection-resistance.md](benchmarks/2026-10-15-injection-resistance.md) | Injection-resistance run report with manual review (written at the recorded run) |
+| [census/README.md](census/README.md) | Interceptor census: strata manifest, carriers, per-arm outcome rules and committed results |
+| [../security/secrets-evidence.md](../security/secrets-evidence.md) | Secrets evidence: accuracy, census, workflow table and the default gate (generated) |
 
 ## Bring-your-own model
 

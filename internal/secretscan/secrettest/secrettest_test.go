@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"maps"
 	"os"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strconv"
@@ -458,14 +459,40 @@ func luhn(digits string) bool {
 	return sum%10 == 0
 }
 
+// TestCommittedArtifactsCarryNoSecretShapes scans every committed #517
+// artifact (Review Focus 3). The census results' sha256 digests are blanked
+// first (ruling R19): they are identifiers that can hold a Luhn-valid digit
+// run, not content. docs/llm/census/manifest.json is never scanned: its
+// per-file sha256s carry such runs by design.
 func TestCommittedArtifactsCarryNoSecretShapes(t *testing.T) {
 	t.Parallel()
-	for _, path := range []string{"cases.json"} {
+	results := filepath.Join("..", "..", "..", "docs", "llm", "census", "census-results.json")
+	for _, path := range []string{
+		"cases.json",
+		filepath.Join("..", "..", "..", "docs", "security", "secrets-evidence.md"),
+		results,
+	} {
 		data, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatalf("read %s: %v", path, err)
 		}
-		if findings := secretscan.Scan(string(data)); len(findings) != 0 {
+		text := string(data)
+		if path == results {
+			var digests struct {
+				Manifest string `json:"manifest_sha256"`
+				Full     string `json:"full_sha256"`
+			}
+			if err := json.Unmarshal(data, &digests); err != nil {
+				t.Fatalf("%s: %v", path, err)
+			}
+			for _, d := range []string{digests.Manifest, digests.Full} {
+				if len(d) != 64 || strings.Trim(d, "0123456789abcdef") != "" {
+					t.Fatalf("%s: digest %q is not a sha256", path, d)
+				}
+				text = strings.ReplaceAll(text, d, "")
+			}
+		}
+		if findings := secretscan.Scan(text); len(findings) != 0 {
 			t.Errorf("%s carries secret-shaped spans: %v", path, findings)
 		}
 	}
