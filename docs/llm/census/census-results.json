@@ -12948,7 +12948,7 @@
       "path": "agent/context_manager_test.go",
       "carrier": "verifier",
       "origin": "workspace",
-      "bytes": 2476,
+      "bytes": 0,
       "findings": [
         {
           "interceptor": "typoglycemia",
@@ -12965,7 +12965,7 @@
       "path": "agent/doc.go",
       "carrier": "verifier",
       "origin": "workspace",
-      "bytes": 2459,
+      "bytes": 0,
       "findings": [
         {
           "interceptor": "typoglycemia",
@@ -12982,7 +12982,7 @@
       "path": "agent/fence.go",
       "carrier": "verifier",
       "origin": "workspace",
-      "bytes": 2461,
+      "bytes": 0,
       "findings": [
         {
           "interceptor": "typoglycemia",
@@ -12999,7 +12999,7 @@
       "path": "agent/interceptor/doc.go",
       "carrier": "verifier",
       "origin": "workspace",
-      "bytes": 2471,
+      "bytes": 0,
       "findings": [
         {
           "interceptor": "typoglycemia",
@@ -13016,7 +13016,7 @@
       "path": "agent/interceptor/e2e_test.go",
       "carrier": "verifier",
       "origin": "workspace",
-      "bytes": 2476,
+      "bytes": 0,
       "findings": [
         {
           "interceptor": "typoglycemia",
@@ -13033,7 +13033,7 @@
       "path": "agent/interceptor/encoding.go",
       "carrier": "verifier",
       "origin": "workspace",
-      "bytes": 2476,
+      "bytes": 0,
       "findings": [
         {
           "interceptor": "typoglycemia",
@@ -13050,7 +13050,7 @@
       "path": "agent/interceptor/encoding_test.go",
       "carrier": "verifier",
       "origin": "workspace",
-      "bytes": 2481,
+      "bytes": 0,
       "findings": [
         {
           "interceptor": "zero_width",
@@ -13075,7 +13075,7 @@
       "path": "agent/interceptor/fuzz_test.go",
       "carrier": "verifier",
       "origin": "workspace",
-      "bytes": 2477,
+      "bytes": 0,
       "findings": [
         {
           "interceptor": "zero_width",
@@ -13100,7 +13100,7 @@
       "path": "agent/interceptor/invariants_alias_test.go",
       "carrier": "verifier",
       "origin": "workspace",
-      "bytes": 2489,
+      "bytes": 0,
       "findings": [
         {
           "interceptor": "zero_width",
@@ -13117,7 +13117,7 @@
       "path": "agent/interceptor/invariants_credential_test.go",
       "carrier": "verifier",
       "origin": "workspace",
-      "bytes": 2494,
+      "bytes": 0,
       "findings": [
         {
           "interceptor": "zero_width",
@@ -13134,7 +13134,7 @@
       "path": "agent/interceptor/policy.go",
       "carrier": "verifier",
       "origin": "workspace",
-      "bytes": 2474,
+      "bytes": 0,
       "findings": [
         {
           "interceptor": "typoglycemia",
@@ -13151,7 +13151,7 @@
       "path": "agent/interceptor/policy_test.go",
       "carrier": "verifier",
       "origin": "workspace",
-      "bytes": 2479,
+      "bytes": 0,
       "findings": [
         {
           "interceptor": "typoglycemia",
@@ -13168,7 +13168,7 @@
       "path": "agent/interceptor/secrets.go",
       "carrier": "verifier",
       "origin": "workspace",
-      "bytes": 2475,
+      "bytes": 0,
       "findings": [
         {
           "interceptor": "typoglycemia",
@@ -13185,7 +13185,7 @@
       "path": "agent/interceptor/typoglycemia.go",
       "carrier": "verifier",
       "origin": "workspace",
-      "bytes": 2480,
+      "bytes": 0,
       "findings": [
         {
           "interceptor": "typoglycemia",
@@ -13202,7 +13202,7 @@
       "path": "agent/interceptor/typoglycemia_test.go",
       "carrier": "verifier",
       "origin": "workspace",
-      "bytes": 2485,
+      "bytes": 0,
       "findings": [
         {
           "interceptor": "typoglycemia",
@@ -13219,7 +13219,7 @@
       "path": "agent/interceptor/zero_width.go",
       "carrier": "verifier",
       "origin": "workspace",
-      "bytes": 2478,
+      "bytes": 0,
       "findings": [
         {
           "interceptor": "typoglycemia",
@@ -13236,7 +13236,7 @@
       "path": "agent/interceptor/zero_width_test.go",
       "carrier": "verifier",
       "origin": "workspace",
-      "bytes": 2483,
+      "bytes": 0,
       "findings": [
         {
           "interceptor": "zero_width",
@@ -13253,7 +13253,7 @@
       "path": "agent/mixed_assemble.go",
       "carrier": "verifier",
       "origin": "workspace",
-      "bytes": 2470,
+      "bytes": 0,
       "findings": [
         {
           "interceptor": "typoglycemia",
@@ -13270,7 +13270,7 @@
       "path": "agent/testdata/hardening/interceptors/mixed.input",
       "carrier": "verifier",
       "origin": "workspace",
-      "bytes": 633,
+      "bytes": 0,
       "findings": [
         {
           "interceptor": "zero_width",
@@ -13303,7 +13303,7 @@
       "path": "agent/testdata/hardening/interceptors/zero-width-raw.input",
       "carrier": "verifier",
       "origin": "workspace",
-      "bytes": 471,
+      "bytes": 0,
       "findings": [
         {
           "interceptor": "zero_width",
@@ -13320,7 +13320,7 @@
       "path": "agent/testdata/hardening/secrets/openai.input",
       "carrier": "verifier",
       "origin": "workspace",
-      "bytes": 468,
+      "bytes": 0,
       "findings": [
         {
           "interceptor": "secrets",
@@ -13337,7 +13337,7 @@
       "path": "agent/testdata/hardening/secrets/private-key.input",
       "carrier": "verifier",
       "origin": "workspace",
-      "bytes": 516,
+      "bytes": 0,
       "findings": [
         {
           "interceptor": "secrets",
@@ -13354,7 +13354,7 @@
       "path": "cmd/golem/hostgitenv_unix_test.go",
       "carrier": "verifier",
       "origin": "workspace",
-      "bytes": 2480,
+      "bytes": 0,
       "findings": [
         {
           "interceptor": "secrets",
@@ -13371,7 +13371,7 @@
       "path": "cmd/golem/memory.go",
       "carrier": "verifier",
       "origin": "workspace",
-      "bytes": 2466,
+      "bytes": 0,
       "findings": [
         {
           "interceptor": "typoglycemia",
@@ -13388,7 +13388,7 @@
       "path": "cmd/golem/memory_records.go",
       "carrier": "verifier",
       "origin": "workspace",
-      "bytes": 2474,
+      "bytes": 0,
       "findings": [
         {
           "interceptor": "typoglycemia",
@@ -13405,7 +13405,7 @@
       "path": "cmd/golem/ops_test.go",
       "carrier": "verifier",
       "origin": "workspace",
-      "bytes": 2468,
+      "bytes": 0,
       "findings": [
         {
           "interceptor": "secrets",
@@ -13422,7 +13422,7 @@
       "path": "cmd/golem/origin_test.go",
       "carrier": "verifier",
       "origin": "workspace",
-      "bytes": 2471,
+      "bytes": 0,
       "findings": [
         {
           "interceptor": "typoglycemia",
@@ -13439,7 +13439,7 @@
       "path": "cmd/llm-bench/assembly_mixed_fixture_test.go",
       "carrier": "verifier",
       "origin": "workspace",
-      "bytes": 2491,
+      "bytes": 0,
       "findings": [
         {
           "interceptor": "typoglycemia",
@@ -13456,7 +13456,7 @@
       "path": "cmd/llm-bench/capture_transcript_roundtrip_test.go",
       "carrier": "verifier",
       "origin": "workspace",
-      "bytes": 2497,
+      "bytes": 0,
       "findings": [
         {
           "interceptor": "typoglycemia",
@@ -13473,7 +13473,7 @@
       "path": "cmd/llm-bench/judge_cache.go",
       "carrier": "verifier",
       "origin": "workspace",
-      "bytes": 2475,
+      "bytes": 0,
       "findings": [
         {
           "interceptor": "typoglycemia",
@@ -13490,7 +13490,7 @@
       "path": "cmd/llm-bench/judge_claude_cli.go",
       "carrier": "verifier",
       "origin": "workspace",
-      "bytes": 2480,
+      "bytes": 0,
       "findings": [
         {
           "interceptor": "typoglycemia",
@@ -13507,7 +13507,7 @@
       "path": "cmd/llm-bench/judge_claude_cli_test.go",
       "carrier": "verifier",
       "origin": "workspace",
-      "bytes": 2485,
+      "bytes": 0,
       "findings": [
         {
           "interceptor": "typoglycemia",
@@ -13524,7 +13524,7 @@
       "path": "cmd/llm-bench/judge_openaicompat.go",
       "carrier": "verifier",
       "origin": "workspace",
-      "bytes": 2482,
+      "bytes": 0,
       "findings": [
         {
           "interceptor": "typoglycemia",
@@ -13541,7 +13541,7 @@
       "path": "cmd/llm-bench/main.go",
       "carrier": "verifier",
       "origin": "workspace",
-      "bytes": 2468,
+      "bytes": 0,
       "findings": [
         {
           "interceptor": "typoglycemia",
@@ -13558,7 +13558,7 @@
       "path": "cmd/llm-bench/replay_attempt_raw_redaction_test.go",
       "carrier": "verifier",
       "origin": "workspace",
-      "bytes": 2497,
+      "bytes": 0,
       "findings": [
         {
           "interceptor": "secrets",
@@ -13575,7 +13575,7 @@
       "path": "cmd/llm-bench/runner.go",
       "carrier": "verifier",
       "origin": "workspace",
-      "bytes": 2470,
+      "bytes": 0,
       "findings": [
         {
           "interceptor": "typoglycemia",
@@ -13592,7 +13592,7 @@
       "path": "consult/claude.go",
       "carrier": "verifier",
       "origin": "workspace",
-      "bytes": 1712,
+      "bytes": 0,
       "findings": [
         {
           "interceptor": "typoglycemia",
@@ -13609,7 +13609,7 @@
       "path": "consult/claude_test.go",
       "carrier": "verifier",
       "origin": "workspace",
-      "bytes": 2185,
+      "bytes": 0,
       "findings": [
         {
           "interceptor": "typoglycemia",
@@ -13626,7 +13626,7 @@
       "path": "docs/library.md",
       "carrier": "verifier",
       "origin": "workspace",
-      "bytes": 2462,
+      "bytes": 0,
       "findings": [
         {
           "interceptor": "typoglycemia",
@@ -13643,7 +13643,7 @@
       "path": "docs/llm/assembly-corpus/mixed/traces/stale-probe-timeout-core-legacy.json",
       "carrier": "verifier",
       "origin": "workspace",
-      "bytes": 2521,
+      "bytes": 0,
       "findings": [
         {
           "interceptor": "secrets",
@@ -13660,7 +13660,7 @@
       "path": "mcp/tools_generate.go",
       "carrier": "verifier",
       "origin": "workspace",
-      "bytes": 2468,
+      "bytes": 0,
       "findings": [
         {
           "interceptor": "typoglycemia",
@@ -26384,7 +26384,7 @@
       "path": "src/archive/tar/strconv_test.go",
       "carrier": "verifier",
       "origin": "workspace",
-      "bytes": 2478,
+      "bytes": 0,
       "findings": [
         {
           "interceptor": "secrets",
@@ -26401,7 +26401,7 @@
       "path": "src/cmd/go/internal/imports/read_test.go",
       "carrier": "verifier",
       "origin": "workspace",
-      "bytes": 2487,
+      "bytes": 0,
       "findings": [
         {
           "interceptor": "zero_width",
@@ -26418,7 +26418,7 @@
       "path": "src/cmd/vendor/rsc.io/markdown/entity.go",
       "carrier": "verifier",
       "origin": "workspace",
-      "bytes": 2487,
+      "bytes": 0,
       "findings": [
         {
           "interceptor": "zero_width",
@@ -26435,7 +26435,7 @@
       "path": "src/crypto/internal/cryptotest/wycheproof/_schema/_go.mod",
       "carrier": "verifier",
       "origin": "workspace",
-      "bytes": 1057,
+      "bytes": 0,
       "findings": [
         {
           "interceptor": "secrets",
@@ -26452,7 +26452,7 @@
       "path": "src/crypto/internal/cryptotest/wycheproof/_schema/go.mod",
       "carrier": "verifier",
       "origin": "workspace",
-      "bytes": 1056,
+      "bytes": 0,
       "findings": [
         {
           "interceptor": "secrets",
@@ -26469,7 +26469,7 @@
       "path": "src/crypto/internal/cryptotest/wycheproof/_schema/go.sum",
       "carrier": "verifier",
       "origin": "workspace",
-      "bytes": 2503,
+      "bytes": 0,
       "findings": [
         {
           "interceptor": "secrets",
@@ -26486,7 +26486,7 @@
       "path": "src/crypto/internal/cryptotest/wycheproof/schemaversion.go",
       "carrier": "verifier",
       "origin": "workspace",
-      "bytes": 870,
+      "bytes": 0,
       "findings": [
         {
           "interceptor": "secrets",
@@ -26503,7 +26503,7 @@
       "path": "src/crypto/internal/fips140/nistec/p256_asm_ppc64le.s",
       "carrier": "verifier",
       "origin": "workspace",
-      "bytes": 2500,
+      "bytes": 0,
       "findings": [
         {
           "interceptor": "secrets",
@@ -26520,7 +26520,7 @@
       "path": "src/crypto/internal/fips140/nistec/p256_asm_s390x.s",
       "carrier": "verifier",
       "origin": "workspace",
-      "bytes": 2498,
+      "bytes": 0,
       "findings": [
         {
           "interceptor": "secrets",
@@ -26537,7 +26537,7 @@
       "path": "src/crypto/internal/fips140/sha256/_asm/sha256block_amd64_shani.go",
       "carrier": "verifier",
       "origin": "workspace",
-      "bytes": 2513,
+      "bytes": 0,
       "findings": [
         {
           "interceptor": "typoglycemia",
@@ -26554,7 +26554,7 @@
       "path": "src/crypto/internal/fips140/sha3/_asm/keccakf_amd64_asm.go",
       "carrier": "verifier",
       "origin": "workspace",
-      "bytes": 2505,
+      "bytes": 0,
       "findings": [
         {
           "interceptor": "secrets",
@@ -26571,7 +26571,7 @@
       "path": "src/crypto/internal/fips140/sha3/keccakf.go",
       "carrier": "verifier",
       "origin": "workspace",
-      "bytes": 2490,
+      "bytes": 0,
       "findings": [
         {
           "interceptor": "secrets",
@@ -26588,7 +26588,7 @@
       "path": "src/crypto/sha1/_asm/sha1block_amd64_shani.go",
       "carrier": "verifier",
       "origin": "workspace",
-      "bytes": 2492,
+      "bytes": 0,
       "findings": [
         {
           "interceptor": "typoglycemia",
@@ -26605,7 +26605,7 @@
       "path": "src/crypto/tls/ech_test.go",
       "carrier": "verifier",
       "origin": "workspace",
-      "bytes": 2473,
+      "bytes": 0,
       "findings": [
         {
           "interceptor": "secrets",
@@ -26622,7 +26622,7 @@
       "path": "src/crypto/x509/platform_root_key.pem",
       "carrier": "verifier",
       "origin": "workspace",
-      "bytes": 664,
+      "bytes": 0,
       "findings": [
         {
           "interceptor": "secrets",
@@ -26639,7 +26639,7 @@
       "path": "src/debug/dwarf/dwarf5ranges_test.go",
       "carrier": "verifier",
       "origin": "workspace",
-      "bytes": 1361,
+      "bytes": 0,
       "findings": [
         {
           "interceptor": "secrets",
@@ -26656,7 +26656,7 @@
       "path": "src/encoding/base32/example_test.go",
       "carrier": "verifier",
       "origin": "workspace",
-      "bytes": 2094,
+      "bytes": 0,
       "findings": [
         {
           "interceptor": "zero_width",
@@ -26673,7 +26673,7 @@
       "path": "src/encoding/base64/example_test.go",
       "carrier": "verifier",
       "origin": "workspace",
-      "bytes": 2399,
+      "bytes": 0,
       "findings": [
         {
           "interceptor": "zero_width",
@@ -26698,7 +26698,7 @@
       "path": "src/encoding/json/v2/arshal_time_test.go",
       "carrier": "verifier",
       "origin": "workspace",
-      "bytes": 2487,
+      "bytes": 0,
       "findings": [
         {
           "interceptor": "secrets",
@@ -26715,7 +26715,7 @@
       "path": "src/go/build/read_test.go",
       "carrier": "verifier",
       "origin": "workspace",
-      "bytes": 2472,
+      "bytes": 0,
       "findings": [
         {
           "interceptor": "zero_width",
@@ -26732,7 +26732,7 @@
       "path": "src/html/template/html_test.go",
       "carrier": "verifier",
       "origin": "workspace",
-      "bytes": 2477,
+      "bytes": 0,
       "findings": [
         {
           "interceptor": "zero_width",
@@ -26749,7 +26749,7 @@
       "path": "src/html/template/js.go",
       "carrier": "verifier",
       "origin": "workspace",
-      "bytes": 2470,
+      "bytes": 0,
       "findings": [
         {
           "interceptor": "zero_width",
@@ -26766,7 +26766,7 @@
       "path": "src/html/template/url_test.go",
       "carrier": "verifier",
       "origin": "workspace",
-      "bytes": 2476,
+      "bytes": 0,
       "findings": [
         {
           "interceptor": "zero_width",
@@ -26783,7 +26783,7 @@
       "path": "src/internal/runtime/gc/sizeclasses.go",
       "carrier": "verifier",
       "origin": "workspace",
-      "bytes": 2485,
+      "bytes": 0,
       "findings": [
         {
           "interceptor": "secrets",
@@ -26800,7 +26800,7 @@
       "path": "src/math/acos_s390x.s",
       "carrier": "verifier",
       "origin": "workspace",
-      "bytes": 2468,
+      "bytes": 0,
       "findings": [
         {
           "interceptor": "secrets",
@@ -26817,7 +26817,7 @@
       "path": "src/math/acosh_s390x.s",
       "carrier": "verifier",
       "origin": "workspace",
-      "bytes": 2469,
+      "bytes": 0,
       "findings": [
         {
           "interceptor": "secrets",
@@ -26834,7 +26834,7 @@
       "path": "src/math/all_test.go",
       "carrier": "verifier",
       "origin": "workspace",
-      "bytes": 2467,
+      "bytes": 0,
       "findings": [
         {
           "interceptor": "secrets",
@@ -26851,7 +26851,7 @@
       "path": "src/math/asin_s390x.s",
       "carrier": "verifier",
       "origin": "workspace",
-      "bytes": 2468,
+      "bytes": 0,
       "findings": [
         {
           "interceptor": "secrets",
@@ -26868,7 +26868,7 @@
       "path": "src/math/asinh_s390x.s",
       "carrier": "verifier",
       "origin": "workspace",
-      "bytes": 2469,
+      "bytes": 0,
       "findings": [
         {
           "interceptor": "secrets",
@@ -26885,7 +26885,7 @@
       "path": "src/math/atan2_s390x.s",
       "carrier": "verifier",
       "origin": "workspace",
-      "bytes": 2469,
+      "bytes": 0,
       "findings": [
         {
           "interceptor": "secrets",
@@ -26902,7 +26902,7 @@
       "path": "src/math/atan_s390x.s",
       "carrier": "verifier",
       "origin": "workspace",
-      "bytes": 2468,
+      "bytes": 0,
       "findings": [
         {
           "interceptor": "secrets",
@@ -26919,7 +26919,7 @@
       "path": "src/math/atanh_s390x.s",
       "carrier": "verifier",
       "origin": "workspace",
-      "bytes": 2469,
+      "bytes": 0,
       "findings": [
         {
           "interceptor": "secrets",
@@ -26936,7 +26936,7 @@
       "path": "src/math/cmplx/cmath_test.go",
       "carrier": "verifier",
       "origin": "workspace",
-      "bytes": 2475,
+      "bytes": 0,
       "findings": [
         {
           "interceptor": "secrets",
@@ -26953,7 +26953,7 @@
       "path": "src/math/cosh_s390x.s",
       "carrier": "verifier",
       "origin": "workspace",
-      "bytes": 2468,
+      "bytes": 0,
       "findings": [
         {
           "interceptor": "secrets",
@@ -26970,7 +26970,7 @@
       "path": "src/math/erf_s390x.s",
       "carrier": "verifier",
       "origin": "workspace",
-      "bytes": 2467,
+      "bytes": 0,
       "findings": [
         {
           "interceptor": "secrets",
@@ -26987,7 +26987,7 @@
       "path": "src/math/erfc_s390x.s",
       "carrier": "verifier",
       "origin": "workspace",
-      "bytes": 2468,
+      "bytes": 0,
       "findings": [
         {
           "interceptor": "secrets",
@@ -27004,7 +27004,7 @@
       "path": "src/math/exp_s390x.s",
       "carrier": "verifier",
       "origin": "workspace",
-      "bytes": 2467,
+      "bytes": 0,
       "findings": [
         {
           "interceptor": "secrets",
@@ -27021,7 +27021,7 @@
       "path": "src/math/huge_test.go",
       "carrier": "verifier",
       "origin": "workspace",
-      "bytes": 2468,
+      "bytes": 0,
       "findings": [
         {
           "interceptor": "secrets",
@@ -27038,7 +27038,7 @@
       "path": "src/math/log10_s390x.s",
       "carrier": "verifier",
       "origin": "workspace",
-      "bytes": 2469,
+      "bytes": 0,
       "findings": [
         {
           "interceptor": "secrets",
@@ -27055,7 +27055,7 @@
       "path": "src/math/log1p_s390x.s",
       "carrier": "verifier",
       "origin": "workspace",
-      "bytes": 2469,
+      "bytes": 0,
       "findings": [
         {
           "interceptor": "secrets",
@@ -27072,7 +27072,7 @@
       "path": "src/math/log_amd64.s",
       "carrier": "verifier",
       "origin": "workspace",
-      "bytes": 2467,
+      "bytes": 0,
       "findings": [
         {
           "interceptor": "secrets",
@@ -27089,7 +27089,7 @@
       "path": "src/math/log_s390x.s",
       "carrier": "verifier",
       "origin": "workspace",
-      "bytes": 2467,
+      "bytes": 0,
       "findings": [
         {
           "interceptor": "secrets",
@@ -27106,7 +27106,7 @@
       "path": "src/math/rand/exp.go",
       "carrier": "verifier",
       "origin": "workspace",
-      "bytes": 2467,
+      "bytes": 0,
       "findings": [
         {
           "interceptor": "secrets",
@@ -27123,7 +27123,7 @@
       "path": "src/math/rand/rng.go",
       "carrier": "verifier",
       "origin": "workspace",
-      "bytes": 2467,
+      "bytes": 0,
       "findings": [
         {
           "interceptor": "secrets",
@@ -27140,7 +27140,7 @@
       "path": "src/math/rand/v2/exp.go",
       "carrier": "verifier",
       "origin": "workspace",
-      "bytes": 2470,
+      "bytes": 0,
       "findings": [
         {
           "interceptor": "secrets",
@@ -27157,7 +27157,7 @@
       "path": "src/math/tan_s390x.s",
       "carrier": "verifier",
       "origin": "workspace",
-      "bytes": 2467,
+      "bytes": 0,
       "findings": [
         {
           "interceptor": "secrets",
@@ -27174,7 +27174,7 @@
       "path": "src/math/tanh_s390x.s",
       "carrier": "verifier",
       "origin": "workspace",
-      "bytes": 2468,
+      "bytes": 0,
       "findings": [
         {
           "interceptor": "secrets",
@@ -27191,7 +27191,7 @@
       "path": "src/os/user/user_windows_test.go",
       "carrier": "verifier",
       "origin": "workspace",
-      "bytes": 2479,
+      "bytes": 0,
       "findings": [
         {
           "interceptor": "secrets",
@@ -27208,7 +27208,7 @@
       "path": "src/runtime/softfloat64_test.go",
       "carrier": "verifier",
       "origin": "workspace",
-      "bytes": 2478,
+      "bytes": 0,
       "findings": [
         {
           "interceptor": "secrets",
@@ -27225,7 +27225,7 @@
       "path": "src/simd/archsimd/clmul_emulated.go",
       "carrier": "verifier",
       "origin": "workspace",
-      "bytes": 2482,
+      "bytes": 0,
       "findings": [
         {
           "interceptor": "secrets",
@@ -27242,7 +27242,7 @@
       "path": "src/sort/example_search_test.go",
       "carrier": "verifier",
       "origin": "workspace",
-      "bytes": 2478,
+      "bytes": 0,
       "findings": [
         {
           "interceptor": "secrets",
@@ -27259,7 +27259,7 @@
       "path": "src/strconv/strconv_test.go",
       "carrier": "verifier",
       "origin": "workspace",
-      "bytes": 2474,
+      "bytes": 0,
       "findings": [
         {
           "interceptor": "secrets",

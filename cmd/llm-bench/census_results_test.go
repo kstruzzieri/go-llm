@@ -181,6 +181,13 @@ func TestCensusResultsCarryNoContent(t *testing.T) {
 	if got := secretscan.Scan(text); len(got) != 0 {
 		t.Errorf("docs/llm/census/census-results.json carries secret-shaped bytes: %+v", got)
 	}
+	// The committed rows are root-independent: no verifier row carries the
+	// byte count of a rendering that names the absolute stratum root.
+	for _, o := range committed.Fired {
+		if o.Carrier == "verifier" && o.Bytes != 0 {
+			t.Errorf("docs/llm/census/census-results.json: verifier row %s %s has bytes %d, want 0; rerun the census", o.Stratum, o.Path, o.Bytes)
+		}
+	}
 }
 
 // Review Focus 4: two fixture regenerations are byte-identical and equal the
