@@ -36,6 +36,12 @@ type fixtureOpts struct {
 	interceptors bool // full chain + canary (D2/D3)
 	autoEdits    bool // seed the /auto-edits file grant
 	verifier     agent.Verifier
+	// chain, when non-nil, is installed in place of the flag-derived chain
+	// through newOrchestratorFactoryChain (#517 workflow table: G and G+S).
+	chain []agent.Interceptor
+	// progressive sets -progressive, which turns on mixed context assembly
+	// (#517 row 9: alternatives are inspected only under it).
+	progressive bool
 }
 
 type fixture struct {
@@ -98,11 +104,15 @@ func (f *fixture) approver(answers string) *replApprover {
 // honored (a second construction path silently dropped Secrets in review).
 func (f *fixture) orchestrator(t *testing.T, caller agent.ModelCaller) *agent.Orchestrator {
 	t.Helper()
+	fl := flags{allowWrite: true, allowExec: true, interceptors: f.opts.interceptors, progressive: f.opts.progressive}
+	if f.opts.chain != nil {
+		return newOrchestratorFactoryChain(caller, fl, f.opts.verifier, f.opts.chain)()
+	}
 	var canary *canaryBinding
 	if f.opts.interceptors {
 		canary = testCanaryBinding(t)
 	}
-	return newOrchestratorFactory(caller, flags{allowWrite: true, allowExec: true, interceptors: f.opts.interceptors}, f.opts.verifier, canary)()
+	return newOrchestratorFactory(caller, fl, f.opts.verifier, canary)()
 }
 
 // runWith drives one run of the real Golem factory as a REPL turn does: the
@@ -110,12 +120,20 @@ func (f *fixture) orchestrator(t *testing.T, caller agent.ModelCaller) *agent.Or
 // a nil interface (H1).
 func (f *fixture) runWith(t *testing.T, caller agent.ModelCaller, approver agent.Approver, maxSteps int) (agent.Result, error) {
 	t.Helper()
+	return f.runRequest(t, caller, agent.Request{Goal: "containment", Tools: f.tools, Approver: approver, MaxSteps: maxSteps}, nil)
+}
+
+// runRequest is runWith for a caller-built request and observer (the #517
+// workflow rows need History, Advisory and a token observer): the journal is
+// armed for req.Goal before Run and sealed after it.
+func (f *fixture) runRequest(t *testing.T, caller agent.ModelCaller, req agent.Request, obs agent.Observer) (agent.Result, error) {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	if err := f.journal.beginTurn(ctx, "containment", cancel); err != nil {
+	if err := f.journal.beginTurn(ctx, req.Goal, cancel); err != nil {
 		t.Fatalf("checkpoint journal: %v", err)
 	}
-	res, err := f.orchestrator(t, caller).Run(ctx, agent.Request{Goal: "containment", Tools: f.tools, Approver: approver, MaxSteps: maxSteps}, nil)
+	res, err := f.orchestrator(t, caller).Run(ctx, req, obs)
 	if serr := f.journal.sealTurn(context.Background()); serr != nil {
 		t.Fatalf("checkpoint journal seal: %v", serr)
 	}

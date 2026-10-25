@@ -50,6 +50,10 @@ func main() {
 	assemblyBuildPath := flag.String("assembly-build", "", "Build assembly traces from this case-fixture JSON (#331): a JSON array is the 3a flat/progressive corpus; a JSON object is the 3c mixed-assembly fixture (paired legacy/mixed arms + optional topline)")
 	injectionBuildPath := flag.String("build-injection-corpus", "", "Build frozen-real-wire injection traces from this cases JSON (#452)")
 	injectionOut := flag.String("injection-out", filepath.Join("docs", "llm", "traces", "injection", "traces"), "Output directory for -build-injection-corpus")
+	interceptorCensus := flag.Bool("interceptor-census", false, "Run the deterministic interceptor census (#517): render every -census-manifest file through Golem's production tools under interceptor.Defaults() and report the findings per carrier")
+	censusManifestPath := flag.String("census-manifest", filepath.Join("docs", "llm", "census", "manifest.json"), "With -interceptor-census: the census manifest (llm-bench.census-manifest/v1)")
+	censusRoot := flag.String("census-root", "", "With -interceptor-census: directory holding one subdirectory per manifest stratum, fetched as docs/llm/census/README.md describes")
+	censusOut := flag.String("census-out", "", "With -interceptor-census: output directory for census-results.json (committed) and full/observations.jsonl (gitignored), e.g. docs/llm/census")
 	assemblyOut := flag.String("assembly-out", filepath.Join("docs", "llm", "assembly-corpus", "traces"), "Output directory for -assembly-build with a 3a JSON-array fixture")
 	assemblyOutMixed := flag.String("assembly-out-mixed", filepath.Join("docs", "llm", "assembly-corpus", "mixed", "traces"), "Output directory for -assembly-build with a 3c mixed-assembly object fixture (the mixed corpus keeps its own manifest, separate from -assembly-out)")
 
@@ -201,8 +205,11 @@ func main() {
 	if *replayAttempt {
 		modes++
 	}
+	if *interceptorCensus {
+		modes++
+	}
 	if modes > 1 {
-		log.Fatalf("llm-bench: -capture, -calibrate-capture, -calibrate, -manual-report, -paired-report, -assembly-report, -fim-latency, -blind-render, -blind-ingest, -fc-render, -fc-ingest, -fc-sidemap-generate, -adjudicate-render, -adjudicate-ingest, -discrimination-report, -import-xlam, -assembly-build, -build-injection-corpus, -injection-report, -replay-attempt are mutually exclusive")
+		log.Fatalf("llm-bench: -capture, -calibrate-capture, -calibrate, -manual-report, -paired-report, -assembly-report, -fim-latency, -blind-render, -blind-ingest, -fc-render, -fc-ingest, -fc-sidemap-generate, -adjudicate-render, -adjudicate-ingest, -discrimination-report, -import-xlam, -assembly-build, -build-injection-corpus, -injection-report, -replay-attempt, -interceptor-census are mutually exclusive")
 	}
 	if providedFlags["registration"] && !*calibrateCapture && !*injectionReport {
 		log.Fatalf("llm-bench: -registration requires -calibrate-capture or -injection-report")
@@ -210,6 +217,11 @@ func main() {
 	if !*replayAttempt {
 		if stray := strayAttemptFlags(providedFlags); len(stray) > 0 {
 			log.Fatalf("llm-bench: %s require -replay-attempt", strings.Join(stray, ", "))
+		}
+	}
+	if !*interceptorCensus {
+		if stray := strayCensusFlags(providedFlags); len(stray) > 0 {
+			log.Fatalf("llm-bench: %s require -interceptor-census", strings.Join(stray, ", "))
 		}
 	}
 
@@ -240,6 +252,13 @@ func main() {
 	if *assemblyBuildPath != "" {
 		if err := assemblyBuildDispatch(ctx, *assemblyBuildPath, *assemblyOut, *assemblyOutMixed); err != nil {
 			log.Fatalf("llm-bench: assembly-build: %v", err)
+		}
+		return
+	}
+
+	if *interceptorCensus {
+		if err := runCensusMode(ctx, *censusManifestPath, *censusRoot, *censusOut, os.Stderr); err != nil {
+			log.Fatalf("llm-bench: interceptor-census: %v", err)
 		}
 		return
 	}
@@ -1425,8 +1444,18 @@ func resolveToolSchemaSource(stdioCmd, httpURL string) (toolSchemaSource, error)
 // strayAttemptFlags lists the -attempt-* flags set without -replay-attempt,
 // which would otherwise be silently ignored by a legacy mode (#687).
 func strayAttemptFlags(provided map[string]bool) []string {
+	return strayFlags(provided, "attempt-trace", "attempt-id", "attempt-arm", "attempt-dir")
+}
+
+// strayCensusFlags lists the -census-* flags set without -interceptor-census,
+// which every other mode would silently ignore.
+func strayCensusFlags(provided map[string]bool) []string {
+	return strayFlags(provided, "census-manifest", "census-root", "census-out")
+}
+
+func strayFlags(provided map[string]bool, names ...string) []string {
 	var stray []string
-	for _, name := range []string{"attempt-trace", "attempt-id", "attempt-arm", "attempt-dir"} {
+	for _, name := range names {
 		if provided[name] {
 			stray = append(stray, "-"+name)
 		}
