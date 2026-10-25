@@ -158,7 +158,14 @@ func TestScratchSeatbeltExecConfinement(t *testing.T) {
 	if res.IsError {
 		t.Fatalf("denied exec is a normal non-zero observation: %s", res.Content)
 	}
-	if strings.Contains(res.Content, "exit code: 0") || strings.Contains(res.Content, seatbeltMarker) {
-		t.Fatalf("canonical absolute exec must be refused under Seatbelt+scratch:\n%s", res.Content)
+	// Route oracle, as the sibling exec-confinement tests use: the shell's
+	// exec of the canonical path is refused with exit 126 and an EPERM
+	// diagnostic naming it, and the marker never appears.
+	if strings.Contains(res.Content, seatbeltMarker) {
+		t.Fatalf("canonical absolute exec ran under Seatbelt+scratch:\n%s", res.Content)
+	}
+	if !strings.Contains(res.Content, "exit code: 126") ||
+		!strings.Contains(res.Content, canonExe+": Operation not permitted") {
+		t.Fatalf("canonical absolute exec must be refused (exit 126, EPERM on %s):\n%s", canonExe, res.Content)
 	}
 }

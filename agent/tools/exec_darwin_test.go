@@ -277,7 +277,11 @@ func TestProbeSeatbeltPrepareFailureReapsProbeWorkspace(t *testing.T) {
 // fresh directory), so the identity-guarded cleanup refuses. Construction must
 // then fail with the cleanup error.
 func TestProbeSeatbeltCleanupFailureFailsConstruction(t *testing.T) {
-	fake := writeFakeSandboxExec(t, "d=\"$PWD\"\ncd /\nrm -rf \"$d\"\nmkdir \"$d\"\nexit 0\n")
+	// Rename the workspace aside rather than remove-and-recreate: a fresh
+	// mkdir can reuse the inode number and mask the swap (see the TOCTOU
+	// inode-reuse lesson), so move the original out of the way and create a
+	// new directory at the path, guaranteeing a distinct identity.
+	fake := writeFakeSandboxExec(t, "d=\"$PWD\"\ncd /\nmv \"$d\" \"$d.gone\"\nmkdir \"$d\"\nexit 0\n")
 	err := probeSeatbelt(context.Background(), probeBackend(t, fake))
 	if err == nil || !strings.Contains(err.Error(), "cleanup") {
 		t.Fatalf("a refused probe cleanup must fail construction: %v", err)
