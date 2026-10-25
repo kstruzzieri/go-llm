@@ -737,6 +737,15 @@ func interceptorsNotice(full bool, ics []agent.Interceptor) string {
 // (#347); the factory normalizes the concrete slot type it can receive so
 // that guarantee does not rest on every call site.
 func newOrchestratorFactory(caller agent.ModelCaller, f flags, verifier agent.Verifier, canary *canaryBinding) func() *agent.Orchestrator {
+	return newOrchestratorFactoryChain(caller, f, verifier, interceptorsFor(f, canary))
+}
+
+// newOrchestratorFactoryChain is newOrchestratorFactory with the chain
+// supplied by the caller instead of derived from the flags. Production always
+// reaches it through newOrchestratorFactory; the #517 Secrets workflow table
+// uses it to run Golem's exact composition under the guards-only chain and
+// under guards plus Secrets.
+func newOrchestratorFactoryChain(caller agent.ModelCaller, f flags, verifier agent.Verifier, chain []agent.Interceptor) func() *agent.Orchestrator {
 	var opts []agent.Option
 	if verifier = nonNilVerifier(verifier); verifier != nil {
 		opts = append(opts, agent.WithVerifier(verifier))
@@ -757,7 +766,7 @@ func newOrchestratorFactory(caller agent.ModelCaller, f flags, verifier agent.Ve
 	// #514 D2 / #575: the same chain on every orchestrator this factory
 	// builds; dispatch children receive it through newDispatchTool from the
 	// same flags value.
-	opts = append(opts, agent.WithInterceptors(interceptorsFor(f, canary)...))
+	opts = append(opts, agent.WithInterceptors(chain...))
 	return func() *agent.Orchestrator {
 		return agent.New(caller, agent.ContextManager{Mixed: f.progressive}, opts...)
 	}
