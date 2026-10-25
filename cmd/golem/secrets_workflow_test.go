@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"flag"
 	"maps"
 	"net/http"
 	"net/http/httptest"
@@ -820,7 +821,8 @@ func TestSecretsArms(t *testing.T) {
 	}
 }
 
-// TestSecretsWorkflowTable runs every row under G and G+S and compares with
+// TestSecretsWorkflowTable runs every row under G and G+S (once per test
+// binary, shared with the evidence report: secretsRowRuns) and compares with
 // literal expectations taken from spec §3 F9 (where Secrets acts and what
 // follows) and F10 (the user-visible texts), never from a run of the code:
 //
@@ -960,22 +962,93 @@ func TestSecretsWorkflowTable(t *testing.T) {
 		t.Errorf("rows cover %d spec numbers, want exactly 14", len(numbers))
 	}
 
-	g, gs := secretsArms()
-	for _, row := range rows {
-		for _, arm := range []struct {
-			name  string
-			chain []agent.Interceptor
-			want  secretsRowResult
-		}{{"G", g, want[row.ID][0]}, {"G+S", gs, want[row.ID][1]}} {
-			t.Run(row.ID+"/"+arm.name, func(t *testing.T) {
-				got := row.Run(t, arm.chain)
-				if got != arm.want {
-					t.Errorf("row %s under %s:\n got %+v\nwant %+v", row.ID, arm.name, got, arm.want)
+	compared := map[string]bool{}
+	runs := secretsRowRuns(t, func(t *testing.T, row secretsRow, arm int, got secretsRowResult) {
+		compared[row.ID+"/"+secretsArmNames[arm]] = true
+		if w := want[row.ID][arm]; got != w {
+			t.Errorf("row %s under %s:\n got %+v\nwant %+v", row.ID, secretsArmNames[arm], got, w)
+		}
+		if got.Message != "" && !pinnedMessage(got.Message) {
+			t.Errorf("row %s under %s: message %q is not a pinned text", row.ID, secretsArmNames[arm], got.Message)
+		}
+	})
+	// Whichever test ran the rows, every result that ran was compared here
+	// (unless a -run subtest filter left some out).
+	if f := flag.Lookup("test.run"); f == nil || !strings.Contains(f.Value.String(), "/") {
+		for _, run := range runs {
+			for arm, name := range secretsArmNames {
+				if run.ran[arm] && !compared[run.row.ID+"/"+name] {
+					t.Errorf("row %s under %s ran but was never compared with its expectation", run.row.ID, name)
 				}
-				if got.Message != "" && !pinnedMessage(got.Message) {
-					t.Errorf("row %s under %s: message %q is not a pinned text", row.ID, arm.name, got.Message)
-				}
-			})
+			}
 		}
 	}
+}
+
+// secretsArmNames are the two arms every workflow row runs under, in the
+// order of secretsRowRun's arrays.
+var secretsArmNames = [2]string{"G", "G+S"}
+
+// secretsRowRun is one workflow row run under G and G+S. ran is set when the
+// arm's run returned without failing (its result is valid); skipped when the
+// host skipped it (rows 6 and 8 need the exec runner) or a -run filter left
+// it out.
+type secretsRowRun struct {
+	row          secretsRow
+	res          [2]secretsRowResult
+	ran, skipped [2]bool
+}
+
+var secretsRowsMemo struct {
+	sync.Mutex
+	runs []secretsRowRun
+}
+
+// secretsRowRuns runs every workflow row under G and G+S once per test binary
+// and memoizes the results, so TestSecretsWorkflowTable and the evidence
+// report share one run (the rows dominate this package's -race time). The
+// first caller runs them as its subtests <row>/<arm>. check, if non-nil, runs
+// inside a subtest <row>/<arm> on each result that ran: the running subtest,
+// or once the memo is filled a fresh one, which fails if the row failed when
+// it ran and skips if it was skipped.
+func secretsRowRuns(t *testing.T, check func(t *testing.T, row secretsRow, arm int, got secretsRowResult)) []secretsRowRun {
+	t.Helper()
+	secretsRowsMemo.Lock()
+	defer secretsRowsMemo.Unlock()
+	fresh := secretsRowsMemo.runs == nil
+	if !fresh && check == nil {
+		return secretsRowsMemo.runs
+	}
+	if fresh {
+		for _, row := range secretsWorkflowRows() {
+			secretsRowsMemo.runs = append(secretsRowsMemo.runs, secretsRowRun{row: row})
+		}
+	}
+	g, gs := secretsArms()
+	for i := range secretsRowsMemo.runs {
+		run := &secretsRowsMemo.runs[i]
+		for arm, name := range secretsArmNames {
+			passed := t.Run(run.row.ID+"/"+name, func(t *testing.T) {
+				switch {
+				case fresh:
+					got := run.row.Run(t, [2][]agent.Interceptor{g, gs}[arm])
+					if t.Failed() {
+						return
+					}
+					run.res[arm], run.ran[arm] = got, true
+				case run.skipped[arm]:
+					t.Skipf("row %s under %s did not run when the workflow table ran", run.row.ID, name)
+				case !run.ran[arm]:
+					t.Fatalf("row %s under %s failed when the workflow table ran in an earlier test; see that test's output", run.row.ID, name)
+				}
+				if check != nil {
+					check(t, run.row, arm, run.res[arm])
+				}
+			})
+			if fresh {
+				run.skipped[arm] = passed && !run.ran[arm]
+			}
+		}
+	}
+	return secretsRowsMemo.runs
 }

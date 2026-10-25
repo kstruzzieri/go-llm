@@ -77,8 +77,9 @@ JSON observation per line.
 `census-results.json` (`llm-bench.census-results/v1`) holds no file content.
 `manifest_sha256` binds the manifest bytes and `full_sha256` the bytes of
 `full/observations.jsonl`. The verifier observation's byte count includes the
-absolute stratum root, so `full_sha256` holds only for the same root path; the
-aggregates and findings do not depend on it.
+absolute stratum root, so `full_sha256` holds only for the same root path, and
+`fired` records every verifier row's `bytes` as 0; the rest of
+`census-results.json` does not depend on the root.
 
 The committed results cover the two local strata, `go-llm` and `go-src`. They
 are regenerated, with every count, when the pending strata are approved and
@@ -107,7 +108,7 @@ never a denominator), `adversarial_fixture` (a file classed
 `observations`, which splits into `trailer`, `blocked`, `call_blocked` and the
 identical remainder. `files` is the number of files behind `observations`
 (0 for `search`, whose observations are per query). `suppressed` counts the
-blocked observations that carried at least one member tag, and
+blocked observations that carried at least one member ingress tag, and
 `trailer_bytes` sums the trailer bytes the arm adds. For mixed assembly the
 trailer bytes count every distinct pair across the alternatives, an upper
 bound on what any one selected alternative gains.
@@ -139,7 +140,8 @@ Notes on fidelity:
   in order to render the file. Its observation is then the failing-check
   rendering: the header, the `command:` and `target:` lines, stderr, and the
   head of stdout within the 4 KiB observation cap. The `target:` line names
-  the absolute stratum root, so verifier bytes depend on where the root is.
+  the absolute stratum root, so verifier bytes depend on where the root is
+  (`fired` records them as 0).
 - `command_tail` renders the job's random handle. A handle whose hex holds a
   digit run that Secrets would flag by itself is redrawn, so findings remain a
   function of the file.

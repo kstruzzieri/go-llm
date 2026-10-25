@@ -4,6 +4,8 @@ import (
 	"reflect"
 	"slices"
 	"testing"
+
+	"github.com/kstruzzieri/go-llm/agent/interceptor"
 )
 
 // The arms' names and members are spec literals (plan Global Constraints;
@@ -105,5 +107,60 @@ func TestDeriveArm(t *testing.T) {
 				t.Errorf("%s under %s = %+v, want %+v", tc.name, a.Name, got, tc.want[i])
 			}
 		}
+	}
+}
+
+// panics reports whether f panics.
+func panics(f func()) (did bool) {
+	defer func() { did = recover() != nil }()
+	f()
+	return false
+}
+
+// A finding whose verdict or target no arm outcome models fails closed: it
+// panics rather than derive as identical. allow is modeled: it changes nothing.
+func TestDeriveArmRejectsUnmodeledFindings(t *testing.T) {
+	arms := interceptorArms()
+	for _, tc := range []struct {
+		name    string
+		finding censusFinding
+		panics  bool
+	}{
+		{"abort on the message", censusFindingOf("secrets", "r", "abort", "message"), true},
+		{"unknown verdict", censusFindingOf("secrets", "r", "unknown", "message"), true},
+		{"block on output content", censusFindingOf("secrets", "r", "block", "output_content"), true},
+		{"tag on the summary", censusFindingOf("zero_width", "r", "tag", "summary"), true},
+		{"block on the system prompt", censusFindingOf("secrets", "r", "block", "system"), true},
+		{"tag on no target", censusFindingOf("zero_width", "r", "tag", "none"), true},
+		{"allow on the message", censusFindingOf("child_scope_denials", "child_scope_denied", "allow", "message"), false},
+		{"block on the message", censusFindingOf("secrets", "r", "block", "message"), false},
+		{"tag on an alternative", censusFindingOf("zero_width", "r", "tag", "alternative"), false},
+		{"block at output", censusFindingOf("secrets", "r", "block", "output_tool_call"), false},
+		{"block at the tool call", censusFindingOf("invariants", "r", "block", "tool_call"), false},
+	} {
+		for _, a := range arms {
+			// An earlier member call block must not hide a later unmodeled finding.
+			o := censusObservation{Findings: []censusFinding{censusFindingOf("invariants", "credential_path", "block", "tool_call"), tc.finding}}
+			if got := panics(func() { deriveArm(o, a) }); got != tc.panics {
+				t.Errorf("%s under %s: panics = %t, want %t", tc.name, a.Name, got, tc.panics)
+			}
+		}
+	}
+	for _, a := range arms {
+		allow := censusObservation{Findings: []censusFinding{censusFindingOf("child_scope_denials", "child_scope_denied", "allow", "message")}}
+		if out, bytes, suppressed := deriveArm(allow, a); out != armIdentical || bytes != 0 || suppressed != 0 {
+			t.Errorf("allow under %s = %s/%d/%d, want identical/0/0", a.Name, out, bytes, suppressed)
+		}
+	}
+}
+
+// An interceptor in Defaults() outside the three groups (here the canary)
+// panics instead of silently leaving every arm.
+func TestInterceptorArmsRejectUnknownType(t *testing.T) {
+	if panics(func() { armsFrom(interceptor.Defaults()) }) {
+		t.Fatal("armsFrom(interceptor.Defaults()) panics")
+	}
+	if !panics(func() { armsFrom(append(interceptor.Defaults(), interceptor.Canary{})) }) {
+		t.Error("armsFrom(Defaults() plus the canary) does not panic")
 	}
 }

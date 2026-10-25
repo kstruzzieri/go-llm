@@ -127,8 +127,10 @@ func (c Case) validate() error {
 		return fmt.Errorf("unknown kind %q", c.Kind)
 	case strings.Count(c.Template, valueMarker) != 1:
 		return errors.New("template must hold {{VALUE}} exactly once")
-	case c.Mandatory && (c.Class != ExpectedSensitive || !c.ExpectAny):
-		return errors.New("mandatory requires class expected-sensitive and expect_any")
+	case c.Mandatory && c.Class != ExpectedSensitive:
+		// A mandatory case may predict a miss (expect_any false): conformance
+		// then pins the miss and the evidence report records item 1 as FAIL.
+		return errors.New("mandatory requires class expected-sensitive")
 	case c.CoverageGap && (c.ExpectAny || c.Kind != ""):
 		return errors.New("a coverage gap has no supported kind and cannot expect a finding")
 	case c.ExpectAny != (len(c.ExpectKinds) > 0):

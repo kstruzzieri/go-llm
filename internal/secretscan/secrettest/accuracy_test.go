@@ -3,6 +3,7 @@ package secrettest
 import (
 	"context"
 	"errors"
+	"maps"
 	"slices"
 	"strings"
 	"testing"
@@ -178,10 +179,14 @@ func TestAnyVersusKindAttribution(t *testing.T) {
 	}
 }
 
-// TestMandatoryCasesDetected is spec §5.6 item 1: every supported
-// expected-sensitive case fires on every carrier and hook it declares.
+// TestMandatoryCasesDetected is spec §5.6 item 1. The table holds 55
+// mandatory cases, and all 55 fire today on every carrier and hook they
+// declare. validate lets a mandatory case predict a miss (the evidence report
+// then records item 1 as FAIL), so a scanner change that stops detecting one
+// turns this red until wantDetected is lowered on purpose.
 func TestMandatoryCasesDetected(t *testing.T) {
 	t.Parallel()
+	const wantMandatory, wantDetected = 55, 55
 	cases, err := Cases()
 	if err != nil {
 		t.Fatalf("Cases: %v", err)
@@ -193,10 +198,11 @@ func TestMandatoryCasesDetected(t *testing.T) {
 			mandatory[c.ID] = c.Carriers
 		}
 	}
-	if len(mandatory) == 0 {
-		t.Fatal("the table holds no mandatory case")
+	if len(mandatory) != wantMandatory {
+		t.Errorf("the table holds %d mandatory cases, want %d", len(mandatory), wantMandatory)
 	}
 	hooks := map[string][]string{}
+	missed := map[string]bool{}
 	for _, o := range outs {
 		carriers, ok := mandatory[o.CaseID]
 		if !ok {
@@ -207,8 +213,11 @@ func TestMandatoryCasesDetected(t *testing.T) {
 		}
 		hooks[o.CaseID] = append(hooks[o.CaseID], o.Hook)
 		if !o.Any {
-			t.Errorf("case %s: mandatory case did not fire on %s/%s", o.CaseID, o.Carrier, o.Hook)
+			missed[o.CaseID] = true
 		}
+	}
+	if detected := len(mandatory) - len(missed); detected != wantDetected {
+		t.Errorf("%d mandatory cases fire on every carrier and hook, want %d; missed: %v", detected, wantDetected, slices.Sorted(maps.Keys(missed)))
 	}
 	for id, carriers := range mandatory {
 		var want []string

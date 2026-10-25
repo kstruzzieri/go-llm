@@ -127,19 +127,14 @@ func reversed(obs []censusObservation) []censusObservation {
 }
 
 // fixtureCensusResults runs the census over the committed fixture and
-// aggregates it. Verifier bytes count the absolute stratum root (its target:
-// line), so they are zeroed; every other field is root-independent.
+// aggregates it. aggregateCensus zeroes the verifier rows' bytes (they count
+// the absolute stratum root), so every field is root-independent.
 func fixtureCensusResults(t *testing.T) censusResults {
 	t.Helper()
 	m, root := censusFixtureCopy(t)
 	obs, err := runCensus(t.Context(), m, root)
 	if err != nil {
 		t.Fatal(err)
-	}
-	for i := range obs {
-		if obs[i].Carrier == "verifier" {
-			obs[i].Bytes = 0
-		}
 	}
 	return aggregateCensus(obs, m)
 }
@@ -254,5 +249,51 @@ func TestCensusModeWritesOutputs(t *testing.T) {
 	}
 	if !strings.Contains(log.String(), "62 observation(s)") {
 		t.Errorf("summary = %q", log.String())
+	}
+	// The committed rows carry no root-dependent bytes: a verifier row's
+	// bytes, which the full output keeps, are 0 in fired; every other fired
+	// row keeps its bytes.
+	fullBytes := map[[2]string]int{}
+	for _, l := range lines {
+		var o censusObservation
+		if err := json.Unmarshal([]byte(l), &o); err == nil {
+			fullBytes[[2]string{o.Carrier, o.Path}] = o.Bytes
+		}
+	}
+	verifiers := 0
+	for _, o := range r.Fired {
+		full := fullBytes[[2]string{o.Carrier, o.Path}]
+		switch {
+		case o.Carrier == "verifier":
+			verifiers++
+			if o.Bytes != 0 || full == 0 {
+				t.Errorf("verifier %s: fired bytes %d, full bytes %d; want 0 in fired and the rendering's length in full", o.Path, o.Bytes, full)
+			}
+		case o.Bytes != full:
+			t.Errorf("%s %s: fired bytes %d, want the full output's %d", o.Carrier, o.Path, o.Bytes, full)
+		}
+	}
+	if verifiers == 0 {
+		t.Error("no fired verifier row: the fixture no longer exercises the zeroing")
+	}
+}
+
+// The -census-* flags without -interceptor-census are refused, as the
+// -attempt-* flags are without -replay-attempt, instead of being ignored.
+func TestStrayCensusFlags(t *testing.T) {
+	got := strayCensusFlags(map[string]bool{"census-out": true, "models": true, "census-root": true, "census-manifest": true})
+	if want := []string{"-census-manifest", "-census-root", "-census-out"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("strayCensusFlags = %v, want %v", got, want)
+	}
+	if got := strayCensusFlags(map[string]bool{"interceptor-census": true, "models": true}); len(got) != 0 {
+		t.Fatalf("strayCensusFlags = %v, want none", got)
+	}
+	for _, flag := range []string{"-census-manifest", "-census-root", "-census-out"} {
+		// -fc-render alone fails fast on its own missing -fc-sidemap if the
+		// census flag were accepted.
+		code, out := runLLMBenchMain(t, nil, flag, t.TempDir(), "-fc-render")
+		if code != 1 || !strings.Contains(out, flag+" require -interceptor-census") {
+			t.Errorf("%s without -interceptor-census: exit %d output %q", flag, code, out)
+		}
 	}
 }

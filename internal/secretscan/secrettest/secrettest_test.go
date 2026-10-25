@@ -68,6 +68,13 @@ func TestCasesValidate(t *testing.T) {
 	if _, err := parseCases(table(base)); err != nil {
 		t.Fatalf("parseCases(valid base) = %v, want nil", err)
 	}
+	// A mandatory case may predict a miss: conformance pins it and the
+	// evidence report records spec §5.6 item 1 as FAIL.
+	missed := base
+	missed.Class, missed.Mandatory = ExpectedSensitive, true
+	if _, err := parseCases(table(missed)); err != nil {
+		t.Errorf("parseCases(mandatory, expect_any false) = %v, want nil", err)
+	}
 	for _, tt := range []struct {
 		name   string
 		mutate func(*Case)
@@ -75,7 +82,6 @@ func TestCasesValidate(t *testing.T) {
 		{"missing role", func(c *Case) { c.Role = "" }},
 		{"unknown class", func(c *Case) { c.Class = "secret" }},
 		{"mandatory not sensitive", func(c *Case) { c.Mandatory, c.ExpectAny, c.ExpectKinds = true, true, []string{"openai_token"} }},
-		{"mandatory without expectation", func(c *Case) { c.Class, c.Mandatory = ExpectedSensitive, true }},
 		{"coverage gap expecting", func(c *Case) { c.CoverageGap, c.ExpectAny, c.ExpectKinds = true, true, []string{"openai_token"} }},
 		{"coverage gap with kind", func(c *Case) { c.CoverageGap, c.Kind = true, "secret_assignment" }},
 		{"template without marker", func(c *Case) { c.Template = "a" }},
@@ -460,18 +466,30 @@ func luhn(digits string) bool {
 }
 
 // TestCommittedArtifactsCarryNoSecretShapes scans every committed #517
-// artifact (Review Focus 3). The census results' sha256 digests are blanked
-// first (ruling R19): they are identifiers that can hold a Luhn-valid digit
-// run, not content. docs/llm/census/manifest.json is never scanned: its
-// per-file sha256s carry such runs by design.
+// artifact (Review Focus 3), the test sources that generate values included.
+// The census results' sha256 digests are blanked first (ruling R19): they are
+// identifiers that can hold a Luhn-valid digit run, not content (the fixture
+// golden's are empty). Never scanned: docs/llm/census/manifest.json, whose
+// per-file sha256s carry such runs by design, and the census fixture's
+// constant.go, a deliberate corpus excerpt.
 func TestCommittedArtifactsCarryNoSecretShapes(t *testing.T) {
 	t.Parallel()
-	results := filepath.Join("..", "..", "..", "docs", "llm", "census", "census-results.json")
-	for _, path := range []string{
+	repo := filepath.Join("..", "..", "..")
+	results := filepath.Join(repo, "docs", "llm", "census", "census-results.json")
+	tests, err := filepath.Glob("*_test.go")
+	if err != nil || len(tests) < 2 {
+		t.Fatalf("Glob(*_test.go) = %v, %v; want this package's test files", tests, err)
+	}
+	for _, path := range append([]string{
 		"cases.json",
-		filepath.Join("..", "..", "..", "docs", "security", "secrets-evidence.md"),
+		filepath.Join(repo, "docs", "security", "secrets-evidence.md"),
 		results,
-	} {
+		filepath.Join(repo, "cmd", "llm-bench", "testdata", "census-fixture", "results.golden.json"),
+		filepath.Join(repo, "docs", "llm", "census", "README.md"),
+		filepath.Join(repo, "changelog.d", "517-secrets-evidence.md"),
+		filepath.Join(repo, "cmd", "golem", "secrets_workflow_test.go"),
+		filepath.Join(repo, "cmd", "golem", "secrets_evidence_test.go"),
+	}, tests...) {
 		data, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatalf("read %s: %v", path, err)

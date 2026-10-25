@@ -41,8 +41,11 @@ const (
 // interceptorArms returns G, G+D, G+S and G+D+S with their registered chain
 // names (G is the existing injectionDefaultChain). It panics if
 // interceptor.Defaults() no longer holds exactly three guards, three
-// detectors and one Secrets, like golemDefaultGuards.
-func interceptorArms() []interceptorArm {
+// detectors and one Secrets and nothing else, like golemDefaultGuards.
+func interceptorArms() []interceptorArm { return armsFrom(interceptor.Defaults()) }
+
+// armsFrom builds the four arms from defaults, the library chain.
+func armsFrom(defaults []agent.Interceptor) []interceptorArm {
 	group := func(ic agent.Interceptor) byte {
 		switch ic.(type) {
 		case interceptor.Invariants, interceptor.Egress, interceptor.ChildScopeDenials:
@@ -55,15 +58,15 @@ func interceptorArms() []interceptorArm {
 		return 0
 	}
 	counts := map[byte]int{}
-	for _, ic := range interceptor.Defaults() {
+	for _, ic := range defaults {
 		counts[group(ic)]++
 	}
-	if counts['G'] != 3 || counts['D'] != 3 || counts['S'] != 1 {
-		panic(fmt.Sprintf("llm-bench: interceptor arms: interceptor.Defaults groups %v, want 3 guards, 3 detectors, 1 secrets", counts))
+	if counts['G'] != 3 || counts['D'] != 3 || counts['S'] != 1 || counts[0] != 0 {
+		panic(fmt.Sprintf("llm-bench: interceptor arms: interceptor.Defaults groups %v, want 3 guards, 3 detectors, 1 secrets and no unknown type (0)", counts))
 	}
 	arm := func(name, groups string) interceptorArm {
 		a := interceptorArm{Name: name}
-		for _, ic := range interceptor.Defaults() {
+		for _, ic := range defaults {
 			if g := group(ic); g != 0 && slices.Contains([]byte(groups), g) {
 				a.Chain = append(a.Chain, ic)
 				a.Members = append(a.Members, ic.Name())
@@ -88,7 +91,16 @@ func interceptorArms() []interceptorArm {
 // distinct (interceptor, rule) pairs, and suppressedTags counts the ingress
 // tags a block removed (F6). For mixed assembly the pair count is taken over
 // every target, an upper bound on what any one selected alternative gains.
+// A verdict other than allow, tag or block (abort), or a target other than
+// the ingress and call targets, has no modeled outcome: deriveArm panics
+// rather than read it as identical.
 func deriveArm(o censusObservation, arm interceptorArm) (out armOutcome, trailerBytes int, suppressedTags int) {
+	for _, f := range o.Findings {
+		if !slices.Contains([]string{"allow", "tag", "block"}, f.Verdict) ||
+			!slices.Contains([]string{"message", "alternative", "output_tool_call", "tool_call"}, f.Target) {
+			panic(fmt.Sprintf("llm-bench: deriveArm: finding %s/%s has verdict %q on target %q, which no arm outcome models", f.Interceptor, f.Rule, f.Verdict, f.Target))
+		}
+	}
 	ingress := func(f censusFinding) bool { return f.Target == "message" || f.Target == "alternative" }
 	var tags []censusFinding
 	blocked, foreignCallBlock := false, false

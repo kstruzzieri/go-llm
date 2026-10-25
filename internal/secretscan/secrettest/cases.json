@@ -1195,7 +1195,7 @@
     {
       "id": "pem-pkcs8-truncated-head",
       "class": "expected-sensitive",
-      "role": "First lines of: tLS private key of a production ingress controller.",
+      "role": "First lines of: TLS private key of a production ingress controller.",
       "provenance": "head -n 3 of tls/server.key on an ingress host, returned by the exec tool. Value: generated key-shaped surrogate, not a real key.",
       "rationale": "The first lines of a live key expose part of its key material.",
       "kind": "private_key",
@@ -1221,7 +1221,7 @@
     {
       "id": "pem-rsa-truncated-head",
       "class": "expected-sensitive",
-      "role": "First lines of: rSA deploy key with write access to a production repository.",
+      "role": "First lines of: RSA deploy key with write access to a production repository.",
       "provenance": "head -n 3 of ~/.ssh/deploy_rsa on a CI runner, returned by the exec tool. Value: generated key-shaped surrogate, not a real key.",
       "rationale": "The first lines of a live key expose part of its key material.",
       "kind": "private_key",
@@ -1247,7 +1247,7 @@
     {
       "id": "pem-dsa-truncated-head",
       "class": "expected-sensitive",
-      "role": "First lines of: dSA host key of a legacy SSH server.",
+      "role": "First lines of: DSA host key of a legacy SSH server.",
       "provenance": "head -n 3 of /etc/ssh/ssh_host_dsa_key on a legacy host, returned by the exec tool. Value: generated key-shaped surrogate, not a real key.",
       "rationale": "The first lines of a live key expose part of its key material.",
       "kind": "private_key",

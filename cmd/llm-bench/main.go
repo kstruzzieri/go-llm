@@ -219,6 +219,11 @@ func main() {
 			log.Fatalf("llm-bench: %s require -replay-attempt", strings.Join(stray, ", "))
 		}
 	}
+	if !*interceptorCensus {
+		if stray := strayCensusFlags(providedFlags); len(stray) > 0 {
+			log.Fatalf("llm-bench: %s require -interceptor-census", strings.Join(stray, ", "))
+		}
+	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
@@ -1439,8 +1444,18 @@ func resolveToolSchemaSource(stdioCmd, httpURL string) (toolSchemaSource, error)
 // strayAttemptFlags lists the -attempt-* flags set without -replay-attempt,
 // which would otherwise be silently ignored by a legacy mode (#687).
 func strayAttemptFlags(provided map[string]bool) []string {
+	return strayFlags(provided, "attempt-trace", "attempt-id", "attempt-arm", "attempt-dir")
+}
+
+// strayCensusFlags lists the -census-* flags set without -interceptor-census,
+// which every other mode would silently ignore.
+func strayCensusFlags(provided map[string]bool) []string {
+	return strayFlags(provided, "census-manifest", "census-root", "census-out")
+}
+
+func strayFlags(provided map[string]bool, names ...string) []string {
 	var stray []string
-	for _, name := range []string{"attempt-trace", "attempt-id", "attempt-arm", "attempt-dir"} {
+	for _, name := range names {
 		if provided[name] {
 			stray = append(stray, "-"+name)
 		}

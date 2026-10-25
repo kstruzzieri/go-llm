@@ -22,7 +22,6 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/kstruzzieri/go-llm/agent"
 	"github.com/kstruzzieri/go-llm/internal/secretscan"
 	"github.com/kstruzzieri/go-llm/internal/secretscan/secrettest"
 )
@@ -190,23 +189,16 @@ func gatherSecretsEvidence(t *testing.T) secretsEvidenceInputs {
 		t.Fatal(err)
 	}
 	in := secretsEvidenceInputs{acc: acc, census: loadCensusDoc(t)}
-	g, gs := secretsArms()
-	for _, row := range secretsWorkflowRows() {
-		rec := secretsRowRecord{Row: row}
-		for _, arm := range []struct {
-			name  string
-			chain []agent.Interceptor
-			out   *secretsRowResult
-		}{{"G", g, &rec.G}, {"G+S", gs, &rec.GS}} {
-			ran := false
-			if !t.Run(row.ID+"/"+arm.name, func(t *testing.T) { *arm.out, ran = row.Run(t, arm.chain), true }) {
-				t.FailNow()
-			}
-			if !ran {
-				t.Skipf("workflow row %s under %s did not run on this host; the evidence report regenerates only where every row runs", row.ID, arm.name)
+	for _, run := range secretsRowRuns(t, nil) {
+		for arm, name := range secretsArmNames {
+			switch {
+			case run.skipped[arm]:
+				t.Skipf("workflow row %s under %s did not run on this host; the evidence report regenerates only where every row runs", run.row.ID, name)
+			case !run.ran[arm]:
+				t.Fatalf("workflow row %s under %s failed", run.row.ID, name)
 			}
 		}
-		in.rows = append(in.rows, rec)
+		in.rows = append(in.rows, secretsRowRecord{Row: run.row, G: run.res[0], GS: run.res[1]})
 	}
 	return in
 }
@@ -232,8 +224,9 @@ func committedSecretsEvidence(t *testing.T) secretsEvidenceInputs {
 // TestSecretsEvidenceDoc is the regeneration gate (Review Focus 4): two
 // renders, the second from a fresh evaluation of the case table and a fresh
 // load of the census, are byte-identical and equal the committed file. The
-// workflow rows are not run a second time (TestSecretsWorkflowTable runs them
-// too, and a row that differs between runs makes the committed file stale).
+// workflow rows run once per test binary (secretsRowRuns, shared with
+// TestSecretsWorkflowTable); a row that differs between runs makes the
+// committed file stale.
 func TestSecretsEvidenceDoc(t *testing.T) {
 	first := committedSecretsEvidence(t)
 	cases, err := secrettest.Cases()
@@ -313,6 +306,41 @@ func TestSecretsEvidenceSections(t *testing.T) {
 	}
 	if !strings.Contains(accuracy, "20 of the 28 FN cases are synthetic boundary probes") {
 		t.Error("the accuracy section does not state that 20 of the 28 FN cases are synthetic boundary probes")
+	}
+	// Item 2's qualifier (spec §3 F9): the lookalike cases that fire in the
+	// model's own write arguments, where a block is terminal, counted here
+	// from the Evaluate outcomes, in the Lookalikes section and on item 2.
+	terminalLookalikes := map[string]bool{}
+	for _, o := range in.acc {
+		if o.Class == "benign-lookalike" && o.Carrier == "tool-args" && o.Hook == "output" && o.Any {
+			terminalLookalikes[o.CaseID] = true
+		}
+	}
+	qualifier := fmt.Sprintf("%d lookalike cases fire at tool-args/output, which is terminal in production; no §5.5 sentinel row writes a lookalike, so item 2 measures the rows only.", len(terminalLookalikes))
+	if !strings.Contains(section(t, doc, "## Lookalikes"), qualifier) {
+		t.Errorf("the Lookalikes section lacks %q", qualifier)
+	}
+	if !regexp.MustCompile(`(?m)^- Item 2: (PASS|FAIL)\. .*` + regexp.QuoteMeta(qualifier)).MatchString(doc) {
+		t.Errorf("gate item 2 lacks %q", qualifier)
+	}
+	// The coverage-gap families are the gap cases themselves (R24: a class
+	// change is only a regeneration), each by ID and role.
+	cases, err := secrettest.Cases()
+	if err != nil {
+		t.Fatal(err)
+	}
+	gaps := section(t, doc, "## Coverage gaps")
+	nGaps := 0
+	for _, c := range cases {
+		if c.CoverageGap {
+			nGaps++
+			if line := "\n- `" + c.ID + "`: " + c.Role + "\n"; !strings.Contains(gaps, line) {
+				t.Errorf("the Coverage gaps section does not name gap case %s by its role", c.ID)
+			}
+		}
+	}
+	if nGaps == 0 {
+		t.Error("the case table holds no coverage-gap case")
 	}
 	// R6/R9: n is printed beside every rate.
 	for _, line := range strings.Split(doc, "\n") {
@@ -544,6 +572,34 @@ func TestSecretsGateEvaluation(t *testing.T) {
 		if !strings.Contains(censusText, want) {
 			t.Errorf("adversarial-fixture line for %s: want %q", s.Name, want[1:])
 		}
+	}
+	// Item 3 read per stratum (K1, BC5): Secrets blocks from the fired rows
+	// over the G+S benign observations, summed over every carrier.
+	poolBlocks, poolObs := map[string]int{}, map[string]int{}
+	for _, a := range in.census.Aggregates {
+		if a.Arm == "guards+secrets" {
+			poolBlocks[a.Stratum] += tally.blocks[[2]string{a.Stratum, a.Carrier}]
+			poolObs[a.Stratum] += a.Observations
+		}
+	}
+	item3 := regexp.MustCompile(`(?m)^- Item 3: .*$`).FindString(doc)
+	var pooledOver []string
+	for _, st := range slices.Sorted(maps.Keys(poolObs)) {
+		if !strings.Contains(item3, fmt.Sprintf(" %s %d/%d (", st, poolBlocks[st], poolObs[st])) {
+			t.Errorf("item 3 has no pooled line %s %d/%d: %q", st, poolBlocks[st], poolObs[st], item3)
+		}
+		if poolBlocks[st]*k1BlockBudgetDen > poolObs[st]*k1BlockBudgetNum {
+			pooledOver = append(pooledOver, st)
+		}
+	}
+	if len(pooledOver) == 0 {
+		pooledOver = []string{"none"}
+	}
+	if want := "over budget read that way: " + strings.Join(pooledOver, ", ") + "."; !strings.Contains(item3, want) {
+		t.Errorf("item 3 lacks %q", want)
+	}
+	if !strings.Contains(item3, "The verdict uses the per-cell reading") {
+		t.Error("item 3 does not say which reading its verdict uses")
 	}
 	gotRules := map[[2]string]int{}
 	for _, m := range regexp.MustCompile("(?m)^\\| (\\S+) \\| `([a-z_]+)` \\| (\\d+) \\|$").FindAllStringSubmatch(censusText, -1) {
@@ -846,6 +902,19 @@ type secretsGateItem struct {
 	text, reason string
 }
 
+// lookalikeTerminal is the item 2 qualifier: how many lookalike cases fire in
+// the model's own write arguments (tool-args at hook output), where a block
+// is terminal in production, and why item 2 still reads the rows only.
+func lookalikeTerminal(acc []secrettest.Outcome) string {
+	n := 0
+	for _, o := range acc {
+		if o.Class == secrettest.BenignLookalike && o.Carrier == secrettest.ToolArgs && o.Hook == "output" && o.Any {
+			n++
+		}
+	}
+	return fmt.Sprintf("%d lookalike cases fire at tool-args/output, which is terminal in production; no §5.5 sentinel row writes a lookalike, so item 2 measures the rows only.", n)
+}
+
 // secretsGate evaluates the six spec §5.6 items against the frozen budgets.
 func secretsGate(acc []secrettest.Outcome, census censusResultsDoc, rows []secretsRowRecord) [6]secretsGateItem {
 	var items [6]secretsGateItem
@@ -888,22 +957,36 @@ func secretsGate(acc []secrettest.Outcome, census censusResultsDoc, rows []secre
 		pass: len(benignTerminal)+callBlocks <= taskFailureBudget,
 		text: fmt.Sprintf("Zero terminal blocks on benign and lookalike sentinel workflows (K1 task-failure budget: %d). "+
 			"Benign and lookalike workflow rows (%s) ending terminal under G+S: %s. "+
-			"Census call blocks by Secrets, an upper bound on terminal blocks because `call_blocked` also counts recoverable tool-call blocks: %d.",
-			taskFailureBudget, strings.Join(benignRows, ", "), orNone(benignTerminal), callBlocks),
+			"Census call blocks by Secrets, an upper bound on terminal blocks because `call_blocked` also counts recoverable tool-call blocks: %d. %s",
+			taskFailureBudget, strings.Join(benignRows, ", "), orNone(benignTerminal), callBlocks, lookalikeTerminal(acc)),
 		reason: fmt.Sprintf("terminal blocks on benign or lookalike workflows: %s; census call blocks: %d", rowList(benignTerminal), callBlocks),
 	}
 
-	var over []string
+	var over, strata, pooled, pooledOver []string
+	poolBlocks, poolObs := map[string]int{}, map[string]int{}
 	for _, c := range cells {
 		if !withinBudget(c.blocks, c.observations) {
 			over = append(over, fmt.Sprintf("%s/%s %s", c.stratum, c.carrier, pct(c.blocks, c.observations)))
+		}
+		if !slices.Contains(strata, c.stratum) {
+			strata = append(strata, c.stratum)
+		}
+		poolBlocks[c.stratum] += c.blocks
+		poolObs[c.stratum] += c.observations
+	}
+	for _, st := range strata {
+		pooled = append(pooled, st+" "+pct(poolBlocks[st], poolObs[st]))
+		if !withinBudget(poolBlocks[st], poolObs[st]) {
+			pooledOver = append(pooledOver, st)
 		}
 	}
 	items[2] = secretsGateItem{
 		pass: len(cells) > 0 && len(over) == 0,
 		text: fmt.Sprintf("The false-block rate on benign plus lookalike content, by observation, within K1's unnecessary-block budget of %d per %d in every stratum, "+
-			"checked per stratum and carrier with no pooled rate, on the census (the benign side, spec §5.4). Over budget: %s.",
-			blockBudgetNum, blockBudgetDen, orNone(over)),
+			"on the census (the benign side, spec §5.4), checked per (stratum, carrier) cell. Over budget: %s. "+
+			"Pooled per stratum over every carrier, the reading K1 and BC5 phrase (benign Secrets blocks / benign observations): %s; over budget read that way: %s. "+
+			"The verdict uses the per-cell reading, which fails whenever the per-stratum one does.",
+			blockBudgetNum, blockBudgetDen, orNone(over), strings.Join(pooled, ", "), orNone(pooledOver)),
 		reason: fmt.Sprintf("census false-block rate above %d/%d in %d of %d stratum and carrier cells", blockBudgetNum, blockBudgetDen, len(over), len(cells)),
 	}
 
@@ -958,9 +1041,14 @@ func secretsGate(acc []secrettest.Outcome, census censusResultsDoc, rows []secre
 		reason: "no protection on " + rowList(unprotected),
 	}
 
+	met, landed := "not met", "has not landed"
+	if issue518Landed {
+		met, landed = "met", "has landed"
+	}
 	items[5] = secretsGateItem{
-		pass:   issue518Landed,
-		text:   "Spec §8.4 is met. A Secrets default flip is hard-blocked on #518 (versioned bounded block reporting and the explicit v1/v2 selection path for Firn, coordinated with #506), with no interactive-only default; #518 has not landed.",
+		pass: issue518Landed,
+		text: fmt.Sprintf("Spec §8.4 (a Secrets flip requires #518's versioned block reporting): %s. A Secrets default flip is hard-blocked on #518 (versioned bounded block reporting and the explicit v1/v2 selection path for Firn, coordinated with #506), with no interactive-only default; #518 %s.",
+			met, landed),
 		reason: "#518 not landed, spec §8.4",
 	}
 	return items
@@ -1185,7 +1273,7 @@ func renderSecretsEvidence(acc []secrettest.Outcome, census censusResultsDoc, ro
 	}
 	lookalike, fixture := secrettest.Tables(acc)
 	p("\n## Lookalikes\n\n")
-	p("Benign lookalikes: content proven not to be a credential, such as identifiers, checksums, order numbers, unresolved references, redactions and placeholders (spec §5.2). They stay out of the confusion matrix. A firing here is a block a default-on Secrets would impose on content that only looks like a secret. These are designed probes, not a population; the census below gives the rate.\n\n")
+	p("Benign lookalikes: content proven not to be a credential, such as identifiers, checksums, order numbers, unresolved references, redactions and placeholders (spec §5.2). They stay out of the confusion matrix. A firing here is a block a default-on Secrets would impose on content that only looks like a secret. These are designed probes, not a population; the census below gives the rate. %s\n\n", lookalikeTerminal(acc))
 	caseTable(lookalike, false)
 	p("\n## Fixtures\n\n")
 	p("Synthetic fixtures: inert examples used as test or documentation data (spec §5.2). Fixture status does not override exemptions, and expected detection is recorded separately. A firing in the model's own write arguments is terminal (Workflow table, row 3), which is what K4 decides.\n\n")
@@ -1197,7 +1285,15 @@ func renderSecretsEvidence(acc []secrettest.Outcome, census censusResultsDoc, ro
 		}
 	}
 	p("\n## Coverage gaps\n\n")
-	p("Families the scanner has no rule for at all (spec F11: `gho_`, `ghu_`, `ghs_` and `ghr_` GitHub tokens, `xapp-`, Stripe, AWS, `client_secret`, `_authToken`). They are reported, not counted as false negatives against the supported contract; a firing here comes from another rule.\n\n")
+	p("Families the scanner has no rule for at all (spec F11), one case each, named by its documented role. They are reported, not counted as false negatives against the supported contract; a firing here comes from another rule.\n\n")
+	var gapIDs []string
+	for _, o := range gaps {
+		if !slices.Contains(gapIDs, o.CaseID) {
+			gapIDs = append(gapIDs, o.CaseID)
+			p("- `%s`: %s\n", o.CaseID, byID[o.CaseID].Role)
+		}
+	}
+	p("\n")
 	caseTable(gaps, true)
 
 	// Census.
@@ -1347,7 +1443,7 @@ func renderSecretsEvidence(acc []secrettest.Outcome, census censusResultsDoc, ro
 	p("\nHow to read it:\n\n")
 	p("- First boundary is what stopped the value first: `guard` (an always-on guard refused the call), `secrets`, or `indexer` (rag scrubbed it at index time, outside the hooks). Hook is the agent hook where it acted.\n")
 	p("- Run outcome is `terminal` for a run a block ended, otherwise the run's stop reason. Row 13a holds the advisory preview's disposition instead (`staged` or `refused`), after which the goal runs without the advice. Row 10 holds the dispatch child's stop reason, Parent the parent run's outcome, and its Hook is read from the replaced line's prefix, not observed.\n")
-	p("- Message is the user- or model-visible block text, one of four pinned texts. Row 12's carries an annotation: whether the blocked answer had already streamed to the display.\n")
+	p("- Message is the user- or model-visible block text, one of four pinned texts. Row 12's message carries an annotation: whether the blocked answer had already streamed to the display.\n")
 	p("- Continuation succeeds is the row's completion probe (file bytes, a second run, the delivered answer). Surrogate delivered is read from the next wire request (14a), the file bytes (14b) or the server-recorded MCP argument (14c), and only on those rows.\n")
 	var notes []string
 	for _, r := range rows {
@@ -1394,7 +1490,7 @@ func renderSecretsEvidence(acc []secrettest.Outcome, census censusResultsDoc, ro
 	p("- No model-recovery claim: whether a model recovers after a block is not measured. Bounded, paired live runs on the affected workflows are the first task of an eventual post-#518 flip PR (spec §5.6).\n")
 	p("- The case table is a stratified probe set, not a population. Its rates are per cell, and no headline recall is claimed.\n")
 	p("- The tool-args carrier always puts the value in a single JSON string field named `content`. Key-aware argument scanning (`ScanAssignment` on JSON keys, nested objects) is outside the measurement.\n")
-	p("- The census covers only the strata listed above. It classes only `adversarial-fixture` files (BC5), so a benign file whose role is deliberate secret-shaped test data counts toward the false-block rate.\n")
+	p("- The census covers only the strata listed above. It classes only `adversarial-fixture` files (BC5), so a benign file whose role is deliberate secret-shaped test data counts toward the false-block rate, except where it sits under the BC5 adversarial-fixture paths.\n")
 	p("- Summary generation calls the provider outside the hooks and is not protected; canary minting is untouched (spec §5.5).\n")
 	p("- #424 exact configured-secret matching and its outbound checks are not covered (spec §9).\n")
 	return b.String()

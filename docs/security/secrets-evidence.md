@@ -120,9 +120,9 @@ Every expected-sensitive case with a FN outcome, by case ID, with where it was m
 
 `private_key` (4 cases):
 
-- `pem-pkcs8-truncated-head`, missed at observation/input. Boundary probe: truncated PEM. Role: First lines of: tLS private key of a production ingress controller.
-- `pem-rsa-truncated-head`, missed at observation/input. Boundary probe: truncated PEM. Role: First lines of: rSA deploy key with write access to a production repository.
-- `pem-dsa-truncated-head`, missed at observation/input. Boundary probe: truncated PEM. Role: First lines of: dSA host key of a legacy SSH server.
+- `pem-pkcs8-truncated-head`, missed at observation/input. Boundary probe: truncated PEM. Role: First lines of: TLS private key of a production ingress controller.
+- `pem-rsa-truncated-head`, missed at observation/input. Boundary probe: truncated PEM. Role: First lines of: RSA deploy key with write access to a production repository.
+- `pem-dsa-truncated-head`, missed at observation/input. Boundary probe: truncated PEM. Role: First lines of: DSA host key of a legacy SSH server.
 - `k8s-data-base64-private-key`, missed at observation/input, tool-args/output, tool-args/tool_call. Role: Base64-encoded TLS private key in the data block of a Kubernetes Secret manifest.
 
 `secret_assignment` (5 cases):
@@ -148,7 +148,7 @@ Correct detection on every mandatory supported case. 55 mandatory cases (165 out
 
 ## Lookalikes
 
-Benign lookalikes: content proven not to be a credential, such as identifiers, checksums, order numbers, unresolved references, redactions and placeholders (spec §5.2). They stay out of the confusion matrix. A firing here is a block a default-on Secrets would impose on content that only looks like a secret. These are designed probes, not a population; the census below gives the rate.
+Benign lookalikes: content proven not to be a credential, such as identifiers, checksums, order numbers, unresolved references, redactions and placeholders (spec §5.2). They stay out of the confusion matrix. A firing here is a block a default-on Secrets would impose on content that only looks like a secret. These are designed probes, not a population; the census below gives the rate. 14 lookalike cases fire at tool-args/output, which is terminal in production; no §5.5 sentinel row writes a lookalike, so item 2 measures the rows only.
 
 Secrets fired on 14/44 (31.82%) by case and 41/132 (31.06%) by outcome.
 
@@ -228,7 +228,22 @@ Secrets fired on 2/18 (11.11%) by case and 6/54 (11.11%) by outcome.
 
 ## Coverage gaps
 
-Families the scanner has no rule for at all (spec F11: `gho_`, `ghu_`, `ghs_` and `ghr_` GitHub tokens, `xapp-`, Stripe, AWS, `client_secret`, `_authToken`). They are reported, not counted as false negatives against the supported contract; a firing here comes from another rule.
+Families the scanner has no rule for at all (spec F11), one case each, named by its documented role. They are reported, not counted as false negatives against the supported contract; a firing here comes from another rule.
+
+- `gap-github-oauth-gho`: GitHub OAuth token written by gh auth login into the CLI's hosts.yml.
+- `gap-github-user-to-server-ghu`: GitHub App user-to-server token held in an app's session store.
+- `gap-github-installation-ghs`: GitHub App installation token exported into a job's environment.
+- `gap-github-refresh-ghr`: GitHub App refresh token persisted by an integration.
+- `gap-slack-app-level-xapp`: Slack app-level token for Socket Mode in a .env file.
+- `gap-stripe-live-key-bare`: Stripe live secret key copied into an operations runbook.
+- `gap-stripe-live-key-env`: Stripe live secret key on the STRIPE_SECRET_KEY line of a .env file.
+- `gap-aws-access-key-id`: AWS access key ID in the default profile of a credentials file.
+- `gap-aws-secret-access-key`: AWS secret access key in the default profile of a credentials file.
+- `gap-oauth-client-secret-ci`: OAuth client_secret set directly in a CI workflow's env block.
+- `gap-npmrc-legacy-authtoken`: Legacy npm auth token without a type prefix on the _authToken line of a project .npmrc.
+- `gap-jwt-bare-session-log`: Signed session JWT printed bare in an auth service log.
+- `jwt-docs-example`: Example JWT in an authentication guide, signed with the guide's published demo secret.
+- `gap-curl-x-api-key-header`: Partner API key in an X-API-Key header of a pasted curl command.
 
 Secrets fired on 0/14 (0.00%) by case and 0/42 (0.00%) by outcome.
 
@@ -405,7 +420,7 @@ How to read it:
 
 - First boundary is what stopped the value first: `guard` (an always-on guard refused the call), `secrets`, or `indexer` (rag scrubbed it at index time, outside the hooks). Hook is the agent hook where it acted.
 - Run outcome is `terminal` for a run a block ended, otherwise the run's stop reason. Row 13a holds the advisory preview's disposition instead (`staged` or `refused`), after which the goal runs without the advice. Row 10 holds the dispatch child's stop reason, Parent the parent run's outcome, and its Hook is read from the replaced line's prefix, not observed.
-- Message is the user- or model-visible block text, one of four pinned texts. Row 12's carries an annotation: whether the blocked answer had already streamed to the display.
+- Message is the user- or model-visible block text, one of four pinned texts. Row 12's message carries an annotation: whether the blocked answer had already streamed to the display.
 - Continuation succeeds is the row's completion probe (file bytes, a second run, the delivered answer). Surrogate delivered is read from the next wire request (14a), the file bytes (14b) or the server-recorded MCP argument (14c), and only on those rows.
 - Row 7b is class benign yet refused by an always-on guard under both arms: a non-Secrets boundary, not Secrets disruption.
 - Overblock, row 9a under G+S: `tool result blocked by interceptor secrets (sensitive_openai_token)` replaced the whole result, yet assembly never delivers the sensitive alternative (a shadow run without Secrets shows it).
@@ -417,11 +432,11 @@ Under G+S: terminal in rows 2c, 3a, 3b, 4, 5a, 5b, 11, 12, 13b, 14b, 14c; contin
 Default-on Secrets requires all six items; if any fails, Secrets stays opt-in and the failed criteria are recorded. The thresholds are frozen (spec §2.1): K1's task-failure budget is 0 terminal blocks on benign or lookalike sentinel workflows, K1's unnecessary-block budget is at most 1 block per 100 benign observations in every stratum, and K4 makes a terminal block on a deliberate fixture workflow disqualifying.
 
 - Item 1: PASS. Correct detection on every mandatory supported case. 55 mandatory cases (165 outcomes, every carrier and hook); missed: none.
-- Item 2: PASS. Zero terminal blocks on benign and lookalike sentinel workflows (K1 task-failure budget: 0). Benign and lookalike workflow rows (1, 7b, 7d) ending terminal under G+S: none. Census call blocks by Secrets, an upper bound on terminal blocks because `call_blocked` also counts recoverable tool-call blocks: 0.
-- Item 3: FAIL. The false-block rate on benign plus lookalike content, by observation, within K1's unnecessary-block budget of 1 per 100 in every stratum, checked per stratum and carrier with no pooled rate, on the census (the benign side, spec §5.4). Over budget: go-llm/mcp 26/1801 (1.44%), go-llm/mixed 27/1801 (1.50%), go-llm/read_file 27/1801 (1.50%), go-llm/run_command 26/1801 (1.44%), go-src/command_tail 84/7787 (1.08%), go-src/mcp 108/7787 (1.39%), go-src/mixed 119/7764 (1.53%), go-src/read_file 120/7764 (1.55%), go-src/run_command 108/7787 (1.39%).
+- Item 2: PASS. Zero terminal blocks on benign and lookalike sentinel workflows (K1 task-failure budget: 0). Benign and lookalike workflow rows (1, 7b, 7d) ending terminal under G+S: none. Census call blocks by Secrets, an upper bound on terminal blocks because `call_blocked` also counts recoverable tool-call blocks: 0. 14 lookalike cases fire at tool-args/output, which is terminal in production; no §5.5 sentinel row writes a lookalike, so item 2 measures the rows only.
+- Item 3: FAIL. The false-block rate on benign plus lookalike content, by observation, within K1's unnecessary-block budget of 1 per 100 in every stratum, on the census (the benign side, spec §5.4), checked per (stratum, carrier) cell. Over budget: go-llm/mcp 26/1801 (1.44%), go-llm/mixed 27/1801 (1.50%), go-llm/read_file 27/1801 (1.50%), go-llm/run_command 26/1801 (1.44%), go-src/command_tail 84/7787 (1.08%), go-src/mcp 108/7787 (1.39%), go-src/mixed 119/7764 (1.53%), go-src/read_file 120/7764 (1.55%), go-src/run_command 108/7787 (1.39%). Pooled per stratum over every carrier, the reading K1 and BC5 phrase (benign Secrets blocks / benign observations): go-llm 124/10814 (1.15%), go-src 581/46684 (1.24%); over budget read that way: go-llm, go-src. The verdict uses the per-cell reading, which fails whenever the per-stratum one does.
 - Item 4: FAIL. Fixture-workflow completion losses within the K4 decision: a terminal block on a deliberate fixture workflow disqualifies a default-on Secrets, and row 3 alone decides K4. Row 3 terminal under G+S: yes. Other synthetic-fixture rows terminal under G+S: 2c, 11. Fixture rows whose continuation G keeps and G+S loses without a terminal block: 6.
 - Item 5: PASS. A protection benefit on expected-sensitive surrogates, shown by the deterministic protection rows (BC4): the surrogate reaches its sink under G and not under G+S. Protected: rows 14a, 14b, 14c; not protected: none.
-- Item 6: FAIL. Spec §8.4 is met. A Secrets default flip is hard-blocked on #518 (versioned bounded block reporting and the explicit v1/v2 selection path for Firn, coordinated with #506), with no interactive-only default; #518 has not landed.
+- Item 6: FAIL. Spec §8.4 (a Secrets flip requires #518's versioned block reporting): not met. A Secrets default flip is hard-blocked on #518 (versioned bounded block reporting and the explicit v1/v2 selection path for Firn, coordinated with #506), with no interactive-only default; #518 has not landed.
 
 **Secrets default: retain opt-in.** Failed criteria: item 3 (census false-block rate above 1/100 in 9 of 14 stratum and carrier cells), item 4 (row 3 terminal; also terminal: rows 2c, 11; continuation lost without a terminal block: row 6), item 6 (#518 not landed, spec §8.4).
 
@@ -431,6 +446,6 @@ Default-on Secrets requires all six items; if any fails, Secrets stays opt-in an
 - No model-recovery claim: whether a model recovers after a block is not measured. Bounded, paired live runs on the affected workflows are the first task of an eventual post-#518 flip PR (spec §5.6).
 - The case table is a stratified probe set, not a population. Its rates are per cell, and no headline recall is claimed.
 - The tool-args carrier always puts the value in a single JSON string field named `content`. Key-aware argument scanning (`ScanAssignment` on JSON keys, nested objects) is outside the measurement.
-- The census covers only the strata listed above. It classes only `adversarial-fixture` files (BC5), so a benign file whose role is deliberate secret-shaped test data counts toward the false-block rate.
+- The census covers only the strata listed above. It classes only `adversarial-fixture` files (BC5), so a benign file whose role is deliberate secret-shaped test data counts toward the false-block rate, except where it sits under the BC5 adversarial-fixture paths.
 - Summary generation calls the provider outside the hooks and is not protected; canary minting is untouched (spec §5.5).
 - #424 exact configured-secret matching and its outbound checks are not covered (spec §9).
