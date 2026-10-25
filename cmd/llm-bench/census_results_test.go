@@ -286,7 +286,8 @@ func TestCensusModeWritesOutputs(t *testing.T) {
 }
 
 // The -census-* flags without -interceptor-census are refused, as the
-// -attempt-* flags are without -replay-attempt, instead of being ignored.
+// -attempt-* flags are without -replay-attempt, instead of being ignored. The
+// end-to-end refusal is TestStrayCensusFlagsRefusedByMain (census_flags_main_test.go).
 func TestStrayCensusFlags(t *testing.T) {
 	got := strayCensusFlags(map[string]bool{"census-out": true, "models": true, "census-root": true, "census-manifest": true})
 	if want := []string{"-census-manifest", "-census-root", "-census-out"}; !reflect.DeepEqual(got, want) {
@@ -294,13 +295,5 @@ func TestStrayCensusFlags(t *testing.T) {
 	}
 	if got := strayCensusFlags(map[string]bool{"interceptor-census": true, "models": true}); len(got) != 0 {
 		t.Fatalf("strayCensusFlags = %v, want none", got)
-	}
-	for _, flag := range []string{"-census-manifest", "-census-root", "-census-out"} {
-		// -fc-render alone fails fast on its own missing -fc-sidemap if the
-		// census flag were accepted.
-		code, out := runLLMBenchMain(t, nil, flag, t.TempDir(), "-fc-render")
-		if code != 1 || !strings.Contains(out, flag+" require -interceptor-census") {
-			t.Errorf("%s without -interceptor-census: exit %d output %q", flag, code, out)
-		}
 	}
 }

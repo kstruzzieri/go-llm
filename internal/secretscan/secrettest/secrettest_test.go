@@ -81,7 +81,9 @@ func TestCasesValidate(t *testing.T) {
 	}{
 		{"missing role", func(c *Case) { c.Role = "" }},
 		{"unknown class", func(c *Case) { c.Class = "secret" }},
-		{"mandatory not sensitive", func(c *Case) { c.Mandatory, c.ExpectAny, c.ExpectKinds = true, true, []string{"openai_token"} }},
+		{"mandatory not sensitive", func(c *Case) {
+			c.Mandatory, c.Kind, c.ExpectAny, c.ExpectKinds = true, "openai_token", true, []string{"openai_token"}
+		}},
 		{"mandatory coverage gap", func(c *Case) { c.Class, c.Mandatory, c.CoverageGap = ExpectedSensitive, true, true }},
 		{"mandatory without kind", func(c *Case) { c.Class, c.Mandatory = ExpectedSensitive, true }},
 		{"coverage gap expecting", func(c *Case) { c.CoverageGap, c.ExpectAny, c.ExpectKinds = true, true, []string{"openai_token"} }},

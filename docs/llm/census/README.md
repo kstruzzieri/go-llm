@@ -50,28 +50,33 @@ denominator. In `go-llm` these are:
 - `agent/testdata/hardening/**`;
 - `docs/llm/traces/injection/**`.
 
-That is 169 files. A blind rater pass over the fired `go-llm` files (the
-protocol of the Secrets case table, spec §5.2) agreed with this assignment on
-106 of 110 paths; Keith kept the four disputed
-`agent/interceptor/invariants_*_test.go` files as `adversarial-fixture`. No
-file of the other five strata is classed. The blind rater pass over the fired
-files of the four third-party strata is pending.
+That is 169 files. A blind rater pass over the 110 fired `go-llm` files with a
+detector finding (the protocol of the Secrets case table, spec §5.2) agreed
+with this assignment on 106 of 110 paths; Keith kept the four disputed
+`agent/interceptor/invariants_*_test.go` files as `adversarial-fixture`. The
+32 fired files with only a Secrets finding were not rated; the path rules
+alone class them. No file of the other five strata is classed. The blind
+rater pass over the fired files of the four third-party strata is pending.
 
 ## Fetch and reproduce
 
 ```sh
 ROOT="$HOME/projects/go-llm/census-root-517"   # outside the checkout
 mkdir -p "$ROOT/go-llm" "$ROOT/go-src"
-git archive 92c2483aa8f51c7b419fb346fcc202d5f5867b4c | tar -x -C "$ROOT/go-llm"
+git -c core.autocrlf=false -c core.eol=lf archive 92c2483aa8f51c7b419fb346fcc202d5f5867b4c | tar -x -C "$ROOT/go-llm"
 TC="$(go env GOMODCACHE)/golang.org/toolchain@v0.0.1-go1.27.1.darwin-arm64"
 cp "$TC/LICENSE" "$ROOT/go-src/LICENSE"
 (cd "$TC" && find src -type d -name testdata -prune -o -type f -print | tar -c -T - -f -) | tar -x -C "$ROOT/go-src"
+# Every git command that writes files passes -c core.autocrlf=false -c core.eol=lf:
+# some upstream repositories set `text=auto`, so a host with core.autocrlf=true
+# (or Windows) would check out CRLF bytes and the census would refuse on a
+# sha256 mismatch.
 sparse() {  # sparse <stratum> <repository> <commit> <sparse-checkout pattern>...
   d="$ROOT/$1" repo="$2" commit="$3"; shift 3
   git init -q "$d" &&
   git -C "$d" sparse-checkout set --no-cone "$@" &&
   git -C "$d" fetch -q --depth 1 --filter=blob:none "$repo" "$commit" &&
-  git -C "$d" checkout -q FETCH_HEAD &&
+  git -C "$d" -c core.autocrlf=false -c core.eol=lf checkout -q FETCH_HEAD &&
   rm -rf "$d/.git"   # the census refuses any file the manifest does not list
 }
 sparse i18n-cldr-annotations https://github.com/unicode-org/cldr-json 91c267402229a59e3ef2774544f001bf959e8809 \
