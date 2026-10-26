@@ -477,11 +477,13 @@ func luhn(digits string) bool {
 
 // TestCommittedArtifactsCarryNoSecretShapes scans every committed #517
 // artifact (Review Focus 3), the test sources that generate values included,
-// and the benign task corpus (cases.json, delegated.json, README,
-// registration.json and every trace). The sha256 digests of the census results
-// and of the registration are blanked first (ruling R19): they are identifiers
-// that can hold a Luhn-valid digit run, not content (the fixture golden's are
-// empty). Never scanned: docs/llm/census/manifest.json, whose
+// the benign task corpus (cases.json, delegated.json, README,
+// registration.json and every trace) and the two PR2 reports (the v1
+// adversarial and the benign interceptor reports). No corpus excerpt is
+// exempt: every committed window must scan clean. The sha256 digests of the
+// census results and of the registration are blanked first (ruling R19): they
+// are identifiers that can hold a Luhn-valid digit run, not content (the
+// fixture golden's are empty). Never scanned: docs/llm/census/manifest.json, whose
 // per-file sha256s carry such runs by design, and the census fixture's
 // constant.go, a deliberate corpus excerpt.
 func TestCommittedArtifactsCarryNoSecretShapes(t *testing.T) {
@@ -511,6 +513,8 @@ func TestCommittedArtifactsCarryNoSecretShapes(t *testing.T) {
 		filepath.Join(benign, "delegated.json"),
 		filepath.Join(benign, "README.md"),
 		registration,
+		filepath.Join(repo, "docs", "llm", "benchmarks", "2026-10-25-interceptor-adversarial-v1.md"),
+		filepath.Join(repo, "docs", "llm", "benchmarks", "2026-10-26-interceptor-benign.md"),
 	}, tests...), traces...) {
 		data, err := os.ReadFile(path)
 		if err != nil {

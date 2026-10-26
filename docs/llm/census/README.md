@@ -55,8 +55,9 @@ detector finding (the protocol of the Secrets case table, spec §5.2) agreed
 with this assignment on 106 of 110 paths; Keith kept the four disputed
 `agent/interceptor/invariants_*_test.go` files as `adversarial-fixture`. The
 32 fired files with only a Secrets finding were not rated; the path rules
-alone class them. No file of the other five strata is classed. The blind
-rater pass over the fired files of the four third-party strata is pending.
+alone decide their class. No file of the other five strata is classed. The
+blind rater pass over the fired files of the four third-party strata is
+pending.
 
 ## Fetch and reproduce
 

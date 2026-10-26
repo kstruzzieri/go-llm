@@ -95,6 +95,8 @@ Blocked-ingress cells: guards+detectors 2/105, guards+secrets 5/105, guards+dete
 Call-blocked cells: guards+detectors 0/105, guards+secrets 0/105, guards+detectors+secrets 0/105.
 Blocked-at-build cells: guards+detectors 0/105, guards+secrets 0/105, guards+detectors+secrets 0/105.
 
+Under `guards+secrets` the hex blocks are `sensitive_payment_card` matches on digit runs in the hex text, not detection of the payload, so `guards+detectors+secrets` 7/105 = 2 zero-width + 5 card-rule.
+
 ## Deterministic hit or miss per v1 payload
 
 Attack cells only (88; the controls are listed below). Each entry is hits over cells; `-` marks a technique the carrier does not carry.
@@ -146,6 +148,8 @@ Attack cells only (88; the controls are listed below). Each entry is hits over c
 | base64 | 0/2 | 0/2 | 0/2 | 0/2 | 0/8 |
 | zero-width | 2/2 | 2/2 | 2/2 | 2/2 | 8/8 |
 | All | 3/22 | 3/22 | 4/22 | 3/22 | 13/88 |
+
+Under `guards+secrets` the hex hits are `sensitive_payment_card` matches on digit runs in the hex text, not detection of the payload, so `guards+detectors+secrets` 13/88 = 8 zero-width + 5 card-rule.
 
 ### Per attack cell
 

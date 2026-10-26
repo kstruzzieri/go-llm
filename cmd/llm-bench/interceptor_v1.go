@@ -302,6 +302,46 @@ func firstSeen(cells []v1Cell, key func(v1Cell) string) []string {
 	return out
 }
 
+// cardRuleNote explains, when a guards+detectors+secrets hit among cells is
+// a Secrets payment-card block, that the card rule matched digit runs in the
+// encoded text rather than detecting the payload, and splits those hits
+// (hit(class) true) into the other hits by technique and the card-rule ones
+// (Task 8 note, ruling P17). kind names the hits ("hits" or "blocks"). It
+// returns "" when no hit is a card-rule block.
+func cardRuleNote(cells []v1Cell, kind string, hit func(cellClass) bool) string {
+	const s, ds, card = "guards+secrets", "guards+detectors+secrets", "secrets (sensitive_payment_card)"
+	var cardTechniques, order []string
+	rest := map[string]int{}
+	hits, cards := 0, 0
+	for _, c := range cells {
+		if !hit(c.Classes[ds]) {
+			continue
+		}
+		hits++
+		if strings.Contains(c.Labels[ds], card) {
+			cards++
+			if !slices.Contains(cardTechniques, c.Technique) {
+				cardTechniques = append(cardTechniques, c.Technique)
+			}
+			continue
+		}
+		if rest[c.Technique] == 0 {
+			order = append(order, c.Technique)
+		}
+		rest[c.Technique]++
+	}
+	if cards == 0 {
+		return ""
+	}
+	var parts []string
+	for _, t := range order {
+		parts = append(parts, fmt.Sprintf("%d %s", rest[t], t))
+	}
+	parts = append(parts, fmt.Sprintf("%d card-rule", cards))
+	t := strings.Join(cardTechniques, "/")
+	return fmt.Sprintf("Under `%s` the %s %s are `sensitive_payment_card` matches on digit runs in the %s text, not detection of the payload, so `%s` %d/%d = %s.\n", s, t, kind, t, ds, hits, len(cells), strings.Join(parts, " + "))
+}
+
 // renderInterceptorV1Report renders r. Every list is iterated in corpus or
 // arm order, never map order, and nothing time-dependent is printed, so the
 // bytes are a function of r alone.
@@ -443,6 +483,9 @@ func renderInterceptorV1Report(r v1Result) string {
 	totals("Blocked-ingress", cellObservationBlocked)
 	totals("Call-blocked", cellCallBlocked)
 	totals("Blocked-at-build", cellBlockedAtBuild)
+	if note := cardRuleNote(r.Cells, "blocks", func(c cellClass) bool { return c == cellObservationBlocked }); note != "" {
+		p("\n%s", note)
+	}
 	p("\n")
 
 	p("## Deterministic hit or miss per v1 payload\n\n")
@@ -471,6 +514,9 @@ func renderInterceptorV1Report(r v1Result) string {
 			p("\n")
 		}
 		p("\n")
+	}
+	if note := cardRuleNote(attack, "hits", func(c cellClass) bool { return c != cellIdentical }); note != "" {
+		p("%s\n", note)
 	}
 	p("### Per attack cell\n\n")
 	cellTable(attack)

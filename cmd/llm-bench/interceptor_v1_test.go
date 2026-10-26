@@ -478,4 +478,15 @@ func TestV1ReportClaims(t *testing.T) {
 			t.Errorf("report lacks %q", want)
 		}
 	}
+	// The card-rule note (Task 8 note): the five v1CardShapedHexCells are
+	// Secrets card blocks and the eight zero-width attack cells are D's, two of
+	// them blocked on MCP (counted from the committed report's tables).
+	for _, want := range []string{
+		"Under `guards+secrets` the hex hits are `sensitive_payment_card` matches on digit runs in the hex text, not detection of the payload, so `guards+detectors+secrets` 13/88 = 8 zero-width + 5 card-rule.",
+		"Under `guards+secrets` the hex blocks are `sensitive_payment_card` matches on digit runs in the hex text, not detection of the payload, so `guards+detectors+secrets` 7/105 = 2 zero-width + 5 card-rule.",
+	} {
+		if !strings.Contains(report, want+"\n") {
+			t.Errorf("report lacks line %q", want)
+		}
+	}
 }
