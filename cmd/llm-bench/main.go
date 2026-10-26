@@ -54,6 +54,7 @@ func main() {
 	censusManifestPath := flag.String("census-manifest", filepath.Join("docs", "llm", "census", "manifest.json"), "With -interceptor-census: the census manifest (llm-bench.census-manifest/v1)")
 	censusRoot := flag.String("census-root", "", "With -interceptor-census: directory holding one subdirectory per manifest stratum, fetched as docs/llm/census/README.md describes")
 	censusOut := flag.String("census-out", "", "With -interceptor-census: output directory for census-results.json (committed) and full/observations.jsonl (gitignored), e.g. docs/llm/census")
+	interceptorV1Report := flag.String("interceptor-v1-report", "", "Rebuild every cell of this injection cases JSON (the #452 v1 corpus, docs/llm/traces/injection/cases.json) under each #517 interceptor arm, classify each arm's decision-point request against the guards-only arm's, and write the deterministic adversarial report to -report (default stdout; the committed report is "+interceptorV1ReportPath+"). No model is called")
 	assemblyOut := flag.String("assembly-out", filepath.Join("docs", "llm", "assembly-corpus", "traces"), "Output directory for -assembly-build with a 3a JSON-array fixture")
 	assemblyOutMixed := flag.String("assembly-out-mixed", filepath.Join("docs", "llm", "assembly-corpus", "mixed", "traces"), "Output directory for -assembly-build with a 3c mixed-assembly object fixture (the mixed corpus keeps its own manifest, separate from -assembly-out)")
 
@@ -208,8 +209,11 @@ func main() {
 	if *interceptorCensus {
 		modes++
 	}
+	if *interceptorV1Report != "" {
+		modes++
+	}
 	if modes > 1 {
-		log.Fatalf("llm-bench: -capture, -calibrate-capture, -calibrate, -manual-report, -paired-report, -assembly-report, -fim-latency, -blind-render, -blind-ingest, -fc-render, -fc-ingest, -fc-sidemap-generate, -adjudicate-render, -adjudicate-ingest, -discrimination-report, -import-xlam, -assembly-build, -build-injection-corpus, -injection-report, -replay-attempt, -interceptor-census are mutually exclusive")
+		log.Fatalf("llm-bench: -capture, -calibrate-capture, -calibrate, -manual-report, -paired-report, -assembly-report, -fim-latency, -blind-render, -blind-ingest, -fc-render, -fc-ingest, -fc-sidemap-generate, -adjudicate-render, -adjudicate-ingest, -discrimination-report, -import-xlam, -assembly-build, -build-injection-corpus, -injection-report, -replay-attempt, -interceptor-census, -interceptor-v1-report are mutually exclusive")
 	}
 	if providedFlags["registration"] && !*calibrateCapture && !*injectionReport {
 		log.Fatalf("llm-bench: -registration requires -calibrate-capture or -injection-report")
@@ -260,6 +264,23 @@ func main() {
 		if err := runCensusMode(ctx, *censusManifestPath, *censusRoot, *censusOut, os.Stderr); err != nil {
 			log.Fatalf("llm-bench: interceptor-census: %v", err)
 		}
+		return
+	}
+
+	if *interceptorV1Report != "" {
+		refuseReportAlias("interceptor-v1-report", *reportPath, [][2]string{{"-interceptor-v1-report", *interceptorV1Report}})
+		report, err := runInterceptorV1Report(ctx, *interceptorV1Report)
+		if err != nil {
+			log.Fatalf("llm-bench: interceptor-v1-report: %v", err)
+		}
+		if *reportPath == "" {
+			fmt.Print(report)
+			return
+		}
+		if err := writeInjectionReport(*reportPath, report); err != nil {
+			log.Fatalf("llm-bench: write interceptor v1 report: %v", err)
+		}
+		fmt.Fprintf(os.Stderr, "llm-bench: interceptor v1 report written to %s\n", *reportPath)
 		return
 	}
 

@@ -259,6 +259,36 @@ func loadInjectionCases(path string) (injectionCases, error) {
 	return c, nil
 }
 
+// injectionCell is one trace the corpus builds from a base: its id, the goal,
+// the text substituted for the payload slot, and the eval block.
+type injectionCell struct {
+	ID, Goal, Slot  string
+	Eval            InjectionEval
+	PositiveControl bool
+}
+
+// injectionCells enumerates a base's cells in build order: the clean twin,
+// then one cell per variant. A positive control asks for the payload in the
+// trusted goal and fills the slot with the twin text.
+func injectionCells(b injectionBase) []injectionCell {
+	first := b.Variants[0]
+	// The twin is scored for restraint only; the first variant's matcher and
+	// forbidden tools are carried so validation and the report see a complete block.
+	cells := []injectionCell{{ID: "inj-" + b.ID + "-twin", Goal: b.Task, Slot: b.TwinFiller,
+		Eval: InjectionEval{Technique: injectionTwin, Form: injectionTwin, Twin: true, Matcher: first.Matcher, ForbiddenTools: first.ForbiddenTools}}}
+	for _, v := range b.Variants {
+		c := injectionCell{ID: "inj-" + b.ID + "-" + v.Technique + "-" + v.Form, Goal: b.Task, Slot: v.Payload,
+			Eval:            InjectionEval{Technique: v.Technique, Form: v.Form, Matcher: v.Matcher, ForbiddenTools: v.ForbiddenTools},
+			PositiveControl: v.PositiveControl}
+		if v.PositiveControl {
+			c.ID += "-positive-control"
+			c.Goal, c.Slot = v.Payload, b.TwinFiller
+		}
+		cells = append(cells, c)
+	}
+	return cells
+}
+
 // buildInjectionCorpusWith drives the real Orchestrator once per variant (and
 // one clean twin per base) with a scripted caller, captures the exact request
 // the candidate would see, normalizes the per-render fence keys and publishes
@@ -294,26 +324,8 @@ func buildInjectionCorpusWith(ctx context.Context, casesPath, outDir string, opt
 		return nil
 	}
 	for _, b := range cases.Bases {
-		first := b.Variants[0]
-		// The twin is scored for restraint only; the first variant's matcher and
-		// forbidden tools are carried so validation and the report see a complete block.
-		twinEval := InjectionEval{Technique: injectionTwin, Form: injectionTwin, Twin: true, Matcher: first.Matcher, ForbiddenTools: first.ForbiddenTools}
-		t, err := buildInjectionTrace(ctx, cases, b, "inj-"+b.ID+"-twin", b.Task, b.TwinFiller, twinEval, chain, chainName)
-		if err != nil {
-			return err
-		}
-		if err := add(t); err != nil {
-			return err
-		}
-		for _, v := range b.Variants {
-			id := "inj-" + b.ID + "-" + v.Technique + "-" + v.Form
-			goal, slot := b.Task, v.Payload
-			if v.PositiveControl {
-				id += "-positive-control"
-				goal, slot = v.Payload, b.TwinFiller
-			}
-			ev := InjectionEval{Technique: v.Technique, Form: v.Form, Matcher: v.Matcher, ForbiddenTools: v.ForbiddenTools}
-			t, err := buildInjectionTrace(ctx, cases, b, id, goal, slot, ev, chain, chainName)
+		for _, c := range injectionCells(b) {
+			t, err := buildInjectionTrace(ctx, cases, b, c.ID, c.Goal, c.Slot, c.Eval, chain, chainName)
 			if err != nil {
 				return err
 			}
