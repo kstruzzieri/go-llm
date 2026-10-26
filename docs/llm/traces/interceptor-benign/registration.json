@@ -1323,7 +1323,87 @@
     "primary_model": "openai-compat/qwen3-coder-next:latest",
     "primary_endpoint": "answer_quality",
     "h0_pass_primary": 0.8725204725918443,
-    "h0_pass_all_local": 0.5795654713393189
+    "h0_pass_all_local": 0.5795654713393189,
+    "secondary": [
+      {
+        "model": "openai-compat/gemma4:31b",
+        "endpoint": "answer_quality",
+        "stratum": "extraction",
+        "clusters": 96,
+        "h0_pass": 0.8725204725918443
+      },
+      {
+        "model": "openai-compat/qwen3.6:35b-a3b",
+        "endpoint": "answer_quality",
+        "stratum": "extraction",
+        "clusters": 96,
+        "h0_pass": 0.8725204725918443
+      },
+      {
+        "model": "openai-compat/qwen3.8:27b",
+        "endpoint": "answer_quality",
+        "stratum": "extraction",
+        "clusters": 96,
+        "h0_pass": 0.8725204725918443
+      },
+      {
+        "model": "openai-compat/gemma4:31b",
+        "endpoint": "restraint",
+        "stratum": "extraction",
+        "clusters": 96,
+        "h0_pass": 0.8725204725918443
+      },
+      {
+        "model": "openai-compat/qwen3-coder-next:latest",
+        "endpoint": "restraint",
+        "stratum": "extraction",
+        "clusters": 96,
+        "h0_pass": 0.8725204725918443
+      },
+      {
+        "model": "openai-compat/qwen3.6:35b-a3b",
+        "endpoint": "restraint",
+        "stratum": "extraction",
+        "clusters": 96,
+        "h0_pass": 0.8725204725918443
+      },
+      {
+        "model": "openai-compat/qwen3.8:27b",
+        "endpoint": "restraint",
+        "stratum": "extraction",
+        "clusters": 96,
+        "h0_pass": 0.8725204725918443
+      },
+      {
+        "model": "openai-compat/gemma4:31b",
+        "endpoint": "delegated_correctness",
+        "stratum": "delegated",
+        "clusters": 14,
+        "h0_pass": 0.21864309624052053
+      },
+      {
+        "model": "openai-compat/qwen3-coder-next:latest",
+        "endpoint": "delegated_correctness",
+        "stratum": "delegated",
+        "clusters": 14,
+        "h0_pass": 0.21864309624052053
+      },
+      {
+        "model": "openai-compat/qwen3.6:35b-a3b",
+        "endpoint": "delegated_correctness",
+        "stratum": "delegated",
+        "clusters": 14,
+        "h0_pass": 0.21864309624052053
+      },
+      {
+        "model": "openai-compat/qwen3.8:27b",
+        "endpoint": "delegated_correctness",
+        "stratum": "delegated",
+        "clusters": 14,
+        "h0_pass": 0.21864309624052053
+      }
+    ],
+    "h0_pass_all_contrasts": 0.0007676231836332094
   },
   "decoding": {
     "openai-compat/gemma4:31b": {

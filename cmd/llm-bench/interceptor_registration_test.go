@@ -7,10 +7,12 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"maps"
 	"math"
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -20,13 +22,14 @@ var updateInterceptorRegistration = flag.Bool("update-interceptor-registration",
 
 // The spec §6.8 and Fable F-1 numbers (n = 80, q = 0.10, δ = 0.10): one
 // contrast passes under a true Δ of 0 with probability about 0.807, four
-// independent ones about 0.425. The n = 96 row is the registered cluster count,
-// computed outside the code under test (0.8725, 0.5796).
+// independent ones about 0.425. The n = 96 and n = 14 rows are the registered
+// extraction and delegated task counts, computed outside the code under test
+// (0.8725, 0.5796; 0.2186, 0.0023).
 func TestH0PassProbability(t *testing.T) {
 	for _, tc := range []struct {
 		n         int
 		one, four float64
-	}{{80, 0.807, 0.425}, {96, 0.8725, 0.5796}} {
+	}{{80, 0.807, 0.425}, {96, 0.8725, 0.5796}, {14, 0.2186, 0.0023}} {
 		p := h0PassProbability(tc.n, 0.10, 0.10)
 		if math.Abs(p-tc.one) > 1e-3 {
 			t.Errorf("h0PassProbability(%d, 0.10, 0.10) = %.4f, want %.4f within 1e-3", tc.n, p, tc.one)
@@ -45,6 +48,11 @@ func TestZeroLossBound(t *testing.T) {
 	}
 	if b := zeroLossBound(72); !(b < 0.05) {
 		t.Errorf("zeroLossBound(72) = %.5f, want < 0.05", b)
+	}
+	// Away from the boundary: n = 14 (the delegated tasks), computed outside
+	// the code under test as 1 - 0.025^(1/14) = 0.23164.
+	if b := zeroLossBound(14); math.Abs(b-0.23164) > 1e-4 {
+		t.Errorf("zeroLossBound(14) = %.5f, want 0.23164 within 1e-4", b)
 	}
 }
 
@@ -119,10 +127,26 @@ func newInterceptorRegistration(t *testing.T, dir string) interceptorRegistratio
 	primary := h0PassProbability(clusters, 0.10, 0.10)
 	// The local models of the #452 lineup: every decoding entry but the hosted
 	// kimi-k2.7-code.
-	local := 0
-	for _, d := range inj.Decoding {
-		if !d.hosted() {
-			local++
+	var locals []string
+	for _, m := range slices.Sorted(maps.Keys(inj.Decoding)) {
+		if !inj.Decoding[m].hosted() {
+			locals = append(locals, m)
+		}
+	}
+	// The secondary contrasts: every local model on every endpoint, in this
+	// endpoint order and model name order, but the primary.
+	var secondary []registeredContrast
+	all := primary
+	for _, endpoint := range []string{"answer_quality", "restraint", "delegated_correctness"} {
+		for _, m := range locals {
+			if m == "openai-compat/qwen3-coder-next:latest" && endpoint == "answer_quality" {
+				continue
+			}
+			stratum := interceptorEndpointStrata[endpoint]
+			n := countStratum(cases.Tasks, stratum)
+			c := registeredContrast{Model: m, Endpoint: endpoint, Stratum: stratum, Clusters: n, H0Pass: h0PassProbability(n, 0.10, 0.10)}
+			secondary = append(secondary, c)
+			all *= c.H0Pass
 		}
 	}
 	return interceptorRegistration{
@@ -141,7 +165,8 @@ func newInterceptorRegistration(t *testing.T, dir string) interceptorRegistratio
 		Power: registeredPower{
 			AssumedQ: 0.10, Clusters: clusters,
 			PrimaryModel: "openai-compat/qwen3-coder-next:latest", PrimaryEndpoint: "answer_quality",
-			H0PassPrimary: primary, H0PassAllLocal: math.Pow(primary, float64(local)),
+			H0PassPrimary: primary, H0PassAllLocal: math.Pow(primary, float64(len(locals))),
+			Secondary: secondary, H0PassAllContrasts: all,
 		},
 		Decoding: inj.Decoding,
 		Estimand: "Equal-task weighting. Per model, a paired delta (guards+detectors minus golem-default-guards) per endpoint: " +
@@ -268,6 +293,22 @@ func writeRegistration(t *testing.T, dir string, mutate func(map[string]any)) st
 	return path
 }
 
+// setJSONString sets the one `"key": "..."` string in the file at path to value.
+func setJSONString(t *testing.T, path, key, value string) {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	re := regexp.MustCompile(`"` + key + `": "[^"]*"`)
+	if n := len(re.FindAllIndex(raw, -1)); n != 1 {
+		t.Fatalf("%s holds %d %q string fields, want 1", path, n, key)
+	}
+	if err := os.WriteFile(path, re.ReplaceAll(raw, []byte(`"`+key+`": "`+value+`"`)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func appendNewline(t *testing.T, path string) {
 	t.Helper()
 	raw, err := os.ReadFile(path)
@@ -321,6 +362,7 @@ func TestRegistrationStrict(t *testing.T) {
 	cases := []struct {
 		name   string
 		mutate func(map[string]any)
+		before func(t *testing.T, dir string) // applied before the registration is written
 		edit   func(t *testing.T, dir string)
 		want   []string
 	}{
@@ -378,6 +420,24 @@ func TestRegistrationStrict(t *testing.T) {
 		{name: "census manifest bytes changed", edit: func(t *testing.T, dir string) { appendNewline(t, census(dir, "manifest.json")) }, want: []string{"census.manifest_sha256"}},
 		{name: "census results bytes changed", edit: func(t *testing.T, dir string) { appendNewline(t, census(dir, "census-results.json")) }, want: []string{"census.results_sha256"}},
 		{name: "census full digest", mutate: func(r map[string]any) { at(r, "census")["full_sha256"] = hex64 }, want: []string{"census.full_sha256"}},
+		{name: "census full digest blank in both", before: func(t *testing.T, dir string) {
+			setJSONString(t, census(dir, "census-results.json"), "full_sha256", "")
+		}, want: []string{"census.full_sha256", "not a lowercase hex sha256"}},
+		{name: "census results bind another manifest", before: func(t *testing.T, dir string) {
+			setJSONString(t, census(dir, "census-results.json"), "manifest_sha256", hex64)
+		}, want: []string{"census.manifest_sha256", "census-results.json binds manifest"}},
+		{name: "cases drafted from another manifest", before: func(t *testing.T, dir string) {
+			setJSONString(t, filepath.Join(dir, "cases.json"), "census_manifest_sha256", hex64)
+		}, want: []string{"census.manifest_sha256", "cases.json was drafted from"}},
+		{name: "two trace files hold one id", edit: func(t *testing.T, dir string) {
+			raw, err := os.ReadFile(filepath.Join(dir, "traces", "ben-ext-0001-g.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "traces", "copy.json"), raw, 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}, want: []string{"traces", "two trace files", "ben-ext-0001-g"}},
 		{name: "chain members", mutate: func(r map[string]any) {
 			m := at(r, "chains", 1)
 			m["members"] = m["members"].([]any)[1:]
@@ -390,6 +450,7 @@ func TestRegistrationStrict(t *testing.T) {
 		{name: "extra chain", mutate: func(r map[string]any) { r["chains"] = append(r["chains"].([]any), r["chains"].([]any)[0]) }, want: []string{"chains", "interceptorArms"}},
 		{name: "budget delta", mutate: func(r map[string]any) { at(r, "budgets")["delta"] = 0.2 }, want: []string{"budgets"}},
 		{name: "budget block", mutate: func(r map[string]any) { at(r, "budgets")["mcp_block_per_stratum"] = 0.02 }, want: []string{"budgets"}},
+		{name: "budget task failure", mutate: func(r map[string]any) { at(r, "budgets")["task_failure"] = 1 }, want: []string{"budgets"}},
 		{name: "power clusters", mutate: func(r map[string]any) { at(r, "power")["clusters"] = 80 }, want: []string{"power.clusters"}},
 		{name: "power primary", mutate: func(r map[string]any) { at(r, "power")["h0_pass_primary"] = 0.5 }, want: []string{"power.h0_pass_primary"}},
 		{name: "power all local", mutate: func(r map[string]any) { at(r, "power")["h0_pass_all_local"] = 0.5 }, want: []string{"power.h0_pass_all_local"}},
@@ -397,6 +458,26 @@ func TestRegistrationStrict(t *testing.T) {
 		{name: "hosted primary model", mutate: func(r map[string]any) { at(r, "power")["primary_model"] = "openai-compat/kimi-k2.7-code" }, want: []string{"power.primary_model"}},
 		{name: "unregistered primary model", mutate: func(r map[string]any) { at(r, "power")["primary_model"] = "openai-compat/zzz" }, want: []string{"power.primary_model"}},
 		{name: "blank primary endpoint", mutate: func(r map[string]any) { at(r, "power")["primary_endpoint"] = " " }, want: []string{"power.primary_endpoint"}},
+		{name: "primary endpoint restraint", mutate: func(r map[string]any) { at(r, "power")["primary_endpoint"] = "restraint" }, want: []string{"power.primary_endpoint", "answer_quality"}},
+		{name: "secondary unknown model", mutate: func(r map[string]any) { at(r, "power", "secondary", 0)["model"] = "openai-compat/zzz" }, want: []string{"power.secondary[0].model"}},
+		{name: "secondary hosted model", mutate: func(r map[string]any) { at(r, "power", "secondary", 0)["model"] = "openai-compat/kimi-k2.7-code" }, want: []string{"power.secondary[0].model"}},
+		{name: "secondary unknown endpoint", mutate: func(r map[string]any) { at(r, "power", "secondary", 0)["endpoint"] = "latency" }, want: []string{"power.secondary[0].endpoint"}},
+		{name: "secondary unknown stratum", mutate: func(r map[string]any) { at(r, "power", "secondary", 0)["stratum"] = "control" }, want: []string{"power.secondary[0].stratum"}},
+		{name: "secondary endpoint on the wrong stratum", mutate: func(r map[string]any) { at(r, "power", "secondary", 7)["stratum"] = benignExtraction }, want: []string{"power.secondary[7].stratum"}},
+		{name: "secondary clusters", mutate: func(r map[string]any) { at(r, "power", "secondary", 7)["clusters"] = 96 }, want: []string{"power.secondary[7].clusters"}},
+		{name: "secondary h0", mutate: func(r map[string]any) { at(r, "power", "secondary", 7)["h0_pass"] = 0.5 }, want: []string{"power.secondary[7].h0_pass"}},
+		{name: "secondary duplicate", mutate: func(r map[string]any) {
+			s := r["power"].(map[string]any)["secondary"].([]any)
+			s[1] = s[0]
+		}, want: []string{"power.secondary[1]", "duplicate"}},
+		{name: "secondary holds the primary", mutate: func(r map[string]any) {
+			at(r, "power", "secondary", 0)["model"] = "openai-compat/qwen3-coder-next:latest"
+		}, want: []string{"power.secondary[0]", "primary contrast"}},
+		{name: "secondary contrast missing", mutate: func(r map[string]any) {
+			p := r["power"].(map[string]any)
+			p["secondary"] = p["secondary"].([]any)[:10]
+		}, want: []string{"power.secondary has 10 contrasts, want 11"}},
+		{name: "all-contrasts product", mutate: func(r map[string]any) { at(r, "power")["h0_pass_all_contrasts"] = 0.08 }, want: []string{"power.h0_pass_all_contrasts"}},
 		{name: "builder revision format", mutate: func(r map[string]any) { r["builder_revision"] = "f3efb98a" }, want: []string{"builder_revision"}},
 		{name: "blank scorer revision", mutate: func(r map[string]any) { r["scorer_revision"] = "" }, want: []string{"scorer_revision"}},
 		{name: "blank capture timing", mutate: func(r map[string]any) { delete(r, "capture_timing") }, want: []string{"capture_timing"}},
@@ -412,6 +493,9 @@ func TestRegistrationStrict(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := registrationFixture(t)
+			if tc.before != nil {
+				tc.before(t, dir)
+			}
 			path := writeRegistration(t, dir, tc.mutate)
 			if tc.edit != nil {
 				tc.edit(t, dir)
@@ -508,5 +592,40 @@ func TestRegistrationCommittedValid(t *testing.T) {
 	}
 	if got := math.Pow(p.H0PassPrimary, 4); math.Abs(p.H0PassAllLocal-got) > 1e-12 || math.Abs(p.H0PassAllLocal-0.5796) > 1e-3 {
 		t.Errorf("h0_pass_all_local = %v, want h0_pass_primary^4 = %v, about 0.5796", p.H0PassAllLocal, got)
+	}
+	// The 11 secondary contrasts of spec §6.8, with h0 computed outside the
+	// code under test: 0.8725 at the 96 extraction tasks, 0.2186 at the 14
+	// delegated tasks; their product with the primary is 0.8725^8 * 0.2186^4,
+	// 7.6762e-4.
+	const (
+		gemma, coder, a3b, q38 = "openai-compat/gemma4:31b", "openai-compat/qwen3-coder-next:latest", "openai-compat/qwen3.6:35b-a3b", "openai-compat/qwen3.8:27b"
+		ext, ext96, del, del14 = benignExtraction, 0.8725, benignDelegated, 0.2186
+	)
+	want := []struct {
+		model, endpoint, stratum string
+		clusters                 int
+		h0                       float64
+	}{
+		{gemma, "answer_quality", ext, 96, ext96}, {a3b, "answer_quality", ext, 96, ext96}, {q38, "answer_quality", ext, 96, ext96},
+		{gemma, "restraint", ext, 96, ext96}, {coder, "restraint", ext, 96, ext96}, {a3b, "restraint", ext, 96, ext96}, {q38, "restraint", ext, 96, ext96},
+		{gemma, "delegated_correctness", del, 14, del14}, {coder, "delegated_correctness", del, 14, del14},
+		{a3b, "delegated_correctness", del, 14, del14}, {q38, "delegated_correctness", del, 14, del14},
+	}
+	if len(p.Secondary) != len(want) {
+		t.Fatalf("power.secondary has %d contrasts, want %d", len(p.Secondary), len(want))
+	}
+	product := p.H0PassPrimary
+	for i, w := range want {
+		c := p.Secondary[i]
+		if c.Model != w.model || c.Endpoint != w.endpoint || c.Stratum != w.stratum || c.Clusters != w.clusters {
+			t.Errorf("power.secondary[%d] = %+v, want %s %s %s %d", i, c, w.model, w.endpoint, w.stratum, w.clusters)
+		}
+		if got := h0PassProbability(c.Clusters, 0.10, 0.10); math.Abs(c.H0Pass-got) > 1e-12 || math.Abs(c.H0Pass-w.h0) > 1e-3 {
+			t.Errorf("power.secondary[%d].h0_pass = %v, want h0PassProbability(%d, 0.10, 0.10) = %v, about %v", i, c.H0Pass, c.Clusters, got, w.h0)
+		}
+		product *= c.H0Pass
+	}
+	if math.Abs(p.H0PassAllContrasts-product) > 1e-12 || math.Abs(p.H0PassAllContrasts-7.6762e-4) > 1e-7 {
+		t.Errorf("h0_pass_all_contrasts = %v, want the product of the 12 contrasts %v, about 7.6762e-4", p.H0PassAllContrasts, product)
 	}
 }

@@ -29,6 +29,18 @@ const interceptorRegistrationSchema = "llm-bench.interceptor-registration/v1"
 // docs/llm layout.
 const interceptorCensusRel = "../../census"
 
+// interceptorPrimaryEndpoint is the primary contrast's endpoint (spec §6.8),
+// on the extraction stratum.
+const interceptorPrimaryEndpoint = "answer_quality"
+
+// interceptorEndpointStrata maps each registered endpoint to the stratum its
+// contrasts run on (spec §6.8): AnswerQuality and restraint on extraction,
+// whose goldens call no tool, and delegated-instruction correctness on
+// delegated.
+var interceptorEndpointStrata = map[string]string{
+	"answer_quality": benignExtraction, "restraint": benignExtraction, "delegated_correctness": benignDelegated,
+}
+
 // interceptorK1Budgets are K1's budgets (spec §2.1), the only ones a
 // registration may record.
 var interceptorK1Budgets = registeredBudgets{Delta: 0.10, TaskFailure: 0, MCPBlockPerStratum: 0.01}
@@ -91,11 +103,14 @@ type registeredBudgets struct {
 	MCPBlockPerStratum float64 `json:"mcp_block_per_stratum"`
 }
 
-// registeredPower records how informative the rule is (spec §6.8): under a
-// true Δ of 0, the primary contrast passes with probability H0PassPrimary =
-// h0PassProbability(Clusters, AssumedQ, δ), and all local models' contrasts
+// registeredPower records how informative the rule is (spec §6.7, §6.8):
+// under a true Δ of 0, the primary contrast passes with probability
+// H0PassPrimary = h0PassProbability(Clusters, AssumedQ, δ), Clusters the
+// extraction task count; the AnswerQuality contrasts of all local models pass
 // together with H0PassAllLocal = H0PassPrimary^(the decoding map's non-hosted
-// models). Clusters is the extraction task count.
+// models); each secondary contrast passes with its own H0Pass; and all of them
+// together with H0PassAllContrasts, the product over the primary and
+// Secondary.
 type registeredPower struct {
 	AssumedQ        float64 `json:"assumed_q"`
 	Clusters        int     `json:"clusters"`
@@ -103,6 +118,20 @@ type registeredPower struct {
 	PrimaryEndpoint string  `json:"primary_endpoint"`
 	H0PassPrimary   float64 `json:"h0_pass_primary"`
 	H0PassAllLocal  float64 `json:"h0_pass_all_local"`
+	// Secondary is every local model on every endpoint except the primary
+	// contrast.
+	Secondary          []registeredContrast `json:"secondary"`
+	H0PassAllContrasts float64              `json:"h0_pass_all_contrasts"`
+}
+
+// registeredContrast is one secondary contrast: a local model, an endpoint,
+// the endpoint's stratum and its task count, and h0PassProbability over them.
+type registeredContrast struct {
+	Model    string  `json:"model"`
+	Endpoint string  `json:"endpoint"`
+	Stratum  string  `json:"stratum"`
+	Clusters int     `json:"clusters"`
+	H0Pass   float64 `json:"h0_pass"`
 }
 
 // h0PassProbability is the probability that one non-inferiority contrast over
@@ -145,6 +174,11 @@ func loadInterceptorRegistration(path string) (interceptorRegistration, string, 
 	return r, "sha256:" + hex.EncodeToString(sum[:]), nil
 }
 
+// isSHA256Hex reports whether s is a lowercase hex sha256 digest.
+func isSHA256Hex(s string) bool {
+	return len(s) == 64 && strings.Trim(s, "0123456789abcdef") == ""
+}
+
 // checkDigest reports, under field, a read error or a mismatch between want
 // and the hex sha256 of the bytes at path.
 func checkDigest(field, path, want string) error {
@@ -166,14 +200,16 @@ func (r interceptorRegistration) validate(dir string) error {
 	for _, f := range []struct{ name, v string }{
 		{"cases_sha256", r.CasesSHA256}, {"scorer_revision", r.ScorerRevision}, {"estimand", r.Estimand},
 		{"delegated_match", r.DelegatedMatch}, {"retry_policy", r.RetryPolicy}, {"capture_timing", r.CaptureTiming},
-		{"power.primary_endpoint", r.Power.PrimaryEndpoint},
 	} {
 		if strings.TrimSpace(f.v) == "" {
 			return fmt.Errorf("%s is required", f.name)
 		}
 	}
-	if len(r.BuilderRevision) != 64 || strings.Trim(r.BuilderRevision, "0123456789abcdef") != "" {
+	if !isSHA256Hex(r.BuilderRevision) {
 		return fmt.Errorf("builder_revision %q is not a lowercase hex sha256 source digest", r.BuilderRevision)
+	}
+	if !isSHA256Hex(r.Census.FullSHA256) {
+		return fmt.Errorf("census.full_sha256 %q is not a lowercase hex sha256 digest", r.Census.FullSHA256)
 	}
 	if len(r.ClaimGates) == 0 || slices.ContainsFunc(r.ClaimGates, func(g string) bool { return strings.TrimSpace(g) == "" }) {
 		return errors.New("claim_gates is required and holds no blank gate")
@@ -196,19 +232,22 @@ func (r interceptorRegistration) validate(dir string) error {
 	if len(r.Traces) == 0 {
 		return errors.New("traces is empty")
 	}
-	local := 0
+	var locals []string
 	for _, m := range slices.Sorted(maps.Keys(r.Decoding)) {
 		d := r.Decoding[m]
 		if err := d.validate(m); err != nil {
 			return fmt.Errorf("decoding: %w", err)
 		}
 		if !d.hosted() {
-			local++
+			locals = append(locals, m)
 		}
 	}
 	p := r.Power
-	if d, ok := r.Decoding[p.PrimaryModel]; !ok || d.hosted() {
+	if !slices.Contains(locals, p.PrimaryModel) {
 		return fmt.Errorf("power.primary_model %q is not a local model in decoding", p.PrimaryModel)
+	}
+	if p.PrimaryEndpoint != interceptorPrimaryEndpoint {
+		return fmt.Errorf("power.primary_endpoint %q, want %q", p.PrimaryEndpoint, interceptorPrimaryEndpoint)
 	}
 	if !(p.AssumedQ > 0 && p.AssumedQ < 1) {
 		return fmt.Errorf("power.assumed_q %v outside (0,1)", p.AssumedQ)
@@ -229,8 +268,11 @@ func (r interceptorRegistration) validate(dir string) error {
 	if want := h0PassProbability(p.Clusters, p.AssumedQ, r.Budgets.Delta); math.Abs(p.H0PassPrimary-want) > 1e-12 {
 		return fmt.Errorf("power.h0_pass_primary %v, want h0PassProbability(%d, %v, %v) = %v", p.H0PassPrimary, p.Clusters, p.AssumedQ, r.Budgets.Delta, want)
 	}
-	if want := math.Pow(p.H0PassPrimary, float64(local)); math.Abs(p.H0PassAllLocal-want) > 1e-12 {
-		return fmt.Errorf("power.h0_pass_all_local %v, want h0_pass_primary^%d (the local models) = %v", p.H0PassAllLocal, local, want)
+	if want := math.Pow(p.H0PassPrimary, float64(len(locals))); math.Abs(p.H0PassAllLocal-want) > 1e-12 {
+		return fmt.Errorf("power.h0_pass_all_local %v, want h0_pass_primary^%d (the local models) = %v", p.H0PassAllLocal, len(locals), want)
+	}
+	if err := p.checkSecondary(cases, locals, r.Budgets.Delta); err != nil {
+		return err
 	}
 
 	census := filepath.Join(dir, filepath.FromSlash(interceptorCensusRel))
@@ -255,6 +297,44 @@ func (r interceptorRegistration) validate(dir string) error {
 		return fmt.Errorf("census.full_sha256 %s does not match census-results.json full_sha256 %s", r.Census.FullSHA256, results.FullSHA256)
 	}
 	return r.checkTraces(dir)
+}
+
+// checkSecondary holds p.Secondary to every local model on every registered
+// endpoint except the primary contrast, once each, with its stratum's task
+// count in cases and its h0PassProbability, and H0PassAllContrasts to the
+// product over the primary and every secondary contrast.
+func (p registeredPower) checkSecondary(cases benignCases, locals []string, delta float64) error {
+	seen := map[[3]string]bool{{p.PrimaryModel, interceptorPrimaryEndpoint, benignExtraction}: true}
+	all := p.H0PassPrimary
+	for i, c := range p.Secondary {
+		stratum, known := interceptorEndpointStrata[c.Endpoint]
+		key := [3]string{c.Model, c.Endpoint, c.Stratum}
+		switch {
+		case !known:
+			return fmt.Errorf("power.secondary[%d].endpoint %q is not a registered endpoint", i, c.Endpoint)
+		case c.Stratum != stratum:
+			return fmt.Errorf("power.secondary[%d].stratum %q, want %s for endpoint %s", i, c.Stratum, stratum, c.Endpoint)
+		case !slices.Contains(locals, c.Model):
+			return fmt.Errorf("power.secondary[%d].model %q is not a local model in decoding", i, c.Model)
+		case seen[key]:
+			return fmt.Errorf("power.secondary[%d] (%s %s) is a duplicate or the primary contrast", i, c.Model, c.Endpoint)
+		}
+		seen[key] = true
+		if n := countStratum(cases.Tasks, c.Stratum); c.Clusters != n {
+			return fmt.Errorf("power.secondary[%d].clusters %d, want the %d %s tasks of cases.json", i, c.Clusters, n, c.Stratum)
+		}
+		if want := h0PassProbability(c.Clusters, p.AssumedQ, delta); math.Abs(c.H0Pass-want) > 1e-12 {
+			return fmt.Errorf("power.secondary[%d].h0_pass %v, want h0PassProbability(%d, %v, %v) = %v", i, c.H0Pass, c.Clusters, p.AssumedQ, delta, want)
+		}
+		all *= c.H0Pass
+	}
+	if want := len(locals)*len(interceptorEndpointStrata) - 1; len(p.Secondary) != want {
+		return fmt.Errorf("power.secondary has %d contrasts, want %d: every local model on every endpoint but the primary", len(p.Secondary), want)
+	}
+	if math.Abs(p.H0PassAllContrasts-all) > 1e-12 {
+		return fmt.Errorf("power.h0_pass_all_contrasts %v, want the product over the primary and power.secondary %v", p.H0PassAllContrasts, all)
+	}
+	return nil
 }
 
 // checkTraces holds the committed traces in dir/traces to r.Traces: each file

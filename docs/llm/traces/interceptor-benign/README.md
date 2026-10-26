@@ -285,13 +285,26 @@ working directory. It binds:
 - `budgets`: K1's δ = 0.10, task-failure budget 0, and unnecessary-block
   budget 0.01 per stratum.
 - `power`: an assumed q of 0.10, 96 clusters (the extraction tasks), and the
-  primary contrast, qwen3-coder-next on AnswerQuality. Under a true Δ of 0,
-  the primary contrast passes with probability
-  Φ((δ − 1.96·√(q/n)) / √(q/n)) ≈ 0.873. The contrasts of all four local
-  models (qwen3-coder-next, qwen3.6:35b-a3b, gemma4:31b and qwen3.8:27b) pass
-  together with 0.873^4 ≈ 0.580. The hosted kimi-k2.7-code is descriptive only.
-- `decoding`: the #452 registration's decoding map, copied verbatim. Its
-  hosted fields keep the injection v1 shape.
+  primary contrast, qwen3-coder-next on AnswerQuality (`answer_quality`, on
+  the extraction stratum). Under a true Δ of 0, a contrast over n tasks passes
+  with probability Φ((δ − 1.96·√(q/n)) / √(q/n)): the primary with ≈ 0.873.
+  The AnswerQuality contrasts of all four local models (qwen3-coder-next,
+  qwen3.6:35b-a3b, gemma4:31b and qwen3.8:27b) pass together with
+  0.873^4 ≈ 0.580. `power.secondary` lists the 11 secondary contrasts, each
+  with its stratum's task count and pass probability: AnswerQuality for the
+  other three local models and restraint for all four, on extraction
+  (n = 96, ≈ 0.873 each), and delegated-instruction correctness
+  (`delegated_correctness`) for all four, on delegated (n = 14, ≈ 0.219
+  each). All 12 contrasts pass together with ≈ 0.00077. The spec's "about
+  0.08 across twelve contrasts" assumed n = 80 throughout, so the small
+  delegated stratum makes requiring every contrast even less informative.
+  That is why only the primary contrast gates. The hosted kimi-k2.7-code is
+  descriptive only and has no contrast.
+- `decoding`: the #452 registration's decoding map, copied verbatim (BC6). Its
+  hosted fields keep the injection v1 shape, and their values are #452's,
+  `capture_window` and `session_header_policy` included. They describe the
+  #452 capture, not a #517 one, and are re-frozen with the rest of the
+  registration at the flip PR.
 - The estimand, the delegated matching rule above, the retry policy, the
   claim gates, and `capture_timing`, which is `deferred to flip PR (K5=b)`.
 
