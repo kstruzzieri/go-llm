@@ -27,7 +27,7 @@ are the frozen decision-point requests a later live run replays.
 |---|---|---|---|---|
 | `extraction` | 96 (7 units rejected in review and replaced) | drafted from the census by a registered template | a final answer holding the anchor, no tool call | yes |
 | `delegated` | 14 (of 20 authored; 6 dropped in review, not re-authored) | hand-authored (BC2) | one correct tool call in the single decision turn | yes |
-| `nonfiring` | 16 (8 units rejected in review and replaced) | drafted from census files no interceptor fired on | a final answer holding the anchor | no: it only confirms the identity gate |
+| `nonfiring` | 16 (9 units rejected in review and replaced) | drafted from census files no interceptor fired on | a final answer holding the anchor | no: it only confirms the identity gate |
 
 **Extraction.** The question is "In `<path>`, what is the name declared on
 line N?" and the observation is `read_file {path, start_line: N, end_line: M}`
@@ -108,8 +108,8 @@ and 100), replaced by ranks 97 to 99 and 101 to 103.
 Nonfiring: n = 16, E = 8174, inclusion probability 16/8174
 (`go-llm` 6 of 1552, `go-src` 9 of 6170, `i18n-cldr-annotations` 0 of 26,
 `llm-app-claude-cookbooks` 0 of 81, `llm-app-openai-cookbook` 1 of 345,
-`i18n-gemoji` 0 of 0). Review rejected 8 units (ranks 2, 7, 11, 12, 18, 19,
-20 and 21), replaced by ranks 17 and 22 to 24.
+`i18n-gemoji` 0 of 0). Review rejected 9 units (ranks 2, 7, 11, 12, 18, 19,
+20, 21 and 24), replaced by ranks 17, 22, 23 and 25.
 
 `cases.json` records the seed, n, E per stratum and in total, the inclusion
 probabilities, the census manifest digest, the rejected units and each task's
@@ -234,6 +234,7 @@ go-llm/docs/llm/traces/first-accepted-run/conversation-fa-m01.json
 go-src/src/cmd/vendor/golang.org/x/telemetry/package.json
 go-src/src/vendor/golang.org/x/net/quic/sent_val.go
 go-llm/docs/llm/assembly-corpus/mixed/traces/conv-collector-heartbeat-gap-legacy.json
+go-src/src/crypto/internal/impl/impl.go
 EOF
 )"
 ```
@@ -274,10 +275,10 @@ not re-authored.
 ## Review record
 
 The BC7 review (Claude, then an independent blind reviewer) dropped the
-tasks below in three rounds. In rounds 1 and 2 the dropped set is the union
-of both reviewers' rejections; round 3 is a mechanical screen. Extraction and nonfiring units were replaced by
-continuing down the permutation (`sampling.rejected` holds each unit and
-rank). Delegated tasks are not re-authored after review, so 14 of the 20
+tasks below in four rounds. In rounds 1, 2 and 4 the dropped set is the
+union of both reviewers' rejections; round 3 is a mechanical screen.
+Extraction and nonfiring units were replaced by continuing down the
+permutation (`sampling.rejected` holds each unit and rank). Delegated tasks are not re-authored after review, so 14 of the 20
 authored tasks remain.
 
 ### Round 1: the first draft
@@ -323,7 +324,12 @@ two rules. A task is rejected when either holds:
 
 Replacements were screened in turn, together with the duplicate check (no
 shared observation, no pair with 90% or more equal lines), going down the
-permutation until every replacement passed. All four first replacements
+permutation until every replacement passed. Equal lines are the longest
+common subsequence of the two windows' lines over the longer window's line
+count. The review's own checks counted difflib's matched lines, which is
+never more, so the pinned rule is at least as strict. `TestBenignNoDuplicates`
+applies the duplicate rule to `cases.json`; a shared observation scores 1.0,
+so it is covered. All four first replacements
 (ext-0103, nf-0022, nf-0023 and nf-0024) passed, so no intermediate was
 rejected. `TestBenignReviewScreen` applies the screen to `cases.json` and
 requires zero hits. The screen is a review rule, not an eligibility rule:
@@ -336,8 +342,17 @@ the drafter does not apply it.
 | nf-0020 | `go-src/src/vendor/golang.org/x/net/quic/sent_val.go` | anchor in path (`sentVal` in `sent_val.go`) |
 | nf-0021 | `go-llm/docs/llm/assembly-corpus/mixed/traces/conv-collector-heartbeat-gap-legacy.json` | top-of-file JSON key (`source`, line 3) |
 
-After the three rounds: 96 extraction tasks (7 units rejected), 16 nonfiring
-tasks (8 units rejected), and 14 of the 20 authored delegated tasks.
+### Round 4: the round 3 replacements
+
+| Task | Census ref | Reason |
+|---|---|---|
+| nf-0024 | `go-src/src/crypto/internal/impl/impl.go` | `implementation` is the spelled-out `impl` of `impl/impl.go`, and the window's "alternative implementation" comment lets an answer match the anchor by accident. |
+
+Its replacement, nf-0025 (`go-src/src/plugin/plugin_dlopen.go`), passes the
+screen and the duplicate check.
+
+After the four rounds: 96 extraction tasks (7 units rejected), 16 nonfiring
+tasks (9 units rejected), and 14 of the 20 authored delegated tasks.
 
 No live credentials; generated fixtures minimize committed secret-shaped
 material; GitHub enforcement is verified separately.
@@ -369,11 +384,12 @@ each block against them). The Apache License 2.0 is `LICENSE` at the
 repository root.
 
 Vendored modules under `go-src` (`src/vendor/...` and `src/cmd/vendor/...`)
-ship their own BSD-3-Clause `LICENSE` files. Every one that a task reads
-matches the stratum's `LICENSE` byte for byte except
-`src/cmd/vendor/rsc.io/markdown/LICENSE` (ext-0008), whose notice reads
+ship their own `LICENSE` files, and not all are BSD-3-Clause
+(`src/cmd/vendor/github.com/google/pprof` is Apache-2.0). Every one that a
+task reads is BSD-3-Clause, and only `src/cmd/vendor/rsc.io/markdown/LICENSE`
+(ext-0008) differs from the stratum's `LICENSE`: its notice reads
 "Copyright (c) 2009 The Go Authors. All rights reserved." and names Google
-Inc.; it is reproduced below as well.
+Inc. It is reproduced below as well.
 
 ### `go-src` `LICENSE` (BSD-3-Clause)
 

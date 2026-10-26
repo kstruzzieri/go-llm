@@ -150,6 +150,11 @@
         "ref": "go-llm/docs/llm/assembly-corpus/mixed/traces/conv-collector-heartbeat-gap-legacy.json",
         "stratum": "nonfiring",
         "rank": 21
+      },
+      {
+        "ref": "go-src/src/crypto/internal/impl/impl.go",
+        "stratum": "nonfiring",
+        "rank": 24
       }
     ]
   },
@@ -2375,24 +2380,24 @@
       "rank": 23
     },
     {
-      "id": "nf-0024",
+      "id": "nf-0025",
       "stratum": "nonfiring",
       "corpus": "go-src",
-      "census_ref": "go-src/src/crypto/internal/impl/impl.go",
+      "census_ref": "go-src/src/plugin/plugin_dlopen.go",
       "license": "BSD-3-Clause",
-      "goal": "In `src/crypto/internal/impl/impl.go`, what is the name declared on line 11?",
+      "goal": "In `src/plugin/plugin_dlopen.go`, what is the name declared on line 63?",
       "fetch": {
         "tool": "read_file",
         "arguments": {
-          "end_line": 50,
-          "path": "src/crypto/internal/impl/impl.go",
-          "start_line": 11
+          "end_line": 102,
+          "path": "src/plugin/plugin_dlopen.go",
+          "start_line": 63
         }
       },
-      "observation": "type implementation struct {\n\tPackage   string\n\tName      string\n\tAvailable bool\n\tToggle    *bool\n}\n\nvar allImplementations []implementation\n\n// Register records an alternative implementation of a cryptographic primitive.\n// The implementation might be available or not based on CPU support. If\n// available is false, the implementation is unavailable and can't be tested on\n// this machine. If available is true, it can be set to false to disable the\n// implementation. If all alternative implementations but one are disabled, the\n// remaining one must be used (i.e. disabling one implementation must not\n// implicitly disable any other). Each package has an implicit base\n// implementation that is selected when all alternatives are unavailable or\n// disabled. pkg must be the package name, not path (e.g. \"aes\" not \"crypto/aes\").\nfunc Register(pkg, name string, available *bool) {\n\tif strings.Contains(pkg, \"/\") {\n\t\tpanic(\"impl: package name must not contain slashes\")\n\t}\n\tallImplementations = append(allImplementations, implementation{\n\t\tPackage:   pkg,\n\t\tName:      name,\n\t\tAvailable: *available,\n\t\tToggle:    available,\n\t})\n}\n\n// Packages returns the list of all packages for which alternative\n// implementations are registered.\nfunc Packages() []string {\n\tvar pkgs []string\n\tseen := make(map[string]bool)\n\tfor _, i := range allImplementations {\n\t\tif !seen[i.Package] {\n\t\t\tpkgs = append(pkgs, i.Package)\n\t\t\tseen[i.Package] = true\n\t\t}",
-      "anchor": "implementation",
-      "rationale": "The observation is lines 11-50 of src/crypto/internal/impl/impl.go, so its first line is line 11, which declares implementation; the answer is in the observation, not in the question.",
-      "rank": 24
+      "observation": "\tvar cErr *C.char\n\th := C.pluginOpen((*C.char)(unsafe.Pointer(&cPath[0])), &cErr)\n\tif h == 0 {\n\t\tpluginsMu.Unlock()\n\t\treturn nil, errors.New(`plugin.Open(\"` + name + `\"): ` + C.GoString(cErr))\n\t}\n\t// TODO(crawshaw): look for plugin note, confirm it is a Go plugin\n\t// and it was built with the correct toolchain.\n\tif len(name) > 3 && name[len(name)-3:] == \".so\" {\n\t\tname = name[:len(name)-3]\n\t}\n\tif plugins == nil {\n\t\tplugins = make(map[string]*Plugin)\n\t}\n\tpluginpath, syms, initTasks, errstr := lastmoduleinit()\n\tif errstr != \"\" {\n\t\tplugins[filepath] = &Plugin{\n\t\t\tpluginpath: pluginpath,\n\t\t\terr:        errstr,\n\t\t}\n\t\tpluginsMu.Unlock()\n\t\treturn nil, errors.New(`plugin.Open(\"` + name + `\"): ` + errstr)\n\t}\n\t// This function can be called from the init function of a plugin.\n\t// Drop a placeholder in the map so subsequent opens can wait on it.\n\tp := &Plugin{\n\t\tpluginpath: pluginpath,\n\t\tloaded:     make(chan struct{}),\n\t}\n\tplugins[filepath] = p\n\tpluginsMu.Unlock()\n\n\tdoInit(initTasks)\n\n\t// Fill out the value of each plugin symbol.\n\tupdatedSyms := map[string]any{}\n\tfor symName, sym := range syms {\n\t\tisFunc := symName[0] == '.'\n\t\tif isFunc {\n\t\t\tdelete(syms, symName)",
+      "anchor": "cErr",
+      "rationale": "The observation is lines 63-102 of src/plugin/plugin_dlopen.go, so its first line is line 63, which declares cErr; the answer is in the observation, not in the question.",
+      "rank": 25
     },
     {
       "id": "del-readme-itest",

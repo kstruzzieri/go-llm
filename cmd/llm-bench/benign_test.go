@@ -1307,6 +1307,64 @@ func TestBenignReviewScreen(t *testing.T) {
 	}
 }
 
+// benignEqualLines is the review's overlap measure: the longest common
+// subsequence of two observations' lines over the longer one's line count.
+// It is never below difflib's matched-line share, which the review counted.
+func benignEqualLines(a, b string) float64 {
+	x, y := strings.Split(a, "\n"), strings.Split(b, "\n")
+	prev := make([]int, len(y)+1)
+	for _, l := range x {
+		cur := make([]int, len(y)+1)
+		for j, r := range y {
+			if l == r {
+				cur[j+1] = prev[j] + 1
+			} else {
+				cur[j+1] = max(prev[j+1], cur[j])
+			}
+		}
+		prev = cur
+	}
+	return float64(prev[len(y)]) / float64(max(len(x), len(y)))
+}
+
+// benignNearDuplicate is the review's duplicate rule: 90% or more equal lines.
+func benignNearDuplicate(a, b string) bool { return benignEqualLines(a, b) >= 0.9 }
+
+// TestBenignNoDuplicates pins the review's duplicate rule on the committed
+// corpus: no pair of tasks is a near duplicate (benignNearDuplicate), so
+// variants of one task never count as extra clusters (spec §6.3). Two tasks
+// sharing an observation (one sha256) score 1.0, so the rule covers them.
+func TestBenignNoDuplicates(t *testing.T) {
+	ten := "l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10"
+	for _, tc := range []struct {
+		a, b string
+		want bool
+	}{
+		{ten, strings.Replace(ten, "l5", "x5", 1), true},                                  // 9 of 10 lines
+		{ten, strings.Replace(strings.Replace(ten, "l5", "x5", 1), "l6", "x6", 1), false}, // 8 of 10
+		{ten, ten + "\nl11", true},                                                        // 10 of 11
+		{ten, ten + "\nl11\nl12\nl13", false},                                             // 10 of 13: over the longer window
+		{ten, "l10\n" + ten[:len(ten)-4], true},                                           // 9 of 10, one line moved
+		{ten, ten, true},
+		{"a\nb\nc\nd", "a\nx\nc\nd\ne", false}, // 3 of 5
+	} {
+		if got := benignNearDuplicate(tc.a, tc.b); got != tc.want {
+			t.Errorf("benignNearDuplicate(%q, %q) = %v (%.3f), want %v", tc.a, tc.b, got, benignEqualLines(tc.a, tc.b), tc.want)
+		}
+	}
+	c, err := loadBenignCases(filepath.Join(benignCorpusDir(t), "cases.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, k := range c.Tasks {
+		for _, o := range c.Tasks[i+1:] {
+			if benignNearDuplicate(k.Observation, o.Observation) {
+				t.Errorf("%s and %s are near duplicates (%.3f equal lines); redraft with -benign-reject", k.ID, o.ID, benignEqualLines(k.Observation, o.Observation))
+			}
+		}
+	}
+}
+
 // The README's reproduce command is the provenance control for review: the
 // census refs it rejects are exactly the refs cases.json records as rejected.
 func TestBenignReadmeRejections(t *testing.T) {
