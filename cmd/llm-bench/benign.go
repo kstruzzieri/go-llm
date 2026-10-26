@@ -86,8 +86,9 @@ type benignCases struct {
 // benignSampling records the registered finite-corpus design (Ruling P15)
 // for the extraction and nonfiring populations: n requested, E eligible in
 // total and per census stratum, units sampled, and the inclusion probability
-// sampled/E every eligible unit shares. Rejected lists the census refs review
-// dropped; each was replaced by continuing down the same permutation.
+// sampled/E every eligible unit shares. Rejected lists the units review
+// dropped, with their population and permutation rank; each was replaced by
+// continuing down the same permutation.
 type benignSampling struct {
 	Seed                          uint64             `json:"seed"`
 	CensusManifestSHA256          string             `json:"census_manifest_sha256"`
@@ -101,7 +102,15 @@ type benignSampling struct {
 	NonfiringEligible             int                `json:"nonfiring_eligible"`
 	NonfiringInclusionProbability float64            `json:"nonfiring_inclusion_probability"`
 	NonfiringPopulation           []benignPopulation `json:"nonfiring_population"`
-	Rejected                      []string           `json:"rejected"`
+	Rejected                      []benignRejection  `json:"rejected"`
+}
+
+// benignRejection is one unit review rejected: its census ref, its
+// population (extraction or nonfiring) and its rank in that permutation.
+type benignRejection struct {
+	Ref     string `json:"ref"`
+	Stratum string `json:"stratum"`
+	Rank    int    `json:"rank"`
 }
 
 // benignPopulation is one census stratum's eligible and sampled unit counts.
@@ -182,6 +191,13 @@ func (c benignCases) validate() error {
 		return fmt.Errorf("sampling seed %d is not the registered seed %d", s.Seed, benignSeed)
 	case s.Carrier != benignCarrier || s.OtherCarriersProbability != 0:
 		return fmt.Errorf("sampling carrier %q with other carriers at %v, want %s only", s.Carrier, s.OtherCarriersProbability, benignCarrier)
+	}
+	refs := map[string]bool{}
+	for _, x := range s.Rejected {
+		if (x.Stratum != benignExtraction && x.Stratum != benignNonfiring) || x.Ref == "" || refs[x.Ref] {
+			return fmt.Errorf("rejected unit %+v: blank or duplicate ref, or a stratum other than extraction or nonfiring", x)
+		}
+		refs[x.Ref] = true
 	}
 	palette := benignPaletteNames()
 	ids := map[string]bool{}
@@ -275,29 +291,55 @@ func checkBenignStratum(stratum, corpus, censusRef, license, anchor, rationale s
 	return nil
 }
 
-// check verifies one drafted stratum's sampling record against its tasks:
-// per census stratum the sampled count is the task count, the totals add up,
-// the inclusion probability is sampled over eligible, ranks are unique and
-// inside the population, and no task is a rejected unit.
+// check verifies one drafted stratum's sampling record against its tasks,
+// so the committed cases.json alone shows the sample is the registered walk:
+// each task's id is <prefix>-<rank>; the kept and rejected ranks together are
+// exactly 1..max with no gap or repeat, and the last is a kept task whenever n
+// were kept (the walk stops there); the kept count is min(n, E - rejected);
+// per census stratum the sampled count is the task count and the totals add
+// up; and the inclusion probability is sampled over eligible.
 func (s benignSampling) check(tasks []benignCase, stratum string) error {
-	n, eligible, prob, pop := s.N, s.Eligible, s.InclusionProbability, s.Population
+	n, eligible, prob, pop, prefix := s.N, s.Eligible, s.InclusionProbability, s.Population, "ext"
 	if stratum == benignNonfiring {
-		n, eligible, prob, pop = s.Nonfiring, s.NonfiringEligible, s.NonfiringInclusionProbability, s.NonfiringPopulation
+		n, eligible, prob, pop, prefix = s.Nonfiring, s.NonfiringEligible, s.NonfiringInclusionProbability, s.NonfiringPopulation, "nf"
 	}
-	byCorpus, ranks, sampled := map[string]int{}, map[int]bool{}, 0
+	byCorpus, ranks, sampled, last := map[string]int{}, map[int]string{}, 0, 0
 	for _, k := range tasks {
 		if k.Stratum != stratum {
 			continue
 		}
-		if slices.Contains(s.Rejected, k.CensusRef) {
+		if slices.ContainsFunc(s.Rejected, func(x benignRejection) bool { return x.Ref == k.CensusRef }) {
 			return fmt.Errorf("task %s reads %s, which review rejected", k.ID, k.CensusRef)
 		}
-		if ranks[k.Rank] || k.Rank > eligible {
+		if want := fmt.Sprintf("%s-%04d", prefix, k.Rank); k.ID != want {
+			return fmt.Errorf("task %s has %s rank %d, so its id must be %s", k.ID, stratum, k.Rank, want)
+		}
+		if ranks[k.Rank] != "" || k.Rank > eligible {
 			return fmt.Errorf("task %s: %s rank %d is duplicated or beyond the %d eligible unit(s)", k.ID, stratum, k.Rank, eligible)
 		}
-		ranks[k.Rank] = true
+		ranks[k.Rank] = k.ID
+		last = max(last, k.Rank)
 		byCorpus[k.Corpus]++
 		sampled++
+	}
+	rejected := 0
+	for _, x := range s.Rejected {
+		if x.Stratum != stratum {
+			continue
+		}
+		if x.Rank < 1 || x.Rank > eligible || ranks[x.Rank] != "" {
+			return fmt.Errorf("rejected %s: %s rank %d is duplicated or outside 1..%d", x.Ref, stratum, x.Rank, eligible)
+		}
+		ranks[x.Rank] = x.Ref
+		rejected++
+	}
+	for r := 1; r <= len(ranks); r++ {
+		if ranks[r] == "" {
+			return fmt.Errorf("%s rank %d is missing: every unit the walk passed is a task or a recorded rejection", stratum, r)
+		}
+	}
+	if sampled == n && n > 0 && last != len(ranks) {
+		return fmt.Errorf("%s rank %d is a rejection past the last drafted task (rank %d): the walk stops at the n-th task", stratum, len(ranks), last)
 	}
 	total := 0
 	for i, p := range pop {
@@ -310,13 +352,13 @@ func (s benignSampling) check(tasks []benignCase, stratum string) error {
 		total += p.Eligible
 		delete(byCorpus, p.Stratum)
 	}
-	switch {
+	switch want := min(n, eligible-rejected); {
 	case len(byCorpus) != 0:
 		return fmt.Errorf("%s tasks sampled from strata outside the population: %v", stratum, byCorpus)
 	case total != eligible:
 		return fmt.Errorf("%s eligible %d, but the population sums to %d", stratum, eligible, total)
-	case sampled > n:
-		return fmt.Errorf("%s sampled %d, more than the %d requested", stratum, sampled, n)
+	case sampled != want:
+		return fmt.Errorf("%s keeps %d task(s), want min(n %d, eligible %d - rejected %d) = %d", stratum, sampled, n, eligible, rejected, want)
 	case prob != inclusionProbability(sampled, eligible):
 		return fmt.Errorf("%s inclusion probability %v, want sampled/eligible %v", stratum, prob, inclusionProbability(sampled, eligible))
 	}
@@ -622,19 +664,21 @@ func draftBenignTasks(ctx context.Context, r censusResults, m censusManifest, ro
 	}
 	out := benignCases{Source: benignSource, Sampling: benignSampling{
 		Seed: p.Seed, CensusManifestSHA256: r.ManifestSHA256, Carrier: benignCarrier,
-		N: p.N, Nonfiring: p.Nonfiring, Rejected: slices.Clone(p.Rejected),
+		N: p.N, Nonfiring: p.Nonfiring, Rejected: []benignRejection{},
 	}}
-	if out.Sampling.Rejected == nil {
-		out.Sampling.Rejected = []string{}
-	}
 	s := &out.Sampling
 	var tasks []benignCase
-	tasks, s.Eligible, s.InclusionProbability, s.Population = benignSample(ext, m, p.N, p.Seed, rejected, "ext")
-	out.Tasks = tasks
-	tasks, s.NonfiringEligible, s.NonfiringInclusionProbability, s.NonfiringPopulation = benignSample(nf, m, p.Nonfiring, p.Seed, rejected, "nf")
-	out.Tasks = append(out.Tasks, tasks...)
+	var rej []benignRejection
+	tasks, rej, s.Eligible, s.InclusionProbability, s.Population = benignSample(ext, m, p.N, p.Seed, rejected, benignExtraction)
+	out.Tasks, s.Rejected = tasks, append(s.Rejected, rej...)
+	tasks, rej, s.NonfiringEligible, s.NonfiringInclusionProbability, s.NonfiringPopulation = benignSample(nf, m, p.Nonfiring, p.Seed, rejected, benignNonfiring)
+	out.Tasks, s.Rejected = append(out.Tasks, tasks...), append(s.Rejected, rej...)
 	for _, ref := range p.Rejected {
-		if !slices.ContainsFunc(append(slices.Clone(ext), nf...), func(c benignCase) bool { return c.CensusRef == ref }) {
+		switch {
+		case slices.ContainsFunc(s.Rejected, func(x benignRejection) bool { return x.Ref == ref }):
+		case slices.ContainsFunc(append(slices.Clone(ext), nf...), func(c benignCase) bool { return c.CensusRef == ref }):
+			return benignCases{}, fmt.Errorf("benign draft: rejected unit %s lies past the last drafted unit, so no draft ever held it", ref)
+		default:
 			return benignCases{}, fmt.Errorf("benign draft: rejected unit %s is in neither population", ref)
 		}
 	}
@@ -643,10 +687,14 @@ func draftBenignTasks(ctx context.Context, r censusResults, m censusManifest, ro
 
 // benignSample sorts units by (stratum, path), walks their permutation and
 // keeps the first n that review has not rejected, each named
-// <prefix>-<rank> by its 1-based permutation rank. It returns them with E,
-// the inclusion probability and the per-stratum counts over every manifest
-// stratum.
-func benignSample(units []benignCase, m censusManifest, n int, seed uint64, rejected map[string]bool, prefix string) ([]benignCase, int, float64, []benignPopulation) {
+// <prefix>-<rank> by its 1-based permutation rank, and records each rejected
+// unit the walk passes. It returns them with E, the inclusion probability and
+// the per-stratum counts over every manifest stratum.
+func benignSample(units []benignCase, m censusManifest, n int, seed uint64, rejected map[string]bool, stratum string) ([]benignCase, []benignRejection, int, float64, []benignPopulation) {
+	prefix := "ext"
+	if stratum == benignNonfiring {
+		prefix = "nf"
+	}
 	slices.SortFunc(units, func(a, b benignCase) int {
 		return cmp.Or(cmp.Compare(a.Corpus, b.Corpus), cmp.Compare(a.CensusRef, b.CensusRef))
 	})
@@ -663,19 +711,21 @@ func benignSample(units []benignCase, m censusManifest, n int, seed uint64, reje
 		counts[u.Corpus].Eligible++
 	}
 	var out []benignCase
+	var rej []benignRejection
 	for pos, i := range benignPermutation(len(units), seed) {
 		u := units[i]
 		if len(out) == n {
 			break
 		}
 		if rejected[u.CensusRef] {
+			rej = append(rej, benignRejection{Ref: u.CensusRef, Stratum: stratum, Rank: pos + 1})
 			continue
 		}
 		u.ID, u.Rank = fmt.Sprintf("%s-%04d", prefix, pos+1), pos+1
 		counts[u.Corpus].Sampled++
 		out = append(out, u)
 	}
-	return out, len(units), inclusionProbability(len(out), len(units)), pop
+	return out, rej, len(units), inclusionProbability(len(out), len(units)), pop
 }
 
 // benignPermutation returns 0..e-1 in the registered seeded order (Ruling
@@ -784,11 +834,18 @@ func runBenignDraftMode(ctx context.Context, manifestPath, root, resultsPath, ou
 	if err != nil {
 		return err
 	}
+	if err := c.validate(); err != nil {
+		return fmt.Errorf("benign draft: the drafted cases would not load, nothing written: %w", err)
+	}
 	raw, err := marshalBenignCases(c)
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(out, raw, 0o644); err != nil {
+	pub, err := publishFileSet([]filePublication{{target: out, data: raw, mode: 0o644}}, nil)
+	for _, w := range pub.cleanupWarnings {
+		_, _ = fmt.Fprintf(stderr, "benign draft: cleanup warning: %v\n", w)
+	}
+	if err != nil {
 		return err
 	}
 	s := c.Sampling
