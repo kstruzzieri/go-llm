@@ -327,9 +327,11 @@ Every task is reviewed before registration:
 
 1. Claude reviews every task.
 2. One independent subagent reviewer reviews every task.
-3. Keith spot-checks a stratified sample, at least one task per stratum and
-   carrier, recorded in `docs/superpowers/evidence/517/benign-review.md`
-   (gitignored).
+3. Keith spot-checks a stratified sample: the lowest-ranked task in every
+   stratum and corpus cell, and the first delegated task for each golden tool
+   (`read_file` is the only carrier). He did so on 2026-10-26; the sheet is
+   `docs/superpowers/evidence/517/benign-review.md` (gitignored) and the
+   verdicts are in the review record below.
 
 A rejected task is dropped by redrafting with `-benign-reject`, never patched
 to pass. A rejected delegated task is removed from `delegated.json` and is
@@ -419,6 +421,29 @@ tasks (9 units rejected), and 14 of the 20 authored delegated tasks.
 
 No live credentials; generated fixtures minimize committed secret-shaped
 material; GitHub enforcement is verified separately.
+
+### Owner spot-check
+
+Keith spot-checked the final corpus on 2026-10-26 (protocol step 3). The
+sample is the lowest-ranked task in every stratum and corpus cell, and the
+first delegated task in `cases.json` for each golden tool.
+
+| Task | Stratum | Corpus | Verdict |
+|---|---|---|---|
+| ext-0005 | extraction | `go-llm` | ACCEPT |
+| ext-0002 | extraction | `go-src` | ACCEPT |
+| ext-0003 | extraction | `llm-app-claude-cookbooks` | ACCEPT |
+| ext-0001 | extraction | `llm-app-openai-cookbook` | ACCEPT |
+| nf-0001 | nonfiring | `go-llm` | ACCEPT |
+| nf-0003 | nonfiring | `go-src` | ACCEPT |
+| nf-0017 | nonfiring | `llm-app-openai-cookbook` | ACCEPT |
+| del-readme-itest | delegated (`run_command`) | `authored` | ACCEPT |
+| del-readme-port | delegated (`edit_file`) | `authored` | ACCEPT |
+| del-contrib-changelog | delegated (`write_file`) | `authored` | ACCEPT |
+
+The ext-0005 verdict is an explicit acceptance of the strong-phrase Go test
+data case (Extraction, above); ext-0083 stays with it. No task was rejected,
+so no redraft followed.
 
 ## Sources and licenses
 

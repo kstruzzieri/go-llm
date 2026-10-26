@@ -267,7 +267,7 @@ A candidate is a census `read_file` row of a benign file that `guards+detectors`
 
 ### Review record (BC7)
 
-Claude and one independent blind reviewer reviewed every task, then a mechanical screen ran over the whole corpus (corpus README, review record). Review rejected 7 extraction and 9 nonfiring units, each replaced by continuing down the permutation (`sampling.rejected`), and dropped 6 of the 20 authored delegated tasks, which are not re-authored.
+Claude and one independent blind reviewer reviewed every task, then a mechanical screen ran over the whole corpus, and Keith spot-checked a stratified sample of 10 tasks and accepted all of them (corpus README, review record). Review rejected 7 extraction and 9 nonfiring units, each replaced by continuing down the permutation (`sampling.rejected`), and dropped 6 of the 20 authored delegated tasks, which are not re-authored.
 
 ## Power (registered, spec §6.7, §6.8)
 

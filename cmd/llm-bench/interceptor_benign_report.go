@@ -500,7 +500,7 @@ func renderInterceptorBenignReport(in benignReportInput) string {
 	for _, x := range sm.Rejected {
 		rejected[x.Stratum]++
 	}
-	p("Claude and one independent blind reviewer reviewed every task, then a mechanical screen ran over the whole corpus (corpus README, review record). ")
+	p("Claude and one independent blind reviewer reviewed every task, then a mechanical screen ran over the whole corpus, and Keith spot-checked a stratified sample of 10 tasks and accepted all of them (corpus README, review record). ")
 	p("Review rejected %d extraction and %d nonfiring units, each replaced by continuing down the permutation (`sampling.rejected`), and dropped %d of the %d authored delegated tasks, which are not re-authored.\n\n",
 		rejected[benignExtraction], rejected[benignNonfiring], benignDelegatedAuthored-byStratum[benignDelegated], benignDelegatedAuthored)
 
