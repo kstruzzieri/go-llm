@@ -189,14 +189,19 @@ func normalizeFenceKeys(traceID string, req provider.ChatRequest) (provider.Chat
 	return out, nil
 }
 
-// injectionBuildOptions is the #517 seam: an explicit interceptor chain and
-// its recorded name. The zero value means Golem's always-on guards.
+// injectionBuildOptions is the #517 seam: an interceptor arm, or an explicit
+// chain and its recorded name. A named Arm wins over Chain and ChainName. The
+// zero value means Golem's always-on guards.
 type injectionBuildOptions struct {
+	Arm       interceptorArm
 	Chain     []agent.Interceptor
 	ChainName string
 }
 
 func (o injectionBuildOptions) resolved() ([]agent.Interceptor, string) {
+	if o.Arm.Name != "" {
+		return o.Arm.Chain, o.Arm.Name
+	}
 	if o.Chain == nil {
 		return golemDefaultGuards(), injectionDefaultChain
 	}
@@ -258,7 +263,7 @@ func loadInjectionCases(path string) (injectionCases, error) {
 // the candidate would see, normalizes the per-render fence keys and publishes
 // the resulting frozen traces (spec section 4.4).
 func buildInjectionCorpusWith(ctx context.Context, casesPath, outDir string, opts injectionBuildOptions) error {
-	if opts.Chain != nil && opts.ChainName == "" {
+	if opts.Arm.Name == "" && opts.Chain != nil && opts.ChainName == "" {
 		return injectionErr("explicit interceptor chain needs a chain name")
 	}
 	chain, chainName := opts.resolved()
@@ -332,7 +337,33 @@ func buildInjectionCorpusWith(ctx context.Context, casesPath, outDir string, opt
 	return err
 }
 
+// errBlockedAtBuild marks a build the scripted run could not finish because an
+// interceptor ended it at the input hook (the goal) or the output hook (the
+// model's own tool call): no decision-point request exists for that cell. A
+// block at the tool_call hook, or on a tool result, yields a blocked
+// observation and the run continues, so it is not this class.
+var errBlockedAtBuild = errors.New("blocked at build")
+
+// buildArmTrace builds one trace under an interceptor arm and records the
+// arm's name as the trace's chain.
+func buildArmTrace(ctx context.Context, cases injectionCases, b injectionBase, id, goal, slot string, ev InjectionEval, arm interceptorArm) (Trace, error) {
+	return buildInjectionTrace(ctx, cases, b, id, goal, slot, ev, arm.Chain, arm.Name)
+}
+
 func buildInjectionTrace(ctx context.Context, cases injectionCases, b injectionBase, id, goal, slot string, ev InjectionEval, chain []agent.Interceptor, chainName string) (Trace, error) {
+	req, err := captureInjectionRequest(ctx, b, id, goal, slot, chain)
+	if err != nil {
+		return Trace{}, err
+	}
+	return injectionTraceFromRequest(cases, b, id, ev, chainName, req)
+}
+
+// captureInjectionRequest drives the real Orchestrator under chain with the
+// scripted caller and returns the decision-point request, fence-normalized.
+// It is the wire request a candidate would see (spec section 6.4 compares
+// these, never trace JSON). A run an interceptor ends at the input or output
+// hook returns an error wrapping errBlockedAtBuild and the *agent.BlockedError.
+func captureInjectionRequest(ctx context.Context, b injectionBase, id, goal, slot string, chain []agent.Interceptor) (provider.ChatRequest, error) {
 	observation := strings.Replace(b.Observation, injectionPayloadSlot, slot, 1)
 	caller := &captureCaller{fetch: b.Fetch}
 	o := agent.New(caller, agent.ContextManager{}, agent.WithInterceptors(chain...))
@@ -345,15 +376,25 @@ func buildInjectionTrace(ctx context.Context, cases injectionCases, b injectionB
 		Options:  provider.ModelOptions{NumPredict: 4096},
 	}, nil)
 	if err != nil {
-		return Trace{}, fmt.Errorf("injection build %s: run: %w", id, err)
+		var blocked *agent.BlockedError
+		if errors.As(err, &blocked) && (blocked.Hook == agent.HookInput || blocked.Hook == agent.HookOutput) {
+			return provider.ChatRequest{}, fmt.Errorf("injection build %s: run: %w: %w", id, errBlockedAtBuild, err)
+		}
+		return provider.ChatRequest{}, fmt.Errorf("injection build %s: run: %w", id, err)
 	}
 	if caller.captured == nil {
-		return Trace{}, fmt.Errorf("injection build %s: the decision-point request was never captured", id)
+		return provider.ChatRequest{}, fmt.Errorf("injection build %s: the decision-point request was never captured", id)
 	}
 	req, err := normalizeFenceKeys(id, *caller.captured)
 	if err != nil {
-		return Trace{}, fmt.Errorf("injection build %s: %w", id, err)
+		return provider.ChatRequest{}, fmt.Errorf("injection build %s: %w", id, err)
 	}
+	return req, nil
+}
+
+// injectionTraceFromRequest assembles the frozen trace from a captured,
+// fence-normalized request.
+func injectionTraceFromRequest(cases injectionCases, b injectionBase, id string, ev InjectionEval, chainName string, req provider.ChatRequest) (Trace, error) {
 	if len(req.Messages) < 2 || req.Messages[0].Role != "system" {
 		return Trace{}, fmt.Errorf("injection build %s: captured request does not start with a system message", id)
 	}
