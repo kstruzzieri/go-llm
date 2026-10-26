@@ -428,6 +428,69 @@ func TestBuildArmTraceToolCallAbortIsNotBlockedAtBuild(t *testing.T) {
 	}
 }
 
+// abortOnToolResult aborts only on the tool result's ingress check, the
+// input-hook inspection of a role "tool" message; the initial goal passes.
+type abortOnToolResult struct{ abortAtToolCall }
+
+func (abortOnToolResult) InspectInput(_ context.Context, in agent.InputInspection) ([]agent.Finding, error) {
+	for _, m := range in.Messages {
+		if m.Role == "tool" {
+			return []agent.Finding{{Rule: "test_abort", Verdict: agent.VerdictAbort}}, nil
+		}
+	}
+	return nil, nil
+}
+func (abortOnToolResult) InspectToolCall(context.Context, agent.ToolCallInspection) ([]agent.Finding, error) {
+	return nil, nil
+}
+
+// A tool result's ingress abort is a *agent.BlockedError at the input hook too,
+// and in the scripted run's first round it reports Step 0, the same step as the
+// initial-input block, so only the model-call count tells them apart: the model
+// has already answered when a tool result is inspected. It is a run error, not
+// blocked-at-build.
+func TestBuildArmTraceToolResultAbortIsNotBlockedAtBuild(t *testing.T) {
+	cases, b, ev := oneBaseFixture(t)
+	arm := interceptorArm{Name: "test-abort", Chain: []agent.Interceptor{abortOnToolResult{}}, Members: []string{"test_abort"}}
+	_, err := buildArmTrace(context.Background(), cases, b, "inj-task7-ingress", b.Task, b.TwinFiller, ev, arm)
+	var blocked *agent.BlockedError
+	if !errors.As(err, &blocked) || blocked.Hook != agent.HookInput {
+		t.Fatalf("err = %v, want the BlockedError of the input hook", err)
+	}
+	t.Logf("tool-result ingress abort reports Step %d", blocked.Step)
+	if errors.Is(err, errBlockedAtBuild) {
+		t.Fatal("a tool result's ingress abort was classed blocked-at-build")
+	}
+}
+
+// A named arm with no interceptors would run with no guards, and interceptors
+// with no name would be ignored by resolved(); both are refused.
+func TestBuildRefusesUnusableArm(t *testing.T) {
+	cases, b, ev := oneBaseFixture(t)
+	for _, tc := range []struct {
+		name string
+		arm  interceptorArm
+		want string
+	}{
+		{"named arm without interceptors", interceptorArm{Name: "guards+nothing"}, "no interceptors"},
+		{"interceptors without a name", interceptorArm{Chain: interceptor.Defaults()}, "no name"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := buildArmTrace(context.Background(), cases, b, "inj-task7-arm", b.Task, b.TwinFiller, ev, tc.arm); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("buildArmTrace err = %v, want %q", err, tc.want)
+			}
+			out := t.TempDir()
+			err := buildInjectionCorpusWith(context.Background(), filepath.FromSlash("testdata/injection/one-base.json"), out, injectionBuildOptions{Arm: tc.arm})
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("buildInjectionCorpusWith err = %v, want %q", err, tc.want)
+			}
+			if entries, _ := os.ReadDir(out); len(entries) != 0 {
+				t.Fatalf("a refused arm published %d files", len(entries))
+			}
+		})
+	}
+}
+
 // The key is base32(sha256("llm-bench-injection-fence:inj-task7-fence"))[:12],
 // computed outside the code under test.
 func TestCaptureInjectionRequestIsFenceNormalized(t *testing.T) {

@@ -209,7 +209,8 @@ func (o injectionBuildOptions) resolved() ([]agent.Interceptor, string) {
 }
 
 // buildInjectionCorpus is the CLI entry (default chain);
-// buildInjectionCorpusWith is what #517 calls with its own chain.
+// buildInjectionCorpusWith is what #517 calls with an interceptor arm (or an
+// explicit chain).
 func buildInjectionCorpus(ctx context.Context, casesPath, outDir string) error {
 	return buildInjectionCorpusWith(ctx, casesPath, outDir, injectionBuildOptions{})
 }
@@ -263,7 +264,11 @@ func loadInjectionCases(path string) (injectionCases, error) {
 // the candidate would see, normalizes the per-render fence keys and publishes
 // the resulting frozen traces (spec section 4.4).
 func buildInjectionCorpusWith(ctx context.Context, casesPath, outDir string, opts injectionBuildOptions) error {
-	if opts.Arm.Name == "" && opts.Chain != nil && opts.ChainName == "" {
+	if opts.Arm.Name != "" || len(opts.Arm.Chain) > 0 {
+		if err := checkArm(opts.Arm); err != nil {
+			return err
+		}
+	} else if opts.Chain != nil && opts.ChainName == "" {
 		return injectionErr("explicit interceptor chain needs a chain name")
 	}
 	chain, chainName := opts.resolved()
@@ -338,15 +343,32 @@ func buildInjectionCorpusWith(ctx context.Context, casesPath, outDir string, opt
 }
 
 // errBlockedAtBuild marks a build the scripted run could not finish because an
-// interceptor ended it at the input hook (the goal) or the output hook (the
-// model's own tool call): no decision-point request exists for that cell. A
-// block at the tool_call hook, or on a tool result, yields a blocked
-// observation and the run continues, so it is not this class.
+// interceptor ended it with a terminal block on the initial input (the goal,
+// before the model is called) or on the model's own output: no decision-point
+// request exists for that cell (spec section 6.5). A block at the tool_call
+// hook yields a blocked observation and the run continues; a block or abort on
+// a tool result's ingress check is an ordinary run error. Neither is this class.
 var errBlockedAtBuild = errors.New("blocked at build")
+
+// checkArm refuses an arm that would silently run the wrong chain: a name with
+// no interceptors runs with no guards, and interceptors with no name are
+// ignored by injectionBuildOptions.resolved.
+func checkArm(arm interceptorArm) error {
+	switch {
+	case arm.Name == "":
+		return injectionErr("interceptor arm has no name")
+	case len(arm.Chain) == 0:
+		return injectionErr("interceptor arm %q has no interceptors", arm.Name)
+	}
+	return nil
+}
 
 // buildArmTrace builds one trace under an interceptor arm and records the
 // arm's name as the trace's chain.
 func buildArmTrace(ctx context.Context, cases injectionCases, b injectionBase, id, goal, slot string, ev InjectionEval, arm interceptorArm) (Trace, error) {
+	if err := checkArm(arm); err != nil {
+		return Trace{}, err
+	}
 	return buildInjectionTrace(ctx, cases, b, id, goal, slot, ev, arm.Chain, arm.Name)
 }
 
@@ -361,8 +383,9 @@ func buildInjectionTrace(ctx context.Context, cases injectionCases, b injectionB
 // captureInjectionRequest drives the real Orchestrator under chain with the
 // scripted caller and returns the decision-point request, fence-normalized.
 // It is the wire request a candidate would see (spec section 6.4 compares
-// these, never trace JSON). A run an interceptor ends at the input or output
-// hook returns an error wrapping errBlockedAtBuild and the *agent.BlockedError.
+// these, never trace JSON). A run an interceptor ends with a terminal block on
+// the initial input or on the model's output returns an error wrapping
+// errBlockedAtBuild and the *agent.BlockedError.
 func captureInjectionRequest(ctx context.Context, b injectionBase, id, goal, slot string, chain []agent.Interceptor) (provider.ChatRequest, error) {
 	observation := strings.Replace(b.Observation, injectionPayloadSlot, slot, 1)
 	caller := &captureCaller{fetch: b.Fetch}
@@ -377,7 +400,11 @@ func captureInjectionRequest(ctx context.Context, b injectionBase, id, goal, slo
 	}, nil)
 	if err != nil {
 		var blocked *agent.BlockedError
-		if errors.As(err, &blocked) && (blocked.Hook == agent.HookInput || blocked.Hook == agent.HookOutput) {
+		// The initial-input check runs before the first model call; a tool
+		// result's ingress check runs after it. Both can report Step 0 (the
+		// scripted fetch happens in the first round), so the call count, not
+		// BlockedError.Step, tells them apart.
+		if errors.As(err, &blocked) && (blocked.Hook == agent.HookOutput || (blocked.Hook == agent.HookInput && caller.calls == 0)) {
 			return provider.ChatRequest{}, fmt.Errorf("injection build %s: run: %w: %w", id, errBlockedAtBuild, err)
 		}
 		return provider.ChatRequest{}, fmt.Errorf("injection build %s: run: %w", id, err)
