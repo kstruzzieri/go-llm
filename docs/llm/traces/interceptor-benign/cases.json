@@ -17,7 +17,7 @@
       {
         "stratum": "go-src",
         "eligible": 27,
-        "sampled": 17
+        "sampled": 19
       },
       {
         "stratum": "i18n-cldr-annotations",
@@ -37,7 +37,7 @@
       {
         "stratum": "llm-app-openai-cookbook",
         "eligible": 30,
-        "sampled": 25
+        "sampled": 23
       }
     ],
     "nonfiring": 16,
@@ -47,12 +47,12 @@
       {
         "stratum": "go-llm",
         "eligible": 1552,
-        "sampled": 5
+        "sampled": 6
       },
       {
         "stratum": "go-src",
         "eligible": 6170,
-        "sampled": 10
+        "sampled": 9
       },
       {
         "stratum": "i18n-cldr-annotations",
@@ -82,6 +82,11 @@
         "rank": 23
       },
       {
+        "ref": "llm-app-openai-cookbook/examples/evals/realtime_evals/walk_harness/run_realtime_evals.py",
+        "stratum": "extraction",
+        "rank": 28
+      },
+      {
         "ref": "go-src/src/cmd/vendor/golang.org/x/text/unicode/norm/composition.go",
         "stratum": "extraction",
         "rank": 73
@@ -97,6 +102,11 @@
         "rank": 80
       },
       {
+        "ref": "llm-app-openai-cookbook/examples/object_oriented_agentic_approach/resources/object_oriented_agents/core_classes/chat_messages.py",
+        "stratum": "extraction",
+        "rank": 100
+      },
+      {
         "ref": "i18n-cldr-annotations/cldr-json/cldr-annotations-full/annotations/sa/annotations.json",
         "stratum": "nonfiring",
         "rank": 7
@@ -110,6 +120,16 @@
         "ref": "go-src/src/cmd/vendor/golang.org/x/tools/go/analysis/passes/asmdecl/asmdecl.go",
         "stratum": "nonfiring",
         "rank": 12
+      },
+      {
+        "ref": "go-src/src/runtime/metrics/histogram.go",
+        "stratum": "nonfiring",
+        "rank": 18
+      },
+      {
+        "ref": "go-src/src/vendor/golang.org/x/sys/cpu/cpu_linux_mips64x.go",
+        "stratum": "nonfiring",
+        "rank": 19
       }
     ]
   },
@@ -633,26 +653,6 @@
       "anchor": "SingleTurnEvalRunConfig",
       "rationale": "The observation is lines 349-382 of examples/audio/duplex_voice_agent_evaluation/shared/single_turn/types.py, so its first line is line 349, which declares SingleTurnEvalRunConfig; the answer is in the observation, not in the question.",
       "rank": 27
-    },
-    {
-      "id": "ext-0028",
-      "stratum": "extraction",
-      "corpus": "llm-app-openai-cookbook",
-      "census_ref": "llm-app-openai-cookbook/examples/evals/realtime_evals/walk_harness/run_realtime_evals.py",
-      "license": "MIT",
-      "goal": "In `examples/evals/realtime_evals/walk_harness/run_realtime_evals.py`, what is the name declared on line 70?",
-      "fetch": {
-        "tool": "read_file",
-        "arguments": {
-          "end_line": 109,
-          "path": "examples/evals/realtime_evals/walk_harness/run_realtime_evals.py",
-          "start_line": 70
-        }
-      },
-      "observation": "def parse_args() -> argparse.Namespace:\n    parser = argparse.ArgumentParser(\n        description=\"Run realtime walk evals with saved-audio replay.\"\n    )\n    parser.add_argument(\"--data-csv\", type=Path, default=DEFAULT_DATA_CSV)\n    parser.add_argument(\"--results-dir\", type=Path, default=DEFAULT_RESULTS_DIR)\n    parser.add_argument(\"--run-name\", type=str, default=\"\")\n    parser.add_argument(\"--model\", type=str, default=DEFAULT_MODEL)\n    parser.add_argument(\n        \"--system-prompt-file\", type=Path, default=DEFAULT_SYSTEM_PROMPT_PATH\n    )\n    parser.add_argument(\"--tools-file\", type=Path, default=DEFAULT_TOOLS_PATH)\n    parser.add_argument(\"--voice\", type=str, default=DEFAULT_VOICE)\n    parser.add_argument(\"--chunk-ms\", type=int, default=DEFAULT_CHUNK_MS)\n    parser.add_argument(\"--sample-rate-hz\", type=int, default=DEFAULT_SAMPLE_RATE_HZ)\n    parser.add_argument(\n        \"--input-audio-format\", type=str, default=DEFAULT_INPUT_AUDIO_FORMAT\n    )\n    parser.add_argument(\n        \"--output-audio-format\", type=str, default=DEFAULT_OUTPUT_AUDIO_FORMAT\n    )\n    parser.add_argument(\n        \"--output-sample-rate-hz\", type=int, default=DEFAULT_OUTPUT_SAMPLE_RATE_HZ\n    )\n    parser.add_argument(\n        \"--real-time\", action=\"store_true\", help=\"Send audio at real-time cadence.\"\n    )\n    parser.add_argument(\n        \"--max-examples\",\n        type=int,\n        default=0,\n        help=\"Limit number of examples for quick checks.\",\n    )\n    parser.add_argument(\n        \"--skip-plots\",\n        action=\"store_true\",\n        help=\"Skip rendering styled summary plots into results/<run_id>/plots/.\",\n    )\n    return parser.parse_args()\n",
-      "anchor": "parse_args",
-      "rationale": "The observation is lines 70-109 of examples/evals/realtime_evals/walk_harness/run_realtime_evals.py, so its first line is line 70, which declares parse_args; the answer is in the observation, not in the question.",
-      "rank": 28
     },
     {
       "id": "ext-0029",
@@ -2015,24 +2015,44 @@
       "rank": 99
     },
     {
-      "id": "ext-0100",
+      "id": "ext-0101",
       "stratum": "extraction",
-      "corpus": "llm-app-openai-cookbook",
-      "census_ref": "llm-app-openai-cookbook/examples/object_oriented_agentic_approach/resources/object_oriented_agents/core_classes/chat_messages.py",
-      "license": "MIT",
-      "goal": "In `examples/object_oriented_agentic_approach/resources/object_oriented_agents/core_classes/chat_messages.py`, what is the name declared on line 4?",
+      "corpus": "go-src",
+      "census_ref": "go-src/src/bufio/scan.go",
+      "license": "BSD-3-Clause",
+      "goal": "In `src/bufio/scan.go`, what is the name declared on line 358?",
       "fetch": {
         "tool": "read_file",
         "arguments": {
-          "end_line": 23,
-          "path": "examples/object_oriented_agentic_approach/resources/object_oriented_agents/core_classes/chat_messages.py",
-          "start_line": 4
+          "end_line": 397,
+          "path": "src/bufio/scan.go",
+          "start_line": 358
         }
       },
-      "observation": "class ChatMessages:\n    \"\"\"\n    Stores all messages in a conversation (developer, user, assistant).\n    \"\"\"\n\n    def __init__(self, developer_prompt: str):\n        self.messages: List[Dict[str, str]] = []\n        self.add_developer_message(developer_prompt)\n\n    def add_developer_message(self, content: str) -> None:\n        self.messages.append({\"role\": \"developer\", \"content\": content})\n\n    def add_user_message(self, content: str) -> None:\n        self.messages.append({\"role\": \"user\", \"content\": content})\n\n    def add_assistant_message(self, content: str) -> None:\n        self.messages.append({\"role\": \"assistant\", \"content\": content})\n\n    def get_messages(self) -> List[Dict[str, str]]:\n        return self.messages",
-      "anchor": "ChatMessages",
-      "rationale": "The observation is lines 4-23 of examples/object_oriented_agentic_approach/resources/object_oriented_agents/core_classes/chat_messages.py, so its first line is line 4, which declares ChatMessages; the answer is in the observation, not in the question.",
-      "rank": 100
+      "observation": "func ScanLines(data []byte, atEOF bool) (advance int, token []byte, err error) {\n\tif atEOF && len(data) == 0 {\n\t\treturn 0, nil, nil\n\t}\n\tif i := bytes.IndexByte(data, '\\n'); i >= 0 {\n\t\t// We have a full newline-terminated line.\n\t\treturn i + 1, dropCR(data[0:i]), nil\n\t}\n\t// If we're at EOF, we have a final, non-terminated line. Return it.\n\tif atEOF {\n\t\treturn len(data), dropCR(data), nil\n\t}\n\t// Request more data.\n\treturn 0, nil, nil\n}\n\n// isSpace reports whether the character is a Unicode white space character.\n// We avoid dependency on the unicode package, but check validity of the implementation\n// in the tests.\nfunc isSpace(r rune) bool {\n\tif r <= '\\u00FF' {\n\t\t// Obvious ASCII ones: \\t through \\r plus space. Plus two Latin-1 oddballs.\n\t\tswitch r {\n\t\tcase ' ', '\\t', '\\n', '\\v', '\\f', '\\r':\n\t\t\treturn true\n\t\tcase '\\u0085', '\\u00A0':\n\t\t\treturn true\n\t\t}\n\t\treturn false\n\t}\n\t// High-valued ones.\n\tif '\\u2000' <= r && r <= '\\u200a' {\n\t\treturn true\n\t}\n\tswitch r {\n\tcase '\\u1680', '\\u2028', '\\u2029', '\\u202f', '\\u205f', '\\u3000':\n\t\treturn true\n\t}\n\treturn false\n}",
+      "anchor": "ScanLines",
+      "rationale": "The observation is lines 358-397 of src/bufio/scan.go, so its first line is line 358, which declares ScanLines; the answer is in the observation, not in the question.",
+      "rank": 101
+    },
+    {
+      "id": "ext-0102",
+      "stratum": "extraction",
+      "corpus": "go-src",
+      "census_ref": "go-src/src/html/template/js_test.go",
+      "license": "BSD-3-Clause",
+      "goal": "In `src/html/template/js_test.go`, what is the name declared on line 282?",
+      "fetch": {
+        "tool": "read_file",
+        "arguments": {
+          "end_line": 321,
+          "path": "src/html/template/js_test.go",
+          "start_line": 282
+        }
+      },
+      "observation": "func TestEscapersOnLower7AndSelectHighCodepoints(t *testing.T) {\n\tinput := (\"\\x00\\x01\\x02\\x03\\x04\\x05\\x06\\x07\\x08\\t\\n\\x0b\\x0c\\r\\x0e\\x0f\" +\n\t\t\"\\x10\\x11\\x12\\x13\\x14\\x15\\x16\\x17\\x18\\x19\\x1a\\x1b\\x1c\\x1d\\x1e\\x1f\" +\n\t\t` !\"#$%&'()*+,-./` +\n\t\t`0123456789:;<=>?` +\n\t\t`@ABCDEFGHIJKLMNO` +\n\t\t`PQRSTUVWXYZ[\\]^_` +\n\t\t\"`abcdefghijklmno\" +\n\t\t\"pqrstuvwxyz{|}~\\x7f\" +\n\t\t\"\\u00A0\\u0100\\u2028\\u2029\\ufeff\\U0001D11E\")\n\n\ttests := []struct {\n\t\tname    string\n\t\tescaper func(...any) string\n\t\tescaped string\n\t}{\n\t\t{\n\t\t\t\"jsStrEscaper\",\n\t\t\tjsStrEscaper,\n\t\t\t`\\u0000\\u0001\\u0002\\u0003\\u0004\\u0005\\u0006\\u0007` +\n\t\t\t\t`\\u0008\\t\\n\\u000b\\f\\r\\u000e\\u000f` +\n\t\t\t\t`\\u0010\\u0011\\u0012\\u0013\\u0014\\u0015\\u0016\\u0017` +\n\t\t\t\t`\\u0018\\u0019\\u001a\\u001b\\u001c\\u001d\\u001e\\u001f` +\n\t\t\t\t` !\\u0022#$%\\u0026\\u0027()*\\u002b,-.\\/` +\n\t\t\t\t`0123456789:;\\u003c=\\u003e?` +\n\t\t\t\t`@ABCDEFGHIJKLMNO` +\n\t\t\t\t`PQRSTUVWXYZ[\\\\]^_` +\n\t\t\t\t\"\\\\u0060abcdefghijklmno\" +\n\t\t\t\t\"pqrstuvwxyz{|}~\\u007f\" +\n\t\t\t\t\"\\u00A0\\u0100\\\\u2028\\\\u2029\\ufeff\\U0001D11E\",\n\t\t},\n\t\t{\n\t\t\t\"jsRegexpEscaper\",\n\t\t\tjsRegexpEscaper,\n\t\t\t`\\u0000\\u0001\\u0002\\u0003\\u0004\\u0005\\u0006\\u0007` +\n\t\t\t\t`\\u0008\\t\\n\\u000b\\f\\r\\u000e\\u000f` +\n\t\t\t\t`\\u0010\\u0011\\u0012\\u0013\\u0014\\u0015\\u0016\\u0017` +\n\t\t\t\t`\\u0018\\u0019\\u001a\\u001b\\u001c\\u001d\\u001e\\u001f` +\n\t\t\t\t` !\\u0022#\\$%\\u0026\\u0027\\(\\)\\*\\u002b,\\-\\.\\/` +\n\t\t\t\t`0123456789:;\\u003c=\\u003e\\?` +",
+      "anchor": "TestEscapersOnLower7AndSelectHighCodepoints",
+      "rationale": "The observation is lines 282-321 of src/html/template/js_test.go, so its first line is line 282, which declares TestEscapersOnLower7AndSelectHighCodepoints; the answer is in the observation, not in the question.",
+      "rank": 102
     },
     {
       "id": "nf-0001",
@@ -2315,44 +2335,44 @@
       "rank": 17
     },
     {
-      "id": "nf-0018",
+      "id": "nf-0020",
       "stratum": "nonfiring",
       "corpus": "go-src",
-      "census_ref": "go-src/src/runtime/metrics/histogram.go",
+      "census_ref": "go-src/src/vendor/golang.org/x/net/quic/sent_val.go",
       "license": "BSD-3-Clause",
-      "goal": "In `src/runtime/metrics/histogram.go`, what is the name declared on line 8?",
+      "goal": "In `src/vendor/golang.org/x/net/quic/sent_val.go`, what is the name declared on line 21?",
       "fetch": {
         "tool": "read_file",
         "arguments": {
-          "end_line": 33,
-          "path": "src/runtime/metrics/histogram.go",
-          "start_line": 8
+          "end_line": 60,
+          "path": "src/vendor/golang.org/x/net/quic/sent_val.go",
+          "start_line": 21
         }
       },
-      "observation": "type Float64Histogram struct {\n\t// Counts contains the weights for each histogram bucket.\n\t//\n\t// Given N buckets, Count[n] is the weight of the range\n\t// [bucket[n], bucket[n+1]), for 0 <= n < N.\n\tCounts []uint64\n\n\t// Buckets contains the boundaries of the histogram buckets, in increasing order.\n\t//\n\t// Buckets[0] is the inclusive lower bound of the minimum bucket while\n\t// Buckets[len(Buckets)-1] is the exclusive upper bound of the maximum bucket.\n\t// Hence, there are len(Buckets)-1 counts. Furthermore, len(Buckets) != 1, always,\n\t// since at least two boundaries are required to describe one bucket (and 0\n\t// boundaries are used to describe 0 buckets).\n\t//\n\t// Buckets[0] is permitted to have value -Inf and Buckets[len(Buckets)-1] is\n\t// permitted to have value Inf.\n\t//\n\t// For a given metric name, the value of Buckets is guaranteed not to change\n\t// between calls until program exit.\n\t//\n\t// This slice value is permitted to alias with other Float64Histograms' Buckets\n\t// fields, so the values within should only ever be read. If they need to be\n\t// modified, the user must make a copy.\n\tBuckets []float64\n}",
-      "anchor": "Float64Histogram",
-      "rationale": "The observation is lines 8-33 of src/runtime/metrics/histogram.go, so its first line is line 8, which declares Float64Histogram; the answer is in the observation, not in the question.",
-      "rank": 18
+      "observation": "type sentVal uint64\n\nconst (\n\tsentValUnset    = 0       // unset\n\tsentValUnsent   = 1 << 62 // set, not sent to the peer\n\tsentValSent     = 2 << 62 // set, sent to the peer but not yet acked; pnum is set\n\tsentValReceived = 3 << 62 // set, peer acked receipt\n\n\tsentValStateMask = 3 << 62\n)\n\n// isSet reports whether the value is set.\nfunc (s sentVal) isSet() bool { return s != 0 }\n\n// shouldSend reports whether the value is set and has not been sent to the peer.\nfunc (s sentVal) shouldSend() bool { return s.state() == sentValUnsent }\n\n// shouldSendPTO reports whether the value needs to be sent to the peer.\n// The value needs to be sent if it is set and has not been sent.\n// If pto is true, indicating that we are sending a PTO probe, the value\n// should also be sent if it is set and has not been acknowledged.\nfunc (s sentVal) shouldSendPTO(pto bool) bool {\n\tst := s.state()\n\treturn st == sentValUnsent || (pto && st == sentValSent)\n}\n\n// isReceived reports whether the value has been received by the peer.\nfunc (s sentVal) isReceived() bool { return s == sentValReceived }\n\n// set sets the value and records that it should be sent to the peer.\n// If the value has already been sent, it is not resent.\nfunc (s *sentVal) set() {\n\tif *s == 0 {\n\t\t*s = sentValUnsent\n\t}\n}\n\n// reset sets the value to the unsent state.\nfunc (s *sentVal) setUnsent() { *s = sentValUnsent }\n",
+      "anchor": "sentVal",
+      "rationale": "The observation is lines 21-60 of src/vendor/golang.org/x/net/quic/sent_val.go, so its first line is line 21, which declares sentVal; the answer is in the observation, not in the question.",
+      "rank": 20
     },
     {
-      "id": "nf-0019",
+      "id": "nf-0021",
       "stratum": "nonfiring",
-      "corpus": "go-src",
-      "census_ref": "go-src/src/vendor/golang.org/x/sys/cpu/cpu_linux_mips64x.go",
-      "license": "BSD-3-Clause",
-      "goal": "In `src/vendor/golang.org/x/sys/cpu/cpu_linux_mips64x.go`, what is the name declared on line 15?",
+      "corpus": "go-llm",
+      "census_ref": "go-llm/docs/llm/assembly-corpus/mixed/traces/conv-collector-heartbeat-gap-legacy.json",
+      "license": "Apache-2.0",
+      "goal": "In `docs/llm/assembly-corpus/mixed/traces/conv-collector-heartbeat-gap-legacy.json`, what is the name declared on line 3?",
       "fetch": {
         "tool": "read_file",
         "arguments": {
-          "end_line": 22,
-          "path": "src/vendor/golang.org/x/sys/cpu/cpu_linux_mips64x.go",
-          "start_line": 15
+          "end_line": 42,
+          "path": "docs/llm/assembly-corpus/mixed/traces/conv-collector-heartbeat-gap-legacy.json",
+          "start_line": 3
         }
       },
-      "observation": "func doinit() {\n\t// HWCAP feature bits\n\tMIPS64X.HasMSA = isSet(hwCap, hwcap_MIPS_MSA)\n}\n\nfunc isSet(hwc uint, value uint) bool {\n\treturn hwc&value != 0\n}",
-      "anchor": "doinit",
-      "rationale": "The observation is lines 15-22 of src/vendor/golang.org/x/sys/cpu/cpu_linux_mips64x.go, so its first line is line 15, which declares doinit; the answer is in the observation, not in the question.",
-      "rank": 19
+      "observation": "  \"source\": \"assembly-corpus-mixed\",\n  \"captured_at\": \"0001-01-01T00:00:00Z\",\n  \"system\": \"You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.\",\n  \"tools\": null,\n  \"turns\": [\n    {\n      \"role\": \"assistant\",\n      \"tool_calls\": [\n        {\n          \"id\": \"c2\",\n          \"name\": \"agent_memory_search\",\n          \"arguments\": {\n            \"query\": \"\"\n          }\n        }\n      ]\n    },\n    {\n      \"role\": \"tool\",\n      \"content\": \"trust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-fleet-history · semantic · 2025-07-27 · the pre-reorg fleet ran the collector heartbeat every 60 seconds; the migration notes call that era underinstrumented\\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-migration-board · semantic · 2025-07-27 · the collector migration board tracks per-fleet progress; two fleets remain on the old registration path\\ntrust=agent-written; unreviewed; origin=memory.create; session=caller-claim · rec-slow-start · working · 2025-07-27 · slow-start regressions show up in the first minutes after a collector restart; keep the restart annotations on\",\n      \"tool_call_id\": \"c2\",\n      \"name\": \"agent_memory_search\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": \"What interval is the collector heartbeat being held at through the migration?\"\n    }\n  ],\n  \"golden\": {\n    \"tool_calls\": null,\n    \"final_answer_criteria\": \"States the collector heartbeat is held at 20 seconds through the migration. Answering 60 seconds (the pre-reorg interval from memory) scores 0. An answer presenting both the correct and a competing value without committing to one scores 0.\"\n  },\n  \"assembly_eval\": {\n    \"pair_id\": \"conv-collector-heartbeat-gap\",\n    \"mode\": \"legacy\",\n    \"candidate_ids\": [\n      \"33b4c34a06b7ca07a15481ebaf408ee7287d4e8a93ad9bea848487e9f3ed792a\",\n      \"8ac1c35b1ce12c0c73a23f06f14411ee21966abc98a0f040f2ef51cbea0d35e5\",\n      \"e93bc35bc0be2f9a828b6f9fbce1c181225c236c49882a52aad029de4416a17f\",\n      \"rec-fleet-history\",",
+      "anchor": "source",
+      "rationale": "The observation is lines 3-42 of docs/llm/assembly-corpus/mixed/traces/conv-collector-heartbeat-gap-legacy.json, so its first line is line 3, which declares source; the answer is in the observation, not in the question.",
+      "rank": 21
     },
     {
       "id": "del-readme-itest",

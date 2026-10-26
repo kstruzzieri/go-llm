@@ -234,6 +234,8 @@ func (k benignCase) validate(palette map[string]struct{}) error {
 		return errors.New("blank observation")
 	case k.Anchor != "" && !strings.Contains(k.Observation, k.Anchor):
 		return fmt.Errorf("anchor is not in the observation: %q", k.Anchor)
+	case k.Stratum == benignDelegated && !strings.HasPrefix(k.ID, "del-"):
+		return fmt.Errorf("delegated task id %q must start with del- (ext- and nf- ids are the draft's)", k.ID)
 	case k.Stratum == benignDelegated && k.Rank != 0:
 		return errors.New("a delegated task has no rank")
 	case k.Stratum != benignDelegated && k.CensusRef != k.Corpus+"/"+p:
@@ -295,7 +297,8 @@ func checkBenignStratum(stratum, corpus, censusRef, license, anchor, rationale s
 // so the committed cases.json alone shows the sample is the registered walk:
 // each task's id is <prefix>-<rank>; the kept and rejected ranks together are
 // exactly 1..max with no gap or repeat, and the last is a kept task whenever n
-// were kept (the walk stops there); the kept count is min(n, E - rejected);
+// were kept (the walk stops there, so with n = 0 it records no rejection);
+// the kept count is min(n, E - rejected);
 // per census stratum the sampled count is the task count and the totals add
 // up; and the inclusion probability is sampled over eligible.
 func (s benignSampling) check(tasks []benignCase, stratum string) error {
@@ -338,7 +341,7 @@ func (s benignSampling) check(tasks []benignCase, stratum string) error {
 			return fmt.Errorf("%s rank %d is missing: every unit the walk passed is a task or a recorded rejection", stratum, r)
 		}
 	}
-	if sampled == n && n > 0 && last != len(ranks) {
+	if sampled == n && last != len(ranks) {
 		return fmt.Errorf("%s rank %d is a rejection past the last drafted task (rank %d): the walk stops at the n-th task", stratum, len(ranks), last)
 	}
 	total := 0

@@ -8,8 +8,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"runtime"
 	"slices"
 	"strings"
@@ -894,6 +896,23 @@ func TestLoadBenignCasesRejects(t *testing.T) {
 			c.Sampling.Rejected = []benignRejection{{"README.md", benignDelegated, 1}}
 			return c
 		}, "a stratum other than extraction or nonfiring"},
+		{"a delegated task with a rank", func(c benignCases) benignCases {
+			return withTask(t, c, "del-readme-test", func(k *benignCase) { k.Rank = 5 })
+		}, "a delegated task has no rank"},
+		{"a delegated task from a census corpus", func(c benignCases) benignCases {
+			return withTask(t, c, "del-readme-test", func(k *benignCase) { k.Corpus = "go-llm" })
+		}, `delegated task has corpus "go-llm"`},
+		{"a delegated task with a drafted id", func(c benignCases) benignCases {
+			return withTask(t, c, "del-readme-test", func(k *benignCase) { k.ID = "ext-0099" })
+		}, "must start with del-"},
+		// The walk stops at once when n = 0, so it can record no rejection.
+		{"a rejection recorded with n = 0", func(c benignCases) benignCases {
+			c.Tasks = slices.DeleteFunc(slices.Clone(c.Tasks), func(k benignCase) bool { return k.ID == "nf-0001" })
+			c.Sampling.Nonfiring, c.Sampling.NonfiringInclusionProbability = 0, 0
+			c.Sampling.NonfiringPopulation = []benignPopulation{{"alpha", 1, 0}, {"beta", 1, 0}}
+			c.Sampling.Rejected = []benignRejection{{"beta/tidy.py", benignNonfiring, 1}}
+			return c
+		}, "nonfiring rank 1 is a rejection past the last drafted task (rank 0)"},
 		{"a rejection with a blank ref", func(c benignCases) benignCases {
 			c.Sampling.Rejected = []benignRejection{{"", benignExtraction, 4}}
 			return c
@@ -1124,15 +1143,7 @@ func TestBenignLicenseNotices(t *testing.T) {
 	for _, s := range m.Strata {
 		strata[s.Name] = s
 	}
-	readme, err := os.ReadFile(filepath.Join(dir, "README.md"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, sources, ok := strings.Cut(string(readme), "\n## Sources and licenses\n")
-	if !ok {
-		t.Fatal("README.md has no ## Sources and licenses section")
-	}
-	sources, _, _ = strings.Cut(sources, "\n## ")
+	sources := benignReadmeSection(t, "Sources and licenses")
 	corpora := map[string]bool{}
 	for _, k := range c.Tasks {
 		want := "Apache-2.0 (authored for go-llm #517)"
@@ -1171,6 +1182,92 @@ func TestBenignLicenseNotices(t *testing.T) {
 		if len(cells) != 5 || cells[2] != commit || cells[3] != license || !strings.HasPrefix(cells[4], "Copyright ") {
 			t.Errorf("README sources row for %s = %q, want commit %s, license %s and a copyright notice", corpus, row, commit, license)
 		}
+	}
+
+	// The reproduced license texts: each "### `<stratum>` `<path>` (<license>)"
+	// block hashes to the manifest's sha256 for that file (the fence adds the
+	// final newline a file may lack). Every task outside go-llm (the
+	// repository's own LICENSE) needs the text of its nearest LICENSE: a
+	// vendored module's when that differs from the stratum's, else the
+	// stratum's.
+	digests := map[[2]string]string{}
+	for _, s := range m.Strata {
+		for _, f := range s.Files {
+			digests[[2]string{s.Name, f.Path}] = f.SHA256
+		}
+	}
+	heading := regexp.MustCompile("(?m)^### `([^`]+)` `([^`]+)` \\(([^)]+)\\)\n\n```text\n")
+	blocks := map[[2]string]bool{}
+	for _, at := range heading.FindAllStringSubmatchIndex(sources, -1) {
+		key := [2]string{sources[at[2]:at[3]], sources[at[4]:at[5]]}
+		body, _, ok := strings.Cut(sources[at[1]:], "```\n")
+		want, listed := digests[key]
+		sum, trimmed := sha256.Sum256([]byte(body)), sha256.Sum256([]byte(strings.TrimSuffix(body, "\n")))
+		switch {
+		case !ok || !listed || sources[at[6]:at[7]] != strata[key[0]].License:
+			t.Errorf("README license block %v: unterminated, not in the manifest, or not the stratum's license", key)
+		case hex.EncodeToString(sum[:]) != want && hex.EncodeToString(trimmed[:]) != want:
+			t.Errorf("README license block %v does not hash to the manifest's %s", key, want)
+		default:
+			blocks[key] = true
+		}
+	}
+	for _, k := range c.Tasks {
+		if _, census := strata[k.Corpus]; !census || k.Corpus == "go-llm" {
+			continue
+		}
+		root := [2]string{k.Corpus, "LICENSE"}
+		need := root
+		for d := path.Dir(strings.TrimPrefix(k.CensusRef, k.Corpus+"/")); d != "."; d = path.Dir(d) {
+			if sum, ok := digests[[2]string{k.Corpus, d + "/LICENSE"}]; ok {
+				if sum != digests[root] {
+					need = [2]string{k.Corpus, d + "/LICENSE"}
+				}
+				break
+			}
+		}
+		if !blocks[need] {
+			t.Errorf("%s: README reproduces no license text for %v", k.ID, need)
+		}
+	}
+}
+
+// benignReadmeSection is the text of the corpus README's "## <name>" section.
+func benignReadmeSection(t *testing.T, name string) string {
+	t.Helper()
+	readme, err := os.ReadFile(filepath.Join(benignCorpusDir(t), "README.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, section, ok := strings.Cut(string(readme), "\n## "+name+"\n")
+	if !ok {
+		t.Fatalf("README.md has no ## %s section", name)
+	}
+	section, _, _ = strings.Cut(section, "\n## ")
+	return section
+}
+
+// The README's reproduce command is the provenance control for review: the
+// census refs it rejects are exactly the refs cases.json records as rejected.
+func TestBenignReadmeRejections(t *testing.T) {
+	c, err := loadBenignCases(filepath.Join(benignCorpusDir(t), "cases.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, list, ok := strings.Cut(benignReadmeSection(t, "Reproduce"), "-benign-reject \"$(paste -sd, - <<'EOF'\n")
+	list, _, ended := strings.Cut(list, "\nEOF\n")
+	if !ok || !ended {
+		t.Fatal("README reproduce command has no -benign-reject list")
+	}
+	got := strings.Split(list, "\n")
+	var want []string
+	for _, x := range c.Sampling.Rejected {
+		want = append(want, x.Ref)
+	}
+	slices.Sort(got)
+	slices.Sort(want)
+	if !slices.Equal(got, want) {
+		t.Errorf("README -benign-reject refs = %v\nwant sampling.rejected refs %v", got, want)
 	}
 }
 
