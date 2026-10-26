@@ -434,10 +434,25 @@ func captureInjectionRequest(ctx context.Context, b injectionBase, id, goal, slo
 // injectionTraceFromRequest assembles the frozen trace from a captured,
 // fence-normalized request.
 func injectionTraceFromRequest(cases injectionCases, b injectionBase, id string, ev InjectionEval, chainName string, req provider.ChatRequest) (Trace, error) {
-	if len(req.Messages) < 2 || req.Messages[0].Role != "system" {
-		return Trace{}, fmt.Errorf("injection build %s: captured request does not start with a system message", id)
+	t, err := traceFromRequest(id, cases.Source, req)
+	if err != nil {
+		return Trace{}, err
 	}
-	t := Trace{ID: id, Source: cases.Source, System: req.Messages[0].Content}
+	t.Golden = Golden{ToolCalls: []string{}, FinalAnswerCriteria: b.Rationale, FinalAnswerSubstring: b.Anchor}
+	opts := req.Options
+	ev.CanaryGUID, ev.BaseID, ev.Carrier, ev.Goal, ev.Chain = cases.CanaryGUID, b.ID, b.Carrier, b.Goal, chainName
+	ev.FrozenOptions = &opts
+	t.Injection = &ev
+	return t, nil
+}
+
+// traceFromRequest is the frozen wire of a captured, fence-normalized
+// request: its system prompt, tools and turns, with no golden or eval block.
+func traceFromRequest(id, source string, req provider.ChatRequest) (Trace, error) {
+	if len(req.Messages) < 2 || req.Messages[0].Role != "system" {
+		return Trace{}, fmt.Errorf("build %s: captured request does not start with a system message", id)
+	}
+	t := Trace{ID: id, Source: source, System: req.Messages[0].Content}
 	for _, tl := range req.Tools {
 		raw, err := json.Marshal(tl)
 		if err != nil {
@@ -455,10 +470,5 @@ func injectionTraceFromRequest(cases injectionCases, b injectionBase, id string,
 		}
 		t.Turns = append(t.Turns, turn)
 	}
-	t.Golden = Golden{ToolCalls: []string{}, FinalAnswerCriteria: b.Rationale, FinalAnswerSubstring: b.Anchor}
-	opts := req.Options
-	ev.CanaryGUID, ev.BaseID, ev.Carrier, ev.Goal, ev.Chain = cases.CanaryGUID, b.ID, b.Carrier, b.Goal, chainName
-	ev.FrozenOptions = &opts
-	t.Injection = &ev
 	return t, nil
 }

@@ -51,10 +51,17 @@ func main() {
 	injectionBuildPath := flag.String("build-injection-corpus", "", "Build frozen-real-wire injection traces from this cases JSON (#452)")
 	injectionOut := flag.String("injection-out", filepath.Join("docs", "llm", "traces", "injection", "traces"), "Output directory for -build-injection-corpus")
 	interceptorCensus := flag.Bool("interceptor-census", false, "Run the deterministic interceptor census (#517): render every -census-manifest file through Golem's production tools under interceptor.Defaults() and report the findings per carrier")
-	censusManifestPath := flag.String("census-manifest", filepath.Join("docs", "llm", "census", "manifest.json"), "With -interceptor-census: the census manifest (llm-bench.census-manifest/v1)")
-	censusRoot := flag.String("census-root", "", "With -interceptor-census: directory holding one subdirectory per manifest stratum, fetched as docs/llm/census/README.md describes")
+	censusManifestPath := flag.String("census-manifest", filepath.Join("docs", "llm", "census", "manifest.json"), "With -interceptor-census or -interceptor-benign-draft: the census manifest (llm-bench.census-manifest/v1)")
+	censusRoot := flag.String("census-root", "", "With -interceptor-census or -interceptor-benign-draft: directory holding one subdirectory per manifest stratum, fetched as docs/llm/census/README.md describes")
 	censusOut := flag.String("census-out", "", "With -interceptor-census: output directory for census-results.json (committed) and full/observations.jsonl (gitignored), e.g. docs/llm/census")
 	interceptorV1Report := flag.String("interceptor-v1-report", "", "Rebuild every cell of this injection cases JSON (the #452 v1 corpus, docs/llm/traces/injection/cases.json) under each #517 interceptor arm, classify each arm's decision-point request against the guards-only arm's, and write the deterministic adversarial report to -report (default stdout; the committed report is "+interceptorV1ReportPath+"). No model is called")
+	interceptorBenignDraft := flag.String("interceptor-benign-draft", "", "Draft the #517 benign extraction and nonfiring tasks (spec §6.3) from -census-results over -census-root and -census-manifest, and write the DRAFT cases JSON to this path for review (BC7); a draft is never the registered docs/llm/traces/interceptor-benign/cases.json until reviewed. No model is called")
+	censusResultsPath := flag.String("census-results", filepath.Join("docs", "llm", "census", "census-results.json"), "With -interceptor-benign-draft: the census results (llm-bench.census-results/v1) bound to -census-manifest")
+	benignN := flag.Int("benign-n", 96, "With -interceptor-benign-draft: extraction tasks to sample")
+	benignNonfiring := flag.Int("benign-nonfiring", 16, "With -interceptor-benign-draft: nonfiring tasks to sample")
+	benignReject := flag.String("benign-reject", "", "With -interceptor-benign-draft: comma-separated census refs (<stratum>/<path>) rejected in review; each is replaced by continuing down the same permutation")
+	buildInterceptorBenign := flag.String("build-interceptor-benign", "", "Run the identity gate (#517 spec §6.4) on this benign cases JSON and, when every identity holds, build each task's golem-default-guards and guards+detectors traces into -benign-out. No model is called")
+	benignOut := flag.String("benign-out", filepath.Join("docs", "llm", "traces", "interceptor-benign", "traces"), "Output directory for -build-interceptor-benign")
 	assemblyOut := flag.String("assembly-out", filepath.Join("docs", "llm", "assembly-corpus", "traces"), "Output directory for -assembly-build with a 3a JSON-array fixture")
 	assemblyOutMixed := flag.String("assembly-out-mixed", filepath.Join("docs", "llm", "assembly-corpus", "mixed", "traces"), "Output directory for -assembly-build with a 3c mixed-assembly object fixture (the mixed corpus keeps its own manifest, separate from -assembly-out)")
 
@@ -212,8 +219,14 @@ func main() {
 	if *interceptorV1Report != "" {
 		modes++
 	}
+	if *interceptorBenignDraft != "" {
+		modes++
+	}
+	if *buildInterceptorBenign != "" {
+		modes++
+	}
 	if modes > 1 {
-		log.Fatalf("llm-bench: -capture, -calibrate-capture, -calibrate, -manual-report, -paired-report, -assembly-report, -fim-latency, -blind-render, -blind-ingest, -fc-render, -fc-ingest, -fc-sidemap-generate, -adjudicate-render, -adjudicate-ingest, -discrimination-report, -import-xlam, -assembly-build, -build-injection-corpus, -injection-report, -replay-attempt, -interceptor-census, -interceptor-v1-report are mutually exclusive")
+		log.Fatalf("llm-bench: -capture, -calibrate-capture, -calibrate, -manual-report, -paired-report, -assembly-report, -fim-latency, -blind-render, -blind-ingest, -fc-render, -fc-ingest, -fc-sidemap-generate, -adjudicate-render, -adjudicate-ingest, -discrimination-report, -import-xlam, -assembly-build, -build-injection-corpus, -injection-report, -replay-attempt, -interceptor-census, -interceptor-v1-report, -interceptor-benign-draft, -build-interceptor-benign are mutually exclusive")
 	}
 	if providedFlags["registration"] && !*calibrateCapture && !*injectionReport {
 		log.Fatalf("llm-bench: -registration requires -calibrate-capture or -injection-report")
@@ -224,8 +237,18 @@ func main() {
 		}
 	}
 	if !*interceptorCensus {
-		if stray := strayCensusFlags(providedFlags); len(stray) > 0 {
-			log.Fatalf("llm-bench: %s require -interceptor-census", strings.Join(stray, ", "))
+		if stray := strayCensusFlags(providedFlags, *interceptorBenignDraft != ""); len(stray) > 0 {
+			log.Fatalf("llm-bench: %s require -interceptor-census (-census-manifest and -census-root also serve -interceptor-benign-draft)", strings.Join(stray, ", "))
+		}
+	}
+	if *interceptorBenignDraft == "" {
+		if stray := strayFlags(providedFlags, "census-results", "benign-n", "benign-nonfiring", "benign-reject"); len(stray) > 0 {
+			log.Fatalf("llm-bench: %s require -interceptor-benign-draft", strings.Join(stray, ", "))
+		}
+	}
+	if *buildInterceptorBenign == "" {
+		if stray := strayFlags(providedFlags, "benign-out"); len(stray) > 0 {
+			log.Fatalf("llm-bench: %s require -build-interceptor-benign", strings.Join(stray, ", "))
 		}
 	}
 
@@ -263,6 +286,29 @@ func main() {
 	if *interceptorCensus {
 		if err := runCensusMode(ctx, *censusManifestPath, *censusRoot, *censusOut, os.Stderr); err != nil {
 			log.Fatalf("llm-bench: interceptor-census: %v", err)
+		}
+		return
+	}
+
+	if *interceptorBenignDraft != "" {
+		refuseOutputAlias("interceptor-benign-draft", "-interceptor-benign-draft", *interceptorBenignDraft,
+			[][2]string{{"-census-manifest", *censusManifestPath}, {"-census-results", *censusResultsPath}})
+		var rejected []string
+		for _, ref := range strings.Split(*benignReject, ",") {
+			if ref = strings.TrimSpace(ref); ref != "" {
+				rejected = append(rejected, ref)
+			}
+		}
+		p := benignDraftParams{N: *benignN, Nonfiring: *benignNonfiring, Seed: benignSeed, Rejected: rejected}
+		if err := runBenignDraftMode(ctx, *censusManifestPath, *censusRoot, *censusResultsPath, *interceptorBenignDraft, p, os.Stderr); err != nil {
+			log.Fatalf("llm-bench: interceptor-benign-draft: %v", err)
+		}
+		return
+	}
+
+	if *buildInterceptorBenign != "" {
+		if err := buildBenignCorpus(ctx, *buildInterceptorBenign, *benignOut); err != nil {
+			log.Fatalf("llm-bench: build-interceptor-benign: %v", err)
 		}
 		return
 	}
@@ -1469,8 +1515,13 @@ func strayAttemptFlags(provided map[string]bool) []string {
 }
 
 // strayCensusFlags lists the -census-* flags set without -interceptor-census,
-// which every other mode would silently ignore.
-func strayCensusFlags(provided map[string]bool) []string {
+// which every other mode would silently ignore. With the benign draft
+// (draft), -census-manifest and -census-root are its inputs; -census-out
+// still is not.
+func strayCensusFlags(provided map[string]bool, draft bool) []string {
+	if draft {
+		return strayFlags(provided, "census-out")
+	}
 	return strayFlags(provided, "census-manifest", "census-root", "census-out")
 }
 

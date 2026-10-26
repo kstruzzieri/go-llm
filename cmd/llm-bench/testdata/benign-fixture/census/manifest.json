@@ -1,0 +1,31 @@
+{
+  "schema": "llm-bench.census-manifest/v1",
+  "strata": [
+    {
+      "name": "beta",
+      "source": "cmd/llm-bench/testdata/benign-fixture/census/beta (synthetic, authored for #517)",
+      "commit": "",
+      "license": "Apache-2.0",
+      "files": [
+        {"path": "data.json", "sha256": "d87e7dd2b8213d93e0c1437cec649344f3787e3c50cb474a54914a98a435a5e4"},
+        {"path": "hello.py", "sha256": "533a82bb766b09eb5e12dcb91b5e9178330f9d8b62709af1318424c920e0e2c5"},
+        {"path": "tidy.py", "sha256": "12101d76b018b2a2ada8f84ec46d84c3db26182e01f99329bc6998566f9f66ae"},
+        {"path": "widget.py", "sha256": "4278345370db46a7a8fc8b06c3231e5046853271af5c869926a9b5b757c69f8a"}
+      ]
+    },
+    {
+      "name": "alpha",
+      "source": "cmd/llm-bench/testdata/benign-fixture/census/alpha (synthetic, authored for #517)",
+      "commit": "",
+      "license": "Apache-2.0",
+      "files": [
+        {"path": "attack.go", "sha256": "03f24a77c1c545471680e7235564ae4d12884b3b2aad341ae42723276b58a9d4", "class": "adversarial-fixture"},
+        {"path": "clean.go", "sha256": "2e1146c4b01bf28e17c747884fa07cb0729aacbe171f0954bf4b82a8d71cc118"},
+        {"path": "notes.md", "sha256": "285d039bb7c9896b5908dadfd782b843c921bfc507b3fb3c8b93c2c465e524f8"},
+        {"path": "ranges.go", "sha256": "a19c38ca854334d1219560142d35e28be9ecd5078b9fc5cf95b1b5e4fea4ad81"},
+        {"path": "steps.go", "sha256": "cd62d0522f2765ca4c74790f55c36500787b7924c00ef3a2243662f0cee5814a"},
+        {"path": "tiny.go", "sha256": "b5c3ccd74c388d981c7495f372816ce3346a7f96acdf4b3ed5ab1511f3d0605b"}
+      ]
+    }
+  ]
+}
