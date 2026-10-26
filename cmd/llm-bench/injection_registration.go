@@ -199,45 +199,8 @@ func (r injectionRegistration) validate() error {
 		if !ok {
 			return fmt.Errorf("model %q has no decoding", m)
 		}
-		if d.NumPredict <= 0 || strings.TrimSpace(d.ServingStack) == "" {
-			return fmt.Errorf("model %q decoding needs num_predict > 0 and serving_stack", m)
-		}
-		hosted := strings.HasPrefix(strings.ToLower(strings.TrimSpace(d.ServingStack)), "hosted")
-		// Local models are pinned at temperature 0. A hosted model may register
-		// the temperature its host fixes (hosted.host_fixed_decoding says why).
-		switch {
-		case hosted && (math.IsNaN(d.Temperature) || math.IsInf(d.Temperature, 0) || d.Temperature < 0):
-			return fmt.Errorf("decoding for %q: hosted temperature must be a finite value >= 0; got %v", m, d.Temperature)
-		case !hosted && d.Temperature != 0:
-			return fmt.Errorf("decoding for %q: temperature must be 0 for a local serving stack (#452 global constraint); got %v", m, d.Temperature)
-		}
-		mode, err := provider.ParseThinkModeStrict(d.ThinkMode)
-		if err != nil {
-			return fmt.Errorf("model %q decoding: %w", m, err)
-		}
-		if mode == provider.ThinkNone && (d.Think != nil || d.ThinkEffort != "") {
-			return fmt.Errorf("model %q decoding: think_mode none cannot set think or think_effort (production clears them)", m)
-		}
-		if mode == provider.ThinkToggle && d.Think == nil {
-			return fmt.Errorf("model %q decoding: think_mode toggle requires an explicit think (an unset toggle parses as auto in production)", m)
-		}
-		if hosted && d.Hosted == nil {
-			return fmt.Errorf("model %q serving_stack %q is hosted but has no hosted block", m, d.ServingStack)
-		}
-		if h := d.Hosted; h != nil {
-			for name, v := range map[string]string{
-				"endpoint": h.Endpoint, "capture_window": h.CaptureWindow, "think_fields": h.ThinkFields,
-				"parser_policy": h.ParserPolicy, "tool_call_envelope": h.ToolCallEnvelope,
-				"time_limit": h.TimeLimit, "session_header_policy": h.SessionHeaderPolicy,
-				"host_fixed_decoding": h.HostFixedDecoding,
-			} {
-				if strings.TrimSpace(v) == "" {
-					return fmt.Errorf("model %q hosted.%s is required", m, name)
-				}
-			}
-			if h.UnavailableControls == nil {
-				return fmt.Errorf("model %q hosted.unavailable_controls must be present (may be empty)", m)
-			}
+		if err := d.validate(m); err != nil {
+			return err
 		}
 	}
 	want := registeredDecoderPolicy{
@@ -248,6 +211,57 @@ func (r injectionRegistration) validate() error {
 	if !slices.Equal(got.Encodings, want.Encodings) || got.MaxValueBytes != want.MaxValueBytes ||
 		got.MaxTotalBytes != want.MaxTotalBytes || got.MaxDepth != want.MaxDepth || got.MinToken != want.MinToken {
 		return errors.New("decoder_policy does not equal the compiled decoder constants")
+	}
+	return nil
+}
+
+// hosted reports whether d's serving stack is a hosted service.
+func (d registeredDecoding) hosted() bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(d.ServingStack)), "hosted")
+}
+
+// validate checks model m's registered decoding: the rules both the #452 and
+// the #517 registration hold every model to.
+func (d registeredDecoding) validate(m string) error {
+	if d.NumPredict <= 0 || strings.TrimSpace(d.ServingStack) == "" {
+		return fmt.Errorf("model %q decoding needs num_predict > 0 and serving_stack", m)
+	}
+	hosted := d.hosted()
+	// Local models are pinned at temperature 0. A hosted model may register
+	// the temperature its host fixes (hosted.host_fixed_decoding says why).
+	switch {
+	case hosted && (math.IsNaN(d.Temperature) || math.IsInf(d.Temperature, 0) || d.Temperature < 0):
+		return fmt.Errorf("decoding for %q: hosted temperature must be a finite value >= 0; got %v", m, d.Temperature)
+	case !hosted && d.Temperature != 0:
+		return fmt.Errorf("decoding for %q: temperature must be 0 for a local serving stack (#452 global constraint); got %v", m, d.Temperature)
+	}
+	mode, err := provider.ParseThinkModeStrict(d.ThinkMode)
+	if err != nil {
+		return fmt.Errorf("model %q decoding: %w", m, err)
+	}
+	if mode == provider.ThinkNone && (d.Think != nil || d.ThinkEffort != "") {
+		return fmt.Errorf("model %q decoding: think_mode none cannot set think or think_effort (production clears them)", m)
+	}
+	if mode == provider.ThinkToggle && d.Think == nil {
+		return fmt.Errorf("model %q decoding: think_mode toggle requires an explicit think (an unset toggle parses as auto in production)", m)
+	}
+	if hosted && d.Hosted == nil {
+		return fmt.Errorf("model %q serving_stack %q is hosted but has no hosted block", m, d.ServingStack)
+	}
+	if h := d.Hosted; h != nil {
+		for name, v := range map[string]string{
+			"endpoint": h.Endpoint, "capture_window": h.CaptureWindow, "think_fields": h.ThinkFields,
+			"parser_policy": h.ParserPolicy, "tool_call_envelope": h.ToolCallEnvelope,
+			"time_limit": h.TimeLimit, "session_header_policy": h.SessionHeaderPolicy,
+			"host_fixed_decoding": h.HostFixedDecoding,
+		} {
+			if strings.TrimSpace(v) == "" {
+				return fmt.Errorf("model %q hosted.%s is required", m, name)
+			}
+		}
+		if h.UnavailableControls == nil {
+			return fmt.Errorf("model %q hosted.unavailable_controls must be present (may be empty)", m)
+		}
 	}
 	return nil
 }

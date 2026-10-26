@@ -20,6 +20,7 @@ are the frozen decision-point requests a later live run replays.
 | `delegated.json` | The 14 hand-authored delegated tasks kept after review (20 were authored), the only hand-written input. |
 | `traces/ben-<task>-g.json` | The task's request under `golem-default-guards`. |
 | `traces/ben-<task>-gd.json` | The task's request under `guards+detectors`. |
+| `registration.json` | The pre-registration (`llm-bench.interceptor-registration/v1`). Generated; see [Registration](#registration-spec-67). |
 
 ## Strata
 
@@ -257,6 +258,48 @@ refs), so this provenance rests on the command. The delegated block is
 hand-authored in `delegated.json` and appended unchanged; a test checks that
 the two agree. `TestBenignCorpusRegen` rebuilds the traces twice and compares
 them byte for byte with `traces/`.
+
+## Registration (spec §6.7)
+
+`registration.json` is committed before any capture, and each run records its
+digest. Its schema is `llm-bench.interceptor-registration/v1`. The loader
+rejects unknown fields and trailing data, and every mismatch names its field.
+It reads `cases.json` and `traces/` beside the registration and the census at
+`../../census` relative to it (`docs/llm/census/`), so it works from any
+working directory. It binds:
+
+- `cases_sha256`: the sha256 of `cases.json`.
+- `traces`: every committed trace exactly once, with its `canonicalTraceHash`
+  and its stratum as `population`. The stratum fixes the expected
+  identity-gate cell: extraction and delegated get a trailer under G+D, and
+  nonfiring stays identical.
+- `chains`: the four arms, equal to `interceptorArms()`.
+- `census`: the sha256 of `manifest.json` and of `census-results.json`, and
+  the full-output digest that `census-results.json` records.
+- `builder_revision`: a source digest, because a branch commit does not
+  survive the squash merge. It is the output of
+  `cd cmd/llm-bench && shasum -a 256 injection_build.go benign.go arms.go interceptor_v1.go | shasum -a 256`.
+  The loader checks its form only, never against the sources.
+- `scorer_revision`: `deferred (K5=b)`. No benign scorer exists until the
+  flip PR.
+- `budgets`: K1's δ = 0.10, task-failure budget 0, and unnecessary-block
+  budget 0.01 per stratum.
+- `power`: an assumed q of 0.10, 96 clusters (the extraction tasks), and the
+  primary contrast, qwen3-coder-next on AnswerQuality. Under a true Δ of 0,
+  the primary contrast passes with probability
+  Φ((δ − 1.96·√(q/n)) / √(q/n)) ≈ 0.873. The contrasts of all four local
+  models (qwen3-coder-next, qwen3.6:35b-a3b, gemma4:31b and qwen3.8:27b) pass
+  together with 0.873^4 ≈ 0.580. The hosted kimi-k2.7-code is descriptive only.
+- `decoding`: the #452 registration's decoding map, copied verbatim. Its
+  hosted fields keep the injection v1 shape.
+- The estimand, the delegated matching rule above, the retry policy, the
+  claim gates, and `capture_timing`, which is `deferred to flip PR (K5=b)`.
+
+This v1 registration is re-frozen at the flip PR, which runs the capture
+against the re-frozen file. To regenerate it, run
+`go test ./cmd/llm-bench -run TestRegistrationRegen -update-interceptor-registration`.
+`TestRegistrationRegen` checks that the committed file is the writer's output,
+apart from `builder_revision`.
 
 ## Review protocol (BC7)
 
