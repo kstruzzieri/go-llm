@@ -59,3 +59,37 @@ func TestMainInterceptorBenignReport(t *testing.T) {
 		}
 	}
 }
+
+func TestMainInterceptorBenignReportRejectsTraceAliases(t *testing.T) {
+	for _, alias := range []string{"direct", "symlink"} {
+		t.Run(alias, func(t *testing.T) {
+			dir := registrationFixture(t)
+			reg := writeRegistration(t, dir, nil)
+			trace := filepath.Join(dir, "traces", "ben-ext-0001-g.json")
+			before, err := os.ReadFile(trace)
+			if err != nil {
+				t.Fatal(err)
+			}
+			out := trace
+			want := "-report must differ from -registration (traces)"
+			if alias == "symlink" {
+				out = filepath.Join(t.TempDir(), "report.md")
+				if err := os.Symlink(trace, out); err != nil {
+					t.Fatal(err)
+				}
+				want = "-report resolves to the same file as -registration (traces)"
+			}
+			code, log := runLLMBenchMain(t, nil, "-interceptor-benign-report", "-registration", reg, "-report", out)
+			if code != 1 || !strings.Contains(log, want) {
+				t.Errorf("exit %d output %q, want alias refusal %q", code, log, want)
+			}
+			after, err := os.ReadFile(trace)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(after) != string(before) {
+				t.Error("report output overwrote a registered trace")
+			}
+		})
+	}
+}

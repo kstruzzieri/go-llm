@@ -324,10 +324,16 @@ func main() {
 		}
 		bound := filepath.Dir(*registrationPath)
 		census := filepath.Join(bound, filepath.FromSlash(interceptorCensusRel))
-		refuseReportAlias("interceptor-benign-report", *reportPath, [][2]string{{"-registration", *registrationPath},
+		inputs := [][2]string{{"-registration", *registrationPath},
 			{"-registration (cases.json)", filepath.Join(bound, "cases.json")},
 			{"-registration (census-results.json)", filepath.Join(census, "census-results.json")},
-			{"-registration (manifest.json)", filepath.Join(census, "manifest.json")}})
+			{"-registration (manifest.json)", filepath.Join(census, "manifest.json")}}
+		traces, err := filepath.Glob(filepath.Join(bound, "traces", "*.json"))
+		if err != nil {
+			log.Fatalf("llm-bench: interceptor-benign-report: glob traces: %v", err)
+		}
+		inputs = append(inputs, pathListInputs("-registration (traces)", traces)...)
+		refuseReportAlias("interceptor-benign-report", *reportPath, inputs)
 		report, err := runInterceptorBenignReport(ctx, *registrationPath)
 		if err != nil {
 			log.Fatalf("llm-bench: interceptor-benign-report: %v", err)
