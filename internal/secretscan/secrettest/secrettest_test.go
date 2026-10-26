@@ -1,6 +1,8 @@
 package secrettest
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"maps"
 	"os"
@@ -481,9 +483,11 @@ func luhn(digits string) bool {
 // registration.json and every trace) and the two PR2 reports (the v1
 // adversarial and the benign interceptor reports). No corpus excerpt is
 // exempt: every committed window must scan clean. The sha256 digests of the
-// census results and of the registration are blanked first (ruling R19): they
-// are identifiers that can hold a Luhn-valid digit run, not content (the
-// fixture golden's are empty). Never scanned: docs/llm/census/manifest.json, whose
+// census results and of the registration, and those the two reports print
+// (the registration's, the registration file's own and the v1 cases file's),
+// are blanked first (ruling R19): they are identifiers that can hold a
+// Luhn-valid digit run, not content (the fixture golden's are empty). Never
+// scanned: docs/llm/census/manifest.json, whose
 // per-file sha256s carry such runs by design, and the census fixture's
 // constant.go, a deliberate corpus excerpt.
 func TestCommittedArtifactsCarryNoSecretShapes(t *testing.T) {
@@ -492,6 +496,42 @@ func TestCommittedArtifactsCarryNoSecretShapes(t *testing.T) {
 	results := filepath.Join(repo, "docs", "llm", "census", "census-results.json")
 	benign := filepath.Join(repo, "docs", "llm", "traces", "interceptor-benign")
 	registration := filepath.Join(benign, "registration.json")
+	benignReport := filepath.Join(repo, "docs", "llm", "benchmarks", "2026-10-26-interceptor-benign.md")
+	v1Report := filepath.Join(repo, "docs", "llm", "benchmarks", "2026-10-25-interceptor-adversarial-v1.md")
+	sha := func(path string) string {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		sum := sha256.Sum256(raw)
+		return hex.EncodeToString(sum[:])
+	}
+	registrationDigests := func() []string {
+		raw, err := os.ReadFile(registration)
+		if err != nil {
+			t.Fatalf("read %s: %v", registration, err)
+		}
+		var digests struct {
+			Cases   string `json:"cases_sha256"`
+			Builder string `json:"builder_revision"`
+			Traces  []struct {
+				SHA256 string `json:"sha256"`
+			} `json:"traces"`
+			Census struct {
+				Manifest string `json:"manifest_sha256"`
+				Results  string `json:"results_sha256"`
+				Full     string `json:"full_sha256"`
+			} `json:"census"`
+		}
+		if err := json.Unmarshal(raw, &digests); err != nil {
+			t.Fatalf("%s: %v", registration, err)
+		}
+		out := []string{digests.Cases, digests.Builder, digests.Census.Manifest, digests.Census.Results, digests.Census.Full}
+		for _, tr := range digests.Traces {
+			out = append(out, tr.SHA256)
+		}
+		return out
+	}
 	tests, err := filepath.Glob("*_test.go")
 	if err != nil || len(tests) < 2 {
 		t.Fatalf("Glob(*_test.go) = %v, %v; want this package's test files", tests, err)
@@ -513,8 +553,8 @@ func TestCommittedArtifactsCarryNoSecretShapes(t *testing.T) {
 		filepath.Join(benign, "delegated.json"),
 		filepath.Join(benign, "README.md"),
 		registration,
-		filepath.Join(repo, "docs", "llm", "benchmarks", "2026-10-25-interceptor-adversarial-v1.md"),
-		filepath.Join(repo, "docs", "llm", "benchmarks", "2026-10-26-interceptor-benign.md"),
+		v1Report,
+		benignReport,
 	}, tests...), traces...) {
 		data, err := os.ReadFile(path)
 		if err != nil {
@@ -533,25 +573,11 @@ func TestCommittedArtifactsCarryNoSecretShapes(t *testing.T) {
 			}
 			blank = []string{digests.Manifest, digests.Full}
 		case registration:
-			var digests struct {
-				Cases   string `json:"cases_sha256"`
-				Builder string `json:"builder_revision"`
-				Traces  []struct {
-					SHA256 string `json:"sha256"`
-				} `json:"traces"`
-				Census struct {
-					Manifest string `json:"manifest_sha256"`
-					Results  string `json:"results_sha256"`
-					Full     string `json:"full_sha256"`
-				} `json:"census"`
-			}
-			if err := json.Unmarshal(data, &digests); err != nil {
-				t.Fatalf("%s: %v", path, err)
-			}
-			blank = []string{digests.Cases, digests.Builder, digests.Census.Manifest, digests.Census.Results, digests.Census.Full}
-			for _, tr := range digests.Traces {
-				blank = append(blank, tr.SHA256)
-			}
+			blank = registrationDigests()
+		case benignReport:
+			blank = append(registrationDigests(), sha(registration))
+		case v1Report:
+			blank = []string{sha(filepath.Join(repo, "docs", "llm", "traces", "injection", "cases.json"))}
 		}
 		for _, d := range blank {
 			if len(d) != 64 || strings.Trim(d, "0123456789abcdef") != "" {

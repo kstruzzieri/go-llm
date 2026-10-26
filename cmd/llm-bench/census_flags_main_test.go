@@ -70,3 +70,21 @@ func TestBenignFlagsRefusedByMain(t *testing.T) {
 		}
 	}
 }
+
+// -build-interceptor-benign names the directory it publishes to and the stale
+// traces it prunes there, before publishing (-benign-out defaults to the
+// committed traces directory).
+func TestBenignBuildNamesOutputDir(t *testing.T) {
+	out := t.TempDir()
+	if err := os.WriteFile(filepath.Join(out, "ben-stale.json"), []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cases := filepath.Join(benignCorpusDir(t), "cases.json")
+	code, log := runLLMBenchMain(t, nil, "-build-interceptor-benign", cases, "-benign-out", out)
+	if want := "benign build: publishing 252 trace(s) to " + out + ", removing 1 stale ben-*.json"; code != 0 || !strings.Contains(log, want) {
+		t.Fatalf("exit %d output %q, want %q", code, log, want)
+	}
+	if _, err := os.Stat(filepath.Join(out, "ben-stale.json")); !os.IsNotExist(err) {
+		t.Errorf("the stale trace survived: %v", err)
+	}
+}

@@ -1,7 +1,7 @@
 {
   "schema": "llm-bench.interceptor-registration/v1",
   "cases_sha256": "55df4a5aaf3d3884007ba957568fca66c2cb8490b46096703f7b91966ba2bc1b",
-  "builder_revision": "a08d52375b08711e5ed99a1eaef5aa3da5a0f8f4901dc5b4460fcc022c7fcaee",
+  "builder_revision": "ae655f76b3d440968480844bc1a341dd7ef8795e464e3c37934526fd501db883",
   "scorer_revision": "deferred (K5=b)",
   "traces": [
     {

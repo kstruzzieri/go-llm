@@ -8,7 +8,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/kstruzzieri/go-llm/internal/secretscan"
 	"github.com/kstruzzieri/go-llm/internal/secretscan/secrettest"
 	"github.com/kstruzzieri/go-llm/provider"
 )
@@ -438,9 +437,9 @@ func TestV1ReportRegen(t *testing.T) {
 	if first != second {
 		t.Fatal("two renders of the v1 interceptor report differ")
 	}
-	if f := secretscan.Scan(first); len(f) != 0 {
-		t.Errorf("the report carries secret-shaped spans: %v", f)
-	}
+	// The secret-shape scan runs on the committed bytes, with their digests
+	// blanked (TestCommittedArtifactsCarryNoSecretShapes); render == committed
+	// is checked below.
 	if interceptorV1ReportPath != "docs/llm/benchmarks/2026-10-25-interceptor-adversarial-v1.md" {
 		t.Fatalf("interceptorV1ReportPath = %s", interceptorV1ReportPath)
 	}

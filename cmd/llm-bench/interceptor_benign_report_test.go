@@ -7,8 +7,6 @@ import (
 	"slices"
 	"strings"
 	"testing"
-
-	"github.com/kstruzzieri/go-llm/internal/secretscan"
 )
 
 // Review Focus 5 and ruling P9: the registered 1/100 budget is integer-exact
@@ -16,22 +14,28 @@ import (
 func TestBlockBudgetBoundary(t *testing.T) {
 	for _, tc := range []struct {
 		blocked, observations int
+		budget                float64
 		want                  budgetVerdict
 	}{
-		{1, 100, budgetPass},
-		{2, 199, budgetFail},
-		{2, 200, budgetPass},
-		{3, 299, budgetFail},
-		{0, 3, budgetPass},
-		{1, 3, budgetFail},
-		{0, 0, budgetNoObservations},
+		{1, 100, 0.01, budgetPass},
+		{2, 199, 0.01, budgetFail},
+		{2, 200, 0.01, budgetPass},
+		{3, 299, 0.01, budgetFail},
+		{0, 3, 0.01, budgetPass},
+		{1, 3, 0.01, budgetFail},
+		{0, 0, 0.01, budgetNoObservations},
 		// Past 2^53 float64(9007199254740999) rounds up to ...1000, so a
 		// float comparison would pass 90071992547410 blocks; the integer check
 		// does not (found by a Python search, not by the code under test).
-		{90071992547410, 9007199254740999, budgetFail},
+		{90071992547410, 9007199254740999, 0.01, budgetFail},
+		// Any other budget compares as a share.
+		{5, 100, 0.05, budgetPass},
+		{6, 100, 0.05, budgetFail},
+		{2, 100, 0.02, budgetPass},
+		{0, 0, 0.05, budgetNoObservations},
 	} {
-		if got := blockBudgetVerdict(tc.blocked, tc.observations, 0.01); got != tc.want {
-			t.Errorf("blockBudgetVerdict(%d, %d, 0.01) = %q, want %q", tc.blocked, tc.observations, got, tc.want)
+		if got := blockBudgetVerdict(tc.blocked, tc.observations, tc.budget); got != tc.want {
+			t.Errorf("blockBudgetVerdict(%d, %d, %v) = %q, want %q", tc.blocked, tc.observations, tc.budget, got, tc.want)
 		}
 	}
 	if budgetNoObservations != "no MCP observations" {
@@ -269,9 +273,9 @@ func TestBenignReportRegen(t *testing.T) {
 	if first != second {
 		t.Fatal("two renders of the benign interceptor report differ")
 	}
-	if f := secretscan.Scan(first); len(f) != 0 {
-		t.Errorf("the report carries secret-shaped spans: %v", f)
-	}
+	// The secret-shape scan runs on the committed bytes, with their digests
+	// blanked (TestCommittedArtifactsCarryNoSecretShapes); render == committed
+	// is checked below.
 	if interceptorBenignReportPath != "docs/llm/benchmarks/2026-10-26-interceptor-benign.md" {
 		t.Fatalf("interceptorBenignReportPath = %s", interceptorBenignReportPath)
 	}

@@ -57,7 +57,8 @@ type interceptorRegistration struct {
 	// ("<hex>  <name>\n", two spaces) of cmd/llm-bench/injection_build.go,
 	// benign.go, arms.go and interceptor_v1.go in that order, as
 	// `cd cmd/llm-bench && shasum -a 256 injection_build.go benign.go arms.go interceptor_v1.go | shasum -a 256`
-	// prints it. The loader checks its form only, never against the sources.
+	// prints it. The loader checks its form only; TestRegistrationRegen holds
+	// it to the current sources (Ruling P30).
 	BuilderRevision string `json:"builder_revision"`
 	// ScorerRevision is "deferred (K5=b)": no benign scorer exists until the
 	// flip PR.

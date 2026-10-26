@@ -212,10 +212,10 @@ func marshalRegistration(t *testing.T, r any) []byte {
 
 // TestRegistrationRegen is the registration's regeneration gate: two writer
 // runs over the committed corpus are byte for byte identical, and equal to the
-// committed file once builder_revision is the committed one (the loader never
-// re-validates that digest against the sources, Ruling P28, so later builder
-// edits do not fail this gate). -update-interceptor-registration rewrites the
-// committed file, builder_revision included.
+// committed file, builder_revision included: it must be builderSourceDigest
+// of the current builder sources (Ruling P30, reversing P28's form-only check
+// here; the loader still checks its form only). -update-interceptor-registration
+// rewrites the committed file.
 func TestRegistrationRegen(t *testing.T) {
 	dir := benignCorpusDir(t)
 	path := filepath.Join(dir, "registration.json")
@@ -233,12 +233,15 @@ func TestRegistrationRegen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	first.BuilderRevision = committed.BuilderRevision
+	if committed.BuilderRevision != first.BuilderRevision {
+		t.Errorf("registration.json: builder_revision %s is not the current builder sources' digest %s; regenerate with go test ./cmd/llm-bench -run TestRegistrationRegen -update-interceptor-registration",
+			committed.BuilderRevision, first.BuilderRevision)
+	}
 	want, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(marshalRegistration(t, first), want) {
+	if !bytes.Equal(got, want) {
 		t.Error("registration.json: rebuilt bytes differ from the committed file; regenerate with go test ./cmd/llm-bench -run TestRegistrationRegen -update-interceptor-registration")
 	}
 }

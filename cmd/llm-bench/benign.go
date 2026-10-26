@@ -1048,6 +1048,9 @@ func buildBenignCorpus(ctx context.Context, casesPath, outDir string) error {
 			removals = append(removals, p)
 		}
 	}
+	// -benign-out defaults to the committed traces directory, so say where the
+	// traces go and how many stale ones are pruned before publishing.
+	_, _ = fmt.Fprintf(os.Stderr, "benign build: publishing %d trace(s) to %s, removing %d stale ben-*.json\n", len(files), outDir, len(removals))
 	pub, err := publishFileSet(files, removals)
 	for _, w := range pub.cleanupWarnings {
 		_, _ = fmt.Fprintf(os.Stderr, "benign build: cleanup warning: %v\n", w)

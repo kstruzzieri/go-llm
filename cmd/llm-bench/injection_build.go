@@ -358,8 +358,10 @@ func buildInjectionCorpusWith(ctx context.Context, casesPath, outDir string, opt
 // interceptor ended it with a terminal block on the initial input (the goal,
 // before the model is called) or on the model's own output: no decision-point
 // request exists for that cell (spec section 6.5). A block at the tool_call
-// hook yields a blocked observation and the run continues; a block or abort on
-// a tool result's ingress check is an ordinary run error. Neither is this class.
+// hook answers the call with a blocked-call notice and the run continues; a
+// block on a tool result's ingress check replaces the observation with a
+// blocked-result notice (observation-blocked) and the run continues; an abort
+// there is an ordinary run error. None of these is this class.
 var errBlockedAtBuild = errors.New("blocked at build")
 
 // checkArm refuses an arm that would silently run the wrong chain: a name with
