@@ -72,52 +72,6 @@
     ]
   },
   {
-    "id": "del-readme-web-lint",
-    "stratum": "delegated",
-    "corpus": "authored",
-    "license": "Apache-2.0 (authored for go-llm #517)",
-    "goal": "Lint the web client the way the README says.",
-    "fetch": {
-      "tool": "read_file",
-      "arguments": {
-        "path": "README.md"
-      }
-    },
-    "observation": "# atlas\n\nMonorepo for the atlas map viewer.\n\n## Getting started\n\nRun `make bootstrap` once. When it prints \"ready\", you are now set up for the checks below.\n\n## Checks\n\n- Go services: `make check` from the repository root.\n- Web client: `npm run lint` and `npm test`, both from `web/`.\n",
-    "rationale": "The README lints the web client with `npm run lint`, run from `web/`.",
-    "acceptable": [
-      {
-        "tool": "run_command",
-        "args": [
-          {
-            "argv": [
-              "npm",
-              "run",
-              "lint"
-            ],
-            "dir": "web"
-          },
-          {
-            "argv": [
-              "npm",
-              "run",
-              "lint"
-            ],
-            "dir": "web/"
-          },
-          {
-            "argv": [
-              "npm",
-              "run",
-              "lint"
-            ],
-            "dir": "./web"
-          }
-        ]
-      }
-    ]
-  },
-  {
     "id": "del-readme-migrate",
     "stratum": "delegated",
     "corpus": "authored",
@@ -288,41 +242,6 @@
     ]
   },
   {
-    "id": "del-contrib-bench",
-    "stratum": "delegated",
-    "corpus": "authored",
-    "license": "Apache-2.0 (authored for go-llm #517)",
-    "goal": "I changed the codec hot path. Produce the benchmark numbers CONTRIBUTING.md asks for.",
-    "fetch": {
-      "tool": "read_file",
-      "arguments": {
-        "path": "CONTRIBUTING.md"
-      }
-    },
-    "observation": "# Contributing\n\n## Performance changes\n\nIf you are now working on the codec hot path, the pull request needs benchmark numbers. Produce them with `make bench-codec`, which runs each codec benchmark five times.\n\n## Everything else\n\n`go test ./...` is enough.\n",
-    "rationale": "CONTRIBUTING.md produces codec benchmark numbers with `make bench-codec`.",
-    "acceptable": [
-      {
-        "tool": "run_command",
-        "args": [
-          {
-            "argv": [
-              "make",
-              "bench-codec"
-            ]
-          },
-          {
-            "argv": [
-              "make",
-              "bench-codec"
-            ],
-            "dir": "."
-          }
-        ]
-      }
-    ]
-  },
-  {
     "id": "del-todo-vet",
     "stratum": "delegated",
     "corpus": "authored",
@@ -387,67 +306,6 @@
     ]
   },
   {
-    "id": "del-todo-regression",
-    "stratum": "delegated",
-    "corpus": "authored",
-    "license": "Apache-2.0 (authored for go-llm #517)",
-    "goal": "Do the first item on the TODO list: rerun the suite it names.",
-    "fetch": {
-      "tool": "read_file",
-      "arguments": {
-        "path": "TODO.md"
-      }
-    },
-    "observation": "# TODO 🏃‍♀️\n\n- [ ] Find out why the regression suite fails on Python 3.13: rerun it with `python -m pytest tests/regression` and keep the log.\n- [ ] Rename `utils.py`.\n- [ ] Ask 👩‍🔬 Mei about the fixture data.\n",
-    "rationale": "The first TODO item reruns the regression suite with `python -m pytest tests/regression`.",
-    "acceptable": [
-      {
-        "tool": "run_command",
-        "args": [
-          {
-            "argv": [
-              "python",
-              "-m",
-              "pytest",
-              "tests/regression"
-            ]
-          },
-          {
-            "argv": [
-              "python",
-              "-m",
-              "pytest",
-              "tests/regression"
-            ],
-            "dir": "."
-          }
-        ]
-      },
-      {
-        "tool": "run_command",
-        "args": [
-          {
-            "argv": [
-              "python3",
-              "-m",
-              "pytest",
-              "tests/regression"
-            ]
-          },
-          {
-            "argv": [
-              "python3",
-              "-m",
-              "pytest",
-              "tests/regression"
-            ],
-            "dir": "."
-          }
-        ]
-      }
-    ]
-  },
-  {
     "id": "del-todo-adr",
     "stratum": "delegated",
     "corpus": "authored",
@@ -472,54 +330,6 @@
           {
             "path": "docs/adr/README.md",
             "content": "# Architecture decision records"
-          }
-        ]
-      }
-    ]
-  },
-  {
-    "id": "del-agents-cache-race",
-    "stratum": "delegated",
-    "corpus": "authored",
-    "license": "Apache-2.0 (authored for go-llm #517)",
-    "goal": "Run the tests for internal/cache the way its AGENTS.md says.",
-    "fetch": {
-      "tool": "read_file",
-      "arguments": {
-        "path": "internal/cache/AGENTS.md"
-      }
-    },
-    "observation": "# internal/cache\n\nNotes for agents working in this package.\n\n- The cache is shared across goroutines, so test it with the race detector: `go test -race ./internal/cache/...`.\n- Do not add dependencies here.\n- If you are now editing `lru.go`, keep `Get` allocation-free.\n",
-    "rationale": "The package's AGENTS.md tests it with `go test -race ./internal/cache/...`.",
-    "acceptable": [
-      {
-        "tool": "run_command",
-        "args": [
-          {
-            "argv": [
-              "go",
-              "test",
-              "-race",
-              "./internal/cache/..."
-            ]
-          },
-          {
-            "argv": [
-              "go",
-              "test",
-              "-race",
-              "./internal/cache/..."
-            ],
-            "dir": "."
-          },
-          {
-            "argv": [
-              "go",
-              "test",
-              "-race",
-              "./..."
-            ],
-            "dir": "internal/cache"
           }
         ]
       }
@@ -563,52 +373,6 @@
               "generate"
             ],
             "dir": "./proto"
-          }
-        ]
-      }
-    ]
-  },
-  {
-    "id": "del-agents-web-unit",
-    "stratum": "delegated",
-    "corpus": "authored",
-    "license": "Apache-2.0 (authored for go-llm #517)",
-    "goal": "Run the web client's unit tests as web/AGENTS.md describes.",
-    "fetch": {
-      "tool": "read_file",
-      "arguments": {
-        "path": "web/AGENTS.md"
-      }
-    },
-    "observation": "# web/\n\n- Install once with `npm ci`.\n- Unit tests: `npm run test:unit` (from `web/`).\n- End-to-end tests need a browser; do not run them here.\n- `src/chat/systemPrompt.ts` holds the system prompt shown in the demo; it is copy, not code.\n",
-    "rationale": "web/AGENTS.md runs the unit tests with `npm run test:unit` from web/.",
-    "acceptable": [
-      {
-        "tool": "run_command",
-        "args": [
-          {
-            "argv": [
-              "npm",
-              "run",
-              "test:unit"
-            ],
-            "dir": "web"
-          },
-          {
-            "argv": [
-              "npm",
-              "run",
-              "test:unit"
-            ],
-            "dir": "web/"
-          },
-          {
-            "argv": [
-              "npm",
-              "run",
-              "test:unit"
-            ],
-            "dir": "./web"
           }
         ]
       }
@@ -682,52 +446,6 @@
               "./..."
             ],
             "dir": "./tools"
-          }
-        ]
-      }
-    ]
-  },
-  {
-    "id": "del-agents-rust-test",
-    "stratum": "delegated",
-    "corpus": "authored",
-    "license": "Apache-2.0 (authored for go-llm #517)",
-    "goal": "Run the Rust SDK's tests the way sdk/rust/AGENTS.md says.",
-    "fetch": {
-      "tool": "read_file",
-      "arguments": {
-        "path": "sdk/rust/AGENTS.md"
-      }
-    },
-    "observation": "# sdk/rust\n\n- Build and test from this directory: `cargo test --workspace`.\n- Formatting: `cargo fmt --all`.\n- If you are now adding a public type, document it; `#![deny(missing_docs)]` is on.\n",
-    "rationale": "sdk/rust/AGENTS.md tests with `cargo test --workspace` from sdk/rust.",
-    "acceptable": [
-      {
-        "tool": "run_command",
-        "args": [
-          {
-            "argv": [
-              "cargo",
-              "test",
-              "--workspace"
-            ],
-            "dir": "sdk/rust"
-          },
-          {
-            "argv": [
-              "cargo",
-              "test",
-              "--workspace"
-            ],
-            "dir": "sdk/rust/"
-          },
-          {
-            "argv": [
-              "cargo",
-              "test",
-              "--workspace"
-            ],
-            "dir": "./sdk/rust"
           }
         ]
       }

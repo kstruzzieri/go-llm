@@ -12,12 +12,12 @@
       {
         "stratum": "go-llm",
         "eligible": 64,
-        "sampled": 49
+        "sampled": 50
       },
       {
         "stratum": "go-src",
         "eligible": 27,
-        "sampled": 19
+        "sampled": 17
       },
       {
         "stratum": "i18n-cldr-annotations",
@@ -37,7 +37,7 @@
       {
         "stratum": "llm-app-openai-cookbook",
         "eligible": 30,
-        "sampled": 24
+        "sampled": 25
       }
     ],
     "nonfiring": 16,
@@ -57,7 +57,7 @@
       {
         "stratum": "i18n-cldr-annotations",
         "eligible": 26,
-        "sampled": 1
+        "sampled": 0
       },
       {
         "stratum": "i18n-gemoji",
@@ -72,10 +72,46 @@
       {
         "stratum": "llm-app-openai-cookbook",
         "eligible": 345,
-        "sampled": 0
+        "sampled": 1
       }
     ],
-    "rejected": []
+    "rejected": [
+      {
+        "ref": "llm-app-openai-cookbook/examples/audio/duplex_voice_agent_evaluation/assistants/resources.py",
+        "stratum": "extraction",
+        "rank": 23
+      },
+      {
+        "ref": "go-src/src/cmd/vendor/golang.org/x/text/unicode/norm/composition.go",
+        "stratum": "extraction",
+        "rank": 73
+      },
+      {
+        "ref": "go-src/src/go/build/read_test.go",
+        "stratum": "extraction",
+        "rank": 74
+      },
+      {
+        "ref": "go-llm/docs/llm/traces/round2-challenge/tool-canary-01.json",
+        "stratum": "extraction",
+        "rank": 80
+      },
+      {
+        "ref": "i18n-cldr-annotations/cldr-json/cldr-annotations-full/annotations/sa/annotations.json",
+        "stratum": "nonfiring",
+        "rank": 7
+      },
+      {
+        "ref": "go-src/src/cmd/go/internal/auth/gitauth_test.go",
+        "stratum": "nonfiring",
+        "rank": 11
+      },
+      {
+        "ref": "go-src/src/cmd/vendor/golang.org/x/tools/go/analysis/passes/asmdecl/asmdecl.go",
+        "stratum": "nonfiring",
+        "rank": 12
+      }
+    ]
   },
   "tasks": [
     {
@@ -517,26 +553,6 @@
       "anchor": "parse_args",
       "rationale": "The observation is lines 81-120 of examples/evals/realtime_evals/crawl_harness/run_realtime_evals.py, so its first line is line 81, which declares parse_args; the answer is in the observation, not in the question.",
       "rank": 22
-    },
-    {
-      "id": "ext-0023",
-      "stratum": "extraction",
-      "corpus": "llm-app-openai-cookbook",
-      "census_ref": "llm-app-openai-cookbook/examples/audio/duplex_voice_agent_evaluation/assistants/resources.py",
-      "license": "MIT",
-      "goal": "In `examples/audio/duplex_voice_agent_evaluation/assistants/resources.py`, what is the name declared on line 18?",
-      "fetch": {
-        "tool": "read_file",
-        "arguments": {
-          "end_line": 57,
-          "path": "examples/audio/duplex_voice_agent_evaluation/assistants/resources.py",
-          "start_line": 18
-        }
-      },
-      "observation": "class AssistantResources:\n    \"\"\"Resolve the selected assistant's editable prompts, tools, and facts.\"\"\"\n\n    assistant_mode: str\n    system_prompt_file: Path\n    backend_system_prompt_file: Path\n    tools_file: Path\n    facts_file: Path\n\n    def load_facts(self) -> dict[str, Any]:\n        parsed = json.loads(self.facts_file.read_text(encoding=\"utf-8\"))\n        if not isinstance(parsed, dict):\n            raise ValueError(\"Application facts must be a JSON object\")\n        return parsed\n\n    def create_executor(\n        self,\n        initial_state: dict[str, Any],\n        facts: dict[str, Any],\n        *,\n        remote: bool = False,\n    ) -> ToolExecutor:\n        if remote:\n            return RemoteToolObserver(initial_state=initial_state, facts=facts)\n        if self.assistant_mode == \"client\":\n            from assistants.client.tools.restaurant import RestaurantTools\n        else:\n            from assistants.responses.tools.restaurant import RestaurantTools\n        return RestaurantTools(initial_state=copy.deepcopy(initial_state), facts=copy.deepcopy(facts))\n\n    def create_offline_behavior(\n        self,\n        *,\n        conversation_context: str,\n        initial_state: dict[str, Any],\n        facts: dict[str, Any],\n    ) -> OfflineApplicationBehavior:\n        if self.assistant_mode == \"client\":\n            from assistants.client.tools.restaurant import RestaurantOfflineBehavior\n        else:",
-      "anchor": "AssistantResources",
-      "rationale": "The observation is lines 18-57 of examples/audio/duplex_voice_agent_evaluation/assistants/resources.py, so its first line is line 18, which declares AssistantResources; the answer is in the observation, not in the question.",
-      "rank": 23
     },
     {
       "id": "ext-0024",
@@ -1519,46 +1535,6 @@
       "rank": 72
     },
     {
-      "id": "ext-0073",
-      "stratum": "extraction",
-      "corpus": "go-src",
-      "census_ref": "go-src/src/cmd/vendor/golang.org/x/text/unicode/norm/composition.go",
-      "license": "BSD-3-Clause",
-      "goal": "In `src/cmd/vendor/golang.org/x/text/unicode/norm/composition.go`, what is the name declared on line 71?",
-      "fetch": {
-        "tool": "read_file",
-        "arguments": {
-          "end_line": 110,
-          "path": "src/cmd/vendor/golang.org/x/text/unicode/norm/composition.go",
-          "start_line": 71
-        }
-      },
-      "observation": "func (ss *streamSafe) backwards(p Properties) ssState {\n\tif *ss > maxNonStarters {\n\t\tpanic(\"streamSafe was not reset\")\n\t}\n\tc := *ss + streamSafe(p.nTrailingNonStarters())\n\tif c > maxNonStarters {\n\t\treturn ssOverflow\n\t}\n\t*ss = c\n\tif p.nLeadingNonStarters() == 0 {\n\t\treturn ssStarter\n\t}\n\treturn ssSuccess\n}\n\nfunc (ss streamSafe) isMax() bool {\n\treturn ss == maxNonStarters\n}\n\n// GraphemeJoiner is inserted after maxNonStarters non-starter runes.\nconst GraphemeJoiner = \"\\u034F\"\n\n// reorderBuffer is used to normalize a single segment.  Characters inserted with\n// insert are decomposed and reordered based on CCC. The compose method can\n// be used to recombine characters.  Note that the byte buffer does not hold\n// the UTF-8 characters in order.  Only the rune array is maintained in sorted\n// order. flush writes the resulting segment to a byte array.\ntype reorderBuffer struct {\n\trune  [maxBufferSize]Properties // Per character info.\n\tbyte  [maxByteBufferSize]byte   // UTF-8 buffer. Referenced by runeInfo.pos.\n\tnbyte uint8                     // Number or bytes.\n\tss    streamSafe                // For limiting length of non-starter sequence.\n\tnrune int                       // Number of runeInfos.\n\tf     formInfo\n\n\tsrc      input\n\tnsrc     int\n\ttmpBytes input\n\n\tout    []byte",
-      "anchor": "backwards",
-      "rationale": "The observation is lines 71-110 of src/cmd/vendor/golang.org/x/text/unicode/norm/composition.go, so its first line is line 71, which declares backwards; the answer is in the observation, not in the question.",
-      "rank": 73
-    },
-    {
-      "id": "ext-0074",
-      "stratum": "extraction",
-      "corpus": "go-src",
-      "census_ref": "go-src/src/go/build/read_test.go",
-      "license": "BSD-3-Clause",
-      "goal": "In `src/go/build/read_test.go`, what is the name declared on line 75?",
-      "fetch": {
-        "tool": "read_file",
-        "arguments": {
-          "end_line": 114,
-          "path": "src/go/build/read_test.go",
-          "start_line": 75
-        }
-      },
-      "observation": "var readCommentsTests = []readTest{\n\t{\n\t\t`ℙpackage p`,\n\t\t\"\",\n\t},\n\t{\n\t\t`ℙpackage p; import \"x\"`,\n\t\t\"\",\n\t},\n\t{\n\t\t`ℙpackage p; import . \"x\"`,\n\t\t\"\",\n\t},\n\t{\n\t\t\"\\ufeff𝔻\" + `ℙpackage p; import . \"x\"`,\n\t\t\"\",\n\t},\n\t{\n\t\t`// foo\n\n\t\t/* bar */\n\n\t\t/* quux */ // baz\n\n\t\t/*/ zot */\n\n\t\t// asdf\n\t\tℙHello, world`,\n\t\t\"\",\n\t},\n\t{\n\t\t\"\\ufeff𝔻\" + `// foo\n\n\t\t/* bar */\n\n\t\t/* quux */ // baz\n\n\t\t/*/ zot */\n\n\t\t// asdf",
-      "anchor": "readCommentsTests",
-      "rationale": "The observation is lines 75-114 of src/go/build/read_test.go, so its first line is line 75, which declares readCommentsTests; the answer is in the observation, not in the question.",
-      "rank": 74
-    },
-    {
       "id": "ext-0075",
       "stratum": "extraction",
       "corpus": "go-llm",
@@ -1657,26 +1633,6 @@
       "anchor": "_assemble_messages",
       "rationale": "The observation is lines 35-74 of examples/gpt-5/prompt-optimization-cookbook/scripts/llm_judge.py, so its first line is line 35, which declares _assemble_messages; the answer is in the observation, not in the question.",
       "rank": 79
-    },
-    {
-      "id": "ext-0080",
-      "stratum": "extraction",
-      "corpus": "go-llm",
-      "census_ref": "go-llm/docs/llm/traces/round2-challenge/tool-canary-01.json",
-      "license": "Apache-2.0",
-      "goal": "In `docs/llm/traces/round2-challenge/tool-canary-01.json`, what is the name declared on line 267?",
-      "fetch": {
-        "tool": "read_file",
-        "arguments": {
-          "end_line": 306,
-          "path": "docs/llm/traces/round2-challenge/tool-canary-01.json",
-          "start_line": 267
-        }
-      },
-      "observation": "      \"description\": \"Explain a code snippet using the local LLM.\",\n      \"inputSchema\": {\n        \"properties\": {\n          \"code\": {\n            \"description\": \"Code to explain\",\n            \"type\": \"string\"\n          },\n          \"model\": {\n            \"description\": \"Model name (uses configured analysis default if omitted)\",\n            \"type\": \"string\"\n          }\n        },\n        \"required\": [\n          \"code\"\n        ],\n        \"type\": \"object\"\n      },\n      \"name\": \"explain_code\"\n    },\n    {\n      \"description\": \"Raw text generation without chat formatting. Returns the generated text.\",\n      \"inputSchema\": {\n        \"properties\": {\n          \"max_tokens\": {\n            \"description\": \"Maximum tokens to generate\",\n            \"type\": \"integer\"\n          },\n          \"model\": {\n            \"description\": \"Model name (uses configured chat default if omitted)\",\n            \"type\": \"string\"\n          },\n          \"prompt\": {\n            \"description\": \"The prompt to generate from\",\n            \"type\": \"string\"\n          },\n          \"system\": {\n            \"description\": \"System prompt\",\n            \"type\": \"string\"\n          },\n          \"temperature\": {",
-      "anchor": "description",
-      "rationale": "The observation is lines 267-306 of docs/llm/traces/round2-challenge/tool-canary-01.json, so its first line is line 267, which declares description; the answer is in the observation, not in the question.",
-      "rank": 80
     },
     {
       "id": "ext-0081",
@@ -1999,6 +1955,86 @@
       "rank": 96
     },
     {
+      "id": "ext-0097",
+      "stratum": "extraction",
+      "corpus": "llm-app-openai-cookbook",
+      "census_ref": "llm-app-openai-cookbook/examples/audio/duplex_voice_agent_evaluation/run_harness/graders.py",
+      "license": "MIT",
+      "goal": "In `examples/audio/duplex_voice_agent_evaluation/run_harness/graders.py`, what is the name declared on line 566?",
+      "fetch": {
+        "tool": "read_file",
+        "arguments": {
+          "end_line": 605,
+          "path": "examples/audio/duplex_voice_agent_evaluation/run_harness/graders.py",
+          "start_line": 566
+        }
+      },
+      "observation": "async def _score_once(\n    client: AsyncOpenAI,\n    scenario: Scenario,\n    result: EvalResult,\n    metric: str,\n    model: str,\n    reasoning_effort: str,\n    golden: dict[str, Any] | None,\n) -> tuple[str, RubricScore, dict[str, Any], float]:\n    started = time.perf_counter()\n    response = await client.responses.parse(\n        model=model,\n        reasoning={\"effort\": reasoning_effort},\n        store=False,\n        input=[\n            {\n                \"role\": \"system\",\n                \"content\": (\n                    f\"{SEMANTIC_JUDGE_SYSTEM_PROMPT} \"\n                    \"Evaluate only the assistant under test. Never penalize the assistant for simulated-user \"\n                    \"reasoning/TTS latency, user pauses, user backchannels, interruptions, verbosity, or follow-up \"\n                    \"questions. Ignore transcript/audio segmentation artifacts and duplicated tool lifecycle events. \"\n                    \"Base the score on assistant responses, unique tool invocations, and assistant-attributable \"\n                    \"interaction behavior. For task_understanding, make an explicit semantic task_completed decision \"\n                    \"based on the achieved caller goal, verified final application state, actual tool executions, \"\n                    \"and authorization. Preferred SOP steps, golden-path order, optional availability checks, \"\n                    \"conversational hold phrases such as 'checking', and questions for information the caller \"\n                    \"already volunteered are diagnostic only; do not fail an otherwise correct outcome for \"\n                    \"them. Do not require literal evidence terms and do \"\n                    \"not treat simulator termination as assistant failure. When the scenario requests only a \"\n                    \"repeat-back or acknowledgement of \"\n                    \"caller-provided information, phrases such as 'I've recorded your correction' or \"\n                    \"'noted' are conversational acknowledgements, not unsupported claims of an \"\n                    \"external system update. Only penalize an explicit claim that an external booking \"\n                    \"or other protected system was independently verified or changed without an \"\n                    \"authorized tool result. \"\n                    \"Keep the rationale brief and specific. Transcript evidence cannot \"\n                    \"establish acoustic naturalness, pronunciation, or prosody; do not infer those qualities.\"\n                ),\n            },",
+      "anchor": "_score_once",
+      "rationale": "The observation is lines 566-605 of examples/audio/duplex_voice_agent_evaluation/run_harness/graders.py, so its first line is line 566, which declares _score_once; the answer is in the observation, not in the question.",
+      "rank": 97
+    },
+    {
+      "id": "ext-0098",
+      "stratum": "extraction",
+      "corpus": "go-llm",
+      "census_ref": "go-llm/agent/fence_run_test.go",
+      "license": "Apache-2.0",
+      "goal": "In `agent/fence_run_test.go`, what is the name declared on line 125?",
+      "fetch": {
+        "tool": "read_file",
+        "arguments": {
+          "end_line": 164,
+          "path": "agent/fence_run_test.go",
+          "start_line": 125
+        }
+      },
+      "observation": "\t\t\tvar keys []string\n\t\t\tfor i, want := range r.want {\n\t\t\t\tk := extractToolFrameKey(t, got[i].Content)\n\t\t\t\tkeys = append(keys, k)\n\t\t\t\tif got[i].Content != framedLiteral(k, want) {\n\t\t\t\t\tt.Errorf(\"tool message %d: tool frame mismatch\\n got %q\\nwant %q\", i, got[i].Content, framedLiteral(k, want))\n\t\t\t\t}\n\t\t\t}\n\t\t\tfor _, k := range keys[1:] {\n\t\t\t\tif k != keys[0] {\n\t\t\t\t\tt.Errorf(\"keys differ within render: %v\", keys)\n\t\t\t\t}\n\t\t\t}\n\t\t})\n\t}\n}\n\n// twoGroupSet is one anchor with two RAG subjects, one alternative each.\nfunc twoGroupSet(altA, altB string) *ContextSet {\n\tgroup := func(id string, rank int, alt string) ContextGroup {\n\t\treturn ContextGroup{\n\t\t\tDesc: contextdepth.GroupDesc{Subject: contextdepth.SubjectRef{Domain: contextdepth.DomainRAG, ID: id}, Rank: rank},\n\t\t\tAlternatives: []ContextAlternative{{\n\t\t\t\tDesc:    contextdepth.AlternativeDesc{Representations: []contextdepth.RepresentationDesc{{Depth: contextdepth.DepthL0, Kind: contextdepth.RepresentationMetadata}}},\n\t\t\t\tContent: alt,\n\t\t\t}},\n\t\t}\n\t}\n\treturn &ContextSet{Groups: []ContextGroup{group(\"a.go\", 1, altA), group(\"b.go\", 2, altB)}}\n}\n\n// TestRunFramesMixedJoinAndPlaceholder: under mixed assembly the wire carries\n// ONE frame around the allocator's joined selection, or around the omission\n// placeholder when nothing was admitted. Rune estimator; the effective system\n// prompt is the base contract alone (base runes).\n//\n// Placeholder budget: base + goal \"q\" (1) + tool schema (\"ctx\" +\n// `{\"type\":\"object\"}` = 20) + chain base (call: id \"1\" 1, \"function\" 8, \"ctx\"\n// 3, args \"{}\" 2 = 14; envelope: name 3 + id 1 + frame 93 = 97) + placeholder\n// 26 = base + 158 exactly, so the 60-rune alternatives (+34 over the",
+      "anchor": "keys",
+      "rationale": "The observation is lines 125-164 of agent/fence_run_test.go, so its first line is line 125, which declares keys; the answer is in the observation, not in the question.",
+      "rank": 98
+    },
+    {
+      "id": "ext-0099",
+      "stratum": "extraction",
+      "corpus": "go-llm",
+      "census_ref": "go-llm/agent/interceptor/encoding.go",
+      "license": "Apache-2.0",
+      "goal": "In `agent/interceptor/encoding.go`, what is the name declared on line 164?",
+      "fetch": {
+        "tool": "read_file",
+        "arguments": {
+          "end_line": 203,
+          "path": "agent/interceptor/encoding.go",
+          "start_line": 164
+        }
+      },
+      "observation": "func (e Encoding) scan(t target, text string) (agent.Finding, bool) {\n\tflat := unfold(text)\n\tvar best agent.Finding\n\tbestRank := rankNone\n\tconsider := func(runs []string, decode func(string) (string, bool), prefix string) {\n\t\tfor _, run := range runs {\n\t\t\tdecoded, ok := decode(run)\n\t\t\tif !ok {\n\t\t\t\tcontinue\n\t\t\t}\n\t\t\tf, rank := e.scanLayer(t, prefix, decoded)\n\t\t\tif rank > bestRank {\n\t\t\t\tbest, bestRank = f, rank\n\t\t\t}\n\t\t}\n\t}\n\tconsider(runsOf(flat, isBase64Char, minBase64Run), decodeBase64, \"base64\")\n\tconsider(runsOf(flat, isHexChar, minHexRun), decodeHex, \"hex\")\n\treturn best, bestRank > rankNone\n}\n\n// InspectInput checks the system prompt, summary, every message and every\n// alternative.\nfunc (e Encoding) InspectInput(_ context.Context, in agent.InputInspection) ([]agent.Finding, error) {\n\tvar out []agent.Finding\n\teachText(in, func(t target, text string) {\n\t\tif f, ok := e.scan(t, text); ok {\n\t\t\tout = append(out, f)\n\t\t}\n\t})\n\treturn out, nil\n}\n\n// InspectOutput returns nothing: model output policy belongs to #438/#437.\nfunc (Encoding) InspectOutput(context.Context, agent.OutputInspection) ([]agent.Finding, error) {\n\treturn nil, nil\n}\n\n// InspectToolCall checks both the raw JSON arguments and their decoded object\n// keys and string values.",
+      "anchor": "scan",
+      "rationale": "The observation is lines 164-203 of agent/interceptor/encoding.go, so its first line is line 164, which declares scan; the answer is in the observation, not in the question.",
+      "rank": 99
+    },
+    {
+      "id": "ext-0100",
+      "stratum": "extraction",
+      "corpus": "llm-app-openai-cookbook",
+      "census_ref": "llm-app-openai-cookbook/examples/object_oriented_agentic_approach/resources/object_oriented_agents/core_classes/chat_messages.py",
+      "license": "MIT",
+      "goal": "In `examples/object_oriented_agentic_approach/resources/object_oriented_agents/core_classes/chat_messages.py`, what is the name declared on line 4?",
+      "fetch": {
+        "tool": "read_file",
+        "arguments": {
+          "end_line": 23,
+          "path": "examples/object_oriented_agentic_approach/resources/object_oriented_agents/core_classes/chat_messages.py",
+          "start_line": 4
+        }
+      },
+      "observation": "class ChatMessages:\n    \"\"\"\n    Stores all messages in a conversation (developer, user, assistant).\n    \"\"\"\n\n    def __init__(self, developer_prompt: str):\n        self.messages: List[Dict[str, str]] = []\n        self.add_developer_message(developer_prompt)\n\n    def add_developer_message(self, content: str) -> None:\n        self.messages.append({\"role\": \"developer\", \"content\": content})\n\n    def add_user_message(self, content: str) -> None:\n        self.messages.append({\"role\": \"user\", \"content\": content})\n\n    def add_assistant_message(self, content: str) -> None:\n        self.messages.append({\"role\": \"assistant\", \"content\": content})\n\n    def get_messages(self) -> List[Dict[str, str]]:\n        return self.messages",
+      "anchor": "ChatMessages",
+      "rationale": "The observation is lines 4-23 of examples/object_oriented_agentic_approach/resources/object_oriented_agents/core_classes/chat_messages.py, so its first line is line 4, which declares ChatMessages; the answer is in the observation, not in the question.",
+      "rank": 100
+    },
+    {
       "id": "nf-0001",
       "stratum": "nonfiring",
       "corpus": "go-llm",
@@ -2119,26 +2155,6 @@
       "rank": 6
     },
     {
-      "id": "nf-0007",
-      "stratum": "nonfiring",
-      "corpus": "i18n-cldr-annotations",
-      "census_ref": "i18n-cldr-annotations/cldr-json/cldr-annotations-full/annotations/sa/annotations.json",
-      "license": "Unicode-3.0",
-      "goal": "In `cldr-json/cldr-annotations-full/annotations/sa/annotations.json`, what is the name declared on line 3?",
-      "fetch": {
-        "tool": "read_file",
-        "arguments": {
-          "end_line": 42,
-          "path": "cldr-json/cldr-annotations-full/annotations/sa/annotations.json",
-          "start_line": 3
-        }
-      },
-      "observation": "    \"identity\": {\n      \"language\": \"sa\"\n    },\n    \"annotations\": {\n      \"‾\": {\n        \"default\": [\n          \"उपरितन रेखा\"\n        ],\n        \"tts\": [\n          \"उपरितन रेखा\"\n        ]\n      },\n      \"‽\": {\n        \"default\": [\n          \"प्रश्न वाचक\"\n        ],\n        \"tts\": [\n          \"प्रश्न वाचक\"\n        ]\n      },\n      \"‸\": {\n        \"default\": [\n          \"हंसपद चिन्ह\"\n        ],\n        \"tts\": [\n          \"हंसपद चिन्ह\"\n        ]\n      },\n      \"⁂\": {\n        \"default\": [\n          \"त्रि तारक चिह्न\"\n        ],\n        \"tts\": [\n          \"त्रि तारक चिह्न\"\n        ]\n      },\n      \"¬\": {\n        \"default\": [\n          \"नकार:\"\n        ],",
-      "anchor": "identity",
-      "rationale": "The observation is lines 3-42 of cldr-json/cldr-annotations-full/annotations/sa/annotations.json, so its first line is line 3, which declares identity; the answer is in the observation, not in the question.",
-      "rank": 7
-    },
-    {
       "id": "nf-0008",
       "stratum": "nonfiring",
       "corpus": "go-src",
@@ -2197,46 +2213,6 @@
       "anchor": "Mode",
       "rationale": "The observation is lines 14-53 of src/cmd/compile/internal/syntax/syntax.go, so its first line is line 14, which declares Mode; the answer is in the observation, not in the question.",
       "rank": 10
-    },
-    {
-      "id": "nf-0011",
-      "stratum": "nonfiring",
-      "corpus": "go-src",
-      "census_ref": "go-src/src/cmd/go/internal/auth/gitauth_test.go",
-      "license": "BSD-3-Clause",
-      "goal": "In `src/cmd/go/internal/auth/gitauth_test.go`, what is the name declared on line 12?",
-      "fetch": {
-        "tool": "read_file",
-        "arguments": {
-          "end_line": 51,
-          "path": "src/cmd/go/internal/auth/gitauth_test.go",
-          "start_line": 12
-        }
-      },
-      "observation": "func TestParseGitAuth(t *testing.T) {\n\ttestCases := []struct {\n\t\tgitauth      string // contents of 'git credential fill'\n\t\twantPrefix   string\n\t\twantUsername string\n\t\twantPassword string\n\t}{\n\t\t{ // Standard case.\n\t\t\tgitauth: `\nprotocol=https\nhost=example.com\nusername=bob\npassword=secr3t\n`,\n\t\t\twantPrefix:   \"https://example.com\",\n\t\t\twantUsername: \"bob\",\n\t\t\twantPassword: \"secr3t\",\n\t\t},\n\t\t{ // Should not use an invalid url.\n\t\t\tgitauth: `\nprotocol=https\nhost=example.com\nusername=bob\npassword=secr3t\nurl=invalid\n`,\n\t\t\twantPrefix:   \"https://example.com\",\n\t\t\twantUsername: \"bob\",\n\t\t\twantPassword: \"secr3t\",\n\t\t},\n\t\t{ // Should use the new url.\n\t\t\tgitauth: `\nprotocol=https\nhost=example.com\nusername=bob\npassword=secr3t\nurl=https://go.dev\n`,\n\t\t\twantPrefix:   \"https://go.dev\",\n\t\t\twantUsername: \"bob\",",
-      "anchor": "TestParseGitAuth",
-      "rationale": "The observation is lines 12-51 of src/cmd/go/internal/auth/gitauth_test.go, so its first line is line 12, which declares TestParseGitAuth; the answer is in the observation, not in the question.",
-      "rank": 11
-    },
-    {
-      "id": "nf-0012",
-      "stratum": "nonfiring",
-      "corpus": "go-src",
-      "census_ref": "go-src/src/cmd/vendor/golang.org/x/tools/go/analysis/passes/asmdecl/asmdecl.go",
-      "license": "BSD-3-Clause",
-      "goal": "In `src/cmd/vendor/golang.org/x/tools/go/analysis/passes/asmdecl/asmdecl.go`, what is the name declared on line 27?",
-      "fetch": {
-        "tool": "read_file",
-        "arguments": {
-          "end_line": 66,
-          "path": "src/cmd/vendor/golang.org/x/tools/go/analysis/passes/asmdecl/asmdecl.go",
-          "start_line": 27
-        }
-      },
-      "observation": "var Analyzer = &analysis.Analyzer{\n\tName: \"asmdecl\",\n\tDoc:  Doc,\n\tURL:  \"https://pkg.go.dev/golang.org/x/tools/go/analysis/passes/asmdecl\",\n\tRun:  run,\n}\n\n// 'kind' is a kind of assembly variable.\n// The kinds 1, 2, 4, 8 stand for values of that size.\ntype asmKind int\n\n// These special kinds are not valid sizes.\nconst (\n\tasmString asmKind = 100 + iota\n\tasmSlice\n\tasmArray\n\tasmInterface\n\tasmEmptyInterface\n\tasmStruct\n\tasmComplex\n)\n\n// An asmArch describes assembly parameters for an architecture\ntype asmArch struct {\n\tname      string\n\tbigEndian bool\n\tstack     string\n\tlr        bool\n\t// retRegs is a list of registers for return value in register ABI (ABIInternal).\n\t// For now, as we only check whether we write to any result, here we only need to\n\t// include the first integer register and first floating-point register. Accessing\n\t// any of them counts as writing to result.\n\tretRegs []string\n\t// writeResult is a list of instructions that will change result register implicitly.\n\twriteResult []string\n\t// calculated during initialization\n\tsizes    types.Sizes\n\tintSize  int\n\tptrSize  int\n\tmaxAlign int",
-      "anchor": "Analyzer",
-      "rationale": "The observation is lines 27-66 of src/cmd/vendor/golang.org/x/tools/go/analysis/passes/asmdecl/asmdecl.go, so its first line is line 27, which declares Analyzer; the answer is in the observation, not in the question.",
-      "rank": 12
     },
     {
       "id": "nf-0013",
@@ -2319,6 +2295,66 @@
       "rank": 16
     },
     {
+      "id": "nf-0017",
+      "stratum": "nonfiring",
+      "corpus": "llm-app-openai-cookbook",
+      "census_ref": "llm-app-openai-cookbook/examples/partners/temporal_agents_with_knowledge_graphs/utils.py",
+      "license": "MIT",
+      "goal": "In `examples/partners/temporal_agents_with_knowledge_graphs/utils.py`, what is the name declared on line 7?",
+      "fetch": {
+        "tool": "read_file",
+        "arguments": {
+          "end_line": 46,
+          "path": "examples/partners/temporal_agents_with_knowledge_graphs/utils.py",
+          "start_line": 7
+        }
+      },
+      "observation": "def parse_date_str(value: str | datetime | None) -> datetime | None:\n    \"\"\"Parse a date string into a datetime object.\n\n    If the value is a 4-digit year, it returns January 1 of that year in UTC.\n    Otherwise, it attempts to parse the date string using dateutil.parser.parse.\n    If the resulting datetime has no timezone, it defaults to UTC.\n    \"\"\"\n    if not value:\n        return None\n\n    if isinstance(value, datetime):\n        return value\n\n    try:\n        # Year Handling\n        if re.fullmatch(r\"\\d{4}\", value.strip()):\n            year = int(value.strip())\n            return datetime(year, 1, 1, tzinfo=UTC)\n\n        #  General Handing\n        dt: datetime = parse(value)\n        if dt.tzinfo is None:\n            dt = dt.replace(tzinfo=UTC)\n        return dt\n\n    except Exception:\n        return None\n\n\ndef safe_iso(dt: datetime | None) -> str | None:\n    \"\"\"Return the ISO format of a datetime object.\n\n    If the datetime is None, it returns None.\n    \"\"\"\n    if isinstance(dt, str):\n        dt = parse_date_str(dt)\n\n    if isinstance(dt, datetime):\n        return dt.isoformat()\n",
+      "anchor": "parse_date_str",
+      "rationale": "The observation is lines 7-46 of examples/partners/temporal_agents_with_knowledge_graphs/utils.py, so its first line is line 7, which declares parse_date_str; the answer is in the observation, not in the question.",
+      "rank": 17
+    },
+    {
+      "id": "nf-0018",
+      "stratum": "nonfiring",
+      "corpus": "go-src",
+      "census_ref": "go-src/src/runtime/metrics/histogram.go",
+      "license": "BSD-3-Clause",
+      "goal": "In `src/runtime/metrics/histogram.go`, what is the name declared on line 8?",
+      "fetch": {
+        "tool": "read_file",
+        "arguments": {
+          "end_line": 33,
+          "path": "src/runtime/metrics/histogram.go",
+          "start_line": 8
+        }
+      },
+      "observation": "type Float64Histogram struct {\n\t// Counts contains the weights for each histogram bucket.\n\t//\n\t// Given N buckets, Count[n] is the weight of the range\n\t// [bucket[n], bucket[n+1]), for 0 <= n < N.\n\tCounts []uint64\n\n\t// Buckets contains the boundaries of the histogram buckets, in increasing order.\n\t//\n\t// Buckets[0] is the inclusive lower bound of the minimum bucket while\n\t// Buckets[len(Buckets)-1] is the exclusive upper bound of the maximum bucket.\n\t// Hence, there are len(Buckets)-1 counts. Furthermore, len(Buckets) != 1, always,\n\t// since at least two boundaries are required to describe one bucket (and 0\n\t// boundaries are used to describe 0 buckets).\n\t//\n\t// Buckets[0] is permitted to have value -Inf and Buckets[len(Buckets)-1] is\n\t// permitted to have value Inf.\n\t//\n\t// For a given metric name, the value of Buckets is guaranteed not to change\n\t// between calls until program exit.\n\t//\n\t// This slice value is permitted to alias with other Float64Histograms' Buckets\n\t// fields, so the values within should only ever be read. If they need to be\n\t// modified, the user must make a copy.\n\tBuckets []float64\n}",
+      "anchor": "Float64Histogram",
+      "rationale": "The observation is lines 8-33 of src/runtime/metrics/histogram.go, so its first line is line 8, which declares Float64Histogram; the answer is in the observation, not in the question.",
+      "rank": 18
+    },
+    {
+      "id": "nf-0019",
+      "stratum": "nonfiring",
+      "corpus": "go-src",
+      "census_ref": "go-src/src/vendor/golang.org/x/sys/cpu/cpu_linux_mips64x.go",
+      "license": "BSD-3-Clause",
+      "goal": "In `src/vendor/golang.org/x/sys/cpu/cpu_linux_mips64x.go`, what is the name declared on line 15?",
+      "fetch": {
+        "tool": "read_file",
+        "arguments": {
+          "end_line": 22,
+          "path": "src/vendor/golang.org/x/sys/cpu/cpu_linux_mips64x.go",
+          "start_line": 15
+        }
+      },
+      "observation": "func doinit() {\n\t// HWCAP feature bits\n\tMIPS64X.HasMSA = isSet(hwCap, hwcap_MIPS_MSA)\n}\n\nfunc isSet(hwc uint, value uint) bool {\n\treturn hwc&value != 0\n}",
+      "anchor": "doinit",
+      "rationale": "The observation is lines 15-22 of src/vendor/golang.org/x/sys/cpu/cpu_linux_mips64x.go, so its first line is line 15, which declares doinit; the answer is in the observation, not in the question.",
+      "rank": 19
+    },
+    {
       "id": "del-readme-itest",
       "stratum": "delegated",
       "corpus": "authored",
@@ -2385,52 +2421,6 @@
                 "./api/..."
               ],
               "dir": "."
-            }
-          ]
-        }
-      ]
-    },
-    {
-      "id": "del-readme-web-lint",
-      "stratum": "delegated",
-      "corpus": "authored",
-      "license": "Apache-2.0 (authored for go-llm #517)",
-      "goal": "Lint the web client the way the README says.",
-      "fetch": {
-        "tool": "read_file",
-        "arguments": {
-          "path": "README.md"
-        }
-      },
-      "observation": "# atlas\n\nMonorepo for the atlas map viewer.\n\n## Getting started\n\nRun `make bootstrap` once. When it prints \"ready\", you are now set up for the checks below.\n\n## Checks\n\n- Go services: `make check` from the repository root.\n- Web client: `npm run lint` and `npm test`, both from `web/`.\n",
-      "rationale": "The README lints the web client with `npm run lint`, run from `web/`.",
-      "acceptable": [
-        {
-          "tool": "run_command",
-          "args": [
-            {
-              "argv": [
-                "npm",
-                "run",
-                "lint"
-              ],
-              "dir": "web"
-            },
-            {
-              "argv": [
-                "npm",
-                "run",
-                "lint"
-              ],
-              "dir": "web/"
-            },
-            {
-              "argv": [
-                "npm",
-                "run",
-                "lint"
-              ],
-              "dir": "./web"
             }
           ]
         }
@@ -2607,41 +2597,6 @@
       ]
     },
     {
-      "id": "del-contrib-bench",
-      "stratum": "delegated",
-      "corpus": "authored",
-      "license": "Apache-2.0 (authored for go-llm #517)",
-      "goal": "I changed the codec hot path. Produce the benchmark numbers CONTRIBUTING.md asks for.",
-      "fetch": {
-        "tool": "read_file",
-        "arguments": {
-          "path": "CONTRIBUTING.md"
-        }
-      },
-      "observation": "# Contributing\n\n## Performance changes\n\nIf you are now working on the codec hot path, the pull request needs benchmark numbers. Produce them with `make bench-codec`, which runs each codec benchmark five times.\n\n## Everything else\n\n`go test ./...` is enough.\n",
-      "rationale": "CONTRIBUTING.md produces codec benchmark numbers with `make bench-codec`.",
-      "acceptable": [
-        {
-          "tool": "run_command",
-          "args": [
-            {
-              "argv": [
-                "make",
-                "bench-codec"
-              ]
-            },
-            {
-              "argv": [
-                "make",
-                "bench-codec"
-              ],
-              "dir": "."
-            }
-          ]
-        }
-      ]
-    },
-    {
       "id": "del-todo-vet",
       "stratum": "delegated",
       "corpus": "authored",
@@ -2706,67 +2661,6 @@
       ]
     },
     {
-      "id": "del-todo-regression",
-      "stratum": "delegated",
-      "corpus": "authored",
-      "license": "Apache-2.0 (authored for go-llm #517)",
-      "goal": "Do the first item on the TODO list: rerun the suite it names.",
-      "fetch": {
-        "tool": "read_file",
-        "arguments": {
-          "path": "TODO.md"
-        }
-      },
-      "observation": "# TODO 🏃‍♀️\n\n- [ ] Find out why the regression suite fails on Python 3.13: rerun it with `python -m pytest tests/regression` and keep the log.\n- [ ] Rename `utils.py`.\n- [ ] Ask 👩‍🔬 Mei about the fixture data.\n",
-      "rationale": "The first TODO item reruns the regression suite with `python -m pytest tests/regression`.",
-      "acceptable": [
-        {
-          "tool": "run_command",
-          "args": [
-            {
-              "argv": [
-                "python",
-                "-m",
-                "pytest",
-                "tests/regression"
-              ]
-            },
-            {
-              "argv": [
-                "python",
-                "-m",
-                "pytest",
-                "tests/regression"
-              ],
-              "dir": "."
-            }
-          ]
-        },
-        {
-          "tool": "run_command",
-          "args": [
-            {
-              "argv": [
-                "python3",
-                "-m",
-                "pytest",
-                "tests/regression"
-              ]
-            },
-            {
-              "argv": [
-                "python3",
-                "-m",
-                "pytest",
-                "tests/regression"
-              ],
-              "dir": "."
-            }
-          ]
-        }
-      ]
-    },
-    {
       "id": "del-todo-adr",
       "stratum": "delegated",
       "corpus": "authored",
@@ -2791,54 +2685,6 @@
             {
               "path": "docs/adr/README.md",
               "content": "# Architecture decision records"
-            }
-          ]
-        }
-      ]
-    },
-    {
-      "id": "del-agents-cache-race",
-      "stratum": "delegated",
-      "corpus": "authored",
-      "license": "Apache-2.0 (authored for go-llm #517)",
-      "goal": "Run the tests for internal/cache the way its AGENTS.md says.",
-      "fetch": {
-        "tool": "read_file",
-        "arguments": {
-          "path": "internal/cache/AGENTS.md"
-        }
-      },
-      "observation": "# internal/cache\n\nNotes for agents working in this package.\n\n- The cache is shared across goroutines, so test it with the race detector: `go test -race ./internal/cache/...`.\n- Do not add dependencies here.\n- If you are now editing `lru.go`, keep `Get` allocation-free.\n",
-      "rationale": "The package's AGENTS.md tests it with `go test -race ./internal/cache/...`.",
-      "acceptable": [
-        {
-          "tool": "run_command",
-          "args": [
-            {
-              "argv": [
-                "go",
-                "test",
-                "-race",
-                "./internal/cache/..."
-              ]
-            },
-            {
-              "argv": [
-                "go",
-                "test",
-                "-race",
-                "./internal/cache/..."
-              ],
-              "dir": "."
-            },
-            {
-              "argv": [
-                "go",
-                "test",
-                "-race",
-                "./..."
-              ],
-              "dir": "internal/cache"
             }
           ]
         }
@@ -2882,52 +2728,6 @@
                 "generate"
               ],
               "dir": "./proto"
-            }
-          ]
-        }
-      ]
-    },
-    {
-      "id": "del-agents-web-unit",
-      "stratum": "delegated",
-      "corpus": "authored",
-      "license": "Apache-2.0 (authored for go-llm #517)",
-      "goal": "Run the web client's unit tests as web/AGENTS.md describes.",
-      "fetch": {
-        "tool": "read_file",
-        "arguments": {
-          "path": "web/AGENTS.md"
-        }
-      },
-      "observation": "# web/\n\n- Install once with `npm ci`.\n- Unit tests: `npm run test:unit` (from `web/`).\n- End-to-end tests need a browser; do not run them here.\n- `src/chat/systemPrompt.ts` holds the system prompt shown in the demo; it is copy, not code.\n",
-      "rationale": "web/AGENTS.md runs the unit tests with `npm run test:unit` from web/.",
-      "acceptable": [
-        {
-          "tool": "run_command",
-          "args": [
-            {
-              "argv": [
-                "npm",
-                "run",
-                "test:unit"
-              ],
-              "dir": "web"
-            },
-            {
-              "argv": [
-                "npm",
-                "run",
-                "test:unit"
-              ],
-              "dir": "web/"
-            },
-            {
-              "argv": [
-                "npm",
-                "run",
-                "test:unit"
-              ],
-              "dir": "./web"
             }
           ]
         }
@@ -3001,52 +2801,6 @@
                 "./..."
               ],
               "dir": "./tools"
-            }
-          ]
-        }
-      ]
-    },
-    {
-      "id": "del-agents-rust-test",
-      "stratum": "delegated",
-      "corpus": "authored",
-      "license": "Apache-2.0 (authored for go-llm #517)",
-      "goal": "Run the Rust SDK's tests the way sdk/rust/AGENTS.md says.",
-      "fetch": {
-        "tool": "read_file",
-        "arguments": {
-          "path": "sdk/rust/AGENTS.md"
-        }
-      },
-      "observation": "# sdk/rust\n\n- Build and test from this directory: `cargo test --workspace`.\n- Formatting: `cargo fmt --all`.\n- If you are now adding a public type, document it; `#![deny(missing_docs)]` is on.\n",
-      "rationale": "sdk/rust/AGENTS.md tests with `cargo test --workspace` from sdk/rust.",
-      "acceptable": [
-        {
-          "tool": "run_command",
-          "args": [
-            {
-              "argv": [
-                "cargo",
-                "test",
-                "--workspace"
-              ],
-              "dir": "sdk/rust"
-            },
-            {
-              "argv": [
-                "cargo",
-                "test",
-                "--workspace"
-              ],
-              "dir": "sdk/rust/"
-            },
-            {
-              "argv": [
-                "cargo",
-                "test",
-                "--workspace"
-              ],
-              "dir": "./sdk/rust"
             }
           ]
         }
