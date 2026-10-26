@@ -12,7 +12,7 @@
       {
         "stratum": "go-llm",
         "eligible": 64,
-        "sampled": 50
+        "sampled": 49
       },
       {
         "stratum": "go-src",
@@ -37,7 +37,7 @@
       {
         "stratum": "llm-app-openai-cookbook",
         "eligible": 30,
-        "sampled": 23
+        "sampled": 24
       }
     ],
     "nonfiring": 16,
@@ -87,6 +87,11 @@
         "rank": 28
       },
       {
+        "ref": "go-llm/docs/llm/traces/first-accepted-run/conversation-fa-m01.json",
+        "stratum": "extraction",
+        "rank": 31
+      },
+      {
         "ref": "go-src/src/cmd/vendor/golang.org/x/text/unicode/norm/composition.go",
         "stratum": "extraction",
         "rank": 73
@@ -105,6 +110,11 @@
         "ref": "llm-app-openai-cookbook/examples/object_oriented_agentic_approach/resources/object_oriented_agents/core_classes/chat_messages.py",
         "stratum": "extraction",
         "rank": 100
+      },
+      {
+        "ref": "go-src/src/cmd/vendor/golang.org/x/telemetry/package.json",
+        "stratum": "nonfiring",
+        "rank": 2
       },
       {
         "ref": "i18n-cldr-annotations/cldr-json/cldr-annotations-full/annotations/sa/annotations.json",
@@ -130,6 +140,16 @@
         "ref": "go-src/src/vendor/golang.org/x/sys/cpu/cpu_linux_mips64x.go",
         "stratum": "nonfiring",
         "rank": 19
+      },
+      {
+        "ref": "go-src/src/vendor/golang.org/x/net/quic/sent_val.go",
+        "stratum": "nonfiring",
+        "rank": 20
+      },
+      {
+        "ref": "go-llm/docs/llm/assembly-corpus/mixed/traces/conv-collector-heartbeat-gap-legacy.json",
+        "stratum": "nonfiring",
+        "rank": 21
       }
     ]
   },
@@ -693,26 +713,6 @@
       "anchor": "TestCodexAnswers",
       "rationale": "The observation is lines 65-104 of consult/codex_protocol_test.go, so its first line is line 65, which declares TestCodexAnswers; the answer is in the observation, not in the question.",
       "rank": 30
-    },
-    {
-      "id": "ext-0031",
-      "stratum": "extraction",
-      "corpus": "go-llm",
-      "census_ref": "go-llm/docs/llm/traces/first-accepted-run/conversation-fa-m01.json",
-      "license": "Apache-2.0",
-      "goal": "In `docs/llm/traces/first-accepted-run/conversation-fa-m01.json`, what is the name declared on line 3?",
-      "fetch": {
-        "tool": "read_file",
-        "arguments": {
-          "end_line": 34,
-          "path": "docs/llm/traces/first-accepted-run/conversation-fa-m01.json",
-          "start_line": 3
-        }
-      },
-      "observation": "  \"source\": \"first-accepted-run\",\n  \"captured_at\": \"2026-05-30T20:30:59.427Z\",\n  \"system\": \"You are a helpful, rigorous technical advisor.\",\n  \"tools\": [],\n  \"turns\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"Explain what a circuit breaker is in distributed systems.\"\n    },\n    {\n      \"role\": \"assistant\",\n      \"content\": \"In a distributed system, a **Circuit Breaker** is a design pattern used to detect failures and encapsulate the logic of preventing a failure from cascading throughout the rest of the system.\\n\\nIt is modeled after the electrical circuit breaker in your home, which shuts off the flow of electricity when a fault is detected to prevent the rest of the house from catching fire.\\n\\n---\\n\\n### 1. The Problem: Cascading Failures\\nIn a microservices architecture, Service A calls Service B, which calls Service C. If Service C becomes sluggish or crashes, Service B’s requests to C will start to hang. \\n\\nBecause Service B is waiting for a response from C, its own threads and resources (memory, sockets) begin to fill up. Eventually, Service B exhausts its resources and crashes. Service A then experiences the same fate. This is known as a **cascading failure**.\\n\\nWithout a circuit breaker, the system continues to hammer a failing service with requests, which not only wastes resources but often prevents the failing service from recovering because it is overwhelmed by a backlog of requests (a \\\"death spiral\\\").\\n\\n### 2. How it Works: The State Machine\\nA circuit breaker acts as a proxy between the client and the remote service. It monitors the number of recent failures and transitions between three states:\\n\\n#### State 1: Closed (Normal Operation)\\n*   **Behavior:** The circuit is \\\"closed,\\\" meaning electricity (requests) flows through normally.\\n*   **Monitoring:** The breaker tracks the number of failed requests.\\n*   **Transition:** If the failure rate exceeds a predefined threshold (e.g., 50% of requests fail over a 30-second window), the breaker **trips** and moves to the **Open** state.\\n\\n#### State 2: Open (Fast Failure)\\n*   **Behavior:** The circuit is \\\"open,\\\" meaning the connection is severed. No requests are sent to the remote service.\\n*   **Action:** The breaker returns an immediate error (or a fallback response) to the caller without even attempting the network call. This is called **\\\"failing fast.\\\"**\\n*   **Transition:** A timer starts (the \\\"sleep window\\\"). Once the timer expires, the breaker moves to the **Half-Open** state.\\n\\n#### State 3: Half-Open (Testing Recovery)\\n*   **Behavior:** The breaker allows a limited number of \\\"trial\\\" requests to pass through to the remote service.\\n*   **Transition (Success):** If these trial requests succeed, the breaker assumes the service has recovered and moves back to the **Closed** state.\\n*   **Transition (Failure):** If any of these requests fail, the breaker assumes the service is still broken and immediately returns to the **Open** state, resetting the sleep timer.\\n\\n---\\n\\n### 3. Circuit Breaker vs. Retries\\nIt is a common mistake to confuse these two. They serve opposite purposes:\\n\\n| Feature | Retry Pattern | Circuit Breaker Pattern |\\n| :--- | :--- | :--- |\\n| **Intent** | To handle **transient** faults (brief network glitch). | To handle **persistent** faults (service outage). |\\n| **Action** | Increases load on the failing service. | Decreases load to allow the service to recover. |\\n| **Outcome** | \\\"I'll try again immediately; it might work now.\\\" | \\\"This is broken; I won't even try for 30 seconds.\\\" |\\n\\n**Best Practice:** Use them together. Wrap a retry logic *inside* a circuit breaker. The breaker prevents the retries from overwhelming a dead service.\\n\\n### 4. Fallback Mechanisms\\nWhen a circuit breaker is **Open**, you don't have to simply return a `500 Internal Server Error`. You can implement a **fallback**, which provides a degraded but functional experience:\\n\\n*   **Static Fallback:** Return a default value (e.g., \\\"Recommendations currently unavailable\\\").\\n*   **Cache Fallback:** Return the last known good data from a local cache.\\n*   **Stubbed Response:** Return a generic response that allows the UI to render without crashing.\\n\\n### 5. Technical Summary for Implementation\\nIf you are implementing this (using libraries like **Resilience4j** for Java or **Polly** for .NET), you must tune these key parameters:\\n1.  **Failure Rate Threshold:** The percentage of failures at which the circuit trips.\\n2.  **Slow Call Threshold:** The duration a call takes before it is considered a \\\"failure,\\\" even if it eventually returns a result (prevents \\\"hanging\\\" systems).\\n3.  **Minimum Number of Calls:** The minimum volume of traffic required before the breaker calculates the failure rate (prevents one single failure in a low-traffic period from tripping the circuit).\\n4.  **Wait Duration in Open State:** How long to wait before transitioning to Half-Open.\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": \"Now contrast it with a simple retry-with-backoff: when does each help and when does combining them hurt?\"\n    },\n    {\n      \"role\": \"assistant\",\n      \"content\": \"To understand the contrast, you first have to distinguish between the two types of failures they are designed to fight: **Transient Faults** and **Persistent Faults**.\\n\\n---\\n\\n### 1. Simple Retry-with-Backoff\\n**Target:** Transient Faults (The \\\"Blip\\\")\\nA transient fault is a temporary glitch—a lost network packet, a momentary CPU spike on the server, or a microservice restarting. These are issues that usually resolve themselves in milliseconds or seconds.\\n\\n*   **How it helps:** Instead of returning an error to the user immediately, the system waits a bit (backoff) and tries again. If the \\\"blip\\\" is gone, the request succeeds, and the user never knows there was a problem.\\n*   **The \\\"Backoff\\\" part:** By increasing the wait time between retries (e.g., 100ms $\\\\rightarrow$ 400ms $\\\\rightarrow$ 1600ms), you avoid hammering a struggling service, giving it a chance to breathe.\\n\\n### 2. Circuit Breaker\\n**Target:** Persistent Faults (The \\\"Outage\\\")\\nA persistent fault is a systemic failure—a database crash, a corrupted configuration, or a complete region outage. No amount of retrying in the next 5 seconds will fix a crashed database.\\n\\n*   **How it helps:** It stops the bleeding. It recognizes that the service is \\\"down\\\" and prevents the system from wasting resources (threads, memory, time) on requests that are mathematically certain to fail. It protects the *caller* from hanging and protects the *callee* from being overwhelmed while trying to restart.\\n\\n---\\n\\n### Summary Comparison Table\\n\\n| Feature | Retry-with-Backoff | Circuit Breaker |\\n| :--- | :--- | :--- |\\n| **Philosophy** | \\\"It's probably a glitch; try again.\\\" | \\\"It's probably broken; stop trying.\\\" |\\n| **Goal** | Increase the probability of **success**. | Decrease the impact of **failure**. |\\n| **Resource Usage** | **Increases** load on the downstream service. | **Decreases** load on the downstream service. |\\n| **Best for...** | Flaky networks, cold starts. | Server crashes, overloaded dependencies. |\\n\\n---\\n\\n### When combining them hurts\\n\\nCombining these two patterns is common, but if implemented in the wrong order or with poor tuning, they can create a **\\\"Retry Storm\\\"** (or Thundering Herd problem).\\n\\n#### The \\\"Wrong Way\\\": Retry wrapping the Circuit Breaker\\nIf you put the Retry logic *outside* the Circuit Breaker:\\n`Client` $\\\\rightarrow$ `Retry Loop` $\\\\rightarrow$ `Circuit Breaker` $\\\\rightarrow$ `Service`\\n\\nWhen the Circuit Breaker is **Open**, it returns a \\\"Fail Fast\\\" error immediately. The Retry loop sees this error and says, \\\"I'll try again!\\\" It then hits the Open circuit breaker again. You are now wasting CPU cycles and adding latency to a request that is guaranteed to fail, essentially performing a \\\"busy wait\\\" loop.\\n\\n#### The \\\"Right Way\\\": Circuit Breaker wrapping the Retry\\nThe standard architecture is to put the Retry logic *inside* the Circuit Breaker:\\n`Client` $\\\\rightarrow$ `Circuit Breaker` $\\\\rightarrow$ `Retry Loop` $\\\\rightarrow$ `Service`\\n\\n*   **If the circuit is Closed:** The retry logic handles the small blips. If the retries continue to fail, the Circuit Breaker counts those as failures and eventually trips.\\n*   **If the circuit is Open:** The request never even reaches the retry logic. It fails fast immediately, saving all those resources.\\n\\n#### When the combination becomes dangerous (The Death Spiral)\\nEven with the \\\"Right Way\\\" architecture, combining them can hurt if your **Retry Budget** is too aggressive.\\n\\nImagine a service is struggling because it is at 95% CPU capacity.\\n1.  A few requests fail.\\n2.  The Retry logic kicks in, and suddenly every single request is being attempted **3 times**.\\n3.  The traffic to the struggling service just **tripled**.\\n4.  The service's CPU hits 100% and it crashes completely.\\n\\n**The Fix:** \\n1.  **Jitter:** Add randomness to your backoff (e.g., instead of exactly 1s, wait between 800ms and 1200ms). This prevents all clients from retrying at the exact same microsecond.\\n2.  **Adaptive Limits:** Ensure the Circuit Breaker trips *before* the retry volume reaches a point that would crash the downstream service.\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": \"Give one metric I should watch to tune the breaker's open duration.\"\n    }\n  ],\n  \"golden\": {\n    \"tool_calls\": [],\n    \"final_answer_criteria\": \"Assistant answer should satisfy the captured final assistant response.\",\n    \"final_answer_substring\": \"The single most important metric to watch for tuning the open duration (the sleep window) is the **Half-Open Success Rate**.\\n\\n### What is it?\\nThe Half-Open Success Rate is the percentage of times the circuit breaker transitions from **Open $\\\\rightarrow$ Half-Open $\\\\rightarrow$ Closed**, versus the number of times it transitions from **Open $\\\\rightarrow$ Half-Open $\\\\rightarrow$ Open**.\\n\\n$$\\\\text{Half-Open Success Rate} = \\\\frac{\\\\text{Successful Recoveries}}{\\\\text{Total Recovery Attempts}}$$\\n\\n---\\n\\n### How to use it for tuning\\n\\nThis metric tells you if your \\\"sleep window\\\" is aligned with the actual recovery time of your downstream dependency.\\n\\n#### Scenario A: The Rate is Very Low (Frequent \\\"Flapping\\\")\\nIf the breaker moves to Half-Open, sends a few probe requests, and immediately trips back to Open, you are **\\\"flapping.\\\"**\\n*   **Diagnosis:** Your open duration is **too short**.\\n*   **Meaning:** You are probing the downstream service before it has had enough time to actually recover. You are essentially waking up a service that is still in the middle of a reboot or a database migration.\\n*   **Action:** **Increase** the open duration. Give the downstream service more breathing room to fully stabilize before you test it.\\n\\n#### Scenario B: The Rate is Very High, but Latency is High\\nIf the breaker almost always transitions successfully from Half-Open to Closed, but you notice (via your dashboards) that the downstream service was actually healthy long before the breaker finished its sleep window.\\n*   **Diagnosis:** Your open duration is **too long**.\\n*   **Meaning:** You are unnecessarily serving fallback responses (degraded experience) to your users even though the system is healthy. You are sacrificing availability for an over-abundance of caution.\\n*   **Action:** **Decrease** the open duration to allow for faster recovery of the system.\\n\\n### Technical Pro-Tip: The \\\"Exponential Backoff\\\" Breaker\\nIf you find that a static open duration is impossible to tune (because some outages last 5 seconds and others last 5 hours), stop using a constant value.\\n\\nImplement **Exponential Backoff for the Open State**. Instead of waiting a fixed 30 seconds, the breaker increases the wait time every time it trips again from a Half-Open state:\\n*   1st trip: Wait 30s\\n*   2nd trip (failed recovery): Wait 60s\\n*   3rd trip (failed recovery): Wait 120s\\n\\nThis solves the \\\"Flapping\\\" problem for long-term outages while maintaining fast recovery for short-term blips.\"\n  }\n}",
-      "anchor": "source",
-      "rationale": "The observation is lines 3-34 of docs/llm/traces/first-accepted-run/conversation-fa-m01.json, so its first line is line 3, which declares source; the answer is in the observation, not in the question.",
-      "rank": 31
     },
     {
       "id": "ext-0032",
@@ -2055,6 +2055,26 @@
       "rank": 102
     },
     {
+      "id": "ext-0103",
+      "stratum": "extraction",
+      "corpus": "llm-app-openai-cookbook",
+      "census_ref": "llm-app-openai-cookbook/examples/evals/realtime_evals/shared/scripts/validate_eval_input.py",
+      "license": "MIT",
+      "goal": "In `examples/evals/realtime_evals/shared/scripts/validate_eval_input.py`, what is the name declared on line 113?",
+      "fetch": {
+        "tool": "read_file",
+        "arguments": {
+          "end_line": 152,
+          "path": "examples/evals/realtime_evals/shared/scripts/validate_eval_input.py",
+          "start_line": 113
+        }
+      },
+      "observation": "def _validate_run_simulation_file(\n    simulation_path: Path,\n    *,\n    expected_simulation_id: str,\n) -> None:\n    simulation = load_simulation(simulation_path)\n    if not isinstance(simulation, dict):\n        raise ValueError(f\"Simulation file must contain an object: {simulation_path}\")\n\n    simulation_id = str(simulation.get(\"simulation_id\", \"\")).strip()\n    if simulation_id and simulation_id != expected_simulation_id:\n        raise ValueError(\n            f\"`simulation_id` mismatch in {simulation_path}: \"\n            f\"expected `{expected_simulation_id}`, found `{simulation_id}`.\"\n        )\n\n    _require_non_empty_string(\n        simulation.get(\"scenario\", \"\"),\n        field_name=\"scenario\",\n        source_path=simulation_path,\n    )\n\n    assistant_config = _coerce_mapping(\n        simulation.get(\"assistant\", {}),\n        field_name=\"assistant\",\n        source_path=simulation_path,\n    )\n    prompt_path = resolve_path(\n        _require_non_empty_string(\n            assistant_config.get(\"system_prompt_file\", \"\"),\n            field_name=\"assistant.system_prompt_file\",\n            source_path=simulation_path,\n        ),\n        ROOT_DIR,\n    )\n    if not prompt_path.exists():\n        raise ValueError(f\"Assistant system prompt file does not exist: {prompt_path}\")\n\n    tools_path = resolve_path(\n        _require_non_empty_string(",
+      "anchor": "_validate_run_simulation_file",
+      "rationale": "The observation is lines 113-152 of examples/evals/realtime_evals/shared/scripts/validate_eval_input.py, so its first line is line 113, which declares _validate_run_simulation_file; the answer is in the observation, not in the question.",
+      "rank": 103
+    },
+    {
       "id": "nf-0001",
       "stratum": "nonfiring",
       "corpus": "go-llm",
@@ -2073,26 +2093,6 @@
       "anchor": "allocFixture",
       "rationale": "The observation is lines 13-52 of rag/progressive_alloc_test.go, so its first line is line 13, which declares allocFixture; the answer is in the observation, not in the question.",
       "rank": 1
-    },
-    {
-      "id": "nf-0002",
-      "stratum": "nonfiring",
-      "corpus": "go-src",
-      "census_ref": "go-src/src/cmd/vendor/golang.org/x/telemetry/package.json",
-      "license": "BSD-3-Clause",
-      "goal": "In `src/cmd/vendor/golang.org/x/telemetry/package.json`, what is the name declared on line 2?",
-      "fetch": {
-        "tool": "read_file",
-        "arguments": {
-          "end_line": 23,
-          "path": "src/cmd/vendor/golang.org/x/telemetry/package.json",
-          "start_line": 2
-        }
-      },
-      "observation": "  \"scripts\": {\n    \"eslint\": \"eslint . --fix\",\n    \"stylelint\": \"stylelint '**/*.css' --fix\",\n    \"prettier\": \"prettier --write **/*.{css,ts,md,yaml} !**/*.min.css\",\n    \"all\": \"run-s --continue-on-error eslint stylelint prettier\"\n  },\n  \"devDependencies\": {\n    \"@typescript-eslint/eslint-plugin\": \"5.59.6\",\n    \"@typescript-eslint/parser\": \"5.59.6\",\n    \"eslint\": \"8.40.0\",\n    \"eslint-config-prettier\": \"8.8.0\",\n    \"npm-run-all\": \"4.1.5\",\n    \"prettier\": \"2.8.8\",\n    \"stylelint\": \"15.6.2\",\n    \"stylelint-config-standard\": \"33.0.0\",\n    \"typescript\": \"5.0.4\"\n  },\n  \"dependencies\": {\n    \"@observablehq/plot\": \"0.6.9\",\n    \"d3\": \"7.8.5\"\n  }\n}",
-      "anchor": "scripts",
-      "rationale": "The observation is lines 2-23 of src/cmd/vendor/golang.org/x/telemetry/package.json, so its first line is line 2, which declares scripts; the answer is in the observation, not in the question.",
-      "rank": 2
     },
     {
       "id": "nf-0003",
@@ -2335,44 +2335,64 @@
       "rank": 17
     },
     {
-      "id": "nf-0020",
+      "id": "nf-0022",
       "stratum": "nonfiring",
       "corpus": "go-src",
-      "census_ref": "go-src/src/vendor/golang.org/x/net/quic/sent_val.go",
+      "census_ref": "go-src/src/encoding/json/jsontext/fuzz_test.go",
       "license": "BSD-3-Clause",
-      "goal": "In `src/vendor/golang.org/x/net/quic/sent_val.go`, what is the name declared on line 21?",
+      "goal": "In `src/encoding/json/jsontext/fuzz_test.go`, what is the name declared on line 20?",
       "fetch": {
         "tool": "read_file",
         "arguments": {
-          "end_line": 60,
-          "path": "src/vendor/golang.org/x/net/quic/sent_val.go",
-          "start_line": 21
+          "end_line": 59,
+          "path": "src/encoding/json/jsontext/fuzz_test.go",
+          "start_line": 20
         }
       },
-      "observation": "type sentVal uint64\n\nconst (\n\tsentValUnset    = 0       // unset\n\tsentValUnsent   = 1 << 62 // set, not sent to the peer\n\tsentValSent     = 2 << 62 // set, sent to the peer but not yet acked; pnum is set\n\tsentValReceived = 3 << 62 // set, peer acked receipt\n\n\tsentValStateMask = 3 << 62\n)\n\n// isSet reports whether the value is set.\nfunc (s sentVal) isSet() bool { return s != 0 }\n\n// shouldSend reports whether the value is set and has not been sent to the peer.\nfunc (s sentVal) shouldSend() bool { return s.state() == sentValUnsent }\n\n// shouldSendPTO reports whether the value needs to be sent to the peer.\n// The value needs to be sent if it is set and has not been sent.\n// If pto is true, indicating that we are sending a PTO probe, the value\n// should also be sent if it is set and has not been acknowledged.\nfunc (s sentVal) shouldSendPTO(pto bool) bool {\n\tst := s.state()\n\treturn st == sentValUnsent || (pto && st == sentValSent)\n}\n\n// isReceived reports whether the value has been received by the peer.\nfunc (s sentVal) isReceived() bool { return s == sentValReceived }\n\n// set sets the value and records that it should be sent to the peer.\n// If the value has already been sent, it is not resent.\nfunc (s *sentVal) set() {\n\tif *s == 0 {\n\t\t*s = sentValUnsent\n\t}\n}\n\n// reset sets the value to the unsent state.\nfunc (s *sentVal) setUnsent() { *s = sentValUnsent }\n",
-      "anchor": "sentVal",
-      "rationale": "The observation is lines 21-60 of src/vendor/golang.org/x/net/quic/sent_val.go, so its first line is line 21, which declares sentVal; the answer is in the observation, not in the question.",
-      "rank": 20
+      "observation": "func FuzzCoder(f *testing.F) {\n\t// Add a number of inputs to the corpus including valid and invalid data.\n\tfor _, td := range coderTestdata {\n\t\tf.Add(int64(0), []byte(td.in))\n\t}\n\tfor _, td := range decoderErrorTestdata {\n\t\tf.Add(int64(0), []byte(td.in))\n\t}\n\tfor _, td := range encoderErrorTestdata {\n\t\tf.Add(int64(0), []byte(td.wantOut))\n\t}\n\tfor _, td := range jsontest.Data {\n\t\tf.Add(int64(0), td.Data())\n\t}\n\n\tf.Fuzz(func(t *testing.T, seed int64, b []byte) {\n\t\tvar tokVals []tokOrVal\n\t\trn := rand.NewSource(seed)\n\n\t\t// Read a sequence of tokens or values. Skip the test for any errors\n\t\t// since we expect this with randomly generated fuzz inputs.\n\t\tsrc := bytes.NewReader(b)\n\t\tdec := NewDecoder(src)\n\t\tfor {\n\t\t\tif rn.Int63()%8 > 0 {\n\t\t\t\ttok, err := dec.ReadToken()\n\t\t\t\tif err != nil {\n\t\t\t\t\tif err == io.EOF {\n\t\t\t\t\t\tbreak\n\t\t\t\t\t}\n\t\t\t\t\tt.Skipf(\"Decoder.ReadToken error: %v\", err)\n\t\t\t\t}\n\t\t\t\ttokVals = append(tokVals, tok.Clone())\n\t\t\t} else {\n\t\t\t\tval, err := dec.ReadValue()\n\t\t\t\tif err != nil {\n\t\t\t\t\tif expectError := dec.PeekKind() == '}' || dec.PeekKind() == ']'; expectError {\n\t\t\t\t\t\tif _, ok := errors.AsType[*SyntacticError](err); ok {\n\t\t\t\t\t\t\tcontinue\n\t\t\t\t\t\t}",
+      "anchor": "FuzzCoder",
+      "rationale": "The observation is lines 20-59 of src/encoding/json/jsontext/fuzz_test.go, so its first line is line 20, which declares FuzzCoder; the answer is in the observation, not in the question.",
+      "rank": 22
     },
     {
-      "id": "nf-0021",
+      "id": "nf-0023",
       "stratum": "nonfiring",
       "corpus": "go-llm",
-      "census_ref": "go-llm/docs/llm/assembly-corpus/mixed/traces/conv-collector-heartbeat-gap-legacy.json",
+      "census_ref": "go-llm/internal/agenttrace/writer.go",
       "license": "Apache-2.0",
-      "goal": "In `docs/llm/assembly-corpus/mixed/traces/conv-collector-heartbeat-gap-legacy.json`, what is the name declared on line 3?",
+      "goal": "In `internal/agenttrace/writer.go`, what is the name declared on line 9?",
       "fetch": {
         "tool": "read_file",
         "arguments": {
-          "end_line": 42,
-          "path": "docs/llm/assembly-corpus/mixed/traces/conv-collector-heartbeat-gap-legacy.json",
-          "start_line": 3
+          "end_line": 48,
+          "path": "internal/agenttrace/writer.go",
+          "start_line": 9
         }
       },
-      "observation": "  \"source\": \"assembly-corpus-mixed\",\n  \"captured_at\": \"0001-01-01T00:00:00Z\",\n  \"system\": \"You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.\",\n  \"tools\": null,\n  \"turns\": [\n    {\n      \"role\": \"assistant\",\n      \"tool_calls\": [\n        {\n          \"id\": \"c2\",\n          \"name\": \"agent_memory_search\",\n          \"arguments\": {\n            \"query\": \"\"\n          }\n        }\n      ]\n    },\n    {\n      \"role\": \"tool\",\n      \"content\": \"trust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-fleet-history · semantic · 2025-07-27 · the pre-reorg fleet ran the collector heartbeat every 60 seconds; the migration notes call that era underinstrumented\\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-migration-board · semantic · 2025-07-27 · the collector migration board tracks per-fleet progress; two fleets remain on the old registration path\\ntrust=agent-written; unreviewed; origin=memory.create; session=caller-claim · rec-slow-start · working · 2025-07-27 · slow-start regressions show up in the first minutes after a collector restart; keep the restart annotations on\",\n      \"tool_call_id\": \"c2\",\n      \"name\": \"agent_memory_search\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": \"What interval is the collector heartbeat being held at through the migration?\"\n    }\n  ],\n  \"golden\": {\n    \"tool_calls\": null,\n    \"final_answer_criteria\": \"States the collector heartbeat is held at 20 seconds through the migration. Answering 60 seconds (the pre-reorg interval from memory) scores 0. An answer presenting both the correct and a competing value without committing to one scores 0.\"\n  },\n  \"assembly_eval\": {\n    \"pair_id\": \"conv-collector-heartbeat-gap\",\n    \"mode\": \"legacy\",\n    \"candidate_ids\": [\n      \"33b4c34a06b7ca07a15481ebaf408ee7287d4e8a93ad9bea848487e9f3ed792a\",\n      \"8ac1c35b1ce12c0c73a23f06f14411ee21966abc98a0f040f2ef51cbea0d35e5\",\n      \"e93bc35bc0be2f9a828b6f9fbce1c181225c236c49882a52aad029de4416a17f\",\n      \"rec-fleet-history\",",
-      "anchor": "source",
-      "rationale": "The observation is lines 3-42 of docs/llm/assembly-corpus/mixed/traces/conv-collector-heartbeat-gap-legacy.json, so its first line is line 3, which declares source; the answer is in the observation, not in the question.",
-      "rank": 21
+      "observation": "const fileMode os.FileMode = 0o600\n\n// jsonlWriter appends content-light telemetry spans to a caller-supplied path,\n// one JSON object per line, each written in a single Write so concurrent\n// processes sharing the file do not interleave partial lines. It owns no path\n// policy. Used by one run's TelemetrySink, whose callbacks are serial.\ntype jsonlWriter struct {\n\tf *os.File\n}\n\nfunc openJSONL(path string) (*jsonlWriter, error) {\n\tf, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, fileMode)\n\tif err != nil {\n\t\treturn nil, fmt.Errorf(\"agenttrace: open telemetry %q: %w\", path, err)\n\t}\n\treturn &jsonlWriter{f: f}, nil\n}\n\nfunc (w *jsonlWriter) write(v any) error {\n\tb, err := json.Marshal(v)\n\tif err != nil {\n\t\treturn fmt.Errorf(\"agenttrace: marshal span: %w\", err)\n\t}\n\tb = append(b, '\\n')\n\tif _, err := w.f.Write(b); err != nil {\n\t\treturn fmt.Errorf(\"agenttrace: write span: %w\", err)\n\t}\n\treturn nil\n}\n\nfunc (w *jsonlWriter) Close() error { return w.f.Close() }\n\n// WriteTrace writes one content-full trace to path, create-exclusive so a\n// run-id collision returns an error (the caller retries with a suffixed path)\n// instead of appending to or clobbering an existing trace.\nfunc WriteTrace(path string, rec TraceRecord) (err error) {\n\tf, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, fileMode)\n\tif err != nil {\n\t\treturn fmt.Errorf(\"agenttrace: create trace %q: %w\", path, err)\n\t}",
+      "anchor": "fileMode",
+      "rationale": "The observation is lines 9-48 of internal/agenttrace/writer.go, so its first line is line 9, which declares fileMode; the answer is in the observation, not in the question.",
+      "rank": 23
+    },
+    {
+      "id": "nf-0024",
+      "stratum": "nonfiring",
+      "corpus": "go-src",
+      "census_ref": "go-src/src/crypto/internal/impl/impl.go",
+      "license": "BSD-3-Clause",
+      "goal": "In `src/crypto/internal/impl/impl.go`, what is the name declared on line 11?",
+      "fetch": {
+        "tool": "read_file",
+        "arguments": {
+          "end_line": 50,
+          "path": "src/crypto/internal/impl/impl.go",
+          "start_line": 11
+        }
+      },
+      "observation": "type implementation struct {\n\tPackage   string\n\tName      string\n\tAvailable bool\n\tToggle    *bool\n}\n\nvar allImplementations []implementation\n\n// Register records an alternative implementation of a cryptographic primitive.\n// The implementation might be available or not based on CPU support. If\n// available is false, the implementation is unavailable and can't be tested on\n// this machine. If available is true, it can be set to false to disable the\n// implementation. If all alternative implementations but one are disabled, the\n// remaining one must be used (i.e. disabling one implementation must not\n// implicitly disable any other). Each package has an implicit base\n// implementation that is selected when all alternatives are unavailable or\n// disabled. pkg must be the package name, not path (e.g. \"aes\" not \"crypto/aes\").\nfunc Register(pkg, name string, available *bool) {\n\tif strings.Contains(pkg, \"/\") {\n\t\tpanic(\"impl: package name must not contain slashes\")\n\t}\n\tallImplementations = append(allImplementations, implementation{\n\t\tPackage:   pkg,\n\t\tName:      name,\n\t\tAvailable: *available,\n\t\tToggle:    available,\n\t})\n}\n\n// Packages returns the list of all packages for which alternative\n// implementations are registered.\nfunc Packages() []string {\n\tvar pkgs []string\n\tseen := make(map[string]bool)\n\tfor _, i := range allImplementations {\n\t\tif !seen[i.Package] {\n\t\t\tpkgs = append(pkgs, i.Package)\n\t\t\tseen[i.Package] = true\n\t\t}",
+      "anchor": "implementation",
+      "rationale": "The observation is lines 11-50 of src/crypto/internal/impl/impl.go, so its first line is line 11, which declares implementation; the answer is in the observation, not in the question.",
+      "rank": 24
     },
     {
       "id": "del-readme-itest",

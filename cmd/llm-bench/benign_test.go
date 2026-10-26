@@ -1247,6 +1247,66 @@ func benignReadmeSection(t *testing.T, name string) string {
 	return section
 }
 
+var benignNonAlnum = regexp.MustCompile(`[^a-z0-9]`)
+
+// benignScreen is the review's mechanical screen (README, review round 3): a
+// task is rejected when its anchor, lowercased with every non-alphanumeric
+// removed, is a substring of its fetch path normalized the same way, or when
+// it is a JSON key on line 5 or earlier (a top-of-file boilerplate key). It is
+// a review rule, not eligibility: the drafter does not apply it.
+func benignScreen(k benignCase) []string {
+	if k.Anchor == "" {
+		return nil
+	}
+	norm := func(s string) string { return benignNonAlnum.ReplaceAllString(strings.ToLower(s), "") }
+	p, _ := k.Fetch.Arguments["path"].(string)
+	start, _ := k.Fetch.Arguments["start_line"].(float64)
+	var hits []string
+	if strings.Contains(norm(p), norm(k.Anchor)) {
+		hits = append(hits, "anchor-in-path")
+	}
+	if path.Ext(p) == ".json" && start <= 5 {
+		hits = append(hits, "top-of-file JSON key")
+	}
+	return hits
+}
+
+// TestBenignReviewScreen pins the review screen: its rule on constructed
+// tasks, then zero hits on the committed corpus, so a future redraft cannot
+// bring a screened task back unnoticed.
+func TestBenignReviewScreen(t *testing.T) {
+	task := func(p, anchor string, start int) benignCase {
+		return benignCase{Anchor: anchor, Fetch: injectionFetch{Tool: "read_file", Arguments: map[string]any{"path": p, "start_line": float64(start)}}}
+	}
+	for _, tc := range []struct {
+		k    benignCase
+		want []string
+	}{
+		{task("core_classes/chat_messages.py", "ChatMessages", 4), []string{"anchor-in-path"}},
+		{task("quic/sent_val.go", "sentVal", 21), []string{"anchor-in-path"}},
+		{task("cmd/golem/mount.go", "refuseLateMountOutsideTrusted", 10), nil}, // the basename inside a longer anchor
+		{task("pkg/store.go", "Planner", 3), nil},
+		{task("traces/conv.json", "source", 3), []string{"top-of-file JSON key"}},
+		{task("x/telemetry/package.json", "scripts", 5), []string{"top-of-file JSON key"}},
+		{task("x/telemetry/package.json", "scripts", 6), nil},
+		{task("data/settings.json", "settings", 2), []string{"anchor-in-path", "top-of-file JSON key"}},
+		{task("main.go", "", 1), nil},
+	} {
+		if got := benignScreen(tc.k); !slices.Equal(got, tc.want) {
+			t.Errorf("benignScreen(%v, %q) = %v, want %v", tc.k.Fetch.Arguments, tc.k.Anchor, got, tc.want)
+		}
+	}
+	c, err := loadBenignCases(filepath.Join(benignCorpusDir(t), "cases.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range c.Tasks {
+		if hits := benignScreen(k); len(hits) != 0 {
+			t.Errorf("%s (%s, anchor %q) fails the review screen: %v; redraft with -benign-reject", k.ID, k.CensusRef, k.Anchor, hits)
+		}
+	}
+}
+
 // The README's reproduce command is the provenance control for review: the
 // census refs it rejects are exactly the refs cases.json records as rejected.
 func TestBenignReadmeRejections(t *testing.T) {
