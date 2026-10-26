@@ -60,6 +60,7 @@ func main() {
 	benignN := flag.Int("benign-n", 96, "With -interceptor-benign-draft: extraction tasks to sample")
 	benignNonfiring := flag.Int("benign-nonfiring", 16, "With -interceptor-benign-draft: nonfiring tasks to sample")
 	benignReject := flag.String("benign-reject", "", "With -interceptor-benign-draft: comma-separated census refs (<stratum>/<path>) rejected in review; each is replaced by continuing down the same permutation")
+	benignAuthored := flag.String("benign-authored", "", "With -interceptor-benign-draft: a JSON array of hand-authored delegated tasks (BC2), appended after the drafted tasks, e.g. docs/llm/traces/interceptor-benign/delegated.json")
 	buildInterceptorBenign := flag.String("build-interceptor-benign", "", "Run the identity gate (#517 spec §6.4) on this benign cases JSON and, when every identity holds, build each task's golem-default-guards and guards+detectors traces into -benign-out. No model is called")
 	benignOut := flag.String("benign-out", filepath.Join("docs", "llm", "traces", "interceptor-benign", "traces"), "Output directory for -build-interceptor-benign")
 	assemblyOut := flag.String("assembly-out", filepath.Join("docs", "llm", "assembly-corpus", "traces"), "Output directory for -assembly-build with a 3a JSON-array fixture")
@@ -242,7 +243,7 @@ func main() {
 		}
 	}
 	if *interceptorBenignDraft == "" {
-		if stray := strayFlags(providedFlags, "census-results", "benign-n", "benign-nonfiring", "benign-reject"); len(stray) > 0 {
+		if stray := strayFlags(providedFlags, "census-results", "benign-n", "benign-nonfiring", "benign-reject", "benign-authored"); len(stray) > 0 {
 			log.Fatalf("llm-bench: %s require -interceptor-benign-draft", strings.Join(stray, ", "))
 		}
 	}
@@ -292,14 +293,14 @@ func main() {
 
 	if *interceptorBenignDraft != "" {
 		refuseOutputAlias("interceptor-benign-draft", "-interceptor-benign-draft", *interceptorBenignDraft,
-			[][2]string{{"-census-manifest", *censusManifestPath}, {"-census-results", *censusResultsPath}})
+			[][2]string{{"-census-manifest", *censusManifestPath}, {"-census-results", *censusResultsPath}, {"-benign-authored", *benignAuthored}})
 		var rejected []string
 		for _, ref := range strings.Split(*benignReject, ",") {
 			if ref = strings.TrimSpace(ref); ref != "" {
 				rejected = append(rejected, ref)
 			}
 		}
-		p := benignDraftParams{N: *benignN, Nonfiring: *benignNonfiring, Seed: benignSeed, Rejected: rejected}
+		p := benignDraftParams{N: *benignN, Nonfiring: *benignNonfiring, Seed: benignSeed, Rejected: rejected, Authored: *benignAuthored}
 		if err := runBenignDraftMode(ctx, *censusManifestPath, *censusRoot, *censusResultsPath, *interceptorBenignDraft, p, os.Stderr); err != nil {
 			log.Fatalf("llm-bench: interceptor-benign-draft: %v", err)
 		}

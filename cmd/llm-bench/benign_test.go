@@ -401,6 +401,74 @@ func TestBenignDraftReplacement(t *testing.T) {
 	}
 }
 
+// fixtureDelegated writes the fixture's delegated tasks as an authored-tasks
+// file and returns its path and bytes.
+func fixtureDelegated(t *testing.T) (string, []byte) {
+	t.Helper()
+	var delegated []benignCase
+	for _, k := range fixtureCases(t).Tasks {
+		if k.Stratum == benignDelegated {
+			delegated = append(delegated, k)
+		}
+	}
+	raw, err := json.Marshal(delegated)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "delegated.json")
+	if err := os.WriteFile(path, raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path, raw
+}
+
+// The draft mode appends the authored delegated tasks after the drafted ones,
+// so one command reproduces a whole cases file: the committed fixture is the
+// N=3, nonfiring=1 draft plus its two delegated tasks, byte for byte. An
+// authored file holding a drafted stratum, an unknown field or trailing data
+// is refused.
+func TestBenignDraftAuthored(t *testing.T) {
+	manifest, root, results := benignFixtureCensus(t)
+	authored, raw := fixtureDelegated(t)
+	out := filepath.Join(t.TempDir(), "cases.json")
+	p := benignDraftParams{N: 3, Nonfiring: 1, Seed: benignSeed, Authored: authored}
+	if err := runBenignDraftMode(t.Context(), manifest, root, results, out, p, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := os.ReadFile(out)
+	want, err := os.ReadFile(filepath.Join(benignFixtureDir, "cases.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The committed fixture binds the committed manifest; this draft binds the
+	// copy with the generated files added, so only that digest differs.
+	_, gotSum, err := loadCensusManifest(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, wantSum, err := loadCensusManifest(filepath.Join(benignFixtureDir, "census", "manifest.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got = bytes.Replace(got, []byte(gotSum), []byte(wantSum), 1); !bytes.Equal(got, want) {
+		t.Fatalf("draft plus authored tasks differs from the committed fixture cases.json:\n%s", got)
+	}
+	for _, tc := range []struct{ name, raw, want string }{
+		{"a drafted stratum", strings.Replace(string(raw), `"stratum":"delegated"`, `"stratum":"extraction"`, 1), "only delegated tasks are authored"},
+		{"unknown field", strings.Replace(string(raw), `"goal":`, `"surprise":1,"goal":`, 1), "unknown field"},
+		{"trailing data", string(raw) + "[]", "trailing data"},
+	} {
+		path := filepath.Join(t.TempDir(), "delegated.json")
+		if err := os.WriteFile(path, []byte(tc.raw), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		p.Authored = path
+		if err := runBenignDraftMode(t.Context(), manifest, root, results, filepath.Join(t.TempDir(), "cases.json"), p, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: err = %v, want %q", tc.name, err, tc.want)
+		}
+	}
+}
+
 // The draft mode refuses census results not produced from the manifest.
 func TestBenignDraftModeBindsManifest(t *testing.T) {
 	skipBenignOnWindows(t)
@@ -826,6 +894,14 @@ func TestLoadBenignCasesRejects(t *testing.T) {
 			c.Sampling.Rejected = []benignRejection{{"README.md", benignDelegated, 1}}
 			return c
 		}, "a stratum other than extraction or nonfiring"},
+		{"a rejection with a blank ref", func(c benignCases) benignCases {
+			c.Sampling.Rejected = []benignRejection{{"", benignExtraction, 4}}
+			return c
+		}, "blank or duplicate ref"},
+		{"a rejection with a duplicate ref", func(c benignCases) benignCases {
+			c.Sampling.Rejected = []benignRejection{{"alpha/ranges.go", benignExtraction, 4}, {"alpha/ranges.go", benignNonfiring, 2}}
+			return c
+		}, "blank or duplicate ref"},
 		{"duplicate rank", func(c benignCases) benignCases {
 			return withTask(t, c, "ext-0002", func(k *benignCase) { k.Rank = 1 })
 		}, "rank"},
@@ -977,25 +1053,124 @@ func TestBuildBenignCorpusGatesAndPrunes(t *testing.T) {
 	}
 }
 
-// TestBenignCorpusRegen is the committed corpus's regeneration gate. It skips
-// until Task 9b commits docs/llm/traces/interceptor-benign/cases.json.
+func benignCorpusDir(t *testing.T) string {
+	t.Helper()
+	return filepath.Join(corpusRepoRoot(t), "docs", "llm", "traces", "interceptor-benign")
+}
+
+// TestBenignCorpusRegen is the committed corpus's regeneration gate: the
+// identity gate holds on every committed task, two rebuilds are byte for byte
+// the committed traces, and the delegated tasks in cases.json are exactly the
+// authored delegated.json the draft mode appended (the drafted block needs the
+// census root, which CI does not have).
 func TestBenignCorpusRegen(t *testing.T) {
-	root := corpusRepoRoot(t)
-	dir := filepath.Join(root, "docs", "llm", "traces", "interceptor-benign")
+	dir := benignCorpusDir(t)
 	cases := filepath.Join(dir, "cases.json")
-	if _, err := os.Stat(cases); os.IsNotExist(err) {
-		t.Skip("docs/llm/traces/interceptor-benign/cases.json is not committed yet (#517 Task 9b)")
-	}
-	out := t.TempDir()
-	if err := buildBenignCorpus(t.Context(), cases, out); err != nil {
-		t.Fatal(err)
-	}
-	diff, err := corpusDirDiff(out, filepath.Join(dir, "traces"))
+	v, err := identityGate(t.Context(), cases)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if diff != "" {
-		t.Fatalf("committed benign corpus is stale; rerun -build-interceptor-benign:\n%s", diff)
+	if len(v) != 0 {
+		t.Fatalf("committed benign corpus: %d identity-gate violation(s): %v", len(v), v)
+	}
+	for range 2 {
+		out := t.TempDir()
+		if err := buildBenignCorpus(t.Context(), cases, out); err != nil {
+			t.Fatal(err)
+		}
+		diff, err := corpusDirDiff(out, filepath.Join(dir, "traces"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if diff != "" {
+			t.Fatalf("committed benign corpus is stale; rerun go run ./cmd/llm-bench -build-interceptor-benign docs/llm/traces/interceptor-benign/cases.json:\n%s", diff)
+		}
+	}
+	c, err := loadBenignCases(cases)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authored, err := loadBenignAuthored(filepath.Join(dir, "delegated.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var delegated []benignCase
+	for _, k := range c.Tasks {
+		if k.Stratum == benignDelegated {
+			delegated = append(delegated, k)
+		}
+	}
+	// Compared as compact JSON: raw argument objects keep their source layout.
+	if !sameJSON(delegated, authored) {
+		t.Fatal("the delegated tasks in cases.json are not delegated.json; redraft with -benign-authored (README)")
+	}
+}
+
+// TestBenignLicenseNotices: every task from a census stratum carries that
+// stratum's manifest license, every authored task the authored notice, and
+// the README's sources section names every corpus in cases.json, with the
+// manifest commit and license of each census stratum.
+func TestBenignLicenseNotices(t *testing.T) {
+	dir := benignCorpusDir(t)
+	c, err := loadBenignCases(filepath.Join(dir, "cases.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, _, err := loadCensusManifest(filepath.Join(corpusRepoRoot(t), "docs", "llm", "census", "manifest.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	strata := map[string]censusStratum{}
+	for _, s := range m.Strata {
+		strata[s.Name] = s
+	}
+	readme, err := os.ReadFile(filepath.Join(dir, "README.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, sources, ok := strings.Cut(string(readme), "\n## Sources and licenses\n")
+	if !ok {
+		t.Fatal("README.md has no ## Sources and licenses section")
+	}
+	sources, _, _ = strings.Cut(sources, "\n## ")
+	corpora := map[string]bool{}
+	for _, k := range c.Tasks {
+		want := "Apache-2.0 (authored for go-llm #517)"
+		if k.Corpus != benignAuthored {
+			s, ok := strata[k.Corpus]
+			if !ok {
+				t.Errorf("%s: corpus %q is no census stratum", k.ID, k.Corpus)
+				continue
+			}
+			want = s.License
+		}
+		if strings.TrimSpace(k.License) == "" || k.License != want {
+			t.Errorf("%s: license %q, want %q", k.ID, k.License, want)
+		}
+		corpora[k.Corpus] = true
+	}
+	rows := map[string]string{}
+	for _, line := range strings.Split(sources, "\n") {
+		if rest, ok := strings.CutPrefix(line, "| `"); ok {
+			name, _, _ := strings.Cut(rest, "`")
+			rows[name] = line
+		}
+	}
+	for corpus := range corpora {
+		row, ok := rows[corpus]
+		if !ok {
+			t.Errorf("README sources table has no row for corpus %s", corpus)
+			continue
+		}
+		// | Corpus | Source | Commit | License | Copyright notice |
+		cells := strings.Split(strings.Trim(row, "| "), " | ")
+		commit, license := "this repository", "Apache-2.0 (authored for go-llm #517)"
+		if s, ok := strata[corpus]; ok {
+			commit, license = "`"+s.Commit+"`", s.License
+		}
+		if len(cells) != 5 || cells[2] != commit || cells[3] != license || !strings.HasPrefix(cells[4], "Copyright ") {
+			t.Errorf("README sources row for %s = %q, want commit %s, license %s and a copyright notice", corpus, row, commit, license)
+		}
 	}
 }
 

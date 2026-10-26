@@ -9,6 +9,8 @@ docs/llm/traces/*
 !docs/llm/traces/round2-challenge/**
 !docs/llm/traces/injection/
 !docs/llm/traces/injection/**
+!docs/llm/traces/interceptor-benign/
+!docs/llm/traces/interceptor-benign/**
 !docs/llm/traces/first-accepted-run/
 docs/llm/traces/first-accepted-run/*
 !docs/llm/traces/first-accepted-run/conversation-fa-c02.json

@@ -575,11 +575,39 @@ func benignAnchorOK(ctx context.Context, name, goal string) (bool, error) {
 }
 
 // benignDraftParams are the draft's inputs besides the census: n extraction
-// and nonfiring tasks, the seed, and the census refs review rejected.
+// and nonfiring tasks, the seed, the census refs review rejected, and the
+// path of the hand-authored delegated tasks the draft mode appends (empty
+// for none).
 type benignDraftParams struct {
 	N, Nonfiring int
 	Seed         uint64
 	Rejected     []string
+	Authored     string
+}
+
+// loadBenignAuthored reads the hand-authored delegated tasks (BC2): a JSON
+// array of tasks, strictly decoded. Every other rule is the cases loader's,
+// applied once they are appended to the draft.
+func loadBenignAuthored(path string) ([]benignCase, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("benign: read authored tasks: %w", err)
+	}
+	var out []benignCase
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&out); err != nil {
+		return nil, fmt.Errorf("benign: parse authored tasks %q: %w", path, err)
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return nil, fmt.Errorf("benign: authored tasks %q: trailing data after the tasks", path)
+	}
+	for _, k := range out {
+		if k.Stratum != benignDelegated {
+			return nil, fmt.Errorf("benign: authored task %s is %q: only delegated tasks are authored", k.ID, k.Stratum)
+		}
+	}
+	return out, nil
 }
 
 // draftBenignTasks drafts the extraction and nonfiring tasks (Rulings P4,
@@ -813,8 +841,9 @@ func firstBenignWindow(ctx context.Context, read *agenttools.ReadFile, dir strin
 }
 
 // runBenignDraftMode is the -interceptor-benign-draft CLI entry: it drafts
-// from census results bound to the manifest and writes the DRAFT cases file
-// to out. A draft becomes the registered corpus only after review (BC7).
+// from census results bound to the manifest, appends the authored delegated
+// tasks when p.Authored names them, and writes the DRAFT cases file to out.
+// A draft becomes the registered corpus only after review (BC7).
 func runBenignDraftMode(ctx context.Context, manifestPath, root, resultsPath, out string, p benignDraftParams, stderr io.Writer) error {
 	if root == "" || out == "" {
 		return errors.New("-census-root and an -interceptor-benign-draft output path are required")
@@ -833,6 +862,13 @@ func runBenignDraftMode(ctx context.Context, manifestPath, root, resultsPath, ou
 	c, err := draftBenignTasks(ctx, r, m, root, p)
 	if err != nil {
 		return err
+	}
+	if p.Authored != "" {
+		a, err := loadBenignAuthored(p.Authored)
+		if err != nil {
+			return err
+		}
+		c.Tasks = append(c.Tasks, a...)
 	}
 	if err := c.validate(); err != nil {
 		return fmt.Errorf("benign draft: the drafted cases would not load, nothing written: %w", err)
@@ -856,8 +892,8 @@ func runBenignDraftMode(ctx context.Context, manifestPath, root, resultsPath, ou
 		}
 		return strings.Join(parts, ", ")
 	}
-	_, _ = fmt.Fprintf(stderr, "llm-bench: interceptor-benign-draft: extraction %d of %d eligible (%s); nonfiring %d of %d eligible (%s); %d rejected; wrote the DRAFT %s for review\n",
-		len(c.Tasks)-countStratum(c.Tasks, benignNonfiring), s.Eligible, line(s.Population), countStratum(c.Tasks, benignNonfiring), s.NonfiringEligible, line(s.NonfiringPopulation), len(s.Rejected), out)
+	_, _ = fmt.Fprintf(stderr, "llm-bench: interceptor-benign-draft: extraction %d of %d eligible (%s); nonfiring %d of %d eligible (%s); %d rejected; %d delegated; wrote the DRAFT %s for review\n",
+		countStratum(c.Tasks, benignExtraction), s.Eligible, line(s.Population), countStratum(c.Tasks, benignNonfiring), s.NonfiringEligible, line(s.NonfiringPopulation), len(s.Rejected), countStratum(c.Tasks, benignDelegated), out)
 	return nil
 }
 

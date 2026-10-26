@@ -476,21 +476,27 @@ func luhn(digits string) bool {
 }
 
 // TestCommittedArtifactsCarryNoSecretShapes scans every committed #517
-// artifact (Review Focus 3), the test sources that generate values included.
-// The census results' sha256 digests are blanked first (ruling R19): they are
-// identifiers that can hold a Luhn-valid digit run, not content (the fixture
-// golden's are empty). Never scanned: docs/llm/census/manifest.json, whose
+// artifact (Review Focus 3), the test sources that generate values included,
+// and the benign task corpus (cases.json, delegated.json, README and every
+// trace). The census results' sha256 digests are blanked first (ruling R19):
+// they are identifiers that can hold a Luhn-valid digit run, not content (the
+// fixture golden's are empty). Never scanned: docs/llm/census/manifest.json, whose
 // per-file sha256s carry such runs by design, and the census fixture's
 // constant.go, a deliberate corpus excerpt.
 func TestCommittedArtifactsCarryNoSecretShapes(t *testing.T) {
 	t.Parallel()
 	repo := filepath.Join("..", "..", "..")
 	results := filepath.Join(repo, "docs", "llm", "census", "census-results.json")
+	benign := filepath.Join(repo, "docs", "llm", "traces", "interceptor-benign")
 	tests, err := filepath.Glob("*_test.go")
 	if err != nil || len(tests) < 2 {
 		t.Fatalf("Glob(*_test.go) = %v, %v; want this package's test files", tests, err)
 	}
-	for _, path := range append([]string{
+	traces, err := filepath.Glob(filepath.Join(benign, "traces", "*.json"))
+	if err != nil || len(traces) == 0 {
+		t.Fatalf("Glob(benign traces) = %v, %v; want the committed benign corpus", traces, err)
+	}
+	for _, path := range append(append([]string{
 		"cases.json",
 		filepath.Join(repo, "docs", "security", "secrets-evidence.md"),
 		results,
@@ -499,7 +505,10 @@ func TestCommittedArtifactsCarryNoSecretShapes(t *testing.T) {
 		filepath.Join(repo, "changelog.d", "517-secrets-evidence.md"),
 		filepath.Join(repo, "cmd", "golem", "secrets_workflow_test.go"),
 		filepath.Join(repo, "cmd", "golem", "secrets_evidence_test.go"),
-	}, tests...) {
+		filepath.Join(benign, "cases.json"),
+		filepath.Join(benign, "delegated.json"),
+		filepath.Join(benign, "README.md"),
+	}, tests...), traces...) {
 		data, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatalf("read %s: %v", path, err)
