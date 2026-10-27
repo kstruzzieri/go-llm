@@ -26,9 +26,11 @@ import (
 // row red.
 //
 // Out of scope (library-owned, spec §8.1): the golem runtime bootstrap
-// (golem/runtime.go:176, :392), which installs no interceptors; orchestrators
-// a host supplies through golem.Options.Orchestrator; and callers of
-// agenttools.NewDispatch outside the CLI. None of them reads the CLI flag.
+// (bootstrapOrchestrator, called by golem.New), which installs no
+// interceptors, as the golem.Options.Orchestrator documentation says;
+// orchestrators a host supplies through golem.Options.Orchestrator; and
+// callers of agenttools.NewDispatch outside the CLI. None of them reads the
+// CLI flag.
 
 const (
 	probeGoal = "summarize the release notes"
