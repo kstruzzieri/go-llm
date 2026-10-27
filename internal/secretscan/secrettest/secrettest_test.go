@@ -481,7 +481,8 @@ func luhn(digits string) bool {
 // artifact (Review Focus 3), the test sources that generate values included,
 // the benign task corpus (cases.json, delegated.json, README,
 // registration.json and every trace) and the two PR2 reports (the v1
-// adversarial and the benign interceptor reports). No corpus excerpt is
+// adversarial and the benign interceptor reports), and the PR3 decision record,
+// its changelog fragment and the construction-path test. No corpus excerpt is
 // exempt: every committed window must scan clean. The sha256 digests of the
 // census results and of the registration, and those the two reports print
 // (the registration's, the registration file's own and the v1 cases file's),
@@ -549,6 +550,9 @@ func TestCommittedArtifactsCarryNoSecretShapes(t *testing.T) {
 		filepath.Join(repo, "changelog.d", "517-secrets-evidence.md"),
 		filepath.Join(repo, "cmd", "golem", "secrets_workflow_test.go"),
 		filepath.Join(repo, "cmd", "golem", "secrets_evidence_test.go"),
+		filepath.Join(repo, "cmd", "golem", "interceptor_paths_test.go"),
+		filepath.Join(repo, "docs", "security", "interceptor-defaults-decision.md"),
+		filepath.Join(repo, "changelog.d", "517-default-decision.md"),
 		filepath.Join(benign, "cases.json"),
 		filepath.Join(benign, "delegated.json"),
 		filepath.Join(benign, "README.md"),

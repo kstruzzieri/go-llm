@@ -88,7 +88,10 @@
 // row; later blocks retain undo records for earlier allowed mutations. A
 // caller-owned blocked agent.Result may still contain its original goal.
 // -interceptors remains off by default; the #439 guards and #555 refusal
-// reporting do not depend on it.
+// reporting do not depend on it. #517 measured the detectors and Secrets and
+// kept both opt-in (no detector benefit evidence before #700, over-budget
+// block rates on benign content, a fixture write ending the run, and #518 not
+// landed); docs/security/interceptor-defaults-decision.md records why.
 //
 // With -interceptors, Golem also plants an unpredictable canary in its system
 // instructions for each live conversation activation. The canary survives
