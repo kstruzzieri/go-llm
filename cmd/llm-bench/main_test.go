@@ -1049,7 +1049,7 @@ func TestMainRejectsRegistrationInUnsupportedModes(t *testing.T) {
 			cmd := exec.Command(os.Args[0], args...)
 			cmd.Env = append(os.Environ(), "LLM_BENCH_TEST_MAIN=1")
 			out, err := cmd.CombinedOutput()
-			if err == nil || !strings.Contains(string(out), "-registration requires -calibrate-capture or -injection-report") {
+			if err == nil || !strings.Contains(string(out), "-registration requires -calibrate-capture, -injection-report or -interceptor-benign-report") {
 				t.Fatalf("unsupported mode did not reject -registration: %v\n%s", err, out)
 			}
 		})

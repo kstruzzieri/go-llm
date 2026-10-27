@@ -1,8 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"cmp"
 	"encoding/json"
+	"fmt"
+	"io"
+	"os"
 	"slices"
 )
 
@@ -123,4 +127,25 @@ func aggregateCensus(obs []censusObservation, m censusManifest) censusResults {
 func marshalCensusResults(r censusResults) ([]byte, error) {
 	b, err := json.MarshalIndent(r, "", "  ")
 	return append(b, '\n'), err
+}
+
+// loadCensusResults strictly decodes a census-results file.
+func loadCensusResults(path string) (censusResults, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return censusResults{}, fmt.Errorf("census results: %w", err)
+	}
+	var r censusResults
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&r); err != nil {
+		return censusResults{}, fmt.Errorf("census results %s: %w", path, err)
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return censusResults{}, fmt.Errorf("census results %s: trailing data after the results", path)
+	}
+	if r.Schema != censusResultsSchema {
+		return censusResults{}, fmt.Errorf("census results %s: schema %q, want %q", path, r.Schema, censusResultsSchema)
+	}
+	return r, nil
 }

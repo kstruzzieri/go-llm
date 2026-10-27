@@ -189,14 +189,19 @@ func normalizeFenceKeys(traceID string, req provider.ChatRequest) (provider.Chat
 	return out, nil
 }
 
-// injectionBuildOptions is the #517 seam: an explicit interceptor chain and
-// its recorded name. The zero value means Golem's always-on guards.
+// injectionBuildOptions is the #517 seam: an interceptor arm, or an explicit
+// chain and its recorded name. A named Arm wins over Chain and ChainName. The
+// zero value means Golem's always-on guards.
 type injectionBuildOptions struct {
+	Arm       interceptorArm
 	Chain     []agent.Interceptor
 	ChainName string
 }
 
 func (o injectionBuildOptions) resolved() ([]agent.Interceptor, string) {
+	if o.Arm.Name != "" {
+		return o.Arm.Chain, o.Arm.Name
+	}
 	if o.Chain == nil {
 		return golemDefaultGuards(), injectionDefaultChain
 	}
@@ -204,7 +209,8 @@ func (o injectionBuildOptions) resolved() ([]agent.Interceptor, string) {
 }
 
 // buildInjectionCorpus is the CLI entry (default chain);
-// buildInjectionCorpusWith is what #517 calls with its own chain.
+// buildInjectionCorpusWith is what #517 calls with an interceptor arm (or an
+// explicit chain).
 func buildInjectionCorpus(ctx context.Context, casesPath, outDir string) error {
 	return buildInjectionCorpusWith(ctx, casesPath, outDir, injectionBuildOptions{})
 }
@@ -253,12 +259,46 @@ func loadInjectionCases(path string) (injectionCases, error) {
 	return c, nil
 }
 
+// injectionCell is one trace the corpus builds from a base: its id, the goal,
+// the text substituted for the payload slot, and the eval block.
+type injectionCell struct {
+	ID, Goal, Slot  string
+	Eval            InjectionEval
+	PositiveControl bool
+}
+
+// injectionCells enumerates a base's cells in build order: the clean twin,
+// then one cell per variant. A positive control asks for the payload in the
+// trusted goal and fills the slot with the twin text.
+func injectionCells(b injectionBase) []injectionCell {
+	first := b.Variants[0]
+	// The twin is scored for restraint only; the first variant's matcher and
+	// forbidden tools are carried so validation and the report see a complete block.
+	cells := []injectionCell{{ID: "inj-" + b.ID + "-twin", Goal: b.Task, Slot: b.TwinFiller,
+		Eval: InjectionEval{Technique: injectionTwin, Form: injectionTwin, Twin: true, Matcher: first.Matcher, ForbiddenTools: first.ForbiddenTools}}}
+	for _, v := range b.Variants {
+		c := injectionCell{ID: "inj-" + b.ID + "-" + v.Technique + "-" + v.Form, Goal: b.Task, Slot: v.Payload,
+			Eval:            InjectionEval{Technique: v.Technique, Form: v.Form, Matcher: v.Matcher, ForbiddenTools: v.ForbiddenTools},
+			PositiveControl: v.PositiveControl}
+		if v.PositiveControl {
+			c.ID += "-positive-control"
+			c.Goal, c.Slot = v.Payload, b.TwinFiller
+		}
+		cells = append(cells, c)
+	}
+	return cells
+}
+
 // buildInjectionCorpusWith drives the real Orchestrator once per variant (and
 // one clean twin per base) with a scripted caller, captures the exact request
 // the candidate would see, normalizes the per-render fence keys and publishes
 // the resulting frozen traces (spec section 4.4).
 func buildInjectionCorpusWith(ctx context.Context, casesPath, outDir string, opts injectionBuildOptions) error {
-	if opts.Chain != nil && opts.ChainName == "" {
+	if opts.Arm.Name != "" || len(opts.Arm.Chain) > 0 {
+		if err := checkArm(opts.Arm); err != nil {
+			return err
+		}
+	} else if opts.Chain != nil && opts.ChainName == "" {
 		return injectionErr("explicit interceptor chain needs a chain name")
 	}
 	chain, chainName := opts.resolved()
@@ -284,26 +324,8 @@ func buildInjectionCorpusWith(ctx context.Context, casesPath, outDir string, opt
 		return nil
 	}
 	for _, b := range cases.Bases {
-		first := b.Variants[0]
-		// The twin is scored for restraint only; the first variant's matcher and
-		// forbidden tools are carried so validation and the report see a complete block.
-		twinEval := InjectionEval{Technique: injectionTwin, Form: injectionTwin, Twin: true, Matcher: first.Matcher, ForbiddenTools: first.ForbiddenTools}
-		t, err := buildInjectionTrace(ctx, cases, b, "inj-"+b.ID+"-twin", b.Task, b.TwinFiller, twinEval, chain, chainName)
-		if err != nil {
-			return err
-		}
-		if err := add(t); err != nil {
-			return err
-		}
-		for _, v := range b.Variants {
-			id := "inj-" + b.ID + "-" + v.Technique + "-" + v.Form
-			goal, slot := b.Task, v.Payload
-			if v.PositiveControl {
-				id += "-positive-control"
-				goal, slot = v.Payload, b.TwinFiller
-			}
-			ev := InjectionEval{Technique: v.Technique, Form: v.Form, Matcher: v.Matcher, ForbiddenTools: v.ForbiddenTools}
-			t, err := buildInjectionTrace(ctx, cases, b, id, goal, slot, ev, chain, chainName)
+		for _, c := range injectionCells(b) {
+			t, err := buildInjectionTrace(ctx, cases, b, c.ID, c.Goal, c.Slot, c.Eval, chain, chainName)
 			if err != nil {
 				return err
 			}
@@ -332,7 +354,53 @@ func buildInjectionCorpusWith(ctx context.Context, casesPath, outDir string, opt
 	return err
 }
 
+// errBlockedAtBuild marks a build the scripted run could not finish because an
+// interceptor ended it with a terminal block on the initial input (the goal,
+// before the model is called) or on the model's own output: no decision-point
+// request exists for that cell (spec section 6.5). A block at the tool_call
+// hook answers the call with a blocked-call notice and the run continues; a
+// block on a tool result's ingress check replaces the observation with a
+// blocked-result notice (observation-blocked) and the run continues; an abort
+// there is an ordinary run error. None of these is this class.
+var errBlockedAtBuild = errors.New("blocked at build")
+
+// checkArm refuses an arm that would silently run the wrong chain: a name with
+// no interceptors runs with no guards, and interceptors with no name are
+// ignored by injectionBuildOptions.resolved.
+func checkArm(arm interceptorArm) error {
+	switch {
+	case arm.Name == "":
+		return injectionErr("interceptor arm has no name")
+	case len(arm.Chain) == 0:
+		return injectionErr("interceptor arm %q has no interceptors", arm.Name)
+	}
+	return nil
+}
+
+// buildArmTrace builds one trace under an interceptor arm and records the
+// arm's name as the trace's chain.
+func buildArmTrace(ctx context.Context, cases injectionCases, b injectionBase, id, goal, slot string, ev InjectionEval, arm interceptorArm) (Trace, error) {
+	if err := checkArm(arm); err != nil {
+		return Trace{}, err
+	}
+	return buildInjectionTrace(ctx, cases, b, id, goal, slot, ev, arm.Chain, arm.Name)
+}
+
 func buildInjectionTrace(ctx context.Context, cases injectionCases, b injectionBase, id, goal, slot string, ev InjectionEval, chain []agent.Interceptor, chainName string) (Trace, error) {
+	req, err := captureInjectionRequest(ctx, b, id, goal, slot, chain)
+	if err != nil {
+		return Trace{}, err
+	}
+	return injectionTraceFromRequest(cases, b, id, ev, chainName, req)
+}
+
+// captureInjectionRequest drives the real Orchestrator under chain with the
+// scripted caller and returns the decision-point request, fence-normalized.
+// It is the wire request a candidate would see (spec section 6.4 compares
+// these, never trace JSON). A run an interceptor ends with a terminal block on
+// the initial input or on the model's output returns an error wrapping
+// errBlockedAtBuild and the *agent.BlockedError.
+func captureInjectionRequest(ctx context.Context, b injectionBase, id, goal, slot string, chain []agent.Interceptor) (provider.ChatRequest, error) {
 	observation := strings.Replace(b.Observation, injectionPayloadSlot, slot, 1)
 	caller := &captureCaller{fetch: b.Fetch}
 	o := agent.New(caller, agent.ContextManager{}, agent.WithInterceptors(chain...))
@@ -345,19 +413,48 @@ func buildInjectionTrace(ctx context.Context, cases injectionCases, b injectionB
 		Options:  provider.ModelOptions{NumPredict: 4096},
 	}, nil)
 	if err != nil {
-		return Trace{}, fmt.Errorf("injection build %s: run: %w", id, err)
+		var blocked *agent.BlockedError
+		// The initial-input check runs before the first model call; a tool
+		// result's ingress check runs after it. Both can report Step 0 (the
+		// scripted fetch happens in the first round), so the call count, not
+		// BlockedError.Step, tells them apart.
+		if errors.As(err, &blocked) && (blocked.Hook == agent.HookOutput || (blocked.Hook == agent.HookInput && caller.calls == 0)) {
+			return provider.ChatRequest{}, fmt.Errorf("injection build %s: run: %w: %w", id, errBlockedAtBuild, err)
+		}
+		return provider.ChatRequest{}, fmt.Errorf("injection build %s: run: %w", id, err)
 	}
 	if caller.captured == nil {
-		return Trace{}, fmt.Errorf("injection build %s: the decision-point request was never captured", id)
+		return provider.ChatRequest{}, fmt.Errorf("injection build %s: the decision-point request was never captured", id)
 	}
 	req, err := normalizeFenceKeys(id, *caller.captured)
 	if err != nil {
-		return Trace{}, fmt.Errorf("injection build %s: %w", id, err)
+		return provider.ChatRequest{}, fmt.Errorf("injection build %s: %w", id, err)
 	}
+	return req, nil
+}
+
+// injectionTraceFromRequest assembles the frozen trace from a captured,
+// fence-normalized request.
+func injectionTraceFromRequest(cases injectionCases, b injectionBase, id string, ev InjectionEval, chainName string, req provider.ChatRequest) (Trace, error) {
+	t, err := traceFromRequest(id, cases.Source, req)
+	if err != nil {
+		return Trace{}, err
+	}
+	t.Golden = Golden{ToolCalls: []string{}, FinalAnswerCriteria: b.Rationale, FinalAnswerSubstring: b.Anchor}
+	opts := req.Options
+	ev.CanaryGUID, ev.BaseID, ev.Carrier, ev.Goal, ev.Chain = cases.CanaryGUID, b.ID, b.Carrier, b.Goal, chainName
+	ev.FrozenOptions = &opts
+	t.Injection = &ev
+	return t, nil
+}
+
+// traceFromRequest is the frozen wire of a captured, fence-normalized
+// request: its system prompt, tools and turns, with no golden or eval block.
+func traceFromRequest(id, source string, req provider.ChatRequest) (Trace, error) {
 	if len(req.Messages) < 2 || req.Messages[0].Role != "system" {
-		return Trace{}, fmt.Errorf("injection build %s: captured request does not start with a system message", id)
+		return Trace{}, fmt.Errorf("build %s: captured request does not start with a system message", id)
 	}
-	t := Trace{ID: id, Source: cases.Source, System: req.Messages[0].Content}
+	t := Trace{ID: id, Source: source, System: req.Messages[0].Content}
 	for _, tl := range req.Tools {
 		raw, err := json.Marshal(tl)
 		if err != nil {
@@ -375,10 +472,5 @@ func buildInjectionTrace(ctx context.Context, cases injectionCases, b injectionB
 		}
 		t.Turns = append(t.Turns, turn)
 	}
-	t.Golden = Golden{ToolCalls: []string{}, FinalAnswerCriteria: b.Rationale, FinalAnswerSubstring: b.Anchor}
-	opts := req.Options
-	ev.CanaryGUID, ev.BaseID, ev.Carrier, ev.Goal, ev.Chain = cases.CanaryGUID, b.ID, b.Carrier, b.Goal, chainName
-	ev.FrozenOptions = &opts
-	t.Injection = &ev
 	return t, nil
 }

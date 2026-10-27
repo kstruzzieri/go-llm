@@ -19,6 +19,9 @@ after OS overhead).
 | [benchmarks/2026-10-15-injection-resistance.md](benchmarks/2026-10-15-injection-resistance.md) | Injection-resistance run report with manual review (written at the recorded run) |
 | [census/README.md](census/README.md) | Interceptor census: strata manifest, carriers, per-arm outcome rules and committed results |
 | [../security/secrets-evidence.md](../security/secrets-evidence.md) | Secrets evidence: accuracy, census, workflow table and the default gate (generated) |
+| [traces/interceptor-benign/README.md](traces/interceptor-benign/README.md) | Registered benign task corpus for the detector interceptors: strata, sampling, identity gate, registration and review record |
+| [benchmarks/2026-10-26-interceptor-benign.md](benchmarks/2026-10-26-interceptor-benign.md) | Detectors on benign work: census fire rates, MCP block budget per stratum, D×S, identity gate and registered power (generated, no model) |
+| [benchmarks/2026-10-25-interceptor-adversarial-v1.md](benchmarks/2026-10-25-interceptor-adversarial-v1.md) | Interceptor arms on the #452 v1 injection corpus: deterministic cell classes and hit or miss per payload (generated, no model) |
 
 ## Bring-your-own model
 

@@ -1,6 +1,8 @@
 package secrettest
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"maps"
 	"os"
@@ -476,21 +478,69 @@ func luhn(digits string) bool {
 }
 
 // TestCommittedArtifactsCarryNoSecretShapes scans every committed #517
-// artifact (Review Focus 3), the test sources that generate values included.
-// The census results' sha256 digests are blanked first (ruling R19): they are
-// identifiers that can hold a Luhn-valid digit run, not content (the fixture
-// golden's are empty). Never scanned: docs/llm/census/manifest.json, whose
+// artifact (Review Focus 3), the test sources that generate values included,
+// the benign task corpus (cases.json, delegated.json, README,
+// registration.json and every trace) and the two PR2 reports (the v1
+// adversarial and the benign interceptor reports). No corpus excerpt is
+// exempt: every committed window must scan clean. The sha256 digests of the
+// census results and of the registration, and those the two reports print
+// (the registration's, the registration file's own and the v1 cases file's),
+// are blanked first (ruling R19): they are identifiers that can hold a
+// Luhn-valid digit run, not content (the fixture golden's are empty). Never
+// scanned: docs/llm/census/manifest.json, whose
 // per-file sha256s carry such runs by design, and the census fixture's
 // constant.go, a deliberate corpus excerpt.
 func TestCommittedArtifactsCarryNoSecretShapes(t *testing.T) {
 	t.Parallel()
 	repo := filepath.Join("..", "..", "..")
 	results := filepath.Join(repo, "docs", "llm", "census", "census-results.json")
+	benign := filepath.Join(repo, "docs", "llm", "traces", "interceptor-benign")
+	registration := filepath.Join(benign, "registration.json")
+	benignReport := filepath.Join(repo, "docs", "llm", "benchmarks", "2026-10-26-interceptor-benign.md")
+	v1Report := filepath.Join(repo, "docs", "llm", "benchmarks", "2026-10-25-interceptor-adversarial-v1.md")
+	sha := func(path string) string {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		sum := sha256.Sum256(raw)
+		return hex.EncodeToString(sum[:])
+	}
+	registrationDigests := func() []string {
+		raw, err := os.ReadFile(registration)
+		if err != nil {
+			t.Fatalf("read %s: %v", registration, err)
+		}
+		var digests struct {
+			Cases   string `json:"cases_sha256"`
+			Builder string `json:"builder_revision"`
+			Traces  []struct {
+				SHA256 string `json:"sha256"`
+			} `json:"traces"`
+			Census struct {
+				Manifest string `json:"manifest_sha256"`
+				Results  string `json:"results_sha256"`
+				Full     string `json:"full_sha256"`
+			} `json:"census"`
+		}
+		if err := json.Unmarshal(raw, &digests); err != nil {
+			t.Fatalf("%s: %v", registration, err)
+		}
+		out := []string{digests.Cases, digests.Builder, digests.Census.Manifest, digests.Census.Results, digests.Census.Full}
+		for _, tr := range digests.Traces {
+			out = append(out, tr.SHA256)
+		}
+		return out
+	}
 	tests, err := filepath.Glob("*_test.go")
 	if err != nil || len(tests) < 2 {
 		t.Fatalf("Glob(*_test.go) = %v, %v; want this package's test files", tests, err)
 	}
-	for _, path := range append([]string{
+	traces, err := filepath.Glob(filepath.Join(benign, "traces", "*.json"))
+	if err != nil || len(traces) == 0 {
+		t.Fatalf("Glob(benign traces) = %v, %v; want the committed benign corpus", traces, err)
+	}
+	for _, path := range append(append([]string{
 		"cases.json",
 		filepath.Join(repo, "docs", "security", "secrets-evidence.md"),
 		results,
@@ -499,13 +549,21 @@ func TestCommittedArtifactsCarryNoSecretShapes(t *testing.T) {
 		filepath.Join(repo, "changelog.d", "517-secrets-evidence.md"),
 		filepath.Join(repo, "cmd", "golem", "secrets_workflow_test.go"),
 		filepath.Join(repo, "cmd", "golem", "secrets_evidence_test.go"),
-	}, tests...) {
+		filepath.Join(benign, "cases.json"),
+		filepath.Join(benign, "delegated.json"),
+		filepath.Join(benign, "README.md"),
+		registration,
+		v1Report,
+		benignReport,
+	}, tests...), traces...) {
 		data, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatalf("read %s: %v", path, err)
 		}
 		text := string(data)
-		if path == results {
+		var blank []string
+		switch path {
+		case results:
 			var digests struct {
 				Manifest string `json:"manifest_sha256"`
 				Full     string `json:"full_sha256"`
@@ -513,12 +571,19 @@ func TestCommittedArtifactsCarryNoSecretShapes(t *testing.T) {
 			if err := json.Unmarshal(data, &digests); err != nil {
 				t.Fatalf("%s: %v", path, err)
 			}
-			for _, d := range []string{digests.Manifest, digests.Full} {
-				if len(d) != 64 || strings.Trim(d, "0123456789abcdef") != "" {
-					t.Fatalf("%s: digest %q is not a sha256", path, d)
-				}
-				text = strings.ReplaceAll(text, d, "")
+			blank = []string{digests.Manifest, digests.Full}
+		case registration:
+			blank = registrationDigests()
+		case benignReport:
+			blank = append(registrationDigests(), sha(registration))
+		case v1Report:
+			blank = []string{sha(filepath.Join(repo, "docs", "llm", "traces", "injection", "cases.json"))}
+		}
+		for _, d := range blank {
+			if len(d) != 64 || strings.Trim(d, "0123456789abcdef") != "" {
+				t.Fatalf("%s: digest %q is not a sha256", path, d)
 			}
+			text = strings.ReplaceAll(text, d, "")
 		}
 		if findings := secretscan.Scan(text); len(findings) != 0 {
 			t.Errorf("%s carries secret-shaped spans: %v", path, findings)

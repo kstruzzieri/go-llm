@@ -287,11 +287,11 @@ func TestCensusModeWritesOutputs(t *testing.T) {
 // -attempt-* flags are without -replay-attempt, instead of being ignored. The
 // end-to-end refusal is TestStrayCensusFlagsRefusedByMain (census_flags_main_test.go).
 func TestStrayCensusFlags(t *testing.T) {
-	got := strayCensusFlags(map[string]bool{"census-out": true, "models": true, "census-root": true, "census-manifest": true})
+	got := strayCensusFlags(map[string]bool{"census-out": true, "models": true, "census-root": true, "census-manifest": true}, false)
 	if want := []string{"-census-manifest", "-census-root", "-census-out"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("strayCensusFlags = %v, want %v", got, want)
 	}
-	if got := strayCensusFlags(map[string]bool{"interceptor-census": true, "models": true}); len(got) != 0 {
+	if got := strayCensusFlags(map[string]bool{"interceptor-census": true, "models": true}, false); len(got) != 0 {
 		t.Fatalf("strayCensusFlags = %v, want none", got)
 	}
 }
