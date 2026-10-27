@@ -22,6 +22,7 @@ after OS overhead).
 | [traces/interceptor-benign/README.md](traces/interceptor-benign/README.md) | Registered benign task corpus for the detector interceptors: strata, sampling, identity gate, registration and review record |
 | [benchmarks/2026-10-26-interceptor-benign.md](benchmarks/2026-10-26-interceptor-benign.md) | Detectors on benign work: census fire rates, MCP block budget per stratum, D×S, identity gate and registered power (generated, no model) |
 | [benchmarks/2026-10-25-interceptor-adversarial-v1.md](benchmarks/2026-10-25-interceptor-adversarial-v1.md) | Interceptor arms on the #452 v1 injection corpus: deterministic cell classes and hit or miss per payload (generated, no model) |
+| [../security/interceptor-defaults-decision.md](../security/interceptor-defaults-decision.md) | Interceptor defaults decision (#517): detectors and Secrets stay opt-in, the failed gates, the `-interceptors` semantics and the follow-ups |
 
 ## Bring-your-own model
 
