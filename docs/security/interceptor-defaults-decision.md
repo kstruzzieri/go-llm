@@ -2,13 +2,13 @@
 
 Recorded 2026-10-26. **The detectors and Secrets both stay opt-in.**
 
-Golem installs the guards (invariants, egress, child scope denials) in every session. `-interceptors` adds the detectors (zero-width, encoding, typoglycemia), Secrets and the canary. This record states why neither moves into the default and what shows the flag's meaning is unchanged. It points to the evidence and does not restate it. "Spec" below is the #517 design (REV 2, approved 2026-10-24), as in the two reports.
+Golem installs the guards (invariants, egress, child scope denials) in every session. `-interceptors` adds the detectors (zero-width, encoding, typoglycemia), Secrets and the canary. This record states why neither moves into the default and what shows the flag's meaning is unchanged. It links the evidence and repeats only the figures the decision rests on. "Spec" below is the #517 design (REV 2, approved 2026-10-24), the document all three linked reports cite as "spec".
 
 ## Decision
 
 - `-interceptors` keeps its default of false. Omitting it means `-interceptors=false`, which is the guards only.
 - No new flag. `interceptor.Defaults()`, every interceptor's policy and the canary lifecycle are unchanged. The only code change is a trailing clause in the `-interceptors` usage text that points here.
-- Detectors reopen with #700's benefit evidence and a powered model capture. Secrets reopens only after #518 lands and the failed items below are met.
+- Detectors reopen only when #700's v2 corpus supplies benefit evidence and the MCP block budget passes in every stratum (it fails in both i18n strata), and then with a powered model capture. Secrets reopens only after #518 lands and its failed items 3 and 4 below pass.
 
 ## Decisions K1 to K5 (approved 2026-10-24, spec §2.1)
 
@@ -54,7 +54,7 @@ The evidence, by test:
 - `TestInterceptorsFor` (`cmd/golem/interceptors_test.go`) pins the chain composition against literal lists, each interceptor once: the guards only without the flag, and the detectors, Secrets, the guards and the canary with it.
 - `TestStartupNotices_Interceptors` (same file) pins the startup notice for both chains.
 - `TestNewDispatchTool_ChildrenInheritInterceptors` (same file) pins that a dispatch child's chain follows the parent's flag: with it the child's foreign result is replaced and scored, without it verbatim and unscored.
-- `TestInterceptorChainConstructionPaths` (`cmd/golem/interceptor_paths_test.go`) drives every CLI construction path: the REPL, `-p`, a dispatch child, `/model` on the parent and on dispatch, a recipe hint, an agentflow worker, and the `/resume`, `/new` and `/clear` rebuilds. It shows that each is flag-controlled. With no flag and with `-interceptors=false` there is no trailer and no block; with `-interceptors` a workspace read becomes a Secrets block. It observes Typoglycemia and Secrets on each path, not the canary, ZeroWidth or Encoding, which the chain-composition test covers.
+- `TestInterceptorChainConstructionPaths` (`cmd/golem/interceptor_paths_test.go`) drives each CLI construction path against loopback backends: the REPL, `-p`, a dispatch child, `/model set` on the parent and on dispatch, a recipe hint, an agentflow worker, and `/resume`, `/new` and `/clear`. Every probe turn reads `.env`, then a workspace file holding a strong injection phrase and a generated OpenAI-shaped value. In all three flag columns the always-on `credential_path` guard blocks the `.env` read, and the test asserts it. With no flag and with `-interceptors=false` the workspace file reaches the model verbatim, with no trailer and no Secrets block; with `-interceptors` it arrives as the Secrets block. Secrets is observed on every path. Typoglycemia is observed through the findings (REPL, `/model set`, recipe hint, `/resume`, `/new`, `/clear`) or through the risk score alone (`-p`, dispatch child, `/model set` on dispatch) on every path except the agentflow worker. The worker row is wire-only: it returns only an error, and the Secrets block suppresses the Typoglycemia trailer (F6). With `-interceptors`, `/resume` and `/new` republish the runtime through `renewCanary` (`runtime.Replace`), and the test checks that the chain survives; without the flag there is no canary and no republish. `/clear` does not rebuild the runtime, and the test checks that the chain is preserved. The test does not observe the canary, ZeroWidth or Encoding on any path.
 
 Out of scope, because the library owns them: the `golem` runtime bootstrap, which installs no interceptors; orchestrators a host supplies through `golem.Options.Orchestrator`; and callers of `agenttools.NewDispatch` outside the CLI. None of them reads the CLI flag.
 
@@ -69,7 +69,7 @@ Nothing changes in headless mode. The v1 serializers, event vocabulary, envelope
 | 1. Attach benign on/off and adversarial reports | The [benign report](../llm/benchmarks/2026-10-26-interceptor-benign.md) and the [v1 adversarial report](../llm/benchmarks/2026-10-25-interceptor-adversarial-v1.md). Both are deterministic under K5 = b. The powered AnswerQuality and restraint capture that the 2026-09-10 comment on #517 requires is a precondition of any future flip, not of keeping opt-in. |
 | 2. Expected-sensitive vs benign, Secrets accuracy and workflow-blocking impact reported separately, no live secrets | The [secrets evidence report](secrets-evidence.md): accuracy by kind and carrier, the census and the workflow table. |
 | 3. Change defaults only when the evidence supports it, otherwise retain opt-in and record why | This record. |
-| 4. `-interceptors=false` and split-control semantics consistent with #575; help, notices, parent/child factories and rebuild paths agree; no duplicated interceptors; canary lifecycle unchanged | The tests listed under "What `-interceptors` means". |
+| 4. `-interceptors=false` and split-control semantics consistent with #575; help, notices, parent/child factories and rebuild paths agree; no duplicated interceptors; canary lifecycle unchanged | Semantics, chain composition (each interceptor once), notices, children and rebuild paths: the tests listed under "What `-interceptors` means". Help: `TestParseFlags_InterceptorsHelpNamesAlwaysOnGuards` (`cmd/golem/default_guards_startup_test.go`), which pins that the `-interceptors` help names the always-on guards and says risk display does not depend on the flag. Canary lifecycle: this PR changes no canary code; no test is cited for it. |
 | 5. Headless schema and protocol compatibility explicit; coordinate versioned reporting with #518 and #506 | "Headless (AC5)" above. #518 and #506 gate a Secrets flip. |
 
 ## Follow-ups
@@ -77,7 +77,7 @@ Nothing changes in headless mode. The v1 serializers, event vocabulary, envelope
 Each is its own issue, not part of this decision.
 
 - **Weak-phrase demotion (K3).** Weak phrases tag at every origin and account for most detector fires in the go-llm and llm-app strata of the benign report (73 of 85 files, 11 of 11 and 49 of 50). Demoting them is a policy change, so it needs re-registered arms and cannot reuse this evidence.
-- **Payment-card rule hardening.** `payment_card` accounts for 122 of the 221 benign (file, rule) blocks in the Secrets census (go-llm 8, go-src 114; 221 is the sum of the report's rule table). Issuer and BIN checks, context words and rejecting digit tables would target it; `secret_assignment` is the second source.
+- **Payment-card rule hardening.** `payment_card` accounts for 122 of the 221 benign (file, rule) pairs in the Secrets census, where a file blocked under two rules counts under both (go-llm 8, go-src 114; 221 is the sum of the report's rule table). Issuer and BIN checks, context words and rejecting digit tables would target it; `secret_assignment` is the second source.
 - **Credential-path coverage of exec output (B5).** `read_file` of a credential path is refused by the always-on guards; exec output carries no such filter. A row for the containment inventory under #581 or #420.
 
 ## Evidence
