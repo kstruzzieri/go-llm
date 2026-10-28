@@ -5,6 +5,7 @@ package mcp
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -94,6 +95,13 @@ type Server struct {
 	fingerprintStore  fingerprint.Store
 	tlsCert           string
 	tlsKey            string
+
+	// HTTP bearer authentication (#428). httpBearerToken holds the plaintext
+	// only until finalizeHTTPBearer runs in NewServer; httpBearerDigest is the
+	// retained SHA-256, and nil means authentication is off.
+	httpBearerSet    bool
+	httpBearerToken  string
+	httpBearerDigest *[sha256.Size]byte
 
 	client *ollama.Client
 	// destPolicy is the #477 destination-admission input (WithDestinationPolicy).
@@ -377,6 +385,12 @@ func NewServer(ctx context.Context, opts ...Option) (*Server, error) {
 	}
 	for _, opt := range opts {
 		opt(s)
+	}
+
+	// Validate the HTTP bearer token before any config, database or provider
+	// work: an invalid explicit token must never fall back to no authentication.
+	if err := s.finalizeHTTPBearer(); err != nil {
+		return nil, err
 	}
 
 	// Step 1: Load configuration.
