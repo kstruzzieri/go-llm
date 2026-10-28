@@ -433,8 +433,8 @@ go-llm-mcp --transport stdio
 go-llm-mcp --transport http --addr 127.0.0.1:8080
 
 # HTTP/2 with TLS and bearer authentication (remote deployment)
-export GO_LLM_MCP_TOKEN="$(openssl rand -base64 32)"
-go-llm-mcp --transport http --addr 0.0.0.0:443 --tls-cert cert.pem --tls-key key.pem
+(umask 077 && openssl rand -hex 32 > mcp-token)
+GO_LLM_MCP_TOKEN="$(cat mcp-token)" go-llm-mcp --transport http --addr 0.0.0.0:443 --tls-cert cert.pem --tls-key key.pem
 
 # Custom config
 go-llm-mcp --ollama-url http://gpu-server:11434 --config /etc/go-llm/models.json

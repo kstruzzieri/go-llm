@@ -40,6 +40,9 @@ updating clients.
   limit) is buffered before authentication runs, and h2c binds loopback only.
 - The gate strips `Authorization` before the MCP SDK and tools see the request,
   so tool handlers never receive the credential.
+- Golem's MCP client cannot send an `Authorization` header yet (#578), so a
+  token-protected `go-llm-mcp` answers Golem's `-mcp-http` with 401. Use stdio, or
+  leave the token unset on loopback, until #578 lands.
 
 #### Notes for library callers
 

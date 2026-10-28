@@ -462,8 +462,8 @@ go build -o go-llm-mcp ./cmd/go-llm-mcp/
 ./go-llm-mcp --no-rag
 
 # HTTP/2 with TLS and bearer authentication (remote deployment)
-export GO_LLM_MCP_TOKEN="$(openssl rand -base64 32)"
-./go-llm-mcp --transport http --addr 0.0.0.0:443 --tls-cert cert.pem --tls-key key.pem
+(umask 077 && openssl rand -hex 32 > mcp-token)
+GO_LLM_MCP_TOKEN="$(cat mcp-token)" ./go-llm-mcp --transport http --addr 0.0.0.0:443 --tls-cert cert.pem --tls-key key.pem
 
 # Opt-in agent-memory tools (agent_memory_search/create/promote)
 ./go-llm-mcp --agent-memory-db ~/.local/share/go-llm/memories.db
@@ -517,9 +517,11 @@ index as the project changes.
 
 Set `GO_LLM_MCP_TOKEN` to require one shared bearer token on the HTTP transport. The binary reads it once at startup and only with `--transport http`; stdio ignores it. If it is unset, behavior is unchanged and the transport is unauthenticated. If it is set but empty, startup fails with `GO_LLM_MCP_TOKEN is set but empty; unset it to disable HTTP authentication`, so an empty value cannot silently disable authentication.
 
-The token must be 1-4096 bytes of RFC 6750 token characters: letters, digits, `-`, `.`, `_`, `~`, `+`, `/`, then optional trailing `=`. Nothing is trimmed or normalized, so a value with a trailing newline or space fails startup. Errors name `GO_LLM_MCP_TOKEN` and never echo its value. Use at least 32 random bytes, as in the `openssl rand -base64 32` example above; the syntax check is not an entropy check. Because the token is read once, rotating it means restarting the server and updating every client.
+The token must be 1-4096 bytes of RFC 6750 token characters: letters, digits, `-`, `.`, `_`, `~`, `+`, `/`, then optional trailing `=`. Nothing is trimmed or normalized, so a value with a trailing newline or space fails startup. Errors name `GO_LLM_MCP_TOKEN` and never echo its value. Use at least 32 random bytes, as in the `openssl rand -hex 32` example above (64 hex characters); the syntax check is not an entropy check. Prefer `-hex` to `-base64`, which wraps its output at 64 characters once the size reaches 49 bytes, and the embedded newline fails startup. Because the token is read once, rotating it means restarting the server and updating every client.
 
-Clients must send a preconfigured `Authorization: Bearer <token>` header; this is not an OAuth implementation. The request must carry exactly one `Authorization` header: the scheme is matched case-insensitively, one or more spaces follow, and the token is matched case-sensitively. Query parameters, cookies, request bodies and session IDs never substitute for the header. Any other request gets HTTP 401 with the body `unauthorized` and `WWW-Authenticate: Bearer realm="go-llm-mcp"`, the same response for every credential failure. That covers every request that reaches the MCP handler: initialize, discovery, tool calls, GET/SSE, DELETE, and requests that carry an existing session ID. A request the body limit rejects first keeps the limit's status. With a token set, the server also stops answering `OPTIONS *` itself, so that request gets the 401 too. On h2c, the `101 Switching Protocols` reply to an HTTP/1.1 upgrade is sent before the handler runs; the upgraded request and every later stream are checked.
+Keep the value in a file only you can read and set it on the server process alone, as in the example above, rather than `export`ing it into a shell where every later command inherits it. Give clients the same value from that file. Under systemd, use `EnvironmentFile=` pointing at a 0600 file that holds `GO_LLM_MCP_TOKEN=<value>`, not `Environment=`, whose value `systemctl show` displays.
+
+Clients must send a preconfigured `Authorization: Bearer <token>` header; this is not an OAuth implementation. Golem's MCP client cannot add that header yet ([#578](https://github.com/kstruzzieri/go-llm/issues/578)), so a token-protected `go-llm-mcp` answers Golem with 401; until #578 lands, use stdio for Golem or leave the token unset on loopback. The request must carry exactly one `Authorization` header: the scheme is matched case-insensitively, one or more spaces follow, and the token is matched case-sensitively. Query parameters, cookies, request bodies and session IDs never substitute for the header. Any other request gets HTTP 401 with the body `unauthorized` and `WWW-Authenticate: Bearer realm="go-llm-mcp"`, the same response for every credential failure. That covers every request that reaches the MCP handler: initialize, discovery, tool calls, GET/SSE, DELETE, and requests that carry an existing session ID. A request the body limit rejects first keeps the limit's status. With a token set, the server also stops answering `OPTIONS *` itself, so that request gets the 401 too. On h2c, the `101 Switching Protocols` reply to an HTTP/1.1 upgrade is sent before the handler runs; the upgraded request and every later stream are checked.
 
 | Configuration | Behavior |
 |---|---|
@@ -532,13 +534,13 @@ Clients must send a preconfigured `Authorization: Bearer <token>` header; this i
 
 The token proves possession of one server credential and nothing more. The gate removes `Authorization` before the MCP SDK and tools see the request, and no `TokenInfo`, `UserID` or principal is derived from the token. Host-supplied `TokenInfo.UserID` and `WithRetrievalPrincipalResolver` keep their retrieval-policy meaning and cannot bypass the bearer check. A custom resolver cannot read `Authorization`, because the gate strips it; it must use separate trusted context. Every token holder can invoke the registered tools with the server's own authority, and the token gives no isolation between holders.
 
-TLS encrypts traffic. The loopback-only rule for h2c and the cross-origin check limit exposure. None of them authenticates the caller, so an unauthenticated HTTP server trusts every caller that can reach it, other local processes included. TLS without a token remains for compatibility; it is not a recommended remote deployment. Keep any reverse proxy on a trusted boundary and keep `Authorization` out of its access logs. On h2c, the body of an HTTP/1.1 upgrade request (up to the 100 MiB body limit) is buffered before authentication runs; h2c binds loopback addresses only.
+TLS encrypts traffic. The loopback-only rule for h2c and the cross-origin check limit exposure. None of them authenticates the caller, so an unauthenticated HTTP server trusts every caller that can reach it, other local processes included. On loopback a token stops other users' processes and browser-originated requests, not processes running as the same OS user, which can read the server's environment (`/proc/<pid>/environ` on Linux, `ps -E` on macOS). TLS without a token remains for compatibility; it is not a recommended remote deployment. Keep any reverse proxy on a trusted boundary and keep `Authorization` out of its access logs. On h2c, the body of an HTTP/1.1 upgrade request (up to the 100 MiB body limit) is buffered before authentication runs; h2c binds loopback addresses only.
 
 Once the server is running at its deployed address, confirm that a request without the bearer is refused before clients use it:
 
 ```bash
 curl -sSi https://mcp.example.com/ | head -n 1
-# the status line ends in 401 (HTTP/1.1 or HTTP/2)
+# the status line reports 401 (HTTP/1.1 or HTTP/2)
 ```
 
 Do not run an authenticated server with `GODEBUG=http2debug=2`: the HTTP/2 implementation then logs decoded request headers, `Authorization` included, before any handler runs.
