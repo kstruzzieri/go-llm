@@ -212,9 +212,15 @@ func TestNewServerRejectsInvalidHTTPBearerTokenBeforeSideEffects(t *testing.T) {
 }
 
 func TestFinalizeHTTPBearerKeepsOnlyDigest(t *testing.T) {
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer mock.Close()
+	cfg := writeTestConfig(t, t.TempDir(), mock.URL)
+
 	t.Run("token set", func(t *testing.T) {
 		const tok = "Az09-._~+/abc=="
-		s, err := NewServer(context.Background(), WithRAGDisabled(), WithHTTPBearerToken(tok))
+		s, err := NewServer(context.Background(), WithConfig(cfg), WithRAGDisabled(), WithHTTPBearerToken(tok))
 		if err != nil {
 			t.Fatalf("NewServer() error = %v", err)
 		}
@@ -232,7 +238,7 @@ func TestFinalizeHTTPBearerKeepsOnlyDigest(t *testing.T) {
 	})
 
 	t.Run("option omitted", func(t *testing.T) {
-		s, err := NewServer(context.Background(), WithRAGDisabled())
+		s, err := NewServer(context.Background(), WithConfig(cfg), WithRAGDisabled())
 		if err != nil {
 			t.Fatalf("NewServer() error = %v", err)
 		}

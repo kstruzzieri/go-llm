@@ -515,7 +515,7 @@ index as the project changes.
 
 #### HTTP authentication and trusted networks
 
-Set `GO_LLM_MCP_TOKEN` to require one shared bearer token on the HTTP transport. The binary reads it once at startup and only with `--transport http`; stdio ignores it. If it is unset, behavior is unchanged and the transport is unauthenticated. If it is set but empty, startup fails with `GO_LLM_MCP_TOKEN is set but empty; unset it to disable HTTP authentication`, so a broken deployment cannot start open.
+Set `GO_LLM_MCP_TOKEN` to require one shared bearer token on the HTTP transport. The binary reads it once at startup and only with `--transport http`; stdio ignores it. If it is unset, behavior is unchanged and the transport is unauthenticated. If it is set but empty, startup fails with `GO_LLM_MCP_TOKEN is set but empty; unset it to disable HTTP authentication`, so an empty value cannot silently disable authentication.
 
 The token must be 1-4096 bytes of RFC 6750 token characters: letters, digits, `-`, `.`, `_`, `~`, `+`, `/`, then optional trailing `=`. Nothing is trimmed or normalized, so a value with a trailing newline or space fails startup. Errors name `GO_LLM_MCP_TOKEN` and never echo its value. Use at least 32 random bytes, as in the `openssl rand -base64 32` example above; the syntax check is not an entropy check. Because the token is read once, rotating it means restarting the server and updating every client.
 
@@ -534,11 +534,11 @@ The token proves possession of one server credential and nothing more. The gate 
 
 TLS encrypts traffic. The loopback-only rule for h2c and the cross-origin check limit exposure. None of them authenticates the caller, so an unauthenticated HTTP server trusts every caller that can reach it, other local processes included. TLS without a token remains for compatibility; it is not a recommended remote deployment. Keep any reverse proxy on a trusted boundary and keep `Authorization` out of its access logs. On h2c, the body of an HTTP/1.1 upgrade request (up to the 100 MiB body limit) is buffered before authentication runs; h2c binds loopback addresses only.
 
-Before a remote deployment, confirm that a request without the bearer is refused:
+Once the server is running at its deployed address, confirm that a request without the bearer is refused before clients use it:
 
 ```bash
-curl -si https://mcp.example.com/ | head -n 1
-# HTTP/2 401
+curl -sSi https://mcp.example.com/ | head -n 1
+# the status line ends in 401 (HTTP/1.1 or HTTP/2)
 ```
 
 Do not run an authenticated server with `GODEBUG=http2debug=2`: the HTTP/2 implementation then logs decoded request headers, `Authorization` included, before any handler runs.

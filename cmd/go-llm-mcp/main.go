@@ -47,8 +47,8 @@ const bearerTokenEnv = "GO_LLM_MCP_TOKEN"
 // bearerTokenOption returns the option that requires bearerTokenEnv's value as
 // the HTTP bearer token. It returns nil, with no error, when the transport is
 // not http (the environment is not read at all) or the variable is unset. A
-// variable that is set but empty is an error rather than "off", so a broken
-// deployment cannot silently start unauthenticated. The value's grammar is
+// variable that is set but empty is an error rather than "off", so an empty
+// value cannot silently disable authentication. The value's grammar is
 // checked by mcp.NewServer; neither error names the value.
 func bearerTokenOption(transport string, lookup func(string) (string, bool)) (mcp.Option, error) {
 	if transport != "http" {

@@ -8,9 +8,9 @@ variable are absent, nothing changes: loopback h2c and TLS on any permitted bind
 stay unauthenticated, so an existing TLS-only remote deployment is still open to
 every caller that can reach it until a token is set. TLS encrypts traffic, and
 the loopback-only rule for h2c and the cross-origin check limit exposure, but
-none of them authenticates the caller. Set a token and confirm that a request
-without it is refused before binding a non-loopback address. See
-`docs/GETTING_STARTED.md`, "HTTP authentication and trusted networks".
+none of them authenticates the caller. Set a token and, once the server is
+running at its deployed address, confirm that a request without it is refused
+before clients use it. See `docs/GETTING_STARTED.md`, "HTTP authentication and trusted networks".
 
 The token is 1-4096 bytes of RFC 6750 token characters (letters, digits, `-`,
 `.`, `_`, `~`, `+`, `/`, then optional trailing `=`), compared by SHA-256

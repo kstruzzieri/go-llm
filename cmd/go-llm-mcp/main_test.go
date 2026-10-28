@@ -503,7 +503,8 @@ func TestBinaryInstallsBearerToken(t *testing.T) {
 					t.Errorf("initialize with the configured bearer = %d, want %d", got, tt.wantBearer)
 				}
 			}
-			// The counter must be live for the zero assertion above to mean anything.
+			// The child started with the synthetic config and its startup probe
+			// reached the mock.
 			if hits.Load() == 0 {
 				t.Error("provider mock saw no requests from a started server")
 			}

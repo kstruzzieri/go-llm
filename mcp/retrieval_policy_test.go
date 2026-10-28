@@ -391,7 +391,7 @@ func TestHostTokenInfoCannotBypassHTTPBearer(t *testing.T) {
 		presented string
 		resolver  RetrievalPrincipalResolver
 		want      string // PrincipalID the evaluator sees
-		reject    bool   // the gate answers 401 and no tool runs
+		reject    bool   // our gate answers 401, not the host's RequireBearerToken
 	}{
 		{name: "wrong bearer the host verifier accepts", host: true, presented: "wrong", reject: true},
 		{name: "configured bearer keeps the host principal", host: true, presented: token, want: "host-user"},
@@ -433,8 +433,13 @@ func TestHostTokenInfoCannotBypassHTTPBearer(t *testing.T) {
 				if resp.StatusCode != http.StatusUnauthorized {
 					t.Fatalf("initialize: status = %d, want %d; body %q", resp.StatusCode, http.StatusUnauthorized, body)
 				}
-				if evaluator.evaluateCalls != 0 {
-					t.Errorf("evaluator called %d times, want 0", evaluator.evaluateCalls)
+				// The host verifier accepts every token, so a 401 here can only be
+				// our gate's: pin its body and challenge exactly.
+				if body != "unauthorized\n" {
+					t.Errorf("initialize body = %q, want %q", body, "unauthorized\n")
+				}
+				if got := resp.Header.Get("WWW-Authenticate"); got != `Bearer realm="go-llm-mcp"` {
+					t.Errorf("WWW-Authenticate = %q, want %q", got, `Bearer realm="go-llm-mcp"`)
 				}
 				return
 			}
