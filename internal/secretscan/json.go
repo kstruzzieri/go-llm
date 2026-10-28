@@ -11,6 +11,12 @@ import (
 // Invalid JSON has no semantic projection, so only its raw text is visited.
 func WalkJSON(raw []byte, visit func(text, key string)) {
 	visit(string(raw), "")
+	walkDecoded(raw, visit)
+}
+
+// walkDecoded makes WalkJSON's visits after the raw text: the decoded keys and
+// string values, none for invalid JSON.
+func walkDecoded(raw []byte, visit func(text, key string)) {
 	if !json.Valid(raw) {
 		return
 	}
@@ -58,8 +64,13 @@ func WalkJSON(raw []byte, visit func(text, key string)) {
 // object key or string value. Fields are never joined, so a value split across
 // two strings does not match. match is not called again after it first accepts.
 func MatchJSON(raw []byte, match func(string) bool) bool {
+	// The raw text is the first visit; accepting it skips validation and the
+	// decode.
+	if match(string(raw)) {
+		return true
+	}
 	found := false
-	WalkJSON(raw, func(text, _ string) {
+	walkDecoded(raw, func(text, _ string) {
 		if !found && match(text) {
 			found = true
 		}

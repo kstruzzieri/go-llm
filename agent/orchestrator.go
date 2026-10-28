@@ -437,7 +437,7 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 // makes the origin-sensitive detectors judge the advice the way they judge a
 // tool result.
 func (o *Orchestrator) prepareAdvisory(ctx context.Context, ic *interceptorRun, obs Observer, a Advisory, index int) (Advisory, error) {
-	tags, block, err := ic.inspectObservation(ctx, normalizeObserver(obs), 0, InspectedMessage{
+	tags, block, sensitive, err := ic.inspectObservation(ctx, normalizeObserver(obs), 0, InspectedMessage{
 		StateIndex: index, Role: "tool", Origin: a.Origin,
 		ToolName: "consult/" + a.Source, Content: a.Content,
 	})
@@ -450,7 +450,7 @@ func (o *Orchestrator) prepareAdvisory(ctx context.Context, ic *interceptorRun, 
 		// other interceptor refusal in this package carries, so the refusing
 		// rule is nameable without re-running the chain.
 		return Advisory{}, errors.Join(ErrAdvisoryBlocked,
-			&BlockedError{Hook: HookInput, Step: 0, Findings: []Finding{*block}})
+			&BlockedError{Hook: HookInput, Step: 0, Findings: []Finding{*block}, sensitive: sensitive})
 	}
 	// distinctTrailers leads with a newline so it can be appended to a tool
 	// result; here it is a block of whole lines, so the lead is dropped.

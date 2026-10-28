@@ -40,7 +40,10 @@ the environment takes effect at the next start.
   blocks, that hook keeps only bounded metadata from every finding
   (interceptor, rule, verdict and numeric fields) and drops all free text, from
   every interceptor and the observer, before risk, telemetry and errors are
-  built. Its hook and observer errors become `agent.ErrDiagnosticsSuppressed`.
-- `interceptor.SensitiveBlocked` reports a `secrets` or `configured_secrets`
-  block. A dispatched child blocked either way, `Secrets` included, now
-  reports the fixed marker instead of its last message, with no setting.
+  built. Its hook and observer errors become `agent.ErrDiagnosticsSuppressed`,
+  and its `agent.BlockedError` reports the new `Sensitive()`. Rule is kept, so
+  interceptors in such a chain must use a fixed identifier for it.
+- `interceptor.SensitiveBlocked` reports a block marked `Sensitive()`, whatever
+  the guard's name, or a `secrets` or `configured_secrets` block. A dispatched
+  child blocked any of these ways, `Secrets` included, now reports the fixed
+  marker instead of its last message, with no setting.

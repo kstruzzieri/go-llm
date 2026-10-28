@@ -70,6 +70,17 @@ func (failingInterceptor) InspectToolCall(context.Context, agent.ToolCallInspect
 	return nil, nil
 }
 
+// renamedGuard is ConfiguredSecrets under a host's own name: a sensitive
+// guard that SensitiveBlocked cannot recognize by name, only by its mark.
+type renamedGuard struct {
+	interceptor.ConfiguredSecrets
+	name string
+}
+
+func (g renamedGuard) Name() string { return g.name }
+
+var _ agent.SensitiveTextInterceptor = renamedGuard{}
+
 func sensitiveFixture(t *testing.T) string {
 	t.Helper()
 	b := make([]byte, 8)
@@ -265,6 +276,18 @@ func TestDispatchSensitiveBlockSkipsPartialSummary(t *testing.T) {
 			absent:      []string{fixture},
 		},
 		{
+			name: "host sensitive guard under its own name",
+			child: sensitiveChild{
+				chain:      []agent.Interceptor{renamedGuard{ConfiguredSecrets: configuredGuard(t, fixture), name: "vault"}},
+				readOutput: "file body " + fixture,
+				searchArgs: `{"pattern":"` + fixture + `"}`,
+				model:      provider.ModelKey{Provider: "local", Model: "fast"},
+			},
+			wantSummary: dispatchSensitiveSummary,
+			wantBlocked: "vault",
+			absent:      []string{fixture},
+		},
+		{
 			name: "invariants block keeps the partial summary",
 			child: sensitiveChild{
 				chain:      []agent.Interceptor{namedSearchBlocker{name: "invariants"}},
@@ -323,6 +346,16 @@ func TestDispatchSensitiveBlockDropsModel(t *testing.T) {
 				model:      provider.ModelKey{Provider: "local", Model: "fast"},
 			},
 			absent: []string{secretShaped},
+		},
+		{
+			name: "host sensitive guard under its own name drops the model",
+			child: sensitiveChild{
+				chain:      []agent.Interceptor{renamedGuard{ConfiguredSecrets: configuredGuard(t, fixture), name: "vault"}},
+				readOutput: "file body",
+				searchArgs: `{"pattern":"` + fixture + `"}`,
+				model:      provider.ModelKey{Provider: "local", Model: fixture},
+			},
+			absent: []string{fixture},
 		},
 		{
 			name: "invariants block keeps the model",

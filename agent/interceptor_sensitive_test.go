@@ -20,15 +20,18 @@ import (
 // guard does. A plain substring check over the all-escaped arguments the
 // tests send would never fire, and every test here would pass vacuously.
 type exactFake struct {
-	name                 string
-	fixture              string
-	atOutput, atToolCall bool
-	tag                  bool // report a match as a Tag, which marks nothing
+	name                          string
+	fixture                       string
+	atInput, atOutput, atToolCall bool
+	tag                           bool // report a match as a Tag, which marks nothing
 }
 
 func (e exactFake) Name() string                { return e.name }
 func (e exactFake) SensitiveText(s string) bool { return strings.Contains(s, e.fixture) }
-func (e exactFake) InspectInput(context.Context, InputInspection) ([]Finding, error) {
+func (e exactFake) InspectInput(_ context.Context, in InputInspection) ([]Finding, error) {
+	if e.atInput && slices.ContainsFunc(in.Messages, func(m InspectedMessage) bool { return e.SensitiveText(m.Content) }) {
+		return e.finding(), nil
+	}
 	return nil, nil
 }
 
@@ -446,6 +449,75 @@ func TestSensitiveCapabilitySurvivesRunScopedResolution(t *testing.T) {
 	blocked := requireBlocked(t, err, HookOutput)
 	if len(blocked.Findings) != 2 || blocked.Findings[1].Detail != "" || !errors.Is(err, ErrDiagnosticsSuppressed) {
 		t.Fatalf("findings = %+v, err = %v; want the per-run instance's block to suppress diagnostics", blocked.Findings, err)
+	}
+}
+
+// TestBlockedErrorSensitiveMark pins Sensitive to the pipeline's mark: set
+// exactly when a SensitiveTextInterceptor's own finding blocks, under any
+// name, and never on a BlockedError built outside the pipeline.
+func TestBlockedErrorSensitiveMark(t *testing.T) {
+	fx := newSensitiveFixture(t)
+	abortCall := func() *stubInterceptor {
+		return &stubInterceptor{name: "canary", toolCall: func(ToolCallInspection) []Finding {
+			return []Finding{{Rule: "canary_leak", Verdict: VerdictAbort, Risk: 100}}
+		}}
+	}
+	cases := []struct {
+		name  string
+		chain []Interceptor
+		hook  Hook
+		want  bool
+	}{
+		{"custom-named guard blocks the output", []Interceptor{exactFake{name: "vault", fixture: fx.value, atOutput: true}}, HookOutput, true},
+		{"custom-named guard blocks beside a tool-call abort", []Interceptor{exactFake{name: "vault", fixture: fx.value, atToolCall: true}, abortCall()}, HookToolCall, true},
+		{"non-sensitive block", []Interceptor{echoFake{verdict: VerdictBlock}}, HookOutput, false},
+		{"guard installed but clean, another blocks", []Interceptor{exactFake{name: "vault", fixture: "absent-" + fx.value, atOutput: true}, echoFake{verdict: VerdictBlock}}, HookOutput, false},
+		{"guard tags, another blocks", []Interceptor{exactFake{name: "vault", fixture: fx.value, atOutput: true, tag: true}, echoFake{verdict: VerdictBlock}}, HookOutput, false},
+		{"tool-call abort alone", []Interceptor{abortCall()}, HookToolCall, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mc := &scriptedCaller{responses: []ModelResult{oneCall("1", "echo", fx.args(t)), finalAnswer("never")}}
+			o := newTestOrchestrator(mc, WithInterceptors(tc.chain...))
+			_, err := o.Run(context.Background(), Request{Goal: "q", Tools: []Tool{echoTool{name: "echo"}}}, nil)
+			blocked := requireBlocked(t, err, tc.hook)
+			if got := blocked.Sensitive(); got != tc.want {
+				t.Fatalf("Sensitive() = %v, want %v; findings %+v", got, tc.want, blocked.Findings)
+			}
+			// The mark changes neither the message nor the encoding.
+			plain := &BlockedError{Hook: blocked.Hook, Step: blocked.Step, Findings: blocked.Findings}
+			got, _ := json.Marshal(blocked)
+			want, _ := json.Marshal(plain)
+			if blocked.Error() != plain.Error() || string(got) != string(want) {
+				t.Fatalf("marked error %q / %s differs from unmarked %q / %s", blocked.Error(), got, plain.Error(), want)
+			}
+		})
+	}
+	for _, tc := range []struct {
+		name  string
+		guard Interceptor
+		want  bool
+	}{
+		{"advisory blocked by a custom-named guard", exactFake{name: "vault", fixture: "SENTINEL-ADVICE", atInput: true}, true},
+		{"advisory blocked by a non-sensitive interceptor", adviceStub(VerdictBlock), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			o := New(&advisoryCaller{}, ContextManager{}, WithInterceptors(tc.guard))
+			_, err := o.InspectAdvisory(context.Background(), *testAdvisory())
+			if !errors.Is(err, ErrAdvisoryBlocked) {
+				t.Fatalf("err = %v, want ErrAdvisoryBlocked", err)
+			}
+			if got := requireBlocked(t, err, HookInput).Sensitive(); got != tc.want {
+				t.Fatalf("Sensitive() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+	literal := &BlockedError{Hook: HookOutput, Findings: []Finding{{Interceptor: "vault", Rule: "configured", Verdict: VerdictBlock}}}
+	if literal.Sensitive() {
+		t.Error("a struct-literal BlockedError reports Sensitive")
+	}
+	if (*BlockedError)(nil).Sensitive() {
+		t.Error("a nil BlockedError reports Sensitive")
 	}
 }
 

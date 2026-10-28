@@ -885,12 +885,13 @@ fixed when Golem starts: `/model set` keeps it, and a credential changed in the
 environment takes effect at the next start.
 
 Known limit: matching decodes one level of JSON, the raw text plus decoded keys
-and string values. When a model emits malformed tool arguments, the
-OpenAI-compatible client (llama.cpp, vLLM, LM Studio) wraps them as a JSON
-string literal; a credential written there as `\u` escapes is then not
-recognized, and the call can reach approval, the terminal tool-call display, the
-tool itself and session history. Built-in tools reject such arguments, because
-they decode into structured types.
+and string values. When a model emits tool arguments Go's JSON decoder
+rejects (malformed, or nested more than 10,000 levels), only their raw text is
+checked, and the OpenAI-compatible client (llama.cpp, vLLM, LM Studio) wraps
+them as a JSON string literal; a credential written there as `\u` escapes is
+then not recognized, and the call can reach approval, the terminal tool-call
+display, the tool itself and session history. Built-in tools reject such
+arguments, because they decode into structured types.
 
 The shared ASCII-oriented scanner recognizes these shapes. It detects syntax
 and heuristics, not whether a credential is active or a card account exists.

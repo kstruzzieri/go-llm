@@ -279,10 +279,13 @@ type Interceptor interface {
 // interceptor and the observer, before risk accumulation, telemetry and
 // error construction: finding Detail and ToolCallID, the event's ToolCallID,
 // and the hook and OnInterception errors, which become
-// ErrDiagnosticsSuppressed. SensitiveText reports whether text carries
-// protected content; it exposes only that boolean, and the pipeline uses it
-// to check copied route metadata. A RunScopedInterceptor's capability is the
-// one its per-run instance implements.
+// ErrDiagnosticsSuppressed. A BlockedError from that invocation reports
+// Sensitive. Rule is kept, so every interceptor in a chain with such a guard
+// must use a fixed identifier for Rule, never text derived from the inspected
+// content. SensitiveText reports whether text carries protected content; it
+// exposes only that boolean, and the pipeline uses it to check copied route
+// metadata. A RunScopedInterceptor's capability is the one its per-run
+// instance implements.
 type SensitiveTextInterceptor interface {
 	Interceptor
 	SensitiveText(text string) bool
@@ -413,7 +416,16 @@ type BlockedError struct {
 	Hook     Hook
 	Step     int
 	Findings []Finding
+	// sensitive is unexported so that only the pipeline can set it: a host's
+	// struct literal cannot claim a sensitive block.
+	sensitive bool
 }
+
+// Sensitive reports whether a SensitiveTextInterceptor blocked in the hook
+// invocation this error reports, so the pipeline dropped that invocation's
+// free text (#424 D3). It is false for a nil receiver and for any
+// BlockedError not built by the pipeline.
+func (e *BlockedError) Sensitive() bool { return e != nil && e.sensitive }
 
 // cause returns the first finding whose verdict equals the maximum verdict
 // among findings; a zero Finding when there are none.
@@ -584,9 +596,10 @@ type hookScope struct {
 // telemetry, and returns the findings, the maximum verdict, and the joined
 // interceptor/observer errors. Callers combine the verdict and the error
 // through terminalAt. When a SensitiveTextInterceptor blocks, the
-// invocation's free text is dropped first (see that interface).
+// invocation's free text is dropped first (see that interface) and the
+// returned sensitive mark is set.
 func (r *interceptorRun) runHook(ctx context.Context, obs Observer, step int, scope hookScope,
-	invoke func(Interceptor) ([]Finding, error)) ([]Finding, Verdict, error) {
+	invoke func(Interceptor) ([]Finding, error)) ([]Finding, Verdict, bool, error) {
 
 	var all []Finding
 	var errs []error
@@ -645,22 +658,22 @@ func (r *interceptorRun) runHook(ctx context.Context, obs Observer, step int, sc
 			}
 		}
 	}
-	return all, verdict, errors.Join(errs...)
+	return all, verdict, sensitive, errors.Join(errs...)
 }
 
 // terminalAt converts a hook outcome into the error to propagate. A verdict
 // at or above min produces a BlockedError; when interceptors or the observer
 // also errored, the BlockedError is joined with those errors so errors.As
 // still finds the structured block (spec D1). Below min, only the errors
-// propagate (nil when there are none).
-func terminalAt(min Verdict, hook Hook, step int, findings []Finding, verdict Verdict, err error) error {
+// propagate (nil when there are none). sensitive is runHook's mark.
+func terminalAt(min Verdict, hook Hook, step int, findings []Finding, verdict Verdict, sensitive bool, err error) error {
 	// Nothing to block below Block. Between Block and min the block is
 	// recoverable, so it becomes a BlockedError only when an error forces the
 	// run to end anyway; otherwise the caller handles it as a synthetic result.
 	if verdict < VerdictBlock || (verdict < min && err == nil) {
 		return err
 	}
-	blocked := &BlockedError{Hook: hook, Step: step, Findings: findings}
+	blocked := &BlockedError{Hook: hook, Step: step, Findings: findings, sensitive: sensitive}
 	if err != nil {
 		return errors.Join(blocked, err)
 	}
@@ -799,9 +812,9 @@ func (r *interceptorRun) inspectInitial(ctx context.Context, obs Observer, state
 		in.Messages = append(in.Messages, InspectedMessage{StateIndex: i, Role: m.Role, Origin: originOfRole(m.Role), Content: m.Content})
 	}
 	scope := hookScope{hook: HookInput, messages: in.Messages, hasSystem: in.System != "", hasSummary: in.Summary != ""}
-	findings, verdict, err := r.runHook(ctx, obs, 0, scope,
+	findings, verdict, sensitive, err := r.runHook(ctx, obs, 0, scope,
 		func(ic Interceptor) ([]Finding, error) { return ic.InspectInput(ctx, cloneInput(in)) })
-	return terminalAt(VerdictBlock, HookInput, 0, findings, verdict, err)
+	return terminalAt(VerdictBlock, HookInput, 0, findings, verdict, sensitive, err)
 }
 
 // finishWithError finalizes a Result for an error return after State exists.
@@ -831,12 +844,12 @@ func (r *interceptorRun) inspectOutput(ctx context.Context, obs Observer, step i
 	for _, c := range resp.ToolCalls {
 		ids = append(ids, c.ID)
 	}
-	findings, verdict, err := r.runHook(ctx, obs, step, hookScope{hook: HookOutput, callIDs: ids},
+	findings, verdict, sensitive, err := r.runHook(ctx, obs, step, hookScope{hook: HookOutput, callIDs: ids},
 		func(ic Interceptor) ([]Finding, error) {
 			// Each interceptor gets its own copy of the tool calls.
 			return ic.InspectOutput(ctx, OutputInspection{Step: step, Content: resp.Content, Thinking: resp.Thinking, ToolCalls: cloneToolCalls(resp.ToolCalls)})
 		})
-	return terminalAt(VerdictBlock, HookOutput, step, findings, verdict, err)
+	return terminalAt(VerdictBlock, HookOutput, step, findings, verdict, sensitive, err)
 }
 
 // blockedCallContent is the exact model-visible observation for a blocked call.
@@ -859,14 +872,14 @@ func (r *interceptorRun) inspectToolCall(ctx context.Context, obs Observer, step
 	if len(r.chain) == 0 {
 		return nil, nil
 	}
-	findings, verdict, err := r.runHook(ctx, obs, step, hookScope{hook: HookToolCall, toolCallID: call.ID},
+	findings, verdict, sensitive, err := r.runHook(ctx, obs, step, hookScope{hook: HookToolCall, toolCallID: call.ID},
 		func(ic Interceptor) ([]Finding, error) {
 			// Each interceptor gets its own copy of the canonical call and effect.
 			return ic.InspectToolCall(ctx, ToolCallInspection{Step: step, Call: cloneToolCall(call), Effect: cloneEffect(effect)})
 		})
 	r.current = append([]Finding(nil), findings...)
 	if err != nil || verdict == VerdictAbort {
-		return nil, terminalAt(VerdictAbort, HookToolCall, step, findings, verdict, err)
+		return nil, terminalAt(VerdictAbort, HookToolCall, step, findings, verdict, sensitive, err)
 	}
 	if verdict == VerdictBlock {
 		return &ToolResult{IsError: true, Content: blockedCallContent(cause(findings))}, nil
@@ -887,29 +900,30 @@ func tagTrailer(f Finding) string {
 
 // inspectObservation is the shared ingress check for one tool-authored text
 // (a tool result or verifier output). It returns the tag findings to apply,
-// the blocking finding when the verdict is Block, and the error to propagate
-// (a BlockedError on Abort, joined with any hook errors).
-func (r *interceptorRun) inspectObservation(ctx context.Context, obs Observer, step int, msg InspectedMessage) (tags []Finding, block *Finding, err error) {
+// the blocking finding and runHook's sensitive mark when the verdict is
+// Block, and the error to propagate (a BlockedError on Abort, joined with any
+// hook errors).
+func (r *interceptorRun) inspectObservation(ctx context.Context, obs Observer, step int, msg InspectedMessage) (tags []Finding, block *Finding, sensitive bool, err error) {
 	if len(r.chain) == 0 {
-		return nil, nil, nil
+		return nil, nil, false, nil
 	}
 	in := InputInspection{Step: step, Messages: []InspectedMessage{msg}}
 	scope := hookScope{hook: HookInput, messages: in.Messages, toolCallID: msg.ToolCallID}
-	findings, verdict, err := r.runHook(ctx, obs, step, scope,
+	findings, verdict, sensitive, err := r.runHook(ctx, obs, step, scope,
 		func(ic Interceptor) ([]Finding, error) { return ic.InspectInput(ctx, cloneInput(in)) })
 	if err != nil || verdict == VerdictAbort {
-		return nil, nil, terminalAt(VerdictAbort, HookInput, step, findings, verdict, err)
+		return nil, nil, false, terminalAt(VerdictAbort, HookInput, step, findings, verdict, sensitive, err)
 	}
 	if verdict == VerdictBlock {
 		b := cause(findings)
-		return nil, &b, nil
+		return nil, &b, sensitive, nil
 	}
 	for _, f := range findings {
 		if f.Verdict == VerdictTag {
 			tags = append(tags, f)
 		}
 	}
-	return tags, nil, nil
+	return tags, nil, false, nil
 }
 
 // alternativesOf lists a set's alternatives for inspection.

@@ -471,9 +471,11 @@ dispatch, err := tools.NewDispatch(caller, agent.ContextManager{}, readTools, to
 
 The matcher is a snapshot of that config: build a new guard after reloading or
 editing it. A config serialized and parsed again keeps its effective keys but
-loses the resolved `${NAME}` components. A dispatched child blocked for
-sensitive content never falls back to its last message as its summary; that
-rule is part of `NewDispatch` and needs no setting.
+loses the resolved `${NAME}` components. A dispatched child blocked by any
+`agent.SensitiveTextInterceptor`, whatever its name, or by `interceptor.Secrets`
+never falls back to its last message as its summary; that rule is part of
+`NewDispatch` and needs no setting. `interceptor.SensitiveBlocked` applies the
+same test to the errors a host's own runs return.
 
 ## Parquet Export
 
