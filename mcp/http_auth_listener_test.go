@@ -560,7 +560,6 @@ func TestAuthenticatedStackKeepsCrossOriginAndBodyLimits(t *testing.T) {
 // unknown-length body is cut at the limit before h2c buffers it.
 func TestAuthenticatedH2CUpgradeBodyStaysBounded(t *testing.T) {
 	srv := newTestMCPServer(t, listenerToken)
-	dispatched := countMCPRequests(srv)
 	body := &countingReader{reader: paddedInitialize(4 * maxMCPHTTPBodyBytes)}
 	req := httptest.NewRequest(http.MethodPost, "http://localhost/mcp", body)
 	mcpHeaders(req.Header)
@@ -571,11 +570,10 @@ func TestAuthenticatedH2CUpgradeBodyStaysBounded(t *testing.T) {
 
 	srv.newHTTPServer("", false).Handler.ServeHTTP(httptest.NewRecorder(), req)
 
+	// h2c needs a hijackable connection, so the inner handler cannot run under
+	// a ResponseRecorder; the exact read count is the check.
 	if want := maxMCPHTTPBodyBytes + 1; int64(body.read) != want {
 		t.Fatalf("h2c upgrade read %d body bytes, want bounded probe of %d", body.read, want)
-	}
-	if got := dispatched.Load(); got != 0 {
-		t.Fatalf("SDK dispatched %d requests, want 0", got)
 	}
 }
 
