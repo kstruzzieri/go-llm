@@ -2,9 +2,12 @@ package mcp
 
 import (
 	"crypto/sha256"
+	"crypto/subtle"
 	"errors"
 	"fmt"
+	"net/http"
 	"regexp"
+	"strings"
 )
 
 // maxHTTPBearerTokenLen is the longest accepted HTTP bearer token, in bytes.
@@ -61,4 +64,52 @@ func (s *Server) finalizeHTTPBearer() error {
 	digest := sha256.Sum256([]byte(token))
 	s.httpBearerDigest = &digest
 	return nil
+}
+
+// presentedHTTPBearer returns the token from a request carrying exactly one
+// Authorization header of the form "Bearer <token>": the scheme is matched
+// case-insensitively, one or more spaces (and nothing else) separate it from
+// the token, and the token must satisfy validHTTPBearerToken. The ok result is
+// false for anything else, including a comma-joined list of credentials.
+func presentedHTTPBearer(h http.Header) (token string, ok bool) {
+	values := h.Values("Authorization")
+	if len(values) != 1 || strings.Contains(values[0], ",") {
+		return "", false
+	}
+	scheme, rest, found := strings.Cut(values[0], " ")
+	if !found || !strings.EqualFold(scheme, "Bearer") {
+		return "", false
+	}
+	token = strings.TrimLeft(rest, " ")
+	if !validHTTPBearerToken(token) {
+		return "", false
+	}
+	return token, true
+}
+
+// digestEqual reports whether two token digests are equal in constant time.
+func digestEqual(a, b *[sha256.Size]byte) bool {
+	return subtle.ConstantTimeCompare(a[:], b[:]) == 1
+}
+
+// requireHTTPBearer serves next only for requests whose bearer token hashes to
+// want. Every other request gets the same 401 whatever the failure. next sees
+// a clone of the request without its Authorization header, so the SDK never
+// copies the credential into tool handlers.
+func requireHTTPBearer(next http.Handler, want *[sha256.Size]byte) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		token, ok := presentedHTTPBearer(r.Header)
+		if ok {
+			got := sha256.Sum256([]byte(token))
+			ok = digestEqual(&got, want)
+		}
+		if !ok {
+			w.Header().Set("WWW-Authenticate", `Bearer realm="go-llm-mcp"`)
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		authed := r.Clone(r.Context())
+		authed.Header.Del("Authorization")
+		next.ServeHTTP(w, authed)
+	})
 }

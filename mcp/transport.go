@@ -73,6 +73,11 @@ func streamableHTTPHandler(s *Server) http.Handler {
 	// The SDK's CrossOriginProtection option is deprecated in favour of
 	// wrapping the handler; the protection itself is unchanged.
 	protected := http.NewCrossOriginProtection().Handler(handler)
+	if s.httpBearerDigest != nil {
+		// The gate sits outside cross-origin protection and inside the body
+		// limiter, so an oversized body keeps its own status.
+		protected = requireHTTPBearer(protected, s.httpBearerDigest)
+	}
 	return limitMCPHTTPBody(protected, maxMCPHTTPBodyBytes)
 }
 
