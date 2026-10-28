@@ -137,6 +137,8 @@ func telemetryRunStatuses(t *testing.T, sess *replSession) []string {
 	if err != nil {
 		t.Fatal("telemetry file unreadable")
 	}
+	// Schema tripwire: the run span carries only enumerated and numeric fields
+	// today, so this cannot fail now; the caller's status assertion discriminates.
 	if leaksFixture(string(raw)) {
 		t.Error("telemetry leaked the fixture")
 	}
@@ -207,6 +209,9 @@ func TestConfiguredSecretsBlockSkipsGoalHistory(t *testing.T) {
 				if !strings.Contains(out, sensitiveTraceWarning+"\n") || traceFileCount(t, sess) != 0 {
 					t.Error("blocked run did not warn and skip its trace")
 				}
+				// Runtime tripwire: a failed model call never saves a session, so this
+				// passes whatever the classification; the "session save error stays an
+				// error" rows discriminate.
 				if sessionRowSaved(t, sess) {
 					t.Error("blocked run saved a session row")
 				}
