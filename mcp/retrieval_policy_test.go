@@ -2,15 +2,18 @@ package mcp
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
+	"net/http"
 	"net/http/httptest"
 	"reflect"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kstruzzieri/go-llm/rag"
 	"github.com/modelcontextprotocol/go-sdk/auth"
@@ -369,6 +372,96 @@ func TestRetrievalPolicyTransportSessionOverridesClaim(t *testing.T) {
 	}
 	if got := evaluator.last.Policy.SessionID; got != session.ID() || got == "claimed-session" {
 		t.Fatalf("evaluator session = %q, want transport session %q", got, session.ID())
+	}
+}
+
+// TestHostTokenInfoCannotBypassHTTPBearer pins the two identity layers apart:
+// the configured bearer gates access and derives no principal, so a host
+// TokenInfo (set by auth.RequireBearerToken outside the gate) neither
+// replaces the bearer nor is lost behind it.
+func TestHostTokenInfoCannotBypassHTTPBearer(t *testing.T) {
+	const token = "Az09-._~+/abc=="
+	hostVerifier := func(context.Context, string, *http.Request) (*auth.TokenInfo, error) {
+		return &auth.TokenInfo{UserID: "host-user", Expiration: time.Now().Add(time.Hour)}, nil
+	}
+
+	tests := []struct {
+		name      string
+		host      bool // wrap the handler in auth.RequireBearerToken(hostVerifier)
+		presented string
+		resolver  RetrievalPrincipalResolver
+		want      string // PrincipalID the evaluator sees
+		reject    bool   // the gate answers 401 and no tool runs
+	}{
+		{name: "wrong bearer the host verifier accepts", host: true, presented: "wrong", reject: true},
+		{name: "configured bearer keeps the host principal", host: true, presented: token, want: "host-user"},
+		{
+			name: "configured bearer, resolver beats the host principal", host: true, presented: token,
+			resolver: func(context.Context, gomcp.Request) (string, error) { return "resolver-user", nil },
+			want:     "resolver-user",
+		},
+		{name: "configured bearer, no host middleware", presented: token, want: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			evaluator := &mcpPolicyEvaluatorSpy{decision: rag.RetrievalPolicyDecision{Allow: true}}
+			digest := sha256.Sum256([]byte(token))
+			s := &Server{retrievalPolicyEvaluator: evaluator, httpBearerDigest: &digest}
+			WithRetrievalPrincipalResolver(tt.resolver)(s)
+			s.mcpServer = gomcp.NewServer(&gomcp.Implementation{Name: "test", Version: "0"}, nil)
+			s.mcpServer.AddTool(&gomcp.Tool{
+				Name: "policy-principal", InputSchema: map[string]any{"type": "object"},
+			}, func(ctx context.Context, req *gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
+				policy, _, err := s.retrievalPolicyRequest(ctx, req)
+				if err != nil {
+					return nil, err
+				}
+				_, err = evaluator.Evaluate(ctx, rag.RetrievalRequest{Query: "q", Policy: policy})
+				return &gomcp.CallToolResult{Content: []gomcp.Content{&gomcp.TextContent{Text: "ok"}}}, err
+			})
+
+			handler := streamableHTTPHandler(s)
+			if tt.host {
+				handler = auth.RequireBearerToken(hostVerifier, nil)(handler)
+			}
+			httpServer := httptest.NewServer(handler)
+			defer httpServer.Close()
+			hc := &http.Client{Timeout: listenerTimeout, Transport: bearerRoundTripper{token: tt.presented}}
+
+			if tt.reject {
+				resp, body := sendAndRead(t, hc, rpcRequest(t, http.MethodPost, httpServer.URL, jsonRPC("initialize", 1), "", ""))
+				if resp.StatusCode != http.StatusUnauthorized {
+					t.Fatalf("initialize: status = %d, want %d; body %q", resp.StatusCode, http.StatusUnauthorized, body)
+				}
+				if evaluator.evaluateCalls != 0 {
+					t.Errorf("evaluator called %d times, want 0", evaluator.evaluateCalls)
+				}
+				return
+			}
+
+			ctx, cancel := context.WithTimeout(t.Context(), listenerTimeout)
+			defer cancel()
+			client := gomcp.NewClient(&gomcp.Implementation{Name: "test-client", Version: "0"}, nil)
+			session, err := client.Connect(ctx, &gomcp.StreamableClientTransport{Endpoint: httpServer.URL, HTTPClient: hc}, nil)
+			if err != nil {
+				t.Fatalf("Connect() error = %v", err)
+			}
+			defer func() { _ = session.Close() }()
+			_, err = session.CallTool(ctx, &gomcp.CallToolParams{
+				Name:      "policy-principal",
+				Meta:      gomcp.Meta{RetrievalPolicyMetaKey: map[string]any{"principal_id": "claimed-user"}},
+				Arguments: map[string]any{},
+			})
+			if err != nil {
+				t.Fatalf("CallTool() error = %v", err)
+			}
+			if evaluator.evaluateCalls != 1 {
+				t.Fatalf("evaluator called %d times, want 1", evaluator.evaluateCalls)
+			}
+			if got := evaluator.last.Policy.PrincipalID; got != tt.want || got == "claimed-user" {
+				t.Errorf("evaluator principal = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 
