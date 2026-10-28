@@ -143,7 +143,7 @@ go build -o go-llm-mcp ./cmd/go-llm-mcp/
 ./go-llm-mcp --transport http --addr 127.0.0.1:8080  # HTTP/2, local development
 ```
 
-Tools cover chat, generation, code completion, embeddings, RAG, model management, and analysis, routed through `provider.Router`; opt-in agent-memory tools register with `--agent-memory-db`. Remote destinations are denied unless pre-admitted with `-allow-destination` — the standalone server never prompts. Claude Desktop configuration, TLS, embedding the server in your own binary, and the routing and admission details: [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md#mcp-server).
+Tools cover chat, generation, code completion, embeddings, RAG, model management, and analysis, routed through `provider.Router`; opt-in agent-memory tools register with `--agent-memory-db`. Remote destinations are denied unless pre-admitted with `-allow-destination` — the standalone server never prompts. The HTTP transport is unauthenticated unless you enable optional bearer authentication via `GO_LLM_MCP_TOKEN`. Claude Desktop configuration, TLS, authentication, embedding the server in your own binary, and the routing and admission details: [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md#mcp-server).
 
 ## Roadmap
 
