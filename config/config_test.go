@@ -1014,7 +1014,7 @@ func TestExpandAPIKeyRefs(t *testing.T) {
 					}
 				})
 			}
-			got, err := expandAPIKeyRefs(tc.provider, tc.value, os.LookupEnv)
+			got, _, err := expandAPIKeyRefs(tc.provider, tc.value, os.LookupEnv)
 			if tc.wantErr != "" {
 				if err == nil || !contains(err.Error(), tc.wantErr) {
 					t.Fatalf("err = %v, want substring %q", err, tc.wantErr)
