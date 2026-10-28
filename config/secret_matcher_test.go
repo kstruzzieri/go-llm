@@ -2,7 +2,6 @@ package config
 
 import (
 	"encoding/json"
-	"fmt"
 	"maps"
 	"reflect"
 	"sort"
@@ -380,14 +379,57 @@ func TestSecretMatcherNotSerialized(t *testing.T) {
 		t.Fatalf("sidecar leaked into JSON:\n got %s\nwant %s", got, want)
 	}
 
-	// Boxed as any: vet rejects formatting a func value directly, but a
-	// host logging the matcher would reach it this way.
-	var m any = cfg.SecretMatcher()
-	formatted := fmt.Sprintf("%v %+v %#v", m, m, m)
-	for _, fixture := range []string{secLiteralA, secComposedB, secCompA, secCompB, "GOLEM_T_A"} {
-		if strings.Contains(formatted, fixture) {
-			t.Fatalf("formatted matcher %q reveals %q", formatted, fixture)
-		}
+	// Formatting a matcher reveals nothing because of its type: fmt prints
+	// an unnamed func value as a pointer and cannot reach its captures. A
+	// format-string check could not fail, so pin the exact type instead. A
+	// named matcher type stays assignable to func(string) bool yet could
+	// carry a String or Format method, so assignability is not enough.
+	if got, want := reflect.TypeOf((*Config)(nil).SecretMatcher()), reflect.TypeFor[func(string) bool](); got != want {
+		t.Fatalf("SecretMatcher returns %v, want exactly %v", got, want)
+	}
+}
+
+// The sidecar survives a copy only as an independent deep copy: writes to
+// the copy's map or component slices must never reach the source. Both
+// Config.clone and Document.Config are copy boundaries.
+func TestSecretMatcherCloneDeepCopiesSidecar(t *testing.T) {
+	want := []string{secCompA, secCompB}
+	cases := []struct {
+		name  string
+		setup func(d *Document) (src *Config, copyOf func() *Config)
+	}{
+		{"Config.clone", func(d *Document) (*Config, func() *Config) {
+			c := d.Config()
+			return c, c.clone
+		}},
+		{"Document.Config", func(d *Document) (*Config, func() *Config) {
+			return d.effective, d.Config
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// A fresh document per subtest and a fresh copy per check, so
+			// each assertion fails on its own when sharing leaks.
+			src, copyOf := tc.setup(parseSecretDoc(t, secLifecycleRaw, lifecycleEnv()))
+			if got := src.resolved["b"].components; !reflect.DeepEqual(got, want) {
+				t.Fatalf("fixture: source components[b] = %q, want %q", got, want)
+			}
+			written := copyOf()
+			if _, ok := written.resolved["b"]; !ok {
+				t.Fatal("copy lost the sidecar entry for b")
+			}
+			written.resolved["b"].components[0] = "zzzzzzzzzz"
+			if got := src.resolved["b"].components; !reflect.DeepEqual(got, want) {
+				t.Errorf("write to the copy's components reached the source: %q", got)
+			}
+			deleted := copyOf()
+			delete(deleted.resolved, "b")
+			if _, ok := src.resolved["b"]; !ok {
+				t.Error("delete on the copy's sidecar removed the source entry")
+			}
+			// B is guarded only through b's components.
+			wantMatch(t, tc.name, src.SecretMatcher(), true, secCompB)
+		})
 	}
 }
 
