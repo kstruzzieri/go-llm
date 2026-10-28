@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"hash/fnv"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/kstruzzieri/go-llm/internal/promptfence"
+	"github.com/kstruzzieri/go-llm/internal/secretscan"
 	"github.com/kstruzzieri/go-llm/provider"
 )
 
@@ -343,9 +345,18 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 		// reaches OnStep, and dispatches nothing. An interceptor error without
 		// a block takes the same path: the response was never cleared.
 		if oerr := ic.inspectOutput(ctx, obs, step, resp); oerr != nil {
+			// #424 D3: the route is copied metadata, so it is kept only when no
+			// string in it, Reason and attempts included, carries protected
+			// text. An outcome that cannot be encoded cannot be checked.
+			route := modelResult.RouteOutcome
+			if route != nil && ic.guardsText() {
+				if b, merr := json.Marshal(route); merr != nil || secretscan.MatchJSON(b, ic.sensitiveText) {
+					route = nil
+				}
+			}
 			res.Steps = append(res.Steps, StepRecord{
 				Index: step, Response: provider.ChatResponse{Usage: resp.Usage, Done: resp.Done},
-				RouteOutcome: modelResult.RouteOutcome, Pressure: pressure, Latency: modelLatency,
+				RouteOutcome: route, Pressure: pressure, Latency: modelLatency,
 			})
 			res.Events = append(res.Events, EventRecord{Step: step, Kind: "step"})
 			return finishWithError(&res, state, historyLen, oerr)

@@ -270,12 +270,40 @@ type Interceptor interface {
 	InspectToolCall(ctx context.Context, call ToolCallInspection) ([]Finding, error)
 }
 
+// SensitiveTextInterceptor is optionally implemented by an Interceptor that
+// guards protected text, such as configured credentials (#424 D3). Its
+// findings at VerdictBlock or above mean protected text was present in the
+// inspected content. The pipeline then keeps only bounded metadata from that
+// hook invocation (every finding's interceptor name, rule, verdict, and
+// numeric fields) and drops all its free text wholesale, from every
+// interceptor and the observer, before risk accumulation, telemetry and
+// error construction: finding Detail and ToolCallID, the event's ToolCallID,
+// and the hook and OnInterception errors, which become
+// ErrDiagnosticsSuppressed. SensitiveText reports whether text carries
+// protected content; it exposes only that boolean, and the pipeline uses it
+// to check copied route metadata. A RunScopedInterceptor's capability is the
+// one its per-run instance implements.
+type SensitiveTextInterceptor interface {
+	Interceptor
+	SensitiveText(text string) bool
+}
+
+// ErrDiagnosticsSuppressed replaces the interceptor and observer errors of a
+// hook invocation that a SensitiveTextInterceptor blocked, whose text may
+// carry the protected content. It is joined with context.Canceled and
+// context.DeadlineExceeded when the replaced errors carried them, so
+// errors.Is still reports cancellation.
+var ErrDiagnosticsSuppressed = errors.New("agent: interceptor diagnostics suppressed after a sensitive block")
+
 // namedInterceptor freezes the validated installation name for one run.
 // Interceptors are otherwise free to compute Name, but model-visible framing
-// and telemetry must use the value that passed validation.
+// and telemetry must use the value that passed validation. sensitive is the
+// resolved instance's SensitiveText, nil when it has none: the wrapper
+// itself does not implement the optional interface.
 type namedInterceptor struct {
 	Interceptor
-	name string
+	name      string
+	sensitive func(string) bool
 }
 
 func (n namedInterceptor) Name() string { return n.name }
@@ -367,7 +395,11 @@ func resolveInterceptors(ctx context.Context, chain []Interceptor, scope RunScop
 				addenda += "\n\n" + addendum
 			}
 		}
-		out[i] = namedInterceptor{Interceptor: resolved, name: names[i]}
+		n := namedInterceptor{Interceptor: resolved, name: names[i]}
+		if s, ok := resolved.(SensitiveTextInterceptor); ok {
+			n.sensitive = s.SensitiveText
+		}
+		out[i] = n
 	}
 	return out, addenda, nil
 }
@@ -509,6 +541,23 @@ func (r *interceptorRun) result() *RiskReport {
 	return &s
 }
 
+// sensitiveText reports whether any chain member's SensitiveText accepts s.
+func (r *interceptorRun) sensitiveText(s string) bool {
+	return slices.ContainsFunc(r.chain, func(ic Interceptor) bool {
+		n, _ := ic.(namedInterceptor)
+		return n.sensitive != nil && n.sensitive(s)
+	})
+}
+
+// guardsText reports whether any chain member implements
+// SensitiveTextInterceptor.
+func (r *interceptorRun) guardsText() bool {
+	return slices.ContainsFunc(r.chain, func(ic Interceptor) bool {
+		n, _ := ic.(namedInterceptor)
+		return n.sensitive != nil
+	})
+}
+
 func addSaturating(a, b int) int {
 	if b > math.MaxInt-a {
 		return math.MaxInt
@@ -534,25 +583,42 @@ type hookScope struct {
 // picture, normalizes findings against scope, accumulates risk, emits
 // telemetry, and returns the findings, the maximum verdict, and the joined
 // interceptor/observer errors. Callers combine the verdict and the error
-// through terminalAt.
+// through terminalAt. When a SensitiveTextInterceptor blocks, the
+// invocation's free text is dropped first (see that interface).
 func (r *interceptorRun) runHook(ctx context.Context, obs Observer, step int, scope hookScope,
 	invoke func(Interceptor) ([]Finding, error)) ([]Finding, Verdict, error) {
 
 	var all []Finding
 	var errs []error
 	verdict := VerdictAllow
+	sensitive := false
 	for _, ic := range r.chain {
 		found, err := invoke(ic)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("agent: interceptor %s %s: %w", ic.Name(), scope.hook, err))
 		}
+		n, _ := ic.(namedInterceptor)
 		for _, f := range found {
 			f = normalizeFinding(f, ic.Name(), step, scope)
 			all = append(all, f)
 			if f.Verdict > verdict {
 				verdict = f.Verdict
 			}
+			if f.Verdict >= VerdictBlock && n.sensitive != nil {
+				sensitive = true
+			}
 		}
+	}
+	// #424 D3: protected text was present, so any interceptor's text may echo
+	// it, possibly in an encoding the predicate cannot see. Drop it all before
+	// anything accumulates or publishes it, rather than filtering it
+	// ([consult 424-F3]).
+	toolCallID := scope.toolCallID
+	if sensitive {
+		for i := range all {
+			all[i].Detail, all[i].ToolCallID = "", ""
+		}
+		toolCallID = ""
 	}
 	if len(all) > 0 {
 		r.risk.Findings = append(r.risk.Findings, all...)
@@ -562,9 +628,20 @@ func (r *interceptorRun) runHook(ctx context.Context, obs Observer, step int, sc
 		if io, ok := obs.(InterceptionObserver); ok {
 			if err := io.OnInterception(ctx, InterceptionEvent{
 				Step: step, Hook: scope.hook, Verdict: verdict,
-				Findings: append([]Finding(nil), all...), Risk: r.cumulative(), ToolCallID: scope.toolCallID,
+				Findings: append([]Finding(nil), all...), Risk: r.cumulative(), ToolCallID: toolCallID,
 			}); err != nil {
 				errs = append(errs, err)
+			}
+		}
+	}
+	// Only replace errors that exist: a nil error keeps a tool-call block
+	// recoverable, and inspectToolCall treats any error as terminal.
+	if sensitive && len(errs) > 0 {
+		joined := errors.Join(errs...)
+		errs = []error{ErrDiagnosticsSuppressed}
+		for _, target := range []error{context.Canceled, context.DeadlineExceeded} {
+			if errors.Is(joined, target) {
+				errs = append(errs, target)
 			}
 		}
 	}
