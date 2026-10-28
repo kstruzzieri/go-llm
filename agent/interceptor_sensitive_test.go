@@ -215,43 +215,63 @@ func requireBlocked(t *testing.T, err error, hook Hook) *BlockedError {
 	return blocked
 }
 
-func TestSensitiveBlockDropsAggregateFreeText(t *testing.T) {
-	fx := newSensitiveFixture(t)
-	exact := exactFake{name: "exact", fixture: fx.value, atOutput: true}
-	mc := &scriptedCaller{responses: []ModelResult{oneCall("id-"+fx.value, "echo", fx.args(t)), finalAnswer("never")}}
-	rec := &interceptRecorder{}
-	o := newTestOrchestrator(mc, WithInterceptors(exact, echoFake{verdict: VerdictTag}))
-	res, err := o.Run(context.Background(), Request{Goal: "q", Tools: []Tool{echoTool{name: "echo"}}}, rec)
-	blocked := requireBlocked(t, err, HookOutput)
+// sensitiveChain installs the guard and an echoing Tag interceptor in either
+// order: the guard may sit anywhere in a host's chain, so findings recorded
+// before it fires must lose their text too. names is the resulting order.
+func sensitiveChain(exact exactFake, echoFirst bool) (chain []Interceptor, names []string) {
+	if echoFirst {
+		return []Interceptor{echoFake{verdict: VerdictTag}, exact}, []string{"echo", exact.name}
+	}
+	return []Interceptor{exact, echoFake{verdict: VerdictTag}}, []string{exact.name, "echo"}
+}
 
-	// Every finding keeps its bounded metadata, so dropping findings cannot
-	// pass for dropping their text.
-	if len(blocked.Findings) != 2 || blocked.Findings[0].Interceptor != "exact" || blocked.Findings[1].Interceptor != "echo" ||
-		blocked.Findings[1].Rule != "echo" || blocked.Findings[1].Verdict != VerdictTag || blocked.Findings[1].Target != TargetOutputToolCall {
-		t.Fatalf("findings = %+v, want exact then echo with name, rule, verdict and target kept", blocked.Findings)
-	}
-	if res.Risk == nil || len(rec.interceptions) != 1 {
-		t.Fatalf("risk = %+v, interceptions = %d; want the block published once", res.Risk, len(rec.interceptions))
-	}
-	sets := map[string][]Finding{"BlockedError": blocked.Findings, "Result.Risk": res.Risk.Findings}
-	for i, e := range rec.interceptions {
-		sets[fmt.Sprintf("event %d", i)] = e.Findings
-		sets[fmt.Sprintf("event %d risk", i)] = e.Risk.Findings
-		if e.ToolCallID != "" {
-			t.Errorf("event %d ToolCallID = %q, want empty", i, e.ToolCallID)
-		}
-	}
-	for label, fs := range sets {
-		for _, f := range fs {
-			if f.Detail != "" || f.ToolCallID != "" {
-				t.Errorf("%s finding %s/%s keeps Detail %q, ToolCallID %q", label, f.Interceptor, f.Rule, f.Detail, f.ToolCallID)
+func TestSensitiveBlockDropsAggregateFreeText(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		echoFirst bool
+	}{{"guard first", false}, {"guard after echo", true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			fx := newSensitiveFixture(t)
+			chain, names := sensitiveChain(exactFake{name: "exact", fixture: fx.value, atOutput: true}, tc.echoFirst)
+			mc := &scriptedCaller{responses: []ModelResult{oneCall("id-"+fx.value, "echo", fx.args(t)), finalAnswer("never")}}
+			rec := &interceptRecorder{}
+			o := newTestOrchestrator(mc, WithInterceptors(chain...))
+			res, err := o.Run(context.Background(), Request{Goal: "q", Tools: []Tool{echoTool{name: "echo"}}}, rec)
+			blocked := requireBlocked(t, err, HookOutput)
+
+			// Every finding keeps its bounded metadata, so dropping findings
+			// cannot pass for dropping their text.
+			if len(blocked.Findings) != 2 || blocked.Findings[0].Interceptor != names[0] || blocked.Findings[1].Interceptor != names[1] {
+				t.Fatalf("findings = %+v, want %v in chain order", blocked.Findings, names)
 			}
-		}
+			echo := blocked.Findings[slices.Index(names, "echo")]
+			if echo.Rule != "echo" || echo.Verdict != VerdictTag || echo.Target != TargetOutputToolCall {
+				t.Fatalf("echo finding = %+v, want its rule, verdict and target kept", echo)
+			}
+			if res.Risk == nil || len(rec.interceptions) != 1 {
+				t.Fatalf("risk = %+v, interceptions = %d; want the block published once", res.Risk, len(rec.interceptions))
+			}
+			sets := map[string][]Finding{"BlockedError": blocked.Findings, "Result.Risk": res.Risk.Findings}
+			for i, e := range rec.interceptions {
+				sets[fmt.Sprintf("event %d", i)] = e.Findings
+				sets[fmt.Sprintf("event %d risk", i)] = e.Risk.Findings
+				if e.ToolCallID != "" {
+					t.Errorf("event %d ToolCallID = %q, want empty", i, e.ToolCallID)
+				}
+			}
+			for label, fs := range sets {
+				for _, f := range fs {
+					if f.Detail != "" || f.ToolCallID != "" {
+						t.Errorf("%s finding %s/%s keeps Detail %q, ToolCallID %q", label, f.Interceptor, f.Rule, f.Detail, f.ToolCallID)
+					}
+				}
+			}
+			fx.assertErrorClean(t, err)
+			fx.assertJSONClean(t, "events", rec.interceptions)
+			fx.assertJSONClean(t, "risk", res.Risk)
+			fx.assertJSONClean(t, "result", res)
+		})
 	}
-	fx.assertErrorClean(t, err)
-	fx.assertJSONClean(t, "events", rec.interceptions)
-	fx.assertJSONClean(t, "risk", res.Risk)
-	fx.assertJSONClean(t, "result", res)
 }
 
 func TestSensitiveToolCallHookClearsEventID(t *testing.T) {
@@ -306,23 +326,26 @@ func TestSensitiveToolCallHookBlockStaysRecoverable(t *testing.T) {
 }
 
 func TestSensitiveBlockBoundsHookAndObserverErrors(t *testing.T) {
+	plain := func(doc string) error { return errors.New(doc) }
 	cases := []struct {
-		name string
-		wrap func(doc string) error
-		is   []error
+		name      string
+		wrap      func(doc string) error
+		is        []error
+		echoFirst bool
 	}{
-		{"plain", func(doc string) error { return errors.New(doc) }, nil},
-		{"canceled", func(doc string) error { return fmt.Errorf("observer saw %s: %w", doc, context.Canceled) }, []error{context.Canceled}},
-		{"deadline", func(doc string) error { return fmt.Errorf("observer saw %s: %w", doc, context.DeadlineExceeded) }, []error{context.DeadlineExceeded}},
+		{"plain", plain, nil, false},
+		{"canceled", func(doc string) error { return fmt.Errorf("observer saw %s: %w", doc, context.Canceled) }, []error{context.Canceled}, false},
+		{"deadline", func(doc string) error { return fmt.Errorf("observer saw %s: %w", doc, context.DeadlineExceeded) }, []error{context.DeadlineExceeded}, false},
+		{"plain, guard after echo", plain, nil, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			fx := newSensitiveFixture(t)
 			doc := fx.args(t)
-			exact := exactFake{name: "exact", fixture: fx.value, atOutput: true}
+			chain, _ := sensitiveChain(exactFake{name: "exact", fixture: fx.value, atOutput: true}, tc.echoFirst)
 			mc := &scriptedCaller{responses: []ModelResult{oneCall("1", "echo", doc), finalAnswer("never")}}
 			rec := &interceptRecorder{err: tc.wrap(doc)}
-			o := newTestOrchestrator(mc, WithInterceptors(exact, echoFake{verdict: VerdictTag}))
+			o := newTestOrchestrator(mc, WithInterceptors(chain...))
 			_, err := o.Run(context.Background(), Request{Goal: "q", Tools: []Tool{echoTool{name: "echo"}}}, rec)
 			_ = requireBlocked(t, err, HookOutput)
 			if !errors.Is(err, ErrDiagnosticsSuppressed) {
