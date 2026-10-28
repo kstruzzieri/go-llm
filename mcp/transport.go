@@ -27,17 +27,19 @@ func (s *Server) ListenStdio(ctx context.Context) error {
 // If TLS was configured via WithTLS, it uses full HTTP/2 with TLS.
 // Otherwise it uses h2c (cleartext HTTP/2) and requires addr to be a
 // loopback address.
+//
+// Without WithHTTPBearerToken the HTTP transport is unauthenticated. With it,
+// every request that reaches the MCP handler, on either transport and
+// including "OPTIONS *", must present the bearer token. TLS encrypts traffic
+// but does not authenticate the caller. On h2c, the 101 Switching Protocols
+// reply to an HTTP/1.1 upgrade is sent before the handler runs; the upgraded
+// request and every later stream are then checked.
 func (s *Server) ListenHTTP(ctx context.Context, addr string) error {
 	if s.tlsCert == "" && !isLoopback(addr) {
 		return fmt.Errorf("mcp: non-loopback address %q requires TLS (use WithTLS)", addr)
 	}
 
-	handler := streamableHTTPHandler(s)
-
-	httpServer := &http.Server{
-		Addr:    addr,
-		Handler: handler,
-	}
+	httpServer := s.newHTTPServer(addr, s.tlsCert != "")
 	s.mu.Lock()
 	s.httpServer = httpServer
 	s.mu.Unlock()
@@ -53,9 +55,6 @@ func (s *Server) ListenHTTP(ctx context.Context, addr string) error {
 	if s.tlsCert != "" {
 		err = httpServer.ListenAndServeTLS(s.tlsCert, s.tlsKey)
 	} else {
-		// h2c: HTTP/2 over cleartext (no TLS)
-		h2s := &http2.Server{}
-		httpServer.Handler = limitMCPH2CBody(handler, h2s, maxMCPHTTPBodyBytes)
 		err = httpServer.ListenAndServe()
 	}
 	// ErrServerClosed is the expected result of graceful shutdown, not an error.
@@ -63,6 +62,23 @@ func (s *Server) ListenHTTP(ctx context.Context, addr string) error {
 		return nil
 	}
 	return err
+}
+
+// newHTTPServer builds the http.Server ListenHTTP serves. Under TLS the MCP
+// handler is served directly; on h2c it is wrapped in h2c and the outer body
+// limiter. With a bearer token configured, Go's built-in "OPTIONS *" reply
+// is disabled so that request reaches the gate as well.
+func (s *Server) newHTTPServer(addr string, useTLS bool) *http.Server {
+	handler := streamableHTTPHandler(s)
+	if !useTLS {
+		// h2c: HTTP/2 over cleartext (no TLS)
+		handler = limitMCPH2CBody(handler, &http2.Server{}, maxMCPHTTPBodyBytes)
+	}
+	return &http.Server{
+		Addr:                         addr,
+		Handler:                      handler,
+		DisableGeneralOptionsHandler: s.httpBearerDigest != nil,
+	}
 }
 
 func streamableHTTPHandler(s *Server) http.Handler {
