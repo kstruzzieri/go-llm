@@ -87,6 +87,12 @@ type Bundle struct {
 	Models    *provider.ModelRegistry
 	Router    *provider.Router
 	Warnings  []error
+	// SecretMatcher is Config.SecretMatcher, frozen once per New from the
+	// materialized effective config (#424). It is never nil: a config that
+	// resolved no credential, including the nil-Config default, yields an
+	// always-false matcher. New installs no guard; hosts that want exact
+	// configured-credential blocking install it from this value.
+	SecretMatcher func(string) bool
 }
 
 // defaultOllamaURL is the fallback base URL for the nil-Config / default provider.
@@ -292,12 +298,13 @@ func New(ctx context.Context, opts Options) (*Bundle, error) {
 	router := provider.NewRouter(mr, pReg, routerOpts...)
 
 	return &Bundle{
-		Config:    effCfg,
-		Effective: eff,
-		Providers: pReg,
-		Models:    mr,
-		Router:    router,
-		Warnings:  warnings,
+		Config:        effCfg,
+		Effective:     eff,
+		Providers:     pReg,
+		Models:        mr,
+		Router:        router,
+		Warnings:      warnings,
+		SecretMatcher: effCfg.SecretMatcher(),
 	}, nil
 }
 

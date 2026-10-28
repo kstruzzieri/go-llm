@@ -5,13 +5,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/kstruzzieri/go-llm/agent"
+	"github.com/kstruzzieri/go-llm/agent/interceptor"
 	"github.com/kstruzzieri/go-llm/conversation"
 	golemruntime "github.com/kstruzzieri/go-llm/golem"
 	"github.com/kstruzzieri/go-llm/provider"
@@ -386,4 +389,204 @@ func sealFailureSession(t *testing.T, sealErr error, caller func(latch func(erro
 	sess.orch = orch
 	sess.runtime = newTestRuntime(t, root, sess.baseSystem, orch, sess.tools)
 	return sess, []error{sealErr}, nil
+}
+
+// configuredBlockedText is the agent error for a configured_secrets block of a
+// model response. The dispatch envelope and the agentflow worker carry it
+// verbatim.
+const configuredBlockedText = "agent: output blocked by interceptor configured_secrets (configured_secret)"
+
+// configuredProbeBody is the text of the file a configured-key turn reads, so a
+// run that is not blocked shows that its call ran.
+const configuredProbeBody = "configured probe: the call ran\n"
+
+// withConfiguredKey gives fx's alt provider the api_key "${GOLEM_T_KEY}" and
+// sets that variable to value through t.Setenv. It is the only variable the
+// config references, and value is always a synthetic fixture.
+func withConfiguredKey(t *testing.T, fx modelSwitchFixture, value string) {
+	t.Helper()
+	t.Setenv("GOLEM_T_KEY", value)
+	raw, err := os.ReadFile(fx.configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const alt = `"alt": {`
+	if strings.Count(string(raw), alt) != 1 {
+		t.Fatal("fixture config has no single alt provider")
+	}
+	keyed := strings.Replace(string(raw), alt, alt+`"api_key": "${GOLEM_T_KEY}", `, 1)
+	if err := os.WriteFile(fx.configPath, []byte(keyed), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// writeConfiguredProbe writes the file configuredScript(value) reads.
+func writeConfiguredProbe(t *testing.T, root, value string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(root, value+".txt"), []byte(configuredProbeBody), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// configuredScript proposes c1, a read_file of value+".txt", as a turn's first
+// response; the next response is the backend's labeled answer.
+func configuredScript(value string) func(http.ResponseWriter, *http.Request, string) bool {
+	args, _ := json.Marshal(map[string]string{"path": value + ".txt"})
+	return scriptedToolCalls(sseToolCall("c1", "read_file", string(args)))
+}
+
+// testConfiguredBinding is testCanaryBinding with the exact guard set the way
+// run() sets it from the bundle; match is the guard's credential lookup.
+func testConfiguredBinding(t *testing.T, match func(string) bool) *canaryBinding {
+	t.Helper()
+	b := testCanaryBinding(t)
+	guard, err := interceptor.NewConfiguredSecrets(match)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.configured = guard
+	return b
+}
+
+// checkConfiguredRun judges one observation of a configured-key turn. An empty
+// blockedAs means the call must run: the run completes with no finding, and
+// the model is shown the file's text as c1's observation. Otherwise the path
+// must report blockedAs without the fixture and send no request after the one
+// that proposed the call, and a Result must carry exactly the
+// configured_secrets finding. Observations are never printed: an unblocked
+// row's carry the fixture.
+func checkConfiguredRun(t *testing.T, o pathObservation, exposes exposure, blockedAs string) {
+	t.Helper()
+	if blockedAs == "" {
+		if o.failure != "" {
+			t.Errorf("%s: run failed, want the call to run", o.surface)
+			return
+		}
+		if exposes != exposesWire && o.answer != o.label+" answer" {
+			t.Errorf("%s: answer is not the %s backend's", o.surface, o.label)
+		}
+		if exposes == exposesResult && len(o.findings) != 0 {
+			t.Errorf("%s: findings = %v, want none", o.surface, o.findings)
+		}
+		if got := c1Observation(t, o.bodies); got != configuredProbeBody {
+			t.Errorf("%s: c1 observation is not the file's text", o.surface)
+		}
+		return
+	}
+	if leaksFixture(o.failure) || leaksFixture(o.answer) {
+		t.Errorf("%s: the rejection carried the fixture", o.surface)
+	} else if !strings.Contains(o.failure, blockedAs) {
+		t.Errorf("%s: failure = %q, want it to contain %q", o.surface, o.failure, blockedAs)
+	}
+	if len(o.bodies) != 1 {
+		t.Errorf("%s: sent %d chat requests, want only the one that proposed the call", o.surface, len(o.bodies))
+	}
+	if exposes == exposesResult {
+		want := []findingPair{{"configured_secrets", "configured_secret"}}
+		if o.score != 100 || !slices.Equal(o.findings, want) {
+			t.Errorf("%s: risk = %d %v, want 100 %v", o.surface, o.score, o.findings, want)
+		}
+	}
+}
+
+// c1Observation returns what the model was shown for c1, read from the one
+// request in bodies that carries it.
+func c1Observation(t *testing.T, bodies []string) string {
+	t.Helper()
+	var seen []string
+	for _, b := range bodies {
+		var req wireRequest
+		if err := json.Unmarshal([]byte(b), &req); err != nil {
+			t.Fatal(err)
+		}
+		for _, m := range req.toolMessages() {
+			if m.ToolCallID == "c1" {
+				seen = append(seen, unframe(t, m.Content))
+			}
+		}
+	}
+	if len(seen) != 1 {
+		t.Fatalf("%d requests carried the c1 observation, want exactly 1", len(seen))
+	}
+	return seen[0]
+}
+
+// TestConfiguredSecretsEmptySetSessionRuns (#424 Review Focus 4): a config with
+// no credential still installs configured_secrets under -interceptors, with an
+// empty set. The startup notice names it exactly as with a credential, with no
+// count, and a turn whose call carries the fixture runs on every surface,
+// dispatch children included: an empty set blocks nothing and raises no hook
+// error. Config: nil is TestBundleSecretMatcherFromEffectiveConfig's.
+func TestConfiguredSecretsEmptySetSessionRuns(t *testing.T) {
+	fx := newModelSwitchFixture(t, "")
+	value := configuredSecretFixture()
+	writeConfiguredProbe(t, fx.root, value)
+	fx.primary.chatResponse = configuredScript(value)
+	stderr := fx.withSession(t, []string{"-interceptors", "-dispatch"}, func(t *testing.T, sess *replSession) {
+		for _, o := range sessionSurfaces(t, sess, fx.primary) {
+			checkConfiguredRun(t, o, exposesResult, "")
+		}
+		checkConfiguredRun(t, dispatchObservation(t, sess, fx.primary), exposesScore, "")
+	})
+	if lines := strings.Split(strings.TrimSpace(stderr), "\n"); !slices.Contains(lines, fullNoticeLine) {
+		t.Errorf("startup lines = %q, want the line %q", lines, fullNoticeLine)
+	}
+}
+
+// TestModelSwitchKeepsConfiguredSecrets (#424 Review Focus 5): /model set
+// rebuilds the orchestrator factory and the parent-following dispatch tool,
+// and both keep the session's guard with the snapshot it started with. The
+// variable changes after startup: the startup key stays blocked on every
+// rebuilt surface, and the new value, which nothing resolved, runs (spec D2:
+// a /model switch keeps the snapshot; rotation takes a new bundle).
+func TestModelSwitchKeepsConfiguredSecrets(t *testing.T) {
+	startup, rotated := configuredSecretFixture(), "cs_"+strings.Repeat("Hw4pRz8N", 3)
+	fx := newModelSwitchFixture(t, "")
+	withConfiguredKey(t, fx, startup)
+	writeConfiguredProbe(t, fx.root, startup)
+	writeConfiguredProbe(t, fx.root, rotated)
+	fx.withSession(t, []string{"-interceptors", "-dispatch"}, func(t *testing.T, sess *replSession) {
+		t.Setenv("GOLEM_T_KEY", rotated)
+		mustSlash(t, sess, "/model set swap", "model: swap\n")
+		for _, tc := range []struct{ name, value, blockedAs string }{
+			{"startup key", startup, configuredBlockedText},
+			{"rotated value", rotated, ""},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				fx.alt.chatResponse = configuredScript(tc.value)
+				for _, o := range sessionSurfaces(t, sess, fx.alt) {
+					checkConfiguredRun(t, o, exposesResult, tc.blockedAs)
+				}
+				checkConfiguredRun(t, dispatchObservation(t, sess, fx.alt), exposesScore, tc.blockedAs)
+			})
+		}
+	})
+}
+
+// TestInterceptorsNoticeNamesConfiguredSecrets (#424): with a configured key,
+// the -interceptors startup notice names configured_secrets, first and by name
+// only: the exact line carries no member, count or source, and nothing on
+// stderr names the credential or the variable it came from. Without the flag
+// the guards-only line names it among the additions.
+func TestInterceptorsNoticeNamesConfiguredSecrets(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"interceptors", []string{"-interceptors"}, fullNoticeLine},
+		{"guards only", nil, guardsNoticeLine},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fx := newModelSwitchFixture(t, "")
+			withConfiguredKey(t, fx, configuredSecretFixture())
+			stderr := fx.withSession(t, tc.args, func(*testing.T, *replSession) {})
+			if leaksFixture(stderr) || strings.Contains(stderr, "GOLEM_T_KEY") {
+				t.Fatal("startup output names the credential or its variable")
+			}
+			if lines := strings.Split(strings.TrimSpace(stderr), "\n"); !slices.Contains(lines, tc.want) {
+				t.Errorf("startup lines = %q, want the line %q", lines, tc.want)
+			}
+		})
+	}
 }

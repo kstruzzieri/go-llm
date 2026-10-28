@@ -106,6 +106,13 @@ func TestInterceptorsFor(t *testing.T) {
 	if got := names(interceptorsFor(f, testCanaryBinding(t))); !slices.Equal(got, full) {
 		t.Fatalf("on: chain = %v, want %v", got, full)
 	}
+	// #424: with the session's exact guard set, as run() always sets it, the
+	// guard leads the chain.
+	configured := []string{"configured_secrets", "zero_width", "encoding", "typoglycemia", "invariants", "egress", "secrets", "child_scope_denials", "canary"}
+	binding := testConfiguredBinding(t, func(string) bool { return false })
+	if got := names(interceptorsFor(f, binding)); !slices.Equal(got, configured) {
+		t.Fatalf("on, configured: chain = %v, want %v", got, configured)
+	}
 }
 
 func TestStartupNotices_Interceptors(t *testing.T) {
@@ -114,7 +121,7 @@ func TestStartupNotices_Interceptors(t *testing.T) {
 		line string
 		want string
 	}{
-		{"full chain", interceptorsNotice(true, interceptorsFor(flags{interceptors: true}, testCanaryBinding(t))),
+		{"full chain", interceptorsNotice(true, interceptorsFor(flags{interceptors: true}, testConfiguredBinding(t, func(string) bool { return false }))),
 			"workspace: /w\n" + fullNoticeLine},
 		{"guards only", interceptorsNotice(false, interceptorsFor(flags{}, nil)),
 			"workspace: /w\n" + guardsNoticeLine},

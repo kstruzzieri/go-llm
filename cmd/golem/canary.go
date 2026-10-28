@@ -28,6 +28,12 @@ type canaryBinding struct {
 	active          canaryActivation
 	renewalRequired bool
 	entropy         io.Reader
+	// configured is the session's exact configured-credential guard (#424),
+	// set once at startup from the bundle's frozen matcher. It rides this
+	// binding because every chain builder already receives it, so startup,
+	// factory-built, /model-rebuilt and dispatch-child chains share one
+	// instance. nil leaves it out of the chain.
+	configured agent.Interceptor
 }
 
 func newCanaryBinding(enabled bool, entropy io.Reader) (*canaryBinding, error) {

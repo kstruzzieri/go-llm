@@ -169,7 +169,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.StringVar(&f.delegateRole, "delegate-role", "coding", "model role the delegate_code tool routes to")
 	fs.BoolVar(&f.dispatch, "dispatch", false, "enable the dispatch tool (bounded read-only exploration tasks use backend-governed concurrency; ungoverned routing stays serial)")
 	fs.StringVar(&f.dispatchRole, "dispatch-role", "", "model role dispatch child agents route to (default: the primary agent chain, so children never force a model swap)")
-	fs.BoolVar(&f.interceptors, "interceptors", false, "add the content interceptor pipeline (#436/#437/#438) on top of the always-on guards (#439/#555, always on since #575: argument invariants for named tools, exec-class egress labels, scoped-child refusal reporting): origin-sensitive injection detectors, all-origin supported secret/payment-card blocking across completed turns, and a canary; required by /consult; streaming output is not intercepted; risk appears at interactive tool-call and plan-lock prompts and successful REPL/-p stderr footers with or without this flag, but not verifier approval prompts; default off, see docs/security/interceptor-defaults-decision.md")
+	fs.BoolVar(&f.interceptors, "interceptors", false, "add the content interceptor pipeline (#436/#437/#438) on top of the always-on guards (#439/#555, always on since #575: argument invariants for named tools, exec-class egress labels, scoped-child refusal reporting): origin-sensitive injection detectors, all-origin supported secret/payment-card blocking across completed turns, exact blocking of configured credentials in tool calls, and a canary; required by /consult; streaming output is not intercepted; risk appears at interactive tool-call and plan-lock prompts and successful REPL/-p stderr footers with or without this flag, but not verifier approval prompts; default off, see docs/security/interceptor-defaults-decision.md")
 	fs.Var(&f.mcpStdio, "mcp-stdio", "attach an MCP server over stdio: \"[alias=]command args...\" (repeatable; runs in -root with a minimal environment; forward variables with -mcp-env)")
 	fs.Var(&f.mcpHTTP, "mcp-http", "attach an MCP server over streamable HTTP: \"[alias=]https://endpoint\" (repeatable)")
 	fs.Var(&f.mcpTools, "mcp-tools", "expose only these original tools of an attached MCP server: \"alias=name[,name...]\"; \"alias=\" exposes none (repeatable; the complete catalog is still verified and pinned)")
@@ -673,7 +673,9 @@ func startupNotices(info startupInfo) []string {
 // the startup orchestrator, every factory-built orchestrator, and every
 // dispatch child derive exactly this list from the production flags value.
 // Without -interceptors it is Golem's always-on deterministic guards; with it,
-// the full default chain plus the canary. Never empty.
+// the session's configured-secret guard when the binding carries one (#424,
+// first, before the detectors), the full default chain, and the canary.
+// Never empty.
 func interceptorsFor(f flags, canary *canaryBinding) []agent.Interceptor {
 	if !f.interceptors {
 		return defaultGuards()
@@ -682,7 +684,12 @@ func interceptorsFor(f flags, canary *canaryBinding) []agent.Interceptor {
 		// An omitted binding fails at ForRun instead of silently losing policy.
 		canary = &canaryBinding{}
 	}
-	return append(interceptor.Defaults(), canary)
+	var chain []agent.Interceptor
+	if canary.configured != nil {
+		chain = append(chain, canary.configured)
+	}
+	chain = append(chain, interceptor.Defaults()...)
+	return append(chain, canary)
 }
 
 // defaultGuards is Golem's always-on subset of interceptor.Defaults (#575 D2,
@@ -717,7 +724,7 @@ func interceptorsNotice(full bool, ics []agent.Interceptor) string {
 	if full {
 		return "interceptors: enabled (" + strings.Join(names, ", ") + ")"
 	}
-	return "guards: " + strings.Join(names, ", ") + " (always on; -interceptors adds detectors, secrets, canary)"
+	return "guards: " + strings.Join(names, ", ") + " (always on; -interceptors adds detectors, secrets, configured secrets, canary)"
 }
 
 // newOrchestratorFactory returns the session's orchestrator constructor. The
@@ -1391,6 +1398,17 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	canary, err := newCanaryBinding(f.interceptors, hooks.canaryEntropy)
 	if err != nil {
 		return err
+	}
+	if canary != nil {
+		// #424: the exact guard comes with the full chain only (-interceptors),
+		// frozen from the bundle's matcher before any chain is built, so every
+		// orchestrator and dispatch child this session builds shares it. A
+		// config that resolved no credential installs it with an empty set.
+		configured, err := interceptor.NewConfiguredSecrets(bundle.SecretMatcher)
+		if err != nil {
+			return err
+		}
+		canary.configured = configured
 	}
 
 	dispatchLine := ""
