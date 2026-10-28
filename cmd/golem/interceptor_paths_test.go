@@ -146,6 +146,7 @@ type pathObservation struct {
 	failure  string        // how the run failed, in the path's own terms; "" if it completed
 	score    int           // the risk score the path reports
 	findings []findingPair // Result.Risk.Findings, where the path returns a Result
+	stderr   string        // the whole stderr, for the path that has one (-p)
 }
 
 // observeProbeRun runs one turn and records what it returned.
@@ -305,7 +306,7 @@ func TestInterceptorChainConstructionPaths(t *testing.T) {
 			}
 			errOut := readRunTestFile(t, stderr)
 			o := pathObservation{surface: "-p", label: fx.primary.label, bodies: fx.primary.chatBodies(),
-				answer: strings.TrimSpace(readRunTestFile(t, stdout)), score: footerRisk(errOut)}
+				answer: strings.TrimSpace(readRunTestFile(t, stdout)), score: footerRisk(errOut), stderr: errOut}
 			if err != nil {
 				o.failure = stderrErrors(errOut)
 			}

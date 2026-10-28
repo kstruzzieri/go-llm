@@ -14,7 +14,7 @@ func TestBundleSecretMatcherFromEffectiveConfig(t *testing.T) {
 	t.Run("template component survives URL overrides", func(t *testing.T) {
 		const component = "golem-t-component-0001"
 		doc, err := config.ParseDocument([]byte(`{
-  "providers": {"lc": {"base_url": "http://127.0.0.1:1", "api_format": "openai-compat", "api_key": "pre-${GOLEM_T_KEY}"}},
+  "providers": {"lc": {"base_url": "http://127.0.0.1:1", "api_format": "openai-compat", "api_key": "static-prefix-0001-${GOLEM_T_KEY}"}},
   "models": {"chat": {"name": "m", "provider": "lc", "type": "dense"}}
 }`), config.Origin{Source: config.OriginExplicit}, config.DocumentOptions{LookupEnv: func(name string) (string, bool) {
 			if name == "GOLEM_T_KEY" {
@@ -48,10 +48,10 @@ func TestBundleSecretMatcherFromEffectiveConfig(t *testing.T) {
 			want bool
 		}{
 			{component, true},
-			{"pre-" + component, true},
+			{"static-prefix-0001-" + component, true},
 			{"${GOLEM_T_KEY}", false},
 			{"GOLEM_T_KEY", false},
-			{"pre-", false},
+			{"static-prefix-0001-", false},
 			{"golem-t-component-0002", false},
 		} {
 			if got := b.SecretMatcher(tc.text); got != tc.want {

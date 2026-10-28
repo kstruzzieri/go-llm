@@ -4,6 +4,8 @@ Recorded 2026-10-26. **The detectors and Secrets both stay opt-in.**
 
 Golem installs the guards (invariants, egress, child scope denials) in every session. `-interceptors` adds the detectors (zero-width, encoding, typoglycemia), Secrets and the canary. This record states why neither moves into the default and what shows the flag's meaning is unchanged. It links the evidence and repeats only the figures the decision rests on. "Spec" below is the #517 design (REV 2, approved 2026-10-24), the document all three linked reports cite as "spec".
 
+Amended 2026-10-28 (#424): `-interceptors` also installs the exact `configured_secrets` guard first in that chain, so the sentences below that describe it as the detectors, Secrets and the canary predate it.
+
 ## Decision
 
 - `-interceptors` keeps its default of false. Omitting it means `-interceptors=false`, which is the guards only.

@@ -473,7 +473,7 @@ func checkConfiguredRun(t *testing.T, o pathObservation, exposes exposure, block
 		}
 		return
 	}
-	if leaksFixture(o.failure) || leaksFixture(o.answer) {
+	if leaksFixture(o.failure) || leaksFixture(o.answer) || leaksFixture(o.stderr) {
 		t.Errorf("%s: the rejection carried the fixture", o.surface)
 	} else if !strings.Contains(o.failure, blockedAs) {
 		t.Errorf("%s: failure = %q, want it to contain %q", o.surface, o.failure, blockedAs)

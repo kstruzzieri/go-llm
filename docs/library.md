@@ -456,8 +456,9 @@ reference in an `api_key` resolved to, when at least eight bytes long. It is a
 trusted host API; never expose it, or its answers, to a model. Loading a config
 installs nothing. To block agent tool calls that carry one (#424), install
 `interceptor.NewConfiguredSecrets(cfg.SecretMatcher())` on the orchestrator and
-pass the same guard to `agenttools.NewDispatch`, which installs its
-interceptors on every dispatched child:
+pass the same guard to `tools.NewDispatch`
+(`github.com/kstruzzieri/go-llm/agent/tools`), which installs its interceptors
+on every dispatched child:
 
 ```go
 guard, err := interceptor.NewConfiguredSecrets(cfg.SecretMatcher())
@@ -465,7 +466,7 @@ if err != nil {
     return err
 }
 orch := agent.New(caller, agent.ContextManager{}, agent.WithInterceptors(guard))
-dispatch, err := agenttools.NewDispatch(caller, agent.ContextManager{}, readTools, agenttools.DispatchLimits{}, guard)
+dispatch, err := tools.NewDispatch(caller, agent.ContextManager{}, readTools, tools.DispatchLimits{}, guard)
 ```
 
 The matcher is a snapshot of that config: build a new guard after reloading or

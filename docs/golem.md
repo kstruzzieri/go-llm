@@ -863,7 +863,12 @@ go-llm resolved from `models.json`: every configured provider's effective
 `api_key` resolved to. Matching is exact, whatever the value's shape: a
 case-sensitive substring of the call's raw arguments, of every decoded JSON key
 and string value, and of the call's ID, function name and type. Values shorter
-than eight bytes get no exact protection. A match drops the whole model
+than eight bytes get no exact protection. Every value of eight or more bytes is
+protected whatever it is, placeholder keys such as LM Studio's `lm-studio` or
+llama.cpp's `sk-no-key-required` and ordinary words included, so a tool call
+whose arguments, ID or name contain one ends the run with
+`run blocked: sensitive content detected`. For a keyless local server, omit
+`api_key`. A match drops the whole model
 response before it is recorded and before any of its calls is shown, planned,
 approved or run, so no call in it runs, clean calls beside it included; answer
 text the model already streamed is outside this check. The run ends with the
@@ -878,6 +883,14 @@ thinking or tool results. It does not check what Golem sends to a provider
 either; outbound request content is the second, separate #424 change. The set is
 fixed when Golem starts: `/model set` keeps it, and a credential changed in the
 environment takes effect at the next start.
+
+Known limit: matching decodes one level of JSON, the raw text plus decoded keys
+and string values. When a model emits malformed tool arguments, the
+OpenAI-compatible client (llama.cpp, vLLM, LM Studio) wraps them as a JSON
+string literal; a credential written there as `\u` escapes is then not
+recognized, and the call can reach approval, the terminal tool-call display, the
+tool itself and session history. Built-in tools reject such arguments, because
+they decode into structured types.
 
 The shared ASCII-oriented scanner recognizes these shapes. It detects syntax
 and heuristics, not whether a credential is active or a card account exists.

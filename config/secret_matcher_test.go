@@ -64,7 +64,7 @@ const (
 	secLiteralA   = "literal-key-0001"
 	secCompA      = "comp-aaaa1111"
 	secCompB      = "comp-bbbb2222"
-	secComposedB  = "sk-comp-aaaa1111-comp-bbbb2222"
+	secComposedB  = "static-prefix-0001-comp-aaaa1111-comp-bbbb2222"
 	secInactiveC  = "inactive-key-0003"
 	secUnusedEnv  = "unused-sentinel-9999"
 	secCompC      = "comp-cccc3333"
@@ -75,7 +75,7 @@ const (
 	secSourcesRaw = `{
   "providers": {
     "a": {"base_url": "http://localhost:1", "api_key": "literal-key-0001"},
-    "b": {"base_url": "http://localhost:2", "api_key": "sk-${GOLEM_T_A}-${GOLEM_T_B}"},
+    "b": {"base_url": "http://localhost:2", "api_key": "static-prefix-0001-${GOLEM_T_A}-${GOLEM_T_B}"},
     "c": {"base_url": "http://localhost:3", "api_key": "inactive-key-0003"},
     "d": {"base_url": "http://localhost:4", "api_key": "literal-key-0001"}
   },
@@ -105,7 +105,7 @@ func TestSecretMatcherSources(t *testing.T) {
 		"prefix "+secLiteralA+" suffix", // contiguous substring, not equality
 	)
 	wantMatch(t, "sources", m, false,
-		"", "sk-", "GOLEM_T_A", "${GOLEM_T_A}", "GOLEM_T_B", "SECRET_TOKEN", secUnusedEnv,
+		"", "static-prefix-0001-", "GOLEM_T_A", "${GOLEM_T_A}", "GOLEM_T_B", "SECRET_TOKEN", secUnusedEnv,
 		"LITERAL-KEY-0001",             // case-sensitive
 		"literal-key-000 1",            // contiguous only
 		"comp-aaaa111", "omp-bbbb2222", // proper prefixes/suffixes of a member
@@ -195,7 +195,7 @@ func TestSecretMatcherOneResolutionTransaction(t *testing.T) {
 const secLifecycleRaw = `{
   "providers": {
     "a": {"base_url": "http://localhost:1", "api_key": "literal-key-0001"},
-    "b": {"base_url": "http://localhost:2", "api_key": "sk-${GOLEM_T_A}-${GOLEM_T_B}"},
+    "b": {"base_url": "http://localhost:2", "api_key": "static-prefix-0001-${GOLEM_T_A}-${GOLEM_T_B}"},
     "c": {"base_url": "http://localhost:3", "api_key": "${GOLEM_T_A}"}
   },
   "models": {"agent": {"name": "m", "type": "dense", "provider": "c"}},
@@ -290,7 +290,7 @@ func TestSecretMatcherLifecycle(t *testing.T) {
 			t.Fatal("same bytes produced different revisions")
 		}
 		m := d2.Config().SecretMatcher()
-		wantMatch(t, "reparse", m, true, secRotatedA, "sk-"+secRotatedA+"-"+secCompB)
+		wantMatch(t, "reparse", m, true, secRotatedA, "static-prefix-0001-"+secRotatedA+"-"+secCompB)
 		// The old composed key contains the unchanged B, so only A shows it.
 		wantMatch(t, "reparse", m, false, secCompA)
 	})
@@ -310,7 +310,7 @@ func TestSecretMatcherDropsStaleComponents(t *testing.T) {
 	raw := `{
   "providers": {
     "a": {"base_url": "http://localhost:1", "api_key": "literal-key-0001"},
-    "b": {"base_url": "http://localhost:2", "api_key": "sk-${GOLEM_T_A}-${GOLEM_T_B}"}
+    "b": {"base_url": "http://localhost:2", "api_key": "static-prefix-0001-${GOLEM_T_A}-${GOLEM_T_B}"}
   },
   "models": {"agent": {"name": "m", "type": "dense", "provider": "a"}},
   "defaults": {"agent": "agent"}

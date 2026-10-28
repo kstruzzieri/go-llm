@@ -83,14 +83,14 @@ func collect(walk func(raw []byte, visit func(text, key string)), doc string) []
 // below cannot drift from it unnoticed.
 func TestWalkJSONVisitSequence(t *testing.T) {
 	t.Parallel()
-	doc := `{"k":"v","k":"w","n":{"m":"x"},"a":["y",{"z":"q"}],"e":1}`
+	doc := `{"k":"v","k":"w","n":{"m":"x"},"a":["y",{"z":"q"}],"e":1,"f":"g"}`
 	want := []visit{
 		{doc, ""},
 		{"k", ""}, {"v", "k"},
 		{"k", ""}, {"w", "k"},
 		{"n", ""}, {"m", ""}, {"x", "m"},
 		{"a", ""}, {"y", ""}, {"z", ""}, {"q", "z"},
-		{"e", ""},
+		{"e", ""}, {"f", ""}, {"g", "f"},
 	}
 	if got := collect(WalkJSON, doc); !reflect.DeepEqual(got, want) {
 		t.Fatalf("WalkJSON visits\n got %q\nwant %q", got, want)
@@ -102,6 +102,8 @@ func TestWalkJSONMatchesLegacyOrder(t *testing.T) {
 	for _, doc := range []string{
 		`{"k":"v","k":"w","n":{"m":"x"},"a":["y",{"z":"q"}],"e":1}`,
 		`[["a",["b"]],{"c":"d"},"e",null,true,12.50]`,
+		`{"n":1,"s":"x"}`,
+		`{"t":true,"u":null,"s":"x"}`,
 		`{"` + uEscape("key") + `":"` + uEscape("val") + `","k2":{"k3":["v3",{"k4":"v4"}],"k3":"dup"}}`,
 		`{"cmd":"unterminated"`,
 		`"just a string"`,
