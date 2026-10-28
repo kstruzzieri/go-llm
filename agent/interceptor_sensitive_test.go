@@ -462,25 +462,60 @@ func TestBlockedErrorSensitiveMark(t *testing.T) {
 			return []Finding{{Rule: "canary_leak", Verdict: VerdictAbort, Risk: 100}}
 		}}
 	}
+	// onMessage reports v on the first message the predicate accepts, as a
+	// non-sensitive interceptor at the input hook.
+	onMessage := func(v Verdict, accept func(InspectedMessage) bool) *stubInterceptor {
+		return &stubInterceptor{name: "canary", input: func(in InputInspection) []Finding {
+			for _, m := range in.Messages {
+				if accept(m) {
+					return []Finding{{Rule: "canary_leak", Verdict: v, Risk: 100, Target: TargetMessage, StateIndex: m.StateIndex}}
+				}
+			}
+			return nil
+		}}
+	}
+	isGoal := func(m InspectedMessage) bool { return m.Role == "user" }
+	isToolResult := func(m InspectedMessage) bool { return m.Role == "tool" }
 	cases := []struct {
 		name  string
 		chain []Interceptor
-		hook  Hook
-		want  bool
+		// goal replaces the run's goal; result, when set, is the content the
+		// tool returns instead of echoing its arguments.
+		goal, result string
+		hook         Hook
+		modelCalls   int // 0: the block precedes the first model call (the initial input hook)
+		want         bool
 	}{
-		{"custom-named guard blocks the output", []Interceptor{exactFake{name: "vault", fixture: fx.value, atOutput: true}}, HookOutput, true},
-		{"custom-named guard blocks beside a tool-call abort", []Interceptor{exactFake{name: "vault", fixture: fx.value, atToolCall: true}, abortCall()}, HookToolCall, true},
-		{"non-sensitive block", []Interceptor{echoFake{verdict: VerdictBlock}}, HookOutput, false},
-		{"guard installed but clean, another blocks", []Interceptor{exactFake{name: "vault", fixture: "absent-" + fx.value, atOutput: true}, echoFake{verdict: VerdictBlock}}, HookOutput, false},
-		{"guard tags, another blocks", []Interceptor{exactFake{name: "vault", fixture: fx.value, atOutput: true, tag: true}, echoFake{verdict: VerdictBlock}}, HookOutput, false},
-		{"tool-call abort alone", []Interceptor{abortCall()}, HookToolCall, false},
+		{name: "custom-named guard blocks the output", chain: []Interceptor{exactFake{name: "vault", fixture: fx.value, atOutput: true}}, hook: HookOutput, modelCalls: 1, want: true},
+		{name: "custom-named guard blocks beside a tool-call abort", chain: []Interceptor{exactFake{name: "vault", fixture: fx.value, atToolCall: true}, abortCall()}, hook: HookToolCall, modelCalls: 1, want: true},
+		{name: "non-sensitive block", chain: []Interceptor{echoFake{verdict: VerdictBlock}}, hook: HookOutput, modelCalls: 1},
+		{name: "guard installed but clean, another blocks", chain: []Interceptor{exactFake{name: "vault", fixture: "absent-" + fx.value, atOutput: true}, echoFake{verdict: VerdictBlock}}, hook: HookOutput, modelCalls: 1},
+		{name: "guard tags, another blocks", chain: []Interceptor{exactFake{name: "vault", fixture: fx.value, atOutput: true, tag: true}, echoFake{verdict: VerdictBlock}}, hook: HookOutput, modelCalls: 1},
+		{name: "tool-call abort alone", chain: []Interceptor{abortCall()}, hook: HookToolCall, modelCalls: 1},
+		// The initial input hook: the goal carries the fixture.
+		{name: "custom-named guard blocks the goal", chain: []Interceptor{exactFake{name: "vault", fixture: fx.value, atInput: true}}, goal: "use " + fx.value, hook: HookInput, want: true},
+		{name: "non-sensitive block of the goal", chain: []Interceptor{onMessage(VerdictBlock, isGoal)}, goal: "use " + fx.value, hook: HookInput},
+		// The observation hook: the tool result carries the fixture, and a
+		// second interceptor's abort makes the block terminal.
+		{name: "custom-named guard blocks a tool result beside an abort", chain: []Interceptor{exactFake{name: "vault", fixture: fx.value, atInput: true}, onMessage(VerdictAbort, isToolResult)}, result: "file body " + fx.value, hook: HookInput, modelCalls: 1, want: true},
+		{name: "tool-result abort alone", chain: []Interceptor{onMessage(VerdictAbort, isToolResult)}, result: "file body " + fx.value, hook: HookInput, modelCalls: 1},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			goal, tool := "q", Tool(echoTool{name: "echo"})
+			if tc.goal != "" {
+				goal = tc.goal
+			}
+			if tc.result != "" {
+				tool = provenanceTool{name: "echo", content: tc.result}
+			}
 			mc := &scriptedCaller{responses: []ModelResult{oneCall("1", "echo", fx.args(t)), finalAnswer("never")}}
 			o := newTestOrchestrator(mc, WithInterceptors(tc.chain...))
-			_, err := o.Run(context.Background(), Request{Goal: "q", Tools: []Tool{echoTool{name: "echo"}}}, nil)
+			_, err := o.Run(context.Background(), Request{Goal: goal, Tools: []Tool{tool}}, nil)
 			blocked := requireBlocked(t, err, tc.hook)
+			if mc.calls != tc.modelCalls {
+				t.Fatalf("model calls = %d, want %d: the block came from another hook site", mc.calls, tc.modelCalls)
+			}
 			if got := blocked.Sensitive(); got != tc.want {
 				t.Fatalf("Sensitive() = %v, want %v; findings %+v", got, tc.want, blocked.Findings)
 			}
