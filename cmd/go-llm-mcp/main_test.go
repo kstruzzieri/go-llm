@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"crypto/tls"
 	"encoding/base64"
 	"errors"
 	"flag"
@@ -19,8 +18,6 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"golang.org/x/net/http2"
 
 	"github.com/kstruzzieri/go-llm/provider"
 )
@@ -375,17 +372,41 @@ func TestBearerTokenEnvRejectsWhitespaceWithoutEcho(t *testing.T) {
 	}
 }
 
-// h2cPriorKnowledgeClient returns a client that speaks HTTP/2 over plain TCP.
+// TestStdioIgnoresBearerTokenEnv pins main's transport wiring: with
+// -transport stdio, a set-but-empty or malformed GO_LLM_MCP_TOKEN must not
+// abort startup. The exit code is not asserted (the server ends when stdin
+// reaches EOF); what matters is that the process got through option building
+// and NewServer, which the provider health probe shows, and never complained
+// about the variable.
+func TestStdioIgnoresBearerTokenEnv(t *testing.T) {
+	for _, token := range []string{"", "a b"} {
+		t.Run(fmt.Sprintf("%q", token), func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), bearerHelperTimeout)
+			defer cancel()
+
+			mock, hits := countingProvider(t)
+			// cmd.Stdin is nil, so the child reads /dev/null and sees EOF.
+			cmd := bearerHelperCommand(ctx, t, t.TempDir(), mock.URL, &token, "-transport", "stdio", "-no-rag")
+			out, _ := cmd.CombinedOutput()
+			if hits.Load() == 0 {
+				t.Errorf("provider saw no requests: startup stopped before NewServer finished; output: %s", out)
+			}
+			if strings.Contains(string(out), tokenEnvName) {
+				t.Errorf("stdio output mentions %s, want the variable ignored: %s", tokenEnvName, out)
+			}
+		})
+	}
+}
+
+// h2cPriorKnowledgeClient returns a client that speaks HTTP/2 over plain TCP
+// (prior knowledge). Only unencrypted HTTP/2 is enabled on its transport, so a
+// request cannot silently fall back to HTTP/1.1.
 func h2cPriorKnowledgeClient() *http.Client {
+	var protocols http.Protocols
+	protocols.SetUnencryptedHTTP2(true)
 	return &http.Client{
-		Timeout: 2 * time.Second,
-		Transport: &http2.Transport{
-			AllowHTTP: true,
-			DialTLSContext: func(ctx context.Context, network, addr string, _ *tls.Config) (net.Conn, error) {
-				var d net.Dialer
-				return d.DialContext(ctx, network, addr)
-			},
-		},
+		Timeout:   2 * time.Second,
+		Transport: &http.Transport{Protocols: &protocols},
 	}
 }
 
