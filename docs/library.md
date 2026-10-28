@@ -442,6 +442,12 @@ in `models.json`.
 The `vision` slot is model selection only; image message payload support is
 tracked separately.
 
+The auxiliary use-case keys are exported as untyped string constants
+(`config.UseCaseSummarize`, `config.UseCaseRerank`, and the rest), enumerated by
+`config.SideTaskUseCases()`, and resolved to a model role by
+`cfg.RoleForUseCase(useCase)` — the same fallback semantics, exposed for callers
+that pick a side-task model without walking the full chain.
+
 ### Blocking configured credentials in tool calls
 
 `cfg.SecretMatcher()` reports whether a string contains a credential the config
@@ -468,11 +474,6 @@ loses the resolved `${NAME}` components. A dispatched child blocked for
 sensitive content never falls back to its last message as its summary; that
 rule is part of `NewDispatch` and needs no setting.
 
-The auxiliary use-case keys are exported as untyped string constants
-(`config.UseCaseSummarize`, `config.UseCaseRerank`, and the rest), enumerated by
-`config.SideTaskUseCases()`, and resolved to a model role by
-`cfg.RoleForUseCase(useCase)` — the same fallback semantics, exposed for callers
-that pick a side-task model without walking the full chain.
 ## Parquet Export
 
 Export vector store contents to Parquet format for ML pipeline interop.
