@@ -183,6 +183,8 @@ func TestUnescapeJSONLenient(t *testing.T) {
 		{in: `\u+041`, want: `\u+041`},
 		{in: `\u004G`, want: `\u004G`},
 		{in: `\x\u0041`, want: `\xA`},
+		{in: `\u00A`, want: `\u00A`},
+		{in: `\u00\u0041`, want: `\u00A`},
 		{in: `end\`, want: `end\`},
 	} {
 		if got := unescapeJSONLenient(tt.in); got != tt.want {
@@ -233,6 +235,11 @@ func TestMatchToolArguments(t *testing.T) {
 		{name: "malformed double-escaped", doc: `{"cmd":"` + double, want: false},
 		{name: "wrapped malformed double-escaped", doc: wrap(`{"cmd":"` + double), want: false},
 		{name: "malformed escape left as is", doc: `{"cmd":"FIXTURE\u00zdunknown-01`, want: false},
+		{name: "truncated escape before escaped", doc: `{"cmd":"\u00` + esc, want: true, lenient: true},
+		// Only JSON whitespace is trimmed, so padding JSON does not allow
+		// leaves the text invalid and it still gets the lenient pass.
+		{name: "object padded with vertical tab", doc: `{"cmd":"` + esc + `"}` + "\v", want: true, lenient: true},
+		{name: "literal padded with no-break space", doc: `"` + esc + `"` + "\u00a0", want: true, lenient: true},
 		{name: "number", doc: `42`, want: false},
 		{name: "empty", doc: ``, want: false},
 	} {

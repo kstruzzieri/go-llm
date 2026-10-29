@@ -93,7 +93,9 @@ func MatchToolArguments(raw []byte, match func(string) bool) bool {
 	if MatchJSON(raw, match) {
 		return true
 	}
-	trimmed := bytes.TrimSpace(raw)
+	// JSON whitespace only: bytes.TrimSpace would also strip \v or U+00A0,
+	// turning invalid padded text into a valid document that is never decoded.
+	trimmed := bytes.Trim(raw, " \t\r\n")
 	var text string
 	switch {
 	case len(trimmed) > 0 && trimmed[0] == '"' && json.Unmarshal(trimmed, &text) == nil:
