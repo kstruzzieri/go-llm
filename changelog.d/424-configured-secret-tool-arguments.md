@@ -28,10 +28,10 @@ line now ends `(always on; -interceptors adds detectors, secrets, configured sec
 
 This protection is available, not on by default: without `-interceptors`
 nothing checks tool arguments for configured credentials. It does not scan
-input, answers, thinking or tool results, and it does not inspect request
-bodies Golem sends to providers; that outbound check is a separate, later
-#424 change. The set is fixed when Golem starts, so a credential changed in
-the environment takes effect at the next start.
+input, answers, thinking or tool results. Request bodies Golem sends to
+providers are covered by the separate "Exact configured-credential checks on
+outbound model requests" entry. The set is fixed when Golem starts, so a
+credential changed in the environment takes effect at the next start.
 
 #### Library
 
