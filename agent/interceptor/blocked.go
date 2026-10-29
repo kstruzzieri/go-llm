@@ -1,6 +1,11 @@
 package interceptor
 
-import "github.com/kstruzzieri/go-llm/agent"
+import (
+	"errors"
+
+	"github.com/kstruzzieri/go-llm/agent"
+	"github.com/kstruzzieri/go-llm/provider"
+)
 
 // Blocked reports whether err carries a BlockedError finding from the named
 // interceptor at or above minimum. It examines every branch of the error tree
@@ -22,12 +27,15 @@ func Blocked(err error, name string, minimum agent.Verdict) bool {
 // marked Sensitive because an agent.SensitiveTextInterceptor blocked, under
 // any name, or one from Secrets or ConfiguredSecrets by name. Secrets does
 // not implement that capability, and a BlockedError built outside the
-// pipeline carries no mark. A host uses it to withhold partial output and
+// pipeline carries no mark. An outbound content denial
+// (provider.ErrContentDenied, #424) counts too: the refused request carried a
+// configured credential. A host uses it to withhold partial output and
 // diagnostics after such a block.
 func SensitiveBlocked(err error) bool {
 	return anyBlocked(err, (*agent.BlockedError).Sensitive) ||
 		Blocked(err, Secrets{}.Name(), agent.VerdictBlock) ||
-		Blocked(err, ConfiguredSecretsName, agent.VerdictBlock)
+		Blocked(err, ConfiguredSecretsName, agent.VerdictBlock) ||
+		errors.Is(err, provider.ErrContentDenied)
 }
 
 // anyBlocked reports whether match accepts a non-nil BlockedError anywhere in

@@ -879,10 +879,9 @@ message. Findings name only `configured_secrets` and the rule
 `configured_secret`; the startup notice names the guard, never a value, a count
 or where one came from. Without `-interceptors` nothing checks tool arguments
 for configured credentials, and the guard does not scan input, answers,
-thinking or tool results. It does not check what Golem sends to a provider
-either; outbound request content is the second, separate #424 change. The set is
-fixed when Golem starts: `/model set` keeps it, and a credential changed in the
-environment takes effect at the next start.
+thinking or tool results; the outbound check below covers what is sent to a
+remote provider. The set is fixed when Golem starts: `/model set` keeps it, and
+a credential changed in the environment takes effect at the next start.
 
 Matching decodes one level of JSON: the raw text plus decoded keys and string
 values. Tool arguments Go's JSON decoder rejects (malformed, or nested more
@@ -891,6 +890,55 @@ LM Studio) wraps as a JSON string literal, get one more check: their text with
 each well-formed JSON escape (`\u` escapes, `\/` and the rest) decoded, so a
 credential written as escapes there still matches. Text that decodes to more
 escapes, such as `\\u0073` inside valid JSON, is not decoded again.
+
+With `-interceptors`, the same set also checks what Golem sends to a
+non-loopback OpenAI-compatible provider (#424). Before a request is sent,
+Golem matches its JSON body the same exact way: the raw text, every decoded key
+and string value, and each tool call's argument document inside its JSON string
+wrapper, raw and decoded. A body that carries a configured credential is not
+sent: no connection, dial or proxy request is made for it, Golem neither
+retries it nor falls back to another provider, and the provider's circuit
+breaker does not count it. The credential can come from any part of the
+request: the goal, a file a tool read, an earlier answer. The run ends with the
+same fixed `run blocked: sensitive content detected` message, the goal is kept
+out of CLI history, and neither the trace nor a session row is written. A
+dispatch child refused this way reports
+`Partial result unavailable: blocked: sensitive content`. In the run's
+`Result.Messages`, each copied field that carries the credential is replaced by
+`[...]`; records published before the refusal, such as an earlier turn's step,
+keep their content.
+
+| Operation | Endpoint | Checked |
+|---|---|---|
+| `Chat`, `ChatStream` | `/v1/chat/completions` | The whole body: every message's role, content, name and ID, earlier tool calls and their arguments, tool names, descriptions and parameter schemas, the model name, stop strings and other options. |
+| `Generate`, `GenerateStream` | `/v1/completions` | The whole body: prompt, FIM suffix, model name, stop strings and options. |
+| `Embed`, `EmbedAdmitted` | `/v1/embeddings` | The whole body, each input on its own, and the model name. A refused input never joins a shared in-flight request or takes a slot. |
+| Health checks, model listing, slot discovery, pulls | | Not checked: these send no prompt content. |
+
+Providers at `localhost` or a literal loopback IP address (`127.0.0.1`, `::1`)
+are exempt, so a local llama.cpp server sees its requests as before. A LAN or
+other private address, a link-local address, and a DNS name that merely
+resolves to loopback all count as remote. Loopback does not prove the data
+stays on the machine: a tunnel or proxy listening there can forward it. The
+tool-call guard above has no loopback exemption.
+
+Headers are never inspected. A provider's own key goes out in its
+`Authorization` header as usual, so a clean request to a keyed provider
+succeeds; the same key in the body is refused, and so is one provider's key in
+a request to another. The request URL, other headers, cookies, proxy
+credentials and responses are outside this check. Remote requests keep the
+destination guard's origin binding and its refusal of every redirect.
+
+Only the provider clients an `-interceptors` session builds are checked: the
+agent and dispatch children, planning, compaction and summaries, probes that
+use those clients, and retrieval embeddings through the session's providers.
+These entry points are not covered: the MCP server (`go-llm-mcp`), the `golem`
+library's automatic provider bootstrap, `golem index` and `golem source`,
+`llm-bench`, native Ollama clients (`api_format: ollama`), including an Ollama
+provider at a remote address, which `-interceptors` does not guard, and
+providers a host builds itself. A library host installs the check on its own
+clients; see
+[Blocking configured credentials in outbound requests](library.md#blocking-configured-credentials-in-outbound-requests).
 
 The shared ASCII-oriented scanner recognizes these shapes. It detects syntax
 and heuristics, not whether a credential is active or a card account exists.

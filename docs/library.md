@@ -477,6 +477,50 @@ block by any `agent.SensitiveTextInterceptor`, whatever its name, or by the
 is part of `NewDispatch` and needs no setting. `interceptor.SensitiveBlocked`
 applies the same test to the errors a host's own runs return.
 
+### Blocking configured credentials in outbound requests
+
+To refuse an OpenAI-compatible request body that carries a configured
+credential before it is sent (#424), install
+`openaicompat.WithContentGuard(cfg.SecretMatcher())` on each client whose
+destination is not loopback. Pass the same matcher value to
+`interceptor.NewConfiguredSecrets`, so the clients and the tool-call guard
+check one snapshot. The guard alone does not bind requests to the admitted
+origin or refuse redirects, so a redirect could still carry a checked body
+elsewhere. Build the client's `http.Client` with `provider.GuardHTTPClient`,
+which does both:
+
+```go
+match := cfg.SecretMatcher() // the value given to NewConfiguredSecrets
+dest, err := provider.NewDestination(name, pc.BaseURL)
+if err != nil {
+    return err
+}
+hc, err := provider.GuardHTTPClient(gate, dest, &http.Client{Timeout: pc.Timeout.Duration})
+if err != nil {
+    return err
+}
+opts := []openaicompat.ClientOption{openaicompat.WithHTTPClient(hc), openaicompat.WithAPIKey(pc.APIKey)}
+if !dest.IsLocal() {
+    opts = append(opts, openaicompat.WithContentGuard(match))
+}
+client := openaicompat.NewClient(pc.BaseURL, opts...)
+```
+
+`gate` is the host's `provider.DestinationGate` with this destination admitted.
+A refused request returns an error wrapping `provider.ErrContentDenied`, which
+names neither the credential nor the URL. The router neither falls back to
+another provider nor counts it against a circuit breaker, and
+`interceptor.SensitiveBlocked` reports it, so a dispatched child refused this
+way reports the fixed marker instead of its last message. When a run's model
+call is refused this way, the orchestrator replaces each copied field of
+`Result.Messages` that an `agent.SensitiveTextInterceptor` in its chain matches
+with `[...]`; install the tool-call guard so that projection has a matcher.
+Only `api_format: openai-compat` clients have this guard; native Ollama
+clients do not. Headers are never inspected, so the client's own key still
+authenticates. Golem wires this internally under `-interceptors`; the `golem`
+package's automatic provider bootstrap does not, so a host that wants the check
+builds its own clients this way.
+
 ## Parquet Export
 
 Export vector store contents to Parquet format for ML pipeline interop.

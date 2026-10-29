@@ -335,6 +335,11 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 				})
 			}
 			res.Messages = resultMessages(state, historyLen)
+			if errors.Is(err, provider.ErrContentDenied) && ic.guardsText() {
+				// #424 D4: the refused request was built from these messages,
+				// so their copy keeps no field that carries protected text.
+				suppressSensitive(res.Messages, ic.sensitiveText)
+			}
 			return res, err
 		}
 		resp := modelResult.Response
@@ -513,6 +518,40 @@ func resultMessages(st State, historyLen int) []provider.ChatMessage {
 		out = append(out, cloneChatMessage(m.ChatMessage))
 	}
 	return out
+}
+
+// suppressedField replaces a copied field that carries protected text
+// (#424); a tool call's arguments become this text as a JSON string.
+const suppressedField = "[...]"
+
+// suppressSensitive replaces wholesale every field of msgs that match
+// accepts: content, tool name and call ID, and each tool call's ID, type,
+// name and arguments. Arguments are checked as the outbound guard checks
+// them (secretscan.MatchToolArguments): raw, decoded, and leniently unescaped
+// when malformed. msgs must be an owned copy such as resultMessages returns;
+// nothing is rewritten in place, so state and the caller's slices keep their
+// values.
+func suppressSensitive(msgs []provider.ChatMessage, match func(string) bool) {
+	suppress := func(s *string) {
+		if match(*s) {
+			*s = suppressedField
+		}
+	}
+	for i := range msgs {
+		m := &msgs[i]
+		suppress(&m.Content)
+		suppress(&m.ToolName)
+		suppress(&m.ToolCallID)
+		for j := range m.ToolCalls {
+			c := &m.ToolCalls[j]
+			suppress(&c.ID)
+			suppress(&c.Type)
+			suppress(&c.Function.Name)
+			if secretscan.MatchToolArguments(c.Function.Arguments, match) {
+				c.Function.Arguments = json.RawMessage(`"` + suppressedField + `"`)
+			}
+		}
+	}
 }
 
 func toolSchemaString(specs []provider.Tool) string {

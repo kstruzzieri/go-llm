@@ -169,7 +169,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.StringVar(&f.delegateRole, "delegate-role", "coding", "model role the delegate_code tool routes to")
 	fs.BoolVar(&f.dispatch, "dispatch", false, "enable the dispatch tool (bounded read-only exploration tasks use backend-governed concurrency; ungoverned routing stays serial)")
 	fs.StringVar(&f.dispatchRole, "dispatch-role", "", "model role dispatch child agents route to (default: the primary agent chain, so children never force a model swap)")
-	fs.BoolVar(&f.interceptors, "interceptors", false, "add the content interceptor pipeline (#436/#437/#438) on top of the always-on guards (#439/#555, always on since #575: argument invariants for named tools, exec-class egress labels, scoped-child refusal reporting): origin-sensitive injection detectors, all-origin supported secret/payment-card blocking across completed turns, exact blocking of configured credentials in tool calls, and a canary; required by /consult; streaming output is not intercepted; risk appears at interactive tool-call and plan-lock prompts and successful REPL/-p stderr footers with or without this flag, but not verifier approval prompts; default off, see docs/security/interceptor-defaults-decision.md")
+	fs.BoolVar(&f.interceptors, "interceptors", false, "add the content interceptor pipeline (#436/#437/#438) on top of the always-on guards (#439/#555, always on since #575: argument invariants for named tools, exec-class egress labels, scoped-child refusal reporting): origin-sensitive injection detectors, all-origin supported secret/payment-card blocking across completed turns, exact blocking of configured credentials in tool calls and in request bodies sent to non-loopback openai-compat providers, and a canary; required by /consult; streaming output is not intercepted; risk appears at interactive tool-call and plan-lock prompts and successful REPL/-p stderr footers with or without this flag, but not verifier approval prompts; default off, see docs/security/interceptor-defaults-decision.md")
 	fs.Var(&f.mcpStdio, "mcp-stdio", "attach an MCP server over stdio: \"[alias=]command args...\" (repeatable; runs in -root with a minimal environment; forward variables with -mcp-env)")
 	fs.Var(&f.mcpHTTP, "mcp-http", "attach an MCP server over streamable HTTP: \"[alias=]https://endpoint\" (repeatable)")
 	fs.Var(&f.mcpTools, "mcp-tools", "expose only these original tools of an attached MCP server: \"alias=name[,name...]\"; \"alias=\" exposes none (repeatable; the complete catalog is still verified and pinned)")
@@ -1201,6 +1201,10 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		CapabilityProbeStore:            capStore, // nil when -no-cap-probe or open fully failed
 		DestinationGate:                 gate,
 		ActiveProviders:                 netPlan.ActiveProviders,
+		// #424: -interceptors also refuses a non-loopback openai-compat
+		// request body carrying a configured credential, using the same
+		// snapshot the configured_secrets guard is built from.
+		ContentGuard: f.interceptors,
 	})
 	if err != nil {
 		// #352: a provider failure during pre-run bootstrap is a provider

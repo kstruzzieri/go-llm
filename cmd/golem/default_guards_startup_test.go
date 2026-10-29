@@ -67,6 +67,7 @@ func TestParseFlags_InterceptorsHelpNamesAlwaysOnGuards(t *testing.T) {
 		"exec-class egress labels",
 		"scoped-child refusal reporting",
 		"exact blocking of configured credentials in tool calls",
+		"request bodies sent to non-loopback openai-compat providers",
 		"required by /consult",
 		"with or without this flag",
 	} {
