@@ -395,7 +395,8 @@ func TestH2CStreamsRequireBearer(t *testing.T) {
 
 // TestH2CUpgradeStreamsRequireBearer checks the upgraded request (stream 1)
 // and a later stream on the same upgraded connection (stream 3) separately:
-// a bearer on the upgrade does not carry over.
+// a bearer on the upgrade does not carry over. An upgrade without the bearer
+// never switches protocols; TestH2CUpgradeWithoutBearerIsRefused covers it.
 func TestH2CUpgradeStreamsRequireBearer(t *testing.T) {
 	bearer := http.Header{"Authorization": {"Bearer " + listenerToken}}
 	tests := []struct {
@@ -403,9 +404,7 @@ func TestH2CUpgradeStreamsRequireBearer(t *testing.T) {
 		upgrade, next http.Header
 		want1, want3  int
 	}{
-		{"no bearer", nil, nil, http.StatusUnauthorized, http.StatusUnauthorized},
 		{"bearer on upgrade only", bearer, nil, http.StatusOK, http.StatusUnauthorized},
-		{"bearer on stream 3 only", nil, bearer, http.StatusUnauthorized, http.StatusOK},
 		{"bearer on both", bearer, bearer, http.StatusOK, http.StatusOK},
 	}
 	for _, tt := range tests {
@@ -417,6 +416,91 @@ func TestH2CUpgradeStreamsRequireBearer(t *testing.T) {
 			}
 			if s3 != tt.want3 {
 				t.Errorf("stream 3 status = %d, want %d", s3, tt.want3)
+			}
+		})
+	}
+}
+
+// TestH2CUpgradeWithoutBearerIsRefused pins the check in front of h2c on a
+// real listener: an HTTP/1.1 upgrade without the right bearer gets the
+// gate's 401 instead of 101, and nothing reaches MCP.
+func TestH2CUpgradeWithoutBearerIsRefused(t *testing.T) {
+	for _, auth := range []string{"", "Authorization: Bearer wrong-token\r\n"} {
+		srv := newTestMCPServer(t, listenerToken)
+		calls := countMCPRequests(srv)
+		ts := startMCPListener(t, srv, false)
+		request := "POST /mcp HTTP/1.1\r\nHost: " + ts.Listener.Addr().String() + "\r\n" +
+			"Content-Type: application/json\r\nAccept: application/json, text/event-stream\r\n" +
+			auth +
+			"Connection: Upgrade, HTTP2-Settings\r\nUpgrade: h2c\r\nHTTP2-Settings: " + h2cUpgradeSettings + "\r\n" +
+			"Content-Length: " + strconv.Itoa(len(initializeBody)) + "\r\n\r\n" + initializeBody
+		if got := rawHTTP1Status(t, ts, request); got != http.StatusUnauthorized {
+			t.Errorf("auth %q: upgrade status = %d, want %d", auth, got, http.StatusUnauthorized)
+		}
+		if n := calls.Load(); n != 0 {
+			t.Errorf("auth %q: %d MCP requests dispatched, want 0", auth, n)
+		}
+	}
+}
+
+// TestH2CUpgradeWithoutBearerIsNotBuffered pins the order on the h2c handler
+// newHTTPServer builds: an upgrade without the right bearer gets the gate's
+// own 401 before h2c reads any of its body, and a declared oversize body
+// still gets the limit's 413 first. Under a ResponseRecorder h2c cannot
+// hijack, so a missing check shows as a 500 after h2c reads to the limit.
+func TestH2CUpgradeWithoutBearerIsNotBuffered(t *testing.T) {
+	tests := []struct {
+		name, method, target, proto, auth string
+		declared                          bool // Content-Length above the limit
+		want                              int
+	}{
+		{"no bearer", http.MethodPost, "/mcp", "", "", false, http.StatusUnauthorized},
+		{"wrong bearer", http.MethodPost, "/mcp", "", "Bearer wrong-token", false, http.StatusUnauthorized},
+		{"GET without bearer", http.MethodGet, "/mcp", "", "", false, http.StatusUnauthorized},
+		// Only the header-less preface skips the check, as in h2c itself.
+		{"PRI preface with headers", "PRI", "*", "HTTP/2.0", "", false, http.StatusUnauthorized},
+		{"declared oversize body without bearer", http.MethodPost, "/mcp", "", "", true, http.StatusRequestEntityTooLarge},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := newTestMCPServer(t, listenerToken)
+			body := &countingReader{reader: paddedInitialize(4 * maxMCPHTTPBodyBytes)}
+			req := httptest.NewRequest(tt.method, "http://localhost/mcp", body)
+			if tt.target == "*" {
+				req.URL.Path = "*"
+			}
+			if tt.proto != "" {
+				req.Proto, req.ProtoMajor, req.ProtoMinor = tt.proto, 2, 0
+			}
+			if tt.declared {
+				req.ContentLength = 4 * maxMCPHTTPBodyBytes
+			}
+			mcpHeaders(req.Header)
+			if tt.auth != "" {
+				req.Header.Set("Authorization", tt.auth)
+			}
+			req.Header.Set("Connection", "Upgrade, HTTP2-Settings")
+			req.Header.Set("Upgrade", "h2c")
+			req.Header.Set("HTTP2-Settings", h2cUpgradeSettings)
+			rec := httptest.NewRecorder()
+
+			srv.newHTTPServer("", false).Handler.ServeHTTP(rec, req)
+
+			if rec.Code != tt.want {
+				t.Errorf("status = %d, want %d", rec.Code, tt.want)
+			}
+			wantAuth, wantBody := `Bearer realm="go-llm-mcp"`, "unauthorized\n"
+			if tt.want == http.StatusRequestEntityTooLarge {
+				wantAuth, wantBody = "", "request body too large\n"
+			}
+			if got := rec.Header().Get("WWW-Authenticate"); got != wantAuth {
+				t.Errorf("WWW-Authenticate = %q, want %q", got, wantAuth)
+			}
+			if got := rec.Body.String(); got != wantBody {
+				t.Errorf("body = %q, want %q", got, wantBody)
+			}
+			if body.read != 0 {
+				t.Errorf("read %d body bytes before refusing, want 0", body.read)
 			}
 		})
 	}

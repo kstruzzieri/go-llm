@@ -92,24 +92,54 @@ func digestEqual(a, b *[sha256.Size]byte) bool {
 	return subtle.ConstantTimeCompare(a[:], b[:]) == 1
 }
 
+// hasHTTPBearer reports whether h carries a bearer token that hashes to want.
+func hasHTTPBearer(h http.Header, want *[sha256.Size]byte) bool {
+	token, ok := presentedHTTPBearer(h)
+	if !ok {
+		return false
+	}
+	got := sha256.Sum256([]byte(token))
+	return digestEqual(&got, want)
+}
+
+// writeHTTPUnauthorized writes the one 401 every rejected request gets.
+func writeHTTPUnauthorized(w http.ResponseWriter) {
+	w.Header().Set("WWW-Authenticate", `Bearer realm="go-llm-mcp"`)
+	http.Error(w, "unauthorized", http.StatusUnauthorized)
+}
+
 // requireHTTPBearer serves next only for requests whose bearer token hashes to
 // want. Every other request gets the same 401 whatever the failure. next sees
 // a clone of the request without its Authorization header, so the SDK never
 // copies the credential into tool handlers.
 func requireHTTPBearer(next http.Handler, want *[sha256.Size]byte) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		token, ok := presentedHTTPBearer(r.Header)
-		if ok {
-			got := sha256.Sum256([]byte(token))
-			ok = digestEqual(&got, want)
-		}
-		if !ok {
-			w.Header().Set("WWW-Authenticate", `Bearer realm="go-llm-mcp"`)
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
+		if !hasHTTPBearer(r.Header, want) {
+			writeHTTPUnauthorized(w)
 			return
 		}
 		authed := r.Clone(r.Context())
 		authed.Header.Del("Authorization")
 		next.ServeHTTP(w, authed)
+	})
+}
+
+// requireHTTPBearerBeforeH2C wraps h2c.NewHandler so that a request without
+// the bearer token gets the 401 before h2c sees it. h2c reads an HTTP/1.1
+// upgrade's whole body and replies 101 before its child handler runs, so
+// without this check an unauthenticated upgrade could make the server buffer
+// up to the body limit. It only checks: next gets the request unchanged, and
+// requireHTTPBearer checks the upgraded request again and strips the header.
+// The prior-knowledge preface (the condition h2c itself tests) carries no
+// headers and passes through; every stream on that connection reaches
+// requireHTTPBearer.
+func requireHTTPBearerBeforeH2C(next http.Handler, want *[sha256.Size]byte) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		priorKnowledge := r.Method == "PRI" && len(r.Header) == 0 && r.URL.Path == "*" && r.Proto == "HTTP/2.0"
+		if !priorKnowledge && !hasHTTPBearer(r.Header, want) {
+			writeHTTPUnauthorized(w)
+			return
+		}
+		next.ServeHTTP(w, r)
 	})
 }

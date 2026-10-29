@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"net"
@@ -31,9 +32,9 @@ func (s *Server) ListenStdio(ctx context.Context) error {
 // Without WithHTTPBearerToken the HTTP transport is unauthenticated. With it,
 // every request that reaches the MCP handler, on either transport and
 // including "OPTIONS *", must present the bearer token. TLS encrypts traffic
-// but does not authenticate the caller. On h2c, the 101 Switching Protocols
-// reply to an HTTP/1.1 upgrade is sent before the handler runs; the upgraded
-// request and every later stream are then checked.
+// but does not authenticate the caller. On h2c, an HTTP/1.1 upgrade must
+// carry the token before h2c reads its body or replies 101; the upgraded
+// request and every later stream are then checked again.
 func (s *Server) ListenHTTP(ctx context.Context, addr string) error {
 	if s.tlsCert == "" && !isLoopback(addr) {
 		return fmt.Errorf("mcp: non-loopback address %q requires TLS (use WithTLS)", addr)
@@ -72,7 +73,7 @@ func (s *Server) newHTTPServer(addr string, useTLS bool) *http.Server {
 	handler := streamableHTTPHandler(s)
 	if !useTLS {
 		// h2c: HTTP/2 over cleartext (no TLS)
-		handler = limitMCPH2CBody(handler, &http2.Server{}, maxMCPHTTPBodyBytes)
+		handler = limitMCPH2CBody(handler, &http2.Server{}, maxMCPHTTPBodyBytes, s.httpBearerDigest)
 	}
 	return &http.Server{
 		Addr:                         addr,
@@ -97,10 +98,16 @@ func streamableHTTPHandler(s *Server) http.Handler {
 	return limitMCPHTTPBody(protected, maxMCPHTTPBodyBytes)
 }
 
-func limitMCPH2CBody(next http.Handler, server *http2.Server, maxBytes int64) http.Handler {
-	// h2c.NewHandler buffers an HTTP/1.1 upgrade body before invoking its child,
-	// so the limiter must wrap h2c rather than sit only inside it.
-	return limitMCPHTTPBody(h2c.NewHandler(next, server), maxBytes)
+// limitMCPH2CBody wraps next in h2c. h2c.NewHandler buffers an HTTP/1.1
+// upgrade body before invoking its child, so the limiter (and, with a token,
+// a bearer check) must wrap h2c rather than sit only inside it. bearer is nil
+// when no token is configured.
+func limitMCPH2CBody(next http.Handler, server *http2.Server, maxBytes int64, bearer *[sha256.Size]byte) http.Handler {
+	handler := h2c.NewHandler(next, server)
+	if bearer != nil {
+		handler = requireHTTPBearerBeforeH2C(handler, bearer)
+	}
+	return limitMCPHTTPBody(handler, maxBytes)
 }
 
 func limitMCPHTTPBody(next http.Handler, maxBytes int64) http.Handler {

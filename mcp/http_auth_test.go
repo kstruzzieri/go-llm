@@ -402,7 +402,8 @@ func TestRequireHTTPBearerStripsAuthorization(t *testing.T) {
 
 // TestHTTPBearerComparatorIsConstantTime pins the shape of the secret
 // comparison in the source: digestEqual is exactly one ConstantTimeCompare,
-// and requireHTTPBearer touches the stored digest only through digestEqual.
+// hasHTTPBearer touches the stored digest only through digestEqual, and both
+// gates touch it only through hasHTTPBearer.
 func TestHTTPBearerComparatorIsConstantTime(t *testing.T) {
 	file, err := parser.ParseFile(token.NewFileSet(), "http_auth.go", nil, 0)
 	if err != nil {
@@ -433,10 +434,13 @@ func TestHTTPBearerComparatorIsConstantTime(t *testing.T) {
 		}
 	})
 
-	t.Run("requireHTTPBearer", func(t *testing.T) {
-		fn := funcs["requireHTTPBearer"]
+	// wantOnlyIn fails unless fn's want parameter is used exactly once, as an
+	// argument to callee.
+	wantOnlyIn := func(t *testing.T, name, callee string) {
+		t.Helper()
+		fn := funcs[name]
 		if fn == nil {
-			t.Fatal("requireHTTPBearer not found in http_auth.go")
+			t.Fatalf("%s not found in http_auth.go", name)
 		}
 		allowed := map[*ast.Ident]bool{}
 		ast.Inspect(fn.Body, func(n ast.Node) bool {
@@ -444,7 +448,7 @@ func TestHTTPBearerComparatorIsConstantTime(t *testing.T) {
 			if !ok {
 				return true
 			}
-			if fun, ok := call.Fun.(*ast.Ident); ok && fun.Name == "digestEqual" {
+			if fun, ok := call.Fun.(*ast.Ident); ok && fun.Name == callee {
 				for _, arg := range call.Args {
 					if id, ok := arg.(*ast.Ident); ok && id.Name == "want" {
 						allowed[id] = true
@@ -454,14 +458,19 @@ func TestHTTPBearerComparatorIsConstantTime(t *testing.T) {
 			return true
 		})
 		if len(allowed) != 1 {
-			t.Errorf("want is passed to digestEqual %d times, want 1", len(allowed))
+			t.Errorf("%s passes want to %s %d times, want 1", name, callee, len(allowed))
 		}
 		ast.Inspect(fn.Body, func(n ast.Node) bool {
 			if id, ok := n.(*ast.Ident); ok && id.Name == "want" && !allowed[id] {
-				t.Errorf("identifier want used outside a digestEqual argument at %v", id.Pos())
+				t.Errorf("%s uses want outside a %s argument at %v", name, callee, id.Pos())
 			}
 			return true
 		})
+	}
+	t.Run("hasHTTPBearer", func(t *testing.T) { wantOnlyIn(t, "hasHTTPBearer", "digestEqual") })
+	t.Run("requireHTTPBearer", func(t *testing.T) { wantOnlyIn(t, "requireHTTPBearer", "hasHTTPBearer") })
+	t.Run("requireHTTPBearerBeforeH2C", func(t *testing.T) {
+		wantOnlyIn(t, "requireHTTPBearerBeforeH2C", "hasHTTPBearer")
 	})
 }
 

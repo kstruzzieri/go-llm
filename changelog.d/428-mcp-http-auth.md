@@ -34,10 +34,11 @@ updating clients.
 - `OPTIONS *` now returns 401 when a token is set. The listener sets
   `DisableGeneralOptionsHandler` so Go no longer answers it with an
   unauthenticated 200. Without a token it behaves as before.
-- On h2c, the `101 Switching Protocols` reply to an HTTP/1.1 upgrade is sent
-  before the handler runs and grants no MCP access; the upgraded request and
-  every later stream are checked. The upgrade request's body (up to the 100 MiB
-  limit) is buffered before authentication runs, and h2c binds loopback only.
+- On h2c, an HTTP/1.1 `Upgrade: h2c` request must itself carry the token. One
+  without it gets the 401 before the server reads its body or replies
+  `101 Switching Protocols`, so an unauthenticated caller cannot make the
+  server buffer an upgrade body. The upgraded request and every later stream
+  are checked again.
 - The gate strips `Authorization` before the MCP SDK and tools see the request,
   so tool handlers never receive the credential.
 - Golem's MCP client cannot send an `Authorization` header yet (#578), so a
