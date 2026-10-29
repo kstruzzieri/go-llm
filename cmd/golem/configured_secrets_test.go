@@ -563,6 +563,29 @@ func TestModelSwitchKeepsConfiguredSecrets(t *testing.T) {
 	})
 }
 
+// TestConfiguredSecretsBlocksEscapedKeyInMalformedArguments (#424): the model
+// writes the key as \u escapes in tool arguments Go's decoder rejects. The
+// OpenAI-compatible client wraps them in a JSON string literal, and the
+// guard's lenient pass still finds the key, so every surface blocks the turn
+// before the call is shown, approved or run.
+func TestConfiguredSecretsBlocksEscapedKeyInMalformedArguments(t *testing.T) {
+	key := configuredSecretFixture()
+	var esc strings.Builder
+	for i := 0; i < len(key); i++ {
+		_, _ = fmt.Fprintf(&esc, `\u%04x`, key[i])
+	}
+	malformed := `{"path":"` + esc.String() + `.txt"`
+	fx := newModelSwitchFixture(t, "")
+	withConfiguredKey(t, fx, key)
+	fx.primary.chatResponse = scriptedToolCalls(sseToolCall("c1", "read_file", malformed))
+	fx.withSession(t, []string{"-interceptors", "-dispatch"}, func(t *testing.T, sess *replSession) {
+		for _, o := range sessionSurfaces(t, sess, fx.primary) {
+			checkConfiguredRun(t, o, exposesResult, configuredBlockedText)
+		}
+		checkConfiguredRun(t, dispatchObservation(t, sess, fx.primary), exposesScore, configuredBlockedText)
+	})
+}
+
 // TestInterceptorsNoticeNamesConfiguredSecrets (#424): with a configured key,
 // the -interceptors startup notice names configured_secrets, first and by name
 // only: the exact line carries no member, count or source, and nothing on

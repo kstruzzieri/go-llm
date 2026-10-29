@@ -66,6 +66,17 @@ func unicodeEscape(s string) string {
 	return b.String()
 }
 
+// jsonString encodes s as a JSON string literal, the way
+// provider/openaicompat wraps tool arguments it cannot decode.
+func jsonString(t *testing.T, s string) string {
+	t.Helper()
+	b, err := json.Marshal(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
 func outputOf(calls ...provider.ToolCall) agent.OutputInspection {
 	return agent.OutputInspection{ToolCalls: calls}
 }
@@ -114,6 +125,10 @@ func TestConfiguredSecretsMatchesArguments(t *testing.T) {
 		{name: "shadowed duplicate first member", args: `{"k":"` + esc + `","k":"safe"}`},
 		{name: "shadowed duplicate last member", args: `{"k":"safe","k":"` + esc + `"}`},
 		{name: "malformed", args: `{"q":"` + fx, literal: true},
+		// provider/openaicompat wraps arguments Go's decoder rejects in a JSON
+		// string literal; the lenient pass decodes the escapes inside.
+		{name: "malformed escaped", args: `{"q":"` + esc},
+		{name: "wrapped malformed escaped", args: jsonString(t, `{"q":"`+esc)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -175,6 +190,10 @@ func TestConfiguredSecretsNoMatch(t *testing.T) {
 		{name: "split across id and name", calls: []provider.ToolCall{toolCall(fx[:half], fx[half:], `{"q":"safe"}`)}},
 		{name: "split across calls", calls: []provider.ToolCall{toolCall("call-1", "lookup", `{"q":"`+fx[:half]+`"}`), toolCall("call-2", "lookup", `{"q":"`+fx[half:]+`"}`)}},
 		{name: "unrelated", calls: []provider.ToolCall{toolCall("call-1", "lookup", `{"q":"nothing to see","n":42,"ok":true,"z":null}`)}},
+		// One decoded level: a value whose decoded text is itself escaped,
+		// and a second escape level in malformed arguments, do not match.
+		{name: "double-escaped value", calls: []provider.ToolCall{toolCall("call-1", "lookup", `{"q":"`+strings.ReplaceAll(unicodeEscape(fx), `\`, `\\`)+`"}`)}},
+		{name: "double-escaped malformed", calls: []provider.ToolCall{toolCall("call-1", "lookup", `{"q":"`+strings.ReplaceAll(unicodeEscape(fx), `\`, `\\`))}},
 		{name: "no calls"},
 	}
 	for _, tc := range cases {

@@ -25,9 +25,13 @@ var errNilConfiguredMatcher = errors.New("interceptor: configured secrets matche
 // The matcher is the host's immutable lookup (config.Config.SecretMatcher).
 // InspectOutput applies it to each call's ID, function name, and type, and to
 // its arguments as raw text plus every decoded JSON object key and string
-// value, before the response is recorded or published. InspectToolCall repeats
-// the argument check before planning, approval, or invocation. Fields are
-// never joined, so a credential split across two strings does not match.
+// value, before the response is recorded or published. Arguments that are not
+// a JSON object or array (invalid JSON, or the string literal
+// provider/openaicompat wraps such arguments in) are checked once more with
+// their JSON escapes decoded leniently (secretscan.MatchToolArguments).
+// InspectToolCall repeats the argument check before planning, approval, or
+// invocation. Fields are never joined, so a credential split across two
+// strings does not match.
 //
 // Each hook emits at most one finding, with the fixed Detail and no call
 // identity: model-controlled IDs and names can hold the credential, so they
@@ -67,7 +71,7 @@ func (c ConfiguredSecrets) InspectOutput(_ context.Context, out agent.OutputInsp
 	}
 	for _, call := range out.ToolCalls {
 		if c.match(call.ID) || c.match(call.Function.Name) || c.match(call.Type) ||
-			secretscan.MatchJSON(call.Function.Arguments, c.match) {
+			secretscan.MatchToolArguments(call.Function.Arguments, c.match) {
 			return []agent.Finding{configuredFinding(agent.TargetOutputContent)}, nil
 		}
 	}
@@ -80,7 +84,7 @@ func (c ConfiguredSecrets) InspectToolCall(_ context.Context, call agent.ToolCal
 	if c.match == nil {
 		return nil, errNilConfiguredMatcher
 	}
-	if !secretscan.MatchJSON(call.Call.Function.Arguments, c.match) {
+	if !secretscan.MatchToolArguments(call.Call.Function.Arguments, c.match) {
 		return nil, nil
 	}
 	return []agent.Finding{configuredFinding(agent.TargetToolCall)}, nil

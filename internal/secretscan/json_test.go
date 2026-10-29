@@ -163,3 +163,97 @@ func legacyWalkToolCall(raw []byte, visit func(text, key string)) {
 		}
 	}
 }
+
+func TestUnescapeJSONLenient(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		in, want string
+		valid    bool // in is a valid JSON string body: encoding/json must agree
+	}{
+		{in: "", want: "", valid: true},
+		{in: "plain", want: "plain", valid: true},
+		{in: `a\"b\\c\/d\be\ff\ng\rh\ti`, want: "a\"b\\c/d\be\ff\ng\rh\ti", valid: true},
+		{in: `\u0041\u00e9\u00E9`, want: "A\u00e9\u00e9", valid: true},
+		{in: `\ud83d\ude00`, want: "\U0001F600", valid: true},
+		{in: `\ud83d`, want: "\ufffd", valid: true},
+		{in: `\ude00x`, want: "\ufffdx", valid: true},
+		{in: `\ud83d\u0041`, want: "\ufffdA", valid: true},
+		{in: `\\u0041`, want: `\u0041`, valid: true},
+		{in: `\u12`, want: `\u12`},
+		{in: `\u+041`, want: `\u+041`},
+		{in: `\u004G`, want: `\u004G`},
+		{in: `\x\u0041`, want: `\xA`},
+		{in: `end\`, want: `end\`},
+	} {
+		if got := unescapeJSONLenient(tt.in); got != tt.want {
+			t.Errorf("unescapeJSONLenient(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+		if !tt.valid {
+			continue
+		}
+		var std string
+		if err := json.Unmarshal([]byte(`"`+tt.in+`"`), &std); err != nil {
+			t.Fatalf("row %q is marked valid but json.Unmarshal fails: %v", tt.in, err)
+		}
+		if std != tt.want {
+			t.Errorf("encoding/json decodes %q to %q, row wants %q", tt.in, std, tt.want)
+		}
+	}
+}
+
+func TestMatchToolArguments(t *testing.T) {
+	t.Parallel()
+	esc := uEscape(jsonFixture)
+	double := strings.ReplaceAll(esc, `\`, `\\`)
+	match := func(s string) bool { return strings.Contains(s, jsonFixture) }
+	wrap := func(s string) string {
+		b, err := json.Marshal(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+	for _, tt := range []struct {
+		name string
+		doc  string
+		want bool
+		// lenient rows match only through the lenient pass: MatchJSON must
+		// miss them.
+		lenient bool
+	}{
+		{name: "malformed escaped", doc: `{"cmd":"` + esc, want: true, lenient: true},
+		{name: "wrapped malformed escaped", doc: wrap(`{"cmd":"` + esc), want: true, lenient: true},
+		{name: "padded wrapped malformed escaped", doc: " \n" + wrap(`{"cmd":"`+esc) + "\t ", want: true, lenient: true},
+		{name: "wrapped valid object escaped", doc: wrap(`{"cmd":"` + esc + `"}`), want: true, lenient: true},
+		{name: "malformed partly escaped", doc: `{"cmd":"FIXTURE\u002dunknown\u002d01`, want: true, lenient: true},
+		{name: "malformed raw contains", doc: `{"cmd":"` + jsonFixture, want: true},
+		{name: "valid object escaped", doc: `{"cmd":"` + esc + `"}`, want: true},
+		// One decoded level only, for valid structure and for the lenient pass.
+		{name: "valid object double-escaped", doc: `{"cmd":"` + double + `"}`, want: false},
+		{name: "malformed double-escaped", doc: `{"cmd":"` + double, want: false},
+		{name: "wrapped malformed double-escaped", doc: wrap(`{"cmd":"` + double), want: false},
+		{name: "malformed escape left as is", doc: `{"cmd":"FIXTURE\u00zdunknown-01`, want: false},
+		{name: "number", doc: `42`, want: false},
+		{name: "empty", doc: ``, want: false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if tt.lenient && MatchJSON([]byte(tt.doc), match) {
+				t.Fatalf("row is not lenient-only: MatchJSON already matches %s", tt.doc)
+			}
+			if got := MatchToolArguments([]byte(tt.doc), match); got != tt.want {
+				t.Fatalf("MatchToolArguments(%s) = %v, want %v", tt.doc, got, tt.want)
+			}
+		})
+	}
+	// A valid object gets no lenient pass, so fields stay unjoined even where
+	// decoding its text whole would close a string around the credential.
+	t.Run("valid object fields stay unjoined", func(t *testing.T) {
+		t.Parallel()
+		const key = `FIX"","b":"TURE`
+		doc := `{"a":"FIX\u0022","b":"TURE"}`
+		if MatchToolArguments([]byte(doc), func(s string) bool { return strings.Contains(s, key) }) {
+			t.Fatalf("MatchToolArguments(%s) matched %q across two fields", doc, key)
+		}
+	})
+}

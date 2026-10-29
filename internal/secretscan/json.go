@@ -3,6 +3,10 @@ package secretscan
 import (
 	"bytes"
 	"encoding/json"
+	"strconv"
+	"strings"
+	"unicode/utf16"
+	"unicode/utf8"
 )
 
 // WalkJSON visits raw text first, then decoded keys and string values.
@@ -76,4 +80,81 @@ func MatchJSON(raw []byte, match func(string) bool) bool {
 		}
 	})
 	return found
+}
+
+// MatchToolArguments is MatchJSON plus one lenient pass for tool-call
+// arguments that are not a JSON object or array. Invalid JSON, or a JSON
+// string literal such as provider/openaicompat writes for arguments Go's
+// decoder rejects, is matched again with its JSON string escapes decoded
+// wherever they are well formed (the literal's decoded text, for a literal).
+// So a credential written as \u or \/ escapes in unparseable arguments still
+// matches. Valid objects and arrays get MatchJSON alone: one decoded level.
+func MatchToolArguments(raw []byte, match func(string) bool) bool {
+	if MatchJSON(raw, match) {
+		return true
+	}
+	trimmed := bytes.TrimSpace(raw)
+	var text string
+	switch {
+	case len(trimmed) > 0 && trimmed[0] == '"' && json.Unmarshal(trimmed, &text) == nil:
+	case !json.Valid(trimmed):
+		text = string(raw)
+	default:
+		return false
+	}
+	return strings.Contains(text, `\`) && match(unescapeJSONLenient(text))
+}
+
+// jsonSimpleEscapes maps the byte after a backslash to what a JSON string
+// escape decodes to, for every escape except \u.
+var jsonSimpleEscapes = map[byte]byte{
+	'"': '"', '\\': '\\', '/': '/', 'b': '\b', 'f': '\f', 'n': '\n', 'r': '\r', 't': '\t',
+}
+
+// unescapeJSONLenient decodes each well-formed JSON string escape in s, with
+// \u surrogate pairs combined and a lone surrogate written as U+FFFD (as
+// encoding/json does), and keeps every other byte, a malformed escape
+// included, as it is. It decodes one level and never parses structure.
+func unescapeJSONLenient(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); {
+		if s[i] != '\\' || i+1 == len(s) {
+			b.WriteByte(s[i])
+			i++
+			continue
+		}
+		if c, ok := jsonSimpleEscapes[s[i+1]]; ok {
+			b.WriteByte(c)
+			i += 2
+			continue
+		}
+		r, ok := jsonHex4(s, i)
+		if !ok {
+			b.WriteByte(s[i])
+			i++
+			continue
+		}
+		i += 6
+		if utf16.IsSurrogate(r) {
+			r2, ok := jsonHex4(s, i)
+			if pair := utf16.DecodeRune(r, r2); ok && pair != utf8.RuneError {
+				r = pair
+				i += 6
+			} else {
+				r = utf8.RuneError
+			}
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+// jsonHex4 decodes the \uXXXX escape starting at s[i], if there is one.
+func jsonHex4(s string, i int) (rune, bool) {
+	if i+6 > len(s) || s[i] != '\\' || s[i+1] != 'u' {
+		return 0, false
+	}
+	v, err := strconv.ParseUint(s[i+2:i+6], 16, 16)
+	return rune(v), err == nil
 }

@@ -6,7 +6,10 @@ every configured provider's effective `api_key`, and each value a `${NAME}`
 reference in an `api_key` resolved to. Matching is exact and does not depend on
 the value's shape: a case-sensitive substring of the call's raw arguments, of
 every decoded JSON key and string value, and of the call's ID, function name
-and type. Values shorter than eight bytes get no exact protection. The guard
+and type. Arguments that are not valid JSON, including the JSON string literal
+the OpenAI-compatible client wraps them in, are also checked with their JSON
+escapes decoded, so a credential written as `\u` escapes there still matches.
+Values shorter than eight bytes get no exact protection. The guard
 runs on the agent and on dispatch children, on every path that builds an
 orchestrator, including `/model set`.
 
