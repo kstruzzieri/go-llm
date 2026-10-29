@@ -116,7 +116,7 @@ func TestLimitMCPH2CBodyCapsUpgradeBeforeH2CBuffersIt(t *testing.T) {
 	called := false
 	handler := limitMCPH2CBody(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		called = true
-	}), &http2.Server{}, limit)
+	}), &http2.Server{}, limit, nil)
 	body := &countingReader{reader: strings.NewReader(strings.Repeat("x", 100))}
 	req := httptest.NewRequest(http.MethodPost, "http://localhost/mcp", struct{ io.Reader }{body})
 	req.Header.Set("Connection", "Upgrade, HTTP2-Settings")
@@ -139,7 +139,7 @@ func TestLimitMCPH2CBodyCapsNonPOSTUpgradeBeforeH2CBuffersIt(t *testing.T) {
 	called := false
 	handler := limitMCPH2CBody(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		called = true
-	}), &http2.Server{}, limit)
+	}), &http2.Server{}, limit, nil)
 	body := &countingReader{reader: strings.NewReader(strings.Repeat("x", 100))}
 	req := httptest.NewRequest(http.MethodGet, "http://localhost/mcp", struct{ io.Reader }{body})
 	req.Header.Set("Connection", "Upgrade, HTTP2-Settings")
@@ -188,7 +188,7 @@ func TestLimitMCPH2CBodyCapsOrdinaryGETRequestBodies(t *testing.T) {
 		data, readErr := io.ReadAll(req.Body)
 		body = string(data)
 		err = readErr
-	}), &http2.Server{}, limit)
+	}), &http2.Server{}, limit, nil)
 	req := httptest.NewRequest(http.MethodGet, "http://localhost/mcp", struct{ io.Reader }{strings.NewReader("SSE")})
 	rec := httptest.NewRecorder()
 
