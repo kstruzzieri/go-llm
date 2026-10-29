@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -39,8 +40,32 @@ func (g destinationGrants) policy() (provider.DestinationPolicy, error) {
 	return provider.NewDestinationPolicy(destinations...), nil
 }
 
+// bearerTokenEnv names the environment variable that enables bearer
+// authentication on the HTTP transport.
+const bearerTokenEnv = "GO_LLM_MCP_TOKEN"
+
+// bearerTokenOption returns the option that requires bearerTokenEnv's value as
+// the HTTP bearer token. It returns nil, with no error, when the transport is
+// not http (the environment is not read at all) or the variable is unset. A
+// variable that is set but empty is an error rather than "off", so an empty
+// value cannot silently disable authentication. The value's grammar is
+// checked by mcp.NewServer; neither error names the value.
+func bearerTokenOption(transport string, lookup func(string) (string, bool)) (mcp.Option, error) {
+	if transport != "http" {
+		return nil, nil
+	}
+	token, ok := lookup(bearerTokenEnv)
+	if !ok {
+		return nil, nil
+	}
+	if token == "" {
+		return nil, fmt.Errorf("%s is set but empty; unset it to disable HTTP authentication", bearerTokenEnv)
+	}
+	return mcp.WithHTTPBearerToken(token), nil
+}
+
 func main() {
-	transport := flag.String("transport", "stdio", "Transport mode: stdio or http")
+	transport := flag.String("transport", "stdio", "Transport mode: stdio or http (http reads GO_LLM_MCP_TOKEN for optional bearer authentication)")
 	addr := flag.String("addr", "127.0.0.1:8080", "HTTP listen address")
 	ollamaURL := flag.String("ollama-url", "", "Ollama server URL (default: from config or http://localhost:11434)")
 	configPath := flag.String("config", "", "Path to models.json (default: auto-discover)")
@@ -59,6 +84,14 @@ func main() {
 		log.Fatal(err)
 	}
 	opts := []mcp.Option{mcp.WithDestinationPolicy(destinationPolicy)}
+	bearerOpt, err := bearerTokenOption(*transport, os.LookupEnv)
+	if err != nil {
+		log.Fatal(err)
+	}
+	// The options loop calls every option, so a nil one would panic.
+	if bearerOpt != nil {
+		opts = append(opts, bearerOpt)
+	}
 	if *ollamaURL != "" {
 		opts = append(opts, mcp.WithOllamaURL(*ollamaURL))
 	}
@@ -92,6 +125,9 @@ func main() {
 
 	srv, err := mcp.NewServer(ctx, opts...)
 	if err != nil {
+		if errors.Is(err, mcp.ErrInvalidHTTPBearerToken) {
+			log.Fatalf("%s: %v", bearerTokenEnv, err)
+		}
 		log.Fatalf("failed to create server: %v", err)
 	}
 
