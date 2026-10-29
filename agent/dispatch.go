@@ -138,7 +138,7 @@ func (o *Orchestrator) recordResult(ctx context.Context, res *Result, state *Sta
 		if o.ctxMgr.Mixed {
 			msg.Alternatives = alternativesOf(out.Context)
 		}
-		tags, block, err := ic.inspectObservation(ctx, obs, step, msg)
+		tags, block, _, err := ic.inspectObservation(ctx, obs, step, msg)
 		if err != nil {
 			var blocked *BlockedError
 			if errors.As(err, &blocked) {

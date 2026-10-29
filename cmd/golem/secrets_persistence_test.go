@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/kstruzzieri/go-llm/agent"
+	"github.com/kstruzzieri/go-llm/agent/interceptor"
 	"github.com/kstruzzieri/go-llm/conversation"
 	golemruntime "github.com/kstruzzieri/go-llm/golem"
 	"github.com/kstruzzieri/go-llm/provider"
@@ -179,7 +180,7 @@ func TestSecretRuntimeSideErrorsPreserveClassification(t *testing.T) {
 					runtime, err := golemruntime.New(ctx, golemruntime.Options{
 						Root: t.TempDir(), System: sess.baseSystem, Orchestrator: sess.orch,
 						FailureMessage: func(code string, cause error) string {
-							if tc.cancel && secretsBlocked(cause) {
+							if tc.cancel && interceptor.SensitiveBlocked(cause) {
 								cancel() // Cancel the real runtime context after detection.
 							}
 							return runFailureMessage(code, cause)
@@ -204,7 +205,7 @@ func TestSecretRuntimeSideErrorsPreserveClassification(t *testing.T) {
 					} else {
 						res, err := runOnce(ctx, &out, nil, sess, tc.goal, nil)
 						var blocked *agent.BlockedError
-						if !errors.As(err, &blocked) || blocked.Hook != tc.wantHook || !secretsBlocked(err) {
+						if !errors.As(err, &blocked) || blocked.Hook != tc.wantHook || !interceptor.SensitiveBlocked(err) {
 							t.Error("runOnce lost the typed secrets block")
 						}
 						if !errors.Is(err, tc.wantErr) {

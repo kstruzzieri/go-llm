@@ -128,6 +128,19 @@ type Config struct {
 	Providers map[string]ProviderConfig `json:"providers"`
 	Models    map[string]ModelConfig    `json:"models"`
 	Defaults  map[string]string         `json:"defaults"`
+
+	// resolved is the private, nonserialized sidecar SecretMatcher reads:
+	// per provider, the values its api_key's ${NAME} references resolved
+	// to during the last successful finalize. Literal keys have no entry.
+	resolved map[string]resolvedKey
+}
+
+// resolvedKey pairs the effective api_key a template produced with the
+// lookup results that built it, so a copy that later changes the key can
+// tell its components are stale.
+type resolvedKey struct {
+	effective  string
+	components []string
 }
 
 // ErrConfigNotFound indicates that Default could not find a models.json file
@@ -421,36 +434,39 @@ func (c *Config) finalizeEnv(lookup func(string) (string, bool)) error {
 // referenced variable that is unset or empty, or a malformed reference,
 // returns an error naming providerName. Errors never contain an expanded
 // secret value. Only the provider api_key field uses this helper.
-func expandAPIKeyRefs(providerName, value string, lookup func(string) (string, bool)) (string, error) {
+// components holds each value lookup returned, in reference order; it is
+// nil for a literal value and on error.
+func expandAPIKeyRefs(providerName, value string, lookup func(string) (string, bool)) (expanded string, components []string, err error) {
 	if !strings.Contains(value, "${") {
-		return value, nil
+		return value, nil, nil
 	}
 	var b strings.Builder
 	for i := 0; i < len(value); {
 		if value[i] == '$' && i+1 < len(value) && value[i+1] == '{' {
 			rel := strings.IndexByte(value[i+2:], '}')
 			if rel < 0 {
-				return "", diagWrap(CodeKeyReferenceMalformed, SubjectProvider, providerName,
+				return "", nil, diagWrap(CodeKeyReferenceMalformed, SubjectProvider, providerName,
 					fmt.Errorf("config: provider %q api_key: malformed environment reference", providerName))
 			}
 			name := value[i+2 : i+2+rel]
 			if !validEnvName(name) {
-				return "", diagWrap(CodeKeyReferenceMalformed, SubjectProvider, providerName,
+				return "", nil, diagWrap(CodeKeyReferenceMalformed, SubjectProvider, providerName,
 					fmt.Errorf("config: provider %q api_key: malformed environment reference", providerName))
 			}
 			v, ok := lookup(name)
 			if !ok || v == "" {
-				return "", diagWrap(CodeKeyReferenceUnavailable, SubjectProvider, providerName,
+				return "", nil, diagWrap(CodeKeyReferenceUnavailable, SubjectProvider, providerName,
 					fmt.Errorf("config: provider %q api_key references unset or empty environment variable %q", providerName, name))
 			}
 			b.WriteString(v)
+			components = append(components, v)
 			i += 2 + rel + 1
 			continue
 		}
 		b.WriteByte(value[i])
 		i++
 	}
-	return b.String(), nil
+	return b.String(), components, nil
 }
 
 // validEnvName reports whether s is a POSIX-style environment identifier
@@ -485,21 +501,45 @@ func MustLoad(path string) *Config {
 // expandProviderAPIKeys rewrites each provider's api_key, expanding ${ENV}
 // references through lookup. Providers are visited in sorted order so the
 // first error is deterministic when several reference bad variables.
+// The call is one resolution transaction: each name is looked up at most
+// once, and on success the resolved sidecar is replaced in full (never
+// merged with an earlier generation).
 func (cfg *Config) expandProviderAPIKeys(lookup func(string) (string, bool)) error {
+	type result struct {
+		v  string
+		ok bool
+	}
+	memo := map[string]result{}
+	memoLookup := func(name string) (string, bool) {
+		r, hit := memo[name]
+		if !hit {
+			r.v, r.ok = lookup(name)
+			memo[name] = r
+		}
+		return r.v, r.ok
+	}
 	keys := make([]string, 0, len(cfg.Providers))
 	for k := range cfg.Providers {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
+	var resolved map[string]resolvedKey
 	for _, k := range keys {
 		p := cfg.Providers[k]
-		expanded, err := expandAPIKeyRefs(k, p.APIKey, lookup)
+		expanded, components, err := expandAPIKeyRefs(k, p.APIKey, memoLookup)
 		if err != nil {
 			return err
 		}
 		p.APIKey = expanded
 		cfg.Providers[k] = p
+		if len(components) > 0 {
+			if resolved == nil {
+				resolved = make(map[string]resolvedKey)
+			}
+			resolved[k] = resolvedKey{effective: expanded, components: components}
+		}
 	}
+	cfg.resolved = resolved
 	return nil
 }
 

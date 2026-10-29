@@ -113,7 +113,7 @@ func verifyBatch(ctx context.Context, state *State, approver Approver, b *batch,
 	anchor := &state.Messages[b.verifyAnchor]
 	// #436 spec D7: verifier output is tool-authored workspace text entering
 	// State; inspect it before the append like any other observation.
-	tags, block, err := ic.inspectObservation(ctx, obs, step, InspectedMessage{
+	tags, block, _, err := ic.inspectObservation(ctx, obs, step, InspectedMessage{
 		StateIndex: b.verifyAnchor, Role: "tool", Origin: OriginWorkspace,
 		ToolName: anchor.ToolName, ToolCallID: anchor.ToolCallID, Content: out,
 	})

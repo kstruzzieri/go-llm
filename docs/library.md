@@ -447,6 +447,36 @@ The auxiliary use-case keys are exported as untyped string constants
 `config.SideTaskUseCases()`, and resolved to a model role by
 `cfg.RoleForUseCase(useCase)` — the same fallback semantics, exposed for callers
 that pick a side-task model without walking the full chain.
+
+### Blocking configured credentials in tool calls
+
+`cfg.SecretMatcher()` reports whether a string contains a credential the config
+resolved: each provider's effective `api_key`, and each value a `${NAME}`
+reference in an `api_key` resolved to, when at least eight bytes long. It is a
+trusted host API; never expose it, or its answers, to a model. Loading a config
+installs nothing. To block agent tool calls that carry one (#424), install
+`interceptor.NewConfiguredSecrets(cfg.SecretMatcher())` on the orchestrator and
+pass the same guard to `tools.NewDispatch`
+(`github.com/kstruzzieri/go-llm/agent/tools`), which installs its interceptors
+on every dispatched child:
+
+```go
+guard, err := interceptor.NewConfiguredSecrets(cfg.SecretMatcher())
+if err != nil {
+    return err
+}
+orch := agent.New(caller, agent.ContextManager{}, agent.WithInterceptors(guard))
+dispatch, err := tools.NewDispatch(caller, agent.ContextManager{}, readTools, tools.DispatchLimits{}, guard)
+```
+
+The matcher is a snapshot of that config: build a new guard after reloading or
+editing it. A config serialized and parsed again keeps its effective keys but
+loses the resolved `${NAME}` components. A dispatched child run that ends in a
+block by any `agent.SensitiveTextInterceptor`, whatever its name, or by the
+`secrets` guard never falls back to its last message as its summary; that rule
+is part of `NewDispatch` and needs no setting. `interceptor.SensitiveBlocked`
+applies the same test to the errors a host's own runs return.
+
 ## Parquet Export
 
 Export vector store contents to Parquet format for ML pipeline interop.

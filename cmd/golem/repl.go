@@ -13,6 +13,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/kstruzzieri/go-llm/agent"
+	"github.com/kstruzzieri/go-llm/agent/interceptor"
 	"github.com/kstruzzieri/go-llm/agent/tools"
 	"github.com/kstruzzieri/go-llm/consult"
 	"github.com/kstruzzieri/go-llm/conversation"
@@ -247,9 +248,10 @@ func runREPL(ctx context.Context, src lineSource, out io.Writer, interrupts <-ch
 			}
 		}
 		// Record accepted goals after inspection has had a chance to block
-		// secrets or abort on a canary. Unrelated failures retain existing history.
+		// sensitive content or abort on a canary. Unrelated failures retain
+		// existing history.
 		_, runErr := runOnceWithRecipeHint(ctx, out, interrupts, sess, line, src, hint)
-		if !secretsBlocked(runErr) && !canaryAborted(runErr) && !errors.Is(runErr, errRecipeHintRefused) {
+		if !interceptor.SensitiveBlocked(runErr) && !canaryAborted(runErr) && !errors.Is(runErr, errRecipeHintRefused) {
 			src.RecordGoal(line)
 			if sessionSaveRefused(runErr) {
 				_, _ = fmt.Fprintln(out, "The next turn uses the latest saved history, without this unsaved turn. Use /new for a separate session.")
@@ -502,9 +504,9 @@ func runOnceWithRecipeHint(ctx context.Context, out io.Writer, interrupts <-chan
 		cancel()
 	}
 	// Inspect both trees before demoting session errors or presenting a seal
-	// failure: either can carry a canary abort or secrets block with a
+	// failure: either can carry a canary abort or sensitive block with a
 	// sensitive side-error.
-	secretBlock := secretsBlocked(runErr) || secretsBlocked(sealErr)
+	sensitiveBlock := interceptor.SensitiveBlocked(runErr) || interceptor.SensitiveBlocked(sealErr)
 	canaryBlock := canaryAborted(runErr) || canaryAborted(sealErr)
 	if canaryBlock {
 		sess.canary.burn()
@@ -513,7 +515,7 @@ func runOnceWithRecipeHint(ctx context.Context, out io.Writer, interrupts <-chan
 	if res.Answer != "" &&
 		errors.Is(runErr, golemruntime.ErrSessionPersistence) &&
 		!sessionSaveRefused(runErr) &&
-		!secretBlock && !canaryBlock &&
+		!sensitiveBlock && !canaryBlock &&
 		!errors.Is(runErr, context.Canceled) &&
 		!errors.Is(runErr, context.DeadlineExceeded) {
 		sessionSaveErr = runErr
@@ -521,7 +523,7 @@ func runOnceWithRecipeHint(ctx context.Context, out io.Writer, interrupts <-chan
 	}
 	if sealErr != nil {
 		runErr = errors.Join(runErr, sealErr)
-		if !secretBlock && !canaryBlock {
+		if !sensitiveBlock && !canaryBlock {
 			writeRunLine("checkpoint: %v", sealErr)
 		}
 	}
@@ -618,10 +620,10 @@ func runOnceWithRecipeHint(ctx context.Context, out io.Writer, interrupts <-chan
 	if sess.obs != nil && sess.obs.trace && canaryBlock {
 		writeRunLine("warning: trace not written: canary detected")
 	}
-	if sess.obs != nil && sess.obs.trace && secretBlock && !canaryBlock {
+	if sess.obs != nil && sess.obs.trace && sensitiveBlock && !canaryBlock {
 		writeRunLine("warning: trace not written: sensitive content detected")
 	}
-	if sess.obs != nil && sess.obs.trace && !secretBlock && !canaryBlock {
+	if sess.obs != nil && sess.obs.trace && !sensitiveBlock && !canaryBlock {
 		meta := agenttrace.TraceMeta{
 			Goal:           req.Goal,
 			System:         req.System,
@@ -639,7 +641,7 @@ func runOnceWithRecipeHint(ctx context.Context, out io.Writer, interrupts <-chan
 	}
 
 	if runErr != nil {
-		if runCtx.Err() != nil && !secretBlock && !canaryBlock {
+		if runCtx.Err() != nil && !sensitiveBlock && !canaryBlock {
 			writeRunLine("canceled")
 			return res, runErr
 		}

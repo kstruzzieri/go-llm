@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"hash/fnv"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/kstruzzieri/go-llm/internal/promptfence"
+	"github.com/kstruzzieri/go-llm/internal/secretscan"
 	"github.com/kstruzzieri/go-llm/provider"
 )
 
@@ -343,9 +345,18 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 		// reaches OnStep, and dispatches nothing. An interceptor error without
 		// a block takes the same path: the response was never cleared.
 		if oerr := ic.inspectOutput(ctx, obs, step, resp); oerr != nil {
+			// #424 D3: the route is copied metadata, so it is kept only when no
+			// string in it, Reason and attempts included, carries protected
+			// text. An outcome that cannot be encoded cannot be checked.
+			route := modelResult.RouteOutcome
+			if route != nil && ic.guardsText() {
+				if b, merr := json.Marshal(route); merr != nil || secretscan.MatchJSON(b, ic.sensitiveText) {
+					route = nil
+				}
+			}
 			res.Steps = append(res.Steps, StepRecord{
 				Index: step, Response: provider.ChatResponse{Usage: resp.Usage, Done: resp.Done},
-				RouteOutcome: modelResult.RouteOutcome, Pressure: pressure, Latency: modelLatency,
+				RouteOutcome: route, Pressure: pressure, Latency: modelLatency,
 			})
 			res.Events = append(res.Events, EventRecord{Step: step, Kind: "step"})
 			return finishWithError(&res, state, historyLen, oerr)
@@ -426,7 +437,7 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 // makes the origin-sensitive detectors judge the advice the way they judge a
 // tool result.
 func (o *Orchestrator) prepareAdvisory(ctx context.Context, ic *interceptorRun, obs Observer, a Advisory, index int) (Advisory, error) {
-	tags, block, err := ic.inspectObservation(ctx, normalizeObserver(obs), 0, InspectedMessage{
+	tags, block, sensitive, err := ic.inspectObservation(ctx, normalizeObserver(obs), 0, InspectedMessage{
 		StateIndex: index, Role: "tool", Origin: a.Origin,
 		ToolName: "consult/" + a.Source, Content: a.Content,
 	})
@@ -439,7 +450,7 @@ func (o *Orchestrator) prepareAdvisory(ctx context.Context, ic *interceptorRun, 
 		// other interceptor refusal in this package carries, so the refusing
 		// rule is nameable without re-running the chain.
 		return Advisory{}, errors.Join(ErrAdvisoryBlocked,
-			&BlockedError{Hook: HookInput, Step: 0, Findings: []Finding{*block}})
+			&BlockedError{Hook: HookInput, Step: 0, Findings: []Finding{*block}, sensitive: sensitive})
 	}
 	// distinctTrailers leads with a newline so it can be appended to a tool
 	// result; here it is a block of whole lines, so the lead is dropped.

@@ -15,10 +15,11 @@ import (
 
 // The exact startup notices (#575). They stay literal and are never derived
 // from the code under test, so reworded production text fails the tests that
-// pin them.
+// pin them. fullNoticeLine is what a real startup prints: run() always sets
+// the configured-secret guard with the flag (#424), so it leads the chain.
 const (
-	guardsNoticeLine = "guards: invariants, egress, child_scope_denials (always on; -interceptors adds detectors, secrets, canary)"
-	fullNoticeLine   = "interceptors: enabled (zero_width, encoding, typoglycemia, invariants, egress, secrets, child_scope_denials, canary)"
+	guardsNoticeLine = "guards: invariants, egress, child_scope_denials (always on; -interceptors adds detectors, secrets, configured secrets, canary)"
+	fullNoticeLine   = "interceptors: enabled (configured_secrets, zero_width, encoding, typoglycemia, invariants, egress, secrets, child_scope_denials, canary)"
 )
 
 // TestParseFlags_InterceptorsHelpNamesAlwaysOnGuards (#575): the help states
@@ -65,6 +66,7 @@ func TestParseFlags_InterceptorsHelpNamesAlwaysOnGuards(t *testing.T) {
 		"argument invariants for named tools",
 		"exec-class egress labels",
 		"scoped-child refusal reporting",
+		"exact blocking of configured credentials in tool calls",
 		"required by /consult",
 		"with or without this flag",
 	} {

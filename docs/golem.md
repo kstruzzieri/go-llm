@@ -856,6 +856,42 @@ observations. A blocked observation is replaced before the next model request;
 streaming tokens already emitted are outside this check. Library callers opt in
 with `interceptor.Defaults()` or `interceptor.Secrets{}`.
 
+The same opt-in chain also installs `configured_secrets` first, on the agent
+and dispatch children (#424). It blocks a tool call that carries a credential
+go-llm resolved from `models.json`: every configured provider's effective
+`api_key`, not only the one in use, and each value a `${NAME}` reference in an
+`api_key` resolved to. Matching is exact, whatever the value's shape: a
+case-sensitive substring of the call's raw arguments, of every decoded JSON key
+and string value, and of the call's ID, function name and type. Values shorter
+than eight bytes get no exact protection. Every value of eight or more bytes is
+protected whatever it is, placeholder keys such as LM Studio's `lm-studio` or
+llama.cpp's `sk-no-key-required` and ordinary words included, so a tool call
+whose arguments, ID or name contain one ends the run with
+`run blocked: sensitive content detected`. For a keyless local server, omit
+`api_key`. A match drops the whole model
+response before it is recorded and before any of its calls is shown, planned,
+approved or run, so no call in it runs, clean calls beside it included; answer
+text the model already streamed is outside this check. The run ends with the
+same fixed `run blocked: sensitive content detected` diagnostic and history and
+trace handling as a Secrets block. A blocked dispatch child reports
+`Partial result unavailable: blocked: sensitive content` instead of its last
+message. Findings name only `configured_secrets` and the rule
+`configured_secret`; the startup notice names the guard, never a value, a count
+or where one came from. Without `-interceptors` nothing checks tool arguments
+for configured credentials, and the guard does not scan input, answers,
+thinking or tool results. It does not check what Golem sends to a provider
+either; outbound request content is the second, separate #424 change. The set is
+fixed when Golem starts: `/model set` keeps it, and a credential changed in the
+environment takes effect at the next start.
+
+Matching decodes one level of JSON: the raw text plus decoded keys and string
+values. Tool arguments Go's JSON decoder rejects (malformed, or nested more
+than 10,000 levels), which the OpenAI-compatible client (llama.cpp, vLLM,
+LM Studio) wraps as a JSON string literal, get one more check: their text with
+each well-formed JSON escape (`\u` escapes, `\/` and the rest) decoded, so a
+credential written as escapes there still matches. Text that decodes to more
+escapes, such as `\\u0073` inside valid JSON, is not decoded again.
+
 The shared ASCII-oriented scanner recognizes these shapes. It detects syntax
 and heuristics, not whether a credential is active or a card account exists.
 
@@ -905,8 +941,9 @@ suppresses the entire content-full trace, and uses one fixed diagnostic on
 stderr and machine output. An initial block saves no conversation or checkpoint
 row; a later block preserves undo records for earlier allowed mutations.
 For these detections, content-light telemetry adds only the optional
-`secret_findings` count, with no finding contents. Failures before inspection
-keep their existing behavior. A
+`secret_findings` count, with no finding contents. It counts `secrets`
+findings only: a `configured_secrets` block adds nothing to it. Failures
+before inspection keep their existing behavior. A
 caller-owned blocked `agent.Result` can still contain the original goal, so
 library callers must not persist it verbatim.
 
