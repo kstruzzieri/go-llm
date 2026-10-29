@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/kstruzzieri/go-llm/provider"
@@ -161,6 +162,56 @@ func TestOutboundDenialLaterTurnProjection(t *testing.T) {
 			}
 			if !reflect.DeepEqual(history, wantHistory) {
 				t.Error("the caller's history was rewritten")
+			}
+		})
+	}
+}
+
+// TestSuppressSensitiveFields (#424 D4): suppressSensitive rewrites every
+// copied field that matches, each wholesale. A tool message's tool name and
+// call ID, and a call's ID, type and function name, cannot be reached through
+// the orchestrator with a text guard installed (the output hook blocks such a
+// response first), so each is checked here with the fixture in that field
+// alone: it becomes the marker, and every other field keeps its value. The
+// clean row shows nothing is rewritten when no field matches.
+func TestSuppressSensitiveFields(t *testing.T) {
+	fx := newSensitiveFixture(t)
+	base := func() []provider.ChatMessage {
+		return []provider.ChatMessage{
+			{Role: "assistant", Content: "reading", ToolCalls: []provider.ToolCall{{
+				ID: "c1", Type: "function",
+				Function: provider.ToolCallFunction{Index: 1, Name: "read_file", Arguments: json.RawMessage(`{"path":"notes.txt"}`)},
+			}}},
+			{Role: "tool", Content: "notes", ToolName: "read_file", ToolCallID: "c1"},
+		}
+	}
+	// Each row writes one value into one field of base's shape; the expected
+	// messages are the same write with the marker, so the expectation never
+	// reads the production code. Arguments are a JSON document, and the
+	// marker replaces them as a JSON string.
+	text := fx.value
+	quoted := `"` + suppressedMarker + `"`
+	for _, tc := range []struct {
+		name         string
+		set          func(msgs []provider.ChatMessage, v string)
+		fixture, out string
+	}{
+		{"message content", func(m []provider.ChatMessage, v string) { m[1].Content = v }, "tool says " + text, suppressedMarker},
+		{"message tool name", func(m []provider.ChatMessage, v string) { m[1].ToolName = v }, "tool_" + text, suppressedMarker},
+		{"message tool call ID", func(m []provider.ChatMessage, v string) { m[1].ToolCallID = v }, "call_" + text, suppressedMarker},
+		{"call ID", func(m []provider.ChatMessage, v string) { m[0].ToolCalls[0].ID = v }, "call_" + text, suppressedMarker},
+		{"call type", func(m []provider.ChatMessage, v string) { m[0].ToolCalls[0].Type = v }, "type_" + text, suppressedMarker},
+		{"call function name", func(m []provider.ChatMessage, v string) { m[0].ToolCalls[0].Function.Name = v }, "fn_" + text, suppressedMarker},
+		{"call arguments", func(m []provider.ChatMessage, v string) { m[0].ToolCalls[0].Function.Arguments = json.RawMessage(v) }, `{"note":"` + text + `"}`, quoted},
+		{"clean: no field matches", func([]provider.ChatMessage, string) {}, "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, want := base(), base()
+			tc.set(got, tc.fixture)
+			tc.set(want, tc.out)
+			suppressSensitive(got, func(s string) bool { return strings.Contains(s, fx.value) })
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("messages = %+v, want %+v", got, want)
 			}
 		})
 	}

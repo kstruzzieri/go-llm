@@ -296,14 +296,24 @@ func TestContentGuardRequiresGate(t *testing.T) {
 // the destination guard's client and must not weaken its refusal to follow a
 // redirect. The loopback row matters most: a loopback client carries no content
 // guard, so only the redirect refusal keeps its unchecked body on the machine.
+// The same-origin rows redirect to another path on the same scheme, host and
+// port, which the destination transport's origin binding admits, so only the
+// client's own CheckRedirect refuses them.
 func TestContentGuardKeepsRedirectRefusal(t *testing.T) {
+	const (
+		otherHost = "http://other.example.invalid/v1/chat/completions"
+		moved     = "/v1/moved"
+	)
 	tests := []struct {
-		name    string
-		baseURL string
-		status  int
+		name     string
+		baseURL  string
+		status   int
+		location string
 	}{
-		{name: "guarded remote 302", baseURL: "http://llm.example.invalid", status: http.StatusFound},
-		{name: "exempt loopback 307", baseURL: "http://127.0.0.1:8080", status: http.StatusTemporaryRedirect},
+		{name: "guarded remote 302", baseURL: "http://llm.example.invalid", status: http.StatusFound, location: otherHost},
+		{name: "exempt loopback 307", baseURL: "http://127.0.0.1:8080", status: http.StatusTemporaryRedirect, location: otherHost},
+		{name: "guarded remote same-origin 302", baseURL: "http://llm.example.invalid", status: http.StatusFound, location: "http://llm.example.invalid" + moved},
+		{name: "exempt loopback same-origin 307", baseURL: "http://127.0.0.1:8080", status: http.StatusTemporaryRedirect, location: "http://127.0.0.1:8080" + moved},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -311,7 +321,7 @@ func TestContentGuardKeepsRedirectRefusal(t *testing.T) {
 				if r.URL.Path != "/v1/chat/completions" {
 					return false
 				}
-				w.Header().Set("Location", "http://other.example.invalid/v1/chat/completions")
+				w.Header().Set("Location", tc.location)
 				w.WriteHeader(tc.status)
 				return true
 			})
@@ -325,10 +335,14 @@ func TestContentGuardKeepsRedirectRefusal(t *testing.T) {
 				t.Fatalf("redirect refusal reported as a content denial: %v", err)
 			}
 			// Every dial reaches this one backend, so a followed redirect would
-			// show as a second chat request addressed to the other host.
+			// show as a second chat request addressed to the other host, or as
+			// a request for the moved path on the same origin.
 			chats := be.requests("/v1/chat/completions")
 			if len(chats) != 1 {
 				t.Fatalf("backend chats = %+v, want exactly the original request", chats)
+			}
+			if followed := be.requests(moved); len(followed) != 0 {
+				t.Fatalf("backend requests for %s = %+v, want the redirect target never requested", moved, followed)
 			}
 		})
 	}
