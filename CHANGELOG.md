@@ -6,6 +6,918 @@ All notable changes to `go-llm` are documented here. Downstream consumers
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-29
+
+### Changed — v0.6.0 consumer upgrade notes (#727)
+
+Read this before upgrading from v0.5.0. Consumers on older pins must also apply
+the earlier upgrade notes. The
+[v0.6.0 upgrade guide](docs/releases/v0.6.0.md) has the details, what a default
+session does not get, the known issues and the consumer compile check.
+
+#### Library consumers
+
+- `golem.Options.Tools` requires `Profile: golem.ProfileTrusted` (#387). The
+  zero value is Inspect, and `golem.New`, `Replace` and `ReplaceConfiguration`
+  reject any caller tool under it with an error wrapping
+  `golem.ErrProfileIncompatible`, at run time.
+- `golem.CommandPermissions` is no longer comparable with `==`, `golem.New`
+  rejects a host runtime with any sandbox constraint, and
+  `agenttools.VerifyCommand.Run` returns a `VerifyResult` with every error
+  (#576).
+- A module that requires `modernc.org/libc` directly must set it to v1.70.0
+  (#632). SQLite openers reject `file:` URIs with a `vfs` parameter, a repeated
+  `mode`, a non-`localhost` host, user information or a fragment, and an
+  agent-memory store opened by `file:` URI fails until its keys are moved
+  beside the database (#648).
+- A dispatched child blocked by `Secrets`, `configured_secrets` or a content
+  denial reports a fixed marker instead of its last message, and a sensitive
+  block drops free-text diagnostics from every interceptor in that hook
+  (#424).
+- Exact configured-secret checks and MCP HTTP authentication are opt-in:
+  install `interceptor.NewConfiguredSecrets` and `openaicompat.WithContentGuard`
+  (#424), and pass `mcp.WithHTTPBearerToken` (#428). Loading a config
+  installs nothing.
+
+#### Golem operators
+
+- A session without `-profile` or a legacy opt-in flag is read-only (#387).
+  Scripts that relied on retrieval, auto-indexing or `memory_search` need
+  `-profile trusted` or one of the legacy opt-in flags.
+- Install AgentFlow 1.1 or a later 1.x (#705). Failed step runs now block their
+  attempt, so `-agentflow-resume` reruns the model, and a fresh `-plan` or
+  `-goal` refuses a workspace with execution history (#642, #643).
+- Exact configured-secret protection is available, opt-in through
+  `-interceptors`; default sessions are not covered (#424). MCP HTTP
+  authentication is optional: `go-llm-mcp` stays unauthenticated over HTTP,
+  TLS without a token included, until `GO_LLM_MCP_TOKEN` is set (#428). The
+  native sandbox needs `-sandbox seatbelt|bwrap` (#576), and sandboxed
+  commands can still write `.git` metadata (#721).
+
+### Security — Finish Seatbelt exec scoping and probe the real profile at startup (#708)
+
+Follow-up to the native command sandbox (#576). Two hardening items for the
+macOS Seatbelt backend.
+
+#### Exec confinement coverage
+
+The exec allowance was scoped to the read allowance in #576. This adds the
+behavioral coverage that pins it: a child cannot run a binary outside the
+reviewed roots, the workspace, its private temp or the approved executable's
+canonical path, whether it is reached directly, through a workspace or
+private-temp symlink, through an outside shebang interpreter, or through
+`posix_spawn` (including `POSIX_SPAWN_SETEXEC`). Scratch execution is confined
+the same way: a clone-local executable runs, an absolute path into the
+canonical workspace is refused. Each refusal is asserted with its route's
+exit code and diagnostic, including a bare-name `PATH` lookup with a host
+control proving the outside executable exists and runs.
+
+A program refused because it resolves, through `PATH`, to a location outside
+the allowances reads as `No such file or directory` (exit 127), not "not
+permitted": the C library's `execvp` falls back to a `stat` the profile also
+denies. A program run by an explicit path reports `Operation not permitted`
+(exit 126), and an approved script whose shebang interpreter is outside the
+roots fails as `sandbox-exec: execvp() of '<script>' failed: Operation not
+permitted` (exit 71). The diagnostics and compatibility notes document this.
+
+#### Startup probe runs the backend's profile
+
+`probeSeatbelt` applied a fixed deny-default profile, so a macOS release that
+rejected a rule the real profile uses would pass startup and then fail every
+command. The probe now renders and applies the backend's own profile — same
+system roots, private temp, ancestor rules and network setting — to a
+throwaway workspace and runs `/usr/bin/env /usr/bin/true` under it. A probe
+cleanup failure fails construction and remains in the error even when the
+probe command also fails. It still proves only that the profile
+applies and a program starts under it, not that a given toolchain loads, and
+it does not detect read-root drift.
+
+### Changed — Golem requires AgentFlow 1.1 and resumes timed-out gates (#705)
+
+Golem now requires AgentFlow 1.1.0 or a later 1.x. AgentFlow 1.0 is refused
+before any other AgentFlow call (`agentflow 1.0 is too old; need >= 1.1`), so
+upgrade AgentFlow before or with Golem. CI's AgentFlow compatibility job pins
+the AgentFlow v1.1.0 release commit.
+
+AgentFlow 1.1 can recover a gate that timed out (kstruzzieri/agentflow#60,
+#70), and Golem now follows it:
+
+- A gate that times out still blocks its attempt, but the error no longer
+  appends `retained timeout receipt ... prevents this root's ledger from
+  passing AgentFlow 1.0 run verification ...`. `-agentflow-status` offers the
+  step for resume (exit 2), and `-agentflow-resume` runs it again in a new
+  attempt. Once that attempt completes, AgentFlow verifies the run and reports
+  the old receipt as a `superseded_timeout` warning.
+- `-agentflow-status` and `-agentflow-resume` handle AgentFlow 1.1's new
+  `next-action` states. `attempt_timed_out` (an open attempt holding a
+  timed-out receipt, including a `verified` one or one whose advisory lease
+  expired) exits 2 with
+  `resume: block the timed-out attempt, then re-run the step serially`; resume
+  blocks it with the fixed reason `golem: resume found timed-out gate`, then
+  continues from the state AgentFlow reports. `step_amendment_needed` (a
+  completed step that needs a replacement attempt) exits 2 with
+  `resume: amend the completed step, then continue serially`; resume runs
+  `amend-step` with the reason `golem: resume replaces the step's attempt` and
+  runs the model on the step's own goal. It amends one step per run: when
+  another step also needs a replacement, resume stops before `finish-run`
+  without building a proof, and the next resume amends that step. Both states
+  exit 3, and resume refuses them before any change, under an `enforce` lease
+  policy, as it already does for `step_unclaimed`, and when the step has a
+  review amendment that never completed, since a replacement would drop its
+  findings
+  (`step <id> has an unfinished review amendment; resume would replace it
+  with the step's own goal and drop the review findings, ...`). Golem never
+  runs `reclaim-step`.
+- The refusal for a retained timed-out receipt (status exit 3, resume, and a
+  same-plan `-review-manifest` round) now applies only to a receipt no later
+  attempt can supersede: one inside an attempt that completed, which only
+  AgentFlow 1.0 recorded, or one whose attempt the step-run ledger does not
+  record under the receipt's step or records inconsistently (under two steps,
+  or closed twice). Its text is now
+  `retained timeout receipt <id> in <root> cannot be superseded by a later
+  attempt, so this root's ledger cannot pass AgentFlow run verification; ...`,
+  with the same archive remedy.
+- Unknown-event diagnostics quote ledger-supplied attempt IDs so terminal
+  escape sequences, newlines, and direction controls cannot spoof the output.
+- Golem no longer reads `.agent/step-runs.jsonl` before it blocks an attempt:
+  AgentFlow 1.1 refuses to block an attempt that is already closed and writes
+  nothing (kstruzzieri/agentflow#61). The endings
+  `attempt already closed (<event>); not blocked` and
+  `check attempt state before blocking: ...` are gone; such a refusal ends
+  `record blocked attempt: <agentflow error>`, and `-agentflow-status` no
+  longer reads that ledger to decide the failed-gate disposition.
+
+**Upgrade note:** a workspace an earlier Golem left with a blocked timed-out
+attempt, which `-agentflow-status` reported as exit 3, is now resumable and
+costs a model run for that step. Fix the gate or its timeout first: the retry
+runs the gate again with the same timeout.
+
+### Fixed — Golem verifies existing proofs before recovery (#689)
+
+Status and resume now independently run AgentFlow's read-only `verify-proof`
+on an existing proof before offering or starting recovery. Invalid, malformed,
+or unverifiable proofs stop status with exit 3 and resume with exit 1 before
+any recovery mutation, even when step work or `run_unverified` hides the proof.
+An initially valid proof may be replaced after settlement or serial work
+makes it stale; settlement now reaches the same terminal path as serial work.
+Resume compares the proof's existence and digest after the final `next-action`
+check and before `finish-run`, refusing a new, replaced, or removed proof.
+An absent proof remains recoverable. Inspect and move a blocking proof aside,
+then run status and resume; the remaining state may still require step work.
+
+Fresh `-plan` runs refuse an exposed `proof_failing` state before `finish-run`,
+but retain the existing ability to rebuild a proof hidden by `run_unverified`.
+Proof checks are not atomic with concurrent changes to other proof inputs or
+with `finish-run` (kstruzzieri/agentflow#58). Resume still refuses stale or
+failing proofs and drift on entry, and drift exposed by settlement.
+
+### Fixed — -agentflow-resume checks for step work before building a proof (#688)
+
+`-agentflow-resume` ran AgentFlow's `finish-run` without the step-work check a
+fresh `-plan` run makes since #651. When another writer opened an attempt while
+resume ran, `finish-run` still passed (kstruzzieri/agentflow#58) and wrote
+`.agent/proof-pack.json` over the unfinished work before resume failed with
+`agentflow resume finished in state "<state>", want complete`.
+
+Resume now asks `next-action` before `finish-run`, as a fresh run does. If
+AgentFlow still reports step or attempt work at that check, resume exits 1
+without running `finish-run` or building a proof, names the AgentFlow state and
+step, and sends you to `-agentflow-status`, which reports whether
+`-agentflow-resume` can recover. A writer that opens an attempt after the check
+can still reach `finish-run`; resume's final check then fails as before. Without
+another writer, resume reaches `finish-run` as before, after one more read-only
+`next-action` call; if that call fails, resume stops there instead.
+
+### Added — llm-bench single-attempt capture mode (#687)
+
+`llm-bench -replay-attempt` replays one trace against one openai-compat candidate exactly once
+and publishes an immutable attempt directory: raw request and response bytes under `raw/`, and
+an `attempt.json` (schema `llm-bench.replay-attempt/v1`) with identity, build and settings
+provenance, the ordered partial transcript, per-request timing and usage, and one of ten stable
+error codes. Failed attempts keep their timing and any usage the server reported; unknown usage
+stays `null`. Every request carries `X-Client-Correlation: <attempt-id>/<ordinal>`. There are no
+retries and no followed redirects. The process exits 0 once `attempt.json` is published, whatever
+the attempt's status. The mode runs on darwin and linux and refuses on windows. Legacy
+`-calibrate-capture` and replay output is unchanged. See `docs/llm/replay-attempt.md`.
+
+Protocol upgrades are closed immediately, duplicate `choices` members are rejected, and malformed
+frozen tool-result names are classified as fixture errors. Diagnostic redaction also recognizes
+Go-quoted credentials, so escaped quotes and backslashes cannot expose an echoed key on stderr.
+Raw artifacts redact equivalent JSON-escaped credentials while preserving unrelated evidence
+bytes; their hashes and redaction flags describe the stored, redacted content. The consumer
+contract explicitly preserves valid reported usage on failed HTTP responses and empty choices.
+
+### Changed — golem ops reads backends in parallel (#662)
+
+`golem ops` reads every local backend in its own goroutine with its own 5 s budget. A slow or hung backend no longer defers, delays or opens a residency gap in another backend's readings, and an Ollama whose `/api/ps` times out always gets its `/api/version` check. Providers no longer take turns going first; a slow backend's activity and model-listing reads still take turns across polls when they do not all fit its budget. A collection lasts as long as its slowest backend, still at most 5 seconds.
+
+### Fixed — scratch snapshots resolve `..` in symlink targets the way the host does (#660)
+
+A scratch snapshot cleaned symlink targets lexically. With `a/s -> deep/er`, a
+link `a/l -> s/../../x` resolves to `a/x` on the host, but its clone pointed at
+the workspace-root `x`, so commands in scratch mode read a different file
+through it. When the host resolves every prefix a `..` pops, the snapshot now
+applies that `..` to the physical parent, for relative and absolute targets and
+for dangling external chains, and an executable or working directory reached
+through such a link is accepted instead of failing closed. Links the host
+cannot resolve (including chains beyond the host's symlink traversal limit),
+and links without `..`, are rewritten exactly as before. A
+dangling external chain that nevertheless names an existing directory or
+multiply linked file now fails the first snapshot pass with the gate's reason,
+instead of being linked into the reference tree and failing one pass later.
+
+### Fixed — -agentflow-resume recovers an attempt left open after its gate failed (#652)
+
+An owned AgentFlow attempt whose validation gate had failed but stayed open
+(its block failed, the process died, or an older Golem wrote it) could not be
+recovered: `-agentflow-status` exited 3 with
+`agentflow gate "..." has unknown status "failed"`, and `-agentflow-resume`
+refused with the same error. AgentFlow credits an attempt's first matching
+gate receipt, so re-running the gate on that attempt can never pass.
+
+`-agentflow-status` now exits 2 with
+`resume: block the attempt whose gate failed, then re-run the step serially`.
+`-agentflow-resume` blocks the attempt with the fixed reason
+`golem: resume found failed command gate`, runs none of its gates, then claims
+a new attempt and runs the model for that step again. The failed receipt is
+kept. Both still refuse before any change (status exit 3, resume exit 1) under
+an `enforce` lease policy, when the root retains a timed-out receipt, when the
+attempt has another owner, or when AgentFlow does not allow an automatic,
+non-break-glass `continue`. An open review-amendment attempt is still refused.
+Exit 2 offers a retry, not a guaranteed proof: a gate refused by
+`risk_policy: block` is refused again on the new attempt until the policy
+changes.
+
+The `enforce` refusal for `step_unclaimed` now says "under an enforced lease"
+instead of "under a finite enforced lease"; it always applied to any
+`enforce` policy.
+
+**Upgrade note:** resuming such a workspace now costs a model run for that
+step. Edits from the failed attempt stay in the workspace; the new attempt
+must write each still-changed in-scope file again.
+
+### Fixed — a fresh -plan run no longer reports success while step work remains (#651)
+
+A fresh `golem -plan` over a workspace that already held an open AgentFlow
+attempt (for example one an older Golem left open after its gate failed)
+skipped the open step, ran `finish-run`, exited 0 and printed `proof pack:`,
+although the proof recorded `steps_completed` below `steps_total`. AgentFlow's
+`next-step` returns nothing both when every step is done and when the
+remaining steps hold open attempts, and a non-strict `finish-run` does not
+require completed steps (kstruzzieri/agentflow#58).
+
+Before `finish-run`, task mode now asks AgentFlow's `next-action` and continues
+only when every step has completed and no attempt is open. Otherwise it exits 1
+without running `finish-run` or building a proof, names the AgentFlow state and
+step, and sends you to `-agentflow-status`, which reports whether
+`-agentflow-resume` can recover. An attempt left open after its gate failed
+(the block itself failed, the step-run ledger could not be read, the process
+died, or an older Golem wrote it) is blocked by `-agentflow-resume`, which then
+re-runs the step (#652); since #642 Golem otherwise blocks such an attempt.
+Since #643 a fresh `-plan` refuses such a workspace before any AgentFlow call;
+this check still covers a same-plan `-review-manifest` round over an unfinished
+run and an attempt another writer opens during the run. Runs whose steps all
+complete are unaffected.
+
+### Security — SQLite stores secure the file SQLite opens, not the path as written (#648)
+
+The stores that promise private (0600) database files used to create and
+chmod the path exactly as given, while SQLite opened the file that path
+resolves to. The two differ in three cases, and in each the real database
+and its `-wal`/`-shm` sidecars could be left at the default 0644:
+
+- a `file:` URI, such as `go-llm-mcp -conversation-db file:/data/t.db`: the
+  store created a 0600 decoy named after the URI in the working directory,
+  and SQLite created the real database beside it at 0644;
+- a path with `..` after a symlink, such as `link/../t.db`: the store secured
+  a file under the link's target while SQLite opened `t.db` in the working
+  directory;
+- a symlinked final component: SQLite names the sidecars after the link's
+  target, so loose sidecars there were never secured.
+
+This covers the transcript store (`transcript.Open`, `go-llm-mcp
+-conversation-db`), agent memory (`memory.OpenRecordStore`,
+`OpenHardenedDB`, `PrepareDBFile`, `SecureDBFiles`, `go-llm-mcp
+-agent-memory-db`), MCP retrieval feedback, and Golem's session, feedback,
+index, checkpoint and memory stores. Each now resolves the file SQLite will
+open first, the way SQLite does, and secures that file and its sidecars;
+the stores that open the database themselves also fail the open if SQLite
+then reports a different file, before enabling WAL or running migrations.
+Opening the connection and applying URI pragmas can still create or modify
+files before that check; it compares pathnames, not file identity, and does
+not protect against concurrent path replacement. The filename check uses
+`PRAGMA database_list` directly so a schema lock or a table with the pragma's
+name cannot interfere. A relative `file:` URI is pinned to the working
+directory at open time. `memory.OpenHardenedDB` now also secures
+existing `-wal` and `-shm` files during the open, so one it cannot chmod
+fails the open rather than the caller's next `SecureDBFiles`.
+
+Related fixes:
+
+- An agent-memory store opened by `file:` URI kept its private signing key
+  under the decoy directory. Keys now live beside the database SQLite opens.
+  A store whose keys are still in the old directory fails to open with an
+  error naming the directory and the `mv` to run; go-llm does not move
+  private keys itself. An agent-memory path that names no file (an in-memory
+  database) now needs an explicit `KeyDir` or injected credentials.
+- Golem's `-feedback-db` workspace check now applies to the file SQLite
+  opens. Before, `file:<workspace>/x.db` (with Golem started outside the
+  workspace), or a URI whose `..` follows a symlink into the workspace,
+  passed the check and wrote inside the workspace.
+- Golem's feedback store with a `file:` path failed after creating the real
+  database at 0644; its writer and reader now use the same file.
+- Golem's feedback workspace check preserves the URI options passed to the
+  opener, including read-only mode, locking and busy timeout settings.
+- Hardened openers require an existing database for URI `mode=rw` or
+  `mode=ro`, before preparing any file or directory.
+- Index database hardening rejects a directory at the main, WAL or SHM path
+  without changing that directory's permissions.
+- Transcript applies the same filename and journal-mode checks to every
+  in-memory spelling, including literal `:memory:`.
+
+Newly rejected before anything is created: `file:` URIs with a `vfs`
+parameter, a repeated `mode` parameter, a NUL byte, a host other than
+`localhost` or any user information, a `#` fragment, or a query Go and
+SQLite would read differently (such as one containing `;`).
+
+### Changed — a fresh -plan or -goal refuses a workspace with AgentFlow execution history (#643)
+
+Re-running `golem -plan` in place over a started or finished AgentFlow run used
+to relock the plan silently: AgentFlow's `lock-plan` overwrites
+`.agent/plan.lock.json`, while `init` and `init-execution` keep the existing
+execution contract and ledgers, which then described a plan they were not
+recorded against. `-goal` could do the same when the plan lock was absent or
+reset.
+
+Both now refuse before any AgentFlow call when `.agent/` holds
+`execution.contract.json` or rows in `step-runs.jsonl`,
+`command-receipts.jsonl`, `file-receipts.jsonl` or `verification-runs.jsonl`.
+They exit 1, name the first artifact found, and point at `-agentflow-status`
+and `-agentflow-resume`, or at moving `.agent/` aside.
+
+**Upgrade note:** a script that re-runs `-plan` in the same workspace,
+including after a finished run, must now resume the run or start from a
+workspace without `.agent/` execution state. The post-run review round,
+`-plan` with `-review-manifest` and the same plan as the locked one, still runs
+over the history. The `-goal` handoff (a locked plan with no execution
+contract), a missing `.agent/`, the pristine `agentflow init` scaffold, and
+`-agentflow-resume` are unaffected.
+
+### Fixed — a failed step run or gate now blocks its AgentFlow attempt (#642)
+
+Task mode closed an attempt only when its agent run stopped at a loop cap
+(#611). Any other failure returned with the attempt open. After a provider or
+observer error, an exhausted context, an interrupt, or a gate whose `run` call
+left no receipt, `-agentflow-resume` then settled the attempt by running its
+missing gates and `finish-step`, accepting partial work whose gates happened to
+pass. After a gate that ran and failed (or that the risk policy refused, which
+also leaves a receipt), or an unreceipted edit, `-agentflow-status` exited 3
+and `-agentflow-resume` refused (exit 1), so recovery was manual.
+
+Golem now attempts to record each such attempt as `blocked` before exiting 1,
+with a fixed reason (`golem: agent run failed`, `golem: agent run cancelled`,
+`golem: agent run exhausted its context`,
+`golem: unreceipted edit aborted the run`, `golem: agent run stopped: <reason>`
+or `golem: gate execution failed`). The error detail stays in the printed
+error, not the ledger. Resume's own gate settlement blocks the same way. The
+block is attempted on its own 30-second deadline, independent of caller
+cancellation, with up to 5 seconds of runner drain time; the deadline bounds
+only the block call, not the recovery report that follows. A failed block
+still reports both causes. When the step-run ledger cannot be read, Golem does
+not block blind: the attempt stays open and the error ends
+`attempt not blocked; run -agentflow-status`. A command-receipt ledger read
+error after a failed gate ends with `run -agentflow-status` too.
+
+A gate that timed out leaves a receipt that AgentFlow 1.0's run verification
+rejects for the rest of that workspace's ledger (kstruzzieri/agentflow#60).
+Golem now says so: the failed gate's error names the receipt,
+`-agentflow-status` exits 3 instead of offering a resume, and
+`-agentflow-resume` refuses before changing anything. A same-plan
+`-review-manifest` round also refuses a retained timeout before startup
+mutations. Archive the complete `.agent/` outside the working tree and start
+and validate a new run; do not delete individual receipts, and do not use
+`agentflow init-execution --force`. Restore or commit the earlier run's source
+changes first, because run verification needs a receipt in the new ledger for
+every changed file. If the run came from a planning handoff, re-plan with
+`-goal` or run `-plan` without `-workflow-handoff`: the handoff check reads
+`.agent/workflow.contract.json`, which went with the archive. The error names
+the receipt by its id when that is an AgentFlow-style id (ASCII letters,
+digits, `.`, `_`, `-`; 1 to 128 characters), else by its ledger line.
+
+**Upgrade note:** once the block is recorded for a failed step attempt,
+`-agentflow-status` reports `step_unclaimed` (exit 2 unless the root retains a
+timed-out command receipt; a gate that ran and failed or an unreceipted edit
+was exit 3 before), and `-agentflow-resume` runs the model again in a new
+attempt instead of settling the old one on its gates. A failed review
+amendment is blocked too, but its step stays completed: resume does not retry
+it and its findings stay unresolved. A script that resumes on exit 2 now pays
+for a model run after a provider or observer error, an exhausted context, an
+interrupt, or a failed gate; before, resume settled each of these on its gates
+without the model, except a gate whose `run` call left a receipt. Under the
+`enforce` lease policy recovery stays manual (exit 3). Edits from the failed
+run stay in the workspace: restore or delete them before resuming, or the new
+attempt must write each still-changed in-scope file again. Attempts an older
+Golem left open are not closed after the fact, except that since #652 resume
+blocks one whose command gate failed and re-runs the step; resume may still
+settle any other eligible one on its gates. Block one with
+`agentflow block-step` to abandon it.
+An attempt can still remain open after a failed block, a step-run ledger Golem
+could not read, process death, a resume safety refusal before its gates, or a
+`finish-step` error. Golem does not block an attempt the ledger already shows
+closed (for example by an operator's `agentflow fail-step`).
+`-agentflow-status` shows the authoritative state.
+
+### Security — SQLite 3.51.3: WAL-reset corruption fix (#632)
+
+go-llm now links modernc.org/sqlite v1.46.2, which embeds SQLite 3.51.3.
+Unpatched SQLite releases from 3.7.0 through 3.51.2 can corrupt a WAL-mode
+database when two or more connections on the same file write or checkpoint
+at the same instant (https://www.sqlite.org/wal.html, section 11). go-llm's
+stores run in WAL mode, and some deployments meet that trigger, for example
+two MCP servers recording chats to one transcript database. SQLite describes
+the race as rare. modernc.org/sqlite still embeds older SQLite on
+netbsd/amd64 (3.40.0) and on freebsd/386 and freebsd/arm (3.41.2); builds for
+those targets do not get the fix. The released golem and go-llm-mcp binaries
+(linux, macOS and Windows on amd64 and arm64) all do.
+
+modernc.org/libc moves to v1.70.0 with it: modernc requires a module using
+modernc.org/sqlite v1.46.2 to select the libc version that release requires.
+If your module requires modernc.org/libc directly, set it to v1.70.0.
+
+### Fixed — concurrent first opens of an agent-memory record store (#631)
+
+Processes that open one new agent-memory record store at the same time
+(`memory.OpenRecordStore`, for example two MCP servers starting with agent
+memory on a fresh path) no longer fail with
+`memory.ErrIncompleteInitialization` and a request for an operator recovery
+that was not needed. The first opener now claims signing initialization inside
+the database's write lock before it creates the signing key. The others wait
+for it, up to the store's 5 s busy timeout, and then open the initialized
+store. If that initialization, a large legacy import for example, takes longer
+than the timeout, the others fail with `SQLITE_BUSY` instead and can retry
+once it finishes. This closes the #631 caveat in the v0.5.0 notes. A first-time
+initialization also no longer fails with `SQLITE_BUSY` when another connection
+is writing to the database. It waits for that writer instead. A signing key
+left without a committed marker, by an attempt that crashed or failed, still
+returns `ErrIncompleteInitialization`.
+
+### Fixed — concurrent llm-bench runs no longer lose the shared judge cache (#593)
+
+Two `llm-bench` runs opening the same judge cache at once could fail its schema migration with `table judge_cache already exists`, `duplicate column name`, or `database is locked`, and the run that failed printed `judge cache disabled` and judged every case uncached. Every judged run uses `<user cache dir>/go-llm/judge-cache.db` unless `-judge-cache` says otherwise, so any two runs started together could hit this. Each migration step now claims its version row before its DDL, in the same transaction, and is skipped when another run already applied it. By default, cache connections retry lock contention from another run for up to five seconds before failing; this applies to cache reads and writes as well as to migrations. On Windows, a UNC or device path for `-judge-cache` is now rejected, as for go-llm's other SQLite stores, and the run continues uncached.
+
+Judge-cache paths are now validated before creating directories. File URIs create only their actual target parent, Unix paths resolve symlinks before `..`, and relative URIs keep the same database when a pooled connection is replaced after a working-directory change. Malformed or ambiguous URI options are rejected instead of silently dropping access-mode restrictions; memory URIs create no directories, and `mode=ro`/`mode=rw` require an existing file. Caller-supplied busy timeouts are preserved without duplication. The report collision guard resolves the same cache target, including URI aliases, hardlinks, and future files, so a report cannot overwrite its cache through a differently spelled path. Open and migration errors retain their underlying causes.
+
+### Added — Native Seatbelt/Bubblewrap sandbox for Trusted commands and verification (#576)
+
+Golem adds `-sandbox host|seatbelt|bwrap` and
+`-sandbox-network denied|allowed`. A Trusted session still runs its commands
+on the host by default. `-sandbox seatbelt` (macOS) or `-sandbox bwrap` (Linux) runs
+foreground and background commands, scratch execution and post-write
+verification under one frozen native policy, with the network denied unless
+`-sandbox-network allowed`. That setting is permission, not a connectivity
+guarantee. The backend is probed against the canonical root before any config,
+store, session, MCP connection or provider is touched. An unavailable backend
+stops startup, and Golem never falls back to the host. A native session mounts
+no retrieval, auto-index or model memory tools. With it, `-rag-db`,
+`-agent-memory` (with a session), `-delegate`, `-dispatch`, `-mcp-stdio`,
+`-mcp-http`, `-progressive` and `-grounding` are usage errors. `-sandbox-network`
+without a native `-sandbox` is a usage error, and AgentFlow modes reject both
+flags. Every `permissions:` line, host and Inspect included, now carries
+`scratch=` and `verification=` state, and a native backend's line adds its
+`network=` policy and `limits=`. Seatbelt has no memory/CPU quota, and
+Bubblewrap's `ip-denied` leaves pathname Unix sockets in the shared workspace
+reachable. `-sandbox` does not
+confine `/consult`, git-context helpers, MCP servers or the external editor.
+Seatbelt may deny loader, SDK or cache access outside its reviewed roots. The
+recovery is a new host Trusted session or a toolchain and caches inside the
+workspace, never a broader policy. See `docs/golem.md`, "Native command
+sandbox (-sandbox)".
+
+#### Behavior change
+
+- Post-write verification grant keys are `verify:v2` for every runtime, host
+  included, bound to the full normalized sandbox policy and the prepared
+  command. A changed runtime or network setting prompts again. Grants are
+  session-local, so old `verify:v1` grants do not carry over and nothing
+  migrates. The key still binds no script bytes (containment row V1 stays
+  uncontained, owner #420).
+- Scratch approval previews name the runtime. The host keeps
+  `disposable cwd copy; host process remains unrestricted`; a native backend
+  shows `disposable cwd copy under the <runtime> sandbox`.
+- Seatbelt results report a failed private-temp cleanup as
+  `note: sandbox temp cleanup: ...` on `run_command`, verification,
+  `command_status`, `stop_command` and `/jobs`, without changing the exit code
+  or error. A nonzero or failed-to-start Seatbelt foreground run adds a note
+  that the profile may have denied loader, SDK or cache access and that the
+  run is not a passing check.
+- An explicit `-sandbox`, `host` included, selects the Trusted profile when
+  `-profile` is omitted (`profile: trusted (selected by -sandbox)`).
+  `-profile inspect` with either sandbox flag is a usage error.
+- The verification approval preview and the model-visible verification result
+  carry a `target:` line naming the canonical workspace and saying unpromoted
+  scratch artifacts are not checked. A native verifier's preview warns that its
+  writes inside the workspace and private temp are outside `/undo`.
+- A native session marks every descriptor Golem inherited above stdio
+  close-on-exec before the startup probe, so a descriptor a launcher left open
+  (a CI runner's, a shell redirection) never reaches a sandboxed command.
+  Host sessions keep their inherited descriptors.
+
+#### Notes for library callers
+
+- `golem.Options.Sandbox` selects the runtime. The zero value is the host and
+  admits tools as before. A native runtime requires `ProfileTrusted` and fails
+  `New` with an error wrapping `agenttools.ErrSandboxPolicy` when it cannot be
+  honored. It admits only library-built tools bound to the session's root and
+  policy (`agenttools.CheckSandboxBindings`), and its verifier must be nil or an
+  `agenttools.VerifierSlot` bound to the same root and policy, checked at
+  `New`, `ReplaceConfiguration` and every turn start. Each turn retains the
+  verifier identity it validated, including an absent hook, across all callbacks.
+  `agent.WithVerifier` is safe concurrently with `Run`; replacement affects
+  subsequent runs. `agent.Orchestrator.RunWithVerifier` runs with an explicitly
+  captured hook so a host can validate it without a check/use gap.
+- `EffectivePermissions` adds `Command.Limits`, `Scratch` and
+  `Verification{State, Target}`. `Command.Network` reports `denied`,
+  `ip-denied` or `allowed` for a native runtime.
+- `agenttools.JobStatus.Notes` and `agenttools.VerifyResult.Notes` carry
+  backend diagnostics such as the Seatbelt cleanup note. They never change an
+  exit code, a timeout or the error classification.
+- The Seatbelt backend now refuses to spawn while any descriptor above stdio
+  lacks FD_CLOEXEC, as Bubblewrap already did, naming the descriptor: a
+  sandboxed command could otherwise write or connect through it whatever its
+  profile says. Both native backends also run the audit at construction, so
+  `agenttools.ValidateSandbox` (and with it `golem.New`) fails with an error
+  wrapping `ErrSandboxPolicy` instead of advertising a backend that refuses
+  every command. Mark your own descriptors close-on-exec before building a
+  native session. On macOS, the audit marks libSystem's identified
+  `com.apple.netsrc` resolver socket close-on-exec, retaining the parent's
+  usable socket while preventing sandboxed children from inheriting it.
+  Failure to set the flag refuses the spawn.
+- Seatbelt execution is limited to the reviewed system roots, workspace,
+  private temp and exact approved executable. An unreadable executable
+  outside those allowances can no longer run as a child.
+- `golem.New` validates every session's sandbox policy, the host included, so
+  the host runtime with any constraint (network, memory, CPU or capabilities)
+  fails `New` with an error wrapping `agenttools.ErrSandboxPolicy`.
+- `golem.CommandPermissions` is no longer comparable with `==`: it gained
+  `Limits []string`.
+- `agenttools.VerifyCommand.Run` returns a `VerifyResult` alongside every
+  error: the partial result, `Notes` included, once the command was launched,
+  and a zero `VerifyResult` (exit code 0) for a refusal before launch, such
+  as the descriptor refusal. Check the error before the exit code.
+- Hosts that leave `Sandbox` zero keep host execution and the existing
+  admission (Firn, which runs Inspect, is unaffected).
+
+### Changed — point reads on APFS no longer list every ancestor directory (#558)
+
+Workspace opens by name (`read_file`, `list`, scoped opens, and the target
+lookup of `write`, `edit` and undo) proved each path component's on-disk
+spelling by listing its parent directory, so one read cost time proportional
+to the size of every ancestor: about 100 ms with 100,000 siblings. On APFS the
+spelling now comes from the stored name the filesystem reports for the
+object, bound to that object's identity, so a read takes about a tenth of a
+millisecond regardless of directory size (measured: 78-142 us from 3,000 to
+100,000 siblings, against 1.6-112 ms before). Policy sees the same spelling, and
+directories that cannot be listed are still denied. Linux, other
+filesystems, mount points, multiply-linked files and other entry types keep
+the listing, including APFS volume-group mount points that share a logical
+device ID with their parent.
+
+### Added — Secrets accuracy and workflow evidence, interceptor census (#517)
+
+- `docs/security/secrets-evidence.md`: a generated report on `interceptor.Secrets` as shipped. It covers accuracy by kind, carrier and hook from a classified case table, with every miss listed by case and lookalikes, fixtures and coverage gaps reported apart; the Secrets side of the interceptor census, by observation and by file; a workflow table that runs Golem's real orchestrator and tools under the always-on guards with and without Secrets; and the evaluation of the six Secrets default gates. The recorded outcome is that Secrets stays opt-in: on ordinary benign files it blocks more than the 1 in 100 observations the unnecessary-block budget allows in four of the six census strata (this repository, the Go source tree and both LLM-application cookbooks; the two emoji and i18n strata have no Secrets block), a secret-shaped test fixture in the model's own write arguments ends the run, and a default flip needs #518 first. A regeneration test keeps the report in step with its inputs. No live credentials; generated fixtures minimize committed secret-shaped material; GitHub enforcement is verified separately.
+- `llm-bench -interceptor-census` (with `-census-manifest`, `-census-root` and `-census-out`, which are refused without it): a deterministic, model-free census of interceptor findings on benign files rendered through Golem's production tools (`read_file`, `search`, `run_command`, `command_tail`, the verifier, an MCP server and mixed-context assembly). It checks every file against a sha256 manifest, records each interceptor's findings once and derives the outcome for the guards-only, guards+detectors, guards+Secrets and full arms. `docs/llm/census/` holds the manifest and the committed aggregate results for this repository, the Go source tree, two LLM-application cookbooks and two emoji and i18n sources; the README describes how to fetch the trees and reproduce the results.
+- `internal/secretscan/secrettest`: the versioned Secrets case table and its deterministic generators, which expand secret-shaped values at test time so that no committed artifact carries one; a test scans the committed table, results, report, census README and the #517 test sources to enforce it.
+
+### Added — interceptor arms, v1 cell classification and benign corpus in llm-bench (#517)
+
+- `docs/llm/benchmarks/2026-10-26-interceptor-benign.md`, generated by `llm-bench -interceptor-benign-report -registration docs/llm/traces/interceptor-benign/registration.json` without calling a model: detector fire rates by rule, carrier, origin and census stratum, by observation and by file; trailer bytes; the unnecessary-block budget on MCP observations per stratum, with adversarial fixtures counted apart; the observations where a Secrets block removes the detectors' trailers; the identity gate on the benign corpus; and the registered power of the deferred capture. The recorded outcome is that the detectors stay opt-in: there is no measured benefit evidence for them until #700's v2 corpus, and `guards+detectors` blocks more than 1 in 100 benign MCP observations in both i18n strata (38 of 176 CLDR annotation files, 1 of 3 gemoji files). The model capture is deferred to the flip PR (K5 = b), which re-freezes the registration. A regeneration test keeps the report in step with its inputs, and the mode refuses to write a report when the identity gate fails.
+- `docs/llm/benchmarks/2026-10-25-interceptor-adversarial-v1.md`, generated by `llm-bench -interceptor-v1-report docs/llm/traces/injection/cases.json`: every cell of the unchanged #452 v1 injection corpus rebuilt under the four interceptor arms (guards only, guards+detectors, guards+Secrets and all three) and classified against the guards-only request as identical, trailer, observation-blocked, call-blocked or blocked-at-build, with the deterministic hit or miss per payload. Secrets blocks 5 hex-encoded cells as payment-card lookalikes: digit runs in the hex text pass the card rule, which is not detection of the payload.
+- `docs/llm/traces/interceptor-benign/`: the registered benign task corpus (96 extraction tasks drafted from the census, 14 hand-authored delegated tasks and 16 nonfiring controls, each reviewed by two reviewers), its frozen `golem-default-guards` and `guards+detectors` traces, and `registration.json` (`llm-bench.interceptor-registration/v1`), which binds the cases, traces, census, budgets and power before any capture. `-interceptor-benign-draft` drafts the sampled tasks from a census root, and `-build-interceptor-benign` runs the identity gate and builds the traces.
+- No Golem or library behavior changes: `interceptor.Defaults()` and every interceptor's policy are untouched, and the arms are filtered from it in library order.
+
+No live credentials; generated fixtures minimize committed secret-shaped material; GitHub enforcement is verified separately.
+
+### Changed — interceptor defaults decision recorded: detectors and Secrets stay opt-in (#517)
+
+- `docs/security/interceptor-defaults-decision.md` records the outcome of #517: the injection detectors and Secrets both stay opt-in, so `golem` without `-interceptors` still installs only the always-on guards, exactly as `-interceptors=false` does. The detectors have no measured benefit evidence until #700's corpus exists, and they block more than 1 in 100 benign MCP observations in both i18n strata (38 of 176 files in i18n-cldr-annotations, 1 of 3 in i18n-gemoji). Secrets blocks more than 1 in 100 benign observations in four of the six census strata, a secret-shaped test fixture in the model's own write arguments ends the run, and a flip needs #518 first. The record also maps each acceptance criterion of #517 to its evidence and lists three follow-ups: weak-phrase demotion, payment-card rule hardening and credential-path coverage of exec output.
+- The `-interceptors` usage text, the `cmd/golem` package documentation, `docs/golem.md` and the README now point at the record, and `docs/golem.md` gives the recorded decision as the reason for the default. The effect of the detectors on answer quality is still unmeasured: the model capture is deferred until a default change is proposed. No flag, default, startup notice, event or serializer changes; `interceptor.Defaults()` and every interceptor's policy are untouched.
+
+### Fixed — Quality-sensitive routes budget against the trained context (#479)
+
+`ModelProfile.QualityCtxCeiling` was declared and read by the router's
+admission budget and Golem's per-turn input ceiling, but nothing populated it,
+so `chat`, `reasoning`, and `code-review` always assembled against the full
+advertised window. It is now populated from a per-family
+`quality_ctx_ceiling` in the embedded catalog (Qwen3.5 and Qwen3.6: 262,144)
+and from a new per-model `quality_ctx_ceiling` in `models.json`, which wins
+over the catalog.
+
+#### Behavior change
+
+- `planning` and `analysis` are now quality-sensitive; `agent`, `fim`,
+  `embedding`, and side tasks are unchanged.
+- `chat`, `reasoning`, `code-review`, `planning`, and `analysis` are the
+  quality-sensitive use cases; `agent`, `fim`, `embedding`, and side tasks are
+  unchanged. The MCP `generate` tool routes as `chat`, so it is
+  quality-sensitive too.
+- A cut happens only when a ceiling applies, it is below the known served
+  window (or the window is unknown), and the use case is quality-sensitive.
+  The budget is then the ceiling, clamped to a known window; with an unknown
+  window the configured ceiling is the budget. A ceiling at or above a known
+  window changes nothing. No catalog family changes at its default catalog
+  window; the catalog ceiling engages for Qwen3.5 and Qwen3.6 served above
+  262,144.
+- A smaller budget also lowers the router's headroom score, which can change
+  model selection, sticky routing, and fallback order before admission fails.
+- Golem's per-turn input ceiling follows the active route's use case: in
+  `-goal` mode that is `planning`, so the chain minimum uses the same reduced
+  budget the router applies, including a configured ceiling on a model whose
+  window is unknown. The ordinary agent loop and an explicit input-ceiling
+  override are unaffected.
+- Catalog defaults match by parsed family name; Hugging Face repository or
+  GGUF identifiers may not match, so set `quality_ctx_ceiling` explicitly for
+  them.
+- The `qwen2.5` and `qwen3` families are deliberately unseeded: `qwen2.5` also
+  matches the Qwen2.5-1M models (trained to 256K), and `qwen3` also matches
+  262,144-native Qwen3-Coder and 2507 models. Users serving an ordinary
+  Qwen2.5 or original-release Qwen3 checkpoint with a YaRN window should set
+  `quality_ctx_ceiling: 32768`.
+- Opt out per model by setting `quality_ctx_ceiling` equal to `context_window`.
+- `quality_ctx_ceiling` of 0 or omitted means unset; positive values override
+  the catalog; Load rejects negative values.
+- Two roles on the same provider/model with different nonzero
+  `quality_ctx_ceiling` values are now a selector conflict at Load.
+- `configview` (and `golem models -json`, the MCP configview resource) gains an
+  optional `quality_ctx_ceiling` field, omitted at 0, on inventory models and
+  model summaries. It is the raw merged ceiling, not a per-use-case window,
+  and may exceed `context_window`; a config-only summary (as in the MCP
+  resource) shows only a configured value, not catalog defaults. The package
+  doc now states the v1 extension policy: v1 may gain optional `omitempty`
+  fields, consumers must ignore unknown members, and renaming, removing, or
+  retyping a field still requires v2.
+- `config.SetRoleModelResult` gains `DroppedQualityCtxCeiling`. `SetRoleModel`
+  drops a role's ceiling, and reports it, only when the role's provider/model
+  changes; re-selecting the same model keeps it. `ForkRoleModel` likewise
+  keeps the ceiling only on a fork to the source's own provider/model.
+
+### Added — llm-bench injection-resistance corpus and report (#452)
+
+- `docs/llm/traces/injection/`: a committed, frozen-real-wire prompt-injection corpus (16 bases across source files, guidance files, retrieval chunks and MCP output; blunt, helpful, encoded, jailbreak and Best-of-N variants; one clean twin per base), built from Golem's application prompt and always-on guards with `-build-injection-corpus` and guarded by regeneration, balance and wire-fidelity tests.
+- `-injection-report`: first-decision `InjectionResistance`, `RestraintUnderAttack` and anchor-match AnswerQuality per model, with equal-base estimates, paired bootstrap CIs on common cells, twin contrasts and explicit completeness (with Serving stack and Temperature columns); bound to a pre-registration file. Before computing, it checks each artifact's sealed provenance hash against the manifest's per_artifact row, and every capture's manifest temperature, each artifact's recorded temperature and a hosted model's endpoint against the registration, and it opens with a generated provenance block (registration digest, revisions, and per capture the manifest digest, endpoint, temperature, models and ledger counts).
+- `-calibrate-capture` writes capture manifest v3 for injection traces and keeps every failed attempt; the interrupt is read from the context, so a cell that a cancellation cuts off mid-flight, the last cell included, is recorded unattempted and a later capture can fill it; a cancellation that cuts off a cell's in-run retry leaves it failed with its first attempt and error only; a per-request timeout stays a real failure (net/http's own `Client.Timeout` message is now filed `<error: timeout>` rather than `<error: other>`, on every capture path); and an interrupted capture returns the interrupt error after publishing the partial ledger. `-scorer llm-judge` refuses injection traces.
+- `-candidate-session-id` sends its value as the session header on every openai-compat candidate request (normal runs, `-calibrate-capture` and `-replay-attempt`; injection and ordinary chat traces alike); empty sends none, and a value with surrounding spaces or tabs or a control character is refused at startup. Hosted endpoints that require a session header need it.
+- Every hosted block in the injection registration requires a `host_fixed_decoding` declaration, which lets a hosted model register its host-fixed temperature; local models stay at temperature 0.
+- The registered temperature per model is recorded in capture manifests and artifact provenance, and a capture that mixes registered temperatures is refused (one capture per temperature).
+- Review hardening: manual outcomes stay outside the deferred-rate denominator; encoded partial markers and unresolved `env` wrappers require adjudication; entirely absent registered BoN groups remain incomplete; manifests and adjudication rows reject trailing data; missing retry results preserve a valid failure ledger; corpus filename segments are validated before publication.
+- Follow-up review: ordinary runs reject injection traces with capture/report guidance, and modes that ignore `-registration` reject it; reports check artifact model, transport and ordering against the manifest and warn about omitted registered controls; malformed declared JSON sinks and unresolved command wrappers require adjudication, and registered base64 matching handles wrapped lines. The published report spells out the task-completion and control-context limitations and the requirements for a separately registered continuation corpus.
+
+### Added — published containment declarations and coverage inventory (#452)
+
+- `docs/security/containment.md` declares, per scenario, which forbidden effects Golem's shipped boundaries contain when a model follows an attack, which they do not (owned residuals such as #420), and which depend on pending work; `docs/security/containment-inventory.md` maps every #452 requirement to its evidence: executed, mutation-proven tests for shipped boundaries, artifacts for model resistance, and a declared owner for pending or out-of-scope rows. No new runtime containment is introduced.
+- The pre-push and CI security gate now also runs the containment scenarios and verifies each mandatory inventory test executed and passed.
+- Inventory refs must connect the selected test to the marked function through static references; allowed skips in a cited parent's descendants do not count as successful execution evidence.
+- Checker evidence is stamped with the tree and commit CI forwards and, in a git checkout, measured: it is marked dirty unless the checkout's HEAD tree matches the forwarded tree with no tracked change. It is not cross-verified across profiles, and the Windows checkout's source digest differs from the other platforms' under `core.autocrlf`. The Windows profile has no mandatory rows yet: its exec and unix scenarios may only skip for their first missing capability, and the rows expected to pass there are listed as unobserved in `docs/local-ci.md`. Every mutation-ledger proof ran on darwin unless its entry names another platform.
+- The checker fails a run that forwards a CI identity but measures dirty (a mismatched tree, a modified tracked file, or a GOOS other than the profile's) instead of publishing dirty evidence under that commit; the inventory lint requires each scenario marker to precede an `AttackEffect` assignment in the registering function, so a deleted probe cannot default to contained; and the registry's declaration, integrity and declared-rate tests are mandatory on `linux-host`.
+
+### Security — Optional bearer authentication for the MCP HTTP transport (#428)
+
+The MCP server's HTTP transport, h2c and TLS alike, can now require one shared
+bearer token. Library callers pass `mcp.WithHTTPBearerToken(token)`; the
+standalone `go-llm-mcp` binary reads `GO_LLM_MCP_TOKEN`, only with
+`-transport http` (stdio ignores it). This is opt-in. When the option and the
+variable are absent, nothing changes: loopback h2c and TLS on any permitted bind
+stay unauthenticated, so an existing TLS-only remote deployment is still open to
+every caller that can reach it until a token is set. TLS encrypts traffic, and
+the loopback-only rule for h2c and the cross-origin check limit exposure, but
+none of them authenticates the caller. Set a token and, once the server is
+running at its deployed address, confirm that a request without it is refused
+before clients use it. See `docs/GETTING_STARTED.md`, "HTTP authentication and trusted networks".
+
+The token is 1-4096 bytes of RFC 6750 token characters (letters, digits, `-`,
+`.`, `_`, `~`, `+`, `/`, then optional trailing `=`), compared by SHA-256
+digest in constant time. Nothing is trimmed, so a value with a trailing newline
+fails. `GO_LLM_MCP_TOKEN` set but empty fails startup rather than disabling
+authentication. `WithHTTPBearerToken` with an empty or malformed token makes
+`mcp.NewServer` return an error wrapping `mcp.ErrInvalidHTTPBearerToken`
+before it loads configuration or opens any database. No error names the value.
+The token is read once, so rotating it means restarting the server and
+updating clients.
+
+#### Behavior change
+
+- With a token set, every request that reaches the MCP handler needs exactly one
+  `Authorization: Bearer <token>` header: initialize, discovery, tool calls,
+  GET/SSE, DELETE, and requests that carry an existing session ID. Any other
+  request gets HTTP 401, body `unauthorized`, and
+  `WWW-Authenticate: Bearer realm="go-llm-mcp"`, the same response for every
+  credential failure. A request the body limit rejects first keeps the limit's
+  status.
+- `OPTIONS *` now returns 401 when a token is set. The listener sets
+  `DisableGeneralOptionsHandler` so Go no longer answers it with an
+  unauthenticated 200. Without a token it behaves as before.
+- On h2c, an HTTP/1.1 `Upgrade: h2c` request must itself carry the token. One
+  without it gets the 401 before h2c reads or buffers its body or replies
+  `101 Switching Protocols`, so an unauthenticated caller cannot make the
+  server buffer an upgrade body. The upgraded request and every later stream
+  are checked again.
+- The gate strips `Authorization` before the MCP SDK and tools see the request,
+  so tool handlers never receive the credential.
+- Golem's MCP client cannot send an `Authorization` header, so a
+  token-protected `go-llm-mcp` answers Golem's `-mcp-http` with 401. Use stdio, or
+  leave the token unset on loopback.
+
+#### Notes for library callers
+
+- The token is one shared credential and carries no identity. No `TokenInfo`,
+  `UserID` or principal is derived from it, and it grants no new tool
+  permissions. A host-supplied `TokenInfo.UserID` and
+  `WithRetrievalPrincipalResolver` keep their retrieval-policy meaning and cannot
+  bypass the bearer check. A custom resolver cannot read `Authorization`,
+  because the gate strips it, so it must use separate trusted context.
+- `GODEBUG=http2debug=2` makes the HTTP/2 implementation log decoded request
+  headers, `Authorization` included, before any handler runs. Do not use it on
+  an authenticated server.
+- The library never reads the process environment; only `go-llm-mcp` reads
+  `GO_LLM_MCP_TOKEN`. There is no CLI flag, token file or `models.json` field.
+
+### Security — Exact configured-credential blocking in tool calls (#424)
+
+Golem's `-interceptors` chain now starts with a `configured_secrets` guard that
+blocks a tool call carrying a credential go-llm resolved from `models.json`:
+every configured provider's effective `api_key`, and each value a `${NAME}`
+reference in an `api_key` resolved to. Matching is exact and does not depend on
+the value's shape: a case-sensitive substring of the call's raw arguments, of
+every decoded JSON key and string value, and of the call's ID, function name
+and type. Arguments that are not valid JSON, including the JSON string literal
+the OpenAI-compatible client wraps them in, are also checked with their JSON
+escapes decoded, so a credential written as `\u` escapes there still matches.
+Values shorter than eight bytes get no exact protection. The guard
+runs on the agent and on dispatch children, on every path that builds an
+orchestrator, including `/model set`.
+
+A match drops the whole model response before it is recorded and before any
+of its calls is shown, planned, approved or run, so no call in it runs, clean
+calls beside it included; answer text the model already streamed is outside
+this check. The run fails with the fixed `run blocked: sensitive content detected` message,
+the goal is kept out of CLI history, and the content-full trace is not
+written, as for a Secrets block. A blocked dispatch child reports
+`Partial result unavailable: blocked: sensitive content` instead of falling
+back to its last message. Findings carry only the interceptor
+`configured_secrets` and the rule `configured_secret`, never the value or where
+it came from. The startup notice lists the guard first, with no member count:
+`interceptors: enabled (configured_secrets, zero_width, ...)`. The guards-only
+line now ends `(always on; -interceptors adds detectors, secrets, configured secrets, canary)`.
+
+This protection is available, not on by default: without `-interceptors`
+nothing checks tool arguments for configured credentials. It does not scan
+input, answers, thinking or tool results. Request bodies Golem sends to
+providers are covered by the separate "Exact configured-credential checks on
+outbound model requests" entry. The set is fixed when Golem starts, so a
+credential changed in the environment takes effect at the next start.
+
+#### Library
+
+- `config.Config.SecretMatcher()` returns an immutable `func(string) bool`
+  over the resolved set, never the values, and
+  `interceptor.NewConfiguredSecrets` builds the guard from it. Loading a config installs nothing: install the guard on the
+  orchestrator and pass it to `agenttools.NewDispatch`.
+- When an interceptor implementing the new `agent.SensitiveTextInterceptor`
+  blocks, that hook keeps only bounded metadata from every finding
+  (interceptor, rule, verdict and numeric fields) and drops all free text, from
+  every interceptor and the observer, before risk, telemetry and errors are
+  built. Its hook and observer errors become `agent.ErrDiagnosticsSuppressed`,
+  and its `agent.BlockedError` reports the new `Sensitive()`. Rule is kept, so
+  interceptors in such a chain must use a fixed identifier for it.
+- `interceptor.SensitiveBlocked` reports a block marked `Sensitive()`, whatever
+  the guard's name, or a `secrets` or `configured_secrets` block. A dispatched
+  child blocked any of these ways, `Secrets` included, now reports the fixed
+  marker instead of its last message, with no setting.
+
+### Security — Exact configured-credential checks on outbound model requests (#424)
+
+With `-interceptors`, Golem now also refuses to send a request body to a
+non-loopback OpenAI-compatible provider when the body carries a credential
+go-llm resolved from `models.json`, the same set the `configured_secrets`
+tool-call guard uses. The check covers chat (`/v1/chat/completions`),
+completion (`/v1/completions`) and embedding (`/v1/embeddings`) bodies: the raw
+text, every decoded JSON key and string value, and each tool call's argument
+document inside its string wrapper. A refused body is never sent: no
+connection, dial or proxy request is made, Golem does not fall back to another
+provider, and the circuit breaker does not count it. A refused embedding input
+never joins a shared in-flight request or takes a slot. The run ends with
+`run blocked: sensitive content detected`, the goal is kept out of CLI history,
+and neither the trace nor a session row is written; a dispatch child refused
+this way reports `Partial result unavailable: blocked: sensitive content`.
+
+Providers at `localhost` or a literal loopback IP are exempt; a LAN, private or
+link-local address, or a DNS name that resolves to loopback, counts as remote.
+Headers are never inspected, so a provider's own key still authenticates in
+its `Authorization` header; the same key in the body is refused, as is one
+provider's key in a request to another. The request URL, other headers,
+cookies, proxy credentials and responses are outside this check.
+
+This protection is available, not on by default. Only the provider clients an
+`-interceptors` session builds participate. The MCP server, the `golem`
+library's automatic provider bootstrap, `golem index` and `golem source`,
+`llm-bench`, native Ollama clients (including an Ollama provider at a remote
+address) and independently built providers are not covered.
+
+#### Library
+
+- `openaicompat.WithContentGuard(match)` installs the check on one client; a
+  refused request returns an error wrapping the new
+  `provider.ErrContentDenied`, which names neither the credential nor the URL.
+  `provider.IsInfrastructureError` reports false for it, so the router neither
+  falls back nor counts it against a breaker. Its route attempt is attributed
+  as unknown, so routing feedback records no failure or latency against the
+  model, and an agent run charges its token budget nothing for it. Install it
+  with `cfg.SecretMatcher()` on each client whose `provider.Destination` is
+  not `IsLocal()`, and build that client's HTTP client with
+  `provider.GuardHTTPClient` for origin binding and redirect refusal; the
+  matcher alone provides neither.
+- `interceptor.SensitiveBlocked` now also reports `provider.ErrContentDenied`,
+  so a dispatched child refused this way reports the fixed marker.
+- When a run's model call fails with `provider.ErrContentDenied`,
+  `Result.Messages` replaces each field an `agent.SensitiveTextInterceptor` in
+  the chain matches (message content, tool name and call ID, and each tool
+  call's ID, type, name and arguments) with `[...]`; arguments become the JSON
+  string `"[...]"`. Caller-owned inputs and earlier published step records are
+  not rewritten.
+
+### Fixed — MCP servers with an unsupported protocol version no longer leak (#406)
+
+When an MCP server answered `initialize` with a protocol version the client does not support, `mcpclient.Connect` reported it unavailable but left its stdio subprocess running (or, for HTTP, its session open), because the MCP SDK returns that error without closing the connection. mcpclient now closes the connection itself whenever the SDK's `Connect` fails. `llm-bench`'s MCP tool-schema capture (`-mcp-url`, `-mcp-stdio-command`) had the same leak and gets the same fix, reporting any close failure alongside the connect error. Its HTTP session cleanup has a five-second timeout and refuses redirects, so a stalled DELETE cannot hang capture after cancellation. Tests now pin the related lifecycle guarantees: a cancelled or partial startup releases the server, a server that exits during startup is reaped, a session outlives its setup context, cancelling one tool call leaves the server running, and closing a manager twice is safe.
+
+### Changed — Golem starts in the read-only Inspect profile (#387)
+
+Golem and the `golem` library now grant the model one of three runtime
+profiles. `golem.Profile` selects it through `Options.Profile`. The zero value
+is Inspect: the four workspace reads (`list`, `glob`, `search`, `read_file`)
+and nothing else. Trusted is the explicit opt-in that admits caller tools,
+writes, commands and the rest. Preview is reserved for the staged-workspace
+runtime (#388, #389) and is always rejected, with
+`Preview unavailable: staged-workspace runtime requires #388/#389`. Admission
+runs at `New`, `Replace` and `ReplaceConfiguration`, before any tool's
+`Effect`, `Plan` or `Invoke` runs and before model bootstrap. `Options.ToolAllowlist` is a frozen
+ceiling that no replacement can widen, and it may name tools that are not
+mounted yet. `Runtime.EffectivePermissions()` returns a copied snapshot of the
+profile, root, ceiling, mounted tools (each with its effect class, approval
+policy and provenance: `runtime`, `library` or `host-extension`) and command
+runtime. Native command sandboxes (`-sandbox`) are not part of this change;
+they come with #576, and without one Trusted commands run on the host.
+
+The CLI adds `-profile inspect|trusted`. With no `-profile`, a session is
+Inspect unless a legacy opt-in flag survives one-shot normalization
+(`-allow-write`, `-allow-exec`, `-scratch`, `-allow-tool`, `-rag-db`,
+`-agent-memory`, `-delegate`, `-dispatch`, `-mcp-stdio`, `-mcp-http`,
+`-progressive`, `-grounding`); it is then Trusted and startup prints
+`profile: trusted (selected by <flag>)`. An explicit `-profile inspect` with
+one of those flags is a usage error. AgentFlow modes stay Trusted and print no
+profile notice. Startup and successful late mounts print a `permissions:` line
+to stderr, and result JSON and stream events keep their schemas.
+
+#### Behavior change
+
+- The default CLI mounts no retrieval, auto-index, embedding route or model
+  memory tools (`memory_search`, `agent_memory_*`). Human `/remember`,
+  `/forget` and `/memories` still work. Existing indexes and memory databases
+  are not migrated or deleted.
+- In an Inspect session `/allow-write` and `/allow-exec` are refused before any
+  resource opens, and the hints for `/undo`, `/checkpoints`, `/auto-edits` and
+  `/jobs` say to restart with `-profile trusted` and the flag. Trusted sessions
+  keep the existing hints. `/help` marks the two commands Trusted-only.
+- `golem.Options.Tools` requires `Profile: golem.ProfileTrusted`; Inspect
+  rejects any caller tool, including one that declares only a `Read` effect,
+  with `ErrProfileIncompatible`.
+- Trusted raises an approval floor under every extra tool. Non-library tools
+  that mutate or use the network always prompt, even if they or their plans ask
+  for `ApprovalNever`. Four library types keep `ApprovalNever`:
+  `agent_memory_create` and `agent_memory_promote` (with the real memory store
+  they write only the agent-memory database under `-agent-memory`'s own
+  guards) and `delegate_code` and `dispatch` (model-provider traffic under
+  destination admission). The exemption is by concrete type and trusts the
+  store, model caller and hooks the host injects into those types: the floor
+  guards against a tool that declares `ApprovalNever` for itself, not against
+  host code. Non-nil pointers to value-receiver library tools retain their
+  library provenance and the same approval policy as the equivalent values.
+- `dispatch` is rejected alongside a `ScopeGuard`, and an allowlist that admits
+  `dispatch` must name all four reads and every other child tool it carries
+  (an optional `retrieve`). The new `agenttools.Dispatch.ChildToolNames`
+  reports those children.
+- Approval previews pass through `agent.SanitizePreview`, which renders
+  terminal controls as visible escapes, and diff headers quote paths that
+  contain whitespace, controls, quotes or backslashes, so literal escapes
+  cannot impersonate another filename.
+
+#### Consumers
+
+Firn's two `golem.New` sites (`internal/ai/runtime.go` and
+`internal/git/generator.go`) pass no `Options.Tools` and never call `Replace`,
+so they already run as Inspect with no behavior change. Setting
+`Profile: golem.ProfileInspect` there explicitly is recommended for clarity
+when Firn bumps go-llm. Callers that pass `Options.Tools` must add
+`Profile: golem.ProfileTrusted`.
+
 ## [0.5.0] - 2026-10-08
 
 ### Changed — `localhost` destinations always dial loopback (#665)
