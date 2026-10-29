@@ -8,8 +8,12 @@ import (
 	"io"
 	"net/http"
 	"runtime/debug"
+	"slices"
 	"strings"
 	"time"
+
+	"github.com/kstruzzieri/go-llm/internal/secretscan"
+	"github.com/kstruzzieri/go-llm/provider"
 )
 
 // Client is a thin HTTP wrapper for OpenAI-compatible endpoints. It handles
@@ -25,6 +29,10 @@ type Client struct {
 	apiKey    string
 	userAgent string
 	hc        *http.Client
+
+	// contentGuard, when non-nil, vets every outbound JSON body (see
+	// WithContentGuard). Read-only after construction.
+	contentGuard func(string) bool
 }
 
 // ClientOption configures a Client.
@@ -139,6 +147,18 @@ func WithUserAgent(ua string) ClientOption {
 	}
 }
 
+// WithContentGuard installs a check on every outbound JSON request body. A body
+// that match accepts is not sent: the call returns an error wrapping
+// provider.ErrContentDenied. match is given the body's raw text and each decoded
+// key and string value, so a credential that json.Marshal escapes on the wire
+// is still seen. Headers are never inspected, so the client's own API key still
+// authenticates. nil leaves the guard off.
+func WithContentGuard(match func(string) bool) ClientOption {
+	return func(c *Client) {
+		c.contentGuard = match
+	}
+}
+
 // NewClient builds a Client targeting baseURL. The URL should be the server
 // root WITHOUT the /v1 suffix; per-endpoint paths are appended internally
 // so callers don't have to remember which endpoints live under /v1. Any
@@ -220,9 +240,9 @@ func (c *Client) post(ctx context.Context, path string, body any, contentType st
 	if id := sessionIDFrom(ctx); strings.Trim(id, " \t") != id {
 		return nil, fmt.Errorf("openaicompat: session ID must not start or end with a space or tab")
 	}
-	buf, err := json.Marshal(body)
+	buf, err := c.marshalBody(path, body)
 	if err != nil {
-		return nil, fmt.Errorf("openaicompat: marshal %s body: %w", path, err)
+		return nil, err
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, bytes.NewReader(buf))
 	if err != nil {
@@ -234,6 +254,88 @@ func (c *Client) post(ctx context.Context, path string, body any, contentType st
 		return nil, fmt.Errorf("openaicompat: %s: %w", path, err)
 	}
 	return resp, nil
+}
+
+// marshalBody encodes body for post. Without a content guard that is plain
+// json.Marshal. With one, a body the guard accepts is refused with
+// provider.ErrContentDenied before anything is sent, and an encoding failure is
+// reported without the encoder's error text, which can quote the offending
+// bytes. Headers are not part of the body and are never inspected.
+func (c *Client) marshalBody(path string, body any) ([]byte, error) {
+	match := c.contentGuard
+	if match == nil {
+		buf, err := json.Marshal(body)
+		if err != nil {
+			return nil, fmt.Errorf("openaicompat: marshal %s body: %w", path, err)
+		}
+		return buf, nil
+	}
+
+	// The raw JSON fields are checked before encoding: a malformed one fails the
+	// encoder, which would skip the check on the encoded body below.
+	chat, isChat := body.(chatRequest) // post is only ever given the value.
+	if isChat && chatRawFieldsMatch(chat, match) {
+		return nil, contentDenied(path)
+	}
+	buf, err := json.Marshal(body)
+	if err != nil {
+		// The body is never sent, but a credential elsewhere in it takes
+		// precedence over the encoding fault, so check the rest.
+		if isChat {
+			if rest, restErr := json.Marshal(withoutRawFields(chat)); restErr == nil && secretscan.MatchJSON(rest, match) {
+				return nil, contentDenied(path)
+			}
+		}
+		return nil, fmt.Errorf("openaicompat: marshal %s body failed", path)
+	}
+	if secretscan.MatchJSON(buf, match) {
+		return nil, contentDenied(path)
+	}
+	return buf, nil
+}
+
+func contentDenied(path string) error {
+	return fmt.Errorf("openaicompat: %s: %w", path, provider.ErrContentDenied)
+}
+
+// chatRawFieldsMatch reports whether match accepts a json.RawMessage in r: a
+// tool call's arguments or a tool's parameter schema. Arguments get the extra
+// pass for the string envelope that wraps the real document on the wire, and for
+// malformed text, so a credential spelled with JSON escapes inside it is still
+// seen. The checks run on the values as given, not as json.Marshal would write
+// them.
+func chatRawFieldsMatch(r chatRequest, match func(string) bool) bool {
+	for _, m := range r.Messages {
+		for _, tc := range m.ToolCalls {
+			if secretscan.MatchToolArguments(tc.Function.Arguments, match) {
+				return true
+			}
+		}
+	}
+	for _, t := range r.Tools {
+		if secretscan.MatchJSON(t.Function.Parameters, match) {
+			return true
+		}
+	}
+	return false
+}
+
+// withoutRawFields returns r with every json.RawMessage emptied, leaving the
+// fields that always encode. marshalBody matches those on their own after
+// chatRawFieldsMatch has found nothing in the raw ones.
+func withoutRawFields(r chatRequest) chatRequest {
+	r.Messages = slices.Clone(r.Messages)
+	for i := range r.Messages {
+		r.Messages[i].ToolCalls = slices.Clone(r.Messages[i].ToolCalls)
+		for j := range r.Messages[i].ToolCalls {
+			r.Messages[i].ToolCalls[j].Function.Arguments = nil
+		}
+	}
+	r.Tools = slices.Clone(r.Tools)
+	for i := range r.Tools {
+		r.Tools[i].Function.Parameters = nil
+	}
+	return r
 }
 
 // setHeaders applies Authorization (when APIKey is set), Accept, User-Agent,
