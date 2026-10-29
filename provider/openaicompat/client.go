@@ -279,24 +279,13 @@ func (c *Client) marshalBody(path string, body any) ([]byte, error) {
 		return buf, nil
 	}
 
-	// The raw JSON fields are checked before encoding: a malformed one fails the
-	// encoder, which would skip the check on the encoded body below.
-	chat, isChat := body.(chatRequest) // post is only ever given the value.
-	if isChat && chatRawFieldsMatch(chat, match) {
+	// Check the concrete fields first. An unrelated encoding fault must not
+	// hide a credential and turn a sensitive denial into a marshal error.
+	if unencodedBodyMatches(body, match) {
 		return nil, contentDenied(path)
 	}
 	buf, err := json.Marshal(body)
 	if err != nil {
-		// The body is never sent, but a credential elsewhere in it takes
-		// precedence over the encoding fault, so check the rest. A fault outside
-		// the raw fields (a NaN Temperature, unencodable ChatTemplateKwargs) also
-		// fails this re-marshal, so it gets the construction error below and
-		// nothing is sent.
-		if isChat {
-			if rest, restErr := json.Marshal(withoutRawFields(chat)); restErr == nil && secretscan.MatchJSON(rest, match) {
-				return nil, contentDenied(path)
-			}
-		}
 		return nil, fmt.Errorf("openaicompat: marshal %s body failed", path)
 	}
 	if secretscan.MatchJSON(buf, match) {
@@ -307,6 +296,48 @@ func (c *Client) marshalBody(path string, body any) ([]byte, error) {
 
 func contentDenied(path string) error {
 	return fmt.Errorf("openaicompat: %s: %w", path, provider.ErrContentDenied)
+}
+
+// unencodedBodyMatches checks the string fields in the three POST shapes
+// before json.Marshal can fail on an unrelated value. The final MatchJSON in
+// marshalBody still checks the exact wire representation, including optional
+// fields and JSON decoding. post only receives these concrete value types.
+func unencodedBodyMatches(body any, match func(string) bool) bool {
+	stringsMatch := func(values []string) bool { return slices.ContainsFunc(values, match) }
+	switch r := body.(type) {
+	case chatRequest:
+		if match(r.Model) || stringsMatch(r.Stop) || match(r.ToolChoice) || match(r.ReasoningEffort) || chatRawFieldsMatch(r, match) {
+			return true
+		}
+		for _, m := range r.Messages {
+			if match(m.Role) || match(m.Content) || match(m.ReasoningContent) || match(m.Name) || match(m.ToolCallID) {
+				return true
+			}
+			for _, tc := range m.ToolCalls {
+				if match(tc.ID) || match(tc.Type) || match(tc.Function.Name) {
+					return true
+				}
+			}
+		}
+		for _, t := range r.Tools {
+			if match(t.Type) || match(t.Function.Name) || match(t.Function.Description) {
+				return true
+			}
+		}
+		for key, value := range r.ChatTemplateKwargs {
+			if match(key) {
+				return true
+			}
+			if encoded, err := json.Marshal(value); err == nil && secretscan.MatchJSON(encoded, match) {
+				return true
+			}
+		}
+	case completionRequest:
+		return match(r.Model) || match(r.Prompt) || match(r.Suffix) || stringsMatch(r.Stop)
+	case embedRequest:
+		return match(r.Model) || stringsMatch(r.Input)
+	}
+	return false
 }
 
 // chatRawFieldsMatch reports whether match accepts a json.RawMessage in r: a
@@ -329,24 +360,6 @@ func chatRawFieldsMatch(r chatRequest, match func(string) bool) bool {
 		}
 	}
 	return false
-}
-
-// withoutRawFields returns r with every json.RawMessage emptied, leaving the
-// fields that always encode. marshalBody matches those on their own after
-// chatRawFieldsMatch has found nothing in the raw ones.
-func withoutRawFields(r chatRequest) chatRequest {
-	r.Messages = slices.Clone(r.Messages)
-	for i := range r.Messages {
-		r.Messages[i].ToolCalls = slices.Clone(r.Messages[i].ToolCalls)
-		for j := range r.Messages[i].ToolCalls {
-			r.Messages[i].ToolCalls[j].Function.Arguments = nil
-		}
-	}
-	r.Tools = slices.Clone(r.Tools)
-	for i := range r.Tools {
-		r.Tools[i].Function.Parameters = nil
-	}
-	return r
 }
 
 // setHeaders applies Authorization (when APIKey is set), Accept, User-Agent,

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"strings"
 	"sync"
@@ -385,6 +386,24 @@ func TestContentGuardToolSchemas(t *testing.T) {
 		// A malformed schema is never sent, even where its escapes cannot be read.
 		{"malformed_schema_with_escaped_fixture", withSchema("hi", `{"`+jsonEscapeAll(guardFixture)+`":`), outcomeUnencodable},
 		{"clean_schema_is_sent", withSchema("hi", `{"type":"object"}`), outcomeSent},
+	})
+}
+
+// A malformed numeric option must not hide a configured credential elsewhere
+// in the request: callers need the typed denial to suppress copied input.
+func TestContentGuardDenialPrecedesNonRawMarshalError(t *testing.T) {
+	nan := math.NaN()
+	chat := chatReq(userMsg(guardFixture))
+	chat.Options.Temperature = &nan
+	generate := provider.GenerateRequest{Model: "m", Prompt: guardFixture}
+	generate.Options.Temperature = &nan
+
+	runSendRows(t, guardFixture, []sendRow{
+		{"chat", sendChat(chat), outcomeDenied},
+		{"generate", func(c *Client) error {
+			_, err := NewProvider(c).Generate(context.Background(), generate)
+			return err
+		}, outcomeDenied},
 	})
 }
 
