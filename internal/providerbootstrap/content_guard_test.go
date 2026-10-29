@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -176,15 +177,16 @@ func chatVia(t *testing.T, b *Bundle, gate *provider.DestinationGate, content st
 }
 
 // embedVia sends one embedding request through the bundle's "under" provider.
-func embedVia(ctx context.Context, t *testing.T, b *Bundle, gate *provider.DestinationGate, input string) error {
-	t.Helper()
+// It reports a lookup or bind failure as its error instead of failing the
+// test, so a goroutine can call it and the test goroutine fails on the result.
+func embedVia(ctx context.Context, b *Bundle, gate *provider.DestinationGate, input string) error {
 	p, ok := b.Providers.Get("under")
 	if !ok {
-		t.Fatal("provider \"under\" not registered")
+		return errors.New("provider \"under\" not registered")
 	}
 	bctx, err := gate.Bind(ctx, "embedding", "under")
 	if err != nil {
-		t.Fatalf("Bind embedding: %v", err)
+		return fmt.Errorf("bind embedding: %w", err)
 	}
 	_, err = p.Embed(bctx, provider.EmbedRequest{Model: "m1", Input: []string{input}})
 	return err
@@ -418,9 +420,11 @@ func TestNewBundleSharesNoFlightOrMatcher(t *testing.T) {
 	b2, gate2 := bootGuarded(t, guardCfg("http://"+host2, key2), "", true)
 
 	firstDone := make(chan error, 1)
-	go func() { firstDone <- embedVia(t.Context(), t, b1, gate1, held) }()
+	go func() { firstDone <- embedVia(t.Context(), b1, gate1, held) }()
 	select {
 	case <-entered:
+	case err := <-firstDone:
+		t.Fatalf("first bundle's embed returned %v before reaching the backend", err)
 	case <-time.After(5 * time.Second):
 		t.Fatal("first bundle's embed never reached the backend")
 	}
@@ -429,7 +433,7 @@ func TestNewBundleSharesNoFlightOrMatcher(t *testing.T) {
 	// on the held one until its deadline.
 	ctx2, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
-	if err := embedVia(ctx2, t, b2, gate2, held); err != nil {
+	if err := embedVia(ctx2, b2, gate2, held); err != nil {
 		t.Fatalf("second bundle's embed = %v, want it served independently of the held flight", err)
 	}
 	embeds := be.requests("/v1/embeddings")
@@ -460,10 +464,10 @@ func TestNewBundleSharesNoFlightOrMatcher(t *testing.T) {
 			t.Errorf("%s matcher: own=%v other=%v, want true/false", tc.name, tc.match(tc.own), tc.match(tc.other))
 		}
 	}
-	if err := embedVia(t.Context(), t, b2, gate2, key2); !errors.Is(err, provider.ErrContentDenied) {
+	if err := embedVia(t.Context(), b2, gate2, key2); !errors.Is(err, provider.ErrContentDenied) {
 		t.Errorf("second bundle embedding its own key = %v, want ErrContentDenied", err)
 	}
-	if err := embedVia(t.Context(), t, b2, gate2, key1); err != nil {
+	if err := embedVia(t.Context(), b2, gate2, key1); err != nil {
 		t.Errorf("second bundle embedding the first bundle's key = %v, want it sent", err)
 	}
 
@@ -476,10 +480,10 @@ func TestNewBundleSharesNoFlightOrMatcher(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("held embed did not finish after release")
 	}
-	if err := embedVia(t.Context(), t, b1, gate1, key1); !errors.Is(err, provider.ErrContentDenied) {
+	if err := embedVia(t.Context(), b1, gate1, key1); !errors.Is(err, provider.ErrContentDenied) {
 		t.Errorf("first bundle embedding its own key = %v, want ErrContentDenied", err)
 	}
-	if err := embedVia(t.Context(), t, b1, gate1, key2); err != nil {
+	if err := embedVia(t.Context(), b1, gate1, key2); err != nil {
 		t.Errorf("first bundle embedding the second bundle's key = %v, want it sent", err)
 	}
 }

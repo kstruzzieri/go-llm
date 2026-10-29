@@ -62,7 +62,8 @@ func TestEmbedDeniedBeforeAdmission(t *testing.T) {
 // TestEmbedFreezesInputs pins that the denial check and the request body see the
 // same inputs. The window is inside admission: the leader reads its inputs after
 // admit returns, so the caller overwrites its slice while the leader holds a
-// permit. The check ran on a frozen copy, so the original input is what is sent.
+// permit. The body and post's wire check use the copy frozen before the flight
+// started, so the original input is what is sent.
 func TestEmbedFreezesInputs(t *testing.T) {
 	tr := &embedGuardTransport{}
 	p := NewProvider(NewClient(guardBaseURL,

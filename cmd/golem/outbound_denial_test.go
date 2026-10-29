@@ -26,11 +26,16 @@ const (
 	outboundAnswer   = "remote answer"
 	// dispatchSensitiveSummaryText is dispatchSensitiveSummary, spelled out.
 	dispatchSensitiveSummaryText = "Partial result unavailable: blocked: sensitive content"
+	// dispatchSensitiveErrorText is dispatchSensitiveError, spelled out, with
+	// the suffix dispatch adds because a sensitive block withholds the
+	// child's model identity.
+	dispatchSensitiveErrorText = "blocked: sensitive content; child model identity unavailable"
 )
 
 // outboundBackend is a TLS openai-compat server reached as outboundOrigin.
-// It records every chat POST and, separately, counts the POSTs whose body
-// carries the fixture: the requests the content guard must stop.
+// It records every chat POST and, separately, counts the requests on any path
+// whose raw body carries the fixture, before anything decodes it: the requests
+// the content guard must stop.
 type outboundBackend struct {
 	mu           sync.Mutex
 	bodies       []string
@@ -75,12 +80,17 @@ func newOutboundEnv(t *testing.T, fixture string, script func(wireRequest) []str
 
 	b := &outboundBackend{}
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if leaksFixture(string(body)) {
+			b.mu.Lock()
+			b.fixturePosts++
+			b.mu.Unlock()
+		}
 		switch r.URL.Path {
 		case "/v1/models":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = io.WriteString(w, `{"data":[{"id":"agent-model"}]}`)
 		case "/v1/chat/completions":
-			body, _ := io.ReadAll(r.Body)
 			var req wireRequest
 			if err := json.Unmarshal(body, &req); err != nil {
 				http.Error(w, "bad request", http.StatusBadRequest)
@@ -88,9 +98,6 @@ func newOutboundEnv(t *testing.T, fixture string, script func(wireRequest) []str
 			}
 			b.mu.Lock()
 			b.bodies = append(b.bodies, string(body))
-			if leaksFixture(string(body)) {
-				b.fixturePosts++
-			}
 			b.mu.Unlock()
 			w.Header().Set("Content-Type", "text/event-stream")
 			for _, c := range script(req) {
@@ -303,7 +310,7 @@ func TestOutboundDenialProductionPath(t *testing.T) {
 				if fixturePosts != 0 {
 					t.Errorf("fixture POSTs = %d, want 0", fixturePosts)
 				}
-				var summaries []string
+				var summaries, errs []string
 				for _, body := range env.backend.chatBodies() {
 					var req wireRequest
 					if err := json.Unmarshal([]byte(body), &req); err != nil {
@@ -318,10 +325,14 @@ func TestOutboundDenialProductionPath(t *testing.T) {
 							t.Fatal("the dispatch result is not a one-child envelope")
 						}
 						summaries = append(summaries, envelope.Results[0].Summary)
+						errs = append(errs, envelope.Results[0].Error)
 					}
 				}
 				if !slices.Equal(summaries, []string{dispatchSensitiveSummaryText}) {
 					t.Errorf("parent's dispatch results = %q, want one %q", summaries, dispatchSensitiveSummaryText)
+				}
+				if !slices.Equal(errs, []string{dispatchSensitiveErrorText}) {
+					t.Errorf("parent's dispatch errors = %q, want one %q", errs, dispatchSensitiveErrorText)
 				}
 			})
 		}

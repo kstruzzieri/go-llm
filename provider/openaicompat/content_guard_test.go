@@ -358,7 +358,9 @@ func TestContentGuardToolArgumentEnvelope(t *testing.T) {
 		// literal holding a string literal; normalizeToolCallArguments would leave
 		// it wrapped.
 		{"scalar_inner_document", viaProvider(mustJSON(t, `"`+esc+`"`)), outcomeDenied},
-		{"clean_escaped_inner_document_is_sent", viaProvider(`{"k":"hi"}`), outcomeSent},
+		// Every value byte is a \u escape, so the lenient pass decodes it and
+		// finds nothing to deny.
+		{"clean_escaped_inner_document_is_sent", viaProvider(`{"k":"` + jsonEscapeAll("hello") + `"}`), outcomeSent},
 		{"invalid_raw_json_with_fixture", sendWire(`{"k":"` + guardFixture), outcomeDenied},
 		{"invalid_raw_json_with_escaped_fixture", sendWire(`{"k":"` + esc), outcomeDenied},
 		{"invalid_raw_json_cannot_be_encoded", sendWire(`{"k":`), outcomeUnencodable},
@@ -389,7 +391,7 @@ func TestContentGuardToolSchemas(t *testing.T) {
 func TestContentGuardKeyWithJSONSpecialBytes(t *testing.T) {
 	// Quote, backslash, HTML characters, U+2028 and a control byte: json.Marshal
 	// writes each of these as an escape, so the key never appears verbatim on the wire.
-	const key = "k\"e\\y/<&> \x01é"
+	const key = "k\"e\\y/<&>\u2028\x01é"
 	quoted := mustJSON(t, key)
 	if strings.Contains(quoted, key) {
 		t.Fatalf("quoted key %s still contains the raw key; the test would not exercise escaping", quoted)
