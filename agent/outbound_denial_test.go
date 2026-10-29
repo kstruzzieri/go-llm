@@ -1,0 +1,218 @@
+package agent
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"reflect"
+	"slices"
+	"strings"
+	"testing"
+
+	"github.com/kstruzzieri/go-llm/provider"
+)
+
+// deniedCaller plays responses, then fails the next request with err, as a
+// guarded openai-compat client refuses a body carrying a configured
+// credential (#424 D4): a wrapped provider.ErrContentDenied and, unless partial
+// is set, no response.
+type deniedCaller struct {
+	responses []ModelResult
+	err       error
+	partial   string // text collected before err, returned beside it
+	calls     int
+}
+
+func (d *deniedCaller) Chat(context.Context, provider.ChatRequest, func(provider.ChatResponse) error) (ModelResult, error) {
+	d.calls++
+	if d.calls <= len(d.responses) {
+		return d.responses[d.calls-1], nil
+	}
+	return ModelResult{Response: provider.ChatResponse{Content: d.partial}}, d.err
+}
+
+// contentBlockFake is exactFake that also blocks output content carrying the
+// fixture, so a partial answer returned beside a failure is blocked.
+type contentBlockFake struct{ exactFake }
+
+func (c contentBlockFake) InspectOutput(_ context.Context, out OutputInspection) ([]Finding, error) {
+	if c.SensitiveText(out.Content) {
+		return c.finding(), nil
+	}
+	return nil, nil
+}
+
+// The marker and the wrapped denial, spelled out so the tests never read the
+// production values they pin.
+const suppressedMarker = "[...]"
+
+func contentDenial() error {
+	return fmt.Errorf("router: chat: %w", provider.ErrContentDenied)
+}
+
+// TestOutboundDenialSuppressesCopiedInput (#424 D4): a goal carrying the
+// fixture is refused by the outbound guard. Result.Messages copies the goal,
+// so the copy shows the marker; the caller's history is not rewritten. The
+// partial rows return text beside the failure that the guard blocks, which
+// takes the block's own return. The controls show the goal is copied verbatim
+// with no guard installed, and on an unrelated failure.
+func TestOutboundDenialSuppressesCopiedInput(t *testing.T) {
+	fx := newSensitiveFixture(t)
+	goal := "deploy with " + fx.value
+	exact := exactFake{name: "exact", fixture: fx.value}
+	partialBlock := contentBlockFake{exact}
+	partial := "partial " + fx.value
+	for _, tc := range []struct {
+		name     string
+		chain    []Interceptor
+		err      error
+		partial  string
+		wantGoal string
+	}{
+		{"guarded denial", []Interceptor{exact}, contentDenial(), "", suppressedMarker},
+		{"guarded denial, blocked partial", []Interceptor{partialBlock}, contentDenial(), partial, suppressedMarker},
+		{"control: no guard installed", nil, contentDenial(), "", goal},
+		{"control: unrelated failure", []Interceptor{exact}, errors.New("provider unavailable"), "", goal},
+		{"control: unrelated failure, blocked partial", []Interceptor{partialBlock}, errors.New("provider unavailable"), partial, goal},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			history := []provider.ChatMessage{{Role: "user", Content: "earlier " + fx.value}, {Role: "assistant", Content: "noted"}}
+			want := slices.Clone(history)
+			o := newTestOrchestrator(&deniedCaller{err: tc.err, partial: tc.partial}, WithInterceptors(tc.chain...))
+			res, err := o.Run(context.Background(), Request{Goal: goal, History: history}, nil)
+			if !errors.Is(err, tc.err) {
+				t.Fatalf("err = %v, want %v", err, tc.err)
+			}
+			var blocked *BlockedError
+			if tc.partial != "" && !errors.As(err, &blocked) {
+				t.Fatalf("err = %v, want the partial blocked", err)
+			}
+			if len(res.Messages) != 1 || res.Messages[0].Role != "user" {
+				t.Fatalf("Result.Messages = %d messages, want the goal alone", len(res.Messages))
+			}
+			if got := res.Messages[0].Content; got != tc.wantGoal {
+				t.Errorf("goal copy = %q, want %q", got, tc.wantGoal)
+			}
+			if tc.wantGoal == suppressedMarker {
+				fx.assertJSONClean(t, "Result.Messages", res.Messages)
+			}
+			if !reflect.DeepEqual(history, want) {
+				t.Error("the caller's history was rewritten")
+			}
+		})
+	}
+}
+
+// TestOutboundDenialLaterTurnProjection (#424 D4, plan-consult 424-B2): turn
+// 1 reads a file whose content carries the fixture; turn 2's request, which
+// holds it, is refused. The call's arguments carry the fixture too, as \u
+// escapes in malformed JSON wrapped in a string literal, the form
+// openaicompat gives arguments Go's decoder rejects and the outbound guard
+// decodes leniently. The tool message's content and the call's arguments are
+// replaced wholesale in Result.Messages, and no JSON string there decodes to
+// the fixture. The control shows both copies arrive verbatim with no guard.
+func TestOutboundDenialLaterTurnProjection(t *testing.T) {
+	fx := newSensitiveFixture(t)
+	wrapped, err := json.Marshal(`{"path":"notes.txt","note":"` + fx.escaped + `"`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := string(wrapped)
+	for _, tc := range []struct {
+		name    string
+		guarded bool
+	}{{"guarded denial", true}, {"control: no guard installed", false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			var chain []Interceptor
+			if tc.guarded {
+				chain = []Interceptor{exactFake{name: "exact", fixture: fx.value}}
+			}
+			turn1 := oneCall("c1", "read_file", args)
+			mc := &deniedCaller{responses: []ModelResult{turn1}, err: contentDenial()}
+			tool := contentTool{name: "read_file", content: "notes: " + fx.value}
+			history := []provider.ChatMessage{{Role: "user", Content: "earlier"}, {Role: "assistant", Content: "noted"}}
+			wantHistory := slices.Clone(history)
+			o := newTestOrchestrator(mc, WithInterceptors(chain...))
+			res, err := o.Run(context.Background(), Request{Goal: "summarize notes.txt", History: history, Tools: []Tool{tool}}, nil)
+			if !errors.Is(err, provider.ErrContentDenied) || mc.calls != 2 {
+				t.Fatalf("err = %v after %d model calls, want the turn 2 denial", err, mc.calls)
+			}
+			if len(res.Messages) != 3 || res.Messages[1].Role != "assistant" || len(res.Messages[1].ToolCalls) != 1 || res.Messages[2].Role != "tool" {
+				t.Fatalf("Result.Messages = %d messages, want goal, call and observation", len(res.Messages))
+			}
+			call, obs := res.Messages[1].ToolCalls[0], res.Messages[2]
+			if res.Messages[0].Content != "summarize notes.txt" || call.ID != "c1" || call.Function.Name != "read_file" ||
+				obs.ToolName != "read_file" || obs.ToolCallID != "c1" {
+				t.Error("a clean field was rewritten")
+			}
+			wantContent, wantArgs := "notes: "+fx.value, args
+			if tc.guarded {
+				wantContent, wantArgs = suppressedMarker, `"`+suppressedMarker+`"`
+				fx.assertJSONClean(t, "Result.Messages", res.Messages)
+			}
+			if obs.Content != wantContent {
+				t.Errorf("observation = %q, want %q", obs.Content, wantContent)
+			}
+			if got := string(call.Function.Arguments); got != wantArgs {
+				t.Errorf("call arguments = %s, want %s", got, wantArgs)
+			}
+			if got := string(turn1.Response.ToolCalls[0].Function.Arguments); got != args {
+				t.Error("the model's response was rewritten")
+			}
+			if !reflect.DeepEqual(history, wantHistory) {
+				t.Error("the caller's history was rewritten")
+			}
+		})
+	}
+}
+
+// TestSuppressSensitiveFields (#424 D4): suppressSensitive rewrites every
+// copied field that matches, each wholesale. A tool message's tool name and
+// call ID, and a call's ID, type and function name, cannot be reached through
+// the orchestrator with a text guard installed (the output hook blocks such a
+// response first), so each is checked here with the fixture in that field
+// alone: it becomes the marker, and every other field keeps its value. The
+// clean row shows nothing is rewritten when no field matches.
+func TestSuppressSensitiveFields(t *testing.T) {
+	fx := newSensitiveFixture(t)
+	base := func() []provider.ChatMessage {
+		return []provider.ChatMessage{
+			{Role: "assistant", Content: "reading", ToolCalls: []provider.ToolCall{{
+				ID: "c1", Type: "function",
+				Function: provider.ToolCallFunction{Index: 1, Name: "read_file", Arguments: json.RawMessage(`{"path":"notes.txt"}`)},
+			}}},
+			{Role: "tool", Content: "notes", ToolName: "read_file", ToolCallID: "c1"},
+		}
+	}
+	// Each row writes one value into one field of base's shape; the expected
+	// messages are the same write with the marker, so the expectation never
+	// reads the production code. Arguments are a JSON document, and the
+	// marker replaces them as a JSON string.
+	text := fx.value
+	quoted := `"` + suppressedMarker + `"`
+	for _, tc := range []struct {
+		name         string
+		set          func(msgs []provider.ChatMessage, v string)
+		fixture, out string
+	}{
+		{"message content", func(m []provider.ChatMessage, v string) { m[1].Content = v }, "tool says " + text, suppressedMarker},
+		{"message tool name", func(m []provider.ChatMessage, v string) { m[1].ToolName = v }, "tool_" + text, suppressedMarker},
+		{"message tool call ID", func(m []provider.ChatMessage, v string) { m[1].ToolCallID = v }, "call_" + text, suppressedMarker},
+		{"call ID", func(m []provider.ChatMessage, v string) { m[0].ToolCalls[0].ID = v }, "call_" + text, suppressedMarker},
+		{"call type", func(m []provider.ChatMessage, v string) { m[0].ToolCalls[0].Type = v }, "type_" + text, suppressedMarker},
+		{"call function name", func(m []provider.ChatMessage, v string) { m[0].ToolCalls[0].Function.Name = v }, "fn_" + text, suppressedMarker},
+		{"call arguments", func(m []provider.ChatMessage, v string) { m[0].ToolCalls[0].Function.Arguments = json.RawMessage(v) }, `{"note":"` + text + `"}`, quoted},
+		{"clean: no field matches", func([]provider.ChatMessage, string) {}, "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, want := base(), base()
+			tc.set(got, tc.fixture)
+			tc.set(want, tc.out)
+			suppressSensitive(got, func(s string) bool { return strings.Contains(s, fx.value) })
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("messages = %+v, want %+v", got, want)
+			}
+		})
+	}
+}

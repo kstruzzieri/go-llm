@@ -102,8 +102,14 @@ func (b *runBudget) reserve(ctx context.Context, promptTokens int) (*tokenReserv
 }
 
 // settle separates logical admission credits from raw provider telemetry.
-// No error sentinel proves that a provider did not execute, so failed calls
-// retain their reservation even when no chunk or RouteOutcome was returned.
+// Failed calls retain their reservation even when no chunk or RouteOutcome
+// was returned, because an error rarely proves that a provider did not
+// execute. provider.ErrContentDenied is the exception: the body was refused
+// before it was sent, so the call charges nothing (#424).
+//
+// ponytail: a walk whose earlier attempt failed after reaching a provider and
+// whose fallback was then denied also charges nothing, since the error alone
+// cannot tell the two apart; carry the attempts on the error if that matters.
 func (r *tokenReservation) settle(mr ModelResult, callErr error) {
 	b := r.run
 	b.mu.Lock()
@@ -125,6 +131,9 @@ func (r *tokenReservation) settle(mr ModelResult, callErr error) {
 	}
 	if callErr != nil || !valid || u.PromptTokens == 0 || multiAttempt {
 		charge = max(charge, r.tokens)
+	}
+	if errors.Is(callErr, provider.ErrContentDenied) {
+		charge = 0
 	}
 	// A reported prompt above the estimate is expected estimator error (len/4
 	// by default) and is charged without stopping. Only output beyond the

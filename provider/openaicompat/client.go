@@ -8,8 +8,12 @@ import (
 	"io"
 	"net/http"
 	"runtime/debug"
+	"slices"
 	"strings"
 	"time"
+
+	"github.com/kstruzzieri/go-llm/internal/secretscan"
+	"github.com/kstruzzieri/go-llm/provider"
 )
 
 // Client is a thin HTTP wrapper for OpenAI-compatible endpoints. It handles
@@ -25,6 +29,10 @@ type Client struct {
 	apiKey    string
 	userAgent string
 	hc        *http.Client
+
+	// contentGuard, when non-nil, vets every outbound JSON body (see
+	// WithContentGuard). Read-only after construction.
+	contentGuard func(string) bool
 }
 
 // ClientOption configures a Client.
@@ -139,6 +147,26 @@ func WithUserAgent(ua string) ClientOption {
 	}
 }
 
+// WithContentGuard installs a check on every outbound JSON request body. A body
+// that match accepts is not sent: the call returns an error wrapping
+// provider.ErrContentDenied. match is given the body's raw text and each decoded
+// key and string value, so a credential that json.Marshal escapes on the wire
+// is still seen. Tool-call arguments also get one lenient escape-decoding pass
+// (secretscan.MatchToolArguments) on the document inside their string wrapper
+// or on malformed text, so a credential written as JSON escapes there still
+// matches. Headers are never inspected, so the client's own API key still
+// authenticates. nil leaves the guard off.
+//
+// With a guard installed, a body that fails to encode returns a fixed error
+// instead of wrapping the encoder's, whose text can quote the offending bytes.
+// The Client is safe for concurrent use, so match is called from concurrent
+// requests and must be safe for concurrent use too.
+func WithContentGuard(match func(string) bool) ClientOption {
+	return func(c *Client) {
+		c.contentGuard = match
+	}
+}
+
 // NewClient builds a Client targeting baseURL. The URL should be the server
 // root WITHOUT the /v1 suffix; per-endpoint paths are appended internally
 // so callers don't have to remember which endpoints live under /v1. Any
@@ -220,9 +248,9 @@ func (c *Client) post(ctx context.Context, path string, body any, contentType st
 	if id := sessionIDFrom(ctx); strings.Trim(id, " \t") != id {
 		return nil, fmt.Errorf("openaicompat: session ID must not start or end with a space or tab")
 	}
-	buf, err := json.Marshal(body)
+	buf, err := c.marshalBody(path, body)
 	if err != nil {
-		return nil, fmt.Errorf("openaicompat: marshal %s body: %w", path, err)
+		return nil, err
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, bytes.NewReader(buf))
 	if err != nil {
@@ -234,6 +262,104 @@ func (c *Client) post(ctx context.Context, path string, body any, contentType st
 		return nil, fmt.Errorf("openaicompat: %s: %w", path, err)
 	}
 	return resp, nil
+}
+
+// marshalBody encodes body for post. Without a content guard that is plain
+// json.Marshal. With one, a body the guard matches is refused with
+// provider.ErrContentDenied before anything is sent, and an encoding failure is
+// reported without the encoder's error text, which can quote the offending
+// bytes. Headers are not part of the body and are never inspected.
+func (c *Client) marshalBody(path string, body any) ([]byte, error) {
+	match := c.contentGuard
+	if match == nil {
+		buf, err := json.Marshal(body)
+		if err != nil {
+			return nil, fmt.Errorf("openaicompat: marshal %s body: %w", path, err)
+		}
+		return buf, nil
+	}
+
+	// Check the concrete fields first. An unrelated encoding fault must not
+	// hide a credential and turn a sensitive denial into a marshal error.
+	if unencodedBodyMatches(body, match) {
+		return nil, contentDenied(path)
+	}
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, fmt.Errorf("openaicompat: marshal %s body failed", path)
+	}
+	if secretscan.MatchJSON(buf, match) {
+		return nil, contentDenied(path)
+	}
+	return buf, nil
+}
+
+func contentDenied(path string) error {
+	return fmt.Errorf("openaicompat: %s: %w", path, provider.ErrContentDenied)
+}
+
+// unencodedBodyMatches checks the string fields in the three POST shapes
+// before json.Marshal can fail on an unrelated value. The final MatchJSON in
+// marshalBody still checks the exact wire representation, including optional
+// fields and JSON decoding. post only receives these concrete value types.
+func unencodedBodyMatches(body any, match func(string) bool) bool {
+	stringsMatch := func(values []string) bool { return slices.ContainsFunc(values, match) }
+	switch r := body.(type) {
+	case chatRequest:
+		if match(r.Model) || stringsMatch(r.Stop) || match(r.ToolChoice) || match(r.ReasoningEffort) || chatRawFieldsMatch(r, match) {
+			return true
+		}
+		for _, m := range r.Messages {
+			if match(m.Role) || match(m.Content) || match(m.ReasoningContent) || match(m.Name) || match(m.ToolCallID) {
+				return true
+			}
+			for _, tc := range m.ToolCalls {
+				if match(tc.ID) || match(tc.Type) || match(tc.Function.Name) {
+					return true
+				}
+			}
+		}
+		for _, t := range r.Tools {
+			if match(t.Type) || match(t.Function.Name) || match(t.Function.Description) {
+				return true
+			}
+		}
+		for key, value := range r.ChatTemplateKwargs {
+			if match(key) {
+				return true
+			}
+			if encoded, err := json.Marshal(value); err == nil && secretscan.MatchJSON(encoded, match) {
+				return true
+			}
+		}
+	case completionRequest:
+		return match(r.Model) || match(r.Prompt) || match(r.Suffix) || stringsMatch(r.Stop)
+	case embedRequest:
+		return match(r.Model) || stringsMatch(r.Input)
+	}
+	return false
+}
+
+// chatRawFieldsMatch reports whether match accepts a json.RawMessage in r: a
+// tool call's arguments or a tool's parameter schema. Arguments get the extra
+// pass for the string envelope that wraps the real document on the wire, and for
+// malformed text, so a credential spelled with JSON escapes inside it is still
+// seen. The checks run on the values as given, not as json.Marshal would write
+// them.
+func chatRawFieldsMatch(r chatRequest, match func(string) bool) bool {
+	for _, m := range r.Messages {
+		for _, tc := range m.ToolCalls {
+			if secretscan.MatchToolArguments(tc.Function.Arguments, match) {
+				return true
+			}
+		}
+	}
+	for _, t := range r.Tools {
+		if secretscan.MatchJSON(t.Function.Parameters, match) {
+			return true
+		}
+	}
+	return false
 }
 
 // setHeaders applies Authorization (when APIKey is set), Accept, User-Agent,

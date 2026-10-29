@@ -65,6 +65,10 @@ func sensitiveIdentities() []sensitiveIdentity {
 	return []sensitiveIdentity{
 		{name: "secrets", block: blockFinding("secrets", "sensitive_openai_token")},
 		{name: "configured_secrets", block: blockFinding("configured_secrets", "configured_secret")},
+		// #424 D4: the outbound guard's denial, wrapped as the client returns it.
+		{name: "content_denied", block: func() error {
+			return fmt.Errorf("openaicompat: /chat/completions: %w", provider.ErrContentDenied)
+		}},
 	}
 }
 

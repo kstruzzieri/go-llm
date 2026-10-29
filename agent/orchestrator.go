@@ -321,11 +321,19 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 			// text; any tool-call fragments may be incomplete. #436: the partial
 			// content and thinking are inspected before they are appended or
 			// returned; a block is joined with the provider error.
+			// #424 D4: a refused request was built from the copied messages, so
+			// their copy keeps no field that carries protected text, on either
+			// return below.
+			denied := errors.Is(err, provider.ErrContentDenied) && ic.guardsText()
 			partial := modelResult.Response
 			if strings.TrimSpace(partial.Content) != "" || strings.TrimSpace(partial.Thinking) != "" {
 				partial.ToolCalls = nil
 				if ierr := ic.inspectOutput(ctx, obs, step, partial); ierr != nil {
-					return finishWithError(&res, state, historyLen, errors.Join(ierr, err))
+					out, ferr := finishWithError(&res, state, historyLen, errors.Join(ierr, err))
+					if denied {
+						suppressSensitive(out.Messages, ic.sensitiveText)
+					}
+					return out, ferr
 				}
 			}
 			if strings.TrimSpace(partial.Content) != "" {
@@ -335,6 +343,9 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 				})
 			}
 			res.Messages = resultMessages(state, historyLen)
+			if denied {
+				suppressSensitive(res.Messages, ic.sensitiveText)
+			}
 			return res, err
 		}
 		resp := modelResult.Response
@@ -513,6 +524,40 @@ func resultMessages(st State, historyLen int) []provider.ChatMessage {
 		out = append(out, cloneChatMessage(m.ChatMessage))
 	}
 	return out
+}
+
+// suppressedField replaces a copied field that carries protected text
+// (#424); a tool call's arguments become this text as a JSON string.
+const suppressedField = "[...]"
+
+// suppressSensitive replaces wholesale every field of msgs that match
+// accepts: content, tool name and call ID, and each tool call's ID, type,
+// name and arguments. Arguments are checked as the outbound guard checks
+// them (secretscan.MatchToolArguments): raw, decoded, and leniently unescaped
+// when malformed. msgs must be an owned copy such as resultMessages returns;
+// nothing is rewritten in place, so state and the caller's slices keep their
+// values.
+func suppressSensitive(msgs []provider.ChatMessage, match func(string) bool) {
+	suppress := func(s *string) {
+		if match(*s) {
+			*s = suppressedField
+		}
+	}
+	for i := range msgs {
+		m := &msgs[i]
+		suppress(&m.Content)
+		suppress(&m.ToolName)
+		suppress(&m.ToolCallID)
+		for j := range m.ToolCalls {
+			c := &m.ToolCalls[j]
+			suppress(&c.ID)
+			suppress(&c.Type)
+			suppress(&c.Function.Name)
+			if secretscan.MatchToolArguments(c.Function.Arguments, match) {
+				c.Function.Arguments = json.RawMessage(`"` + suppressedField + `"`)
+			}
+		}
+	}
 }
 
 func toolSchemaString(specs []provider.Tool) string {

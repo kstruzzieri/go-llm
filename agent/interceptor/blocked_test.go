@@ -39,6 +39,9 @@ func TestSensitiveBlockedIdentities(t *testing.T) {
 	configured := blockedBy("configured_secrets", agent.VerdictBlock)
 	marked := markedBlock(t)
 	unrelated := errors.New("unrelated")
+	// The outbound guard's denial (#424 D4), wrapped as the client and router
+	// return it. It is not a BlockedError.
+	denied := fmt.Errorf("router: chat: %w", fmt.Errorf("openaicompat: /chat/completions: %w", provider.ErrContentDenied))
 	cases := []struct {
 		name string
 		err  error
@@ -61,6 +64,9 @@ func TestSensitiveBlockedIdentities(t *testing.T) {
 		{"marked block wrapped", fmt.Errorf("run: %w", marked), true},
 		{"marked block joined under unrelated errors", errors.Join(unrelated, marked, unrelated), true},
 		{"marked block joined then wrapped", fmt.Errorf("run: %w", errors.Join(unrelated, marked)), true},
+		{"content denial", denied, true},
+		{"content denial joined under unrelated errors", errors.Join(unrelated, denied, unrelated), true},
+		{"content denial text without its identity", errors.New(denied.Error()), false},
 		{"unmarked block under the same name", blockedBy("vault", agent.VerdictBlock), false},
 		{"invariants block", blockedBy("invariants", agent.VerdictBlock), false},
 		{"invariants block joined and wrapped", fmt.Errorf("run: %w", errors.Join(unrelated, blockedBy("invariants", agent.VerdictBlock))), false},
