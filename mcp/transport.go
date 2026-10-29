@@ -67,8 +67,9 @@ func (s *Server) ListenHTTP(ctx context.Context, addr string) error {
 
 // newHTTPServer builds the http.Server ListenHTTP serves. Under TLS the MCP
 // handler is served directly; on h2c it is wrapped in h2c and the outer body
-// limiter. With a bearer token configured, Go's built-in "OPTIONS *" reply
-// is disabled so that request reaches the gate as well.
+// limiter, with a bearer check in front of h2c when a token is configured.
+// With a token, Go's built-in "OPTIONS *" reply is also disabled so that
+// request reaches the gate as well.
 func (s *Server) newHTTPServer(addr string, useTLS bool) *http.Server {
 	handler := streamableHTTPHandler(s)
 	if !useTLS {

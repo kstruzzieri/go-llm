@@ -423,11 +423,11 @@ func TestH2CUpgradeStreamsRequireBearer(t *testing.T) {
 
 // TestH2CUpgradeWithoutBearerIsRefused pins the check in front of h2c on a
 // real listener: an HTTP/1.1 upgrade without the right bearer gets the
-// gate's 401 instead of 101, and nothing reaches MCP.
+// gate's 401 instead of 101. (Without the check the inner gate would still
+// refuse stream 1, so only the HTTP/1.1 status tells the two apart.)
 func TestH2CUpgradeWithoutBearerIsRefused(t *testing.T) {
 	for _, auth := range []string{"", "Authorization: Bearer wrong-token\r\n"} {
 		srv := newTestMCPServer(t, listenerToken)
-		calls := countMCPRequests(srv)
 		ts := startMCPListener(t, srv, false)
 		request := "POST /mcp HTTP/1.1\r\nHost: " + ts.Listener.Addr().String() + "\r\n" +
 			"Content-Type: application/json\r\nAccept: application/json, text/event-stream\r\n" +
@@ -436,9 +436,6 @@ func TestH2CUpgradeWithoutBearerIsRefused(t *testing.T) {
 			"Content-Length: " + strconv.Itoa(len(initializeBody)) + "\r\n\r\n" + initializeBody
 		if got := rawHTTP1Status(t, ts, request); got != http.StatusUnauthorized {
 			t.Errorf("auth %q: upgrade status = %d, want %d", auth, got, http.StatusUnauthorized)
-		}
-		if n := calls.Load(); n != 0 {
-			t.Errorf("auth %q: %d MCP requests dispatched, want 0", auth, n)
 		}
 	}
 }

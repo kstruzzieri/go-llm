@@ -130,9 +130,9 @@ func requireHTTPBearer(next http.Handler, want *[sha256.Size]byte) http.Handler 
 // without this check an unauthenticated upgrade could make the server buffer
 // up to the body limit. It only checks: next gets the request unchanged, and
 // requireHTTPBearer checks the upgraded request again and strips the header.
-// The prior-knowledge preface (the condition h2c itself tests) carries no
-// headers and passes through; every stream on that connection reaches
-// requireHTTPBearer.
+// The prior-knowledge preface passes through, tested exactly as h2c tests it.
+// Its header map is empty, so it can never take h2c's upgrade branch, and
+// every stream on that connection reaches requireHTTPBearer.
 func requireHTTPBearerBeforeH2C(next http.Handler, want *[sha256.Size]byte) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		priorKnowledge := r.Method == "PRI" && len(r.Header) == 0 && r.URL.Path == "*" && r.Proto == "HTTP/2.0"

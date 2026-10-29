@@ -35,7 +35,7 @@ updating clients.
   `DisableGeneralOptionsHandler` so Go no longer answers it with an
   unauthenticated 200. Without a token it behaves as before.
 - On h2c, an HTTP/1.1 `Upgrade: h2c` request must itself carry the token. One
-  without it gets the 401 before the server reads its body or replies
+  without it gets the 401 before h2c reads or buffers its body or replies
   `101 Switching Protocols`, so an unauthenticated caller cannot make the
   server buffer an upgrade body. The upgraded request and every later stream
   are checked again.
