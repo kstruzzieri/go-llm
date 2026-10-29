@@ -488,51 +488,77 @@ check one snapshot. The guard alone does not bind requests to the admitted
 origin or refuse redirects, so a redirect could still carry a checked body
 elsewhere. Build the client's `http.Client` with `provider.GuardHTTPClient`,
 which does both. A guarded client sends a request only under a destination
-capability its gate issued, so the host also installs the gate's policy and
-manifest and binds every request:
+capability its gate issued, so the host also admits each destination in a gate
+and binds every request. `Install` replaces the gate's whole generation, so
+collect every provider's destination and edges first, install them once, then
+build the guarded clients:
 
 ```go
 match := cfg.SecretMatcher() // the value given to NewConfiguredSecrets
-dest, err := provider.NewDestination(name, pc.BaseURL)
+
+// Every provider here is api_format openai-compat. Each needs an edge for every
+// use case routed to it (agent.NewRouterModelCaller routes "agent") and one for
+// model-refresh, which the model registry sends while the Router resolves
+// candidates.
+dests := make(map[string]provider.Destination, len(cfg.Providers))
+var edges []provider.DestinationEdge
+for name, pc := range cfg.Providers {
+    dest, err := provider.NewDestination(name, pc.BaseURL)
+    if err != nil {
+        return err
+    }
+    dests[name] = dest
+    edges = append(edges,
+        provider.DestinationEdge{Purpose: "agent", Destination: dest},
+        provider.DestinationEdge{Purpose: provider.DestinationPurposeModelRefresh, Destination: dest},
+    )
+}
+manifest, err := provider.NewDestinationManifest(edges...)
 if err != nil {
     return err
 }
-// One gate per process. Its manifest needs an edge for each use case the host
-// routes to this provider (agent.NewRouterModelCaller routes "agent") and for
-// each provider.DestinationPurpose* operation it runs, such as model refresh.
 gate := provider.NewDestinationGate()
-manifest, err := provider.NewDestinationManifest(provider.DestinationEdge{Purpose: "agent", Destination: dest})
+if err := gate.Install(provider.NewDestinationPolicy(manifest.Destinations()...), manifest); err != nil {
+    return err
+}
+
+providers := provider.NewRegistry()
+for name, pc := range cfg.Providers {
+    dest := dests[name]
+    timeout := pc.Timeout.Duration
+    if timeout <= 0 {
+        timeout = 5 * time.Minute // the default NewClient and Golem use; zero never times out
+    }
+    hc, err := provider.GuardHTTPClient(gate, dest, &http.Client{Timeout: timeout})
+    if err != nil {
+        return err
+    }
+    opts := []openaicompat.ClientOption{openaicompat.WithHTTPClient(hc), openaicompat.WithAPIKey(pc.APIKey)}
+    if !dest.IsLocal() {
+        opts = append(opts, openaicompat.WithContentGuard(match))
+    }
+    client := openaicompat.NewClient(pc.BaseURL, opts...)
+    if err := providers.Register(openaicompat.NewProvider(client, openaicompat.WithProviderName(name))); err != nil {
+        return err
+    }
+}
+
+// The registry binds its own model-refresh and capability-probe traffic, and
+// the Router binds each attempt to its use case and provider.
+models, err := provider.NewModelRegistry(providers, nil, provider.WithModelRegistryDestinationGate(gate))
 if err != nil {
     return err
 }
-if err := gate.Install(provider.NewDestinationPolicy(dest), manifest); err != nil {
-    return err
-}
-timeout := pc.Timeout.Duration
-if timeout <= 0 {
-    timeout = 5 * time.Minute // the default NewClient and Golem use; zero never times out
-}
-hc, err := provider.GuardHTTPClient(gate, dest, &http.Client{Timeout: timeout})
-if err != nil {
-    return err
-}
-opts := []openaicompat.ClientOption{openaicompat.WithHTTPClient(hc), openaicompat.WithAPIKey(pc.APIKey)}
-if !dest.IsLocal() {
-    opts = append(opts, openaicompat.WithContentGuard(match))
-}
-client := openaicompat.NewClient(pc.BaseURL, opts...)
-if err := providers.Register(openaicompat.NewProvider(client, openaicompat.WithProviderName(name))); err != nil {
-    return err
-}
-// A Router built with the gate binds each attempt to its use case and provider.
 router := provider.NewRouter(models, providers, provider.WithDestinationGate(gate))
 ```
 
-`providers` is the host's `*provider.Registry` and `models` its
-`*provider.ModelRegistry`. A call made without a Router binds its own
-capability first: `ctx, err := gate.Bind(ctx, "agent", name)`. Without a
-binding the guarded client refuses the request with
-`provider.ErrDestinationDenied`.
+`nil` is the optional fingerprint store. A registry that runs active
+capability probes (`provider.WithCapabilityProber`) also needs a
+`provider.DestinationPurposeCapabilityProbe` edge per provider, and a provider
+with `slot_discovery` needs a `provider.DestinationPurposeSlotProbe` edge. A
+call made without a Router binds its own capability first:
+`ctx, err := gate.Bind(ctx, "agent", name)`. A request with no capability for
+its edge is refused with `provider.ErrDestinationDenied`.
 
 A refused request returns an error wrapping `provider.ErrContentDenied`, which
 names neither the credential nor the URL. The router neither falls back to
