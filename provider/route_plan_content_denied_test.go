@@ -5,16 +5,49 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"time"
 )
+
+// slowProvider delays every call so the attempt has a nonzero latency, which
+// RoutingFeedback records as a Latency signal for any attempt it attributes.
+type slowProvider struct{ *rpMockProvider }
+
+func (s slowProvider) Chat(ctx context.Context, req ChatRequest) (*ChatResponse, error) {
+	time.Sleep(2 * time.Millisecond)
+	return s.rpMockProvider.Chat(ctx, req)
+}
+
+func (s slowProvider) ChatStream(ctx context.Context, req ChatRequest, fn func(ChatResponse) error) error {
+	time.Sleep(2 * time.Millisecond)
+	return s.rpMockProvider.ChatStream(ctx, req, fn)
+}
+
+func (s slowProvider) Generate(ctx context.Context, req GenerateRequest) (*GenerateResponse, error) {
+	time.Sleep(2 * time.Millisecond)
+	return s.rpMockProvider.Generate(ctx, req)
+}
+
+func (s slowProvider) GenerateStream(ctx context.Context, req GenerateRequest, fn func(GenerateResponse) error) error {
+	time.Sleep(2 * time.Millisecond)
+	return s.rpMockProvider.GenerateStream(ctx, req, fn)
+}
+
+func (s slowProvider) Embed(ctx context.Context, req EmbedRequest) (*EmbedResponse, error) {
+	time.Sleep(2 * time.Millisecond)
+	return s.rpMockProvider.Embed(ctx, req)
+}
 
 // TestContentDenialNoFallback (#424): a primary that refuses a request body for
 // carrying a configured credential ends the walk. The fallback is never called
-// (a fallback would be sent the same body), no breaker failure is recorded, and
-// the attempt is attributed with the bounded class "unknown" rather than a
-// transport class. Every execute path walks its own fallback loop, so each is a
-// row.
+// (a fallback would be sent the same body) and no breaker failure is recorded.
+// The model never received the request, so the attempt is Unknown: routing
+// feedback records no failure, latency or success signal against it. Every
+// execute path walks its own fallback loop, so each is a row.
 func TestContentDenialNoFallback(t *testing.T) {
 	denied := fmt.Errorf("openaicompat: /v1/chat/completions: %w", ErrContentDenied)
+	if got := makeAttempt(ModelKey{Provider: "p", Model: "m"}, denied, time.Second); got.Status != AttemptStatusUnknown || got.ErrorClass != "" {
+		t.Errorf("denial attempt = %+v, want AttemptStatusUnknown with no class", got)
+	}
 
 	tests := []struct {
 		name string
@@ -89,6 +122,7 @@ func TestContentDenialNoFallback(t *testing.T) {
 			}
 			rec := &rpMockRecorder{}
 			plan := newTestPlan(primary, rec)
+			plan.Provider = slowProvider{primary}
 			plan.Request.Prompt = "p"
 			plan.Request.Input = []string{"i"}
 			plan.SetFeedback(NewRoutingFeedback(store))
@@ -111,19 +145,8 @@ func TestContentDenialNoFallback(t *testing.T) {
 				t.Errorf("breaker failures = %v, want none", got)
 			}
 			primaryKey := FeedbackKey{Provider: "ollama-a", Model: "test-model", UseCase: "chat"}
-			sigs := store.Signals(primaryKey)
-			var failures int
-			for _, sig := range sigs {
-				if sig.Kind != RoutingSignalFailure {
-					continue
-				}
-				failures++
-				if sig.ErrorClass != "unknown" {
-					t.Errorf("attempt class = %q, want %q", sig.ErrorClass, "unknown")
-				}
-			}
-			if failures != 1 {
-				t.Errorf("failure attributions on the primary = %d, want 1 (signals %+v)", failures, sigs)
+			if got := store.Signals(primaryKey); len(got) != 0 {
+				t.Errorf("primary signals = %+v, want none (an Unknown attempt)", got)
 			}
 			fallbackKey := FeedbackKey{Provider: "ollama-b", Model: "qwen3:8b", UseCase: "chat"}
 			if got := store.Signals(fallbackKey); len(got) != 0 {

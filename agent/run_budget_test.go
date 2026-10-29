@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math"
 	"reflect"
 	"sync"
@@ -159,6 +160,10 @@ func TestRunBudgetSettlement(t *testing.T) {
 		{name: "failed with usage", usage: provider.Usage{PromptTokens: 100, CompletionTokens: 20, TotalTokens: 120}, err: errors.New("provider failed"), charge: 150, telemetry: true},
 		{name: "callback failed", usage: provider.Usage{PromptTokens: 100, CompletionTokens: 20, TotalTokens: 120}, err: errors.New("callback failed"), charge: 150, telemetry: true},
 		{name: "router sentinel without outcome", err: provider.ErrRouterClosed, charge: 150},
+		// #424: a refused body was never sent, so the call charges nothing; the
+		// plain error beside it is the control that still charges in full.
+		{name: "content denied", err: fmt.Errorf("openaicompat: /v1/chat/completions: %w", provider.ErrContentDenied), charge: 0},
+		{name: "plain error without outcome", err: errors.New("provider failed"), charge: 150},
 		{name: "multiple attempts", usage: provider.Usage{PromptTokens: 100, CompletionTokens: 20, TotalTokens: 120}, outcome: &provider.RouteOutcome{Attempts: make([]provider.RouteAttempt, 2)}, charge: 150, telemetry: true},
 		{name: "response multiple attempts", usage: provider.Usage{PromptTokens: 100, CompletionTokens: 20, TotalTokens: 120}, outcome: &provider.RouteOutcome{Attempts: make([]provider.RouteAttempt, 2)}, responseOutcome: true, charge: 150, telemetry: true},
 		{name: "fallback without attempts", usage: provider.Usage{PromptTokens: 100, CompletionTokens: 20, TotalTokens: 120}, outcome: &provider.RouteOutcome{FallbacksUsed: 1}, charge: 150, telemetry: true},

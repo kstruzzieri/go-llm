@@ -321,11 +321,19 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 			// text; any tool-call fragments may be incomplete. #436: the partial
 			// content and thinking are inspected before they are appended or
 			// returned; a block is joined with the provider error.
+			// #424 D4: a refused request was built from the copied messages, so
+			// their copy keeps no field that carries protected text, on either
+			// return below.
+			denied := errors.Is(err, provider.ErrContentDenied) && ic.guardsText()
 			partial := modelResult.Response
 			if strings.TrimSpace(partial.Content) != "" || strings.TrimSpace(partial.Thinking) != "" {
 				partial.ToolCalls = nil
 				if ierr := ic.inspectOutput(ctx, obs, step, partial); ierr != nil {
-					return finishWithError(&res, state, historyLen, errors.Join(ierr, err))
+					out, ferr := finishWithError(&res, state, historyLen, errors.Join(ierr, err))
+					if denied {
+						suppressSensitive(out.Messages, ic.sensitiveText)
+					}
+					return out, ferr
 				}
 			}
 			if strings.TrimSpace(partial.Content) != "" {
@@ -335,9 +343,7 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 				})
 			}
 			res.Messages = resultMessages(state, historyLen)
-			if errors.Is(err, provider.ErrContentDenied) && ic.guardsText() {
-				// #424 D4: the refused request was built from these messages,
-				// so their copy keeps no field that carries protected text.
+			if denied {
 				suppressSensitive(res.Messages, ic.sensitiveText)
 			}
 			return res, err

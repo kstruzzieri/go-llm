@@ -14,10 +14,12 @@ import (
 
 // deniedCaller plays responses, then fails the next request with err, as a
 // guarded openai-compat client refuses a body carrying a configured
-// credential (#424 D4): a wrapped provider.ErrContentDenied and no response.
+// credential (#424 D4): a wrapped provider.ErrContentDenied and, unless partial
+// is set, no response.
 type deniedCaller struct {
 	responses []ModelResult
 	err       error
+	partial   string // text collected before err, returned beside it
 	calls     int
 }
 
@@ -26,7 +28,18 @@ func (d *deniedCaller) Chat(context.Context, provider.ChatRequest, func(provider
 	if d.calls <= len(d.responses) {
 		return d.responses[d.calls-1], nil
 	}
-	return ModelResult{}, d.err
+	return ModelResult{Response: provider.ChatResponse{Content: d.partial}}, d.err
+}
+
+// contentBlockFake is exactFake that also blocks output content carrying the
+// fixture, so a partial answer returned beside a failure is blocked.
+type contentBlockFake struct{ exactFake }
+
+func (c contentBlockFake) InspectOutput(_ context.Context, out OutputInspection) ([]Finding, error) {
+	if c.SensitiveText(out.Content) {
+		return c.finding(), nil
+	}
+	return nil, nil
 }
 
 // The marker and the wrapped denial, spelled out so the tests never read the
@@ -40,29 +53,39 @@ func contentDenial() error {
 // TestOutboundDenialSuppressesCopiedInput (#424 D4): a goal carrying the
 // fixture is refused by the outbound guard. Result.Messages copies the goal,
 // so the copy shows the marker; the caller's history is not rewritten. The
-// controls show the goal is copied verbatim with no guard installed, and on
-// an unrelated failure.
+// partial rows return text beside the failure that the guard blocks, which
+// takes the block's own return. The controls show the goal is copied verbatim
+// with no guard installed, and on an unrelated failure.
 func TestOutboundDenialSuppressesCopiedInput(t *testing.T) {
 	fx := newSensitiveFixture(t)
 	goal := "deploy with " + fx.value
 	exact := exactFake{name: "exact", fixture: fx.value}
+	partialBlock := contentBlockFake{exact}
+	partial := "partial " + fx.value
 	for _, tc := range []struct {
 		name     string
 		chain    []Interceptor
 		err      error
+		partial  string
 		wantGoal string
 	}{
-		{"guarded denial", []Interceptor{exact}, contentDenial(), suppressedMarker},
-		{"control: no guard installed", nil, contentDenial(), goal},
-		{"control: unrelated failure", []Interceptor{exact}, errors.New("provider unavailable"), goal},
+		{"guarded denial", []Interceptor{exact}, contentDenial(), "", suppressedMarker},
+		{"guarded denial, blocked partial", []Interceptor{partialBlock}, contentDenial(), partial, suppressedMarker},
+		{"control: no guard installed", nil, contentDenial(), "", goal},
+		{"control: unrelated failure", []Interceptor{exact}, errors.New("provider unavailable"), "", goal},
+		{"control: unrelated failure, blocked partial", []Interceptor{partialBlock}, errors.New("provider unavailable"), partial, goal},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			history := []provider.ChatMessage{{Role: "user", Content: "earlier " + fx.value}, {Role: "assistant", Content: "noted"}}
 			want := slices.Clone(history)
-			o := newTestOrchestrator(&deniedCaller{err: tc.err}, WithInterceptors(tc.chain...))
+			o := newTestOrchestrator(&deniedCaller{err: tc.err, partial: tc.partial}, WithInterceptors(tc.chain...))
 			res, err := o.Run(context.Background(), Request{Goal: goal, History: history}, nil)
 			if !errors.Is(err, tc.err) {
 				t.Fatalf("err = %v, want %v", err, tc.err)
+			}
+			var blocked *BlockedError
+			if tc.partial != "" && !errors.As(err, &blocked) {
+				t.Fatalf("err = %v, want the partial blocked", err)
 			}
 			if len(res.Messages) != 1 || res.Messages[0].Role != "user" {
 				t.Fatalf("Result.Messages = %d messages, want the goal alone", len(res.Messages))

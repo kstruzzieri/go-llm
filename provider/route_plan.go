@@ -1281,8 +1281,14 @@ func newRouteID() string {
 //   - err != nil: Status and ErrorClass from classifyError(err); LatencyMs
 //     from duration regardless (latency-to-failure is informative for
 //     failure-mode pivots in PR3+).
+//   - err wraps ErrContentDenied: an Unknown attempt (makeUnknownAttempt). The
+//     body was refused before it was sent, so the model is credited with
+//     neither a failure nor a latency (#424).
 //   - Negative duration clamps to LatencyMs=0.
 func makeAttempt(key ModelKey, err error, duration time.Duration) RouteAttempt {
+	if errors.Is(err, ErrContentDenied) {
+		return makeUnknownAttempt(key, duration)
+	}
 	class, status := classifyError(err)
 	return RouteAttempt{
 		Key:        key,
@@ -1294,7 +1300,8 @@ func makeAttempt(key ModelKey, err error, duration time.Duration) RouteAttempt {
 
 // makeUnknownAttempt builds a RouteAttempt with AttemptStatusUnknown — used
 // by streaming Execute methods when a user-callback error aborts the stream
-// before a Done chunk. The attribution must NOT classify as a provider
+// before a Done chunk, and by makeAttempt for a content denial. The
+// attribution must NOT classify as a provider
 // failure (the provider may have been healthy), and Unknown signals are
 // no-ops in RoutingFeedback. Shares clampMs with makeAttempt so negative
 // monotonic-clock excursions can't produce negative LatencyMs.

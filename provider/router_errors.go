@@ -46,7 +46,8 @@ var ErrProviderMismatch = errors.New("router: provider mismatch between qualifie
 // credential and so was not sent. It is a local policy refusal, not an
 // infrastructure failure: IsInfrastructureError reports false for it, so the
 // router neither falls back to another candidate nor counts it against a
-// circuit breaker.
+// circuit breaker. Its attempt is attributed as AttemptStatusUnknown, so
+// routing feedback records no failure or latency against the model.
 var ErrContentDenied = errors.New("provider: request content denied: configured credential")
 
 // ---------------------------------------------------------------------------
