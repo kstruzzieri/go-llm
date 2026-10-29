@@ -487,7 +487,9 @@ destination is not loopback. Pass the same matcher value to
 check one snapshot. The guard alone does not bind requests to the admitted
 origin or refuse redirects, so a redirect could still carry a checked body
 elsewhere. Build the client's `http.Client` with `provider.GuardHTTPClient`,
-which does both:
+which does both. A guarded client sends a request only under a destination
+capability its gate issued, so the host also installs the gate's policy and
+manifest and binds every request:
 
 ```go
 match := cfg.SecretMatcher() // the value given to NewConfiguredSecrets
@@ -495,7 +497,22 @@ dest, err := provider.NewDestination(name, pc.BaseURL)
 if err != nil {
     return err
 }
-hc, err := provider.GuardHTTPClient(gate, dest, &http.Client{Timeout: pc.Timeout.Duration})
+// One gate per process. Its manifest needs an edge for each use case the host
+// routes to this provider (agent.NewRouterModelCaller routes "agent") and for
+// each provider.DestinationPurpose* operation it runs, such as model refresh.
+gate := provider.NewDestinationGate()
+manifest, err := provider.NewDestinationManifest(provider.DestinationEdge{Purpose: "agent", Destination: dest})
+if err != nil {
+    return err
+}
+if err := gate.Install(provider.NewDestinationPolicy(dest), manifest); err != nil {
+    return err
+}
+timeout := pc.Timeout.Duration
+if timeout <= 0 {
+    timeout = 5 * time.Minute // the default NewClient and Golem use; zero never times out
+}
+hc, err := provider.GuardHTTPClient(gate, dest, &http.Client{Timeout: timeout})
 if err != nil {
     return err
 }
@@ -504,17 +521,30 @@ if !dest.IsLocal() {
     opts = append(opts, openaicompat.WithContentGuard(match))
 }
 client := openaicompat.NewClient(pc.BaseURL, opts...)
+if err := providers.Register(openaicompat.NewProvider(client, openaicompat.WithProviderName(name))); err != nil {
+    return err
+}
+// A Router built with the gate binds each attempt to its use case and provider.
+router := provider.NewRouter(models, providers, provider.WithDestinationGate(gate))
 ```
 
-`gate` is the host's `provider.DestinationGate` with this destination admitted.
+`providers` is the host's `*provider.Registry` and `models` its
+`*provider.ModelRegistry`. A call made without a Router binds its own
+capability first: `ctx, err := gate.Bind(ctx, "agent", name)`. Without a
+binding the guarded client refuses the request with
+`provider.ErrDestinationDenied`.
+
 A refused request returns an error wrapping `provider.ErrContentDenied`, which
 names neither the credential nor the URL. The router neither falls back to
-another provider nor counts it against a circuit breaker, and
-`interceptor.SensitiveBlocked` reports it, so a dispatched child refused this
-way reports the fixed marker instead of its last message. When a run's model
+another provider nor counts it against a circuit breaker, routing feedback
+records no failure or latency against the model, and an agent run charges its
+token budget nothing for the call. `interceptor.SensitiveBlocked` reports it,
+so a dispatched child refused this way reports the fixed marker instead of its
+last message. When a run's model
 call is refused this way, the orchestrator replaces each copied field of
 `Result.Messages` that an `agent.SensitiveTextInterceptor` in its chain matches
-with `[...]`; install the tool-call guard so that projection has a matcher.
+with `[...]` (a tool call's arguments become the JSON string `"[...]"`);
+install the tool-call guard so that projection has a matcher.
 Only `api_format: openai-compat` clients have this guard; native Ollama
 clients do not. Headers are never inspected, so the client's own key still
 authenticates. Golem wires this internally under `-interceptors`; the `golem`

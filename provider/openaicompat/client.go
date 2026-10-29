@@ -151,8 +151,16 @@ func WithUserAgent(ua string) ClientOption {
 // that match accepts is not sent: the call returns an error wrapping
 // provider.ErrContentDenied. match is given the body's raw text and each decoded
 // key and string value, so a credential that json.Marshal escapes on the wire
-// is still seen. Headers are never inspected, so the client's own API key still
+// is still seen. Tool-call arguments also get one lenient escape-decoding pass
+// (secretscan.MatchToolArguments) on the document inside their string wrapper
+// or on malformed text, so a credential written as JSON escapes there still
+// matches. Headers are never inspected, so the client's own API key still
 // authenticates. nil leaves the guard off.
+//
+// With a guard installed, a body that fails to encode returns a fixed error
+// instead of wrapping the encoder's, whose text can quote the offending bytes.
+// The Client is safe for concurrent use, so match is called from concurrent
+// requests and must be safe for concurrent use too.
 func WithContentGuard(match func(string) bool) ClientOption {
 	return func(c *Client) {
 		c.contentGuard = match
@@ -257,7 +265,7 @@ func (c *Client) post(ctx context.Context, path string, body any, contentType st
 }
 
 // marshalBody encodes body for post. Without a content guard that is plain
-// json.Marshal. With one, a body the guard accepts is refused with
+// json.Marshal. With one, a body the guard matches is refused with
 // provider.ErrContentDenied before anything is sent, and an encoding failure is
 // reported without the encoder's error text, which can quote the offending
 // bytes. Headers are not part of the body and are never inspected.
@@ -280,7 +288,10 @@ func (c *Client) marshalBody(path string, body any) ([]byte, error) {
 	buf, err := json.Marshal(body)
 	if err != nil {
 		// The body is never sent, but a credential elsewhere in it takes
-		// precedence over the encoding fault, so check the rest.
+		// precedence over the encoding fault, so check the rest. A fault outside
+		// the raw fields (a NaN Temperature, unencodable ChatTemplateKwargs) also
+		// fails this re-marshal, so it gets the construction error below and
+		// nothing is sent.
 		if isChat {
 			if rest, restErr := json.Marshal(withoutRawFields(chat)); restErr == nil && secretscan.MatchJSON(rest, match) {
 				return nil, contentDenied(path)

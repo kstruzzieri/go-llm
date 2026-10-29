@@ -33,9 +33,11 @@ address) and independently built providers are not covered.
   refused request returns an error wrapping the new
   `provider.ErrContentDenied`, which names neither the credential nor the URL.
   `provider.IsInfrastructureError` reports false for it, so the router neither
-  falls back nor counts it against a breaker. Install it with
-  `cfg.SecretMatcher()` on each client whose `provider.Destination` is not
-  `IsLocal()`, and build that client's HTTP client with
+  falls back nor counts it against a breaker. Its route attempt is attributed
+  as unknown, so routing feedback records no failure or latency against the
+  model, and an agent run charges its token budget nothing for it. Install it
+  with `cfg.SecretMatcher()` on each client whose `provider.Destination` is
+  not `IsLocal()`, and build that client's HTTP client with
   `provider.GuardHTTPClient` for origin binding and redirect refusal; the
   matcher alone provides neither.
 - `interceptor.SensitiveBlocked` now also reports `provider.ErrContentDenied`,
@@ -43,5 +45,6 @@ address) and independently built providers are not covered.
 - When a run's model call fails with `provider.ErrContentDenied`,
   `Result.Messages` replaces each field an `agent.SensitiveTextInterceptor` in
   the chain matches (message content, tool name and call ID, and each tool
-  call's ID, type, name and arguments) with `[...]`. Caller-owned inputs and
-  earlier published step records are not rewritten.
+  call's ID, type, name and arguments) with `[...]`; arguments become the JSON
+  string `"[...]"`. Caller-owned inputs and earlier published step records are
+  not rewritten.

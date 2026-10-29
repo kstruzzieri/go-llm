@@ -906,7 +906,10 @@ dispatch child refused this way reports
 `Partial result unavailable: blocked: sensitive content`. In the run's
 `Result.Messages`, each copied field that carries the credential is replaced by
 `[...]`; records published before the refusal, such as an earlier turn's step,
-keep their content.
+keep their content. A session saved by a run without `-interceptors` whose
+history or summary already carries a configured credential is refused on every
+turn once resumed with the flag, showing only the fixed message; start a new
+session with `-fresh`.
 
 | Operation | Endpoint | Checked |
 |---|---|---|
