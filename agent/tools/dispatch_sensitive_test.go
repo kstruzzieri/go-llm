@@ -50,6 +50,23 @@ func (namedSearchBlocker) InspectToolCall(context.Context, agent.ToolCallInspect
 	return nil, nil
 }
 
+type outputSensitiveBlocker struct {
+	namedSearchBlocker
+	secret string
+	rule   string
+}
+
+func (b outputSensitiveBlocker) SensitiveText(text string) bool {
+	return strings.Contains(text, b.secret)
+}
+
+func (b outputSensitiveBlocker) InspectOutput(_ context.Context, out agent.OutputInspection) ([]agent.Finding, error) {
+	if !strings.Contains(out.Content, b.secret) {
+		return nil, nil
+	}
+	return []agent.Finding{{Rule: b.rule, Verdict: agent.VerdictBlock, Target: agent.TargetOutputContent, StateIndex: -1, Group: -1, Alternative: -1}}, nil
+}
+
 // failingInterceptor errors on the output that proposes a search call, so the
 // block on that same output is joined with its error.
 type failingInterceptor struct{}
@@ -236,7 +253,7 @@ func TestDispatchSensitiveBlockSkipsPartialSummary(t *testing.T) {
 		name        string
 		child       sensitiveChild
 		wantSummary string
-		wantBlocked string
+		wantError   string
 		absent      []string
 	}{
 		{
@@ -248,7 +265,7 @@ func TestDispatchSensitiveBlockSkipsPartialSummary(t *testing.T) {
 				model:      provider.ModelKey{Provider: "local", Model: "fast"},
 			},
 			wantSummary: dispatchSensitiveSummary,
-			wantBlocked: "configured_secrets",
+			wantError:   "blocked: sensitive content",
 			absent:      []string{fixture},
 		},
 		{
@@ -260,7 +277,7 @@ func TestDispatchSensitiveBlockSkipsPartialSummary(t *testing.T) {
 				model:      provider.ModelKey{Provider: "local", Model: "fast"},
 			},
 			wantSummary: dispatchSensitiveSummary,
-			wantBlocked: "secrets",
+			wantError:   "blocked: sensitive content",
 			absent:      []string{evidence, secretShaped},
 		},
 		{
@@ -272,7 +289,7 @@ func TestDispatchSensitiveBlockSkipsPartialSummary(t *testing.T) {
 				model:      provider.ModelKey{Provider: "local", Model: "fast"},
 			},
 			wantSummary: dispatchSensitiveSummary,
-			wantBlocked: "configured_secrets",
+			wantError:   "blocked: sensitive content",
 			absent:      []string{fixture},
 		},
 		{
@@ -284,7 +301,7 @@ func TestDispatchSensitiveBlockSkipsPartialSummary(t *testing.T) {
 				model:      provider.ModelKey{Provider: "local", Model: "fast"},
 			},
 			wantSummary: dispatchSensitiveSummary,
-			wantBlocked: "vault",
+			wantError:   "blocked: sensitive content",
 			absent:      []string{fixture},
 		},
 		{
@@ -296,7 +313,7 @@ func TestDispatchSensitiveBlockSkipsPartialSummary(t *testing.T) {
 				model:      provider.ModelKey{Provider: "local", Model: "fast"},
 			},
 			wantSummary: "Partial result before error: " + evidence,
-			wantBlocked: "invariants",
+			wantError:   "blocked by interceptor invariants (test_block)",
 		},
 	}
 	for _, tc := range cases {
@@ -308,8 +325,8 @@ func TestDispatchSensitiveBlockSkipsPartialSummary(t *testing.T) {
 			if got.StopReason != "error" {
 				t.Fatalf("stop_reason = %q, want error", got.StopReason)
 			}
-			if !strings.Contains(got.Error, "blocked by interceptor "+tc.wantBlocked+" (") {
-				t.Fatalf("error = %q, want a block by %s", got.Error, tc.wantBlocked)
+			if !strings.Contains(got.Error, tc.wantError) {
+				t.Fatalf("error = %q, want %q", got.Error, tc.wantError)
 			}
 			for _, secret := range tc.absent {
 				requireEnvelopeWithout(t, content, secret)
@@ -376,6 +393,55 @@ func TestDispatchSensitiveBlockDropsModel(t *testing.T) {
 			}
 			for _, secret := range tc.absent {
 				requireEnvelopeWithout(t, content, secret)
+			}
+		})
+	}
+}
+
+func TestDispatchSensitiveBlockSanitizesJoinedErrors(t *testing.T) {
+	secret := sensitiveFixture(t)
+	read := agent.Effect{Class: agent.Read, Approval: agent.ApprovalNever}
+	available := []agent.Tool{
+		dispatchNamedTool{name: "read_file", effect: read},
+		dispatchNamedTool{name: "search", effect: read},
+		dispatchNamedTool{name: "glob", effect: read},
+		dispatchNamedTool{name: "list", effect: read},
+	}
+	for _, tc := range []struct {
+		name        string
+		providerErr error
+		rule        string
+	}{
+		{name: "provider error echoes protected content", providerErr: fmt.Errorf("provider echoed %s", secret), rule: "protected_output"},
+		{name: "finding rule echoes protected content", providerErr: errors.New("provider unavailable"), rule: secret},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			caller := dispatchModelFunc(func(context.Context, provider.ChatRequest) (agent.ModelResult, error) {
+				return agent.ModelResult{Response: provider.ChatResponse{Content: secret}}, tc.providerErr
+			})
+			guard := outputSensitiveBlocker{namedSearchBlocker: namedSearchBlocker{name: "host_guard"}, secret: secret, rule: tc.rule}
+			d, err := NewDispatch(caller, agent.ContextManager{}, available, DispatchLimits{MaxTasks: 1}, guard)
+			if err != nil {
+				t.Fatalf("NewDispatch: %v", err)
+			}
+			out, err := d.Invoke(t.Context(), json.RawMessage(`{"tasks":["inspect notes"]}`))
+			if err != nil {
+				t.Fatalf("Invoke: %v", err)
+			}
+			if !out.IsError {
+				t.Fatalf("dispatch result = %+v, want error", out)
+			}
+			requireEnvelopeWithout(t, out.Content, secret)
+			var envelope dispatchEnvelope
+			if err := json.Unmarshal([]byte(out.Content), &envelope); err != nil {
+				t.Fatalf("decode dispatch result: %v", err)
+			}
+			if len(envelope.Results) != 1 {
+				t.Fatalf("results = %+v, want one", envelope.Results)
+			}
+			got := envelope.Results[0]
+			if got.Summary != dispatchSensitiveSummary || got.Model != "" || got.StopReason != "error" || got.Error != "blocked: sensitive content; child model identity unavailable" {
+				t.Fatalf("result = %+v, want redacted error result", got)
 			}
 		})
 	}

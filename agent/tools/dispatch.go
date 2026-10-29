@@ -40,6 +40,7 @@ const (
 	// sensitive block (#424): the last retained message may hold the value the
 	// guard just refused.
 	dispatchSensitiveSummary = "Partial result unavailable: blocked: sensitive content"
+	dispatchSensitiveError   = "blocked: sensitive content"
 )
 
 const dispatchSystemPrompt = "You are a read-only exploration subagent. Investigate only the assigned task using the available read and retrieval tools. Do not write or edit files, run commands, call external tools, submit plans, or dispatch children. Return a concise evidence-backed summary and do not claim actions you did not perform."
@@ -445,7 +446,8 @@ func (d *Dispatch) runChild(ctx context.Context, task dispatchTask, child dispat
 	if err != nil {
 		out.StopReason = "error"
 	}
-	if interceptor.SensitiveBlocked(err) {
+	sensitiveBlocked := interceptor.SensitiveBlocked(err)
+	if sensitiveBlocked {
 		// The last retained message can be the value the guard refused, and the
 		// recorded model name was captured before the output check could see it;
 		// neither reaches the parent (#424). The child's earlier history is not
@@ -478,7 +480,13 @@ func (d *Dispatch) runChild(ctx context.Context, task dispatchTask, child dispat
 		}
 	}
 	if err != nil {
-		out.Error = err.Error()
+		if sensitiveBlocked {
+			// The joined error can include provider diagnostics or a finding rule
+			// that repeats the protected text. Neither is safe for the parent.
+			out.Error = dispatchSensitiveError
+		} else {
+			out.Error = err.Error()
+		}
 		if strings.TrimSpace(out.Error) == "" {
 			out.Error = "child failed without an error message"
 		}

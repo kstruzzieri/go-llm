@@ -391,10 +391,12 @@ func sealFailureSession(t *testing.T, sealErr error, caller func(latch func(erro
 	return sess, []error{sealErr}, nil
 }
 
-// configuredBlockedText is the agent error for a configured_secrets block of a
-// model response. The dispatch envelope and the agentflow worker carry it
-// verbatim.
-const configuredBlockedText = "agent: output blocked by interceptor configured_secrets (configured_secret)"
+// configuredBlockedText is the direct agent error for a configured_secrets
+// block. Dispatch uses a fixed error because a joined error may carry the key.
+const (
+	configuredBlockedText         = "agent: output blocked by interceptor configured_secrets (configured_secret)"
+	configuredDispatchBlockedText = "blocked: sensitive content"
+)
 
 // configuredProbeBody is the text of the file a configured-key turn reads, so a
 // run that is not blocked shows that its call ran.
@@ -557,7 +559,11 @@ func TestModelSwitchKeepsConfiguredSecrets(t *testing.T) {
 				for _, o := range sessionSurfaces(t, sess, fx.alt) {
 					checkConfiguredRun(t, o, exposesResult, tc.blockedAs)
 				}
-				checkConfiguredRun(t, dispatchObservation(t, sess, fx.alt), exposesScore, tc.blockedAs)
+				dispatchBlockedAs := ""
+				if tc.blockedAs != "" {
+					dispatchBlockedAs = configuredDispatchBlockedText
+				}
+				checkConfiguredRun(t, dispatchObservation(t, sess, fx.alt), exposesScore, dispatchBlockedAs)
 			})
 		}
 	})
@@ -582,7 +588,7 @@ func TestConfiguredSecretsBlocksEscapedKeyInMalformedArguments(t *testing.T) {
 		for _, o := range sessionSurfaces(t, sess, fx.primary) {
 			checkConfiguredRun(t, o, exposesResult, configuredBlockedText)
 		}
-		checkConfiguredRun(t, dispatchObservation(t, sess, fx.primary), exposesScore, configuredBlockedText)
+		checkConfiguredRun(t, dispatchObservation(t, sess, fx.primary), exposesScore, configuredDispatchBlockedText)
 	})
 }
 

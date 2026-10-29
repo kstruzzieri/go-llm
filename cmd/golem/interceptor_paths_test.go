@@ -312,7 +312,7 @@ func TestInterceptorChainConstructionPaths(t *testing.T) {
 			}
 			return []pathObservation{o}
 		}},
-		{"dispatch child", exposesScore, configuredBlockedText, func(t *testing.T, fx modelSwitchFixture, flag []string) (obs []pathObservation) {
+		{"dispatch child", exposesScore, configuredDispatchBlockedText, func(t *testing.T, fx modelSwitchFixture, flag []string) (obs []pathObservation) {
 			fx.withSession(t, append([]string{"-dispatch"}, flag...), func(t *testing.T, sess *replSession) {
 				obs = []pathObservation{dispatchObservation(t, sess, fx.primary)}
 			})
@@ -325,7 +325,7 @@ func TestInterceptorChainConstructionPaths(t *testing.T) {
 			})
 			return obs
 		}},
-		{"model set dispatch", exposesScore, configuredBlockedText, func(t *testing.T, fx modelSwitchFixture, flag []string) (obs []pathObservation) {
+		{"model set dispatch", exposesScore, configuredDispatchBlockedText, func(t *testing.T, fx modelSwitchFixture, flag []string) (obs []pathObservation) {
 			// -dispatch without -dispatch-role follows the parent, so /model set
 			// rebuilds the child (rebuildDispatchTool).
 			fx.withSession(t, append([]string{"-dispatch"}, flag...), func(t *testing.T, sess *replSession) {
