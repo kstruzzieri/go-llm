@@ -8,6 +8,25 @@ All notable changes to `go-llm` are documented here. Downstream consumers
 
 ## [0.6.0] - 2026-10-29
 
+### Changed — Golem requires AgentFlow 1.2 (#730)
+
+Golem now requires AgentFlow 1.2.0 or a later 1.x. AgentFlow 1.1 and older
+are refused before any other AgentFlow call
+(`agentflow 1.1 is too old; need >= 1.2`), so upgrade AgentFlow before or
+with Golem. CI's AgentFlow compatibility job pins the AgentFlow v1.2.0
+release commit.
+
+In AgentFlow 1.2, `next-action` answers only from the ledger rows it
+validated. When the step, command or file receipt ledgers change while it
+runs, it reports `state_invalid` ("execution ledgers changed during
+next-action; run it again") instead of an answer steered by an unvalidated
+row. Golem already refuses `state_invalid`: `-agentflow-status` exits 3 with
+`resume: blocked by invalid Agentflow state`, and `-agentflow-resume` stops
+before any change. Both now act only on the validated projection; when you
+see that refusal while another process is writing `.agent/`, run the command
+again. Golem does not use 1.2's `next-step --explain` or the
+`recorded_blockers` key of `next-action --json` yet; it ignores the new key.
+
 ### Changed — v0.6.0 consumer upgrade notes (#727)
 
 Read this before upgrading from v0.5.0. Consumers on older pins must also apply
@@ -44,9 +63,9 @@ session does not get, the known issues and the consumer compile check.
 - A session without `-profile` or a legacy opt-in flag is read-only (#387).
   Scripts that relied on retrieval, auto-indexing or `memory_search` need
   `-profile trusted` or one of the legacy opt-in flags.
-- Install AgentFlow 1.1 or a later 1.x (#705). Failed step runs now block their
-  attempt, so `-agentflow-resume` reruns the model, and a fresh `-plan` or
-  `-goal` refuses a workspace with execution history (#642, #643).
+- Install AgentFlow 1.2 or a later 1.x (#705, #730). Failed step runs now
+  block their attempt, so `-agentflow-resume` reruns the model, and a fresh
+  `-plan` or `-goal` refuses a workspace with execution history (#642, #643).
 - Exact configured-secret protection is available, opt-in through
   `-interceptors`; default sessions are not covered (#424). MCP HTTP
   authentication is optional: `go-llm-mcp` stays unauthenticated over HTTP,
@@ -97,7 +116,8 @@ it does not detect read-root drift.
 Golem now requires AgentFlow 1.1.0 or a later 1.x. AgentFlow 1.0 is refused
 before any other AgentFlow call (`agentflow 1.0 is too old; need >= 1.1`), so
 upgrade AgentFlow before or with Golem. CI's AgentFlow compatibility job pins
-the AgentFlow v1.1.0 release commit.
+the AgentFlow v1.1.0 release commit. #730, in this same release, raises the
+floor again to 1.2, so v0.6.0 itself requires AgentFlow 1.2 or a later 1.x.
 
 AgentFlow 1.1 can recover a gate that timed out (kstruzzieri/agentflow#60,
 #70), and Golem now follows it:
