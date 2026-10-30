@@ -7,9 +7,12 @@
 # with (a) the fragments this PR deletes folded in by scripts/changelog-fold
 # and optionally (b) one "## [x.y.z] - YYYY-MM-DD" stamp immediately under
 # Unreleased, with its blank-line formatting. Anything else is a direct edit,
-# except (c): a PR that folds nothing may correct the body of the newest
-# version section until that version's v<x.y.z> tag exists, so release notes
-# can still be fixed between the stamp and the tag. The fragments in the tree are also
+# except (c): a PR may correct the body of the newest version section until
+# that version's v<x.y.z> tag exists, so release notes can still be fixed
+# between the stamp and the tag. In that window the fragments a PR deletes may
+# be folded into that body instead of under Unreleased, so a change merged
+# after the stamp can still ship in the stamped version; each must appear
+# there as scripts/changelog-fold emits it. The fragments in the tree are also
 # validated so a malformed one fails here, not at release time.
 set -euo pipefail
 export LC_ALL=C
@@ -72,17 +75,33 @@ if [ "$status" -gt 1 ]; then
 fi
 # (c): everything outside the newest version's body, its heading included,
 # must match the merge-base. A heading the base lacks hides nothing there, so
-# a new or redated version section never compares equal.
-if [ "$status" -eq 1 ] && [ -z "$deleted" ]; then
+# a new or redated version section never compares equal. A deleted fragment
+# must then sit in that body verbatim, preceded and followed by a line break,
+# or it was dropped rather than folded.
+if [ "$status" -eq 1 ]; then
   top="$(awk '/^## \[Unreleased\]$/ { found = 1; next } found && /^## \[/ { print; exit }' "$tmp/head")"
   version="$(printf '%s\n' "$top" | sed -nE 's/^## \[([0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?)\] - [0-9]{4}-[0-9]{2}-[0-9]{2}$/\1/p')"
   if [ -n "$version" ] && ! git -C "$root" rev-parse -q --verify "refs/tags/v$version" >/dev/null; then
     outside_top() {
       awk -v top="$top" '$0 == top { print; skip = 1; next } skip && /^## \[/ { skip = 0 } !skip' "$1"
     }
-    outside_top "$scratch/CHANGELOG.md" >"$tmp/base-outside"
+    git -C "$root" show "$mb:CHANGELOG.md" >"$tmp/base"
+    outside_top "$tmp/base" >"$tmp/base-outside"
     outside_top "$tmp/head" >"$tmp/head-outside"
     if cmp -s "$tmp/base-outside" "$tmp/head-outside"; then
+      body="$(awk -v top="$top" '$0 == top { found = 1; print; next } found && /^## \[/ { exit } found' "$tmp/head")"
+      for path in $deleted; do
+        # Same trailing-blank trim as scripts/changelog-fold.
+        block="$(git -C "$root" show "$mb:$path" \
+          | awk '{ if ($0 == "") { held = held "\n" } else { printf "%s%s\n", held, $0; held = "" } }')"
+        case "$body"$'\n' in
+          *$'\n'"$block"$'\n'*) ;;
+          *)
+            printf 'changelog fragment removed without folding it into CHANGELOG.md\n' >&2
+            exit 1
+            ;;
+        esac
+      done
       exec "$script_dir/changelog-fold" --dry-run
     fi
   fi

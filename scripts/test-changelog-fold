@@ -381,7 +381,45 @@ sed -i.bak 's/^## \[0\.3\.0\] - 2026-09-10$/## [0.3.0] - 2026-09-11/' "$repo/CHA
 g commit -qam redate
 expect_fail correction-heading 'CHANGELOG.md is edited directly.' "$repo/scripts/check-changelog" develop
 
+# A change merged after the stamp can still ship in the stamped version: its
+# fragment folds into that version's body, here beside a correction.
+late_fold() { # <heading-marker> <body-line>
+  g rm -q changelog.d/20-pending.md
+  printf '\n%s Added — pending (#20)\n\n%s\n' "$1" "$2" >"$tmp/entry"
+  sed -i.bak "/^## \\[0\\.3\\.0\\] - 2026-09-10\$/r $tmp/entry" "$repo/CHANGELOG.md" && rm "$repo/CHANGELOG.md.bak"
+}
+pr late-folds-into-untagged-version
+late_fold '###' 'Body twenty.'
+sed -i.bak 's/^Stale claim\.$/Corrected claim./' "$repo/CHANGELOG.md" && rm "$repo/CHANGELOG.md.bak"
+g commit -qam late-fold
+"$repo/scripts/check-changelog" develop >"$tmp/out"
+printf 'nothing to fold: changelog.d/ has no fragments\n' >"$tmp/want"
+diff -u "$tmp/want" "$tmp/out"
+
+# The fragment text must survive whole: neither its last line extended nor
+# its heading demoted.
+pr late-fold-extends-fragment
+late_fold '###' 'Body twenty. Reworded.'
+g commit -qam late-fold-extended
+expect_fail late-fold-extended 'changelog fragment removed without folding it' "$repo/scripts/check-changelog" develop
+
+pr late-fold-demotes-heading
+late_fold '####' 'Body twenty.'
+g commit -qam late-fold-demoted
+expect_fail late-fold-demoted 'changelog fragment removed without folding it' "$repo/scripts/check-changelog" develop
+
+pr late-fold-drops-fragment
+g rm -q changelog.d/20-pending.md
+sed -i.bak 's/^Stale claim\.$/Corrected claim./' "$repo/CHANGELOG.md" && rm "$repo/CHANGELOG.md.bak"
+g commit -qam late-fold-dropped
+expect_fail late-fold-dropped 'changelog fragment removed without folding it' "$repo/scripts/check-changelog" develop
+
 g checkout -q develop && g tag v0.3.0
+pr late-folds-into-tagged-version
+late_fold '###' 'Body twenty.'
+g commit -qam late-fold-tagged
+expect_fail late-fold-after-tag 'CHANGELOG.md is edited directly.' "$repo/scripts/check-changelog" develop
+
 pr corrects-tagged-version
 sed -i.bak 's/^Stale claim\.$/Corrected claim./' "$repo/CHANGELOG.md" && rm "$repo/CHANGELOG.md.bak"
 g commit -qam correct-tagged
