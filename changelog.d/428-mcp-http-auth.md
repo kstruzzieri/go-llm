@@ -41,9 +41,9 @@ updating clients.
   are checked again.
 - The gate strips `Authorization` before the MCP SDK and tools see the request,
   so tool handlers never receive the credential.
-- Golem's MCP client cannot send an `Authorization` header yet (#578), so a
+- Golem's MCP client cannot send an `Authorization` header, so a
   token-protected `go-llm-mcp` answers Golem's `-mcp-http` with 401. Use stdio, or
-  leave the token unset on loopback, until #578 lands.
+  leave the token unset on loopback.
 
 #### Notes for library callers
 
