@@ -407,6 +407,98 @@ func TestContentGuardDenialPrecedesNonRawMarshalError(t *testing.T) {
 	})
 }
 
+// TestContentGuardDenialPrecedesMarshalErrorInEveryField places the fixture in
+// one string field at a time, with a NaN temperature so json.Marshal fails.
+// Only the pre-marshal field check can then report a denial, so each row pins
+// that check for its own field.
+func TestContentGuardDenialPrecedesMarshalErrorInEveryField(t *testing.T) {
+	nan := math.NaN()
+	f := guardFixture
+	chat := func(mut func(r *chatRequest)) func(*Client) error {
+		return func(c *Client) error {
+			r := chatRequest{Model: "m", Messages: []chatMessage{{Role: "user", Content: "hi"}}, Temperature: &nan}
+			mut(&r)
+			return c.postJSON(context.Background(), chatPath, r, nil)
+		}
+	}
+	gen := func(mut func(r *completionRequest)) func(*Client) error {
+		return func(c *Client) error {
+			r := completionRequest{Model: "m", Prompt: "hi", Temperature: &nan}
+			mut(&r)
+			return c.postJSON(context.Background(), "/v1/completions", r, nil)
+		}
+	}
+	call := func(mut func(tc *chatToolCall)) func(r *chatRequest) {
+		return func(r *chatRequest) {
+			tc := chatToolCall{ID: "c1", Type: "function", Function: chatToolCallFunction{Name: "read", Arguments: json.RawMessage(`{}`)}}
+			mut(&tc)
+			r.Messages = append(r.Messages, chatMessage{Role: "assistant", ToolCalls: []chatToolCall{tc}})
+		}
+	}
+	tool := func(mut func(tl *chatTool)) func(r *chatRequest) {
+		return func(r *chatRequest) {
+			tl := chatTool{Type: "function", Function: chatFunction{Name: "read", Description: "d", Parameters: json.RawMessage(`{"type":"object"}`)}}
+			mut(&tl)
+			r.Tools = append(r.Tools, tl)
+		}
+	}
+
+	t.Run("control: clean NaN generate is a construction error", func(t *testing.T) {
+		tr := &guardTransport{}
+		err := gen(func(*completionRequest) {})(newGuardClient(tr, guardContains(f)))
+		if err == nil || errors.Is(err, provider.ErrContentDenied) || tr.calls.Load() != 0 {
+			t.Fatalf("err = %v, calls = %d; want a construction error and nothing sent", err, tr.calls.Load())
+		}
+	})
+	runSendRows(t, f, []sendRow{
+		{"control: clean NaN chat is a construction error", chat(func(*chatRequest) {}), outcomeUnencodable},
+		{"chat model", chat(func(r *chatRequest) { r.Model = f }), outcomeDenied},
+		{"chat stop", chat(func(r *chatRequest) { r.Stop = []string{"x", f} }), outcomeDenied},
+		{"chat tool_choice", chat(func(r *chatRequest) { r.ToolChoice = f }), outcomeDenied},
+		{"chat reasoning_effort", chat(func(r *chatRequest) { r.ReasoningEffort = f }), outcomeDenied},
+		{"message role", chat(func(r *chatRequest) { r.Messages[0].Role = f }), outcomeDenied},
+		{"message content", chat(func(r *chatRequest) { r.Messages[0].Content = f }), outcomeDenied},
+		{"message reasoning_content", chat(func(r *chatRequest) { r.Messages[0].ReasoningContent = f }), outcomeDenied},
+		{"message name", chat(func(r *chatRequest) { r.Messages[0].Name = f }), outcomeDenied},
+		{"message tool_call_id", chat(func(r *chatRequest) { r.Messages[0].ToolCallID = f }), outcomeDenied},
+		{"tool call id", chat(call(func(tc *chatToolCall) { tc.ID = f })), outcomeDenied},
+		{"tool call type", chat(call(func(tc *chatToolCall) { tc.Type = f })), outcomeDenied},
+		{"tool call function name", chat(call(func(tc *chatToolCall) { tc.Function.Name = f })), outcomeDenied},
+		{"tool call arguments", chat(call(func(tc *chatToolCall) { tc.Function.Arguments = json.RawMessage(`{"q":"` + f + `"}`) })), outcomeDenied},
+		{"tool type", chat(tool(func(tl *chatTool) { tl.Type = f })), outcomeDenied},
+		{"tool function name", chat(tool(func(tl *chatTool) { tl.Function.Name = f })), outcomeDenied},
+		{"tool description", chat(tool(func(tl *chatTool) { tl.Function.Description = f })), outcomeDenied},
+		{"tool parameters", chat(tool(func(tl *chatTool) {
+			tl.Function.Parameters = json.RawMessage(`{"type":"object","description":"` + f + `"}`)
+		})), outcomeDenied},
+		{"chat_template_kwargs key", chat(func(r *chatRequest) { r.ChatTemplateKwargs = map[string]any{f: true} }), outcomeDenied},
+		{"chat_template_kwargs value", chat(func(r *chatRequest) { r.ChatTemplateKwargs = map[string]any{"k": f} }), outcomeDenied},
+		{"generate model", gen(func(r *completionRequest) { r.Model = f }), outcomeDenied},
+		{"generate prompt", gen(func(r *completionRequest) { r.Prompt = f }), outcomeDenied},
+		{"generate suffix", gen(func(r *completionRequest) { r.Suffix = f }), outcomeDenied},
+		{"generate stop", gen(func(r *completionRequest) { r.Stop = []string{f} }), outcomeDenied},
+	})
+}
+
+// TestContentGuardFinalWireCheck sends bodies whose Go type the pre-marshal
+// field check does not list, so only the final check on the serialized bytes
+// (spec D4) sees the fixture. Every production caller passes a listed value
+// type today; this pins the backstop for a future field or body type.
+func TestContentGuardFinalWireCheck(t *testing.T) {
+	f := guardFixture
+	runSendRows(t, f, []sendRow{
+		{"pointer to chatRequest", func(c *Client) error {
+			return c.postJSON(context.Background(), chatPath, &chatRequest{Model: "m", Messages: []chatMessage{{Role: "user", Content: f}}}, nil)
+		}, outcomeDenied},
+		{"generic map body", func(c *Client) error {
+			return c.postJSON(context.Background(), chatPath, map[string]any{"model": "m", "messages": []any{map[string]any{"role": "user", "content": f}}}, nil)
+		}, outcomeDenied},
+		{"control: clean map body is sent", func(c *Client) error {
+			return c.postJSON(context.Background(), chatPath, map[string]any{"model": "m", "messages": []any{map[string]any{"role": "user", "content": "hi"}}}, nil)
+		}, outcomeSent},
+	})
+}
+
 func TestContentGuardKeyWithJSONSpecialBytes(t *testing.T) {
 	// Quote, backslash, HTML characters, U+2028 and a control byte: json.Marshal
 	// writes each of these as an escape, so the key never appears verbatim on the wire.

@@ -1310,4 +1310,4 @@ go-llm-mcp --transport http --addr 127.0.0.1:8080
 go-llm-mcp --ollama-url http://gpu-server:11434
 ```
 
-A `go-llm-mcp` HTTP server started with `GO_LLM_MCP_TOKEN` answers Golem's `-mcp-http` with 401, because Golem's MCP client cannot send an `Authorization` header yet ([#578](https://github.com/kstruzzieri/go-llm/issues/578)). Until then, attach it with `-mcp-stdio`, or leave the token unset on loopback.
+A `go-llm-mcp` HTTP server started with `GO_LLM_MCP_TOKEN` answers Golem's `-mcp-http` with 401, because Golem's MCP client cannot send an `Authorization` header. Attach it with `-mcp-stdio` instead, or leave the token unset on loopback.
