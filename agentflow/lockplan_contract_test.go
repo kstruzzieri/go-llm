@@ -75,7 +75,7 @@ func TestAgentflowRunnerForTest_PrefersSourceOverride(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Source mode runs `python3 -P -m agentflow --version` for the version gate.
-	if err := os.WriteFile(filepath.Join(binDir, "python3"), []byte("#!/bin/sh\necho 'agentflow 1.1.0'\n"), 0o700); err != nil {
+	if err := os.WriteFile(filepath.Join(binDir, "python3"), []byte("#!/bin/sh\necho 'agentflow 1.2.0'\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	checkout := writeSourceCheckoutFixture(t)

@@ -1190,7 +1190,7 @@ func TestRunAgentflowTask_RejectsInvalidTraceabilityBeforeClientUse(t *testing.T
 
 // #612 R4: a 0.x plan file is refused before any AgentFlow call.
 func TestRunAgentflowTask_RejectsZeroXPlanBeforeClientUse(t *testing.T) {
-	calls := fakeAgentflowOnPath(t, "1.1.0")
+	calls := fakeAgentflowOnPath(t, "1.2.0")
 	plan := agentflow.Compile(validTraceableIR())
 	plan.SchemaVersion = "0.3.0"
 	planBytes, err := json.Marshal(plan)
@@ -1242,7 +1242,7 @@ func TestRunAgentflowTask_RejectedVersionMakesNoOtherCall(t *testing.T) {
 			if !errors.Is(err, errAgentflowTaskFailed) {
 				t.Fatalf("err = %v, want errAgentflowTaskFailed", err)
 			}
-			if !strings.Contains(stderr.String(), "agentflow 0.4 is too old; need >= 1.1") {
+			if !strings.Contains(stderr.String(), "agentflow 0.4 is too old; need >= 1.2") {
 				t.Fatalf("stderr = %q, want the version rejection", stderr.String())
 			}
 			got, err := os.ReadFile(calls)

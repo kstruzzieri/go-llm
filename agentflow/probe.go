@@ -12,8 +12,11 @@ import (
 // maxMajor bounds it from above (#612: AgentFlow 1.x only). 1.1 ships the
 // recovery Golem relies on: superseded timeouts verify (agentflow#60),
 // next-action leads timed-out and replacement work to a close (#70), and
-// ledger writers refuse closed attempts (#61).
-var minVersion = [2]int{1, 1}
+// ledger writers refuse closed attempts (#61). 1.2 is the release CI verifies:
+// the next-action projection Golem's status and resume act on comes only from
+// ledger rows AgentFlow validated, and is state_invalid when they change
+// mid-call.
+var minVersion = [2]int{1, 2}
 
 const maxMajor = 1
 

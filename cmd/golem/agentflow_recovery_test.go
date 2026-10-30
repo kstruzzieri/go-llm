@@ -19,7 +19,7 @@ import (
 
 type recoveryRunner struct {
 	payload []byte
-	version string // --version reply; "" means a supported "agentflow 1.1.0"
+	version string // --version reply; "" means a supported "agentflow 1.2.0"
 	calls   [][]string
 }
 
@@ -29,7 +29,7 @@ type failingRecoveryRunner struct{ stderr []byte }
 
 func (r *failingRecoveryRunner) Run(_ context.Context, args []string, _ []byte) ([]byte, []byte, int, error) {
 	if len(args) > 0 && args[0] == "--version" {
-		return []byte("agentflow 1.1.0\n"), nil, 0, nil
+		return []byte("agentflow 1.2.0\n"), nil, 0, nil
 	}
 	return nil, append([]byte(nil), r.stderr...), 1, nil
 }
@@ -38,7 +38,7 @@ func (r *recoveryRunner) Run(_ context.Context, args []string, _ []byte) ([]byte
 	r.calls = append(r.calls, append([]string(nil), args...))
 	if len(args) > 0 && args[0] == "--version" {
 		if r.version == "" {
-			return []byte("agentflow 1.1.0\n"), nil, 0, nil
+			return []byte("agentflow 1.2.0\n"), nil, 0, nil
 		}
 		return []byte(r.version), nil, 0, nil
 	}
@@ -118,7 +118,8 @@ func TestAgentflowStatus_HumanIsReadOnlyAndOwned(t *testing.T) {
 // rejection is Golem's own text, so JSON mode reports it on stderr.
 func TestAgentflowStatus_RejectsUnsupportedVersionBeforeNextAction(t *testing.T) {
 	for _, tt := range []struct{ version, want string }{
-		{"agentflow 0.4.0\n", "agentflow 0.4 is too old; need >= 1.1"},
+		{"agentflow 0.4.0\n", "agentflow 0.4 is too old; need >= 1.2"},
+		{"agentflow 1.1.1\n", "agentflow 1.1 is too old; need >= 1.2"},
 		{"agentflow 2.0.0\n", "agentflow 2.0 is newer than this Golem supports; need 1.x"},
 	} {
 		for _, jsonOutput := range []bool{false, true} {
