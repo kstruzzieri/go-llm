@@ -584,18 +584,21 @@ without `-workflow-handoff`: the handoff check reads
 
 ## Upgrading from AgentFlow 0.x
 
-Golem drives AgentFlow 1.x only, from 1.1: earlier 1.0 releases are refused
-by version, because Golem relies on 1.1's timeout and amendment recovery
-(kstruzzieri/agentflow#60, #70). AgentFlow 1.0 moved its plan, execution
-contract, ledgers, drift report and proof pack to schema `1.0.0` and gives 0.x
-working state no upgrade path, so Golem does not migrate it either:
+Golem drives AgentFlow 1.x only, from 1.2: earlier 1.x releases are refused
+by version. Golem relies on 1.1's timeout and amendment recovery
+(kstruzzieri/agentflow#60, #70), and 1.2 is the release CI verifies it
+against: `next-action` answers only from the ledger rows it validated and
+reports `state_invalid` when they change during the call. AgentFlow 1.0
+moved its plan, execution contract, ledgers, drift report and proof pack to
+schema `1.0.0` and gives 0.x working state no upgrade path, so Golem does not
+migrate it either:
 
 1. Finish the run with AgentFlow 0.x, or run `agentflow build-proof` with it
    and keep the proof bundle.
 2. Move the workspace's `.agent/` directory aside. Re-initializing only the
    execution contract is not enough: AgentFlow keeps the old ledger rows and
    rejects them when it reads them.
-3. Install AgentFlow 1.1 or a later 1.x, then re-plan with `-goal`, or
+3. Install AgentFlow 1.2 or a later 1.x, then re-plan with `-goal`, or
    migrate an external plan to `schema_version` `1.0.0` and review it again
    before `-plan`.
 

@@ -157,7 +157,7 @@ func TestRunAgentflowTask_RefusesZeroXStateBeforeAgentflow(t *testing.T) {
 			writeAgentFile(t, root, "plan.lock.json", v1Lock)
 			writeAgentFile(t, root, "execution.contract.json", `{"schema_version":"0.3.0"}`)
 			before := snapshotAuditFixtureTree(t, filepath.Join(root, ".agent"))
-			calls := fakeAgentflowOnPath(t, "1.1.0")
+			calls := fakeAgentflowOnPath(t, "1.2.0")
 			planBytes, err := json.Marshal(agentflow.Compile(validTraceableIR()))
 			if err != nil {
 				t.Fatal(err)
@@ -289,7 +289,7 @@ func TestAgentflowExecutionHistory(t *testing.T) {
 // PATH and returns the error and the fake's call log path.
 func runFreshTaskOverFixture(t *testing.T, root string, f flags) (calls string, err error) {
 	t.Helper()
-	calls = fakeAgentflowOnPath(t, "1.1.0")
+	calls = fakeAgentflowOnPath(t, "1.2.0")
 	if f.planPath == "" {
 		planBytes, err := json.Marshal(agentflow.Compile(validTraceableIR()))
 		if err != nil {
