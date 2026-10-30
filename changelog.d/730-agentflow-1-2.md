@@ -1,4 +1,4 @@
-### Changed — Golem requires AgentFlow 1.2 (#0000)
+### Changed — Golem requires AgentFlow 1.2 (#730)
 
 Golem now requires AgentFlow 1.2.0 or a later 1.x. AgentFlow 1.1 and older
 are refused before any other AgentFlow call
