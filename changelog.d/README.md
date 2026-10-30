@@ -23,7 +23,10 @@ the tree. At release, `scripts/changelog-fold` moves every fragment under
 `## [Unreleased]` (newest issue first) and removes it; stamp the version
 heading afterwards as before.
 
-Between the stamp and the `v<x.y.z>` tag, a pull request that folds nothing
-may edit the body of the newest version section directly to correct its
-notes. The heading and everything outside that section must stay unchanged,
-and the window closes when the tag exists.
+Between the stamp and the `v<x.y.z>` tag, a pull request may edit the body
+of the newest version section directly to correct its notes. In the same
+window, a change merged after the stamp can still ship in that version: delete
+its fragment and paste the fragment's text, unchanged, into that section's
+body instead of folding it under `## [Unreleased]`. The heading and everything
+outside that section must stay unchanged, and the window closes when the tag
+exists.

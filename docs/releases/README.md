@@ -38,8 +38,9 @@ pitfalls earlier releases hit.
 
    Then insert `## [X.Y.Z] - YYYY-MM-DD` under `## [Unreleased]`. In the same
    PR, point the README release line and roadmap at the new version. Between
-   the stamp and the tag, a PR that folds nothing may still correct the body
-   of the newest version section (see `changelog.d/README.md`).
+   the stamp and the tag, a PR may still correct the body of the newest
+   version section, or fold a fragment merged after the stamp into it (see
+   `changelog.d/README.md`).
 2. **Release PR, develop to main.** Open it with `--base main --head develop`.
    CI requires `changelog.d/` to hold only `README.md`. Merge it with a
    **merge commit**, never a squash.
