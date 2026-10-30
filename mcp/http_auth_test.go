@@ -312,6 +312,12 @@ func TestRequireHTTPBearer(t *testing.T) {
 		{name: "letter case changed", auth: []string{"Bearer Az09-._~+/abcdEF"}},
 		{name: "two headers both valid", auth: []string{"Bearer " + tok, "Bearer " + tok}},
 		{name: "comma-joined values", auth: []string{"Bearer " + tok + ", Bearer " + tok}},
+		// The configured token itself under another scheme: only the scheme
+		// check refuses these (the Basic row above carries a different value).
+		{name: "configured token under Token", auth: []string{"Token " + tok}},
+		{name: "configured token under Basic", auth: []string{"Basic " + tok}},
+		{name: "configured token under DPoP", auth: []string{"DPoP " + tok}},
+		{name: "configured token under Bearerx", auth: []string{"Bearerx " + tok}},
 		{name: "token only in query", url: "http://localhost/mcp?access_token=" + tok},
 		{name: "token only in cookie", header: map[string]string{"Cookie": "token=" + tok}},
 		{name: "token only in Proxy-Authorization", header: map[string]string{"Proxy-Authorization": "Bearer " + tok}},
@@ -530,7 +536,8 @@ func TestStreamableHTTPHandlerBodyLimitPrecedesBearer(t *testing.T) {
 
 // TestHTTPBearerRequestsLogNothing is not parallel: it swaps the process
 // logger. Nothing logs on the request path today; the test pins that a later
-// log line cannot carry the configured or presented credential.
+// log line cannot carry the configured or presented credential, both in the
+// inner gate and in the check newHTTPServer puts in front of h2c.
 func TestHTTPBearerRequestsLogNothing(t *testing.T) {
 	const (
 		tok   = "Az09-._~+/abc=="
@@ -545,23 +552,31 @@ func TestHTTPBearerRequestsLogNothing(t *testing.T) {
 		log.SetFlags(prevFlags)
 	})
 
-	handler := streamableHTTPHandler(newTestMCPServer(t, tok))
-	for _, tt := range []struct {
-		name string
-		auth string
-		want int
+	srv := newTestMCPServer(t, tok)
+	for _, h := range []struct {
+		name    string
+		handler http.Handler
 	}{
-		{"configured token", "Bearer " + tok, http.StatusOK},
-		{"wrong token", "Bearer " + wrong, http.StatusUnauthorized},
-		{"no header", "", http.StatusUnauthorized},
+		{"inner gate", streamableHTTPHandler(srv)},
+		{"h2c front", srv.newHTTPServer("", false).Handler},
 	} {
-		rec := serveInitialize(handler, func(h http.Header) {
-			if tt.auth != "" {
-				h.Set("Authorization", tt.auth)
+		for _, tt := range []struct {
+			name string
+			auth string
+			want int
+		}{
+			{"configured token", "Bearer " + tok, http.StatusOK},
+			{"wrong token", "Bearer " + wrong, http.StatusUnauthorized},
+			{"no header", "", http.StatusUnauthorized},
+		} {
+			rec := serveInitialize(h.handler, func(hdr http.Header) {
+				if tt.auth != "" {
+					hdr.Set("Authorization", tt.auth)
+				}
+			})
+			if rec.Code != tt.want {
+				t.Fatalf("%s, %s: status = %d, want %d", h.name, tt.name, rec.Code, tt.want)
 			}
-		})
-		if rec.Code != tt.want {
-			t.Fatalf("%s: status = %d, want %d", tt.name, rec.Code, tt.want)
 		}
 	}
 
