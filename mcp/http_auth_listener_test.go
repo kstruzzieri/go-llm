@@ -496,6 +496,16 @@ func TestH2CUpgradeWithoutBearerIsNotBuffered(t *testing.T) {
 			if got := rec.Body.String(); got != wantBody {
 				t.Errorf("body = %q, want %q", got, wantBody)
 			}
+			// This refusal answers every HTTP/1.1 request on the default
+			// listener, so it must echo neither credential either.
+			text := rec.Body.String()
+			for k, vs := range rec.Header() {
+				text += "\n" + k + ": " + strings.Join(vs, "\n")
+			}
+			assertNoBearerEcho(t, text, listenerToken)
+			if _, presented, ok := strings.Cut(tt.auth, " "); ok {
+				assertNoBearerEcho(t, text, presented)
+			}
 			if body.read != 0 {
 				t.Errorf("read %d body bytes before refusing, want 0", body.read)
 			}
