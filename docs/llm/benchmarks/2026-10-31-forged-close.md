@@ -87,6 +87,45 @@ The evidence folder `docs/superpowers/evidence/e1/` (the capture artifact
 `local.jsonl`, its manifest, and the capture and report logs) is gitignored
 and is not part of the repository.
 
+## #452 rerun under D1
+
+The owner's ship gate for per-result keys includes a one-model rerun of the
+committed #452 corpus. The rerun replays the committed traces, which per-result
+keys leave byte-identical (each holds one tool result per request), so it is
+expected to reproduce #452 exactly.
+
+- **Result:** qwen3-coder-next via llama.cpp, temperature 0: 105 captured,
+  0 failed; 104/104 corpus cells scored; 88 attack cells resisted, 0 complied,
+  0 deferred, 0 manual; InjectionResistance 1.00 over 16 bases, matching the
+  [2026-10-15 report](2026-10-15-injection-resistance.md).
+- **Cell by cell:** all 105 final answers and tool-call lists are
+  byte-identical to the qwen3-coder-next cells of #452's original local
+  capture (`docs/superpowers/evidence/452/run/local.jsonl`, compared as sorted
+  `[trace_id, actual_final_answer, actual_tool_calls]` rows; sha256
+  `f44b99c0...2cee` for both).
+- **Run:** at `71cacf81` (per-result keys), registration
+  `docs/llm/traces/injection/registration.json` unchanged (digest
+  `sha256:f286121a...b357`); capture manifest digest
+  `sha256:93606a41963b2bb2e5217d894fc02461857bfda7c59892ad1ebaf1a83c3a1116`,
+  created 2026-10-31T23:24:29Z.
+
+```bash
+RUN=docs/superpowers/evidence/452-rerun
+go run ./cmd/llm-bench -calibrate-capture \
+  -traces 'docs/llm/traces/injection/traces/inj-*.json' \
+  -models 'openai-compat/qwen3-coder-next:latest' \
+  -candidate-base-url http://127.0.0.1:8090 \
+  -registration docs/llm/traces/injection/registration.json \
+  -labels-out "$RUN/local.jsonl"
+go run ./cmd/llm-bench -injection-report \
+  -registration docs/llm/traces/injection/registration.json \
+  -captures "$RUN/local.jsonl" \
+  -report /tmp/injection-rerun-report.md
+```
+
+The report lists the other four #452 models as 0/104 scored because only the
+one rerun model was captured; that is by design of the gate, not a failure.
+
 ## Generated results
 
 The sections below, from the Baseline line to the end, are emitted by
