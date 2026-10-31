@@ -243,6 +243,73 @@ func (c *Client) NextStep(ctx context.Context) (string, error) {
 	return r.ID, nil
 }
 
+// Reason codes next-step --explain reports (AgentFlow 1.2, agentflow#71).
+const (
+	NextStepEligible          = "eligible"
+	NextStepDependenciesUnmet = "dependencies_unmet"
+	NextStepOpenAttempts      = "open_attempts"
+	NextStepStepsComplete     = "steps_complete"
+)
+
+// NextStepExplanation is next-step --explain's answer. StepID is set only for
+// NextStepEligible; Diagnostics explain why no step is eligible.
+type NextStepExplanation struct {
+	StepID      string
+	ReasonCode  string
+	Diagnostics []string
+}
+
+// ExplainNextStep returns the next eligible step, or why there is none
+// (#731). It ignores unknown keys but fails closed on what Golem acts on: an
+// unknown reason code (a later 1.x may add one) or a step that does not match
+// its code. Golem reads the step itself from its own plan, so only its id is
+// read here.
+func (c *Client) ExplainNextStep(ctx context.Context) (NextStepExplanation, error) {
+	out, err := c.call(ctx, "next-step", append([]string{"next-step"}, c.rootArgs("--json", "--explain")...), true)
+	if err != nil {
+		return NextStepExplanation{}, err
+	}
+	bad := func(problem string) (NextStepExplanation, error) {
+		return NextStepExplanation{}, fmt.Errorf("agentflow next-step: %s in %q", problem, out)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(out, &fields); err != nil || fields == nil {
+		return bad("want a JSON object")
+	}
+	rawStep, hasStep := fields["step"]
+	rawCode, hasCode := fields["reason_code"]
+	rawDiagnostics, hasDiagnostics := fields["diagnostics"]
+	if !hasStep || !hasCode || !hasDiagnostics {
+		return bad("step, reason_code and diagnostics are required")
+	}
+	var code string
+	if string(rawCode) == "null" || json.Unmarshal(rawCode, &code) != nil {
+		return bad("reason_code is not a string")
+	}
+	switch code {
+	case NextStepEligible, NextStepDependenciesUnmet, NextStepOpenAttempts, NextStepStepsComplete:
+	default:
+		return NextStepExplanation{}, fmt.Errorf("agentflow next-step reported unknown reason_code %q; update Golem", code)
+	}
+	var diagnostics []string
+	if string(rawDiagnostics) == "null" || json.Unmarshal(rawDiagnostics, &diagnostics) != nil {
+		return bad("diagnostics is not an array of strings")
+	}
+	next := NextStepExplanation{ReasonCode: code, Diagnostics: diagnostics}
+	if code != NextStepEligible {
+		if string(rawStep) != "null" {
+			return bad(fmt.Sprintf("step is not null for reason_code %q", code))
+		}
+		return next, nil
+	}
+	var step nextStepResult
+	if string(rawStep) == "null" || json.Unmarshal(rawStep, &step) != nil || step.ID == "" {
+		return bad("eligible step has no string id")
+	}
+	next.StepID = step.ID
+	return next, nil
+}
+
 // ClaimStep claims step for this client's agent and returns the new attempt id.
 func (c *Client) ClaimStep(ctx context.Context, step string) (string, error) {
 	args := append([]string{"claim-step", step}, c.rootArgs("--agent", c.agentName(), "--json")...)

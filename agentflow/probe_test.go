@@ -17,7 +17,7 @@ func TestProbe_OKWhenAllPresent(t *testing.T) {
 }
 
 func probeReplies(topHelp string) map[string]fakeReply {
-	allFlags := []byte("--root --json --from-json --agent --step --attempt --path --gate --confirm-risk --reason")
+	allFlags := []byte("--root --json --from-json --agent --step --attempt --path --gate --confirm-risk --reason --explain")
 	replies := map[string]fakeReply{
 		"--version": {stdout: []byte("agentflow 1.2.0\n")},
 		"--help":    {stdout: []byte(topHelp)},
@@ -51,6 +51,17 @@ func TestProbe_FailsOnMissingRequiredFlag(t *testing.T) {
 	err := NewClient(f, "/ws").Probe(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "lock-plan --from-json") || !strings.HasSuffix(err.Error(), "(upgrade Agentflow)") {
 		t.Fatalf("expected missing flag error, got %v", err)
+	}
+}
+
+// #731 A5: the serial loop needs next-step --explain (AgentFlow 1.2).
+func TestProbe_FailsWithoutNextStepExplain(t *testing.T) {
+	help := "usage: agentflow {init,init-execution,lock-plan,record-file-change,run,finish-step,finish-run,next-step,next-action,doctor,status}"
+	replies := probeReplies(help)
+	replies["next-step"] = fakeReply{stdout: []byte("usage: next-step [--root ROOT] [--json]\n")}
+	err := NewClient(&fakeRunner{replies: replies}, "/ws").Probe(context.Background())
+	if want := "agentflow next-step --explain unavailable (upgrade Agentflow)"; err == nil || err.Error() != want {
+		t.Fatalf("Probe = %v, want %s", err, want)
 	}
 }
 

@@ -43,7 +43,7 @@ func TestProjectTrustAgentflowProcess(t *testing.T) {
 	case args[0] == "--version":
 		reply = "agentflow 1.2.0"
 	case args[0] == "--help" || len(args) > 1 && args[1] == "--help":
-		reply = "init init-execution lock-plan record-file-change run finish-step finish-run next-step next-action doctor status claim-step recommend-workflow workflow-contract --root --from-json --json --agent --step --attempt --path --gate --confirm-risk --stdin --selected-profile --reason"
+		reply = "init init-execution lock-plan record-file-change run finish-step finish-run next-step next-action doctor status claim-step recommend-workflow workflow-contract --root --from-json --json --agent --step --attempt --path --gate --confirm-risk --stdin --selected-profile --reason --explain"
 	case args[0] == "recommend-workflow":
 		reply = trustWorkflowRecommendation
 	case args[0] == "next-step":
