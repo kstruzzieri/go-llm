@@ -95,6 +95,7 @@ func RunHardeningBoundaryContracts(t *testing.T) {
 		{"Framing/provider_observations", runHardeningObservations},
 		{"Framing/full_system_trust_text", runHardeningSystemText},
 		{"Framing/keys_stable_across_renders", TestRunReusesKeysAcrossRenders},
+		{"Framing/keys_rotate_on_exposure", TestPlantedLiveKeyRotatesOwnerOnce},
 		{"Accounting/independent_envelope_costs", TestToolFrameEnvelopeCost},
 		{"Accounting/exact_fit_and_one_below", TestFramedToolBudgetFit},
 		{"Accounting/wrapped_compactor", runHardeningWrappedCompactor},

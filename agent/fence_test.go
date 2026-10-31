@@ -195,6 +195,9 @@ func TestRepeatedRenderReusesKeysWithoutAccumulatingFrames(t *testing.T) {
 type wireCaller struct {
 	responses []ModelResult
 	requests  []provider.ChatRequest
+	// answer, when set, may rewrite the scripted response to request k after
+	// seeing it, so a reply can quote a key that request carries.
+	answer func(k int, req provider.ChatRequest, r *ModelResult)
 }
 
 func (w *wireCaller) Chat(_ context.Context, req provider.ChatRequest, onToken func(provider.ChatResponse) error) (ModelResult, error) {
@@ -205,6 +208,9 @@ func (w *wireCaller) Chat(_ context.Context, req provider.ChatRequest, onToken f
 		return ModelResult{}, fmt.Errorf("wireCaller: unscripted request %d", len(w.requests))
 	}
 	r := w.responses[len(w.requests)-1]
+	if w.answer != nil {
+		w.answer(len(w.requests)-1, req, &r)
+	}
 	if onToken != nil && r.Response.Content != "" {
 		if err := onToken(provider.ChatResponse{Content: r.Response.Content}); err != nil {
 			return ModelResult{}, err

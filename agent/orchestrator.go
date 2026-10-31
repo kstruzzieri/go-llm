@@ -222,11 +222,13 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 	}
 	goal := state.Messages[len(state.Messages)-1].Content
 
-	next := 0 // first State index mintFenceKeys has not visited
+	next := 0 // first State index refreshFenceKeys has not visited
 	for step := 0; step < maxSteps; step++ {
-		// Key the tool messages the previous step appended, now that
-		// verifyBatch has finished with them (history results on step 0).
-		next = mintFenceKeys(&state, next)
+		// Rotate every live key the previous step's text exposed, then key
+		// the tool messages it appended, now that verifyBatch has finished
+		// with them (history on step 0).
+		var rotated int
+		next, rotated = refreshFenceKeys(&state, &advisoryFence, next)
 		manager := o.ctxMgr
 		if advisory != nil {
 			estimate := manager.estimate
@@ -288,6 +290,9 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 					return res, rerr
 				}
 			}
+		}
+		for range rotated {
+			res.Events = append(res.Events, EventRecord{Step: step, Kind: "fence_rotation"})
 		}
 		if pressure.Compactions > 0 {
 			res.Events = append(res.Events, EventRecord{Step: step, Kind: "compaction"})
