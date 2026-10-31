@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"embed"
@@ -348,9 +349,9 @@ type cacheProbeOptions struct {
 	Timeout    time.Duration // -timeout
 }
 
-// runCacheProbeMode validates the flags, opens opts.Out, runs the probe against
-// the one selected model, and writes the table to opts.Out. Every flag error
-// and an unwritable opts.Out fail before any request is sent.
+// runCacheProbeMode validates the flags, checks opts.Out is writable, runs the
+// probe against the one selected model, and writes the table to opts.Out. Every
+// flag error and an unwritable opts.Out fail before any request is sent.
 func runCacheProbeMode(ctx context.Context, opts cacheProbeOptions, stderr io.Writer) error {
 	if strings.TrimSpace(opts.BaseURL) == "" {
 		return fmt.Errorf("-cache-probe requires -candidate-base-url")
@@ -383,29 +384,27 @@ func runCacheProbeMode(ctx context.Context, opts cacheProbeOptions, stderr io.Wr
 	if err != nil {
 		return err
 	}
-	// Open the output before the first request so a bad path fails now, not after
-	// a multi-minute run. No O_TRUNC: a run that then fails leaves an existing
-	// table untouched (a path that did not exist stays an empty file); the
-	// truncate happens just before the table is written.
-	out, err := os.OpenFile(opts.Out, os.O_CREATE|os.O_WRONLY, 0o600)
+	// Prove the path is writable before the first request so a bad path fails
+	// now, not after a multi-minute run. No O_TRUNC and no held handle: the
+	// table is written with os.WriteFile at the end, so a run that fails never
+	// reaches it and an existing table survives (a path that did not exist stays
+	// an empty file), and device targets such as /dev/null or a piped
+	// /dev/stdout keep working because nothing is ever ftruncate'd.
+	probe, err := os.OpenFile(opts.Out, os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		return fmt.Errorf("open -cache-probe-out: %w", err)
 	}
-	defer func() { _ = out.Close() }() // error paths only; success closes below
+	_ = probe.Close()
 
 	rows, err := runCacheProbe(ctx, real, opts.FixtureDir, sc)
 	if err != nil {
 		return err
 	}
-	// The offset is still 0; truncating keeps a shorter table from leaving the
-	// old file's trailing bytes.
-	if err := out.Truncate(0); err != nil {
-		return fmt.Errorf("write -cache-probe-out: %w", err)
+	var table bytes.Buffer
+	if err := writeProbeTable(&table, rows); err != nil {
+		return err
 	}
-	if err := writeProbeTable(out, rows); err != nil {
-		return fmt.Errorf("write -cache-probe-out: %w", err)
-	}
-	if err := out.Close(); err != nil {
+	if err := os.WriteFile(opts.Out, table.Bytes(), 0o600); err != nil {
 		return fmt.Errorf("write -cache-probe-out: %w", err)
 	}
 	_, _ = fmt.Fprintf(stderr, "llm-bench: cache-probe: %d requests (%s) -> %s\n", len(rows), sc, opts.Out)

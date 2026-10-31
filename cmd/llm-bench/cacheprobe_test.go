@@ -563,6 +563,23 @@ func TestRunCacheProbeModeOutputFileLifecycle(t *testing.T) {
 			t.Errorf("output keeps bytes of the old table (%d bytes):\n%.200s", len(b), b)
 		}
 	})
+
+	// A device or pipe target (-cache-probe-out /dev/stdout) must work: nothing
+	// may ftruncate the output, which fails with EINVAL on Linux devices.
+	t.Run("device target is written", func(t *testing.T) {
+		if f, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0); err != nil {
+			t.Skipf("%s is not writable here: %v", os.DevNull, err)
+		} else {
+			_ = f.Close()
+		}
+		ps := newProbeServer(t)
+		if err := runCacheProbeMode(t.Context(), opts(ps.URL, os.DevNull), &strings.Builder{}); err != nil {
+			t.Fatalf("runCacheProbeMode with -cache-probe-out %s: %v", os.DevNull, err)
+		}
+		if ps.count() != 12 {
+			t.Errorf("server saw %d requests, want 12: the run must complete", ps.count())
+		}
+	})
 }
 
 func TestRunCacheProbeModeWritesTable(t *testing.T) {
