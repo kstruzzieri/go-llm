@@ -668,7 +668,7 @@ func TestAgentflowStatusRendersRecordedBlockers(t *testing.T) {
 			if tt.name == "current" {
 				diag, blocker := strings.Index(rendered, "diagnostic: d1\n"), strings.Index(rendered, "recorded blocker:")
 				advisory, resume := strings.Index(rendered, "advisory (display only):"), strings.Index(rendered, "resume:")
-				if diag < 0 || !(diag < blocker && blocker < advisory && advisory < resume) {
+				if diag < 0 || diag >= blocker || blocker >= advisory || advisory >= resume {
 					t.Fatalf("blocker line out of place:\n%s", rendered)
 				}
 			}
