@@ -118,8 +118,12 @@ func buildChatRequest(st State, specs []provider.Tool, outputReserve int, opts p
 		}
 		// #382: the staged advisory is projected here too, on the same value
 		// copy, under the Run's advisory key, which no tool message shares.
-		// State keeps the raw goal.
+		// State keeps the raw goal. A zero key would render an empty, forgeable
+		// marker, so it falls back to a key minted for this render.
 		if advisory != nil && m.Segment == Pinned && cm.Role == "user" {
+			if advisoryFence == (promptfence.Fence{}) {
+				advisoryFence = promptfence.New()
+			}
 			cm.Content = renderAdvisory(advisoryFence, cm.Content, *advisory)
 			advisory = nil
 		}

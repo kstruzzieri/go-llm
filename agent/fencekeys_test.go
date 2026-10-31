@@ -210,3 +210,18 @@ func TestUnkeyedToolMessageFallsBackToFreshKey(t *testing.T) {
 		t.Errorf("unkeyed fallback reused key %q across renders", keys[0])
 	}
 }
+
+// TestUnkeyedAdvisoryFallsBackToFreshKey: an advisory rendered with a zero
+// fence is still framed under a real key (an empty key is forgeable by any
+// text), minted for that render.
+func TestUnkeyedAdvisoryFallsBackToFreshKey(t *testing.T) {
+	st := frameTestState()
+	var keys [2]string
+	for render := range keys {
+		req := buildChatRequest(st, nil, 0, provider.ModelOptions{}, testAdvisory(), promptfence.Fence{})
+		keys[render] = advisoryKeyOf(t, req)
+	}
+	if keys[0] == keys[1] {
+		t.Errorf("unkeyed advisory fallback reused key %q across renders", keys[0])
+	}
+}

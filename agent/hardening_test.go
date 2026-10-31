@@ -175,7 +175,7 @@ func hardeningFrame(t *testing.T, id, actual, template string) string {
 
 func runHardeningFrameBytes(t *testing.T) {
 	// One minted state, two unchanged renders: each tool result has its own
-	// key, and the second render reuses every key of the first.
+	// key, reused by the second render; a second State (below) shares none.
 	st := State{System: "sys", Messages: []Message{{ChatMessage: provider.ChatMessage{Role: "user", Content: "q"}}}}
 	names := []string{"fencing/ordinary", "fencing/empty", "fencing/trailing-newline", "fencing/unicode-controls", "fencing/marker-looking", "ansi/observation"}
 	var wants []string
@@ -216,6 +216,22 @@ func runHardeningFrameBytes(t *testing.T) {
 		previous = keys
 		if !reflect.DeepEqual(st.Messages, original) {
 			t.Error("render mutated canonical state")
+		}
+	}
+	// A second State minted from the same inputs stands for the next Run:
+	// none of its keys may repeat one of the first State's.
+	next := State{System: "sys", Messages: []Message{{ChatMessage: provider.ChatMessage{Role: "user", Content: "q"}}}}
+	for i, name := range names {
+		next.Messages = append(next.Messages, toolMsg(hardeningFixture(t, name+".input"), "fixture", fmt.Sprint(i)))
+	}
+	mintFenceKeys(&next, 0)
+	req := buildChatRequest(next, nil, 0, provider.ModelOptions{}, nil, promptfence.Fence{})
+	if len(req.Messages) != len(names)+2 {
+		t.Fatalf("second state: message count = %d, want %d", len(req.Messages), len(names)+2)
+	}
+	for i, name := range names {
+		if key := hardeningFrame(t, name, req.Messages[i+2].Content, wants[i]); slices.Contains(previous, key) {
+			t.Errorf("%s: a second State minted a key of the first", name)
 		}
 	}
 	hardeningEqual(t, "independent accounting envelope", toolFrameEnvelope, oracleToolFrameEnvelope)

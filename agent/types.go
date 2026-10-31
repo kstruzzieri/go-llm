@@ -139,7 +139,8 @@ type Message struct {
 	// fence is the key a role "tool" message is framed under on the wire
 	// (#430), minted once by mintFenceKeys and reused on every later render
 	// so earlier request bytes never change. Runtime-only: unexported, so it
-	// is never serialized and never leaves the package. Zero means unkeyed.
+	// is never serialized and is not readable outside the package except by
+	// reflection. Zero means unkeyed.
 	fence promptfence.Fence
 }
 
