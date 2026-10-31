@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
 	"embed"
@@ -384,28 +383,33 @@ func runCacheProbeMode(ctx context.Context, opts cacheProbeOptions, stderr io.Wr
 	if err != nil {
 		return err
 	}
-	// Prove the path is writable before the first request so a bad path fails
-	// now, not after a multi-minute run. No O_TRUNC and no held handle: the
-	// table is written with os.WriteFile at the end, so a run that fails never
-	// reaches it and an existing table survives (a path that did not exist stays
-	// an empty file), and device targets such as /dev/null or a piped
-	// /dev/stdout keep working because nothing is ever ftruncate'd.
+	// Open without truncating so a failed run preserves an earlier table.
+	// Keep the handle open so a FIFO reader cannot see EOF before the write.
 	probe, err := os.OpenFile(opts.Out, os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		return fmt.Errorf("open -cache-probe-out: %w", err)
 	}
-	_ = probe.Close()
+	defer func() { _ = probe.Close() }() // Failure paths retain their primary error; success checks Close below.
+	info, err := probe.Stat()
+	if err != nil {
+		return fmt.Errorf("stat -cache-probe-out: %w", err)
+	}
 
 	rows, err := runCacheProbe(ctx, real, opts.FixtureDir, sc)
 	if err != nil {
 		return err
 	}
-	var table bytes.Buffer
-	if err := writeProbeTable(&table, rows); err != nil {
-		return err
+	// Only regular files need truncation; devices and pipes do not support it.
+	if info.Mode().IsRegular() {
+		if err := probe.Truncate(0); err != nil {
+			return fmt.Errorf("truncate -cache-probe-out: %w", err)
+		}
 	}
-	if err := os.WriteFile(opts.Out, table.Bytes(), 0o600); err != nil {
+	if err := writeProbeTable(probe, rows); err != nil {
 		return fmt.Errorf("write -cache-probe-out: %w", err)
+	}
+	if err := probe.Close(); err != nil {
+		return fmt.Errorf("close -cache-probe-out: %w", err)
 	}
 	_, _ = fmt.Fprintf(stderr, "llm-bench: cache-probe: %d requests (%s) -> %s\n", len(rows), sc, opts.Out)
 	return nil
