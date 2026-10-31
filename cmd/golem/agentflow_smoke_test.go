@@ -223,10 +223,13 @@ func TestAgentflowResumeStatusAndProof_RealCLI(t *testing.T) {
 	}
 }
 
-// #651: a fresh -plan over a workspace whose only step holds an open attempt
-// must not report success. next-step skips the open step and a non-strict
-// finish-run would pass (agentflow#58), so before the fix this printed a proof
-// pack recording steps_completed 0 of 1.
+// #651, #731: a fresh -plan over a workspace whose only step holds an open
+// attempt must not report success. Plain next-step skipped the open step and a
+// non-strict finish-run would pass (agentflow#58), so before #651 this printed
+// a proof pack recording steps_completed 0 of 1. next-step --explain now
+// reports the open attempt and the serial loop refuses there; R4
+// (TestAgentflowResumeGuardsAmendmentOpenedAfterExplain_RealCLI) keeps real-CLI
+// coverage of the post-loop guard.
 func TestAgentflowFreshPlanRefusesOpenStepWork_RealCLI(t *testing.T) {
 	dir := t.TempDir()
 	copyTree(t, "../../testdata/agentflow", dir)
@@ -279,8 +282,7 @@ func TestAgentflowFreshPlanRefusesOpenStepWork_RealCLI(t *testing.T) {
 
 	// Run 2: a fresh driver over the same tree. The production entry now
 	// refuses this tree before any AgentFlow call (#643), so the driver is
-	// called directly to keep proving #651's post-loop guard against real
-	// AgentFlow.
+	// called directly to keep proving the refusal against real AgentFlow.
 	steps := 0
 	second := &driver{
 		af: client, plan: &plan, planPath: planPath,
@@ -299,10 +301,8 @@ func TestAgentflowFreshPlanRefusesOpenStepWork_RealCLI(t *testing.T) {
 	}
 	// The refusal must not claim resume can recover: this unowned query cannot
 	// tell. Status reports that verdict.
-	for _, want := range []string{"still reports step work before finish-run", `state "validation_missing" step "P1"`} {
-		if !strings.Contains(err.Error(), want) {
-			t.Fatalf("run 2 refusal %q does not mention %s", err, want)
-		}
+	if want := `agentflow reports no eligible step while step work remains: reason_code "open_attempts" (step P1 has open attempt A1 (owner golem)); no proof was built; run -agentflow-status to see whether -agentflow-resume can recover it`; err.Error() != want {
+		t.Fatalf("run 2 refusal %q\nwant %s", err, want)
 	}
 	if !strings.HasSuffix(err.Error(), "; run -agentflow-status to see whether -agentflow-resume can recover it") {
 		t.Fatalf("run 2 refusal %q, want it to defer the resume verdict to -agentflow-status", err)
@@ -2205,9 +2205,9 @@ func (c *concurrentClaimAF) FinishStep(ctx context.Context, step, attempt string
 	return nil
 }
 
-// addSecondStep appends an independent step P2, with its own command gate, to
-// the fixture plan.
-func addSecondStep(t *testing.T, dir string) {
+// addSecondStep appends step P2, with its own command gate, to the fixture
+// plan. It is independent unless dependsOn names steps it waits on.
+func addSecondStep(t *testing.T, dir string, dependsOn ...string) {
 	t.Helper()
 	planPath := filepath.Join(dir, "plan.json")
 	planBytes, err := os.ReadFile(planPath)
@@ -2218,7 +2218,7 @@ func addSecondStep(t *testing.T, dir string) {
 	if err := json.Unmarshal(planBytes, &plan); err != nil {
 		t.Fatal(err)
 	}
-	plan["steps"] = append(plan["steps"].([]any), map[string]any{
+	step := map[string]any{
 		"id":            "P2",
 		"action":        "create src/second.txt",
 		"files":         []string{"src/second.txt"},
@@ -2227,7 +2227,11 @@ func addSecondStep(t *testing.T, dir string) {
 		"validation":    []string{"second-exists"},
 		"evidence_ids":  []string{},
 		"gates":         []map[string]any{{"kind": "command", "run": []string{"test", "-f", "src/second.txt"}}},
-	})
+	}
+	if len(dependsOn) > 0 {
+		step["depends_on"] = dependsOn
+	}
+	plan["steps"] = append(plan["steps"].([]any), step)
 	plan["validation_gates"] = []string{"unit-tests", "second-exists"}
 	if planBytes, err = json.Marshal(plan); err != nil {
 		t.Fatal(err)
@@ -2237,9 +2241,9 @@ func addSecondStep(t *testing.T, dir string) {
 	}
 }
 
-// #688: another writer claims P2 between resume's P1 finish-step and its
-// next-step, so next-step finds nothing while P2's attempt is open. Resume
-// refuses before finish-run, which AgentFlow 1.0 would otherwise pass
+// #688, #731: another writer claims P2 between resume's P1 finish-step and its
+// next-step, so next-step --explain reports P2's open attempt. Resume refuses
+// there, before finish-run, which AgentFlow 1.0 would otherwise pass
 // (kstruzzieri/agentflow#58), writing .agent/proof-pack.json over the open
 // attempt before resume's final check failed.
 func TestAgentflowResumeRefusesFinishRunWhileStepWorkRemains_RealCLI(t *testing.T) {
@@ -2257,7 +2261,7 @@ func TestAgentflowResumeRefusesFinishRunWhileStepWorkRemains_RealCLI(t *testing.
 		return nil
 	}}
 	_, err := d.resume(ctx, dir, planBytes, nil)
-	want := `agentflow still reports step work before finish-run: state "validation_missing" step "P2"; no proof was built; run -agentflow-status to see whether -agentflow-resume can recover it`
+	want := `agentflow reports no eligible step while step work remains: reason_code "open_attempts" (step P2 has open attempt A2 (owner golem)); no proof was built; run -agentflow-status to see whether -agentflow-resume can recover it`
 	if err == nil || err.Error() != want || af.claimed != "A2" {
 		t.Fatalf("resume err = %v, concurrent claim = %q\nwant error %s and claim A2", err, af.claimed, want)
 	}
@@ -2280,6 +2284,107 @@ func TestAgentflowResumeRefusesFinishRunWhileStepWorkRemains_RealCLI(t *testing.
 	if !errors.As(statusErr, &exit) || exit.ExitCode() != 2 ||
 		!strings.Contains(status.String(), "\nresume: settle missing command gates, then continue serially\n") {
 		t.Fatalf("status = %v, want exit 2 offering to settle P2's missing gate\n%s", statusErr, status.String())
+	}
+}
+
+// assertReviewRoundStoppedOnStepWork runs a same-plan -review-manifest round
+// over dir and checks that it fails with wantLine on stderr before it records
+// the review, calls the model, writes a proof or touches the step-runs ledger
+// (#731 R1, R2).
+func assertReviewRoundStoppedOnStepWork(t *testing.T, dir, wantLine string) {
+	t.Helper()
+	review := fixtureTaskFlags(dir)
+	review.reviewManifest = writeNoFindingsReviewManifest(t, dir)
+	stepRunsPath := filepath.Join(dir, ".agent", "step-runs.jsonl")
+	before, err := os.ReadFile(stepRunsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	caller := &recordingCaller{next: &scriptCaller{}}
+	_, stderr, err := runFixtureTask(t, dir, caller, review)
+	if !errors.Is(err, errAgentflowTaskFailed) || failureLine(stderr) != wantLine || len(caller.reqs) != 0 {
+		t.Fatalf("review round err = %v, model requests = %d\nwant line %s\nstderr:\n%s", err, len(caller.reqs), wantLine, stderr)
+	}
+	if runs, err := os.ReadFile(filepath.Join(dir, ".agent", "review-runs.jsonl")); err == nil && len(runs) != 0 {
+		t.Fatalf("review-runs.jsonl = %q, want the review unrecorded", runs)
+	} else if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".agent", "proof-pack.json")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("proof-pack.json stat err = %v, want it never built", err)
+	}
+	if after, err := os.ReadFile(stepRunsPath); err != nil || !bytes.Equal(after, before) {
+		t.Fatalf("step-runs.jsonl changed during the review round (err %v)", err)
+	}
+}
+
+// #731 F2: a run died with P1's attempt open (ClaimStep stands in for it), and
+// a same-plan review round skips the execution-history refusal. next-step
+// --explain stops the round before it records the review.
+func TestAgentflowReviewRoundStopsOnOpenAttempt_RealCLI(t *testing.T) {
+	dir := t.TempDir()
+	copyTree(t, "../../testdata/agentflow", dir)
+	_, client, _, _ := startFixtureExecution(t, dir)
+	if attempt, err := client.ClaimStep(context.Background(), "P1"); err != nil || attempt != "A1" {
+		t.Fatalf("claim = %q, %v; want A1", attempt, err)
+	}
+	assertReviewRoundStoppedOnStepWork(t, dir,
+		`agentflow task failed: agentflow reports no eligible step while step work remains: reason_code \"open_attempts\" (step P1 has open attempt A1 (owner golem)); no proof was built; run -agentflow-status to see whether -agentflow-resume can recover it`)
+}
+
+// #731: as above, with P2 depending on the open P1; AgentFlow reports
+// dependencies_unmet, which takes precedence over open_attempts.
+func TestAgentflowReviewRoundStopsOnUnmetDependency_RealCLI(t *testing.T) {
+	dir := t.TempDir()
+	copyTree(t, "../../testdata/agentflow", dir)
+	addSecondStep(t, dir, "P1")
+	_, client, _, _ := startFixtureExecution(t, dir)
+	if attempt, err := client.ClaimStep(context.Background(), "P1"); err != nil || attempt != "A1" {
+		t.Fatalf("claim = %q, %v; want A1", attempt, err)
+	}
+	assertReviewRoundStoppedOnStepWork(t, dir,
+		`agentflow task failed: agentflow reports no eligible step while step work remains: reason_code \"dependencies_unmet\" (step P1 has open attempt A1 (owner golem); step P2 waits on unmet dependencies: P1); no proof was built; run -agentflow-status to see whether -agentflow-resume can recover it`)
+}
+
+// amendAfterExplainAF opens an amendment of P1 right after next-step --explain
+// first reports steps_complete, standing in for a writer that acts between the
+// serial loop and finish-run (#731 R4).
+type amendAfterExplainAF struct {
+	afClient
+	amended string
+}
+
+func (a *amendAfterExplainAF) ExplainNextStep(ctx context.Context) (agentflow.NextStepExplanation, error) {
+	next, err := a.afClient.ExplainNextStep(ctx)
+	if err == nil && next.ReasonCode == agentflow.NextStepStepsComplete && a.amended == "" {
+		amended, amendErr := a.AmendCompletedStep(ctx, "P1", "test: amendment opened after next-step")
+		if amendErr != nil {
+			return next, fmt.Errorf("amend P1: %w", amendErr)
+		}
+		a.amended = amended
+	}
+	return next, err
+}
+
+// #731 A4: steps_complete hands over to requireNoStepWork, which still refuses
+// work opened after the loop. Here that is an amendment whose attempt has no
+// receipt for P1's changed file.
+func TestAgentflowResumeGuardsAmendmentOpenedAfterExplain_RealCLI(t *testing.T) {
+	dir := t.TempDir()
+	copyTree(t, "../../testdata/agentflow", dir)
+	_, client, plan, planBytes := startFixtureExecution(t, dir)
+	af := &amendAfterExplainAF{afClient: client}
+	d := &driver{af: af, plan: &plan, runStep: func(_ context.Context, _ agentflow.Step, attempt, _ string) error {
+		writeAndRecordAnswer(t, client, dir, attempt, "expected\n")
+		return nil
+	}}
+	_, err := d.resume(context.Background(), dir, planBytes, nil)
+	want := `agentflow still reports step work before finish-run: state "file_receipts_missing" step "P1"; no proof was built; run -agentflow-status to see whether -agentflow-resume can recover it`
+	if err == nil || err.Error() != want || af.amended != "A2" {
+		t.Fatalf("resume err = %v, amendment = %q\nwant error %s and amendment A2", err, af.amended, want)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".agent", "proof-pack.json")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("proof-pack.json stat err = %v, want it never built", err)
 	}
 }
 

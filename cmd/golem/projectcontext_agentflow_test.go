@@ -50,9 +50,9 @@ func TestProjectTrustAgentflowProcess(t *testing.T) {
 		data, _ := os.ReadFile(filepath.Join(stateDir, "step"))
 		step, _ := strconv.Atoi(string(data))
 		if step >= 2 {
-			reply = "null"
+			reply = `{"diagnostics":[],"reason_code":"steps_complete","step":null}`
 		} else {
-			reply = fmt.Sprintf(`{"id":"P%d"}`, step+1)
+			reply = fmt.Sprintf(`{"diagnostics":[],"reason_code":"eligible","step":{"id":"P%d"}}`, step+1)
 		}
 	case args[0] == "claim-step":
 		reply = `{"attempt_id":"A1"}`

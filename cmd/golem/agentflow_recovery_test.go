@@ -1280,9 +1280,10 @@ func TestResumeReentryRefusesRecordedGateInsteadOfDuplicatingIt(t *testing.T) {
 }
 
 // #688: resume runs #651's step-work check before finish-run, as a fresh run
-// does. Another writer claimed P2 while P1 ran, so next-step finds nothing and
-// next-action reports P2's open attempt: resume refuses and never calls
-// finish-run, so no proof is built over the unfinished work.
+// does. next-step --explain answers steps_complete here (#731), as when another
+// writer claims P2 after the loop's last call, and next-action reports P2's open
+// attempt: resume refuses and never calls finish-run, so no proof is built over
+// the unfinished work.
 func TestResumeRefusesFinishRunWhileStepWorkRemains(t *testing.T) {
 	fixture := newResumeFixtureWithPlan(t, recoveryPlanTwoSteps())
 	fixture.useAdvisoryLease()
@@ -1313,6 +1314,48 @@ func TestResumeRefusesFinishRunWhileStepWorkRemains(t *testing.T) {
 		"probe", "next-action", "next-step", "claim:P1", "model:P1",
 		"next-action", "gate:P1:unit-tests", "gate:P1:lint", "finish-step:P1:A-P1",
 		"next-step", "next-action",
+	}
+	if !reflect.DeepEqual(af.seq, wantSeq) {
+		t.Fatalf("seq = %v\nwant %v", af.seq, wantSeq)
+	}
+}
+
+// #731 A3: when next-step --explain reports another writer's open attempt
+// after settlement and the serial step, resume refuses there, before the
+// next-action check and finish-run.
+func TestResumeStopsWhenStepWorkRemainsAfterSettlement(t *testing.T) {
+	fixture := newResumeFixtureWithPlan(t, recoveryPlanTwoSteps())
+	fixture.useAdvisoryLease()
+	initial := fixture.noAttemptState(t, "step_unclaimed", true)
+	inFlightFixture := newResumeFixtureWithPlan(t, recoveryPlanTwoSteps())
+	inFlightFixture.useAdvisoryLease()
+	inFlight := inFlightFixture.attemptState(t, "validation_missing", []agentflow.ResumabilityGate{
+		{Kind: "command", Label: "go test ./...", Status: "missing"},
+		{Kind: "command", Label: "go vet ./...", Status: "missing"},
+	})
+	inFlight.Resumability.Attempt.ID = "A-P1"
+	af := &fakeAF{
+		explanations: []agentflow.NextStepExplanation{
+			{StepID: "P1", ReasonCode: agentflow.NextStepEligible},
+			{ReasonCode: agentflow.NextStepOpenAttempts, Diagnostics: []string{"step P2 has open attempt A9 (owner other)"}},
+		},
+		nextActions: []agentflow.NextActionState{initial, inFlight},
+	}
+	d := &driver{af: af, plan: recoveryPlanTwoSteps()}
+	d.runStep = func(_ context.Context, step agentflow.Step, _, _ string) error {
+		af.seq = append(af.seq, "model:"+step.ID)
+		return nil
+	}
+
+	final, err := d.resume(context.Background(), fixture.root, fixture.planJSON, nil)
+	want := `agentflow reports no eligible step while step work remains: reason_code "open_attempts" (step P2 has open attempt A9 (owner other)); no proof was built; run -agentflow-status to see whether -agentflow-resume can recover it`
+	if err == nil || err.Error() != want || final.State != "" {
+		t.Fatalf("state = %q, err = %v\nwant error %s", final.State, err, want)
+	}
+	wantSeq := []string{
+		"probe", "next-action", "next-step", "claim:P1", "model:P1",
+		"next-action", "gate:P1:unit-tests", "gate:P1:lint", "finish-step:P1:A-P1",
+		"next-step",
 	}
 	if !reflect.DeepEqual(af.seq, wantSeq) {
 		t.Fatalf("seq = %v\nwant %v", af.seq, wantSeq)
