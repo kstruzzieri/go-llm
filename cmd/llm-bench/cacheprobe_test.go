@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -415,6 +416,44 @@ func TestCacheProbeRejectsBadInput(t *testing.T) {
 	}
 }
 
+// failingCaller is a real caller whose n-th request (1-based) fails.
+type failingCaller struct {
+	next agent.ModelCaller
+	n    int
+	err  error
+	seen int
+}
+
+func (c *failingCaller) Chat(ctx context.Context, req provider.ChatRequest, on func(provider.ChatResponse) error) (agent.ModelResult, error) {
+	c.seen++
+	if c.seen == c.n {
+		return agent.ModelResult{}, c.err
+	}
+	return c.next.Chat(ctx, req, on)
+}
+
+// A failed real request is reported with its turn and step under one
+// "cache probe:" prefix, not wrapped twice.
+func TestCacheProbeChatFailureWrapsOnce(t *testing.T) {
+	ps := newProbeServer(t)
+	boom := fmt.Errorf("server went away")
+	fc := &failingCaller{next: ps.caller(t), n: 3, err: boom}
+	_, err := runCacheProbe(t.Context(), fc, cacheProbeFixtures, probeUncompacted)
+	if err == nil {
+		t.Fatal("runCacheProbe succeeded despite a failed request")
+	}
+	if !errors.Is(err, boom) {
+		t.Errorf("error = %v, want it to wrap the caller's error", err)
+	}
+	const want = "cache probe: turn 1: step 3: server went away"
+	if err.Error() != want {
+		t.Errorf("error = %q, want %q", err.Error(), want)
+	}
+	if n := strings.Count(err.Error(), "cache probe:"); n != 1 {
+		t.Errorf("error %q has the cache probe prefix %d times, want once", err.Error(), n)
+	}
+}
+
 func TestWriteProbeTable(t *testing.T) {
 	rows := []probeRow{
 		{Scenario: probePressure, Turn: 1, Step: 1, PromptTokens: 1200, Cached: 0, CachedReported: true, PrefixRatio: 0},
@@ -461,6 +500,11 @@ func TestRunCacheProbeModeValidation(t *testing.T) {
 		{"no out", func(o *cacheProbeOptions) { o.Out = "" }, "-cache-probe requires -cache-probe-out"},
 		{"bad scenario", func(o *cacheProbeOptions) { o.Scenario = "bogus" }, `-cache-probe-scenario must be "uncompacted" or "pressure"`},
 		{"empty scenario", func(o *cacheProbeOptions) { o.Scenario = "" }, `-cache-probe-scenario must be`},
+		// Everything else is valid: only the unwritable output stops the run, and it
+		// must do so before the first request, not after a multi-minute probe.
+		{"out in a missing directory", func(o *cacheProbeOptions) {
+			o.Out = filepath.Join(t.TempDir(), "no-such-dir", "out.md")
+		}, "open -cache-probe-out"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			opts := valid

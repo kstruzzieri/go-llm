@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
 	"embed"
@@ -22,8 +21,8 @@ import (
 // The cache probe measures how stable the prompt prefix is across the requests
 // of one scripted Golem session, and what the provider's own cache counters
 // say about them. It is the before/after evidence for the prompt-caching
-// phases, so it is deterministic: the model's replies are scripted, only
-// usage is taken from the real server.
+// phases, so it is scripted: the model's replies are fixed, only usage is taken
+// from the real server.
 
 //go:embed testdata/cacheprobe/*.txt
 var probeFixtureFS embed.FS
@@ -114,13 +113,15 @@ func checkProbeCompaction(sc probeScenario, compactions int) error {
 // when dir is empty. Reading them all up front fails a bad directory before
 // any request is sent.
 func loadProbeFixtures(dir string) (map[string]string, error) {
-	fsys := os.DirFS(dir)
+	var fsys fs.FS
 	if dir == "" {
 		sub, err := fs.Sub(probeFixtureFS, "testdata/cacheprobe")
 		if err != nil {
 			return nil, fmt.Errorf("cache probe: embedded fixtures: %w", err)
 		}
 		fsys = sub
+	} else {
+		fsys = os.DirFS(dir)
 	}
 	files := make(map[string]string, probeReads)
 	for i := 1; i <= probeReads; i++ {
@@ -188,13 +189,14 @@ func (c *probeCaller) Chat(ctx context.Context, req provider.ChatRequest, _ func
 	// provider.ChatMessage JSON, a proxy for the outbound OpenAI bytes.
 	body, err := json.Marshal(req.Messages)
 	if err != nil {
-		return agent.ModelResult{}, fmt.Errorf("cache probe: encode turn %d step %d: %w", c.turn, c.step, err)
+		return agent.ModelResult{}, fmt.Errorf("step %d: encode messages: %w", c.step, err)
 	}
 	fwd := req
 	fwd.Options.NumPredict = 1 // the reply is discarded; only usage is wanted
 	res, err := c.real.Chat(ctx, fwd, nil)
 	if err != nil {
-		return agent.ModelResult{}, fmt.Errorf("cache probe: turn %d step %d: %w", c.turn, c.step, err)
+		// runCacheProbe adds the "cache probe: turn N" prefix; only the step is new here.
+		return agent.ModelResult{}, fmt.Errorf("step %d: %w", c.step, err)
 	}
 	u := res.Response.Usage
 	c.rows = append(c.rows, probeRow{
@@ -224,7 +226,8 @@ func (c *probeCaller) Chat(ctx context.Context, req provider.ChatRequest, _ func
 // one turn of probeReads read_file calls and a final answer, then probeFollowUps
 // single-step turns that carry History. Every request goes to real for its
 // usage and gets a scripted reply, so the request bytes are what Golem's loop
-// would send for the same flow and the run is deterministic.
+// would send for the same flow; the run is scripted (the fence keys and the
+// session id are random per invocation).
 //
 // Out of its reach: Golem's cross-turn compression (golem/session.go) and mixed
 // assembly. A run whose compaction contradicts sc is an error.
@@ -345,9 +348,9 @@ type cacheProbeOptions struct {
 	Timeout    time.Duration // -timeout
 }
 
-// runCacheProbeMode validates the flags, runs the probe against the one
-// selected model, and writes the table to opts.Out. Every flag error fails
-// before any request is sent.
+// runCacheProbeMode validates the flags, opens opts.Out, runs the probe against
+// the one selected model, and writes the table to opts.Out. Every flag error
+// and an unwritable opts.Out fail before any request is sent.
 func runCacheProbeMode(ctx context.Context, opts cacheProbeOptions, stderr io.Writer) error {
 	if strings.TrimSpace(opts.BaseURL) == "" {
 		return fmt.Errorf("-cache-probe requires -candidate-base-url")
@@ -380,15 +383,22 @@ func runCacheProbeMode(ctx context.Context, opts cacheProbeOptions, stderr io.Wr
 	if err != nil {
 		return err
 	}
+	// Open the output before the first request so a bad path fails now, not after
+	// a multi-minute run. A run that then fails leaves the file truncated.
+	out, err := os.OpenFile(opts.Out, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return fmt.Errorf("open -cache-probe-out: %w", err)
+	}
+	defer func() { _ = out.Close() }() // error paths only; success closes below
+
 	rows, err := runCacheProbe(ctx, real, opts.FixtureDir, sc)
 	if err != nil {
 		return err
 	}
-	var table bytes.Buffer
-	if err := writeProbeTable(&table, rows); err != nil {
-		return err
+	if err := writeProbeTable(out, rows); err != nil {
+		return fmt.Errorf("write -cache-probe-out: %w", err)
 	}
-	if err := os.WriteFile(opts.Out, table.Bytes(), 0o600); err != nil {
+	if err := out.Close(); err != nil {
 		return fmt.Errorf("write -cache-probe-out: %w", err)
 	}
 	_, _ = fmt.Fprintf(stderr, "llm-bench: cache-probe: %d requests (%s) -> %s\n", len(rows), sc, opts.Out)

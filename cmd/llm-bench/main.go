@@ -251,6 +251,8 @@ func main() {
 		if stray := strayFlags(providedFlags, "cache-probe-out", "cache-probe-scenario"); len(stray) > 0 {
 			log.Fatalf("llm-bench: %s require -cache-probe", strings.Join(stray, ", "))
 		}
+	} else if providedFlags["candidate-session-id"] {
+		log.Fatalf("llm-bench: -candidate-session-id cannot be combined with -cache-probe: the probe mints its own session id per invocation")
 	}
 	if !*interceptorCensus {
 		if stray := strayCensusFlags(providedFlags, *interceptorBenignDraft != ""); len(stray) > 0 {

@@ -12,6 +12,7 @@ import (
 // The -cache-probe flags are refused outside their mode, the mode excludes
 // every other, and its required flags fail before any request is sent.
 func TestCacheProbeFlagsRefusedByMain(t *testing.T) {
+	out := filepath.Join(t.TempDir(), "probe.md")
 	for _, tc := range []struct {
 		args []string
 		want string
@@ -23,11 +24,18 @@ func TestCacheProbeFlagsRefusedByMain(t *testing.T) {
 		{[]string{"-cache-probe", "-candidate-base-url", "http://127.0.0.1:1"}, "-cache-probe requires -models"},
 		{[]string{"-cache-probe", "-candidate-base-url", "http://127.0.0.1:1", "-models", "openai-compat/m"}, "-cache-probe requires -cache-probe-out"},
 		{[]string{"-cache-probe", "-candidate-base-url", "http://127.0.0.1:1", "-models", "openai-compat/m", "-cache-probe-out", "x.md", "-cache-probe-scenario", "bogus"}, "must be"},
+		// Every other flag is valid, so only the session id can be what is refused:
+		// the probe mints its own id and would otherwise ignore this one silently.
+		{[]string{"-cache-probe", "-candidate-base-url", "http://127.0.0.1:1", "-models", "openai-compat/m", "-cache-probe-out", out, "-candidate-session-id", "mine"},
+			"-candidate-session-id cannot be combined with -cache-probe"},
 	} {
-		code, out := runLLMBenchMain(t, nil, tc.args...)
-		if code != 1 || !strings.Contains(out, tc.want) {
-			t.Errorf("%v: exit %d output %q, want %q", tc.args, code, out, tc.want)
+		code, log := runLLMBenchMain(t, nil, tc.args...)
+		if code != 1 || !strings.Contains(log, tc.want) {
+			t.Errorf("%v: exit %d output %q, want %q", tc.args, code, log, tc.want)
 		}
+	}
+	if _, err := os.Stat(out); err == nil {
+		t.Error("a refused invocation created the output file")
 	}
 }
 
