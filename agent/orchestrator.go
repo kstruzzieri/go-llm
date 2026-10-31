@@ -92,32 +92,35 @@ func initState(req Request) State {
 	return State{System: req.System, DurableSummary: req.HistorySummary, Messages: msgs}
 }
 
-func buildChatRequest(st State, specs []provider.Tool, outputReserve int, opts provider.ModelOptions, advisory *Advisory) provider.ChatRequest {
+func buildChatRequest(st State, specs []provider.Tool, outputReserve int, opts provider.ModelOptions, advisory *Advisory, advisoryFence promptfence.Fence) provider.ChatRequest {
 	msgs := make([]provider.ChatMessage, 0, len(st.Messages)+1)
 	if st.System != "" {
 		msgs = append(msgs, provider.ChatMessage{Role: "system", Content: st.System})
 	}
 	// #430: every tool observation is framed here, on the value copy, after
-	// assembly, under one key minted for this render. State keeps the raw
-	// bytes, and the next render mints its own key (promptfence.New's
-	// contract: one id per rendered prompt).
-	var fence promptfence.Fence
-	minted := false
+	// assembly, under the key mintFenceKeys stored on its message. The key is
+	// the same on every render, so an earlier observation's wire bytes never
+	// change. State keeps the raw bytes. A tool message with no key (a custom
+	// Compactor rebuilt it) is framed under one key minted for this render,
+	// shared by every unkeyed message in it.
+	var unkeyed promptfence.Fence
 	for _, m := range st.Messages {
 		cm := m.ChatMessage
 		if cm.Role == "tool" {
-			if !minted {
-				fence, minted = promptfence.New(), true
+			fence := m.fence
+			if fence == (promptfence.Fence{}) {
+				if unkeyed == (promptfence.Fence{}) {
+					unkeyed = promptfence.New()
+				}
+				fence = unkeyed
 			}
 			cm.Content = frameToolResult(fence, cm.Content)
 		}
 		// #382: the staged advisory is projected here too, on the same value
-		// copy under the same per-render key. State keeps the raw goal.
+		// copy, under the Run's advisory key, which no tool message shares.
+		// State keeps the raw goal.
 		if advisory != nil && m.Segment == Pinned && cm.Role == "user" {
-			if !minted {
-				fence, minted = promptfence.New(), true
-			}
-			cm.Content = renderAdvisory(fence, cm.Content, *advisory)
+			cm.Content = renderAdvisory(advisoryFence, cm.Content, *advisory)
 			advisory = nil
 		}
 		msgs = append(msgs, cm)
@@ -205,6 +208,8 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 		}
 		advisory = &annotated
 	}
+	// One advisory key per Run, reused on every render like a tool key.
+	advisoryFence := promptfence.New()
 
 	// #436: the initial input is inspected once, before any assembly, so a
 	// block never reaches the model and no pressure event is emitted for it.
@@ -213,7 +218,11 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 	}
 	goal := state.Messages[len(state.Messages)-1].Content
 
+	next := 0 // first State index mintFenceKeys has not visited
 	for step := 0; step < maxSteps; step++ {
+		// Key the tool messages the previous step appended, now that
+		// verifyBatch has finished with them (history results on step 0).
+		next = mintFenceKeys(&state, next)
 		manager := o.ctxMgr
 		if advisory != nil {
 			estimate := manager.estimate
@@ -282,7 +291,7 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 
 		tokenLogged := false
 		modelStart := o.now()
-		chatReq := buildChatRequest(assembled, specs, req.Budget.OutputReserve, req.Options, advisory)
+		chatReq := buildChatRequest(assembled, specs, req.Budget.OutputReserve, req.Options, advisory, advisoryFence)
 		// Session identity belongs to the run, independent of transcript rebuilding.
 		chatReq.SessionID = req.SessionID
 		// Both assembly modes report the checked, complete prompt cost. Spend

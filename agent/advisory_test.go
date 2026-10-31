@@ -128,7 +128,7 @@ func TestAdvisoryRendersOnlyOnTheWireCopy(t *testing.T) {
 	}
 }
 
-func TestAdvisoryFenceKeyIsPerRender(t *testing.T) {
+func TestAdvisoryFenceKeyDiffersAcrossRuns(t *testing.T) {
 	caller := &advisoryCaller{}
 	o := New(caller, ContextManager{})
 	for i := 0; i < 2; i++ {
@@ -148,7 +148,7 @@ func TestAdvisoryFenceKeyIsPerRender(t *testing.T) {
 		return strings.Fields(c[i:])[1]
 	}
 	if key(caller.reqs[0]) == key(caller.reqs[1]) {
-		t.Fatal("fence key reused across renders")
+		t.Fatal("fence key reused across runs")
 	}
 }
 
@@ -542,9 +542,9 @@ func TestRunRejectsInvalidAdvisoryBeforeAnyModelCall(t *testing.T) {
 	}
 }
 
-// --- One key per render, shared with the tool frames in that render. ---
+// --- The advisory and each tool result are framed under keys of their own. ---
 
-func TestAdvisoryAndToolResultShareOneFenceKey(t *testing.T) {
+func TestAdvisoryAndToolResultUseSeparateFenceKeys(t *testing.T) {
 	caller := &wireCaller{responses: []ModelResult{
 		toolCallResponse(call("c1", "planned", `{}`)),
 		{Response: provider.ChatResponse{Content: "done"}},
@@ -572,8 +572,8 @@ func TestAdvisoryAndToolResultShareOneFenceKey(t *testing.T) {
 			tool = keyAfter(m.Content, "<<<TOOL_RESULT ")
 		}
 	}
-	if goal == "" || goal != tool {
-		t.Fatalf("one render must mint one key: advisory=%q tool=%q", goal, tool)
+	if goal == "" || tool == "" || goal == tool {
+		t.Fatalf("the advisory and the tool result must carry separate keys: advisory=%q tool=%q", goal, tool)
 	}
 }
 

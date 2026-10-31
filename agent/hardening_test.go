@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"os"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
+	"github.com/kstruzzieri/go-llm/internal/promptfence"
 	"github.com/kstruzzieri/go-llm/provider"
 )
 
@@ -88,11 +90,11 @@ func RunHardeningBoundaryContracts(t *testing.T) {
 		{"Baseline/empty_goal_rejected", TestRunRejectsEmptyGoal},
 		{"Baseline/output_reserve_wired", TestRunWiresOutputReserveToNumPredict},
 		{"Baseline/token_events_bounded", TestRunBoundsTokenEventsPerStep},
-		{"Framing/literal_bytes_and_request_nonce", runHardeningFrameBytes},
+		{"Framing/literal_bytes_and_per_result_key", runHardeningFrameBytes},
 		{"Framing/oracle_rejects_malformed_frames", runHardeningFrameOracle},
 		{"Framing/provider_observations", runHardeningObservations},
 		{"Framing/full_system_trust_text", runHardeningSystemText},
-		{"Framing/consecutive_run_requests_rotate_nonce", TestRunRotatesNonceEveryRender},
+		{"Framing/keys_stable_across_renders", TestRunReusesKeysAcrossRenders},
 		{"Accounting/independent_envelope_costs", TestToolFrameEnvelopeCost},
 		{"Accounting/exact_fit_and_one_below", TestFramedToolBudgetFit},
 		{"Accounting/wrapped_compactor", runHardeningWrappedCompactor},
@@ -172,7 +174,8 @@ func hardeningFrame(t *testing.T, id, actual, template string) string {
 }
 
 func runHardeningFrameBytes(t *testing.T) {
-	// One state, two unchanged renders: identity is per request, not per turn.
+	// One minted state, two unchanged renders: each tool result has its own
+	// key, and the second render reuses every key of the first.
 	st := State{System: "sys", Messages: []Message{{ChatMessage: provider.ChatMessage{Role: "user", Content: "q"}}}}
 	names := []string{"fencing/ordinary", "fencing/empty", "fencing/trailing-newline", "fencing/unicode-controls", "fencing/marker-looking", "ansi/observation"}
 	var wants []string
@@ -180,26 +183,26 @@ func runHardeningFrameBytes(t *testing.T) {
 		st.Messages = append(st.Messages, toolMsg(hardeningFixture(t, name+".input"), "fixture", fmt.Sprint(i)))
 		wants = append(wants, hardeningFixture(t, name+".want"))
 	}
+	mintFenceKeys(&st, 0)
 	original := append([]Message(nil), st.Messages...)
-	var previous string
+	var previous []string
 	for render := 0; render < 2; render++ {
-		req := buildChatRequest(st, nil, 0, provider.ModelOptions{}, nil)
+		req := buildChatRequest(st, nil, 0, provider.ModelOptions{}, nil, promptfence.Fence{})
 		if len(req.Messages) != len(names)+2 {
 			t.Fatalf("render %d: message count = %d, want %d", render, len(req.Messages), len(names)+2)
 		}
 		if req.Messages[0].Role != "system" || req.Messages[0].Content != "sys" || req.Messages[1].Role != "user" || req.Messages[1].Content != "q" {
 			t.Error("render changed non-tool messages")
 		}
-		var requestKey string
+		var keys []string
 		for i, name := range names {
 			got := req.Messages[i+2]
 			// containment: FENCE-FORGED
 			key := hardeningFrame(t, name, got.Content, wants[i])
-			if i == 0 {
-				requestKey = key
-			} else if key != requestKey {
-				t.Error("render used different keys within one request")
+			if slices.Contains(keys, key) {
+				t.Errorf("%s: render framed two tool results under one key", name)
 			}
+			keys = append(keys, key)
 			if got.Role != "tool" || got.ToolName != "fixture" || got.ToolCallID != fmt.Sprint(i) || len(got.ToolCalls) != 0 {
 				t.Errorf("%s: render changed tool metadata", name)
 			}
@@ -207,10 +210,10 @@ func runHardeningFrameBytes(t *testing.T) {
 				t.Errorf("%s: frame envelope is not 93 bytes", name)
 			}
 		}
-		if render > 0 && requestKey == previous {
-			t.Error("unchanged state render reused previous request nonce")
+		if render > 0 && !slices.Equal(keys, previous) {
+			t.Error("unchanged state render did not reuse the previous render's keys")
 		}
-		previous = requestKey
+		previous = keys
 		if !reflect.DeepEqual(st.Messages, original) {
 			t.Error("render mutated canonical state")
 		}

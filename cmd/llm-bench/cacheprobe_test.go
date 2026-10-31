@@ -185,12 +185,12 @@ func TestCacheProbeUnreportedCounters(t *testing.T) {
 	}
 }
 
-// TestCacheProbePrefixRatioBaseline pins the problem Phase 1 fixes: every
-// render re-keys all earlier tool frames, so consecutive requests share only
-// the bytes before the first frame's key. runCacheProbe itself fails an
-// uncompacted run in which any step reported a compaction, so a nil error is
-// the "no step compacted" assertion. Task 1.3 flips the bound.
-func TestCacheProbePrefixRatioBaseline(t *testing.T) {
+// TestCacheProbePrefixRatioStable pins what per-result fence keys buy: each
+// tool frame keeps its key on every later render, so consecutive requests
+// share every byte before the new step's messages. runCacheProbe itself
+// fails an uncompacted run in which any step reported a compaction, so a nil
+// error is the "no step compacted" assertion.
+func TestCacheProbePrefixRatioStable(t *testing.T) {
 	ps := newProbeServer(t)
 	rows := runProbe(t, ps, probeUncompacted)
 
@@ -205,12 +205,9 @@ func TestCacheProbePrefixRatioBaseline(t *testing.T) {
 	}
 	slices.Sort(ratios)
 	median := ratios[len(ratios)/2]
-	t.Logf("baseline median prefix ratio over steps 3-9: %.4f (min %.4f, max %.4f)", median, ratios[0], ratios[len(ratios)-1])
-	if median >= 0.5 {
-		t.Errorf("median prefix ratio = %.4f, want below 0.5 under per-render tool-frame keys", median)
-	}
-	if median <= 0 {
-		t.Errorf("median prefix ratio = %.4f, want above 0: the system prompt and goal are shared bytes", median)
+	t.Logf("median prefix ratio over steps 3-9: %.4f (min %.4f, max %.4f)", median, ratios[0], ratios[len(ratios)-1])
+	if median < 0.95 {
+		t.Errorf("median prefix ratio = %.4f, want at least 0.95 under per-result tool-frame keys", median)
 	}
 }
 

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -17,11 +18,11 @@ import (
 	"github.com/kstruzzieri/go-llm/provider"
 )
 
-// normalizedRequests marshals each request and replaces its one per-render
-// fence id after checking the id occurs only in the open and close marker of
-// each tool message (one fence per render, #430). It fails when no request
-// carried a tool message, so a normalizer that never saw a fence cannot make
-// two runs look equal.
+// normalizedRequests marshals each request and replaces each tool message's
+// fence id with a placeholder numbered by its position, after checking the id
+// occurs only in that message's own open and close marker (one key per tool
+// result, #430). It fails when no request carried a tool message, so a
+// normalizer that never saw a fence cannot make two runs look equal.
 func normalizedRequests(t *testing.T, reqs []provider.ChatRequest) []string {
 	t.Helper()
 	out := make([]string, len(reqs))
@@ -32,23 +33,19 @@ func normalizedRequests(t *testing.T, reqs []provider.ChatRequest) []string {
 			t.Fatal(err)
 		}
 		s := string(raw)
-		key, tools := "", 0
+		tools := 0
 		for _, m := range req.Messages {
 			if m.Role != "tool" {
 				continue
 			}
 			k := toolFrameKey(t, m.Content)
-			if key != "" && k != key {
-				t.Fatalf("request %d: two fence ids %q and %q in one render", i, key, k)
+			if n := strings.Count(s, k); n != 2 {
+				t.Fatalf("request %d: fence id %q occurs %d times, want 2 (its own markers only)", i, k, n)
 			}
-			key = k
+			s = strings.ReplaceAll(s, k, "FENCEID"+strconv.Itoa(tools))
 			tools++
 		}
-		if key != "" {
-			if n := strings.Count(s, key); n != 2*tools {
-				t.Fatalf("request %d: fence id occurs %d times, want %d (markers only)", i, n, 2*tools)
-			}
-			s = strings.ReplaceAll(s, key, "FENCEID")
+		if tools > 0 {
 			fenced++
 		}
 		// json:"-" fields still reach the provider (SessionID becomes a
@@ -67,9 +64,9 @@ func normalizedRequests(t *testing.T, reqs []provider.ChatRequest) []string {
 
 // TestDefaultGuardsLeaveAllowedCallsEquivalent (#575): for these fixtures, a
 // guarded run and an unguarded run execute the same calls, record the same
-// raw observations and send the same provider requests modulo the per-render
-// fence id. The guards still saw the exec calls (uname scores unknown 10),
-// which is the only allowed difference. Both run_command calls are approved
+// raw observations and send the same provider requests modulo the fence ids.
+// The guards still saw the exec calls (uname scores unknown 10), which is
+// the only allowed difference. Both run_command calls are approved
 // through the real -allow-tool approver, so equivalence holds under the same
 // authorization path a headless run uses.
 func TestDefaultGuardsLeaveAllowedCallsEquivalent(t *testing.T) {

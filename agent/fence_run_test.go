@@ -3,10 +3,12 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/kstruzzieri/go-llm/contextdepth"
+	"github.com/kstruzzieri/go-llm/internal/promptfence"
 	"github.com/kstruzzieri/go-llm/provider"
 )
 
@@ -122,17 +124,15 @@ func TestRunFramesEveryObservationKind(t *testing.T) {
 			if len(got) != len(r.want) {
 				t.Fatalf("tool messages = %d, want %d: %+v", len(got), len(r.want), got)
 			}
-			var keys []string
+			seen := map[string]int{}
 			for i, want := range r.want {
 				k := extractToolFrameKey(t, got[i].Content)
-				keys = append(keys, k)
+				if j, dup := seen[k]; dup {
+					t.Errorf("tool messages %d and %d share key %q", j, i, k)
+				}
+				seen[k] = i
 				if got[i].Content != framedLiteral(k, want) {
 					t.Errorf("tool message %d: tool frame mismatch\n got %q\nwant %q", i, got[i].Content, framedLiteral(k, want))
-				}
-			}
-			for _, k := range keys[1:] {
-				if k != keys[0] {
-					t.Errorf("keys differ within render: %v", keys)
 				}
 			}
 		})
@@ -253,7 +253,8 @@ func TestToolFramesStayOutOfCanonicalObservations(t *testing.T) {
 // TestFramingCommutesWithAssembly: across the existing trace fixtures, both
 // assemblers and both estimators, de-framing only the authentic outer frame
 // of every wire tool message recovers exactly the assembled State's raw
-// observation, with metadata and order intact and one key per render.
+// observation, with metadata and order intact, and each tool message keeps
+// the key minted on the canonical State before assembly.
 func TestFramingCommutesWithAssembly(t *testing.T) {
 	estimators := []struct {
 		name string
@@ -264,12 +265,21 @@ func TestFramingCommutesWithAssembly(t *testing.T) {
 		for _, f := range traceFixtures() {
 			for _, mixed := range []bool{false, true} {
 				for _, budget := range []int{f.maxBudget / 2, f.maxBudget} {
+					st := f.st
+					st.Messages = slices.Clone(f.st.Messages)
+					mintFenceKeys(&st, 0)
+					minted := map[string]bool{} // keys on the canonical State before assembly
+					for _, m := range st.Messages {
+						if m.Role == "tool" {
+							minted[m.fence.ID()] = true
+						}
+					}
 					m := ContextManager{Mixed: mixed, Estimate: e.est}
-					out, _, _, err := m.AssembleWithTrace(context.Background(), f.st, 0, TokenBudget{Input: budget})
+					out, _, _, err := m.AssembleWithTrace(context.Background(), st, 0, TokenBudget{Input: budget})
 					if err != nil {
 						continue // must-fit overflow: no render to check
 					}
-					req := buildChatRequest(out, nil, 0, provider.ModelOptions{}, nil)
+					req := buildChatRequest(out, nil, 0, provider.ModelOptions{}, nil, promptfence.Fence{})
 					offset := 0
 					if out.System != "" {
 						offset = 1
@@ -280,7 +290,7 @@ func TestFramingCommutesWithAssembly(t *testing.T) {
 					if len(req.Messages) != len(out.Messages)+offset {
 						t.Fatalf("%s/%s/mixed=%v/%d: %d wire messages for %d assembled", e.name, f.name, mixed, budget, len(req.Messages), len(out.Messages))
 					}
-					key := ""
+					seen := map[string]bool{}
 					for i, raw := range out.Messages {
 						w := req.Messages[i+offset]
 						if w.Role != raw.Role || w.ToolName != raw.ToolName || w.ToolCallID != raw.ToolCallID || len(w.ToolCalls) != len(raw.ToolCalls) {
@@ -293,11 +303,13 @@ func TestFramingCommutesWithAssembly(t *testing.T) {
 							continue
 						}
 						k := extractToolFrameKey(t, w.Content)
-						if key == "" {
-							key = k
-						} else if k != key {
-							t.Errorf("%s/%s/mixed=%v/%d: keys differ within render", e.name, f.name, mixed, budget)
+						if !minted[k] || k != raw.fence.ID() {
+							t.Errorf("%s/%s/mixed=%v/%d: message %d framed under %q, not the key minted before assembly", e.name, f.name, mixed, budget, i, k)
 						}
+						if seen[k] {
+							t.Errorf("%s/%s/mixed=%v/%d: key %q framed two tool messages", e.name, f.name, mixed, budget, k)
+						}
+						seen[k] = true
 						if inner := frameInner(t, w.Content, k); inner != raw.Content {
 							t.Errorf("%s/%s/mixed=%v/%d: de-framed message %d = %q, want %q", e.name, f.name, mixed, budget, i, inner, raw.Content)
 						}
@@ -312,9 +324,10 @@ func TestFramingCommutesWithAssembly(t *testing.T) {
 	}
 }
 
-// TestRunRotatesNonceEveryRender: consecutive steps of one run render under
-// different keys, and every tool message of one render shares its key.
-func TestRunRotatesNonceEveryRender(t *testing.T) {
+// TestRunReusesKeysAcrossRenders: a later step of one run renders an earlier
+// tool message under the key it had before, and a new tool message under a
+// key of its own.
+func TestRunReusesKeysAcrossRenders(t *testing.T) {
 	mc := &wireCaller{responses: []ModelResult{
 		toolCallResponse(call("1", "echo", `{}`)),
 		toolCallResponse(call("2", "echo", `{}`)),
@@ -333,10 +346,10 @@ func TestRunRotatesNonceEveryRender(t *testing.T) {
 		t.Fatalf("request 2 tool messages = %d, want 2", len(second))
 	}
 	k2a, k2b := extractToolFrameKey(t, second[0].Content), extractToolFrameKey(t, second[1].Content)
-	if k2a != k2b {
-		t.Errorf("keys differ within render: %q vs %q", k2a, k2b)
+	if k1 != k2a {
+		t.Errorf("tool message 1 re-keyed across renders: %q then %q", k1, k2a)
 	}
-	if k1 == k2a {
-		t.Errorf("nonce reused across renders: %q", k1)
+	if k2a == k2b {
+		t.Errorf("two tool messages share key %q within one render", k2a)
 	}
 }

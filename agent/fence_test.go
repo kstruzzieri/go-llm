@@ -80,8 +80,14 @@ func frameTestState() State {
 
 func TestBuildChatRequestFramesOnlyToolMessages(t *testing.T) {
 	st := frameTestState()
-	untouched := frameTestState()
-	req := buildChatRequest(st, nil, 0, provider.ModelOptions{}, nil)
+	mintFenceKeys(&st, 0)
+	untouched := st
+	untouched.Messages = make([]Message, len(st.Messages))
+	for i, m := range st.Messages {
+		m.ChatMessage = cloneChatMessage(m.ChatMessage)
+		untouched.Messages[i] = m
+	}
+	req := buildChatRequest(st, nil, 0, provider.ModelOptions{}, nil, promptfence.Fence{})
 
 	wantNonTool := map[int]provider.ChatMessage{
 		0: {Role: "system", Content: "sys"},
@@ -105,21 +111,19 @@ func TestBuildChatRequestFramesOnlyToolMessages(t *testing.T) {
 			t.Errorf("non-tool message changed at %d: got %+v, want %+v", i, got, want)
 		}
 	}
-	var keys []string
+	seen := map[string]int{}
 	for i, want := range wantTool {
 		got := req.Messages[i]
 		k := extractToolFrameKey(t, got.Content)
-		keys = append(keys, k)
+		if j, dup := seen[k]; dup {
+			t.Errorf("tool messages %d and %d share key %q within one render", j, i, k)
+		}
+		seen[k] = i
 		if got.Content != framedLiteral(k, want.Content) {
 			t.Errorf("tool frame mismatch at %d:\n got %q\nwant %q", i, got.Content, framedLiteral(k, want.Content))
 		}
 		if got.Role != "tool" || got.ToolName != want.ToolName || got.ToolCallID != want.ToolCallID || len(got.ToolCalls) != 0 {
 			t.Errorf("tool message metadata changed at %d: got %+v, want role/name/id %q/%q/%q", i, got, "tool", want.ToolName, want.ToolCallID)
-		}
-	}
-	for _, k := range keys[1:] {
-		if k != keys[0] {
-			t.Errorf("keys differ within render: %v", keys)
 		}
 	}
 	if !reflect.DeepEqual(st, untouched) {
@@ -156,21 +160,21 @@ func TestToolFramePreservesBytes(t *testing.T) {
 	}
 }
 
-// TestRepeatedRenderRotatesNonceWithoutAccumulatingFrames renders one raw
-// State twice: each render uses one key for all its tool messages, the two
-// keys differ, and stripping only the authentic outer frame recovers the raw
-// content both times (no frame rides on a previous frame).
-func TestRepeatedRenderRotatesNonceWithoutAccumulatingFrames(t *testing.T) {
+// TestRepeatedRenderReusesKeysWithoutAccumulatingFrames renders one minted
+// State twice: each tool message keeps its own key on both renders, and
+// stripping only the authentic outer frame recovers the raw content both
+// times (no frame rides on a previous frame).
+func TestRepeatedRenderReusesKeysWithoutAccumulatingFrames(t *testing.T) {
 	st := frameTestState()
+	mintFenceKeys(&st, 0)
 	raw := map[int]string{4: "A", 5: "unknown tool: nope", 6: ""}
-	var renderKeys []string
-	for render := 0; render < 2; render++ {
-		req := buildChatRequest(st, nil, 0, provider.ModelOptions{}, nil)
-		var keys []string
+	renderKeys := [2]map[int]string{{}, {}}
+	for render := range renderKeys {
+		req := buildChatRequest(st, nil, 0, provider.ModelOptions{}, nil, promptfence.Fence{})
 		for i, c := range raw {
 			got := req.Messages[i].Content
 			k := extractToolFrameKey(t, got)
-			keys = append(keys, k)
+			renderKeys[render][i] = k
 			if got != framedLiteral(k, c) {
 				t.Errorf("render %d: tool frame mismatch at %d: %q", render, i, got)
 			}
@@ -178,15 +182,11 @@ func TestRepeatedRenderRotatesNonceWithoutAccumulatingFrames(t *testing.T) {
 				t.Errorf("render %d: frame accumulated or content altered at %d: %q", render, i, inner)
 			}
 		}
-		for _, k := range keys[1:] {
-			if k != keys[0] {
-				t.Errorf("render %d: keys differ within render: %v", render, keys)
-			}
-		}
-		renderKeys = append(renderKeys, keys[0])
 	}
-	if renderKeys[0] == renderKeys[1] {
-		t.Errorf("nonce reused across renders: %q", renderKeys[0])
+	for i := range raw {
+		if renderKeys[0][i] != renderKeys[1][i] {
+			t.Errorf("tool message %d re-keyed across renders: %q then %q", i, renderKeys[0][i], renderKeys[1][i])
+		}
 	}
 }
 

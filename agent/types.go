@@ -5,6 +5,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/kstruzzieri/go-llm/internal/promptfence"
 	"github.com/kstruzzieri/go-llm/provider"
 )
 
@@ -135,6 +136,11 @@ type Message struct {
 	// failure — all three return before prepareCall normalizes).
 	Context   *ContextSet `json:"-"`
 	OutputCap int         `json:"-"`
+	// fence is the key a role "tool" message is framed under on the wire
+	// (#430), minted once by mintFenceKeys and reused on every later render
+	// so earlier request bytes never change. Runtime-only: unexported, so it
+	// is never serialized and never leaves the package. Zero means unkeyed.
+	fence promptfence.Fence
 }
 
 // State is the canonical transcript the Orchestrator owns.
