@@ -439,3 +439,7 @@ func (p *scratchProcess) Wait() (int, bool, error) {
 	<-p.session.cleanupDone
 	return code, managerKilled, err
 }
+
+// cleanupNote implements cleanupReporter by delegating to the wrapped
+// process, so a Seatbelt cleanup note survives the scratch decorator.
+func (p *scratchProcess) cleanupNote() string { return cleanupNoteOf(p.backgroundProcess) }

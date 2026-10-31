@@ -43,9 +43,14 @@ type Verifier interface {
 }
 
 // WithVerifier installs the post-write verification hook (#347). A nil
-// verifier leaves every batch byte-for-byte unchanged.
+// verifier leaves every batch byte-for-byte unchanged. It may be applied after
+// New, concurrently with Run; each Run retains the hook captured at entry.
 func WithVerifier(v Verifier) Option {
-	return func(o *Orchestrator) { o.verifier = v }
+	return func(o *Orchestrator) {
+		o.verifierMu.Lock()
+		defer o.verifierMu.Unlock()
+		o.verifier = v
+	}
 }
 
 // mutatesWorkspaceFiles reports whether a successful call to this tool changed
@@ -91,11 +96,11 @@ func (b *batch) note(state *State, call provider.ToolCall, rec ToolCallRecord, o
 // ctx.Err() check is nonetheless kept: the error covers what the context does
 // not know, the context check covers a cancellation that landed while the
 // check was running, before State is mutated.
-func (o *Orchestrator) verifyBatch(ctx context.Context, state *State, approver Approver, b *batch, obs Observer, step int, ic *interceptorRun) error {
-	if o.verifier == nil || b.verifyAnchor < 0 {
+func verifyBatch(ctx context.Context, state *State, approver Approver, b *batch, obs Observer, step int, ic *interceptorRun, verifier Verifier) error {
+	if verifier == nil || b.verifyAnchor < 0 {
 		return nil
 	}
-	out, err := o.verifier.Verify(ctx, approver)
+	out, err := verifier.Verify(ctx, approver)
 	if err != nil {
 		return err
 	}
@@ -108,7 +113,7 @@ func (o *Orchestrator) verifyBatch(ctx context.Context, state *State, approver A
 	anchor := &state.Messages[b.verifyAnchor]
 	// #436 spec D7: verifier output is tool-authored workspace text entering
 	// State; inspect it before the append like any other observation.
-	tags, block, err := ic.inspectObservation(ctx, obs, step, InspectedMessage{
+	tags, block, _, err := ic.inspectObservation(ctx, obs, step, InspectedMessage{
 		StateIndex: b.verifyAnchor, Role: "tool", Origin: OriginWorkspace,
 		ToolName: anchor.ToolName, ToolCallID: anchor.ToolCallID, Content: out,
 	})

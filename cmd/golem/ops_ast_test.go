@@ -61,7 +61,7 @@ var opsClosedNames = map[string][]string{
 		"Destination", "DestinationEdge", "DestinationGate", "DestinationPolicy",
 		"DestinationPurposeDiscovery", "DestinationPurposeHealth", "ErrDestinationDenied",
 		"NewDestination", "NewDestinationGate", "NewDestinationManifest"},
-	goLLM + "agent": {"ModelCallCapabilities"},
+	goLLM + "agent": {"ModelCallCapabilities", "SanitizePreview"},
 	"main":          {"loadDocumentFor", "modelsJSONInput", "parseQuietly", "realTermOps", "sanitizeApprovalPreview", "termOps"},
 }
 

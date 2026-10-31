@@ -905,6 +905,7 @@ func TestBwrapPayloadEnvironment(t *testing.T) {
 	// PWD is set by bwrap itself as part of --chdir; everything else must be
 	// exactly the approved payload set.
 	want := []string{"PATH=/usr/bin:/bin", "HOME=" + bwrapTestHome, "TMPDIR=/tmp", "PWD=" + ws}
+	// containment: ENV-BWRAP
 	for _, kv := range want {
 		if !got[kv] {
 			t.Fatalf("payload env missing %q: %q", kv, envLine)

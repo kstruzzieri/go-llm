@@ -14,6 +14,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -23,6 +24,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode"
 
 	"github.com/kstruzzieri/go-llm/config"
 	"github.com/kstruzzieri/go-llm/ollama"
@@ -46,6 +48,22 @@ func main() {
 	importXlamN := flag.Int("import-xlam-n", 300, "Number of eligible records to sample for -import-xlam (<=0 = all eligible)")
 	importXlamSeed := flag.Int64("import-xlam-seed", 42, "Deterministic sampling seed for -import-xlam")
 	assemblyBuildPath := flag.String("assembly-build", "", "Build assembly traces from this case-fixture JSON (#331): a JSON array is the 3a flat/progressive corpus; a JSON object is the 3c mixed-assembly fixture (paired legacy/mixed arms + optional topline)")
+	injectionBuildPath := flag.String("build-injection-corpus", "", "Build frozen-real-wire injection traces from this cases JSON (#452)")
+	injectionOut := flag.String("injection-out", filepath.Join("docs", "llm", "traces", "injection", "traces"), "Output directory for -build-injection-corpus")
+	interceptorCensus := flag.Bool("interceptor-census", false, "Run the deterministic interceptor census (#517): render every -census-manifest file through Golem's production tools under interceptor.Defaults() and report the findings per carrier")
+	censusManifestPath := flag.String("census-manifest", filepath.Join("docs", "llm", "census", "manifest.json"), "With -interceptor-census or -interceptor-benign-draft: the census manifest (llm-bench.census-manifest/v1)")
+	censusRoot := flag.String("census-root", "", "With -interceptor-census or -interceptor-benign-draft: directory holding one subdirectory per manifest stratum, fetched as docs/llm/census/README.md describes")
+	censusOut := flag.String("census-out", "", "With -interceptor-census: output directory for census-results.json (committed) and full/observations.jsonl (gitignored), e.g. docs/llm/census")
+	interceptorV1Report := flag.String("interceptor-v1-report", "", "Rebuild every cell of this injection cases JSON (the #452 v1 corpus, docs/llm/traces/injection/cases.json) under each #517 interceptor arm, classify each arm's decision-point request against the guards-only arm's, and write the deterministic adversarial report to -report (default stdout; the committed report is "+interceptorV1ReportPath+"). No model is called")
+	interceptorBenignReport := flag.Bool("interceptor-benign-report", false, "Write the deterministic #517 benign interceptor report (census by detector rule, MCP block budget per stratum, D×S, identity gate, registered power) from -registration (llm-bench.interceptor-registration/v1) and the cases and census it binds, to -report (default stdout; the committed report is "+interceptorBenignReportPath+"). No model is called")
+	interceptorBenignDraft := flag.String("interceptor-benign-draft", "", "Draft the #517 benign extraction and nonfiring tasks (spec §6.3) from -census-results over -census-root and -census-manifest, and write the DRAFT cases JSON to this path for review (BC7); a draft is never the registered docs/llm/traces/interceptor-benign/cases.json until reviewed. No model is called")
+	censusResultsPath := flag.String("census-results", filepath.Join("docs", "llm", "census", "census-results.json"), "With -interceptor-benign-draft: the census results (llm-bench.census-results/v1) bound to -census-manifest")
+	benignN := flag.Int("benign-n", 96, "With -interceptor-benign-draft: extraction tasks to sample")
+	benignNonfiring := flag.Int("benign-nonfiring", 16, "With -interceptor-benign-draft: nonfiring tasks to sample")
+	benignReject := flag.String("benign-reject", "", "With -interceptor-benign-draft: comma-separated census refs (<stratum>/<path>) rejected in review; each is replaced by continuing down the same permutation")
+	benignAuthored := flag.String("benign-authored", "", "With -interceptor-benign-draft: a JSON array of hand-authored delegated tasks (BC2), appended after the drafted tasks, e.g. docs/llm/traces/interceptor-benign/delegated.json")
+	buildInterceptorBenign := flag.String("build-interceptor-benign", "", "Run the identity gate (#517 spec §6.4) on this benign cases JSON and, when every identity holds, build each task's golem-default-guards and guards+detectors traces into -benign-out. No model is called")
+	benignOut := flag.String("benign-out", filepath.Join("docs", "llm", "traces", "interceptor-benign", "traces"), "Output directory for -build-interceptor-benign")
 	assemblyOut := flag.String("assembly-out", filepath.Join("docs", "llm", "assembly-corpus", "traces"), "Output directory for -assembly-build with a 3a JSON-array fixture")
 	assemblyOutMixed := flag.String("assembly-out-mixed", filepath.Join("docs", "llm", "assembly-corpus", "mixed", "traces"), "Output directory for -assembly-build with a 3c mixed-assembly object fixture (the mixed corpus keeps its own manifest, separate from -assembly-out)")
 
@@ -73,6 +91,10 @@ func main() {
 	calibrateAgreement := flag.String("calibrate-agreement", string(calibrationAgreementExact), "Calibration agreement mode: exact or tolerance")
 	judgeStabilityRuns := flag.Int("judge-stability-runs", 0, "When >1, run the judge that many times per artifact (cache bypassed) and report spread as a diagnostic")
 
+	injectionReport := flag.Bool("injection-report", false, "Emit the injection-resistance report from -captures (artifacts JSONL files, comma-separated, each with its .manifest.json) bound to -registration (#452)")
+	capturesFlag := flag.String("captures", "", "With -injection-report: comma-separated injection capture artifacts paths (local and hosted captures are separate files)")
+	injectionAdjudications := flag.String("injection-adjudications", "", "With -injection-report: optional JSONL of {trace_id, model, outcome, reviewer, note}; may only replace manual cells")
+	registrationPath := flag.String("registration", "", "With -calibrate-capture over injection traces or -injection-report: the committed pre-registration JSON (llm-bench.injection-registration/v1); its census, decoding and digest bind captures and reports (#452). With -interceptor-benign-report: the #517 benign registration (llm-bench.interceptor-registration/v1), e.g. docs/llm/traces/interceptor-benign/registration.json")
 	tracesGlob := flag.String("traces", "", "Glob pattern for trace JSON files (required for normal runs and -calibrate-capture)")
 	modelsArg := flag.String("models", "", "Comma-separated model selectors (provider/model or bare model name; required)")
 	scorerName := flag.String("scorer", "exact-match", "Scoring strategy: exact-match, llm-judge, manual")
@@ -86,6 +108,7 @@ func main() {
 	judgeDisableThinking := flag.Bool("judge-disable-thinking", false, "Send chat_template_kwargs.enable_thinking=false on -judge-transport openai-compat so a thinking-tuned local judge (llama.cpp/vLLM) answers directly; leave off for api.openai.com, which rejects the kwarg")
 	candidateBaseURL := flag.String("candidate-base-url", "", "Base URL for openai-compat candidate targets (server root, no /v1 suffix)")
 	candidateAPIKey := flag.String("candidate-api-key", "", "Bearer token for openai-compat candidate targets; falls back to $"+candidateAPIKeyEnvVar)
+	candidateSessionID := flag.String("candidate-session-id", "", "Session id sent as the openai-compat session header on every candidate request; required by some hosted endpoints; empty sends no header")
 	corpusManifestPath := flag.String("corpus-manifest", "", "Path to a corpus manifest JSONL (partition/category per trace); enables partition-separated reporting")
 	corpusPartitions := flag.String("corpus-partitions", "", "Comma-separated partitions to include from the corpus manifest (natural, challenge, judge-validation; empty = all)")
 	corpusCategories := flag.String("corpus-categories", "", "Comma-separated categories to include from the corpus manifest (empty = all)")
@@ -115,6 +138,11 @@ func main() {
 	reportPath := flag.String("report", "", "Output report path (default: stdout)")
 	ollamaURL := flag.String("ollama-url", "http://localhost:11434", "Ollama base URL")
 	timeout := flag.Duration("timeout", 5*time.Minute, "Per-replay timeout for candidate model calls")
+	replayAttempt := flag.Bool("replay-attempt", false, "Run exactly one replay attempt of -attempt-trace against one openai-compat -models target and publish an immutable -attempt-dir holding raw/ evidence and attempt.json (schema llm-bench.replay-attempt/v1); exits 0 once attempt.json is published, whatever the attempt's status (#687)")
+	attemptTrace := flag.String("attempt-trace", "", "With -replay-attempt: the one trace JSON file to replay (a literal path, not a glob)")
+	attemptID := flag.String("attempt-id", "", "With -replay-attempt: caller-supplied attempt id matching [A-Za-z0-9._:-]{1,128}; sent as X-Client-Correlation <id>/<ordinal>")
+	attemptArm := flag.String("attempt-arm", "", "With -replay-attempt: opaque arm selector, recorded verbatim")
+	attemptDir := flag.String("attempt-dir", "", "With -replay-attempt: output directory, which must not exist")
 	flag.Parse()
 	providedFlags := map[string]bool{}
 	flag.Visit(func(f *flag.Flag) {
@@ -122,6 +150,9 @@ func main() {
 	})
 
 	ct := resolveCandidateTransportConfig(*candidateBaseURL, *candidateAPIKey, os.Getenv)
+	if err := validateCandidateSessionID(*candidateSessionID); err != nil {
+		log.Fatalf("llm-bench: %v", err)
+	}
 
 	modes := 0
 	if *capture {
@@ -175,16 +206,169 @@ func main() {
 	if *assemblyBuildPath != "" {
 		modes++
 	}
+	if *injectionBuildPath != "" {
+		modes++
+	}
+	if *injectionReport {
+		modes++
+	}
+	if *replayAttempt {
+		modes++
+	}
+	if *interceptorCensus {
+		modes++
+	}
+	if *interceptorV1Report != "" {
+		modes++
+	}
+	if *interceptorBenignReport {
+		modes++
+	}
+	if *interceptorBenignDraft != "" {
+		modes++
+	}
+	if *buildInterceptorBenign != "" {
+		modes++
+	}
 	if modes > 1 {
-		log.Fatalf("llm-bench: -capture, -calibrate-capture, -calibrate, -manual-report, -paired-report, -assembly-report, -fim-latency, -blind-render, -blind-ingest, -fc-render, -fc-ingest, -fc-sidemap-generate, -adjudicate-render, -adjudicate-ingest, -discrimination-report, -import-xlam, -assembly-build are mutually exclusive")
+		log.Fatalf("llm-bench: -capture, -calibrate-capture, -calibrate, -manual-report, -paired-report, -assembly-report, -fim-latency, -blind-render, -blind-ingest, -fc-render, -fc-ingest, -fc-sidemap-generate, -adjudicate-render, -adjudicate-ingest, -discrimination-report, -import-xlam, -assembly-build, -build-injection-corpus, -injection-report, -replay-attempt, -interceptor-census, -interceptor-v1-report, -interceptor-benign-report, -interceptor-benign-draft, -build-interceptor-benign are mutually exclusive")
+	}
+	if providedFlags["registration"] && !*calibrateCapture && !*injectionReport && !*interceptorBenignReport {
+		log.Fatalf("llm-bench: -registration requires -calibrate-capture, -injection-report or -interceptor-benign-report")
+	}
+	if !*replayAttempt {
+		if stray := strayAttemptFlags(providedFlags); len(stray) > 0 {
+			log.Fatalf("llm-bench: %s require -replay-attempt", strings.Join(stray, ", "))
+		}
+	}
+	if !*interceptorCensus {
+		if stray := strayCensusFlags(providedFlags, *interceptorBenignDraft != ""); len(stray) > 0 {
+			log.Fatalf("llm-bench: %s require -interceptor-census (-census-manifest and -census-root also serve -interceptor-benign-draft)", strings.Join(stray, ", "))
+		}
+	}
+	if *interceptorBenignDraft == "" {
+		if stray := strayFlags(providedFlags, "census-results", "benign-n", "benign-nonfiring", "benign-reject", "benign-authored"); len(stray) > 0 {
+			log.Fatalf("llm-bench: %s require -interceptor-benign-draft", strings.Join(stray, ", "))
+		}
+	}
+	if *buildInterceptorBenign == "" {
+		if stray := strayFlags(providedFlags, "benign-out"); len(stray) > 0 {
+			log.Fatalf("llm-bench: %s require -build-interceptor-benign", strings.Join(stray, ", "))
+		}
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
+	if *replayAttempt {
+		// stderr carries evidence before attempt.json is published. Without
+		// this, Go kills the process with SIGPIPE on a write to a closed
+		// stderr pipe, leaving a claimed directory with no terminal. Write
+		// errors are already discarded.
+		signal.Ignore(syscall.SIGPIPE)
+		code := runReplayAttempt(ctx, replayAttemptOptions{
+			AttemptDir: *attemptDir,
+			AttemptID:  *attemptID,
+			Arm:        *attemptArm,
+			TracePath:  *attemptTrace,
+			Models:     *modelsArg,
+			BaseURL:    ct.baseURL,
+			APIKey:     ct.apiKey,
+			SessionID:  *candidateSessionID,
+			Timeout:    *timeout,
+		}, os.Stderr)
+		cancel()
+		os.Exit(code)
+	}
+
 	if *assemblyBuildPath != "" {
 		if err := assemblyBuildDispatch(ctx, *assemblyBuildPath, *assemblyOut, *assemblyOutMixed); err != nil {
 			log.Fatalf("llm-bench: assembly-build: %v", err)
+		}
+		return
+	}
+
+	if *interceptorCensus {
+		if err := runCensusMode(ctx, *censusManifestPath, *censusRoot, *censusOut, os.Stderr); err != nil {
+			log.Fatalf("llm-bench: interceptor-census: %v", err)
+		}
+		return
+	}
+
+	if *interceptorBenignDraft != "" {
+		refuseOutputAlias("interceptor-benign-draft", "-interceptor-benign-draft", *interceptorBenignDraft,
+			[][2]string{{"-census-manifest", *censusManifestPath}, {"-census-results", *censusResultsPath}, {"-benign-authored", *benignAuthored}})
+		var rejected []string
+		for _, ref := range strings.Split(*benignReject, ",") {
+			if ref = strings.TrimSpace(ref); ref != "" {
+				rejected = append(rejected, ref)
+			}
+		}
+		p := benignDraftParams{N: *benignN, Nonfiring: *benignNonfiring, Seed: benignSeed, Rejected: rejected, Authored: *benignAuthored}
+		if err := runBenignDraftMode(ctx, *censusManifestPath, *censusRoot, *censusResultsPath, *interceptorBenignDraft, p, os.Stderr); err != nil {
+			log.Fatalf("llm-bench: interceptor-benign-draft: %v", err)
+		}
+		return
+	}
+
+	if *buildInterceptorBenign != "" {
+		if err := buildBenignCorpus(ctx, *buildInterceptorBenign, *benignOut); err != nil {
+			log.Fatalf("llm-bench: build-interceptor-benign: %v", err)
+		}
+		return
+	}
+
+	if *interceptorBenignReport {
+		if strings.TrimSpace(*registrationPath) == "" {
+			log.Fatalf("llm-bench: -interceptor-benign-report requires -registration")
+		}
+		bound := filepath.Dir(*registrationPath)
+		census := filepath.Join(bound, filepath.FromSlash(interceptorCensusRel))
+		inputs := [][2]string{{"-registration", *registrationPath},
+			{"-registration (cases.json)", filepath.Join(bound, "cases.json")},
+			{"-registration (census-results.json)", filepath.Join(census, "census-results.json")},
+			{"-registration (manifest.json)", filepath.Join(census, "manifest.json")}}
+		traces, err := filepath.Glob(filepath.Join(bound, "traces", "*.json"))
+		if err != nil {
+			log.Fatalf("llm-bench: interceptor-benign-report: glob traces: %v", err)
+		}
+		inputs = append(inputs, pathListInputs("-registration (traces)", traces)...)
+		refuseReportAlias("interceptor-benign-report", *reportPath, inputs)
+		report, err := runInterceptorBenignReport(ctx, *registrationPath)
+		if err != nil {
+			log.Fatalf("llm-bench: interceptor-benign-report: %v", err)
+		}
+		if *reportPath == "" {
+			fmt.Print(report)
+			return
+		}
+		if err := writeInjectionReport(*reportPath, report); err != nil {
+			log.Fatalf("llm-bench: write interceptor benign report: %v", err)
+		}
+		fmt.Fprintf(os.Stderr, "llm-bench: interceptor benign report written to %s\n", *reportPath)
+		return
+	}
+
+	if *interceptorV1Report != "" {
+		refuseReportAlias("interceptor-v1-report", *reportPath, [][2]string{{"-interceptor-v1-report", *interceptorV1Report}})
+		report, err := runInterceptorV1Report(ctx, *interceptorV1Report)
+		if err != nil {
+			log.Fatalf("llm-bench: interceptor-v1-report: %v", err)
+		}
+		if *reportPath == "" {
+			fmt.Print(report)
+			return
+		}
+		if err := writeInjectionReport(*reportPath, report); err != nil {
+			log.Fatalf("llm-bench: write interceptor v1 report: %v", err)
+		}
+		fmt.Fprintf(os.Stderr, "llm-bench: interceptor v1 report written to %s\n", *reportPath)
+		return
+	}
+
+	if *injectionBuildPath != "" {
+		if err := buildInjectionCorpus(ctx, *injectionBuildPath, *injectionOut); err != nil {
+			log.Fatalf("llm-bench: build-injection-corpus: %v", err)
 		}
 		return
 	}
@@ -255,8 +439,9 @@ func main() {
 		}
 		// The artifacts output (and its manifest sibling) must never clobber
 		// a trace input.
-		refuseOutputAlias("calibrate-capture", "-labels-out", *labelsOut, pathListInputs("-traces", tracePaths))
-		refuseOutputAlias("calibrate-capture", "-labels-out capture manifest", captureManifestPath(*labelsOut), pathListInputs("-traces", tracePaths))
+		captureInputs := append(pathListInputs("-traces", tracePaths), [2]string{"-registration", *registrationPath})
+		refuseOutputAlias("calibrate-capture", "-labels-out", *labelsOut, captureInputs)
+		refuseOutputAlias("calibrate-capture", "-labels-out capture manifest", captureManifestPath(*labelsOut), captureInputs)
 		// ... and the two outputs must differ from EACH OTHER (round-2 review
 		// P1): a pre-existing hardlink/symlink between <labels-out> and its
 		// .manifest.json sibling would leave the artifacts path holding the
@@ -276,7 +461,31 @@ func main() {
 			OpenAICompatBaseURL: ct.baseURL,
 			OpenAICompatAPIKey:  ct.apiKey,
 			Timeout:             *timeout,
+			CandidateSessionID:  *candidateSessionID,
 			Scorer:              &CaptureScorer{},
+		}
+		var registrationDigest string
+		var injectionTemps map[string]float64
+		if anyInjectionTrace(traces) {
+			if strings.TrimSpace(*registrationPath) == "" {
+				log.Fatalf("llm-bench: -calibrate-capture over injection traces requires -registration")
+			}
+			reg, digest, err := loadInjectionRegistration(*registrationPath)
+			if err != nil {
+				log.Fatalf("llm-bench: calibrate-capture: %v", err)
+			}
+			decoding, err := reg.bindCapture(traces, targets)
+			if err != nil {
+				log.Fatalf("llm-bench: calibrate-capture: %v", err)
+			}
+			runner.InjectionDecoding = decoding
+			registrationDigest = digest
+			injectionTemps = make(map[string]float64, len(decoding))
+			for sel, d := range decoding {
+				injectionTemps[sel] = *d.Options.Temperature // providerOptions always sets it
+			}
+		} else if strings.TrimSpace(*registrationPath) != "" {
+			log.Fatalf("llm-bench: -registration applies only to injection traces")
 		}
 		// Model digests feed assembly-artifact capture provenance only, so
 		// resolution (an /api/show round-trip per ollama target) is skipped
@@ -286,13 +495,15 @@ func main() {
 			modelDigests = resolveCaptureModelDigests(ctx, *ollamaURL, targets)
 		}
 		if err := runCalibrateCapture(ctx, calibrateCaptureOptions{
-			Runner:              runner,
-			Targets:             targets,
-			Traces:              traces,
-			OutputPath:          *labelsOut,
-			ModelDigests:        modelDigests,
-			OllamaURL:           *ollamaURL,
-			OpenAICompatBaseURL: ct.baseURL,
+			Runner:                runner,
+			Targets:               targets,
+			Traces:                traces,
+			OutputPath:            *labelsOut,
+			ModelDigests:          modelDigests,
+			OllamaURL:             *ollamaURL,
+			OpenAICompatBaseURL:   ct.baseURL,
+			RegistrationDigest:    registrationDigest,
+			InjectionTemperatures: injectionTemps,
 		}); err != nil {
 			log.Fatalf("llm-bench: calibrate-capture: %v", err)
 		}
@@ -432,6 +643,41 @@ func main() {
 			log.Fatalf("llm-bench: write assembly report: %v", err)
 		}
 		fmt.Fprintf(os.Stderr, "llm-bench: assembly report written to %s\n", *reportPath)
+		return
+	}
+
+	if *injectionReport {
+		var captures []string
+		for _, c := range strings.Split(*capturesFlag, ",") {
+			if c = strings.TrimSpace(c); c != "" {
+				captures = append(captures, c)
+			}
+		}
+		if len(captures) == 0 || strings.TrimSpace(*registrationPath) == "" {
+			log.Fatalf("llm-bench: -injection-report requires -captures and -registration")
+		}
+		inputs := [][2]string{{"-registration", *registrationPath}, {"-injection-adjudications", *injectionAdjudications}}
+		inputs = append(inputs, pathListInputs("-captures", captures)...)
+		for _, c := range captures {
+			inputs = append(inputs, [2]string{"-captures manifest", captureManifestPath(c)})
+		}
+		refuseReportAlias("injection-report", *reportPath, inputs)
+		report, err := runInjectionReport(injectionReportOptions{
+			RegistrationPath: *registrationPath,
+			Captures:         captures,
+			Adjudications:    *injectionAdjudications,
+		})
+		if err != nil {
+			log.Fatalf("llm-bench: %v", err)
+		}
+		if *reportPath == "" {
+			fmt.Print(report)
+			return
+		}
+		if err := writeInjectionReport(*reportPath, report); err != nil {
+			log.Fatalf("llm-bench: write injection report: %v", err)
+		}
+		fmt.Fprintf(os.Stderr, "llm-bench: injection report written to %s\n", *reportPath)
 		return
 	}
 
@@ -857,6 +1103,9 @@ func main() {
 	if err != nil {
 		log.Fatalf("llm-bench: load traces: %v", err)
 	}
+	if anyInjectionTrace(traces) {
+		log.Fatalf("llm-bench: injection traces require -calibrate-capture with -registration, then -injection-report")
+	}
 
 	var corpusData *corpusReportData
 	if strings.TrimSpace(*corpusManifestPath) != "" {
@@ -935,6 +1184,7 @@ func main() {
 		OpenAICompatBaseURL: ct.baseURL,
 		OpenAICompatAPIKey:  ct.apiKey,
 		Timeout:             *timeout,
+		CandidateSessionID:  *candidateSessionID,
 		Scorer:              scorer,
 	}
 
@@ -1085,12 +1335,22 @@ func refuseOutputAlias(mode, outFlag, outPath string, inputs [][2]string) {
 		if strings.TrimSpace(inPath) == "" {
 			continue
 		}
+		if inFlag == "-judge-cache" {
+			_, diskPath, _ := resolveJudgeCachePath(inPath)
+			if diskPath == "" {
+				// Memory caches and invalid URIs without a target name no file.
+				continue
+			}
+			// Protect a known future target even when mode=ro/rw currently
+			// cannot open it: another process could create it before the report.
+			inPath = diskPath
+		}
 		same, err := pathsAlias(outPath, inPath)
 		if err != nil {
 			log.Fatalf("llm-bench: %s: cannot resolve %s or %s: %v", mode, outFlag, inFlag, err)
 		}
 		if same {
-			if filepath.Clean(outPath) == filepath.Clean(inPath) {
+			if filepath.Clean(outPath) == filepath.Clean(in[1]) {
 				log.Fatalf("llm-bench: %s: %s must differ from %s (it would overwrite the input)", mode, outFlag, inFlag)
 			}
 			log.Fatalf("llm-bench: %s: %s resolves to the same file as %s; choose a different output path", mode, outFlag, inFlag)
@@ -1143,6 +1403,20 @@ func defaultJudgeCachePath() string {
 		return ""
 	}
 	return filepath.Join(base, "go-llm", "judge-cache.db")
+}
+
+// validateCandidateSessionID refuses a -candidate-session-id that would not
+// travel as typed: surrounding spaces or tabs (a paste error that changes the
+// session) or any control character (net/http refuses it as a header value,
+// which would read as a candidate connection failure on every request).
+func validateCandidateSessionID(id string) error {
+	if strings.Trim(id, " \t") != id {
+		return errors.New("-candidate-session-id has leading or trailing whitespace")
+	}
+	if strings.ContainsFunc(id, unicode.IsControl) {
+		return errors.New("-candidate-session-id contains a control character")
+	}
+	return nil
 }
 
 // validateCaptureSampleAndLimit rejects the case where both flags are
@@ -1268,4 +1542,31 @@ func resolveToolSchemaSource(stdioCmd, httpURL string) (toolSchemaSource, error)
 		return newMCPToolSchemaSourceHTTP(httpURL)
 	}
 	return nil, nil
+}
+
+// strayAttemptFlags lists the -attempt-* flags set without -replay-attempt,
+// which would otherwise be silently ignored by a legacy mode (#687).
+func strayAttemptFlags(provided map[string]bool) []string {
+	return strayFlags(provided, "attempt-trace", "attempt-id", "attempt-arm", "attempt-dir")
+}
+
+// strayCensusFlags lists the -census-* flags set without -interceptor-census,
+// which every other mode would silently ignore. With the benign draft
+// (draft), -census-manifest and -census-root are its inputs; -census-out
+// still is not.
+func strayCensusFlags(provided map[string]bool, draft bool) []string {
+	if draft {
+		return strayFlags(provided, "census-out")
+	}
+	return strayFlags(provided, "census-manifest", "census-root", "census-out")
+}
+
+func strayFlags(provided map[string]bool, names ...string) []string {
+	var stray []string
+	for _, name := range names {
+		if provided[name] {
+			stray = append(stray, "-"+name)
+		}
+	}
+	return stray
 }

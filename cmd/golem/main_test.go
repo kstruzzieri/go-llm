@@ -481,7 +481,9 @@ func TestRunShutdownDrainsBorrowedWeighterBeforeFeedbackClose(t *testing.T) {
 			weighter := &runBlockingWeighter{entered: make(chan struct{}), release: make(chan struct{})}
 			svc := feedbackServiceForStore(root, &feedbackBlockingStore{}, feedbackTestWarn(t))
 			svc.weighter = weighter
-			args := []string{"-config", configPath, "-root", root, "-feedback", "-no-probe", "-no-cap-probe", "-no-session", "-no-memory", "-no-project-context"}
+			// The ready generation is the automatic retrieve tool, which only
+			// Trusted mounts (#387).
+			args := []string{"-config", configPath, "-root", root, "-profile", "trusted", "-feedback", "-no-probe", "-no-cap-probe", "-no-session", "-no-memory", "-no-project-context"}
 			if current {
 				dbPath := filepath.Join(t.TempDir(), "explicit.db")
 				seedIndex(t, dbPath, workspaceID(root), "test/qwen3-embedding:8b")
@@ -1202,7 +1204,7 @@ func writeFakeAgentflow(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "agentflow")
-	script := "#!/bin/sh\nif [ \"$1\" = --version ]; then printf 'agentflow 1.0.0\\n'; exit 0; fi\nprintf '%s' \"$GOLEM_AGENTFLOW_STATUS_PAYLOAD\"\n"
+	script := "#!/bin/sh\nif [ \"$1\" = --version ]; then printf 'agentflow 1.2.0\\n'; exit 0; fi\nprintf '%s' \"$GOLEM_AGENTFLOW_STATUS_PAYLOAD\"\n"
 	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}

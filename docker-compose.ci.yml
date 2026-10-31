@@ -12,11 +12,18 @@ services:
     # they stay zombies for the container's lifetime.
     init: true
     command: ["./scripts/ci-local", "--mode", "pre-push"]
+    # The pre-push hook names the tree and commit it gates; unset names stay
+    # unset in the container, and the containment evidence records a manual run.
+    environment:
+      - GO_LLM_CI_TREE
+      - GO_LLM_CI_COMMIT
     # The image runs as uid 1000 (see Dockerfile.ci). The volume names carry a
     # -ci suffix so they are created fresh with that ownership rather than
     # reusing the root-owned volumes of the earlier image.
     volumes:
-      - .:/workspace
+      - type: bind
+        source: ${GO_LLM_CI_SOURCE:-.}
+        target: /workspace
       - go-build-cache-ci:/home/ci/.cache/go-build
       - go-mod-cache-ci:/go/pkg/mod
       - golangci-lint-cache-ci:/home/ci/.cache/golangci-lint

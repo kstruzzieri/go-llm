@@ -293,14 +293,20 @@ type recordPromoter interface {
 	Promote(ctx context.Context, id string, acc memory.RecordAccess, to memory.MemoryKind) (memory.MemoryRecord, error)
 }
 
-// AgentMemoryCreate stores one working note scoped to the active session. It
-// writes only the per-user memory DB (never the workspace), so it is
-// Write-class but never approval-gated.
+// AgentMemoryCreate stores one working note scoped to the active session. Over
+// the real memory store it writes only the per-user memory DB (never the
+// workspace), so it is Write-class but never approval-gated. S and AfterWrite
+// are host code that runs unprompted; nothing here constrains them.
 type AgentMemoryCreate struct {
 	S           recordCreator
 	WorkspaceID string
 	SessionID   func() string
 	Now         func() time.Time // expiry base; nil => time.Now
+	// AfterWrite, when non-nil, runs after every Invoke, whether the write
+	// succeeded or not (a failed write can still leave files behind). A host
+	// uses it to re-secure the memory DB and its sidecars. Its error is
+	// ignored: the hook is best-effort and never changes the tool result.
+	AfterWrite func() error
 }
 
 type agentMemoryCreateArgs struct {
@@ -331,6 +337,14 @@ func (AgentMemoryCreate) Effect() agent.Effect {
 func (AgentMemoryCreate) Origin() agent.Origin { return agent.OriginWorkspace }
 
 func (t AgentMemoryCreate) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolResult, error) {
+	res, err := t.invoke(ctx, raw)
+	if t.AfterWrite != nil {
+		_ = t.AfterWrite()
+	}
+	return res, err
+}
+
+func (t AgentMemoryCreate) invoke(ctx context.Context, raw json.RawMessage) (agent.ToolResult, error) {
 	var args agentMemoryCreateArgs
 	if err := json.Unmarshal(raw, &args); err != nil {
 		return agent.ToolResult{IsError: true, Content: "invalid arguments: " + err.Error()}, nil
@@ -367,6 +381,9 @@ type AgentMemoryPromote struct {
 	S           recordPromoter
 	WorkspaceID string
 	SessionID   func() string
+	// AfterWrite has AgentMemoryCreate.AfterWrite's meaning: a best-effort
+	// host hook run after every Invoke, with its error ignored.
+	AfterWrite func() error
 }
 
 type agentMemoryPromoteArgs struct {
@@ -399,6 +416,14 @@ func (AgentMemoryPromote) Effect() agent.Effect {
 func (AgentMemoryPromote) Origin() agent.Origin { return agent.OriginWorkspace }
 
 func (t AgentMemoryPromote) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolResult, error) {
+	res, err := t.invoke(ctx, raw)
+	if t.AfterWrite != nil {
+		_ = t.AfterWrite()
+	}
+	return res, err
+}
+
+func (t AgentMemoryPromote) invoke(ctx context.Context, raw json.RawMessage) (agent.ToolResult, error) {
 	var args agentMemoryPromoteArgs
 	if err := json.Unmarshal(raw, &args); err != nil {
 		return agent.ToolResult{IsError: true, Content: "invalid arguments: " + err.Error()}, nil

@@ -15,6 +15,14 @@ after OS overhead).
 | [setups.md](setups.md) | Three candidate setup combinations with tradeoffs |
 | [recommendation.md](recommendation.md) | Current reference lineup + how to customize |
 | [benchmark-plan.md](benchmark-plan.md) | Harness design for A/B'ing models on real traces |
+| [traces/injection/README.md](traces/injection/README.md) | Committed injection corpus: 16 bases, variants and clean twins; builder and gates |
+| [benchmarks/2026-10-15-injection-resistance.md](benchmarks/2026-10-15-injection-resistance.md) | Injection-resistance run report with manual review (written at the recorded run) |
+| [census/README.md](census/README.md) | Interceptor census: strata manifest, carriers, per-arm outcome rules and committed results |
+| [../security/secrets-evidence.md](../security/secrets-evidence.md) | Secrets evidence: accuracy, census, workflow table and the default gate (generated) |
+| [traces/interceptor-benign/README.md](traces/interceptor-benign/README.md) | Registered benign task corpus for the detector interceptors: strata, sampling, identity gate, registration and review record |
+| [benchmarks/2026-10-26-interceptor-benign.md](benchmarks/2026-10-26-interceptor-benign.md) | Detectors on benign work: census fire rates, MCP block budget per stratum, D×S, identity gate and registered power (generated, no model) |
+| [benchmarks/2026-10-25-interceptor-adversarial-v1.md](benchmarks/2026-10-25-interceptor-adversarial-v1.md) | Interceptor arms on the #452 v1 injection corpus: deterministic cell classes and hit or miss per payload (generated, no model) |
+| [../security/interceptor-defaults-decision.md](../security/interceptor-defaults-decision.md) | Interceptor defaults decision (#517): detectors and Secrets stay opt-in, the failed gates, the `-interceptors` semantics and the follow-ups |
 
 ## Bring-your-own model
 

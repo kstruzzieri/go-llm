@@ -270,12 +270,43 @@ type Interceptor interface {
 	InspectToolCall(ctx context.Context, call ToolCallInspection) ([]Finding, error)
 }
 
+// SensitiveTextInterceptor is optionally implemented by an Interceptor that
+// guards protected text, such as configured credentials (#424 D3). Its
+// findings at VerdictBlock or above mean protected text was present in the
+// inspected content. The pipeline then keeps only bounded metadata from that
+// hook invocation (every finding's interceptor name, rule, verdict, and
+// numeric fields) and drops all its free text wholesale, from every
+// interceptor and the observer, before risk accumulation, telemetry and
+// error construction: finding Detail and ToolCallID, the event's ToolCallID,
+// and the hook and OnInterception errors, which become
+// ErrDiagnosticsSuppressed. A BlockedError from that invocation reports
+// Sensitive. Rule is kept, so every interceptor in a chain with such a guard
+// must use a fixed identifier for Rule, never text derived from the inspected
+// content. SensitiveText reports whether text carries protected content; it
+// exposes only that boolean, and the pipeline uses it to check copied route
+// metadata. A RunScopedInterceptor's capability is the one its per-run
+// instance implements.
+type SensitiveTextInterceptor interface {
+	Interceptor
+	SensitiveText(text string) bool
+}
+
+// ErrDiagnosticsSuppressed replaces the interceptor and observer errors of a
+// hook invocation that a SensitiveTextInterceptor blocked, whose text may
+// carry the protected content. It is joined with context.Canceled and
+// context.DeadlineExceeded when the replaced errors carried them, so
+// errors.Is still reports cancellation.
+var ErrDiagnosticsSuppressed = errors.New("agent: interceptor diagnostics suppressed after a sensitive block")
+
 // namedInterceptor freezes the validated installation name for one run.
 // Interceptors are otherwise free to compute Name, but model-visible framing
-// and telemetry must use the value that passed validation.
+// and telemetry must use the value that passed validation. sensitive is the
+// resolved instance's SensitiveText, nil when it has none: the wrapper
+// itself does not implement the optional interface.
 type namedInterceptor struct {
 	Interceptor
-	name string
+	name      string
+	sensitive func(string) bool
 }
 
 func (n namedInterceptor) Name() string { return n.name }
@@ -367,7 +398,11 @@ func resolveInterceptors(ctx context.Context, chain []Interceptor, scope RunScop
 				addenda += "\n\n" + addendum
 			}
 		}
-		out[i] = namedInterceptor{Interceptor: resolved, name: names[i]}
+		n := namedInterceptor{Interceptor: resolved, name: names[i]}
+		if s, ok := resolved.(SensitiveTextInterceptor); ok {
+			n.sensitive = s.SensitiveText
+		}
+		out[i] = n
 	}
 	return out, addenda, nil
 }
@@ -381,7 +416,16 @@ type BlockedError struct {
 	Hook     Hook
 	Step     int
 	Findings []Finding
+	// sensitive is unexported so that only the pipeline can set it: a host's
+	// struct literal cannot claim a sensitive block.
+	sensitive bool
 }
+
+// Sensitive reports whether a SensitiveTextInterceptor blocked in the hook
+// invocation this error reports, so the pipeline dropped that invocation's
+// free text (#424 D3). It is false for a nil receiver and for any
+// BlockedError not built by the pipeline.
+func (e *BlockedError) Sensitive() bool { return e != nil && e.sensitive }
 
 // cause returns the first finding whose verdict equals the maximum verdict
 // among findings; a zero Finding when there are none.
@@ -509,6 +553,23 @@ func (r *interceptorRun) result() *RiskReport {
 	return &s
 }
 
+// sensitiveText reports whether any chain member's SensitiveText accepts s.
+func (r *interceptorRun) sensitiveText(s string) bool {
+	return slices.ContainsFunc(r.chain, func(ic Interceptor) bool {
+		n, _ := ic.(namedInterceptor)
+		return n.sensitive != nil && n.sensitive(s)
+	})
+}
+
+// guardsText reports whether any chain member implements
+// SensitiveTextInterceptor.
+func (r *interceptorRun) guardsText() bool {
+	return slices.ContainsFunc(r.chain, func(ic Interceptor) bool {
+		n, _ := ic.(namedInterceptor)
+		return n.sensitive != nil
+	})
+}
+
 func addSaturating(a, b int) int {
 	if b > math.MaxInt-a {
 		return math.MaxInt
@@ -534,25 +595,43 @@ type hookScope struct {
 // picture, normalizes findings against scope, accumulates risk, emits
 // telemetry, and returns the findings, the maximum verdict, and the joined
 // interceptor/observer errors. Callers combine the verdict and the error
-// through terminalAt.
+// through terminalAt. When a SensitiveTextInterceptor blocks, the
+// invocation's free text is dropped first (see that interface) and the
+// returned sensitive mark is set.
 func (r *interceptorRun) runHook(ctx context.Context, obs Observer, step int, scope hookScope,
-	invoke func(Interceptor) ([]Finding, error)) ([]Finding, Verdict, error) {
+	invoke func(Interceptor) ([]Finding, error)) ([]Finding, Verdict, bool, error) {
 
 	var all []Finding
 	var errs []error
 	verdict := VerdictAllow
+	sensitive := false
 	for _, ic := range r.chain {
 		found, err := invoke(ic)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("agent: interceptor %s %s: %w", ic.Name(), scope.hook, err))
 		}
+		n, _ := ic.(namedInterceptor)
 		for _, f := range found {
 			f = normalizeFinding(f, ic.Name(), step, scope)
 			all = append(all, f)
 			if f.Verdict > verdict {
 				verdict = f.Verdict
 			}
+			if f.Verdict >= VerdictBlock && n.sensitive != nil {
+				sensitive = true
+			}
 		}
+	}
+	// #424 D3: protected text was present, so any interceptor's text may echo
+	// it, possibly in an encoding the predicate cannot see. Drop it all before
+	// anything accumulates or publishes it, rather than filtering it
+	// ([consult 424-F3]).
+	toolCallID := scope.toolCallID
+	if sensitive {
+		for i := range all {
+			all[i].Detail, all[i].ToolCallID = "", ""
+		}
+		toolCallID = ""
 	}
 	if len(all) > 0 {
 		r.risk.Findings = append(r.risk.Findings, all...)
@@ -562,28 +641,39 @@ func (r *interceptorRun) runHook(ctx context.Context, obs Observer, step int, sc
 		if io, ok := obs.(InterceptionObserver); ok {
 			if err := io.OnInterception(ctx, InterceptionEvent{
 				Step: step, Hook: scope.hook, Verdict: verdict,
-				Findings: append([]Finding(nil), all...), Risk: r.cumulative(), ToolCallID: scope.toolCallID,
+				Findings: append([]Finding(nil), all...), Risk: r.cumulative(), ToolCallID: toolCallID,
 			}); err != nil {
 				errs = append(errs, err)
 			}
 		}
 	}
-	return all, verdict, errors.Join(errs...)
+	// Only replace errors that exist: a nil error keeps a tool-call block
+	// recoverable, and inspectToolCall treats any error as terminal.
+	if sensitive && len(errs) > 0 {
+		joined := errors.Join(errs...)
+		errs = []error{ErrDiagnosticsSuppressed}
+		for _, target := range []error{context.Canceled, context.DeadlineExceeded} {
+			if errors.Is(joined, target) {
+				errs = append(errs, target)
+			}
+		}
+	}
+	return all, verdict, sensitive, errors.Join(errs...)
 }
 
 // terminalAt converts a hook outcome into the error to propagate. A verdict
 // at or above min produces a BlockedError; when interceptors or the observer
 // also errored, the BlockedError is joined with those errors so errors.As
 // still finds the structured block (spec D1). Below min, only the errors
-// propagate (nil when there are none).
-func terminalAt(min Verdict, hook Hook, step int, findings []Finding, verdict Verdict, err error) error {
+// propagate (nil when there are none). sensitive is runHook's mark.
+func terminalAt(min Verdict, hook Hook, step int, findings []Finding, verdict Verdict, sensitive bool, err error) error {
 	// Nothing to block below Block. Between Block and min the block is
 	// recoverable, so it becomes a BlockedError only when an error forces the
 	// run to end anyway; otherwise the caller handles it as a synthetic result.
 	if verdict < VerdictBlock || (verdict < min && err == nil) {
 		return err
 	}
-	blocked := &BlockedError{Hook: hook, Step: step, Findings: findings}
+	blocked := &BlockedError{Hook: hook, Step: step, Findings: findings, sensitive: sensitive}
 	if err != nil {
 		return errors.Join(blocked, err)
 	}
@@ -722,9 +812,9 @@ func (r *interceptorRun) inspectInitial(ctx context.Context, obs Observer, state
 		in.Messages = append(in.Messages, InspectedMessage{StateIndex: i, Role: m.Role, Origin: originOfRole(m.Role), Content: m.Content})
 	}
 	scope := hookScope{hook: HookInput, messages: in.Messages, hasSystem: in.System != "", hasSummary: in.Summary != ""}
-	findings, verdict, err := r.runHook(ctx, obs, 0, scope,
+	findings, verdict, sensitive, err := r.runHook(ctx, obs, 0, scope,
 		func(ic Interceptor) ([]Finding, error) { return ic.InspectInput(ctx, cloneInput(in)) })
-	return terminalAt(VerdictBlock, HookInput, 0, findings, verdict, err)
+	return terminalAt(VerdictBlock, HookInput, 0, findings, verdict, sensitive, err)
 }
 
 // finishWithError finalizes a Result for an error return after State exists.
@@ -754,12 +844,12 @@ func (r *interceptorRun) inspectOutput(ctx context.Context, obs Observer, step i
 	for _, c := range resp.ToolCalls {
 		ids = append(ids, c.ID)
 	}
-	findings, verdict, err := r.runHook(ctx, obs, step, hookScope{hook: HookOutput, callIDs: ids},
+	findings, verdict, sensitive, err := r.runHook(ctx, obs, step, hookScope{hook: HookOutput, callIDs: ids},
 		func(ic Interceptor) ([]Finding, error) {
 			// Each interceptor gets its own copy of the tool calls.
 			return ic.InspectOutput(ctx, OutputInspection{Step: step, Content: resp.Content, Thinking: resp.Thinking, ToolCalls: cloneToolCalls(resp.ToolCalls)})
 		})
-	return terminalAt(VerdictBlock, HookOutput, step, findings, verdict, err)
+	return terminalAt(VerdictBlock, HookOutput, step, findings, verdict, sensitive, err)
 }
 
 // blockedCallContent is the exact model-visible observation for a blocked call.
@@ -782,14 +872,14 @@ func (r *interceptorRun) inspectToolCall(ctx context.Context, obs Observer, step
 	if len(r.chain) == 0 {
 		return nil, nil
 	}
-	findings, verdict, err := r.runHook(ctx, obs, step, hookScope{hook: HookToolCall, toolCallID: call.ID},
+	findings, verdict, sensitive, err := r.runHook(ctx, obs, step, hookScope{hook: HookToolCall, toolCallID: call.ID},
 		func(ic Interceptor) ([]Finding, error) {
 			// Each interceptor gets its own copy of the canonical call and effect.
 			return ic.InspectToolCall(ctx, ToolCallInspection{Step: step, Call: cloneToolCall(call), Effect: cloneEffect(effect)})
 		})
 	r.current = append([]Finding(nil), findings...)
 	if err != nil || verdict == VerdictAbort {
-		return nil, terminalAt(VerdictAbort, HookToolCall, step, findings, verdict, err)
+		return nil, terminalAt(VerdictAbort, HookToolCall, step, findings, verdict, sensitive, err)
 	}
 	if verdict == VerdictBlock {
 		return &ToolResult{IsError: true, Content: blockedCallContent(cause(findings))}, nil
@@ -810,29 +900,30 @@ func tagTrailer(f Finding) string {
 
 // inspectObservation is the shared ingress check for one tool-authored text
 // (a tool result or verifier output). It returns the tag findings to apply,
-// the blocking finding when the verdict is Block, and the error to propagate
-// (a BlockedError on Abort, joined with any hook errors).
-func (r *interceptorRun) inspectObservation(ctx context.Context, obs Observer, step int, msg InspectedMessage) (tags []Finding, block *Finding, err error) {
+// the blocking finding and runHook's sensitive mark when the verdict is
+// Block, and the error to propagate (a BlockedError on Abort, joined with any
+// hook errors).
+func (r *interceptorRun) inspectObservation(ctx context.Context, obs Observer, step int, msg InspectedMessage) (tags []Finding, block *Finding, sensitive bool, err error) {
 	if len(r.chain) == 0 {
-		return nil, nil, nil
+		return nil, nil, false, nil
 	}
 	in := InputInspection{Step: step, Messages: []InspectedMessage{msg}}
 	scope := hookScope{hook: HookInput, messages: in.Messages, toolCallID: msg.ToolCallID}
-	findings, verdict, err := r.runHook(ctx, obs, step, scope,
+	findings, verdict, sensitive, err := r.runHook(ctx, obs, step, scope,
 		func(ic Interceptor) ([]Finding, error) { return ic.InspectInput(ctx, cloneInput(in)) })
 	if err != nil || verdict == VerdictAbort {
-		return nil, nil, terminalAt(VerdictAbort, HookInput, step, findings, verdict, err)
+		return nil, nil, false, terminalAt(VerdictAbort, HookInput, step, findings, verdict, sensitive, err)
 	}
 	if verdict == VerdictBlock {
 		b := cause(findings)
-		return nil, &b, nil
+		return nil, &b, sensitive, nil
 	}
 	for _, f := range findings {
 		if f.Verdict == VerdictTag {
 			tags = append(tags, f)
 		}
 	}
-	return tags, nil, nil
+	return tags, nil, false, nil
 }
 
 // alternativesOf lists a set's alternatives for inspection.

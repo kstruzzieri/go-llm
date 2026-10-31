@@ -268,6 +268,7 @@ func TestAllowToolSetAuthorizesNothingWhenEmpty(t *testing.T) {
 		t.Error("an empty list must report empty()")
 	}
 	for _, name := range append(append([]string{}, allowToolNames...), "read_file", "mcp__x__y") {
+		// containment: GRANT-HEADLESS-NOAUTH
 		if set.authorized(name) {
 			t.Errorf("an empty set must authorize nothing, but authorized %q", name)
 		}
@@ -326,6 +327,7 @@ func TestFilterAllowedToolsMountsOnlyNamedPlusUngatedCompanions(t *testing.T) {
 				t.Fatalf("newAllowToolSet: %v", err)
 			}
 			got := toolNames(filterAllowedTools(built, set))
+			// containment: GRANT-HEADLESS-NOAUTH
 			if len(got) == 0 && len(tc.want) == 0 {
 				return
 			}

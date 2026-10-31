@@ -1,10 +1,25 @@
 // Command golem is a terminal coding agent. It wires the shared
 // provider/router bootstrap and file tools into an agent.Orchestrator and
-// drives it from a line-based REPL. The workspace is read-only by default:
+// drives it from a line-based REPL. It starts in the read-only Inspect
+// profile (#387): the four workspace read tools and nothing else, with no
+// retrieval or auto-index, embedding route, model memory tools, writes,
+// commands or extension tools (human /remember still works). -profile
+// inspect|trusted selects the profile; -profile preview is reserved and
+// rejected until the staged-workspace runtime ships (#388/#389). When -profile
+// is omitted, a surviving legacy opt-in (-allow-write, -allow-exec, -scratch,
+// -allow-tool, -rag-db, -agent-memory, -delegate, -dispatch, -mcp-stdio,
+// -mcp-http, -progressive, -grounding, or -sandbox with any value) selects
+// Trusted and a "profile: trusted (selected by <flag>)" notice goes to stderr;
+// an explicit -profile inspect with one of them is a usage error. In Trusted,
 // -allow-write and -allow-exec opt into approval-gated mutation and command
-// execution, and retrieve can be enabled for a prebuilt RAG index. Session,
-// memory, and agent-memory features write per-user databases outside the
-// workspace. For thinking-capable models, -think off|on|low|medium|high
+// execution (commands run unsandboxed on the host unless -sandbox selects a
+// native backend; see below), and retrieve can be enabled for a prebuilt RAG
+// index. The REPL's /allow-write and /allow-exec work only in Trusted and are
+// refused in Inspect with restart guidance. Startup prints a "permissions:"
+// line to stderr naming the profile, mounted tools, command runtime (with a
+// native backend's network policy and limits), scratch and verification
+// state. Session, memory, and agent-memory features write per-user databases
+// outside the workspace. For thinking-capable models, -think off|on|low|medium|high
 // drives reasoning behavior and captured thinking renders dim above the
 // answer (a no-op with a notice when the model does not support thinking).
 // In the REPL, /think off|on|low|medium|high applies the same support gate to
@@ -13,6 +28,26 @@
 // are preserved. The setting survives /new, /clear, and /resume within this
 // process, but is not stored across restarts. The -goal planner still disables
 // extended thinking.
+//
+// -sandbox host|seatbelt|bwrap picks where a Trusted session's commands,
+// scratch execution and post-write verification run (#576). host is the
+// default and is unsandboxed: commands run with the host user's filesystem
+// and network authority. seatbelt (macOS) and bwrap (Linux) are probed against
+// the canonical root at startup, before any config, store, session, MCP
+// connection or provider is touched; an unavailable backend is a startup
+// error, and Golem never falls back to host. -sandbox-network denied|allowed
+// (default denied) requires a native -sandbox and covers commands and
+// verification alike; allowed is permission, not a connectivity guarantee.
+// A native session mounts no retrieval, auto-index or model memory tools and
+// rejects -rag-db, -agent-memory (with a session), -delegate, -dispatch,
+// -mcp-stdio, -mcp-http, -progressive and -grounding; AgentFlow modes reject
+// both sandbox flags. Seatbelt sets no memory or CPU quota and may deny
+// loader, SDK or cache access outside its reviewed roots: a failed foreground
+// command or verification carries a note saying so, and the recovery is a new
+// host Trusted session or a toolchain and caches inside the workspace, never a
+// broader policy. Bubblewrap's network denial is ip-denied: pathname Unix
+// sockets inside the shared workspace stay reachable. -sandbox does not
+// confine /consult, git-context helpers, MCP servers or the /edit editor.
 //
 // The openai-compat backend URL can be overridden with -base-url (or
 // GO_LLM_BASE_URL); otherwise, when the configured loopback URL does not
@@ -53,7 +88,10 @@
 // row; later blocks retain undo records for earlier allowed mutations. A
 // caller-owned blocked agent.Result may still contain its original goal.
 // -interceptors remains off by default; the #439 guards and #555 refusal
-// reporting do not depend on it.
+// reporting do not depend on it. #517 measured the detectors and Secrets and
+// kept both opt-in (no detector benefit evidence before #700, over-budget
+// block rates on benign content, a fixture write ending the run, and #518 not
+// landed); docs/security/interceptor-defaults-decision.md records why.
 //
 // With -interceptors, Golem also plants an unpredictable canary in its system
 // instructions for each live conversation activation. The canary survives
@@ -237,17 +275,28 @@
 // several steps pays for it several times: prefer a fast check, a build over a
 // full test suite. Only the first few kilobytes reach the model, stderr first.
 //
-// Because a repository-supplied argv is still arbitrary host execution, the
+// Because a repository-supplied argv is still arbitrary execution, the
 // resolved command and cwd are approved once per session at first use, under
-// their own grant namespace: a verification grant can never authorize
-// run_command or start_command, or the reverse. The command is resolved and
-// frozen when writes are enabled, so editing .golem.json after that point
-// changes nothing until the next run; a malformed file warns and disables
-// verification rather than failing the session.
+// their own verify:v2 grant namespace, bound to the session's full sandbox
+// policy and the prepared command (canonical root, argv, resolved executable,
+// cwd, environment values, timeout): a verification grant can never authorize
+// run_command or start_command, or the reverse, and a changed runtime or
+// network setting prompts again. Grants are session-local, so verify:v1
+// grants from earlier builds do not carry over and nothing migrates. The key
+// binds no script bytes: an approved verifier runs whatever the workspace
+// holds. The command is resolved and frozen when writes are enabled, so
+// editing .golem.json after that point changes nothing until the next run; a
+// malformed file warns and disables verification rather than failing the
+// session.
 //
-// Verification runs on the host with no isolation, so a verifier that writes
-// (a formatter, a codegen step) produces changes the checkpoint journal did
-// not capture and /undo will not restore. Prefer a read-only check.
+// Verification runs under the session's -sandbox policy, also in a
+// write-only session, and always checks the canonical workspace: its approval
+// preview and result carry a "target:" line saying unpromoted scratch
+// artifacts are not checked. On the host it has no isolation; under seatbelt
+// or bwrap it can still write inside the workspace and its private temp.
+// Either way a verifier that writes (a formatter, a codegen step) produces
+// changes the checkpoint journal did not capture and /undo will not restore.
+// Prefer a read-only check.
 //
 // Durable checkpoint writes also produce signed MutationReceipts: interactive
 // write_file/edit_file, headless -allow-tool, late /allow-write, startup-enabled

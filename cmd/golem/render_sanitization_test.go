@@ -24,6 +24,7 @@ func TestRendererTerminalTokenQuotesOSC52WithoutColor(t *testing.T) {
 	if err := r.finish(); err != nil {
 		t.Fatal(err)
 	}
+	// containment: TERM-STREAM
 	if got, want := out.String(), `safe\x1b]52;c;Y2xpcA==\a text`; got != want {
 		t.Fatalf("terminal output = %q, want %q", got, want)
 	}
@@ -47,6 +48,7 @@ func TestRendererSynchronizedTerminalQuotesModelOutput(t *testing.T) {
 	if err := r.finish(); err != nil {
 		t.Fatal(err)
 	}
+	// containment: TERM-STREAM
 	if got, want := out.String(), `worker\x1b]52;c;YQ==\a`; got != want {
 		t.Fatalf("wrapped terminal output = %q, want %q", got, want)
 	}
@@ -81,6 +83,7 @@ func TestRendererTerminalToolResultQuotesPreviewControls(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// containment: TERM-STREAM
 	if got, want := out.String(), "< saved \\x1b]52;c;YQ==\\a\n"; got != want {
 		t.Fatalf("terminal tool result = %q, want %q", got, want)
 	}

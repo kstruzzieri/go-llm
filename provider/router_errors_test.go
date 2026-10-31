@@ -107,6 +107,16 @@ func TestIsInfrastructureError(t *testing.T) {
 			err:  &net.DNSError{Err: "no such host", Name: "example.com"},
 			want: true,
 		},
+		{
+			name: "ErrContentDenied",
+			err:  ErrContentDenied,
+			want: false,
+		},
+		{
+			name: "wrapped ErrContentDenied",
+			err:  fmt.Errorf("openaicompat: /v1/chat/completions: %w", ErrContentDenied),
+			want: false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -129,6 +139,7 @@ func TestSentinelErrors(t *testing.T) {
 		{"ErrBudgetAdaptationRequired", ErrBudgetAdaptationRequired},
 		{"ErrBudgetExceeded", ErrBudgetExceeded},
 		{"ErrRouterClosed", ErrRouterClosed},
+		{"ErrContentDenied", ErrContentDenied},
 	}
 
 	// Each sentinel should match itself.
@@ -162,6 +173,13 @@ func TestSentinelErrors(t *testing.T) {
 				t.Errorf("errors.Is(wrapped, %v) = false, want true", s.err)
 			}
 		})
+	}
+}
+
+func TestErrContentDeniedText(t *testing.T) {
+	const want = "provider: request content denied: configured credential"
+	if got := ErrContentDenied.Error(); got != want {
+		t.Errorf("ErrContentDenied = %q, want %q", got, want)
 	}
 }
 

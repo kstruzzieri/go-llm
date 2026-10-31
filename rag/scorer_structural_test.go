@@ -3,6 +3,9 @@ package rag
 import (
 	"context"
 	"math"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -18,9 +21,9 @@ func TestStructuralScorerWorkspaceRootNormalization(t *testing.T) {
 
 	// Editor provides absolute paths.
 	qCtx := QueryContext{
-		CurrentFile:   "/home/user/project/rag/store.go",
-		WorkspaceRoot: "/home/user/project",
-		OpenFiles:     []string{"/home/user/project/ollama/client.go"},
+		CurrentFile:   absTestPath("/home/user/project/rag/store.go"),
+		WorkspaceRoot: absTestPath("/home/user/project"),
+		OpenFiles:     []string{absTestPath("/home/user/project/ollama/client.go")},
 	}
 
 	scores, err := scorer.ScoreBatch(context.Background(), chunks, "", nil, qCtx)
@@ -29,7 +32,7 @@ func TestStructuralScorerWorkspaceRootNormalization(t *testing.T) {
 	}
 
 	// Same file: relative "rag/store.go" should match absolute
-	// "/home/user/project/rag/store.go" through WorkspaceRoot.
+	// absTestPath("/home/user/project/rag/store.go") through WorkspaceRoot.
 	if math.Abs(scores[0]-1.0) > 0.001 {
 		t.Errorf("same file (normalized): scores[0] = %f, want 1.0", scores[0])
 	}
@@ -48,13 +51,13 @@ func TestStructuralScorerAbsoluteChunksRelativeEditor(t *testing.T) {
 
 	// Chunks indexed with absolute paths.
 	chunks := []Chunk{
-		{ID: "c1", Source: "/home/user/project/rag/store.go"},
+		{ID: "c1", Source: absTestPath("/home/user/project/rag/store.go")},
 	}
 
 	// Editor provides relative path, workspace root makes it absolute.
 	qCtx := QueryContext{
 		CurrentFile:   "rag/store.go",
-		WorkspaceRoot: "/home/user/project",
+		WorkspaceRoot: absTestPath("/home/user/project"),
 	}
 
 	scores, err := scorer.ScoreBatch(context.Background(), chunks, "", nil, qCtx)
@@ -110,10 +113,21 @@ func TestNormalizePath(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := normalizePath(tt.path, tt.workspaceRoot)
-			if got != tt.want {
-				t.Errorf("normalizePath(%q, %q) = %q, want %q", tt.path, tt.workspaceRoot, got, tt.want)
+			path, root, want := absTestPath(tt.path), absTestPath(tt.workspaceRoot), filepath.FromSlash(absTestPath(tt.want))
+			if got := normalizePath(path, root); got != want {
+				t.Errorf("normalizePath(%q, %q) = %q, want %q", path, root, got, want)
 			}
 		})
 	}
+}
+
+// absTestPath makes a slash-rooted test path ("/home/user/project") absolute on
+// the host OS. On Unix it returns p unchanged. On Windows, where a leading "/"
+// is rooted but not absolute, it prefixes the temp dir's volume and uses native
+// separators. Relative paths are returned unchanged.
+func absTestPath(p string) string {
+	if !strings.HasPrefix(p, "/") {
+		return p
+	}
+	return filepath.VolumeName(os.TempDir()) + filepath.FromSlash(p)
 }

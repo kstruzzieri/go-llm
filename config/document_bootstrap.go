@@ -6,17 +6,18 @@ import "fmt"
 // constructor owns the provider linkage. No Fallbacks — a single-model
 // document has no valid fallback target.
 type ModelSpec struct {
-	Name          string
-	Description   string
-	Type          string // dense | moe | embedding
-	Parameters    string
-	ContextWindow int
-	Dimensions    int
-	Capabilities  []string
-	Options       *SamplingOptions
-	Slots         int
-	ThinkMode     string
-	ThinkTags     *ThinkTagsConfig
+	Name              string
+	Description       string
+	Type              string // dense | moe | embedding
+	Parameters        string
+	ContextWindow     int
+	QualityCtxCeiling int
+	Dimensions        int
+	Capabilities      []string
+	Options           *SamplingOptions
+	Slots             int
+	ThinkMode         string
+	ThinkTags         *ThinkTagsConfig
 }
 
 // BootstrapSpec describes an initially valid single-provider, single-model
@@ -59,7 +60,7 @@ func NewDocument(spec BootstrapSpec, opts DocumentOptions) (*Document, error) {
 			spec.Role: {
 				Name: m.Name, Provider: spec.ProviderName,
 				Description: m.Description, Type: m.Type, Parameters: m.Parameters,
-				ContextWindow: m.ContextWindow, Dimensions: m.Dimensions,
+				ContextWindow: m.ContextWindow, QualityCtxCeiling: m.QualityCtxCeiling, Dimensions: m.Dimensions,
 				Capabilities: m.Capabilities, Options: m.Options, Slots: m.Slots,
 				ThinkMode: m.ThinkMode, ThinkTags: m.ThinkTags,
 			},

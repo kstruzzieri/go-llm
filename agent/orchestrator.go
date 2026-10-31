@@ -2,17 +2,20 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"hash/fnv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/kstruzzieri/go-llm/internal/promptfence"
+	"github.com/kstruzzieri/go-llm/internal/secretscan"
 	"github.com/kstruzzieri/go-llm/provider"
 )
 
-// Orchestrator runs the plan->act->observe loop.
+// Orchestrator runs the plan->act->observe loop. It must not be copied after use.
 type Orchestrator struct {
 	model     ModelCaller
 	ctxMgr    ContextManager
@@ -20,7 +23,8 @@ type Orchestrator struct {
 	toolLimit ToolInvocationLimit
 	// verifier is the optional post-write verification hook (#347). nil is the
 	// default and leaves every batch byte-for-byte unchanged.
-	verifier Verifier
+	verifierMu sync.RWMutex
+	verifier   Verifier
 	// interceptors is the deterministic middleware chain (#436), in
 	// registration order. Empty leaves every hook a no-op.
 	interceptors []Interceptor
@@ -65,6 +69,15 @@ func New(model ModelCaller, ctxMgr ContextManager, opts ...Option) *Orchestrator
 		opt(o)
 	}
 	return o
+}
+
+// Verifier returns the currently installed hook, or nil. It is safe to call
+// concurrently with WithVerifier and Run. To validate and run the same hook,
+// pass this captured value to RunWithVerifier.
+func (o *Orchestrator) Verifier() Verifier {
+	o.verifierMu.RLock()
+	defer o.verifierMu.RUnlock()
+	return o.verifier
 }
 
 func initState(req Request) State {
@@ -121,16 +134,24 @@ func buildChatRequest(st State, specs []provider.Tool, outputReserve int, opts p
 // errors. Nested Runs using the supplied context inherit capacities and finite
 // token allowances. Returning seals that scope and cancels its context; callers
 // must join nested work before returning to receive complete descendant usage.
-func (o *Orchestrator) Run(ctx context.Context, req Request, obs Observer) (res Result, err error) {
+func (o *Orchestrator) Run(ctx context.Context, req Request, obs Observer) (Result, error) {
+	return o.RunWithVerifier(ctx, req, obs, o.Verifier())
+}
+
+// RunWithVerifier runs with exactly the supplied verification hook for every
+// batch, including nil to disable verification. It never reads the installed
+// hook, allowing a caller to validate a captured value before running it.
+// The hook's internal state remains its own responsibility.
+func (o *Orchestrator) RunWithVerifier(ctx context.Context, req Request, obs Observer, verifier Verifier) (res Result, err error) {
 	ctx, req, budgetRun := newRunBudget(ctx, req)
 	defer func() { res.DescendantUsage = budgetRun.close() }()
 	ic := &interceptorRun{}
-	res, err = o.run(ctx, req, obs, ic, budgetRun)
+	res, err = o.run(ctx, req, obs, ic, budgetRun, verifier)
 	res.Risk = ic.result()
 	return res, err
 }
 
-func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *interceptorRun, budgetRun *runBudget) (Result, error) {
+func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *interceptorRun, budgetRun *runBudget, verifier Verifier) (Result, error) {
 	obs = normalizeObserver(obs)
 	if req.Goal == "" {
 		return Result{}, fmt.Errorf("agent: empty goal")
@@ -300,11 +321,19 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 			// text; any tool-call fragments may be incomplete. #436: the partial
 			// content and thinking are inspected before they are appended or
 			// returned; a block is joined with the provider error.
+			// #424 D4: a refused request was built from the copied messages, so
+			// their copy keeps no field that carries protected text, on either
+			// return below.
+			denied := errors.Is(err, provider.ErrContentDenied) && ic.guardsText()
 			partial := modelResult.Response
 			if strings.TrimSpace(partial.Content) != "" || strings.TrimSpace(partial.Thinking) != "" {
 				partial.ToolCalls = nil
 				if ierr := ic.inspectOutput(ctx, obs, step, partial); ierr != nil {
-					return finishWithError(&res, state, historyLen, errors.Join(ierr, err))
+					out, ferr := finishWithError(&res, state, historyLen, errors.Join(ierr, err))
+					if denied {
+						suppressSensitive(out.Messages, ic.sensitiveText)
+					}
+					return out, ferr
 				}
 			}
 			if strings.TrimSpace(partial.Content) != "" {
@@ -314,6 +343,9 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 				})
 			}
 			res.Messages = resultMessages(state, historyLen)
+			if denied {
+				suppressSensitive(res.Messages, ic.sensitiveText)
+			}
 			return res, err
 		}
 		resp := modelResult.Response
@@ -324,9 +356,18 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 		// reaches OnStep, and dispatches nothing. An interceptor error without
 		// a block takes the same path: the response was never cleared.
 		if oerr := ic.inspectOutput(ctx, obs, step, resp); oerr != nil {
+			// #424 D3: the route is copied metadata, so it is kept only when no
+			// string in it, Reason and attempts included, carries protected
+			// text. An outcome that cannot be encoded cannot be checked.
+			route := modelResult.RouteOutcome
+			if route != nil && ic.guardsText() {
+				if b, merr := json.Marshal(route); merr != nil || secretscan.MatchJSON(b, ic.sensitiveText) {
+					route = nil
+				}
+			}
 			res.Steps = append(res.Steps, StepRecord{
 				Index: step, Response: provider.ChatResponse{Usage: resp.Usage, Done: resp.Done},
-				RouteOutcome: modelResult.RouteOutcome, Pressure: pressure, Latency: modelLatency,
+				RouteOutcome: route, Pressure: pressure, Latency: modelLatency,
 			})
 			res.Events = append(res.Events, EventRecord{Step: step, Kind: "step"})
 			return finishWithError(&res, state, historyLen, oerr)
@@ -373,7 +414,7 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 		}
 
 		state.Messages = append(state.Messages, assistantMessage(resp))
-		if err := o.runToolCalls(ctx, &res, &state, reg, resp.ToolCalls, req.Approver, obs, step, gov, ic); err != nil {
+		if err := o.runToolCalls(ctx, &res, &state, reg, resp.ToolCalls, req.Approver, obs, step, gov, ic, verifier); err != nil {
 			return finishWithError(&res, state, historyLen, err)
 		}
 		if res.StopReason != Completed {
@@ -407,7 +448,7 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 // makes the origin-sensitive detectors judge the advice the way they judge a
 // tool result.
 func (o *Orchestrator) prepareAdvisory(ctx context.Context, ic *interceptorRun, obs Observer, a Advisory, index int) (Advisory, error) {
-	tags, block, err := ic.inspectObservation(ctx, normalizeObserver(obs), 0, InspectedMessage{
+	tags, block, sensitive, err := ic.inspectObservation(ctx, normalizeObserver(obs), 0, InspectedMessage{
 		StateIndex: index, Role: "tool", Origin: a.Origin,
 		ToolName: "consult/" + a.Source, Content: a.Content,
 	})
@@ -420,7 +461,7 @@ func (o *Orchestrator) prepareAdvisory(ctx context.Context, ic *interceptorRun, 
 		// other interceptor refusal in this package carries, so the refusing
 		// rule is nameable without re-running the chain.
 		return Advisory{}, errors.Join(ErrAdvisoryBlocked,
-			&BlockedError{Hook: HookInput, Step: 0, Findings: []Finding{*block}})
+			&BlockedError{Hook: HookInput, Step: 0, Findings: []Finding{*block}, sensitive: sensitive})
 	}
 	// distinctTrailers leads with a newline so it can be appended to a tool
 	// result; here it is a block of whole lines, so the lead is dropped.
@@ -483,6 +524,40 @@ func resultMessages(st State, historyLen int) []provider.ChatMessage {
 		out = append(out, cloneChatMessage(m.ChatMessage))
 	}
 	return out
+}
+
+// suppressedField replaces a copied field that carries protected text
+// (#424); a tool call's arguments become this text as a JSON string.
+const suppressedField = "[...]"
+
+// suppressSensitive replaces wholesale every field of msgs that match
+// accepts: content, tool name and call ID, and each tool call's ID, type,
+// name and arguments. Arguments are checked as the outbound guard checks
+// them (secretscan.MatchToolArguments): raw, decoded, and leniently unescaped
+// when malformed. msgs must be an owned copy such as resultMessages returns;
+// nothing is rewritten in place, so state and the caller's slices keep their
+// values.
+func suppressSensitive(msgs []provider.ChatMessage, match func(string) bool) {
+	suppress := func(s *string) {
+		if match(*s) {
+			*s = suppressedField
+		}
+	}
+	for i := range msgs {
+		m := &msgs[i]
+		suppress(&m.Content)
+		suppress(&m.ToolName)
+		suppress(&m.ToolCallID)
+		for j := range m.ToolCalls {
+			c := &m.ToolCalls[j]
+			suppress(&c.ID)
+			suppress(&c.Type)
+			suppress(&c.Function.Name)
+			if secretscan.MatchToolArguments(c.Function.Arguments, match) {
+				c.Function.Arguments = json.RawMessage(`"` + suppressedField + `"`)
+			}
+		}
+	}
 }
 
 func toolSchemaString(specs []provider.Tool) string {

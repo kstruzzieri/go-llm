@@ -23,7 +23,7 @@ import (
 // capability are separate concepts.
 func (o *Orchestrator) runToolCalls(ctx context.Context, res *Result, state *State,
 	reg *toolRegistry, calls []provider.ToolCall, approver Approver, obs Observer, step int,
-	gov *restraintGovernor, ic *interceptorRun) error {
+	gov *restraintGovernor, ic *interceptorRun, verifier Verifier) error {
 
 	b := newBatch()
 	assistantIndex := len(state.Messages) - 1
@@ -65,7 +65,7 @@ func (o *Orchestrator) runToolCalls(ctx context.Context, res *Result, state *Sta
 		// gets no further turn, so the observation would never be read.
 		return nil
 	}
-	return o.verifyBatch(ctx, state, approver, &b, obs, step, ic)
+	return verifyBatch(ctx, state, approver, &b, obs, step, ic, verifier)
 }
 
 func (o *Orchestrator) runToolCallsSerial(ctx context.Context, res *Result, state *State,
@@ -138,7 +138,7 @@ func (o *Orchestrator) recordResult(ctx context.Context, res *Result, state *Sta
 		if o.ctxMgr.Mixed {
 			msg.Alternatives = alternativesOf(out.Context)
 		}
-		tags, block, err := ic.inspectObservation(ctx, obs, step, msg)
+		tags, block, _, err := ic.inspectObservation(ctx, obs, step, msg)
 		if err != nil {
 			var blocked *BlockedError
 			if errors.As(err, &blocked) {
@@ -379,11 +379,15 @@ func (o *Orchestrator) dispatch(ctx context.Context, reg *toolRegistry, call pro
 // A RiskApprover receives the run's cumulative RiskReport snapshot (#436); a
 // KeyedApprover receives the plan's structural ApprovalKey and returns the full
 // decision; a plain Approver keeps its existing signature, its bare bool
-// lifted into a decision with no grant provenance.
+// lifted into a decision with no grant provenance. The preview is display
+// data: every tier receives SanitizePreview(preview) (#387), so an embedded
+// approver sees the same inert text as the CLI. The key, the call and the
+// planned arguments pass through byte-identical.
 func approve(ctx context.Context, approver Approver, call provider.ToolCall, preview, approvalKey string, risk RiskReport) (ApprovalDecision, error) {
 	if approver == nil {
 		return ApprovalDecision{}, nil
 	}
+	preview = SanitizePreview(preview)
 	if ra, ok := approver.(RiskApprover); ok {
 		return ra.ApproveWithRisk(ctx, call, preview, approvalKey, risk)
 	}

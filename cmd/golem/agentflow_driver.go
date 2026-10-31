@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/kstruzzieri/go-llm/agent"
 	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
@@ -39,10 +40,12 @@ type afClient interface {
 	ClaimStep(context.Context, string) (string, error)
 	RecordReview(context.Context, string) (agentflow.ReviewRun, error)
 	AmendStep(context.Context, string, []string) (string, error)
+	AmendCompletedStep(context.Context, string, string) (string, error)
 	RunGate(context.Context, string, string, string, []string) error
 	FinishStep(context.Context, string, string) error
 	CompleteStep(context.Context, string, string) error
 	BlockStep(context.Context, string, string, string) error
+	VerifyProof(context.Context) error
 	FinishRun(context.Context) (string, error)
 	RecordFileChange(context.Context, string, string, string) error
 	RecordEvidence(context.Context, agentflow.EvidenceEntry) error
@@ -60,6 +63,73 @@ type runStepFunc func(ctx context.Context, step agentflow.Step, attempt, goal st
 type runStoppedError struct{ reason agent.StopReason }
 
 func (e *runStoppedError) Error() string { return "agent run stopped: " + e.reason.String() }
+
+// unreceiptedEditError is a run the journal aborted because AgentFlow did not
+// record an edit the model made. It wins over the run's own error.
+type unreceiptedEditError struct{ err error }
+
+func (e *unreceiptedEditError) Error() string {
+	return "unreceipted edit aborted the run: " + e.err.Error()
+}
+func (e *unreceiptedEditError) Unwrap() error { return e.err }
+
+// blockStepTimeout bounds the block-step call that closes a failed attempt
+// (#642 A3). ponytail: fixed budget, no flag.
+const blockStepTimeout = 30 * time.Second
+
+// gateBlockReason is the one ledger reason for any RunGate error (#642 A2). A
+// CommandError only means the CLI exited nonzero, and a gate label can be a
+// full argv, so neither the outcome nor the label is recorded.
+const gateBlockReason = "golem: gate execution failed"
+
+// stepRunBlockReason is the fixed ledger reason for a failed step run (#642
+// A1), checked in this order. Raw error text never reaches the ledger; the
+// returned error keeps it.
+func stepRunBlockReason(err error) string {
+	var fatal *unreceiptedEditError
+	var stopped *runStoppedError
+	switch {
+	case errors.As(err, &fatal):
+		return "golem: unreceipted edit aborted the run"
+	case errors.As(err, &stopped):
+		return "golem: " + stopped.Error()
+	case errors.Is(err, context.Canceled):
+		return "golem: agent run cancelled"
+	case errors.Is(err, agent.ErrContextExhausted):
+		return "golem: agent run exhausted its context"
+	default:
+		return "golem: agent run failed"
+	}
+}
+
+// recordBlocked closes an open attempt with reason, so recovery runs a new
+// attempt instead of settling this one on its gates (#611, #642, #652). It
+// returns nil once AgentFlow recorded the block. AgentFlow 1.1 refuses to block
+// an attempt that is already closed (an operator's break-glass fail-step, say)
+// and appends nothing (agentflow#61), so the refusal is the error. The block
+// runs on a fresh bounded context: by now the caller's context may be cancelled
+// by an interrupt, a sibling worker's failure, or the journal's fatal-receipt
+// cancel.
+func recordBlocked(ctx context.Context, af afClient, step, attempt, reason string) error {
+	bctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), blockStepTimeout)
+	defer cancel()
+	if err := af.BlockStep(bctx, step, attempt, reason); err != nil {
+		return fmt.Errorf("record blocked attempt: %w", err)
+	}
+	return nil
+}
+
+// blockAttempt closes the attempt a failure ended and returns that failure
+// with the block's outcome appended. It never returns nil. A gate that timed
+// out needs nothing more: AgentFlow 1.1 supersedes its receipt once a later
+// attempt of the step completes (agentflow#60).
+func blockAttempt(ctx context.Context, af afClient, step, attempt, reason string, cause error) error {
+	err := fmt.Errorf("step %s attempt %s: %w", step, attempt, cause)
+	if berr := recordBlocked(ctx, af, step, attempt, reason); berr != nil {
+		return fmt.Errorf("%w; %w", err, berr)
+	}
+	return fmt.Errorf("%w; attempt recorded as blocked", err)
+}
 
 // agentflowUnavailableError marks a failed version gate or capability probe.
 // A refused AgentFlow is not asked for recovery advice (#612 R10).
@@ -205,7 +275,55 @@ func (d *driver) run(ctx context.Context) (string, error) {
 			return "", err
 		}
 	}
+	return d.finishRun(ctx, nil)
+}
+
+// finishRun runs AgentFlow's finish-run once next-action reports no step or
+// attempt work. Fresh runs and resume reach finish-run only through it, so
+// neither can skip the check (#651, #688), and both refuse an exposed
+// proof_failing state (#689). Resume also guards its pre-verified proof.
+func (d *driver) finishRun(ctx context.Context, proof *resumeProofGuard) (string, error) {
+	if err := d.requireNoStepWork(ctx); err != nil {
+		return "", err
+	}
+	if proof != nil {
+		if err := proof.checkUnchanged(); err != nil {
+			return "", err
+		}
+	}
 	return d.af.FinishRun(ctx)
+}
+
+// requireNoStepWork refuses finish-run while AgentFlow still reports step or
+// attempt work (#651). next-step returns nothing both when every step is done
+// and when the remaining steps hold open attempts, and non-strict finish-run
+// does not require completed steps; only next-action's run-phase states prove
+// that every step completed and no attempt is open. It also refuses
+// proof_failing, which finish-run would overwrite (#689).
+func (d *driver) requireNoStepWork(ctx context.Context) error {
+	state, err := d.af.NextAction(ctx)
+	if err != nil {
+		return fmt.Errorf("check step work before finish-run: %w", err)
+	}
+	switch state.State {
+	case "run_unverified", "drift_failing", "proof_missing", "proof_stale", "complete":
+		return nil
+	case "proof_failing":
+		// #689: Golem's own ledger writes leave an older proof proof_stale
+		// (AgentFlow reports any hash or mismatch error as stale), so a
+		// failing proof here is malformed, from a newer AgentFlow, or failing
+		// for reasons Golem did not cause. finish-run would overwrite it.
+		return errors.New("agentflow reports a failing proof before finish-run; finish-run would replace it, so no proof was built; inspect .agent/proof-pack.json, move it out of the workspace, then run -agentflow-status to see whether -agentflow-resume can build a new proof")
+	}
+	where := fmt.Sprintf("state %q", state.State)
+	if state.StepID != nil {
+		where += fmt.Sprintf(" step %q", *state.StepID)
+	}
+	// Resume's verdict needs more than this state: the owned projection's
+	// agent identity and recovery actions (a fresh run's query is unowned) and
+	// resume's lease, mutation-safety and timeout checks. So the refusal defers
+	// it to -agentflow-status rather than predicting it.
+	return fmt.Errorf("agentflow still reports step work before finish-run: %s; no proof was built; run -agentflow-status to see whether -agentflow-resume can recover it", where)
 }
 
 func (d *driver) runSerialSteps(ctx context.Context) error {
@@ -241,21 +359,12 @@ func (d *driver) runOneStep(ctx context.Context, id string) error {
 
 func (d *driver) runAttempt(ctx context.Context, step agentflow.Step, attempt, goal string) error {
 	if err := d.runStep(ctx, step, attempt, goal); err != nil {
-		var stopped *runStoppedError
-		if !errors.As(err, &stopped) {
-			return err // includes a fatal record-file-change failure surfaced via ctx cancel
-		}
-		// #611: close the stopped attempt so recovery re-runs the step instead
-		// of settling it on its gates alone.
-		err = fmt.Errorf("step %s attempt %s: %w", step.ID, attempt, err)
-		if berr := d.af.BlockStep(ctx, step.ID, attempt, "golem: "+stopped.Error()); berr != nil {
-			return fmt.Errorf("%w; record blocked attempt: %w", err, berr)
-		}
-		return fmt.Errorf("%w; attempt recorded as blocked", err)
+		// #611, #642: every failed run closes its attempt.
+		return blockAttempt(ctx, d.af, step.ID, attempt, stepRunBlockReason(err), err)
 	}
 	if d.beforeGates != nil {
 		if err := d.beforeGates(ctx, step, attempt); err != nil {
-			return err
+			return err // #642 A4: a binding, ownership or receipt-safety refusal; no mutation
 		}
 	}
 	gates, err := agentflow.ExtractCommandGates(step)
@@ -264,10 +373,10 @@ func (d *driver) runAttempt(ctx context.Context, step agentflow.Step, attempt, g
 	}
 	for _, g := range gates {
 		if err := d.af.RunGate(ctx, step.ID, attempt, g.Label, g.Argv); err != nil {
-			return fmt.Errorf("gate %q failed: %w", g.Label, err)
+			return blockAttempt(ctx, d.af, step.ID, attempt, gateBlockReason, fmt.Errorf("gate %q failed: %w", g.Label, err))
 		}
 	}
-	return d.af.FinishStep(ctx, step.ID, attempt)
+	return d.af.FinishStep(ctx, step.ID, attempt) // #642 A4: not blocked: finish-step can fail after closing the attempt
 }
 
 type reviewAmendment struct {
@@ -482,7 +591,7 @@ func newTaskStepRunner(root string, plan *agentflow.Plan, af afClient, orch *age
 		}
 		res, runErr := orch.Run(stepCtx, req, agent.Observer(newRenderer(out, false, sess.maxSteps, sess.clock, sess.mixed)))
 		if fatal := afJournal.fatalErr(); fatal != nil {
-			return fmt.Errorf("unreceipted edit aborted the run: %w", fatal)
+			return &unreceiptedEditError{err: fatal}
 		}
 		if runErr != nil {
 			return runErr
@@ -539,6 +648,29 @@ func runAgentflowTask(ctx context.Context, stdout, stderr io.Writer, interrupts 
 	// #612 R5: refuse retained non-1.x AgentFlow state before any AgentFlow call.
 	if err := checkAgentflowStateMajor(root); err != nil {
 		return err
+	}
+	// #643: a fresh run must not relock over retained execution state; resume
+	// is the recovery path for it. The exception is a -review-manifest run with
+	// the same plan as the locked one, which is how review is ingested over
+	// existing work (resume rejects review manifests): its relock rewrites an
+	// identical plan, so the ledgers and the execution contract stay
+	// consistent. It does not hold the workflow contract fixed; that follows
+	// the run's routing flags or -workflow-handoff, as on any run.
+	reviewOfLockedPlan := f.reviewManifest != "" && lockedPlanMatches(root, planBytes)
+	if !f.agentflowResume && !reviewOfLockedPlan {
+		if err := refuseAgentflowExecutionHistory(root, "refusing a fresh -plan run"); err != nil {
+			if f.reviewManifest != "" {
+				return fmt.Errorf("%w; a -review-manifest round over this history needs the same plan as .agent/plan.lock.json", err)
+			}
+			return err
+		}
+	}
+	if !f.agentflowResume && reviewOfLockedPlan {
+		// #642 A9: the same-plan review exception above skips the history
+		// guard, so it must not mutate a ledger that can never verify.
+		if err := refuseUnrecoverableTimeout(root); err != nil {
+			return fmt.Errorf("refusing a -review-manifest round: %w", err)
+		}
 	}
 	evidence, err := readEvidenceSidecar(f.evidencePath)
 	if err != nil {

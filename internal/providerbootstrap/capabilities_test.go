@@ -324,3 +324,62 @@ func TestBuildThinkOverridesSameKeyCompatibility(t *testing.T) {
 		})
 	}
 }
+
+func TestBuildQualityCtxCeilingOverrides(t *testing.T) {
+	cfg := &config.Config{Models: map[string]config.ModelConfig{
+		"agent": {Provider: "lc", Name: "qwen", QualityCtxCeiling: 32_768},
+		"chat":  {Provider: "lc", Name: "qwen", QualityCtxCeiling: 32_768},
+		"other": {Provider: "lc", Name: "plain"},
+	}}
+	got, err := buildQualityCtxCeilingOverrides(cfg)
+	if err != nil {
+		t.Fatalf("buildQualityCtxCeilingOverrides: %v", err)
+	}
+	want := map[provider.ModelKey]int{{Provider: "lc", Model: "qwen"}: 32_768}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	cfg.Models["chat"] = config.ModelConfig{Provider: "lc", Name: "qwen", QualityCtxCeiling: 24_576}
+	if _, err := buildQualityCtxCeilingOverrides(cfg); err == nil || !strings.Contains(err.Error(), "conflicting quality_ctx_ceiling") {
+		t.Fatalf("err = %v, want conflicting quality_ctx_ceiling", err)
+	}
+}
+
+func TestBuildQualityCtxCeilingOverridesImplicitOllama(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name     string
+		ceiling  int
+		explicit bool
+		errText  string
+	}{
+		{name: "implicit role", ceiling: 32_768},
+		{name: "matching roles", ceiling: 32_768, explicit: true},
+		{name: "conflicting roles", ceiling: 24_576, explicit: true, errText: "conflicting quality_ctx_ceiling"},
+		{name: "negative ceiling", ceiling: -1, errText: `model "agent" quality_ctx_ceiling must be positive`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := &config.Config{Models: map[string]config.ModelConfig{
+				"agent": {Name: "qwen", QualityCtxCeiling: tt.ceiling},
+			}}
+			if tt.explicit {
+				cfg.Models["chat"] = config.ModelConfig{Provider: "ollama", Name: "qwen", QualityCtxCeiling: 32_768}
+			}
+			got, err := buildQualityCtxCeilingOverrides(cfg)
+			if tt.errText != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.errText) {
+					t.Fatalf("error = %v, want %q", err, tt.errText)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("buildQualityCtxCeilingOverrides: %v", err)
+			}
+			want := map[provider.ModelKey]int{{Provider: "ollama", Model: "qwen"}: 32_768}
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("overrides = %v, want %v", got, want)
+			}
+		})
+	}
+}

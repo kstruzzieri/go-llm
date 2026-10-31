@@ -1,6 +1,8 @@
 // Package interceptor provides the default interceptors for the agent
 // pipeline: four detectors (#436/#437), two guards (#439) and one reporter
-// (#555).
+// (#555). It also provides ConfiguredSecrets (#424), an exact guard for
+// credentials the host resolved from configuration, which is not in Defaults:
+// a host installs it with NewConfiguredSecrets.
 //
 // Detectors: zero-width characters (raw and JSON-escaped), encoded
 // instructions (base64 in all four stdlib forms, hex, line-folded runs, one

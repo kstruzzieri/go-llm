@@ -512,6 +512,66 @@ func TestClient_BlockStep_SurfacesCommandError(t *testing.T) {
 	}
 }
 
+func TestClient_VerifyProof_Argv(t *testing.T) {
+	t.Parallel()
+	f := &fakeRunner{replies: map[string]fakeReply{
+		"verify-proof": {stdout: []byte("proof verified\n")},
+	}}
+	c := NewOwnedClient(f, "/workspace with spaces", "golem")
+	if err := c.VerifyProof(context.Background()); err != nil {
+		t.Fatalf("VerifyProof() = %v, want nil", err)
+	}
+	want := [][]string{{"verify-proof", "--root", "/workspace with spaces"}}
+	if !reflect.DeepEqual(f.calls, want) {
+		t.Errorf("VerifyProof() calls = %v, want %v", f.calls, want)
+	}
+	if len(f.inputs) != 1 || len(f.inputs[0]) != 0 {
+		t.Errorf("VerifyProof() stdin = %q, want one empty input", f.inputs)
+	}
+}
+
+func TestClient_VerifyProof_SurfacesCommandError(t *testing.T) {
+	t.Parallel()
+	c, _ := newTestClient(map[string]fakeReply{
+		"verify-proof": {stdout: []byte("error: proof canonical core checksum mismatch\n"), exit: 1},
+	})
+	err := c.VerifyProof(context.Background())
+	var ce *CommandError
+	if !errors.As(err, &ce) || ce.Cmd != "verify-proof" || ce.Exit != 1 {
+		t.Errorf("VerifyProof() = %v, want *CommandError for verify-proof with exit 1", err)
+	}
+}
+
+func TestClient_VerifyProof_PreservesRunnerError(t *testing.T) {
+	t.Parallel()
+	want := errors.New("cannot launch agentflow")
+	c, _ := newTestClient(map[string]fakeReply{"verify-proof": {err: want}})
+	if err := c.VerifyProof(context.Background()); !errors.Is(err, want) {
+		t.Errorf("VerifyProof() = %v, want runner error %v", err, want)
+	}
+}
+
+type verifyProofContextRunner struct{ called bool }
+
+func (r *verifyProofContextRunner) Run(ctx context.Context, _ []string, _ []byte) ([]byte, []byte, int, error) {
+	r.called = true
+	return nil, nil, 0, ctx.Err()
+}
+
+func TestClient_VerifyProof_PropagatesCancellation(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cancel()
+	r := &verifyProofContextRunner{}
+	if err := NewClient(r, "/ws").VerifyProof(ctx); !errors.Is(err, context.Canceled) {
+		t.Errorf("VerifyProof(cancelled context) = %v, want context.Canceled", err)
+	}
+	if !r.called {
+		t.Error("VerifyProof(cancelled context) did not pass the context to the runner")
+	}
+}
+
 func TestClient_FinishRun_StopReportsStoppedAt(t *testing.T) {
 	c, _ := newTestClient(map[string]fakeReply{
 		"finish-run": {stdout: []byte(`{"ok":false,"stopped_at":"verify-proof","diagnostics":["bad proof"]}`), exit: 1},
@@ -727,6 +787,28 @@ func TestClient_AmendStep_PreservesEveryFindingReference(t *testing.T) {
 	}
 	if !reflect.DeepEqual(f.calls[0], want) {
 		t.Fatalf("argv = %v, want %v", f.calls[0], want)
+	}
+}
+
+// AmendCompletedStep is amend-step with no review linkage (agentflow#70), and
+// it validates the success projection as AmendStep does.
+func TestClient_AmendCompletedStep(t *testing.T) {
+	c, f := newTestClient(map[string]fakeReply{
+		"amend-step": {stdout: []byte(`{"event":"amendment_started","step_id":"P1","attempt_id":"A3"}`), exit: 0},
+	})
+	attempt, err := c.AmendCompletedStep(context.Background(), "P1", "golem: replace the step's attempt")
+	if err != nil || attempt != "A3" {
+		t.Fatalf("attempt=%q err=%v", attempt, err)
+	}
+	want := []string{"amend-step", "P1", "--root", "/ws", "--agent", "golem", "--reason", "golem: replace the step's attempt", "--json"}
+	if !reflect.DeepEqual(f.calls[0], want) {
+		t.Fatalf("argv = %v, want %v", f.calls[0], want)
+	}
+	c, _ = newTestClient(map[string]fakeReply{
+		"amend-step": {stdout: []byte(`{"event":"claimed","step_id":"P1","attempt_id":"A3"}`), exit: 0},
+	})
+	if attempt, err := c.AmendCompletedStep(context.Background(), "P1", "reason"); err == nil {
+		t.Fatalf("attempt = %q, want malformed success error", attempt)
 	}
 }
 

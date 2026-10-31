@@ -137,13 +137,14 @@ func (i sessionInfo) line() string {
 func openSession(ctx context.Context, dbPath, id string) (*session, sessionInfo, error) {
 	// The DSN gives every connection a 5s busy_timeout, including
 	// replacements database/sql opens after a context-cancelled statement.
-	// It is built before the file is prepared, so a path it rejects is never
-	// created.
-	dsn, err := sqlitedsn.WithBusyTimeout(dbPath, 5*time.Second)
+	// disk is the file SQLite opens for it; it is the one prepared and
+	// secured, never the raw path (#648). Resolve runs before anything is
+	// created, so an input it rejects leaves nothing behind.
+	dsn, disk, err := sqlitedsn.Resolve(dbPath, 5*time.Second)
 	if err != nil {
 		return nil, sessionInfo{}, fmt.Errorf("golem: open session db %q: %w", dbPath, err)
 	}
-	if err := prepareDBFile(dbPath); err != nil {
+	if err := prepareDBFile(disk); err != nil {
 		return nil, sessionInfo{}, err
 	}
 	db, err := sql.Open("sqlite", dsn)
@@ -152,6 +153,10 @@ func openSession(ctx context.Context, dbPath, id string) (*session, sessionInfo,
 	}
 	// One connection serializes writes.
 	db.SetMaxOpenConns(1)
+	if err := sqlitedsn.CheckMainFile(ctx, db, disk); err != nil {
+		_ = db.Close()
+		return nil, sessionInfo{}, fmt.Errorf("golem: open session db %q: %w", dbPath, err)
+	}
 	// EnableWAL retries the switch when another opener races it.
 	if err := sqlitedsn.EnableWAL(ctx, db); err != nil {
 		_ = db.Close()
@@ -162,12 +167,12 @@ func openSession(ctx context.Context, dbPath, id string) (*session, sessionInfo,
 		_ = db.Close()
 		return nil, sessionInfo{}, fmt.Errorf("golem: init session store: %w", err)
 	}
-	if err := chmodDBFiles(dbPath); err != nil {
+	if err := chmodDBFiles(disk); err != nil {
 		_ = db.Close()
 		return nil, sessionInfo{}, err
 	}
 
-	s := &session{db: db, dbPath: dbPath, store: store, id: id}
+	s := &session{db: db, dbPath: disk, store: store, id: id}
 	info := sessionInfo{id: id}
 	conv, lerr := store.Load(ctx, id)
 	switch {

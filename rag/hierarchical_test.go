@@ -48,7 +48,7 @@ func (s *hierarchicalMultiStore) SearchMulti(_ context.Context, _ []float64, _ s
 func hierarchicalResult(id, source, content string, score float64, metadata map[string]string) ScoredResult {
 	return ScoredResult{
 		SearchResult: SearchResult{
-			Chunk: Chunk{ID: id, Source: source, Content: content, StartLine: 1, EndLine: 1, Metadata: metadata},
+			Chunk: Chunk{ID: id, Source: absTestPath(source), Content: content, StartLine: 1, EndLine: 1, Metadata: metadata},
 			Score: score, Distance: 1 - score,
 		},
 		RankScore: score,
@@ -72,7 +72,7 @@ func newHierarchicalMultiRetriever(t *testing.T, results []ScoredResult, opts ..
 
 func hierarchicalRequest(k, candidates, depth, groups, tokens int) HierarchicalRetrievalRequest {
 	return HierarchicalRetrievalRequest{
-		Request:        RetrievalRequest{Query: "q", K: k, QueryContext: QueryContext{WorkspaceRoot: "/work"}},
+		Request:        RetrievalRequest{Query: "q", K: k, QueryContext: QueryContext{WorkspaceRoot: absTestPath("/work")}},
 		CandidateLimit: candidates,
 		MaxDepth:       depth,
 		MaxGroups:      groups,

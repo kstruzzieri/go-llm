@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/kstruzzieri/go-llm/ollama"
+	"github.com/kstruzzieri/go-llm/provider"
 )
 
 // benchKeepAlive is the Ollama keep_alive directive used for benchmark runs.
@@ -17,6 +18,13 @@ import (
 const benchKeepAlive = "30m"
 
 const plainChatToolDivergenceFinal = "__LLM_BENCH_TOOL_DIVERGENCE_8F3E0B2C__"
+
+// Divergence kinds recorded on replayOutput.Divergences (#687).
+const (
+	divergenceToolRouteBypassed = "tool_route_bypassed"
+	divergencePlainChatToolCall = "plain_chat_tool_call"
+	divergencePrefilledToolCall = "prefilled_tool_call"
+)
 
 // Sentinel errors so tests assert on identity rather than message text.
 var (
@@ -40,6 +48,13 @@ var (
 	errNoAssistantFinalAnswer   = errors.New("judge scorer requires an assistant final answer")
 )
 
+// frozenToolResultNameError marks a fixture defect while preserving the
+// legacy error text and errToolCallMismatch identity used by runner callers.
+type frozenToolResultNameError struct{ err error }
+
+func (e *frozenToolResultNameError) Error() string { return e.err.Error() }
+func (e *frozenToolResultNameError) Unwrap() error { return e.err }
+
 // Runner executes traces against a list of candidate models and collects
 // per-trace, per-model Results.
 type Runner struct {
@@ -61,7 +76,15 @@ type Runner struct {
 	// long multi-turn replays may silently truncate prompts from the
 	// model's perspective without this set.
 	NumCtx int
-	Scorer Scorer
+	// CandidateSessionID, when non-empty, is sent as the openai-compat session
+	// header on every candidate request (-candidate-session-id). Empty sends
+	// no header.
+	CandidateSessionID string
+	Scorer             Scorer
+	// InjectionDecoding is the registered decoding (#452), keyed by the full
+	// model selector exactly as typed in -models (ModelTarget.Display).
+	// Injection traces fail closed for a model with no entry.
+	InjectionDecoding map[string]injectionDecoding
 }
 
 // Result is a single (model, trace) evaluation.
@@ -72,6 +95,9 @@ type Result struct {
 	Score             Score
 	Err               error
 	Transcript        []Turn
+	// RawToolCalls preserves the candidate's tool calls before map conversion
+	// (#452); only injection traces read it.
+	RawToolCalls []injectionRawCall
 }
 
 // RunAll replays every trace against every model. Iterates models in the
@@ -117,7 +143,16 @@ func (r *Runner) RunAll(ctx context.Context, targets []ModelTarget, traces []Tra
 func (r *Runner) runOne(ctx context.Context, transport candidateTransport, target ModelTarget, trace Trace) Result {
 	replayCtx, cancel := context.WithTimeout(ctx, r.Timeout)
 
-	opts := replayOptions{PerTurnTimeout: r.PerTurnTimeout, NumCtx: r.NumCtx}
+	opts := replayOptions{PerTurnTimeout: r.PerTurnTimeout, NumCtx: r.NumCtx, SessionID: r.CandidateSessionID}
+	if trace.Injection != nil {
+		decoding, ok := r.InjectionDecoding[target.Display]
+		if !ok {
+			cancel()
+			return Result{Model: target.Display, TraceID: trace.ID, CandidateProvider: transport.providerName, Err: fmt.Errorf("no registered decoding for %s", target.Display)}
+		}
+		opts.ProviderOptions = &decoding.Options
+		opts.ParseThinkMode = &decoding.ThinkMode
+	}
 	out, err := replayWith(replayCtx, transport.chat, target.Model, trace, opts)
 	cancel()
 	if err != nil {
@@ -130,6 +165,7 @@ func (r *Runner) runOne(ctx context.Context, transport candidateTransport, targe
 		TraceID:           trace.ID,
 		CandidateProvider: transport.providerName,
 		Transcript:        out.Transcript,
+		RawToolCalls:      out.RawToolCalls,
 	})
 	scorerMs := time.Since(scoreStart).Milliseconds()
 	if err != nil {
@@ -160,6 +196,7 @@ func (r *Runner) runOne(ctx context.Context, transport candidateTransport, targe
 		CandidateProvider: transport.providerName,
 		Score:             score,
 		Transcript:        out.Transcript,
+		RawToolCalls:      out.RawToolCalls,
 	}
 }
 
@@ -184,6 +221,16 @@ type replayOutput struct {
 	GenTokens        int
 	ThinkingTokens   int
 	ThinkingComputed bool // true once any turn reported isolated thinking tokens
+	// Divergences names each scored-divergence branch the replay executed,
+	// in order; SentinelSubstituted is true when one of them replaced the
+	// candidate's content with plainChatToolDivergenceFinal. Both are set in
+	// the branch itself, never inferred from content (a candidate can emit
+	// the sentinel string). No legacy writer serializes replayOutput; they
+	// exist for -replay-attempt (#687).
+	Divergences         []string
+	SentinelSubstituted bool
+	// RawToolCalls is the injection raw side channel (#452); empty elsewhere.
+	RawToolCalls []injectionRawCall
 }
 
 // addUsage folds one chat turn's token usage into the replay totals.
@@ -211,6 +258,14 @@ type replayOptions struct {
 	// transport's options shape supports one, so temperature-0 is the sole
 	// registered decoding control.
 	Temperature *float64
+	// ProviderOptions (injection replays) is sent verbatim on the openai-compat
+	// wire: the registered decoding (#452).
+	ProviderOptions *provider.ModelOptions
+	// ParseThinkMode (injection replays) is the registered inline-think parser
+	// policy; nil keeps the provider instance's think mode.
+	ParseThinkMode *provider.ThinkMode
+	// SessionID is the openai-compat session header value; empty sends none.
+	SessionID string
 }
 
 // assemblyCaptureTemperature is the registered decoding control for
@@ -253,6 +308,9 @@ func replay(ctx context.Context, client *ollama.Client, model string, trace Trac
 // All accumulated divergence notes are appended to the resulting Score's
 // Notes so aggregate consumers can see why a candidate diverged.
 func replayWith(ctx context.Context, client candidateChatClient, model string, trace Trace, opts replayOptions) (replayOutput, error) {
+	if trace.Injection != nil {
+		return replayInjection(ctx, client, model, trace, opts)
+	}
 	if prefilledAssemblyMode(trace) {
 		return replayPrefilled(ctx, client, model, trace, opts)
 	}
@@ -310,6 +368,7 @@ func replayWith(ctx context.Context, client candidateChatClient, model string, t
 						out.Notes = append(out.Notes,
 							fmt.Sprintf("trace %q user turn %d: candidate bypassed scripted tool route (%d turn(s) skipped from index %d)",
 								trace.ID, userIndex, skipped, i))
+						out.Divergences = append(out.Divergences, divergenceToolRouteBypassed)
 					}
 					i = next
 				}
@@ -406,8 +465,10 @@ func replayPrefilled(ctx context.Context, client candidateChatClient, model stri
 		// recorded and scored on its content, never errored.
 		out.Notes = append(out.Notes,
 			fmt.Sprintf("prefilled trace %q: candidate emitted %d tool call(s); scored on content", trace.ID, n))
+		out.Divergences = append(out.Divergences, divergencePrefilledToolCall)
 		if strings.TrimSpace(msg.Content) == "" {
 			out.Transcript[len(out.Transcript)-1].Content = plainChatToolDivergenceFinal
+			out.SentinelSubstituted = true
 		}
 	}
 	if note := thinkMarkupResidueNote(lastAssistantContent(out.Transcript)); note != "" {
@@ -491,7 +552,9 @@ func scorePlainChatToolDivergence(out replayOutput, traceID string, userIndex, t
 	// divergence.
 	if n := len(out.Transcript); n > 0 {
 		out.Transcript[n-1].Content = plainChatToolDivergenceFinal
+		out.SentinelSubstituted = true
 	}
+	out.Divergences = append(out.Divergences, divergencePlainChatToolCall)
 	out.Notes = append(out.Notes,
 		fmt.Sprintf("trace %q user turn %d: candidate called %d tool(s) on a plain-chat trace (%s); scored as divergence",
 			traceID, userIndex, toolCallCount, reason))
@@ -526,6 +589,7 @@ func chatReplayTurn(ctx context.Context, client candidateChatClient, model strin
 			KeepAlive: benchKeepAlive,
 		},
 		RawToolArgs: rawArgs,
+		SessionID:   opts.SessionID,
 	}
 	if opts.NumCtx > 0 || opts.Temperature != nil {
 		req.Options = &ollama.ModelOptions{NumCtx: opts.NumCtx, Temperature: opts.Temperature}
@@ -593,8 +657,8 @@ func frozenToolResults(traceID string, expectedIndex int, expected Turn, turns [
 		}
 		resultName := strings.TrimSpace(result.Name)
 		if resultName != "" && resultName != callName {
-			return nil, nil, start, fmt.Errorf("trace %q assistant turn %d tool %d result: got %q, want %q: %w",
-				traceID, expectedIndex, i, resultName, callName, errToolCallMismatch)
+			return nil, nil, start, &frozenToolResultNameError{err: fmt.Errorf("trace %q assistant turn %d tool %d result: got %q, want %q: %w",
+				traceID, expectedIndex, i, resultName, callName, errToolCallMismatch)}
 		}
 
 		messages = append(messages, ollama.ChatMessage{

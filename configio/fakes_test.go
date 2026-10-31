@@ -107,6 +107,9 @@ func (f *fakeProjector) ProjectListedModels(ctx context.Context, providerName st
 			KnownMask:     provider.CapChat | provider.CapEmbed,
 			ProfileSource: "proj-src",
 			ContextWindow: info.ContextWindow,
+			// Derived from a different number than the window so a swapped
+			// mapping in the caller is caught.
+			QualityCtxCeiling: info.ContextWindow / 4,
 		}
 	}
 	return out, nil

@@ -5,6 +5,7 @@ package tools
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,12 +14,15 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/kstruzzieri/go-llm/agent"
 )
@@ -34,6 +38,25 @@ func writeFakeSandboxExec(t *testing.T, body string) string {
 	return p
 }
 
+// probeBackend builds a *seatbeltBackend for probe tests: a given sandbox-exec
+// path (real or a fake applier), an isolated temp base so the probe's
+// throwaway workspace and prepare's private temp never touch /private/tmp, and
+// a fixed system-root set. systemRootsErr, when set, makes prepare fail.
+func probeBackend(t *testing.T, execPath string) *seatbeltBackend {
+	t.Helper()
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &seatbeltBackend{
+		execPath:    execPath,
+		runner:      unixRunner{},
+		starter:     unixStarter{},
+		tempBase:    base,
+		systemRoots: func(string) ([]string, error) { return []string{"/usr/lib", "/bin"}, nil },
+	}
+}
+
 func TestProbeSeatbeltFileChecks(t *testing.T) {
 	dir := t.TempDir()
 	nonexec := filepath.Join(dir, "sandbox-exec")
@@ -47,7 +70,7 @@ func TestProbeSeatbeltFileChecks(t *testing.T) {
 	}
 	for name, path := range tests {
 		t.Run(name, func(t *testing.T) {
-			err := probeSeatbelt(context.Background(), path)
+			err := probeSeatbelt(context.Background(), probeBackend(t, path))
 			if err == nil || !strings.Contains(err.Error(), path) {
 				t.Fatalf("probe must fail naming the path: %v", err)
 			}
@@ -62,9 +85,124 @@ func TestProbeSeatbeltFileChecks(t *testing.T) {
 func TestProbeSeatbeltNestedSandboxShape(t *testing.T) {
 	fake := writeFakeSandboxExec(t,
 		"echo 'sandbox_apply: Operation not permitted' >&2\nexit 1\n")
-	err := probeSeatbelt(context.Background(), fake)
+	err := probeSeatbelt(context.Background(), probeBackend(t, fake))
 	if err == nil || !strings.Contains(err.Error(), "Operation not permitted") {
 		t.Fatalf("probe must surface the sandbox_apply diagnostic: %v", err)
+	}
+}
+
+// TestProbeSeatbeltAppliesRenderedProfile pins what the probe applies: the
+// backend's own rendered profile (not a fixed one), reaching /usr/bin/true
+// through /usr/bin/env, in a throwaway 0700 workspace under the backend's temp
+// base. The fake applier records its argv, cwd and TMPDIR. Byte-exact profile
+// content is the golden test's job; here we check the probe renders a scoped
+// deny-default profile for the probe workspace and gates the network rule on
+// the config.
+func TestProbeSeatbeltAppliesRenderedProfile(t *testing.T) {
+	for _, allowNetwork := range []bool{false, true} {
+		t.Run(fmt.Sprintf("network=%t", allowNetwork), func(t *testing.T) {
+			dir := t.TempDir()
+			argsFile := filepath.Join(dir, "args")
+			envFile := filepath.Join(dir, "env")
+			// NUL-separate the args: the profile is multi-line, so a newline
+			// separator would split it.
+			fake := writeFakeSandboxExec(t,
+				"printf '%s\\0' \"$@\" > '"+argsFile+"'\n"+
+					"printf 'PWD=%s\\nTMPDIR=%s\\n' \"$PWD\" \"$TMPDIR\" > '"+envFile+"'\n")
+			b := probeBackend(t, fake)
+			b.allowNetwork = allowNetwork
+			if err := probeSeatbelt(context.Background(), b); err != nil {
+				t.Fatalf("probe of a working applier failed: %v", err)
+			}
+			raw, err := os.ReadFile(argsFile)
+			if err != nil {
+				t.Fatal(err)
+			}
+			args := strings.Split(strings.TrimSuffix(string(raw), "\x00"), "\x00")
+			// argv to the fake: -p <profile> /usr/bin/env /usr/bin/true
+			if len(args) != 4 || args[0] != "-p" || args[2] != seatbeltProbeExe || args[3] != "/usr/bin/true" {
+				t.Fatalf("probe argv = %q, want [-p <profile> %s /usr/bin/true]", args, seatbeltProbeExe)
+			}
+			profile := args[1]
+			if !strings.HasPrefix(profile, "(version 1)\n(deny default)\n") {
+				t.Fatalf("probe profile is not deny-default:\n%s", profile)
+			}
+			if !strings.Contains(profile, "(allow process-exec*\n") {
+				t.Fatalf("probe profile has no scoped exec rule:\n%s", profile)
+			}
+			if strings.Contains(profile, "(allow process-exec*)\n") {
+				t.Fatalf("probe profile has a bare (unscoped) exec rule:\n%s", profile)
+			}
+			if got := strings.Contains(profile, "(allow network*)"); got != allowNetwork {
+				t.Fatalf("network rule present = %t, want %t:\n%s", got, allowNetwork, profile)
+			}
+			// The probe workspace is the profile's workspace root, under the
+			// backend's temp base.
+			meta, err := os.ReadFile(envFile)
+			if err != nil {
+				t.Fatal(err)
+			}
+			pwd := ""
+			for _, l := range strings.Split(string(meta), "\n") {
+				if v, ok := strings.CutPrefix(l, "PWD="); ok {
+					pwd = v
+				}
+			}
+			if filepath.Dir(pwd) != b.tempBase || !strings.Contains(filepath.Base(pwd), "probe") {
+				t.Fatalf("probe workspace %q is not a probe dir under %q", pwd, b.tempBase)
+			}
+			if !strings.Contains(profile, "(subpath \""+pwd+"\")") {
+				t.Fatalf("probe profile does not scope to the probe workspace %q:\n%s", pwd, profile)
+			}
+		})
+	}
+}
+
+// TestProbeSeatbeltRejectsProfileTheHostRejects is C2's reason to exist: a host
+// that rejects a rule the real profile uses (here the hw. sysctl-name-prefix)
+// must fail startup, even though the old fixed probe profile — which had no
+// such rule — would have applied cleanly. The control shows the same fake
+// accepts that old profile.
+func TestProbeSeatbeltRejectsProfileTheHostRejects(t *testing.T) {
+	// Fake rejects only a profile naming sysctl-name-prefix (exit 65, the
+	// sandbox-exec parse-error shape); anything else applies.
+	fake := writeFakeSandboxExec(t,
+		"case \"$2\" in\n"+
+			"  *sysctl-name-prefix*) echo 'sandbox-exec: unbound variable: sysctl-name-prefix' >&2; exit 65;;\n"+
+			"esac\nexit 0\n")
+
+	// Control: the old fixed deny-default profile has no sysctl rule, so this
+	// same host "accepts" it — exactly the false positive C2 removes.
+	const oldFixed = "(version 1)(deny default)(allow process-exec*)(allow file-read*)"
+	ctx, cancel := context.WithTimeout(context.Background(), seatbeltProbeTimeout)
+	defer cancel()
+	ctl := exec.CommandContext(ctx, fake, "-p", oldFixed, "/usr/bin/true")
+	if err := ctl.Run(); err != nil {
+		t.Fatalf("control: old fixed profile should apply on this fake: %v", err)
+	}
+
+	err := probeSeatbelt(context.Background(), probeBackend(t, fake))
+	if err == nil || !strings.Contains(err.Error(), "sysctl-name-prefix") {
+		t.Fatalf("probe must fail when the host rejects the real profile: %v", err)
+	}
+	if !strings.Contains(err.Error(), "unavailable on this host") {
+		t.Fatalf("probe failure must read as unavailable: %v", err)
+	}
+}
+
+// TestProbeSeatbeltRealProfileAcceptedOnHost proves the real backend's profile
+// applies on this host for both network settings. It is gated like the
+// behavioral tests (skip, or fail under GO_LLM_REQUIRE_SEATBELT=1).
+func TestProbeSeatbeltRealProfileAcceptedOnHost(t *testing.T) {
+	requireSeatbeltCapability(t)
+	for _, allowNetwork := range []bool{false, true} {
+		t.Run(fmt.Sprintf("network=%t", allowNetwork), func(t *testing.T) {
+			if _, err := newSeatbeltExecBackend(SandboxConfig{
+				Runtime: SandboxRuntimeSeatbelt, AllowNetwork: allowNetwork,
+			}); err != nil {
+				t.Fatalf("real profile rejected on this host: %v", err)
+			}
+		})
 	}
 }
 
@@ -72,22 +210,133 @@ func TestProbeSeatbeltTimeout(t *testing.T) {
 	fake := writeFakeSandboxExec(t, "sleep 5\n")
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
-	if err := probeSeatbelt(ctx, fake); err == nil {
+	if err := probeSeatbelt(ctx, probeBackend(t, fake)); err == nil {
 		t.Fatal("hung probe must fail, not block construction forever")
 	}
 }
 
 func TestProbeSeatbeltSucceedsOnFakeApplier(t *testing.T) {
 	fake := writeFakeSandboxExec(t, "exit 0\n")
-	if err := probeSeatbelt(context.Background(), fake); err != nil {
+	if err := probeSeatbelt(context.Background(), probeBackend(t, fake)); err != nil {
 		t.Fatalf("probe of a working applier failed: %v", err)
+	}
+}
+
+// TestProbeSeatbeltReapsProbeDirs proves the probe leaves nothing under the
+// temp base, whether the applier succeeds or fails.
+func TestProbeSeatbeltReapsProbeDirs(t *testing.T) {
+	for name, body := range map[string]string{
+		"success": "exit 0\n",
+		"failure": "echo boom >&2\nexit 1\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			b := probeBackend(t, writeFakeSandboxExec(t, body))
+			_ = probeSeatbelt(context.Background(), b)
+			entries, err := os.ReadDir(b.tempBase)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(entries) != 0 {
+				names := make([]string, len(entries))
+				for i, e := range entries {
+					names[i] = e.Name()
+				}
+				t.Fatalf("probe left directories under the temp base: %q", names)
+			}
+		})
+	}
+}
+
+// TestProbeSeatbeltPrepareFailureReapsProbeWorkspace covers a preparation
+// failure after the probe workspace exists: the applier must never run, both
+// owned directories must be reaped, and construction must fail.
+func TestProbeSeatbeltPrepareFailureReapsProbeWorkspace(t *testing.T) {
+	ranFile := filepath.Join(t.TempDir(), "ran")
+	fake := writeFakeSandboxExec(t, "touch '"+ranFile+"'\nexit 0\n")
+	b := probeBackend(t, fake)
+	b.systemRoots = func(string) ([]string, error) { return nil, errors.New("synthetic systemRoots failure") }
+
+	err := probeSeatbelt(context.Background(), b)
+	if err == nil || !strings.Contains(err.Error(), "synthetic systemRoots failure") {
+		t.Fatalf("probe must fail when prepare fails: %v", err)
+	}
+	if _, statErr := os.Stat(ranFile); statErr == nil {
+		t.Fatal("applier ran despite a preparation failure")
+	}
+	entries, err := os.ReadDir(b.tempBase)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("preparation failure leaked directories under the temp base: %d", len(entries))
+	}
+}
+
+// TestProbeSeatbeltCleanupFailureFailsConstruction forces the probe workspace
+// to lose its identity while the applier runs (the applier replaces it with a
+// fresh directory), so the identity-guarded cleanup refuses. Construction must
+// then fail with the cleanup error.
+func TestProbeSeatbeltCleanupFailureFailsConstruction(t *testing.T) {
+	// Rename the workspace aside rather than remove-and-recreate: a fresh
+	// mkdir can reuse the inode number and mask the swap (see the TOCTOU
+	// inode-reuse lesson), so move the original out of the way and create a
+	// new directory at the path, guaranteeing a distinct identity.
+	fake := writeFakeSandboxExec(t, "d=\"$PWD\"\ncd /\nmv \"$d\" \"$d.gone\"\nmkdir \"$d\"\nexit 0\n")
+	err := probeSeatbelt(context.Background(), probeBackend(t, fake))
+	if err == nil || !strings.Contains(err.Error(), "cleanup") {
+		t.Fatalf("a refused probe cleanup must fail construction: %v", err)
+	}
+}
+
+func TestProbeSeatbeltPrivateTempCleanupJoinsFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		res  execResult
+		err  error
+		want string
+	}{
+		{name: "success"},
+		{name: "nonzero", res: execResult{ExitCode: 65}, want: "exit 65"},
+		{name: "diagnostic", res: execResult{ExitCode: 65, Stderr: []byte("synthetic profile rejection")}, want: "exit 65: synthetic profile rejection"},
+		{name: "timeout", err: context.DeadlineExceeded, want: "context deadline exceeded"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := probeBackend(t, writeFakeSandboxExec(t, "exit 0\n"))
+			var ws, temp string
+			b.runner = &captureRunner{
+				res: tc.res, err: tc.err,
+				during: func(s execSpec) {
+					ws = s.WorkspaceRoot
+					temp = replacePrivateTemp(t, tmpdirOf(t, s.Env))
+				},
+			}
+			err := probeSeatbelt(context.Background(), b)
+			if err == nil || !strings.Contains(err.Error(), "probe private temp cleanup failed") {
+				t.Fatalf("probe must report its refused private-temp cleanup: %v", err)
+			}
+			if tc.want != "" && !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("probe lost its original failure %q: %v", tc.want, err)
+			}
+			if tc.err != nil && !errors.Is(err, tc.err) {
+				t.Errorf("probe lost its error identity: %v", err)
+			}
+			if _, statErr := os.Stat(temp + "-stolen"); statErr != nil {
+				t.Errorf("original private temp must remain after refused cleanup: %v", statErr)
+			}
+			if _, statErr := os.Stat(temp); statErr != nil {
+				t.Errorf("cleanup must preserve the replacement directory: %v", statErr)
+			}
+			if _, statErr := os.Stat(ws); !errors.Is(statErr, os.ErrNotExist) {
+				t.Errorf("private-temp cleanup failure must not skip workspace cleanup: %v", statErr)
+			}
+		})
 	}
 }
 
 func TestSeatbeltConstructorRejectsUnenforceableBeforeProbe(t *testing.T) {
 	probeCalled := false
 	_, err := newSeatbeltExecBackendAt("/usr/bin/sandbox-exec",
-		func(context.Context, string) error { probeCalled = true; return nil },
+		func(context.Context, *seatbeltBackend) error { probeCalled = true; return nil },
 		SandboxConfig{Runtime: SandboxRuntimeSeatbelt, MemoryCapMB: 512})
 	if err == nil || !strings.Contains(err.Error(), "MemoryCapMB") {
 		t.Fatalf("unenforceable field accepted: %v", err)
@@ -100,7 +349,7 @@ func TestSeatbeltConstructorRejectsUnenforceableBeforeProbe(t *testing.T) {
 func TestSeatbeltConstructorFailsClosedOnProbeError(t *testing.T) {
 	probeErr := errors.New("sandbox_apply: Operation not permitted")
 	backend, err := newSeatbeltExecBackendAt("/usr/bin/sandbox-exec",
-		func(context.Context, string) error { return probeErr },
+		func(context.Context, *seatbeltBackend) error { return probeErr },
 		SandboxConfig{Runtime: SandboxRuntimeSeatbelt})
 	if backend != nil || !errors.Is(err, probeErr) {
 		t.Fatalf("probe failure must fail construction: backend=%T err=%v", backend, err)
@@ -109,7 +358,7 @@ func TestSeatbeltConstructorFailsClosedOnProbeError(t *testing.T) {
 
 func TestSeatbeltConstructorSucceedsOnProbeSuccess(t *testing.T) {
 	backend, err := newSeatbeltExecBackendAt("/usr/bin/sandbox-exec",
-		func(context.Context, string) error { return nil },
+		func(context.Context, *seatbeltBackend) error { return nil },
 		SandboxConfig{Runtime: SandboxRuntimeSeatbelt, AllowNetwork: true})
 	if err != nil {
 		t.Fatal(err)
@@ -322,6 +571,7 @@ func TestSeatbeltRunHostileAmbientTMPDIR(t *testing.T) {
 				t.Fatal(err)
 			}
 			childTemp := tmpdirOf(t, fake.spec.Env)
+			// containment: ENV-SEATBELT
 			if childTemp == hostile || filepath.Dir(childTemp) != base {
 				t.Fatalf("child TMPDIR %q not the private directory", childTemp)
 			}
@@ -592,14 +842,26 @@ func TestSeatbeltStartReplacementRaceLeavesForeignDir(t *testing.T) {
 // gate cannot silently pass without exercising confinement.
 func requireSeatbeltCapability(t *testing.T) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), seatbeltProbeTimeout)
-	defer cancel()
-	if err := probeSeatbelt(ctx, seatbeltExecPath); err != nil {
+	if _, err := newSeatbeltExecBackend(seatbeltTestCfg()); err != nil {
 		if os.Getenv("GO_LLM_REQUIRE_SEATBELT") == "1" {
 			t.Fatalf("GO_LLM_REQUIRE_SEATBELT=1 but Seatbelt is unavailable: %v", err)
 		}
 		t.Skipf("Seatbelt unavailable on this host: %v", err)
 	}
+}
+
+// seatbeltAppliesDenyDefaultOnHost is an independent capability oracle: it
+// applies a minimal fixed deny-default profile to /usr/bin/true directly, with
+// no reference to the backend's own probe. It answers only "can this host
+// apply a deny-default profile at all" (so it fails inside a nested sandbox),
+// never "does the backend's full profile apply" — which is exactly why the
+// characterization test below may see construction fail while this oracle
+// passes.
+func seatbeltAppliesDenyDefaultOnHost(ctx context.Context) error {
+	cmd := exec.CommandContext(ctx, seatbeltExecPath, "-p",
+		"(version 1)(deny default)(allow process-exec*)(allow file-read*)", "/usr/bin/true")
+	cmd.WaitDelay = execWaitDelay
+	return cmd.Run()
 }
 
 // TestSeatbeltHelperProcess is the argv-selected helper entry point that runs
@@ -629,6 +891,21 @@ func TestSeatbeltHelperProcess(t *testing.T) {
 	switch mode {
 	case "pid":
 		fmt.Printf("HELPER-PID: %d\n", os.Getpid())
+	case "netsrcclosed":
+		var fd int
+		var id uint32
+		if _, err := fmt.Sscan(args[1], &fd); err != nil {
+			fail(err)
+		}
+		if _, err := fmt.Sscan(args[2], &id); err != nil {
+			fail(err)
+		}
+		if sa, err := unix.Getpeername(fd); err == nil {
+			if ctl, ok := sa.(*unix.SockaddrCtl); ok && ctl.ID == id {
+				fail(errors.New("inherited parent's netsrc socket"))
+			}
+		}
+		fmt.Println("HELPER-OK: netsrc closed")
 	case "tmprw":
 		p := filepath.Join(os.TempDir(), "canary.txt")
 		if err := os.WriteFile(p, []byte("temp-canary"), 0o600); err != nil {
@@ -1396,17 +1673,29 @@ func TestSeatbeltPrepareMissingExecutableCleansTemp(t *testing.T) {
 	assertEmptyDir(t, base)
 }
 
-// TestNewExecBackendSeatbeltMatchesRealCapability is the characterization pin:
-// public construction succeeds exactly when the real active probe succeeds on
-// this host. On an unsandboxed macOS host both succeed; inside a nested
-// sandbox both must fail.
+// TestNewExecBackendSeatbeltMatchesRealCapability is the characterization pin,
+// as a one-way check against an independent oracle: construction renders and
+// applies the backend's full profile, so it may fail where the basic
+// deny-default oracle passes (a release that rejects a rule the real profile
+// uses) — that asymmetry is C2's whole point, so we never assert equality. We
+// assert the implications that must hold: construction success implies the
+// host can apply a deny-default profile at all, and under
+// GO_LLM_REQUIRE_SEATBELT=1 both succeed.
 func TestNewExecBackendSeatbeltMatchesRealCapability(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), seatbeltProbeTimeout)
 	defer cancel()
-	probeErr := probeSeatbelt(ctx, seatbeltExecPath)
+	oracleErr := seatbeltAppliesDenyDefaultOnHost(ctx)
 	got, err := newExecBackend(SandboxConfig{Runtime: SandboxRuntimeSeatbelt})
-	if (err == nil) != (probeErr == nil) {
-		t.Fatalf("constructor outcome (err=%v) disagrees with real capability (probe=%v)", err, probeErr)
+	if err == nil && oracleErr != nil {
+		t.Fatalf("construction succeeded but the host cannot apply a basic deny-default profile: %v", oracleErr)
+	}
+	if os.Getenv("GO_LLM_REQUIRE_SEATBELT") == "1" {
+		if oracleErr != nil {
+			t.Fatalf("GO_LLM_REQUIRE_SEATBELT=1 but the deny-default oracle failed: %v", oracleErr)
+		}
+		if err != nil {
+			t.Fatalf("GO_LLM_REQUIRE_SEATBELT=1 but construction failed: %v", err)
+		}
 	}
 	if err != nil {
 		return // incapable host: fail-closed is the correct outcome
@@ -1831,8 +2120,13 @@ func TestSeatbeltProfileGrantsMetadataOnSymlinkChain(t *testing.T) {
 			}
 		}
 	}
-	if rule := seatbeltRuleOf(profile, `(literal "`+target+`")`); rule != "file-read*" {
-		t.Errorf("canonical target literal is under %q; want file-read*", rule)
+	remaining := profile
+	literal := `(literal "` + target + `")`
+	for _, want := range []string{"process-exec*", "file-read*"} {
+		if rule := seatbeltRuleOf(remaining, literal); rule != want {
+			t.Errorf("canonical target literal is under %q; want %s", rule, want)
+		}
+		_, remaining, _ = strings.Cut(remaining, literal)
 	}
 	if wrapped.Argv[3] != spelled {
 		t.Errorf("wrapper launches %q; want the approved spelling %q", wrapped.Argv[3], spelled)
@@ -1978,4 +2272,811 @@ func TestSeatbeltSymlinkChainResolvesDotDotPhysically(t *testing.T) {
 		t.Errorf("directory link %s literal is under %q; want file-read-metadata", dl, rule)
 	}
 	assertEmptyDir(t, base)
+}
+
+// --- #576: Seatbelt cleanup diagnostics and the loader note ---
+
+// wantLoaderNote is seatbeltLoaderNote written out, so a reworded constant
+// cannot pass these tests.
+const wantLoaderNote = "native sandbox (seatbelt) may deny loader, SDK or cache access outside its allowed roots; this is not a passing check"
+
+// replacePrivateTemp swaps the private temp at dir for a foreign directory
+// at the same pathname, so the guarded cleanup must refuse it and report why.
+func replacePrivateTemp(t *testing.T, dir string) string {
+	t.Helper()
+	if err := os.Rename(dir, dir+"-stolen"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// replacedNote is the note a replaced private temp at dir must produce,
+// written out from the guard's error text. The fixture path must leave the
+// note under the 256-byte cut, or the comparison would test truncation.
+func replacedNote(t *testing.T, dir string) string {
+	t.Helper()
+	note := "sandbox temp cleanup: tools: seatbelt temp " + dir + " was replaced; cleanup abandoned"
+	if len(note) > 256 {
+		t.Fatalf("fixture temp path too long for an uncut note (%d bytes): %s", len(note), dir)
+	}
+	return note
+}
+
+// seatbeltTestManager is a manager over b bound to the normalized Seatbelt
+// policy, the pairing newExecBackend produces, with b's fake delegates.
+func seatbeltTestManager(t *testing.T, b *seatbeltBackend) *BackgroundManager {
+	t.Helper()
+	m := newBackgroundManagerWithBackend(bindExecBackend(b, mustNormalizeSandbox(t, seatbeltTestCfg())), rand.Reader)
+	t.Cleanup(m.Shutdown)
+	return m
+}
+
+// seatbeltBgTools builds the background exec tool set over b, keyed by tool
+// name, optionally with scratch on a canonical snapshot base.
+func seatbeltBgTools(t *testing.T, b *seatbeltBackend, scratch bool) map[string]agent.Tool {
+	t.Helper()
+	toolsList, err := NewExecToolsWithBackgroundOptions(buildIsolationWorkspace(t), seatbeltTestManager(t, b),
+		ExecToolsOptions{Scratch: ScratchConfig{Enabled: scratch}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName := map[string]agent.Tool{}
+	for _, tool := range toolsList {
+		byName[tool.Spec().Name] = tool
+	}
+	if scratch {
+		canonicalScratchBase(t, byName["start_command"].(*StartCommand).scratchRT)
+	}
+	return byName
+}
+
+// canonicalScratchBase points rt's snapshots at a symlink-free base: Seatbelt
+// requires the rewritten workspace root to be canonical.
+func canonicalScratchBase(t *testing.T, rt *scratchRuntime) {
+	t.Helper()
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt.tempBase = base
+}
+
+// TestSeatbeltCleanupFailureIsReported: the foreground replacement race
+// leaves the command's result untouched and reports the refused cleanup as
+// the only note (exit 0 adds no loader note).
+func TestSeatbeltCleanupFailureIsReported(t *testing.T) {
+	b, _ := testSeatbeltBackend(t, nil)
+	var temp string
+	b.runner = &captureRunner{during: func(s execSpec) { temp = replacePrivateTemp(t, tmpdirOf(t, s.Env)) }}
+	res, err := b.Run(context.Background(), seatbeltSpec(t, canonTempDirT(t)))
+	if err != nil || res.ExitCode != 0 || res.TimedOut {
+		t.Fatalf("cleanup outcome overwrote the command result: res=%+v err=%v", res, err)
+	}
+	if want := []string{replacedNote(t, temp)}; !slices.Equal(res.Notes, want) {
+		t.Fatalf("Notes = %q, want %q", res.Notes, want)
+	}
+}
+
+// TestSeatbeltCleanupNoteJoinsPrepareFailure: a prepare failure whose own
+// cleanup is refused keeps its error class and carries the note, on both
+// lifetimes. The collector hook is the last step before the failure, so it
+// can swap the temp prepare just made.
+func TestSeatbeltCleanupNoteJoinsPrepareFailure(t *testing.T) {
+	for _, lifetime := range seatbeltLifetimes {
+		t.Run(lifetime, func(t *testing.T) {
+			b, base := testSeatbeltBackend(t, &captureRunner{})
+			b.starter = &captureStarter{proc: &fakeProcess{}}
+			collectorErr := errors.New("collector down")
+			var temp string
+			b.systemRoots = func(string) ([]string, error) {
+				made, err := filepath.Glob(filepath.Join(base, "go-llm-seatbelt-*"))
+				if err != nil || len(made) != 1 {
+					t.Fatalf("private temps = %q, %v; want exactly one", made, err)
+				}
+				temp = replacePrivateTemp(t, made[0])
+				return nil, collectorErr
+			}
+			var err error
+			if lifetime == "foreground" {
+				_, err = b.Run(context.Background(), seatbeltSpec(t, canonTempDirT(t)))
+			} else {
+				_, err = b.Start(seatbeltSpec(t, canonTempDirT(t)), io.Discard, io.Discard)
+			}
+			if !errors.Is(err, collectorErr) {
+				t.Fatalf("err = %v; want it to wrap %v", err, collectorErr)
+			}
+			if want := "collector down; " + replacedNote(t, temp); err.Error() != want {
+				t.Fatalf("err = %q\nwant %q", err, want)
+			}
+		})
+	}
+}
+
+// TestSeatbeltCleanupNoteOnTimeout: a timed-out run_command still reports
+// the refused cleanup after its timeout text.
+func TestSeatbeltCleanupNoteOnTimeout(t *testing.T) {
+	b, _ := testSeatbeltBackend(t, nil)
+	var temp string
+	b.runner = &captureRunner{
+		res:    execResult{ExitCode: -1, TimedOut: true},
+		err:    context.DeadlineExceeded,
+		during: func(s execSpec) { temp = replacePrivateTemp(t, tmpdirOf(t, s.Env)) },
+	}
+	rc := NewRunCommand(mustWorkspace(t, canonTempDirT(t)), b)
+	res := planAndInvoke(t, rc, `{"argv":["/bin/echo","hi"],"timeout_seconds":7}`)
+	if want := "command timed out after 7s\nnote: " + replacedNote(t, temp); !res.IsError || res.Content != want {
+		t.Fatalf("result = %+v\nwant error %q", res, want)
+	}
+}
+
+// TestSeatbeltCleanupNoteOnScratchForeground: the scratched foreground path
+// renders the same notes as the plain one, with the exit code unchanged.
+func TestSeatbeltCleanupNoteOnScratchForeground(t *testing.T) {
+	rc, rt, _ := scratchExecTools(t, buildIsolationWorkspace(t), ScratchConfig{Enabled: true})
+	canonicalScratchBase(t, rt)
+	b, _ := testSeatbeltBackend(t, nil)
+	var temp string
+	b.runner = &captureRunner{
+		res:    execResult{ExitCode: 4},
+		during: func(s execSpec) { temp = replacePrivateTemp(t, tmpdirOf(t, s.Env)) },
+	}
+	rc.runner = b
+	res := planAndInvoke(t, rc, `{"argv":["/bin/echo","hi"]}`)
+	want := "exit code: 4\nnote: " + wantLoaderNote + "\nnote: " + replacedNote(t, temp) +
+		"\n--- stdout ---\n\n--- stderr ---\n"
+	if res.IsError || !strings.HasPrefix(res.Content, "scratch: id=") || !strings.HasSuffix(res.Content, want) {
+		t.Fatalf("result = %+v\nwant scratch line then %q", res, want)
+	}
+}
+
+// TestSeatbeltCleanupNoteSurvivesScratchBackground: scratch plus background
+// plus a refused cleanup reaches command_status after the unchanged exit
+// code, through the scratchProcess wrapper.
+func TestSeatbeltCleanupNoteSurvivesScratchBackground(t *testing.T) {
+	b, _ := testSeatbeltBackend(t, nil)
+	var temp string
+	b.starter = &captureStarter{
+		proc:   &fakeProcess{pid: 4242, code: 5},
+		during: func(s execSpec) { temp = replacePrivateTemp(t, tmpdirOf(t, s.Env)) },
+	}
+	byName := seatbeltBgTools(t, b, true)
+	final := bgAwaitExit(t, byName, bgStart(t, byName, `{"argv":["/bin/echo","hi"]}`))
+	if want := "exit_code: 5\nnote: " + replacedNote(t, temp) + "\n"; !strings.HasSuffix(final, want) {
+		t.Fatalf("command_status:\n%s\nwant suffix %q", final, want)
+	}
+}
+
+// TestSeatbeltStartFailureJoinsCleanup: a spawn failure whose cleanup is
+// refused keeps the starter's error class and carries the note.
+func TestSeatbeltStartFailureJoinsCleanup(t *testing.T) {
+	spawnErr := errors.New("spawn failed")
+	b, _ := testSeatbeltBackend(t, nil)
+	var temp string
+	b.starter = &captureStarter{err: spawnErr, during: func(s execSpec) { temp = replacePrivateTemp(t, tmpdirOf(t, s.Env)) }}
+	proc, err := b.Start(seatbeltSpec(t, canonTempDirT(t)), io.Discard, io.Discard)
+	if proc != nil || !errors.Is(err, spawnErr) {
+		t.Fatalf("Start = %v, %v; want no process and the spawn error", proc, err)
+	}
+	if want := "spawn failed; " + replacedNote(t, temp); err.Error() != want {
+		t.Fatalf("err = %q\nwant %q", err, want)
+	}
+}
+
+// TestSeatbeltAbandonedStartJoinsCleanup: a start canceled between spawn and
+// registration is reaped synchronously; its refused cleanup joins the
+// cancellation without hiding it.
+func TestSeatbeltAbandonedStartJoinsCleanup(t *testing.T) {
+	b, _ := testSeatbeltBackend(t, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var temp string
+	inner := &fakeProcess{pid: 4242}
+	b.starter = &captureStarter{proc: inner, during: func(s execSpec) {
+		temp = replacePrivateTemp(t, tmpdirOf(t, s.Env))
+		cancel()
+	}}
+	st, err := seatbeltTestManager(t, b).start(ctx, seatbeltSpec(t, canonTempDirT(t)), "(workspace root)")
+	if st.Handle != "" || !errors.Is(err, context.Canceled) {
+		t.Fatalf("start = %+v, %v; want no job and the cancellation", st, err)
+	}
+	if want := "context canceled; " + replacedNote(t, temp); err.Error() != want {
+		t.Fatalf("err = %q\nwant %q", err, want)
+	}
+	if inner.killCalls != 1 {
+		t.Fatalf("abandoned process kills = %d, want 1", inner.killCalls)
+	}
+}
+
+// TestSeatbeltAbandonedStartNoteReachesStartResult: the abandoned job is
+// never registered, so command_status cannot show its note; start_command's
+// canceled result must, on the plain and the scratched path.
+func TestSeatbeltAbandonedStartNoteReachesStartResult(t *testing.T) {
+	for _, scratch := range []bool{false, true} {
+		t.Run(fmt.Sprintf("scratch=%t", scratch), func(t *testing.T) {
+			b, _ := testSeatbeltBackend(t, nil)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			var temp string
+			b.starter = &captureStarter{proc: &fakeProcess{pid: 4242}, during: func(s execSpec) {
+				temp = replacePrivateTemp(t, tmpdirOf(t, s.Env))
+				cancel()
+			}}
+			sc := seatbeltBgTools(t, b, scratch)["start_command"].(*StartCommand)
+			raw := json.RawMessage(`{"argv":["/bin/echo","hi"]}`)
+			if _, err := sc.Plan(context.Background(), raw); err != nil {
+				t.Fatal(err)
+			}
+			res, err := sc.Invoke(ctx, raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if want := "start canceled\nnote: " + replacedNote(t, temp); !res.IsError || res.Content != want {
+				t.Fatalf("result = %+v\nwant error %q", res, want)
+			}
+		})
+	}
+}
+
+// TestSeatbeltVerifierLoaderFailureIsNotPass runs a real failing command
+// through a Seatbelt verifier slot: the observation is a failure carrying the
+// loader note, never the pass marker.
+func TestSeatbeltVerifierLoaderFailureIsNotPass(t *testing.T) {
+	requireSeatbeltCapability(t)
+	root := canonTempDirT(t)
+	slot := newTestSlot(t, root, seatbeltTestCfg())
+	cmd, err := NewSandboxedVerifyCommand(mustWorkspace(t, root), seatbeltTestCfg(), []string{"/usr/bin/false"}, "", 30*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := slot.Set(cmd); err != nil {
+		t.Fatal(err)
+	}
+	out, err := slot.Verify(context.Background(), approved())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "status: failed\nexit_code: 1\ntimed_out: false\noutput_truncated: false\nnote: " + wantLoaderNote + "\n"
+	if !strings.HasSuffix(out, want) || strings.Contains(out, "status: passed\nexit_code: 0\n") {
+		t.Fatalf("observation:\n%s\nwant suffix %q and no pass marker", out, want)
+	}
+}
+
+// TestSeatbeltVerifierErrorRendersNotes: a verifier spawn failure is an error
+// observation that still carries the loader note and the refused cleanup.
+func TestSeatbeltVerifierErrorRendersNotes(t *testing.T) {
+	b, _ := testSeatbeltBackend(t, nil)
+	var temp string
+	b.runner = &captureRunner{
+		err:    errors.New("spawn failed"),
+		during: func(s execSpec) { temp = replacePrivateTemp(t, tmpdirOf(t, s.Env)) },
+	}
+	root := canonTempDirT(t)
+	cmd, err := newVerifyCommandWithBackend(mustWorkspace(t, root),
+		bindExecBackend(b, mustNormalizeSandbox(t, seatbeltTestCfg())), []string{"/bin/echo", "hi"}, "", 30*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	slot := newTestSlot(t, root, seatbeltTestCfg())
+	if err := slot.Set(cmd); err != nil {
+		t.Fatal(err)
+	}
+	out, err := slot.Verify(context.Background(), approved())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "status: error\nreason: spawn failed\nnote: " + wantLoaderNote + "\nnote: " + replacedNote(t, temp) + "\n"
+	if !strings.HasSuffix(out, want) {
+		t.Fatalf("observation:\n%s\nwant suffix %q", out, want)
+	}
+}
+
+// TestSeatbeltCleanupNoteInStopResult: stop_command reports a job's final
+// state, so a refused cleanup must reach its result on both Stop branches:
+// a job the stop kills, and one that had already finished.
+func TestSeatbeltCleanupNoteInStopResult(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		proc  backgroundProcess
+		state string
+	}{
+		{"stopped", newFakeProc(4242), "state: killed\nexit_code: -1\n"},
+		{"already finished", &fakeProcess{pid: 4242, code: 5}, "state: exited\nexit_code: 5\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b, _ := testSeatbeltBackend(t, nil)
+			var temp string
+			b.starter = &captureStarter{proc: tc.proc, during: func(s execSpec) { temp = replacePrivateTemp(t, tmpdirOf(t, s.Env)) }}
+			byName := seatbeltBgTools(t, b, false)
+			handle := bgStart(t, byName, `{"argv":["/bin/echo","hi"]}`)
+			if tc.name == "already finished" {
+				bgAwaitExit(t, byName, handle)
+			}
+			res, err := byName["stop_command"].Invoke(context.Background(), json.RawMessage(fmt.Sprintf(`{"handle":%q}`, handle)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := "handle: " + handle + "\n" + tc.state + "note: " + replacedNote(t, temp) + "\n"
+			if res.IsError || res.Content != want {
+				t.Fatalf("stop result = %+v\nwant %q", res, want)
+			}
+		})
+	}
+}
+
+// TestSeatbeltSpawnFailureRendersNotes: run_command's own spawn failure is
+// where the loader note matters most; it renders after the failure text,
+// followed by the refused cleanup.
+func TestSeatbeltSpawnFailureRendersNotes(t *testing.T) {
+	b, _ := testSeatbeltBackend(t, nil)
+	var temp string
+	b.runner = &captureRunner{
+		err:    errors.New("spawn failed"),
+		during: func(s execSpec) { temp = replacePrivateTemp(t, tmpdirOf(t, s.Env)) },
+	}
+	rc := NewRunCommand(mustWorkspace(t, canonTempDirT(t)), b)
+	res := planAndInvoke(t, rc, `{"argv":["/bin/echo","hi"]}`)
+	want := "command failed to run: spawn failed\nnote: " + wantLoaderNote + "\nnote: " + replacedNote(t, temp)
+	if !res.IsError || res.Content != want {
+		t.Fatalf("result = %+v\nwant error %q", res, want)
+	}
+}
+
+// TestSeatbeltScratchSpawnFailureKeepsNotes: the scratched runErr branch
+// renders the same notes after the scratch line.
+func TestSeatbeltScratchSpawnFailureKeepsNotes(t *testing.T) {
+	rc, rt, _ := scratchExecTools(t, buildIsolationWorkspace(t), ScratchConfig{Enabled: true})
+	canonicalScratchBase(t, rt)
+	b, _ := testSeatbeltBackend(t, nil)
+	var temp string
+	b.runner = &captureRunner{
+		err:    errors.New("spawn failed"),
+		during: func(s execSpec) { temp = replacePrivateTemp(t, tmpdirOf(t, s.Env)) },
+	}
+	rc.runner = b
+	res := planAndInvoke(t, rc, `{"argv":["/bin/echo","hi"]}`)
+	want := "command failed to run: spawn failed\nnote: " + wantLoaderNote + "\nnote: " + replacedNote(t, temp)
+	if !res.IsError || !strings.HasPrefix(res.Content, "scratch: id=") || !strings.HasSuffix(res.Content, "\n"+want) {
+		t.Fatalf("result = %+v\nwant scratch line then %q", res, want)
+	}
+}
+
+// TestSeatbeltCanceledRunCarriesNoLoaderNote: a run the caller canceled says
+// nothing about the loader, so it carries no note; the error stays the
+// cancellation.
+func TestSeatbeltCanceledRunCarriesNoLoaderNote(t *testing.T) {
+	b, _ := testSeatbeltBackend(t, &captureRunner{res: execResult{ExitCode: -1}, err: context.Canceled})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	res, err := b.Run(ctx, seatbeltSpec(t, canonTempDirT(t)))
+	if !errors.Is(err, context.Canceled) || res.ExitCode != -1 {
+		t.Fatalf("Run = %+v, %v; want the canceled result unchanged", res, err)
+	}
+	if res.Notes != nil {
+		t.Fatalf("canceled run carries notes %q; want none", res.Notes)
+	}
+}
+
+// --- Inherited descriptors (#576 final review I1/I2) ---
+//
+// None of these run in parallel: descriptor flags are process-global, and a
+// descriptor leaked here would reach any concurrent test's children.
+
+// leakFD returns fd with FD_CLOEXEC cleared, closed at cleanup, after
+// checking independently of the audit that a child would inherit it.
+func leakFD(t *testing.T, fd int) int {
+	t.Helper()
+	t.Cleanup(func() { _ = unix.Close(fd) })
+	if _, err := unix.FcntlInt(uintptr(fd), unix.F_SETFD, 0); err != nil {
+		t.Fatal(err)
+	}
+	if flags, err := unix.FcntlInt(uintptr(fd), unix.F_GETFD, 0); err != nil || flags&unix.FD_CLOEXEC != 0 {
+		t.Fatalf("precondition: fd %d flags=%d err=%v, want it inheritable", fd, flags, err)
+	}
+	return fd
+}
+
+// inheritableHostFDs lists the descriptors above stdio a child would
+// inherit, read without the audit's code.
+func inheritableHostFDs(t *testing.T) []int {
+	t.Helper()
+	f, err := os.Open("/dev/fd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	names, err := f.Readdirnames(-1)
+	_ = f.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fds []int
+	for _, name := range names {
+		var fd int
+		if _, err := fmt.Sscan(name, &fd); err != nil || fd <= 2 {
+			continue
+		}
+		if flags, err := unix.FcntlInt(uintptr(fd), unix.F_GETFD, 0); err == nil && flags&unix.FD_CLOEXEC == 0 {
+			fds = append(fds, fd)
+		}
+	}
+	return fds
+}
+
+// seatbeltShellSpec runs script under /bin/sh in ws.
+func seatbeltShellSpec(t *testing.T, ws, script string) execSpec {
+	t.Helper()
+	return execSpec{
+		Path:          "/bin/sh",
+		Argv:          []string{"/bin/sh", "-c", script},
+		Dir:           ws,
+		Env:           []string{"PATH=/usr/bin:/bin", "HOME=" + os.Getenv("HOME")},
+		WorkspaceRoot: ws,
+		ExeIdentity:   execIdentityOf(t, "/bin/sh"),
+	}
+}
+
+// The bypass the final review demonstrated: Seatbelt never re-checks a write
+// through an already-open descriptor, so a writable descriptor the launcher
+// leaked would carry a sandboxed write outside the workspace. The backend
+// refuses to spawn while one exists, and nothing lands.
+func TestSeatbeltRefusesInheritableHostFD(t *testing.T) {
+	requireSeatbeltCapability(t)
+	ws := canonTempDirT(t)
+	dir, _ := outsideCanaryDir(t, ws)
+	backend, err := newExecBackend(seatbeltTestCfg())
+	if err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(dir, "leaked.txt")
+	fd, err := unix.Open(outside, unix.O_WRONLY|unix.O_CREAT|unix.O_TRUNC, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leakFD(t, fd)
+
+	res, err := backend.Run(context.Background(), seatbeltShellSpec(t, ws, fmt.Sprintf("printf leaked >&%d", fd)))
+	if got, rerr := os.ReadFile(outside); rerr != nil || len(got) != 0 {
+		t.Fatalf("outside file = %q (err %v), want it empty: the write escaped through fd %d (Run = %+v, %v)", got, rerr, fd, res, err)
+	}
+	want := fmt.Sprintf("tools: seatbelt refuses to spawn with inheritable host fd %d (missing FD_CLOEXEC)", fd)
+	if err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("Run with inheritable fd %d = %+v, %v; want the refusal %q", fd, res, err, want)
+	}
+
+	// Control: with the descriptor close-on-exec the same command runs, and
+	// the descriptor is gone in the child.
+	if _, err := unix.FcntlInt(uintptr(fd), unix.F_SETFD, unix.FD_CLOEXEC); err != nil {
+		t.Fatal(err)
+	}
+	res, err = backend.Run(context.Background(), seatbeltShellSpec(t, ws, fmt.Sprintf("printf leaked >&%d", fd)))
+	if err != nil || res.ExitCode == 0 {
+		t.Fatalf("control Run = exit %d, %v; want a ran command whose write to fd %d fails", res.ExitCode, err, fd)
+	}
+	if got, _ := os.ReadFile(outside); len(got) != 0 {
+		t.Fatalf("outside file = %q after the control, want it empty", got)
+	}
+}
+
+// ValidateSandbox fails at construction, wrapped in ErrSandboxPolicy, where
+// every later spawn would be refused (I2): a library host learns before it
+// advertises the backend.
+func TestSeatbeltValidateSandboxRefusesInheritableFD(t *testing.T) {
+	requireSeatbeltCapability(t)
+	root := canonTempDirT(t)
+	fd, err := unix.Open("/dev/null", unix.O_RDONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leakFD(t, fd)
+	err = ValidateSandbox(seatbeltTestCfg(), root)
+	want := fmt.Sprintf("tools: seatbelt refuses to spawn with inheritable host fd %d (missing FD_CLOEXEC)", fd)
+	if !errors.Is(err, ErrSandboxPolicy) || !strings.Contains(err.Error(), want) {
+		t.Fatalf("ValidateSandbox with inheritable fd %d = %v, want ErrSandboxPolicy and %q", fd, err, want)
+	}
+	if _, err := unix.FcntlInt(uintptr(fd), unix.F_SETFD, unix.FD_CLOEXEC); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateSandbox(seatbeltTestCfg(), root); err != nil {
+		t.Fatalf("control ValidateSandbox = %v, want nil", err)
+	}
+}
+
+// The netsrc repair keys on the control's id, never on the socket family:
+// another kernel control a launcher leaks (here com.apple.network.statistics,
+// which an unprivileged process can connect; utun_control, IP egress, needs
+// root) is refused like any other descriptor.
+func TestSeatbeltRefusesOtherKernelControlSocket(t *testing.T) {
+	requireSeatbeltCapability(t)
+	ws := canonTempDirT(t)
+	backend, err := newExecBackend(seatbeltTestCfg())
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := kernelControlID("com.apple.network.statistics")
+	if err != nil {
+		t.Fatalf("resolve com.apple.network.statistics: %v", err)
+	}
+	fd, err := unix.Socket(unix.AF_SYSTEM, unix.SOCK_DGRAM, sysprotoControl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leakFD(t, fd)
+	if err := unix.Connect(fd, &unix.SockaddrCtl{ID: id}); err != nil {
+		t.Fatalf("connect com.apple.network.statistics: %v", err)
+	}
+	if sa, err := unix.Getpeername(fd); err != nil {
+		t.Fatalf("precondition: getpeername: %v", err)
+	} else if ctl, ok := sa.(*unix.SockaddrCtl); !ok || ctl.ID != id {
+		t.Fatalf("precondition: peer = %#v, want a kernel control with id %d", sa, id)
+	}
+	_, err = backend.Run(context.Background(), seatbeltShellSpec(t, ws, "true"))
+	want := fmt.Sprintf("tools: seatbelt refuses to spawn with inheritable host fd %d (missing FD_CLOEXEC)", fd)
+	if err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("Run with a leaked network.statistics control socket = %v, want %q", err, want)
+	}
+}
+
+func TestSeatbeltNetsrcNotInherited(t *testing.T) {
+	requireSeatbeltCapability(t)
+	if raceInstrumented {
+		t.Skip("helper legs run in the non-race pass")
+	}
+	id, err := kernelControlID(seatbeltNetsrcControl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fd, err := unix.Socket(unix.AF_SYSTEM, unix.SOCK_DGRAM, sysprotoControl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leakFD(t, fd)
+	if err := unix.Connect(fd, &unix.SockaddrCtl{ID: id}); err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.SetNonblock(fd, true); err != nil {
+		t.Fatal(err)
+	}
+	query := func() {
+		t.Helper()
+		// NETSRC v2 routing query for loopback; all bytes are synthetic.
+		request := [36]byte{0: 2, 8: 16, 9: unix.AF_INET, 12: 127, 15: 1}
+		if n, err := unix.Write(fd, request[:]); err != nil || n != len(request) {
+			t.Fatalf("parent netsrc query: n=%d err=%v", n, err)
+		}
+		var reply [128]byte
+		if n, err := unix.Read(fd, reply[:]); err != nil || n == 0 {
+			t.Fatalf("parent netsrc reply: n=%d err=%v", n, err)
+		}
+	}
+	query()
+	backend, err := newExecBackend(seatbeltTestCfg())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if flags, err := unix.FcntlInt(uintptr(fd), unix.F_GETFD, 0); err != nil || flags&unix.FD_CLOEXEC == 0 {
+		t.Errorf("construction left netsrc inheritable: flags=%d err=%v", flags, err)
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ws := canonTempDirT(t)
+	spec := execSpec{
+		Path: exe, Argv: []string{exe, "-test.run=^TestSeatbeltHelperProcess$", "--", "netsrcclosed", fmt.Sprint(fd), fmt.Sprint(id)},
+		Dir: ws, WorkspaceRoot: ws, ExeIdentity: execIdentityOf(t, exe),
+		Env: []string{"PATH=/usr/bin:/bin", "GO_LLM_SEATBELT_HELPER=1"},
+	}
+	for _, background := range []bool{false, true} {
+		t.Run(fmt.Sprintf("background=%t", background), func(t *testing.T) {
+			// Also repair resolver sockets created after backend construction.
+			if _, err := unix.FcntlInt(uintptr(fd), unix.F_SETFD, 0); err != nil {
+				t.Fatal(err)
+			}
+			if background {
+				out := &lockedBuffer{}
+				proc, err := backend.Start(spec, out, out)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer func() { _ = proc.Kill() }()
+				if code, _, err := proc.Wait(); err != nil || code != 0 || !strings.Contains(out.String(), "HELPER-OK: netsrc closed") {
+					t.Fatalf("background exit=%d err=%v output=%s", code, err, out.String())
+				}
+			} else {
+				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
+				res, err := backend.Run(ctx, spec)
+				if err != nil || res.ExitCode != 0 || !strings.Contains(string(res.Stdout), "HELPER-OK: netsrc closed") {
+					t.Fatalf("foreground result=%+v err=%v stdout=%s", res, err, res.Stdout)
+				}
+			}
+			query()
+		})
+	}
+}
+
+func TestSeatbeltExecRestrictedToAllowances(t *testing.T) {
+	requireSeatbeltCapability(t)
+	parent := canonTempDirT(t)
+	ws := filepath.Join(parent, "workspace")
+	outside := filepath.Join(parent, "workspace-sibling")
+	for _, dir := range []string{ws, outside} {
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const marker = "EXEC-ALLOWANCE-CONTROL"
+	foreignExe := filepath.Join(outside, "echo")
+	workspaceExe := filepath.Join(ws, "echo")
+	source := filepath.Join(parent, "echo.c")
+	if err := os.WriteFile(source, []byte("extern int puts(const char *);\nint main(void) { puts(\""+marker+"\"); return 0; }\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	build := exec.CommandContext(ctx, "/usr/bin/cc", source, "-o", foreignExe)
+	build.Env = []string{"PATH=/usr/bin:/bin", "TMPDIR=" + parent}
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build synthetic native executable: %v\n%s", err, out)
+	}
+	binary, err := os.ReadFile(foreignExe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(workspaceExe, binary, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(foreignExe, marker)
+	cmd.Env = []string{"PATH=/usr/bin:/bin"}
+	if out, err := cmd.CombinedOutput(); err != nil || string(out) != marker+"\n" {
+		t.Fatalf("host control: %q, %v", out, err)
+	}
+	for _, allowNetwork := range []bool{false, true} {
+		cfg := seatbeltTestCfg()
+		cfg.AllowNetwork = allowNetwork
+		for _, background := range []bool{false, true} {
+			t.Run(fmt.Sprintf("network=%t/background=%t", allowNetwork, background), func(t *testing.T) {
+				backend, err := newExecBackend(cfg)
+				if err != nil {
+					t.Fatal(err)
+				}
+				spec := seatbeltShellSpec(t, ws, fmt.Sprintf("exec %q %s", foreignExe, marker))
+				// Route-specific refusal oracle (#708): a shell `exec` of an
+				// outside target is refused with exit 126 and a /bin/sh
+				// diagnostic naming the target. Assert that one diagnostic
+				// line, not all of stderr (the /private/var/select/sh selector
+				// line is unrelated noise).
+				const wantExit = 126
+				wantDiag := foreignExe + ": Operation not permitted"
+				if background {
+					out := &lockedBuffer{}
+					proc, err := backend.Start(spec, out, out)
+					if err != nil {
+						t.Fatal(err)
+					}
+					defer func() { _ = proc.Kill() }()
+					code, _, err := proc.Wait()
+					if err != nil || code != wantExit || strings.Contains(out.String(), marker) ||
+						!strings.Contains(out.String(), wantDiag) {
+						t.Fatalf("outside executable: exit=%d (want %d) err=%v output=%s", code, wantExit, err, out.String())
+					}
+				} else {
+					ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+					defer cancel()
+					res, err := backend.Run(ctx, spec)
+					if err != nil || res.ExitCode != wantExit || strings.Contains(string(res.Stdout), marker) ||
+						!strings.Contains(string(res.Stderr), wantDiag) {
+						t.Fatalf("outside executable: result=%+v err=%v", res, err)
+					}
+				}
+			})
+		}
+	}
+	for name, argv := range map[string][]string{
+		"approved external executable": {foreignExe, marker},
+		"system child":                 {"/bin/sh", "-c", "/bin/echo " + marker},
+		"workspace child":              {"/bin/sh", "-c", fmt.Sprintf("%q %s", workspaceExe, marker)},
+		"private temp child":           {"/bin/sh", "-c", fmt.Sprintf(`/bin/cp %q "$TMPDIR/echo" && "$TMPDIR/echo" %s`, workspaceExe, marker)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			res := realSeatbeltRun(t, seatbeltTestCfg(), ws, argv)
+			if res.ExitCode != 0 || string(res.Stdout) != marker+"\n" {
+				t.Fatalf("allowed executable: exit=%d stdout=%s stderr=%s", res.ExitCode, res.Stdout, res.Stderr)
+			}
+		})
+	}
+}
+
+// libSystem's resolver leaves a non-CLOEXEC com.apple.netsrc control socket in
+// the process after a lookup that returns several addresses; "localhost"
+// (::1 and 127.0.0.1) is one. The audit repairs it without breaking DNS or commands.
+func TestSeatbeltRunsAfterLocalhostLookup(t *testing.T) {
+	requireSeatbeltCapability(t)
+	if _, err := net.LookupHost("localhost"); err != nil {
+		t.Fatalf("LookupHost(localhost): %v", err)
+	}
+	res := realSeatbeltRun(t, seatbeltTestCfg(), canonTempDirT(t), []string{"/bin/echo", "hi"})
+	if res.ExitCode != 0 || string(res.Stdout) != "hi\n" {
+		t.Fatalf("exit=%d stdout=%q stderr=%q, want exit 0 and \"hi\\n\"", res.ExitCode, res.Stdout, res.Stderr)
+	}
+	if fds := inheritableHostFDs(t); len(fds) != 0 {
+		t.Fatalf("command left inheritable descriptors: %v", fds)
+	}
+	if _, err := net.LookupHost("localhost"); err != nil {
+		t.Fatalf("LookupHost(localhost) after repair: %v", err)
+	}
+}
+
+// The repair refuses on any doubt: a getpeername or id-resolution error,
+// a peer that is not a kernel control, or another control's id.
+func TestSeatbeltNetsrcRepairRefusesOnDoubt(t *testing.T) {
+	const netsrc = 7
+	errBoom := errors.New("boom")
+	idOK := func(name string) (uint32, error) {
+		if name != "com.apple.netsrc" {
+			t.Fatalf("resolved control %q, want com.apple.netsrc", name)
+		}
+		return netsrc, nil
+	}
+	for _, tc := range []struct {
+		name string
+		id   func(string) (uint32, error)
+		peer func(int) (unix.Sockaddr, error)
+		want bool
+	}{
+		{"netsrc peer", idOK, func(int) (unix.Sockaddr, error) { return &unix.SockaddrCtl{ID: netsrc, Unit: 234}, nil }, true},
+		{"other control", idOK, func(int) (unix.Sockaddr, error) { return &unix.SockaddrCtl{ID: netsrc + 1}, nil }, false},
+		{"not a control", idOK, func(int) (unix.Sockaddr, error) { return &unix.SockaddrInet4{Port: 443}, nil }, false},
+		{"getpeername error", idOK, func(int) (unix.Sockaddr, error) { return nil, unix.ENOTSOCK }, false},
+		{"id error", func(string) (uint32, error) { return netsrc, errBoom }, func(int) (unix.Sockaddr, error) { return &unix.SockaddrCtl{ID: netsrc}, nil }, false},
+		{"zero id", func(string) (uint32, error) { return 0, nil }, func(int) (unix.Sockaddr, error) { return &unix.SockaddrCtl{}, nil }, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := netsrcControlSocket(tc.id, tc.peer)(3); got != tc.want {
+				t.Fatalf("may repair = %t, want %t", got, tc.want)
+			}
+		})
+	}
+	t.Run("id resolved once per audit", func(t *testing.T) {
+		calls := 0
+		mayRepair := netsrcControlSocket(func(string) (uint32, error) { calls++; return netsrc, nil },
+			func(int) (unix.Sockaddr, error) { return &unix.SockaddrCtl{ID: netsrc}, nil })
+		mayRepair(3)
+		mayRepair(4)
+		if calls != 1 {
+			t.Fatalf("id resolutions = %d, want 1", calls)
+		}
+	})
+}
+
+// TestProbeSeatbeltUnavailableInsideASandbox runs the real probe in a child
+// confined by an allow-default Seatbelt profile, where macOS refuses to apply
+// the deny-default profile every command needs: the probe must report
+// Seatbelt unavailable. The parent's own probe passing is the control.
+func TestProbeSeatbeltUnavailableInsideASandbox(t *testing.T) {
+	if os.Getenv("GO_LLM_SEATBELT_PROBE_CHILD") == "1" {
+		_, err := newSeatbeltExecBackend(seatbeltTestCfg())
+		fmt.Printf("PROBE-RESULT: %v\n", err)
+		return
+	}
+	requireSeatbeltCapability(t)
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, seatbeltExecPath, "-p", "(version 1)(allow default)",
+		exe, "-test.run=^TestProbeSeatbeltUnavailableInsideASandbox$", "-test.count=1")
+	cmd.Env = append(os.Environ(), "GO_LLM_SEATBELT_PROBE_CHILD=1")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("sandboxed child: %v\n%s", err, out)
+	}
+	const want = "PROBE-RESULT: tools: seatbelt unavailable on this host"
+	if !strings.Contains(string(out), want) {
+		t.Fatalf("sandboxed child output:\n%s\nwant a line starting %q", out, want)
+	}
 }

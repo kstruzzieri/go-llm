@@ -5,15 +5,19 @@ set -euo pipefail
 # bwrap and Seatbelt confinement.
 
 mode="pre-push"
+evidence_out=""
 
 usage() {
   cat <<'USAGE'
-Usage: scripts/ci-local [--mode security|pre-push|full]
+Usage: scripts/ci-local [--mode security|pre-push|full] [--evidence-out PATH]
 
 Modes:
   security  Run only the hardening-contract phase (used by the GitHub CI job).
   pre-push  Run fast deterministic checks intended for every push.
   full      Run pre-push checks plus slower compile smoke checks.
+
+--evidence-out names the containment evidence file; without it the evidence
+goes to a fresh mktemp file. Either way the path is printed.
 USAGE
 }
 
@@ -43,6 +47,15 @@ while [ "$#" -gt 0 ]; do
     --mode=*)
       mode="${1#*=}"
       shift
+      ;;
+    --evidence-out)
+      if [ "$#" -lt 2 ] || [ -z "$2" ]; then
+        printf '%s\n' '--evidence-out requires a path' >&2
+        usage >&2
+        exit 2
+      fi
+      evidence_out="$2"
+      shift 2
       ;;
     -h|--help)
       usage
@@ -98,7 +111,9 @@ export GOFLAGS=' '
 # The race tests are only meaningful unprivileged: root skips every
 # permission-denial path. A CI image built before the gate ran as uid 1000
 # still starts as root, so refuse before any phase runs rather than report a
-# hollow green. Security mode runs nothing permission-sensitive.
+# hollow green. Security mode may run as root: its aggregate is not
+# permission-sensitive, and its containment check fails any cited leaf that
+# skips, so a root run fails loudly rather than passing hollow.
 if [ "$mode" != security ] && [ "$(id -u)" = 0 ]; then
   printf 'ci-local: refusing to run the test suite as root; permission-denial tests would skip\n' >&2
   printf 'hint: rebuild the CI image: docker compose -f docker-compose.ci.yml build ci\n' >&2
@@ -139,11 +154,29 @@ fi
 # variable rather than piped into `grep -q`: an early-exiting downstream grep
 # would SIGPIPE the upstream one and invert the condition under pipefail.
 unexpected_skips="$(grep -E '^ +--- SKIP: ' <<<"$security_output" \
-  | grep -Ev '^    --- SKIP: TestHardeningContracts/(ZT-602_#431_project_trust|ZT-605_#434_quarantine|ZT-606_#435_retrieval_screening) \([0-9.]+s\)$' || true)"
+  | grep -Ev '^    --- SKIP: TestHardeningContracts/(ZT-605_#434_quarantine|ZT-606_#435_retrieval_screening) \([0-9.]+s\)$' || true)"
 if [ -n "$unexpected_skips" ]; then
   printf 'unexpected skip inside TestHardeningContracts:\n%s\n' "$unexpected_skips" >&2
   exit 1
 fi
+
+# The execution checker is the single runner of the containment inventory:
+# every ref mandatory on linux-host, TestContainment's scenario leaves
+# included, must run and pass with no skip (docs/local-ci.md). The evidence
+# goes to a fresh mktemp file unless --evidence-out names one (the CI job);
+# the checker's success line repeats its tree, commit and source digest for
+# runs whose file is discarded, such as the pre-push container.
+section "containment inventory"
+if [ -z "$evidence_out" ]; then
+  evidence_out="$(mktemp "${TMPDIR:-/tmp}/containment-evidence.XXXXXXXX")"
+fi
+containment_status=0
+go run ./internal/containmentinv/check -inventory docs/security/containment-inventory.json -profile linux-host -evidence-out "$evidence_out" || containment_status=$?
+if [ "$containment_status" -ne 0 ]; then
+  printf 'containment inventory check failed (profile linux-host)\n' >&2
+  exit "$containment_status"
+fi
+printf 'containment evidence: %s\n' "$evidence_out"
 if [ "$mode" = security ]; then
   exit 0
 fi
@@ -160,7 +193,16 @@ go test -race ./...
 if [ "$mode" = "full" ]; then
   section "compile smoke"
   go test -run '^$' ./...
-  # Same cross-platform vets as the CI workflow's compile smoke step.
+  # Same cross-platform builds and vets as the CI workflow's compile smoke
+  # step. CGO_ENABLED=0 overrides the image's cgo-on default, as release does.
+  GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -buildvcs=false -o /dev/null ./cmd/golem ./cmd/go-llm-mcp
   GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go vet ./...
+  GOOS=windows GOARCH=arm64 CGO_ENABLED=0 go build -buildvcs=false -o /dev/null ./cmd/golem ./cmd/go-llm-mcp
   GOOS=freebsd GOARCH=amd64 CGO_ENABLED=0 go vet ./...
+  GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -buildvcs=false -o /dev/null ./cmd/golem ./cmd/go-llm-mcp
+  GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -buildvcs=false -o /dev/null ./cmd/golem ./cmd/go-llm-mcp
+  GOOS=darwin GOARCH=amd64 CGO_ENABLED=0 go build -buildvcs=false -o /dev/null ./cmd/golem ./cmd/go-llm-mcp
+  GOOS=darwin GOARCH=amd64 CGO_ENABLED=0 go vet ./...
+  GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -buildvcs=false -o /dev/null ./cmd/golem ./cmd/go-llm-mcp
+  GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go vet ./...
 fi

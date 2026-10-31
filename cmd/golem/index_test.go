@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -117,6 +118,55 @@ func assertIndexDBModes(t *testing.T, dbPath string) {
 			t.Fatalf("%s mode = %v, want 0600", p, info.Mode().Perm())
 		}
 	}
+}
+
+func TestChmodIndexDBFilesRejectsDirectories(t *testing.T) {
+	t.Parallel()
+	for name, suffix := range map[string]string{"main": "", "wal": "-wal", "shm": "-shm"} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			dbPath := filepath.Join(t.TempDir(), "index.db")
+			dir := dbPath + suffix
+			if err := os.Mkdir(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			before, err := os.Stat(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.Chmod(dir, before.Mode().Perm()) })
+			if err := chmodIndexDBFiles(dbPath); err == nil {
+				t.Errorf("chmodIndexDBFiles(%q) = nil with directory %q, want error", dbPath, dir)
+			}
+			after, err := os.Stat(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if after.Mode().Perm() != before.Mode().Perm() {
+				t.Errorf("chmodIndexDBFiles(%q) changed directory %q mode to %o, want %o", dbPath, dir, after.Mode().Perm(), before.Mode().Perm())
+			}
+		})
+	}
+}
+
+func TestChmodIndexDBFilesHardensRegularFiles(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("file mode bits are not portable on Windows")
+	}
+	t.Parallel()
+	dbPath := filepath.Join(t.TempDir(), "index.db")
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		if err := os.WriteFile(dbPath+suffix, []byte("fixture"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(dbPath+suffix, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := chmodIndexDBFiles(dbPath); err != nil {
+		t.Fatalf("chmodIndexDBFiles(%q) = %v, want nil", dbPath, err)
+	}
+	assertIndexDBModes(t, dbPath)
 }
 
 func TestExecuteIndex_HappyPath(t *testing.T) {

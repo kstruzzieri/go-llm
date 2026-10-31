@@ -564,3 +564,60 @@ func TestBindUseCaseMissingRole(t *testing.T) {
 		t.Fatal("failed bind mutated authored")
 	}
 }
+
+// #479: a quality_ctx_ceiling is a fact about one model; re-pointing the
+// role must not carry it to the new model, and the drop is reported.
+func TestSetRoleModelDropsQualityCtxCeiling(t *testing.T) {
+	d := loadTestDoc(t, `{
+  "providers": {"local": {"base_url": "http://localhost:1", "api_format": "openai-compat"}},
+  "models": {"agent": {"name": "m1", "provider": "local", "type": "dense", "quality_ctx_ceiling": 32768}},
+  "defaults": {"agent": "agent"}
+}`)
+	res, err := d.SetRoleModel("agent", agentFacts(), SetRoleModelOpts{ConfirmUnknown: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.DroppedQualityCtxCeiling {
+		t.Errorf("DroppedQualityCtxCeiling = false, want true")
+	}
+	if got := d.authored.Models["agent"].QualityCtxCeiling; got != 0 {
+		t.Errorf("QualityCtxCeiling = %d after SetRoleModel to m9, want 0", got)
+	}
+}
+
+// #479 R4: re-selecting the role's current provider/model (to refresh
+// capacity facts, say) must not lose its ceiling: the API has no way to
+// re-assert it. The implicit row omits "provider", which means "ollama".
+func TestSetRoleModelSameModelKeepsQualityCtxCeiling(t *testing.T) {
+	for _, tt := range []struct {
+		name, body string
+		key        provider.ModelKey
+	}{
+		{"explicit provider", `{
+  "providers": {"local": {"base_url": "http://localhost:1", "api_format": "openai-compat"}},
+  "models": {"agent": {"name": "m9", "provider": "local", "type": "dense", "quality_ctx_ceiling": 32768}},
+  "defaults": {"agent": "agent"}
+}`, provider.ModelKey{Provider: "local", Model: "m9"}},
+		{"implicit ollama provider", `{
+  "providers": {"ollama": {"base_url": "http://localhost:1"}},
+  "models": {"agent": {"name": "m9", "type": "dense", "quality_ctx_ceiling": 32768}},
+  "defaults": {"agent": "agent"}
+}`, provider.ModelKey{Provider: "ollama", Model: "m9"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			d := loadTestDoc(t, tt.body)
+			facts := agentFacts() // local/m9, dense
+			facts.Key = tt.key
+			res, err := d.SetRoleModel("agent", facts, SetRoleModelOpts{ConfirmUnknown: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res.DroppedQualityCtxCeiling {
+				t.Errorf("DroppedQualityCtxCeiling = true, want false for the same model")
+			}
+			if got := d.authored.Models["agent"].QualityCtxCeiling; got != 32768 {
+				t.Errorf("QualityCtxCeiling = %d after same-model SetRoleModel, want 32768 kept", got)
+			}
+		})
+	}
+}

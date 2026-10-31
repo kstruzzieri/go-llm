@@ -1,0 +1,423 @@
+[
+  {
+    "Case": "plain-answer",
+    "Model": "openai-compat/golden-model",
+    "TraceID": "smoke-minimal-001",
+    "CandidateProvider": "openai-compat:\u003cendpoint-sha256-12\u003e",
+    "Score": {
+      "ToolSequenceMatch": 1,
+      "ToolArgsValid": 0,
+      "ToolArgsValidComputed": false,
+      "AnswerQuality": 0,
+      "LatencyMs": 0,
+      "TurnLatenciesMs": [
+        0
+      ],
+      "ScorerLatencyMs": 0,
+      "TotalTokens": 14,
+      "PromptEvalTokens": 11,
+      "GenTokens": 3,
+      "ThinkingTokens": 0,
+      "ThinkingTokensComputed": false,
+      "Notes": "capture mode: scoring skipped",
+      "Restraint": 1,
+      "RestraintComputed": true,
+      "ToolExposedRestraint": 0,
+      "ToolExposedRestraintComputed": false
+    },
+    "Err": "",
+    "Transcript": [
+      {
+        "role": "assistant",
+        "content": "smoke-ok"
+      }
+    ],
+    "Requests": [
+      {
+        "Path": "/v1/chat/completions",
+        "Authorization": "",
+        "AcceptEncoding": "gzip",
+        "Correlation": "",
+        "BodyBytes": 205,
+        "BodySHA256": "b8a979db96375ae09a4a87a13424198f4b73e3f6011410de0395727f988b9e16"
+      }
+    ]
+  },
+  {
+    "Case": "tool-route",
+    "Model": "openai-compat/golden-model",
+    "TraceID": "tool-canary-01",
+    "CandidateProvider": "openai-compat:\u003cendpoint-sha256-12\u003e",
+    "Score": {
+      "ToolSequenceMatch": 1,
+      "ToolArgsValid": 0,
+      "ToolArgsValidComputed": false,
+      "AnswerQuality": 0,
+      "LatencyMs": 0,
+      "TurnLatenciesMs": [
+        0,
+        0
+      ],
+      "ScorerLatencyMs": 0,
+      "TotalTokens": 64,
+      "PromptEvalTokens": 50,
+      "GenTokens": 14,
+      "ThinkingTokens": 2,
+      "ThinkingTokensComputed": true,
+      "Notes": "capture mode: scoring skipped",
+      "Restraint": 0,
+      "RestraintComputed": false,
+      "ToolExposedRestraint": 0,
+      "ToolExposedRestraintComputed": false
+    },
+    "Err": "",
+    "Transcript": [
+      {
+        "role": "assistant",
+        "tool_calls": [
+          {
+            "name": "rag_search",
+            "arguments": {
+              "query": "retry budget"
+            }
+          }
+        ]
+      },
+      {
+        "role": "tool",
+        "content": "provider/router.go: RetryBudget defaults to three attempts and is set via RouterConfig.RetryBudget.",
+        "tool_call_id": "call_1",
+        "name": "rag_search"
+      },
+      {
+        "role": "assistant",
+        "content": "RetryBudget defaults to 3 in provider/router.go."
+      }
+    ],
+    "Requests": [
+      {
+        "Path": "/v1/chat/completions",
+        "Authorization": "",
+        "AcceptEncoding": "gzip",
+        "Correlation": "",
+        "BodyBytes": 8157,
+        "BodySHA256": "fabd7641efad5b80babb4ca4f75920ca0b51460b232e1faa18a6f9f4dc07f493"
+      },
+      {
+        "Path": "/v1/chat/completions",
+        "Authorization": "",
+        "AcceptEncoding": "gzip",
+        "Correlation": "",
+        "BodyBytes": 8488,
+        "BodySHA256": "d9d4638cf2bf5851d1baa1b98dee99027b7b9900d7c44c1992c2a283d36d43d1"
+      }
+    ]
+  },
+  {
+    "Case": "tool-route-bypassed",
+    "Model": "openai-compat/golden-model",
+    "TraceID": "tool-canary-01",
+    "CandidateProvider": "openai-compat:\u003cendpoint-sha256-12\u003e",
+    "Score": {
+      "ToolSequenceMatch": 0,
+      "ToolArgsValid": 0,
+      "ToolArgsValidComputed": false,
+      "AnswerQuality": 0,
+      "LatencyMs": 0,
+      "TurnLatenciesMs": [
+        0
+      ],
+      "ScorerLatencyMs": 0,
+      "TotalTokens": 0,
+      "PromptEvalTokens": 0,
+      "GenTokens": 0,
+      "ThinkingTokens": 0,
+      "ThinkingTokensComputed": false,
+      "Notes": "capture mode: scoring skipped; trace \"tool-canary-01\" user turn 0: candidate bypassed scripted tool route (1 turn(s) skipped from index 2)",
+      "Restraint": 0,
+      "RestraintComputed": false,
+      "ToolExposedRestraint": 0,
+      "ToolExposedRestraintComputed": false
+    },
+    "Err": "",
+    "Transcript": [
+      {
+        "role": "assistant",
+        "content": "It is in provider/router.go."
+      }
+    ],
+    "Requests": [
+      {
+        "Path": "/v1/chat/completions",
+        "Authorization": "",
+        "AcceptEncoding": "gzip",
+        "Correlation": "",
+        "BodyBytes": 8157,
+        "BodySHA256": "fabd7641efad5b80babb4ca4f75920ca0b51460b232e1faa18a6f9f4dc07f493"
+      }
+    ]
+  },
+  {
+    "Case": "prefilled-answer",
+    "Model": "openai-compat/golden-model",
+    "TraceID": "chain-drift-window-pair-mixed",
+    "CandidateProvider": "openai-compat:\u003cendpoint-sha256-12\u003e",
+    "Score": {
+      "ToolSequenceMatch": 1,
+      "ToolArgsValid": 0,
+      "ToolArgsValidComputed": false,
+      "AnswerQuality": 0,
+      "LatencyMs": 0,
+      "TurnLatenciesMs": [
+        0
+      ],
+      "ScorerLatencyMs": 0,
+      "TotalTokens": 48,
+      "PromptEvalTokens": 40,
+      "GenTokens": 8,
+      "ThinkingTokens": 0,
+      "ThinkingTokensComputed": false,
+      "Notes": "capture mode: scoring skipped",
+      "Restraint": 1,
+      "RestraintComputed": true,
+      "ToolExposedRestraint": 0,
+      "ToolExposedRestraintComputed": false
+    },
+    "Err": "",
+    "Transcript": [
+      {
+        "role": "assistant",
+        "content": "The drift detector averages over a 35 minute window."
+      }
+    ],
+    "Requests": [
+      {
+        "Path": "/v1/chat/completions",
+        "Authorization": "",
+        "AcceptEncoding": "gzip",
+        "Correlation": "",
+        "BodyBytes": 5568,
+        "BodySHA256": "edf8f3fc5924990bd93102887b35c26251c4c3bc03924b5f8b09a42dffedb658"
+      }
+    ]
+  },
+  {
+    "Case": "prefilled-tool-call-no-content",
+    "Model": "openai-compat/golden-model",
+    "TraceID": "chain-drift-window-pair-mixed",
+    "CandidateProvider": "openai-compat:\u003cendpoint-sha256-12\u003e",
+    "Score": {
+      "ToolSequenceMatch": 0,
+      "ToolArgsValid": 0,
+      "ToolArgsValidComputed": false,
+      "AnswerQuality": 0,
+      "LatencyMs": 0,
+      "TurnLatenciesMs": [
+        0
+      ],
+      "ScorerLatencyMs": 0,
+      "TotalTokens": 0,
+      "PromptEvalTokens": 0,
+      "GenTokens": 0,
+      "ThinkingTokens": 0,
+      "ThinkingTokensComputed": false,
+      "Notes": "capture mode: scoring skipped; prefilled trace \"chain-drift-window-pair-mixed\": candidate emitted 1 tool call(s); scored on content",
+      "Restraint": 0,
+      "RestraintComputed": true,
+      "ToolExposedRestraint": 0,
+      "ToolExposedRestraintComputed": false
+    },
+    "Err": "",
+    "Transcript": [
+      {
+        "role": "assistant",
+        "content": "__LLM_BENCH_TOOL_DIVERGENCE_8F3E0B2C__",
+        "tool_calls": [
+          {
+            "name": "retrieve",
+            "arguments": {
+              "query": "drift"
+            }
+          }
+        ]
+      }
+    ],
+    "Requests": [
+      {
+        "Path": "/v1/chat/completions",
+        "Authorization": "",
+        "AcceptEncoding": "gzip",
+        "Correlation": "",
+        "BodyBytes": 5568,
+        "BodySHA256": "edf8f3fc5924990bd93102887b35c26251c4c3bc03924b5f8b09a42dffedb658"
+      }
+    ]
+  },
+  {
+    "Case": "plain-chat-tool-call",
+    "Model": "openai-compat/golden-model",
+    "TraceID": "smoke-minimal-001",
+    "CandidateProvider": "openai-compat:\u003cendpoint-sha256-12\u003e",
+    "Score": {
+      "ToolSequenceMatch": 0,
+      "ToolArgsValid": 0,
+      "ToolArgsValidComputed": false,
+      "AnswerQuality": 0,
+      "LatencyMs": 0,
+      "TurnLatenciesMs": [
+        0
+      ],
+      "ScorerLatencyMs": 0,
+      "TotalTokens": 0,
+      "PromptEvalTokens": 0,
+      "GenTokens": 0,
+      "ThinkingTokens": 0,
+      "ThinkingTokensComputed": false,
+      "Notes": "capture mode: scoring skipped; trace \"smoke-minimal-001\" user turn 0: candidate called 1 tool(s) on a plain-chat trace (no scripted tool route); scored as divergence",
+      "Restraint": 0,
+      "RestraintComputed": true,
+      "ToolExposedRestraint": 0,
+      "ToolExposedRestraintComputed": false
+    },
+    "Err": "",
+    "Transcript": [
+      {
+        "role": "assistant",
+        "content": "__LLM_BENCH_TOOL_DIVERGENCE_8F3E0B2C__",
+        "tool_calls": [
+          {
+            "name": "lookup",
+            "arguments": {
+              "q": "x"
+            }
+          }
+        ]
+      }
+    ],
+    "Requests": [
+      {
+        "Path": "/v1/chat/completions",
+        "Authorization": "",
+        "AcceptEncoding": "gzip",
+        "Correlation": "",
+        "BodyBytes": 205,
+        "BodySHA256": "b8a979db96375ae09a4a87a13424198f4b73e3f6011410de0395727f988b9e16"
+      }
+    ]
+  },
+  {
+    "Case": "argument-decode-error",
+    "Model": "openai-compat/golden-model",
+    "TraceID": "tool-canary-01",
+    "CandidateProvider": "openai-compat:\u003cendpoint-sha256-12\u003e",
+    "Score": {
+      "ToolSequenceMatch": 0,
+      "ToolArgsValid": 0,
+      "ToolArgsValidComputed": false,
+      "AnswerQuality": 0,
+      "LatencyMs": 0,
+      "TurnLatenciesMs": null,
+      "ScorerLatencyMs": 0,
+      "TotalTokens": 0,
+      "PromptEvalTokens": 0,
+      "GenTokens": 0,
+      "ThinkingTokens": 0,
+      "ThinkingTokensComputed": false,
+      "Notes": "",
+      "Restraint": 0,
+      "RestraintComputed": false,
+      "ToolExposedRestraint": 0,
+      "ToolExposedRestraintComputed": false
+    },
+    "Err": "openai-compat candidate tool \"rag_search\" arguments: json: cannot unmarshal string into Go value of type map[string]interface {}",
+    "Transcript": null,
+    "Requests": [
+      {
+        "Path": "/v1/chat/completions",
+        "Authorization": "",
+        "AcceptEncoding": "gzip",
+        "Correlation": "",
+        "BodyBytes": 8157,
+        "BodySHA256": "fabd7641efad5b80babb4ca4f75920ca0b51460b232e1faa18a6f9f4dc07f493"
+      }
+    ]
+  },
+  {
+    "Case": "empty-reply",
+    "Model": "openai-compat/golden-model",
+    "TraceID": "smoke-minimal-001",
+    "CandidateProvider": "openai-compat:\u003cendpoint-sha256-12\u003e",
+    "Score": {
+      "ToolSequenceMatch": 0,
+      "ToolArgsValid": 0,
+      "ToolArgsValidComputed": false,
+      "AnswerQuality": 0,
+      "LatencyMs": 0,
+      "TurnLatenciesMs": null,
+      "ScorerLatencyMs": 0,
+      "TotalTokens": 0,
+      "PromptEvalTokens": 0,
+      "GenTokens": 0,
+      "ThinkingTokens": 0,
+      "ThinkingTokensComputed": false,
+      "Notes": "",
+      "Restraint": 0,
+      "RestraintComputed": false,
+      "ToolExposedRestraint": 0,
+      "ToolExposedRestraintComputed": false
+    },
+    "Err": "trace \"smoke-minimal-001\" turn 0: candidate returned empty assistant reply (no content, no tool calls)",
+    "Transcript": [
+      {
+        "role": "assistant"
+      }
+    ],
+    "Requests": [
+      {
+        "Path": "/v1/chat/completions",
+        "Authorization": "",
+        "AcceptEncoding": "gzip",
+        "Correlation": "",
+        "BodyBytes": 205,
+        "BodySHA256": "b8a979db96375ae09a4a87a13424198f4b73e3f6011410de0395727f988b9e16"
+      }
+    ]
+  },
+  {
+    "Case": "http-500",
+    "Model": "openai-compat/golden-model",
+    "TraceID": "smoke-minimal-001",
+    "CandidateProvider": "openai-compat:\u003cendpoint-sha256-12\u003e",
+    "Score": {
+      "ToolSequenceMatch": 0,
+      "ToolArgsValid": 0,
+      "ToolArgsValidComputed": false,
+      "AnswerQuality": 0,
+      "LatencyMs": 0,
+      "TurnLatenciesMs": null,
+      "ScorerLatencyMs": 0,
+      "TotalTokens": 0,
+      "PromptEvalTokens": 0,
+      "GenTokens": 0,
+      "ThinkingTokens": 0,
+      "ThinkingTokensComputed": false,
+      "Notes": "",
+      "Restraint": 0,
+      "RestraintComputed": false,
+      "ToolExposedRestraint": 0,
+      "ToolExposedRestraintComputed": false
+    },
+    "Err": "provider: openaicompat: chat: openaicompat: 500 Internal Server Error: boom",
+    "Transcript": null,
+    "Requests": [
+      {
+        "Path": "/v1/chat/completions",
+        "Authorization": "",
+        "AcceptEncoding": "gzip",
+        "Correlation": "",
+        "BodyBytes": 205,
+        "BodySHA256": "b8a979db96375ae09a4a87a13424198f4b73e3f6011410de0395727f988b9e16"
+      }
+    ]
+  }
+]

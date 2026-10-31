@@ -386,6 +386,7 @@ func WithConfig(path string) Option    // models.json path
 func WithRAGPath(path string) Option   // SQLite vector store
 func WithRAGDisabled() Option
 func WithTLS(cert, key string) Option
+func WithHTTPBearerToken(token string) Option // optional shared bearer token for HTTP
 
 // Transports
 func (s *Server) ListenStdio(ctx context.Context) error
@@ -418,7 +419,7 @@ func (s *Server) Close() error
 **Key design decisions:**
 - Stateful `Server` struct wraps `ollama.Client` + optional `rag.VectorStore`/`rag.Indexer`/`rag.Retriever`
 - Model resolution: explicit model param > config defaults > error. Uses `config.ResolveAll` with cached results, refreshed on `list_models` / `pull_model`
-- Transport: stdio for client integration, HTTP/2 for network. h2c (cleartext HTTP/2) for local, TLS for remote — `isLoopback()` prevents accidental plaintext exposure on non-loopback addresses
+- Transport: stdio for client integration, HTTP/2 for network. h2c (cleartext HTTP/2) for local, TLS for remote — `isLoopback()` prevents accidental plaintext exposure on non-loopback addresses, but neither TLS nor `isLoopback()` authenticates the caller; `WithHTTPBearerToken` (the binary reads `GO_LLM_MCP_TOKEN`) adds one shared bearer token, with no per-user identity, on every request that reaches the MCP handler ([details](GETTING_STARTED.md#http-authentication-and-trusted-networks))
 - Graceful shutdown: `Shutdown` stops HTTP listener, waits for in-flight requests, then closes RAG store and derived clients
 - RAG tools trust caller-provided paths (matches MCP trust model: server trusts its client)
 
@@ -431,8 +432,9 @@ go-llm-mcp --transport stdio
 # HTTP/2 (local development)
 go-llm-mcp --transport http --addr 127.0.0.1:8080
 
-# HTTP/2 with TLS (remote deployment)
-go-llm-mcp --transport http --addr 0.0.0.0:443 --tls-cert cert.pem --tls-key key.pem
+# HTTP/2 with TLS and bearer authentication (remote deployment)
+(umask 077 && openssl rand -hex 32 > mcp-token)
+GO_LLM_MCP_TOKEN="$(cat mcp-token)" go-llm-mcp --transport http --addr 0.0.0.0:443 --tls-cert cert.pem --tls-key key.pem
 
 # Custom config
 go-llm-mcp --ollama-url http://gpu-server:11434 --config /etc/go-llm/models.json

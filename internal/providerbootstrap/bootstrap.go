@@ -69,6 +69,18 @@ type Options struct {
 	// constructing the source and reading cached capacity make no requests,
 	// and every probe stays guarded by DestinationGate.
 	ActiveProviders []string
+
+	// ContentGuard installs Bundle.SecretMatcher as the outbound content guard
+	// (#424) on every openai-compat client whose materialized destination is
+	// not loopback: a request body carrying a configured credential is refused
+	// before anything is sent. Loopback clients are exempt, and ollama clients
+	// have no guard to install. Requires DestinationGate, whose client wrapper
+	// refuses redirects and binds each request to its destination's origin;
+	// without it a guarded body could be forwarded by a redirect, and New
+	// fails before building anything.
+	//
+	// false keeps the pre-#424 clients byte-identical.
+	ContentGuard bool
 }
 
 // Bundle is the assembled provider stack. Warnings collects non-fatal,
@@ -87,6 +99,14 @@ type Bundle struct {
 	Models    *provider.ModelRegistry
 	Router    *provider.Router
 	Warnings  []error
+	// SecretMatcher is Config.SecretMatcher, frozen once per New from the
+	// materialized effective config (#424). It is never nil: a config that
+	// resolved no credential, including the nil-Config default, yields an
+	// always-false matcher. New installs it as a client guard only when
+	// Options.ContentGuard is set, and only on non-loopback openai-compat
+	// clients; hosts that want exact configured-credential blocking elsewhere
+	// install it from this value.
+	SecretMatcher func(string) bool
 }
 
 // defaultOllamaURL is the fallback base URL for the nil-Config / default provider.
@@ -96,6 +116,9 @@ const defaultOllamaURL = "http://localhost:11434"
 // constructed/registered or the model registry/router cannot be built.
 func New(ctx context.Context, opts Options) (*Bundle, error) {
 	gate := opts.DestinationGate
+	if opts.ContentGuard && gate == nil {
+		return nil, errors.New("providerbootstrap: ContentGuard requires DestinationGate")
+	}
 	if gate != nil && len(opts.ActiveProviders) == 0 {
 		return nil, fmt.Errorf("providerbootstrap: DestinationGate set without ActiveProviders; a gated bootstrap that refreshes nothing is a wiring bug, not a mode")
 	}
@@ -108,11 +131,18 @@ func New(ctx context.Context, opts Options) (*Bundle, error) {
 	if err != nil {
 		return nil, err
 	}
-	provs, ollamaClients, err := constructProviders(eff, gate)
+	effCfg := eff.cfg
+	// One matcher per New: the guard on the clients and Bundle.SecretMatcher
+	// are the same value, so they cannot disagree about the credential set.
+	match := effCfg.SecretMatcher()
+	var guard func(string) bool
+	if opts.ContentGuard {
+		guard = match
+	}
+	provs, ollamaClients, err := constructProviders(eff, gate, guard)
 	if err != nil {
 		return nil, err
 	}
-	effCfg := eff.cfg
 
 	// Validate slot_discovery before any provider registration or
 	// RefreshModels I/O: user config fails loud and fails FAST — an
@@ -212,6 +242,9 @@ func New(ctx context.Context, opts Options) (*Bundle, error) {
 	if err := installContextWindowOverrides(mr, effCfg); err != nil {
 		return nil, err
 	}
+	if err := installQualityCtxCeilingOverrides(mr, effCfg); err != nil {
+		return nil, err
+	}
 	if err := installCapabilityOverrides(mr, effCfg); err != nil {
 		return nil, err
 	}
@@ -289,12 +322,13 @@ func New(ctx context.Context, opts Options) (*Bundle, error) {
 	router := provider.NewRouter(mr, pReg, routerOpts...)
 
 	return &Bundle{
-		Config:    effCfg,
-		Effective: eff,
-		Providers: pReg,
-		Models:    mr,
-		Router:    router,
-		Warnings:  warnings,
+		Config:        effCfg,
+		Effective:     eff,
+		Providers:     pReg,
+		Models:        mr,
+		Router:        router,
+		Warnings:      warnings,
+		SecretMatcher: match,
 	}, nil
 }
 

@@ -87,6 +87,7 @@ func TestWorkspacePinnedDuringPolicy(t *testing.T) {
 			// #613: the pinned directory moved after the guard decided, so the
 			// guarded path no longer reaches it. Fail closed; the replacement
 			// content (FORBIDDEN) must never be returned either.
+			// containment: PATH-TOCTOU-READ
 			if listing {
 				result, err := NewList(ws).Invoke(context.Background(), json.RawMessage(`{"path":"public"}`))
 				if err != nil || !result.IsError || result.Content != "path changed during access" {

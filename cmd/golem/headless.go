@@ -49,7 +49,7 @@ func (f outputFormat) machine() bool { return f == outputJSON || f == outputStre
 //
 // Deliberately absent:
 //   - verify_command   — a synthetic approval identity, never a registered
-//     tool; the model cannot call it (cmd/golem/verify.go).
+//     tool; the model cannot call it (agent/tools/verify_slot.go).
 //   - submit_plan      — planning mode only, and -goal is incompatible with -p.
 //   - mcp__*           — excluded by the issue; MCP tools stay mounted under
 //     -p and stay denied.

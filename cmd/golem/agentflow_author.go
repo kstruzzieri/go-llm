@@ -1471,6 +1471,12 @@ func runAgentflowAuthorWithClient(ctx context.Context, stdout, stderr io.Writer,
 	if err := checkAgentflowStateMajor(root); err != nil {
 		return err
 	}
+	// #643: an absent or pristine plan lock passes guardExistingPlan, so
+	// retained execution history is checked first; init and lock would
+	// otherwise relock over it.
+	if err := refuseAgentflowExecutionHistory(root, "refusing to plan"); err != nil {
+		return err
+	}
 	if err := guardExistingPlan(root); err != nil {
 		return err
 	}

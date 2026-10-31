@@ -170,6 +170,55 @@ To use different models, edit `models.json`:
 
 Pull the new model (`ollama pull llama3.3:70b`) and restart your application.
 
+### Trained context vs. served window
+
+Some models are served with a longer window than they were trained on. The
+Qwen2.5-7B-Instruct and larger instruct checkpoints, for example, ship a
+config set for 32,768 tokens and reach 131,072 only with YaRN. When a
+trained-context ceiling is known for a model, the quality-sensitive use cases
+(`chat`, `reasoning`, `code-review`, `planning`, `analysis`) budget against it;
+`agent`, `fim`, `embedding`, and side tasks always get the full window. The
+MCP `generate` tool routes as `chat`, so it is quality-sensitive too.
+
+A ceiling cuts the budget only when it is below the served `context_window`,
+or when the window is unknown, in which case the ceiling is the budget for the
+quality-sensitive use cases. A ceiling at or above a known window changes
+nothing, and a model with no ceiling gets the full window everywhere.
+
+go-llm ships curated ceilings of 262,144 tokens for names that parse to the
+Qwen3.5 and Qwen3.6 families (for example `qwen3.5:27b` or
+`qwen3.6:35b-a3b`). Catalog defaults match by parsed family name, so Hugging
+Face repository names and GGUF file identifiers may not match. Qwen2.5 and
+Qwen3 are deliberately not seeded: the `qwen2.5` name also matches the
+Qwen2.5-1M models (trained to 256K), and `qwen3` also matches Qwen3-Coder and
+the 2507 refresh (262,144 native). For those, and for any other model, set
+`quality_ctx_ceiling` on its entry, for example 32768 for an ordinary Qwen2.5
+or original-release Qwen3 checkpoint served with a YaRN window:
+
+```json
+"models": {
+  "chat": {
+    "name": "qwen3:32b",
+    "provider": "local",
+    "type": "dense",
+    "context_window": 131072,
+    "quality_ctx_ceiling": 32768
+  }
+}
+```
+
+`0` or omitted means unset and preserves any catalog ceiling; zero does not
+disable it. A positive value overrides the catalog; negative values are
+rejected. Two roles on one provider/model with different nonzero values
+conflict at load. To opt a seeded family out, set
+`quality_ctx_ceiling` equal to its `context_window`.
+
+A smaller budget also lowers the router's headroom score, which can change
+model selection, sticky routing, and fallback order before admission fails.
+Golem's per-turn input ceiling follows the active route's use case: in
+`-goal` mode that is `planning`, so Golem compacts against the reduced
+budget; the ordinary agent loop is unaffected.
+
 ## Running Golem against a hosted API
 
 Golem does not require a local LLM. Any hosted OpenAI-compatible endpoint works:
@@ -269,8 +318,10 @@ server without `/v1/completions` is fine — the Router never sends it
 unsupported requests.
 
 RAG is optional. To index and use `retrieve`, add a hosted embedding model
-(`"type": "embedding"`) and set `defaults.embedding` to it. Without one, golem
-runs with file tools only.
+(`"type": "embedding"`) and set `defaults.embedding` to it, and start golem with
+`-profile trusted` or a retrieval opt-in (`-progressive`, `-grounding` or
+`-rag-db`), because the default Inspect profile mounts no `retrieve` tool. Without
+an embedding model, golem runs with file tools only.
 
 ### Verify the setup
 
@@ -410,12 +461,15 @@ go build -o go-llm-mcp ./cmd/go-llm-mcp/
 # Disable RAG tools
 ./go-llm-mcp --no-rag
 
-# HTTP/2 with TLS (remote deployment)
-./go-llm-mcp --transport http --addr 0.0.0.0:443 --tls-cert cert.pem --tls-key key.pem
+# HTTP/2 with TLS and bearer authentication (remote deployment)
+(umask 077 && openssl rand -hex 32 > mcp-token)
+GO_LLM_MCP_TOKEN="$(cat mcp-token)" ./go-llm-mcp --transport http --addr 0.0.0.0:443 --tls-cert cert.pem --tls-key key.pem
 
 # Opt-in agent-memory tools (agent_memory_search/create/promote)
 ./go-llm-mcp --agent-memory-db ~/.local/share/go-llm/memories.db
 ```
+
+Without `GO_LLM_MCP_TOKEN` the HTTP transport is unauthenticated, TLS included. See [HTTP authentication and trusted networks](#http-authentication-and-trusted-networks).
 
 #### Claude Desktop Configuration
 
@@ -458,6 +512,40 @@ A host's project instructions can encourage `rag_search` for conceptual or
 cross-file questions and text search for known identifiers. Retrieval reflects
 the indexed content, so re-read files edited since indexing and refresh the
 index as the project changes.
+
+#### HTTP authentication and trusted networks
+
+Set `GO_LLM_MCP_TOKEN` to require one shared bearer token on the HTTP transport. The binary reads it once at startup and only with `--transport http`; stdio ignores it. If it is unset, behavior is unchanged and the transport is unauthenticated. If it is set but empty, startup fails with `GO_LLM_MCP_TOKEN is set but empty; unset it to disable HTTP authentication`, so an empty value cannot silently disable authentication.
+
+The token must be 1-4096 bytes of RFC 6750 token characters: letters, digits, `-`, `.`, `_`, `~`, `+`, `/`, then optional trailing `=`. Nothing is trimmed or normalized, so a value with a trailing newline or space fails startup. Errors name `GO_LLM_MCP_TOKEN` and never echo its value. Use at least 32 random bytes, as in the `openssl rand -hex 32` example above (64 hex characters); the syntax check is not an entropy check. Prefer `-hex` to `-base64`, which wraps its output at 64 characters once the size reaches 49 bytes, and the embedded newline fails startup. Because the token is read once, rotating it means restarting the server and updating every client.
+
+Keep the value in a file only you can read and set it on the server process alone, as in the example above, rather than `export`ing it into a shell where every later command inherits it. Give clients the same value from that file. Under systemd, use `EnvironmentFile=` pointing at a 0600 file that holds `GO_LLM_MCP_TOKEN=<value>`, not `Environment=`, whose value `systemctl show` displays.
+
+Clients must send a preconfigured `Authorization: Bearer <token>` header; this is not an OAuth implementation. Golem's MCP client cannot add that header, so a token-protected `go-llm-mcp` answers Golem with 401; use stdio for Golem or leave the token unset on loopback. The request must carry exactly one `Authorization` header: the scheme is matched case-insensitively, one or more spaces follow, and the token is matched case-sensitively. Query parameters, cookies, request bodies and session IDs never substitute for the header. Any other request gets HTTP 401 with the body `unauthorized` and `WWW-Authenticate: Bearer realm="go-llm-mcp"`, the same response for every credential failure. That covers every request that reaches the MCP handler: initialize, discovery, tool calls, GET/SSE, DELETE, and requests that carry an existing session ID. A request the body limit rejects first keeps the limit's status. With a token set, the server also stops answering `OPTIONS *` itself, so that request gets the 401 too. On h2c, an HTTP/1.1 `Upgrade: h2c` request must itself carry the token: one without it gets the 401 before h2c reads or buffers its body or replies `101 Switching Protocols`. The upgraded request and every later stream are checked again.
+
+| Configuration | Behavior |
+|---|---|
+| No token, loopback h2c | Unchanged: unauthenticated, including `localhost` and IPv4 and IPv6 loopback. |
+| Token, loopback h2c | Bearer required on every request. The transport stays cleartext and local-only. |
+| Non-loopback bind without TLS, token or not | Refuses to listen, as before. |
+| TLS, no token | Unchanged: unauthenticated on any permitted bind. |
+| TLS and token | Bearer required on every request that reaches the MCP handler, `OPTIONS *` included. |
+| Stdio | Unchanged: trusted local single client. `GO_LLM_MCP_TOKEN` is ignored. |
+
+The token proves possession of one server credential and nothing more. The gate removes `Authorization` before the MCP SDK and tools see the request, and no `TokenInfo`, `UserID` or principal is derived from the token. Host-supplied `TokenInfo.UserID` and `WithRetrievalPrincipalResolver` keep their retrieval-policy meaning and cannot bypass the bearer check. A custom resolver cannot read `Authorization`, because the gate strips it; it must use separate trusted context. Every token holder can invoke the registered tools with the server's own authority, and the token gives no isolation between holders.
+
+TLS encrypts traffic. The loopback-only rule for h2c and the cross-origin check limit exposure. None of them authenticates the caller, so an unauthenticated HTTP server trusts every caller that can reach it, other local processes included. On loopback a token stops other users' processes and browser-originated requests, not processes running as the same OS user, which can read the server's environment (`/proc/<pid>/environ` on Linux, `ps -E` on macOS). TLS without a token remains for compatibility; it is not a recommended remote deployment. Keep any reverse proxy on a trusted boundary and keep `Authorization` out of its access logs.
+
+Once the server is running at its deployed address, confirm that a request without the bearer is refused before clients use it:
+
+```bash
+curl -sSi https://mcp.example.com/ | head -n 1
+# the status line reports 401 (HTTP/1.1 or HTTP/2)
+```
+
+Do not run an authenticated server with `GODEBUG=http2debug=2`: the HTTP/2 implementation then logs decoded request headers, `Authorization` included, before any handler runs.
+
+An embedded server takes the token through `mcp.WithHTTPBearerToken(token)`; the library never reads the environment. An empty or malformed token makes `mcp.NewServer` return an error wrapping `mcp.ErrInvalidHTTPBearerToken` before it loads configuration or opens any database. Omitting the option leaves HTTP unauthenticated.
 
 #### Embedded in a Go Application
 

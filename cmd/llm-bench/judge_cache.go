@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/kstruzzieri/go-llm/internal/sqlitedsn"
 	_ "modernc.org/sqlite"
 )
 
@@ -137,40 +138,67 @@ type sqliteJudgeCache struct {
 	misses atomic.Int64
 }
 
+// resolveJudgeCachePath gives the opener and output guards the same target.
+// Convert plain paths to URIs before Resolve so symlink/.. is not cleaned.
+func resolveJudgeCachePath(path string) (dsn, diskPath string, err error) {
+	if strings.TrimSpace(path) == "" {
+		return "", "", nil
+	}
+	if path == ":memory:" {
+		return path, "", nil
+	}
+	u, err := sqlitedsn.FileURLPreservingPath(path)
+	if err != nil {
+		return "", "", err
+	}
+	// SQLite ignores fragments; modernc would include one in the last pragma.
+	u.Fragment, u.RawFragment = "", ""
+	return sqlitedsn.Resolve(u.String(), 5*time.Second)
+}
+
 // openJudgeCache opens (and migrates) the judge cache DB at path. Empty
 // path returns (nil, nil) so callers can disable the cache by passing "".
 // Callers MUST check for a nil concrete pointer before assigning to a
 // judgeCacheStore interface variable to avoid the typed-nil interface trap.
 func openJudgeCache(path string) (*sqliteJudgeCache, error) {
-	if strings.TrimSpace(path) == "" {
+	dsn, diskPath, err := resolveJudgeCachePath(path)
+	if err != nil {
+		return nil, fmt.Errorf("%w %q: %w", errJudgeCacheOpen, path, err)
+	}
+	if dsn == "" {
 		return nil, nil
 	}
-	if dir := filepath.Dir(path); dir != "." && dir != "" {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			return nil, fmt.Errorf("%w %q: mkdir parent: %v", errJudgeCacheOpen, path, err)
+	if diskPath != "" {
+		if err := os.MkdirAll(filepath.Dir(diskPath), 0o755); err != nil {
+			return nil, fmt.Errorf("%w %q: mkdir parent: %w", errJudgeCacheOpen, path, err)
 		}
 	}
-	db, err := sql.Open("sqlite", path)
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
-		return nil, fmt.Errorf("%w %q: %v", errJudgeCacheOpen, path, err)
+		return nil, fmt.Errorf("%w %q: %w", errJudgeCacheOpen, path, err)
 	}
 	db.SetMaxOpenConns(1) // SQLite does not support concurrent writers; serialize all ops.
 	if err := db.Ping(); err != nil {
 		_ = db.Close()
-		return nil, fmt.Errorf("%w %q: %v", errJudgeCacheOpen, path, err)
+		return nil, fmt.Errorf("%w %q: %w", errJudgeCacheOpen, path, err)
+	}
+	if err := sqlitedsn.CheckMainFile(context.Background(), db, diskPath); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("%w %q: %w", errJudgeCacheOpen, path, err)
 	}
 	if err := migrateJudgeCache(db); err != nil {
 		_ = db.Close()
-		return nil, fmt.Errorf("%w: %v", errJudgeCacheMigrate, err)
+		return nil, fmt.Errorf("%w: %w", errJudgeCacheMigrate, err)
 	}
 	return &sqliteJudgeCache{db: db}, nil
 }
 
-// migrateJudgeCache applies pending DDL migrations using the
-// judge_cache_schema_version table to track applied versions. The pattern
-// matches feedback/migration.go and rag/migration.go: each migration runs
-// in its own transaction so a mid-list failure leaves the DB in a known
-// state.
+// migrateJudgeCache applies pending migrations, tracking applied versions in
+// judge_cache_schema_version, with the claim-first runner of
+// conversation/migration.go and feedback/migration.go. The version read here
+// only skips steps already applied; each step's own claim decides whether it
+// runs, so two llm-bench runs opening one cache at once apply every step
+// exactly once.
 func migrateJudgeCache(db *sql.DB) error {
 	const createVersionTable = `CREATE TABLE IF NOT EXISTS judge_cache_schema_version (
         version     INTEGER PRIMARY KEY,
@@ -184,15 +212,30 @@ func migrateJudgeCache(db *sql.DB) error {
 	if err := db.QueryRow(`SELECT COALESCE(MAX(version),0) FROM judge_cache_schema_version`).Scan(&current); err != nil {
 		return fmt.Errorf("read schema version: %w", err)
 	}
-	migrations := []struct {
-		version     int
-		description string
-		ddl         string
-	}{
-		{
-			version:     1,
-			description: "initial judge_cache table",
-			ddl: `
+	for _, m := range judgeCacheMigrations {
+		if m.version <= current {
+			continue
+		}
+		if err := applyJudgeCacheMigration(db, m); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// judgeCacheMigration is one schema step. ddl may hold several statements and
+// need not be idempotent: applyJudgeCacheMigration runs it at most once.
+type judgeCacheMigration struct {
+	version     int
+	description string
+	ddl         string
+}
+
+var judgeCacheMigrations = []judgeCacheMigration{
+	{
+		version:     1,
+		description: "initial judge_cache table",
+		ddl: `
             CREATE TABLE judge_cache (
                 cache_key          TEXT PRIMARY KEY,
                 judge_model        TEXT NOT NULL,
@@ -210,37 +253,52 @@ func migrateJudgeCache(db *sql.DB) error {
             );
             CREATE INDEX idx_judge_cache_model_trace ON judge_cache(judge_model, trace_id);
             `,
-		},
-		{
-			version:     2,
-			description: "add judge_provider column for provider-instance provenance",
-			ddl: `
+	},
+	{
+		version:     2,
+		description: "add judge_provider column for provider-instance provenance",
+		ddl: `
             ALTER TABLE judge_cache ADD COLUMN judge_provider TEXT NOT NULL DEFAULT '';
             `,
-		},
+	},
+}
+
+// applyJudgeCacheMigration runs m in one transaction whose first statement
+// claims m's version row. Being first, the claim takes the write lock without
+// upgrading a read lock, so it waits out another writer under busy_timeout
+// instead of failing at once. A claim that inserts nothing means another
+// opener already committed m, and the step is skipped. The claim commits with
+// the DDL, so a failed step leaves no version row behind.
+func applyJudgeCacheMigration(db *sql.DB, m judgeCacheMigration) (err error) {
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin tx for v%d: %w", m.version, err)
 	}
-	for _, m := range migrations {
-		if m.version <= current {
-			continue
+	defer func() {
+		if rbErr := tx.Rollback(); rbErr != nil && !errors.Is(rbErr, sql.ErrTxDone) {
+			err = errors.Join(err, fmt.Errorf("rollback v%d: %w", m.version, rbErr))
 		}
-		tx, err := db.Begin()
-		if err != nil {
-			return fmt.Errorf("begin tx for v%d: %w", m.version, err)
-		}
-		if _, err := tx.Exec(m.ddl); err != nil {
-			_ = tx.Rollback()
-			return fmt.Errorf("apply v%d: %w", m.version, err)
-		}
-		if _, err := tx.Exec(
-			`INSERT INTO judge_cache_schema_version (version, description, applied_at) VALUES (?, ?, ?)`,
-			m.version, m.description, time.Now().UnixNano(),
-		); err != nil {
-			_ = tx.Rollback()
-			return fmt.Errorf("record v%d: %w", m.version, err)
-		}
-		if err := tx.Commit(); err != nil {
-			return fmt.Errorf("commit v%d: %w", m.version, err)
-		}
+	}()
+	res, err := tx.Exec(
+		`INSERT INTO judge_cache_schema_version (version, description, applied_at)
+		 VALUES (?, ?, ?) ON CONFLICT(version) DO NOTHING`,
+		m.version, m.description, time.Now().UnixNano(),
+	)
+	if err != nil {
+		return fmt.Errorf("claim v%d: %w", m.version, err)
+	}
+	claimed, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("claim v%d rows: %w", m.version, err)
+	}
+	if claimed == 0 {
+		return nil
+	}
+	if _, err := tx.Exec(m.ddl); err != nil {
+		return fmt.Errorf("apply v%d: %w", m.version, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit v%d: %w", m.version, err)
 	}
 	return nil
 }

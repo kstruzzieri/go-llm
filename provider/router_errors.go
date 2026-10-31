@@ -42,6 +42,14 @@ var ErrRouterClosed = errors.New("router: router is closed")
 // silently routing to the wrong provider instance.
 var ErrProviderMismatch = errors.New("router: provider mismatch between qualified model and Provider field")
 
+// ErrContentDenied is returned when a request body carries a configured
+// credential and so was not sent. It is a local policy refusal, not an
+// infrastructure failure: IsInfrastructureError reports false for it, so the
+// router neither falls back to another candidate nor counts it against a
+// circuit breaker. Its attempt is attributed as AttemptStatusUnknown, so
+// routing feedback records no failure or latency against the model.
+var ErrContentDenied = errors.New("provider: request content denied: configured credential")
+
 // ---------------------------------------------------------------------------
 // BreakerState
 // ---------------------------------------------------------------------------

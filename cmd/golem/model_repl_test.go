@@ -475,6 +475,7 @@ func TestModelSetFailuresPreserveTheCompleteTuple(t *testing.T) {
 		// publication itself fails.
 		prepare func(t *testing.T, sess *replSession)
 		wantOut string
+		extra   []string
 	}{
 		{
 			name:    "unknown selector",
@@ -501,6 +502,8 @@ func TestModelSetFailuresPreserveTheCompleteTuple(t *testing.T) {
 				sess.tools = append(slices.Clone(sess.tools), duplicateNameTool{name: sess.tools[0].Spec().Name})
 			},
 			wantOut: "model unchanged: golem: duplicate tool name \"read_file\"\n",
+			// Inspect rejects any extra before the duplicate check (#387).
+			extra: []string{"-profile", "trusted"},
 		},
 		{
 			name:    "closed runtime",
@@ -515,7 +518,7 @@ func TestModelSetFailuresPreserveTheCompleteTuple(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fx := newModelSwitchFixture(t, "")
-			fx.withSession(t, nil, func(t *testing.T, sess *replSession) {
+			fx.withSession(t, tc.extra, func(t *testing.T, sess *replSession) {
 				sess.pressure = &pressureCapture{runID: "kept"}
 				sess.lastModel = "primary/agent-model"
 				if tc.prepare != nil {

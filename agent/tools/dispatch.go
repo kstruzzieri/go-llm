@@ -12,6 +12,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/kstruzzieri/go-llm/agent"
+	"github.com/kstruzzieri/go-llm/agent/interceptor"
 	"github.com/kstruzzieri/go-llm/provider"
 )
 
@@ -34,6 +35,12 @@ const (
 	defaultDispatchTimeout       = 5 * time.Minute
 	dispatchSummaryTruncated     = "… [summary truncated]"
 	dispatchErrorTruncated       = "… [error details truncated]"
+
+	// dispatchSensitiveSummary replaces a child's partial summary after a
+	// sensitive block (#424): the last retained message may hold the value the
+	// guard just refused.
+	dispatchSensitiveSummary = "Partial result unavailable: blocked: sensitive content"
+	dispatchSensitiveError   = "blocked: sensitive content"
 )
 
 const dispatchSystemPrompt = "You are a read-only exploration subagent. Investigate only the assigned task using the available read and retrieval tools. Do not write or edit files, run commands, call external tools, submit plans, or dispatch children. Return a concise evidence-backed summary and do not claim actions you did not perform."
@@ -212,6 +219,17 @@ func NewDispatch(caller agent.ModelCaller, ctxMgr agent.ContextManager, availabl
 		tools = append(tools, tool)
 	}
 	return &Dispatch{caller: caller, ctxMgr: ctxMgr, tools: tools, limits: limits, interceptors: append([]agent.Interceptor(nil), interceptors...), slots: make(chan struct{}, limits.MaxConcurrent)}, nil
+}
+
+// ChildToolNames returns the names of the tools a child may be offered, in
+// order: the four file readers, then retrieve when one was supplied. Scoped
+// tasks get only the readers. The slice is a fresh copy on every call.
+func (d *Dispatch) ChildToolNames() []string {
+	names := make([]string, len(d.tools))
+	for i, tool := range d.tools {
+		names[i] = tool.Spec().Name
+	}
+	return names
 }
 
 // invokeConcurrency resolves one invocation's fan-out: the static
@@ -428,6 +446,15 @@ func (d *Dispatch) runChild(ctx context.Context, task dispatchTask, child dispat
 	if err != nil {
 		out.StopReason = "error"
 	}
+	sensitiveBlocked := interceptor.SensitiveBlocked(err)
+	if sensitiveBlocked {
+		// The last retained message can be the value the guard refused, and the
+		// recorded model name was captured before the output check could see it;
+		// neither reaches the parent (#424). The child's earlier history is not
+		// rewritten.
+		out.Summary = dispatchSensitiveSummary
+		out.Model = ""
+	}
 	if strings.TrimSpace(out.Summary) == "" {
 		out.Summary = ""
 		// ponytail: the last evidence avoids an extra model call; add bounded
@@ -453,7 +480,13 @@ func (d *Dispatch) runChild(ctx context.Context, task dispatchTask, child dispat
 		}
 	}
 	if err != nil {
-		out.Error = err.Error()
+		if sensitiveBlocked {
+			// The joined error can include provider diagnostics or a finding rule
+			// that repeats the protected text. Neither is safe for the parent.
+			out.Error = dispatchSensitiveError
+		} else {
+			out.Error = err.Error()
+		}
 		if strings.TrimSpace(out.Error) == "" {
 			out.Error = "child failed without an error message"
 		}

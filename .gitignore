@@ -7,6 +7,10 @@ docs/superpowers/
 docs/llm/traces/*
 !docs/llm/traces/round2-challenge/
 !docs/llm/traces/round2-challenge/**
+!docs/llm/traces/injection/
+!docs/llm/traces/injection/**
+!docs/llm/traces/interceptor-benign/
+!docs/llm/traces/interceptor-benign/**
 !docs/llm/traces/first-accepted-run/
 docs/llm/traces/first-accepted-run/*
 !docs/llm/traces/first-accepted-run/conversation-fa-c02.json
@@ -43,5 +47,6 @@ docs/llm/calibration/reports/
 docs/llm/calibration/round2-capture/
 docs/llm/calibration/round3-capture/
 docs/llm/traces/real-workflow-local/
+docs/llm/census/full/
 docs/llm/calibration/fim-cases/
 docs/llm/calibration/real-workflow-capture/

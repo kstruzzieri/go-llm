@@ -647,8 +647,11 @@ func TestNewServerClosesBootstrapResourcesOnTranscriptStartupFailure(t *testing.
 	if err == nil {
 		t.Fatal("NewServer() error = nil, want transcript startup failure")
 	}
-	if !strings.Contains(err.Error(), "create transcript directory") {
-		t.Fatalf("NewServer() error = %q, want transcript directory failure", err)
+	// The transcript store fails on the non-directory parent: on Unix while it
+	// resolves the file SQLite would open, elsewhere when it creates the
+	// directory (#648).
+	if !strings.Contains(err.Error(), "open transcript store") || !strings.Contains(err.Error(), "not-a-dir") {
+		t.Fatalf("NewServer() error = %q, want the transcript open to fail on the non-directory parent", err)
 	}
 
 	select {

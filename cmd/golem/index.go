@@ -13,6 +13,7 @@ import (
 	"github.com/kstruzzieri/go-llm/config"
 	"github.com/kstruzzieri/go-llm/internal/providerbootstrap"
 	"github.com/kstruzzieri/go-llm/internal/secretscan"
+	"github.com/kstruzzieri/go-llm/memory"
 	"github.com/kstruzzieri/go-llm/provider"
 	"github.com/kstruzzieri/go-llm/rag"
 )
@@ -167,13 +168,8 @@ func fileExists(p string) bool {
 }
 
 func chmodIndexDBFiles(dbPath string) error {
-	for _, p := range []string{dbPath, dbPath + "-wal", dbPath + "-shm"} {
-		if err := os.Chmod(p, 0o600); err != nil {
-			if os.IsNotExist(err) {
-				continue
-			}
-			return fmt.Errorf("golem: chmod index db artifact %q: %w", p, err)
-		}
+	if err := memory.SecureDBFiles(dbPath); err != nil {
+		return fmt.Errorf("golem: secure index db %q: %w", dbPath, err)
 	}
 	return nil
 }

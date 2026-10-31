@@ -23,7 +23,7 @@ func buildProviders(cfg *config.Config, override, ocOverrideProvider, ocOverride
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	provs, ollamaClients, err := constructProviders(eff, nil)
+	provs, ollamaClients, err := constructProviders(eff, nil, nil)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -42,13 +42,16 @@ func buildProviders(cfg *config.Config, override, ocOverrideProvider, ocOverride
 // reuse these same clients (the ollama client map and the openai-compat
 // provider), so capability-probe traffic is guarded by construction rather
 // than by a second wrapping site.
-func constructProviders(eff *Effective, gate *provider.DestinationGate) ([]provider.Provider, map[string]*ollama.Client, error) {
+//
+// A non-nil match is the outbound content guard (#424); buildProvider installs
+// it on the openai-compat clients that need it.
+func constructProviders(eff *Effective, gate *provider.DestinationGate, match func(string) bool) ([]provider.Provider, map[string]*ollama.Client, error) {
 	keys := eff.sortedProviderKeys()
 	registered := make([]provider.Provider, 0, len(keys))
 	ollamaClients := make(map[string]*ollama.Client)
 	for _, key := range keys {
 		pc := eff.cfg.Providers[key]
-		prov, client, err := buildProvider(key, pc, gate, eff.dests[key])
+		prov, client, err := buildProvider(key, pc, gate, eff.dests[key], match)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -99,7 +102,12 @@ const defaultSlotProbeClientTimeout = 5 * time.Second
 // returns the underlying client so the prober factory can reuse it. A
 // non-nil gate wraps the provider's HTTP client with the destination guard
 // bound to dest; a nil gate keeps the ungated construction byte-identical.
-func buildProvider(key string, cfg config.ProviderConfig, gate *provider.DestinationGate, dest provider.Destination) (provider.Provider, *ollama.Client, error) {
+//
+// A non-nil match is installed as the content guard on an openai-compat client
+// whose destination is not loopback. Loopback is decided on the materialized
+// destination, so a URL override moves a provider across the boundary; ollama
+// clients take no guard.
+func buildProvider(key string, cfg config.ProviderConfig, gate *provider.DestinationGate, dest provider.Destination, match func(string) bool) (provider.Provider, *ollama.Client, error) {
 	timeout := defaultProviderTimeout
 	if cfg.Timeout.Duration > 0 {
 		timeout = cfg.Timeout.Duration
@@ -132,6 +140,9 @@ func buildProvider(key string, cfg config.ProviderConfig, gate *provider.Destina
 		}
 		if cfg.APIKey != "" {
 			copts = append(copts, openaicompat.WithAPIKey(cfg.APIKey))
+		}
+		if match != nil && !dest.IsLocal() {
+			copts = append(copts, openaicompat.WithContentGuard(match))
 		}
 		return openaicompat.NewProvider(
 			openaicompat.NewClient(cfg.BaseURL, copts...),

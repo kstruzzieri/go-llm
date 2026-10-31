@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/kstruzzieri/go-llm/provider"
@@ -598,7 +599,17 @@ func (p *Provider) embed(ctx context.Context, req provider.EmbedRequest, admit p
 		return nil, fmt.Errorf("provider: openaicompat: embed: at least one input text is required")
 	}
 
-	key := embedKey(req.Model, req.Input)
+	// Freeze the inputs first: the denial check, the flight key and the leader's
+	// request body all read this copy, so a caller reusing req.Input while the
+	// flight is queued in admission cannot make them disagree. The check runs
+	// here, not only in post, so a refused request never joins or starts a
+	// flight and never takes a permit; post stays the wire boundary.
+	input := slices.Clone(req.Input)
+	if match := p.client.contentGuard; match != nil && (match(req.Model) || slices.ContainsFunc(input, match)) {
+		return nil, fmt.Errorf("provider: openaicompat: embed: %w", provider.ErrContentDenied)
+	}
+
+	key := embedKey(req.Model, input)
 	sharedCtx := context.WithoutCancel(ctx)
 	ch := p.embedGroup.DoChan(key, func() (any, error) {
 		if admit != nil {
@@ -611,15 +622,15 @@ func (p *Provider) embed(ctx context.Context, req provider.EmbedRequest, admit p
 			}
 			defer release()
 		}
-		body := embedRequest{Model: req.Model, Input: req.Input}
+		body := embedRequest{Model: req.Model, Input: input}
 		var resp embedResponse
 		if err := p.client.postJSON(sharedCtx, "/v1/embeddings", body, &resp); err != nil {
 			return nil, fmt.Errorf("provider: openaicompat: embed: %w", err)
 		}
-		if len(resp.Data) != len(req.Input) {
-			return nil, fmt.Errorf("provider: openaicompat: embed: server returned %d embeddings for %d inputs", len(resp.Data), len(req.Input))
+		if len(resp.Data) != len(input) {
+			return nil, fmt.Errorf("provider: openaicompat: embed: server returned %d embeddings for %d inputs", len(resp.Data), len(input))
 		}
-		ordered := make([][]float64, len(req.Input))
+		ordered := make([][]float64, len(input))
 		for _, doc := range resp.Data {
 			if doc.Index < 0 || doc.Index >= len(ordered) {
 				return nil, fmt.Errorf("provider: openaicompat: embed: server returned out-of-range index %d", doc.Index)

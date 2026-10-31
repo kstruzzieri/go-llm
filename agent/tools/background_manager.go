@@ -55,6 +55,11 @@ type JobStatus struct {
 
 	StdoutFloor, StdoutEnd uint64
 	StderrFloor, StderrEnd uint64
+
+	// Notes are backend diagnostics recorded when the job completed, such as
+	// a refused Seatbelt private-temp cleanup (#576). They never change
+	// State, ExitCode or ExitKnown. Copied; nil when there are none.
+	Notes []string
 }
 
 // tailChunk is one tail read through the manager: the stream bytes plus the
@@ -86,6 +91,7 @@ type backgroundJob struct {
 	state         string
 	exitCode      int
 	exitKnown     bool
+	notes         []string
 }
 
 // BackgroundManager owns every detached background command for one host:
@@ -253,14 +259,17 @@ func (m *BackgroundManager) startWrapped(ctx context.Context, spec execSpec, cwd
 		m.mu.Unlock()
 		// Spawned but never registered: reap synchronously so no orphan
 		// survives, then undo the reservation (which releases startWG and
-		// with it any Shutdown blocked on this start).
+		// with it any Shutdown blocked on this start). The reap ran the
+		// process's cleanup; a note it reports joins the returned error,
+		// which errors.Is still classifies.
 		_ = proc.Kill()
 		_, _, _ = proc.Wait()
 		m.releaseReservation(handle)
+		err := ctx.Err()
 		if closed {
-			return JobStatus{}, errBackgroundShutDown
+			err = errBackgroundShutDown
 		}
-		return JobStatus{}, ctx.Err()
+		return JobStatus{}, withCleanupNote(err, cleanupNoteOf(proc))
 	}
 	delete(m.pending, handle)
 	m.jobs[handle] = job
@@ -277,8 +286,12 @@ func (m *BackgroundManager) startWrapped(ctx context.Context, spec execSpec, cwd
 // Nothing that only presents or notifies may ever be added before the close.
 func (m *BackgroundManager) reap(job *backgroundJob) {
 	code, managerKilled, waitErr := job.proc.Wait()
+	note := cleanupNoteOf(job.proc)
 
 	m.mu.Lock()
+	if note != "" {
+		job.notes = []string{note}
+	}
 	switch {
 	case managerKilled:
 		// Manager-initiated kill (Stop or Shutdown).
@@ -331,6 +344,7 @@ func (m *BackgroundManager) snapshotLocked(job *backgroundJob) JobStatus {
 		StdoutEnd:   outEnd,
 		StderrFloor: errFloor,
 		StderrEnd:   errEnd,
+		Notes:       append([]string(nil), job.notes...),
 	}
 }
 

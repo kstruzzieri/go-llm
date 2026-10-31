@@ -52,17 +52,23 @@ func splitLines(s string) []string {
 // It is never parsed or fed back to the model. beforeExists distinguishes a
 // brand-new file (all additions) from an overwrite. A non-empty before with an
 // empty after renders as emptied (truncated to zero bytes).
+//
+// path is the raw workspace-relative path. It is quoted ONCE here, for display:
+// an ordinary path stays bare; whitespace, controls, quotes and backslashes
+// become a single quoted token, so names cannot forge headings or impersonate
+// another escaped path. Callers and pending plans keep the raw path.
 func unifiedDiff(path string, before, after []byte, beforeExists bool) string {
+	display := quoteArgForPreview(path)
 	var b strings.Builder
 	if !beforeExists {
-		fmt.Fprintf(&b, "new file: %s\n", path)
+		fmt.Fprintf(&b, "new file: %s\n", display)
 		for _, ln := range splitLines(string(after)) {
 			fmt.Fprintf(&b, "+%s\n", ln)
 		}
 		return b.String()
 	}
 	if len(after) == 0 {
-		fmt.Fprintf(&b, "empty file: %s\n", path)
+		fmt.Fprintf(&b, "empty file: %s\n", display)
 		for _, ln := range splitLines(string(before)) {
 			fmt.Fprintf(&b, "-%s\n", ln)
 		}
@@ -78,7 +84,7 @@ func unifiedDiff(path string, before, after []byte, beforeExists bool) string {
 	for s < len(bl)-p && s < len(al)-p && bl[len(bl)-1-s] == al[len(al)-1-s] {
 		s++
 	}
-	fmt.Fprintf(&b, "--- %s\n+++ %s\n", path, path)
+	fmt.Fprintf(&b, "--- %s\n+++ %s\n", display, display)
 	if p > 0 {
 		start := p - diffContext
 		if start < 0 {

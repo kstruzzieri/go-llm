@@ -13,6 +13,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/kstruzzieri/go-llm/agent"
+	"github.com/kstruzzieri/go-llm/agent/interceptor"
 	"github.com/kstruzzieri/go-llm/agent/tools"
 	"github.com/kstruzzieri/go-llm/consult"
 	"github.com/kstruzzieri/go-llm/conversation"
@@ -27,6 +28,8 @@ import (
 
 // replSession holds the per-process state the REPL needs.
 type replSession struct {
+	// profile is the resolved permission profile the runtime was built with (#387).
+	profile         golemruntime.Profile
 	commandsDir     string
 	recipes         map[string]recipe.Recipe
 	recipeHint      *recipeInvocationHint
@@ -68,11 +71,17 @@ type replSession struct {
 	// when -allow-exec owned the manager at startup.
 	lateManager *tools.BackgroundManager
 	lateStop    func() bool
-	// verifier is the REPL-mode post-write verification slot (#372). nil
-	// outside the REPL, for a REPL session started with -allow-write (its
-	// verifier is bound directly, and /allow-write is idempotent there), and
-	// in narrow tests (set is nil-safe).
-	verifier *lateVerifier
+	// verifier is the REPL-mode post-write verification slot (#372, #576),
+	// bound to the session root and sandbox policy; the orchestrator verifies
+	// through it. Every REPL session has one (armed or disabled at startup
+	// under -allow-write, absent until /allow-write otherwise). nil outside
+	// the REPL and in narrow tests: every method is nil-safe. An unarmed slot
+	// still lets verifyBatch run its post-Verify ctx.Err() check (see run()).
+	verifier *tools.VerifierSlot
+	// sandbox is the session's frozen sandbox policy (resolveSandbox): what
+	// /allow-write builds the verifier under and /allow-exec builds its
+	// manager under, the same one startup used.
+	sandbox  tools.SandboxConfig
 	maxSteps int
 	// startupBudget is the budget resolved at startup. It is IMMUTABLE and
 	// exists only for the AgentFlow planner/driver, which freeze their own
@@ -160,6 +169,8 @@ type replSession struct {
 	// REPL turns and status use runtime.ModelOptions() instead.
 	startupModelOptions provider.ModelOptions
 
+	notice func(string) // stderr notices; rebound to control.notice in the REPL
+
 	// control coordinates the prompt, async notices, and Ctrl-C. nil in tests
 	// and non-interactive callers, where runREPL falls back to a plain prompt
 	// and the caller's interrupt wiring.
@@ -237,9 +248,10 @@ func runREPL(ctx context.Context, src lineSource, out io.Writer, interrupts <-ch
 			}
 		}
 		// Record accepted goals after inspection has had a chance to block
-		// secrets or abort on a canary. Unrelated failures retain existing history.
+		// sensitive content or abort on a canary. Unrelated failures retain
+		// existing history.
 		_, runErr := runOnceWithRecipeHint(ctx, out, interrupts, sess, line, src, hint)
-		if !secretsBlocked(runErr) && !canaryAborted(runErr) && !errors.Is(runErr, errRecipeHintRefused) {
+		if !interceptor.SensitiveBlocked(runErr) && !canaryAborted(runErr) && !errors.Is(runErr, errRecipeHintRefused) {
 			src.RecordGoal(line)
 			if sessionSaveRefused(runErr) {
 				_, _ = fmt.Fprintln(out, "The next turn uses the latest saved history, without this unsaved turn. Use /new for a separate session.")
@@ -492,9 +504,9 @@ func runOnceWithRecipeHint(ctx context.Context, out io.Writer, interrupts <-chan
 		cancel()
 	}
 	// Inspect both trees before demoting session errors or presenting a seal
-	// failure: either can carry a canary abort or secrets block with a
+	// failure: either can carry a canary abort or sensitive block with a
 	// sensitive side-error.
-	secretBlock := secretsBlocked(runErr) || secretsBlocked(sealErr)
+	sensitiveBlock := interceptor.SensitiveBlocked(runErr) || interceptor.SensitiveBlocked(sealErr)
 	canaryBlock := canaryAborted(runErr) || canaryAborted(sealErr)
 	if canaryBlock {
 		sess.canary.burn()
@@ -503,7 +515,7 @@ func runOnceWithRecipeHint(ctx context.Context, out io.Writer, interrupts <-chan
 	if res.Answer != "" &&
 		errors.Is(runErr, golemruntime.ErrSessionPersistence) &&
 		!sessionSaveRefused(runErr) &&
-		!secretBlock && !canaryBlock &&
+		!sensitiveBlock && !canaryBlock &&
 		!errors.Is(runErr, context.Canceled) &&
 		!errors.Is(runErr, context.DeadlineExceeded) {
 		sessionSaveErr = runErr
@@ -511,7 +523,7 @@ func runOnceWithRecipeHint(ctx context.Context, out io.Writer, interrupts <-chan
 	}
 	if sealErr != nil {
 		runErr = errors.Join(runErr, sealErr)
-		if !secretBlock && !canaryBlock {
+		if !sensitiveBlock && !canaryBlock {
 			writeRunLine("checkpoint: %v", sealErr)
 		}
 	}
@@ -608,10 +620,10 @@ func runOnceWithRecipeHint(ctx context.Context, out io.Writer, interrupts <-chan
 	if sess.obs != nil && sess.obs.trace && canaryBlock {
 		writeRunLine("warning: trace not written: canary detected")
 	}
-	if sess.obs != nil && sess.obs.trace && secretBlock && !canaryBlock {
+	if sess.obs != nil && sess.obs.trace && sensitiveBlock && !canaryBlock {
 		writeRunLine("warning: trace not written: sensitive content detected")
 	}
-	if sess.obs != nil && sess.obs.trace && !secretBlock && !canaryBlock {
+	if sess.obs != nil && sess.obs.trace && !sensitiveBlock && !canaryBlock {
 		meta := agenttrace.TraceMeta{
 			Goal:           req.Goal,
 			System:         req.System,
@@ -629,7 +641,7 @@ func runOnceWithRecipeHint(ctx context.Context, out io.Writer, interrupts <-chan
 	}
 
 	if runErr != nil {
-		if runCtx.Err() != nil && !secretBlock && !canaryBlock {
+		if runCtx.Err() != nil && !sensitiveBlock && !canaryBlock {
 			writeRunLine("canceled")
 			return res, runErr
 		}
@@ -772,7 +784,7 @@ func dispatchSlash(ctx context.Context, out io.Writer, sess *replSession, line s
 		handleModel(ctx, out, sess, fields)
 	case "/undo":
 		if sess.journal == nil {
-			_, _ = fmt.Fprintln(out, "writes disabled; run /allow-write or start with -allow-write")
+			_, _ = fmt.Fprintln(out, disabledHint(sess, "writes", "/allow-write", "-allow-write"))
 			return "", false
 		}
 		n := 1
@@ -792,7 +804,7 @@ func dispatchSlash(ctx context.Context, out io.Writer, sess *replSession, line s
 		sess.journal.undo(ctx, out, n)
 	case "/checkpoints":
 		if sess.journal == nil {
-			_, _ = fmt.Fprintln(out, "writes disabled; run /allow-write or start with -allow-write")
+			_, _ = fmt.Fprintln(out, disabledHint(sess, "writes", "/allow-write", "-allow-write"))
 		} else if len(fields) == 1 || (len(fields) == 2 && fields[1] == "list") {
 			sess.journal.listCheckpoints(ctx, out)
 		} else {
@@ -820,7 +832,7 @@ func dispatchSlash(ctx context.Context, out io.Writer, sess *replSession, line s
 		}
 	case "/auto-edits":
 		if !sess.allowWrite {
-			_, _ = fmt.Fprintln(out, "writes disabled; run /allow-write or start with -allow-write")
+			_, _ = fmt.Fprintln(out, disabledHint(sess, "writes", "/allow-write", "-allow-write"))
 			return "", false
 		}
 		if sess.grants == nil {
@@ -915,7 +927,7 @@ func dispatchSlash(ctx context.Context, out io.Writer, sess *replSession, line s
 // requested rather than printing a raw context error.
 func handleJobs(ctx context.Context, out io.Writer, sess *replSession, fields []string) {
 	if sess.bgManager == nil {
-		_, _ = fmt.Fprintln(out, "exec disabled; run /allow-exec or start with -allow-exec")
+		_, _ = fmt.Fprintln(out, disabledHint(sess, "exec", "/allow-exec", "-allow-exec"))
 		return
 	}
 	switch {
@@ -960,16 +972,25 @@ func renderJobStopResult(out io.Writer, st tools.JobStatus, err error) {
 	default:
 		_, _ = fmt.Fprintf(out, "already finished: %s (%s)\n", st.Handle, st.State)
 	}
+	for _, n := range st.Notes {
+		_, _ = fmt.Fprintf(out, "  note: %s\n", n)
+	}
 }
 
-// renderJobLine renders one /jobs listing line: handle, state (with exit code
-// when known), pid, then argv through the dedicated control-safe renderer.
+// renderJobLine renders one /jobs listing entry: a line with the handle, state
+// (with exit code when known), pid, then argv through the dedicated
+// control-safe renderer, followed by one indented line per backend note
+// (#576). Notes arrive one-line and control-safe from agent/tools.
 func renderJobLine(st tools.JobStatus) string {
 	state := st.State
 	if st.ExitKnown {
 		state = fmt.Sprintf("%s exit=%d", st.State, st.ExitCode)
 	}
-	return fmt.Sprintf("%s  %s  pid=%d  %s", st.Handle, state, st.PID, renderJobArgv(st.Argv))
+	line := fmt.Sprintf("%s  %s  pid=%d  %s", st.Handle, state, st.PID, renderJobArgv(st.Argv))
+	for _, n := range st.Notes {
+		line += "\n  note: " + n
+	}
+	return line
 }
 
 // jobArgvDisplayCap bounds the rendered argv to one terminal-friendly line.
@@ -1001,6 +1022,18 @@ func renderJobArgv(argv []string) string {
 		return string(runes[:jobArgvDisplayCap]) + "..."
 	}
 	return line
+}
+
+// disabledHint is the "capability not mounted" message for /undo, /checkpoints,
+// /auto-edits and /jobs. Only a Trusted session can mount the capability
+// in-session with the matching /allow-* command; every other profile refuses
+// that command (refuseLateMountOutsideTrusted), so they get a restart hint
+// instead. Like that refusal it fails closed: anything but Trusted restarts (#387).
+func disabledHint(sess *replSession, what, command, flag string) string {
+	if sess.profile == golemruntime.ProfileTrusted {
+		return fmt.Sprintf("%s disabled; run %s or start with %s", what, command, flag)
+	}
+	return fmt.Sprintf("%s disabled in profile %s: restart with -profile trusted %s", what, sess.profile, flag)
 }
 
 // autoEditState reports the write-class grant as a toggle state. The "a"
@@ -1044,8 +1077,8 @@ const golemHelp = `commands:
                  inspect project documents or approve their exact snapshot
   /grants [clear]
                  count active session approval grants, or revoke them all
-  /allow-write   enable the approval-gated write_file/edit_file tools for the rest of this session
-  /allow-exec    enable the approval-gated command tools for the rest of this session
+  /allow-write   enable the approval-gated write_file/edit_file tools for the rest of this session (Trusted profile only)
+  /allow-exec    enable the approval-gated command tools for the rest of this session (Trusted profile only)
   /git-context refresh
                  re-capture the repository snapshot (branch, status, recent commits) in the system prompt
   /think [off|on|low|medium|high|default]

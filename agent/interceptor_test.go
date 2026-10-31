@@ -312,10 +312,11 @@ func TestRunHookRunsEveryInterceptorAfterBlockAndError(t *testing.T) {
 	}}
 	rec := &interceptRecorder{}
 	r := newRun(bad, blocker, tail)
-	findings, verdict, err := r.runHook(context.Background(), rec, 3, inputScope(nil, false, false), inputInvoke(InputInspection{Step: 3}))
+	findings, verdict, _, err := r.runHook(context.Background(), rec, 3, inputScope(nil, false, false), inputInvoke(InputInspection{Step: 3}))
 	if err == nil || err.Error() != "agent: interceptor bad input: boom" {
 		t.Fatalf("err = %v", err)
 	}
+	// containment: PIPELINE-ORDER
 	if len(tail.inputs) != 1 {
 		t.Fatalf("tail ran %d times after an error and a block, want 1 (spec D1)", len(tail.inputs))
 	}
@@ -336,7 +337,7 @@ func TestRunHookRunsEveryInterceptorAfterBlockAndError(t *testing.T) {
 
 func TestRunHookJoinsEveryError(t *testing.T) {
 	r := newRun(&stubInterceptor{name: "a", err: errors.New("boom")}, &stubInterceptor{name: "b", err: errors.New("bang")})
-	_, _, err := r.runHook(context.Background(), normalizeObserver(nil), 0, hookScope{hook: HookOutput},
+	_, _, _, err := r.runHook(context.Background(), normalizeObserver(nil), 0, hookScope{hook: HookOutput},
 		func(ic Interceptor) ([]Finding, error) {
 			return ic.InspectOutput(context.Background(), OutputInspection{})
 		})
@@ -347,21 +348,21 @@ func TestRunHookJoinsEveryError(t *testing.T) {
 
 func TestTerminalAtJoinsBlockedErrorWithHookErrors(t *testing.T) {
 	block := []Finding{{Interceptor: "b", Rule: "deny", Verdict: VerdictBlock}}
-	err := terminalAt(VerdictBlock, HookInput, 4, block, VerdictBlock, errors.New("boom"))
+	err := terminalAt(VerdictBlock, HookInput, 4, block, VerdictBlock, false, errors.New("boom"))
 	var blocked *BlockedError
 	if !errors.As(err, &blocked) || blocked.Step != 4 || err.Error() != "agent: input blocked by interceptor b (deny)\nboom" {
 		t.Fatalf("err = %v (%T)", err, err)
 	}
-	if err := terminalAt(VerdictBlock, HookInput, 0, nil, VerdictTag, errors.New("boom")); errors.As(err, &blocked) || err.Error() != "boom" {
+	if err := terminalAt(VerdictBlock, HookInput, 0, nil, VerdictTag, false, errors.New("boom")); errors.As(err, &blocked) || err.Error() != "boom" {
 		t.Fatalf("tag plus error must be the error alone, got %v", err)
 	}
-	if err := terminalAt(VerdictBlock, HookOutput, 1, block, VerdictBlock, nil); !errors.As(err, &blocked) || blocked.Hook != HookOutput {
+	if err := terminalAt(VerdictBlock, HookOutput, 1, block, VerdictBlock, false, nil); !errors.As(err, &blocked) || blocked.Hook != HookOutput {
 		t.Fatalf("block without error must be the BlockedError alone, got %v", err)
 	}
-	if err := terminalAt(VerdictAbort, HookToolCall, 1, block, VerdictBlock, nil); err != nil {
+	if err := terminalAt(VerdictAbort, HookToolCall, 1, block, VerdictBlock, false, nil); err != nil {
 		t.Fatalf("a recoverable block below the threshold must return nil, got %v", err)
 	}
-	if err := terminalAt(VerdictAbort, HookToolCall, 1, block, VerdictBlock, errors.New("boom")); !errors.As(err, &blocked) {
+	if err := terminalAt(VerdictAbort, HookToolCall, 1, block, VerdictBlock, false, errors.New("boom")); !errors.As(err, &blocked) {
 		t.Fatalf("a recoverable block WITH an error must still carry the BlockedError, got %v", err)
 	}
 }
@@ -452,7 +453,7 @@ func TestRunHookNormalizesValues(t *testing.T) {
 		}
 	}}
 	r := newRun(ic)
-	got, verdict, err := r.runHook(context.Background(), normalizeObserver(nil), 2, inputScope(nil, false, false), inputInvoke(InputInspection{}))
+	got, verdict, _, err := r.runHook(context.Background(), normalizeObserver(nil), 2, inputScope(nil, false, false), inputInvoke(InputInspection{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -474,7 +475,7 @@ func TestRunHookScoreSaturates(t *testing.T) {
 		return []Finding{{Rule: "r", Risk: 100}}
 	}})
 	r.risk.Score = math.MaxInt - 10
-	if _, _, err := r.runHook(context.Background(), normalizeObserver(nil), 0, inputScope(nil, false, false), inputInvoke(InputInspection{})); err != nil {
+	if _, _, _, err := r.runHook(context.Background(), normalizeObserver(nil), 0, inputScope(nil, false, false), inputInvoke(InputInspection{})); err != nil {
 		t.Fatal(err)
 	}
 	if r.risk.Score != math.MaxInt {
@@ -489,10 +490,10 @@ func TestRunHookSnapshotsAndEvents(t *testing.T) {
 	}
 	rec := &interceptRecorder{}
 	r := newRun(ic)
-	if _, _, err := r.runHook(context.Background(), rec, 0, inputScope(nil, false, false), inputInvoke(InputInspection{})); err != nil {
+	if _, _, _, err := r.runHook(context.Background(), rec, 0, inputScope(nil, false, false), inputInvoke(InputInspection{})); err != nil {
 		t.Fatal(err)
 	}
-	found, _, err := r.runHook(context.Background(), rec, 1, hookScope{hook: HookToolCall, toolCallID: "call-7"},
+	found, _, _, err := r.runHook(context.Background(), rec, 1, hookScope{hook: HookToolCall, toolCallID: "call-7"},
 		func(ic Interceptor) ([]Finding, error) {
 			return ic.InspectToolCall(context.Background(), ToolCallInspection{})
 		})
@@ -508,6 +509,7 @@ func TestRunHookSnapshotsAndEvents(t *testing.T) {
 	}
 	e1.Risk.Findings[0].Risk = 999
 	e1.Findings[0].Risk = 999
+	// containment: RISK-SNAPSHOT
 	if r.risk.Findings[0].Risk != 30 {
 		t.Fatal("observer wrote through to the run's report: snapshot missing")
 	}
@@ -524,7 +526,7 @@ func TestRunHookSnapshotsAndEvents(t *testing.T) {
 func TestRunHookNoFindingsNoEventAndObserverErrorJoined(t *testing.T) {
 	rec := &interceptRecorder{}
 	r := newRun(&stubInterceptor{name: "quiet"})
-	findings, verdict, err := r.runHook(context.Background(), rec, 0, hookScope{hook: HookOutput},
+	findings, verdict, _, err := r.runHook(context.Background(), rec, 0, hookScope{hook: HookOutput},
 		func(ic Interceptor) ([]Finding, error) {
 			return ic.InspectOutput(context.Background(), OutputInspection{})
 		})
@@ -533,7 +535,7 @@ func TestRunHookNoFindingsNoEventAndObserverErrorJoined(t *testing.T) {
 	}
 	rec = &interceptRecorder{err: errors.New("sink down")}
 	r = newRun(blockAll("b"))
-	_, _, err = r.runHook(context.Background(), rec, 0, inputScope(nil, false, false), inputInvoke(InputInspection{}))
+	_, _, _, err = r.runHook(context.Background(), rec, 0, inputScope(nil, false, false), inputInvoke(InputInspection{}))
 	if err == nil || err.Error() != "sink down" {
 		t.Fatalf("err = %v, want the observer's error", err)
 	}
@@ -1002,6 +1004,7 @@ func TestToolCallBlockSerialNeverPlansInvokesOrPrompts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v (a tool-call block is a model-visible observation, not a run error)", err)
 	}
+	// containment: PIPELINE-ORDER
 	if tool.planned != 0 || tool.invoked != 0 {
 		t.Fatalf("planned=%d invoked=%d, want 0/0", tool.planned, tool.invoked)
 	}
@@ -1269,6 +1272,7 @@ func TestToolResultBlockReplacesTheObservationBeforeTheObserver(t *testing.T) {
 			}
 			const content = "tool result blocked by interceptor guard (poison)"
 			last := rec.toolResults[len(rec.toolResults)-1]
+			// containment: PIPELINE-ORDER
 			if last.Call.Function.Name != "evil" || last.Result.Content != content || !last.Blocked || !last.Invoked || last.Result.Attrib != nil || last.Result.Context != nil {
 				t.Fatalf("observer saw %+v, want the replaced observation", last)
 			}

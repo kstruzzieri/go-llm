@@ -5,8 +5,10 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 )
 
@@ -196,7 +198,8 @@ func (d *Document) Config() *Config {
 // invariants (validate plus the entry-point guards enforce them; e.g.
 // Duration's non-negative rule). The clone panics remain the backstop for
 // bugs, never a reachable rejection path. Expansion is NOT re-triggered —
-// it lives in finalize, not UnmarshalJSON.
+// it lives in finalize, not UnmarshalJSON. JSON skips the unexported
+// resolved sidecar, so it is deep-copied explicitly.
 func (c *Config) clone() *Config {
 	data, err := json.Marshal(c)
 	if err != nil {
@@ -205,6 +208,11 @@ func (c *Config) clone() *Config {
 	var out Config
 	if err := json.Unmarshal(data, &out); err != nil {
 		panic(fmt.Sprintf("config: clone unmarshal: %v", err))
+	}
+	out.resolved = maps.Clone(c.resolved)
+	for name, rk := range out.resolved {
+		rk.components = slices.Clone(rk.components)
+		out.resolved[name] = rk
 	}
 	return &out
 }

@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -76,9 +75,13 @@ func appendAgentMemoryTools(tools []agent.Tool, records *memory.MemoryRecordStor
 	if sessn == nil {
 		return tools
 	}
+	// Every write path re-secures the DB file and its sidecars (#237 lesson).
+	// The hook rides on the library types themselves: wrapping them in a
+	// golem-local type would make them opaque to the Trusted approval floor.
+	secure := func() error { return chmodDBFiles(dbPath) }
 	return append(tools,
-		sidecarSecuringTool{Tool: agenttools.AgentMemoryCreate{S: records, WorkspaceID: workspaceID, SessionID: sid}, dbPath: dbPath},
-		sidecarSecuringTool{Tool: agenttools.AgentMemoryPromote{S: records, WorkspaceID: workspaceID, SessionID: sid}, dbPath: dbPath},
+		agenttools.AgentMemoryCreate{S: records, WorkspaceID: workspaceID, SessionID: sid, AfterWrite: secure},
+		agenttools.AgentMemoryPromote{S: records, WorkspaceID: workspaceID, SessionID: sid, AfterWrite: secure},
 	)
 }
 
@@ -134,7 +137,13 @@ func openMemoryRuntime(ctx context.Context, getenv func(string) string, root str
 		rt.user = store
 	}
 	if wantRecords {
-		rs, rerr := memory.NewMemoryRecordStore(ctx, db, memory.RecordStoreConfig{KeyDir: dbPath + ".keys", Writer: memory.WriterGolem})
+		// The keys live beside the file SQLite opens, as with OpenRecordStore
+		// (#648): a symlinked memories.db keeps them beside its target.
+		keyDir, rerr := memory.DefaultRecordKeyDir(dbPath)
+		var rs *memory.MemoryRecordStore
+		if rerr == nil {
+			rs, rerr = memory.NewMemoryRecordStore(ctx, db, memory.RecordStoreConfig{KeyDir: keyDir, Writer: memory.WriterGolem})
+		}
 		if rerr != nil {
 			rt.warns = append(rt.warns, "agent memory disabled: "+rerr.Error())
 		} else {
@@ -161,35 +170,6 @@ func openMemoryRuntime(ctx context.Context, getenv func(string) string, root str
 	rt.db, rt.dbPath = db, dbPath
 	return rt
 }
-
-// sidecarSecuringTool re-secures the memory DB file + sidecars after every
-// Invoke of a memory-writing tool (#237 lesson: every write path re-chmods,
-// not just the open path). Spec/Effect delegate via the embedded Tool; Origin
-// is forwarded explicitly because embedding does not promote it (#514).
-// Do not wrap PlanningTools: interface embedding drops Plan and its approval
-// gating.
-type sidecarSecuringTool struct {
-	agent.Tool
-	dbPath string
-}
-
-func (t sidecarSecuringTool) Invoke(ctx context.Context, args json.RawMessage) (agent.ToolResult, error) {
-	res, err := t.Tool.Invoke(ctx, args)
-	_ = chmodDBFiles(t.dbPath)
-	return res, err
-}
-
-// Origin forwards the wrapped declaration (#514 D6). Interface embedding does
-// not promote Origin, and a wrapper must never upgrade trust: an undeclared
-// wrapped tool stays unknown, which the detectors may block.
-func (t sidecarSecuringTool) Origin() agent.Origin {
-	if ot, ok := t.Tool.(agent.OriginTool); ok {
-		return ot.Origin()
-	}
-	return agent.OriginUnknown
-}
-
-var _ agent.OriginTool = sidecarSecuringTool{}
 
 // recordAccess is the visibility scope golem presents for record reads and
 // mutations: this workspace plus the active session ("" when sessions are off).

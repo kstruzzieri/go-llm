@@ -3,6 +3,8 @@
 package tools
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -28,6 +30,25 @@ func scratchSeatbeltTools(t *testing.T, root string) (*RunCommand, *scratchRunti
 	// binds its write allowance to the rewritten workspace root, and the
 	// metadata-ancestor allowances assume the platform base.
 	return rc, rc.scratchRT
+}
+
+// TestScratchSeatbeltPreviewNamesRuntime covers the native production caller of the
+// runtime-aware scratch wording: the real sandboxed factory must hand the
+// scratch engine the backend's own runtime, so the preview names seatbelt, not
+// the host.
+func TestScratchSeatbeltPreviewNamesRuntime(t *testing.T) {
+	rc, _ := scratchSeatbeltTools(t, buildIsolationWorkspace(t))
+	plan, err := rc.Plan(context.Background(), json.RawMessage(`{"argv":["sh","-c","true"]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = "scratch: disposable cwd copy under the seatbelt sandbox git-metadata=omitted "
+	if !strings.Contains(plan.Preview, want) {
+		t.Fatalf("preview missing %q:\n%s", want, plan.Preview)
+	}
+	if strings.Contains(plan.Preview, "host process remains unrestricted") {
+		t.Fatalf("native preview claims the host is unrestricted:\n%s", plan.Preview)
+	}
 }
 
 // TestScratchSeatbeltComposition proves the enforced-isolation claim on real
@@ -102,5 +123,49 @@ func TestScratchSeatbeltClonedTreePassesLinkValidation(t *testing.T) {
 	}
 	if !strings.Contains(res.Content, "tracked content") {
 		t.Fatalf("command must see the cloned bytes: %s", res.Content)
+	}
+}
+
+// TestScratchSeatbeltExecConfinement is the exec analog of the composition
+// test (#708): under Seatbelt+scratch, a clone-local executable runs, while an
+// executable addressed by its absolute path in the canonical workspace is
+// refused. Scratch rewrites the workspace root, cwd and a workspace-local
+// executable to the clone, but leaves argv and the environment as approved, so
+// an absolute canonical child path is outside the scratch profile's exec
+// allowance. M-scratch (add the canonical root to the exec filter) turns the
+// refusal leg green and so is caught here.
+func TestScratchSeatbeltExecConfinement(t *testing.T) {
+	cc := seatbeltHasCC(t)
+	root := buildIsolationWorkspace(t)
+	canonExe := buildSeatbeltExe(t, cc, root, "canon-exe", markerExeSource())
+	rc, _ := scratchSeatbeltTools(t, root)
+
+	// Clone-local exec: copy a system binary into the scratch cwd and run it
+	// by a relative path. It lives in the clone, so the exec filter allows it.
+	res := planAndInvoke(t, rc, `{"argv":["sh","-c","cp /usr/bin/true ./clone-exe && ./clone-exe && echo CLONE-EXEC-OK"]}`)
+	if res.IsError {
+		t.Fatalf("clone-local exec is a normal observation, not an infra error: %s", res.Content)
+	}
+	if !strings.Contains(res.Content, "exit code: 0") || !strings.Contains(res.Content, "CLONE-EXEC-OK") {
+		t.Fatalf("clone-local executable must run under Seatbelt+scratch:\n%s", res.Content)
+	}
+
+	// Canonical absolute exec: the executable exists in the canonical tree,
+	// but that path is outside the scratch profile, so the launch is refused
+	// and its marker never appears.
+	raw := fmt.Sprintf(`{"argv":["sh","-c","%s"]}`, canonExe)
+	res = planAndInvoke(t, rc, raw)
+	if res.IsError {
+		t.Fatalf("denied exec is a normal non-zero observation: %s", res.Content)
+	}
+	// Route oracle, as the sibling exec-confinement tests use: the shell's
+	// exec of the canonical path is refused with exit 126 and an EPERM
+	// diagnostic naming it, and the marker never appears.
+	if strings.Contains(res.Content, seatbeltMarker) {
+		t.Fatalf("canonical absolute exec ran under Seatbelt+scratch:\n%s", res.Content)
+	}
+	if !strings.Contains(res.Content, "exit code: 126") ||
+		!strings.Contains(res.Content, canonExe+": Operation not permitted") {
+		t.Fatalf("canonical absolute exec must be refused (exit 126, EPERM on %s):\n%s", canonExe, res.Content)
 	}
 }

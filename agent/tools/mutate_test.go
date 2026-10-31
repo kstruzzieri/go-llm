@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io/fs"
 	"os"
@@ -217,4 +218,75 @@ func TestHashFileWithMode(t *testing.T) {
 	if _, _, err := ws.HashFileWithMode("file"); !errors.Is(err, errScopeDenied) {
 		t.Fatalf("scope guard error = %v", err)
 	}
+}
+
+// TestWritePreviewHeadersExact drives the real write_file and edit_file Plan
+// and pins the whole preview, header included. The path is quoted once, inside
+// unifiedDiff: an ordinary path stays bare, a spaced or newline-bearing path
+// becomes one quoted token on one line, and never a doubly quoted one.
+func TestWritePreviewHeadersExact(t *testing.T) {
+	plan := func(t *testing.T, tool agent.PlanningTool, args any) string {
+		t.Helper()
+		raw, err := json.Marshal(args)
+		if err != nil {
+			t.Fatal(err)
+		}
+		p, err := tool.Plan(context.Background(), raw)
+		if err != nil {
+			t.Fatalf("Plan: %v", err)
+		}
+		return p.Preview
+	}
+	seed := func(t *testing.T, root, rel string) {
+		t.Helper()
+		full := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte("old\n"), 0o644); err != nil {
+			t.Skipf("filesystem refuses the name %q: %v", rel, err)
+		}
+	}
+	cases := []struct {
+		name, path string
+		seeded     bool
+		want       string
+	}{
+		{"ordinary overwrite", "a/b.go", true, "--- a/b.go\n+++ a/b.go\n-old\n+new\n"},
+		{"spaced overwrite", "my file.txt", true, "--- \"my file.txt\"\n+++ \"my file.txt\"\n-old\n+new\n"},
+		{"LF overwrite", "a\nb.txt", true, "--- \"a\\nb.txt\"\n+++ \"a\\nb.txt\"\n-old\n+new\n"},
+		{"quoted escape overwrite", `"a\nb.txt"`, true, "--- \"\\\"a\\\\nb.txt\\\"\"\n+++ \"\\\"a\\\\nb.txt\\\"\"\n-old\n+new\n"},
+		{"ordinary new file", "a/b.go", false, "new file: a/b.go\n+new\n"},
+		{"LF new file", "a\nb.txt", false, "new file: \"a\\nb.txt\"\n+new\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			if err := os.MkdirAll(filepath.Dir(filepath.Join(root, tc.path)), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if tc.seeded {
+				seed(t, root, tc.path)
+			}
+			got := plan(t, NewWriteFile(mustWorkspace(t, root), nil), map[string]string{"path": tc.path, "content": "new\n"})
+			// containment: PREVIEW-PROFILE
+			if got != tc.want {
+				t.Fatalf("write_file preview:\n got %q\nwant %q", got, tc.want)
+			}
+			if tc.seeded {
+				got := plan(t, NewEditFile(mustWorkspace(t, root), nil), map[string]string{"path": tc.path, "old_string": "old", "new_string": "new"})
+				if got != tc.want {
+					t.Fatalf("edit_file preview:\n got %q\nwant %q", got, tc.want)
+				}
+			}
+		})
+	}
+	t.Run("emptied file", func(t *testing.T) {
+		root := t.TempDir()
+		seed(t, root, "my file.txt")
+		got := plan(t, NewWriteFile(mustWorkspace(t, root), nil), map[string]string{"path": "my file.txt", "content": ""})
+		if want := "empty file: \"my file.txt\"\n-old\n"; got != want {
+			t.Fatalf("emptied preview:\n got %q\nwant %q", got, want)
+		}
+	})
 }

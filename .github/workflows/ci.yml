@@ -64,9 +64,24 @@ jobs:
       # runs, so a renamed, skipped, or hollowed-out aggregate cannot pass the
       # required check by bypassing the local hook. It is also the only CI run
       # that enforces the aggregate's 500 ms budget (-hardening-budget); the
-      # Test step's race pass runs the same contracts without it.
+      # Test step's race pass runs the same contracts without it. Its
+      # containment inventory check (profile linux-host) binds its evidence to
+      # the tested tree and commit (#452).
       - name: Security contracts
-        run: ./scripts/ci-local --mode security
+        env:
+          GO_LLM_CI_COMMIT: ${{ github.sha }}
+          GO_LLM_CI_PR_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          tree="$(git rev-parse "${GITHUB_SHA}^{tree}")"
+          GO_LLM_CI_TREE="$tree" ./scripts/ci-local --mode security --evidence-out "$RUNNER_TEMP/containment-linux-host.json"
+
+      - name: Upload containment evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: containment-linux-host
+          path: ${{ runner.temp }}/containment-linux-host.json
+          if-no-files-found: error
 
       - name: Test
         run: |
@@ -76,15 +91,31 @@ jobs:
       # vet type-checks every package with its test files, so a test naming a
       # symbol declared only in a build-tagged file fails here. windows checks
       # the !unix files; freebsd is the only lane where unix holds but linux
-      # and darwin do not. scripts/ci-local --mode full runs the same vets.
+      # and darwin do not. The builds link every binary .goreleaser.yaml ships
+      # for every release target with cgo off (race tests use cgo), so a
+      # dependency that drops a target (modernc sqlite ships per-target files)
+      # fails here, not at release. darwin is built and vetted for both arches
+      # cgo-off, as release builds it: the macOS Compile Smoke job builds only
+      # the runner's arm64 with cgo on and runs only go test's vet subset, and
+      # release does not vet. Build output is discarded, so -buildvcs=false
+      # skips VCS stamping (it fails when git refuses a checkout owned by
+      # another uid). scripts/ci-local --mode full runs the same builds and
+      # vets.
       - name: Cross-platform compile smoke
         env:
           GOARCH: amd64
           CGO_ENABLED: "0"
         run: |
-          GOOS=windows go build -o /dev/null ./cmd/golem
+          GOOS=windows go build -buildvcs=false -o /dev/null ./cmd/golem ./cmd/go-llm-mcp
           GOOS=windows go vet ./...
+          GOOS=windows GOARCH=arm64 go build -buildvcs=false -o /dev/null ./cmd/golem ./cmd/go-llm-mcp
           GOOS=freebsd go vet ./...
+          GOOS=linux GOARCH=amd64 go build -buildvcs=false -o /dev/null ./cmd/golem ./cmd/go-llm-mcp
+          GOOS=linux GOARCH=arm64 go build -buildvcs=false -o /dev/null ./cmd/golem ./cmd/go-llm-mcp
+          GOOS=darwin GOARCH=amd64 go build -buildvcs=false -o /dev/null ./cmd/golem ./cmd/go-llm-mcp
+          GOOS=darwin GOARCH=amd64 go vet ./...
+          GOOS=darwin GOARCH=arm64 go build -buildvcs=false -o /dev/null ./cmd/golem ./cmd/go-llm-mcp
+          GOOS=darwin GOARCH=arm64 go vet ./...
 
       # Validate .goreleaser.yaml on every PR so a schema error surfaces here,
       # not at tag-push time when it would fail the actual release.
@@ -151,12 +182,60 @@ jobs:
       - name: Bwrap confinement (non-race)
         env:
           GO_LLM_REQUIRE_BWRAP: "1"
-        run: go test -count=1 -run '^(TestBwrap|TestBuildBwrap|TestCollectBwrap|TestProbeBwrap|TestExistingPolicyPaths)' ./agent/tools
+        run: go test -count=1 -run '^(TestBwrap|TestBuildBwrap|TestCollectBwrap|TestProbeBwrap|TestExistingPolicyPaths|TestNativeBackend)' ./agent/tools ./golem
 
       - name: Bwrap confinement (race)
         env:
           GO_LLM_REQUIRE_BWRAP: "1"
-        run: go test -race -count=1 -run '^(TestBwrap|TestBuildBwrap|TestCollectBwrap|TestProbeBwrap|TestExistingPolicyPaths)' ./agent/tools
+        run: go test -race -count=1 -run '^(TestBwrap|TestBuildBwrap|TestCollectBwrap|TestProbeBwrap|TestExistingPolicyPaths|TestNativeBackend)' ./agent/tools ./golem
+
+      # Golem's own construction paths under real bwrap (#576): startup and
+      # late exec, scratch and verification, each after a host positive
+      # control. Non-race only: no race job runs these with bwrap present.
+      # A rename would match nothing and pass, so the step requires exactly
+      # this OS's top-level tests to pass and none to skip.
+      - name: Golem native wiring (non-race)
+        shell: bash
+        env:
+          GO_LLM_REQUIRE_BWRAP: "1"
+        run: |
+          set -o pipefail; go test -count=1 -run '^TestNativeWiring' -v ./cmd/golem | tee "$RUNNER_TEMP/native-wiring-linux.txt"
+          if grep -q -- '--- SKIP' "$RUNNER_TEMP/native-wiring-linux.txt"; then
+            echo "::error::native wiring tests skipped: a skip is not confinement evidence"
+            exit 1
+          fi
+          passed=$(grep -cE -- '^--- PASS: TestNativeWiring[A-Za-z]+ ' "$RUNNER_TEMP/native-wiring-linux.txt" || true)
+          if [ "$passed" -ne 11 ]; then
+            echo "::error::expected 11 passing top-level native wiring tests, saw $passed"
+            exit 1
+          fi
+
+      - name: Upload native wiring evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: native-wiring-linux
+          path: ${{ runner.temp }}/native-wiring-linux.txt
+          if-no-files-found: error
+
+      # The containment inventory's bwrap profile: every mandatory ref must
+      # run and pass under the real sandbox, no skip allowed (#452).
+      - name: Containment inventory (bwrap)
+        env:
+          GO_LLM_REQUIRE_BWRAP: "1"
+          GO_LLM_CI_COMMIT: ${{ github.sha }}
+          GO_LLM_CI_PR_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          tree="$(git rev-parse "${GITHUB_SHA}^{tree}")"
+          GO_LLM_CI_TREE="$tree" go run ./internal/containmentinv/check -inventory docs/security/containment-inventory.json -profile bwrap -evidence-out "$RUNNER_TEMP/containment-bwrap.json"
+
+      - name: Upload containment evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: containment-bwrap
+          path: ${{ runner.temp }}/containment-bwrap.json
+          if-no-files-found: error
 
   # Real-CLI Agentflow suite (#577) against the one verified-compatible pin, run
   # twice: against an installed `agentflow` and against a source checkout.
@@ -174,12 +253,12 @@ jobs:
         with:
           go-version-file: go.mod
 
-      # Pinned to the Agentflow 1.0.0 release commit (tag v1.0.0), the version
-      # Golem develop is verified against (#612). Golem supports Agentflow 1.x only.
+      # Pinned to the Agentflow 1.2.0 release commit (tag v1.2.0), the version
+      # Golem develop is verified against. Golem supports Agentflow 1.x from 1.2.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: kstruzzieri/agentflow
-          ref: bf48d63abeeaff2d7929972455c5512cb9051f60
+          ref: 60220ddd5a2a47c89792906a2c593bbb427189f5
           path: _agentflow
           persist-credentials: false
 
@@ -190,18 +269,40 @@ jobs:
 
       # Only this step puts the venv on PATH. The source step must run the
       # system python3, which cannot import Agentflow except from AGENTFLOW_SRC.
+      # Each step also runs the containment inventory's agentflow-integration
+      # profile in its own environment; a separate step would lack the venv or
+      # AGENTFLOW_SRC, and its required tests would skip (#452).
       - name: Agentflow compatibility (installed)
         env:
           GO_LLM_REQUIRE_AGENTFLOW: installed
+          GO_LLM_CI_COMMIT: ${{ github.sha }}
+          GO_LLM_CI_PR_HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
           export PATH="$RUNNER_TEMP/agentflow-venv/bin:$PATH"
           go test -tags=agentflow_integration -count=1 -run "$AGENTFLOW_TESTS" ./agentflow ./cmd/golem
+          tree="$(git rev-parse "${GITHUB_SHA}^{tree}")"
+          GO_LLM_CI_TREE="$tree" go run ./internal/containmentinv/check -inventory docs/security/containment-inventory.json -profile agentflow-integration -evidence-out "$RUNNER_TEMP/containment-agentflow-integration-installed.json"
 
       - name: Agentflow compatibility (source)
         env:
           GO_LLM_REQUIRE_AGENTFLOW: source
           AGENTFLOW_SRC: ${{ github.workspace }}/_agentflow
-        run: go test -tags=agentflow_integration -count=1 -run "$AGENTFLOW_TESTS" ./agentflow ./cmd/golem
+          GO_LLM_CI_COMMIT: ${{ github.sha }}
+          GO_LLM_CI_PR_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          go test -tags=agentflow_integration -count=1 -run "$AGENTFLOW_TESTS" ./agentflow ./cmd/golem
+          tree="$(git rev-parse "${GITHUB_SHA}^{tree}")"
+          GO_LLM_CI_TREE="$tree" go run ./internal/containmentinv/check -inventory docs/security/containment-inventory.json -profile agentflow-integration -evidence-out "$RUNNER_TEMP/containment-agentflow-integration-source.json"
+
+      - name: Upload containment evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: containment-agentflow-integration
+          path: |
+            ${{ runner.temp }}/containment-agentflow-integration-installed.json
+            ${{ runner.temp }}/containment-agentflow-integration-source.json
+          if-no-files-found: error
 
   windows-sqlite:
     name: Windows SQLite URIs
@@ -214,16 +315,43 @@ jobs:
           go-version-file: go.mod
 
       # Linux CI only builds and vets for Windows. This runs the SQLite URI
-      # tests natively: Windows path resolution, SQLite's URI parser and the
-      # Windows VFS (#619).
-      - name: Test internal/sqlitedsn on Windows
+      # helpers and the store packages built on them natively: Windows path
+      # resolution, SQLite's URI parser, the Windows VFS, and each opener's
+      # own tests (concurrent first opens, fail-closed WAL, sidecars,
+      # read-only opens) (#619, #653). -p 1 runs one package at a time: the
+      # lock-budget tests measure wall-clock waits, and running the packages
+      # in parallel (with the cross-process open tests' child processes) on
+      # this runner overran a 1s budget by 0.5s that it meets alone.
+      - name: Test SQLite helpers and store packages on Windows
         env:
           CGO_ENABLED: "0"
-        run: go test -count=1 -v ./internal/sqlitedsn
+        run: go test -count=1 -p 1 -v ./internal/sqlitedsn ./internal/sqlitetest ./transcript ./memory ./provider ./rag
 
       # Windows loads path-based FileInfo identities lazily. Compile smoke
       # cannot detect a replaced root being mistaken for the original (#658).
+      # TestValidateSandboxUnavailable proves Windows refuses both native
+      # sandbox selections (#576).
       - name: Test workspace identity and undo on Windows
         env:
           CGO_ENABLED: "0"
-        run: go test -count=1 -v -run '^(TestWorkspaceVerifyRoot.*|TestNewWorkspace.*|TestUndoCreatedFile.*|TestCheckpointUndoCreatedFile.*)$' ./agent/tools ./cmd/golem
+        run: go test -count=1 -v -run '^(TestWorkspaceVerifyRoot.*|TestNewWorkspace.*|TestUndoCreatedFile.*|TestCheckpointUndoCreatedFile.*|TestValidateSandboxUnavailable)$' ./agent/tools ./cmd/golem
+
+      # The containment inventory's windows profile: exec scenarios skip only
+      # with the profile's enumerated capability reasons (#452).
+      - name: Containment inventory (windows)
+        shell: bash
+        env:
+          CGO_ENABLED: "0"
+          GO_LLM_CI_COMMIT: ${{ github.sha }}
+          GO_LLM_CI_PR_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          tree="$(git rev-parse "${GITHUB_SHA}^{tree}")"
+          GO_LLM_CI_TREE="$tree" go run ./internal/containmentinv/check -inventory docs/security/containment-inventory.json -profile windows -evidence-out "$RUNNER_TEMP/containment-windows.json"
+
+      - name: Upload containment evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: containment-windows
+          path: ${{ runner.temp }}/containment-windows.json
+          if-no-files-found: error

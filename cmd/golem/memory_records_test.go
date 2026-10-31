@@ -377,12 +377,18 @@ func TestRecordsSlashReSecuresSidecars(t *testing.T) {
 	assertTight("after --forget")
 }
 
-func TestSidecarWrappedToolsAreNotPlanningTools(t *testing.T) {
-	// sidecarSecuringTool's interface embedding would silently drop Plan;
-	// pin that the tools golem wraps never implement it.
+// TestAgentMemoryWriteToolsAreNotPlanningTools: the library memory writes are
+// approval-exempt by their static Effect (D-P1 option A). A PlanningTool's
+// per-call plan overrides Effect, so the exemption is only sound while these
+// tools stay Effect-only. Origin stays the library's workspace declaration.
+func TestAgentMemoryWriteToolsAreNotPlanningTools(t *testing.T) {
 	for _, tl := range []agent.Tool{agenttools.AgentMemoryCreate{}, agenttools.AgentMemoryPromote{}} {
 		if _, ok := tl.(agent.PlanningTool); ok {
-			t.Fatalf("%s implements PlanningTool; sidecarSecuringTool would drop Plan", tl.Spec().Name)
+			t.Fatalf("%s implements PlanningTool; its plan would override the static ApprovalNever", tl.Spec().Name)
+		}
+		ot, ok := tl.(agent.OriginTool)
+		if !ok || ot.Origin() != agent.OriginWorkspace {
+			t.Fatalf("%s must declare workspace origin itself", tl.Spec().Name)
 		}
 	}
 }
@@ -432,54 +438,143 @@ func TestRecordsCommandsCrossSessionDurable(t *testing.T) {
 	}
 }
 
-func TestSidecarSecuringToolReChmods(t *testing.T) {
+// agentMemoryTools returns the tools golem mounts for sess, by name.
+func agentMemoryTools(t *testing.T, sess *replSession, dbPath string) map[string]agent.Tool {
+	t.Helper()
+	out := map[string]agent.Tool{}
+	for _, tl := range appendAgentMemoryTools(nil, sess.records, dbPath, sess.workspaceID, sess.session) {
+		out[tl.Spec().Name] = tl
+	}
+	return out
+}
+
+// loosenDBFiles widens the memory DB file and any sidecar to 0644, so a test
+// can prove a write path re-secured them. The main file always exists.
+func loosenDBFiles(t *testing.T, dbPath string) {
+	t.Helper()
+	if err := os.Chmod(dbPath, 0o644); err != nil {
+		t.Fatalf("loosen %s: %v", dbPath, err)
+	}
+	for _, p := range []string{dbPath + "-wal", dbPath + "-shm"} {
+		if _, err := os.Stat(p); err == nil {
+			_ = os.Chmod(p, 0o644)
+		}
+	}
+}
+
+func assertDBFilesTight(t *testing.T, dbPath, when string) {
+	t.Helper()
+	for _, p := range []string{dbPath, dbPath + "-wal", dbPath + "-shm"} {
+		info, err := os.Stat(p)
+		if err != nil {
+			continue // a sidecar may not exist; nothing to leak
+		}
+		if info.Mode().Perm() != 0o600 {
+			t.Errorf("%s: %s mode = %v, want 0600", when, p, info.Mode().Perm())
+		}
+	}
+}
+
+// TestAgentMemoryToolsReChmodAfterWrite: every write path re-secures the DB
+// (#237 lesson), on success and on a failed call, for both write tools. The
+// hook is the library AfterWrite golem installs; no wrapper type remains.
+func TestAgentMemoryToolsReChmodAfterWrite(t *testing.T) {
 	ctx := context.Background()
 	sess, dbPath := newTestReplWithRecords(t)
-	inner := agenttools.AgentMemoryCreate{
-		S: sess.records, WorkspaceID: sess.workspaceID,
-		SessionID: func() string { return sess.session.id },
+	tools := agentMemoryTools(t, sess, dbPath)
+	rec, err := sess.records.Create(ctx, memory.CreateRecordParams{
+		Kind: memory.KindWorking, Content: "seed", WorkspaceID: sess.workspaceID, SessionID: sess.session.id,
+	})
+	if err != nil {
+		t.Fatalf("seed: %v", err)
 	}
-	tool := sidecarSecuringTool{Tool: inner, dbPath: dbPath}
-	if tool.Spec().Name != agenttools.AgentMemoryCreateToolName {
-		t.Errorf("decorator must delegate Spec: %q", tool.Spec().Name)
+	cases := []struct {
+		tool   string
+		class  agent.EffectClass
+		good   string
+		failed string
+	}{
+		{agenttools.AgentMemoryCreateToolName, agent.Write, `{"content":"hello"}`, `{"content":""}`},
+		{agenttools.AgentMemoryPromoteToolName, agent.Write, `{"id":"` + rec.ID + `","kind":"semantic"}`, `{"id":"","kind":"semantic"}`},
 	}
-	if tool.Effect().Class != agent.Write {
-		t.Errorf("decorator must delegate Effect")
+	for _, tc := range cases {
+		t.Run(tc.tool, func(t *testing.T) {
+			tool, ok := tools[tc.tool]
+			if !ok {
+				t.Fatalf("%s not mounted", tc.tool)
+			}
+			if got := tool.Effect(); got.Class != tc.class || got.Approval != agent.ApprovalNever {
+				t.Errorf("Effect = %+v, want Class %v with ApprovalNever", got, tc.class)
+			}
+			loosenDBFiles(t, dbPath)
+			res, err := tool.Invoke(ctx, json.RawMessage(tc.good))
+			if err != nil || res.IsError {
+				t.Fatalf("invoke: err=%v res=%+v", err, res)
+			}
+			assertDBFilesTight(t, dbPath, "after tool write")
+			// re-chmod must also run when the tool reports an error
+			loosenDBFiles(t, dbPath)
+			if res, _ := tool.Invoke(ctx, json.RawMessage(tc.failed)); !res.IsError {
+				t.Fatal("expected IsError for the invalid call")
+			}
+			assertDBFilesTight(t, dbPath, "after erroring tool write")
+		})
 	}
-	for _, p := range []string{dbPath + "-wal", dbPath + "-shm"} {
-		if _, err := os.Stat(p); err == nil {
-			_ = os.Chmod(p, 0o644)
+}
+
+// TestAppendAgentMemoryToolsUsesLibraryTypes: golem mounts the library memory
+// tools themselves (D-P1 option A), so they stay library types and keep
+// ApprovalNever behind the Trusted approval floor. AfterWrite must be wired and
+// run exactly once per Invoke, success or failure.
+func TestAppendAgentMemoryToolsUsesLibraryTypes(t *testing.T) {
+	ctx := context.Background()
+	sess, dbPath := newTestReplWithRecords(t)
+	tools := appendAgentMemoryTools(nil, sess.records, dbPath, sess.workspaceID, sess.session)
+	if len(tools) != 3 {
+		t.Fatalf("mounted %d tools, want search, create and promote", len(tools))
+	}
+	var create agenttools.AgentMemoryCreate
+	var promote agenttools.AgentMemoryPromote
+	var sawSearch bool
+	for _, tl := range tools {
+		switch v := tl.(type) {
+		case agenttools.AgentMemorySearch:
+			sawSearch = true
+		case agenttools.AgentMemoryCreate:
+			create = v
+		case agenttools.AgentMemoryPromote:
+			promote = v
+		default:
+			t.Fatalf("mounted %T (%s), want only library memory types", tl, tl.Spec().Name)
 		}
 	}
-	res, err := tool.Invoke(ctx, json.RawMessage(`{"content":"hello"}`))
-	if err != nil || res.IsError {
-		t.Fatalf("invoke: err=%v res=%+v", err, res)
+	if !sawSearch || create.AfterWrite == nil || promote.AfterWrite == nil {
+		t.Fatalf("search mounted = %v, create hook set = %v, promote hook set = %v", sawSearch, create.AfterWrite != nil, promote.AfterWrite != nil)
 	}
-	for _, p := range []string{dbPath + "-wal", dbPath + "-shm"} {
-		info, err := os.Stat(p)
-		if err != nil {
-			continue
+	var created, promoted int
+	realCreate, realPromote := create.AfterWrite, promote.AfterWrite
+	create.AfterWrite = func() error { created++; return realCreate() }
+	promote.AfterWrite = func() error { promoted++; return realPromote() }
+	rec, err := sess.records.Create(ctx, memory.CreateRecordParams{
+		Kind: memory.KindWorking, Content: "seed", WorkspaceID: sess.workspaceID, SessionID: sess.session.id,
+	})
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	for i, raw := range []string{`{"content":"one"}`, `{"content":""}`} {
+		if _, err := create.Invoke(ctx, json.RawMessage(raw)); err != nil {
+			t.Fatalf("create invoke %d: %v", i, err)
 		}
-		if info.Mode().Perm() != 0o600 {
-			t.Errorf("%s mode = %v, want 0600 after tool write", p, info.Mode().Perm())
+		if created != i+1 {
+			t.Fatalf("create AfterWrite calls after invoke %d = %d, want %d", i, created, i+1)
 		}
 	}
-	// re-chmod must also run when the inner tool errors
-	for _, p := range []string{dbPath + "-wal", dbPath + "-shm"} {
-		if _, err := os.Stat(p); err == nil {
-			_ = os.Chmod(p, 0o644)
+	for i, raw := range []string{`{"id":"` + rec.ID + `","kind":"semantic"}`, `{"id":"","kind":"semantic"}`} {
+		if _, err := promote.Invoke(ctx, json.RawMessage(raw)); err != nil {
+			t.Fatalf("promote invoke %d: %v", i, err)
 		}
-	}
-	if res, _ := tool.Invoke(ctx, json.RawMessage(`{"content":""}`)); !res.IsError {
-		t.Fatal("expected IsError for empty content")
-	}
-	for _, p := range []string{dbPath + "-wal", dbPath + "-shm"} {
-		info, err := os.Stat(p)
-		if err != nil {
-			continue
-		}
-		if info.Mode().Perm() != 0o600 {
-			t.Errorf("%s mode = %v, want 0600 after erroring tool write", p, info.Mode().Perm())
+		if promoted != i+1 {
+			t.Fatalf("promote AfterWrite calls after invoke %d = %d, want %d", i, promoted, i+1)
 		}
 	}
 }

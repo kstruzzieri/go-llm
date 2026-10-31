@@ -447,6 +447,136 @@ The auxiliary use-case keys are exported as untyped string constants
 `config.SideTaskUseCases()`, and resolved to a model role by
 `cfg.RoleForUseCase(useCase)` — the same fallback semantics, exposed for callers
 that pick a side-task model without walking the full chain.
+
+### Blocking configured credentials in tool calls
+
+`cfg.SecretMatcher()` reports whether a string contains a credential the config
+resolved: each provider's effective `api_key`, and each value a `${NAME}`
+reference in an `api_key` resolved to, when at least eight bytes long. It is a
+trusted host API; never expose it, or its answers, to a model. Loading a config
+installs nothing. To block agent tool calls that carry one (#424), install
+`interceptor.NewConfiguredSecrets(cfg.SecretMatcher())` on the orchestrator and
+pass the same guard to `tools.NewDispatch`
+(`github.com/kstruzzieri/go-llm/agent/tools`), which installs its interceptors
+on every dispatched child:
+
+```go
+guard, err := interceptor.NewConfiguredSecrets(cfg.SecretMatcher())
+if err != nil {
+    return err
+}
+orch := agent.New(caller, agent.ContextManager{}, agent.WithInterceptors(guard))
+dispatch, err := tools.NewDispatch(caller, agent.ContextManager{}, readTools, tools.DispatchLimits{}, guard)
+```
+
+The matcher is a snapshot of that config: build a new guard after reloading or
+editing it. A config serialized and parsed again keeps its effective keys but
+loses the resolved `${NAME}` components. A dispatched child run that ends in a
+block by any `agent.SensitiveTextInterceptor`, whatever its name, or by the
+`secrets` guard never falls back to its last message as its summary; that rule
+is part of `NewDispatch` and needs no setting. `interceptor.SensitiveBlocked`
+applies the same test to the errors a host's own runs return.
+
+### Blocking configured credentials in outbound requests
+
+To refuse an OpenAI-compatible request body that carries a configured
+credential before it is sent (#424), install
+`openaicompat.WithContentGuard(cfg.SecretMatcher())` on each client whose
+destination is not loopback. Pass the same matcher value to
+`interceptor.NewConfiguredSecrets`, so the clients and the tool-call guard
+check one snapshot. The guard alone does not bind requests to the admitted
+origin or refuse redirects, so a redirect could still carry a checked body
+elsewhere. Build the client's `http.Client` with `provider.GuardHTTPClient`,
+which does both. A guarded client sends a request only under a destination
+capability its gate issued, so the host also admits each destination in a gate
+and binds every request. `Install` replaces the gate's whole generation, so
+collect every provider's destination and edges first, install them once, then
+build the guarded clients:
+
+```go
+match := cfg.SecretMatcher() // the value given to NewConfiguredSecrets
+
+// Every provider here is api_format openai-compat. Each needs an edge for every
+// use case routed to it (agent.NewRouterModelCaller routes "agent") and one for
+// model-refresh, which the model registry sends while the Router resolves
+// candidates.
+dests := make(map[string]provider.Destination, len(cfg.Providers))
+var edges []provider.DestinationEdge
+for name, pc := range cfg.Providers {
+    dest, err := provider.NewDestination(name, pc.BaseURL)
+    if err != nil {
+        return err
+    }
+    dests[name] = dest
+    edges = append(edges,
+        provider.DestinationEdge{Purpose: "agent", Destination: dest},
+        provider.DestinationEdge{Purpose: provider.DestinationPurposeModelRefresh, Destination: dest},
+    )
+}
+manifest, err := provider.NewDestinationManifest(edges...)
+if err != nil {
+    return err
+}
+gate := provider.NewDestinationGate()
+if err := gate.Install(provider.NewDestinationPolicy(manifest.Destinations()...), manifest); err != nil {
+    return err
+}
+
+providers := provider.NewRegistry()
+for name, pc := range cfg.Providers {
+    dest := dests[name]
+    timeout := pc.Timeout.Duration
+    if timeout <= 0 {
+        timeout = 5 * time.Minute // the default NewClient and Golem use; zero never times out
+    }
+    hc, err := provider.GuardHTTPClient(gate, dest, &http.Client{Timeout: timeout})
+    if err != nil {
+        return err
+    }
+    opts := []openaicompat.ClientOption{openaicompat.WithHTTPClient(hc), openaicompat.WithAPIKey(pc.APIKey)}
+    if !dest.IsLocal() {
+        opts = append(opts, openaicompat.WithContentGuard(match))
+    }
+    client := openaicompat.NewClient(pc.BaseURL, opts...)
+    if err := providers.Register(openaicompat.NewProvider(client, openaicompat.WithProviderName(name))); err != nil {
+        return err
+    }
+}
+
+// The registry binds its own model-refresh and capability-probe traffic, and
+// the Router binds each attempt to its use case and provider.
+models, err := provider.NewModelRegistry(providers, nil, provider.WithModelRegistryDestinationGate(gate))
+if err != nil {
+    return err
+}
+router := provider.NewRouter(models, providers, provider.WithDestinationGate(gate))
+```
+
+`nil` is the optional fingerprint store. A registry that runs active
+capability probes (`provider.WithCapabilityProber`) also needs a
+`provider.DestinationPurposeCapabilityProbe` edge per provider, and a provider
+with `slot_discovery` needs a `provider.DestinationPurposeSlotProbe` edge. A
+call made without a Router binds its own capability first:
+`ctx, err := gate.Bind(ctx, "agent", name)`. A request with no capability for
+its edge is refused with `provider.ErrDestinationDenied`.
+
+A refused request returns an error wrapping `provider.ErrContentDenied`, which
+names neither the credential nor the URL. The router neither falls back to
+another provider nor counts it against a circuit breaker, routing feedback
+records no failure or latency against the model, and an agent run charges its
+token budget nothing for the call. `interceptor.SensitiveBlocked` reports it,
+so a dispatched child refused this way reports the fixed marker instead of its
+last message. When a run's model
+call is refused this way, the orchestrator replaces each copied field of
+`Result.Messages` that an `agent.SensitiveTextInterceptor` in its chain matches
+with `[...]` (a tool call's arguments become the JSON string `"[...]"`);
+install the tool-call guard so that projection has a matcher.
+Only `api_format: openai-compat` clients have this guard; native Ollama
+clients do not. Headers are never inspected, so the client's own key still
+authenticates. Golem wires this internally under `-interceptors`; the `golem`
+package's automatic provider bootstrap does not, so a host that wants the check
+builds its own clients this way.
+
 ## Parquet Export
 
 Export vector store contents to Parquet format for ML pipeline interop.

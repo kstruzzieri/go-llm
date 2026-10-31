@@ -1,4 +1,135 @@
 #!/usr/bin/env sh
 set -eu
 
-docker compose -f docker-compose.ci.yml run --build --rm ci ./scripts/ci-local --mode full
+# Gate exactly what is being pushed (#630).
+# Git writes one "<local ref> SP <local oid> SP <remote ref> SP <remote oid>"
+# line per updated ref on stdin. The local field is the source as the user
+# typed it, a revision expression that may contain spaces ('HEAD^{/fix it}'),
+# so the line is split from the right. An all-zero local oid deletes a remote
+# ref and pushes no code; empty stdin (nothing to update) pushes nothing.
+# Refs at one tree, such as a branch and its tag, are gated once (#630).
+# Each gate run receives its tree and the pushed commit (an annotated tag
+# peeled to its commit; the first ref at a tree wins) as GO_LLM_CI_TREE and
+# GO_LLM_CI_COMMIT, binding the containment evidence to them (#452). A tag of
+# a bare tree has no commit; its evidence records commit unknown.
+# git push transfers the real objects, never what refs/replace maps them to,
+# so peel and export with replacements off.
+export GIT_NO_REPLACE_OBJECTS=1
+malformed() {
+  printf 'pre-push: malformed ref update from git: %s\n' "$1" >&2
+  exit 1
+}
+is_oid() {
+  case "$1" in
+    '' | *[!0-9a-f]*) return 1 ;;
+  esac
+  [ "${#1}" -eq 40 ] || [ "${#1}" -eq 64 ]
+}
+
+trees=
+while IFS= read -r line || [ -n "$line" ]; do
+  case "$line" in
+    *' '*' '*' '*) ;;
+    *) malformed "$line" ;;
+  esac
+  remote_oid=${line##* }
+  rest=${line% *}
+  remote_ref=${rest##* }
+  rest=${rest% *}
+  local_oid=${rest##* }
+  local_ref=${rest% *}
+  if [ -z "$local_ref" ] || ! is_oid "$local_oid" || ! is_oid "$remote_oid"; then
+    malformed "$line"
+  fi
+  case "$remote_ref" in
+    refs/?*) ;;
+    *) malformed "$line" ;;
+  esac
+  case "$local_oid" in
+    *[!0]*) ;;
+    *) continue ;;
+  esac
+  if ! tree="$(git rev-parse --verify --quiet "$local_oid^{tree}")"; then
+    printf 'pre-push: %s (%s) names no tree to gate\n' "$local_ref" "$local_oid" >&2
+    exit 1
+  fi
+  commit="$(git rev-parse --verify --quiet "$local_oid^{commit}")" || commit=
+  case " $trees" in
+    *" $tree:"*) ;;
+    *) trees="$trees $tree:$commit" ;;
+  esac
+done
+if [ -z "$trees" ]; then
+  exit 0
+fi
+
+# Export each tree and gate that clean copy, so gitignored files, untracked
+# files and uncommitted edits in this checkout cannot change the verdict and
+# the container needs no .git (#306). The export lives under $TMPDIR, which the
+# Docker host must be able to bind-mount (Docker Desktop shares it by
+# default). The gate runs as uid 1000, which on a Linux host need not be this
+# user: umask and tar.umask keep the export world-readable whatever the
+# caller's umask or git config.
+umask 022
+# An interrupt (Ctrl-C, or SIGHUP from a closed terminal, reaches the whole
+# push) kills docker compose, but compose runs without a TTY here and leaves
+# its container running against the export the EXIT trap removes. Name the
+# container so the traps can remove it.
+name="go-llm-prepush-$$"
+work="$(mktemp -d)"
+work="$(cd "$work" && pwd -P)"
+trap 'rm -rf "$work"' EXIT
+# "No such container" means the interrupt came before compose created it; any
+# other failure leaves a container running, so report it. The || keeps set -e
+# from ending the trap before its exit status.
+remove_container() {
+  if ! out="$(docker rm -f "$name" 2>&1)"; then
+    case "$out" in
+      *'No such container'*) ;;
+      *)
+        printf 'pre-push: could not remove container %s: %s\n' "$name" "$out" >&2
+        printf 'pre-push: remove it with: docker rm -f %s\n' "$name" >&2
+        ;;
+    esac
+  fi
+}
+trap 'remove_container; exit 129' HUP
+trap 'remove_container; exit 130' INT
+trap 'remove_container; exit 143' TERM
+# Only the hook installation supplies host-side Docker settings. The pushed
+# tree supplies code to test, never Compose, dotenv, or build configuration.
+hook_dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)"
+mkdir "$work/runner"
+cp "$hook_dir/../docker-compose.ci.yml" "$hook_dir/../Dockerfile.ci" "$work/runner/"
+for pair in $trees; do
+  tree=${pair%%:*}
+  commit=${pair#*:}
+  mkdir "$work/$tree"
+  # Through a file, not a pipe: sh has no pipefail, and some tar
+  # implementations (bsdtar, measured) accept the empty output of a failed
+  # archive.
+  (
+    objects="$(git rev-parse --path-format=absolute --git-path objects)"
+    object_format="$(git rev-parse --show-object-format)"
+    alternates=${GIT_ALTERNATE_OBJECT_DIRECTORIES-}
+    unset $(git rev-parse --local-env-vars) GIT_ATTR_SOURCE
+    export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_ATTR_NOSYSTEM=1 GIT_NO_REPLACE_OBJECTS=1
+    git init -q --bare --template= --object-format="$object_format" "$work/archive.git"
+    # Highest-priority attributes disable exclusions and every checkout
+    # conversion, including host-side smudge filters. Keep the caller's cwd
+    # so relative alternate object paths keep resolving as they do for push.
+    mkdir -p "$work/archive.git/info"
+    printf '* -export-ignore -export-subst -text -eol -ident -filter -working-tree-encoding\n' >"$work/archive.git/info/attributes"
+    GIT_OBJECT_DIRECTORY="$objects" GIT_ALTERNATE_OBJECT_DIRECTORIES="$alternates" \
+      git --git-dir="$work/archive.git" \
+      -c core.attributesFile=/dev/null -c tar.umask=0022 \
+      archive --format=tar -o "$work/$tree.tar" "$tree"
+  )
+  tar -xf "$work/$tree.tar" -C "$work/$tree"
+  rm -f "$work/$tree.tar"
+  printf 'pre-push: gating tree %s in %s\n' "$tree" "$work/$tree" >&2
+  # The containment evidence file stays in the discarded container; the
+  # checker's success line in this output names the tree, commit and source
+  # digest it bound.
+  (cd "$work/runner" && GO_LLM_CI_SOURCE="$work/$tree" GO_LLM_CI_TREE="$tree" GO_LLM_CI_COMMIT="$commit" docker compose --env-file /dev/null -f docker-compose.ci.yml run --build --rm --name "$name" ci ./scripts/ci-local --mode full)
+done

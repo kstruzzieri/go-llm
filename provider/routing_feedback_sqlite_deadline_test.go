@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"net/url"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -13,12 +12,18 @@ import (
 	"time"
 
 	"modernc.org/sqlite"
+
+	"github.com/kstruzzieri/go-llm/internal/sqlitedsn"
 )
 
 // openFeedbackFileDB opens a caller-owned file database for the deadline tests.
 func openFeedbackFileDB(t *testing.T, path, query string, maxConns int) *sql.DB {
 	t.Helper()
-	u := url.URL{Scheme: "file", Path: path, RawQuery: query}
+	u, err := sqlitedsn.FileURL(path) // builds a URI SQLite accepts on Windows too
+	if err != nil {
+		t.Fatal(err)
+	}
+	u.RawQuery = query
 	db, err := sql.Open("sqlite", u.String())
 	if err != nil {
 		t.Fatal(err)
@@ -127,6 +132,28 @@ func assertBusyTimeouts(t *testing.T, db *sql.DB, n int, want int64) {
 	}
 }
 
+// recordedCaps installs store.capHook and returns, per phase and in order, the
+// busy_timeout SQLite reports on the write's own connection right after the
+// store capped it: ground truth for the cap in effect at BEGIN and at COMMIT,
+// with no wall clock involved (#693). The map is written from the write's
+// goroutine, so read it only after the write has returned, and record one
+// deadline-bearing write per store.
+func recordedCaps(t *testing.T, store *SQLiteFeedbackStore) map[capPhase][]int64 {
+	t.Helper()
+	caps := map[capPhase][]int64{}
+	store.capHook = func(phase capPhase, e sqlExecer) {
+		var got int64
+		// Background, not the write's ctx: an interrupt raised here by an
+		// expiring ctx would stay on the pinned connection (see runInTxBefore).
+		if err := e.QueryRowContext(context.Background(), "PRAGMA busy_timeout").Scan(&got); err != nil {
+			t.Errorf("read busy_timeout %s: %v", phase, err)
+			return
+		}
+		caps[phase] = append(caps[phase], got)
+	}
+	return caps
+}
+
 func testFeedbackItem(model string) FeedbackItem {
 	return FeedbackItem{
 		Key:    FeedbackKey{Provider: "p", Model: model, UseCase: "chat"},
@@ -168,7 +195,8 @@ func assertContendedFailure(t *testing.T, err error, elapsed, minWait, maxWait t
 // Test 1: a short deadline bounds the lock wait on a caller-owned pool whose
 // busy_timeout is 5s. Under _txlock=immediate, BEGIN itself takes the write
 // lock, so the cap must be in place before BEGIN, not just before the first
-// write.
+// write. The cap read back before BEGIN is at most the deadline; the wall
+// clock keeps a 2s ceiling for a cap that lands on another connection.
 func TestSQLiteFeedbackStoreDeadlineBoundsLockWait(t *testing.T) {
 	for _, tc := range []struct{ name, query, phase string }{
 		{"deferred", "_pragma=busy_timeout(5000)", "insert signal"},
@@ -179,21 +207,32 @@ func TestSQLiteFeedbackStoreDeadlineBoundsLockWait(t *testing.T) {
 			db := openFeedbackFileDB(t, path, tc.query, 2)
 			execFeedbackSQL(t, db, "PRAGMA journal_mode=WAL")
 			store := newFileFeedbackStore(t, db)
+			caps := recordedCaps(t, store)
 			release := holdFeedbackLock(t, path, "BEGIN IMMEDIATE")
+			const budget = 200 * time.Millisecond
 			start := time.Now()
-			ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
+			ctx, cancel := context.WithTimeout(t.Context(), budget)
 			defer cancel()
 			err := store.RecordBatch(ctx, []FeedbackItem{testFeedbackItem("m")})
 			elapsed := time.Since(start)
 			release()
-			t.Logf("ELAPSED deadline-bounds/%s %v", tc.name, elapsed)
+			t.Logf("ELAPSED deadline-bounds/%s %v caps %v", tc.name, elapsed, caps)
 			if err != nil && strings.Contains(err.Error(), "cap busy_timeout") {
 				t.Skipf("fixture invalid: stalled past the deadline before the first cap: %v", err)
 			}
 			if err == nil || !strings.Contains(err.Error(), tc.phase) {
 				t.Fatalf("fixture invalid: err = %v, want the lock wait in %q", err, tc.phase)
 			}
-			assertContendedFailure(t, err, elapsed, 100*time.Millisecond, 600*time.Millisecond)
+			if got := caps[capBeforeBegin]; len(got) != 1 || got[0] > budget.Milliseconds() {
+				t.Fatalf("busy_timeout %s = %v ms, want one cap of at most the %dms deadline", capBeforeBegin, got, budget.Milliseconds())
+			}
+			// 100ms: the write waited out its budget. 2s is a gross ceiling
+			// (#693) that still catches a cap applied through another pooled
+			// connection: it reads back correctly through the hook while this
+			// connection waits the DSN's 5s. A cap moved after BEGIN never
+			// reaches the hook under _txlock=immediate (BEGIN fails first);
+			// the deferred subtest cannot see ordering at all.
+			assertContendedFailure(t, err, elapsed, 100*time.Millisecond, 2*time.Second)
 			if n := feedbackRows(t, db); n != 0 {
 				t.Fatalf("signals after a failed write = %d, want 0", n)
 			}
@@ -201,12 +240,15 @@ func TestSQLiteFeedbackStoreDeadlineBoundsLockWait(t *testing.T) {
 	}
 }
 
-// Test 4: time spent waiting for a pool connection comes out of the budget.
+// Test 4: time spent waiting for a pool connection comes out of the budget:
+// the cap read back after the handover is at most the time that was left at
+// the handover.
 func TestSQLiteFeedbackStoreDeductsPoolWait(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feedback.db")
 	db := openFeedbackFileDB(t, path, "_pragma=busy_timeout(5000)", 1)
 	execFeedbackSQL(t, db, "PRAGMA journal_mode=WAL")
 	store := newFileFeedbackStore(t, db)
+	caps := recordedCaps(t, store)
 	_ = holdFeedbackLock(t, path, "BEGIN IMMEDIATE")
 	pinned, err := db.Conn(t.Context())
 	if err != nil {
@@ -215,6 +257,10 @@ func TestSQLiteFeedbackStoreDeductsPoolWait(t *testing.T) {
 	start := time.Now()
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		t.Fatal("fixture invalid: ctx carries no deadline")
+	}
 	done := make(chan error, 1)
 	acquired := make(chan struct{})
 	item := testFeedbackItem("m")
@@ -232,6 +278,9 @@ func TestSQLiteFeedbackStoreDeductsPoolWait(t *testing.T) {
 	// write really started after the handover.
 	waitUntil(t, func() bool { return db.Stats().WaitCount > 0 })
 	time.Sleep(1200*time.Millisecond - time.Since(start))
+	// The cap goes on after the pool hands this connection over, so the
+	// budget left now bounds it from above.
+	releaseLeft := time.Until(deadline)
 	_ = pinned.Close()
 	var recErr error
 	select {
@@ -240,28 +289,46 @@ func TestSQLiteFeedbackStoreDeductsPoolWait(t *testing.T) {
 		t.Fatal("runInTx did not return")
 	}
 	elapsed := time.Since(start)
-	t.Logf("ELAPSED pool-wait %v", elapsed)
+	t.Logf("ELAPSED pool-wait %v caps %v releaseLeft %v", elapsed, caps, releaseLeft)
 	select {
 	case <-acquired:
 	default:
 		t.Fatalf("fixture invalid: returned before acquiring the pool connection: %v", recErr)
 	}
-	// The write must spend the rest of the budget waiting, not less.
-	assertContendedFailure(t, recErr, elapsed, 1500*time.Millisecond, 2600*time.Millisecond)
+	// A budget measured before the pool wait would read back near the full
+	// 2s; one that deducts it reads back at most what was left at handover.
+	if got := caps[capBeforeBegin]; len(got) != 1 || got[0] > releaseLeft.Milliseconds() {
+		t.Fatalf("busy_timeout %s = %v ms, want one cap of at most %dms (the budget left when the pool connection was released)", capBeforeBegin, got, releaseLeft.Milliseconds())
+	}
+	// The write must spend the rest of the budget waiting, not less. 5s is a
+	// gross ceiling only (#693): slow lock I/O stretches the wait past the
+	// cap, and no cap at all would wait the DSN's 5s on top of the 1.2s hold.
+	assertContendedFailure(t, recErr, elapsed, 1500*time.Millisecond, 5*time.Second)
 }
 
 // Test 5: the cap is refreshed before COMMIT, which in rollback-journal mode
-// needs EXCLUSIVE and waits on readers.
+// needs EXCLUSIVE and waits on readers. The proof is the busy_timeout SQLite
+// reports right after each cap: the one before COMMIT must sit at least the
+// 1200ms fn slept below the one before BEGIN. Elapsed time is not the proof:
+// SQLite charges only its requested sleeps against busy_timeout, so slow lock
+// I/O stretches the wait past the cap (3.43s on a hosted Windows runner, #693)
+// while the stale-cap defect lands near 3.2s; no ceiling separates them. What
+// remains of the wall clock is a lower bound (slow I/O only lengthens a wait)
+// and a gross 5s ceiling under the 6.2s a write with no cap at all takes with
+// the DSN's 5000ms.
 func TestSQLiteFeedbackStoreRefreshesCapBeforeCommit(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feedback.db")
 	db := openFeedbackFileDB(t, path, "_pragma=busy_timeout(5000)", 1)
 	execFeedbackSQL(t, db, "PRAGMA journal_mode=DELETE")
 	store := newFileFeedbackStore(t, db)
 	markConn(t, db)
+	caps := recordedCaps(t, store)
 	release := holdFeedbackLock(t, path, "BEGIN", "SELECT COUNT(*) FROM routing_feedback_signals")
+	const budget = 2 * time.Second
 	start := time.Now()
-	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), budget)
 	defer cancel()
+	const fnSleep = 1200 * time.Millisecond
 	item := testFeedbackItem("m")
 	insertedLive := false
 	err := store.runInTx(ctx, func(tx *sql.Tx) error {
@@ -269,21 +336,44 @@ func TestSQLiteFeedbackStoreRefreshesCapBeforeCommit(t *testing.T) {
 			return err
 		}
 		insertedLive = ctx.Err() == nil
-		time.Sleep(1200 * time.Millisecond)
+		time.Sleep(fnSleep)
 		return nil
 	})
 	elapsed := time.Since(start)
 	release()
-	t.Logf("ELAPSED refresh-before-commit %v", elapsed)
+	t.Logf("ELAPSED refresh-before-commit %v caps %v", elapsed, caps)
 	if !insertedLive {
 		t.Fatal("fixture invalid: the INSERT did not finish while the deadline was live")
 	}
+	// A deadline that expired inside fn returns the ctx error from the
+	// "before commit" check, not a *sqlite.Error, and stops here.
 	var se *sqlite.Error
 	if !errors.As(err, &se) || se.Code()&255 != 5 {
 		t.Fatalf("fixture invalid: err = %v, want SQLITE_BUSY from the contended COMMIT", err)
 	}
-	if elapsed < 1500*time.Millisecond || elapsed > 2600*time.Millisecond {
-		t.Fatalf("returned after %v, want 1.5s..2.6s (COMMIT waits out the rest of the budget)", elapsed)
+	if len(caps[capBeforeBegin]) != 1 || len(caps[capBeforeCommit]) != 1 {
+		t.Fatalf("caps = %v, want exactly one %s and one %s", caps, capBeforeBegin, capBeforeCommit)
+	}
+	beginCap, commitCap := caps[capBeforeBegin][0], caps[capBeforeCommit][0]
+	slept := fnSleep.Milliseconds()
+	if beginCap <= slept {
+		t.Fatalf("fixture invalid: busy_timeout %s = %dms, want more than the %dms fn sleeps", capBeforeBegin, beginCap, slept)
+	}
+	// fn slept at least fnSleep between the two caps, so the time left, and
+	// with it the cap, dropped by at least that many whole milliseconds
+	// (Milliseconds truncates; exact while the DSN's busy_timeout exceeds the
+	// budget, so the saved clamp never applies). A stale cap reads back equal
+	// to beginCap.
+	if commitCap > beginCap-slept {
+		t.Fatalf("busy_timeout %s = %dms, want at most %dms (%s cap %dms minus the %dms spent in fn): the cap was not refreshed", capBeforeCommit, commitCap, beginCap-slept, capBeforeBegin, beginCap, slept)
+	}
+	// A hook that ran before its PRAGMA would report the DSN's 5000 here and
+	// the stale pre-BEGIN value at COMMIT, which the relation above accepts.
+	if beginCap > budget.Milliseconds() {
+		t.Fatalf("busy_timeout %s = %dms, want at most the %dms budget: the value read back was not set by the cap", capBeforeBegin, beginCap, budget.Milliseconds())
+	}
+	if elapsed < 1500*time.Millisecond || elapsed > 5*time.Second {
+		t.Fatalf("returned after %v, want 1.5s..5s (COMMIT waits out the rest of the budget; no cap at all would wait the DSN's 5s)", elapsed)
 	}
 	// modernc rolled the failed COMMIT back, so the store keeps the
 	// connection, and that connection is outside any transaction.

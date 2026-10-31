@@ -406,6 +406,7 @@ func TestProjectContextInputsUntrustedOmitsProject(t *testing.T) {
 	docs := []projectcontext.Document{{Source: "workspace", Path: "/ws/AGENTS.md", Content: "secret rule"}}
 	gitSnap := gitContextSnapshot{Block: "present", State: gitState{Branch: "main"}}
 	got := projectContextInputs(systemInputs{}, docs, gitSnap, false)
+	// containment: GUIDANCE-TRUST
 	if got.projectContext != "" || !strings.Contains(got.gitContext, "branch: main") {
 		t.Fatalf("projectContextInputs(untrusted) = project %q git %q, want no project and retained Git", got.projectContext, got.gitContext)
 	}
@@ -430,6 +431,7 @@ func TestProjectContextInputsExactNormalizedWire(t *testing.T) {
 		"recent commits (newest first): (none)\n" +
 		"working tree: clean\n" +
 		">>>GIT_CONTEXT TESTKEY00000"
+	// containment: GUIDANCE-SYSTEM-CONTEXT
 	if normalized := normalize(got.projectContext); normalized != wantProject {
 		t.Fatalf("projectContextInputs project wire = %q, want %q", normalized, wantProject)
 	}

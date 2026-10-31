@@ -5,6 +5,7 @@ package tools
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -14,29 +15,6 @@ import (
 	"syscall"
 	"testing"
 )
-
-// platformTestSetup makes the test process a clean bwrap parent. CI runners
-// (observed: GitHub Actions leaks an inheritable descriptor into the test
-// process) would otherwise trip the backend's fail-closed FD audit on every
-// prepare. Marking an inherited descriptor close-on-exec only changes what
-// FUTURE children of this process inherit; the owner's use of its own copy
-// is untouched. Production keeps the strict fail-closed audit.
-func platformTestSetup() {
-	entries, err := os.ReadDir("/proc/self/fd")
-	if err != nil {
-		return
-	}
-	for _, e := range entries {
-		fd, convErr := strconv.Atoi(e.Name())
-		if convErr != nil || fd <= 2 {
-			continue
-		}
-		flags, _, errno := syscall.Syscall(syscall.SYS_FCNTL, uintptr(fd), syscall.F_GETFD, 0)
-		if errno == 0 && flags&syscall.FD_CLOEXEC == 0 {
-			_, _, _ = syscall.Syscall(syscall.SYS_FCNTL, uintptr(fd), syscall.F_SETFD, flags|syscall.FD_CLOEXEC)
-		}
-	}
-}
 
 // recordingProbe fails the test if the probe runs when construction must have
 // already failed, and records the argv it receives otherwise.
@@ -84,6 +62,37 @@ func TestBwrapConstructorRejectsUnsupportedConfigBeforeProbe(t *testing.T) {
 	}
 	if probe.called != 0 {
 		t.Fatalf("probe ran %d times for unsupported configs", probe.called)
+	}
+}
+
+// The audit also runs at construction, before the probe (bwrap's first
+// spawn), so ValidateSandbox fails where every later spawn would (#576 I2).
+// Not parallel: FD flags are process-global state.
+func TestBwrapConstructorRefusesInheritableFD(t *testing.T) {
+	good := writeFakeBinary(t, 0o755)
+	cfg := SandboxConfig{Runtime: SandboxRuntimeBwrap}
+	fd, err := syscall.Open("/dev/null", syscall.O_RDONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = syscall.Close(fd) }()
+	if flags, _, errno := syscall.Syscall(syscall.SYS_FCNTL, uintptr(fd), syscall.F_GETFD, 0); errno != 0 || flags&syscall.FD_CLOEXEC != 0 {
+		t.Fatalf("precondition: fd %d flags=%d errno=%v, want it inheritable", fd, flags, errno)
+	}
+	probe := &recordingProbe{t: t}
+	_, err = newBwrapExecBackendAt(good, good, probe.probe, cfg)
+	want := fmt.Sprintf("tools: bwrap refuses to spawn with inheritable host fd %d (missing FD_CLOEXEC)", fd)
+	if err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("constructor with inheritable fd %d = %v, want %q", fd, err, want)
+	}
+	if probe.called != 0 {
+		t.Fatalf("probe ran %d times with an inheritable fd, want 0", probe.called)
+	}
+	if _, _, errno := syscall.Syscall(syscall.SYS_FCNTL, uintptr(fd), syscall.F_SETFD, syscall.FD_CLOEXEC); errno != 0 {
+		t.Fatal(errno)
+	}
+	if _, err := newBwrapExecBackendAt(good, good, probe.probe, cfg); err != nil || probe.called != 1 {
+		t.Fatalf("control constructor = %v with %d probe(s), want nil and 1", err, probe.called)
 	}
 }
 

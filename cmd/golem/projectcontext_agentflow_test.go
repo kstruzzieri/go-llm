@@ -41,7 +41,7 @@ func TestProjectTrustAgentflowProcess(t *testing.T) {
 	reply := "{}"
 	switch {
 	case args[0] == "--version":
-		reply = "agentflow 1.0.0"
+		reply = "agentflow 1.2.0"
 	case args[0] == "--help" || len(args) > 1 && args[1] == "--help":
 		reply = "init init-execution lock-plan record-file-change run finish-step finish-run next-step next-action doctor status claim-step recommend-workflow workflow-contract --root --from-json --json --agent --step --attempt --path --gate --confirm-risk --stdin --selected-profile --reason"
 	case args[0] == "recommend-workflow":
@@ -67,6 +67,8 @@ func TestProjectTrustAgentflowProcess(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(stateDir, "step"), []byte(strconv.Itoa(step+1)), 0600); err != nil {
 			os.Exit(2)
 		}
+	case args[0] == "next-action":
+		reply = `{"state":"run_unverified"}`
 	case args[0] == "finish-run":
 		reply = `{"ok":true}`
 	}
