@@ -48,7 +48,7 @@ func main() {
 	importXlamN := flag.Int("import-xlam-n", 300, "Number of eligible records to sample for -import-xlam (<=0 = all eligible)")
 	importXlamSeed := flag.Int64("import-xlam-seed", 42, "Deterministic sampling seed for -import-xlam")
 	assemblyBuildPath := flag.String("assembly-build", "", "Build assembly traces from this case-fixture JSON (#331): a JSON array is the 3a flat/progressive corpus; a JSON object is the 3c mixed-assembly fixture (paired legacy/mixed arms + optional topline)")
-	injectionBuildPath := flag.String("build-injection-corpus", "", "Build frozen-real-wire injection traces from this cases JSON (#452)")
+	injectionBuildPath := flag.String("build-injection-corpus", "", "Build frozen-real-wire injection traces from this cases JSON (#452; a cases source of \"forged-close\" builds the E1 forged-close corpus, docs/llm/traces/injection-forged-close)")
 	injectionOut := flag.String("injection-out", filepath.Join("docs", "llm", "traces", "injection", "traces"), "Output directory for -build-injection-corpus")
 	interceptorCensus := flag.Bool("interceptor-census", false, "Run the deterministic interceptor census (#517): render every -census-manifest file through Golem's production tools under interceptor.Defaults() and report the findings per carrier")
 	censusManifestPath := flag.String("census-manifest", filepath.Join("docs", "llm", "census", "manifest.json"), "With -interceptor-census or -interceptor-benign-draft: the census manifest (llm-bench.census-manifest/v1)")
@@ -390,7 +390,7 @@ func main() {
 	}
 
 	if *injectionBuildPath != "" {
-		if err := buildInjectionCorpus(ctx, *injectionBuildPath, *injectionOut); err != nil {
+		if err := buildInjectionCorpusBySource(ctx, *injectionBuildPath, *injectionOut); err != nil {
 			log.Fatalf("llm-bench: build-injection-corpus: %v", err)
 		}
 		return
@@ -685,7 +685,7 @@ func main() {
 			inputs = append(inputs, [2]string{"-captures manifest", captureManifestPath(c)})
 		}
 		refuseReportAlias("injection-report", *reportPath, inputs)
-		report, err := runInjectionReport(injectionReportOptions{
+		report, err := runInjectionReportWithForgedClose(injectionReportOptions{
 			RegistrationPath: *registrationPath,
 			Captures:         captures,
 			Adjudications:    *injectionAdjudications,
