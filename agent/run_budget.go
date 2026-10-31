@@ -121,7 +121,7 @@ func (r *tokenReservation) settle(mr ModelResult, callErr error) {
 	u := mr.Response.Usage
 	sum, sumOK := checkedTokenAdd(max(0, u.PromptTokens), max(0, u.CompletionTokens))
 	valid := u.PromptTokens >= 0 && u.CompletionTokens >= 0 && u.TotalTokens >= 0 &&
-		u.ReasoningTokens >= 0 && sumOK &&
+		u.ReasoningTokens >= 0 && u.CachedPromptTokens >= 0 && u.CacheWriteTokens >= 0 && sumOK &&
 		(u.TotalTokens == 0 || u.TotalTokens == sum || (u.PromptTokens == 0 && u.CompletionTokens == 0))
 	logical := saturatedTokenAdd(max(r.prompt, u.PromptTokens), max(0, u.CompletionTokens))
 	charge := max(logical, u.TotalTokens)
@@ -151,6 +151,10 @@ func (r *tokenReservation) settle(mr ModelResult, callErr error) {
 			node.descendants.PromptTokens = saturatedTokenAdd(node.descendants.PromptTokens, u.PromptTokens)
 			node.descendants.CompletionTokens = saturatedTokenAdd(node.descendants.CompletionTokens, u.CompletionTokens)
 			node.descendants.TotalTokens = saturatedTokenAdd(node.descendants.TotalTokens, u.TotalTokens)
+			node.descendants.CachedPromptTokens = saturatedTokenAdd(node.descendants.CachedPromptTokens, u.CachedPromptTokens)
+			node.descendants.CachedPromptTokensReported = node.descendants.CachedPromptTokensReported || u.CachedPromptTokensReported
+			node.descendants.CacheWriteTokens = saturatedTokenAdd(node.descendants.CacheWriteTokens, u.CacheWriteTokens)
+			node.descendants.CacheWriteTokensReported = node.descendants.CacheWriteTokensReported || u.CacheWriteTokensReported
 		}
 	}
 }
