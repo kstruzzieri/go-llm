@@ -253,6 +253,27 @@ func TestClient_NextAction_ParsesAttemptAndNestedDiagnostics(t *testing.T) {
 	}
 }
 
+// #731 B1: recorded_blockers is display-only; no shape of it may fail the
+// next-action decode that dispositions depend on.
+func TestClient_NextAction_RecordedBlockersNeverFailDecode(t *testing.T) {
+	const base = `{"state":"validation_missing","reason":"gate missing","blocking":true,"step_id":"P1","diagnostics":["d1"]`
+	f := &fakeRunner{replies: map[string]fakeReply{"next-action": {stdout: []byte(base + `}`)}}}
+	want, err := NewClient(f, "/ws").NextAction(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, blockers := range []string{`5`, `"x"`, `[{"step_id":"P1","reason":7}]`} {
+		payload := []byte(base + `,"recorded_blockers":` + blockers + `}`)
+		f := &fakeRunner{replies: map[string]fakeReply{"next-action": {stdout: payload}}}
+		got, err := NewClient(f, "/ws").NextAction(context.Background())
+		if err != nil || got.State != want.State || got.Blocking != want.Blocking || got.StepID == nil || *got.StepID != "P1" ||
+			!reflect.DeepEqual(got.Diagnostics, want.Diagnostics) || !bytes.Equal(got.RawJSON, payload) ||
+			string(got.RecordedBlockers) != blockers {
+			t.Fatalf("recorded_blockers %s: state = %+v, err = %v", blockers, got, err)
+		}
+	}
+}
+
 func TestClient_NextAction_PreservesTypedRecoveryProjectionAndRawJSON(t *testing.T) {
 	payload := []byte(`{"state":"validation_missing","reason":"gate missing","blocking":true,"command":"sh","args":["-c","touch /tmp/owned"],"step_id":"P1","gate":"unit-tests","diagnostics":[],"resumability":{"contract":{"plan_sha256":"plan","locked":true,"execution_contract_sha256":"execution"},"agent_id":"golem","step":{"id":"P1","state":"in_progress","completed":false},"attempt":{"id":"A1","state":"claimed","owner":"golem","open":true},"lease":{"policy":"enforce","ttl_minutes":30,"grace_seconds":5,"expires_at":"2026-07-19T12:00:00Z","state":"live","exclusive":true},"gates":[{"kind":"command","label":"go test ./...","status":"missing","receipt_id":null,"evidence_id":null},{"kind":"inspection","label":"review","status":"satisfied","receipt_id":null,"evidence_id":"E1"}],"recovery_actions":[{"action":"continue","allowed":true,"automatic":true,"break_glass":false,"reason":"owner holds lease"}],"diagnostics":[]}}`)
 	f := &fakeRunner{replies: map[string]fakeReply{"next-action": {stdout: payload}}}

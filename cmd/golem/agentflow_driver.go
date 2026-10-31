@@ -771,7 +771,7 @@ func runAgentflowTask(ctx context.Context, stdout, stderr io.Writer, interrupts 
 			reportAgentflowResumeError(stderr, err)
 			return errAgentflowTaskFailed
 		}
-		renderAgentflowStatus(stdout, final, &summary, resumeDisposition(final.State))
+		renderResumeResult(stdout, final, summary)
 		return nil
 	}
 	var coordinator *parallelCoordinator

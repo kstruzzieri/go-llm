@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -1409,6 +1410,11 @@ func TestAgentflowFailedGateIsBlockedAndResumes_RealCLI(t *testing.T) {
 	if !errors.As(statusErr, &exit) || exit.ExitCode() != 2 {
 		t.Fatalf("status before resume = %v, want exit 2\n%s", statusErr, status.String())
 	}
+	// #731: status shows the block as a current recorded blocker.
+	blockerLine := regexp.MustCompile(`(?m)^recorded blocker: P1/A1 blocked at \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?\+00:00 \(owner golem\): golem: gate execution failed$`)
+	if !blockerLine.MatchString(status.String()) {
+		t.Fatalf("status before resume does not show A1's recorded blocker:\n%s", status.String())
+	}
 
 	resume := fixtureTaskFlags(dir)
 	resume.agentflowResume = true
@@ -1426,6 +1432,11 @@ func TestAgentflowFailedGateIsBlockedAndResumes_RealCLI(t *testing.T) {
 	}
 	if state, err := agentflow.NewClient(runner, dir).NextAction(context.Background()); err != nil || state.State != "complete" {
 		t.Fatalf("after resume: state=%q err=%v, want complete", state.State, err)
+	}
+	// A2's opening superseded A1's blocker, so status shows none.
+	status.Reset()
+	if err := runAgentflowStatusWithRunner(context.Background(), &status, dir, false, runner); err != nil || strings.Contains(status.String(), "recorded blocker") {
+		t.Fatalf("status after resume = %v, want exit 0 and no recorded blocker\n%s", err, status.String())
 	}
 	lines, receipts = readCommandReceipts(t, dir)
 	var a1, a2 []int

@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/kstruzzieri/go-llm/agentflow"
 )
@@ -538,7 +539,7 @@ func TestAgentflowRecoveryOutputEscapesTerminalControls(t *testing.T) {
 		},
 	}
 	var rendered bytes.Buffer
-	renderAgentflowStatus(&rendered, state, nil, recoveryDisposition{failClosed, 3, evil})
+	renderAgentflowStatus(&rendered, state, nil, recoveryDisposition{failClosed, 3, evil}, false)
 	for _, control := range []string{"\x1b", "\u0085", "\nproof: verified\n"} {
 		if strings.Contains(rendered.String(), control) {
 			t.Fatalf("raw terminal control or forged line reached status output: %q", rendered.String())
@@ -580,6 +581,159 @@ func TestAgentflowRecoveryOutputEscapesTerminalControls(t *testing.T) {
 	// checks above prove nothing (for example, if --version failed first).
 	if !strings.Contains(unavailable.String(), `proof: verified\x1b[2J`) {
 		t.Fatalf("status output = %q, want the escaped next-action stderr", unavailable.String())
+	}
+}
+
+const (
+	currentBlockerJSON    = `{"step_id":"P1","attempt_id":"A1","event":"blocked","reason":"golem: gate execution failed","recorded_at":"2026-10-31T15:30:06+00:00","attempt_owner":"golem","superseded_by":null}`
+	currentBlockerLine    = "recorded blocker: P1/A1 blocked at 2026-10-31T15:30:06+00:00 (owner golem): golem: gate execution failed"
+	malformedBlockersJSON = `[` + currentBlockerJSON + `,{"step_id":"P4","attempt_id":"A6","event":"blocked","reason":"x"},{"step_id":"P5","attempt_id":"A11","event":"blocked","reason":7,"superseded_by":null},"x"]`
+)
+
+// reasonBlockers is one current P1/A1 blocker, owned by golem, with reason and
+// no recorded_at.
+func reasonBlockers(t *testing.T, reason string) string {
+	t.Helper()
+	b, err := json.Marshal(map[string]any{"step_id": "P1", "attempt_id": "A1", "event": "blocked", "reason": reason, "attempt_owner": "golem", "superseded_by": nil})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return "[" + string(b) + "]"
+}
+
+// linesWithPrefix returns out's lines that start with prefix.
+func linesWithPrefix(out, prefix string) []string {
+	var lines []string
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(line, prefix) {
+			lines = append(lines, line)
+		}
+	}
+	return lines
+}
+
+// statusExitCode is runAgentflowStatusWithRunner's exit code: 0 for nil.
+func statusExitCode(t *testing.T, err error) int {
+	t.Helper()
+	if err == nil {
+		return 0
+	}
+	var exit *agentflowStatusExit
+	if !errors.As(err, &exit) {
+		t.Fatalf("status err = %v, want an exit code", err)
+	}
+	return exit.ExitCode()
+}
+
+// #731 B2-B4: human status shows current recorded blockers, escaped, with the
+// reason cut to 200 runes before escaping, after the diagnostics.
+func TestAgentflowStatusRendersRecordedBlockers(t *testing.T) {
+	const prefix = "recorded blocker: P1/A1 blocked (owner golem): "
+	for _, tt := range []struct {
+		name, blockers string
+		want           []string
+	}{
+		{"none", "", nil},
+		{"current", "[" + currentBlockerJSON + "]", []string{currentBlockerLine}},
+		{"nulls", `[{"step_id":"P2","attempt_id":"A3","event":"failed","reason":null,"recorded_at":null,"attempt_owner":null,"superseded_by":null}]`,
+			[]string{"recorded blocker: P2/A3 failed (no owner): (no reason)"}},
+		{"order", "[" + currentBlockerJSON +
+			`,{"step_id":"P1","attempt_id":"A2","event":"failed","reason":"r","recorded_at":null,"attempt_owner":null,"superseded_by":"A4"}` +
+			`,{"step_id":"P3","attempt_id":"A5","event":"abandoned_future","reason":"r","recorded_at":"2026-10-31T16:00:00+00:00","attempt_owner":"ops","superseded_by":null}]`,
+			[]string{currentBlockerLine, "recorded blocker: P3/A5 abandoned_future at 2026-10-31T16:00:00+00:00 (owner ops): r"}},
+		{"malformed", malformedBlockersJSON,
+			[]string{currentBlockerLine, "recorded blockers: 3 malformed entries not shown; see -agentflow-status -json"}},
+		{"not array", "5", []string{"recorded blockers: not shown (recorded_blockers is not an array); see -agentflow-status -json"}},
+		{"controls", reasonBlockers(t, "a\nb\x1bc\u202ed"), []string{prefix + "a\\nb\\x1bc\\u202ed"}},
+		{"cut", reasonBlockers(t, "\x1b"+strings.Repeat("a", 299)), []string{prefix + `\x1b` + strings.Repeat("a", 199) + "..."}},
+		{"boundary", reasonBlockers(t, strings.Repeat("a", 200)), []string{prefix + strings.Repeat("a", 200)}},
+		{"multibyte", reasonBlockers(t, strings.Repeat("é", 250)), []string{prefix + strings.Repeat("é", 200) + "..."}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			state := agentflow.NextActionState{State: "step_unclaimed", Reason: "r", Diagnostics: []string{"d1"}, Command: "c", RecordedBlockers: json.RawMessage(tt.blockers)}
+			var out bytes.Buffer
+			renderAgentflowStatus(&out, state, nil, recoveryDisposition{failClosed, 3, "blocked"}, true)
+			rendered := out.String()
+			if got := linesWithPrefix(rendered, "recorded blocker"); !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("blocker lines = %q\nwant %q\noutput:\n%s", got, tt.want, rendered)
+			}
+			for _, r := range rendered {
+				if r < 0x20 && r != '\n' || r == 0x7f || r == '\u202e' {
+					t.Fatalf("raw control %U reached status output: %q", r, rendered)
+				}
+			}
+			if !utf8.ValidString(rendered) {
+				t.Fatalf("status output is not valid UTF-8: %q", rendered)
+			}
+			if tt.name == "current" {
+				diag, blocker := strings.Index(rendered, "diagnostic: d1\n"), strings.Index(rendered, "recorded blocker:")
+				advisory, resume := strings.Index(rendered, "advisory (display only):"), strings.Index(rendered, "resume:")
+				if diag < 0 || !(diag < blocker && blocker < advisory && advisory < resume) {
+					t.Fatalf("blocker line out of place:\n%s", rendered)
+				}
+			}
+		})
+	}
+}
+
+// #731 B1: blockers never change status's exit code, blocking or resume line,
+// and JSON status still relays AgentFlow's exact bytes.
+func TestAgentflowStatusBlockersAreDisplayOnly(t *testing.T) {
+	fixture := newResumeFixture(t)
+	state := fixture.noAttemptState(t, "step_unclaimed", true)
+	var baseExit int
+	var baseLines []string
+	for i, blockers := range []string{"", "[" + currentBlockerJSON + "]", malformedBlockersJSON} {
+		variant := state
+		variant.RecordedBlockers = json.RawMessage(blockers)
+		payload, err := json.Marshal(variant)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var human bytes.Buffer
+		exit := statusExitCode(t, runAgentflowStatusWithRunner(context.Background(), &human, fixture.root, false, &recoveryRunner{payload: payload}))
+		lines := append(linesWithPrefix(human.String(), "blocking: "), linesWithPrefix(human.String(), "resume: ")...)
+		if i == 0 {
+			baseExit, baseLines = exit, lines
+		} else if exit != baseExit || !reflect.DeepEqual(lines, baseLines) {
+			t.Fatalf("blockers %s: exit %d lines %q, want exit %d lines %q", blockers, exit, lines, baseExit, baseLines)
+		}
+		if i > 0 && !strings.Contains(human.String(), "\n"+currentBlockerLine+"\n") {
+			t.Fatalf("blockers %s: status did not show the current blocker:\n%s", blockers, human.String())
+		}
+		var relayed bytes.Buffer
+		jsonExit := statusExitCode(t, runAgentflowStatusWithRunner(context.Background(), &relayed, fixture.root, true, &recoveryRunner{payload: payload}))
+		if jsonExit != baseExit || !bytes.Equal(relayed.Bytes(), payload) {
+			t.Fatalf("blockers %s: JSON exit %d, bytes changed: %s", blockers, jsonExit, relayed.String())
+		}
+	}
+}
+
+// #731 B5: the malformed-projection status path still shows the blockers that
+// decoded, and JSON mode still relays the bytes.
+func TestAgentflowStatusMalformedProjectionStillShowsBlockers(t *testing.T) {
+	payload := []byte(`{"state":"step_unclaimed","reason":"r","blocking":"bad","diagnostics":[],"recorded_blockers":[` + currentBlockerJSON + `]}`)
+	var human bytes.Buffer
+	exit := statusExitCode(t, runAgentflowStatusWithRunner(context.Background(), &human, t.TempDir(), false, &recoveryRunner{payload: payload}))
+	if exit != 3 || !strings.Contains(human.String(), "\n"+currentBlockerLine+"\n") ||
+		!strings.Contains(human.String(), "\nresume: blocked by malformed Agentflow projection\n") {
+		t.Fatalf("status exit %d, want 3 with the blocker and the malformed disposition:\n%s", exit, human.String())
+	}
+	var relayed bytes.Buffer
+	exit = statusExitCode(t, runAgentflowStatusWithRunner(context.Background(), &relayed, t.TempDir(), true, &recoveryRunner{payload: payload}))
+	if exit != 3 || !bytes.Equal(relayed.Bytes(), payload) {
+		t.Fatalf("JSON status exit %d, bytes %s; want 3 and the payload", exit, relayed.String())
+	}
+}
+
+// #731 B5: resume's success render shares renderAgentflowStatus but shows no
+// blockers; they belong to -agentflow-status.
+func TestResumeResultOmitsRecordedBlockers(t *testing.T) {
+	var out bytes.Buffer
+	renderResumeResult(&out, agentflow.NextActionState{State: "complete", RecordedBlockers: json.RawMessage(malformedBlockersJSON)},
+		agentflow.ProofSummary{Path: ".agent/proof-pack.json"})
+	if !strings.Contains(out.String(), "proof: verified") || strings.Contains(out.String(), "recorded blocker") {
+		t.Fatalf("resume result = %q, want the proof and no blocker lines", out.String())
 	}
 }
 

@@ -698,18 +698,20 @@ func (c *Client) ProofSummary(ctx context.Context) (ProofSummary, error) {
 // NextActionState is agentflow's next-action projection. Golem branches on
 // State (resume dispositions, the pre-finish-run step-work check); Command and
 // Args are an advisory hint, printed and never executed: proof state stays
-// adapter-driven.
+// adapter-driven. RecordedBlockers stays raw so that no shape of it can fail
+// this decode (#731); only human status reads it, via ParseRecordedBlockers.
 type NextActionState struct {
-	State        string                  `json:"state"`
-	Reason       string                  `json:"reason"`
-	Blocking     bool                    `json:"blocking"`
-	Command      string                  `json:"command"`
-	Args         []string                `json:"args"`
-	StepID       *string                 `json:"step_id"`
-	Gate         *string                 `json:"gate"`
-	Diagnostics  []string                `json:"diagnostics"`
-	Resumability *ResumabilityProjection `json:"resumability"`
-	RawJSON      []byte                  `json:"-"`
+	State            string                  `json:"state"`
+	Reason           string                  `json:"reason"`
+	Blocking         bool                    `json:"blocking"`
+	Command          string                  `json:"command"`
+	Args             []string                `json:"args"`
+	StepID           *string                 `json:"step_id"`
+	Gate             *string                 `json:"gate"`
+	Diagnostics      []string                `json:"diagnostics"`
+	Resumability     *ResumabilityProjection `json:"resumability"`
+	RecordedBlockers json.RawMessage         `json:"recorded_blockers,omitempty"`
+	RawJSON          []byte                  `json:"-"`
 }
 
 // ResumabilityProjection is the subset of next-action state required to prove
