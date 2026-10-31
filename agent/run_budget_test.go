@@ -174,6 +174,8 @@ func TestRunBudgetSettlement(t *testing.T) {
 		{name: "negative completion", usage: provider.Usage{CompletionTokens: -1}, charge: 150},
 		{name: "negative total", usage: provider.Usage{TotalTokens: -1}, charge: 150},
 		{name: "negative reasoning", usage: provider.Usage{PromptTokens: 100, CompletionTokens: 20, TotalTokens: 120, ReasoningTokens: -1}, charge: 150},
+		{name: "negative cached", usage: provider.Usage{PromptTokens: 100, CompletionTokens: 20, TotalTokens: 120, CachedPromptTokens: -1}, charge: 150},
+		{name: "negative cache write", usage: provider.Usage{PromptTokens: 100, CompletionTokens: 20, TotalTokens: 120, CacheWriteTokens: -1}, charge: 150},
 		{name: "larger contradictory total", usage: provider.Usage{PromptTokens: 100, CompletionTokens: 20, TotalTokens: 500}, charge: 500},
 		{name: "overflow", usage: provider.Usage{PromptTokens: math.MaxInt, CompletionTokens: 1}, charge: math.MaxInt},
 	} {

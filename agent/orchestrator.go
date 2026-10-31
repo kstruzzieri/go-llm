@@ -507,10 +507,18 @@ func assistantMessage(resp provider.ChatResponse) Message {
 	}, Segment: Elastic}
 }
 
+// addUsage sums a and b's token counts. The cache counters are summed too and
+// their Reported flags are ORed, so a run that mixes a reporting and a
+// non-reporting backend still shows what was measured. Reasoning tokens are
+// not accumulated.
 func addUsage(a, b provider.Usage) provider.Usage {
 	a.PromptTokens += b.PromptTokens
 	a.CompletionTokens += b.CompletionTokens
 	a.TotalTokens += b.TotalTokens
+	a.CachedPromptTokens += b.CachedPromptTokens
+	a.CachedPromptTokensReported = a.CachedPromptTokensReported || b.CachedPromptTokensReported
+	a.CacheWriteTokens += b.CacheWriteTokens
+	a.CacheWriteTokensReported = a.CacheWriteTokensReported || b.CacheWriteTokensReported
 	return a
 }
 

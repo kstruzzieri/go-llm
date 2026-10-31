@@ -375,12 +375,21 @@ type ModelInfo struct {
 // ReasoningTokensReported is true when the backend explicitly reported the
 // reasoning-token field. It distinguishes a measured zero from a backend that
 // does not report isolated reasoning tokens.
+//
+// CachedPromptTokens is the part of PromptTokens served from the backend's
+// prompt cache, and CacheWriteTokens is the part written to it, when the
+// backend reports them. PromptTokens includes cached tokens; the Reported
+// flags distinguish a measured zero from a backend that does not report.
 type Usage struct {
-	PromptTokens            int  `json:"prompt_tokens"`
-	CompletionTokens        int  `json:"completion_tokens"`
-	TotalTokens             int  `json:"total_tokens"`
-	ReasoningTokens         int  `json:"reasoning_tokens,omitempty"`
-	ReasoningTokensReported bool `json:"reasoning_tokens_reported,omitempty"`
+	PromptTokens               int  `json:"prompt_tokens"`
+	CompletionTokens           int  `json:"completion_tokens"`
+	TotalTokens                int  `json:"total_tokens"`
+	ReasoningTokens            int  `json:"reasoning_tokens,omitempty"`
+	ReasoningTokensReported    bool `json:"reasoning_tokens_reported,omitempty"`
+	CachedPromptTokens         int  `json:"cached_prompt_tokens,omitempty"`
+	CachedPromptTokensReported bool `json:"cached_prompt_tokens_reported,omitempty"`
+	CacheWriteTokens           int  `json:"cache_write_tokens,omitempty"`
+	CacheWriteTokensReported   bool `json:"cache_write_tokens_reported,omitempty"`
 }
 
 // LatencyInfo captures timing breakdowns from the provider backend.
