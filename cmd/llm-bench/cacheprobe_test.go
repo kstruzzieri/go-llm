@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/kstruzzieri/go-llm/agent"
+	"github.com/kstruzzieri/go-llm/golem"
 	"github.com/kstruzzieri/go-llm/provider"
 )
 
@@ -216,7 +217,11 @@ func TestCacheProbePressureCompacts(t *testing.T) {
 	ps := newProbeServer(t)
 	// A pressure run that never compacted would be mislabeled, so
 	// runCacheProbe errors on it: a nil error proves compaction ran.
-	rows := runProbe(t, ps, probePressure)
+	pressure := &forwardRecorder{next: ps.caller(t)}
+	rows, err := runCacheProbe(t.Context(), pressure, cacheProbeFixtures, probePressure)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(rows) != 12 {
 		t.Fatalf("rows = %d, want 12", len(rows))
 	}
@@ -227,6 +232,16 @@ func TestCacheProbePressureCompacts(t *testing.T) {
 		if r.PrefixRatio < 0 || r.PrefixRatio > 1 {
 			t.Errorf("rows[%d].PrefixRatio = %v, want within [0,1]", i, r.PrefixRatio)
 		}
+	}
+
+	// Compaction must reach the wire, not just the step counter: turn 1's last
+	// request (the 9th) carries fewer messages under pressure than uncompacted.
+	whole := &forwardRecorder{next: ps.caller(t)}
+	if _, err := runCacheProbe(t.Context(), whole, cacheProbeFixtures, probeUncompacted); err != nil {
+		t.Fatal(err)
+	}
+	if got, ref := len(pressure.reqs[8].Messages), len(whole.reqs[8].Messages); got >= ref {
+		t.Errorf("turn 1 step 9 carries %d messages under pressure, want fewer than the %d uncompacted: the pressure budget no longer shrinks the request", got, ref)
 	}
 }
 
@@ -320,6 +335,50 @@ func TestCacheProbePrefixRatioIsMessagesOnly(t *testing.T) {
 	if len(fr.reqs[1].Tools) == 0 {
 		t.Error("requests carry no tool schemas: the messages-only comparison is untested")
 	}
+}
+
+// TestCacheProbeSendsSystemPromptAndHistory pins what makes the probe's
+// requests Golem-shaped: the first message of every request is Golem's system
+// prompt, and a follow-up turn's request carries the earlier turns as History.
+// Dropping either would keep every other probe test green while the measured
+// prefix stopped resembling a real session.
+func TestCacheProbeSendsSystemPromptAndHistory(t *testing.T) {
+	ps := newProbeServer(t)
+	fr := &forwardRecorder{next: ps.caller(t)}
+	if _, err := runCacheProbe(t.Context(), fr, cacheProbeFixtures, probeUncompacted); err != nil {
+		t.Fatal(err)
+	}
+	if len(fr.reqs) != 12 {
+		t.Fatalf("forwarded %d requests, want 12", len(fr.reqs))
+	}
+	system := golem.SystemPrompt(false, false)
+	for i, req := range fr.reqs {
+		if len(req.Messages) == 0 || req.Messages[0].Role != "system" || !strings.HasPrefix(req.Messages[0].Content, system) {
+			t.Errorf("request %d does not open with Golem's system prompt: first message %+v", i, firstMessage(req))
+		}
+	}
+
+	// reqs[9] is the first request of turn 2 (turn 1 is 8 reads + the answer).
+	turn2 := fr.reqs[9].Messages
+	var sawGoal, sawAnswer bool
+	for _, m := range turn2 {
+		switch {
+		case m.Role == "user" && strings.Contains(m.Content, "Read f1.txt through f8.txt"):
+			sawGoal = true
+		case m.Role == "assistant" && m.Content == "Probe answer 1.":
+			sawAnswer = true
+		}
+	}
+	if !sawGoal || !sawAnswer {
+		t.Errorf("turn 2 request carries turn 1 goal=%v answer=%v, want both: History must reach the model\nmessages: %+v", sawGoal, sawAnswer, turn2)
+	}
+}
+
+func firstMessage(req provider.ChatRequest) any {
+	if len(req.Messages) == 0 {
+		return nil
+	}
+	return req.Messages[0]
 }
 
 func TestCacheProbeFixtures(t *testing.T) {

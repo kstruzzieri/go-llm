@@ -89,6 +89,26 @@ func TestChatUsageCacheCounters(t *testing.T) {
 			want: cacheUsageWant{prompt: 2000, completion: 10, total: 2010},
 		},
 		{
+			// The provider reports the wire value raw, even when it exceeds
+			// prompt_tokens; consumers (budget, footer) clamp, not the parser.
+			name: "cached exceeds prompt passes through raw",
+			body: chatBody(`"prompt_tokens":100,"completion_tokens":10,"total_tokens":110,"prompt_tokens_details":{"cached_tokens":150}`),
+			want: cacheUsageWant{cached: 150, cachedRep: true, prompt: 100, completion: 10, total: 110},
+		},
+		{
+			name: "cached_tokens null is unreported",
+			body: chatBody(`"prompt_tokens":2000,"completion_tokens":10,"total_tokens":2010,"prompt_tokens_details":{"cached_tokens":null}`),
+			want: cacheUsageWant{prompt: 2000, completion: 10, total: 2010},
+		},
+		{
+			// Step 0 decision: the llama-server timings block is not a counter
+			// source; only prompt_tokens_details.cached_tokens is.
+			name: "timings alone is ignored",
+			body: `{"model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],` +
+				`"usage":{"prompt_tokens":2000,"completion_tokens":10,"total_tokens":2010},"timings":{"cache_n":1800}}`,
+			want: cacheUsageWant{prompt: 2000, completion: 10, total: 2010},
+		},
+		{
 			name: "cache write",
 			body: chatBody(`"prompt_tokens":2000,"completion_tokens":10,"total_tokens":2010,"prompt_tokens_details":{"cached_tokens":0,"cache_write_tokens":900}`),
 			want: cacheUsageWant{write: 900, cachedRep: true, writeRep: true, prompt: 2000, completion: 10, total: 2010},

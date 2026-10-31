@@ -44,6 +44,18 @@ func TestAddUsageSumsCacheCounters(t *testing.T) {
 			want: provider.Usage{CachedPromptTokens: 3, CachedPromptTokensReported: true, CacheWriteTokens: 12, CacheWriteTokensReported: true},
 		},
 		{
+			name: "cache write reported on the left only ORs the flag",
+			a:    provider.Usage{CacheWriteTokens: 5, CacheWriteTokensReported: true},
+			b:    provider.Usage{},
+			want: provider.Usage{CacheWriteTokens: 5, CacheWriteTokensReported: true},
+		},
+		{
+			name: "cache write reported on the right only ORs the flag",
+			a:    provider.Usage{},
+			b:    provider.Usage{CacheWriteTokens: 5, CacheWriteTokensReported: true},
+			want: provider.Usage{CacheWriteTokens: 5, CacheWriteTokensReported: true},
+		},
+		{
 			name: "reasoning is still not accumulated",
 			a:    provider.Usage{TotalTokens: 1},
 			b:    provider.Usage{TotalTokens: 2, ReasoningTokens: 4, ReasoningTokensReported: true},
