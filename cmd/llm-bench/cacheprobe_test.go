@@ -523,6 +523,48 @@ func TestRunCacheProbeModeValidation(t *testing.T) {
 	}
 }
 
+// The output file is opened before the run so a bad path fails early, but it
+// must not be truncated until the table is ready: a failed run keeps whatever
+// table was there, and a successful one replaces it completely.
+func TestRunCacheProbeModeOutputFileLifecycle(t *testing.T) {
+	opts := func(url, out string) cacheProbeOptions {
+		return cacheProbeOptions{BaseURL: url, Models: "openai-compat/probe-model", Out: out, Scenario: string(probeUncompacted)}
+	}
+
+	t.Run("failed run keeps the old table", func(t *testing.T) {
+		ps := newProbeServer(t)
+		ps.Close() // every request now fails
+		out := filepath.Join(t.TempDir(), "probe.md")
+		if err := os.WriteFile(out, []byte("old table"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := runCacheProbeMode(t.Context(), opts(ps.URL, out), &strings.Builder{}); err == nil {
+			t.Fatal("runCacheProbeMode succeeded against a closed server")
+		}
+		if b, err := os.ReadFile(out); err != nil || string(b) != "old table" {
+			t.Errorf("output after a failed run = %q (err %v), want %q untouched", b, err, "old table")
+		}
+	})
+
+	t.Run("successful run replaces a longer old table", func(t *testing.T) {
+		ps := newProbeServer(t)
+		out := filepath.Join(t.TempDir(), "probe.md")
+		if err := os.WriteFile(out, []byte(strings.Repeat("stale table\n", 2000)), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := runCacheProbeMode(t.Context(), opts(ps.URL, out), &strings.Builder{}); err != nil {
+			t.Fatal(err)
+		}
+		b, err := os.ReadFile(out)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.HasPrefix(string(b), "# Cache probe: scenario uncompacted") || strings.Contains(string(b), "stale") {
+			t.Errorf("output keeps bytes of the old table (%d bytes):\n%.200s", len(b), b)
+		}
+	})
+}
+
 func TestRunCacheProbeModeWritesTable(t *testing.T) {
 	for _, sc := range []probeScenario{probeUncompacted, probePressure} {
 		t.Run(string(sc), func(t *testing.T) {

@@ -384,8 +384,10 @@ func runCacheProbeMode(ctx context.Context, opts cacheProbeOptions, stderr io.Wr
 		return err
 	}
 	// Open the output before the first request so a bad path fails now, not after
-	// a multi-minute run. A run that then fails leaves the file truncated.
-	out, err := os.OpenFile(opts.Out, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	// a multi-minute run. No O_TRUNC: a run that then fails leaves an existing
+	// table untouched (a path that did not exist stays an empty file); the
+	// truncate happens just before the table is written.
+	out, err := os.OpenFile(opts.Out, os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		return fmt.Errorf("open -cache-probe-out: %w", err)
 	}
@@ -394,6 +396,11 @@ func runCacheProbeMode(ctx context.Context, opts cacheProbeOptions, stderr io.Wr
 	rows, err := runCacheProbe(ctx, real, opts.FixtureDir, sc)
 	if err != nil {
 		return err
+	}
+	// The offset is still 0; truncating keeps a shorter table from leaving the
+	// old file's trailing bytes.
+	if err := out.Truncate(0); err != nil {
+		return fmt.Errorf("write -cache-probe-out: %w", err)
 	}
 	if err := writeProbeTable(out, rows); err != nil {
 		return fmt.Errorf("write -cache-probe-out: %w", err)

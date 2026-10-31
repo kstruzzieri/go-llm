@@ -90,7 +90,8 @@ func TestChatUsageCacheCounters(t *testing.T) {
 		},
 		{
 			// The provider reports the wire value raw, even when it exceeds
-			// prompt_tokens; consumers (budget, footer) clamp, not the parser.
+			// prompt_tokens; any clamp belongs to the consumer (none exists
+			// today; cost clamping is planned in a later task).
 			name: "cached exceeds prompt passes through raw",
 			body: chatBody(`"prompt_tokens":100,"completion_tokens":10,"total_tokens":110,"prompt_tokens_details":{"cached_tokens":150}`),
 			want: cacheUsageWant{cached: 150, cachedRep: true, prompt: 100, completion: 10, total: 110},
