@@ -550,3 +550,64 @@ func TestOnToolResult_OmitsAutoApprovedWhenFalse(t *testing.T) {
 		t.Fatalf("false AutoApproved must be omitted (SchemaVersion 2 byte-identity): %s", data)
 	}
 }
+
+func TestTelemetrySpanCarriesCached(t *testing.T) {
+	tests := []struct {
+		name string
+		u    provider.Usage
+		// want maps each cache key that must be present in the span's usage
+		// object to its value; every other cache key must be absent.
+		want map[string]any
+	}{
+		{
+			name: "reported with tokens",
+			u: provider.Usage{
+				PromptTokens: 2000, CompletionTokens: 10, TotalTokens: 2010,
+				CachedPromptTokens: 1536, CachedPromptTokensReported: true,
+				CacheWriteTokens: 64, CacheWriteTokensReported: true,
+			},
+			want: map[string]any{
+				"cached": 1536.0, "cached_reported": true,
+				"cache_write": 64.0, "cache_write_reported": true,
+			},
+		},
+		{
+			name: "reported zero keeps the flag and drops the count",
+			u:    provider.Usage{PromptTokens: 5, TotalTokens: 5, CachedPromptTokensReported: true},
+			want: map[string]any{"cached_reported": true},
+		},
+		{
+			name: "unreported writes neither key",
+			u:    provider.Usage{PromptTokens: 5, TotalTokens: 5},
+			want: map[string]any{},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "t.jsonl")
+			started := time.Unix(0, 0)
+			sink, err := NewTelemetrySink(path, "run1", started, func() time.Time { return started })
+			if err != nil {
+				t.Fatalf("NewTelemetrySink: %v", err)
+			}
+			_ = sink.OnStep(context.Background(), agent.StepEvent{Index: 0, Response: provider.ChatResponse{Usage: tt.u}})
+			_ = sink.Close()
+			var usage map[string]any
+			for _, s := range readSpans(t, path) {
+				if s["kind"] == "model_step" {
+					usage, _ = s["usage"].(map[string]any)
+				}
+			}
+			if usage == nil {
+				t.Fatal("no model_step usage object")
+			}
+			for _, k := range []string{"cached", "cached_reported", "cache_write", "cache_write_reported"} {
+				got, present := usage[k]
+				wantV, wantPresent := tt.want[k]
+				if present != wantPresent || got != wantV {
+					t.Errorf("usage[%q] = %v (present=%v), want %v (present=%v); usage=%v", k, got, present, wantV, wantPresent, usage)
+				}
+			}
+		})
+	}
+}
