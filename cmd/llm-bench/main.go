@@ -143,6 +143,9 @@ func main() {
 	attemptID := flag.String("attempt-id", "", "With -replay-attempt: caller-supplied attempt id matching [A-Za-z0-9._:-]{1,128}; sent as X-Client-Correlation <id>/<ordinal>")
 	attemptArm := flag.String("attempt-arm", "", "With -replay-attempt: opaque arm selector, recorded verbatim")
 	attemptDir := flag.String("attempt-dir", "", "With -replay-attempt: output directory, which must not exist")
+	cacheProbe := flag.Bool("cache-probe", false, "Run the prompt-cache probe: a scripted Golem session (8 file reads, 3 follow-up turns) against exactly one openai-compat -models target at -candidate-base-url, writing per-request provider cache counters and a prefix-stability proxy to -cache-probe-out")
+	cacheProbeOut := flag.String("cache-probe-out", "", "With -cache-probe: output path for the markdown table (required)")
+	cacheProbeScenario := flag.String("cache-probe-scenario", string(probeUncompacted), "With -cache-probe: uncompacted (131072-token input ceiling, no compaction) or pressure (8192, compaction runs)")
 	flag.Parse()
 	providedFlags := map[string]bool{}
 	flag.Visit(func(f *flag.Flag) {
@@ -230,8 +233,11 @@ func main() {
 	if *buildInterceptorBenign != "" {
 		modes++
 	}
+	if *cacheProbe {
+		modes++
+	}
 	if modes > 1 {
-		log.Fatalf("llm-bench: -capture, -calibrate-capture, -calibrate, -manual-report, -paired-report, -assembly-report, -fim-latency, -blind-render, -blind-ingest, -fc-render, -fc-ingest, -fc-sidemap-generate, -adjudicate-render, -adjudicate-ingest, -discrimination-report, -import-xlam, -assembly-build, -build-injection-corpus, -injection-report, -replay-attempt, -interceptor-census, -interceptor-v1-report, -interceptor-benign-report, -interceptor-benign-draft, -build-interceptor-benign are mutually exclusive")
+		log.Fatalf("llm-bench: -capture, -calibrate-capture, -calibrate, -manual-report, -paired-report, -assembly-report, -fim-latency, -blind-render, -blind-ingest, -fc-render, -fc-ingest, -fc-sidemap-generate, -adjudicate-render, -adjudicate-ingest, -discrimination-report, -import-xlam, -assembly-build, -build-injection-corpus, -injection-report, -replay-attempt, -interceptor-census, -interceptor-v1-report, -interceptor-benign-report, -interceptor-benign-draft, -build-interceptor-benign, -cache-probe are mutually exclusive")
 	}
 	if providedFlags["registration"] && !*calibrateCapture && !*injectionReport && !*interceptorBenignReport {
 		log.Fatalf("llm-bench: -registration requires -calibrate-capture, -injection-report or -interceptor-benign-report")
@@ -239,6 +245,11 @@ func main() {
 	if !*replayAttempt {
 		if stray := strayAttemptFlags(providedFlags); len(stray) > 0 {
 			log.Fatalf("llm-bench: %s require -replay-attempt", strings.Join(stray, ", "))
+		}
+	}
+	if !*cacheProbe {
+		if stray := strayFlags(providedFlags, "cache-probe-out", "cache-probe-scenario"); len(stray) > 0 {
+			log.Fatalf("llm-bench: %s require -cache-probe", strings.Join(stray, ", "))
 		}
 	}
 	if !*interceptorCensus {
@@ -279,6 +290,16 @@ func main() {
 		}, os.Stderr)
 		cancel()
 		os.Exit(code)
+	}
+
+	if *cacheProbe {
+		if err := runCacheProbeMode(ctx, cacheProbeOptions{
+			BaseURL: ct.baseURL, APIKey: ct.apiKey, Models: *modelsArg,
+			Out: *cacheProbeOut, Scenario: *cacheProbeScenario, Timeout: *timeout,
+		}, os.Stderr); err != nil {
+			log.Fatalf("llm-bench: %v", err)
+		}
+		return
 	}
 
 	if *assemblyBuildPath != "" {
