@@ -49,8 +49,10 @@ func (d *Document) AddProvider(name string, p ProviderSpec) error {
 // UpdateProvider replaces the four ProviderSpec fields wholesale (form
 // semantics — no patch language). It preserves the fields ProviderSpec does
 // not carry, the authored APIKey and CacheAffinity, by updating the current
-// value in place. Callers needing the current
-// authored base use AuthoredProvider and overlay their edits.
+// value in place; CacheAffinity is kept only while the updated api_format is
+// "openai-compat" (empty means ollama), since it is invalid on any other
+// format. Callers needing the current authored base use AuthoredProvider and
+// overlay their edits.
 func (d *Document) UpdateProvider(name string, p ProviderSpec) error {
 	return d.mutate(func(a *Config) error {
 		if p.Timeout.Duration < 0 {
@@ -63,6 +65,9 @@ func (d *Document) UpdateProvider(name string, p ProviderSpec) error {
 		}
 		cur.BaseURL, cur.Timeout = p.BaseURL, p.Timeout
 		cur.APIFormat, cur.SlotDiscovery = p.APIFormat, p.SlotDiscovery
+		if p.APIFormat != "openai-compat" {
+			cur.CacheAffinity = ""
+		}
 		a.Providers[name] = cur
 		return nil
 	})

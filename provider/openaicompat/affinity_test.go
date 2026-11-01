@@ -236,28 +236,34 @@ func TestCacheAffinityKeyStability(t *testing.T) {
 }
 
 // TestAffinityKeyNotRecomputableFromWorkspace: the key is keyed by a secret,
-// so nobody holding the session id or the workspace root can derive it — not
-// as the raw id, an unkeyed hash of it, or Golem's workspace id form
-// ("workspace:" + hex(sha256(root))[:16], cmd/golem/memory.go).
+// so nobody holding the session id or the workspace root can derive it as an
+// unkeyed hash of either, nor as Golem's workspace id form ("workspace:" +
+// hex(sha256(root))[:16], cmd/golem/memory.go). The 32-hex check alone rules
+// out the raw session id and the "workspace:" string, so the rows below are
+// the unkeyed forms a 32-hex key could actually equal.
 func TestAffinityKeyNotRecomputableFromWorkspace(t *testing.T) {
 	const root = "/Users/someone/project"
 	sum := sha256.Sum256([]byte(root))
-	workspace := "workspace:" + hex.EncodeToString(sum[:])[:16]
-	for _, session := range []string{"thread-abc", workspace} {
+	rootHash := hex.EncodeToString(sum[:])
+	workspace := "workspace:" + rootHash[:16]
+	// The root itself is a session too, so an unkeyed key would land on the
+	// root-hash rows: each row below can fail.
+	for _, session := range []string{"thread-abc", workspace, root} {
 		key := NewClient("https://api.openai.com").affinityKey(session)
 		if !hex32.MatchString(key) {
 			t.Fatalf("affinityKey(%q) = %q, want 32 hex", session, key)
 		}
 		unkeyed := sha256.Sum256([]byte(session))
 		for name, derivable := range map[string]string{
-			"raw session id":        session,
-			"unkeyed sha256":        hex.EncodeToString(unkeyed[:])[:32],
-			"workspace id":          workspace,
-			"workspace id hex tail": strings.TrimPrefix(workspace, "workspace:"),
+			"unkeyed sha256 of the session id":     hex.EncodeToString(unkeyed[:])[:32],
+			"unkeyed sha256 of the workspace root": rootHash[:32],
 		} {
-			if strings.Contains(key, derivable) {
-				t.Errorf("affinityKey(%q) = %q is derivable as the %s %q", session, key, name, derivable)
+			if key == derivable {
+				t.Errorf("affinityKey(%q) = %q is derivable as the %s", session, key, name)
 			}
+		}
+		if strings.HasPrefix(key, rootHash[:16]) {
+			t.Errorf("affinityKey(%q) = %q starts with the workspace id's hash %q", session, key, rootHash[:16])
 		}
 	}
 }

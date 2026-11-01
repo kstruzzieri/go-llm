@@ -109,7 +109,7 @@ func main() {
 	candidateBaseURL := flag.String("candidate-base-url", "", "Base URL for openai-compat candidate targets (server root, no /v1 suffix)")
 	candidateAPIKey := flag.String("candidate-api-key", "", "Bearer token for openai-compat candidate targets; falls back to $"+candidateAPIKeyEnvVar)
 	candidateSessionID := flag.String("candidate-session-id", "", "Session id sent with every openai-compat candidate request in the form -cache-affinity selects (the raw id as x-opencode-session for OpenCode); required by some hosted endpoints; empty sends none")
-	cacheAffinity := flag.String("cache-affinity", "", "Prompt-cache key mode for openai-compat candidates: none, openai (body prompt_cache_key), openrouter (x-session-id), or opencode (x-opencode-session); empty infers it from the -candidate-base-url host, which sends nothing to other hosts")
+	cacheAffinity := flag.String("cache-affinity", "", "Prompt-cache key mode for openai-compat candidates: none, openai (body prompt_cache_key), openrouter (x-session-id), or opencode (x-opencode-session); empty infers it from an https -candidate-base-url host, which sends nothing to other hosts or to http URLs")
 	corpusManifestPath := flag.String("corpus-manifest", "", "Path to a corpus manifest JSONL (partition/category per trace); enables partition-separated reporting")
 	corpusPartitions := flag.String("corpus-partitions", "", "Comma-separated partitions to include from the corpus manifest (natural, challenge, judge-validation; empty = all)")
 	corpusCategories := flag.String("corpus-categories", "", "Comma-separated categories to include from the corpus manifest (empty = all)")

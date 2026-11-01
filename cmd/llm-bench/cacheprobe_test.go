@@ -666,10 +666,15 @@ func TestCacheProbeAffinityFlag(t *testing.T) {
 		ps := newProbeServer(t)
 		// LLM_BENCH_TEST_REDIRECT sends every request to the fake (TestMain).
 		// The unreachable proxies make a broken redirect fail closed instead of
-		// reaching the real host; loopback, the fake, bypasses them.
+		// reaching the real host; loopback, the fake, bypasses them. Go reads
+		// each variable uppercase first and falls back to lowercase only when
+		// the uppercase one is empty, so an inherited no_proxy would win over
+		// an empty NO_PROXY: both cases are set, every one of them.
 		out, err := runAt(t, "https://opencode.ai/zen/go", []string{
 			"LLM_BENCH_TEST_REDIRECT=" + ps.URL,
-			"HTTPS_PROXY=http://127.0.0.1:1", "HTTP_PROXY=http://127.0.0.1:1", "NO_PROXY=",
+			"HTTPS_PROXY=http://127.0.0.1:1", "https_proxy=http://127.0.0.1:1",
+			"HTTP_PROXY=http://127.0.0.1:1", "http_proxy=http://127.0.0.1:1",
+			"NO_PROXY=", "no_proxy=",
 		})
 		if err != nil {
 			t.Fatalf("probe failed: %v\n%s", err, out)
