@@ -134,9 +134,14 @@ func feedbackKindCount(store *feedbackBlockingStore, kind feedbackpkg.SignalKind
 	return store.kinds[kind]
 }
 
+// feedbackWait bounds each wait for something the worker or a callback must
+// do. Every wait returns once its condition holds, so the bound only matters
+// on a loaded host, where one second failed with "completed = 2, want 9".
+const feedbackWait = 10 * time.Second
+
 func waitFeedbackCompleted(t *testing.T, svc *feedbackService, want int) {
 	t.Helper()
-	deadline := time.Now().Add(time.Second)
+	deadline := time.Now().Add(feedbackWait)
 	for {
 		svc.admissionMu.Lock()
 		got := svc.report.completed
@@ -746,19 +751,7 @@ func TestFeedbackServiceOverflowDisablesAndAccountsQueuedEvents(t *testing.T) {
 	if err := present.OnRetrievalPresentation(context.Background(), agent.RetrievalPresentationEvent{Step: 2, ToolCallID: "setup", Attribution: agent.RetrievalAttribution{Sources: []agent.RetrievedSource{{StableKey: "k", Source: "a.go"}}}}); err != nil {
 		t.Fatal(err)
 	}
-	deadline := time.Now().Add(time.Second)
-	for {
-		svc.admissionMu.Lock()
-		completed := svc.report.completed
-		svc.admissionMu.Unlock()
-		if completed == 2 {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("setup did not complete")
-		}
-		time.Sleep(time.Millisecond)
-	}
+	waitFeedbackCompleted(t, svc, 2)
 	svc.admissionMu.Lock()
 	svc.report = feedbackReport{reasons: make(map[string]int)}
 	svc.admissionMu.Unlock()
@@ -767,7 +760,7 @@ func TestFeedbackServiceOverflowDisablesAndAccountsQueuedEvents(t *testing.T) {
 	}
 	select {
 	case <-store.started:
-	case <-time.After(time.Second):
+	case <-time.After(feedbackWait):
 		t.Fatal("first persistence did not start")
 	}
 	for i := 0; i < feedbackQueueSize; i++ {
@@ -777,7 +770,7 @@ func TestFeedbackServiceOverflowDisablesAndAccountsQueuedEvents(t *testing.T) {
 	go func() { emitRetrieve("overflow"); close(returned) }()
 	select {
 	case <-returned:
-	case <-time.After(100 * time.Millisecond):
+	case <-time.After(feedbackWait):
 		t.Fatal("overflow callback blocked")
 	}
 	close(store.release)
@@ -825,7 +818,7 @@ func TestFeedbackServiceCountedOverflowWarnsOnceWithoutBlockingCallback(t *testi
 	go func() { emit("overflow"); close(returned) }()
 	select {
 	case <-returned:
-	case <-time.After(100 * time.Millisecond):
+	case <-time.After(feedbackWait):
 		t.Fatal("overflow callback blocked")
 	}
 	select {
@@ -839,7 +832,7 @@ func TestFeedbackServiceCountedOverflowWarnsOnceWithoutBlockingCallback(t *testi
 		if !strings.Contains(warning, "overflow") {
 			t.Fatalf("warning=%q", warning)
 		}
-	case <-time.After(time.Second):
+	case <-time.After(feedbackWait):
 		t.Fatal("worker did not deliver overflow warning")
 	}
 	report, err := svc.close()
@@ -877,7 +870,7 @@ func TestFeedbackServiceOverflowAfterWarningProbeWarnsOnce(t *testing.T) {
 	defer func() { _, _ = svc.close() }()
 	select {
 	case <-afterProbe:
-	case <-time.After(time.Second):
+	case <-time.After(feedbackWait):
 		t.Fatal("worker did not reach overflow warning/disable boundary")
 	}
 	obs := svc.observer("run").(agent.ToolResultObserver)
@@ -891,7 +884,7 @@ func TestFeedbackServiceOverflowAfterWarningProbeWarnsOnce(t *testing.T) {
 	go func() { emit("overflow"); close(returned) }()
 	select {
 	case <-returned:
-	case <-time.After(100 * time.Millisecond):
+	case <-time.After(feedbackWait):
 		t.Fatal("overflow callback blocked")
 	}
 	select {
@@ -905,7 +898,7 @@ func TestFeedbackServiceOverflowAfterWarningProbeWarnsOnce(t *testing.T) {
 		if !strings.Contains(warning, "overflow") {
 			t.Fatalf("warning=%q", warning)
 		}
-	case <-time.After(time.Second):
+	case <-time.After(feedbackWait):
 		t.Fatal("worker did not deliver overflow warning")
 	}
 	report, err := svc.close()
@@ -966,7 +959,7 @@ func TestFeedbackServiceOverflowBeforeTimeoutWarnsOnce(t *testing.T) {
 	go func() { emit("overflow"); close(returned) }()
 	select {
 	case <-returned:
-	case <-time.After(100 * time.Millisecond):
+	case <-time.After(feedbackWait):
 		t.Fatal("overflow callback blocked")
 	}
 	select {
@@ -1034,7 +1027,7 @@ func TestFeedbackServiceCleanupOverflowWarnsOnceWithoutBlockingFinishRun(t *test
 	go func() { svc.finishRun("run"); close(returned) }()
 	select {
 	case <-returned:
-	case <-time.After(100 * time.Millisecond):
+	case <-time.After(feedbackWait):
 		t.Fatal("finishRun blocked on cleanup overflow")
 	}
 	select {
@@ -1048,7 +1041,7 @@ func TestFeedbackServiceCleanupOverflowWarnsOnceWithoutBlockingFinishRun(t *test
 		if !strings.Contains(warning, "overflow") {
 			t.Fatalf("warning=%q", warning)
 		}
-	case <-time.After(time.Second):
+	case <-time.After(feedbackWait):
 		t.Fatal("worker did not deliver cleanup overflow warning")
 	}
 	report, err := svc.close()
@@ -1112,19 +1105,7 @@ func TestFeedbackServiceWriteFailureDisablesAndWarnsOnce(t *testing.T) {
 	present := observer.(agent.RetrievalPresentationObserver)
 	_ = obs.OnToolResult(context.Background(), agent.ToolResultEvent{Step: 1, Call: feedbackCall("setup", "retrieve", `{"query":"q"}`), Invoked: true})
 	_ = present.OnRetrievalPresentation(context.Background(), agent.RetrievalPresentationEvent{Step: 2, ToolCallID: "setup", Attribution: agent.RetrievalAttribution{Sources: []agent.RetrievedSource{{StableKey: "k", Source: "a.go"}}}})
-	deadline := time.Now().Add(time.Second)
-	for {
-		svc.admissionMu.Lock()
-		completed := svc.report.completed
-		svc.admissionMu.Unlock()
-		if completed == 2 {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("setup did not complete")
-		}
-		time.Sleep(time.Millisecond)
-	}
+	waitFeedbackCompleted(t, svc, 2)
 	svc.admissionMu.Lock()
 	svc.report = feedbackReport{reasons: make(map[string]int)}
 	svc.admissionMu.Unlock()
@@ -1153,19 +1134,7 @@ func TestFeedbackServiceOperationDeadline(t *testing.T) {
 	present := o.(agent.RetrievalPresentationObserver)
 	_ = obs.OnToolResult(context.Background(), agent.ToolResultEvent{Step: 1, Call: feedbackCall("setup", "retrieve", `{"query":"q"}`), Invoked: true})
 	_ = present.OnRetrievalPresentation(context.Background(), agent.RetrievalPresentationEvent{Step: 2, ToolCallID: "setup", Attribution: agent.RetrievalAttribution{Sources: []agent.RetrievedSource{{StableKey: "k", Source: "a.go"}}}})
-	deadline := time.Now().Add(time.Second)
-	for {
-		svc.admissionMu.Lock()
-		completed := svc.report.completed
-		svc.admissionMu.Unlock()
-		if completed == 2 {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("setup did not complete")
-		}
-		time.Sleep(time.Millisecond)
-	}
+	waitFeedbackCompleted(t, svc, 2)
 	svc.admissionMu.Lock()
 	svc.report = feedbackReport{reasons: make(map[string]int)}
 	svc.admissionMu.Unlock()
@@ -1439,7 +1408,7 @@ func TestFeedbackServiceTickerCapturesSweepTimeBeforeClose(t *testing.T) {
 	ticks <- base.Add(299 * time.Second)
 	select {
 	case <-entered:
-	case <-time.After(time.Second):
+	case <-time.After(feedbackWait):
 		t.Fatal("worker did not capture ticker time")
 	}
 	closed := make(chan feedbackReport, 1)
@@ -1478,19 +1447,7 @@ func TestFeedbackServiceCommittedMaintenanceFailureCompletesThenDisables(t *test
 		sources[i] = agent.RetrievedSource{StableKey: fmt.Sprintf("k-%d", i), Source: "a.go"}
 	}
 	_ = present.OnRetrievalPresentation(context.Background(), agent.RetrievalPresentationEvent{Step: 2, ToolCallID: "setup", Attribution: agent.RetrievalAttribution{Sources: sources}})
-	deadline := time.Now().Add(time.Second)
-	for {
-		svc.admissionMu.Lock()
-		completed := svc.report.completed
-		svc.admissionMu.Unlock()
-		if completed == 2 {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("setup did not complete")
-		}
-		time.Sleep(time.Millisecond)
-	}
+	waitFeedbackCompleted(t, svc, 2)
 	svc.admissionMu.Lock()
 	svc.report = feedbackReport{reasons: make(map[string]int)}
 	svc.admissionMu.Unlock()
@@ -1531,19 +1488,7 @@ func TestFeedbackServiceDisabledRecordingKeepsWeightsReadable(t *testing.T) {
 	present := o.(agent.RetrievalPresentationObserver)
 	_ = obs.OnToolResult(context.Background(), agent.ToolResultEvent{Step: 1, Call: feedbackCall("r", "retrieve", `{"query":"q"}`), Invoked: true})
 	_ = present.OnRetrievalPresentation(context.Background(), agent.RetrievalPresentationEvent{Step: 2, ToolCallID: "r", Attribution: agent.RetrievalAttribution{Sources: []agent.RetrievedSource{{StableKey: "key", Source: "a.go"}}}})
-	deadline := time.Now().Add(time.Second)
-	for {
-		svc.admissionMu.Lock()
-		completed := svc.report.completed
-		svc.admissionMu.Unlock()
-		if completed == 2 {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("setup did not complete")
-		}
-		time.Sleep(time.Millisecond)
-	}
+	waitFeedbackCompleted(t, svc, 2)
 	if err := svc.writer.Close(); err != nil {
 		t.Fatal(err)
 	}
