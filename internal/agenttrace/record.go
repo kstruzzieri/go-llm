@@ -112,6 +112,11 @@ type runSpan struct {
 	MaxPressureLevel string  `json:"max_pressure_level"`
 	// SecretFindings counts recognized findings without storing their contents.
 	SecretFindings int `json:"secret_findings,omitempty"`
+	// Compactions and FenceRotations count the run's "compaction" and
+	// "fence_rotation" agent.EventRecords. Additive within SchemaVersion 2:
+	// omitempty keeps every run span without either byte-identical.
+	Compactions    int `json:"compactions,omitempty"`
+	FenceRotations int `json:"fence_rotations,omitempty"`
 }
 
 type modelStepSpan struct {

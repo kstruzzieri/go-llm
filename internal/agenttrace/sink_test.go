@@ -611,3 +611,49 @@ func TestTelemetrySpanCarriesCached(t *testing.T) {
 		})
 	}
 }
+
+// The run span counts compaction and fence_rotation events; a run with
+// neither writes the same bytes as before the counts existed.
+func TestTelemetryRunSpanCountsEvents(t *testing.T) {
+	const base = `{"schema_version":2,"run_id":"run1","span_id":"run1-run","kind":"run","started_at":"1970-01-01T00:00:00Z","duration_ms":0,"steps":0,"status":"completed","stop_reason":"completed","max_used_pct":0,"max_pressure_level":"ok"`
+	ev := func(kinds ...string) []agent.EventRecord {
+		out := make([]agent.EventRecord, len(kinds))
+		for i, k := range kinds {
+			out[i] = agent.EventRecord{Step: i, Kind: k}
+		}
+		return out
+	}
+	for _, tc := range []struct {
+		name   string
+		events []agent.EventRecord
+		want   string
+	}{
+		{"no events", nil, base + "}\n"},
+		{"other kinds", ev("step", "tool_call", "tool_result", "token", "blocked", "stop"), base + "}\n"},
+		{"compactions only", ev("compaction", "step", "compaction"), base + `,"compactions":2}` + "\n"},
+		{"rotations only", ev("fence_rotation"), base + `,"fence_rotations":1}` + "\n"},
+		{"both", ev("fence_rotation", "compaction", "fence_rotation", "stop"), base + `,"compactions":1,"fence_rotations":2}` + "\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "t.jsonl")
+			started := time.Unix(0, 0)
+			sink, err := NewTelemetrySink(path, "run1", started, func() time.Time { return started })
+			if err != nil {
+				t.Fatalf("NewTelemetrySink: %v", err)
+			}
+			if err := sink.Finish(agent.Result{Events: tc.events}, "completed"); err != nil {
+				t.Fatalf("Finish: %v", err)
+			}
+			if err := sink.Close(); err != nil {
+				t.Fatalf("Close: %v", err)
+			}
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(raw) != tc.want {
+				t.Errorf("run span =\n%s\nwant\n%s", raw, tc.want)
+			}
+		})
+	}
+}
