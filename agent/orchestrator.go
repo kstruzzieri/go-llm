@@ -218,8 +218,11 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 		}
 		advisory = &annotated
 	}
-	// One advisory key per Run, reused on every render like a tool key.
-	advisoryFence := promptfence.New()
+	// One advisory key per Run with advice, reused on every render like a tool key.
+	var advisoryFence promptfence.Fence
+	if advisory != nil {
+		advisoryFence = promptfence.New()
+	}
 
 	// #436: the initial input is inspected once, before any assembly, so a
 	// block never reaches the model and no pressure event is emitted for it.

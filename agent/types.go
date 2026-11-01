@@ -113,7 +113,8 @@ type Request struct {
 	Advisory *Advisory
 	// SystemKeys are the fence keys System frames untrusted text under, such
 	// as the promptfence id of a caller-rendered snapshot. Each must be 12 or
-	// more characters of [A-Z2-7]. Run treats each like a tool result's key:
+	// more characters of [A-Z2-7], and distinct keys cannot contain one
+	// another. Run treats each like a tool result's key:
 	// when the run's text (history, its summary, the goal and Advisory
 	// included) exposes one, every occurrence of it in System is replaced by
 	// a fresh key before the next render. Result.SystemKeys reports the keys System ended under.

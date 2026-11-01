@@ -1300,3 +1300,37 @@ func TestSystemKeysRefuseNonKeys(t *testing.T) {
 		}
 	}
 }
+
+func TestSystemKeysRefuseOverlappingKeys(t *testing.T) {
+	short, long := "AAAAAAAAAAAA", "AAAAAAAAAAAAA"
+	for _, keys := range [][]string{{short, long}, {long, short}} {
+		mc := &wireCaller{responses: []ModelResult{{Response: provider.ChatResponse{Content: "done", Done: true}}}}
+		_, err := newTestOrchestrator(mc).Run(context.Background(), Request{
+			Goal: short, System: "<<<ONE " + keys[0] + "\n>>>ONE " + keys[0] + "\n<<<TWO " + keys[1] + "\n>>>TWO " + keys[1],
+			SystemKeys: keys,
+		}, nil)
+		if err == nil || !strings.Contains(err.Error(), "SystemKeys entry 1") {
+			t.Errorf("SystemKeys %q: err = %v, want a refusal naming entry 1", keys, err)
+		}
+		if len(mc.requests) != 0 {
+			t.Errorf("SystemKeys %q: %d model calls, want none", keys, len(mc.requests))
+		}
+	}
+	for _, keys := range [][]string{{short, short}, {short, "CCCCCCCCCCCCC"}} {
+		mc := &wireCaller{responses: []ModelResult{{Response: provider.ChatResponse{Content: "done", Done: true}}}}
+		res, err := newTestOrchestrator(mc).Run(context.Background(), Request{
+			Goal: short, System: "<<<ONE " + keys[0] + "\n>>>ONE " + keys[0] + "\n<<<TWO " + keys[1] + "\n>>>TWO " + keys[1],
+			SystemKeys: keys,
+		}, nil)
+		if err != nil || len(mc.requests) != 1 {
+			t.Errorf("SystemKeys %q: err = %v, model calls = %d, want accepted", keys, err, len(mc.requests))
+			continue
+		}
+		if keys[0] == keys[1] && (res.SystemKeys[0] == short || res.SystemKeys[0] != res.SystemKeys[1]) {
+			t.Errorf("duplicate SystemKeys %q rotated inconsistently: %q", keys, res.SystemKeys)
+		}
+		if keys[0] != keys[1] && (res.SystemKeys[0] == short || res.SystemKeys[1] != keys[1]) {
+			t.Errorf("distinct SystemKeys %q rotated inconsistently: %q", keys, res.SystemKeys)
+		}
+	}
+}
