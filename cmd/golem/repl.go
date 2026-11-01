@@ -485,6 +485,8 @@ func runOnceWithRecipeHint(ctx context.Context, out io.Writer, interrupts <-chan
 		Approver: approver, // nil when read-only => runtime fail-safe denies Write/Exec
 		Observer: observer,
 		Advisory: sess.advisory, // staged by /consult; consumed by this turn only (#382)
+		// The Run rotates the snapshot key if its text exposes it (#430).
+		SystemKeys: sess.sysInputs.systemKeys(),
 	}, sess.machine.sink())
 	// Seal immediately after Run on every path: writes applied before an
 	// interrupt or provider error must stay undoable. The error is joined
@@ -495,6 +497,11 @@ func runOnceWithRecipeHint(ctx context.Context, out io.Writer, interrupts <-chan
 		sealErr = sess.journal.sealTurn(ctx)
 	}
 	sess.feedback.finishRun(runID)
+	// On every path: a rotated snapshot key already reached the wire, and the
+	// next goal must not frame the snapshot under the exposed key again.
+	if err := adoptSnapshotKey(sess, res.SystemKeys); err != nil {
+		writeRunLine("warning: snapshot key not carried forward: %v", err)
+	}
 	// An interrupted approval surfaces as context.Canceled from inside the run
 	// and races the interrupt watcher's cancel(). Synchronize the derived
 	// context here so status and rendering never depend on scheduler order: an

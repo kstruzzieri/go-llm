@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -89,7 +90,7 @@ func initState(req Request) State {
 		ChatMessage: provider.ChatMessage{Role: "user", Content: req.Goal},
 		Segment:     Pinned,
 	})
-	return State{System: req.System, DurableSummary: req.HistorySummary, Messages: msgs}
+	return State{System: req.System, DurableSummary: req.HistorySummary, Messages: msgs, systemKeys: slices.Clone(req.SystemKeys)}
 }
 
 func buildChatRequest(st State, specs []provider.Tool, outputReserve int, opts provider.ModelOptions, advisory *Advisory, advisoryFence promptfence.Fence) provider.ChatRequest {
@@ -171,6 +172,9 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 			return Result{}, err
 		}
 	}
+	if err := validateSystemKeys(req.SystemKeys); err != nil {
+		return Result{}, err
+	}
 	maxSteps := req.MaxSteps
 	reg, err := newToolRegistry(req.Tools)
 	if err != nil {
@@ -198,7 +202,9 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 	req.System = withToolTrustContract(req.System) + addenda
 	state := initState(req)
 	historyLen := len(req.History)
-	var res Result
+	// Shares state.systemKeys' backing array: every return path reports the
+	// keys refreshFenceKeys last rotated in place.
+	res := Result{SystemKeys: state.systemKeys}
 
 	// #382: the staged advisory is re-inspected before the initial input, as
 	// its own model-origin observation: a block refuses the run before any
@@ -227,7 +233,7 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 		// Rotate every live key the previous step's text exposed, then key
 		// the tool messages it appended, now that verifyBatch has finished
 		// with them. Step 0 scans the history and goal text for the advisory
-		// key; history carries no tool messages (validateHistory).
+		// and system keys; history carries no tool messages (validateHistory).
 		var rotated int
 		next, rotated = refreshFenceKeys(&state, &advisoryFence, next)
 		manager := o.ctxMgr

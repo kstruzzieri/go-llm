@@ -36,8 +36,12 @@ type systemInputs struct {
 	memory         bool
 	projectContext string // raw fenced project-context block; "" when none
 	gitContext     string // raw fenced Git snapshot block (#354); "" when none
-	agentMemory    bool
-	sessionUp      bool
+	// snapshotKey is the key projectContext and gitContext are framed under;
+	// "" when neither is set. composeSystem never reads it: each Run gets it
+	// as its system key (systemKeys) and may rotate it (adoptSnapshotKey).
+	snapshotKey string
+	agentMemory bool
+	sessionUp   bool
 }
 
 // composeSystem is the one composition path. Order and separators are the
@@ -64,6 +68,15 @@ func composeSystem(in systemInputs) string {
 		system += "\n\n" + in.canary
 	}
 	return system
+}
+
+// systemKeys is the snapshot key as agent.Request.SystemKeys, nil when the
+// prompt frames no snapshot.
+func (in systemInputs) systemKeys() []string {
+	if in.snapshotKey == "" {
+		return nil
+	}
+	return []string{in.snapshotKey}
 }
 
 // injectedContext is the untrusted-data suffix every model-facing prompt

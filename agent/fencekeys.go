@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"fmt"
 	"regexp"
 	"strconv"
 	"strings"
@@ -28,9 +29,13 @@ func mintFenceKeys(st *State, from int) int {
 	return len(st.Messages)
 }
 
-// advisoryOwner is the owner index refreshFenceKeys gives the advisory key;
-// a tool key's owner is its message index.
-const advisoryOwner = -1
+// advisoryOwner and systemOwner are the owner indexes refreshFenceKeys gives
+// the advisory key and every system key; a tool key's owner is its message
+// index.
+const (
+	advisoryOwner = -1
+	systemOwner   = -2
+)
 
 // refreshFenceKeys rotates every live key whose value appears in the text
 // appended since the last call, then keys the new tool messages
@@ -39,8 +44,10 @@ const advisoryOwner = -1
 // assembly, so no render ever frames a message under a key that the text
 // the model reads can quote.
 //
-// The live keys are every tool message's key and the advisory key, which is
-// rotated in place; a nil or zero advisory is not live. Each message at
+// The live keys are every tool message's key, the advisory key, which is
+// rotated in place (a nil or zero advisory is not live), and every system key
+// (st.systemKeys), rotated by replacing each occurrence of it in st.System
+// and in st.systemKeys, so System changes only where it is keyed. Each message at
 // index from or later contributes every string replayed to the provider or
 // rendered into the prompt (replayedTexts). A key that occurs in any of them
 // as keyLetters reads it (any letter case, split by any non-key characters)
@@ -69,6 +76,9 @@ func refreshFenceKeys(st *State, advisory *promptfence.Fence, from int) (next in
 	if advisory != nil && *advisory != (promptfence.Fence{}) {
 		live[advisory.ID()] = advisoryOwner
 	}
+	for _, id := range st.systemKeys {
+		live[id] = systemOwner
+	}
 	for i := from; i < len(st.Messages); i++ {
 		for _, text := range replayedTexts(st.Messages[i]) {
 			letters := keyLetters(text)
@@ -77,9 +87,17 @@ func refreshFenceKeys(st *State, advisory *promptfence.Fence, from int) (next in
 					continue
 				}
 				fresh := promptfence.New() // never a retired key
-				if owner == advisoryOwner {
+				switch owner {
+				case advisoryOwner:
 					*advisory = fresh
-				} else {
+				case systemOwner:
+					st.System = strings.ReplaceAll(st.System, id, fresh.ID())
+					for j, k := range st.systemKeys {
+						if k == id {
+							st.systemKeys[j] = fresh.ID()
+						}
+					}
+				default:
 					st.Messages[owner].fence = fresh
 				}
 				delete(live, id)
@@ -89,6 +107,18 @@ func refreshFenceKeys(st *State, advisory *promptfence.Fence, from int) (next in
 		}
 	}
 	return mintFenceKeys(st, from), rotated
+}
+
+// validateSystemKeys refuses a system key the scan would match everywhere
+// (the empty key), by chance (a short one), or never (one outside the
+// alphabet keyLetters reads). Twelve is promptfence's id length.
+func validateSystemKeys(keys []string) error {
+	for i, k := range keys {
+		if len(k) < 12 || keyLetters(k) != k {
+			return fmt.Errorf("agent: SystemKeys entry %d is not a fence key: want 12 or more characters of A-Z and 2-7", i)
+		}
+	}
+	return nil
 }
 
 // keyLetters is what the key search reads of text: each rune case-folded
