@@ -60,6 +60,44 @@ const advisoryOwner = -1
 // projection looked up in the live map is the upgrade if a Run ever holds
 // enough keys for that to show.
 func refreshFenceKeys(st *State, advisory *promptfence.Fence, from int) (next int, rotated int) {
+	live := liveFenceKeys(st, advisory)
+	for i := from; i < len(st.Messages); i++ {
+		for _, text := range replayedTexts(st.Messages[i]) {
+			rotated += rotateExposedFenceKeys(st, nil, advisory, live, text)
+		}
+	}
+	return mintFenceKeys(st, from), rotated
+}
+
+// refreshMaterializedFenceKeys checks the joined content that mixed assembly
+// selected for each multi-group tool result. The individual alternatives were
+// checked by refreshFenceKeys, but a key can straddle the newline anchorJoined
+// inserts between two selected groups. The assembled copy and canonical State
+// must both receive each new key before buildChatRequest frames the result.
+func refreshMaterializedFenceKeys(st *State, assembled *State, advisory *promptfence.Fence) (rotated int) {
+	structured := map[string]bool{}
+	for _, m := range st.Messages {
+		if m.Context != nil && len(m.Context.Groups) > 1 && m.fence != (promptfence.Fence{}) {
+			structured[m.fence.ID()] = true
+		}
+	}
+	if len(structured) == 0 {
+		return 0
+	}
+	var indexes []int
+	for i, m := range assembled.Messages {
+		if structured[m.fence.ID()] {
+			indexes = append(indexes, i)
+		}
+	}
+	live := liveFenceKeys(st, advisory)
+	for _, i := range indexes {
+		rotated += rotateExposedFenceKeys(st, assembled, advisory, live, assembled.Messages[i].Content)
+	}
+	return rotated
+}
+
+func liveFenceKeys(st *State, advisory *promptfence.Fence) map[string]int {
 	live := map[string]int{}
 	for i, m := range st.Messages {
 		if m.fence != (promptfence.Fence{}) {
@@ -69,26 +107,42 @@ func refreshFenceKeys(st *State, advisory *promptfence.Fence, from int) (next in
 	if advisory != nil && *advisory != (promptfence.Fence{}) {
 		live[advisory.ID()] = advisoryOwner
 	}
-	for i := from; i < len(st.Messages); i++ {
-		for _, text := range replayedTexts(st.Messages[i]) {
-			letters := keyLetters(text)
-			for id, owner := range live {
-				if !strings.Contains(letters, id) {
-					continue
-				}
-				fresh := promptfence.New() // never a retired key
-				if owner == advisoryOwner {
-					*advisory = fresh
-				} else {
-					st.Messages[owner].fence = fresh
-				}
-				delete(live, id)
-				live[fresh.ID()] = owner
+	return live
+}
+
+func rotateExposedFenceKeys(st, assembled *State, advisory *promptfence.Fence, live map[string]int, text string) (rotated int) {
+	layers := []string{text}
+	if decoded := escapedRune.ReplaceAllStringFunc(text, decodeEscape); decoded != text {
+		layers = append(layers, decoded)
+	}
+	for _, layer := range layers {
+		letters := keyLetters(layer)
+		for id, owner := range live {
+			if strings.Contains(letters, id) {
+				rotateFenceKey(st, assembled, advisory, live, id, owner)
 				rotated++
 			}
 		}
 	}
-	return mintFenceKeys(st, from), rotated
+	return rotated
+}
+
+func rotateFenceKey(st, assembled *State, advisory *promptfence.Fence, live map[string]int, id string, owner int) {
+	fresh := promptfence.New() // never a retired key
+	if owner == advisoryOwner {
+		*advisory = fresh
+	} else {
+		st.Messages[owner].fence = fresh
+		if assembled != nil {
+			for i := range assembled.Messages {
+				if assembled.Messages[i].fence.ID() == id {
+					assembled.Messages[i].fence = fresh
+				}
+			}
+		}
+	}
+	delete(live, id)
+	live[fresh.ID()] = owner
 }
 
 // keyLetters is what the key search reads of text: each rune case-folded
@@ -121,10 +175,9 @@ var escapedRune = regexp.MustCompile(`\\+u[0-9A-Fa-f]{4}`)
 // call's ID, Type, Function.Name and Function.Arguments; and, when m carries
 // a ContextSet (mixed assembly renders its alternatives instead of Content),
 // each group's subject domain and ID and each alternative's Content. An
-// AlternativeDesc holds no string. Each text that holds a \uXXXX escape is
-// also returned with every escape decoded, so a key spelled in escapes is
-// found in arguments decoded at any JSON depth, double-encoded or malformed.
-// Over-scanning costs a rotation; under-scanning lets a quoted key live.
+// AlternativeDesc holds no string. rotateExposedFenceKeys inspects each text
+// and one decoded escape layer. Over-scanning costs a rotation; under-scanning
+// lets a quoted key live.
 func replayedTexts(m Message) []string {
 	texts := []string{m.Content, m.ToolName, m.ToolCallID}
 	for _, c := range m.ToolCalls {
@@ -136,11 +189,6 @@ func replayedTexts(m Message) []string {
 			for _, a := range g.Alternatives {
 				texts = append(texts, a.Content)
 			}
-		}
-	}
-	for _, t := range texts {
-		if d := escapedRune.ReplaceAllStringFunc(t, decodeEscape); d != t {
-			texts = append(texts, d)
 		}
 	}
 	return texts

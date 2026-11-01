@@ -257,6 +257,9 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 		if err != nil {
 			return res, err
 		}
+		if atrace.Subjects != nil {
+			rotated += refreshMaterializedFenceKeys(&state, &assembled, &advisoryFence)
+		}
 		if advisory != nil {
 			goals := 0
 			for _, m := range assembled.Messages {

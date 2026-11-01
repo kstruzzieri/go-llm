@@ -304,6 +304,18 @@ func (d dynamicStructuredTool) Invoke(context.Context, json.RawMessage) (ToolRes
 	}}}}, nil
 }
 
+// dynamicGroupedTool supplies multiple structured groups after the earlier
+// tool result's key is visible, so their selected contents can straddle it.
+type dynamicGroupedTool struct{ set func() *ContextSet }
+
+func (dynamicGroupedTool) Spec() ToolSpec {
+	return ToolSpec{Name: "lookup", Parameters: json.RawMessage(`{"type":"object"}`)}
+}
+func (dynamicGroupedTool) Effect() Effect { return Effect{Class: Read, Approval: ApprovalNever} }
+func (d dynamicGroupedTool) Invoke(context.Context, json.RawMessage) (ToolResult, error) {
+	return ToolResult{Content: "fallback", Context: d.set()}, nil
+}
+
 // wireText is every string of req the model reads, joined.
 func wireText(req provider.ChatRequest) string {
 	var b strings.Builder
@@ -559,6 +571,44 @@ func TestAlternativeOnlyKeyRotates(t *testing.T) {
 	}
 	// containment: FENCE-FORGED
 	assertToolRotatedAt(t, mc.requests, planted, k1)
+	if n := rotationEvents(res); n != 1 {
+		t.Errorf("fence_rotation events = %d, want 1", n)
+	}
+	assertNoFrameKeyInText(t, mc.requests)
+}
+
+// A mixed anchor joins selected group contents with a newline. A live key
+// split at that boundary is absent from either alternative on its own, but
+// present in the text the model receives.
+func TestJoinedStructuredFragmentsRotateLiveKey(t *testing.T) {
+	var old, joined string
+	mc := &wireCaller{responses: []ModelResult{
+		toolCallResponse(call("1", "echo", `{"n":1}`)),
+		toolCallResponse(call("2", "lookup", `{}`)),
+		toolCallResponse(call("3", "echo", `{"n":3}`)),
+		{Response: provider.ChatResponse{Content: "done", Done: true}},
+	}}
+	tools := []Tool{echoTool{name: "echo"}, dynamicGroupedTool{set: func() *ContextSet {
+		old = latestFirstToolKey(mc)
+		if old == "" {
+			return nil
+		}
+		first, second := "before "+old[:6], old[6:]+" after"
+		joined = first + "\n" + second
+		return twoGroupSet(first, second)
+	}}}
+	o := New(mc, ContextManager{Mixed: true, Estimate: runeEstimator})
+	res, err := o.Run(context.Background(), Request{Goal: "q", Budget: Budget{InputCeiling: 8192}, Tools: tools}, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if old == "" || len(mc.requests) != 4 {
+		t.Fatalf("key %q, requests %d: want a key and 4 requests", old, len(mc.requests))
+	}
+	if !strings.Contains(wireText(mc.requests[2]), joined) {
+		t.Fatalf("mixed request does not carry the joined contents %q", joined)
+	}
+	assertToolRotatedAt(t, mc.requests, joined, old)
 	if n := rotationEvents(res); n != 1 {
 		t.Errorf("fence_rotation events = %d, want 1", n)
 	}
