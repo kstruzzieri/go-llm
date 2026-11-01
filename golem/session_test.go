@@ -317,6 +317,48 @@ func TestCompressionDoesNotRewriteSummaryEveryTurn(t *testing.T) {
 	}
 }
 
+// TestCompressConversationSummarizerGetsRoleAndTextOnly covers an assistant
+// message that carries text beside a tool call. history() replays it as role
+// and text, so the summarizer must not receive its 8000-byte tool-call JSON,
+// tool name or call ID either: those are unpriced by the trigger and would
+// break the request bound the fold relies on.
+func TestCompressConversationSummarizerGetsRoleAndTextOnly(t *testing.T) {
+	t.Parallel()
+	old := []conversation.Message{
+		{Role: "user", Content: "write it"},
+		{Role: "assistant", Content: "writing the file", ToolName: "write_file", ToolCallID: "c1",
+			ToolCalls: json.RawMessage(`[{"id":"c1","function":{"name":"write_file","arguments":{"content":"` + strings.Repeat("w", 8000) + `"}}}]`)},
+		{Role: "tool", ToolName: "write_file", ToolCallID: "c1", Content: "ok"},
+		{Role: "assistant", Content: "done"},
+	}
+	// Four 1100-token exchanges (4400 tokens) cross the 4096 trigger and sit at
+	// the retention floor, so only the exchange above folds.
+	var recent []conversation.Message
+	for range 4 {
+		recent = append(recent,
+			conversation.Message{Role: "user", Content: strings.Repeat("q", 2200)},
+			conversation.Message{Role: "assistant", Content: strings.Repeat("a", 2200)})
+	}
+	current := conversation.Conversation{Messages: append(append([]conversation.Message(nil), old...), recent...)}
+	want := []conversation.Message{
+		{Role: "user", Content: "write it"},
+		{Role: "assistant", Content: "writing the file"},
+		{Role: "assistant", Content: "done"},
+	}
+	calls := 0
+	r := &Runtime{summarizer: func(_ context.Context, prior string, messages []conversation.Message) (string, error) {
+		calls++
+		if prior != "" || !reflect.DeepEqual(messages, want) {
+			t.Errorf("summarizer input = %q, %+v; want empty prior and role and text only %+v", prior, messages, want)
+		}
+		return "SUM", nil
+	}}
+	got, changed, err := r.compressConversation(context.Background(), agent.Budget{InputCeiling: 8192}, current, false)
+	if err != nil || !changed || calls != 1 || !reflect.DeepEqual(got.Messages, recent) || summaryMessageCount(got) != 4 {
+		t.Errorf("compression = %d retained, summary %+v, changed %v, calls %d, error %v; want the four recent exchanges, count 4, changed true, one call", len(got.Messages), got.DurableSummary, changed, calls, err)
+	}
+}
+
 // TestCompressConversationSkipsSummarizerWhenNothingReplayedFolds covers a fold
 // batch holding only stored tool traffic (here an exchange whose question and
 // answer are empty): the prior summary has nothing new to absorb, so it is kept

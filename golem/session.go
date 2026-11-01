@@ -325,7 +325,10 @@ func (r *Runtime) compressConversation(ctx context.Context, budget agent.Budget,
 // and tool results were never replayed. Costing them at zero for the trigger
 // also leaves the fold batch unbounded by it (about a dozen turns of tool
 // output in one request), while the summary itself is capped at
-// agent.DefaultSummaryOutputReserve tokens. A non-empty batch with nothing
+// agent.DefaultSummaryOutputReserve tokens. Each message is passed as role and
+// text only, as history() sends it: an assistant message carrying text beside a
+// tool call would otherwise drag its full tool-call JSON, name and call ID into
+// the request, unpriced by the trigger. A non-empty batch with nothing
 // replayed in it leaves a non-empty prior summary alone instead of paying for
 // a rewrite that would bust the prompt cache for no new content.
 func summarizeReplayed(summarize conversation.Summarizer) conversation.Summarizer {
@@ -333,7 +336,7 @@ func summarizeReplayed(summarize conversation.Summarizer) conversation.Summarize
 		visible := make([]conversation.Message, 0, len(old))
 		for _, message := range old {
 			if replayed(message) {
-				visible = append(visible, message)
+				visible = append(visible, conversation.Message{Role: message.Role, Content: message.Content})
 			}
 		}
 		if len(old) > 0 && len(visible) == 0 && strings.TrimSpace(prior) != "" {
