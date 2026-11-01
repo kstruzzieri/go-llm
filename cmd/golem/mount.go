@@ -27,7 +27,8 @@ import (
 type systemInputs struct {
 	canary string
 	// headless is non-nil only for a -allow-tool one-shot (#352): the prompt
-	// is built from the exact mounted set. Never recomposed (no REPL there).
+	// is built from the exact mounted set. No command recomposes it (no REPL
+	// there); a snapshot-key rotation after the goal only swaps the key.
 	headless       *golemruntime.HeadlessToolCaps
 	allowWrite     bool
 	allowExec      bool
@@ -36,8 +37,12 @@ type systemInputs struct {
 	memory         bool
 	projectContext string // raw fenced project-context block; "" when none
 	gitContext     string // raw fenced Git snapshot block (#354); "" when none
-	agentMemory    bool
-	sessionUp      bool
+	// snapshotKey is the key projectContext and gitContext are framed under;
+	// "" when neither is set. composeSystem never reads it: each Run gets it
+	// as its system key (systemKeys) and may rotate it (adoptSnapshotKey).
+	snapshotKey string
+	agentMemory bool
+	sessionUp   bool
 }
 
 // composeSystem is the one composition path. Order and separators are the
@@ -64,6 +69,15 @@ func composeSystem(in systemInputs) string {
 		system += "\n\n" + in.canary
 	}
 	return system
+}
+
+// systemKeys is the snapshot key as agent.Request.SystemKeys, nil when the
+// prompt frames no snapshot.
+func (in systemInputs) systemKeys() []string {
+	if in.snapshotKey == "" {
+		return nil
+	}
+	return []string{in.snapshotKey}
 }
 
 // injectedContext is the untrusted-data suffix every model-facing prompt

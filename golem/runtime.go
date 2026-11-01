@@ -233,6 +233,11 @@ type Turn struct {
 	// It is projected onto the wire copy of the goal only and never
 	// persisted with the thread.
 	Advisory *agent.Advisory
+	// SystemKeys are the fence keys the runtime's System frames untrusted
+	// text under (agent.Request.SystemKeys). The returned Result.SystemKeys
+	// holds them after any rotation; a host that recomposes System should
+	// carry those forward.
+	SystemKeys []string
 }
 
 // CompactionReport estimates persisted non-system history and its rendered
@@ -596,8 +601,9 @@ func (r *Runtime) Run(ctx context.Context, turn Turn, sink EventSink) (agent.Res
 		// The thread id is the conversation's stable identity, so every turn
 		// of one thread reaches the provider under one session id (#533).
 		// Stateless turns carry no thread id and so send no session header.
-		SessionID: turn.ThreadID,
-		Advisory:  turn.Advisory,
+		SessionID:  turn.ThreadID,
+		Advisory:   turn.Advisory,
+		SystemKeys: turn.SystemKeys,
 	}
 	if thread != nil {
 		request.History = thread.history()

@@ -29,10 +29,10 @@
 // request may keep each value's id across requests, which keeps the bytes of
 // earlier values stable for a provider's prompt cache; it should then replace
 // an id whose text shows up in text added after the id was first shown, as
-// agent.Run does for tool results and consult advice. Golem's project and Git
-// snapshot renderer does not do this yet: it keeps one snapshot-scoped id
-// across requests. Never write a rendered prompt anywhere the untrusted values
-// are later read back from.
+// agent.Run does for tool results and consult advice, and for a caller's own
+// system-prompt frames such as Golem's project and Git snapshot when the caller
+// names their ids in agent.Request.SystemKeys. Never write a rendered prompt
+// anywhere the untrusted values are later read back from.
 package promptfence
 
 import "crypto/rand"

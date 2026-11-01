@@ -111,6 +111,14 @@ type Request struct {
 	// (#382). It is projected onto the wire copy of the goal message only:
 	// State, Result.Messages, history and summaries never carry it.
 	Advisory *Advisory
+	// SystemKeys are the fence keys System frames untrusted text under, such
+	// as the promptfence id of a caller-rendered snapshot. Each must be 12 or
+	// more characters of [A-Z2-7], and distinct keys cannot contain one
+	// another. Run treats each like a tool result's key:
+	// when the run's text (history, its summary, the goal and Advisory
+	// included) exposes one, every occurrence of it in System is replaced by
+	// a fresh key before the next render. Result.SystemKeys reports the keys System ended under.
+	SystemKeys []string
 }
 
 // Segment tags a message as always-present (Pinned) or compactable (Elastic).
@@ -149,6 +157,10 @@ type State struct {
 	System         string
 	DurableSummary string
 	Messages       []Message
+	// systemKeys are the keys System frames untrusted text under
+	// (Request.SystemKeys), rotated in place by refreshFenceKeys.
+	// Runtime-only, like Message.fence.
+	systemKeys []string
 }
 
 // RetrievalAttribution credits the sources a retrieval-style tool returned.
@@ -277,4 +289,9 @@ type Result struct {
 	// Risk is the run's cumulative interceptor report (#436): nil when no
 	// interceptor produced a finding, so pre-#436 traces stay byte-identical.
 	Risk *RiskReport `json:"Risk,omitempty"`
+	// SystemKeys is Request.SystemKeys with each rotated key replaced by its
+	// successor; nil when the Run refused the request. A caller that replays
+	// System in a later Run should swap each old key for its successor first,
+	// so that Run starts from the bytes this one last sent. Runtime-only.
+	SystemKeys []string `json:"-"`
 }

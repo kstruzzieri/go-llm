@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"fmt"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -27,9 +28,12 @@ func mintFenceKeys(st *State, from int) int {
 	return len(st.Messages)
 }
 
-// advisoryOwner is the owner index refreshFenceKeys gives the advisory key;
-// a tool key's owner is its message index.
-const advisoryOwner = -1
+// Tool keys use their message indexes; these owners identify keys outside
+// Messages when a scan rotates them.
+const (
+	advisoryOwner = -1
+	systemOwner   = -2
+)
 
 // refreshFenceKeys rotates every live key whose value appears in the text
 // appended since the last call, then keys the new tool messages
@@ -38,10 +42,12 @@ const advisoryOwner = -1
 // it at the top of each step, before assembly, so no render ever frames a
 // message under a key that the text the model reads can quote.
 //
-// The live keys are every tool message's key and the advisory key, which is
-// rotated in place; a nil or zero advisory is not live. Each message at
-// index from or later contributes every string replayed to the provider or
-// rendered into the prompt (replayedTexts). A key that occurs in any of them
+// The live keys are every tool message's key, the advisory key, and the keys
+// registered for the system prompt. A nil or zero advisory is not live. Each
+// message at index from or later contributes every string replayed to the
+// provider or rendered into the prompt (replayedTexts). At step zero, Run
+// also supplies the durable summary and staged advisory as pinned text. A
+// key that occurs in any of them
 // as keyLetters reads it (any letter case, split by any non-key characters)
 // is replaced by a fresh promptfence.New key, never a retired one. Every key
 // a text exposes rotates, and each rotation counts once. Rotation changes
@@ -56,8 +62,14 @@ const advisoryOwner = -1
 //
 // Each decoded layer is checked against the live keys. The work budget bounds
 // the total bytes checked; reaching it resets every live key once.
-func refreshFenceKeys(st *State, advisory *promptfence.Fence, from int) (next int, rotated int, limited bool, rotatedOwners map[int]bool) {
+func refreshFenceKeys(st *State, advisory *promptfence.Fence, from int, pinned ...string) (next int, rotated int, limited bool, rotatedOwners map[int]bool) {
 	scan := newFenceScan(st, advisory)
+	for _, text := range pinned {
+		if !scan.inspect(text) {
+			rotated = scan.rotateAll(st, nil, advisory, nil)
+			return mintFenceKeys(st, from), rotated, true, scan.rotatedOwners()
+		}
+	}
 	for i := from; i < len(st.Messages); i++ {
 		for _, text := range replayedTexts(st.Messages[i]) {
 			if !scan.inspect(text) {
@@ -116,6 +128,9 @@ func liveFenceKeys(st *State, advisory *promptfence.Fence) map[string]int {
 	if advisory != nil && *advisory != (promptfence.Fence{}) {
 		live[advisory.ID()] = advisoryOwner
 	}
+	for _, id := range st.systemKeys {
+		live[id] = systemOwner
+	}
 	return live
 }
 
@@ -126,20 +141,19 @@ func liveFenceKeys(st *State, advisory *promptfence.Fence) map[string]int {
 const maxFenceScanBytes = 8 << 20
 
 type fenceScan struct {
-	live      map[string]int
-	exposed   map[string]int
-	remaining int
-	keyLength int
+	live       map[string]int
+	exposed    map[string]int
+	remaining  int
+	keyLengths map[int]bool
 }
 
 func newFenceScan(st *State, advisory *promptfence.Fence) fenceScan {
 	live := liveFenceKeys(st, advisory)
-	var keyLength int
+	keyLengths := make(map[int]bool)
 	for id := range live {
-		keyLength = len(id) // every promptfence.New ID has the same width
-		break
+		keyLengths[len(id)] = true
 	}
-	return fenceScan{live: live, exposed: make(map[string]int), remaining: maxFenceScanBytes, keyLength: keyLength}
+	return fenceScan{live: live, exposed: make(map[string]int), remaining: maxFenceScanBytes, keyLengths: keyLengths}
 }
 
 // inspect checks every decoded escape layer. Fullwidth ASCII forms map to
@@ -147,7 +161,7 @@ func newFenceScan(st *State, advisory *promptfence.Fence) fenceScan {
 // remain separators. Matches are collected before rotation; exhausting the
 // byte budget resets all keys.
 func (s *fenceScan) inspect(text string) bool {
-	if s.keyLength == 0 {
+	if len(s.keyLengths) == 0 {
 		return true
 	}
 	for {
@@ -166,10 +180,12 @@ func (s *fenceScan) inspect(text string) bool {
 
 func (s *fenceScan) scanLayer(text string) {
 	letters := keyLetters(text)
-	for i := 0; i+s.keyLength <= len(letters); i++ {
-		id := letters[i : i+s.keyLength]
-		if owner, ok := s.live[id]; ok {
-			s.exposed[id] = owner
+	for length := range s.keyLengths {
+		for i := 0; i+length <= len(letters); i++ {
+			id := letters[i : i+length]
+			if owner, ok := s.live[id]; ok {
+				s.exposed[id] = owner
+			}
 		}
 	}
 }
@@ -205,9 +221,20 @@ func (s *fenceScan) rotatedOwners() map[int]bool {
 
 func rotateFenceKey(st, assembled *State, advisory *promptfence.Fence, live map[string]int, id string, owner int) {
 	fresh := promptfence.New() // never a retired key
-	if owner == advisoryOwner {
+	switch owner {
+	case advisoryOwner:
 		*advisory = fresh
-	} else {
+	case systemOwner:
+		st.System = strings.ReplaceAll(st.System, id, fresh.ID())
+		if assembled != nil {
+			assembled.System = strings.ReplaceAll(assembled.System, id, fresh.ID())
+		}
+		for i, key := range st.systemKeys {
+			if key == id {
+				st.systemKeys[i] = fresh.ID()
+			}
+		}
+	default:
 		st.Messages[owner].fence = fresh
 		if assembled != nil {
 			for i := range assembled.Messages {
@@ -219,6 +246,23 @@ func rotateFenceKey(st, assembled *State, advisory *promptfence.Fence, live map[
 	}
 	delete(live, id)
 	live[fresh.ID()] = owner
+}
+
+// validateSystemKeys rejects keys the scan cannot safely identify and
+// distinct keys that overlap in System. Duplicate entries refer to the same
+// frame and are rotated together.
+func validateSystemKeys(keys []string) error {
+	for i, key := range keys {
+		if len(key) < 12 || keyLetters(key) != key {
+			return fmt.Errorf("agent: SystemKeys entry %d is not a fence key: want 12 or more characters of A-Z and 2-7", i)
+		}
+		for j, prior := range keys[:i] {
+			if key != prior && (strings.Contains(key, prior) || strings.Contains(prior, key)) {
+				return fmt.Errorf("agent: SystemKeys entry %d overlaps entry %d", i, j)
+			}
+		}
+	}
+	return nil
 }
 
 // keyLetters is what the key search reads of text: fullwidth ASCII forms

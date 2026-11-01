@@ -1513,13 +1513,14 @@ func runAgentflowAuthorWithClient(ctx context.Context, stdout, stderr io.Writer,
 
 	plannerOpts := plannerModelOptions(sess.startupModelOptions)
 	req := agent.Request{
-		Goal:     f.goal,
-		System:   system,
-		Tools:    planTools,
-		MaxSteps: sess.maxSteps,
-		Budget:   plannerBudget(sess.startupBudget, plannerOpts, config.UseCasePlanning),
-		Options:  plannerOpts,
-		Approver: &authorPlanApprover{delegate: approver, sess: as},
+		Goal:       f.goal,
+		System:     system,
+		Tools:      planTools,
+		MaxSteps:   sess.maxSteps,
+		Budget:     plannerBudget(sess.startupBudget, plannerOpts, config.UseCasePlanning),
+		Options:    plannerOpts,
+		Approver:   &authorPlanApprover{delegate: approver, sess: as},
+		SystemKeys: sess.sysInputs.systemKeys(),
 	}
 	res, runErr := sess.orch.Run(loopCtx, req, agent.Observer(newRenderer(stderr, false, sess.maxSteps, sess.clock, sess.mixed)))
 	budgetExhausted := as.attempts >= maxPlanSubmissions

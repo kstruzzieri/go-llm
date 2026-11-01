@@ -610,6 +610,9 @@ func newTaskStepRunner(root string, plan *agentflow.Plan, af afClient, orch *age
 			Budget:   sess.startupBudget,
 			Approver: taskApprover(approveEdits),
 			Options:  sess.startupModelOptions,
+			// Rotated per step only: steps may run in parallel, so none
+			// writes the shared session.
+			SystemKeys: sess.sysInputs.systemKeys(),
 		}
 		res, runErr := orch.Run(stepCtx, req, agent.Observer(newRenderer(out, false, sess.maxSteps, sess.clock, sess.mixed)))
 		if fatal := afJournal.fatalErr(); fatal != nil {
