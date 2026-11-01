@@ -1,10 +1,10 @@
 # Containment mutation ledger (#452)
 
-Each entry proves one security property's assertions can fail. Entries are point-in-time evidence at their baseline revision. The ledger contains 74 entries: 69 guard and five effect-detection entries.
+Each entry proves one security property's assertions can fail. Entries are point-in-time evidence at their baseline revision. The ledger contains 78 entries: 73 guard and five effect-detection entries.
 
 Platform: every proof in this ledger ran on darwin (arm64, go1.27.1). After the rebase onto the model-resistance PR, the entries whose patches touch build-tagged or platform-sensitive code (M-005 to M-008, the unix path walks; M-009 and M-014 to M-018, the host exec path; M-011, the MCP stdio child environment) were re-run on Linux (arm64, go1.27.1, the Docker `ci-local` image) at their baseline: each entry's `Platform:` line records the result, and a Linux line that differs would be recorded beside the darwin evidence, never in place of it. M-010 (it needs an AgentFlow source checkout) and M-012 (Seatbelt is darwin-native) were not re-run on Linux, and no entry has run on Windows.
 
-Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-only variants added in review, M-045 B and M-047 B, at `34b2ff38`, whose production and scenario trees are identical; M-051 to M-053 at `731f2d1d`, the commit that adds them; M-054 to M-058 at `3d423ce1`, the commit that adds them; M-059 at `1166b276`, the commit that adds it): the baseline passed, the mutant failed as shown, and the tree was restored with `git checkout` and passed again. M-028 was re-recorded when tool frames moved to per-result keys: variant A on the commit that makes that change (parent `140524de`), variant B on the commit that adds the cross-Run check (parent `d75c78cb`). Each baseline passed, each mutant failed as shown, and an editor edit restored the baseline bytes, which passed again. Entries M-067 to M-071 ran on the commit that adds fence-key rotation (parent `72b6eb47`) in the same way, the restored file's sha256 matching the baseline's each time; M-072 and M-073 ran the same way on the commit that makes every exposed key rotate and matches keys through separators (parent `00912c90`), and M-074 on the commit that pins key minting before assembly (parent `caa84426`). Entries M-060 and M-061 ran in isolated exports of immutable code commit `23f0c0bbca83f0c9d6e02163dd09c4856698ddcd`: each baseline passed, its mutant failed, and restored files matched the baseline bytes and passed again. Entries M-062 and M-063 ran on this branch at `dbe5c315b40f8b973b96cf623d5cdcbe00c616fc`, the commit that adds their rules: each baseline passed, its mutant failed, and `git checkout -- <file>` restored the baseline bytes, which passed again; M-062's comparison against the previous rule ran in an isolated `git archive` export of `ac053567`. Entries M-064 to M-066 ran on the #387 branch at `72d0bedeb1d264b3da62cf812df7505a8bd7e776`, the commit that tightens PV1's probe and cites the exec and verification preview tests (M-064 and M-065 were first recorded at `b9cea9154746758026fd9bb58d467f665be5952f`, the commit that makes PV1 executable): each baseline passed, its mutant failed, and `git checkout -- <file>` restored the baseline bytes, which passed again. Entries quote test output, the containment judge's message text and line numbers included, as it read at their baseline; later wording changes do not rewrite them. Entries carried over from the PR 2 delivery record name the draft entry they were first recorded as; they were re-run here so every command, diff and line number matches one revision. Apply a patch with `git apply`, run the command, then restore with `git checkout -- <file>`. `guard` entries remove or weaken the protection the refs assert. `effect-detection` entries change the effect path of an uncontained scenario: they show its probe can read a change in outcome, not that a guard is absent. Rows exempt from this ledger (pending, out-of-scope, unobserved such as ENV-BWRAP, whose native bwrap profile needs a Linux host, and administrative META- rows; the inventory lint allows no other verified or uncontained row an exemption) carry their exempt reason in the inventory (`docs/security/containment-inventory.json`, rendered in `docs/security/containment-inventory.md`).
+Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-only variants added in review, M-045 B and M-047 B, at `34b2ff38`, whose production and scenario trees are identical; M-051 to M-053 at `731f2d1d`, the commit that adds them; M-054 to M-058 at `3d423ce1`, the commit that adds them; M-059 at `1166b276`, the commit that adds it): the baseline passed, the mutant failed as shown, and the tree was restored with `git checkout` and passed again. M-028 was re-recorded when tool frames moved to per-result keys: variant A on the commit that makes that change (parent `140524de`), variant B on the commit that adds the cross-Run check (parent `d75c78cb`). Each baseline passed, each mutant failed as shown, and an editor edit restored the baseline bytes, which passed again. Entries M-067 to M-071 ran on the commit that adds fence-key rotation (parent `72b6eb47`) in the same way, the restored file's sha256 matching the baseline's each time; M-072 and M-073 ran the same way on the commit that makes every exposed key rotate and matches keys through separators (parent `00912c90`), and M-074 on the commit that pins key minting before assembly (parent `caa84426`). Entries M-075 to M-078 ran the same way in an isolated `git archive` export of the commit that adds system keys (parent `3346b711`). Entries M-060 and M-061 ran in isolated exports of immutable code commit `23f0c0bbca83f0c9d6e02163dd09c4856698ddcd`: each baseline passed, its mutant failed, and restored files matched the baseline bytes and passed again. Entries M-062 and M-063 ran on this branch at `dbe5c315b40f8b973b96cf623d5cdcbe00c616fc`, the commit that adds their rules: each baseline passed, its mutant failed, and `git checkout -- <file>` restored the baseline bytes, which passed again; M-062's comparison against the previous rule ran in an isolated `git archive` export of `ac053567`. Entries M-064 to M-066 ran on the #387 branch at `72d0bedeb1d264b3da62cf812df7505a8bd7e776`, the commit that tightens PV1's probe and cites the exec and verification preview tests (M-064 and M-065 were first recorded at `b9cea9154746758026fd9bb58d467f665be5952f`, the commit that makes PV1 executable): each baseline passed, its mutant failed, and `git checkout -- <file>` restored the baseline bytes, which passed again. Entries quote test output, the containment judge's message text and line numbers included, as it read at their baseline; later wording changes do not rewrite them. Entries carried over from the PR 2 delivery record name the draft entry they were first recorded as; they were re-run here so every command, diff and line number matches one revision. Apply a patch with `git apply`, run the command, then restore with `git checkout -- <file>`. `guard` entries remove or weaken the protection the refs assert. `effect-detection` entries change the effect path of an uncontained scenario: they show its probe can read a change in outcome, not that a guard is absent. Rows exempt from this ledger (pending, out-of-scope, unobserved such as ENV-BWRAP, whose native bwrap profile needs a Linux host, and administrative META- rows; the inventory lint allows no other verified or uncontained row an exemption) carry their exempt reason in the inventory (`docs/security/containment-inventory.json`, rendered in `docs/security/containment-inventory.md`).
 
 ## M-001 — Absolute paths are rejected by the workspace path cleaner
 - Affected refs: PATH-ABS: `TestHardeningContracts/Active/Workspace/confinement_and_arguments/public_confinement/owned_absolute_sibling`, `TestWorkspaceCleanRelContainment/absolute_escape`, `TestContainment/W1`
@@ -2266,6 +2266,102 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
 - Baseline: pass (exit 0). Mutant: FAIL `TestKeysMintedBeforeAssemblyUnderDroppingCompaction` (`fencekeys_test.go:892: request 1 frames results 1-a and 1-b under one key "NO2SFUMMSFOD"`, `fencekeys_test.go:898: request 2 re-keyed result 1-a to "J5EM5JW4BAHY"; its first render used "NO2SFUMMSFOD"`, and the same two lines for every later batch and request); FAIL `TestAlternativeOnlyKeyRotates` (`fencekeys_test.go:561: request 2 carries the exposure but still frames tool message 1 under the exposed key "267E4VGUHSRI"`, `fencekeys_test.go:561: request 3 re-keyed tool message 1 again: "R7LLFXNXNUVH" after "267E4VGUHSRI"`); FAIL `TestMemoryRecallSignedStoreProviderFences/mixed=true` (`memory_recall_e2e_test.go:97: observation re-keyed across requests`), which no inventory row cites; every other test of the package passes; exit 1. Restored by an editor edit, byte-identical to the baseline file (sha256 match): pass (exit 0).
 - Kind: guard
 - Notes: Keying after assembly works only while the assembled State shares State's backing array, which is the case on the legacy path when nothing is dropped. A RecencyCompactor that drops a group, and mixed assembly, return copies made before the key was minted. The new result then reaches that render unkeyed: it is framed under the per-render fallback key, which is shared by every unkeyed result in the render, and it is re-keyed on the next request. Before this entry, only the mixed-assembly tests caught the move; the legacy dropping path was pinned by nothing. The new test drops history on every step that renders a new batch, asserts that precondition through the `compaction` events, and checks that each result keeps one key across every request and that no two results in one request share a key.
+
+## M-075 — A system key is a live owner of the exposure scan
+- Affected refs: FENCE-FORGED: `TestSystemKeyEchoRotatesSystem`, `TestHistoryQuotingSystemKeyRotatesFirstRender`, `TestSnapshotKeyRotatesOnExposureAndCarriesForward`
+- Baseline: the commit that adds system keys (parent `3346b711`), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^(TestSystemKeyEchoRotatesSystem|TestHistoryQuotingSystemKeyRotatesFirstRender)$' ./agent`; `go test -count=1 -v -run '^TestTurnSystemKeysReachTheRun$' ./golem`; `go test -count=1 -v -run '^TestSnapshotKeyRotatesOnExposureAndCarriesForward$' ./cmd/golem`
+- Patch:
+  ```diff
+  diff --git a/agent/fencekeys.go b/agent/fencekeys.go
+  --- a/agent/fencekeys.go
+  +++ b/agent/fencekeys.go
+  @@ -76,9 +76,6 @@ func refreshFenceKeys(st *State, advisory *promptfence.Fence, from int) (next in
+   	if advisory != nil && *advisory != (promptfence.Fence{}) {
+   		live[advisory.ID()] = advisoryOwner
+   	}
+  -	for _, id := range st.systemKeys {
+  -		live[id] = systemOwner
+  -	}
+   	for i := from; i < len(st.Messages); i++ {
+   		for _, text := range replayedTexts(st.Messages[i]) {
+   			letters := keyLetters(text)
+  ```
+- Baseline: pass (exit 0). Mutant: FAIL `TestSystemKeyEchoRotatesSystem` (`fencekeys_test.go:1164: Result.SystemKeys[0] = "75F7GH2CM5AK", want a fresh key replacing "75F7GH2CM5AK"`); FAIL `TestHistoryQuotingSystemKeyRotatesFirstRender` (`fencekeys_test.go:1210: Result.SystemKeys = ["LYZLXEBPLW7G"], want one key replacing "LYZLXEBPLW7G"`); FAIL `TestSnapshotKeyRotatesOnExposureAndCarriesForward` (`projectcontext_trust_test.go:612: request after the read still frames the snapshot under the exposed key "JSJUQ7LI5PN5"`); FAIL `TestTurnSystemKeysReachTheRun` (`session_id_test.go:175: Result.SystemKeys = ["ABCDEFGHJKLM"], want one key replacing "ABCDEFGHJKLM"`), which no inventory row cites; exit 1. Restored by an editor edit, byte-identical to the baseline file (sha256 match): pass (exit 0).
+- Kind: guard
+- Notes: This is the snapshot owner the scan must hold: without it the caller's keys pass through the Run untouched, so text that quotes Golem's project and Git snapshot key leaves that frame under the quoted key for every later request of the Run and of the session.
+
+## M-076 — Rotating a system key rewrites System, not only the reported key
+- Affected refs: FENCE-FORGED: `TestSystemKeyEchoRotatesSystem`, `TestHistoryQuotingSystemKeyRotatesFirstRender`, `TestSnapshotKeyRotatesOnExposureAndCarriesForward`
+- Baseline: the commit that adds system keys (parent `3346b711`), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^(TestSystemKeyEchoRotatesSystem|TestHistoryQuotingSystemKeyRotatesFirstRender)$' ./agent`; `go test -count=1 -v -run '^TestTurnSystemKeysReachTheRun$' ./golem`; `go test -count=1 -v -run '^TestSnapshotKeyRotatesOnExposureAndCarriesForward$' ./cmd/golem`
+- Patch:
+  ```diff
+  diff --git a/agent/fencekeys.go b/agent/fencekeys.go
+  --- a/agent/fencekeys.go
+  +++ b/agent/fencekeys.go
+  @@ -91,7 +91,6 @@ func refreshFenceKeys(st *State, advisory *promptfence.Fence, from int) (next in
+   				case advisoryOwner:
+   					*advisory = fresh
+   				case systemOwner:
+  -					st.System = strings.ReplaceAll(st.System, id, fresh.ID())
+   					for j, k := range st.systemKeys {
+   						if k == id {
+   							st.systemKeys[j] = fresh.ID()
+  ```
+- Baseline: pass (exit 0). Mutant: FAIL `TestSystemKeyEchoRotatesSystem` (`fencekeys_test.go:1168: request 2 carries the exposure but still frames System under "5TO2BXDGEDLB"`, `fencekeys_test.go:1177: request 2 system message is not framed under "5VPU2VMWRXSE"`, and the same for request 3); FAIL `TestHistoryQuotingSystemKeyRotatesFirstRender` (`fencekeys_test.go:1216: first request system message:` followed by the unrotated bytes, `fencekeys_test.go:1218: request 0 system message is not framed under "UENLLA4TCFJE"`); FAIL `TestSnapshotKeyRotatesOnExposureAndCarriesForward` (`projectcontext_trust_test.go:612: request after the read still frames the snapshot under the exposed key "7PS6K6PQYJDM"`); FAIL `TestTurnSystemKeysReachTheRun` (`session_id_test.go:181: system message:`), which no inventory row cites; exit 1. Restored by an editor edit, byte-identical to the baseline file (sha256 match): pass (exit 0).
+- Kind: guard
+- Notes: The tests read the key off the wire, not only off `Result.SystemKeys`, so a rotation that is reported but never reaches the system message fails.
+
+## M-077 — Golem gives every goal's Run the snapshot key
+- Affected refs: FENCE-FORGED: `TestSnapshotKeyRotatesOnExposureAndCarriesForward`
+- Baseline: the commit that adds system keys (parent `3346b711`), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^TestSnapshotKeyRotatesOnExposureAndCarriesForward$' ./cmd/golem` (the agent and golem commands above pass unchanged)
+- Patch:
+  ```diff
+  diff --git a/cmd/golem/repl.go b/cmd/golem/repl.go
+  --- a/cmd/golem/repl.go
+  +++ b/cmd/golem/repl.go
+  @@ -486,7 +486,6 @@ func runOnceWithRecipeHint(ctx context.Context, out io.Writer, interrupts <-chan
+   		Observer: observer,
+   		Advisory: sess.advisory, // staged by /consult; consumed by this turn only (#382)
+   		// The Run rotates the snapshot key if its text exposes it (#430).
+  -		SystemKeys: sess.sysInputs.systemKeys(),
+   	}, sess.machine.sink())
+   	// Seal immediately after Run on every path: writes applied before an
+   	// interrupt or provider error must stay undoable. The error is joined
+  ```
+- Baseline: pass (exit 0). Mutant: FAIL `TestSnapshotKeyRotatesOnExposureAndCarriesForward` (`projectcontext_trust_test.go:612: request after the read still frames the snapshot under the exposed key "G3LLIKCJT2F5"`); exit 1. Restored by an editor edit, byte-identical to the baseline file (sha256 match): pass (exit 0).
+- Kind: guard
+- Notes: The library rotation works only for keys the caller names; this is the Golem side of the snapshot owner.
+
+## M-078 — Golem carries a rotated snapshot key into later goals
+- Affected refs: FENCE-FORGED: `TestSnapshotKeyRotatesOnExposureAndCarriesForward`
+- Baseline: the commit that adds system keys (parent `3346b711`), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^TestSnapshotKeyRotatesOnExposureAndCarriesForward$' ./cmd/golem` (the agent and golem commands above pass unchanged)
+- Patch:
+  ```diff
+  diff --git a/cmd/golem/repl.go b/cmd/golem/repl.go
+  --- a/cmd/golem/repl.go
+  +++ b/cmd/golem/repl.go
+  @@ -499,9 +499,6 @@ func runOnceWithRecipeHint(ctx context.Context, out io.Writer, interrupts <-chan
+   	sess.feedback.finishRun(runID)
+   	// On every path: a rotated snapshot key already reached the wire, and the
+   	// next goal must not frame the snapshot under the exposed key again.
+  -	if err := adoptSnapshotKey(sess, res.SystemKeys); err != nil {
+  -		writeRunLine("warning: snapshot key not carried forward: %v", err)
+  -	}
+   	// An interrupted approval surfaces as context.Canceled from inside the run
+   	// and races the interrupt watcher's cancel(). Synchronize the derived
+   	// context here so status and rendering never depend on scheduler order: an
+  ```
+- Baseline: pass (exit 0). Mutant: FAIL `TestSnapshotKeyRotatesOnExposureAndCarriesForward` (`projectcontext_trust_test.go:616: session snapshot key = [<<<GIT_CONTEXT O3QGWCAKFPWR  O3QGWCAKFPWR], want the Run's fresh key`); exit 1. Restored by an editor edit, byte-identical to the baseline file (sha256 match): pass (exit 0).
+- Kind: guard
+- Notes: Without adoption the next goal frames the snapshot under the exposed key again. A goal that replays history quoting it would rotate it once more before its first request, but a goal without history (no session, or AgentFlow) would start under a retired key, and every later goal would miss the prompt cache from the system prompt on.
 
 ## Administrative evidence
 
