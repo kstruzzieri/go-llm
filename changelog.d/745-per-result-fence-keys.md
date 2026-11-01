@@ -31,5 +31,5 @@ built with `-build-injection-corpus` from a cases file whose `source` is
 `forged-close`; any `source` other than `injection` or `forged-close` is now
 rejected before anything is written. `-injection-report` with that
 registration adds a within-model forged-live vs forged-stale table. Results on
-two local models and a one-model #452 rerun are in
-`docs/llm/benchmarks/2026-10-31-forged-close.md`.
+two local models and one cloud model (kimi-k2.7-code on OpenCode Go), and a
+one-model #452 rerun, are in `docs/llm/benchmarks/2026-10-31-forged-close.md`.
