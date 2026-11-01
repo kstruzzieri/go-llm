@@ -24,16 +24,15 @@
 // one id per framed value: mint the id only after the value's bytes are final,
 // so the value cannot contain an id that did not exist yet, and never reuse an
 // id for a different value, or for text fixed after the id was first shown. A
-// renderer whose values are new on every prompt,
-// such as retrieval, builds one fence per rendered prompt. A renderer that
-// replays the same values on every request may keep each value's id across
-// requests, which keeps the bytes of earlier values stable for a provider's
-// prompt cache; it should then replace an id whose text shows up in text added
-// after the id was first shown, as agent.Run does for tool results and consult
-// advice. Golem's project and Git snapshot renderer does not do this yet: it
-// keeps one snapshot-scoped id across requests. Never write a rendered prompt
-// anywhere the
-// untrusted values are later read back from.
+// renderer whose values are new on every prompt, such as retrieval, builds one
+// fence per rendered prompt. A renderer that replays the same values on every
+// request may keep each value's id across requests, which keeps the bytes of
+// earlier values stable for a provider's prompt cache; it should then replace
+// an id whose text shows up in text added after the id was first shown, as
+// agent.Run does for tool results and consult advice. Golem's project and Git
+// snapshot renderer does not do this yet: it keeps one snapshot-scoped id
+// across requests. Never write a rendered prompt anywhere the untrusted values
+// are later read back from.
 package promptfence
 
 import "crypto/rand"
