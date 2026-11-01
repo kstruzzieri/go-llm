@@ -472,6 +472,18 @@ func invokeDispatchFromParent(t *testing.T, tool agent.Tool, tasks []string, bud
 	return dispatchTestEnvelope{}
 }
 
+// TestGolemContextManagerSetsLowWater pins spec D2.4 for Golem: the main
+// orchestrator factory and the dispatch tool both take their manager from
+// golemContextManager, with or without -progressive.
+func TestGolemContextManagerSetsLowWater(t *testing.T) {
+	for _, progressive := range []bool{false, true} {
+		m := golemContextManager(progressive)
+		if m.CompactionLowWater != 0.75 || m.Mixed != progressive {
+			t.Errorf("golemContextManager(%t) = low-water %v, mixed %t; want 0.75, %t", progressive, m.CompactionLowWater, m.Mixed, progressive)
+		}
+	}
+}
+
 func TestNewDispatchTool_AttenuatesAtParentRun(t *testing.T) {
 	caller := &specRecordingCaller{}
 	tool, err := newDispatchTool(caller, flags{}, agent.Budget{InputCeiling: 16384, OutputReserve: 777}, dispatchFanout{maxConcurrent: 1}, nil, validDispatchAvailable(t), nil)

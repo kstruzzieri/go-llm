@@ -86,7 +86,9 @@ func bootstrapOrchestrator(ctx context.Context, configPath string, policy provid
 	if useBuiltInSummarizer {
 		summarizer = agent.NewRouterSummarizer(bundle.Router, summarizeRoute.Chain)
 	}
-	return agent.New(agent.NewRouterModelCallerWithChain(bundle.Router, agentRoute.Chain), agent.ContextManager{Mixed: progressive}), bundle, summarizer, nil
+	// Spec D2.4: compact to a 75% low-water mark, as cmd/golem's
+	// golemContextManager does, so the cached prefix holds across steps.
+	return agent.New(agent.NewRouterModelCallerWithChain(bundle.Router, agentRoute.Chain), agent.ContextManager{Mixed: progressive, CompactionLowWater: 0.75}), bundle, summarizer, nil
 }
 
 func loadConfig(path string) (*config.Config, error) {

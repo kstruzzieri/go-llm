@@ -18,6 +18,11 @@ type TokenBudget struct {
 	// it for the active transport; zero means raw, unframed assembly. Custom
 	// compactors must include it when fitting and reporting token counts.
 	ToolResultOverhead int
+	// LowWaterFraction is ContextManager.CompactionLowWater: when the
+	// transcript exceeds Input, a compactor drops until it fits
+	// int(Input*fraction) rather than Input. Zero, or any value outside
+	// (0,1), means just enough.
+	LowWaterFraction float64
 }
 
 // CompactionReport describes what a Compact call did.
@@ -225,7 +230,16 @@ func (rc RecencyCompactor) groups(st State) []compactionGroup {
 	return out
 }
 
-func (rc RecencyCompactor) Compact(_ context.Context, st State, b TokenBudget) (State, CompactionReport, error) {
+// lowWaterMark is int(input*frac), the size a compacting fit drops to, and
+// false when frac is off or outside (0,1): the fit then drops just enough.
+func lowWaterMark(input int, frac float64) (int, bool) {
+	if !(frac > 0 && frac < 1) {
+		return input, false
+	}
+	return int(float64(input) * frac), true
+}
+
+func (rc RecencyCompactor) Compact(ctx context.Context, st State, b TokenBudget) (State, CompactionReport, error) {
 	rc.toolResultOverhead = b.ToolResultOverhead
 	before, ok := rc.checkedTotal(st)
 	if !ok {
@@ -241,12 +255,15 @@ func (rc RecencyCompactor) Compact(_ context.Context, st State, b TokenBudget) (
 			return st, CompactionReport{Strategy: "recency", TokensBefore: before, TokensAfter: math.MaxInt}, ErrContextExhausted
 		}
 	}
+	// Over budget, a low-water fit drops to the mark rather than to Input,
+	// so the next steps fit without moving the cut point again.
+	target, lowWater := lowWaterMark(b.Input, b.LowWaterFraction)
 	remaining := before
 	dropped := 0
 	arithmeticOK := true
 	dropKind := func(kind compactionGroupKind) {
 		for i := range groups {
-			if !arithmeticOK || remaining <= b.Input {
+			if !arithmeticOK || remaining <= target {
 				return
 			}
 			if groups[i].kind == kind {
@@ -264,6 +281,12 @@ func (rc RecencyCompactor) Compact(_ context.Context, st State, b TokenBudget) (
 	dropKind(groupHistory)
 	dropKind(groupCompletedTool)
 	dropKind(groupPlainElastic)
+	if lowWater && remaining > target {
+		// Pinned and unresolved content alone sit above the mark: return
+		// exactly the just-enough fit, never an error low-water caused.
+		b.LowWaterFraction = 0
+		return rc.Compact(ctx, st, b)
+	}
 	if !arithmeticOK {
 		return st, CompactionReport{Strategy: "recency", DroppedCount: dropped, TokensBefore: before, TokensAfter: math.MaxInt}, ErrContextExhausted
 	}

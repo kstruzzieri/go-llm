@@ -86,6 +86,22 @@ type ContextManager struct {
 	// Context — is that assembling a State does not mutate it. Budget the memory;
 	// do not buy it with a non-idempotent Assemble.
 	Mixed bool
+	// CompactionLowWater is the fraction of the state budget a compacting
+	// step drops to, instead of dropping just enough to fit. Zero keeps that
+	// "just enough" behavior; any other value must lie in (0,1), or Run
+	// fails before its first model call. When the mark is unreachable
+	// (pinned and unresolved content alone sit above it), the step falls
+	// back to the just-enough fit.
+	//
+	// With the built-in assembly (a nil Compactor, a RecencyCompactor value,
+	// or Mixed) every Elastic message a compacting step drops also stays out
+	// of every later request of the same Run, so the first retained message,
+	// and the provider's cached prefix with it, holds for several steps. The
+	// dropped messages remain in State and Result.Messages. A custom
+	// Compactor receives the fraction as TokenBudget.LowWaterFraction but
+	// nothing is hidden from it, because it may synthesize replacements for
+	// what it drops and would never see those messages again.
+	CompactionLowWater float64
 }
 
 // DurableSummaryPrompt renders the durable summary as the pinned system message
@@ -106,6 +122,21 @@ func (m ContextManager) estimate(s string) int {
 		return 0
 	}
 	return 1 + (len(s)-1)/4
+}
+
+// stickyEviction reports whether a Run may hide what a compacting step
+// dropped for the rest of the Run: a low-water mark is set and assembly is
+// built in. A custom Compactor may synthesize replacements for what it drops,
+// so it keeps seeing every message (CompactionLowWater).
+func (m ContextManager) stickyEviction() bool {
+	if m.CompactionLowWater <= 0 {
+		return false
+	}
+	if m.Mixed || m.Compactor == nil {
+		return true
+	}
+	_, builtin := m.Compactor.(RecencyCompactor)
+	return builtin
 }
 
 func normalizeContextManager(m ContextManager) ContextManager {
@@ -261,7 +292,10 @@ func (m ContextManager) assembleLegacy(ctx context.Context, st State, toolSchema
 			Level: LevelCritical, Cause: CauseToolSchema, Mitigation: MitigationHalt,
 		}, ErrContextExhausted
 	}
-	stateBudget := TokenBudget{Input: stateInput, ToolResultOverhead: m.costCompactor().toolResultOverhead}
+	stateBudget := TokenBudget{
+		Input: stateInput, ToolResultOverhead: m.costCompactor().toolResultOverhead,
+		LowWaterFraction: m.CompactionLowWater,
+	}
 	out, report, err := m.Compactor.Compact(ctx, st, stateBudget)
 	if err != nil {
 		if errors.Is(err, ErrContextExhausted) {

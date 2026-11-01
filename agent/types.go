@@ -150,6 +150,11 @@ type Message struct {
 	// is never serialized and is not readable outside the package except by
 	// reflection. Zero means unkeyed.
 	fence promptfence.Fence
+	// idx is the message's canonical State.Messages index plus one, set only
+	// on the assembly-input copies a low-water Run builds (visibleState), so
+	// the Run can tell which messages a compacting step dropped. Zero means
+	// untagged. Runtime-only like fence: canonical State never carries it.
+	idx int
 }
 
 // State is the canonical transcript the Orchestrator owns.

@@ -225,6 +225,18 @@ func (m ContextManager) assembleMixed(ctx context.Context, st State, toolSchemaT
 			Mitigation:  MitigationHalt,
 		}, ContextAssemblyTrace{}, err
 	}
+	// Low-water (CompactionLowWater): a step that had to evict allocates again
+	// against the mark, so later steps fit without evicting. allocateMixed
+	// mutates its units, so that pass gets fresh ones. When the must-fit units
+	// alone sit above the mark it fails, and the full-budget allocation above
+	// stands: low-water never turns a fit into an error.
+	if mark, ok := lowWaterMark(stateBudget, m.CompactionLowWater); ok && alloc.evictedGroups > 0 {
+		if lowUnits, lerr := m.buildMixedUnits(st); lerr == nil {
+			if lowAlloc, lerr := m.allocateMixed(ctx, lowUnits, mark, sysTokens); lerr == nil {
+				units, alloc = lowUnits, lowAlloc
+			}
+		}
+	}
 
 	out := materializeMixed(stMat.System, summary, units)
 	used, usedOK := m.checkedTotalTokens(out, 0)

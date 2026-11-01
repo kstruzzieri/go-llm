@@ -161,7 +161,13 @@ func (m ContextManager) buildMixedUnits(st State) ([]*mixedUnit, error) {
 		if g.overflow {
 			return nil, ErrContextExhausted
 		}
-		u, err := m.mixedUnitFor(g, first)
+		// A low-water Run assembles a filtered copy whose messages carry
+		// their canonical index (Message.idx); the subject ID stays that.
+		id := first
+		if g.msgs[0].idx > 0 {
+			id = g.msgs[0].idx - 1
+		}
+		u, err := m.mixedUnitFor(g, id)
 		if err != nil {
 			return nil, err
 		}

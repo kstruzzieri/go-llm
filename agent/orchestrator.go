@@ -93,6 +93,43 @@ func initState(req Request) State {
 	return State{System: req.System, DurableSummary: req.HistorySummary, Messages: msgs, systemKeys: slices.Clone(req.SystemKeys)}
 }
 
+// visibleState is the assembly input of a low-water Run: st without the
+// messages hidden[i] marks, each kept message tagged with its canonical
+// index plus one (Message.idx). hidden is aligned to st.Messages and may be
+// shorter; a message past its end is visible. The other fields are st's.
+func visibleState(st State, hidden []bool) State {
+	out := st
+	out.Messages = make([]Message, 0, len(st.Messages))
+	for i, m := range st.Messages {
+		if i < len(hidden) && hidden[i] {
+			continue
+		}
+		m.idx = i + 1
+		out.Messages = append(out.Messages, m)
+	}
+	return out
+}
+
+// hideEvicted marks each Elastic message of the assembly input in that
+// assembled left out, so it stays out of the Run's later requests. Pinned
+// messages are never hidden, and no built-in assembly leaves out an
+// unresolved tool tail. hidden grows to cover n, len(State.Messages).
+func hideEvicted(hidden []bool, in, assembled State, n int) []bool {
+	kept := make(map[int]bool, len(assembled.Messages))
+	for _, m := range assembled.Messages {
+		kept[m.idx] = true
+	}
+	if len(hidden) < n {
+		hidden = append(hidden, make([]bool, n-len(hidden))...)
+	}
+	for _, m := range in.Messages {
+		if m.Segment == Elastic && !kept[m.idx] {
+			hidden[m.idx-1] = true
+		}
+	}
+	return hidden
+}
+
 func buildChatRequest(st State, specs []provider.Tool, outputReserve int, opts provider.ModelOptions, advisory *Advisory, advisoryFence promptfence.Fence) provider.ChatRequest {
 	msgs := make([]provider.ChatMessage, 0, len(st.Messages)+1)
 	if st.System != "" {
@@ -164,6 +201,9 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 	if req.Goal == "" {
 		return Result{}, fmt.Errorf("agent: empty goal")
 	}
+	if v := o.ctxMgr.CompactionLowWater; v != 0 && !(v > 0 && v < 1) {
+		return Result{}, fmt.Errorf("agent: compaction low-water %v outside (0,1)", v)
+	}
 	if err := validateHistory(req.History); err != nil {
 		return Result{}, err
 	}
@@ -233,6 +273,11 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 
 	next := 0            // first State index refreshFenceKeys has not visited
 	scanSafeThrough := 0 // messages older than a scan-limit key reset
+	// Sticky low-water eviction (CompactionLowWater): what a compacting step
+	// dropped stays out of later assemblies. Only the assembly input is
+	// filtered; fence keys and Result.Messages keep using canonical state.
+	sticky := o.ctxMgr.stickyEviction()
+	var hidden []bool // aligned to state.Messages
 	for step := 0; step < maxSteps; step++ {
 		// Rotate every live key the previous step's text exposed, then key
 		// the tool messages it appended, now that verifyBatch has finished
@@ -252,10 +297,14 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 		if limited {
 			scanSafeThrough = len(state.Messages)
 		}
+		in := state
+		if sticky {
+			in = visibleState(state, hidden)
+		}
 		manager := o.ctxMgr
 		if advisory != nil {
 			estimate := manager.estimate
-			if manager.Mixed && hasStructuredAnchor(state) {
+			if manager.Mixed && hasStructuredAnchor(in) {
 				estimate = guardedEstimate(manager.Estimate)
 			}
 			projected := renderAdvisoryLines(advisoryPlaceholderOpen, advisoryPlaceholderClose, goal, *advisory)
@@ -266,7 +315,7 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 			// Never create spare capacity from a non-monotonic estimator.
 			manager.advisoryTokens = max(0, extra)
 		}
-		assembled, pressure, atrace, err := manager.AssembleWithTrace(ctx, state, toolSchemaTokens, budget)
+		assembled, pressure, atrace, err := manager.AssembleWithTrace(ctx, in, toolSchemaTokens, budget)
 		// Emit pressure before the model call on the success path and on the
 		// exhaustion path; skip only opaque compactor failures (pressure is zero).
 		if err == nil || errors.Is(err, ErrContextExhausted) {
@@ -278,6 +327,9 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 		}
 		if err != nil {
 			return res, err
+		}
+		if sticky && pressure.Compactions > 0 {
+			hidden = hideEvicted(hidden, in, assembled, len(state.Messages))
 		}
 		if atrace.Subjects != nil {
 			n, postLimited := refreshMaterializedFenceKeys(&state, &assembled, liveAdvisory, scanSafeThrough, preRotated)
