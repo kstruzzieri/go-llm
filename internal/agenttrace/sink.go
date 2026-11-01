@@ -247,6 +247,15 @@ func (s *TelemetrySink) Finish(res agent.Result, status string) error {
 			}
 		}
 	}
+	var compactions, rotations int
+	for _, e := range res.Events {
+		switch e.Kind {
+		case "compaction":
+			compactions++
+		case "fence_rotation":
+			rotations++
+		}
+	}
 	s.record(runSpan{
 		SchemaVersion:    SchemaVersion,
 		RunID:            s.runID,
@@ -260,6 +269,8 @@ func (s *TelemetrySink) Finish(res agent.Result, status string) error {
 		MaxUsedPct:       s.maxUsedPct,
 		MaxPressureLevel: s.maxLevel.String(),
 		SecretFindings:   secretFindings,
+		Compactions:      compactions,
+		FenceRotations:   rotations,
 	})
 	return s.lastErr
 }
