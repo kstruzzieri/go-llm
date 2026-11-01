@@ -75,6 +75,13 @@ type usageLite struct {
 	Prompt     int `json:"prompt"`
 	Completion int `json:"completion"`
 	Total      int `json:"total"`
+	// Cache counters are additive within SchemaVersion 2: omitempty leaves
+	// every span from a backend that reports none byte-identical. The Reported
+	// flags keep a measured zero apart from "backend does not report".
+	Cached             int  `json:"cached,omitempty"`
+	CachedReported     bool `json:"cached_reported,omitempty"`
+	CacheWrite         int  `json:"cache_write,omitempty"`
+	CacheWriteReported bool `json:"cache_write_reported,omitempty"`
 }
 
 type pressureLite struct {

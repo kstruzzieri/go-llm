@@ -233,11 +233,23 @@ type modelEntry struct {
 // It is a pointer so absence (the server omits the block) is distinguishable
 // from a present-but-zero reasoning count; servers that don't report it leave
 // it nil and the reasoning accessor yields zero.
+//
+// PromptTokensDetails is the matching OpenAI extension for the prompt side
+// (llama-server emits it with cached_tokens). prompt_tokens already includes
+// the cached part.
 type usage struct {
 	PromptTokens            int                      `json:"prompt_tokens"`
 	CompletionTokens        int                      `json:"completion_tokens"`
 	TotalTokens             int                      `json:"total_tokens"`
 	CompletionTokensDetails *completionTokensDetails `json:"completion_tokens_details,omitempty"`
+	PromptTokensDetails     *promptTokensDetails     `json:"prompt_tokens_details,omitempty"`
+}
+
+// promptTokensDetails carries optional prompt-cache breakdowns. Each field is
+// a pointer so an omitted count is distinguishable from a measured zero.
+type promptTokensDetails struct {
+	CachedTokens     *int `json:"cached_tokens"`
+	CacheWriteTokens *int `json:"cache_write_tokens"`
 }
 
 // completionTokensDetails carries optional completion-token breakdowns.

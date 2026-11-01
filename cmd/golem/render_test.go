@@ -394,3 +394,56 @@ func TestRenderer_FinalFooter_Risk(t *testing.T) {
 		})
 	}
 }
+
+func TestFinalFooterShowsCached(t *testing.T) {
+	tests := []struct {
+		name  string
+		usage provider.Usage
+		risk  *agent.RiskReport
+		stop  agent.StopReason
+		want  string
+	}{
+		{
+			name:  "reported cached tokens",
+			usage: provider.Usage{TotalTokens: 3000, CachedPromptTokens: 1536, CachedPromptTokensReported: true},
+			want:  "done · 1 step · 2.0s · 3000 tok (1536 cached)\n",
+		},
+		{
+			name:  "reported zero is shown",
+			usage: provider.Usage{TotalTokens: 3000, CachedPromptTokensReported: true},
+			want:  "done · 1 step · 2.0s · 3000 tok (0 cached)\n",
+		},
+		{
+			name:  "unreported footer is unchanged",
+			usage: provider.Usage{TotalTokens: 3000, CachedPromptTokens: 1536},
+			want:  "done · 1 step · 2.0s · 3000 tok\n",
+		},
+		{
+			name:  "cache writes alone do not change the footer",
+			usage: provider.Usage{TotalTokens: 3000, CacheWriteTokens: 9, CacheWriteTokensReported: true},
+			want:  "done · 1 step · 2.0s · 3000 tok\n",
+		},
+		{
+			name:  "cached sits before the risk and stop suffixes",
+			usage: provider.Usage{TotalTokens: 3000, CachedPromptTokens: 1536, CachedPromptTokensReported: true},
+			risk:  &agent.RiskReport{Score: 30},
+			stop:  agent.StepCapReached,
+			want:  "done · 1 step · 2.0s · 3000 tok (1536 cached) · risk 30  stopped: step_cap_reached\n",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			r := newRenderer(&buf, false, 16, func() time.Time { return time.Unix(0, 0) }, false)
+			r.finalFooter(agent.Result{
+				Steps:      make([]agent.StepRecord, 1),
+				Usage:      tt.usage,
+				StopReason: tt.stop,
+				Risk:       tt.risk,
+			}, 2*time.Second)
+			if buf.String() != tt.want {
+				t.Errorf("footer = %q, want %q", buf.String(), tt.want)
+			}
+		})
+	}
+}

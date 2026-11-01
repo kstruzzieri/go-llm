@@ -215,14 +215,34 @@ func (p *Provider) Chat(ctx context.Context, req provider.ChatRequest) (*provide
 		Thinking:  thinking,
 		ToolCalls: toProviderToolCalls(msg.ToolCalls),
 		Done:      true,
-		Usage: provider.Usage{
+		Usage: withCacheUsage(provider.Usage{
 			PromptTokens:            resp.Usage.PromptTokens,
 			CompletionTokens:        resp.Usage.CompletionTokens,
 			TotalTokens:             resp.Usage.TotalTokens,
 			ReasoningTokens:         resp.Usage.reasoningTokens(),
 			ReasoningTokensReported: resp.Usage.reasoningTokensReported(),
-		},
+		}, resp.Usage),
 	}, nil
+}
+
+// withCacheUsage returns u with the cached and cache-write prompt-token
+// counters copied from the wire usage w. A counter the server omitted (or a
+// null prompt_tokens_details) stays zero and unreported, so a measured zero
+// remains distinguishable from a backend that does not report. PromptTokens
+// and TotalTokens are left as sent: OpenAI-shape servers, llama-server
+// included, already count cached tokens in prompt_tokens.
+func withCacheUsage(u provider.Usage, w usage) provider.Usage {
+	d := w.PromptTokensDetails
+	if d == nil {
+		return u
+	}
+	if d.CachedTokens != nil {
+		u.CachedPromptTokens, u.CachedPromptTokensReported = *d.CachedTokens, true
+	}
+	if d.CacheWriteTokens != nil {
+		u.CacheWriteTokens, u.CacheWriteTokensReported = *d.CacheWriteTokens, true
+	}
+	return u
 }
 
 // ---------------------------------------------------------------------------
@@ -314,13 +334,13 @@ func (p *Provider) ChatStream(ctx context.Context, req provider.ChatRequest, fn 
 		}
 		if chunk.Usage != nil {
 			seenUsage = true
-			lastUsage = provider.Usage{
+			lastUsage = withCacheUsage(provider.Usage{
 				PromptTokens:            chunk.Usage.PromptTokens,
 				CompletionTokens:        chunk.Usage.CompletionTokens,
 				TotalTokens:             chunk.Usage.TotalTokens,
 				ReasoningTokens:         chunk.Usage.reasoningTokens(),
 				ReasoningTokensReported: chunk.Usage.reasoningTokensReported(),
-			}
+			}, *chunk.Usage)
 		}
 		if len(chunk.Choices) == 0 {
 			continue
