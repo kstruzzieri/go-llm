@@ -49,7 +49,10 @@ generator cannot know.
   which is code-identical to the registered builder and scorer revision
   `62797e232d07804417822822aaaed65d425ee618` for the builder and scorer: the
   commits between them change only `registration.json` (the revision pins) and
-  a test file.
+  a test file. The pin covers the `cmd/llm-bench` builder and scorer only; the
+  builder drives the real Orchestrator, and `TestForgedCloseCorpusRegeneration`
+  at the shipping commit covers that agent dependency (the committed traces
+  regenerate byte-identically).
 - **Machine:** Apple M3 Max, 128 GB; llama-swap in front of llama-server on
   `127.0.0.1:8090`.
 
@@ -92,7 +95,11 @@ and is not part of the repository.
 The owner's ship gate for per-result keys includes a one-model rerun of the
 committed #452 corpus. The rerun replays the committed traces, which per-result
 keys leave byte-identical (each holds one tool result per request), so it is
-expected to reproduce #452 exactly.
+expected to reproduce #452 exactly. The replay path
+(`cmd/llm-bench/injection_replay.go`) sends each trace's frozen turns verbatim
+and never calls `agent.Run`, so the rerun exercises none of the changed code
+and cannot detect a D1 regression. It is the gate the owner chose, and it
+confirms that the byte-identical committed corpus still scores identically.
 
 - **Result:** qwen3-coder-next via llama.cpp, temperature 0: 105 captured,
   0 failed; 104/104 corpus cells scored; 88 attack cells resisted, 0 complied,
@@ -102,10 +109,10 @@ expected to reproduce #452 exactly.
   byte-identical to the qwen3-coder-next cells of #452's original local
   capture (`docs/superpowers/evidence/452/run/local.jsonl`, compared as sorted
   `[trace_id, actual_final_answer, actual_tool_calls]` rows; sha256
-  `f44b99c0...2cee` for both).
+  `f44b99c0f3a7750598d0f1b79cb974b240ba206237de274dc951542085c02cee` for both).
 - **Run:** at `71cacf81` (per-result keys), registration
   `docs/llm/traces/injection/registration.json` unchanged (digest
-  `sha256:f286121a...b357`); capture manifest digest
+  `sha256:f286121a9b4abddb86629a3ee9a326834b510814859de61a50a129d9e275b357`); capture manifest digest
   `sha256:93606a41963b2bb2e5217d894fc02461857bfda7c59892ad1ebaf1a83c3a1116`,
   created 2026-10-31T23:24:29Z.
 
@@ -125,6 +132,10 @@ go run ./cmd/llm-bench -injection-report \
 
 The report lists the other four #452 models as 0/104 scored because only the
 one rerun model was captured; that is by design of the gate, not a failure.
+
+The evidence folders `docs/superpowers/evidence/452-rerun/` and
+`docs/superpowers/evidence/452/run/` are gitignored and are not part of the
+repository.
 
 ## Generated results
 

@@ -30,7 +30,9 @@
 // requests, which keeps the bytes of earlier values stable for a provider's
 // prompt cache; it should then replace an id whose text shows up in text added
 // after the id was first shown, as agent.Run does for tool results and consult
-// advice. Never write a rendered prompt anywhere the
+// advice. Golem's project and Git snapshot renderer does not do this yet: it
+// keeps one snapshot-scoped id across requests. Never write a rendered prompt
+// anywhere the
 // untrusted values are later read back from.
 package promptfence
 
