@@ -347,10 +347,11 @@ func TestMixedLowWaterFallsBackToFullBudget(t *testing.T) {
 func TestLowWaterKeepsNewestObservation(t *testing.T) {
 	t.Run("prior history is never the kept group", func(t *testing.T) {
 		// Step 0 of a session with history and no tool chain yet. The
-		// materialized durable summary is pinned at index 0, which makes
-		// the history exchanges classify as plain Elastic; they must still
-		// not count as the newest current-run group, or the mark becomes
-		// unreachable and the step falls back to the just-enough fit.
+		// materialized durable summary is pinned at index 0, but it
+		// does not move the history boundary, so the history exchanges
+		// stay prior history. They must not count as the newest
+		// current-run group, or the mark becomes unreachable and the
+		// step falls back to the just-enough fit.
 		for _, tc := range []struct{ name, summary string }{
 			{"without a durable summary", ""},
 			{"with a durable summary", "earlier work"},

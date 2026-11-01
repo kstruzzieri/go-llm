@@ -146,13 +146,11 @@ type mixedUnit struct {
 //
 // PRECONDITION — st MUST be the PRE-materialization State (the caller-visible
 // one, with DurableSummary still a field). materializeDurableSummary prepends
-// the summary as a PINNED message at index 0, which makes firstPinnedIndex
-// return 0; priorHistoryGroup requires end < firstPinned, so every prior-history
-// exchange would then be classified as a current-run plain exchange and its
-// conversation subject ID would be shifted by one. The history lane silently
-// disappears — nothing at the call site reveals the mistake. The caller
-// materializes the summary separately and charges it as a pinned reservation
-// (#331 spec 4.1 step 1).
+// the summary as a PINNED message at index 0, which shifts every message index
+// by one: each conversation subject ID would be off by one, and the summary
+// would get a pinned unit of its own. Nothing at the call site reveals the
+// mistake. The caller materializes the summary separately and charges it as a
+// pinned reservation (#331 spec 4.1 step 1).
 func (m ContextManager) buildMixedUnits(st State) ([]*mixedUnit, error) {
 	groups := RecencyCompactor{Estimate: m.Estimate}.groups(st)
 	units := make([]*mixedUnit, 0, len(groups))

@@ -97,16 +97,16 @@ type ContextManager struct {
 	// read; when the mark needs it gone, the step falls back the same way.
 	//
 	// With the built-in assembly (a nil Compactor, a RecencyCompactor value
-	// or pointer, or Mixed) every Elastic message a compacting step drops also stays out
-	// of every later request of the same Run, so the first retained message,
-	// and the provider's cached prefix with it, holds for several steps. The
-	// dropped messages remain in State and Result.Messages. A later step's
-	// Pressure counts only what that step itself dropped, so content withheld
-	// since an earlier compaction shows in neither Evicted, Mitigation nor
-	// Level. A custom Compactor receives the fraction as
-	// TokenBudget.LowWaterFraction but nothing is hidden from it, because it
-	// may synthesize replacements for what it drops and would never see those
-	// messages again.
+	// or pointer, or Mixed) every Elastic message a compacting step drops
+	// also stays out of every later request of the same Run, so the first
+	// retained message, and the provider's cached prefix with it, holds for
+	// several steps. The dropped messages remain in State and
+	// Result.Messages. A later step's Pressure counts only what that step
+	// itself dropped, so content withheld since an earlier compaction shows
+	// in neither Evicted, Mitigation nor Level. A custom Compactor receives
+	// the fraction as TokenBudget.LowWaterFraction but nothing is hidden
+	// from it, because it may synthesize replacements for what it drops and
+	// would never see those messages again.
 	CompactionLowWater float64
 }
 

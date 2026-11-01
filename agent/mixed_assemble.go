@@ -166,10 +166,9 @@ func (m ContextManager) assembleMixed(ctx context.Context, st State, toolSchemaT
 		}, ContextAssemblyTrace{}, ErrContextExhausted
 	}
 
-	// Units come from the PRE-materialization State. materializeDurableSummary
-	// prepends a pinned message at index 0, which makes firstPinnedIndex return 0
-	// and silently reclassifies every prior-history exchange as a current-run
-	// plain one — buildMixedUnits' documented precondition.
+	// Units come from the PRE-materialization State: buildMixedUnits relies
+	// on it for subject IDs and unit boundaries, and the summary that
+	// materializeDurableSummary prepends at index 0 would shift both.
 	units, err := m.buildMixedUnits(st)
 	if err != nil {
 		if errors.Is(err, ErrContextExhausted) {
