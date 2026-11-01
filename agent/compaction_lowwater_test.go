@@ -345,6 +345,41 @@ func TestMixedLowWaterFallsBackToFullBudget(t *testing.T) {
 // would keep it out for good. Every request after a tool step must carry
 // that step's calls and results.
 func TestLowWaterKeepsNewestObservation(t *testing.T) {
+	t.Run("prior history is never the kept group", func(t *testing.T) {
+		// Step 0 of a session with history and no tool chain yet. The
+		// materialized durable summary is pinned at index 0, which makes
+		// the history exchanges classify as plain Elastic; they must still
+		// not count as the newest current-run group, or the mark becomes
+		// unreachable and the step falls back to the just-enough fit.
+		for _, tc := range []struct{ name, summary string }{
+			{"without a durable summary", ""},
+			{"with a durable summary", "earlier work"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				const h, g = 100, 10 // each history exchange is 2h, the goal g
+				st := State{DurableSummary: tc.summary, Messages: []Message{
+					history("user", strings.Repeat("a", h)), history("assistant", strings.Repeat("A", h)),
+					history("user", strings.Repeat("b", h)), history("assistant", strings.Repeat("B", h)),
+					pinned("user", strings.Repeat("G", g)),
+				}}
+				s, kept := 0, 1 // summary cost; kept messages: the goal
+				if tc.summary != "" {
+					s, kept = runeEstimator(DurableSummaryPrompt(tc.summary)), 2 // and the summary
+				}
+				// One dropped exchange fits Input exactly; the mark needs both.
+				input := s + 2*h + g
+				m := ContextManager{Estimate: runeEstimator, CompactionLowWater: 0.75}
+				out, pressure, err := m.Assemble(context.Background(), st, 0, TokenBudget{Input: input})
+				if err != nil {
+					t.Fatalf("Assemble: %v", err)
+				}
+				if pressure.Evicted != 2 || out.Messages[len(out.Messages)-1].Content != strings.Repeat("G", g) || len(out.Messages) != kept {
+					t.Errorf("evicted %d, kept %q; want both history exchanges dropped to reach the mark", pressure.Evicted, shape(out))
+				}
+			})
+		}
+	})
+
 	bulky := strings.Repeat("X", 400)
 	t.Run("legacy", func(t *testing.T) {
 		chain := chainCost(nthCall("bulky", 1), bulky)

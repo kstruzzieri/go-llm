@@ -230,12 +230,17 @@ func (rc RecencyCompactor) groups(st State) []compactionGroup {
 	return out
 }
 
-// newestCurrentRunGroup is the index of the last droppable group that is
-// not prior-session history (a completed tool chain or plain Elastic
-// group), or -1.
+// newestCurrentRunGroup is the index of the newest droppable group (a
+// completed tool chain or plain Elastic group) after the last pinned group,
+// the goal, or -1. Groups before the goal are prior-session history even
+// when a materialized durable summary, pinned at index 0, makes them
+// classify as plain Elastic.
 func newestCurrentRunGroup(groups []compactionGroup) int {
 	for i := len(groups) - 1; i >= 0; i-- {
-		if k := groups[i].kind; k == groupCompletedTool || k == groupPlainElastic {
+		switch groups[i].kind {
+		case groupPinned:
+			return -1
+		case groupCompletedTool, groupPlainElastic:
 			return i
 		}
 	}

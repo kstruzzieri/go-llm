@@ -42,10 +42,12 @@ var ErrMixedCompactor = errors.New("agent: ContextManager.Mixed is incompatible 
 // one of them a zero-cost omission while its placeholder text is model-visible
 // and paid for. The rows therefore deliberately do not sum to the total.
 //
-// Under ContextManager.CompactionLowWater a step that evicts allocates against
-// the low-water mark, not MaxTokens, so its omission reasons are judged
-// against the mark: a row can read token_budget while EstimatedTokensFree
-// exceeds its cost. The trace does not record the mark.
+// Under ContextManager.CompactionLowWater a step that evicts allocates again
+// against the low-water mark. When that pass succeeds, its omission reasons
+// are judged against the mark, not MaxTokens: a row can read token_budget
+// while EstimatedTokensFree exceeds its cost. When it falls back to the
+// full-budget allocation, they are judged against MaxTokens as usual. The
+// trace records neither the mark nor which pass it reports.
 type ContextAssemblyTrace struct {
 	MaxTokens           int
 	EstimatedTokensUsed int
