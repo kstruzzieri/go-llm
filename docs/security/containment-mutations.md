@@ -1,10 +1,10 @@
 # Containment mutation ledger (#452)
 
-Each entry proves one security property's assertions can fail. Entries are point-in-time evidence at their baseline revision. The ledger contains 78 entries: 73 guard and five effect-detection entries.
+Each entry proves one security property's assertions can fail. Entries are point-in-time evidence at their baseline revision. The ledger contains 80 entries: 75 guard and five effect-detection entries.
 
 Platform: every proof in this ledger ran on darwin (arm64, go1.27.1). After the rebase onto the model-resistance PR, the entries whose patches touch build-tagged or platform-sensitive code (M-005 to M-008, the unix path walks; M-009 and M-014 to M-018, the host exec path; M-011, the MCP stdio child environment) were re-run on Linux (arm64, go1.27.1, the Docker `ci-local` image) at their baseline: each entry's `Platform:` line records the result, and a Linux line that differs would be recorded beside the darwin evidence, never in place of it. M-010 (it needs an AgentFlow source checkout) and M-012 (Seatbelt is darwin-native) were not re-run on Linux, and no entry has run on Windows.
 
-Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-only variants added in review, M-045 B and M-047 B, at `34b2ff38`, whose production and scenario trees are identical; M-051 to M-053 at `731f2d1d`, the commit that adds them; M-054 to M-058 at `3d423ce1`, the commit that adds them; M-059 at `1166b276`, the commit that adds it): the baseline passed, the mutant failed as shown, and the tree was restored with `git checkout` and passed again. M-028 was re-recorded when tool frames moved to per-result keys: variant A on the commit that makes that change (parent `140524de`), variant B on the commit that adds the cross-Run check (parent `d75c78cb`). Each baseline passed, each mutant failed as shown, and an editor edit restored the baseline bytes, which passed again. Entries M-067 to M-071 ran on the commit that adds fence-key rotation (parent `72b6eb47`) in the same way, the restored file's sha256 matching the baseline's each time; M-072 and M-073 ran the same way on the commit that makes every exposed key rotate and matches keys through separators (parent `00912c90`), and M-074 on the commit that pins key minting before assembly (parent `caa84426`). Entries M-075 to M-078 ran the same way in an isolated `git archive` export of the commit that adds system keys (parent `3346b711`). Entries M-060 and M-061 ran in isolated exports of immutable code commit `23f0c0bbca83f0c9d6e02163dd09c4856698ddcd`: each baseline passed, its mutant failed, and restored files matched the baseline bytes and passed again. Entries M-062 and M-063 ran on this branch at `dbe5c315b40f8b973b96cf623d5cdcbe00c616fc`, the commit that adds their rules: each baseline passed, its mutant failed, and `git checkout -- <file>` restored the baseline bytes, which passed again; M-062's comparison against the previous rule ran in an isolated `git archive` export of `ac053567`. Entries M-064 to M-066 ran on the #387 branch at `72d0bedeb1d264b3da62cf812df7505a8bd7e776`, the commit that tightens PV1's probe and cites the exec and verification preview tests (M-064 and M-065 were first recorded at `b9cea9154746758026fd9bb58d467f665be5952f`, the commit that makes PV1 executable): each baseline passed, its mutant failed, and `git checkout -- <file>` restored the baseline bytes, which passed again. Entries quote test output, the containment judge's message text and line numbers included, as it read at their baseline; later wording changes do not rewrite them. Entries carried over from the PR 2 delivery record name the draft entry they were first recorded as; they were re-run here so every command, diff and line number matches one revision. Apply a patch with `git apply`, run the command, then restore with `git checkout -- <file>`. `guard` entries remove or weaken the protection the refs assert. `effect-detection` entries change the effect path of an uncontained scenario: they show its probe can read a change in outcome, not that a guard is absent. Rows exempt from this ledger (pending, out-of-scope, unobserved such as ENV-BWRAP, whose native bwrap profile needs a Linux host, and administrative META- rows; the inventory lint allows no other verified or uncontained row an exemption) carry their exempt reason in the inventory (`docs/security/containment-inventory.json`, rendered in `docs/security/containment-inventory.md`).
+Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-only variants added in review, M-045 B and M-047 B, at `34b2ff38`, whose production and scenario trees are identical; M-051 to M-053 at `731f2d1d`, the commit that adds them; M-054 to M-058 at `3d423ce1`, the commit that adds them; M-059 at `1166b276`, the commit that adds it): the baseline passed, the mutant failed as shown, and the tree was restored with `git checkout` and passed again. M-028 was re-recorded when tool frames moved to per-result keys: variant A on the commit that makes that change (parent `140524de`), variant B on the commit that adds the cross-Run check (parent `d75c78cb`). Each baseline passed, each mutant failed as shown, and an editor edit restored the baseline bytes, which passed again. Entries M-067 to M-071 ran on the commit that adds fence-key rotation (parent `72b6eb47`) in the same way, the restored file's sha256 matching the baseline's each time; M-072 and M-073 ran the same way on the commit that makes every exposed key rotate and matches keys through separators (parent `00912c90`), and M-074 on the commit that pins key minting before assembly (parent `caa84426`). Entries M-075 to M-078 ran the same way in an isolated `git archive` export of the commit that adds system keys (parent `3346b711`). M-079 and M-080 ran the same way on the commit that scans the durable summary and staged advice (parent `c17e940d`). Entries M-060 and M-061 ran in isolated exports of immutable code commit `23f0c0bbca83f0c9d6e02163dd09c4856698ddcd`: each baseline passed, its mutant failed, and restored files matched the baseline bytes and passed again. Entries M-062 and M-063 ran on this branch at `dbe5c315b40f8b973b96cf623d5cdcbe00c616fc`, the commit that adds their rules: each baseline passed, its mutant failed, and `git checkout -- <file>` restored the baseline bytes, which passed again; M-062's comparison against the previous rule ran in an isolated `git archive` export of `ac053567`. Entries M-064 to M-066 ran on the #387 branch at `72d0bedeb1d264b3da62cf812df7505a8bd7e776`, the commit that tightens PV1's probe and cites the exec and verification preview tests (M-064 and M-065 were first recorded at `b9cea9154746758026fd9bb58d467f665be5952f`, the commit that makes PV1 executable): each baseline passed, its mutant failed, and `git checkout -- <file>` restored the baseline bytes, which passed again. Entries quote test output, the containment judge's message text and line numbers included, as it read at their baseline; later wording changes do not rewrite them. Entries carried over from the PR 2 delivery record name the draft entry they were first recorded as; they were re-run here so every command, diff and line number matches one revision. Apply a patch with `git apply`, run the command, then restore with `git checkout -- <file>`. `guard` entries remove or weaken the protection the refs assert. `effect-detection` entries change the effect path of an uncontained scenario: they show its probe can read a change in outcome, not that a guard is absent. Rows exempt from this ledger (pending, out-of-scope, unobserved such as ENV-BWRAP, whose native bwrap profile needs a Linux host, and administrative META- rows; the inventory lint allows no other verified or uncontained row an exemption) carry their exempt reason in the inventory (`docs/security/containment-inventory.json`, rendered in `docs/security/containment-inventory.md`).
 
 ## M-001 — Absolute paths are rejected by the workspace path cleaner
 - Affected refs: PATH-ABS: `TestHardeningContracts/Active/Workspace/confinement_and_arguments/public_confinement/owned_absolute_sibling`, `TestWorkspaceCleanRelContainment/absolute_escape`, `TestContainment/W1`
@@ -2362,6 +2362,54 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
 - Baseline: pass (exit 0). Mutant: FAIL `TestSnapshotKeyRotatesOnExposureAndCarriesForward` (`projectcontext_trust_test.go:616: session snapshot key = [<<<GIT_CONTEXT O3QGWCAKFPWR  O3QGWCAKFPWR], want the Run's fresh key`); exit 1. Restored by an editor edit, byte-identical to the baseline file (sha256 match): pass (exit 0).
 - Kind: guard
 - Notes: Without adoption the next goal frames the snapshot under the exposed key again. A goal that replays history quoting it would rotate it once more before its first request, but a goal without history (no session, or AgentFlow) would start under a retired key, and every later goal would miss the prompt cache from the system prompt on.
+
+## M-079 — The step-0 scan reads the durable summary
+- Affected refs: FENCE-FORGED: `TestSummaryQuotingSystemKeyRotatesFirstRender`
+- Baseline: the commit that scans the durable summary and staged advice (parent `c17e940d`), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^(TestSummaryQuotingSystemKeyRotatesFirstRender|TestAdvisoryQuotingSystemKeyRotatesFirstRender)$' ./agent`
+- Patch:
+  ```diff
+  diff --git a/agent/orchestrator.go b/agent/orchestrator.go
+  --- a/agent/orchestrator.go
+  +++ b/agent/orchestrator.go
+  @@ -238,7 +238,6 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
+   		var rotated int
+   		var pinned []string
+   		if step == 0 {
+  -			pinned = append(pinned, state.DurableSummary)
+   			if advisory != nil {
+   				pinned = append(pinned, advisory.Source, advisory.Tool, advisory.Model, advisory.Digest, advisory.Content, advisory.Annotation)
+   			}
+  ```
+- Baseline: pass (exit 0). Mutant: FAIL `TestSummaryQuotingSystemKeyRotatesFirstRender` (`fencekeys_test.go:1240: Result.SystemKeys = ["65ERSOHC76WA"], want one key replacing "65ERSOHC76WA"`); `TestAdvisoryQuotingSystemKeyRotatesFirstRender` passes; exit 1. Restored by an editor edit, byte-identical to the baseline file (sha256 match): pass (exit 0).
+- Kind: guard
+- Notes: Tool and advisory keys are minted per Run, so only a system key can sit in a summary written before the Run started, for example a final answer that quoted Golem's snapshot key and was condensed after its raw turn was dropped.
+
+## M-080 — The step-0 scan reads staged advice
+- Affected refs: FENCE-FORGED: `TestAdvisoryQuotingSystemKeyRotatesFirstRender`
+- Baseline: the commit that scans the durable summary and staged advice (parent `c17e940d`), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^(TestSummaryQuotingSystemKeyRotatesFirstRender|TestAdvisoryQuotingSystemKeyRotatesFirstRender)$' ./agent`
+- Patch:
+  ```diff
+  diff --git a/agent/orchestrator.go b/agent/orchestrator.go
+  --- a/agent/orchestrator.go
+  +++ b/agent/orchestrator.go
+  @@ -239,9 +239,6 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
+   		var pinned []string
+   		if step == 0 {
+   			pinned = append(pinned, state.DurableSummary)
+  -			if advisory != nil {
+  -				pinned = append(pinned, advisory.Source, advisory.Tool, advisory.Model, advisory.Digest, advisory.Content, advisory.Annotation)
+  -			}
+   		}
+   		next, rotated = refreshFenceKeys(&state, &advisoryFence, next, pinned...)
+   		manager := o.ctxMgr
+  ```
+- Baseline: pass (exit 0). Mutant: FAIL `TestAdvisoryQuotingSystemKeyRotatesFirstRender` (`fencekeys_test.go:1264: Result.SystemKeys = ["NKMWIWAZT6EX"], want one key replacing "NKMWIWAZT6EX"`); `TestSummaryQuotingSystemKeyRotatesFirstRender` passes; exit 1. Restored by an editor edit, byte-identical to the baseline file (sha256 match): pass (exit 0).
+- Kind: guard
+- Notes: Advice is projected onto the wire copy of the goal and never enters Run state, so only this pinned text puts it in front of the scan. A consult child runs with host privileges and can read a `-trace` file that holds the system prompt, so its advice can quote the snapshot key.
 
 ## Administrative evidence
 

@@ -1370,7 +1370,7 @@
     {
       "id": "FENCE-FORGED",
       "source": "issue-452:58",
-      "requirement": "Forged and marker-looking context delimiters in tool observations stay literal bytes inside a frame keyed to that one result (exact-byte fixtures); every key whose value appears in later run text, in any letter case, spelled in escapes or split by non-key characters, is replaced by a fresh, never-retired key before the next render. That includes Golem's project and Git snapshot key in the system prompt, scanned against the replayed history too, whose replacement later goals keep.",
+      "requirement": "Forged and marker-looking context delimiters in tool observations stay literal bytes inside a frame keyed to that one result (exact-byte fixtures); every key whose value appears in later run text, in any letter case, spelled in escapes or split by non-key characters, is replaced by a fresh, never-retired key before the next render. That includes Golem's project and Git snapshot key in the system prompt, scanned against the replayed history, its summary and staged advice too, whose replacement later goals keep.",
       "status": "verified",
       "owner": "",
       "layer": "aggregate",
@@ -1450,6 +1450,18 @@
           "func": "TestHistoryQuotingSystemKeyRotatesFirstRender"
         },
         {
+          "package": "./agent",
+          "test": "TestSummaryQuotingSystemKeyRotatesFirstRender",
+          "file": "agent/fencekeys_test.go",
+          "func": "TestSummaryQuotingSystemKeyRotatesFirstRender"
+        },
+        {
+          "package": "./agent",
+          "test": "TestAdvisoryQuotingSystemKeyRotatesFirstRender",
+          "file": "agent/fencekeys_test.go",
+          "func": "TestAdvisoryQuotingSystemKeyRotatesFirstRender"
+        },
+        {
           "package": "./cmd/golem",
           "test": "TestSnapshotKeyRotatesOnExposureAndCarriesForward",
           "file": "cmd/golem/projectcontext_trust_test.go",
@@ -1473,7 +1485,9 @@
         "M-075",
         "M-076",
         "M-077",
-        "M-078"
+        "M-078",
+        "M-079",
+        "M-080"
       ],
       "artifacts": []
     },
