@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -17,10 +19,88 @@ import (
 
 func TestMain(m *testing.M) {
 	if os.Getenv("LLM_BENCH_TEST_MAIN") == "1" {
+		if to := os.Getenv("LLM_BENCH_TEST_REDIRECT"); to != "" {
+			redirectDefaultTransport(to)
+		}
 		main()
 		return
 	}
 	os.Exit(m.Run())
+}
+
+// redirectDefaultTransport makes every request sent through
+// http.DefaultTransport go to the server at rawURL instead, keeping its Host
+// header. A binary run can then name a hosted -candidate-base-url, whose host
+// decides the inferred cache affinity, while only a local fake is contacted.
+// The candidate transport falls back to http.DefaultTransport when it has no
+// client of its own (candidateHTTPClient).
+func redirectDefaultTransport(rawURL string) {
+	to, err := url.Parse(rawURL)
+	if err != nil {
+		panic(err)
+	}
+	next := http.DefaultTransport
+	http.DefaultTransport = redirectTransport{to: to, next: next}
+}
+
+type redirectTransport struct {
+	to   *url.URL
+	next http.RoundTripper
+}
+
+func (rt redirectTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	r = r.Clone(r.Context())
+	r.URL.Scheme, r.URL.Host = rt.to.Scheme, rt.to.Host
+	return rt.next.RoundTrip(r)
+}
+
+// TestMainCandidateCacheAffinityReachesRunner covers both Runner literals in
+// main: -calibrate-capture and an ordinary run each pass -cache-affinity, so
+// with opencode on a loopback server (which infers none) the session header
+// still reaches the wire.
+func TestMainCandidateCacheAffinityReachesRunner(t *testing.T) {
+	for name, mode := range map[string][]string{
+		"ordinary":          {"-scorer", "exact-match", "-judge-cache", "", "-report", "report.md"},
+		"calibrate-capture": {"-calibrate-capture", "-labels-out", "artifacts.jsonl"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var mu sync.Mutex
+			var sessions []string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				sessions = append(sessions, r.Header.Get("x-opencode-session"))
+				mu.Unlock()
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"id":"c","model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"smoke-ok"},"finish_reason":"stop"}],` +
+					`"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+			}))
+			defer srv.Close()
+			dir := t.TempDir()
+			args := []string{"-traces", "testdata/smoke/minimal.json", "-models", "openai-compat/fake", "-candidate-base-url", srv.URL,
+				"-cache-affinity", "opencode", "-candidate-session-id", "llmb-runner"}
+			for _, a := range mode {
+				if strings.HasSuffix(a, ".md") || strings.HasSuffix(a, ".jsonl") {
+					a = filepath.Join(dir, a) // output paths land in the test's temp dir
+				}
+				args = append(args, a)
+			}
+			cmd := exec.Command(os.Args[0], args...)
+			cmd.Env = append(os.Environ(), "LLM_BENCH_TEST_MAIN=1")
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("llm-bench %s failed: %v\n%s", name, err, out)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if len(sessions) == 0 {
+				t.Fatal("the candidate server saw no request")
+			}
+			for i, s := range sessions {
+				if s != "llmb-runner" {
+					t.Errorf("request %d x-opencode-session = %q, want %q", i, s, "llmb-runner")
+				}
+			}
+		})
+	}
 }
 
 func TestMainManualScorerUsesLabelsFlag(t *testing.T) {

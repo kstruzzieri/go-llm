@@ -18,7 +18,9 @@ import (
 
 // TestCacheAffinityResolution pins how a client picks its mode: the base URL's
 // host when no explicit mode is given, the explicit mode otherwise. A host
-// matches only exactly or as a subdomain, so a look-alike never earns a key.
+// matches only exactly or as a subdomain, so a look-alike never earns a key,
+// and only over https, so the raw OpenCode thread id never goes out in
+// cleartext by inference.
 func TestCacheAffinityResolution(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -45,6 +47,14 @@ func TestCacheAffinityResolution(t *testing.T) {
 		{name: "explicit empty infers", baseURL: "https://api.openai.com", opts: []ClientOption{WithCacheAffinity("")}, want: "openai"},
 		{name: "unknown explicit sends nothing", baseURL: "https://api.openai.com", opts: []ClientOption{WithCacheAffinity("bogus")}, want: "none"},
 		{name: "explicit opencode on loopback", baseURL: "http://127.0.0.1:8090", opts: []ClientOption{WithCacheAffinity("opencode")}, want: "opencode"},
+		{name: "one trailing dot is the same host", baseURL: "https://api.openai.com./v1", want: "openai"},
+		{name: "one trailing dot on opencode", baseURL: "https://opencode.ai./zen/go", want: "opencode"},
+		{name: "two trailing dots", baseURL: "https://api.openai.com../v1", want: "none"},
+		{name: "listed host as userinfo", baseURL: "https://api.openai.com@evil.example", want: "none"},
+		{name: "cleartext opencode infers none", baseURL: "http://opencode.ai/zen/go", want: "none"},
+		{name: "cleartext openai infers none", baseURL: "http://api.openai.com/v1", want: "none"},
+		{name: "cleartext openrouter infers none", baseURL: "http://openrouter.ai/api", want: "none"},
+		{name: "explicit opencode wins over cleartext", baseURL: "http://opencode.ai/zen/go", opts: []ClientOption{WithCacheAffinity("opencode")}, want: "opencode"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

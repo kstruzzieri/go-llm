@@ -163,7 +163,7 @@ golem -root /path/to/project -ollama-url http://gpu-server:11434
 
 **Privacy: what a request says about its thread.** Golem sends each hosted
 provider the prompt-cache key it documents, chosen by the provider's `base_url`
-host ([Cache affinity](backends.md#cache-affinity)). OpenAI gets a
+host when that URL is `https` ([Cache affinity](backends.md#cache-affinity)). OpenAI gets a
 `prompt_cache_key` and OpenRouter an `x-session-id`; each is an HMAC of the
 thread id under a random secret minted per process, so it changes when Golem
 restarts and is not the thread id. OpenCode gets the raw thread id as

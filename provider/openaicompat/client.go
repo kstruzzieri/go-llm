@@ -201,24 +201,26 @@ func WithCacheAffinity(mode string) ClientOption {
 }
 
 // cacheAffinityHosts maps each host that documents a session cache key to its
-// mode. A base URL matches the host itself or any subdomain of it.
+// mode. An https base URL matches the host itself or any subdomain of it.
 var cacheAffinityHosts = []struct{ host, mode string }{
 	{"api.openai.com", "openai"},
 	{"openrouter.ai", "openrouter"},
 	{"opencode.ai", "opencode"},
 }
 
-// InferCacheAffinity returns the cache affinity mode for baseURL's host:
-// "openai" for api.openai.com, "openrouter" for openrouter.ai, "opencode" for
-// opencode.ai — each also matching its subdomains, case-insensitively, with
-// scheme, port, and path ignored — and "none" for any other host or an
-// unparseable URL, so a host that documents no key is sent none.
+// InferCacheAffinity returns the cache affinity mode for an https baseURL's
+// host: "openai" for api.openai.com, "openrouter" for openrouter.ai,
+// "opencode" for opencode.ai — each also matching its subdomains,
+// case-insensitively, with one trailing dot, the port, and the path ignored.
+// It returns "none" for any other host, a non-https URL (so the raw OpenCode
+// session id is never sent in cleartext by inference), or an unparseable URL,
+// so a host that documents no key is sent none.
 func InferCacheAffinity(baseURL string) string {
 	u, err := url.Parse(baseURL)
-	if err != nil {
+	if err != nil || u.Scheme != "https" { // url.Parse lowercases the scheme
 		return "none"
 	}
-	host := strings.ToLower(u.Hostname())
+	host := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
 	for _, h := range cacheAffinityHosts {
 		if host == h.host || strings.HasSuffix(host, "."+h.host) {
 			return h.mode

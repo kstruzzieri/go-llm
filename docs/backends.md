@@ -172,7 +172,9 @@ A hosted provider reuses a cached prompt prefix more reliably when each request
 says which conversation it belongs to. go-llm sends each `openai-compat`
 provider the session key that provider documents, and nothing to a host that
 documents none. By default the mode comes from the `base_url` host (the host
-itself or any subdomain of it):
+itself or any subdomain of it, ignoring one trailing dot), and only for an
+`https` URL: an `http` URL to any of these hosts infers `none`, so the raw
+OpenCode session id never goes out in cleartext unless you ask for it.
 
 | Host | Mode | What a request with a session id sends |
 |------|------|-----------------------------------------|
@@ -190,8 +192,9 @@ A request without a session id sends nothing in any mode.
 
 Set `cache_affinity` on a provider to override the host: `"none"` sends
 nothing, and `"openai"`, `"openrouter"` or `"opencode"` use that mode on any
-host, for a gateway that documents one of those keys. Any other value fails the
-config load.
+host and scheme, for a gateway that documents one of those keys. Any other
+value, or any value on a provider whose `api_format` is not `openai-compat`,
+fails the config load.
 
 ```json
 "gateway": { "base_url": "https://llm-gateway.example.com", "api_format": "openai-compat", "api_key": "${GATEWAY_API_KEY}", "cache_affinity": "openai" }
