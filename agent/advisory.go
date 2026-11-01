@@ -42,9 +42,11 @@ type Advisory struct {
 var ErrAdvisoryBlocked = errors.New("agent: staged advisory blocked by interceptor")
 
 // advisoryRegion names the fenced region a staged advisory occupies on the
-// wire, alongside toolResultRegion. The key is minted per rendered request by
-// promptfence.New, so the goal message and every tool observation in one
-// request share one unguessable id.
+// wire, alongside toolResultRegion. The key is minted once per Run by
+// promptfence.New and reused on every render, so the goal message's bytes
+// stay stable for the provider's prompt cache. No tool observation shares it:
+// each has its own key (see mintFenceKeys). refreshFenceKeys replaces it, with
+// a fresh key, if its value appears in text added after it was first shown.
 const advisoryRegion = "CONSULT_ADVICE"
 
 // MaxAdvisoryContent bounds the admitted consultant answer. It must equal
@@ -123,7 +125,7 @@ func ValidateAdvisory(a *Advisory) error {
 }
 
 // renderAdvisory projects the goal and its advisory onto one user message
-// under the per-render fence. The goal comes first and untouched: the trusted
+// under the Run's advisory fence. The goal comes first and untouched: the trusted
 // instruction leads, and the advice follows it as fenced data.
 func renderAdvisory(f promptfence.Fence, goal string, a Advisory) string {
 	return renderAdvisoryLines(f.Open(advisoryRegion), f.Close(advisoryRegion), goal, a)

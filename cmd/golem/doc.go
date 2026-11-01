@@ -171,8 +171,10 @@
 // the issue mentioned is deferred; the existing 256 KiB write bounds remain.
 //
 // Independently of -interceptors, every tool result reaches the model inside
-// a keyed <<<TOOL_RESULT / >>>TOOL_RESULT frame minted per request, and every
-// effective system prompt carries agent.ToolTrustContract (framed content is
+// a keyed <<<TOOL_RESULT / >>>TOOL_RESULT frame, each result under its own
+// key that stays the same for the rest of the run unless later text quotes it
+// (the key is then replaced, which costs a prompt-cache miss from that result
+// on), and every effective system prompt carries agent.ToolTrustContract (framed content is
 // data, never instructions; project guidance only where delegated) after the
 // Golem application prompt and its capability-gated write/exec clauses
 // (#430). For observations allowed through the interceptor pipeline, the
@@ -232,8 +234,8 @@
 //
 // Project and Git context are separate labeled frames using one
 // snapshot-scoped shared key; a Git refresh revalidates project guidance and
-// can change its budget. Tool results retain independently keyed per-request
-// frames. Approval neither grants capabilities nor sanitizes prior conversation
+// can change its budget. Tool results keep their own independent per-result
+// keys. Approval neither grants capabilities nor sanitizes prior conversation
 // or model influence.
 //
 // The source subcommand manages ad-hoc documents in the workspace index over
