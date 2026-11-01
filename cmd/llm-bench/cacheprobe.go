@@ -230,15 +230,17 @@ func (c *probeCaller) Chat(ctx context.Context, req provider.ChatRequest, _ func
 // session id are random per invocation).
 //
 // Out of its reach: Golem's cross-turn compression (golem/session.go) and mixed
-// assembly. A run whose compaction contradicts sc is an error.
-func runCacheProbe(ctx context.Context, real agent.ModelCaller, fixtureDir string, sc probeScenario) ([]probeRow, error) {
+// assembly. A run whose compaction contradicts sc is an error. It also returns
+// the run's fence rotations: each re-frames an earlier tool result, so the
+// prompt cache misses from that request on.
+func runCacheProbe(ctx context.Context, real agent.ModelCaller, fixtureDir string, sc probeScenario) ([]probeRow, int, error) {
 	ceiling, err := probeCeiling(sc)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	files, err := loadProbeFixtures(fixtureDir)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	sessionID := "probe-" + rand.Text()
 	pc := &probeCaller{real: real, sc: sc}
@@ -249,7 +251,7 @@ func runCacheProbe(ctx context.Context, real agent.ModelCaller, fixtureDir strin
 	system := golem.SystemPrompt(false, false)
 
 	var history []provider.ChatMessage
-	compactions := 0
+	compactions, rotations := 0, 0
 	for turn := 1; turn <= 1+probeFollowUps; turn++ {
 		goal := "Read f1.txt through f8.txt one at a time, then summarize them."
 		reads := probeReads
@@ -263,27 +265,33 @@ func runCacheProbe(ctx context.Context, real agent.ModelCaller, fixtureDir strin
 			MaxSteps: probeMaxSteps, Budget: agent.Budget{InputCeiling: ceiling}, SessionID: sessionID,
 		}, nil)
 		if err != nil {
-			return nil, fmt.Errorf("cache probe: turn %d: %w", turn, err)
+			return nil, 0, fmt.Errorf("cache probe: turn %d: %w", turn, err)
 		}
 		if res.StopReason != agent.Completed || pc.step != reads+1 {
-			return nil, fmt.Errorf("cache probe: turn %d stopped (%s) after %d request(s), want %d", turn, res.StopReason, pc.step, reads+1)
+			return nil, 0, fmt.Errorf("cache probe: turn %d stopped (%s) after %d request(s), want %d", turn, res.StopReason, pc.step, reads+1)
 		}
 		for _, s := range res.Steps {
 			compactions += s.Pressure.Compactions
+		}
+		for _, e := range res.Events {
+			if e.Kind == "fence_rotation" {
+				rotations++
+			}
 		}
 		history = append(history,
 			provider.ChatMessage{Role: "user", Content: goal},
 			provider.ChatMessage{Role: "assistant", Content: answer})
 	}
 	if err := checkProbeCompaction(sc, compactions); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	return pc.rows, nil
+	return pc.rows, rotations, nil
 }
 
-// writeProbeTable writes rows as a markdown table. The Cached column is the
-// ground truth; the prefix ratio is labeled a serialization proxy.
-func writeProbeTable(w io.Writer, rows []probeRow) error {
+// writeProbeTable writes rows as a markdown table, then the run's fence
+// rotation count. The Cached column is the ground truth; the prefix ratio is
+// labeled a serialization proxy.
+func writeProbeTable(w io.Writer, rows []probeRow, rotations int) error {
 	scenario := ""
 	if len(rows) > 0 {
 		scenario = string(rows[0].Scenario)
@@ -301,6 +309,7 @@ func writeProbeTable(w io.Writer, rows []probeRow) error {
 		}
 		_, _ = fmt.Fprintf(&b, "| %d | %d | %d | %s | %.3f |\n", r.Turn, r.Step, r.PromptTokens, cached, r.PrefixRatio)
 	}
+	_, _ = fmt.Fprintf(&b, "\nFence rotations: %d. A rotation re-frames an earlier tool result, so the prompt cache misses from that request on.\n", rotations)
 	_, err := io.WriteString(w, b.String())
 	return err
 }
@@ -398,7 +407,7 @@ func runCacheProbeMode(ctx context.Context, opts cacheProbeOptions, stderr io.Wr
 		return fmt.Errorf("stat -cache-probe-out: %w", err)
 	}
 
-	rows, err := runCacheProbe(ctx, real, opts.FixtureDir, sc)
+	rows, rotations, err := runCacheProbe(ctx, real, opts.FixtureDir, sc)
 	if err != nil {
 		return err
 	}
@@ -408,7 +417,7 @@ func runCacheProbeMode(ctx context.Context, opts cacheProbeOptions, stderr io.Wr
 			return fmt.Errorf("truncate -cache-probe-out: %w", err)
 		}
 	}
-	if err := writeProbeTable(probe, rows); err != nil {
+	if err := writeProbeTable(probe, rows, rotations); err != nil {
 		return fmt.Errorf("write -cache-probe-out: %w", err)
 	}
 	if err := probe.Close(); err != nil {

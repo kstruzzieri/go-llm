@@ -117,7 +117,7 @@ func (c *forwardRecorder) Chat(ctx context.Context, req provider.ChatRequest, on
 
 func runProbe(t *testing.T, ps *probeServer, sc probeScenario) []probeRow {
 	t.Helper()
-	rows, err := runCacheProbe(t.Context(), ps.caller(t), cacheProbeFixtures, sc)
+	rows, _, err := runCacheProbe(t.Context(), ps.caller(t), cacheProbeFixtures, sc)
 	if err != nil {
 		t.Fatalf("runCacheProbe(%s): %v", sc, err)
 	}
@@ -172,7 +172,7 @@ func TestCacheProbeUnreportedCounters(t *testing.T) {
 	ps.mu.Unlock()
 	rows := runProbe(t, ps, probeUncompacted)
 	var b strings.Builder
-	if err := writeProbeTable(&b, rows); err != nil {
+	if err := writeProbeTable(&b, rows, 0); err != nil {
 		t.Fatal(err)
 	}
 	for i, r := range rows {
@@ -216,7 +216,7 @@ func TestCacheProbePressureCompacts(t *testing.T) {
 	// A pressure run that never compacted would be mislabeled, so
 	// runCacheProbe errors on it: a nil error proves compaction ran.
 	pressure := &forwardRecorder{next: ps.caller(t)}
-	rows, err := runCacheProbe(t.Context(), pressure, cacheProbeFixtures, probePressure)
+	rows, _, err := runCacheProbe(t.Context(), pressure, cacheProbeFixtures, probePressure)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -235,7 +235,7 @@ func TestCacheProbePressureCompacts(t *testing.T) {
 	// Compaction must reach the wire, not just the step counter: turn 1's last
 	// request (the 9th) carries fewer messages under pressure than uncompacted.
 	whole := &forwardRecorder{next: ps.caller(t)}
-	if _, err := runCacheProbe(t.Context(), whole, cacheProbeFixtures, probeUncompacted); err != nil {
+	if _, _, err := runCacheProbe(t.Context(), whole, cacheProbeFixtures, probeUncompacted); err != nil {
 		t.Fatal(err)
 	}
 	if got, ref := len(pressure.reqs[8].Messages), len(whole.reqs[8].Messages); got >= ref {
@@ -271,7 +271,7 @@ func TestCheckProbeCompaction(t *testing.T) {
 func TestCacheProbeSessionIDStable(t *testing.T) {
 	ps := newProbeServer(t)
 	cc := &forwardRecorder{next: ps.caller(t)}
-	if _, err := runCacheProbe(t.Context(), cc, cacheProbeFixtures, probeUncompacted); err != nil {
+	if _, _, err := runCacheProbe(t.Context(), cc, cacheProbeFixtures, probeUncompacted); err != nil {
 		t.Fatal(err)
 	}
 	if len(cc.reqs) != 12 {
@@ -297,7 +297,7 @@ func TestCacheProbeSessionIDStable(t *testing.T) {
 
 	// A second invocation must get its own id, or two probes would share a cache slot.
 	cc2 := &forwardRecorder{next: ps.caller(t)}
-	if _, err := runCacheProbe(t.Context(), cc2, cacheProbeFixtures, probeUncompacted); err != nil {
+	if _, _, err := runCacheProbe(t.Context(), cc2, cacheProbeFixtures, probeUncompacted); err != nil {
 		t.Fatal(err)
 	}
 	if cc2.reqs[0].SessionID == first {
@@ -312,7 +312,7 @@ func TestCacheProbeSessionIDStable(t *testing.T) {
 func TestCacheProbePrefixRatioIsMessagesOnly(t *testing.T) {
 	ps := newProbeServer(t)
 	fr := &forwardRecorder{next: ps.caller(t)}
-	rows, err := runCacheProbe(t.Context(), fr, cacheProbeFixtures, probeUncompacted)
+	rows, _, err := runCacheProbe(t.Context(), fr, cacheProbeFixtures, probeUncompacted)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -343,7 +343,7 @@ func TestCacheProbePrefixRatioIsMessagesOnly(t *testing.T) {
 func TestCacheProbeSendsSystemPromptAndHistory(t *testing.T) {
 	ps := newProbeServer(t)
 	fr := &forwardRecorder{next: ps.caller(t)}
-	if _, err := runCacheProbe(t.Context(), fr, cacheProbeFixtures, probeUncompacted); err != nil {
+	if _, _, err := runCacheProbe(t.Context(), fr, cacheProbeFixtures, probeUncompacted); err != nil {
 		t.Fatal(err)
 	}
 	if len(fr.reqs) != 12 {
@@ -402,7 +402,7 @@ func TestCacheProbeRejectsBadInput(t *testing.T) {
 		{"missing fixture dir", filepath.Join(t.TempDir(), "none"), probeUncompacted, "f1.txt"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := runCacheProbe(t.Context(), ps.caller(t), tc.dir, tc.sc)
+			_, _, err := runCacheProbe(t.Context(), ps.caller(t), tc.dir, tc.sc)
 			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 				t.Errorf("error = %v, want it to contain %q", err, tc.wantErr)
 			}
@@ -435,7 +435,7 @@ func TestCacheProbeChatFailureWrapsOnce(t *testing.T) {
 	ps := newProbeServer(t)
 	boom := fmt.Errorf("server went away")
 	fc := &failingCaller{next: ps.caller(t), n: 3, err: boom}
-	_, err := runCacheProbe(t.Context(), fc, cacheProbeFixtures, probeUncompacted)
+	_, _, err := runCacheProbe(t.Context(), fc, cacheProbeFixtures, probeUncompacted)
 	if err == nil {
 		t.Fatal("runCacheProbe succeeded despite a failed request")
 	}
@@ -458,8 +458,13 @@ func TestWriteProbeTable(t *testing.T) {
 		{Scenario: probePressure, Turn: 2, Step: 1, PromptTokens: 900, CachedReported: false, PrefixRatio: 0.25},
 	}
 	var b strings.Builder
-	if err := writeProbeTable(&b, rows); err != nil {
+	if err := writeProbeTable(&b, rows, 2); err != nil {
 		t.Fatal(err)
+	}
+	const tail = "| 2 | 1 | 900 | n/a | 0.250 |\n\n" +
+		"Fence rotations: 2. A rotation re-frames an earlier tool result, so the prompt cache misses from that request on.\n"
+	if !strings.HasSuffix(b.String(), tail) {
+		t.Errorf("table does not end with the rotation line %q:\n%s", tail, b.String())
 	}
 	for _, want := range []string{
 		"scenario pressure",
@@ -601,6 +606,11 @@ func TestRunCacheProbeModeWritesTable(t *testing.T) {
 			}
 			if rows := strings.Count(got, "\n| ") - 1; rows != 12 { // minus the header row
 				t.Errorf("table has %d data rows, want 12:\n%s", rows, got)
+			}
+			// Nothing in the scripted session quotes a fence key, so no key rotates.
+			const zero = "|\n\nFence rotations: 0. A rotation re-frames an earlier tool result, so the prompt cache misses from that request on.\n"
+			if !strings.HasSuffix(got, zero) {
+				t.Errorf("table does not end with %q:\n%s", zero, got)
 			}
 		})
 	}
