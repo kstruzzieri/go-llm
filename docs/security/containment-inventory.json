@@ -1427,6 +1427,12 @@
         },
         {
           "package": "./agent",
+          "test": "TestKeysMintedBeforeAssemblyUnderDroppingCompaction",
+          "file": "agent/fencekeys_test.go",
+          "func": "TestKeysMintedBeforeAssemblyUnderDroppingCompaction"
+        },
+        {
+          "package": "./agent",
           "test": "TestRotationScansEveryReplayedField",
           "file": "agent/fencekeys_test.go",
           "func": "TestRotationScansEveryReplayedField"
@@ -1444,7 +1450,8 @@
         "M-070",
         "M-071",
         "M-072",
-        "M-073"
+        "M-073",
+        "M-074"
       ],
       "artifacts": []
     },

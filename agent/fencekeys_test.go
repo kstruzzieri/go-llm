@@ -792,6 +792,115 @@ func TestOneTextExposingTwoKeysRotatesBoth(t *testing.T) {
 	}
 }
 
+// TestRetiredKeyReexposureDoesNotRotate: once tool message 1 has rotated off
+// K1, K1 is no frame's key, so quoting it again changes nothing. The model's
+// reply and the first plant quote K1 in the same step, and a later plant
+// quotes it again.
+func TestRetiredKeyReexposureDoesNotRotate(t *testing.T) {
+	var k1 string
+	mc := &wireCaller{responses: []ModelResult{
+		toolCallResponse(call("1", "echo", `{"n":1}`)),
+		{}, // replaced: quotes K1 and calls the plant
+		toolCallResponse(call("3", "plant", `{"n":3}`)),
+		{Response: provider.ChatResponse{Content: "done", Done: true}},
+	}}
+	mc.answer = func(k int, req provider.ChatRequest, r *ModelResult) {
+		if k == 1 {
+			if tms := toolMessagesOf(req); len(tms) > 0 {
+				k1 = frameKeyIn(tms[0].Content)
+			}
+			*r = ModelResult{Response: provider.ChatResponse{Content: "noting " + k1, ToolCalls: []provider.ToolCall{call("2", "plant", `{"n":2}`)}}}
+		}
+	}
+	plant := plantTool{name: "plant", plant: func() string { return plantText(k1) }}
+	res, err := newTestOrchestrator(mc).Run(context.Background(), Request{Goal: "q", Tools: []Tool{echoTool{name: "echo"}, plant}}, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if k1 == "" || len(mc.requests) != 4 {
+		t.Fatalf("key %q, requests %d: want a key and 4 requests", k1, len(mc.requests))
+	}
+	reqs := mc.requests
+	k2 := firstToolKey(t, reqs[2])
+	if k2 == k1 {
+		t.Fatalf("request 2 carries K1 %q but did not rotate tool message 1", k1)
+	}
+	if n := strings.Count(wireText(reqs[3]), plantText(k1)); n != 2 {
+		t.Fatalf("request 3 carries the K1 plant %d times, want 2 (both plants)", n)
+	}
+	if got := firstToolKey(t, reqs[3]); got != k2 {
+		t.Errorf("request 3 re-keyed tool message 1 from %q to %q on a retired key's re-exposure", k2, got)
+	}
+	if n := rotationEvents(res); n != 1 {
+		t.Errorf("fence_rotation events = %d, want 1: re-exposing a retired key rotates nothing", n)
+	}
+	assertNoFrameKeyInText(t, reqs)
+}
+
+// TestKeysMintedBeforeAssemblyUnderDroppingCompaction: a RecencyCompactor
+// that drops a group returns copies of the messages it keeps, so a tool
+// message keyed after assembly would reach that render unkeyed and take a
+// per-render fallback key. Every step here drops history, and each step's
+// two results must carry their own key from the first request on.
+func TestKeysMintedBeforeAssemblyUnderDroppingCompaction(t *testing.T) {
+	var history []provider.ChatMessage
+	for i := range 100 {
+		history = append(history,
+			provider.ChatMessage{Role: "user", Content: fmt.Sprintf("earlier question %03d %s", i, strings.Repeat("q", 20))},
+			provider.ChatMessage{Role: "assistant", Content: fmt.Sprintf("earlier answer %03d %s", i, strings.Repeat("a", 20))})
+	}
+	batch := func(n int) ModelResult {
+		return toolCallResponse(
+			call(fmt.Sprintf("%d-a", n), "echo", fmt.Sprintf(`{"n":%d,"i":1}`, n)),
+			call(fmt.Sprintf("%d-b", n), "echo", fmt.Sprintf(`{"n":%d,"i":2}`, n)))
+	}
+	mc := &wireCaller{responses: []ModelResult{
+		batch(1), batch(2), batch(3),
+		{Response: provider.ChatResponse{Content: "done", Done: true}},
+	}}
+	res, err := newTestOrchestrator(mc).Run(context.Background(), Request{Goal: "q", History: history,
+		Tools: []Tool{echoTool{name: "echo"}}, Budget: Budget{InputCeiling: 5000}}, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(mc.requests) != 4 {
+		t.Fatalf("requests = %d, want 4", len(mc.requests))
+	}
+	// Precondition: each step that first renders new results dropped a group,
+	// so its assembly returned copies rather than State's own backing array.
+	compacted := map[int]bool{}
+	for _, e := range res.Events {
+		if e.Kind == "compaction" {
+			compacted[e.Step] = true
+		}
+	}
+	for step := 1; step <= 3; step++ {
+		if !compacted[step] {
+			t.Fatalf("step %d did not compact (events %v); each step that renders new results must drop a group", step, res.Events)
+		}
+	}
+	if n := len(toolMessagesOf(mc.requests[3])); n != 6 {
+		t.Fatalf("request 3 retains %d tool results, want all 6: only history may be dropped", n)
+	}
+	first := map[string]string{} // tool call ID -> key at its first render
+	for k, req := range mc.requests {
+		inRequest := map[string]string{} // key -> tool call ID
+		for _, m := range toolMessagesOf(req) {
+			key := extractToolFrameKey(t, m.Content)
+			// containment: FENCE-FORGED
+			if other, dup := inRequest[key]; dup {
+				t.Errorf("request %d frames results %s and %s under one key %q", k, other, m.ToolCallID, key)
+			}
+			inRequest[key] = m.ToolCallID
+			if was, ok := first[m.ToolCallID]; !ok {
+				first[m.ToolCallID] = key
+			} else if was != key {
+				t.Errorf("request %d re-keyed result %s to %q; its first render used %q", k, m.ToolCallID, key, was)
+			}
+		}
+	}
+}
+
 // TestNoFalseRotation: ordinary content, including a long run of base32
 // key-shaped tokens that are not live keys, rotates nothing.
 func TestNoFalseRotation(t *testing.T) {
