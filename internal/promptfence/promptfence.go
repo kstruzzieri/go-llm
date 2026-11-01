@@ -20,8 +20,18 @@
 // lets a verifier match a model's quote against the original chunk, so defanging
 // and quote verification are not independent choices.
 //
-// A fence is only unguessable while the attacker cannot observe it. Build one per
-// rendered prompt, and never write a rendered prompt anywhere the untrusted values
+// A fence is only unguessable while the attacker cannot observe it. The rule is
+// one id per framed value: mint the id only after the value's bytes are final,
+// so the value cannot contain an id that did not exist yet, and never reuse an
+// id for a different value, or for text fixed after the id was first shown. A
+// renderer whose values are new on every prompt, such as retrieval, builds one
+// fence per rendered prompt. A renderer that replays the same values on every
+// request may keep each value's id across requests, which keeps the bytes of
+// earlier values stable for a provider's prompt cache; it should then replace
+// an id whose text shows up in text added after the id was first shown, as
+// agent.Run does for tool results and consult advice. Golem's project and Git
+// snapshot renderer does not do this yet: it keeps one snapshot-scoped id
+// across requests. Never write a rendered prompt anywhere the untrusted values
 // are later read back from.
 package promptfence
 
@@ -33,16 +43,20 @@ import "crypto/rand"
 // lead where extra length is only prompt tokens.
 const idLen = 12
 
-// Fence renders the markers for one prompt, keyed to a single unguessable id.
+// Fence renders the markers for one framed value, or for the values of one
+// rendered prompt, keyed to a single unguessable id.
 type Fence struct {
 	id string
 }
 
-// New returns a Fence with a fresh id. Call it once per rendered prompt: reusing
-// an id across renders gives an attacker who saw one prompt the marker for the
-// next. rand.Text panics rather than returning a weak value if the system entropy
-// source fails, which is the correct outcome here -- a guessable fence is not a
-// degraded fence, it is no fence.
+// New returns a Fence with a fresh id. Call it once per framed value, after the
+// value's bytes (and any alternative renderings of it) are fixed. A renderer
+// that shows new values on every prompt, as the RAG renderers do, calls it once
+// per rendered prompt. Never reuse an id for different content: an attacker who
+// saw the id framing one value would hold the marker for the next. rand.Text
+// panics rather than returning a weak value if the system entropy source fails,
+// which is the correct outcome here -- a guessable fence is not a degraded
+// fence, it is no fence.
 func New() Fence {
 	text := rand.Text()
 	if len(text) > idLen {

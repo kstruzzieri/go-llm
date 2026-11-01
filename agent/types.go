@@ -5,6 +5,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/kstruzzieri/go-llm/internal/promptfence"
 	"github.com/kstruzzieri/go-llm/provider"
 )
 
@@ -135,6 +136,12 @@ type Message struct {
 	// failure — all three return before prepareCall normalizes).
 	Context   *ContextSet `json:"-"`
 	OutputCap int         `json:"-"`
+	// fence is the key a role "tool" message is framed under on the wire
+	// (#430), minted once by mintFenceKeys and reused on every later render
+	// so earlier request bytes never change. Runtime-only: unexported, so it
+	// is never serialized and is not readable outside the package except by
+	// reflection. Zero means unkeyed.
+	fence promptfence.Fence
 }
 
 // State is the canonical transcript the Orchestrator owns.
@@ -222,7 +229,7 @@ type StepRecord struct {
 // EventRecord is a lightweight ordered log entry for replay/eval.
 type EventRecord struct {
 	Step int
-	Kind string // "token" | "step" | "tool_call" | "tool_result" | "compaction" | "blocked" | "stop"
+	Kind string // "token" | "step" | "tool_call" | "tool_result" | "compaction" | "fence_rotation" | "fence_scan_limit" | "blocked" | "stop"
 }
 
 // ToolCallRecord captures one dispatched tool call and its outcome.

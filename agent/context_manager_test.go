@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/kstruzzieri/go-llm/internal/promptfence"
 	"github.com/kstruzzieri/go-llm/provider"
 )
 
@@ -80,7 +81,7 @@ func TestAssembleIncludesDurableSummaryBeforeRawMessages(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Assemble: %v", err)
 	}
-	req := buildChatRequest(out, nil, 0, provider.ModelOptions{}, nil)
+	req := buildChatRequest(out, nil, 0, provider.ModelOptions{}, nil, promptfence.Fence{})
 	if len(req.Messages) < 4 {
 		t.Fatalf("messages = %+v, want system, durable summary, recent, goal", req.Messages)
 	}

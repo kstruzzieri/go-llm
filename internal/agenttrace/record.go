@@ -19,9 +19,9 @@ const SchemaVersion = 2
 // System is the caller's application-prompt projection. Golem omits its
 // CLI-owned canary fragment from this field while preserving the other typed
 // composition inputs. agent.Run appends agent.ToolTrustContract and interceptor
-// addenda, and frames every tool observation under a per-render key (#430), so
-// replaying through Run reproduces those prompt and framing rules rather than
-// reading their generated values here.
+// addenda, and frames every tool observation under its own generated key
+// (#430), so replaying through Run reproduces those prompt and framing rules
+// rather than reading their generated values here.
 type TraceMeta struct {
 	Goal           string
 	System         string

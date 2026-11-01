@@ -78,9 +78,9 @@ func TestMemoryRecallSignedStoreProviderFences(t *testing.T) {
 			if len(mc.requests) != 3 {
 				t.Fatalf("requests = %d", len(mc.requests))
 			}
-			previous := ""
+			keys := map[string]string{} // tool call id -> frame ID, across requests
 			for step, req := range mc.requests[1:] {
-				id, count := "", 0
+				seen, count := map[string]bool{}, 0
 				for _, m := range req.Messages {
 					if m.Role == "tool" {
 						first, _, _ := strings.Cut(m.Content, "\n")
@@ -88,11 +88,15 @@ func TestMemoryRecallSignedStoreProviderFences(t *testing.T) {
 						if len(fields) != 6 || len(fields[1]) != 12 {
 							t.Fatalf("bad frame: %q", m.Content)
 						}
-						if id == "" {
-							id = fields[1]
-						} else if fields[1] != id {
-							t.Fatal("different IDs within request")
+						id := fields[1]
+						if seen[id] {
+							t.Fatal("two observations share one ID within a request")
 						}
+						seen[id] = true
+						if prev, ok := keys[m.ToolCallID]; ok && prev != id {
+							t.Fatal("observation re-keyed across requests")
+						}
+						keys[m.ToolCallID] = id
 						body := want
 						if m.ToolCallID == "2" {
 							body = "no records found"
@@ -104,10 +108,9 @@ func TestMemoryRecallSignedStoreProviderFences(t *testing.T) {
 						count++
 					}
 				}
-				if count != step+1 || id == previous {
-					t.Fatal("unexpected observation count or reused ID")
+				if count != step+1 {
+					t.Fatal("unexpected observation count")
 				}
-				previous = id
 			}
 			raw := []string{}
 			for _, m := range res.Messages {
