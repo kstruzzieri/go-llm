@@ -161,6 +161,16 @@ golem -root /path/to/project -config /path/to/models.json
 golem -root /path/to/project -ollama-url http://gpu-server:11434
 ```
 
+**Privacy: what a request says about its thread.** Golem sends each hosted
+provider the prompt-cache key it documents, chosen by the provider's `base_url`
+host ([Cache affinity](backends.md#cache-affinity)). OpenAI gets a
+`prompt_cache_key` and OpenRouter an `x-session-id`; each is an HMAC of the
+thread id under a random secret minted per process, so it changes when Golem
+restarts and is not the thread id. OpenCode gets the raw thread id as
+`x-opencode-session`, which its endpoint requires. Every other host, local
+llama.cpp and Ollama included, gets none of them. Set `"cache_affinity": "none"`
+on a provider to send nothing.
+
 ## Opt in to write and exec
 
 Opt in to project mutation explicitly. Either flag selects the Trusted [profile](#runtime-profiles) when `-profile` is omitted and prints `profile: trusted (selected by <flag>)`; add `-profile trusted` to say so explicitly.

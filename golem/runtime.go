@@ -759,7 +759,8 @@ func turnGoal(turn Turn) (string, error) {
 // an HTTP header field value — an ASCII control character other than
 // horizontal tab, or DEL (RFC 9110 §5.5) — or -1 when there is none.
 //
-// The thread id travels to providers as a header (x-opencode-session, #533).
+// The thread id travels to OpenCode providers as a header (x-opencode-session,
+// #533).
 // Go's Transport refuses to send such a value, so without this check a bad id
 // would fail every turn of the thread with an opaque transport error rather
 // than a clear request-validation one. It is a validation rule, not a

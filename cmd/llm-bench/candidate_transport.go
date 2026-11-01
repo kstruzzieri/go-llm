@@ -24,6 +24,9 @@ type candidateTransportOptions struct {
 	// openai-compat branch: -replay-attempt injects its recording client
 	// (#687). Every legacy caller leaves it nil.
 	httpClient *http.Client
+	// cacheAffinity is -cache-affinity for the openai-compat branch; empty
+	// lets the client infer the mode from the base URL host.
+	cacheAffinity string
 }
 
 // defaultOpenAICompatTimeout mirrors provider/openaicompat.NewClient's own
@@ -76,9 +79,10 @@ type candidateChatRequest struct {
 	// <think> parser mode for this request: the registered parser policy, so the
 	// replay extracts exactly what Golem's configured think_mode would (#452).
 	ParseThinkMode *provider.ThinkMode
-	// SessionID, when non-empty, is sent as the openai-compat session header on
-	// this request (some hosted endpoints reject requests without one). Empty
-	// sends no header. The Ollama transport ignores it.
+	// SessionID, when non-empty, is sent on this request in the client's cache
+	// affinity form (the x-opencode-session header for OpenCode, whose endpoint
+	// rejects requests without one). Empty sends none. The Ollama transport
+	// ignores it.
 	SessionID string
 }
 
@@ -174,7 +178,7 @@ func newCandidateTransport(target ModelTarget, opts candidateTransportOptions) (
 		if baseURL == "" {
 			return candidateTransport{}, fmt.Errorf("candidate %s transport requires -candidate-base-url", openAICompatTransport)
 		}
-		clientOpts := []openaicompat.ClientOption{}
+		clientOpts := []openaicompat.ClientOption{openaicompat.WithCacheAffinity(opts.cacheAffinity)}
 		// The recorder is always installed; requests without a slot pass
 		// through untouched.
 		wrapped := candidateHTTPClient(opts)

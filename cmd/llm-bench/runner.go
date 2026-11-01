@@ -76,11 +76,14 @@ type Runner struct {
 	// long multi-turn replays may silently truncate prompts from the
 	// model's perspective without this set.
 	NumCtx int
-	// CandidateSessionID, when non-empty, is sent as the openai-compat session
-	// header on every candidate request (-candidate-session-id). Empty sends
-	// no header.
+	// CandidateSessionID, when non-empty, is sent with every openai-compat
+	// candidate request in the CandidateCacheAffinity form
+	// (-candidate-session-id). Empty sends none.
 	CandidateSessionID string
-	Scorer             Scorer
+	// CandidateCacheAffinity is -cache-affinity for openai-compat candidates;
+	// empty infers the mode from OpenAICompatBaseURL's host.
+	CandidateCacheAffinity string
+	Scorer                 Scorer
 	// InjectionDecoding is the registered decoding (#452), keyed by the full
 	// model selector exactly as typed in -models (ModelTarget.Display).
 	// Injection traces fail closed for a model with no entry.
@@ -117,6 +120,7 @@ func (r *Runner) RunAll(ctx context.Context, targets []ModelTarget, traces []Tra
 			openAICompatBaseURL: r.OpenAICompatBaseURL,
 			openAICompatAPIKey:  r.OpenAICompatAPIKey,
 			timeout:             r.Timeout,
+			cacheAffinity:       r.CandidateCacheAffinity,
 		})
 		if err != nil {
 			for _, trace := range traces {

@@ -945,6 +945,17 @@ func TestValidateCandidateSessionID(t *testing.T) {
 	}
 }
 
+func TestValidateCacheAffinity(t *testing.T) {
+	for mode, ok := range map[string]bool{
+		"": true, "none": true, "openai": true, "openrouter": true, "opencode": true,
+		"OpenAI": false, " openai": false, "anthropic": false,
+	} {
+		if err := validateCacheAffinity(mode); (err == nil) != ok {
+			t.Errorf("validateCacheAffinity(%q) = %v; want ok=%v", mode, err, ok)
+		}
+	}
+}
+
 // main must reject a malformed -candidate-session-id before any network use:
 // the binary exits non-zero with the validation message and the candidate
 // server never sees a request.

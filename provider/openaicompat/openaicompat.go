@@ -177,6 +177,7 @@ func (p *Provider) Models(ctx context.Context) ([]provider.ModelInfo, error) {
 func (p *Provider) Chat(ctx context.Context, req provider.ChatRequest) (*provider.ChatResponse, error) {
 	ctx = withSessionID(ctx, req.SessionID)
 	body := toChatRequest(req, false)
+	body.PromptCacheKey = p.client.promptCacheKey(req.SessionID)
 	var resp chatResponse
 	if err := p.client.postJSON(ctx, "/v1/chat/completions", body, &resp); err != nil {
 		return nil, fmt.Errorf("provider: openaicompat: chat: %w", err)
@@ -271,6 +272,7 @@ func (p *Provider) ChatStream(ctx context.Context, req provider.ChatRequest, fn 
 
 	ctx = withSessionID(ctx, req.SessionID)
 	body := toChatRequest(req, true)
+	body.PromptCacheKey = p.client.promptCacheKey(req.SessionID)
 	reader, err := p.client.postSSE(ctx, "/v1/chat/completions", body)
 	if err != nil {
 		return fmt.Errorf("provider: openaicompat: chat stream: %w", err)

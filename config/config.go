@@ -63,6 +63,13 @@ type ProviderConfig struct {
 	// it for a backend without /props degrades that backend to fail-safe
 	// serial admission. Default false: ungoverned, existing behavior.
 	SlotDiscovery bool `json:"slot_discovery,omitempty"`
+	// CacheAffinity selects the prompt-cache key an openai-compat client
+	// sends with a session: "openai" (body prompt_cache_key), "openrouter"
+	// (x-session-id header), "opencode" (x-opencode-session header with the
+	// raw session id), or "none". Empty lets the client infer the mode from
+	// the base_url host (openaicompat.InferCacheAffinity), which sends nothing
+	// to a host that documents no key. Other values fail Load.
+	CacheAffinity string `json:"cache_affinity,omitempty"`
 }
 
 // ModelConfig describes a model's identity, capabilities, and fallback chain.
@@ -160,6 +167,16 @@ var validModelTypes = map[string]bool{
 var validAPIFormats = map[string]bool{
 	"ollama":        true,
 	"openai-compat": true,
+}
+
+// validCacheAffinities enumerates the allowed values for
+// ProviderConfig.CacheAffinity; empty means "infer from the host".
+var validCacheAffinities = map[string]bool{
+	"":           true,
+	"none":       true,
+	"openai":     true,
+	"openrouter": true,
+	"opencode":   true,
 }
 
 // ValidateProviderName verifies that a configured provider key is safe to use
@@ -613,6 +630,10 @@ func (cfg *Config) validate() error {
 		if p.APIFormat != "" && !validAPIFormats[p.APIFormat] {
 			return diagWrap(CodeProviderFormatInvalid, SubjectProvider, key,
 				fmt.Errorf("config: provider %q: invalid api_format %q", key, p.APIFormat))
+		}
+		if !validCacheAffinities[p.CacheAffinity] {
+			return diagWrap(CodeInvalidArgument, SubjectProvider, key,
+				fmt.Errorf("config: provider %q: unknown cache_affinity %q", key, p.CacheAffinity))
 		}
 		// Slot policy (410 spec s1): slot discovery is an openai-compat
 		// capability. Bootstrap rechecks for programmatic Configs that

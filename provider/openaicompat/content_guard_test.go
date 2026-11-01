@@ -456,6 +456,7 @@ func TestContentGuardDenialPrecedesMarshalErrorInEveryField(t *testing.T) {
 		{"chat stop", chat(func(r *chatRequest) { r.Stop = []string{"x", f} }), outcomeDenied},
 		{"chat tool_choice", chat(func(r *chatRequest) { r.ToolChoice = f }), outcomeDenied},
 		{"chat reasoning_effort", chat(func(r *chatRequest) { r.ReasoningEffort = f }), outcomeDenied},
+		{"chat prompt_cache_key", chat(func(r *chatRequest) { r.PromptCacheKey = f }), outcomeDenied},
 		{"message role", chat(func(r *chatRequest) { r.Messages[0].Role = f }), outcomeDenied},
 		{"message content", chat(func(r *chatRequest) { r.Messages[0].Content = f }), outcomeDenied},
 		{"message reasoning_content", chat(func(r *chatRequest) { r.Messages[0].ReasoningContent = f }), outcomeDenied},
