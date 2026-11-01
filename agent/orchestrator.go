@@ -99,10 +99,10 @@ func buildChatRequest(st State, specs []provider.Tool, outputReserve int, opts p
 	}
 	// #430: every tool observation is framed here, on the value copy, after
 	// assembly, under the key mintFenceKeys stored on its message. The key is
-	// the same on every render, so the key never changes an earlier
-	// observation's wire bytes. State keeps the raw bytes. A tool message with no key (a custom
-	// Compactor rebuilt it) is framed under one key minted for this render,
-	// shared by every unkeyed message in it.
+	// the same on every render, so it never changes an earlier observation's
+	// wire bytes. State keeps the raw bytes. A tool message with no key (a
+	// custom Compactor rebuilt it) is framed under one key minted for this
+	// render, shared by every unkeyed message in it.
 	var unkeyed promptfence.Fence
 	for _, m := range st.Messages {
 		cm := m.ChatMessage
@@ -214,6 +214,10 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 	}
 	// One advisory key per Run, reused on every render like a tool key.
 	advisoryFence := promptfence.New()
+	var liveAdvisory *promptfence.Fence
+	if advisory != nil {
+		liveAdvisory = &advisoryFence
+	}
 
 	// #436: the initial input is inspected once, before any assembly, so a
 	// block never reaches the model and no pressure event is emitted for it.
@@ -222,14 +226,20 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 	}
 	goal := state.Messages[len(state.Messages)-1].Content
 
-	next := 0 // first State index refreshFenceKeys has not visited
+	next := 0            // first State index refreshFenceKeys has not visited
+	scanSafeThrough := 0 // messages older than a scan-limit key reset
 	for step := 0; step < maxSteps; step++ {
 		// Rotate every live key the previous step's text exposed, then key
 		// the tool messages it appended, now that verifyBatch has finished
 		// with them. Step 0 scans the history and goal text for the advisory
 		// key; history carries no tool messages (validateHistory).
 		var rotated int
-		next, rotated = refreshFenceKeys(&state, &advisoryFence, next)
+		var limited bool
+		var preRotated map[int]bool
+		next, rotated, limited, preRotated = refreshFenceKeys(&state, liveAdvisory, next)
+		if limited {
+			scanSafeThrough = len(state.Messages)
+		}
 		manager := o.ctxMgr
 		if advisory != nil {
 			estimate := manager.estimate
@@ -258,7 +268,12 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 			return res, err
 		}
 		if atrace.Subjects != nil {
-			rotated += refreshMaterializedFenceKeys(&state, &assembled, &advisoryFence)
+			n, postLimited := refreshMaterializedFenceKeys(&state, &assembled, liveAdvisory, scanSafeThrough, preRotated)
+			rotated += n
+			if postLimited {
+				scanSafeThrough = len(state.Messages)
+				limited = true
+			}
 		}
 		if advisory != nil {
 			goals := 0
@@ -297,6 +312,9 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 		}
 		for range rotated {
 			res.Events = append(res.Events, EventRecord{Step: step, Kind: "fence_rotation"})
+		}
+		if limited {
+			res.Events = append(res.Events, EventRecord{Step: step, Kind: "fence_scan_limit"})
 		}
 		if pressure.Compactions > 0 {
 			res.Events = append(res.Events, EventRecord{Step: step, Kind: "compaction"})

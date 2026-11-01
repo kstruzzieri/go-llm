@@ -229,7 +229,7 @@ type StepRecord struct {
 // EventRecord is a lightweight ordered log entry for replay/eval.
 type EventRecord struct {
 	Step int
-	Kind string // "token" | "step" | "tool_call" | "tool_result" | "compaction" | "fence_rotation" | "blocked" | "stop"
+	Kind string // "token" | "step" | "tool_call" | "tool_result" | "compaction" | "fence_rotation" | "fence_scan_limit" | "blocked" | "stop"
 }
 
 // ToolCallRecord captures one dispatched tool call and its outcome.
