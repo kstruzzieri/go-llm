@@ -8,6 +8,7 @@ import (
 	"unicode"
 
 	"github.com/kstruzzieri/go-llm/internal/promptfence"
+	"github.com/kstruzzieri/go-llm/provider"
 )
 
 // mintFenceKeys gives every role "tool" message at index from or later that
@@ -47,9 +48,13 @@ const (
 // The live keys are every tool message's key, the advisory key, which is
 // rotated in place (a nil or zero advisory is not live), and every system key
 // (st.systemKeys), rotated by replacing each occurrence of it in st.System
-// and in st.systemKeys, so System changes only where it is keyed. Each message at
-// index from or later contributes every string replayed to the provider or
-// rendered into the prompt (replayedTexts). A key that occurs in any of them
+// and in st.systemKeys, so System changes only where it is keyed. Each
+// message at index from or later contributes every string replayed to the
+// provider or rendered into the prompt (replayedTexts), and so does each
+// pinned text: text rendered into every request from outside st.Messages,
+// which Run passes at step 0 (the durable summary and the staged advisory).
+// It was fixed before the Run, so it can quote a system key but no key the
+// Run minted. A key that occurs in any of them
 // as keyLetters reads it (any letter case, split by any non-key characters)
 // is replaced by a fresh promptfence.New key, never a retired one. Every key
 // a text exposes rotates, and each rotation counts once. Rotation changes
@@ -66,7 +71,7 @@ const (
 // key, O(text x keys); a single pass over fixed-width windows of the
 // projection looked up in the live map is the upgrade if a Run ever holds
 // enough keys for that to show.
-func refreshFenceKeys(st *State, advisory *promptfence.Fence, from int) (next int, rotated int) {
+func refreshFenceKeys(st *State, advisory *promptfence.Fence, from int, pinned ...string) (next int, rotated int) {
 	live := map[string]int{}
 	for i, m := range st.Messages {
 		if m.fence != (promptfence.Fence{}) {
@@ -79,31 +84,36 @@ func refreshFenceKeys(st *State, advisory *promptfence.Fence, from int) (next in
 	for _, id := range st.systemKeys {
 		live[id] = systemOwner
 	}
+	var texts []string
+	for _, p := range pinned {
+		texts = append(texts, replayedTexts(Message{ChatMessage: provider.ChatMessage{Content: p}})...)
+	}
 	for i := from; i < len(st.Messages); i++ {
-		for _, text := range replayedTexts(st.Messages[i]) {
-			letters := keyLetters(text)
-			for id, owner := range live {
-				if !strings.Contains(letters, id) {
-					continue
-				}
-				fresh := promptfence.New() // never a retired key
-				switch owner {
-				case advisoryOwner:
-					*advisory = fresh
-				case systemOwner:
-					st.System = strings.ReplaceAll(st.System, id, fresh.ID())
-					for j, k := range st.systemKeys {
-						if k == id {
-							st.systemKeys[j] = fresh.ID()
-						}
-					}
-				default:
-					st.Messages[owner].fence = fresh
-				}
-				delete(live, id)
-				live[fresh.ID()] = owner
-				rotated++
+		texts = append(texts, replayedTexts(st.Messages[i])...)
+	}
+	for _, text := range texts {
+		letters := keyLetters(text)
+		for id, owner := range live {
+			if !strings.Contains(letters, id) {
+				continue
 			}
+			fresh := promptfence.New() // never a retired key
+			switch owner {
+			case advisoryOwner:
+				*advisory = fresh
+			case systemOwner:
+				st.System = strings.ReplaceAll(st.System, id, fresh.ID())
+				for j, k := range st.systemKeys {
+					if k == id {
+						st.systemKeys[j] = fresh.ID()
+					}
+				}
+			default:
+				st.Messages[owner].fence = fresh
+			}
+			delete(live, id)
+			live[fresh.ID()] = owner
+			rotated++
 		}
 	}
 	return mintFenceKeys(st, from), rotated

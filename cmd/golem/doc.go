@@ -236,11 +236,12 @@
 // key, kept across goals so the system prompt stays cacheable; a Git refresh
 // revalidates project guidance and can change its budget. Each Run gets the
 // snapshot key as a system key (agent.Request.SystemKeys): when the Run's
-// text, replayed history included, quotes it, the Run replaces it before the
-// next request, and the session adopts the replacement for later goals.
-// AgentFlow planner runs and task steps rotate it within each run only. Tool results keep their own
-// independent per-result keys. Approval neither grants capabilities nor sanitizes prior conversation
-// or model influence.
+// text, replayed history, its summary and staged /consult advice included,
+// quotes it, the Run replaces it before the next request, and the session
+// adopts the replacement for later goals. AgentFlow planner runs and task steps rotate
+// it within each run only. Tool results keep their own independent
+// per-result keys. Approval neither grants capabilities nor sanitizes prior
+// conversation or model influence.
 //
 // The source subcommand manages ad-hoc documents in the workspace index over
 // the managed-document registry:

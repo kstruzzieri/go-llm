@@ -27,7 +27,8 @@ import (
 type systemInputs struct {
 	canary string
 	// headless is non-nil only for a -allow-tool one-shot (#352): the prompt
-	// is built from the exact mounted set. Never recomposed (no REPL there).
+	// is built from the exact mounted set. No command recomposes it (no REPL
+	// there); a snapshot-key rotation after the goal only swaps the key.
 	headless       *golemruntime.HeadlessToolCaps
 	allowWrite     bool
 	allowExec      bool

@@ -232,10 +232,18 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 	for step := 0; step < maxSteps; step++ {
 		// Rotate every live key the previous step's text exposed, then key
 		// the tool messages it appended, now that verifyBatch has finished
-		// with them. Step 0 scans the history and goal text for the advisory
-		// and system keys; history carries no tool messages (validateHistory).
+		// with them. Step 0 scans the history, its summary, the goal and the
+		// staged advice for the advisory and system keys; history carries no
+		// tool messages (validateHistory).
 		var rotated int
-		next, rotated = refreshFenceKeys(&state, &advisoryFence, next)
+		var pinned []string
+		if step == 0 {
+			pinned = append(pinned, state.DurableSummary)
+			if advisory != nil {
+				pinned = append(pinned, advisory.Source, advisory.Tool, advisory.Model, advisory.Digest, advisory.Content, advisory.Annotation)
+			}
+		}
+		next, rotated = refreshFenceKeys(&state, &advisoryFence, next, pinned...)
 		manager := o.ctxMgr
 		if advisory != nil {
 			estimate := manager.estimate
