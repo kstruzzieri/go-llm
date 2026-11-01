@@ -23,12 +23,14 @@
 // A fence is only unguessable while the attacker cannot observe it. The rule is
 // one id per framed value: mint the id only after the value's bytes are final,
 // so the value cannot contain an id that did not exist yet, and never reuse an
-// id for different content. A renderer whose values are new on every prompt,
+// id for a different value, or for text fixed after the id was first shown. A
+// renderer whose values are new on every prompt,
 // such as retrieval, builds one fence per rendered prompt. A renderer that
 // replays the same values on every request may keep each value's id across
 // requests, which keeps the bytes of earlier values stable for a provider's
-// prompt cache; it must then replace an id whose text shows up in text added
-// after the id was first shown. Never write a rendered prompt anywhere the
+// prompt cache; it should then replace an id whose text shows up in text added
+// after the id was first shown, as agent.Run does for tool results and consult
+// advice. Never write a rendered prompt anywhere the
 // untrusted values are later read back from.
 package promptfence
 

@@ -29,7 +29,9 @@
 //     letter case, \uXXXX escapes and separator characters; a live key it
 //     finds is replaced with a fresh one and a "fence_rotation" event
 //     is recorded. A custom Compactor is trusted library code: run-state
-//     text it copies has been scanned, text it synthesizes is not. Framing
+//     text it copies has been scanned, text it synthesizes is not, and a
+//     message it rebuilds without a key is framed under one per-render
+//     key. Framing
 //     happens at the provider boundary only: State, Result.Messages,
 //     observers and stores keep raw bytes.
 //     Run also appends ToolTrustContract to every effective system prompt

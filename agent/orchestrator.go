@@ -99,8 +99,8 @@ func buildChatRequest(st State, specs []provider.Tool, outputReserve int, opts p
 	}
 	// #430: every tool observation is framed here, on the value copy, after
 	// assembly, under the key mintFenceKeys stored on its message. The key is
-	// the same on every render, so an earlier observation's wire bytes never
-	// change. State keeps the raw bytes. A tool message with no key (a custom
+	// the same on every render, so the key never changes an earlier
+	// observation's wire bytes. State keeps the raw bytes. A tool message with no key (a custom
 	// Compactor rebuilt it) is framed under one key minted for this render,
 	// shared by every unkeyed message in it.
 	var unkeyed promptfence.Fence
