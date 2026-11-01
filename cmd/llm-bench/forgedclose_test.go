@@ -268,9 +268,9 @@ func TestForgedCloseRegistrationBindsCorpus(t *testing.T) {
 	if got := fmt.Sprintf("%x", sha256.Sum256(raw)); got != reg.CasesSHA256 {
 		t.Errorf("cases_sha256 %s != sha256(cases.json) %s", reg.CasesSHA256, got)
 	}
-	// Ruling P1-b: the two local llama.cpp models only; a cloud model is added
-	// on the owner's approval.
-	if want := []string{"openai-compat/qwen3-coder-next:latest", "openai-compat/gemma4:31b"}; !slices.Equal(reg.Models, want) {
+	// The two local llama.cpp models, plus the one cloud model the owner
+	// approved (2026-10-31).
+	if want := []string{"openai-compat/qwen3-coder-next:latest", "openai-compat/gemma4:31b", "openai-compat/kimi-k2.7-code"}; !slices.Equal(reg.Models, want) {
 		t.Errorf("models = %v, want %v", reg.Models, want)
 	}
 	if !isForgedCloseRegistration(reg) {
