@@ -286,7 +286,8 @@ func (r *Runtime) compressConversation(ctx context.Context, budget agent.Budget,
 	// escaping (or a custom summarizer) can exceed the anticipated content cost.
 	reserve := max(agent.DefaultSummaryOutputReserve+estimate(agent.DurableSummaryPrompt("")),
 		estimate(agent.DurableSummaryPrompt(strings.TrimSpace(currentSummary(current)))))
-	input, summarize := current, r.summarizer
+	fold := summarizeReplayed(r.summarizer)
+	input, summarize := current, fold
 	var compacted conversation.Conversation
 	for {
 		maxRawTokens := max(0, lowWater-reserve)
@@ -310,13 +311,36 @@ func (r *Runtime) compressConversation(ctx context.Context, budget agent.Budget,
 			if len(old) == 0 {
 				return prior, nil
 			}
-			return r.summarizer(ctx, prior, old)
+			return fold(ctx, prior, old)
 		}
 	}
 	changed := len(compacted.Messages) != len(current.Messages) ||
 		currentSummary(compacted) != currentSummary(current) ||
 		summaryMessageCount(compacted) != summaryMessageCount(current)
 	return compacted, changed, nil
+}
+
+// summarizeReplayed adapts summarize so a fold batch reaches it as replayed
+// history only. The durable summary stands in for what history() sends back,
+// and tool results were never replayed. Costing them at zero for the trigger
+// also leaves the fold batch unbounded by it (about a dozen turns of tool
+// output in one request), while the summary itself is capped at
+// agent.DefaultSummaryOutputReserve tokens. A non-empty batch with nothing
+// replayed in it leaves a non-empty prior summary alone instead of paying for
+// a rewrite that would bust the prompt cache for no new content.
+func summarizeReplayed(summarize conversation.Summarizer) conversation.Summarizer {
+	return func(ctx context.Context, prior string, old []conversation.Message) (string, error) {
+		visible := make([]conversation.Message, 0, len(old))
+		for _, message := range old {
+			if replayed(message) {
+				visible = append(visible, message)
+			}
+		}
+		if len(old) > 0 && len(visible) == 0 && strings.TrimSpace(prior) != "" {
+			return prior, nil
+		}
+		return summarize(ctx, prior, visible)
+	}
 }
 
 func estimateStoredHistory(current conversation.Conversation) int {

@@ -47,7 +47,9 @@ func FallbackSummarizer(_ context.Context, prior string, msgs []Message) (string
 
 // EstimateMessagesTokens sums the estimated token cost of every NON-system
 // message, matching CompressMessages' raw-history accounting. Exported so
-// consumers (Golem) can make trigger decisions without re-deriving messageCost.
+// consumers that send every stored field back to the model can make trigger
+// decisions without re-deriving messageCost; a consumer that replays only part
+// of a message should price it itself and use CompressMessagesWithCost.
 // Panics on a nil estimator, consistent with TrimMessages.
 func EstimateMessagesTokens(msgs []Message, estimator TokenEstimator) int {
 	if estimator == nil {

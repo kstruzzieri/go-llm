@@ -263,12 +263,27 @@ func TestCompressionDoesNotRewriteSummaryEveryTurn(t *testing.T) {
 		t.Fatal(err)
 	}
 	calls := 0
+	estimate := conversation.CharRatioEstimator(4)
 	runtime := &Runtime{
 		onWarning: func(err error) { t.Errorf("compression warning: %v", err) },
 		sessions:  &threadStore{store: store},
 		compress:  true,
-		summarizer: func(context.Context, string, []conversation.Message) (string, error) {
+		summarizer: func(_ context.Context, _ string, old []conversation.Message) (string, error) {
 			calls++
+			// A fold batch spans a dozen turns now that tool results cost
+			// nothing for the trigger, so the summarize request must carry
+			// replayed history only, never the stored tool output.
+			for _, message := range old {
+				if !replayed(message) {
+					t.Errorf("summarizer call %d received a message history() never replays: role %q, %d content bytes", calls, message.Role, len(message.Content))
+				}
+			}
+			// Bound the request by the unfiltered estimate (what the summarize
+			// transcript writes); visibleCost would be 0 for the tool results
+			// this guards against. Trigger 4096 plus one 200-token turn.
+			if tokens := conversation.EstimateMessagesTokens(old, estimate); tokens > 4096+200 {
+				t.Errorf("summarizer call %d input = %d tokens, want at most the trigger plus one turn (4296)", calls, tokens)
+			}
 			return strings.Repeat("s", 200), nil
 		},
 	}
@@ -299,6 +314,43 @@ func TestCompressionDoesNotRewriteSummaryEveryTurn(t *testing.T) {
 	// the 4-exchange floor.
 	if minReplayed < 6 {
 		t.Errorf("fewest replayed exchanges after the first summary = %d, want at least 6", minReplayed)
+	}
+}
+
+// TestCompressConversationSkipsSummarizerWhenNothingReplayedFolds covers a fold
+// batch holding only stored tool traffic (here an exchange whose question and
+// answer are empty): the prior summary has nothing new to absorb, so it is kept
+// as is and the summarizer, whose rewrite would bust the prompt cache, is not
+// called. The folded messages still count toward the summary.
+func TestCompressConversationSkipsSummarizerWhenNothingReplayedFolds(t *testing.T) {
+	t.Parallel()
+	unreplayed := []conversation.Message{
+		{Role: "user"},
+		{Role: "assistant", ToolCalls: json.RawMessage(`[{"id":"c1"}]`)},
+		{Role: "tool", ToolName: "read_file", ToolCallID: "c1", Content: strings.Repeat("t", 8000)},
+		{Role: "assistant"},
+	}
+	// Four 1100-token exchanges (550 tokens per 2200-char message) sit at the
+	// retention floor and cost 4400 plus the 41-token "OLD" summary prompt,
+	// over the 4096 trigger, so compression runs and folds only the first.
+	var recent []conversation.Message
+	for range 4 {
+		recent = append(recent,
+			conversation.Message{Role: "user", Content: strings.Repeat("q", 2200)},
+			conversation.Message{Role: "assistant", Content: strings.Repeat("a", 2200)})
+	}
+	current := conversation.Conversation{
+		Messages:       append(append([]conversation.Message(nil), unreplayed...), recent...),
+		DurableSummary: &conversation.DurableSummary{Content: "OLD", MessageCount: 7},
+	}
+	calls := 0
+	r := &Runtime{summarizer: func(context.Context, string, []conversation.Message) (string, error) {
+		calls++
+		return "REWRITTEN", nil
+	}}
+	got, changed, err := r.compressConversation(context.Background(), agent.Budget{InputCeiling: 8192}, current, false)
+	if err != nil || !changed || calls != 0 || currentSummary(got) != "OLD" || summaryMessageCount(got) != 11 || !reflect.DeepEqual(got.Messages, recent) {
+		t.Errorf("compression = %d retained, summary %+v, changed %v, calls %d, error %v; want the four recent exchanges, summary OLD with count 11, changed true, no summarizer call", len(got.Messages), got.DurableSummary, changed, calls, err)
 	}
 }
 
@@ -446,8 +498,11 @@ func TestCompressConversationRetainsToolExchangesAndUnresolvedTail(t *testing.T)
 	calls := 0
 	r := &Runtime{summarizer: func(_ context.Context, prior string, messages []conversation.Message) (string, error) {
 		calls++
-		if prior != "" || !reflect.DeepEqual(messages, old) {
-			t.Errorf("summarizer input = %q, %+v; want empty prior and complete old tool exchange %+v", prior, messages, old)
+		// The whole old exchange leaves storage together (count 4 below), but
+		// the summarizer sees only what history() replayed: the question and
+		// the answer, not the tool-call frame or the tool result.
+		if replayedOnly := []conversation.Message{old[0], old[3]}; prior != "" || !reflect.DeepEqual(messages, replayedOnly) {
+			t.Errorf("summarizer input = %q, %+v; want empty prior and the replayed question and answer %+v", prior, messages, replayedOnly)
 		}
 		return "SUM", nil
 	}}
