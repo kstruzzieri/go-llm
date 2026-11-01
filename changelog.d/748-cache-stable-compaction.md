@@ -4,9 +4,10 @@ Inside a goal, a compacting step now drops to 75% of the budget left for
 messages instead of just under it, and what it dropped stays out of every later
 request in that goal, so the requests after a compaction start with the same
 bytes and the provider's prompt cache can reuse them. The newest tool result is
-never dropped to reach that mark; when the mark cannot be reached without it,
-compaction falls back to the previous just-enough fit. On local llama.cpp with
-qwen3-coder-next, `llm-bench -cache-probe` (pressure) now reports 27,992 of
+never dropped to reach that mark, including replacing a structured result's
+real content with an omission placeholder; when the mark cannot be reached
+without it, compaction falls back to the previous just-enough fit. On local
+llama.cpp with qwen3-coder-next, `llm-bench -cache-probe` (pressure) now reports 27,992 of
 53,511 turn-1 prompt tokens cached (52.3%), up from 14,692 of 57,605 (25.5%).
 
 The setting is `agent.ContextManager.CompactionLowWater` (0, the default, keeps

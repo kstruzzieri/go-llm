@@ -479,6 +479,107 @@ func assertNewestObservations(t *testing.T, reqs []provider.ChatRequest, res Res
 	}
 }
 
+func TestMixedLowWaterPreservesNewestStructuredContent(t *testing.T) {
+	t.Parallel()
+	content, cheaper := strings.Repeat("N", 100), strings.Repeat("n", 40)
+	for _, tc := range []struct {
+		name       string
+		fraction   float64
+		cheaper    string
+		outputCap  int
+		history    string
+		want       string
+		wantTokens int
+	}{
+		{name: "full budget control", outputCap: 4096, want: content, wantTokens: 230},
+		{name: "fall back rather than omit newest data", fraction: 0.75, outputCap: 4096, want: content, wantTokens: 230},
+		{name: "a cheaper real alternative still reaches the mark", fraction: 0.75, cheaper: cheaper, outputCap: 4096, want: cheaper, wantTokens: 170},
+		{name: "existing byte cap omission does not prevent low water", fraction: 0.75, outputCap: 26, history: strings.Repeat("h", 20), want: "context omitted for budget", wantTokens: 156},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			group := oneAltGroup("new.go", 1, content, altAbstract)
+			if tc.cheaper != "" {
+				group = oneAltGroup("new.go", 1, tc.cheaper, altAbstract)
+				group.Alternatives = append(group.Alternatives,
+					oneAltGroup("new.go", 1, content, altAbstract, altOverview).Alternatives[0])
+			}
+			var msgs []Message
+			if tc.history != "" {
+				msgs = append(msgs, history("user", tc.history), history("assistant", tc.history))
+			}
+			msgs = append(msgs,
+				pinned("user", strings.Repeat("G", 100)),
+				mixedAsstCall("c0"), mixedToolResult("c0", strings.Repeat("O", 100), nil, 0),
+				mixedAsstCall("c1"), mixedToolResult("c1", content, &ContextSet{Groups: []ContextGroup{group}}, tc.outputCap))
+			// Pinned 100 + newest envelope 30 + content 100 fit the full
+			// 250 budget, but not its 187 low-water mark. Keeping only the
+			// 26-token placeholder would lose the unread observation.
+			// A real 40-token alternative fits at 170. When the byte cap
+			// already omits the content, low-water should still drop the
+			// 40-token history rather than retain the full-budget 196.
+			mgr := ContextManager{Mixed: true, Estimate: runeEstimator, CompactionLowWater: tc.fraction}
+			out, pressure, err := mgr.Assemble(context.Background(), State{Messages: msgs}, 0, TokenBudget{Input: 250})
+			if err != nil {
+				t.Fatalf("Assemble(low-water %v): %v", tc.fraction, err)
+			}
+			found := false
+			for _, msg := range out.Messages {
+				if msg.ToolCallID != "c1" {
+					continue
+				}
+				found = true
+				if msg.Content != tc.want {
+					t.Errorf("Assemble(low-water %v) newest content = %q, want %q", tc.fraction, msg.Content, tc.want)
+				}
+			}
+			if !found {
+				t.Error("Assemble omitted the newest tool result")
+			}
+			if pressure.InputTokens != tc.wantTokens {
+				t.Errorf("Assemble(low-water %v) input tokens = %d, want %d", tc.fraction, pressure.InputTokens, tc.wantTokens)
+			}
+			if pressure.Compactions != 1 {
+				t.Errorf("Assemble compactions = %d, want 1; the fixture must compact", pressure.Compactions)
+			}
+		})
+	}
+}
+
+func TestMixedLowWaterPreservesEachNewestStructuredResult(t *testing.T) {
+	t.Parallel()
+	content := strings.Repeat("N", 100)
+	st := State{Messages: []Message{
+		pinned("user", strings.Repeat("G", 100)),
+		mixedAsstCall("c0"), mixedToolResult("c0", strings.Repeat("O", 100), nil, 0),
+		mixedAsstCall("c1", "c2"),
+		mixedToolResult("c1", "small data", oneAltSet("small.go", "small data"), 4096),
+		mixedToolResult("c2", content, oneAltSet("new.go", content), 4096),
+	}}
+	// Both newest results fit at 270: pinned 100 + envelopes 60 + data
+	// 10+100. At the 225 mark c1 fits, but c2 becomes a placeholder. Keeping
+	// real data in one result must not excuse losing the other result.
+	mgr := ContextManager{Mixed: true, Estimate: runeEstimator, CompactionLowWater: 0.75}
+	out, pressure, err := mgr.Assemble(context.Background(), st, 0, TokenBudget{Input: 300})
+	if err != nil {
+		t.Fatalf("Assemble: %v", err)
+	}
+	got := map[string]string{}
+	for _, msg := range out.Messages {
+		if msg.Role == "tool" {
+			got[msg.ToolCallID] = msg.Content
+		}
+	}
+	for id, want := range map[string]string{"c1": "small data", "c2": content} {
+		if got[id] != want {
+			t.Errorf("Assemble newest result %s = %q, want %q", id, got[id], want)
+		}
+	}
+	if pressure.InputTokens != 270 {
+		t.Errorf("Assemble input tokens = %d, want 270 from the full-budget fit", pressure.InputTokens)
+	}
+}
+
 // TestMixedLowWaterAllocatesFreshAtTheMark pins that the low-water pass is a
 // fresh allocation at the mark. allocateMixed mutates its units (omitted
 // spans, evicted chains, chosen alternatives), so a pass over the full-budget

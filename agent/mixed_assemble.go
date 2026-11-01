@@ -253,7 +253,7 @@ func (m ContextManager) assembleMixed(ctx context.Context, st State, toolSchemaT
 					break
 				}
 			}
-			if lowAlloc, lerr := m.allocateMixed(ctx, lowUnits, mark, sysTokens); lerr == nil {
+			if lowAlloc, lerr := m.allocateMixed(ctx, lowUnits, mark, sysTokens); lerr == nil && preservesNewestContent(units, lowUnits) {
 				units, alloc = lowUnits, lowAlloc
 			}
 		}
@@ -300,6 +300,25 @@ func (m ContextManager) assembleMixed(ctx context.Context, st State, toolSchemaT
 		return out, pressure, ContextAssemblyTrace{}, ErrContextExhausted
 	}
 	return out, pressure, m.fillMixedTrace(units, summary, alloc, stateBudget, used), nil
+}
+
+// preservesNewestContent compares allocations of the same units. A newest
+// anchor may use a cheaper real alternative, but must not lose all content
+// selected at full budget. An anchor already omitted there needs no fallback.
+func preservesNewestContent(full, low []*mixedUnit) bool {
+	selected := func(s *mixedSubject) bool { return s.chosen >= 0 }
+	for i, u := range low {
+		if !u.keep {
+			continue
+		}
+		for j, a := range u.anchors {
+			if slices.ContainsFunc(full[i].anchors[j].subjects, selected) &&
+				!slices.ContainsFunc(a.subjects, selected) {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // mustFitCause attributes a must-fit overflow across the THREE buckets mixed
