@@ -161,11 +161,22 @@ func chainAt(msgs []Message, i int) int {
 	return end
 }
 
+// firstPinnedIndex is the history boundary: the index of the first Pinned
+// message that is not a leading role "system" message, or -1. assembleLegacy
+// materializes the durable summary as exactly such a message at index 0, and
+// counting it would turn every prior-turn exchange before the goal into a
+// current-run one that drops after current-run tool chains.
 func firstPinnedIndex(msgs []Message) int {
+	leading := 0 // pinned system messages at the head so far
 	for i, m := range msgs {
-		if m.Segment == Pinned {
-			return i
+		if m.Segment != Pinned {
+			continue
 		}
+		if m.Role == "system" && i == leading {
+			leading++
+			continue
+		}
+		return i
 	}
 	return -1
 }

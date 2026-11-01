@@ -381,6 +381,28 @@ func TestLowWaterKeepsNewestObservation(t *testing.T) {
 	})
 
 	bulky := strings.Repeat("X", 400)
+	t.Run("groups before the goal are never the kept group", func(t *testing.T) {
+		// Two completed chains ahead of the goal (60 each, goal 10, Input
+		// 90): the just-enough fit drops one, and the 67 mark needs both.
+		// Keeping the newer one would make the mark unreachable.
+		st := State{Messages: []Message{
+			mixedAsstCall("c0"), mixedToolResult("c0", strings.Repeat("0", 30), nil, 0),
+			mixedAsstCall("c1"), mixedToolResult("c1", strings.Repeat("1", 30), nil, 0),
+			gateAnchor(pinned("user", strings.Repeat("G", 10))), // gate: mixed on, legacy inert
+		}}
+		for _, m := range []ContextManager{
+			{Estimate: runeEstimator, CompactionLowWater: 0.75},
+			{Mixed: true, Estimate: runeEstimator, CompactionLowWater: 0.75},
+		} {
+			out, pressure, err := m.Assemble(context.Background(), st, 0, TokenBudget{Input: 90})
+			if err != nil {
+				t.Fatalf("Assemble (mixed %t): %v", m.Mixed, err)
+			}
+			if pressure.Evicted != 2 || len(out.Messages) != 1 {
+				t.Errorf("mixed %t: evicted %d, kept %q; want both chains before the goal dropped", m.Mixed, pressure.Evicted, shape(out))
+			}
+		}
+	})
 	t.Run("legacy", func(t *testing.T) {
 		chain := chainCost(nthCall("bulky", 1), bulky)
 		script := toolScript("bulky", 4)
@@ -611,6 +633,74 @@ func TestRunSystemMessageIdenticalAcrossSteps(t *testing.T) {
 	for k, req := range mc.reqs[1:] {
 		if !reflect.DeepEqual(req.Messages[0], first) {
 			t.Errorf("request %d system message = %q, want byte-identical to request 0's %q", k+1, req.Messages[0].Content, first.Content)
+		}
+	}
+}
+
+// TestLegacyDropsHistoryBeforeChainsWithDurableSummary pins the documented
+// drop order on the path every Golem session past its first cross-turn
+// compression takes: assembleLegacy materializes the durable summary as a
+// pinned system message at index 0, and the prior-turn exchanges before the
+// goal must still drop before any current-run tool chain.
+func TestLegacyDropsHistoryBeforeChainsWithDurableSummary(t *testing.T) {
+	summary := DurableSummaryPrompt("earlier work")
+	st := State{DurableSummary: "earlier work", Messages: []Message{
+		history("user", strings.Repeat("a", 50)), history("assistant", strings.Repeat("A", 50)), // 100
+		history("user", strings.Repeat("b", 50)), history("assistant", strings.Repeat("B", 50)), // 100
+		pinned("user", strings.Repeat("G", 10)),
+		mixedAsstCall("c1"), mixedToolResult("c1", strings.Repeat("1", 30), nil, 0), // 60
+		mixedAsstCall("c2"), mixedToolResult("c2", strings.Repeat("2", 30), nil, 0), // 60
+	}}
+	// One token over: the just-enough fit drops one exchange, and the 75%
+	// mark is reached by dropping both, with both chains kept.
+	input := runeEstimator(summary) + 330 - 1
+	for _, tc := range []struct {
+		lowWater float64
+		want     []string
+	}{
+		{0, []string{summary, strings.Repeat("b", 50), strings.Repeat("B", 50), strings.Repeat("G", 10), "", strings.Repeat("1", 30), "", strings.Repeat("2", 30)}},
+		{0.75, []string{summary, strings.Repeat("G", 10), "", strings.Repeat("1", 30), "", strings.Repeat("2", 30)}},
+	} {
+		t.Run(fmt.Sprint(tc.lowWater), func(t *testing.T) {
+			m := ContextManager{Estimate: runeEstimator, CompactionLowWater: tc.lowWater}
+			out, _, err := m.Assemble(context.Background(), st, 0, TokenBudget{Input: input})
+			if err != nil {
+				t.Fatalf("Assemble: %v", err)
+			}
+			if got := msgContents(out); !slices.Equal(got, tc.want) {
+				t.Errorf("kept %q, want %q: prior-turn history drops before current-run chains", shape(out), shape(State{Messages: messagesOf(tc.want)}))
+			}
+		})
+	}
+}
+
+// messagesOf wraps contents as messages, for shape in failure output.
+func messagesOf(contents []string) []Message {
+	out := make([]Message, len(contents))
+	for i, c := range contents {
+		out[i] = elastic("", c)
+	}
+	return out
+}
+
+// TestStickyEvictionNeedsBuiltInAssembly pins ruling P2-a: hiding needs a
+// low-water mark and built-in assembly, whichever form the built-in
+// compactor takes.
+func TestStickyEvictionNeedsBuiltInAssembly(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		m    ContextManager
+		want bool
+	}{
+		{"no low-water", ContextManager{}, false},
+		{"nil compactor", ContextManager{CompactionLowWater: 0.75}, true},
+		{"RecencyCompactor value", ContextManager{Compactor: RecencyCompactor{}, CompactionLowWater: 0.75}, true},
+		{"RecencyCompactor pointer", ContextManager{Compactor: &RecencyCompactor{}, CompactionLowWater: 0.75}, true},
+		{"mixed", ContextManager{Mixed: true, CompactionLowWater: 0.75}, true},
+		{"custom compactor", ContextManager{Compactor: passthroughCompactor{}, CompactionLowWater: 0.75}, false},
+	} {
+		if got := tc.m.stickyEviction(); got != tc.want {
+			t.Errorf("%s: stickyEviction = %t, want %t", tc.name, got, tc.want)
 		}
 	}
 }

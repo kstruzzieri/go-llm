@@ -243,8 +243,13 @@ func (m ContextManager) assembleMixed(ctx context.Context, st State, toolSchemaT
 		// The same input just built units, so this cannot fail; on the
 		// impossible error the full-budget allocation simply stands.
 		if lowUnits, lerr := m.buildMixedUnits(st); lerr == nil {
+			// Newest first, stopping at the goal, like newestCurrentRunGroup.
 			for i := len(lowUnits) - 1; i >= 0; i-- {
-				if k := lowUnits[i].kind; k == unitChain || k == unitPlainSpan {
+				k := lowUnits[i].kind
+				if k == unitPinned {
+					break
+				}
+				if k == unitChain || k == unitPlainSpan {
 					lowUnits[i].keep = true
 					break
 				}

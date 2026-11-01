@@ -96,8 +96,8 @@ type ContextManager struct {
 	// group), which holds the observation the model asked for and has not
 	// read; when the mark needs it gone, the step falls back the same way.
 	//
-	// With the built-in assembly (a nil Compactor, a RecencyCompactor value,
-	// or Mixed) every Elastic message a compacting step drops also stays out
+	// With the built-in assembly (a nil Compactor, a RecencyCompactor value
+	// or pointer, or Mixed) every Elastic message a compacting step drops also stays out
 	// of every later request of the same Run, so the first retained message,
 	// and the provider's cached prefix with it, holds for several steps. The
 	// dropped messages remain in State and Result.Messages. A later step's
@@ -141,8 +141,11 @@ func (m ContextManager) stickyEviction() bool {
 	if m.Mixed || m.Compactor == nil {
 		return true
 	}
-	_, builtin := m.Compactor.(RecencyCompactor)
-	return builtin
+	switch m.Compactor.(type) {
+	case RecencyCompactor, *RecencyCompactor:
+		return true
+	}
+	return false
 }
 
 func normalizeContextManager(m ContextManager) ContextManager {
