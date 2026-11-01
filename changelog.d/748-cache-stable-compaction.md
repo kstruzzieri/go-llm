@@ -10,8 +10,8 @@ qwen3-coder-next, `llm-bench -cache-probe` (pressure) now reports 27,992 of
 53,511 turn-1 prompt tokens cached (52.3%), up from 14,692 of 57,605 (25.5%).
 
 The setting is `agent.ContextManager.CompactionLowWater` (0, the default, keeps
-the previous behavior; otherwise a fraction in (0,1), and `Run` rejects anything
-else). Sticky eviction applies with the built-in assembly (no custom
+the previous just-enough fit; otherwise a fraction in (0,1), and `Run` rejects
+anything else). Sticky eviction applies with the built-in assembly (no custom
 `Compactor`, a `RecencyCompactor`, or `Mixed`); a custom `Compactor` receives the
 fraction in `TokenBudget.LowWaterFraction` but no hiding. A later step's
 `Pressure` counts only what that step dropped, and mixed-assembly trace omission

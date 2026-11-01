@@ -106,7 +106,11 @@ type ContextManager struct {
 	// in neither Evicted, Mitigation nor Level. A custom Compactor receives
 	// the fraction as TokenBudget.LowWaterFraction but nothing is hidden
 	// from it, because it may synthesize replacements for what it drops and
-	// would never see those messages again.
+	// would never see those messages again. Such a compactor (including a
+	// decorator around RecencyCompactor) must keep its own record of what it
+	// dropped to benefit; one that drops to the mark from the full state on
+	// every step keeps less context and still moves the prefix each step, so
+	// leave the fraction 0 for it.
 	CompactionLowWater float64
 }
 

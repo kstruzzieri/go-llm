@@ -186,6 +186,14 @@ func TestRunCompactionCutPointStable(t *testing.T) {
 	if stickyCompactions == 0 || baseCompactions == 0 {
 		t.Fatalf("compactions = %d (0.75), %d (0); the fixture must compact", stickyCompactions, baseCompactions)
 	}
+	// Every "compaction" event marks a request whose prefix moved, and no
+	// other request moves it: Golem's footer reports the event count as the
+	// number of cache misses compaction caused. A step that only keeps the
+	// sticky set hidden must not count as a compaction.
+	if sticky != stickyCompactions || base != baseCompactions {
+		t.Errorf("cut point moved %d/%d times with %d/%d compaction events (0.75/0); want each move to be exactly one event",
+			sticky, base, stickyCompactions, baseCompactions)
+	}
 	if sticky > 3 {
 		t.Errorf("cut point moved %d times at low-water 0.75, want <= 3", sticky)
 	}
@@ -702,6 +710,57 @@ func TestStickyEvictionNeedsBuiltInAssembly(t *testing.T) {
 	} {
 		if got := tc.m.stickyEviction(); got != tc.want {
 			t.Errorf("%s: stickyEviction = %t, want %t", tc.name, got, tc.want)
+		}
+	}
+}
+
+// recordingCompactor delegates to a RecencyCompactor, so it compacts like the
+// built-in one, but is a custom Compactor: it records how many messages each
+// call received and the low-water fraction it was given.
+type recordingCompactor struct {
+	inner     RecencyCompactor
+	sizes     []int
+	fractions []float64
+}
+
+func (c *recordingCompactor) Compact(ctx context.Context, st State, b TokenBudget) (State, CompactionReport, error) {
+	c.sizes = append(c.sizes, len(st.Messages))
+	c.fractions = append(c.fractions, b.LowWaterFraction)
+	return c.inner.Compact(ctx, st, b)
+}
+
+// TestRunCustomCompactorSeesEveryMessage pins the Run side of ruling P2-a: a
+// custom Compactor gets the low-water fraction, but nothing a compacting step
+// dropped is hidden from it, because it may synthesize replacements for what
+// it drops. TestStickyEvictionNeedsBuiltInAssembly checks only the predicate.
+func TestRunCustomCompactorSeesEveryMessage(t *testing.T) {
+	const goal = "q"
+	script := toolScript("bulky", 12)
+	mc := &scriptedCaller{responses: script}
+	rec := &recordingCompactor{inner: RecencyCompactor{Estimate: runeEstimator}}
+	// The cutPointRun ceiling: the sixth chain forces the first compaction.
+	ceiling := fixedRunCost(t, "", bulkyTool{}) + runeEstimator(goal) +
+		5*chainCost(nthCall("bulky", 12), strings.Repeat("X", 400))
+	res, err := New(mc, ContextManager{Compactor: rec, Estimate: runeEstimator, CompactionLowWater: 0.75}).Run(context.Background(), Request{
+		Goal: goal, MaxSteps: len(script), Tools: []Tool{bulkyTool{}},
+		Budget: Budget{InputCeiling: ceiling},
+	}, nil)
+	if err != nil || res.StopReason != Completed {
+		t.Fatalf("Run: %v, stop %v", err, res.StopReason)
+	}
+	if eventCount(res.Events, "compaction") == 0 {
+		t.Fatal("no compaction event; the fixture must compact")
+	}
+	if len(rec.sizes) != len(script) {
+		t.Fatalf("compactor called %d times, want %d", len(rec.sizes), len(script))
+	}
+	for step, n := range rec.sizes {
+		// The goal plus one call and one result per earlier step.
+		if want := 1 + 2*step; n != want {
+			t.Errorf("step %d: compactor received %d messages, want all %d", step, n, want)
+		}
+		if rec.fractions[step] != 0.75 {
+			t.Errorf("step %d: LowWaterFraction = %v, want 0.75", step, rec.fractions[step])
 		}
 	}
 }
