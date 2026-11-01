@@ -45,8 +45,9 @@ const advisoryOwner = -1
 // rendered into the prompt (replayedTexts). A key that occurs in any of them
 // as keyLetters reads it (any letter case, split by any non-key characters)
 // is replaced by a fresh promptfence.New key, never a retired one. Every key
-// a text exposes rotates, one owner per count. Rotation changes the owner's frame on every later render, so
-// the prompt cache misses from that message on; ordinary text never matches
+// a text exposes rotates, and each rotation counts once. Rotation changes
+// the owner's frame on every later render, so the prompt cache misses from
+// that message on; ordinary text never matches
 // a random key, so it rotates nothing.
 //
 // Trust boundary: the scan reads Run state. A custom Compactor is trusted

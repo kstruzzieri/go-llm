@@ -899,6 +899,9 @@ func TestRotationScansEveryReplayedField(t *testing.T) {
 		{"split by hyphens", 0, func(k string) Message { return said(splitKey(k, "-")) }},
 		{"split by newlines", 0, func(k string) Message { return said(splitKey(k, "\n")) }},
 		{"split by combining marks", 0, func(k string) Message { return said(splitKey(k, string(rune(0x0301)))) }},
+		// 0, 1, 8 and 9 are outside the base32 key alphabet, so they separate.
+		{"split by digit zero", 0, func(k string) Message { return said(splitKey(k, "0")) }},
+		{"split by digit eight", 0, func(k string) Message { return said(splitKey(k, "8")) }},
 	}
 	base := func() State {
 		return State{Messages: []Message{
