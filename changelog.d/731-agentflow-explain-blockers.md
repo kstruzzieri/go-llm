@@ -15,6 +15,7 @@ plain `next-step`.
   amendment or calls the model. Previously it recorded the review first.
 - A reason code this Golem does not know, which a newer AgentFlow may add,
   stops the run until Golem is updated.
+- Malformed explain replies, including null diagnostic entries, stop the run.
 
 Human `-agentflow-status` now lists each current recorded blocker from
 `next-action`, a blocked or failed attempt that no later attempt of the step

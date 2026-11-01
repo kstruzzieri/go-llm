@@ -481,6 +481,8 @@ func TestClient_ExplainNextStep_DecodesEachReasonCode(t *testing.T) {
 			NextStepExplanation{ReasonCode: NextStepDependenciesUnmet, Diagnostics: []string{"step P1 has open attempt A1 (owner golem)", "step P2 waits on unmet dependencies: P1"}}},
 		{"open_attempts", `{"diagnostics":["step P1 has open attempt A1 (owner golem)"],"reason_code":"open_attempts","step":null}`,
 			NextStepExplanation{ReasonCode: NextStepOpenAttempts, Diagnostics: []string{"step P1 has open attempt A1 (owner golem)"}}},
+		{"empty diagnostic", `{"diagnostics":[""],"reason_code":"open_attempts","step":null}`,
+			NextStepExplanation{ReasonCode: NextStepOpenAttempts, Diagnostics: []string{""}}},
 		{"steps_complete", `{"diagnostics":[],"reason_code":"steps_complete","step":null}`,
 			NextStepExplanation{ReasonCode: NextStepStepsComplete, Diagnostics: []string{}}},
 	} {
@@ -510,6 +512,8 @@ func TestClient_ExplainNextStep_RejectsMalformedPayload(t *testing.T) {
 		`{"diagnostics":[],"reason_code":"eligible","step":"P1"}`,
 		`{"diagnostics":[],"reason_code":"open_attempts","step":{"id":"P1"}}`,
 		`{"diagnostics":null,"reason_code":"steps_complete","step":null}`,
+		`{"diagnostics":[null],"reason_code":"steps_complete","step":null}`,
+		`{"diagnostics":["step P1 has open attempt A1",null],"reason_code":"open_attempts","step":null}`,
 		`{"diagnostics":[7],"reason_code":"steps_complete","step":null}`,
 		`{"step":`,
 	} {

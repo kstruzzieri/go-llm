@@ -291,9 +291,16 @@ func (c *Client) ExplainNextStep(ctx context.Context) (NextStepExplanation, erro
 	default:
 		return NextStepExplanation{}, fmt.Errorf("agentflow next-step reported unknown reason_code %q; update Golem", code)
 	}
-	var diagnostics []string
-	if string(rawDiagnostics) == "null" || json.Unmarshal(rawDiagnostics, &diagnostics) != nil {
+	var diagnosticValues []*string // distinguish JSON null from an empty string
+	if string(rawDiagnostics) == "null" || json.Unmarshal(rawDiagnostics, &diagnosticValues) != nil {
 		return bad("diagnostics is not an array of strings")
+	}
+	diagnostics := make([]string, len(diagnosticValues))
+	for i, value := range diagnosticValues {
+		if value == nil {
+			return bad("diagnostics is not an array of strings")
+		}
+		diagnostics[i] = *value
 	}
 	next := NextStepExplanation{ReasonCode: code, Diagnostics: diagnostics}
 	if code != NextStepEligible {
