@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"sync/atomic"
 	"testing"
@@ -201,6 +202,19 @@ func runWiringTurn(t *testing.T, progressive bool, host agent.Observer) (int32, 
 		return nil
 	})
 	return calls.Load(), events, runErr
+}
+
+// TestNewContextManagerSetsGolemAssembly pins Golem's assembly settings
+// (spec D2.4 low-water 0.75, Mixed = progressive). The runtime default, the
+// golem CLI's main loop and dispatch children, and the llm-bench cache probe
+// all take their ContextManager from NewContextManager.
+func TestNewContextManagerSetsGolemAssembly(t *testing.T) {
+	for _, progressive := range []bool{false, true} {
+		want := agent.ContextManager{Mixed: progressive, CompactionLowWater: 0.75}
+		if got := golem.NewContextManager(progressive); !reflect.DeepEqual(got, want) {
+			t.Errorf("NewContextManager(%t) = %+v, want %+v", progressive, got, want)
+		}
+	}
 }
 
 // TestProgressiveOptionEnablesMixedAssembly is the CONTENT pin on

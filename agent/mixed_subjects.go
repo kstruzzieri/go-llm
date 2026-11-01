@@ -133,6 +133,10 @@ type mixedUnit struct {
 	anchors    []*mixedAnchor
 	subject    *mixedSubject // every kind except pinned/unresolved (must-fit)
 	evicted    bool          // chains
+	// keep marks the newest current-run unit in a low-water pass: it is
+	// admitted right after the must-fit reservations, and losing it fails
+	// the pass with ErrContextExhausted (CompactionLowWater).
+	keep bool
 }
 
 // buildMixedUnits returns the allocation units for st.Messages in stable input

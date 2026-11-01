@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"maps"
 	"math"
 	"reflect"
 	"slices"
@@ -338,18 +339,97 @@ func TestMixedLowWaterFallsBackToFullBudget(t *testing.T) {
 	}
 }
 
+// TestLowWaterKeepsNewestObservation covers the window pinned < mark <
+// pinned + newest group: dropping to the mark would take the observation the
+// model asked for on the previous step and has not read, and sticky hiding
+// would keep it out for good. Every request after a tool step must carry
+// that step's calls and results.
+func TestLowWaterKeepsNewestObservation(t *testing.T) {
+	bulky := strings.Repeat("X", 400)
+	t.Run("legacy", func(t *testing.T) {
+		chain := chainCost(nthCall("bulky", 1), bulky)
+		script := toolScript("bulky", 4)
+		mc := &capturingScriptedCaller{scriptedCaller: scriptedCaller{responses: script}}
+		res, err := lowWaterOrchestrator(mc, 0.75).Run(context.Background(), Request{
+			Goal: "q", MaxSteps: len(script), Tools: []Tool{bulkyTool{}},
+			Budget: Budget{InputCeiling: fixedRunCost(t, "", bulkyTool{}) + 1 + chain + chain/2},
+		}, nil)
+		assertNewestObservations(t, mc.reqs, res, err, len(script), func(k int) map[string]string {
+			return map[string]string{fmt.Sprintf("c%d", k): bulky}
+		})
+	})
+	t.Run("mixed", func(t *testing.T) {
+		// Each step calls a structured lookup (keeping mixed assembly on) and
+		// bulky together; the pair is one group whose base is mostly bulky.
+		alt := strings.Repeat("s", 10)
+		var sets []*ContextSet
+		var script []ModelResult
+		for i := 1; i <= 4; i++ {
+			sets = append(sets, oneAltSet(fmt.Sprintf("f%d.go", i), alt))
+			args := fmt.Sprintf(`{"n":%d}`, i)
+			script = append(script, toolCallResponse(call(fmt.Sprintf("c%d", i), "lookup", args), call(fmt.Sprintf("d%d", i), "bulky", args)))
+		}
+		script = append(script, finalAnswer("done"))
+		tools := []Tool{queuedSets(sets...), bulkyTool{}}
+		pair := []provider.ToolCall{call("c1", "lookup", `{"n":1}`), call("d1", "bulky", `{"n":1}`)}
+		group := lowWaterMgr.messageCost(assistantMessage(provider.ChatResponse{ToolCalls: pair})) +
+			lowWaterMgr.messageCost(toolObservation(pair[0], ToolResult{Content: alt})) +
+			lowWaterMgr.messageCost(toolObservation(pair[1], ToolResult{Content: bulky}))
+		mc := &capturingScriptedCaller{scriptedCaller: scriptedCaller{responses: script}}
+		res, err := New(mc, ContextManager{Mixed: true, Estimate: runeEstimator, CompactionLowWater: 0.75}).Run(context.Background(), Request{
+			Goal: "q", MaxSteps: len(script), Tools: tools,
+			Budget: Budget{InputCeiling: fixedRunCost(t, "", tools...) + 1 + group + group/2},
+		}, nil)
+		assertNewestObservations(t, mc.reqs, res, err, len(script), func(k int) map[string]string {
+			return map[string]string{fmt.Sprintf("c%d", k): alt, fmt.Sprintf("d%d", k): bulky}
+		})
+	})
+}
+
+// assertNewestObservations checks a completed, compacting Run in which
+// request k (k >= 1) carries want(k): each tool call ID with its unframed
+// result.
+func assertNewestObservations(t *testing.T, reqs []provider.ChatRequest, res Result, err error, n int, want func(k int) map[string]string) {
+	t.Helper()
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.StopReason != Completed || len(reqs) != n {
+		t.Fatalf("stopped %v after %d requests, want completed after %d", res.StopReason, len(reqs), n)
+	}
+	if eventCount(res.Events, "compaction") == 0 {
+		t.Fatal("never compacted; the fixture must compact")
+	}
+	for k := 1; k < len(reqs); k++ {
+		got := map[string]string{}
+		for _, m := range toolMessagesOf(reqs[k]) {
+			got[m.ToolCallID] = frameInner(t, m.Content, extractToolFrameKey(t, m.Content))
+		}
+		for id, content := range want(k) {
+			if got[id] != content {
+				t.Errorf("request %d: %s result missing or wrong (tool messages %v); the newest observation must be kept", k, id, slices.Sorted(maps.Keys(got)))
+			}
+		}
+	}
+}
+
 // TestMixedLowWaterAllocatesFreshAtTheMark pins that the low-water pass is a
 // fresh allocation at the mark. allocateMixed mutates its units (omitted
 // spans, evicted chains, chosen alternatives), so a pass over the full-budget
 // pass's units would keep that pass's omissions: here the history span the
-// full pass omitted, which the mark admits once the newer chain is evicted.
+// full pass omitted, which the mark admits once the older chain c0 is
+// evicted. The newest chain c1 is kept at the mark (it holds the observation
+// the model has not read yet).
 func TestMixedLowWaterAllocatesFreshAtTheMark(t *testing.T) {
 	st := State{Messages: []Message{
-		history("user", strings.Repeat("q", 30)), history("assistant", strings.Repeat("a", 30)), // span: 60
+		history("user", strings.Repeat("q", 20)), history("assistant", strings.Repeat("a", 20)), // span: 40
 		gateAnchor(pinned("user", strings.Repeat("G", 100))), // must-fit: 100
-		mixedAsstCall("c1"), mixedToolResult("c1", strings.Repeat("r", 170), nil, 0), // chain: 200
+		mixedAsstCall("c0"), mixedToolResult("c0", strings.Repeat("o", 70), nil, 0), // chain: 100
+		mixedAsstCall("c1"), mixedToolResult("c1", strings.Repeat("n", 30), nil, 0), // chain: 60
 	}}
-	const full = 320 // goal + chain fit, the span does not
+	// Goal and both chains fit, the span does not. At the 210 mark c1 and the
+	// span fit beside the goal and c0 does not.
+	const full = 280
 	mark, _ := lowWaterMark(full, 0.75)
 	mixed := ContextManager{Mixed: true, Estimate: runeEstimator}
 	atFull, _, err := mixed.Assemble(context.Background(), st, 0, TokenBudget{Input: full})
@@ -368,6 +448,9 @@ func TestMixedLowWaterAllocatesFreshAtTheMark(t *testing.T) {
 	}
 	if got, want := msgContents(low), msgContents(atMark); !slices.Equal(got, want) || slices.Equal(got, msgContents(atFull)) {
 		t.Errorf("low-water kept %q, want a fresh allocation at the mark %q (the full budget keeps %q)", shape(low), shape(atMark), shape(atFull))
+	}
+	if !slices.Contains(msgContents(low), strings.Repeat("n", 30)) {
+		t.Errorf("low-water kept %q, want the newest chain c1", shape(low))
 	}
 }
 

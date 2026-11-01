@@ -91,16 +91,22 @@ type ContextManager struct {
 	// "just enough" behavior; any other value must lie in (0,1), or Run
 	// fails before its first model call. When the mark is unreachable
 	// (pinned and unresolved content alone sit above it), the step falls
-	// back to the just-enough fit.
+	// back to the just-enough fit. A low-water fit never drops the newest
+	// current-run group (the newest completed tool chain or plain Elastic
+	// group), which holds the observation the model asked for and has not
+	// read; when the mark needs it gone, the step falls back the same way.
 	//
 	// With the built-in assembly (a nil Compactor, a RecencyCompactor value,
 	// or Mixed) every Elastic message a compacting step drops also stays out
 	// of every later request of the same Run, so the first retained message,
 	// and the provider's cached prefix with it, holds for several steps. The
-	// dropped messages remain in State and Result.Messages. A custom
-	// Compactor receives the fraction as TokenBudget.LowWaterFraction but
-	// nothing is hidden from it, because it may synthesize replacements for
-	// what it drops and would never see those messages again.
+	// dropped messages remain in State and Result.Messages. A later step's
+	// Pressure counts only what that step itself dropped, so content withheld
+	// since an earlier compaction shows in neither Evicted, Mitigation nor
+	// Level. A custom Compactor receives the fraction as
+	// TokenBudget.LowWaterFraction but nothing is hidden from it, because it
+	// may synthesize replacements for what it drops and would never see those
+	// messages again.
 	CompactionLowWater float64
 }
 

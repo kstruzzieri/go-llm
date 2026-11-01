@@ -19,6 +19,16 @@ import (
 var ErrDestinationPolicyIneffective = errors.New(
 	"golem: DestinationPolicy has no effect with a caller-supplied Orchestrator; the host owns those transports")
 
+// NewContextManager returns Golem's assembly settings: Mixed (#331 mixed
+// assembly) when progressive, and CompactionLowWater 0.75, the in-Run
+// low-water mark of the prompt-cache design (spec D2.4), so a compacting step
+// keeps the cached prefix still for several steps. Every Golem orchestrator
+// uses it: the runtime default, the golem CLI's main loop and its dispatch
+// children.
+func NewContextManager(progressive bool) agent.ContextManager {
+	return agent.ContextManager{Mixed: progressive, CompactionLowWater: 0.75}
+}
+
 // bootstrapOrchestrator builds the config-driven orchestrator behind the
 // destination-admission boundary (#477): the frozen network plan resolves
 // every route BEFORE any I/O, the policy is checked against the resulting
@@ -86,9 +96,7 @@ func bootstrapOrchestrator(ctx context.Context, configPath string, policy provid
 	if useBuiltInSummarizer {
 		summarizer = agent.NewRouterSummarizer(bundle.Router, summarizeRoute.Chain)
 	}
-	// Spec D2.4: compact to a 75% low-water mark, as cmd/golem's
-	// golemContextManager does, so the cached prefix holds across steps.
-	return agent.New(agent.NewRouterModelCallerWithChain(bundle.Router, agentRoute.Chain), agent.ContextManager{Mixed: progressive, CompactionLowWater: 0.75}), bundle, summarizer, nil
+	return agent.New(agent.NewRouterModelCallerWithChain(bundle.Router, agentRoute.Chain), NewContextManager(progressive)), bundle, summarizer, nil
 }
 
 func loadConfig(path string) (*config.Config, error) {

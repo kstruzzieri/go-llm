@@ -189,7 +189,9 @@ type Pressure struct {
 	// Evicted counts whole GROUPS the assembler dropped: a conversation span or
 	// a completed tool chain under legacy compaction and under mixed assembly
 	// alike. It never counts a partial trim inside a retained group — see
-	// AnchorOmissions.
+	// AnchorOmissions. Under ContextManager.CompactionLowWater, groups an
+	// earlier step of the Run dropped are no longer assembled, so a later
+	// step does not count them again.
 	Evicted int
 	// Compactions is 1 when the assembler shed anything this turn and 0
 	// otherwise, and is what the orchestrator's "compaction" EventRecord keys

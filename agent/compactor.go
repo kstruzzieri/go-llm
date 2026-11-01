@@ -230,6 +230,18 @@ func (rc RecencyCompactor) groups(st State) []compactionGroup {
 	return out
 }
 
+// newestCurrentRunGroup is the index of the last droppable group that is
+// not prior-session history (a completed tool chain or plain Elastic
+// group), or -1.
+func newestCurrentRunGroup(groups []compactionGroup) int {
+	for i := len(groups) - 1; i >= 0; i-- {
+		if k := groups[i].kind; k == groupCompletedTool || k == groupPlainElastic {
+			return i
+		}
+	}
+	return -1
+}
+
 // lowWaterMark is int(input*frac), the size a compacting fit drops to, and
 // false when frac is off or outside (0,1): the fit then drops just enough.
 func lowWaterMark(input int, frac float64) (int, bool) {
@@ -256,8 +268,14 @@ func (rc RecencyCompactor) Compact(ctx context.Context, st State, b TokenBudget)
 		}
 	}
 	// Over budget, a low-water fit drops to the mark rather than to Input,
-	// so the next steps fit without moving the cut point again.
+	// so the next steps fit without moving the cut point again. It never
+	// drops the newest current-run group: that holds the observation the
+	// model asked for and has not read, and a Run hides what was dropped.
 	target, lowWater := lowWaterMark(b.Input, b.LowWaterFraction)
+	keep := -1
+	if lowWater {
+		keep = newestCurrentRunGroup(groups)
+	}
 	remaining := before
 	dropped := 0
 	arithmeticOK := true
@@ -266,7 +284,7 @@ func (rc RecencyCompactor) Compact(ctx context.Context, st State, b TokenBudget)
 			if !arithmeticOK || remaining <= target {
 				return
 			}
-			if groups[i].kind == kind {
+			if groups[i].kind == kind && i != keep {
 				groups[i].drop = true
 				remaining, arithmeticOK = checkedTokenSub(remaining, groups[i].tokens)
 				dropped++
@@ -282,8 +300,8 @@ func (rc RecencyCompactor) Compact(ctx context.Context, st State, b TokenBudget)
 	dropKind(groupCompletedTool)
 	dropKind(groupPlainElastic)
 	if lowWater && remaining > target {
-		// Pinned and unresolved content alone sit above the mark: return
-		// exactly the just-enough fit, never an error low-water caused.
+		// Pinned, unresolved and newest content alone sit above the mark:
+		// return exactly the just-enough fit, never an error low-water caused.
 		b.LowWaterFraction = 0
 		return rc.Compact(ctx, st, b)
 	}

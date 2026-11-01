@@ -41,6 +41,11 @@ var ErrMixedCompactor = errors.New("agent: ContextManager.Mixed is incompatible 
 // a retained anchor whose subjects were ALL omitted, whose rows are then every
 // one of them a zero-cost omission while its placeholder text is model-visible
 // and paid for. The rows therefore deliberately do not sum to the total.
+//
+// Under ContextManager.CompactionLowWater a step that evicts allocates against
+// the low-water mark, not MaxTokens, so its omission reasons are judged
+// against the mark: a row can read token_budget while EstimatedTokensFree
+// exceeds its cost. The trace does not record the mark.
 type ContextAssemblyTrace struct {
 	MaxTokens           int
 	EstimatedTokensUsed int
@@ -227,11 +232,21 @@ func (m ContextManager) assembleMixed(ctx context.Context, st State, toolSchemaT
 	}
 	// Low-water (CompactionLowWater): a step that had to evict allocates again
 	// against the mark, so later steps fit without evicting. allocateMixed
-	// mutates its units, so that pass gets fresh ones. When the must-fit units
-	// alone sit above the mark it fails, and the full-budget allocation above
-	// stands: low-water never turns a fit into an error.
+	// mutates its units, so that pass gets fresh ones, and it keeps the newest
+	// current-run unit, whose observation the model has not read yet. When the
+	// must-fit units and that unit do not fit the mark, the pass fails and the
+	// full-budget allocation above stands: low-water never turns a fit into an
+	// error.
 	if mark, ok := lowWaterMark(stateBudget, m.CompactionLowWater); ok && alloc.evictedGroups > 0 {
+		// The same input just built units, so this cannot fail; on the
+		// impossible error the full-budget allocation simply stands.
 		if lowUnits, lerr := m.buildMixedUnits(st); lerr == nil {
+			for i := len(lowUnits) - 1; i >= 0; i-- {
+				if k := lowUnits[i].kind; k == unitChain || k == unitPlainSpan {
+					lowUnits[i].keep = true
+					break
+				}
+			}
 			if lowAlloc, lerr := m.allocateMixed(ctx, lowUnits, mark, sysTokens); lerr == nil {
 				units, alloc = lowUnits, lowAlloc
 			}

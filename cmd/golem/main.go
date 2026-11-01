@@ -747,18 +747,6 @@ func newOrchestratorFactory(caller agent.ModelCaller, f flags, verifier agent.Ve
 	return newOrchestratorFactoryChain(caller, f, verifier, interceptorsFor(f, canary))
 }
 
-// golemCompactionLowWater is the in-Run low-water mark every Golem Run
-// compacts to (spec D2.4): a compacting step drops to 75% of the state
-// budget and keeps what it dropped out, so the cached prefix holds for
-// several steps.
-const golemCompactionLowWater = 0.75
-
-// golemContextManager is the ContextManager every Golem orchestrator uses,
-// the main loop's and the dispatch children's alike.
-func golemContextManager(progressive bool) agent.ContextManager {
-	return agent.ContextManager{Mixed: progressive, CompactionLowWater: golemCompactionLowWater}
-}
-
 // newOrchestratorFactoryChain is newOrchestratorFactory with the chain
 // supplied by the caller instead of derived from the flags. Production always
 // reaches it through newOrchestratorFactory; the #517 Secrets workflow table
@@ -787,7 +775,7 @@ func newOrchestratorFactoryChain(caller agent.ModelCaller, f flags, verifier age
 	// same flags value.
 	opts = append(opts, agent.WithInterceptors(chain...))
 	return func() *agent.Orchestrator {
-		return agent.New(caller, golemContextManager(f.progressive), opts...)
+		return agent.New(caller, golemruntime.NewContextManager(f.progressive), opts...)
 	}
 }
 
