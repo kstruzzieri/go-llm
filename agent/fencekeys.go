@@ -4,6 +4,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/kstruzzieri/go-llm/internal/promptfence"
 )
@@ -41,9 +42,10 @@ const advisoryOwner = -1
 // The live keys are every tool message's key and the advisory key, which is
 // rotated in place; a nil or zero advisory is not live. Each message at
 // index from or later contributes every string replayed to the provider or
-// rendered into the prompt (replayedTexts). A key that occurs in any of them,
-// in any letter case, is replaced by a fresh promptfence.New key, never a
-// retired one. Rotation changes the owner's frame on every later render, so
+// rendered into the prompt (replayedTexts). A key that occurs in any of them
+// as keyLetters reads it (any letter case, split by any non-key characters)
+// is replaced by a fresh promptfence.New key, never a retired one. Every key
+// a text exposes rotates, one owner per count. Rotation changes the owner's frame on every later render, so
 // the prompt cache misses from that message on; ordinary text never matches
 // a random key, so it rotates nothing.
 //
@@ -52,9 +54,10 @@ const advisoryOwner = -1
 // synthesizes during assembly is not. Golem uses RecencyCompactor, and mixed
 // assembly forbids custom compactors.
 //
-// ponytail: each text is searched once per live key, O(text x keys); a single
-// pass over fixed-width windows looked up in the live map is the upgrade if
-// a Run ever holds enough keys for that to show.
+// ponytail: each text is projected once (linear), then searched once per live
+// key, O(text x keys); a single pass over fixed-width windows of the
+// projection looked up in the live map is the upgrade if a Run ever holds
+// enough keys for that to show.
 func refreshFenceKeys(st *State, advisory *promptfence.Fence, from int) (next int, rotated int) {
 	live := map[string]int{}
 	for i, m := range st.Messages {
@@ -67,10 +70,9 @@ func refreshFenceKeys(st *State, advisory *promptfence.Fence, from int) (next in
 	}
 	for i := from; i < len(st.Messages); i++ {
 		for _, text := range replayedTexts(st.Messages[i]) {
-			// ToLower first so the Kelvin sign folds to K like k does.
-			up := strings.ToUpper(strings.ToLower(text))
+			letters := keyLetters(text)
 			for id, owner := range live {
-				if !strings.Contains(up, id) {
+				if !strings.Contains(letters, id) {
 					continue
 				}
 				fresh := promptfence.New() // never a retired key
@@ -86,6 +88,27 @@ func refreshFenceKeys(st *State, advisory *promptfence.Fence, from int) (next in
 		}
 	}
 	return mintFenceKeys(st, from), rotated
+}
+
+// keyLetters is what the key search reads of text: each rune case-folded
+// (lower, then upper, so the Kelvin sign folds to K as k does) and projected
+// onto the key alphabet [A-Z2-7], every other rune dropped. A key split by
+// invisible format characters (U+200B, U+2060, U+FEFF, U+00AD), spaces,
+// hyphens, line breaks or combining marks still matches, as a reader still
+// reads it. Keys are 12 random characters of that alphabet, so the
+// projection loses no match; a false match needs a chance run of a live
+// key's 12 characters, about N x 2^-60 per live key over N projected
+// characters. Confusables (Cyrillic or fullwidth look-alikes, precomposed
+// accented letters) are dropped, not mapped: mapping them needs the UTS #39
+// confusables table, which is out of scope.
+func keyLetters(text string) string {
+	return strings.Map(func(r rune) rune {
+		r = unicode.ToUpper(unicode.ToLower(r))
+		if 'A' <= r && r <= 'Z' || '2' <= r && r <= '7' {
+			return r
+		}
+		return -1
+	}, text)
 }
 
 // escapedRune is a \uXXXX escape behind one or more backslashes: a JSON
