@@ -244,7 +244,10 @@ func runCacheProbe(ctx context.Context, real agent.ModelCaller, fixtureDir strin
 	}
 	sessionID := "probe-" + rand.Text()
 	pc := &probeCaller{real: real, sc: sc}
-	orch := agent.New(pc, agent.ContextManager{})
+	// Golem's assembly settings, so the probe matches Golem by construction
+	// (including its in-Run low-water mark, spec D2.4); the uncompacted scenario
+	// never compacts, so the mark changes nothing there.
+	orch := agent.New(pc, golem.NewContextManager(false))
 	system := golem.SystemPrompt(false, false)
 
 	var history []provider.ChatMessage
