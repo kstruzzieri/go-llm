@@ -182,8 +182,14 @@ golem -root <workspace> -agentflow-status -json
 Human status shows the authoritative `next-action` state and reason, current
 step/gate, attempt owner and lease, typed gate statuses, diagnostics, and the
 serial resume disposition. Any suggested command is labeled display-only and
-is never executed. JSON mode relays AgentFlow's exact `next-action --json`
-bytes. Both forms use actor `golem`. Status first runs `agentflow --version` and
+is never executed. Human status also lists each current recorded blocker, a
+`blocked` or `failed` attempt close that no later attempt of the same step has
+superseded, as `recorded blocker: <step>/<attempt> <event> at <time> (owner
+<owner>): <reason>`. These lines are escaped like every other status line, the
+reason is cut at 200 characters, and they are display-only: they never change
+the exit code or the resume disposition. JSON mode relays AgentFlow's exact
+`next-action --json` bytes, which carry every recorded blocker, superseded ones
+included. Both forms use actor `golem`. Status first runs `agentflow --version` and
 refuses an AgentFlow outside 1.x; it then reads `next-action` and, before
 offering recovery, independently checks any existing proof with the read-only
 `verify-proof` command.
@@ -431,6 +437,11 @@ and the `-p` result's `stopReason`. On `-agentflow-resume` the same error
 follows `agentflow resume failed:`. For a parallel worker it appears inside the
 cohort failure, after `run parallel cohort:` and `worker <id>:`.
 
+Until a new attempt of that step opens, human `-agentflow-status` shows the
+block as a recorded blocker carrying the fixed reason, for example
+`recorded blocker: P1/A1 blocked at 2026-10-31T15:30:06+00:00 (owner golem):
+golem: gate execution failed`.
+
 Ctrl-C during the model run cancels it, and Golem then attempts to close the
 attempt with the reason `golem: agent run cancelled`. Ctrl-C during one of the
 step's gates ends that `run` call, and Golem attempts to close the attempt with
@@ -646,13 +657,22 @@ For an external plan, the task driver order is:
    recommendation once through AgentFlow.
 4. Initialize execution, run plan steps and declared gates, and print the same
    route again immediately before review-manifest ingestion.
-5. After the steps and any review amendments, ask `next-action` whether step
-   work remains, and continue only from a run-phase state (`run_unverified`,
-   `drift_failing`, `proof_missing`, `proof_stale`, `complete`).
-   `proof_failing` exits 1 and points at `.agent/proof-pack.json`, preserving
-   that proof. AgentFlow's `next-step` returns nothing both when every step is
-   done and when remaining steps hold open attempts, so any other state or a
-   failed `next-action` call also stops before `finish-run`. A remaining-work
+5. Golem picks each step with `next-step --explain`. When AgentFlow reports
+   `open_attempts` or `dependencies_unmet` (step work remains, but no step is
+   eligible), the run stops before any review manifest is recorded and before
+   `finish-run`. The error quotes AgentFlow's diagnostics, for example
+   `reason_code "open_attempts" (step P1 has open attempt A1 (owner golem))`,
+   and sends you to `-agentflow-status`. A same-plan `-review-manifest` round
+   over a run that died with an attempt open stops here. A reason code this
+   Golem does not know (from a newer AgentFlow) or an invalid AgentFlow state
+   also stops the run. After `steps_complete` and any review amendments, ask
+   `next-action` whether step work remains, and continue only from a run-phase
+   state (`run_unverified`, `drift_failing`, `proof_missing`, `proof_stale`,
+   `complete`). `proof_failing` exits 1 and points at `.agent/proof-pack.json`,
+   preserving that proof. `steps_complete` does not decide whether a completed
+   step needs `amend-step`, and another writer can open an attempt after the
+   loop, so any other state or a failed `next-action` call also stops before
+   `finish-run`. A remaining-work
    error names the state and step and sends you to `-agentflow-status` for
    recovery checks, including independent verification of an existing proof.
    Status does not check resume's supplied-plan and handoff bindings, which

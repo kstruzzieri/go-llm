@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -104,7 +105,7 @@ func runAgentflowStatusWithRunner(ctx context.Context, out io.Writer, root strin
 			}
 			state.Diagnostics = append(state.Diagnostics, "next-action projection is malformed: "+err.Error())
 			disposition := recoveryDisposition{failClosed, 3, "blocked by malformed Agentflow projection"}
-			renderAgentflowStatus(out, state, nil, disposition)
+			renderAgentflowStatus(out, state, nil, disposition, true)
 			return statusExit(3)
 		}
 		// CheckVersion wraps launch failures; an unset approved name keeps its
@@ -166,7 +167,7 @@ func runAgentflowStatusWithRunner(ctx context.Context, out io.Writer, root strin
 		}
 		return statusExit(disposition.exitCode)
 	}
-	renderAgentflowStatus(out, state, proof, disposition)
+	renderAgentflowStatus(out, state, proof, disposition, true)
 	return statusExit(disposition.exitCode)
 }
 
@@ -818,7 +819,9 @@ func (d *driver) amendCompletedStep(ctx context.Context, root string, state agen
 	return d.runAttempt(ctx, step, attempt, goal)
 }
 
-func renderAgentflowStatus(out io.Writer, state agentflow.NextActionState, proof *agentflow.ProofSummary, disposition recoveryDisposition) {
+// renderAgentflowStatus prints the human status layout. showBlockers adds the
+// current recorded blockers; only -agentflow-status passes it (#731 B5).
+func renderAgentflowStatus(out io.Writer, state agentflow.NextActionState, proof *agentflow.ProofSummary, disposition recoveryDisposition, showBlockers bool) {
 	blocking := state.Blocking || disposition.action == failClosed
 	_, _ = fmt.Fprintf(out, "state: %s\nreason: %s\nblocking: %t\n", recoveryDisplayText(state.State), recoveryDisplayText(state.Reason), blocking)
 	if state.StepID != nil {
@@ -859,6 +862,9 @@ func renderAgentflowStatus(out io.Writer, state agentflow.NextActionState, proof
 	for _, diagnostic := range state.Diagnostics {
 		_, _ = fmt.Fprintf(out, "diagnostic: %s\n", recoveryDisplayText(diagnostic))
 	}
+	if showBlockers {
+		renderRecordedBlockers(out, state.RecordedBlockers)
+	}
 	if state.Command != "" || len(state.Args) > 0 {
 		_, _ = fmt.Fprintf(out, "advisory (display only): command=%q args=%q\n", state.Command, state.Args)
 	}
@@ -866,6 +872,51 @@ func renderAgentflowStatus(out io.Writer, state agentflow.NextActionState, proof
 	if proof != nil {
 		_, _ = fmt.Fprintf(out, "proof: verified\nartifact: %s\nchecks: passed=%d warning=%d failed=%d not_run=%d skipped=%d not_applicable=%d total=%d\n",
 			recoveryDisplayText(proof.Path), proof.Passed, proof.Warning, proof.Failed, proof.NotRun, proof.Skipped, proof.NotApplicable, proof.Total)
+	}
+}
+
+// renderResumeResult prints a successful resume's final state. It shares the
+// status layout but not the recorded blockers, which belong to
+// -agentflow-status (#731 B5).
+func renderResumeResult(out io.Writer, final agentflow.NextActionState, summary agentflow.ProofSummary) {
+	renderAgentflowStatus(out, final, &summary, resumeDisposition(final.State), false)
+}
+
+// recordedBlockerReasonRunes caps a blocker reason before escaping, so an
+// escape sequence is never split (#731 B3).
+const recordedBlockerReasonRunes = 200
+
+// renderRecordedBlockers prints next-action's current recorded blockers, one
+// line each, then one line for any entries it could not read (#731 B2-B3).
+// Display only: nothing branches on them.
+func renderRecordedBlockers(out io.Writer, raw json.RawMessage) {
+	blockers := agentflow.ParseRecordedBlockers(raw)
+	if blockers.NotAnArray {
+		_, _ = fmt.Fprintln(out, "recorded blockers: not shown (recorded_blockers is not an array); see -agentflow-status -json")
+		return
+	}
+	for _, b := range blockers.Current {
+		at := ""
+		if b.RecordedAt != nil {
+			at = " at " + recoveryDisplayText(*b.RecordedAt)
+		}
+		owner := "no owner"
+		if b.AttemptOwner != nil {
+			owner = "owner " + recoveryDisplayText(*b.AttemptOwner)
+		}
+		reason := "(no reason)"
+		if b.Reason != nil {
+			reason = *b.Reason
+			if runes := []rune(reason); len(runes) > recordedBlockerReasonRunes {
+				reason = string(runes[:recordedBlockerReasonRunes]) + "..."
+			}
+			reason = recoveryDisplayText(reason)
+		}
+		_, _ = fmt.Fprintf(out, "recorded blocker: %s/%s %s%s (%s): %s\n",
+			recoveryDisplayText(b.StepID), recoveryDisplayText(b.AttemptID), recoveryDisplayText(b.Event), at, owner, reason)
+	}
+	if blockers.Malformed > 0 {
+		_, _ = fmt.Fprintf(out, "recorded blockers: %d malformed entries not shown; see -agentflow-status -json\n", blockers.Malformed)
 	}
 }
 

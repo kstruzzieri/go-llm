@@ -12,14 +12,18 @@ re-renders earlier results still moves the prefix.
 
 Before each request the runtime scans every string of the new run text that
 is replayed to the provider or rendered into the prompt (message content, tool
-names, tool-call IDs and arguments, structured-context text), with `\uXXXX`
-escapes decoded, any letter case, and the text reduced to the key alphabet so
-spaces, hyphens, digits or invisible characters between key letters do not
-hide a key. Every live key it finds is replaced with a fresh one (never a
-retired one), and the library records one `fence_rotation` entry per rotated
-frame in `Result.Events`. Look-alike letters from other scripts are not
-matched. A custom `Compactor` is trusted: text it synthesizes while building a
-request is not scanned.
+names, tool-call IDs and arguments, structured-context text, and selected
+content joined across context groups). It checks nested `\uXXXX` escapes,
+fullwidth ASCII forms, any letter case, and the text reduced to the key
+alphabet so spaces, hyphens, digits or invisible characters between key
+letters do not hide a key. Every live key it finds is replaced with a fresh
+one (never a retired one), and the library records one `fence_rotation` entry
+per rotated frame in `Result.Events`. If the bounded scan reaches its limit
+(for example, with deeply nested escapes or an oversized result), it resets
+the live keys once, records `fence_scan_limit`, then resumes
+stable reuse. Other compatibility forms and cross-script look-alike letters
+are not matched. A custom `Compactor` is trusted: text it synthesizes while
+building a request is not scanned.
 
 The `ToolTrustContract` wording and every committed trace are unchanged. The
 containment inventory, hardening contract and mutation ledger record the new
@@ -31,5 +35,5 @@ built with `-build-injection-corpus` from a cases file whose `source` is
 `forged-close`; any `source` other than `injection` or `forged-close` is now
 rejected before anything is written. `-injection-report` with that
 registration adds a within-model forged-live vs forged-stale table. Results on
-two local models and a one-model #452 rerun are in
-`docs/llm/benchmarks/2026-10-31-forged-close.md`.
+two local models and one cloud model (kimi-k2.7-code on OpenCode Go), and a
+one-model #452 rerun, are in `docs/llm/benchmarks/2026-10-31-forged-close.md`.

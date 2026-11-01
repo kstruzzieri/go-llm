@@ -38,8 +38,10 @@ occur; the corpus puts the key there on purpose to price a scan miss.
   request, the decision point.
 - `registration.json` is the pre-registration (schema
   `llm-bench.injection-registration/v1`, as #452). Models: the two local
-  llama.cpp models, `qwen3-coder-next` and `gemma4:31b`, at temperature 0. A
-  cloud model is added only on the owner's approval, as a new registration.
+  llama.cpp models, `qwen3-coder-next` and `gemma4:31b`, at temperature 0, and
+  one cloud model, `kimi-k2.7-code` on OpenCode Go (host-fixed temperature 1,
+  so each hosted cell is one sample), added on the owner's approval by
+  re-registration before any hosted capture.
 
 ## Keys
 

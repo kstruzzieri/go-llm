@@ -23,8 +23,10 @@ import (
 // fakeAF records the ordered sequence of driver->agentflow calls.
 type fakeAF struct {
 	seq                []string
-	nextSteps          []string // ids to hand out, then "" (done)
+	nextSteps          []string // ids answered eligible, then steps_complete
 	i                  int
+	explanations       []agentflow.NextStepExplanation // when set, served instead of nextSteps
+	explanationIndex   int
 	review             agentflow.ReviewRun
 	failAt             map[string]error
 	proofError         error
@@ -117,14 +119,25 @@ func (f *fakeAF) MaterializeWorkflowContract(_ context.Context, recommendation a
 }
 func (f *fakeAF) InitExecution(context.Context) error { f.seq = append(f.seq, "init-exec"); return nil }
 func (f *fakeAF) Doctor(context.Context) error        { f.seq = append(f.seq, "doctor"); return nil }
-func (f *fakeAF) NextStep(context.Context) (string, error) {
+func (f *fakeAF) ExplainNextStep(context.Context) (agentflow.NextStepExplanation, error) {
 	f.seq = append(f.seq, "next-step")
+	if err := f.failure("next-step"); err != nil {
+		return agentflow.NextStepExplanation{}, err
+	}
+	if len(f.explanations) > 0 {
+		if f.explanationIndex < len(f.explanations) {
+			next := f.explanations[f.explanationIndex]
+			f.explanationIndex++
+			return next, nil
+		}
+		return agentflow.NextStepExplanation{ReasonCode: agentflow.NextStepStepsComplete}, nil
+	}
 	if f.i < len(f.nextSteps) {
 		s := f.nextSteps[f.i]
 		f.i++
-		return s, nil
+		return agentflow.NextStepExplanation{StepID: s, ReasonCode: agentflow.NextStepEligible}, nil
 	}
-	return "", nil
+	return agentflow.NextStepExplanation{ReasonCode: agentflow.NextStepStepsComplete}, nil
 }
 func (f *fakeAF) ClaimStep(_ context.Context, id string) (string, error) {
 	f.seq = append(f.seq, "claim:"+id)
@@ -345,8 +358,9 @@ func TestDriver_ParallelCohortFailuresAbortBeforeSerialWork(t *testing.T) {
 	}
 }
 
-// #651: next-step also returns nothing when the remaining step holds an open
-// attempt, so the serial loop ending is not proof the work is done.
+// #651, #731: next-step --explain's steps_complete is not proof the work is
+// done (an amendment, or a writer that opens an attempt after the loop), so
+// next-action still decides before finish-run.
 func TestDriver_RefusesFinishRunWhileStepWorkRemains(t *testing.T) {
 	stepID := "P1"
 	af := &fakeAF{nextActions: []agentflow.NextActionState{{State: "validation_missing", StepID: &stepID}}}
@@ -367,6 +381,114 @@ func TestDriver_RefusesFinishRunWhileStepWorkRemains(t *testing.T) {
 	if len(af.seq) < len(wantTail) || !equalSeq(af.seq[len(af.seq)-len(wantTail):], wantTail) {
 		t.Fatalf("seq = %v, want it to end %v with no finish-run", af.seq, wantTail)
 	}
+}
+
+// assertLoopStoppedAtNextStep checks that the run ended at next-step, with no
+// next-action check and no finish-run after it.
+func assertLoopStoppedAtNextStep(t *testing.T, seq []string) {
+	t.Helper()
+	if len(seq) == 0 || seq[len(seq)-1] != "next-step" || slices.Contains(seq, "next-action") || slices.Contains(seq, "finish-run") {
+		t.Fatalf("seq = %v, want it to end at next-step with no next-action or finish-run", seq)
+	}
+}
+
+// #731 A3: when next-step --explain reports step work but no eligible step,
+// the run stops before finish-run, naming AgentFlow's diagnostics.
+func TestDriver_SerialLoopStopsWhenStepWorkRemains(t *testing.T) {
+	const tail = "; no proof was built; run -agentflow-status to see whether -agentflow-resume can recover it"
+	for _, tt := range []struct {
+		name string
+		next agentflow.NextStepExplanation
+		want string
+	}{
+		{"open", agentflow.NextStepExplanation{ReasonCode: agentflow.NextStepOpenAttempts, Diagnostics: []string{"step P1 has open attempt A1 (owner golem)"}},
+			`agentflow reports no eligible step while step work remains: reason_code "open_attempts" (step P1 has open attempt A1 (owner golem))` + tail},
+		{"deps", agentflow.NextStepExplanation{ReasonCode: agentflow.NextStepDependenciesUnmet, Diagnostics: []string{"step P1 has open attempt A1 (owner golem)", "step P2 waits on unmet dependencies: P1"}},
+			`agentflow reports no eligible step while step work remains: reason_code "dependencies_unmet" (step P1 has open attempt A1 (owner golem); step P2 waits on unmet dependencies: P1)` + tail},
+		{"bare", agentflow.NextStepExplanation{ReasonCode: agentflow.NextStepOpenAttempts},
+			`agentflow reports no eligible step while step work remains: reason_code "open_attempts"` + tail},
+		{"control characters", agentflow.NextStepExplanation{ReasonCode: agentflow.NextStepOpenAttempts, Diagnostics: []string{"step P1 has open attempt A1 (owner ev\x1b[2Jil)"}},
+			"agentflow reports no eligible step while step work remains: reason_code \"open_attempts\" (step P1 has open attempt A1 (owner ev\x1b[2Jil))" + tail},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			af := &fakeAF{explanations: []agentflow.NextStepExplanation{tt.next}}
+			d := &driver{af: af, plan: reviewPlan(), planPath: "plan.json", out: io.Discard}
+			proof, err := d.run(context.Background())
+			if err == nil || err.Error() != tt.want || proof != "" {
+				t.Fatalf("proof=%q err=%v\nwant %s", proof, err, tt.want)
+			}
+			assertLoopStoppedAtNextStep(t, af.seq)
+			// The error keeps AgentFlow's raw text; every sink escapes it.
+			var printed bytes.Buffer
+			reportAgentflowResumeError(&printed, err)
+			if strings.Contains(printed.String(), "\x1b") {
+				t.Fatalf("printed error carries a raw ESC: %q", printed.String())
+			}
+			if tt.name == "control characters" && !strings.Contains(printed.String(), `ev\x1b[2Jil`) {
+				t.Fatalf("printed error = %q, want the ESC escaped", printed.String())
+			}
+		})
+	}
+}
+
+// #731: a reason code this Golem does not know stops the run (fail closed).
+// The client already rejects one; this is the driver's own default branch.
+func TestDriver_SerialLoopRefusesUnknownReasonCode(t *testing.T) {
+	af := &fakeAF{explanations: []agentflow.NextStepExplanation{{ReasonCode: "future_code"}}}
+	d := &driver{af: af, plan: reviewPlan(), planPath: "plan.json", out: io.Discard}
+	_, err := d.run(context.Background())
+	if want := `agentflow next-step reported unknown reason_code "future_code"; update Golem`; err == nil || err.Error() != want {
+		t.Fatalf("err = %v, want %s", err, want)
+	}
+	assertLoopStoppedAtNextStep(t, af.seq)
+}
+
+// #731: an invalid AgentFlow state (next-step exit 1) stops the run with the
+// CommandError's identity intact, which reportAgentflowRecovery inspects.
+func TestDriver_SerialLoopKeepsExplainErrorIdentity(t *testing.T) {
+	af := &fakeAF{failAt: map[string]error{"next-step": &agentflow.CommandError{Cmd: "next-step", Exit: 1, Stderr: "plan invalid"}}}
+	d := &driver{af: af, plan: reviewPlan(), planPath: "plan.json", out: io.Discard}
+	_, err := d.run(context.Background())
+	var ce *agentflow.CommandError
+	if !errors.As(err, &ce) || ce.Exit != 1 {
+		t.Fatalf("err = %v, want the next-step CommandError", err)
+	}
+	assertLoopStoppedAtNextStep(t, af.seq)
+}
+
+// #731 F3: steps_complete may carry AgentFlow's hint that a completed step's
+// latest attempt ended blocked; next-action decides, and nothing is printed.
+func TestDriver_StepsCompleteWithDiagnosticsReachesFinishRunCheck(t *testing.T) {
+	af := &fakeAF{explanations: []agentflow.NextStepExplanation{{ReasonCode: agentflow.NextStepStepsComplete, Diagnostics: []string{
+		"step P1 has completed work but its latest attempt A1 ended blocked; run next-action to see whether it needs amend-step",
+	}}}}
+	var out bytes.Buffer
+	d := &driver{af: af, plan: reviewPlan(), planPath: "plan.json", out: &out}
+	if _, err := d.run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if wantTail := []string{"next-step", "next-action", "finish-run"}; len(af.seq) < 3 || !equalSeq(af.seq[len(af.seq)-3:], wantTail) {
+		t.Fatalf("seq = %v, want it to end %v", af.seq, wantTail)
+	}
+	if strings.Contains(out.String(), "amend-step") {
+		t.Fatalf("steps_complete diagnostics were printed: %q", out.String())
+	}
+}
+
+// #731 F2: an interrupted run's open attempt reaches a same-plan review round;
+// the round stops before it records the review or opens an amendment.
+func TestDriver_ReviewRoundStopsBeforeIngestionWhenStepWorkRemains(t *testing.T) {
+	af := &fakeAF{explanations: []agentflow.NextStepExplanation{{ReasonCode: agentflow.NextStepOpenAttempts, Diagnostics: []string{"step P1 has open attempt A1 (owner golem)"}}}}
+	d := &driver{af: af, plan: reviewPlan(), planPath: "plan.json", reviewManifest: "review.json", out: io.Discard}
+	if _, err := d.run(context.Background()); err == nil || !strings.Contains(err.Error(), `reason_code "open_attempts"`) {
+		t.Fatalf("err = %v, want the open_attempts refusal", err)
+	}
+	for _, call := range af.seq {
+		if strings.HasPrefix(call, "record-review:") || strings.HasPrefix(call, "amend:") {
+			t.Fatalf("seq = %v, want no review ingestion or amendment", af.seq)
+		}
+	}
+	assertLoopStoppedAtNextStep(t, af.seq)
 }
 
 func TestDriver_FinishRunGateByNextActionState(t *testing.T) {

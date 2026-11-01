@@ -60,7 +60,7 @@ var requiredFeatures = []featureProbe{
 	{"lock-plan", []string{"--from-json", "--json"}},
 	{"init-execution", []string{"--root"}},
 	{"doctor", []string{"--root", "--json"}},
-	{"next-step", []string{"--root", "--json"}},
+	{"next-step", []string{"--root", "--json", "--explain"}}, // #731: --explain is 1.2
 	{"claim-step", []string{"--root", "--agent", "--json"}},
 	{"record-file-change", []string{"--root", "--step", "--attempt", "--path", "--agent", "--json"}},
 	{"run", []string{"--root", "--step", "--attempt", "--gate", "--agent", "--confirm-risk"}},
