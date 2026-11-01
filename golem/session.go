@@ -78,11 +78,30 @@ func (r *Runtime) loadThread(ctx context.Context, id string) (*threadState, erro
 func (s *threadState) history() []provider.ChatMessage {
 	history := make([]provider.ChatMessage, 0, len(s.conversation.Messages))
 	for _, message := range s.conversation.Messages {
-		if (message.Role == "user" || message.Role == "assistant") && message.Content != "" {
+		if replayed(message) {
 			history = append(history, provider.ChatMessage{Role: message.Role, Content: message.Content})
 		}
 	}
 	return history
+}
+
+// replayed reports whether history sends message back to the model: only
+// user and assistant text. Tool results and tool-call frames stay stored but
+// are never replayed across turns.
+func replayed(message conversation.Message) bool {
+	return (message.Role == "user" || message.Role == "assistant") && message.Content != ""
+}
+
+// visibleCost prices a message at the tokens history replays for it, so
+// compression counts what the model will actually see rather than what is
+// merely stored.
+func visibleCost(estimate conversation.TokenEstimator) func(conversation.Message) int {
+	return func(message conversation.Message) int {
+		if !replayed(message) {
+			return 0
+		}
+		return estimate(message.Content)
+	}
 }
 
 func (s *threadState) summary() string {
@@ -257,6 +276,11 @@ func (r *Runtime) compressConversation(ctx context.Context, budget agent.Budget,
 	if !force && estimateStoredHistory(current) <= maxHistoryTokens {
 		return current, false, nil
 	}
+	// Evict to half the trigger, not to the trigger. The summary is
+	// messages[0] of every request, so each rewrite busts the provider's prompt
+	// cache; fitting just under the trigger would put the next turn back over
+	// it. The gap buys several quiet turns between rewrites.
+	lowWater := maxHistoryTokens / 2
 	// The model's output allowance excludes the rendered envelope and quoting.
 	// Reserve the envelope up front and account for actual output below, since
 	// escaping (or a custom summarizer) can exceed the anticipated content cost.
@@ -265,16 +289,16 @@ func (r *Runtime) compressConversation(ctx context.Context, budget agent.Budget,
 	input, summarize := current, r.summarizer
 	var compacted conversation.Conversation
 	for {
-		maxRawTokens := max(0, maxHistoryTokens-reserve)
+		maxRawTokens := max(0, lowWater-reserve)
 		if force {
 			maxRawTokens = 0
 		}
 		var err error
-		compacted, err = conversation.CompressMessages(ctx, input, maxRawTokens, 4, estimate, summarize)
+		compacted, err = conversation.CompressMessagesWithCost(ctx, input, maxRawTokens, 4, visibleCost(estimate), summarize)
 		if err != nil {
 			return conversation.Conversation{}, false, err
 		}
-		if force || maxRawTokens == 0 || estimateStoredHistory(compacted) <= maxHistoryTokens || len(compacted.Messages) >= len(input.Messages) {
+		if force || maxRawTokens == 0 || estimateStoredHistory(compacted) <= lowWater || len(compacted.Messages) >= len(input.Messages) {
 			break
 		}
 		// Each retry must evict more history; the retention floor can still
@@ -297,7 +321,11 @@ func (r *Runtime) compressConversation(ctx context.Context, budget agent.Budget,
 
 func estimateStoredHistory(current conversation.Conversation) int {
 	estimate := conversation.CharRatioEstimator(4)
-	tokens := conversation.EstimateMessagesTokens(current.Messages, estimate)
+	cost := visibleCost(estimate)
+	tokens := 0
+	for _, message := range current.Messages {
+		tokens += cost(message)
+	}
 	if summary := strings.TrimSpace(currentSummary(current)); summary != "" {
 		tokens += estimate(agent.DurableSummaryPrompt(summary))
 	}
