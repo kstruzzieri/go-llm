@@ -263,7 +263,9 @@ func TestChatUsageAbacusNonStream(t *testing.T) {
 			}))
 			defer srv.Close()
 
-			resp, err := NewProvider(NewClient(srv.URL)).Chat(context.Background(), provider.ChatRequest{
+			c := NewClient(srv.URL)
+			c.weightedStreamPrompt = true // an Abacus client: the stream-only rule must not touch Chat
+			resp, err := NewProvider(c).Chat(context.Background(), provider.ChatRequest{
 				Model:    "gpt-5-mini",
 				Messages: []provider.ChatMessage{{Role: "user", Content: "hi"}},
 			})
@@ -313,6 +315,104 @@ func TestUsageDecodeUnchangedForOpenAIShapes(t *testing.T) {
 			}
 			if !reflect.DeepEqual(got, usage(want)) {
 				t.Errorf("decode = %+v, want the plain decode %+v", got, usage(want))
+			}
+		})
+	}
+}
+
+// TestAbacusRouteLLMHost pins which base URLs get the weighted-stream rule:
+// routellm.abacus.ai and its subdomains over any scheme, never a look-alike.
+func TestAbacusRouteLLMHost(t *testing.T) {
+	for baseURL, want := range map[string]bool{
+		"https://routellm.abacus.ai":             true,
+		"http://routellm.abacus.ai":              true,
+		"https://RouteLLM.Abacus.AI.:443/":       true,
+		"https://eu.routellm.abacus.ai":          true,
+		"https://notroutellm.abacus.ai":          false,
+		"https://routellm.abacus.ai.example.com": false,
+		"https://abacus.ai":                      false,
+		"https://api.openai.com":                 false,
+		"http://127.0.0.1:8090":                  false,
+	} {
+		if got := NewClient(baseURL).weightedStreamPrompt; got != want {
+			t.Errorf("NewClient(%q).weightedStreamPrompt = %v, want %v", baseURL, got, want)
+		}
+	}
+}
+
+// TestChatStreamUsageAbacusWeighted replays Abacus RouteLLM's streamed usage
+// (gpt-5-mini, measured 2026-11-01: usage objects verbatim, in the finish-chunk
+// envelope Abacus sent). Its prompt_tokens counts cached tokens at the model's
+// cache discount (596 = 97 uncached + 4,992 cached at a tenth; the same prompt
+// cold reported 5,089) and no raw count is sent, so on an Abacus client a
+// frame with cached tokens reports PromptTokens and TotalTokens as unknown (0)
+// and keeps the rest. The same frame from any other server passes as sent.
+func TestChatStreamUsageAbacusWeighted(t *testing.T) {
+	sse := func(usageObj string) string {
+		return `data: {"id": "chatcmpl-45a6e76220334f87bf8369e9d200d94c", "object": "chat.completion.chunk", "model": "gpt-5-mini", "created": 1793587534, ` +
+			`"choices": [{"index": 0, "delta": {"role": "assistant", "content": "OK"}, "finish_reason": "stop"}], "usage": ` + usageObj + "}\n\n" +
+			"data: [DONE]\n\n"
+	}
+	const (
+		warm = `{"prompt_tokens": 596, "completion_tokens": 75, "total_tokens": 671, "completion_tokens_details": {"reasoning_tokens": 64}, "prompt_tokens_details": {"cached_tokens": 4992}}`
+		cold = `{"prompt_tokens": 5089, "completion_tokens": 56, "total_tokens": 5145}`
+		// Not recorded: a frame reporting zero cached tokens, whose weighted
+		// count equals the raw one.
+		zeroCached = `{"prompt_tokens": 5089, "completion_tokens": 56, "total_tokens": 5145, "prompt_tokens_details": {"cached_tokens": 0}}`
+	)
+
+	tests := []struct {
+		name   string
+		usage  string
+		abacus bool
+		want   provider.Usage
+	}{
+		{
+			name: "warm on abacus: input unknown", usage: warm, abacus: true,
+			want: provider.Usage{CompletionTokens: 75, ReasoningTokens: 64, ReasoningTokensReported: true,
+				CachedPromptTokens: 4992, CachedPromptTokensReported: true},
+		},
+		{
+			name: "cold on abacus: exact", usage: cold, abacus: true,
+			want: provider.Usage{PromptTokens: 5089, CompletionTokens: 56, TotalTokens: 5145},
+		},
+		{
+			name: "zero cached on abacus: exact", usage: zeroCached, abacus: true,
+			want: provider.Usage{PromptTokens: 5089, CompletionTokens: 56, TotalTokens: 5145, CachedPromptTokensReported: true},
+		},
+		{
+			name: "same frame elsewhere: as sent", usage: warm, abacus: false,
+			want: provider.Usage{PromptTokens: 596, CompletionTokens: 75, TotalTokens: 671, ReasoningTokens: 64, ReasoningTokensReported: true,
+				CachedPromptTokens: 4992, CachedPromptTokensReported: true},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = fmt.Fprint(w, sse(tc.usage))
+			}))
+			defer srv.Close()
+
+			c := NewClient(srv.URL)
+			c.weightedStreamPrompt = tc.abacus
+			var last provider.ChatResponse
+			err := NewProvider(c).ChatStream(context.Background(), provider.ChatRequest{
+				Model:    "gpt-5-mini",
+				Messages: []provider.ChatMessage{{Role: "user", Content: "hi"}},
+			}, func(r provider.ChatResponse) error {
+				last = r
+				return nil
+			})
+			if err != nil {
+				t.Fatalf("ChatStream: %v", err)
+			}
+			if !last.Done {
+				t.Fatalf("last chunk should be Done, got %+v", last)
+			}
+			if last.Usage != tc.want {
+				t.Errorf("Usage = %+v\nwant    %+v", last.Usage, tc.want)
 			}
 		})
 	}

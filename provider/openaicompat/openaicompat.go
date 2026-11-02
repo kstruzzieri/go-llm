@@ -343,6 +343,14 @@ func (p *Provider) ChatStream(ctx context.Context, req provider.ChatRequest, fn 
 				ReasoningTokens:         chunk.Usage.reasoningTokens(),
 				ReasoningTokensReported: chunk.Usage.reasoningTokensReported(),
 			}, *chunk.Usage)
+			if p.client.weightedStreamPrompt && lastUsage.CachedPromptTokens > 0 {
+				// Abacus streams prompt_tokens with cached tokens at the model's
+				// cache discount (596 for a 5,090-token request with 4,992
+				// cached) and sends no raw count, so report the input unknown
+				// rather than low. Total goes with it to keep Total = 0 or
+				// Prompt + Completion. With nothing cached the count is exact.
+				lastUsage.PromptTokens, lastUsage.TotalTokens = 0, 0
+			}
 		}
 		if len(chunk.Choices) == 0 {
 			continue

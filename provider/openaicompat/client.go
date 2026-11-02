@@ -44,6 +44,11 @@ type Client struct {
 	// no key). Both are read-only after construction; see WithCacheAffinity.
 	cacheAffinity  string
 	affinitySecret []byte
+
+	// weightedStreamPrompt is true for an Abacus RouteLLM base URL, whose
+	// streamed prompt_tokens counts cached tokens at the model's cache
+	// discount; see ChatStream. Read-only after construction.
+	weightedStreamPrompt bool
 }
 
 // ClientOption configures a Client.
@@ -220,13 +225,26 @@ func InferCacheAffinity(baseURL string) string {
 	if err != nil || u.Scheme != "https" { // url.Parse lowercases the scheme
 		return "none"
 	}
-	host := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
 	for _, h := range cacheAffinityHosts {
-		if host == h.host || strings.HasSuffix(host, "."+h.host) {
+		if hostIs(u, h.host) {
 			return h.mode
 		}
 	}
 	return "none"
+}
+
+// hostIs reports whether u's host is want or a subdomain of it,
+// case-insensitively, with one trailing dot and the port ignored.
+func hostIs(u *url.URL, want string) bool {
+	host := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
+	return host == want || strings.HasSuffix(host, "."+want)
+}
+
+// isAbacusRouteLLM reports whether baseURL is Abacus RouteLLM
+// (routellm.abacus.ai or a subdomain), over any scheme.
+func isAbacusRouteLLM(baseURL string) bool {
+	u, err := url.Parse(baseURL)
+	return err == nil && hostIs(u, "routellm.abacus.ai")
 }
 
 // NewClient builds a Client targeting baseURL. The URL should be the server
@@ -249,6 +267,7 @@ func NewClient(baseURL string, opts ...ClientOption) *Client {
 	for _, opt := range opts {
 		opt(c)
 	}
+	c.weightedStreamPrompt = isAbacusRouteLLM(c.baseURL)
 	switch c.cacheAffinity {
 	case "":
 		c.cacheAffinity = InferCacheAffinity(c.baseURL)
