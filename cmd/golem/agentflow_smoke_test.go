@@ -2378,8 +2378,9 @@ func (a *amendAfterExplainAF) ExplainNextStep(ctx context.Context) (agentflow.Ne
 }
 
 // #731 A4: steps_complete hands over to requireNoStepWork, which still refuses
-// work opened after the loop. Here that is an amendment whose attempt has no
-// receipt for P1's changed file.
+// work opened after the loop. Here that is an amendment of P1. AgentFlow 1.2.2
+// counts the receipt from P1's completed attempt A1 for the amendment's attempt,
+// so it needs no new one and the state is validation_missing.
 func TestAgentflowResumeGuardsAmendmentOpenedAfterExplain_RealCLI(t *testing.T) {
 	dir := t.TempDir()
 	copyTree(t, "../../testdata/agentflow", dir)
@@ -2390,7 +2391,7 @@ func TestAgentflowResumeGuardsAmendmentOpenedAfterExplain_RealCLI(t *testing.T) 
 		return nil
 	}}
 	_, err := d.resume(context.Background(), dir, planBytes, nil)
-	want := `agentflow still reports step work before finish-run: state "file_receipts_missing" step "P1"; no proof was built; run -agentflow-status to see whether -agentflow-resume can recover it`
+	want := `agentflow still reports step work before finish-run: state "validation_missing" step "P1"; no proof was built; run -agentflow-status to see whether -agentflow-resume can recover it`
 	if err == nil || err.Error() != want || af.amended != "A2" {
 		t.Fatalf("resume err = %v, amendment = %q\nwant error %s and amendment A2", err, af.amended, want)
 	}
