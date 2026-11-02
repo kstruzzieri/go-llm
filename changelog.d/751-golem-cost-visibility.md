@@ -37,7 +37,9 @@ total; an unpriced one is already under `excludes unpriced`. Both clauses name
 an agent-run bucket by its model and a side-task bucket by model and task, as
 in `a/priced (probe)`. Dispatch children report one total without a
 model, so they appear under `dispatch children: N input tok, cache coverage
-unknown` and under `excludes unpriced`. Measured 2026-11-01 on Abacus RouteLLM
+unknown` and under `excludes unpriced`. Successful children with missing or
+invalid counters remain under `excludes unpriced: dispatch children` even
+when no child tokens can be reported. Measured 2026-11-01 on Abacus RouteLLM
 with gpt-5-mini: a streaming response's prompt count was smaller than its
 cached count, and a non-streaming response had no prompt count, so both read as
 unreliable. An Ollama embedding reports the server's `prompt_eval_count` as its

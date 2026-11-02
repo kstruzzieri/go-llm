@@ -24,6 +24,7 @@ type runBudget struct {
 	charged, reserved        int
 	closed, overrun          bool
 	descendants              provider.Usage
+	descendantSucceeded      bool
 }
 
 type tokenReservation struct {
@@ -147,6 +148,9 @@ func (r *tokenReservation) settle(mr ModelResult, callErr error) {
 			node.reserved -= r.tokens
 			node.charged = saturatedTokenAdd(node.charged, charge)
 		}
+		if node != b && callErr == nil {
+			node.descendantSucceeded = true
+		}
 		if node != b && valid {
 			node.descendants.PromptTokens = saturatedTokenAdd(node.descendants.PromptTokens, u.PromptTokens)
 			node.descendants.CompletionTokens = saturatedTokenAdd(node.descendants.CompletionTokens, u.CompletionTokens)
@@ -192,9 +196,10 @@ func (b *runBudget) close() *provider.Usage {
 	b.mu.Lock()
 	b.closed = true
 	snapshot := b.descendants
+	hasSuccessfulDescendant := b.descendantSucceeded
 	b.mu.Unlock()
 	b.cancel()
-	if snapshot == (provider.Usage{}) {
+	if snapshot == (provider.Usage{}) && !hasSuccessfulDescendant {
 		return nil
 	}
 	return &snapshot

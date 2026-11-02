@@ -329,7 +329,7 @@ A provider reuses a cached prompt prefix only for a limited time and only above 
 
 - OpenAI: the minimum cacheable prompt is 1,024 tokens.
 - Anthropic: the minimum cacheable prompt is 512 to 4,096 tokens, depending on the model, and a cached prefix lasts 5 minutes.
-- OpenRouter: a cache lasts about 10 minutes idle.
+- OpenRouter: sticky provider routing expires after 10 minutes of inactivity; prompt-cache lifetimes depend on the underlying provider and model. See [OpenRouter's prompt caching documentation](https://openrouter.ai/docs/guides/best-practices/prompt-caching).
 
 An approval prompt is a wait. If you answer a write or command approval after the provider's cache lifetime has passed, the next request pays full price for the whole prompt prefix. Golem keeps the prefix stable where it can (compression rewrites the summary rarely, and a compacting step inside a goal drops to 75% of the message budget so later requests start with the same bytes), but it cannot extend a provider's lifetime.
 

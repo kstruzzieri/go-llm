@@ -248,6 +248,62 @@ func TestLedgerDispatchChildren(t *testing.T) {
 	}
 }
 
+// A successful dispatch must remain excluded from cost even when its child
+// reports no usable counters. Exercise the real nested Run accounting.
+func TestLedgerDispatchExcludesUnavailableUsage(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		usage provider.Usage
+		want  string
+	}{
+		{
+			name:  "reported usage control",
+			usage: provider.Usage{PromptTokens: 50, CompletionTokens: 5, TotalTokens: 55},
+			want:  "usage (this process): input 250 tok (cached n/a), output 25 tok, 2 requests; dispatch children: 50 input tok, cache coverage unknown",
+		},
+		{
+			name: "missing usage",
+			want: "usage (this process): input 200 tok (cached n/a), output 20 tok, 2 requests; unreliable usage on 1 requests",
+		},
+		{
+			name:  "invalid usage",
+			usage: provider.Usage{PromptTokens: -1},
+			want:  "usage (this process): input 200 tok (cached n/a), output 20 tok, 2 requests; unreliable usage on 1 requests",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			response := routed(answerStep("child done"))
+			response.Response.Usage = tc.usage
+			child := &scriptCaller{responses: []agent.ModelResult{response}}
+			dispatch, err := newDispatchTool(child, flags{dispatch: true}, agent.Budget{}, dispatchFanout{maxConcurrent: 1}, nil, validDispatchAvailable(t), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			first := routed(toolStep("d", "dispatch", `{"tasks":["inspect"]}`))
+			first.Response.Usage = provider.Usage{PromptTokens: 100, CompletionTokens: 10, TotalTokens: 110}
+			second := routed(answerStep("parent done"))
+			second.Response.Usage = first.Response.Usage
+			parent := &scriptCaller{responses: []agent.ModelResult{first, second}}
+			res, err := newOrchestratorFactory(parent, flags{dispatch: true}, nil, nil)().Run(t.Context(), agent.Request{Goal: "inspect", Tools: []agent.Tool{dispatch}}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if child.i != 1 || len(res.ToolCalls) != 1 || !res.ToolCalls[0].Invoked || res.ToolCalls[0].IsError {
+				t.Fatalf("dispatch did not complete: child calls=%d, tools=%+v", child.i, res.ToolCalls)
+			}
+			ledger := &usageLedger{}
+			ledger.addRun(res)
+			lines := ledger.render(map[string]*config.ModelPrice{"local/fast": {Input: 1000, Output: 1000}})
+			if lines[0] != tc.want {
+				t.Errorf("usage = %q, want %q", lines[0], tc.want)
+			}
+			if want := "est. cost: $0.2200 (excludes unpriced: dispatch children)"; lines[2] != want {
+				t.Errorf("cost = %q, want %q", lines[2], want)
+			}
+		})
+	}
+}
+
 func TestLedgerLastRunAndSideTasks(t *testing.T) {
 	l := &usageLedger{}
 	if got, want := l.render(nil), []string{

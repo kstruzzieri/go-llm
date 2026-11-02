@@ -207,7 +207,8 @@ func TestRunBudgetSettlesBeforeCallbacks(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				r.settle(ModelResult{}, nil)
+				// This admission probe made no successful model call.
+				r.settle(ModelResult{}, provider.ErrRouterClosed)
 			}
 			obs := budgetObserver{pressure: func(_ context.Context, e PressureEvent) error {
 				estimate = e.Pressure.InputTokens
