@@ -594,6 +594,32 @@ type startupInfo struct {
 	dispatchLine       string
 	interceptorLine    string
 	consultLine        string
+	// summarizeModel and activeModel are the first strict selectors of the
+	// summarize and active routes ("" when a route has no chain); with
+	// summarizePriced they drive the shared-model notice.
+	summarizeModel  string
+	activeModel     string
+	summarizePriced bool
+}
+
+// summarizeNoticeInputs derives the three summarize-notice fields from the
+// planned chains and the bundle's prices. An empty chain gives "" (recommendation
+// mode runs with an empty active chain, and a skipped summarize route has none),
+// so indexing never panics. priced is true only when the summarize model has a
+// configured price with a nonzero Input or Output: a $0 price has no cost to
+// lower.
+func summarizeNoticeInputs(summarize, active []string, prices map[provider.ModelKey]config.ModelPrice) (summarizeModel, activeModel string, priced bool) {
+	if len(summarize) > 0 {
+		summarizeModel = summarize[0]
+	}
+	if len(active) > 0 {
+		activeModel = active[0]
+	}
+	if key, ok := parseSelector(summarizeModel); ok {
+		p := prices[key]
+		priced = p.Input != 0 || p.Output != 0
+	}
+	return summarizeModel, activeModel, priced
 }
 
 // startupNotices renders the human-facing startup lines (written to stderr).
@@ -653,6 +679,9 @@ func startupNotices(info startupInfo) []string {
 	}
 	if info.inputCeilingLine != "" {
 		out = append(out, info.inputCeilingLine)
+	}
+	if info.summarizeModel != "" && info.summarizeModel == info.activeModel && info.summarizePriced {
+		out = append(out, "notice: summarize uses the same model as chat ("+info.summarizeModel+"); set defaults.summarize to a cheaper model to lower compression cost")
 	}
 	for _, w := range info.bootstrapWarns {
 		out = append(out, "warning: "+w.Error())
@@ -1758,6 +1787,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	if agentMemoryEnabled && mrt.records.CreatedKeyID() != "" {
 		agentMemoryLine += "; created signing identity " + mrt.records.CreatedKeyID()
 	}
+	summarizeModel, activeModel, summarizePriced := summarizeNoticeInputs(summarizeRoute.Chain, plan.chain, bundle.Prices)
 	for _, line := range startupNotices(startupInfo{
 		workspace:         root,
 		agentflowState:    shouldShowAgentflowHint(f) && agentflowStateDetected(root),
@@ -1782,6 +1812,9 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		dispatchLine:      dispatchLine,
 		interceptorLine:   interceptorLine,
 		consultLine:       consultLine,
+		summarizeModel:    summarizeModel,
+		activeModel:       activeModel,
+		summarizePriced:   summarizePriced,
 	}) {
 		_, _ = fmt.Fprintln(stderr, line)
 	}

@@ -25,6 +25,7 @@ import (
 	"github.com/kstruzzieri/go-llm/agent"
 	"github.com/kstruzzieri/go-llm/config"
 	"github.com/kstruzzieri/go-llm/fingerprint"
+	"github.com/kstruzzieri/go-llm/provider"
 	"github.com/kstruzzieri/go-llm/rag"
 )
 
@@ -180,6 +181,147 @@ func TestStartupNotices_RequestedRetrieveSuppressesGenericLine(t *testing.T) {
 	if strings.Contains(joined, "no RAG index configured") {
 		t.Errorf("generic no-index line must be suppressed when -rag-db was requested, got:\n%s", joined)
 	}
+}
+
+// summarizeSharedNotice is the exact line (ruling in the Task 4.4 brief) that
+// names the shared model.
+func summarizeSharedNotice(sel string) string {
+	return "notice: summarize uses the same model as chat (" + sel + "); set defaults.summarize to a cheaper model to lower compression cost"
+}
+
+// The notice fires only when all three hold: a summarize model exists, it is
+// the active chat model, and it has a price to lower. Each row isolates one
+// conjunct so dropping any of them turns a row red.
+func TestStartupNotices_SummarizeSharesChatModel(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		info startupInfo
+		want bool
+	}{
+		{name: "same model and priced",
+			info: startupInfo{summarizeModel: "primary/m", activeModel: "primary/m", summarizePriced: true}, want: true},
+		{name: "same model and unpriced",
+			info: startupInfo{summarizeModel: "primary/m", activeModel: "primary/m"}},
+		{name: "different models",
+			info: startupInfo{summarizeModel: "alt/m", activeModel: "primary/m", summarizePriced: true}},
+		{name: "no summarize route",
+			info: startupInfo{activeModel: "primary/m", summarizePriced: true}},
+		{name: "recommendation mode: no active chain",
+			info: startupInfo{summarizeModel: "primary/m", summarizePriced: true}},
+		{name: "neither side has a model",
+			info: startupInfo{summarizePriced: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.info.workspace = "/r"
+			got := strings.Join(startupNotices(tc.info), "\n")
+			if has := strings.Contains(got, "notice: summarize uses the same model"); has != tc.want {
+				t.Fatalf("notice present = %v, want %v:\n%s", has, tc.want, got)
+			}
+			if tc.want && !slices.Contains(startupNotices(tc.info), summarizeSharedNotice(tc.info.summarizeModel)) {
+				t.Fatalf("notice line not exact:\n%s", got)
+			}
+		})
+	}
+}
+
+// summarizeNoticeInputs turns the planned chains and the bundle's prices into
+// the three startupInfo fields. An empty chain (recommendation mode, or no
+// summarize route) gives "" and never panics; a $0 price is not priced (there
+// is no cost to lower); a price under another provider does not count.
+func TestSummarizeNoticeInputs(t *testing.T) {
+	price := func(in, out float64) config.ModelPrice { return config.ModelPrice{Input: in, Output: out} }
+	pk := func(prov, model string) provider.ModelKey { return provider.ModelKey{Provider: prov, Model: model} }
+	for _, tc := range []struct {
+		name                      string
+		summarize, active         []string
+		prices                    map[provider.ModelKey]config.ModelPrice
+		wantSummarize, wantActive string
+		wantPriced                bool
+	}{
+		{name: "same model priced", summarize: []string{"p/m", "p/fb"}, active: []string{"p/m"},
+			prices:        map[provider.ModelKey]config.ModelPrice{pk("p", "m"): price(3, 15)},
+			wantSummarize: "p/m", wantActive: "p/m", wantPriced: true},
+		{name: "input only", summarize: []string{"p/m"}, active: []string{"p/m"},
+			prices:        map[provider.ModelKey]config.ModelPrice{pk("p", "m"): price(3, 0)},
+			wantSummarize: "p/m", wantActive: "p/m", wantPriced: true},
+		{name: "output only", summarize: []string{"p/m"}, active: []string{"p/m"},
+			prices:        map[provider.ModelKey]config.ModelPrice{pk("p", "m"): price(0, 15)},
+			wantSummarize: "p/m", wantActive: "p/m", wantPriced: true},
+		{name: "zero price is not priced", summarize: []string{"p/m"}, active: []string{"p/m"},
+			prices:        map[provider.ModelKey]config.ModelPrice{pk("p", "m"): price(0, 0)},
+			wantSummarize: "p/m", wantActive: "p/m"},
+		{name: "no price entry", summarize: []string{"p/m"}, active: []string{"p/m"},
+			prices:        map[provider.ModelKey]config.ModelPrice{pk("p", "other"): price(3, 15)},
+			wantSummarize: "p/m", wantActive: "p/m"},
+		{name: "same model name under another provider", summarize: []string{"p/m"}, active: []string{"p/m"},
+			prices:        map[provider.ModelKey]config.ModelPrice{pk("q", "m"): price(3, 15)},
+			wantSummarize: "p/m", wantActive: "p/m"},
+		{name: "model name with a slash keys at the first slash", summarize: []string{"ollama/lib/m"}, active: []string{"ollama/lib/m"},
+			prices:        map[provider.ModelKey]config.ModelPrice{pk("ollama", "lib/m"): price(3, 15)},
+			wantSummarize: "ollama/lib/m", wantActive: "ollama/lib/m", wantPriced: true},
+		{name: "recommendation mode: empty active chain", summarize: []string{"p/m"}, active: nil,
+			prices:        map[provider.ModelKey]config.ModelPrice{pk("p", "m"): price(3, 15)},
+			wantSummarize: "p/m", wantPriced: true},
+		{name: "no summarize route", summarize: nil, active: []string{"p/m"},
+			prices:     map[provider.ModelKey]config.ModelPrice{pk("p", "m"): price(3, 15)},
+			wantActive: "p/m"},
+		{name: "both empty, nil prices"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			gotS, gotA, gotP := summarizeNoticeInputs(tc.summarize, tc.active, tc.prices)
+			if gotS != tc.wantSummarize || gotA != tc.wantActive || gotP != tc.wantPriced {
+				t.Fatalf("summarizeNoticeInputs = (%q, %q, %v), want (%q, %q, %v)",
+					gotS, gotA, gotP, tc.wantSummarize, tc.wantActive, tc.wantPriced)
+			}
+		})
+	}
+}
+
+// Through run(): the notice reaches stderr only when the summarize route and
+// the active route resolve to the same priced model.
+func TestRunStartupNoticeSummarizeSharesChat(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		edit  func(string) string
+		extra []string
+		want  bool
+		also  string // a startup line the run must also print, proving the mode under test
+	}{
+		{name: "shared and priced", edit: priceAgentRole, want: true},
+		{name: "shared and unpriced", edit: func(s string) string { return s }},
+		{name: "priced but summarize is another model", edit: func(s string) string {
+			return strings.Replace(priceAgentRole(s), `"summarize": "agent"`, `"summarize": "swap"`, 1)
+		}},
+		{name: "priced but compression off", edit: priceAgentRole, extra: []string{"-no-compress"}},
+		// No defaults.agent: the active chain is empty, so there is no active
+		// model to share. Building the notice inputs must not index it.
+		{name: "priced in recommendation mode", edit: func(s string) string {
+			return strings.Replace(priceAgentRole(s), `"agent": "agent", `, "", 1)
+		}, also: "no defaults.agent configured; using model recommendation"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fx := newModelSwitchFixture(t, "")
+			raw, err := os.ReadFile(fx.configPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(fx.configPath, []byte(tc.edit(string(raw))), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			stderr := fx.withSession(t, tc.extra, func(*testing.T, *replSession) {})
+			if has := strings.Contains(stderr, summarizeSharedNotice("primary/agent-model")); has != tc.want {
+				t.Fatalf("notice present = %v, want %v; stderr:\n%s", has, tc.want, stderr)
+			}
+			if !strings.Contains(stderr, tc.also) {
+				t.Fatalf("stderr missing %q:\n%s", tc.also, stderr)
+			}
+		})
+	}
+}
+
+// priceAgentRole prices the fixture's agent role (primary/agent-model).
+func priceAgentRole(raw string) string {
+	return strings.Replace(raw, `"context_window": 32768,`, `"context_window": 32768, `+pricedAgentRole+`,`, 1)
 }
 
 func TestParseFlags_RejectsPositionalArguments(t *testing.T) {
