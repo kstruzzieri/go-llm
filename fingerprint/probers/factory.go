@@ -20,7 +20,8 @@ type ProberFactoryInput struct {
 	Capabilities         []string
 	// UsageObserver, when non-nil, receives the usage of every successful
 	// model call an openai-compat prober makes (see
-	// WithOpenAICompatUsageObserver). The ollama prober ignores it.
+	// WithOpenAICompatUsageObserver). The ollama prober ignores it. It must
+	// be safe for concurrent use.
 	UsageObserver func(model string, u provider.Usage)
 }
 

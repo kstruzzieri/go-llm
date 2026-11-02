@@ -85,7 +85,9 @@ type Options struct {
 	// ProbeUsageObserver, when non-nil, receives the usage of every
 	// successful model call an openai-compat fingerprint or tool-capability
 	// probe makes, keyed by the probed provider/model. Probe results are
-	// unchanged; ollama probes are not reported.
+	// unchanged; ollama probes are not reported. Every prober the factory
+	// builds shares it and probes for different keys run at once (route-time
+	// ResolveToolCall), so it must be safe for concurrent use.
 	ProbeUsageObserver func(key provider.ModelKey, u provider.Usage)
 }
 

@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -484,13 +485,16 @@ func TestChainEmbedderRecordsSideTaskUsage(t *testing.T) {
 		Usage:        provider.Usage{PromptTokens: 7, TotalTokens: 7},
 		RouteOutcome: &provider.RouteOutcome{ActualModel: provider.ModelKey{Provider: "e", Model: "x"}},
 	}
+	// Priced by the routed provider/model, not the bare model name.
+	prices := map[string]*config.ModelPrice{"e/x": {Input: 1_000_000}}
 	for _, tc := range []struct {
-		name string
-		plan fakeEmbedPlan
-		want []string
+		name     string
+		plan     fakeEmbedPlan
+		want     []string
+		wantCost string
 	}{
-		{"success", fakeEmbedPlan{resp: ok}, []string{"side task embed: input 7 tok, output 0 tok, 1 calls"}},
-		{"failed call", fakeEmbedPlan{resp: ok, err: errors.New("backend down")}, []string{}},
+		{"success", fakeEmbedPlan{resp: ok}, []string{"side task embed: input 7 tok, output 0 tok, 1 calls"}, "est. cost: $7.0000"},
+		{"failed call", fakeEmbedPlan{resp: ok, err: errors.New("backend down")}, []string{}, "est. cost: $0.0000"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			l := &usageLedger{}
@@ -499,12 +503,8 @@ func TestChainEmbedderRecordsSideTaskUsage(t *testing.T) {
 			if got := l.render(nil)[3:]; !slices.Equal(got, tc.want) {
 				t.Fatalf("side task lines = %q; want %q", got, tc.want)
 			}
-			// Priced by the routed provider/model, not the bare model name.
-			prices := map[string]*config.ModelPrice{"e/x": {Input: 1_000_000}}
-			if tc.name == "success" {
-				if got, want := l.render(prices)[2], "est. cost: $7.0000"; got != want {
-					t.Fatalf("line 3 = %q; want %q", got, want)
-				}
+			if got := l.render(prices)[2]; got != tc.wantCost {
+				t.Fatalf("line 3 = %q; want %q", got, tc.wantCost)
 			}
 		})
 	}
@@ -565,6 +565,63 @@ func TestLedgerRecordsSummarizeSideTask(t *testing.T) {
 			t.Fatalf("/context =\n%s\nwant suffix\n%s", got, want)
 		}
 	})
+}
+
+// Ruling P4-n: delegate_code's model call lands under "delegate", priced by
+// the routed provider/model; a failed call adds nothing (P4-k). Runs through
+// run() and the real delegate_code tool.
+func TestLedgerRecordsDelegateSideTask(t *testing.T) {
+	fx := newModelSwitchFixture(t, "")
+	raw, err := os.ReadFile(fx.configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	priced := strings.Replace(string(raw), `"think_mode": "none",`, `"think_mode": "none", `+pricedAgentRole+`,`, 1)
+	if priced == string(raw) {
+		t.Fatal("fixture config shape changed")
+	}
+	if err := os.WriteFile(fx.configPath, []byte(priced), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var chats atomic.Int32
+	fx.alt.chatResponse = func(w http.ResponseWriter, _ *http.Request, _ string) bool {
+		if chats.Add(1) > 1 {
+			http.Error(w, `{"error":{"message":"boom"}}`, http.StatusInternalServerError)
+			return true
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, `data: {"model":"alt-model","choices":[{"delta":{"content":"func A() {}"}}]}`+"\n\n")
+		_, _ = io.WriteString(w, `data: {"model":"alt-model","choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":120,"completion_tokens":30,"total_tokens":150}}`+"\n\n")
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+		return true
+	}
+	fx.withSession(t, []string{"-delegate", "-delegate-role", "swap"}, func(t *testing.T, sess *replSession) {
+		var tool agent.Tool
+		for _, tl := range sess.tools {
+			if tl.Spec().Name == "delegate_code" {
+				tool = tl
+			}
+		}
+		if tool == nil {
+			t.Fatal("delegate_code not mounted")
+		}
+		args := json.RawMessage(`{"prompt":"write func A"}`)
+		if out, err := tool.Invoke(t.Context(), args); err != nil || out.IsError {
+			t.Fatalf("first delegate = %+v, %v; want success", out, err)
+		}
+		if out, err := tool.Invoke(t.Context(), args); err != nil || !out.IsError {
+			t.Fatalf("second delegate = %+v, %v; want the backend failure", out, err)
+		}
+		// One successful call: 120*1 + 30*2 = $180.0000.
+		want := "est. cost: $180.0000\n" +
+			"side task delegate: input 120 tok, output 30 tok, 1 calls\n"
+		if got := slash(t, sess, "/context"); !strings.HasSuffix(got, want) {
+			t.Fatalf("/context =\n%s\nwant suffix\n%s", got, want)
+		}
+	})
+	if got := chats.Load(); got != 2 {
+		t.Fatalf("delegate backend chats = %d, want 2", got)
+	}
 }
 
 // The startup tool-capability probe of an undeclared model lands under

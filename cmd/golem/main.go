@@ -1648,7 +1648,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 
 	delegateLine := ""
 	if f.delegate {
-		dt, dchain, derr := buildDelegateTool(bundle.Router, f.delegateRole, delegateChain, nil)
+		dt, dchain, derr := buildDelegateTool(bundle.Router, f.delegateRole, delegateChain, nil, usage)
 		if derr != nil {
 			return derr
 		}

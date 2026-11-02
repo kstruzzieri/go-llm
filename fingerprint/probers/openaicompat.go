@@ -50,7 +50,8 @@ func WithOpenAICompatCapabilities(caps []string) OpenAICompatProberOption {
 // call the prober makes (DetectKind's chat probe and embed fallback,
 // ProbeChat, ProbeEmbedding, and each ProbeToolCall attempt), with the bare
 // model name it was called with. Failed calls are not reported. Probe results
-// are unchanged.
+// are unchanged. One observer may serve many probers whose probes run
+// concurrently, so fn must be safe for concurrent use.
 func WithOpenAICompatUsageObserver(fn func(model string, u provider.Usage)) OpenAICompatProberOption {
 	return func(p *OpenAICompatProber) {
 		p.onUsage = fn

@@ -52,18 +52,39 @@ func resolveDelegateChain(cfg *config.Config, role string) ([]string, error) {
 // the frozen network plan via resolveDelegateChain; this function performs
 // no resolution of its own. The stream sink is optional: nil disables
 // streaming (default runs unchanged); non-nil surfaces generation progress.
-func buildDelegateTool(router *provider.Router, role string, chain []string, stream func(string)) (agent.Tool, []string, error) {
+// Each successful delegate call is recorded in usage under "delegate" (ruling
+// P4-n); nil records nothing.
+func buildDelegateTool(router *provider.Router, role string, chain []string, stream func(string), usage *usageLedger) (agent.Tool, []string, error) {
 	if len(chain) == 0 {
 		return nil, nil, fmt.Errorf("golem: -delegate-role %q resolved to an empty chain", role)
 	}
 	// delegateUseCase describes the TASK, not the model; -delegate-role selects
 	// which model serves it via the StrictChain-pinned chain.
 	caller := newRouterChainCallerFor(router, chain, delegateUseCase)
+	if usage != nil {
+		caller = delegateUsageCaller{inner: caller, usage: usage}
+	}
 	var opts []agenttools.DelegateOption
 	if stream != nil {
 		opts = append(opts, agenttools.WithStream(stream))
 	}
 	return agenttools.NewDelegateCode(caller, opts...), chain, nil
+}
+
+// delegateUsageCaller records each successful delegate model call. The tool
+// returns the call's usage to no one: it is a direct Chat inside a tool, not a
+// nested Run, so it reaches neither Result.Steps nor DescendantUsage.
+type delegateUsageCaller struct {
+	inner agent.ModelCaller
+	usage *usageLedger
+}
+
+func (c delegateUsageCaller) Chat(ctx context.Context, req provider.ChatRequest, onToken func(provider.ChatResponse) error) (agent.ModelResult, error) {
+	res, err := c.inner.Chat(ctx, req, onToken)
+	if err == nil {
+		c.usage.addSide("delegate", routedModel(res.RouteOutcome), res.Response.Usage)
+	}
+	return res, err
 }
 
 // delegateSystemFragment is appended to the system prompt only when delegation
