@@ -561,19 +561,27 @@ func (p *OllamaProvider) Embed(ctx context.Context, req EmbedRequest) (*EmbedRes
 	sharedCtx := context.WithoutCancel(ctx)
 	ch := p.embedGroup.DoChan(key, func() (any, error) {
 		embeddings := make([][]float64, len(req.Input))
+		// Usage is the server's prompt_eval_count summed over inputs. One
+		// omitted count makes the total unknown (0), never a partial sum.
+		prompt, counted := 0, true
 		for i, text := range req.Input {
-			emb, embedErr := p.client.Embed(sharedCtx, req.Model, text)
+			emb, n, embedErr := p.client.EmbedWithPromptCount(sharedCtx, req.Model, text)
 			if embedErr != nil {
 				return nil, fmt.Errorf("provider: ollama: embed: %w", embedErr)
 			}
 			embeddings[i] = emb
+			prompt += n
+			counted = counted && n > 0
+		}
+		if !counted {
+			prompt = 0
 		}
 		return &EmbedResponse{
 			Model:      req.Model,
 			Provider:   p.name,
 			Embeddings: embeddings,
 			Usage: Usage{
-				PromptTokens: len(req.Input),
+				PromptTokens: prompt,
 			},
 		}, nil
 	})

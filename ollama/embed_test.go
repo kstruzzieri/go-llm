@@ -80,3 +80,29 @@ func TestEmbedBatch(t *testing.T) {
 		t.Errorf("expected third embedding[0]=3.0, got %f", results[2][0])
 	}
 }
+
+func TestEmbedWithPromptCount(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		want int
+	}{
+		{"reported", `{"embeddings": [[0.5, 0.25]], "prompt_eval_count": 9}`, 9},
+		{"omitted", `{"embeddings": [[0.5, 0.25]]}`, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+			c := NewClient(WithBaseURL(srv.URL))
+			emb, n, err := c.EmbedWithPromptCount(context.Background(), "nomic-embed-text", "hello")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if n != tc.want || len(emb) != 2 || emb[0] != 0.5 || emb[1] != 0.25 {
+				t.Fatalf("EmbedWithPromptCount = (%v, %d), want ([0.5 0.25], %d)", emb, n, tc.want)
+			}
+		})
+	}
+}

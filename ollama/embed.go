@@ -7,11 +7,18 @@ import (
 
 // Embed generates an embedding vector for a single text using the specified model.
 func (c *Client) Embed(ctx context.Context, model string, text string) ([]float64, error) {
+	emb, _, err := c.EmbedWithPromptCount(ctx, model, text)
+	return emb, err
+}
+
+// EmbedWithPromptCount is Embed plus the server's prompt_eval_count, the
+// number of input tokens it evaluated (0 when the server omits it).
+func (c *Client) EmbedWithPromptCount(ctx context.Context, model string, text string) ([]float64, int, error) {
 	if model == "" {
-		return nil, fmt.Errorf("ollama: embed: model name is required")
+		return nil, 0, fmt.Errorf("ollama: embed: model name is required")
 	}
 	if text == "" {
-		return nil, fmt.Errorf("ollama: embed: text is required")
+		return nil, 0, fmt.Errorf("ollama: embed: text is required")
 	}
 
 	req := EmbedRequest{
@@ -20,12 +27,12 @@ func (c *Client) Embed(ctx context.Context, model string, text string) ([]float6
 	}
 	var resp EmbedResponse
 	if err := c.doJSON(ctx, "POST", "/api/embed", req, &resp); err != nil {
-		return nil, fmt.Errorf("ollama: embed: %w", err)
+		return nil, 0, fmt.Errorf("ollama: embed: %w", err)
 	}
 	if len(resp.Embeddings) == 0 {
-		return nil, fmt.Errorf("ollama: embed: server returned no embeddings for model %q", model)
+		return nil, 0, fmt.Errorf("ollama: embed: server returned no embeddings for model %q", model)
 	}
-	return resp.Embeddings[0], nil
+	return resp.Embeddings[0], resp.PromptEvalCount, nil
 }
 
 // EmbedBatch generates embeddings for multiple texts in batches.
