@@ -169,12 +169,34 @@ func sumUsage(m map[string]*modelUsage) modelUsage {
 	return total
 }
 
-// cachedPart is "N cached" or "cached n/a" when no request reported a count.
-func cachedPart(u modelUsage) (string, bool) {
-	if u.CachedReportedRequests == 0 && !u.ChildCacheReported {
-		return "cached n/a", false
+// scopeUsage totals one scope of agent-run buckets (the process or the last
+// run) for lines 1 and 2. reported is false when no request, and not the
+// children aggregate, reported a cached count (the line then reads
+// "cached n/a"). suffix holds the qualifiers both lines share, in this fixed
+// order:
+//  1. "; cache reported on X of Y requests": a cached figure is shown but not
+//     every request reported one;
+//  2. "; dispatch children: N input tok, cache coverage unknown": children
+//     contributed input without per-request detail;
+//  3. "; unreliable usage on N requests": raw counts had cached above prompt
+//     or no prompt (ruling P4-j); the children aggregate counts as one.
+func scopeUsage(scope map[string]*modelUsage) (total modelUsage, reported bool, suffix string) {
+	total = sumUsage(scope)
+	reported = total.CachedReportedRequests > 0 || total.ChildCacheReported
+	if reported && total.CachedReportedRequests < total.Requests {
+		suffix += fmt.Sprintf("; cache reported on %d of %d requests", total.CachedReportedRequests, total.Requests)
 	}
-	return fmt.Sprintf("%d cached", u.Cached), true
+	unreliable := total.UnreliableRequests
+	if c := scope[childrenBucket]; c != nil {
+		if c.Prompt > 0 {
+			suffix += fmt.Sprintf("; dispatch children: %d input tok, cache coverage unknown", c.Prompt)
+		}
+		unreliable += min(c.UnreliableRequests, 1) - c.UnreliableRequests
+	}
+	if unreliable > 0 {
+		suffix += fmt.Sprintf("; unreliable usage on %d requests", unreliable)
+	}
+	return total, reported, suffix
 }
 
 // render returns the /context usage lines. Lines 1-2 cover agent runs only;
@@ -187,30 +209,26 @@ func (l *usageLedger) render(prices map[string]*config.ModelPrice) []string {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	total := sumUsage(l.byModel)
-	cached, reported := cachedPart(total)
+	total, reported, suffix := scopeUsage(l.byModel)
+	cached := "cached n/a"
 	if reported {
 		pct := 0
 		if total.Prompt > 0 {
 			pct = total.Cached * 100 / total.Prompt
 		}
-		cached += fmt.Sprintf(", %d%%", pct)
+		cached = fmt.Sprintf("%d cached, %d%%", total.Cached, pct)
 	}
-	line := fmt.Sprintf("usage (this process): input %d tok (%s), output %d tok, %d requests", total.Prompt, cached, total.Completion, total.Requests)
-	if reported && total.CachedReportedRequests < total.Requests {
-		line += fmt.Sprintf("; cache reported on %d of %d requests", total.CachedReportedRequests, total.Requests)
-	}
-	if c := l.byModel[childrenBucket]; c != nil && c.Prompt > 0 {
-		line += fmt.Sprintf("; dispatch children: %d input tok, cache coverage unknown", c.Prompt)
-	}
-	lines := []string{line}
+	lines := []string{fmt.Sprintf("usage (this process): input %d tok (%s), output %d tok, %d requests", total.Prompt, cached, total.Completion, total.Requests) + suffix}
 
 	if l.lastRun == nil {
 		lines = append(lines, "last run: none")
 	} else {
-		last := sumUsage(l.lastRun)
-		cached, _ := cachedPart(last)
-		lines = append(lines, fmt.Sprintf("last run: input %d tok (%s), output %d tok", last.Prompt, cached, last.Completion))
+		last, reported, suffix := scopeUsage(l.lastRun)
+		cached := "cached n/a"
+		if reported {
+			cached = fmt.Sprintf("%d cached", last.Cached)
+		}
+		lines = append(lines, fmt.Sprintf("last run: input %d tok (%s), output %d tok", last.Prompt, cached, last.Completion)+suffix)
 	}
 
 	if len(prices) == 0 {

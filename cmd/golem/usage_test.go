@@ -105,12 +105,80 @@ func TestLedgerRenderClampsDisplayedTokens(t *testing.T) {
 		usageStep("p/m", provider.Usage{PromptTokens: 100, CachedPromptTokens: 50, CachedPromptTokensReported: true, CompletionTokens: 5}),
 		usageStep("p/m", provider.Usage{PromptTokens: -7, CachedPromptTokens: 3, CachedPromptTokensReported: true, CompletionTokens: -2}),
 	))
+	// Two of the three raw reports (cached 500 > prompt 100, prompt -7) are
+	// unreliable, and both lines say so.
 	want := []string{
-		"usage (this process): input 200 tok (150 cached, 75%), output 10 tok, 3 requests",
-		"last run: input 200 tok (150 cached), output 10 tok",
+		"usage (this process): input 200 tok (150 cached, 75%), output 10 tok, 3 requests; unreliable usage on 2 requests",
+		"last run: input 200 tok (150 cached), output 10 tok; unreliable usage on 2 requests",
 	}
 	if got := l.render(nil)[:2]; !slices.Equal(got, want) {
 		t.Fatalf("render =\n%q\nwant\n%q", got, want)
+	}
+}
+
+// Lines 1 and 2 share one qualifier suffix, each computed over its own scope
+// (process vs last run), in a fixed order: partial cache reports, dispatch
+// children coverage, unreliable usage.
+func TestLedgerLineQualifiers(t *testing.T) {
+	weighted := provider.Usage{PromptTokens: 596, CachedPromptTokens: 4992, CachedPromptTokensReported: true, CompletionTokens: 20}
+	reported := provider.Usage{PromptTokens: 100, CachedPromptTokens: 40, CachedPromptTokensReported: true, CompletionTokens: 10}
+	silent := provider.Usage{PromptTokens: 100, CompletionTokens: 10}
+	// cached 80 > prompt 50: an unreliable aggregate, clamped to 50/50.
+	children := &provider.Usage{PromptTokens: 50, CachedPromptTokens: 80, CachedPromptTokensReported: true, CompletionTokens: 5}
+	for _, tc := range []struct {
+		name string
+		runs []agent.Result
+		want []string
+	}{
+		{"abacus billing-weighted on line 1", []agent.Result{usageRun(usageStep("abacus/route", weighted))}, []string{
+			"usage (this process): input 596 tok (596 cached, 100%), output 20 tok, 1 requests; unreliable usage on 1 requests",
+			"last run: input 596 tok (596 cached), output 20 tok; unreliable usage on 1 requests",
+		}},
+		{"abacus non-streaming sends no prompt", []agent.Result{usageRun(usageStep("abacus/route", provider.Usage{CompletionTokens: 50}))}, []string{
+			"usage (this process): input 0 tok (cached n/a), output 50 tok, 1 requests; unreliable usage on 1 requests",
+			"last run: input 0 tok (cached n/a), output 50 tok; unreliable usage on 1 requests",
+		}},
+		{"partial report on line 2", []agent.Result{
+			usageRun(usageStep("p/m", reported)),
+			usageRun(usageStep("p/m", reported), usageStep("q/n", silent)),
+		}, []string{
+			"usage (this process): input 300 tok (80 cached, 26%), output 30 tok, 3 requests; cache reported on 2 of 3 requests",
+			"last run: input 200 tok (40 cached), output 20 tok; cache reported on 1 of 2 requests",
+		}},
+		{"all qualifiers in order; children count once", []agent.Result{
+			{Steps: []agent.StepRecord{usageStep("p/m", reported)}, DescendantUsage: children},
+			{Steps: []agent.StepRecord{usageStep("p/m", silent), usageStep("abacus/route", weighted)}, DescendantUsage: children},
+		}, []string{
+			// 100+100+596 top-level + 2*50 children = 896 input; 40+596+2*50 = 736 cached.
+			"usage (this process): input 896 tok (736 cached, 82%), output 50 tok, 3 requests; cache reported on 2 of 3 requests; dispatch children: 100 input tok, cache coverage unknown; unreliable usage on 2 requests",
+			"last run: input 746 tok (646 cached), output 35 tok; cache reported on 1 of 2 requests; dispatch children: 50 input tok, cache coverage unknown; unreliable usage on 2 requests",
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			l := &usageLedger{}
+			for _, res := range tc.runs {
+				l.addRun(res)
+			}
+			if got := l.render(nil)[:2]; !slices.Equal(got, tc.want) {
+				t.Fatalf("lines 1-2 =\n%q\nwant\n%q", got, tc.want)
+			}
+		})
+	}
+}
+
+// The cache-write clamp is per request: A's write has no room left after its
+// cached tokens, so it is 0 even though the summed bucket would have room.
+func TestLedgerClampsCacheWritePerRequest(t *testing.T) {
+	prices := map[string]*config.ModelPrice{"p/m": {Input: 1000, CachedInput: new(100.0), CacheWrite: new(5000.0), Output: 1000}}
+	l := &usageLedger{}
+	l.addRun(usageRun(
+		usageStep("p/m", provider.Usage{PromptTokens: 100, CachedPromptTokens: 100, CacheWriteTokens: 100}),
+		usageStep("p/m", provider.Usage{PromptTokens: 100}),
+	))
+	// 100 uncached * 1000 + 100 cached * 100 + 0 write = 110000 / 1e6. Summing
+	// the raw write first would bill 100 write * 5000 instead: $0.5100.
+	if got, want := l.render(prices)[2], "est. cost: $0.1100"; got != want {
+		t.Fatalf("line 3 = %q; want %q", got, want)
 	}
 }
 
