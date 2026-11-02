@@ -110,7 +110,7 @@ func TestProgressiveWithoutSummarizeChainProducesNoGenerator(t *testing.T) {
 			if len(chain) != 0 {
 				t.Fatalf("chain = %v, want empty (warning would be dead code)", chain)
 			}
-			if routerSourceSummaryGenerator(&provider.Router{}, chain) != nil {
+			if routerSourceSummaryGenerator(&provider.Router{}, chain, nil) != nil {
 				t.Fatal("empty chain must yield no generator")
 			}
 		})
@@ -156,7 +156,7 @@ func TestProgressiveWithSummarizeFallbackProducesGenerator(t *testing.T) {
 			if len(chain) == 0 {
 				t.Fatalf("%q default did not resolve a summarize chain", role)
 			}
-			if routerSourceSummaryGenerator(&provider.Router{}, chain) == nil {
+			if routerSourceSummaryGenerator(&provider.Router{}, chain, nil) == nil {
 				t.Fatal("resolved chain must yield a generator")
 			}
 		})

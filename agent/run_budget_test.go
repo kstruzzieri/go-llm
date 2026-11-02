@@ -206,19 +206,20 @@ func TestRunBudgetSettlement(t *testing.T) {
 				if err != nil {
 					t.Fatalf("exact remaining: %v", err)
 				}
-				got.settle(ModelResult{}, nil)
+				// This admission probe made no successful model call.
+				got.settle(ModelResult{}, provider.ErrRouterClosed)
 			}
 			snapshot := root.close()
-			if !tc.telemetry {
-				if snapshot != nil {
-					t.Fatalf("fabricated telemetry: %+v", snapshot)
-				}
-			} else {
-				want := tc.usage
+			if wantPresent := tc.telemetry || tc.err == nil; (snapshot != nil) != wantPresent {
+				t.Fatalf("telemetry presence = %v, want %v", snapshot != nil, wantPresent)
+			}
+			var want provider.Usage
+			if tc.telemetry {
+				want = tc.usage
 				want.ReasoningTokens, want.ReasoningTokensReported = 0, false
-				if snapshot == nil || *snapshot != want {
-					t.Fatalf("telemetry = %+v, want %+v", snapshot, want)
-				}
+			}
+			if snapshot != nil && *snapshot != want {
+				t.Fatalf("telemetry = %+v, want %+v", snapshot, want)
 			}
 		})
 	}

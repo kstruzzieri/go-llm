@@ -30,6 +30,7 @@ import (
 type OpenAICompatProber struct {
 	prov         *openaicompat.Provider
 	capabilities []string
+	onUsage      func(model string, u provider.Usage)
 }
 
 // OpenAICompatProberOption configures an OpenAICompatProber.
@@ -42,6 +43,25 @@ type OpenAICompatProberOption func(*OpenAICompatProber)
 func WithOpenAICompatCapabilities(caps []string) OpenAICompatProberOption {
 	return func(p *OpenAICompatProber) {
 		p.capabilities = append([]string(nil), caps...)
+	}
+}
+
+// WithOpenAICompatUsageObserver reports the usage of every successful model
+// call the prober makes (DetectKind's chat probe and embed fallback,
+// ProbeChat, ProbeEmbedding, and each ProbeToolCall attempt), with the bare
+// model name it was called with. Failed calls are not reported. Probe results
+// are unchanged. One observer may serve many probers whose probes run
+// concurrently, so fn must be safe for concurrent use.
+func WithOpenAICompatUsageObserver(fn func(model string, u provider.Usage)) OpenAICompatProberOption {
+	return func(p *OpenAICompatProber) {
+		p.onUsage = fn
+	}
+}
+
+// observe reports one successful call's usage to the observer, if any.
+func (p *OpenAICompatProber) observe(model string, u provider.Usage) {
+	if p.onUsage != nil {
+		p.onUsage(model, u)
 	}
 }
 
@@ -73,18 +93,20 @@ func (p *OpenAICompatProber) DetectKind(ctx context.Context, model string) (*fin
 		}, nil
 	}
 
-	if _, err := p.prov.Chat(ctx, provider.ChatRequest{
+	if resp, err := p.prov.Chat(ctx, provider.ChatRequest{
 		Model:    model,
 		Messages: []provider.ChatMessage{{Role: "user", Content: "hi"}},
 		Options:  provider.ModelOptions{NumPredict: 1},
 	}); err == nil {
+		p.observe(model, resp.Usage)
 		return &fingerprint.KindDetection{Kind: fingerprint.ModelKindChat, Source: "probe"}, nil
 	}
 
-	if _, err := p.prov.Embed(ctx, provider.EmbedRequest{
+	if resp, err := p.prov.Embed(ctx, provider.EmbedRequest{
 		Model: model,
 		Input: []string{"test"},
 	}); err == nil {
+		p.observe(model, resp.Usage)
 		return &fingerprint.KindDetection{Kind: fingerprint.ModelKindEmbedding, Source: "probe"}, nil
 	}
 
@@ -123,6 +145,7 @@ func (p *OpenAICompatProber) ProbeChat(ctx context.Context, model string, opts a
 		return nil, fmt.Errorf("fingerprint: openaicompat probe chat %q: %w", model, err)
 	}
 	elapsed := time.Since(start)
+	p.observe(model, resp.Usage)
 
 	metrics := &fingerprint.ChatMetrics{}
 	if resp.Usage.CompletionTokens > 0 && elapsed > 0 {
@@ -142,6 +165,7 @@ func (p *OpenAICompatProber) ProbeEmbedding(ctx context.Context, model string) (
 	if err != nil {
 		return nil, fmt.Errorf("fingerprint: openaicompat probe embedding %q: %w", model, err)
 	}
+	p.observe(model, resp.Usage)
 	// An empty embedding response is a probe failure, not a zero-dimension
 	// model: surface it instead of reporting Dim 0, which the profiler would
 	// silently treat as "not tested".
@@ -243,6 +267,7 @@ func (p *OpenAICompatProber) toolProbeAttempt(ctx context.Context, model string,
 		// Transport-level failure (network, timeout, cancel): transient.
 		return fingerprint.CapProbeOutcome{}, false, fmt.Errorf("fingerprint: openaicompat tool probe %q: %w", model, err)
 	}
+	p.observe(model, resp.Usage)
 	if len(resp.ToolCalls) > 0 {
 		return fingerprint.CapProbeOutcome{State: fingerprint.CapProbeYes, Detail: "model produced a tool call"}, false, nil
 	}

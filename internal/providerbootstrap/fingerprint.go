@@ -14,8 +14,10 @@ import (
 
 // proberFactory builds the provider-aware fingerprint prober factory. Ollama
 // clients are keyed by provider name so multi-Ollama configs probe the same
-// backend that owns the requested model key.
-func proberFactory(cfg *config.Config, ollamaClients map[string]*ollama.Client) provider.FingerprintProberFactory {
+// backend that owns the requested model key. obs, when non-nil, receives each
+// openai-compat probe call's usage under the probed key (the prober itself
+// knows only the bare model name).
+func proberFactory(cfg *config.Config, ollamaClients map[string]*ollama.Client, obs func(provider.ModelKey, provider.Usage)) provider.FingerprintProberFactory {
 	return func(ctx context.Context, key provider.ModelKey, runtime *provider.ModelInfo, p provider.Provider) (*provider.FingerprintProberSpec, error) {
 		apiFormat := "ollama"
 		if cfg != nil {
@@ -41,6 +43,9 @@ func proberFactory(cfg *config.Config, ollamaClients map[string]*ollama.Client) 
 				return nil, fmt.Errorf("providerbootstrap: fingerprint prober for %s/%s: provider has type %T, want *openaicompat.Provider", key.Provider, key.Model, p)
 			}
 			in.OpenAICompatProvider = oc
+			if obs != nil {
+				in.UsageObserver = func(_ string, u provider.Usage) { obs(key, u) }
+			}
 		}
 
 		prober, err := probers.NewProberForAPIFormat(in)

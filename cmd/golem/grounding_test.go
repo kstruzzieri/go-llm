@@ -1146,7 +1146,7 @@ func TestGroundingRetrieverWrappedOnlyWhenRecording(t *testing.T) {
 			cfg, router, _ := testRoutingEmbedder(t)
 
 			reader, _, _, err := buildGatedRetriever(
-				context.Background(), cfg, router, dbPath, expectedVectorSpaces(cfg), nil, false, tc.rec)
+				context.Background(), cfg, router, dbPath, expectedVectorSpaces(cfg), nil, false, tc.rec, nil)
 			if err != nil {
 				t.Fatalf("buildGatedRetriever: %v", err)
 			}

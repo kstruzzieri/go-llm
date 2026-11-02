@@ -265,7 +265,7 @@ func runIndex(ctx context.Context, args []string, out, errOut io.Writer) (runErr
 		if len(summarizeChain) == 0 {
 			_, _ = fmt.Fprintln(errOut, "golem index: warning: "+progressiveNoChainWarning(false))
 		}
-		summarize = routerSourceSummaryGenerator(bundle.Router, summarizeChain)
+		summarize = routerSourceSummaryGenerator(bundle.Router, summarizeChain, nil)
 	}
 	dbPath, workspaceID, err := indexDBPathForWorkspace(os.Getenv, root)
 	if err != nil {
@@ -288,7 +288,7 @@ func runIndex(ctx context.Context, args []string, out, errOut io.Writer) (runErr
 
 	embedder := newChainEmbedder(func(rc context.Context, rr provider.RoutingRequest) (embedExecutor, error) {
 		return bundle.Router.Route(rc, rr)
-	}, embChain)
+	}, embChain, nil)
 	actualVectorSpace, err := probeAutoIndexEmbedder(ctx, embedder, embChain[0])
 	if err != nil {
 		_, _ = fmt.Fprintf(out, "golem index: %s\n", indexDiagnostic(err.Error()))

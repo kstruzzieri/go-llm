@@ -5,6 +5,8 @@ package providerbootstrap
 
 import (
 	"fmt"
+	"math"
+	"reflect"
 	"sort"
 
 	"github.com/kstruzzieri/go-llm/config"
@@ -57,6 +59,52 @@ func buildIntOverrides(cfg *config.Config, field string, value func(config.Model
 		}
 		seen[key] = intOverrideEntry{role: role, value: v}
 		out[key] = v
+	}
+	return out, nil
+}
+
+// buildPriceOverrides maps each provider/model key to its configured token
+// prices. Sorted-role walk; an empty provider means ollama. Roles without a
+// name or a price are skipped; a non-finite or negative value, or two roles
+// giving one key different prices, is an error naming "price". Revalidated
+// here because config.Load only covers file-loaded config. The returned
+// values share the config's CachedInput/CacheWrite pointers.
+func buildPriceOverrides(cfg *config.Config) (map[provider.ModelKey]config.ModelPrice, error) {
+	out := make(map[provider.ModelKey]config.ModelPrice)
+	if cfg == nil {
+		return out, nil
+	}
+	roles := make([]string, 0, len(cfg.Models))
+	for role := range cfg.Models {
+		roles = append(roles, role)
+	}
+	sort.Strings(roles)
+	seenRole := make(map[provider.ModelKey]string)
+	for _, role := range roles {
+		model := cfg.Models[role]
+		if model.Name == "" || model.Price == nil {
+			continue
+		}
+		if model.Provider == "" {
+			model.Provider = "ollama"
+		}
+		for _, f := range []struct {
+			name string
+			v    *float64
+		}{{"input", &model.Price.Input}, {"output", &model.Price.Output}, {"cached_input", model.Price.CachedInput}, {"cache_write", model.Price.CacheWrite}} {
+			if f.v != nil && (math.IsNaN(*f.v) || math.IsInf(*f.v, 0) || *f.v < 0) {
+				return nil, fmt.Errorf("providerbootstrap: model %q price.%s must be a finite number >= 0", role, f.name)
+			}
+		}
+		key := provider.ModelKey{Provider: model.Provider, Model: model.Name}
+		if existing, ok := out[key]; ok && !reflect.DeepEqual(existing, *model.Price) {
+			return nil, fmt.Errorf(
+				"providerbootstrap: conflicting price for %s: models %q and %q",
+				key, seenRole[key], role,
+			)
+		}
+		seenRole[key] = role
+		out[key] = *model.Price
 	}
 	return out, nil
 }

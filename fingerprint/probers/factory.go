@@ -6,6 +6,7 @@ import (
 
 	"github.com/kstruzzieri/go-llm/fingerprint"
 	"github.com/kstruzzieri/go-llm/ollama"
+	"github.com/kstruzzieri/go-llm/provider"
 	"github.com/kstruzzieri/go-llm/provider/openaicompat"
 )
 
@@ -17,6 +18,11 @@ type ProberFactoryInput struct {
 	OllamaClient         *ollama.Client
 	OpenAICompatProvider *openaicompat.Provider
 	Capabilities         []string
+	// UsageObserver, when non-nil, receives the usage of every successful
+	// model call an openai-compat prober makes (see
+	// WithOpenAICompatUsageObserver). The ollama prober ignores it. It must
+	// be safe for concurrent use.
+	UsageObserver func(model string, u provider.Usage)
 }
 
 // NewProberForAPIFormat selects the ModelProber implementation for a provider
@@ -36,6 +42,7 @@ func NewProberForAPIFormat(in ProberFactoryInput) (fingerprint.ModelProber, erro
 		return NewOpenAICompatProber(
 			in.OpenAICompatProvider,
 			WithOpenAICompatCapabilities(in.Capabilities),
+			WithOpenAICompatUsageObserver(in.UsageObserver),
 		), nil
 	default:
 		return nil, fmt.Errorf("fingerprint: unsupported api_format %q", in.APIFormat)

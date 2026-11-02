@@ -99,8 +99,9 @@ func (m *routerModelCaller) Chat(ctx context.Context, req provider.ChatRequest,
 }
 
 type routerSummarizer struct {
-	chain []string
-	route func(ctx context.Context, rr provider.RoutingRequest) (planExecutor, error)
+	chain   []string
+	route   func(ctx context.Context, rr provider.RoutingRequest) (planExecutor, error)
+	onUsage func(model string, u provider.Usage)
 }
 
 // DefaultSummaryOutputReserve bounds the rolling durable summary. It is the
@@ -123,11 +124,20 @@ Recent outcome:`
 // NewRouterSummarizer routes durable-history compression through the optional
 // "summarize" model role.
 func NewRouterSummarizer(r *provider.Router, chain []string) conversation.Summarizer {
+	return NewRouterSummarizerWithUsage(r, chain, nil)
+}
+
+// NewRouterSummarizerWithUsage is NewRouterSummarizer plus onUsage, called
+// once after each successful summarize call with the model that served it
+// ("provider/model" from the route outcome, or "" when there is none) and the
+// call's usage. A failed call never calls it. nil onUsage disables it.
+func NewRouterSummarizerWithUsage(r *provider.Router, chain []string, onUsage func(model string, u provider.Usage)) conversation.Summarizer {
 	return (&routerSummarizer{
 		chain: append([]string(nil), chain...),
 		route: func(ctx context.Context, rr provider.RoutingRequest) (planExecutor, error) {
 			return r.Route(ctx, rr)
 		},
+		onUsage: onUsage,
 	}).Summarize
 }
 
@@ -153,11 +163,25 @@ func (s *routerSummarizer) Summarize(ctx context.Context, prior string, msgs []c
 	if err != nil {
 		return "", err
 	}
-	wrapped, getFinal := provider.Collect(nil)
+	var outcome *provider.RouteOutcome
+	wrapped, getFinal := provider.Collect(func(chunk provider.ChatResponse) error {
+		if chunk.RouteOutcome != nil {
+			outcome = chunk.RouteOutcome
+		}
+		return nil
+	})
 	if err := plan.ExecuteChatStream(ctx, wrapped); err != nil {
 		return "", err
 	}
-	return strings.TrimSpace(getFinal().Content), nil
+	final := getFinal()
+	if s.onUsage != nil {
+		model := ""
+		if outcome != nil && outcome.ActualModel != (provider.ModelKey{}) {
+			model = outcome.ActualModel.String()
+		}
+		s.onUsage(model, final.Usage)
+	}
+	return strings.TrimSpace(final.Content), nil
 }
 
 // summaryUserContent frames the entire historical input, including prior model

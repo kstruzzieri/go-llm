@@ -15,6 +15,7 @@ import (
 	"github.com/kstruzzieri/go-llm/agent"
 	"github.com/kstruzzieri/go-llm/agent/interceptor"
 	"github.com/kstruzzieri/go-llm/agent/tools"
+	"github.com/kstruzzieri/go-llm/config"
 	"github.com/kstruzzieri/go-llm/consult"
 	"github.com/kstruzzieri/go-llm/conversation"
 	golemruntime "github.com/kstruzzieri/go-llm/golem"
@@ -151,6 +152,12 @@ type replSession struct {
 	feedback     *feedbackService
 	pressureWarn bool             // enable the one-per-run context-pressure warning line
 	pressure     *pressureCapture // latest attempted Runtime turn; owned by the REPL loop
+	// usage is the process-local usage ledger /context prints, recorded on
+	// every turn whether or not observability is on; prices is its lookup
+	// keyed "provider/model". /model, /new, /clear and /resume never reset
+	// it. nil usage (narrow tests) records and prints nothing.
+	usage  *usageLedger
+	prices map[string]*config.ModelPrice
 	// mixed mirrors what newOrchestratorFactory puts in ContextManager.Mixed, so
 	// the renderer can tell whether a tool result's flat Content is what the
 	// model actually read. Same -progressive flag, one source.
@@ -594,6 +601,9 @@ func runOnceWithRecipeHint(ctx context.Context, out io.Writer, interrupts <-chan
 			}
 		}
 	}
+	// Outside the obs block on purpose: ordinary sessions run with
+	// observability off. Every path after Run reaches here exactly once.
+	sess.usage.addRun(res)
 	runDuration := rend.now().Sub(rend.runStart)
 
 	// Grounding verification (#348). Only a completed run has a final answer

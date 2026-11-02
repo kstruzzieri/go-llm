@@ -90,8 +90,11 @@ type EmbedRequest struct {
 }
 
 // EmbedResponse is the response from the /api/embed endpoint.
+// PromptEvalCount is the number of input tokens the server evaluated; it is
+// 0 when the server omits it.
 type EmbedResponse struct {
-	Embeddings [][]float64 `json:"embeddings"`
+	Embeddings      [][]float64 `json:"embeddings"`
+	PromptEvalCount int         `json:"prompt_eval_count,omitempty"`
 }
 
 // GenerateRequest is the request body for the /api/generate endpoint.
