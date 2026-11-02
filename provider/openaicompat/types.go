@@ -255,6 +255,44 @@ type promptTokensDetails struct {
 	CacheWriteTokens *int `json:"cache_write_tokens"`
 }
 
+// UnmarshalJSON decodes the OpenAI usage shape and, when prompt_tokens is
+// absent and raw_input_tokens is present, Abacus RouteLLM's non-streaming
+// shape (measured 2026-11-01 on gpt-5-mini): raw_input_tokens is the uncached
+// input, cache_read_input_tokens the cached part, output_tokens and a
+// top-level reasoning_tokens the completion side, and there is no total.
+// Abacus's input_tokens is billing-weighted (cached tokens at the model's
+// cache discount) and is deliberately not read. Any block that carries
+// prompt_tokens decodes exactly as the OpenAI shape.
+func (u *usage) UnmarshalJSON(b []byte) error {
+	type plain usage // drops this method so the OpenAI fields decode as usual
+	if err := json.Unmarshal(b, (*plain)(u)); err != nil {
+		return err
+	}
+	var a struct {
+		PromptTokens         *int `json:"prompt_tokens"`
+		RawInputTokens       *int `json:"raw_input_tokens"`
+		CacheReadInputTokens *int `json:"cache_read_input_tokens"`
+		OutputTokens         *int `json:"output_tokens"`
+		ReasoningTokens      *int `json:"reasoning_tokens"`
+	}
+	if err := json.Unmarshal(b, &a); err != nil || a.PromptTokens != nil || a.RawInputTokens == nil {
+		return err
+	}
+	u.PromptTokens = *a.RawInputTokens
+	if a.CacheReadInputTokens != nil {
+		u.PromptTokens += *a.CacheReadInputTokens
+		u.PromptTokensDetails = &promptTokensDetails{CachedTokens: a.CacheReadInputTokens}
+	}
+	if a.OutputTokens != nil {
+		u.CompletionTokens = *a.OutputTokens
+	}
+	if a.ReasoningTokens != nil {
+		u.CompletionTokensDetails = &completionTokensDetails{ReasoningTokens: a.ReasoningTokens}
+	}
+	u.TotalTokens = u.PromptTokens + u.CompletionTokens
+	return nil
+}
+
 // completionTokensDetails carries optional completion-token breakdowns.
 type completionTokensDetails struct {
 	ReasoningTokens *int `json:"reasoning_tokens,omitempty"`

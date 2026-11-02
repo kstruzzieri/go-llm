@@ -2,11 +2,13 @@ package openaicompat
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	"github.com/kstruzzieri/go-llm/provider"
@@ -214,6 +216,104 @@ func TestChatStreamUsageCacheCounters(t *testing.T) {
 					last.Usage.CompletionTokens, last.Usage.TotalTokens, tc.want.completion, tc.want.total)
 			}
 			checkCacheUsage(t, last.Usage, tc.want)
+		})
+	}
+}
+
+// TestChatUsageAbacusNonStream replays the usage blocks Abacus RouteLLM sent on
+// non-streaming gpt-5-mini chat completions (measured 2026-11-01; the usage
+// objects are verbatim, the envelope around them is rebuilt). Abacus sends no
+// prompt_tokens: raw_input_tokens is the uncached input, cache_read_input_tokens
+// the cached part, and input_tokens is billing-weighted (597 = 98 uncached +
+// 4,992 cached at a tenth), so it must not be read as the prompt count.
+func TestChatUsageAbacusNonStream(t *testing.T) {
+	envelope := func(usageObj string) string {
+		return `{"model": "gpt-5-mini", "choices": [{"index": 0, "message": {"role": "assistant", "content": "OK"}, "finish_reason": "stop", "native_finish_reason": "stop"}], "usage": ` + usageObj + `, "error": null}`
+	}
+
+	tests := []struct {
+		name  string
+		usage string
+		want  provider.Usage
+	}{
+		{
+			name:  "warm request",
+			usage: `{"input_tokens": 597, "output_tokens": 45, "cache_read_input_tokens": 4992, "raw_input_tokens": 98}`,
+			want: provider.Usage{PromptTokens: 5090, CompletionTokens: 45, TotalTokens: 5135,
+				CachedPromptTokens: 4992, CachedPromptTokensReported: true},
+		},
+		{
+			name:  "cold request with reasoning",
+			usage: `{"input_tokens": 5090, "output_tokens": 104, "reasoning_tokens": 64, "raw_input_tokens": 5090}`,
+			want: provider.Usage{PromptTokens: 5090, CompletionTokens: 104, TotalTokens: 5194,
+				ReasoningTokens: 64, ReasoningTokensReported: true},
+		},
+		{
+			name:  "tiny request",
+			usage: `{"input_tokens": 8, "output_tokens": 77, "raw_input_tokens": 8}`,
+			want:  provider.Usage{PromptTokens: 8, CompletionTokens: 77, TotalTokens: 85},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = fmt.Fprint(w, envelope(tc.usage))
+			}))
+			defer srv.Close()
+
+			resp, err := NewProvider(NewClient(srv.URL)).Chat(context.Background(), provider.ChatRequest{
+				Model:    "gpt-5-mini",
+				Messages: []provider.ChatMessage{{Role: "user", Content: "hi"}},
+			})
+			if err != nil {
+				t.Fatalf("Chat: %v", err)
+			}
+			if resp.Usage != tc.want {
+				t.Errorf("Usage = %+v\nwant    %+v", resp.Usage, tc.want)
+			}
+		})
+	}
+}
+
+// TestUsageDecodeUnchangedForOpenAIShapes proves the Abacus rule leaves every
+// usage block that is not Abacus's non-streaming shape decoding exactly as the
+// plain struct decode did before the rule existed: llama.cpp, OpenAI, vLLM and
+// embedding shapes, a block that carries prompt_tokens next to Abacus field
+// names, and Abacus fields without raw_input_tokens.
+func TestUsageDecodeUnchangedForOpenAIShapes(t *testing.T) {
+	var llama struct {
+		Usage json.RawMessage `json:"usage"`
+	}
+	if err := json.Unmarshal([]byte(readUsageFixture(t, "llama_usage_nonstream.json")), &llama); err != nil {
+		t.Fatalf("llama fixture: %v", err)
+	}
+
+	bodies := map[string]string{
+		"llama.cpp fixture":   string(llama.Usage),
+		"openai":              `{"prompt_tokens":2000,"completion_tokens":10,"total_tokens":2010,"prompt_tokens_details":{"cached_tokens":1536,"audio_tokens":0},"completion_tokens_details":{"reasoning_tokens":0,"audio_tokens":0}}`,
+		"vllm":                `{"prompt_tokens":12,"total_tokens":20,"completion_tokens":8,"prompt_tokens_details":null}`,
+		"embedding":           `{"prompt_tokens":8,"total_tokens":8}`,
+		"abacus stream":       `{"prompt_tokens": 596, "completion_tokens": 75, "total_tokens": 671, "completion_tokens_details": {"reasoning_tokens": 64}, "prompt_tokens_details": {"cached_tokens": 4992}}`,
+		"prompt_tokens wins":  `{"prompt_tokens":2000,"completion_tokens":10,"total_tokens":2010,"raw_input_tokens":5,"cache_read_input_tokens":7,"output_tokens":99,"reasoning_tokens":3}`,
+		"no raw_input_tokens": `{"input_tokens":597,"output_tokens":45,"cache_read_input_tokens":4992,"reasoning_tokens":3}`,
+		"null":                `null`,
+	}
+	type plain usage // no UnmarshalJSON: the decode before the Abacus rule
+	for name, body := range bodies {
+		t.Run(name, func(t *testing.T) {
+			var got usage
+			var want plain
+			if err := json.Unmarshal([]byte(body), &got); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if err := json.Unmarshal([]byte(body), &want); err != nil {
+				t.Fatalf("plain decode: %v", err)
+			}
+			if !reflect.DeepEqual(got, usage(want)) {
+				t.Errorf("decode = %+v, want the plain decode %+v", got, usage(want))
+			}
 		})
 	}
 }
