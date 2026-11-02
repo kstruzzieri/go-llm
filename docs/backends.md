@@ -206,10 +206,17 @@ cached 84.8% of input with `prompt_cache_key` and 80.3% without it, a gap too
 small for that sample to tell from chance
 ([measurement](llm/benchmarks/2026-11-01-abacus-cache-affinity.md)): no
 significant benefit was detected, and none was ruled out.
-`"cache_affinity": "openai"` is accepted there. Abacus also
-reports usage in its own shape (non-streaming `input_tokens` and
-`cache_read_input_tokens`; streaming `prompt_tokens` discounted for cached
-tokens), so go-llm's token and cache counts for Abacus are not exact yet.
+`"cache_affinity": "openai"` is accepted there.
+
+Abacus also reports usage in its own shape. go-llm reads a non-streaming
+response exactly: input is `raw_input_tokens` plus `cache_read_input_tokens`,
+and Abacus's billing-weighted `input_tokens` is not used. A streamed response
+that reused cached input sends only a `prompt_tokens` count discounted for
+those cached tokens, and no exact input count, so go-llm reports its input and
+total as 0 (unknown) and keeps the cached and output counts. Golem flags such a
+request as unreliable usage and leaves it out of the dollar total (see
+[What the figures leave out](golem.md#what-the-figures-leave-out)). A stream
+with nothing cached reports exact counts.
 
 Local llama.cpp gets no key; go-llm does not pin `id_slot`, and `llama-server`
 already routes requests by prompt similarity. To keep a conversation's prefix
