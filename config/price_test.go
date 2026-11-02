@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -91,6 +92,61 @@ func TestModelPriceLoadDecodesAndRejects(t *testing.T) {
 	})
 }
 
+// A price must name both rates and only known members: "{}", a missing
+// rate or a typo'd member would otherwise decode to a legal $0 price and
+// print a dollar total with no exclusion. The refusal names the role under
+// CodeModelInvalid on both decode paths (Load and Document); a malformed
+// value stays a parse error, as before.
+func TestModelPriceStrictDecode(t *testing.T) {
+	const tmpl = `{
+  "providers": {"p": {"base_url": "http://localhost:1234"}},
+  "models": {"agent": {"name": "m", "provider": "p", "type": "dense", "price": %s}},
+  "defaults": {"agent": "agent"}
+}`
+	for _, tc := range []struct {
+		name, price string
+		code        ErrorCode // "" = accepted
+		want        string    // substring of the error
+	}{
+		{"empty object", `{}`, CodeModelInvalid, "price.input is required"},
+		{"typo'd member", `{"input_per_mtok": 3, "output": 15}`, CodeModelInvalid, `price has unknown member "input_per_mtok"`},
+		{"unknown member beside both rates", `{"input": 3, "output": 15, "future_price_field": "x"}`, CodeModelInvalid, `price has unknown member "future_price_field"`},
+		{"case variant is not the member", `{"Input": 3, "output": 15}`, CodeModelInvalid, `price has unknown member "Input"`},
+		{"missing output", `{"input": 3}`, CodeModelInvalid, "price.output is required"},
+		{"null input", `{"input": null, "output": 15}`, CodeModelInvalid, "price.input is required"},
+		{"wrong type stays a parse error", `{"input": "3", "output": 15}`, CodeParseError, "price"},
+		{"explicit free price", `{"input": 0, "output": 0}`, "", ""},
+		{"both rates, optional absent", `{"input": 3, "output": 15}`, "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := fmt.Sprintf(tmpl, tc.price)
+			cfg, loadErr := Load(writeTempJSON(t, body))
+			_, docErr := NewDocumentFromBytes([]byte(body), Origin{Source: OriginExplicit})
+			for path, err := range map[string]error{"Load": loadErr, "Document": docErr} {
+				if tc.code == "" {
+					if err != nil {
+						t.Fatalf("%s: %v, want accepted", path, err)
+					}
+					continue
+				}
+				subjectKind, subject := SubjectRole, "agent"
+				if tc.code == CodeParseError {
+					subjectKind, subject = SubjectNone, ""
+				}
+				assertDiag(t, err, tc.code, subjectKind, subject)
+				if !strings.Contains(err.Error(), tc.want) || (tc.code == CodeModelInvalid && !strings.Contains(err.Error(), `"agent"`)) {
+					t.Fatalf("%s: error %q must name %q and the role", path, err, tc.want)
+				}
+			}
+			if tc.code == "" {
+				if p := cfg.Models["agent"].Price; p == nil {
+					t.Fatal("accepted price decoded to nil")
+				}
+			}
+		})
+	}
+}
+
 // selectorPriceCfg puts two roles on the SAME provider/model selector.
 func selectorPriceCfg(a, b *ModelPrice) *Config {
 	return &Config{
@@ -177,19 +233,22 @@ func TestModelPriceCloneIsDeep(t *testing.T) {
 	}
 }
 
-// pricedFixture has one priced role plus unknown members, including one
-// inside price, so raw-subtree preservation is observable.
+// pricedFixture has one priced role plus an unknown role member, so
+// raw-subtree preservation is observable. An unknown member inside price is
+// refused at load (TestModelPriceStrictDecode).
 const pricedFixture = `{
   "providers": {"local": {"base_url": "http://localhost:1", "api_format": "openai-compat"}},
   "models": {
     "agent": {"name": "m1", "provider": "local", "type": "dense",
       "future_role_field": true,
-      "price": {"input": 3, "output": 15, "cached_input": 0.3, "cache_write": 3.75, "future_price_field": "x"}}
+      "price": {"input": 3, "output": 15, "cached_input": 0.3, "cache_write": 3.75}}
   },
   "defaults": {"agent": "agent"}
 }`
 
-var pricedWant = map[string]float64{"input": 3, "output": 15, "cached_input": 0.3, "cache_write": 3.75}
+// pricedWant is the fixture price as the writer emits it: compact, keys
+// sorted, every member exactly as loaded.
+const pricedWant = `{"cache_write":3.75,"cached_input":0.3,"input":3,"output":15}`
 
 // renderedRole renders d through the real writer path and returns one role's
 // raw members, so a test can assert a member is absent or has exact numbers.
@@ -208,23 +267,20 @@ func renderedRole(t *testing.T, d *Document, role string) map[string]json.RawMes
 	return members
 }
 
-// requireRenderedPrice asserts the role's written price members carry exactly
-// want (unknown nested members are ignored).
-func requireRenderedPrice(t *testing.T, members map[string]json.RawMessage, want map[string]float64) {
+// requireRenderedPrice asserts the role's written price is byte-for-byte
+// want once the writer's indentation is compacted away.
+func requireRenderedPrice(t *testing.T, members map[string]json.RawMessage, want string) {
 	t.Helper()
 	raw, ok := members["price"]
 	if !ok {
 		t.Fatalf("rendered role has no price member: %v", members)
 	}
-	var got map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &got); err != nil {
+	var got bytes.Buffer
+	if err := json.Compact(&got, raw); err != nil {
 		t.Fatal(err)
 	}
-	for k, w := range want {
-		var v float64
-		if err := json.Unmarshal(got[k], &v); err != nil || v != w {
-			t.Errorf("rendered price.%s = %s, want %v", k, got[k], w)
-		}
+	if got.String() != want {
+		t.Errorf("rendered price = %s, want %s", got.String(), want)
 	}
 }
 
@@ -242,11 +298,6 @@ func TestModelPriceRoundTripsThroughDocument(t *testing.T) {
 	if string(members["future_role_field"]) != "true" {
 		t.Errorf("unknown role member lost: %v", members)
 	}
-	var priceMembers map[string]json.RawMessage
-	_ = json.Unmarshal(members["price"], &priceMembers)
-	if string(priceMembers["future_price_field"]) != `"x"` {
-		t.Errorf("unknown price member lost: %s", members["price"])
-	}
 
 	// Rendered bytes parse back to the same price and re-render identically.
 	first := renderToString(t, d)
@@ -259,6 +310,21 @@ func TestModelPriceRoundTripsThroughDocument(t *testing.T) {
 	}
 	if second := renderToString(t, again); second != first {
 		t.Errorf("render not idempotent:\n%s\n--- vs ---\n%s", first, second)
+	}
+}
+
+// An explicit free price survives the writer exactly: both zero members
+// stay present (absent would now be refused) and no optional rate appears.
+func TestModelPriceFreeRoundTrip(t *testing.T) {
+	d := loadTestDoc(t, strings.Replace(pricedFixture,
+		`{"input": 3, "output": 15, "cached_input": 0.3, "cache_write": 3.75}`, `{"input": 0, "output": 0}`, 1))
+	requireRenderedPrice(t, renderedRole(t, d, "agent"), `{"input":0,"output":0}`)
+	again, err := NewDocumentFromBytes([]byte(renderToString(t, d)), Origin{Source: OriginExplicit})
+	if err != nil {
+		t.Fatalf("rendered free price does not reload: %v", err)
+	}
+	if p := again.Config().Models["agent"].Price; p == nil || p.Input != 0 || p.Output != 0 || p.CachedInput != nil || p.CacheWrite != nil {
+		t.Fatalf("reloaded price = %+v, want {0 0 nil nil}", p)
 	}
 }
 

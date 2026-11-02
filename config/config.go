@@ -6,11 +6,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -128,11 +130,52 @@ type ModelConfig struct {
 // tokens served from a prompt cache and CacheWrite the rate for tokens
 // written to one; nil means the provider has no such rate, which is
 // different from 0 (free). Every present value must be finite and >= 0.
+// Decoded from JSON, input and output are required (a free price is
+// {"input": 0, "output": 0}) and an unknown member is refused; see
+// UnmarshalJSON.
 type ModelPrice struct {
 	Input       float64  `json:"input"`
 	Output      float64  `json:"output"`
 	CachedInput *float64 `json:"cached_input,omitempty"`
 	CacheWrite  *float64 `json:"cache_write,omitempty"`
+
+	// problem is the strict-decode refusal UnmarshalJSON found, reported by
+	// validate so the error names the role. JSON never carries it.
+	problem string
+}
+
+// UnmarshalJSON decodes a price strictly, so "{}", a missing rate or a
+// typo'd member cannot read as a legal $0 price: input and output must be
+// present and non-null, and every member must be one of input, output,
+// cached_input and cache_write. Such a refusal is recorded and returned by
+// validate as CodeModelInvalid naming the role; a value of the wrong JSON
+// type is still a decode (parse) error.
+func (p *ModelPrice) UnmarshalJSON(data []byte) error {
+	var members map[string]json.RawMessage
+	if err := json.Unmarshal(data, &members); err != nil {
+		return fmt.Errorf("config: price: %w", err)
+	}
+	type plain ModelPrice // no methods: decodes without recursing
+	var v plain
+	if err := json.Unmarshal(data, &v); err != nil {
+		return fmt.Errorf("config: price: %w", err)
+	}
+	*p = ModelPrice(v)
+	for _, k := range slices.Sorted(maps.Keys(members)) {
+		switch k {
+		case "input", "output", "cached_input", "cache_write":
+		default:
+			p.problem = fmt.Sprintf("price has unknown member %q", k)
+			return nil
+		}
+	}
+	for _, k := range []string{"input", "output"} {
+		if raw, ok := members[k]; !ok || string(raw) == "null" {
+			p.problem = fmt.Sprintf("price.%s is required (0 means free)", k)
+			return nil
+		}
+	}
+	return nil
 }
 
 // SamplingOptions are optional per-model defaults. Request values override
@@ -761,6 +804,12 @@ func (cfg *Config) validate() error {
 				fmt.Errorf("config: model %q: quality_ctx_ceiling must not be negative", role))
 		}
 
+		// A strict-decode refusal (UnmarshalJSON) is reported here so it
+		// names the role like every other price error.
+		if m.Price != nil && m.Price.problem != "" {
+			return diagWrap(CodeModelInvalid, SubjectRole, role,
+				fmt.Errorf("config: model %q: %s", role, m.Price.problem))
+		}
 		// Validate price here, not in the JSON decoder: a constructed Config
 		// is the only way to carry NaN or Inf, and it must be refused too.
 		if field := invalidPriceField(m.Price); field != "" {
