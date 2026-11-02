@@ -6,10 +6,13 @@ request Abacus RouteLLM serves from its prompt cache on `/v1/chat/completions`?
 Abacus documents the field only for `/v1/responses`, so go-llm infers `none`
 for `routellm.abacus.ai` until this was measured.
 
-**Result: no measurable effect.** Abacus caches a repeated prefix on its own,
-with or without the key, and accepted the field on every request. go-llm keeps
-inferring `none` for Abacus. Setting `"cache_affinity": "openai"` on an Abacus
-provider is harmless but bought nothing measurable here.
+**Result: no statistically significant benefit detected in this sample.**
+Abacus caches a repeated prefix on its own, with or without the key, and
+accepted the field on every request. The keyed arm cached somewhat more
+(84.8% against 80.3%), but this sample is too small to tell that gap from
+chance, and it does not show that the key makes no difference either. go-llm
+keeps inferring `none` for Abacus provisionally; `"cache_affinity": "openai"`
+is accepted there.
 
 ## Provenance
 - **Commit**: develop `0758c97d` (the A/B below calls the endpoint directly; see "Why not `llm-bench -cache-probe`")
@@ -49,11 +52,11 @@ Pooled share: `none` 80.3%, `openai` 84.8%. Zero-cache steps: `none` 4 of 56,
 `openai` 1 of 56 (Fisher exact p = 0.36; runs with any miss, 3 of 8 against
 1 of 8, p = 0.57).
 
-The gap is not the key. Three of the five misses fall on step 8, the largest
-request, and they hit both arms (runs 9, 10, 13). The one early miss that looks
-like a routing miss (run 3, steps 2-3) is a single `none` run. Every hit, in
-both arms, covers all or nearly all of the previous request in 128-token
-blocks.
+Neither test is significant, and with five misses in all, this sample cannot
+show whether the key helps. Three of the five misses fall on step 8, the
+largest request, and they hit both arms (`none` runs 9 and 13, `openai` run
+10). The one early miss (run 3, steps 2-3) is a `none` run. Every hit, in both
+arms, covers all or nearly all of the previous request in 128-token blocks.
 
 ## Usage counters
 

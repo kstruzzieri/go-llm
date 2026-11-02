@@ -200,11 +200,13 @@ fails the config load.
 "gateway": { "base_url": "https://llm-gateway.example.com", "api_format": "openai-compat", "api_key": "${GATEWAY_API_KEY}", "cache_affinity": "openai" }
 ```
 
-Abacus (`routellm.abacus.ai`) defaults to `none`. It caches a repeated prefix
-on its own, and on chat completions `prompt_cache_key` made no measurable
-difference: 16 interleaved runs on `gpt-5-mini` gave the same cached share with
-and without it ([measurement](llm/benchmarks/2026-11-01-abacus-cache-affinity.md)).
-`"cache_affinity": "openai"` is accepted there but not needed. Abacus also
+Abacus (`routellm.abacus.ai`) defaults to `none` for now. It caches a repeated
+prefix on its own. On chat completions, 16 interleaved runs on `gpt-5-mini`
+cached 84.8% of input with `prompt_cache_key` and 80.3% without it, a gap too
+small for that sample to tell from chance
+([measurement](llm/benchmarks/2026-11-01-abacus-cache-affinity.md)): no
+significant benefit was detected, and none was ruled out.
+`"cache_affinity": "openai"` is accepted there. Abacus also
 reports usage in its own shape (non-streaming `input_tokens` and
 `cache_read_input_tokens`; streaming `prompt_tokens` discounted for cached
 tokens), so go-llm's token and cache counts for Abacus are not exact yet.
