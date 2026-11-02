@@ -232,7 +232,7 @@ func sourceEmbedderFor(ctx context.Context, configPath, ollamaURL string, allowD
 	}
 	embedder := newChainEmbedder(func(rc context.Context, rr provider.RoutingRequest) (embedExecutor, error) {
 		return bundle.Router.Route(rc, rr)
-	}, embChain)
+	}, embChain, nil)
 	return embedder, embChain, closer, nil
 }
 

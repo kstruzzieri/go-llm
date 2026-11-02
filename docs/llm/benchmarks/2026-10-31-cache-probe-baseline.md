@@ -181,3 +181,90 @@ request from cache), as expected: nothing in it is compacted.
 - **Cross-turn summary rewrites** (`TestCompressionDoesNotRewriteSummaryEveryTurn`,
   60 tool-heavy turns at an 8,192 ceiling): the summarizer ran 56 times before
   P2 and 3 times after.
+
+## Close-out: P0 to P4 (2026-11-01)
+
+The last probe run of the prompt-caching work, on the P4 branch head. P3
+(session affinity) sends nothing to a local host, and P4 (cost visibility)
+only reads usage counters, so neither should move the local numbers. This
+run checks that they did not.
+
+### Provenance
+- **Commit**: `ebbb0bd9` on `feat/cost-visibility` (dirty: no). It contains
+  P0-P3 as merged into develop at `0758c97d`, plus P4 Tasks 4.1-4.3.
+- **Machine, server, model**: as above (llama-swap in front of llama-server,
+  `openai-compat/qwen3-coder-next:latest`, local)
+- **Cloud targets**: not run. The OpenRouter and Abacus RouteLLM rows wait on
+  Keith's approval and keys.
+- **Exact commands**: the two commands at the top of this file, run with a
+  binary built at `ebbb0bd9`.
+
+### Turn 1, by phase
+
+Each row is turn 1 (9 steps): the cached prompt tokens over all prompt tokens.
+
+| Phase | Commit | uncompacted | pressure |
+|---|---|---:|---:|
+| P0 baseline (fresh fence key per render) | `287620fd` | 1,042 / 77,739 (1.3%) | 1,540 / 57,551 (2.7%) |
+| P1 per-result fence keys | `00912c90` | 78.4% | 14,692 / 57,605 (25.5%) |
+| P2 cache-stable compaction | `f27b63a9` | 78.4% (unchanged) | 27,992 / 53,511 (52.3%) |
+| P3 session affinity | not rerun locally | (no local effect) | (no local effect) |
+| P4 head (this run) | `ebbb0bd9` | 60,944 / 77,757 (78.4%) | 27,990 / 53,507 (52.3%) |
+
+Follow-up turns 2-4 cached well in every phase. This run: 519/551, 551/579
+and 579/607 uncompacted; 498/551, 551/579 and 579/607 under pressure.
+
+### uncompacted (P4 head)
+
+| Turn | Step | Prompt tokens | Cached | Prefix ratio (proxy) |
+|---:|---:|---:|---:|---:|
+| 1 | 1 | 523 | 0 | 0.000 |
+| 1 | 2 | 2498 | 523 | 0.999 |
+| 1 | 3 | 4544 | 2498 | 1.000 |
+| 1 | 4 | 6588 | 4544 | 1.000 |
+| 1 | 5 | 8632 | 6588 | 1.000 |
+| 1 | 6 | 10674 | 8632 | 1.000 |
+| 1 | 7 | 12719 | 10674 | 1.000 |
+| 1 | 8 | 14766 | 12719 | 1.000 |
+| 1 | 9 | 16813 | 14766 | 1.000 |
+| 2 | 1 | 551 | 519 | 0.027 |
+| 3 | 1 | 579 | 551 | 0.999 |
+| 4 | 1 | 607 | 579 | 0.999 |
+
+### pressure (P4 head)
+
+| Turn | Step | Prompt tokens | Cached | Prefix ratio (proxy) |
+|---:|---:|---:|---:|---:|
+| 1 | 1 | 523 | 519 | 0.000 |
+| 1 | 2 | 2500 | 523 | 0.999 |
+| 1 | 3 | 4542 | 2500 | 1.000 |
+| 1 | 4 | 6586 | 4542 | 1.000 |
+| 1 | 5 | 8628 | 6586 | 1.000 |
+| 1 | 6 | 6655 | 0 | 0.053 |
+| 1 | 7 | 8702 | 6655 | 1.000 |
+| 1 | 8 | 6665 | 0 | 0.053 |
+| 1 | 9 | 8706 | 6665 | 1.000 |
+| 2 | 1 | 551 | 498 | 0.052 |
+| 3 | 1 | 579 | 551 | 0.999 |
+| 4 | 1 | 607 | 579 | 0.999 |
+
+Fence rotations: 0 in both scenarios.
+
+### Reading
+
+The P4 head reproduces P2's numbers to within a few tokens per request. The
+small differences are the probe's random fence keys, which change token
+counts slightly from run to run. P3 and P4 left the local cache behavior
+unchanged, as expected.
+
+Across the work, turn 1 went from 1.3% to 78.4% cached when nothing is
+compacted, and from 2.7% to 52.3% under compaction pressure. Under pressure,
+each compacting step (6 and 8) still misses once. The step after it then
+serves the whole previous request from cache.
+
+The cloud columns stay open:
+- OpenRouter and Abacus RouteLLM have no probe rows yet.
+- One measurement on Abacus (gpt-5-mini, 2026-11-01, by a sibling session) found two problems.
+  - Its streaming `prompt_tokens` is billing-weighted. A 5,090-token request with 4,992 cached reported a prompt count of 596.
+  - Non-streaming responses report no `prompt_tokens` at all.
+- So on Abacus the cached share cannot be read from this probe's prompt column. Golem's `/context` marks such requests as unreliable usage and leaves them out of the cost estimate.

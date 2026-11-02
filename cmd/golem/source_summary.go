@@ -138,7 +138,10 @@ func sourceSummaryGenerator(chain []string, chat sourceSummaryChatFunc) rag.Sour
 	}
 }
 
-func routerSourceSummaryGenerator(router *provider.Router, chain []string) rag.SourceSummaryGenerator {
+// routerSourceSummaryGenerator routes source summaries through chain. Each
+// successful summary call is recorded in usage under "source-summary" (nil
+// records nothing).
+func routerSourceSummaryGenerator(router *provider.Router, chain []string, usage *usageLedger) rag.SourceSummaryGenerator {
 	if router == nil || len(chain) == 0 {
 		return nil
 	}
@@ -147,7 +150,11 @@ func routerSourceSummaryGenerator(router *provider.Router, chain []string) rag.S
 		if err != nil {
 			return nil, err
 		}
-		return plan.ExecuteChat(ctx)
+		resp, err := plan.ExecuteChat(ctx)
+		if err == nil && resp != nil {
+			usage.addSide("source-summary", routedModel(resp.RouteOutcome), resp.Usage)
+		}
+		return resp, err
 	})
 }
 

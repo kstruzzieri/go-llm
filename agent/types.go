@@ -289,7 +289,9 @@ type Result struct {
 	// DescendantUsage is a copied snapshot of validated raw descendant P/C/T
 	// and cache-counter reports, including known failed-call usage. Usage
 	// remains local to recorded Steps. Neither field includes estimated or
-	// unknown-usage admission charges.
+	// unknown-usage admission charges. A successful descendant call with no
+	// usable counters still produces a non-nil, possibly zero snapshot, so
+	// consumers can distinguish unavailable usage from no descendant calls.
 	DescendantUsage *provider.Usage `json:"DescendantUsage,omitempty"`
 	ToolCalls       []ToolCallRecord
 	StopReason      StopReason

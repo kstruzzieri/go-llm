@@ -104,6 +104,19 @@ func TestDescendantUsageIncludesCacheCounters(t *testing.T) {
 			children: []provider.Usage{plain},
 			want:     plain,
 		},
+		{
+			name:     "successful child with missing usage stays visible",
+			children: []provider.Usage{{}},
+		},
+		{
+			name:     "successful child with invalid usage stays visible",
+			children: []provider.Usage{{PromptTokens: -1}},
+		},
+		{
+			name:     "missing usage does not replace measured totals",
+			children: []provider.Usage{{}, plain},
+			want:     plain,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

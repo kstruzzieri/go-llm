@@ -433,6 +433,48 @@ func TestNew_CapabilityProbeStoreInstallsCapProberNotFullFactory(t *testing.T) {
 	}
 }
 
+// Options.ProbeUsageObserver reaches the prober through the factory, keyed by
+// the full provider/model selector (the prober itself knows only the bare
+// model name).
+func TestNew_ProbeUsageObserverReceivesModelKey(t *testing.T) {
+	ctx := context.Background()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/models":
+			_, _ = w.Write([]byte(`{"data":[{"id":"mystery-model-x"}]}`))
+		case "/v1/chat/completions":
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"","tool_calls":[{"id":"1","type":"function","function":{"name":"get_time","arguments":"{}"}}]}}],"usage":{"prompt_tokens":40,"completion_tokens":6,"total_tokens":46}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	cfg := &config.Config{
+		Providers: map[string]config.ProviderConfig{"lc": {APIFormat: "openai-compat", BaseURL: srv.URL}},
+		Models:    map[string]config.ModelConfig{"chat": {Provider: "lc", Name: "mystery-model-x", Type: "dense"}},
+	}
+	type obs struct {
+		key provider.ModelKey
+		u   provider.Usage
+	}
+	var got []obs
+	b, err := New(ctx, Options{Config: cfg, CapabilityProbeStore: newTestFingerprintStore(t),
+		ProbeUsageObserver: func(k provider.ModelKey, u provider.Usage) { got = append(got, obs{k, u}) }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = b.Close() }()
+	key := provider.ModelKey{Provider: "lc", Model: "mystery-model-x"}
+	if state, err := b.Models.ResolveToolCall(ctx, key); err != nil || state != fingerprint.CapProbeYes {
+		t.Fatalf("ResolveToolCall = %q, %v; want yes", state, err)
+	}
+	want := obs{key, provider.Usage{PromptTokens: 40, CompletionTokens: 6, TotalTokens: 46}}
+	if len(got) != 1 || got[0] != want {
+		t.Fatalf("observations = %+v; want [%+v]", got, want)
+	}
+}
+
 func TestNew_FingerprintStoreSatisfiesCapProbeStoreFallback(t *testing.T) {
 	// MCP path: with a FingerprintStore (whose SQLiteStore also satisfies
 	// fingerprint.CapProbeStore) and NO explicit CapabilityProbeStore, the

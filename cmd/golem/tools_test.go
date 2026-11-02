@@ -145,7 +145,7 @@ func TestBuildDelegateTool_ResolvesCodingRole(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolveDelegateChain: %v", err)
 	}
-	tool, chain, err := buildDelegateTool(nil, "coding", resolved, nil)
+	tool, chain, err := buildDelegateTool(nil, "coding", resolved, nil, nil)
 	if err != nil {
 		t.Fatalf("buildDelegateTool: %v", err)
 	}
@@ -171,7 +171,7 @@ func TestResolveDelegateChain_UnknownRole(t *testing.T) {
 }
 
 func TestBuildDelegateTool_EmptyChain(t *testing.T) {
-	if _, _, err := buildDelegateTool(nil, "coding", nil, nil); err == nil {
+	if _, _, err := buildDelegateTool(nil, "coding", nil, nil, nil); err == nil {
 		t.Fatal("empty pre-resolved chain should error, not build a broken tool")
 	}
 }
@@ -187,7 +187,7 @@ func TestBuildDelegateTool_WithStreamSink(t *testing.T) {
 	if rerr != nil {
 		t.Fatalf("resolveDelegateChain: %v", rerr)
 	}
-	tool, _, err := buildDelegateTool(nil, "coding", resolved, sink)
+	tool, _, err := buildDelegateTool(nil, "coding", resolved, sink, nil)
 	if err != nil {
 		t.Fatalf("buildDelegateTool with sink: %v", err)
 	}
