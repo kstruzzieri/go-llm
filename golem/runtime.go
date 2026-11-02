@@ -240,8 +240,10 @@ type Turn struct {
 	SystemKeys []string
 }
 
-// CompactionReport estimates persisted non-system history and its rendered
-// durable summary. It excludes the live system prompt, tool schemas, and current turn.
+// CompactionReport estimates the persisted history a later turn replays (user
+// and assistant text; stored tool results and tool-call frames are not counted)
+// and its rendered durable summary. It excludes the live system prompt, tool
+// schemas, and current turn.
 // Changed reports content replacement, not guaranteed token savings.
 type CompactionReport struct {
 	TokensBefore int

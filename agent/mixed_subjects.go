@@ -133,6 +133,10 @@ type mixedUnit struct {
 	anchors    []*mixedAnchor
 	subject    *mixedSubject // every kind except pinned/unresolved (must-fit)
 	evicted    bool          // chains
+	// keep marks the newest current-run unit in a low-water pass: it is
+	// admitted right after the must-fit reservations, and losing it fails
+	// the pass with ErrContextExhausted (CompactionLowWater).
+	keep bool
 }
 
 // buildMixedUnits returns the allocation units for st.Messages in stable input
@@ -142,13 +146,11 @@ type mixedUnit struct {
 //
 // PRECONDITION — st MUST be the PRE-materialization State (the caller-visible
 // one, with DurableSummary still a field). materializeDurableSummary prepends
-// the summary as a PINNED message at index 0, which makes firstPinnedIndex
-// return 0; priorHistoryGroup requires end < firstPinned, so every prior-history
-// exchange would then be classified as a current-run plain exchange and its
-// conversation subject ID would be shifted by one. The history lane silently
-// disappears — nothing at the call site reveals the mistake. The caller
-// materializes the summary separately and charges it as a pinned reservation
-// (#331 spec 4.1 step 1).
+// the summary as a PINNED message at index 0, which shifts every message index
+// by one: each conversation subject ID would be off by one, and the summary
+// would get a pinned unit of its own. Nothing at the call site reveals the
+// mistake. The caller materializes the summary separately and charges it as a
+// pinned reservation (#331 spec 4.1 step 1).
 func (m ContextManager) buildMixedUnits(st State) ([]*mixedUnit, error) {
 	groups := RecencyCompactor{Estimate: m.Estimate}.groups(st)
 	units := make([]*mixedUnit, 0, len(groups))
@@ -161,7 +163,13 @@ func (m ContextManager) buildMixedUnits(st State) ([]*mixedUnit, error) {
 		if g.overflow {
 			return nil, ErrContextExhausted
 		}
-		u, err := m.mixedUnitFor(g, first)
+		// A low-water Run assembles a filtered copy whose messages carry
+		// their canonical index (Message.idx); the subject ID stays that.
+		id := first
+		if g.msgs[0].idx > 0 {
+			id = g.msgs[0].idx - 1
+		}
+		u, err := m.mixedUnitFor(g, id)
 		if err != nil {
 			return nil, err
 		}

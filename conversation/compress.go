@@ -47,18 +47,24 @@ func FallbackSummarizer(_ context.Context, prior string, msgs []Message) (string
 
 // EstimateMessagesTokens sums the estimated token cost of every NON-system
 // message, matching CompressMessages' raw-history accounting. Exported so
-// consumers (Golem) can make trigger decisions without re-deriving messageCost.
+// consumers that send every stored field back to the model can make trigger
+// decisions without re-deriving messageCost; a consumer that replays only part
+// of a message should price it itself and use CompressMessagesWithCost.
 // Panics on a nil estimator, consistent with TrimMessages.
 func EstimateMessagesTokens(msgs []Message, estimator TokenEstimator) int {
 	if estimator == nil {
 		panic("conversation: EstimateMessagesTokens requires non-nil TokenEstimator")
 	}
+	return rawCost(msgs, func(m Message) int { return messageCost(m, estimator) })
+}
+
+// rawCost sums cost over every NON-system message.
+func rawCost(msgs []Message, cost func(Message) int) int {
 	n := 0
 	for _, m := range msgs {
-		if m.Role == "system" {
-			continue
+		if m.Role != "system" {
+			n += cost(m)
 		}
-		n += messageCost(m, estimator)
 	}
 	return n
 }
@@ -84,6 +90,27 @@ func CompressMessages(
 	if estimator == nil {
 		panic("conversation: CompressMessages requires non-nil TokenEstimator")
 	}
+	return CompressMessagesWithCost(ctx, conv, maxTokens, minRecentExchanges,
+		func(m Message) int { return messageCost(m, estimator) }, summarize)
+}
+
+// CompressMessagesWithCost is CompressMessages with the per-message cost
+// supplied by the caller instead of derived from a TokenEstimator. Use it when
+// the consumer sends only part of a stored message back to the model (Golem
+// replays user/assistant text and drops tool results), so the trigger and the
+// retained-window fit must both count what is actually replayed. cost is
+// consulted only for non-system messages and must not be nil; the contract is
+// otherwise identical to CompressMessages.
+func CompressMessagesWithCost(
+	ctx context.Context,
+	conv Conversation,
+	maxTokens, minRecentExchanges int,
+	cost func(Message) int,
+	summarize Summarizer,
+) (Conversation, error) {
+	if cost == nil {
+		panic("conversation: CompressMessagesWithCost requires non-nil cost func")
+	}
 	if summarize == nil {
 		return Conversation{}, errNilSummarizer
 	}
@@ -93,7 +120,7 @@ func CompressMessages(
 		priorCount = conv.DurableSummary.MessageCount
 	}
 	hasPrior := strings.TrimSpace(prior) != ""
-	if EstimateMessagesTokens(conv.Messages, estimator) <= maxTokens && !hasPrior {
+	if rawCost(conv.Messages, cost) <= maxTokens && !hasPrior {
 		return conv, nil
 	}
 	if minRecentExchanges < 0 {
@@ -109,7 +136,7 @@ func CompressMessages(
 		if sameKeepMask(grown, keep) {
 			break // nothing older left to add: floor already keeps everything
 		}
-		if keptRawCost(conv.Messages, grown, estimator) > maxTokens {
+		if keptRawCost(conv.Messages, grown, cost) > maxTokens {
 			break // adding the next-oldest exchange overflows the budget
 		}
 		keep = grown
@@ -158,11 +185,11 @@ func sameKeepMask(a, b []bool) bool {
 	return true
 }
 
-func keptRawCost(msgs []Message, keep []bool, estimator TokenEstimator) int {
+func keptRawCost(msgs []Message, keep []bool, cost func(Message) int) int {
 	n := 0
 	for i, m := range msgs {
 		if keep[i] && m.Role != "system" {
-			n += messageCost(m, estimator)
+			n += cost(m)
 		}
 	}
 	return n

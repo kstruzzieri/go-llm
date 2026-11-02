@@ -150,6 +150,11 @@ type Message struct {
 	// is never serialized and is not readable outside the package except by
 	// reflection. Zero means unkeyed.
 	fence promptfence.Fence
+	// idx is the message's canonical State.Messages index plus one, set only
+	// on the assembly-input copies a low-water Run builds (visibleState), so
+	// the Run can tell which messages a compacting step dropped. Zero means
+	// untagged. Runtime-only like fence: canonical State never carries it.
+	idx int
 }
 
 // State is the canonical transcript the Orchestrator owns.
@@ -184,7 +189,9 @@ type Pressure struct {
 	// Evicted counts whole GROUPS the assembler dropped: a conversation span or
 	// a completed tool chain under legacy compaction and under mixed assembly
 	// alike. It never counts a partial trim inside a retained group — see
-	// AnchorOmissions.
+	// AnchorOmissions. Under ContextManager.CompactionLowWater, groups an
+	// earlier step of the Run dropped are no longer assembled, so a later
+	// step does not count them again.
 	Evicted int
 	// Compactions is 1 when the assembler shed anything this turn and 0
 	// otherwise, and is what the orchestrator's "compaction" EventRecord keys

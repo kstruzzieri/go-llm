@@ -160,7 +160,8 @@ func omitSubject(s *mixedSubject, reason string) {
 // that manufactures an exhaustion.
 //
 // ErrContextExhausted is the only error: the must-fit reservations alone exceed
-// the budget. st.used then reports the FULL must-fit cost so the caller's
+// the budget, or, in a low-water pass, the kept unit does not fit after them.
+// st.used then reports the FULL must-fit cost so the caller's
 // pressure row covers the reservations, not just the pinned subset (spec 5).
 func (m ContextManager) allocateMixed(ctx context.Context, units []*mixedUnit, budget, sysTokens int) (*mixedAllocState, error) {
 	st := &mixedAllocState{budget: budget, used: sysTokens}
@@ -175,6 +176,22 @@ func (m ContextManager) allocateMixed(ctx context.Context, units []*mixedUnit, b
 	}
 	if !reservationsOK || st.used > st.budget {
 		return st, ErrContextExhausted
+	}
+	// 1b. Low-water pass only: the newest current-run unit (keep) holds the
+	// observation the model has not read yet, so it is admitted before any
+	// lane competes, and the pass fails rather than evict it.
+	for _, u := range units {
+		if !u.keep {
+			continue
+		}
+		if u.kind == unitChain {
+			m.allocateChain(st, u)
+		} else {
+			m.admitSpan(st, u)
+		}
+		if u.subject.omitted {
+			return st, ErrContextExhausted
+		}
 	}
 
 	// Lanes 0-2. Two ORTHOGONAL orderings are in play and conflating them
@@ -194,7 +211,7 @@ func (m ContextManager) allocateMixed(ctx context.Context, units []*mixedUnit, b
 
 	// 2. Lane 0: current-run plain exchanges. Highest retention priority.
 	for i := len(units) - 1; i >= 0; i-- {
-		if units[i].kind != unitPlainSpan {
+		if units[i].kind != unitPlainSpan || units[i].keep {
 			continue
 		}
 		m.admitSpan(st, units[i])
@@ -202,7 +219,7 @@ func (m ContextManager) allocateMixed(ctx context.Context, units []*mixedUnit, b
 
 	// 3. Lane 1: completed tool chains, newest first.
 	for i := len(units) - 1; i >= 0; i-- {
-		if units[i].kind != unitChain {
+		if units[i].kind != unitChain || units[i].keep {
 			continue
 		}
 		m.allocateChain(st, units[i])

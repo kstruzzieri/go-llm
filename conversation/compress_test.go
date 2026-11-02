@@ -3,6 +3,7 @@ package conversation
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -187,6 +188,59 @@ func TestCompressMessages_NilEstimatorPanics(t *testing.T) {
 	}()
 	conv := Conversation{ID: "c", Messages: userAsst("a", "b")}
 	_, _ = CompressMessages(context.Background(), conv, 0, 0, nil, okSummarizer)
+}
+
+func TestCompressMessagesWithCost(t *testing.T) {
+	// Six exchanges of user, tool-call frame, tool result, assistant answer.
+	// Under messageCost one exchange costs 10+12+101+10 = 133 (the tool result
+	// dominates); counting only user/assistant text it costs 20.
+	var msgs []Message
+	for range 6 {
+		msgs = append(msgs,
+			makeMsg("user", "uuuuuuuuuu"),
+			Message{Role: "assistant", ToolCalls: []byte(`[{"id":"c"}]`)},
+			Message{Role: "tool", Content: strings.Repeat("t", 100), ToolCallID: "c"},
+			makeMsg("assistant", "aaaaaaaaaa"))
+	}
+	replayedText := func(m Message) int {
+		if (m.Role == "user" || m.Role == "assistant") && m.Content != "" {
+			return len(m.Content)
+		}
+		return 0
+	}
+	for _, tc := range []struct {
+		name      string
+		cost      func(Message) int
+		wantPanic bool
+		wantKept  int
+	}{
+		{name: "nil cost panics", wantPanic: true},
+		// 133 per exchange against a budget of 100: only the 1-exchange floor.
+		{name: "full message cost keeps the floor", cost: func(m Message) int { return messageCost(m, lenEstimator) }, wantKept: 4},
+		// 20 per exchange: five fit (100 <= 100), the sixth does not (120).
+		{name: "replayed text only keeps five exchanges", cost: replayedText, wantKept: 20},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			defer func() {
+				r := recover()
+				// The message distinguishes the explicit guard from the nil
+				// function call that would panic anyway on non-empty history.
+				if got := r != nil && strings.Contains(fmt.Sprint(r), "requires non-nil cost func"); got != tc.wantPanic {
+					t.Errorf("recovered %v, want panic from the nil cost guard = %v", r, tc.wantPanic)
+				}
+			}()
+			out, err := CompressMessagesWithCost(context.Background(), Conversation{ID: "c", Messages: msgs}, 100, 1, tc.cost, okSummarizer)
+			if err != nil {
+				t.Fatalf("CompressMessagesWithCost: %v", err)
+			}
+			if len(out.Messages) != tc.wantKept {
+				t.Errorf("kept %d messages, want %d", len(out.Messages), tc.wantKept)
+			}
+			if out.DurableSummary == nil || out.DurableSummary.MessageCount != len(msgs)-tc.wantKept {
+				t.Errorf("summary = %+v, want folded count %d", out.DurableSummary, len(msgs)-tc.wantKept)
+			}
+		})
+	}
 }
 
 func TestCompressMessages_SummarizerErrorLeavesNoLoss(t *testing.T) {

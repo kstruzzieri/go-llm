@@ -201,11 +201,14 @@ func TestEstimateStoredHistory(t *testing.T) {
 		{name: "trim summary", current: conversation.Conversation{DurableSummary: &conversation.DurableSummary{Content: " \n SUM \t"}}, want: 41},
 		{name: "blank summary", current: conversation.Conversation{DurableSummary: &conversation.DurableSummary{Content: " \n\t "}}, want: 0},
 		{name: "multibyte", current: conversation.Conversation{Messages: []conversation.Message{{Role: "user", Content: "雪雪雪雪雪"}}}, want: 2},
-		{name: "tool metadata excludes system", current: conversation.Conversation{Messages: []conversation.Message{
+		// Was 10 before compression counted only replayed text: the tool-call
+		// frame and the tool result are stored but never sent back, and the
+		// system message was always excluded, so nothing here costs anything.
+		{name: "tool metadata is not replayed", current: conversation.Conversation{Messages: []conversation.Message{
 			{Role: "system", Content: "ignored", ToolCalls: json.RawMessage(`{"x":123}`), ToolName: "skip", ToolCallID: "skip"},
 			{Role: "assistant", ToolCalls: json.RawMessage(`{"x":123}`)},
 			{Role: "tool", Content: "雪雪雪雪雪", ToolName: "read_file", ToolCallID: "call1"},
-		}}, want: 10},
+		}}, want: 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -216,28 +219,218 @@ func TestEstimateStoredHistory(t *testing.T) {
 	}
 }
 
+// TestEstimateStoredHistoryCountsOnlyReplayed pins the trigger to what
+// history() replays: user/assistant text. Tool results and tool-call frames
+// are stored but never sent back, so they must not trip compression.
+func TestEstimateStoredHistoryCountsOnlyReplayed(t *testing.T) {
+	t.Parallel()
+	frame := json.RawMessage(`{"x":123}`)
+	for _, tc := range []struct {
+		name string
+		msg  conversation.Message
+		want int
+	}{
+		{"tool result", conversation.Message{Role: "tool", Content: strings.Repeat("t", 8000), ToolName: "read_file", ToolCallID: "c1"}, 0},
+		{"tool-call frame without text", conversation.Message{Role: "assistant", ToolCalls: frame}, 0},
+		{"tool-call frame counts text only", conversation.Message{Role: "assistant", Content: strings.Repeat("a", 40), ToolCalls: frame}, 10},
+		{"user text", conversation.Message{Role: "user", Content: strings.Repeat("u", 40)}, 10},
+		{"system", conversation.Message{Role: "system", Content: strings.Repeat("s", 40)}, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := estimateStoredHistory(conversation.Conversation{Messages: []conversation.Message{tc.msg}}); got != tc.want {
+				t.Errorf("estimateStoredHistory(%s) = %d, want %d", tc.name, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestCompressionDoesNotRewriteSummaryEveryTurn replays 60 tool-heavy turns
+// through saveThread. Each turn stores 200 replayed tokens plus a 2000-token
+// tool result that history() never sends back. Compaction must evict down to
+// the low-water mark so the summary (messages[0] of every request) stays
+// still between compactions, instead of being rewritten almost every turn.
+func TestCompressionDoesNotRewriteSummaryEveryTurn(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db, err := memory.OpenHardenedDB(ctx, filepath.Join(t.TempDir(), "sessions.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	store, err := conversation.NewStore(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	estimate := conversation.CharRatioEstimator(4)
+	runtime := &Runtime{
+		onWarning: func(err error) { t.Errorf("compression warning: %v", err) },
+		sessions:  &threadStore{store: store},
+		compress:  true,
+		summarizer: func(_ context.Context, _ string, old []conversation.Message) (string, error) {
+			calls++
+			// A fold batch spans a dozen turns now that tool results cost
+			// nothing for the trigger, so the summarize request must carry
+			// replayed history only, never the stored tool output.
+			for _, message := range old {
+				if !replayed(message) {
+					t.Errorf("summarizer call %d received a message history() never replays: role %q, %d content bytes", calls, message.Role, len(message.Content))
+				}
+			}
+			// Bound the request by the unfiltered estimate (what the summarize
+			// transcript writes); visibleCost would be 0 for the tool results
+			// this guards against. Trigger 4096 plus one 200-token turn.
+			if tokens := conversation.EstimateMessagesTokens(old, estimate); tokens > 4096+200 {
+				t.Errorf("summarizer call %d input = %d tokens, want at most the trigger plus one turn (4296)", calls, tokens)
+			}
+			return strings.Repeat("s", 200), nil
+		},
+	}
+	state := &threadState{conversation: conversation.Conversation{ID: "thrash"}}
+	question := strings.Repeat("q", 400)
+	minReplayed := -1
+	for turn := range 60 {
+		result := agent.Result{Messages: []provider.ChatMessage{
+			{Role: "user", Content: question},
+			{Role: "assistant", ToolCalls: []provider.ToolCall{{ID: "c1", Type: "function", Function: provider.ToolCallFunction{Name: "read_file", Arguments: json.RawMessage(`{}`)}}}},
+			{Role: "tool", ToolName: "read_file", ToolCallID: "c1", Content: strings.Repeat("t", 8000)},
+			{Role: "assistant", Content: strings.Repeat("a", 400)},
+		}}
+		if err := runtime.saveThread(ctx, &activeRun{}, agent.Budget{InputCeiling: 8192}, state, question, result); err != nil {
+			t.Fatalf("turn %d: %v", turn, err)
+		}
+		if state.conversation.DurableSummary != nil {
+			if exchanges := len(state.history()) / 2; minReplayed < 0 || exchanges < minReplayed {
+				minReplayed = exchanges
+			}
+		}
+	}
+	if calls < 1 || calls > 6 {
+		t.Errorf("summarizer calls over 60 turns = %d, want 1 to 6", calls)
+	}
+	// Low-water 2048 less the summary reserve leaves room for about 7 exchanges
+	// of 200 tokens; a fit still counting the invisible tool results keeps only
+	// the 4-exchange floor.
+	if minReplayed < 6 {
+		t.Errorf("fewest replayed exchanges after the first summary = %d, want at least 6", minReplayed)
+	}
+}
+
+// TestCompressConversationSummarizerGetsRoleAndTextOnly covers an assistant
+// message that carries text beside a tool call. history() replays it as role
+// and text, so the summarizer must not receive its 8000-byte tool-call JSON,
+// tool name or call ID either: those are unpriced by the trigger and would
+// break the request bound the fold relies on.
+func TestCompressConversationSummarizerGetsRoleAndTextOnly(t *testing.T) {
+	t.Parallel()
+	old := []conversation.Message{
+		{Role: "user", Content: "write it"},
+		{Role: "assistant", Content: "writing the file", ToolName: "write_file", ToolCallID: "c1",
+			ToolCalls: json.RawMessage(`[{"id":"c1","function":{"name":"write_file","arguments":{"content":"` + strings.Repeat("w", 8000) + `"}}}]`)},
+		{Role: "tool", ToolName: "write_file", ToolCallID: "c1", Content: "ok"},
+		{Role: "assistant", Content: "done"},
+	}
+	// Four 1100-token exchanges (4400 tokens) cross the 4096 trigger and sit at
+	// the retention floor, so only the exchange above folds.
+	var recent []conversation.Message
+	for range 4 {
+		recent = append(recent,
+			conversation.Message{Role: "user", Content: strings.Repeat("q", 2200)},
+			conversation.Message{Role: "assistant", Content: strings.Repeat("a", 2200)})
+	}
+	current := conversation.Conversation{Messages: append(append([]conversation.Message(nil), old...), recent...)}
+	want := []conversation.Message{
+		{Role: "user", Content: "write it"},
+		{Role: "assistant", Content: "writing the file"},
+		{Role: "assistant", Content: "done"},
+	}
+	calls := 0
+	r := &Runtime{summarizer: func(_ context.Context, prior string, messages []conversation.Message) (string, error) {
+		calls++
+		if prior != "" || !reflect.DeepEqual(messages, want) {
+			t.Errorf("summarizer input = %q, %+v; want empty prior and role and text only %+v", prior, messages, want)
+		}
+		return "SUM", nil
+	}}
+	got, changed, err := r.compressConversation(context.Background(), agent.Budget{InputCeiling: 8192}, current, false)
+	if err != nil || !changed || calls != 1 || !reflect.DeepEqual(got.Messages, recent) || summaryMessageCount(got) != 4 {
+		t.Errorf("compression = %d retained, summary %+v, changed %v, calls %d, error %v; want the four recent exchanges, count 4, changed true, one call", len(got.Messages), got.DurableSummary, changed, calls, err)
+	}
+}
+
+// TestCompressConversationSkipsSummarizerWhenNothingReplayedFolds covers a fold
+// batch holding only stored tool traffic (here an exchange whose question and
+// answer are empty): the prior summary has nothing new to absorb, so it is kept
+// as is and the summarizer, whose rewrite would bust the prompt cache, is not
+// called. The folded messages still count toward the summary.
+func TestCompressConversationSkipsSummarizerWhenNothingReplayedFolds(t *testing.T) {
+	t.Parallel()
+	unreplayed := []conversation.Message{
+		{Role: "user"},
+		{Role: "assistant", ToolCalls: json.RawMessage(`[{"id":"c1"}]`)},
+		{Role: "tool", ToolName: "read_file", ToolCallID: "c1", Content: strings.Repeat("t", 8000)},
+		{Role: "assistant"},
+	}
+	// Four 1100-token exchanges (550 tokens per 2200-char message) sit at the
+	// retention floor and cost 4400 plus the 41-token "OLD" summary prompt,
+	// over the 4096 trigger, so compression runs and folds only the first.
+	var recent []conversation.Message
+	for range 4 {
+		recent = append(recent,
+			conversation.Message{Role: "user", Content: strings.Repeat("q", 2200)},
+			conversation.Message{Role: "assistant", Content: strings.Repeat("a", 2200)})
+	}
+	current := conversation.Conversation{
+		Messages:       append(append([]conversation.Message(nil), unreplayed...), recent...),
+		DurableSummary: &conversation.DurableSummary{Content: "OLD", MessageCount: 7},
+	}
+	calls := 0
+	r := &Runtime{summarizer: func(context.Context, string, []conversation.Message) (string, error) {
+		calls++
+		return "REWRITTEN", nil
+	}}
+	got, changed, err := r.compressConversation(context.Background(), agent.Budget{InputCeiling: 8192}, current, false)
+	if err != nil || !changed || calls != 0 || currentSummary(got) != "OLD" || summaryMessageCount(got) != 11 || !reflect.DeepEqual(got.Messages, recent) {
+		t.Errorf("compression = %d retained, summary %+v, changed %v, calls %d, error %v; want the four recent exchanges, summary OLD with count 11, changed true, no summarizer call", len(got.Messages), got.DurableSummary, changed, calls, err)
+	}
+}
+
+// Eviction now targets the low-water mark (half the 4096 trigger), so the raw
+// budget is 2048 less the 552-token reserve (512 output + 40 for the empty
+// summary prompt) = 1496. A 280-token exchange (two 140-token messages) fits
+// five times (1400) and not six (1680), keeping the newest ten messages; with
+// no reserve the budget would be 2048 and seven would fit. 15 exchanges
+// (4200 tokens) cross the trigger, so the oldest 30-10 = 20 messages fold.
 func TestCompressConversationAutomaticSummaryReserve(t *testing.T) {
 	t.Parallel()
 	var messages []conversation.Message
-	for range 7 {
+	for range 15 {
 		messages = append(messages,
-			conversation.Message{Role: "user", Content: strings.Repeat("q", 1200)},
-			conversation.Message{Role: "assistant", Content: strings.Repeat("a", 1200)})
+			conversation.Message{Role: "user", Content: strings.Repeat("q", 560)},
+			conversation.Message{Role: "assistant", Content: strings.Repeat("a", 560)})
 	}
 	calls := 0
 	r := &Runtime{summarizer: func(_ context.Context, prior string, old []conversation.Message) (string, error) {
 		calls++
-		if prior != "" || !reflect.DeepEqual(old, messages[:4]) {
-			t.Errorf("automatic summary inputs = %q, %d messages; want empty prior and oldest four messages", prior, len(old))
+		if prior != "" || !reflect.DeepEqual(old, messages[:20]) {
+			t.Errorf("automatic summary inputs = %q, %d messages; want empty prior and oldest twenty messages", prior, len(old))
 		}
 		return "SUM", nil
 	}}
 	got, changed, err := r.compressConversation(context.Background(), agent.Budget{InputCeiling: 8192}, conversation.Conversation{Messages: messages}, false)
-	if err != nil || !changed || calls != 1 || !reflect.DeepEqual(got.Messages, messages[4:]) || summaryMessageCount(got) != 4 {
-		t.Errorf("automatic compression = %d retained, summary %+v, changed %v, calls %d, error %v; want newest ten messages, count 4, changed true, one call", len(got.Messages), got.DurableSummary, changed, calls, err)
+	if err != nil || !changed || calls != 1 || !reflect.DeepEqual(got.Messages, messages[20:]) || summaryMessageCount(got) != 20 {
+		t.Errorf("automatic compression = %d retained, summary %+v, changed %v, calls %d, error %v; want newest ten messages, count 20, changed true, one call", len(got.Messages), got.DurableSummary, changed, calls, err)
 	}
 }
 
+// Ceiling 16384 puts the trigger at 8192 and the low-water mark at 4096, the
+// mark these cases used when eviction still stopped at the trigger of an 8192
+// ceiling. 17 exchanges of 512 tokens (8704) cross the trigger. The plain
+// summary renders to 552 tokens, so the first pass keeps six exchanges
+// (3072 <= 4096-552) and folds 22 messages. The escaped one renders to 1064,
+// which leaves 4136 stored > 4096, so the retry's 3032-token budget keeps five
+// and folds two more (24 in all).
 func TestCompressConversationReservesRenderedSummary(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
@@ -250,7 +443,7 @@ func TestCompressConversationReservesRenderedSummary(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			var messages []conversation.Message
-			for range 9 {
+			for range 17 {
 				messages = append(messages,
 					conversation.Message{Role: "user", Content: strings.Repeat("q", 1024)},
 					conversation.Message{Role: "assistant", Content: strings.Repeat("a", 1024)})
@@ -265,14 +458,14 @@ func TestCompressConversationReservesRenderedSummary(t *testing.T) {
 				return tc.summary, nil
 			}}
 			current := conversation.Conversation{Messages: messages}
-			got, changed, err := r.compressConversation(context.Background(), agent.Budget{InputCeiling: 8192}, current, false)
+			got, changed, err := r.compressConversation(context.Background(), agent.Budget{InputCeiling: 16384}, current, false)
 			if err != nil || !changed || calls != tc.wantCalls || estimateStoredHistory(got) > 4096 {
 				t.Fatalf("compression = changed %v, %v, calls %d, tokens %d; want changed, %d calls and <=4096", changed, err, calls, estimateStoredHistory(got), tc.wantCalls)
 			}
 			if len(got.Messages) < 8 || !reflect.DeepEqual(got.Messages, messages[summarized:]) || summaryMessageCount(got) != summarized {
 				t.Fatalf("compressed history = %+v; want retained suffix and summary count %d", got, summarized)
 			}
-			again, changed, err := r.compressConversation(context.Background(), agent.Budget{InputCeiling: 8192}, got, false)
+			again, changed, err := r.compressConversation(context.Background(), agent.Budget{InputCeiling: 16384}, got, false)
 			if err != nil || changed || calls != tc.wantCalls || !reflect.DeepEqual(again, got) {
 				t.Errorf("immediate repeat = changed %v, %v, calls %d; want unchanged with no further summary", changed, err, calls)
 			}
@@ -299,10 +492,12 @@ func TestCompressConversationRenderedReserveStopsAtFloor(t *testing.T) {
 	}
 }
 
+// Same 16384-ceiling arithmetic as TestCompressConversationReservesRenderedSummary:
+// the escaped summary forces a second eviction pass, whose summarizer fails.
 func TestCompressConversationRenderedReserveRetryFailure(t *testing.T) {
 	t.Parallel()
 	var current conversation.Conversation
-	for range 9 {
+	for range 17 {
 		current.Messages = append(current.Messages,
 			conversation.Message{Role: "user", Content: strings.Repeat("q", 1024)},
 			conversation.Message{Role: "assistant", Content: strings.Repeat("a", 1024)})
@@ -317,7 +512,7 @@ func TestCompressConversationRenderedReserveRetryFailure(t *testing.T) {
 		}
 		return "", failure
 	}}
-	_, changed, err := r.compressConversation(context.Background(), agent.Budget{}, current, false)
+	_, changed, err := r.compressConversation(context.Background(), agent.Budget{InputCeiling: 16384}, current, false)
 	if !errors.Is(err, failure) || changed || calls != 2 || current.DurableSummary != nil || !reflect.DeepEqual(current.Messages, before) {
 		t.Fatalf("retry failure = changed %v, %v, calls %d; want failure with original history intact", changed, err, calls)
 	}
@@ -345,8 +540,11 @@ func TestCompressConversationRetainsToolExchangesAndUnresolvedTail(t *testing.T)
 	calls := 0
 	r := &Runtime{summarizer: func(_ context.Context, prior string, messages []conversation.Message) (string, error) {
 		calls++
-		if prior != "" || !reflect.DeepEqual(messages, old) {
-			t.Errorf("summarizer input = %q, %+v; want empty prior and complete old tool exchange %+v", prior, messages, old)
+		// The whole old exchange leaves storage together (count 4 below), but
+		// the summarizer sees only what history() replayed: the question and
+		// the answer, not the tool-call frame or the tool result.
+		if replayedOnly := []conversation.Message{old[0], old[3]}; prior != "" || !reflect.DeepEqual(messages, replayedOnly) {
+			t.Errorf("summarizer input = %q, %+v; want empty prior and the replayed question and answer %+v", prior, messages, replayedOnly)
 		}
 		return "SUM", nil
 	}}

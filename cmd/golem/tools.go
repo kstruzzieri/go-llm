@@ -202,7 +202,7 @@ func newDispatchTool(caller agent.ModelCaller, f flags, budget agent.Budget, fan
 			notify(fmt.Sprintf("dispatch: task #%d finished (%d total)", index+1, total))
 		}
 	}
-	dt, err := agenttools.NewDispatch(caller, agent.ContextManager{Mixed: f.progressive}, available, agenttools.DispatchLimits{
+	dt, err := agenttools.NewDispatch(caller, golemruntime.NewContextManager(f.progressive), available, agenttools.DispatchLimits{
 		Budget:          budget,
 		MaxConcurrent:   fan.maxConcurrent,
 		Concurrency:     fan.governor,
