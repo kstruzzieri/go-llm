@@ -113,6 +113,26 @@ type ModelConfig struct {
 	ThinkMode string `json:"think_mode,omitempty"`
 	// ThinkTags optionally overrides the reasoning tag delimiters.
 	ThinkTags *ThinkTagsConfig `json:"think_tags,omitempty"`
+	// Price optionally prices this model's tokens so Golem can show an
+	// estimated cost (see ModelPrice). There is no built-in price table:
+	// absent means unpriced and the cost is simply not estimated. Like
+	// QualityCtxCeiling it is a fact about one provider/model selector, so
+	// roles sharing a selector cannot disagree on it and re-pointing a role
+	// at another model clears it.
+	Price *ModelPrice `json:"price,omitempty"`
+}
+
+// ModelPrice is one model's token prices in USD per 1,000,000 tokens (the
+// unit providers publish), so 3 means $3 per million tokens. Input and
+// Output are the plain per-token rates. CachedInput is the rate for input
+// tokens served from a prompt cache and CacheWrite the rate for tokens
+// written to one; nil means the provider has no such rate, which is
+// different from 0 (free). Every present value must be finite and >= 0.
+type ModelPrice struct {
+	Input       float64  `json:"input"`
+	Output      float64  `json:"output"`
+	CachedInput *float64 `json:"cached_input,omitempty"`
+	CacheWrite  *float64 `json:"cache_write,omitempty"`
 }
 
 // SamplingOptions are optional per-model defaults. Request values override
@@ -741,6 +761,13 @@ func (cfg *Config) validate() error {
 				fmt.Errorf("config: model %q: quality_ctx_ceiling must not be negative", role))
 		}
 
+		// Validate price here, not in the JSON decoder: a constructed Config
+		// is the only way to carry NaN or Inf, and it must be refused too.
+		if field := invalidPriceField(m.Price); field != "" {
+			return diagWrap(CodeModelInvalid, SubjectRole, role,
+				fmt.Errorf("config: model %q: price.%s must be a finite number >= 0", role, field))
+		}
+
 		// Validate slots (#400 admission-capacity override). Bootstrap
 		// rechecks for programmatic Configs that bypass Load.
 		if m.Slots < 0 {
@@ -843,6 +870,23 @@ func (cfg *Config) validate() error {
 	return nil
 }
 
+// invalidPriceField names the first price member that is not a finite number
+// >= 0, or returns "" when p is nil or every present member is valid.
+func invalidPriceField(p *ModelPrice) string {
+	if p == nil {
+		return ""
+	}
+	for _, f := range []struct {
+		name string
+		v    *float64
+	}{{"input", &p.Input}, {"output", &p.Output}, {"cached_input", p.CachedInput}, {"cache_write", p.CacheWrite}} {
+		if f.v != nil && (math.IsNaN(*f.v) || math.IsInf(*f.v, 0) || *f.v < 0) {
+			return f.name
+		}
+	}
+	return ""
+}
+
 func validateSamplingOptions(role string, opts *SamplingOptions) error {
 	if opts == nil {
 		return nil
@@ -862,11 +906,12 @@ func validateSamplingOptions(role string, opts *SamplingOptions) error {
 	return nil
 }
 
-// validateSelectorConflicts enforces the six per-selector conflict
+// validateSelectorConflicts enforces the per-selector conflict
 // families statically (spec §1): roles sharing one effective
 // provider/model selector cannot disagree on non-zero context_window,
 // non-zero quality_ctx_ceiling, non-nil options, explicit capabilities, non-empty think_mode, non-nil
-// think_tags, or non-zero slots. Missing values mean "no override".
+// think_tags, non-zero slots, or non-nil price (compared by value). Missing
+// values mean "no override".
 // Deterministic: sorted roles, first conflicting sorted pair errors.
 // Bootstrap keeps its copies as defense in depth for programmatic Configs.
 func (cfg *Config) validateSelectorConflicts() error {
@@ -942,6 +987,11 @@ func selectorPairConflict(sel, ra, rb string, a, b ModelConfig) error {
 	}
 	if a.Slots != 0 && b.Slots != 0 && a.Slots != b.Slots {
 		return conflict("slots")
+	}
+	// DeepEqual follows the pointers, so equal values behind distinct
+	// pointers agree; a present optional rate against an absent one differs.
+	if a.Price != nil && b.Price != nil && !reflect.DeepEqual(a.Price, b.Price) {
+		return conflict("price")
 	}
 	return nil
 }

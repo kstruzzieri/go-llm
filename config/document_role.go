@@ -183,6 +183,10 @@ func selectorStateDrop(cfg *Config, removedRole string) (string, string) {
 		return m.Slots == removed.Slots
 	}):
 		return survivorNames[0], "slots"
+	case removed.Price != nil && !preserved(func(m ModelConfig) bool {
+		return m.Price != nil && reflect.DeepEqual(m.Price, removed.Price)
+	}):
+		return survivorNames[0], "price"
 	default:
 		return "", ""
 	}
@@ -311,6 +315,7 @@ func (d *Document) ForkRoleModel(sourceRole, role string, facts ModelFacts, opts
 		m.ContextWindow = facts.ContextWindow
 		if !sameModelIdentity(src, facts.Key) {
 			m.QualityCtxCeiling = 0 // per-model trained length; never carried to another model (#479)
+			m.Price = nil           // a price belongs to one model; never carried to another
 		}
 		m.Dimensions = facts.Dimensions
 		applyRoleOverridesFromOpts(&m, opts.SetRoleModelOpts)

@@ -107,6 +107,14 @@ type Bundle struct {
 	// clients; hosts that want exact configured-credential blocking elsewhere
 	// install it from this value.
 	SecretMatcher func(string) bool
+	// Prices maps each priced provider/model selector to its configured token
+	// prices (USD per 1,000,000 tokens), built once per New from the effective
+	// config; a role with an empty provider is keyed "ollama". Selectors with
+	// no configured price are absent: there is no built-in price table. It is
+	// never nil (the nil-Config default yields an empty map). It is shared and
+	// read-only: never mutate it, since its CachedInput/CacheWrite pointers
+	// alias the config's.
+	Prices map[provider.ModelKey]config.ModelPrice
 }
 
 // defaultOllamaURL is the fallback base URL for the nil-Config / default provider.
@@ -148,6 +156,13 @@ func New(ctx context.Context, opts Options) (*Bundle, error) {
 	// RefreshModels I/O: user config fails loud and fails FAST — an
 	// invalid config must error without touching any server.
 	slotBEs, err := slotBackends(effCfg)
+	if err != nil {
+		return nil, err
+	}
+
+	// Same fail-fast rule for prices: a conflicting or invalid price is a
+	// config error that must not cost a single request.
+	prices, err := buildPriceOverrides(effCfg)
 	if err != nil {
 		return nil, err
 	}
@@ -329,6 +344,7 @@ func New(ctx context.Context, opts Options) (*Bundle, error) {
 		Router:        router,
 		Warnings:      warnings,
 		SecretMatcher: match,
+		Prices:        prices,
 	}, nil
 }
 

@@ -165,10 +165,12 @@ func TestNewDocumentFullFieldRoundTrip(t *testing.T) {
 
 // TestModelSpecParityWithModelConfig forces a conscious ModelSpec decision
 // whenever ModelConfig grows a field: every ModelConfig field except the
-// constructor-owned Provider and the bootstrap-excluded Fallbacks must have
-// a same-named ModelSpec counterpart, and nothing extra.
+// constructor-owned Provider and the bootstrap-excluded Fallbacks and Price
+// must have a same-named ModelSpec counterpart, and nothing extra. Price is
+// excluded because a first-run document has no price to ask for; it is added
+// to a model afterwards by editing models.json.
 func TestModelSpecParityWithModelConfig(t *testing.T) {
-	skip := map[string]bool{"Provider": true, "Fallbacks": true}
+	skip := map[string]bool{"Provider": true, "Fallbacks": true, "Price": true}
 	want, got := map[string]bool{}, map[string]bool{}
 	cfgT := reflect.TypeOf(ModelConfig{})
 	for i := 0; i < cfgT.NumField(); i++ {
@@ -181,7 +183,7 @@ func TestModelSpecParityWithModelConfig(t *testing.T) {
 		got[specT.Field(i).Name] = true
 	}
 	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("ModelSpec fields %v != ModelConfig fields minus {Provider, Fallbacks} %v", got, want)
+		t.Fatalf("ModelSpec fields %v != ModelConfig fields minus {Provider, Fallbacks, Price} %v", got, want)
 	}
 }
 
