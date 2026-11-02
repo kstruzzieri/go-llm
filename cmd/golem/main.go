@@ -775,7 +775,7 @@ func newOrchestratorFactoryChain(caller agent.ModelCaller, f flags, verifier age
 	// same flags value.
 	opts = append(opts, agent.WithInterceptors(chain...))
 	return func() *agent.Orchestrator {
-		return agent.New(caller, agent.ContextManager{Mixed: f.progressive}, opts...)
+		return agent.New(caller, golemruntime.NewContextManager(f.progressive), opts...)
 	}
 }
 

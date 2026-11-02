@@ -86,6 +86,32 @@ type ContextManager struct {
 	// Context — is that assembling a State does not mutate it. Budget the memory;
 	// do not buy it with a non-idempotent Assemble.
 	Mixed bool
+	// CompactionLowWater is the fraction of the state budget a compacting
+	// step drops to, instead of dropping just enough to fit. Zero keeps that
+	// "just enough" behavior; any other value must lie in (0,1), or Run
+	// fails before its first model call. When the mark is unreachable
+	// (pinned and unresolved content alone sit above it), the step falls
+	// back to the just-enough fit. A low-water fit never drops the newest
+	// current-run group (the newest completed tool chain or plain Elastic
+	// group), which holds the observation the model asked for and has not
+	// read; when the mark needs it gone, the step falls back the same way.
+	//
+	// With the built-in assembly (a nil Compactor, a RecencyCompactor value
+	// or pointer, or Mixed) every Elastic message a compacting step drops
+	// also stays out of every later request of the same Run, so the first
+	// retained message, and the provider's cached prefix with it, holds for
+	// several steps. The dropped messages remain in State and
+	// Result.Messages. A later step's Pressure counts only what that step
+	// itself dropped, so content withheld since an earlier compaction shows
+	// in neither Evicted, Mitigation nor Level. A custom Compactor receives
+	// the fraction as TokenBudget.LowWaterFraction but nothing is hidden
+	// from it, because it may synthesize replacements for what it drops and
+	// would never see those messages again. Such a compactor (including a
+	// decorator around RecencyCompactor) must keep its own record of what it
+	// dropped to benefit; one that drops to the mark from the full state on
+	// every step keeps less context and still moves the prefix each step, so
+	// leave the fraction 0 for it.
+	CompactionLowWater float64
 }
 
 // DurableSummaryPrompt renders the durable summary as the pinned system message
@@ -106,6 +132,24 @@ func (m ContextManager) estimate(s string) int {
 		return 0
 	}
 	return 1 + (len(s)-1)/4
+}
+
+// stickyEviction reports whether a Run may hide what a compacting step
+// dropped for the rest of the Run: a low-water mark is set and assembly is
+// built in. A custom Compactor may synthesize replacements for what it drops,
+// so it keeps seeing every message (CompactionLowWater).
+func (m ContextManager) stickyEviction() bool {
+	if m.CompactionLowWater <= 0 {
+		return false
+	}
+	if m.Mixed || m.Compactor == nil {
+		return true
+	}
+	switch m.Compactor.(type) {
+	case RecencyCompactor, *RecencyCompactor:
+		return true
+	}
+	return false
 }
 
 func normalizeContextManager(m ContextManager) ContextManager {
@@ -261,7 +305,10 @@ func (m ContextManager) assembleLegacy(ctx context.Context, st State, toolSchema
 			Level: LevelCritical, Cause: CauseToolSchema, Mitigation: MitigationHalt,
 		}, ErrContextExhausted
 	}
-	stateBudget := TokenBudget{Input: stateInput, ToolResultOverhead: m.costCompactor().toolResultOverhead}
+	stateBudget := TokenBudget{
+		Input: stateInput, ToolResultOverhead: m.costCompactor().toolResultOverhead,
+		LowWaterFraction: m.CompactionLowWater,
+	}
 	out, report, err := m.Compactor.Compact(ctx, st, stateBudget)
 	if err != nil {
 		if errors.Is(err, ErrContextExhausted) {

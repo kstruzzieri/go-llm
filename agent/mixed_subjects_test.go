@@ -261,10 +261,9 @@ func TestBuildMixedUnitsHistoryWithSummaryBoundary(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildMixedUnits: %v", err)
 	}
-	// Materializing first would prepend a pinned message, zero
-	// firstPinnedIndex, and reclassify both history exchanges as plain (and
-	// shift their IDs to "1" and "3"). The per-unit assertions run BEFORE the
-	// unit count so the count Fatalf cannot mask them.
+	// Materializing first would prepend a pinned message and shift both
+	// history exchanges' IDs to "1" and "3". The per-unit assertions run
+	// BEFORE the unit count so the count Fatalf cannot mask them.
 	if len(units) < 2 {
 		t.Fatalf("got %d units, want at least the two history exchanges", len(units))
 	}
