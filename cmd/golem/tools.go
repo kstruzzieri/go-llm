@@ -289,7 +289,10 @@ type embedExecutor interface {
 
 type embedRouteFunc func(context.Context, provider.RoutingRequest) (embedExecutor, error)
 
-func newChainEmbedder(route embedRouteFunc, chain []string) rag.Embedder {
+// newChainEmbedder embeds through route, pinned to chain when it is set. Each
+// successful embed call is recorded in usage under "embed" (nil records
+// nothing).
+func newChainEmbedder(route embedRouteFunc, chain []string, usage *usageLedger) rag.Embedder {
 	chain = append([]string(nil), chain...)
 	return rag.EmbedderFunc(func(ctx context.Context, model string, inputs []string) (rag.EmbedResult, error) {
 		if model == "" {
@@ -329,6 +332,7 @@ func newChainEmbedder(route embedRouteFunc, chain []string) rag.Embedder {
 		if resp == nil {
 			return rag.EmbedResult{}, fmt.Errorf("golem: embedding route returned nil response")
 		}
+		usage.addSide("embed", routedModel(resp.RouteOutcome), resp.Usage)
 		return embedResultFromResponse(resp), nil
 	})
 }
@@ -383,11 +387,13 @@ func embeddingChain(cfg *config.Config) ([]string, error) {
 //
 // The returned retrievalReader owns and closes the opened store.
 //
+// usage is the session's usage ledger for query embeddings, or nil.
+//
 // rec is the -grounding evidence recorder, or nil. It is the ONE place golem
 // builds a retrieve tool, so wrapping here is what reaches the explicit
 // -rag-db generation, the discovered auto index, and every background
 // auto-index replacement alike.
-func buildGatedRetriever(ctx context.Context, cfg *config.Config, router *provider.Router, dbPath string, expected []string, weighter rag.BehavioralWeighter, progressive bool, rec *evidenceRecorder) (*retrievalReader, vsDecision, rag.StoreStats, error) {
+func buildGatedRetriever(ctx context.Context, cfg *config.Config, router *provider.Router, dbPath string, expected []string, weighter rag.BehavioralWeighter, progressive bool, rec *evidenceRecorder, usage *usageLedger) (*retrievalReader, vsDecision, rag.StoreStats, error) {
 	if cfg == nil || router == nil {
 		return nil, vsDecision{}, rag.StoreStats{}, fmt.Errorf("golem: no provider configured for embeddings")
 	}
@@ -439,7 +445,7 @@ func buildGatedRetriever(ctx context.Context, cfg *config.Config, router *provid
 	}
 	embedder := newChainEmbedder(func(rc context.Context, rr provider.RoutingRequest) (embedExecutor, error) {
 		return router.Route(rc, rr)
-	}, queryChain)
+	}, queryChain, usage)
 	retr, err := rag.NewRetrieverWithEmbedder(embedder, store, rag.WithRetrieverModel(queryModel))
 	if err != nil {
 		return nil, vsDecision{}, rag.StoreStats{}, closeStore(fmt.Errorf("golem: build retriever for %q: %w", dbPath, err))

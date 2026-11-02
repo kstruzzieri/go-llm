@@ -22,6 +22,8 @@ type retrieveOpts struct {
 	// recorder captures retrieval evidence for -grounding. nil => no capture and
 	// no wrapper, so the flag-off path constructs exactly what it did before.
 	recorder *evidenceRecorder
+	// usage records query embeddings; nil records nothing.
+	usage *usageLedger
 }
 
 // retrieveResult is the startup outcome. reader owns the registered generation
@@ -50,7 +52,7 @@ func enableRetrieve(ctx context.Context, cfg *config.Config, router *provider.Ro
 	}
 
 	if opts.ragDB != "" {
-		reader, dec, _, err := buildGatedRetriever(ctx, cfg, router, opts.ragDB, expected, opts.weighter, opts.progressive, opts.recorder)
+		reader, dec, _, err := buildGatedRetriever(ctx, cfg, router, opts.ragDB, expected, opts.weighter, opts.progressive, opts.recorder, opts.usage)
 		if err != nil {
 			return retrieveResult{warns: []string{"retrieve disabled: " + err.Error()}, suppressNotice: true}
 		}
@@ -70,7 +72,7 @@ func enableRetrieve(ctx context.Context, cfg *config.Config, router *provider.Ro
 		}
 		return retrieveResult{warns: []string{"retrieve disabled: " + err.Error()}, suppressNotice: true}
 	}
-	reader, dec, stats, err := buildGatedRetriever(ctx, cfg, router, gen.dbPath, expected, opts.weighter, opts.progressive, opts.recorder)
+	reader, dec, stats, err := buildGatedRetriever(ctx, cfg, router, gen.dbPath, expected, opts.weighter, opts.progressive, opts.recorder, opts.usage)
 	if err != nil {
 		// An index exists but could not be opened/probed: a specific warning
 		// already explains why, so suppress the contradictory generic "no index"

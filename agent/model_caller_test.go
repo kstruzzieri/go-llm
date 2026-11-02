@@ -3,7 +3,9 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/kstruzzieri/go-llm/conversation"
@@ -243,5 +245,140 @@ func TestRouterSummarizerFramesAllHistoricalInput(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// summarizeProvider is a streaming chat backend "p" serving model "m" behind a
+// real provider.Router, so the summarizer sees the router's own RouteOutcome.
+type summarizeProvider struct {
+	mu   sync.Mutex
+	reqs []provider.ChatRequest
+	fail error
+}
+
+func (*summarizeProvider) Name() string { return "p" }
+func (*summarizeProvider) Capabilities() provider.Capability {
+	return provider.CapChat | provider.CapStream
+}
+func (*summarizeProvider) Health(context.Context) error { return nil }
+func (*summarizeProvider) Models(context.Context) ([]provider.ModelInfo, error) {
+	return []provider.ModelInfo{{Name: "m", Capabilities: []string{"chat", "stream"}, ContextWindow: 8192}}, nil
+}
+func (*summarizeProvider) Chat(context.Context, provider.ChatRequest) (*provider.ChatResponse, error) {
+	return nil, errors.New("chat unsupported")
+}
+func (p *summarizeProvider) ChatStream(_ context.Context, req provider.ChatRequest, fn func(provider.ChatResponse) error) error {
+	p.mu.Lock()
+	p.reqs = append(p.reqs, req)
+	fail := p.fail
+	p.mu.Unlock()
+	if fail != nil {
+		return fail
+	}
+	if err := fn(provider.ChatResponse{Content: " SUM "}); err != nil {
+		return err
+	}
+	return fn(provider.ChatResponse{Done: true, Usage: provider.Usage{PromptTokens: 300, CompletionTokens: 50, TotalTokens: 350}})
+}
+func (*summarizeProvider) Generate(context.Context, provider.GenerateRequest) (*provider.GenerateResponse, error) {
+	return nil, errors.New("generate unsupported")
+}
+func (*summarizeProvider) GenerateStream(context.Context, provider.GenerateRequest, func(provider.GenerateResponse) error) error {
+	return errors.New("generate stream unsupported")
+}
+func (*summarizeProvider) Embed(context.Context, provider.EmbedRequest) (*provider.EmbedResponse, error) {
+	return nil, errors.New("embed unsupported")
+}
+
+func newSummarizeRouter(t *testing.T) (*provider.Router, *summarizeProvider) {
+	t.Helper()
+	p := &summarizeProvider{}
+	providers := provider.NewRegistry()
+	if err := providers.Register(p); err != nil {
+		t.Fatal(err)
+	}
+	if err := providers.RefreshModels(context.Background(), p.Name()); err != nil {
+		t.Fatal(err)
+	}
+	models, err := provider.NewModelRegistry(providers, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := provider.NewRouter(models, providers)
+	t.Cleanup(func() { _ = r.Close() })
+	return r, p
+}
+
+type usageCall struct {
+	model string
+	usage provider.Usage
+}
+
+// The callback fires once per successful summarize call with the router's
+// ActualModel and the collected Done usage; a failed call never fires it.
+func TestRouterSummarizerWithUsageReportsUsage(t *testing.T) {
+	r, p := newSummarizeRouter(t)
+	var calls []usageCall
+	summarize := NewRouterSummarizerWithUsage(r, []string{"p/m"}, func(model string, u provider.Usage) {
+		calls = append(calls, usageCall{model, u})
+	})
+	msgs := []conversation.Message{{Role: "user", Content: "old turn"}}
+	for range 2 {
+		if got, err := summarize(context.Background(), "", msgs); err != nil || got != "SUM" {
+			t.Fatalf("Summarize = %q, %v; want SUM", got, err)
+		}
+	}
+	want := usageCall{"p/m", provider.Usage{PromptTokens: 300, CompletionTokens: 50, TotalTokens: 350}}
+	if len(calls) != 2 || calls[0] != want || calls[1] != want {
+		t.Fatalf("callback calls = %+v; want %+v twice", calls, want)
+	}
+
+	p.fail = errors.New("backend down")
+	if _, err := summarize(context.Background(), "", msgs); err == nil {
+		t.Fatal("Summarize succeeded; want the backend failure")
+	}
+	if len(calls) != 2 {
+		t.Fatalf("failed summarize fired the callback: %+v", calls)
+	}
+}
+
+// NewRouterSummarizer delegates with a nil callback; neither form, nor a
+// non-nil callback, changes the summary or the request the backend receives.
+func TestNewRouterSummarizerUnchanged(t *testing.T) {
+	msgs := []conversation.Message{{Role: "user", Content: "old turn"}, {Role: "assistant", Content: "reply"}}
+	run := func(build func(*provider.Router) conversation.Summarizer) (string, string) {
+		r, p := newSummarizeRouter(t)
+		got, err := build(r)(context.Background(), "PRIOR", msgs)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(p.reqs) != 1 {
+			t.Fatalf("backend requests = %d, want 1", len(p.reqs))
+		}
+		req := p.reqs[0]
+		// The SUMMARY_INPUT fence key is fresh per request; mask it.
+		content := req.Messages[1].Content
+		key := strings.Fields(content)[1]
+		req.Messages[1].Content = strings.ReplaceAll(content, key, "KEY")
+		raw, err := json.Marshal(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got, string(raw)
+	}
+	chain := []string{"p/m"}
+	wantSummary, wantReq := run(func(r *provider.Router) conversation.Summarizer { return NewRouterSummarizer(r, chain) })
+	if wantSummary != "SUM" {
+		t.Fatalf("summary = %q, want SUM", wantSummary)
+	}
+	for name, build := range map[string]func(*provider.Router) conversation.Summarizer{
+		"nil callback": func(r *provider.Router) conversation.Summarizer { return NewRouterSummarizerWithUsage(r, chain, nil) },
+		"non-nil callback": func(r *provider.Router) conversation.Summarizer {
+			return NewRouterSummarizerWithUsage(r, chain, func(string, provider.Usage) {})
+		},
+	} {
+		if got, req := run(build); got != wantSummary || req != wantReq {
+			t.Errorf("%s: summary %q, request\n%s\nwant %q,\n%s", name, got, req, wantSummary, wantReq)
+		}
 	}
 }

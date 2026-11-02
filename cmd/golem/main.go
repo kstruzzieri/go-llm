@@ -1208,6 +1208,11 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		// request body carrying a configured credential, using the same
 		// snapshot the configured_secrets guard is built from.
 		ContentGuard: f.interceptors,
+		// Task 4.3: probe calls are side-task usage, priced by the full
+		// provider/model key.
+		ProbeUsageObserver: func(k provider.ModelKey, u provider.Usage) {
+			usage.addSide("probe", k.String(), u)
+		},
 	})
 	if err != nil {
 		// #352: a provider failure during pre-run bootstrap is a provider
@@ -1300,7 +1305,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	)
 	if f.grounding {
 		groundingRec = newEvidenceRecorder(groundingEvidenceMaxBytes)
-		groundingSvc, groundingChainWarn = newGroundingService(bundle.Config, bundle.Router, groundingRec)
+		groundingSvc, groundingChainWarn = newGroundingService(bundle.Config, bundle.Router, groundingRec, usage)
 		if groundingSvc == nil {
 			groundingRec = nil // no verifier: capture nothing and wrap nothing
 		}
@@ -1326,6 +1331,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		rr := enableRetrieve(ctx, bundle.Config, bundle.Router, retrieveOpts{
 			autoDBPath:  autoDBPath,
 			workspaceID: autoWorkspaceID, weighter: feedbackWeighter, progressive: f.progressive, recorder: groundingRec,
+			usage: usage,
 		})
 		warns = append(warns, rr.warns...)
 		if rr.reader != nil {
@@ -1346,6 +1352,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 			weighter:    feedbackWeighter,
 			progressive: f.progressive,
 			recorder:    groundingRec,
+			usage:       usage,
 		})
 		if rr.reader != nil {
 			// Route the explicit generation through the same readyRetrieve
@@ -1788,7 +1795,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		if len(summarizeChain) == 0 {
 			_, _ = fmt.Fprintln(stderr, "golem: warning: "+progressiveNoChainWarning(true))
 		}
-		sourceSummarizer = routerSourceSummaryGenerator(bundle.Router, summarizeChain)
+		sourceSummarizer = routerSourceSummaryGenerator(bundle.Router, summarizeChain, usage)
 	}
 
 	// #372/#576: every REPL session verifies through one library slot bound
@@ -1831,7 +1838,9 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	budget := prep.budget
 	var summarizer conversation.Summarizer
 	if !f.noCompress {
-		summarizer = agent.NewRouterSummarizer(bundle.Router, summarizeChain)
+		summarizer = agent.NewRouterSummarizerWithUsage(bundle.Router, summarizeChain, func(model string, u provider.Usage) {
+			usage.addSide("summarize", model, u)
+		})
 	}
 	runtime, err := golemruntime.New(ctx, golemruntime.Options{
 		Root:     root,
@@ -2051,11 +2060,12 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 					router:      bundle.Router,
 					embedder: newChainEmbedder(func(rc context.Context, rreq provider.RoutingRequest) (embedExecutor, error) {
 						return bundle.Router.Route(rc, rreq)
-					}, embChain),
+					}, embChain, usage),
 					embChain:    embChain,
 					weighter:    feedbackWeighter,
 					progressive: f.progressive,
 					recorder:    groundingRec,
+					usage:       usage,
 					summarize:   sourceSummarizer,
 					ready:       ready,
 					notice:      notice,

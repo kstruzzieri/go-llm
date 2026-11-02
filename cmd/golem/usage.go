@@ -117,6 +117,15 @@ func bucket[K comparable](m map[K]*modelUsage, k K) *modelUsage {
 	return u
 }
 
+// routedModel is the "provider/model" that served a call, or "" when the
+// call reported no route.
+func routedModel(oc *provider.RouteOutcome) string {
+	if oc == nil || oc.ActualModel == (provider.ModelKey{}) {
+		return ""
+	}
+	return oc.ActualModel.String()
+}
+
 // addRun records one finished agent run on any exit path.
 func (l *usageLedger) addRun(res agent.Result) {
 	if l == nil {
@@ -124,9 +133,9 @@ func (l *usageLedger) addRun(res agent.Result) {
 	}
 	run := make(map[string]*modelUsage)
 	for _, st := range res.Steps {
-		model := unknownBucket
-		if oc := st.RouteOutcome; oc != nil && oc.ActualModel != (provider.ModelKey{}) {
-			model = oc.ActualModel.String()
+		model := routedModel(st.RouteOutcome)
+		if model == "" {
+			model = unknownBucket
 		}
 		bucket(run, model).add(st.Response.Usage, true)
 	}
@@ -144,8 +153,9 @@ func (l *usageLedger) addRun(res agent.Result) {
 	l.lastRun = run
 }
 
-// addSide records one side-task model call (summarizer, probes, embeddings,
-// grounding, source summaries). An empty model prices as "unknown".
+// addSide records one successful side-task model call (summarizer, probes,
+// embeddings, grounding, source summaries). An empty model prices as
+// "unknown".
 func (l *usageLedger) addSide(task, model string, u provider.Usage) {
 	if l == nil {
 		return
@@ -201,7 +211,8 @@ func scopeUsage(scope map[string]*modelUsage) (total modelUsage, reported bool, 
 
 // render returns the /context usage lines. Lines 1-2 cover agent runs only;
 // line 3 prices agent runs and side tasks, each by its own model; one line per
-// side task follows, sorted by name. prices is keyed "provider/model".
+// side task follows, sorted by name, naming its unreliable calls (ruling
+// P4-l). prices is keyed "provider/model".
 func (l *usageLedger) render(prices map[string]*config.ModelPrice) []string {
 	if l == nil {
 		return nil
@@ -278,7 +289,11 @@ func (l *usageLedger) render(prices map[string]*config.ModelPrice) []string {
 	}
 	for _, name := range slices.Sorted(maps.Keys(tasks)) {
 		u := tasks[name]
-		lines = append(lines, fmt.Sprintf("side task %s: input %d tok, output %d tok, %d calls", name, u.Prompt, u.Completion, u.Requests))
+		line := fmt.Sprintf("side task %s: input %d tok, output %d tok, %d calls", name, u.Prompt, u.Completion, u.Requests)
+		if u.UnreliableRequests > 0 {
+			line += fmt.Sprintf("; unreliable usage on %d calls", u.UnreliableRequests)
+		}
+		lines = append(lines, line)
 	}
 	return lines
 }

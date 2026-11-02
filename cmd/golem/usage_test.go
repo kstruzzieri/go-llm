@@ -4,17 +4,24 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"math"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/kstruzzieri/go-llm/agent"
 	"github.com/kstruzzieri/go-llm/config"
+	"github.com/kstruzzieri/go-llm/conversation"
 	"github.com/kstruzzieri/go-llm/provider"
+	"github.com/kstruzzieri/go-llm/rag"
 )
 
 // usageStep is one top-level step served by model ("provider/model"); an
@@ -448,4 +455,339 @@ func TestUsageLedgerSurvivesModelSwitch(t *testing.T) {
 			t.Fatalf("/context =\n%s\nwant suffix\n%s", got, want)
 		}
 	})
+}
+
+// Ruling P4-l: a side-task line names its unreliable calls with the same test
+// as the run lines (raw cached > prompt, or no prompt). Abacus non-streaming
+// side calls send no prompt_tokens and would otherwise read "input 0 tok".
+func TestLedgerSideTaskUnreliableQualifier(t *testing.T) {
+	l := &usageLedger{}
+	l.addSide("grounding", "abacus/route", provider.Usage{CompletionTokens: 9})
+	l.addSide("grounding", "abacus/route", provider.Usage{PromptTokens: 80, CompletionTokens: 9})
+	l.addSide("probe", "abacus/route", provider.Usage{PromptTokens: 40, CachedPromptTokens: 400, CompletionTokens: 6})
+	l.addSide("summarize", "p/m", provider.Usage{PromptTokens: 300, CompletionTokens: 50})
+	want := []string{
+		"side task grounding: input 80 tok, output 18 tok, 2 calls; unreliable usage on 1 calls",
+		"side task probe: input 40 tok, output 6 tok, 1 calls; unreliable usage on 1 calls",
+		"side task summarize: input 300 tok, output 50 tok, 1 calls",
+	}
+	if got := l.render(nil)[3:]; !slices.Equal(got, want) {
+		t.Fatalf("side task lines =\n%q\nwant\n%q", got, want)
+	}
+}
+
+// Ruling P4-e/P4-k: the chain embedder records each successful embed under
+// "embed" by the routed model, and a failed call leaves the ledger unchanged.
+func TestChainEmbedderRecordsSideTaskUsage(t *testing.T) {
+	ok := &provider.EmbedResponse{
+		Model: "x", Provider: "e", Embeddings: [][]float64{{1}},
+		Usage:        provider.Usage{PromptTokens: 7, TotalTokens: 7},
+		RouteOutcome: &provider.RouteOutcome{ActualModel: provider.ModelKey{Provider: "e", Model: "x"}},
+	}
+	for _, tc := range []struct {
+		name string
+		plan fakeEmbedPlan
+		want []string
+	}{
+		{"success", fakeEmbedPlan{resp: ok}, []string{"side task embed: input 7 tok, output 0 tok, 1 calls"}},
+		{"failed call", fakeEmbedPlan{resp: ok, err: errors.New("backend down")}, []string{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			l := &usageLedger{}
+			emb := newChainEmbedder(func(context.Context, provider.RoutingRequest) (embedExecutor, error) { return tc.plan, nil }, []string{"e/x"}, l)
+			_, _ = emb.Embed(t.Context(), "e/x", []string{"q"})
+			if got := l.render(nil)[3:]; !slices.Equal(got, tc.want) {
+				t.Fatalf("side task lines = %q; want %q", got, tc.want)
+			}
+			// Priced by the routed provider/model, not the bare model name.
+			prices := map[string]*config.ModelPrice{"e/x": {Input: 1_000_000}}
+			if tc.name == "success" {
+				if got, want := l.render(prices)[2], "est. cost: $7.0000"; got != want {
+					t.Fatalf("line 3 = %q; want %q", got, want)
+				}
+			}
+		})
+	}
+}
+
+// pricedAgentRole is the fixture price on primary/agent-model: $1 per input
+// token and $2 per output token, so every est. cost below is exact.
+const pricedAgentRole = `"price": {"input": 1000000, "output": 2000000}`
+
+// A forced /compact runs main's summarizer once; its usage lands under
+// "summarize", priced by the routed provider/model. Runs through run(), so it
+// covers main's NewRouterSummarizerWithUsage wiring.
+func TestLedgerRecordsSummarizeSideTask(t *testing.T) {
+	fx := newModelSwitchFixture(t, "")
+	raw, err := os.ReadFile(fx.configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	priced := strings.Replace(string(raw), `"context_window": 32768,`, `"context_window": 32768, `+pricedAgentRole+`,`, 1)
+	if priced == string(raw) {
+		t.Fatal("fixture config shape changed")
+	}
+	if err := os.WriteFile(fx.configPath, []byte(priced), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fx.primary.chatResponse = func(w http.ResponseWriter, _ *http.Request, body string) bool {
+		if !strings.Contains(body, "SUMMARY_INPUT") {
+			return false
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, `data: {"model":"agent-model","choices":[{"delta":{"content":"SUM"}}]}`+"\n\n")
+		_, _ = io.WriteString(w, `data: {"model":"agent-model","choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":300,"completion_tokens":50,"total_tokens":350}}`+"\n\n")
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+		return true
+	}
+	fx.withSessionOpts(t, false, nil, func(t *testing.T, sess *replSession) {
+		current := conversation.Conversation{ID: sess.session.id, Title: "t"}
+		for i := range 5 {
+			current.Messages = append(current.Messages,
+				conversation.Message{Role: "user", Content: strings.Repeat(string(rune('a'+i)), 40)},
+				conversation.Message{Role: "assistant", Content: strings.Repeat(string(rune('A'+i)), 40)})
+		}
+		if _, err := sess.session.store.Save(t.Context(), current); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := sess.session.switchTo(t.Context(), current.ID); err != nil {
+			t.Fatal(err)
+		}
+		if got := slash(t, sess, "/compact"); !strings.HasSuffix(got, "(changed)\n") {
+			t.Fatalf("/compact = %q; want a changed compaction", got)
+		}
+		// 300*1 + 50*2 = $400.0000.
+		want := "usage (this process): input 0 tok (cached n/a), output 0 tok, 0 requests\n" +
+			"last run: none\n" +
+			"est. cost: $400.0000\n" +
+			"side task summarize: input 300 tok, output 50 tok, 1 calls\n"
+		if got := slash(t, sess, "/context"); !strings.HasSuffix(got, want) {
+			t.Fatalf("/context =\n%s\nwant suffix\n%s", got, want)
+		}
+	})
+}
+
+// The startup tool-capability probe of an undeclared model lands under
+// "probe" keyed by the full provider/model selector: the price on
+// primary/agent-model applies, where the bare "agent-model" would read
+// "excludes unpriced". Runs through run() and the real bootstrap Options.
+func TestLedgerRecordsProbeSideTask(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	backend := newModelBackend(t, "primary", "agent-model")
+	backend.chatResponse = func(w http.ResponseWriter, _ *http.Request, body string) bool {
+		if !strings.Contains(body, "get_time") {
+			return false
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"","tool_calls":[{"id":"1","type":"function","function":{"name":"get_time","arguments":"{}"}}]}}],"usage":{"prompt_tokens":40,"completion_tokens":6,"total_tokens":46}}`)
+		return true
+	}
+	configPath := filepath.Join(t.TempDir(), "models.json")
+	// No declared capabilities: tool_call is unknown, so preflight probes.
+	configJSON := fmt.Sprintf(`{
+  "providers": {"primary": {"base_url": %q, "api_format": "openai-compat", "timeout": "5s"}},
+  "models": {"agent": {"name": "agent-model", "provider": "primary", "type": "dense", "context_window": 32768, %s}},
+  "defaults": {"agent": "agent"}
+}`, backend.url, pricedAgentRole)
+	if err := os.WriteFile(configPath, []byte(configJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stdin, stdout, stderr := runTestFiles(t)
+	errStop := errors.New("stop after session ready")
+	var got string
+	err := run([]string{"-config", configPath, "-root", t.TempDir(), "-no-probe", "-no-session", "-no-memory", "-no-rag",
+		"-no-project-context", "-no-git-context", "-no-auto-index", "-no-editor"}, stdin, stdout, stderr, runHooks{
+		startAutoIndex: func() func() { return func() {} },
+		afterSessionReady: func(sess *replSession) error {
+			got = slash(t, sess, "/context")
+			return errStop
+		},
+	})
+	if !errors.Is(err, errStop) {
+		t.Fatalf("run = %v\nstderr:\n%s", err, readRunTestFile(t, stderr))
+	}
+	// 40*1 + 6*2 = $52.0000.
+	want := "usage (this process): input 0 tok (cached n/a), output 0 tok, 0 requests\n" +
+		"last run: none\n" +
+		"est. cost: $52.0000\n" +
+		"side task probe: input 40 tok, output 6 tok, 1 calls\n"
+	if !strings.HasSuffix(got, want) {
+		t.Fatalf("/context =\n%s\nwant suffix\n%s", got, want)
+	}
+}
+
+// writeSideTaskRunConfig serves one openai-compat provider "test" with priced
+// agent-model and qwen3-embedding:8b. Every non-streaming chat (grounding
+// stages, source summaries) reports usage 80/9 and answers with a valid
+// source summary; every embed call reports 7 input tokens.
+func writeSideTaskRunConfig(t *testing.T) (string, string) {
+	t.Helper()
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/models":
+			_, _ = io.WriteString(w, `{"data":[{"id":"agent-model"},{"id":"qwen3-embedding:8b"}]}`)
+		case "/v1/embeddings":
+			var req struct {
+				Input []string `json:"input"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			data := make([]any, len(req.Input))
+			for i := range data {
+				data[i] = map[string]any{"embedding": realisticTestVector(), "index": i}
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": data, "model": "qwen3-embedding:8b",
+				"usage": map[string]int{"prompt_tokens": 7, "total_tokens": 7}})
+		case "/v1/chat/completions":
+			_, _ = io.WriteString(w, `{"model":"agent-model","choices":[{"message":{"role":"assistant","content":"{\"abstract\":\"Defines A.\",\"overview\":\"Package a defines A.\"}"}}],"usage":{"prompt_tokens":80,"completion_tokens":9,"total_tokens":89}}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+	root := t.TempDir()
+	configPath := filepath.Join(t.TempDir(), "models.json")
+	configJSON := fmt.Sprintf(`{
+  "providers": {"test": {"base_url": %q, "api_format": "openai-compat", "timeout": "5s"}},
+  "models": {
+    "agent": {"name": "agent-model", "provider": "test", "type": "dense", "context_window": 32768,
+      "capabilities": ["chat", "stream", "tool_call"], %s},
+    "embedding": {"name": "qwen3-embedding:8b", "provider": "test", "type": "embedding", "dimensions": 768,
+      "capabilities": ["embed"], "price": {"input": 1000000, "output": 0}}
+  },
+  "defaults": {"agent": "agent", "embedding": "embedding", "chat": "agent", "summarize": "agent"}
+}`, server.URL, pricedAgentRole)
+	if err := os.WriteFile(configPath, []byte(configJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return configPath, root
+}
+
+// readyRetrieveOf returns the session's retrieve wrapper.
+func readyRetrieveOf(t *testing.T, tools []agent.Tool) *readyRetrieve {
+	t.Helper()
+	for _, tool := range tools {
+		if ready, ok := tool.(*readyRetrieve); ok {
+			return ready
+		}
+	}
+	t.Fatal("no retrieve tool mounted")
+	return nil
+}
+
+// One retrieve query lands under "embed" and one grounding judge (extract +
+// verify) under "grounding", each priced by its routed provider/model, on
+// both startup retrieve construction sites in run().
+func TestLedgerRecordsRetrievalSideTasks(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		seedAuto bool
+	}{
+		{name: "explicit rag-db"},
+		{name: "discovered auto index", seedAuto: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			configPath, root := writeSideTaskRunConfig(t)
+			args := []string{"-config", configPath, "-root", root, "-no-probe", "-no-cap-probe",
+				"-no-session", "-no-memory", "-no-project-context", "-no-git-context", "-no-editor", "-grounding"}
+			if tc.seedAuto {
+				canonical, err := filepath.EvalSymlinks(root)
+				if err != nil {
+					t.Fatal(err)
+				}
+				dbPath, workspaceID, err := indexDBPathForWorkspace(os.Getenv, canonical)
+				if err != nil {
+					t.Fatal(err)
+				}
+				seedIndex(t, dbPath, workspaceID, "test/qwen3-embedding:8b")
+			} else {
+				dbPath := filepath.Join(t.TempDir(), "explicit.db")
+				seedIndex(t, dbPath, "workspace:ignored", "test/qwen3-embedding:8b")
+				args = append(args, "-no-auto-index", "-rag-db", dbPath)
+			}
+			stdin, stdout, stderr := runTestFiles(t)
+			errStop := errors.New("stop after side tasks")
+			var got string
+			err := run(args, stdin, stdout, stderr, runHooks{
+				startAutoIndex: func() func() { return func() {} },
+				afterSessionReady: func(sess *replSession) error {
+					out, err := readyRetrieveOf(t, sess.tools).Invoke(t.Context(), json.RawMessage(`{"query":"find A"}`))
+					if err != nil || out.IsError {
+						t.Fatalf("retrieve = %+v, %v", out, err)
+					}
+					if sess.grounding == nil {
+						t.Fatal("grounding service not built")
+					}
+					judge, _, err := sess.grounding.newJudge()
+					if err != nil {
+						t.Fatal(err)
+					}
+					// The fixture's verify reply is malformed; both calls still succeeded.
+					_, _ = judge.Judge(t.Context(), "A is defined.", []rag.SearchResult{{Chunk: rag.Chunk{ID: "c1", Source: "a.go", Content: "func A() {}"}}}, groundingEvidenceMaxBytes)
+					got = slash(t, sess, "/context")
+					return errStop
+				},
+			})
+			if !errors.Is(err, errStop) {
+				t.Fatalf("run = %v\nstderr:\n%s", err, readRunTestFile(t, stderr))
+			}
+			// grounding 2*(80*1 + 9*2) = 196, embed 7*1 = 7.
+			want := "est. cost: $203.0000\n" +
+				"side task embed: input 7 tok, output 0 tok, 1 calls\n" +
+				"side task grounding: input 160 tok, output 18 tok, 2 calls\n"
+			if !strings.HasSuffix(got, want) {
+				t.Fatalf("/context =\n%s\nwant suffix\n%s", got, want)
+			}
+		})
+	}
+}
+
+// The real background auto-index records its startup embed probe, its index
+// embeds and, under -progressive, one source summary per source; a query on
+// the published generation then records through the refreshed reader.
+func TestLedgerRecordsAutoIndexSideTasks(t *testing.T) {
+	configPath, root := writeSideTaskRunConfig(t)
+	writeWorkspaceFile(t, root, "a.go", "package a\n\nfunc A() {}\n")
+	stdin, stdout, stderr := runTestFiles(t)
+	errStop := errors.New("stop after auto-index")
+	var sess *replSession
+	var got string
+	err := run([]string{"-config", configPath, "-root", root, "-no-probe", "-no-cap-probe", "-no-session", "-no-memory",
+		"-no-project-context", "-no-git-context", "-no-editor", "-progressive"}, stdin, stdout, stderr, runHooks{
+		afterSessionReady: func(s *replSession) error { sess = s; return nil },
+		afterAutoIndexStart: func(_ lineSourceMode, retrieve agent.Tool, _ *feedbackService) error {
+			ready, ok := retrieve.(*readyRetrieve)
+			if !ok {
+				t.Fatalf("retrieve = %T", retrieve)
+			}
+			for deadline := time.Now().Add(30 * time.Second); retrieveStateOf(ready) != retrieveReady; {
+				if retrieveStateOf(ready) == retrieveFailed || time.Now().After(deadline) {
+					t.Fatalf("auto-index did not become ready")
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			out, err := ready.Invoke(t.Context(), json.RawMessage(`{"query":"find A"}`))
+			if err != nil || out.IsError {
+				t.Fatalf("retrieve = %+v, %v", out, err)
+			}
+			got = slash(t, sess, "/context")
+			return errStop
+		},
+	})
+	if !errors.Is(err, errStop) {
+		t.Fatalf("run = %v\nstderr:\n%s", err, readRunTestFile(t, stderr))
+	}
+	// embed: probe + 1 index batch + 1 query = 3 calls * 7 = 21 (= $21);
+	// source summary: 80*1 + 9*2 = 98.
+	want := "est. cost: $119.0000\n" +
+		"side task embed: input 21 tok, output 0 tok, 3 calls\n" +
+		"side task source-summary: input 80 tok, output 9 tok, 1 calls\n"
+	if !strings.HasSuffix(got, want) {
+		t.Fatalf("/context =\n%s\nwant suffix\n%s", got, want)
+	}
 }

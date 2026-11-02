@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/kstruzzieri/go-llm/fingerprint"
+	"github.com/kstruzzieri/go-llm/provider"
 	"github.com/kstruzzieri/go-llm/provider/openaicompat"
 )
 
@@ -240,5 +241,77 @@ func TestOpenAICompatProber_ProbeEmbedding_EmptyResponseErrors(t *testing.T) {
 
 	if _, err := prober.ProbeEmbedding(context.Background(), "embed-model"); err == nil {
 		t.Fatal("ProbeEmbedding() error = nil, want error for empty embedding response")
+	}
+}
+
+// Fingerprint profiling calls are real model calls too: DetectKind's chat
+// probe and embed fallback, ProbeChat and ProbeEmbedding each report their
+// usage once, and a capabilities hint (no live probe) reports nothing.
+func TestOpenAICompatProberProfilingUsageObserver(t *testing.T) {
+	chatUsage := provider.Usage{PromptTokens: 11, CompletionTokens: 2, TotalTokens: 13}
+	embedUsage := provider.Usage{PromptTokens: 9, TotalTokens: 9}
+	handler := func(chatOK bool) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/v1/models":
+				_, _ = w.Write([]byte(`{"data":[{"id":"m"}]}`))
+			case "/v1/chat/completions":
+				if !chatOK {
+					http.NotFound(w, r)
+					return
+				}
+				_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"hi"}}],"usage":{"prompt_tokens":11,"completion_tokens":2,"total_tokens":13}}`))
+			case "/v1/embeddings":
+				_, _ = w.Write([]byte(`{"data":[{"embedding":[0.1,0.2],"index":0}],"usage":{"prompt_tokens":9,"total_tokens":9}}`))
+			default:
+				http.NotFound(w, r)
+			}
+		})
+	}
+	for _, tt := range []struct {
+		name   string
+		chatOK bool
+		caps   []string
+		call   func(*OpenAICompatProber) error
+		want   []observedUsage
+	}{
+		{"detect kind chat", true, nil, func(p *OpenAICompatProber) error {
+			_, err := p.DetectKind(context.Background(), "m")
+			return err
+		}, []observedUsage{{"m", chatUsage}}},
+		{"detect kind embed fallback", false, nil, func(p *OpenAICompatProber) error {
+			_, err := p.DetectKind(context.Background(), "m")
+			return err
+		}, []observedUsage{{"m", embedUsage}}},
+		{"detect kind from capabilities", true, []string{"chat"}, func(p *OpenAICompatProber) error {
+			_, err := p.DetectKind(context.Background(), "m")
+			return err
+		}, nil},
+		{"probe chat", true, nil, func(p *OpenAICompatProber) error {
+			_, err := p.ProbeChat(context.Background(), "m", nil)
+			return err
+		}, []observedUsage{{"m", chatUsage}}},
+		{"probe embedding", true, nil, func(p *OpenAICompatProber) error {
+			_, err := p.ProbeEmbedding(context.Background(), "m")
+			return err
+		}, []observedUsage{{"m", embedUsage}}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var got []observedUsage
+			opts := []OpenAICompatProberOption{WithOpenAICompatUsageObserver(func(model string, u provider.Usage) {
+				got = append(got, observedUsage{model, u})
+			})}
+			if tt.caps != nil {
+				opts = append(opts, WithOpenAICompatCapabilities(tt.caps))
+			}
+			prober, srv := newOpenAICompatTestProber(handler(tt.chatOK), opts...)
+			defer srv.Close()
+			if err := tt.call(prober); err != nil {
+				t.Fatal(err)
+			}
+			if !slices.Equal(got, tt.want) {
+				t.Fatalf("observations = %+v; want %+v", got, tt.want)
+			}
+		})
 	}
 }

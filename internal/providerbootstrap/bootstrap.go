@@ -81,6 +81,12 @@ type Options struct {
 	//
 	// false keeps the pre-#424 clients byte-identical.
 	ContentGuard bool
+
+	// ProbeUsageObserver, when non-nil, receives the usage of every
+	// successful model call an openai-compat fingerprint or tool-capability
+	// probe makes, keyed by the probed provider/model. Probe results are
+	// unchanged; ollama probes are not reported.
+	ProbeUsageObserver func(key provider.ModelKey, u provider.Usage)
 }
 
 // Bundle is the assembled provider stack. Warnings collects non-fatal,
@@ -223,7 +229,7 @@ func New(ctx context.Context, opts Options) (*Bundle, error) {
 		// active capability probes) binds its own metadata purposes (#477).
 		mrOpts = append(mrOpts, provider.WithModelRegistryDestinationGate(gate))
 	}
-	factory := proberFactory(effCfg, ollamaClients)
+	factory := proberFactory(effCfg, ollamaClients, opts.ProbeUsageObserver)
 	if opts.FingerprintStore != nil {
 		mrOpts = append(mrOpts, provider.WithFingerprintProberFactory(factory))
 	} else if opts.FingerprintProfileStore != nil {
