@@ -1442,10 +1442,15 @@ func TestOllamaProvider_GenerateStream_CallbackError(t *testing.T) {
 
 func TestOllamaProvider_Embed(t *testing.T) {
 	var callCount int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&callCount, 1)
+		var req ollama.EmbedRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		// The fixture's prompt_eval_count is the input's byte length, so the
+		// two inputs below report 11 and 13 tokens.
 		resp := ollama.EmbedResponse{
-			Embeddings: [][]float64{{0.1, 0.2, 0.3}},
+			Embeddings:      [][]float64{{0.1, 0.2, 0.3}},
+			PromptEvalCount: len(req.Input),
 		}
 		_ = json.NewEncoder(w).Encode(resp)
 	}))
@@ -1470,8 +1475,8 @@ func TestOllamaProvider_Embed(t *testing.T) {
 	if resp.Model != "nomic-embed-text" {
 		t.Errorf("Model = %q, want %q", resp.Model, "nomic-embed-text")
 	}
-	if resp.Usage.PromptTokens != 2 {
-		t.Errorf("Usage.PromptTokens = %d, want 2", resp.Usage.PromptTokens)
+	if resp.Usage.PromptTokens != 24 {
+		t.Errorf("Usage.PromptTokens = %d, want 24 (11 + 13 from the server's prompt_eval_count)", resp.Usage.PromptTokens)
 	}
 	if got := atomic.LoadInt32(&callCount); got != 2 {
 		t.Errorf("expected 2 API calls (one per input), got %d", got)
@@ -1481,6 +1486,43 @@ func TestOllamaProvider_Embed(t *testing.T) {
 		if len(emb) != 3 {
 			t.Errorf("embedding[%d] length = %d, want 3", i, len(emb))
 		}
+	}
+}
+
+// Usage.PromptTokens is the server's prompt_eval_count summed over inputs,
+// never the number of inputs. A count the server omits is unknown, so the
+// whole request reports 0 (which the Golem ledger flags as unreliable)
+// rather than a partial sum that would read as complete.
+func TestOllamaProvider_EmbedUsage(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		counts map[string]int // input -> prompt_eval_count; absent = omitted
+		want   int
+	}{
+		{"every input reported", map[string]int{"a": 7, "b": 5}, 12},
+		{"field absent", map[string]int{}, 0},
+		{"one input omits it", map[string]int{"a": 7}, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var req ollama.EmbedRequest
+				_ = json.NewDecoder(r.Body).Decode(&req)
+				body := map[string]any{"embeddings": [][]float64{{0.1}}}
+				if n, ok := tc.counts[req.Input]; ok {
+					body["prompt_eval_count"] = n
+				}
+				_ = json.NewEncoder(w).Encode(body)
+			}))
+			defer srv.Close()
+			p := NewOllamaProvider(ollama.NewClient(ollama.WithBaseURL(srv.URL)))
+			resp, err := p.Embed(context.Background(), EmbedRequest{Model: "m", Input: []string{"a", "b"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if resp.Usage.PromptTokens != tc.want {
+				t.Fatalf("Usage.PromptTokens = %d, want %d", resp.Usage.PromptTokens, tc.want)
+			}
+		})
 	}
 }
 

@@ -546,8 +546,9 @@ const groundingNoChainWarning = "-grounding had no effect: no verify/extract, an
 
 // newGroundingService builds the production service. Returns (nil, warning)
 // when either stage's chain cannot resolve, so the caller can disable the
-// feature with one notice instead of failing every turn.
-func newGroundingService(cfg *config.Config, router *provider.Router, rec *evidenceRecorder) (*groundingService, string) {
+// feature with one notice instead of failing every turn. Each successful judge
+// call is recorded in usage under "grounding" (nil records nothing).
+func newGroundingService(cfg *config.Config, router *provider.Router, rec *evidenceRecorder, usage *usageLedger) (*groundingService, string) {
 	if cfg == nil || router == nil || rec == nil {
 		return nil, groundingNoChainWarning
 	}
@@ -564,7 +565,11 @@ func newGroundingService(cfg *config.Config, router *provider.Router, rec *evide
 		if err != nil {
 			return nil, err
 		}
-		return plan.ExecuteChat(ctx)
+		resp, err := plan.ExecuteChat(ctx)
+		if err == nil && resp != nil {
+			usage.addSide("grounding", routedModel(resp.RouteOutcome), resp.Usage)
+		}
+		return resp, err
 	}
 	return &groundingService{
 		rec:     rec,

@@ -369,8 +369,10 @@ func TestModelSetPublishesTheNewConfiguration(t *testing.T) {
 			sess.selection.useRecommend || sess.selection.useCase != "agent" {
 			t.Errorf("selection = %+v", sess.selection)
 		}
-		// /context and /think now answer from the SAME new configuration.
-		if got, want := slash(t, sess, "/context"), "context: no pressure sample for the current session\nconfigured input ceiling: 14336 tokens; explicit output reserve: 0 tokens\n"; got != want {
+		// /context and /think now answer from the SAME new configuration. The
+		// usage ledger (process-local, never reset by /model) follows.
+		if got, want := slash(t, sess, "/context"), "context: no pressure sample for the current session\nconfigured input ceiling: 14336 tokens; explicit output reserve: 0 tokens\n"+
+			"usage (this process): input 0 tok (cached n/a), output 0 tok, 0 requests\nlast run: none\nest. cost: unavailable (no prices set)\n"; got != want {
 			t.Errorf("/context = %q, want %q", got, want)
 		}
 
