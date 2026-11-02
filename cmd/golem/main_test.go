@@ -289,8 +289,11 @@ func TestRunStartupNoticeSummarizeSharesChat(t *testing.T) {
 	}{
 		{name: "shared and priced", edit: priceAgentRole, want: true},
 		{name: "shared and unpriced", edit: func(s string) string { return s }},
-		{name: "priced but summarize is another model", edit: func(s string) string {
-			return strings.Replace(priceAgentRole(s), `"summarize": "agent"`, `"summarize": "swap"`, 1)
+		// Both models are priced, so only the model mismatch can keep the
+		// notice away.
+		{name: "both priced but summarize is another model", edit: func(s string) string {
+			s = strings.Replace(priceAgentRole(s), `"summarize": "agent"`, `"summarize": "swap"`, 1)
+			return strings.Replace(s, `"think_mode": "none",`, `"think_mode": "none", `+pricedAgentRole+`,`, 1)
 		}},
 		{name: "priced but compression off", edit: priceAgentRole, extra: []string{"-no-compress"}},
 		// No defaults.agent: the active chain is empty, so there is no active
@@ -309,8 +312,13 @@ func TestRunStartupNoticeSummarizeSharesChat(t *testing.T) {
 				t.Fatal(err)
 			}
 			stderr := fx.withSession(t, tc.extra, func(*testing.T, *replSession) {})
-			if has := strings.Contains(stderr, summarizeSharedNotice("primary/agent-model")); has != tc.want {
+			// Absent rows look for the prefix, not one exact line: a notice
+			// that named any other model must fail them too.
+			if has := strings.Contains(stderr, "notice: summarize uses the same model"); has != tc.want {
 				t.Fatalf("notice present = %v, want %v; stderr:\n%s", has, tc.want, stderr)
+			}
+			if tc.want && !strings.Contains(stderr, summarizeSharedNotice("primary/agent-model")) {
+				t.Fatalf("notice line not exact; stderr:\n%s", stderr)
 			}
 			if !strings.Contains(stderr, tc.also) {
 				t.Fatalf("stderr missing %q:\n%s", tc.also, stderr)
