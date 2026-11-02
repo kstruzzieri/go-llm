@@ -293,14 +293,21 @@ func TestUsageDecodeUnchangedForOpenAIShapes(t *testing.T) {
 	}
 
 	bodies := map[string]string{
-		"llama.cpp fixture":   string(llama.Usage),
-		"openai":              `{"prompt_tokens":2000,"completion_tokens":10,"total_tokens":2010,"prompt_tokens_details":{"cached_tokens":1536,"audio_tokens":0},"completion_tokens_details":{"reasoning_tokens":0,"audio_tokens":0}}`,
-		"vllm":                `{"prompt_tokens":12,"total_tokens":20,"completion_tokens":8,"prompt_tokens_details":null}`,
-		"embedding":           `{"prompt_tokens":8,"total_tokens":8}`,
-		"abacus stream":       `{"prompt_tokens": 596, "completion_tokens": 75, "total_tokens": 671, "completion_tokens_details": {"reasoning_tokens": 64}, "prompt_tokens_details": {"cached_tokens": 4992}}`,
-		"prompt_tokens wins":  `{"prompt_tokens":2000,"completion_tokens":10,"total_tokens":2010,"raw_input_tokens":5,"cache_read_input_tokens":7,"output_tokens":99,"reasoning_tokens":3}`,
-		"no raw_input_tokens": `{"input_tokens":597,"output_tokens":45,"cache_read_input_tokens":4992,"reasoning_tokens":3}`,
-		"null":                `null`,
+		"llama.cpp fixture":               string(llama.Usage),
+		"openai":                          `{"prompt_tokens":2000,"completion_tokens":10,"total_tokens":2010,"prompt_tokens_details":{"cached_tokens":1536,"audio_tokens":0},"completion_tokens_details":{"reasoning_tokens":0,"audio_tokens":0}}`,
+		"vllm":                            `{"prompt_tokens":12,"total_tokens":20,"completion_tokens":8,"prompt_tokens_details":null}`,
+		"embedding":                       `{"prompt_tokens":8,"total_tokens":8}`,
+		"abacus stream":                   `{"prompt_tokens": 596, "completion_tokens": 75, "total_tokens": 671, "completion_tokens_details": {"reasoning_tokens": 64}, "prompt_tokens_details": {"cached_tokens": 4992}}`,
+		"prompt_tokens wins":              `{"prompt_tokens":2000,"completion_tokens":10,"total_tokens":2010,"raw_input_tokens":5,"cache_read_input_tokens":7,"output_tokens":99,"reasoning_tokens":3}`,
+		"prompt wins over raw type":       `{"prompt_tokens":12,"completion_tokens":8,"total_tokens":20,"raw_input_tokens":"unavailable"}`,
+		"prompt wins over output type":    `{"prompt_tokens":12,"completion_tokens":8,"total_tokens":20,"raw_input_tokens":5,"output_tokens":"8"}`,
+		"prompt wins over cache type":     `{"prompt_tokens":12,"completion_tokens":8,"total_tokens":20,"raw_input_tokens":5,"cache_read_input_tokens":"unknown"}`,
+		"prompt wins over reasoning type": `{"prompt_tokens":12,"completion_tokens":8,"total_tokens":20,"raw_input_tokens":5,"reasoning_tokens":{"count":2}}`,
+		"extensions without raw":          `{"completion_tokens":8,"total_tokens":8,"output_tokens":"8","cache_read_input_tokens":"unknown","reasoning_tokens":{"count":2}}`,
+		"null prompt wins":                `{"prompt_tokens":null,"completion_tokens":8,"total_tokens":8,"raw_input_tokens":2,"cache_read_input_tokens":3,"output_tokens":99}`,
+		"duplicate prompt ending in null": `{"prompt_tokens":12,"prompt_tokens":null,"completion_tokens":8,"total_tokens":20,"raw_input_tokens":2,"cache_read_input_tokens":3,"output_tokens":99}`,
+		"no raw_input_tokens":             `{"input_tokens":597,"output_tokens":45,"cache_read_input_tokens":4992,"reasoning_tokens":3}`,
+		"null":                            `null`,
 	}
 	type plain usage // no UnmarshalJSON: the decode before the Abacus rule
 	for name, body := range bodies {
@@ -315,6 +322,24 @@ func TestUsageDecodeUnchangedForOpenAIShapes(t *testing.T) {
 			}
 			if !reflect.DeepEqual(got, usage(want)) {
 				t.Errorf("decode = %+v, want the plain decode %+v", got, usage(want))
+			}
+		})
+	}
+}
+
+func TestUsageDecodeAbacusInvalidCounts(t *testing.T) {
+	t.Parallel()
+	for name, body := range map[string]string{
+		"raw input":  `{"raw_input_tokens":"5","output_tokens":2}`,
+		"cache read": `{"raw_input_tokens":5,"cache_read_input_tokens":"3","output_tokens":2}`,
+		"output":     `{"raw_input_tokens":5,"output_tokens":"2"}`,
+		"reasoning":  `{"raw_input_tokens":5,"output_tokens":2,"reasoning_tokens":{"count":1}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			var got usage
+			if err := json.Unmarshal([]byte(body), &got); err == nil {
+				t.Errorf("UnmarshalJSON(%s) = %+v, nil; want an invalid token count error", body, got)
 			}
 		})
 	}

@@ -268,14 +268,21 @@ func (u *usage) UnmarshalJSON(b []byte) error {
 	if err := json.Unmarshal(b, (*plain)(u)); err != nil {
 		return err
 	}
+	// Select the shape before validating fields the OpenAI decoder ignores.
+	var shape struct {
+		PromptTokens   json.RawMessage `json:"prompt_tokens"`
+		RawInputTokens json.RawMessage `json:"raw_input_tokens"`
+	}
+	if err := json.Unmarshal(b, &shape); err != nil || shape.PromptTokens != nil || shape.RawInputTokens == nil {
+		return err
+	}
 	var a struct {
-		PromptTokens         *int `json:"prompt_tokens"`
 		RawInputTokens       *int `json:"raw_input_tokens"`
 		CacheReadInputTokens *int `json:"cache_read_input_tokens"`
 		OutputTokens         *int `json:"output_tokens"`
 		ReasoningTokens      *int `json:"reasoning_tokens"`
 	}
-	if err := json.Unmarshal(b, &a); err != nil || a.PromptTokens != nil || a.RawInputTokens == nil {
+	if err := json.Unmarshal(b, &a); err != nil || a.RawInputTokens == nil {
 		return err
 	}
 	u.PromptTokens = *a.RawInputTokens
