@@ -20,8 +20,9 @@ const (
 // modelUsage is the clamped token usage of one bucket. CachedReportedRequests
 // counts requests whose usage reported a cached count, keeping "reported on
 // some requests" apart from "reported on all". UnreliableRequests counts
-// requests whose RAW usage had cached above prompt or no prompt (ruling
-// P4-j): billing-weighted or missing counts that pricing cannot trust.
+// requests whose RAW usage had no prompt or needed a clamp (ruling P4-j, see
+// add): billing-weighted, missing or inconsistent counts that pricing cannot
+// trust.
 // ChildCacheReported records a cached report from the dispatch-children
 // aggregate, which has no requests to count.
 type modelUsage struct {
@@ -41,13 +42,16 @@ func clampTokens(prompt, cached, write int) (int, int, int) {
 	return prompt, cached, write
 }
 
-// add folds one usage report in, clamped. request is false for the
-// dispatch-children aggregate, which adds tokens but no requests.
+// add folds one usage report in, clamped. A report with no prompt, or one
+// that any clamp changes (a negative counter, cached above prompt,
+// cache-write above the prompt left after cached), is unreliable. request is
+// false for the dispatch-children aggregate, which adds tokens but no
+// requests.
 func (m *modelUsage) add(u provider.Usage, request bool) {
-	if u.PromptTokens <= 0 || u.CachedPromptTokens > u.PromptTokens {
+	p, c, w := clampTokens(u.PromptTokens, u.CachedPromptTokens, u.CacheWriteTokens)
+	if u.PromptTokens <= 0 || c != u.CachedPromptTokens || w != u.CacheWriteTokens || u.CompletionTokens < 0 {
 		m.UnreliableRequests++
 	}
-	p, c, w := clampTokens(u.PromptTokens, u.CachedPromptTokens, u.CacheWriteTokens)
 	m.Prompt += p
 	m.Cached += c
 	m.CacheWrite += w
@@ -188,8 +192,8 @@ func sumUsage(m map[string]*modelUsage) modelUsage {
 //     every request reported one;
 //  2. "; dispatch children: N input tok, cache coverage unknown": children
 //     contributed input without per-request detail;
-//  3. "; unreliable usage on N requests": raw counts had cached above prompt
-//     or no prompt (ruling P4-j); the children aggregate counts as one.
+//  3. "; unreliable usage on N requests": raw counts had no prompt or needed
+//     a clamp (ruling P4-j); the children aggregate counts as one.
 func scopeUsage(scope map[string]*modelUsage) (total modelUsage, reported bool, suffix string) {
 	total = sumUsage(scope)
 	reported = total.CachedReportedRequests > 0 || total.ChildCacheReported
@@ -210,9 +214,11 @@ func scopeUsage(scope map[string]*modelUsage) (total modelUsage, reported bool, 
 }
 
 // render returns the /context usage lines. Lines 1-2 cover agent runs only;
-// line 3 prices agent runs and side tasks, each by its own model; one line per
-// side task follows, sorted by name, naming its unreliable calls (ruling
-// P4-l). prices is keyed "provider/model".
+// line 3 prices agent runs and side tasks, each by its own model, and names
+// each excluded bucket: a run bucket by its model, a side-task bucket as
+// "model (task)" ("unknown" stays bare); one line per side task follows,
+// sorted by name, naming its unreliable calls (ruling P4-l). prices is keyed
+// "provider/model".
 func (l *usageLedger) render(prices map[string]*config.ModelPrice) []string {
 	if l == nil {
 		return nil
@@ -250,21 +256,25 @@ func (l *usageLedger) render(prices map[string]*config.ModelPrice) []string {
 		// Every bucket has input tokens or an unreliable request (a request
 		// without input is unreliable), so none is skipped as empty: a
 		// zero-usage request is named, never priced as free.
-		price := func(model string, u *modelUsage) {
+		price := func(model, label string, u *modelUsage) {
 			switch p := prices[model]; {
 			case p == nil:
-				unpriced = append(unpriced, model)
+				unpriced = append(unpriced, label)
 			case u.UnreliableRequests > 0:
-				unreliable = append(unreliable, model)
+				unreliable = append(unreliable, label)
 			default:
 				cost += costUSD(*u, p)
 			}
 		}
 		for model, u := range l.byModel {
-			price(model, u)
+			price(model, model, u)
 		}
 		for k, u := range l.side {
-			price(k.model, u)
+			label := k.model
+			if label != unknownBucket {
+				label += " (" + k.task + ")"
+			}
+			price(k.model, label, u)
 		}
 		var clauses []string
 		for _, c := range []struct {

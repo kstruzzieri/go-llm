@@ -174,18 +174,46 @@ func TestLedgerLineQualifiers(t *testing.T) {
 	}
 }
 
-// The cache-write clamp is per request: A's write has no room left after its
-// cached tokens, so it is 0 even though the summed bucket would have room.
-func TestLedgerClampsCacheWritePerRequest(t *testing.T) {
+// A request is unreliable when it has no prompt count or any counter had
+// to be clamped: the clamp keeps the figures sane, the flag keeps them out of
+// the dollar total.
+func TestLedgerUnreliableConditions(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		u    provider.Usage
+		want bool
+	}{
+		{"consistent counters", provider.Usage{PromptTokens: 100, CachedPromptTokens: 60, CacheWriteTokens: 40, CompletionTokens: 5}, false},
+		{"no prompt count", provider.Usage{CompletionTokens: 5}, true},
+		{"negative prompt", provider.Usage{PromptTokens: -1, CompletionTokens: 5}, true},
+		{"cached above prompt", provider.Usage{PromptTokens: 100, CachedPromptTokens: 101}, true},
+		{"negative cached", provider.Usage{PromptTokens: 100, CachedPromptTokens: -1}, true},
+		{"negative completion", provider.Usage{PromptTokens: 100, CompletionTokens: -1}, true},
+		{"cache write above uncached prompt", provider.Usage{PromptTokens: 100, CachedPromptTokens: 60, CacheWriteTokens: 41}, true},
+		{"negative cache write", provider.Usage{PromptTokens: 100, CacheWriteTokens: -1}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var m modelUsage
+			m.add(tc.u, true)
+			if got := m.UnreliableRequests == 1; got != tc.want {
+				t.Fatalf("unreliable = %v; want %v (bucket %+v)", got, tc.want, m)
+			}
+		})
+	}
+}
+
+// A's write has no room left after its cached tokens, which breaks the
+// Usage contract (cache-write is part of prompt). Clamping it per request
+// would bill $0.1100 and summing the raw write $0.5100; neither is a
+// measurement, so the bucket is excluded and named instead.
+func TestLedgerExcludesClampedCacheWrite(t *testing.T) {
 	prices := map[string]*config.ModelPrice{"p/m": {Input: 1000, CachedInput: new(100.0), CacheWrite: new(5000.0), Output: 1000}}
 	l := &usageLedger{}
 	l.addRun(usageRun(
 		usageStep("p/m", provider.Usage{PromptTokens: 100, CachedPromptTokens: 100, CacheWriteTokens: 100}),
 		usageStep("p/m", provider.Usage{PromptTokens: 100}),
 	))
-	// 100 uncached * 1000 + 100 cached * 100 + 0 write = 110000 / 1e6. Summing
-	// the raw write first would bill 100 write * 5000 instead: $0.5100.
-	if got, want := l.render(prices)[2], "est. cost: $0.1100"; got != want {
+	if got, want := l.render(prices)[2], "est. cost: $0.0000 (excludes unreliable usage: p/m)"; got != want {
 		t.Fatalf("line 3 = %q; want %q", got, want)
 	}
 }
@@ -272,7 +300,8 @@ func TestLedgerRenderPartialPrices(t *testing.T) {
 }
 
 // Line 3 prices agent runs AND side tasks, each by its own model, and names
-// every unpriced bucket once: "unknown", "dispatch children" and side models.
+// every unpriced bucket once: "unknown", "dispatch children" and side models,
+// a side model as "model (task)".
 func TestLedgerCostCoversSideTasksAndNamedBuckets(t *testing.T) {
 	prices := map[string]*config.ModelPrice{"a/priced": {Input: 2, CachedInput: new(0.2), Output: 8}}
 	l := &usageLedger{}
@@ -285,7 +314,7 @@ func TestLedgerCostCoversSideTasksAndNamedBuckets(t *testing.T) {
 	l.addSide("summarize", "a/priced", provider.Usage{PromptTokens: 1_000_000})
 	l.addSide("probe", "s/m", provider.Usage{PromptTokens: 5, CompletionTokens: 1})
 	l.addSide("embed", "", provider.Usage{PromptTokens: 3})
-	if got, want := l.render(prices)[2], "est. cost: $3.1000 (excludes unpriced: dispatch children, s/m, unknown)"; got != want {
+	if got, want := l.render(prices)[2], "est. cost: $3.1000 (excludes unpriced: dispatch children, s/m (probe), unknown)"; got != want {
 		t.Fatalf("line 3 = %q; want %q", got, want)
 	}
 }
@@ -317,9 +346,21 @@ func TestLedgerRenderExcludesUnreliableUsage(t *testing.T) {
 			l.addRun(usageRun(usageStep("abacus/route", provider.Usage{CompletionTokens: 50}), usageStep("a/priced", good)))
 		}, "est. cost: $1.1000 (excludes unreliable usage: abacus/route)"},
 		{"unreliable side task", func(l *usageLedger) {
+			// The $1.10 is a/priced's run cost: only the probe bucket is out.
 			l.addRun(usageRun(usageStep("a/priced", good)))
 			l.addSide("probe", "a/priced", provider.Usage{CompletionTokens: 5})
-		}, "est. cost: $1.1000 (excludes unreliable usage: a/priced)"},
+		}, "est. cost: $1.1000 (excludes unreliable usage: a/priced (probe))"},
+		{"run and side buckets of one model are named apart", func(l *usageLedger) {
+			l.addRun(usageRun(usageStep("abacus/route", weighted)))
+			l.addSide("grounding", "abacus/route", provider.Usage{CompletionTokens: 5})
+			l.addSide("summarize", "abacus/route", good)
+		}, "est. cost: $1.1000 (excludes unreliable usage: abacus/route, abacus/route (grounding))"},
+		{"one unpriced model under two tasks", func(l *usageLedger) {
+			l.addRun(usageRun(usageStep("a/priced", good)))
+			l.addSide("probe", "b/unpriced", good)
+			l.addSide("embed", "b/unpriced", good)
+			l.addSide("embed", "", good)
+		}, "est. cost: $1.1000 (excludes unpriced: b/unpriced (embed), b/unpriced (probe), unknown)"},
 		{"zero-usage request is still named", func(l *usageLedger) {
 			l.addRun(usageRun(usageStep("", provider.Usage{}), usageStep("a/priced", good)))
 		}, "est. cost: $1.1000 (excludes unpriced: unknown)"},
@@ -459,7 +500,7 @@ func TestUsageLedgerSurvivesModelSwitch(t *testing.T) {
 }
 
 // Ruling P4-l: a side-task line names its unreliable calls with the same test
-// as the run lines (raw cached > prompt, or no prompt). Abacus non-streaming
+// as the run lines (no prompt, or a counter that needed a clamp). Abacus non-streaming
 // side calls send no prompt_tokens and would otherwise read "input 0 tok".
 func TestLedgerSideTaskUnreliableQualifier(t *testing.T) {
 	l := &usageLedger{}
