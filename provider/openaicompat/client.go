@@ -3,10 +3,15 @@ package openaicompat
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"runtime/debug"
 	"slices"
 	"strings"
@@ -33,6 +38,12 @@ type Client struct {
 	// contentGuard, when non-nil, vets every outbound JSON body (see
 	// WithContentGuard). Read-only after construction.
 	contentGuard func(string) bool
+
+	// cacheAffinity is the resolved mode — "openai", "openrouter",
+	// "opencode", or "none" — and affinitySecret keys affinityKey (nil sends
+	// no key). Both are read-only after construction; see WithCacheAffinity.
+	cacheAffinity  string
+	affinitySecret []byte
 }
 
 // ClientOption configures a Client.
@@ -167,6 +178,57 @@ func WithContentGuard(match func(string) bool) ClientOption {
 	}
 }
 
+// WithCacheAffinity selects how a request's session id (ChatRequest.SessionID)
+// reaches the provider's prompt cache:
+//
+//   - "openai": body prompt_cache_key = the affinity key
+//   - "openrouter": header x-session-id = the affinity key
+//   - "opencode": header x-opencode-session = the raw session id
+//   - "none": nothing
+//
+// The affinity key is hex(HMAC-SHA256(secret, sessionID))[:32] under a random
+// secret each Client mints in NewClient, so it is stable for one session on
+// one Client, changes when the process restarts, and cannot be recomputed
+// from the session (thread) id. An empty session id sends nothing in any mode.
+//
+// Empty, the default, infers the mode from the base URL (InferCacheAffinity).
+// An unknown mode sends nothing, as "none" does: the option cannot fail, so
+// callers validate the value first (config rejects unknown cache_affinity).
+func WithCacheAffinity(mode string) ClientOption {
+	return func(c *Client) {
+		c.cacheAffinity = mode
+	}
+}
+
+// cacheAffinityHosts maps each host that documents a session cache key to its
+// mode. An https base URL matches the host itself or any subdomain of it.
+var cacheAffinityHosts = []struct{ host, mode string }{
+	{"api.openai.com", "openai"},
+	{"openrouter.ai", "openrouter"},
+	{"opencode.ai", "opencode"},
+}
+
+// InferCacheAffinity returns the cache affinity mode for an https baseURL's
+// host: "openai" for api.openai.com, "openrouter" for openrouter.ai,
+// "opencode" for opencode.ai — each also matching its subdomains,
+// case-insensitively, with one trailing dot, the port, and the path ignored.
+// It returns "none" for any other host, a non-https URL (so the raw OpenCode
+// session id is never sent in cleartext by inference), or an unparseable URL,
+// so a host that documents no key is sent none.
+func InferCacheAffinity(baseURL string) string {
+	u, err := url.Parse(baseURL)
+	if err != nil || u.Scheme != "https" { // url.Parse lowercases the scheme
+		return "none"
+	}
+	host := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
+	for _, h := range cacheAffinityHosts {
+		if host == h.host || strings.HasSuffix(host, "."+h.host) {
+			return h.mode
+		}
+	}
+	return "none"
+}
+
 // NewClient builds a Client targeting baseURL. The URL should be the server
 // root WITHOUT the /v1 suffix; per-endpoint paths are appended internally
 // so callers don't have to remember which endpoints live under /v1. Any
@@ -175,6 +237,9 @@ func WithContentGuard(match func(string) bool) ClientOption {
 // The default http.Client uses a 5-minute timeout, matching the
 // config.ProviderConfig default. Override via WithHTTPClient for shorter
 // (low-latency local) or longer (large-batch embedding) requests.
+//
+// NewClient resolves the cache affinity mode and mints the client's random
+// affinity secret; see WithCacheAffinity.
 func NewClient(baseURL string, opts ...ClientOption) *Client {
 	c := &Client{
 		baseURL:   strings.TrimRight(baseURL, "/"),
@@ -184,7 +249,41 @@ func NewClient(baseURL string, opts ...ClientOption) *Client {
 	for _, opt := range opts {
 		opt(c)
 	}
+	switch c.cacheAffinity {
+	case "":
+		c.cacheAffinity = InferCacheAffinity(c.baseURL)
+	case "none", "openai", "openrouter", "opencode":
+	default:
+		c.cacheAffinity = "none"
+	}
+	// rand.Read crashes the program rather than return an error (Go 1.24+);
+	// should that change, a failure leaves no secret and so sends no key.
+	secret := make([]byte, 32)
+	if _, err := rand.Read(secret); err == nil {
+		c.affinitySecret = secret
+	}
 	return c
+}
+
+// affinityKey returns hex(HMAC-SHA256(secret, sessionID))[:32], or "" when
+// sessionID is empty or the client has no secret, so a failure sends no key
+// rather than one anybody could recompute.
+func (c *Client) affinityKey(sessionID string) string {
+	if sessionID == "" || c.affinitySecret == nil {
+		return ""
+	}
+	m := hmac.New(sha256.New, c.affinitySecret)
+	_, _ = m.Write([]byte(sessionID))
+	return hex.EncodeToString(m.Sum(nil))[:32]
+}
+
+// promptCacheKey returns the chat body's prompt_cache_key for sessionID: the
+// affinity key in "openai" mode, "" (omitted) otherwise.
+func (c *Client) promptCacheKey(sessionID string) string {
+	if c.cacheAffinity != "openai" {
+		return ""
+	}
+	return c.affinityKey(sessionID)
 }
 
 // postJSON sends a JSON request and decodes a JSON response. Non-2xx
@@ -306,7 +405,7 @@ func unencodedBodyMatches(body any, match func(string) bool) bool {
 	stringsMatch := func(values []string) bool { return slices.ContainsFunc(values, match) }
 	switch r := body.(type) {
 	case chatRequest:
-		if match(r.Model) || stringsMatch(r.Stop) || match(r.ToolChoice) || match(r.ReasoningEffort) || chatRawFieldsMatch(r, match) {
+		if match(r.Model) || stringsMatch(r.Stop) || match(r.ToolChoice) || match(r.ReasoningEffort) || match(r.PromptCacheKey) || chatRawFieldsMatch(r, match) {
 			return true
 		}
 		for _, m := range r.Messages {
@@ -363,16 +462,24 @@ func chatRawFieldsMatch(r chatRequest, match func(string) bool) bool {
 }
 
 // setHeaders applies Authorization (when APIKey is set), Accept, User-Agent,
-// the opencode session id carried by the request context, and optional
-// Content-Type to req.
+// the cache affinity header for the session id carried by the request context
+// (see WithCacheAffinity), and optional Content-Type to req.
 func (c *Client) setHeaders(req *http.Request, contentType string) {
 	if c.apiKey != "" {
 		req.Header.Set("Authorization", "Bearer "+c.apiKey)
 	}
 	req.Header.Set("Accept", "application/json, text/event-stream")
 	req.Header.Set("User-Agent", c.userAgent)
-	if id := sessionIDFrom(req.Context()); id != "" {
-		req.Header.Set("x-opencode-session", id)
+	id := sessionIDFrom(req.Context())
+	switch c.cacheAffinity {
+	case "opencode":
+		if id != "" {
+			req.Header.Set("x-opencode-session", id)
+		}
+	case "openrouter":
+		if key := c.affinityKey(id); key != "" {
+			req.Header.Set("x-session-id", key)
+		}
 	}
 	if contentType != "" {
 		req.Header.Set("Content-Type", contentType)

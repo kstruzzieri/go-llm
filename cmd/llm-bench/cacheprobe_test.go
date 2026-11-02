@@ -5,10 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -45,12 +48,14 @@ func TestCommonPrefixRatio(t *testing.T) {
 
 // probeServer is an openai-compat fake whose n-th request reports
 // prompt_tokens 1000*n and cached_tokens 100*n, and records the session
-// header each request carried.
+// header and body each request carried.
 type probeServer struct {
 	*httptest.Server
 	mu       sync.Mutex
 	n        int
 	sessions []string
+	hosts    []string // each request's Host header
+	bodies   [][]byte
 	silent   bool // omit prompt_tokens_details, like a backend without prefix-cache counters
 }
 
@@ -58,10 +63,13 @@ func newProbeServer(t *testing.T) *probeServer {
 	t.Helper()
 	ps := &probeServer{}
 	ps.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
 		ps.mu.Lock()
 		ps.n++
 		n := ps.n
 		ps.sessions = append(ps.sessions, r.Header.Get("x-opencode-session"))
+		ps.hosts = append(ps.hosts, r.Host)
+		ps.bodies = append(ps.bodies, body)
 		silent := ps.silent
 		ps.mu.Unlock()
 		details := fmt.Sprintf(`,"prompt_tokens_details":{"cached_tokens":%d}`, 100*n)
@@ -89,12 +97,36 @@ func (ps *probeServer) seenSessions() []string {
 	return slices.Clone(ps.sessions)
 }
 
+// promptCacheKeys returns each request's prompt_cache_key, nil where none was sent.
+func (ps *probeServer) promptCacheKeys(t *testing.T) []*string {
+	t.Helper()
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	keys := make([]*string, len(ps.bodies))
+	for i, b := range ps.bodies {
+		var body struct {
+			Key *string `json:"prompt_cache_key"`
+		}
+		if err := json.Unmarshal(b, &body); err != nil {
+			t.Fatalf("request %d body: %v", i, err)
+		}
+		keys[i] = body.Key
+	}
+	return keys
+}
+
 // caller builds the probe's real ModelCaller exactly as the CLI does, through
-// the candidate transport.
+// the candidate transport, with the default cache affinity.
 func (ps *probeServer) caller(t *testing.T) agent.ModelCaller {
 	t.Helper()
+	return ps.callerWithAffinity(t, "")
+}
+
+// callerWithAffinity is caller with an explicit -cache-affinity mode.
+func (ps *probeServer) callerWithAffinity(t *testing.T, mode string) agent.ModelCaller {
+	t.Helper()
 	c, err := newProbeCaller(ModelTarget{Display: "openai-compat/probe-model", Provider: openAICompatTransport, Model: "probe-model"},
-		candidateTransportOptions{openAICompatBaseURL: ps.URL})
+		candidateTransportOptions{openAICompatBaseURL: ps.URL, cacheAffinity: mode})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -270,7 +302,9 @@ func TestCheckProbeCompaction(t *testing.T) {
 
 func TestCacheProbeSessionIDStable(t *testing.T) {
 	ps := newProbeServer(t)
-	cc := &forwardRecorder{next: ps.caller(t)}
+	// The fake is loopback, which infers no affinity; opencode mode is the one
+	// that puts the raw session id on the wire.
+	cc := &forwardRecorder{next: ps.callerWithAffinity(t, "opencode")}
 	if _, _, err := runCacheProbe(t.Context(), cc, cacheProbeFixtures, probeUncompacted); err != nil {
 		t.Fatal(err)
 	}
@@ -614,4 +648,115 @@ func TestRunCacheProbeModeWritesTable(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestCacheProbeAffinityFlag runs the binary: with -cache-affinity openai every
+// probe request body carries the same keyed prompt_cache_key; with the default,
+// a loopback -candidate-base-url infers none and no request carries one, while
+// an https opencode.ai base URL infers opencode (ruling P3-b: the default is
+// "infer", not "none"). An unknown mode fails before any request.
+func TestCacheProbeAffinityFlag(t *testing.T) {
+	hex32 := regexp.MustCompile(`^[0-9a-f]{32}$`)
+	runAt := func(t *testing.T, baseURL string, env []string, extra ...string) ([]byte, error) {
+		t.Helper()
+		args := append([]string{
+			"-cache-probe", "-models", "openai-compat/probe-model", "-candidate-base-url", baseURL,
+			"-cache-probe-out", filepath.Join(t.TempDir(), "probe.md"),
+		}, extra...)
+		cmd := exec.Command(os.Args[0], args...)
+		cmd.Env = append(append(os.Environ(), "LLM_BENCH_TEST_MAIN=1"), env...)
+		return cmd.CombinedOutput()
+	}
+	run := func(t *testing.T, ps *probeServer, extra ...string) ([]byte, error) {
+		t.Helper()
+		return runAt(t, ps.URL, nil, extra...)
+	}
+
+	t.Run("default infers opencode for an https opencode.ai URL", func(t *testing.T) {
+		ps := newProbeServer(t)
+		// LLM_BENCH_TEST_REDIRECT sends every request to the fake (TestMain).
+		// The unreachable proxies make a broken redirect fail closed instead of
+		// reaching the real host; loopback, the fake, bypasses them. Go reads
+		// each variable uppercase first and falls back to lowercase only when
+		// the uppercase one is empty, so an inherited no_proxy would win over
+		// an empty NO_PROXY: both cases are set, every one of them.
+		out, err := runAt(t, "https://opencode.ai/zen/go", []string{
+			"LLM_BENCH_TEST_REDIRECT=" + ps.URL,
+			"HTTPS_PROXY=http://127.0.0.1:1", "https_proxy=http://127.0.0.1:1",
+			"HTTP_PROXY=http://127.0.0.1:1", "http_proxy=http://127.0.0.1:1",
+			"NO_PROXY=", "no_proxy=",
+		})
+		if err != nil {
+			t.Fatalf("probe failed: %v\n%s", err, out)
+		}
+		sessions := ps.seenSessions()
+		if len(sessions) != 12 {
+			t.Fatalf("server saw %d requests, want 12", len(sessions))
+		}
+		ps.mu.Lock()
+		hosts := slices.Clone(ps.hosts)
+		ps.mu.Unlock()
+		for i, s := range sessions {
+			if hosts[i] != "opencode.ai" {
+				t.Fatalf("request %d Host = %q, want opencode.ai: the redirect seam did not apply", i, hosts[i])
+			}
+			if !strings.HasPrefix(s, "probe-") || s != sessions[0] {
+				t.Errorf("request %d x-opencode-session = %q, want the probe's one session id (first %q)", i, s, sessions[0])
+			}
+		}
+	})
+
+	t.Run("openai", func(t *testing.T) {
+		ps := newProbeServer(t)
+		if out, err := run(t, ps, "-cache-affinity", "openai"); err != nil {
+			t.Fatalf("probe failed: %v\n%s", err, out)
+		}
+		keys := ps.promptCacheKeys(t)
+		if len(keys) != 12 {
+			t.Fatalf("server saw %d requests, want 12", len(keys))
+		}
+		for i, k := range keys {
+			if k == nil || !hex32.MatchString(*k) {
+				t.Fatalf("request %d prompt_cache_key = %v, want 32 hex", i, k)
+			}
+			if *k != *keys[0] {
+				t.Errorf("request %d prompt_cache_key = %q, want %q: one key per probe session", i, *k, *keys[0])
+			}
+		}
+	})
+
+	t.Run("default", func(t *testing.T) {
+		ps := newProbeServer(t)
+		if out, err := run(t, ps); err != nil {
+			t.Fatalf("probe failed: %v\n%s", err, out)
+		}
+		keys := ps.promptCacheKeys(t)
+		if len(keys) != 12 {
+			t.Fatalf("server saw %d requests, want 12", len(keys))
+		}
+		for i, k := range keys {
+			if k != nil {
+				t.Errorf("request %d sent prompt_cache_key %q under the default affinity", i, *k)
+			}
+		}
+		for i, s := range ps.seenSessions() {
+			if s != "" {
+				t.Errorf("request %d sent x-opencode-session %q to a non-OpenCode host", i, s)
+			}
+		}
+	})
+
+	t.Run("unknown mode", func(t *testing.T) {
+		ps := newProbeServer(t)
+		out, err := run(t, ps, "-cache-affinity", "OpenAI")
+		if err == nil {
+			t.Fatalf("llm-bench accepted -cache-affinity OpenAI:\n%s", out)
+		}
+		if !strings.Contains(string(out), `llm-bench: -cache-affinity must be one of none, openai, openrouter, opencode, or empty to infer from -candidate-base-url; got "OpenAI"`) {
+			t.Fatalf("missing the validation message:\n%s", out)
+		}
+		if n := ps.count(); n != 0 {
+			t.Fatalf("server saw %d request(s) before the mode was rejected", n)
+		}
+	})
 }

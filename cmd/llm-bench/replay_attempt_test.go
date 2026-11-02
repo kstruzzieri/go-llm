@@ -1399,7 +1399,8 @@ func TestReplayAttemptRefusesInjectionTrace(t *testing.T) {
 }
 
 // -candidate-session-id reaches the wire on -replay-attempt exactly as on
-// runOne and -calibrate-capture; empty sends no header at all.
+// runOne and -calibrate-capture under opencode affinity (the fake is loopback,
+// which infers none); empty sends no header at all.
 func TestReplayAttempt_SessionIDReachesHeader(t *testing.T) {
 	for _, id := range []string{"llmb-452-test", ""} {
 		t.Run("id="+id, func(t *testing.T) {
@@ -1414,6 +1415,7 @@ func TestReplayAttempt_SessionIDReachesHeader(t *testing.T) {
 			t.Cleanup(srv.Close)
 			opts := attemptTestOptions(t, srv.URL, fixtureSmokeTrace)
 			opts.SessionID = id
+			opts.CacheAffinity = "opencode"
 			if code, rec := runAttempt(t, context.Background(), opts); code != 0 || rec.Status != attemptStatusCompleted {
 				t.Fatalf("exit %d status %q error %+v", code, rec.Status, rec.Error)
 			}

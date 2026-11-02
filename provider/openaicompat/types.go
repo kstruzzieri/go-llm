@@ -20,6 +20,9 @@ type chatRequest struct {
 	Stop          []string           `json:"stop,omitempty"`
 	Tools         []chatTool         `json:"tools,omitempty"`
 	ToolChoice    string             `json:"tool_choice,omitempty"`
+	// PromptCacheKey is OpenAI's prompt-cache routing key, set only in
+	// "openai" cache affinity mode (WithCacheAffinity); omitted otherwise.
+	PromptCacheKey string `json:"prompt_cache_key,omitempty"`
 
 	// ReasoningEffort and ChatTemplateKwargs carry the caller's think
 	// controls (#220). llama.cpp forwards reasoning_effort to templates

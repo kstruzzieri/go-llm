@@ -165,3 +165,46 @@ so the Router won't send unsupported requests.
 
 For the Golem-specific walkthrough (flags, capability probing costs, verification
 runbook), see [Running Golem against a hosted API](GETTING_STARTED.md#running-golem-against-a-hosted-api).
+
+### Cache affinity
+
+A hosted provider reuses a cached prompt prefix more reliably when each request
+says which conversation it belongs to. go-llm sends each `openai-compat`
+provider the session key that provider documents, and nothing to a host that
+documents none. By default the mode comes from the `base_url` host (the host
+itself or any subdomain of it, ignoring one trailing dot), and only for an
+`https` URL: an `http` URL to any of these hosts infers `none`, so the raw
+OpenCode session id never goes out in cleartext unless you ask for it.
+
+| Host | Mode | What a request with a session id sends |
+|------|------|-----------------------------------------|
+| `api.openai.com` | `openai` | body `prompt_cache_key` = the affinity key |
+| `openrouter.ai` | `openrouter` | header `x-session-id` = the affinity key |
+| `opencode.ai` | `opencode` | header `x-opencode-session` = the raw session id |
+| any other host | `none` | nothing |
+
+`x-opencode-session` now goes only to OpenCode; earlier versions sent it to
+every `openai-compat` host. The affinity key is an HMAC-SHA256 of the session
+id under a random secret minted per process (each client mints its own when it
+is built), truncated to 32 hex characters: it is stable for one conversation,
+changes on restart, and is not the thread id, nor can it be recomputed from it.
+A request without a session id sends nothing in any mode.
+
+Set `cache_affinity` on a provider to override the host: `"none"` sends
+nothing, and `"openai"`, `"openrouter"` or `"opencode"` use that mode on any
+host and scheme, for a gateway that documents one of those keys. Any other
+value, or any value on a provider whose `api_format` is not `openai-compat`,
+fails the config load.
+
+```json
+"gateway": { "base_url": "https://llm-gateway.example.com", "api_format": "openai-compat", "api_key": "${GATEWAY_API_KEY}", "cache_affinity": "openai" }
+```
+
+Abacus (`routellm.abacus.ai`) defaults to `none`: whether it honors
+`prompt_cache_key` has not been measured yet.
+
+Local llama.cpp gets no key; go-llm does not pin `id_slot`, and `llama-server`
+already routes requests by prompt similarity. To keep a conversation's prefix
+cached, run a single slot (`--parallel 1`), or keep several slots and set
+`--slot-prompt-similarity` with `--cache-reuse`, so a request lands on the slot
+that holds its prefix and reuses that slot's cache.
