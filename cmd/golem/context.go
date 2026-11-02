@@ -72,4 +72,7 @@ func handleContext(out io.Writer, sess *replSession, fields []string) {
 	// the next turn will actually reserve, and /model set republishes them.
 	budget := sess.runtime.Budget()
 	_, _ = fmt.Fprintf(out, "configured input ceiling: %d tokens; explicit output reserve: %d tokens\n", budget.InputCeiling, budget.OutputReserve)
+	for _, line := range sess.usage.render(sess.prices) {
+		_, _ = fmt.Fprintln(out, line)
+	}
 }

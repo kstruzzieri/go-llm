@@ -1192,6 +1192,9 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		capStoreWarn = warning
 	}
 
+	// The usage ledger exists before bootstrap so bootstrap-time model calls
+	// (Task 4.3's probe observers) have somewhere to record.
+	usage := &usageLedger{}
 	bundle, err := providerbootstrap.New(ctx, providerbootstrap.Options{
 		Config:                          cfg, // nil => default Ollama provider
 		OllamaURLOverride:               f.ollamaURL,
@@ -1918,6 +1921,8 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		obs:              obsv,
 		feedback:         feedbackSvc,
 		pressureWarn:     f.pressureWarn > 0,
+		usage:            usage,
+		prices:           priceLookup(bundle.Prices),
 		mixed:            f.progressive,
 		grounding:        groundingSvc,
 		thinkModels:      bundle.Models,
