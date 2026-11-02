@@ -47,7 +47,9 @@ type replayAttemptOptions struct {
 	BaseURL    string
 	APIKey     string
 	SessionID  string // -candidate-session-id; empty sends no session header
-	Timeout    time.Duration
+	// CacheAffinity is -cache-affinity; empty infers the mode from BaseURL.
+	CacheAffinity string
+	Timeout       time.Duration
 
 	publisher *attemptPublisher // nil: newAttemptPublisher(AttemptDir)
 	goos      string            // "": runtime.GOOS
@@ -216,6 +218,7 @@ func executeAttempt(parent context.Context, opts replayAttemptOptions, trace Tra
 		openAICompatBaseURL: opts.BaseURL,
 		openAICompatAPIKey:  opts.APIKey,
 		httpClient:          client,
+		cacheAffinity:       opts.CacheAffinity,
 	})
 	if err != nil {
 		reportAttemptDetail(stderr, err, opts.APIKey)

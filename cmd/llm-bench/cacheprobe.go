@@ -358,6 +358,8 @@ type cacheProbeOptions struct {
 	// FixtureDir, when set, replaces the embedded fixtures (tests only).
 	FixtureDir string
 	Timeout    time.Duration // -timeout
+	// CacheAffinity is -cache-affinity; empty infers the mode from BaseURL.
+	CacheAffinity string
 }
 
 // runCacheProbeMode validates the flags, checks opts.Out is writable, runs the
@@ -391,6 +393,7 @@ func runCacheProbeMode(ctx context.Context, opts cacheProbeOptions, stderr io.Wr
 
 	real, err := newProbeCaller(targets[0], candidateTransportOptions{
 		openAICompatBaseURL: opts.BaseURL, openAICompatAPIKey: opts.APIKey, timeout: opts.Timeout,
+		cacheAffinity: opts.CacheAffinity,
 	})
 	if err != nil {
 		return err

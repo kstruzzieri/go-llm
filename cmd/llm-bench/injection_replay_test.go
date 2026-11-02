@@ -151,7 +151,8 @@ func TestRunOneInjectionWiresRawCalls(t *testing.T) {
 
 // The -candidate-session-id value must travel Runner -> runOne -> the replay
 // (injection and ordinary chat traces alike) -> the openai-compat wire as the
-// literal session header; an empty value sends no header at all.
+// literal session header in opencode affinity mode; an empty value sends no
+// header at all, and neither does the default affinity on a non-OpenCode host.
 func TestCandidateSessionIDReachesHeader(t *testing.T) {
 	plainTrace := Trace{
 		ID:     "plain-chat",
@@ -161,13 +162,14 @@ func TestCandidateSessionIDReachesHeader(t *testing.T) {
 		Golden: Golden{ToolCalls: []string{}, FinalAnswerSubstring: "ok"},
 	}
 	for _, tc := range []struct {
-		name, id, want string
-		trace          Trace
+		name, affinity, id, want string
+		trace                    Trace
 	}{
-		{"injection set", "llmb-452-test", "llmb-452-test", validInjectionTrace()},
-		{"injection empty", "", "", validInjectionTrace()},
-		{"plain set", "llmb-452-test", "llmb-452-test", plainTrace},
-		{"plain empty", "", "", plainTrace},
+		{"injection set", "opencode", "llmb-452-test", "llmb-452-test", validInjectionTrace()},
+		{"injection empty", "opencode", "", "", validInjectionTrace()},
+		{"plain set", "opencode", "llmb-452-test", "llmb-452-test", plainTrace},
+		{"plain empty", "opencode", "", "", plainTrace},
+		{"plain set, default affinity on loopback", "", "llmb-452-test", "", plainTrace},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var gotPresent bool
@@ -180,14 +182,12 @@ func TestCandidateSessionIDReachesHeader(t *testing.T) {
 			}))
 			t.Cleanup(srv.Close)
 			target := ModelTarget{Display: "m", Provider: openAICompatTransport, Model: "m"}
-			tp, err := newCandidateTransport(target, candidateTransportOptions{openAICompatBaseURL: srv.URL})
-			if err != nil {
-				t.Fatal(err)
-			}
 			r := &Runner{Scorer: &CaptureScorer{}, Timeout: time.Minute, CandidateSessionID: tc.id,
+				OpenAICompatBaseURL: srv.URL, CandidateCacheAffinity: tc.affinity,
 				InjectionDecoding: map[string]injectionDecoding{"m": {Options: provider.ModelOptions{NumPredict: 77}}}}
-			if res := r.runOne(context.Background(), tp, target, tc.trace); res.Err != nil {
-				t.Fatalf("runOne: %v", res.Err)
+			res, err := r.RunAll(context.Background(), []ModelTarget{target}, []Trace{tc.trace})
+			if err != nil || len(res) != 1 || res[0].Err != nil {
+				t.Fatalf("RunAll: %v %+v", err, res)
 			}
 			if gotPresent != (tc.want != "") || gotValue != tc.want {
 				t.Fatalf("x-opencode-session present=%v value=%q; want present=%v value=%q", gotPresent, gotValue, tc.want != "", tc.want)

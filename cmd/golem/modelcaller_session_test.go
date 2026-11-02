@@ -10,7 +10,8 @@ import (
 // TestChainModelCallerForwardsSessionID covers the caller golem actually uses
 // when a model chain is configured. It converts ChatRequest to RoutingRequest
 // independently of agent.routerModelCaller, so it needs its own guard: a drop
-// here silently disables the x-opencode-session header for chain runs only.
+// here silently disables the session's cache affinity (x-opencode-session,
+// x-session-id, or prompt_cache_key, by provider) for chain runs only.
 func TestChainModelCallerForwardsSessionID(t *testing.T) {
 	tests := []struct {
 		name      string

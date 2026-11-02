@@ -108,7 +108,8 @@ func main() {
 	judgeDisableThinking := flag.Bool("judge-disable-thinking", false, "Send chat_template_kwargs.enable_thinking=false on -judge-transport openai-compat so a thinking-tuned local judge (llama.cpp/vLLM) answers directly; leave off for api.openai.com, which rejects the kwarg")
 	candidateBaseURL := flag.String("candidate-base-url", "", "Base URL for openai-compat candidate targets (server root, no /v1 suffix)")
 	candidateAPIKey := flag.String("candidate-api-key", "", "Bearer token for openai-compat candidate targets; falls back to $"+candidateAPIKeyEnvVar)
-	candidateSessionID := flag.String("candidate-session-id", "", "Session id sent as the openai-compat session header on every candidate request; required by some hosted endpoints; empty sends no header")
+	candidateSessionID := flag.String("candidate-session-id", "", "Session id sent with every openai-compat candidate request in the form -cache-affinity selects (the raw id as x-opencode-session for OpenCode); required by some hosted endpoints; empty sends none")
+	cacheAffinity := flag.String("cache-affinity", "", "Prompt-cache key mode for openai-compat candidates: none, openai (body prompt_cache_key), openrouter (x-session-id), or opencode (x-opencode-session); empty infers it from an https -candidate-base-url host, which sends nothing to other hosts or to http URLs")
 	corpusManifestPath := flag.String("corpus-manifest", "", "Path to a corpus manifest JSONL (partition/category per trace); enables partition-separated reporting")
 	corpusPartitions := flag.String("corpus-partitions", "", "Comma-separated partitions to include from the corpus manifest (natural, challenge, judge-validation; empty = all)")
 	corpusCategories := flag.String("corpus-categories", "", "Comma-separated categories to include from the corpus manifest (empty = all)")
@@ -154,6 +155,9 @@ func main() {
 
 	ct := resolveCandidateTransportConfig(*candidateBaseURL, *candidateAPIKey, os.Getenv)
 	if err := validateCandidateSessionID(*candidateSessionID); err != nil {
+		log.Fatalf("llm-bench: %v", err)
+	}
+	if err := validateCacheAffinity(*cacheAffinity); err != nil {
 		log.Fatalf("llm-bench: %v", err)
 	}
 
@@ -280,15 +284,16 @@ func main() {
 		// errors are already discarded.
 		signal.Ignore(syscall.SIGPIPE)
 		code := runReplayAttempt(ctx, replayAttemptOptions{
-			AttemptDir: *attemptDir,
-			AttemptID:  *attemptID,
-			Arm:        *attemptArm,
-			TracePath:  *attemptTrace,
-			Models:     *modelsArg,
-			BaseURL:    ct.baseURL,
-			APIKey:     ct.apiKey,
-			SessionID:  *candidateSessionID,
-			Timeout:    *timeout,
+			AttemptDir:    *attemptDir,
+			AttemptID:     *attemptID,
+			Arm:           *attemptArm,
+			TracePath:     *attemptTrace,
+			Models:        *modelsArg,
+			BaseURL:       ct.baseURL,
+			APIKey:        ct.apiKey,
+			SessionID:     *candidateSessionID,
+			CacheAffinity: *cacheAffinity,
+			Timeout:       *timeout,
 		}, os.Stderr)
 		cancel()
 		os.Exit(code)
@@ -298,6 +303,7 @@ func main() {
 		if err := runCacheProbeMode(ctx, cacheProbeOptions{
 			BaseURL: ct.baseURL, APIKey: ct.apiKey, Models: *modelsArg,
 			Out: *cacheProbeOut, Scenario: *cacheProbeScenario, Timeout: *timeout,
+			CacheAffinity: *cacheAffinity,
 		}, os.Stderr); err != nil {
 			log.Fatalf("llm-bench: %v", err)
 		}
@@ -480,12 +486,13 @@ func main() {
 			log.Fatalf("llm-bench: parse models: %v", err)
 		}
 		runner := &Runner{
-			OllamaURL:           *ollamaURL,
-			OpenAICompatBaseURL: ct.baseURL,
-			OpenAICompatAPIKey:  ct.apiKey,
-			Timeout:             *timeout,
-			CandidateSessionID:  *candidateSessionID,
-			Scorer:              &CaptureScorer{},
+			OllamaURL:              *ollamaURL,
+			OpenAICompatBaseURL:    ct.baseURL,
+			OpenAICompatAPIKey:     ct.apiKey,
+			Timeout:                *timeout,
+			CandidateSessionID:     *candidateSessionID,
+			CandidateCacheAffinity: *cacheAffinity,
+			Scorer:                 &CaptureScorer{},
 		}
 		var registrationDigest string
 		var injectionTemps map[string]float64
@@ -1203,12 +1210,13 @@ func main() {
 	}
 
 	runner := &Runner{
-		OllamaURL:           *ollamaURL,
-		OpenAICompatBaseURL: ct.baseURL,
-		OpenAICompatAPIKey:  ct.apiKey,
-		Timeout:             *timeout,
-		CandidateSessionID:  *candidateSessionID,
-		Scorer:              scorer,
+		OllamaURL:              *ollamaURL,
+		OpenAICompatBaseURL:    ct.baseURL,
+		OpenAICompatAPIKey:     ct.apiKey,
+		Timeout:                *timeout,
+		CandidateSessionID:     *candidateSessionID,
+		CandidateCacheAffinity: *cacheAffinity,
+		Scorer:                 scorer,
 	}
 
 	results, err := runner.RunAll(ctx, targets, traces)
@@ -1440,6 +1448,18 @@ func validateCandidateSessionID(id string) error {
 		return errors.New("-candidate-session-id contains a control character")
 	}
 	return nil
+}
+
+// validateCacheAffinity refuses a -cache-affinity outside the values
+// config's cache_affinity accepts: openaicompat.WithCacheAffinity treats an
+// unknown mode as none, which would silently drop a session header the
+// endpoint requires.
+func validateCacheAffinity(mode string) error {
+	switch mode {
+	case "", "none", "openai", "openrouter", "opencode":
+		return nil
+	}
+	return fmt.Errorf("-cache-affinity must be one of none, openai, openrouter, opencode, or empty to infer from -candidate-base-url; got %q", mode)
 }
 
 // validateCaptureSampleAndLimit rejects the case where both flags are
