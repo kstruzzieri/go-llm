@@ -95,14 +95,22 @@ output per million:
 | Build | `usage (this process)` | `est. cost` |
 |---|---|---|
 | develop `39b207a2` | input 0 tok (0 cached, 0%), output 412 tok, 4 requests; unreliable usage on 4 requests | $0.0000 (excludes unreliable usage: abacus/gpt-5-mini) |
-| this change | input 17376 tok (13440 cached, 77%), output 496 tok, 5 requests; cache reported on 4 of 5 requests | $0.0023 |
+| this change, before the absent-counter rule (`a6d2e399`) | input 17376 tok (13440 cached, 77%), output 496 tok, 5 requests; cache reported on 4 of 5 requests | $0.0023 |
+
+The second row was recorded before the absent-counter rule in
+[Cache counter when nothing is cached](#cache-counter-when-nothing-is-cached).
+With it, the cold first request reads as 0 cached, reported, so Golem would
+not print the `cache reported on 4 of 5 requests` suffix.
 
 ## Limits
 
 - One day's measurement. If Abacus changes a model's rates, its `w` changes
   and the table entry must be re-measured. If Abacus starts streaming the
-  exact count, the inversion would undercount, and a single frame cannot tell
-  the two apart; only a negative result is caught.
+  exact count, the inversion would overcount by `cached - floor(cached * w)`
+  (an exact 5,089 with 4,992 cached on `gpt-5-mini` would read as 9,582), and
+  Golem would price it as reliable. The negative check cannot catch this: an
+  exact count minus `floor(cached * w)` is never below the uncached count, so
+  the miscount would go unnoticed.
 - `route-llm` reports the served model in each chunk, and go-llm looks up that
   model, so a routed request is recovered only when the router picked a model
   in the table.
