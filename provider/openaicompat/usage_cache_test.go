@@ -259,6 +259,23 @@ func TestChatUsageAbacusNonStream(t *testing.T) {
 			want:  provider.Usage{PromptTokens: 8, CompletionTokens: 77, TotalTokens: 85, CachedPromptTokensReported: true},
 		},
 		{
+			// gpt-6-luna, cold (2026-11-03): 4,726 = 3 + floor(3,779 * 1.25),
+			// so input_tokens weights the written tokens at the write premium.
+			name:  "cold request writing the cache",
+			usage: `{"input_tokens": 4726, "output_tokens": 5, "cache_creation_input_tokens": 3779, "raw_input_tokens": 3}`,
+			want: provider.Usage{PromptTokens: 3782, CompletionTokens: 5, TotalTokens: 3787,
+				CachedPromptTokensReported: true, CacheWriteTokens: 3779, CacheWriteTokensReported: true},
+		},
+		{
+			// Claude Haiku 4.5, a grown turn (2026-11-03): reads the earlier
+			// turn, writes the new one; the same turn repeated read 5,799 with
+			// 3 uncached, so the exact input is 3 + 4,550 + 1,249 = 5,802.
+			name:  "warm request writing new tokens",
+			usage: `{"input_tokens": 2019, "output_tokens": 4, "cache_read_input_tokens": 4550, "cache_creation_input_tokens": 1249, "raw_input_tokens": 3}`,
+			want: provider.Usage{PromptTokens: 5802, CompletionTokens: 4, TotalTokens: 5806,
+				CachedPromptTokens: 4550, CachedPromptTokensReported: true, CacheWriteTokens: 1249, CacheWriteTokensReported: true},
+		},
+		{
 			name:  "abacus shape elsewhere: counter unreported",
 			usage: `{"input_tokens": 8, "output_tokens": 77, "raw_input_tokens": 8}`, elsewhere: true,
 			want: provider.Usage{PromptTokens: 8, CompletionTokens: 77, TotalTokens: 85},
@@ -317,6 +334,8 @@ func TestUsageDecodeUnchangedForOpenAIShapes(t *testing.T) {
 		"prompt wins over raw type":       `{"prompt_tokens":12,"completion_tokens":8,"total_tokens":20,"raw_input_tokens":"unavailable"}`,
 		"prompt wins over output type":    `{"prompt_tokens":12,"completion_tokens":8,"total_tokens":20,"raw_input_tokens":5,"output_tokens":"8"}`,
 		"prompt wins over cache type":     `{"prompt_tokens":12,"completion_tokens":8,"total_tokens":20,"raw_input_tokens":5,"cache_read_input_tokens":"unknown"}`,
+		"prompt wins over write type":     `{"prompt_tokens":12,"completion_tokens":8,"total_tokens":20,"raw_input_tokens":5,"cache_creation_input_tokens":"unknown"}`,
+		"prompt wins over cache write":    `{"prompt_tokens":12,"completion_tokens":8,"total_tokens":20,"raw_input_tokens":2,"cache_creation_input_tokens":7}`,
 		"prompt wins over reasoning type": `{"prompt_tokens":12,"completion_tokens":8,"total_tokens":20,"raw_input_tokens":5,"reasoning_tokens":{"count":2}}`,
 		"extensions without raw":          `{"completion_tokens":8,"total_tokens":8,"output_tokens":"8","cache_read_input_tokens":"unknown","reasoning_tokens":{"count":2}}`,
 		"null prompt wins":                `{"prompt_tokens":null,"completion_tokens":8,"total_tokens":8,"raw_input_tokens":2,"cache_read_input_tokens":3,"output_tokens":99}`,
@@ -345,10 +364,11 @@ func TestUsageDecodeUnchangedForOpenAIShapes(t *testing.T) {
 func TestUsageDecodeAbacusInvalidCounts(t *testing.T) {
 	t.Parallel()
 	for name, body := range map[string]string{
-		"raw input":  `{"raw_input_tokens":"5","output_tokens":2}`,
-		"cache read": `{"raw_input_tokens":5,"cache_read_input_tokens":"3","output_tokens":2}`,
-		"output":     `{"raw_input_tokens":5,"output_tokens":"2"}`,
-		"reasoning":  `{"raw_input_tokens":5,"output_tokens":2,"reasoning_tokens":{"count":1}}`,
+		"raw input":   `{"raw_input_tokens":"5","output_tokens":2}`,
+		"cache read":  `{"raw_input_tokens":5,"cache_read_input_tokens":"3","output_tokens":2}`,
+		"cache write": `{"raw_input_tokens":5,"cache_creation_input_tokens":"3","output_tokens":2}`,
+		"output":      `{"raw_input_tokens":5,"output_tokens":"2"}`,
+		"reasoning":   `{"raw_input_tokens":5,"output_tokens":2,"reasoning_tokens":{"count":1}}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
@@ -384,11 +404,13 @@ func TestAbacusRouteLLMHost(t *testing.T) {
 // (usage objects verbatim, in the finish-chunk envelope Abacus sent; gpt-5-mini
 // measured 2026-11-01, the rest 2026-11-03). Its prompt_tokens is
 // uncached + floor(cached * w), w the served model's cached-to-input price
-// ratio, and no raw count is sent. On an Abacus client a frame with cached
-// tokens from a model in abacusCacheWeights reports the recovered exact input
-// (each want was checked against the same prompt's exact non-streaming
-// count); any other model, or a recovery below zero, reports PromptTokens and
-// TotalTokens as unknown (0) and keeps the rest. A cold Abacus frame carries no
+// ratio, and no raw count is sent. Models that bill cache writes add the
+// written tokens at 1.25 and report no written count, so a frame from one is
+// not invertible, cold or warm. On an Abacus client a frame from a model in
+// abacusCacheWeights reports the recovered exact input (each want was checked
+// against the same prompt's exact non-streaming count); any other served
+// model, or a recovery below zero, reports PromptTokens and TotalTokens as
+// unknown (0) and keeps the rest. A cold Abacus frame carries no
 // prompt_tokens_details (measured 2026-11-03 on every cold stream of five
 // models), so it reads as 0 cached, reported. The same frame from any other
 // server passes as sent.
@@ -419,6 +441,18 @@ func TestChatStreamUsageAbacusWeighted(t *testing.T) {
 		deepseek = `{"prompt_tokens": 457, "completion_tokens": 1, "total_tokens": 458, "prompt_tokens_details": {"cached_tokens": 4224}}`
 		// gpt-6-luna bills cache writes the stream does not report.
 		luna = `{"prompt_tokens": 279, "completion_tokens": 5, "total_tokens": 284, "prompt_tokens_details": {"cached_tokens": 2762}}`
+		// Models that bill cache writes, recorded 2026-11-03. A cold frame
+		// counts written tokens at 1.25: 5,691 = 3 + floor(4,551 * 1.25) for
+		// an exact 4,554 (Claude Haiku 4.5), 4,729 = 3 + floor(3,781 * 1.25)
+		// for an exact 3,784 (route-llm serving gpt-6-luna).
+		claudeCold = `{"prompt_tokens": 5691, "completion_tokens": 4, "total_tokens": 5695}`
+		routedCold = `{"prompt_tokens": 4729, "completion_tokens": 5, "total_tokens": 4734}`
+		// Below Claude Haiku 4.5's cache minimum nothing is written, so 3,116
+		// is exact, but the frame has the same shape as claudeCold.
+		claudeUncacheable = `{"prompt_tokens": 3116, "completion_tokens": 4, "total_tokens": 3120}`
+		// A grown turn reads the earlier turn and writes the new one:
+		// 2,019 = 3 + floor(4,551 / 10 + 1,249 * 1.25) for an exact 5,803.
+		claudeGrown = `{"prompt_tokens": 2019, "completion_tokens": 4, "total_tokens": 2023, "prompt_tokens_details": {"cached_tokens": 4551}}`
 		// Not recorded: 499 = floor(4,992 / 10), so nothing is uncached.
 		allCached = `{"prompt_tokens": 499, "completion_tokens": 75, "total_tokens": 574, "prompt_tokens_details": {"cached_tokens": 4992}}`
 		// Not recorded: a details object without cached_tokens.
@@ -488,8 +522,32 @@ func TestChatStreamUsageAbacusWeighted(t *testing.T) {
 			want: provider.Usage{PromptTokens: 5089, CompletionTokens: 56, TotalTokens: 5145, CachedPromptTokensReported: true},
 		},
 		{
-			name: "cold on abacus, unmeasured model: as sent", usage: cold, chunkMod: "gpt-5.5", abacus: true,
-			want: provider.Usage{PromptTokens: 5089, CompletionTokens: 56, TotalTokens: 5145, CachedPromptTokensReported: true},
+			name: "cold on abacus, unmeasured model: input unknown", usage: cold, chunkMod: "gpt-5.5", abacus: true,
+			want: cachedOnly(0, 56),
+		},
+		{
+			name: "cold claude writes the cache: input unknown", usage: claudeCold, chunkMod: "claude-haiku-4-5-20251001", abacus: true,
+			want: cachedOnly(0, 4),
+		},
+		{
+			name: "cold router serving gpt-6-luna: input unknown", usage: routedCold, reqModel: "route-llm", chunkMod: "gpt-6-luna", abacus: true,
+			want: cachedOnly(0, 5),
+		},
+		{
+			name: "router without a served model: input unknown", usage: cold, reqModel: "route-llm", chunkMod: "-", abacus: true,
+			want: cachedOnly(0, 56),
+		},
+		{
+			name: "claude below its cache minimum: input unknown", usage: claudeUncacheable, chunkMod: "claude-haiku-4-5-20251001", abacus: true,
+			want: cachedOnly(0, 4),
+		},
+		{
+			name: "grown claude turn: input unknown", usage: claudeGrown, chunkMod: "claude-haiku-4-5-20251001", abacus: true,
+			want: cachedOnly(4551, 4),
+		},
+		{
+			name: "cold claude elsewhere: as sent", usage: claudeCold, chunkMod: "claude-haiku-4-5-20251001", abacus: false,
+			want: provider.Usage{PromptTokens: 5691, CompletionTokens: 4, TotalTokens: 5695},
 		},
 		{
 			name: "cold elsewhere: counter unreported", usage: cold, abacus: false,
