@@ -264,7 +264,7 @@ var abacusCacheWeights = map[string][2]int{
 }
 
 // abacusStreamPrompt recovers the exact input count from an Abacus streamed
-// prompt_tokens (weighted) with cached > 0 cached tokens. ok is false for a
+// prompt_tokens (weighted) and its nonzero cached count. ok is false for a
 // model without a measured weight, or when the uncached count would be
 // negative (the frame does not follow the measured rule).
 func abacusStreamPrompt(model string, weighted, cached int) (prompt int, ok bool) {

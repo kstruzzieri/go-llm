@@ -60,7 +60,13 @@ does not report:
 - `gpt-6-luna` (listed $0.01 / $0.10, the model `route-llm` served): a cold
   stream reported 3,455 for a 2,765-token prompt. In the growing conversation
   the inversion overshot by a quarter of each turn's new tokens (6,008 against
-  an exact 5,666).
+  an exact 5,666). A cold non-streaming request reported
+  `cache_creation_input_tokens: 3779` and `raw_input_tokens: 3`.
+
+For both models a cold request is affected outside this change too: the
+stream's count passes through with written tokens at 1.25, and #753's
+non-streaming parser reads `raw_input_tokens + cache_read_input_tokens`, which
+leaves out `cache_creation_input_tokens` (3 tokens for a 3,782-token prompt).
 
 Several Claude models on Abacus list a cached rate, so a listed rate alone does
 not mark a model as safe to invert.
@@ -79,7 +85,9 @@ output per million:
 ## Limits
 
 - One day's measurement. If Abacus changes a model's rates, its `w` changes
-  and the table entry must be re-measured.
+  and the table entry must be re-measured. If Abacus starts streaming the
+  exact count, the inversion would undercount, and a single frame cannot tell
+  the two apart; only a negative result is caught.
 - `route-llm` reports the served model in each chunk, and go-llm looks up that
   model, so a routed request is recovered only when the router picked a model
   in the table.
