@@ -11,8 +11,8 @@ model's `cached_input_token_rate / input_token_rate` from Abacus's own
 `/v1/models`. Given `w`, `uncached = prompt_tokens - floor(cached * w)` and the
 input is `uncached + cached`. All 84 measured frames with cached tokens on
 those four models, and 12 more from growing conversations, recovered the exact
-count. Models that bill cache writes (the Claude models, `gpt-6-luna`,
-`gpt-6-astra` and `gpt-5.6-luna`) cannot be inverted this way, even on a cold
+count. Models that bill cache writes (the three Claude models probed,
+`gpt-6-luna`, `gpt-6-astra` and `gpt-5.6-luna`) cannot be inverted this way, even on a cold
 request, so go-llm reports a stream from any model outside the table as
 unknown.
 
@@ -143,8 +143,10 @@ output per million:
 
 - One day's measurement. If Abacus changes a model's rates, its `w` changes
   and the table entry must be re-measured. If Abacus starts streaming the
-  exact count, the inversion would undercount, and a single frame cannot tell
-  the two apart; only a negative result is caught.
+  exact count, the inversion would overcount by nearly the cached part (9,582
+  for the 5,089-token request with 4,992 cached), and a single frame cannot
+  tell the two apart; the guard catches only a negative result, which this
+  never is.
 - `route-llm` reports the served model in each chunk, and go-llm looks up that
   model, so a routed request is recovered only when the router picked a model
   in the table. Every follow-up `route-llm` request was served by

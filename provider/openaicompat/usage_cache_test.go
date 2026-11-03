@@ -412,7 +412,8 @@ func TestAbacusRouteLLMHost(t *testing.T) {
 // model, or a recovery below zero, reports PromptTokens and TotalTokens as
 // unknown (0) and keeps the rest. A cold Abacus frame carries no
 // prompt_tokens_details (measured 2026-11-03 on every cold stream of five
-// models), so it reads as 0 cached, reported. The same frame from any other
+// models, then on 20 more across seven write-billing models), so it reads as
+// 0 cached, reported. The same frame from any other
 // server passes as sent.
 func TestChatStreamUsageAbacusWeighted(t *testing.T) {
 	sse := func(model, usageObj string) string {

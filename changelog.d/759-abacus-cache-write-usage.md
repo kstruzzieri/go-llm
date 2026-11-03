@@ -1,9 +1,10 @@
 ### Fixed — openai-compat counts Abacus cache writes and stops trusting their streamed input (#759)
 
 Abacus RouteLLM (`routellm.abacus.ai`) bills the tokens a request writes to
-its prompt cache at 1.25 times the input rate on the Claude models,
-`gpt-6-luna`, `gpt-6-astra` and `gpt-5.6-luna` (and `route-llm` when it serves
-one of them), and counted them wrong:
+its prompt cache at 1.25 times the input rate on every model measured outside
+the four below (Claude Haiku 4.5, Haiku 5.5 and Sonnet 5.5, `gpt-6-luna`,
+`gpt-6-astra` and `gpt-5.6-luna`, and `route-llm` when it serves one of them),
+and counted them wrong:
 
 - A non-streaming response now includes the written tokens in the input count
   and reports them as the cache-write count. Before, a cold request read as a
