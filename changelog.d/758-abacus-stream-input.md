@@ -11,5 +11,10 @@ recovered when it was routed to one of them.
 
 - Golem now counts and prices these requests in `/context` instead of naming
   them under `excludes unreliable usage`.
-- Any other Abacus model, and a count the reversal cannot explain, still
-  reports input and total as `0` (unknown), as since #753.
+- On any other Abacus model, a streamed response with cached tokens, or one
+  whose count the reversal cannot explain, still reports input and total as
+  `0` (unknown), as since #753.
+- An Abacus response with nothing cached now reports 0 cached tokens instead
+  of no cache count, streaming or not: Abacus leaves the counter out in that
+  case. Golem shows 0% cached for such requests instead of `cached n/a`. Other
+  servers are unchanged.

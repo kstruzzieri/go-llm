@@ -71,6 +71,21 @@ leaves out `cache_creation_input_tokens` (3 tokens for a 3,782-token prompt).
 Several Claude models on Abacus list a cached rate, so a listed rate alone does
 not mark a model as safe to invert.
 
+## Cache counter when nothing is cached
+
+Abacus leaves the cache counter out instead of sending 0. Of the streamed
+frames above, all 33 with nothing cached (five models) had no
+`prompt_tokens_details`, and all 81 with cached tokens (six models) had one
+with `cached_tokens` above 0; none had `cached_tokens: 0` or a details object
+without it. Four tiny cold streams (10 to 15 tokens) on `gpt-5-mini`,
+`gemini-3.5-flash`, DeepSeek and Claude Haiku also had no details. Every
+non-streaming response with nothing cached (Claude Haiku, `gemini-3.5-flash`
+and `gpt-6-luna`) had no `cache_read_input_tokens`; a separate check on
+`gpt-5-mini` found the same for a cold 1,985-token and a cold 27-token request.
+`grok-4.3` reports 128 cached tokens even on a first request (a shared
+preamble), so it always carries the counter. On an Abacus base URL go-llm
+therefore reads an absent counter as 0 cached, reported.
+
 ## Through Golem
 
 Same two goals (a ~3.3k-token goal that reads a file, then a follow-up), with

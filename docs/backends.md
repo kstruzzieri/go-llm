@@ -228,6 +228,12 @@ models that bill cache writes (Claude, `gpt-6-luna`) count written tokens at a
 premium in it, and their non-streaming input leaves out
 `cache_creation_input_tokens`.
 
+When nothing is cached, Abacus leaves the cache counter out: a non-streaming
+response has no `cache_read_input_tokens`, and a streamed one has no
+`prompt_tokens_details`. On an Abacus base URL go-llm reads either as 0 cached
+tokens, reported, so Golem shows 0% cached instead of `cached n/a`. Elsewhere
+an absent counter still means the server did not report one.
+
 Local llama.cpp gets no key; go-llm does not pin `id_slot`, and `llama-server`
 already routes requests by prompt similarity. To keep a conversation's prefix
 cached, run a single slot (`--parallel 1`), or keep several slots and set
