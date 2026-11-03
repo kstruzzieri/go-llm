@@ -211,12 +211,22 @@ significant benefit was detected, and none was ruled out.
 Abacus also reports usage in its own shape. go-llm reads a non-streaming
 response exactly: input is `raw_input_tokens` plus `cache_read_input_tokens`,
 and Abacus's billing-weighted `input_tokens` is not used. A streamed response
-that reused cached input sends only a `prompt_tokens` count discounted for
-those cached tokens, and no exact input count, so go-llm reports its input and
-total as 0 (unknown) and keeps the cached and output counts. Golem flags such a
-request as unreliable usage and leaves it out of the dollar total (see
-[What the figures leave out](golem.md#what-the-figures-leave-out)). A stream
-with nothing cached reports exact counts.
+that reused cached input sends no exact input count, only a `prompt_tokens`
+of uncached tokens plus `floor(cached * w)`, where `w` is the served model's
+cached-to-input rate ratio. For the models whose `w` was measured
+(`gpt-5-mini`, `gemini-3.5-flash`, `grok-4.3` and
+`deepseek-ai/DeepSeek-V4-Flash-0731`;
+[measurement](llm/benchmarks/2026-11-03-abacus-stream-weight.md)), go-llm
+inverts that count and reports the exact input and total. For any other
+model, or a count the inversion cannot explain, it reports input and total as
+0 (unknown) and keeps the cached and output counts; Golem flags such a request
+as unreliable usage and leaves it out of the dollar total (see
+[What the figures leave out](golem.md#what-the-figures-leave-out)). A `route-llm`
+request is looked up by the model that served it. A stream with nothing cached
+passes its count through. That count is exact on the measured models, but
+models that bill cache writes (Claude, `gpt-6-luna`) count written tokens at a
+premium in it, and their non-streaming input leaves out
+`cache_creation_input_tokens`.
 
 Local llama.cpp gets no key; go-llm does not pin `id_slot`, and `llama-server`
 already routes requests by prompt similarity. To keep a conversation's prefix
