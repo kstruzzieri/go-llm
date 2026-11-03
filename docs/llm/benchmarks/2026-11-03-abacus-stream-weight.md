@@ -11,8 +11,10 @@ model's `cached_input_token_rate / input_token_rate` from Abacus's own
 `/v1/models`. Given `w`, `uncached = prompt_tokens - floor(cached * w)` and the
 input is `uncached + cached`. All 84 measured frames with cached tokens on
 those four models, and 12 more from growing conversations, recovered the exact
-count. Models that bill cache writes (Claude, `gpt-6-luna`) cannot be inverted
-this way and stay unknown.
+count. Models that bill cache writes (the Claude models, `gpt-6-luna`,
+`gpt-6-astra` and `gpt-5.6-luna`) cannot be inverted this way, even on a cold
+request, so go-llm reports a stream from any model outside the table as
+unknown.
 
 ## Provenance
 - **Commit**: develop `39b207a2`; requests sent directly to the endpoint, then the change checked through Golem (below)
@@ -50,23 +52,63 @@ which were equal for the same prompt in every case.
 
 ## Models that cannot be inverted
 
-Models that bill cache writes add the written tokens at a premium the stream
-does not report:
+Models that bill cache writes add the written tokens at a 1.25 premium that a
+stream does not report. A follow-up run the same day (#759, branch
+`fix/abacus-cache-write-usage` on #758's head `6e23c5ae`) measured them with
+the same nonce design: per prompt size, a cold stream, a warm non-stream, a
+grown turn (about 1,000 to 1,600 new tokens) streamed and then non-streamed,
+and a cold non-stream and warm stream on a second fresh prompt. Every model
+probed bills writes:
 
-- `claude-haiku-4-5-20251001` (no cached rate listed): a cold stream reported
-  `prompt_tokens` 5,691 for a 4,554-token prompt (3 uncached plus 4,551
-  written at 1.25). Non-streaming, the same request reported
-  `cache_creation_input_tokens: 4552` and `raw_input_tokens: 3`.
-- `gpt-6-luna` (listed $0.01 / $0.10, the model `route-llm` served): a cold
-  stream reported 3,455 for a 2,765-token prompt. In the growing conversation
-  the inversion overshot by a quarter of each turn's new tokens (6,008 against
-  an exact 5,666). A cold non-streaming request reported
-  `cache_creation_input_tokens: 3779` and `raw_input_tokens: 3`.
+| Served model | Listed rates (cached / input, per 1M) | Read `w` | Prompt sizes | Cold stream, example (reported for exact) |
+|---|---|---:|---:|---|
+| `claude-haiku-4-5-20251001` | none / $1.00 | 1/10 | 6 | 5,691 for 4,554 |
+| `claude-haiku-5-5` | $0.01 / $0.10 | 1/10 | 2 | 7,221 for 5,778 |
+| `claude-sonnet-5-5` | $0.10 / $2.00 | 1/20 | 1 | 7,214 for 5,772 |
+| `gpt-6-luna` | $0.01 / $0.10 | 1/10 | 6 | 4,730 for 3,785 |
+| `gpt-6-luna` via `route-llm` | $0.10 / $2.00 (`route-llm`) | 1/10 | 2 | 4,729 for 3,784 |
+| `gpt-5.6-luna` | $0.02 / $0.20 | 1/10 | 2 | 4,729 for 3,784 |
+| `gpt-6-astra` | $1.00 / $10.00 | 1/10 | 1 | 4,728 for 3,783 |
 
-For both models a cold request is affected outside this change too: the
-stream's count passes through with written tokens at 1.25, and #753's
-non-streaming parser reads `raw_input_tokens + cache_read_input_tokens`, which
-leaves out `cache_creation_input_tokens` (3 tokens for a 3,782-token prompt).
+All 20 prompt sizes followed the same rules, with `u` the uncached input,
+`R` the tokens read and `W` the tokens written:
+
+- **A cold stream reports `u + floor(1.25 * W)`** and carries no
+  `prompt_tokens_details`, 20 of 20. The written count's remainder mod 4 was
+  0, 1, 2 and 3 across the sizes, so the premium is exactly 1.25 and floored.
+- **A cold non-streaming `input_tokens` is `u + floor(1.25 * W)` too**, next to
+  `raw_input_tokens` (`u`) and `cache_creation_input_tokens` (`W`), 20 of 20.
+  The exact input is `raw_input_tokens + cache_creation_input_tokens`.
+- **A grown turn streams `u + floor(w * R + 1.25 * W)`**, one floor over the
+  sum, 20 of 20; flooring each part separately fits 11. It reports `R` as
+  `cached_tokens` and nothing for `W`, so inverting it as a read-only frame
+  overshoots by a quarter of the new tokens (6,008 against an exact 5,666 in
+  the first run's growing `gpt-6-luna` conversation).
+- **A non-streaming grown turn reports both counters.** Four of four sent
+  `cache_read_input_tokens` and `cache_creation_input_tokens` together, and
+  `raw + read + creation` matched the exact count from repeating the request
+  (5,802 = 3 + 4,550 + 1,249 on Claude Haiku 4.5).
+- **A warm stream with nothing written** reports `u + floor(w * R)`, as on the
+  models in the table, but a frame cannot show that nothing was written.
+
+So no streamed frame from these models can be inverted. A frame with `R`
+reported has two unknowns (`u` and `W`) in one equation, and a cold frame has
+the same shape whether it wrote the cache or was too short to cache at all:
+a 3,116-token Claude Haiku 4.5 prompt, which Abacus did not cache, streamed
+its exact count in the same no-details shape as a 4,554-token prompt reported
+as 5,691. The usage chunk of all 64 follow-up streams carried only `choices`,
+`created`, `id`, `model`, `object` and `usage`.
+
+`/v1/models` lists no cache-write rate, and write billing does not follow the
+listed provider: the three GPT models are listed under `openai`. go-llm
+therefore trusts an Abacus stream's count only for the four models in the
+table above, measured not to write: on their cold streams the count matched
+the exact input (22 of 22 on `gpt-5-mini`, `gemini-3.5-flash` and DeepSeek,
+and 6 of 6 on `grok-4.3` once its 128-token preamble was inverted), and no
+response from them carried `cache_creation_input_tokens`. A stream
+from any other served model reports input and total as 0 (unknown), cold or
+warm. A non-streaming response reports the exact input on every model, with
+the written tokens as the cache-write count.
 
 Several Claude models on Abacus list a cached rate, so a listed rate alone does
 not mark a model as safe to invert.
@@ -105,4 +147,8 @@ output per million:
   the two apart; only a negative result is caught.
 - `route-llm` reports the served model in each chunk, and go-llm looks up that
   model, so a routed request is recovered only when the router picked a model
-  in the table.
+  in the table. Every follow-up `route-llm` request was served by
+  `gpt-6-luna`, so in that sample a streamed `route-llm` request always
+  reported unknown input.
+- If a model in the table starts billing cache writes, its cold streams would
+  overcount and pass through; only the four models were checked, on one day.
