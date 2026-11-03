@@ -262,9 +262,109 @@ compacted, and from 2.7% to 52.3% under compaction pressure. Under pressure,
 each compacting step (6 and 8) still misses once. The step after it then
 serves the whole previous request from cache.
 
-The cloud columns stay open:
+The cloud columns stay open (since filled: see "Cloud targets (2026-11-02)" below):
 - OpenRouter and Abacus RouteLLM have no probe rows yet.
 - One measurement on Abacus (gpt-5-mini, 2026-11-01, by a sibling session) found two problems.
   - Its streaming `prompt_tokens` is billing-weighted. A 5,090-token request with 4,992 cached reported a prompt count of 596.
   - Non-streaming responses report no `prompt_tokens` at all.
 - So on Abacus the cached share cannot be read from this probe's prompt column. Golem's `/context` marks such requests as unreliable usage and leaves them out of the cost estimate.
+
+## Cloud targets (2026-11-02)
+
+The cloud rows of the close-out. Keith chose OpenCode and CommandCode in place
+of OpenRouter, alongside Abacus RouteLLM. All three ran on develop after #753,
+so the Abacus prompt column is now exact.
+
+### Provenance
+- **Commit**: develop `39b207a2` (dirty: no), all of P0-P4 plus #753
+- **Targets** (one run per scenario on each):
+
+  | Target | `-candidate-base-url` | Model | Cache key sent (inferred from host) |
+  |---|---|---|---|
+  | OpenCode Go | `https://opencode.ai/zen/go` | `kimi-k2.7-code` | `x-opencode-session` |
+  | CommandCode | `https://api.commandcode.ai/provider` | `moonshotai/Kimi-K2.7-Code` | none |
+  | Abacus RouteLLM | `https://routellm.abacus.ai` | `gpt-5-mini` | none |
+
+  The same Kimi model on both gateways is Golem's default agent model;
+  `gpt-5-mini` is the model of the Abacus affinity A/B.
+- **Exact commands**: the two commands at the top of this file, with each
+  target's base URL and `-models openai-compat/<model>`, and the key in
+  `LLM_BENCH_CANDIDATE_API_KEY`.
+
+### Turn 1, by target
+
+| Target | uncompacted | pressure |
+|---|---:|---:|
+| local llama.cpp, P4 head (`ebbb0bd9`, above) | 60,944 / 77,757 (78.4%) | 27,990 / 53,507 (52.3%) |
+| OpenCode Go | 45,056 / 58,509 (77.0%) | 20,736 / 39,917 (51.9%) |
+| CommandCode | 45,312 / 58,598 (77.3%) | 20,480 / 39,960 (51.3%) |
+| Abacus RouteLLM | 44,800 / 58,232 (76.9%) | 19,712 / 39,758 (49.6%) |
+
+Earlier phases ran locally only, so there is no cloud "before" row. Each
+server counts tokens with its own tokenizer and chat template, so prompt sizes
+differ across hosts (311 tokens at step 1 on OpenCode, 523 on llama.cpp); the
+shares compare, the counts do not.
+
+### uncompacted
+
+| Turn | Step | OpenCode prompt | OpenCode cached | CommandCode prompt | CommandCode cached | Abacus prompt | Abacus cached |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 1 | 311 | n/a | 312 | 0 | 308 | n/a |
+| 1 | 2 | 1858 | 256 | 1864 | 256 | 1847 | n/a |
+| 1 | 3 | 3405 | 1792 | 3410 | 1792 | 3388 | 1792 |
+| 1 | 4 | 4952 | 3328 | 4958 | 3328 | 4929 | 3328 |
+| 1 | 5 | 6501 | 4864 | 6510 | 4864 | 6470 | 4864 |
+| 1 | 6 | 8052 | 6400 | 8062 | 6400 | 8011 | 6400 |
+| 1 | 7 | 9597 | 7936 | 9610 | 7936 | 9552 | 7936 |
+| 1 | 8 | 11144 | 9472 | 11162 | 9600 | 11093 | 9472 |
+| 1 | 9 | 12689 | 11008 | 12710 | 11136 | 12634 | 11008 |
+| 2 | 1 | 339 | 256 | 340 | 256 | 336 | n/a |
+| 3 | 1 | 367 | 256 | 368 | 256 | 364 | n/a |
+| 4 | 1 | 395 | 256 | 396 | 256 | 392 | n/a |
+
+### pressure
+
+| Turn | Step | OpenCode prompt | OpenCode cached | CommandCode prompt | CommandCode cached | Abacus prompt | Abacus cached |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 1 | 311 | 256 | 312 | 256 | 308 | n/a |
+| 1 | 2 | 1858 | 256 | 1860 | 256 | 1851 | n/a |
+| 1 | 3 | 3405 | 1792 | 3410 | 1792 | 3394 | 1792 |
+| 1 | 4 | 4950 | 3328 | 4958 | 3328 | 4933 | 3328 |
+| 1 | 5 | 6495 | 4864 | 6508 | 4864 | 6474 | 4864 |
+| 1 | 6 | 4948 | 256 | 4958 | 256 | 4929 | n/a |
+| 1 | 7 | 6495 | 4864 | 6504 | 4864 | 6470 | 4864 |
+| 1 | 8 | 4954 | 256 | 4950 | 0 | 4929 | n/a |
+| 1 | 9 | 6501 | 4864 | 6500 | 4864 | 6470 | 4864 |
+| 2 | 1 | 339 | 256 | 340 | 256 | 336 | n/a |
+| 3 | 1 | 367 | 256 | 368 | 256 | 364 | n/a |
+| 4 | 1 | 395 | 256 | 396 | 384 | 392 | n/a |
+
+Fence rotations: 0 in every run.
+
+### Reading
+
+All three hosts show the local pattern. Uncompacted, every step from 3 on
+serves the whole previous request from cache except its last partial block,
+and turn 1 is 76.9-77.3% cached against 78.4% locally. Under pressure, the
+compacting steps (6 and 8) miss, reusing at most the ~256 tokens ahead of the
+first tool result, and the step after each serves the previous request again:
+49.6-51.9% cached against 52.3%.
+
+- **Abacus's `n/a` cells are zeros.** Abacus sent no cache counter on 12 of
+  its 24 requests: steps 1 and 2 of each run, the compacting steps and the
+  follow-up turns. In each, the reusable prefix was under 1,024 tokens,
+  OpenAI's documented minimum for caching. Abacus leaves the counter out
+  whenever nothing is cached, not only below the minimum: a check on
+  2026-11-03 (`gpt-5-mini`, non-streaming) sent a cold 1,985-token request,
+  which came back with no `cache_read_input_tokens`, then the same request
+  again, which reported 1,920. The turn-1 shares count `n/a` as 0. This
+  probe's follow-up turns are all under the minimum, so none cached on Abacus.
+- **Kimi caches in 256-token blocks** on both gateways, so the short
+  follow-up turns cache 256 of about 340-396 tokens. CommandCode three times
+  reports a 128-token multiple instead (9,600 and 11,136 at steps 8-9, 384 at
+  turn 4). OpenCode sent no counter on its one cold request; CommandCode
+  sent 0.
+- **These runs do not measure affinity.** OpenCode received its session
+  header and CommandCode received no key, and their shares match, but one run
+  per host cannot show whether a key helps. That takes interleaved runs, as
+  in the [Abacus A/B](2026-11-01-abacus-cache-affinity.md).

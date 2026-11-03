@@ -139,8 +139,17 @@ func runAgentflowStatusWithRunner(ctx context.Context, out io.Writer, root strin
 		}
 	}
 	// #642 A9: after validateStatusRecovery, so earlier projection refusals keep precedence (D9).
+	// The AgentFlow 1.2.1 refusal goes first, in the order resume checks them;
+	// its text is Golem's own, so JSON mode reports it on stderr too.
+	var diagnostic string
 	if disposition.action == resumeSerial {
-		if err := refuseReviewAmendmentReplacement(root, state); err != nil {
+		if err := client.ProbeRecovery(ctx); err != nil {
+			disposition = recoveryDisposition{failClosed, 3, "blocked: " + err.Error()}
+			var versionErr *agentflow.VersionError
+			if errors.As(err, &versionErr) {
+				diagnostic = versionErr.Error()
+			}
+		} else if err := refuseReviewAmendmentReplacement(root, state); err != nil {
 			disposition = recoveryDisposition{failClosed, 3, "blocked: " + err.Error()}
 		} else if err := refuseUnrecoverableTimeout(root); err != nil {
 			disposition = recoveryDisposition{failClosed, 3, "blocked: " + err.Error()}
@@ -164,6 +173,9 @@ func runAgentflowStatusWithRunner(ctx context.Context, out io.Writer, root strin
 	if jsonOutput {
 		if _, err := out.Write(state.RawJSON); err != nil {
 			return fmt.Errorf("write Agentflow status: %w", err)
+		}
+		if diagnostic != "" {
+			return &agentflowStatusExit{code: disposition.exitCode, diagnostic: diagnostic}
 		}
 		return statusExit(disposition.exitCode)
 	}
@@ -686,6 +698,12 @@ func (d *driver) resume(ctx context.Context, root string, planJSON []byte, appro
 	}
 	if disposition.action == reportComplete {
 		return state, nil
+	}
+	// After the complete-run report and before settlement, the first mutation:
+	// AgentFlow 1.2.1's projection would let a replacement attempt complete on
+	// a stopped attempt's edit.
+	if err := d.af.ProbeRecovery(ctx); err != nil {
+		return agentflow.NextActionState{}, &agentflowUnavailableError{fmt.Errorf("agentflow recovery unavailable: %w", err)}
 	}
 	if err := refuseReviewAmendmentReplacement(root, state); err != nil {
 		return agentflow.NextActionState{}, err

@@ -238,6 +238,9 @@ func TestCheckVersion(t *testing.T) {
 		{"agentflow 1.7.3\n", ""},
 		{"agentflow 1.2.0rc1\n", ""},
 		{"agentflow 1.2.0.dev1+gabc\n", ""},
+		// The base gate reads major.minor only: 1.2.1 still runs fresh work;
+		// ProbeRecovery refuses it for recovery.
+		{"agentflow 1.2.1\n", ""},
 		// 1.2 is the floor: the release CI verifies Golem against.
 		{"agentflow 1.1.0\n", "agentflow 1.1 is too old; need >= 1.2"},
 		{"agentflow 1.1.1\n", "agentflow 1.1 is too old; need >= 1.2"},
@@ -303,6 +306,79 @@ func TestCheckVersion_LaunchFailureIsNotAVersionError(t *testing.T) {
 		var versionErr *VersionError
 		if err == nil || errors.As(err, &versionErr) || err.Error() != tt.want {
 			t.Fatalf("CheckVersion = %v, want plain %q", err, tt.want)
+		}
+	}
+}
+
+// TestProbeRecovery pins the AgentFlow 1.2.1 recovery exclusion: every 1.2.1
+// build by its leading patch digits, and a 1.2 whose patch cannot be read.
+// Every refusal is a *VersionError, so JSON status may report it.
+func TestProbeRecovery(t *testing.T) {
+	const refused = "agentflow 1.2.1 cannot drive recovery: its next-action counts a stopped attempt's file receipts toward the replacement attempt (agentflow#97); use AgentFlow 1.2.0 or a later fixed release"
+	unreadable := func(v string) string {
+		return "cannot parse agentflow patch version \"" + v + "\"; recovery refuses an AgentFlow 1.2 it cannot tell from 1.2.1"
+	}
+	for _, tt := range []struct{ out, want string }{
+		{"agentflow 1.2.0\n", ""},
+		{"agentflow 1.2.0rc1\n", ""},
+		{"agentflow 1.2.2\n", ""},
+		{"agentflow 1.2.2.dev0\n", ""},
+		{"agentflow 1.2.10\n", ""},
+		{"agentflow 1.3.1\n", ""},
+		{"agentflow 1.1.1\n", ""}, // the base gate refuses it
+		{"agentflow 1.2.1\n", refused},
+		{"agentflow 1.2.1rc1\n", refused},
+		{"agentflow 1.2.1a1\n", refused},
+		{"agentflow 1.2.1b1\n", refused},
+		{"agentflow 1.2.1.post1\n", refused},
+		{"agentflow 1.2.1.dev0\n", refused},
+		{"agentflow 1.2.1+local\n", refused},
+		{"agentflow 1.2.01\n", refused},
+		// JSON status prints the refusal raw on stderr: no token is echoed.
+		{"agentflow 1.2.1\x1b[2J\n", refused},
+		{"\n  agentflow 1.2.1 (python 3.12)\nwarning: /Users/x/y\n", refused},
+		{"agentflow 1.2\n", unreadable("1.2")},
+		{"agentflow 1.2.\n", unreadable("1.2.")},
+		{"agentflow 1.2.rc1\n", unreadable("1.2.rc1")},
+		{"agentflow 1.2.x\n", unreadable("1.2.x")},
+		{"agentflow 1.2.\x1b[2J\n", `cannot parse agentflow patch version "1.2.\x1b[2J"; recovery refuses an AgentFlow 1.2 it cannot tell from 1.2.1`},
+		{"agentflow 1.x.1\n", `cannot parse agentflow version "1.x.1"`},
+		{"agentflow\n", `cannot parse agentflow version from "agentflow"`},
+	} {
+		t.Run(strings.TrimSpace(tt.out), func(t *testing.T) {
+			c, f := newTestClient(map[string]fakeReply{"--version": {stdout: []byte(tt.out)}})
+			err := c.ProbeRecovery(context.Background())
+			if tt.want == "" {
+				if err != nil {
+					t.Fatalf("ProbeRecovery(%q) = %v", tt.out, err)
+				}
+			} else {
+				var versionErr *VersionError
+				if !errors.As(err, &versionErr) || err.Error() != tt.want {
+					t.Fatalf("ProbeRecovery(%q) = %v, want *VersionError %q", tt.out, err, tt.want)
+				}
+			}
+			if !reflect.DeepEqual(f.calls, [][]string{{"--version"}}) {
+				t.Fatalf("calls = %v, want only --version", f.calls)
+			}
+		})
+	}
+}
+
+// A launch failure is not a VersionError: JSON status keeps its text silent.
+func TestProbeRecovery_LaunchFailureIsNotAVersionError(t *testing.T) {
+	for _, tt := range []struct {
+		reply fakeReply
+		want  string
+	}{
+		{fakeReply{err: errors.New("exec: agentflow: not found")}, "agentflow unavailable (--version failed): exec: agentflow: not found"},
+		{fakeReply{exit: 1, stderr: []byte("boom\n")}, "agentflow unavailable (--version failed): agentflow --version: exit 1: boom"},
+	} {
+		c, _ := newTestClient(map[string]fakeReply{"--version": tt.reply})
+		err := c.ProbeRecovery(context.Background())
+		var versionErr *VersionError
+		if err == nil || errors.As(err, &versionErr) || err.Error() != tt.want {
+			t.Fatalf("ProbeRecovery = %v, want plain %q", err, tt.want)
 		}
 	}
 }
