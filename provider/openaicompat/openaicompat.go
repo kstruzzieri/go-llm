@@ -356,13 +356,15 @@ func (p *Provider) ChatStream(ctx context.Context, req provider.ChatRequest, fn 
 				// (measured 2026-11-03), so an absent counter is a reported 0.
 				lastUsage.CachedPromptTokensReported = true
 			}
-			if p.client.abacusRouteLLM && lastUsage.CachedPromptTokens > 0 {
+			if p.client.abacusRouteLLM {
 				// Abacus streams prompt_tokens with cached tokens at the model's
 				// cache discount (596 for a 5,089-token request with 4,992
-				// cached) and sends no raw count. Recover the exact count for
-				// the served model when its weight was measured; otherwise
-				// report the input unknown rather than low. Total follows to
-				// keep Total = 0 or Prompt + Completion.
+				// cached) and, on models that bill cache writes, written tokens
+				// at 1.25 (5,691 for a cold 4,554-token request), and sends no
+				// raw or written count. Recover the exact count for a served
+				// model measured not to write; otherwise report the input
+				// unknown rather than wrong. Total follows to keep Total = 0 or
+				// Prompt + Completion.
 				lastUsage.PromptTokens, lastUsage.TotalTokens = 0, 0
 				if prompt, ok := abacusStreamPrompt(cmp.Or(lastModel, req.Model), chunk.Usage.PromptTokens, lastUsage.CachedPromptTokens); ok {
 					lastUsage.PromptTokens, lastUsage.TotalTokens = prompt, prompt+lastUsage.CompletionTokens
