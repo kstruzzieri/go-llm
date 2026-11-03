@@ -45,10 +45,11 @@ type Client struct {
 	cacheAffinity  string
 	affinitySecret []byte
 
-	// weightedStreamPrompt is true for an Abacus RouteLLM base URL, whose
+	// abacusRouteLLM is true for an Abacus RouteLLM base URL, whose
 	// streamed prompt_tokens counts cached tokens at the model's cache
-	// discount; see ChatStream. Read-only after construction.
-	weightedStreamPrompt bool
+	// discount and which omits its cache counter when nothing is cached;
+	// see Chat and ChatStream. Read-only after construction.
+	abacusRouteLLM bool
 }
 
 // ClientOption configures a Client.
@@ -247,6 +248,38 @@ func isAbacusRouteLLM(baseURL string) bool {
 	return err == nil && hostIs(u, "routellm.abacus.ai")
 }
 
+// abacusCacheWeights holds, per served Abacus RouteLLM model, the weight w
+// its streamed prompt_tokens gives a cached token, as {numerator,
+// denominator}: prompt_tokens = uncached + floor(cached * w). Each w equals
+// the model's cached_input_token_rate / input_token_rate in Abacus's
+// /v1/models and was measured on 2026-11-03 against exact non-streaming
+// counts (docs/llm/benchmarks/2026-11-03-abacus-stream-weight.md). Models
+// that bill cache writes (Claude, gpt-6-luna) also add the written tokens at
+// a premium the stream does not report, so they cannot be inverted and are
+// deliberately absent.
+var abacusCacheWeights = map[string][2]int{
+	"gpt-5-mini":                         {1, 10},  // $0.025 / $0.25
+	"gemini-3.5-flash":                   {1, 10},  // $0.15 / $1.50
+	"grok-4.3":                           {4, 25},  // $0.20 / $1.25
+	"deepseek-ai/DeepSeek-V4-Flash-0731": {7, 110}, // $0.028 / $0.44
+}
+
+// abacusStreamPrompt recovers the exact input count from an Abacus streamed
+// prompt_tokens (weighted) and its nonzero cached count. ok is false for a
+// model without a measured weight, or when the uncached count would be
+// negative (the frame does not follow the measured rule).
+func abacusStreamPrompt(model string, weighted, cached int) (prompt int, ok bool) {
+	w, ok := abacusCacheWeights[model]
+	if !ok {
+		return 0, false
+	}
+	uncached := weighted - cached*w[0]/w[1]
+	if uncached < 0 {
+		return 0, false
+	}
+	return uncached + cached, true
+}
+
 // NewClient builds a Client targeting baseURL. The URL should be the server
 // root WITHOUT the /v1 suffix; per-endpoint paths are appended internally
 // so callers don't have to remember which endpoints live under /v1. Any
@@ -267,7 +300,7 @@ func NewClient(baseURL string, opts ...ClientOption) *Client {
 	for _, opt := range opts {
 		opt(c)
 	}
-	c.weightedStreamPrompt = isAbacusRouteLLM(c.baseURL)
+	c.abacusRouteLLM = isAbacusRouteLLM(c.baseURL)
 	switch c.cacheAffinity {
 	case "":
 		c.cacheAffinity = InferCacheAffinity(c.baseURL)

@@ -246,6 +246,10 @@ type usage struct {
 	TotalTokens             int                      `json:"total_tokens"`
 	CompletionTokensDetails *completionTokensDetails `json:"completion_tokens_details,omitempty"`
 	PromptTokensDetails     *promptTokensDetails     `json:"prompt_tokens_details,omitempty"`
+
+	// abacusShape is true when UnmarshalJSON read Abacus's non-streaming
+	// shape, so Chat can apply that shape's cache-counter convention.
+	abacusShape bool
 }
 
 // promptTokensDetails carries optional prompt-cache breakdowns. Each field is
@@ -285,6 +289,7 @@ func (u *usage) UnmarshalJSON(b []byte) error {
 	if err := json.Unmarshal(b, &a); err != nil || a.RawInputTokens == nil {
 		return err
 	}
+	u.abacusShape = true
 	u.PromptTokens = *a.RawInputTokens
 	if a.CacheReadInputTokens != nil {
 		u.PromptTokens += *a.CacheReadInputTokens
