@@ -459,6 +459,10 @@ func TestChatStreamUsageAbacusWeighted(t *testing.T) {
 			want: provider.Usage{PromptTokens: 5089, CompletionTokens: 56, TotalTokens: 5145},
 		},
 		{
+			name: "cold on abacus, unmeasured model: as sent", usage: cold, chunkMod: "gpt-5.5", abacus: true,
+			want: provider.Usage{PromptTokens: 5089, CompletionTokens: 56, TotalTokens: 5145},
+		},
+		{
 			name: "zero cached on abacus: exact", usage: zeroCached, abacus: true,
 			want: provider.Usage{PromptTokens: 5089, CompletionTokens: 56, TotalTokens: 5145, CachedPromptTokensReported: true},
 		},
