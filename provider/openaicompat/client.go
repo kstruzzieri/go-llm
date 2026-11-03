@@ -253,10 +253,12 @@ func isAbacusRouteLLM(baseURL string) bool {
 // denominator}: prompt_tokens = uncached + floor(cached * w). Each w equals
 // the model's cached_input_token_rate / input_token_rate in Abacus's
 // /v1/models and was measured on 2026-11-03 against exact non-streaming
-// counts (docs/llm/benchmarks/2026-11-03-abacus-stream-weight.md). Models
-// that bill cache writes (Claude, gpt-6-luna) also add the written tokens at
-// a premium the stream does not report, so they cannot be inverted and are
-// deliberately absent.
+// counts (docs/llm/benchmarks/2026-11-03-abacus-stream-weight.md). The table
+// is also the only set of models whose streamed count is trusted at all, cold
+// or warm: a model that bills cache writes adds the written tokens at 1.25
+// and sends no written count, every other model probed bills them (Claude,
+// gpt-6-luna, gpt-6-astra, gpt-5.6-luna), and /v1/models does not say which
+// models do.
 var abacusCacheWeights = map[string][2]int{
 	"gpt-5-mini":                         {1, 10},  // $0.025 / $0.25
 	"gemini-3.5-flash":                   {1, 10},  // $0.15 / $1.50
@@ -265,9 +267,9 @@ var abacusCacheWeights = map[string][2]int{
 }
 
 // abacusStreamPrompt recovers the exact input count from an Abacus streamed
-// prompt_tokens (weighted) and its nonzero cached count. ok is false for a
-// model without a measured weight, or when the uncached count would be
-// negative (the frame does not follow the measured rule).
+// prompt_tokens (weighted) and its cached count, 0 for a cold frame. ok is
+// false for a model without a measured weight, or when the uncached count
+// would be negative (the frame does not follow the measured rule).
 func abacusStreamPrompt(model string, weighted, cached int) (prompt int, ok bool) {
 	w, ok := abacusCacheWeights[model]
 	if !ok {

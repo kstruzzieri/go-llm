@@ -262,11 +262,14 @@ type promptTokensDetails struct {
 // UnmarshalJSON decodes the OpenAI usage shape and, when prompt_tokens is
 // absent and raw_input_tokens is present, Abacus RouteLLM's non-streaming
 // shape (measured 2026-11-01 on gpt-5-mini): raw_input_tokens is the uncached
-// input, cache_read_input_tokens the cached part, output_tokens and a
+// input, cache_read_input_tokens the cached part, cache_creation_input_tokens
+// the part written to the cache (models that bill cache writes, measured
+// 2026-11-03 on gpt-6-luna and Claude Haiku 4.5), output_tokens and a
 // top-level reasoning_tokens the completion side, and there is no total.
 // Abacus's input_tokens is billing-weighted (cached tokens at the model's
-// cache discount) and is deliberately not read. Any block that carries
-// prompt_tokens decodes exactly as the OpenAI shape.
+// cache discount, written tokens at its write premium) and is deliberately
+// not read. Any block that carries prompt_tokens decodes exactly as the
+// OpenAI shape.
 func (u *usage) UnmarshalJSON(b []byte) error {
 	type plain usage // drops this method so the OpenAI fields decode as usual
 	if err := json.Unmarshal(b, (*plain)(u)); err != nil {
@@ -281,10 +284,11 @@ func (u *usage) UnmarshalJSON(b []byte) error {
 		return err
 	}
 	var a struct {
-		RawInputTokens       *int `json:"raw_input_tokens"`
-		CacheReadInputTokens *int `json:"cache_read_input_tokens"`
-		OutputTokens         *int `json:"output_tokens"`
-		ReasoningTokens      *int `json:"reasoning_tokens"`
+		RawInputTokens           *int `json:"raw_input_tokens"`
+		CacheReadInputTokens     *int `json:"cache_read_input_tokens"`
+		CacheCreationInputTokens *int `json:"cache_creation_input_tokens"`
+		OutputTokens             *int `json:"output_tokens"`
+		ReasoningTokens          *int `json:"reasoning_tokens"`
 	}
 	if err := json.Unmarshal(b, &a); err != nil || a.RawInputTokens == nil {
 		return err
@@ -293,7 +297,12 @@ func (u *usage) UnmarshalJSON(b []byte) error {
 	u.PromptTokens = *a.RawInputTokens
 	if a.CacheReadInputTokens != nil {
 		u.PromptTokens += *a.CacheReadInputTokens
-		u.PromptTokensDetails = &promptTokensDetails{CachedTokens: a.CacheReadInputTokens}
+	}
+	if a.CacheCreationInputTokens != nil {
+		u.PromptTokens += *a.CacheCreationInputTokens
+	}
+	if a.CacheReadInputTokens != nil || a.CacheCreationInputTokens != nil {
+		u.PromptTokensDetails = &promptTokensDetails{CachedTokens: a.CacheReadInputTokens, CacheWriteTokens: a.CacheCreationInputTokens}
 	}
 	if a.OutputTokens != nil {
 		u.CompletionTokens = *a.OutputTokens
