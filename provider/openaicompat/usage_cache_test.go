@@ -226,16 +226,20 @@ func TestChatStreamUsageCacheCounters(t *testing.T) {
 // objects are verbatim, the envelope around them is rebuilt). Abacus sends no
 // prompt_tokens: raw_input_tokens is the uncached input, cache_read_input_tokens
 // the cached part, and input_tokens is billing-weighted (597 = 98 uncached +
-// 4,992 cached at a tenth), so it must not be read as the prompt count.
+// 4,992 cached at a tenth), so it must not be read as the prompt count. Abacus
+// omits cache_read_input_tokens when nothing is cached, so on an Abacus client
+// its shape without one reads as 0 cached, reported; any other host, or the
+// OpenAI shape, leaves an absent counter unreported.
 func TestChatUsageAbacusNonStream(t *testing.T) {
 	envelope := func(usageObj string) string {
 		return `{"model": "gpt-5-mini", "choices": [{"index": 0, "message": {"role": "assistant", "content": "OK"}, "finish_reason": "stop", "native_finish_reason": "stop"}], "usage": ` + usageObj + `, "error": null}`
 	}
 
 	tests := []struct {
-		name  string
-		usage string
-		want  provider.Usage
+		name      string
+		usage     string
+		elsewhere bool // a non-Abacus host
+		want      provider.Usage
 	}{
 		{
 			name:  "warm request",
@@ -247,11 +251,21 @@ func TestChatUsageAbacusNonStream(t *testing.T) {
 			name:  "cold request with reasoning",
 			usage: `{"input_tokens": 5090, "output_tokens": 104, "reasoning_tokens": 64, "raw_input_tokens": 5090}`,
 			want: provider.Usage{PromptTokens: 5090, CompletionTokens: 104, TotalTokens: 5194,
-				ReasoningTokens: 64, ReasoningTokensReported: true},
+				ReasoningTokens: 64, ReasoningTokensReported: true, CachedPromptTokensReported: true},
 		},
 		{
 			name:  "tiny request",
 			usage: `{"input_tokens": 8, "output_tokens": 77, "raw_input_tokens": 8}`,
+			want:  provider.Usage{PromptTokens: 8, CompletionTokens: 77, TotalTokens: 85, CachedPromptTokensReported: true},
+		},
+		{
+			name:  "abacus shape elsewhere: counter unreported",
+			usage: `{"input_tokens": 8, "output_tokens": 77, "raw_input_tokens": 8}`, elsewhere: true,
+			want: provider.Usage{PromptTokens: 8, CompletionTokens: 77, TotalTokens: 85},
+		},
+		{
+			name:  "openai shape on abacus: counter unreported",
+			usage: `{"prompt_tokens": 8, "completion_tokens": 77, "total_tokens": 85}`,
 			want:  provider.Usage{PromptTokens: 8, CompletionTokens: 77, TotalTokens: 85},
 		},
 	}
@@ -265,7 +279,7 @@ func TestChatUsageAbacusNonStream(t *testing.T) {
 			defer srv.Close()
 
 			c := NewClient(srv.URL)
-			c.weightedStreamPrompt = true // an Abacus client: the stream-only rule must not touch Chat
+			c.abacusRouteLLM = !tc.elsewhere // the stream-only recovery must not touch Chat
 			resp, err := NewProvider(c).Chat(context.Background(), provider.ChatRequest{
 				Model:    "gpt-5-mini",
 				Messages: []provider.ChatMessage{{Role: "user", Content: "hi"}},
@@ -346,7 +360,7 @@ func TestUsageDecodeAbacusInvalidCounts(t *testing.T) {
 	}
 }
 
-// TestAbacusRouteLLMHost pins which base URLs get the weighted-stream rule:
+// TestAbacusRouteLLMHost pins which base URLs get the Abacus usage rules:
 // routellm.abacus.ai and its subdomains over any scheme, never a look-alike.
 func TestAbacusRouteLLMHost(t *testing.T) {
 	for baseURL, want := range map[string]bool{
@@ -360,8 +374,8 @@ func TestAbacusRouteLLMHost(t *testing.T) {
 		"https://api.openai.com":                 false,
 		"http://127.0.0.1:8090":                  false,
 	} {
-		if got := NewClient(baseURL).weightedStreamPrompt; got != want {
-			t.Errorf("NewClient(%q).weightedStreamPrompt = %v, want %v", baseURL, got, want)
+		if got := NewClient(baseURL).abacusRouteLLM; got != want {
+			t.Errorf("NewClient(%q).abacusRouteLLM = %v, want %v", baseURL, got, want)
 		}
 	}
 }
@@ -374,7 +388,9 @@ func TestAbacusRouteLLMHost(t *testing.T) {
 // tokens from a model in abacusCacheWeights reports the recovered exact input
 // (each want was checked against the same prompt's exact non-streaming
 // count); any other model, or a recovery below zero, reports PromptTokens and
-// TotalTokens as unknown (0) and keeps the rest. The same frame from any other
+// TotalTokens as unknown (0) and keeps the rest. A cold Abacus frame carries no
+// prompt_tokens_details (measured 2026-11-03 on every cold stream of five
+// models), so it reads as 0 cached, reported. The same frame from any other
 // server passes as sent.
 func TestChatStreamUsageAbacusWeighted(t *testing.T) {
 	sse := func(model, usageObj string) string {
@@ -403,6 +419,10 @@ func TestChatStreamUsageAbacusWeighted(t *testing.T) {
 		deepseek = `{"prompt_tokens": 457, "completion_tokens": 1, "total_tokens": 458, "prompt_tokens_details": {"cached_tokens": 4224}}`
 		// gpt-6-luna bills cache writes the stream does not report.
 		luna = `{"prompt_tokens": 279, "completion_tokens": 5, "total_tokens": 284, "prompt_tokens_details": {"cached_tokens": 2762}}`
+		// Not recorded: 499 = floor(4,992 / 10), so nothing is uncached.
+		allCached = `{"prompt_tokens": 499, "completion_tokens": 75, "total_tokens": 574, "prompt_tokens_details": {"cached_tokens": 4992}}`
+		// Not recorded: a details object without cached_tokens.
+		detailsNoCached = `{"prompt_tokens": 5089, "completion_tokens": 56, "total_tokens": 5145, "prompt_tokens_details": {"audio_tokens": 0}}`
 		// Not recorded: 400 < floor(4,992 / 10), so the uncached count would be negative.
 		belowCached = `{"prompt_tokens": 400, "completion_tokens": 75, "total_tokens": 475, "prompt_tokens_details": {"cached_tokens": 4992}}`
 	)
@@ -419,9 +439,13 @@ func TestChatStreamUsageAbacusWeighted(t *testing.T) {
 		return u
 	}
 
+	// The model arrives on an earlier chunk; the usage frame carries none.
+	carried := `data: {"id": "c", "object": "chat.completion.chunk", "model": "gpt-5-mini", "choices": [{"index": 0, "delta": {"content": "OK"}, "finish_reason": "stop"}]}` + "\n\n" +
+		`data: {"id": "c", "object": "chat.completion.chunk", "choices": [], "usage": ` + warmFloor + "}\n\n" + "data: [DONE]\n\n"
+
 	tests := []struct {
 		name               string
-		usage              string
+		usage, body        string // body, when set, is the whole stream
 		reqModel, chunkMod string
 		abacus             bool
 		want               provider.Usage
@@ -453,13 +477,26 @@ func TestChatStreamUsageAbacusWeighted(t *testing.T) {
 			name: "requested model cannot stand in for the served one", usage: luna, chunkMod: "gpt-6-luna", abacus: true,
 			want: cachedOnly(2762, 5),
 		},
+		{
+			name: "model from an earlier chunk", body: carried, reqModel: "route-llm", abacus: true,
+			want: exact(2764, 2688, 59),
+		},
+		{name: "nothing uncached: recovered", usage: allCached, abacus: true, want: exact(4992, 4992, 75)},
 		{name: "negative uncached: input unknown", usage: belowCached, abacus: true, want: cachedOnly(4992, 75)},
 		{
-			name: "cold on abacus: exact", usage: cold, abacus: true,
-			want: provider.Usage{PromptTokens: 5089, CompletionTokens: 56, TotalTokens: 5145},
+			name: "cold on abacus: exact, 0 cached", usage: cold, abacus: true,
+			want: provider.Usage{PromptTokens: 5089, CompletionTokens: 56, TotalTokens: 5145, CachedPromptTokensReported: true},
 		},
 		{
 			name: "cold on abacus, unmeasured model: as sent", usage: cold, chunkMod: "gpt-5.5", abacus: true,
+			want: provider.Usage{PromptTokens: 5089, CompletionTokens: 56, TotalTokens: 5145, CachedPromptTokensReported: true},
+		},
+		{
+			name: "cold elsewhere: counter unreported", usage: cold, abacus: false,
+			want: provider.Usage{PromptTokens: 5089, CompletionTokens: 56, TotalTokens: 5145},
+		},
+		{
+			name: "details without cached_tokens on abacus: unreported", usage: detailsNoCached, abacus: true,
 			want: provider.Usage{PromptTokens: 5089, CompletionTokens: 56, TotalTokens: 5145},
 		},
 		{
@@ -481,12 +518,16 @@ func TestChatStreamUsageAbacusWeighted(t *testing.T) {
 			}
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				w.Header().Set("Content-Type", "text/event-stream")
-				_, _ = fmt.Fprint(w, sse(chunkModel, tc.usage))
+				body := tc.body
+				if body == "" {
+					body = sse(chunkModel, tc.usage)
+				}
+				_, _ = fmt.Fprint(w, body)
 			}))
 			defer srv.Close()
 
 			c := NewClient(srv.URL)
-			c.weightedStreamPrompt = tc.abacus
+			c.abacusRouteLLM = tc.abacus
 			var last provider.ChatResponse
 			err := NewProvider(c).ChatStream(context.Background(), provider.ChatRequest{
 				Model:    reqModel,

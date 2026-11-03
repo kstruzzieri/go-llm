@@ -45,10 +45,11 @@ type Client struct {
 	cacheAffinity  string
 	affinitySecret []byte
 
-	// weightedStreamPrompt is true for an Abacus RouteLLM base URL, whose
+	// abacusRouteLLM is true for an Abacus RouteLLM base URL, whose
 	// streamed prompt_tokens counts cached tokens at the model's cache
-	// discount; see ChatStream. Read-only after construction.
-	weightedStreamPrompt bool
+	// discount and which omits its cache counter when nothing is cached;
+	// see Chat and ChatStream. Read-only after construction.
+	abacusRouteLLM bool
 }
 
 // ClientOption configures a Client.
@@ -299,7 +300,7 @@ func NewClient(baseURL string, opts ...ClientOption) *Client {
 	for _, opt := range opts {
 		opt(c)
 	}
-	c.weightedStreamPrompt = isAbacusRouteLLM(c.baseURL)
+	c.abacusRouteLLM = isAbacusRouteLLM(c.baseURL)
 	switch c.cacheAffinity {
 	case "":
 		c.cacheAffinity = InferCacheAffinity(c.baseURL)

@@ -210,6 +210,19 @@ func (p *Provider) Chat(ctx context.Context, req provider.ChatRequest) (*provide
 		model = req.Model
 	}
 
+	u := withCacheUsage(provider.Usage{
+		PromptTokens:            resp.Usage.PromptTokens,
+		CompletionTokens:        resp.Usage.CompletionTokens,
+		TotalTokens:             resp.Usage.TotalTokens,
+		ReasoningTokens:         resp.Usage.reasoningTokens(),
+		ReasoningTokensReported: resp.Usage.reasoningTokensReported(),
+	}, resp.Usage)
+	if p.client.abacusRouteLLM && resp.Usage.abacusShape {
+		// Abacus omits cache_read_input_tokens when nothing is cached
+		// (measured 2026-11-03), so an absent counter is a reported 0.
+		u.CachedPromptTokensReported = true
+	}
+
 	return &provider.ChatResponse{
 		Model:     model,
 		Provider:  p.name,
@@ -217,13 +230,7 @@ func (p *Provider) Chat(ctx context.Context, req provider.ChatRequest) (*provide
 		Thinking:  thinking,
 		ToolCalls: toProviderToolCalls(msg.ToolCalls),
 		Done:      true,
-		Usage: withCacheUsage(provider.Usage{
-			PromptTokens:            resp.Usage.PromptTokens,
-			CompletionTokens:        resp.Usage.CompletionTokens,
-			TotalTokens:             resp.Usage.TotalTokens,
-			ReasoningTokens:         resp.Usage.reasoningTokens(),
-			ReasoningTokensReported: resp.Usage.reasoningTokensReported(),
-		}, resp.Usage),
+		Usage:     u,
 	}, nil
 }
 
@@ -344,7 +351,12 @@ func (p *Provider) ChatStream(ctx context.Context, req provider.ChatRequest, fn 
 				ReasoningTokens:         chunk.Usage.reasoningTokens(),
 				ReasoningTokensReported: chunk.Usage.reasoningTokensReported(),
 			}, *chunk.Usage)
-			if p.client.weightedStreamPrompt && lastUsage.CachedPromptTokens > 0 {
+			if p.client.abacusRouteLLM && chunk.Usage.PromptTokensDetails == nil {
+				// A cold Abacus frame carries no prompt_tokens_details
+				// (measured 2026-11-03), so an absent counter is a reported 0.
+				lastUsage.CachedPromptTokensReported = true
+			}
+			if p.client.abacusRouteLLM && lastUsage.CachedPromptTokens > 0 {
 				// Abacus streams prompt_tokens with cached tokens at the model's
 				// cache discount (596 for a 5,089-token request with 4,992
 				// cached) and sends no raw count. Recover the exact count for
