@@ -3,6 +3,7 @@ package openaicompat
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
@@ -345,11 +346,15 @@ func (p *Provider) ChatStream(ctx context.Context, req provider.ChatRequest, fn 
 			}, *chunk.Usage)
 			if p.client.weightedStreamPrompt && lastUsage.CachedPromptTokens > 0 {
 				// Abacus streams prompt_tokens with cached tokens at the model's
-				// cache discount (596 for a 5,090-token request with 4,992
-				// cached) and sends no raw count, so report the input unknown
-				// rather than low. Total goes with it to keep Total = 0 or
-				// Prompt + Completion. With nothing cached the count is exact.
+				// cache discount (596 for a 5,089-token request with 4,992
+				// cached) and sends no raw count. Recover the exact count for
+				// the served model when its weight was measured; otherwise
+				// report the input unknown rather than low. Total follows to
+				// keep Total = 0 or Prompt + Completion.
 				lastUsage.PromptTokens, lastUsage.TotalTokens = 0, 0
+				if prompt, ok := abacusStreamPrompt(cmp.Or(lastModel, req.Model), chunk.Usage.PromptTokens, lastUsage.CachedPromptTokens); ok {
+					lastUsage.PromptTokens, lastUsage.TotalTokens = prompt, prompt+lastUsage.CompletionTokens
+				}
 			}
 		}
 		if len(chunk.Choices) == 0 {
