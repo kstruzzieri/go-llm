@@ -350,11 +350,14 @@ compacting steps (6 and 8) miss, reusing at most the ~256 tokens ahead of the
 first tool result, and the step after each serves the previous request again:
 49.6-51.9% cached against 52.3%.
 
-- **Abacus's `n/a` cells are most likely zeros.** Abacus sent no cache
-  counter on 12 of its 24 requests: steps 1 and 2 of each run, the compacting
-  steps and the follow-up turns. In each, the reusable prefix was under 1,024
-  tokens, OpenAI's documented minimum for caching, so the missing counter most
-  likely means 0 (not verified). The turn-1 shares count `n/a` as 0. This
+- **Abacus's `n/a` cells are zeros.** Abacus sent no cache counter on 12 of
+  its 24 requests: steps 1 and 2 of each run, the compacting steps and the
+  follow-up turns. In each, the reusable prefix was under 1,024 tokens,
+  OpenAI's documented minimum for caching. Abacus leaves the counter out
+  whenever nothing is cached, not only below the minimum: a check on
+  2026-11-03 (`gpt-5-mini`, non-streaming) sent a cold 1,985-token request,
+  which came back with no `cache_read_input_tokens`, then the same request
+  again, which reported 1,920. The turn-1 shares count `n/a` as 0. This
   probe's follow-up turns are all under the minimum, so none cached on Abacus.
 - **Kimi caches in 256-token blocks** on both gateways, so the short
   follow-up turns cache 256 of about 340-396 tokens. CommandCode three times
