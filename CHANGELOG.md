@@ -6,6 +6,382 @@ All notable changes to `go-llm` are documented here. Downstream consumers
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-04
+
+### Changed — v0.7.0 consumer upgrade notes (#761)
+
+Read this before upgrading from v0.6.0. Consumers on older pins must also apply
+the earlier upgrade notes. The
+[v0.7.0 upgrade guide](docs/releases/v0.7.0.md) has the details, the known
+issues and the consumer compile check.
+
+- `apidiff` reports no incompatible change to an exported package since v0.6.0.
+- Use AgentFlow 1.2.2 or 1.2.0. Golem refuses 1.2.1 for recovery (#756).
+- `openaicompat.NewClient` against an OpenCode mirror on another host, or over
+  `http`, must pass `WithCacheAffinity("opencode")` to keep its header (#749).
+- `PromptTokens` of 0 means unknown. Streamed requests on most Abacus RouteLLM
+  models now report it (#759). Ollama embeddings report the server's count, not
+  the number of input texts (#751).
+- With a durable summary, the legacy compactor now drops prior-turn history
+  before current-run tool results (#748).
+
+### Fixed — openai-compat counts Abacus cache writes and stops trusting their streamed input (#759)
+
+Abacus RouteLLM (`routellm.abacus.ai`) bills the tokens a request writes to
+its prompt cache at 1.25 times the input rate on every model measured outside
+the four below (Claude Haiku 4.5, Haiku 5.5 and Sonnet 5.5, `gpt-6-luna`,
+`gpt-6-astra` and `gpt-5.6-luna`, and `route-llm` when it serves one of them),
+and counted them wrong:
+
+- A non-streaming response now includes the written tokens in the input count
+  and reports them as the cache-write count. Before, a cold request read as a
+  handful of tokens (3 for a 3,782-token prompt), and Golem priced it as
+  reliable.
+- A streamed response from any served model other than `gpt-5-mini`,
+  `gemini-3.5-flash`, `grok-4.3` and `deepseek-ai/DeepSeek-V4-Flash-0731` now
+  reports input and total as `0` (unknown), the first request included. Before,
+  a request with nothing cached passed its count through, which on these
+  models includes the written tokens at 1.25 (5,691 for a 4,554-token prompt).
+  A stream reports no written count and cannot tell a request that wrote the
+  cache from one too short to cache, so the input cannot be recovered. Golem
+  names such requests under `excludes unreliable usage` instead of pricing
+  them.
+- The four models above, measured not to bill writes, are unchanged.
+
+The [v0.7.0 upgrade guide](docs/releases/v0.7.0.md) has the net Abacus behavior
+against v0.6.0.
+
+### Fixed — openai-compat recovers Abacus streamed input counts (#758)
+
+Streaming chat responses from Abacus RouteLLM (`routellm.abacus.ai`) that
+reused cached input now report the exact input and total counts for
+`gpt-5-mini`, `gemini-3.5-flash`, `grok-4.3` and
+`deepseek-ai/DeepSeek-V4-Flash-0731`, instead of `0` (unknown). Abacus streams
+the uncached tokens plus the cached tokens times the model's cached-to-input
+rate ratio, rounded down; go-llm reverses that with the ratio measured for each
+of these models. The served model decides, so a `route-llm` request is
+recovered when it was routed to one of them.
+
+- Golem now counts and prices these requests in `/context` instead of naming
+  them under `excludes unreliable usage`.
+- On any other Abacus model, a streamed response with cached tokens, or one
+  whose count the reversal cannot explain, still reports input and total as
+  `0` (unknown), as since #753. #759 extends this to those models' requests with
+  nothing cached.
+- An Abacus response with nothing cached now reports 0 cached tokens instead
+  of no cache count, streaming or not: Abacus leaves the counter out in that
+  case. Golem shows 0% cached for such requests instead of `cached n/a`. Other
+  servers are unchanged.
+
+### Fixed — Golem refuses AgentFlow 1.2.1 for recovery (#756)
+
+AgentFlow 1.2.1 counts a changed file's latest matching receipt from any
+attempt, so a stopped attempt's edit satisfies the attempt that replaces it.
+On 1.2.1, `-agentflow-resume` would run the gates and complete the step on an
+edit nobody accepted instead of failing in `file_receipts_missing`.
+
+- `-agentflow-resume` refuses AgentFlow 1.2.1 (every `1.2.1` build, such as
+  `1.2.1rc1` or `1.2.1+local`) after its read-only checks and before its first
+  change to the run, and asks AgentFlow for no recovery advice.
+- `-agentflow-status` reports every state that would otherwise exit `2` as
+  blocked and exits `3`. JSON mode keeps AgentFlow's bytes on stdout and prints
+  the refusal as one `golem:` line on stderr.
+- A `-review-manifest` run refuses AgentFlow 1.2.1 before `init`: a review
+  round over the locked plan retries retained attempts.
+- A complete run still reports its verified proof, and fresh `-plan` and
+  `-goal` runs without a review manifest still run on 1.2.1. AgentFlow 1.2.0
+  is unaffected. An AgentFlow 1.2 whose patch version cannot be read is
+  refused for recovery the same way.
+
+### Fixed — openai-compat reads Abacus RouteLLM token usage (#753)
+
+Abacus RouteLLM reports token usage in its own shape, and the `openai-compat`
+client read most of it as zero or as a discounted count.
+
+- Non-streaming chat responses now report the full input count (uncached plus
+  cached tokens), the cached count, completion and reasoning tokens, and a
+  total. Abacus's billing-weighted `input_tokens` is not used.
+- OpenAI-shaped usage keeps its existing decoding behavior, including ignoring
+  unrelated vendor extensions with different JSON types.
+- Streaming chat responses from an Abacus base URL (`routellm.abacus.ai`) that
+  include cached tokens now report the input and total counts as `0`
+  (unknown). Abacus streams a count that discounts cached tokens and can be
+  smaller than the cached count itself, and it sends no exact input count. A
+  stream with nothing cached, and every other server, reports as before.
+  #758 recovers the count for four models and #759 extends the unknown case to
+  every request on the others.
+
+### Added — Golem cost and side-task visibility (#751)
+
+Golem's `/context` now prints this process's model usage and an estimated cost,
+including the side tasks that used to be invisible. A model entry in
+`models.json` takes an optional `price`, in USD per 1,000,000 tokens:
+`{"input": 3, "output": 15, "cached_input": 0.3, "cache_write": 3.75}`. `input`
+and `output` are the plain rates and both are required (a free model is
+`{"input": 0, "output": 0}`); `cached_input` and `cache_write` price tokens
+served from, and written to, a provider's prompt cache, and a missing one bills
+those tokens at `input`. Any other member, such as a typo'd `input_per_mtok`, is
+refused. A refused price, or a value that is not finite and at least 0, makes
+the config fail to load, naming the entry, and two entries that name the same
+`provider/model` and both set a price must carry the same one. There is no
+built-in price table: a model without a `price` is never guessed. Prices are
+read at startup, so a `models.json` edit takes effect on restart.
+
+`/context` then shows, after the `configured input ceiling` line: `usage (this process)` (agent
+input, cached share, output and requests across every model used, `/model`
+switches included), `last run`, `est. cost`, and one `side task <name>` line for
+each of `summarize`, `probe`, `embed`, `grounding`, `source-summary` and
+`delegate` that has made a call. `est. cost` prices each call by the
+`provider/model` that served it, so a fallback is priced at the model that
+answered. Totals are process-local and reset on restart.
+
+Startup prints `notice: summarize uses the same model as chat (<provider/model>);
+set defaults.summarize to a cheaper model to lower compression cost` when the
+summarize route and the active chat route start with the same model and that
+model has a nonzero `input` or `output` price.
+
+The figures never claim more than the provider reported. A model with no price
+is named under `excludes unpriced` and left out of the dollar total. A request
+with no input count, or with a count Golem had to clamp (a negative count,
+cached tokens above input tokens, or cache-write tokens above the input left
+after cached), is flagged `unreliable usage`. A priced bucket with such a
+request is named under `excludes unreliable usage` and also left out of the
+total; an unpriced one is already under `excludes unpriced`. Both clauses name
+an agent-run bucket by its model and a side-task bucket by model and task, as
+in `a/priced (probe)`. Dispatch children report one total without a
+model, so they appear under `dispatch children: N input tok, cache coverage
+unknown` and under `excludes unpriced`. Successful children with missing or
+invalid counters remain under `excludes unpriced: dispatch children` even
+when no child tokens can be reported. #753, #758 and #759 set what Abacus
+RouteLLM reports. An Ollama embedding reports the server's `prompt_eval_count` as its
+input count; it used to report the number of input texts, which also changes
+`usage.prompt_tokens` on the compat `/v1/embeddings` endpoint for Ollama-backed
+models. A server that omits the count reports no input count, so the call reads
+as unreliable. A side-task call that fails is not counted, and a rare concurrent
+identical embed request can be counted twice.
+
+The new docs section "Calls, caching and cost" in `docs/golem.md` lists every
+model call Golem makes with the flag that gates it, the provider cache
+lifetimes as of 2026-10-30, and how to read each `/context` line.
+
+#### Library additions
+
+- `config.ModelPrice` (with a strict `UnmarshalJSON`) and
+  `config.ModelConfig.Price`; `providerbootstrap.Bundle.Prices` maps each priced
+  `provider.ModelKey` to its price. `config.Document.SetRoleModel` and
+  `config.Document.ForkRoleModel` clear the price when the role, or the fork,
+  moves to a different provider/model; `SetRoleModel` reports it as
+  `SetRoleModelResult.DroppedPrice`.
+- `ollama.Client.EmbedWithPromptCount` is `Embed` plus the server's
+  `prompt_eval_count`, which `ollama.EmbedResponse.PromptEvalCount` now
+  carries. `Embed` is unchanged. `provider.OllamaProvider.Embed` reports the
+  summed count as `Usage.PromptTokens`, or 0 when the server omits any.
+- `agent.NewRouterSummarizerWithUsage` is `NewRouterSummarizer` plus a callback
+  that receives the model and usage of each successful summarizer call.
+  `NewRouterSummarizer` is unchanged.
+- `probers.WithOpenAICompatUsageObserver`, `ProberFactoryInput.UsageObserver` and
+  `providerbootstrap.Options.ProbeUsageObserver` report the usage of each
+  successful openai-compat probe request, both tool-capability probes and
+  fingerprint profiling probes (Golem runs only the former; a library host that
+  enables profiling gets the latter too). Ollama probes are not reported. The
+  observer must be safe for concurrent use. Probe results are unchanged.
+
+### Changed — openai-compat sends each host only the cache key it documents (#749)
+
+openai-compat clients no longer send `x-opencode-session` to every host. Each
+client picks a cache-affinity mode from its base URL: an `https` URL on
+`api.openai.com` sends the body field `prompt_cache_key`, one on `openrouter.ai`
+sends the `x-session-id` header, one on `opencode.ai` keeps sending
+`x-opencode-session` with the raw session id, and every other host (local
+llama.cpp, Abacus, `http` URLs) gets nothing. The OpenAI and OpenRouter values
+are an HMAC-SHA256 of the session id under a random per-client secret, so they
+change when the client is recreated and are not the thread id or the workspace
+hash. A request with no session id (`--no-session`, `golem -p`) sends nothing in
+any mode.
+
+Set the mode explicitly with `"cache_affinity"` on an openai-compat provider in
+`models.json` (`none`, `openai`, `openrouter` or `opencode`; anything else, or
+the field on a non-openai-compat provider, fails to load), with
+`openaicompat.WithCacheAffinity`, or with `llm-bench -cache-affinity`. Code that
+builds `openaicompat.NewClient` directly against an OpenCode mirror on another
+host, or over `http`, must now pass `WithCacheAffinity("opencode")` to keep the
+header OpenCode requires.
+
+### Changed — Compaction keeps the cached prompt prefix still, inside a goal and across turns (#748)
+
+Inside a goal, a compacting step now drops to 75% of the budget left for
+messages instead of just under it, and what it dropped stays out of every later
+request in that goal, so the requests after a compaction start with the same
+bytes and the provider's prompt cache can reuse them. The newest tool result is
+never dropped to reach that mark, including replacing a structured result's
+real content with an omission placeholder; when the mark cannot be reached
+without it, compaction falls back to the previous just-enough fit. On local
+llama.cpp with qwen3-coder-next, `llm-bench -cache-probe` (pressure) now reports 27,992 of
+53,511 turn-1 prompt tokens cached (52.3%), up from 14,692 of 57,605 (25.5%).
+
+The setting is `agent.ContextManager.CompactionLowWater` (0, the default, keeps
+the previous just-enough fit; otherwise a fraction in (0,1), and `Run` rejects
+anything else). Sticky eviction applies with the built-in assembly (no custom
+`Compactor`, a `RecencyCompactor`, or `Mixed`); a custom `Compactor` receives the
+fraction in `TokenBudget.LowWaterFraction` but no hiding. A later step's
+`Pressure` counts only what that step dropped, and mixed-assembly trace omission
+reasons are judged against the mark. Golem sets 0.75 through the new
+`golem.NewContextManager`, which the cache probe also uses. With a durable
+summary, the legacy compactor now drops prior-turn history before current-run
+tool results, as documented; it previously did the reverse.
+
+Across turns, Golem's history compression counts only the user and assistant
+text it replays (stored tool results and tool-call frames no longer count),
+still triggers at half the input ceiling, and now evicts to half of that, so the
+durable summary at the start of every request is rewritten far less often (3
+summarizer calls instead of 56 over 60 tool-heavy turns in the new test). The
+summarizer receives only that replayed text, not tool results. `golem compact`
+reports the same replayed-text estimate, so tool-heavy threads show smaller
+numbers. `conversation.CompressMessagesWithCost` is the new, additive form of
+`CompressMessages` with a caller-supplied message cost.
+
+### Added — Golem and the cache probe show compaction and fence-rotation counts (#747)
+
+Golem's end-of-turn footer, in the REPL and on `-p` stderr, now counts the
+turn's `compaction` and `fence_rotation` events from `agent.Result.Events`:
+`done · 4 steps · 9.2s · 18342 tok (12800 cached) · 1 compaction · 1 fence
+rotation`. Both re-render earlier request bytes, so each explains a
+prompt-cache miss. The counts sit after the token count and before
+` · risk N` and the stop suffix; a turn with neither event keeps its footer
+unchanged. The `-telemetry` run span gains `compactions` and
+`fence_rotations`, omitted when zero, so a run with neither writes the same
+bytes as before; the schema version stays 2.
+
+`llm-bench -cache-probe` ends its table with `Fence rotations: N.` A scripted
+probe run quotes no frame key, so it reports 0; a non-zero count means a
+rotation re-framed an earlier tool result and the cache missed from there.
+
+### Security — Golem's project and Git snapshot fence key now rotates when exposed (#746)
+
+Golem frames approved project guidance and the Git snapshot in the system
+prompt (#430) under one key per snapshot. Until now that key was never checked
+against run text, so text that quoted it (a file the model read, command
+output, the model's own reply) could forge a frame the model would read as
+approved project guidance or repository state for the rest of the session.
+The key now rotates the way tool-result keys do since #745: when a run's text,
+including the conversation history a goal replays, that history's summary and
+advice staged with `/consult`, contains it, the system prompt is re-keyed
+before the next request, and later goals keep the new key,
+so the session never returns to a key that has been shown. Without an
+exposure the system prompt stays byte-identical across requests and goals, so
+the prompt cache is unaffected; a rotation misses it for one request. AgentFlow
+planner runs and task steps rotate the key within each run only.
+
+Library callers can do the same for their own system-prompt frames:
+`agent.Request.SystemKeys` names the fence keys `System` frames untrusted text
+under (12 or more characters of `A-Z` and `2-7`; anything else is refused
+before the first model call), `agent.Result.SystemKeys` reports the keys
+`System` ended under (runtime-only, never serialized into traces), and
+`golem.Turn.SystemKeys` forwards them through the Golem runtime. The
+containment inventory and mutation ledger record the new checks (M-075 to
+M-080).
+
+### Changed — Per-result fence keys with scan-and-rotate, so the prompt cache holds inside a goal (#745)
+
+Each tool result is now framed (#430) under its own key, minted once the
+result is final and reused on every later request of the run, instead of one
+fresh key per request for every frame. Earlier results therefore reach the
+provider with the same bytes on each request, and the provider's prompt cache
+can reuse them: on local llama.cpp with qwen3-coder-next, `llm-bench
+-cache-probe` (uncompacted) now reports 60,914 of 77,717 turn-1 prompt tokens
+cached (78.4%), up from about 1,000 (1.3%). `/consult` advice gets one key per
+run; keys differ across runs and are never saved. Compaction that drops or
+re-renders earlier results still moves the prefix.
+
+Before each request the runtime scans every string of the new run text that
+is replayed to the provider or rendered into the prompt (message content, tool
+names, tool-call IDs and arguments, structured-context text, and selected
+content joined across context groups). It checks nested `\uXXXX` escapes,
+fullwidth ASCII forms, any letter case, and the text reduced to the key
+alphabet so spaces, hyphens, digits or invisible characters between key
+letters do not hide a key. Every live key it finds is replaced with a fresh
+one (never a retired one), and the library records one `fence_rotation` entry
+per rotated frame in `Result.Events`. If the bounded scan reaches its limit
+(for example, with deeply nested escapes or an oversized result), it resets
+the live keys once, records `fence_scan_limit`, then resumes
+stable reuse. Other compatibility forms and cross-script look-alike letters
+are not matched. A custom `Compactor` is trusted: text it synthesizes while
+building a request is not scanned.
+
+The `ToolTrustContract` wording and every committed trace are unchanged. The
+containment inventory, hardening contract and mutation ledger record the new
+checks (M-028 A/B, M-067 to M-074).
+
+`llm-bench` gains a separate forged-close corpus,
+`docs/llm/traces/injection-forged-close/` (10 traces, its own registration),
+built with `-build-injection-corpus` from a cases file whose `source` is
+`forged-close`; any `source` other than `injection` or `forged-close` is now
+rejected before anything is written. `-injection-report` with that
+registration adds a within-model forged-live vs forged-stale table. Results on
+two local models and one cloud model (kimi-k2.7-code on OpenCode Go), and a
+one-model #452 rerun, are in `docs/llm/benchmarks/2026-10-31-forged-close.md`.
+
+### Added — Prompt-cache telemetry and the `llm-bench -cache-probe` mode (#743)
+
+`provider.Usage` gains `CachedPromptTokens`, `CachedPromptTokensReported`,
+`CacheWriteTokens` and `CacheWriteTokensReported`. `PromptTokens` still
+includes cached tokens; the Reported flags tell a measured zero apart from a
+backend that does not report the counter. The openai-compat provider fills
+them from `prompt_tokens_details` (OpenAI, llama.cpp's llama-server, and other
+servers that send it), in both non-streaming and streaming responses. The
+values are passed through as the server sent them.
+
+The agent carries the counters through `Result.Usage` and nested-run
+`DescendantUsage`. A negative cache counter is treated like a negative
+reasoning count: the run budget charges that call's full reservation and
+leaves its usage out of the descendant totals.
+
+Golem's end-of-run footer reads `… · T tok (C cached)` when the backend
+reports the counter, and is unchanged otherwise. `-telemetry` step spans gain
+`cached`, `cached_reported`, `cache_write` and `cache_write_reported` inside
+`usage`; the schema version stays 2.
+
+`llm-bench -cache-probe -candidate-base-url <url> -models openai-compat/<model>
+-cache-probe-out <file>` runs a scripted Golem session (eight file reads, then
+three follow-up turns) against one openai-compat server and writes a markdown
+table of each request's prompt tokens and cached tokens, beside a
+prefix-stability ratio that is labeled as a serialization proxy.
+`-cache-probe-scenario pressure` uses Golem's default 8192-token input ceiling
+so compaction runs; the default `uncompacted` uses 131072. A bad output path
+fails before any request, and a failed run leaves an earlier table in place.
+
+### Changed — Golem explains a stalled step loop and shows recorded blockers (#731)
+
+Golem's serial step loop now asks AgentFlow `next-step --explain` instead of
+plain `next-step`.
+
+- When AgentFlow reports remaining step work but no eligible step
+  (`open_attempts` or `dependencies_unmet`), the run stops before `finish-run`
+  with `agentflow reports no eligible step while step work remains:
+  reason_code "<code>" (<AgentFlow's diagnostics>); no proof was built; run
+  -agentflow-status to see whether -agentflow-resume can recover it`.
+  Previously such a run went on to the `next-action` check and stopped there
+  with less detail.
+- A same-plan `-review-manifest` round over a run that died with an attempt
+  open now stops at that point, before it records the review, opens an
+  amendment or calls the model. Previously it recorded the review first.
+- A reason code this Golem does not know, which a newer AgentFlow may add,
+  stops the run until Golem is updated.
+- Malformed explain replies, including null diagnostic entries, stop the run.
+
+Human `-agentflow-status` now lists each current recorded blocker from
+`next-action`, a blocked or failed attempt that no later attempt of the step
+has superseded, after the diagnostics:
+
+```text
+recorded blocker: P1/A1 blocked at 2026-10-31T15:30:06+00:00 (owner golem): golem: gate execution failed
+```
+
+The lines are escaped like the rest of status, the reason is cut at 200
+characters, and they are display-only: exit codes, resume dispositions and
+`-agentflow-status -json` output are unchanged. Entries Golem cannot read are
+counted on one line that points to `-agentflow-status -json`.
+
 ## [0.6.0] - 2026-10-29
 
 ### Changed — Golem requires AgentFlow 1.2 (#730)
