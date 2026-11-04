@@ -6,9 +6,10 @@ client picks a cache-affinity mode from its base URL: an `https` URL on
 sends the `x-session-id` header, one on `opencode.ai` keeps sending
 `x-opencode-session` with the raw session id, and every other host (local
 llama.cpp, Abacus, `http` URLs) gets nothing. The OpenAI and OpenRouter values
-are an HMAC-SHA256 of the session id under a random per-process secret, so they
-change on restart and are not the thread id or the workspace hash. A request
-with no session id (`--no-session`, `golem -p`) sends nothing in any mode.
+are an HMAC-SHA256 of the session id under a random per-client secret, so they
+change when the client is recreated and are not the thread id or the workspace
+hash. A request with no session id (`--no-session`, `golem -p`) sends nothing in
+any mode.
 
 Set the mode explicitly with `"cache_affinity"` on an openai-compat provider in
 `models.json` (`none`, `openai`, `openrouter` or `opencode`; anything else, or

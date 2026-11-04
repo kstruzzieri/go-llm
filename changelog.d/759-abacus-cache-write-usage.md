@@ -20,3 +20,6 @@ and counted them wrong:
   names such requests under `excludes unreliable usage` instead of pricing
   them.
 - The four models above, measured not to bill writes, are unchanged.
+
+The [v0.7.0 upgrade guide](docs/releases/v0.7.0.md) has the net Abacus behavior
+against v0.6.0.

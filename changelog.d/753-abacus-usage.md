@@ -13,3 +13,5 @@ client read most of it as zero or as a discounted count.
   (unknown). Abacus streams a count that discounts cached tokens and can be
   smaller than the cached count itself, and it sends no exact input count. A
   stream with nothing cached, and every other server, reports as before.
+  #758 recovers the count for four models and #759 extends the unknown case to
+  every request on the others.
