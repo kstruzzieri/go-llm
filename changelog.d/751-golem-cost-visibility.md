@@ -39,10 +39,8 @@ in `a/priced (probe)`. Dispatch children report one total without a
 model, so they appear under `dispatch children: N input tok, cache coverage
 unknown` and under `excludes unpriced`. Successful children with missing or
 invalid counters remain under `excludes unpriced: dispatch children` even
-when no child tokens can be reported. Measured 2026-11-01 on Abacus RouteLLM
-with gpt-5-mini: a streaming response's prompt count was smaller than its
-cached count, and a non-streaming response had no prompt count, so both read as
-unreliable. An Ollama embedding reports the server's `prompt_eval_count` as its
+when no child tokens can be reported. #753, #758 and #759 set what Abacus
+RouteLLM reports. An Ollama embedding reports the server's `prompt_eval_count` as its
 input count; it used to report the number of input texts, which also changes
 `usage.prompt_tokens` on the compat `/v1/embeddings` endpoint for Ollama-backed
 models. A server that omits the count reports no input count, so the call reads
