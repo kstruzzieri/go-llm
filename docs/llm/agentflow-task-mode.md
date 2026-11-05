@@ -253,9 +253,12 @@ and checks all of these bindings:
   attempt may also be `verified`, and an advisory lease may also be expired,
   as AgentFlow allows. The independent owner check also applies under
   advisory lease policy. An open attempt on a step AgentFlow already counts
-  completed (an amendment) is refused unless it timed out;
+  completed (an amendment) is refused unless it timed out, or an operator
+  opened it and recorded an edit in it (see
+  [An edit a stopped amendment left](#an-edit-a-stopped-amendment-left));
 - `step_amendment_needed` projects a completed step and one allowed automatic
-  non-break-glass `amend` action;
+  non-break-glass `amend` action. An `amend` AgentFlow allows but marks
+  `automatic: false` is left to an operator;
 - for `attempt_timed_out` and `step_amendment_needed`, the step has no review
   amendment that never completed. Resume replaces an attempt with the step's
   own goal, which would drop the review findings, so it refuses
@@ -355,6 +358,7 @@ blocked instead: see [AgentFlow 1.2.1 and recovery](#agentflow-121-and-recovery)
 | `validation_missing` with a `failed` command gate | 2 | Block the owned attempt with `golem: resume found failed command gate`, run none of its gates, then claim a new attempt and run the model. |
 | `attempt_timed_out` | 2 | Block the owned attempt with `golem: resume found timed-out gate`, then continue from the state AgentFlow reports next: a new claim, or an amendment of a completed step. |
 | `step_amendment_needed` | 2 | Open a replacement attempt with `amend-step` (reason `golem: resume replaces the step's attempt`) and run the model on the step's own goal, then its gates and `finish-step`; then continue serially. One step per resume: when another step also needs a replacement, resume stops at the step-work check before `finish-run` without building a proof, and the next `-agentflow-resume` amends it. |
+| `step_amendment_needed` with `amend` marked `automatic: false` | 3 | Fail closed: an operator decides. See [An edit a stopped amendment left](#an-edit-a-stopped-amendment-left). |
 | `step_unverified` | 2 | Call the fixed `FinishStep` adapter for the owned attempt. |
 | `step_uncompleted` | 2 | Call the fixed `CompleteStep` adapter without re-verifying. |
 | `drift_failing` | 3 | Fail closed for operator inspection. |
@@ -601,6 +605,35 @@ needs a receipt in the new ledger for every file `git status` shows changed.
 If the run came from a planning handoff, re-plan with `-goal`, or run `-plan`
 without `-workflow-handoff`: the handoff check reads
 `.agent/workflow.contract.json`, which went with the archive.
+
+#### An edit a stopped amendment left
+
+When an amendment records an edit and then stops, no attempt has verified that
+edit. AgentFlow 1.3 fails `verify-run` and `finish-run` on it and reports
+`step_amendment_needed` with an `amend` action marked `automatic: false`,
+because someone must decide whether to keep the edit. AgentFlow marks an edit
+in a completed step's scope that no receipt covers the same way. Status exits
+`3` and resume refuses before any change:
+
+```text
+resume: blocked: an operator must decide whether to amend step P1: AgentFlow does not allow it unattended; to replace the attempt, run its advised amend-step, record the edit in the new attempt, then resume
+```
+
+To keep the edit, run the `amend-step` command status shows as advisory, then
+the `record-file-change` command it shows next. `amend-step` names `--agent
+golem`, which resume needs as the attempt's owner. `-agentflow-resume` then runs
+the attempt's missing gates and finishes it without running the model. To drop
+the edit, restore the file first, then do the same: AgentFlow's latest receipt
+still holds the dropped content, so it counts the restored file as an edit too.
+
+Resume settles an open amendment only when an operator opened it and recorded
+an edit in it. It still refuses an amendment with no recorded edit, one Golem
+opened itself (its reason starts with `golem:`), one linked to a review, and one
+with a failed command gate.
+
+Before AgentFlow 1.3 the run does not fail on such an edit, and
+`-agentflow-resume` reaches `complete` with the edit unverified. Use AgentFlow
+1.3.
 
 ## AgentFlow 1.2.1 and recovery
 

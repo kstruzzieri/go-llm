@@ -1258,6 +1258,166 @@ func TestAgentflowStoppedStepPartialEditFailsClosed_RealCLI(t *testing.T) {
 	}
 }
 
+// completedFixtureStep completes the fixture's P1 in attempt A1, gates included.
+func completedFixtureStep(t *testing.T) (string, agentflow.Runner, *agentflow.Client, agentflow.Plan, []byte) {
+	t.Helper()
+	dir, runner, client, plan, planBytes := openSettlementAttempt(t, nil, "expected\n")
+	ctx := context.Background()
+	step, ok := findStep(&plan, "P1")
+	if !ok {
+		t.Fatal("fixture plan has no P1")
+	}
+	gates, err := agentflow.ExtractCommandGates(step)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, gate := range gates {
+		if err := client.RunGate(ctx, "P1", "A1", gate.Label, gate.Argv); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := client.FinishStep(ctx, "P1", "A1"); err != nil {
+		t.Fatal(err)
+	}
+	return dir, runner, client, plan, planBytes
+}
+
+// agentflow#103: an amendment that recorded an edit and then stopped leaves an
+// edit no attempt verified, and AgentFlow leaves its replacement to an operator.
+// Status says so and resume changes nothing. Once the operator runs the advised
+// commands, resume settles the replacement on its gates. Dropping the edit takes
+// the same steps: the latest receipt still holds it, so the restored file counts
+// as an edit too.
+func TestAgentflowStoppedAmendmentWaitsForOperator_RealCLI(t *testing.T) {
+	const edited, restored = "expected\namended\n", "expected\n"
+	for _, tt := range []struct{ name, diagnostic, final string }{
+		{name: "keep the edit", diagnostic: "diagnostic: unverified edit from blocked attempt A2: src/answer.txt", final: edited},
+		{name: "drop the edit", diagnostic: "diagnostic: out-of-band edit after latest file receipt: src/answer.txt", final: restored},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dir, runner, client, plan, planBytes := completedFixtureStep(t)
+			ctx := context.Background()
+			stopped, err := client.AmendCompletedStep(ctx, "P1", "test: amendment")
+			if err != nil {
+				t.Fatal(err)
+			}
+			writeAndRecordAnswer(t, client, dir, stopped, edited)
+			if err := client.BlockStep(ctx, "P1", stopped, "test: stopped"); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "src", "answer.txt"), []byte(tt.final), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			status := func(wantExit int, want ...string) {
+				t.Helper()
+				var out bytes.Buffer
+				err := runAgentflowStatusWithRunner(ctx, &out, dir, false, runner)
+				var exit *agentflowStatusExit
+				if !errors.As(err, &exit) || exit.ExitCode() != wantExit {
+					t.Fatalf("status err = %v, want exit %d\n%s", err, wantExit, out.String())
+				}
+				for _, line := range want {
+					if !strings.Contains(out.String(), line) {
+						t.Fatalf("status lacks %q:\n%s", line, out.String())
+					}
+				}
+			}
+			modelRuns := 0
+			d := &driver{af: client, plan: &plan, runStep: func(context.Context, agentflow.Step, string, string) error {
+				modelRuns++
+				return nil
+			}}
+			refused := func(want string) {
+				t.Helper()
+				before := len(readStepRunEvents(t, dir))
+				if _, err := d.resume(ctx, dir, planBytes, nil); err == nil || !strings.Contains(err.Error(), want) {
+					t.Fatalf("resume err = %v, want %q", err, want)
+				}
+				if after := len(readStepRunEvents(t, dir)); after != before || modelRuns != 0 || commandReceiptCount(t, dir) != 1 {
+					t.Fatalf("refused resume changed the run: events %d -> %d, model runs %d, command receipts %d", before, after, modelRuns, commandReceiptCount(t, dir))
+				}
+			}
+			// The operator runs exactly what next-action advises.
+			runAdvised := func(command string) {
+				t.Helper()
+				state, err := client.NextAction(ctx)
+				if err != nil || len(state.Args) == 0 || state.Args[0] != command {
+					t.Fatalf("next-action args = %q, err = %v; want %s", state.Args, err, command)
+				}
+				if out, errOut, code, err := runner.Run(ctx, append(slices.Clone(state.Args), "--root", dir), nil); err != nil || code != 0 {
+					t.Fatalf("advised %s: exit=%d err=%v stdout=%s stderr=%s", command, code, err, out, errOut)
+				}
+			}
+
+			status(3, "state: step_amendment_needed", tt.diagnostic, "resume: blocked: an operator must decide whether to amend step P1")
+			refused("an operator must decide whether to amend step P1")
+
+			runAdvised("amend-step")
+			const replacement = "A3"
+			if got := lastStepRunEvent(readStepRunEvents(t, dir), replacement).Event; got != "amendment_started" {
+				t.Fatalf("%s last event = %q, want amendment_started", replacement, got)
+			}
+
+			// The stopped attempt's receipt does not cover its replacement.
+			status(3, "state: file_receipts_missing", "resume: blocked by missing file receipts")
+			refused("blocked by missing file receipts")
+
+			runAdvised("record-file-change")
+			status(2, "state: validation_missing", "resume: settle missing command gates, then continue serially")
+
+			final, err := d.resume(ctx, dir, planBytes, nil)
+			if err != nil || final.State != "complete" {
+				t.Fatalf("resume state = %q, err = %v", final.State, err)
+			}
+			if got := lastStepRunEvent(readStepRunEvents(t, dir), replacement).Event; got != "completed" || modelRuns != 0 {
+				t.Fatalf("%s last event = %q, model runs = %d; want completed without the model", replacement, got, modelRuns)
+			}
+			if b, err := os.ReadFile(filepath.Join(dir, "src", "answer.txt")); err != nil || string(b) != tt.final {
+				t.Fatalf("src/answer.txt = %q, err = %v; want %q", b, err, tt.final)
+			}
+			if summary, err := client.ProofSummary(ctx); err != nil || summary.Total == 0 || summary.Failed != 0 {
+				t.Fatalf("proof summary = %+v, err = %v", summary, err)
+			}
+		})
+	}
+}
+
+// #652 D1 against the real CLI: an amendment without an operator's recorded edit
+// would finish on its gates alone, so resume refuses it before any gate runs.
+func TestAgentflowOtherAmendmentsStayRefused_RealCLI(t *testing.T) {
+	const reason = "agentflow resumability open attempt belongs to a completed step"
+	for _, tt := range []struct {
+		name, amendReason string
+		edit              bool
+	}{
+		{name: "operator amendment without an edit", amendReason: "operator: look again"},
+		{name: "Golem's own amendment with an edit", amendReason: resumeAmendReason, edit: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dir, _, client, plan, planBytes := completedFixtureStep(t)
+			ctx := context.Background()
+			attempt, err := client.AmendCompletedStep(ctx, "P1", tt.amendReason)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tt.edit {
+				writeAndRecordAnswer(t, client, dir, attempt, "expected\namended\n")
+			}
+			d := &driver{af: client, plan: &plan, runStep: func(context.Context, agentflow.Step, string, string) error {
+				t.Error("model ran for a refused amendment")
+				return nil
+			}}
+			if _, err := d.resume(ctx, dir, planBytes, nil); err == nil || err.Error() != reason {
+				t.Fatalf("resume err = %v, want %q", err, reason)
+			}
+			if got := lastStepRunEvent(readStepRunEvents(t, dir), attempt).Event; got != "amendment_started" || commandReceiptCount(t, dir) != 1 {
+				t.Fatalf("%s last event = %q, command receipts = %d; want it untouched and no new gate", attempt, got, commandReceiptCount(t, dir))
+			}
+		})
+	}
+}
+
 // fixtureTaskFlags are the #643 T6 production-entry flags over dir/plan.json.
 func fixtureTaskFlags(dir string) flags {
 	return flags{planPath: filepath.Join(dir, "plan.json"), approveEdits: true, approveGates: true, agentflowSrc: os.Getenv("AGENTFLOW_SRC")}
@@ -2130,7 +2290,7 @@ func TestAgentflowResumeRefusesFailedGateUnderFiniteEnforce_RealCLI(t *testing.T
 	statusErr := runAgentflowStatusWithRunner(ctx, &status, dir, false, runner)
 	var exit *agentflowStatusExit
 	if !errors.As(statusErr, &exit) || exit.ExitCode() != 3 ||
-		!strings.Contains(status.String(), "\nresume: blocked by unsafe or malformed projection: "+refusal+"\n") {
+		!strings.Contains(status.String(), "\nresume: blocked: "+refusal+"\n") {
 		t.Fatalf("status = %v, want exit 3 with the finite-enforce refusal\n%s", statusErr, status.String())
 	}
 	models := 0
