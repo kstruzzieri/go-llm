@@ -233,10 +233,17 @@ type Turn struct {
 	// It is projected onto the wire copy of the goal only and never
 	// persisted with the thread.
 	Advisory *agent.Advisory
+	// SystemKeys are the fence keys the runtime's System frames untrusted
+	// text under (agent.Request.SystemKeys). The returned Result.SystemKeys
+	// holds them after any rotation; a host that recomposes System should
+	// carry those forward.
+	SystemKeys []string
 }
 
-// CompactionReport estimates persisted non-system history and its rendered
-// durable summary. It excludes the live system prompt, tool schemas, and current turn.
+// CompactionReport estimates the persisted history a later turn replays (user
+// and assistant text; stored tool results and tool-call frames are not counted)
+// and its rendered durable summary. It excludes the live system prompt, tool
+// schemas, and current turn.
 // Changed reports content replacement, not guaranteed token savings.
 type CompactionReport struct {
 	TokensBefore int
@@ -596,8 +603,9 @@ func (r *Runtime) Run(ctx context.Context, turn Turn, sink EventSink) (agent.Res
 		// The thread id is the conversation's stable identity, so every turn
 		// of one thread reaches the provider under one session id (#533).
 		// Stateless turns carry no thread id and so send no session header.
-		SessionID: turn.ThreadID,
-		Advisory:  turn.Advisory,
+		SessionID:  turn.ThreadID,
+		Advisory:   turn.Advisory,
+		SystemKeys: turn.SystemKeys,
 	}
 	if thread != nil {
 		request.History = thread.history()
@@ -753,7 +761,8 @@ func turnGoal(turn Turn) (string, error) {
 // an HTTP header field value — an ASCII control character other than
 // horizontal tab, or DEL (RFC 9110 §5.5) — or -1 when there is none.
 //
-// The thread id travels to providers as a header (x-opencode-session, #533).
+// The thread id travels to OpenCode providers as a header (x-opencode-session,
+// #533).
 // Go's Transport refuses to send such a value, so without this check a bad id
 // would fail every turn of the thread with an opaque transport error rather
 // than a clear request-validation one. It is a validation rule, not a

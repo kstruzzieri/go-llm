@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -89,35 +90,79 @@ func initState(req Request) State {
 		ChatMessage: provider.ChatMessage{Role: "user", Content: req.Goal},
 		Segment:     Pinned,
 	})
-	return State{System: req.System, DurableSummary: req.HistorySummary, Messages: msgs}
+	return State{System: req.System, DurableSummary: req.HistorySummary, Messages: msgs, systemKeys: slices.Clone(req.SystemKeys)}
 }
 
-func buildChatRequest(st State, specs []provider.Tool, outputReserve int, opts provider.ModelOptions, advisory *Advisory) provider.ChatRequest {
+// visibleState is the assembly input of a low-water Run: st without the
+// messages hidden[i] marks, each kept message tagged with its canonical
+// index plus one (Message.idx). hidden is aligned to st.Messages and may be
+// shorter; a message past its end is visible. The other fields are st's.
+func visibleState(st State, hidden []bool) State {
+	out := st
+	out.Messages = make([]Message, 0, len(st.Messages))
+	for i, m := range st.Messages {
+		if i < len(hidden) && hidden[i] {
+			continue
+		}
+		m.idx = i + 1
+		out.Messages = append(out.Messages, m)
+	}
+	return out
+}
+
+// hideEvicted marks each Elastic message of the assembly input in that
+// assembled left out, so it stays out of the Run's later requests. Pinned
+// messages are never hidden, and no built-in assembly leaves out an
+// unresolved tool tail. hidden grows to cover n, len(State.Messages).
+func hideEvicted(hidden []bool, in, assembled State, n int) []bool {
+	kept := make(map[int]bool, len(assembled.Messages))
+	for _, m := range assembled.Messages {
+		kept[m.idx] = true
+	}
+	if len(hidden) < n {
+		hidden = append(hidden, make([]bool, n-len(hidden))...)
+	}
+	for _, m := range in.Messages {
+		if m.Segment == Elastic && !kept[m.idx] {
+			hidden[m.idx-1] = true
+		}
+	}
+	return hidden
+}
+
+func buildChatRequest(st State, specs []provider.Tool, outputReserve int, opts provider.ModelOptions, advisory *Advisory, advisoryFence promptfence.Fence) provider.ChatRequest {
 	msgs := make([]provider.ChatMessage, 0, len(st.Messages)+1)
 	if st.System != "" {
 		msgs = append(msgs, provider.ChatMessage{Role: "system", Content: st.System})
 	}
 	// #430: every tool observation is framed here, on the value copy, after
-	// assembly, under one key minted for this render. State keeps the raw
-	// bytes, and the next render mints its own key (promptfence.New's
-	// contract: one id per rendered prompt).
-	var fence promptfence.Fence
-	minted := false
+	// assembly, under the key mintFenceKeys stored on its message. The key is
+	// the same on every render, so it never changes an earlier observation's
+	// wire bytes. State keeps the raw bytes. A tool message with no key (a
+	// custom Compactor rebuilt it) is framed under one key minted for this
+	// render, shared by every unkeyed message in it.
+	var unkeyed promptfence.Fence
 	for _, m := range st.Messages {
 		cm := m.ChatMessage
 		if cm.Role == "tool" {
-			if !minted {
-				fence, minted = promptfence.New(), true
+			fence := m.fence
+			if fence == (promptfence.Fence{}) {
+				if unkeyed == (promptfence.Fence{}) {
+					unkeyed = promptfence.New()
+				}
+				fence = unkeyed
 			}
 			cm.Content = frameToolResult(fence, cm.Content)
 		}
 		// #382: the staged advisory is projected here too, on the same value
-		// copy under the same per-render key. State keeps the raw goal.
+		// copy, under the Run's advisory key, which no tool message shares.
+		// State keeps the raw goal. A zero key would render an empty, forgeable
+		// marker, so it falls back to a key minted for this render.
 		if advisory != nil && m.Segment == Pinned && cm.Role == "user" {
-			if !minted {
-				fence, minted = promptfence.New(), true
+			if advisoryFence == (promptfence.Fence{}) {
+				advisoryFence = promptfence.New()
 			}
-			cm.Content = renderAdvisory(fence, cm.Content, *advisory)
+			cm.Content = renderAdvisory(advisoryFence, cm.Content, *advisory)
 			advisory = nil
 		}
 		msgs = append(msgs, cm)
@@ -156,6 +201,9 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 	if req.Goal == "" {
 		return Result{}, fmt.Errorf("agent: empty goal")
 	}
+	if v := o.ctxMgr.CompactionLowWater; v != 0 && !(v > 0 && v < 1) {
+		return Result{}, fmt.Errorf("agent: compaction low-water %v outside (0,1)", v)
+	}
 	if err := validateHistory(req.History); err != nil {
 		return Result{}, err
 	}
@@ -163,6 +211,9 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 		if err := ValidateAdvisory(req.Advisory); err != nil {
 			return Result{}, err
 		}
+	}
+	if err := validateSystemKeys(req.SystemKeys); err != nil {
+		return Result{}, err
 	}
 	maxSteps := req.MaxSteps
 	reg, err := newToolRegistry(req.Tools)
@@ -191,7 +242,8 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 	req.System = withToolTrustContract(req.System) + addenda
 	state := initState(req)
 	historyLen := len(req.History)
-	var res Result
+	// Every return path reports the keys refreshFenceKeys last rotated in place.
+	res := Result{SystemKeys: state.systemKeys}
 
 	// #382: the staged advisory is re-inspected before the initial input, as
 	// its own model-origin observation: a block refuses the run before any
@@ -205,6 +257,12 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 		}
 		advisory = &annotated
 	}
+	// One advisory key per Run, reused on every render like a tool key.
+	advisoryFence := promptfence.New()
+	var liveAdvisory *promptfence.Fence
+	if advisory != nil {
+		liveAdvisory = &advisoryFence
+	}
 
 	// #436: the initial input is inspected once, before any assembly, so a
 	// block never reaches the model and no pressure event is emitted for it.
@@ -213,11 +271,40 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 	}
 	goal := state.Messages[len(state.Messages)-1].Content
 
+	next := 0            // first State index refreshFenceKeys has not visited
+	scanSafeThrough := 0 // messages older than a scan-limit key reset
+	// Sticky low-water eviction (CompactionLowWater): what a compacting step
+	// dropped stays out of later assemblies. Only the assembly input is
+	// filtered; fence keys and Result.Messages keep using canonical state.
+	sticky := o.ctxMgr.stickyEviction()
+	var hidden []bool // aligned to state.Messages
 	for step := 0; step < maxSteps; step++ {
+		// Rotate every live key the previous step's text exposed, then key
+		// the tool messages it appended, now that verifyBatch has finished
+		// with them. Step 0 also scans the summary and staged advice for
+		// advisory and system keys; history carries no tool messages.
+		var rotated int
+		var limited bool
+		var preRotated map[int]bool
+		var pinned []string
+		if step == 0 {
+			pinned = append(pinned, state.DurableSummary)
+			if advisory != nil {
+				pinned = append(pinned, advisory.Source, advisory.Tool, advisory.Model, advisory.Digest, advisory.Content, advisory.Annotation)
+			}
+		}
+		next, rotated, limited, preRotated = refreshFenceKeys(&state, liveAdvisory, next, pinned...)
+		if limited {
+			scanSafeThrough = len(state.Messages)
+		}
+		in := state
+		if sticky {
+			in = visibleState(state, hidden)
+		}
 		manager := o.ctxMgr
 		if advisory != nil {
 			estimate := manager.estimate
-			if manager.Mixed && hasStructuredAnchor(state) {
+			if manager.Mixed && hasStructuredAnchor(in) {
 				estimate = guardedEstimate(manager.Estimate)
 			}
 			projected := renderAdvisoryLines(advisoryPlaceholderOpen, advisoryPlaceholderClose, goal, *advisory)
@@ -228,7 +315,7 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 			// Never create spare capacity from a non-monotonic estimator.
 			manager.advisoryTokens = max(0, extra)
 		}
-		assembled, pressure, atrace, err := manager.AssembleWithTrace(ctx, state, toolSchemaTokens, budget)
+		assembled, pressure, atrace, err := manager.AssembleWithTrace(ctx, in, toolSchemaTokens, budget)
 		// Emit pressure before the model call on the success path and on the
 		// exhaustion path; skip only opaque compactor failures (pressure is zero).
 		if err == nil || errors.Is(err, ErrContextExhausted) {
@@ -240,6 +327,17 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 		}
 		if err != nil {
 			return res, err
+		}
+		if sticky && pressure.Compactions > 0 {
+			hidden = hideEvicted(hidden, in, assembled, len(state.Messages))
+		}
+		if atrace.Subjects != nil {
+			n, postLimited := refreshMaterializedFenceKeys(&state, &assembled, liveAdvisory, scanSafeThrough, preRotated)
+			rotated += n
+			if postLimited {
+				scanSafeThrough = len(state.Messages)
+				limited = true
+			}
 		}
 		if advisory != nil {
 			goals := 0
@@ -276,13 +374,19 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 				}
 			}
 		}
+		for range rotated {
+			res.Events = append(res.Events, EventRecord{Step: step, Kind: "fence_rotation"})
+		}
+		if limited {
+			res.Events = append(res.Events, EventRecord{Step: step, Kind: "fence_scan_limit"})
+		}
 		if pressure.Compactions > 0 {
 			res.Events = append(res.Events, EventRecord{Step: step, Kind: "compaction"})
 		}
 
 		tokenLogged := false
 		modelStart := o.now()
-		chatReq := buildChatRequest(assembled, specs, req.Budget.OutputReserve, req.Options, advisory)
+		chatReq := buildChatRequest(assembled, specs, req.Budget.OutputReserve, req.Options, advisory, advisoryFence)
 		// Session identity belongs to the run, independent of transcript rebuilding.
 		chatReq.SessionID = req.SessionID
 		// Both assembly modes report the checked, complete prompt cost. Spend
@@ -507,10 +611,18 @@ func assistantMessage(resp provider.ChatResponse) Message {
 	}, Segment: Elastic}
 }
 
+// addUsage sums a and b's token counts. The cache counters are summed too and
+// their Reported flags are ORed, so a run that mixes a reporting and a
+// non-reporting backend still shows what was measured. Reasoning tokens are
+// not accumulated.
 func addUsage(a, b provider.Usage) provider.Usage {
 	a.PromptTokens += b.PromptTokens
 	a.CompletionTokens += b.CompletionTokens
 	a.TotalTokens += b.TotalTokens
+	a.CachedPromptTokens += b.CachedPromptTokens
+	a.CachedPromptTokensReported = a.CachedPromptTokensReported || b.CachedPromptTokensReported
+	a.CacheWriteTokens += b.CacheWriteTokens
+	a.CacheWriteTokensReported = a.CacheWriteTokensReported || b.CacheWriteTokensReported
 	return a
 }
 

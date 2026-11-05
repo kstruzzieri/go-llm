@@ -43,16 +43,16 @@ func TestProjectTrustAgentflowProcess(t *testing.T) {
 	case args[0] == "--version":
 		reply = "agentflow 1.2.0"
 	case args[0] == "--help" || len(args) > 1 && args[1] == "--help":
-		reply = "init init-execution lock-plan record-file-change run finish-step finish-run next-step next-action doctor status claim-step recommend-workflow workflow-contract --root --from-json --json --agent --step --attempt --path --gate --confirm-risk --stdin --selected-profile --reason"
+		reply = "init init-execution lock-plan record-file-change run finish-step finish-run next-step next-action doctor status claim-step recommend-workflow workflow-contract --root --from-json --json --agent --step --attempt --path --gate --confirm-risk --stdin --selected-profile --reason --explain"
 	case args[0] == "recommend-workflow":
 		reply = trustWorkflowRecommendation
 	case args[0] == "next-step":
 		data, _ := os.ReadFile(filepath.Join(stateDir, "step"))
 		step, _ := strconv.Atoi(string(data))
 		if step >= 2 {
-			reply = "null"
+			reply = `{"diagnostics":[],"reason_code":"steps_complete","step":null}`
 		} else {
-			reply = fmt.Sprintf(`{"id":"P%d"}`, step+1)
+			reply = fmt.Sprintf(`{"diagnostics":[],"reason_code":"eligible","step":{"id":"P%d"}}`, step+1)
 		}
 	case args[0] == "claim-step":
 		reply = `{"attempt_id":"A1"}`

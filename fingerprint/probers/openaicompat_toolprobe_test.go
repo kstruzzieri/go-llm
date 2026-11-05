@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/kstruzzieri/go-llm/fingerprint"
+	"github.com/kstruzzieri/go-llm/provider"
 	"github.com/kstruzzieri/go-llm/provider/openaicompat"
 )
 
@@ -282,5 +283,60 @@ func TestOpenAICompatProber_ProbeToolCall_RequestBodies(t *testing.T) {
 	}
 	if len(second.Tools) != 1 || second.Tools[0].Function.Name != "get_time" {
 		t.Errorf("attempt-2 tools = %+v, want single get_time", second.Tools)
+	}
+}
+
+// toolProbeUsageOK and toolProbeUsageNoCalls carry prompt_tokens, so the
+// usage observer has a real count to report.
+const (
+	toolProbeUsageOK      = `{"choices":[{"message":{"role":"assistant","content":"","tool_calls":[{"id":"1","type":"function","function":{"name":"get_time","arguments":"{}"}}]}}],"usage":{"prompt_tokens":40,"completion_tokens":6,"total_tokens":46}}`
+	toolProbeUsageNoCalls = `{"choices":[{"message":{"role":"assistant","content":"It is noon."}}],"usage":{"prompt_tokens":40,"completion_tokens":6,"total_tokens":46}}`
+)
+
+type observedUsage struct {
+	model string
+	usage provider.Usage
+}
+
+// The observer fires once per successful attempt (a 400/422 or error attempt
+// carries no usage and is not observed), and the probe outcome is identical
+// with and without it.
+func TestProberUsageObserver(t *testing.T) {
+	probeUsage := provider.Usage{PromptTokens: 40, CompletionTokens: 6, TotalTokens: 46}
+	for _, tt := range []struct {
+		name      string
+		responses []scriptedResponse
+		wantObs   int
+	}{
+		{"yes_on_required", []scriptedResponse{{200, toolProbeUsageOK}}, 1},
+		{"inconclusive_on_required", []scriptedResponse{{200, toolProbeUsageNoCalls}}, 1},
+		{"escalate_then_yes", []scriptedResponse{{400, ""}, {200, toolProbeUsageOK}}, 1},
+		{"no_when_tools_rejected", []scriptedResponse{{400, ""}, {422, ""}}, 0},
+		{"server_error", []scriptedResponse{{500, ""}}, 0},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			probe := func(opts ...OpenAICompatProberOption) (fingerprint.CapProbeOutcome, error) {
+				s := newScriptedToolProbeServer(t, tt.responses)
+				defer s.srv.Close()
+				p := NewOpenAICompatProber(openaicompat.NewProvider(openaicompat.NewClient(s.srv.URL)), opts...)
+				return p.ProbeToolCall(context.Background(), "tool-model")
+			}
+			var got []observedUsage
+			outcome, err := probe(WithOpenAICompatUsageObserver(func(model string, u provider.Usage) {
+				got = append(got, observedUsage{model, u})
+			}))
+			wantOutcome, wantErr := probe()
+			if outcome != wantOutcome || (err == nil) != (wantErr == nil) {
+				t.Fatalf("observed probe = %+v, %v; want %+v, %v", outcome, err, wantOutcome, wantErr)
+			}
+			if len(got) != tt.wantObs {
+				t.Fatalf("observations = %+v; want %d", got, tt.wantObs)
+			}
+			for _, o := range got {
+				if o != (observedUsage{"tool-model", probeUsage}) {
+					t.Fatalf("observation = %+v; want tool-model %+v", o, probeUsage)
+				}
+			}
+		})
 	}
 }

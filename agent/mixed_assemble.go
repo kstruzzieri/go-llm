@@ -41,6 +41,13 @@ var ErrMixedCompactor = errors.New("agent: ContextManager.Mixed is incompatible 
 // a retained anchor whose subjects were ALL omitted, whose rows are then every
 // one of them a zero-cost omission while its placeholder text is model-visible
 // and paid for. The rows therefore deliberately do not sum to the total.
+//
+// Under ContextManager.CompactionLowWater a step that evicts allocates again
+// against the low-water mark. When that pass succeeds, its omission reasons
+// are judged against the mark, not MaxTokens: a row can read token_budget
+// while EstimatedTokensFree exceeds its cost. When it falls back to the
+// full-budget allocation, they are judged against MaxTokens as usual. The
+// trace records neither the mark nor which pass it reports.
 type ContextAssemblyTrace struct {
 	MaxTokens           int
 	EstimatedTokensUsed int
@@ -159,10 +166,9 @@ func (m ContextManager) assembleMixed(ctx context.Context, st State, toolSchemaT
 		}, ContextAssemblyTrace{}, ErrContextExhausted
 	}
 
-	// Units come from the PRE-materialization State. materializeDurableSummary
-	// prepends a pinned message at index 0, which makes firstPinnedIndex return 0
-	// and silently reclassifies every prior-history exchange as a current-run
-	// plain one — buildMixedUnits' documented precondition.
+	// Units come from the PRE-materialization State: buildMixedUnits relies
+	// on it for subject IDs and unit boundaries, and the summary that
+	// materializeDurableSummary prepends at index 0 would shift both.
 	units, err := m.buildMixedUnits(st)
 	if err != nil {
 		if errors.Is(err, ErrContextExhausted) {
@@ -225,6 +231,33 @@ func (m ContextManager) assembleMixed(ctx context.Context, st State, toolSchemaT
 			Mitigation:  MitigationHalt,
 		}, ContextAssemblyTrace{}, err
 	}
+	// Low-water (CompactionLowWater): a step that had to evict allocates again
+	// against the mark, so later steps fit without evicting. allocateMixed
+	// mutates its units, so that pass gets fresh ones, and it keeps the newest
+	// current-run unit, whose observation the model has not read yet. When the
+	// must-fit units and that unit do not fit the mark, the pass fails and the
+	// full-budget allocation above stands: low-water never turns a fit into an
+	// error.
+	if mark, ok := lowWaterMark(stateBudget, m.CompactionLowWater); ok && alloc.evictedGroups > 0 {
+		// The same input just built units, so this cannot fail; on the
+		// impossible error the full-budget allocation simply stands.
+		if lowUnits, lerr := m.buildMixedUnits(st); lerr == nil {
+			// Newest first, stopping at the goal, like newestCurrentRunGroup.
+			for i := len(lowUnits) - 1; i >= 0; i-- {
+				k := lowUnits[i].kind
+				if k == unitPinned {
+					break
+				}
+				if k == unitChain || k == unitPlainSpan {
+					lowUnits[i].keep = true
+					break
+				}
+			}
+			if lowAlloc, lerr := m.allocateMixed(ctx, lowUnits, mark, sysTokens); lerr == nil && preservesNewestContent(units, lowUnits) {
+				units, alloc = lowUnits, lowAlloc
+			}
+		}
+	}
 
 	out := materializeMixed(stMat.System, summary, units)
 	used, usedOK := m.checkedTotalTokens(out, 0)
@@ -267,6 +300,25 @@ func (m ContextManager) assembleMixed(ctx context.Context, st State, toolSchemaT
 		return out, pressure, ContextAssemblyTrace{}, ErrContextExhausted
 	}
 	return out, pressure, m.fillMixedTrace(units, summary, alloc, stateBudget, used), nil
+}
+
+// preservesNewestContent compares allocations of the same units. A newest
+// anchor may use a cheaper real alternative, but must not lose all content
+// selected at full budget. An anchor already omitted there needs no fallback.
+func preservesNewestContent(full, low []*mixedUnit) bool {
+	selected := func(s *mixedSubject) bool { return s.chosen >= 0 }
+	for i, u := range low {
+		if !u.keep {
+			continue
+		}
+		for j, a := range u.anchors {
+			if slices.ContainsFunc(full[i].anchors[j].subjects, selected) &&
+				!slices.ContainsFunc(a.subjects, selected) {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // mustFitCause attributes a must-fit overflow across the THREE buckets mixed

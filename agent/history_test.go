@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/kstruzzieri/go-llm/internal/promptfence"
 	"github.com/kstruzzieri/go-llm/provider"
 )
 
@@ -70,7 +71,7 @@ func TestBuildChatRequestOrdersSystemHistoryGoal(t *testing.T) {
 			{Role: "assistant", Content: "a1"},
 		},
 	})
-	req := buildChatRequest(st, nil, 0, provider.ModelOptions{}, nil)
+	req := buildChatRequest(st, nil, 0, provider.ModelOptions{}, nil, promptfence.Fence{})
 	gotRoles := make([]string, len(req.Messages))
 	gotContent := make([]string, len(req.Messages))
 	for i, m := range req.Messages {

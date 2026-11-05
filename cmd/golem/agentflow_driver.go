@@ -31,12 +31,13 @@ type afClient interface {
 	ProbeWorkflow(context.Context) error
 	RecommendWorkflow(context.Context, agentflow.TaskBrief, string, string) (agentflow.WorkflowRecommendation, error)
 	ProbeReview(context.Context) error
+	ProbeRecovery(context.Context) error
 	Init(context.Context) error
 	LockPlan(context.Context, string) error
 	MaterializeWorkflowContract(context.Context, agentflow.WorkflowRecommendation) error
 	InitExecution(context.Context) error
 	Doctor(context.Context) error
-	NextStep(context.Context) (string, error)
+	ExplainNextStep(context.Context) (agentflow.NextStepExplanation, error)
 	ClaimStep(context.Context, string) (string, error)
 	RecordReview(context.Context, string) (agentflow.ReviewRun, error)
 	AmendStep(context.Context, string, []string) (string, error)
@@ -239,6 +240,11 @@ func (d *driver) run(ctx context.Context) (string, error) {
 		if err := d.af.ProbeReview(ctx); err != nil {
 			return "", &agentflowUnavailableError{fmt.Errorf("agentflow review unavailable: %w", err)}
 		}
+		// A same-plan review round skips the execution-history refusal and runs
+		// the serial loop over retained attempts, so it is recovery too.
+		if err := d.af.ProbeRecovery(ctx); err != nil {
+			return "", &agentflowUnavailableError{fmt.Errorf("agentflow review unavailable: %w", err)}
+		}
 	}
 	if err := d.af.Init(ctx); err != nil {
 		return "", err
@@ -295,11 +301,12 @@ func (d *driver) finishRun(ctx context.Context, proof *resumeProofGuard) (string
 }
 
 // requireNoStepWork refuses finish-run while AgentFlow still reports step or
-// attempt work (#651). next-step returns nothing both when every step is done
-// and when the remaining steps hold open attempts, and non-strict finish-run
-// does not require completed steps; only next-action's run-phase states prove
-// that every step completed and no attempt is open. It also refuses
-// proof_failing, which finish-run would overwrite (#689).
+// attempt work (#651). next-step --explain stops the serial loop on open
+// attempts (#731), but its steps_complete does not decide whether a completed
+// step needs amend-step, a writer can open an attempt after the loop, and
+// non-strict finish-run does not require completed steps; only next-action's
+// run-phase states prove that every step completed and no attempt is open. It
+// also refuses proof_failing, which finish-run would overwrite (#689).
 func (d *driver) requireNoStepWork(ctx context.Context) error {
 	state, err := d.af.NextAction(ctx)
 	if err != nil {
@@ -326,19 +333,40 @@ func (d *driver) requireNoStepWork(ctx context.Context) error {
 	return fmt.Errorf("agentflow still reports step work before finish-run: %s; no proof was built; run -agentflow-status to see whether -agentflow-resume can recover it", where)
 }
 
+// runSerialSteps runs eligible steps until next-step --explain reports none
+// (#731). steps_complete hands over to finishRun's next-action check; open
+// attempts or unmet dependencies stop the run here, before a review round
+// records anything and before finish-run.
 func (d *driver) runSerialSteps(ctx context.Context) error {
 	for {
-		id, err := d.af.NextStep(ctx)
+		next, err := d.af.ExplainNextStep(ctx)
 		if err != nil {
 			return err
 		}
-		if id == "" {
+		switch next.ReasonCode {
+		case agentflow.NextStepEligible:
+			if err := d.runOneStep(ctx, next.StepID); err != nil {
+				return err
+			}
+		case agentflow.NextStepStepsComplete:
 			return nil
-		}
-		if err := d.runOneStep(ctx, id); err != nil {
-			return err
+		case agentflow.NextStepOpenAttempts, agentflow.NextStepDependenciesUnmet:
+			return stepWorkRemainsError(next)
+		default: // the client already refuses unknown codes
+			return fmt.Errorf("agentflow next-step reported unknown reason_code %q; update Golem", next.ReasonCode)
 		}
 	}
+}
+
+// stepWorkRemainsError is the serial loop's refusal when AgentFlow reports
+// step work but no eligible step. It carries AgentFlow's raw diagnostics on one
+// line; every sink prints errors through recoveryDisplayText.
+func stepWorkRemainsError(next agentflow.NextStepExplanation) error {
+	why := ""
+	if len(next.Diagnostics) > 0 {
+		why = " (" + strings.Join(next.Diagnostics, "; ") + ")"
+	}
+	return fmt.Errorf("agentflow reports no eligible step while step work remains: reason_code %q%s; no proof was built; run -agentflow-status to see whether -agentflow-resume can recover it", next.ReasonCode, why)
 }
 
 func (d *driver) runOneStep(ctx context.Context, id string) error {
@@ -588,6 +616,9 @@ func newTaskStepRunner(root string, plan *agentflow.Plan, af afClient, orch *age
 			Budget:   sess.startupBudget,
 			Approver: taskApprover(approveEdits),
 			Options:  sess.startupModelOptions,
+			// Rotated per step only: steps may run in parallel, so none
+			// writes the shared session.
+			SystemKeys: sess.sysInputs.systemKeys(),
 		}
 		res, runErr := orch.Run(stepCtx, req, agent.Observer(newRenderer(out, false, sess.maxSteps, sess.clock, sess.mixed)))
 		if fatal := afJournal.fatalErr(); fatal != nil {
@@ -749,7 +780,7 @@ func runAgentflowTask(ctx context.Context, stdout, stderr io.Writer, interrupts 
 			reportAgentflowResumeError(stderr, err)
 			return errAgentflowTaskFailed
 		}
-		renderAgentflowStatus(stdout, final, &summary, resumeDisposition(final.State))
+		renderResumeResult(stdout, final, summary)
 		return nil
 	}
 	var coordinator *parallelCoordinator

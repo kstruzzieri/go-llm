@@ -19,9 +19,9 @@ const SchemaVersion = 2
 // System is the caller's application-prompt projection. Golem omits its
 // CLI-owned canary fragment from this field while preserving the other typed
 // composition inputs. agent.Run appends agent.ToolTrustContract and interceptor
-// addenda, and frames every tool observation under a per-render key (#430), so
-// replaying through Run reproduces those prompt and framing rules rather than
-// reading their generated values here.
+// addenda, and frames every tool observation under its own generated key
+// (#430), so replaying through Run reproduces those prompt and framing rules
+// rather than reading their generated values here.
 type TraceMeta struct {
 	Goal           string
 	System         string
@@ -75,6 +75,13 @@ type usageLite struct {
 	Prompt     int `json:"prompt"`
 	Completion int `json:"completion"`
 	Total      int `json:"total"`
+	// Cache counters are additive within SchemaVersion 2: omitempty leaves
+	// every span from a backend that reports none byte-identical. The Reported
+	// flags keep a measured zero apart from "backend does not report".
+	Cached             int  `json:"cached,omitempty"`
+	CachedReported     bool `json:"cached_reported,omitempty"`
+	CacheWrite         int  `json:"cache_write,omitempty"`
+	CacheWriteReported bool `json:"cache_write_reported,omitempty"`
 }
 
 type pressureLite struct {
@@ -105,6 +112,11 @@ type runSpan struct {
 	MaxPressureLevel string  `json:"max_pressure_level"`
 	// SecretFindings counts recognized findings without storing their contents.
 	SecretFindings int `json:"secret_findings,omitempty"`
+	// Compactions and FenceRotations count the run's "compaction" and
+	// "fence_rotation" agent.EventRecords. Additive within SchemaVersion 2:
+	// omitempty keeps every run span without either byte-identical.
+	Compactions    int `json:"compactions,omitempty"`
+	FenceRotations int `json:"fence_rotations,omitempty"`
 }
 
 type modelStepSpan struct {

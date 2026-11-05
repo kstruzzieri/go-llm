@@ -31,17 +31,41 @@ func (e *VersionError) Error() string { return e.msg }
 // calls it instead of Probe, then reads next-action, to stay read-only and
 // cheap; Probe calls it first.
 func (c *Client) CheckVersion(ctx context.Context) error {
+	vout, err := c.version(ctx)
+	if err != nil {
+		return err
+	}
+	return checkVersion(vout)
+}
+
+// ProbeRecovery refuses an AgentFlow release whose next-action is known to
+// mis-project recovery. AgentFlow 1.2.1 (agentflow#97) counts a changed
+// file's latest receipt from any attempt, so a stopped attempt's unaccepted
+// edit satisfies its replacement and resume would gate and complete the step
+// on it. Resume, status and -review-manifest runs call it; fresh runs never
+// retry a stopped attempt and keep the base gate. The exclusion is
+// permanent: CheckVersion compares only major.minor and would admit 1.2.1
+// again. The refusal is a VersionError, so JSON status may report its text.
+func (c *Client) ProbeRecovery(ctx context.Context) error {
+	vout, err := c.version(ctx)
+	if err != nil {
+		return err
+	}
+	return checkRecoveryVersion(vout)
+}
+
+func (c *Client) version(ctx context.Context) (string, error) {
 	vout, stderr, exit, err := c.r.Run(ctx, []string{"--version"}, nil)
 	if err != nil {
-		return fmt.Errorf("agentflow unavailable (--version failed): %w", err)
+		return "", fmt.Errorf("agentflow unavailable (--version failed): %w", err)
 	}
 	if exit != 0 {
 		// A broken install's own stderr is the diagnosis; keep it. Still not a
 		// VersionError: that text is not Golem's, so JSON status stays silent.
-		return fmt.Errorf("agentflow unavailable (--version failed): %w",
+		return "", fmt.Errorf("agentflow unavailable (--version failed): %w",
 			&CommandError{Cmd: "--version", Exit: exit, Stderr: string(stderr)})
 	}
-	return checkVersion(string(vout))
+	return string(vout), nil
 }
 
 // requiredSubcommands must all appear in `agentflow --help` for the P0 sequence.
@@ -60,7 +84,7 @@ var requiredFeatures = []featureProbe{
 	{"lock-plan", []string{"--from-json", "--json"}},
 	{"init-execution", []string{"--root"}},
 	{"doctor", []string{"--root", "--json"}},
-	{"next-step", []string{"--root", "--json"}},
+	{"next-step", []string{"--root", "--json", "--explain"}}, // #731: --explain is 1.2
 	{"claim-step", []string{"--root", "--agent", "--json"}},
 	{"record-file-change", []string{"--root", "--step", "--attempt", "--path", "--agent", "--json"}},
 	{"run", []string{"--root", "--step", "--attempt", "--gate", "--agent", "--confirm-risk"}},
@@ -194,34 +218,71 @@ func versionEcho(s string) string {
 }
 
 func checkVersion(s string) error {
-	// Only the first non-empty line is the version; later lines (warnings,
-	// paths) are neither parsed nor echoed. It reads like "agentflow 1.0.0";
-	// anything after the second dot ("1.0.0rc1") is accepted.
-	line, _, _ := strings.Cut(strings.TrimSpace(s), "\n")
-	line = strings.TrimSpace(line)
-	fields := strings.Fields(line)
-	if len(fields) < 2 {
-		return &VersionError{fmt.Sprintf("cannot parse agentflow version from %q", versionEcho(line))}
-	}
-	v := fields[len(fields)-1]
-	if fields[0] == "agentflow" {
-		v = fields[1]
-	}
-	parts := strings.SplitN(v, ".", 3)
-	if len(parts) < 2 {
-		return &VersionError{fmt.Sprintf("cannot parse agentflow version %q", versionEcho(v))}
-	}
-	major, majorErr := strconv.Atoi(parts[0])
-	minor, minorErr := strconv.Atoi(parts[1])
-	// Atoi also accepts a leading sign; a version part is plain decimal.
-	if majorErr != nil || minorErr != nil || strings.ContainsAny(parts[0]+parts[1], "+-") {
-		return &VersionError{fmt.Sprintf("cannot parse agentflow version %q", versionEcho(v))}
+	_, _, major, minor, err := parseVersion(s)
+	if err != nil {
+		return err
 	}
 	if major < minVersion[0] || (major == minVersion[0] && minor < minVersion[1]) {
 		return &VersionError{fmt.Sprintf("agentflow %d.%d is too old; need >= %d.%d", major, minor, minVersion[0], minVersion[1])}
 	}
 	if major > maxMajor {
 		return &VersionError{fmt.Sprintf("agentflow %d.%d is newer than this Golem supports; need %d.x", major, minor, maxMajor)}
+	}
+	return nil
+}
+
+// parseVersion reads the version token and its numeric major.minor. Only the
+// first non-empty line is the version; later lines (warnings, paths) are
+// neither parsed nor echoed. It reads like "agentflow 1.0.0"; parts keeps
+// anything after the second dot ("0rc1") unparsed for the caller.
+func parseVersion(s string) (v string, parts []string, major, minor int, err error) {
+	line, _, _ := strings.Cut(strings.TrimSpace(s), "\n")
+	line = strings.TrimSpace(line)
+	fields := strings.Fields(line)
+	if len(fields) < 2 {
+		return "", nil, 0, 0, &VersionError{fmt.Sprintf("cannot parse agentflow version from %q", versionEcho(line))}
+	}
+	v = fields[len(fields)-1]
+	if fields[0] == "agentflow" {
+		v = fields[1]
+	}
+	parts = strings.SplitN(v, ".", 3)
+	if len(parts) < 2 {
+		return "", nil, 0, 0, &VersionError{fmt.Sprintf("cannot parse agentflow version %q", versionEcho(v))}
+	}
+	major, majorErr := strconv.Atoi(parts[0])
+	minor, minorErr := strconv.Atoi(parts[1])
+	// Atoi also accepts a leading sign; a version part is plain decimal.
+	if majorErr != nil || minorErr != nil || strings.ContainsAny(parts[0]+parts[1], "+-") {
+		return "", nil, 0, 0, &VersionError{fmt.Sprintf("cannot parse agentflow version %q", versionEcho(v))}
+	}
+	return v, parts, major, minor, nil
+}
+
+// checkRecoveryVersion refuses AgentFlow 1.2.1 by its leading patch digits, so
+// every 1.2.1 build (1.2.1rc1, 1.2.1.post1, 1.2.1+local, 1.2.1.dev0, 1.2.01)
+// is refused and 1.2.10 is not. A 1.2 version without a readable patch fails
+// closed: it cannot be told apart from 1.2.1.
+func checkRecoveryVersion(s string) error {
+	v, parts, major, minor, err := parseVersion(s)
+	if err != nil {
+		return err
+	}
+	if major != 1 || minor != 2 {
+		return nil
+	}
+	digits := ""
+	if len(parts) == 3 {
+		digits = parts[2][:len(parts[2])-len(strings.TrimLeft(parts[2], "0123456789"))]
+	}
+	patch, err := strconv.Atoi(digits)
+	if err != nil {
+		return &VersionError{fmt.Sprintf("cannot parse agentflow patch version %q; recovery refuses an AgentFlow 1.2 it cannot tell from 1.2.1", versionEcho(v))}
+	}
+	if patch == 1 {
+		// Fixed text: the token reaches stderr raw in JSON status, and every
+		// version refused here is a 1.2.1 build.
+		return &VersionError{"agentflow 1.2.1 cannot drive recovery: its next-action counts a stopped attempt's file receipts toward the replacement attempt (agentflow#97); use AgentFlow 1.2.0 or a later fixed release"}
 	}
 	return nil
 }

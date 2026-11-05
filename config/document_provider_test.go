@@ -364,3 +364,41 @@ func TestClearAllProviderAPIKeysIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// TestUpdateProviderCacheAffinityFollowsAPIFormat: ProviderSpec cannot show
+// cache_affinity, so UpdateProvider keeps an authored value while the provider
+// stays openai-compat and drops it when the form moves the provider to another
+// format, which would otherwise fail the finalize gate over a hidden field.
+func TestUpdateProviderCacheAffinityFollowsAPIFormat(t *testing.T) {
+	raw := strings.Replace(rawValid, `"base_url": "http://localhost:1234"`,
+		`"base_url": "http://localhost:1234", "api_format": "openai-compat", "cache_affinity": "openai"`, 1)
+	for _, tc := range []struct{ format, want string }{
+		{"openai-compat", "openai"},
+		{"ollama", ""},
+		{"", ""}, // empty api_format means ollama
+	} {
+		t.Run("api_format="+tc.format, func(t *testing.T) {
+			d, err := ParseDocument([]byte(raw), Origin{Source: OriginExplicit}, DocumentOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := d.UpdateProvider("p", ProviderSpec{BaseURL: "http://localhost:1234", APIFormat: tc.format}); err != nil {
+				t.Fatalf("UpdateProvider: %v", err)
+			}
+			if got := d.Config().Providers["p"].CacheAffinity; got != tc.want {
+				t.Errorf("CacheAffinity = %q, want %q", got, tc.want)
+			}
+			out := renderToString(t, d)
+			if got := strings.Contains(out, `"cache_affinity"`); got != (tc.want != "") {
+				t.Errorf("rendered cache_affinity present = %v, want %v:\n%s", got, tc.want != "", out)
+			}
+			reloaded, err := ParseDocument([]byte(out), Origin{Source: OriginExplicit}, DocumentOptions{})
+			if err != nil {
+				t.Fatalf("rendered document does not load: %v", err)
+			}
+			if got := reloaded.Config().Providers["p"].CacheAffinity; got != tc.want {
+				t.Errorf("reloaded CacheAffinity = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

@@ -594,6 +594,32 @@ type startupInfo struct {
 	dispatchLine       string
 	interceptorLine    string
 	consultLine        string
+	// summarizeModel and activeModel are the first strict selectors of the
+	// summarize and active routes ("" when a route has no chain); with
+	// summarizePriced they drive the shared-model notice.
+	summarizeModel  string
+	activeModel     string
+	summarizePriced bool
+}
+
+// summarizeNoticeInputs derives the three summarize-notice fields from the
+// planned chains and the bundle's prices. An empty chain gives "" (recommendation
+// mode runs with an empty active chain, and a skipped summarize route has none),
+// so indexing never panics. priced is true only when the summarize model has a
+// configured price with a nonzero Input or Output: a $0 price has no cost to
+// lower.
+func summarizeNoticeInputs(summarize, active []string, prices map[provider.ModelKey]config.ModelPrice) (summarizeModel, activeModel string, priced bool) {
+	if len(summarize) > 0 {
+		summarizeModel = summarize[0]
+	}
+	if len(active) > 0 {
+		activeModel = active[0]
+	}
+	if key, ok := parseSelector(summarizeModel); ok {
+		p := prices[key]
+		priced = p.Input != 0 || p.Output != 0
+	}
+	return summarizeModel, activeModel, priced
 }
 
 // startupNotices renders the human-facing startup lines (written to stderr).
@@ -653,6 +679,9 @@ func startupNotices(info startupInfo) []string {
 	}
 	if info.inputCeilingLine != "" {
 		out = append(out, info.inputCeilingLine)
+	}
+	if info.summarizeModel != "" && info.summarizeModel == info.activeModel && info.summarizePriced {
+		out = append(out, "notice: summarize uses the same model as chat ("+info.summarizeModel+"); set defaults.summarize to a cheaper model to lower compression cost")
 	}
 	for _, w := range info.bootstrapWarns {
 		out = append(out, "warning: "+w.Error())
@@ -775,7 +804,7 @@ func newOrchestratorFactoryChain(caller agent.ModelCaller, f flags, verifier age
 	// same flags value.
 	opts = append(opts, agent.WithInterceptors(chain...))
 	return func() *agent.Orchestrator {
-		return agent.New(caller, agent.ContextManager{Mixed: f.progressive}, opts...)
+		return agent.New(caller, golemruntime.NewContextManager(f.progressive), opts...)
 	}
 }
 
@@ -1192,6 +1221,9 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		capStoreWarn = warning
 	}
 
+	// The usage ledger exists before bootstrap so bootstrap-time model calls
+	// (Task 4.3's probe observers) have somewhere to record.
+	usage := &usageLedger{}
 	bundle, err := providerbootstrap.New(ctx, providerbootstrap.Options{
 		Config:                          cfg, // nil => default Ollama provider
 		OllamaURLOverride:               f.ollamaURL,
@@ -1205,6 +1237,11 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		// request body carrying a configured credential, using the same
 		// snapshot the configured_secrets guard is built from.
 		ContentGuard: f.interceptors,
+		// Task 4.3: probe calls are side-task usage, priced by the full
+		// provider/model key.
+		ProbeUsageObserver: func(k provider.ModelKey, u provider.Usage) {
+			usage.addSide("probe", k.String(), u)
+		},
 	})
 	if err != nil {
 		// #352: a provider failure during pre-run bootstrap is a provider
@@ -1297,7 +1334,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	)
 	if f.grounding {
 		groundingRec = newEvidenceRecorder(groundingEvidenceMaxBytes)
-		groundingSvc, groundingChainWarn = newGroundingService(bundle.Config, bundle.Router, groundingRec)
+		groundingSvc, groundingChainWarn = newGroundingService(bundle.Config, bundle.Router, groundingRec, usage)
 		if groundingSvc == nil {
 			groundingRec = nil // no verifier: capture nothing and wrap nothing
 		}
@@ -1323,6 +1360,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		rr := enableRetrieve(ctx, bundle.Config, bundle.Router, retrieveOpts{
 			autoDBPath:  autoDBPath,
 			workspaceID: autoWorkspaceID, weighter: feedbackWeighter, progressive: f.progressive, recorder: groundingRec,
+			usage: usage,
 		})
 		warns = append(warns, rr.warns...)
 		if rr.reader != nil {
@@ -1343,6 +1381,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 			weighter:    feedbackWeighter,
 			progressive: f.progressive,
 			recorder:    groundingRec,
+			usage:       usage,
 		})
 		if rr.reader != nil {
 			// Route the explicit generation through the same readyRetrieve
@@ -1638,7 +1677,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 
 	delegateLine := ""
 	if f.delegate {
-		dt, dchain, derr := buildDelegateTool(bundle.Router, f.delegateRole, delegateChain, nil)
+		dt, dchain, derr := buildDelegateTool(bundle.Router, f.delegateRole, delegateChain, nil, usage)
 		if derr != nil {
 			return derr
 		}
@@ -1748,6 +1787,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	if agentMemoryEnabled && mrt.records.CreatedKeyID() != "" {
 		agentMemoryLine += "; created signing identity " + mrt.records.CreatedKeyID()
 	}
+	summarizeModel, activeModel, summarizePriced := summarizeNoticeInputs(summarizeRoute.Chain, plan.chain, bundle.Prices)
 	for _, line := range startupNotices(startupInfo{
 		workspace:         root,
 		agentflowState:    shouldShowAgentflowHint(f) && agentflowStateDetected(root),
@@ -1772,6 +1812,9 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		dispatchLine:      dispatchLine,
 		interceptorLine:   interceptorLine,
 		consultLine:       consultLine,
+		summarizeModel:    summarizeModel,
+		activeModel:       activeModel,
+		summarizePriced:   summarizePriced,
 	}) {
 		_, _ = fmt.Fprintln(stderr, line)
 	}
@@ -1785,7 +1828,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		if len(summarizeChain) == 0 {
 			_, _ = fmt.Fprintln(stderr, "golem: warning: "+progressiveNoChainWarning(true))
 		}
-		sourceSummarizer = routerSourceSummaryGenerator(bundle.Router, summarizeChain)
+		sourceSummarizer = routerSourceSummaryGenerator(bundle.Router, summarizeChain, usage)
 	}
 
 	// #372/#576: every REPL session verifies through one library slot bound
@@ -1828,7 +1871,9 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	budget := prep.budget
 	var summarizer conversation.Summarizer
 	if !f.noCompress {
-		summarizer = agent.NewRouterSummarizer(bundle.Router, summarizeChain)
+		summarizer = agent.NewRouterSummarizerWithUsage(bundle.Router, summarizeChain, func(model string, u provider.Usage) {
+			usage.addSide("summarize", model, u)
+		})
 	}
 	runtime, err := golemruntime.New(ctx, golemruntime.Options{
 		Root:     root,
@@ -1918,6 +1963,8 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		obs:              obsv,
 		feedback:         feedbackSvc,
 		pressureWarn:     f.pressureWarn > 0,
+		usage:            usage,
+		prices:           priceLookup(bundle.Prices),
 		mixed:            f.progressive,
 		grounding:        groundingSvc,
 		thinkModels:      bundle.Models,
@@ -2046,11 +2093,12 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 					router:      bundle.Router,
 					embedder: newChainEmbedder(func(rc context.Context, rreq provider.RoutingRequest) (embedExecutor, error) {
 						return bundle.Router.Route(rc, rreq)
-					}, embChain),
+					}, embChain, usage),
 					embChain:    embChain,
 					weighter:    feedbackWeighter,
 					progressive: f.progressive,
 					recorder:    groundingRec,
+					usage:       usage,
 					summarize:   sourceSummarizer,
 					ready:       ready,
 					notice:      notice,

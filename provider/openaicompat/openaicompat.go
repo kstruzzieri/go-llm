@@ -3,6 +3,7 @@ package openaicompat
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
@@ -177,6 +178,7 @@ func (p *Provider) Models(ctx context.Context) ([]provider.ModelInfo, error) {
 func (p *Provider) Chat(ctx context.Context, req provider.ChatRequest) (*provider.ChatResponse, error) {
 	ctx = withSessionID(ctx, req.SessionID)
 	body := toChatRequest(req, false)
+	body.PromptCacheKey = p.client.promptCacheKey(req.SessionID)
 	var resp chatResponse
 	if err := p.client.postJSON(ctx, "/v1/chat/completions", body, &resp); err != nil {
 		return nil, fmt.Errorf("provider: openaicompat: chat: %w", err)
@@ -208,6 +210,19 @@ func (p *Provider) Chat(ctx context.Context, req provider.ChatRequest) (*provide
 		model = req.Model
 	}
 
+	u := withCacheUsage(provider.Usage{
+		PromptTokens:            resp.Usage.PromptTokens,
+		CompletionTokens:        resp.Usage.CompletionTokens,
+		TotalTokens:             resp.Usage.TotalTokens,
+		ReasoningTokens:         resp.Usage.reasoningTokens(),
+		ReasoningTokensReported: resp.Usage.reasoningTokensReported(),
+	}, resp.Usage)
+	if p.client.abacusRouteLLM && resp.Usage.abacusShape {
+		// Abacus omits cache_read_input_tokens when nothing is cached
+		// (measured 2026-11-03), so an absent counter is a reported 0.
+		u.CachedPromptTokensReported = true
+	}
+
 	return &provider.ChatResponse{
 		Model:     model,
 		Provider:  p.name,
@@ -215,14 +230,28 @@ func (p *Provider) Chat(ctx context.Context, req provider.ChatRequest) (*provide
 		Thinking:  thinking,
 		ToolCalls: toProviderToolCalls(msg.ToolCalls),
 		Done:      true,
-		Usage: provider.Usage{
-			PromptTokens:            resp.Usage.PromptTokens,
-			CompletionTokens:        resp.Usage.CompletionTokens,
-			TotalTokens:             resp.Usage.TotalTokens,
-			ReasoningTokens:         resp.Usage.reasoningTokens(),
-			ReasoningTokensReported: resp.Usage.reasoningTokensReported(),
-		},
+		Usage:     u,
 	}, nil
+}
+
+// withCacheUsage returns u with the cached and cache-write prompt-token
+// counters copied from the wire usage w. A counter the server omitted (or a
+// null prompt_tokens_details) stays zero and unreported, so a measured zero
+// remains distinguishable from a backend that does not report. PromptTokens
+// and TotalTokens are left as sent: OpenAI-shape servers, llama-server
+// included, already count cached tokens in prompt_tokens.
+func withCacheUsage(u provider.Usage, w usage) provider.Usage {
+	d := w.PromptTokensDetails
+	if d == nil {
+		return u
+	}
+	if d.CachedTokens != nil {
+		u.CachedPromptTokens, u.CachedPromptTokensReported = *d.CachedTokens, true
+	}
+	if d.CacheWriteTokens != nil {
+		u.CacheWriteTokens, u.CacheWriteTokensReported = *d.CacheWriteTokens, true
+	}
+	return u
 }
 
 // ---------------------------------------------------------------------------
@@ -251,6 +280,7 @@ func (p *Provider) ChatStream(ctx context.Context, req provider.ChatRequest, fn 
 
 	ctx = withSessionID(ctx, req.SessionID)
 	body := toChatRequest(req, true)
+	body.PromptCacheKey = p.client.promptCacheKey(req.SessionID)
 	reader, err := p.client.postSSE(ctx, "/v1/chat/completions", body)
 	if err != nil {
 		return fmt.Errorf("provider: openaicompat: chat stream: %w", err)
@@ -314,12 +344,31 @@ func (p *Provider) ChatStream(ctx context.Context, req provider.ChatRequest, fn 
 		}
 		if chunk.Usage != nil {
 			seenUsage = true
-			lastUsage = provider.Usage{
+			lastUsage = withCacheUsage(provider.Usage{
 				PromptTokens:            chunk.Usage.PromptTokens,
 				CompletionTokens:        chunk.Usage.CompletionTokens,
 				TotalTokens:             chunk.Usage.TotalTokens,
 				ReasoningTokens:         chunk.Usage.reasoningTokens(),
 				ReasoningTokensReported: chunk.Usage.reasoningTokensReported(),
+			}, *chunk.Usage)
+			if p.client.abacusRouteLLM && chunk.Usage.PromptTokensDetails == nil {
+				// A cold Abacus frame carries no prompt_tokens_details
+				// (measured 2026-11-03), so an absent counter is a reported 0.
+				lastUsage.CachedPromptTokensReported = true
+			}
+			if p.client.abacusRouteLLM {
+				// Abacus streams prompt_tokens with cached tokens at the model's
+				// cache discount (596 for a 5,089-token request with 4,992
+				// cached) and, on models that bill cache writes, written tokens
+				// at 1.25 (5,691 for a cold 4,554-token request), and sends no
+				// raw or written count. Recover the exact count for a served
+				// model measured not to write; otherwise report the input
+				// unknown rather than wrong. Total follows to keep Total = 0 or
+				// Prompt + Completion.
+				lastUsage.PromptTokens, lastUsage.TotalTokens = 0, 0
+				if prompt, ok := abacusStreamPrompt(cmp.Or(lastModel, req.Model), chunk.Usage.PromptTokens, lastUsage.CachedPromptTokens); ok {
+					lastUsage.PromptTokens, lastUsage.TotalTokens = prompt, prompt+lastUsage.CompletionTokens
+				}
 			}
 		}
 		if len(chunk.Choices) == 0 {

@@ -113,6 +113,28 @@ func (r *renderer) finalFooter(res agent.Result, elapsed time.Duration) {
 	_ = r.markdown.Finish()
 	line := fmt.Sprintf("done · %s · %.1fs · %d tok",
 		plural(len(res.Steps), "step", "steps"), elapsed.Seconds(), res.Usage.TotalTokens)
+	if res.Usage.CachedPromptTokensReported {
+		// Cache hits are shown only when the backend measured them, so a
+		// backend that reports nothing keeps its footer unchanged.
+		line += fmt.Sprintf(" (%d cached)", res.Usage.CachedPromptTokens)
+	}
+	// Both events re-render earlier request bytes, so each one explains a
+	// prompt-cache miss; a run with neither keeps its footer unchanged.
+	var compactions, rotations int
+	for _, e := range res.Events {
+		switch e.Kind {
+		case "compaction":
+			compactions++
+		case "fence_rotation":
+			rotations++
+		}
+	}
+	if compactions > 0 {
+		line += " · " + plural(compactions, "compaction", "compactions")
+	}
+	if rotations > 0 {
+		line += " · " + plural(rotations, "fence rotation", "fence rotations")
+	}
 	if res.Risk != nil {
 		// #514 D7: successful REPL and -p turns expose their cumulative score.
 		line += fmt.Sprintf(" · risk %d", res.Risk.Score)

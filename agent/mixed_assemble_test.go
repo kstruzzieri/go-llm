@@ -958,9 +958,8 @@ func TestAssembleWithTraceStripsContextOnUnvalidatedSpans(t *testing.T) {
 
 // TestAssembleWithTraceHistoryLane pins that units are built from the
 // PRE-materialization State. materializeDurableSummary prepends a pinned message
-// at index 0, which zeroes firstPinnedIndex and would reclassify every
-// prior-history exchange as a current-run plain one (lane 0) with its subject ID
-// shifted by one.
+// at index 0, which would shift every prior-history exchange's subject ID
+// by one and give the summary a unit of its own.
 func TestAssembleWithTraceHistoryLane(t *testing.T) {
 	st := State{System: "SYS", DurableSummary: "PRIOR", Messages: []Message{
 		history("user", "HQ"),       // 0 \ prior history: ID "0"

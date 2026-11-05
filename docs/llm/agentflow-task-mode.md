@@ -182,8 +182,14 @@ golem -root <workspace> -agentflow-status -json
 Human status shows the authoritative `next-action` state and reason, current
 step/gate, attempt owner and lease, typed gate statuses, diagnostics, and the
 serial resume disposition. Any suggested command is labeled display-only and
-is never executed. JSON mode relays AgentFlow's exact `next-action --json`
-bytes. Both forms use actor `golem`. Status first runs `agentflow --version` and
+is never executed. Human status also lists each current recorded blocker, a
+`blocked` or `failed` attempt close that no later attempt of the same step has
+superseded, as `recorded blocker: <step>/<attempt> <event> at <time> (owner
+<owner>): <reason>`. These lines are escaped like every other status line, the
+reason is cut at 200 characters, and they are display-only: they never change
+the exit code or the resume disposition. JSON mode relays AgentFlow's exact
+`next-action --json` bytes, which carry every recorded blocker, superseded ones
+included. Both forms use actor `golem`. Status first runs `agentflow --version` and
 refuses an AgentFlow outside 1.x; it then reads `next-action` and, before
 offering recovery, independently checks any existing proof with the read-only
 `verify-proof` command.
@@ -203,6 +209,10 @@ cannot be read, human mode reports the sanitized failure, JSON mode emits no
 bytes, and status exits `3`. In JSON mode a rejected version, like an unset
 `-agentflow-env` name, is also printed as one `golem:` line on stderr; any other
 launch failure stays silent.
+On AgentFlow 1.2.1, status reports every state that would otherwise exit `2`
+as blocked and exits `3`; JSON mode relays the same bytes and prints the
+refusal as one `golem:` line on stderr. See
+[AgentFlow 1.2.1 and recovery](#agentflow-121-and-recovery).
 
 Status exit codes are stable for scripts:
 
@@ -330,7 +340,8 @@ Drift exposed by a settlement is also refused; after the serial loop,
 `finish-run`'s drift audit stops before building a proof. The table describes
 the state resume finds on entry.
 
-The complete disposition table is:
+The complete disposition table is (on AgentFlow 1.2.1 every exit-`2` row is
+blocked instead: see [AgentFlow 1.2.1 and recovery](#agentflow-121-and-recovery)):
 
 | AgentFlow state | Status exit | Resume behavior |
 |---|---:|---|
@@ -431,6 +442,11 @@ and the `-p` result's `stopReason`. On `-agentflow-resume` the same error
 follows `agentflow resume failed:`. For a parallel worker it appears inside the
 cohort failure, after `run parallel cohort:` and `worker <id>:`.
 
+Until a new attempt of that step opens, human `-agentflow-status` shows the
+block as a recorded blocker carrying the fixed reason, for example
+`recorded blocker: P1/A1 blocked at 2026-10-31T15:30:06+00:00 (owner golem):
+golem: gate execution failed`.
+
 Ctrl-C during the model run cancels it, and Golem then attempts to close the
 attempt with the reason `golem: agent run cancelled`. Ctrl-C during one of the
 step's gates ends that `run` call, and Golem attempts to close the attempt with
@@ -481,6 +497,10 @@ the model. Block the open attempt first, then restore, then resume:
 ```text
 agentflow block-step <step> --root <workspace> --attempt <open attempt> --reason "<text>" --agent golem
 ```
+
+AgentFlow 1.2.1 does not hold the new attempt to its own receipts, so Golem
+refuses to resume with it at all; see
+[AgentFlow 1.2.1 and recovery](#agentflow-121-and-recovery).
 
 An attempt can still stay open: when recording the block itself fails, when
 the process dies mid-attempt,
@@ -582,6 +602,42 @@ If the run came from a planning handoff, re-plan with `-goal`, or run `-plan`
 without `-workflow-handoff`: the handoff check reads
 `.agent/workflow.contract.json`, which went with the archive.
 
+## AgentFlow 1.2.1 and recovery
+
+AgentFlow 1.2.1 (kstruzzieri/agentflow#97) counts an in-scope file as recorded
+when its latest receipt, from any step or attempt, matches the file. A
+stopped attempt's receipt therefore satisfies the attempt that replaces it, so
+resume would run the gates and complete the step on an edit the stopped run
+made and nobody accepted, instead of failing in `file_receipts_missing`
+as described in [Failed step runs](#failed-step-runs).
+
+Golem refuses AgentFlow 1.2.1, including its pre-releases, post-releases and
+local builds (`1.2.1rc1`, `1.2.1.post1`, `1.2.1+local`), for every path that
+can retry a stopped attempt:
+
+- `-agentflow-resume` stops after its read-only checks and before its first
+  change to the run (exit `1`), and does not ask AgentFlow for recovery advice.
+- `-agentflow-status` shows every state that would otherwise exit `2` as
+  blocked and exits `3`. Earlier refusals of an unsafe projection keep
+  precedence.
+- A `-review-manifest` run stops before `init`. A review round over the
+  locked plan skips the execution-history refusal and runs the serial loop
+  over the retained attempts, so it counts as recovery.
+
+A complete run still reports its verified proof through status (exit `0`) and
+resume. A fresh `-plan` or `-goal` run without a review manifest is
+unaffected: it refuses retained execution history and never retries a
+stopped attempt. To recover, use AgentFlow 1.2.0 or a later release that fixes
+the receipt rule. An AgentFlow 1.2 whose patch version cannot be read is
+refused the same way.
+
+The check reads the version AgentFlow prints. A source build that contains
+the 1.2.1 change but still reports another version is not caught. AgentFlow
+`main` between the merge of that change (kstruzzieri/agentflow#98) and the 1.2.1
+release still reports `1.2.0`: update such a checkout, or an editable install
+of it, to the 1.2.1 release or later so the check sees its version, or install
+AgentFlow 1.2.0. A build with a fix that still reports `1.2.1` is refused.
+
 ## Upgrading from AgentFlow 0.x
 
 Golem drives AgentFlow 1.x only, from 1.2: earlier 1.x releases are refused
@@ -598,7 +654,9 @@ migrate it either:
 2. Move the workspace's `.agent/` directory aside. Re-initializing only the
    execution contract is not enough: AgentFlow keeps the old ledger rows and
    rejects them when it reads them.
-3. Install AgentFlow 1.2 or a later 1.x, then re-plan with `-goal`, or
+3. Install AgentFlow 1.2 or a later 1.x (1.2.1 is refused for recovery; see
+   [AgentFlow 1.2.1 and recovery](#agentflow-121-and-recovery)), then
+   re-plan with `-goal`, or
    migrate an external plan to `schema_version` `1.0.0` and review it again
    before `-plan`.
 
@@ -646,13 +704,22 @@ For an external plan, the task driver order is:
    recommendation once through AgentFlow.
 4. Initialize execution, run plan steps and declared gates, and print the same
    route again immediately before review-manifest ingestion.
-5. After the steps and any review amendments, ask `next-action` whether step
-   work remains, and continue only from a run-phase state (`run_unverified`,
-   `drift_failing`, `proof_missing`, `proof_stale`, `complete`).
-   `proof_failing` exits 1 and points at `.agent/proof-pack.json`, preserving
-   that proof. AgentFlow's `next-step` returns nothing both when every step is
-   done and when remaining steps hold open attempts, so any other state or a
-   failed `next-action` call also stops before `finish-run`. A remaining-work
+5. Golem picks each step with `next-step --explain`. When AgentFlow reports
+   `open_attempts` or `dependencies_unmet` (step work remains, but no step is
+   eligible), the run stops before any review manifest is recorded and before
+   `finish-run`. The error quotes AgentFlow's diagnostics, for example
+   `reason_code "open_attempts" (step P1 has open attempt A1 (owner golem))`,
+   and sends you to `-agentflow-status`. A same-plan `-review-manifest` round
+   over a run that died with an attempt open stops here. A reason code this
+   Golem does not know (from a newer AgentFlow) or an invalid AgentFlow state
+   also stops the run. After `steps_complete` and any review amendments, ask
+   `next-action` whether step work remains, and continue only from a run-phase
+   state (`run_unverified`, `drift_failing`, `proof_missing`, `proof_stale`,
+   `complete`). `proof_failing` exits 1 and points at `.agent/proof-pack.json`,
+   preserving that proof. `steps_complete` does not decide whether a completed
+   step needs `amend-step`, and another writer can open an attempt after the
+   loop, so any other state or a failed `next-action` call also stops before
+   `finish-run`. A remaining-work
    error names the state and step and sends you to `-agentflow-status` for
    recovery checks, including independent verification of an existing proof.
    Status does not check resume's supplied-plan and handoff bindings, which
@@ -697,6 +764,8 @@ refuses a root that retains a timed-out command receipt no later attempt can
 supersede (see [Timed-out gates](#timed-out-gates)). The condition is
 "same plan plus a manifest", not "the run finished": over an unfinished run the
 same command first runs the remaining steps, as `-review-manifest` documents.
+On AgentFlow 1.2.1 every `-review-manifest` run is refused before `init` (see
+[AgentFlow 1.2.1 and recovery](#agentflow-121-and-recovery)).
 Repeat the original `-task-brief`, `-workflow-profile` and `-workflow-reason`,
 or `-workflow-handoff`, on that run: without a handoff Golem materializes the
 workflow route from those flags again, so changed flags would replace the proof

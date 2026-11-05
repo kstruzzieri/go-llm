@@ -301,3 +301,69 @@ func TestRunOneShot_FencesObservationsOnTheWire(t *testing.T) {
 		}
 	})
 }
+
+// TestRunOneShot_ReportsFenceRotation drives a real rotation through the CLI:
+// the model quotes the first result's frame key in its next tool call, so the
+// step after that rotates the key, and the stderr footer and the -telemetry
+// run span both count it. A run that quotes nothing shows neither.
+func TestRunOneShot_ReportsFenceRotation(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		quoteKey   bool
+		wantFooter string
+		wantSpan   string
+	}{
+		{"key quoted", true, " · 6 tok · 1 fence rotation", `,"fence_rotations":1}`},
+		{"nothing quoted", false, " · 6 tok", `"max_pressure_level":"ok"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			configPath, root, requests := fenceWireHarness(t, func(req wireRequest) []string {
+				switch tools := req.toolMessages(); len(tools) {
+				case 0:
+					return sseToolCall("r1", "read_file", `{"path":"fixture.txt"}`)
+				case 1:
+					path := "other.txt"
+					// Not toolFrameKey: t.Fatalf must not run on the handler goroutine.
+					// A missed match leaves the footer without a rotation, which fails below.
+					if sub := toolFrameKeyLine.FindStringSubmatch(tools[0].Content); tc.quoteKey && sub != nil {
+						path = sub[1] + ".txt"
+					}
+					return sseToolCall("r2", "read_file", `{"path":"`+path+`"}`)
+				default:
+					return sseAnswer("final answer")
+				}
+			})
+			for _, name := range []string{"fixture.txt", "other.txt"} {
+				if err := os.WriteFile(filepath.Join(root, name), []byte("plain text"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			stderr := runFenceOneShot(t, configPath, root, "-telemetry")
+			if n := len(requests()); n != 3 {
+				t.Fatalf("requests = %d, want 3", n)
+			}
+			footer := ""
+			for _, line := range strings.Split(stderr, "\n") {
+				if strings.HasPrefix(line, "done · 3 steps · ") {
+					footer = line
+				}
+			}
+			if !strings.HasSuffix(footer, tc.wantFooter) {
+				t.Errorf("footer %q does not end with %q; stderr:\n%s", footer, tc.wantFooter, stderr)
+			}
+			raw, err := os.ReadFile(filepath.Join(os.Getenv("XDG_DATA_HOME"), "golem", "telemetry.jsonl"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var run string
+			for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+				if strings.Contains(line, `"kind":"run"`) {
+					run = line
+				}
+			}
+			if !strings.HasSuffix(run, tc.wantSpan) {
+				t.Errorf("run span %q does not end with %q", run, tc.wantSpan)
+			}
+		})
+	}
+}

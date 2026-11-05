@@ -48,7 +48,7 @@ func main() {
 	importXlamN := flag.Int("import-xlam-n", 300, "Number of eligible records to sample for -import-xlam (<=0 = all eligible)")
 	importXlamSeed := flag.Int64("import-xlam-seed", 42, "Deterministic sampling seed for -import-xlam")
 	assemblyBuildPath := flag.String("assembly-build", "", "Build assembly traces from this case-fixture JSON (#331): a JSON array is the 3a flat/progressive corpus; a JSON object is the 3c mixed-assembly fixture (paired legacy/mixed arms + optional topline)")
-	injectionBuildPath := flag.String("build-injection-corpus", "", "Build frozen-real-wire injection traces from this cases JSON (#452)")
+	injectionBuildPath := flag.String("build-injection-corpus", "", "Build frozen-real-wire injection traces from this cases JSON (#452; a cases source of \"forged-close\" builds the E1 forged-close corpus, docs/llm/traces/injection-forged-close)")
 	injectionOut := flag.String("injection-out", filepath.Join("docs", "llm", "traces", "injection", "traces"), "Output directory for -build-injection-corpus")
 	interceptorCensus := flag.Bool("interceptor-census", false, "Run the deterministic interceptor census (#517): render every -census-manifest file through Golem's production tools under interceptor.Defaults() and report the findings per carrier")
 	censusManifestPath := flag.String("census-manifest", filepath.Join("docs", "llm", "census", "manifest.json"), "With -interceptor-census or -interceptor-benign-draft: the census manifest (llm-bench.census-manifest/v1)")
@@ -108,7 +108,8 @@ func main() {
 	judgeDisableThinking := flag.Bool("judge-disable-thinking", false, "Send chat_template_kwargs.enable_thinking=false on -judge-transport openai-compat so a thinking-tuned local judge (llama.cpp/vLLM) answers directly; leave off for api.openai.com, which rejects the kwarg")
 	candidateBaseURL := flag.String("candidate-base-url", "", "Base URL for openai-compat candidate targets (server root, no /v1 suffix)")
 	candidateAPIKey := flag.String("candidate-api-key", "", "Bearer token for openai-compat candidate targets; falls back to $"+candidateAPIKeyEnvVar)
-	candidateSessionID := flag.String("candidate-session-id", "", "Session id sent as the openai-compat session header on every candidate request; required by some hosted endpoints; empty sends no header")
+	candidateSessionID := flag.String("candidate-session-id", "", "Session id sent with every openai-compat candidate request in the form -cache-affinity selects (the raw id as x-opencode-session for OpenCode); required by some hosted endpoints; empty sends none")
+	cacheAffinity := flag.String("cache-affinity", "", "Prompt-cache key mode for openai-compat candidates: none, openai (body prompt_cache_key), openrouter (x-session-id), or opencode (x-opencode-session); empty infers it from an https -candidate-base-url host, which sends nothing to other hosts or to http URLs")
 	corpusManifestPath := flag.String("corpus-manifest", "", "Path to a corpus manifest JSONL (partition/category per trace); enables partition-separated reporting")
 	corpusPartitions := flag.String("corpus-partitions", "", "Comma-separated partitions to include from the corpus manifest (natural, challenge, judge-validation; empty = all)")
 	corpusCategories := flag.String("corpus-categories", "", "Comma-separated categories to include from the corpus manifest (empty = all)")
@@ -143,6 +144,9 @@ func main() {
 	attemptID := flag.String("attempt-id", "", "With -replay-attempt: caller-supplied attempt id matching [A-Za-z0-9._:-]{1,128}; sent as X-Client-Correlation <id>/<ordinal>")
 	attemptArm := flag.String("attempt-arm", "", "With -replay-attempt: opaque arm selector, recorded verbatim")
 	attemptDir := flag.String("attempt-dir", "", "With -replay-attempt: output directory, which must not exist")
+	cacheProbe := flag.Bool("cache-probe", false, "Run the prompt-cache probe: a scripted Golem session (8 file reads, 3 follow-up turns) against exactly one openai-compat -models target at -candidate-base-url, writing per-request provider cache counters and a prefix-stability proxy to -cache-probe-out")
+	cacheProbeOut := flag.String("cache-probe-out", "", "With -cache-probe: output path for the markdown table (required)")
+	cacheProbeScenario := flag.String("cache-probe-scenario", string(probeUncompacted), "With -cache-probe: uncompacted (131072-token input ceiling, no compaction) or pressure (8192, compaction runs)")
 	flag.Parse()
 	providedFlags := map[string]bool{}
 	flag.Visit(func(f *flag.Flag) {
@@ -151,6 +155,9 @@ func main() {
 
 	ct := resolveCandidateTransportConfig(*candidateBaseURL, *candidateAPIKey, os.Getenv)
 	if err := validateCandidateSessionID(*candidateSessionID); err != nil {
+		log.Fatalf("llm-bench: %v", err)
+	}
+	if err := validateCacheAffinity(*cacheAffinity); err != nil {
 		log.Fatalf("llm-bench: %v", err)
 	}
 
@@ -230,8 +237,11 @@ func main() {
 	if *buildInterceptorBenign != "" {
 		modes++
 	}
+	if *cacheProbe {
+		modes++
+	}
 	if modes > 1 {
-		log.Fatalf("llm-bench: -capture, -calibrate-capture, -calibrate, -manual-report, -paired-report, -assembly-report, -fim-latency, -blind-render, -blind-ingest, -fc-render, -fc-ingest, -fc-sidemap-generate, -adjudicate-render, -adjudicate-ingest, -discrimination-report, -import-xlam, -assembly-build, -build-injection-corpus, -injection-report, -replay-attempt, -interceptor-census, -interceptor-v1-report, -interceptor-benign-report, -interceptor-benign-draft, -build-interceptor-benign are mutually exclusive")
+		log.Fatalf("llm-bench: -capture, -calibrate-capture, -calibrate, -manual-report, -paired-report, -assembly-report, -fim-latency, -blind-render, -blind-ingest, -fc-render, -fc-ingest, -fc-sidemap-generate, -adjudicate-render, -adjudicate-ingest, -discrimination-report, -import-xlam, -assembly-build, -build-injection-corpus, -injection-report, -replay-attempt, -interceptor-census, -interceptor-v1-report, -interceptor-benign-report, -interceptor-benign-draft, -build-interceptor-benign, -cache-probe are mutually exclusive")
 	}
 	if providedFlags["registration"] && !*calibrateCapture && !*injectionReport && !*interceptorBenignReport {
 		log.Fatalf("llm-bench: -registration requires -calibrate-capture, -injection-report or -interceptor-benign-report")
@@ -240,6 +250,13 @@ func main() {
 		if stray := strayAttemptFlags(providedFlags); len(stray) > 0 {
 			log.Fatalf("llm-bench: %s require -replay-attempt", strings.Join(stray, ", "))
 		}
+	}
+	if !*cacheProbe {
+		if stray := strayFlags(providedFlags, "cache-probe-out", "cache-probe-scenario"); len(stray) > 0 {
+			log.Fatalf("llm-bench: %s require -cache-probe", strings.Join(stray, ", "))
+		}
+	} else if providedFlags["candidate-session-id"] {
+		log.Fatalf("llm-bench: -candidate-session-id cannot be combined with -cache-probe: the probe mints its own session id per invocation")
 	}
 	if !*interceptorCensus {
 		if stray := strayCensusFlags(providedFlags, *interceptorBenignDraft != ""); len(stray) > 0 {
@@ -267,18 +284,30 @@ func main() {
 		// errors are already discarded.
 		signal.Ignore(syscall.SIGPIPE)
 		code := runReplayAttempt(ctx, replayAttemptOptions{
-			AttemptDir: *attemptDir,
-			AttemptID:  *attemptID,
-			Arm:        *attemptArm,
-			TracePath:  *attemptTrace,
-			Models:     *modelsArg,
-			BaseURL:    ct.baseURL,
-			APIKey:     ct.apiKey,
-			SessionID:  *candidateSessionID,
-			Timeout:    *timeout,
+			AttemptDir:    *attemptDir,
+			AttemptID:     *attemptID,
+			Arm:           *attemptArm,
+			TracePath:     *attemptTrace,
+			Models:        *modelsArg,
+			BaseURL:       ct.baseURL,
+			APIKey:        ct.apiKey,
+			SessionID:     *candidateSessionID,
+			CacheAffinity: *cacheAffinity,
+			Timeout:       *timeout,
 		}, os.Stderr)
 		cancel()
 		os.Exit(code)
+	}
+
+	if *cacheProbe {
+		if err := runCacheProbeMode(ctx, cacheProbeOptions{
+			BaseURL: ct.baseURL, APIKey: ct.apiKey, Models: *modelsArg,
+			Out: *cacheProbeOut, Scenario: *cacheProbeScenario, Timeout: *timeout,
+			CacheAffinity: *cacheAffinity,
+		}, os.Stderr); err != nil {
+			log.Fatalf("llm-bench: %v", err)
+		}
+		return
 	}
 
 	if *assemblyBuildPath != "" {
@@ -367,7 +396,7 @@ func main() {
 	}
 
 	if *injectionBuildPath != "" {
-		if err := buildInjectionCorpus(ctx, *injectionBuildPath, *injectionOut); err != nil {
+		if err := buildInjectionCorpusBySource(ctx, *injectionBuildPath, *injectionOut); err != nil {
 			log.Fatalf("llm-bench: build-injection-corpus: %v", err)
 		}
 		return
@@ -457,12 +486,13 @@ func main() {
 			log.Fatalf("llm-bench: parse models: %v", err)
 		}
 		runner := &Runner{
-			OllamaURL:           *ollamaURL,
-			OpenAICompatBaseURL: ct.baseURL,
-			OpenAICompatAPIKey:  ct.apiKey,
-			Timeout:             *timeout,
-			CandidateSessionID:  *candidateSessionID,
-			Scorer:              &CaptureScorer{},
+			OllamaURL:              *ollamaURL,
+			OpenAICompatBaseURL:    ct.baseURL,
+			OpenAICompatAPIKey:     ct.apiKey,
+			Timeout:                *timeout,
+			CandidateSessionID:     *candidateSessionID,
+			CandidateCacheAffinity: *cacheAffinity,
+			Scorer:                 &CaptureScorer{},
 		}
 		var registrationDigest string
 		var injectionTemps map[string]float64
@@ -662,7 +692,7 @@ func main() {
 			inputs = append(inputs, [2]string{"-captures manifest", captureManifestPath(c)})
 		}
 		refuseReportAlias("injection-report", *reportPath, inputs)
-		report, err := runInjectionReport(injectionReportOptions{
+		report, err := runInjectionReportWithForgedClose(injectionReportOptions{
 			RegistrationPath: *registrationPath,
 			Captures:         captures,
 			Adjudications:    *injectionAdjudications,
@@ -1180,12 +1210,13 @@ func main() {
 	}
 
 	runner := &Runner{
-		OllamaURL:           *ollamaURL,
-		OpenAICompatBaseURL: ct.baseURL,
-		OpenAICompatAPIKey:  ct.apiKey,
-		Timeout:             *timeout,
-		CandidateSessionID:  *candidateSessionID,
-		Scorer:              scorer,
+		OllamaURL:              *ollamaURL,
+		OpenAICompatBaseURL:    ct.baseURL,
+		OpenAICompatAPIKey:     ct.apiKey,
+		Timeout:                *timeout,
+		CandidateSessionID:     *candidateSessionID,
+		CandidateCacheAffinity: *cacheAffinity,
+		Scorer:                 scorer,
 	}
 
 	results, err := runner.RunAll(ctx, targets, traces)
@@ -1417,6 +1448,18 @@ func validateCandidateSessionID(id string) error {
 		return errors.New("-candidate-session-id contains a control character")
 	}
 	return nil
+}
+
+// validateCacheAffinity refuses a -cache-affinity outside the values
+// config's cache_affinity accepts: openaicompat.WithCacheAffinity treats an
+// unknown mode as none, which would silently drop a session header the
+// endpoint requires.
+func validateCacheAffinity(mode string) error {
+	switch mode {
+	case "", "none", "openai", "openrouter", "opencode":
+		return nil
+	}
+	return fmt.Errorf("-cache-affinity must be one of none, openai, openrouter, opencode, or empty to infer from -candidate-base-url; got %q", mode)
 }
 
 // validateCaptureSampleAndLimit rejects the case where both flags are

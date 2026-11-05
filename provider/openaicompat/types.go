@@ -20,6 +20,9 @@ type chatRequest struct {
 	Stop          []string           `json:"stop,omitempty"`
 	Tools         []chatTool         `json:"tools,omitempty"`
 	ToolChoice    string             `json:"tool_choice,omitempty"`
+	// PromptCacheKey is OpenAI's prompt-cache routing key, set only in
+	// "openai" cache affinity mode (WithCacheAffinity); omitted otherwise.
+	PromptCacheKey string `json:"prompt_cache_key,omitempty"`
 
 	// ReasoningEffort and ChatTemplateKwargs carry the caller's think
 	// controls (#220). llama.cpp forwards reasoning_effort to templates
@@ -233,11 +236,82 @@ type modelEntry struct {
 // It is a pointer so absence (the server omits the block) is distinguishable
 // from a present-but-zero reasoning count; servers that don't report it leave
 // it nil and the reasoning accessor yields zero.
+//
+// PromptTokensDetails is the matching OpenAI extension for the prompt side
+// (llama-server emits it with cached_tokens). prompt_tokens already includes
+// the cached part.
 type usage struct {
 	PromptTokens            int                      `json:"prompt_tokens"`
 	CompletionTokens        int                      `json:"completion_tokens"`
 	TotalTokens             int                      `json:"total_tokens"`
 	CompletionTokensDetails *completionTokensDetails `json:"completion_tokens_details,omitempty"`
+	PromptTokensDetails     *promptTokensDetails     `json:"prompt_tokens_details,omitempty"`
+
+	// abacusShape is true when UnmarshalJSON read Abacus's non-streaming
+	// shape, so Chat can apply that shape's cache-counter convention.
+	abacusShape bool
+}
+
+// promptTokensDetails carries optional prompt-cache breakdowns. Each field is
+// a pointer so an omitted count is distinguishable from a measured zero.
+type promptTokensDetails struct {
+	CachedTokens     *int `json:"cached_tokens"`
+	CacheWriteTokens *int `json:"cache_write_tokens"`
+}
+
+// UnmarshalJSON decodes the OpenAI usage shape and, when prompt_tokens is
+// absent and raw_input_tokens is present, Abacus RouteLLM's non-streaming
+// shape (measured 2026-11-01 on gpt-5-mini): raw_input_tokens is the uncached
+// input, cache_read_input_tokens the cached part, cache_creation_input_tokens
+// the part written to the cache (models that bill cache writes, measured
+// 2026-11-03 on gpt-6-luna and Claude Haiku 4.5), output_tokens and a
+// top-level reasoning_tokens the completion side, and there is no total.
+// Abacus's input_tokens is billing-weighted (cached tokens at the model's
+// cache discount, written tokens at its write premium) and is deliberately
+// not read. Any block that carries prompt_tokens decodes exactly as the
+// OpenAI shape.
+func (u *usage) UnmarshalJSON(b []byte) error {
+	type plain usage // drops this method so the OpenAI fields decode as usual
+	if err := json.Unmarshal(b, (*plain)(u)); err != nil {
+		return err
+	}
+	// Select the shape before validating fields the OpenAI decoder ignores.
+	var shape struct {
+		PromptTokens   json.RawMessage `json:"prompt_tokens"`
+		RawInputTokens json.RawMessage `json:"raw_input_tokens"`
+	}
+	if err := json.Unmarshal(b, &shape); err != nil || shape.PromptTokens != nil || shape.RawInputTokens == nil {
+		return err
+	}
+	var a struct {
+		RawInputTokens           *int `json:"raw_input_tokens"`
+		CacheReadInputTokens     *int `json:"cache_read_input_tokens"`
+		CacheCreationInputTokens *int `json:"cache_creation_input_tokens"`
+		OutputTokens             *int `json:"output_tokens"`
+		ReasoningTokens          *int `json:"reasoning_tokens"`
+	}
+	if err := json.Unmarshal(b, &a); err != nil || a.RawInputTokens == nil {
+		return err
+	}
+	u.abacusShape = true
+	u.PromptTokens = *a.RawInputTokens
+	if a.CacheReadInputTokens != nil {
+		u.PromptTokens += *a.CacheReadInputTokens
+	}
+	if a.CacheCreationInputTokens != nil {
+		u.PromptTokens += *a.CacheCreationInputTokens
+	}
+	if a.CacheReadInputTokens != nil || a.CacheCreationInputTokens != nil {
+		u.PromptTokensDetails = &promptTokensDetails{CachedTokens: a.CacheReadInputTokens, CacheWriteTokens: a.CacheCreationInputTokens}
+	}
+	if a.OutputTokens != nil {
+		u.CompletionTokens = *a.OutputTokens
+	}
+	if a.ReasoningTokens != nil {
+		u.CompletionTokensDetails = &completionTokensDetails{ReasoningTokens: a.ReasoningTokens}
+	}
+	u.TotalTokens = u.PromptTokens + u.CompletionTokens
+	return nil
 }
 
 // completionTokensDetails carries optional completion-token breakdowns.

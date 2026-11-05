@@ -119,7 +119,11 @@ type SetRoleModelResult struct {
 	// SetRoleModel that keeps the role's provider/model preserves the
 	// ceiling and leaves this false.
 	DroppedQualityCtxCeiling bool
-	Verdict                  provider.CapVerdict
+	// DroppedPrice reports that a configured price was cleared because the
+	// role moved to a different provider/model. A SetRoleModel that keeps the
+	// role's provider/model preserves the price and leaves this false.
+	DroppedPrice bool
+	Verdict      provider.CapVerdict
 }
 
 // validateRoleFacts applies the shared facts argument checks. op names the
@@ -229,15 +233,15 @@ func applyRoleOverridesFromOpts(m *ModelConfig, opts SetRoleModelOpts) {
 // Fallbacks/Description/Options preserved (role-level intent); identity and
 // capacity replaced from facts (empty = unknown, never stale);
 // Capabilities, ThinkMode, ThinkTags CLEARED unless re-asserted; Slots
-// CLEARED unconditionally; QualityCtxCeiling CLEARED only when the role's
-// effective provider/model changes (an empty Provider means "ollama"), since
-// it is a fact about one model with no re-assertion option and a same-model
-// call must not lose it — a stale override carried across models could
-// falsely assert tool_call, fabricate a trained-context ceiling, or violate
-// the per-selector invariants. The eligibility gate and the
-// finalize gate (whose validate includes the static selector-conflict
-// check) run under the document lock; any failure leaves the document
-// unchanged.
+// CLEARED unconditionally; QualityCtxCeiling and Price CLEARED only when the
+// role's effective provider/model changes (an empty Provider means "ollama"),
+// since each is a fact about one model with no re-assertion option and a
+// same-model call must not lose it — a stale override carried across models
+// could falsely assert tool_call, fabricate a trained-context ceiling or
+// another model's price, or violate the per-selector invariants. The
+// eligibility gate and the finalize gate (whose validate includes the static
+// selector-conflict check) run under the document lock; any failure leaves
+// the document unchanged.
 func (d *Document) SetRoleModel(role string, facts ModelFacts, opts SetRoleModelOpts) (SetRoleModelResult, error) {
 	var zero SetRoleModelResult
 	var res SetRoleModelResult
@@ -270,6 +274,7 @@ func (d *Document) SetRoleModel(role string, facts ModelFacts, opts SetRoleModel
 			DroppedThinkTags:          m.ThinkTags != nil && opts.ThinkTags == nil,
 			DroppedSlots:              m.Slots != 0,
 			DroppedQualityCtxCeiling:  m.QualityCtxCeiling != 0 && !sameModel,
+			DroppedPrice:              m.Price != nil && !sameModel,
 			Verdict:                   verdict,
 		}
 
@@ -279,6 +284,7 @@ func (d *Document) SetRoleModel(role string, facts ModelFacts, opts SetRoleModel
 		m.ContextWindow = facts.ContextWindow
 		if !sameModel {
 			m.QualityCtxCeiling = 0 // per-model trained length; never carried to another model (#479)
+			m.Price = nil           // a price belongs to one model; never carried to another
 		}
 		m.Dimensions = facts.Dimensions
 		applyRoleOverridesFromOpts(&m, opts)

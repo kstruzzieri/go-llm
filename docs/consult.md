@@ -709,7 +709,7 @@ consultants file it prints `consult disabled: no consultants.json (see
 -interceptors`.
 
 On the next goal the advice is rendered onto the **wire copy** of the goal
-message only, inside a `CONSULT_ADVICE` fence whose key is minted per request:
+message only, inside a `CONSULT_ADVICE` fence:
 
 ```
 <your goal, first and untouched>
@@ -720,6 +720,11 @@ source: consultant "claude-opus" (claude 2.1.240, model opus, sha256:<digest>); 
 <interceptor trailer lines, if any>
 >>>CONSULT_ADVICE <key>
 ```
+
+The key is minted once per run and kept on every request of that run, so the
+goal message's bytes stay the same for the provider's prompt cache. No tool
+result shares it. If text added later in the run quotes the key, the runtime
+replaces it with a fresh one.
 
 Interceptor tag trailers are stored out of band, in `Advisory.Annotation`, and
 rendered inside the fence below the content they qualify. They are never

@@ -6,11 +6,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -63,6 +65,14 @@ type ProviderConfig struct {
 	// it for a backend without /props degrades that backend to fail-safe
 	// serial admission. Default false: ungoverned, existing behavior.
 	SlotDiscovery bool `json:"slot_discovery,omitempty"`
+	// CacheAffinity selects the prompt-cache key an openai-compat client
+	// sends with a session: "openai" (body prompt_cache_key), "openrouter"
+	// (x-session-id header), "opencode" (x-opencode-session header with the
+	// raw session id), or "none". Empty lets the client infer the mode from
+	// the base_url host (openaicompat.InferCacheAffinity), which sends nothing
+	// to a host that documents no key. Other values, and any value on a
+	// provider whose api_format is not "openai-compat", fail Load.
+	CacheAffinity string `json:"cache_affinity,omitempty"`
 }
 
 // ModelConfig describes a model's identity, capabilities, and fallback chain.
@@ -105,6 +115,67 @@ type ModelConfig struct {
 	ThinkMode string `json:"think_mode,omitempty"`
 	// ThinkTags optionally overrides the reasoning tag delimiters.
 	ThinkTags *ThinkTagsConfig `json:"think_tags,omitempty"`
+	// Price optionally prices this model's tokens so Golem can show an
+	// estimated cost (see ModelPrice). There is no built-in price table:
+	// absent means unpriced and the cost is simply not estimated. Like
+	// QualityCtxCeiling it is a fact about one provider/model selector, so
+	// roles sharing a selector cannot disagree on it and re-pointing a role
+	// at another model clears it.
+	Price *ModelPrice `json:"price,omitempty"`
+}
+
+// ModelPrice is one model's token prices in USD per 1,000,000 tokens (the
+// unit providers publish), so 3 means $3 per million tokens. Input and
+// Output are the plain per-token rates. CachedInput is the rate for input
+// tokens served from a prompt cache and CacheWrite the rate for tokens
+// written to one; nil means the provider has no such rate, which is
+// different from 0 (free). Every present value must be finite and >= 0.
+// Decoded from JSON, input and output are required (a free price is
+// {"input": 0, "output": 0}) and an unknown member is refused; see
+// UnmarshalJSON.
+type ModelPrice struct {
+	Input       float64  `json:"input"`
+	Output      float64  `json:"output"`
+	CachedInput *float64 `json:"cached_input,omitempty"`
+	CacheWrite  *float64 `json:"cache_write,omitempty"`
+
+	// problem is the strict-decode refusal UnmarshalJSON found, reported by
+	// validate so the error names the role. JSON never carries it.
+	problem string
+}
+
+// UnmarshalJSON decodes a price strictly, so "{}", a missing rate or a
+// typo'd member cannot read as a legal $0 price: input and output must be
+// present and non-null, and every member must be one of input, output,
+// cached_input and cache_write. Such a refusal is recorded and returned by
+// validate as CodeModelInvalid naming the role; a value of the wrong JSON
+// type is still a decode (parse) error.
+func (p *ModelPrice) UnmarshalJSON(data []byte) error {
+	var members map[string]json.RawMessage
+	if err := json.Unmarshal(data, &members); err != nil {
+		return fmt.Errorf("config: price: %w", err)
+	}
+	type plain ModelPrice // no methods: decodes without recursing
+	var v plain
+	if err := json.Unmarshal(data, &v); err != nil {
+		return fmt.Errorf("config: price: %w", err)
+	}
+	*p = ModelPrice(v)
+	for _, k := range slices.Sorted(maps.Keys(members)) {
+		switch k {
+		case "input", "output", "cached_input", "cache_write":
+		default:
+			p.problem = fmt.Sprintf("price has unknown member %q", k)
+			return nil
+		}
+	}
+	for _, k := range []string{"input", "output"} {
+		if raw, ok := members[k]; !ok || string(raw) == "null" {
+			p.problem = fmt.Sprintf("price.%s is required (0 means free)", k)
+			return nil
+		}
+	}
+	return nil
 }
 
 // SamplingOptions are optional per-model defaults. Request values override
@@ -160,6 +231,16 @@ var validModelTypes = map[string]bool{
 var validAPIFormats = map[string]bool{
 	"ollama":        true,
 	"openai-compat": true,
+}
+
+// validCacheAffinities enumerates the allowed values for
+// ProviderConfig.CacheAffinity; empty means "infer from the host".
+var validCacheAffinities = map[string]bool{
+	"":           true,
+	"none":       true,
+	"openai":     true,
+	"openrouter": true,
+	"opencode":   true,
 }
 
 // ValidateProviderName verifies that a configured provider key is safe to use
@@ -614,14 +695,24 @@ func (cfg *Config) validate() error {
 			return diagWrap(CodeProviderFormatInvalid, SubjectProvider, key,
 				fmt.Errorf("config: provider %q: invalid api_format %q", key, p.APIFormat))
 		}
+		format := p.APIFormat
+		if format == "" {
+			format = "ollama"
+		}
+		if !validCacheAffinities[p.CacheAffinity] {
+			return diagWrap(CodeInvalidArgument, SubjectProvider, key,
+				fmt.Errorf("config: provider %q: unknown cache_affinity %q", key, p.CacheAffinity))
+		}
+		// Only the openai-compat client sends a cache key; elsewhere the
+		// setting would be silently ignored.
+		if p.CacheAffinity != "" && format != "openai-compat" {
+			return diagWrap(CodeInvalidArgument, SubjectProvider, key,
+				fmt.Errorf("config: provider %q: cache_affinity requires api_format \"openai-compat\", got %q", key, format))
+		}
 		// Slot policy (410 spec s1): slot discovery is an openai-compat
 		// capability. Bootstrap rechecks for programmatic Configs that
 		// bypass Load.
 		if p.SlotDiscovery {
-			format := p.APIFormat
-			if format == "" {
-				format = "ollama"
-			}
 			if format != "openai-compat" {
 				return diagWrap(CodeSlotPolicyInvalid, SubjectProvider, key,
 					fmt.Errorf("config: provider %q: slot_discovery requires api_format \"openai-compat\", got %q", key, format))
@@ -711,6 +802,19 @@ func (cfg *Config) validate() error {
 		if m.QualityCtxCeiling < 0 {
 			return diagWrap(CodeModelInvalid, SubjectRole, role,
 				fmt.Errorf("config: model %q: quality_ctx_ceiling must not be negative", role))
+		}
+
+		// A strict-decode refusal (UnmarshalJSON) is reported here so it
+		// names the role like every other price error.
+		if m.Price != nil && m.Price.problem != "" {
+			return diagWrap(CodeModelInvalid, SubjectRole, role,
+				fmt.Errorf("config: model %q: %s", role, m.Price.problem))
+		}
+		// Validate price here, not in the JSON decoder: a constructed Config
+		// is the only way to carry NaN or Inf, and it must be refused too.
+		if field := invalidPriceField(m.Price); field != "" {
+			return diagWrap(CodeModelInvalid, SubjectRole, role,
+				fmt.Errorf("config: model %q: price.%s must be a finite number >= 0", role, field))
 		}
 
 		// Validate slots (#400 admission-capacity override). Bootstrap
@@ -815,6 +919,23 @@ func (cfg *Config) validate() error {
 	return nil
 }
 
+// invalidPriceField names the first price member that is not a finite number
+// >= 0, or returns "" when p is nil or every present member is valid.
+func invalidPriceField(p *ModelPrice) string {
+	if p == nil {
+		return ""
+	}
+	for _, f := range []struct {
+		name string
+		v    *float64
+	}{{"input", &p.Input}, {"output", &p.Output}, {"cached_input", p.CachedInput}, {"cache_write", p.CacheWrite}} {
+		if f.v != nil && (math.IsNaN(*f.v) || math.IsInf(*f.v, 0) || *f.v < 0) {
+			return f.name
+		}
+	}
+	return ""
+}
+
 func validateSamplingOptions(role string, opts *SamplingOptions) error {
 	if opts == nil {
 		return nil
@@ -834,11 +955,12 @@ func validateSamplingOptions(role string, opts *SamplingOptions) error {
 	return nil
 }
 
-// validateSelectorConflicts enforces the six per-selector conflict
+// validateSelectorConflicts enforces the per-selector conflict
 // families statically (spec §1): roles sharing one effective
 // provider/model selector cannot disagree on non-zero context_window,
 // non-zero quality_ctx_ceiling, non-nil options, explicit capabilities, non-empty think_mode, non-nil
-// think_tags, or non-zero slots. Missing values mean "no override".
+// think_tags, non-zero slots, or non-nil price (compared by value). Missing
+// values mean "no override".
 // Deterministic: sorted roles, first conflicting sorted pair errors.
 // Bootstrap keeps its copies as defense in depth for programmatic Configs.
 func (cfg *Config) validateSelectorConflicts() error {
@@ -914,6 +1036,11 @@ func selectorPairConflict(sel, ra, rb string, a, b ModelConfig) error {
 	}
 	if a.Slots != 0 && b.Slots != 0 && a.Slots != b.Slots {
 		return conflict("slots")
+	}
+	// DeepEqual follows the pointers, so equal values behind distinct
+	// pointers agree; a present optional rate against an absent one differs.
+	if a.Price != nil && b.Price != nil && !reflect.DeepEqual(a.Price, b.Price) {
+		return conflict("price")
 	}
 	return nil
 }

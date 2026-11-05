@@ -5,6 +5,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/kstruzzieri/go-llm/internal/promptfence"
 	"github.com/kstruzzieri/go-llm/provider"
 )
 
@@ -110,6 +111,14 @@ type Request struct {
 	// (#382). It is projected onto the wire copy of the goal message only:
 	// State, Result.Messages, history and summaries never carry it.
 	Advisory *Advisory
+	// SystemKeys are the fence keys System frames untrusted text under, such
+	// as the promptfence id of a caller-rendered snapshot. Each must be 12 or
+	// more characters of [A-Z2-7], and distinct keys cannot contain one
+	// another. Run treats each like a tool result's key:
+	// when the run's text (history, its summary, the goal and Advisory
+	// included) exposes one, every occurrence of it in System is replaced by
+	// a fresh key before the next render. Result.SystemKeys reports the keys System ended under.
+	SystemKeys []string
 }
 
 // Segment tags a message as always-present (Pinned) or compactable (Elastic).
@@ -135,6 +144,17 @@ type Message struct {
 	// failure — all three return before prepareCall normalizes).
 	Context   *ContextSet `json:"-"`
 	OutputCap int         `json:"-"`
+	// fence is the key a role "tool" message is framed under on the wire
+	// (#430), minted once by mintFenceKeys and reused on every later render
+	// so earlier request bytes never change. Runtime-only: unexported, so it
+	// is never serialized and is not readable outside the package except by
+	// reflection. Zero means unkeyed.
+	fence promptfence.Fence
+	// idx is the message's canonical State.Messages index plus one, set only
+	// on the assembly-input copies a low-water Run builds (visibleState), so
+	// the Run can tell which messages a compacting step dropped. Zero means
+	// untagged. Runtime-only like fence: canonical State never carries it.
+	idx int
 }
 
 // State is the canonical transcript the Orchestrator owns.
@@ -142,6 +162,10 @@ type State struct {
 	System         string
 	DurableSummary string
 	Messages       []Message
+	// systemKeys are the keys System frames untrusted text under
+	// (Request.SystemKeys), rotated in place by refreshFenceKeys.
+	// Runtime-only, like Message.fence.
+	systemKeys []string
 }
 
 // RetrievalAttribution credits the sources a retrieval-style tool returned.
@@ -165,7 +189,9 @@ type Pressure struct {
 	// Evicted counts whole GROUPS the assembler dropped: a conversation span or
 	// a completed tool chain under legacy compaction and under mixed assembly
 	// alike. It never counts a partial trim inside a retained group — see
-	// AnchorOmissions.
+	// AnchorOmissions. Under ContextManager.CompactionLowWater, groups an
+	// earlier step of the Run dropped are no longer assembled, so a later
+	// step does not count them again.
 	Evicted int
 	// Compactions is 1 when the assembler shed anything this turn and 0
 	// otherwise, and is what the orchestrator's "compaction" EventRecord keys
@@ -222,7 +248,7 @@ type StepRecord struct {
 // EventRecord is a lightweight ordered log entry for replay/eval.
 type EventRecord struct {
 	Step int
-	Kind string // "token" | "step" | "tool_call" | "tool_result" | "compaction" | "blocked" | "stop"
+	Kind string // "token" | "step" | "tool_call" | "tool_result" | "compaction" | "fence_rotation" | "fence_scan_limit" | "blocked" | "stop"
 }
 
 // ToolCallRecord captures one dispatched tool call and its outcome.
@@ -261,12 +287,20 @@ type Result struct {
 	Events   []EventRecord
 	Usage    provider.Usage
 	// DescendantUsage is a copied snapshot of validated raw descendant P/C/T
-	// reports, including known failed-call usage. Usage remains local to recorded
-	// Steps. Neither field includes estimated or unknown-usage admission charges.
+	// and cache-counter reports, including known failed-call usage. Usage
+	// remains local to recorded Steps. Neither field includes estimated or
+	// unknown-usage admission charges. A successful descendant call with no
+	// usable counters still produces a non-nil, possibly zero snapshot, so
+	// consumers can distinguish unavailable usage from no descendant calls.
 	DescendantUsage *provider.Usage `json:"DescendantUsage,omitempty"`
 	ToolCalls       []ToolCallRecord
 	StopReason      StopReason
 	// Risk is the run's cumulative interceptor report (#436): nil when no
 	// interceptor produced a finding, so pre-#436 traces stay byte-identical.
 	Risk *RiskReport `json:"Risk,omitempty"`
+	// SystemKeys is Request.SystemKeys with each rotated key replaced by its
+	// successor; nil when the Run refused the request. A caller that replays
+	// System in a later Run should swap each old key for its successor first,
+	// so that Run starts from the bytes this one last sent. Runtime-only.
+	SystemKeys []string `json:"-"`
 }

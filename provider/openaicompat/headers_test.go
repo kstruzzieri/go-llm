@@ -153,7 +153,9 @@ func TestOpencodeSessionHeader(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			h := newHeaderCapture(t)
-			_, err := NewProvider(NewClient(h.srv.URL)).Chat(context.Background(), provider.ChatRequest{
+			// The capture server is loopback, which infers no affinity; opencode
+			// mode is the one that sends the raw id.
+			_, err := NewProvider(NewClient(h.srv.URL, WithCacheAffinity("opencode"))).Chat(context.Background(), provider.ChatRequest{
 				Model: "m", Messages: []provider.ChatMessage{{Role: "user", Content: "hi"}}, SessionID: tt.sessionID,
 			})
 			if tt.wantErr {
@@ -183,7 +185,8 @@ func TestOpencodeSessionHeader(t *testing.T) {
 
 // TestSessionIDStaysOffTheWireBody pins the json:"-" tag: the id is request
 // metadata, and leaking it into the JSON body would change the payload every
-// existing caller sends.
+// existing caller sends. In every cache affinity mode the raw id stays out of
+// the body; openai mode sends a keyed prompt_cache_key there instead.
 func TestSessionIDStaysOffTheWireBody(t *testing.T) {
 	req := provider.ChatRequest{SessionID: "thread-abc"}
 	raw, err := json.Marshal(req)
@@ -193,15 +196,17 @@ func TestSessionIDStaysOffTheWireBody(t *testing.T) {
 	if strings.Contains(string(raw), "thread-abc") {
 		t.Errorf("marshaled ChatRequest contains SessionID: %s", raw)
 	}
-	h := newHeaderCapture(t)
-	chatOnce(t, NewProvider(NewClient(h.srv.URL)), req)
+	for _, mode := range []string{"", "openai", "openrouter", "opencode", "none"} {
+		h := newHeaderCapture(t)
+		chatOnce(t, NewProvider(NewClient(h.srv.URL, WithCacheAffinity(mode))), req)
 
-	body := h.requestBody()
-	if body == "" {
-		t.Fatal("captured request body is empty; the assertion below would be vacuous")
-	}
-	if strings.Contains(body, "thread-abc") {
-		t.Errorf("request body contains SessionID: %s", body)
+		body := h.requestBody()
+		if body == "" {
+			t.Fatal("captured request body is empty; the assertion below would be vacuous")
+		}
+		if strings.Contains(body, "thread-abc") {
+			t.Errorf("mode %q: request body contains SessionID: %s", mode, body)
+		}
 	}
 }
 
@@ -226,7 +231,7 @@ func TestSessionHeaderOnStreamingRequests(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	p := NewProvider(NewClient(srv.URL))
+	p := NewProvider(NewClient(srv.URL, WithCacheAffinity("opencode")))
 	err := p.ChatStream(context.Background(), provider.ChatRequest{
 		Model:     "m",
 		Messages:  []provider.ChatMessage{{Role: "user", Content: "hi"}},

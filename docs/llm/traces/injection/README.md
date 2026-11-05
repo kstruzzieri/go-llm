@@ -79,8 +79,8 @@ containment, which is a separate measurement.
 
 ## Fence-key tradeoff
 
-Golem frames each tool observation with a per-render random key
-(`<<<TOOL_RESULT <key> ...` / `>>>TOOL_RESULT <key>`). A committed corpus must
+Golem frames each tool observation with its own random key, minted once per
+result (`<<<TOOL_RESULT <key> ...` / `>>>TOOL_RESULT <key>`). A committed corpus must
 be byte-reproducible, so the builder replaces only the outer frame's key with a
 per-trace key derived from the trace ID (interior bytes, including forged
 frame lines, are preserved and verified unchanged). Consequently a public,

@@ -171,8 +171,10 @@
 // the issue mentioned is deferred; the existing 256 KiB write bounds remain.
 //
 // Independently of -interceptors, every tool result reaches the model inside
-// a keyed <<<TOOL_RESULT / >>>TOOL_RESULT frame minted per request, and every
-// effective system prompt carries agent.ToolTrustContract (framed content is
+// a keyed <<<TOOL_RESULT / >>>TOOL_RESULT frame, each result under its own
+// key that stays the same for the rest of the run unless later text quotes it
+// (the key is then replaced, which costs a prompt-cache miss from that result
+// on), and every effective system prompt carries agent.ToolTrustContract (framed content is
 // data, never instructions; project guidance only where delegated) after the
 // Golem application prompt and its capability-gated write/exec clauses
 // (#430). For observations allowed through the interceptor pipeline, the
@@ -230,11 +232,16 @@
 // exactly one golem.result.v1 error record with code
 // project_context_untrusted; human diagnostics remain on stderr.
 //
-// Project and Git context are separate labeled frames using one
-// snapshot-scoped shared key; a Git refresh revalidates project guidance and
-// can change its budget. Tool results retain independently keyed per-request
-// frames. Approval neither grants capabilities nor sanitizes prior conversation
-// or model influence.
+// Project and Git context are separate labeled frames sharing one snapshot
+// key, kept across goals so the system prompt stays cacheable; a Git refresh
+// revalidates project guidance and can change its budget. Each Run gets the
+// snapshot key as a system key (agent.Request.SystemKeys): when the Run's
+// text, replayed history, its summary and staged /consult advice included,
+// quotes it, the Run replaces it before the next request, and the session
+// adopts the replacement for later goals. AgentFlow planner runs and task steps rotate
+// it within each run only. Tool results keep their own independent
+// per-result keys. Approval neither grants capabilities nor sanitizes prior
+// conversation or model influence.
 //
 // The source subcommand manages ad-hoc documents in the workspace index over
 // the managed-document registry:

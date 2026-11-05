@@ -39,10 +39,11 @@ func TestEmbeddingSelector(t *testing.T) {
 
 type fakeEmbedPlan struct {
 	resp *provider.EmbedResponse
+	err  error
 }
 
 func (p fakeEmbedPlan) ExecuteEmbed(context.Context) (*provider.EmbedResponse, error) {
-	return p.resp, nil
+	return p.resp, p.err
 }
 
 func TestChainEmbedderRoutesWithPreferredChain(t *testing.T) {
@@ -57,7 +58,7 @@ func TestChainEmbedderRoutesWithPreferredChain(t *testing.T) {
 				ActualModel: provider.ModelKey{Provider: "ollama", Model: "nomic-fallback"},
 			},
 		}}, nil
-	}, []string{"ollama/nomic", "ollama/nomic-fallback"})
+	}, []string{"ollama/nomic", "ollama/nomic-fallback"}, nil)
 
 	res, err := embedder.Embed(context.Background(), "ollama/nomic", []string{"query"})
 	if err != nil {
@@ -80,4 +81,4 @@ func TestChainEmbedderRoutesWithPreferredChain(t *testing.T) {
 	}
 }
 
-var _ rag.Embedder = newChainEmbedder(nil, nil)
+var _ rag.Embedder = newChainEmbedder(nil, nil, nil)

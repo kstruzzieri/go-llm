@@ -73,6 +73,11 @@ func (s *TelemetrySink) OnStep(_ context.Context, e agent.StepEvent) error {
 			Prompt:     e.Response.Usage.PromptTokens,
 			Completion: e.Response.Usage.CompletionTokens,
 			Total:      e.Response.Usage.TotalTokens,
+
+			Cached:             e.Response.Usage.CachedPromptTokens,
+			CachedReported:     e.Response.Usage.CachedPromptTokensReported,
+			CacheWrite:         e.Response.Usage.CacheWriteTokens,
+			CacheWriteReported: e.Response.Usage.CacheWriteTokensReported,
 		},
 		Pressure: pressureLite{
 			UsedPct:         e.Pressure.UsedPct,
@@ -242,6 +247,15 @@ func (s *TelemetrySink) Finish(res agent.Result, status string) error {
 			}
 		}
 	}
+	var compactions, rotations int
+	for _, e := range res.Events {
+		switch e.Kind {
+		case "compaction":
+			compactions++
+		case "fence_rotation":
+			rotations++
+		}
+	}
 	s.record(runSpan{
 		SchemaVersion:    SchemaVersion,
 		RunID:            s.runID,
@@ -255,6 +269,8 @@ func (s *TelemetrySink) Finish(res agent.Result, status string) error {
 		MaxUsedPct:       s.maxUsedPct,
 		MaxPressureLevel: s.maxLevel.String(),
 		SecretFindings:   secretFindings,
+		Compactions:      compactions,
+		FenceRotations:   rotations,
 	})
 	return s.lastErr
 }

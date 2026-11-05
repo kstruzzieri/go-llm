@@ -296,6 +296,7 @@ func projectContextInputs(in systemInputs, docs []projectcontext.Document, gitSn
 	fence := promptfence.New()
 	in.projectContext = ""
 	in.gitContext = ""
+	in.snapshotKey = ""
 
 	gitBytes := 0
 	if gitSnap.Block != "" {
@@ -306,7 +307,30 @@ func projectContextInputs(in systemInputs, docs []projectcontext.Document, gitSn
 	if trusted && len(docs) > 0 {
 		in.projectContext, _, _ = renderProjectContext(fence, docs, max(0, projectContextMaxBytes-gitBytes))
 	}
+	if in.projectContext != "" || in.gitContext != "" {
+		in.snapshotKey = fence.ID()
+	}
 	return in
+}
+
+// adoptSnapshotKey carries a snapshot key the Run rotated (got is its
+// Result.SystemKeys) into the session, so the next goal starts from the
+// bytes this one last sent and never returns to the exposed key. A Run that
+// refused its request reports no keys and changes nothing.
+func adoptSnapshotKey(sess *replSession, got []string) error {
+	old := sess.sysInputs.snapshotKey
+	if old == "" || len(got) != 1 || got[0] == old {
+		return nil
+	}
+	next := sess.sysInputs
+	next.projectContext = strings.ReplaceAll(next.projectContext, old, got[0])
+	next.gitContext = strings.ReplaceAll(next.gitContext, old, got[0])
+	next.snapshotKey = got[0]
+	if err := sess.mount(sess.mountAt, nil, next); err != nil {
+		return fmt.Errorf("runtime: %w", err)
+	}
+	sess.gitSnapshot.Block = next.gitContext
+	return nil
 }
 
 func renderProjectContext(fence promptfence.Fence, docs []projectcontext.Document, maxBytes int) (string, int, []projectContextRetention) {

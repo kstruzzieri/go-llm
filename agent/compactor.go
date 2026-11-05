@@ -18,6 +18,11 @@ type TokenBudget struct {
 	// it for the active transport; zero means raw, unframed assembly. Custom
 	// compactors must include it when fitting and reporting token counts.
 	ToolResultOverhead int
+	// LowWaterFraction is ContextManager.CompactionLowWater: when the
+	// transcript exceeds Input, a compactor drops until it fits
+	// int(Input*fraction) rather than Input. Zero, or any value outside
+	// (0,1), means just enough.
+	LowWaterFraction float64
 }
 
 // CompactionReport describes what a Compact call did.
@@ -156,11 +161,22 @@ func chainAt(msgs []Message, i int) int {
 	return end
 }
 
+// firstPinnedIndex is the history boundary: the index of the first Pinned
+// message that is not a leading role "system" message, or -1. assembleLegacy
+// materializes the durable summary as exactly such a message at index 0, and
+// counting it would turn every prior-turn exchange before the goal into a
+// current-run one that drops after current-run tool chains.
 func firstPinnedIndex(msgs []Message) int {
+	leading := 0 // pinned system messages at the head so far
 	for i, m := range msgs {
-		if m.Segment == Pinned {
-			return i
+		if m.Segment != Pinned {
+			continue
 		}
+		if m.Role == "system" && i == leading {
+			leading++
+			continue
+		}
+		return i
 	}
 	return -1
 }
@@ -225,7 +241,34 @@ func (rc RecencyCompactor) groups(st State) []compactionGroup {
 	return out
 }
 
-func (rc RecencyCompactor) Compact(_ context.Context, st State, b TokenBudget) (State, CompactionReport, error) {
+// newestCurrentRunGroup is the index of the newest droppable group (a
+// completed tool chain or plain Elastic group) after the last pinned group,
+// the goal, or -1. The search stops at the goal (the last Pinned group), so
+// groups before it, such as tool chains in a hand-built State, are never the
+// kept group. Prior history is groupHistory even with a materialized durable
+// summary, pinned at index 0.
+func newestCurrentRunGroup(groups []compactionGroup) int {
+	for i := len(groups) - 1; i >= 0; i-- {
+		switch groups[i].kind {
+		case groupPinned:
+			return -1
+		case groupCompletedTool, groupPlainElastic:
+			return i
+		}
+	}
+	return -1
+}
+
+// lowWaterMark is int(input*frac), the size a compacting fit drops to, and
+// false when frac is off or outside (0,1): the fit then drops just enough.
+func lowWaterMark(input int, frac float64) (int, bool) {
+	if !(frac > 0 && frac < 1) {
+		return input, false
+	}
+	return int(float64(input) * frac), true
+}
+
+func (rc RecencyCompactor) Compact(ctx context.Context, st State, b TokenBudget) (State, CompactionReport, error) {
 	rc.toolResultOverhead = b.ToolResultOverhead
 	before, ok := rc.checkedTotal(st)
 	if !ok {
@@ -241,15 +284,24 @@ func (rc RecencyCompactor) Compact(_ context.Context, st State, b TokenBudget) (
 			return st, CompactionReport{Strategy: "recency", TokensBefore: before, TokensAfter: math.MaxInt}, ErrContextExhausted
 		}
 	}
+	// Over budget, a low-water fit drops to the mark rather than to Input,
+	// so the next steps fit without moving the cut point again. It never
+	// drops the newest current-run group: that holds the observation the
+	// model asked for and has not read, and a Run hides what was dropped.
+	target, lowWater := lowWaterMark(b.Input, b.LowWaterFraction)
+	keep := -1
+	if lowWater {
+		keep = newestCurrentRunGroup(groups)
+	}
 	remaining := before
 	dropped := 0
 	arithmeticOK := true
 	dropKind := func(kind compactionGroupKind) {
 		for i := range groups {
-			if !arithmeticOK || remaining <= b.Input {
+			if !arithmeticOK || remaining <= target {
 				return
 			}
-			if groups[i].kind == kind {
+			if groups[i].kind == kind && i != keep {
 				groups[i].drop = true
 				remaining, arithmeticOK = checkedTokenSub(remaining, groups[i].tokens)
 				dropped++
@@ -264,6 +316,12 @@ func (rc RecencyCompactor) Compact(_ context.Context, st State, b TokenBudget) (
 	dropKind(groupHistory)
 	dropKind(groupCompletedTool)
 	dropKind(groupPlainElastic)
+	if lowWater && remaining > target {
+		// Pinned, unresolved and newest content alone sit above the mark:
+		// return exactly the just-enough fit, never an error low-water caused.
+		b.LowWaterFraction = 0
+		return rc.Compact(ctx, st, b)
+	}
 	if !arithmeticOK {
 		return st, CompactionReport{Strategy: "recency", DroppedCount: dropped, TokensBefore: before, TokensAfter: math.MaxInt}, ErrContextExhausted
 	}

@@ -219,9 +219,10 @@ type ChatRequest struct {
 	// for this request. nil uses the provider default tags.
 	ParseThinkTags *ThinkTags `json:"-"`
 	// SessionID is a stable per-conversation identifier. The openai-compat
-	// provider emits it as the x-opencode-session header, which opencode
-	// uses for request routing and prompt caching; empty omits the header,
-	// leaving the request without session metadata. Leading or trailing spaces
+	// provider sends it in the form its cache affinity mode selects
+	// (openaicompat.WithCacheAffinity): raw as the x-opencode-session header
+	// to OpenCode, as a keyed hash to OpenAI and OpenRouter, and not at all to
+	// other hosts. Empty sends no session metadata. Leading or trailing spaces
 	// and tabs are rejected because HTTP would trim them and change the ID.
 	SessionID string `json:"-"`
 }
@@ -375,12 +376,21 @@ type ModelInfo struct {
 // ReasoningTokensReported is true when the backend explicitly reported the
 // reasoning-token field. It distinguishes a measured zero from a backend that
 // does not report isolated reasoning tokens.
+//
+// CachedPromptTokens is the part of PromptTokens served from the backend's
+// prompt cache, and CacheWriteTokens is the part written to it, when the
+// backend reports them. PromptTokens includes cached tokens; the Reported
+// flags distinguish a measured zero from a backend that does not report.
 type Usage struct {
-	PromptTokens            int  `json:"prompt_tokens"`
-	CompletionTokens        int  `json:"completion_tokens"`
-	TotalTokens             int  `json:"total_tokens"`
-	ReasoningTokens         int  `json:"reasoning_tokens,omitempty"`
-	ReasoningTokensReported bool `json:"reasoning_tokens_reported,omitempty"`
+	PromptTokens               int  `json:"prompt_tokens"`
+	CompletionTokens           int  `json:"completion_tokens"`
+	TotalTokens                int  `json:"total_tokens"`
+	ReasoningTokens            int  `json:"reasoning_tokens,omitempty"`
+	ReasoningTokensReported    bool `json:"reasoning_tokens_reported,omitempty"`
+	CachedPromptTokens         int  `json:"cached_prompt_tokens,omitempty"`
+	CachedPromptTokensReported bool `json:"cached_prompt_tokens_reported,omitempty"`
+	CacheWriteTokens           int  `json:"cache_write_tokens,omitempty"`
+	CacheWriteTokensReported   bool `json:"cache_write_tokens_reported,omitempty"`
 }
 
 // LatencyInfo captures timing breakdowns from the provider backend.

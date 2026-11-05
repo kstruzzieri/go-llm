@@ -132,7 +132,8 @@ func buildProvider(key string, cfg config.ProviderConfig, gate *provider.Destina
 		client := ollama.NewClient(opts...)
 		return provider.NewOllamaProvider(client, provider.WithProviderName(key)), client, nil
 	case "openai-compat":
-		copts := []openaicompat.ClientOption{}
+		// An empty cache_affinity lets the client infer the mode from its host.
+		copts := []openaicompat.ClientOption{openaicompat.WithCacheAffinity(cfg.CacheAffinity)}
 		if guarded != nil {
 			copts = append(copts, openaicompat.WithHTTPClient(guarded))
 		} else if cfg.Timeout.Duration > 0 {

@@ -253,6 +253,27 @@ func TestClient_NextAction_ParsesAttemptAndNestedDiagnostics(t *testing.T) {
 	}
 }
 
+// #731 B1: recorded_blockers is display-only; no shape of it may fail the
+// next-action decode that dispositions depend on.
+func TestClient_NextAction_RecordedBlockersNeverFailDecode(t *testing.T) {
+	const base = `{"state":"validation_missing","reason":"gate missing","blocking":true,"step_id":"P1","diagnostics":["d1"]`
+	f := &fakeRunner{replies: map[string]fakeReply{"next-action": {stdout: []byte(base + `}`)}}}
+	want, err := NewClient(f, "/ws").NextAction(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, blockers := range []string{`5`, `"x"`, `[{"step_id":"P1","reason":7}]`} {
+		payload := []byte(base + `,"recorded_blockers":` + blockers + `}`)
+		f := &fakeRunner{replies: map[string]fakeReply{"next-action": {stdout: payload}}}
+		got, err := NewClient(f, "/ws").NextAction(context.Background())
+		if err != nil || got.State != want.State || got.Blocking != want.Blocking || got.StepID == nil || *got.StepID != "P1" ||
+			!reflect.DeepEqual(got.Diagnostics, want.Diagnostics) || !bytes.Equal(got.RawJSON, payload) ||
+			string(got.RecordedBlockers) != blockers {
+			t.Fatalf("recorded_blockers %s: state = %+v, err = %v", blockers, got, err)
+		}
+	}
+}
+
 func TestClient_NextAction_PreservesTypedRecoveryProjectionAndRawJSON(t *testing.T) {
 	payload := []byte(`{"state":"validation_missing","reason":"gate missing","blocking":true,"command":"sh","args":["-c","touch /tmp/owned"],"step_id":"P1","gate":"unit-tests","diagnostics":[],"resumability":{"contract":{"plan_sha256":"plan","locked":true,"execution_contract_sha256":"execution"},"agent_id":"golem","step":{"id":"P1","state":"in_progress","completed":false},"attempt":{"id":"A1","state":"claimed","owner":"golem","open":true},"lease":{"policy":"enforce","ttl_minutes":30,"grace_seconds":5,"expires_at":"2026-07-19T12:00:00Z","state":"live","exclusive":true},"gates":[{"kind":"command","label":"go test ./...","status":"missing","receipt_id":null,"evidence_id":null},{"kind":"inspection","label":"review","status":"satisfied","receipt_id":null,"evidence_id":"E1"}],"recovery_actions":[{"action":"continue","allowed":true,"automatic":true,"break_glass":false,"reason":"owner holds lease"}],"diagnostics":[]}}`)
 	f := &fakeRunner{replies: map[string]fakeReply{"next-action": {stdout: payload}}}
@@ -434,6 +455,94 @@ func TestClient_NextStep_MalformedSuccessNamesSubcommand(t *testing.T) {
 	_, err := c.NextStep(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "next-step") {
 		t.Fatalf("parse error must name the subcommand, got %v", err)
+	}
+}
+
+func TestClient_ExplainNextStep_Argv(t *testing.T) {
+	c, f := newTestClient(map[string]fakeReply{"next-step": {stdout: []byte(`{"diagnostics":[],"reason_code":"steps_complete","step":null}`)}})
+	if _, err := c.ExplainNextStep(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"next-step", "--root", "/ws", "--json", "--explain"}; !reflect.DeepEqual(f.calls[0], want) {
+		t.Fatalf("argv = %v, want %v", f.calls[0], want)
+	}
+}
+
+// #731: every 1.2 reason code decodes; unknown keys and the eligible step's
+// other fields are ignored, since Golem reads the step from its own plan.
+func TestClient_ExplainNextStep_DecodesEachReasonCode(t *testing.T) {
+	for _, tt := range []struct {
+		name, stdout string
+		want         NextStepExplanation
+	}{
+		{"eligible", `{"diagnostics":[],"reason_code":"eligible","step":{"id":"P1","action":"edit","files":["a"]},"future":1}`,
+			NextStepExplanation{StepID: "P1", ReasonCode: NextStepEligible, Diagnostics: []string{}}},
+		{"dependencies_unmet", `{"diagnostics":["step P1 has open attempt A1 (owner golem)","step P2 waits on unmet dependencies: P1"],"reason_code":"dependencies_unmet","step":null}`,
+			NextStepExplanation{ReasonCode: NextStepDependenciesUnmet, Diagnostics: []string{"step P1 has open attempt A1 (owner golem)", "step P2 waits on unmet dependencies: P1"}}},
+		{"open_attempts", `{"diagnostics":["step P1 has open attempt A1 (owner golem)"],"reason_code":"open_attempts","step":null}`,
+			NextStepExplanation{ReasonCode: NextStepOpenAttempts, Diagnostics: []string{"step P1 has open attempt A1 (owner golem)"}}},
+		{"empty diagnostic", `{"diagnostics":[""],"reason_code":"open_attempts","step":null}`,
+			NextStepExplanation{ReasonCode: NextStepOpenAttempts, Diagnostics: []string{""}}},
+		{"steps_complete", `{"diagnostics":[],"reason_code":"steps_complete","step":null}`,
+			NextStepExplanation{ReasonCode: NextStepStepsComplete, Diagnostics: []string{}}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			c, _ := newTestClient(map[string]fakeReply{"next-step": {stdout: []byte(tt.stdout)}})
+			got, err := c.ExplainNextStep(context.Background())
+			if err != nil || !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("got %+v, err %v; want %+v", got, err, tt.want)
+			}
+		})
+	}
+}
+
+// #731 A1: decoding fails closed on what Golem acts on.
+func TestClient_ExplainNextStep_RejectsMalformedPayload(t *testing.T) {
+	for _, stdout := range []string{
+		`null`,
+		`[]`,
+		`{"reason_code":"eligible","step":{"id":"P1"}}`,
+		`{"diagnostics":[],"reason_code":"steps_complete"}`,
+		`{"diagnostics":[],"step":null}`,
+		`{"diagnostics":[],"reason_code":null,"step":null}`,
+		`{"diagnostics":[],"reason_code":7,"step":null}`,
+		`{"diagnostics":[],"reason_code":"eligible","step":null}`,
+		`{"diagnostics":[],"reason_code":"eligible","step":{"id":""}}`,
+		`{"diagnostics":[],"reason_code":"eligible","step":{"id":7}}`,
+		`{"diagnostics":[],"reason_code":"eligible","step":"P1"}`,
+		`{"diagnostics":[],"reason_code":"open_attempts","step":{"id":"P1"}}`,
+		`{"diagnostics":null,"reason_code":"steps_complete","step":null}`,
+		`{"diagnostics":[null],"reason_code":"steps_complete","step":null}`,
+		`{"diagnostics":["step P1 has open attempt A1",null],"reason_code":"open_attempts","step":null}`,
+		`{"diagnostics":[7],"reason_code":"steps_complete","step":null}`,
+		`{"step":`,
+	} {
+		t.Run(stdout, func(t *testing.T) {
+			c, _ := newTestClient(map[string]fakeReply{"next-step": {stdout: []byte(stdout)}})
+			got, err := c.ExplainNextStep(context.Background())
+			if err == nil || !strings.Contains(err.Error(), "next-step") || !reflect.DeepEqual(got, NextStepExplanation{}) {
+				t.Fatalf("got %+v, err %v; want a next-step error and the zero value", got, err)
+			}
+		})
+	}
+
+	c, _ := newTestClient(map[string]fakeReply{"next-step": {stdout: []byte(`{"diagnostics":[],"reason_code":"future_code","step":null}`)}})
+	got, err := c.ExplainNextStep(context.Background())
+	want := `agentflow next-step reported unknown reason_code "future_code"; update Golem`
+	if err == nil || err.Error() != want || !reflect.DeepEqual(got, NextStepExplanation{}) {
+		t.Fatalf("got %+v, err %v; want %s", got, err, want)
+	}
+}
+
+func TestClient_ExplainNextStep_NonZeroExitIsCommandError(t *testing.T) {
+	c, f := newTestClient(map[string]fakeReply{"next-step": {stderr: []byte("plan invalid\n"), exit: 1}})
+	_, err := c.ExplainNextStep(context.Background())
+	var ce *CommandError
+	if !errors.As(err, &ce) || ce.Cmd != "next-step" || ce.Exit != 1 || !strings.Contains(err.Error(), "plan invalid") {
+		t.Fatalf("err = %v, want a next-step CommandError carrying stderr", err)
+	}
+	if len(f.calls) != 1 {
+		t.Fatalf("calls = %v, want exactly one", f.calls)
 	}
 }
 

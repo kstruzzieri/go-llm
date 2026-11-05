@@ -116,7 +116,7 @@ type RoutingRequest struct {
 	AffinityKey string
 	// SessionID is the caller's stable per-conversation identifier, carried
 	// through routing so the executing provider can put it on the wire — the
-	// openai-compat provider emits it as x-opencode-session. Distinct from
+	// openai-compat provider sends it per its cache affinity mode. Distinct from
 	// AffinityKey, which steers which model is chosen: SessionID never
 	// influences routing, it only travels with the request.
 	SessionID string
