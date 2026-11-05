@@ -133,7 +133,7 @@ func runAgentflowStatusWithRunner(ctx context.Context, out io.Writer, root strin
 	disposition := resumeDisposition(state.State)
 	if disposition.action != failClosed {
 		if err := validateStatusRecovery(root, state); err != nil {
-			disposition = recoveryDisposition{failClosed, 3, "blocked by unsafe or malformed projection: " + err.Error()}
+			disposition = recoveryDisposition{failClosed, 3, "blocked: " + err.Error()}
 		} else if hasFailedCommandGate(state) {
 			disposition.description = "block the attempt whose gate failed, then re-run the step serially" // #652 A6
 		}
@@ -365,11 +365,21 @@ func validateRecoveryProjection(state agentflow.NextActionState) error {
 // settlement would finish on its gates alone, without the work it was opened
 // for (#652 D1). Status and resume run it on the projection they start from,
 // not on an amendment resume opens itself. A timed-out one is only blocked, so
-// it passes.
-func refuseCompletedStepAttempt(state agentflow.NextActionState) error {
+// it passes. So does an amendment an operator opened and recorded an edit in:
+// the edit is the work, and settlement gates it (agentflow#103). If one of its
+// gates failed, settlement would block the operator's attempt, so that stays
+// refused.
+func refuseCompletedStepAttempt(root string, state agentflow.NextActionState) error {
 	projection := state.Resumability
 	if projection == nil || projection.Attempt == nil || projection.Step == nil || projection.Step.Completed == nil ||
 		!*projection.Step.Completed || state.State == "attempt_timed_out" {
+		return nil
+	}
+	settleable, err := operatorAmendmentWithEdit(root, projection.Step.ID, projection.Attempt.ID)
+	if err != nil {
+		return err
+	}
+	if settleable && !hasFailedCommandGate(state) {
 		return nil
 	}
 	return fmt.Errorf("agentflow resumability open attempt belongs to a completed step")
@@ -406,6 +416,12 @@ func validateAutomaticRecoveryAction(projection *agentflow.ResumabilityProjectio
 		}
 		matched = &projection.RecoveryActions[i]
 	}
+	// AgentFlow leaves amend to an operator when it cannot say whose an edit is,
+	// or when a stopped attempt's edit was never verified (agentflow#73, #103).
+	// That is a decision to surface, not a fault in the projection.
+	if action == "amend" && matched != nil && matched.Allowed && !matched.Automatic && matched.BreakGlass != nil && !*matched.BreakGlass {
+		return fmt.Errorf("an operator must decide whether to amend step %s: AgentFlow does not allow it unattended; to replace the attempt, run its advised amend-step, record the edit in the new attempt, then resume", projection.Step.ID)
+	}
 	if matched == nil || !matched.Allowed || !matched.Automatic || matched.BreakGlass == nil || *matched.BreakGlass {
 		return fmt.Errorf("agentflow resumability does not allow automatic non-break-glass %s", action)
 	}
@@ -425,7 +441,7 @@ func validateStatusRecovery(root string, state agentflow.NextActionState) error 
 	if err := validateRecoveryProjection(state); err != nil {
 		return err
 	}
-	if err := refuseCompletedStepAttempt(state); err != nil {
+	if err := refuseCompletedStepAttempt(root, state); err != nil {
 		return err
 	}
 	if resumeDisposition(state.State).action == resumeSerial {
@@ -690,7 +706,7 @@ func (d *driver) resume(ctx context.Context, root string, planJSON []byte, appro
 	if err := validateResumeProjection(root, planJSON, state, approved); err != nil {
 		return agentflow.NextActionState{}, err
 	}
-	if err := refuseCompletedStepAttempt(state); err != nil {
+	if err := refuseCompletedStepAttempt(root, state); err != nil {
 		return agentflow.NextActionState{}, err
 	}
 	if err := validateRecoveryMutationSafety(state); err != nil {
