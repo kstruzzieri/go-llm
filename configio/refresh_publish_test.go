@@ -391,3 +391,43 @@ func TestListingFailureReason_NoRawProviderText(t *testing.T) {
 		}
 	}
 }
+
+// failingStore is an EvidenceWriter whose PublishListings fails, optionally
+// cancelling the context first.
+type failingStore struct {
+	fingerprint.EvidenceWriter
+	onPublish func()
+}
+
+func (f failingStore) PublishListings(context.Context, []fingerprint.ListingPublish) error {
+	if f.onPublish != nil {
+		f.onPublish()
+	}
+	return fmt.Errorf("disk full")
+}
+
+func TestRefreshPublish_StoreFailureKeepsInventoryAndReportsError(t *testing.T) {
+	p := &fakeProvider{name: "a", models: []provider.ModelInfo{{Name: "m", Family: "f"}}}
+	lister := &fakeLister{names: []string{"a"}, providers: map[string]provider.Provider{"a": p}}
+	cfg := cfgFor(map[string][3]string{"a": {"http://a.test:1", "openai-compat", "sk-secret-key"}})
+
+	inv, err := RefreshInventory(t.Context(), lister, nil, WithPublish(failingStore{}, cfg))
+	if err == nil || !strings.Contains(err.Error(), "disk full") {
+		t.Fatalf("err = %v, want the wrapped store failure", err)
+	}
+	if strings.Contains(err.Error(), "sk-secret-key") {
+		t.Fatalf("error carries the API key: %v", err)
+	}
+	wantProviders := []configview.InventoryProvider{{Name: "a", Reachable: true}}
+	if fmt.Sprint(inv.Providers) != fmt.Sprint(wantProviders) || len(inv.Models) != 1 ||
+		inv.Models[0].Key != (provider.ModelKey{Provider: "a", Model: "m"}) || inv.Models[0].Family != "f" {
+		t.Fatalf("inventory = %+v, want the fetched listing", inv)
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	inv, err = RefreshInventory(ctx, lister, nil, WithPublish(failingStore{onPublish: cancel}, cfg))
+	if err != context.Canceled || len(inv.Models) != 0 || len(inv.Providers) != 0 {
+		t.Fatalf("cancelled during publish: inv=%+v err=%v, want zero Inventory and context.Canceled", inv, err)
+	}
+}

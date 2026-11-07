@@ -158,8 +158,11 @@ func listingPublish(t publishTarget, started time.Time, infos []provider.ModelIn
 //
 // With WithPublish, each successful listing is also published to the evidence
 // store after the final barrier (see WithPublish); a failed listing publishes
-// nothing and reports a bounded Reason. A store failure returns the zero
-// Inventory and the error.
+// nothing and reports a bounded Reason. If the store fails while the context is
+// live, the populated Inventory is returned together with a non-nil wrapped
+// error, so a host can show the models and say they were not saved. If the
+// context is cancelled, including during publish, the zero Inventory and the
+// context error are returned.
 func RefreshInventory(ctx context.Context, providers ProviderLister, models ListedProjector, opts ...RefreshOption) (configview.Inventory, error) {
 	var o refreshOptions
 	for _, opt := range opts {
@@ -255,7 +258,10 @@ func RefreshInventory(ctx context.Context, providers ProviderLister, models List
 	}
 	if o.store != nil && len(pubs) > 0 {
 		if err := o.store.PublishListings(ctx, pubs); err != nil {
-			return configview.Inventory{}, fmt.Errorf("configio: publish listings: %w", err)
+			if cerr := ctx.Err(); cerr != nil {
+				return configview.Inventory{}, cerr
+			}
+			return inv, fmt.Errorf("configio: publish listings: %w", err)
 		}
 	}
 	return inv, nil
