@@ -190,9 +190,11 @@ func (o *Orchestrator) Run(ctx context.Context, req Request, obs Observer) (Resu
 func (o *Orchestrator) RunWithVerifier(ctx context.Context, req Request, obs Observer, verifier Verifier) (res Result, err error) {
 	ctx, req, budgetRun := newRunBudget(ctx, req)
 	defer func() { res.DescendantUsage = budgetRun.close() }()
+	ctx, exposure := newExposureRun(ctx, req)
 	ic := &interceptorRun{}
 	res, err = o.run(ctx, req, obs, ic, budgetRun, verifier)
 	res.Risk = ic.result()
+	res.Exposure = exposure.snapshot()
 	return res, err
 }
 

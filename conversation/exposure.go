@@ -1,7 +1,7 @@
 package conversation
 
-// MaxExposureFirstBytes bounds how much of the first exposing content an
-// Exposure keeps in First, so a record never stores a large payload.
+// MaxExposureFirstBytes bounds Exposure.First. First is a short content-free
+// label such as "tool:mcp__docs__fetch", "history" or "consult", never content.
 const MaxExposureFirstBytes = 128
 
 // Exposure records whether outside content has entered a conversation.
@@ -15,7 +15,7 @@ type Exposure struct {
 	Foreign bool
 	// Unknown is true when the origin of entered content could not be determined.
 	Unknown bool
-	// First holds at most MaxExposureFirstBytes of the first exposing content.
+	// First labels the first exposing source, at most MaxExposureFirstBytes.
 	First string
 }
 
