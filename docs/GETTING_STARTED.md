@@ -140,7 +140,10 @@ Consumer applications (Firn IDE, Flux ML) can also use `config.Default()` to dis
 search order is `$GO_LLM_CONFIG` (absolute or relative path), then `./models.json`,
 then the user config directory. A config found at `./models.json` cannot use
 `${NAME}` `api_key` references (error code `key_reference_refused`); load it with
-`config.Load` or name it in `GO_LLM_CONFIG` to use them. Code that mirrors the
+`config.Load` or name it in `GO_LLM_CONFIG` for one run
+(`GO_LLM_CONFIG=./models.json your-app`) to use them. Do not export a relative
+`GO_LLM_CONFIG`: it would trust the `models.json` in every directory you run
+from. Code that mirrors the
 closed error-code list must add `key_reference_refused`.
 
 ### Choosing a Model

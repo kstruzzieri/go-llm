@@ -85,7 +85,9 @@ found only because it sits in the current directory is refused with error code
 `key_reference_refused` as soon as any `api_key` holds a `${...}` reference,
 before any environment variable is read. Name the file yourself to use its
 references: `golem -config ./models.json` (or `go-llm-mcp -config ./models.json`),
-or set `GO_LLM_CONFIG`, a relative path works. Saving the config to another
+or set `GO_LLM_CONFIG` for one run: `GO_LLM_CONFIG=./models.json golem ...`.
+Do not export a relative `GO_LLM_CONFIG`: it would trust the `models.json` in
+every directory you run from. Saving the config to another
 path or as a profile also lifts the refusal; saving it back to its own path
 keeps it. Literal keys, the user config (including when you run from inside
 its directory), `GO_LLM_CONFIG` and explicit paths are unchanged.
@@ -110,7 +112,7 @@ primary or fallback — and asks for consent. Literal loopback endpoints
 waits for a yes. Under each destination whose provider sends a key, the screen
 adds `sends api_key from $NAME` (several: `$A, $B`) or `sends a literal
 api_key`, so you see which secret goes where; this extends the #477 consent
-field set (D14 in its design). For scripts and one-shot runs, pre-admit exact
+field set. For scripts and one-shot runs, pre-admit exact
 destinations with the repeatable flag:
 
 ```bash
