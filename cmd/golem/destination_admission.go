@@ -376,8 +376,9 @@ func firstUncovered(dests []provider.Destination, policy provider.DestinationPol
 
 // render writes the consent surface: one line per deduplicated destination,
 // grouped local-first, each followed by the purposes that reach it with
-// primary/fallback marking. D14 fields only — provider key, canonical URL,
-// purpose, marker, locality. Deterministic order.
+// primary/fallback marking. D14 fields — provider key, canonical URL, purpose,
+// marker, locality — plus, for a provider that sends a key, the key source
+// (#776 D5: variable names or "literal", never a value). Deterministic order.
 func (a *destinationAdmission) render(w io.Writer) {
 	renderManifest(w, a.manifest, a.keySources)
 }
