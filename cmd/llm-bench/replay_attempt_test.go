@@ -1111,7 +1111,9 @@ func TestReplayAttempt_TrailingWhitespaceKeyIsRedactedAsSent(t *testing.T) {
 		opts.APIKey = attemptTestKey + "\n"
 		_, rec, stderr := runAttemptStderr(t, context.Background(), opts) // fails on a key in stderr
 		assertAttemptError(t, rec, attemptCodeHTTPStatus, attemptStageResponse, 1)
-		if !strings.Contains(stderr, "rejected key [REDACTED]") {
+		// The client redacts its own key as [redacted] (#776) before llm-bench's
+		// scrub sees the text; either spelling means the key did not survive.
+		if !strings.Contains(strings.ToLower(stderr), "rejected key [redacted]") {
 			t.Fatalf("stderr %q; want the sent key redacted in the server's body", stderr)
 		}
 	})
