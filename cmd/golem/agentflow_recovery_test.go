@@ -20,7 +20,7 @@ import (
 
 type recoveryRunner struct {
 	payload []byte
-	version string // --version reply; "" means a supported "agentflow 1.2.0"
+	version string // --version reply; "" means a supported "agentflow 1.3.0"
 	calls   [][]string
 }
 
@@ -30,7 +30,7 @@ type failingRecoveryRunner struct{ stderr []byte }
 
 func (r *failingRecoveryRunner) Run(_ context.Context, args []string, _ []byte) ([]byte, []byte, int, error) {
 	if len(args) > 0 && args[0] == "--version" {
-		return []byte("agentflow 1.2.0\n"), nil, 0, nil
+		return []byte("agentflow 1.3.0\n"), nil, 0, nil
 	}
 	return nil, append([]byte(nil), r.stderr...), 1, nil
 }
@@ -39,7 +39,7 @@ func (r *recoveryRunner) Run(_ context.Context, args []string, _ []byte) ([]byte
 	r.calls = append(r.calls, append([]string(nil), args...))
 	if len(args) > 0 && args[0] == "--version" {
 		if r.version == "" {
-			return []byte("agentflow 1.2.0\n"), nil, 0, nil
+			return []byte("agentflow 1.3.0\n"), nil, 0, nil
 		}
 		return []byte(r.version), nil, 0, nil
 	}
@@ -105,7 +105,7 @@ func TestAgentflowStatus_HumanIsReadOnlyAndOwned(t *testing.T) {
 			t.Errorf("output missing %q:\n%s", want, out.String())
 		}
 	}
-	wantCalls := [][]string{{"--version"}, {"next-action", "--root", root, "--json", "--agent", "golem"}, {"--version"}}
+	wantCalls := [][]string{{"--version"}, {"next-action", "--root", root, "--json", "--agent", "golem"}}
 	if !reflect.DeepEqual(runner.calls, wantCalls) {
 		t.Fatalf("calls = %v, want %v", runner.calls, wantCalls)
 	}
@@ -119,8 +119,8 @@ func TestAgentflowStatus_HumanIsReadOnlyAndOwned(t *testing.T) {
 // rejection is Golem's own text, so JSON mode reports it on stderr.
 func TestAgentflowStatus_RejectsUnsupportedVersionBeforeNextAction(t *testing.T) {
 	for _, tt := range []struct{ version, want string }{
-		{"agentflow 0.4.0\n", "agentflow 0.4 is too old; need >= 1.2"},
-		{"agentflow 1.1.1\n", "agentflow 1.1 is too old; need >= 1.2"},
+		{"agentflow 0.4.0\n", "agentflow 0.4 is too old; need >= 1.3"},
+		{"agentflow 1.2.2\n", "agentflow 1.2 is too old; need >= 1.3"},
 		{"agentflow 2.0.0\n", "agentflow 2.0 is newer than this Golem supports; need 1.x"},
 	} {
 		for _, jsonOutput := range []bool{false, true} {
@@ -1302,7 +1302,7 @@ func TestResumeReentersExistingSerialStepLoop(t *testing.T) {
 		t.Fatalf("state=%q err=%v", final.State, err)
 	}
 	want := []string{
-		"probe", "next-action", "probe-recovery", "next-step", "claim:P1", "model:P1",
+		"probe", "next-action", "next-step", "claim:P1", "model:P1",
 		"next-action",
 		"gate:P1:unit-tests", "gate:P1:lint", "finish-step:P1:A-P1",
 		"next-step", "next-action", "finish-run", "next-action",
@@ -1351,7 +1351,7 @@ func TestResumeRunsMultipleRemainingStepsSerially(t *testing.T) {
 		t.Fatalf("state=%q err=%v", final.State, err)
 	}
 	want := []string{
-		"probe", "next-action", "probe-recovery", "next-step", "claim:P1", "model:P1",
+		"probe", "next-action", "next-step", "claim:P1", "model:P1",
 		"next-action", "gate:P1:unit-tests", "gate:P1:lint", "finish-step:P1:A-P1",
 		"next-step", "claim:P2", "model:P2",
 		"next-action", "gate:P2:unit-tests-2", "finish-step:P2:A-P2",
@@ -1425,7 +1425,7 @@ func TestResumeReentryRefusesRecordedGateInsteadOfDuplicatingIt(t *testing.T) {
 			if _, err := d.resume(context.Background(), initialFixture.root, initialFixture.planJSON, nil); err == nil || err.Error() != want {
 				t.Fatalf("resume error = %v, want %q", err, want)
 			}
-			wantSeq := []string{"probe", "next-action", "probe-recovery", "next-step", "claim:P1", "model:P1", "next-action"}
+			wantSeq := []string{"probe", "next-action", "next-step", "claim:P1", "model:P1", "next-action"}
 			if !reflect.DeepEqual(af.seq, wantSeq) || len(af.gateArgv) != 0 {
 				t.Fatalf("calls before duplicate refusal = %v argv=%v, want %v and no gate argv", af.seq, af.gateArgv, wantSeq)
 			}
@@ -1465,7 +1465,7 @@ func TestResumeRefusesFinishRunWhileStepWorkRemains(t *testing.T) {
 		t.Fatalf("state = %q, err = %v\nwant error %s", final.State, err, want)
 	}
 	wantSeq := []string{
-		"probe", "next-action", "probe-recovery", "next-step", "claim:P1", "model:P1",
+		"probe", "next-action", "next-step", "claim:P1", "model:P1",
 		"next-action", "gate:P1:unit-tests", "gate:P1:lint", "finish-step:P1:A-P1",
 		"next-step", "next-action",
 	}
@@ -1507,7 +1507,7 @@ func TestResumeStopsWhenStepWorkRemainsAfterSettlement(t *testing.T) {
 		t.Fatalf("state = %q, err = %v\nwant error %s", final.State, err, want)
 	}
 	wantSeq := []string{
-		"probe", "next-action", "probe-recovery", "next-step", "claim:P1", "model:P1",
+		"probe", "next-action", "next-step", "claim:P1", "model:P1",
 		"next-action", "gate:P1:unit-tests", "gate:P1:lint", "finish-step:P1:A-P1",
 		"next-step",
 	}
@@ -1547,7 +1547,7 @@ func TestResumeNextActionErrorBlocksFinishRun(t *testing.T) {
 	if !errors.Is(err, sentinel) || err.Error() != "check step work before finish-run: next-action unavailable" {
 		t.Fatalf("err = %v, want the wrapped next-action error", err)
 	}
-	if want := []string{"probe", "next-action", "probe-recovery", "next-step", "next-action"}; !reflect.DeepEqual(af.seq, want) {
+	if want := []string{"probe", "next-action", "next-step", "next-action"}; !reflect.DeepEqual(af.seq, want) {
 		t.Fatalf("seq = %v, want %v", af.seq, want)
 	}
 }
@@ -1571,7 +1571,7 @@ func TestResumeFinalCheckRefusesAttemptOpenedAfterCheck(t *testing.T) {
 	if want := `agentflow resume finished in state "validation_missing", want complete`; err == nil || err.Error() != want || final.State != "" {
 		t.Fatalf("state = %q, err = %v\nwant error %s", final.State, err, want)
 	}
-	if want := []string{"probe", "next-action", "probe-recovery", "next-step", "next-action", "finish-run", "next-action"}; !reflect.DeepEqual(af.seq, want) {
+	if want := []string{"probe", "next-action", "next-step", "next-action", "finish-run", "next-action"}; !reflect.DeepEqual(af.seq, want) {
 		t.Fatalf("seq = %v, want %v", af.seq, want)
 	}
 }
@@ -1589,7 +1589,7 @@ func TestResumeProgressReadOccursOnlyAfterSettlement(t *testing.T) {
 		if _, err := d.resume(context.Background(), fixture.root, fixture.planJSON, nil); err == nil || !strings.Contains(err.Error(), "did not progress") {
 			t.Fatalf("resume error = %v", err)
 		}
-		want := []string{"probe", "next-action", "probe-recovery", "finish-step:P1:A1", "next-action"}
+		want := []string{"probe", "next-action", "finish-step:P1:A1", "next-action"}
 		if !reflect.DeepEqual(af.seq, want) {
 			t.Fatalf("seq = %v, want %v", af.seq, want)
 		}
@@ -1605,7 +1605,7 @@ func TestResumeProgressReadOccursOnlyAfterSettlement(t *testing.T) {
 			if _, err := d.resume(context.Background(), fixture.root, fixture.planJSON, nil); err != nil {
 				t.Fatal(err)
 			}
-			want := []string{"probe", "next-action", "probe-recovery", "next-step", "next-action", "finish-run", "next-action"}
+			want := []string{"probe", "next-action", "next-step", "next-action", "finish-run", "next-action"}
 			if !reflect.DeepEqual(af.seq, want) {
 				t.Fatalf("seq = %v, want %v", af.seq, want)
 			}
@@ -1625,15 +1625,15 @@ func TestResumeSettlementContinuesSeriallyWithoutRepeatingMutation(t *testing.T)
 				{Kind: "command", Label: "go test ./...", Status: "satisfied"},
 				{Kind: "command", Label: "go vet ./...", Status: "missing"},
 			},
-			want: []string{"probe", "next-action", "probe-recovery", "gate:P1:lint", "finish-step:P1:A1", "next-action", "next-step", "next-action", "finish-run", "next-action"},
+			want: []string{"probe", "next-action", "gate:P1:lint", "finish-step:P1:A1", "next-action", "next-step", "next-action", "finish-run", "next-action"},
 		},
 		{
 			state: "step_unverified",
-			want:  []string{"probe", "next-action", "probe-recovery", "finish-step:P1:A1", "next-action", "next-step", "next-action", "finish-run", "next-action"},
+			want:  []string{"probe", "next-action", "finish-step:P1:A1", "next-action", "next-step", "next-action", "finish-run", "next-action"},
 		},
 		{
 			state: "step_uncompleted",
-			want:  []string{"probe", "next-action", "probe-recovery", "complete-step:P1:A1", "next-action", "next-step", "next-action", "finish-run", "next-action"},
+			want:  []string{"probe", "next-action", "complete-step:P1:A1", "next-action", "next-step", "next-action", "finish-run", "next-action"},
 		},
 	}
 	for _, test := range tests {
@@ -1691,7 +1691,7 @@ func TestResumeSettlementReplacesProofItsWorkMadeStale(t *testing.T) {
 	if err != nil || final.State != "complete" {
 		t.Fatalf("resume state = %q, err = %v; want complete", final.State, err)
 	}
-	want := []string{"probe", "next-action", "probe-recovery", "complete-step:P1:A1", "next-action", "next-step", "next-action", "finish-run", "next-action"}
+	want := []string{"probe", "next-action", "complete-step:P1:A1", "next-action", "next-step", "next-action", "finish-run", "next-action"}
 	if !reflect.DeepEqual(af.seq, want) {
 		t.Fatalf("seq = %v, want %v", af.seq, want)
 	}
@@ -1711,7 +1711,7 @@ func TestResumeSettlementPreservesFailingProof(t *testing.T) {
 	if want := `agentflow resume blocked after settlement in state "proof_failing": blocked by failing proof`; err == nil || err.Error() != want {
 		t.Fatalf("resume err = %v\nwant %s", err, want)
 	}
-	if want := []string{"probe", "next-action", "probe-recovery", "complete-step:P1:A1", "next-action"}; !reflect.DeepEqual(af.seq, want) {
+	if want := []string{"probe", "next-action", "complete-step:P1:A1", "next-action"}; !reflect.DeepEqual(af.seq, want) {
 		t.Fatalf("seq = %v, want %v", af.seq, want)
 	}
 }
@@ -1729,7 +1729,7 @@ func TestResumeSettlementStillRefusesDrift(t *testing.T) {
 	if want := `agentflow resume blocked after settlement in state "drift_failing": blocked by drift findings`; err == nil || err.Error() != want {
 		t.Fatalf("resume err = %v\nwant %s", err, want)
 	}
-	if want := []string{"probe", "next-action", "probe-recovery", "complete-step:P1:A1", "next-action"}; !reflect.DeepEqual(af.seq, want) {
+	if want := []string{"probe", "next-action", "complete-step:P1:A1", "next-action"}; !reflect.DeepEqual(af.seq, want) {
 		t.Fatalf("seq = %v, want %v", af.seq, want)
 	}
 }
@@ -1749,7 +1749,7 @@ func TestResumeSettlementReplacementProofFailureStopsResume(t *testing.T) {
 	if _, err := d.resume(context.Background(), fixture.root, fixture.planJSON, nil); err == nil || !strings.Contains(err.Error(), "finish-run stopped at verify-proof") {
 		t.Fatalf("resume err = %v, want finish-run's error", err)
 	}
-	if want := []string{"probe", "next-action", "probe-recovery", "complete-step:P1:A1", "next-action", "next-step", "next-action", "finish-run"}; !reflect.DeepEqual(af.seq, want) {
+	if want := []string{"probe", "next-action", "complete-step:P1:A1", "next-action", "next-step", "next-action", "finish-run"}; !reflect.DeepEqual(af.seq, want) {
 		t.Fatalf("seq = %v, want %v", af.seq, want)
 	}
 }
@@ -1790,7 +1790,7 @@ func TestResumeSettlementThenSerialStepReplacesStaleProof(t *testing.T) {
 		t.Fatalf("resume state = %q, err = %v; want complete", final.State, err)
 	}
 	want := []string{
-		"probe", "next-action", "probe-recovery", "complete-step:P1:A1", "next-action",
+		"probe", "next-action", "complete-step:P1:A1", "next-action",
 		"next-step", "claim:P2", "model:P2",
 		"next-action", "gate:P2:unit-tests-2", "finish-step:P2:A-P2",
 		"next-step", "next-action", "finish-run", "next-action",
@@ -1838,7 +1838,7 @@ func TestResumeRefusesMalformedProgressedProofState(t *testing.T) {
 			if _, err := d.resume(context.Background(), fixture.root, fixture.planJSON, nil); err == nil || err.Error() != test.want {
 				t.Fatalf("resume err = %v\nwant %s", err, test.want)
 			}
-			if want := []string{"probe", "next-action", "probe-recovery", "complete-step:P1:A1", "next-action"}; !reflect.DeepEqual(af.seq, want) {
+			if want := []string{"probe", "next-action", "complete-step:P1:A1", "next-action"}; !reflect.DeepEqual(af.seq, want) {
 				t.Fatalf("seq = %v, want %v", af.seq, want)
 			}
 		})
@@ -1902,7 +1902,7 @@ func TestResumeBlocksFailedGateAttemptThenRerunsStep(t *testing.T) {
 		t.Fatalf("state = %q, err = %v", final.State, err)
 	}
 	want := []string{
-		"probe", "next-action", "probe-recovery",
+		"probe", "next-action",
 		"block-step:P1:A1:golem: resume found failed command gate",
 		"next-action", "next-step", "claim:P1", "model:P1",
 		"next-action", "gate:P1:unit-tests", "gate:P1:lint", "finish-step:P1:A-P1",
@@ -2004,7 +2004,7 @@ func TestResumeFailedGateBlockFailures(t *testing.T) {
 	}{
 		{name: "block rejected", blockErr: errors.New("block rejected"),
 			want:      `step P1 attempt A1: gate "lint" already failed; record blocked attempt: block rejected`,
-			wantSeq:   []string{"probe", "next-action", "probe-recovery", "block-step:P1:A1:golem: resume found failed command gate"},
+			wantSeq:   []string{"probe", "next-action", "block-step:P1:A1:golem: resume found failed command gate"},
 			wantBlock: 1},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -2280,7 +2280,7 @@ func TestResumeRefusesRetainedTimeoutBeforeMutation(t *testing.T) {
 			if want := wantTimeoutReport(fixture.root, tt.id); err == nil || err.Error() != want {
 				t.Fatalf("err = %v\nwant %s", err, want)
 			}
-			if want := []string{"probe", "next-action", "probe-recovery"}; !reflect.DeepEqual(af.seq, want) || modelCalls != 0 {
+			if want := []string{"probe", "next-action"}; !reflect.DeepEqual(af.seq, want) || modelCalls != 0 {
 				t.Fatalf("seq = %v, model calls = %d; want %v and none", af.seq, modelCalls, want)
 			}
 		})
@@ -2320,7 +2320,7 @@ func TestResumeRefusesRetainedTimeoutBeforeMutation(t *testing.T) {
 			if _, err := d.resume(context.Background(), fixture.root, fixture.planJSON, nil); err != nil {
 				t.Fatal(err)
 			}
-			want := []string{"probe", "next-action", "probe-recovery", "gate:P1:unit-tests", "gate:P1:lint", "finish-step:P1:A1", "next-action", "next-step", "next-action", "finish-run", "next-action"}
+			want := []string{"probe", "next-action", "gate:P1:unit-tests", "gate:P1:lint", "finish-step:P1:A1", "next-action", "next-step", "next-action", "finish-run", "next-action"}
 			if !reflect.DeepEqual(af.seq, want) {
 				t.Fatalf("seq = %v, want %v", af.seq, want)
 			}
@@ -2620,7 +2620,7 @@ func TestResumeBlocksTimedOutAttemptThenRerunsStep(t *testing.T) {
 		t.Fatalf("state = %q, err = %v", final.State, err)
 	}
 	want := []string{
-		"probe", "next-action", "probe-recovery",
+		"probe", "next-action",
 		"block-step:P1:A1:golem: resume found timed-out gate",
 		"next-action", "next-step", "claim:P1", "model:P1",
 		"next-action", "gate:P1:unit-tests", "gate:P1:lint", "finish-step:P1:A-P1",
@@ -2661,12 +2661,12 @@ func TestResumeAmendsCompletedStep(t *testing.T) {
 		entry func(t *testing.T, f *resumeFixture) agentflow.NextActionState
 		head  []string
 	}{
-		{name: "step_amendment_needed", entry: amendmentNeededState, head: []string{"probe", "next-action", "probe-recovery"}},
+		{name: "step_amendment_needed", entry: amendmentNeededState, head: []string{"probe", "next-action"}},
 		{name: "timed-out amendment", entry: func(t *testing.T, f *resumeFixture) agentflow.NextActionState {
 			_ = timedOutState(t, f)
 			asAmendment(f, "A2")
 			return f.state(t)
-		}, head: []string{"probe", "next-action", "probe-recovery", "block-step:P1:A2:golem: resume found timed-out gate", "next-action"}},
+		}, head: []string{"probe", "next-action", "block-step:P1:A2:golem: resume found timed-out gate", "next-action"}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			fixture := newResumeFixture(t)
@@ -2717,7 +2717,7 @@ func TestResumeTimedOutBlockFailureStops(t *testing.T) {
 	if want := "step P1 attempt A1: gate timed out; record blocked attempt: " + blockErr.Error(); err == nil || err.Error() != want || !errors.Is(err, blockErr) {
 		t.Fatalf("err = %v\nwant %s", err, want)
 	}
-	if want := []string{"probe", "next-action", "probe-recovery", "block-step:P1:A1:golem: resume found timed-out gate"}; !reflect.DeepEqual(af.seq, want) || models != 0 {
+	if want := []string{"probe", "next-action", "block-step:P1:A1:golem: resume found timed-out gate"}; !reflect.DeepEqual(af.seq, want) || models != 0 {
 		t.Fatalf("seq = %v, model runs = %d; want %v and none", af.seq, models, want)
 	}
 }
@@ -2830,7 +2830,7 @@ func TestReviewAmendmentReplacementIsRefused(t *testing.T) {
 			if _, err := d.resume(context.Background(), fixture.root, fixture.planJSON, nil); err == nil || err.Error() != refusal {
 				t.Fatalf("err = %v\nwant %s", err, refusal)
 			}
-			if want := []string{"probe", "next-action", "probe-recovery"}; !reflect.DeepEqual(af.seq, want) {
+			if want := []string{"probe", "next-action"}; !reflect.DeepEqual(af.seq, want) {
 				t.Fatalf("seq = %v, want %v", af.seq, want)
 			}
 		})
@@ -2918,7 +2918,7 @@ func TestResumeAmendsOneStepPerRun(t *testing.T) {
 	if want := `agentflow still reports step work before finish-run: state "step_amendment_needed" step "P2"; no proof was built; run -agentflow-status to see whether -agentflow-resume can recover it`; err == nil || err.Error() != want {
 		t.Fatalf("resume 1 err = %v\nwant %s", err, want)
 	}
-	if want := []string{"probe", "next-action", "probe-recovery", "amend-completed:P1" + amend, "model:P1", "next-action", "gate:P1:unit-tests", "gate:P1:lint", "finish-step:P1:AM-P1", "next-step", "next-action"}; !reflect.DeepEqual(af.seq, want) {
+	if want := []string{"probe", "next-action", "amend-completed:P1" + amend, "model:P1", "next-action", "gate:P1:unit-tests", "gate:P1:lint", "finish-step:P1:AM-P1", "next-step", "next-action"}; !reflect.DeepEqual(af.seq, want) {
 		t.Fatalf("resume 1 seq = %v\nwant %v", af.seq, want)
 	}
 
@@ -2926,239 +2926,8 @@ func TestResumeAmendsOneStepPerRun(t *testing.T) {
 	if err != nil || final.State != "complete" {
 		t.Fatalf("resume 2 state = %q, err = %v", final.State, err)
 	}
-	if want := []string{"probe", "next-action", "probe-recovery", "amend-completed:P2" + amend, "model:P2", "next-action", "gate:P2:unit-tests-2", "finish-step:P2:AM-P2", "next-step", "next-action", "finish-run", "next-action"}; !reflect.DeepEqual(af.seq, want) {
+	if want := []string{"probe", "next-action", "amend-completed:P2" + amend, "model:P2", "next-action", "gate:P2:unit-tests-2", "finish-step:P2:AM-P2", "next-step", "next-action", "finish-run", "next-action"}; !reflect.DeepEqual(af.seq, want) {
 		t.Fatalf("resume 2 seq = %v\nwant %v", af.seq, want)
-	}
-}
-
-// errAgentflow121 stands in for ProbeRecovery's refusal of AgentFlow 1.2.1.
-var errAgentflow121 = errors.New("agentflow 1.2.1 cannot drive recovery")
-
-// recoveryVersionStates are the resumeSerial states, one per settlement or
-// loop route resume would take after its checks.
-var recoveryVersionStates = append([]struct {
-	name  string
-	state func(t *testing.T, f *resumeFixture) agentflow.NextActionState
-}{
-	{"attempt_timed_out", timedOutState},
-	{"step_amendment_needed", amendmentNeededState},
-}, retainedTimeoutStates...)
-
-// AgentFlow 1.2.1 counts a stopped attempt's receipts toward its replacement,
-// so resume refuses it after the read-only checks and before settlement, the
-// first mutation: no gate, lifecycle or ledger call and no model run, for
-// every resumable state. The refusal is an unavailable runtime, so the caller
-// asks it for no recovery advice.
-func TestResumeRefusesAgentflow121BeforeMutation(t *testing.T) {
-	for _, st := range recoveryVersionStates {
-		t.Run(st.name, func(t *testing.T) {
-			fixture := newResumeFixture(t)
-			fixture.useAdvisoryLease()
-			state := st.state(t, &fixture)
-			af := &fakeAF{nextSteps: []string{"P1"}, nextActions: []agentflow.NextActionState{state},
-				failAt: map[string]error{"probe-recovery": errAgentflow121}}
-			d := &driver{af: af, plan: recoveryPlan(), runStep: func(_ context.Context, step agentflow.Step, _, _ string) error {
-				af.seq = append(af.seq, "model:"+step.ID)
-				return nil
-			}}
-			_, err := d.resume(context.Background(), fixture.root, fixture.planJSON, nil)
-			var unavailable *agentflowUnavailableError
-			if !errors.As(err, &unavailable) || !errors.Is(err, errAgentflow121) {
-				t.Fatalf("resume error = %v, want the 1.2.1 refusal as agentflowUnavailableError", err)
-			}
-			if want := "agentflow recovery unavailable: agentflow 1.2.1 cannot drive recovery"; err.Error() != want {
-				t.Fatalf("resume error = %q, want %q", err, want)
-			}
-			if want := []string{"probe", "next-action", "probe-recovery"}; !reflect.DeepEqual(af.seq, want) {
-				t.Fatalf("seq = %v, want %v", af.seq, want)
-			}
-		})
-	}
-}
-
-// A complete run reports its proof on AgentFlow 1.2.1: resume never asks.
-func TestResumeReportsCompleteRunWithoutRecoveryProbe(t *testing.T) {
-	fixture := newResumeFixture(t)
-	fixture.useAdvisoryLease()
-	complete := fixture.noAttemptState(t, "complete", false)
-	af := &fakeAF{nextActions: []agentflow.NextActionState{complete},
-		failAt: map[string]error{"probe-recovery": errAgentflow121}}
-	d := &driver{af: af, plan: recoveryPlan()}
-	final, err := d.resume(context.Background(), fixture.root, fixture.planJSON, nil)
-	if err != nil || final.State != "complete" {
-		t.Fatalf("state=%q err=%v", final.State, err)
-	}
-	if want := []string{"probe", "next-action"}; !reflect.DeepEqual(af.seq, want) {
-		t.Fatalf("seq = %v, want %v", af.seq, want)
-	}
-}
-
-// Status blocks every resumable state on AgentFlow 1.2.1 with exit 3. JSON
-// mode keeps the raw payload on stdout and reports the refusal, Golem's own
-// text, as the stderr diagnostic. AgentFlow 1.2.0 leaves the same states
-// resumable.
-func TestAgentflowStatus_RefusesRecoveryOnAgentflow121(t *testing.T) {
-	const refusal = "agentflow 1.2.1 cannot drive recovery: its next-action counts a stopped attempt's file receipts toward the replacement attempt (agentflow#97); use AgentFlow 1.2.0 or a later fixed release"
-	for _, st := range recoveryVersionStates {
-		for _, version := range []string{"agentflow 1.2.1\n", "agentflow 1.2.0\n"} {
-			for _, jsonOutput := range []bool{false, true} {
-				t.Run(fmt.Sprintf("%s/%s/json=%t", st.name, strings.TrimSpace(version), jsonOutput), func(t *testing.T) {
-					fixture := newResumeFixture(t)
-					fixture.useAdvisoryLease()
-					state := st.state(t, &fixture)
-					payload, err := json.Marshal(state)
-					if err != nil {
-						t.Fatal(err)
-					}
-					runner := &recoveryRunner{version: version, payload: payload}
-					var out bytes.Buffer
-					err = runAgentflowStatusWithRunner(context.Background(), &out, fixture.root, jsonOutput, runner)
-					var exit *agentflowStatusExit
-					if !errors.As(err, &exit) {
-						t.Fatalf("err = %v, want a status exit", err)
-					}
-					refused := strings.HasPrefix(version, "agentflow 1.2.1")
-					wantCode, wantDiagnostic := 2, ""
-					if refused {
-						wantCode = 3
-						if jsonOutput {
-							wantDiagnostic = refusal
-						}
-					}
-					if exit.ExitCode() != wantCode || exit.diagnostic != wantDiagnostic {
-						t.Fatalf("exit = %d diagnostic = %q, want %d / %q\n%s", exit.ExitCode(), exit.diagnostic, wantCode, wantDiagnostic, out.String())
-					}
-					switch {
-					case jsonOutput:
-						if !bytes.Equal(out.Bytes(), payload) {
-							t.Fatalf("JSON output = %q, want exact payload %q", out.Bytes(), payload)
-						}
-					case refused:
-						if want := "\nresume: blocked: " + refusal + "\n"; !strings.Contains(out.String(), want) || !strings.Contains(out.String(), "blocking: true") {
-							t.Fatalf("output missing %q:\n%s", want, out.String())
-						}
-					default:
-						if strings.Contains(out.String(), "resume: blocked") {
-							t.Fatalf("1.2.0 blocked recovery:\n%s", out.String())
-						}
-					}
-				})
-			}
-		}
-	}
-}
-
-// On AgentFlow 1.2.1 the projection checks keep precedence over the version
-// refusal, which in turn reports before the later timeout refusal, as resume
-// checks them; complete keeps its verified-proof path and exit 0.
-func TestAgentflowStatus_Agentflow121RefusalPrecedence(t *testing.T) {
-	const v121 = "agentflow 1.2.1\n"
-	t.Run("malformed projection first", func(t *testing.T) {
-		fixture := newResumeFixture(t)
-		fixture.useAdvisoryLease()
-		_ = retainedTimeoutStates[1].state(t, &fixture)
-		fixture.projection()["attempt"].(map[string]any)["owner"] = "other"
-		payload, err := json.Marshal(fixture.payload)
-		if err != nil {
-			t.Fatal(err)
-		}
-		for _, jsonOutput := range []bool{false, true} {
-			var out bytes.Buffer
-			err = runAgentflowStatusWithRunner(context.Background(), &out, fixture.root, jsonOutput, &recoveryRunner{version: v121, payload: payload})
-			var exit *agentflowStatusExit
-			if !errors.As(err, &exit) || exit.ExitCode() != 3 || exit.diagnostic != "" {
-				t.Fatalf("json=%t err = %v, want exit 3 without a diagnostic", jsonOutput, err)
-			}
-			if !jsonOutput && (!strings.Contains(out.String(), "resume: blocked: ") || strings.Contains(out.String(), "cannot drive recovery")) {
-				t.Fatalf("output lacks the projection refusal, or shows the version refusal:\n%s", out.String())
-			}
-		}
-	})
-	t.Run("version before timeout", func(t *testing.T) {
-		fixture := newResumeFixture(t)
-		fixture.useAdvisoryLease()
-		state := retainedTimeoutStates[0].state(t, &fixture)
-		writeAgentFile(t, fixture.root, "command-receipts.jsonl", timeoutReceiptCR1+"\n")
-		payload, err := json.Marshal(state)
-		if err != nil {
-			t.Fatal(err)
-		}
-		var out bytes.Buffer
-		err = runAgentflowStatusWithRunner(context.Background(), &out, fixture.root, false, &recoveryRunner{version: v121, payload: payload})
-		var exit *agentflowStatusExit
-		if !errors.As(err, &exit) || exit.ExitCode() != 3 {
-			t.Fatalf("err = %v, want exit 3", err)
-		}
-		if !strings.Contains(out.String(), "\nresume: blocked: agentflow 1.2.1 cannot drive recovery: ") || strings.Contains(out.String(), "retained timeout receipt") {
-			t.Fatalf("output lacks the version refusal, or shows the timeout report:\n%s", out.String())
-		}
-	})
-	t.Run("complete", func(t *testing.T) {
-		fixture := newResumeFixture(t)
-		fixture.useAdvisoryLease()
-		state := fixture.noAttemptState(t, "complete", false)
-		writeAgentFile(t, fixture.root, "proof-pack.json", `{"checks":[{"status":"passed"}]}`)
-		payload, err := json.Marshal(state)
-		if err != nil {
-			t.Fatal(err)
-		}
-		runner := &recoveryRunner{version: v121, payload: payload}
-		var out bytes.Buffer
-		if err := runAgentflowStatusWithRunner(context.Background(), &out, fixture.root, false, runner); err != nil {
-			t.Fatalf("err = %v, want exit 0\n%s", err, out.String())
-		}
-		if !strings.Contains(out.String(), "proof: verified") {
-			t.Fatalf("complete left its verified-proof path:\n%s", out.String())
-		}
-	})
-}
-
-// secondVersionFailRunner answers the base --version and next-action, then
-// fails the recovery --version with AgentFlow's own stderr.
-type secondVersionFailRunner struct {
-	payload  []byte
-	versions int
-}
-
-func (r *secondVersionFailRunner) Run(_ context.Context, args []string, _ []byte) ([]byte, []byte, int, error) {
-	if len(args) > 0 && args[0] == "--version" {
-		r.versions++
-		if r.versions > 1 {
-			return nil, []byte("boom: RUNNER-SECRET-577\x1b[2J\n"), 1, nil
-		}
-		return []byte("agentflow 1.2.0\n"), nil, 0, nil
-	}
-	return append([]byte(nil), r.payload...), nil, 0, nil
-}
-
-// A failed recovery --version blocks status like a refusal, but its text is
-// AgentFlow's, not Golem's: JSON mode stays silent and human mode shows it
-// sanitized.
-func TestAgentflowStatus_RecoveryProbeFailureIsNotADiagnostic(t *testing.T) {
-	fixture := newResumeFixture(t)
-	fixture.useAdvisoryLease()
-	state := retainedTimeoutStates[0].state(t, &fixture)
-	payload, err := json.Marshal(state)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var jsonOut bytes.Buffer
-	err = runAgentflowStatusWithRunner(context.Background(), &jsonOut, fixture.root, true, &secondVersionFailRunner{payload: payload})
-	var exit *agentflowStatusExit
-	if !errors.As(err, &exit) || exit.ExitCode() != 3 || exit.diagnostic != "" {
-		t.Fatalf("json err = %v, want exit 3 without a diagnostic", err)
-	}
-	if !bytes.Equal(jsonOut.Bytes(), payload) {
-		t.Fatalf("JSON output = %q, want exact payload %q", jsonOut.Bytes(), payload)
-	}
-	var human bytes.Buffer
-	err = runAgentflowStatusWithRunner(context.Background(), &human, fixture.root, false, &secondVersionFailRunner{payload: payload})
-	if !errors.As(err, &exit) || exit.ExitCode() != 3 || exit.diagnostic != "" {
-		t.Fatalf("human err = %v, want exit 3 without a diagnostic", err)
-	}
-	const want = "\nresume: blocked: agentflow unavailable (--version failed): agentflow --version: exit 1: boom: RUNNER-SECRET-577\\x1b[2J\n"
-	if !strings.Contains(human.String(), want) {
-		t.Fatalf("human output missing %q:\n%s", want, human.String())
 	}
 }
 
@@ -3232,7 +3001,7 @@ func TestResumeSettlesOperatorAmendmentWithRecordedEdit(t *testing.T) {
 	if err != nil || final.State != "complete" {
 		t.Fatalf("resume state = %q, err = %v", final.State, err)
 	}
-	want := []string{"probe", "next-action", "probe-recovery", "gate:P1:unit-tests", "gate:P1:lint", "finish-step:P1:A3", "next-action"}
+	want := []string{"probe", "next-action", "gate:P1:unit-tests", "gate:P1:lint", "finish-step:P1:A3", "next-action"}
 	if !reflect.DeepEqual(af.seq, want) {
 		t.Fatalf("seq = %v\nwant %v", af.seq, want)
 	}
