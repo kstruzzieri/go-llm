@@ -373,7 +373,7 @@ func TestDiagnosticCapabilityParserDriftGuard(t *testing.T) {
 }
 
 // TestExportedErrorCodeSetMatchesContract pins the exported ErrorCode
-// constant SET to the approved 31-code vocabulary by parsing the package
+// constant SET to the approved 32-code vocabulary by parsing the package
 // source: adding, removing, renaming, or retyping an exported Code* const
 // breaks this test. (parser.ParseDir is deprecated since Go 1.22; per-file
 // ParseFile over os.ReadDir has the same semantics without SA1019.)
@@ -395,9 +395,10 @@ func TestExportedErrorCodeSetMatchesContract(t *testing.T) {
 		"role_exists": true, "role_in_use": true,
 		"use_case_not_found":         true,
 		"drop_confirmation_required": true,
+		"key_reference_refused":      true,
 	}
-	if len(want) != 31 {
-		t.Fatalf("test contract has %d codes, want 31", len(want))
+	if len(want) != 32 {
+		t.Fatalf("test contract has %d codes, want 32", len(want))
 	}
 
 	fset := token.NewFileSet()
@@ -466,7 +467,7 @@ func TestExportedErrorCodeSetMatchesContract(t *testing.T) {
 		sort.Strings(missing)
 		sort.Strings(extra)
 		t.Fatalf("exported ErrorCode set drifted (missing=%v extra=%v): a deliberate "+
-			"vocabulary change must update this want set, the 31 count guard above, and the spec s6 code table",
+			"vocabulary change must update this want set, the 32 count guard above, and the spec s6 code table",
 			missing, extra)
 	}
 }

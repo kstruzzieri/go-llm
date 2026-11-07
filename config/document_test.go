@@ -115,7 +115,7 @@ func TestDefaultDocumentEnvSetButEmpty(t *testing.T) {
 func TestDefaultDocumentWorkingDirAndPrecedence(t *testing.T) {
 	t.Setenv("DOC_TEST_KEY", "v")
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "models.json"), []byte(docTestConfig), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "models.json"), []byte(literalKey(docTestConfig)), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	t.Chdir(dir)
