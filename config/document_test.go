@@ -109,9 +109,9 @@ func TestDefaultDocumentEnvSetButEmpty(t *testing.T) {
 }
 
 // Working-dir winner, and env-beats-working-dir precedence. The user-config
-// and legacy winners depend on os.UserConfigDir/os.UserHomeDir, which are not
-// env-fakeable on darwin; they stay covered by discoverConfigPath being the
-// single implementation shared with Default() and Default's existing tests.
+// winner, and a working-dir file beating a different user config, are in
+// workingdir_refusal_test.go, which fakes those locations through HOME
+// (isolateDiscovery).
 func TestDefaultDocumentWorkingDirAndPrecedence(t *testing.T) {
 	t.Setenv("DOC_TEST_KEY", "v")
 	dir := t.TempDir()

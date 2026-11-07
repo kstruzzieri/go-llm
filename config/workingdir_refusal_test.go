@@ -279,6 +279,38 @@ func TestWorkingDirIsUserConfigDir(t *testing.T) {
 	}
 }
 
+// A DIFFERENT ./models.json still beats the user config: only the same file
+// takes the user-config origin.
+func TestWorkingDirBeatsDifferentUserConfig(t *testing.T) {
+	userPath := isolateDiscovery(t)
+	if err := os.MkdirAll(filepath.Dir(userPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(userPath, []byte(wdConfig("sk-user-776")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "models.json"), []byte(wdConfig("sk-wd-776")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+
+	d, err := DefaultDocument()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.Origin().Source != OriginWorkingDir || d.Config().Providers["p"].APIKey != "sk-wd-776" {
+		t.Fatalf("origin %+v, api_key %q; want working-dir, sk-wd-776", d.Origin(), d.Config().Providers["p"].APIKey)
+	}
+	cfg, err := Default()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Providers["p"].APIKey != "sk-wd-776" {
+		t.Fatalf("Default api_key = %q, want sk-wd-776", cfg.Providers["p"].APIKey)
+	}
+}
+
 // A working-dir Document refuses a mutation that introduces a reference
 // and is left exactly as it was (acceptance 4, 10); the same mutation on an
 // explicit-origin Document of the same file succeeds.

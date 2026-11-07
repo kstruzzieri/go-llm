@@ -219,8 +219,19 @@ type resolvedKey struct {
 // api_key referenced, in reference order, from the last successful finalize.
 // It is nil for a literal key, no key, or an unknown provider. Names only:
 // no resolved value is reachable through it. The slice is a copy.
+//
+// Like SecretMatcher, it is also nil when the record is stale: the
+// provider's api_key no longer equals the value the record resolved to.
+// A nil Config has no names.
 func (c *Config) APIKeyRefNames(provider string) []string {
-	return slices.Clone(c.resolved[provider].names)
+	if c == nil {
+		return nil
+	}
+	rk, ok := c.resolved[provider]
+	if !ok || rk.effective != c.Providers[provider].APIKey {
+		return nil
+	}
+	return slices.Clone(rk.names)
 }
 
 // ErrConfigNotFound indicates that Default could not find a models.json file

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -66,5 +67,25 @@ func TestAPIKeyRefNamesSurviveClone(t *testing.T) {
 	c.resolved["p"].names[0] = "MUTATED"
 	if got := doc.Config().APIKeyRefNames("p"); !reflect.DeepEqual(got, []string{"NAMES_TEST_A"}) {
 		t.Fatalf("clone shares names: %v", got)
+	}
+}
+
+// A copy whose key was rewritten without re-finalizing has stale names, as
+// SecretMatcher treats its components; a nil Config has none.
+func TestAPIKeyRefNamesStaleAndNil(t *testing.T) {
+	cfg := loadNamesConfig(t, "${NAMES_TEST_A}")
+	rewritten := *cfg
+	rewritten.Providers = maps.Clone(cfg.Providers)
+	p := rewritten.Providers["p"]
+	p.APIKey = "sk-rewritten-776"
+	rewritten.Providers["p"] = p
+	if got := rewritten.APIKeyRefNames("p"); got != nil {
+		t.Fatalf("rewritten key still reports names %v", got)
+	}
+	if got := cfg.APIKeyRefNames("p"); !reflect.DeepEqual(got, []string{"NAMES_TEST_A"}) {
+		t.Fatalf("original names = %v", got)
+	}
+	if got := (*Config)(nil).APIKeyRefNames("p"); got != nil {
+		t.Fatalf("nil Config names = %v", got)
 	}
 }
