@@ -124,7 +124,9 @@ type backendResolveOpts struct {
 // model before provider bootstrap. Precedence is first-explicit-source-wins:
 // -base-url flag, then GO_LLM_BASE_URL, both absolute (no probe, no scan);
 // otherwise the configured base_url is left alone unless discovery (loopback
-// scan 8080..8090, identity-validated) finds the backend elsewhere. All
+// scan 8080..8090, identity-validated) finds the backend elsewhere. A provider
+// with an api_key never scans: only its configured URL is probed (guarded,
+// with the key) and a miss yields a skip notice. All
 // failures are non-fatal except explicit-override validation errors; a broken
 // backend is ultimately diagnosed by the existing tool-capability preflight.
 func resolveBackend(ctx context.Context, cfg *config.Config, o backendResolveOpts) (backendResolution, error) {
@@ -180,14 +182,24 @@ func resolveBackend(ctx context.Context, cfg *config.Config, o backendResolveOpt
 		// in the band, and a hit would re-route the key there for good.
 		// Probe only the configured URL; the user can pass -base-url.
 		configured := strings.TrimRight(pc.BaseURL, "/")
-		_, derr := o.prober(ctx, []string{configured}, model,
-			openaicompat.WithHTTPClient(&http.Client{Timeout: backendProbeTimeout}),
-			openaicompat.WithAPIKey(pc.APIKey))
-		if derr == nil {
-			return backendResolution{}, nil
+		skip := backendResolution{warns: []string{fmt.Sprintf(
+			"openai-compat backend discovery skipped: provider %q has an api_key; pass -base-url to use another port", key)}}
+		hc, pctx := &http.Client{Timeout: backendProbeTimeout}, ctx
+		if o.guardCandidate != nil {
+			// The configured URL goes through the same #477 guard a scan
+			// candidate would: no-redirect client bound to this destination,
+			// so the key cannot follow a redirect to another port.
+			var gerr error
+			if hc, pctx, gerr = o.guardCandidate(configured); gerr != nil {
+				return skip, nil
+			}
 		}
-		return backendResolution{warns: []string{fmt.Sprintf(
-			"openai-compat backend discovery skipped: provider %q has an api_key; pass -base-url to use another port", key)}}, nil
+		if _, derr := o.prober(pctx, []string{configured}, model,
+			openaicompat.WithHTTPClient(hc),
+			openaicompat.WithAPIKey(pc.APIKey)); derr != nil {
+			return skip, nil
+		}
+		return backendResolution{}, nil
 	}
 
 	candidates := scanCandidates(pc.BaseURL)

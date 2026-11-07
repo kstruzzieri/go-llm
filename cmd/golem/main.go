@@ -1181,7 +1181,8 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	}
 
 	// Guarded, loopback-only discovery runs strictly after admission: each
-	// scan candidate probes through its own bound no-redirect client, and a
+	// probe (scan candidate, or the configured URL alone for a provider with
+	// an api_key) goes through its own bound no-redirect client, and a
 	// hit re-pins the target provider's admitted destination to the
 	// discovered loopback URL before any client is constructed.
 	backendRes, err := resolveBackend(ctx, eff.Config(), backendResolveOpts{
