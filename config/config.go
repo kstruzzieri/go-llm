@@ -409,7 +409,7 @@ func (c *Config) ProviderFor(role string) *ProviderConfig {
 
 // Default discovers and loads the configuration file from standard locations.
 // It searches in order:
-//  1. $GO_LLM_CONFIG environment variable (absolute path)
+//  1. $GO_LLM_CONFIG environment variable (absolute or relative path)
 //  2. ./models.json (current working directory)
 //  3. ~/.config/go-llm/models.json (user config directory)
 //

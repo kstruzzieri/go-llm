@@ -161,6 +161,15 @@ golem -root /path/to/project -config /path/to/models.json
 golem -root /path/to/project -ollama-url http://gpu-server:11434
 ```
 
+Without `-config`, Golem uses `$GO_LLM_CONFIG`, then `./models.json`, then the
+user config directory. A config found at `./models.json` cannot use `${NAME}`
+`api_key` references: the load fails with `key_reference_refused` before any
+environment lookup, and Golem prints `pass -config ./models.json to use this
+file's key references, or set GO_LLM_CONFIG`. Literal keys and the other
+sources are unchanged. An `openai-compat` provider with an `api_key` never runs
+the loopback port scan (8080-8090); only its configured URL is probed, through
+the destination guard, and `-base-url` points it at another port.
+
 **Privacy: what a request says about its thread.** Golem sends each hosted
 provider the prompt-cache key it documents, chosen by the provider's `base_url`
 host when that URL is `https` ([Cache affinity](backends.md#cache-affinity)). OpenAI gets a
@@ -643,13 +652,15 @@ anything, keeps nothing on disk, and asks no consent question.
 golem ops                                # one snapshot as a table
 golem ops -json                          # the same snapshot as an opsview v1 JSON document
 golem ops -watch                         # live view: redraws every second, polls every 2 s
-golem ops -config /path/to/models.json   # default: auto-discover
+golem ops -config /path/to/models.json   # default: auto-discover (see Config and endpoint flags)
 ```
 
 `-json` cannot be combined with `-watch`. `golem ops` exits 0 whenever it
 prints a snapshot, including when a backend is down. A `models.json` that fails
 to load is an error that names only the config diagnostic, never the file's
-text; with no `models.json` found at all, it prints an empty snapshot whose
+text (for a refused working-directory key reference: the code
+`key_reference_refused`, the provider, and the `-config ./models.json` /
+`GO_LLM_CONFIG` remedy); with no `models.json` found at all, it prints an empty snapshot whose
 attention list reports `config_missing`.
 
 **What it contacts.** Only providers whose `base_url` is a loopback address

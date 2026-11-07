@@ -80,6 +80,16 @@ export the variable. go-llm expands it when the config loads and fails fast if t
 variable is unset or empty, so a missing key surfaces as a clear config error
 rather than a remote 401. Literal keys still work, but `${ENV_VAR}` is recommended.
 
+**Working-directory configs cannot use `${ENV_VAR}` keys.** A `models.json`
+found only because it sits in the current directory is refused with error code
+`key_reference_refused` as soon as any `api_key` holds a `${...}` reference,
+before any environment variable is read. Name the file yourself to use its
+references: `golem -config ./models.json` (or `go-llm-mcp -config ./models.json`),
+or set `GO_LLM_CONFIG`, a relative path works. Saving the config to another
+path or as a profile also lifts the refusal; saving it back to its own path
+keeps it. Literal keys, the user config (including when you run from inside
+its directory), `GO_LLM_CONFIG` and explicit paths are unchanged.
+
 Key expansion checks every declared provider, including providers the current
 run will not use. An unset or empty reference fails the **entire config load**
 for any consumer loading that file. To keep local use independent of hosted
@@ -97,8 +107,11 @@ config's full network plan and shows a manifest of every remote endpoint it
 could reach — deduplicated destinations with each use-case route marked
 primary or fallback — and asks for consent. Literal loopback endpoints
 (llama.cpp, Ollama on `127.0.0.1`/`localhost`) auto-admit; anything remote
-waits for a yes. For scripts and one-shot runs, pre-admit exact destinations
-with the repeatable flag:
+waits for a yes. Under each destination whose provider sends a key, the screen
+adds `sends api_key from $NAME` (several: `$A, $B`) or `sends a literal
+api_key`, so you see which secret goes where; this extends the #477 consent
+field set (D14 in its design). For scripts and one-shot runs, pre-admit exact
+destinations with the repeatable flag:
 
 ```bash
 golem -p "..." -allow-destination "openai/https://api.openai.com"
