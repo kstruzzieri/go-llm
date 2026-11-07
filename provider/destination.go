@@ -148,6 +148,14 @@ func ParseDestinationFlag(s string) (Destination, error) {
 	return ParseDestination(s)
 }
 
+// CanonicalEndpoint returns a base URL's canonical form, the same one a
+// Destination holds, and whether it names this host. Spellings of one endpoint
+// (default port, trailing slash, case, IP notation) share a form; localhost and
+// 127.0.0.1 do not. Errors never contain the URL.
+func CanonicalEndpoint(rawBaseURL string) (canonical string, local bool, err error) {
+	return canonicalizeEndpoint(rawBaseURL)
+}
+
 // canonicalizeEndpoint implements DestinationSchemeVersion. Its output is a
 // fixed point: canonicalizing an already-canonical value returns it unchanged,
 // so a key derived on a later pass always matches the grant issued earlier.

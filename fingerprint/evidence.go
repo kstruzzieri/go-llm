@@ -1,6 +1,7 @@
 package fingerprint
 
 import (
+	"maps"
 	"slices"
 	"time"
 )
@@ -228,6 +229,62 @@ func (c *CapabilityReading) slotFor(r EvidenceRow, adapter, digest string, now t
 		return &c.Observed
 	}
 	return &c.Provider
+}
+
+// NextReadingTransition returns the first instant after now at which what
+// ReadCapabilities reports for a route through adapter at digest differs from
+// what it reports at now, or zero when nothing in rows will ever change it. Such
+// an instant comes from an expiry, a freshness end or the admission of a
+// future-dated row (ObservedAt less the skew allowance). An end is inclusive, so
+// its change is the instant after it. A row that loses to another changes
+// nothing and is not named, and neither is the expiry of an attempt, which reads
+// the same past it. OtherAdapter is left out: it never counts for this route.
+// Rows are one model's, as for ReadCapabilities.
+//
+// ponytail: re-reads the rows at each future candidate, so quadratic in a model's
+// rows at worst; it runs once per profile build, and most rows have no future
+// instant.
+func NextReadingTransition(rows []EvidenceRow, adapter, digest string, now time.Time) time.Time {
+	var candidates []time.Time
+	for _, r := range rows {
+		candidates = append(candidates, r.ObservedAt.Add(-maxClockSkew))
+		for _, end := range []time.Time{r.ExpiresAt, r.FreshUntil} {
+			if !end.IsZero() {
+				candidates = append(candidates, end.Add(time.Nanosecond))
+			}
+		}
+	}
+	slices.SortFunc(candidates, time.Time.Compare)
+	current := routeStates(rows, adapter, digest, now)
+	for _, t := range candidates {
+		if t.After(now) && !maps.Equal(routeStates(rows, adapter, digest, t), current) {
+			return t
+		}
+	}
+	return time.Time{}
+}
+
+// routeState is a reading in comparable form: the row in each slot that counts
+// for the route, and whether each is fresh.
+type routeState struct {
+	rows  [5]EvidenceRow
+	fresh [5]bool
+}
+
+func routeStates(rows []EvidenceRow, adapter, digest string, at time.Time) map[string]routeState {
+	states := make(map[string]routeState)
+	for capability, c := range ReadCapabilities(rows, adapter, digest, at) {
+		var s routeState
+		for i, slot := range [...]*EvidenceRow{c.Probe, c.Observed, c.Provider, c.Attempt, c.Flag} {
+			if slot != nil {
+				s.rows[i], s.fresh[i] = *slot, slot.Fresh(at)
+			}
+		}
+		if s != (routeState{}) { // an entry only for OtherAdapter says nothing here
+			states[capability] = s
+		}
+	}
+	return states
 }
 
 // evidencePartition identifies rows that compete for one reading under one

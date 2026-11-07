@@ -17,6 +17,8 @@ import (
 // provider re-query. KnownMask covers every present Caps bit, plus
 // tool_call when a persisted probe row validated against the listing
 // identity answers definitively (including "no", which no cap bit can carry).
+// With the evidence log, it covers every capability the log answers definitively
+// at the listing's identity.
 type ListedModelFacts struct {
 	Key       ModelKey
 	Family    string
@@ -76,9 +78,18 @@ func (r *ModelRegistry) snapshotListedProjectionPolicy() listedProjectionPolicy 
 // contributes nothing from that layer -- fingerprint enrichment here
 // requires a prober factory to anchor identity, and failing closed on an
 // unanchored profile is deliberate.
+//
+// With WithEvidenceLog, one snapshot without account reads answers for the whole
+// listing, each model read at its own listed digest (empty when name-only), and
+// cap-probe rows are not consulted.
 func (r *ModelRegistry) ProjectListedModels(ctx context.Context, providerName string, infos []ModelInfo) ([]ListedModelFacts, error) {
 	policy := r.snapshotListedProjectionPolicy()
 	now := time.Now()
+	names := make([]string, len(infos))
+	for i := range infos {
+		names[i] = infos[i].Name
+	}
+	log := r.readEvidence(ctx, providerName, names)
 	out := make([]ListedModelFacts, 0, len(infos))
 	for i := range infos {
 		if err := ctx.Err(); err != nil {
@@ -86,8 +97,13 @@ func (r *ModelRegistry) ProjectListedModels(ctx context.Context, providerName st
 		}
 		info := infos[i] // value copy; the caller's slice is never mutated
 		key := ModelKey{Provider: providerName, Model: info.Name}
-		row := r.capProbeRow(ctx, key)
-		out = append(out, r.projectListedModel(ctx, key, info, row, now, policy))
+		var evidenceYes, known Capability
+		if log != nil {
+			evidenceYes, known = log.caps(info.Name, info.Digest)
+		} else {
+			evidenceYes, known = legacyProbeBits(r.capProbeRow(ctx, key), capProbeDigest(key, &info), now)
+		}
+		out = append(out, r.projectListedModel(ctx, key, info, evidenceYes, known, policy))
 	}
 	// Final barrier: cancellation landing mid-final-iteration (or arriving
 	// with an empty listing) must not return a degraded slice with nil error.
@@ -97,33 +113,32 @@ func (r *ModelRegistry) ProjectListedModels(ctx context.Context, providerName st
 	return out, nil
 }
 
+// legacyProbeBits validates a single cap-probe row snapshot against a listing's
+// identity and returns the bits it says yes to and the bits it answers definitively.
+func legacyProbeBits(row *fingerprint.CapProbe, digest string, now time.Time) (yes, known Capability) {
+	if row != nil && row.Valid(digest, now) {
+		switch row.State {
+		case fingerprint.CapProbeYes:
+			return CapToolCall, CapToolCall
+		case fingerprint.CapProbeNo:
+			return 0, CapToolCall
+		}
+	}
+	return 0, 0
+}
+
 func (r *ModelRegistry) projectListedModel(
 	ctx context.Context,
 	key ModelKey,
 	info ModelInfo,
-	row *fingerprint.CapProbe,
-	now time.Time,
+	evidenceYes, known Capability,
 	policy listedProjectionPolicy,
 ) ListedModelFacts {
 	parsed := ParseModelName(info.Name)
 	static := r.catalogProfileFor(parsed, &info)
 	fp := r.fingerprintProfileMode(ctx, key, &info, true) // read-only: never EnsureProfile
 
-	// Validate the caller's single row snapshot against THIS listing's identity.
-	digest := capProbeDigest(key, &info)
-	var probeYes Capability
-	known := Capability(0)
-	if row != nil && row.Valid(digest, now) {
-		switch row.State {
-		case fingerprint.CapProbeYes:
-			probeYes = CapToolCall
-			known |= CapToolCall
-		case fingerprint.CapProbeNo:
-			known |= CapToolCall
-		}
-	}
-
-	profile := r.merge(key, &info, static, fp, parsed, policy.override, policy.floor, policy.thinkOverride, policy.contextOverride, policy.qualityCeilingOverride, policy.rejectionHook, probeYes)
+	profile := r.merge(key, &info, static, fp, parsed, policy.override, policy.floor, policy.thinkOverride, policy.contextOverride, policy.qualityCeilingOverride, policy.rejectionHook, evidenceYes)
 	return ListedModelFacts{
 		Key:               key,
 		Family:            profile.Family,
