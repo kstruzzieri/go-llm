@@ -495,6 +495,51 @@ func TestPrune_KeepsNewestPerMethodVersion(t *testing.T) {
 	wantStoredIDs(t, s, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14)
 }
 
+func TestPrune_ExpiredAttemptsBeforeWeeklyCheck(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	for week := range 52 {
+		at := evDay(-364 + week*7)
+		pruneEv(t, s, at) // OpenSharedStore prunes before the next check writes.
+		appendEv(t, s, evRow(0, at, asAttempt, byTheRules(0)))
+	}
+	pruneEv(t, s, evNow)
+	wantStoredIDs(t, s, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52)
+	if got := toolIDs(storedEv(t, s), AdapterOpenAICompat, evDigest, evNow); got != (readingIDs{attempt: 52}) {
+		t.Errorf("ReadCapabilities(after weekly pruning) = %+v, want attempt 52", got)
+	}
+
+	pruneEv(t, s, evDay(100))
+	wantStoredIDs(t, s, 52) // The newest attempt survives even after all history ages out.
+}
+
+func TestPrune_AttemptDominanceIgnoresExpiry(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		newerAt     time.Time
+		olderExpiry time.Time
+		want        []int64
+	}{
+		{"older has no expiry", evDay(-100), time.Time{}, []int64{2}},
+		{"older expires later", evDay(-100), evDay(1), []int64{2}},
+		{"future attempt cannot evict", evNow.Add(time.Millisecond), time.Time{}, []int64{1, 2}},
+		{"attempt dated now can evict", evNow, time.Time{}, []int64{2}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			s := newTestStore(t)
+			appendEv(t, s,
+				evRow(1, evDay(-200), asAttempt, expiring(tt.olderExpiry)),
+				evRow(2, tt.newerAt, asAttempt, byTheRules(0)),
+			)
+			before := storedEv(t, s)
+			pruneEv(t, s, evNow)
+			wantStoredIDs(t, s, tt.want...)
+			wantSameDecisions(t, tt.name, before, storedEv(t, s), pruneDecisionClocks(before))
+		})
+	}
+}
+
 func TestPrune_FiniteNoPreservesOlderUnboundedYes(t *testing.T) {
 	s := newTestStore(t)
 	appendEv(t, s,

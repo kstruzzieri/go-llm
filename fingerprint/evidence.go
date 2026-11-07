@@ -311,13 +311,19 @@ func (r EvidenceRow) partition() evidencePartition {
 }
 
 // dominates reports whether r wins over older whenever older could count, for a
-// reader at now or later and for one behind now by up to maxClockSkew: r is newer,
-// dated no later than now, valid now, and valid for all of older's life. A row
-// dated inside the skew allowance does not qualify yet, because a reader behind
-// now does not admit it. A finite row cannot dominate an indefinite one, however
-// new.
+// reader at now or later and for one behind now by up to maxClockSkew: r is newer
+// and dated no later than now. A row dated inside the skew allowance does not
+// qualify yet, because a reader behind now does not admit it. Answers and flags
+// must also be valid now and for all of older's life; attempts stay readable
+// regardless of expiry.
 func (r EvidenceRow) dominates(older EvidenceRow, now time.Time) bool {
-	return r.newerThan(older) && !r.ObservedAt.After(now) && r.live(now) &&
+	if !r.newerThan(older) || r.ObservedAt.After(now) {
+		return false
+	}
+	if r.Kind == EvidenceKindAttempt {
+		return true
+	}
+	return r.live(now) &&
 		(r.ExpiresAt.IsZero() || (!older.ExpiresAt.IsZero() && !r.ExpiresAt.Before(older.ExpiresAt)))
 }
 
