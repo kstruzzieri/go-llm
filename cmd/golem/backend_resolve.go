@@ -124,7 +124,9 @@ type backendResolveOpts struct {
 // model before provider bootstrap. Precedence is first-explicit-source-wins:
 // -base-url flag, then GO_LLM_BASE_URL, both absolute (no probe, no scan);
 // otherwise the configured base_url is left alone unless discovery (loopback
-// scan 8080..8090, identity-validated) finds the backend elsewhere. All
+// scan 8080..8090, identity-validated) finds the backend elsewhere. A provider
+// with an api_key never scans: only its configured URL is probed (guarded,
+// with the key) and a miss yields a skip notice. All
 // failures are non-fatal except explicit-override validation errors; a broken
 // backend is ultimately diagnosed by the existing tool-capability preflight.
 func resolveBackend(ctx context.Context, cfg *config.Config, o backendResolveOpts) (backendResolution, error) {
@@ -175,18 +177,34 @@ func resolveBackend(ctx context.Context, cfg *config.Config, o backendResolveOpt
 		return backendResolution{}, nil
 	}
 
+	if pc.APIKey != "" {
+		// A provider with a key never scans: the key would go to every port
+		// in the band, and a hit would re-route the key there for good.
+		// Probe only the configured URL; the user can pass -base-url.
+		configured := strings.TrimRight(pc.BaseURL, "/")
+		skip := backendResolution{warns: []string{fmt.Sprintf(
+			"openai-compat backend discovery skipped: provider %q has an api_key; pass -base-url to use another port", key)}}
+		hc, pctx := &http.Client{Timeout: backendProbeTimeout}, ctx
+		if o.guardCandidate != nil {
+			// The configured URL goes through the same #477 guard a scan
+			// candidate would: no-redirect client bound to this destination,
+			// so the key cannot follow a redirect to another port.
+			var gerr error
+			if hc, pctx, gerr = o.guardCandidate(configured); gerr != nil {
+				return skip, nil
+			}
+		}
+		if _, derr := o.prober(pctx, []string{configured}, model,
+			openaicompat.WithHTTPClient(hc),
+			openaicompat.WithAPIKey(pc.APIKey)); derr != nil {
+			return skip, nil
+		}
+		return backendResolution{}, nil
+	}
+
 	candidates := scanCandidates(pc.BaseURL)
 	copts := []openaicompat.ClientOption{
 		openaicompat.WithHTTPClient(&http.Client{Timeout: backendProbeTimeout}),
-	}
-	// The provider's API key is deliberately sent to every loopback scan
-	// candidate: if the backend moved to another local port but still
-	// enforces auth, it must still answer the probe. This is bounded by the
-	// literal-loopback gate above (isLoopbackURL) — the scan never leaves
-	// 127.0.0.1/localhost, so the key never reaches a non-loopback host.
-	// Spec-locked tradeoff; do not gate this on a "trusted candidate" check.
-	if pc.APIKey != "" {
-		copts = append(copts, openaicompat.WithAPIKey(pc.APIKey))
 	}
 	var hit string
 	var derr error
@@ -194,7 +212,7 @@ func resolveBackend(ctx context.Context, cfg *config.Config, o backendResolveOpt
 		// Guarded scan (#477): each candidate probes through its own bound
 		// client, so discovery traffic carries the discovery capability and
 		// can never leave the candidate's loopback origin.
-		hit, derr = probeCandidatesGuarded(ctx, candidates, model, pc.APIKey, o)
+		hit, derr = probeCandidatesGuarded(ctx, candidates, model, o)
 	} else {
 		hit, derr = o.prober(ctx, candidates, model, copts...)
 	}
@@ -220,7 +238,7 @@ func resolveBackend(ctx context.Context, cfg *config.Config, o backendResolveOpt
 // guardCandidate. The first candidate that serves the model wins, matching
 // the shared-prober loop; a guard refusal for a candidate skips it the same
 // way a probe failure would.
-func probeCandidatesGuarded(ctx context.Context, candidates []string, model, apiKey string, o backendResolveOpts) (string, error) {
+func probeCandidatesGuarded(ctx context.Context, candidates []string, model string, o backendResolveOpts) (string, error) {
 	var errs []string
 	for _, cand := range candidates {
 		if err := ctx.Err(); err != nil {
@@ -232,9 +250,6 @@ func probeCandidatesGuarded(ctx context.Context, candidates []string, model, api
 			continue
 		}
 		copts := []openaicompat.ClientOption{openaicompat.WithHTTPClient(hc)}
-		if apiKey != "" {
-			copts = append(copts, openaicompat.WithAPIKey(apiKey))
-		}
 		hit, err := o.prober(bctx, []string{cand}, model, copts...)
 		if err != nil {
 			errs = append(errs, err.Error())

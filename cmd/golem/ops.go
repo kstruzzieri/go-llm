@@ -96,6 +96,9 @@ func opsLoadError(prefix string, err error) error {
 		if d.Subject != "" { // already control-free and bounded by config
 			msg += " " + d.Subject
 		}
+		if d.Code == config.CodeKeyReferenceRefused {
+			msg += "; " + keyRefusalRemedy
+		}
 		return fmt.Errorf("%s: models.json not loaded: %s", prefix, msg)
 	}
 	return fmt.Errorf("%s: models.json not loaded", prefix)

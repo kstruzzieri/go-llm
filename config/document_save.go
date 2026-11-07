@@ -105,6 +105,9 @@ func lockForPath(path string) *sync.Mutex {
 // SaveNew writes the document to a path that must not exist (create-only,
 // race-free via link-based publication). Equivalent to SaveNewAs with an
 // empty origin source (same-path Source preservation, else explicit-path).
+// Saving a working-directory Document to another path lifts the ${NAME}
+// key-reference refusal for the saved copy; saving to its own path keeps it
+// (#776).
 func (d *Document) SaveNew(path string) error {
 	return d.SaveNewAs(path, "")
 }
@@ -143,7 +146,9 @@ func (d *Document) SaveNewAs(path string, src OriginSource) error {
 
 // SaveReplace overwrites path after its digest matches expectedRevision at the
 // start of the save and again after the replacement temp is synced. Equivalent
-// to SaveReplaceAs with an empty origin source.
+// to SaveReplaceAs with an empty origin source. As with SaveNew, saving a
+// working-directory Document to another path lifts the key-reference refusal
+// and saving to its own path keeps it (#776).
 func (d *Document) SaveReplace(path, expectedRevision string) error {
 	return d.SaveReplaceAs(path, expectedRevision, "")
 }

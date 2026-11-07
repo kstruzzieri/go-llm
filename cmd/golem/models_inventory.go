@@ -100,7 +100,7 @@ func loadDocumentFor(configPath string) (*config.Document, error) {
 		if errors.Is(err, config.ErrConfigNotFound) {
 			return nil, nil
 		}
-		return nil, err
+		return nil, withKeyRefusalRemedy(err)
 	}
 	return doc, nil
 }
