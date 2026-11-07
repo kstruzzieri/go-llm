@@ -562,9 +562,10 @@ func decodeJSONOrError(resp *http.Response, apiKey string, out any) error {
 // error envelope, so HTML error pages and bare strings still produce a
 // usable error message rather than swallowing the failure.
 //
-// A non-empty apiKey is replaced with "[redacted]" in the message: servers
-// that echo the Authorization header would otherwise put the key into
-// bootstrap warnings and logs.
+// A non-empty apiKey is replaced with "[redacted]" in the message and the
+// status: servers that echo the Authorization header, in the body or in the
+// server-chosen reason phrase, would otherwise put the key into bootstrap
+// warnings and logs.
 func readErrorEnvelope(resp *http.Response, apiKey string) error {
 	const limit = 64 * 1024
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, limit))
@@ -576,15 +577,16 @@ func readErrorEnvelope(resp *http.Response, apiKey string) error {
 		}
 		return strings.ReplaceAll(m, apiKey, "[redacted]")
 	}
+	status := redact(resp.Status)
 
 	var env errorEnvelope
 	if json.Unmarshal(body, &env) == nil && env.Error.Message != "" {
-		return &statusError{statusCode: resp.StatusCode, status: resp.Status, message: redact(env.Error.Message)}
+		return &statusError{statusCode: resp.StatusCode, status: status, message: redact(env.Error.Message)}
 	}
 	if len(body) > 0 {
-		return &statusError{statusCode: resp.StatusCode, status: resp.Status, message: redact(string(body))}
+		return &statusError{statusCode: resp.StatusCode, status: status, message: redact(string(body))}
 	}
-	return &statusError{statusCode: resp.StatusCode, status: resp.Status}
+	return &statusError{statusCode: resp.StatusCode, status: status}
 }
 
 type statusError struct {

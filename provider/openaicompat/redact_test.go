@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -69,6 +70,33 @@ func TestErrorEnvelopeRedactsOwnKey(t *testing.T) {
 
 func TestPlainErrorBodyRedactsOwnKey(t *testing.T) {
 	assertRedacted(t, echoServer(t, false), canaryKey(t))
+}
+
+// TestStatusLineRedactsOwnKey: the reason phrase after the status code is
+// server-chosen, so a raw listener can echo the Authorization header there.
+// The body never carries the key, so "[redacted]" can only come from the
+// status; each body shape reaches a different readErrorEnvelope return.
+func TestStatusLineRedactsOwnKey(t *testing.T) {
+	for name, body := range map[string]string{
+		"envelope": `{"error":{"message":"denied"}}`,
+		"plain":    "denied",
+		"empty":    "",
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				conn, buf, err := w.(http.Hijacker).Hijack()
+				if err != nil {
+					t.Error(err)
+					return
+				}
+				defer func() { _ = conn.Close() }()
+				_, _ = fmt.Fprintf(buf, "HTTP/1.1 401 echo %s\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s", r.Header.Get("Authorization"), len(body), body)
+				_ = buf.Flush()
+			}))
+			t.Cleanup(srv.Close)
+			assertRedacted(t, srv, canaryKey(t))
+		})
+	}
 }
 
 func TestErrorTextUnchangedWithoutKey(t *testing.T) {
