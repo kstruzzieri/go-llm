@@ -55,9 +55,10 @@ type InventoryModel struct {
 
 // InventoryProvider reports provider reachability from an explicit refresh.
 //
-// Reason says why a failed listing failed, as one of the Listing* codes below.
-// It never carries provider text, and is empty when the listing succeeded or the
-// cause is not one of the bounded codes.
+// Reason says why a failed listing failed, as one of the Listing* codes below:
+// every failed listing has one. It never carries provider text, and is empty when
+// the listing succeeded or when the provider was unregistered before its listing
+// ran.
 type InventoryProvider struct {
 	Name      string `json:"name"`
 	Reachable bool   `json:"reachable"`

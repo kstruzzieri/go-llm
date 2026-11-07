@@ -33,6 +33,9 @@ type RefreshOption func(*refreshOptions)
 // key is listed as usual and not published. Cancellation publishes nothing.
 // With WithPublish, models may be nil: the result then carries the listed
 // identities and the provider-reported facts, without registry projection.
+// cfg must come from the same load as the providers: the two are joined by
+// provider name, so a newer cfg could publish a listing under another endpoint
+// or key.
 func WithPublish(store fingerprint.EvidenceWriter, cfg *config.Config) RefreshOption {
 	return func(o *refreshOptions) { o.store, o.cfg = store, cfg }
 }
