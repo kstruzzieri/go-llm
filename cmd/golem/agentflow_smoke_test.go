@@ -2538,8 +2538,8 @@ func (a *amendAfterExplainAF) ExplainNextStep(ctx context.Context) (agentflow.Ne
 }
 
 // #731 A4: steps_complete hands over to requireNoStepWork, which still refuses
-// work opened after the loop. Here that is an amendment of P1. AgentFlow 1.2.2
-// counts the receipt from P1's completed attempt A1 for the amendment's attempt,
+// work opened after the loop. Here that is an amendment of P1. AgentFlow counts
+// the receipt from P1's completed attempt A1 for the amendment's attempt,
 // so it needs no new one and the state is validation_missing.
 func TestAgentflowResumeGuardsAmendmentOpenedAfterExplain_RealCLI(t *testing.T) {
 	dir := t.TempDir()

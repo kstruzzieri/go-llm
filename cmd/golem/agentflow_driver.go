@@ -31,7 +31,6 @@ type afClient interface {
 	ProbeWorkflow(context.Context) error
 	RecommendWorkflow(context.Context, agentflow.TaskBrief, string, string) (agentflow.WorkflowRecommendation, error)
 	ProbeReview(context.Context) error
-	ProbeRecovery(context.Context) error
 	Init(context.Context) error
 	LockPlan(context.Context, string) error
 	MaterializeWorkflowContract(context.Context, agentflow.WorkflowRecommendation) error
@@ -238,11 +237,6 @@ func (d *driver) run(ctx context.Context) (string, error) {
 	}
 	if d.reviewManifest != "" {
 		if err := d.af.ProbeReview(ctx); err != nil {
-			return "", &agentflowUnavailableError{fmt.Errorf("agentflow review unavailable: %w", err)}
-		}
-		// A same-plan review round skips the execution-history refusal and runs
-		// the serial loop over retained attempts, so it is recovery too.
-		if err := d.af.ProbeRecovery(ctx); err != nil {
 			return "", &agentflowUnavailableError{fmt.Errorf("agentflow review unavailable: %w", err)}
 		}
 	}
