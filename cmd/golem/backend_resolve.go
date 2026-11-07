@@ -175,18 +175,24 @@ func resolveBackend(ctx context.Context, cfg *config.Config, o backendResolveOpt
 		return backendResolution{}, nil
 	}
 
+	if pc.APIKey != "" {
+		// A provider with a key never scans: the key would go to every port
+		// in the band, and a hit would re-route the key there for good.
+		// Probe only the configured URL; the user can pass -base-url.
+		configured := strings.TrimRight(pc.BaseURL, "/")
+		_, derr := o.prober(ctx, []string{configured}, model,
+			openaicompat.WithHTTPClient(&http.Client{Timeout: backendProbeTimeout}),
+			openaicompat.WithAPIKey(pc.APIKey))
+		if derr == nil {
+			return backendResolution{}, nil
+		}
+		return backendResolution{warns: []string{fmt.Sprintf(
+			"openai-compat backend discovery skipped: provider %q has an api_key; pass -base-url to use another port", key)}}, nil
+	}
+
 	candidates := scanCandidates(pc.BaseURL)
 	copts := []openaicompat.ClientOption{
 		openaicompat.WithHTTPClient(&http.Client{Timeout: backendProbeTimeout}),
-	}
-	// The provider's API key is deliberately sent to every loopback scan
-	// candidate: if the backend moved to another local port but still
-	// enforces auth, it must still answer the probe. This is bounded by the
-	// literal-loopback gate above (isLoopbackURL) — the scan never leaves
-	// 127.0.0.1/localhost, so the key never reaches a non-loopback host.
-	// Spec-locked tradeoff; do not gate this on a "trusted candidate" check.
-	if pc.APIKey != "" {
-		copts = append(copts, openaicompat.WithAPIKey(pc.APIKey))
 	}
 	var hit string
 	var derr error
@@ -194,7 +200,7 @@ func resolveBackend(ctx context.Context, cfg *config.Config, o backendResolveOpt
 		// Guarded scan (#477): each candidate probes through its own bound
 		// client, so discovery traffic carries the discovery capability and
 		// can never leave the candidate's loopback origin.
-		hit, derr = probeCandidatesGuarded(ctx, candidates, model, pc.APIKey, o)
+		hit, derr = probeCandidatesGuarded(ctx, candidates, model, o)
 	} else {
 		hit, derr = o.prober(ctx, candidates, model, copts...)
 	}
@@ -220,7 +226,7 @@ func resolveBackend(ctx context.Context, cfg *config.Config, o backendResolveOpt
 // guardCandidate. The first candidate that serves the model wins, matching
 // the shared-prober loop; a guard refusal for a candidate skips it the same
 // way a probe failure would.
-func probeCandidatesGuarded(ctx context.Context, candidates []string, model, apiKey string, o backendResolveOpts) (string, error) {
+func probeCandidatesGuarded(ctx context.Context, candidates []string, model string, o backendResolveOpts) (string, error) {
 	var errs []string
 	for _, cand := range candidates {
 		if err := ctx.Err(); err != nil {
@@ -232,9 +238,6 @@ func probeCandidatesGuarded(ctx context.Context, candidates []string, model, api
 			continue
 		}
 		copts := []openaicompat.ClientOption{openaicompat.WithHTTPClient(hc)}
-		if apiKey != "" {
-			copts = append(copts, openaicompat.WithAPIKey(apiKey))
-		}
 		hit, err := o.prober(bctx, []string{cand}, model, copts...)
 		if err != nil {
 			errs = append(errs, err.Error())

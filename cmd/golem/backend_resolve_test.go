@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -269,26 +271,124 @@ func TestResolveBackend_ScanCandidatesShape(t *testing.T) {
 	}
 }
 
-func TestResolveBackend_ScanPassesAPIKeyOpt(t *testing.T) {
-	fp := &fakeProber{returnURL: "http://127.0.0.1:8083"}
-	cfg := &config.Config{
-		Providers: map[string]config.ProviderConfig{
-			"llamacpp": {APIFormat: "openai-compat", BaseURL: "http://127.0.0.1:8080", APIKey: "k123"},
-		},
-		Models:   map[string]config.ModelConfig{"agent-role": {Name: "gemma4:31b", Provider: "llamacpp", Type: "dense"}},
-		Defaults: map[string]string{"agent": "agent-role"},
+// recProber records each call's candidates and whether the client options it
+// received carry an API key. It applies the options to a real openaicompat
+// probe against an httptest recorder and reads the Authorization header the
+// recorder got (the key field is unexported). No port in 8080-8090 is bound.
+type recProber struct {
+	calls   [][]string
+	sawAuth []string // Authorization header seen per call ("" = none)
+	serves  string   // candidate URL that "serves" the model; "" = none
+}
+
+func (rp *recProber) probe(ctx context.Context, cands []string, model string, opts ...openaicompat.ClientOption) (string, error) {
+	rp.calls = append(rp.calls, append([]string(nil), cands...))
+	var auth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auth = r.Header.Get("Authorization")
+		_, _ = fmt.Fprintf(w, `{"data":[{"id":%q}]}`, model)
+	}))
+	defer srv.Close()
+	if _, err := openaicompat.DiscoverBaseURL(ctx, []string{srv.URL}, model, opts...); err != nil {
+		return "", err
 	}
-	res, err := resolveBackend(context.Background(), cfg, backendResolveOpts{
-		lookupEnv: noEnv, prober: fp.probe,
+	rp.sawAuth = append(rp.sawAuth, auth)
+	for _, c := range cands {
+		if c == rp.serves {
+			return c, nil
+		}
+	}
+	return "", fmt.Errorf("no candidate serves %q", model)
+}
+
+func keyedConfig(key string) *config.Config {
+	cfg := ocConfig("llamacpp", "gemma4:31b", "http://127.0.0.1:8080")
+	pc := cfg.Providers["llamacpp"]
+	pc.APIKey = key
+	cfg.Providers["llamacpp"] = pc
+	return cfg
+}
+
+func TestResolveBackendKeyedSkipsScan(t *testing.T) {
+	const canary = "CANARY-776-a1b2c3d4e5f6"
+	rp := &recProber{}
+	res, err := resolveBackend(context.Background(), keyedConfig(canary), backendResolveOpts{
+		lookupEnv: noEnv, prober: rp.probe,
 	})
 	if err != nil {
 		t.Fatalf("resolveBackend: %v", err)
 	}
-	if fp.calls != 1 {
-		t.Fatalf("prober calls = %d, want 1", fp.calls)
+	if len(rp.calls) != 1 || len(rp.calls[0]) != 1 || rp.calls[0][0] != "http://127.0.0.1:8080" {
+		t.Fatalf("probe calls = %v, want exactly [[configured]]", rp.calls)
 	}
-	if fp.gotOpts != 2 {
-		t.Fatalf("gotOpts = %d, want 2 (base HTTP-client opt + APIKey opt)", fp.gotOpts)
+	if len(rp.sawAuth) != 1 || rp.sawAuth[0] != "Bearer "+canary {
+		t.Fatalf("key must reach the configured URL probe: %v", rp.sawAuth)
+	}
+	want := `openai-compat backend discovery skipped: provider "llamacpp" has an api_key; pass -base-url to use another port`
+	if len(res.warns) != 1 || res.warns[0] != want {
+		t.Fatalf("warns = %q, want [%q]", res.warns, want)
+	}
+	if res.baseURL != "" || res.providerKey != "" {
+		t.Fatalf("res = %+v, want no override", res)
+	}
+	if strings.Contains(res.warns[0], canary) || strings.Contains(res.notice, canary) {
+		t.Fatal("canary leaked into notice output")
+	}
+}
+
+func TestResolveBackendKeyedConfiguredServes(t *testing.T) {
+	rp := &recProber{serves: "http://127.0.0.1:8080"}
+	res, err := resolveBackend(context.Background(), keyedConfig("CANARY-776-0f9e8d7c"), backendResolveOpts{
+		lookupEnv: noEnv, prober: rp.probe,
+	})
+	if err != nil {
+		t.Fatalf("resolveBackend: %v", err)
+	}
+	if len(res.warns) != 0 || res.baseURL != "" || res.providerKey != "" || res.notice != "" {
+		t.Fatalf("res = %+v, want zero resolution", res)
+	}
+	if len(rp.calls) != 1 || len(rp.calls[0]) != 1 {
+		t.Fatalf("probe calls = %v, want one single-candidate call", rp.calls)
+	}
+}
+
+func TestResolveBackendKeylessStillScans(t *testing.T) {
+	rp := &recProber{serves: "http://127.0.0.1:8083"}
+	res, err := resolveBackend(context.Background(), keyedConfig(""), backendResolveOpts{
+		lookupEnv: noEnv, prober: rp.probe,
+	})
+	if err != nil {
+		t.Fatalf("resolveBackend: %v", err)
+	}
+	if len(rp.calls) != 1 || len(rp.calls[0]) != 11 {
+		t.Fatalf("probe calls = %v, want one call with 8080..8090", rp.calls)
+	}
+	if rp.sawAuth[0] != "" {
+		t.Fatalf("keyless scan sent Authorization %q", rp.sawAuth[0])
+	}
+	if res.providerKey != "llamacpp" || res.baseURL != "http://127.0.0.1:8083" || res.source != "discovered" {
+		t.Fatalf("res = %+v", res)
+	}
+}
+
+func TestResolveBackendGuardedScanSendsNoKey(t *testing.T) {
+	rp := &recProber{serves: "http://127.0.0.1:8083"}
+	res, err := resolveBackend(context.Background(), keyedConfig(""), backendResolveOpts{
+		lookupEnv: noEnv, prober: rp.probe,
+		guardCandidate: func(string) (*http.Client, context.Context, error) {
+			return &http.Client{}, context.Background(), nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("resolveBackend: %v", err)
+	}
+	if len(rp.sawAuth) == 0 {
+		t.Fatal("guarded scan made no probes")
+	}
+	for i, a := range rp.sawAuth {
+		if a != "" {
+			t.Fatalf("guarded candidate %d carried Authorization %q", i, a)
+		}
 	}
 	if res.baseURL != "http://127.0.0.1:8083" {
 		t.Fatalf("res = %+v", res)
