@@ -31,6 +31,14 @@ func proberFactory(cfg *config.Config, ollamaClients map[string]*ollama.Client, 
 			}
 		}
 
+		// Ollama's digest comes from /api/tags. Without it this lookup has no real
+		// identity: a fallback would re-run the benchmark now, and again when the
+		// digest returns. An openai-compat server reports none, so its fallback is
+		// its identity.
+		if apiFormat == "ollama" && (runtime == nil || runtime.Digest == "") {
+			return nil, nil
+		}
+
 		caps := capabilitiesForKey(cfg, key)
 		in := probers.ProberFactoryInput{
 			APIFormat:    apiFormat,
