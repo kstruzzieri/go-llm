@@ -150,20 +150,28 @@ func (p *Provider) Health(ctx context.Context) error {
 // Models discovery
 // ---------------------------------------------------------------------------
 
-// Models returns the list of models advertised by /v1/models. OpenAI-compat
+// Models returns the list of models advertised by /v1/models (nil, with nil
+// error, when the body has no "data" key). OpenAI-compat
 // servers expose only the ID reliably; Family, ParameterSize, QuantLevel,
 // Template, Capabilities, ContextWindow, and Digest are NOT part of the
 // /v1/models spec and will be empty/zero. Consumers needing those fields
 // should populate them via models.json (catalog merge happens upstream in
 // ModelRegistry).
 func (p *Provider) Models(ctx context.Context) ([]provider.ModelInfo, error) {
-	var resp modelsResponse
+	var resp modelsListing
 	if err := p.client.getJSON(ctx, "/v1/models", &resp); err != nil {
 		return nil, fmt.Errorf("provider: openaicompat: list models: %w", err)
 	}
-	out := make([]provider.ModelInfo, len(resp.Data))
-	for i, m := range resp.Data {
-		out[i] = provider.ModelInfo{Name: m.ID}
+	if resp.Data == nil {
+		return nil, nil // no listing key: not a listing (see provider.Provider.Models)
+	}
+	var entries []modelEntry
+	if err := json.Unmarshal(resp.Data, &entries); err != nil {
+		return nil, fmt.Errorf("provider: openaicompat: list models: decode response: %w", err)
+	}
+	out := make([]provider.ModelInfo, len(entries))
+	for i, m := range entries {
+		out[i] = provider.ModelInfo{Name: m.ID, OwnedBy: m.OwnedBy}
 	}
 	return out, nil
 }

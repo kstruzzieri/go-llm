@@ -52,7 +52,7 @@ func (p *fakeProvider) Models(context.Context) ([]provider.ModelInfo, error) {
 	if p.modelsErr != nil {
 		return nil, p.modelsErr
 	}
-	return append([]provider.ModelInfo(nil), p.models...), nil
+	return append([]provider.ModelInfo{}, p.models...), nil
 }
 func (p *fakeProvider) Chat(context.Context, provider.ChatRequest) (*provider.ChatResponse, error) {
 	return nil, errors.New("not implemented")

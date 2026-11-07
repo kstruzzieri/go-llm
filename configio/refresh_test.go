@@ -98,7 +98,7 @@ func TestRefreshInventory_UnreachableProviderIsInValue(t *testing.T) {
 		t.Fatalf("RefreshInventory() error: %v; a down provider must not abort the refresh", err)
 	}
 	wantProviders := []configview.InventoryProvider{
-		{Name: "down", Reachable: false},
+		{Name: "down", Reachable: false, Reason: "unreachable"},
 		{Name: "up", Reachable: true},
 	}
 	if !reflect.DeepEqual(inv.Providers, wantProviders) {

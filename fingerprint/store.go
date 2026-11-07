@@ -37,7 +37,8 @@ var _ CapProbeStore = (*SQLiteStore)(nil)
 
 // SQLiteStore is a fingerprint Store backed by SQLite.
 type SQLiteStore struct {
-	db *sql.DB
+	db     *sql.DB
+	secret []byte // store_meta.account_secret, read once at open; it never changes
 }
 
 // NewStore creates a fingerprint store on the given database, running
@@ -54,7 +55,11 @@ func NewStore(ctx context.Context, db *sql.DB) (*SQLiteStore, error) {
 	if err := runMigrations(ctx, db); err != nil {
 		return nil, fmt.Errorf("fingerprint: initialize store: %w", err)
 	}
-	return &SQLiteStore{db: db}, nil
+	s := &SQLiteStore{db: db}
+	if err := db.QueryRowContext(ctx, `SELECT account_secret FROM store_meta`).Scan(&s.secret); err != nil {
+		return nil, fmt.Errorf("fingerprint: initialize store: read account secret: %w", err)
+	}
+	return s, nil
 }
 
 // Get retrieves a profile by backend ID and model name.
