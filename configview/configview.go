@@ -54,10 +54,35 @@ type InventoryModel struct {
 }
 
 // InventoryProvider reports provider reachability from an explicit refresh.
+//
+// Reason says why a failed listing failed, as one of the Listing* codes below.
+// It never carries provider text, and is empty when the listing succeeded or the
+// cause is not one of the bounded codes.
 type InventoryProvider struct {
 	Name      string `json:"name"`
 	Reachable bool   `json:"reachable"`
+	Reason    string `json:"reason,omitempty"`
 }
+
+// The bounded reasons a provider listing can fail.
+const (
+	// ListingUnsupported is a 404 or 405 on the listing path.
+	ListingUnsupported = "listing_unsupported"
+	// ListingAuthFailed is a 401 or 403.
+	ListingAuthFailed = "auth_failed"
+	// ListingRateLimited is a 429.
+	ListingRateLimited = "rate_limited"
+	// ListingRejected is any other 4xx.
+	ListingRejected = "rejected"
+	// ListingTimeout is a listing that ran out of time.
+	ListingTimeout = "timeout"
+	// ListingUnreachable is a connection that could not be made.
+	ListingUnreachable = "unreachable"
+	// ListingServerError is a 5xx.
+	ListingServerError = "server_error"
+	// ListingMalformedResponse is a body that could not be read as a listing.
+	ListingMalformedResponse = "malformed_response"
+)
 
 // Inventory is a plain serializable value produced by an EXPLICIT refresh
 // (spec slice 4) or a consumer-side adapter. The zero value renders a

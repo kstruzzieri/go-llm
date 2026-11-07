@@ -1,8 +1,9 @@
 package provider
 
 import (
-	"strings"
 	"time"
+
+	"github.com/kstruzzieri/go-llm/fingerprint"
 )
 
 // ---------------------------------------------------------------------------
@@ -200,7 +201,7 @@ func (p *ModelProfile) FIMUnsupportedReason() string {
 }
 
 func templateUsesSuffix(tmpl string) bool {
-	return strings.Contains(tmpl, ".Suffix")
+	return fingerprint.TemplateUsesSuffix(tmpl)
 }
 
 // ---------------------------------------------------------------------------
