@@ -1266,6 +1266,43 @@ func TestAgentflowStoppedStepPartialEditFailsClosed_RealCLI(t *testing.T) {
 	}
 }
 
+// #774: the retry's goal names the file the stopped attempt left right, and an
+// edit_file with identical old and new text records it byte for byte, so the
+// step completes on its gates without the file being written again.
+func TestAgentflowRetryConfirmsInheritedEdit_RealCLI(t *testing.T) {
+	dir, runner, plan, planBytes := runStoppedSmokeStep(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	client := agentflow.NewOwnedClient(runner, dir, "golem")
+	caller := &scriptCaller{responses: []agent.ModelResult{
+		toolStep("e1", "edit_file", `{"path":"src/answer.txt","old_string":"expected","new_string":"expected"}`),
+		answerStep("confirmed"),
+	}}
+	runStep, err := newTaskStepRunner(dir, &plan, client, agent.New(caller, agent.ContextManager{}), &replSession{maxSteps: 4}, true, io.Discard, nil, cancel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &driver{af: client, plan: &plan, runStep: runStep}
+	final, err := d.resume(ctx, dir, planBytes, nil)
+	if err != nil || final.State != "complete" {
+		t.Fatalf("resume: state=%q err=%v", final.State, err)
+	}
+	var sent strings.Builder
+	for _, m := range caller.lastRequest.Messages {
+		sent.WriteString(m.Content)
+	}
+	if !strings.Contains(sent.String(), `this attempt has not recorded them: "src/answer.txt".`) {
+		t.Fatalf("model was not told about the inherited file:\n%s", sent.String())
+	}
+	if b, err := os.ReadFile(filepath.Join(dir, "src", "answer.txt")); err != nil || string(b) != "expected\n" {
+		t.Fatalf("src/answer.txt = %q, err=%v, want the inherited bytes unchanged", b, err)
+	}
+	if got := lastStepRunEvent(readStepRunEvents(t, dir), "A2").Event; got != "completed" {
+		t.Fatalf("A2 last event = %q, want completed", got)
+	}
+}
+
 // completedFixtureStep completes the fixture's P1 in attempt A1, gates included.
 func completedFixtureStep(t *testing.T) (string, agentflow.Runner, *agentflow.Client, agentflow.Plan, []byte) {
 	t.Helper()
