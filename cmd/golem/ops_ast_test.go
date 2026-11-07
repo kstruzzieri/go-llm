@@ -62,7 +62,7 @@ var opsClosedNames = map[string][]string{
 		"DestinationPurposeDiscovery", "DestinationPurposeHealth", "ErrDestinationDenied",
 		"NewDestination", "NewDestinationGate", "NewDestinationManifest"},
 	goLLM + "agent": {"ModelCallCapabilities", "SanitizePreview"},
-	"main":          {"loadDocumentFor", "modelsJSONInput", "parseQuietly", "realTermOps", "sanitizeApprovalPreview", "termOps"},
+	"main":          {"keyRefusalRemedy", "loadDocumentFor", "modelsJSONInput", "parseQuietly", "realTermOps", "sanitizeApprovalPreview", "termOps"},
 }
 
 // opsAllowedModuleImports are the only non-stdlib packages ops code and the

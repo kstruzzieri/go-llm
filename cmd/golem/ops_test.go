@@ -365,3 +365,28 @@ func TestOpsFlagErrors(t *testing.T) {
 		}
 	}
 }
+
+func TestOpsLoadErrorRefusalRemedy(t *testing.T) {
+	workingDirRefusal := func() error {
+		t.Setenv("CANARY_VAR", "CANARY-776-ops")
+		t.Setenv("HOME", t.TempDir())
+		t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+		_ = os.Unsetenv("GO_LLM_CONFIG")
+		dir := t.TempDir()
+		body := `{"providers":{"openai":{"base_url":"http://127.0.0.1:1","api_format":"openai-compat","api_key":"${CANARY_VAR}"}},"models":{},"defaults":{}}`
+		if err := os.WriteFile(filepath.Join(dir, "models.json"), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		t.Chdir(dir)
+		_, err := config.DefaultDocument()
+		return err
+	}()
+	got := opsLoadError("golem ops", workingDirRefusal).Error()
+	want := "golem ops: models.json not loaded: key_reference_refused openai; " + keyRefusalRemedy
+	if got != want {
+		t.Errorf("got  %q\nwant %q", got, want)
+	}
+	if strings.Contains(got, "CANARY") {
+		t.Errorf("leaks variable name or secret: %q", got)
+	}
+}
