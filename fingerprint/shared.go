@@ -143,8 +143,17 @@ func (s *SharedStore) Probes() CapProbeStore {
 	return nil
 }
 
-// Profiles is the fingerprint profile store; nil when the store is disabled.
-func (s *SharedStore) Profiles() *SQLiteStore { return s.sqlite }
+// Profiles is the fingerprint profile store, or a nil interface when the store
+// is disabled. Every write re-secures the file's sidecars.
+func (s *SharedStore) Profiles() Store {
+	switch {
+	case s.secured != nil:
+		return s.secured
+	case s.sqlite != nil:
+		return s.sqlite
+	}
+	return nil
+}
 
 // Close closes the database. It is safe on a disabled store.
 func (s *SharedStore) Close() error {
@@ -203,4 +212,14 @@ func (s *securingStore) SaveCapProbe(ctx context.Context, probe CapProbe) error 
 func (s *securingStore) DeleteCapProbes(ctx context.Context, backendID, modelName string) error {
 	defer s.secure()
 	return s.SQLiteStore.DeleteCapProbes(ctx, backendID, modelName)
+}
+
+func (s *securingStore) Save(ctx context.Context, profile Profile) error {
+	defer s.secure()
+	return s.SQLiteStore.Save(ctx, profile)
+}
+
+func (s *securingStore) SaveFailure(ctx context.Context, backendID, modelName, modelDigest, errMsg string) error {
+	defer s.secure()
+	return s.SQLiteStore.SaveFailure(ctx, backendID, modelName, modelDigest, errMsg)
 }

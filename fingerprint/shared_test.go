@@ -122,8 +122,9 @@ func TestOpenSharedStore_DisabledWhenMemoryAlsoFails(t *testing.T) {
 	if s.Probes() != nil {
 		t.Errorf("Probes() = %#v, want nil interface", s.Probes())
 	}
-	if s.Profiles() != nil {
-		t.Error("Profiles() want nil")
+	var st Store = s.Profiles() // a host wires it this way: the interface itself must be nil
+	if st != nil {
+		t.Errorf("Profiles() = %#v, want nil interface", st)
 	}
 	if !strings.HasPrefix(s.Warning(), "fingerprint cache disabled: ") || !strings.HasSuffix(s.Warning(), "(memory fallback failed: no memory)") {
 		t.Errorf("warning %q", s.Warning())
@@ -167,6 +168,10 @@ func TestSharedStore_SidecarsResecuredAfterEveryWrite(t *testing.T) {
 		{"RecordModelAccess", func() error {
 			return s.Log().RecordModelAccess(ctx, evEndpoint, "", evModel, AccessAnswered, 200, now)
 		}},
+		{"Profiles.Save", func() error {
+			return s.Profiles().Save(ctx, Profile{BackendID: "lc", ModelName: "m", ModelDigest: "d", ProfileVersion: CurrentProfileVersion, TestedAt: now})
+		}},
+		{"Profiles.SaveFailure", func() error { return s.Profiles().SaveFailure(ctx, "lc", "m", "d", "boom") }},
 		{"SaveCapProbe", func() error {
 			return s.Probes().SaveCapProbe(ctx, CapProbe{BackendID: "lc", ModelName: "m", Capability: "tool_call", State: CapProbeYes, ModelDigest: "d", ProbeVersion: CurrentToolProbeVersion, TestedAt: now})
 		}},
@@ -256,6 +261,10 @@ func TestSharedStoreHelper(t *testing.T) {
 	for i := 0; i < n; i++ {
 		if err := s.Log().AppendEvidence(context.Background(), evRow(0, time.Now())); err != nil {
 			t.Fatalf("child append %d: %v", i, err)
+		}
+		// Read while the other process writes: a BUSY read fails the child.
+		if _, err := s.Log().EvidenceRows(context.Background(), evEndpoint, evModel); err != nil {
+			t.Fatalf("child read %d: %v", i, err)
 		}
 	}
 }
