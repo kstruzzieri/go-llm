@@ -143,6 +143,11 @@ func (e *agentflowUnavailableError) Unwrap() error { return e.err }
 // Fresh execution leaves it nil and preserves the existing driver sequence.
 type beforeGatesFunc func(ctx context.Context, step agentflow.Step, attempt string) error
 
+// beforeRunFunc is a resume-only read invoked after a claim and before the
+// model runs. It returns text appended to the attempt's goal (#774). Fresh
+// execution leaves it nil.
+type beforeRunFunc func(ctx context.Context, step agentflow.Step, attempt string) (string, error)
+
 type driver struct {
 	af              afClient
 	plan            *agentflow.Plan
@@ -158,6 +163,7 @@ type driver struct {
 	approvedRecommendation *agentflow.WorkflowRecommendation
 	evidence               []agentflow.EvidenceEntry
 	runStep                runStepFunc
+	beforeRun              beforeRunFunc
 	beforeGates            beforeGatesFunc
 	parallelCohort         func(context.Context) error
 	out                    io.Writer
@@ -380,7 +386,16 @@ func (d *driver) runOneStep(ctx context.Context, id string) error {
 }
 
 func (d *driver) runAttempt(ctx context.Context, step agentflow.Step, attempt, goal string) error {
-	if err := d.runStep(ctx, step, attempt, goal); err != nil {
+	var err error
+	if d.beforeRun != nil {
+		var extra string
+		extra, err = d.beforeRun(ctx, step, attempt)
+		goal += extra
+	}
+	if err == nil {
+		err = d.runStep(ctx, step, attempt, goal)
+	}
+	if err != nil {
 		// #611, #642: every failed run closes its attempt.
 		return blockAttempt(ctx, d.af, step.ID, attempt, stepRunBlockReason(err), err)
 	}

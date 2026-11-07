@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/kstruzzieri/go-llm/agentflow"
@@ -696,6 +697,28 @@ func unrecordedFilesAdvice(diagnostics []string) string {
 	return files + ". To keep the files as they are, run the record-file-change command -agentflow-status shows for each one, then resume. To discard them, block the open attempt with agentflow block-step, then restore them, then resume; restoring first would settle the attempt on its gates without running the model"
 }
 
+// retryContext tells a just-claimed attempt which in-scope files a stopped
+// attempt left changed (#774). Without it, a model that finds the content
+// already right writes nothing and the attempt stops before its gates. Paths
+// are quoted, so a file name cannot add lines to the prompt.
+func retryContext(state agentflow.NextActionState) string {
+	if state.State != "file_receipts_missing" {
+		return ""
+	}
+	var files []string
+	for _, diagnostic := range state.Diagnostics {
+		if path, ok := strings.CutPrefix(diagnostic, "unrecorded: "); ok {
+			files = append(files, strconv.Quote(path))
+		}
+	}
+	if len(files) == 0 {
+		return ""
+	}
+	return "\n\nRetry context (authoritative Agentflow projection):\n" +
+		"An earlier attempt of this step stopped after changing these in-scope files, and this attempt has not recorded them: " + strings.Join(files, ", ") + ".\n" +
+		"Review each one. If it is wrong, fix it. If it is already right, confirm it with edit_file, giving the same unique text as old_string and new_string; that records the file without changing it. Write an empty file again with write_file. A file you leave untouched stops the step before its gates."
+}
+
 func (d *driver) resume(ctx context.Context, root string, planJSON []byte, approved *agentflow.WorkflowRecommendation) (agentflow.NextActionState, error) {
 	// #612 R6: resume mutates, so it runs the base probe (version gate and the
 	// base capability probes, including #611's block-step) before its first
@@ -773,6 +796,15 @@ func (d *driver) resume(ctx context.Context, root string, planJSON []byte, appro
 		}
 	}
 
+	previousBeforeRun := d.beforeRun
+	d.beforeRun = func(ctx context.Context, _ agentflow.Step, _ string) (string, error) {
+		claimed, err := d.af.NextAction(ctx)
+		if err != nil {
+			return "", err
+		}
+		return retryContext(claimed), nil
+	}
+	defer func() { d.beforeRun = previousBeforeRun }()
 	previousBeforeGates := d.beforeGates
 	d.beforeGates = func(ctx context.Context, step agentflow.Step, attempt string) error {
 		projected, err := d.af.NextAction(ctx)
