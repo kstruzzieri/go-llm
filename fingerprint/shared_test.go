@@ -122,7 +122,7 @@ func TestOpenSharedStore_DisabledWhenMemoryAlsoFails(t *testing.T) {
 	if s.Probes() != nil {
 		t.Errorf("Probes() = %#v, want nil interface", s.Probes())
 	}
-	var st Store = s.Profiles() // a host wires it this way: the interface itself must be nil
+	st := Store(s.Profiles()) // a host wires it this way: the interface itself must be nil
 	if st != nil {
 		t.Errorf("Profiles() = %#v, want nil interface", st)
 	}
@@ -161,7 +161,7 @@ func TestSharedStore_SidecarsResecuredAfterEveryWrite(t *testing.T) {
 			return s.Log().AppendCheckResult(ctx, evEndpoint, "", evModel, []EvidenceRow{evRow(0, now)}, nil)
 		}},
 		{"PublishListings", func() error {
-			return s.Log().PublishListings(ctx, []ListingPublish{{Endpoint: evEndpoint, StartedAt: now.Add(-time.Second), Members: []ListingMember{{Model: evModel}}}})
+			return s.Log().PublishListings(ctx, []ListingPublish{{Endpoint: evEndpoint, Adapter: evAdapter, StartedAt: now.Add(-time.Second), Members: []ListingMember{{Model: evModel}}}})
 		}},
 		{"AddNamedModel", func() error { return s.Log().AddNamedModel(ctx, evEndpoint, "named") }},
 		{"RemoveNamedModel", func() error { return s.Log().RemoveNamedModel(ctx, evEndpoint, "named") }},
@@ -213,14 +213,21 @@ func TestOpenSharedStore_PrunesOnlyWhenSomethingIsPrunable(t *testing.T) {
 	base, root := t.TempDir(), t.TempDir()
 	s := openShared(t, xdg(base), root)
 	ctx := context.Background()
-	gen0, _ := s.Log().Generation(ctx)
+	// A row inside the 90-day window: present, but not prunable.
+	if err := s.Log().AppendEvidence(ctx, evRow(0, time.Now().AddDate(0, 0, -10), asNo)); err != nil {
+		t.Fatal(err)
+	}
+	gen0, err := s.Log().Generation(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
 	}
 	// Quiet reopen: nothing to prune, so the generation stays put.
 	s = openShared(t, xdg(base), root)
-	if g, _ := s.Log().Generation(ctx); g != gen0 {
-		t.Fatalf("quiet open moved generation %d -> %d", gen0, g)
+	if g, err := s.Log().Generation(ctx); err != nil || g != gen0 {
+		t.Fatalf("quiet open moved generation %d -> %d (%v)", gen0, g, err)
 	}
 	// An old no, shadowed by a newer no of the same partition, is prunable.
 	now := time.Now()

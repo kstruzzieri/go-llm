@@ -42,7 +42,7 @@ func publish(t *testing.T, s *SQLiteStore, pub ListingPublish) {
 }
 
 func listingOf(endpoint, key string, at time.Time, models ...string) ListingPublish {
-	p := ListingPublish{Endpoint: endpoint, APIKey: key, StartedAt: at}
+	p := ListingPublish{Endpoint: endpoint, Adapter: evAdapter, APIKey: key, StartedAt: at}
 	for _, m := range models {
 		p.Members = append(p.Members, ListingMember{Model: m, OwnedBy: "o-" + m, Digest: "d-" + m})
 	}
@@ -91,7 +91,7 @@ func TestAccount_TwoKeysOneEndpointSeparate(t *testing.T) {
 	if err := s.RecordModelAccess(t.Context(), evEndpoint, keyA, "gone", AccessRefused, 403, time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	gotB, err := s.CurrentListing(t.Context(), evEndpoint, keyB)
+	gotB, err := s.CurrentListing(t.Context(), evEndpoint, evAdapter, keyB)
 	if err != nil || gotB != nil {
 		t.Fatalf("listing under B = %+v, %v; want nil", gotB, err)
 	}
@@ -99,7 +99,7 @@ func TestAccount_TwoKeysOneEndpointSeparate(t *testing.T) {
 	if err != nil || accB != nil {
 		t.Fatalf("access under B = %+v, %v; want nil", accB, err)
 	}
-	gotA, err := s.CurrentListing(t.Context(), evEndpoint, keyA)
+	gotA, err := s.CurrentListing(t.Context(), evEndpoint, evAdapter, keyA)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,7 +110,7 @@ func TestAccount_TwoKeysOneEndpointSeparate(t *testing.T) {
 	}
 	// B publishing its own listing leaves A's alone: two snapshots coexist.
 	publish(t, s, listingOf(evEndpoint, keyB, lsDay(1), "only-b"))
-	gotA, _ = s.CurrentListing(t.Context(), evEndpoint, keyA)
+	gotA, _ = s.CurrentListing(t.Context(), evEndpoint, evAdapter, keyA)
 	wantModels(t, gotA, "only-a")
 	if n := count(t, s, "listing_snapshots"); n != 2 {
 		t.Fatalf("snapshots = %d, want 2", n)
@@ -124,7 +124,7 @@ func TestAccount_KeyChangeStartsEmptyAnswersStay(t *testing.T) {
 	if err := s.RecordModelAccess(t.Context(), evEndpoint, keyA, "m", AccessRefused, 404, time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	snap, err := s.ReadSnapshot(t.Context(), evEndpoint, ptr(keyB), "", []string{"m"}, time.Now())
+	snap, err := s.ReadSnapshot(t.Context(), evEndpoint, evAdapter, ptr(keyB), "", []string{"m"}, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,7 +134,7 @@ func TestAccount_KeyChangeStartsEmptyAnswersStay(t *testing.T) {
 	if snap.Listing != nil || len(snap.Access) != 0 {
 		t.Fatalf("new key sees listing %+v access %+v, want neither", snap.Listing, snap.Access)
 	}
-	if l, _ := s.CurrentListing(t.Context(), evEndpoint, keyB); l != nil {
+	if l, _ := s.CurrentListing(t.Context(), evEndpoint, evAdapter, keyB); l != nil {
 		t.Fatalf("CurrentListing under new key = %+v", l)
 	}
 	if a, _ := s.LatestModelAccess(t.Context(), evEndpoint, keyB, "m"); a != nil {
@@ -149,7 +149,7 @@ func TestAccount_NoKeyIsEmptyAccount(t *testing.T) {
 	}
 	publish(t, s, listingOf(evEndpoint, "", lsNow, "first"))
 	publish(t, s, listingOf(evEndpoint, "", lsDay(1), "second"))
-	l, err := s.CurrentListing(t.Context(), evEndpoint, "")
+	l, err := s.CurrentListing(t.Context(), evEndpoint, evAdapter, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -274,7 +274,7 @@ func TestPublishListings_OlderStartedAtDoesNotReplace(t *testing.T) {
 	late := listingOf(evEndpoint, keyA, lsDay(1), "old")
 	late.Facts = []EvidenceRow{evRow(0, lsNow, asOllamaShow)}
 	publish(t, s, late)
-	l, _ := s.CurrentListing(t.Context(), evEndpoint, keyA)
+	l, _ := s.CurrentListing(t.Context(), evEndpoint, evAdapter, keyA)
 	wantModels(t, l, "new")
 	if !l.StartedAt.Equal(lsDay(2)) {
 		t.Fatalf("StartedAt = %v, want %v", l.StartedAt, lsDay(2))
@@ -284,11 +284,11 @@ func TestPublishListings_OlderStartedAtDoesNotReplace(t *testing.T) {
 	}
 	// An equal start is not newer either.
 	publish(t, s, listingOf(evEndpoint, keyA, lsDay(2), "tie"))
-	l, _ = s.CurrentListing(t.Context(), evEndpoint, keyA)
+	l, _ = s.CurrentListing(t.Context(), evEndpoint, evAdapter, keyA)
 	wantModels(t, l, "new")
 	// A newer one replaces, and its predecessor's members go with it.
 	publish(t, s, listingOf(evEndpoint, keyA, lsDay(3), "newer", "newest"))
-	l, _ = s.CurrentListing(t.Context(), evEndpoint, keyA)
+	l, _ = s.CurrentListing(t.Context(), evEndpoint, evAdapter, keyA)
 	wantModels(t, l, "newer", "newest")
 	if n, m := count(t, s, "listing_snapshots"), count(t, s, "listing_members"); n != 1 || m != 2 {
 		t.Fatalf("snapshots %d members %d; want 1, 2", n, m)
@@ -300,12 +300,12 @@ func TestPublishListings_OlderStartedAtDoesNotReplace(t *testing.T) {
 
 func TestPublishListings_EmptyIsRecordedEmpty(t *testing.T) {
 	s := newTestStore(t)
-	if l, _ := s.CurrentListing(t.Context(), evEndpoint, keyA); l != nil {
+	if l, _ := s.CurrentListing(t.Context(), evEndpoint, evAdapter, keyA); l != nil {
 		t.Fatalf("listing before any publish = %+v, want nil", l)
 	}
 	publish(t, s, listingOf(evEndpoint, keyA, lsNow, "gone-soon"))
 	publish(t, s, listingOf(evEndpoint, keyA, lsDay(1)))
-	l, err := s.CurrentListing(t.Context(), evEndpoint, keyA)
+	l, err := s.CurrentListing(t.Context(), evEndpoint, evAdapter, keyA)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -334,9 +334,9 @@ func TestPublishListings_OneTransaction(t *testing.T) {
 	if n := count(t, s, "listing_snapshots"); n != 1 {
 		t.Fatalf("snapshot rows = %d, want only the first publish's", n)
 	}
-	l, _ := s.CurrentListing(t.Context(), evEndpoint, keyA)
+	l, _ := s.CurrentListing(t.Context(), evEndpoint, evAdapter, keyA)
 	wantModels(t, l, "kept")
-	if l, _ := s.CurrentListing(t.Context(), "http://one:1", keyA); l != nil {
+	if l, _ := s.CurrentListing(t.Context(), "http://one:1", evAdapter, keyA); l != nil {
 		t.Fatalf("the first listing of the failed batch survived: %+v", l)
 	}
 	wantGeneration(t, s, 1)
@@ -391,7 +391,7 @@ func TestPublishListings_TwoHandlesRaceNoBusySnapshot(t *testing.T) {
 			t.Fatalf("publish: %v", err)
 		}
 	}
-	l, err := stores[0].CurrentListing(t.Context(), evEndpoint, keyA)
+	l, err := stores[0].CurrentListing(t.Context(), evEndpoint, evAdapter, keyA)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -428,7 +428,7 @@ func TestNamedModels_SurvivePublish(t *testing.T) {
 	if !reflect.DeepEqual(before, after) {
 		t.Fatalf("named models after publishes = %+v, want %+v (re-adding keeps AddedAt)", after, before)
 	}
-	l, _ := s.CurrentListing(t.Context(), evEndpoint, keyA)
+	l, _ := s.CurrentListing(t.Context(), evEndpoint, evAdapter, keyA)
 	wantModels(t, l)
 	if err := s.RemoveNamedModel(t.Context(), evEndpoint, "alpha"); err != nil {
 		t.Fatal(err)
@@ -460,7 +460,7 @@ func TestLatestModelAccess_RefusedExpiresAt7Days(t *testing.T) {
 		t.Fatalf("stored expires_at = %d, want %d", expires, want)
 	}
 	read := func(now time.Time) *ModelAccess {
-		snap, err := s.ReadSnapshot(ctx, evEndpoint, ptr(keyA), "", []string{"m"}, now)
+		snap, err := s.ReadSnapshot(ctx, evEndpoint, evAdapter, ptr(keyA), "", []string{"m"}, now)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -493,14 +493,14 @@ func TestLatestModelAccess_RefusedExpiresAt7Days(t *testing.T) {
 	if err := s.RecordModelAccess(ctx, evEndpoint, keyA, "rev", AccessRefused, 403, lsDay(-20)); err != nil {
 		t.Fatal(err)
 	}
-	if snap, _ := s.ReadSnapshot(ctx, evEndpoint, ptr(keyA), "", []string{"rev"}, lsNow); snap.Access["rev"] != nil {
+	if snap, _ := s.ReadSnapshot(ctx, evEndpoint, evAdapter, ptr(keyA), "", []string{"rev"}, lsNow); snap.Access["rev"] != nil {
 		t.Fatalf("expired refusal revived an older row: %+v", snap.Access["rev"])
 	}
 	// An answered row never expires.
 	if err := s.RecordModelAccess(ctx, evEndpoint, keyA, "ok", AccessAnswered, 0, lsNow); err != nil {
 		t.Fatal(err)
 	}
-	snap, _ := s.ReadSnapshot(ctx, evEndpoint, ptr(keyA), "", []string{"ok"}, lsDay(3650))
+	snap, _ := s.ReadSnapshot(ctx, evEndpoint, evAdapter, ptr(keyA), "", []string{"ok"}, lsDay(3650))
 	if a := snap.Access["ok"]; a == nil || !a.ExpiresAt.IsZero() || a.HTTPStatus != 0 || a.State != AccessAnswered {
 		t.Fatalf("answered access = %+v", a)
 	}
@@ -588,7 +588,7 @@ func TestReadSnapshot_ConcurrentPublishIsEntirelyBeforeOrAfter(t *testing.T) {
 	}()
 	reads := 0
 	for {
-		snap, err := reader.ReadSnapshot(ctx, evEndpoint, ptr(keyA), "", []string{"m"}, lsDay(1))
+		snap, err := reader.ReadSnapshot(ctx, evEndpoint, evAdapter, ptr(keyA), "", []string{"m"}, lsDay(1))
 		if err != nil {
 			t.Fatalf("ReadSnapshot: %v", err)
 		}
@@ -628,7 +628,7 @@ func TestReadSnapshot_ClosesBeforeCallerNetworkWork(t *testing.T) {
 	s := newTestStore(t)
 	s.db.SetMaxOpenConns(1)
 	appendEv(t, s, evRow(0, lsNow))
-	if _, err := s.ReadSnapshot(t.Context(), evEndpoint, ptr(keyA), "p", []string{"m", "m"}, lsNow); err != nil {
+	if _, err := s.ReadSnapshot(t.Context(), evEndpoint, evAdapter, ptr(keyA), "p", []string{"m", "m"}, lsNow); err != nil {
 		t.Fatal(err)
 	}
 	if in := s.db.Stats().InUse; in != 0 {
@@ -642,7 +642,7 @@ func TestReadSnapshot_ClosesBeforeCallerNetworkWork(t *testing.T) {
 	// An error path ends the transaction too.
 	cancelled, stop := context.WithCancel(t.Context())
 	stop()
-	if _, err := s.ReadSnapshot(cancelled, evEndpoint, nil, "", nil, lsNow); err == nil {
+	if _, err := s.ReadSnapshot(cancelled, evEndpoint, evAdapter, nil, "", nil, lsNow); err == nil {
 		t.Fatal("ReadSnapshot on a cancelled context succeeded")
 	}
 	if in := s.db.Stats().InUse; in != 0 {
@@ -669,7 +669,7 @@ func TestReadSnapshot_NilCredentialSkipsAccountReads(t *testing.T) {
 	}
 	models := []string{"m", "absent"}
 
-	nilSnap, err := s.ReadSnapshot(ctx, evEndpoint, nil, "prov", models, lsNow)
+	nilSnap, err := s.ReadSnapshot(ctx, evEndpoint, evAdapter, nil, "prov", models, lsNow)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -683,7 +683,7 @@ func TestReadSnapshot_NilCredentialSkipsAccountReads(t *testing.T) {
 		t.Fatalf("legacy = %+v", nilSnap.Legacy)
 	}
 
-	keyless, err := s.ReadSnapshot(ctx, evEndpoint, ptr(""), "", models, lsNow)
+	keyless, err := s.ReadSnapshot(ctx, evEndpoint, evAdapter, ptr(""), "", models, lsNow)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -693,19 +693,19 @@ func TestReadSnapshot_NilCredentialSkipsAccountReads(t *testing.T) {
 	}
 
 	// An unresolved credential reads no account data and the rest as usual.
-	unres, err := s.ReadSnapshot(ctx, evEndpoint, ptr("${API_KEY}"), "", models, lsNow)
+	unres, err := s.ReadSnapshot(ctx, evEndpoint, evAdapter, ptr("${API_KEY}"), "", models, lsNow)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if unres.Listing != nil || len(unres.Access) != 0 || len(unres.Rows) != 1 || len(unres.Named) != 1 {
 		t.Fatalf("unresolved credential: %+v", unres)
 	}
-	if l, err := s.CurrentListing(ctx, evEndpoint, "${API_KEY}"); l != nil || err != nil {
+	if l, err := s.CurrentListing(ctx, evEndpoint, evAdapter, "${API_KEY}"); l != nil || err != nil {
 		t.Fatalf("CurrentListing unresolved = %+v, %v", l, err)
 	}
 
 	// No models: metadata only.
-	meta, err := s.ReadSnapshot(ctx, evEndpoint, ptr(keyA), "prov", nil, lsNow)
+	meta, err := s.ReadSnapshot(ctx, evEndpoint, evAdapter, ptr(keyA), "prov", nil, lsNow)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -877,7 +877,7 @@ func TestCurrentListing_NeverEmptyDuringTwoProviderPublish(t *testing.T) {
 		}
 	}()
 	for reads := 0; ; reads++ {
-		l, err := reader.CurrentListing(t.Context(), evEndpoint, keyA)
+		l, err := reader.CurrentListing(t.Context(), evEndpoint, evAdapter, keyA)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -917,12 +917,12 @@ func TestAccess_FutureAndUnknownStateRowsAreNotClaims(t *testing.T) {
 	if err != nil || got == nil || got.State != AccessAnswered {
 		t.Fatalf("getter = %+v, %v; want the answered row", got, err)
 	}
-	snap, err := s.ReadSnapshot(ctx, evEndpoint, ptr(keyA), "", []string{"m"}, now)
+	snap, err := s.ReadSnapshot(ctx, evEndpoint, evAdapter, ptr(keyA), "", []string{"m"}, now)
 	if err != nil || snap.Access["m"] == nil || snap.Access["m"].State != AccessAnswered {
 		t.Fatalf("snapshot access = %+v, %v; want the answered row", snap.Access["m"], err)
 	}
 	// Later, the future row is admitted and wins.
-	snap, _ = s.ReadSnapshot(ctx, evEndpoint, ptr(keyA), "", []string{"m"}, now.Add(3*365*evDayLen))
+	snap, _ = s.ReadSnapshot(ctx, evEndpoint, evAdapter, ptr(keyA), "", []string{"m"}, now.Add(3*365*evDayLen))
 	if a := snap.Access["m"]; a == nil || a.State != AccessRefused {
 		t.Fatalf("access once the future row's date arrives = %+v", a)
 	}
@@ -970,8 +970,8 @@ func TestPublishListings_FutureStartedAtRefusedAndStoredOneReplaced(t *testing.T
 	wantGeneration(t, s, 0)
 	// A row already stored with such a date (another clock, another binary) is not current.
 	res, err := s.db.ExecContext(ctx,
-		`INSERT INTO listing_snapshots (key_version, endpoint, account, started_at, committed_at) VALUES (1, ?, ?, ?, ?)`,
-		evEndpoint, s.account(evEndpoint, keyA), future.UnixMilli(), now.UnixMilli())
+		`INSERT INTO listing_snapshots (key_version, endpoint, adapter, account, started_at, committed_at) VALUES (1, ?, ?, ?, ?, ?)`,
+		evEndpoint, evAdapter, s.account(evEndpoint, keyA), future.UnixMilli(), now.UnixMilli())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -979,14 +979,14 @@ func TestPublishListings_FutureStartedAtRefusedAndStoredOneReplaced(t *testing.T
 	if _, err := s.db.ExecContext(ctx, `INSERT INTO listing_members (snapshot_id, model_name) VALUES (?, 'skewed')`, id); err != nil {
 		t.Fatal(err)
 	}
-	if l, _ := s.CurrentListing(ctx, evEndpoint, keyA); l != nil {
+	if l, _ := s.CurrentListing(ctx, evEndpoint, evAdapter, keyA); l != nil {
 		t.Fatalf("CurrentListing = %+v, want the future-dated row ignored", l)
 	}
-	if snap, _ := s.ReadSnapshot(ctx, evEndpoint, ptr(keyA), "", nil, now); snap.Listing != nil {
+	if snap, _ := s.ReadSnapshot(ctx, evEndpoint, evAdapter, ptr(keyA), "", nil, now); snap.Listing != nil {
 		t.Fatalf("ReadSnapshot listing = %+v, want it ignored", snap.Listing)
 	}
 	publish(t, s, listingOf(evEndpoint, keyA, now.Add(-time.Minute), "real"))
-	l, _ := s.CurrentListing(ctx, evEndpoint, keyA)
+	l, _ := s.CurrentListing(ctx, evEndpoint, evAdapter, keyA)
 	wantModels(t, l, "real")
 	if n, m := count(t, s, "listing_snapshots"), count(t, s, "listing_members"); n != 1 || m != 1 {
 		t.Fatalf("snapshots %d members %d; want 1, 1", n, m)
@@ -1020,7 +1020,7 @@ func TestModelAccess_ExpiryIsTheRuleNotTheCallers(t *testing.T) {
 		}
 	}
 	// And the answered row is honored forever, though the caller set an expiry.
-	snap, _ := s.ReadSnapshot(ctx, evEndpoint, ptr(keyA), "", []string{"answered"}, long.Add(time.Hour))
+	snap, _ := s.ReadSnapshot(ctx, evEndpoint, evAdapter, ptr(keyA), "", []string{"answered"}, long.Add(time.Hour))
 	if snap.Access["answered"] == nil {
 		t.Fatal("answered access expired on a caller-set expiry")
 	}
@@ -1054,4 +1054,44 @@ func TestListingPublish_NeverPrintsKey(t *testing.T) {
 			t.Errorf("json of %s prints the key: %s", name, b)
 		}
 	}
+}
+
+// One server reached through two adapters at one address keeps two listings:
+// neither replaces the other, in either started_at order.
+func TestPublishListings_AdaptersKeepSeparateListings(t *testing.T) {
+	for name, order := range map[string][2]time.Time{"native newer": {lsDay(1), lsDay(2)}, "compat newer": {lsDay(2), lsDay(1)}} {
+		t.Run(name, func(t *testing.T) {
+			s := newTestStore(t)
+			native := listingOf(evEndpoint, keyA, order[0], "n")
+			native.Adapter = AdapterOllama
+			compat := listingOf(evEndpoint, keyA, order[1], "c")
+			compat.Members[0].Digest = ""
+			publish(t, s, native)
+			publish(t, s, compat)
+			ln, err := s.CurrentListing(t.Context(), evEndpoint, AdapterOllama, keyA)
+			if err != nil || ln == nil || len(ln.Members) != 1 || ln.Members[0] != (ListingMember{Model: "n", OwnedBy: "o-n", Digest: "d-n"}) {
+				t.Fatalf("ollama listing = %+v, %v", ln, err)
+			}
+			lc, err := s.CurrentListing(t.Context(), evEndpoint, AdapterOpenAICompat, keyA)
+			if err != nil || lc == nil || len(lc.Members) != 1 || lc.Members[0] != (ListingMember{Model: "c", OwnedBy: "o-c"}) {
+				t.Fatalf("compat listing = %+v, %v", lc, err)
+			}
+			if n := count(t, s, "listing_snapshots"); n != 2 {
+				t.Fatalf("snapshots = %d, want 2", n)
+			}
+		})
+	}
+}
+
+func TestPublishListings_RejectsEmptyAdapter(t *testing.T) {
+	s := newTestStore(t)
+	p := listingOf(evEndpoint, keyA, lsNow, "m")
+	p.Adapter = ""
+	if err := s.PublishListings(t.Context(), []ListingPublish{p}); err == nil || !strings.Contains(err.Error(), "adapter") {
+		t.Fatalf("error = %v, want an adapter refusal", err)
+	}
+	if n := count(t, s, "listing_snapshots"); n != 0 {
+		t.Fatalf("snapshots = %d, want none", n)
+	}
+	wantGeneration(t, s, 0)
 }

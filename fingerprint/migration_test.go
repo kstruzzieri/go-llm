@@ -446,7 +446,7 @@ func TestMigrationV3_Schema(t *testing.T) {
 			"model_name TEXT 1 0, model_digest TEXT 1 0, capability TEXT 1 0, evidence TEXT 1 0, kind TEXT 1 0, " +
 			"state TEXT 1 0, method TEXT 1 0, method_version INTEGER 1 0, detail TEXT 1 0, http_status INTEGER 0 0, " +
 			"observed_at INTEGER 1 0, fresh_until INTEGER 0 0, expires_at INTEGER 0 0",
-		"listing_snapshots": "id INTEGER 0 1, key_version INTEGER 1 0, endpoint TEXT 1 0, account TEXT 1 0, " +
+		"listing_snapshots": "id INTEGER 0 1, key_version INTEGER 1 0, endpoint TEXT 1 0, adapter TEXT 1 0, account TEXT 1 0, " +
 			"started_at INTEGER 1 0, committed_at INTEGER 1 0",
 		"listing_members": "snapshot_id INTEGER 1 1, model_name TEXT 1 2, owned_by TEXT 1 0, model_digest TEXT 1 0",
 		"named_models":    "key_version INTEGER 1 1, endpoint TEXT 1 2, model_name TEXT 1 3, added_at INTEGER 1 0",

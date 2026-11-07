@@ -1,6 +1,7 @@
 package configio
 
 import (
+	"cmp"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -60,9 +61,9 @@ func canonical(t *testing.T, base, format string) string {
 	return b.Endpoint
 }
 
-func listedNames(t *testing.T, s *fingerprint.SQLiteStore, endpoint, key string) []string {
+func listedNames(t *testing.T, s *fingerprint.SQLiteStore, endpoint, adapter, key string) []string {
 	t.Helper()
-	l, err := s.CurrentListing(t.Context(), endpoint, key)
+	l, err := s.CurrentListing(t.Context(), endpoint, adapter, key)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,7 +131,7 @@ func TestRefreshPublish_OllamaInsertSurvivesOffline(t *testing.T) {
 	srv.Close()
 
 	s2 := openStoreAt(t, path) // reopened, the stub is closed
-	l, err := s2.CurrentListing(t.Context(), endpoint, "")
+	l, err := s2.CurrentListing(t.Context(), endpoint, fingerprint.AdapterOllama, "")
 	if err != nil || l == nil || len(l.Members) != 1 || l.Members[0].Digest != "sha256:abc" {
 		t.Fatalf("listing = %+v, %v, want the member carrying the /api/tags digest", l, err)
 	}
@@ -171,7 +172,7 @@ func TestRefreshPublish_NilProjectorAllowedWithPublish(t *testing.T) {
 	if want := provider.CapChat | provider.CapGenerate | provider.CapStream | provider.CapToolCall; inv.Models[0].Caps != want || inv.Models[0].KnownMask != want {
 		t.Fatalf("caps %v known %v, want %v", inv.Models[0].Caps, inv.Models[0].KnownMask, want)
 	}
-	if got := listedNames(t, s, canonical(t, srv.URL, ""), ""); len(got) != 1 || got[0] != "m" {
+	if got := listedNames(t, s, canonical(t, srv.URL, ""), adapterOf(""), ""); len(got) != 1 || got[0] != "m" {
 		t.Fatalf("published members = %v", got)
 	}
 }
@@ -187,10 +188,10 @@ func TestRefreshPublish_CancelBeforeCommitPublishesNothing(t *testing.T) {
 	if _, err := RefreshInventory(ctx, lister, nil, WithPublish(s, cfg)); err == nil {
 		t.Fatal("want the context error")
 	}
-	if g, _ := s.Generation(t.Context()); g != 0 {
-		t.Fatalf("generation = %d, want 0", g)
+	if g, err := s.Generation(t.Context()); err != nil || g != 0 {
+		t.Fatalf("generation = %d, %v, want 0", g, err)
 	}
-	if got := listedNames(t, s, canonical(t, "http://a.test:1", "openai-compat"), ""); got != nil {
+	if got := listedNames(t, s, canonical(t, "http://a.test:1", "openai-compat"), adapterOf("openai-compat"), ""); got != nil {
 		t.Fatalf("published %v after cancellation", got)
 	}
 }
@@ -211,7 +212,7 @@ func TestRefreshPublish_FailedListingKeepsPreviousSnapshot(t *testing.T) {
 	if got := inv.Providers[0]; got.Reachable || got.Reason != configview.ListingRateLimited {
 		t.Fatalf("provider = %+v, want unreachable with rate_limited", got)
 	}
-	if got := listedNames(t, s, canonical(t, "http://a.test:1", "openai-compat"), ""); len(got) != 1 || got[0] != "m" {
+	if got := listedNames(t, s, canonical(t, "http://a.test:1", "openai-compat"), adapterOf("openai-compat"), ""); len(got) != 1 || got[0] != "m" {
 		t.Fatalf("snapshot = %v, want the previous one kept", got)
 	}
 }
@@ -266,10 +267,10 @@ func TestRefreshPublish_DirtyProviderDoesNotStopCleanOne(t *testing.T) {
 	if len(inv.Models) != 4 {
 		t.Errorf("listed %d models, want 4", len(inv.Models))
 	}
-	if got := listedNames(t, s, canonical(t, "http://clean.test:1", "openai-compat"), "sk-real"); len(got) != 1 || got[0] != "ok" {
+	if got := listedNames(t, s, canonical(t, "http://clean.test:1", "openai-compat"), adapterOf("openai-compat"), "sk-real"); len(got) != 1 || got[0] != "ok" {
 		t.Fatalf("clean listing = %v", got)
 	}
-	if got := listedNames(t, s, canonical(t, "http://dirty.test:1", "openai-compat"), ""); got != nil {
+	if got := listedNames(t, s, canonical(t, "http://dirty.test:1", "openai-compat"), adapterOf("openai-compat"), ""); got != nil {
 		t.Fatalf("dirty provider published %v", got)
 	}
 }
@@ -293,7 +294,7 @@ func TestRefreshPublish_5000DirtyMembersWithinBusyTimeout(t *testing.T) {
 	if d := time.Since(start); d > 5*time.Second {
 		t.Fatalf("took %v", d)
 	}
-	got := listedNames(t, s, canonical(t, "http://big.test:1", "openai-compat"), "")
+	got := listedNames(t, s, canonical(t, "http://big.test:1", "openai-compat"), adapterOf("openai-compat"), "")
 	if len(got) != 2000 {
 		t.Fatalf("published %d members, want the 2000 distinct clean names", len(got))
 	}
@@ -333,24 +334,32 @@ func TestListingFailureReason(t *testing.T) {
 		case <-time.After(3 * time.Second):
 		}
 	}
+	hangup := func(w http.ResponseWriter, r *http.Request) {
+		conn, _, err := w.(http.Hijacker).Hijack()
+		if err == nil {
+			_ = conn.Close()
+		}
+	}
 	cases := []struct {
 		name    string
 		handler http.HandlerFunc
 		want    string
+		timeout time.Duration // 0 = generous; only the slow case needs it short
 	}{
-		{"404", status(404, ""), "listing_unsupported"},
-		{"405", status(405, ""), "listing_unsupported"},
-		{"401", status(401, ""), "auth_failed"},
-		{"403", status(403, ""), "auth_failed"},
-		{"429", status(429, ""), "rate_limited"},
-		{"400", status(400, ""), "rejected"},
-		{"500", status(500, ""), "server_error"},
-		{"slow", slow, "timeout"},
-		{"bad json", status(200, "{not json"), "malformed_response"},
-		{"302", status(302, ""), "malformed_response"},
+		{"404", status(404, ""), "listing_unsupported", 0},
+		{"405", status(405, ""), "listing_unsupported", 0},
+		{"401", status(401, ""), "auth_failed", 0},
+		{"403", status(403, ""), "auth_failed", 0},
+		{"429", status(429, ""), "rate_limited", 0},
+		{"400", status(400, ""), "rejected", 0},
+		{"500", status(500, ""), "server_error", 0},
+		{"slow", slow, "timeout", 150 * time.Millisecond},
+		{"hangs up", hangup, "unreachable", 0},
+		{"bad json", status(200, "{not json"), "malformed_response", 0},
+		{"302", status(302, ""), "malformed_response", 0},
 	}
 	for _, c := range cases {
-		for format, lister := range httpProviders(t, c.handler, 150*time.Millisecond) {
+		for format, lister := range httpProviders(t, c.handler, cmp.Or(c.timeout, 10*time.Second)) {
 			t.Run(c.name+"/"+format, func(t *testing.T) {
 				inv, err := RefreshInventory(t.Context(), lister, newFakeProjector())
 				if err != nil {
@@ -453,7 +462,7 @@ func TestRefreshPublish_StartedAtIsBeforeTheListingCall(t *testing.T) {
 	if _, err := RefreshInventory(t.Context(), lister, nil, WithPublish(s, cfg)); err != nil {
 		t.Fatal(err)
 	}
-	l, err := s.CurrentListing(t.Context(), canonical(t, "http://a.test:1", "openai-compat"), "")
+	l, err := s.CurrentListing(t.Context(), canonical(t, "http://a.test:1", "openai-compat"), adapterOf("openai-compat"), "")
 	if err != nil || l == nil {
 		t.Fatal(l, err)
 	}
@@ -477,12 +486,12 @@ func TestRefreshPublish_OllamaFactExpiry(t *testing.T) {
 	seen := map[string]bool{}
 	for _, r := range rows {
 		seen[r.Capability] = true
-		switch {
-		case r.State == fingerprint.CapProbeYes:
+		switch r.State {
+		case fingerprint.CapProbeYes:
 			if !r.FreshUntil.Equal(r.ObservedAt.Add(30*24*time.Hour)) || !r.ExpiresAt.IsZero() {
 				t.Errorf("%s yes: fresh_until %v expires %v, want observed+30d and none", r.Capability, r.FreshUntil, r.ExpiresAt)
 			}
-		case r.State == fingerprint.CapProbeNo:
+		case fingerprint.CapProbeNo:
 			if !r.ExpiresAt.Equal(r.ObservedAt.Add(7*24*time.Hour)) || !r.FreshUntil.IsZero() {
 				t.Errorf("%s no: fresh_until %v expires %v, want expires observed+7d", r.Capability, r.FreshUntil, r.ExpiresAt)
 			}
@@ -505,7 +514,7 @@ func TestRefreshPublish_PublishesUnderTheCanonicalEndpoint(t *testing.T) {
 	if _, err := RefreshInventory(t.Context(), lister, nil, WithPublish(s, cfgFor(map[string][3]string{"a": {raw, "openai-compat", ""}}))); err != nil {
 		t.Fatal(err)
 	}
-	if got := listedNames(t, s, endpoint, ""); len(got) != 1 {
+	if got := listedNames(t, s, endpoint, fingerprint.AdapterOpenAICompat, ""); len(got) != 1 {
 		t.Fatalf("listing under the canonical key = %v", got)
 	}
 }
@@ -532,7 +541,7 @@ func TestRefreshPublish_OwnedByIsPublished(t *testing.T) {
 	if _, err := RefreshInventory(t.Context(), lister, nil, WithPublish(s, cfgFor(map[string][3]string{"p": {srv.URL, "openai-compat", ""}}))); err != nil {
 		t.Fatal(err)
 	}
-	l, err := s.CurrentListing(t.Context(), canonical(t, srv.URL, "openai-compat"), "")
+	l, err := s.CurrentListing(t.Context(), canonical(t, srv.URL, "openai-compat"), adapterOf("openai-compat"), "")
 	if err != nil || l == nil || len(l.Members) != 1 || l.Members[0].OwnedBy != "acme" {
 		t.Fatalf("listing = %+v, %v, want owned_by acme", l, err)
 	}
@@ -575,7 +584,7 @@ func TestRefreshPublish_NonListingBodyKeepsPreviousSnapshot(t *testing.T) {
 			if got := inv.Providers[0]; got.Reachable || got.Reason != "malformed_response" {
 				t.Errorf("%s %s: provider = %+v", format, bad, got)
 			}
-			if got := listedNames(t, s, endpoint, ""); len(got) != 1 {
+			if got := listedNames(t, s, endpoint, adapterOf(format), ""); len(got) != 1 {
 				t.Errorf("%s %s: snapshot = %v, want the previous one kept", format, bad, got)
 			}
 		}
@@ -590,7 +599,7 @@ func TestRefreshPublish_NonListingBodyKeepsPreviousSnapshot(t *testing.T) {
 			if err != nil || !inv.Providers[0].Reachable {
 				t.Fatalf("%s %s: %+v, %v, want a reachable empty listing", format, ok, inv.Providers, err)
 			}
-			if l, _ := s.CurrentListing(t.Context(), endpoint, ""); l == nil || len(l.Members) != 0 {
+			if l, _ := s.CurrentListing(t.Context(), endpoint, adapterOf(format), ""); l == nil || len(l.Members) != 0 {
 				t.Errorf("%s %s: listing = %+v, want recorded empty", format, ok, l)
 			}
 		}
@@ -607,4 +616,12 @@ func TestRefresh_NilListingWithoutPublishingIsUnchanged(t *testing.T) {
 	if err != nil || !inv.Providers[0].Reachable || inv.Providers[0].Reason != "" {
 		t.Fatalf("%+v, %v, want reachable as before", inv.Providers, err)
 	}
+}
+
+// adapterOf is the adapter a provider format publishes under.
+func adapterOf(format string) string {
+	if format == "" || format == "ollama" {
+		return fingerprint.AdapterOllama
+	}
+	return fingerprint.AdapterOpenAICompat
 }

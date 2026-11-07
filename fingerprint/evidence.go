@@ -113,7 +113,7 @@ func ExpiryFor(row EvidenceRow, proberTTL time.Duration) (freshUntil, expiresAt 
 	case CapProbeNo:
 		if row.Digest == "" {
 			expiresAt = row.ObservedAt.Add(CapProbeDigestlessNoTTL)
-		} else if proberTTL != 0 {
+		} else if proberTTL > 0 {
 			expiresAt = row.ObservedAt.Add(proberTTL)
 		}
 	case CapProbeInconclusive:

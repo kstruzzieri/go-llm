@@ -912,7 +912,7 @@ func (s *hookedEvidenceStore) Generation(ctx context.Context) (int64, error) {
 	return generation, err
 }
 
-func (s *hookedEvidenceStore) ReadSnapshot(ctx context.Context, endpoint string, apiKey *string, legacyProvider string, models []string, now time.Time) (fingerprint.EvidenceSnapshot, error) {
+func (s *hookedEvidenceStore) ReadSnapshot(ctx context.Context, endpoint, adapter string, apiKey *string, legacyProvider string, models []string, now time.Time) (fingerprint.EvidenceSnapshot, error) {
 	s.snapshots.Add(1)
 	if s.onRead != nil {
 		s.onRead()
@@ -926,7 +926,7 @@ func (s *hookedEvidenceStore) ReadSnapshot(ctx context.Context, endpoint string,
 	if legacyProvider != "" {
 		return fingerprint.EvidenceSnapshot{}, errors.New("the registry asked for legacy rows")
 	}
-	return s.EvidenceStore.ReadSnapshot(ctx, endpoint, apiKey, legacyProvider, models, now)
+	return s.EvidenceStore.ReadSnapshot(ctx, endpoint, adapter, apiKey, legacyProvider, models, now)
 }
 
 func TestRegistryFreshness_GenerationReadErrorKeepsCache(t *testing.T) {

@@ -90,10 +90,25 @@ func (s *SQLiteStore) Prune(ctx context.Context, now time.Time) error {
 	if len(ids) == 0 && len(accessIDs) == 0 {
 		return nil
 	}
+	// The decision was made outside the transaction, and SQLite may reuse a
+	// deleted row's id for a later insert. Matching observed_at as well keeps a
+	// row appended meanwhile under a reused id from being deleted in its place.
+	observed := make(map[int64]int64, len(stored)+len(access))
+	for _, r := range stored {
+		observed[r.ID] = r.ObservedAt.UnixMilli()
+	}
+	accessObserved := make(map[int64]int64, len(access))
+	for _, r := range access {
+		accessObserved[r.id] = r.observedAt
+	}
 	err = s.writeTx(ctx, func(tx *sql.Tx) error {
 		for table, doomed := range map[string][]int64{"capability_evidence": ids, "model_access": accessIDs} {
+			at := observed
+			if table == "model_access" {
+				at = accessObserved
+			}
 			for _, id := range doomed {
-				if _, err := tx.ExecContext(ctx, `DELETE FROM `+table+` WHERE id = ?`, id); err != nil {
+				if _, err := tx.ExecContext(ctx, `DELETE FROM `+table+` WHERE id = ? AND observed_at = ?`, id, at[id]); err != nil {
 					return err
 				}
 			}

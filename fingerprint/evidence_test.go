@@ -17,6 +17,7 @@ import (
 
 const (
 	evEndpoint = "http://127.0.0.1:8080"
+	evAdapter  = "openai-compat"
 	evModel    = "m"
 	evDigest   = "sha256:aaa"
 	evDigest2  = "sha256:bbb"
@@ -384,6 +385,7 @@ func TestExpiryFor(t *testing.T) {
 		{name: "no name-only ignores the prober", row: evRow(1, at, nameOnly, asNo), ttl: time.Hour, wantExp: at.Add(7 * day)},
 		{name: "no with digest, as the prober chose", row: evRow(1, at, asNo), ttl: 48 * time.Hour, wantExp: at.Add(48 * time.Hour)},
 		{name: "no with digest, prober chose none", row: evRow(1, at, asNo)},
+		{name: "no with digest, negative ttl is none", row: evRow(1, at, asNo), ttl: -time.Hour},
 		{name: "inconclusive with digest", row: evRow(1, at, asAttempt), wantExp: at.Add(day)},
 		{name: "inconclusive name-only", row: evRow(1, at, asAttempt, nameOnly), ttl: 7 * day, wantExp: at.Add(day)},
 		{name: "flag", row: evRow(1, at, asFlag), ttl: day},

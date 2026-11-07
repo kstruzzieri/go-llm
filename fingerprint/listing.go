@@ -27,6 +27,7 @@ type ListingMember struct{ Model, OwnedBy, Digest string }
 // APIKey; the key itself is never stored.
 type ListingPublish struct {
 	Endpoint  string
+	Adapter   string // required: one endpoint reached through two adapters keeps two listings
 	APIKey    string `json:"-"` // the raw key; String, GoString and JSON leave it out
 	StartedAt time.Time
 	Members   []ListingMember
@@ -35,8 +36,8 @@ type ListingPublish struct {
 
 // String describes the publish without its credential.
 func (p ListingPublish) String() string {
-	return fmt.Sprintf("ListingPublish{Endpoint:%q StartedAt:%s Members:%d Facts:%d APIKey:[redacted]}",
-		p.Endpoint, p.StartedAt.Format(time.RFC3339Nano), len(p.Members), len(p.Facts))
+	return fmt.Sprintf("ListingPublish{Endpoint:%q Adapter:%q StartedAt:%s Members:%d Facts:%d APIKey:[redacted]}",
+		p.Endpoint, p.Adapter, p.StartedAt.Format(time.RFC3339Nano), len(p.Members), len(p.Facts))
 }
 
 // GoString is String, so %#v does not print the credential either.
@@ -87,10 +88,10 @@ type EvidenceSnapshot struct {
 
 // EvidenceReader is the read side of the evidence store.
 type EvidenceReader interface {
-	ReadSnapshot(ctx context.Context, endpoint string, apiKey *string, legacyProvider string, models []string, now time.Time) (EvidenceSnapshot, error)
+	ReadSnapshot(ctx context.Context, endpoint, adapter string, apiKey *string, legacyProvider string, models []string, now time.Time) (EvidenceSnapshot, error)
 	EvidenceRows(ctx context.Context, endpoint, model string) ([]EvidenceRow, error)
 	GetCapProbe(ctx context.Context, backendID, modelName, capability string) (*CapProbe, error) // legacy history
-	CurrentListing(ctx context.Context, endpoint, apiKey string) (*ListingSnapshot, error)
+	CurrentListing(ctx context.Context, endpoint, adapter, apiKey string) (*ListingSnapshot, error)
 	NamedModels(ctx context.Context, endpoint string) ([]NamedModel, error)
 	LatestModelAccess(ctx context.Context, endpoint, apiKey, model string) (*ModelAccess, error)
 	Generation(ctx context.Context) (int64, error)
@@ -139,13 +140,13 @@ type queryer interface {
 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
 }
 
-// PublishListings stores each listing as its endpoint-and-account's current
+// PublishListings stores each listing as its endpoint-adapter-and-account's current
 // snapshot, with its facts, in one transaction. A snapshot replaces the current
 // one only when its StartedAt is newer; the older snapshot and its members go in
 // the same transaction (a stored snapshot dated beyond the clock-skew allowance
 // does not count as current, so a real publish replaces it), and a late older publish, facts included, inserts
 // nothing. A StartedAt beyond the skew allowance is refused. An empty Members is an empty listing, recorded as such. Members
-// repeating a model keep the first. A credential holding an unresolved ${...}
+// repeating a model keep the first. An empty Adapter is refused. A credential holding an unresolved ${...}
 // is refused.
 func (s *SQLiteStore) PublishListings(ctx context.Context, pubs []ListingPublish) error {
 	if len(pubs) == 0 {
@@ -153,8 +154,8 @@ func (s *SQLiteStore) PublishListings(ctx context.Context, pubs []ListingPublish
 	}
 	now := time.Now()
 	for _, p := range pubs {
-		if p.Endpoint == "" || p.StartedAt.IsZero() {
-			return errors.New("fingerprint: publish listings: listing needs an endpoint and a start time")
+		if p.Endpoint == "" || p.Adapter == "" || p.StartedAt.IsZero() {
+			return errors.New("fingerprint: publish listings: listing needs an endpoint, an adapter and a start time")
 		}
 		if p.StartedAt.After(now.Add(maxClockSkew)) {
 			return errors.New("fingerprint: publish listings: listing is dated in the future")
@@ -191,8 +192,8 @@ func (s *SQLiteStore) publishListing(ctx context.Context, tx *sql.Tx, p ListingP
 	var current sql.NullInt64
 	err := tx.QueryRowContext(ctx,
 		`SELECT MAX(started_at) FROM listing_snapshots
-		WHERE key_version = ? AND endpoint = ? AND account = ? AND started_at <= ?`,
-		EvidenceKeyVersion, p.Endpoint, account, now.Add(maxClockSkew).UnixMilli()).Scan(&current)
+		WHERE key_version = ? AND endpoint = ? AND adapter = ? AND account = ? AND started_at <= ?`,
+		EvidenceKeyVersion, p.Endpoint, p.Adapter, account, now.Add(maxClockSkew).UnixMilli()).Scan(&current)
 	if err != nil {
 		return fmt.Errorf("read current listing: %w", err)
 	}
@@ -201,16 +202,16 @@ func (s *SQLiteStore) publishListing(ctx context.Context, tx *sql.Tx, p ListingP
 	}
 	for _, q := range []string{
 		`DELETE FROM listing_members WHERE snapshot_id IN
-			(SELECT id FROM listing_snapshots WHERE key_version = ? AND endpoint = ? AND account = ?)`,
-		`DELETE FROM listing_snapshots WHERE key_version = ? AND endpoint = ? AND account = ?`,
+			(SELECT id FROM listing_snapshots WHERE key_version = ? AND endpoint = ? AND adapter = ? AND account = ?)`,
+		`DELETE FROM listing_snapshots WHERE key_version = ? AND endpoint = ? AND adapter = ? AND account = ?`,
 	} {
-		if _, err := tx.ExecContext(ctx, q, EvidenceKeyVersion, p.Endpoint, account); err != nil {
+		if _, err := tx.ExecContext(ctx, q, EvidenceKeyVersion, p.Endpoint, p.Adapter, account); err != nil {
 			return fmt.Errorf("replace listing: %w", err)
 		}
 	}
 	res, err := tx.ExecContext(ctx,
-		`INSERT INTO listing_snapshots (key_version, endpoint, account, started_at, committed_at) VALUES (?, ?, ?, ?, ?)`,
-		EvidenceKeyVersion, p.Endpoint, account, p.StartedAt.UnixMilli(), time.Now().UnixMilli())
+		`INSERT INTO listing_snapshots (key_version, endpoint, adapter, account, started_at, committed_at) VALUES (?, ?, ?, ?, ?, ?)`,
+		EvidenceKeyVersion, p.Endpoint, p.Adapter, account, p.StartedAt.UnixMilli(), time.Now().UnixMilli())
 	if err != nil {
 		return fmt.Errorf("insert listing: %w", err)
 	}
@@ -228,9 +229,9 @@ func (s *SQLiteStore) publishListing(ctx context.Context, tx *sql.Tx, p ListingP
 	return insertEvidence(ctx, tx, p.Facts)
 }
 
-// CurrentListing returns the endpoint's current listing for the credential, or
+// CurrentListing returns the endpoint's current listing through the adapter for the credential, or
 // nil when there is none for it, or the credential is unresolved.
-func (s *SQLiteStore) CurrentListing(ctx context.Context, endpoint, apiKey string) (*ListingSnapshot, error) {
+func (s *SQLiteStore) CurrentListing(ctx context.Context, endpoint, adapter, apiKey string) (*ListingSnapshot, error) {
 	if unresolved(apiKey) {
 		return nil, nil
 	}
@@ -240,7 +241,7 @@ func (s *SQLiteStore) CurrentListing(ctx context.Context, endpoint, apiKey strin
 		return nil, fmt.Errorf("fingerprint: current listing %q: begin: %w", endpoint, err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	l, err := readListing(ctx, tx, endpoint, s.account(endpoint, apiKey), time.Now())
+	l, err := readListing(ctx, tx, endpoint, adapter, s.account(endpoint, apiKey), time.Now())
 	if err != nil {
 		return nil, fmt.Errorf("fingerprint: current listing %q: %w", endpoint, err)
 	}
@@ -248,13 +249,13 @@ func (s *SQLiteStore) CurrentListing(ctx context.Context, endpoint, apiKey strin
 }
 
 // readListing reads the newest snapshot not dated beyond the skew allowance at now.
-func readListing(ctx context.Context, q queryer, endpoint, account string, now time.Time) (*ListingSnapshot, error) {
+func readListing(ctx context.Context, q queryer, endpoint, adapter, account string, now time.Time) (*ListingSnapshot, error) {
 	var id, startedAt, committedAt int64
 	err := q.QueryRowContext(ctx,
 		`SELECT id, started_at, committed_at FROM listing_snapshots
-		WHERE key_version = ? AND endpoint = ? AND account = ? AND started_at <= ?
+		WHERE key_version = ? AND endpoint = ? AND adapter = ? AND account = ? AND started_at <= ?
 		ORDER BY started_at DESC, id DESC LIMIT 1`,
-		EvidenceKeyVersion, endpoint, account, now.Add(maxClockSkew).UnixMilli()).Scan(&id, &startedAt, &committedAt)
+		EvidenceKeyVersion, endpoint, adapter, account, now.Add(maxClockSkew).UnixMilli()).Scan(&id, &startedAt, &committedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -439,7 +440,7 @@ func readAccess(ctx context.Context, q queryer, endpoint, account, model string,
 // listing and named models. legacyProvider names the old capability_probes
 // label; empty skips legacy history. Expiry is decided at now. The transaction
 // has ended when this returns, and everything returned is a copy.
-func (s *SQLiteStore) ReadSnapshot(ctx context.Context, endpoint string, apiKey *string, legacyProvider string, models []string, now time.Time) (snap EvidenceSnapshot, err error) {
+func (s *SQLiteStore) ReadSnapshot(ctx context.Context, endpoint, adapter string, apiKey *string, legacyProvider string, models []string, now time.Time) (snap EvidenceSnapshot, err error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return EvidenceSnapshot{}, fmt.Errorf("fingerprint: read snapshot: begin: %w", err)
@@ -463,7 +464,7 @@ func (s *SQLiteStore) ReadSnapshot(ctx context.Context, endpoint string, apiKey 
 		account, haveAccount = s.account(endpoint, *apiKey), true
 	}
 	if haveAccount {
-		if snap.Listing, err = readListing(ctx, tx, endpoint, account, now); err != nil {
+		if snap.Listing, err = readListing(ctx, tx, endpoint, adapter, account, now); err != nil {
 			return fail(err)
 		}
 	}

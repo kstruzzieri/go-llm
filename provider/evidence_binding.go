@@ -99,7 +99,7 @@ func (r *ModelRegistry) readEvidence(ctx context.Context, provider string, model
 		view.unbound = true
 		return view
 	}
-	snap, err := r.evidenceStore.ReadSnapshot(ctx, binding.Endpoint, nil, "", models, view.now)
+	snap, err := r.evidenceStore.ReadSnapshot(ctx, binding.Endpoint, binding.Adapter, nil, "", models, view.now)
 	if err != nil {
 		view.failed = true
 		return view

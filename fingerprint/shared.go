@@ -42,7 +42,8 @@ type SharedStore struct {
 // memory-only), and failing that to Status disabled; Warning says why. The
 // error is returned only for misuse: a nil ctx or getenv. Evidence rows past
 // retention are pruned once at open, and only when there are some, so a quiet
-// open writes nothing.
+// open writes nothing. An empty workspaceRoot means the current directory
+// (filepath.Abs("")).
 func OpenSharedStore(ctx context.Context, getenv func(string) string, workspaceRoot string) (*SharedStore, error) {
 	if ctx == nil || getenv == nil {
 		return nil, errors.New("fingerprint: open shared store: nil context or getenv")

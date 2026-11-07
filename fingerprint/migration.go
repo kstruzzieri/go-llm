@@ -124,6 +124,7 @@ func migrateV3(tx *sql.Tx) error {
 			id           INTEGER PRIMARY KEY,
 			key_version  INTEGER NOT NULL,
 			endpoint     TEXT NOT NULL,
+			adapter      TEXT NOT NULL,
 			account      TEXT NOT NULL,
 			started_at   INTEGER NOT NULL,
 			committed_at INTEGER NOT NULL

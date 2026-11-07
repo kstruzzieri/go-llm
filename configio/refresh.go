@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/url"
 	"sort"
 	"strings"
 	"time"
@@ -56,10 +57,17 @@ func listingReason(err error) string {
 			return configview.ListingMalformedResponse // not a listing: a redirect or other non-2xx
 		}
 	}
+	var urlErr *url.Error
 	var syntax *json.SyntaxError
 	var typed *json.UnmarshalTypeError
 	var netErr net.Error
 	switch {
+	case errors.As(err, &urlErr):
+		// A transport failure, even one wrapping io.EOF (a server that hangs up).
+		if urlErr.Timeout() {
+			return configview.ListingTimeout
+		}
+		return configview.ListingUnreachable
 	case errors.As(err, &syntax), errors.As(err, &typed),
 		errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF):
 		return configview.ListingMalformedResponse
@@ -96,7 +104,7 @@ func (o *refreshOptions) targetFor(name string) (publishTarget, bool) {
 
 // listingPublish builds the publish for one provider's hygiene-filtered listing.
 func listingPublish(t publishTarget, started time.Time, infos []provider.ModelInfo) fingerprint.ListingPublish {
-	pub := fingerprint.ListingPublish{Endpoint: t.binding.Endpoint, APIKey: t.apiKey, StartedAt: started}
+	pub := fingerprint.ListingPublish{Endpoint: t.binding.Endpoint, Adapter: t.binding.Adapter, APIKey: t.apiKey, StartedAt: started}
 	for _, info := range infos {
 		pub.Members = append(pub.Members, fingerprint.ListingMember{Model: info.Name, OwnedBy: info.OwnedBy, Digest: info.Digest})
 		if t.binding.Adapter != fingerprint.AdapterOllama {
