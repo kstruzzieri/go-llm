@@ -134,9 +134,10 @@ func TestMigrationConcurrentFreshStores(t *testing.T) {
 		}
 	}
 	for _, db := range []*sql.DB{a, b} {
-		assertMigrationVersions(t, db, "1,2")
+		assertMigrationVersions(t, db, "1,2,3")
 	}
-	assertMigrationSQL(t, a, "SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name IN ('fingerprint_profiles','fingerprint_failures','capability_probes')", "3")
+	assertMigrationSQL(t, a, "SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name IN ('fingerprint_profiles','fingerprint_failures','capability_probes','capability_evidence','store_meta')", "5")
+	assertMigrationSQL(t, a, "SELECT COUNT(*) FROM store_meta", "1")
 }
 
 func TestMigrationClaimBeforeDDLAndStaleSelection(t *testing.T) {
@@ -231,7 +232,7 @@ func TestMigrationRollbackAndRetry(t *testing.T) {
 	if err := runMigrationsWith(t.Context(), db, list); !errors.Is(err, boom) {
 		t.Fatalf("failed step = %v, want sentinel", err)
 	}
-	assertMigrationVersions(t, db, "1,2")
+	assertMigrationVersions(t, db, "1,2,3")
 	assertMigrationSQL(t, db, "SELECT COUNT(*) FROM sqlite_schema WHERE name='tentative'", "0")
 	assertMigrationSQL(t, db, "SELECT last_error FROM fingerprint_failures WHERE backend_id='p'", "seed")
 	assertMigrationSQL(t, db, "SELECT COUNT(*) FROM sqlite_schema WHERE name='custom_legacy_index'", "1")
@@ -242,7 +243,7 @@ func TestMigrationRollbackAndRetry(t *testing.T) {
 	if err := runMigrationsWith(t.Context(), db, list); err != nil {
 		t.Fatal(err)
 	}
-	assertMigrationVersions(t, db, "1,2,7")
+	assertMigrationVersions(t, db, "1,2,3,7")
 	assertMigrationSQL(t, db, "SELECT value FROM tentative", "retried")
 	assertMigrationSQL(t, db, "SELECT last_error FROM fingerprint_failures WHERE backend_id='p'", "seed")
 }
@@ -311,10 +312,10 @@ func TestMigrationCurrentSchemaReadOnly(t *testing.T) {
 	if err := newMigrationStore(t.Context(), ro); err != nil {
 		t.Fatalf("current read-only schema: %v", err)
 	}
-	assertMigrationVersions(t, ro, "1,2")
+	assertMigrationVersions(t, ro, "1,2,3")
 	pending := migration{version: 7, description: "pending", fn: func(tx *sql.Tx) error { _, err := tx.Exec("CREATE TABLE forbidden (id INTEGER)"); return err }}
 	assertMigrationSQLiteError(t, runMigrationsWith(t.Context(), ro, []migration{pending}), 8)
-	assertMigrationVersions(t, ro, "1,2")
+	assertMigrationVersions(t, ro, "1,2,3")
 	assertMigrationSQL(t, ro, "SELECT COUNT(*) FROM sqlite_schema WHERE name='forbidden'", "0")
 }
 
@@ -379,5 +380,121 @@ func TestMigrationMalformedVersionTable(t *testing.T) {
 			assertMigrationSQL(t, db, "SELECT group_concat(version) FROM fingerprint_schema_version", "broken")
 			assertMigrationSQL(t, db, "SELECT COUNT(*) FROM sqlite_schema WHERE name <> 'fingerprint_schema_version' AND name NOT LIKE 'sqlite_%'", "0")
 		})
+	}
+}
+
+func TestMigrationV3_OlderBinaryCoexists(t *testing.T) {
+	ctx := t.Context()
+	db := openMigrationDB(t, filepath.Join(t.TempDir(), "coexist.db"))
+
+	// An older binary made this file and saved a verdict.
+	older := migrations[:2]
+	if err := runMigrationsWith(ctx, db, older); err != nil {
+		t.Fatal(err)
+	}
+	assertMigrationVersions(t, db, "1,2")
+	oldStore := &SQLiteStore{db: db}
+	saved := CapProbe{
+		BackendID: "local", ModelName: "m", Capability: "tool_call", State: CapProbeYes,
+		ModelDigest: "d", ProbeVersion: CurrentToolProbeVersion, TestedAt: time.UnixMilli(1_000),
+	}
+	if err := oldStore.SaveCapProbe(ctx, saved); err != nil {
+		t.Fatal(err)
+	}
+
+	// A new binary upgrades the file in place, leaving the old table alone.
+	if err := newMigrationStore(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	assertMigrationVersions(t, db, "1,2,3")
+
+	// The older binary opens the newer schema, skips what it does not know, and
+	// still reads its row and writes a newer one.
+	if err := runMigrationsWith(ctx, db, older); err != nil {
+		t.Fatalf("older binary on the new schema: %v", err)
+	}
+	assertMigrationVersions(t, db, "1,2,3")
+	got, err := oldStore.GetCapProbe(ctx, "local", "m", "tool_call")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State != CapProbeYes || got.ModelDigest != "d" || !got.TestedAt.Equal(saved.TestedAt) {
+		t.Fatalf("older row after the upgrade = %+v", got)
+	}
+	saved.State, saved.TestedAt = CapProbeNo, time.UnixMilli(2_000)
+	if err := oldStore.SaveCapProbe(ctx, saved); err != nil {
+		t.Fatal(err)
+	}
+	got, err = oldStore.GetCapProbe(ctx, "local", "m", "tool_call")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State != CapProbeNo || !got.TestedAt.Equal(saved.TestedAt) {
+		t.Fatalf("older write on the new schema = %+v", got)
+	}
+}
+
+// TestMigrationV3_Schema pins each column's type and constraints from the design.
+func TestMigrationV3_Schema(t *testing.T) {
+	db := openMigrationDB(t, filepath.Join(t.TempDir(), "schema.db"))
+	if err := newMigrationStore(t.Context(), db); err != nil {
+		t.Fatal(err)
+	}
+	// Each column: name, type, NOT NULL, position in the primary key.
+	want := map[string]string{
+		"capability_evidence": "id INTEGER 0 1, key_version INTEGER 1 0, endpoint TEXT 1 0, adapter TEXT 1 0, " +
+			"model_name TEXT 1 0, model_digest TEXT 1 0, capability TEXT 1 0, evidence TEXT 1 0, kind TEXT 1 0, " +
+			"state TEXT 1 0, method TEXT 1 0, method_version INTEGER 1 0, detail TEXT 1 0, http_status INTEGER 0 0, " +
+			"observed_at INTEGER 1 0, fresh_until INTEGER 0 0, expires_at INTEGER 0 0",
+		"listing_snapshots": "id INTEGER 0 1, key_version INTEGER 1 0, endpoint TEXT 1 0, account TEXT 1 0, " +
+			"started_at INTEGER 1 0, committed_at INTEGER 1 0",
+		"listing_members": "snapshot_id INTEGER 1 1, model_name TEXT 1 2, owned_by TEXT 1 0, model_digest TEXT 1 0",
+		"named_models":    "key_version INTEGER 1 1, endpoint TEXT 1 2, model_name TEXT 1 3, added_at INTEGER 1 0",
+		"model_access": "id INTEGER 0 1, key_version INTEGER 1 0, endpoint TEXT 1 0, account TEXT 1 0, " +
+			"model_name TEXT 1 0, state TEXT 1 0, http_status INTEGER 0 0, observed_at INTEGER 1 0, expires_at INTEGER 0 0",
+		"store_meta": "id INTEGER 0 1, generation INTEGER 1 0, account_secret BLOB 1 0",
+	}
+	for table, columns := range want {
+		assertMigrationSQL(t, db, "SELECT group_concat(name || ' ' || type || ' ' || \"notnull\" || ' ' || pk, ', ') FROM pragma_table_info('"+table+"')", columns)
+	}
+	assertMigrationSQL(t, db, "SELECT group_concat(name) FROM pragma_index_info('idx_capability_evidence_lookup')",
+		"key_version,endpoint,adapter,model_name,capability,observed_at")
+}
+
+func TestMigrationV3_SeedsOneMetaRow(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "seed.db")
+	db := openMigrationDB(t, path)
+	if err := newMigrationStore(t.Context(), db); err != nil {
+		t.Fatal(err)
+	}
+	assertMigrationSQL(t, db, "SELECT COUNT(*) || ' ' || MIN(generation) || ' ' || MIN(length(account_secret)) || ' ' || MIN(typeof(account_secret)) FROM store_meta", "1 0 32 blob")
+	var secret string
+	if err := db.QueryRowContext(t.Context(), "SELECT hex(account_secret) FROM store_meta").Scan(&secret); err != nil {
+		t.Fatal(err)
+	}
+	if secret == strings.Repeat("00", 32) {
+		t.Fatal("account secret is all zeroes")
+	}
+
+	// A second row is refused, and a second opener does not re-seed.
+	if _, err := db.ExecContext(t.Context(), "INSERT INTO store_meta (id, generation, account_secret) VALUES (2, 0, x'00')"); err == nil {
+		t.Fatal("store_meta accepted a second row")
+	}
+	if err := newMigrationStore(t.Context(), openMigrationDB(t, path)); err != nil {
+		t.Fatal(err)
+	}
+	assertMigrationSQL(t, db, "SELECT hex(account_secret) FROM store_meta", secret)
+
+	// Another file gets its own secret.
+	other := openMigrationDB(t, filepath.Join(t.TempDir(), "other.db"))
+	if err := newMigrationStore(t.Context(), other); err != nil {
+		t.Fatal(err)
+	}
+	var otherSecret string
+	if err := other.QueryRowContext(t.Context(), "SELECT hex(account_secret) FROM store_meta").Scan(&otherSecret); err != nil {
+		t.Fatal(err)
+	}
+	if otherSecret == secret {
+		t.Fatal("two files share one account secret")
 	}
 }

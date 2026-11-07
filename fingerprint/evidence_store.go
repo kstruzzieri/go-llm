@@ -1,0 +1,176 @@
+package fingerprint
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"time"
+)
+
+const evidenceColumns = `id, key_version, endpoint, adapter, model_name, model_digest,
+	capability, evidence, kind, state, method, method_version, detail, http_status,
+	observed_at, fresh_until, expires_at`
+
+// AppendEvidence appends rows in one transaction with one generation bump. Row
+// IDs are assigned by the store; any set on the rows are ignored. Appending
+// nothing writes nothing.
+func (s *SQLiteStore) AppendEvidence(ctx context.Context, rows ...EvidenceRow) error {
+	if len(rows) == 0 {
+		return nil
+	}
+	err := s.writeTx(ctx, func(tx *sql.Tx) error {
+		return insertEvidence(ctx, tx, rows)
+	})
+	if err != nil {
+		return fmt.Errorf("fingerprint: append evidence: %w", err)
+	}
+	return nil
+}
+
+// EvidenceRows returns a model's rows at an endpoint for the current key
+// version, through every adapter, in insertion order. Rows of unknown shape are
+// included: ReadCapabilities decides what counts.
+func (s *SQLiteStore) EvidenceRows(ctx context.Context, endpoint, model string) ([]EvidenceRow, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT `+evidenceColumns+` FROM capability_evidence
+		WHERE key_version = ? AND endpoint = ? AND model_name = ?
+		ORDER BY id`,
+		EvidenceKeyVersion, endpoint, model)
+	if err != nil {
+		return nil, fmt.Errorf("fingerprint: evidence rows %q/%q: %w", endpoint, model, err)
+	}
+	out, err := scanEvidence(rows)
+	if err != nil {
+		return nil, fmt.Errorf("fingerprint: evidence rows %q/%q: %w", endpoint, model, err)
+	}
+	return out, nil
+}
+
+// Generation returns the store's write generation, which moves with every write
+// transaction. A consumer that cached a decision re-reads when it has moved.
+func (s *SQLiteStore) Generation(ctx context.Context) (int64, error) {
+	var generation int64
+	if err := s.db.QueryRowContext(ctx, `SELECT generation FROM store_meta`).Scan(&generation); err != nil {
+		return 0, fmt.Errorf("fingerprint: read generation: %w", err)
+	}
+	return generation, nil
+}
+
+// Prune deletes evidence no reader can select at now or later, keeping 90 days
+// of history and every older row that could still win. It decides from a read
+// outside the transaction, so a prune with nothing to do opens no write
+// transaction and bumps no generation. The decision stays safe against a
+// concurrent writer, because a row added meanwhile cannot make a deleted row
+// selectable, and a concurrent pruner, because dominance is transitive.
+//
+// ponytail: scans the whole log at every call, which is thousands of rows at
+// most; restrict to partitions holding an old row if that ever shows up at open.
+func (s *SQLiteStore) Prune(ctx context.Context, now time.Time) error {
+	rows, err := s.db.QueryContext(ctx, `SELECT `+evidenceColumns+` FROM capability_evidence`)
+	if err != nil {
+		return fmt.Errorf("fingerprint: prune: read evidence: %w", err)
+	}
+	stored, err := scanEvidence(rows)
+	if err != nil {
+		return fmt.Errorf("fingerprint: prune: read evidence: %w", err)
+	}
+	ids := prunableEvidenceIDs(stored, now)
+	if len(ids) == 0 {
+		return nil
+	}
+	err = s.writeTx(ctx, func(tx *sql.Tx) error {
+		for _, id := range ids {
+			if _, err := tx.ExecContext(ctx, `DELETE FROM capability_evidence WHERE id = ?`, id); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("fingerprint: prune: %w", err)
+	}
+	return nil
+}
+
+// writeTx runs fn in a transaction whose first statement bumps the generation.
+// Writing first makes SQLite wait for another writer within the busy timeout,
+// where a transaction that read first would fail a read-lock upgrade.
+func (s *SQLiteStore) writeTx(ctx context.Context, fn func(*sql.Tx) error) (err error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin: %w", err)
+	}
+	defer func() {
+		if rbErr := tx.Rollback(); rbErr != nil && !errors.Is(rbErr, sql.ErrTxDone) {
+			err = errors.Join(err, fmt.Errorf("rollback: %w", rbErr))
+		}
+	}()
+	if _, err := tx.ExecContext(ctx, `UPDATE store_meta SET generation = generation + 1`); err != nil {
+		return fmt.Errorf("bump generation: %w", err)
+	}
+	if err := fn(tx); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit: %w", err)
+	}
+	return nil
+}
+
+func insertEvidence(ctx context.Context, tx *sql.Tx, rows []EvidenceRow) error {
+	for _, r := range rows {
+		var httpStatus any // nil => NULL
+		if r.HTTPStatus != 0 {
+			httpStatus = r.HTTPStatus
+		}
+		_, err := tx.ExecContext(ctx,
+			`INSERT INTO capability_evidence
+				(key_version, endpoint, adapter, model_name, model_digest,
+				 capability, evidence, kind, state, method, method_version, detail, http_status,
+				 observed_at, fresh_until, expires_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			r.KeyVersion, r.Endpoint, r.Adapter, r.Model, r.Digest,
+			r.Capability, string(r.Source), string(r.Kind), string(r.State), r.Method, r.MethodVersion, r.Detail, httpStatus,
+			r.ObservedAt.UnixMilli(), millisOrNull(r.FreshUntil), millisOrNull(r.ExpiresAt))
+		if err != nil {
+			return fmt.Errorf("insert %q/%q/%q: %w", r.Endpoint, r.Model, r.Capability, err)
+		}
+	}
+	return nil
+}
+
+// scanEvidence drains and closes rows selected with evidenceColumns.
+func scanEvidence(rows *sql.Rows) (out []EvidenceRow, err error) {
+	defer func() { err = errors.Join(err, rows.Close()) }()
+	for rows.Next() {
+		var r EvidenceRow
+		var observedAt int64
+		var httpStatus, freshUntil, expiresAt sql.NullInt64
+		if err := rows.Scan(&r.ID, &r.KeyVersion, &r.Endpoint, &r.Adapter, &r.Model, &r.Digest,
+			&r.Capability, &r.Source, &r.Kind, &r.State, &r.Method, &r.MethodVersion, &r.Detail, &httpStatus,
+			&observedAt, &freshUntil, &expiresAt); err != nil {
+			return nil, err
+		}
+		r.HTTPStatus = int(httpStatus.Int64)
+		r.ObservedAt = time.UnixMilli(observedAt)
+		r.FreshUntil = timeOrZero(freshUntil)
+		r.ExpiresAt = timeOrZero(expiresAt)
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+func millisOrNull(t time.Time) any {
+	if t.IsZero() {
+		return nil
+	}
+	return t.UnixMilli()
+}
+
+func timeOrZero(ms sql.NullInt64) time.Time {
+	if !ms.Valid {
+		return time.Time{}
+	}
+	return time.UnixMilli(ms.Int64)
+}
