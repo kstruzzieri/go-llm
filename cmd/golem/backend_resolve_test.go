@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/kstruzzieri/go-llm/config"
@@ -454,16 +455,18 @@ func TestResolveBackendKeyedGuardRefusalSkips(t *testing.T) {
 }
 
 // Real guard + a configured URL that redirects to a second loopback port:
-// the key must not follow the redirect.
+// the key must not follow the redirect. The configured server must see the
+// one probe, so the test cannot pass merely because the guard refused it.
 func TestResolveBackendKeyedRealGuardDoesNotFollowRedirect(t *testing.T) {
 	const canary = "CANARY-776-c0ffee123456"
-	var targetHits int
+	var targetHits, frontHits atomic.Int64
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		targetHits++
+		targetHits.Add(1)
 		_, _ = fmt.Fprint(w, `{"data":[{"id":"gemma4:31b"}]}`)
 	}))
 	defer target.Close()
 	front := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		frontHits.Add(1)
 		http.Redirect(w, r, target.URL+r.URL.Path, http.StatusFound)
 	}))
 	defer front.Close()
@@ -479,8 +482,11 @@ func TestResolveBackendKeyedRealGuardDoesNotFollowRedirect(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolveBackend: %v", err)
 	}
-	if targetHits != 0 {
-		t.Fatalf("redirect target received %d request(s); the key followed a redirect", targetHits)
+	if got := targetHits.Load(); got != 0 {
+		t.Fatalf("redirect target received %d request(s); the key followed a redirect", got)
+	}
+	if got := frontHits.Load(); got != 1 {
+		t.Fatalf("configured server received %d request(s), want 1", got)
 	}
 	if len(res.warns) != 1 || !strings.Contains(res.warns[0], "discovery skipped") {
 		t.Fatalf("warns = %q", res.warns)

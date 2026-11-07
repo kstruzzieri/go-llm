@@ -1153,7 +1153,10 @@ func TestDefaultJudgeRefusesWorkingDirKey(t *testing.T) {
 	t.Setenv("CANARY_VAR", "CANARY-776-bench")
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	_ = os.Unsetenv("GO_LLM_CONFIG")
+	t.Setenv("GO_LLM_CONFIG", "") // registers the restore; unset below
+	if err := os.Unsetenv("GO_LLM_CONFIG"); err != nil {
+		t.Fatal(err)
+	}
 	dir := t.TempDir()
 	t.Chdir(dir)
 

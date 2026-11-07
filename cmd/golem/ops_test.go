@@ -371,7 +371,10 @@ func TestOpsLoadErrorRefusalRemedy(t *testing.T) {
 		t.Setenv("CANARY_VAR", "CANARY-776-ops")
 		t.Setenv("HOME", t.TempDir())
 		t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-		_ = os.Unsetenv("GO_LLM_CONFIG")
+		t.Setenv("GO_LLM_CONFIG", "") // registers the restore; unset below
+		if err := os.Unsetenv("GO_LLM_CONFIG"); err != nil {
+			t.Fatal(err)
+		}
 		dir := t.TempDir()
 		body := `{"providers":{"openai":{"base_url":"http://127.0.0.1:1","api_format":"openai-compat","api_key":"${CANARY_VAR}"}},"models":{},"defaults":{}}`
 		if err := os.WriteFile(filepath.Join(dir, "models.json"), []byte(body), 0o600); err != nil {

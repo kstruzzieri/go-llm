@@ -1,9 +1,7 @@
 package main
 
 import (
-	"errors"
 	"fmt"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -17,26 +15,28 @@ import (
 
 const refusalCanary = "CANARY-776-golem-9f3a1c"
 
-// refusalWorkingDir writes a ./models.json whose provider points at a
-// counting listener and carries a ${CANARY_VAR} key, isolates discovery, and
-// makes it the working directory. The variable is set, so a refusal (not an
-// absent variable) is what keeps the request count at zero.
-func refusalWorkingDir(t *testing.T, host string) *atomic.Int64 {
+// refusalLegs are the provider destinations each refusal test covers: a
+// counting loopback listener, and a remote address with no listener.
+var refusalLegs = []string{"loopback", "remote"}
+
+// refusalWorkingDir writes a ./models.json whose provider carries a
+// ${CANARY_VAR} key, isolates discovery, and makes it the working directory.
+// The loopback leg points the provider at a counting listener; the remote
+// leg at an unroutable documentation address (RFC 5737) with nothing bound,
+// so no test listens on a LAN interface. The variable is set, so a refusal
+// (not an absent variable) is what keeps the request count at zero.
+func refusalWorkingDir(t *testing.T, leg string) *atomic.Int64 {
 	t.Helper()
 	var hits atomic.Int64
-	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		hits.Add(1)
-		http.NotFound(w, nil)
-	}))
-	if host != "127.0.0.1" {
-		l, err := net.Listen("tcp", host+":0")
-		if err != nil {
-			t.Skipf("cannot listen on %s: %v", host, err)
-		}
-		srv.Listener = l
+	baseURL := "http://192.0.2.1:9"
+	if leg == "loopback" {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			hits.Add(1)
+			http.NotFound(w, nil)
+		}))
+		t.Cleanup(srv.Close)
+		baseURL = srv.URL
 	}
-	srv.Start()
-	t.Cleanup(srv.Close)
 
 	t.Setenv("CANARY_VAR", refusalCanary)
 	home := t.TempDir()
@@ -54,7 +54,7 @@ func refusalWorkingDir(t *testing.T, host string) *atomic.Int64 {
   "models": {"agent": {"name": "agent-model", "provider": "openai", "type": "dense", "context_window": 32768,
     "capabilities": ["chat", "generate", "stream", "tool_call"]}},
   "defaults": {"agent": "agent"}
-}`, srv.URL)
+}`, baseURL)
 	if err := os.WriteFile(filepath.Join(dir, "models.json"), []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -62,31 +62,10 @@ func refusalWorkingDir(t *testing.T, host string) *atomic.Int64 {
 	return &hits
 }
 
-// nonLoopbackHost returns a non-loopback address of this machine, or "".
-func nonLoopbackHost() string {
-	addrs, _ := net.InterfaceAddrs()
-	for _, a := range addrs {
-		if ipn, ok := a.(*net.IPNet); ok && ipn.IP.To4() != nil && !ipn.IP.IsLoopback() {
-			return ipn.IP.String()
-		}
-	}
-	return ""
-}
-
-func refusalHosts(t *testing.T) []string {
-	hosts := []string{"127.0.0.1"}
-	if h := nonLoopbackHost(); h != "" {
-		hosts = append(hosts, h)
-	} else {
-		t.Log("non-loopback leg skipped: no non-loopback IPv4 address on this machine")
-	}
-	return hosts
-}
-
 func TestGolemPromptModeRefusesWorkingDirKey(t *testing.T) {
-	for _, host := range refusalHosts(t) {
-		t.Run(host, func(t *testing.T) {
-			hits := refusalWorkingDir(t, host)
+	for _, leg := range refusalLegs {
+		t.Run(leg, func(t *testing.T) {
+			hits := refusalWorkingDir(t, leg)
 			stdin, stdout, stderr := runTestFiles(t)
 			err := run([]string{"-root", t.TempDir(), "-p", "say done", "-no-probe", "-no-cap-probe",
 				"-no-rag", "-no-project-context", "-no-session", "-no-memory"}, stdin, stdout, stderr)
@@ -117,9 +96,9 @@ func TestGolemPromptModeRefusesWorkingDirKey(t *testing.T) {
 }
 
 func TestGolemModelsInventoryRefusesWorkingDirKey(t *testing.T) {
-	for _, host := range refusalHosts(t) {
-		t.Run(host, func(t *testing.T) {
-			hits := refusalWorkingDir(t, host)
+	for _, leg := range refusalLegs {
+		t.Run(leg, func(t *testing.T) {
+			hits := refusalWorkingDir(t, leg)
 			doc, err := loadDocumentFor("")
 			if err == nil || doc != nil {
 				t.Fatalf("loadDocumentFor = %v, %v; want a refusal", doc, err)
@@ -140,9 +119,15 @@ func TestGolemModelsInventoryRefusesWorkingDirKey(t *testing.T) {
 	}
 }
 
+// Another config diagnostic, not just any error, so the code comparison is
+// what keeps it unwrapped.
 func TestWithKeyRefusalRemedyPassesOtherErrorsThrough(t *testing.T) {
-	other := errors.New("boom")
-	if got := withKeyRefusalRemedy(other); got != other {
-		t.Errorf("got %v, want the same error", got)
+	_, other := config.ParseDocument([]byte(`{"providers":{"openai":{"base_url":"http://127.0.0.1:1","api_format":"openai-compat","api_key":"abc${"}},"models":{},"defaults":{}}`),
+		config.Origin{Source: config.OriginExplicit}, config.DocumentOptions{})
+	if d, ok := config.DiagnosticOf(other); !ok || d.Code != config.CodeKeyReferenceMalformed {
+		t.Fatalf("fixture: DiagnosticOf = %+v, %v; want key_reference_malformed", d, ok)
+	}
+	if got := withKeyRefusalRemedy(other); got != other || got.Error() != other.Error() {
+		t.Errorf("got %v, want the same error unchanged", got)
 	}
 }
