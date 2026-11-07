@@ -299,18 +299,18 @@ func (b bulkAdmitTool) Spec() ToolSpec {
 }
 func (bulkAdmitTool) Effect() Effect   { return Effect{Class: Read} }
 func (b bulkAdmitTool) Origin() Origin { return b.origin }
-func (bulkAdmitTool) Invoke(context.Context, json.RawMessage) (ToolResult, error) {
-	return ToolResult{Content: strings.Repeat("X", 400)}, nil
+func (b bulkAdmitTool) Invoke(context.Context, json.RawMessage) (ToolResult, error) {
+	return ToolResult{Content: strings.Repeat(b.name+" ", 100)}, nil
 }
 
 func TestAdmitCompactionEvictingForeignObservation(t *testing.T) {
-	mc := &scriptedCaller{responses: []ModelResult{
+	mc := &capturingScriptedCaller{scriptedCaller: scriptedCaller{responses: []ModelResult{
 		{Response: provider.ChatResponse{ToolCalls: []provider.ToolCall{tc("far", `{}`)}}},
 		{Response: provider.ChatResponse{ToolCalls: []provider.ToolCall{tc("near", `{}`)}}},
 		{Response: provider.ChatResponse{Content: "done", Done: true}},
-	}}
+	}}}
 	res, err := runAdmit(t, mc, Request{
-		Budget: Budget{InputCeiling: 80 + len([]rune(ToolTrustContract))},
+		Budget: Budget{InputCeiling: 700 + len([]rune(ToolTrustContract))},
 		Tools:  []Tool{bulkAdmitTool{"far", OriginForeign}, bulkAdmitTool{"near", OriginWorkspace}},
 	}, nil)
 	if err != nil {
@@ -322,6 +322,22 @@ func TestAdmitCompactionEvictingForeignObservation(t *testing.T) {
 	}
 	if !saw {
 		t.Fatalf("no compaction event: %+v", res.Events)
+	}
+	// The premise: the foreign result reached the model, then was evicted
+	// before the final call, so the record is the only trace left of it.
+	sent := func(i int) string {
+		b, err := json.Marshal(mc.reqs[i])
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+	const farText = "far far far"
+	if len(mc.reqs) != 3 || !strings.Contains(sent(1), farText) {
+		t.Fatalf("foreign result never reached the model (%d requests)", len(mc.reqs))
+	}
+	if strings.Contains(sent(2), farText) {
+		t.Fatal("foreign result was not evicted before the final call")
 	}
 	if want := (Exposure{Recorded: true, Foreign: true, First: "tool:far"}); res.Exposure != want {
 		t.Fatalf("Exposure = %+v, want %+v", res.Exposure, want)
