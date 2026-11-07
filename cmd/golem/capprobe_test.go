@@ -4,28 +4,12 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/kstruzzieri/go-llm/fingerprint"
 )
-
-func TestCapProbeStorePath_UsesDataDir(t *testing.T) {
-	base := t.TempDir()
-	getenv := func(k string) string {
-		if k == "XDG_DATA_HOME" {
-			return base
-		}
-		return ""
-	}
-	p, err := capProbeStorePath(getenv)
-	if err != nil {
-		t.Fatalf("capProbeStorePath: %v", err)
-	}
-	if want := filepath.Join(base, "golem", "fingerprints.db"); p != want {
-		t.Errorf("path = %q, want %q", p, want)
-	}
-}
 
 func TestOpenCapProbeStore_CreatesHardenedFile(t *testing.T) {
 	base := t.TempDir()
@@ -37,10 +21,10 @@ func TestOpenCapProbeStore_CreatesHardenedFile(t *testing.T) {
 		return ""
 	}
 	h, warn := openCapProbeStore(context.Background(), getenv, root)
-	if h == nil || h.store == nil || h.db == nil {
+	if h == nil || h.Probes() == nil {
 		t.Fatalf("want non-nil handle, got %#v (warn=%q)", h, warn)
 	}
-	defer func() { _ = h.db.Close() }()
+	defer func() { _ = h.Close() }()
 	if warn != "" {
 		t.Errorf("unexpected warn: %q", warn)
 	}
@@ -94,10 +78,10 @@ func TestOpenCapProbeStore_SaveCapProbeSecuresSidecars(t *testing.T) {
 	}
 	ctx := context.Background()
 	h, warn := openCapProbeStore(ctx, getenv, root)
-	if h == nil || h.store == nil {
+	if h == nil || h.Probes() == nil {
 		t.Fatalf("want non-nil handle, got %#v (warn=%q)", h, warn)
 	}
-	defer func() { _ = h.db.Close() }()
+	defer func() { _ = h.Close() }()
 
 	dbPath := filepath.Join(base, "golem", "fingerprints.db")
 	// Loosen the sidecars before the write to prove the decorator re-secures
@@ -116,7 +100,7 @@ func TestOpenCapProbeStore_SaveCapProbeSecuresSidecars(t *testing.T) {
 		ProbeVersion: fingerprint.CurrentToolProbeVersion,
 		TestedAt:     time.Now(),
 	}
-	if err := h.store.SaveCapProbe(ctx, row); err != nil {
+	if err := h.Probes().SaveCapProbe(ctx, row); err != nil {
 		t.Fatalf("SaveCapProbe: %v", err)
 	}
 	assertDBFilesSecured(t, dbPath)
@@ -136,10 +120,10 @@ func TestOpenCapProbeStore_FallsBackToMemoryOnFailure(t *testing.T) {
 	}
 	ctx := context.Background()
 	h, warn := openCapProbeStore(ctx, getenv, t.TempDir())
-	if h == nil || h.store == nil {
+	if h == nil || h.Probes() == nil {
 		t.Fatalf("want in-memory fallback store, got nil (warn=%q)", warn)
 	}
-	defer func() { _ = h.db.Close() }()
+	defer func() { _ = h.Close() }()
 	if warn == "" {
 		t.Errorf("want a degradation warning")
 	}
@@ -153,14 +137,52 @@ func TestOpenCapProbeStore_FallsBackToMemoryOnFailure(t *testing.T) {
 		ProbeVersion: fingerprint.CurrentToolProbeVersion,
 		TestedAt:     time.Now(),
 	}
-	if err := h.store.SaveCapProbe(ctx, row); err != nil {
+	if err := h.Probes().SaveCapProbe(ctx, row); err != nil {
 		t.Fatalf("SaveCapProbe on fallback store: %v", err)
 	}
-	got, err := h.store.GetCapProbe(ctx, "lc", "m", "tool_call")
+	got, err := h.Probes().GetCapProbe(ctx, "lc", "m", "tool_call")
 	if err != nil {
 		t.Fatalf("GetCapProbe on fallback store: %v", err)
 	}
 	if got == nil || got.State != fingerprint.CapProbeYes {
 		t.Fatalf("GetCapProbe = %#v, want yes row", got)
+	}
+}
+
+func TestGolemOpensThroughSharedStore(t *testing.T) {
+	base, root := t.TempDir(), t.TempDir()
+	getenv := func(k string) string {
+		if k == "XDG_DATA_HOME" {
+			return base
+		}
+		return ""
+	}
+	h, warn := openCapProbeStore(context.Background(), getenv, root)
+	if h == nil || warn != "" {
+		t.Fatalf("handle %v warning %q, want a file-backed store and no warning", h, warn)
+	}
+	defer func() { _ = h.Close() }()
+	if h.Status() != fingerprint.StoreFile {
+		t.Errorf("status %q, want file", h.Status())
+	}
+	// Same path as before the shared opener.
+	if _, err := os.Stat(filepath.Join(base, "golem", "fingerprints.db")); err != nil {
+		t.Errorf("db not at $XDG_DATA_HOME/golem/fingerprints.db: %v", err)
+	}
+
+	// A path inside the workspace degrades, with the text golem always printed.
+	inside := func(k string) string {
+		if k == "XDG_DATA_HOME" {
+			return filepath.Join(root, "data")
+		}
+		return ""
+	}
+	h2, warn2 := openCapProbeStore(context.Background(), inside, root)
+	if h2 == nil {
+		t.Fatal("inside-workspace open returned no store; want the in-memory fallback")
+	}
+	defer func() { _ = h2.Close() }()
+	if !strings.HasPrefix(warn2, "fingerprint cache degraded to in-memory: ") {
+		t.Errorf("warning = %q", warn2)
 	}
 }

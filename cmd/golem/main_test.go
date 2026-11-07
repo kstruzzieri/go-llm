@@ -29,6 +29,53 @@ import (
 	"github.com/kstruzzieri/go-llm/rag"
 )
 
+// testDataHome is the data directory TestMain gave this process; empty in a
+// helper child, whose data directory its parent chose.
+var testDataHome string
+
+// dataHomeChosenEnv tells a child of this test binary that its parent already
+// chose XDG_DATA_HOME, so a value a test set for that child stands.
+const dataHomeChosenEnv = "GOLEM_TEST_DATA_HOME_CHOSEN"
+
+// TestMain keeps every test off the developer's data directory: run() opens its
+// stores with os.Getenv, and a store it finds under the real one gets migrated.
+// Helpers golem launches with a scrubbed environment skip it, because none of
+// them touches the data directory: two report exactly what they inherit, and
+// three end in os.Exit, which would strand a temp dir made here.
+func TestMain(m *testing.M) {
+	scrubbed := slices.ContainsFunc([]string{"TestContainmentHelper", "TestMCPEnvProbeProcess", "TestMCPTrustStdioProcess", "TestProjectTrustAgentflowProcess"}, func(name string) bool {
+		return slices.Contains(os.Args, "-test.run=^"+name+"$")
+	})
+	if scrubbed || os.Getenv(dataHomeChosenEnv) != "" {
+		os.Exit(m.Run())
+	}
+	dir, err := os.MkdirTemp("", "golem-test-data-*")
+	if err != nil {
+		panic(err)
+	}
+	testDataHome = dir
+	if err := os.Setenv("XDG_DATA_HOME", dir); err != nil {
+		panic(err)
+	}
+	if err := os.Setenv(dataHomeChosenEnv, "1"); err != nil {
+		panic(err)
+	}
+	code := m.Run()
+	_ = os.RemoveAll(dir)
+	os.Exit(code)
+}
+
+func TestDataHomeIsUnderTempDir(t *testing.T) {
+	got := os.Getenv("XDG_DATA_HOME")
+	rel, err := filepath.Rel(os.TempDir(), got)
+	if got == "" || got != testDataHome || err != nil || !filepath.IsLocal(rel) || rel == "." {
+		t.Fatalf("XDG_DATA_HOME = %q, TestMain chose %q, temp dir %q", got, testDataHome, os.TempDir())
+	}
+	if info, err := os.Stat(got); err != nil || !info.IsDir() {
+		t.Fatalf("data home is not a directory: %v", err)
+	}
+}
+
 func TestParseFlagsAllowWrite(t *testing.T) {
 	f, err := parseFlags([]string{"-allow-write"})
 	if err != nil {
@@ -482,7 +529,7 @@ func TestRunReportsDerivedInputCeilingFromFingerprint(t *testing.T) {
 	if handle == nil || warning != "" {
 		t.Fatalf("open fingerprint store = %v, warning %q", handle, warning)
 	}
-	if err := handle.profiles.Save(context.Background(), fingerprint.Profile{
+	if err := handle.Profiles().Save(context.Background(), fingerprint.Profile{
 		BackendID:        "test",
 		ModelName:        "agent-model",
 		ModelDigest:      "config-caps:chat,stream,tool_call",
@@ -492,7 +539,7 @@ func TestRunReportsDerivedInputCeilingFromFingerprint(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("save fingerprint profile: %v", err)
 	}
-	if err := handle.db.Close(); err != nil {
+	if err := handle.Close(); err != nil {
 		t.Fatalf("close fingerprint store: %v", err)
 	}
 

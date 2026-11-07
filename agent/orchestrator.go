@@ -177,8 +177,10 @@ func buildChatRequest(st State, specs []provider.Tool, outputReserve int, opts p
 // Run executes the loop until the model produces a final answer or a cap is
 // hit. Result.Risk is published on every return path, including blocks and
 // errors. Nested Runs using the supplied context inherit capacities and finite
-// token allowances. Returning seals that scope and cancels its context; callers
-// must join nested work before returning to receive complete descendant usage.
+// token allowances. A nested Run on the context a tool received also shares
+// the run's exposure record; one on a fresh context.Background() escapes it.
+// Returning seals that scope and cancels its context; callers must join
+// nested work before returning to receive complete descendant usage.
 func (o *Orchestrator) Run(ctx context.Context, req Request, obs Observer) (Result, error) {
 	return o.RunWithVerifier(ctx, req, obs, o.Verifier())
 }
@@ -190,9 +192,11 @@ func (o *Orchestrator) Run(ctx context.Context, req Request, obs Observer) (Resu
 func (o *Orchestrator) RunWithVerifier(ctx context.Context, req Request, obs Observer, verifier Verifier) (res Result, err error) {
 	ctx, req, budgetRun := newRunBudget(ctx, req)
 	defer func() { res.DescendantUsage = budgetRun.close() }()
+	ctx, exposure := newExposureRun(ctx, req)
 	ic := &interceptorRun{}
 	res, err = o.run(ctx, req, obs, ic, budgetRun, verifier)
 	res.Risk = ic.result()
+	res.Exposure = exposure.snapshot()
 	return res, err
 }
 
@@ -255,6 +259,9 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 		if aerr != nil {
 			return finishWithError(&res, state, historyLen, aerr)
 		}
+		// #582: accepted advice is foreign content. Admitted here, not in
+		// prepareAdvisory, which InspectAdvisory shares outside any run.
+		exposureFrom(ctx).admitForeign("consult")
 		advisory = &annotated
 	}
 	// One advisory key per Run, reused on every render like a tool key.

@@ -161,8 +161,8 @@ func runModels(ctx context.Context, args []string, out, errOut io.Writer) error 
 	var capStore fingerprint.CapProbeStore
 	capHandle, capStoreWarn := openCapProbeStore(ctx, os.Getenv, root)
 	if capHandle != nil {
-		capStore = capHandle.store
-		defer func() { _ = capHandle.db.Close() }()
+		capStore = capHandle.Probes()
+		defer func() { _ = capHandle.Close() }()
 	}
 	if capStoreWarn != "" {
 		_, _ = fmt.Fprintln(errOut, "warning: "+capStoreWarn)

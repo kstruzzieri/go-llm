@@ -155,6 +155,12 @@ func (o *Orchestrator) recordResult(ctx context.Context, res *Result, state *Sta
 		}
 	}
 
+	// #582: a result the model will see admits its origin. Fixed
+	// orchestrator text (denial, malformed arguments) and blocked
+	// observations carry no outside content and admit nothing.
+	if (rec.Invoked || inspectResult) && !rec.Blocked {
+		exposureFrom(ctx).admit(out.Origin, call.Function.Name)
+	}
 	if !rec.Blocked {
 		rec.Provenance = provenance
 	}
