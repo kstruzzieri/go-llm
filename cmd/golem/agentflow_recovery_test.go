@@ -1672,6 +1672,59 @@ func TestResumeBlockedStatesDoNotMutate(t *testing.T) {
 	}
 }
 
+const missingReceiptsWayOut = "To keep the files as they are, run the record-file-change command -agentflow-status shows for each one, then resume. To discard them, block the open attempt with agentflow block-step, then restore them, then resume; restoring first would settle the attempt on its gates without running the model"
+
+// #774: a retry whose model wrote nothing stops before its gates in
+// file_receipts_missing. The refusal names the step, the attempt and the files,
+// and both ways out, and it leaves the attempt open with no gate run.
+func TestResumeNamesUnrecordedFilesBeforeGates(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		diagnostics []string
+		want        string
+	}{
+		{"files", []string{"unrecorded: src/a.txt", "unrecorded: src/b.txt"},
+			"step P1 attempt A-P1 ended without recording its changed files, so no gate ran and the attempt stays open (unrecorded: src/a.txt; unrecorded: src/b.txt). " + missingReceiptsWayOut},
+		{"no diagnostics", nil,
+			"step P1 attempt A-P1 ended without recording its changed files, so no gate ran and the attempt stays open. " + missingReceiptsWayOut},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			fixture := newResumeFixture(t)
+			fixture.useAdvisoryLease()
+			start := fixture.noAttemptState(t, "step_unclaimed", true)
+			missing := agentflow.NextActionState{State: "file_receipts_missing", Diagnostics: tt.diagnostics}
+			af := &fakeAF{nextSteps: []string{"P1"}, nextActions: []agentflow.NextActionState{start, missing}}
+			d := &driver{af: af, plan: recoveryPlan(), runStep: func(context.Context, agentflow.Step, string, string) error { return nil }}
+			_, err := d.resume(context.Background(), fixture.root, fixture.planJSON, nil)
+			if err == nil || err.Error() != tt.want {
+				t.Fatalf("resume err = %v\nwant %s", err, tt.want)
+			}
+			for _, call := range af.seq {
+				if strings.HasPrefix(call, "gate:") || strings.HasPrefix(call, "block-step:") || strings.HasPrefix(call, "finish-step:") {
+					t.Fatalf("seq = %v, want no gate, block or finish", af.seq)
+				}
+			}
+		})
+	}
+}
+
+// #774: a second resume finds the same state on entry and gets the same way out.
+func TestResumeEntryNamesUnrecordedFiles(t *testing.T) {
+	fixture := newResumeFixture(t)
+	state := fixture.attemptState(t, "file_receipts_missing", nil)
+	state.Diagnostics = []string{"unrecorded: src/a.txt"}
+	af := &fakeAF{nextActions: []agentflow.NextActionState{state}}
+	d := &driver{af: af, plan: recoveryPlan()}
+	_, err := d.resume(context.Background(), fixture.root, fixture.planJSON, nil)
+	want := `agentflow resume blocked in state "file_receipts_missing": blocked by missing file receipts (unrecorded: src/a.txt). ` + missingReceiptsWayOut
+	if err == nil || err.Error() != want {
+		t.Fatalf("resume err = %v\nwant %s", err, want)
+	}
+	if want := []string{"probe", "next-action"}; !reflect.DeepEqual(af.seq, want) {
+		t.Fatalf("seq = %v, want read-only %v", af.seq, want)
+	}
+}
+
 // #689: settlement appends to the .agent ledgers an older proof hashes, so
 // AgentFlow reports that proof proof_stale. Resume continues to the same tail
 // as after the serial loop, and finish-run replaces it.

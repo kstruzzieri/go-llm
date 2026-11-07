@@ -676,6 +676,26 @@ func settleAgentflowAttempt(ctx context.Context, client afClient, plan *agentflo
 	return true, nil
 }
 
+// blockedDetail is resume's text for a state it refuses. Only
+// file_receipts_missing has a way out to name (#774).
+func blockedDetail(state agentflow.NextActionState, disposition recoveryDisposition) string {
+	if state.State != "file_receipts_missing" {
+		return disposition.description
+	}
+	return disposition.description + unrecordedFilesAdvice(state.Diagnostics)
+}
+
+// unrecordedFilesAdvice lists the files next-action reports unrecorded, then the
+// operator's two ways past them (#774). A model that finds a stopped attempt's
+// edit already right and writes nothing ends here.
+func unrecordedFilesAdvice(diagnostics []string) string {
+	files := ""
+	if len(diagnostics) > 0 {
+		files = " (" + strings.Join(diagnostics, "; ") + ")"
+	}
+	return files + ". To keep the files as they are, run the record-file-change command -agentflow-status shows for each one, then resume. To discard them, block the open attempt with agentflow block-step, then restore them, then resume; restoring first would settle the attempt on its gates without running the model"
+}
+
 func (d *driver) resume(ctx context.Context, root string, planJSON []byte, approved *agentflow.WorkflowRecommendation) (agentflow.NextActionState, error) {
 	// #612 R6: resume mutates, so it runs the base probe (version gate and the
 	// base capability probes, including #611's block-step) before its first
@@ -689,7 +709,7 @@ func (d *driver) resume(ctx context.Context, root string, planJSON []byte, appro
 	}
 	disposition := resumeDisposition(state.State)
 	if disposition.action == failClosed {
-		return agentflow.NextActionState{}, fmt.Errorf("agentflow resume blocked in state %q: %s", state.State, disposition.description)
+		return agentflow.NextActionState{}, fmt.Errorf("agentflow resume blocked in state %q: %s", state.State, blockedDetail(state, disposition))
 	}
 	if err := validateResumeProjection(root, planJSON, state, approved); err != nil {
 		return agentflow.NextActionState{}, err
@@ -747,7 +767,7 @@ func (d *driver) resume(ctx context.Context, root string, planJSON []byte, appro
 		default:
 			disposition = resumeDisposition(state.State)
 			if disposition.action == failClosed {
-				return agentflow.NextActionState{}, fmt.Errorf("agentflow resume blocked after settlement in state %q: %s", state.State, disposition.description)
+				return agentflow.NextActionState{}, fmt.Errorf("agentflow resume blocked after settlement in state %q: %s", state.State, blockedDetail(state, disposition))
 			}
 			return agentflow.NextActionState{}, fmt.Errorf("agentflow settlement progressed to unsupported in-flight state %q", state.State)
 		}
@@ -758,6 +778,9 @@ func (d *driver) resume(ctx context.Context, root string, planJSON []byte, appro
 		projected, err := d.af.NextAction(ctx)
 		if err != nil {
 			return err
+		}
+		if projected.State == "file_receipts_missing" {
+			return fmt.Errorf("step %s attempt %s ended without recording its changed files, so no gate ran and the attempt stays open%s", step.ID, attempt, unrecordedFilesAdvice(projected.Diagnostics))
 		}
 		if projected.State != "validation_missing" {
 			return fmt.Errorf("agentflow resumed step %q reached state %q before gates, want validation_missing", step.ID, projected.State)
