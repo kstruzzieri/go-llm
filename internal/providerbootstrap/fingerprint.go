@@ -60,7 +60,7 @@ func proberFactory(cfg *config.Config, ollamaClients map[string]*ollama.Client, 
 }
 
 // fingerprintDigestForModel returns the canonical model digest for fingerprint
-// cache keying. Mirrors mcp.fingerprintDigestForModel exactly.
+// cache keying.
 func fingerprintDigestForModel(key provider.ModelKey, runtime *provider.ModelInfo, caps []string) string {
 	if runtime != nil && runtime.Digest != "" {
 		return runtime.Digest

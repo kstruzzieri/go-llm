@@ -121,7 +121,11 @@ type Provider interface {
 	// Health checks whether the provider backend is reachable and ready.
 	Health(ctx context.Context) error
 
-	// Models returns the list of models available from this provider.
+	// Models returns the list of models available from this provider. A nil
+	// slice with a nil error means the response carried no listing at all (the
+	// listing key was absent); a listing that is present but empty, or null, is a
+	// non-nil empty slice. RefreshInventory treats the former as a failed listing
+	// when it publishes.
 	Models(ctx context.Context) ([]ModelInfo, error)
 
 	// Chat sends a chat completion request and returns the full response.
@@ -359,6 +363,7 @@ type ModelInfo struct {
 	Capabilities  []string `json:"capabilities,omitempty"`
 	ContextWindow int      `json:"context_window,omitempty"`
 	Digest        string   `json:"digest,omitempty"`
+	OwnedBy       string   `json:"owned_by,omitempty"` // OpenAI-compat owned_by; empty when not reported
 }
 
 // ---------------------------------------------------------------------------

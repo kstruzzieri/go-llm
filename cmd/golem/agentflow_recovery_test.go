@@ -1290,7 +1290,7 @@ func TestResumeReentersExistingSerialStepLoop(t *testing.T) {
 		{Kind: "command", Label: "go vet ./...", Status: "missing"},
 	})
 	inFlight.Resumability.Attempt.ID = "A-P1"
-	af := &fakeAF{nextSteps: []string{"P1"}, nextActions: []agentflow.NextActionState{initial, inFlight, finishRunGuard, complete}}
+	af := &fakeAF{nextSteps: []string{"P1"}, nextActions: []agentflow.NextActionState{initial, inFlight, inFlight, finishRunGuard, complete}}
 	d := &driver{af: af, plan: recoveryPlan()}
 	d.runStep = func(_ context.Context, step agentflow.Step, _, _ string) error {
 		af.seq = append(af.seq, "model:"+step.ID)
@@ -1302,7 +1302,7 @@ func TestResumeReentersExistingSerialStepLoop(t *testing.T) {
 		t.Fatalf("state=%q err=%v", final.State, err)
 	}
 	want := []string{
-		"probe", "next-action", "next-step", "claim:P1", "model:P1",
+		"probe", "next-action", "next-step", "claim:P1", "next-action", "model:P1",
 		"next-action",
 		"gate:P1:unit-tests", "gate:P1:lint", "finish-step:P1:A-P1",
 		"next-step", "next-action", "finish-run", "next-action",
@@ -1338,7 +1338,7 @@ func TestResumeRunsMultipleRemainingStepsSerially(t *testing.T) {
 
 	af := &fakeAF{
 		nextSteps:   []string{"P1", "P2"},
-		nextActions: []agentflow.NextActionState{initial, inFlightP1, inFlightP2, finishRunGuard, complete},
+		nextActions: []agentflow.NextActionState{initial, inFlightP1, inFlightP1, inFlightP2, inFlightP2, finishRunGuard, complete},
 	}
 	d := &driver{af: af, plan: recoveryPlanTwoSteps()}
 	d.runStep = func(_ context.Context, step agentflow.Step, _, _ string) error {
@@ -1351,9 +1351,9 @@ func TestResumeRunsMultipleRemainingStepsSerially(t *testing.T) {
 		t.Fatalf("state=%q err=%v", final.State, err)
 	}
 	want := []string{
-		"probe", "next-action", "next-step", "claim:P1", "model:P1",
+		"probe", "next-action", "next-step", "claim:P1", "next-action", "model:P1",
 		"next-action", "gate:P1:unit-tests", "gate:P1:lint", "finish-step:P1:A-P1",
-		"next-step", "claim:P2", "model:P2",
+		"next-step", "claim:P2", "next-action", "model:P2",
 		"next-action", "gate:P2:unit-tests-2", "finish-step:P2:A-P2",
 		"next-step", "next-action", "finish-run", "next-action",
 	}
@@ -1413,7 +1413,7 @@ func TestResumeReentryRefusesRecordedGateInsteadOfDuplicatingIt(t *testing.T) {
 
 			af := &fakeAF{
 				nextSteps:   []string{"P1"},
-				nextActions: []agentflow.NextActionState{initial, inFlight},
+				nextActions: []agentflow.NextActionState{initial, inFlight, inFlight},
 			}
 			d := &driver{af: af, plan: recoveryPlan()}
 			d.runStep = func(_ context.Context, step agentflow.Step, _, _ string) error {
@@ -1425,7 +1425,7 @@ func TestResumeReentryRefusesRecordedGateInsteadOfDuplicatingIt(t *testing.T) {
 			if _, err := d.resume(context.Background(), initialFixture.root, initialFixture.planJSON, nil); err == nil || err.Error() != want {
 				t.Fatalf("resume error = %v, want %q", err, want)
 			}
-			wantSeq := []string{"probe", "next-action", "next-step", "claim:P1", "model:P1", "next-action"}
+			wantSeq := []string{"probe", "next-action", "next-step", "claim:P1", "next-action", "model:P1", "next-action"}
 			if !reflect.DeepEqual(af.seq, wantSeq) || len(af.gateArgv) != 0 {
 				t.Fatalf("calls before duplicate refusal = %v argv=%v, want %v and no gate argv", af.seq, af.gateArgv, wantSeq)
 			}
@@ -1451,7 +1451,7 @@ func TestResumeRefusesFinishRunWhileStepWorkRemains(t *testing.T) {
 	inFlight.Resumability.Attempt.ID = "A-P1"
 	stepID2 := "P2"
 	af := &fakeAF{nextSteps: []string{"P1"}, nextActions: []agentflow.NextActionState{
-		initial, inFlight, {State: "validation_missing", StepID: &stepID2},
+		initial, inFlight, inFlight, {State: "validation_missing", StepID: &stepID2},
 	}}
 	d := &driver{af: af, plan: recoveryPlanTwoSteps()}
 	d.runStep = func(_ context.Context, step agentflow.Step, _, _ string) error {
@@ -1465,7 +1465,7 @@ func TestResumeRefusesFinishRunWhileStepWorkRemains(t *testing.T) {
 		t.Fatalf("state = %q, err = %v\nwant error %s", final.State, err, want)
 	}
 	wantSeq := []string{
-		"probe", "next-action", "next-step", "claim:P1", "model:P1",
+		"probe", "next-action", "next-step", "claim:P1", "next-action", "model:P1",
 		"next-action", "gate:P1:unit-tests", "gate:P1:lint", "finish-step:P1:A-P1",
 		"next-step", "next-action",
 	}
@@ -1493,7 +1493,7 @@ func TestResumeStopsWhenStepWorkRemainsAfterSettlement(t *testing.T) {
 			{StepID: "P1", ReasonCode: agentflow.NextStepEligible},
 			{ReasonCode: agentflow.NextStepOpenAttempts, Diagnostics: []string{"step P2 has open attempt A9 (owner other)"}},
 		},
-		nextActions: []agentflow.NextActionState{initial, inFlight},
+		nextActions: []agentflow.NextActionState{initial, inFlight, inFlight},
 	}
 	d := &driver{af: af, plan: recoveryPlanTwoSteps()}
 	d.runStep = func(_ context.Context, step agentflow.Step, _, _ string) error {
@@ -1507,7 +1507,7 @@ func TestResumeStopsWhenStepWorkRemainsAfterSettlement(t *testing.T) {
 		t.Fatalf("state = %q, err = %v\nwant error %s", final.State, err, want)
 	}
 	wantSeq := []string{
-		"probe", "next-action", "next-step", "claim:P1", "model:P1",
+		"probe", "next-action", "next-step", "claim:P1", "next-action", "model:P1",
 		"next-action", "gate:P1:unit-tests", "gate:P1:lint", "finish-step:P1:A-P1",
 		"next-step",
 	}
@@ -1693,7 +1693,8 @@ func TestResumeNamesUnrecordedFilesBeforeGates(t *testing.T) {
 			fixture.useAdvisoryLease()
 			start := fixture.noAttemptState(t, "step_unclaimed", true)
 			missing := agentflow.NextActionState{State: "file_receipts_missing", Diagnostics: tt.diagnostics}
-			af := &fakeAF{nextSteps: []string{"P1"}, nextActions: []agentflow.NextActionState{start, missing}}
+			// The retry's goal reads missing after the claim; beforeGates reads it again.
+			af := &fakeAF{nextSteps: []string{"P1"}, nextActions: []agentflow.NextActionState{start, missing, missing}}
 			d := &driver{af: af, plan: recoveryPlan(), runStep: func(context.Context, agentflow.Step, string, string) error { return nil }}
 			_, err := d.resume(context.Background(), fixture.root, fixture.planJSON, nil)
 			if err == nil || err.Error() != tt.want {
@@ -1722,6 +1723,68 @@ func TestResumeEntryNamesUnrecordedFiles(t *testing.T) {
 	}
 	if want := []string{"probe", "next-action"}; !reflect.DeepEqual(af.seq, want) {
 		t.Fatalf("seq = %v, want read-only %v", af.seq, want)
+	}
+}
+
+// #774: once resume claims a retry, the goal lists the files an earlier stopped
+// attempt left changed and says how to confirm one that is already right. A
+// fresh attempt's goal is unchanged.
+func TestResumeTellsRetryWhichFilesItInherits(t *testing.T) {
+	const inherited = "\n\nRetry context (authoritative Agentflow projection):\n" +
+		`An earlier attempt of this step stopped after changing these in-scope files, and this attempt has not recorded them: "src/a.txt", "src/b\ntxt".` + "\n" +
+		"Review each one. If it is wrong, fix it. If it is already right, confirm it with edit_file, giving the same unique text as old_string and new_string; that records the file without changing it. Write an empty file again with write_file. A file you leave untouched stops the step before its gates."
+	for _, tt := range []struct {
+		name       string
+		afterClaim agentflow.NextActionState
+		want       string
+	}{
+		{"inherited files", agentflow.NextActionState{State: "file_receipts_missing", Diagnostics: []string{"unrecorded: src/a.txt", "lease: advisory", "unrecorded: src/b\ntxt"}}, inherited},
+		{"no unrecorded diagnostics", agentflow.NextActionState{State: "file_receipts_missing", Diagnostics: []string{"lease: advisory"}}, ""},
+		{"fresh attempt", agentflow.NextActionState{State: "validation_missing"}, ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			fixture := newResumeFixture(t)
+			fixture.useAdvisoryLease()
+			start := fixture.noAttemptState(t, "step_unclaimed", true)
+			af := &fakeAF{nextSteps: []string{"P1"}, nextActions: []agentflow.NextActionState{start, tt.afterClaim}}
+			plan := recoveryPlan()
+			var goal string
+			d := &driver{af: af, plan: plan, runStep: func(_ context.Context, _ agentflow.Step, _ string, g string) error {
+				goal = g
+				return errors.New("model stopped")
+			}}
+			if _, err := d.resume(context.Background(), fixture.root, fixture.planJSON, nil); err == nil {
+				t.Fatal("resume succeeded, want the scripted model failure")
+			}
+			step, _ := findStep(plan, "P1")
+			base, err := stepGoal(plan, step)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if goal != base+tt.want {
+				t.Fatalf("goal = %q\nwant %q", goal, base+tt.want)
+			}
+		})
+	}
+}
+
+// #774: if the read after the claim fails, the model does not run and the
+// attempt closes like any failed run, so the next resume claims a new one.
+func TestResumeBlocksRetryWhenItsContextCannotBeRead(t *testing.T) {
+	fixture := newResumeFixture(t)
+	fixture.useAdvisoryLease()
+	start := fixture.noAttemptState(t, "step_unclaimed", true)
+	af := &nextActionErrAt{fakeAF: &fakeAF{nextSteps: []string{"P1"}, nextActions: []agentflow.NextActionState{start}}, call: 2, err: errors.New("next-action unavailable")}
+	d := &driver{af: af, plan: recoveryPlan(), runStep: func(context.Context, agentflow.Step, string, string) error {
+		t.Error("resume ran the model")
+		return nil
+	}}
+	_, err := d.resume(context.Background(), fixture.root, fixture.planJSON, nil)
+	if want := "step P1 attempt A-P1: next-action unavailable; attempt recorded as blocked"; err == nil || err.Error() != want {
+		t.Fatalf("resume err = %v, want %q", err, want)
+	}
+	if !slices.Contains(af.seq, "block-step:P1:A-P1:golem: agent run failed") {
+		t.Fatalf("seq = %v, want the attempt blocked", af.seq)
 	}
 }
 
@@ -1831,7 +1894,7 @@ func TestResumeSettlementThenSerialStepReplacesStaleProof(t *testing.T) {
 
 	af := &fakeAF{
 		nextSteps:   []string{"P2"},
-		nextActions: []agentflow.NextActionState{initial, unclaimedP2, inFlightP2, stale, complete},
+		nextActions: []agentflow.NextActionState{initial, unclaimedP2, inFlightP2, inFlightP2, stale, complete},
 	}
 	d := &driver{af: af, plan: recoveryPlanTwoSteps()}
 	d.runStep = func(_ context.Context, step agentflow.Step, _, _ string) error {
@@ -1844,7 +1907,7 @@ func TestResumeSettlementThenSerialStepReplacesStaleProof(t *testing.T) {
 	}
 	want := []string{
 		"probe", "next-action", "complete-step:P1:A1", "next-action",
-		"next-step", "claim:P2", "model:P2",
+		"next-step", "claim:P2", "next-action", "model:P2",
 		"next-action", "gate:P2:unit-tests-2", "finish-step:P2:A-P2",
 		"next-step", "next-action", "finish-run", "next-action",
 	}
@@ -1943,7 +2006,7 @@ func TestResumeBlocksFailedGateAttemptThenRerunsStep(t *testing.T) {
 		{Kind: "command", Label: "go vet ./...", Status: "missing"},
 	})
 	inFlight.Resumability.Attempt.ID = "A-P1"
-	af := &fakeAF{nextSteps: []string{"P1"}, nextActions: []agentflow.NextActionState{initial, unclaimed, inFlight, finishRunGuard, complete}}
+	af := &fakeAF{nextSteps: []string{"P1"}, nextActions: []agentflow.NextActionState{initial, unclaimed, inFlight, inFlight, finishRunGuard, complete}}
 	d := &driver{af: af, plan: recoveryPlan()}
 	d.runStep = func(_ context.Context, step agentflow.Step, _, _ string) error {
 		af.seq = append(af.seq, "model:"+step.ID)
@@ -1957,7 +2020,7 @@ func TestResumeBlocksFailedGateAttemptThenRerunsStep(t *testing.T) {
 	want := []string{
 		"probe", "next-action",
 		"block-step:P1:A1:golem: resume found failed command gate",
-		"next-action", "next-step", "claim:P1", "model:P1",
+		"next-action", "next-step", "claim:P1", "next-action", "model:P1",
 		"next-action", "gate:P1:unit-tests", "gate:P1:lint", "finish-step:P1:A-P1",
 		"next-step", "next-action", "finish-run", "next-action",
 	}
@@ -2663,7 +2726,7 @@ func TestResumeBlocksTimedOutAttemptThenRerunsStep(t *testing.T) {
 	})
 	inFlight.Resumability.Attempt.ID = "A-P1"
 	complete := fixture.noAttemptState(t, "complete", false)
-	af := &fakeAF{nextSteps: []string{"P1"}, nextActions: []agentflow.NextActionState{initial, unclaimed, inFlight, finishRunGuard, complete}}
+	af := &fakeAF{nextSteps: []string{"P1"}, nextActions: []agentflow.NextActionState{initial, unclaimed, inFlight, inFlight, finishRunGuard, complete}}
 	d := &driver{af: af, plan: recoveryPlan()}
 	d.runStep = func(_ context.Context, step agentflow.Step, _, _ string) error {
 		af.seq = append(af.seq, "model:"+step.ID)
@@ -2675,7 +2738,7 @@ func TestResumeBlocksTimedOutAttemptThenRerunsStep(t *testing.T) {
 	want := []string{
 		"probe", "next-action",
 		"block-step:P1:A1:golem: resume found timed-out gate",
-		"next-action", "next-step", "claim:P1", "model:P1",
+		"next-action", "next-step", "claim:P1", "next-action", "model:P1",
 		"next-action", "gate:P1:unit-tests", "gate:P1:lint", "finish-step:P1:A-P1",
 		"next-step", "next-action", "finish-run", "next-action",
 	}
@@ -2705,7 +2768,7 @@ func inFlightAmendment(t *testing.T) agentflow.NextActionState {
 func TestResumeAmendsCompletedStep(t *testing.T) {
 	const amend = "amend-completed:P1:golem: resume replaces the step's attempt"
 	tail := []string{
-		amend, "model:P1",
+		amend, "next-action", "model:P1",
 		"next-action", "gate:P1:unit-tests", "gate:P1:lint", "finish-step:P1:AM-P1",
 		"next-step", "next-action", "finish-run", "next-action",
 	}
@@ -2731,7 +2794,7 @@ func TestResumeAmendsCompletedStep(t *testing.T) {
 				states = append(states, amendmentNeededState(t, &needed))
 			}
 			complete := fixture.noAttemptState(t, "complete", false)
-			states = append(states, inFlightAmendment(t), finishRunGuard, complete)
+			states = append(states, inFlightAmendment(t), inFlightAmendment(t), finishRunGuard, complete)
 			af := &fakeAF{nextActions: states}
 			goals := 0
 			d := &driver{af: af, plan: recoveryPlan()}
@@ -2967,19 +3030,19 @@ func TestResumeAmendsOneStepPerRun(t *testing.T) {
 	}
 	const amend = ":golem: resume replaces the step's attempt"
 
-	af, _, err := run([]agentflow.NextActionState{needed(t, "P1"), inFlight(t, "P1"), needed(t, "P2")})
+	af, _, err := run([]agentflow.NextActionState{needed(t, "P1"), inFlight(t, "P1"), inFlight(t, "P1"), needed(t, "P2")})
 	if want := `agentflow still reports step work before finish-run: state "step_amendment_needed" step "P2"; no proof was built; run -agentflow-status to see whether -agentflow-resume can recover it`; err == nil || err.Error() != want {
 		t.Fatalf("resume 1 err = %v\nwant %s", err, want)
 	}
-	if want := []string{"probe", "next-action", "amend-completed:P1" + amend, "model:P1", "next-action", "gate:P1:unit-tests", "gate:P1:lint", "finish-step:P1:AM-P1", "next-step", "next-action"}; !reflect.DeepEqual(af.seq, want) {
+	if want := []string{"probe", "next-action", "amend-completed:P1" + amend, "next-action", "model:P1", "next-action", "gate:P1:unit-tests", "gate:P1:lint", "finish-step:P1:AM-P1", "next-step", "next-action"}; !reflect.DeepEqual(af.seq, want) {
 		t.Fatalf("resume 1 seq = %v\nwant %v", af.seq, want)
 	}
 
-	af, final, err := run([]agentflow.NextActionState{needed(t, "P2"), inFlight(t, "P2"), finishRunGuard, complete})
+	af, final, err := run([]agentflow.NextActionState{needed(t, "P2"), inFlight(t, "P2"), inFlight(t, "P2"), finishRunGuard, complete})
 	if err != nil || final.State != "complete" {
 		t.Fatalf("resume 2 state = %q, err = %v", final.State, err)
 	}
-	if want := []string{"probe", "next-action", "amend-completed:P2" + amend, "model:P2", "next-action", "gate:P2:unit-tests-2", "finish-step:P2:AM-P2", "next-step", "next-action", "finish-run", "next-action"}; !reflect.DeepEqual(af.seq, want) {
+	if want := []string{"probe", "next-action", "amend-completed:P2" + amend, "next-action", "model:P2", "next-action", "gate:P2:unit-tests-2", "finish-step:P2:AM-P2", "next-step", "next-action", "finish-run", "next-action"}; !reflect.DeepEqual(af.seq, want) {
 		t.Fatalf("resume 2 seq = %v\nwant %v", af.seq, want)
 	}
 }

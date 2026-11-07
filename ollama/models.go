@@ -6,18 +6,28 @@ import (
 	"fmt"
 )
 
-// ListModels returns all models available in the Ollama instance.
+// ListModels returns all models available in the Ollama instance, with the
+// digest /api/tags reports for each. A body with no "models" key returns a nil
+// slice and nil error; a present key, even null, returns a non-nil slice.
 func (c *Client) ListModels(ctx context.Context) ([]ModelInfo, error) {
-	var resp listModelsResponse
+	var resp listModelsRaw
 	if err := c.doJSON(ctx, "GET", "/api/tags", nil, &resp); err != nil {
 		return nil, fmt.Errorf("ollama: list models: %w", err)
 	}
+	if resp.Models == nil {
+		return nil, nil
+	}
+	var entries []listModelEntry
+	if err := json.Unmarshal(resp.Models, &entries); err != nil {
+		return nil, fmt.Errorf("ollama: list models: decode response: %w", err)
+	}
 
-	models := make([]ModelInfo, len(resp.Models))
-	for i, m := range resp.Models {
+	models := make([]ModelInfo, len(entries))
+	for i, m := range entries {
 		models[i] = ModelInfo{
-			Name: m.Name,
-			Size: m.Size,
+			Name:   m.Name,
+			Size:   m.Size,
+			Digest: m.Digest,
 		}
 	}
 	return models, nil

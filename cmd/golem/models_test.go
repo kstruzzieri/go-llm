@@ -156,11 +156,11 @@ func TestRunModels_ReadsCachedProbeOnPlainListing(t *testing.T) {
 	if warn != "" {
 		t.Fatalf("openCapProbeStore warning = %q", warn)
 	}
-	if h == nil || h.store == nil {
+	if h == nil || h.Probes() == nil {
 		t.Fatal("openCapProbeStore returned nil store")
 	}
 	key := provider.ModelKey{Provider: "llamacpp", Model: "mystery"}
-	if err := h.store.SaveCapProbe(ctx, fingerprint.CapProbe{
+	if err := h.Probes().SaveCapProbe(ctx, fingerprint.CapProbe{
 		BackendID:    key.Provider,
 		ModelName:    key.Model,
 		Capability:   "tool_call",
@@ -171,7 +171,7 @@ func TestRunModels_ReadsCachedProbeOnPlainListing(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("seed SaveCapProbe: %v", err)
 	}
-	if err := h.db.Close(); err != nil {
+	if err := h.Close(); err != nil {
 		t.Fatalf("close seed store: %v", err)
 	}
 

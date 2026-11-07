@@ -119,6 +119,10 @@ type Request struct {
 	// included) exposes one, every occurrence of it in System is replaced by
 	// a fresh key before the next render. Result.SystemKeys reports the keys System ended under.
 	SystemKeys []string
+	// PriorExposure is the conversation's exposure record from earlier runs.
+	// Nil with no History and no HistorySummary is a clean start; nil with
+	// either, or a record that is not Recorded, reads as Unknown ("history").
+	PriorExposure *Exposure
 }
 
 // Segment tags a message as always-present (Pinned) or compactable (Elastic).
@@ -303,4 +307,7 @@ type Result struct {
 	// System in a later Run should swap each old key for its successor first,
 	// so that Run starts from the bytes this one last sent. Runtime-only.
 	SystemKeys []string `json:"-"`
+	// Exposure is the conversation's exposure after this run, set on every
+	// return path. Runtime-only, so run traces stay byte-identical.
+	Exposure Exposure `json:"-"`
 }
