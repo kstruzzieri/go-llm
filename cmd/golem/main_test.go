@@ -482,7 +482,7 @@ func TestRunReportsDerivedInputCeilingFromFingerprint(t *testing.T) {
 	if handle == nil || warning != "" {
 		t.Fatalf("open fingerprint store = %v, warning %q", handle, warning)
 	}
-	if err := handle.profiles.Save(context.Background(), fingerprint.Profile{
+	if err := handle.Profiles().Save(context.Background(), fingerprint.Profile{
 		BackendID:        "test",
 		ModelName:        "agent-model",
 		ModelDigest:      "config-caps:chat,stream,tool_call",
@@ -492,7 +492,7 @@ func TestRunReportsDerivedInputCeilingFromFingerprint(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("save fingerprint profile: %v", err)
 	}
-	if err := handle.db.Close(); err != nil {
+	if err := handle.Close(); err != nil {
 		t.Fatalf("close fingerprint store: %v", err)
 	}
 

@@ -15,7 +15,7 @@ go-llm/
 ├── ollama/          # Ollama REST API client (chat, generate, embeddings, models)
 ├── config/          # Model configuration loader (models.json, resolve, fallback) + Document (origin/revision-aware load, secret-literal-preserving atomic writer, role lifecycle + selector overrides + credential scrub)
 ├── configview/      # Pure projection of a config for panels/CLI/MCP (v1 wire contract, tri-state candidate eligibility, no I/O) — consumed by golem models -json, MCP configview resource, Firn config panel
-├── configio/        # Explicit I/O tier for the config stack: RefreshInventory (provider listing → configview.Inventory value via the read-only ProjectListedModels projection) + ProbeToolCall (consent-gated per-model probe, ProbeOutcome{State,Persisted}) — never implicit, values in/out, bounded error codes (CodeOf), cancellation unclassified
+├── configio/        # Explicit I/O tier for the config stack: RefreshInventory (provider listing → configview.Inventory value via the read-only ProjectListedModels projection; publishes listings and provider facts to the evidence store only through the explicit `WithPublish` option) + ProbeToolCall (consent-gated per-model probe, ProbeOutcome{State,Persisted}) — never implicit, values in/out, bounded error codes (CodeOf), cancellation unclassified
 ├── profiles/        # Profile catalog: curated go:embed configs (credential-free by pinned rule) + user store under a 0700 profiles/ boundary; stable IDs, bounded error codes, SaveOutcome writes (nil error whenever persisted) — the Firn config-panel write path
 ├── provider/        # Use-case-aware Router (chat/fim/embedding/reasoning/analysis/code-review/agent profiles), circuit breakers, warmth, slot-capacity discovery + slot-aware admission, sticky routing, scoring, fallback chains
 │   └── openaicompat/ # OpenAI /v1 client — reaches llama.cpp (primary), vLLM, LM Studio via api_format: openai-compat
@@ -34,7 +34,7 @@ go-llm/
 ├── recipe/          # Versioned JSON prompt bundles (v1): Parse for embedded bytes, Load for explicit paths (regular-file + identity checks, 64 KiB bound, nonblocking Unix open); closed schema, strict keys, advisory role/use-case hints. Template expansion + discovery are #353.
 ├── signing/         # Detached signatures over canonical JSON (ZT-301): Signer/Verifier seam, canonical form v1, Ed25519 + HMAC-SHA256 backends, Keyring rotation, hardened key files. Consumed by #445/#446/#447/#450; knows no record schema.
 ├── feedback/        # Implicit user behavioral signal collection
-├── fingerprint/     # Model profiling (latency benchmarks, capability detection)
+├── fingerprint/     # Model profiling (latency benchmarks, capability detection) + the shared capability store (#734): append-only evidence log (per-endpoint/adapter/digest answers with expiry + pruning), per-credential listings (account HMAC never exported), registry reads; `OpenSharedStore` is the one hardened opener (file, memory-only fallback, disabled; golem and other hosts use it)
 ├── prefetch/        # Predictive cache-warming engine for RAG retrieval
 ├── compat/          # OpenAI-compatible endpoint shim (chat, completions, model aliases, concurrency limiter)
 ├── cmd/
