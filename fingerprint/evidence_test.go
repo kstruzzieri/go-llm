@@ -2,6 +2,7 @@ package fingerprint
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"maps"
@@ -9,6 +10,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 )
@@ -406,6 +408,16 @@ func appendEv(t *testing.T, s *SQLiteStore, rows ...EvidenceRow) {
 	}
 }
 
+// appendForeignEv stores rows the way another binary would, past this binary's
+// write check: a newer build writes its own key version into the shared file.
+func appendForeignEv(t *testing.T, s *SQLiteStore, rows ...EvidenceRow) {
+	t.Helper()
+	err := s.writeTx(t.Context(), func(tx *sql.Tx) error { return insertEvidence(t.Context(), tx, rows) })
+	if err != nil {
+		t.Fatalf("store foreign rows: %v", err)
+	}
+}
+
 func pruneEv(t *testing.T, s *SQLiteStore, now time.Time) {
 	t.Helper()
 	if err := s.Prune(t.Context(), now); err != nil {
@@ -548,6 +560,8 @@ func TestPrune_UnknownOrFutureRowCannotEvictUsableAnswer(t *testing.T) {
 		evRow(7, evDay(-400), withMethod("nope")), // unknown method, newer sibling: not compacted either
 		evRow(8, evDay(-500), withVersion(9)),     // unknown version
 		evRow(9, evDay(-400), withVersion(9)),
+	)
+	appendForeignEv(t, s,
 		evRow(10, evDay(-500), func(r *EvidenceRow) { r.KeyVersion = EvidenceKeyVersion + 1 }),
 		evRow(11, evDay(-400), func(r *EvidenceRow) { r.KeyVersion = EvidenceKeyVersion + 1 }),
 	)
@@ -864,7 +878,7 @@ func TestEvidenceInvariants_StoredPruneMatchesReducer(t *testing.T) {
 		slices.SortFunc(rows, func(a, b EvidenceRow) int { return int(a.ID - b.ID) }) // rowids then match IDs
 
 		s := newTestStore(t)
-		appendEv(t, s, rows...)
+		appendForeignEv(t, s, rows...) // the log holds rows other binaries wrote
 		full := storedEv(t, s)
 		ids := prunableEvidenceIDs(rows, evNow)
 		pruneEv(t, s, evNow)
@@ -958,8 +972,8 @@ func TestEvidenceRows_RoundTripAndScope(t *testing.T) {
 	appendEv(t, s, full, bare,
 		evRow(3, evDay(-1), func(r *EvidenceRow) { r.Endpoint = "http://other:8080" }),
 		evRow(4, evDay(-1), func(r *EvidenceRow) { r.Model = "other" }),
-		evRow(5, evDay(-1), func(r *EvidenceRow) { r.KeyVersion = EvidenceKeyVersion + 1 }),
 	)
+	appendForeignEv(t, s, evRow(5, evDay(-1), func(r *EvidenceRow) { r.KeyVersion = EvidenceKeyVersion + 1 }))
 	got := storedEv(t, s)
 	if want := []EvidenceRow{full, bare}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("EvidenceRows =\n %+v\nwant\n %+v", got, want)
@@ -998,6 +1012,96 @@ func TestAppendEvidence_OneTransactionBumpsGenerationOnce(t *testing.T) {
 	}
 	wantStoredIDs(t, s, 1, 2, 3)
 	wantGeneration(t, s, 1)
+}
+
+// evMarked is a row of marker values, so a test can see any of them leak into an
+// error. Its method, state, kind and source are unknown, which AppendEvidence
+// must accept: readers ignore such rows and other binaries may write them.
+func evMarked(mutators ...func(*EvidenceRow)) EvidenceRow {
+	r := EvidenceRow{
+		KeyVersion: EvidenceKeyVersion,
+		Endpoint:   "http://endpoint-marker:8080", Adapter: "adapter-marker", Model: "model-marker", Digest: "digest-marker",
+		Capability: "capability-marker", Source: "source-marker", Kind: "kind-marker", State: "state-marker",
+		Method: "method-marker", MethodVersion: 9, Detail: "detail-marker", ObservedAt: evNow,
+	}
+	for _, mutate := range mutators {
+		mutate(&r)
+	}
+	return r
+}
+
+func TestAppendEvidence_RejectsRowsItCouldNotReadBack(t *testing.T) {
+	noModel := func(r *EvidenceRow) { r.Model = "" }
+	tests := []struct {
+		name  string
+		field string // the field the error must name
+		rows  []EvidenceRow
+	}{
+		{"unset key version", "KeyVersion", []EvidenceRow{evMarked(func(r *EvidenceRow) { r.KeyVersion = 0 })}},
+		{"another key version", "KeyVersion", []EvidenceRow{evMarked(func(r *EvidenceRow) { r.KeyVersion = EvidenceKeyVersion + 1 })}},
+		{"empty endpoint", "Endpoint", []EvidenceRow{evMarked(func(r *EvidenceRow) { r.Endpoint = "" })}},
+		{"empty adapter", "Adapter", []EvidenceRow{evMarked(func(r *EvidenceRow) { r.Adapter = "" })}},
+		{"empty model", "Model", []EvidenceRow{evMarked(noModel)}},
+		{"empty capability", "Capability", []EvidenceRow{evMarked(func(r *EvidenceRow) { r.Capability = "" })}},
+		{"empty method", "Method", []EvidenceRow{evMarked(func(r *EvidenceRow) { r.Method = "" })}},
+		{"zero observation time", "ObservedAt", []EvidenceRow{evMarked(func(r *EvidenceRow) { r.ObservedAt = time.Time{} })}},
+		{"good row, then a bad one", "Model", []EvidenceRow{evMarked(), evMarked(noModel)}},
+		{"bad row, then a good one", "Model", []EvidenceRow{evMarked(noModel), evMarked()}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newTestStore(t)
+			wantRejected := func(err error) {
+				t.Helper()
+				if err == nil {
+					t.Fatal("AppendEvidence accepted the batch")
+				}
+				if msg := err.Error(); !strings.Contains(msg, tt.field) || strings.Contains(msg, "marker") {
+					t.Errorf("error = %q, want it to name %s and carry no row value", msg, tt.field)
+				}
+			}
+			wantRejected(s.AppendEvidence(t.Context(), tt.rows...))
+
+			// Each row's own key, or a row written under its bad value would not show.
+			for _, r := range append([]EvidenceRow{evMarked()}, tt.rows...) {
+				got, err := s.EvidenceRows(t.Context(), r.Endpoint, r.Model)
+				if err != nil {
+					t.Fatalf("EvidenceRows: %v", err)
+				}
+				if len(got) != 0 {
+					t.Errorf("EvidenceRows(%q, %q) returned %d rows, want none", r.Endpoint, r.Model, len(got))
+				}
+			}
+			wantStoredIDs(t, s) // EvidenceRows' key-version filter would hide a KeyVersion row
+			wantGeneration(t, s, 0)
+
+			// A canceled context fails BeginTx, so seeing the rejection instead
+			// proves the check ran before any transaction opened.
+			ctx, cancel := context.WithCancel(t.Context())
+			cancel()
+			err := s.AppendEvidence(ctx, tt.rows...)
+			wantRejected(err)
+			if errors.Is(err, context.Canceled) {
+				t.Errorf("error = %v, want the rejection before the transaction", err)
+			}
+		})
+	}
+}
+
+func TestAppendEvidence_AcceptsRowsOtherBinariesMayWrite(t *testing.T) {
+	s := newTestStore(t)
+	appendEv(t, s, evMarked(), evMarked(func(r *EvidenceRow) { r.Digest = "" })) // name-only is a real identity
+	wantGeneration(t, s, 1)
+	got, err := s.EvidenceRows(t.Context(), evMarked().Endpoint, evMarked().Model)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].Method != "method-marker" || got[0].State != "state-marker" || got[1].Digest != "" {
+		t.Fatalf("EvidenceRows = %+v", got)
+	}
+	if readings := ReadCapabilities(got, "adapter-marker", "digest-marker", evNow); len(readings) != 0 {
+		t.Fatalf("readings = %+v, want the reader to ignore these rows", idsOfReadings(readings))
+	}
 }
 
 func TestAppendEvidence_WaitsForWriterInsteadOfFailing(t *testing.T) {

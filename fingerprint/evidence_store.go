@@ -14,10 +14,14 @@ const evidenceColumns = `id, key_version, endpoint, adapter, model_name, model_d
 
 // AppendEvidence appends rows in one transaction with one generation bump. Row
 // IDs are assigned by the store; any set on the rows are ignored. Appending
-// nothing writes nothing.
+// nothing writes nothing. One row that could never be read back rejects the whole
+// batch before a transaction opens; see validateEvidenceRows.
 func (s *SQLiteStore) AppendEvidence(ctx context.Context, rows ...EvidenceRow) error {
 	if len(rows) == 0 {
 		return nil
+	}
+	if err := validateEvidenceRows(rows); err != nil {
+		return fmt.Errorf("fingerprint: append evidence: %w", err)
 	}
 	err := s.writeTx(ctx, func(tx *sql.Tx) error {
 		return insertEvidence(ctx, tx, rows)
@@ -114,6 +118,37 @@ func (s *SQLiteStore) writeTx(ctx context.Context, fn func(*sql.Tx) error) (err 
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit: %w", err)
+	}
+	return nil
+}
+
+// validateEvidenceRows names the first field that would keep a row from ever
+// being read back: a KeyVersion other than EvidenceKeyVersion, an empty Endpoint,
+// Adapter, Model, Capability or Method, or a zero ObservedAt. The error carries
+// the field name and no row values. Unknown methods and states pass, because
+// readers ignore them and other binaries may write them.
+func validateEvidenceRows(rows []EvidenceRow) error {
+	for _, r := range rows {
+		var field string
+		switch {
+		case r.KeyVersion != EvidenceKeyVersion:
+			field = "KeyVersion"
+		case r.Endpoint == "":
+			field = "Endpoint"
+		case r.Adapter == "":
+			field = "Adapter"
+		case r.Model == "":
+			field = "Model"
+		case r.Capability == "":
+			field = "Capability"
+		case r.Method == "":
+			field = "Method"
+		case r.ObservedAt.IsZero():
+			field = "ObservedAt"
+		default:
+			continue
+		}
+		return fmt.Errorf("row has invalid %s", field)
 	}
 	return nil
 }
