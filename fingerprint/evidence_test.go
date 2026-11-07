@@ -1225,3 +1225,64 @@ func mustEvidenceStore(t *testing.T, ctx context.Context, path string) *SQLiteSt
 	}
 	return s
 }
+
+// Prune decides outside its transaction, and SQLite may reuse a deleted row's id
+// for a later insert. The trigger runs on the generation bump, Prune's first
+// statement in the transaction, and swaps the doomed row for a fresh one under
+// the same id. The fresh row is not the one Prune decided on, so it stays.
+func TestPrune_ReusedIDIsNotDeleted(t *testing.T) {
+	s := newTestStore(t)
+	appendEv(t, s, evRow(0, evDay(-300), byTheRules(0)), evRow(0, evDay(-200), byTheRules(0)))
+	if ids := prunableEvidenceIDs(storedEv(t, s), evNow); !slices.Equal(ids, []int64{1}) {
+		t.Fatalf("prunable = %v, want [1]: the test needs row 1 doomed", ids)
+	}
+	_, err := s.db.ExecContext(t.Context(), fmt.Sprintf(`CREATE TRIGGER reuse_id AFTER UPDATE ON store_meta BEGIN
+		DELETE FROM capability_evidence WHERE id = 1;
+		INSERT INTO capability_evidence (id, key_version, endpoint, adapter, model_name, model_digest,
+			capability, evidence, kind, state, method, method_version, observed_at)
+		SELECT 1, key_version, endpoint, adapter, model_name, model_digest,
+			capability, evidence, kind, state, method, method_version, %d
+		FROM capability_evidence WHERE id = 2;
+	END`, evNow.UnixMilli()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pruneEv(t, s, evNow)
+	wantStoredIDs(t, s, 1, 2)
+	if got := storedEv(t, s)[0].ObservedAt; !got.Equal(evNow) {
+		t.Fatalf("row 1 observed at %v, want the fresh row's %v: the trigger did not run", got, evNow)
+	}
+}
+
+// A statement that runs out of space makes SQLite roll the whole transaction
+// back itself, so the deferred rollback finds none. That is not a second failure.
+func TestWriteTx_FullDiskReportsOnlyTheFullDisk(t *testing.T) {
+	ctx := t.Context()
+	db := openMigrationDB(t, filepath.Join(t.TempDir(), "full.db"))
+	s, err := NewStore(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gen, err := s.Generation(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pages int
+	if err := db.QueryRowContext(ctx, `PRAGMA page_count`).Scan(&pages); err != nil {
+		t.Fatal(err)
+	}
+	execMigrationSQL(t, db, fmt.Sprintf(`PRAGMA max_page_count = %d`, pages+2))
+	row := evRow(0, time.Now(), func(r *EvidenceRow) { r.Detail = strings.Repeat("x", 4096) })
+	err = s.AppendEvidence(ctx, slices.Repeat([]EvidenceRow{row}, 64)...)
+	if err == nil {
+		t.Fatal("append past max_page_count succeeded")
+	}
+	if !strings.Contains(err.Error(), "disk is full") {
+		t.Fatalf("err = %q, want the full disk", err)
+	}
+	if strings.Contains(err.Error(), "rollback") {
+		t.Fatalf("err = %q, want no rollback failure beside the full disk", err)
+	}
+	wantGeneration(t, s, gen)
+	wantStoredIDs(t, s)
+}

@@ -1,17 +1,23 @@
 package fingerprint
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 
 	"github.com/kstruzzieri/go-llm/memory"
 )
@@ -108,7 +114,9 @@ func TestOpenSharedStore_InsideWorkspaceFallsToMemory(t *testing.T) {
 
 func TestOpenSharedStore_DisabledWhenMemoryAlsoFails(t *testing.T) {
 	old := openMemoryStore
-	openMemoryStore = func(context.Context) (*sql.DB, *SQLiteStore, error) { return nil, nil, errors.New("no memory") }
+	openMemoryStore = func(context.Context) (*sql.DB, *SQLiteStore, *memoryPin, error) {
+		return nil, nil, nil, errors.New("no memory")
+	}
 	t.Cleanup(func() { openMemoryStore = old })
 	root := t.TempDir()
 	s := openShared(t, xdg(filepath.Join(root, "data")), root)
@@ -341,5 +349,244 @@ func TestSharedStore_ContentionBeyondTimeoutReturnsLockError(t *testing.T) {
 	}
 	if err := s.Log().AppendEvidence(context.Background(), evRow(0, time.Now())); err != nil {
 		t.Errorf("append after the holder released: %v", err)
+	}
+}
+
+// sharedMemoryStore opens a store whose data directory is inside the workspace,
+// the documented way to reach the in-memory fallback.
+func sharedMemoryStore(t *testing.T) *SharedStore {
+	t.Helper()
+	root := t.TempDir()
+	s := openShared(t, xdg(filepath.Join(root, "data")), root)
+	if s.Status() != StoreMemoryOnly {
+		t.Fatalf("status %q, want memory-only", s.Status())
+	}
+	return s
+}
+
+// A cancel during a read outside a transaction makes database/sql discard the
+// connection. The replacement must find the same database.
+func TestOpenSharedStore_MemoryOnlySurvivesCancelledRead(t *testing.T) {
+	s := sharedMemoryStore(t)
+	ctx := context.Background()
+	now := time.Now()
+	const rowCount = 50
+	if err := s.Log().AppendEvidence(ctx, slices.Repeat([]EvidenceRow{evRow(0, now)}, rowCount)...); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Log().AddNamedModel(ctx, evEndpoint, "kept"); err != nil {
+		t.Fatal(err)
+	}
+
+	// A scan that never finds its first row by itself, so the cancel always lands
+	// inside the driver's step, which is what interrupts the connection.
+	const endless = `WITH RECURSIVE c(x) AS (SELECT id FROM capability_evidence UNION ALL SELECT x FROM c) SELECT count(*) FROM c`
+	cctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	stop := time.AfterFunc(100*time.Millisecond, cancel)
+	defer stop.Stop()
+	var scanned int64
+	err := s.db.QueryRowContext(cctx, endless).Scan(&scanned)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("scan = %d, %v; want it cancelled mid-read", scanned, err)
+	}
+
+	named, err := s.Log().NamedModels(ctx, evEndpoint)
+	if err != nil || len(named) != 1 || named[0].Model != "kept" {
+		t.Fatalf("named after the cancel = %v, %v", named, err)
+	}
+	got, err := s.Log().EvidenceRows(ctx, evEndpoint, evModel)
+	if err != nil || len(got) != rowCount {
+		t.Fatalf("rows after the cancel = %d, %v; want %d", len(got), err, rowCount)
+	}
+	if err := s.Log().AppendEvidence(ctx, evRow(0, now)); err != nil {
+		t.Fatalf("write after the cancel: %v", err)
+	}
+	if got, err := s.Log().EvidenceRows(ctx, evEndpoint, evModel); err != nil || len(got) != rowCount+1 {
+		t.Fatalf("rows after the write = %d, %v; want %d", len(got), err, rowCount+1)
+	}
+}
+
+func TestOpenSharedStore_MemoryOnlyStoresArePrivate(t *testing.T) {
+	a, b := sharedMemoryStore(t), sharedMemoryStore(t)
+	ctx := context.Background()
+	if err := a.Log().AddNamedModel(ctx, evEndpoint, "only-in-a"); err != nil {
+		t.Fatal(err)
+	}
+	named, err := b.Log().NamedModels(ctx, evEndpoint)
+	if err != nil || len(named) != 0 {
+		t.Fatalf("second store sees %v, %v; want nothing", named, err)
+	}
+}
+
+// damageMiddlePages overwrites the middle third of a closed database, leaving the
+// header, schema and store_meta at the front of the file readable.
+func damageMiddlePages(t *testing.T, path string) {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+	if _, err := f.WriteAt(bytes.Repeat([]byte{0xFF}, int(info.Size()/3)), info.Size()/3); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestOpenSharedStore_DamagedStoreWarns(t *testing.T) {
+	base, root := t.TempDir(), t.TempDir()
+	s := openShared(t, xdg(base), root)
+	ctx := context.Background()
+	row := evRow(0, time.Now(), func(r *EvidenceRow) { r.Detail = strings.Repeat("x", 512) })
+	if err := s.Log().AppendEvidence(ctx, slices.Repeat([]EvidenceRow{row}, 2000)...); err != nil {
+		t.Fatal(err)
+	}
+	if s.Warning() != "" {
+		t.Fatalf("healthy store warns: %q", s.Warning())
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	damageMiddlePages(t, filepath.Join(base, "golem", "fingerprints.db"))
+
+	s = openShared(t, xdg(base), root)
+	if s.Status() != StoreFile {
+		t.Fatalf("status %q (%s), want file: only the prune sees the damage", s.Status(), s.Warning())
+	}
+	const sentence = "fingerprint cache could not be pruned and may be damaged: "
+	if !strings.HasPrefix(s.Warning(), sentence) || !strings.Contains(s.Warning(), "malformed") {
+		t.Fatalf("warning %q, want %q and the error", s.Warning(), sentence)
+	}
+}
+
+func TestOpenSharedStore_BusyPruneStaysSilent(t *testing.T) {
+	base, root := t.TempDir(), t.TempDir()
+	s := openShared(t, xdg(base), root)
+	ctx := context.Background()
+	now := time.Now()
+	if err := s.Log().AppendEvidence(ctx, evRow(0, now.AddDate(0, 0, -200), asNo), evRow(0, now.AddDate(0, 0, -1), asNo)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	holder, err := memory.OpenHardenedDB(ctx, filepath.Join(base, "golem", "fingerprints.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = holder.Close() }()
+	tx, err := holder.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.Exec(`UPDATE store_meta SET generation = generation`); err != nil {
+		t.Fatal(err)
+	}
+
+	s = openShared(t, xdg(base), root)
+	if s.Status() != StoreFile || s.Warning() != "" {
+		t.Fatalf("status %q warning %q, want file and none", s.Status(), s.Warning())
+	}
+	rows, err := s.Log().EvidenceRows(ctx, evEndpoint, evModel)
+	if err != nil || len(rows) != 2 {
+		t.Fatalf("rows = %d, %v; want both: the prune must have failed busy", len(rows), err)
+	}
+}
+
+// An empty workspace root is no workspace: the current directory is not one.
+func TestOpenSharedStore_EmptyRootMeansNoWorkspace(t *testing.T) {
+	cwd := t.TempDir()
+	t.Chdir(cwd)
+	data := filepath.Join(cwd, "data")
+	s := openShared(t, xdg(data), "")
+	if s.Status() != StoreFile || s.Warning() != "" {
+		t.Fatalf("empty root: status %q warning %q, want file and none", s.Status(), s.Warning())
+	}
+	if _, err := os.Stat(filepath.Join(data, "golem", "fingerprints.db")); err != nil {
+		t.Fatalf("db under the current directory: %v", err)
+	}
+	if s := openShared(t, xdg(data), cwd); s.Status() != StoreMemoryOnly {
+		t.Fatalf("root holding the data dir: status %q, want memory-only", s.Status())
+	}
+}
+
+// Close releases the pinned connection as well, and a second Close is still fine.
+func TestOpenSharedStore_MemoryOnlyCloseReleasesPin(t *testing.T) {
+	s := sharedMemoryStore(t)
+	ctx := context.Background()
+	if err := s.pin.conn.PingContext(ctx); err != nil {
+		t.Fatalf("pinned connection before Close: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if err := s.pin.conn.PingContext(ctx); !errors.Is(err, sql.ErrConnDone) {
+		t.Errorf("pinned connection after Close: %v, want %v", err, sql.ErrConnDone)
+	}
+	if err := s.pin.db.PingContext(ctx); err == nil {
+		t.Error("pin handle still open after Close")
+	}
+	if err := s.db.PingContext(ctx); err == nil {
+		t.Error("store handle still open after Close")
+	}
+	if err := s.Close(); err != nil {
+		t.Errorf("second Close: %v", err)
+	}
+}
+
+// lockedError returns a real SQLITE_LOCKED: dropping a table the same connection
+// is still reading.
+func lockedError(t *testing.T) error {
+	t.Helper()
+	ctx := t.Context()
+	conn, err := openTestDB(t).Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	if _, err := conn.ExecContext(ctx, `CREATE TABLE x (v INTEGER); INSERT INTO x VALUES (1), (2)`); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := conn.QueryContext(ctx, `SELECT v FROM x`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = rows.Close() }()
+	if !rows.Next() {
+		t.Fatalf("no first row: %v", rows.Err())
+	}
+	_, err = conn.ExecContext(ctx, `DROP TABLE x`)
+	var sqliteErr *sqlite.Error
+	if !errors.As(err, &sqliteErr) || sqliteErr.Code()&0xff != sqlite3.SQLITE_LOCKED {
+		t.Fatalf("err = %v, want SQLITE_LOCKED", err)
+	}
+	return err
+}
+
+func TestPruneWarning(t *testing.T) {
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	failure := errors.New("database disk image is malformed")
+	for _, tc := range []struct {
+		name string
+		ctx  context.Context
+		err  error
+		want string
+	}{
+		{"no failure", context.Background(), nil, ""},
+		{"cancelled open, whatever the driver reports", cancelled, errors.New("interrupted"), ""},
+		{"locked store", context.Background(), fmt.Errorf("fingerprint: prune: %w", lockedError(t)), ""},
+		{"other failure", context.Background(), failure, "fingerprint cache could not be pruned and may be damaged: database disk image is malformed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := pruneWarning(tc.ctx, tc.err); got != tc.want {
+				t.Fatalf("pruneWarning = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }

@@ -280,10 +280,14 @@ func readListing(ctx context.Context, q queryer, endpoint, adapter, account stri
 }
 
 // AddNamedModel names a model for an endpoint. Naming it again keeps the first
-// AddedAt.
+// AddedAt. A name no request could address, empty or holding a NUL, writes
+// nothing.
 func (s *SQLiteStore) AddNamedModel(ctx context.Context, endpoint, model string) error {
 	if endpoint == "" || model == "" {
 		return errors.New("fingerprint: add named model: endpoint and model are required")
+	}
+	if strings.ContainsRune(model, 0) {
+		return errors.New("fingerprint: add named model: model name holds a NUL")
 	}
 	err := s.writeTx(ctx, func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx,
@@ -408,15 +412,17 @@ func (s *SQLiteStore) LatestModelAccess(ctx context.Context, endpoint, apiKey, m
 	return a, nil
 }
 
+// latestAccessQuery reads the newest row that can be a claim.
+const latestAccessQuery = `SELECT state, http_status, observed_at, expires_at FROM model_access
+	WHERE key_version = ? AND endpoint = ? AND account = ? AND model_name = ?
+		AND state IN ('answered', 'refused') AND observed_at <= ?
+	ORDER BY observed_at DESC, id DESC LIMIT 1`
+
 func readAccess(ctx context.Context, q queryer, endpoint, account, model string, now time.Time) (*ModelAccess, error) {
 	var a ModelAccess
 	var status, expiresAt sql.NullInt64
 	var observedAt int64
-	err := q.QueryRowContext(ctx,
-		`SELECT state, http_status, observed_at, expires_at FROM model_access
-		WHERE key_version = ? AND endpoint = ? AND account = ? AND model_name = ?
-			AND state IN ('answered', 'refused') AND observed_at <= ?
-		ORDER BY observed_at DESC, id DESC LIMIT 1`,
+	err := q.QueryRowContext(ctx, latestAccessQuery,
 		EvidenceKeyVersion, endpoint, account, model, now.Add(maxClockSkew).UnixMilli()).Scan(&a.State, &status, &observedAt, &expiresAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -477,10 +483,7 @@ func (s *SQLiteStore) ReadSnapshot(ctx context.Context, endpoint, adapter string
 			continue
 		}
 		seen[model] = true
-		rows, err := tx.QueryContext(ctx,
-			`SELECT `+evidenceColumns+` FROM capability_evidence
-			WHERE key_version = ? AND endpoint = ? AND model_name = ? ORDER BY id`,
-			EvidenceKeyVersion, endpoint, model)
+		rows, err := tx.QueryContext(ctx, modelEvidenceQuery, EvidenceKeyVersion, endpoint, model)
 		if err != nil {
 			return fail(err)
 		}

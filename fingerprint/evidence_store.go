@@ -5,12 +5,17 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
 const evidenceColumns = `id, key_version, endpoint, adapter, model_name, model_digest,
 	capability, evidence, kind, state, method, method_version, detail, http_status,
 	observed_at, fresh_until, expires_at`
+
+// modelEvidenceQuery reads one model's rows at an endpoint, for any adapter.
+const modelEvidenceQuery = `SELECT ` + evidenceColumns + ` FROM capability_evidence
+	WHERE key_version = ? AND endpoint = ? AND model_name = ? ORDER BY id`
 
 // AppendEvidence appends rows in one transaction with one generation bump. Row
 // IDs are assigned by the store; any set on the rows are ignored. Appending
@@ -36,11 +41,7 @@ func (s *SQLiteStore) AppendEvidence(ctx context.Context, rows ...EvidenceRow) e
 // version, through every adapter, in insertion order. Rows of unknown shape are
 // included: ReadCapabilities decides what counts.
 func (s *SQLiteStore) EvidenceRows(ctx context.Context, endpoint, model string) ([]EvidenceRow, error) {
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT `+evidenceColumns+` FROM capability_evidence
-		WHERE key_version = ? AND endpoint = ? AND model_name = ?
-		ORDER BY id`,
-		EvidenceKeyVersion, endpoint, model)
+	rows, err := s.db.QueryContext(ctx, modelEvidenceQuery, EvidenceKeyVersion, endpoint, model)
 	if err != nil {
 		return nil, fmt.Errorf("fingerprint: evidence rows %q/%q: %w", endpoint, model, err)
 	}
@@ -130,7 +131,10 @@ func (s *SQLiteStore) writeTx(ctx context.Context, fn func(*sql.Tx) error) (err 
 		return fmt.Errorf("begin: %w", err)
 	}
 	defer func() {
-		if rbErr := tx.Rollback(); rbErr != nil && !errors.Is(rbErr, sql.ErrTxDone) {
+		// A failure such as a full disk makes SQLite roll back by itself, and
+		// database/sql does not know: the rollback then finds no transaction.
+		rbErr := tx.Rollback()
+		if rbErr != nil && !errors.Is(rbErr, sql.ErrTxDone) && !strings.Contains(rbErr.Error(), "no transaction is active") {
 			err = errors.Join(err, fmt.Errorf("rollback: %w", rbErr))
 		}
 	}()

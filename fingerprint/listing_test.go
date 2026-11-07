@@ -1095,3 +1095,34 @@ func TestPublishListings_RejectsEmptyAdapter(t *testing.T) {
 	}
 	wantGeneration(t, s, 0)
 }
+
+// A name no route could address is refused before any write, as RefreshInventory
+// drops it from a listing. The error carries no name.
+func TestAddNamedModel_RejectsUnaddressableNames(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+	gen, err := s.Generation(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ name, model, want string }{
+		{"empty", "", "fingerprint: add named model: endpoint and model are required"},
+		{"NUL inside", "nul\x00name", "fingerprint: add named model: model name holds a NUL"},
+		{"NUL only", "\x00", "fingerprint: add named model: model name holds a NUL"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := s.AddNamedModel(ctx, evEndpoint, tc.model)
+			if err == nil || err.Error() != tc.want {
+				t.Fatalf("err = %v, want %q", err, tc.want)
+			}
+			named, err := s.NamedModels(ctx, evEndpoint)
+			if err != nil || len(named) != 0 {
+				t.Fatalf("named = %v, %v; want none", named, err)
+			}
+			wantGeneration(t, s, gen)
+		})
+	}
+	if err := s.AddNamedModel(ctx, evEndpoint, "fine"); err != nil {
+		t.Fatalf("an addressable name: %v", err)
+	}
+}

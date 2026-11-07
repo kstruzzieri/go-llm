@@ -2,14 +2,19 @@ package fingerprint
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
 	"errors"
 	"fmt"
 	"path/filepath"
 	"time"
 
+	"modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
+
 	"github.com/kstruzzieri/go-llm/internal/datadir"
 	"github.com/kstruzzieri/go-llm/internal/pathguard"
+	"github.com/kstruzzieri/go-llm/internal/sqlitedsn"
 	"github.com/kstruzzieri/go-llm/memory"
 )
 
@@ -33,17 +38,20 @@ type SharedStore struct {
 	db      *sql.DB
 	sqlite  *SQLiteStore
 	secured *securingStore // nil for memory-only and disabled
+	pin     *memoryPin     // set for memory-only
 }
 
 // OpenSharedStore opens $XDG_DATA_HOME/golem/fingerprints.db (else
 // ~/.local/share/golem/fingerprints.db) with outside-workspace path validation,
-// a 0700 directory, a 0600 file and secured -wal/-shm sidecars. A path inside
-// workspaceRoot, or any open failure, degrades to an in-memory store (Status
-// memory-only), and failing that to Status disabled; Warning says why. The
-// error is returned only for misuse: a nil ctx or getenv. Evidence rows past
-// retention are pruned once at open, and only when there are some, so a quiet
-// open writes nothing. An empty workspaceRoot means the current directory
-// (filepath.Abs("")).
+// a 0600 file and secured -wal/-shm sidecars; a directory it has to create is
+// 0700, and one that exists keeps its mode. A path inside workspaceRoot, or any
+// open failure, degrades to an in-memory store (Status memory-only), and failing
+// that to Status disabled; Warning says why. The error is returned only for
+// misuse: a nil ctx or getenv. Evidence rows past retention are pruned once at
+// open, and only when there are some, so a quiet open writes nothing; a prune
+// that fails for any reason but a cancelled open or a busy store leaves Status
+// as it is and puts the failure in Warning, since it can mean a damaged file. An
+// empty workspaceRoot means no workspace, and skips the outside-workspace check.
 func OpenSharedStore(ctx context.Context, getenv func(string) string, workspaceRoot string) (*SharedStore, error) {
 	if ctx == nil || getenv == nil {
 		return nil, errors.New("fingerprint: open shared store: nil context or getenv")
@@ -52,12 +60,12 @@ func OpenSharedStore(ctx context.Context, getenv func(string) string, workspaceR
 	if err == nil {
 		return s, nil
 	}
-	db, st, merr := openMemoryStore(ctx)
+	db, st, pin, merr := openMemoryStore(ctx)
 	if merr == nil {
 		return &SharedStore{
 			status:  StoreMemoryOnly,
 			warning: fmt.Sprintf("fingerprint cache degraded to in-memory: %v", err),
-			db:      db, sqlite: st,
+			db:      db, sqlite: st, pin: pin,
 		}, nil
 	}
 	return &SharedStore{
@@ -66,21 +74,50 @@ func OpenSharedStore(ctx context.Context, getenv func(string) string, workspaceR
 	}, nil
 }
 
-// openMemoryStore opens the in-memory fallback; a variable so a test can make it fail.
-var openMemoryStore = func(ctx context.Context) (*sql.DB, *SQLiteStore, error) {
-	db, err := sql.Open("sqlite", ":memory:")
-	if err != nil {
-		return nil, nil, err
+// memoryPin keeps a named in-memory database alive. database/sql discards the
+// store's one connection after a cancelled read, and SQLite frees the database
+// with its last connection.
+type memoryPin struct {
+	db   *sql.DB
+	conn *sql.Conn
+}
+
+func (p *memoryPin) close() error {
+	err := p.conn.Close()
+	if errors.Is(err, sql.ErrConnDone) { // a second Close
+		err = nil
 	}
-	// database/sql pools connections and each :memory: connection is a
-	// separate database; clamp to one so migrations and queries agree.
+	return errors.Join(err, p.db.Close())
+}
+
+// openMemoryStore opens the in-memory fallback, under a random name because a
+// shared-cache name is process-wide and every store stays private to its handle;
+// a variable so a test can make it fail.
+var openMemoryStore = func(ctx context.Context) (*sql.DB, *SQLiteStore, *memoryPin, error) {
+	dsn := sqlitedsn.SharedMemoryURI("fp-mem-" + rand.Text())
+	pinDB, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	conn, err := pinDB.Conn(ctx)
+	if err != nil {
+		_ = pinDB.Close()
+		return nil, nil, nil, err
+	}
+	pin := &memoryPin{db: pinDB, conn: conn}
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		_ = pin.close()
+		return nil, nil, nil, err
+	}
 	db.SetMaxOpenConns(1)
 	st, err := NewStore(ctx, db)
 	if err != nil {
 		_ = db.Close()
-		return nil, nil, err
+		_ = pin.close()
+		return nil, nil, nil, err
 	}
-	return db, st, nil
+	return db, st, pin, nil
 }
 
 func openSharedFile(ctx context.Context, getenv func(string) string, root string) (*SharedStore, error) {
@@ -89,8 +126,10 @@ func openSharedFile(ctx context.Context, getenv func(string) string, root string
 		return nil, err
 	}
 	path := filepath.Join(base, "golem", "fingerprints.db")
-	if err := pathguard.ValidateOutside(path, root); err != nil {
-		return nil, err
+	if root != "" {
+		if err := pathguard.ValidateOutside(path, root); err != nil {
+			return nil, err
+		}
 	}
 	db, err := memory.OpenHardenedDB(ctx, path)
 	if err != nil {
@@ -102,22 +141,38 @@ func openSharedFile(ctx context.Context, getenv func(string) string, root string
 		_ = memory.SecureDBFiles(path) // best-effort: failed migrations may leave loose sidecars
 		return nil, err
 	}
-	// ponytail: a failed prune only leaves old rows for the next open.
-	_ = store.Prune(ctx, time.Now())
+	warning := pruneWarning(ctx, store.Prune(ctx, time.Now()))
 	if err := memory.SecureDBFiles(path); err != nil { // migrations and the prune may create -wal/-shm
 		_ = db.Close()
 		return nil, err
 	}
 	return &SharedStore{
-		status: StoreFile, db: db, sqlite: store,
+		status: StoreFile, warning: warning, db: db, sqlite: store,
 		secured: &securingStore{SQLiteStore: store, path: path},
 	}, nil
+}
+
+// pruneWarning stays silent for a failed prune that only leaves old rows for the
+// next open: a cancelled open, or another writer holding the store. Anything else
+// may be a damaged file, and the prune is the first read that would notice.
+func pruneWarning(ctx context.Context, err error) string {
+	if err == nil || ctx.Err() != nil {
+		return ""
+	}
+	var sqliteErr *sqlite.Error
+	if errors.As(err, &sqliteErr) {
+		if code := sqliteErr.Code() & 0xff; code == sqlite3.SQLITE_BUSY || code == sqlite3.SQLITE_LOCKED {
+			return ""
+		}
+	}
+	return "fingerprint cache could not be pruned and may be damaged: " + err.Error()
 }
 
 // Status reports what backs the store.
 func (s *SharedStore) Status() StoreStatus { return s.status }
 
-// Warning is why the store is not file-backed; empty when it is.
+// Warning is why the store is not file-backed, or why a file-backed store could
+// not be pruned at open; empty when there is neither.
 func (s *SharedStore) Warning() string { return s.warning }
 
 // Log is the evidence log, or a nil interface when the store is disabled.
@@ -161,7 +216,11 @@ func (s *SharedStore) Close() error {
 	if s.db == nil {
 		return nil
 	}
-	return s.db.Close()
+	err := s.db.Close()
+	if s.pin != nil {
+		err = errors.Join(err, s.pin.close())
+	}
+	return err
 }
 
 // securingStore re-chmods the DB file and its -wal/-shm sidecars after every

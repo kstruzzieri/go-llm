@@ -31,6 +31,11 @@ var migrations = []migration{
 		description: "append-only capability evidence log, listings, named models, model access and store_meta",
 		fn:          migrateV3,
 	},
+	{
+		version:     4,
+		description: "listing_snapshots adapter column and evidence and model_access lookup indexes",
+		fn:          migrateV4,
+	},
 }
 
 func migrateV1(tx *sql.Tx) error {
@@ -171,6 +176,34 @@ func migrateV3(tx *sql.Tx) error {
 	}
 	if _, err := tx.Exec(`INSERT INTO store_meta (id, generation, account_secret) VALUES (1, 0, ?)`, secret); err != nil {
 		return fmt.Errorf("fingerprint: migrate v3: seed store_meta: %w", err)
+	}
+	return nil
+}
+
+// migrateV4 repairs stores migrated by an earlier V3, whose listing_snapshots
+// had no adapter column, so a store from either V3 ends the same. Its lookup
+// indexes replace one that no query could use past the endpoint, because every
+// reader filters by model and none by adapter.
+func migrateV4(tx *sql.Tx) error {
+	var hasAdapter bool
+	if err := tx.QueryRow(
+		`SELECT EXISTS(SELECT 1 FROM pragma_table_info('listing_snapshots') WHERE name = 'adapter')`,
+	).Scan(&hasAdapter); err != nil {
+		return fmt.Errorf("fingerprint: migrate v4: read listing columns: %w", err)
+	}
+	var stmts []string
+	if !hasAdapter {
+		stmts = append(stmts, `ALTER TABLE listing_snapshots ADD COLUMN adapter TEXT NOT NULL DEFAULT ''`)
+	}
+	stmts = append(stmts,
+		`DROP INDEX IF EXISTS idx_capability_evidence_lookup`,
+		`CREATE INDEX idx_capability_evidence_lookup ON capability_evidence (key_version, endpoint, model_name, observed_at)`,
+		`CREATE INDEX idx_model_access_lookup ON model_access (key_version, endpoint, account, model_name, observed_at)`,
+	)
+	for _, stmt := range stmts {
+		if _, err := tx.Exec(stmt); err != nil {
+			return fmt.Errorf("fingerprint: migrate v4: %w", err)
+		}
 	}
 	return nil
 }
