@@ -220,6 +220,7 @@ func (c *Config) clone() *Config {
 	out.resolved = maps.Clone(c.resolved)
 	for name, rk := range out.resolved {
 		rk.components = slices.Clone(rk.components)
+		rk.names = slices.Clone(rk.names)
 		out.resolved[name] = rk
 	}
 	return &out

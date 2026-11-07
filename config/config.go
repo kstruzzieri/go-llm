@@ -212,6 +212,15 @@ type Config struct {
 type resolvedKey struct {
 	effective  string
 	components []string
+	names      []string // variable names, never values, in reference order
+}
+
+// APIKeyRefNames returns the environment variable names the provider's
+// api_key referenced, in reference order, from the last successful finalize.
+// It is nil for a literal key, no key, or an unknown provider. Names only:
+// no resolved value is reachable through it. The slice is a copy.
+func (c *Config) APIKeyRefNames(provider string) []string {
+	return slices.Clone(c.resolved[provider].names)
 }
 
 // ErrConfigNotFound indicates that Default could not find a models.json file
@@ -579,39 +588,41 @@ func refuseKeyRefs(c *Config) error {
 // referenced variable that is unset or empty, or a malformed reference,
 // returns an error naming providerName. Errors never contain an expanded
 // secret value. Only the provider api_key field uses this helper.
-// components holds each value lookup returned, in reference order; it is
-// nil for a literal value and on error.
-func expandAPIKeyRefs(providerName, value string, lookup func(string) (string, bool)) (expanded string, components []string, err error) {
+// components holds each value lookup returned, and names the matching
+// variable names, in reference order; both are nil for a literal value and
+// on error.
+func expandAPIKeyRefs(providerName, value string, lookup func(string) (string, bool)) (expanded string, components, names []string, err error) {
 	if !strings.Contains(value, "${") {
-		return value, nil, nil
+		return value, nil, nil, nil
 	}
 	var b strings.Builder
 	for i := 0; i < len(value); {
 		if value[i] == '$' && i+1 < len(value) && value[i+1] == '{' {
 			rel := strings.IndexByte(value[i+2:], '}')
 			if rel < 0 {
-				return "", nil, diagWrap(CodeKeyReferenceMalformed, SubjectProvider, providerName,
+				return "", nil, nil, diagWrap(CodeKeyReferenceMalformed, SubjectProvider, providerName,
 					fmt.Errorf("config: provider %q api_key: malformed environment reference", providerName))
 			}
 			name := value[i+2 : i+2+rel]
 			if !validEnvName(name) {
-				return "", nil, diagWrap(CodeKeyReferenceMalformed, SubjectProvider, providerName,
+				return "", nil, nil, diagWrap(CodeKeyReferenceMalformed, SubjectProvider, providerName,
 					fmt.Errorf("config: provider %q api_key: malformed environment reference", providerName))
 			}
 			v, ok := lookup(name)
 			if !ok || v == "" {
-				return "", nil, diagWrap(CodeKeyReferenceUnavailable, SubjectProvider, providerName,
+				return "", nil, nil, diagWrap(CodeKeyReferenceUnavailable, SubjectProvider, providerName,
 					fmt.Errorf("config: provider %q api_key references unset or empty environment variable %q", providerName, name))
 			}
 			b.WriteString(v)
 			components = append(components, v)
+			names = append(names, name)
 			i += 2 + rel + 1
 			continue
 		}
 		b.WriteByte(value[i])
 		i++
 	}
-	return b.String(), components, nil
+	return b.String(), components, names, nil
 }
 
 // validEnvName reports whether s is a POSIX-style environment identifier
@@ -671,7 +682,7 @@ func (cfg *Config) expandProviderAPIKeys(lookup func(string) (string, bool)) err
 	var resolved map[string]resolvedKey
 	for _, k := range keys {
 		p := cfg.Providers[k]
-		expanded, components, err := expandAPIKeyRefs(k, p.APIKey, memoLookup)
+		expanded, components, names, err := expandAPIKeyRefs(k, p.APIKey, memoLookup)
 		if err != nil {
 			return err
 		}
@@ -681,7 +692,7 @@ func (cfg *Config) expandProviderAPIKeys(lookup func(string) (string, bool)) err
 			if resolved == nil {
 				resolved = make(map[string]resolvedKey)
 			}
-			resolved[k] = resolvedKey{effective: expanded, components: components}
+			resolved[k] = resolvedKey{effective: expanded, components: components, names: names}
 		}
 	}
 	cfg.resolved = resolved
