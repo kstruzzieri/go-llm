@@ -257,6 +257,9 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 		if aerr != nil {
 			return finishWithError(&res, state, historyLen, aerr)
 		}
+		// #582: accepted advice is foreign content. Admitted here, not in
+		// prepareAdvisory, which InspectAdvisory shares outside any run.
+		exposureFrom(ctx).admitForeign("consult")
 		advisory = &annotated
 	}
 	// One advisory key per Run, reused on every render like a tool key.
