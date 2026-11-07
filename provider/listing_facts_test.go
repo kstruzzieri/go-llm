@@ -1,11 +1,16 @@
 package provider
 
 import (
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"slices"
 	"strings"
 	"testing"
 
 	"github.com/kstruzzieri/go-llm/fingerprint"
+	"github.com/kstruzzieri/go-llm/ollama"
 )
 
 // positive tokens as the catalog/runtime vocabulary writes them, in two cases.
@@ -65,5 +70,39 @@ func TestOllamaShowRecipe_CapabilitiesAreTheCanonicalNames(t *testing.T) {
 	slices.Sort(want)
 	if !slices.Equal(got, want) {
 		t.Fatalf("recipe capabilities %v != canonical names %v", got, want)
+	}
+}
+
+// A real Ollama reports the digest on /api/tags and none on /api/show; the
+// listing and the single-model path must agree on it, and on a failed show.
+func TestOllamaProvider_DigestComesFromTagsOnEveryPath(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/tags":
+			_, _ = fmt.Fprint(w, `{"models":[{"name":"ok","digest":"sha256:ok"},{"name":"broken","digest":"sha256:broken"}]}`)
+		case "/api/show":
+			var body struct{ Name string }
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			if body.Name == "broken" {
+				http.Error(w, "boom", http.StatusInternalServerError)
+				return
+			}
+			_, _ = fmt.Fprint(w, `{"capabilities":["completion"]}`)
+		}
+	}))
+	defer srv.Close()
+	p := NewOllamaProvider(ollama.NewClient(ollama.WithBaseURL(srv.URL)))
+	infos, err := p.Models(t.Context())
+	if err != nil || len(infos) != 2 {
+		t.Fatal(infos, err)
+	}
+	for _, info := range infos {
+		if want := "sha256:" + info.Name; info.Digest != want {
+			t.Errorf("Models %s digest = %q, want %q", info.Name, info.Digest, want)
+		}
+	}
+	one, err := p.ModelInfo(t.Context(), "ok")
+	if err != nil || one.Digest != "sha256:ok" {
+		t.Fatalf("ModelInfo = %+v, %v, want the same digest Models reports", one, err)
 	}
 }

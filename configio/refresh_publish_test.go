@@ -76,21 +76,25 @@ func listedNames(t *testing.T, s *fingerprint.SQLiteStore, endpoint, key string)
 	return out
 }
 
+// stubModel is what a real Ollama serves for a model: its digest comes from
+// /api/tags (/api/show does not carry one), the rest from /api/show.
+type stubModel struct{ digest, show string }
+
 // ollamaStub serves /api/tags and /api/show for the given models.
-func ollamaStub(t *testing.T, show map[string]string) *httptest.Server {
+func ollamaStub(t *testing.T, models map[string]stubModel) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/tags":
 			var parts []string
-			for name := range show {
-				parts = append(parts, fmt.Sprintf(`{"name":%q}`, name))
+			for name, m := range models {
+				parts = append(parts, fmt.Sprintf(`{"name":%q,"digest":%q}`, name, m.digest))
 			}
 			_, _ = fmt.Fprintf(w, `{"models":[%s]}`, strings.Join(parts, ","))
 		case "/api/show":
 			var body struct{ Name string }
 			_ = json.NewDecoder(r.Body).Decode(&body)
-			_, _ = fmt.Fprint(w, show[body.Name])
+			_, _ = fmt.Fprint(w, models[body.Name].show)
 		default:
 			http.NotFound(w, r)
 		}
@@ -114,8 +118,8 @@ func providerReading(t *testing.T, s *fingerprint.SQLiteStore, endpoint, model, 
 }
 
 func TestRefreshPublish_OllamaInsertSurvivesOffline(t *testing.T) {
-	srv := ollamaStub(t, map[string]string{
-		"fim": `{"digest":"sha256:abc","template":"{{ .Prompt }}{{ .Suffix }}","capabilities":["completion","insert"]}`,
+	srv := ollamaStub(t, map[string]stubModel{
+		"fim": {"sha256:abc", `{"template":"{{ .Prompt }}{{ .Suffix }}","capabilities":["completion","insert"]}`},
 	})
 	path := filepath.Join(t.TempDir(), "ev.db")
 	s := openStoreAt(t, path)
@@ -126,6 +130,10 @@ func TestRefreshPublish_OllamaInsertSurvivesOffline(t *testing.T) {
 	srv.Close()
 
 	s2 := openStoreAt(t, path) // reopened, the stub is closed
+	l, err := s2.CurrentListing(t.Context(), endpoint, "")
+	if err != nil || l == nil || len(l.Members) != 1 || l.Members[0].Digest != "sha256:abc" {
+		t.Fatalf("listing = %+v, %v, want the member carrying the /api/tags digest", l, err)
+	}
 	row := providerReading(t, s2, endpoint, "fim", "sha256:abc", "insert")
 	if row == nil || row.State != fingerprint.CapProbeYes || row.Method != "ollama-show" || row.MethodVersion != 1 || row.Digest != "sha256:abc" {
 		t.Fatalf("insert reading = %+v, want a provider yes carrying the digest", row)
@@ -136,7 +144,7 @@ func TestRefreshPublish_OllamaInsertSurvivesOffline(t *testing.T) {
 }
 
 func TestRefreshPublish_UnfamiliarEmbeddingSurvivesOffline(t *testing.T) {
-	srv := ollamaStub(t, map[string]string{"zz-unknown:1b": `{"digest":"d1","capabilities":["embedding"]}`})
+	srv := ollamaStub(t, map[string]stubModel{"zz-unknown:1b": {"d1", `{"capabilities":["embedding"]}`}})
 	path := filepath.Join(t.TempDir(), "ev.db")
 	s := openStoreAt(t, path)
 	endpoint := canonical(t, srv.URL, "")
@@ -151,7 +159,7 @@ func TestRefreshPublish_UnfamiliarEmbeddingSurvivesOffline(t *testing.T) {
 }
 
 func TestRefreshPublish_NilProjectorAllowedWithPublish(t *testing.T) {
-	srv := ollamaStub(t, map[string]string{"m": `{"digest":"d","capabilities":["completion","tools"]}`})
+	srv := ollamaStub(t, map[string]stubModel{"m": {"d", `{"capabilities":["completion","tools"]}`}})
 	s := newStore(t)
 	inv, err := RefreshInventory(t.Context(), ollamaLister(srv), nil, WithPublish(s, cfgFor(map[string][3]string{"local": {srv.URL, "", ""}})))
 	if err != nil {
@@ -339,6 +347,7 @@ func TestListingFailureReason(t *testing.T) {
 		{"500", status(500, ""), "server_error"},
 		{"slow", slow, "timeout"},
 		{"bad json", status(200, "{not json"), "malformed_response"},
+		{"302", status(302, ""), "malformed_response"},
 	}
 	for _, c := range cases {
 		for format, lister := range httpProviders(t, c.handler, 150*time.Millisecond) {
@@ -429,5 +438,173 @@ func TestRefreshPublish_StoreFailureKeepsInventoryAndReportsError(t *testing.T) 
 	inv, err = RefreshInventory(ctx, lister, nil, WithPublish(failingStore{onPublish: cancel}, cfg))
 	if err != context.Canceled || len(inv.Models) != 0 || len(inv.Providers) != 0 {
 		t.Fatalf("cancelled during publish: inv=%+v err=%v, want zero Inventory and context.Canceled", inv, err)
+	}
+}
+
+func TestRefreshPublish_StartedAtIsBeforeTheListingCall(t *testing.T) {
+	s := newStore(t)
+	var seen time.Time
+	p := &fakeProvider{name: "a", models: []provider.ModelInfo{{Name: "m"}}, onModels: func() {
+		seen = time.Now()
+		time.Sleep(25 * time.Millisecond)
+	}}
+	lister := &fakeLister{names: []string{"a"}, providers: map[string]provider.Provider{"a": p}}
+	cfg := cfgFor(map[string][3]string{"a": {"http://a.test:1", "openai-compat", ""}})
+	if _, err := RefreshInventory(t.Context(), lister, nil, WithPublish(s, cfg)); err != nil {
+		t.Fatal(err)
+	}
+	l, err := s.CurrentListing(t.Context(), canonical(t, "http://a.test:1", "openai-compat"), "")
+	if err != nil || l == nil {
+		t.Fatal(l, err)
+	}
+	if l.StartedAt.After(seen) {
+		t.Fatalf("StartedAt %v is after the listing call began at %v", l.StartedAt, seen)
+	}
+}
+
+func TestRefreshPublish_OllamaFactExpiry(t *testing.T) {
+	s := newStore(t)
+	p := &fakeProvider{name: "a", models: []provider.ModelInfo{{Name: "m", Capabilities: []string{"completion"}}}}
+	lister := &fakeLister{names: []string{"a"}, providers: map[string]provider.Provider{"a": p}}
+	cfg := cfgFor(map[string][3]string{"a": {"http://a.test:1", "", ""}}) // empty format is ollama
+	if _, err := RefreshInventory(t.Context(), lister, nil, WithPublish(s, cfg)); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := s.EvidenceRows(t.Context(), canonical(t, "http://a.test:1", ""), "m")
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]bool{}
+	for _, r := range rows {
+		seen[r.Capability] = true
+		switch {
+		case r.State == fingerprint.CapProbeYes:
+			if !r.FreshUntil.Equal(r.ObservedAt.Add(30*24*time.Hour)) || !r.ExpiresAt.IsZero() {
+				t.Errorf("%s yes: fresh_until %v expires %v, want observed+30d and none", r.Capability, r.FreshUntil, r.ExpiresAt)
+			}
+		case r.State == fingerprint.CapProbeNo:
+			if !r.ExpiresAt.Equal(r.ObservedAt.Add(7*24*time.Hour)) || !r.FreshUntil.IsZero() {
+				t.Errorf("%s no: fresh_until %v expires %v, want expires observed+7d", r.Capability, r.FreshUntil, r.ExpiresAt)
+			}
+		}
+	}
+	if !seen["chat"] || !seen["tool_call"] {
+		t.Fatalf("rows for %v, want both a yes (chat) and a no (tool_call)", seen)
+	}
+}
+
+func TestRefreshPublish_PublishesUnderTheCanonicalEndpoint(t *testing.T) {
+	s := newStore(t)
+	raw := "HTTP://Host.Test:1/"
+	endpoint := canonical(t, raw, "openai-compat")
+	if endpoint == raw || endpoint == "" {
+		t.Fatalf("test needs a base URL that canonicalizes differently, got %q", endpoint)
+	}
+	p := &fakeProvider{name: "a", models: []provider.ModelInfo{{Name: "m"}}}
+	lister := &fakeLister{names: []string{"a"}, providers: map[string]provider.Provider{"a": p}}
+	if _, err := RefreshInventory(t.Context(), lister, nil, WithPublish(s, cfgFor(map[string][3]string{"a": {raw, "openai-compat", ""}}))); err != nil {
+		t.Fatal(err)
+	}
+	if got := listedNames(t, s, endpoint, ""); len(got) != 1 {
+		t.Fatalf("listing under the canonical key = %v", got)
+	}
+}
+
+func TestRefreshPublish_OnlyOllamaListingsCarryFacts(t *testing.T) {
+	s := newStore(t)
+	p := &fakeProvider{name: "a", models: []provider.ModelInfo{{Name: "m", Capabilities: []string{"completion", "tools"}, Template: ".Suffix"}}}
+	lister := &fakeLister{names: []string{"a"}, providers: map[string]provider.Provider{"a": p}}
+	cfg := cfgFor(map[string][3]string{"a": {"http://a.test:1", "openai-compat", ""}})
+	if _, err := RefreshInventory(t.Context(), lister, nil, WithPublish(s, cfg)); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := s.EvidenceRows(t.Context(), canonical(t, "http://a.test:1", "openai-compat"), "m")
+	if err != nil || len(rows) != 0 {
+		t.Fatalf("rows = %+v, %v, want none for an openai-compat provider", rows, err)
+	}
+}
+
+func TestRefreshPublish_OwnedByIsPublished(t *testing.T) {
+	srv := httptest.NewServer(status(200, `{"data":[{"id":"m","owned_by":"acme"}]}`))
+	defer srv.Close()
+	s := newStore(t)
+	lister := &fakeLister{names: []string{"p"}, providers: map[string]provider.Provider{"p": openaicompat.NewProvider(openaicompat.NewClient(srv.URL))}}
+	if _, err := RefreshInventory(t.Context(), lister, nil, WithPublish(s, cfgFor(map[string][3]string{"p": {srv.URL, "openai-compat", ""}}))); err != nil {
+		t.Fatal(err)
+	}
+	l, err := s.CurrentListing(t.Context(), canonical(t, srv.URL, "openai-compat"), "")
+	if err != nil || l == nil || len(l.Members) != 1 || l.Members[0].OwnedBy != "acme" {
+		t.Fatalf("listing = %+v, %v, want owned_by acme", l, err)
+	}
+}
+
+// A 200 whose body is not a listing must not wipe the previous snapshot; an
+// explicit empty or null list is a real empty listing.
+func TestRefreshPublish_NonListingBodyKeepsPreviousSnapshot(t *testing.T) {
+	for _, format := range []string{"openai-compat", "ollama"} {
+		body := `{"data":[{"id":"m"}]}`
+		if format == "ollama" {
+			body = `{"models":[{"name":"m"}]}`
+		}
+		cur := &body
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/api/show" {
+				_, _ = fmt.Fprint(w, `{}`)
+				return
+			}
+			_, _ = fmt.Fprint(w, *cur)
+		}))
+		defer srv.Close()
+		var p provider.Provider = openaicompat.NewProvider(openaicompat.NewClient(srv.URL))
+		if format == "ollama" {
+			p = provider.NewOllamaProvider(ollama.NewClient(ollama.WithBaseURL(srv.URL)))
+		}
+		lister := &fakeLister{names: []string{"p"}, providers: map[string]provider.Provider{"p": p}}
+		s := newStore(t)
+		cfg := cfgFor(map[string][3]string{"p": {srv.URL, format, ""}})
+		endpoint := canonical(t, srv.URL, format)
+		if _, err := RefreshInventory(t.Context(), lister, nil, WithPublish(s, cfg)); err != nil {
+			t.Fatal(err)
+		}
+		for _, bad := range []string{`{}`, `{"error":{"message":"backend down"}}`} {
+			*cur = bad
+			inv, err := RefreshInventory(t.Context(), lister, nil, WithPublish(s, cfg))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := inv.Providers[0]; got.Reachable || got.Reason != "malformed_response" {
+				t.Errorf("%s %s: provider = %+v", format, bad, got)
+			}
+			if got := listedNames(t, s, endpoint, ""); len(got) != 1 {
+				t.Errorf("%s %s: snapshot = %v, want the previous one kept", format, bad, got)
+			}
+		}
+		empty := `{"data":[]}`
+		null := `{"data":null}`
+		if format == "ollama" {
+			empty, null = `{"models":[]}`, `{"models":null}`
+		}
+		for _, ok := range []string{empty, null} {
+			*cur = ok
+			inv, err := RefreshInventory(t.Context(), lister, nil, WithPublish(s, cfg))
+			if err != nil || !inv.Providers[0].Reachable {
+				t.Fatalf("%s %s: %+v, %v, want a reachable empty listing", format, ok, inv.Providers, err)
+			}
+			if l, _ := s.CurrentListing(t.Context(), endpoint, ""); l == nil || len(l.Members) != 0 {
+				t.Errorf("%s %s: listing = %+v, want recorded empty", format, ok, l)
+			}
+		}
+	}
+}
+
+type nilListing struct{ *fakeProvider }
+
+func (nilListing) Models(context.Context) ([]provider.ModelInfo, error) { return nil, nil }
+
+func TestRefresh_NilListingWithoutPublishingIsUnchanged(t *testing.T) {
+	lister := &fakeLister{names: []string{"p"}, providers: map[string]provider.Provider{"p": nilListing{&fakeProvider{name: "p"}}}}
+	inv, err := RefreshInventory(t.Context(), lister, newFakeProjector())
+	if err != nil || !inv.Providers[0].Reachable || inv.Providers[0].Reason != "" {
+		t.Fatalf("%+v, %v, want reachable as before", inv.Providers, err)
 	}
 }

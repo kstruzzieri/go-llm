@@ -36,8 +36,8 @@ func WithPublish(store fingerprint.EvidenceWriter, cfg *config.Config) RefreshOp
 	return func(o *refreshOptions) { o.store, o.cfg = store, cfg }
 }
 
-// listingReason classifies a failed listing as one of the bounded reasons, or ""
-// when it is none of them. It reads status codes and error types, never text.
+// listingReason classifies a failed listing as one of the bounded reasons; an
+// error that is none of them is unreachable, so a failure always has a reason. It reads status codes and error types, never text.
 func listingReason(err error) string {
 	var status interface{ HTTPStatusCode() int }
 	if errors.As(err, &status) {
@@ -52,6 +52,8 @@ func listingReason(err error) string {
 			return configview.ListingRejected
 		case code >= 500:
 			return configview.ListingServerError
+		case code >= 300:
+			return configview.ListingMalformedResponse // not a listing: a redirect or other non-2xx
 		}
 	}
 	var syntax *json.SyntaxError
@@ -66,7 +68,7 @@ func listingReason(err error) string {
 	case errors.As(err, &netErr):
 		return configview.ListingUnreachable
 	}
-	return ""
+	return configview.ListingUnreachable
 }
 
 // publishTarget is where one provider's listing is published.
@@ -96,7 +98,7 @@ func (o *refreshOptions) targetFor(name string) (publishTarget, bool) {
 func listingPublish(t publishTarget, started time.Time, infos []provider.ModelInfo) fingerprint.ListingPublish {
 	pub := fingerprint.ListingPublish{Endpoint: t.binding.Endpoint, APIKey: t.apiKey, StartedAt: started}
 	for _, info := range infos {
-		pub.Members = append(pub.Members, fingerprint.ListingMember{Model: info.Name, Digest: info.Digest})
+		pub.Members = append(pub.Members, fingerprint.ListingMember{Model: info.Name, OwnedBy: info.OwnedBy, Digest: info.Digest})
 		if t.binding.Adapter != fingerprint.AdapterOllama {
 			continue
 		}
@@ -187,6 +189,12 @@ func RefreshInventory(ctx context.Context, providers ProviderLister, models List
 		infos, err := p.Models(ctx)
 		if err != nil {
 			inv.Providers = append(inv.Providers, configview.InventoryProvider{Name: name, Reachable: false, Reason: listingReason(err)})
+			continue
+		}
+		if infos == nil && o.store != nil {
+			// A 200 with no listing in it is not an empty listing: publishing it
+			// would wipe the previous snapshot.
+			inv.Providers = append(inv.Providers, configview.InventoryProvider{Name: name, Reachable: false, Reason: configview.ListingMalformedResponse})
 			continue
 		}
 		infos = append([]provider.ModelInfo(nil), infos...)

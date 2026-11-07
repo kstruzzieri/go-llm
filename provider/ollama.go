@@ -167,6 +167,10 @@ func (p *OllamaProvider) Models(ctx context.Context) ([]ModelInfo, error) {
 		return nil, fmt.Errorf("provider: ollama: list models: %w", err)
 	}
 
+	if oModels == nil {
+		return nil, nil // no listing key: not a listing (see Provider.Models)
+	}
+
 	models := make([]ModelInfo, len(oModels))
 	for i, m := range oModels {
 		// Fetch detailed info for each model.
@@ -174,11 +178,17 @@ func (p *OllamaProvider) Models(ctx context.Context) ([]ModelInfo, error) {
 		if showErr != nil {
 			// Fallback: use basic info from list.
 			models[i] = ModelInfo{
-				Name: m.Name,
+				Name:   m.Name,
+				Digest: m.Digest,
 			}
 			continue
 		}
 		models[i] = ollamaModelInfo(detail)
+		// /api/tags is where Ollama reports the digest; keep a show digest if
+		// one is ever present.
+		if models[i].Digest == "" {
+			models[i].Digest = m.Digest
+		}
 	}
 	return models, nil
 }
@@ -190,6 +200,17 @@ func (p *OllamaProvider) ModelInfo(ctx context.Context, name string) (*ModelInfo
 		return nil, fmt.Errorf("provider: ollama: show model %q: %w", name, err)
 	}
 	info := ollamaModelInfo(detail)
+	if info.Digest == "" {
+		// Same digest Models reports for this model, so the two paths agree.
+		if listed, err := p.client.ListModels(ctx); err == nil {
+			for _, m := range listed {
+				if m.Name == name {
+					info.Digest = m.Digest
+					break
+				}
+			}
+		}
+	}
 	return &info, nil
 }
 
