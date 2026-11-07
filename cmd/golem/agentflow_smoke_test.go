@@ -1201,8 +1201,16 @@ func TestAgentflowStoppedStepPartialEditFailsClosed_RealCLI(t *testing.T) {
 		t.Fatal(err)
 	}
 	d := &driver{af: client, plan: &plan, runStep: runStep}
-	if _, err := d.resume(runCtx, dir, planBytes, nil); err == nil || !strings.Contains(err.Error(), "reached state \"file_receipts_missing\" before gates") {
-		t.Fatalf("want the before-gates refusal in state file_receipts_missing, got resume err = %v", err)
+	_, err = d.resume(runCtx, dir, planBytes, nil)
+	if err == nil {
+		t.Fatal("resume succeeded on the inherited edit")
+	}
+	// #774: the refusal names the attempt, the file and both ways out, from what
+	// the real AgentFlow reports.
+	for _, want := range []string{"step P1 attempt A2 ended without recording", "(unrecorded: src/answer.txt)", "record-file-change", "agentflow block-step"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("resume err = %v, want it to contain %q", err, want)
+		}
 	}
 	if got := lastStepRunEvent(readStepRunEvents(t, dir), "A2").Event; got != "claimed" {
 		t.Fatalf("A2 last event = %q after the refusal, want claimed: the refused attempt stays open", got)

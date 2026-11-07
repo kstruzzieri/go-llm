@@ -487,11 +487,19 @@ never receipted. To retry from a clean tree, restore the modified tracked files
 (for example `git restore`) and delete files the failed run created *before*
 you resume. Otherwise the new attempt must record its own receipts for every
 in-scope file that is still changed, by writing it again; writing the same
-bytes again is enough. If it does not, resume fails before any gate (exit `1`)
-and leaves the new attempt open, and `-agentflow-status` then reports
-`file_receipts_missing` (exit `3`). Do not just restore the files at that
-point. A resume would then settle the open attempt on its gates without running
-the model. Block the open attempt first, then restore, then resume:
+bytes again is enough. A model that finds the content already right may not,
+because its prompt does not mention the earlier attempt. Resume then fails
+before any gate (exit `1`), leaves the new attempt open, and names the step, the
+attempt, the unrecorded files and both ways out. `-agentflow-status` reports
+`file_receipts_missing` (exit `3`).
+
+To keep the files as they are, run the `record-file-change` command status shows
+for each one, then resume. Resume runs the attempt's gates and finishes it
+without running the model.
+
+To discard them, do not just restore the files. A resume would then settle the
+open attempt on its gates without running the model. Block the open attempt
+first, then restore, then resume:
 
 ```text
 agentflow block-step <step> --root <workspace> --attempt <open attempt> --reason "<text>" --agent golem
