@@ -5,11 +5,14 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/kstruzzieri/go-llm/config"
 	"github.com/kstruzzieri/go-llm/provider"
 )
 
@@ -1261,5 +1264,125 @@ func TestAdmissionExtendSerializesWithRevoke(t *testing.T) {
 		if _, err := adm.gate.Bind(context.Background(), e.Purpose, e.Destination.Provider()); !errors.Is(err, provider.ErrDestinationDenied) {
 			t.Errorf("edge %q -> %s authorized after revoke: %v", e.Purpose, e.Destination, err)
 		}
+	}
+}
+
+const keySourceCanary = "CANARY-776-5e1c0a9d7b3f2468"
+
+// loadKeySourceConfig loads a config with the given providers object body,
+// with the canary behind $CANARY_VAR and a second variable behind $OTHER_VAR.
+func loadKeySourceConfig(t *testing.T, providers string) *config.Config {
+	t.Helper()
+	t.Setenv("CANARY_VAR", keySourceCanary)
+	t.Setenv("OTHER_VAR", keySourceCanary+"-other")
+	path := filepath.Join(t.TempDir(), "models.json")
+	body := `{"providers": {` + providers + `}, "models": {"m": {"name": "m", "provider": "ref", "type": "dense", "context_window": 8192, "capabilities": ["chat"]}}, "defaults": {"agent": "m"}}`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cfg
+}
+
+func TestKeySourceLines(t *testing.T) {
+	cfg := loadKeySourceConfig(t, `
+		"ref":  {"base_url": "https://one.example.com", "api_format": "openai-compat", "api_key": "${CANARY_VAR}"},
+		"two":  {"base_url": "https://two.example.com", "api_format": "openai-compat", "api_key": "${CANARY_VAR}${OTHER_VAR}"},
+		"lit":  {"base_url": "http://127.0.0.1:1", "api_format": "openai-compat", "api_key": "plain-literal"},
+		"none": {"base_url": "http://127.0.0.1:2", "api_format": "openai-compat"}`)
+	got := keySourceLines(cfg)
+	want := map[string]string{
+		"ref": "sends api_key from $CANARY_VAR",
+		"two": "sends api_key from $CANARY_VAR, $OTHER_VAR",
+		"lit": "sends a literal api_key",
+	}
+	if len(got) != len(want) {
+		t.Errorf("keySourceLines = %v, want %v", got, want)
+	}
+	for k, w := range want {
+		if got[k] != w {
+			t.Errorf("keySourceLines[%q] = %q, want %q", k, got[k], w)
+		}
+	}
+	for k, v := range got {
+		if strings.Contains(v, keySourceCanary) || strings.Contains(v, "plain-literal") {
+			t.Errorf("line for %q carries a secret value: %q", k, v)
+		}
+	}
+	if got := keySourceLines(nil); got != nil {
+		t.Errorf("keySourceLines(nil) = %v, want nil", got)
+	}
+}
+
+func TestRenderManifestKeySourceLines(t *testing.T) {
+	m, err := provider.NewDestinationManifest(
+		provider.DestinationEdge{Purpose: "agent", Destination: admDest(t, "lit", "http://127.0.0.1:8090")},
+		provider.DestinationEdge{Purpose: "chat", Destination: admDest(t, "none", "http://127.0.0.1:8091")},
+		provider.DestinationEdge{Purpose: "summarize", Destination: admDest(t, "ref", "https://one.example.com")},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out strings.Builder
+	renderManifest(&out, m, map[string]string{
+		"ref": "sends api_key from $CANARY_VAR",
+		"lit": "sends a literal api_key",
+	})
+	want := "destinations:\n" +
+		"  lit  http://127.0.0.1:8090  (local, auto-admitted)\n" +
+		"      agent\n" +
+		"      sends a literal api_key\n" +
+		"  none  http://127.0.0.1:8091  (local, auto-admitted)\n" +
+		"      chat\n" +
+		"  ref  https://one.example.com  (remote)\n" +
+		"      summarize\n" +
+		"      sends api_key from $CANARY_VAR\n"
+	if out.String() != want {
+		t.Errorf("rendered block:\n%s\nwant:\n%s", out.String(), want)
+	}
+}
+
+// The extension path draws the screen too: a model switch that adds a keyed
+// remote provider shows its key source at the extension prompt, and the
+// question text is unchanged.
+func TestExtensionAdmissionShowsKeySource(t *testing.T) {
+	cfg := loadKeySourceConfig(t, `
+		"ref":   {"base_url": "https://one.example.com", "api_format": "openai-compat", "api_key": "${CANARY_VAR}"},
+		"local": {"base_url": "http://127.0.0.1:8090", "api_format": "openai-compat"}`)
+	var out strings.Builder
+	var atPrompt, question string
+	adm, err := newDestinationAdmission(destinationAdmissionConfig{
+		Gate:        provider.NewDestinationGate(),
+		Edges:       []provider.DestinationEdge{{Purpose: "agent", Destination: admDest(t, "local", "http://127.0.0.1:8090")}},
+		Interactive: true,
+		Out:         &out,
+		KeySources:  keySourceLines(cfg),
+		PromptYN: func(_ context.Context, prompt string) (bool, error) {
+			atPrompt, question = out.String(), prompt
+			return true, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := adm.ensure(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := adm.extend(context.Background(), []provider.DestinationEdge{
+		{Purpose: "agent", Destination: admDest(t, "ref", "https://one.example.com")},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(atPrompt, "      sends api_key from $CANARY_VAR\n") {
+		t.Errorf("extension prompt screen missing the key source:\n%s", atPrompt)
+	}
+	if question != destinationConsentPrompt {
+		t.Errorf("question = %q, want unchanged %q", question, destinationConsentPrompt)
+	}
+	if strings.Contains(out.String(), keySourceCanary) || strings.Contains(question, keySourceCanary) {
+		t.Errorf("canary leaked into admission output:\n%s", out.String())
 	}
 }

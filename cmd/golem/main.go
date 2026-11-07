@@ -1140,6 +1140,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		Interactive: interactive,
 		PromptYN:    startupPromptYN(stdin, stderr),
 		Out:         stderr,
+		KeySources:  keySourceLines(cfg),
 	})
 	if err != nil {
 		return maybeUsageError(err, headlessExitApplies(f))
