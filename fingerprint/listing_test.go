@@ -5,7 +5,9 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -23,6 +25,14 @@ const (
 	keyA = "sk-live-AAAA-0123456789abcdef-raw-secret-value"
 	keyB = "sk-live-BBBB-fedcba9876543210-other-secret-val"
 )
+
+// lsNow and lsDay date rows from the real clock: the store checks dates against
+// it, and evNow (2027) is ahead of it. lsNow is 30 days back, so lsDay(n) is a
+// past date for n < 30; tests that read through a getter using the real clock
+// date their rows from time.Now() instead.
+var lsNow = time.Now().Add(-30 * evDayLen).Truncate(time.Millisecond)
+
+func lsDay(n int) time.Time { return lsNow.Add(time.Duration(n) * evDayLen) }
 
 func publish(t *testing.T, s *SQLiteStore, pub ListingPublish) {
 	t.Helper()
@@ -77,7 +87,7 @@ func failInserts(t *testing.T, s *SQLiteStore, table string) {
 
 func TestAccount_TwoKeysOneEndpointSeparate(t *testing.T) {
 	s := newTestStore(t)
-	publish(t, s, listingOf(evEndpoint, keyA, evNow, "only-a"))
+	publish(t, s, listingOf(evEndpoint, keyA, lsNow, "only-a"))
 	if err := s.RecordModelAccess(t.Context(), evEndpoint, keyA, "gone", AccessRefused, 403, time.Now()); err != nil {
 		t.Fatal(err)
 	}
@@ -99,7 +109,7 @@ func TestAccount_TwoKeysOneEndpointSeparate(t *testing.T) {
 		t.Fatalf("access under A = %+v, %v", accA, err)
 	}
 	// B publishing its own listing leaves A's alone: two snapshots coexist.
-	publish(t, s, listingOf(evEndpoint, keyB, evDay(1), "only-b"))
+	publish(t, s, listingOf(evEndpoint, keyB, lsDay(1), "only-b"))
 	gotA, _ = s.CurrentListing(t.Context(), evEndpoint, keyA)
 	wantModels(t, gotA, "only-a")
 	if n := count(t, s, "listing_snapshots"); n != 2 {
@@ -109,8 +119,8 @@ func TestAccount_TwoKeysOneEndpointSeparate(t *testing.T) {
 
 func TestAccount_KeyChangeStartsEmptyAnswersStay(t *testing.T) {
 	s := newTestStore(t)
-	appendEv(t, s, evRow(0, evNow))
-	publish(t, s, listingOf(evEndpoint, keyA, evNow, "m"))
+	appendEv(t, s, evRow(0, lsNow))
+	publish(t, s, listingOf(evEndpoint, keyA, lsNow, "m"))
 	if err := s.RecordModelAccess(t.Context(), evEndpoint, keyA, "m", AccessRefused, 404, time.Now()); err != nil {
 		t.Fatal(err)
 	}
@@ -137,8 +147,8 @@ func TestAccount_NoKeyIsEmptyAccount(t *testing.T) {
 	if got := s.account(evEndpoint, ""); got != "" {
 		t.Fatalf("keyless account = %q, want empty", got)
 	}
-	publish(t, s, listingOf(evEndpoint, "", evNow, "first"))
-	publish(t, s, listingOf(evEndpoint, "", evDay(1), "second"))
+	publish(t, s, listingOf(evEndpoint, "", lsNow, "first"))
+	publish(t, s, listingOf(evEndpoint, "", lsDay(1), "second"))
 	l, err := s.CurrentListing(t.Context(), evEndpoint, "")
 	if err != nil {
 		t.Fatal(err)
@@ -168,12 +178,12 @@ func ptr(s string) *string { return &s }
 func TestAccount_RawKeyNeverInFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "fp.db")
 	s := mustEvidenceStore(t, t.Context(), path)
-	publish(t, s, listingOf(evEndpoint, keyA, evNow, "m"))
+	publish(t, s, listingOf(evEndpoint, keyA, lsNow, "m"))
 	if err := s.RecordModelAccess(t.Context(), evEndpoint, keyA, "m", AccessRefused, 403, time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	err := s.AppendCheckResult(t.Context(), evEndpoint, keyA, "m", []EvidenceRow{evRow(0, evNow)},
-		&ModelAccess{Model: "m", State: AccessAnswered, ObservedAt: evNow})
+	err := s.AppendCheckResult(t.Context(), evEndpoint, keyA, "m", []EvidenceRow{evRow(0, lsNow)},
+		&ModelAccess{Model: "m", State: AccessAnswered, ObservedAt: lsNow})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -260,24 +270,24 @@ func TestNoExportedTypeCarriesAccount(t *testing.T) {
 
 func TestPublishListings_OlderStartedAtDoesNotReplace(t *testing.T) {
 	s := newTestStore(t)
-	publish(t, s, listingOf(evEndpoint, keyA, evDay(2), "new"))
-	late := listingOf(evEndpoint, keyA, evDay(1), "old")
-	late.Facts = []EvidenceRow{evRow(0, evNow, asOllamaShow)}
+	publish(t, s, listingOf(evEndpoint, keyA, lsDay(2), "new"))
+	late := listingOf(evEndpoint, keyA, lsDay(1), "old")
+	late.Facts = []EvidenceRow{evRow(0, lsNow, asOllamaShow)}
 	publish(t, s, late)
 	l, _ := s.CurrentListing(t.Context(), evEndpoint, keyA)
 	wantModels(t, l, "new")
-	if !l.StartedAt.Equal(evDay(2)) {
-		t.Fatalf("StartedAt = %v, want %v", l.StartedAt, evDay(2))
+	if !l.StartedAt.Equal(lsDay(2)) {
+		t.Fatalf("StartedAt = %v, want %v", l.StartedAt, lsDay(2))
 	}
 	if n, m, e := count(t, s, "listing_snapshots"), count(t, s, "listing_members"), count(t, s, "capability_evidence"); n != 1 || m != 1 || e != 0 {
 		t.Fatalf("snapshots %d members %d evidence %d; want 1, 1, 0 (a late older publish inserts nothing)", n, m, e)
 	}
 	// An equal start is not newer either.
-	publish(t, s, listingOf(evEndpoint, keyA, evDay(2), "tie"))
+	publish(t, s, listingOf(evEndpoint, keyA, lsDay(2), "tie"))
 	l, _ = s.CurrentListing(t.Context(), evEndpoint, keyA)
 	wantModels(t, l, "new")
 	// A newer one replaces, and its predecessor's members go with it.
-	publish(t, s, listingOf(evEndpoint, keyA, evDay(3), "newer", "newest"))
+	publish(t, s, listingOf(evEndpoint, keyA, lsDay(3), "newer", "newest"))
 	l, _ = s.CurrentListing(t.Context(), evEndpoint, keyA)
 	wantModels(t, l, "newer", "newest")
 	if n, m := count(t, s, "listing_snapshots"), count(t, s, "listing_members"); n != 1 || m != 2 {
@@ -293,14 +303,14 @@ func TestPublishListings_EmptyIsRecordedEmpty(t *testing.T) {
 	if l, _ := s.CurrentListing(t.Context(), evEndpoint, keyA); l != nil {
 		t.Fatalf("listing before any publish = %+v, want nil", l)
 	}
-	publish(t, s, listingOf(evEndpoint, keyA, evNow, "gone-soon"))
-	publish(t, s, listingOf(evEndpoint, keyA, evDay(1)))
+	publish(t, s, listingOf(evEndpoint, keyA, lsNow, "gone-soon"))
+	publish(t, s, listingOf(evEndpoint, keyA, lsDay(1)))
 	l, err := s.CurrentListing(t.Context(), evEndpoint, keyA)
 	if err != nil {
 		t.Fatal(err)
 	}
 	wantModels(t, l)
-	if !l.StartedAt.Equal(evDay(1)) {
+	if !l.StartedAt.Equal(lsDay(1)) {
 		t.Fatalf("empty listing StartedAt = %v", l.StartedAt)
 	}
 	if n, m := count(t, s, "listing_snapshots"), count(t, s, "listing_members"); n != 1 || m != 0 {
@@ -310,14 +320,14 @@ func TestPublishListings_EmptyIsRecordedEmpty(t *testing.T) {
 
 func TestPublishListings_OneTransaction(t *testing.T) {
 	s := newTestStore(t)
-	publish(t, s, listingOf(evEndpoint, keyA, evNow, "kept"))
+	publish(t, s, listingOf(evEndpoint, keyA, lsNow, "kept"))
 	wantGeneration(t, s, 1)
 	failInserts(t, s, "capability_evidence")
 	two := []ListingPublish{
-		listingOf("http://one:1", keyA, evDay(1), "x"),
-		listingOf(evEndpoint, keyA, evDay(1), "replacement"),
+		listingOf("http://one:1", keyA, lsDay(1), "x"),
+		listingOf(evEndpoint, keyA, lsDay(1), "replacement"),
 	}
-	two[1].Facts = []EvidenceRow{evRow(0, evNow, asOllamaShow)}
+	two[1].Facts = []EvidenceRow{evRow(0, lsNow, asOllamaShow)}
 	if err := s.PublishListings(t.Context(), two); err == nil || !strings.Contains(err.Error(), "injected") {
 		t.Fatalf("PublishListings error = %v, want the injected failure", err)
 	}
@@ -334,17 +344,17 @@ func TestPublishListings_OneTransaction(t *testing.T) {
 
 func TestPublishListings_RejectsBeforeWriting(t *testing.T) {
 	s := newTestStore(t)
-	bad := listingOf(evEndpoint, keyA, evNow, "m")
-	bad.Facts = []EvidenceRow{evRow(0, evNow, func(r *EvidenceRow) { r.Endpoint = "" })}
+	bad := listingOf(evEndpoint, keyA, lsNow, "m")
+	bad.Facts = []EvidenceRow{evRow(0, lsNow, func(r *EvidenceRow) { r.Endpoint = "" })}
 	for name, pub := range map[string]ListingPublish{
 		"invalid fact":    bad,
-		"no endpoint":     listingOf("", keyA, evNow, "m"),
+		"no endpoint":     listingOf("", keyA, lsNow, "m"),
 		"no start":        listingOf(evEndpoint, keyA, time.Time{}, "m"),
-		"unresolved key":  listingOf(evEndpoint, "${OPENAI_KEY}", evNow, "m"),
-		"empty member":    listingOf(evEndpoint, keyA, evNow, ""),
-		"partial secrets": listingOf(evEndpoint, "Bearer ${X}", evNow, "m"),
+		"unresolved key":  listingOf(evEndpoint, "${OPENAI_KEY}", lsNow, "m"),
+		"empty member":    listingOf(evEndpoint, keyA, lsNow, ""),
+		"partial secrets": listingOf(evEndpoint, "Bearer ${X}", lsNow, "m"),
 	} {
-		err := s.PublishListings(t.Context(), []ListingPublish{listingOf("http://ok:1", "", evNow, "fine"), pub})
+		err := s.PublishListings(t.Context(), []ListingPublish{listingOf("http://ok:1", "", lsNow, "fine"), pub})
 		if err == nil {
 			t.Errorf("%s: want an error", name)
 		} else if strings.Contains(err.Error(), keyA) || strings.Contains(err.Error(), "OPENAI_KEY") {
@@ -369,7 +379,7 @@ func TestPublishListings_TwoHandlesRaceNoBusySnapshot(t *testing.T) {
 			defer wg.Done()
 			for i := range each {
 				// Distinct, increasing starts interleave across the handles.
-				at := evDay(0).Add(time.Duration(2*i+h) * time.Millisecond)
+				at := lsDay(0).Add(time.Duration(2*i+h) * time.Millisecond)
 				errs <- s.PublishListings(t.Context(), []ListingPublish{listingOf(evEndpoint, keyA, at, fmt.Sprintf("m%d-%d", h, i))})
 			}
 		}()
@@ -409,8 +419,8 @@ func TestNamedModels_SurvivePublish(t *testing.T) {
 	if len(before) != 2 || before[0].Model != "alpha" || before[1].Model != "zeta" || before[0].AddedAt.IsZero() {
 		t.Fatalf("named = %+v, want alpha then zeta, dated", before)
 	}
-	publish(t, s, listingOf(evEndpoint, keyA, evNow, "alpha"))
-	publish(t, s, listingOf(evEndpoint, keyA, evDay(1))) // a listing that omits both
+	publish(t, s, listingOf(evEndpoint, keyA, lsNow, "alpha"))
+	publish(t, s, listingOf(evEndpoint, keyA, lsDay(1))) // a listing that omits both
 	if err := s.AddNamedModel(t.Context(), evEndpoint, "alpha"); err != nil {
 		t.Fatal(err)
 	}
@@ -438,7 +448,7 @@ func TestNamedModels_SurvivePublish(t *testing.T) {
 func TestLatestModelAccess_RefusedExpiresAt7Days(t *testing.T) {
 	s := newTestStore(t)
 	ctx := t.Context()
-	at := evNow
+	at := lsNow
 	if err := s.RecordModelAccess(ctx, evEndpoint, keyA, "m", AccessRefused, 403, at); err != nil {
 		t.Fatal(err)
 	}
@@ -477,27 +487,27 @@ func TestLatestModelAccess_RefusedExpiresAt7Days(t *testing.T) {
 		t.Fatalf("expired refusal = %+v, want nil", a)
 	}
 	// An expired newest row is no claim, and does not revive an older answered row.
-	if err := s.RecordModelAccess(ctx, evEndpoint, keyA, "rev", AccessAnswered, 0, evDay(-30)); err != nil {
+	if err := s.RecordModelAccess(ctx, evEndpoint, keyA, "rev", AccessAnswered, 0, lsDay(-30)); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.RecordModelAccess(ctx, evEndpoint, keyA, "rev", AccessRefused, 403, evDay(-20)); err != nil {
+	if err := s.RecordModelAccess(ctx, evEndpoint, keyA, "rev", AccessRefused, 403, lsDay(-20)); err != nil {
 		t.Fatal(err)
 	}
-	if snap, _ := s.ReadSnapshot(ctx, evEndpoint, ptr(keyA), "", []string{"rev"}, evNow); snap.Access["rev"] != nil {
+	if snap, _ := s.ReadSnapshot(ctx, evEndpoint, ptr(keyA), "", []string{"rev"}, lsNow); snap.Access["rev"] != nil {
 		t.Fatalf("expired refusal revived an older row: %+v", snap.Access["rev"])
 	}
 	// An answered row never expires.
-	if err := s.RecordModelAccess(ctx, evEndpoint, keyA, "ok", AccessAnswered, 0, evNow); err != nil {
+	if err := s.RecordModelAccess(ctx, evEndpoint, keyA, "ok", AccessAnswered, 0, lsNow); err != nil {
 		t.Fatal(err)
 	}
-	snap, _ := s.ReadSnapshot(ctx, evEndpoint, ptr(keyA), "", []string{"ok"}, evDay(3650))
+	snap, _ := s.ReadSnapshot(ctx, evEndpoint, ptr(keyA), "", []string{"ok"}, lsDay(3650))
 	if a := snap.Access["ok"]; a == nil || !a.ExpiresAt.IsZero() || a.HTTPStatus != 0 || a.State != AccessAnswered {
 		t.Fatalf("answered access = %+v", a)
 	}
 	for _, bad := range []struct {
 		state AccessState
 		at    time.Time
-	}{{"maybe", evNow}, {AccessRefused, time.Time{}}} {
+	}{{"maybe", lsNow}, {AccessRefused, time.Time{}}} {
 		if err := s.RecordModelAccess(ctx, evEndpoint, keyA, "m", bad.state, 403, bad.at); err == nil {
 			t.Errorf("RecordModelAccess(%q, %v) accepted", bad.state, bad.at)
 		}
@@ -513,23 +523,23 @@ func TestPrune_ModelAccessKeepsNewestPerAccountModel(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	rec(keyA, "m", AccessAnswered, evDay(-200)) // 1: older than the newest, outside 90 days: goes
-	rec(keyA, "m", AccessRefused, evDay(-150))  // 2: the newest of A/m, however old: stays
-	rec(keyB, "m", AccessAnswered, evDay(-300)) // 3: B's only row: stays
-	rec(keyA, "n", AccessAnswered, evDay(-120)) // 4: goes, superseded by 5
-	rec(keyA, "n", AccessAnswered, evDay(-100)) // 5: stays (newest)
-	rec(keyA, "n", AccessRefused, evDay(-10))   // 6: newest, recent
-	rec(keyA, "o", AccessAnswered, evDay(-95))  // 7: outside the window but A/o's only row: stays
-	rec(keyA, "o", AccessRefused, evDay(-89))   // 8: inside 90 days: stays, newest
-	rec(keyA, "p", AccessAnswered, evDay(-89))  // 9: inside 90 days, superseded: stays
-	rec(keyA, "p", AccessRefused, evDay(-1))    // 10: newest
+	rec(keyA, "m", AccessAnswered, lsDay(-200)) // 1: older than the newest, outside 90 days: goes
+	rec(keyA, "m", AccessRefused, lsDay(-150))  // 2: the newest of A/m, however old: stays
+	rec(keyB, "m", AccessAnswered, lsDay(-300)) // 3: B's only row: stays
+	rec(keyA, "n", AccessAnswered, lsDay(-120)) // 4: goes, superseded by 5
+	rec(keyA, "n", AccessAnswered, lsDay(-100)) // 5: stays (newest)
+	rec(keyA, "n", AccessRefused, lsDay(-10))   // 6: newest, recent
+	rec(keyA, "o", AccessAnswered, lsDay(-95))  // 7: outside the window but A/o's only row: stays
+	rec(keyA, "o", AccessRefused, lsDay(-89))   // 8: inside 90 days: stays, newest
+	rec(keyA, "p", AccessAnswered, lsDay(-89))  // 9: inside 90 days, superseded: stays
+	rec(keyA, "p", AccessRefused, lsDay(-1))    // 10: newest
 	wantGeneration(t, s, 10)
-	pruneEv(t, s, evNow)
+	pruneEv(t, s, lsNow)
 	// 5 was superseded by 6 and is older than 90 days, so it goes too; 7 is outside 90 days and superseded by 8.
 	wantAccessIDs(t, s, 2, 3, 6, 8, 9, 10)
 	wantGeneration(t, s, 11)
 	// Idle: nothing left to delete, so no write transaction and no generation bump.
-	pruneEv(t, s, evNow)
+	pruneEv(t, s, lsNow)
 	wantAccessIDs(t, s, 2, 3, 6, 8, 9, 10)
 	wantGeneration(t, s, 11)
 }
@@ -567,9 +577,9 @@ func TestReadSnapshot_ConcurrentPublishIsEntirelyBeforeOrAfter(t *testing.T) {
 		for i := 1; i <= rounds; i++ {
 			// Publish i is the only write to bump the generation to i, and it carries
 			// its number in the listing digest and in the evidence row it publishes.
-			pub := listingOf(evEndpoint, keyA, evDay(0).Add(time.Duration(i)*time.Millisecond))
+			pub := listingOf(evEndpoint, keyA, lsDay(0).Add(time.Duration(i)*time.Millisecond))
 			pub.Members = []ListingMember{{Model: "m", Digest: strconv.Itoa(i)}}
-			pub.Facts = []EvidenceRow{evRow(0, evDay(0).Add(time.Duration(i)*time.Millisecond), asOllamaShow, withDigest(strconv.Itoa(i)))}
+			pub.Facts = []EvidenceRow{evRow(0, lsDay(0).Add(time.Duration(i)*time.Millisecond), asOllamaShow, withDigest(strconv.Itoa(i)))}
 			if err := writer.PublishListings(ctx, []ListingPublish{pub}); err != nil {
 				done <- err
 				return
@@ -578,7 +588,7 @@ func TestReadSnapshot_ConcurrentPublishIsEntirelyBeforeOrAfter(t *testing.T) {
 	}()
 	reads := 0
 	for {
-		snap, err := reader.ReadSnapshot(ctx, evEndpoint, ptr(keyA), "", []string{"m"}, evDay(1))
+		snap, err := reader.ReadSnapshot(ctx, evEndpoint, ptr(keyA), "", []string{"m"}, lsDay(1))
 		if err != nil {
 			t.Fatalf("ReadSnapshot: %v", err)
 		}
@@ -617,8 +627,8 @@ func TestReadSnapshot_ClosesBeforeCallerNetworkWork(t *testing.T) {
 	// starve every other statement on the handle.
 	s := newTestStore(t)
 	s.db.SetMaxOpenConns(1)
-	appendEv(t, s, evRow(0, evNow))
-	if _, err := s.ReadSnapshot(t.Context(), evEndpoint, ptr(keyA), "p", []string{"m", "m"}, evNow); err != nil {
+	appendEv(t, s, evRow(0, lsNow))
+	if _, err := s.ReadSnapshot(t.Context(), evEndpoint, ptr(keyA), "p", []string{"m", "m"}, lsNow); err != nil {
 		t.Fatal(err)
 	}
 	if in := s.db.Stats().InUse; in != 0 {
@@ -632,7 +642,7 @@ func TestReadSnapshot_ClosesBeforeCallerNetworkWork(t *testing.T) {
 	// An error path ends the transaction too.
 	cancelled, stop := context.WithCancel(t.Context())
 	stop()
-	if _, err := s.ReadSnapshot(cancelled, evEndpoint, nil, "", nil, evNow); err == nil {
+	if _, err := s.ReadSnapshot(cancelled, evEndpoint, nil, "", nil, lsNow); err == nil {
 		t.Fatal("ReadSnapshot on a cancelled context succeeded")
 	}
 	if in := s.db.Stats().InUse; in != 0 {
@@ -643,23 +653,23 @@ func TestReadSnapshot_ClosesBeforeCallerNetworkWork(t *testing.T) {
 func TestReadSnapshot_NilCredentialSkipsAccountReads(t *testing.T) {
 	s := newTestStore(t)
 	ctx := t.Context()
-	publish(t, s, listingOf(evEndpoint, "", evNow, "m"))
-	publish(t, s, listingOf(evEndpoint, keyA, evNow, "keyed"))
-	if err := s.RecordModelAccess(ctx, evEndpoint, "", "m", AccessAnswered, 0, evNow); err != nil {
+	publish(t, s, listingOf(evEndpoint, "", lsNow, "m"))
+	publish(t, s, listingOf(evEndpoint, keyA, lsNow, "keyed"))
+	if err := s.RecordModelAccess(ctx, evEndpoint, "", "m", AccessAnswered, 0, lsNow); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.AddNamedModel(ctx, evEndpoint, "named"); err != nil {
 		t.Fatal(err)
 	}
-	appendEv(t, s, evRow(0, evNow))
+	appendEv(t, s, evRow(0, lsNow))
 	if _, err := s.db.ExecContext(ctx,
 		`INSERT INTO capability_probes (backend_id, model_name, capability, state, model_digest, probe_version, tested_at)
-		VALUES ('prov', 'm', 'tool_call', 'yes', 'dg', 1, ?)`, evNow.UnixMilli()); err != nil {
+		VALUES ('prov', 'm', 'tool_call', 'yes', 'dg', 1, ?)`, lsNow.UnixMilli()); err != nil {
 		t.Fatal(err)
 	}
 	models := []string{"m", "absent"}
 
-	nilSnap, err := s.ReadSnapshot(ctx, evEndpoint, nil, "prov", models, evNow)
+	nilSnap, err := s.ReadSnapshot(ctx, evEndpoint, nil, "prov", models, lsNow)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -673,7 +683,7 @@ func TestReadSnapshot_NilCredentialSkipsAccountReads(t *testing.T) {
 		t.Fatalf("legacy = %+v", nilSnap.Legacy)
 	}
 
-	keyless, err := s.ReadSnapshot(ctx, evEndpoint, ptr(""), "", models, evNow)
+	keyless, err := s.ReadSnapshot(ctx, evEndpoint, ptr(""), "", models, lsNow)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -683,7 +693,7 @@ func TestReadSnapshot_NilCredentialSkipsAccountReads(t *testing.T) {
 	}
 
 	// An unresolved credential reads no account data and the rest as usual.
-	unres, err := s.ReadSnapshot(ctx, evEndpoint, ptr("${API_KEY}"), "", models, evNow)
+	unres, err := s.ReadSnapshot(ctx, evEndpoint, ptr("${API_KEY}"), "", models, lsNow)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -695,7 +705,7 @@ func TestReadSnapshot_NilCredentialSkipsAccountReads(t *testing.T) {
 	}
 
 	// No models: metadata only.
-	meta, err := s.ReadSnapshot(ctx, evEndpoint, ptr(keyA), "prov", nil, evNow)
+	meta, err := s.ReadSnapshot(ctx, evEndpoint, ptr(keyA), "prov", nil, lsNow)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -708,8 +718,9 @@ func TestReadSnapshot_NilCredentialSkipsAccountReads(t *testing.T) {
 func TestAppendCheckResult_OneCommitOneGeneration(t *testing.T) {
 	s := newTestStore(t)
 	ctx := t.Context()
-	rows := []EvidenceRow{evRow(0, evNow), evRow(0, evNow, withCap("chat"), withMethod(MethodChatStream))}
-	acc := &ModelAccess{Model: evModel, State: AccessRefused, HTTPStatus: 403, ObservedAt: evNow}
+	now := time.Now().Truncate(time.Millisecond)
+	rows := []EvidenceRow{evRow(0, now), evRow(0, now, withCap("chat"), withMethod(MethodChatStream))}
+	acc := &ModelAccess{Model: evModel, State: AccessRefused, HTTPStatus: 403, ObservedAt: now}
 	if err := s.AppendCheckResult(ctx, evEndpoint, keyA, evModel, rows, acc); err != nil {
 		t.Fatal(err)
 	}
@@ -718,16 +729,16 @@ func TestAppendCheckResult_OneCommitOneGeneration(t *testing.T) {
 		t.Fatalf("evidence rows = %d, want 2", n)
 	}
 	got, _ := s.LatestModelAccess(ctx, evEndpoint, keyA, evModel)
-	if got == nil || got.State != AccessRefused || got.HTTPStatus != 403 || !got.ExpiresAt.Equal(evNow.Add(7*24*time.Hour)) {
+	if got == nil || got.State != AccessRefused || got.HTTPStatus != 403 || !got.ExpiresAt.Equal(now.Add(7*24*time.Hour)) {
 		t.Fatalf("access = %+v, want a 403 refusal expiring in 7 days", got)
 	}
 	// An access-only refusal and an evidence-only check are each one commit.
 	if err := s.AppendCheckResult(ctx, evEndpoint, keyA, evModel, nil,
-		&ModelAccess{Model: evModel, State: AccessAnswered, ObservedAt: evDay(1)}); err != nil {
+		&ModelAccess{Model: evModel, State: AccessAnswered, ObservedAt: now.Add(-time.Hour)}); err != nil {
 		t.Fatal(err)
 	}
 	wantGeneration(t, s, 2)
-	if err := s.AppendCheckResult(ctx, evEndpoint, keyA, evModel, []EvidenceRow{evRow(0, evDay(1))}, nil); err != nil {
+	if err := s.AppendCheckResult(ctx, evEndpoint, keyA, evModel, []EvidenceRow{evRow(0, now.Add(-time.Hour))}, nil); err != nil {
 		t.Fatal(err)
 	}
 	wantGeneration(t, s, 3)
@@ -744,15 +755,16 @@ func TestAppendCheckResult_OneCommitOneGeneration(t *testing.T) {
 func TestAppendCheckResult_SecondWriteFailureRollsBackEverything(t *testing.T) {
 	s := newTestStore(t)
 	ctx := t.Context()
-	appendEv(t, s, evRow(0, evNow))
-	if err := s.RecordModelAccess(ctx, evEndpoint, keyA, evModel, AccessRefused, 403, evNow); err != nil {
+	now := time.Now().Truncate(time.Millisecond)
+	appendEv(t, s, evRow(0, now))
+	if err := s.RecordModelAccess(ctx, evEndpoint, keyA, evModel, AccessRefused, 403, now); err != nil {
 		t.Fatal(err)
 	}
 	wantGeneration(t, s, 2)
 	failInserts(t, s, "model_access")
 	err := s.AppendCheckResult(ctx, evEndpoint, keyA, evModel,
-		[]EvidenceRow{evRow(0, evDay(1)), evRow(0, evDay(2))},
-		&ModelAccess{Model: evModel, State: AccessAnswered, ObservedAt: evDay(1)})
+		[]EvidenceRow{evRow(0, now.Add(-time.Hour)), evRow(0, now.Add(-time.Minute))},
+		&ModelAccess{Model: evModel, State: AccessAnswered, ObservedAt: now.Add(-time.Hour)})
 	if err == nil || !strings.Contains(err.Error(), "injected") {
 		t.Fatalf("error = %v, want the injected failure", err)
 	}
@@ -768,7 +780,7 @@ func TestAppendCheckResult_CancelBeforeCommitRollsBackEverything(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "fp.db")
 	s := mustEvidenceStore(t, t.Context(), path)
 	other := mustEvidenceStore(t, t.Context(), path)
-	appendEv(t, s, evRow(0, evNow))
+	appendEv(t, s, evRow(0, lsNow))
 	wantGeneration(t, s, 1)
 
 	// Another handle holds the write lock for 300ms, so the transaction is open and
@@ -790,8 +802,8 @@ func TestAppendCheckResult_CancelBeforeCommitRollsBackEverything(t *testing.T) {
 		_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
 	}()
 	start := time.Now()
-	err = s.AppendCheckResult(ctx, evEndpoint, keyA, evModel, []EvidenceRow{evRow(0, evDay(1))},
-		&ModelAccess{Model: evModel, State: AccessRefused, HTTPStatus: 403, ObservedAt: evDay(1)})
+	err = s.AppendCheckResult(ctx, evEndpoint, keyA, evModel, []EvidenceRow{evRow(0, lsDay(1))},
+		&ModelAccess{Model: evModel, State: AccessRefused, HTTPStatus: 403, ObservedAt: lsDay(1)})
 	if err == nil {
 		t.Fatal("AppendCheckResult succeeded under a cancelled context")
 	}
@@ -805,7 +817,7 @@ func TestAppendCheckResult_CancelBeforeCommitRollsBackEverything(t *testing.T) {
 	// A context cancelled before the call changes nothing either.
 	dead, stop := context.WithCancel(t.Context())
 	stop()
-	if err := s.AppendCheckResult(dead, evEndpoint, keyA, evModel, []EvidenceRow{evRow(0, evDay(1))}, nil); err == nil {
+	if err := s.AppendCheckResult(dead, evEndpoint, keyA, evModel, []EvidenceRow{evRow(0, lsDay(1))}, nil); err == nil {
 		t.Fatal("AppendCheckResult succeeded under a dead context")
 	}
 	wantGeneration(t, s, 1)
@@ -815,11 +827,11 @@ func TestAppendCheckResult_CancelBeforeCommitRollsBackEverything(t *testing.T) {
 func TestAppendCheckResult_MismatchedEndpointOrModelRejected(t *testing.T) {
 	s := newTestStore(t)
 	ctx := t.Context()
-	good := evRow(0, evNow)
-	otherModel := evRow(0, evNow, func(r *EvidenceRow) { r.Model = "other" })
-	otherEndpoint := evRow(0, evNow, func(r *EvidenceRow) { r.Endpoint = "http://elsewhere:1" })
-	invalid := evRow(0, evNow, func(r *EvidenceRow) { r.Method = "" })
-	okAccess := &ModelAccess{Model: evModel, State: AccessRefused, ObservedAt: evNow}
+	good := evRow(0, lsNow)
+	otherModel := evRow(0, lsNow, func(r *EvidenceRow) { r.Model = "other" })
+	otherEndpoint := evRow(0, lsNow, func(r *EvidenceRow) { r.Endpoint = "http://elsewhere:1" })
+	invalid := evRow(0, lsNow, func(r *EvidenceRow) { r.Method = "" })
+	okAccess := &ModelAccess{Model: evModel, State: AccessRefused, ObservedAt: lsNow}
 	for name, c := range map[string]struct {
 		rows   []EvidenceRow
 		access *ModelAccess
@@ -827,9 +839,9 @@ func TestAppendCheckResult_MismatchedEndpointOrModelRejected(t *testing.T) {
 	}{
 		"row of another model":    {[]EvidenceRow{good, otherModel}, okAccess, keyA},
 		"row of another endpoint": {[]EvidenceRow{good, otherEndpoint}, okAccess, keyA},
-		"access of another model": {[]EvidenceRow{good}, &ModelAccess{Model: "other", State: AccessRefused, ObservedAt: evNow}, keyA},
+		"access of another model": {[]EvidenceRow{good}, &ModelAccess{Model: "other", State: AccessRefused, ObservedAt: lsNow}, keyA},
 		"unreadable row":          {[]EvidenceRow{good, invalid}, okAccess, keyA},
-		"unknown access state":    {[]EvidenceRow{good}, &ModelAccess{Model: evModel, State: "x", ObservedAt: evNow}, keyA},
+		"unknown access state":    {[]EvidenceRow{good}, &ModelAccess{Model: evModel, State: "x", ObservedAt: lsNow}, keyA},
 		"unresolved credential":   {[]EvidenceRow{good}, okAccess, "${KEY}"},
 	} {
 		err := s.AppendCheckResult(ctx, evEndpoint, c.key, evModel, c.rows, c.access)
@@ -843,4 +855,203 @@ func TestAppendCheckResult_MismatchedEndpointOrModelRejected(t *testing.T) {
 		t.Fatalf("rejected results wrote %d evidence and %d access rows", n, a)
 	}
 	wantGeneration(t, s, 0)
+}
+
+func TestCurrentListing_NeverEmptyDuringTwoProviderPublish(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "fp.db")
+	writer := mustEvidenceStore(t, t.Context(), path)
+	reader := mustEvidenceStore(t, t.Context(), path)
+	const rounds = 300
+	done := make(chan error, 1)
+	go func() {
+		defer close(done)
+		for i := 1; i <= rounds; i++ {
+			at := lsDay(0).Add(time.Duration(i) * time.Millisecond)
+			err := writer.PublishListings(t.Context(), []ListingPublish{
+				listingOf(evEndpoint, keyA, at, "one"), listingOf("http://two:2", keyA, at, "two"),
+			})
+			if err != nil {
+				done <- err
+				return
+			}
+		}
+	}()
+	for reads := 0; ; reads++ {
+		l, err := reader.CurrentListing(t.Context(), evEndpoint, keyA)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if l != nil && len(l.Members) != 1 {
+			t.Fatalf("read %d: current listing has %d members mid-publish, want 1", reads, len(l.Members))
+		}
+		select {
+		case err, open := <-done:
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !open {
+				return
+			}
+		default:
+		}
+	}
+}
+
+func TestAccess_FutureAndUnknownStateRowsAreNotClaims(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+	now := time.Now().Truncate(time.Millisecond)
+	if err := s.RecordModelAccess(ctx, evEndpoint, keyA, "m", AccessAnswered, 0, now.Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	// Dated three years ahead: not admitted. Unknown state, newer than the answer: not a claim.
+	if err := s.RecordModelAccess(ctx, evEndpoint, keyA, "m", AccessRefused, 403, now.Add(3*365*evDayLen)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.ExecContext(ctx,
+		`INSERT INTO model_access (key_version, endpoint, account, model_name, state, observed_at)
+		VALUES (1, ?, ?, 'm', 'from-a-newer-binary', ?)`, evEndpoint, s.account(evEndpoint, keyA), now.UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.LatestModelAccess(ctx, evEndpoint, keyA, "m")
+	if err != nil || got == nil || got.State != AccessAnswered {
+		t.Fatalf("getter = %+v, %v; want the answered row", got, err)
+	}
+	snap, err := s.ReadSnapshot(ctx, evEndpoint, ptr(keyA), "", []string{"m"}, now)
+	if err != nil || snap.Access["m"] == nil || snap.Access["m"].State != AccessAnswered {
+		t.Fatalf("snapshot access = %+v, %v; want the answered row", snap.Access["m"], err)
+	}
+	// Later, the future row is admitted and wins.
+	snap, _ = s.ReadSnapshot(ctx, evEndpoint, ptr(keyA), "", []string{"m"}, now.Add(3*365*evDayLen))
+	if a := snap.Access["m"]; a == nil || a.State != AccessRefused {
+		t.Fatalf("access once the future row's date arrives = %+v", a)
+	}
+}
+
+func TestPrune_ModelAccessFutureAndUnknownRowsAuthorizeNothing(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+	if err := s.RecordModelAccess(ctx, evEndpoint, keyA, "m", AccessAnswered, 0, lsDay(-200)); err != nil { // 1: the real claim
+		t.Fatal(err)
+	}
+	if err := s.RecordModelAccess(ctx, evEndpoint, keyA, "m", AccessRefused, 403, lsDay(3*365)); err != nil { // 2: future
+		t.Fatal(err)
+	}
+	old := func(state string, at time.Time) {
+		if _, err := s.db.ExecContext(ctx,
+			`INSERT INTO model_access (key_version, endpoint, account, model_name, state, observed_at) VALUES (1, ?, ?, 'm', ?, ?)`,
+			evEndpoint, s.account(evEndpoint, keyA), state, at.UnixMilli()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old("from-a-newer-binary", lsDay(-300)) // 3: another binary's row, old: never deleted
+	old("from-a-newer-binary", lsDay(-1))   // 4: unknown and newer than the answer: no authority
+	pruneEv(t, s, lsNow)
+	wantAccessIDs(t, s, 1, 2, 3, 4)
+	// An old answered row under the real one is still pruned.
+	if err := s.RecordModelAccess(ctx, evEndpoint, keyA, "m", AccessAnswered, 0, lsDay(-250)); err != nil { // 5
+		t.Fatal(err)
+	}
+	pruneEv(t, s, lsNow)
+	wantAccessIDs(t, s, 1, 2, 3, 4)
+}
+
+func TestPublishListings_FutureStartedAtRefusedAndStoredOneReplaced(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+	now := time.Now().Truncate(time.Millisecond)
+	future := now.Add(3 * 365 * evDayLen)
+	if err := s.PublishListings(ctx, []ListingPublish{listingOf(evEndpoint, keyA, future, "skewed")}); err == nil {
+		t.Fatal("a listing dated three years ahead was accepted")
+	}
+	if n := count(t, s, "listing_snapshots"); n != 0 {
+		t.Fatalf("snapshots = %d, want none", n)
+	}
+	wantGeneration(t, s, 0)
+	// A row already stored with such a date (another clock, another binary) is not current.
+	res, err := s.db.ExecContext(ctx,
+		`INSERT INTO listing_snapshots (key_version, endpoint, account, started_at, committed_at) VALUES (1, ?, ?, ?, ?)`,
+		evEndpoint, s.account(evEndpoint, keyA), future.UnixMilli(), now.UnixMilli())
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, _ := res.LastInsertId()
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO listing_members (snapshot_id, model_name) VALUES (?, 'skewed')`, id); err != nil {
+		t.Fatal(err)
+	}
+	if l, _ := s.CurrentListing(ctx, evEndpoint, keyA); l != nil {
+		t.Fatalf("CurrentListing = %+v, want the future-dated row ignored", l)
+	}
+	if snap, _ := s.ReadSnapshot(ctx, evEndpoint, ptr(keyA), "", nil, now); snap.Listing != nil {
+		t.Fatalf("ReadSnapshot listing = %+v, want it ignored", snap.Listing)
+	}
+	publish(t, s, listingOf(evEndpoint, keyA, now.Add(-time.Minute), "real"))
+	l, _ := s.CurrentListing(ctx, evEndpoint, keyA)
+	wantModels(t, l, "real")
+	if n, m := count(t, s, "listing_snapshots"), count(t, s, "listing_members"); n != 1 || m != 1 {
+		t.Fatalf("snapshots %d members %d; want 1, 1", n, m)
+	}
+}
+
+func TestModelAccess_ExpiryIsTheRuleNotTheCallers(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+	at := lsNow
+	long := at.Add(8759 * time.Hour)
+	for _, c := range []struct {
+		model string
+		state AccessState
+		want  any
+	}{
+		{"refused", AccessRefused, at.Add(7 * 24 * time.Hour).UnixMilli()},
+		{"answered", AccessAnswered, nil},
+	} {
+		err := s.AppendCheckResult(ctx, evEndpoint, keyA, c.model, nil,
+			&ModelAccess{Model: c.model, State: c.state, ObservedAt: at, ExpiresAt: long})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got sql.NullInt64
+		if err := s.db.QueryRowContext(ctx, `SELECT expires_at FROM model_access WHERE model_name = ?`, c.model).Scan(&got); err != nil {
+			t.Fatal(err)
+		}
+		if c.want == nil && got.Valid || c.want != nil && (!got.Valid || got.Int64 != c.want) {
+			t.Fatalf("%s: stored expires_at = %+v, want %v", c.model, got, c.want)
+		}
+	}
+	// And the answered row is honored forever, though the caller set an expiry.
+	snap, _ := s.ReadSnapshot(ctx, evEndpoint, ptr(keyA), "", []string{"answered"}, long.Add(time.Hour))
+	if snap.Access["answered"] == nil {
+		t.Fatal("answered access expired on a caller-set expiry")
+	}
+}
+
+func TestListingPublish_NeverPrintsKey(t *testing.T) {
+	const marker = "MARKER-key-7f3a9c"
+	pub := listingOf(evEndpoint, marker, lsNow, "m")
+	for name, got := range map[string]string{
+		"%v":        fmt.Sprintf("%v", pub),
+		"%+v":       fmt.Sprintf("%+v", pub),
+		"%#v":       fmt.Sprintf("%#v", pub),
+		"ptr %+v":   fmt.Sprintf("%+v", &pub),
+		"slice %v":  fmt.Sprintf("%v", []ListingPublish{pub}),
+		"slice %+v": fmt.Sprintf("%+v", []ListingPublish{pub}),
+		"slice %#v": fmt.Sprintf("%#v", []ListingPublish{pub}),
+	} {
+		if strings.Contains(got, marker) {
+			t.Errorf("%s prints the key: %s", name, got)
+		}
+		if !strings.Contains(got, evEndpoint) {
+			t.Errorf("%s lost the endpoint: %s", name, got)
+		}
+	}
+	for name, v := range map[string]any{"value": pub, "slice": []ListingPublish{pub}, "pointer": &pub} {
+		b, err := json.Marshal(v)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(b), marker) {
+			t.Errorf("json of %s prints the key: %s", name, b)
+		}
+	}
 }

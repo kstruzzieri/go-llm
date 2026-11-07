@@ -26,11 +26,21 @@ type ListingMember struct{ Model, OwnedBy, Digest string }
 // provider reported alongside it. It is stored for the account derived from
 // APIKey; the key itself is never stored.
 type ListingPublish struct {
-	Endpoint, APIKey string
-	StartedAt        time.Time
-	Members          []ListingMember
-	Facts            []EvidenceRow
+	Endpoint  string
+	APIKey    string `json:"-"` // the raw key; String, GoString and JSON leave it out
+	StartedAt time.Time
+	Members   []ListingMember
+	Facts     []EvidenceRow
 }
+
+// String describes the publish without its credential.
+func (p ListingPublish) String() string {
+	return fmt.Sprintf("ListingPublish{Endpoint:%q StartedAt:%s Members:%d Facts:%d APIKey:[redacted]}",
+		p.Endpoint, p.StartedAt.Format(time.RFC3339Nano), len(p.Members), len(p.Facts))
+}
+
+// GoString is String, so %#v does not print the credential either.
+func (p ListingPublish) GoString() string { return p.String() }
 
 // ListingSnapshot is the current listing of an endpoint for one credential.
 type ListingSnapshot struct {
@@ -132,17 +142,22 @@ type queryer interface {
 // PublishListings stores each listing as its endpoint-and-account's current
 // snapshot, with its facts, in one transaction. A snapshot replaces the current
 // one only when its StartedAt is newer; the older snapshot and its members go in
-// the same transaction, and a late older publish, facts included, inserts
-// nothing. An empty Members is an empty listing, recorded as such. Members
+// the same transaction (a stored snapshot dated beyond the clock-skew allowance
+// does not count as current, so a real publish replaces it), and a late older publish, facts included, inserts
+// nothing. A StartedAt beyond the skew allowance is refused. An empty Members is an empty listing, recorded as such. Members
 // repeating a model keep the first. A credential holding an unresolved ${...}
 // is refused.
 func (s *SQLiteStore) PublishListings(ctx context.Context, pubs []ListingPublish) error {
 	if len(pubs) == 0 {
 		return nil
 	}
+	now := time.Now()
 	for _, p := range pubs {
 		if p.Endpoint == "" || p.StartedAt.IsZero() {
 			return errors.New("fingerprint: publish listings: listing needs an endpoint and a start time")
+		}
+		if p.StartedAt.After(now.Add(maxClockSkew)) {
+			return errors.New("fingerprint: publish listings: listing is dated in the future")
 		}
 		if unresolved(p.APIKey) {
 			return fmt.Errorf("fingerprint: publish listings: %w", errUnresolvedCredential)
@@ -156,7 +171,7 @@ func (s *SQLiteStore) PublishListings(ctx context.Context, pubs []ListingPublish
 	}
 	err := s.writeTx(ctx, func(tx *sql.Tx) error {
 		for _, p := range pubs {
-			if err := s.publishListing(ctx, tx, p); err != nil {
+			if err := s.publishListing(ctx, tx, p, now); err != nil {
 				return err
 			}
 		}
@@ -171,12 +186,13 @@ func (s *SQLiteStore) PublishListings(ctx context.Context, pubs []ListingPublish
 // publishListing runs inside the write transaction, whose generation bump took
 // the write lock first, so the started_at it reads cannot go stale before it
 // writes.
-func (s *SQLiteStore) publishListing(ctx context.Context, tx *sql.Tx, p ListingPublish) error {
+func (s *SQLiteStore) publishListing(ctx context.Context, tx *sql.Tx, p ListingPublish, now time.Time) error {
 	account := s.account(p.Endpoint, p.APIKey)
 	var current sql.NullInt64
 	err := tx.QueryRowContext(ctx,
-		`SELECT MAX(started_at) FROM listing_snapshots WHERE key_version = ? AND endpoint = ? AND account = ?`,
-		EvidenceKeyVersion, p.Endpoint, account).Scan(&current)
+		`SELECT MAX(started_at) FROM listing_snapshots
+		WHERE key_version = ? AND endpoint = ? AND account = ? AND started_at <= ?`,
+		EvidenceKeyVersion, p.Endpoint, account, now.Add(maxClockSkew).UnixMilli()).Scan(&current)
 	if err != nil {
 		return fmt.Errorf("read current listing: %w", err)
 	}
@@ -218,20 +234,27 @@ func (s *SQLiteStore) CurrentListing(ctx context.Context, endpoint, apiKey strin
 	if unresolved(apiKey) {
 		return nil, nil
 	}
-	l, err := readListing(ctx, s.db, endpoint, s.account(endpoint, apiKey))
+	// One transaction: the snapshot row and its members must come from one commit.
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("fingerprint: current listing %q: begin: %w", endpoint, err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	l, err := readListing(ctx, tx, endpoint, s.account(endpoint, apiKey), time.Now())
 	if err != nil {
 		return nil, fmt.Errorf("fingerprint: current listing %q: %w", endpoint, err)
 	}
 	return l, nil
 }
 
-func readListing(ctx context.Context, q queryer, endpoint, account string) (*ListingSnapshot, error) {
+// readListing reads the newest snapshot not dated beyond the skew allowance at now.
+func readListing(ctx context.Context, q queryer, endpoint, account string, now time.Time) (*ListingSnapshot, error) {
 	var id, startedAt, committedAt int64
 	err := q.QueryRowContext(ctx,
 		`SELECT id, started_at, committed_at FROM listing_snapshots
-		WHERE key_version = ? AND endpoint = ? AND account = ?
+		WHERE key_version = ? AND endpoint = ? AND account = ? AND started_at <= ?
 		ORDER BY started_at DESC, id DESC LIMIT 1`,
-		EvidenceKeyVersion, endpoint, account).Scan(&id, &startedAt, &committedAt)
+		EvidenceKeyVersion, endpoint, account, now.Add(maxClockSkew).UnixMilli()).Scan(&id, &startedAt, &committedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -345,7 +368,9 @@ func validateAccess(endpoint, apiKey string, a *ModelAccess) error {
 	case unresolved(apiKey):
 		return errUnresolvedCredential
 	}
-	if a.State == AccessRefused && a.ExpiresAt.IsZero() {
+	// The expiry is a rule, not the caller's choice.
+	a.ExpiresAt = time.Time{}
+	if a.State == AccessRefused {
 		a.ExpiresAt = a.ObservedAt.Add(refusedAccessTTL)
 	}
 	return nil
@@ -368,7 +393,8 @@ func (s *SQLiteStore) insertAccess(ctx context.Context, tx *sql.Tx, endpoint, ap
 }
 
 // LatestModelAccess returns the credential's newest access row for the model, or
-// nil when there is none, it has expired, or the credential is unresolved. An
+// nil when there is none (rows of an unknown state or dated beyond the skew
+// allowance are not claims), it has expired, or the credential is unresolved. An
 // expired newest row means no claim; it does not bring back an older row.
 func (s *SQLiteStore) LatestModelAccess(ctx context.Context, endpoint, apiKey, model string) (*ModelAccess, error) {
 	if unresolved(apiKey) {
@@ -388,8 +414,9 @@ func readAccess(ctx context.Context, q queryer, endpoint, account, model string,
 	err := q.QueryRowContext(ctx,
 		`SELECT state, http_status, observed_at, expires_at FROM model_access
 		WHERE key_version = ? AND endpoint = ? AND account = ? AND model_name = ?
+			AND state IN ('answered', 'refused') AND observed_at <= ?
 		ORDER BY observed_at DESC, id DESC LIMIT 1`,
-		EvidenceKeyVersion, endpoint, account, model).Scan(&a.State, &status, &observedAt, &expiresAt)
+		EvidenceKeyVersion, endpoint, account, model, now.Add(maxClockSkew).UnixMilli()).Scan(&a.State, &status, &observedAt, &expiresAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -436,7 +463,7 @@ func (s *SQLiteStore) ReadSnapshot(ctx context.Context, endpoint string, apiKey 
 		account, haveAccount = s.account(endpoint, *apiKey), true
 	}
 	if haveAccount {
-		if snap.Listing, err = readListing(ctx, tx, endpoint, account); err != nil {
+		if snap.Listing, err = readListing(ctx, tx, endpoint, account, now); err != nil {
 			return fail(err)
 		}
 	}
@@ -550,6 +577,7 @@ func (s *SQLiteStore) AppendCheckResult(ctx context.Context, endpoint, apiKey, m
 // accessRow is the part of a model_access row Prune decides on.
 type accessRow struct {
 	id         int64
+	state      string
 	partition  accessPartition
 	observedAt int64
 }
@@ -559,6 +587,14 @@ type accessPartition struct {
 	endpoint, account, model string
 }
 
+// counts reports whether the row can be a partition's newest claim at now: a
+// known state, dated no later than now. A row dated inside the skew allowance
+// does not qualify yet, because a reader behind now does not admit it (the
+// defect class of commit 6cade156).
+func (r accessRow) counts(now time.Time) bool {
+	return (r.state == string(AccessAnswered) || r.state == string(AccessRefused)) && r.observedAt <= now.UnixMilli()
+}
+
 // prunableAccessIDs returns, sorted, the access rows older than the retention
 // window that are not the newest of their account and model. The newest stays
 // however old: an expired latest row means no claim, and deleting it would let
@@ -566,6 +602,9 @@ type accessPartition struct {
 func prunableAccessIDs(rows []accessRow, now time.Time) []int64 {
 	newest := make(map[accessPartition]accessRow)
 	for _, r := range rows {
+		if !r.counts(now) {
+			continue
+		}
 		if n, ok := newest[r.partition]; !ok || r.observedAt > n.observedAt || (r.observedAt == n.observedAt && r.id > n.id) {
 			newest[r.partition] = r
 		}
@@ -573,7 +612,10 @@ func prunableAccessIDs(rows []accessRow, now time.Time) []int64 {
 	cutoff := now.Add(-evidenceRetention).UnixMilli()
 	var ids []int64
 	for _, r := range rows {
-		if r.observedAt < cutoff && newest[r.partition].id != r.id {
+		if r.state != string(AccessAnswered) && r.state != string(AccessRefused) {
+			continue // another binary's row: never deleted
+		}
+		if n, ok := newest[r.partition]; ok && r.observedAt < cutoff && n.id != r.id {
 			ids = append(ids, r.id)
 		}
 	}
@@ -582,7 +624,7 @@ func prunableAccessIDs(rows []accessRow, now time.Time) []int64 {
 }
 
 func (s *SQLiteStore) readAccessRows(ctx context.Context) (out []accessRow, err error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, key_version, endpoint, account, model_name, observed_at FROM model_access`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, state, key_version, endpoint, account, model_name, observed_at FROM model_access`)
 	if err != nil {
 		return nil, err
 	}
@@ -590,7 +632,7 @@ func (s *SQLiteStore) readAccessRows(ctx context.Context) (out []accessRow, err 
 	for rows.Next() {
 		var r accessRow
 		p := &r.partition
-		if err := rows.Scan(&r.id, &p.keyVersion, &p.endpoint, &p.account, &p.model, &r.observedAt); err != nil {
+		if err := rows.Scan(&r.id, &r.state, &p.keyVersion, &p.endpoint, &p.account, &p.model, &r.observedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, r)
