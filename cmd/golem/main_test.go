@@ -39,10 +39,11 @@ const dataHomeChosenEnv = "GOLEM_TEST_DATA_HOME_CHOSEN"
 
 // TestMain keeps every test off the developer's data directory: run() opens its
 // stores with os.Getenv, and a store it finds under the real one gets migrated.
-// Helpers golem launches with a scrubbed environment skip it: two of them report
-// exactly what they inherit, and none of them touches the data directory.
+// Helpers golem launches with a scrubbed environment skip it, because none of
+// them touches the data directory: two report exactly what they inherit, and
+// three end in os.Exit, which would strand a temp dir made here.
 func TestMain(m *testing.M) {
-	scrubbed := slices.ContainsFunc([]string{"TestContainmentHelper", "TestMCPEnvProbeProcess", "TestMCPTrustStdioProcess"}, func(name string) bool {
+	scrubbed := slices.ContainsFunc([]string{"TestContainmentHelper", "TestMCPEnvProbeProcess", "TestMCPTrustStdioProcess", "TestProjectTrustAgentflowProcess"}, func(name string) bool {
 		return slices.Contains(os.Args, "-test.run=^"+name+"$")
 	})
 	if scrubbed || os.Getenv(dataHomeChosenEnv) != "" {
