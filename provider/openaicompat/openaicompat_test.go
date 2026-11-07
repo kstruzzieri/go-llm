@@ -2092,3 +2092,27 @@ func rawJSONString(t *testing.T, s string) json.RawMessage {
 	}
 	return json.RawMessage(b)
 }
+
+func TestProviderModels_ListingKeyContractAndOwnedBy(t *testing.T) {
+	for _, tc := range []struct {
+		body    string
+		nilList bool
+		want    []provider.ModelInfo
+	}{
+		{`{"data":[{"id":"m","owned_by":"acme"}]}`, false, []provider.ModelInfo{{Name: "m", OwnedBy: "acme"}}},
+		{`{}`, true, nil},
+		{`{"error":{"message":"backend down"}}`, true, nil},
+		{`{"data":[]}`, false, []provider.ModelInfo{}},
+		{`{"data":null}`, false, []provider.ModelInfo{}},
+	} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(tc.body)) }))
+		got, err := NewProvider(NewClient(srv.URL)).Models(context.Background())
+		srv.Close()
+		if err != nil {
+			t.Fatalf("%s: %v", tc.body, err)
+		}
+		if (got == nil) != tc.nilList || len(got) != len(tc.want) || (len(got) > 0 && (got[0].Name != tc.want[0].Name || got[0].OwnedBy != tc.want[0].OwnedBy)) {
+			t.Errorf("%s: got %#v, want %#v", tc.body, got, tc.want)
+		}
+	}
+}

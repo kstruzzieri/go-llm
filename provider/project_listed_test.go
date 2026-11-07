@@ -326,3 +326,141 @@ func TestProjectListedModels_QualityCtxCeiling(t *testing.T) {
 		t.Fatalf("QualityCtxCeiling = %d, %d; want 262144 (catalog), 16384 (config override)", facts[0].QualityCtxCeiling, facts[1].QualityCtxCeiling)
 	}
 }
+
+func TestProjectListedModels_LogReadsAllCapabilitiesAndKnownNo(t *testing.T) {
+	ctx := t.Context()
+	log := &hookedEvidenceStore{EvidenceStore: newEvidenceLog(t)}
+	b := mustBinding(t, "http://127.0.0.1:8080", "openai-compat")
+	row := func(model, capability string, state fingerprint.CapProbeState, digest string) fingerprint.EvidenceRow {
+		r := logRow(b, capability, state, digest, logT0.Add(-logDay))
+		r.Model = model
+		return r
+	}
+	appendRows(t, log,
+		// Every capability counts, not only tool_call, at the supplied digest.
+		row("checked", "chat", fingerprint.CapProbeYes, "sha256:listed"),
+		row("checked", "stream", fingerprint.CapProbeYes, "sha256:listed"),
+		row("checked", "tool_call", fingerprint.CapProbeNo, "sha256:listed"),
+		// A row at another digest says nothing about the listed identity.
+		row("checked", "embed", fingerprint.CapProbeYes, "sha256:older"),
+		row("moved", "tool_call", fingerprint.CapProbeYes, "sha256:older"),
+		// Name-only rows answer a listing with no digest, and only that.
+		row("named", "tool_call", fingerprint.CapProbeYes, ""),
+		row("named-with-digest", "tool_call", fingerprint.CapProbeYes, ""),
+	)
+
+	legacy := newFakeCapProbeStore()
+	for _, model := range []string{"checked", "moved", "unchecked"} {
+		if err := legacy.SaveCapProbe(ctx, fingerprint.CapProbe{
+			BackendID: "prov", ModelName: model, Capability: "tool_call",
+			State: fingerprint.CapProbeYes, ModelDigest: (ModelKey{Provider: "prov", Model: model}).String(),
+			ProbeVersion: fingerprint.CurrentToolProbeVersion, TestedAt: time.Now(),
+		}); err != nil {
+			t.Fatalf("SaveCapProbe(%s): %v", model, err)
+		}
+	}
+
+	prov := newStubProvider("prov")
+	prov.modelsErr = errors.New("the projection must not list")
+	mr, err := NewModelRegistry(&mrMockProviderRegistry{providers: map[string]Provider{"prov": prov}}, nil,
+		WithCapabilityProbeStore(legacy),
+		WithEvidenceLog(log, func(string) (EvidenceBinding, bool) { return b, true }))
+	if err != nil {
+		t.Fatalf("NewModelRegistry() error: %v", err)
+	}
+	newLogClock(mr, logT0)
+	generation, err := log.Generation(ctx)
+	if err != nil {
+		t.Fatalf("Generation: %v", err)
+	}
+
+	infos := []ModelInfo{
+		{Name: "unchecked"},
+		{Name: "checked", Digest: "sha256:listed"},
+		{Name: "named"},
+		{Name: "moved", Digest: "sha256:listed"},
+		{Name: "named-with-digest", Digest: "sha256:listed"},
+	}
+	facts, err := mr.ProjectListedModels(ctx, "prov", infos)
+	if err != nil {
+		t.Fatalf("ProjectListedModels() error: %v", err)
+	}
+	want := []struct {
+		model       string
+		caps, known Capability
+	}{
+		{"unchecked", 0, 0},
+		{"checked", CapChat | CapStream, CapChat | CapStream | CapToolCall},
+		{"named", CapToolCall, CapToolCall},
+		{"moved", 0, 0},
+		{"named-with-digest", 0, 0},
+	}
+	if len(facts) != len(want) {
+		t.Fatalf("len(facts) = %d; want %d", len(facts), len(want))
+	}
+	for i, w := range want {
+		f := facts[i]
+		if f.Key != (ModelKey{Provider: "prov", Model: w.model}) || f.Caps != w.caps || f.KnownMask != w.known {
+			t.Errorf("facts[%d] = %v Caps=%v KnownMask=%v; want %s Caps=%v KnownMask=%v", i, f.Key, f.Caps, f.KnownMask, w.model, w.caps, w.known)
+		}
+	}
+
+	wantModelsCalls(t, "the projection", prov, 0)
+	if got := log.snapshots.Load(); got != 1 {
+		t.Fatalf("%d snapshot reads; want one for the whole listing", got)
+	}
+	if len(mr.profiles) != 0 || len(mr.profileDeadlines) != 0 {
+		t.Fatalf("profiles = %d, deadlines = %d; the projection writes neither", len(mr.profiles), len(mr.profileDeadlines))
+	}
+	if got, err := log.Generation(ctx); err != nil || got != generation {
+		t.Fatalf("Generation = %d, %v; want %d, because the projection only reads", got, err, generation)
+	}
+}
+
+func TestProjectListedModels_LogOtherAdapterNotKnown(t *testing.T) {
+	log := newEvidenceLog(t)
+	native := mustBinding(t, "http://127.0.0.1:11434", "ollama")
+	compat := mustBinding(t, "http://127.0.0.1:11434", "openai-compat")
+	appendRows(t, log,
+		showRow(native, "tool_call", fingerprint.CapProbeNo, logDigest, logT0),
+		showRow(native, "chat", fingerprint.CapProbeYes, logDigest, logT0),
+	)
+	mr, _ := logRegistry(t, log, "compat", compat, logDigest)
+	facts, err := mr.ProjectListedModels(t.Context(), "compat", []ModelInfo{{Name: logModel, Digest: logDigest}})
+	if err != nil {
+		t.Fatalf("ProjectListedModels() error: %v", err)
+	}
+	if f := facts[0]; f.Caps != 0 || f.KnownMask != 0 {
+		t.Fatalf("Caps=%v KnownMask=%v; another adapter's rows must claim nothing", f.Caps, f.KnownMask)
+	}
+}
+
+func TestProjectListedModels_LogCancellationBarriers(t *testing.T) {
+	log := newEvidenceLog(t)
+	b := mustBinding(t, "http://127.0.0.1:8080", "openai-compat")
+	mr, _ := logRegistry(t, log, "prov", b, logDigest)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	for name, infos := range map[string][]ModelInfo{"listing": {{Name: logModel}}, "empty listing": nil} {
+		facts, err := mr.ProjectListedModels(ctx, "prov", infos)
+		if !errors.Is(err, context.Canceled) || facts != nil {
+			t.Fatalf("%s: facts = %v, err = %v; want nil, context.Canceled", name, facts, err)
+		}
+	}
+}
+
+// As on the legacy path, a store failure claims nothing and fails nothing.
+func TestProjectListedModels_LogReadFailureDegrades(t *testing.T) {
+	log := &hookedEvidenceStore{EvidenceStore: newEvidenceLog(t)}
+	b := mustBinding(t, "http://127.0.0.1:8080", "openai-compat")
+	appendRows(t, log, logRow(b, "tool_call", fingerprint.CapProbeYes, logDigest, logT0))
+	mr, _ := logRegistry(t, log, "prov", b, logDigest)
+	log.snapshotErr = errors.New("database is locked")
+	facts, err := mr.ProjectListedModels(t.Context(), "prov", []ModelInfo{{Name: logModel, Digest: logDigest, Capabilities: []string{"chat"}}})
+	if err != nil {
+		t.Fatalf("ProjectListedModels() error: %v", err)
+	}
+	if f := facts[0]; f.Caps != CapChat || f.KnownMask != CapChat {
+		t.Fatalf("Caps=%v KnownMask=%v; want only the listing's own chat", f.Caps, f.KnownMask)
+	}
+}

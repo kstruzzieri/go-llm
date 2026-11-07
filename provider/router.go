@@ -385,6 +385,8 @@ func (r *Router) Route(ctx context.Context, req RoutingRequest) (*RoutePlan, err
 	}
 	r.mu.RUnlock()
 
+	r.registry.syncGeneration(ctx)
+
 	// Invariant: when PreferredChain is empty and the caller supplies BOTH
 	// a qualified Model ("provider/model") and a Provider field, the two
 	// must agree on provider identity. Mismatch is a caller-side bug — we

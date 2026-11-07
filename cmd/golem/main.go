@@ -1212,11 +1212,11 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	if !f.noCapProbe || f.inputCeiling <= 0 {
 		capHandle, warning := openCapProbeStore(ctx, os.Getenv, root)
 		if capHandle != nil {
-			profileStore = capHandle.profiles
+			profileStore = capHandle.Profiles()
 			if !f.noCapProbe {
-				capStore = capHandle.store
+				capStore = capHandle.Probes()
 			}
-			defer func() { _ = capHandle.db.Close() }()
+			defer func() { _ = capHandle.Close() }()
 		}
 		capStoreWarn = warning
 	}
