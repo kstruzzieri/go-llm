@@ -486,11 +486,18 @@ Edits the failed run made stay in the workspace, including an edit AgentFlow
 never receipted. To retry from a clean tree, restore the modified tracked files
 (for example `git restore`) and delete files the failed run created *before*
 you resume. Otherwise the new attempt must record its own receipts for every
-in-scope file that is still changed, by writing it again; writing the same
-bytes again is enough. A model that finds the content already right may not,
-because its prompt does not mention the earlier attempt. Resume then fails
-before any gate (exit `1`), leaves the new attempt open, and names the step, the
-attempt, the unrecorded files and both ways out. `-agentflow-status` reports
+in-scope file that is still changed. After resume claims that attempt, it reads
+`next-action` again and adds a `Retry context` section to the model's
+instructions. The section lists the unrecorded files, quoted, and says to fix a
+file that is wrong and to confirm one that is already right with an `edit_file`
+whose `old_string` and `new_string` are the same unique text. That edit keeps
+the bytes and records the receipt. An empty file has nothing to match, so the
+model writes it again as empty. If that read fails, the model does not run and
+resume blocks the attempt as it blocks a failed run.
+
+A model can still leave a file untouched. Resume then fails before any gate
+(exit `1`), leaves the new attempt open, and names the step, the attempt, the
+unrecorded files and both ways out. `-agentflow-status` reports
 `file_receipts_missing` (exit `3`).
 
 To keep the files as they are, run the `record-file-change` command status shows
