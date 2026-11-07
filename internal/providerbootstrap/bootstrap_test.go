@@ -319,7 +319,7 @@ func TestNew_FingerprintStoreUsesProviderSpecificOllamaClient(t *testing.T) {
 		switch r.URL.Path {
 		case "/api/tags":
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"models":[{"name":"b-model","digest":"sha256:b"}]}`))
+			_, _ = w.Write([]byte(`{"models":[{"name":"b-model"}]}`))
 		case "/api/show":
 			var body struct {
 				Name string `json:"name"`

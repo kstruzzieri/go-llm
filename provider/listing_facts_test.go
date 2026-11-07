@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -104,5 +105,72 @@ func TestOllamaProvider_DigestComesFromTagsOnEveryPath(t *testing.T) {
 	one, err := p.ModelInfo(t.Context(), "ok")
 	if err != nil || one.Digest != "sha256:ok" {
 		t.Fatalf("ModelInfo = %+v, %v, want the same digest Models reports", one, err)
+	}
+}
+
+// Ollama reads a name with no tag as its :latest form, and /api/tags always lists
+// the tag, so the two spellings must find one digest. Show reports none.
+func TestOllamaModelInfoDigestTreatsBareNameAndLatestAsOne(t *testing.T) {
+	const digest = "sha256:listed"
+	for _, tc := range []struct {
+		name, asked, listed, want string
+	}{
+		{"bare asked, latest listed", "m", "m:latest", digest},
+		{"latest asked, bare listed", "m:latest", "m", digest},
+		{"exact", "m:7b", "m:7b", digest},
+		{"bare is not another tag", "m", "m:7b", ""},
+		{"another tag is not latest", "m:7b", "m:latest", ""},
+		{"another model", "m", "m2:latest", ""},
+		{"namespace", "ns/m", "ns/m:latest", digest},
+		{"registry port is not a tag", "host:5000/m", "host:5000/m:latest", digest},
+		{"registry port, bare is not another tag", "host:5000/m", "host:5000/m:7b", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/api/tags":
+					_, _ = fmt.Fprintf(w, `{"models":[{"name":%q,"digest":%q}]}`, tc.listed, digest)
+				case "/api/show":
+					_, _ = fmt.Fprint(w, `{"capabilities":["completion"]}`)
+				}
+			}))
+			defer srv.Close()
+			p := NewOllamaProvider(ollama.NewClient(ollama.WithBaseURL(srv.URL)))
+			info, err := p.ModelInfo(t.Context(), tc.asked)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if info.Digest != tc.want || info.Name != tc.asked {
+				t.Fatalf("ModelInfo(%q) = name %q digest %q, want name %q digest %q", tc.asked, info.Name, info.Digest, tc.asked, tc.want)
+			}
+			// The listing still reports the server's own spelling.
+			infos, err := p.Models(t.Context())
+			if err != nil || len(infos) != 1 || infos[0].Name != tc.listed || infos[0].Digest != digest {
+				t.Fatalf("Models = %+v, %v, want only %q under %q", infos, err, tc.listed, digest)
+			}
+		})
+	}
+}
+
+// A known limit: with no listing there is no digest, and the fingerprint identity
+// falls back for this lookup. The show data still comes back.
+func TestOllamaModelInfoKeepsShowDataWhenTagsFail(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/tags":
+			http.Error(w, "overloaded", http.StatusServiceUnavailable)
+		case "/api/show":
+			_, _ = fmt.Fprint(w, `{"capabilities":["completion"],"template":"tmpl","details":{"family":"fam","parameter_size":"7B","quantization_level":"Q4"}}`)
+		}
+	}))
+	defer srv.Close()
+	p := NewOllamaProvider(ollama.NewClient(ollama.WithBaseURL(srv.URL)))
+	info, err := p.ModelInfo(t.Context(), "m")
+	if err != nil {
+		t.Fatalf("ModelInfo: %v", err)
+	}
+	want := ModelInfo{Name: "m", Family: "fam", ParameterSize: "7B", QuantLevel: "Q4", Template: "tmpl", Capabilities: []string{"completion"}}
+	if !reflect.DeepEqual(*info, want) {
+		t.Fatalf("ModelInfo = %+v, want %+v", *info, want)
 	}
 }

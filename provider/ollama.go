@@ -203,8 +203,9 @@ func (p *OllamaProvider) ModelInfo(ctx context.Context, name string) (*ModelInfo
 	if info.Digest == "" {
 		// Same digest Models reports for this model, so the two paths agree.
 		if listed, err := p.client.ListModels(ctx); err == nil {
+			want := ollamaTaggedName(name)
 			for _, m := range listed {
-				if m.Name == name {
+				if ollamaTaggedName(m.Name) == want {
 					info.Digest = m.Digest
 					break
 				}
@@ -212,6 +213,15 @@ func (p *OllamaProvider) ModelInfo(ctx context.Context, name string) (*ModelInfo
 		}
 	}
 	return &info, nil
+}
+
+// ollamaTaggedName spells a name with its tag, as Ollama reads it: no tag means
+// :latest. A colon before the last slash is a registry port, not a tag.
+func ollamaTaggedName(name string) string {
+	if strings.LastIndex(name, ":") <= strings.LastIndex(name, "/") {
+		return name + ":latest"
+	}
+	return name
 }
 
 func ollamaModelInfo(detail *ollama.ModelInfo) ModelInfo {
