@@ -61,7 +61,7 @@ func (s *SQLiteStore) Generation(ctx context.Context) (int64, error) {
 	return generation, nil
 }
 
-// Prune deletes evidence no reader can select at now or later, keeping 90 days
+// Prune deletes evidence and access rows no reader can select at now or later, keeping 90 days
 // of history and every older row that could still win. It decides from a read
 // outside the transaction, so a prune with nothing to do opens no write
 // transaction and bumps no generation. The decision stays safe against a
@@ -80,13 +80,20 @@ func (s *SQLiteStore) Prune(ctx context.Context, now time.Time) error {
 		return fmt.Errorf("fingerprint: prune: read evidence: %w", err)
 	}
 	ids := prunableEvidenceIDs(stored, now)
-	if len(ids) == 0 {
+	access, err := s.readAccessRows(ctx)
+	if err != nil {
+		return fmt.Errorf("fingerprint: prune: read access: %w", err)
+	}
+	accessIDs := prunableAccessIDs(access, now)
+	if len(ids) == 0 && len(accessIDs) == 0 {
 		return nil
 	}
 	err = s.writeTx(ctx, func(tx *sql.Tx) error {
-		for _, id := range ids {
-			if _, err := tx.ExecContext(ctx, `DELETE FROM capability_evidence WHERE id = ?`, id); err != nil {
-				return err
+		for table, doomed := range map[string][]int64{"capability_evidence": ids, "model_access": accessIDs} {
+			for _, id := range doomed {
+				if _, err := tx.ExecContext(ctx, `DELETE FROM `+table+` WHERE id = ?`, id); err != nil {
+					return err
+				}
 			}
 		}
 		return nil
