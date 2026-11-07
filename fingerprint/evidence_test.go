@@ -578,6 +578,27 @@ func TestPrune_UnknownOrFutureRowCannotEvictUsableAnswer(t *testing.T) {
 		t.Fatalf("reading after the future row arrived = %+v", got)
 	}
 	wantStoredIDs(t, s, 1, 3, 4, 5, 6, 7, 8, 9, 10, 11)
+
+	// A row inside the skew allowance counts for a reader at the pruner's clock
+	// but not for one slightly behind it, so it authorizes nothing until its date
+	// has passed.
+	for _, tt := range []struct {
+		name string
+		at   time.Time
+		want []int64
+	}{
+		{"30 minutes ahead", evNow.Add(30 * time.Minute), []int64{1, 2}},
+		{"at the skew allowance", evNow.Add(time.Hour), []int64{1, 2}},
+		{"1 ms ahead", evNow.Add(time.Millisecond), []int64{1, 2}},
+		{"dated exactly now", evNow, []int64{2}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newTestStore(t)
+			appendEv(t, s, evRow(1, evDay(-300)), evRow(2, tt.at))
+			pruneEv(t, s, evNow)
+			wantStoredIDs(t, s, tt.want...)
+		})
+	}
 }
 
 func TestPrune_DominatedOldPositiveCanBeRemoved(t *testing.T) {
@@ -731,7 +752,7 @@ func genEvidenceClaim(rng *rand.Rand, r *EvidenceRow) {
 
 // evidenceClocks returns the instants at which any reading could change: each
 // expiry, freshness and skew-admission boundary and a millisecond either side,
-// from the prune instant on.
+// from the given instant on.
 func evidenceClocks(rows []EvidenceRow, from time.Time) []time.Time {
 	seen := map[int64]bool{from.UnixMilli(): true, from.Add(5000 * evDayLen).UnixMilli(): true}
 	add := func(b time.Time) {
@@ -758,6 +779,13 @@ func evidenceClocks(rows []EvidenceRow, from time.Time) []time.Time {
 		clocks = append(clocks, time.UnixMilli(ms))
 	}
 	return clocks
+}
+
+// pruneDecisionClocks is every clock a pruned log must answer for: the prune
+// instant and everything after it, plus readers behind the pruner by up to the
+// skew allowance, the most this package tolerates between two clocks.
+func pruneDecisionClocks(rows []EvidenceRow) []time.Time {
+	return append(evidenceClocks(rows, evNow.Add(-time.Hour)), evNow.Add(-time.Millisecond), evNow)
 }
 
 // asReaderVersion shows the log as a binary reading method version v would see
@@ -860,7 +888,7 @@ func TestEvidenceInvariants_PrunePreservesFutureDecisions(t *testing.T) {
 			}
 		}
 		deleted += len(ids)
-		wantSameDecisions(t, fmt.Sprintf("seed %d", seed), full, pruned, evidenceClocks(full, evNow))
+		wantSameDecisions(t, fmt.Sprintf("seed %d", seed), full, pruned, pruneDecisionClocks(full))
 	}
 	// Guard against a generator that stopped exercising the decision.
 	t.Logf("%d rows deleted, %d old rows kept", deleted, keptOld)
@@ -889,7 +917,7 @@ func TestEvidenceInvariants_StoredPruneMatchesReducer(t *testing.T) {
 			want = append(want, r.ID)
 		}
 		wantStoredIDs(t, s, want...)
-		wantSameDecisions(t, fmt.Sprintf("seed %d", seed), full, pruned, evidenceClocks(full, evNow))
+		wantSameDecisions(t, fmt.Sprintf("seed %d", seed), full, pruned, pruneDecisionClocks(full))
 	}
 }
 
