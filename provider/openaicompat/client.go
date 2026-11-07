@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"runtime/debug"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -385,7 +386,7 @@ func (c *Client) getJSON(ctx context.Context, path string, out any) error {
 		return fmt.Errorf("openaicompat: build %s: %w", path, err)
 	}
 	c.setHeaders(req, "")
-	resp, err := c.hc.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return fmt.Errorf("openaicompat: %s: %w", path, err)
 	}
@@ -410,11 +411,27 @@ func (c *Client) post(ctx context.Context, path string, body any, contentType st
 		return nil, fmt.Errorf("openaicompat: build %s: %w", path, err)
 	}
 	c.setHeaders(req, contentType)
-	resp, err := c.hc.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return nil, fmt.Errorf("openaicompat: %s: %w", path, err)
 	}
 	return resp, nil
+}
+
+// do redacts errors from HTTP parsing before a response exists, while
+// preserving their causes for cancellation and routing classification.
+func (c *Client) do(req *http.Request) (*http.Response, error) {
+	resp, err := c.hc.Do(req)
+	key := strings.TrimRight(c.apiKey, " \t") // Match HTTP's trailing header whitespace trimming.
+	if err == nil || key == "" {
+		return resp, err
+	}
+	quoted := strconv.Quote(key)
+	message := strings.NewReplacer(
+		key, "[redacted]",
+		quoted[1:len(quoted)-1], "[redacted]",
+	).Replace(err.Error())
+	return resp, &redactedError{err: err, message: message}
 }
 
 // marshalBody encodes body for post. Without a content guard that is plain
@@ -608,3 +625,11 @@ func (e *statusError) HTTPStatusCode() int {
 	}
 	return e.statusCode
 }
+
+type redactedError struct {
+	err     error
+	message string
+}
+
+func (e *redactedError) Error() string { return e.message }
+func (e *redactedError) Unwrap() error { return e.err }

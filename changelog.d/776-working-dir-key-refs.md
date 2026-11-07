@@ -8,7 +8,7 @@ A `models.json` found only because it sits in the current directory could name a
 - Golem prints `pass -config ./models.json to use this file's key references, or set GO_LLM_CONFIG`; `golem ops` prints the code, the provider and that sentence; `go-llm-mcp` names its `-config` flag; `llm-bench` fails on the refusal (`set GO_LLM_CONFIG or pass -judge-model`) instead of silently falling back to its built-in judge.
 - An `openai-compat` provider with an `api_key` never runs the loopback discovery scan (ports 8080-8090). Only its configured URL is probed, through the destination guard. If that URL does not serve the model, Golem prints `openai-compat backend discovery skipped: provider "<key>" has an api_key; pass -base-url to use another port`. Keyless providers still discover a moved local backend.
 - The destination consent screen adds `sends api_key from $NAME` (several: `$A, $B`) or `sends a literal api_key` under each destination whose provider sends a key. This extends the #477 consent field set.
-- The openai-compat client replaces its own key with `[redacted]` in error text built from a server response.
+- The openai-compat client replaces its own key with `[redacted]` in error text built from a server response, including malformed HTTP status lines and headers. Transport error causes remain available through `errors.Is` and `errors.As`.
 
 #### For consumers that mirror the error codes
 

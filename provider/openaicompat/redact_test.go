@@ -5,9 +5,11 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -50,6 +52,7 @@ func assertRedacted(t *testing.T, srv *httptest.Server, key string) {
 	_, chatErr := p.Chat(context.Background(), req)
 	streamErr := p.ChatStream(context.Background(), req, func(provider.ChatResponse) error { return nil })
 	_, modelsErr := p.Models(context.Background())
+	key = strings.TrimRight(key, " \t") // HTTP trims trailing header whitespace on the wire.
 	for name, err := range map[string]error{"Chat": chatErr, "ChatStream": streamErr, "Models": modelsErr} {
 		if err == nil {
 			t.Errorf("%s: want error", name)
@@ -95,6 +98,91 @@ func TestStatusLineRedactsOwnKey(t *testing.T) {
 			}))
 			t.Cleanup(srv.Close)
 			assertRedacted(t, srv, canaryKey(t))
+		})
+	}
+}
+
+func TestMalformedResponseRedactsOwnKey(t *testing.T) {
+	for name, response := range map[string]string{
+		"status line": "HTTP/1.1 %s\r\nContent-Length: 0\r\n\r\n",
+		"header":      "HTTP/1.1 401 Unauthorized\r\n%s\r\nContent-Length: 0\r\n\r\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			for name, key := range map[string]string{
+				"plain":               canaryKey(t),
+				"quoted":              "CANARY-776-quoted-\"\\-end",
+				"trailing whitespace": canaryKey(t) + " \t",
+			} {
+				t.Run(name, func(t *testing.T) {
+					srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						conn, buf, err := w.(http.Hijacker).Hijack()
+						if err != nil {
+							t.Error(err)
+							return
+						}
+						defer func() { _ = conn.Close() }()
+						key := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+						_, _ = fmt.Fprintf(buf, response, key)
+						_ = buf.Flush()
+					}))
+					t.Cleanup(srv.Close)
+					assertRedacted(t, srv, key)
+				})
+			}
+		})
+	}
+}
+
+func TestTransportErrorRedactionPreservesCause(t *testing.T) {
+	key := canaryKey(t)
+	cause := errors.New("redirect refused for " + key)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/redirect", http.StatusFound)
+	}))
+	t.Cleanup(srv.Close)
+	c := NewClient(srv.URL, WithAPIKey(key), WithHTTPClient(&http.Client{
+		CheckRedirect: func(*http.Request, []*http.Request) error { return cause },
+	}))
+	for name, call := range map[string]func() error{
+		"GET": func() error { return c.getJSON(t.Context(), "/v1/models", nil) },
+		"POST": func() error {
+			_, err := c.post(t.Context(), "/v1/chat/completions", nil, "application/json")
+			return err
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := call()
+			if err == nil {
+				t.Fatal("redirect unexpectedly succeeded")
+			}
+			if strings.Contains(err.Error(), key) || !strings.Contains(err.Error(), "[redacted]") {
+				t.Error("transport error did not redact the key")
+			}
+			if !errors.Is(err, cause) {
+				t.Error("transport error lost its cause")
+			}
+			var urlErr *url.Error
+			if !errors.As(err, &urlErr) {
+				t.Error("transport error lost its URL error type")
+			}
+		})
+	}
+}
+
+func TestTransportErrorUnchangedWithoutKey(t *testing.T) {
+	for _, key := range []string{"", " \t"} {
+		t.Run(fmt.Sprintf("%q", key), func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				http.Redirect(w, r, "/redirect", http.StatusFound)
+			}))
+			t.Cleanup(srv.Close)
+			c := NewClient(srv.URL, WithAPIKey(key), WithHTTPClient(&http.Client{
+				CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("upstream down") },
+			}))
+			err := c.getJSON(t.Context(), "/v1/models", nil)
+			if err == nil || !strings.HasSuffix(err.Error(), ": upstream down") || strings.Contains(err.Error(), "[redacted]") {
+				t.Errorf("keyless transport error changed: %v", err)
+			}
 		})
 	}
 }
