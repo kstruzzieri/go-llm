@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -63,6 +64,27 @@ func TestExposureReportedOnEveryReturnPath(t *testing.T) {
 	}
 }
 
+// errAfterTool answers one tool call, then fails the next model call.
+type errAfterTool struct{ calls int }
+
+func (e *errAfterTool) Chat(context.Context, provider.ChatRequest, func(provider.ChatResponse) error) (ModelResult, error) {
+	e.calls++
+	if e.calls == 1 {
+		return ModelResult{Response: provider.ChatResponse{ToolCalls: []provider.ToolCall{tc("stub", `{}`)}}}, nil
+	}
+	return ModelResult{}, errors.New("model down")
+}
+
+func TestExposureKeptOnModelError(t *testing.T) {
+	res, err := runAdmit(t, &errAfterTool{}, Request{Tools: []Tool{foreignStub()}}, nil)
+	if err == nil {
+		t.Fatal("want error")
+	}
+	if want := (Exposure{Recorded: true, Foreign: true, First: "tool:stub"}); res.Exposure != want {
+		t.Fatalf("Exposure = %+v, want %+v", res.Exposure, want)
+	}
+}
+
 func TestExposureFirstIsBounded(t *testing.T) {
 	_, r := newExposureRun(context.Background(), Request{})
 	r.admit(OriginForeign, strings.Repeat("é", 5000))
@@ -77,14 +99,16 @@ func TestExposureFirstIsBounded(t *testing.T) {
 }
 
 func TestExposureNestedRunsShareAndNeverClear(t *testing.T) {
-	ctx, parent := newExposureRun(context.Background(), Request{})
-	_, child := newExposureRun(ctx, Request{PriorExposure: &Exposure{}})
-	if !parent.snapshot().Unknown {
-		t.Fatal("child prior must reach parent")
+	ctx, parent := newExposureRun(context.Background(), Request{HistorySummary: "s"})
+	parent.admitForeign("consult")
+	_, _ = newExposureRun(ctx, Request{PriorExposure: &Exposure{Recorded: true}})
+	want := Exposure{Recorded: true, Foreign: true, Unknown: true, First: "history"}
+	if got := parent.snapshot(); got != want {
+		t.Fatalf("parent = %+v, want %+v", got, want)
 	}
-	child.admitForeign("consult")
-	if s := parent.snapshot(); !s.Foreign || s.First != "history" {
-		t.Fatalf("parent = %+v", s)
+	_, r := newExposureRun(context.Background(), Request{PriorExposure: &Exposure{Recorded: true, First: "junk"}})
+	if got := r.snapshot(); got != (Exposure{Recorded: true}) {
+		t.Fatalf("clean prior = %+v", got)
 	}
 	var nilRun *exposureRun
 	nilRun.admit(OriginForeign, "x")
@@ -94,12 +118,25 @@ func TestExposureNestedRunsShareAndNeverClear(t *testing.T) {
 	}
 }
 
+func TestExposurePriorFirstIsBounded(t *testing.T) {
+	long := strings.Repeat("é", 5000)
+	_, r := newExposureRun(context.Background(), Request{PriorExposure: &Exposure{Recorded: true, Foreign: true, First: long}})
+	got := r.snapshot().First
+	if len(got) > conversation.MaxExposureFirstBytes || !utf8.ValidString(got) || got == "" {
+		t.Fatalf("First = %d bytes", len(got))
+	}
+}
+
 func TestResultExposureNotSerialized(t *testing.T) {
 	b, err := json.Marshal(Result{Exposure: Exposure{Recorded: true, Foreign: true}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(b), "Exposure") {
-		t.Fatalf("serialized: %s", b)
+	empty, err := json.Marshal(Result{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(b) != string(empty) {
+		t.Fatalf("serialized %s, want %s", b, empty)
 	}
 }

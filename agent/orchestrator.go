@@ -177,7 +177,8 @@ func buildChatRequest(st State, specs []provider.Tool, outputReserve int, opts p
 // Run executes the loop until the model produces a final answer or a cap is
 // hit. Result.Risk is published on every return path, including blocks and
 // errors. Nested Runs using the supplied context inherit capacities and finite
-// token allowances. Returning seals that scope and cancels its context; callers
+// token allowances. A nested Run on the context a tool received also shares
+// the run's exposure record; one on a fresh context.Background() escapes it. Returning seals that scope and cancels its context; callers
 // must join nested work before returning to receive complete descendant usage.
 func (o *Orchestrator) Run(ctx context.Context, req Request, obs Observer) (Result, error) {
 	return o.RunWithVerifier(ctx, req, obs, o.Verifier())

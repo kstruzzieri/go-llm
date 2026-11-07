@@ -20,6 +20,7 @@ type admitTool struct {
 	invoked  Origin // per-invocation origin; OriginUnknown defers to the static one
 	planErr  bool
 	run      func(context.Context) error
+	set      *ContextSet // returned as the structured payload when non-nil
 }
 
 func (a admitTool) Spec() ToolSpec {
@@ -32,7 +33,7 @@ func (a admitTool) Invoke(ctx context.Context, _ json.RawMessage) (ToolResult, e
 			return ToolResult{}, err
 		}
 	}
-	return ToolResult{Content: "out", Origin: a.invoked}, nil
+	return ToolResult{Content: "out", Origin: a.invoked, Context: a.set}, nil
 }
 
 // admitOriginTool adds OriginTool; a noOrigin admitTool is used bare and
@@ -181,8 +182,8 @@ func TestAdmitParallelReadBatch(t *testing.T) {
 	got := admitRun(t, []provider.ToolCall{tc("a", `{}`), tc("b", `{}`)},
 		admitTool{name: "a", origin: OriginForeign}.tool(),
 		admitTool{name: "b", origin: OriginForeign}.tool())
-	if !got.Foreign || got.Unknown || !strings.HasPrefix(got.First, "tool:") {
-		t.Fatalf("Exposure = %+v", got)
+	if want := (Exposure{Recorded: true, Foreign: true, First: "tool:a"}); got != want {
+		t.Fatalf("Exposure = %+v, want %+v", got, want)
 	}
 }
 
@@ -255,6 +256,74 @@ func TestAdmitBlockedAdviceAdmitsNothing(t *testing.T) {
 		t.Fatalf("model calls = %d, want 0", mc.calls)
 	}
 	if want := (Exposure{Recorded: true}); res.Exposure != want {
+		t.Fatalf("Exposure = %+v, want %+v", res.Exposure, want)
+	}
+}
+
+func TestAdmitInvokeErrorIsForeign(t *testing.T) {
+	boom := func(context.Context) error { return errors.New("boom") }
+	got := admitRun(t, []provider.ToolCall{tc("bad", `{}`)}, admitTool{name: "bad", origin: OriginForeign, run: boom}.tool())
+	if want := (Exposure{Recorded: true, Foreign: true, First: "tool:bad"}); got != want {
+		t.Fatalf("Exposure = %+v, want %+v", got, want)
+	}
+}
+
+func TestAdmitMixedAlternativesWithContextSet(t *testing.T) {
+	cm := ContextManager{Mixed: true, Estimate: runeEstimator}
+	tool := admitTool{name: "ctx", origin: OriginForeign, set: validSet()}.tool()
+	res, err := runAdmit(t, scriptedToolCalls(tc("ctx", `{}`)), Request{Tools: []Tool{tool}}, &cm)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := (Exposure{Recorded: true, Foreign: true, First: "tool:ctx"}); res.Exposure != want {
+		t.Fatalf("Exposure = %+v, want %+v", res.Exposure, want)
+	}
+}
+
+func TestAdmitForeignTrustedOriginClaim(t *testing.T) {
+	tool := admitTool{name: "liar", origin: OriginForeign, invoked: OriginWorkspace}.tool()
+	got := admitRun(t, []provider.ToolCall{tc("liar", `{}`)}, tool)
+	if want := (Exposure{Recorded: true, Foreign: true, First: "tool:liar"}); got != want {
+		t.Fatalf("Exposure = %+v, want %+v", got, want)
+	}
+}
+
+// bulkAdmitTool returns a large result so the next step's assembly evicts it.
+type bulkAdmitTool struct {
+	name   string
+	origin Origin
+}
+
+func (b bulkAdmitTool) Spec() ToolSpec {
+	return ToolSpec{Name: b.name, Parameters: json.RawMessage(`{"type":"object"}`)}
+}
+func (bulkAdmitTool) Effect() Effect   { return Effect{Class: Read} }
+func (b bulkAdmitTool) Origin() Origin { return b.origin }
+func (bulkAdmitTool) Invoke(context.Context, json.RawMessage) (ToolResult, error) {
+	return ToolResult{Content: strings.Repeat("X", 400)}, nil
+}
+
+func TestAdmitCompactionEvictingForeignObservation(t *testing.T) {
+	mc := &scriptedCaller{responses: []ModelResult{
+		{Response: provider.ChatResponse{ToolCalls: []provider.ToolCall{tc("far", `{}`)}}},
+		{Response: provider.ChatResponse{ToolCalls: []provider.ToolCall{tc("near", `{}`)}}},
+		{Response: provider.ChatResponse{Content: "done", Done: true}},
+	}}
+	res, err := runAdmit(t, mc, Request{
+		Budget: Budget{InputCeiling: 80 + len([]rune(ToolTrustContract))},
+		Tools:  []Tool{bulkAdmitTool{"far", OriginForeign}, bulkAdmitTool{"near", OriginWorkspace}},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	saw := false
+	for _, e := range res.Events {
+		saw = saw || e.Kind == "compaction"
+	}
+	if !saw {
+		t.Fatalf("no compaction event: %+v", res.Events)
+	}
+	if want := (Exposure{Recorded: true, Foreign: true, First: "tool:far"}); res.Exposure != want {
 		t.Fatalf("Exposure = %+v, want %+v", res.Exposure, want)
 	}
 }

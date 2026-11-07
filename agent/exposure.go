@@ -56,7 +56,7 @@ func (r *exposureRun) merge(e Exposure) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if (e.Foreign || e.Unknown) && s.exp.First == "" {
-		s.exp.First = e.First
+		s.exp.First = boundExposureFirst(e.First)
 	}
 	s.exp.Foreign = s.exp.Foreign || e.Foreign
 	s.exp.Unknown = s.exp.Unknown || e.Unknown
@@ -70,9 +70,9 @@ func (r *exposureRun) admit(origin Origin, toolName string) {
 	}
 	switch origin {
 	case OriginForeign:
-		r.merge(Exposure{Foreign: true, First: boundExposureFirst("tool:" + toolName)})
+		r.merge(Exposure{Foreign: true, First: "tool:" + toolName})
 	case OriginUnknown:
-		r.merge(Exposure{Unknown: true, First: boundExposureFirst("tool:" + toolName)})
+		r.merge(Exposure{Unknown: true, First: "tool:" + toolName})
 	}
 }
 
@@ -82,7 +82,7 @@ func (r *exposureRun) admitForeign(first string) {
 	if r == nil {
 		return
 	}
-	r.merge(Exposure{Foreign: true, First: boundExposureFirst(first)})
+	r.merge(Exposure{Foreign: true, First: first})
 }
 
 // snapshot returns a copy of the record. Recorded is always true: a run
@@ -98,7 +98,7 @@ func (r *exposureRun) snapshot() Exposure {
 	return e
 }
 
-// boundExposureFirst cuts s to MaxExposureFirstBytes at a UTF-8 boundary.
+// boundExposureFirst (applied in merge) cuts s to MaxExposureFirstBytes at a UTF-8 boundary.
 func boundExposureFirst(s string) string {
 	if len(s) <= conversation.MaxExposureFirstBytes {
 		return s
