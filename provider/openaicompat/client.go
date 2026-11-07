@@ -353,7 +353,7 @@ func (c *Client) postJSON(ctx context.Context, path string, body any, out any) e
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	if err := decodeJSONOrError(resp, out); err != nil {
+	if err := decodeJSONOrError(resp, c.apiKey, out); err != nil {
 		return err
 	}
 	return nil
@@ -370,7 +370,7 @@ func (c *Client) postSSE(ctx context.Context, path string, body any) (*sseReader
 	}
 
 	if resp.StatusCode/100 != 2 {
-		err := readErrorEnvelope(resp)
+		err := readErrorEnvelope(resp, c.apiKey)
 		_ = resp.Body.Close()
 		return nil, err
 	}
@@ -390,7 +390,7 @@ func (c *Client) getJSON(ctx context.Context, path string, out any) error {
 		return fmt.Errorf("openaicompat: %s: %w", path, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	return decodeJSONOrError(resp, out)
+	return decodeJSONOrError(resp, c.apiKey, out)
 }
 
 // post is the shared transport for postJSON / postSSE. It marshals body
@@ -542,9 +542,9 @@ func (c *Client) setHeaders(req *http.Request, contentType string) {
 
 // decodeJSONOrError reads resp.Body. On 2xx, it JSON-decodes into out. On
 // non-2xx, it parses an OpenAI error envelope and returns it as an error.
-func decodeJSONOrError(resp *http.Response, out any) error {
+func decodeJSONOrError(resp *http.Response, apiKey string, out any) error {
 	if resp.StatusCode/100 != 2 {
-		return readErrorEnvelope(resp)
+		return readErrorEnvelope(resp, apiKey)
 	}
 	if out == nil {
 		// Drain the body so the connection can be reused.
@@ -561,17 +561,28 @@ func decodeJSONOrError(resp *http.Response, out any) error {
 // Falls back to a plain "<status>: <body>" when the body is not a valid
 // error envelope, so HTML error pages and bare strings still produce a
 // usable error message rather than swallowing the failure.
-func readErrorEnvelope(resp *http.Response) error {
+//
+// A non-empty apiKey is replaced with "[redacted]" in the message: servers
+// that echo the Authorization header would otherwise put the key into
+// bootstrap warnings and logs.
+func readErrorEnvelope(resp *http.Response, apiKey string) error {
 	const limit = 64 * 1024
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, limit))
 	body = bytes.TrimSpace(body)
 
+	redact := func(m string) string {
+		if apiKey == "" {
+			return m
+		}
+		return strings.ReplaceAll(m, apiKey, "[redacted]")
+	}
+
 	var env errorEnvelope
 	if json.Unmarshal(body, &env) == nil && env.Error.Message != "" {
-		return &statusError{statusCode: resp.StatusCode, status: resp.Status, message: env.Error.Message}
+		return &statusError{statusCode: resp.StatusCode, status: resp.Status, message: redact(env.Error.Message)}
 	}
 	if len(body) > 0 {
-		return &statusError{statusCode: resp.StatusCode, status: resp.Status, message: string(body)}
+		return &statusError{statusCode: resp.StatusCode, status: resp.Status, message: redact(string(body))}
 	}
 	return &statusError{statusCode: resp.StatusCode, status: resp.Status}
 }
