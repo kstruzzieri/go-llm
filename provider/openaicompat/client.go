@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"runtime/debug"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -353,7 +354,7 @@ func (c *Client) postJSON(ctx context.Context, path string, body any, out any) e
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	if err := decodeJSONOrError(resp, out); err != nil {
+	if err := decodeJSONOrError(resp, c.apiKey, out); err != nil {
 		return err
 	}
 	return nil
@@ -370,7 +371,7 @@ func (c *Client) postSSE(ctx context.Context, path string, body any) (*sseReader
 	}
 
 	if resp.StatusCode/100 != 2 {
-		err := readErrorEnvelope(resp)
+		err := readErrorEnvelope(resp, c.apiKey)
 		_ = resp.Body.Close()
 		return nil, err
 	}
@@ -385,12 +386,12 @@ func (c *Client) getJSON(ctx context.Context, path string, out any) error {
 		return fmt.Errorf("openaicompat: build %s: %w", path, err)
 	}
 	c.setHeaders(req, "")
-	resp, err := c.hc.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return fmt.Errorf("openaicompat: %s: %w", path, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	return decodeJSONOrError(resp, out)
+	return decodeJSONOrError(resp, c.apiKey, out)
 }
 
 // post is the shared transport for postJSON / postSSE. It marshals body
@@ -410,11 +411,27 @@ func (c *Client) post(ctx context.Context, path string, body any, contentType st
 		return nil, fmt.Errorf("openaicompat: build %s: %w", path, err)
 	}
 	c.setHeaders(req, contentType)
-	resp, err := c.hc.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return nil, fmt.Errorf("openaicompat: %s: %w", path, err)
 	}
 	return resp, nil
+}
+
+// do redacts errors from HTTP parsing before a response exists, while
+// preserving their causes for cancellation and routing classification.
+func (c *Client) do(req *http.Request) (*http.Response, error) {
+	resp, err := c.hc.Do(req)
+	key := strings.TrimRight(c.apiKey, " \t") // Match HTTP's trailing header whitespace trimming.
+	if err == nil || key == "" {
+		return resp, err
+	}
+	quoted := strconv.Quote(key)
+	message := strings.NewReplacer(
+		key, "[redacted]",
+		quoted[1:len(quoted)-1], "[redacted]",
+	).Replace(err.Error())
+	return resp, &redactedError{err: err, message: message}
 }
 
 // marshalBody encodes body for post. Without a content guard that is plain
@@ -542,9 +559,9 @@ func (c *Client) setHeaders(req *http.Request, contentType string) {
 
 // decodeJSONOrError reads resp.Body. On 2xx, it JSON-decodes into out. On
 // non-2xx, it parses an OpenAI error envelope and returns it as an error.
-func decodeJSONOrError(resp *http.Response, out any) error {
+func decodeJSONOrError(resp *http.Response, apiKey string, out any) error {
 	if resp.StatusCode/100 != 2 {
-		return readErrorEnvelope(resp)
+		return readErrorEnvelope(resp, apiKey)
 	}
 	if out == nil {
 		// Drain the body so the connection can be reused.
@@ -561,19 +578,32 @@ func decodeJSONOrError(resp *http.Response, out any) error {
 // Falls back to a plain "<status>: <body>" when the body is not a valid
 // error envelope, so HTML error pages and bare strings still produce a
 // usable error message rather than swallowing the failure.
-func readErrorEnvelope(resp *http.Response) error {
+//
+// A non-empty apiKey is replaced with "[redacted]" in the message and the
+// status: servers that echo the Authorization header, in the body or in the
+// server-chosen reason phrase, would otherwise put the key into bootstrap
+// warnings and logs.
+func readErrorEnvelope(resp *http.Response, apiKey string) error {
 	const limit = 64 * 1024
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, limit))
 	body = bytes.TrimSpace(body)
 
+	redact := func(m string) string {
+		if apiKey == "" {
+			return m
+		}
+		return strings.ReplaceAll(m, apiKey, "[redacted]")
+	}
+	status := redact(resp.Status)
+
 	var env errorEnvelope
 	if json.Unmarshal(body, &env) == nil && env.Error.Message != "" {
-		return &statusError{statusCode: resp.StatusCode, status: resp.Status, message: env.Error.Message}
+		return &statusError{statusCode: resp.StatusCode, status: status, message: redact(env.Error.Message)}
 	}
 	if len(body) > 0 {
-		return &statusError{statusCode: resp.StatusCode, status: resp.Status, message: string(body)}
+		return &statusError{statusCode: resp.StatusCode, status: status, message: redact(string(body))}
 	}
-	return &statusError{statusCode: resp.StatusCode, status: resp.Status}
+	return &statusError{statusCode: resp.StatusCode, status: status}
 }
 
 type statusError struct {
@@ -595,3 +625,11 @@ func (e *statusError) HTTPStatusCode() int {
 	}
 	return e.statusCode
 }
+
+type redactedError struct {
+	err     error
+	message string
+}
+
+func (e *redactedError) Error() string { return e.message }
+func (e *redactedError) Unwrap() error { return e.err }

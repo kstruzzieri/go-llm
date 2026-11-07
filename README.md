@@ -131,7 +131,7 @@ Setup for each — llama-swap, pinned `llama-server` processes, Ollama, and the 
 
 ## Use a hosted API (bring your own key)
 
-No local GPU? Point an `openai-compat` provider at any hosted OpenAI-compatible endpoint with your own key. Keep the secret out of the file with `"api_key": "${OPENAI_API_KEY}"`: go-llm expands the reference at load time and fails fast if the variable is unset. Before the first outbound byte, Golem shows a manifest of every remote endpoint the config can reach and asks for consent — loopback auto-admits, anything remote waits for a yes; scripts pre-admit exact destinations with `-allow-destination "provider/https://host"`. Compatibility table, mixing providers, and fallback chains: [docs/backends.md](docs/backends.md#use-a-hosted-api-bring-your-own-key).
+No local GPU? Point an `openai-compat` provider at any hosted OpenAI-compatible endpoint with your own key. Keep the secret out of the file with `"api_key": "${OPENAI_API_KEY}"`: go-llm expands the reference at load time and fails fast if the variable is unset. A `./models.json` found only because it sits in the working directory cannot use `${NAME}` references (a cloned repository must not choose which of your secrets go to which URL): pass it with `-config ./models.json` or set `GO_LLM_CONFIG`. Before the first outbound byte, Golem shows a manifest of every remote endpoint the config can reach and asks for consent — loopback auto-admits, anything remote waits for a yes; scripts pre-admit exact destinations with `-allow-destination "provider/https://host"`. Compatibility table, mixing providers, and fallback chains: [docs/backends.md](docs/backends.md#use-a-hosted-api-bring-your-own-key).
 
 ## MCP Server
 

@@ -396,7 +396,7 @@ endpoints that reject unknown request fields.
 ```go
 import "github.com/kstruzzieri/go-llm/config"
 
-cfg, _ := config.Default() // auto-discovers models.json
+cfg, _ := config.Default() // auto-discovers models.json; ./models.json may not use ${NAME} api_keys (key_reference_refused), name it in GO_LLM_CONFIG or use config.Load
 
 // Simple lookup
 model := cfg.ModelFor("chat") // e.g., "gemma4:31b"

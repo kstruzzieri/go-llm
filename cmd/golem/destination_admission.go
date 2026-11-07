@@ -26,6 +26,9 @@ type destinationAdmissionConfig struct {
 	Interactive bool
 	PromptYN    func(ctx context.Context, prompt string) (bool, error)
 	Out         io.Writer
+	// KeySources maps provider key -> the consent line saying where its key
+	// comes from (see keySourceLines); nil renders none.
+	KeySources map[string]string
 }
 
 // destinationAdmission is golem's consent surface for #477: it renders the
@@ -43,6 +46,7 @@ type destinationAdmission struct {
 	interactive bool
 	promptYN    func(ctx context.Context, prompt string) (bool, error)
 	out         io.Writer
+	keySources  map[string]string
 
 	mu       sync.Mutex
 	admitted bool
@@ -90,7 +94,28 @@ func newDestinationAdmission(cfg destinationAdmissionConfig) (*destinationAdmiss
 		interactive: cfg.Interactive,
 		promptYN:    cfg.PromptYN,
 		out:         out,
+		keySources:  cfg.KeySources,
 	}, nil
+}
+
+// keySourceLines maps each provider that sends a key to the consent line
+// naming its source: the environment variable names (never values) or a
+// literal. Names come from cfg as loaded, so a later rewrite of a key on an
+// effective copy cannot change what the user is told. Keyless providers are
+// absent; a nil cfg yields nil.
+func keySourceLines(cfg *config.Config) map[string]string {
+	if cfg == nil {
+		return nil
+	}
+	lines := make(map[string]string)
+	for key, p := range cfg.Providers {
+		if names := cfg.APIKeyRefNames(key); len(names) > 0 {
+			lines[key] = "sends api_key from $" + strings.Join(names, ", $")
+		} else if p.APIKey != "" {
+			lines[key] = "sends a literal api_key"
+		}
+	}
+	return lines
 }
 
 // destinationConsentPrompt is the one batch consent question, asked from the
@@ -225,7 +250,7 @@ func (a *destinationAdmission) extend(ctx context.Context, edges []provider.Dest
 
 	// Rendered before the decision: the question refers to "the remote
 	// destinations listed above", and it asks about the PROPOSED manifest.
-	renderManifest(a.out, m)
+	renderManifest(a.out, m, a.keySources)
 
 	policy, newGrant, err := a.consent(ctx, m, baseline)
 	if err != nil {
@@ -351,15 +376,16 @@ func firstUncovered(dests []provider.Destination, policy provider.DestinationPol
 
 // render writes the consent surface: one line per deduplicated destination,
 // grouped local-first, each followed by the purposes that reach it with
-// primary/fallback marking. D14 fields only — provider key, canonical URL,
-// purpose, marker, locality. Deterministic order.
+// primary/fallback marking. D14 fields — provider key, canonical URL, purpose,
+// marker, locality — plus, for a provider that sends a key, the key source
+// (#776 D5: variable names or "literal", never a value). Deterministic order.
 func (a *destinationAdmission) render(w io.Writer) {
-	renderManifest(w, a.manifest)
+	renderManifest(w, a.manifest, a.keySources)
 }
 
 // renderManifest is render over an arbitrary manifest — extend renders the
 // PROPOSED one, which is exactly what its consent question refers to.
-func renderManifest(w io.Writer, m *provider.DestinationManifest) {
+func renderManifest(w io.Writer, m *provider.DestinationManifest, keySources map[string]string) {
 	byDest := make(map[provider.Destination][]provider.DestinationEdge)
 	for _, e := range m.Edges() {
 		byDest[e.Destination] = append(byDest[e.Destination], e)
@@ -388,6 +414,9 @@ func renderManifest(w io.Writer, m *provider.DestinationManifest) {
 			parts = append(parts, label)
 		}
 		_, _ = fmt.Fprintf(w, "      %s\n", strings.Join(parts, ", "))
+		if line, ok := keySources[d.Provider()]; ok {
+			_, _ = fmt.Fprintf(w, "      %s\n", line)
+		}
 	}
 }
 
@@ -518,6 +547,7 @@ func admitForSubcommand(
 		Edges:      netPlan.Edges,
 		AllowFlags: allow,
 		Out:        errOut,
+		KeySources: keySourceLines(cfg),
 	})
 	if err != nil {
 		return nil, nil, nil, err

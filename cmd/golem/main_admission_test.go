@@ -858,3 +858,42 @@ func TestRunMutationSigningRefusesMissingKey(t *testing.T) {
 		})
 	}
 }
+
+// The real startup admission, through run(): a keyed remote provider's
+// consent screen names the variable, never the value. Stdin is not a
+// terminal, so the run fails closed after drawing the same screen the
+// interactive prompt would sit under.
+func TestStartupAdmissionShowsKeySource(t *testing.T) {
+	const canary = "CANARY-776-0f2e4d6c8b1a3957"
+	t.Setenv("CANARY_VAR", canary)
+	configPath, root, requests := admissionHarness(t, "https://opencode.invalid/zen/go")
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyed := strings.Replace(string(raw), `"opencode":  {"base_url"`, `"opencode":  {"api_key": "${CANARY_VAR}", "base_url"`, 1)
+	if keyed == string(raw) {
+		t.Fatal("harness config shape changed; key not injected")
+	}
+	if err := os.WriteFile(configPath, []byte(keyed), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stdin, stdout, stderr := runTestFiles(t)
+
+	// -grounding makes the remote analysis fallback reachable in one-shot.
+	if err := run(append(admissionArgs(configPath, root), "-grounding"), stdin, stdout, stderr); err == nil {
+		t.Fatal("keyed remote without consent was admitted")
+	}
+	errOut := readRunTestFile(t, stderr)
+	if !strings.Contains(errOut, "      sends api_key from $CANARY_VAR\n") {
+		t.Errorf("startup consent screen missing the key source:\n%s", errOut)
+	}
+	for name, got := range map[string]string{"stderr": errOut, "stdout": readRunTestFile(t, stdout)} {
+		if strings.Contains(got, canary) {
+			t.Errorf("canary leaked into %s:\n%s", name, got)
+		}
+	}
+	if requests.Load() != 0 {
+		t.Errorf("denied startup sent %d requests, want 0", requests.Load())
+	}
+}

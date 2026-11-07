@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/kstruzzieri/go-llm/config"
 	"github.com/kstruzzieri/go-llm/mcp"
 	"github.com/kstruzzieri/go-llm/provider"
 )
@@ -128,7 +129,7 @@ func main() {
 		if errors.Is(err, mcp.ErrInvalidHTTPBearerToken) {
 			log.Fatalf("%s: %v", bearerTokenEnv, err)
 		}
-		log.Fatalf("failed to create server: %v", err)
+		log.Fatalf("failed to create server: %v", createServerErr(err))
 	}
 
 	// Handle shutdown signals.
@@ -158,4 +159,13 @@ func main() {
 	default:
 		log.Fatalf("unknown transport: %q (use stdio or http)", *transport)
 	}
+}
+
+// createServerErr appends the -config remedy to a working-directory key
+// refusal; every other error passes through unchanged.
+func createServerErr(err error) error {
+	if d, ok := config.DiagnosticOf(err); ok && d.Code == config.CodeKeyReferenceRefused {
+		return fmt.Errorf("%w; pass -config ./models.json to use this file's key references, or set GO_LLM_CONFIG", err)
+	}
+	return err
 }

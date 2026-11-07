@@ -119,9 +119,13 @@ func (d *Document) AuthoredProvider(name string) (ProviderSpec, error) {
 // finalize gate validates templates against the document's environment
 // lookup; failure leaves the document unchanged. An empty value is
 // rejected — clearing is a distinct operation, ClearProviderAPIKey.
-// Rejections carry CodeInvalidArgument, CodeKeyReferenceMalformed, or
-// CodeKeyReferenceUnavailable, and rejection errors never echo the
-// submitted value, so they are safe to surface and log.
+// On an OriginWorkingDir document any ${NAME} template is refused with
+// CodeKeyReferenceRefused before the environment is read (#776); saving the
+// document to another path moves its origin and lifts the refusal (see
+// DefaultDocument). Rejections carry CodeInvalidArgument,
+// CodeKeyReferenceMalformed, CodeKeyReferenceUnavailable, or
+// CodeKeyReferenceRefused, and rejection errors never echo the submitted
+// value, so they are safe to surface and log.
 func (d *Document) SetProviderAPIKey(name, value string) error {
 	return d.mutate(func(a *Config) error {
 		if value == "" {

@@ -54,6 +54,11 @@ const (
 	CodeRoleInUse                ErrorCode = "role_in_use"
 	CodeUseCaseNotFound          ErrorCode = "use_case_not_found"
 	CodeDropConfirmationRequired ErrorCode = "drop_confirmation_required"
+
+	// Code added by #776: 31 -> 32. A models.json found by working-directory
+	// discovery may not expand ${NAME} api_key references. Consumers extend
+	// their closed allowlists in lockstep (firn-ide#524).
+	CodeKeyReferenceRefused ErrorCode = "key_reference_refused"
 )
 
 // Subject kind constants — classify what a Diagnostic's Subject names.

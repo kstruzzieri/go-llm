@@ -136,7 +136,15 @@ if resolved.IsFallback {
 }
 ```
 
-Consumer applications (Firn IDE, Flux ML) can also use `config.Default()` to discover `models.json` automatically.
+Consumer applications (Firn IDE, Flux ML) can also use `config.Default()` to discover `models.json` automatically. The
+search order is `$GO_LLM_CONFIG` (absolute or relative path), then `./models.json`,
+then the user config directory. A config found at `./models.json` cannot use
+`${NAME}` `api_key` references (error code `key_reference_refused`); load it with
+`config.Load` or name it in `GO_LLM_CONFIG` for one run
+(`GO_LLM_CONFIG=./models.json your-app`) to use them. Do not export a relative
+`GO_LLM_CONFIG`: it would trust the `models.json` in every directory you run
+from. Code that mirrors the
+closed error-code list must add `key_reference_refused`.
 
 ### Choosing a Model
 
@@ -281,6 +289,12 @@ error names the provider and variable, never the secret value. Never commit a
 literal key to a config file. Expansion applies only to file-loaded configs;
 a `config.Config` built programmatically keeps `api_key` as written.
 
+A `models.json` that Golem finds only because it is in the working directory
+cannot use `${ENV_VAR}` keys: loading it fails with `key_reference_refused`
+before any variable is read, and Golem prints `pass -config ./models.json to
+use this file's key references, or set GO_LLM_CONFIG`. Do one of those, or save
+the config elsewhere. Literal keys and the user config are unchanged.
+
 ### Remote-relevant flags
 
 - `-allow-destination "hosted/https://api.openai.com"` — pre-admits the
@@ -290,7 +304,12 @@ a `config.Config` built programmatically keeps `api_key` as written.
 - `-no-probe` — skips the openai-compat port discovery scan. The scan is
   loopback-only (localhost ports 8080-8090); a remote `base_url` is never
   scanned regardless, so this flag just silences local discovery when you are
-  not running a local backend.
+  not running a local backend. A provider with an `api_key` is never scanned
+  either, so its key cannot reach another local port: only its configured URL
+  is probed, and if that does not serve the model Golem prints
+  `openai-compat backend discovery skipped: provider "<key>" has an api_key;
+  pass -base-url to use another port`. Keyless providers still find a moved
+  local backend.
 - `-no-cap-probe` — disables the active tool-capability probe. For a model
   with no declared or catalog-known `tool_call` capability, golem sends up to
   two real chat-completion requests to the endpoint to test tool support —
