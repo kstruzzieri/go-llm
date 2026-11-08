@@ -9,13 +9,16 @@ import (
 	"testing"
 
 	"github.com/kstruzzieri/go-llm/agent"
+	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
 	"github.com/kstruzzieri/go-llm/mcpclient"
 )
 
 // previewStub is a non-executing PlanningTool whose preview depends on its
 // tool name: an argv for exec stubs, a path for write_file and edit_file, a
 // handle for stop_command. Write and edit previews end in a newline like the
-// real diff previews do. Invoke only counts.
+// real diff previews do, and plan the write-class key the real tools plan for
+// an ordinary path (an empty key would mark a harness file, #725). Invoke
+// only counts.
 type previewStub struct {
 	name  string
 	class agent.EffectClass
@@ -33,18 +36,18 @@ func (p *previewStub) Plan(_ context.Context, args json.RawMessage) (agent.ToolP
 		Handle string   `json:"handle"`
 	}
 	_ = json.Unmarshal(args, &a)
-	var preview string
+	var preview, key string
 	switch p.name {
 	case "write_file":
-		preview = "write " + a.Path + "\n"
+		preview, key = "write "+a.Path+"\n", agenttools.WriteClassApprovalKey
 	case "edit_file":
-		preview = "edit " + a.Path + "\n"
+		preview, key = "edit "+a.Path+"\n", agenttools.WriteClassApprovalKey
 	case "stop_command":
 		preview = "stop background command:\n  handle: " + a.Handle + "\n"
 	default:
 		preview = "run command:\n  argv: " + strings.Join(a.Argv, " ") + "\n"
 	}
-	return agent.ToolPlan{Effect: p.Effect(), Preview: preview}, nil
+	return agent.ToolPlan{Effect: p.Effect(), Preview: preview, ApprovalKey: key}, nil
 }
 func (p *previewStub) Invoke(context.Context, json.RawMessage) (agent.ToolResult, error) {
 	p.runs.Add(1)

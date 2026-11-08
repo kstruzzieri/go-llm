@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/kstruzzieri/go-llm/agent"
+	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
 	"github.com/kstruzzieri/go-llm/provider"
 )
 
@@ -69,7 +70,9 @@ var allowToolCompanions = map[string][]string{
 // allowToolSet is the exact-name authorization set built from -allow-tool. It
 // is consulted by name only: the approver never parses a preview and never
 // parses or derives from an ApprovalKey, mirroring the #341 discipline that
-// scope comes from the tool name and never from the key.
+// scope comes from the tool name and never from the key. The approver does
+// test the key for emptiness, to deny harness file writes (#725), but the set
+// itself never sees the key.
 type allowToolSet struct{ names map[string]struct{} }
 
 // newAllowToolSet validates every name against the frozen list and returns the
@@ -181,12 +184,19 @@ func filterAllowedTools(built []agent.Tool, allow allowToolSet) []agent.Tool {
 // Authorization is by tool name ONLY. The preview is never parsed — it is
 // model-influenced text — and the ApprovalKey is never parsed or compared,
 // keeping the #341 rule that a colliding key can never transfer authorization
-// across tools. The key is accepted and ignored purely to satisfy the
-// KeyedApprover signature.
+// across tools. The key is tested for emptiness and nothing else: a
+// write_file or edit_file call with the empty key targets an agent
+// instruction or harness configuration file, the library's "always prompt"
+// signal, and a headless run has no one to prompt, so it is denied even when
+// the tool is named (#725), the same test the interactive approver makes.
 //
 // It never records a grant: an approval authorizes exactly the call in front of
 // it, and the process exits at the end of the turn.
-type headlessApprover struct{ allow allowToolSet }
+type headlessApprover struct {
+	allow allowToolSet
+	// notices receives one line per harness file denial; nil is silent.
+	notices io.Writer
+}
 
 var (
 	_ agent.Approver      = (*headlessApprover)(nil)
@@ -207,18 +217,36 @@ func headlessApproverFor(allow allowToolSet) *headlessApprover {
 	return newHeadlessApprover(allow)
 }
 
+// withNotices sets the writer harness file denials are reported to (#725) and
+// returns a. A nil receiver returns nil, so headlessApproverFor's "nothing
+// authorized" result passes through unchanged.
+func (a *headlessApprover) withNotices(w io.Writer) *headlessApprover {
+	if a != nil {
+		a.notices = w
+	}
+	return a
+}
+
 // Approve satisfies the plain contract by delegating; no key, same answer.
 func (a *headlessApprover) Approve(ctx context.Context, call provider.ToolCall, preview string) (bool, error) {
 	d, err := a.ApproveKeyed(ctx, call, preview, "")
 	return d.Approved, err
 }
 
-// ApproveKeyed approves iff the exact tool name was named by -allow-tool. A
-// canceled context denies and returns the error so the run aborts, matching the
-// interactive approver's cancellation semantics.
-func (a *headlessApprover) ApproveKeyed(ctx context.Context, call provider.ToolCall, _, _ string) (agent.ApprovalDecision, error) {
+// ApproveKeyed approves iff the exact tool name was named by -allow-tool and
+// the call is not a harness file write (#725), which it denies with one line
+// to the notices writer. A canceled context denies and returns the error so
+// the run aborts, matching the interactive approver's cancellation semantics.
+func (a *headlessApprover) ApproveKeyed(ctx context.Context, call provider.ToolCall, _, key string) (agent.ApprovalDecision, error) {
 	if err := ctx.Err(); err != nil {
 		return agent.ApprovalDecision{}, err
+	}
+	if harnessFileCall(call.Function.Name, key) {
+		if a.notices != nil {
+			_, _ = fmt.Fprintf(a.notices, "golem: denied %s: harness file, -allow-tool does not cover it (%s)\n",
+				call.Function.Name, agenttools.HarnessApprovalNotice)
+		}
+		return agent.ApprovalDecision{}, nil
 	}
 	// ViaGrant stays false by construction: this decision came from a flag, not
 	// from a session grant, and reporting otherwise would mislabel the run
