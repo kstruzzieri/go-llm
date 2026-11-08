@@ -94,6 +94,8 @@ func TestMain(m *testing.M) {
 //	                                  detached stdio (pipes released), write its PID
 //	                                  to <pidfile>, exit 0 immediately
 //	["holdpipeescape", <pidfile>]  -> same, but the pipe holder escapes via setsid
+//
+// Any other mode goes to platformHelperMain (darwin: helper_darwin_test.go).
 func helperMain(args []string) int {
 	if len(args) == 0 {
 		return 0
@@ -212,6 +214,9 @@ func helperMain(args []string) int {
 			return 1
 		}
 		return 0
+	}
+	if code, handled := platformHelperMain(args); handled {
+		return code
 	}
 	return 0
 }
