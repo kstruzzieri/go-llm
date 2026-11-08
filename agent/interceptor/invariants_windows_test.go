@@ -7,7 +7,8 @@ import "testing"
 // TestPathDenyWindowsSeparators pins the native Windows interpretation:
 // backslashes are separators, drive-absolute paths are still matched by
 // component, and case folding applies. CI compiles this file in its Windows
-// smoke step; a native run needs a Windows host and is reported separately.
+// smoke step and the Windows job runs the harness rows; a full native run needs
+// a Windows host and is reported separately.
 func TestPathDenyWindowsSeparators(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -51,5 +52,24 @@ func TestPathDenyWindowsSeparators(t *testing.T) {
 			}
 			expectOne(t, found, rule, tc.detail)
 		})
+	}
+}
+
+// TestIsHarnessPathWindows pins native Windows spellings of harness paths:
+// backslash separators, an alternate data stream suffix, a drive prefix and
+// case folding all still match, and a lookalike directory does not (#725).
+func TestIsHarnessPathWindows(t *testing.T) {
+	for _, tc := range []struct {
+		in   string
+		want bool
+	}{
+		{`.github\hooks\x.json`, true},
+		{`C:\repo\CLAUDE.md::$DATA`, true},
+		{`sub\.Claude\settings.json`, true},
+		{`notes\claude-old\x`, false},
+	} {
+		if got := IsHarnessPath(tc.in); got != tc.want {
+			t.Errorf("IsHarnessPath(%q) = %v, want %v", tc.in, got, tc.want)
+		}
 	}
 }
