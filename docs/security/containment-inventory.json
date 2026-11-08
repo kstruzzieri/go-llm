@@ -741,7 +741,7 @@
     {
       "id": "LAUNCHD-SEATBELT",
       "source": "issue-712:17",
-      "requirement": "Seatbelt commands start with no inherited launchd connection: the bootstrap special port and every registered-port slot are null and the task exception ports are null for every mask, so a sandboxed command cannot ask launchd to start, enable, disable or list the user's jobs. Filesystem-triggered jobs and Unix-domain sockets under allowed network are outside this row.",
+      "requirement": "Seatbelt commands start with no inherited launchd connection: the bootstrap special port and every registered-port slot are null and the task exception ports are null for every mask, so a sandboxed command cannot ask launchd to start, enable, disable or list the user's jobs. The command also inherits no host descriptor beyond stdio and starts with no blocked signals. Filesystem-triggered jobs and Unix-domain sockets under allowed network are outside this row.",
       "status": "verified",
       "owner": "",
       "layer": "focused",
