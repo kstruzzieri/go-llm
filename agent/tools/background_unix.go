@@ -3,6 +3,7 @@
 package tools
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -12,48 +13,43 @@ import (
 )
 
 // unixStarter starts detached background processes as leaders of their own
-// process group. Unlike unixRunner it uses exec.Command, NOT CommandContext:
-// the manager owns lifetime after publication, so no context may kill the
-// child behind its back.
-type unixStarter struct{}
+// process group. Unlike unixRunner it spawns with no context
+// (context.Background): the manager owns lifetime after publication, so no
+// context may kill the child behind its back. spawn nil means osExecSpawn.
+type unixStarter struct{ spawn spawnFunc }
 
 func newPlatformStarter() backgroundStarter { return unixStarter{} }
 
-func (unixStarter) Start(spec execSpec, stdout, stderr io.Writer) (backgroundProcess, error) {
-	cmd := exec.Command(spec.Path, spec.Argv[1:]...)
-	cmd.Dir = spec.Dir
-	cmd.Env = spec.Env
-	// cmd.Stdin stays nil: os/exec wires /dev/null, so a child that prompts
-	// for input reads immediate EOF instead of hanging forever.
-	cmd.Stdout = stdout
-	cmd.Stderr = stderr
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	// WaitDelay bounds Wait when a same-group descendant outlives the leader
-	// while holding the stdio pipes open.
-	cmd.WaitDelay = execWaitDelay
+func (s unixStarter) Start(spec execSpec, stdout, stderr io.Writer) (backgroundProcess, error) {
+	spawn := s.spawn
+	if spawn == nil {
+		spawn = osExecSpawn
+	}
+	cmd := spawn(context.Background(), spec, stdout, stderr)
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
-	observer, err := newProcessExitObserver(cmd.Process.Pid)
+	pid := cmd.Pid()
+	observer, err := newProcessExitObserver(pid)
 	if err != nil {
 		// The child is still ours and unreaped, so this group signal cannot
 		// target a reused PGID. Fail closed when safe exit observation is not
 		// available on a shipped Unix platform.
-		_ = signalProcessGroup(cmd.Process.Pid)
+		_ = signalProcessGroup(pid)
 		_ = cmd.Wait()
 		return nil, fmt.Errorf("observe background process exit: %w", err)
 	}
-	// Remember the PGID now (== child PID because Setpgid with Pgid 0).
+	// Remember the PGID now (== child PID: the spawner makes it a group leader).
 	return &unixProcess{
 		cmd:      cmd,
-		pgid:     cmd.Process.Pid,
+		pgid:     pid,
 		observer: observer,
-		group:    processGroupGuard{pgid: cmd.Process.Pid},
+		group:    processGroupGuard{pgid: pid},
 	}, nil
 }
 
 type unixProcess struct {
-	cmd      *exec.Cmd
+	cmd      procCmd
 	pgid     int
 	observer processExitObserver
 	group    processGroupGuard
@@ -70,7 +66,8 @@ func (p *unixProcess) Wait() (int, bool, error) {
 	_ = p.group.close(false)
 	_ = p.observer.Close()
 	waitErr := p.cmd.Wait()
-	if p.cmd.ProcessState == nil {
+	state := p.cmd.State()
+	if state == nil {
 		// ECHILD-class wait failure: no exit status exists. Not reachable in
 		// tests without faking wait(2); the guard is documented instead.
 		if observeErr != nil {
@@ -78,7 +75,7 @@ func (p *unixProcess) Wait() (int, bool, error) {
 		}
 		return -1, false, waitErr
 	}
-	code := p.cmd.ProcessState.ExitCode() // killed-by-signal leader reports -1
+	code := state.ExitCode() // killed-by-signal leader reports -1
 	managerKilled := p.group.wasManagerKill(code)
 	if observeErr != nil {
 		return code, managerKilled, fmt.Errorf("observe background process exit: %w", observeErr)

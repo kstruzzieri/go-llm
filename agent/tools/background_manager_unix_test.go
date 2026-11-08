@@ -34,25 +34,29 @@ func waitForManagerExit(t *testing.T, m *BackgroundManager, handle string) JobSt
 // same-group child lives on, and the manager must publish the leader's real
 // exit while Wait's residual-group cleanup reaps the child.
 func TestBackgroundManagerUnixNaturalExitReapsResidualChild(t *testing.T) {
-	m := newBackgroundManager(newPlatformStarter(), rand.Reader)
-	t.Cleanup(m.Shutdown)
-	pidfile := t.TempDir() + "/child.pid"
-	spec := helperSpec(t, "orphanleave", pidfile)
+	for _, sc := range spawnerCases() {
+		t.Run(sc.name, func(t *testing.T) {
+			m := newBackgroundManager(unixStarter{spawn: sc.spawn}, rand.Reader)
+			t.Cleanup(m.Shutdown)
+			pidfile := t.TempDir() + "/child.pid"
+			spec := helperSpec(t, "orphanleave", pidfile)
 
-	st, err := m.start(context.Background(), spec, spec.Dir)
-	if err != nil {
-		t.Fatalf("start: %v", err)
-	}
-	childPID := waitForPidfile(t, pidfile)
-	// Safety net only; the assertion path must be covered by the manager alone.
-	t.Cleanup(func() { _ = syscall.Kill(childPID, syscall.SIGKILL) })
+			st, err := m.start(context.Background(), spec, spec.Dir)
+			if err != nil {
+				t.Fatalf("start: %v", err)
+			}
+			childPID := waitForPidfile(t, pidfile)
+			// Safety net only; the assertion path must be covered by the manager alone.
+			t.Cleanup(func() { _ = syscall.Kill(childPID, syscall.SIGKILL) })
 
-	final := waitForManagerExit(t, m, st.Handle)
-	if final.State != backgroundStateExited || !final.ExitKnown || final.ExitCode != 0 {
-		t.Errorf("final = %+v, want exited/0/known — natural exit must not be rewritten", final)
-	}
-	if !waitProcessGone(childPID) {
-		t.Errorf("residual child pid %d still alive after natural leader exit", childPID)
+			final := waitForManagerExit(t, m, st.Handle)
+			if final.State != backgroundStateExited || !final.ExitKnown || final.ExitCode != 0 {
+				t.Errorf("final = %+v, want exited/0/known — natural exit must not be rewritten", final)
+			}
+			if !waitProcessGone(childPID) {
+				t.Errorf("residual child pid %d still alive after natural leader exit", childPID)
+			}
+		})
 	}
 }
 
@@ -60,34 +64,38 @@ func TestBackgroundManagerUnixNaturalExitReapsResidualChild(t *testing.T) {
 // active real process group — leader and same-group descendant — and returns
 // only after the job's completion is published as killed.
 func TestBackgroundManagerUnixShutdownKillsActiveGroup(t *testing.T) {
-	m := newBackgroundManager(newPlatformStarter(), rand.Reader)
-	// Safety net for a fatal before the explicit Shutdown below (e.g. a
-	// pidfile timeout): Shutdown is Once-guarded, so this is a no-op on the
-	// happy path but reaps the real leader and its group on the failure path.
-	t.Cleanup(m.Shutdown)
-	pidfile := t.TempDir() + "/grandchild.pid"
-	spec := helperSpec(t, "groupkill", pidfile)
+	for _, sc := range spawnerCases() {
+		t.Run(sc.name, func(t *testing.T) {
+			m := newBackgroundManager(unixStarter{spawn: sc.spawn}, rand.Reader)
+			// Safety net for a fatal before the explicit Shutdown below (e.g. a
+			// pidfile timeout): Shutdown is Once-guarded, so this is a no-op on the
+			// happy path but reaps the real leader and its group on the failure path.
+			t.Cleanup(m.Shutdown)
+			pidfile := t.TempDir() + "/grandchild.pid"
+			spec := helperSpec(t, "groupkill", pidfile)
 
-	st, err := m.start(context.Background(), spec, spec.Dir)
-	if err != nil {
-		t.Fatalf("start: %v", err)
-	}
-	grandchildPID := waitForPidfile(t, pidfile)
-	t.Cleanup(func() { _ = syscall.Kill(grandchildPID, syscall.SIGKILL) })
+			st, err := m.start(context.Background(), spec, spec.Dir)
+			if err != nil {
+				t.Fatalf("start: %v", err)
+			}
+			grandchildPID := waitForPidfile(t, pidfile)
+			t.Cleanup(func() { _ = syscall.Kill(grandchildPID, syscall.SIGKILL) })
 
-	m.Shutdown()
-	// Shutdown returned, so completion must already be published: no polling.
-	final, ok := m.status(st.Handle)
-	if !ok {
-		t.Fatal("job missing after Shutdown")
-	}
-	if final.State != backgroundStateKilled || !final.ExitKnown || final.ExitCode != -1 {
-		t.Errorf("final = %+v, want killed/-1/known", final)
-	}
-	if !waitProcessGone(st.PID) {
-		t.Errorf("leader pid %d still alive after Shutdown", st.PID)
-	}
-	if !waitProcessGone(grandchildPID) {
-		t.Errorf("grandchild pid %d still alive after Shutdown", grandchildPID)
+			m.Shutdown()
+			// Shutdown returned, so completion must already be published: no polling.
+			final, ok := m.status(st.Handle)
+			if !ok {
+				t.Fatal("job missing after Shutdown")
+			}
+			if final.State != backgroundStateKilled || !final.ExitKnown || final.ExitCode != -1 {
+				t.Errorf("final = %+v, want killed/-1/known", final)
+			}
+			if !waitProcessGone(st.PID) {
+				t.Errorf("leader pid %d still alive after Shutdown", st.PID)
+			}
+			if !waitProcessGone(grandchildPID) {
+				t.Errorf("grandchild pid %d still alive after Shutdown", grandchildPID)
+			}
+		})
 	}
 }

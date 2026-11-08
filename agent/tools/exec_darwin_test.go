@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -372,6 +373,51 @@ func TestSeatbeltConstructorSucceedsOnProbeSuccess(t *testing.T) {
 	}
 	if sb.runner == nil || sb.starter == nil {
 		t.Fatal("backend must carry both host delegates")
+	}
+}
+
+// TestSeatbeltBackendUsesNativeSpawn pins the production wiring (#712): both
+// lifetimes start commands through nativeSpawn, never os/exec. The real probe
+// runs against a fake applier, so construction spawns natively on any darwin
+// host.
+func TestSeatbeltBackendUsesNativeSpawn(t *testing.T) {
+	backend, err := newSeatbeltExecBackendAt(writeFakeSandboxExec(t, "exit 0\n"), probeSeatbelt, seatbeltTestCfg())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sb, ok := backend.(*seatbeltBackend)
+	if !ok {
+		t.Fatalf("backend = %T, want *seatbeltBackend", backend)
+	}
+	runner, ok := sb.runner.(unixRunner)
+	if !ok {
+		t.Fatalf("runner = %T, want unixRunner", sb.runner)
+	}
+	starter, ok := sb.starter.(unixStarter)
+	if !ok {
+		t.Fatalf("starter = %T, want unixStarter", sb.starter)
+	}
+	native := reflect.ValueOf(nativeSpawn).Pointer()
+	if runner.spawn == nil || reflect.ValueOf(runner.spawn).Pointer() != native {
+		t.Error("runner does not spawn through nativeSpawn")
+	}
+	if starter.spawn == nil || reflect.ValueOf(starter.spawn).Pointer() != native {
+		t.Error("starter does not spawn through nativeSpawn")
+	}
+}
+
+// TestSeatbeltConstructionFailsWhenRegisteredPortsStay: the probe is the
+// backend's first native spawn, so a registered-port table that will not
+// empty fails construction (design D4) rather than the first command. Not
+// parallel: it swaps the package-level guard.
+func TestSeatbeltConstructionFailsWhenRegisteredPortsStay(t *testing.T) {
+	orig := registeredPortsGuard
+	t.Cleanup(func() { registeredPortsGuard = orig })
+	registeredPortsGuard = func() error { return errRegisteredPortsNotEmpty }
+
+	backend, err := newSeatbeltExecBackend(seatbeltTestCfg())
+	if backend != nil || !errors.Is(err, errRegisteredPortsNotEmpty) {
+		t.Fatalf("construction = (%T, %v), want errRegisteredPortsNotEmpty", backend, err)
 	}
 }
 

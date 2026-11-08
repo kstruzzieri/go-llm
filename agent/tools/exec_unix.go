@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strconv"
@@ -14,38 +15,85 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// procCmd is one child process as the unix runner and starter drive it:
+// *exec.Cmd (osExecCmd) or, on darwin, nativeCmd.
+type procCmd interface {
+	Start() error
+	Wait() error
+	Pid() int                // 0 before a successful Start
+	State() *os.ProcessState // nil before Wait, or after a failed wait
+}
+
+// spawnFunc builds an unstarted command for spec that leads its own process
+// group, reads stdin from /dev/null, writes to stdout and stderr, and bounds
+// Wait by execWaitDelay. A ctx that is never done (context.Background) means
+// no context; otherwise ctx being done kills the whole group.
+type spawnFunc func(ctx context.Context, spec execSpec, stdout, stderr io.Writer) procCmd
+
+// osExecSpawn is the default spawnFunc, on os/exec.
+func osExecSpawn(ctx context.Context, spec execSpec, stdout, stderr io.Writer) procCmd {
+	var cmd *exec.Cmd
+	if ctx.Done() == nil {
+		// The starter's path: the manager owns lifetime after publication, so
+		// no context may kill the child behind its back. A runner given a
+		// never-done ctx (context.Background) lands here too, and that is
+		// equivalent: exec.CommandContext with a ctx that is never done never
+		// calls Cancel, so the group-kill below could not fire anyway.
+		cmd = exec.Command(spec.Path, spec.Argv[1:]...)
+	} else {
+		// CommandContext (NOT exec.Command) is REQUIRED: cmd.Cancel is only
+		// consulted when the command was created with a context — with
+		// exec.Command the custom group-kill Cancel would never fire on timeout.
+		cmd = exec.CommandContext(ctx, spec.Path, spec.Argv[1:]...)
+		// Context-driven cancel: kill the whole process GROUP (negative pid).
+		cmd.Cancel = func() error {
+			if cmd.Process != nil {
+				_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			}
+			return nil
+		}
+	}
+	cmd.Dir = spec.Dir
+	cmd.Env = spec.Env
+	// cmd.Stdin stays nil: os/exec wires /dev/null, so a child that prompts
+	// for input reads immediate EOF instead of hanging forever.
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// WaitDelay bounds how long a child that ignores the kill, or a same-group
+	// descendant that outlives the leader, can keep the pipes open.
+	cmd.WaitDelay = execWaitDelay
+	return osExecCmd{cmd}
+}
+
+// osExecCmd adapts *exec.Cmd to procCmd.
+type osExecCmd struct{ *exec.Cmd }
+
+func (c osExecCmd) Pid() int {
+	if c.Process == nil {
+		return 0
+	}
+	return c.Process.Pid
+}
+
+func (c osExecCmd) State() *os.ProcessState { return c.ProcessState }
+
 // unixRunner executes commands in their own process group so a timeout/cancel can kill
 // the whole group (reaping ordinary children), and bounds stdout/stderr to the tool's
-// self-caps while always consuming pipe writes (no deadlock).
-type unixRunner struct{}
+// self-caps while always consuming pipe writes (no deadlock). spawn starts the
+// command; nil means osExecSpawn.
+type unixRunner struct{ spawn spawnFunc }
 
 func newPlatformRunner() commandRunner { return unixRunner{} }
 
-func (unixRunner) Run(ctx context.Context, spec execSpec) (execResult, error) {
-	// CommandContext (NOT exec.Command) is REQUIRED: cmd.Cancel is only consulted
-	// when the command was created with a context — with exec.Command the custom
-	// group-kill Cancel would never fire on timeout. (cmd.WaitDelay, by contrast,
-	// works with plain exec.Command too; see background_unix.go.)
-	cmd := exec.CommandContext(ctx, spec.Path, spec.Argv[1:]...)
-	cmd.Dir = spec.Dir
-	cmd.Env = spec.Env
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-
+func (r unixRunner) Run(ctx context.Context, spec execSpec) (execResult, error) {
+	spawn := r.spawn
+	if spawn == nil {
+		spawn = osExecSpawn
+	}
 	stdout := &cappedBuffer{cap: execStdoutCap}
 	stderr := &cappedBuffer{cap: execStderrCap}
-	cmd.Stdout = stdout
-	cmd.Stderr = stderr
-
-	// Context-driven cancel: kill the whole process GROUP (negative pid). WaitDelay
-	// bounds how long a child that ignores the kill can keep pipes open.
-	cmd.Cancel = func() error {
-		if cmd.Process != nil {
-			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		}
-		return nil
-	}
-	cmd.WaitDelay = execWaitDelay
-
+	cmd := spawn(ctx, spec, stdout, stderr)
 	if err := cmd.Start(); err != nil {
 		return execResult{}, err
 	}
@@ -56,7 +104,7 @@ func (unixRunner) Run(ctx context.Context, spec execSpec) (execResult, error) {
 		Stderr:          stderr.buf,
 		StdoutTruncated: stdout.truncated,
 		StderrTruncated: stderr.truncated,
-		ExitCode:        cmd.ProcessState.ExitCode(),
+		ExitCode:        cmd.State().ExitCode(),
 	}
 	if ctx.Err() != nil {
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
@@ -77,16 +125,18 @@ func (unixRunner) Run(ctx context.Context, spec execSpec) (execResult, error) {
 
 // rejectInheritableFDs lists this process's descriptor directory (dir:
 // /proc/self/fd on Linux, /dev/fd on macOS) immediately before a native spawn
-// and fails closed on any descriptor above stdio without FD_CLOEXEC. Both
-// native backends pass inherited descriptors through to the payload, and
-// neither re-checks writes or connects through an already-open descriptor
-// against its policy. maySetCloexec, when non-nil, identifies descriptors that
-// may be marked close-on-exec instead of refused; it must refuse on any doubt.
-// An entry gone by inspection (EBADF: closed during the scan, or the listing's
-// own descriptor) is ignored. The audit changes no other descriptor flags
-// and never closes an audited descriptor. The names are read
-// without stat: fdescfs cannot stat some descriptors, a kqueue among them.
-// The scan and os/exec are not one kernel-atomic operation; that residual
+// and fails closed on any descriptor above stdio without FD_CLOEXEC. The
+// bwrap backend passes inherited descriptors through to the payload; a
+// Seatbelt command starts with POSIX_SPAWN_CLOEXEC_DEFAULT, so only stdio
+// reaches it and the audit is a second line there. Neither backend re-checks
+// writes or connects through an already-open descriptor against its policy.
+// maySetCloexec, when non-nil, identifies descriptors that may be marked
+// close-on-exec instead of refused; it must refuse on any doubt. An entry
+// gone by inspection (EBADF: closed during the scan, or the listing's own
+// descriptor) is ignored. The audit changes no other descriptor flags and
+// never closes an audited descriptor. The names are read without stat:
+// fdescfs cannot stat some descriptors, a kqueue among them. Under bwrap the
+// scan and the spawn are not one kernel-atomic operation; that residual
 // interval is the documented D10 limitation.
 func rejectInheritableFDs(backend, dir string, maySetCloexec func(fd int) bool) error {
 	f, err := os.Open(dir)
