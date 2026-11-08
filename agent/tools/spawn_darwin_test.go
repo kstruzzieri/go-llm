@@ -6,11 +6,13 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -113,6 +115,73 @@ func TestNativeCmdConcurrentSpawns(t *testing.T) {
 		if err != nil {
 			t.Errorf("spawn %d: %v", i, err)
 		}
+	}
+}
+
+// TestNativeCmdConcurrentForkKeepsRegisteredEmpty: a fork through libSystem
+// (os/exec) puts the bootstrap port back in this process's registered slot 0,
+// to hand it to the forked child. A fork landing between the guard and
+// posix_spawn would give a native child a way back to launchd, or make the
+// guard's re-check fail the spawn. Four goroutines fork without pause while
+// 300 native children report their registered tables.
+func TestNativeCmdConcurrentForkKeepsRegisteredEmpty(t *testing.T) {
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	const spawns = 300
+	deadline := time.Now().Add(60 * time.Second)
+	var stop atomic.Bool
+	forks := make(chan int)
+	const forkers = 4
+	for range forkers {
+		go func() {
+			n := 0
+			for !stop.Load() {
+				if exec.Command("/usr/bin/true").Run() == nil {
+					n++
+				}
+			}
+			forks <- n
+		}()
+	}
+	leaked, failed, done := 0, 0, 0
+	var firstLeak, firstFail string
+	for ; done < spawns && time.Now().Before(deadline); done++ {
+		c := newNativeCmd(context.Background(), self, []string{self, "__golem_exec_helper__", "machstate"})
+		// Without atexit_sleep_ms=0 a race-instrumented child sleeps 1s at exit.
+		c.Env = []string{"PATH=/usr/bin:/bin", "GORACE=atexit_sleep_ms=0"}
+		out, _, err := runNative(c)
+		st, perr := machStateFromOutput(out)
+		if err != nil || perr != nil {
+			if failed++; firstFail == "" {
+				firstFail = fmt.Sprintf("spawn %d: %v", done, errors.Join(err, perr))
+			}
+			continue
+		}
+		if slices.ContainsFunc(st.Registered, func(p uint32) bool { return p != machPortNull }) {
+			if leaked++; firstLeak == "" {
+				firstLeak = fmt.Sprintf("spawn %d: registered %#x", done, st.Registered)
+			}
+		}
+	}
+	stop.Store(true)
+	n := 0
+	for range forkers {
+		n += <-forks
+	}
+	if done < spawns || n == 0 {
+		t.Fatalf("%d of %d spawns and %d concurrent forks in 60s; the race was not exercised", done, spawns, n)
+	}
+	t.Logf("of %d native spawns during %d concurrent forks: %d inherited a registered port, %d failed", spawns, n, leaked, failed)
+	// A guard that re-reads a table a fork has just refilled fails the spawn:
+	// closed, but spurious.
+	if failed != 0 {
+		t.Errorf("%d of %d native spawns failed during concurrent forks; first: %s", failed, spawns, firstFail)
+	}
+	// containment: LAUNCHD-SEATBELT
+	if leaked != 0 {
+		t.Errorf("%d of %d native children inherited a registered port during concurrent forks; first: %s", leaked, spawns, firstLeak)
 	}
 }
 

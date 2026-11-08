@@ -26,8 +26,9 @@ const (
 
 // nativeCmd starts a command with posix_spawn and no launchd connection: the
 // bootstrap special port is null, every exception port in excMaskAllPorts is
-// null, and the registered-port table it would inherit is emptied first
-// (registeredPortsGuard). Every descriptor except stdio is closed in the
+// null, and the registered-port table it would inherit is emptied
+// (registeredPortsGuard) immediately before the spawn, with no Go fork in
+// between. Every descriptor except stdio is closed in the
 // child (POSIX_SPAWN_CLOEXEC_DEFAULT). The child leads a new process group
 // with an empty signal mask, and every signal this process does not ignore is
 // reset to its default.
@@ -94,15 +95,14 @@ func (c *nativeCmd) Pid() int {
 // State is the exited child's state, or nil before Wait.
 func (c *nativeCmd) State() *os.ProcessState { return c.state }
 
-// Start spawns the command. It fails closed: an error from the registered-port
-// guard, any attribute or file action, or posix_spawn itself leaves no child
-// and no descriptor behind.
+// Start spawns the command. It builds the attributes, file actions and pipes
+// first, then runs the registered-port guard and posix_spawn together under
+// syscall.ForkLock. It fails closed: an error from any attribute or file
+// action, the guard, or posix_spawn itself leaves no child and no descriptor
+// behind.
 func (c *nativeCmd) Start() error {
 	if c.process != nil {
 		return errors.New("exec: already started")
-	}
-	if err := registeredPortsGuard(); err != nil {
-		return err
 	}
 	if c.ctx != nil {
 		if err := c.ctx.Err(); err != nil {
@@ -193,8 +193,25 @@ func (c *nativeCmd) Start() error {
 		}
 	}
 
+	// A fork through libSystem (every os/exec in this process) puts the
+	// bootstrap port back in this process's registered slot 0, to hand it to
+	// the forked child. os/exec forks holding ForkLock for writing, so holding
+	// it here from the guard through the spawn keeps any Go fork out of that
+	// window. It is taken only now because os.Pipe above takes it for reading.
+	// Residual: a fork that skips ForkLock (cgo or C code in the host process
+	// calling libSystem fork()) is not excluded.
 	var pid int32
-	if rc := posixSpawn(&pid, path, &fa, &attr, &argvp[0], &envp[0]); rc != 0 {
+	syscall.ForkLock.Lock()
+	err = registeredPortsGuard()
+	var rc int32
+	if err == nil {
+		rc = posixSpawn(&pid, path, &fa, &attr, &argvp[0], &envp[0])
+	}
+	syscall.ForkLock.Unlock()
+	if err != nil {
+		return err
+	}
+	if rc != 0 {
 		return &os.PathError{Op: "fork/exec", Path: c.Path, Err: syscall.Errno(rc)}
 	}
 	started = true

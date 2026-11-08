@@ -783,6 +783,12 @@
           "test": "TestNativeCmdUnblockedUSR1",
           "file": "agent/tools/spawn_darwin_test.go",
           "func": "TestNativeCmdUnblockedUSR1"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestNativeCmdConcurrentForkKeepsRegisteredEmpty",
+          "file": "agent/tools/spawn_darwin_test.go",
+          "func": "TestNativeCmdConcurrentForkKeepsRegisteredEmpty"
         }
       ],
       "profiles": [
@@ -793,7 +799,8 @@
         "M-082",
         "M-083",
         "M-084",
-        "M-085"
+        "M-085",
+        "M-086"
       ],
       "artifacts": []
     },
