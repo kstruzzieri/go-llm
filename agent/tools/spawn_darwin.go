@@ -196,9 +196,10 @@ func (c *nativeCmd) Start() error {
 	return nil
 }
 
-// watchCtx calls Cancel once if ctx is done before the process exits, then
-// closes the output pipes after WaitDelay unless the process exits first, in
-// which case Wait bounds them.
+// watchCtx calls Cancel once if ctx is done before the process exits. If the
+// process has still not exited WaitDelay later, it kills the process (Cancel
+// may have missed it) and then closes the output pipes, as os/exec does; if it
+// exits first, Wait bounds the pipes.
 func (c *nativeCmd) watchCtx() {
 	select {
 	case <-c.exited:
@@ -216,6 +217,9 @@ func (c *nativeCmd) watchCtx() {
 	select {
 	case <-c.exited:
 	case <-t.C:
+		// Kill before closing, so the child dies of SIGKILL, not SIGPIPE. An
+		// os.ErrProcessDone from a racing exit is harmless.
+		_ = c.process.Kill()
 		closeFiles(c.readers)
 	}
 }

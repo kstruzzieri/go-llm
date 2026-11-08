@@ -154,6 +154,30 @@ func TestNativeCmdWaitDelayBoundsHeldPipe(t *testing.T) {
 	}
 }
 
+// A Cancel that misses the leader (one that left the group it signals) must
+// not leave Wait to the leader's own exit: as with exec.CommandContext, the
+// leader is killed once WaitDelay passes after cancellation.
+func TestNativeCmdKillsLeaderWaitDelayAfterCancel(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	c := newNativeCmd(ctx, "/bin/sh", []string{"sh", "-c", "sleep 30"})
+	c.Cancel = func() error { return nil }
+	c.WaitDelay = 100 * time.Millisecond
+	if err := c.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = syscall.Kill(-c.Pid(), syscall.SIGKILL) })
+	start := time.Now()
+	_ = c.Wait()
+	if d := time.Since(start); d > 10*time.Second {
+		t.Fatalf("Wait took %v after cancel with a 100ms WaitDelay", d)
+	}
+	ws, ok := c.State().Sys().(syscall.WaitStatus)
+	if !ok || !ws.Signaled() || ws.Signal() != syscall.SIGKILL {
+		t.Fatalf("state %v, want killed by SIGKILL", c.State())
+	}
+}
+
 // Not parallel: it swaps the package-level guard.
 func TestNativeCmdFailsClosedWhenRegisteredPortsStay(t *testing.T) {
 	orig := registeredPortsGuard
