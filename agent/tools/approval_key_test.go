@@ -357,6 +357,8 @@ func TestHarnessPlanResolverStoredSpelling(t *testing.T) {
 	if err != nil || !verified || rel != "CLAUDE.md" {
 		t.Fatalf("resolvedWriteRel(claude.md) = (%q, %v, %v), want (CLAUDE.md, true, nil)", rel, verified, err)
 	}
+	// The requested spelling alone already catches claude.md (IsHarnessPath lower-cases); the resolver's
+	// part is proven by the assertion above and, through Plan, only by the Linux unverified rows.
 	if k := harnessWritePlan(t, ws, "claude.md").ApprovalKey; k != "" {
 		t.Fatalf("write_file claude.md key = %q, want empty", k)
 	}
@@ -396,9 +398,9 @@ func TestHarnessPlanUnverifiedSpelling(t *testing.T) {
 	}
 }
 
-// TestHarnessPlanUnverifiedRoot: a root component below the repository
+// TestHarnessPlanUnverifiedRoot: a root component at or below the repository
 // boundary whose spelling cannot be listed is part of the classified prefix,
-// so every write prompts; an unverified boundary itself is not.
+// so every write prompts; an unlistable folder above the repository is not.
 func TestHarnessPlanUnverifiedRoot(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("unix permission fixture")
@@ -407,12 +409,12 @@ func TestHarnessPlanUnverifiedRoot(t *testing.T) {
 		t.Skip("root bypasses directory read permission")
 	}
 	tmp := t.TempDir()
-	for _, d := range []string{"repo/.git", "repo/a/b", "outer/repo/.git"} {
+	for _, d := range []string{"repo/.git", "repo/a/b", "edge/repo/.git", "outer/mid/repo/.git"} {
 		if err := os.MkdirAll(filepath.Join(tmp, filepath.FromSlash(d)), 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
-	for _, d := range []string{"repo/a", "outer"} {
+	for _, d := range []string{"repo/a", "edge", "outer"} {
 		p := filepath.Join(tmp, filepath.FromSlash(d))
 		if err := os.Chmod(p, 0o311); err != nil {
 			t.Fatal(err)
@@ -423,24 +425,31 @@ func TestHarnessPlanUnverifiedRoot(t *testing.T) {
 	if k := harnessWritePlan(t, ws, "notes.txt").ApprovalKey; k != "" {
 		t.Fatalf("unverified root below the boundary: notes.txt key = %q, want empty", k)
 	}
-	ws = harnessWorkspace(t, filepath.Join(tmp, "outer", "repo"))
+	ws = harnessWorkspace(t, filepath.Join(tmp, "edge", "repo"))
+	if k := harnessWritePlan(t, ws, "notes.txt").ApprovalKey; k != "" {
+		t.Fatalf("unverified boundary name: notes.txt key = %q, want empty", k)
+	}
+	ws = harnessWorkspace(t, filepath.Join(tmp, "outer", "mid", "repo"))
 	if k := harnessWritePlan(t, ws, "notes.txt").ApprovalKey; k != WriteClassApprovalKey {
-		t.Fatalf("control, unverified boundary: notes.txt key = %q, want %q", k, WriteClassApprovalKey)
+		t.Fatalf("control, unlistable folder above the repository: notes.txt key = %q, want %q", k, WriteClassApprovalKey)
 	}
 }
 
-// TestHarnessPlanRepositoryPrefix: the key classifies the path below the
-// enclosing repository, so a root inside a harness folder does not hide it,
-// while a worktree (a .git file or link at its root) starts a new prefix.
+// TestHarnessPlanRepositoryPrefix: the key classifies the path from the
+// enclosing repository's own name down, so a root inside a harness folder, or
+// a harness folder that is itself a repository, does not hide it, while a
+// worktree (a .git file or link at its root) adds only its own name.
 func TestHarnessPlanRepositoryPrefix(t *testing.T) {
 	tmp := t.TempDir()
-	for _, d := range []string{"repo/.git", "repo/.github/hooks", "repo/.vscode", "repo/.claude/worktrees/w/docs", "repo/docs", "plain/.claude", "gitdir"} {
+	for _, d := range []string{"repo/.git", "repo/.github/hooks", "repo/.vscode", "repo/.claude/worktrees/w/docs", "repo/docs", "plain/.claude", "gitdir", "dot/.claude/.git", "dotm/.claude"} {
 		if err := os.MkdirAll(filepath.Join(tmp, filepath.FromSlash(d)), 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := os.WriteFile(filepath.Join(tmp, "repo", ".claude", "worktrees", "w", ".git"), []byte("gitdir: elsewhere\n"), 0o644); err != nil {
-		t.Fatal(err)
+	for _, f := range []string{"repo/.claude/worktrees/w/.git", "dotm/.claude/.git"} {
+		if err := os.WriteFile(filepath.Join(tmp, filepath.FromSlash(f)), []byte("gitdir: elsewhere\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if runtime.GOOS != "windows" {
 		s := filepath.Join(tmp, "repo", ".claude", "worktrees", "s")
@@ -466,6 +475,8 @@ func TestHarnessPlanRepositoryPrefix(t *testing.T) {
 		{"worktree with .git symlink", "repo/.claude/worktrees/s", "notes.txt", WriteClassApprovalKey, true},
 		{"ordinary folder", "repo/docs", "notes.txt", WriteClassApprovalKey, false},
 		{"non-git .claude root", "plain/.claude", "notes.txt", "", false},
+		{".claude that is a repository", "dot/.claude", "settings.json", "", false},
+		{".claude that is a submodule", "dotm/.claude", "notes.txt", "", false},
 		{"symlinked root", "link", "settings.json", "", true},
 	}
 	for _, r := range rows {
@@ -478,6 +489,33 @@ func TestHarnessPlanRepositoryPrefix(t *testing.T) {
 				t.Fatalf("root %s, write_file %s key = %q, want %q", r.root, r.rel, k, r.want)
 			}
 		})
+	}
+}
+
+// TestHarnessPlanScopeGuardNotConsulted: key resolution is a pure lookup. It
+// never asks the scope guard for a write check, so an out-of-scope ordinary
+// edit keeps the write-class key and fails at Invoke as before (#725).
+func TestHarnessPlanScopeGuardNotConsulted(t *testing.T) {
+	root := t.TempDir()
+	harnessFixture(t, root, "notes.txt")
+	harnessFixture(t, root, "CLAUDE.md")
+	ws := harnessWorkspace(t, root)
+	var writes []string
+	ws.SetScopeGuard(func(rel string, write bool) error {
+		if write {
+			writes = append(writes, rel)
+			return errors.New("writes denied")
+		}
+		return nil
+	})
+	if k := harnessEditPlan(t, ws, "notes.txt").ApprovalKey; k != WriteClassApprovalKey {
+		t.Fatalf("edit_file notes.txt key = %q, want %q", k, WriteClassApprovalKey)
+	}
+	if k := harnessEditPlan(t, ws, "CLAUDE.md").ApprovalKey; k != "" {
+		t.Fatalf("edit_file CLAUDE.md key = %q, want empty", k)
+	}
+	if len(writes) != 0 {
+		t.Fatalf("Plan asked the guard for write checks on %q, want none", writes)
 	}
 }
 

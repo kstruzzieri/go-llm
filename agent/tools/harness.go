@@ -7,18 +7,17 @@ import (
 	"github.com/kstruzzieri/go-llm/agent/interceptor"
 )
 
-// repositoryPrefix returns canonRoot's path below the nearest directory, the
+// repositoryPrefix returns canonRoot's path from the nearest directory, the
 // root included, that holds a .git entry of any type (a checkout's directory,
 // a worktree's file, or a link), and that directory as boundary. The prefix
-// is "" when the boundary is the root. With no .git up to the volume root the
-// prefix is canonRoot itself, so the whole root is classified (#725).
+// starts with the boundary's own name, because a repository can itself be a
+// harness folder (a git-tracked ~/.claude, or a .claude submodule); a worktree
+// root adds only its own name. With no .git up to the volume root the prefix
+// is canonRoot itself, so the whole root is classified (#725).
 func repositoryPrefix(canonRoot string) (prefix, boundary string) {
 	for d := canonRoot; ; {
 		if _, err := os.Lstat(filepath.Join(d, ".git")); err == nil {
-			if d == canonRoot {
-				return "", d
-			}
-			rel, err := filepath.Rel(d, canonRoot)
+			rel, err := filepath.Rel(filepath.Dir(d), canonRoot)
 			if err != nil {
 				return canonRoot, d // unreachable: d is an ancestor; classify everything
 			}

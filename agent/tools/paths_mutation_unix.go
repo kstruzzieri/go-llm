@@ -46,7 +46,13 @@ func regularMutationEntry(st *unix.Stat_t) error {
 
 // openMutationTarget owns the parent until release. Canonical policy consults
 // only the final logical name, including on resolution errors, as reads do.
-func (w *Workspace) openMutationTarget(p string) (target *mutationTarget, resultErr error) {
+func (w *Workspace) openMutationTarget(p string) (*mutationTarget, error) {
+	return w.lookupMutationTarget(p, true)
+}
+
+// lookupMutationTarget is openMutationTarget; checkWrite false skips the
+// scope guard's write check on the final name, for the approval-key lookup.
+func (w *Workspace) lookupMutationTarget(p string, checkWrite bool) (target *mutationTarget, resultErr error) {
 	defer func() { resultErr = w.scopedPathError(resultErr) }()
 	abs, err := w.cleanRel(p)
 	if err != nil {
@@ -68,7 +74,7 @@ func (w *Workspace) openMutationTarget(p string) (target *mutationTarget, result
 		}
 	}
 	defer func() {
-		if !errors.Is(resultErr, errScopeDenied) {
+		if checkWrite && !errors.Is(resultErr, errScopeDenied) {
 			if err := w.checkScope(filepath.Join(w.root, policyRel), true); err != nil {
 				resultErr = err
 			}
@@ -159,9 +165,10 @@ func (w *Workspace) resolveWriteTarget(p string) (string, bool, error) {
 
 // resolvedWriteRel returns the workspace-relative spelling the filesystem
 // stores for a write target, and whether every existing component's spelling
-// was verified (#725). It is a lookup only.
+// was verified (#725). It is a lookup only: it never asks the scope guard for
+// a write check.
 func (w *Workspace) resolvedWriteRel(p string) (string, bool, error) {
-	target, err := w.openMutationTarget(p)
+	target, err := w.lookupMutationTarget(p, false)
 	if err != nil {
 		return "", false, err
 	}

@@ -141,9 +141,10 @@ type Workspace struct {
 	// noReplaceRename replaces the platform no-replace install in tests only, so
 	// an unsupported-filesystem result is observed at the real call site.
 	noReplaceRename func(srcFd int, tmpName string, dstFd int, dstName string) error
-	// harnessPrefix is the root's path below its enclosing repository (#725):
-	// "" at a repository or worktree root, the canonical root itself when no
-	// .git exists above it. It feeds only harness classification.
+	// harnessPrefix is the root's path from its enclosing repository's own
+	// name down (#725): just that name at a repository or worktree root, the
+	// canonical root itself when no .git exists above it. It feeds only
+	// harness classification.
 	harnessPrefix string
 	// harnessPrefixUnverified is set when a root component inside that prefix
 	// could not have its stored spelling verified, so every write prompts.
@@ -183,9 +184,10 @@ func canonicalWorkspaceRoot(root string) (canon, unverified string, err error) {
 
 // NewWorkspace canonicalizes root so the root itself may legitimately be a
 // symlinked or filesystem-aliased path while no later access follows a symlink.
-// It also records the canonical root's path below its enclosing repository,
-// which write_file and edit_file put in front of a target before classifying
-// it as a harness file (#725), so a root inside .claude does not hide it.
+// It also records the canonical root's path from its enclosing repository's
+// own name down, which write_file and edit_file put in front of a target
+// before classifying it as a harness file (#725), so a root inside .claude,
+// or a .claude that is itself a repository, does not hide it.
 func NewWorkspace(root string) (*Workspace, error) {
 	canon, unverified, err := canonicalWorkspaceRoot(root)
 	if err != nil {
@@ -196,15 +198,15 @@ func NewWorkspace(root string) (*Workspace, error) {
 		return nil, err
 	}
 	prefix, boundary := repositoryPrefix(canon)
-	// An unverified root component strictly below the boundary is part of the
+	// An unverified root component at or below the boundary is part of the
 	// classified prefix and its spelling cannot be checked, so every write
 	// prompts (#725): repo/CLAUDE reached unlistably may really be .claude.
-	below := false
+	inPrefix := false
 	if unverified != "" {
 		rel, err := filepath.Rel(boundary, unverified)
-		below = err != nil || rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator))
+		inPrefix = err != nil || rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator))
 	}
-	return &Workspace{root: canon, rootIdentity: identity, harnessPrefix: prefix, harnessPrefixUnverified: below}, nil
+	return &Workspace{root: canon, rootIdentity: identity, harnessPrefix: prefix, harnessPrefixUnverified: inPrefix}, nil
 }
 
 func canonicalExistingPath(path string) (string, string, error) {

@@ -91,7 +91,8 @@ func (w *Workspace) CanonicalPathForUndo(p string) (string, error) {
 
 // resolvedWriteRel returns the workspace-relative spelling the filesystem
 // stores for a write target, and whether every existing component's spelling
-// was verified (#725). It is a lookup only.
+// was verified (#725). It is a lookup only: it never asks the scope guard for
+// a write check.
 func (w *Workspace) resolvedWriteRel(p string) (string, bool, error) {
 	abs, err := w.cleanRel(p)
 	if err != nil {
