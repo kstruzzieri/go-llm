@@ -148,8 +148,8 @@ jobs:
       # connection in the child, the registered-port guard, signal and
       # descriptor state, and the unix runner suite through both spawners.
       # Nothing here skips on macOS, so a skip fails the step, and so does
-      # any count other than 43 PASS lines: 35 leaves plus the 8 parents of
-      # subtests (21 top-level tests). A rename would otherwise run nothing
+      # any count other than 45 PASS lines: 37 leaves plus the 8 parents of
+      # subtests (23 top-level tests). A rename would otherwise run nothing
       # and pass.
       - name: Native spawner (race)
         shell: bash
@@ -160,8 +160,8 @@ jobs:
             exit 1
           fi
           passed=$(grep -c -- '--- PASS: Test' "$RUNNER_TEMP/native-spawner.txt" || true)
-          if [ "$passed" -ne 43 ]; then
-            echo "::error::expected 43 native spawner PASS lines, saw $passed"
+          if [ "$passed" -ne 45 ]; then
+            echo "::error::expected 45 native spawner PASS lines, saw $passed"
             exit 1
           fi
 

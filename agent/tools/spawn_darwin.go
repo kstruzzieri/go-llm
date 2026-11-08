@@ -50,12 +50,13 @@ type nativeCmd struct {
 	// caller always sets it.
 	Cancel func() error
 
-	ctx     context.Context
-	process *os.Process
-	state   *os.ProcessState
-	readers []*os.File // parent ends of the output pipes
-	copies  chan error // one result per reader's copy goroutine
-	exited  chan struct{}
+	ctx       context.Context
+	process   *os.Process
+	state     *os.ProcessState
+	readers   []*os.File // parent ends of the output pipes
+	copies    chan error // one result per reader's copy goroutine
+	exited    chan struct{}
+	watchDone chan struct{}
 }
 
 // nativeSpawn is the Seatbelt backend's spawnFunc: osExecSpawn's
@@ -234,7 +235,11 @@ func (c *nativeCmd) Start() error {
 		}()
 	}
 	if c.ctx != nil && c.ctx.Done() != nil {
-		go c.watchCtx()
+		c.watchDone = make(chan struct{})
+		go func() {
+			defer close(c.watchDone)
+			c.watchCtx()
+		}()
 	}
 	return nil
 }
@@ -248,6 +253,12 @@ func (c *nativeCmd) watchCtx() {
 	case <-c.exited:
 		return
 	case <-c.ctx.Done():
+	}
+	// If both were ready, completion wins over cleanup cancellation.
+	select {
+	case <-c.exited:
+		return
+	default:
 	}
 	if c.Cancel != nil {
 		_ = c.Cancel()
@@ -285,6 +296,10 @@ func (c *nativeCmd) Wait() error {
 	}
 	c.state = state
 	close(c.exited)
+	// A caller may cancel its context as soon as Wait returns.
+	if c.watchDone != nil {
+		<-c.watchDone
+	}
 	if copyErr := c.awaitCopies(); err == nil {
 		err = copyErr
 	}

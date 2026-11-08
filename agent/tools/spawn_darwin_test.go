@@ -258,6 +258,55 @@ func TestNativeCmdKillsLeaderWaitDelayAfterCancel(t *testing.T) {
 	}
 }
 
+func TestNativeCmdWaitJoinsCancellationWatcher(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	c := newNativeCmd(ctx, "/bin/sleep", []string{"sleep", "30"})
+	entered, release, finished := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	c.Cancel = func() error {
+		err := c.process.Kill()
+		close(entered)
+		<-release
+		close(finished)
+		return err
+	}
+	if err := c.Start(); err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	<-entered
+	waited := make(chan error, 1)
+	go func() { waited <- c.Wait() }()
+	<-c.exited
+	select {
+	case err := <-waited:
+		close(release)
+		<-finished
+		t.Fatalf("Wait returned %v while Cancel was still running", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(release)
+	if err := <-waited; err == nil {
+		t.Fatal("Wait returned nil for a killed child")
+	}
+	<-finished
+}
+
+func TestNativeCmdWatcherPrefersCompletedProcess(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	for range 100 {
+		c := newNativeCmd(ctx, "", nil)
+		c.exited = make(chan struct{})
+		close(c.exited)
+		c.Cancel = func() error {
+			t.Error("Cancel called after process completion when both channels were ready")
+			return nil
+		}
+		c.watchCtx()
+	}
+}
+
 // Not parallel: it swaps the package-level guard.
 func TestNativeCmdFailsClosedWhenRegisteredPortsStay(t *testing.T) {
 	orig := registeredPortsGuard
