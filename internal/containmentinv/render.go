@@ -14,7 +14,7 @@ var families = []struct {
 }{
 	{"Paths", []string{"PATH-"}},
 	{"Mutation substitution", []string{"MUT-"}},
-	{"Environment", []string{"ENV-"}},
+	{"Environment", []string{"ENV-", "LAUNCHD-SEATBELT"}},
 	{"Terminal", []string{"TERM-", "PREVIEW-PROFILE"}},
 	{"Fingerprint", []string{"FP-"}},
 	{"Grants", []string{"GRANT-"}},

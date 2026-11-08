@@ -144,6 +144,16 @@ jobs:
           GO_LLM_REQUIRE_SEATBELT: "1"
         run: go test -race -count=1 -run '^(TestSeatbelt|TestSBPL|TestProbeSeatbelt|TestScratchSeatbelt|TestNewExecBackendSeatbelt|TestNativeBackend)' ./agent/tools ./golem
 
+      # Seatbelt commands cannot reach launchd (#712). The steps above already
+      # run the read-only launchd tests; the opt-in adds the two that load,
+      # kickstart, enable and disable throwaway jobs in the runner user's
+      # launchd domain (labels com.kstruzzieri.golem-test-712.*).
+      - name: Seatbelt launchd (opt-in)
+        env:
+          GO_LLM_REQUIRE_SEATBELT: "1"
+          GO_LLM_LAUNCHD_TESTS: "1"
+        run: go test -count=1 -v -run '^TestSeatbeltLaunchd' ./agent/tools
+
       # Golem's own construction paths under real Seatbelt (#576): startup
       # and late exec, scratch and verification, each after a host positive
       # control. Non-race only: no race job runs these on macOS.

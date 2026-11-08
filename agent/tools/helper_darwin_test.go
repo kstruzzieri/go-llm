@@ -53,9 +53,27 @@ func platformSpawnerCases() []spawnerCase { return []spawnerCase{{"native", nati
 //	                    and os/exec, require only the os/exec child to see it,
 //	                    print FDDRIVER-OK
 //	["fdprobe", fd]  -> print whether fd is open
+//	["seatbeltmachdriver", ws]
+//	                 -> seed as nativedriver does, build the real Seatbelt
+//	                    backend, run machstate under it through Run and Start
+//	                    in workspace ws, print one LIFETIME line for each
+//	["seatbeltreattachdriver", ws]
+//	                 -> put the bootstrap port in registered slot 0, as a
+//	                    normal process has it, build the real Seatbelt
+//	                    backend, run reattach under it through Run in
+//	                    workspace ws, print its LIFETIME line
+//	["reattach"]     -> install the first non-null registered port as the
+//	                    bootstrap port and exec launchctl managername; with
+//	                    none, print HELPER-REATTACH: no-slot and exit 3
 func platformHelperMain(args []string) (int, bool) {
 	var err error
 	switch args[0] {
+	case "seatbeltmachdriver":
+		err = helperSeatbeltMachDriver(args[1:])
+	case "seatbeltreattachdriver":
+		err = helperSeatbeltReattachDriver(args[1:])
+	case "reattach":
+		return helperReattach(), true
 	case "machregclear":
 		err = helperMachRegClear()
 	case "machinspect":
@@ -269,7 +287,10 @@ func noLaunchdConnection(st machState) error {
 // two masks EXC_MASK_ALL leaves out, and one it covers.
 const excMaskSeeded = 0x2402
 
-func helperNativeDriver() error {
+// seedLaunchdState fills every registered slot and installs an exception
+// handler for excMaskSeeded, then requires the inspection to see both, so a
+// child that inherits either is caught.
+func seedLaunchdState() error {
 	if err := seedRegisteredPorts(); err != nil {
 		return fmt.Errorf("seed registered ports: %w", err)
 	}
@@ -297,6 +318,13 @@ func helperNativeDriver() error {
 	}
 	if held&excMaskSeeded != excMaskSeeded {
 		return fmt.Errorf("seeded exception handlers cover %#x, want %#x", held, excMaskSeeded)
+	}
+	return nil
+}
+
+func helperNativeDriver() error {
+	if err := seedLaunchdState(); err != nil {
+		return err
 	}
 	c, err := nativeHelper("machstate")
 	if err != nil {
@@ -419,4 +447,81 @@ func helperFDProbe(args []string) error {
 		return err
 	}
 	return nil
+}
+
+// helperSeatbeltMachDriver is TestSeatbeltLaunchdChildMachState's driver: the
+// seeds live in this process only, never in the test binary.
+func helperSeatbeltMachDriver(args []string) error {
+	if len(args) != 1 {
+		return errors.New("want one workspace argument")
+	}
+	if err := seedLaunchdState(); err != nil {
+		return err
+	}
+	return runSeatbeltHelper(args[0], "machstate", "run", "start")
+}
+
+// helperSeatbeltReattachDriver is TestSeatbeltLaunchdReattachRefused's
+// driver. It puts the bootstrap port in slot 0 itself rather than rely on how
+// it was started: a process forked through libSystem (os/exec) has it there,
+// one started by a native spawn does not.
+func helperSeatbeltReattachDriver(args []string) error {
+	if len(args) != 1 {
+		return errors.New("want one workspace argument")
+	}
+	if err := registerBootstrapPort(); err != nil {
+		return err
+	}
+	st, err := inspectMachState()
+	if err != nil {
+		return err
+	}
+	_, _ = fmt.Printf("driver state: %+v\n", st)
+	if len(st.Registered) == 0 || st.Registered[0] == machPortNull {
+		return fmt.Errorf("seed not visible: registered %#x", st.Registered)
+	}
+	return runSeatbeltHelper(args[0], "reattach", "run")
+}
+
+// runSeatbeltHelper builds the real Seatbelt backend, the seeds already in
+// place, and runs this binary's helper mode under it once per lifetime.
+func runSeatbeltHelper(ws, mode string, lifetimes ...string) error {
+	b, err := newSeatbeltExecBackend(seatbeltTestCfg())
+	if err != nil {
+		return err
+	}
+	self, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	for _, lifetime := range lifetimes {
+		js, err := json.Marshal(seatbeltLifetimeRun(b, lifetime, ws, self, "__golem_exec_helper__", mode))
+		if err != nil {
+			return err
+		}
+		_, _ = fmt.Printf("LIFETIME %s\n", js)
+	}
+	return nil
+}
+
+func helperReattach() int {
+	ports, err := lookupRegisteredPorts()
+	if err != nil {
+		_, _ = fmt.Fprintln(os.Stderr, "reattach:", err)
+		return 1
+	}
+	for _, p := range ports {
+		if p == machPortNull || p == machPortDead {
+			continue
+		}
+		if err := setBootstrapPort(p); err != nil {
+			_, _ = fmt.Fprintln(os.Stderr, "reattach:", err)
+			return 1
+		}
+		err := syscall.Exec("/bin/launchctl", []string{"launchctl", "managername"}, os.Environ())
+		_, _ = fmt.Fprintln(os.Stderr, "reattach: exec launchctl:", err)
+		return 1
+	}
+	_, _ = fmt.Println("HELPER-REATTACH: no-slot")
+	return 3
 }

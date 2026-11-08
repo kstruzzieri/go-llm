@@ -739,6 +739,65 @@
       "artifacts": []
     },
     {
+      "id": "LAUNCHD-SEATBELT",
+      "source": "issue-712:17",
+      "requirement": "Seatbelt commands start with no inherited launchd connection: the bootstrap special port and every registered-port slot are null and the task exception ports are null for every mask, so a sandboxed command cannot ask launchd to start, enable, disable or list the user's jobs. Filesystem-triggered jobs and Unix-domain sockets under allowed network are outside this row.",
+      "status": "verified",
+      "owner": "",
+      "layer": "focused",
+      "exempt": "",
+      "scenarios": [],
+      "refs": [
+        {
+          "package": "./agent/tools",
+          "test": "TestSeatbeltLaunchdPrintRefused/run",
+          "file": "agent/tools/seatbelt_launchd_darwin_test.go",
+          "func": "TestSeatbeltLaunchdPrintRefused"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestSeatbeltLaunchdPrintRefused/start",
+          "file": "agent/tools/seatbelt_launchd_darwin_test.go",
+          "func": "TestSeatbeltLaunchdPrintRefused"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestSeatbeltLaunchdChildMachState",
+          "file": "agent/tools/seatbelt_launchd_darwin_test.go",
+          "func": "TestSeatbeltLaunchdChildMachState"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestSeatbeltLaunchdReattachRefused",
+          "file": "agent/tools/seatbelt_launchd_darwin_test.go",
+          "func": "TestSeatbeltLaunchdReattachRefused"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestNativeCmdCloseOnExecDefault",
+          "file": "agent/tools/spawn_darwin_test.go",
+          "func": "TestNativeCmdCloseOnExecDefault"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestNativeCmdUnblockedUSR1",
+          "file": "agent/tools/spawn_darwin_test.go",
+          "func": "TestNativeCmdUnblockedUSR1"
+        }
+      ],
+      "profiles": [
+        "seatbelt"
+      ],
+      "mutations": [
+        "M-081",
+        "M-082",
+        "M-083",
+        "M-084",
+        "M-085"
+      ],
+      "artifacts": []
+    },
+    {
       "id": "TERM-PREVIEW",
       "source": "issue-452:55",
       "requirement": "Approval previews render ESC, C1, carriage return, backspace, tab and bidi controls inert and visibly escaped, for file, exec and background prompts.",

@@ -28,10 +28,12 @@ func TestNativeCmdIgnoredSignalStaysIgnored(t *testing.T) {
 }
 
 func TestNativeCmdUnblockedUSR1(t *testing.T) {
+	// containment: LAUNCHD-SEATBELT
 	runMachHelper(t, "usr1driver", "USR1DRIVER-OK")
 }
 
 func TestNativeCmdCloseOnExecDefault(t *testing.T) {
+	// containment: LAUNCHD-SEATBELT
 	runMachHelper(t, "fddriver", "FDDRIVER-OK")
 }
 

@@ -1,10 +1,10 @@
 # Containment mutation ledger (#452)
 
-Each entry proves one security property's assertions can fail. Entries are point-in-time evidence at their baseline revision. The ledger contains 80 entries: 75 guard and five effect-detection entries.
+Each entry proves one security property's assertions can fail. Entries are point-in-time evidence at their baseline revision. The ledger contains 85 entries: 80 guard and five effect-detection entries.
 
 Platform: every proof in this ledger ran on darwin (arm64, go1.27.1). After the rebase onto the model-resistance PR, the entries whose patches touch build-tagged or platform-sensitive code (M-005 to M-008, the unix path walks; M-009 and M-014 to M-018, the host exec path; M-011, the MCP stdio child environment) were re-run on Linux (arm64, go1.27.1, the Docker `ci-local` image) at their baseline: each entry's `Platform:` line records the result, and a Linux line that differs would be recorded beside the darwin evidence, never in place of it. M-010 (it needs an AgentFlow source checkout) and M-012 (Seatbelt is darwin-native) were not re-run on Linux, and no entry has run on Windows.
 
-Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-only variants added in review, M-045 B and M-047 B, at `34b2ff38`, whose production and scenario trees are identical; M-051 to M-053 at `731f2d1d`, the commit that adds them; M-054 to M-058 at `3d423ce1`, the commit that adds them; M-059 at `1166b276`, the commit that adds it): the baseline passed, the mutant failed as shown, and the tree was restored with `git checkout` and passed again. M-028 was re-recorded when tool frames moved to per-result keys: variant A on the commit that makes that change (parent `140524de`), variant B on the commit that adds the cross-Run check (parent `d75c78cb`). Each baseline passed, each mutant failed as shown, and an editor edit restored the baseline bytes, which passed again. Entries M-067 to M-071 ran on the commit that adds fence-key rotation (parent `72b6eb47`) in the same way, the restored file's sha256 matching the baseline's each time; M-072 and M-073 ran the same way on the commit that makes every exposed key rotate and matches keys through separators (parent `00912c90`), and M-074 on the commit that pins key minting before assembly (parent `caa84426`). Entries M-075 to M-078 ran the same way in an isolated `git archive` export of the commit that adds system keys (parent `3346b711`). M-079 and M-080 ran the same way on the commit that scans the durable summary and staged advice (parent `c17e940d`). Entries M-060 and M-061 ran in isolated exports of immutable code commit `23f0c0bbca83f0c9d6e02163dd09c4856698ddcd`: each baseline passed, its mutant failed, and restored files matched the baseline bytes and passed again. Entries M-062 and M-063 ran on this branch at `dbe5c315b40f8b973b96cf623d5cdcbe00c616fc`, the commit that adds their rules: each baseline passed, its mutant failed, and `git checkout -- <file>` restored the baseline bytes, which passed again; M-062's comparison against the previous rule ran in an isolated `git archive` export of `ac053567`. Entries M-064 to M-066 ran on the #387 branch at `72d0bedeb1d264b3da62cf812df7505a8bd7e776`, the commit that tightens PV1's probe and cites the exec and verification preview tests (M-064 and M-065 were first recorded at `b9cea9154746758026fd9bb58d467f665be5952f`, the commit that makes PV1 executable): each baseline passed, its mutant failed, and `git checkout -- <file>` restored the baseline bytes, which passed again. Entries quote test output, the containment judge's message text and line numbers included, as it read at their baseline; later wording changes do not rewrite them. Entries carried over from the PR 2 delivery record name the draft entry they were first recorded as; they were re-run here so every command, diff and line number matches one revision. Apply a patch with `git apply`, run the command, then restore with `git checkout -- <file>`. `guard` entries remove or weaken the protection the refs assert. `effect-detection` entries change the effect path of an uncontained scenario: they show its probe can read a change in outcome, not that a guard is absent. Rows exempt from this ledger (pending, out-of-scope, unobserved such as ENV-BWRAP, whose native bwrap profile needs a Linux host, and administrative META- rows; the inventory lint allows no other verified or uncontained row an exemption) carry their exempt reason in the inventory (`docs/security/containment-inventory.json`, rendered in `docs/security/containment-inventory.md`).
+Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-only variants added in review, M-045 B and M-047 B, at `34b2ff38`, whose production and scenario trees are identical; M-051 to M-053 at `731f2d1d`, the commit that adds them; M-054 to M-058 at `3d423ce1`, the commit that adds them; M-059 at `1166b276`, the commit that adds it): the baseline passed, the mutant failed as shown, and the tree was restored with `git checkout` and passed again. M-028 was re-recorded when tool frames moved to per-result keys: variant A on the commit that makes that change (parent `140524de`), variant B on the commit that adds the cross-Run check (parent `d75c78cb`). Each baseline passed, each mutant failed as shown, and an editor edit restored the baseline bytes, which passed again. Entries M-067 to M-071 ran on the commit that adds fence-key rotation (parent `72b6eb47`) in the same way, the restored file's sha256 matching the baseline's each time; M-072 and M-073 ran the same way on the commit that makes every exposed key rotate and matches keys through separators (parent `00912c90`), and M-074 on the commit that pins key minting before assembly (parent `caa84426`). Entries M-075 to M-078 ran the same way in an isolated `git archive` export of the commit that adds system keys (parent `3346b711`). M-079 and M-080 ran the same way on the commit that scans the durable summary and staged advice (parent `c17e940d`). Entries M-081 to M-085 ran the same way in an isolated `git archive` export of the commit that adds the #712 launchd acceptance tests (parent `f751926c`), each applied with `patch -p1` and reverted with `patch -R -p1`, the restored file's sha256 matching the baseline's. Entries M-060 and M-061 ran in isolated exports of immutable code commit `23f0c0bbca83f0c9d6e02163dd09c4856698ddcd`: each baseline passed, its mutant failed, and restored files matched the baseline bytes and passed again. Entries M-062 and M-063 ran on this branch at `dbe5c315b40f8b973b96cf623d5cdcbe00c616fc`, the commit that adds their rules: each baseline passed, its mutant failed, and `git checkout -- <file>` restored the baseline bytes, which passed again; M-062's comparison against the previous rule ran in an isolated `git archive` export of `ac053567`. Entries M-064 to M-066 ran on the #387 branch at `72d0bedeb1d264b3da62cf812df7505a8bd7e776`, the commit that tightens PV1's probe and cites the exec and verification preview tests (M-064 and M-065 were first recorded at `b9cea9154746758026fd9bb58d467f665be5952f`, the commit that makes PV1 executable): each baseline passed, its mutant failed, and `git checkout -- <file>` restored the baseline bytes, which passed again. Entries quote test output, the containment judge's message text and line numbers included, as it read at their baseline; later wording changes do not rewrite them. Entries carried over from the PR 2 delivery record name the draft entry they were first recorded as; they were re-run here so every command, diff and line number matches one revision. Apply a patch with `git apply`, run the command, then restore with `git checkout -- <file>`. `guard` entries remove or weaken the protection the refs assert. `effect-detection` entries change the effect path of an uncontained scenario: they show its probe can read a change in outcome, not that a guard is absent. Rows exempt from this ledger (pending, out-of-scope, unobserved such as ENV-BWRAP, whose native bwrap profile needs a Linux host, and administrative META- rows; the inventory lint allows no other verified or uncontained row an exemption) carry their exempt reason in the inventory (`docs/security/containment-inventory.json`, rendered in `docs/security/containment-inventory.md`).
 
 ## M-001 — Absolute paths are rejected by the workspace path cleaner
 - Affected refs: PATH-ABS: `TestHardeningContracts/Active/Workspace/confinement_and_arguments/public_confinement/owned_absolute_sibling`, `TestWorkspaceCleanRelContainment/absolute_escape`, `TestContainment/W1`
@@ -2410,6 +2410,125 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
 - Baseline: pass (exit 0). Mutant: FAIL `TestAdvisoryQuotingSystemKeyRotatesFirstRender` (`fencekeys_test.go:1264: Result.SystemKeys = ["NKMWIWAZT6EX"], want one key replacing "NKMWIWAZT6EX"`); `TestSummaryQuotingSystemKeyRotatesFirstRender` passes; exit 1. Restored by an editor edit, byte-identical to the baseline file (sha256 match): pass (exit 0).
 - Kind: guard
 - Notes: Advice is projected onto the wire copy of the goal and never enters Run state, so only this pinned text puts it in front of the scan. A consult child runs with host privileges and can read a `-trace` file that holds the system prompt, so its advice can quote the snapshot key.
+
+## M-081 — A Seatbelt command starts with a null bootstrap port
+- Affected refs: LAUNCHD-SEATBELT: `TestSeatbeltLaunchdPrintRefused/run`, `TestSeatbeltLaunchdPrintRefused/start`, `TestSeatbeltLaunchdChildMachState`
+- Baseline: the commit that adds the #712 launchd acceptance tests (parent `f751926c`), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: seatbelt / `GO_LLM_REQUIRE_SEATBELT=1 go test -count=1 -v -run '^(TestSeatbeltLaunchd(PrintRefused|ChildMachState|ReattachRefused)|TestNativeCmd(CloseOnExecDefault|UnblockedUSR1))$' ./agent/tools`
+- Patch:
+  ```diff
+  diff --git a/agent/tools/spawn_darwin.go b/agent/tools/spawn_darwin.go
+  --- a/agent/tools/spawn_darwin.go
+  +++ b/agent/tools/spawn_darwin.go
+  @@ -168,7 +168,6 @@
+   		spawnErr("posix_spawnattr_setpgroup", posixSpawnattrSetpgroup(&attr, 0)),
+   		spawnErr("posix_spawnattr_setsigmask", posixSpawnattrSetsigmask(&attr, &noMask)),
+   		spawnErr("posix_spawnattr_setsigdefault", posixSpawnattrSetsigdefault(&attr, &sigdef)),
+  -		spawnErr("posix_spawnattr_setspecialport_np", posixSpawnattrSetspecialportNp(&attr, machPortNull, taskBootstrapPort)),
+   		spawnErr("posix_spawnattr_setexceptionports_np", posixSpawnattrSetexceptionportsNp(&attr,
+   			excMaskAllPorts, machPortNull, exceptionDefault, threadStateNone)),
+   		spawnErr("posix_spawn_file_actions_addopen", posixSpawnFileActionsAddopen(&fa, 0, devNull, syscall.O_RDONLY, 0)),
+  ```
+- Baseline: pass (exit 0). Mutant: FAIL `TestSeatbeltLaunchdPrintRefused/run` and `/start` (`seatbelt_launchd_darwin_test.go:190: sandboxed launchctl print gui/503: exit 0, listed true, first line "gui/503 = {"; want a refusal`); FAIL `TestSeatbeltLaunchdChildMachState` (`seatbelt_launchd_darwin_test.go:226: run: sandboxed child keeps a launchd connection: bootstrap port 0x807, want null`, and the same for start); the other three refs pass; exit 1. Restored (sha256 match): pass (exit 0).
+- Kind: guard
+- Notes: The child inherits the host's bootstrap port, so the sandboxed launchctl lists the user's domain, the #712 observation. `TestSeatbeltLaunchdReattachRefused` stays green: the registered table is still emptied, so the child finds no slot to reinstall. The failure quotes only the listing's first line, because a domain listing carries the user's launchd environment, credentials included.
+
+## M-082 — A Seatbelt command starts with null exception ports for every mask
+- Affected refs: LAUNCHD-SEATBELT: `TestSeatbeltLaunchdChildMachState`
+- Baseline: the commit that adds the #712 launchd acceptance tests (parent `f751926c`), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: seatbelt / `GO_LLM_REQUIRE_SEATBELT=1 go test -count=1 -v -run '^(TestSeatbeltLaunchd(PrintRefused|ChildMachState|ReattachRefused)|TestNativeCmd(CloseOnExecDefault|UnblockedUSR1))$' ./agent/tools`
+- Patch:
+  ```diff
+  diff --git a/agent/tools/spawn_darwin.go b/agent/tools/spawn_darwin.go
+  --- a/agent/tools/spawn_darwin.go
+  +++ b/agent/tools/spawn_darwin.go
+  @@ -170,7 +170,7 @@
+   		spawnErr("posix_spawnattr_setsigdefault", posixSpawnattrSetsigdefault(&attr, &sigdef)),
+   		spawnErr("posix_spawnattr_setspecialport_np", posixSpawnattrSetspecialportNp(&attr, machPortNull, taskBootstrapPort)),
+   		spawnErr("posix_spawnattr_setexceptionports_np", posixSpawnattrSetexceptionportsNp(&attr,
+  -			excMaskAllPorts, machPortNull, exceptionDefault, threadStateNone)),
+  +			0x1BFE, machPortNull, exceptionDefault, threadStateNone)),
+   		spawnErr("posix_spawn_file_actions_addopen", posixSpawnFileActionsAddopen(&fa, 0, devNull, syscall.O_RDONLY, 0)),
+   	)
+   	if err != nil {
+  ```
+- Baseline: pass (exit 0). Mutant: FAIL `TestSeatbeltLaunchdChildMachState` (`seatbelt_launchd_darwin_test.go:226: run: sandboxed child keeps a launchd connection: exception mask 0x2400 has handler 0xf03, want null`, and the same for start); the other refs pass; exit 1. Restored (sha256 match): pass (exit 0).
+- Kind: guard
+- Notes: 0x1BFE is EXC_MASK_ALL, which omits EXC_MASK_CRASH (0x400) and EXC_MASK_CORPSE_NOTIFY (0x2000). The driver seeds a handler for 0x2402, so the CRASH and CORPSE_NOTIFY handlers survive into the sandboxed child while BAD_ACCESS (0x2) is cleared. The profile allows task_get_exception_ports, so the check runs inside the sandbox (controller ruling R3 did not apply). Outside this selection, `TestNativeCmdChildHasNoLaunchdConnection` (unsandboxed) is red under the same patch.
+
+## M-083 — The registered-port table is empty before every Seatbelt spawn
+- Affected refs: LAUNCHD-SEATBELT: `TestSeatbeltLaunchdChildMachState`, `TestSeatbeltLaunchdReattachRefused`
+- Baseline: the commit that adds the #712 launchd acceptance tests (parent `f751926c`), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: seatbelt / `GO_LLM_REQUIRE_SEATBELT=1 go test -count=1 -v -run '^(TestSeatbeltLaunchd(PrintRefused|ChildMachState|ReattachRefused)|TestNativeCmd(CloseOnExecDefault|UnblockedUSR1))$' ./agent/tools`
+- Patch:
+  ```diff
+  diff --git a/agent/tools/machports_darwin.go b/agent/tools/machports_darwin.go
+  --- a/agent/tools/machports_darwin.go
+  +++ b/agent/tools/machports_darwin.go
+  @@ -101,7 +101,7 @@
+   // is empty, so a spawned child cannot inherit launchd's bootstrap port
+   // through it. It is process-wide and idempotent.
+   func ensureRegisteredPortsEmpty() error {
+  -	return ensureRegisteredPortsEmptyWith(registeredPortsEmpty, registerNoPorts)
+  +	return nil
+   }
+   
+   // ensureRegisteredPortsEmptyWith checks the table with empty and, if it is not
+  ```
+- Baseline: pass (exit 0). Mutant: FAIL `TestSeatbeltLaunchdChildMachState` (`seatbelt_launchd_darwin_test.go:226: run: sandboxed child keeps a launchd connection: registered slot 0 holds 0x1a03, want null`, slots 1 and 2 likewise, and the same for start); FAIL `TestSeatbeltLaunchdReattachRefused` (`seatbelt_launchd_darwin_test.go:258: sandboxed reattach: exit 0, want 3 with HELPER-REATTACH: no-slot and without manager name "Aqua". Output: Aqua`); the other refs pass; exit 1. Restored (sha256 match): pass (exit 0).
+- Kind: guard
+- Notes: Both tests run their seeds in a driver process: the test binary's own table holds whatever its last spawn left (a native spawn empties it, an os/exec fork puts the bootstrap port back in slot 0), so a seed there would depend on test order. The reattach driver puts the bootstrap port in slot 0, as a normal process has it, and the sandboxed child reinstalls it and reaches launchd ("Aqua"). With seedRegisteredPorts' fresh, unserviced port instead, measured once under this patch, the reinstalled launchctl blocks on that port and the test goes red only on its 30 s timeout (`infra failure: context deadline exceeded`), never reaching launchd.
+
+## M-084 — A Seatbelt command inherits no host descriptor beyond stdio
+- Affected refs: LAUNCHD-SEATBELT: `TestNativeCmdCloseOnExecDefault`
+- Baseline: the commit that adds the #712 launchd acceptance tests (parent `f751926c`), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: seatbelt / `GO_LLM_REQUIRE_SEATBELT=1 go test -count=1 -v -run '^(TestSeatbeltLaunchd(PrintRefused|ChildMachState|ReattachRefused)|TestNativeCmd(CloseOnExecDefault|UnblockedUSR1))$' ./agent/tools`
+- Patch:
+  ```diff
+  diff --git a/agent/tools/spawn_darwin.go b/agent/tools/spawn_darwin.go
+  --- a/agent/tools/spawn_darwin.go
+  +++ b/agent/tools/spawn_darwin.go
+  @@ -164,7 +164,7 @@
+   	noMask, sigdef := uint32(0), sigDefaultSet()
+   	err = errors.Join(
+   		spawnErr("posix_spawnattr_setflags", posixSpawnattrSetflags(&attr,
+  -			posixSpawnSetPgroup|posixSpawnSetSigmask|posixSpawnSetSigdef|posixSpawnCloexecDefault)),
+  +			posixSpawnSetPgroup|posixSpawnSetSigmask|posixSpawnSetSigdef)),
+   		spawnErr("posix_spawnattr_setpgroup", posixSpawnattrSetpgroup(&attr, 0)),
+   		spawnErr("posix_spawnattr_setsigmask", posixSpawnattrSetsigmask(&attr, &noMask)),
+   		spawnErr("posix_spawnattr_setsigdefault", posixSpawnattrSetsigdefault(&attr, &sigdef)),
+  ```
+- Baseline: pass (exit 0). Mutant: FAIL `TestNativeCmdCloseOnExecDefault` (`spawn_darwin_test.go:37: helper fddriver: exit status 1`, after the driver's `fddriver: native "fd 77: open\n", os/exec "fd 77: open\n": want the native child without fd 77 and the os/exec child with it`); the other refs pass; exit 1. Restored (sha256 match): pass (exit 0).
+- Kind: guard
+- Notes: A native-spawn guard: POSIX_SPAWN_CLOEXEC_DEFAULT closes every descriptor but stdio in the child, the backstop behind the inherited-descriptor audit. The test runs unsandboxed through nativeCmd, the spawner both Seatbelt lifetimes use; it needs no launchd opt-in.
+
+## M-085 — A Seatbelt command starts with an empty signal mask
+- Affected refs: LAUNCHD-SEATBELT: `TestNativeCmdUnblockedUSR1`
+- Baseline: the commit that adds the #712 launchd acceptance tests (parent `f751926c`), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: seatbelt / `GO_LLM_REQUIRE_SEATBELT=1 go test -count=1 -v -run '^(TestSeatbeltLaunchd(PrintRefused|ChildMachState|ReattachRefused)|TestNativeCmd(CloseOnExecDefault|UnblockedUSR1))$' ./agent/tools`
+- Patch:
+  ```diff
+  diff --git a/agent/tools/spawn_darwin.go b/agent/tools/spawn_darwin.go
+  --- a/agent/tools/spawn_darwin.go
+  +++ b/agent/tools/spawn_darwin.go
+  @@ -164,7 +164,7 @@
+   	noMask, sigdef := uint32(0), sigDefaultSet()
+   	err = errors.Join(
+   		spawnErr("posix_spawnattr_setflags", posixSpawnattrSetflags(&attr,
+  -			posixSpawnSetPgroup|posixSpawnSetSigmask|posixSpawnSetSigdef|posixSpawnCloexecDefault)),
+  +			posixSpawnSetPgroup|posixSpawnSetSigdef|posixSpawnCloexecDefault)),
+   		spawnErr("posix_spawnattr_setpgroup", posixSpawnattrSetpgroup(&attr, 0)),
+   		spawnErr("posix_spawnattr_setsigmask", posixSpawnattrSetsigmask(&attr, &noMask)),
+   		spawnErr("posix_spawnattr_setsigdefault", posixSpawnattrSetsigdefault(&attr, &sigdef)),
+  ```
+- Baseline: pass (exit 0). Mutant: FAIL `TestNativeCmdUnblockedUSR1` (`spawn_darwin_test.go:32: helper usr1driver: exit status 1`, after the driver's `usr1driver: native child inherited the blocked SIGUSR1: output "survived\n", state exit status 0`); the other refs pass; exit 1. Restored (sha256 match): pass (exit 0).
+- Kind: guard
+- Notes: A native-spawn guard, SETSIGMASK only (controller rulings R2 and R7). Dropping SETSIGDEF instead is equivalent by construction for Go hosts, and the Task 2 implementer measured that it survives: exec already resets caught handlers to default, and the SETSIGDEF set excludes the signals the host ignores (`signal.Ignored`), which a child must keep ignored. `TestNativeCmdIgnoredSignalStaysIgnored` pins that exclusion and stays green under this patch.
 
 ## Administrative evidence
 

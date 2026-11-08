@@ -118,6 +118,23 @@ func seedRegisteredPorts() error {
 	return nil
 }
 
+// registerBootstrapPort puts the bootstrap port in registered slot 0 and
+// nulls the rest, the table a normal process inherits: a child given it can
+// reinstall slot 0 and reach launchd again.
+func registerBootstrapPort() error {
+	var bootstrap uint32
+	if kr := taskGetSpecialPort(machTaskSelf(), taskBootstrapPort, &bootstrap); kr != kernSuccess {
+		return machErr("task_get_special_port(bootstrap)", kr)
+	}
+	if bootstrap == machPortNull {
+		return errors.New("bootstrap port is null")
+	}
+	if kr := machPortsRegister(machTaskSelf(), &bootstrap, 1); kr != kernSuccess {
+		return machErr("mach_ports_register", kr)
+	}
+	return nil
+}
+
 // seedExceptionReceiver installs a fresh port as the task's exception handler
 // for mask (EXCEPTION_DEFAULT, THREAD_STATE_NONE). Nothing services the port,
 // so mask must name exception types the process never raises.
