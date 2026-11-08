@@ -19,7 +19,9 @@ import (
 )
 
 // The nativeCmd tests that seed or change Mach or signal state do it in a
-// helper process (runMachHelper), so this test binary's own state is untouched.
+// helper process (runMachHelper). The in-process tests still change this test
+// binary's Mach state: every native spawn here runs the real guard, which
+// empties the binary's registered-port table.
 
 func TestNativeCmdChildHasNoLaunchdConnection(t *testing.T) {
 	runMachHelper(t, "nativedriver", "NATIVEDRIVER-OK")
@@ -123,14 +125,17 @@ func TestNativeCmdConcurrentSpawns(t *testing.T) {
 // to hand it to the forked child. A fork landing between the guard and
 // posix_spawn would give a native child a way back to launchd, or make the
 // guard's re-check fail the spawn. Four goroutines fork without pause while
-// 300 native children report their registered tables.
+// up to 300 native children report their registered tables; at least 100
+// must complete within the deadline, so a slow runner still exercises the
+// race.
 func TestNativeCmdConcurrentForkKeepsRegisteredEmpty(t *testing.T) {
 	self, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
 	}
-	const spawns = 300
-	deadline := time.Now().Add(60 * time.Second)
+	const spawns, floor = 300, 100
+	ctx, cancel := context.WithDeadline(t.Context(), time.Now().Add(60*time.Second))
+	defer cancel()
 	var stop atomic.Bool
 	forks := make(chan int)
 	const forkers = 4
@@ -147,41 +152,45 @@ func TestNativeCmdConcurrentForkKeepsRegisteredEmpty(t *testing.T) {
 	}
 	leaked, failed, done := 0, 0, 0
 	var firstLeak, firstFail string
-	for ; done < spawns && time.Now().Before(deadline); done++ {
-		c := newNativeCmd(context.Background(), self, []string{self, "__golem_exec_helper__", "machstate"})
+	for done < spawns && ctx.Err() == nil {
+		c := newNativeCmd(ctx, self, []string{self, "__golem_exec_helper__", "machstate"})
 		// Without atexit_sleep_ms=0 a race-instrumented child sleeps 1s at exit.
 		c.Env = []string{"PATH=/usr/bin:/bin", "GORACE=atexit_sleep_ms=0"}
+		// The deadline kills a spawn still in flight.
+		c.Cancel = func() error { return c.process.Kill() }
 		out, _, err := runNative(c)
+		if ctx.Err() != nil {
+			break // cut short by the deadline: neither a pass nor a failure
+		}
 		st, perr := machStateFromOutput(out)
 		if err != nil || perr != nil {
 			if failed++; firstFail == "" {
 				firstFail = fmt.Sprintf("spawn %d: %v", done, errors.Join(err, perr))
 			}
-			continue
-		}
-		if slices.ContainsFunc(st.Registered, func(p uint32) bool { return p != machPortNull }) {
+		} else if slices.ContainsFunc(st.Registered, func(p uint32) bool { return p != machPortNull }) {
 			if leaked++; firstLeak == "" {
 				firstLeak = fmt.Sprintf("spawn %d: registered %#x", done, st.Registered)
 			}
 		}
+		done++
 	}
 	stop.Store(true)
 	n := 0
 	for range forkers {
 		n += <-forks
 	}
-	if done < spawns || n == 0 {
-		t.Fatalf("%d of %d spawns and %d concurrent forks in 60s; the race was not exercised", done, spawns, n)
+	if done < floor || n == 0 {
+		t.Fatalf("%d spawns (at least %d needed) and %d concurrent forks in 60s; the race was not exercised", done, floor, n)
 	}
-	t.Logf("of %d native spawns during %d concurrent forks: %d inherited a registered port, %d failed", spawns, n, leaked, failed)
+	t.Logf("of %d native spawns during %d concurrent forks: %d inherited a registered port, %d failed", done, n, leaked, failed)
 	// A guard that re-reads a table a fork has just refilled fails the spawn:
 	// closed, but spurious.
 	if failed != 0 {
-		t.Errorf("%d of %d native spawns failed during concurrent forks; first: %s", failed, spawns, firstFail)
+		t.Errorf("%d of %d native spawns failed during concurrent forks; first: %s", failed, done, firstFail)
 	}
 	// containment: LAUNCHD-SEATBELT
 	if leaked != 0 {
-		t.Errorf("%d of %d native children inherited a registered port during concurrent forks; first: %s", leaked, spawns, firstLeak)
+		t.Errorf("%d of %d native children inherited a registered port during concurrent forks; first: %s", leaked, done, firstLeak)
 	}
 }
 

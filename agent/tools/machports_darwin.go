@@ -70,7 +70,8 @@ func lookupRegisteredPorts() ([]uint32, error) {
 
 // registeredPortsEmpty reports whether every registered-port slot is
 // MACH_PORT_NULL. It runs before every spawn in a long-lived host, so it
-// releases the array and every send right the lookup copied out.
+// releases the array and every send right the lookup copied out. With any
+// error it reports false: a table it could not read in full is not empty.
 func registeredPortsEmpty() (bool, error) {
 	ports, err := lookupRegisteredPorts()
 	empty := true
@@ -86,7 +87,10 @@ func registeredPortsEmpty() (bool, error) {
 			err = errors.Join(err, machErr(fmt.Sprintf("mach_port_deallocate(%#x)", p), kr))
 		}
 	}
-	return empty, err
+	if err != nil {
+		return false, err
+	}
+	return empty, nil
 }
 
 // registerNoPorts empties this task's registered-port table.

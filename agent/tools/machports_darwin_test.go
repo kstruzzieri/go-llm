@@ -3,11 +3,13 @@
 package tools
 
 import (
+	"context"
 	"errors"
 	"os"
 	"os/exec"
 	"strings"
 	"testing"
+	"time"
 )
 
 // runMachHelper runs a darwin helper mode in its own process, so seeding and
@@ -18,7 +20,9 @@ func runMachHelper(t *testing.T, mode, want string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	out, err := exec.Command(self, "__golem_exec_helper__", mode).CombinedOutput()
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, self, "__golem_exec_helper__", mode).CombinedOutput()
 	t.Logf("%s output:\n%s", mode, out)
 	if err != nil {
 		t.Fatalf("helper %s: %v", mode, err)
@@ -38,31 +42,34 @@ func TestInspectMachStateRequiresSuccess(t *testing.T) {
 
 func TestEnsureRegisteredPortsEmptyFailsClosed(t *testing.T) {
 	errLookup := errors.New("lookup refused")
+	errReread := errors.New("re-read refused")
 	errClear := errors.New("register refused")
+	type answer struct {
+		empty bool
+		err   error
+	}
 	cases := []struct {
 		name      string
-		empty     []bool // successive empty() answers; the last repeats
-		emptyErr  error  // returned by every empty() call when set
-		clearErr  error  // returned by clear()
-		wantErr   error  // errors.Is target; nil means success
+		answers   []answer // successive empty() answers; the last repeats
+		clearErr  error    // returned by clear()
+		wantErr   error    // errors.Is target; nil means success
 		wantClear int
 	}{
-		{name: "clear does nothing", empty: []bool{false}, wantErr: errRegisteredPortsNotEmpty, wantClear: 1},
-		{name: "lookup fails", emptyErr: errLookup, wantErr: errLookup, wantClear: 0},
-		{name: "clear fails", empty: []bool{false}, clearErr: errClear, wantErr: errClear, wantClear: 1},
-		{name: "clear works", empty: []bool{false, true}, wantClear: 1},
-		{name: "already empty", empty: []bool{true}, wantClear: 0},
+		{name: "clear does nothing", answers: []answer{{false, nil}}, wantErr: errRegisteredPortsNotEmpty, wantClear: 1},
+		// An error wins over the value reported with it, on either read.
+		{name: "lookup fails", answers: []answer{{true, errLookup}}, wantErr: errLookup, wantClear: 0},
+		{name: "re-read fails", answers: []answer{{false, nil}, {true, errReread}}, wantErr: errReread, wantClear: 1},
+		{name: "clear fails", answers: []answer{{false, nil}}, clearErr: errClear, wantErr: errClear, wantClear: 1},
+		{name: "clear works", answers: []answer{{false, nil}, {true, nil}}, wantClear: 1},
+		{name: "already empty", answers: []answer{{true, nil}}, wantClear: 0},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			calls, clears := 0, 0
 			empty := func() (bool, error) {
-				if tc.emptyErr != nil {
-					return false, tc.emptyErr
-				}
-				v := tc.empty[min(calls, len(tc.empty)-1)]
+				a := tc.answers[min(calls, len(tc.answers)-1)]
 				calls++
-				return v, nil
+				return a.empty, a.err
 			}
 			clear := func() error {
 				clears++
@@ -78,10 +85,13 @@ func TestEnsureRegisteredPortsEmptyFailsClosed(t *testing.T) {
 				}
 				return
 			}
+			if err == nil {
+				t.Fatalf("err = nil, want errors.Is %v", tc.wantErr)
+			}
 			if !errors.Is(err, tc.wantErr) {
 				t.Errorf("err = %v, want errors.Is %v", err, tc.wantErr)
 			}
-			if err != nil && (err == tc.emptyErr || err == tc.clearErr) {
+			if err == tc.wantErr && err != errRegisteredPortsNotEmpty {
 				t.Errorf("err = %v returned bare, want it wrapped with context", err)
 			}
 		})

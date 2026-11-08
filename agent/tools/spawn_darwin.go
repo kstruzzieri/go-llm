@@ -148,6 +148,10 @@ func (c *nativeCmd) Start() error {
 		}
 	}()
 	// output wires fd to a fresh pipe feeding w, or to /dev/null for nil w.
+	// If the host's fds 0-2 are closed, os.Pipe may return a low fd, which
+	// os/exec would dup high first; the file actions can then cross the
+	// child's stdout and stderr. No containment effect: the child still gets
+	// only these pipes and /dev/null.
 	output := func(fd int32, w io.Writer) error {
 		if w == nil {
 			return spawnErr("posix_spawn_file_actions_addopen", posixSpawnFileActionsAddopen(&fa, fd, devNull, syscall.O_WRONLY, 0))
@@ -200,14 +204,16 @@ func (c *nativeCmd) Start() error {
 	// window. It is taken only now because os.Pipe above takes it for reading.
 	// Residual: a fork that skips ForkLock (cgo or C code in the host process
 	// calling libSystem fork()) is not excluded.
-	var pid int32
-	syscall.ForkLock.Lock()
-	err = registeredPortsGuard()
-	var rc int32
-	if err == nil {
+	var pid, rc int32
+	err = func() error {
+		syscall.ForkLock.Lock()
+		defer syscall.ForkLock.Unlock()
+		if err := registeredPortsGuard(); err != nil {
+			return err
+		}
 		rc = posixSpawn(&pid, path, &fa, &attr, &argvp[0], &envp[0])
-	}
-	syscall.ForkLock.Unlock()
+		return nil
+	}()
 	if err != nil {
 		return err
 	}

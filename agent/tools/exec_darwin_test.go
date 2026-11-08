@@ -385,7 +385,10 @@ func TestSeatbeltBackendUsesNativeSpawn(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sb := backend.(*seatbeltBackend)
+	sb, ok := backend.(*seatbeltBackend)
+	if !ok {
+		t.Fatalf("backend = %T, want *seatbeltBackend", backend)
+	}
 	runner, ok := sb.runner.(unixRunner)
 	if !ok {
 		t.Fatalf("runner = %T, want unixRunner", sb.runner)

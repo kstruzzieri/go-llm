@@ -35,7 +35,10 @@ func osExecSpawn(ctx context.Context, spec execSpec, stdout, stderr io.Writer) p
 	var cmd *exec.Cmd
 	if ctx.Done() == nil {
 		// The starter's path: the manager owns lifetime after publication, so
-		// no context may kill the child behind its back.
+		// no context may kill the child behind its back. A runner given a
+		// never-done ctx (context.Background) lands here too, and that is
+		// equivalent: exec.CommandContext with a ctx that is never done never
+		// calls Cancel, so the group-kill below could not fire anyway.
 		cmd = exec.Command(spec.Path, spec.Argv[1:]...)
 	} else {
 		// CommandContext (NOT exec.Command) is REQUIRED: cmd.Cancel is only
@@ -122,16 +125,18 @@ func (r unixRunner) Run(ctx context.Context, spec execSpec) (execResult, error) 
 
 // rejectInheritableFDs lists this process's descriptor directory (dir:
 // /proc/self/fd on Linux, /dev/fd on macOS) immediately before a native spawn
-// and fails closed on any descriptor above stdio without FD_CLOEXEC. Both
-// native backends pass inherited descriptors through to the payload, and
-// neither re-checks writes or connects through an already-open descriptor
-// against its policy. maySetCloexec, when non-nil, identifies descriptors that
-// may be marked close-on-exec instead of refused; it must refuse on any doubt.
-// An entry gone by inspection (EBADF: closed during the scan, or the listing's
-// own descriptor) is ignored. The audit changes no other descriptor flags
-// and never closes an audited descriptor. The names are read
-// without stat: fdescfs cannot stat some descriptors, a kqueue among them.
-// The scan and os/exec are not one kernel-atomic operation; that residual
+// and fails closed on any descriptor above stdio without FD_CLOEXEC. The
+// bwrap backend passes inherited descriptors through to the payload; a
+// Seatbelt command starts with POSIX_SPAWN_CLOEXEC_DEFAULT, so only stdio
+// reaches it and the audit is a second line there. Neither backend re-checks
+// writes or connects through an already-open descriptor against its policy.
+// maySetCloexec, when non-nil, identifies descriptors that may be marked
+// close-on-exec instead of refused; it must refuse on any doubt. An entry
+// gone by inspection (EBADF: closed during the scan, or the listing's own
+// descriptor) is ignored. The audit changes no other descriptor flags and
+// never closes an audited descriptor. The names are read without stat:
+// fdescfs cannot stat some descriptors, a kqueue among them. Under bwrap the
+// scan and the spawn are not one kernel-atomic operation; that residual
 // interval is the documented D10 limitation.
 func rejectInheritableFDs(backend, dir string, maySetCloexec func(fd int) bool) error {
 	f, err := os.Open(dir)

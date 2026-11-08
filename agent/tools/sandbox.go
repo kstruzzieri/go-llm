@@ -27,6 +27,15 @@ const SandboxRuntimeHost SandboxRuntime = "host"
 // workspace plus a private temp directory and reads to reviewed system roots,
 // the workspace and that temp. Selecting it off-darwin, or on a
 // host whose Seatbelt capability probe fails, fails closed at construction.
+//
+// Commands start with no launchd connection (#712), which has process-wide
+// side effects on the host. Before each spawn the backend empties the host
+// process's registered Mach port table: nothing in go-llm reads it, but a
+// host that registers ports with mach_ports_register loses them. It holds
+// syscall.ForkLock across each spawn, so Go forks wait for it. Forks from C
+// code that do not take syscall.ForkLock are not serialized: such a fork
+// running concurrently with a Seatbelt spawn can hand that command the host's
+// launchd connection.
 const SandboxRuntimeSeatbelt SandboxRuntime = "seatbelt"
 
 // SandboxRuntimeBwrap selects the Linux Bubblewrap backend (#441): a fresh
@@ -301,7 +310,9 @@ func normalizeSandboxConfig(c SandboxConfig) (SandboxConfig, error) {
 // constructor does, resolves its backend (the availability probe), and checks
 // that root, canonicalized as a Workspace does, can bound that backend. Every
 // failure wraps ErrSandboxPolicy, and there is no host fallback. It holds no
-// resources: a resolved backend owns nothing to close.
+// resources: a resolved backend owns nothing to close. Validating a Seatbelt
+// config runs the probe spawn, so it empties the host's registered Mach port
+// table too (see SandboxRuntimeSeatbelt).
 func ValidateSandbox(cfg SandboxConfig, root string) error {
 	backend, err := newExecBackend(cfg)
 	if err != nil {

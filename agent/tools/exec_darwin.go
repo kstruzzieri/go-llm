@@ -261,8 +261,11 @@ var seatbeltDefaultSystemRoots = []string{
 // (#712): the child gets no bootstrap port and no exception ports, and every
 // descriptor but stdio is close-on-exec by default. Before every spawn the
 // backend empties this process's registered-port table and re-checks it,
-// failing the spawn if a port remains. That table is process-wide; nothing in
-// this process reads it.
+// failing the spawn if a port remains. That table is process-wide: nothing in
+// go-llm reads it, but a host that registers ports with mach_ports_register
+// loses them. The guard and spawn run under syscall.ForkLock; a fork from C
+// code that skips that lock, concurrent with a spawn, can hand the command the
+// host's launchd connection.
 type seatbeltBackend struct {
 	execPath     string
 	allowNetwork bool

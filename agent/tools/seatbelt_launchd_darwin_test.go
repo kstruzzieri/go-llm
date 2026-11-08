@@ -148,6 +148,30 @@ func seatbeltPositiveControl(t *testing.T, ws string) {
 	}
 }
 
+// launchctlPositiveControl requires /bin/launchctl itself to run under b
+// through lifetime: "launchctl help" needs no launchd connection, so a
+// refusal that follows is launchd's, not a launchctl the profile kept from
+// executing or loading.
+func launchctlPositiveControl(t *testing.T, b execBackend, lifetime, ws string) {
+	t.Helper()
+	r := seatbeltLifetimeRun(b, lifetime, ws, "/bin/launchctl", "help")
+	if r.Err != "" || r.Exit != 0 || !strings.HasPrefix(r.Output, "Usage: launchctl") {
+		t.Fatalf("positive control: sandboxed launchctl help (%s): exit %d, err %q, first line %q; want its usage",
+			lifetime, r.Exit, r.Err, firstLine(r.Output))
+	}
+}
+
+// requireLaunchdRefusal fails t unless a sandboxed launchctl exited nonzero
+// with its own error naming the refused request (want, such as "Could not
+// print domain"). A launchctl that never ran, from a denied exec or a dyld
+// failure, exits nonzero without that line. It quotes one line at most.
+func requireLaunchdRefusal(t *testing.T, what string, exit int, output, want string) {
+	t.Helper()
+	if exit == 0 || !strings.Contains(output, want) {
+		t.Errorf("%s: exit %d, first line %q; want a nonzero exit and launchctl's %q", what, exit, firstLine(output), want)
+	}
+}
+
 // firstLine is s up to its first newline. A domain or job listing carries
 // the user's launchd environment, credentials included, so failures quote
 // one line of it, never the whole listing.
@@ -176,6 +200,7 @@ func TestSeatbeltLaunchdPrintRefused(t *testing.T) {
 	}
 	for _, lifetime := range []string{"run", "start"} {
 		t.Run(lifetime, func(t *testing.T) {
+			launchctlPositiveControl(t, backend, lifetime, ws)
 			r := seatbeltLifetimeRun(backend, lifetime, ws, "/bin/launchctl", "print", domain)
 			if r.Err != "" {
 				t.Fatalf("infra failure: %s", r.Err)
@@ -186,9 +211,10 @@ func TestSeatbeltLaunchdPrintRefused(t *testing.T) {
 				listed = listed || strings.HasPrefix(line, domain+" = {")
 			}
 			// containment: LAUNCHD-SEATBELT
-			if r.Exit == 0 || listed {
-				t.Errorf("sandboxed launchctl print %s: exit %d, listed %v, first line %q; want a refusal", domain, r.Exit, listed, firstLine(r.Output))
+			if listed {
+				t.Errorf("sandboxed launchctl print %s listed the domain, first line %q; want a refusal", domain, firstLine(r.Output))
 			}
+			requireLaunchdRefusal(t, "sandboxed launchctl print "+domain, r.Exit, r.Output, "Could not print domain")
 		})
 	}
 }
@@ -289,11 +315,11 @@ func TestSeatbeltLaunchdKickstartRefused(t *testing.T) {
 	target := domain + "/" + launchdKickLabel
 	_, _ = hostLaunchctl("bootout", target) // a job left by an interrupted run
 	if out, err := hostLaunchctl("bootstrap", domain, plist); err != nil {
-		t.Fatalf("host launchctl bootstrap %s %s: %v\n%s", domain, plist, err, out)
+		t.Fatalf("host launchctl bootstrap %s %s: %v (%s)", domain, plist, err, firstLine(out))
 	}
 	t.Cleanup(func() {
 		if out, err := hostLaunchctl("bootout", target); err != nil {
-			t.Errorf("host launchctl bootout %s: %v\n%s", target, err, out)
+			t.Errorf("host launchctl bootout %s: %v (%s)", target, err, firstLine(out))
 		}
 	})
 	idle := func(when string) {
@@ -316,16 +342,20 @@ func TestSeatbeltLaunchdKickstartRefused(t *testing.T) {
 	}
 	idle("after bootstrap")
 
-	res := realSeatbeltRun(t, seatbeltTestCfg(), ws, []string{"/bin/launchctl", "kickstart", target})
-	t.Logf("sandboxed launchctl kickstart %s: exit %d, stdout %q, stderr %q", target, res.ExitCode, res.Stdout, res.Stderr)
-	if res.ExitCode == 0 {
-		t.Errorf("sandboxed launchctl kickstart %s exited 0 (stdout %q, stderr %q)", target, res.Stdout, res.Stderr)
+	backend, err := newSeatbeltExecBackend(seatbeltTestCfg())
+	if err != nil {
+		t.Fatal(err)
 	}
+	launchctlPositiveControl(t, backend, "run", ws)
+	res := realSeatbeltRun(t, seatbeltTestCfg(), ws, []string{"/bin/launchctl", "kickstart", target})
+	output := string(res.Stdout) + string(res.Stderr)
+	t.Logf("sandboxed launchctl kickstart %s: exit %d, first line %q", target, res.ExitCode, firstLine(output))
+	requireLaunchdRefusal(t, "sandboxed launchctl kickstart "+target, res.ExitCode, output, "Could not kickstart service")
 	time.Sleep(2 * time.Second)
 	idle("after the sandboxed kickstart")
 
 	if out, err := hostLaunchctl("kickstart", target); err != nil {
-		t.Fatalf("host launchctl kickstart %s: %v\n%s", target, err, out)
+		t.Fatalf("host launchctl kickstart %s: %v (%s)", target, err, firstLine(out))
 	}
 	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(100 * time.Millisecond) {
 		if _, err := os.Stat(marker); err == nil {
@@ -348,10 +378,15 @@ func TestSeatbeltLaunchdEnableDisableRefused(t *testing.T) {
 	domain := launchdDomain(t)
 	ws := canonTempDirT(t)
 	seatbeltPositiveControl(t, ws)
+	backend, err := newSeatbeltExecBackend(seatbeltTestCfg())
+	if err != nil {
+		t.Fatal(err)
+	}
+	launchctlPositiveControl(t, backend, "run", ws)
 	target := domain + "/" + launchdToggleLabel
 	t.Cleanup(func() {
 		if out, err := hostLaunchctl("enable", target); err != nil {
-			t.Errorf("host launchctl enable %s: %v\n%s", target, err, out)
+			t.Errorf("host launchctl enable %s: %v (%s)", target, err, firstLine(out))
 		}
 	})
 	// entry is the label's line in print-disabled: enabled or disabled.
@@ -359,7 +394,7 @@ func TestSeatbeltLaunchdEnableDisableRefused(t *testing.T) {
 		t.Helper()
 		out, err := hostLaunchctl("print-disabled", domain)
 		if err != nil {
-			t.Fatalf("host launchctl print-disabled %s: %v\n%s", domain, err, out)
+			t.Fatalf("host launchctl print-disabled %s: %v (%s)", domain, err, firstLine(out))
 		}
 		for line := range strings.Lines(out) {
 			if v, ok := strings.CutPrefix(strings.TrimSpace(line), `"`+launchdToggleLabel+`" => `); ok {
@@ -370,7 +405,7 @@ func TestSeatbeltLaunchdEnableDisableRefused(t *testing.T) {
 	}
 	for _, step := range []struct{ host, sandboxed string }{{"enable", "disable"}, {"disable", "enable"}} {
 		if out, err := hostLaunchctl(step.host, target); err != nil {
-			t.Fatalf("host launchctl %s %s: %v\n%s", step.host, target, err, out)
+			t.Fatalf("host launchctl %s %s: %v (%s)", step.host, target, err, firstLine(out))
 		}
 		before := entry()
 		if before != step.host+"d" {
@@ -378,10 +413,12 @@ func TestSeatbeltLaunchdEnableDisableRefused(t *testing.T) {
 		}
 		res := realSeatbeltRun(t, seatbeltTestCfg(), ws, []string{"/bin/launchctl", step.sandboxed, target})
 		after := entry()
-		t.Logf("sandboxed launchctl %s %s: exit %d, stderr %q; override entry %q -> %q", step.sandboxed, target, res.ExitCode, res.Stderr, before, after)
-		if res.ExitCode == 0 || after != before {
-			t.Fatalf("sandboxed launchctl %s %s: exit %d, override entry %q -> %q; want a refusal and no change (stderr %q)",
-				step.sandboxed, target, res.ExitCode, before, after, res.Stderr)
+		output := string(res.Stdout) + string(res.Stderr)
+		t.Logf("sandboxed launchctl %s %s: exit %d, first line %q; override entry %q -> %q", step.sandboxed, target, res.ExitCode, firstLine(output), before, after)
+		if after != before {
+			t.Fatalf("sandboxed launchctl %s %s: override entry %q -> %q; want no change (first line %q)",
+				step.sandboxed, target, before, after, firstLine(output))
 		}
+		requireLaunchdRefusal(t, "sandboxed launchctl "+step.sandboxed+" "+target, res.ExitCode, output, "Could not "+step.sandboxed+" service")
 	}
 }

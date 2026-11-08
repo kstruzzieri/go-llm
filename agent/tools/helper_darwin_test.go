@@ -258,12 +258,16 @@ func machStateFromOutput(out string) (machState, error) {
 	return machState{}, fmt.Errorf("no MACHSTATE line in %q", out)
 }
 
-// noLaunchdConnection requires a null bootstrap port, an empty registered
-// table, and null exception handlers for every mask in excMaskAllPorts.
+// noLaunchdConnection requires a null bootstrap port, all
+// TASK_PORT_REGISTER_MAX registered slots reported and null, and null
+// exception handlers for every mask in excMaskAllPorts.
 func noLaunchdConnection(st machState) error {
 	var errs []error
 	if st.Bootstrap != machPortNull {
 		errs = append(errs, fmt.Errorf("bootstrap port %#x, want null", st.Bootstrap))
+	}
+	if len(st.Registered) != taskPortRegisterMax {
+		errs = append(errs, fmt.Errorf("registered table has %d slots, want %d", len(st.Registered), taskPortRegisterMax))
 	}
 	for i, p := range st.Registered {
 		if p != machPortNull {
@@ -283,9 +287,11 @@ func noLaunchdConnection(st machState) error {
 	return errors.Join(errs...)
 }
 
-// excMaskSeeded is EXC_MASK_CORPSE_NOTIFY | EXC_MASK_CRASH | EXC_MASK_BAD_ACCESS:
-// two masks EXC_MASK_ALL leaves out, and one it covers.
-const excMaskSeeded = 0x2402
+// excMaskSeeded is EXC_MASK_CORPSE_NOTIFY | EXC_MASK_CRASH | EXC_MASK_RPC_ALERT
+// (0x2600): two masks EXC_MASK_ALL leaves out, and one it covers that the
+// kernel never raises, so a fault in a driver cannot stall on the unserviced
+// handler.
+const excMaskSeeded = 0x2000 | 0x400 | excMaskRPCAlert
 
 // seedLaunchdState fills every registered slot and installs an exception
 // handler for excMaskSeeded, then requires the inspection to see both, so a
