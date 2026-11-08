@@ -15,6 +15,10 @@ import (
 // old_string must occur exactly once; new_string may be empty (deletion). Plan
 // computes the after-content and diff; Invoke re-verifies the file is unchanged
 // and the match is still unique before writing atomically.
+//
+// Plan's ApprovalKey follows WriteFile's rule: "" for an agent instruction or
+// harness configuration file or an unverified spelling (#725). A host with a
+// plain agent.Approver never receives the key, so the rule does not cover it.
 type EditFile struct {
 	ws *Workspace
 	j  Journal
@@ -120,7 +124,7 @@ func (t *EditFile) Plan(_ context.Context, raw json.RawMessage) (agent.ToolPlan,
 		afterHash:    ContentHash(after),
 		summary:      fmt.Sprintf("edit %s", args.Path),
 	})
-	return agent.ToolPlan{Effect: eff, Preview: unifiedDiff(args.Path, before, after, true), ApprovalKey: WriteClassApprovalKey}, nil
+	return agent.ToolPlan{Effect: eff, Preview: unifiedDiff(args.Path, before, after, true), ApprovalKey: t.ws.fileToolApprovalKey(args.Path)}, nil
 }
 
 func (t *EditFile) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolResult, error) {

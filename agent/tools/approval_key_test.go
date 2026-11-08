@@ -3,11 +3,15 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/kstruzzieri/go-llm/agent"
 )
 
 // planKeyRC builds a RunCommand rooted in a temp workspace and returns the
@@ -202,5 +206,298 @@ func TestWriteAndEditShareTheWriteClassKey(t *testing.T) {
 	if wp.ApprovalKey != WriteClassApprovalKey || ep.ApprovalKey != WriteClassApprovalKey {
 		t.Fatalf("write=%q edit=%q, want both == WriteClassApprovalKey (%q)",
 			wp.ApprovalKey, ep.ApprovalKey, WriteClassApprovalKey)
+	}
+}
+
+// harnessFixture creates rel under root holding "old\n", parents included.
+func harnessFixture(t *testing.T, root, rel string) {
+	t.Helper()
+	p := filepath.Join(root, filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte("old\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func harnessWorkspace(t *testing.T, root string) *Workspace {
+	t.Helper()
+	ws, err := NewWorkspace(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ws
+}
+
+// harnessWritePlan plans write_file of "new\n" to rel.
+func harnessWritePlan(t *testing.T, ws *Workspace, rel string) agent.ToolPlan {
+	t.Helper()
+	raw, err := json.Marshal(map[string]string{"path": rel, "content": "new\n"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := NewWriteFile(ws, nil).Plan(context.Background(), raw)
+	if err != nil {
+		t.Fatalf("write_file Plan(%s): %v", rel, err)
+	}
+	return p
+}
+
+// harnessEditPlan plans edit_file of rel's "old\n" to "new\n".
+func harnessEditPlan(t *testing.T, ws *Workspace, rel string) agent.ToolPlan {
+	t.Helper()
+	raw, err := json.Marshal(map[string]string{"path": rel, "old_string": "old\n", "new_string": "new\n"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := NewEditFile(ws, nil).Plan(context.Background(), raw)
+	if err != nil {
+		t.Fatalf("edit_file Plan(%s): %v", rel, err)
+	}
+	return p
+}
+
+// TestHarnessPlanEmptyKey pins #725 through the real Plan: a harness target
+// plans with the ungrantable empty key, an ordinary one keeps the write-class
+// key, and only the key differs (Effect and Preview match up to the path).
+func TestHarnessPlanEmptyKey(t *testing.T) {
+	root := t.TempDir()
+	harness := []string{"CLAUDE.md", ".claude/settings.json", ".github/hooks/x.json", "Models.json"}
+	for _, rel := range append([]string{"notes.txt"}, harness...) {
+		harnessFixture(t, root, rel)
+	}
+	ws := harnessWorkspace(t, root)
+	ordinary := map[string]agent.ToolPlan{
+		"write_file": harnessWritePlan(t, ws, "notes.txt"),
+		"edit_file":  harnessEditPlan(t, ws, "notes.txt"),
+	}
+	for tool, p := range ordinary {
+		if p.ApprovalKey != WriteClassApprovalKey {
+			t.Fatalf("%s notes.txt key = %q, want %q", tool, p.ApprovalKey, WriteClassApprovalKey)
+		}
+	}
+	for _, rel := range harness {
+		got := map[string]agent.ToolPlan{
+			"write_file": harnessWritePlan(t, ws, rel),
+			"edit_file":  harnessEditPlan(t, ws, rel),
+		}
+		for tool, p := range got {
+			if p.ApprovalKey != "" {
+				t.Errorf("%s %s key = %q, want empty", tool, rel, p.ApprovalKey)
+			}
+			if !reflect.DeepEqual(p.Effect, ordinary[tool].Effect) {
+				t.Errorf("%s %s Effect = %+v, want %+v", tool, rel, p.Effect, ordinary[tool].Effect)
+			}
+			if want := strings.ReplaceAll(ordinary[tool].Preview, "notes.txt", rel); p.Preview != want {
+				t.Errorf("%s %s Preview = %q, want %q", tool, rel, p.Preview, want)
+			}
+		}
+	}
+}
+
+// TestHarnessPlanResolvedSpelling drives the key through the resolver seam:
+// the spelling the filesystem resolves is classified too, and an unverified
+// or failed resolution prompts.
+func TestHarnessPlanResolvedSpelling(t *testing.T) {
+	root := t.TempDir()
+	harnessFixture(t, root, "odd/x.json")
+	harnessFixture(t, root, "CLAUDE.md")
+	ws := harnessWorkspace(t, root)
+	cases := []struct {
+		name     string
+		req, rel string
+		verified bool
+		err      error
+		want     string
+	}{
+		{"resolved harness spelling", "odd/x.json", ".claude/settings.json", true, nil, ""},
+		{"unverified spelling", "odd/x.json", "notes.txt", false, nil, ""},
+		{"verified ordinary spelling", "odd/x.json", "notes.txt", true, nil, WriteClassApprovalKey},
+		{"resolver error", "odd/x.json", "notes.txt", true, errors.New("resolve failed"), ""},
+		// Either spelling decides: an ordinary resolution does not clear a
+		// harness request.
+		{"requested harness spelling", "CLAUDE.md", "notes.txt", true, nil, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var asked []string
+			ws.resolveForKey = func(p string) (string, bool, error) {
+				asked = append(asked, p)
+				return c.rel, c.verified, c.err
+			}
+			w := harnessWritePlan(t, ws, c.req)
+			e := harnessEditPlan(t, ws, c.req)
+			if w.ApprovalKey != c.want || e.ApprovalKey != c.want {
+				t.Fatalf("write=%q edit=%q, want both %q", w.ApprovalKey, e.ApprovalKey, c.want)
+			}
+			if c.want != "" && !reflect.DeepEqual(asked, []string{c.req, c.req}) {
+				t.Fatalf("resolver asked %q, want the requested path once per Plan", asked)
+			}
+		})
+	}
+}
+
+// TestHarnessPlanResolverStoredSpelling: on a case-insensitive filesystem the
+// real resolver reports the stored spelling of an existing harness file.
+func TestHarnessPlanResolverStoredSpelling(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "Probe"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "probe")); err != nil {
+		t.Skip("temp dir is case-sensitive")
+	}
+	if err := os.Remove(filepath.Join(root, "Probe")); err != nil {
+		t.Fatal(err)
+	}
+	harnessFixture(t, root, "CLAUDE.md")
+	ws := harnessWorkspace(t, root)
+	rel, verified, err := ws.resolvedWriteRel("claude.md")
+	if err != nil || !verified || rel != "CLAUDE.md" {
+		t.Fatalf("resolvedWriteRel(claude.md) = (%q, %v, %v), want (CLAUDE.md, true, nil)", rel, verified, err)
+	}
+	if k := harnessWritePlan(t, ws, "claude.md").ApprovalKey; k != "" {
+		t.Fatalf("write_file claude.md key = %q, want empty", k)
+	}
+}
+
+// TestHarnessPlanUnverifiedSpelling: a component whose stored spelling cannot
+// be listed is unverified, for an existing leaf and for an absent leaf below
+// it, and an unverified spelling prompts.
+func TestHarnessPlanUnverifiedSpelling(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("linux descriptor resolver fixture")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory read permission")
+	}
+	root := t.TempDir()
+	harnessFixture(t, root, "d/x.txt")
+	if err := os.Mkdir(filepath.Join(root, "d", "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ws := harnessWorkspace(t, root)
+	if _, verified, err := ws.resolvedWriteRel("d/sub/new.txt"); err != nil || !verified {
+		t.Fatalf("control: listable resolvedWriteRel = (%v, %v), want verified", verified, err)
+	}
+	d := filepath.Join(root, "d")
+	if err := os.Chmod(d, 0o311); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(d, 0o755) })
+	for _, rel := range []string{"d/x.txt", "d/sub/new.txt"} {
+		if _, verified, err := ws.resolvedWriteRel(rel); err != nil || verified {
+			t.Fatalf("resolvedWriteRel(%s) = (verified %v, %v), want unverified", rel, verified, err)
+		}
+	}
+	if k := harnessWritePlan(t, ws, "d/sub/new.txt").ApprovalKey; k != "" {
+		t.Fatalf("write_file d/sub/new.txt key = %q, want empty", k)
+	}
+}
+
+// TestHarnessPlanUnverifiedRoot: a root component below the repository
+// boundary whose spelling cannot be listed is part of the classified prefix,
+// so every write prompts; an unverified boundary itself is not.
+func TestHarnessPlanUnverifiedRoot(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix permission fixture")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory read permission")
+	}
+	tmp := t.TempDir()
+	for _, d := range []string{"repo/.git", "repo/a/b", "outer/repo/.git"} {
+		if err := os.MkdirAll(filepath.Join(tmp, filepath.FromSlash(d)), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, d := range []string{"repo/a", "outer"} {
+		p := filepath.Join(tmp, filepath.FromSlash(d))
+		if err := os.Chmod(p, 0o311); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(p, 0o755) })
+	}
+	ws := harnessWorkspace(t, filepath.Join(tmp, "repo", "a", "b"))
+	if k := harnessWritePlan(t, ws, "notes.txt").ApprovalKey; k != "" {
+		t.Fatalf("unverified root below the boundary: notes.txt key = %q, want empty", k)
+	}
+	ws = harnessWorkspace(t, filepath.Join(tmp, "outer", "repo"))
+	if k := harnessWritePlan(t, ws, "notes.txt").ApprovalKey; k != WriteClassApprovalKey {
+		t.Fatalf("control, unverified boundary: notes.txt key = %q, want %q", k, WriteClassApprovalKey)
+	}
+}
+
+// TestHarnessPlanRepositoryPrefix: the key classifies the path below the
+// enclosing repository, so a root inside a harness folder does not hide it,
+// while a worktree (a .git file or link at its root) starts a new prefix.
+func TestHarnessPlanRepositoryPrefix(t *testing.T) {
+	tmp := t.TempDir()
+	for _, d := range []string{"repo/.git", "repo/.github/hooks", "repo/.vscode", "repo/.claude/worktrees/w/docs", "repo/docs", "plain/.claude", "gitdir"} {
+		if err := os.MkdirAll(filepath.Join(tmp, filepath.FromSlash(d)), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(tmp, "repo", ".claude", "worktrees", "w", ".git"), []byte("gitdir: elsewhere\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS != "windows" {
+		s := filepath.Join(tmp, "repo", ".claude", "worktrees", "s")
+		if err := os.Mkdir(s, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(filepath.Join(tmp, "gitdir"), filepath.Join(s, ".git")); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(filepath.Join(tmp, "repo", ".claude"), filepath.Join(tmp, "link")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rows := []struct {
+		name, root, rel, want string
+		symlink               bool
+	}{
+		{".claude root", "repo/.claude", "settings.json", "", false},
+		{".github root", "repo/.github", "hooks/x.json", "", false},
+		{".vscode root", "repo/.vscode", "settings.json", "", false},
+		{"worktree with .git file", "repo/.claude/worktrees/w", "notes.txt", WriteClassApprovalKey, false},
+		{"folder inside that worktree", "repo/.claude/worktrees/w/docs", "notes.txt", WriteClassApprovalKey, false},
+		{"worktree with .git symlink", "repo/.claude/worktrees/s", "notes.txt", WriteClassApprovalKey, true},
+		{"ordinary folder", "repo/docs", "notes.txt", WriteClassApprovalKey, false},
+		{"non-git .claude root", "plain/.claude", "notes.txt", "", false},
+		{"symlinked root", "link", "settings.json", "", true},
+	}
+	for _, r := range rows {
+		t.Run(r.name, func(t *testing.T) {
+			if r.symlink && runtime.GOOS == "windows" {
+				t.Skip("symlink fixture")
+			}
+			ws := harnessWorkspace(t, filepath.Join(tmp, filepath.FromSlash(r.root)))
+			if k := harnessWritePlan(t, ws, r.rel).ApprovalKey; k != r.want {
+				t.Fatalf("root %s, write_file %s key = %q, want %q", r.root, r.rel, k, r.want)
+			}
+		})
+	}
+}
+
+// TestHarnessPlanSymlinkedInstructionFile: a symlinked instruction file is
+// refused by the resolver as before, and its regular target still prompts.
+func TestHarnessPlanSymlinkedInstructionFile(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink fixture")
+	}
+	root := t.TempDir()
+	harnessFixture(t, root, "AGENTS.md")
+	if err := os.Symlink("AGENTS.md", filepath.Join(root, "CLAUDE.md")); err != nil {
+		t.Fatal(err)
+	}
+	ws := harnessWorkspace(t, root)
+	if _, err := NewWriteFile(ws, nil).Plan(context.Background(),
+		json.RawMessage(`{"path":"CLAUDE.md","content":"new\n"}`)); err == nil {
+		t.Fatal("write_file through the CLAUDE.md symlink planned; want the resolver's refusal")
+	}
+	if k := harnessWritePlan(t, ws, "AGENTS.md").ApprovalKey; k != "" {
+		t.Fatalf("write_file AGENTS.md key = %q, want empty", k)
 	}
 }

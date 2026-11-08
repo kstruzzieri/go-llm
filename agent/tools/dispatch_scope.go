@@ -99,7 +99,8 @@ func newScopedWorkspace(parent *Workspace, scope string) (*Workspace, *scopeCoun
 		return nil, nil, nil, err
 	}
 	counter := new(scopeCounters)
-	ws := &Workspace{root: filepath.Join(snapshot.root, rel), rootIdentity: identity, pinnedRoot: root, scope: counter}
+	ws := &Workspace{root: filepath.Join(snapshot.root, rel), rootIdentity: identity, pinnedRoot: root, scope: counter,
+		harnessPrefix: filepath.Join(snapshot.harnessPrefix, rel), harnessPrefixUnverified: snapshot.harnessPrefixUnverified}
 	// #613: verification starts at the top-level root, above the pinned scope,
 	// so a moved scope or a symlinked ancestor cannot satisfy it.
 	anchorRoot, anchorIdentity, anchorPrefix := snapshot.readAnchor()

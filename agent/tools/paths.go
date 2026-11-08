@@ -141,34 +141,53 @@ type Workspace struct {
 	// noReplaceRename replaces the platform no-replace install in tests only, so
 	// an unsupported-filesystem result is observed at the real call site.
 	noReplaceRename func(srcFd int, tmpName string, dstFd int, dstName string) error
+	// harnessPrefix is the root's path below its enclosing repository (#725):
+	// "" at a repository or worktree root, the canonical root itself when no
+	// .git exists above it. It feeds only harness classification.
+	harnessPrefix string
+	// harnessPrefixUnverified is set when a root component inside that prefix
+	// could not have its stored spelling verified, so every write prompts.
+	harnessPrefixUnverified bool
+	// resolveForKey replaces resolvedWriteRel in fileToolApprovalKey, in tests only.
+	resolveForKey func(string) (string, bool, error)
 }
 
 // CanonicalWorkspaceRoot resolves a workspace root to its absolute, symlink-free
 // path, canonicalizing filesystem spelling where directory enumeration is
 // permitted without folding distinct names on case-sensitive filesystems.
 func CanonicalWorkspaceRoot(root string) (string, error) {
+	canon, _, err := canonicalWorkspaceRoot(root)
+	return canon, err
+}
+
+// canonicalWorkspaceRoot is CanonicalWorkspaceRoot that also returns the
+// deepest root component whose stored spelling it could not verify.
+func canonicalWorkspaceRoot(root string) (canon, unverified string, err error) {
 	if root == "" {
-		return "", errEmptyRoot
+		return "", "", errEmptyRoot
 	}
 	abs, err := filepath.Abs(root)
 	if err != nil {
-		return "", fmt.Errorf("tools: abs root: %w", err)
+		return "", "", fmt.Errorf("tools: abs root: %w", err)
 	}
 	abs, err = filepath.EvalSymlinks(abs)
 	if err != nil {
-		return "", fmt.Errorf("tools: resolve root: %w", err)
+		return "", "", fmt.Errorf("tools: resolve root: %w", err)
 	}
-	canon, err := canonicalExistingPath(abs)
+	canon, unverified, err = canonicalExistingPath(abs)
 	if err != nil {
-		return "", fmt.Errorf("tools: canonicalize root: %w", err)
+		return "", "", fmt.Errorf("tools: canonicalize root: %w", err)
 	}
-	return canon, nil
+	return canon, unverified, nil
 }
 
 // NewWorkspace canonicalizes root so the root itself may legitimately be a
 // symlinked or filesystem-aliased path while no later access follows a symlink.
+// It also records the canonical root's path below its enclosing repository,
+// which write_file and edit_file put in front of a target before classifying
+// it as a harness file (#725), so a root inside .claude does not hide it.
 func NewWorkspace(root string) (*Workspace, error) {
-	canon, err := CanonicalWorkspaceRoot(root)
+	canon, unverified, err := canonicalWorkspaceRoot(root)
 	if err != nil {
 		return nil, err
 	}
@@ -176,40 +195,54 @@ func NewWorkspace(root string) (*Workspace, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Workspace{root: canon, rootIdentity: identity}, nil
+	prefix, boundary := repositoryPrefix(canon)
+	// An unverified root component strictly below the boundary is part of the
+	// classified prefix and its spelling cannot be checked, so every write
+	// prompts (#725): repo/CLAUDE reached unlistably may really be .claude.
+	below := false
+	if unverified != "" {
+		rel, err := filepath.Rel(boundary, unverified)
+		below = err != nil || rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator))
+	}
+	return &Workspace{root: canon, rootIdentity: identity, harnessPrefix: prefix, harnessPrefixUnverified: below}, nil
 }
 
-func canonicalExistingPath(path string) (string, error) {
+func canonicalExistingPath(path string) (string, string, error) {
 	volume := filepath.VolumeName(path)
 	return canonicalExistingPathFrom(volume+string(os.PathSeparator), path)
 }
 
-func canonicalExistingPathFrom(root, path string) (string, error) {
+// canonicalExistingPathFrom returns path's stored spelling below root, plus
+// the deepest component whose spelling it could not verify because its parent
+// could not be listed ("" when every component was verified).
+func canonicalExistingPathFrom(root, path string) (canonical, unverified string, err error) {
 	current := filepath.Clean(root)
 	rest, err := filepath.Rel(current, path)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	if rest == "." {
-		return current, nil
+		return current, "", nil
 	}
 	if rest == ".." || strings.HasPrefix(rest, ".."+string(os.PathSeparator)) {
-		return "", fmt.Errorf("path %q is outside canonical root %q", path, root)
+		return "", "", fmt.Errorf("path %q is outside canonical root %q", path, root)
 	}
 	for _, part := range strings.Split(rest, string(os.PathSeparator)) {
 		candidate := filepath.Join(current, part)
 		target, err := os.Stat(candidate)
 		if err != nil {
-			return "", err
+			return "", "", err
 		}
 		entries, err := os.ReadDir(current)
 		if err != nil {
 			if errors.Is(err, fs.ErrPermission) {
-				// Search permission is sufficient to reach a valid descendant.
+				// Search permission is sufficient to reach a valid descendant;
+				// part keeps its requested spelling, unverified.
 				current = candidate
+				unverified = candidate
 				continue
 			}
-			return "", err
+			return "", "", err
 		}
 		actual := ""
 		for _, entry := range entries {
@@ -222,7 +255,7 @@ func canonicalExistingPathFrom(root, path string) (string, error) {
 			for _, entry := range entries {
 				if strings.EqualFold(entry.Name(), part) {
 					if actual != "" {
-						return "", fmt.Errorf("filesystem entry for %q is ambiguous", candidate)
+						return "", "", fmt.Errorf("filesystem entry for %q is ambiguous", candidate)
 					}
 					actual = entry.Name()
 				}
@@ -232,43 +265,50 @@ func canonicalExistingPathFrom(root, path string) (string, error) {
 			for _, entry := range entries {
 				info, err := entry.Info()
 				if err != nil {
-					return "", err
+					return "", "", err
 				}
 				if os.SameFile(info, target) {
 					if actual != "" {
-						return "", fmt.Errorf("filesystem entry for %q is ambiguous", candidate)
+						return "", "", fmt.Errorf("filesystem entry for %q is ambiguous", candidate)
 					}
 					actual = entry.Name()
 				}
 			}
 		}
 		if actual == "" {
-			return "", fmt.Errorf("filesystem entry for %q disappeared", candidate)
+			return "", "", fmt.Errorf("filesystem entry for %q disappeared", candidate)
 		}
 		current = filepath.Join(current, actual)
 	}
-	return filepath.Clean(current), nil
+	return filepath.Clean(current), unverified, nil
 }
 
 func canonicalFuturePath(root, path string) (string, error) {
+	canonical, _, err := canonicalFuturePathVerified(root, path)
+	return canonical, err
+}
+
+// canonicalFuturePathVerified is canonicalFuturePath that also reports whether
+// every existing component's stored spelling was verified.
+func canonicalFuturePathVerified(root, path string) (string, bool, error) {
 	current := path
 	var suffix []string
 	for {
 		if _, err := os.Lstat(current); err == nil {
-			canonical, err := canonicalExistingPathFrom(root, current)
+			canonical, unverified, err := canonicalExistingPathFrom(root, current)
 			if err != nil {
-				return "", err
+				return "", false, err
 			}
 			for i := len(suffix) - 1; i >= 0; i-- {
 				canonical = filepath.Join(canonical, suffix[i])
 			}
-			return filepath.Clean(canonical), nil
+			return filepath.Clean(canonical), unverified == "", nil
 		} else if !os.IsNotExist(err) {
-			return "", err
+			return "", false, err
 		}
 		parent := filepath.Dir(current)
 		if parent == current {
-			return "", fmt.Errorf("no existing ancestor for %q", path)
+			return "", false, fmt.Errorf("no existing ancestor for %q", path)
 		}
 		suffix = append(suffix, filepath.Base(current))
 		current = parent
