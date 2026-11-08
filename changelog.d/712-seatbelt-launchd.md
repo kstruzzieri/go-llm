@@ -13,4 +13,4 @@ A command run under the macOS Seatbelt sandbox inherited a connection to launchd
 
 #### For embedders
 
-The Seatbelt backend empties the host process's legacy registered Mach port table before each spawn; nothing in go-llm reads it. It does this under Go's `syscall.ForkLock`, so forks from C code in the host that do not take that lock are not serialized against Seatbelt spawns.
+The Seatbelt backend empties the host process's legacy registered Mach port table before each spawn; nothing in go-llm reads it. It does this under Go's `syscall.ForkLock`, so forks from C code in the host that do not take that lock are not serialized against Seatbelt spawns: such a fork running at the same time as a Seatbelt spawn can hand that command the host's launchd connection.
