@@ -23,6 +23,10 @@ import (
 // helper can hold an unserviced handler for it without stalling any thread.
 const excMaskRPCAlert = 1 << 9
 
+// platformSpawnerCases adds the Seatbelt backend's spawner, so the unix runner
+// and starter suites also run through nativeCmd.
+func platformSpawnerCases() []spawnerCase { return []spawnerCase{{"native", nativeSpawn}} }
+
 // platformHelperMain runs the darwin-only helper modes. handled is false for
 // any other mode, leaving helperMain's fallthrough unchanged.
 //

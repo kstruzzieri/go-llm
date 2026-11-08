@@ -57,6 +57,26 @@ type nativeCmd struct {
 	exited  chan struct{}
 }
 
+// nativeSpawn is the Seatbelt backend's spawnFunc: osExecSpawn's
+// configuration on a nativeCmd. As with exec.Command, argv[0] is spec.Path.
+// ponytail: no PATH lookup as exec.Command does for a bare name; the backend
+// always spawns its absolute sandbox-exec path.
+func nativeSpawn(ctx context.Context, spec execSpec, stdout, stderr io.Writer) procCmd {
+	c := newNativeCmd(ctx, spec.Path, append([]string{spec.Path}, spec.Argv[1:]...))
+	c.Dir = spec.Dir
+	c.Env = spec.Env
+	c.Stdout, c.Stderr = stdout, stderr
+	// Kill the whole process group, as osExecSpawn's Cancel does.
+	c.Cancel = func() error {
+		if pid := c.Pid(); pid > 0 {
+			_ = syscall.Kill(-pid, syscall.SIGKILL)
+		}
+		return nil
+	}
+	c.WaitDelay = execWaitDelay
+	return c
+}
+
 // newNativeCmd returns a nativeCmd for path with argv args. A nil ctx, or one
 // that is never done (context.Background), means no context.
 func newNativeCmd(ctx context.Context, path string, args []string) *nativeCmd {

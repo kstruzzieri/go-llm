@@ -221,6 +221,18 @@ func helperMain(args []string) int {
 	return 0
 }
 
+// spawnerCase names one spawner the unix runner and starter suites drive.
+type spawnerCase struct {
+	name  string
+	spawn spawnFunc
+}
+
+// spawnerCases is os/exec (the zero value) plus this platform's other
+// spawners: darwin adds nativeSpawn (helper_darwin_test.go).
+func spawnerCases() []spawnerCase {
+	return append([]spawnerCase{{"osexec", nil}}, platformSpawnerCases()...)
+}
+
 func helperSpec(t *testing.T, args ...string) execSpec {
 	t.Helper()
 	self, err := os.Executable()
@@ -232,70 +244,90 @@ func helperSpec(t *testing.T, args ...string) execSpec {
 }
 
 func TestUnixRunnerEchoAndExit(t *testing.T) {
-	r := unixRunner{}
-	res, err := r.Run(context.Background(), helperSpec(t, "echo", "hello", "world"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if res.ExitCode != 0 || !strings.Contains(string(res.Stdout), "hello world") {
-		t.Errorf("exit=%d stdout=%q", res.ExitCode, res.Stdout)
+	for _, sc := range spawnerCases() {
+		t.Run(sc.name, func(t *testing.T) {
+			r := unixRunner{spawn: sc.spawn}
+			res, err := r.Run(context.Background(), helperSpec(t, "echo", "hello", "world"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res.ExitCode != 0 || !strings.Contains(string(res.Stdout), "hello world") {
+				t.Errorf("exit=%d stdout=%q", res.ExitCode, res.Stdout)
+			}
+		})
 	}
 }
 
 func TestUnixRunnerNonZeroExit(t *testing.T) {
-	r := unixRunner{}
-	res, err := r.Run(context.Background(), helperSpec(t, "fail"))
-	if err != nil {
-		t.Fatalf("non-zero exit must not be a runner error: %v", err)
-	}
-	if res.ExitCode != 3 {
-		t.Errorf("exit = %d, want 3", res.ExitCode)
+	for _, sc := range spawnerCases() {
+		t.Run(sc.name, func(t *testing.T) {
+			r := unixRunner{spawn: sc.spawn}
+			res, err := r.Run(context.Background(), helperSpec(t, "fail"))
+			if err != nil {
+				t.Fatalf("non-zero exit must not be a runner error: %v", err)
+			}
+			if res.ExitCode != 3 {
+				t.Errorf("exit = %d, want 3", res.ExitCode)
+			}
+		})
 	}
 }
 
 func TestUnixRunnerTimeoutKills(t *testing.T) {
-	r := unixRunner{}
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-	defer cancel()
-	start := time.Now()
-	res, err := r.Run(ctx, helperSpec(t, "sleep", "30"))
-	if err == nil {
-		t.Fatal("want timeout error")
-	}
-	if !res.TimedOut {
-		t.Error("want TimedOut=true")
-	}
-	if time.Since(start) > 10*time.Second {
-		t.Error("kill did not take effect promptly")
+	for _, sc := range spawnerCases() {
+		t.Run(sc.name, func(t *testing.T) {
+			r := unixRunner{spawn: sc.spawn}
+			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+			defer cancel()
+			start := time.Now()
+			res, err := r.Run(ctx, helperSpec(t, "sleep", "30"))
+			if err == nil {
+				t.Fatal("want timeout error")
+			}
+			if !res.TimedOut {
+				t.Error("want TimedOut=true")
+			}
+			if time.Since(start) > 10*time.Second {
+				t.Error("kill did not take effect promptly")
+			}
+		})
 	}
 }
 
 func TestUnixRunnerEnvIsolation(t *testing.T) {
-	r := unixRunner{}
-	spec := helperSpec(t, "dumpenv")
-	spec.Env = []string{"PATH=/usr/bin:/bin", "HOME=/home/x"}
-	res, err := r.Run(context.Background(), spec)
-	if err != nil {
-		t.Fatal(err)
-	}
-	dump := string(res.Stdout)
-	if !strings.Contains(dump, "HOME=/home/x") || !strings.Contains(dump, "PATH=") {
-		t.Errorf("allowlisted vars missing:\n%s", dump)
-	}
-	if strings.Contains(dump, "__golem_exec_helper__") {
-		t.Error("sentinel leaked into env (should be argv only)")
+	for _, sc := range spawnerCases() {
+		t.Run(sc.name, func(t *testing.T) {
+			r := unixRunner{spawn: sc.spawn}
+			spec := helperSpec(t, "dumpenv")
+			spec.Env = []string{"PATH=/usr/bin:/bin", "HOME=/home/x"}
+			res, err := r.Run(context.Background(), spec)
+			if err != nil {
+				t.Fatal(err)
+			}
+			dump := string(res.Stdout)
+			if !strings.Contains(dump, "HOME=/home/x") || !strings.Contains(dump, "PATH=") {
+				t.Errorf("allowlisted vars missing:\n%s", dump)
+			}
+			if strings.Contains(dump, "__golem_exec_helper__") {
+				t.Error("sentinel leaked into env (should be argv only)")
+			}
+		})
 	}
 }
 
 func TestUnixRunnerOutputCap(t *testing.T) {
-	r := unixRunner{}
-	big := strings.Repeat("x", execStdoutCap+5000)
-	res, err := r.Run(context.Background(), helperSpec(t, "echo", big))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(res.Stdout) > execStdoutCap || !res.StdoutTruncated {
-		t.Errorf("len=%d truncated=%v want <=%d and truncated", len(res.Stdout), res.StdoutTruncated, execStdoutCap)
+	for _, sc := range spawnerCases() {
+		t.Run(sc.name, func(t *testing.T) {
+			r := unixRunner{spawn: sc.spawn}
+			big := strings.Repeat("x", execStdoutCap+5000)
+			res, err := r.Run(context.Background(), helperSpec(t, "echo", big))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(res.Stdout) > execStdoutCap || !res.StdoutTruncated {
+				t.Errorf("len=%d truncated=%v want <=%d and truncated", len(res.Stdout), res.StdoutTruncated, execStdoutCap)
+			}
+		})
 	}
 }
 
@@ -303,51 +335,55 @@ func TestUnixRunnerOutputCap(t *testing.T) {
 // in unixRunner actually reaps grandchildren that share the leader's process group,
 // not just the leader itself.
 func TestUnixRunnerGroupKillReapsChild(t *testing.T) {
-	pidfile := t.TempDir() + "/grandchild.pid"
+	for _, sc := range spawnerCases() {
+		t.Run(sc.name, func(t *testing.T) {
+			pidfile := t.TempDir() + "/grandchild.pid"
 
-	r := unixRunner{}
-	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-	defer cancel()
+			r := unixRunner{spawn: sc.spawn}
+			ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+			defer cancel()
 
-	// Run the "groupkill" helper in the background so we can poll the pidfile
-	// while it runs.
-	type result struct {
-		res execResult
-		err error
-	}
-	done := make(chan result, 1)
-	go func() {
-		res, err := r.Run(ctx, helperSpec(t, "groupkill", pidfile))
-		done <- result{res, err}
-	}()
-
-	// Poll for the pidfile (written by the helper after the grandchild starts).
-	var grandchildPID int
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		data, err := os.ReadFile(pidfile)
-		if err == nil && len(data) > 0 {
-			pid, parseErr := strconv.Atoi(strings.TrimSpace(string(data)))
-			if parseErr == nil && pid > 0 {
-				grandchildPID = pid
-				break
+			// Run the "groupkill" helper in the background so we can poll the pidfile
+			// while it runs.
+			type result struct {
+				res execResult
+				err error
 			}
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if grandchildPID == 0 {
-		t.Fatal("timed out waiting for grandchild pidfile to appear")
-	}
+			done := make(chan result, 1)
+			go func() {
+				res, err := r.Run(ctx, helperSpec(t, "groupkill", pidfile))
+				done <- result{res, err}
+			}()
 
-	// Wait for the runner to finish (context timeout fires, group-kill issued).
-	r2 := <-done
-	if !r2.res.TimedOut {
-		t.Errorf("want TimedOut=true, got TimedOut=%v err=%v", r2.res.TimedOut, r2.err)
-	}
+			// Poll for the pidfile (written by the helper after the grandchild starts).
+			var grandchildPID int
+			deadline := time.Now().Add(5 * time.Second)
+			for time.Now().Before(deadline) {
+				data, err := os.ReadFile(pidfile)
+				if err == nil && len(data) > 0 {
+					pid, parseErr := strconv.Atoi(strings.TrimSpace(string(data)))
+					if parseErr == nil && pid > 0 {
+						grandchildPID = pid
+						break
+					}
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			if grandchildPID == 0 {
+				t.Fatal("timed out waiting for grandchild pidfile to appear")
+			}
 
-	// Poll up to 5s confirming the grandchild is gone (SIGKILL to group must have
-	// reached it). A zombie counts as gone; see processGone.
-	if !waitProcessGone(grandchildPID) {
-		t.Errorf("grandchild pid %d still alive after group-kill", grandchildPID)
+			// Wait for the runner to finish (context timeout fires, group-kill issued).
+			r2 := <-done
+			if !r2.res.TimedOut {
+				t.Errorf("want TimedOut=true, got TimedOut=%v err=%v", r2.res.TimedOut, r2.err)
+			}
+
+			// Poll up to 5s confirming the grandchild is gone (SIGKILL to group must have
+			// reached it). A zombie counts as gone; see processGone.
+			if !waitProcessGone(grandchildPID) {
+				t.Errorf("grandchild pid %d still alive after group-kill", grandchildPID)
+			}
+		})
 	}
 }
