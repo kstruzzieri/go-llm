@@ -184,24 +184,27 @@
 // denies and grants nothing, /auto-edits does not cover these files, and an
 // earlier grant never silences the prompt. Unattended runs deny them: -p with
 // -allow-tool write_file or edit_file prints "golem: denied <tool>: harness
-// file, -allow-tool does not cover it" on stderr, and Agentflow
+// file, -allow-tool does not cover it (<reason>)" on stderr, and Agentflow
 // -approve-plan-edits denies. The one exception is submit_plan under
 // -approve-plan-lock, which writes .agent/ itself. A path is classified by the
 // spelling the model gave, by the spelling the filesystem resolves, and by the
 // workspace root counted from the folder holding the nearest .git entry (file
 // or folder), that folder's own name included: a git-tracked ~/.claude used as
 // the root prompts for every write, while a worktree under
-// .claude/worktrees/<name> behaves like an ordinary checkout. When Golem
-// cannot list a folder between the repository and the target, so cannot verify
-// that folder's spelling, every file-tool write in that workspace prompts, and
-// the line still says "harness file" though the file may be ordinary. Windows
+// .claude/worktrees/<name> behaves like an ordinary checkout. With no .git
+// above the root, the whole absolute root path is classified. When Golem
+// cannot list a folder on the workspace root's own path, from the repository
+// folder's parent down, it cannot verify that spelling and every file-tool
+// write prompts; an unlistable folder inside the workspace makes writes beneath
+// it prompt. The line still says "harness file" though the file may be
+// ordinary. Windows
 // 8.3 short names (CLAUDE~1) and trailing-dot or alternate-stream spellings
 // match on every platform. Not covered: writes made by commands (run_command,
 // start_command, the post-write verifier, scratch commands, Agentflow
 // parallel promotion); files that a harness file imports or runs, and symlinks
-// inside harness folders that point at ordinary folders (issue #784); a git
-// submodule or nested repository rooted inside a harness folder, whose files
-// are classified from that repository's own folder; and hosts embedding the
+// inside harness folders that point at ordinary folders (issue #784); a
+// workspace rooted in a git submodule or nested repository inside a harness
+// folder, whose files are classified from that repository's own folder; and hosts embedding the
 // library with a plain agent.Approver, which never receives the key.
 //
 // Independently of -interceptors, every tool result reaches the model inside

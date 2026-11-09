@@ -44,7 +44,8 @@ func grantScope(toolName string) string {
 // (#725): either the target is an agent instruction or harness configuration
 // file, or Golem could not verify the target's spelling. Exec, background and
 // verify keys are never empty, and stop_command and promote_artifact plan ""
-// outside the files scope, so they never match. The key is tested for emptiness only, never parsed.
+// outside the files scope, so they never match. The key is tested for
+// emptiness only, never parsed.
 func harnessFileCall(toolName, key string) bool {
 	return grantScope(toolName) == grantScopeFiles && key == ""
 }

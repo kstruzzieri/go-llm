@@ -1136,13 +1136,13 @@ What happens on a match:
 
 How a path is classified: by the spelling the model gave, by the spelling the filesystem resolves, and by the workspace root's own path counted from the folder that holds the nearest `.git` entry (a file or a folder), including that repository folder's own name. A git-tracked `~/.claude` used as the workspace root therefore prompts for every file-tool write, while a worktree under `.claude/worktrees/<name>` behaves like an ordinary checkout. A root with no `.git` anywhere above it is classified by its whole absolute path. Windows 8.3 short names (`CLAUDE~1`) and trailing-dot or alternate-stream spellings match on every platform.
 
-When Golem cannot list a folder at or below the repository folder it cannot verify that folder's spelling, so every file-tool write in that workspace prompts; the same applies to a spelling it cannot verify for the target itself. The line still says `harness file` in that case, although the file may be ordinary.
+With no `.git` anywhere above the root, the whole absolute root path is classified. When Golem cannot list a folder on the workspace root's own path, from the repository folder's parent down, it cannot verify that spelling and every file-tool write prompts; an unlistable folder inside the workspace makes writes beneath it prompt, and the same holds for a spelling it cannot verify for the target itself. The line still says `harness file` in that case, although the file may be ordinary.
 
 Not covered:
 
 - Writes made by commands: `run_command`, `start_command`, the post-write verifier, scratch commands and Agentflow parallel promotion.
 - Files that a harness file imports or runs, and symlinks inside harness folders that point at ordinary folders (tracked as issue #784).
-- A git submodule or nested repository rooted inside a harness folder: its files are classified from that repository's own folder.
+- A workspace rooted in a git submodule or nested repository inside a harness folder: its files are classified from that repository's own folder.
 - Hosts embedding the library with a plain `agent.Approver`, which never receives the key.
 
 ## Project-context trust
@@ -1254,7 +1254,7 @@ the last line of the stream.
 auto-approves one exact built-in gated tool. It is repeatable, requires `-p`,
 and creates no session grants — authorization lasts for the process only.
 
-It does not cover writes to agent instruction and harness configuration files: a `write_file` or `edit_file` call for one is denied even when the tool is named, with `golem: denied <tool>: harness file, -allow-tool does not cover it` on stderr. See [Harness files always prompt](#harness-files-always-prompt).
+It does not cover writes to agent instruction and harness configuration files: a `write_file` or `edit_file` call for one is denied even when the tool is named, with `golem: denied <tool>: harness file, -allow-tool does not cover it (<reason>)` on stderr. See [Harness files always prompt](#harness-files-always-prompt).
 
 ```bash
 golem -p "run the tests and summarize the failures" -allow-tool run_command

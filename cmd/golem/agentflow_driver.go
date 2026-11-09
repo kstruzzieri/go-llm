@@ -1239,9 +1239,10 @@ func readEvidenceSidecar(path string) ([]agentflow.EvidenceEntry, error) {
 // taskApprover auto-approves tool calls when edits are opted in. Scope is enforced
 // structurally by the step-scope guard, not the human; gates never flow through
 // here (they run via RunGate, gated by -approve-plan-gates in the preflight).
-// A write_file or edit_file to an agent instruction or harness configuration
-// file plans with the empty key, which means "always ask a human"; task mode
-// has none, so it is denied even with edits opted in (#725).
+// A write_file or edit_file plans with the empty key, which means "always ask
+// a human", when its target is an agent instruction or harness configuration
+// file or its spelling could not be verified; task mode has no human, so it is
+// denied even with edits opted in (#725).
 type taskApprover bool
 
 var _ agent.KeyedApprover = taskApprover(false)

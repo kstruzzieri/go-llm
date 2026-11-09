@@ -67,7 +67,8 @@ func (a *replApprover) ApproveKeyed(ctx context.Context, call provider.ToolCall,
 // this session): approve now and store the grant. MCP tools and submit_plan
 // are never on the allowlist. The key is opaque: never parsed, never derived
 // from the preview. A write_file or edit_file call with the empty key is a
-// harness file (#725): it prompts [y/N] with a notice line after the diff.
+// demand for a human (#725): a harness target or a spelling the tool could
+// not verify. It prompts [y/N] with a notice line after the diff.
 func (a *replApprover) ApproveWithRisk(ctx context.Context, call provider.ToolCall, preview, key string, risk agent.RiskReport) (agent.ApprovalDecision, error) {
 	if a.beforeWrite != nil {
 		if err := a.beforeWrite(); err != nil {

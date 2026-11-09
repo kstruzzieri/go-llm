@@ -185,9 +185,9 @@ func filterAllowedTools(built []agent.Tool, allow allowToolSet) []agent.Tool {
 // model-influenced text — and the ApprovalKey is never parsed or compared,
 // keeping the #341 rule that a colliding key can never transfer authorization
 // across tools. The key is tested for emptiness and nothing else: a
-// write_file or edit_file call with the empty key targets an agent
-// instruction or harness configuration file, the library's "always prompt"
-// signal, and a headless run has no one to prompt, so it is denied even when
+// write_file or edit_file call with the empty key means the tool demanded a
+// human (an agent instruction or harness configuration target, or a spelling
+// it could not verify), the library's "always prompt" signal, and a headless run has no one to prompt, so it is denied even when
 // the tool is named (#725), the same test the interactive approver makes.
 //
 // It never records a grant: an approval authorizes exactly the call in front of

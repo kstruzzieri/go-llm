@@ -35,18 +35,36 @@ func TestDocMentions(t *testing.T) {
 	}
 }
 
+// harnessSpans holds, per doc, the markers around its harness-list span. The
+// check is scoped to the span because the docs name .claude, .agent,
+// .golem.json, models.json and agents.md elsewhere, which would hide a
+// dropped entry.
+var harnessSpans = []struct{ file, start, end string }{
+	{"doc.go", "the set is", "the answer a"},
+	{"../../docs/golem.md", "the target sits under:", "what happens on a match:"},
+}
+
 // TestHarnessPathsDocumented fails when a harness entry is missing from the
-// Golem package doc or the user guide.
+// harness-list span of the Golem package doc or the user guide.
 func TestHarnessPathsDocumented(t *testing.T) {
-	for _, file := range []string{"doc.go", "../../docs/golem.md"} {
-		b, err := os.ReadFile(file)
+	for _, sp := range harnessSpans {
+		b, err := os.ReadFile(sp.file)
 		if err != nil {
 			t.Fatal(err)
 		}
 		text := strings.ToLower(string(b))
+		i := strings.Index(text, sp.start)
+		if i < 0 {
+			t.Fatalf("%s: start marker %q not found", sp.file, sp.start)
+		}
+		j := strings.Index(text[i:], sp.end)
+		if j < 0 {
+			t.Fatalf("%s: end marker %q not found after %q", sp.file, sp.end, sp.start)
+		}
+		span := text[i : i+j]
 		for _, e := range interceptor.HarnessPaths() {
-			if !docMentions(text, e) {
-				t.Errorf("%s does not mention harness path %q", file, e)
+			if !docMentions(span, e) {
+				t.Errorf("%s: harness list does not mention %q", sp.file, e)
 			}
 		}
 	}
