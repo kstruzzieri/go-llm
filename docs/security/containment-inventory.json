@@ -398,7 +398,22 @@
         "linux-host",
         "darwin-host"
       ],
-      "mutations": [],
+      "mutations": [
+        "M-088",
+        "M-089",
+        "M-090",
+        "M-091",
+        "M-092",
+        "M-093",
+        "M-094",
+        "M-095",
+        "M-096",
+        "M-097",
+        "M-098",
+        "M-099",
+        "M-100",
+        "M-101"
+      ],
       "artifacts": []
     },
     {
@@ -1528,7 +1543,14 @@
         "linux-host",
         "darwin-host"
       ],
-      "mutations": [],
+      "mutations": [
+        "M-087",
+        "M-088",
+        "M-096",
+        "M-097",
+        "M-102",
+        "M-103"
+      ],
       "artifacts": []
     },
     {
@@ -1572,7 +1594,11 @@
         "linux-host",
         "darwin-host"
       ],
-      "mutations": [],
+      "mutations": [
+        "M-104",
+        "M-105",
+        "M-106"
+      ],
       "artifacts": []
     },
     {
