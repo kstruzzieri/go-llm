@@ -194,11 +194,11 @@
 // every write, while a worktree under .claude/worktrees/<name> behaves like
 // an ordinary checkout. With no .git above the root, the whole absolute root
 // path is classified. When Golem cannot list the repository folder or a
-// folder below it on the workspace root's own path (any folder on that path
-// when there is no .git), it cannot verify the root's spelling and every
-// file-tool write prompts; an unlistable folder that holds the repository
-// changes nothing, and an unlistable folder inside the workspace makes writes
-// beneath it prompt. The line still says "harness file" though the file may
+// folder between it and the workspace root (any folder holding a component of
+// the root's path when there is no .git), it cannot verify the root's
+// spelling and every file-tool write prompts; an unlistable folder that holds
+// the repository changes nothing, and an unlistable folder inside the
+// workspace makes writes beneath it prompt. The line still says "harness file" though the file may
 // be ordinary. Windows 8.3 short names (CLAUDE~1) and trailing-dot or
 // alternate-stream spellings match on every platform. Not covered: writes
 // made by commands (run_command, start_command, the post-write verifier,

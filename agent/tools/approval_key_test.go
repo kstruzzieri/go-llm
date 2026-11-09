@@ -414,12 +414,12 @@ func TestHarnessPlanUnverifiedRoot(t *testing.T) {
 		t.Skip("root bypasses directory read permission")
 	}
 	tmp := t.TempDir()
-	for _, d := range []string{"repo/.git", "repo/a/b", "edge/repo/.git", "outer/mid/repo/.git"} {
+	for _, d := range []string{"repo/.git", "repo/a/b", "one/repo/.git", "one/repo/a", "edge/repo/.git", "outer/mid/repo/.git"} {
 		if err := os.MkdirAll(filepath.Join(tmp, filepath.FromSlash(d)), 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
-	for _, d := range []string{"repo/a", "edge", "outer"} {
+	for _, d := range []string{"repo/a", "one/repo", "edge", "outer"} {
 		p := filepath.Join(tmp, filepath.FromSlash(d))
 		if err := os.Chmod(p, 0o311); err != nil {
 			t.Fatal(err)
@@ -430,6 +430,12 @@ func TestHarnessPlanUnverifiedRoot(t *testing.T) {
 	// containment: PATH-HARNESS
 	if k := harnessWritePlan(t, ws, "notes.txt").ApprovalKey; k != "" {
 		t.Fatalf("unverified root below the boundary: notes.txt key = %q, want empty", k)
+	}
+	// The repository folder itself cannot be listed, so a's spelling is
+	// unverified one level below the boundary.
+	ws = harnessWorkspace(t, filepath.Join(tmp, "one", "repo", "a"))
+	if k := harnessWritePlan(t, ws, "notes.txt").ApprovalKey; k != "" {
+		t.Fatalf("unverified root one level below the boundary: notes.txt key = %q, want empty", k)
 	}
 	// Control: the unlistable edge holds the repository directly, so only the
 	// repository folder's own name is unverified, and that changes nothing.

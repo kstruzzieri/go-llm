@@ -146,8 +146,9 @@ type Workspace struct {
 	// canonical root itself when no .git exists above it. It feeds only
 	// harness classification.
 	harnessPrefix string
-	// harnessPrefixUnverified is set when a root component in that prefix,
-	// below the repository's own name, could not have its stored spelling
+	// harnessPrefixUnverified is true when a component of the root's path
+	// strictly below the repository boundary (the folder holding .git, or the
+	// volume root when there is none) has a spelling that could not be
 	// verified, so every write prompts.
 	harnessPrefixUnverified bool
 	// resolveForKey replaces resolvedWriteRel in fileToolApprovalKey, in tests only.
