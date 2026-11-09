@@ -45,7 +45,14 @@ func TestCheckpointCrashHelper(t *testing.T) {
 
 	ready := func() {
 		_, _ = os.Stdout.WriteString("READY\n")
-		select {} // block until killed
+		// Block until the parent kills us. A bare `select {}` leaves the
+		// runtime nothing pending, so it reports "fatal error: all goroutines
+		// are asleep - deadlock!" on the inherited stderr whenever the kill
+		// arrives late. A pending timer keeps the detector quiet. The wait is
+		// bounded (the parent gives up after 30s) so an orphaned child exits,
+		// and never falls through into the next crash window.
+		time.Sleep(time.Minute)
+		os.Exit(1)
 	}
 
 	if mode == "undo-prepared" {
