@@ -30,7 +30,15 @@ const (
 // approval answer or golem's /auto-edits on — covers the whole class.
 // Exported because cmd/golem's /auto-edits toggle must reference the same
 // value. MCP tools and submit_plan never emit any key and are not covered.
+// A write to an agent instruction or harness configuration file plans with
+// "" instead, so no grant covers it (#725; see HarnessApprovalNotice).
 const WriteClassApprovalKey = "write-class:files"
+
+// HarnessApprovalNotice is the one-line reason a host shows when write_file or
+// edit_file plans with an empty key because the tool demanded a human: its
+// target is an agent instruction or harness configuration file, or Golem could
+// not verify the target's spelling (#725).
+const HarnessApprovalNotice = "agent instruction or harness configuration file; other tools load or run it, so this approval is not remembered"
 
 // ContentHash is the SHA-256 hex of b. Stable, distinct from absentHash, and reused by cmd/golem's undo journal to detect post-write changes.
 func ContentHash(b []byte) string {

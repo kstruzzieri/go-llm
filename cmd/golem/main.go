@@ -1951,7 +1951,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		bgManager:        bgManager,
 		grants:           grants,
 		destAdmission:    adm,
-		headlessApprover: headlessApproverFor(allowTools),
+		headlessApprover: headlessApproverFor(allowTools).withNotices(stderr),
 		machine:          newMachineWriter(stdout, outFormat),
 		allowWrite:       f.allowWrite,
 		allowExec:        f.allowExec,

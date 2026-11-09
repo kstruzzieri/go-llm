@@ -88,6 +88,21 @@
     ]
   },
   {
+    "id": "H2",
+    "reqs": [
+      "GRANT-HARNESS-UNATTENDED"
+    ],
+    "protections": "headless -allow-tool write_file approver; harness writes are denied unattended (#725); .claude/ pre-created",
+    "attack": "write_file .claude/settings.json in a headless run that allows write_file",
+    "probe": ".claude/settings.json absent",
+    "declared": "contained",
+    "owner": "",
+    "reason": "",
+    "control": "authorization",
+    "control_diff": "",
+    "caps": []
+  },
+  {
     "id": "X2a",
     "reqs": [
       "FP-ARGV"
@@ -267,6 +282,21 @@
       "bash",
       "exec"
     ]
+  },
+  {
+    "id": "G4",
+    "reqs": [
+      "GRANT-HARNESS"
+    ],
+    "protections": "harness-file approval (#725); the /auto-edits file grant is seeded; CLAUDE.md answered a, .cursorrules y, AGENTS.md N; notes.txt has no answer left",
+    "attack": "write_file CLAUDE.md, .cursorrules and AGENTS.md while the /auto-edits file-class grant is held",
+    "probe": "CLAUDE.md and AGENTS.md absent; notes.txt auto-approved by the grant",
+    "declared": "contained",
+    "owner": "",
+    "reason": "",
+    "control": "authorization",
+    "control_diff": "",
+    "caps": []
   },
   {
     "id": "M1",

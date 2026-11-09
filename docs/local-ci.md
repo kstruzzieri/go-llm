@@ -102,7 +102,7 @@ docker compose -f docker-compose.ci.yml run --build --rm ci ./scripts/ci-local -
 
 - compiled discovery of `TestHardeningContracts`, followed by a fresh,
   verbose, non-race run of that aggregate with its 500 ms budget enforced
-- the containment inventory check, profile `linux-host` (below)
+- the containment inventory check, profile `darwin-host` on macOS and `linux-host` on Linux or in Docker (below)
 - `golangci-lint fmt --diff` (all Go files, including inactive build tags)
 - `golangci-lint run`
 - `go test -race ./...`
@@ -160,11 +160,12 @@ inverting only the assertion remains a review responsibility.
 ### Containment inventory check (#452)
 
 After the aggregate passes, every mode (`security` included) runs the
-execution checker for the `linux-host` profile of
-`docs/security/containment-inventory.json`:
+execution checker for `docs/security/containment-inventory.json`.
+`ci-local` selects `darwin-host` on macOS; Linux and Docker retain
+`linux-host`, whose no-skip rule is unchanged:
 
 ```bash
-go run ./internal/containmentinv/check -inventory docs/security/containment-inventory.json -profile linux-host -evidence-out "$evidence_out"
+go run ./internal/containmentinv/check -inventory docs/security/containment-inventory.json -profile "$containment_profile" -evidence-out "$evidence_out"
 ```
 
 `$evidence_out` is a fresh `mktemp` file under `$TMPDIR`, or the path
@@ -207,7 +208,7 @@ reason. An allowed descendant skip also excludes its cited parent from the
 successful `executed` evidence. A failure prints either the captured stream,
 when it does not decode,
 or the failed tests' output, and
-`containment inventory check failed (profile linux-host)`, and ends `ci-local`
+`containment inventory check failed (profile <selected profile>)`, and ends `ci-local`
 before formatting. The checker's own tests (`internal/containmentinv`) feed it
 recorded event streams; no ordinary package test launches `go test`.
 
@@ -380,11 +381,11 @@ platform and capabilities:
 
 | Profile | Runs in | Notes |
 | --- | --- | --- |
-| `linux-host` | `Lint & Test`, `Security contracts` step (through `ci-local`); the pre-push hook; manual `ci-local` | no skips |
+| `linux-host` | `Lint & Test`, `Security contracts` step (through `ci-local`); the Docker pre-push hook; manual `ci-local` on Linux | no skips |
 | `bwrap` | `Linux Sandbox (bwrap)`, `Containment inventory (bwrap)` | `GO_LLM_REQUIRE_BWRAP=1` |
 | `agentflow-integration` | `Agentflow compatibility`, inside both the installed and source steps | `-tags agentflow_integration`; a separate step would lack the venv or `AGENTFLOW_SRC`, and its required tests would skip |
 | `windows` | `Windows SQLite URIs`, `Containment inventory (windows)` | no mandatory rows yet: every listed leaf is skip-allowed (`caps: bash`, Git Bash on the runner's PATH; the exec and unix scenarios skip for `capability:exec` or `capability:unix`) |
-| `darwin-host` | `macOS Compile Smoke`, `Containment inventory (darwin-host)` | no skips |
+| `darwin-host` | `macOS Compile Smoke`, `Containment inventory (darwin-host)`; manual `ci-local` on macOS | only the pinned `TestHarnessPlanUnverifiedSpelling=capability:linux` skip |
 | `seatbelt` | `macOS Compile Smoke`, `Containment inventory (seatbelt)` | `GO_LLM_REQUIRE_SEATBELT=1`, no race |
 
 Rows expected to pass on Windows but not yet observed green there, and so

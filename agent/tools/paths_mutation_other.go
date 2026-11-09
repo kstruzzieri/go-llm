@@ -89,6 +89,29 @@ func (w *Workspace) CanonicalPathForUndo(p string) (string, error) {
 	return filepath.ToSlash(rel), nil
 }
 
+// resolvedWriteRel returns the workspace-relative spelling the filesystem
+// stores for a write target, and whether every existing component's spelling
+// was verified (#725). It is a lookup only: it never asks the scope guard for
+// a write check.
+func (w *Workspace) resolvedWriteRel(p string) (string, bool, error) {
+	abs, err := w.cleanRel(p)
+	if err != nil {
+		return "", false, err
+	}
+	canonical, verified, err := canonicalFuturePathVerified(w.root, abs)
+	if err != nil {
+		return "", false, err
+	}
+	if !w.underRoot(canonical) {
+		return "", false, errEscape
+	}
+	rel, err := filepath.Rel(w.root, canonical)
+	if err != nil {
+		return "", false, err
+	}
+	return rel, verified, nil
+}
+
 // legacyWriteFileAtomic preserves the portable checked-path implementation.
 func (w *Workspace) legacyWriteFileAtomic(p string, content []byte) error {
 	abs, priorExists, err := w.resolveWriteTarget(p)

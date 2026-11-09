@@ -226,7 +226,7 @@ case "$*" in
     printf '%s\n' "$CI_LOCAL_SECURITY_OUTPUT"
     exit "$CI_LOCAL_SECURITY_STATUS"
     ;;
-  'run ./internal/containmentinv/check -inventory docs/security/containment-inventory.json -profile linux-host -evidence-out '*)
+  'run ./internal/containmentinv/check -inventory docs/security/containment-inventory.json -profile '*' -evidence-out '*)
     printf 'stub: containment check\n' >&2
     exit "${CI_LOCAL_CONTAINMENT_STATUS:-0}"
     ;;
@@ -243,6 +243,11 @@ STUB
 cat >"$tmp/bin/python3" <<'STUB'
 #!/usr/bin/env sh
 exit 0
+STUB
+
+cat >"$tmp/bin/uname" <<'STUB'
+#!/usr/bin/env sh
+printf '%s\n' "${CI_LOCAL_HOST_NAME:-Linux}"
 STUB
 
 cat >"$tmp/bin/docker" <<'STUB'
@@ -280,7 +285,7 @@ if [ "$1" = compose ] && [ -n "${CI_LOCAL_DOCKER_BLOCK-}" ]; then
 fi
 exit "${CI_LOCAL_DOCKER_STATUS:-0}"
 STUB
-chmod +x "$tmp/bin/golangci-lint" "$tmp/bin/go" "$tmp/bin/python3" "$tmp/bin/docker"
+chmod +x "$tmp/bin/golangci-lint" "$tmp/bin/go" "$tmp/bin/python3" "$tmp/bin/uname" "$tmp/bin/docker"
 
 discovery_output=TestHardeningContracts
 discovery_status=0
@@ -294,6 +299,7 @@ passing_output="$budget_line"'
 security_output="$passing_output"
 race_status=0
 containment_status=0
+host_name=Linux
 caller_goroot=''
 caller_goflags='-skip=Test'
 ci_status=0
@@ -319,6 +325,7 @@ run_ci() {
       CI_LOCAL_SECURITY_OUTPUT="$security_output" \
       CI_LOCAL_RACE_STATUS="$race_status" \
       CI_LOCAL_CONTAINMENT_STATUS="$containment_status" \
+      CI_LOCAL_HOST_NAME="$host_name" \
       "$module/scripts/ci-local" "$@"
   ) >"$tmp/$name.out" 2>&1
   ci_status=$?
@@ -420,6 +427,23 @@ run_ci security --mode security
 assert_status security 0
 diff -u "$tmp/expected-security" "$tmp/security.log"
 assert_scope_notice security
+
+# Every macOS mode must select darwin-host and stop on its failures. The
+# existing Linux expectations above and below retain the no-skip profile.
+host_name=Darwin
+for mode in security pre-push full; do
+  run_ci "darwin-$mode" --mode "$mode"
+  assert_status "darwin-$mode" 0
+  sed 's/-profile linux-host /-profile darwin-host /' "$tmp/expected-$mode" >"$tmp/expected-darwin-$mode"
+  diff -u "$tmp/expected-darwin-$mode" "$tmp/darwin-$mode.log"
+  containment_status=41
+  run_ci "darwin-containment-failure-$mode" --mode "$mode"
+  assert_status "darwin-containment-failure-$mode" 41
+  grep -Fxq 'containment inventory check failed (profile darwin-host)' "$tmp/darwin-containment-failure-$mode.out"
+  diff -u "$tmp/expected-darwin-security" "$tmp/darwin-containment-failure-$mode.log"
+  containment_status=0
+done
+host_name=Linux
 
 # assert_evidence NAME PATH: the checker wrote its evidence to PATH and
 # ci-local printed that path.

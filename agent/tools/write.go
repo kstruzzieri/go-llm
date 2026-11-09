@@ -13,6 +13,12 @@ import (
 // WriteFile creates or overwrites a workspace file. It is a PlanningTool: Plan
 // computes the diff preview and stashes the resulting content keyed by raw-args
 // hash; Invoke re-checks the previewed state and writes atomically.
+//
+// Plan's ApprovalKey is WriteClassApprovalKey, except "" (ungrantable, always
+// prompt) when the target is an agent instruction or harness configuration
+// file, or its spelling cannot be verified (#725). Only an approver that
+// implements agent.KeyedApprover or agent.RiskApprover sees the key; a host
+// with a plain agent.Approver never receives it, so the rule does not cover it.
 type WriteFile struct {
 	ws *Workspace
 	j  Journal
@@ -101,7 +107,7 @@ func (t *WriteFile) Plan(_ context.Context, raw json.RawMessage) (agent.ToolPlan
 		afterHash:    ContentHash(content),
 		summary:      fmt.Sprintf("write %s", args.Path),
 	})
-	return agent.ToolPlan{Effect: eff, Preview: preview, ApprovalKey: WriteClassApprovalKey}, nil
+	return agent.ToolPlan{Effect: eff, Preview: preview, ApprovalKey: t.ws.fileToolApprovalKey(args.Path)}, nil
 }
 
 func (t *WriteFile) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolResult, error) {

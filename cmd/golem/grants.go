@@ -39,6 +39,17 @@ func grantScope(toolName string) string {
 	return ""
 }
 
+// harnessFileCall reports whether a file-tool call planned with the empty
+// key, which write_file and edit_file emit when the tool demanded a human
+// (#725): either the target is an agent instruction or harness configuration
+// file, or Golem could not verify the target's spelling. Exec, background and
+// verify keys are never empty, and stop_command and promote_artifact plan ""
+// outside the files scope, so they never match. The key is tested for
+// emptiness only, never parsed.
+func harnessFileCall(toolName, key string) bool {
+	return grantScope(toolName) == grantScopeFiles && key == ""
+}
+
 // grantID identifies one grant: the domain modeled directly as a comparable
 // struct map key — no string encoding, no separator assumptions.
 type grantID struct {
