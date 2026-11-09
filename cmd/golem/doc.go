@@ -198,16 +198,16 @@
 // the root's path when there is no .git), it cannot verify the root's
 // spelling and every file-tool write prompts; an unlistable folder that holds
 // the repository changes nothing, and an unlistable folder inside the
-// workspace makes writes beneath it prompt. The line still says "harness file" though the file may
-// be ordinary. Windows 8.3 short names (CLAUDE~1) and trailing-dot or
-// alternate-stream spellings match on every platform. Not covered: writes
-// made by commands (run_command, start_command, the post-write verifier,
-// scratch commands, Agentflow parallel promotion); files that a harness file
-// imports or runs, and symlinks inside harness folders that point at ordinary
-// folders (issue #784); a workspace rooted in a git submodule or nested
-// repository inside a harness folder, whose files are classified from that
-// repository's own folder; and hosts embedding the library with a plain
-// agent.Approver, which never receives the key.
+// workspace makes writes beneath it prompt. The line still says "harness
+// file" though the file may be ordinary. Windows 8.3 short names (CLAUDE~1)
+// and trailing-dot or alternate-stream spellings match on every platform. Not
+// covered: writes made by commands (run_command, start_command, the
+// post-write verifier, scratch commands, Agentflow parallel promotion); files
+// that a harness file imports or runs, and symlinks inside harness folders
+// that point at ordinary folders (issue #784); a workspace rooted in a git
+// submodule or nested repository inside a harness folder, whose files are
+// classified from that repository's own folder; and hosts embedding the
+// library with a plain agent.Approver, which never receives the key.
 //
 // Independently of -interceptors, every tool result reaches the model inside
 // a keyed <<<TOOL_RESULT / >>>TOOL_RESULT frame, each result under its own
