@@ -72,6 +72,7 @@ func TestHarnessApprovalPromptsDespiteFileGrant(t *testing.T) {
 
 	requireRecords(t, res, 4)
 	out := f.Out.String()
+	// containment: GRANT-HARNESS
 	if got := f.prompts(); got != 3 {
 		t.Fatalf("prompts = %d, want 3:\n%s", got, out)
 	}
@@ -109,6 +110,7 @@ func TestHarnessApprovalEmptyStoreLeavesNoGrant(t *testing.T) {
 		call("write_file", map[string]string{"path": "notes.txt", "content": "n\n"}),
 	}, "y\nN\n")
 	requireRecords(t, res, 2)
+	// containment: GRANT-HARNESS
 	requireInvoked(t, res, 0, false)
 	requireDenied(t, res, 1)
 	if exists(t, filepath.Join(f.Root, "notes.txt")) {
@@ -147,6 +149,7 @@ func TestHarnessApprovalRepositoryPrefix(t *testing.T) {
 		call("write_file", map[string]string{"path": "settings.json", "content": "{}\n"}),
 	}, "N\n")
 	requireRecords(t, res, 1)
+	// containment: GRANT-HARNESS
 	requireDenied(t, res, 0)
 	if got := f.prompts(); got != 1 {
 		t.Fatalf("prompts = %d, want 1:\n%s", got, f.Out.String())
@@ -191,6 +194,7 @@ func TestHarnessApprovalHeadlessDenies(t *testing.T) {
 		t.Fatalf("run: %v", err)
 	}
 	requireRecords(t, res, 4)
+	// containment: GRANT-HARNESS-UNATTENDED
 	requireDenied(t, res, 0)
 	requireDenied(t, res, 1)
 	requireInvoked(t, res, 2, false)
@@ -256,6 +260,7 @@ func TestHarnessApprovalTaskStepDenies(t *testing.T) {
 		t.Fatal(err)
 	}
 	const denied = "tool call denied by approver"
+	// containment: GRANT-HARNESS-UNATTENDED
 	if got := toolObservation(t, caller.lastRequest.Messages, "w-1").Content; !strings.Contains(got, denied) {
 		t.Fatalf("w-1 observation = %q, want the approver denial", got)
 	}
@@ -280,6 +285,7 @@ func TestHarnessApprovalTaskStepDenies(t *testing.T) {
 func TestHarnessApprovalTaskApproverPlainPath(t *testing.T) {
 	ctx := context.Background()
 	write := newCall()
+	// containment: GRANT-HARNESS-UNATTENDED
 	if ok, err := taskApprover(true).Approve(ctx, write, ""); err != nil || ok {
 		t.Fatalf("plain Approve(write_file) = %v, %v, want denied", ok, err)
 	}

@@ -283,6 +283,7 @@ func TestHarnessPlanEmptyKey(t *testing.T) {
 			"edit_file":  harnessEditPlan(t, ws, rel),
 		}
 		for tool, p := range got {
+			// containment: GRANT-HARNESS
 			if p.ApprovalKey != "" {
 				t.Errorf("%s %s key = %q, want empty", tool, rel, p.ApprovalKey)
 			}
@@ -328,6 +329,7 @@ func TestHarnessPlanResolvedSpelling(t *testing.T) {
 			}
 			w := harnessWritePlan(t, ws, c.req)
 			e := harnessEditPlan(t, ws, c.req)
+			// containment: PATH-HARNESS
 			if w.ApprovalKey != c.want || e.ApprovalKey != c.want {
 				t.Fatalf("write=%q edit=%q, want both %q", w.ApprovalKey, e.ApprovalKey, c.want)
 			}
@@ -422,6 +424,7 @@ func TestHarnessPlanUnverifiedRoot(t *testing.T) {
 		t.Cleanup(func() { _ = os.Chmod(p, 0o755) })
 	}
 	ws := harnessWorkspace(t, filepath.Join(tmp, "repo", "a", "b"))
+	// containment: PATH-HARNESS
 	if k := harnessWritePlan(t, ws, "notes.txt").ApprovalKey; k != "" {
 		t.Fatalf("unverified root below the boundary: notes.txt key = %q, want empty", k)
 	}
@@ -485,6 +488,7 @@ func TestHarnessPlanRepositoryPrefix(t *testing.T) {
 				t.Skip("symlink fixture")
 			}
 			ws := harnessWorkspace(t, filepath.Join(tmp, filepath.FromSlash(r.root)))
+			// containment: PATH-HARNESS
 			if k := harnessWritePlan(t, ws, r.rel).ApprovalKey; k != r.want {
 				t.Fatalf("root %s, write_file %s key = %q, want %q", r.root, r.rel, k, r.want)
 			}

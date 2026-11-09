@@ -354,6 +354,54 @@
       "artifacts": []
     },
     {
+      "id": "PATH-HARNESS",
+      "source": "issue-725:38",
+      "requirement": "The harness matcher covers every listed entry at any depth under the #627 case fold, filesystem aliases, the Windows component fold and 8.3 short-name shapes, and no lookalike; a file-tool call is classified by both its requested and its resolved spelling, and an unverified resolution prompts.",
+      "status": "verified",
+      "owner": "",
+      "layer": "focused",
+      "exempt": "",
+      "scenarios": [],
+      "refs": [
+        {
+          "package": "./agent/interceptor",
+          "test": "TestIsHarnessPath",
+          "file": "agent/interceptor/harness_test.go",
+          "func": "TestIsHarnessPath"
+        },
+        {
+          "package": "./agent/interceptor",
+          "test": "TestHasShortNameComponent",
+          "file": "agent/interceptor/harness_test.go",
+          "func": "TestHasShortNameComponent"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestHarnessPlanResolvedSpelling",
+          "file": "agent/tools/approval_key_test.go",
+          "func": "TestHarnessPlanResolvedSpelling"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestHarnessPlanRepositoryPrefix",
+          "file": "agent/tools/approval_key_test.go",
+          "func": "TestHarnessPlanRepositoryPrefix"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestHarnessPlanUnverifiedRoot",
+          "file": "agent/tools/approval_key_test.go",
+          "func": "TestHarnessPlanUnverifiedRoot"
+        }
+      ],
+      "profiles": [
+        "linux-host",
+        "darwin-host"
+      ],
+      "mutations": [],
+      "artifacts": []
+    },
+    {
       "id": "MUT-WRITE",
       "source": "issue-452:53",
       "requirement": "A parent directory substituted at any write phase (before and after the temporary file, before the rename) never lets the write reach the outside-root or guard-denied sibling canaries (#552).",
@@ -1431,6 +1479,100 @@
       "mutations": [
         "M-027"
       ],
+      "artifacts": []
+    },
+    {
+      "id": "GRANT-HARNESS",
+      "source": "issue-725:37",
+      "requirement": "A file-tool write or edit to an agent instruction or harness configuration file prompts even with the `/auto-edits` grant held, offers no reusable answer, and leaves no grant; an ordinary write in the same session still auto-approves, including when the workspace root is itself inside a harness folder.",
+      "status": "",
+      "owner": "",
+      "layer": "aggregate",
+      "exempt": "",
+      "scenarios": [
+        "G4"
+      ],
+      "refs": [
+        {
+          "package": "./agent/tools",
+          "test": "TestHarnessPlanEmptyKey",
+          "file": "agent/tools/approval_key_test.go",
+          "func": "TestHarnessPlanEmptyKey"
+        },
+        {
+          "package": "./cmd/golem",
+          "test": "TestContainment/G4",
+          "file": "cmd/golem/containment_scenarios_test.go",
+          "func": "g4"
+        },
+        {
+          "package": "./cmd/golem",
+          "test": "TestHarnessApprovalPromptsDespiteFileGrant",
+          "file": "cmd/golem/harness_approval_test.go",
+          "func": "TestHarnessApprovalPromptsDespiteFileGrant"
+        },
+        {
+          "package": "./cmd/golem",
+          "test": "TestHarnessApprovalEmptyStoreLeavesNoGrant",
+          "file": "cmd/golem/harness_approval_test.go",
+          "func": "TestHarnessApprovalEmptyStoreLeavesNoGrant"
+        },
+        {
+          "package": "./cmd/golem",
+          "test": "TestHarnessApprovalRepositoryPrefix",
+          "file": "cmd/golem/harness_approval_test.go",
+          "func": "TestHarnessApprovalRepositoryPrefix"
+        }
+      ],
+      "profiles": [
+        "linux-host",
+        "darwin-host"
+      ],
+      "mutations": [],
+      "artifacts": []
+    },
+    {
+      "id": "GRANT-HARNESS-UNATTENDED",
+      "source": "issue-725:40",
+      "requirement": "A headless `-allow-tool write_file`/`edit_file` run, and Agentflow `-approve-plan-edits`, never write a harness file; ordinary writes stay approved.",
+      "status": "",
+      "owner": "",
+      "layer": "aggregate",
+      "exempt": "",
+      "scenarios": [
+        "H2"
+      ],
+      "refs": [
+        {
+          "package": "./cmd/golem",
+          "test": "TestContainment/H2",
+          "file": "cmd/golem/containment_scenarios_test.go",
+          "func": "h2"
+        },
+        {
+          "package": "./cmd/golem",
+          "test": "TestHarnessApprovalHeadlessDenies",
+          "file": "cmd/golem/harness_approval_test.go",
+          "func": "TestHarnessApprovalHeadlessDenies"
+        },
+        {
+          "package": "./cmd/golem",
+          "test": "TestHarnessApprovalTaskStepDenies",
+          "file": "cmd/golem/harness_approval_test.go",
+          "func": "TestHarnessApprovalTaskStepDenies"
+        },
+        {
+          "package": "./cmd/golem",
+          "test": "TestHarnessApprovalTaskApproverPlainPath",
+          "file": "cmd/golem/harness_approval_test.go",
+          "func": "TestHarnessApprovalTaskApproverPlainPath"
+        }
+      ],
+      "profiles": [
+        "linux-host",
+        "darwin-host"
+      ],
+      "mutations": [],
       "artifacts": []
     },
     {

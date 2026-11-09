@@ -117,6 +117,7 @@ func TestIsHarnessPath(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.in, func(t *testing.T) {
+			// containment: PATH-HARNESS
 			if got := IsHarnessPath(tc.in); got != tc.want {
 				t.Errorf("IsHarnessPath(%q) = %v, want %v", tc.in, got, tc.want)
 			}
@@ -138,6 +139,7 @@ func TestHasShortNameComponent(t *testing.T) {
 		{"foo~", false},
 		{"foo~1.long", false},
 	} {
+		// containment: PATH-HARNESS
 		if got := hasShortNameComponent(tc.in); got != tc.want {
 			t.Errorf("hasShortNameComponent(%q) = %v, want %v", tc.in, got, tc.want)
 		}
