@@ -9,7 +9,8 @@ import (
 // harnessPaths lists the files and folders whose contents change how an agent
 // behaves or what it runs, so a write to one needs a human (#725). Entries are
 // lower-case in normalized form and matched as whole path components at any
-// depth; an entry holding a slash is a multi-component path.
+// depth; an entry holding a slash is a multi-component path. .clinerules may
+// be a file or a folder; both spellings match.
 //
 //   - Instruction files that other agents load on start (AGENTS.md, CLAUDE.md,
 //     GEMINI.md and their local and override variants, the legacy rules files)
@@ -43,10 +44,12 @@ var (
 func HarnessPaths() []string { return slices.Clone(harnessPaths) }
 
 // IsHarnessPath reports whether p names an agent instruction or harness
-// configuration file (#725). It matches like IsProtectedPath, plus the Windows
-// component fold on every platform: FAT and exFAT strip trailing dots and
-// spaces on Linux and macOS too, and for a prompt-only matcher a wider fold can
-// only add prompts. The fold lives here rather than in normalizePath because
+// configuration file (#725). p is a workspace- or repository-relative path; an
+// absolute path also matches through harness-named or 8.3-shaped ancestors.
+// It matches like IsProtectedPath, plus the Windows component fold on every
+// platform: FAT and exFAT strip trailing dots on Linux and macOS too, and
+// spaces are folded as well because, for a prompt-only matcher, a wider fold
+// can only add prompts. The fold lives here rather than in normalizePath because
 // that also feeds IsCredentialPath's template exception, where folding would
 // turn a deny into an allow. A component shaped like an 8.3 short name also
 // matches, since NTFS can reach .claude as CLAUDE~1.

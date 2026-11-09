@@ -48,7 +48,7 @@ func TestIsHarnessPath(t *testing.T) {
 		{".codex", true},
 		{".opencode", true},
 		{".agent", true},
-		{".clinerules", true},
+		{".clinerules/rules.md", true},
 		{".github/hooks", true},
 		{".github/copilot", true},
 		{".github/instructions", true},

@@ -170,6 +170,40 @@
 // run anything. No score or badge revokes a grant. The hard line-count limit
 // the issue mentioned is deferred; the existing 256 KiB write bounds remain.
 //
+// Writes to agent instruction and harness configuration files always need a
+// human (#725). A write_file or edit_file call that targets one of these names,
+// as a file or as a folder it sits under, at any depth, prompts [y/N] with a
+// "harness file:" line giving the reason: other tools load or run the file, so
+// the approval is not remembered. The set is AGENTS.md, AGENTS.override.md,
+// CLAUDE.md, CLAUDE.local.md, GEMINI.md, .cursorrules, .windsurfrules,
+// .clinerules, .mcp.json, opencode.json, opencode.jsonc, .golem.json,
+// models.json, the folders .claude, .cursor, .windsurf, .gemini, .codex,
+// .opencode and .agent, and the paths .github/copilot-instructions.md,
+// .github/instructions, .github/prompts, .github/agents, .github/hooks,
+// .github/copilot, .vscode/mcp.json and .vscode/settings.json. The answer a
+// denies and grants nothing, /auto-edits does not cover these files, and an
+// earlier grant never silences the prompt. Unattended runs deny them: -p with
+// -allow-tool write_file or edit_file prints "golem: denied <tool>: harness
+// file, -allow-tool does not cover it" on stderr, and Agentflow
+// -approve-plan-edits denies. The one exception is submit_plan under
+// -approve-plan-lock, which writes .agent/ itself. A path is classified by the
+// spelling the model gave, by the spelling the filesystem resolves, and by the
+// workspace root counted from the folder holding the nearest .git entry (file
+// or folder), that folder's own name included: a git-tracked ~/.claude used as
+// the root prompts for every write, while a worktree under
+// .claude/worktrees/<name> behaves like an ordinary checkout. When Golem
+// cannot list a folder between the repository and the target, so cannot verify
+// that folder's spelling, every file-tool write in that workspace prompts, and
+// the line still says "harness file" though the file may be ordinary. Windows
+// 8.3 short names (CLAUDE~1) and trailing-dot or alternate-stream spellings
+// match on every platform. Not covered: writes made by commands (run_command,
+// start_command, the post-write verifier, scratch commands, Agentflow
+// parallel promotion); files that a harness file imports or runs, and symlinks
+// inside harness folders that point at ordinary folders (issue #784); a git
+// submodule or nested repository rooted inside a harness folder, whose files
+// are classified from that repository's own folder; and hosts embedding the
+// library with a plain agent.Approver, which never receives the key.
+//
 // Independently of -interceptors, every tool result reaches the model inside
 // a keyed <<<TOOL_RESULT / >>>TOOL_RESULT frame, each result under its own
 // key that stays the same for the rest of the run unless later text quotes it
