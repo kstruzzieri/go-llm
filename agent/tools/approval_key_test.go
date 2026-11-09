@@ -371,7 +371,8 @@ func TestHarnessPlanResolverStoredSpelling(t *testing.T) {
 // it, and an unverified spelling prompts.
 func TestHarnessPlanUnverifiedSpelling(t *testing.T) {
 	if runtime.GOOS != "linux" {
-		t.Skip("linux descriptor resolver fixture")
+		// Darwin proves an existing component's spelling without listing its parent (provenSpelling), so this path is Linux's.
+		t.Skip("capability:linux")
 	}
 	if os.Geteuid() == 0 {
 		t.Skip("root bypasses directory read permission")
@@ -390,6 +391,7 @@ func TestHarnessPlanUnverifiedSpelling(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Chmod(d, 0o755) })
+	// containment: PATH-HARNESS
 	for _, rel := range []string{"d/x.txt", "d/sub/new.txt"} {
 		if _, verified, err := ws.resolvedWriteRel(rel); err != nil || verified {
 			t.Fatalf("resolvedWriteRel(%s) = (verified %v, %v), want unverified", rel, verified, err)

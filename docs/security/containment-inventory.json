@@ -33,7 +33,9 @@
       "race": false,
       "caps": [],
       "timeout": "120s",
-      "allowed_skips": []
+      "allowed_skips": [
+        "TestHarnessPlanUnverifiedSpelling=capability:linux"
+      ]
     },
     {
       "name": "seatbelt",
@@ -392,6 +394,12 @@
           "test": "TestHarnessPlanUnverifiedRoot",
           "file": "agent/tools/approval_key_test.go",
           "func": "TestHarnessPlanUnverifiedRoot"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestHarnessPlanUnverifiedSpelling",
+          "file": "agent/tools/approval_key_test.go",
+          "func": "TestHarnessPlanUnverifiedSpelling"
         }
       ],
       "profiles": [

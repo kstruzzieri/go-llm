@@ -2912,10 +2912,10 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
 - Notes: A `.claude` that is itself a repository (a git-tracked `~/.claude`) or a submodule is its own boundary, so the prefix must hold the boundary's name. `TestHarnessApprovalRepositoryPrefix` passes: its root sits below the boundary `repo`, so the prefix still starts with `.claude`.
 
 ## M-100 — The Linux resolver marks a component it cannot list as unverified
-- Affected refs: PATH-HARNESS: no ref of the row fails; the killing test, `TestHarnessPlanUnverifiedSpelling`, is cited by no inventory row (see Notes)
+- Affected refs: PATH-HARNESS: `TestHarnessPlanUnverifiedSpelling`
 - Baseline: `88f33cfb`, the commit that adds the #725 inventory rows, in an isolated `git archive` export
 - Platform: linux (arm64, go1.27.1, the Docker `ci-local` image: Alpine 3.24.2, kernel 6.10.14-linuxkit, run as the non-root `ci` user, uid 1000)
-- Profile / command: linux-host (Docker `ci-local`, from the export) / `docker compose -f docker-compose.ci.yml run --rm ci go test -count=1 -v -run '^TestHarnessPlanUnverifiedSpelling$' ./agent/tools`; `docker compose -f docker-compose.ci.yml run --rm ci go test -count=1 -v -run '^(TestHarnessPlanEmptyKey|TestHarnessPlanResolvedSpelling|TestHarnessPlanRepositoryPrefix|TestHarnessPlanUnverifiedRoot)$' ./agent/tools` (the agent/tools refs of PATH-HARNESS and GRANT-HARNESS)
+- Profile / command: linux-host (Docker `ci-local`, from the export) / `docker compose -f docker-compose.ci.yml run --rm ci go test -count=1 -v -run '^TestHarnessPlanUnverifiedSpelling$' ./agent/tools`; `docker compose -f docker-compose.ci.yml run --rm ci go test -count=1 -v -run '^(TestHarnessPlanEmptyKey|TestHarnessPlanResolvedSpelling|TestHarnessPlanRepositoryPrefix|TestHarnessPlanUnverifiedRoot)$' ./agent/tools` (the other agent/tools refs of PATH-HARNESS and GRANT-HARNESS)
 - Patch:
   ```diff
   diff --git a/agent/tools/paths_mutation_unix.go b/agent/tools/paths_mutation_unix.go
@@ -2930,15 +2930,15 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
    		if err != nil {
    			return nil, err
   ```
-- Baseline: pass (exit 0, both commands; `TestHarnessPlanUnverifiedSpelling` ran as uid 1000, not skipped). Mutant: FAIL `TestHarnessPlanUnverifiedSpelling` (`approval_key_test.go:395: resolvedWriteRel(d/x.txt) = (verified true, <nil>), want unverified`); every agent/tools ref of PATH-HARNESS and GRANT-HARNESS passes. Exit 1 for the first command, 0 for the second. Restored (sha256 match): pass (exit 0, both commands).
+- Baseline: pass (exit 0, both commands; `TestHarnessPlanUnverifiedSpelling` ran as uid 1000, not skipped). Mutant: FAIL `TestHarnessPlanUnverifiedSpelling` (`approval_key_test.go:395: resolvedWriteRel(d/x.txt) = (verified true, <nil>), want unverified`); the other agent/tools refs of PATH-HARNESS and GRANT-HARNESS pass. Exit 1 for the first command, 0 for the second. Restored (sha256 match): pass (exit 0, both commands).
 - Kind: guard
-- Notes: Linux only: `TestHarnessPlanUnverifiedSpelling` skips on darwin (the descriptor resolver fixture) and as root. The patch drops the flag at the `ErrPermission` fallback, so a component of an unlistable directory keeps its requested spelling as if verified. The killing test is not a ref of PATH-HARNESS, whose profiles are linux-host and darwin-host, so the containment checker never runs it; the row's own refs reach the unverified rule only through the resolver seam (M-093).
+- Notes: Linux only: `TestHarnessPlanUnverifiedSpelling` skips off Linux and as root. darwin-host allows its skip (`capability:linux`): darwin proves an existing component's spelling without listing its parent (`provenSpelling`), so the unverified path does not arise there. The patch drops the flag at the `ErrPermission` fallback, so a component of an unlistable directory keeps its requested spelling as if verified. It is the row's only ref that reaches the real resolver's flag; the others reach the unverified rule through the resolver seam (M-093). The mutant ran at baseline `88f33cfb`; the fix commit that made the test a PATH-HARNESS ref later changed its off-Linux skip text to `capability:linux` and added its `// containment: PATH-HARNESS` marker (the quoted `:395` line is `:397` after it), and left its assertions unchanged.
 
 ## M-101 — The Linux resolver carries an unverified ancestor to an absent leaf
-- Affected refs: PATH-HARNESS: no ref of the row fails; the killing test, `TestHarnessPlanUnverifiedSpelling`, is cited by no inventory row (see Notes)
+- Affected refs: PATH-HARNESS: `TestHarnessPlanUnverifiedSpelling`
 - Baseline: `88f33cfb`, the commit that adds the #725 inventory rows, in an isolated `git archive` export
 - Platform: linux (arm64, go1.27.1, the Docker `ci-local` image: Alpine 3.24.2, kernel 6.10.14-linuxkit, run as the non-root `ci` user, uid 1000)
-- Profile / command: linux-host (Docker `ci-local`, from the export) / `docker compose -f docker-compose.ci.yml run --rm ci go test -count=1 -v -run '^TestHarnessPlanUnverifiedSpelling$' ./agent/tools`; `docker compose -f docker-compose.ci.yml run --rm ci go test -count=1 -v -run '^(TestHarnessPlanEmptyKey|TestHarnessPlanResolvedSpelling|TestHarnessPlanRepositoryPrefix|TestHarnessPlanUnverifiedRoot)$' ./agent/tools` (the agent/tools refs of PATH-HARNESS and GRANT-HARNESS)
+- Profile / command: linux-host (Docker `ci-local`, from the export) / `docker compose -f docker-compose.ci.yml run --rm ci go test -count=1 -v -run '^TestHarnessPlanUnverifiedSpelling$' ./agent/tools`; `docker compose -f docker-compose.ci.yml run --rm ci go test -count=1 -v -run '^(TestHarnessPlanEmptyKey|TestHarnessPlanResolvedSpelling|TestHarnessPlanRepositoryPrefix|TestHarnessPlanUnverifiedRoot)$' ./agent/tools` (the other agent/tools refs of PATH-HARNESS and GRANT-HARNESS)
 - Patch:
   ```diff
   diff --git a/agent/tools/paths_mutation_unix.go b/agent/tools/paths_mutation_unix.go
@@ -2954,9 +2954,9 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
    		if errors.Is(err, fs.ErrNotExist) {
    			return nil, errParentMissing // path-free; says a parent, not the target, is missing
   ```
-- Baseline: pass (exit 0, both commands; `TestHarnessPlanUnverifiedSpelling` ran as uid 1000, not skipped). Mutant: FAIL `TestHarnessPlanUnverifiedSpelling` (`approval_key_test.go:395: resolvedWriteRel(d/sub/new.txt) = (verified true, <nil>), want unverified`; the existing-leaf row `d/x.txt` passes before it); every agent/tools ref of PATH-HARNESS and GRANT-HARNESS passes. Exit 1 for the first command, 0 for the second. Restored (sha256 match): pass (exit 0, both commands).
+- Baseline: pass (exit 0, both commands; `TestHarnessPlanUnverifiedSpelling` ran as uid 1000, not skipped). Mutant: FAIL `TestHarnessPlanUnverifiedSpelling` (`approval_key_test.go:395: resolvedWriteRel(d/sub/new.txt) = (verified true, <nil>), want unverified`; the existing-leaf row `d/x.txt` passes before it); the other agent/tools refs of PATH-HARNESS and GRANT-HARNESS pass. Exit 1 for the first command, 0 for the second. Restored (sha256 match): pass (exit 0, both commands).
 - Kind: guard
-- Notes: Linux only, for the reason M-100 gives; the same caveat applies: the killing test is not a ref of PATH-HARNESS. A new file below an unlistable folder is the write that creates a harness file under a spelling nobody verified.
+- Notes: Linux only, for the reason M-100 gives. A new file below an unlistable folder is the write that creates a harness file under a spelling nobody verified. The mutant ran at baseline `88f33cfb`; the fix commit that made the test a PATH-HARNESS ref later changed its off-Linux skip text to `capability:linux` and added its `// containment: PATH-HARNESS` marker (the quoted `:395` line is `:397` after it), and left its assertions unchanged.
 
 ## M-102 — A harness prompt is never grantable
 - Affected refs: GRANT-HARNESS: `TestHarnessApprovalPromptsDespiteFileGrant`, `TestHarnessApprovalEmptyStoreLeavesNoGrant`, `TestContainment/G4`
