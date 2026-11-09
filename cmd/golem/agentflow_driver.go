@@ -1239,8 +1239,25 @@ func readEvidenceSidecar(path string) ([]agentflow.EvidenceEntry, error) {
 // taskApprover auto-approves tool calls when edits are opted in. Scope is enforced
 // structurally by the step-scope guard, not the human; gates never flow through
 // here (they run via RunGate, gated by -approve-plan-gates in the preflight).
+// A write_file or edit_file plans with the empty key, which means "always ask
+// a human", when its target is an agent instruction or harness configuration
+// file or its spelling could not be verified; task mode has no human, so it is
+// denied even with edits opted in (#725).
 type taskApprover bool
 
-func (a taskApprover) Approve(context.Context, provider.ToolCall, string) (bool, error) {
-	return bool(a), nil
+var _ agent.KeyedApprover = taskApprover(false)
+
+// Approve delegates with no key, so a file-tool call reaching the plain entry
+// point fails closed.
+func (a taskApprover) Approve(ctx context.Context, call provider.ToolCall, preview string) (bool, error) {
+	d, err := a.ApproveKeyed(ctx, call, preview, "")
+	return d.Approved, err
+}
+
+// ApproveKeyed denies a harness file write and otherwise returns the opt-in.
+func (a taskApprover) ApproveKeyed(_ context.Context, call provider.ToolCall, _, key string) (agent.ApprovalDecision, error) {
+	if harnessFileCall(call.Function.Name, key) {
+		return agent.ApprovalDecision{}, nil
+	}
+	return agent.ApprovalDecision{Approved: bool(a)}, nil
 }

@@ -101,6 +101,7 @@ require_cmd go
 require_cmd golangci-lint
 require_cmd python3
 require_cmd id
+require_cmd uname
 
 # Apply the same toolchain environment to Go and lint. `unset` covers every
 # later command in this script. Nonempty whitespace overrides even GOFLAGS
@@ -161,19 +162,24 @@ if [ -n "$unexpected_skips" ]; then
 fi
 
 # The execution checker is the single runner of the containment inventory:
-# every ref mandatory on linux-host, TestContainment's scenario leaves
-# included, must run and pass with no skip (docs/local-ci.md). The evidence
+# every ref mandatory on the host profile, TestContainment's scenario leaves
+# included, must pass under that profile's skip rules (docs/local-ci.md). The evidence
 # goes to a fresh mktemp file unless --evidence-out names one (the CI job);
 # the checker's success line repeats its tree, commit and source digest for
 # runs whose file is discarded, such as the pre-push container.
 section "containment inventory"
+containment_profile=linux-host
+host_os="$(uname -s)"
+if [ "$host_os" = Darwin ]; then
+  containment_profile=darwin-host
+fi
 if [ -z "$evidence_out" ]; then
   evidence_out="$(mktemp "${TMPDIR:-/tmp}/containment-evidence.XXXXXXXX")"
 fi
 containment_status=0
-go run ./internal/containmentinv/check -inventory docs/security/containment-inventory.json -profile linux-host -evidence-out "$evidence_out" || containment_status=$?
+go run ./internal/containmentinv/check -inventory docs/security/containment-inventory.json -profile "$containment_profile" -evidence-out "$evidence_out" || containment_status=$?
 if [ "$containment_status" -ne 0 ]; then
-  printf 'containment inventory check failed (profile linux-host)\n' >&2
+  printf 'containment inventory check failed (profile %s)\n' "$containment_profile" >&2
   exit "$containment_status"
 fi
 printf 'containment evidence: %s\n' "$evidence_out"

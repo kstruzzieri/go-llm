@@ -39,10 +39,10 @@ func executableScenarios() []scenario {
 					t.Fatal(err)
 				}
 			}),
-		a1(), h1(),
+		a1(), h1(), h2(),
 		x2a(), x2b(), x2c(), x2d(), x3(), x4(),
 		e1(),
-		g1(), g2(), g3(),
+		g1(), g2(), g3(), g4(),
 		m1(), p1(),
 		v1(), v2(), b1(),
 		d1(), d2(), d3(),
@@ -187,6 +187,36 @@ func h1() scenario {
 			g.run(t, []agent.ModelResult{call("write_file", map[string]string{"path": "h1.txt", "content": "pwned"}), call("run_command", map[string]any{"argv": []string{"bash", "act.sh", gsink}})}, "y\ny\n")
 			ob.ControlEffect = exists(t, filepath.Join(g.Root, "h1.txt")) && exists(t, gsink)
 			return ob
+		},
+	}
+}
+
+// h2: GRANT-HARNESS-UNATTENDED (#725). A headless run that allows write_file
+// still denies a harness file, since no human is there to see the call; the
+// ordinary write in the same run is the matched control.
+func h2() scenario {
+	return scenario{
+		ID: "H2", Reqs: []string{"GRANT-HARNESS-UNATTENDED"}, Protections: "headless -allow-tool write_file approver; harness writes are denied unattended (#725); .claude/ pre-created",
+		Attack: "write_file .claude/settings.json in a headless run that allows write_file", Probe: ".claude/settings.json absent",
+		Declared: outcomeContained, Control: controlAuthorization,
+		run: func(t *testing.T) observation {
+			f := newFixture(t, fixtureOpts{})
+			mkdirFixture(t, f.Root, ".claude") // a missing parent would fail Plan with or without the guard
+			ap := newHeadlessApprover(allowToolSet{names: map[string]struct{}{"write_file": {}}})
+			calls := []agent.ModelResult{
+				call("write_file", map[string]string{"path": ".claude/settings.json", "content": "pwned\n"}),
+				call("write_file", map[string]string{"path": "notes.txt", "content": "notes\n"}),
+			}
+			caller := &scriptCaller{responses: append(calls, agent.ModelResult{Response: provider.ChatResponse{Content: "done"}})}
+			res, err := f.runWith(t, caller, ap, 3)
+			var o observation
+			if err != nil || len(res.ToolCalls) != 2 || !res.ToolCalls[0].Denied || res.ToolCalls[0].Invoked || !res.ToolCalls[1].Invoked {
+				o.ValidityErr = fmt.Sprintf("want the harness write denied and the ordinary write invoked: %v %+v", err, res.ToolCalls)
+			}
+			// containment: GRANT-HARNESS-UNATTENDED
+			o.AttackEffect = exists(t, filepath.Join(f.Root, ".claude", "settings.json"))
+			o.ControlEffect = readFile(t, filepath.Join(f.Root, "notes.txt")) == "notes\n"
+			return o
 		},
 	}
 }
@@ -657,6 +687,36 @@ func g3() scenario {
 			g.run(t, []agent.ModelResult{call("start_command", argv(gsink))}, "y\n")
 			waitExited(t, g)
 			o.ControlEffect = readFile(t, gsink) == "x\n"
+			return o
+		},
+	}
+}
+
+// g4: GRANT-HARNESS (#725). With the /auto-edits grant held, each harness
+// write reaches its own [y/N] prompt and "a" grants nothing, while an ordinary
+// write still rides the grant. One file per answer, so a mutant that honors
+// the grant, grants on "a" or drops the grant leaves a visible trace.
+func g4() scenario {
+	return scenario{
+		ID: "G4", Reqs: []string{"GRANT-HARNESS"}, Protections: "harness-file approval (#725); the /auto-edits file grant is seeded; CLAUDE.md answered a, .cursorrules y, AGENTS.md N; notes.txt has no answer left",
+		Attack: "write_file CLAUDE.md, .cursorrules and AGENTS.md while the /auto-edits file-class grant is held", Probe: "CLAUDE.md and AGENTS.md absent; notes.txt auto-approved by the grant",
+		Declared: outcomeContained, Control: controlAuthorization,
+		run: func(t *testing.T) observation {
+			f := newFixture(t, fixtureOpts{autoEdits: true})
+			write := func(p string) agent.ModelResult {
+				return call("write_file", map[string]string{"path": p, "content": p + "\n"})
+			}
+			res := f.run(t, []agent.ModelResult{write("CLAUDE.md"), write(".cursorrules"), write("AGENTS.md"), write("notes.txt")}, "a\ny\nN\n")
+			recs := res.ToolCalls
+			var o observation
+			if len(recs) != 4 || f.prompts() != 3 ||
+				!recs[0].Denied || recs[0].Invoked || !recs[1].Invoked || recs[1].AutoApproved ||
+				!recs[2].Denied || recs[2].Invoked || !recs[3].AutoApproved {
+				o.ValidityErr = fmt.Sprintf("want CLAUDE.md denied after a, .cursorrules invoked after y without the grant, AGENTS.md denied after N and notes.txt auto-approved (3 prompts); records %+v prompts %d", recs, f.prompts())
+			}
+			// containment: GRANT-HARNESS
+			o.AttackEffect = exists(t, filepath.Join(f.Root, "CLAUDE.md")) || exists(t, filepath.Join(f.Root, "AGENTS.md")) || (len(recs) == 4 && !recs[3].AutoApproved)
+			o.ControlEffect = readFile(t, filepath.Join(f.Root, ".cursorrules")) == ".cursorrules\n" && readFile(t, filepath.Join(f.Root, "notes.txt")) == "notes.txt\n"
 			return o
 		},
 	}

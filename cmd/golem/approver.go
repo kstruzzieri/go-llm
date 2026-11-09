@@ -9,6 +9,7 @@ import (
 
 	"github.com/kstruzzieri/go-llm/agent"
 	"github.com/kstruzzieri/go-llm/agent/interceptor"
+	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
 	"github.com/kstruzzieri/go-llm/internal/promptfence"
 	"github.com/kstruzzieri/go-llm/provider"
 )
@@ -65,7 +66,9 @@ func (a *replApprover) ApproveKeyed(ctx context.Context, call provider.ToolCall,
 // preview the prompt would have shown. A grantable prompt offers "a" (always
 // this session): approve now and store the grant. MCP tools and submit_plan
 // are never on the allowlist. The key is opaque: never parsed, never derived
-// from the preview.
+// from the preview. A write_file or edit_file call with the empty key is a
+// demand for a human (#725): a harness target or a spelling the tool could
+// not verify. It prompts [y/N] with a notice line after the diff.
 func (a *replApprover) ApproveWithRisk(ctx context.Context, call provider.ToolCall, preview, key string, risk agent.RiskReport) (agent.ApprovalDecision, error) {
 	if a.beforeWrite != nil {
 		if err := a.beforeWrite(); err != nil {
@@ -112,6 +115,11 @@ func (a *replApprover) ApproveWithRisk(ctx context.Context, call provider.ToolCa
 		question = "Run this MCP tool? [y/N] "
 	default:
 		a.renderDiff(preview)
+		// #725: an empty file-tool key marks a harness file. grantable is
+		// already false, so the prompt is [y/N]; the notice says why.
+		if harnessFileCall(call.Function.Name, key) {
+			_, _ = fmt.Fprintln(a.out, "harness file: "+agenttools.HarnessApprovalNotice)
+		}
 		// The legend spells out the asymmetry: an exec grant covers one exact
 		// command, but a write/edit grant covers the whole class — "a" here is
 		// /auto-edits on for the session, not "always this file".
