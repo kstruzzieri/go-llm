@@ -1136,7 +1136,7 @@ What happens on a match:
 
 How a path is classified: by the spelling the model gave, by the spelling the filesystem resolves, and by the workspace root's own path counted from the folder that holds the nearest `.git` entry (a file or a folder), including that repository folder's own name. A git-tracked `~/.claude` used as the workspace root therefore prompts for every file-tool write, while a worktree under `.claude/worktrees/<name>` behaves like an ordinary checkout. A root with no `.git` anywhere above it is classified by its whole absolute path. Windows 8.3 short names (`CLAUDE~1`) and trailing-dot or alternate-stream spellings match on every platform.
 
-With no `.git` anywhere above the root, the whole absolute root path is classified. When Golem cannot list a folder on the workspace root's own path, from the repository folder's parent down, it cannot verify that spelling and every file-tool write prompts; an unlistable folder inside the workspace makes writes beneath it prompt, and the same holds for a spelling it cannot verify for the target itself. The line still says `harness file` in that case, although the file may be ordinary.
+When Golem cannot list the repository folder or a folder below it on the workspace root's own path (any folder on that path when there is no `.git`), it cannot verify the root's spelling and every file-tool write prompts; an unlistable folder that holds the repository changes nothing. An unlistable folder inside the workspace makes writes beneath it prompt, and the same holds for a spelling it cannot verify for the target itself. The line still says `harness file` in that case, although the file may be ordinary.
 
 Not covered:
 

@@ -1,10 +1,10 @@
 # Containment mutation ledger (#452)
 
-Each entry proves one security property's assertions can fail. Entries are point-in-time evidence at their baseline revision. The ledger contains 106 entries: 101 guard and five effect-detection entries.
+Each entry proves one security property's assertions can fail. Entries are point-in-time evidence at their baseline revision. The ledger contains 105 entries: 100 guard and five effect-detection entries.
 
-Platform: every proof in this ledger ran on darwin (arm64, go1.27.1), except M-100 and M-101, whose test runs only on Linux and which ran only there (arm64, go1.27.1, the Docker `ci-local` image as its non-root `ci` user). After the rebase onto the model-resistance PR, the entries whose patches touch build-tagged or platform-sensitive code (M-005 to M-008, the unix path walks; M-009 and M-014 to M-018, the host exec path; M-011, the MCP stdio child environment) were re-run on Linux (arm64, go1.27.1, the Docker `ci-local` image) at their baseline: each entry's `Platform:` line records the result, and a Linux line that differs would be recorded beside the darwin evidence, never in place of it. M-010 (it needs an AgentFlow source checkout) and M-012 (Seatbelt is darwin-native) were not re-run on Linux, and no entry has run on Windows.
+Platform: every proof in this ledger ran on darwin (arm64, go1.27.1), except M-099 and M-100, whose test runs only on Linux and which ran only there (arm64, go1.27.1, the Docker `ci-local` image as its non-root `ci` user). After the rebase onto the model-resistance PR, the entries whose patches touch build-tagged or platform-sensitive code (M-005 to M-008, the unix path walks; M-009 and M-014 to M-018, the host exec path; M-011, the MCP stdio child environment) were re-run on Linux (arm64, go1.27.1, the Docker `ci-local` image) at their baseline: each entry's `Platform:` line records the result, and a Linux line that differs would be recorded beside the darwin evidence, never in place of it. M-010 (it needs an AgentFlow source checkout) and M-012 (Seatbelt is darwin-native) were not re-run on Linux, and no entry has run on Windows.
 
-Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-only variants added in review, M-045 B and M-047 B, at `34b2ff38`, whose production and scenario trees are identical; M-051 to M-053 at `731f2d1d`, the commit that adds them; M-054 to M-058 at `3d423ce1`, the commit that adds them; M-059 at `1166b276`, the commit that adds it): the baseline passed, the mutant failed as shown, and the tree was restored with `git checkout` and passed again. M-028 was re-recorded when tool frames moved to per-result keys: variant A on the commit that makes that change (parent `140524de`), variant B on the commit that adds the cross-Run check (parent `d75c78cb`). Each baseline passed, each mutant failed as shown, and an editor edit restored the baseline bytes, which passed again. Entries M-067 to M-071 ran on the commit that adds fence-key rotation (parent `72b6eb47`) in the same way, the restored file's sha256 matching the baseline's each time; M-072 and M-073 ran the same way on the commit that makes every exposed key rotate and matches keys through separators (parent `00912c90`), and M-074 on the commit that pins key minting before assembly (parent `caa84426`). Entries M-075 to M-078 ran the same way in an isolated `git archive` export of the commit that adds system keys (parent `3346b711`). M-079 and M-080 ran the same way on the commit that scans the durable summary and staged advice (parent `c17e940d`). Entries M-081 to M-085 ran the same way in an isolated `git archive` export of the commit that adds the #712 launchd acceptance tests, each applied with `patch -p1` and reverted with `patch -R -p1`, the restored file's sha256 matching the baseline's. Their baseline is recorded as `c4ca1a8d`: the runs used that commit's tree before two comment-only amends (a driver comment and the M-083 note) produced it, and the patches apply to `c4ca1a8d` at the recorded hunk offsets, with the quoted failing lines at the same line numbers. M-086 ran the same way in an export of `461fdcdc`, the commit that holds `syscall.ForkLock` across the guard and posix_spawn, where M-081 and M-083 were re-run against the new spawn order. All six were re-run the same way at `231baa07`, after the final #712 fix wave changed their tests and moved M-086's lock into a closure; each entry's last note records that run. Entries M-087 to M-106 ran the same way in an isolated `git archive` export of `88f33cfb`, the commit that adds the #725 inventory rows, each applied with `git apply` and reverted with `git apply -R`, the restored file's sha256 matching the baseline's (the export sat inside a checkout, where `git apply` silently skips paths outside the current directory, so both ran with `GIT_CEILING_DIRECTORIES` set to the export's parent); M-100 and M-101 ran in the Docker `ci-local` image from that export. Entries M-060 and M-061 ran in isolated exports of immutable code commit `23f0c0bbca83f0c9d6e02163dd09c4856698ddcd`: each baseline passed, its mutant failed, and restored files matched the baseline bytes and passed again. Entries M-062 and M-063 ran on this branch at `dbe5c315b40f8b973b96cf623d5cdcbe00c616fc`, the commit that adds their rules: each baseline passed, its mutant failed, and `git checkout -- <file>` restored the baseline bytes, which passed again; M-062's comparison against the previous rule ran in an isolated `git archive` export of `ac053567`. Entries M-064 to M-066 ran on the #387 branch at `72d0bedeb1d264b3da62cf812df7505a8bd7e776`, the commit that tightens PV1's probe and cites the exec and verification preview tests (M-064 and M-065 were first recorded at `b9cea9154746758026fd9bb58d467f665be5952f`, the commit that makes PV1 executable): each baseline passed, its mutant failed, and `git checkout -- <file>` restored the baseline bytes, which passed again. Entries quote test output, the containment judge's message text and line numbers included, as it read at their baseline; later wording changes do not rewrite them. Entries carried over from the PR 2 delivery record name the draft entry they were first recorded as; they were re-run here so every command, diff and line number matches one revision. Apply a patch with `git apply`, run the command, then restore with `git checkout -- <file>`. `guard` entries remove or weaken the protection the refs assert. `effect-detection` entries change the effect path of an uncontained scenario: they show its probe can read a change in outcome, not that a guard is absent. Rows exempt from this ledger (pending, out-of-scope, unobserved such as ENV-BWRAP, whose native bwrap profile needs a Linux host, and administrative META- rows; the inventory lint allows no other verified or uncontained row an exemption) carry their exempt reason in the inventory (`docs/security/containment-inventory.json`, rendered in `docs/security/containment-inventory.md`).
+Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-only variants added in review, M-045 B and M-047 B, at `34b2ff38`, whose production and scenario trees are identical; M-051 to M-053 at `731f2d1d`, the commit that adds them; M-054 to M-058 at `3d423ce1`, the commit that adds them; M-059 at `1166b276`, the commit that adds it): the baseline passed, the mutant failed as shown, and the tree was restored with `git checkout` and passed again. M-028 was re-recorded when tool frames moved to per-result keys: variant A on the commit that makes that change (parent `140524de`), variant B on the commit that adds the cross-Run check (parent `d75c78cb`). Each baseline passed, each mutant failed as shown, and an editor edit restored the baseline bytes, which passed again. Entries M-067 to M-071 ran on the commit that adds fence-key rotation (parent `72b6eb47`) in the same way, the restored file's sha256 matching the baseline's each time; M-072 and M-073 ran the same way on the commit that makes every exposed key rotate and matches keys through separators (parent `00912c90`), and M-074 on the commit that pins key minting before assembly (parent `caa84426`). Entries M-075 to M-078 ran the same way in an isolated `git archive` export of the commit that adds system keys (parent `3346b711`). M-079 and M-080 ran the same way on the commit that scans the durable summary and staged advice (parent `c17e940d`). Entries M-081 to M-085 ran the same way in an isolated `git archive` export of the commit that adds the #712 launchd acceptance tests, each applied with `patch -p1` and reverted with `patch -R -p1`, the restored file's sha256 matching the baseline's. Their baseline is recorded as `c4ca1a8d`: the runs used that commit's tree before two comment-only amends (a driver comment and the M-083 note) produced it, and the patches apply to `c4ca1a8d` at the recorded hunk offsets, with the quoted failing lines at the same line numbers. M-086 ran the same way in an export of `461fdcdc`, the commit that holds `syscall.ForkLock` across the guard and posix_spawn, where M-081 and M-083 were re-run against the new spawn order. All six were re-run the same way at `231baa07`, after the final #712 fix wave changed their tests and moved M-086's lock into a closure; each entry's last note records that run. Entries M-087 to M-105 ran the same way in an isolated `git archive` export of `88f33cfb`, the commit that adds the #725 inventory rows, each applied with `git apply` and reverted with `git apply -R`, the restored file's sha256 matching the baseline's (the export sat inside a checkout, where `git apply` silently skips paths outside the current directory, so both ran with `GIT_CEILING_DIRECTORIES` set to the export's parent); M-099 and M-100 ran in the Docker `ci-local` image from that export. A mutant that made the unverified-root rule include the repository boundary itself (at or below instead of strictly below) was withdrawn when the production rule was reverted to strictly below, and the later entries were renumbered to close the gap. Entries M-060 and M-061 ran in isolated exports of immutable code commit `23f0c0bbca83f0c9d6e02163dd09c4856698ddcd`: each baseline passed, its mutant failed, and restored files matched the baseline bytes and passed again. Entries M-062 and M-063 ran on this branch at `dbe5c315b40f8b973b96cf623d5cdcbe00c616fc`, the commit that adds their rules: each baseline passed, its mutant failed, and `git checkout -- <file>` restored the baseline bytes, which passed again; M-062's comparison against the previous rule ran in an isolated `git archive` export of `ac053567`. Entries M-064 to M-066 ran on the #387 branch at `72d0bedeb1d264b3da62cf812df7505a8bd7e776`, the commit that tightens PV1's probe and cites the exec and verification preview tests (M-064 and M-065 were first recorded at `b9cea9154746758026fd9bb58d467f665be5952f`, the commit that makes PV1 executable): each baseline passed, its mutant failed, and `git checkout -- <file>` restored the baseline bytes, which passed again. Entries quote test output, the containment judge's message text and line numbers included, as it read at their baseline; later wording changes do not rewrite them. Entries carried over from the PR 2 delivery record name the draft entry they were first recorded as; they were re-run here so every command, diff and line number matches one revision. Apply a patch with `git apply`, run the command, then restore with `git checkout -- <file>`. `guard` entries remove or weaken the protection the refs assert. `effect-detection` entries change the effect path of an uncontained scenario: they show its probe can read a change in outcome, not that a guard is absent. Rows exempt from this ledger (pending, out-of-scope, unobserved such as ENV-BWRAP, whose native bwrap profile needs a Linux host, and administrative META- rows; the inventory lint allows no other verified or uncontained row an exemption) carry their exempt reason in the inventory (`docs/security/containment-inventory.json`, rendered in `docs/security/containment-inventory.md`).
 
 ## M-001 — Absolute paths are rejected by the workspace path cleaner
 - Affected refs: PATH-ABS: `TestHardeningContracts/Active/Workspace/confinement_and_arguments/public_confinement/owned_absolute_sibling`, `TestWorkspaceCleanRelContainment/absolute_escape`, `TestContainment/W1`
@@ -2755,7 +2755,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
   ```
 - Baseline: pass (exit 0, all four commands). Mutant: FAIL `TestHarnessPlanResolvedSpelling/unverified_spelling` (`approval_key_test.go:334: write="write-class:files" edit="write-class:files", want both ""`); the other four rows and every other ref pass. Exit 1 for the tools command, 0 for the others. Restored (sha256 match): pass (exit 0, all four commands).
 - Kind: guard
-- Notes: A spelling the resolver could not verify (an unlistable directory may hide `.claude` as `CLAUDE`) plans the write-class key under this patch. The real resolver's unverified flag is pinned on Linux by M-100 and M-101.
+- Notes: A spelling the resolver could not verify (an unlistable directory may hide `.claude` as `CLAUDE`) plans the write-class key under this patch. The real resolver's unverified flag is pinned on Linux by M-099 and M-100.
 
 ## M-094 — An unverified root component inside the repository prefix makes every write prompt
 - Affected refs: PATH-HARNESS: `TestHarnessPlanUnverifiedRoot`
@@ -2779,33 +2779,9 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
   ```
 - Baseline: pass (exit 0, all four commands; `TestHarnessPlanUnverifiedRoot` ran, not skipped). Mutant: FAIL `TestHarnessPlanUnverifiedRoot` (`approval_key_test.go:429: unverified root below the boundary: notes.txt key = "write-class:files", want empty`); every other ref passes. Exit 1 for the tools command, 0 for the others. Restored (sha256 match): pass (exit 0, all four commands).
 - Kind: guard
-- Notes: `NewWorkspace` computes the flag and the patch drops it from the Workspace, so a root reached through the unlistable `repo/a` keeps the write-class key. The test stops at its first case; M-095 covers the boundary case.
+- Notes: `NewWorkspace` computes the flag and the patch drops it from the Workspace, so a root reached through the unlistable `repo/a` keeps the write-class key. The test stops at its first case. Re-checked after the fix wave that reverted the unverified-root rule to strictly below the boundary: the same `repo/a/b` assertion still kills it (`approval_key_test.go:432` in that tree), and the `edge/repo` case is now a control that expects the write-class key.
 
-## M-095 — The unverified-root rule includes the repository boundary itself
-- Affected refs: PATH-HARNESS: `TestHarnessPlanUnverifiedRoot`
-- Baseline: `88f33cfb`, the commit that adds the #725 inventory rows, in an isolated `git archive` export
-- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
-- Profile / command: darwin-host / `go test -count=1 -v -run '^(TestIsHarnessPath|TestHasShortNameComponent)$' ./agent/interceptor`; `go test -count=1 -v -run '^(TestHarnessPlanEmptyKey|TestHarnessPlanResolvedSpelling|TestHarnessPlanRepositoryPrefix|TestHarnessPlanUnverifiedRoot)$' ./agent/tools`; `go test -count=1 -v -run '^TestHarnessApproval(PromptsDespiteFileGrant|EmptyStoreLeavesNoGrant|RepositoryPrefix|HeadlessDenies|TaskStepDenies|TaskApproverPlainPath)$' ./cmd/golem`; `go test -count=1 -v -run '^TestContainment$/^(G4|H2)$' ./cmd/golem` (every ref of PATH-HARNESS, GRANT-HARNESS and GRANT-HARNESS-UNATTENDED, in four commands: interceptor, tools, approval, containment)
-- Patch:
-  ```diff
-  diff --git a/agent/tools/paths.go b/agent/tools/paths.go
-  --- a/agent/tools/paths.go
-  +++ b/agent/tools/paths.go
-  @@ -204,7 +204,7 @@
-   	inPrefix := false
-   	if unverified != "" {
-   		rel, err := filepath.Rel(boundary, unverified)
-  -		inPrefix = err != nil || rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator))
-  +		inPrefix = err != nil || rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator))
-   	}
-   	return &Workspace{root: canon, rootIdentity: identity, harnessPrefix: prefix, harnessPrefixUnverified: inPrefix}, nil
-   }
-  ```
-- Baseline: pass (exit 0, all four commands). Mutant: FAIL `TestHarnessPlanUnverifiedRoot` (`approval_key_test.go:433: unverified boundary name: notes.txt key = "write-class:files", want empty`); its first case passes, and every other ref passes. Exit 1 for the tools command, 0 for the others. Restored (sha256 match): pass (exit 0, all four commands).
-- Kind: guard
-- Notes: The `edge/repo` case: `edge` is unlistable, so the unverified component is `repo`, the boundary itself (relative path `.`). The boundary's own name starts the classified prefix, so its spelling matters; "strictly below" excludes it. The test stops at this case, so its control (an unlistable folder above the repository) did not run under the patch.
-
-## M-096 — The harness key classifies the path from the repository's own name down
+## M-095 — The harness key classifies the path from the repository's own name down
 - Affected refs: PATH-HARNESS: `TestHarnessPlanRepositoryPrefix`; GRANT-HARNESS: `TestHarnessApprovalRepositoryPrefix`
 - Baseline: `88f33cfb`, the commit that adds the #725 inventory rows, in an isolated `git archive` export
 - Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
@@ -2839,7 +2815,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
 - Kind: guard
 - Notes: The patch empties the prefix on both reachable returns and keeps the boundary, so the unverified-root rule is untouched (`TestHarnessPlanUnverifiedRoot` passes). Without the prefix, a root inside `.claude` writes `settings.json` through the `/auto-edits` grant.
 
-## M-097 — A worktree's .git file or link marks the repository boundary
+## M-096 — A worktree's .git file or link marks the repository boundary
 - Affected refs: PATH-HARNESS: `TestHarnessPlanRepositoryPrefix`; GRANT-HARNESS: `TestHarnessApprovalRepositoryPrefix`
 - Baseline: `88f33cfb`, the commit that adds the #725 inventory rows, in an isolated `git archive` export
 - Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
@@ -2863,7 +2839,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
 - Kind: guard
 - Notes: The fail-closed direction: the walk passes the worktree and stops at `repo/.git`, so an ordinary write in a worktree below `.claude` is classified under `.claude` and prompts. `.claude that is a submodule` still passes: with no `.git` directory above it the whole canonical root, `.claude` included, is classified.
 
-## M-098 — A worktree's .git link marks the repository boundary
+## M-097 — A worktree's .git link marks the repository boundary
 - Affected refs: PATH-HARNESS: `TestHarnessPlanRepositoryPrefix`
 - Baseline: `88f33cfb`, the commit that adds the #725 inventory rows, in an isolated `git archive` export
 - Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
@@ -2887,7 +2863,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
 - Kind: guard
 - Notes: The `.git`-file worktree rows pass under this patch, and `TestHarnessApprovalRepositoryPrefix` passes because its worktree uses a `.git` file; only the symlink row tells a link from a regular file.
 
-## M-099 — The repository prefix starts with the boundary's own name
+## M-098 — The repository prefix starts with the boundary's own name
 - Affected refs: PATH-HARNESS: `TestHarnessPlanRepositoryPrefix`
 - Baseline: `88f33cfb`, the commit that adds the #725 inventory rows, in an isolated `git archive` export
 - Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
@@ -2911,7 +2887,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
 - Kind: guard
 - Notes: A `.claude` that is itself a repository (a git-tracked `~/.claude`) or a submodule is its own boundary, so the prefix must hold the boundary's name. `TestHarnessApprovalRepositoryPrefix` passes: its root sits below the boundary `repo`, so the prefix still starts with `.claude`.
 
-## M-100 — The Linux resolver marks a component it cannot list as unverified
+## M-099 — The Linux resolver marks a component it cannot list as unverified
 - Affected refs: PATH-HARNESS: `TestHarnessPlanUnverifiedSpelling`
 - Baseline: `88f33cfb`, the commit that adds the #725 inventory rows, in an isolated `git archive` export
 - Platform: linux (arm64, go1.27.1, the Docker `ci-local` image: Alpine 3.24.2, kernel 6.10.14-linuxkit, run as the non-root `ci` user, uid 1000)
@@ -2934,7 +2910,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
 - Kind: guard
 - Notes: Linux only: `TestHarnessPlanUnverifiedSpelling` skips off Linux and as root. darwin-host allows its skip (`capability:linux`): darwin proves an existing component's spelling without listing its parent (`provenSpelling`), so the unverified path does not arise there. The patch drops the flag at the `ErrPermission` fallback, so a component of an unlistable directory keeps its requested spelling as if verified. It is the row's only ref that reaches the real resolver's flag; the others reach the unverified rule through the resolver seam (M-093). The mutant ran at baseline `88f33cfb`; the fix commit that made the test a PATH-HARNESS ref later changed its off-Linux skip text to `capability:linux` and added its `// containment: PATH-HARNESS` marker (the quoted `:395` line is `:397` after it), and left its assertions unchanged.
 
-## M-101 — The Linux resolver carries an unverified ancestor to an absent leaf
+## M-100 — The Linux resolver carries an unverified ancestor to an absent leaf
 - Affected refs: PATH-HARNESS: `TestHarnessPlanUnverifiedSpelling`
 - Baseline: `88f33cfb`, the commit that adds the #725 inventory rows, in an isolated `git archive` export
 - Platform: linux (arm64, go1.27.1, the Docker `ci-local` image: Alpine 3.24.2, kernel 6.10.14-linuxkit, run as the non-root `ci` user, uid 1000)
@@ -2956,9 +2932,9 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
   ```
 - Baseline: pass (exit 0, both commands; `TestHarnessPlanUnverifiedSpelling` ran as uid 1000, not skipped). Mutant: FAIL `TestHarnessPlanUnverifiedSpelling` (`approval_key_test.go:395: resolvedWriteRel(d/sub/new.txt) = (verified true, <nil>), want unverified`; the existing-leaf row `d/x.txt` passes before it); the other agent/tools refs of PATH-HARNESS and GRANT-HARNESS pass. Exit 1 for the first command, 0 for the second. Restored (sha256 match): pass (exit 0, both commands).
 - Kind: guard
-- Notes: Linux only, for the reason M-100 gives. A new file below an unlistable folder is the write that creates a harness file under a spelling nobody verified. The mutant ran at baseline `88f33cfb`; the fix commit that made the test a PATH-HARNESS ref later changed its off-Linux skip text to `capability:linux` and added its `// containment: PATH-HARNESS` marker (the quoted `:395` line is `:397` after it), and left its assertions unchanged.
+- Notes: Linux only, for the reason M-099 gives. A new file below an unlistable folder is the write that creates a harness file under a spelling nobody verified. The mutant ran at baseline `88f33cfb`; the fix commit that made the test a PATH-HARNESS ref later changed its off-Linux skip text to `capability:linux` and added its `// containment: PATH-HARNESS` marker (the quoted `:395` line is `:397` after it), and left its assertions unchanged.
 
-## M-102 — A harness prompt is never grantable
+## M-101 — A harness prompt is never grantable
 - Affected refs: GRANT-HARNESS: `TestHarnessApprovalPromptsDespiteFileGrant`, `TestHarnessApprovalEmptyStoreLeavesNoGrant`, `TestContainment/G4`
 - Baseline: `88f33cfb`, the commit that adds the #725 inventory rows, in an isolated `git archive` export
 - Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
@@ -2982,7 +2958,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
 - Kind: guard
 - Notes: The same patch Task 5 used to show G4 red. The empty key still reaches the approver, so the harness notice prints, but the prompt offers `a` and `a` approves.
 
-## M-103 — A harness answer leaves no grant
+## M-102 — A harness answer leaves no grant
 - Affected refs: GRANT-HARNESS: `TestHarnessApprovalEmptyStoreLeavesNoGrant`
 - Baseline: `88f33cfb`, the commit that adds the #725 inventory rows, in an isolated `git archive` export
 - Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
@@ -3007,7 +2983,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
 - Kind: guard
 - Notes: G4 and the prompts test seed `/auto-edits` before the harness write, and the grant store is a map, so a grant left by a harness answer is invisible to them; only the empty-store test can see it.
 
-## M-104 — Headless -allow-tool denies a harness write
+## M-103 — Headless -allow-tool denies a harness write
 - Affected refs: GRANT-HARNESS-UNATTENDED: `TestHarnessApprovalHeadlessDenies`, `TestContainment/H2`
 - Baseline: `88f33cfb`, the commit that adds the #725 inventory rows, in an isolated `git archive` export
 - Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
@@ -3031,7 +3007,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
 - Kind: guard
 - Notes: The same patch Task 5 used to show H2 red. With the key ignored, `-allow-tool write_file` approves `.claude/settings.json` like any other write.
 
-## M-105 — An Agentflow task step denies a harness write
+## M-104 — An Agentflow task step denies a harness write
 - Affected refs: GRANT-HARNESS-UNATTENDED: `TestHarnessApprovalTaskStepDenies`, `TestHarnessApprovalTaskApproverPlainPath`
 - Baseline: `88f33cfb`, the commit that adds the #725 inventory rows, in an isolated `git archive` export
 - Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
@@ -3055,7 +3031,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
 - Kind: guard
 - Notes: Under `-approve-plan-edits` the step's scope covers CLAUDE.md, so only the key check stands between the worker and the file.
 
-## M-106 — The task approver's plain entry point fails closed
+## M-105 — The task approver's plain entry point fails closed
 - Affected refs: GRANT-HARNESS-UNATTENDED: `TestHarnessApprovalTaskApproverPlainPath`
 - Baseline: `88f33cfb`, the commit that adds the #725 inventory rows, in an isolated `git archive` export
 - Platform: darwin (arm64, go1.27.1, macOS 26.6.2)

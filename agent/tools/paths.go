@@ -146,8 +146,9 @@ type Workspace struct {
 	// canonical root itself when no .git exists above it. It feeds only
 	// harness classification.
 	harnessPrefix string
-	// harnessPrefixUnverified is set when a root component inside that prefix
-	// could not have its stored spelling verified, so every write prompts.
+	// harnessPrefixUnverified is set when a root component in that prefix,
+	// below the repository's own name, could not have its stored spelling
+	// verified, so every write prompts.
 	harnessPrefixUnverified bool
 	// resolveForKey replaces resolvedWriteRel in fileToolApprovalKey, in tests only.
 	resolveForKey func(string) (string, bool, error)
@@ -198,13 +199,18 @@ func NewWorkspace(root string) (*Workspace, error) {
 		return nil, err
 	}
 	prefix, boundary := repositoryPrefix(canon)
-	// An unverified root component at or below the boundary is part of the
+	// An unverified root component strictly below the boundary is part of the
 	// classified prefix and its spelling cannot be checked, so every write
 	// prompts (#725): repo/CLAUDE reached unlistably may really be .claude.
+	// The boundary itself (the repository folder's own name) is classified
+	// from its requested spelling and does not force prompts: the user, never
+	// the model, chooses the root, so an alias spelling of it is no attack
+	// path, and lexical matching still covers case, 8.3 shapes, trailing dots
+	// and Unicode aliases. A Rel error fails closed.
 	inPrefix := false
 	if unverified != "" {
 		rel, err := filepath.Rel(boundary, unverified)
-		inPrefix = err != nil || rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator))
+		inPrefix = err != nil || rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator))
 	}
 	return &Workspace{root: canon, rootIdentity: identity, harnessPrefix: prefix, harnessPrefixUnverified: inPrefix}, nil
 }

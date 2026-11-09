@@ -402,9 +402,10 @@ func TestHarnessPlanUnverifiedSpelling(t *testing.T) {
 	}
 }
 
-// TestHarnessPlanUnverifiedRoot: a root component at or below the repository
-// boundary whose spelling cannot be listed is part of the classified prefix,
-// so every write prompts; an unlistable folder above the repository is not.
+// TestHarnessPlanUnverifiedRoot: a root component strictly below the
+// repository boundary whose spelling cannot be listed is part of the
+// classified prefix, so every write prompts; an unlistable folder that holds
+// the repository, directly or further up, changes nothing.
 func TestHarnessPlanUnverifiedRoot(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("unix permission fixture")
@@ -430,9 +431,11 @@ func TestHarnessPlanUnverifiedRoot(t *testing.T) {
 	if k := harnessWritePlan(t, ws, "notes.txt").ApprovalKey; k != "" {
 		t.Fatalf("unverified root below the boundary: notes.txt key = %q, want empty", k)
 	}
+	// Control: the unlistable edge holds the repository directly, so only the
+	// repository folder's own name is unverified, and that changes nothing.
 	ws = harnessWorkspace(t, filepath.Join(tmp, "edge", "repo"))
-	if k := harnessWritePlan(t, ws, "notes.txt").ApprovalKey; k != "" {
-		t.Fatalf("unverified boundary name: notes.txt key = %q, want empty", k)
+	if k := harnessWritePlan(t, ws, "notes.txt").ApprovalKey; k != WriteClassApprovalKey {
+		t.Fatalf("control, unlistable folder holding the repository: notes.txt key = %q, want %q", k, WriteClassApprovalKey)
 	}
 	ws = harnessWorkspace(t, filepath.Join(tmp, "outer", "mid", "repo"))
 	if k := harnessWritePlan(t, ws, "notes.txt").ApprovalKey; k != WriteClassApprovalKey {
