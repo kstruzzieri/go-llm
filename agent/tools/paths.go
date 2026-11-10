@@ -153,6 +153,16 @@ type Workspace struct {
 	harnessPrefixUnverified bool
 	// resolveForKey replaces resolvedWriteRel in fileToolApprovalKey, in tests only.
 	resolveForKey func(string) (string, bool, error)
+	// Test seams for harnessReferences (#784). harnessMaxEntries replaces the
+	// walk's entry bound when not 0. harnessAncestorStop, when set, ends the
+	// ancestor scan before that folder; "" scans up to and including the
+	// volume root. beforeHarnessReadDir runs before the walk lists a folder
+	// (its virtual workspace-relative path, "." for the root), and
+	// onHarnessAncestor before each ancestor folder is read.
+	harnessMaxEntries    int
+	harnessAncestorStop  string
+	beforeHarnessReadDir func(rel string)
+	onHarnessAncestor    func(dir string)
 }
 
 // CanonicalWorkspaceRoot resolves a workspace root to its absolute, symlink-free

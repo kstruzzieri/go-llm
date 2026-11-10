@@ -105,7 +105,7 @@ func (t *EditFile) computeEdit(args editFileArgs) (before, after []byte, err err
 	return before, after, nil
 }
 
-func (t *EditFile) Plan(_ context.Context, raw json.RawMessage) (agent.ToolPlan, error) {
+func (t *EditFile) Plan(ctx context.Context, raw json.RawMessage) (agent.ToolPlan, error) {
 	eff := t.Effect()
 	var args editFileArgs
 	if err := json.Unmarshal(raw, &args); err != nil {
@@ -124,7 +124,8 @@ func (t *EditFile) Plan(_ context.Context, raw json.RawMessage) (agent.ToolPlan,
 		afterHash:    ContentHash(after),
 		summary:      fmt.Sprintf("edit %s", args.Path),
 	})
-	return agent.ToolPlan{Effect: eff, Preview: unifiedDiff(args.Path, before, after, true), ApprovalKey: t.ws.fileToolApprovalKey(args.Path)}, nil
+	key, _ := t.ws.fileToolApprovalKey(ctx, args.Path)
+	return agent.ToolPlan{Effect: eff, Preview: unifiedDiff(args.Path, before, after, true), ApprovalKey: key}, nil
 }
 
 func (t *EditFile) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolResult, error) {

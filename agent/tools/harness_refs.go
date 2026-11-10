@@ -1,0 +1,849 @@
+package tools
+
+import (
+	"cmp"
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"io/fs"
+	"os"
+	"path"
+	"path/filepath"
+	"runtime"
+	"slices"
+	"strings"
+	"syscall"
+
+	"github.com/kstruzzieri/go-llm/agent/interceptor"
+)
+
+// Bounds of one reference-set build (#784, spec D2). Crossing one makes the
+// set incomplete; each configuration file is also capped at readFileMaxBytes,
+// and Markdown has no per-file cap.
+const (
+	harnessDefaultMaxEntries = 100_000  // walk entries per build
+	harnessMaxTotalBytes     = 32 << 20 // bytes read per build, Markdown included
+	// harnessImportDepth is how many import hops are followed: spec D3 takes
+	// the larger of Claude Code's four and Gemini CLI's maxDepth of 5.
+	harnessImportDepth = 5
+)
+
+// buildOutputDirs are the folder names the reference walk skips besides
+// ignoreDirs (spec D2, Open 3(b)): build and environment output, which a
+// running build rewrites and which can hold more entries than the walk allows.
+// A harness file inside one is not read, a documented residual. The list is
+// fixed, never derived from what the workspace holds.
+var buildOutputDirs = map[string]bool{
+	"target": true, "build": true, "dist": true, "out": true, ".venv": true,
+	"venv": true, "__pycache__": true, ".gradle": true, ".next": true, ".tox": true,
+}
+
+// harnessAnchorFolders are the harness folders whose parent is the anchor of
+// a D4 file inside them; a file under none of them is its own anchor (spec D4).
+var harnessAnchorFolders = []string{".claude", ".cursor", ".windsurf", ".gemini", ".codex", ".github", ".vscode"}
+
+// harnessAncestorFiles are the instruction files read in every folder above
+// the workspace root (spec D12). Every literal D4 file (commandFileKeys) is
+// read there too, and harnessAncestorListings are listed once; nothing else
+// above the root is read, and no folder there is walked.
+var harnessAncestorFiles = []string{
+	"CLAUDE.md", "CLAUDE.local.md", "AGENTS.md", "AGENTS.override.md", "GEMINI.md",
+	".claude/CLAUDE.md", ".cursorrules", ".windsurfrules", ".clinerules",
+}
+
+// harnessAncestorListings are the folders listed, without recursion, in every
+// folder above the root, with the extensions their reader takes. Any other
+// entry there (a sub-folder, .DS_Store) is ignored, not a failure (revision 2,
+// F6).
+var harnessAncestorListings = []struct {
+	dir  string
+	exts []string
+}{
+	{".claude/rules", []string{".md", ".mdc"}},
+	{".github/hooks", []string{".json"}},
+	{".github/copilot", []string{".json"}},
+}
+
+// harnessRefs is what the harness files a workspace can see load, run or link
+// to (#784). exact and subtree map the HarnessKey of a workspace-relative path
+// to the reason a write there prompts, such as "CLAUDE.md imports
+// docs/policy.md"; a subtree entry also covers everything below it. patterns
+// are OpenCode instruction globs. An incomplete set covers everything; cause
+// says why.
+type harnessRefs struct {
+	complete       bool
+	cause          string
+	exact, subtree map[string]string
+	patterns       []harnessPattern
+}
+
+// harnessPattern is an OpenCode instructions glob over HarnessKey workspace
+// paths (spec D5), with its reason.
+type harnessPattern struct{ key, reason string }
+
+// covers reports whether a write to the workspace-relative path rel is a
+// harness reference, and the first matching reason: an exact reference, then
+// rel or an ancestor of it as a subtree (a dangling link's target may later be
+// created as a file at exactly that path), then a pattern.
+func (r *harnessRefs) covers(rel string) (bool, string) {
+	k := interceptor.HarnessKey(rel)
+	if why, ok := r.exact[k]; ok {
+		return true, why
+	}
+	for a := k; ; a = path.Dir(a) {
+		if why, ok := r.subtree[a]; ok {
+			return true, why
+		}
+		if a == "." || a == "/" {
+			break
+		}
+	}
+	for _, p := range r.patterns {
+		if matchGlobBounded(p.key, k) {
+			return true, p.reason
+		}
+	}
+	return false, ""
+}
+
+// harnessFile is one file a reader reads. abs is where its bytes are and vabs
+// where the harness sees it; they differ behind a link. v is the path that
+// classifies it (the repository-prefixed workspace path, or vabs above the
+// root), and label names it in reasons.
+type harnessFile struct{ abs, vabs, v, label string }
+
+// harnessDir is a folder the walk lists: abs on disk, vrel where the harness
+// sees it, and link, the link whose target is being walked ("" if none).
+type harnessDir struct{ abs, vrel, link string }
+
+// harnessLink is a link to a folder the walk met, kept for OpenCode globs.
+type harnessLink struct{ abs, vrel string }
+
+// refBuilder builds one harnessRefs. The first failure is the cause, and
+// every step stops once there is one.
+type refBuilder struct {
+	ctx        context.Context
+	w          *Workspace
+	refs       *harnessRefs
+	entries    int
+	maxEntries int
+	left       int64  // bytes still allowed
+	rootKey    string // HarnessKey of the root, with a trailing "/"
+	boundary   string // the repository folder (repositoryPrefix)
+	home       string
+	lookPath   func(name string) (string, bool)
+	stack      []harnessDir
+	visited    map[string]bool // link targets walked, by real path
+	readAt     map[string]int  // Markdown read, by HarnessKey of abs: the shallowest depth
+	dirLinks   []harnessLink
+}
+
+// harnessReferences builds the reference set of w from scratch (#784; spec
+// D1: no cache). It walks the workspace with its own bounded walker, never
+// Workspace.walk and never the scope guard (D2), reads every harness file with
+// the reader its name selects (D3-D5) and follows links at harness paths (D6);
+// then it reads the fixed paths in every folder above the root (D12) and
+// matches OpenCode globs against the folder links seen (D5).
+func (w *Workspace) harnessReferences(ctx context.Context) *harnessRefs {
+	b := &refBuilder{
+		ctx:        ctx,
+		w:          w,
+		refs:       &harnessRefs{complete: true, exact: map[string]string{}, subtree: map[string]string{}},
+		maxEntries: cmp.Or(w.harnessMaxEntries, harnessDefaultMaxEntries),
+		left:       harnessMaxTotalBytes,
+		rootKey:    interceptor.HarnessKey(w.root) + "/",
+		visited:    map[string]bool{},
+		readAt:     map[string]int{},
+	}
+	_, b.boundary = repositoryPrefix(w.root)
+	b.home, _ = os.UserHomeDir() // "" drops ~/ imports
+	env, _ := buildExecEnv(os.LookupEnv)
+	pathValue := pathFromEnv(env)
+	b.lookPath = func(name string) (string, bool) {
+		hit, _, err := customLookPath(pathValue, name)
+		return hit, err == nil
+	}
+	b.walk()
+	b.ancestors()
+	b.patternLinks()
+	return b.refs
+}
+
+// fail records the first cause, "<subject> <problem>", and makes the set
+// incomplete.
+func (b *refBuilder) fail(subject, problem string) {
+	if b.refs.complete {
+		b.refs.complete = false
+		b.refs.cause = strings.TrimPrefix(subject+" "+problem, " ")
+	}
+}
+
+func (b *refBuilder) failed() bool { return !b.refs.complete }
+
+// harnessQuote renders a path or pattern for a reason: slashes (ruling R4),
+// then quoteArgForPreview, so a name cannot forge a line.
+func harnessQuote(p string) string { return quoteArgForPreview(filepath.ToSlash(p)) }
+
+// harnessAbsent reports a path that is not there; ENOTDIR (a regular file
+// where a folder is expected) counts.
+func harnessAbsent(err error) bool {
+	return errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR)
+}
+
+// walk lists every folder from the root, depth first.
+func (b *refBuilder) walk() {
+	b.stack = []harnessDir{{abs: b.w.root, vrel: "."}}
+	for len(b.stack) > 0 && !b.failed() {
+		d := b.stack[len(b.stack)-1]
+		b.stack = b.stack[:len(b.stack)-1]
+		b.list(d)
+	}
+}
+
+// list reads d in batches, checking for cancellation before each. A vanished
+// folder is skipped, and so is one this user cannot search, since no tool
+// running as this user reaches inside it; one it can search but not list
+// makes the set incomplete, since another tool can still open a known name
+// there (spec D2).
+func (b *refBuilder) list(d harnessDir) {
+	if b.w.beforeHarnessReadDir != nil {
+		b.w.beforeHarnessReadDir(d.vrel)
+	}
+	f, err := os.Open(d.abs)
+	if errors.Is(err, fs.ErrPermission) {
+		if _, err = os.Lstat(filepath.Join(d.abs, "CLAUDE.md")); errors.Is(err, fs.ErrPermission) {
+			return // unsearchable
+		}
+		err = fs.ErrPermission
+	}
+	if err != nil {
+		if !errors.Is(err, fs.ErrNotExist) {
+			b.fail(harnessQuote(d.vrel), "folder cannot be listed")
+		}
+		return
+	}
+	defer func() { _ = f.Close() }()
+	for !b.failed() {
+		if b.ctx.Err() != nil {
+			b.fail("", "walk cancelled")
+			return
+		}
+		entries, err := f.ReadDir(256)
+		for _, e := range entries {
+			if b.failed() {
+				return
+			}
+			b.entry(d, e)
+		}
+		if errors.Is(err, io.EOF) {
+			return
+		}
+		if err != nil {
+			b.fail(harnessQuote(d.vrel), "folder cannot be listed")
+			return
+		}
+	}
+}
+
+// entry classifies one walk entry. Folders are pushed unless skipped (D2);
+// links go to the link pass; a harness regular file, outside .agent, goes to
+// its reader, and one reached under a link adds its real path as a reference.
+func (b *refBuilder) entry(d harnessDir, e fs.DirEntry) {
+	if b.entries++; b.entries > b.maxEntries {
+		b.fail("", "walk stopped at the entry limit")
+		return
+	}
+	name := e.Name()
+	abs, vrel := filepath.Join(d.abs, name), filepath.Join(d.vrel, name)
+	v := filepath.Join(b.w.harnessPrefix, vrel)
+	harness := interceptor.IsHarnessPath(v) && !slices.Contains(strings.Split(interceptor.HarnessKey(vrel), "/"), ".agent")
+	switch t := e.Type(); {
+	case t&fs.ModeIrregular != 0:
+		// How Go reports a Windows junction: a link this walk cannot follow.
+		if harness && runtime.GOOS == "windows" {
+			b.fail(harnessQuote(vrel), "link cannot be resolved")
+		}
+	case t.IsDir():
+		if ignoreDirs[name] || buildOutputDirs[name] {
+			return
+		}
+		if _, err := os.Lstat(filepath.Join(abs, ".git")); err == nil {
+			return // a nested repository
+		}
+		b.stack = append(b.stack, harnessDir{abs: abs, vrel: vrel, link: d.link})
+	case t&fs.ModeSymlink != 0:
+		b.symlink(abs, vrel, v, harness)
+	case t.IsRegular() && harness:
+		if d.link != "" {
+			if rel, ok := b.place(abs); ok {
+				b.addExact(rel, fmt.Sprintf("%s links to %s", harnessQuote(d.link), harnessQuote(rel)))
+			}
+		}
+		b.read(harnessFile{abs: abs, vabs: filepath.Join(b.w.root, vrel), v: v, label: vrel})
+	}
+}
+
+// symlink records a link to a folder for OpenCode globs, then follows a link
+// at a harness path, or named .github or .vscode (spec D6, D2). Its target is
+// the resolved path, or for a dangling link the lexical one; any other
+// resolution failure makes the set incomplete. A harness link's target inside
+// the workspace is a reference: a subtree for a folder or a dangling target, a
+// file otherwise. A folder target is walked at the link's path, once per real
+// folder and not when it holds .git; a file target is read by the reader the
+// link's path selects.
+func (b *refBuilder) symlink(abs, vrel, v string, harness bool) {
+	if fi, err := os.Stat(abs); err == nil && fi.IsDir() {
+		b.dirLinks = append(b.dirLinks, harnessLink{abs: abs, vrel: vrel})
+	}
+	if base := interceptor.HarnessKey(filepath.Base(vrel)); !harness && base != ".github" && base != ".vscode" {
+		return
+	}
+	target, err := filepath.EvalSymlinks(abs)
+	dangling := errors.Is(err, fs.ErrNotExist)
+	if dangling {
+		var t string
+		if t, err = os.Readlink(abs); err == nil {
+			if !filepath.IsAbs(t) {
+				t = filepath.Join(filepath.Dir(abs), t)
+			}
+			target = filepath.Clean(t)
+		}
+	}
+	var fi os.FileInfo
+	if err == nil && !dangling {
+		fi, err = os.Stat(target)
+	}
+	if err != nil {
+		b.fail(harnessQuote(vrel), "link cannot be resolved")
+		return
+	}
+	dir := dangling || fi.IsDir()
+	if !dir && !fi.Mode().IsRegular() {
+		if harness {
+			b.fail(harnessQuote(vrel), "is not a regular file")
+		}
+		return
+	}
+	if harness {
+		if rel, ok := b.place(target); ok {
+			why := fmt.Sprintf("%s links to %s", harnessQuote(vrel), harnessQuote(rel))
+			if dir {
+				b.add(b.refs.subtree, rel, why)
+			} else {
+				b.addExact(rel, why)
+			}
+		}
+	}
+	switch {
+	case dangling:
+	case dir:
+		if b.visited[target] {
+			return // a revisit is not a failure
+		}
+		b.visited[target] = true
+		if _, err := os.Lstat(filepath.Join(target, ".git")); err == nil {
+			return
+		}
+		b.stack = append(b.stack, harnessDir{abs: target, vrel: vrel, link: vrel})
+	case harness:
+		b.read(harnessFile{abs: target, vabs: filepath.Join(b.w.root, vrel), v: v, label: vrel})
+	}
+}
+
+// read sends f to the reader its classified name selects: Markdown imports
+// (D3) or commands (D4, and D5 for OpenCode). Other names are not read.
+func (b *refBuilder) read(f harnessFile) {
+	if b.failed() {
+		return
+	}
+	k := interceptor.HarnessKey(f.v)
+	base := path.Base(k)
+	switch ext := path.Ext(base); {
+	case ext == ".md", ext == ".mdc", base == ".cursorrules", base == ".windsurfrules", base == ".clinerules":
+		b.markdown(f, 0)
+	default:
+		if keys, ok := commandFileKeysFor(k); ok {
+			b.config(f, keys)
+		}
+	}
+}
+
+// open opens f through openHarnessFile. An absent file is skipped with no
+// cause; any other failure makes the set incomplete.
+func (b *refBuilder) open(f harnessFile) *os.File {
+	file, _, err := openHarnessFile(f.abs)
+	switch {
+	case err == nil:
+		return file
+	case harnessAbsent(err):
+	case errors.Is(err, errNotRegular):
+		b.fail(harnessQuote(f.label), "is not a regular file")
+	default:
+		b.fail(harnessQuote(f.label), "cannot be read")
+	}
+	return nil
+}
+
+// readFailed makes the set incomplete for a read error and reports whether
+// there was one.
+func (b *refBuilder) readFailed(f harnessFile, err error) bool {
+	switch {
+	case err == nil:
+		return false
+	case errors.Is(err, errHarnessBudget):
+		b.fail(harnessQuote(f.label), "is over the size limit")
+	default:
+		b.fail(harnessQuote(f.label), "cannot be read")
+	}
+	return true
+}
+
+// markdown reads f's imports at depth (0 for a harness file). A file already
+// read at this depth or shallower is not read again, which stops cycles.
+func (b *refBuilder) markdown(f harnessFile, depth int) {
+	key := interceptor.HarnessKey(f.abs)
+	if d, ok := b.readAt[key]; ok && d <= depth {
+		return
+	}
+	b.readAt[key] = depth
+	file := b.open(f)
+	if file == nil {
+		return
+	}
+	defer func() { _ = file.Close() }()
+	dirs := b.folders(f)
+	err := scanMarkdownImports(budgetReader{file, &b.left}, func(tok string) {
+		if !b.failed() {
+			b.importToken(f.label, tok, dirs, depth)
+		}
+	})
+	b.readFailed(f, err)
+}
+
+// importToken resolves one import of the file labelled label, read at depth
+// (spec D3, revision 2 F8). A relative token resolves against each of dirs, a
+// leading ~/ against the home folder; every candidate, absolute ones
+// canonicalized first, that lands inside the workspace is a reference whether
+// or not it exists. An existing regular file is read in turn, wherever it is,
+// while depth+1 is under harnessImportDepth.
+func (b *refBuilder) importToken(label, tok string, dirs []string, depth int) {
+	var cands []string
+	switch rest, home := strings.CutPrefix(tok, "~/"); {
+	case home && b.home == "":
+		return
+	case home:
+		cands = []string{filepath.Join(b.home, rest)}
+	case filepath.IsAbs(tok):
+		cands = []string{filepath.Clean(tok)}
+	default:
+		for _, d := range dirs {
+			cands = append(cands, filepath.Join(d, tok))
+		}
+	}
+	for _, c := range cands {
+		name := c
+		if rel, ok := b.place(c); ok {
+			name = rel
+			b.addExact(rel, fmt.Sprintf("%s imports %s", harnessQuote(label), harnessQuote(rel)))
+		}
+		if depth+1 >= harnessImportDepth || b.failed() {
+			continue
+		}
+		// A name nobody can stat (absent, through a file, too long) names
+		// nothing; a permission error may not hold for the harness's user.
+		fi, err := os.Stat(c)
+		if err == nil && fi.Mode().IsRegular() {
+			b.markdown(harnessFile{abs: c, vabs: c, v: c, label: name}, depth+1)
+		} else if errors.Is(err, fs.ErrPermission) {
+			b.fail(harnessQuote(name), "cannot be read")
+		}
+	}
+}
+
+// config reads a D4 configuration file (keys nil for .codex/config.toml),
+// resolves its commands against the anchor and its folders, and adds what
+// lands inside the workspace; an OpenCode file also goes to D5.
+func (b *refBuilder) config(f harnessFile, keys []string) {
+	file := b.open(f)
+	if file == nil {
+		return
+	}
+	data, err := io.ReadAll(io.LimitReader(budgetReader{file, &b.left}, readFileMaxBytes+1))
+	_ = file.Close()
+	if err == nil && len(data) > readFileMaxBytes {
+		err = errHarnessBudget
+	}
+	if b.readFailed(f, err) {
+		return
+	}
+	var cs commandSet
+	var doc any
+	if keys == nil {
+		var strs []tomlString
+		if strs, err = lexTOMLStrings(data); err == nil {
+			cs = extractTOMLCommands(strs)
+		}
+	} else if doc, err = decodeJSONC(data); err == nil {
+		cs = extractCommands(keys, doc)
+	}
+	if err != nil {
+		b.fail(harnessQuote(f.label), "does not parse")
+		return
+	}
+	// A user-level hook's project-folder variable means the session's project,
+	// not the home folder (revision 2, F1).
+	anchor := anchorOf(f.vabs, f.v)
+	bases := harnessUniq(append([]string{anchor}, b.folders(f)...))
+	paths, complete := resolveCommandTokens(cs, bases, harnessUniq([]string{anchor, b.w.root, b.boundary}), b.lookPath)
+	if !complete {
+		b.fail(harnessQuote(f.label), "names too many paths") // ruling R15
+		return
+	}
+	for _, p := range paths {
+		if rel, ok := b.place(p); ok {
+			b.addExact(rel, fmt.Sprintf("%s runs %s", harnessQuote(f.label), harnessQuote(rel)))
+		}
+	}
+	if base := path.Base(interceptor.HarnessKey(f.v)); base == "opencode.json" || base == "opencode.jsonc" {
+		b.opencode(f, doc)
+	}
+}
+
+// opencode adds an OpenCode file's instructions (spec D5): paths, resolved
+// against its folders, as references, and globs as patterns.
+func (b *refBuilder) opencode(f harnessFile, doc any) {
+	paths, patterns := opencodeInstructions(doc)
+	for _, dir := range b.folders(f) {
+		for _, p := range paths {
+			if !filepath.IsAbs(p) {
+				p = filepath.Join(dir, p)
+			}
+			if rel, ok := b.place(filepath.Clean(p)); ok {
+				b.addExact(rel, fmt.Sprintf("%s instructions name %s", harnessQuote(f.label), harnessQuote(rel)))
+			}
+		}
+		for _, p := range patterns {
+			for _, k := range b.patternKeys(dir, p) {
+				why := fmt.Sprintf("%s instructions match %s", harnessQuote(f.label), harnessQuote(k))
+				b.refs.patterns = append(b.refs.patterns, harnessPattern{key: k, reason: why})
+			}
+		}
+	}
+}
+
+// patternKeys returns the glob p, written in folder dir, as HarnessKey globs
+// over workspace paths. A glob from a folder above the root (D12) is narrowed
+// to what it matches below the root, so ../opencode.json's **/*.md still
+// covers the workspace's Markdown; one that leaves the root matches nothing.
+func (b *refBuilder) patternKeys(dir, p string) []string {
+	if rel, ok := b.rel(filepath.Join(dir, p)); ok {
+		return []string{interceptor.HarnessKey(rel)}
+	}
+	down, err := filepath.Rel(dir, b.w.root)
+	if err != nil || down == "." || down == ".." || strings.HasPrefix(down, ".."+string(os.PathSeparator)) {
+		return nil
+	}
+	pats := [][]string{strings.Split(interceptor.HarnessKey(p), "/")}
+	for _, seg := range strings.Split(interceptor.HarnessKey(down), "/") {
+		var next [][]string
+		for _, pat := range pats {
+			for ; len(pat) > 0 && pat[0] == "**"; pat = pat[1:] {
+				next = append(next, pat) // "**" takes seg and stays
+			}
+			if len(pat) > 1 {
+				if ok, _ := path.Match(pat[0], seg); ok {
+					next = append(next, pat[1:])
+				}
+			}
+		}
+		// Every entry is a suffix of the glob, so its length identifies it.
+		slices.SortFunc(next, func(x, y []string) int { return len(x) - len(y) })
+		pats = slices.CompactFunc(next, func(x, y []string) bool { return len(x) == len(y) })
+	}
+	keys := make([]string, 0, len(pats))
+	for _, pat := range pats {
+		keys = append(keys, strings.Join(pat, "/"))
+	}
+	return keys
+}
+
+// patternLinks makes the in-workspace target of every folder link a glob
+// reaches a subtree reference (spec D5): a link at or below the glob's literal
+// prefix (the segments before the first holding *?[) covers its whole target,
+// and a link above the prefix the part of its target the prefix names. A link
+// that no longer resolves makes the set incomplete. Known over-coverage, kept
+// on purpose: an empty prefix (**/*.md) takes every folder link's target.
+func (b *refBuilder) patternLinks() {
+	for _, p := range b.refs.patterns {
+		var lit []string
+		for _, s := range strings.Split(p.key, "/") {
+			if strings.ContainsAny(s, "*?[") {
+				break
+			}
+			lit = append(lit, s)
+		}
+		prefix := strings.Join(lit, "/")
+		for _, l := range b.dirLinks {
+			if b.failed() {
+				return
+			}
+			k, extra := interceptor.HarnessKey(l.vrel), ""
+			switch {
+			case harnessUnder(k, prefix):
+			case harnessUnder(prefix, k):
+				extra = prefix[len(k)+1:]
+			default:
+				continue
+			}
+			t, err := filepath.EvalSymlinks(l.abs)
+			if err != nil {
+				b.fail(harnessQuote(l.vrel), "link cannot be resolved")
+				return
+			}
+			if rel, ok := b.place(filepath.Join(t, filepath.FromSlash(extra))); ok {
+				b.add(b.refs.subtree, rel, fmt.Sprintf("%s links to %s", harnessQuote(l.vrel), harnessQuote(rel)))
+			}
+		}
+	}
+}
+
+// harnessUnder reports whether the key k is p or below it; every key is below
+// the empty prefix.
+func harnessUnder(k, p string) bool { return p == "" || k == p || strings.HasPrefix(k, p+"/") }
+
+// ancestors reads the fixed paths in every folder above the root, up to and
+// including the volume root or until harnessAncestorStop (spec D12). An absent
+// path is normal; anything else that fails makes the set incomplete, and the
+// cause names the absolute path.
+func (b *refBuilder) ancestors() {
+	stop := b.w.harnessAncestorStop
+	if stop != "" {
+		if s, err := filepath.EvalSymlinks(stop); err == nil {
+			stop = s
+		}
+	}
+	files := slices.Clone(harnessAncestorFiles)
+	for _, f := range HarnessCommandFiles() {
+		if path.Ext(f) != "" { // .github/hooks and .github/copilot are listings
+			files = append(files, f)
+		}
+	}
+	for d := b.w.root; filepath.Dir(d) != d && !b.failed(); {
+		if d = filepath.Dir(d); d == stop {
+			return
+		}
+		if b.ctx.Err() != nil {
+			b.fail("", "walk cancelled")
+			return
+		}
+		if b.w.onHarnessAncestor != nil {
+			b.w.onHarnessAncestor(d)
+		}
+		for _, name := range files {
+			abs := filepath.Join(d, filepath.FromSlash(name))
+			b.read(harnessFile{abs: abs, vabs: abs, v: abs, label: abs})
+		}
+		for _, l := range harnessAncestorListings {
+			b.listing(filepath.Join(d, filepath.FromSlash(l.dir)), l.exts)
+		}
+	}
+}
+
+// listing reads, from one listing of the folder dir above the root, each
+// regular file with one of exts, through links; folders and other names are
+// ignored.
+func (b *refBuilder) listing(dir string, exts []string) {
+	if b.failed() {
+		return
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if !harnessAbsent(err) {
+			b.fail(harnessQuote(dir), "folder cannot be listed")
+		}
+		return
+	}
+	for _, e := range entries {
+		if !slices.Contains(exts, strings.ToLower(filepath.Ext(e.Name()))) {
+			continue
+		}
+		abs := filepath.Join(dir, e.Name())
+		fi, err := os.Stat(abs)
+		switch {
+		case harnessAbsent(err), err == nil && fi.IsDir():
+		case err != nil:
+			b.fail(harnessQuote(abs), "cannot be read")
+		default:
+			b.read(harnessFile{abs: abs, vabs: abs, v: abs, label: abs})
+		}
+	}
+}
+
+// folders returns the folders f's relative references resolve against: its
+// own, and where the harness sees it when that differs (spec D6).
+func (b *refBuilder) folders(f harnessFile) []string {
+	return harnessUniq([]string{filepath.Dir(f.abs), filepath.Dir(f.vabs)})
+}
+
+// anchorOf returns the anchor of the D4 file the harness sees at vabs, whose
+// classified path is v: the folder above v's first harness folder component,
+// or vabs's own folder (spec D4). The anchor may lie outside the workspace.
+func anchorOf(vabs, v string) string {
+	parts := strings.Split(interceptor.HarnessKey(v), "/")
+	for i, c := range parts[:len(parts)-1] {
+		if slices.Contains(harnessAnchorFolders, c) {
+			a := vabs
+			for range len(parts) - i {
+				a = filepath.Dir(a)
+			}
+			return a
+		}
+	}
+	return filepath.Dir(vabs)
+}
+
+// harnessUniq sorts xs and drops duplicates, in place.
+func harnessUniq(xs []string) []string {
+	slices.Sort(xs)
+	return slices.Compact(xs)
+}
+
+// rel returns the workspace-relative path of the cleaned absolute path abs,
+// if it lies inside the root.
+func (b *refBuilder) rel(abs string) (string, bool) {
+	if !b.w.underRoot(abs) {
+		return "", false
+	}
+	rel, err := filepath.Rel(b.w.root, abs)
+	return rel, err == nil
+}
+
+// place returns the workspace-relative path of abs if it lands inside the
+// root: as written, or with the links in its longest existing ancestor
+// resolved, or, when only a fold of the root's spelling keeps it outside, at
+// its stored spelling (revision 2, F8).
+func (b *refBuilder) place(abs string) (string, bool) {
+	if rel, ok := b.rel(abs); ok {
+		return rel, true
+	}
+	r := resolveExisting(abs)
+	if rel, ok := b.rel(r); ok {
+		return rel, true
+	}
+	if !strings.HasPrefix(interceptor.HarnessKey(r), b.rootKey) {
+		return "", false
+	}
+	stored, _, err := canonicalFuturePathVerified(filepath.VolumeName(r)+string(os.PathSeparator), r)
+	if err != nil {
+		return "", false
+	}
+	return b.rel(stored)
+}
+
+// resolveExisting returns p with the links in its longest existing ancestor
+// resolved and the rest rejoined.
+func resolveExisting(p string) string {
+	var rest []string
+	for cur := p; ; {
+		if r, err := filepath.EvalSymlinks(cur); err == nil {
+			slices.Reverse(rest)
+			return filepath.Join(append([]string{r}, rest...)...)
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return p
+		}
+		rest = append(rest, filepath.Base(cur))
+		cur = parent
+	}
+}
+
+// addExact adds a file reference; the root itself is never a file target
+// (ruling R15).
+func (b *refBuilder) addExact(rel, why string) {
+	if rel != "." {
+		b.add(b.refs.exact, rel, why)
+	}
+}
+
+// add stores the key of the workspace-relative rel in m with why, unless it is
+// there already, and with it the key of its stored spelling (spec D7) and of
+// the file a link there reaches, when they differ.
+func (b *refBuilder) add(m map[string]string, rel, why string) {
+	k := interceptor.HarnessKey(rel)
+	if _, ok := m[k]; ok {
+		return
+	}
+	m[k] = why
+	abs := filepath.Join(b.w.root, rel)
+	if s, _, err := canonicalFuturePathVerified(b.w.root, abs); err == nil {
+		b.alias(m, s, why)
+	}
+	if s, err := filepath.EvalSymlinks(abs); err == nil {
+		b.alias(m, s, why)
+	}
+}
+
+// alias adds the key of abs, if it lies inside the root, to m with why.
+func (b *refBuilder) alias(m map[string]string, abs, why string) {
+	if rel, ok := b.rel(abs); ok {
+		if k := interceptor.HarnessKey(rel); m[k] == "" {
+			m[k] = why
+		}
+	}
+}
+
+// openHarnessFile opens abs, following links, for a reference reader. os.Stat
+// must report a regular file before the open, and the descriptor the same
+// regular file after it (errNotRegular, errFileChanged); on Unix the open does
+// not block, so a FIFO swapped in between cannot hang Plan (spec D2).
+func openHarnessFile(abs string) (*os.File, os.FileInfo, error) {
+	before, err := os.Stat(abs)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !before.Mode().IsRegular() {
+		return nil, nil, errNotRegular
+	}
+	f, err := os.OpenFile(abs, harnessOpenFlags, 0)
+	if err != nil {
+		return nil, nil, err
+	}
+	after, err := f.Stat()
+	switch {
+	case err != nil:
+	case !after.Mode().IsRegular():
+		err = errNotRegular
+	case !os.SameFile(before, after):
+		err = errFileChanged
+	default:
+		return f, after, nil
+	}
+	_ = f.Close()
+	return nil, nil, err
+}
+
+// errHarnessBudget reports a read past harnessMaxTotalBytes.
+var errHarnessBudget = errors.New("harness read budget exceeded")
+
+// budgetReader charges what it reads to a build's byte budget; the read that
+// takes the budget below zero fails with errHarnessBudget.
+type budgetReader struct {
+	r    io.Reader
+	left *int64
+}
+
+func (r budgetReader) Read(p []byte) (int, error) {
+	if *r.left < 0 {
+		return 0, errHarnessBudget
+	}
+	if int64(len(p)) > *r.left+1 {
+		p = p[:*r.left+1]
+	}
+	n, err := r.r.Read(p)
+	if *r.left -= int64(n); *r.left < 0 {
+		return n, errHarnessBudget
+	}
+	return n, err
+}

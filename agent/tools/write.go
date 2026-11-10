@@ -62,7 +62,7 @@ func (*WriteFile) Origin() agent.Origin { return agent.OriginWorkspace }
 // Plan computes the preview and stashes the pending plan. It never mutates. On any
 // validation failure it returns an error so dispatch reports the failure without
 // asking the user to approve an empty diff.
-func (t *WriteFile) Plan(_ context.Context, raw json.RawMessage) (agent.ToolPlan, error) {
+func (t *WriteFile) Plan(ctx context.Context, raw json.RawMessage) (agent.ToolPlan, error) {
 	eff := t.Effect()
 	var args writeFileArgs
 	if err := json.Unmarshal(raw, &args); err != nil {
@@ -107,7 +107,8 @@ func (t *WriteFile) Plan(_ context.Context, raw json.RawMessage) (agent.ToolPlan
 		afterHash:    ContentHash(content),
 		summary:      fmt.Sprintf("write %s", args.Path),
 	})
-	return agent.ToolPlan{Effect: eff, Preview: preview, ApprovalKey: t.ws.fileToolApprovalKey(args.Path)}, nil
+	key, _ := t.ws.fileToolApprovalKey(ctx, args.Path)
+	return agent.ToolPlan{Effect: eff, Preview: preview, ApprovalKey: key}, nil
 }
 
 func (t *WriteFile) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolResult, error) {
