@@ -30,8 +30,9 @@ type outputScreen struct {
 	withhold string   // non-empty: both streams deliver nothing; the cause text
 	changed  int      // entries that changed during the pre-run read
 
-	mu      sync.Mutex // guards keys (after construction) and matches
-	matches int
+	mu       sync.Mutex // guards keys (after construction), released and matches
+	released bool
+	matches  int
 }
 
 // newOutputScreen returns a screen over keys, sorted longest first.
@@ -50,11 +51,14 @@ func newOutputScreen(keys [][]byte) *outputScreen {
 // output never reaches a model.
 func probeScreen() *outputScreen { return &outputScreen{} }
 
-// release drops the key bytes. Safe to call more than once and concurrently;
-// notes keeps working.
+// release drops the screen's reference to the key bytes. Call it only after
+// every stream of the screen has finished. A stream written or finished after
+// release drops its output instead of delivering it unscreened. Safe to call
+// more than once and concurrently; notes keeps working.
 func (s *outputScreen) release() {
 	s.mu.Lock()
 	s.keys = nil
+	s.released = true
 	s.mu.Unlock()
 }
 
@@ -81,10 +85,10 @@ func (s *outputScreen) mark() {
 	s.mu.Unlock()
 }
 
-func (s *outputScreen) snapshot() (keys [][]byte, withhold string) {
+func (s *outputScreen) snapshot() (keys [][]byte, withhold string, released bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.keys, s.withhold
+	return s.keys, s.withhold, s.released
 }
 
 // screenStream is one output stream's writer. Write never fails and never
@@ -111,9 +115,10 @@ func (w *screenStream) Write(p []byte) (int, error) {
 	if w.dead {
 		return n, nil
 	}
-	keys, withhold := w.s.snapshot()
-	if withhold != "" {
+	keys, withhold, released := w.s.snapshot()
+	if withhold != "" || released {
 		w.dead = true
+		w.held = nil
 		return n, nil
 	}
 	var out []byte
@@ -146,8 +151,11 @@ func (w *screenStream) finish() {
 	if w.dead {
 		return
 	}
-	keys, _ := w.s.snapshot()
+	keys, _, released := w.s.snapshot()
 	var out []byte
+	if released {
+		w.held = nil
+	}
 	if len(w.held) > 0 {
 		out = w.record(out, w.held, 0, keys)
 	}

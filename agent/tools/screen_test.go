@@ -58,7 +58,6 @@ func TestScreenStream(t *testing.T) {
 		{"go results", nil, "    --- FAIL: TestNames/.env (0.00s)\n        x_test.go:9: detail\n",
 			"    --- FAIL: TestNames/.env (0.00s)\n        x_test.go:9: detail\n", false},
 		{"bound ok", nil, strings.Repeat("a", 32768) + "\n", strings.Repeat("a", 32768) + "\n", false},
-		{"too long", nil, strings.Repeat("a", 32769) + "\nshort\n", tL + "\n", false},
 		{"long header", nil, "diff --git " + strings.Repeat("a", 33000) + "/.env\n+NAME=x\n", tL + "\n", false},
 	}
 	for _, r := range rows {
@@ -100,6 +99,50 @@ func TestScreenStream(t *testing.T) {
 		}
 	})
 
+	t.Run("hold bound", func(t *testing.T) {
+		var buf bytes.Buffer
+		w := newOutputScreen(nil).stream(&buf)
+		_, _ = w.Write([]byte(strings.Repeat("a", 32769)))
+		if buf.String() != tL+"\n" {
+			t.Fatalf("after first write: %d bytes", buf.Len())
+		}
+		if w.held != nil {
+			t.Fatalf("held buffer kept after cut: %d", len(w.held))
+		}
+		_, _ = w.Write([]byte("\nshort\n"))
+		w.finish()
+		if buf.String() != tL+"\n" {
+			t.Fatalf("later output delivered: %d bytes", buf.Len())
+		}
+	})
+
+	t.Run("after release", func(t *testing.T) {
+		for _, keys := range [][]string{{"value-0001-abcdef"}, nil} {
+			var kb [][]byte
+			for _, k := range keys {
+				kb = append(kb, []byte(k))
+			}
+			var buf bytes.Buffer
+			s := newOutputScreen(kb)
+			w := s.stream(&buf)
+			s.release()
+			n, err := w.Write([]byte("x NAME=value-0001-abcdef y\n"))
+			w.finish()
+			if n != 27 || err != nil || buf.Len() != 0 {
+				t.Fatalf("keys=%d n=%d err=%v out=%d", len(keys), n, err, buf.Len())
+			}
+		}
+		var buf bytes.Buffer
+		s := newOutputScreen(nil)
+		w := s.stream(&buf)
+		_, _ = w.Write([]byte("partial"))
+		s.release()
+		w.finish()
+		if buf.Len() != 0 {
+			t.Fatalf("held record delivered after release: %d", buf.Len())
+		}
+	})
+
 	t.Run("after cut discards held", func(t *testing.T) {
 		got := screenRun(nil, "diff --git a/.env b/.env\n", "held")
 		if got != tP+"\n" {
@@ -133,7 +176,7 @@ func TestScreenStream(t *testing.T) {
 	})
 
 	t.Run("race", func(t *testing.T) {
-		s := newOutputScreen([][]byte{[]byte("secret-key-1")})
+		s := newOutputScreen([][]byte{[]byte("value-0001-abcdef")})
 		var a, b bytes.Buffer
 		wa, wb := s.stream(&a), s.stream(&b)
 		var wg sync.WaitGroup
@@ -142,16 +185,28 @@ func TestScreenStream(t *testing.T) {
 			go func() {
 				defer wg.Done()
 				for i := 0; i < 100; i++ {
-					_, _ = w.Write([]byte("x secret-key-1\n"))
+					_, _ = w.Write([]byte("x value-0001-abcdef\n"))
 				}
 			}()
 		}
-		go s.release()
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			s.release()
+		}()
 		_ = s.notes()
 		wg.Wait()
 		wa.finish()
 		wb.finish()
-		s.release()
+		for label, buf := range map[string]*bytes.Buffer{"a": &a, "b": &b} {
+			out := buf.String()
+			if strings.Contains(out, "value-0001-abcdef") {
+				t.Fatalf("stream %s leaked a key", label)
+			}
+			if out != strings.Repeat("x "+tM+"\n", strings.Count(out, "\n")) {
+				t.Fatalf("stream %s holds something other than screened records: %d bytes", label, len(out))
+			}
+		}
 	})
 }
 
