@@ -207,32 +207,45 @@
 // grant nothing, and are denied unattended, under the notice "agent
 // instruction or harness configuration file, or a file one of them loads,
 // runs or links to; other tools load or run it, so this approval is not
-// remembered". Covered are Markdown @ imports (followed five hops, existing
-// or not), the commands and arguments in the configuration files named
-// next, OpenCode instructions entries and patterns, what symlinks at
-// harness paths reach, and fixed paths in every ancestor folder,
-// ~/.claude/settings.json included. The command-file list begins:
-// .claude/settings.json, .claude/settings.local.json, .mcp.json,
-// .cursor/hooks.json, .cursor/mcp.json, .windsurf/hooks.json,
+// remembered". Coverage promise: Markdown @ imports, OpenCode instructions,
+// symlinks at harness paths and what they reach, and the literal paths in
+// every command read from the files below are covered completely, and if
+// Golem cannot read or parse something it needs, every write prompts. What
+// a command does at run time is best effort: cd in a shell string, the
+// documented project-folder variables and Golem's own PATH lookup are
+// followed; other variables, command substitution, scripts sourced by
+// scripts and another tool's own PATH are not. Covered are Markdown @
+// imports (followed five hops, existing or not), the commands and arguments
+// in the configuration files named next, OpenCode instructions entries and
+// patterns, what symlinks at harness paths reach, and fixed paths in every
+// ancestor folder, ~/.claude/settings.json included. Golem reads commands
+// from these files: .claude/settings.json, .claude/settings.local.json,
+// .mcp.json, .cursor/hooks.json, .cursor/mcp.json, .windsurf/hooks.json,
 // .gemini/settings.json, .github/hooks/*.json, .github/copilot/*.json,
 // .vscode/mcp.json, .vscode/settings.json, opencode.json, opencode.jsonc,
-// .golem.json and .codex/config.toml. The command-file list ends. env and
-// permissions values are not read. Commands are read best-effort: cd in a
-// shell string, the project-folder variables ($CLAUDE_PROJECT_DIR,
-// ${workspaceFolder} and the like) and Golem's own PATH lookup are
-// followed; other variables, command substitution, scripts that call
-// scripts and another tool's own PATH are not. The search skips .git and
-// the other ignored folders, the build-output folders target, build, dist,
-// out, .venv, venv, __pycache__, .gradle, .next and .tox, any folder
-// holding its own .git entry, and folders this user cannot search; it is
-// bounded to 100,000 entries, 256 KiB per configuration file, 32 MiB read
-// per call and five import hops. If the search cannot finish (an unreadable
-// or malformed harness file, an ancestor ~/.claude/settings.json included,
-// or a crossed bound), every file-tool write prompts. The preview's first
-// line, "harness reference: <reason>", names the cause; -p prints "golem:
-// harness reference: ..." after its denial line, and Agentflow task steps
-// print "golem: task step denied <tool>: harness file (<notice>)" and the
-// same line. Parallel Agentflow promotion refuses a whole batch, writes and
+// .golem.json and .codex/config.toml. No other file is read for commands. A
+// top-level permissions section is skipped, and so is an env section at the
+// top level or inside an object that also holds a command; an env or
+// permissions key anywhere else is read, so a server named env cannot hide
+// its command. .codex/config.toml reads every string, env tables included.
+// Commands are read best-effort: cd in a shell string, the project-folder
+// variables ($CLAUDE_PROJECT_DIR, ${workspaceFolder} and the like) and
+// Golem's own PATH lookup are followed; other variables, command
+// substitution, scripts that call scripts and another tool's own PATH are
+// not. The search skips .git and the other ignored folders, the
+// build-output folders target, build, dist, out, .venv, venv, __pycache__,
+// .gradle, .next and .tox, any folder holding its own .git entry, and
+// folders this user cannot search; it is bounded to 100,000 entries, 256
+// KiB per configuration file, 32 MiB read per call and five import hops, 64
+// cd folders per shell string, 100,000 resolution steps per configuration
+// file and a 40-link dangling symlink chain; crossing a bound makes the set
+// incomplete. If the search cannot finish (an unreadable or malformed
+// harness file, an ancestor ~/.claude/settings.json included, or a crossed
+// bound), every file-tool write prompts. The preview's first line, "harness
+// reference: <reason>", names the cause; -p prints "golem: harness
+// reference: ..." after its denial line, and Agentflow task steps print
+// "golem: task step denied <tool>: harness file (<notice>)" and the same
+// line. Parallel Agentflow promotion refuses a whole batch, writes and
 // deletions, with "refuse parallel promotion: <path>: <reason>" and applies
 // nothing. Residuals: other variables and run-time command behavior;
 // ancestor files below the fixed paths; skipped folders; permission rules

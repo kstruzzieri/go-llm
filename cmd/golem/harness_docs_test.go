@@ -76,8 +76,8 @@ func TestHarnessPathsDocumented(t *testing.T) {
 // The span is separate from harnessSpans because the docs name .mcp.json and
 // .vscode/settings.json in the harness list, which would hide a dropped entry.
 var commandFileSpans = []struct{ file, start, end string }{
-	{"doc.go", "command-file list begins:", "command-file list ends."},
-	{"../../docs/golem.md", "command-file list begins:", "command-file list ends."},
+	{"doc.go", "golem reads commands from these files:", "no other file is read for commands."},
+	{"../../docs/golem.md", "<!-- command-file list -->", "<!-- end command-file list -->"},
 }
 
 // TestHarnessCommandFilesDocumented fails when a file the command reader
@@ -88,7 +88,8 @@ func TestHarnessCommandFilesDocumented(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		text := strings.ToLower(string(b))
+		// Join wrapped comment lines so a marker may span a line break.
+		text := strings.Join(strings.Fields(strings.ReplaceAll(strings.ToLower(string(b)), "\n//", " ")), " ")
 		i := strings.Index(text, sp.start)
 		if i < 0 {
 			t.Fatalf("%s: start marker %q not found", sp.file, sp.start)
