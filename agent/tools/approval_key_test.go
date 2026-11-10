@@ -746,6 +746,17 @@ func TestHarnessPlanReferencesKinds(t *testing.T) {
 			links:    map[string]string{".github": "cfg"},
 			covered:  []string{"cfg/hooks/new.json"},
 			ordinary: []string{"cfg/notes.txt"}},
+		// Final review F6: a glob's literal folder is matched against links
+		// unescaped. "\" is a separator on Windows, and both rows link.
+		{name: "glob link under a folder named with a backslash", unix: true,
+			files:   map[string]string{`a\b/opencode.json`: `{"instructions":["**/*.md"]}`, "u/keep.txt": "k\n"},
+			links:   map[string]string{`a\b/m`: "../u"},
+			covered: []string{"u/new.md"}},
+		{name: "glob in a folder named with [ and an unrelated link", unix: true,
+			files:    map[string]string{"x[1]/opencode.json": `{"instructions":["*.md"]}`, "t/keep.txt": "k\n"},
+			links:    map[string]string{"other/l": "../t"},
+			covered:  []string{"x[1]/new.md"},
+			ordinary: []string{"t/notes.txt"}},
 	}
 	// One script row per D4 file.
 	for _, f := range HarnessCommandFiles() {

@@ -392,19 +392,23 @@ func TestHarnessApprovalRefPrompts(t *testing.T) {
 }
 
 // TestHarnessApprovalRefSameRun: a covered target is judged when the call is
-// planned, so an import added earlier in the same run is already in force.
+// planned, so an import added earlier in the same run is already in force. The
+// ordinary write first builds the set once before the edit, so a set kept
+// from an earlier call would let docs/new.md ride the /auto-edits grant.
 func TestHarnessApprovalRefSameRun(t *testing.T) {
-	f := newFixture(t, fixtureOpts{})
+	f := newFixture(t, fixtureOpts{autoEdits: true})
 	writeFixtureFile(t, f.Root, "CLAUDE.md", "keep\n")
 	mkdirFixture(t, f.Root, "docs")
 	res := f.run(t, []agent.ModelResult{
+		refWrite("notes.txt"),
 		call("edit_file", map[string]string{"path": "CLAUDE.md", "old_string": "keep", "new_string": "keep @docs/new.md"}),
 		refWrite("docs/new.md"),
 	}, "y\n")
-	requireRecords(t, res, 2)
+	requireRecords(t, res, 3)
 	// containment: GRANT-HARNESS-REF
-	requireInvoked(t, res, 0, false)
-	requireDenied(t, res, 1)
+	requireInvoked(t, res, 0, true)
+	requireInvoked(t, res, 1, false)
+	requireDenied(t, res, 2)
 	if got := f.prompts(); got != 2 {
 		t.Fatalf("prompts = %d, want 2:\n%s", got, f.Out.String())
 	}

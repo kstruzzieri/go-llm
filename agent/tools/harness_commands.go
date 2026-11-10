@@ -51,9 +51,10 @@ import (
 // server's headersHelper, which "Claude Code runs ... in a shell" when
 // connecting (https://code.claude.com/docs/en/mcp, ruling R9). A top-level
 // permissions or env subtree, and the env of an object that also holds a
-// listed key (a server or hook's own env), are skipped whole (ruling R14); an
-// env or permissions key anywhere else is read like any other, so a server
-// named "env" cannot hide its command.
+// listed key with a string or array value (a server or hook's own env), are
+// skipped whole (ruling R14); an env or permissions key anywhere else is read
+// like any other, so a server named "env" cannot hide its command, not even
+// beside a server named "command".
 var commandFileKeys = map[string][]string{
 	interceptor.HarnessKey(".claude/settings.json"):       {"command", "args", "apiKeyHelper", "awsAuthRefresh", "awsCredentialExport", "otelHeadersHelper", "headersHelper"},
 	interceptor.HarnessKey(".claude/settings.local.json"): {"command", "args", "apiKeyHelper", "awsAuthRefresh", "awsCredentialExport", "otelHeadersHelper", "headersHelper"},
@@ -332,7 +333,8 @@ func unescapeTOML(raw string) string {
 
 // cmdToken is one word a configuration file may run or pass to a program.
 // program marks a command's first word; bases are the folders earlier "cd"
-// commands in the same shell string moved to, relative to its start.
+// commands in the same shell string, and earlier working-directory flags in
+// the same command, moved to, relative to its start.
 type cmdToken struct {
 	text    string
 	program bool
@@ -349,11 +351,11 @@ type commandSet struct {
 	capped bool
 }
 
-// maxCdBases bounds the distinct "cd" targets one shell string records
-// (ruling R8). A real hook changes folder once or twice; with no bound a string
-// of repeated "cd a;x;" grows the bases, and the resolution work with them,
-// without limit (a 28 KB string took 99 s). Crossing it makes the file's
-// command set incomplete.
+// maxCdBases bounds the distinct "cd" and working-directory flag targets one
+// shell string or argv records (rulings R8, R24). A real hook changes folder
+// once or twice; with no bound a string of repeated "cd a;x;" grows the bases,
+// and the resolution work with them, without limit (a 28 KB string took 99 s).
+// Crossing it makes the file's command set incomplete.
 const maxCdBases = 64
 
 // maxCommandPaths bounds the work resolveCommandTokens does for one file
@@ -393,7 +395,11 @@ const wholeTokenMeta = "'\"\\$`;&|()<>\n\r*?["
 //     token (R2, R13);
 //   - a string under cwd or dir, whatever the file's keys, is a working folder;
 //   - a top-level env or permissions subtree, and the env of an object that
-//     also holds a listed key, are skipped whole (spec D4's exclusions, R14).
+//     also holds a listed key with a string or array value, are skipped whole
+//     (spec D4's exclusions, R14);
+//   - --directory, -C, --cwd and --project, with their value as the next word
+//     or after "=", make the value a base for the rest of that argv or shell
+//     command, as "cd" does for the rest of a shell string (ruling R24).
 func extractCommands(keys []string, doc any) commandSet {
 	var cs commandSet
 	cs.walkJSON(keys, doc, true)
@@ -413,7 +419,15 @@ func (cs *commandSet) walkJSON(keys []string, v any, top bool) {
 		}
 	case map[string]any:
 		names := slices.Sorted(maps.Keys(v))
-		ownsEnv := top || slices.ContainsFunc(names, listed)
+		// Only a listed key holding a command (a string or an array) makes a
+		// sibling env the command's own; a server named "command" does not.
+		ownsEnv := top || slices.ContainsFunc(names, func(k string) bool {
+			switch v[k].(type) {
+			case string, []any:
+				return listed(k)
+			}
+			return false
+		})
 		for _, k := range names {
 			if cs.capped {
 				return
@@ -477,8 +491,11 @@ func siblingCommand(m map[string]any) string {
 
 // argv adds words as tokens, words[0] as the program when programFirst. A
 // shell-command flag after a shell program (sh is the kind of one already
-// seen) sends the next word through shell.
+// seen) sends the next word through shell. A working-directory flag makes its
+// value a base for the words after it, as "cd" does (ruling R24); it stops,
+// marking cs capped, when that would cross maxCdBases.
 func (cs *commandSet) argv(words []string, programFirst bool, sh string, st shellState) {
+	st.bases = slices.Clip(st.bases) // appends here never write into the caller's tokens
 	for i, w := range words {
 		if cs.capped {
 			return
@@ -490,7 +507,33 @@ func (cs *commandSet) argv(words []string, programFirst bool, sh string, st shel
 		if k := shellKind(w); k != "" {
 			sh = k
 		}
+		dir, ok := dirFlagValue(w)
+		if !ok && i > 0 && slices.Contains(dirFlags, words[i-1]) {
+			dir, ok = w, true
+		}
+		if ok && dir != "" {
+			if st, ok = st.cd(dir); !ok {
+				cs.capped = true
+				return
+			}
+		}
 	}
+}
+
+// dirFlags are the tool working-directory flags followed like "cd" (ruling
+// R24): uv's --directory and --project, git's and make's -C, and --cwd (bun,
+// yarn). Other tools' flags are a documented residual.
+var dirFlags = []string{"--directory", "-C", "--cwd", "--project"}
+
+// dirFlagValue returns X for a "--directory=X", "--cwd=X" or "--project=X"
+// word.
+func dirFlagValue(w string) (string, bool) {
+	for _, f := range dirFlags {
+		if v, ok := strings.CutPrefix(w, f+"="); ok && f != "-C" {
+			return v, true
+		}
+	}
+	return "", false
 }
 
 // shellKind classifies a program word by basename: "sh" for sh, bash and zsh,

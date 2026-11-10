@@ -1701,6 +1701,7 @@ func TestParallelPromotionRejectsUnsafeStateBeforeWriting(t *testing.T) {
 		name  string
 		file  string
 		setup func(*testing.T, string, string)
+		want  string // a substring of promoteWorkers' error, when set
 	}{
 		{name: "escaping path", file: "../escape.go"},
 		{name: "worker symlink", file: "unsafe.go", setup: func(t *testing.T, _, worker string) {
@@ -1713,7 +1714,22 @@ func TestParallelPromotionRejectsUnsafeStateBeforeWriting(t *testing.T) {
 				t.Fatal(err)
 			}
 		}},
+		// The harness classifier keeps a link's own spelling, so with the target
+		// present it passes unsafe/file.go and apply's parent guard must refuse.
 		{name: "canonical symlink parent", file: "unsafe/file.go", setup: func(t *testing.T, root, worker string) {
+			if err := os.Mkdir(filepath.Join(worker, "unsafe"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			writeTestFile(t, filepath.Join(worker, "unsafe", "file.go"), "worker\n", 0o600)
+			if err := os.Mkdir(filepath.Join(root, "elsewhere"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink("elsewhere", filepath.Join(root, "unsafe")); err != nil {
+				t.Fatal(err)
+			}
+		}, want: "promotion parent is not a real directory"},
+		// A dangling parent link is refused earlier, by the harness classifier.
+		{name: "canonical dangling symlink parent", file: "unsafe/file.go", setup: func(t *testing.T, root, worker string) {
 			if err := os.Mkdir(filepath.Join(worker, "unsafe"), 0o700); err != nil {
 				t.Fatal(err)
 			}
@@ -1721,7 +1737,7 @@ func TestParallelPromotionRejectsUnsafeStateBeforeWriting(t *testing.T) {
 			if err := os.Symlink("elsewhere", filepath.Join(root, "unsafe")); err != nil {
 				t.Fatal(err)
 			}
-		}},
+		}, want: "refuse parallel promotion: unsafe/file.go: cannot resolve"},
 		{name: "canonical symlink", file: "unsafe.go", setup: func(t *testing.T, root, worker string) {
 			writeTestFile(t, filepath.Join(worker, "unsafe.go"), "worker\n", 0o600)
 			if err := os.Symlink("sentinel.go", filepath.Join(root, "unsafe.go")); err != nil {
@@ -1755,8 +1771,12 @@ func TestParallelPromotionRejectsUnsafeStateBeforeWriting(t *testing.T) {
 				tt.file:       {path: tt.file},
 			}
 			writeTestFile(t, filepath.Join(worker, "sentinel.go"), "promoted\n", 0o600)
-			if _, err := c.promoteWorkers(context.Background()); err == nil {
+			_, err = c.promoteWorkers(context.Background())
+			if err == nil {
 				t.Fatal("promoteWorkers() unexpectedly succeeded")
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("promoteWorkers() error = %v, want it to contain %q", err, tt.want)
 			}
 			if got := readTestFile(t, filepath.Join(root, "sentinel.go")); got != "original\n" {
 				t.Fatalf("promotion wrote before validating every path: %q", got)
@@ -1964,8 +1984,8 @@ func TestHarnessPromotionRefusesGitignoredImport(t *testing.T) {
 				}
 			}
 			// containment: GRANT-HARNESS-REF-UNATTENDED
-			if imports && (err == nil || !strings.Contains(err.Error(), "refuse parallel promotion") || !strings.Contains(err.Error(), "docs/p.md")) {
-				t.Fatalf("runCohort() error = %v, want a refused promotion naming docs/p.md", err)
+			if imports && (err == nil || !strings.Contains(err.Error(), "refuse parallel promotion") || !strings.Contains(err.Error(), "docs/p.md: CLAUDE.local.md imports docs/p.md")) {
+				t.Fatalf("runCohort() error = %v, want a refused promotion naming docs/p.md and the import", err)
 			}
 			if !imports && err != nil {
 				t.Fatalf("runCohort() error = %v, want both files promoted", err)
@@ -1994,8 +2014,8 @@ func TestHarnessPromotionRefusesDeletion(t *testing.T) {
 
 	_, err := runHarnessCohort(t, root, "docs/a.md", "src/q.go")
 	// containment: GRANT-HARNESS-REF-UNATTENDED
-	if err == nil || !strings.Contains(err.Error(), "refuse parallel promotion") || !strings.Contains(err.Error(), "docs/a.md") {
-		t.Fatalf("runCohort() error = %v, want a refused promotion naming docs/a.md", err)
+	if err == nil || !strings.Contains(err.Error(), "refuse parallel promotion") || !strings.Contains(err.Error(), "docs/a.md: CLAUDE.md imports docs/a.md") {
+		t.Fatalf("runCohort() error = %v, want a refused promotion naming docs/a.md and the import", err)
 	}
 	if got := readTestFile(t, filepath.Join(root, "docs", "a.md")); got != "a\n" {
 		t.Fatalf("canonical docs/a.md = %q", got)

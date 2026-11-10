@@ -385,6 +385,27 @@ func TestHarnessRefsDanglingVirtualLink(t *testing.T) {
 	}
 }
 
+// TestHarnessRefsDanglingGlobLink: a dangling folder link under an OpenCode
+// glob's literal prefix covers its lexical target, as a harness-path link
+// does (spec D5, D6). The set is checked directly: Plan's fixtures create the
+// target's parent, which would resolve the link.
+func TestHarnessRefsDanglingGlobLink(t *testing.T) {
+	_, _, ws := harnessRefFixture(t, harnessRefRow{unix: true,
+		files: map[string]string{"opencode.json": `{"instructions":["rules/*/policy.md"]}`, "docs/keep.txt": "k\n"},
+		links: map[string]string{"rules/team": "../docs/team"},
+	})
+	refs := ws.harnessReferences(context.Background())
+	if !refs.complete {
+		t.Fatalf("set incomplete: %s", refs.cause)
+	}
+	if ok, why := refs.covers("docs/team/policy.md"); !ok || why != "rules/team links to docs/team" {
+		t.Fatalf("covers(docs/team/policy.md) = (%v, %q), want the rules/team reason", ok, why)
+	}
+	if ok, why := refs.covers("docs/notes.txt"); ok {
+		t.Fatalf("docs/notes.txt covered: %s", why)
+	}
+}
+
 // harnessPlanTool is a write_file or edit_file call on rel, to plan, invoke
 // and compare. Both tools write "new\n" over what rel holds ("old\n" for
 // edit_file's existing target, absent for write_file's).
@@ -472,6 +493,75 @@ func TestHarnessPlanInvokeRecheck(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// harnessPlanInvoke plans tool on rel, runs change, then invokes the same
+// call, returning the planned key and Invoke's content.
+func harnessPlanInvoke(t *testing.T, ws *Workspace, tool, rel string, change func()) (string, string) {
+	t.Helper()
+	for _, c := range harnessPlanTools(t, ws, rel) {
+		if c.name != tool {
+			continue
+		}
+		p, err := c.plan(context.Background(), c.raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		change()
+		res, err := c.run(context.Background(), c.raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return p.ApprovalKey, res.Content
+	}
+	t.Fatalf("no tool %s", tool)
+	return "", ""
+}
+
+// TestHarnessPlanInvokeRecheckIncomplete: an ordinary write planned with the
+// write-class key is refused at Invoke when a harness file turns malformed in
+// between, since the set can no longer be checked, and nothing is written.
+func TestHarnessPlanInvokeRecheckIncomplete(t *testing.T) {
+	for _, tool := range []string{"write_file", "edit_file"} {
+		t.Run(tool, func(t *testing.T) {
+			_, root, ws := harnessRefFixture(t, harnessRefRow{})
+			key, got := harnessPlanInvoke(t, ws, tool, "notes.txt", func() {
+				if err := os.WriteFile(filepath.Join(root, ".mcp.json"), []byte(`{"a":`), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			})
+			if key != WriteClassApprovalKey || !strings.Contains(got, harnessKeyLostMsg) {
+				t.Fatalf("planned key %q, Invoke = %q; want the write-class key, then the refusal", key, got)
+			}
+			if b, err := os.ReadFile(filepath.Join(root, "notes.txt")); err != nil || string(b) != "old\n" {
+				t.Fatalf("notes.txt = %q (%v), want unchanged", b, err)
+			}
+		})
+	}
+}
+
+// TestHarnessPlanInvokeNoRecheckForEmptyKey: a call that planned "" (a
+// covered target) is not rechecked at Invoke. A human approved that exact
+// call, so removing the reference in between does not stop the write.
+func TestHarnessPlanInvokeNoRecheckForEmptyKey(t *testing.T) {
+	for _, tool := range []string{"write_file", "edit_file"} {
+		t.Run(tool, func(t *testing.T) {
+			_, root, ws := harnessRefFixture(t, harnessRefRow{files: map[string]string{
+				"CLAUDE.md": "@docs/policy.md\n", "docs/policy.md": "old\n",
+			}})
+			key, got := harnessPlanInvoke(t, ws, tool, "docs/policy.md", func() {
+				if err := os.WriteFile(filepath.Join(root, "CLAUDE.md"), []byte("no imports\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			})
+			if key != "" || strings.Contains(got, harnessKeyLostMsg) {
+				t.Fatalf("planned key %q, Invoke = %q; want \"\", then a landed write", key, got)
+			}
+			if b, err := os.ReadFile(filepath.Join(root, "docs", "policy.md")); err != nil || string(b) != "new\n" {
+				t.Fatalf("docs/policy.md = %q (%v), want the approved write", b, err)
+			}
+		})
 	}
 }
 

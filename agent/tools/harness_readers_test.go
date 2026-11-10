@@ -319,6 +319,14 @@ func TestHarnessReadShellStrings(t *testing.T) {
 		{"server named env", mcp, `{"mcpServers":{"env":{"command":"./evil.sh"}}}`, []string{"w/evil.sh"}, false, nil},
 		{"server named permissions", claude, `{"mcpServers":{"permissions":{"command":"./p.sh"}}}`, []string{"w/p.sh"}, false, nil},
 		{"cd /D flag", claude, `{"command":"cd /D sub && ./run.bat"}`, []string{"w/sub/run.bat"}, false, nil},
+		// Final review: F1 (a server named "command" beside one named "env") and
+		// F3 (ruling R24, working-directory flags).
+		{"server named command beside env", mcp, `{"mcpServers":{"command":{"command":"x"},"env":{"command":"./evil.sh"}}}`, []string{"w/evil.sh"}, false, nil},
+		{"uv --directory args", mcp, `{"command":"uv","args":["--directory","mcp","run","server.py"]}`, []string{"w/mcp/server.py", "w/mcp", "w/server.py"}, false, nil},
+		{"uv --directory= args", mcp, `{"command":"uv","args":["--directory=mcp","run","server.py"]}`, []string{"w/mcp/server.py"}, false, nil},
+		{"uv --directory shell", claude, `{"command":"uv --directory mcp run server.py"}`, []string{"w/mcp/server.py"}, false, nil},
+		{"git -C argv", golem, `{"argv":["git","-C","sub","x.sh"]}`, []string{"w/sub/x.sh"}, false, nil},
+		{"--cwd and --project", claude, `{"command":"bun --cwd=web run a.ts; uv --project svc run b.py"}`, []string{"w/web/a.ts", "w/svc/b.py"}, false, []string{"w/web/b.py"}},
 	}
 	for _, r := range rows {
 		t.Run(r.name, func(t *testing.T) {
@@ -486,6 +494,10 @@ func TestHarnessReadCommandBounds(t *testing.T) {
 		{"64 cd bases", ".claude/settings.json", `{"command":"` + strings.Repeat("cd a;", 64) + `./x.sh"}`, true},
 		{"65 cd bases", ".claude/settings.json", `{"command":"` + strings.Repeat("cd a;", 65) + `./x.sh"}`, false},
 		{"repeated cd deduped", ".claude/settings.json", `{"command":"` + strings.Repeat("cd a; cd /abs; ", 500) + `./x.sh"}`, true},
+		// Working-directory flags count against the same cap (ruling R24).
+		{"64 directory flags", ".golem.json", `{"argv":["git"` + strings.Repeat(`,"-C","a"`, 64) + `,"x.sh"]}`, true},
+		{"65 directory flags", ".golem.json", `{"argv":["git"` + strings.Repeat(`,"-C","a"`, 65) + `,"x.sh"]}`, false},
+		{"65 directory flags in a shell string", ".claude/settings.json", `{"command":"git` + strings.Repeat(" --cwd=a", 65) + ` x.sh"}`, false},
 	}
 	for _, r := range rows {
 		t.Run(r.name, func(t *testing.T) {

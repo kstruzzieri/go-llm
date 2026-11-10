@@ -87,8 +87,10 @@ type harnessRefs struct {
 type harnessVirtualLink struct{ target, vpath, link string }
 
 // harnessPattern is an OpenCode instructions glob over HarnessKey workspace
-// paths (spec D5), with its reason.
-type harnessPattern struct{ key, reason string }
+// paths (spec D5), with its reason. prefix is its literal folder, unescaped:
+// the HarnessKey of the segments before the first holding *?[ ("" for the
+// root), which patternLinks matches links against.
+type harnessPattern struct{ key, prefix, reason string }
 
 // covers reports whether a write to the workspace-relative path rel is a
 // harness reference, and the first matching reason: an exact reference, then
@@ -148,7 +150,8 @@ type harnessVisit struct{ real, vkey string }
 // followed through (ruling R19), Linux's own limit.
 const maxLinkHops = 40
 
-// harnessLink is a link to a folder the walk met, kept for OpenCode globs.
+// harnessLink is a link to a folder, or a dangling link, the walk met, kept
+// for OpenCode globs.
 type harnessLink struct{ abs, vrel string }
 
 // refBuilder builds one harnessRefs. The first failure is the cause, and
@@ -339,7 +342,8 @@ func harnessVirtualName(name string) bool {
 // read by the reader the link's path selects. Any other resolution failure
 // makes the set incomplete.
 func (b *refBuilder) symlink(d harnessDir, abs, vrel, v string, harness bool) {
-	if fi, err := os.Stat(abs); err == nil && fi.IsDir() {
+	// A dangling link is kept too: a folder may be created at its target.
+	if fi, err := os.Stat(abs); err == nil && fi.IsDir() || errors.Is(err, fs.ErrNotExist) {
 		b.dirLinks = append(b.dirLinks, harnessLink{abs: abs, vrel: vrel})
 	}
 	named := harnessVirtualName(filepath.Base(vrel))
@@ -630,23 +634,25 @@ func (b *refBuilder) opencode(f harnessFile, doc any) {
 			}
 		}
 		for _, p := range patterns {
-			for _, k := range b.patternKeys(dir, p) {
-				why := fmt.Sprintf("%s instructions match %s", harnessQuote(f.label), harnessQuote(k))
-				b.refs.patterns = append(b.refs.patterns, harnessPattern{key: k, reason: why})
+			for _, hp := range b.patternKeys(dir, p) {
+				hp.reason = fmt.Sprintf("%s instructions match %s", harnessQuote(f.label), harnessQuote(hp.key))
+				b.refs.patterns = append(b.refs.patterns, hp)
 			}
 		}
 	}
 }
 
 // patternKeys returns the glob p, written in folder dir or absolute, as
-// HarnessKey globs over workspace paths. Its literal folder (the glob's own
-// segments before the first holding *?[, joined to dir) is placed like a
-// path, and never read as glob syntax: dir, the root and the literal part may
-// hold *?[ as plain characters, so the literal part is escaped in the key. A
-// glob whose literal folder lies above the root (D12) is narrowed to what it
-// matches below the root, so ../opencode.json's **/*.md still covers the
-// workspace's Markdown; one that leaves the root matches nothing.
-func (b *refBuilder) patternKeys(dir, p string) []string {
+// HarnessKey globs over workspace paths, each with its literal prefix (no
+// reason). Its literal folder (the glob's own segments before the first
+// holding *?[, joined to dir) is placed like a path, and never read as glob
+// syntax: dir, the root and the literal part may hold *?[ as plain
+// characters, so the literal part is escaped in the key and kept unescaped as
+// the prefix. A glob whose literal folder lies above the root (D12) is
+// narrowed to what it matches below the root, so ../opencode.json's **/*.md
+// still covers the workspace's Markdown; one that leaves the root matches
+// nothing.
+func (b *refBuilder) patternKeys(dir, p string) []harnessPattern {
 	segs := strings.Split(path.Clean(filepath.ToSlash(p)), "/")
 	i := slices.IndexFunc(segs, func(s string) bool { return strings.ContainsAny(s, "*?[") })
 	if i < 0 {
@@ -659,8 +665,12 @@ func (b *refBuilder) patternKeys(dir, p string) []string {
 		base = filepath.Join(dir, base)
 	}
 	if rel, ok := b.place(base); ok {
-		lit := harnessGlobEscape.Replace(interceptor.HarnessKey(rel))
-		return []string{path.Join(lit, interceptor.HarnessKey(path.Join(rest...)))}
+		prefix := interceptor.HarnessKey(rel)
+		if rel == "." {
+			prefix = ""
+		}
+		key := path.Join(harnessGlobEscape.Replace(prefix), interceptor.HarnessKey(path.Join(rest...)))
+		return []harnessPattern{{key: key, prefix: prefix}}
 	}
 	down, err := filepath.Rel(resolveExisting(base), b.w.root)
 	if err != nil || down == ".." || strings.HasPrefix(down, ".."+string(os.PathSeparator)) {
@@ -683,9 +693,13 @@ func (b *refBuilder) patternKeys(dir, p string) []string {
 		slices.SortFunc(next, func(x, y []string) int { return len(x) - len(y) })
 		pats = slices.CompactFunc(next, func(x, y []string) bool { return len(x) == len(y) })
 	}
-	keys := make([]string, 0, len(pats))
+	keys := make([]harnessPattern, 0, len(pats))
 	for _, pat := range pats {
-		keys = append(keys, strings.Join(pat, "/"))
+		i := slices.IndexFunc(pat, func(s string) bool { return strings.ContainsAny(s, "*?[") })
+		if i < 0 {
+			i = len(pat)
+		}
+		keys = append(keys, harnessPattern{key: strings.Join(pat, "/"), prefix: strings.Join(pat[:i], "/")})
 	}
 	return keys
 }
@@ -696,43 +710,42 @@ var harnessGlobEscape = strings.NewReplacer(`\`, `\\`, "*", `\*`, "?", `\?`, "["
 
 // patternLinks makes the in-workspace target of every folder link a glob
 // reaches a subtree reference (spec D5): a link at or below the glob's literal
-// prefix (the segments before the first holding *?[) covers its whole target,
-// and a link above the prefix the part of its target the prefix names. A link
-// that vanished is skipped; any other resolution failure makes the set
-// incomplete. Known over-coverage, kept
-// on purpose: an empty prefix (**/*.md) takes every folder link's target.
+// prefix (harnessPattern.prefix) covers its whole target, and a link above the
+// prefix the part of its target the prefix names. A dangling link counts through its lexical targets (danglingTargets, as D6
+// does for harness paths), since a folder may be created there. A link that
+// vanished is skipped; any other resolution failure makes the set incomplete.
+// Known over-coverage, kept on purpose: an empty prefix (**/*.md) takes every
+// folder link's target.
 func (b *refBuilder) patternLinks() {
 	for _, p := range b.refs.patterns {
-		var lit []string
-		for _, s := range strings.Split(p.key, "/") {
-			if strings.ContainsAny(s, "*?[") {
-				break
-			}
-			lit = append(lit, s)
-		}
-		prefix := strings.Join(lit, "/")
 		for _, l := range b.dirLinks {
 			if b.failed() {
 				return
 			}
 			k, extra := interceptor.HarnessKey(l.vrel), ""
 			switch {
-			case harnessUnder(k, prefix):
-			case harnessUnder(prefix, k):
-				extra = prefix[len(k)+1:]
+			case harnessUnder(k, p.prefix):
+			case harnessUnder(p.prefix, k):
+				extra = p.prefix[len(k)+1:]
 			default:
 				continue
 			}
 			t, err := filepath.EvalSymlinks(l.abs)
+			targets := []string{t}
 			if errors.Is(err, fs.ErrNotExist) {
-				continue // vanished, or dangling now (spec D8)
+				var vanished bool
+				if targets, vanished, err = danglingTargets(l.abs); vanished {
+					continue // spec D8
+				}
 			}
 			if err != nil {
 				b.fail(harnessQuote(l.vrel), "link cannot be resolved")
 				return
 			}
-			if rel, ok := b.place(filepath.Join(t, filepath.FromSlash(extra))); ok {
-				b.add(b.refs.subtree, rel, fmt.Sprintf("%s links to %s", harnessQuote(l.vrel), harnessQuote(rel)))
+			for _, t := range targets {
+				if rel, ok := b.place(filepath.Join(t, filepath.FromSlash(extra))); ok {
+					b.add(b.refs.subtree, rel, fmt.Sprintf("%s links to %s", harnessQuote(l.vrel), harnessQuote(rel)))
+				}
 			}
 		}
 	}
