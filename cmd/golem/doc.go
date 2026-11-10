@@ -200,11 +200,52 @@
 // the repository changes nothing, and an unlistable folder inside the
 // workspace makes writes beneath it prompt. The line still says "harness
 // file" though the file may be ordinary. Windows 8.3 short names (CLAUDE~1)
-// and trailing-dot or alternate-stream spellings match on every platform. Not
-// covered: writes made by commands (run_command, start_command, the
-// post-write verifier, scratch commands, Agentflow parallel promotion); files
-// that a harness file imports or runs, and symlinks inside harness folders
-// that point at ordinary folders (issue #784); a workspace rooted in a git
+// and trailing-dot or alternate-stream spellings match on every platform.
+//
+// A harness file also controls the files it points at, so write_file and
+// edit_file treat those as harness files too (#784): they always prompt,
+// grant nothing, and are denied unattended, under the notice "agent
+// instruction or harness configuration file, or a file one of them loads,
+// runs or links to; other tools load or run it, so this approval is not
+// remembered". Covered are Markdown @ imports (followed five hops, existing
+// or not), the commands and arguments in the configuration files named
+// next, OpenCode instructions entries and patterns, what symlinks at
+// harness paths reach, and fixed paths in every ancestor folder,
+// ~/.claude/settings.json included. The command-file list begins:
+// .claude/settings.json, .claude/settings.local.json, .mcp.json,
+// .cursor/hooks.json, .cursor/mcp.json, .windsurf/hooks.json,
+// .gemini/settings.json, .github/hooks/*.json, .github/copilot/*.json,
+// .vscode/mcp.json, .vscode/settings.json, opencode.json, opencode.jsonc,
+// .golem.json and .codex/config.toml. The command-file list ends. env and
+// permissions values are not read. Commands are read best-effort: cd in a
+// shell string, the project-folder variables ($CLAUDE_PROJECT_DIR,
+// ${workspaceFolder} and the like) and Golem's own PATH lookup are
+// followed; other variables, command substitution, scripts that call
+// scripts and another tool's own PATH are not. The search skips .git and
+// the other ignored folders, the build-output folders target, build, dist,
+// out, .venv, venv, __pycache__, .gradle, .next and .tox, any folder
+// holding its own .git entry, and folders this user cannot search; it is
+// bounded to 100,000 entries, 256 KiB per configuration file, 32 MiB read
+// per call and five import hops. If the search cannot finish (an unreadable
+// or malformed harness file, an ancestor ~/.claude/settings.json included,
+// or a crossed bound), every file-tool write prompts. The preview's first
+// line, "harness reference: <reason>", names the cause; -p prints "golem:
+// harness reference: ..." after its denial line, and Agentflow task steps
+// print "golem: task step denied <tool>: harness file (<notice>)" and the
+// same line. Parallel Agentflow promotion refuses a whole batch, writes and
+// deletions, with "refuse parallel promotion: <path>: <reason>" and applies
+// nothing. Residuals: other variables and run-time command behavior;
+// ancestor files below the fixed paths; skipped folders; permission rules
+// that are not commands; Copilot #file: references, YAML configuration and
+// custom Gemini contextFileName names; folder links at paths other than
+// .github and .vscode; a change between the last check and the rename; on
+// Windows, cmd.exe running a bare run.bat from the current folder and
+// cloud-sync placeholder files; cmd /k, PowerShell flag abbreviations and
+// -EncodedCommand, and pushd; and macOS privacy protection (TCC) blocking a
+// read.
+//
+// Not covered: writes made by commands (run_command, start_command, the
+// post-write verifier, scratch commands); a workspace rooted in a git
 // submodule or nested repository inside a harness folder, whose files are
 // classified from that repository's own folder; and hosts embedding the
 // library with a plain agent.Approver, which never receives the key.
