@@ -877,3 +877,12 @@ func TestHarnessPlanReferencesUserSettings(t *testing.T) {
 		covered: []string{"scripts/lint.sh"},
 	})
 }
+
+// TestHarnessPlanReferencesUnreachableImportNames: Markdown "@" words that
+// name no file anyone can read leave the set complete (fix round 1b). On
+// Windows these names fail the stat as invalid or too long rather than absent.
+func TestHarnessPlanReferencesUnreachableImportNames(t *testing.T) {
+	runHarnessPlanRow(t, harnessRefRow{files: map[string]string{
+		"CLAUDE.md": "contact @team: now\n@https://example.com/x.md\n@" + strings.Repeat("n", 300) + ".md\n",
+	}})
+}

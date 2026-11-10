@@ -508,15 +508,15 @@ func (b *refBuilder) importToken(label, tok string, dirs []string, depth int) {
 		if depth+1 >= harnessImportDepth || b.failed() {
 			continue
 		}
-		// A name nobody can reach (absent, through a file, too long, a link
-		// loop) names nothing; any other stat failure fails closed (M8).
+		// A name nobody can reach names nothing (isAbsentStatErr, per
+		// platform); any other stat failure fails closed (M8).
 		fi, err := os.Stat(c)
 		switch {
 		case err == nil:
 			if fi.Mode().IsRegular() {
 				b.markdown(harnessFile{abs: c, vabs: c, v: c, label: name}, depth+1)
 			}
-		case harnessAbsent(err), errors.Is(err, syscall.ENAMETOOLONG), errors.Is(err, syscall.ELOOP):
+		case isAbsentStatErr(err):
 		default:
 			b.fail(harnessQuote(name), "cannot be read")
 		}
