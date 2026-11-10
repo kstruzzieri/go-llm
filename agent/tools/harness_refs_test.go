@@ -147,8 +147,10 @@ func TestHarnessRefsFailClosed(t *testing.T) {
 		{name: "entry bound", files: harnessFiles("f", 20), want: "walk stopped at the entry limit",
 			prep: func(_ *testing.T, _, _ string, ws *Workspace) { ws.harnessMaxEntries = 10 }},
 		{name: "symlink loop in rules", unix: true, links: map[string]string{".claude/rules/a": "b", ".claude/rules/b": "a"}, want: "link cannot be resolved"},
-		{name: "unreadable import", files: map[string]string{"CLAUDE.md": "@sealed/x.md\n", "sealed/x.md": "x\n"}, want: "sealed/x.md cannot be read",
-			prep: func(t *testing.T, _, root string, _ *Workspace) { harnessChmod(t, filepath.Join(root, "sealed"), 0) }},
+		{name: "imported file that cannot be read", files: map[string]string{"CLAUDE.md": "@docs/x.md\n", "docs/x.md": "x\n"}, want: "docs/x.md cannot be read",
+			prep: func(t *testing.T, _, root string, _ *Workspace) {
+				harnessChmod(t, filepath.Join(root, "docs", "x.md"), 0)
+			}},
 		{name: "dangling link chain past 40 hops", unix: true, links: harnessLinkChain(41), want: "CLAUDE.md link cannot be resolved"},
 		{name: "malformed ancestor settings", root: "outer/ws", files: map[string]string{"../.claude/settings.json": `{"a":`}, want: "outer/.claude/settings.json does not parse",
 			prep: func(_ *testing.T, tmp, _ string, ws *Workspace) { ws.harnessAncestorStop = tmp }},
@@ -213,6 +215,10 @@ func TestHarnessRefsNotFailures(t *testing.T) {
 		{name: "1 MiB skill document", files: map[string]string{".claude/skills/big.md": strings.Repeat("x", 1<<20)}},
 		{name: "unknown variable", files: map[string]string{".claude/settings.json": `{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"$OTHER/x.sh"}]}]}}`}},
 		{name: "seven-hop import chain", files: harnessChain(7)},
+		{name: "import inside an unsearchable folder", files: map[string]string{"CLAUDE.md": "@sealed/x.md\n", "sealed/x.md": "x\n"},
+			prep: func(t *testing.T, _, root string, _ *Workspace) { harnessChmod(t, filepath.Join(root, "sealed"), 0) }},
+		{name: "NUL in an import", files: map[string]string{"CLAUDE.md": "see @a\x00b.md\n"}},
+		{name: "dangling link chain of 40 hops", unix: true, links: harnessLinkChain(40)},
 		{name: "folder link cycle in rules", unix: true, files: map[string]string{".claude/rules/a.md": "x\n"},
 			links: map[string]string{".claude/rules/up": ".."}},
 		{name: "imports no file can have", unix: true,
@@ -322,5 +328,22 @@ func TestHarnessRefsVanishedLink(t *testing.T) {
 	hops, vanished, err := danglingTargets(filepath.Join(t.TempDir(), "gone"))
 	if !vanished || hops != nil {
 		t.Fatalf("danglingTargets(gone) = (%q, %v, %v), want vanished", hops, vanished, err)
+	}
+}
+
+// TestHarnessRefsDanglingVirtualLink: a dangling .github link's lexical
+// target still classifies what is created there (ruling R20).
+func TestHarnessRefsDanglingVirtualLink(t *testing.T) {
+	_, _, ws := harnessRefFixture(t, harnessRefRow{unix: true, links: map[string]string{".github": "cfg"}})
+	refs := ws.harnessReferences(context.Background())
+	if !refs.complete {
+		t.Fatalf("set incomplete: %s", refs.cause)
+	}
+	// containment: PATH-HARNESS-REF
+	if ok, why := refs.covers("cfg/hooks/new.json"); !ok || why != ".github links to cfg/hooks/new.json" {
+		t.Fatalf("covers(cfg/hooks/new.json) = (%v, %q), want the .github reason", ok, why)
+	}
+	if ok, why := refs.covers("cfg/notes.txt"); ok {
+		t.Fatalf("cfg/notes.txt covered: %s", why)
 	}
 }
