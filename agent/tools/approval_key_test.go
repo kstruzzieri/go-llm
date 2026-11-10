@@ -191,10 +191,7 @@ func TestWriteAndEditShareTheWriteClassKey(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "f.txt"), []byte("old\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	ws, err := NewWorkspace(root)
-	if err != nil {
-		t.Fatal(err)
-	}
+	ws := harnessWorkspace(t, root) // the host's folders above root must not decide the key (#784)
 	wp, err := NewWriteFile(ws, nil).Plan(context.Background(),
 		json.RawMessage(`{"path":"f.txt","content":"new\n"}`))
 	if err != nil {
@@ -688,6 +685,42 @@ func TestHarnessPlanReferencesKinds(t *testing.T) {
 			files:   map[string]string{"../CLAUDE.md": "@ws/docs/up.md\n", "../.claude/settings.json": hook("ws/scripts/up.sh")},
 			prep:    func(_ *testing.T, tmp, _ string, ws *Workspace) { ws.harnessAncestorStop = tmp },
 			covered: []string{"docs/up.md", "scripts/up.sh"}},
+		// Fix round 1.
+		{name: "absent hook script behind a linked folder", unix: true,
+			files:   map[string]string{".claude/settings.json": hook("./scripts/x.sh"), "tools/keep.txt": "k\n"},
+			links:   map[string]string{"scripts": "tools"},
+			covered: []string{"tools/x.sh"}},
+		{name: "absent import behind a linked folder", unix: true,
+			files:   map[string]string{"CLAUDE.md": "@docs/shared/new.md\n", "common/keep.txt": "k\n"},
+			links:   map[string]string{"docs/shared": "../common"},
+			covered: []string{"common/new.md"}},
+		{name: "absolute OpenCode glob", files: map[string]string{"opencode.json": `{"instructions":["{root}/rules/*.md"]}`},
+			covered: []string{"rules/new.md"}},
+		{name: "ancestor .clinerules folder", root: "outer/ws",
+			files:   map[string]string{"../.clinerules/a.md": "@../ws/docs/cl.md\n"},
+			prep:    func(_ *testing.T, tmp, _ string, ws *Workspace) { ws.harnessAncestorStop = tmp },
+			covered: []string{"docs/cl.md"}},
+		{name: "workspace .clinerules folder", files: map[string]string{".clinerules/team.md": "@../docs/cw.md\n"},
+			covered: []string{"docs/cw.md"}},
+		{name: "repository settings with the root under a .codex folder", root: "x/.codex/w/repo/sub",
+			files: map[string]string{"../.git/HEAD": "ref: refs/heads/main\n", "../.claude/settings.json": hook("sub/scripts/a.sh")},
+			prep: func(_ *testing.T, tmp, _ string, ws *Workspace) {
+				ws.harnessAncestorStop = filepath.Join(tmp, "x", ".codex", "w")
+			},
+			covered: []string{"scripts/a.sh"}},
+		{name: ".github and .vscode linked to one folder", unix: true,
+			files: map[string]string{
+				"cfg/mcp.json":     `{"servers":{"s":{"command":"./scripts/v.sh"}}}`,
+				"cfg/hooks/h.json": `{"hooks":{"sessionStart":[{"bash":"./scripts/h.sh"}]}}`,
+			},
+			links:   map[string]string{".github": "cfg", ".vscode": "cfg"},
+			covered: []string{"scripts/v.sh", "scripts/h.sh"}},
+		{name: "root inside a .github folder", root: "repo/.github/sub",
+			files:   map[string]string{"../../.git/HEAD": "ref: refs/heads/main\n", ".claude/settings.json": hook("scripts/x.sh")},
+			covered: []string{"scripts/x.sh"}},
+		{name: "dangling link chain", unix: true,
+			links:   map[string]string{"CLAUDE.md": "b", "b": "c"},
+			covered: []string{"c"}},
 	}
 	// One script row per D4 file.
 	for _, f := range HarnessCommandFiles() {

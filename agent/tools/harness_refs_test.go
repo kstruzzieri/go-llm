@@ -3,13 +3,14 @@ package tools
 import (
 	"cmp"
 	"context"
+	"errors"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // harnessRefRow is one reference-set fixture (#784). Paths are relative to
@@ -17,7 +18,7 @@ import (
 type harnessRefRow struct {
 	name  string
 	root  string            // the root below the temp folder; "" means "ws"
-	files map[string]string // "{tmp}" and "{root}" in a content are replaced
+	files map[string]string // "{tmp}" and "{root}" in a content become slash paths
 	links map[string]string // link -> target as written, relative to the link's folder
 	unix  bool              // links, FIFOs, modes or the exec bit: skip on Windows
 	// prep runs after the Workspace is built and before anything is checked.
@@ -50,7 +51,7 @@ func harnessRefFixture(t *testing.T, r harnessRefRow) (string, string, *Workspac
 	root := filepath.Join(tmp, filepath.FromSlash(cmp.Or(r.root, "ws")))
 	files := map[string]string{"notes.txt": "old\n"}
 	for rel, content := range r.files {
-		files[rel] = strings.NewReplacer("{tmp}", tmp, "{root}", root).Replace(content)
+		files[rel] = strings.NewReplacer("{tmp}", filepath.ToSlash(tmp), "{root}", filepath.ToSlash(root)).Replace(content)
 	}
 	for rel, content := range files {
 		p := filepath.Join(root, filepath.FromSlash(rel))
@@ -142,14 +143,13 @@ func TestHarnessRefsFailClosed(t *testing.T) {
 				harnessChmod(t, filepath.Join(root, "locked"), 0o111)
 			}},
 		{name: "harness link to a FIFO", unix: true, links: map[string]string{".claude/rules/p": "../../fifo"}, want: ".claude/rules/p is not a regular file",
-			prep: func(t *testing.T, _, root string, _ *Workspace) {
-				if err := exec.Command("mkfifo", filepath.Join(root, "fifo")).Run(); err != nil {
-					t.Skipf("mkfifo: %v", err)
-				}
-			}},
+			prep: func(t *testing.T, _, root string, _ *Workspace) { harnessMkfifo(t, filepath.Join(root, "fifo")) }},
 		{name: "entry bound", files: harnessFiles("f", 20), want: "walk stopped at the entry limit",
 			prep: func(_ *testing.T, _, _ string, ws *Workspace) { ws.harnessMaxEntries = 10 }},
 		{name: "symlink loop in rules", unix: true, links: map[string]string{".claude/rules/a": "b", ".claude/rules/b": "a"}, want: "link cannot be resolved"},
+		{name: "unreadable import", files: map[string]string{"CLAUDE.md": "@sealed/x.md\n", "sealed/x.md": "x\n"}, want: "sealed/x.md cannot be read",
+			prep: func(t *testing.T, _, root string, _ *Workspace) { harnessChmod(t, filepath.Join(root, "sealed"), 0) }},
+		{name: "dangling link chain past 40 hops", unix: true, links: harnessLinkChain(41), want: "CLAUDE.md link cannot be resolved"},
 		{name: "malformed ancestor settings", root: "outer/ws", files: map[string]string{"../.claude/settings.json": `{"a":`}, want: "outer/.claude/settings.json does not parse",
 			prep: func(_ *testing.T, tmp, _ string, ws *Workspace) { ws.harnessAncestorStop = tmp }},
 		{name: "cancelled", want: "walk cancelled"},
@@ -184,6 +184,16 @@ func harnessFiles(prefix string, n int) map[string]string {
 	return files
 }
 
+// harnessLinkChain returns links CLAUDE.md -> l1 -> ... -> l<n>, with l<n>
+// absent.
+func harnessLinkChain(n int) map[string]string {
+	links := map[string]string{"CLAUDE.md": "l1"}
+	for i := 1; i < n; i++ {
+		links["l"+strconv.Itoa(i)] = "l" + strconv.Itoa(i+1)
+	}
+	return links
+}
+
 // TestHarnessRefsNotFailures (acceptance 9, other half): none of these makes
 // the set incomplete, and notes.txt stays ordinary.
 func TestHarnessRefsNotFailures(t *testing.T) {
@@ -203,11 +213,29 @@ func TestHarnessRefsNotFailures(t *testing.T) {
 		{name: "1 MiB skill document", files: map[string]string{".claude/skills/big.md": strings.Repeat("x", 1<<20)}},
 		{name: "unknown variable", files: map[string]string{".claude/settings.json": `{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"$OTHER/x.sh"}]}]}}`}},
 		{name: "seven-hop import chain", files: harnessChain(7)},
+		{name: "folder link cycle in rules", unix: true, files: map[string]string{".claude/rules/a.md": "x\n"},
+			links: map[string]string{".claude/rules/up": ".."}},
+		{name: "imports no file can have", unix: true,
+			files: map[string]string{"CLAUDE.md": "@" + strings.Repeat("n", 300) + ".md @loop/x.md\n"},
+			links: map[string]string{"loop": "loop"}},
 		{name: "build output past the entry bound", files: harnessFiles("build/f", 20),
 			prep: func(_ *testing.T, _, _ string, ws *Workspace) { ws.harnessMaxEntries = 10 }},
 		{name: "ancestor folder, .DS_Store and a .codex file", root: "outer/ws",
-			files: map[string]string{"../.claude/rules/sub/x.md": "x\n", "../.github/hooks/.DS_Store": "\x00\x01junk", "../.codex": "not a folder\n"},
+			files: map[string]string{
+				"../.claude/rules/sub/x.md": "x\n", "../.github/hooks/.DS_Store": "\x00\x01junk", "../.codex": "not a folder\n",
+				"../.claude/rules/sub.md/x": "x\n", "../.github/hooks/d.json/x": "x\n",
+			},
+			prep: func(_ *testing.T, tmp, _ string, ws *Workspace) { ws.harnessAncestorStop = tmp }},
+		{name: "ancestor .clinerules folder", root: "outer/ws",
+			files: map[string]string{"../.clinerules/sub/x.md": "x\n", "../.clinerules/.DS_Store": "\x00\x01junk", "../.clinerules/ok.md": "x\n"},
 			prep:  func(_ *testing.T, tmp, _ string, ws *Workspace) { ws.harnessAncestorStop = tmp }},
+		{name: "folder link gone before the globs", unix: true, root: "outer/ws",
+			files: map[string]string{"opencode.json": `{"instructions":["rules/*/p.md"]}`, "docs/team/p.md": "x\n"},
+			links: map[string]string{"rules/team": "../docs/team"},
+			prep: func(t *testing.T, tmp, root string, ws *Workspace) {
+				ws.harnessAncestorStop = tmp
+				ws.onHarnessAncestor = func(string) { _ = os.Remove(filepath.Join(root, "rules", "team")) }
+			}},
 	}
 	for _, r := range rows {
 		t.Run(r.name, func(t *testing.T) {
@@ -236,5 +264,63 @@ func TestHarnessRefsAncestorDefaultStop(t *testing.T) {
 	vol := filepath.VolumeName(ws.root) + string(os.PathSeparator)
 	if len(seen) == 0 || seen[0] != filepath.Dir(ws.root) || seen[len(seen)-1] != vol {
 		t.Fatalf("ancestors %q, want %q up to %q", seen, filepath.Dir(ws.root), vol)
+	}
+}
+
+// TestHarnessRefsHarnessFileFirst: #725's checks run before the set is
+// built, so a harness file plans "" with no #784 reason even when the set is
+// incomplete.
+func TestHarnessRefsHarnessFileFirst(t *testing.T) {
+	_, _, ws := harnessRefFixture(t, harnessRefRow{files: map[string]string{".mcp.json": `{"a":`}})
+	ctx := context.Background()
+	// containment: PATH-HARNESS-REF
+	if key, why := ws.fileToolApprovalKey(ctx, "CLAUDE.md"); key != "" || why != "" {
+		t.Fatalf("CLAUDE.md = (%q, %q), want (\"\", \"\")", key, why)
+	}
+	if key, why := ws.fileToolApprovalKey(ctx, "notes.txt"); key != "" || why == "" {
+		t.Fatalf("control notes.txt = (%q, %q), want the could-not-check reason", key, why)
+	}
+}
+
+// TestHarnessRefsOpenHarnessFile: a regular file opens; a FIFO is refused as
+// not regular without blocking. errFileChanged needs the file swapped between
+// the two stats, which no seam reaches deterministically, so it is not tested.
+func TestHarnessRefsOpenHarnessFile(t *testing.T) {
+	dir := t.TempDir()
+	reg := filepath.Join(dir, "r.md")
+	if err := os.WriteFile(reg, []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f, fi, err := openHarnessFile(reg)
+	if err != nil || !fi.Mode().IsRegular() {
+		t.Fatalf("regular file: info %v, err %v", fi, err)
+	}
+	_ = f.Close()
+	fifo := filepath.Join(dir, "fifo")
+	harnessMkfifo(t, fifo)
+	done := make(chan error, 1)
+	go func() {
+		f, _, err := openHarnessFile(fifo)
+		if f != nil {
+			_ = f.Close()
+		}
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if !errors.Is(err, errNotRegular) {
+			t.Fatalf("FIFO: err %v, want errNotRegular", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("openHarnessFile blocked on a FIFO")
+	}
+}
+
+// TestHarnessRefsVanishedLink: a link that is gone by the time its target is
+// read is a vanished entry, not a failure (spec D8).
+func TestHarnessRefsVanishedLink(t *testing.T) {
+	hops, vanished, err := danglingTargets(filepath.Join(t.TempDir(), "gone"))
+	if !vanished || hops != nil {
+		t.Fatalf("danglingTargets(gone) = (%q, %v, %v), want vanished", hops, vanished, err)
 	}
 }
