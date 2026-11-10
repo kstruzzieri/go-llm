@@ -196,14 +196,18 @@ func TestHarnessReadTOML(t *testing.T) {
 		want []tomlString
 	}{
 		{"inline table", `mcp_servers.demo = { command = "python3", args = ["scripts/server.py"] }`,
-			[]tomlString{{"command", "python3"}, {"", "scripts/server.py"}}},
-		{"multi-line literal", "x = '''multi\nline'''", []tomlString{{"x", "multi\nline"}}},
-		{"multi-line basic", `y = """a\"b"""`, []tomlString{{"y", `a"b`}}},
-		{"comment apostrophe", "# don't panic\nx = \"y\"\n", []tomlString{{"x", "y"}}},
+			[]tomlString{{"command", "python3", 0}, {"", "scripts/server.py", 1}}},
+		{"multi-line literal", "x = '''multi\nline'''", []tomlString{{"x", "multi\nline", 0}}},
+		{"multi-line basic", `y = """a\"b"""`, []tomlString{{"y", `a"b`, 0}}},
+		{"comment apostrophe", "# don't panic\nx = \"y\"\n", []tomlString{{"x", "y", 0}}},
 		{"header quoted key", "[mcp_servers.\"my server\"]\ncommand = 'a' # it's\ncwd = \"svc\"\r\n",
-			[]tomlString{{"command", "a"}, {"cwd", "svc"}}},
+			[]tomlString{{"command", "a", 0}, {"cwd", "svc", 0}}},
 		{"multi-line array", "notify = [\n  \"bash\", # why's\n  \"-lc\",\n]\nk = \"\\u0041\"",
-			[]tomlString{{"", "bash"}, {"", "-lc"}, {"k", "A"}}},
+			[]tomlString{{"", "bash", 1}, {"", "-lc", 1}, {"k", "A", 0}}},
+		{"array numbers", "a = [\"x\"]\n[[t]]\nb = [[\"y\"], \"z\"]",
+			[]tomlString{{"", "x", 1}, {"", "y", 3}, {"", "z", 2}}},
+		{"array in inline table in array", "x = [{command = \"a\", args = [\"-C\", \"d\", \"b.sh\"]}]",
+			[]tomlString{{"command", "a", 0}, {"", "-C", 2}, {"", "d", 2}, {"", "b.sh", 2}}},
 	}
 	for _, r := range rows {
 		t.Run(r.name, func(t *testing.T) {
@@ -213,7 +217,7 @@ func TestHarnessReadTOML(t *testing.T) {
 			}
 			// containment: PATH-HARNESS-REF
 			if !reflect.DeepEqual(got, r.want) {
-				t.Fatalf("got %q, want %q", got, r.want)
+				t.Fatalf("got %+v, want %+v", got, r.want)
 			}
 		})
 	}
@@ -271,7 +275,7 @@ func TestHarnessReadShellStrings(t *testing.T) {
 		}
 		return filepath.Join(root, filepath.FromSlash(rel))
 	}
-	const claude, golem, copilot, mcp = ".claude/settings.json", ".golem.json", ".github/hooks/h.json", ".mcp.json"
+	const claude, golem, copilot, mcp, codex = ".claude/settings.json", ".golem.json", ".github/hooks/h.json", ".mcp.json", ".codex/config.toml"
 	rows := []struct {
 		name, file, doc string
 		want            []string // "w/..." or "p/..."
@@ -327,6 +331,13 @@ func TestHarnessReadShellStrings(t *testing.T) {
 		{"uv --directory shell", claude, `{"command":"uv --directory mcp run server.py"}`, []string{"w/mcp/server.py"}, false, nil},
 		{"git -C argv", golem, `{"argv":["git","-C","sub","x.sh"]}`, []string{"w/sub/x.sh"}, false, nil},
 		{"--cwd and --project", claude, `{"command":"bun --cwd=web run a.ts; uv --project svc run b.py"}`, []string{"w/web/a.ts", "w/svc/b.py"}, false, []string{"w/web/b.py"}},
+		// A Codex array is one argv too (ruling R24).
+		{"codex args --directory", codex, "[mcp_servers.s]\ncommand = \"uv\"\nargs = [\"--directory\", \"mcp\", \"run\", \"server.py\"]\n", []string{"w/mcp/server.py", "w/mcp", "w/server.py"}, false, nil},
+		{"codex args --directory=", codex, "[mcp_servers.s]\ncommand = 'uv'\nargs = [\n  '--directory=mcp',\n  'run', 'server.py',\n]\n", []string{"w/mcp/server.py"}, false, nil},
+		{"codex arrays apart", codex, "a = [\"-C\", \"sub\"]\nb = [\"x.sh\"]\n", []string{"w/x.sh"}, false, []string{"w/sub/x.sh"}},
+		// Residual: a flag in an inner array does not base the outer array's
+		// later elements; Codex args are flat string arrays.
+		{"codex nested array", codex, "args = [[\"-C\", \"sub\"], \"x.sh\"]\n", []string{"w/x.sh"}, false, []string{"w/sub/x.sh"}},
 	}
 	for _, r := range rows {
 		t.Run(r.name, func(t *testing.T) {
@@ -525,5 +536,12 @@ func TestHarnessReadCommandBounds(t *testing.T) {
 				t.Fatal("resolution did not finish within 1s")
 			}
 		})
+	}
+	// A Codex array counts against the same cap (ruling R24).
+	for n, want := range map[int]bool{64: true, 65: false} {
+		doc := `args = ["git"` + strings.Repeat(`, "-C", "a"`, n) + `, "x.sh"]`
+		if _, complete := harnessResolveDocComplete(t, ".codex/config.toml", doc, []string{w}, []string{w, p}, noLookPath); complete != want {
+			t.Errorf("%d -C flags in a Codex array: complete = %v, want %v", n, complete, want)
+		}
 	}
 }

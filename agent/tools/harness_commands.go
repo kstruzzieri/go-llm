@@ -165,9 +165,14 @@ func decodeJSONC(data []byte) (any, error) {
 	return v, nil
 }
 
-// tomlString is one string literal from a TOML file: its value, and the key
-// on the left of the nearest "=" ("" for an array element).
-type tomlString struct{ key, value string }
+// tomlString is one string literal from a TOML file: its value, the key on
+// the left of the nearest "=" ("" for an array element), and for an array
+// element the array's number, counting from 1 in the order arrays open (0
+// otherwise), so the elements of one array can be read as one argv.
+type tomlString struct {
+	key, value string
+	array      int
+}
 
 // errTOMLUnterminated reports a TOML string with no closing delimiter.
 var errTOMLUnterminated = errors.New("unterminated TOML string")
@@ -183,10 +188,12 @@ func lexTOMLStrings(data []byte) ([]tomlString, error) {
 	type level struct {
 		array, keyPos bool // keyPos: a key, not a value, comes next
 		key           string
+		id            int // the array's number
 	}
 	s := string(data)
 	stack := []level{{keyPos: true}}
 	var out []tomlString
+	arrays := 0
 	for i := 0; i < len(s); {
 		top := &stack[len(stack)-1]
 		switch c := s[i]; {
@@ -204,9 +211,9 @@ func lexTOMLStrings(data []byte) ([]tomlString, error) {
 			case top.keyPos:
 				top.key = v
 			case top.array:
-				out = append(out, tomlString{"", v})
+				out = append(out, tomlString{"", v, top.id})
 			default:
-				out = append(out, tomlString{top.key, v})
+				out = append(out, tomlString{key: top.key, value: v})
 			}
 			i += n
 			continue
@@ -215,7 +222,8 @@ func lexTOMLStrings(data []byte) ([]tomlString, error) {
 		case c == '=' && !top.array:
 			top.keyPos = false
 		case c == '[' && (len(stack) > 1 || !top.keyPos): // not a table header
-			stack = append(stack, level{array: true})
+			arrays++
+			stack = append(stack, level{array: true, id: arrays})
 		case c == '{':
 			stack = append(stack, level{keyPos: true})
 		case len(stack) > 1 && (c == ']' && top.array || c == '}' && !top.array):
@@ -728,18 +736,31 @@ func shellCommands(s string) [][]string {
 
 // extractTOMLCommands turns the strings of a TOML file (.codex/config.toml)
 // into a commandSet: every value is one whole operand token and also a shell
-// string, and a value whose key is cwd is also a working folder.
+// string, a value whose key is cwd is also a working folder, and the elements
+// of each array are also one argv of operands, so a working-directory flag in
+// args bases the elements after it (ruling R24).
 func extractTOMLCommands(strs []tomlString) commandSet {
 	var cs commandSet
+	var arrays [][]string // arrays[n-1] holds the elements of array n
 	for _, s := range strs {
 		if cs.capped {
-			break
+			return cs
 		}
-		cs.tokens = append(cs.tokens, cmdToken{text: s.value})
+		if s.array == 0 {
+			cs.tokens = append(cs.tokens, cmdToken{text: s.value})
+		} else {
+			for len(arrays) < s.array {
+				arrays = append(arrays, nil)
+			}
+			arrays[s.array-1] = append(arrays[s.array-1], s.value)
+		}
 		cs.shell(s.value, shellState{})
 		if strings.EqualFold(s.key, "cwd") {
 			cs.dirs = append(cs.dirs, s.value)
 		}
+	}
+	for _, words := range arrays {
+		cs.argv(words, false, "", shellState{}) // adds each element as a token
 	}
 	return cs
 }
