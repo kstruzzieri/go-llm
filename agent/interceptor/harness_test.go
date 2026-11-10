@@ -137,6 +137,7 @@ func TestHarnessKey(t *testing.T) {
 		{"Key.md", "key.md"},
 	}
 	for _, p := range equal {
+		// containment: PATH-HARNESS-REF
 		if a, b := HarnessKey(p[0]), HarnessKey(p[1]); a != b {
 			t.Errorf("HarnessKey(%q) = %q, HarnessKey(%q) = %q, want equal", p[0], a, p[1], b)
 		}

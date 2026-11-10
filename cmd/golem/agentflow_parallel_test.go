@@ -1963,6 +1963,7 @@ func TestHarnessPromotionRefusesGitignoredImport(t *testing.T) {
 					t.Fatalf("worker %s wrote %q to %s", w.sourceID, got, w.paths[0])
 				}
 			}
+			// containment: GRANT-HARNESS-REF-UNATTENDED
 			if imports && (err == nil || !strings.Contains(err.Error(), "refuse parallel promotion") || !strings.Contains(err.Error(), "docs/p.md")) {
 				t.Fatalf("runCohort() error = %v, want a refused promotion naming docs/p.md", err)
 			}
@@ -1992,6 +1993,7 @@ func TestHarnessPromotionRefusesDeletion(t *testing.T) {
 	runTestGit(t, root, "commit", "-q", "-m", "import docs/a.md")
 
 	_, err := runHarnessCohort(t, root, "docs/a.md", "src/q.go")
+	// containment: GRANT-HARNESS-REF-UNATTENDED
 	if err == nil || !strings.Contains(err.Error(), "refuse parallel promotion") || !strings.Contains(err.Error(), "docs/a.md") {
 		t.Fatalf("runCohort() error = %v, want a refused promotion naming docs/a.md", err)
 	}

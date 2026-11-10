@@ -454,6 +454,7 @@ func TestHarnessPlanInvokeRecheck(t *testing.T) {
 					t.Fatal(err)
 				}
 				got, rerr := os.ReadFile(target)
+				// containment: GRANT-HARNESS-REF
 				if changed {
 					if !strings.Contains(res.Content, refusal) {
 						t.Fatalf("Invoke = %q, want the refusal", res.Content)

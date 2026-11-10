@@ -763,6 +763,7 @@ func TestHarnessPlanReferencesKinds(t *testing.T) {
 		}
 		rows = append(rows, harnessRefRow{name: "D4 " + file, files: map[string]string{file: content}, covered: []string{script}})
 	}
+	// containment: GRANT-HARNESS-REF
 	for _, r := range rows {
 		t.Run(r.name, func(t *testing.T) { runHarnessPlanRow(t, r) })
 	}
@@ -854,6 +855,7 @@ func TestHarnessPlanReferencesFreshness(t *testing.T) {
 	}
 	harnessPlanKeys(t, ws, root, "docs/new.md", WriteClassApprovalKey)
 	write("CLAUDE.md", "@docs/new.md\n")
+	// containment: GRANT-HARNESS-REF
 	harnessPlanKeys(t, ws, root, "docs/new.md", "")
 	write("docs/new.md", "old\n")
 	harnessPlanKeys(t, ws, root, "docs/new.md", "")

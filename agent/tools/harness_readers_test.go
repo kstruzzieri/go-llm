@@ -41,6 +41,7 @@ func TestHarnessReadMarkdownImports(t *testing.T) {
 			if err := scanMarkdownImports(strings.NewReader(r.in), func(s string) { got = append(got, s) }); err != nil {
 				t.Fatal(err)
 			}
+			// containment: PATH-HARNESS-REF
 			if !reflect.DeepEqual(got, r.want) {
 				t.Fatalf("got %q, want %q", got, r.want)
 			}
@@ -92,6 +93,7 @@ func TestHarnessReadGlobAdversarial(t *testing.T) {
 	go func() {
 		done <- matchGlobBounded(strings.Repeat("**/a/", 20)+"b", strings.Repeat("a/", 60)+"c")
 	}()
+	// containment: PATH-HARNESS-REF
 	select {
 	case got := <-done:
 		if got {
@@ -209,6 +211,7 @@ func TestHarnessReadTOML(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			// containment: PATH-HARNESS-REF
 			if !reflect.DeepEqual(got, r.want) {
 				t.Fatalf("got %q, want %q", got, r.want)
 			}
@@ -239,6 +242,7 @@ func TestHarnessReadArgvWhole(t *testing.T) {
 		}
 	}
 	slices.Sort(ops)
+	// containment: PATH-HARNESS-REF
 	if want := []string{"scripts/a&b.py", "scripts/check one.py"}; !reflect.DeepEqual(ops, want) {
 		t.Fatalf("operand tokens %q, want %q", ops, want)
 	}
@@ -319,6 +323,7 @@ func TestHarnessReadShellStrings(t *testing.T) {
 	for _, r := range rows {
 		t.Run(r.name, func(t *testing.T) {
 			got := harnessResolveDoc(t, r.file, r.doc, []string{w}, []string{w, p}, lookPath)
+			// containment: PATH-HARNESS-REF
 			var want []string
 			for _, s := range r.want {
 				want = append(want, abs(s))
@@ -357,6 +362,7 @@ func TestHarnessReadKeySelection(t *testing.T) {
 	for _, tk := range cs.tokens {
 		texts = append(texts, tk.text)
 	}
+	// containment: PATH-HARNESS-REF
 	if !slices.Contains(texts, "./scripts/x.sh") {
 		t.Fatalf("tokens %q lack the hook command", texts)
 	}

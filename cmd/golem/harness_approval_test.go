@@ -366,7 +366,7 @@ func TestHarnessApprovalRefPrompts(t *testing.T) {
 
 	requireRecords(t, res, 7)
 	out := f.Out.String()
-	// containment: GRANT-HARNESS
+	// containment: GRANT-HARNESS-REF
 	if got := f.prompts(); got != 6 {
 		t.Fatalf("prompts = %d, want 6:\n%s", got, out)
 	}
@@ -402,7 +402,7 @@ func TestHarnessApprovalRefSameRun(t *testing.T) {
 		refWrite("docs/new.md"),
 	}, "y\n")
 	requireRecords(t, res, 2)
-	// containment: GRANT-HARNESS
+	// containment: GRANT-HARNESS-REF
 	requireInvoked(t, res, 0, false)
 	requireDenied(t, res, 1)
 	if got := f.prompts(); got != 2 {
@@ -431,7 +431,7 @@ func TestHarnessApprovalRefHeadless(t *testing.T) {
 		t.Fatalf("run: %v", err)
 	}
 	requireRecords(t, res, 2*len(refKinds))
-	// containment: GRANT-HARNESS-UNATTENDED
+	// containment: GRANT-HARNESS-REF-UNATTENDED
 	for i, p := range refKinds {
 		requireDenied(t, res, 2*i)
 		requireInvoked(t, res, 2*i+1, false)
@@ -473,7 +473,7 @@ func TestHarnessApprovalRefTaskStep(t *testing.T) {
 		t.Fatal(err)
 	}
 	const denied = "tool call denied by approver"
-	// containment: GRANT-HARNESS-UNATTENDED
+	// containment: GRANT-HARNESS-REF-UNATTENDED
 	if got := toolObservation(t, caller.lastRequest.Messages, "w-1").Content; !strings.Contains(got, denied) {
 		t.Fatalf("w-1 observation = %q, want the approver denial", got)
 	}
