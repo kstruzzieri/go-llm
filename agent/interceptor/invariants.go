@@ -196,7 +196,7 @@ func componentPattern(names []string) *regexp.Regexp {
 // files, so the two readers cannot drift (#627).
 func IsCredentialPath(p string) bool {
 	parts := strings.Split(normalizePath(p), "/")
-	base, dirs := parts[len(parts)-1], parts[:len(parts)-1]
+	base := parts[len(parts)-1]
 	for _, c := range parts {
 		if slices.Contains(credentialDirs, c) {
 			return true
@@ -207,10 +207,15 @@ func IsCredentialPath(p string) bool {
 		return true
 	case strings.HasPrefix(base, ".env.") && !slices.Contains(envTemplates, base):
 		return true
-	case base == "config" && slices.Contains(dirs, ".git"):
-		return true
 	}
-	return false
+	return IsGitConfigPath(p)
+}
+
+// IsGitConfigPath reports whether p, after normalizePath, is a file named
+// config with a .git directory component.
+func IsGitConfigPath(p string) bool {
+	parts := strings.Split(normalizePath(p), "/")
+	return parts[len(parts)-1] == "config" && slices.Contains(parts[:len(parts)-1], ".git")
 }
 
 // IsProtectedPath reports whether p has a .git, .ssh, .gnupg, .aws or .kube
