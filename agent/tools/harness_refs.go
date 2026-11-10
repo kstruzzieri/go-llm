@@ -75,6 +75,7 @@ var harnessAncestorListings = []struct {
 type harnessRefs struct {
 	complete       bool
 	cause          string
+	entries        int // walk entries visited, for the benchmark
 	exact, subtree map[string]string
 	patterns       []harnessPattern
 	virtual        []harnessVirtualLink
@@ -197,6 +198,7 @@ func (w *Workspace) harnessReferences(ctx context.Context) *harnessRefs {
 	b.walk()
 	b.ancestors()
 	b.patternLinks()
+	b.refs.entries = b.entries
 	return b.refs
 }
 
