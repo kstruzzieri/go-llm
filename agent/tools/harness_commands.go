@@ -623,7 +623,7 @@ func (cs *commandSet) shellOnce(s string, st shellState) {
 func (st shellState) cd(x string) (_ shellState, ok bool) {
 	next := x
 	if st.cur != "" && !strings.ContainsAny(x[:1], `/\$%~`) && !filepath.IsAbs(x) {
-		next = path.Join(st.cur, x)
+		next = st.cur + "/" + x // Keep link/.. until the filesystem resolves it.
 	}
 	for _, b := range []string{x, next} {
 		if slices.Contains(st.bases, b) {
@@ -881,7 +881,7 @@ func resolveUnder(start, tok string, projectDirs []string) []string {
 		if rest, ok := strings.CutPrefix(tok, v); ok && (rest == "" || rest[0] == '/' || rest[0] == '\\') {
 			out := make([]string, 0, len(projectDirs))
 			for _, d := range projectDirs {
-				out = append(out, filepath.Join(d, rest))
+				out = append(out, harnessPathCandidates(d, strings.TrimLeft(rest, `/\`))...)
 			}
 			return out
 		}
@@ -895,8 +895,5 @@ func resolveUnder(start, tok string, projectDirs []string) []string {
 			return nil
 		}
 	}
-	if filepath.IsAbs(tok) {
-		return []string{filepath.Clean(tok)}
-	}
-	return []string{filepath.Join(start, tok)}
+	return harnessPathCandidates(start, tok)
 }

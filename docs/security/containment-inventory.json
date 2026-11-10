@@ -477,6 +477,12 @@
         },
         {
           "package": "./agent/tools",
+          "test": "TestHarnessRefsSymlinkParentPaths",
+          "file": "agent/tools/harness_paths_test.go",
+          "func": "TestHarnessRefsSymlinkParentPaths"
+        },
+        {
+          "package": "./agent/tools",
           "test": "TestHarnessPlanReferencesKinds",
           "file": "agent/tools/approval_key_test.go",
           "func": "harnessPlanKeys"

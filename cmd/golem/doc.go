@@ -238,13 +238,14 @@
 // and the other ignored folders, the build-output folders target, build,
 // dist, out, .venv, venv, __pycache__, .gradle, .next and .tox, any folder
 // holding its own .git entry, and folders this user cannot search; it is
-// bounded to 100,000 entries, 256 KiB per configuration file, 32 MiB read
+// bounded to 100,000 directory entries and 100,000 checks for links inside
+// covered subtrees per call, 256 KiB per configuration file, 32 MiB read
 // per call and five import hops, 64 cd or working-directory folders per
-// command, 100,000 resolution steps per configuration file and a 40-link
-// dangling symlink chain; crossing a bound makes the set incomplete. If the
-// search cannot finish (an unreadable or malformed harness file, an ancestor
-// ~/.claude/settings.json included, or a crossed bound), every file-tool
-// write prompts. The preview's first line, "harness
+// shell string or argument list, 100,000 resolution steps per configuration
+// file and a 40-link dangling symlink chain; crossing a bound makes the set
+// incomplete. If the search cannot finish (an unreadable or malformed harness
+// file, an ancestor ~/.claude/settings.json included, or a crossed bound),
+// every file-tool write prompts. The preview's first line, "harness
 // reference: <reason>", names the cause; -p prints "golem: harness
 // reference: ..." after its denial line, and Agentflow task steps print
 // "golem: task step denied <tool>: harness file (<notice>)" and the same

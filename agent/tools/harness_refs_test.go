@@ -104,6 +104,187 @@ func harnessChain(n int) map[string]string {
 	return files
 }
 
+func TestHarnessPlanReferencesDistinctMarkdownPaths(t *testing.T) {
+	for _, other := range []string{"A", "a."} {
+		t.Run(other, func(t *testing.T) {
+			t.Parallel()
+			_, root, ws := harnessRefFixture(t, harnessRefRow{files: map[string]string{
+				"a/CLAUDE.md":        "@../first.txt\n",
+				other + "/CLAUDE.md": "@../second.txt\n",
+				"first.txt":          "old\n",
+				"second.txt":         "old\n",
+			}})
+			first, err := os.Stat(filepath.Join(root, "a", "CLAUDE.md"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			second, err := os.Stat(filepath.Join(root, other, "CLAUDE.md"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if os.SameFile(first, second) {
+				t.Skip("filesystem aliases the two Markdown paths")
+			}
+			for _, rel := range []string{"first.txt", "second.txt"} {
+				for _, tool := range harnessPlanTools(t, ws, rel) {
+					plan, err := tool.plan(context.Background(), tool.raw)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if plan.ApprovalKey != "" {
+						t.Errorf("%s Plan(%q).ApprovalKey = %q, want empty", tool.name, rel, plan.ApprovalKey)
+					}
+				}
+				if err := ws.CheckHarnessPromotion(context.Background(), []string{rel}); err == nil {
+					t.Errorf("CheckHarnessPromotion(%q) = nil, want reference refusal", rel)
+				}
+			}
+		})
+	}
+}
+
+func TestHarnessPlanReferencesGlobFileSymlink(t *testing.T) {
+	t.Parallel()
+	_, _, ws := harnessRefFixture(t, harnessRefRow{unix: true,
+		files: map[string]string{
+			"opencode.json": `{"instructions":["docs/*.md"]}`,
+			"policy.txt":    "old\n",
+			"ordinary.txt":  "old\n",
+		},
+		links: map[string]string{
+			"docs/policy.md":    "../policy.txt",
+			"docs/ordinary.txt": "../ordinary.txt",
+		},
+	})
+	for _, tool := range harnessPlanTools(t, ws, "policy.txt") {
+		plan, err := tool.plan(context.Background(), tool.raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if plan.ApprovalKey != "" {
+			t.Errorf("%s Plan(policy.txt).ApprovalKey = %q, want empty", tool.name, plan.ApprovalKey)
+		}
+	}
+	if err := ws.CheckHarnessPromotion(context.Background(), []string{"policy.txt"}); err == nil {
+		t.Error("CheckHarnessPromotion(policy.txt) = nil, want reference refusal")
+	}
+	if key, why := ws.fileToolApprovalKey(context.Background(), "ordinary.txt"); key != WriteClassApprovalKey {
+		t.Errorf("fileToolApprovalKey(ordinary.txt) = (%q, %q), want (%q, empty)", key, why, WriteClassApprovalKey)
+	}
+}
+
+func TestHarnessPlanReferencesGlobLinkedFolderFiles(t *testing.T) {
+	t.Parallel()
+	_, _, ws := harnessRefFixture(t, harnessRefRow{unix: true,
+		files: map[string]string{
+			"opencode.json": `{"instructions":["docs/**/*.md"]}`,
+			"policy.txt":    "old\n",
+			"ordinary.txt":  "old\n",
+		},
+		links: map[string]string{
+			"docs":                  "rules",
+			"rules/team":            "../second",
+			"second/policy.md":      "../policy.txt",
+			"second/back":           "../rules",
+			"unrelated/ordinary.md": "../ordinary.txt",
+		},
+	})
+	if key, why := ws.fileToolApprovalKey(context.Background(), "policy.txt"); key != "" {
+		t.Errorf("fileToolApprovalKey(policy.txt) = (%q, %q), want empty key", key, why)
+	}
+	if key, why := ws.fileToolApprovalKey(context.Background(), "ordinary.txt"); key != WriteClassApprovalKey {
+		t.Errorf("fileToolApprovalKey(ordinary.txt) = (%q, %q), want (%q, empty)", key, why, WriteClassApprovalKey)
+	}
+}
+
+func TestHarnessRefsLinkTraversalBound(t *testing.T) {
+	t.Parallel()
+	r := harnessRefRow{unix: true,
+		files: map[string]string{
+			"opencode.json": `{"instructions":["docs/**/*.md"]}`,
+			"policy.txt":    "old\n",
+		},
+		links: map[string]string{
+			"docs":             "rules",
+			"rules/team":       "../second",
+			"second/policy.md": "../policy.txt",
+		},
+	}
+	for i := range 20 {
+		r.links["unrelated/"+strconv.Itoa(i)] = "../policy.txt"
+	}
+	_, _, ws := harnessRefFixture(t, r)
+	refs := ws.harnessReferences(context.Background())
+	if !refs.complete {
+		t.Fatalf("harnessReferences(default bound) incomplete: %s", refs.cause)
+	}
+	ws.harnessMaxEntries = refs.entries
+	refs = ws.harnessReferences(context.Background())
+	if refs.complete || refs.cause != "link traversal stopped at the entry limit" {
+		t.Errorf("harnessReferences(%d) = complete %v, cause %q; want link traversal limit", ws.harnessMaxEntries, refs.complete, refs.cause)
+	}
+}
+
+func TestHarnessPlanReferencesMarkdownLinkLocations(t *testing.T) {
+	t.Parallel()
+	_, _, ws := harnessRefFixture(t, harnessRefRow{unix: true,
+		files: map[string]string{
+			"shared.txt":   "@policy.txt\n",
+			"a/policy.txt": "old\n",
+			"b/policy.txt": "old\n",
+		},
+		links: map[string]string{"a/CLAUDE.md": "../shared.txt", "b/CLAUDE.md": "../shared.txt"},
+	})
+	for _, rel := range []string{"a/policy.txt", "b/policy.txt"} {
+		if key, why := ws.fileToolApprovalKey(context.Background(), rel); key != "" {
+			t.Errorf("fileToolApprovalKey(%q) = (%q, %q), want empty key", rel, key, why)
+		}
+	}
+}
+
+func TestHarnessPlanReferencesDistinctImportAliases(t *testing.T) {
+	t.Parallel()
+	_, _, ws := harnessRefFixture(t, harnessRefRow{unix: true,
+		files: map[string]string{
+			"CLAUDE.md":  "@docs/link.md @docs/link.md.\n",
+			"first.txt":  "old\n",
+			"second.txt": "old\n",
+		},
+		links: map[string]string{"docs/link.md": "../first.txt", "docs/link.md.": "../second.txt"},
+	})
+	for _, rel := range []string{"first.txt", "second.txt"} {
+		if key, why := ws.fileToolApprovalKey(context.Background(), rel); key != "" {
+			t.Errorf("fileToolApprovalKey(%q) = (%q, %q), want empty key", rel, key, why)
+		}
+	}
+}
+
+func TestHarnessPlanReferencesGlobSymlinkParent(t *testing.T) {
+	t.Parallel()
+	_, _, ws := harnessRefFixture(t, harnessRefRow{unix: true,
+		files: map[string]string{
+			"opencode.json":       `{"instructions":["link/../*.md"]}`,
+			"other/deep/keep.txt": "old\n",
+			"other/policy.md":     "old\n",
+		},
+		links: map[string]string{"link": "other/deep"},
+	})
+	if key, why := ws.fileToolApprovalKey(context.Background(), "other/policy.md"); key != "" {
+		t.Errorf("fileToolApprovalKey(other/policy.md) = (%q, %q), want empty key", key, why)
+	}
+}
+
+func TestHarnessPlanReferencesDanglingSymlinkParent(t *testing.T) {
+	t.Parallel()
+	_, _, ws := harnessRefFixture(t, harnessRefRow{unix: true,
+		files: map[string]string{"other/deep/keep.txt": "old\n"},
+		links: map[string]string{"link": "other/deep", "CLAUDE.md": "link/../future.md"},
+	})
+	if key, why := ws.fileToolApprovalKey(context.Background(), "other/future.md"); key != "" {
+		t.Errorf("fileToolApprovalKey(other/future.md) = (%q, %q), want empty key", key, why)
+	}
+}
+
 // TestHarnessRefsNestedRepository (acceptance 8): a nested checkout under
 // .claude/worktrees is not read, so what its CLAUDE.md imports and what its
 // link reaches stay ordinary, and the set is complete.

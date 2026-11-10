@@ -150,9 +150,12 @@ type harnessVisit struct{ real, vkey string }
 // followed through (ruling R19), Linux's own limit.
 const maxLinkHops = 40
 
-// harnessLink is a link to a folder, or a dangling link, the walk met, kept
-// for OpenCode globs.
-type harnessLink struct{ abs, vrel string }
+// harnessLink is a link the walk met, kept for OpenCode globs. file reports
+// a resolved non-directory target; unresolved targets may become folders.
+type harnessLink struct {
+	abs, vrel string
+	file      bool
+}
 
 // refBuilder builds one harnessRefs. The first failure is the cause, and
 // every step stops once there is one.
@@ -169,7 +172,7 @@ type refBuilder struct {
 	lookPath   func(name string) (string, bool)
 	stack      []harnessDir
 	visited    map[harnessVisit]bool
-	readAt     map[string]int // Markdown read, by HarnessKey of abs: the shallowest depth
+	readAt     map[[2]string]int // Markdown read, by abs and vabs: the shallowest depth
 	dirLinks   []harnessLink
 }
 
@@ -188,7 +191,7 @@ func (w *Workspace) harnessReferences(ctx context.Context) *harnessRefs {
 		left:       harnessMaxTotalBytes,
 		rootKey:    interceptor.HarnessKey(w.root) + "/",
 		visited:    map[harnessVisit]bool{},
-		readAt:     map[string]int{},
+		readAt:     map[[2]string]int{},
 	}
 	_, b.boundary = repositoryPrefix(w.root)
 	b.home, _ = os.UserHomeDir() // "" drops ~/ imports
@@ -328,7 +331,7 @@ func harnessVirtualName(name string) bool {
 	return k == ".github" || k == ".vscode"
 }
 
-// symlink records a link to a folder for OpenCode globs, then follows a link
+// symlink records a link for OpenCode globs, then follows a link
 // at a harness path, or named .github or .vscode (spec D6, D2). A link that
 // vanished meanwhile is skipped (spec D8). A dangling link's lexical target is
 // followed through further links (ruling R19), and each hop inside the
@@ -342,10 +345,8 @@ func harnessVirtualName(name string) bool {
 // read by the reader the link's path selects. Any other resolution failure
 // makes the set incomplete.
 func (b *refBuilder) symlink(d harnessDir, abs, vrel, v string, harness bool) {
-	// A dangling link is kept too: a folder may be created at its target.
-	if fi, err := os.Stat(abs); err == nil && fi.IsDir() || errors.Is(err, fs.ErrNotExist) {
-		b.dirLinks = append(b.dirLinks, harnessLink{abs: abs, vrel: vrel})
-	}
+	fi, statErr := os.Stat(abs)
+	b.dirLinks = append(b.dirLinks, harnessLink{abs: abs, vrel: vrel, file: statErr == nil && !fi.IsDir()})
 	named := harnessVirtualName(filepath.Base(vrel))
 	if !harness && !named {
 		return
@@ -370,7 +371,6 @@ func (b *refBuilder) symlink(d harnessDir, abs, vrel, v string, harness bool) {
 		}
 		return
 	}
-	var fi os.FileInfo
 	if err == nil {
 		if fi, err = os.Stat(target); harnessAbsent(err) {
 			return // vanished meanwhile
@@ -427,12 +427,14 @@ func danglingTargets(abs string) (hops []string, vanished bool, err error) {
 		if err != nil {
 			return nil, cur == abs && errors.Is(err, fs.ErrNotExist), err
 		}
-		next := filepath.Clean(t)
+		next := t
 		if !filepath.IsAbs(t) {
-			next = filepath.Join(resolveExisting(filepath.Dir(cur)), t)
-			if lexical := filepath.Join(filepath.Dir(cur), t); lexical != next {
-				hops = append(hops, lexical)
-			}
+			next = filepath.Dir(cur) + string(os.PathSeparator) + t
+		}
+		lexical := filepath.Clean(next)
+		next = resolveExisting(next)
+		if lexical != next {
+			hops = append(hops, lexical)
 		}
 		hops = append(hops, next)
 		if fi, err := os.Lstat(next); err != nil || fi.Mode()&fs.ModeSymlink == 0 {
@@ -497,9 +499,10 @@ func (b *refBuilder) readFailed(f harnessFile, err error) bool {
 }
 
 // markdown reads f's imports at depth (0 for a harness file). A file already
-// read at this depth or shallower is not read again, which stops cycles.
+// read at this depth or shallower from the same virtual location is skipped.
+// Filesystem spellings must stay distinct even when their HarnessKeys match.
 func (b *refBuilder) markdown(f harnessFile, depth int) {
-	key := interceptor.HarnessKey(f.abs)
+	key := [2]string{f.abs, f.vabs}
 	if d, ok := b.readAt[key]; ok && d <= depth {
 		return
 	}
@@ -533,12 +536,12 @@ func (b *refBuilder) importToken(label, tok string, dirs []string, depth int) {
 	case home && b.home == "":
 		return
 	case home:
-		cands = []string{filepath.Join(b.home, rest)}
+		cands = harnessPathCandidates(b.home, rest)
 	case filepath.IsAbs(tok):
-		cands = []string{filepath.Clean(tok)}
+		cands = harnessPathCandidates("", tok)
 	default:
 		for _, d := range dirs {
-			cands = append(cands, filepath.Join(d, tok))
+			cands = append(cands, harnessPathCandidates(d, tok)...)
 		}
 	}
 	for _, c := range cands {
@@ -626,11 +629,10 @@ func (b *refBuilder) opencode(f harnessFile, doc any) {
 	paths, patterns := opencodeInstructions(doc)
 	for _, dir := range b.folders(f) {
 		for _, p := range paths {
-			if !filepath.IsAbs(p) {
-				p = filepath.Join(dir, p)
-			}
-			if rel, ok := b.place(filepath.Clean(p)); ok {
-				b.addExact(rel, fmt.Sprintf("%s instructions name %s", harnessQuote(f.label), harnessQuote(rel)))
+			for _, c := range harnessPathCandidates(dir, p) {
+				if rel, ok := b.place(c); ok {
+					b.addExact(rel, fmt.Sprintf("%s instructions name %s", harnessQuote(f.label), harnessQuote(rel)))
+				}
 			}
 		}
 		for _, p := range patterns {
@@ -653,17 +655,24 @@ func (b *refBuilder) opencode(f harnessFile, doc any) {
 // still covers the workspace's Markdown; one that leaves the root matches
 // nothing.
 func (b *refBuilder) patternKeys(dir, p string) []harnessPattern {
-	segs := strings.Split(path.Clean(filepath.ToSlash(p)), "/")
+	segs := strings.Split(filepath.ToSlash(p), "/")
 	i := slices.IndexFunc(segs, func(s string) bool { return strings.ContainsAny(s, "*?[") })
 	if i < 0 {
 		return nil
 	}
 	base, rest := filepath.FromSlash(strings.Join(segs[:i], "/")), segs[i:]
 	if filepath.IsAbs(p) {
-		base = filepath.Clean(base + string(os.PathSeparator))
-	} else {
-		base = filepath.Join(dir, base)
+		base += string(os.PathSeparator)
 	}
+	var keys []harnessPattern
+	for _, candidate := range harnessPathCandidates(dir, base) {
+		keys = append(keys, b.patternBase(candidate, rest)...)
+	}
+	return keys
+}
+
+// patternBase places one spelling of a glob's literal folder in the workspace.
+func (b *refBuilder) patternBase(base string, rest []string) []harnessPattern {
 	if rel, ok := b.place(base); ok {
 		prefix := interceptor.HarnessKey(rel)
 		if rel == "." {
@@ -708,12 +717,13 @@ func (b *refBuilder) patternKeys(dir, p string) []harnessPattern {
 // the literal folder of a glob key.
 var harnessGlobEscape = strings.NewReplacer(`\`, `\\`, "*", `\*`, "?", `\?`, "[", `\[`)
 
-// patternLinks makes the in-workspace target of every folder link a glob
-// reaches a subtree reference (spec D5): a link at or below the glob's literal
-// prefix (harnessPattern.prefix) covers its whole target, and a link above the
-// prefix the part of its target the prefix names. A dangling link counts through its lexical targets (danglingTargets, as D6
-// does for harness paths), since a folder may be created there. A link that
-// vanished is skipped; any other resolution failure makes the set incomplete.
+// patternLinks makes a matched file link's in-workspace target a reference,
+// and every folder link a glob reaches a subtree reference (spec D5): a link
+// at or below the glob's literal prefix covers its whole target, and a link
+// above the prefix the part of its target the prefix names. A dangling link
+// counts through its lexical targets (danglingTargets, as D6 does for harness
+// paths), since a folder may be created there. A vanished link is skipped;
+// any other resolution failure makes the set incomplete.
 // Known over-coverage, kept on purpose: an empty prefix (**/*.md) takes every
 // folder link's target.
 func (b *refBuilder) patternLinks() {
@@ -723,6 +733,9 @@ func (b *refBuilder) patternLinks() {
 				return
 			}
 			k, extra := interceptor.HarnessKey(l.vrel), ""
+			if l.file && !matchGlobBounded(p.key, k) {
+				continue
+			}
 			switch {
 			case harnessUnder(k, p.prefix):
 			case harnessUnder(p.prefix, k):
@@ -730,22 +743,65 @@ func (b *refBuilder) patternLinks() {
 			default:
 				continue
 			}
-			t, err := filepath.EvalSymlinks(l.abs)
-			targets := []string{t}
-			if errors.Is(err, fs.ErrNotExist) {
-				var vanished bool
-				if targets, vanished, err = danglingTargets(l.abs); vanished {
-					continue // spec D8
-				}
-			}
-			if err != nil {
-				b.fail(harnessQuote(l.vrel), "link cannot be resolved")
+			b.addLinkTargets(l, extra)
+		}
+	}
+	// A covered folder can contain links outside that subtree. Follow each
+	// newly reached link once, with a separate bound on fixed-point work.
+	seen := make(map[harnessLink]bool)
+	left := b.maxEntries
+	for changed := true; changed && !b.failed(); {
+		changed = false
+		for _, l := range b.dirLinks {
+			if b.failed() {
 				return
 			}
-			for _, t := range targets {
-				if rel, ok := b.place(filepath.Join(t, filepath.FromSlash(extra))); ok {
-					b.add(b.refs.subtree, rel, fmt.Sprintf("%s links to %s", harnessQuote(l.vrel), harnessQuote(rel)))
+			if seen[l] {
+				continue
+			}
+			if b.ctx.Err() != nil {
+				b.fail("", "link traversal cancelled")
+				return
+			}
+			if left--; left < 0 {
+				b.fail("", "link traversal stopped at the entry limit")
+				return
+			}
+			for k := interceptor.HarnessKey(l.vrel); ; k = path.Dir(k) {
+				if _, ok := b.refs.subtree[k]; ok {
+					seen[l], changed = true, true
+					b.addLinkTargets(l, "")
+					break
 				}
+				if k == "." || k == "/" {
+					break
+				}
+			}
+		}
+	}
+}
+
+// addLinkTargets protects a reached link's targets, optionally below extra.
+func (b *refBuilder) addLinkTargets(l harnessLink, extra string) {
+	t, err := filepath.EvalSymlinks(l.abs)
+	targets := []string{t}
+	if errors.Is(err, fs.ErrNotExist) {
+		var vanished bool
+		if targets, vanished, err = danglingTargets(l.abs); vanished {
+			return // spec D8
+		}
+	}
+	if err != nil {
+		b.fail(harnessQuote(l.vrel), "link cannot be resolved")
+		return
+	}
+	for _, t := range targets {
+		if rel, ok := b.place(filepath.Join(t, filepath.FromSlash(extra))); ok {
+			why := fmt.Sprintf("%s links to %s", harnessQuote(l.vrel), harnessQuote(rel))
+			if l.file {
+				b.addExact(rel, why)
+			} else {
+				b.add(b.refs.subtree, rel, why)
 			}
 		}
 	}
@@ -913,6 +969,20 @@ func (b *refBuilder) place(abs string) (string, bool) {
 	return b.rel(stored)
 }
 
+// harnessPathCandidates keeps both the lexical path and the filesystem's
+// resolution: cleaning a link/.. before resolving it can name a different file.
+func harnessPathCandidates(base, p string) []string {
+	if !filepath.IsAbs(p) {
+		p = base + string(os.PathSeparator) + p
+	}
+	clean := filepath.Clean(p)
+	// add resolves ordinary symlink aliases after command path deduplication.
+	if p == clean || !slices.Contains(strings.Split(filepath.ToSlash(p), "/"), "..") {
+		return []string{clean}
+	}
+	return harnessUniq([]string{clean, resolveExisting(p)})
+}
+
 // resolveExisting returns p with the links in its longest existing ancestor
 // resolved and the rest rejoined.
 func resolveExisting(p string) string {
@@ -922,11 +992,18 @@ func resolveExisting(p string) string {
 			slices.Reverse(rest)
 			return filepath.Join(append([]string{r}, rest...)...)
 		}
-		parent := filepath.Dir(cur)
-		if parent == cur {
+		dir, leaf := filepath.Split(cur)
+		parent := dir
+		if len(parent) > 0 && os.IsPathSeparator(parent[len(parent)-1]) {
+			parent = parent[:len(parent)-1]
+		}
+		if parent == filepath.VolumeName(cur) {
+			parent = dir // keep the volume root absolute
+		}
+		if parent == cur || parent == "" {
 			return p
 		}
-		rest = append(rest, filepath.Base(cur))
+		rest = append(rest, leaf)
 		cur = parent
 	}
 }
@@ -946,10 +1023,9 @@ func (b *refBuilder) addExact(rel, why string) {
 // it would really be created (ruling R17).
 func (b *refBuilder) add(m map[string]string, rel, why string) {
 	k := interceptor.HarnessKey(rel)
-	if _, ok := m[k]; ok {
-		return
+	if _, ok := m[k]; !ok {
+		m[k] = why
 	}
-	m[k] = why
 	abs := filepath.Join(b.w.root, rel)
 	if s, _, err := canonicalFuturePathVerified(b.w.root, abs); err == nil {
 		b.alias(m, s, why)
