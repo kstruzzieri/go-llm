@@ -77,6 +77,12 @@ type execSpec struct {
 	ExeIdentity  os.FileInfo
 	DirIdentity  os.FileInfo
 	RootIdentity os.FileInfo
+	// Screen screens the command's stdout and stderr for credential-path
+	// content. recheckExecPlan builds it just before the run; the by-value
+	// copies the sandbox backends and scratch make share it, and both capture
+	// sites (the unix runner and the background manager) refuse a spec
+	// without one. Whoever received the spec from recheckExecPlan releases it.
+	Screen *outputScreen
 }
 
 type execResult struct {
@@ -288,7 +294,7 @@ func (t *RunCommand) Spec() agent.ToolSpec {
 		Name: "run_command",
 		Description: "Run a command directly (argv-first, NO shell: no metacharacters, globbing, or pipes). " +
 			"Returns the exit code plus bounded stdout/stderr. The command is shown to the user and runs only after they approve it. " +
-			"A non-zero exit code is a normal result to read and react to, not an error." +
+			"A non-zero exit code is a normal result to read and react to, not an error. " +
 			"Commands that name a credential file (.env and .env.* other than .env.example, .env.sample, .env.template and .env.dist; .netrc, _netrc, .npmrc, .pypirc, .git-credentials; anything under .ssh, .gnupg, .aws or .kube), or that use a credential directory or .git as dir, are refused, and the content of those files is withheld from output.",
 		Parameters: json.RawMessage(`{
   "type":"object",
@@ -345,7 +351,9 @@ func (t *RunCommand) Plan(_ context.Context, raw json.RawMessage) (agent.ToolPla
 		p.scratch = t.scratchRT.approval
 	}
 	t.store(ContentHash(raw), p)
-	eff.Timeout = timeout
+	// The credential screen's pre-run walk is bounded by its budget, which is
+	// added here and never to the fingerprinted timeout.
+	eff.Timeout = timeout + defaultScreenLimits.budget
 	if t.scratchRT != nil {
 		// The outer effect budget covers setup + command + capture + cleanup + grace;
 		// Invoke gives each phase its own bounded child context (D6).
@@ -353,7 +361,7 @@ func (t *RunCommand) Plan(_ context.Context, raw json.RawMessage) (agent.ToolPla
 		if err != nil {
 			return agent.ToolPlan{Effect: eff}, err
 		}
-		eff.Timeout = outer
+		eff.Timeout = outer + defaultScreenLimits.budget
 	}
 	return agent.ToolPlan{
 		Effect:      eff,
@@ -412,7 +420,11 @@ func prepareExecPlan(ws *Workspace, argv []string, dir string, timeout time.Dura
 // snapshot carrying the compared identities for the later scratch and
 // backend checks; on mismatch a descriptive error the caller renders
 // model-visible. Shared by foreground Invoke and the background tool (#346).
-func recheckExecPlan(ws *Workspace, pp execPending) (execSpec, error) {
+// After the identity checks it builds the spec's output screen from the
+// workspace's credential files: a done ctx is returned wrapped, and a root
+// that was replaced or cannot be opened or listed means the command must not
+// run. The caller owns the returned screen and releases it.
+func recheckExecPlan(ctx context.Context, ws *Workspace, pp execPending) (execSpec, error) {
 	dir, _, dirIdentity, err := resolveExecDir(ws, pp.dirLabel)
 	if err != nil || dir != pp.dir || pp.dirIdentity == nil || !os.SameFile(dirIdentity, pp.dirIdentity) {
 		return execSpec{}, errors.New("working directory changed since approval; retry")
@@ -426,6 +438,13 @@ func recheckExecPlan(ws *Workspace, pp execPending) (execSpec, error) {
 	if rerr != nil || path != pp.path || !os.SameFile(fi, pp.identity) {
 		return execSpec{}, errors.New("executable changed since approval; retry")
 	}
+	screen, err := buildOutputScreen(ctx, ws)
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil && errors.Is(err, ctxErr) {
+			return execSpec{}, err // already wraps ctxErr
+		}
+		return execSpec{}, errors.New("credential screen failed; command not run: " + toolErrMessage(err))
+	}
 	// Env is []string{} and never []string(nil): os/exec treats a nil Env as
 	// "inherit the parent environment", which would silently defeat the
 	// allowlist when none of its variables are set.
@@ -438,6 +457,7 @@ func recheckExecPlan(ws *Workspace, pp execPending) (execSpec, error) {
 		ExeIdentity:   pp.identity,
 		DirIdentity:   pp.dirIdentity,
 		RootIdentity:  pp.workspaceIdentity,
+		Screen:        screen,
 	}, nil
 }
 
@@ -471,14 +491,22 @@ func (t *RunCommand) Invoke(ctx context.Context, raw json.RawMessage) (agent.Too
 	if !ok {
 		return errResult("exec preview missing; retry"), nil
 	}
-	spec, err := recheckExecPlan(t.ws, pp)
+	spec, err := recheckExecPlan(ctx, t.ws, pp)
 	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return errResult("command canceled"), nil
+		}
 		return errResult(err.Error()), nil
 	}
+	defer spec.Screen.release()
 	if t.scratchRT != nil {
 		return t.invokeScratched(ctx, pp, spec)
 	}
-	res, runErr := t.runner.Run(ctx, spec)
+	// The run gets its own approved timeout, so the walk's time, which the
+	// outer effect budget covers, is not charged to the command.
+	runCtx, cancelRun := context.WithTimeout(ctx, pp.timeout)
+	res, runErr := t.runner.Run(runCtx, spec)
+	cancelRun()
 	if runErr != nil {
 		if res.TimedOut {
 			return execErr(fmt.Sprintf("command timed out after %s", pp.timeout), res.Notes), nil

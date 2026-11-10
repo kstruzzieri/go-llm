@@ -91,13 +91,21 @@ func (r unixRunner) Run(ctx context.Context, spec execSpec) (execResult, error) 
 	if spawn == nil {
 		spawn = osExecSpawn
 	}
+	if spec.Screen == nil {
+		return execResult{}, errNoOutputScreen
+	}
 	stdout := &cappedBuffer{cap: execStdoutCap}
 	stderr := &cappedBuffer{cap: execStderrCap}
-	cmd := spawn(ctx, spec, stdout, stderr)
+	outScreen, errScreen := spec.Screen.stream(stdout), spec.Screen.stream(stderr)
+	cmd := spawn(ctx, spec, outScreen, errScreen)
 	if err := cmd.Start(); err != nil {
 		return execResult{}, err
 	}
 	waitErr := cmd.Wait()
+	// A stream holds an unterminated last line until finish; the caller that
+	// owns the screen releases it after this returns.
+	outScreen.finish()
+	errScreen.finish()
 
 	res := execResult{
 		Stdout:          stdout.buf,
@@ -105,6 +113,7 @@ func (r unixRunner) Run(ctx context.Context, spec execSpec) (execResult, error) 
 		StdoutTruncated: stdout.truncated,
 		StderrTruncated: stderr.truncated,
 		ExitCode:        cmd.State().ExitCode(),
+		Notes:           spec.Screen.notes(),
 	}
 	if ctx.Err() != nil {
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {

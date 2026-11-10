@@ -239,8 +239,11 @@ func (t *StartCommand) Invoke(ctx context.Context, raw json.RawMessage) (agent.T
 	if !ok {
 		return errResult("start preview missing; retry"), nil
 	}
-	spec, err := recheckExecPlan(t.ws, pp)
+	spec, err := recheckExecPlan(ctx, t.ws, pp)
 	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return startCanceled(err), nil
+		}
 		return errResult(err.Error()), nil
 	}
 	if t.scratchRT != nil {

@@ -476,6 +476,7 @@ func seatbeltSpec(t *testing.T, ws string) execSpec {
 		Dir:           ws,
 		Env:           []string{"PATH=/usr/bin", "HOME=/Users/nobody"},
 		WorkspaceRoot: ws,
+		Screen:        testScreen(),
 	}
 	s.ExeIdentity = execIdentityOf(t, s.Path)
 	return s
@@ -1019,6 +1020,7 @@ func realSeatbeltRun(t *testing.T, cfg SandboxConfig, ws string, argv []string, 
 		Env:           append([]string{"PATH=/usr/bin:/bin", "HOME=" + os.Getenv("HOME")}, extraEnv...),
 		WorkspaceRoot: ws,
 		ExeIdentity:   execIdentityOf(t, argv[0]),
+		Screen:        testScreen(),
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -1456,6 +1458,18 @@ func TestSeatbeltBehavioralPublicWiring(t *testing.T) {
 	if !strings.Contains(res.Content, "exit code: 0") || !strings.Contains(res.Content, "sandboxed") {
 		t.Fatalf("unexpected result:\n%s", res.Content)
 	}
+}
+
+// TestSeatbeltRunScreensOutput: the backend's by-value spec copy keeps the
+// screen, and the match note survives the backend's own note handling.
+func TestSeatbeltRunScreensOutput(t *testing.T) {
+	requireSeatbeltCapability(t)
+	root := t.TempDir()
+	toolsList, err := NewSandboxedExecTools(root, seatbeltTestCfg())
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertScreensOutput(t, toolsList[0].(*RunCommand), root)
 }
 
 func seatbeltTestCfg() SandboxConfig { return SandboxConfig{Runtime: SandboxRuntimeSeatbelt} }
@@ -2760,6 +2774,7 @@ func seatbeltShellSpec(t *testing.T, ws, script string) execSpec {
 		Env:           []string{"PATH=/usr/bin:/bin", "HOME=" + os.Getenv("HOME")},
 		WorkspaceRoot: ws,
 		ExeIdentity:   execIdentityOf(t, "/bin/sh"),
+		Screen:        testScreen(),
 	}
 }
 
@@ -2912,7 +2927,7 @@ func TestSeatbeltNetsrcNotInherited(t *testing.T) {
 	spec := execSpec{
 		Path: exe, Argv: []string{exe, "-test.run=^TestSeatbeltHelperProcess$", "--", "netsrcclosed", fmt.Sprint(fd), fmt.Sprint(id)},
 		Dir: ws, WorkspaceRoot: ws, ExeIdentity: execIdentityOf(t, exe),
-		Env: []string{"PATH=/usr/bin:/bin", "GO_LLM_SEATBELT_HELPER=1"},
+		Env: []string{"PATH=/usr/bin:/bin", "GO_LLM_SEATBELT_HELPER=1"}, Screen: testScreen(),
 	}
 	for _, background := range []bool{false, true} {
 		t.Run(fmt.Sprintf("background=%t", background), func(t *testing.T) {

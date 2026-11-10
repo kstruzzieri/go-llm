@@ -330,7 +330,7 @@ func TestScratchForegroundEffectBudget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := rt.cfg.SnapshotTimeout + 90*time.Second + 2*rt.cfg.CaptureTimeout + scratchEffectGrace
+	want := rt.cfg.SnapshotTimeout + 90*time.Second + 2*rt.cfg.CaptureTimeout + scratchEffectGrace + defaultScreenLimits.budget
 	if plan.Effect.Timeout != want {
 		t.Fatalf("outer effect timeout = %v, want %v", plan.Effect.Timeout, want)
 	}

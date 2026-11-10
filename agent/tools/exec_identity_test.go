@@ -30,7 +30,7 @@ func TestRecheckExecPlanCarriesIdentities(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	spec, err := recheckExecPlan(ws, pp)
+	spec, err := recheckExecPlan(t.Context(), ws, pp)
 	if err != nil {
 		t.Fatal(err)
 	}

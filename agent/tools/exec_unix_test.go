@@ -82,6 +82,7 @@ func TestMain(m *testing.M) {
 //	["echo", args...]              -> print args to stdout
 //	["errto", args...]             -> print args to stderr
 //	["fail"]                       -> exit with code 3
+//	["lines", <n>]                 -> print n lines of 999 'x' and a newline
 //	["dumpenv"]                    -> print env, one key=value per line
 //	["sleep"]                      -> sleep 30s (plain sleeper, e.g. for timeout tests)
 //	["groupkill", <pidfile>]       -> spawn a grandchild justsleep, write its PID to
@@ -109,6 +110,13 @@ func helperMain(args []string) int {
 		return 0
 	case "fail":
 		return 3
+	case "lines":
+		n, _ := strconv.Atoi(args[1])
+		line := strings.Repeat("x", 999) + "\n"
+		for i := 0; i < n; i++ {
+			_, _ = fmt.Fprint(os.Stdout, line)
+		}
+		return 0
 	case "dumpenv":
 		for _, e := range os.Environ() {
 			_, _ = fmt.Fprintln(os.Stdout, e)
@@ -240,7 +248,7 @@ func helperSpec(t *testing.T, args ...string) execSpec {
 		t.Fatal(err)
 	}
 	argv := append([]string{self, "__golem_exec_helper__"}, args...)
-	return execSpec{Path: self, Argv: argv, Dir: t.TempDir(), Env: []string{"PATH=/usr/bin:/bin"}}
+	return execSpec{Path: self, Argv: argv, Dir: t.TempDir(), Env: []string{"PATH=/usr/bin:/bin"}, Screen: testScreen()}
 }
 
 func TestUnixRunnerEchoAndExit(t *testing.T) {
@@ -319,8 +327,8 @@ func TestUnixRunnerOutputCap(t *testing.T) {
 	for _, sc := range spawnerCases() {
 		t.Run(sc.name, func(t *testing.T) {
 			r := unixRunner{spawn: sc.spawn}
-			big := strings.Repeat("x", execStdoutCap+5000)
-			res, err := r.Run(context.Background(), helperSpec(t, "echo", big))
+			// 40 lines of 1000 bytes: over the cap, each line short enough to screen.
+			res, err := r.Run(context.Background(), helperSpec(t, "lines", "40"))
 			if err != nil {
 				t.Fatal(err)
 			}

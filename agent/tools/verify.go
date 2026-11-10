@@ -206,10 +206,11 @@ func (v *VerifyCommand) Preview() string {
 // classify; once the command was launched, that error comes with the partial
 // result, including Notes.
 func (v *VerifyCommand) Run(ctx context.Context) (VerifyResult, error) {
-	spec, err := recheckExecPlan(v.ws, v.pending)
+	spec, err := recheckExecPlan(ctx, v.ws, v.pending)
 	if err != nil {
 		return VerifyResult{}, err
 	}
+	defer spec.Screen.release()
 	cctx, cancel := context.WithTimeout(ctx, v.pending.timeout)
 	defer cancel()
 
