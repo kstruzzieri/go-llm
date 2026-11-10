@@ -115,6 +115,7 @@ func (t *EditFile) Plan(ctx context.Context, raw json.RawMessage) (agent.ToolPla
 	if err != nil {
 		return agent.ToolPlan{Effect: eff}, err
 	}
+	key, reason := t.ws.fileToolApprovalKey(ctx, args.Path)
 	t.store(ContentHash(raw), pendingPlan{
 		path:         args.Path,
 		priorContent: before,
@@ -123,9 +124,9 @@ func (t *EditFile) Plan(ctx context.Context, raw json.RawMessage) (agent.ToolPla
 		afterContent: after,
 		afterHash:    ContentHash(after),
 		summary:      fmt.Sprintf("edit %s", args.Path),
+		approvalKey:  key,
 	})
-	key, _ := t.ws.fileToolApprovalKey(ctx, args.Path)
-	return agent.ToolPlan{Effect: eff, Preview: unifiedDiff(args.Path, before, after, true), ApprovalKey: key}, nil
+	return agent.ToolPlan{Effect: eff, Preview: harnessPreview(reason, unifiedDiff(args.Path, before, after, true)), ApprovalKey: key}, nil
 }
 
 func (t *EditFile) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolResult, error) {
@@ -149,6 +150,9 @@ func (t *EditFile) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolR
 	// before-hash match guarantees pp.afterContent equals a fresh recomputation.
 	if ContentHash(before) != pp.beforeHash {
 		return errResult("file changed since preview; retry"), nil
+	}
+	if t.ws.harnessKeyLost(ctx, pp) {
+		return errResult(harnessKeyLostMsg), nil
 	}
 	rec := MutationRecord{
 		Path: pp.path, PriorContent: pp.priorContent, Existed: true,

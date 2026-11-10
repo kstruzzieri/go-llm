@@ -97,7 +97,8 @@ func (t *WriteFile) Plan(ctx context.Context, raw json.RawMessage) (agent.ToolPl
 		beforeHash = ContentHash(prior)
 	}
 	content := []byte(args.Content)
-	preview := unifiedDiff(args.Path, prior, content, priorExists)
+	key, reason := t.ws.fileToolApprovalKey(ctx, args.Path)
+	preview := harnessPreview(reason, unifiedDiff(args.Path, prior, content, priorExists))
 	t.store(ContentHash(raw), pendingPlan{
 		path:         args.Path,
 		priorContent: prior,
@@ -106,8 +107,8 @@ func (t *WriteFile) Plan(ctx context.Context, raw json.RawMessage) (agent.ToolPl
 		afterContent: content,
 		afterHash:    ContentHash(content),
 		summary:      fmt.Sprintf("write %s", args.Path),
+		approvalKey:  key,
 	})
-	key, _ := t.ws.fileToolApprovalKey(ctx, args.Path)
 	return agent.ToolPlan{Effect: eff, Preview: preview, ApprovalKey: key}, nil
 }
 
@@ -135,6 +136,9 @@ func (t *WriteFile) Invoke(ctx context.Context, raw json.RawMessage) (agent.Tool
 	}
 	if nowExists != pp.priorExists || curHash != pp.beforeHash {
 		return errResult("file changed since preview; retry"), nil
+	}
+	if t.ws.harnessKeyLost(ctx, pp) {
+		return errResult(harnessKeyLostMsg), nil
 	}
 	// The decisive hash/existence check runs after Prepare, through the same
 	// parent capability as installation. The earlier read supplies helpful errors;

@@ -3,6 +3,7 @@ package tools
 import (
 	"cmp"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -11,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/kstruzzieri/go-llm/agent"
 )
 
 // harnessRefRow is one reference-set fixture (#784). Paths are relative to
@@ -346,4 +349,190 @@ func TestHarnessRefsDanglingVirtualLink(t *testing.T) {
 	if ok, why := refs.covers("cfg/notes.txt"); ok {
 		t.Fatalf("cfg/notes.txt covered: %s", why)
 	}
+}
+
+// harnessPlanTool is a write_file or edit_file call on rel, to plan, invoke
+// and compare. Both tools write "new\n" over what rel holds ("old\n" for
+// edit_file's existing target, absent for write_file's).
+type harnessPlanTool struct {
+	name string
+	raw  json.RawMessage
+	plan func(context.Context, json.RawMessage) (agent.ToolPlan, error)
+	run  func(context.Context, json.RawMessage) (agent.ToolResult, error)
+}
+
+func harnessPlanTools(t *testing.T, ws *Workspace, rel string) []harnessPlanTool {
+	t.Helper()
+	wraw, err := json.Marshal(map[string]string{"path": rel, "content": "new\n"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	eraw, err := json.Marshal(map[string]string{"path": rel, "old_string": "old", "new_string": "new"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	w, e := NewWriteFile(ws, nil), NewEditFile(ws, nil)
+	return []harnessPlanTool{
+		{"write_file", wraw, w.Plan, w.Invoke},
+		{"edit_file", eraw, e.Plan, e.Invoke},
+	}
+}
+
+// TestHarnessPlanInvokeRecheck: a key that went from grantable to "" between
+// Plan and Invoke refuses the write and writes nothing; without the change the
+// same pair lands.
+func TestHarnessPlanInvokeRecheck(t *testing.T) {
+	const refusal = "harness files changed or could not be checked since preview; retry"
+	for _, tool := range []string{"write_file", "edit_file"} {
+		for _, changed := range []bool{true, false} {
+			t.Run(tool+"/changed="+strconv.FormatBool(changed), func(t *testing.T) {
+				root := filepath.Join(t.TempDir(), "ws")
+				ws := harnessRefsWorkspace(t, root)
+				target := filepath.Join(root, "docs", "policy.md")
+				if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if tool == "edit_file" {
+					if err := os.WriteFile(target, []byte("old\n"), 0o644); err != nil {
+						t.Fatal(err)
+					}
+				}
+				var tc harnessPlanTool
+				for _, c := range harnessPlanTools(t, ws, "docs/policy.md") {
+					if c.name == tool {
+						tc = c
+					}
+				}
+				p, err := tc.plan(context.Background(), tc.raw)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if p.ApprovalKey != WriteClassApprovalKey {
+					t.Fatalf("planned key %q, want the write-class key", p.ApprovalKey)
+				}
+				if changed {
+					if err := os.WriteFile(filepath.Join(root, "CLAUDE.md"), []byte("@docs/policy.md\n"), 0o644); err != nil {
+						t.Fatal(err)
+					}
+				}
+				res, err := tc.run(context.Background(), tc.raw)
+				if err != nil {
+					t.Fatal(err)
+				}
+				got, rerr := os.ReadFile(target)
+				if changed {
+					if !strings.Contains(res.Content, refusal) {
+						t.Fatalf("Invoke = %q, want the refusal", res.Content)
+					}
+					if tool == "write_file" && rerr == nil {
+						t.Fatalf("docs/policy.md written: %q", got)
+					}
+					if tool == "edit_file" && string(got) != "old\n" {
+						t.Fatalf("docs/policy.md = %q, want unchanged", got)
+					}
+					return
+				}
+				if strings.Contains(res.Content, refusal) || rerr != nil || string(got) != "new\n" {
+					t.Fatalf("control: Invoke = %q, file %q (%v), want a landed write", res.Content, got, rerr)
+				}
+			})
+		}
+	}
+}
+
+// TestHarnessPlanReasonLine: the preview of a covered or unverifiable target
+// opens with the reason line; #725 harness files and ordinary files get none.
+func TestHarnessPlanReasonLine(t *testing.T) {
+	const prefix = "harness reference: "
+	plan := func(t *testing.T, ws *Workspace, tool, rel string) agent.ToolPlan {
+		t.Helper()
+		for _, c := range harnessPlanTools(t, ws, rel) {
+			if c.name == tool {
+				p, err := c.plan(context.Background(), c.raw)
+				if err != nil {
+					t.Fatalf("%s Plan(%s): %v", tool, rel, err)
+				}
+				return p
+			}
+		}
+		return agent.ToolPlan{}
+	}
+	for _, tool := range []string{"write_file", "edit_file"} {
+		t.Run(tool, func(t *testing.T) {
+			_, _, ws := harnessRefFixture(t, harnessRefRow{files: map[string]string{
+				"CLAUDE.md":      "@docs/policy.md\n",
+				"docs/policy.md": "old\n",
+				"AGENTS.md":      "old\n",
+				"other/plain.md": "old\n",
+			}})
+			covered := plan(t, ws, tool, "docs/policy.md")
+			line := prefix + "CLAUDE.md imports docs/policy.md\n"
+			if covered.ApprovalKey != "" || !strings.HasPrefix(covered.Preview, line) {
+				t.Fatalf("covered plan = key %q preview %q, want key \"\" and prefix %q", covered.ApprovalKey, covered.Preview, line)
+			}
+			// The rest is the diff an ordinary target of the same content gets.
+			ordinary := plan(t, ws, tool, "other/plain.md")
+			if strings.HasPrefix(ordinary.Preview, prefix) || ordinary.ApprovalKey != WriteClassApprovalKey {
+				t.Fatalf("other/plain.md plan = key %q preview %q, want ordinary", ordinary.ApprovalKey, ordinary.Preview)
+			}
+			wantRest := strings.ReplaceAll(ordinary.Preview, "other/plain.md", "docs/policy.md")
+			if rest := strings.TrimPrefix(covered.Preview, line); rest != wantRest {
+				t.Fatalf("diff after the reason line = %q, want %q", rest, wantRest)
+			}
+			for _, rel := range []string{"AGENTS.md", "notes.txt"} {
+				if p := plan(t, ws, tool, rel); strings.HasPrefix(p.Preview, prefix) {
+					t.Errorf("%s preview %q has a reason line", rel, p.Preview)
+				}
+			}
+		})
+	}
+	t.Run("incomplete set", func(t *testing.T) {
+		_, _, ws := harnessRefFixture(t, harnessRefRow{files: map[string]string{".mcp.json": `{"a":`}})
+		for _, tool := range []string{"write_file", "edit_file"} {
+			p := plan(t, ws, tool, "notes.txt")
+			if p.ApprovalKey != "" || !strings.HasPrefix(p.Preview, prefix+"could not check what harness files reference: ") {
+				t.Errorf("%s plan = key %q preview %q, want the incomplete-set reason", tool, p.ApprovalKey, p.Preview)
+			}
+		}
+	})
+}
+
+// TestHarnessPlanReasonQuoted (Review Focus 4, ruling R5): a name holding a
+// newline or U+202E cannot forge a second line or hide in the reason line.
+func TestHarnessPlanReasonQuoted(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("file names holding a newline or U+202E are not portable to Windows")
+	}
+	t.Run("newline in an OpenCode pattern", func(t *testing.T) {
+		const pat = "docs/a\nharness file: forged.md"
+		cfg, err := json.Marshal(map[string]any{"instructions": []string{pat}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _, ws := harnessRefFixture(t, harnessRefRow{files: map[string]string{"opencode.json": string(cfg), pat: "old\n"}})
+		p := harnessWritePlan(t, ws, pat)
+		lines := strings.Split(p.Preview, "\n")
+		if p.ApprovalKey != "" || len(lines) < 2 || !strings.HasPrefix(lines[0], "harness reference: opencode.json instructions name ") ||
+			!strings.HasPrefix(lines[1], "---") {
+			t.Fatalf("preview = %q, want a one-line reason then the diff", p.Preview)
+		}
+		if !strings.Contains(lines[0], `"docs/a\nharness file: forged.md"`) {
+			t.Fatalf("reason line %q holds the pattern unquoted", lines[0])
+		}
+	})
+	t.Run("U+202E in an imported name", func(t *testing.T) {
+		name := "docs/a\u202eb.md"
+		_, _, ws := harnessRefFixture(t, harnessRefRow{files: map[string]string{
+			"CLAUDE.md": "@" + name + "\n",
+			name:        "old\n",
+		}})
+		p := harnessWritePlan(t, ws, name)
+		want := `harness reference: CLAUDE.md imports "docs/a\u202eb.md"` + "\n"
+		if p.ApprovalKey != "" || !strings.HasPrefix(p.Preview, want) {
+			t.Fatalf("preview = %q, want prefix %q", p.Preview, want)
+		}
+		if strings.ContainsRune(p.Preview[:len(want)], '\u202e') {
+			t.Fatalf("reason line holds the raw U+202E: %q", p.Preview)
+		}
+	})
 }
