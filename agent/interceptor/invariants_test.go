@@ -378,6 +378,10 @@ func TestDefaultTableRows(t *testing.T) {
 		"read_file/credential_path/path",
 		"run_command/remote_script_execution/argv",
 		"start_command/remote_script_execution/argv",
+		"run_command/credential_path/argv",
+		"start_command/credential_path/argv",
+		"run_command/protected_dir/dir",
+		"start_command/protected_dir/dir",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("rows = %v, want %v", got, want)
@@ -398,4 +402,65 @@ func sprintfJSON(tmpl, p string) string {
 		panic(err)
 	}
 	return fmt.Sprintf(tmpl, q)
+}
+
+// TestExecDirInvariant: the working directory of an exec call is refused when
+// it is, or sits under, a protected directory (#777).
+func TestExecDirInvariant(t *testing.T) {
+	iv, err := NewInvariants(DefaultInvariants())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tool := range []string{"run_command", "start_command"} {
+		for _, tc := range []struct {
+			label, args string
+			blocked     bool
+		}{
+			{"ssh", `{"argv":["ls"],"dir":".ssh"}`, true},
+			{"git", `{"argv":["ls"],"dir":".git"}`, true},
+			{"nested aws", `{"argv":["ls"],"dir":"sub/.aws/x"}`, true},
+			{"src", `{"argv":["ls"],"dir":"src"}`, false},
+			{"absent", `{"argv":["ls"]}`, false},
+		} {
+			t.Run(tool+"/"+tc.label, func(t *testing.T) {
+				call := guardCall(tool, tc.args)
+				got, err := iv.InspectToolCall(context.Background(), call)
+				if err != nil {
+					t.Fatal(err)
+				}
+				blocked := false
+				for _, f := range got {
+					if f.Rule == "protected_dir" && f.Verdict == agent.VerdictBlock {
+						blocked = true
+					}
+				}
+				if blocked != tc.blocked {
+					t.Errorf("protected_dir blocked = %t, want %t", blocked, tc.blocked)
+				}
+			})
+		}
+	}
+}
+
+// TestAmbiguousArgvReportedOnce: two rows read argv, but the ambiguity of the
+// field is one finding.
+func TestAmbiguousArgvReportedOnce(t *testing.T) {
+	iv, err := NewInvariants(DefaultInvariants())
+	if err != nil {
+		t.Fatal(err)
+	}
+	call := guardCall("run_command", `{"argv":["ls"],"Argv":["pwd"]}`)
+	got, err := iv.InspectToolCall(context.Background(), call)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for _, f := range got {
+		if f.Rule == "ambiguous_argument" {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("ambiguous_argument findings = %d, want 1", n)
+	}
 }

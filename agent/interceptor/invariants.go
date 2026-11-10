@@ -30,7 +30,7 @@ type Invariant struct {
 }
 
 // Check is the sealed evaluator vocabulary. Tables are composed from the
-// shipped value kinds (PathDeny, CredentialPath, RemoteScript);
+// shipped value kinds (PathDeny, CredentialPath, CredentialArgv, RemoteScript);
 // NewInvariants rejects anything else, pointers included, so a check can
 // neither panic nor silently disable enforcement.
 type Check interface {
@@ -253,6 +253,10 @@ func DefaultInvariants() []Invariant {
 		{Tool: "read_file", Name: "credential_path", Field: "path", Check: CredentialPath{}},
 		{Tool: "run_command", Name: "remote_script_execution", Field: "argv", Check: RemoteScript{}},
 		{Tool: "start_command", Name: "remote_script_execution", Field: "argv", Check: RemoteScript{}},
+		{Tool: "run_command", Name: "credential_path", Field: "argv", Check: CredentialArgv{}},
+		{Tool: "start_command", Name: "credential_path", Field: "argv", Check: CredentialArgv{}},
+		{Tool: "run_command", Name: "protected_dir", Field: "dir", Check: protected},
+		{Tool: "start_command", Name: "protected_dir", Field: "dir", Check: protected},
 	}
 }
 
@@ -323,6 +327,8 @@ func ownedCheck(inv Invariant) (Check, error) {
 		}
 		return PathDeny{Pattern: &re}, nil
 	case CredentialPath:
+		return c, nil
+	case CredentialArgv:
 		return c, nil
 	case RemoteScript:
 		return c, nil
@@ -398,6 +404,7 @@ func (iv Invariants) InspectToolCall(_ context.Context, call agent.ToolCallInspe
 	}
 	tg := toolCallTarget(call.Call.ID)
 	var out []agent.Finding
+	ambiguous := make(map[string]bool)
 	for _, inv := range table {
 		raw, n := findMember(members, inv.Field)
 		switch n {
@@ -407,6 +414,10 @@ func (iv Invariants) InspectToolCall(_ context.Context, call agent.ToolCallInspe
 				out = append(out, tg.finding(inv.Name, agent.VerdictBlock, InvariantRisk, detail))
 			}
 		default:
+			if ambiguous[inv.Field] {
+				continue
+			}
+			ambiguous[inv.Field] = true
 			detail := fmt.Sprintf("argument %q appears %d times under equivalent spellings", inv.Field, n)
 			out = append(out, tg.finding(ambiguousRule, agent.VerdictBlock, InvariantRisk, detail))
 		}

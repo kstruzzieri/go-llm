@@ -157,7 +157,8 @@ func (t *StartCommand) Spec() agent.ToolSpec {
 		Description: "Start a command in the background (argv-first, NO shell) and return an opaque handle immediately. " +
 			"The command is shown to the user and starts only after they approve it; it keeps running across turns until it exits, " +
 			"is stopped via stop_command, or the session shuts down. When the command exits, background processes it left running " +
-			"in its process group are terminated. Poll with command_status and read output with command_tail.",
+			"in its process group are terminated. Poll with command_status and read output with command_tail." +
+			"Commands that name a credential file (.env and .env.* other than .env.example, .env.sample, .env.template and .env.dist; .netrc, _netrc, .npmrc, .pypirc, .git-credentials; anything under .ssh, .gnupg, .aws or .kube), or that use a credential directory or .git as dir, are refused, and the content of those files is withheld from output.",
 		Parameters: json.RawMessage(`{
   "type":"object",
   "properties":{

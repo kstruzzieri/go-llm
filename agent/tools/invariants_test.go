@@ -49,6 +49,7 @@ func TestDefaultInvariantsMatchToolSchemas(t *testing.T) {
 	}
 	wantShape := map[string]property{}
 	wantShape["path"] = property{Type: "string"}
+	wantShape["dir"] = property{Type: "string"}
 	argv := property{Type: "array"}
 	argv.Items.Type = "string"
 	wantShape["argv"] = argv

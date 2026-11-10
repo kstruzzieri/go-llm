@@ -288,7 +288,8 @@ func (t *RunCommand) Spec() agent.ToolSpec {
 		Name: "run_command",
 		Description: "Run a command directly (argv-first, NO shell: no metacharacters, globbing, or pipes). " +
 			"Returns the exit code plus bounded stdout/stderr. The command is shown to the user and runs only after they approve it. " +
-			"A non-zero exit code is a normal result to read and react to, not an error.",
+			"A non-zero exit code is a normal result to read and react to, not an error." +
+			"Commands that name a credential file (.env and .env.* other than .env.example, .env.sample, .env.template and .env.dist; .netrc, _netrc, .npmrc, .pypirc, .git-credentials; anything under .ssh, .gnupg, .aws or .kube), or that use a credential directory or .git as dir, are refused, and the content of those files is withheld from output.",
 		Parameters: json.RawMessage(`{
   "type":"object",
   "properties":{
