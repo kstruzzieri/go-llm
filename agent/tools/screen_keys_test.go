@@ -41,6 +41,8 @@ func TestCredentialFileKeys(t *testing.T) {
 		{"cr-splits-records", "NAME=abcd\rwxyz", []string{"NAME=abcd"}},
 		{"colon-no-eq", "password: value-0014-abcdef", []string{"password: value-0014-abcdef"}},
 		{"empty", "", nil},
+		{"csi-in-eq-run", "NAME\x1b[=1m=value-0042-abcdef", []string{"NAME=value-0042-abcdef", "1m=value-0042-abcdef"}},
+		{"csi-before-semicolon", "NAME=value-0043-abcdef \x1b[1m; note", []string{"NAME=value-0043-abcdef ; note", "value-0043-abcdef ; note"}},
 	}
 	for _, tc := range exact {
 		t.Run(tc.label, func(t *testing.T) {
@@ -77,6 +79,8 @@ func TestCredentialFileKeys(t *testing.T) {
 		{"git-url-token-user", "url = https://tokn-0024-abcdef:x-oauth-basic@example.invalid/r.git", []string{"tokn-0024-abcdef", "x-oauth-basic", "tokn-0024-abcdef:x-oauth-basic"}, nil},
 		{"git-url-percent", "url = https://user-0023:p%40ss-0023-abcdef@example.invalid/r.git", []string{"p%40ss-0023-abcdef", "p@ss-0023-abcdef", "user-0023"}, nil},
 		{"git-url-two-at", "url = https://user-0027:p@ss-0027-abcdef@example.invalid/r.git", []string{"p@ss-0027-abcdef"}, nil},
+		{"git-csi-in-name", "extraheader\x1b[=5h = \"AUTH: basic placeholder-0044-abcdef\"",
+			[]string{"extraheader = \"AUTH: basic placeholder-0044-abcdef\""}, []string{"AUTH: basic placeholder-0044-abcdef"}},
 		{"git-trailing-backslash", "extraheader = ordinary-0038-abcdef\\\n", []string{"ordinary-0038-abcdef"}, nil},
 	}
 	for _, tc := range git {
@@ -105,6 +109,24 @@ func TestCredentialFileKeys(t *testing.T) {
 		})
 	}
 
+	t.Run("git-eq-cap", func(t *testing.T) {
+		if _, over := credentialFileKeys([]byte(strings.Repeat("a=", 32)+"x"), true, 1<<14); over {
+			t.Fatal("32 named = should not set overLong")
+		}
+		if _, over := credentialFileKeys([]byte(strings.Repeat("a=", 33)+"x"), true, 1<<14); !over {
+			t.Fatal("33 named = should set overLong")
+		}
+	})
+	t.Run("overlong-no-keys", func(t *testing.T) {
+		keys, over := credentialFileKeys([]byte("abcdefghijkl\nNAME=value-0001-abcdef"), false, 22)
+		if over || len(keys) != 3 {
+			t.Fatalf("control: over=%v keys=%d", over, len(keys))
+		}
+		keys, over = credentialFileKeys([]byte("abcdefghijkl\nshort-ok-1"), false, 11)
+		if !over || len(keys) != 1 {
+			t.Fatalf("over=%v keys=%d, want over with only the other record's key", over, len(keys))
+		}
+	})
 	t.Run("overlong", func(t *testing.T) {
 		if _, over := credentialFileKeys([]byte("abcdefghijk"), false, 10); !over {
 			t.Fatal("keyCap+1 record should set overLong")

@@ -76,8 +76,9 @@ loop:
 
 // credentialFileKeys returns the byte strings to withhold from command output
 // for one credential file: each record, and the values inside it. Keys are
-// CSI-stripped, at least screenKeyFloor bytes, and unique. overLong reports a
-// record longer than keyCap.
+// CSI-stripped (each key is stripped after the raw record is parsed), at least screenKeyFloor bytes, and unique. overLong reports a
+// record longer than keyCap (no key is taken from it) or one with too many
+// settings to try.
 func credentialFileKeys(content []byte, gitConfig bool, keyCap int) (keys [][]byte, overLong bool) {
 	seen := map[string]bool{}
 	add := func(k []byte) {
@@ -92,12 +93,14 @@ func credentialFileKeys(content []byte, gitConfig bool, keyCap int) (keys [][]by
 	for _, rec := range bytes.FieldsFunc(content, func(r rune) bool { return r == '\n' || r == '\r' }) {
 		if len(rec) > keyCap {
 			overLong = true
+			continue
 		}
-		rec = stripCSI(rec)
 		line := bytes.TrimSpace(rec)
 		add(line)
 		if gitConfig {
-			gitConfigKeys(rec, add)
+			if !gitConfigKeys(rec, add) {
+				overLong = true
+			}
 		} else if eq := bytes.IndexByte(line, '='); eq >= 0 {
 			envValueKeys(bytes.TrimSpace(line[eq+1:]), add)
 		}
@@ -126,15 +129,21 @@ func envValueKeys(r []byte, add func([]byte)) {
 	}
 }
 
+// gitConfigEqCap bounds the "=" positions tried per git config record: each
+// one re-reads the rest of the record, so the count bounds the work.
+const gitConfigEqCap = 32
+
 func isSettingNameByte(c byte) bool {
 	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-'
 }
 
 // gitConfigKeys adds the keys for one git config record: what git prints for
 // each setting on the line, URL userinfo in the record and in those values,
-// and the extraheader forms.
-func gitConfigKeys(rec []byte, add func([]byte)) {
+// and the extraheader forms. It returns false when the record holds more than
+// gitConfigEqCap named "=" positions.
+func gitConfigKeys(rec []byte, add func([]byte)) bool {
 	texts := [][]byte{rec}
+	tried, ok := 0, true
 	for eq := range rec {
 		if rec[eq] != '=' {
 			continue
@@ -149,6 +158,10 @@ func gitConfigKeys(rec []byte, add func([]byte)) {
 		}
 		if start == end {
 			continue
+		}
+		if tried++; tried > gitConfigEqCap {
+			ok = false
+			break
 		}
 		v := gitConfigValue(rec[eq+1:])
 		if v != nil {
@@ -165,6 +178,7 @@ func gitConfigKeys(rec []byte, add func([]byte)) {
 	for _, t := range texts {
 		urlUserinfoKeys(t, add)
 	}
+	return ok
 }
 
 // urlUserinfoKeys adds the userinfo of each scheme://userinfo@ in t, read to
