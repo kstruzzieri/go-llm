@@ -362,11 +362,149 @@ func TestBuildOutputScreenRootReplaced(t *testing.T) {
 
 	// A parent deadline is the parent's error, not the screen's budget.
 	ws, _, _ = tolerantFixture(t, map[string]string{".env": "TOKEN=root-0004-abcdef\n", "a.txt": "x\n"}, nil)
-	ws.beforeReadDir = func(string) { time.Sleep(50 * time.Millisecond) }
-	ctx, cancel = context.WithTimeout(t.Context(), 10*time.Millisecond)
+	ctx, cancel = context.WithDeadline(t.Context(), time.Now().Add(-time.Hour))
 	defer cancel()
 	s, err = buildOutputScreen(ctx, ws)
 	check("parent deadline", s, err, context.DeadlineExceeded)
 
 	secretFree(t, "root", []string{"root-0001-abcdef", "root-0002-abcdef", "root-0003-abcdef", "root-0004-abcdef"}, texts...)
+}
+
+// .git/config is read through the held .git descriptor, so a .git moved,
+// replaced or denied during the read is never silently "no config".
+func TestBuildOutputScreenGitConfigHeld(t *testing.T) {
+	const cfg = "[remote \"origin\"]\n\turl = https://user-0020:pass-0020-abcdef@example.invalid/r.git\n"
+	gitTree := map[string]string{".git/config": cfg, "a.txt": "x\n"}
+	changed := "credential screen: 1 entr(ies) changed during the read and were skipped; output screened without them"
+	mustRename := func(t *testing.T, from, to string) {
+		t.Helper()
+		if err := os.Rename(from, to); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rows := []struct {
+		label   string
+		tree    map[string]string
+		setup   func(t *testing.T, ws *Workspace, root, sib string)
+		wantErr error    // non-nil: the build fails with it
+		notes   []string // the screen's notes
+		keyed   bool     // the config's password comes out as M
+	}{
+		{"git dir renamed away", gitTree, func(t *testing.T, ws *Workspace, root, _ string) {
+			ws.screenSeams = &screenSeams{openErr: func(rel string) error {
+				if rel == ".git" {
+					mustRename(t, filepath.Join(root, ".git"), filepath.Join(root, ".git-x"))
+				}
+				return nil
+			}}
+		}, nil, []string{changed}, false},
+		{"git dir away and back", gitTree, func(t *testing.T, ws *Workspace, root, _ string) {
+			ws.screenSeams = &screenSeams{openErr: func(rel string) error {
+				if rel == ".git" {
+					mustRename(t, filepath.Join(root, ".git"), filepath.Join(root, ".git-x"))
+					mustRename(t, filepath.Join(root, ".git-x"), filepath.Join(root, ".git"))
+				}
+				return nil
+			}}
+		}, nil, nil, true},
+		{"no config", map[string]string{".git/HEAD": "ref: refs/heads/main\n"}, func(*testing.T, *Workspace, string, string) {}, nil, nil, false},
+		{"git dir replaced", gitTree, func(t *testing.T, ws *Workspace, root, _ string) {
+			other := root + "-other-git"
+			writeTree(t, other, map[string]string{"config": "[core]\n"})
+			ws.screenSeams = &screenSeams{openErr: func(rel string) error {
+				if rel == ".git" {
+					mustRename(t, filepath.Join(root, ".git"), root+"-old-git")
+					mustRename(t, other, filepath.Join(root, ".git"))
+				}
+				return nil
+			}}
+		}, nil, []string{changed}, false},
+		{"git dir denied", gitTree, func(_ *testing.T, ws *Workspace, _, _ string) {
+			ws.screenSeams = &screenSeams{openErr: answer(".git", fs.ErrPermission)}
+		}, nil, []string{withheldNote + `unreadable: ".git")`}, false},
+		{"config stat fails", gitTree, func(_ *testing.T, ws *Workspace, _, _ string) {
+			ws.screenSeams = &screenSeams{statErr: answer(".git/config", syscall.EIO)}
+		}, nil, []string{withheldNote + `unreadable: ".git/config")`}, false},
+		{"config gone at stat", gitTree, func(_ *testing.T, ws *Workspace, _, _ string) {
+			ws.screenSeams = &screenSeams{statErr: answer(".git/config", fs.ErrNotExist)}
+		}, nil, nil, false},
+		{"config open denied", gitTree, func(_ *testing.T, ws *Workspace, _, _ string) {
+			ws.screenSeams = &screenSeams{openErr: answer(".git/config", fs.ErrPermission)}
+		}, nil, []string{withheldNote + `unreadable: ".git/config")`}, false},
+		{"config replaced before open", gitTree, func(t *testing.T, ws *Workspace, root, _ string) {
+			other := root + "-other-config"
+			if err := os.WriteFile(other, []byte("[core]\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			ws.screenSeams = &screenSeams{openErr: func(rel string) error {
+				if rel == ".git/config" {
+					mustRename(t, other, filepath.Join(root, ".git", "config"))
+				}
+				return nil
+			}}
+		}, nil, []string{changed}, false},
+		{"root swapped at git dir", gitTree, func(t *testing.T, ws *Workspace, root, sib string) {
+			ws.screenSeams = &screenSeams{openErr: func(rel string) error {
+				if rel != ".git" {
+					return nil
+				}
+				swapRoot(t, root, sib)
+				return fs.ErrNotExist // the ordinary error, not the sentinel
+			}}
+		}, ErrRootReplaced, nil, false},
+	}
+	for _, r := range rows {
+		t.Run(r.label, func(t *testing.T) {
+			ws, root, sib := tolerantFixture(t, r.tree, map[string]string{"a.txt": "x\n"})
+			r.setup(t, ws, root, sib)
+			s, err := buildOutputScreen(t.Context(), ws)
+			if r.wantErr != nil {
+				if !errors.Is(err, r.wantErr) || s != nil {
+					t.Fatalf("%s: wrong outcome (error: %t, screen: %t)", r.label, err != nil, s != nil)
+				}
+				secretFree(t, r.label, []string{"pass-0020-abcdef"}, err.Error())
+				return
+			}
+			if err != nil || s == nil {
+				t.Fatalf("%s: build failed (error: %t)", r.label, err != nil)
+			}
+			notes := s.notes()
+			if !slices.Equal(notes, r.notes) {
+				t.Fatalf("%s: notes differ (%d notes, want %d)", r.label, len(notes), len(r.notes))
+			}
+			secretFree(t, r.label, []string{"pass-0020-abcdef"}, notes...)
+			want := "pass-0020-abcdef\n"
+			if r.keyed {
+				want = tM + "\n"
+			} else if len(r.notes) == 1 && strings.HasPrefix(r.notes[0], withheldNote) {
+				want = ""
+			}
+			if got := screenThrough(s, "pass-0020-abcdef\n"); got != want {
+				t.Fatalf("%s: output differs (len %d, want %d)", r.label, len(got), len(want))
+			}
+		})
+	}
+}
+
+// The screen's walk reads what the scope guard hides; the strict walk still
+// obeys the guard.
+func TestBuildOutputScreenIgnoresGuard(t *testing.T) {
+	ws, _, _ := tolerantFixture(t, map[string]string{"secrets/.env": "TOKEN=guard-0001-abcdef\n", "a.txt": "x\n"}, nil)
+	ws.SetScopeGuard(func(rel string, _ bool) error {
+		if rel == "secrets" || strings.HasPrefix(rel, "secrets/") {
+			return errors.New("denied")
+		}
+		return nil
+	})
+	s := mustBuild(t, "guard", ws)
+	if got := screenThrough(s, "got guard-0001-abcdef\n"); got != "got "+tM+"\n" {
+		t.Fatalf("guard: key not collected (len %d)", len(got))
+	}
+	var visits []string
+	if err := ws.walk(t.Context(), func(rel string, _ fs.DirEntry) error {
+		visits = append(visits, rel)
+		return nil
+	}); err != nil || !slices.Equal(visits, []string{"a.txt"}) {
+		t.Fatalf("guard: strict walk visits differ (%d, error: %t)", len(visits), err != nil)
+	}
 }

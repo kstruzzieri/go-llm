@@ -254,6 +254,28 @@ func TestWalkTolerant(t *testing.T) {
 			wantErr:     errBoom,
 		},
 		{
+			// A fatal error from ignored is returned before the recheck,
+			// whose own (non-fatal) error would otherwise turn it into a skip.
+			label: "ignored fails fatally below a moved subdir",
+			setup: func(t *testing.T, _ *Workspace, root, _ string) func(string) error {
+				if err := os.Mkdir(filepath.Join(root, "sub", ".git"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				return func(rel string) error {
+					if rel != "sub/.git" {
+						return nil
+					}
+					if err := os.Rename(filepath.Join(root, "sub"), root+"-moved-sub"); err != nil {
+						t.Fatal(err)
+					}
+					return ErrRootReplaced
+				}
+			},
+			wantVisits:  []string{"a", "a/bad", "a/gone", "a/ok", "data", "data/f", "sub"},
+			wantIgnored: []string{".git", "sub/.git"},
+			wantErr:     ErrRootReplaced,
+		},
+		{
 			label: "root replaced during ignored",
 			setup: func(t *testing.T, _ *Workspace, root, sib string) func(string) error {
 				return func(rel string) error {
@@ -279,7 +301,7 @@ func TestWalkTolerant(t *testing.T) {
 					return errBoom
 				}
 				return nil
-			}, func(rel string) error {
+			}, func(rel string, _ fs.DirEntry) error {
 				ignored = append(ignored, rel)
 				if onIgnored != nil {
 					return onIgnored(rel)
@@ -310,7 +332,7 @@ func TestWalkTolerant(t *testing.T) {
 	ws, _, _ := tolerantFixture(t, tolerantTree, nil)
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	nop := func(string) error { return nil }
+	nop := func(string, fs.DirEntry) error { return nil }
 	if err := ws.walkTolerant(ctx, func(string, fs.DirEntry) error { return nil }, nop, func(walkSkip) {}); !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled: error is not context.Canceled (nil: %t)", err == nil)
 	}

@@ -11,6 +11,8 @@ import (
 	"os"
 	"path/filepath"
 
+	"golang.org/x/sys/unix"
+
 	"github.com/kstruzzieri/go-llm/agent/interceptor"
 )
 
@@ -108,30 +110,22 @@ func buildOutputScreen(ctx context.Context, ws *Workspace) (*outputScreen, error
 		}
 		return read(rel, f, interceptor.IsGitConfigPath(rel))
 	}
-	// ignored reads the config of each .git directory the walk skips. A
-	// missing, symlinked or non-regular config is nothing: the walk rechecks
-	// the root after this returns, no listing says what a non-regular config
-	// was before, and a credential-named symlink is never read.
-	ignored := func(rel string) error {
+	// ignored reads the config of each .git directory the walk skips.
+	ignored := func(rel string, d fs.DirEntry) error {
 		if withhold != "" {
 			return fs.SkipAll
 		}
-		if filepath.Base(rel) != ".git" {
+		if d.Name() != ".git" {
 			return nil
 		}
-		cfg := rel + "/config"
-		err := ws.screenSeams.open(cfg)
-		var f *os.File
-		if err == nil {
-			f, err = ws.openRegularFile(cfg)
+		f, at, err := ws.openGitConfig(rel, d)
+		if err != nil {
+			return failed(at, err, false)
 		}
-		switch {
-		case errors.Is(err, fs.ErrNotExist), errors.Is(err, errSymlink), errors.Is(err, errNotRegular):
+		if f == nil {
 			return nil
-		case err != nil:
-			return failed(cfg, err, false)
 		}
-		return read(cfg, f, true)
+		return read(rel+"/config", f, true)
 	}
 	skip := func(s walkSkip) {
 		var le listingError
@@ -155,6 +149,53 @@ func buildOutputScreen(ctx context.Context, ws *Workspace) (*outputScreen, error
 	s.withhold = withhold
 	s.changed = changed
 	return s, nil
+}
+
+// openGitConfig opens config inside the listed .git directory d, at rel,
+// through held descriptors only: d is opened from its listed parent and must
+// be the directory listed, and config is opened from it with the identity
+// check openRegular makes. It returns a nil file and error when that
+// directory has no config. A config that is a symlink or not a regular file
+// is errNotRegular, which classifySkip ignores (a credential-named symlink is
+// never read). On failure it also returns the path the failure is about.
+func (w *Workspace) openGitConfig(rel string, d fs.DirEntry) (*os.File, string, error) {
+	e, ok := d.(workspaceEntry)
+	if !ok {
+		return nil, rel, errWalkEntryUnheld
+	}
+	var dir *os.File
+	err := w.screenSeams.open(rel)
+	if err == nil {
+		dir, err = e.openListedDir()
+	} else {
+		err = reachabilityError(workspaceOpenError(err), false)
+	}
+	if err != nil {
+		return nil, rel, err
+	}
+	defer func() { _ = dir.Close() }()
+	cfg := rel + "/config"
+	var st unix.Stat_t
+	err = w.screenSeams.stat(cfg)
+	if err == nil {
+		err = unix.Fstatat(int(dir.Fd()), "config", &st, unix.AT_SYMLINK_NOFOLLOW)
+	}
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return nil, "", nil
+	case err != nil:
+		return nil, cfg, err
+	}
+	if err := w.screenSeams.open(cfg); err != nil {
+		return nil, cfg, workspaceOpenError(err)
+	}
+	// A symlink or non-regular config fails here with errNotRegular, which
+	// classifySkip ignores.
+	f, err := workspaceEntry{name: "config", stat: st, dir: dir}.openRegular()
+	if err != nil {
+		return nil, cfg, err
+	}
+	return f, "", nil
 }
 
 // openScreened is openWalked with the openErr seam asked first; a seam's
