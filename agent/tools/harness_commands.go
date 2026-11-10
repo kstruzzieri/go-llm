@@ -44,13 +44,17 @@ import (
 //   - Every other JSON file in a harness folder: `.claude/tasks/`, `.claude/plans/` and similar working state name ordinary files constantly.
 //   - `.agent/`.
 //
-// Two additions to the table, each only adding prompts: .gemini/settings.json
+// Three additions to the table, each only adding prompts: .gemini/settings.json
 // also reads Gemini CLI's older top-level toolDiscoveryCommand and
-// toolCallCommand, and .github/copilot/*.json also reads args.
+// toolCallCommand; .github/copilot/*.json also reads args; and .mcp.json,
+// .claude/settings.json and .claude/settings.local.json also read an MCP
+// server's headersHelper, which "Claude Code runs ... in a shell" when
+// connecting (https://code.claude.com/docs/en/mcp, ruling R9). The env and
+// permissions subtrees are skipped whole, whatever keys they hold.
 var commandFileKeys = map[string][]string{
-	interceptor.HarnessKey(".claude/settings.json"):       {"command", "args", "apiKeyHelper", "awsAuthRefresh", "awsCredentialExport", "otelHeadersHelper"},
-	interceptor.HarnessKey(".claude/settings.local.json"): {"command", "args", "apiKeyHelper", "awsAuthRefresh", "awsCredentialExport", "otelHeadersHelper"},
-	interceptor.HarnessKey(".mcp.json"):                   {"command", "args"},
+	interceptor.HarnessKey(".claude/settings.json"):       {"command", "args", "apiKeyHelper", "awsAuthRefresh", "awsCredentialExport", "otelHeadersHelper", "headersHelper"},
+	interceptor.HarnessKey(".claude/settings.local.json"): {"command", "args", "apiKeyHelper", "awsAuthRefresh", "awsCredentialExport", "otelHeadersHelper", "headersHelper"},
+	interceptor.HarnessKey(".mcp.json"):                   {"command", "args", "headersHelper"},
 	interceptor.HarnessKey(".cursor/hooks.json"):          {"command", "args"},
 	interceptor.HarnessKey(".cursor/mcp.json"):            {"command", "args"},
 	interceptor.HarnessKey(".windsurf/hooks.json"):        {"command", "args"},
@@ -71,15 +75,17 @@ var commandFileKeys = map[string][]string{
 func HarnessCommandFiles() []string { return slices.Sorted(maps.Keys(commandFileKeys)) }
 
 // commandFileKeysFor returns the keys to read from the file whose virtual
-// path has HarnessKey virtualKey. The longest commandFileKeys entry that is a
-// whole-component suffix of virtualKey wins; a folder entry (.github/hooks,
-// .github/copilot) matches only a *.json file directly inside that folder. ok
-// is false for a file the command reader does not read.
+// path has HarnessKey virtualKey. The longest commandFileKeys entries that are
+// a whole-component suffix of virtualKey win; when several tie, the result is
+// the union of their keys in sorted-name order (ruling R11), so map order never
+// decides it. A folder entry (.github/hooks, .github/copilot) matches only a
+// *.json file directly inside that folder. ok is false for a file the command
+// reader does not read. The result is a fresh slice.
 func commandFileKeysFor(virtualKey string) (keys []string, ok bool) {
 	dir, base := path.Split(virtualKey)
 	dir = strings.TrimSuffix(dir, "/")
-	best := ""
-	for name, k := range commandFileKeys {
+	best := 0
+	for _, name := range slices.Sorted(maps.Keys(commandFileKeys)) {
 		target := virtualKey
 		if path.Ext(name) == "" {
 			if !strings.HasSuffix(base, ".json") {
@@ -87,8 +93,17 @@ func commandFileKeysFor(virtualKey string) (keys []string, ok bool) {
 			}
 			target = dir
 		}
-		if (target == name || strings.HasSuffix(target, "/"+name)) && len(name) > len(best) {
-			best, keys, ok = name, k, true
+		if target != name && !strings.HasSuffix(target, "/"+name) || len(name) < best {
+			continue
+		}
+		if len(name) > best {
+			best, keys = len(name), nil
+		}
+		ok = true
+		for _, k := range commandFileKeys[name] {
+			if !slices.Contains(keys, k) {
+				keys = append(keys, k)
+			}
 		}
 	}
 	return keys, ok
@@ -322,11 +337,28 @@ type cmdToken struct {
 }
 
 // commandSet is what one configuration file names: its tokens, and the
-// working folders (cwd, dir) its commands may run in.
+// working folders (cwd, dir) its commands may run in. capped reports that a
+// shell string crossed maxCdBases; reading stopped there, so the set is
+// incomplete.
 type commandSet struct {
 	tokens []cmdToken
 	dirs   []string
+	capped bool
 }
+
+// maxCdBases bounds the distinct "cd" targets one shell string records
+// (ruling R8). A real hook changes folder once or twice; with no bound a string
+// of repeated "cd a;x;" grows the bases, and the resolution work with them,
+// without limit (a 28 KB string took 99 s). Crossing it makes the file's
+// command set incomplete.
+const maxCdBases = 64
+
+// maxCommandPaths bounds the paths resolveCommandTokens builds for one file,
+// counting start folders, "cd" folders, candidates and PATH lookups (ruling
+// R8). A real hook or MCP file builds a few hundred; 2,000 cwd and command
+// pairs (69 KB) would build four million. Crossing it stops the work and
+// reports the result incomplete.
+const maxCommandPaths = 100_000
 
 // shellState is what earlier commands in a shell string tell the reader about
 // later ones: every "cd" target so far (bases) and the folder reached if every
@@ -338,7 +370,9 @@ type shellState struct {
 
 // wholeTokenMeta are the characters that make a "command" string shell
 // syntax rather than one program path (ruling R2); space and tab are not, so
-// "/opt/My Tools/server" stays one token.
+// "/opt/My Tools/server" stays one token. A "\" alone does not either: the
+// value is kept whole with "\" folded to "/" (ruling R13), so the Windows
+// path "tools\my server.exe" stays one token.
 const wholeTokenMeta = "'\"\\$`;&|()<>\n\r*?["
 
 // extractCommands collects the command tokens and working folders of a
@@ -351,8 +385,10 @@ const wholeTokenMeta = "'\"\\$`;&|()<>\n\r*?["
 //     are operands, and the shell-command flag rule applies;
 //   - a string under any other listed key is a shell string; a powershell
 //     value has "\" folded to "/" first (R3), and a command value with no
-//     wholeTokenMeta is also one whole program token;
-//   - a string under cwd or dir, whatever the file's keys, is a working folder.
+//     wholeTokenMeta once "\" is folded to "/" is also one whole program
+//     token (R2, R13);
+//   - a string under cwd or dir, whatever the file's keys, is a working folder;
+//   - an env or permissions subtree is skipped whole (spec D4's exclusions).
 func extractCommands(keys []string, doc any) commandSet {
 	var cs commandSet
 	cs.walkJSON(keys, doc)
@@ -368,6 +404,12 @@ func (cs *commandSet) walkJSON(keys []string, v any) {
 		}
 	case map[string]any:
 		for _, k := range slices.Sorted(maps.Keys(v)) {
+			if cs.capped {
+				return
+			}
+			if strings.EqualFold(k, "env") || strings.EqualFold(k, "permissions") {
+				continue
+			}
 			e := v[k]
 			if s, ok := e.(string); ok && (strings.EqualFold(k, "cwd") || strings.EqualFold(k, "dir")) {
 				cs.dirs = append(cs.dirs, s)
@@ -391,8 +433,8 @@ func (cs *commandSet) readValue(k string, e any, parent map[string]any) {
 		case "powershell":
 			e = strings.ReplaceAll(e, `\`, "/")
 		case "command":
-			if !strings.ContainsAny(e, wholeTokenMeta) {
-				cs.tokens = append(cs.tokens, cmdToken{text: e, program: true})
+			if whole := strings.ReplaceAll(e, `\`, "/"); !strings.ContainsAny(whole, wholeTokenMeta) {
+				cs.tokens = append(cs.tokens, cmdToken{text: whole, program: true})
 			}
 		}
 		cs.shell(e, shellState{})
@@ -427,6 +469,9 @@ func siblingCommand(m map[string]any) string {
 // seen) sends the next word through shell.
 func (cs *commandSet) argv(words []string, programFirst bool, sh string, st shellState) {
 	for i, w := range words {
+		if cs.capped {
+			return
+		}
 		cs.tokens = append(cs.tokens, cmdToken{text: w, program: programFirst && i == 0, bases: st.bases})
 		if sh != "" && i+1 < len(words) && isShellFlag(sh, w) {
 			cs.shell(words[i+1], st)
@@ -468,8 +513,8 @@ func isShellFlag(sh, f string) bool {
 }
 
 // shell adds the tokens of shell string s, run in state st. Each command's
-// first word is its program and the rest are operands; "cd X" makes X a base
-// for later commands; the shell-command flag rule applies to each command's
+// first word is its program and the rest are operands; "cd X" (X its first
+// argument not starting with "-") makes X a base for later commands; the shell-command flag rule applies to each command's
 // words; and a word holding "$(" or a backtick, which survives double quotes,
 // is read again from there. A string holding "\" is also read with "\" folded
 // to "/", so a Windows path in a command does not lose its separators. Both
@@ -482,38 +527,52 @@ func (cs *commandSet) shell(s string, st shellState) {
 	}
 }
 
-// shellOnce is one reading of shell; st is its own copy.
+// shellOnce is one reading of shell; st is its own copy. It stops, marking cs
+// capped, when a "cd" would cross maxCdBases.
 func (cs *commandSet) shellOnce(s string, st shellState) {
 	for _, words := range shellCommands(s) {
+		if cs.capped {
+			return
+		}
 		cs.argv(words, true, "", st)
 		for _, w := range words {
 			if i := substitutionStart(w); i >= 0 {
 				cs.shell(w[i:], st)
 			}
 		}
-		if len(words) > 1 && words[0] == "cd" {
-			st = st.cd(words[len(words)-1])
+		if words[0] != "cd" {
+			continue
+		}
+		if i := slices.IndexFunc(words[1:], func(a string) bool { return a != "" && a[0] != '-' }); i >= 0 {
+			var ok bool
+			if st, ok = st.cd(words[1+i]); !ok {
+				cs.capped = true
+				return
+			}
 		}
 	}
 }
 
-// cd returns the state after "cd x". A target starting with "-" changes
-// nothing. A relative target is recorded both as given and joined to the
-// folder reached so far, since an earlier "cd" may have failed.
-func (st shellState) cd(x string) shellState {
-	if x == "" || x[0] == '-' {
-		return st
-	}
+// cd returns the state after "cd x", x non-empty. A relative target is
+// recorded both as given and joined to the folder reached so far, since an
+// earlier "cd" may have failed; a base already recorded is not added again.
+// ok is false when a new base would cross maxCdBases.
+func (st shellState) cd(x string) (_ shellState, ok bool) {
 	next := x
 	if st.cur != "" && !strings.ContainsAny(x[:1], `/\$%~`) && !filepath.IsAbs(x) {
 		next = path.Join(st.cur, x)
 	}
-	st.bases = append(st.bases, x)
-	if next != x {
-		st.bases = append(st.bases, next)
+	for _, b := range []string{x, next} {
+		if slices.Contains(st.bases, b) {
+			continue
+		}
+		if len(st.bases) == maxCdBases {
+			return st, false
+		}
+		st.bases = append(st.bases, b)
 	}
 	st.cur = next
-	return st
+	return st, true
 }
 
 // substitutionStart returns the index just past the first "$(" or backtick in
@@ -532,26 +591,38 @@ func substitutionStart(w string) int {
 // shellCommands splits a shell string into simple commands, each a list of
 // words with quotes and escapes removed. It is lenient and never fails: single
 // quotes, double quotes (with \" \\ \$ \` and line continuation) and
-// backslash escapes are honored; unquoted ; & | ( ) < >, backticks and
-// newlines end a command; an unterminated quote runs to the end.
+// backslash escapes are honored; unquoted ; & | ( ), backticks and newlines
+// end a command; an unterminated quote runs to the end. A redirect operator
+// (< > >> 2> &> >& <<< and the like) only ends a word: the word after it is an
+// operand of the current command, never its program (ruling R10). A target met
+// before the program is moved after the command's other words, and a command
+// of redirects alone gets an empty program word.
 func shellCommands(s string) [][]string {
 	var cmds [][]string
-	var words []string
+	var words, targets []string // targets: redirect targets met before the program
 	var w strings.Builder
-	inWord := false
+	inWord, redirect := false, false
 	endWord := func() {
-		if inWord {
-			words = append(words, w.String())
-			w.Reset()
-			inWord = false
+		if !inWord {
+			return
 		}
+		if redirect && len(words) == 0 {
+			targets = append(targets, w.String())
+		} else {
+			words = append(words, w.String())
+		}
+		w.Reset()
+		inWord, redirect = false, false
 	}
 	endCommand := func() {
 		endWord()
-		if len(words) > 0 {
-			cmds = append(cmds, words)
-			words = nil
+		if len(words) == 0 && len(targets) > 0 {
+			words = []string{""}
 		}
+		if words = append(words, targets...); len(words) > 0 {
+			cmds = append(cmds, words)
+		}
+		words, targets, redirect = nil, nil, false
 	}
 	for i := 0; i < len(s); i++ {
 		switch c := s[i]; {
@@ -583,7 +654,13 @@ func shellCommands(s string) [][]string {
 			}
 		case c == ' ' || c == '\t' || c == '\r':
 			endWord()
-		case strings.IndexByte(";&|()<>`\n", c) >= 0:
+		case c == '<' || c == '>' || c == '&' && i+1 < len(s) && s[i+1] == '>':
+			endWord()
+			for i+1 < len(s) && strings.IndexByte("<>&|", s[i+1]) >= 0 {
+				i++
+			}
+			redirect = true
+		case strings.IndexByte(";&|()`\n", c) >= 0:
 			endCommand()
 		default:
 			inWord = true
@@ -600,6 +677,9 @@ func shellCommands(s string) [][]string {
 func extractTOMLCommands(strs []tomlString) commandSet {
 	var cs commandSet
 	for _, s := range strs {
+		if cs.capped {
+			break
+		}
 		cs.tokens = append(cs.tokens, cmdToken{text: s.value})
 		cs.shell(s.value, shellState{})
 		if strings.EqualFold(s.key, "cwd") {
@@ -627,29 +707,47 @@ var projectDirVars = []string{
 }
 
 // resolveCommandTokens returns the absolute, cleaned, sorted and deduplicated
-// paths that cs's tokens may name. bases are the folders relative tokens
-// resolve against (spec D4: the anchor and the file's folder); projectDirs are
-// what a project-folder variable means; lookPath finds a bare program on PATH
-// and returns an absolute path. For each token:
+// paths that cs's tokens may name, and whether that set is complete. bases are
+// the folders relative tokens resolve against (spec D4: the anchor and the
+// file's folder); projectDirs are what a project-folder variable means;
+// lookPath finds a bare program on PATH and returns an absolute path. For each
+// token:
 //   - a "-flag=value" token is replaced by its value; then tokens starting
 //     with "-" or holding "://" are dropped;
-//   - a program token with no separator and no leading "$" or "%" counts only
-//     as its lookPath hit (ruling R1);
+//   - a program token with no separator and no leading "$", "%" or "~" counts
+//     only as its lookPath hit (ruling R1);
 //   - anything else resolves through resolveUnder against every base, every
 //     base joined with every cs.dirs value, and each of those joined with the
 //     token's own "cd" bases. Glob characters are literal.
 //
-// ponytail: the work is tokens times bases times dirs and "cd" targets, all
-// bounded by one configuration file's size; cap the candidates if a 256 KiB
-// file ever proves too slow.
-func resolveCommandTokens(cs commandSet, bases []string, projectDirs []string, lookPath func(name string) (string, bool)) []string {
+// complete is false, with no paths, when cs is capped or the work crosses
+// maxCommandPaths; the work stops at that point (ruling R8), and the caller
+// treats the reference set as incomplete.
+func resolveCommandTokens(cs commandSet, bases []string, projectDirs []string, lookPath func(name string) (string, bool)) (paths []string, complete bool) {
+	if cs.capped {
+		return nil, false
+	}
+	budget := maxCommandPaths
+	// grow appends resolveUnder(start, tok) to *dst; false once over budget.
+	grow := func(dst *[]string, start, tok string) bool {
+		r := resolveUnder(start, tok, projectDirs)
+		if budget -= len(r); budget < 0 {
+			return false
+		}
+		*dst = append(*dst, r...)
+		return true
+	}
 	starts := slices.Clone(bases)
 	for _, b := range bases {
-		for _, d := range cs.dirs {
-			starts = append(starts, resolveUnder(b, d, projectDirs)...)
+		for _, d := range slices.Compact(slices.Sorted(slices.Values(cs.dirs))) {
+			if !grow(&starts, b, d) {
+				return nil, false
+			}
 		}
 	}
-	var out []string
+	slices.Sort(starts)
+	starts = slices.Compact(starts)
+	looked := map[string]bool{}
 	for _, tk := range cs.tokens {
 		text := tk.text
 		if strings.HasPrefix(text, "-") {
@@ -658,9 +756,15 @@ func resolveCommandTokens(cs commandSet, bases []string, projectDirs []string, l
 		if text == "" || text[0] == '-' || strings.Contains(text, "://") {
 			continue
 		}
-		if tk.program && !strings.ContainsAny(text, `/\`) && text[0] != '$' && text[0] != '%' {
-			if hit, ok := lookPath(text); ok {
-				out = append(out, filepath.Clean(hit))
+		if tk.program && !strings.ContainsAny(text, `/\`) && !strings.ContainsAny(text[:1], "$%~") {
+			if !looked[text] {
+				looked[text] = true
+				if budget--; budget < 0 {
+					return nil, false
+				}
+				if hit, ok := lookPath(text); ok {
+					paths = append(paths, filepath.Clean(hit))
+				}
 			}
 			continue
 		}
@@ -669,23 +773,28 @@ func resolveCommandTokens(cs commandSet, bases []string, projectDirs []string, l
 			from = slices.Clone(starts)
 			for _, cd := range tk.bases {
 				for _, s := range starts {
-					from = append(from, resolveUnder(s, cd, projectDirs)...)
+					if !grow(&from, s, cd) {
+						return nil, false
+					}
 				}
 			}
 		}
 		for _, s := range from {
-			out = append(out, resolveUnder(s, text, projectDirs)...)
+			if !grow(&paths, s, text) {
+				return nil, false
+			}
 		}
 	}
-	slices.Sort(out)
-	return slices.Compact(out)
+	slices.Sort(paths)
+	return slices.Compact(paths), true
 }
 
 // resolveUnder resolves one path token against the folder start. A leading
 // project-folder variable yields one path per projectDirs entry. Any other
-// leading "$" or "%" form keeps what follows its first separator (a residual
-// of spec D4); with nothing there the token names nothing. An absolute token
-// stands as is; a relative one is joined to start.
+// leading "$" or "%" form, and a leading "~" (ruling R12), keeps what follows
+// its first separator (a residual of spec D4); with nothing there the token
+// names nothing. An absolute token stands as is; a relative one is joined to
+// start.
 func resolveUnder(start, tok string, projectDirs []string) []string {
 	if tok == "" {
 		return nil
@@ -699,7 +808,7 @@ func resolveUnder(start, tok string, projectDirs []string) []string {
 			return out
 		}
 	}
-	if tok[0] == '$' || tok[0] == '%' {
+	if tok[0] == '$' || tok[0] == '%' || tok[0] == '~' {
 		i := strings.IndexAny(tok, `/\`)
 		if i < 0 {
 			return nil

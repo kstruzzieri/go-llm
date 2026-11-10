@@ -2,6 +2,7 @@ package tools
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -122,9 +123,9 @@ func harnessKeysFor(t *testing.T, file string) []string {
 	return keys
 }
 
-// harnessResolveDoc decodes doc as the D4 file at virtual path file and
-// resolves its command tokens.
-func harnessResolveDoc(t *testing.T, file, doc string, bases, projectDirs []string, lookPath func(string) (string, bool)) []string {
+// harnessResolveDocComplete decodes doc as the D4 file at virtual path file
+// and resolves its command tokens, reporting whether the result is complete.
+func harnessResolveDocComplete(t *testing.T, file, doc string, bases, projectDirs []string, lookPath func(string) (string, bool)) ([]string, bool) {
 	t.Helper()
 	keys := harnessKeysFor(t, file)
 	if keys == nil {
@@ -139,6 +140,17 @@ func harnessResolveDoc(t *testing.T, file, doc string, bases, projectDirs []stri
 		t.Fatal(err)
 	}
 	return resolveCommandTokens(extractCommands(keys, v), bases, projectDirs, lookPath)
+}
+
+// harnessResolveDoc is harnessResolveDocComplete for a document that must
+// resolve completely.
+func harnessResolveDoc(t *testing.T, file, doc string, bases, projectDirs []string, lookPath func(string) (string, bool)) []string {
+	t.Helper()
+	got, complete := harnessResolveDocComplete(t, file, doc, bases, projectDirs, lookPath)
+	if !complete {
+		t.Fatalf("%s: resolution incomplete", file)
+	}
+	return got
 }
 
 // noLookPath finds no program on PATH.
@@ -290,6 +302,15 @@ func TestHarnessReadShellStrings(t *testing.T) {
 		{"workspaceFolder arg", ".vscode/mcp.json", `{"command":"node","args":["${workspaceFolder}/server.js"]}`, []string{"p/server.js"}, false, nil},
 		{"var name boundary", claude, `{"command":"$CLAUDE_PROJECT_DIRX/y.sh"}`, []string{"w/y.sh"}, false, []string{"p/y.sh"}},
 		{"cd to project var", claude, `{"command":"cd \"$CLAUDE_PROJECT_DIR\" && ./scripts/c.sh"}`, []string{"p/scripts/c.sh"}, false, nil},
+		// Fix round 1 (rulings R9, R10, R12, R13).
+		{"headersHelper", mcp, `{"mcpServers":{"s":{"headersHelper":"./scripts/hdr.sh"}}}`, []string{"w/scripts/hdr.sh"}, false, nil},
+		{"redirect input", claude, `{"command":"bash < setup.sh"}`, []string{"w/setup.sh"}, false, nil},
+		{"redirect output", claude, `{"command":"./run.sh > out.log"}`, []string{"w/run.sh"}, false, nil},
+		{"leading redirect", claude, `{"command":"< in.sh bash"}`, []string{"w/in.sh"}, false, nil},
+		{"fd redirects", claude, `{"command":"bash 2>&1 &> all.log < next.sh"}`, []string{"w/next.sh"}, false, nil},
+		{"cd with redirect", claude, `{"command":"cd sub 2>/dev/null && ./r.sh"}`, []string{"w/sub/r.sh"}, false, nil},
+		{"home residual", claude, `{"command":"~/scripts/x.sh"}`, []string{"w/scripts/x.sh"}, false, nil},
+		{"backslash whole token", mcp, `{"command":"tools\\my server.exe"}`, []string{"w/tools/my server.exe"}, false, nil},
 	}
 	for _, r := range rows {
 		t.Run(r.name, func(t *testing.T) {
@@ -340,6 +361,35 @@ func TestHarnessReadKeySelection(t *testing.T) {
 			t.Fatalf("tokens %q include a permission rule or env value", texts)
 		}
 	}
+
+	rows := []struct{ file, doc string }{
+		{".claude/settings.json", `{"env":{"COMMAND":"scripts/z.sh","DIR":"sub"}}`},
+		{".claude/settings.json", `{"ENV":{"command":"scripts/z.sh","cwd":"sub"}}`},
+		{".claude/settings.json", `{"permissions":{"command":"./scripts/p.sh","allow":["Bash(./scripts/p.sh)"],"dir":"sub"}}`},
+		{".mcp.json", `{"mcpServers":{"s":{"env":{"DIR":"sub","COMMAND":"other/z.sh","ARGS":["other/a.sh"]}}}}`},
+	}
+	for _, r := range rows {
+		v, err := decodeJSONC([]byte(r.doc))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cs := extractCommands(harnessKeysFor(t, r.file), v); len(cs.tokens) != 0 || len(cs.dirs) != 0 {
+			t.Errorf("%s: got tokens %v and dirs %q, want none", r.doc, cs.tokens, cs.dirs)
+		}
+	}
+	v, err = decodeJSONC([]byte(`{"command":"python3","args":["server.py"],"env":{"DIR":"sub","COMMAND":"other/z.sh"}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs = extractCommands(harnessKeysFor(t, ".mcp.json"), v)
+	texts = texts[:0]
+	for _, tk := range cs.tokens {
+		texts = append(texts, tk.text)
+	}
+	slices.Sort(texts)
+	if want := []string{"python3", "python3", "server.py"}; !reflect.DeepEqual(texts, want) || len(cs.dirs) != 0 {
+		t.Fatalf("got tokens %q and dirs %q, want %q and none", texts, cs.dirs, want)
+	}
 }
 
 func TestHarnessReadCwdDirBases(t *testing.T) {
@@ -358,7 +408,7 @@ func TestHarnessReadCwdDirBases(t *testing.T) {
 }
 
 func TestHarnessReadCommandFileLookup(t *testing.T) {
-	claude := []string{"command", "args", "apiKeyHelper", "awsAuthRefresh", "awsCredentialExport", "otelHeadersHelper"}
+	claude := []string{"command", "args", "apiKeyHelper", "awsAuthRefresh", "awsCredentialExport", "otelHeadersHelper", "headersHelper"}
 	gemini := []string{"command", "args", "discoveryCommand", "callCommand", "toolDiscoveryCommand", "toolCallCommand"}
 	vscode := []string{"command", "args"}
 	copilotHooks := []string{"bash", "powershell", "command"}
@@ -378,11 +428,16 @@ func TestHarnessReadCommandFileLookup(t *testing.T) {
 		{"pkg/.CLAUDE/Settings.JSON", claude, true},
 		{".codex/config.toml", nil, true},
 		{".agent/plan.lock.json", nil, false},
+		{".mcp.json", []string{"command", "args", "headersHelper"}, true},
+		// .github/hooks and opencode.json tie at 13 characters: the union.
+		{".github/hooks/opencode.json", copilotHooks, true},
 	}
 	for _, r := range rows {
-		got, ok := commandFileKeysFor(interceptor.HarnessKey(r.key))
-		if ok != r.ok || !reflect.DeepEqual(got, r.want) {
-			t.Errorf("%s: got %q, %v; want %q, %v", r.key, got, ok, r.want, r.ok)
+		for range 200 { // map order must not decide a tie
+			got, ok := commandFileKeysFor(interceptor.HarnessKey(r.key))
+			if ok != r.ok || !reflect.DeepEqual(got, r.want) {
+				t.Fatalf("%s: got %q, %v; want %q, %v", r.key, got, ok, r.want, r.ok)
+			}
 		}
 	}
 }
@@ -395,5 +450,50 @@ func TestHarnessCommandFilesIsACopy(t *testing.T) {
 	a[0] = "mutated"
 	if b := HarnessCommandFiles(); b[0] == "mutated" {
 		t.Fatal("HarnessCommandFiles shares its backing array")
+	}
+}
+
+func TestHarnessReadCommandBounds(t *testing.T) {
+	w, p := absBase(t, "w"), absBase(t, "p")
+	var pairs []string
+	for i := range 2000 {
+		pairs = append(pairs, fmt.Sprintf(`{"cwd":"d%d","command":"./c%d.sh"}`, i, i))
+	}
+	rows := []struct {
+		name, file, doc string
+		complete        bool
+	}{
+		{"cd chain 28 KB", ".claude/settings.json", `{"command":"` + strings.Repeat("cd a;x;", 4000) + `"}`, false},
+		{"cwd x command", ".mcp.json", `{"s":[` + strings.Join(pairs, ",") + `]}`, false},
+		{"64 cd bases", ".claude/settings.json", `{"command":"` + strings.Repeat("cd a;", 64) + `./x.sh"}`, true},
+		{"65 cd bases", ".claude/settings.json", `{"command":"` + strings.Repeat("cd a;", 65) + `./x.sh"}`, false},
+		{"repeated cd deduped", ".claude/settings.json", `{"command":"` + strings.Repeat("cd a; cd /abs; ", 500) + `./x.sh"}`, true},
+	}
+	for _, r := range rows {
+		t.Run(r.name, func(t *testing.T) {
+			keys := harnessKeysFor(t, r.file)
+			type result struct {
+				complete bool
+				err      error
+			}
+			done := make(chan result, 1)
+			go func() { // decode, extract and resolve all count against the bound
+				v, err := decodeJSONC([]byte(r.doc))
+				if err != nil {
+					done <- result{err: err}
+					return
+				}
+				_, complete := resolveCommandTokens(extractCommands(keys, v), []string{w, filepath.Join(w, ".claude")}, []string{w, p}, noLookPath)
+				done <- result{complete: complete}
+			}()
+			select {
+			case got := <-done:
+				if got.err != nil || got.complete != r.complete {
+					t.Fatalf("complete = %v (%v), want %v", got.complete, got.err, r.complete)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("resolution did not finish within 1s")
+			}
+		})
 	}
 }
