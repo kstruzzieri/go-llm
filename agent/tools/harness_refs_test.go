@@ -180,6 +180,40 @@ func TestHarnessRefsFailClosed(t *testing.T) {
 	}
 }
 
+// TestHarnessRefsPromotionCheck (spec D10, Open 2(b)): the promotion check
+// accepts a path whose parent folders are missing and refuses, naming the path
+// and the reason, a harness file, a referenced path, an escape, an unverified
+// spelling, and any path while the set is incomplete.
+func TestHarnessRefsPromotionCheck(t *testing.T) {
+	ctx := context.Background()
+	check := func(t *testing.T, ws *Workspace, paths []string, want string) {
+		t.Helper()
+		err := ws.CheckHarnessPromotion(ctx, paths)
+		// containment: PATH-HARNESS-REF
+		if want == "" && err != nil || want != "" && (err == nil || !strings.HasPrefix(err.Error(), want)) {
+			t.Errorf("CheckHarnessPromotion(%q) = %v, want %q", paths, err, cmp.Or(want, "nil"))
+		}
+	}
+	t.Run("references", func(t *testing.T) {
+		_, _, ws := harnessRefFixture(t, harnessRefRow{files: map[string]string{
+			"CLAUDE.md": "@docs/a.md\n", "docs/a.md": "old\n",
+		}})
+		check(t, ws, []string{"new/dir/x.go", "notes.txt"}, "")
+		check(t, ws, []string{"new/dir/x.go", "docs/a.md"}, "docs/a.md: CLAUDE.md imports docs/a.md")
+		check(t, ws, []string{"CLAUDE.md"}, "CLAUDE.md: agent instruction or harness file")
+		check(t, ws, []string{"../out.go"}, "../out.go: cannot resolve: ")
+	})
+	t.Run("incomplete set", func(t *testing.T) {
+		_, _, ws := harnessRefFixture(t, harnessRefRow{files: map[string]string{".mcp.json": `{"a":`}})
+		check(t, ws, []string{"notes.txt"}, "notes.txt: could not check what harness files reference: .mcp.json does not parse")
+	})
+	t.Run("unverified spelling", func(t *testing.T) {
+		_, root, ws := harnessRefFixture(t, harnessRefRow{files: map[string]string{"locked/x.go": "old\n"}})
+		harnessChmod(t, filepath.Join(root, "locked"), 0o111)
+		check(t, ws, []string{"locked/x.go"}, "locked/x.go: its stored spelling cannot be verified")
+	})
+}
+
 // harnessFiles returns n files named <prefix><i>.txt.
 func harnessFiles(prefix string, n int) map[string]string {
 	files := map[string]string{}

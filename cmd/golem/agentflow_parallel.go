@@ -18,6 +18,7 @@ import (
 	"strings"
 	"sync"
 
+	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
 	"github.com/kstruzzieri/go-llm/agentflow"
 	"golang.org/x/sync/errgroup"
 )
@@ -188,7 +189,7 @@ func (c *parallelCoordinator) runCohort(ctx context.Context) (ran bool, err erro
 	if err := c.recheckRoot(waveCtx); err != nil {
 		return true, fmt.Errorf("recheck canonical root before promotion: %w", err)
 	}
-	promotion, err := c.promoteWorkers()
+	promotion, err := c.promoteWorkers(waveCtx)
 	if err != nil {
 		return true, err
 	}
@@ -217,7 +218,7 @@ func (c *parallelCoordinator) runCohort(ctx context.Context) (ran bool, err erro
 	return true, nil
 }
 
-func (c *parallelCoordinator) promoteWorkers() (*parallelPromotion, error) {
+func (c *parallelCoordinator) promoteWorkers(ctx context.Context) (*parallelPromotion, error) {
 	root, err := os.OpenRoot(c.root)
 	if err != nil {
 		return nil, fmt.Errorf("open canonical promotion root: %w", err)
@@ -226,6 +227,21 @@ func (c *parallelCoordinator) promoteWorkers() (*parallelPromotion, error) {
 	changes, snapshots, err := c.parallelPromotionChanges()
 	if err != nil {
 		return nil, errors.Join(fmt.Errorf("snapshot parallel promotion: %w", err), promotion.close())
+	}
+	// Workers cannot see the canonical root's gitignored harness files, and
+	// apply never calls Plan, so the whole batch, writes and deletions alike,
+	// is classified against one fresh reference scan before anything is
+	// applied (#784, spec D10).
+	ws, err := agenttools.NewWorkspace(c.root)
+	if err == nil {
+		paths := make([]string, len(changes))
+		for i, change := range changes {
+			paths[i] = change.path
+		}
+		err = ws.CheckHarnessPromotion(ctx, paths)
+	}
+	if err != nil {
+		return nil, errors.Join(fmt.Errorf("refuse parallel promotion: %w", err), promotion.close())
 	}
 	for i, change := range changes {
 		if err := promotion.apply(change, snapshots[i]); err != nil {
