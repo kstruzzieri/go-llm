@@ -1,10 +1,10 @@
 # Containment mutation ledger (#452)
 
-Each entry proves one security property's assertions can fail. Entries are point-in-time evidence at their baseline revision. The ledger contains 105 entries: 100 guard and five effect-detection entries.
+Each entry proves one security property's assertions can fail. Entries are point-in-time evidence at their baseline revision. The ledger contains 140 entries: 135 guard and five effect-detection entries.
 
 Platform: every proof in this ledger ran on darwin (arm64, go1.27.1), except M-099 and M-100, whose test runs only on Linux and which ran only there (arm64, go1.27.1, the Docker `ci-local` image as its non-root `ci` user). After the rebase onto the model-resistance PR, the entries whose patches touch build-tagged or platform-sensitive code (M-005 to M-008, the unix path walks; M-009 and M-014 to M-018, the host exec path; M-011, the MCP stdio child environment) were re-run on Linux (arm64, go1.27.1, the Docker `ci-local` image) at their baseline: each entry's `Platform:` line records the result, and a Linux line that differs would be recorded beside the darwin evidence, never in place of it. M-010 (it needs an AgentFlow source checkout) and M-012 (Seatbelt is darwin-native) were not re-run on Linux, and no entry has run on Windows.
 
-Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-only variants added in review, M-045 B and M-047 B, at `34b2ff38`, whose production and scenario trees are identical; M-051 to M-053 at `731f2d1d`, the commit that adds them; M-054 to M-058 at `3d423ce1`, the commit that adds them; M-059 at `1166b276`, the commit that adds it): the baseline passed, the mutant failed as shown, and the tree was restored with `git checkout` and passed again. M-028 was re-recorded when tool frames moved to per-result keys: variant A on the commit that makes that change (parent `140524de`), variant B on the commit that adds the cross-Run check (parent `d75c78cb`). Each baseline passed, each mutant failed as shown, and an editor edit restored the baseline bytes, which passed again. Entries M-067 to M-071 ran on the commit that adds fence-key rotation (parent `72b6eb47`) in the same way, the restored file's sha256 matching the baseline's each time; M-072 and M-073 ran the same way on the commit that makes every exposed key rotate and matches keys through separators (parent `00912c90`), and M-074 on the commit that pins key minting before assembly (parent `caa84426`). Entries M-075 to M-078 ran the same way in an isolated `git archive` export of the commit that adds system keys (parent `3346b711`). M-079 and M-080 ran the same way on the commit that scans the durable summary and staged advice (parent `c17e940d`). Entries M-081 to M-085 ran the same way in an isolated `git archive` export of the commit that adds the #712 launchd acceptance tests, each applied with `patch -p1` and reverted with `patch -R -p1`, the restored file's sha256 matching the baseline's. Their baseline is recorded as `c4ca1a8d`: the runs used that commit's tree before two comment-only amends (a driver comment and the M-083 note) produced it, and the patches apply to `c4ca1a8d` at the recorded hunk offsets, with the quoted failing lines at the same line numbers. M-086 ran the same way in an export of `461fdcdc`, the commit that holds `syscall.ForkLock` across the guard and posix_spawn, where M-081 and M-083 were re-run against the new spawn order. All six were re-run the same way at `231baa07`, after the final #712 fix wave changed their tests and moved M-086's lock into a closure; each entry's last note records that run. Entries M-087 to M-105 ran the same way in an isolated `git archive` export of `88f33cfb`, the commit that adds the #725 inventory rows, each applied with `git apply` and reverted with `git apply -R`, the restored file's sha256 matching the baseline's (the export sat inside a checkout, where `git apply` silently skips paths outside the current directory, so both ran with `GIT_CEILING_DIRECTORIES` set to the export's parent); M-099 and M-100 ran in the Docker `ci-local` image from that export. The entry for the unverified-root rule including the repository boundary itself, whose mutant narrowed the rule to strictly below the boundary, was withdrawn when that narrowing became the production rule; later entries were renumbered to close the gap. Entries M-060 and M-061 ran in isolated exports of immutable code commit `23f0c0bbca83f0c9d6e02163dd09c4856698ddcd`: each baseline passed, its mutant failed, and restored files matched the baseline bytes and passed again. Entries M-062 and M-063 ran on this branch at `dbe5c315b40f8b973b96cf623d5cdcbe00c616fc`, the commit that adds their rules: each baseline passed, its mutant failed, and `git checkout -- <file>` restored the baseline bytes, which passed again; M-062's comparison against the previous rule ran in an isolated `git archive` export of `ac053567`. Entries M-064 to M-066 ran on the #387 branch at `72d0bedeb1d264b3da62cf812df7505a8bd7e776`, the commit that tightens PV1's probe and cites the exec and verification preview tests (M-064 and M-065 were first recorded at `b9cea9154746758026fd9bb58d467f665be5952f`, the commit that makes PV1 executable): each baseline passed, its mutant failed, and `git checkout -- <file>` restored the baseline bytes, which passed again. Entries quote test output, the containment judge's message text and line numbers included, as it read at their baseline; later wording changes do not rewrite them. Entries carried over from the PR 2 delivery record name the draft entry they were first recorded as; they were re-run here so every command, diff and line number matches one revision. Apply a patch with `git apply`, run the command, then restore with `git checkout -- <file>`. `guard` entries remove or weaken the protection the refs assert. `effect-detection` entries change the effect path of an uncontained scenario: they show its probe can read a change in outcome, not that a guard is absent. Rows exempt from this ledger (pending, out-of-scope, unobserved such as ENV-BWRAP, whose native bwrap profile needs a Linux host, and administrative META- rows; the inventory lint allows no other verified or uncontained row an exemption) carry their exempt reason in the inventory (`docs/security/containment-inventory.json`, rendered in `docs/security/containment-inventory.md`).
+Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-only variants added in review, M-045 B and M-047 B, at `34b2ff38`, whose production and scenario trees are identical; M-051 to M-053 at `731f2d1d`, the commit that adds them; M-054 to M-058 at `3d423ce1`, the commit that adds them; M-059 at `1166b276`, the commit that adds it): the baseline passed, the mutant failed as shown, and the tree was restored with `git checkout` and passed again. M-028 was re-recorded when tool frames moved to per-result keys: variant A on the commit that makes that change (parent `140524de`), variant B on the commit that adds the cross-Run check (parent `d75c78cb`). Each baseline passed, each mutant failed as shown, and an editor edit restored the baseline bytes, which passed again. Entries M-067 to M-071 ran on the commit that adds fence-key rotation (parent `72b6eb47`) in the same way, the restored file's sha256 matching the baseline's each time; M-072 and M-073 ran the same way on the commit that makes every exposed key rotate and matches keys through separators (parent `00912c90`), and M-074 on the commit that pins key minting before assembly (parent `caa84426`). Entries M-075 to M-078 ran the same way in an isolated `git archive` export of the commit that adds system keys (parent `3346b711`). M-079 and M-080 ran the same way on the commit that scans the durable summary and staged advice (parent `c17e940d`). Entries M-081 to M-085 ran the same way in an isolated `git archive` export of the commit that adds the #712 launchd acceptance tests, each applied with `patch -p1` and reverted with `patch -R -p1`, the restored file's sha256 matching the baseline's. Their baseline is recorded as `c4ca1a8d`: the runs used that commit's tree before two comment-only amends (a driver comment and the M-083 note) produced it, and the patches apply to `c4ca1a8d` at the recorded hunk offsets, with the quoted failing lines at the same line numbers. M-086 ran the same way in an export of `461fdcdc`, the commit that holds `syscall.ForkLock` across the guard and posix_spawn, where M-081 and M-083 were re-run against the new spawn order. All six were re-run the same way at `231baa07`, after the final #712 fix wave changed their tests and moved M-086's lock into a closure; each entry's last note records that run. Entries M-087 to M-105 ran the same way in an isolated `git archive` export of `88f33cfb`, the commit that adds the #725 inventory rows, each applied with `git apply` and reverted with `git apply -R`, the restored file's sha256 matching the baseline's (the export sat inside a checkout, where `git apply` silently skips paths outside the current directory, so both ran with `GIT_CEILING_DIRECTORIES` set to the export's parent); M-099 and M-100 ran in the Docker `ci-local` image from that export. Entries M-106 to M-140 ran the same way in an isolated `git archive` export of `f3581fda`, the commit that adds the #784 inventory rows, each applied with `git apply` and reverted with `git apply -R`, the restored file's sha256 matching the baseline's (that export sat outside any checkout; both still ran with `GIT_CEILING_DIRECTORIES` set to its parent), and no test in their commands skipped; M-131 records two variants, each run that way. The commit that adds them also makes `TestHarnessPlanReferencesKinds` a PATH-HARNESS-REF ref, an inventory change only, so their quoted line numbers hold there too. The entry for the unverified-root rule including the repository boundary itself, whose mutant narrowed the rule to strictly below the boundary, was withdrawn when that narrowing became the production rule; later entries were renumbered to close the gap. Entries M-060 and M-061 ran in isolated exports of immutable code commit `23f0c0bbca83f0c9d6e02163dd09c4856698ddcd`: each baseline passed, its mutant failed, and restored files matched the baseline bytes and passed again. Entries M-062 and M-063 ran on this branch at `dbe5c315b40f8b973b96cf623d5cdcbe00c616fc`, the commit that adds their rules: each baseline passed, its mutant failed, and `git checkout -- <file>` restored the baseline bytes, which passed again; M-062's comparison against the previous rule ran in an isolated `git archive` export of `ac053567`. Entries M-064 to M-066 ran on the #387 branch at `72d0bedeb1d264b3da62cf812df7505a8bd7e776`, the commit that tightens PV1's probe and cites the exec and verification preview tests (M-064 and M-065 were first recorded at `b9cea9154746758026fd9bb58d467f665be5952f`, the commit that makes PV1 executable): each baseline passed, its mutant failed, and `git checkout -- <file>` restored the baseline bytes, which passed again. Entries quote test output, the containment judge's message text and line numbers included, as it read at their baseline; later wording changes do not rewrite them. Entries carried over from the PR 2 delivery record name the draft entry they were first recorded as; they were re-run here so every command, diff and line number matches one revision. Apply a patch with `git apply`, run the command, then restore with `git checkout -- <file>`. `guard` entries remove or weaken the protection the refs assert. `effect-detection` entries change the effect path of an uncontained scenario: they show its probe can read a change in outcome, not that a guard is absent. Rows exempt from this ledger (pending, out-of-scope, unobserved such as ENV-BWRAP, whose native bwrap profile needs a Linux host, and administrative META- rows; the inventory lint allows no other verified or uncontained row an exemption) carry their exempt reason in the inventory (`docs/security/containment-inventory.json`, rendered in `docs/security/containment-inventory.md`).
 
 ## M-001 — Absolute paths are rejected by the workspace path cleaner
 - Affected refs: PATH-ABS: `TestHardeningContracts/Active/Workspace/confinement_and_arguments/public_confinement/owned_absolute_sibling`, `TestWorkspaceCleanRelContainment/absolute_escape`, `TestContainment/W1`
@@ -3055,6 +3055,963 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
 - Baseline: pass (exit 0, all four commands). Mutant: FAIL `TestHarnessApprovalTaskApproverPlainPath` (`harness_approval_test.go:290: plain Approve(write_file) = true, <nil>, want denied`); every other ref passes, `TestHarnessApprovalTaskStepDenies` included, because the orchestrator calls `ApproveKeyed`. Exit 1 for the approval command, 0 for the others. Restored (sha256 match): pass (exit 0, all four commands).
 - Kind: guard
 - Notes: The plain `agent.Approver` entry carries no key, so a file-tool call that reaches it must be denied rather than approved by the opt-in.
+
+## M-106 — The Markdown import reader emits each import token
+- Affected refs: GRANT-HARNESS-REF: `TestHarnessPlanReferencesKinds`, `TestHarnessPlanReferencesFreshness`, `TestHarnessPlanInvokeRecheck`, `TestContainment/G5`, `TestHarnessApprovalRefPrompts`; GRANT-HARNESS-REF-UNATTENDED: `TestContainment/H3`, `TestHarnessApprovalRefHeadless`, `TestHarnessApprovalRefTaskStep`, `TestHarnessPromotionRefusesGitignoredImport`, `TestHarnessPromotionRefusesDeletion`
+- Baseline: `f3581fda`, the commit that adds the #784 inventory rows, in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^TestHarnessKey$' ./agent/interceptor`; `go test -count=1 -v -run '^(TestHarnessRead(MarkdownImports|ArgvWhole|ShellStrings|KeySelection|TOML|GlobAdversarial|CwdDirBases)|TestHarnessPlanReferences(Kinds|NFD|StoredSpelling|Fold|ResolvedSpelling|AntiGoals|Freshness|RootInHarnessFolder|UserSettings)|TestHarnessRefs(NestedRepository|FailClosed|NotFailures|PromotionCheck|HarnessFileFirst|DanglingVirtualLink)|TestHarnessPlan(InvokeRecheck|ReasonLine))$' ./agent/tools`; `go test -count=1 -v -run '^(TestHarnessApprovalRef(Prompts|SameRun|Headless|TaskStep)|TestHarnessPromotionRefuses(GitignoredImport|Deletion))$' ./cmd/golem`; `go test -count=1 -v -run '^TestContainment$/^(G5|H3)$' ./cmd/golem` (every ref of PATH-HARNESS-REF, GRANT-HARNESS-REF and GRANT-HARNESS-REF-UNATTENDED, and five tests that are no ref: `TestHarnessReadCwdDirBases`, `TestHarnessPlanReferencesNFD`, `TestHarnessPlanReferencesStoredSpelling`, `TestHarnessPlanReferencesUserSettings` and `TestHarnessPlanReasonLine`; in four commands: interceptor, tools, approval, containment)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/harness_markdown.go b/agent/tools/harness_markdown.go
+  --- a/agent/tools/harness_markdown.go
+  +++ b/agent/tools/harness_markdown.go
+  @@ -31,7 +31,7 @@
+   	var inTok, over bool
+   	atStart := true // an "@" here would start a token
+   	flush := func() {
+  -		if inTok && !over && len(tok) > 0 {
+  +		if false && inTok && !over && len(tok) > 0 {
+   			s := string(tok)
+   			emit(s)
+   			if trimmed := strings.TrimRight(s, ".,;:)"); trimmed != s && trimmed != "" {
+  ```
+- Baseline: pass (exit 0, all four commands). Mutant: FAIL `TestHarnessPlanReferencesKinds`, the 13 import rows (`approval_key_test.go:768: write_file docs/a.md key = "write-class:files" (reason ""), want ""`, and the same for the GEMINI.md, AGENTS.md, absolute, linked rules folder, linked CLAUDE.md, depth-five, home, linked-parent, ancestor, linked-folder and both `.clinerules` rows); FAIL `TestHarnessPlanReferencesFreshness` (`approval_key_test.go:859: write_file docs/new.md key = "write-class:files" (reason ""), want ""`); FAIL `TestHarnessPlanInvokeRecheck`, both `changed=true` rows (`harness_refs_test.go:460: Invoke = "write docs/policy.md", want the refusal`, and `"edit docs/policy.md"`); FAIL `TestContainment/G5` (`containment_test.go:116: G5: validity: want docs/policy.md denied after a, scripts/hook.sh invoked after y without the grant, docs/shared/x.md denied after N and notes.txt auto-approved (3 prompts); records [...] prompts 2`: docs/policy.md rode the grant, record 0 `AutoApproved:true`); FAIL `TestHarnessApprovalRefPrompts` (`harness_approval_test.go:371: prompts = 4, want 6:`: docs/a.md and docs/g.md rode the grant); FAIL `TestContainment/H3` (`containment_test.go:116: H3: validity: want the import target denied and the ordinary write invoked: <nil> [{Step:0 Name:write_file IsError:false Denied:false Invoked:true ...} {Step:1 ...}]`); FAIL `TestHarnessApprovalRefHeadless` (`harness_approval_test.go:436: record 0 = {Step:0 Name:write_file IsError:false Denied:false Invoked:true ...}, want an approver denial`); FAIL `TestHarnessApprovalRefTaskStep` (`harness_approval_test.go:478: w-1 observation = "<<<TOOL_RESULT ... write docs/a.md ...", want the approver denial`); FAIL `TestHarnessPromotionRefusesGitignoredImport/imports=true` (`agentflow_parallel_test.go:1968: runCohort() error = <nil>, want a refused promotion naming docs/p.md`); FAIL `TestHarnessPromotionRefusesDeletion` (`agentflow_parallel_test.go:1998: runCohort() error = <nil>, want a refused promotion naming docs/a.md`). `TestHarnessApprovalRefSameRun` passes: with no `/auto-edits` grant its write prompts either way. Outside this entry's rows the PATH-HARNESS-REF refs `TestHarnessReadMarkdownImports` (ten rows, `harness_readers_test.go:46: got [], want ["docs/a.md"]`), `TestHarnessPlanReferencesFold`, `TestHarnessPlanReferencesResolvedSpelling`, `TestHarnessRefsFailClosed/imported_file_that_cannot_be_read` and `TestHarnessRefsPromotionCheck/references` fail, and so do `TestHarnessPlanReferencesNFD`, `TestHarnessPlanReferencesStoredSpelling` and `TestHarnessPlanReasonLine`, which are no ref; `TestHarnessKey` passes. Exit 1 for the tools, approval and containment commands, 0 for interceptor. Restored (sha256 match): pass (exit 0, all four commands).
+- Kind: guard
+- Notes: The patch keeps the scan and drops every token at flush, so no Markdown file (instruction file, rule or imported file) names anything, and every import target rides the `/auto-edits` grant, `-allow-tool` and promotion.
+
+## M-107 — The command reader's tokens reach the reference set
+- Affected refs: GRANT-HARNESS-REF: `TestHarnessPlanReferencesKinds`, `TestContainment/G5`, `TestHarnessApprovalRefPrompts`
+- Baseline: `f3581fda`, the commit that adds the #784 inventory rows, in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^TestHarnessKey$' ./agent/interceptor`; `go test -count=1 -v -run '^(TestHarnessRead(MarkdownImports|ArgvWhole|ShellStrings|KeySelection|TOML|GlobAdversarial|CwdDirBases)|TestHarnessPlanReferences(Kinds|NFD|StoredSpelling|Fold|ResolvedSpelling|AntiGoals|Freshness|RootInHarnessFolder|UserSettings)|TestHarnessRefs(NestedRepository|FailClosed|NotFailures|PromotionCheck|HarnessFileFirst|DanglingVirtualLink)|TestHarnessPlan(InvokeRecheck|ReasonLine))$' ./agent/tools`; `go test -count=1 -v -run '^(TestHarnessApprovalRef(Prompts|SameRun|Headless|TaskStep)|TestHarnessPromotionRefuses(GitignoredImport|Deletion))$' ./cmd/golem`; `go test -count=1 -v -run '^TestContainment$/^(G5|H3)$' ./cmd/golem` (every ref of PATH-HARNESS-REF, GRANT-HARNESS-REF and GRANT-HARNESS-REF-UNATTENDED, and five tests that are no ref: `TestHarnessReadCwdDirBases`, `TestHarnessPlanReferencesNFD`, `TestHarnessPlanReferencesStoredSpelling`, `TestHarnessPlanReferencesUserSettings` and `TestHarnessPlanReasonLine`; in four commands: interceptor, tools, approval, containment)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/harness_refs.go b/agent/tools/harness_refs.go
+  --- a/agent/tools/harness_refs.go
+  +++ b/agent/tools/harness_refs.go
+  @@ -591,6 +591,7 @@
+   		b.fail(harnessQuote(f.label), "does not parse")
+   		return
+   	}
+  +	cs.tokens = nil
+   	// A user-level hook's project-folder variable means the session's project,
+   	// not the home folder (revision 2, F1).
+   	anchor := anchorOf(f.vabs, f.v)
+  ```
+- Baseline: pass (exit 0, all four commands). Mutant: FAIL `TestHarnessPlanReferencesKinds`, 29 rows: every command row (`approval_key_test.go:768: write_file scripts/server.py key = "write-class:files" (reason ""), want ""` for `Codex inline table`, and the same for the VS Code, Copilot `cwd`, Golem `dir`, both absent MCP operand, PATH program, linked `.vscode`, ancestor settings, linked-folder hook, `.codex`-root, `.github` and `.vscode` one-folder, `.github`-root and folderless rows) and all 15 `D4` rows; FAIL `TestContainment/G5` (`containment_test.go:116: G5: validity: ... records [...] prompts 2`: scripts/hook.sh, record 1, `AutoApproved:true`); FAIL `TestHarnessApprovalRefPrompts` (`harness_approval_test.go:371: prompts = 4, want 6:`: scripts/h.sh and scripts/server.py rode the grant). Outside this entry's row the GRANT-HARNESS-REF-UNATTENDED ref `TestHarnessApprovalRefHeadless` (`harness_approval_test.go:436: record 2 = {Step:2 Name:write_file IsError:false Denied:false Invoked:true ...}, want an approver denial`) and the PATH-HARNESS-REF ref `TestHarnessPlanReferencesRootInHarnessFolder` (`approval_key_test.go:884: covers(scripts/x.sh) = (false, ""), want the settings.json reason`) fail, and so does `TestHarnessPlanReferencesUserSettings`, no ref (`approval_key_test.go:900: write_file scripts/lint.sh key = "write-class:files" (reason ""), want ""`); `TestContainment/H3` and every other ref pass. Exit 1 for the tools, approval and containment commands, 0 for interceptor. Restored (sha256 match): pass (exit 0, all four commands).
+- Kind: guard
+- Notes: The patch clears the tokens once a D4 file parses, JSON and TOML alike, so the file leaves the set complete and runs nothing. The reader unit tests (`TestHarnessReadShellStrings` and the rest) call `extractCommands` and `resolveCommandTokens` directly and pass.
+
+## M-108 — OpenCode `instructions` paths and globs are references
+- Affected refs: PATH-HARNESS-REF: `TestHarnessPlanReferencesKinds`
+- Baseline: `f3581fda`, the commit that adds the #784 inventory rows, in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^TestHarnessKey$' ./agent/interceptor`; `go test -count=1 -v -run '^(TestHarnessRead(MarkdownImports|ArgvWhole|ShellStrings|KeySelection|TOML|GlobAdversarial|CwdDirBases)|TestHarnessPlanReferences(Kinds|NFD|StoredSpelling|Fold|ResolvedSpelling|AntiGoals|Freshness|RootInHarnessFolder|UserSettings)|TestHarnessRefs(NestedRepository|FailClosed|NotFailures|PromotionCheck|HarnessFileFirst|DanglingVirtualLink)|TestHarnessPlan(InvokeRecheck|ReasonLine))$' ./agent/tools`; `go test -count=1 -v -run '^(TestHarnessApprovalRef(Prompts|SameRun|Headless|TaskStep)|TestHarnessPromotionRefuses(GitignoredImport|Deletion))$' ./cmd/golem`; `go test -count=1 -v -run '^TestContainment$/^(G5|H3)$' ./cmd/golem` (every ref of PATH-HARNESS-REF, GRANT-HARNESS-REF and GRANT-HARNESS-REF-UNATTENDED, and five tests that are no ref: `TestHarnessReadCwdDirBases`, `TestHarnessPlanReferencesNFD`, `TestHarnessPlanReferencesStoredSpelling`, `TestHarnessPlanReferencesUserSettings` and `TestHarnessPlanReasonLine`; in four commands: interceptor, tools, approval, containment)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/harness_refs.go b/agent/tools/harness_refs.go
+  --- a/agent/tools/harness_refs.go
+  +++ b/agent/tools/harness_refs.go
+  @@ -609,9 +609,6 @@
+   			b.addExact(rel, fmt.Sprintf("%s runs %s", harnessQuote(f.label), harnessQuote(rel)))
+   		}
+   	}
+  -	if base := path.Base(interceptor.HarnessKey(f.v)); base == "opencode.json" || base == "opencode.jsonc" {
+  -		b.opencode(f, doc)
+  -	}
+   }
+   
+   // opencode adds an OpenCode file's instructions (spec D5): paths, resolved
+  ```
+- Baseline: pass (exit 0, all four commands). Mutant: FAIL `TestHarnessPlanReferencesKinds`, the six OpenCode rows (`approval_key_test.go:768: write_file docs/oc.md key = "write-class:files" (reason ""), want ""`, and the same for `rules/x/new.md`, `docs/team/policy.md` behind the linked folder, `rules/new.md` for the absolute glob and both `[` root rows, and `x[1]/new.md`). Outside this entry's row the GRANT-HARNESS-REF ref `TestHarnessApprovalRefPrompts` (`harness_approval_test.go:371: prompts = 5, want 6:`) and the GRANT-HARNESS-REF-UNATTENDED ref `TestHarnessApprovalRefHeadless` (`harness_approval_test.go:436: record 6 = {Step:6 ... Invoked:true ...}, want an approver denial`: docs/oc.md) fail; every other ref passes. Exit 1 for the tools and approval commands, 0 for the others. Restored (sha256 match): pass (exit 0, all four commands).
+- Kind: guard
+- Notes: `opencode.json`'s `command` keys are still read (its `D4` rows pass); only spec D5's `instructions` are skipped. No other ref of the row plans an OpenCode reference, so the commit that adds this entry makes `TestHarnessPlanReferencesKinds` a PATH-HARNESS-REF ref too, citing `harnessPlanKeys`, where its rows' assertion runs and the row's marker already sits; the test is unchanged.
+
+## M-109 — Links at harness paths are followed
+- Affected refs: GRANT-HARNESS-REF: `TestHarnessPlanReferencesKinds`, `TestContainment/G5`, `TestHarnessApprovalRefPrompts`
+- Baseline: `f3581fda`, the commit that adds the #784 inventory rows, in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^TestHarnessKey$' ./agent/interceptor`; `go test -count=1 -v -run '^(TestHarnessRead(MarkdownImports|ArgvWhole|ShellStrings|KeySelection|TOML|GlobAdversarial|CwdDirBases)|TestHarnessPlanReferences(Kinds|NFD|StoredSpelling|Fold|ResolvedSpelling|AntiGoals|Freshness|RootInHarnessFolder|UserSettings)|TestHarnessRefs(NestedRepository|FailClosed|NotFailures|PromotionCheck|HarnessFileFirst|DanglingVirtualLink)|TestHarnessPlan(InvokeRecheck|ReasonLine))$' ./agent/tools`; `go test -count=1 -v -run '^(TestHarnessApprovalRef(Prompts|SameRun|Headless|TaskStep)|TestHarnessPromotionRefuses(GitignoredImport|Deletion))$' ./cmd/golem`; `go test -count=1 -v -run '^TestContainment$/^(G5|H3)$' ./cmd/golem` (every ref of PATH-HARNESS-REF, GRANT-HARNESS-REF and GRANT-HARNESS-REF-UNATTENDED, and five tests that are no ref: `TestHarnessReadCwdDirBases`, `TestHarnessPlanReferencesNFD`, `TestHarnessPlanReferencesStoredSpelling`, `TestHarnessPlanReferencesUserSettings` and `TestHarnessPlanReasonLine`; in four commands: interceptor, tools, approval, containment)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/harness_refs.go b/agent/tools/harness_refs.go
+  --- a/agent/tools/harness_refs.go
+  +++ b/agent/tools/harness_refs.go
+  @@ -305,7 +305,6 @@
+   		}
+   		b.stack = append(b.stack, harnessDir{abs: abs, vrel: vrel, link: d.link, chain: d.chain})
+   	case t&fs.ModeSymlink != 0:
+  -		b.symlink(d, abs, vrel, v, harness)
+   	case t.IsRegular() && harness:
+   		if d.link != "" {
+   			if rel, ok := b.place(abs); ok {
+  ```
+- Baseline: pass (exit 0, all four commands). Mutant: FAIL `TestHarnessPlanReferencesKinds`, nine link rows (`approval_key_test.go:768: write_file docs/team/policy.md key = "write-class:files" (reason ""), want ""` for `OpenCode glob through a linked folder`, and the same for the linked rules folder, linked CLAUDE.md, linked `.vscode`, `.github` and `.vscode` one-folder, both dangling-chain rows, and the absent config and hook under a linked `.vscode` and `.github`); FAIL `TestContainment/G5` (`containment_test.go:116: G5: validity: ... records [...] prompts 2`: docs/shared/x.md, record 2, `AutoApproved:true`); FAIL `TestHarnessApprovalRefPrompts` (`harness_approval_test.go:371: prompts = 5, want 6:`: docs/shared/x.md rode the grant). Outside this entry's row the GRANT-HARNESS-REF-UNATTENDED ref `TestHarnessApprovalRefHeadless` (`harness_approval_test.go:436: record 4 = {Step:4 ... Invoked:true ...}, want an approver denial`) and the PATH-HARNESS-REF refs `TestHarnessRefsFailClosed`, three rows (`harness_refs_test.go:173: complete=true cause="", want incomplete naming ".claude/rules/p is not a regular file"`, and the same naming `link cannot be resolved` and `CLAUDE.md link cannot be resolved`), and `TestHarnessRefsDanglingVirtualLink` (`harness_refs_test.go:381: covers(cfg/hooks/new.json) = (false, ""), want the .github reason`) fail; `TestContainment/H3` passes. Exit 1 for the tools, approval and containment commands, 0 for interceptor. Restored (sha256 match): pass (exit 0, all four commands).
+- Kind: guard
+- Notes: The walk still lists every link but neither follows nor records it, so a harness folder linked elsewhere covers nothing, and a link loop or a link to a FIFO no longer makes the set incomplete.
+
+## M-110 — A link's target is read, not only referenced
+- Affected refs: PATH-HARNESS-REF: `TestHarnessPlanReferencesKinds`
+- Baseline: `f3581fda`, the commit that adds the #784 inventory rows, in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^TestHarnessKey$' ./agent/interceptor`; `go test -count=1 -v -run '^(TestHarnessRead(MarkdownImports|ArgvWhole|ShellStrings|KeySelection|TOML|GlobAdversarial|CwdDirBases)|TestHarnessPlanReferences(Kinds|NFD|StoredSpelling|Fold|ResolvedSpelling|AntiGoals|Freshness|RootInHarnessFolder|UserSettings)|TestHarnessRefs(NestedRepository|FailClosed|NotFailures|PromotionCheck|HarnessFileFirst|DanglingVirtualLink)|TestHarnessPlan(InvokeRecheck|ReasonLine))$' ./agent/tools`; `go test -count=1 -v -run '^(TestHarnessApprovalRef(Prompts|SameRun|Headless|TaskStep)|TestHarnessPromotionRefuses(GitignoredImport|Deletion))$' ./cmd/golem`; `go test -count=1 -v -run '^TestContainment$/^(G5|H3)$' ./cmd/golem` (every ref of PATH-HARNESS-REF, GRANT-HARNESS-REF and GRANT-HARNESS-REF-UNATTENDED, and five tests that are no ref: `TestHarnessReadCwdDirBases`, `TestHarnessPlanReferencesNFD`, `TestHarnessPlanReferencesStoredSpelling`, `TestHarnessPlanReferencesUserSettings` and `TestHarnessPlanReasonLine`; in four commands: interceptor, tools, approval, containment)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/harness_refs.go b/agent/tools/harness_refs.go
+  --- a/agent/tools/harness_refs.go
+  +++ b/agent/tools/harness_refs.go
+  @@ -391,6 +391,7 @@
+   			b.refs.virtual = append(b.refs.virtual, harnessVirtualLink{interceptor.HarnessKey(rel), v, vrel})
+   		}
+   	}
+  +	return
+   	if !fi.IsDir() {
+   		if harness {
+   			b.read(harnessFile{abs: target, vabs: filepath.Join(b.w.root, vrel), v: v, label: vrel})
+  ```
+- Baseline: pass (exit 0, all four commands). Mutant: FAIL `TestHarnessPlanReferencesKinds`, four rows (`approval_key_test.go:768: write_file docs/outside.md key = "write-class:files" (reason ""), want ""` for `linked rules folder and what it imports`, `approval_key_test.go:768: write_file docs/g2.md key = "write-class:files" (reason ""), want ""` for `linked CLAUDE.md and what it imports`, `scripts/v.sh` for `linked .vscode`, and `scripts/v.sh` and `scripts/h.sh` for `.github and .vscode linked to one folder`); the link targets themselves (`docs/shared/x.md`, `docs/guide.md`, `config/editor/mcp.json`) still plan ""; every other ref passes. Exit 1 for the tools command, 0 for the others. Restored (sha256 match): pass (exit 0, all four commands).
+- Kind: guard
+- Notes: The patch returns once the target is recorded, so a linked file is never read and a linked folder never walked: what they import or run stays ordinary. `TestContainment/G5` passes, since its write lands inside the linked folder itself. `TestHarnessPlanReferencesKinds` is a PATH-HARNESS-REF ref from the commit that adds these entries (M-108).
+
+## M-111 — The reference set is built afresh for every call
+- Affected refs: GRANT-HARNESS-REF: `TestHarnessPlanReferencesFreshness`, `TestHarnessPlanInvokeRecheck`
+- Baseline: `f3581fda`, the commit that adds the #784 inventory rows, in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^TestHarnessKey$' ./agent/interceptor`; `go test -count=1 -v -run '^(TestHarnessRead(MarkdownImports|ArgvWhole|ShellStrings|KeySelection|TOML|GlobAdversarial|CwdDirBases)|TestHarnessPlanReferences(Kinds|NFD|StoredSpelling|Fold|ResolvedSpelling|AntiGoals|Freshness|RootInHarnessFolder|UserSettings)|TestHarnessRefs(NestedRepository|FailClosed|NotFailures|PromotionCheck|HarnessFileFirst|DanglingVirtualLink)|TestHarnessPlan(InvokeRecheck|ReasonLine))$' ./agent/tools`; `go test -count=1 -v -run '^(TestHarnessApprovalRef(Prompts|SameRun|Headless|TaskStep)|TestHarnessPromotionRefuses(GitignoredImport|Deletion))$' ./cmd/golem`; `go test -count=1 -v -run '^TestContainment$/^(G5|H3)$' ./cmd/golem` (every ref of PATH-HARNESS-REF, GRANT-HARNESS-REF and GRANT-HARNESS-REF-UNATTENDED, and five tests that are no ref: `TestHarnessReadCwdDirBases`, `TestHarnessPlanReferencesNFD`, `TestHarnessPlanReferencesStoredSpelling`, `TestHarnessPlanReferencesUserSettings` and `TestHarnessPlanReasonLine`; in four commands: interceptor, tools, approval, containment)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/harness_refs.go b/agent/tools/harness_refs.go
+  --- a/agent/tools/harness_refs.go
+  +++ b/agent/tools/harness_refs.go
+  @@ -176,6 +176,9 @@
+   // then it reads the fixed paths in every folder above the root (D12) and
+   // matches OpenCode globs against the folder links seen (D5).
+   func (w *Workspace) harnessReferences(ctx context.Context) *harnessRefs {
+  +	if w.harnessCached != nil {
+  +		return w.harnessCached
+  +	}
+   	b := &refBuilder{
+   		ctx:        ctx,
+   		w:          w,
+  @@ -197,6 +200,7 @@
+   	b.walk()
+   	b.ancestors()
+   	b.patternLinks()
+  +	w.harnessCached = b.refs
+   	return b.refs
+   }
+   
+  diff --git a/agent/tools/paths.go b/agent/tools/paths.go
+  --- a/agent/tools/paths.go
+  +++ b/agent/tools/paths.go
+  @@ -160,6 +160,7 @@
+   	// (its virtual workspace-relative path, "." for the root), and
+   	// onHarnessAncestor before each ancestor folder is read.
+   	harnessMaxEntries    int
+  +	harnessCached        *harnessRefs
+   	harnessAncestorStop  string
+   	beforeHarnessReadDir func(rel string)
+   	onHarnessAncestor    func(dir string)
+  ```
+- Baseline: pass (exit 0, all four commands). Mutant: FAIL `TestHarnessPlanReferencesFreshness` (`approval_key_test.go:859: write_file docs/new.md key = "write-class:files" (reason ""), want ""`, then `approval_key_test.go:861` for write_file and edit_file once the file exists); FAIL `TestHarnessPlanInvokeRecheck`, both `changed=true` rows (`harness_refs_test.go:460: Invoke = "write docs/policy.md", want the refusal`, and `"edit docs/policy.md"`); every other ref passes, `TestHarnessApprovalRefSameRun` included. Exit 1 for the tools command, 0 for the others. Restored (sha256 match): pass (exit 0, all four commands).
+- Kind: guard
+- Notes: The patch memoizes the first set on the Workspace. `TestHarnessApprovalRefSameRun` cannot see it: the run's first call edits CLAUDE.md, a #725 harness file whose key is decided before any set is built, so the first build, and the memo, happen when docs/new.md is planned, after the import landed. `TestHarnessPlanReferencesFreshness` plans an ordinary target first, and the Invoke recheck reuses the Plan-time set.
+
+## M-112 — Invoke refuses a write whose grantable key a harness change revoked
+- Affected refs: GRANT-HARNESS-REF: `TestHarnessPlanInvokeRecheck`
+- Baseline: `f3581fda`, the commit that adds the #784 inventory rows, in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^TestHarnessKey$' ./agent/interceptor`; `go test -count=1 -v -run '^(TestHarnessRead(MarkdownImports|ArgvWhole|ShellStrings|KeySelection|TOML|GlobAdversarial|CwdDirBases)|TestHarnessPlanReferences(Kinds|NFD|StoredSpelling|Fold|ResolvedSpelling|AntiGoals|Freshness|RootInHarnessFolder|UserSettings)|TestHarnessRefs(NestedRepository|FailClosed|NotFailures|PromotionCheck|HarnessFileFirst|DanglingVirtualLink)|TestHarnessPlan(InvokeRecheck|ReasonLine))$' ./agent/tools`; `go test -count=1 -v -run '^(TestHarnessApprovalRef(Prompts|SameRun|Headless|TaskStep)|TestHarnessPromotionRefuses(GitignoredImport|Deletion))$' ./cmd/golem`; `go test -count=1 -v -run '^TestContainment$/^(G5|H3)$' ./cmd/golem` (every ref of PATH-HARNESS-REF, GRANT-HARNESS-REF and GRANT-HARNESS-REF-UNATTENDED, and five tests that are no ref: `TestHarnessReadCwdDirBases`, `TestHarnessPlanReferencesNFD`, `TestHarnessPlanReferencesStoredSpelling`, `TestHarnessPlanReferencesUserSettings` and `TestHarnessPlanReasonLine`; in four commands: interceptor, tools, approval, containment)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/mutate.go b/agent/tools/mutate.go
+  --- a/agent/tools/mutate.go
+  +++ b/agent/tools/mutate.go
+  @@ -53,8 +53,7 @@
+   	if pp.approvalKey == "" {
+   		return false
+   	}
+  -	key, _ := w.fileToolApprovalKey(ctx, pp.path)
+  -	return key == ""
+  +	return false
+   }
+   
+   // harnessKeyLostMsg is the refusal Invoke returns when harnessKeyLost is true.
+  ```
+- Baseline: pass (exit 0, all four commands). Mutant: FAIL `TestHarnessPlanInvokeRecheck`, both `changed=true` rows (`harness_refs_test.go:460: Invoke = "write docs/policy.md", want the refusal`, and `"edit docs/policy.md"`); the `changed=false` controls and every other ref pass. Exit 1 for the tools command, 0 for the others. Restored (sha256 match): pass (exit 0, all four commands).
+- Kind: guard
+- Notes: An import added between Plan and Invoke no longer stops the write that planned the write-class key.
+
+## M-113 — Only a configuration file's listed keys are read; permission rules and env values name nothing
+- Affected refs: PATH-HARNESS-REF: `TestHarnessReadKeySelection`, `TestHarnessPlanReferencesAntiGoals`, `TestHarnessReadArgvWhole`
+- Baseline: `f3581fda`, the commit that adds the #784 inventory rows, in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^TestHarnessKey$' ./agent/interceptor`; `go test -count=1 -v -run '^(TestHarnessRead(MarkdownImports|ArgvWhole|ShellStrings|KeySelection|TOML|GlobAdversarial|CwdDirBases)|TestHarnessPlanReferences(Kinds|NFD|StoredSpelling|Fold|ResolvedSpelling|AntiGoals|Freshness|RootInHarnessFolder|UserSettings)|TestHarnessRefs(NestedRepository|FailClosed|NotFailures|PromotionCheck|HarnessFileFirst|DanglingVirtualLink)|TestHarnessPlan(InvokeRecheck|ReasonLine))$' ./agent/tools`; `go test -count=1 -v -run '^(TestHarnessApprovalRef(Prompts|SameRun|Headless|TaskStep)|TestHarnessPromotionRefuses(GitignoredImport|Deletion))$' ./cmd/golem`; `go test -count=1 -v -run '^TestContainment$/^(G5|H3)$' ./cmd/golem` (every ref of PATH-HARNESS-REF, GRANT-HARNESS-REF and GRANT-HARNESS-REF-UNATTENDED, and five tests that are no ref: `TestHarnessReadCwdDirBases`, `TestHarnessPlanReferencesNFD`, `TestHarnessPlanReferencesStoredSpelling`, `TestHarnessPlanReferencesUserSettings` and `TestHarnessPlanReasonLine`; in four commands: interceptor, tools, approval, containment)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/harness_commands.go b/agent/tools/harness_commands.go
+  --- a/agent/tools/harness_commands.go
+  +++ b/agent/tools/harness_commands.go
+  @@ -407,6 +407,8 @@
+   		return slices.ContainsFunc(keys, func(want string) bool { return strings.EqualFold(k, want) })
+   	}
+   	switch v := v.(type) {
+  +	case string:
+  +		cs.shell(v, shellState{})
+   	case []any:
+   		for _, e := range v {
+   			cs.walkJSON(keys, e, false)
+  @@ -418,7 +420,7 @@
+   			if cs.capped {
+   				return
+   			}
+  -			if strings.EqualFold(k, "env") && ownsEnv || strings.EqualFold(k, "permissions") && top {
+  +			if false && (strings.EqualFold(k, "env") && ownsEnv || strings.EqualFold(k, "permissions") && top) {
+   				continue
+   			}
+   			e := v[k]
+  ```
+- Baseline: pass (exit 0, all four commands). Mutant: FAIL `TestHarnessReadKeySelection` (`harness_readers_test.go:371: tokens ["scripts/z.sh" "./scripts/x.sh" "./scripts/x.sh" "./scripts/x.sh" "command" "Write" "Bash" "./scripts/y.sh"] include a permission rule or env value`); FAIL `TestHarnessPlanReferencesAntiGoals`, the permission-rule pin (`approval_key_test.go:830: write_file src/a.go key = "" (reason ".claude/settings.local.json runs src/a.go"), want "write-class:files"`, and the same for edit_file); FAIL `TestHarnessReadArgvWhole` (`harness_readers_test.go:247: operand tokens ["one.py" "scripts/a&b.py" "scripts/check one.py"], want ["scripts/a&b.py" "scripts/check one.py"]`: each `args` element is also read as a shell string); every other ref passes. Exit 1 for the tools command, 0 for the others. Restored (sha256 match): pass (exit 0, all four commands).
+- Kind: guard
+- Notes: The patch reads every string value in the tree as a shell string and drops the top-level `permissions` and `env` exclusions. Reading every key's value alone would still skip those subtrees, and an allow-rule's string sits in an array under `allow`, which no listed key reaches.
+
+## M-114 — An argv element is one whole token
+- Affected refs: PATH-HARNESS-REF: `TestHarnessReadArgvWhole`, `TestHarnessReadShellStrings`
+- Baseline: `f3581fda`, the commit that adds the #784 inventory rows, in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^TestHarnessKey$' ./agent/interceptor`; `go test -count=1 -v -run '^(TestHarnessRead(MarkdownImports|ArgvWhole|ShellStrings|KeySelection|TOML|GlobAdversarial|CwdDirBases)|TestHarnessPlanReferences(Kinds|NFD|StoredSpelling|Fold|ResolvedSpelling|AntiGoals|Freshness|RootInHarnessFolder|UserSettings)|TestHarnessRefs(NestedRepository|FailClosed|NotFailures|PromotionCheck|HarnessFileFirst|DanglingVirtualLink)|TestHarnessPlan(InvokeRecheck|ReasonLine))$' ./agent/tools`; `go test -count=1 -v -run '^(TestHarnessApprovalRef(Prompts|SameRun|Headless|TaskStep)|TestHarnessPromotionRefuses(GitignoredImport|Deletion))$' ./cmd/golem`; `go test -count=1 -v -run '^TestContainment$/^(G5|H3)$' ./cmd/golem` (every ref of PATH-HARNESS-REF, GRANT-HARNESS-REF and GRANT-HARNESS-REF-UNATTENDED, and five tests that are no ref: `TestHarnessReadCwdDirBases`, `TestHarnessPlanReferencesNFD`, `TestHarnessPlanReferencesStoredSpelling`, `TestHarnessPlanReferencesUserSettings` and `TestHarnessPlanReasonLine`; in four commands: interceptor, tools, approval, containment)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/harness_commands.go b/agent/tools/harness_commands.go
+  --- a/agent/tools/harness_commands.go
+  +++ b/agent/tools/harness_commands.go
+  @@ -453,7 +453,7 @@
+   		var words []string
+   		for _, x := range e {
+   			if s, ok := x.(string); ok {
+  -				words = append(words, s)
+  +				words = append(words, strings.Fields(s)...)
+   			}
+   		}
+   		switch k {
+  ```
+- Baseline: pass (exit 0, all four commands). Mutant: FAIL `TestHarnessReadArgvWhole` (`harness_readers_test.go:247: operand tokens ["one.py" "scripts/a&b.py" "scripts/check"], want ["scripts/a&b.py" "scripts/check one.py"]`); FAIL `TestHarnessReadShellStrings`, the four argv rows whose shell-command element is split before the shell reads it (`harness_readers_test.go:339: got ["/w/&&" "/w/a.sh" "/w/cd" "/w/sub"], want it to include "/w/sub/a.sh"` for `argv sh -ec cd`, and the same for `argv pwsh -Command cd`, `argv cmd /C cd` and `args after shell command`); every other ref passes. Exit 1 for the tools command, 0 for the others. Restored (sha256 match): pass (exit 0, all four commands).
+- Kind: guard
+- Notes: `/w` is the test's `absBase(t, "w")`. The patch splits each string of an `args`, `argv` or `command` array on white space.
+
+## M-115 — A command operand counts whether or not it exists
+- Affected refs: PATH-HARNESS-REF: `TestHarnessReadShellStrings`, `TestHarnessReadArgvWhole`, `TestHarnessPlanReferencesKinds`
+- Baseline: `f3581fda`, the commit that adds the #784 inventory rows, in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^TestHarnessKey$' ./agent/interceptor`; `go test -count=1 -v -run '^(TestHarnessRead(MarkdownImports|ArgvWhole|ShellStrings|KeySelection|TOML|GlobAdversarial|CwdDirBases)|TestHarnessPlanReferences(Kinds|NFD|StoredSpelling|Fold|ResolvedSpelling|AntiGoals|Freshness|RootInHarnessFolder|UserSettings)|TestHarnessRefs(NestedRepository|FailClosed|NotFailures|PromotionCheck|HarnessFileFirst|DanglingVirtualLink)|TestHarnessPlan(InvokeRecheck|ReasonLine))$' ./agent/tools`; `go test -count=1 -v -run '^(TestHarnessApprovalRef(Prompts|SameRun|Headless|TaskStep)|TestHarnessPromotionRefuses(GitignoredImport|Deletion))$' ./cmd/golem`; `go test -count=1 -v -run '^TestContainment$/^(G5|H3)$' ./cmd/golem` (every ref of PATH-HARNESS-REF, GRANT-HARNESS-REF and GRANT-HARNESS-REF-UNATTENDED, and five tests that are no ref: `TestHarnessReadCwdDirBases`, `TestHarnessPlanReferencesNFD`, `TestHarnessPlanReferencesStoredSpelling`, `TestHarnessPlanReferencesUserSettings` and `TestHarnessPlanReasonLine`; in four commands: interceptor, tools, approval, containment)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/harness_commands.go b/agent/tools/harness_commands.go
+  --- a/agent/tools/harness_commands.go
+  +++ b/agent/tools/harness_commands.go
+  @@ -5,6 +5,7 @@
+   	"encoding/json"
+   	"errors"
+   	"maps"
+  +	"os"
+   	"path"
+   	"path/filepath"
+   	"slices"
+  @@ -794,9 +795,15 @@
+   			}
+   		}
+   		for _, s := range from {
+  -			if !grow(&paths, s, text) {
+  +			var got []string
+  +			if !grow(&got, s, text) {
+   				return nil, false
+   			}
+  +			for _, g := range got {
+  +				if _, err := os.Stat(g); tk.program || err == nil {
+  +					paths = append(paths, g)
+  +				}
+  +			}
+   		}
+   	}
+   	slices.Sort(paths)
+  ```
+- Baseline: pass (exit 0, all four commands). Mutant: FAIL `TestHarnessReadShellStrings`, nine rows (`harness_readers_test.go:339: got [], want it to include "/w/server.py"` for `absent operand`, and the same for `node operand`, `quoted space`, `flag value`, `workspaceFolder arg` and the three redirect rows, and `harness_readers_test.go:334: got [], want exactly ["/w/src/*.js"]` for `glob literal`); FAIL `TestHarnessReadArgvWhole` (`harness_readers_test.go:253: got [], want it to include "/w/scripts/check.sh"`); FAIL `TestHarnessPlanReferencesKinds`, the two absent `server.py` rows (`approval_key_test.go:768: write_file server.py key = "write-class:files" (reason ""), want ""`, and `svc/server.py`). Outside this entry's row the GRANT-HARNESS-REF ref `TestHarnessApprovalRefPrompts` (`harness_approval_test.go:371: prompts = 5, want 6:`) and the GRANT-HARNESS-REF-UNATTENDED ref `TestHarnessApprovalRefHeadless` (`harness_approval_test.go:436: record 10 = {Step:10 ... Invoked:true ...}, want an approver denial`: the absent scripts/server.py) fail. Exit 1 for the tools and approval commands, 0 for the others. Restored (sha256 match): pass (exit 0, all four commands).
+- Kind: guard
+- Notes: The patch keeps an operand's path only when the host can stat it; program tokens are untouched. A hook or MCP entry may name its script before the script is written, which is the write that matters.
+
+## M-116 — `cwd`, `dir` and `cd` targets are bases for relative tokens
+- Affected refs: PATH-HARNESS-REF: `TestHarnessReadArgvWhole`, `TestHarnessReadShellStrings`, `TestHarnessPlanReferencesKinds`
+- Baseline: `f3581fda`, the commit that adds the #784 inventory rows, in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^TestHarnessKey$' ./agent/interceptor`; `go test -count=1 -v -run '^(TestHarnessRead(MarkdownImports|ArgvWhole|ShellStrings|KeySelection|TOML|GlobAdversarial|CwdDirBases)|TestHarnessPlanReferences(Kinds|NFD|StoredSpelling|Fold|ResolvedSpelling|AntiGoals|Freshness|RootInHarnessFolder|UserSettings)|TestHarnessRefs(NestedRepository|FailClosed|NotFailures|PromotionCheck|HarnessFileFirst|DanglingVirtualLink)|TestHarnessPlan(InvokeRecheck|ReasonLine))$' ./agent/tools`; `go test -count=1 -v -run '^(TestHarnessApprovalRef(Prompts|SameRun|Headless|TaskStep)|TestHarnessPromotionRefuses(GitignoredImport|Deletion))$' ./cmd/golem`; `go test -count=1 -v -run '^TestContainment$/^(G5|H3)$' ./cmd/golem` (every ref of PATH-HARNESS-REF, GRANT-HARNESS-REF and GRANT-HARNESS-REF-UNATTENDED, and five tests that are no ref: `TestHarnessReadCwdDirBases`, `TestHarnessPlanReferencesNFD`, `TestHarnessPlanReferencesStoredSpelling`, `TestHarnessPlanReferencesUserSettings` and `TestHarnessPlanReasonLine`; in four commands: interceptor, tools, approval, containment)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/harness_commands.go b/agent/tools/harness_commands.go
+  --- a/agent/tools/harness_commands.go
+  +++ b/agent/tools/harness_commands.go
+  @@ -750,7 +750,7 @@
+   		*dst = append(*dst, r...)
+   		return true
+   	}
+  -	dirs := slices.Compact(slices.Sorted(slices.Values(cs.dirs)))
+  +	var dirs []string
+   	starts := slices.Clone(bases)
+   	for _, b := range bases {
+   		for _, d := range dirs {
+  @@ -783,7 +783,7 @@
+   			continue
+   		}
+   		from := starts
+  -		if len(tk.bases) > 0 {
+  +		if false {
+   			from = slices.Clone(starts)
+   			for _, cd := range tk.bases {
+   				for _, s := range starts {
+  ```
+- Baseline: pass (exit 0, all four commands). Mutant: FAIL `TestHarnessReadArgvWhole`, the `cd` half (`harness_readers_test.go:253: got ["/w/cd scripts && sh ./check.sh" "/w/check.sh" "/w/scripts"], want it to include "/w/scripts/check.sh"`); FAIL `TestHarnessReadShellStrings`, eight `cd` rows (`harness_readers_test.go:339: got ["/w/cd scripts && ./check.sh" "/w/check.sh" "/w/scripts"], want it to include "/w/scripts/check.sh"` for `bash -lc cd`, and the same for `argv sh -ec cd`, `argv pwsh -Command cd`, `argv cmd /C cd`, `args after shell command`, `cd to project var`, `cd with redirect` and `cd /D flag`); FAIL `TestHarnessPlanReferencesKinds`, the three `cwd`/`dir` rows (`approval_key_test.go:768: write_file tools/run.sh key = "write-class:files" (reason ""), want ""`, and `sub/v.sh` and `svc/server.py`); FAIL `TestHarnessReadCwdDirBases`, which is no ref (`harness_readers_test.go:418: .github/hooks/h.json: got ["/w/run.sh"], want it to include "/w/tools/run.sh"`, and the same for `.golem.json` and `.codex/config.toml`); every other ref passes. Exit 1 for the tools command, 0 for the others. Restored (sha256 match): pass (exit 0, all four commands).
+- Kind: guard
+- Notes: The patch drops the `cwd`/`dir` folders and each token's `cd` bases in `resolveCommandTokens`, so relative tokens resolve only against the anchor and the file's folders.
+
+## M-117 — A bare program word resolves through PATH
+- Affected refs: PATH-HARNESS-REF: `TestHarnessReadShellStrings`, `TestHarnessPlanReferencesKinds`
+- Baseline: `f3581fda`, the commit that adds the #784 inventory rows, in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^TestHarnessKey$' ./agent/interceptor`; `go test -count=1 -v -run '^(TestHarnessRead(MarkdownImports|ArgvWhole|ShellStrings|KeySelection|TOML|GlobAdversarial|CwdDirBases)|TestHarnessPlanReferences(Kinds|NFD|StoredSpelling|Fold|ResolvedSpelling|AntiGoals|Freshness|RootInHarnessFolder|UserSettings)|TestHarnessRefs(NestedRepository|FailClosed|NotFailures|PromotionCheck|HarnessFileFirst|DanglingVirtualLink)|TestHarnessPlan(InvokeRecheck|ReasonLine))$' ./agent/tools`; `go test -count=1 -v -run '^(TestHarnessApprovalRef(Prompts|SameRun|Headless|TaskStep)|TestHarnessPromotionRefuses(GitignoredImport|Deletion))$' ./cmd/golem`; `go test -count=1 -v -run '^TestContainment$/^(G5|H3)$' ./cmd/golem` (every ref of PATH-HARNESS-REF, GRANT-HARNESS-REF and GRANT-HARNESS-REF-UNATTENDED, and five tests that are no ref: `TestHarnessReadCwdDirBases`, `TestHarnessPlanReferencesNFD`, `TestHarnessPlanReferencesStoredSpelling`, `TestHarnessPlanReferencesUserSettings` and `TestHarnessPlanReasonLine`; in four commands: interceptor, tools, approval, containment)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/harness_commands.go b/agent/tools/harness_commands.go
+  --- a/agent/tools/harness_commands.go
+  +++ b/agent/tools/harness_commands.go
+  @@ -776,7 +776,7 @@
+   				if budget--; budget < 0 {
+   					return nil, false
+   				}
+  -				if hit, ok := lookPath(text); ok {
+  +				if hit, ok := lookPath(text); false && ok {
+   					paths = append(paths, filepath.Clean(hit))
+   				}
+   			}
+  ```
+- Baseline: pass (exit 0, all four commands). Mutant: FAIL `TestHarnessReadShellStrings/path_program` (`harness_readers_test.go:339: got [], want it to include "/w/bin/mytool"`); FAIL `TestHarnessPlanReferencesKinds/bare_program_on_a_workspace_PATH_entry` (`approval_key_test.go:768: write_file bin/tool1 key = "write-class:files" (reason ""), want ""`, and the same for edit_file); every other ref passes. Exit 1 for the tools command, 0 for the others. Restored (sha256 match): pass (exit 0, all four commands).
+- Kind: guard
+- Notes: A bare program word is resolved only through PATH (it is never joined to bases), so with the lookup gone a workspace `bin/` on PATH holds programs that run with no prompt to change them.
+
+## M-118 — A glob-shaped command token is a literal path
+- Affected refs: PATH-HARNESS-REF: `TestHarnessPlanReferencesAntiGoals`
+- Baseline: `f3581fda`, the commit that adds the #784 inventory rows, in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^TestHarnessKey$' ./agent/interceptor`; `go test -count=1 -v -run '^(TestHarnessRead(MarkdownImports|ArgvWhole|ShellStrings|KeySelection|TOML|GlobAdversarial|CwdDirBases)|TestHarnessPlanReferences(Kinds|NFD|StoredSpelling|Fold|ResolvedSpelling|AntiGoals|Freshness|RootInHarnessFolder|UserSettings)|TestHarnessRefs(NestedRepository|FailClosed|NotFailures|PromotionCheck|HarnessFileFirst|DanglingVirtualLink)|TestHarnessPlan(InvokeRecheck|ReasonLine))$' ./agent/tools`; `go test -count=1 -v -run '^(TestHarnessApprovalRef(Prompts|SameRun|Headless|TaskStep)|TestHarnessPromotionRefuses(GitignoredImport|Deletion))$' ./cmd/golem`; `go test -count=1 -v -run '^TestContainment$/^(G5|H3)$' ./cmd/golem` (every ref of PATH-HARNESS-REF, GRANT-HARNESS-REF and GRANT-HARNESS-REF-UNATTENDED, and five tests that are no ref: `TestHarnessReadCwdDirBases`, `TestHarnessPlanReferencesNFD`, `TestHarnessPlanReferencesStoredSpelling`, `TestHarnessPlanReferencesUserSettings` and `TestHarnessPlanReasonLine`; in four commands: interceptor, tools, approval, containment)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/harness_refs.go b/agent/tools/harness_refs.go
+  --- a/agent/tools/harness_refs.go
+  +++ b/agent/tools/harness_refs.go
+  @@ -606,6 +606,9 @@
+   	}
+   	for _, p := range paths {
+   		if rel, ok := b.place(p); ok {
+  +			if strings.ContainsAny(rel, "*?[") {
+  +				b.refs.patterns = append(b.refs.patterns, harnessPattern{key: interceptor.HarnessKey(rel), reason: fmt.Sprintf("%s runs %s", harnessQuote(f.label), harnessQuote(rel))})
+  +			}
+   			b.addExact(rel, fmt.Sprintf("%s runs %s", harnessQuote(f.label), harnessQuote(rel)))
+   		}
+   	}
+  ```
+- Baseline: pass (exit 0, all four commands). Mutant: FAIL `TestHarnessPlanReferencesAntiGoals`, the `eslint src/*.js` pin (`approval_key_test.go:830: write_file src/a.js key = "" (reason ".claude/settings.json runs src/*.js"), want "write-class:files"`, and the same for edit_file); every other ref passes, `TestHarnessReadShellStrings/glob_literal` included. Exit 1 for the tools command, 0 for the others. Restored (sha256 match): pass (exit 0, all four commands).
+- Kind: guard
+- Notes: The resolver still returns the literal `<w>/src/*.js`; the patch also adds it to the set as a pattern, so a lint hook's glob would make every source file it matches prompt.
+
+## M-119 — `.agent/` files are not read
+- Affected refs: PATH-HARNESS-REF: `TestHarnessPlanReferencesAntiGoals`
+- Baseline: `f3581fda`, the commit that adds the #784 inventory rows, in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^TestHarnessKey$' ./agent/interceptor`; `go test -count=1 -v -run '^(TestHarnessRead(MarkdownImports|ArgvWhole|ShellStrings|KeySelection|TOML|GlobAdversarial|CwdDirBases)|TestHarnessPlanReferences(Kinds|NFD|StoredSpelling|Fold|ResolvedSpelling|AntiGoals|Freshness|RootInHarnessFolder|UserSettings)|TestHarnessRefs(NestedRepository|FailClosed|NotFailures|PromotionCheck|HarnessFileFirst|DanglingVirtualLink)|TestHarnessPlan(InvokeRecheck|ReasonLine))$' ./agent/tools`; `go test -count=1 -v -run '^(TestHarnessApprovalRef(Prompts|SameRun|Headless|TaskStep)|TestHarnessPromotionRefuses(GitignoredImport|Deletion))$' ./cmd/golem`; `go test -count=1 -v -run '^TestContainment$/^(G5|H3)$' ./cmd/golem` (every ref of PATH-HARNESS-REF, GRANT-HARNESS-REF and GRANT-HARNESS-REF-UNATTENDED, and five tests that are no ref: `TestHarnessReadCwdDirBases`, `TestHarnessPlanReferencesNFD`, `TestHarnessPlanReferencesStoredSpelling`, `TestHarnessPlanReferencesUserSettings` and `TestHarnessPlanReasonLine`; in four commands: interceptor, tools, approval, containment)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/harness_refs.go b/agent/tools/harness_refs.go
+  --- a/agent/tools/harness_refs.go
+  +++ b/agent/tools/harness_refs.go
+  @@ -287,7 +287,7 @@
+   	name := e.Name()
+   	abs, vrel := filepath.Join(d.abs, name), filepath.Join(d.vrel, name)
+   	v := filepath.Join(b.w.harnessPrefix, vrel)
+  -	harness := interceptor.IsHarnessPath(v) && !slices.Contains(strings.Split(interceptor.HarnessKey(vrel), "/"), ".agent")
+  +	harness := interceptor.IsHarnessPath(v)
+   	switch t := e.Type(); {
+   	case t&fs.ModeIrregular != 0 && !t.IsDir():
+   		// How Go reports a Windows junction or mount point: a link this walk
+  ```
+- Baseline: pass (exit 0, all four commands). Mutant: FAIL `TestHarnessPlanReferencesAntiGoals`, the `.agent/notes.md` pin (`approval_key_test.go:830: write_file docs/n.md key = "" (reason ".agent/notes.md imports docs/n.md"), want "write-class:files"`); every other ref passes. Exit 1 for the tools command, 0 for the others. Restored (sha256 match): pass (exit 0, all four commands).
+- Kind: guard
+- Notes: AgentFlow's `.agent/` state holds Markdown that names ordinary files; read as a harness file it would make them prompt.
+
+## M-120 — The reference walk skips nested repositories
+- Affected refs: PATH-HARNESS-REF: `TestHarnessRefsNestedRepository`
+- Baseline: `f3581fda`, the commit that adds the #784 inventory rows, in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^TestHarnessKey$' ./agent/interceptor`; `go test -count=1 -v -run '^(TestHarnessRead(MarkdownImports|ArgvWhole|ShellStrings|KeySelection|TOML|GlobAdversarial|CwdDirBases)|TestHarnessPlanReferences(Kinds|NFD|StoredSpelling|Fold|ResolvedSpelling|AntiGoals|Freshness|RootInHarnessFolder|UserSettings)|TestHarnessRefs(NestedRepository|FailClosed|NotFailures|PromotionCheck|HarnessFileFirst|DanglingVirtualLink)|TestHarnessPlan(InvokeRecheck|ReasonLine))$' ./agent/tools`; `go test -count=1 -v -run '^(TestHarnessApprovalRef(Prompts|SameRun|Headless|TaskStep)|TestHarnessPromotionRefuses(GitignoredImport|Deletion))$' ./cmd/golem`; `go test -count=1 -v -run '^TestContainment$/^(G5|H3)$' ./cmd/golem` (every ref of PATH-HARNESS-REF, GRANT-HARNESS-REF and GRANT-HARNESS-REF-UNATTENDED, and five tests that are no ref: `TestHarnessReadCwdDirBases`, `TestHarnessPlanReferencesNFD`, `TestHarnessPlanReferencesStoredSpelling`, `TestHarnessPlanReferencesUserSettings` and `TestHarnessPlanReasonLine`; in four commands: interceptor, tools, approval, containment)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/harness_refs.go b/agent/tools/harness_refs.go
+  --- a/agent/tools/harness_refs.go
+  +++ b/agent/tools/harness_refs.go
+  @@ -300,9 +300,6 @@
+   		if ignoreDirs[name] || buildOutputDirs[name] {
+   			return
+   		}
+  -		if _, err := os.Lstat(filepath.Join(abs, ".git")); err == nil {
+  -			return // a nested repository
+  -		}
+   		b.stack = append(b.stack, harnessDir{abs: abs, vrel: vrel, link: d.link, chain: d.chain})
+   	case t&fs.ModeSymlink != 0:
+   		b.symlink(d, abs, vrel, v, harness)
+  ```
+- Baseline: pass (exit 0, all four commands). Mutant: FAIL `TestHarnessRefsNestedRepository` (`harness_refs_test.go:128: docs/a.md covered (.claude/worktrees/x/CLAUDE.md imports docs/a.md), want ordinary`, and `docs/b/x.md covered (.claude/worktrees/x/shared links to docs/b/x.md), want ordinary`); every other ref passes. Exit 1 for the tools command, 0 for the others. Restored (sha256 match): pass (exit 0, all four commands).
+- Kind: guard
+- Notes: Only the walk's folder check is removed; a link target holding `.git` is still not walked. The nested checkout here is reached as a folder.
+
+## M-121 — An incomplete reference set makes every write prompt
+- Affected refs: PATH-HARNESS-REF: `TestHarnessRefsFailClosed`, `TestHarnessRefsHarnessFileFirst`
+- Baseline: `f3581fda`, the commit that adds the #784 inventory rows, in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^TestHarnessKey$' ./agent/interceptor`; `go test -count=1 -v -run '^(TestHarnessRead(MarkdownImports|ArgvWhole|ShellStrings|KeySelection|TOML|GlobAdversarial|CwdDirBases)|TestHarnessPlanReferences(Kinds|NFD|StoredSpelling|Fold|ResolvedSpelling|AntiGoals|Freshness|RootInHarnessFolder|UserSettings)|TestHarnessRefs(NestedRepository|FailClosed|NotFailures|PromotionCheck|HarnessFileFirst|DanglingVirtualLink)|TestHarnessPlan(InvokeRecheck|ReasonLine))$' ./agent/tools`; `go test -count=1 -v -run '^(TestHarnessApprovalRef(Prompts|SameRun|Headless|TaskStep)|TestHarnessPromotionRefuses(GitignoredImport|Deletion))$' ./cmd/golem`; `go test -count=1 -v -run '^TestContainment$/^(G5|H3)$' ./cmd/golem` (every ref of PATH-HARNESS-REF, GRANT-HARNESS-REF and GRANT-HARNESS-REF-UNATTENDED, and five tests that are no ref: `TestHarnessReadCwdDirBases`, `TestHarnessPlanReferencesNFD`, `TestHarnessPlanReferencesStoredSpelling`, `TestHarnessPlanReferencesUserSettings` and `TestHarnessPlanReasonLine`; in four commands: interceptor, tools, approval, containment)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/harness.go b/agent/tools/harness.go
+  --- a/agent/tools/harness.go
+  +++ b/agent/tools/harness.go
+  @@ -54,9 +54,6 @@
+   		return "", "" // unknown or unverified spelling: prompt (#725)
+   	}
+   	refs := w.harnessReferences(ctx)
+  -	if !refs.complete {
+  -		return "", "could not check what harness files reference: " + refs.cause
+  -	}
+   	for _, s := range []string{p, rel} {
+   		if ok, why := refs.covers(s); ok {
+   			return "", why
+  ```
+- Baseline: pass (exit 0, all four commands). Mutant: FAIL `TestHarnessRefsFailClosed`, all 12 rows (`harness_refs_test.go:177: notes.txt = ("write-class:files", ""), want empty key and the could-not-check reason`); FAIL `TestHarnessRefsHarnessFileFirst` (`harness_refs_test.go:324: control notes.txt = ("write-class:files", ""), want the could-not-check reason`); FAIL `TestHarnessPlanReasonLine/incomplete_set`, which is no ref (`harness_refs_test.go:529: write_file plan = key "write-class:files" preview "--- notes.txt\n+++ notes.txt\n-old\n+new\n", want the incomplete-set reason`, and the same for edit_file); every other ref passes. Exit 1 for the tools command, 0 for the others. Restored (sha256 match): pass (exit 0, all four commands).
+- Kind: guard
+- Notes: Each FailClosed row's first assertion (the set is incomplete and names its cause) still passes; the key check that follows fails. `TestHarnessRefsPromotionCheck/incomplete_set` passes: promotion checks completeness itself.
+
+## M-122 — A folder this user can search but not list makes the set incomplete
+- Affected refs: PATH-HARNESS-REF: `TestHarnessRefsFailClosed`
+- Baseline: `f3581fda`, the commit that adds the #784 inventory rows, in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^TestHarnessKey$' ./agent/interceptor`; `go test -count=1 -v -run '^(TestHarnessRead(MarkdownImports|ArgvWhole|ShellStrings|KeySelection|TOML|GlobAdversarial|CwdDirBases)|TestHarnessPlanReferences(Kinds|NFD|StoredSpelling|Fold|ResolvedSpelling|AntiGoals|Freshness|RootInHarnessFolder|UserSettings)|TestHarnessRefs(NestedRepository|FailClosed|NotFailures|PromotionCheck|HarnessFileFirst|DanglingVirtualLink)|TestHarnessPlan(InvokeRecheck|ReasonLine))$' ./agent/tools`; `go test -count=1 -v -run '^(TestHarnessApprovalRef(Prompts|SameRun|Headless|TaskStep)|TestHarnessPromotionRefuses(GitignoredImport|Deletion))$' ./cmd/golem`; `go test -count=1 -v -run '^TestContainment$/^(G5|H3)$' ./cmd/golem` (every ref of PATH-HARNESS-REF, GRANT-HARNESS-REF and GRANT-HARNESS-REF-UNATTENDED, and five tests that are no ref: `TestHarnessReadCwdDirBases`, `TestHarnessPlanReferencesNFD`, `TestHarnessPlanReferencesStoredSpelling`, `TestHarnessPlanReferencesUserSettings` and `TestHarnessPlanReasonLine`; in four commands: interceptor, tools, approval, containment)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/harness_refs.go b/agent/tools/harness_refs.go
+  --- a/agent/tools/harness_refs.go
+  +++ b/agent/tools/harness_refs.go
+  @@ -242,10 +242,7 @@
+   	}
+   	f, err := os.Open(d.abs)
+   	if errors.Is(err, fs.ErrPermission) {
+  -		if _, err = os.Lstat(filepath.Join(d.abs, "CLAUDE.md")); errors.Is(err, fs.ErrPermission) {
+  -			return // unsearchable
+  -		}
+  -		err = fs.ErrPermission
+  +		return
+   	}
+   	if err != nil {
+   		if !errors.Is(err, fs.ErrNotExist) {
+  ```
+- Baseline: pass (exit 0, all four commands). Mutant: FAIL `TestHarnessRefsFailClosed/searchable_but_unlistable_folder` (`harness_refs_test.go:173: complete=true cause="", want incomplete naming "locked folder cannot be listed"`); every other ref passes, `TestHarnessRefsNotFailures/unsearchable_folder` included. Exit 1 for the tools command, 0 for the others. Restored (sha256 match): pass (exit 0, all four commands).
+- Kind: guard
+- Notes: Ran as uid 503, so the mode rows ran. A mode-0111 folder is skipped like a mode-0000 one under this patch, although another tool can still open a known name inside it.
+
+## M-123 — A folder that vanishes during the walk is skipped
+- Affected refs: PATH-HARNESS-REF: `TestHarnessRefsNotFailures`
+- Baseline: `f3581fda`, the commit that adds the #784 inventory rows, in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^TestHarnessKey$' ./agent/interceptor`; `go test -count=1 -v -run '^(TestHarnessRead(MarkdownImports|ArgvWhole|ShellStrings|KeySelection|TOML|GlobAdversarial|CwdDirBases)|TestHarnessPlanReferences(Kinds|NFD|StoredSpelling|Fold|ResolvedSpelling|AntiGoals|Freshness|RootInHarnessFolder|UserSettings)|TestHarnessRefs(NestedRepository|FailClosed|NotFailures|PromotionCheck|HarnessFileFirst|DanglingVirtualLink)|TestHarnessPlan(InvokeRecheck|ReasonLine))$' ./agent/tools`; `go test -count=1 -v -run '^(TestHarnessApprovalRef(Prompts|SameRun|Headless|TaskStep)|TestHarnessPromotionRefuses(GitignoredImport|Deletion))$' ./cmd/golem`; `go test -count=1 -v -run '^TestContainment$/^(G5|H3)$' ./cmd/golem` (every ref of PATH-HARNESS-REF, GRANT-HARNESS-REF and GRANT-HARNESS-REF-UNATTENDED, and five tests that are no ref: `TestHarnessReadCwdDirBases`, `TestHarnessPlanReferencesNFD`, `TestHarnessPlanReferencesStoredSpelling`, `TestHarnessPlanReferencesUserSettings` and `TestHarnessPlanReasonLine`; in four commands: interceptor, tools, approval, containment)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/harness_refs.go b/agent/tools/harness_refs.go
+  --- a/agent/tools/harness_refs.go
+  +++ b/agent/tools/harness_refs.go
+  @@ -248,9 +248,7 @@
+   		err = fs.ErrPermission
+   	}
+   	if err != nil {
+  -		if !errors.Is(err, fs.ErrNotExist) {
+  -			b.fail(harnessQuote(d.vrel), "folder cannot be listed")
+  -		}
+  +		b.fail(harnessQuote(d.vrel), "folder cannot be listed")
+   		return
+   	}
+   	defer func() { _ = f.Close() }()
+  ```
+- Baseline: pass (exit 0, all four commands). Mutant: FAIL `TestHarnessRefsNotFailures/folder_removed_mid-walk` (`harness_refs_test.go:289: set incomplete: docs folder cannot be listed`); every other ref passes. Exit 1 for the tools command, 0 for the others. Restored (sha256 match): pass (exit 0, all four commands).
+- Kind: guard
+- Notes: The fail-closed direction: a build that deletes a folder while the walk runs would otherwise make every write prompt.
+
+## M-124 — HarnessKey folds NFD to NFC
+- Affected refs: PATH-HARNESS-REF: `TestHarnessKey`
+- Baseline: `f3581fda`, the commit that adds the #784 inventory rows, in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^TestHarnessKey$' ./agent/interceptor`; `go test -count=1 -v -run '^(TestHarnessRead(MarkdownImports|ArgvWhole|ShellStrings|KeySelection|TOML|GlobAdversarial|CwdDirBases)|TestHarnessPlanReferences(Kinds|NFD|StoredSpelling|Fold|ResolvedSpelling|AntiGoals|Freshness|RootInHarnessFolder|UserSettings)|TestHarnessRefs(NestedRepository|FailClosed|NotFailures|PromotionCheck|HarnessFileFirst|DanglingVirtualLink)|TestHarnessPlan(InvokeRecheck|ReasonLine))$' ./agent/tools`; `go test -count=1 -v -run '^(TestHarnessApprovalRef(Prompts|SameRun|Headless|TaskStep)|TestHarnessPromotionRefuses(GitignoredImport|Deletion))$' ./cmd/golem`; `go test -count=1 -v -run '^TestContainment$/^(G5|H3)$' ./cmd/golem` (every ref of PATH-HARNESS-REF, GRANT-HARNESS-REF and GRANT-HARNESS-REF-UNATTENDED, and five tests that are no ref: `TestHarnessReadCwdDirBases`, `TestHarnessPlanReferencesNFD`, `TestHarnessPlanReferencesStoredSpelling`, `TestHarnessPlanReferencesUserSettings` and `TestHarnessPlanReasonLine`; in four commands: interceptor, tools, approval, containment)
+- Patch:
+  ```diff
+  diff --git a/agent/interceptor/harness.go b/agent/interceptor/harness.go
+  --- a/agent/interceptor/harness.go
+  +++ b/agent/interceptor/harness.go
+  @@ -4,8 +4,6 @@
+   	"regexp"
+   	"slices"
+   	"strings"
+  -
+  -	"golang.org/x/text/unicode/norm"
+   )
+   
+   // harnessPaths lists the files and folders whose contents change how an agent
+  @@ -66,7 +64,7 @@
+   // with "/". IsHarnessPath matches against it, so a write target and a
+   // reference that name the same file on some filesystem share one key.
+   func HarnessKey(p string) string {
+  -	parts := strings.Split(normalizePath(norm.NFC.String(p)), "/")
+  +	parts := strings.Split(normalizePath(p), "/")
+   	for i, c := range parts {
+   		parts[i] = windowsComponent(c)
+   	}
+  ```
+- Baseline: pass (exit 0, all four commands). Mutant: FAIL `TestHarnessKey` (`harness_test.go:142: HarnessKey("café/policy.md") = "café/policy.md", HarnessKey("café/policy.md") = "café/policy.md", want equal`; the first is NFC, the second NFD); every other ref passes. `TestHarnessPlanReferencesNFD`, which is no ref, ran (its probe held: this volume aliases NFC and NFD) and passes; see Notes. Exit 1 for the interceptor command, 0 for the others. Restored (sha256 match): pass (exit 0, all four commands).
+- Kind: guard
+- Notes: On APFS the stored-spelling alias (spec D7, M-125) masks the missing fold in `TestHarnessPlanReferencesNFD`: for the NFC import `café/p.md` it adds the NFD name the volume stores, and for the absent `café2/new.md` the NFD folder `harnessPlanKeys` creates before planning, so both NFD targets stay covered. `TestHarnessKey` pins the fold itself.
+
+## M-125 — A reference's stored spelling is in the set
+- Affected refs: PATH-HARNESS-REF (no ref of the row fails; the killing test is the probe-gated `TestHarnessPlanReferencesStoredSpelling`, which is no ref, see Notes)
+- Baseline: `f3581fda`, the commit that adds the #784 inventory rows, in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^TestHarnessKey$' ./agent/interceptor`; `go test -count=1 -v -run '^(TestHarnessRead(MarkdownImports|ArgvWhole|ShellStrings|KeySelection|TOML|GlobAdversarial|CwdDirBases)|TestHarnessPlanReferences(Kinds|NFD|StoredSpelling|Fold|ResolvedSpelling|AntiGoals|Freshness|RootInHarnessFolder|UserSettings)|TestHarnessRefs(NestedRepository|FailClosed|NotFailures|PromotionCheck|HarnessFileFirst|DanglingVirtualLink)|TestHarnessPlan(InvokeRecheck|ReasonLine))$' ./agent/tools`; `go test -count=1 -v -run '^(TestHarnessApprovalRef(Prompts|SameRun|Headless|TaskStep)|TestHarnessPromotionRefuses(GitignoredImport|Deletion))$' ./cmd/golem`; `go test -count=1 -v -run '^TestContainment$/^(G5|H3)$' ./cmd/golem` (every ref of PATH-HARNESS-REF, GRANT-HARNESS-REF and GRANT-HARNESS-REF-UNATTENDED, and five tests that are no ref: `TestHarnessReadCwdDirBases`, `TestHarnessPlanReferencesNFD`, `TestHarnessPlanReferencesStoredSpelling`, `TestHarnessPlanReferencesUserSettings` and `TestHarnessPlanReasonLine`; in four commands: interceptor, tools, approval, containment)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/harness_refs.go b/agent/tools/harness_refs.go
+  --- a/agent/tools/harness_refs.go
+  +++ b/agent/tools/harness_refs.go
+  @@ -936,9 +936,6 @@
+   	}
+   	m[k] = why
+   	abs := filepath.Join(b.w.root, rel)
+  -	if s, _, err := canonicalFuturePathVerified(b.w.root, abs); err == nil {
+  -		b.alias(m, s, why)
+  -	}
+   	b.alias(m, resolveExisting(abs), why)
+   }
+   
+  ```
+- Baseline: pass (exit 0, all four commands). Mutant: FAIL `TestHarnessPlanReferencesStoredSpelling` (`approval_key_test.go:793: write_file docs/σ.md key = "write-class:files" (reason ""), want ""`, and the same for edit_file); it ran at baseline, mutant and restore alike, its probe holding each time (this volume folds `ς` to `σ`); every ref of the three rows passes. Exit 1 for the tools command, 0 for the others. Restored (sha256 match): pass (exit 0, all four commands).
+- Kind: guard
+- Notes: The test skips where the volume does not fold `ς` to `σ` (a case-sensitive volume, Linux's included), and linux-host allows no skip, so it cannot be a ref of this row, which is mandatory there. On such a volume the stored spelling is the spelling written and this patch changes nothing; on APFS it is the only guard of spec D7, and M-124 shows it also covers NFD.
+
+## M-126 — References and targets compare through HarnessKey
+- Affected refs: PATH-HARNESS-REF: `TestHarnessPlanReferencesFold`
+- Baseline: `f3581fda`, the commit that adds the #784 inventory rows, in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^TestHarnessKey$' ./agent/interceptor`; `go test -count=1 -v -run '^(TestHarnessRead(MarkdownImports|ArgvWhole|ShellStrings|KeySelection|TOML|GlobAdversarial|CwdDirBases)|TestHarnessPlanReferences(Kinds|NFD|StoredSpelling|Fold|ResolvedSpelling|AntiGoals|Freshness|RootInHarnessFolder|UserSettings)|TestHarnessRefs(NestedRepository|FailClosed|NotFailures|PromotionCheck|HarnessFileFirst|DanglingVirtualLink)|TestHarnessPlan(InvokeRecheck|ReasonLine))$' ./agent/tools`; `go test -count=1 -v -run '^(TestHarnessApprovalRef(Prompts|SameRun|Headless|TaskStep)|TestHarnessPromotionRefuses(GitignoredImport|Deletion))$' ./cmd/golem`; `go test -count=1 -v -run '^TestContainment$/^(G5|H3)$' ./cmd/golem` (every ref of PATH-HARNESS-REF, GRANT-HARNESS-REF and GRANT-HARNESS-REF-UNATTENDED, and five tests that are no ref: `TestHarnessReadCwdDirBases`, `TestHarnessPlanReferencesNFD`, `TestHarnessPlanReferencesStoredSpelling`, `TestHarnessPlanReferencesUserSettings` and `TestHarnessPlanReasonLine`; in four commands: interceptor, tools, approval, containment)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/harness_refs.go b/agent/tools/harness_refs.go
+  --- a/agent/tools/harness_refs.go
+  +++ b/agent/tools/harness_refs.go
+  @@ -96,7 +96,7 @@
+   // .github or .vscode link's target that is a harness path where the harness
+   // sees it, as a file created there would be (ruling R20).
+   func (r *harnessRefs) covers(rel string) (bool, string) {
+  -	k := interceptor.HarnessKey(rel)
+  +	k := rel
+   	if why, ok := r.exact[k]; ok {
+   		return true, why
+   	}
+  @@ -930,7 +930,7 @@
+   // the rest rejoined, so an absent file behind a linked folder is covered where
+   // it would really be created (ruling R17).
+   func (b *refBuilder) add(m map[string]string, rel, why string) {
+  -	k := interceptor.HarnessKey(rel)
+  +	k := rel
+   	if _, ok := m[k]; ok {
+   		return
+   	}
+  @@ -945,7 +945,7 @@
+   // alias adds the key of abs, if it lies inside the root, to m with why.
+   func (b *refBuilder) alias(m map[string]string, abs, why string) {
+   	if rel, ok := b.rel(abs); ok {
+  -		if k := interceptor.HarnessKey(rel); m[k] == "" {
+  +		if k := rel; m[k] == "" {
+   			m[k] = why
+   		}
+   	}
+  ```
+- Baseline: pass (exit 0, all four commands). Mutant: FAIL `TestHarnessPlanReferencesFold` (`approval_key_test.go:807: write_file docs/policy.md key = "write-class:files" (reason ""), want ""`); every other ref passes, as do `TestHarnessPlanReferencesNFD` and `TestHarnessPlanReferencesStoredSpelling`. Exit 1 for the tools command, 0 for the others. Restored (sha256 match): pass (exit 0, all four commands).
+- Kind: guard
+- Notes: The patch makes all three key sites raw (`covers`, `add` and `alias`). With the alias still folded, the stored spelling of `Docs/Policy.md`, `docs/Policy.md` once `harnessPlanKeys` has created `docs`, would fold to the target; the target itself is absent, so no stored spelling of it can stand in.
+
+## M-127 — A project-folder variable resolves to the workspace and the repository too
+- Affected refs: PATH-HARNESS-REF: `TestHarnessReadShellStrings`
+- Baseline: `f3581fda`, the commit that adds the #784 inventory rows, in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^TestHarnessKey$' ./agent/interceptor`; `go test -count=1 -v -run '^(TestHarnessRead(MarkdownImports|ArgvWhole|ShellStrings|KeySelection|TOML|GlobAdversarial|CwdDirBases)|TestHarnessPlanReferences(Kinds|NFD|StoredSpelling|Fold|ResolvedSpelling|AntiGoals|Freshness|RootInHarnessFolder|UserSettings)|TestHarnessRefs(NestedRepository|FailClosed|NotFailures|PromotionCheck|HarnessFileFirst|DanglingVirtualLink)|TestHarnessPlan(InvokeRecheck|ReasonLine))$' ./agent/tools`; `go test -count=1 -v -run '^(TestHarnessApprovalRef(Prompts|SameRun|Headless|TaskStep)|TestHarnessPromotionRefuses(GitignoredImport|Deletion))$' ./cmd/golem`; `go test -count=1 -v -run '^TestContainment$/^(G5|H3)$' ./cmd/golem` (every ref of PATH-HARNESS-REF, GRANT-HARNESS-REF and GRANT-HARNESS-REF-UNATTENDED, and five tests that are no ref: `TestHarnessReadCwdDirBases`, `TestHarnessPlanReferencesNFD`, `TestHarnessPlanReferencesStoredSpelling`, `TestHarnessPlanReferencesUserSettings` and `TestHarnessPlanReasonLine`; in four commands: interceptor, tools, approval, containment)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/harness_commands.go b/agent/tools/harness_commands.go
+  --- a/agent/tools/harness_commands.go
+  +++ b/agent/tools/harness_commands.go
+  @@ -815,11 +815,7 @@
+   	}
+   	for _, v := range projectDirVars {
+   		if rest, ok := strings.CutPrefix(tok, v); ok && (rest == "" || rest[0] == '/' || rest[0] == '\\') {
+  -			out := make([]string, 0, len(projectDirs))
+  -			for _, d := range projectDirs {
+  -				out = append(out, filepath.Join(d, rest))
+  -			}
+  -			return out
+  +			return []string{filepath.Join(start, rest)}
+   		}
+   	}
+   	if tok[0] == '$' || tok[0] == '%' || tok[0] == '~' {
+  ```
+- Baseline: pass (exit 0, all four commands). Mutant: FAIL `TestHarnessReadShellStrings`, five rows (`harness_readers_test.go:339: got ["/w/scripts/x.sh"], want it to include "/p/scripts/x.sh"` for `project dir var`, the same for `gemini project var`, `cursor project var` and `workspaceFolder arg`, and `got ["/w" "/w/scripts/c.sh"], want it to include "/p/scripts/c.sh"` for `cd to project var`); FAIL `TestHarnessPlanReferencesUserSettings`, which is no ref (`approval_key_test.go:900: write_file scripts/lint.sh key = "write-class:files" (reason ""), want ""`); every other ref passes. Exit 1 for the tools command, 0 for the others. Restored (sha256 match): pass (exit 0, all four commands).
+- Kind: guard
+- Notes: The patch resolves the variable against each start folder, the anchor and the file's own folders, which is the spec's original "resolves to the anchor". For a user-level `~/.claude/settings.json` that is the home folder, so a `"$CLAUDE_PROJECT_DIR"/scripts/lint.sh` hook leaves the workspace's `scripts/lint.sh` writable with no prompt.
+
+## M-128 — A shell flag cluster holding `c` runs its next argument
+- Affected refs: PATH-HARNESS-REF: `TestHarnessReadShellStrings`
+- Baseline: `f3581fda`, the commit that adds the #784 inventory rows, in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^TestHarnessKey$' ./agent/interceptor`; `go test -count=1 -v -run '^(TestHarnessRead(MarkdownImports|ArgvWhole|ShellStrings|KeySelection|TOML|GlobAdversarial|CwdDirBases)|TestHarnessPlanReferences(Kinds|NFD|StoredSpelling|Fold|ResolvedSpelling|AntiGoals|Freshness|RootInHarnessFolder|UserSettings)|TestHarnessRefs(NestedRepository|FailClosed|NotFailures|PromotionCheck|HarnessFileFirst|DanglingVirtualLink)|TestHarnessPlan(InvokeRecheck|ReasonLine))$' ./agent/tools`; `go test -count=1 -v -run '^(TestHarnessApprovalRef(Prompts|SameRun|Headless|TaskStep)|TestHarnessPromotionRefuses(GitignoredImport|Deletion))$' ./cmd/golem`; `go test -count=1 -v -run '^TestContainment$/^(G5|H3)$' ./cmd/golem` (every ref of PATH-HARNESS-REF, GRANT-HARNESS-REF and GRANT-HARNESS-REF-UNATTENDED, and five tests that are no ref: `TestHarnessReadCwdDirBases`, `TestHarnessPlanReferencesNFD`, `TestHarnessPlanReferencesStoredSpelling`, `TestHarnessPlanReferencesUserSettings` and `TestHarnessPlanReasonLine`; in four commands: interceptor, tools, approval, containment)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/harness_commands.go b/agent/tools/harness_commands.go
+  --- a/agent/tools/harness_commands.go
+  +++ b/agent/tools/harness_commands.go
+  @@ -514,7 +514,7 @@
+   func isShellFlag(sh, f string) bool {
+   	switch sh {
+   	case "sh":
+  -		return len(f) > 1 && f[0] == '-' && f[1] != '-' && strings.Contains(f[1:], "c")
+  +		return f == "-c"
+   	case "cmd":
+   		return strings.EqualFold(f, "/c")
+   	case "ps":
+  ```
+- Baseline: pass (exit 0, all four commands). Mutant: FAIL `TestHarnessReadShellStrings`, two rows (`harness_readers_test.go:339: got ["/w/cd scripts && ./check.sh"], want it to include "/w/scripts/check.sh"` for `bash -lc cd`, and the same for `argv sh -ec cd`); every other ref passes. Exit 1 for the tools command, 0 for the others. Restored (sha256 match): pass (exit 0, all four commands).
+- Kind: guard
+- Notes: Unread, a `-lc` or `-ec` script stays one operand token. A script with no `cd` (`argv sh -ec`, `./a.sh`) still resolves as that token, so only the `cd` rows tell a cluster from a plain operand.
+
+## M-129 — Ancestor listings ignore entries their reader does not read
+- Affected refs: PATH-HARNESS-REF: `TestHarnessRefsNotFailures`
+- Baseline: `f3581fda`, the commit that adds the #784 inventory rows, in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^TestHarnessKey$' ./agent/interceptor`; `go test -count=1 -v -run '^(TestHarnessRead(MarkdownImports|ArgvWhole|ShellStrings|KeySelection|TOML|GlobAdversarial|CwdDirBases)|TestHarnessPlanReferences(Kinds|NFD|StoredSpelling|Fold|ResolvedSpelling|AntiGoals|Freshness|RootInHarnessFolder|UserSettings)|TestHarnessRefs(NestedRepository|FailClosed|NotFailures|PromotionCheck|HarnessFileFirst|DanglingVirtualLink)|TestHarnessPlan(InvokeRecheck|ReasonLine))$' ./agent/tools`; `go test -count=1 -v -run '^(TestHarnessApprovalRef(Prompts|SameRun|Headless|TaskStep)|TestHarnessPromotionRefuses(GitignoredImport|Deletion))$' ./cmd/golem`; `go test -count=1 -v -run '^TestContainment$/^(G5|H3)$' ./cmd/golem` (every ref of PATH-HARNESS-REF, GRANT-HARNESS-REF and GRANT-HARNESS-REF-UNATTENDED, and five tests that are no ref: `TestHarnessReadCwdDirBases`, `TestHarnessPlanReferencesNFD`, `TestHarnessPlanReferencesStoredSpelling`, `TestHarnessPlanReferencesUserSettings` and `TestHarnessPlanReasonLine`; in four commands: interceptor, tools, approval, containment)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/harness_refs.go b/agent/tools/harness_refs.go
+  --- a/agent/tools/harness_refs.go
+  +++ b/agent/tools/harness_refs.go
+  @@ -802,7 +802,8 @@
+   	}
+   	for _, e := range entries {
+   		if !slices.Contains(exts, strings.ToLower(filepath.Ext(e.Name()))) {
+  -			continue
+  +			b.fail(harnessQuote(filepath.Join(dir, e.Name())), "is not a regular file")
+  +			return
+   		}
+   		abs := filepath.Join(dir, e.Name())
+   		fi, err := os.Stat(abs)
+  ```
+- Baseline: pass (exit 0, all four commands). Mutant: FAIL `TestHarnessRefsNotFailures`, both ancestor rows (`harness_refs_test.go:289: set incomplete: <tmp>/outer/.claude/rules/sub is not a regular file` for `ancestor folder, .DS_Store and a .codex file`, and `... <tmp>/outer/.clinerules/.DS_Store is not a regular file` for `ancestor .clinerules folder`; `<tmp>` is the test's temporary folder); every other ref passes. Exit 1 for the tools command, 0 for the others. Restored (sha256 match): pass (exit 0, all four commands).
+- Kind: guard
+- Notes: A `~/.claude/rules/frontend/` folder or a `.DS_Store` in `~/.github/hooks/` would otherwise make every write on a normal Mac prompt.
+
+## M-130 — A `~/` import resolves against the home folder
+- Affected refs: PATH-HARNESS-REF: `TestHarnessPlanReferencesKinds`
+- Baseline: `f3581fda`, the commit that adds the #784 inventory rows, in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^TestHarnessKey$' ./agent/interceptor`; `go test -count=1 -v -run '^(TestHarnessRead(MarkdownImports|ArgvWhole|ShellStrings|KeySelection|TOML|GlobAdversarial|CwdDirBases)|TestHarnessPlanReferences(Kinds|NFD|StoredSpelling|Fold|ResolvedSpelling|AntiGoals|Freshness|RootInHarnessFolder|UserSettings)|TestHarnessRefs(NestedRepository|FailClosed|NotFailures|PromotionCheck|HarnessFileFirst|DanglingVirtualLink)|TestHarnessPlan(InvokeRecheck|ReasonLine))$' ./agent/tools`; `go test -count=1 -v -run '^(TestHarnessApprovalRef(Prompts|SameRun|Headless|TaskStep)|TestHarnessPromotionRefuses(GitignoredImport|Deletion))$' ./cmd/golem`; `go test -count=1 -v -run '^TestContainment$/^(G5|H3)$' ./cmd/golem` (every ref of PATH-HARNESS-REF, GRANT-HARNESS-REF and GRANT-HARNESS-REF-UNATTENDED, and five tests that are no ref: `TestHarnessReadCwdDirBases`, `TestHarnessPlanReferencesNFD`, `TestHarnessPlanReferencesStoredSpelling`, `TestHarnessPlanReferencesUserSettings` and `TestHarnessPlanReasonLine`; in four commands: interceptor, tools, approval, containment)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/harness_refs.go b/agent/tools/harness_refs.go
+  --- a/agent/tools/harness_refs.go
+  +++ b/agent/tools/harness_refs.go
+  @@ -524,7 +524,7 @@
+   	}
+   	var cands []string
+   	switch rest, home := strings.CutPrefix(tok, "~/"); {
+  -	case home && b.home == "":
+  +	case home:
+   		return
+   	case home:
+   		cands = []string{filepath.Join(b.home, rest)}
+  ```
+- Baseline: pass (exit 0, all four commands). Mutant: FAIL `TestHarnessPlanReferencesKinds/home_import` (`approval_key_test.go:768: write_file docs/home.md key = "write-class:files" (reason ""), want ""`); every other ref passes, `TestHarnessReadMarkdownImports/home` included (the scanner still emits `~/notes.md`). Exit 1 for the tools command, 0 for the others. Restored (sha256 match): pass (exit 0, all four commands).
+- Kind: guard
+- Notes: A workspace under the home folder is the common case, so `@~/` imports can land inside it. `TestHarnessPlanReferencesKinds` is a PATH-HARNESS-REF ref from the commit that adds these entries (M-108).
+
+## M-131 — GEMINI.md and `.mcp.json` are read
+- Affected refs: GRANT-HARNESS-REF: `TestHarnessPlanReferencesKinds`, `TestHarnessApprovalRefPrompts`; GRANT-HARNESS-REF-UNATTENDED: `TestHarnessApprovalRefHeadless`
+- Baseline: `f3581fda`, the commit that adds the #784 inventory rows, in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^TestHarnessKey$' ./agent/interceptor`; `go test -count=1 -v -run '^(TestHarnessRead(MarkdownImports|ArgvWhole|ShellStrings|KeySelection|TOML|GlobAdversarial|CwdDirBases)|TestHarnessPlanReferences(Kinds|NFD|StoredSpelling|Fold|ResolvedSpelling|AntiGoals|Freshness|RootInHarnessFolder|UserSettings)|TestHarnessRefs(NestedRepository|FailClosed|NotFailures|PromotionCheck|HarnessFileFirst|DanglingVirtualLink)|TestHarnessPlan(InvokeRecheck|ReasonLine))$' ./agent/tools`; `go test -count=1 -v -run '^(TestHarnessApprovalRef(Prompts|SameRun|Headless|TaskStep)|TestHarnessPromotionRefuses(GitignoredImport|Deletion))$' ./cmd/golem`; `go test -count=1 -v -run '^TestContainment$/^(G5|H3)$' ./cmd/golem` (every ref of PATH-HARNESS-REF, GRANT-HARNESS-REF and GRANT-HARNESS-REF-UNATTENDED, and five tests that are no ref: `TestHarnessReadCwdDirBases`, `TestHarnessPlanReferencesNFD`, `TestHarnessPlanReferencesStoredSpelling`, `TestHarnessPlanReferencesUserSettings` and `TestHarnessPlanReasonLine`; in four commands: interceptor, tools, approval, containment)
+- Patch (A, GEMINI.md not read):
+  ```diff
+  diff --git a/agent/tools/harness_refs.go b/agent/tools/harness_refs.go
+  --- a/agent/tools/harness_refs.go
+  +++ b/agent/tools/harness_refs.go
+  @@ -452,6 +452,9 @@
+   	base := path.Base(k)
+   	switch ext := path.Ext(base); {
+   	case ext == ".md", ext == ".mdc", base == ".cursorrules", base == ".windsurfrules", base == ".clinerules":
+  +		if base == "gemini.md" {
+  +			return
+  +		}
+   		b.markdown(f, 0)
+   	default:
+   		if keys, ok := commandFileKeysFor(k); ok {
+  ```
+- Patch (B, .mcp.json not read):
+  ```diff
+  diff --git a/agent/tools/harness_commands.go b/agent/tools/harness_commands.go
+  --- a/agent/tools/harness_commands.go
+  +++ b/agent/tools/harness_commands.go
+  @@ -57,7 +57,6 @@
+   var commandFileKeys = map[string][]string{
+   	interceptor.HarnessKey(".claude/settings.json"):       {"command", "args", "apiKeyHelper", "awsAuthRefresh", "awsCredentialExport", "otelHeadersHelper", "headersHelper"},
+   	interceptor.HarnessKey(".claude/settings.local.json"): {"command", "args", "apiKeyHelper", "awsAuthRefresh", "awsCredentialExport", "otelHeadersHelper", "headersHelper"},
+  -	interceptor.HarnessKey(".mcp.json"):                   {"command", "args", "headersHelper"},
+   	interceptor.HarnessKey(".cursor/hooks.json"):          {"command", "args"},
+   	interceptor.HarnessKey(".cursor/mcp.json"):            {"command", "args"},
+   	interceptor.HarnessKey(".windsurf/hooks.json"):        {"command", "args"},
+  ```
+- Baseline: pass (exit 0, all four commands). A: FAIL `TestHarnessPlanReferencesKinds/GEMINI.md_import` (`approval_key_test.go:768: write_file docs/g.md key = "write-class:files" (reason ""), want ""`); FAIL `TestHarnessApprovalRefPrompts` (`harness_approval_test.go:371: prompts = 5, want 6:`); FAIL `TestHarnessApprovalRefHeadless` (`harness_approval_test.go:436: record 8 = {Step:8 ... Invoked:true ...}, want an approver denial`: docs/g.md); every other ref passes. Exit 1 for the tools and approval commands, 0 for the others. Restored (sha256 match): pass (exit 0, all four commands). B: FAIL `TestHarnessPlanReferencesKinds`, four rows (`approval_key_test.go:768: write_file server.py key = "write-class:files" (reason ""), want ""` for `absent MCP operand`, and the same for `svc/server.py`, `bin/tool1` and the folderless `scripts/n.sh`); FAIL `TestHarnessApprovalRefPrompts` (`harness_approval_test.go:371: prompts = 5, want 6:`); FAIL `TestHarnessApprovalRefHeadless` (`harness_approval_test.go:436: record 10 = {Step:10 ... Invoked:true ...}, want an approver denial`: scripts/server.py). Outside this entry's rows the PATH-HARNESS-REF refs `TestHarnessReadArgvWhole` (`harness_readers_test.go:239: .mcp.json: no command keys`), `TestHarnessReadShellStrings` (five `.mcp.json` rows, `harness_readers_test.go:325: .mcp.json: no command keys`), `TestHarnessReadKeySelection` (`harness_readers_test.go:396`, the same), `TestHarnessRefsFailClosed` (the oversized and malformed `.mcp.json` rows, `harness_refs_test.go:173: complete=true cause="", want incomplete naming ".mcp.json is over the size limit"`), `TestHarnessRefsPromotionCheck/incomplete_set` and `TestHarnessRefsHarnessFileFirst` fail, and so does `TestHarnessPlanReasonLine/incomplete_set`, which is no ref. Exit 1 for the tools and approval commands, 0 for the others. Restored (sha256 match): pass (exit 0, all four commands).
+- Kind: guard
+- Notes: Variant A skips GEMINI.md in the Markdown reader; variant B deletes `.mcp.json` from `commandFileKeys`, which also drops the `D4 .mcp.json` row that `TestHarnessPlanReferencesKinds` builds from that table, so that row does not run under B. Either file dropped is caught by the acceptance-5 and acceptance-6 tests.
+
+## M-132 — The resolved spelling is checked against the set too
+- Affected refs: PATH-HARNESS-REF: `TestHarnessPlanReferencesResolvedSpelling`
+- Baseline: `f3581fda`, the commit that adds the #784 inventory rows, in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^TestHarnessKey$' ./agent/interceptor`; `go test -count=1 -v -run '^(TestHarnessRead(MarkdownImports|ArgvWhole|ShellStrings|KeySelection|TOML|GlobAdversarial|CwdDirBases)|TestHarnessPlanReferences(Kinds|NFD|StoredSpelling|Fold|ResolvedSpelling|AntiGoals|Freshness|RootInHarnessFolder|UserSettings)|TestHarnessRefs(NestedRepository|FailClosed|NotFailures|PromotionCheck|HarnessFileFirst|DanglingVirtualLink)|TestHarnessPlan(InvokeRecheck|ReasonLine))$' ./agent/tools`; `go test -count=1 -v -run '^(TestHarnessApprovalRef(Prompts|SameRun|Headless|TaskStep)|TestHarnessPromotionRefuses(GitignoredImport|Deletion))$' ./cmd/golem`; `go test -count=1 -v -run '^TestContainment$/^(G5|H3)$' ./cmd/golem` (every ref of PATH-HARNESS-REF, GRANT-HARNESS-REF and GRANT-HARNESS-REF-UNATTENDED, and five tests that are no ref: `TestHarnessReadCwdDirBases`, `TestHarnessPlanReferencesNFD`, `TestHarnessPlanReferencesStoredSpelling`, `TestHarnessPlanReferencesUserSettings` and `TestHarnessPlanReasonLine`; in four commands: interceptor, tools, approval, containment)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/harness.go b/agent/tools/harness.go
+  --- a/agent/tools/harness.go
+  +++ b/agent/tools/harness.go
+  @@ -57,7 +57,7 @@
+   	if !refs.complete {
+   		return "", "could not check what harness files reference: " + refs.cause
+   	}
+  -	for _, s := range []string{p, rel} {
+  +	for _, s := range []string{p} {
+   		if ok, why := refs.covers(s); ok {
+   			return "", why
+   		}
+  ```
+- Baseline: pass (exit 0, all four commands). Mutant: FAIL `TestHarnessPlanReferencesResolvedSpelling` (`approval_key_test.go:813: edit_file odd/x.md key = "write-class:files" (reason ""), want ""`, and the same for write_file); every other ref passes. Exit 1 for the tools command, 0 for the others. Restored (sha256 match): pass (exit 0, all four commands).
+- Kind: guard
+- Notes: The patch narrows `fileToolApprovalKey`'s loop to the requested spelling; the promotion check keeps its own two-spelling loop.
+
+## M-133 — `.github` and `.vscode` links are walked as the harness folder they stand for
+- Affected refs: PATH-HARNESS-REF: `TestHarnessPlanReferencesKinds`, `TestHarnessRefsDanglingVirtualLink`
+- Baseline: `f3581fda`, the commit that adds the #784 inventory rows, in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^TestHarnessKey$' ./agent/interceptor`; `go test -count=1 -v -run '^(TestHarnessRead(MarkdownImports|ArgvWhole|ShellStrings|KeySelection|TOML|GlobAdversarial|CwdDirBases)|TestHarnessPlanReferences(Kinds|NFD|StoredSpelling|Fold|ResolvedSpelling|AntiGoals|Freshness|RootInHarnessFolder|UserSettings)|TestHarnessRefs(NestedRepository|FailClosed|NotFailures|PromotionCheck|HarnessFileFirst|DanglingVirtualLink)|TestHarnessPlan(InvokeRecheck|ReasonLine))$' ./agent/tools`; `go test -count=1 -v -run '^(TestHarnessApprovalRef(Prompts|SameRun|Headless|TaskStep)|TestHarnessPromotionRefuses(GitignoredImport|Deletion))$' ./cmd/golem`; `go test -count=1 -v -run '^TestContainment$/^(G5|H3)$' ./cmd/golem` (every ref of PATH-HARNESS-REF, GRANT-HARNESS-REF and GRANT-HARNESS-REF-UNATTENDED, and five tests that are no ref: `TestHarnessReadCwdDirBases`, `TestHarnessPlanReferencesNFD`, `TestHarnessPlanReferencesStoredSpelling`, `TestHarnessPlanReferencesUserSettings` and `TestHarnessPlanReasonLine`; in four commands: interceptor, tools, approval, containment)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/harness_refs.go b/agent/tools/harness_refs.go
+  --- a/agent/tools/harness_refs.go
+  +++ b/agent/tools/harness_refs.go
+  @@ -340,7 +340,7 @@
+   	if fi, err := os.Stat(abs); err == nil && fi.IsDir() {
+   		b.dirLinks = append(b.dirLinks, harnessLink{abs: abs, vrel: vrel})
+   	}
+  -	named := harnessVirtualName(filepath.Base(vrel))
+  +	named := false
+   	if !harness && !named {
+   		return
+   	}
+  ```
+- Baseline: pass (exit 0, all four commands). Mutant: FAIL `TestHarnessPlanReferencesKinds`, four rows (`approval_key_test.go:768: write_file scripts/v.sh key = "write-class:files" (reason ""), want ""` and `config/editor/mcp.json` for `linked .vscode` (the `.vscode -> config/editor` row), `scripts/v.sh` and `scripts/h.sh` for `.github and .vscode linked to one folder`, `config/editor/mcp.json` and `config/editor/settings.json` for `absent config under a linked .vscode`, and `cfg/hooks/new.json` for `absent hook under a linked .github`); FAIL `TestHarnessRefsDanglingVirtualLink` (`harness_refs_test.go:381: covers(cfg/hooks/new.json) = (false, ""), want the .github reason`); every other ref passes. Exit 1 for the tools command, 0 for the others. Restored (sha256 match): pass (exit 0, all four commands).
+- Kind: guard
+- Notes: The name `.vscode` alone is no harness path, so without the virtual walk its target's `mcp.json` is never read and a file created there is not classified.
+
+## M-134 — Imports are followed past the first hop
+- Affected refs: PATH-HARNESS-REF: `TestHarnessPlanReferencesKinds`, `TestHarnessRefsFailClosed`
+- Baseline: `f3581fda`, the commit that adds the #784 inventory rows, in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^TestHarnessKey$' ./agent/interceptor`; `go test -count=1 -v -run '^(TestHarnessRead(MarkdownImports|ArgvWhole|ShellStrings|KeySelection|TOML|GlobAdversarial|CwdDirBases)|TestHarnessPlanReferences(Kinds|NFD|StoredSpelling|Fold|ResolvedSpelling|AntiGoals|Freshness|RootInHarnessFolder|UserSettings)|TestHarnessRefs(NestedRepository|FailClosed|NotFailures|PromotionCheck|HarnessFileFirst|DanglingVirtualLink)|TestHarnessPlan(InvokeRecheck|ReasonLine))$' ./agent/tools`; `go test -count=1 -v -run '^(TestHarnessApprovalRef(Prompts|SameRun|Headless|TaskStep)|TestHarnessPromotionRefuses(GitignoredImport|Deletion))$' ./cmd/golem`; `go test -count=1 -v -run '^TestContainment$/^(G5|H3)$' ./cmd/golem` (every ref of PATH-HARNESS-REF, GRANT-HARNESS-REF and GRANT-HARNESS-REF-UNATTENDED, and five tests that are no ref: `TestHarnessReadCwdDirBases`, `TestHarnessPlanReferencesNFD`, `TestHarnessPlanReferencesStoredSpelling`, `TestHarnessPlanReferencesUserSettings` and `TestHarnessPlanReasonLine`; in four commands: interceptor, tools, approval, containment)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/harness_refs.go b/agent/tools/harness_refs.go
+  --- a/agent/tools/harness_refs.go
+  +++ b/agent/tools/harness_refs.go
+  @@ -541,7 +541,7 @@
+   			name = rel
+   			b.addExact(rel, fmt.Sprintf("%s imports %s", harnessQuote(label), harnessQuote(rel)))
+   		}
+  -		if depth+1 >= harnessImportDepth || b.failed() {
+  +		if depth+1 >= 1 || b.failed() {
+   			continue
+   		}
+   		// A name nobody can reach names nothing (isAbsentStatErr, per
+  ```
+- Baseline: pass (exit 0, all four commands). Mutant: FAIL `TestHarnessPlanReferencesKinds/import_depth_five` (`approval_key_test.go:768: write_file docs/h2.md key = "write-class:files" (reason ""), want ""`, the same for edit_file, and for `docs/h5.md`); FAIL `TestHarnessRefsFailClosed/imported_file_that_cannot_be_read` (`harness_refs_test.go:173: complete=true cause="", want incomplete naming "docs/x.md cannot be read"`); every other ref passes. Exit 1 for the tools command, 0 for the others. Restored (sha256 match): pass (exit 0, all four commands).
+- Kind: guard
+- Notes: An imported file is recorded but never read. `linked CLAUDE.md and what it imports` passes: its linked file is a harness file read at depth 0.
+
+## M-135 — Imports are followed to depth five
+- Affected refs: PATH-HARNESS-REF: `TestHarnessPlanReferencesKinds`
+- Baseline: `f3581fda`, the commit that adds the #784 inventory rows, in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^TestHarnessKey$' ./agent/interceptor`; `go test -count=1 -v -run '^(TestHarnessRead(MarkdownImports|ArgvWhole|ShellStrings|KeySelection|TOML|GlobAdversarial|CwdDirBases)|TestHarnessPlanReferences(Kinds|NFD|StoredSpelling|Fold|ResolvedSpelling|AntiGoals|Freshness|RootInHarnessFolder|UserSettings)|TestHarnessRefs(NestedRepository|FailClosed|NotFailures|PromotionCheck|HarnessFileFirst|DanglingVirtualLink)|TestHarnessPlan(InvokeRecheck|ReasonLine))$' ./agent/tools`; `go test -count=1 -v -run '^(TestHarnessApprovalRef(Prompts|SameRun|Headless|TaskStep)|TestHarnessPromotionRefuses(GitignoredImport|Deletion))$' ./cmd/golem`; `go test -count=1 -v -run '^TestContainment$/^(G5|H3)$' ./cmd/golem` (every ref of PATH-HARNESS-REF, GRANT-HARNESS-REF and GRANT-HARNESS-REF-UNATTENDED, and five tests that are no ref: `TestHarnessReadCwdDirBases`, `TestHarnessPlanReferencesNFD`, `TestHarnessPlanReferencesStoredSpelling`, `TestHarnessPlanReferencesUserSettings` and `TestHarnessPlanReasonLine`; in four commands: interceptor, tools, approval, containment)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/harness_refs.go b/agent/tools/harness_refs.go
+  --- a/agent/tools/harness_refs.go
+  +++ b/agent/tools/harness_refs.go
+  @@ -26,7 +26,7 @@
+   	harnessMaxTotalBytes     = 32 << 20 // bytes read per build, Markdown included
+   	// harnessImportDepth is how many import hops are followed: spec D3 takes
+   	// the larger of Claude Code's four and Gemini CLI's maxDepth of 5.
+  -	harnessImportDepth = 5
+  +	harnessImportDepth = 4
+   )
+   
+   // buildOutputDirs are the folder names the reference walk skips besides
+  ```
+- Baseline: pass (exit 0, all four commands). Mutant: FAIL `TestHarnessPlanReferencesKinds/import_depth_five` (`approval_key_test.go:768: write_file docs/h5.md key = "write-class:files" (reason ""), want ""`, and the same for edit_file); `docs/h2.md` and the control `docs/h6.md` pass, as does every other ref, `TestHarnessRefsNotFailures/seven-hop_import_chain` included. Exit 1 for the tools command, 0 for the others. Restored (sha256 match): pass (exit 0, all four commands).
+- Kind: guard
+- Notes: Spec D3 takes the larger of Claude Code's four hops and Gemini CLI's `maxDepth: 5`. `TestHarnessPlanReferencesKinds` is a PATH-HARNESS-REF ref from the commit that adds these entries (M-108).
+
+## M-136 — Agentflow parallel promotion refuses a covered path
+- Affected refs: GRANT-HARNESS-REF-UNATTENDED: `TestHarnessPromotionRefusesGitignoredImport`, `TestHarnessPromotionRefusesDeletion`
+- Baseline: `f3581fda`, the commit that adds the #784 inventory rows, in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^TestHarnessKey$' ./agent/interceptor`; `go test -count=1 -v -run '^(TestHarnessRead(MarkdownImports|ArgvWhole|ShellStrings|KeySelection|TOML|GlobAdversarial|CwdDirBases)|TestHarnessPlanReferences(Kinds|NFD|StoredSpelling|Fold|ResolvedSpelling|AntiGoals|Freshness|RootInHarnessFolder|UserSettings)|TestHarnessRefs(NestedRepository|FailClosed|NotFailures|PromotionCheck|HarnessFileFirst|DanglingVirtualLink)|TestHarnessPlan(InvokeRecheck|ReasonLine))$' ./agent/tools`; `go test -count=1 -v -run '^(TestHarnessApprovalRef(Prompts|SameRun|Headless|TaskStep)|TestHarnessPromotionRefuses(GitignoredImport|Deletion))$' ./cmd/golem`; `go test -count=1 -v -run '^TestContainment$/^(G5|H3)$' ./cmd/golem` (every ref of PATH-HARNESS-REF, GRANT-HARNESS-REF and GRANT-HARNESS-REF-UNATTENDED, and five tests that are no ref: `TestHarnessReadCwdDirBases`, `TestHarnessPlanReferencesNFD`, `TestHarnessPlanReferencesStoredSpelling`, `TestHarnessPlanReferencesUserSettings` and `TestHarnessPlanReasonLine`; in four commands: interceptor, tools, approval, containment)
+- Patch:
+  ```diff
+  diff --git a/cmd/golem/agentflow_parallel.go b/cmd/golem/agentflow_parallel.go
+  --- a/cmd/golem/agentflow_parallel.go
+  +++ b/cmd/golem/agentflow_parallel.go
+  @@ -240,7 +240,7 @@
+   		}
+   		err = ws.CheckHarnessPromotion(ctx, paths)
+   	}
+  -	if err != nil {
+  +	if false && err != nil {
+   		return nil, errors.Join(fmt.Errorf("refuse parallel promotion: %w", err), promotion.close())
+   	}
+   	for i, change := range changes {
+  ```
+- Baseline: pass (exit 0, all four commands). Mutant: FAIL `TestHarnessPromotionRefusesGitignoredImport/imports=true` (`agentflow_parallel_test.go:1968: runCohort() error = <nil>, want a refused promotion naming docs/p.md`); FAIL `TestHarnessPromotionRefusesDeletion` (`agentflow_parallel_test.go:1998: runCohort() error = <nil>, want a refused promotion naming docs/a.md`); the `imports=false` control and every other ref pass. Exit 1 for the approval command, 0 for the others. Restored (sha256 match): pass (exit 0, all four commands).
+- Kind: guard
+- Notes: The check still runs; the patch ignores its result, so promotion writes and deletes what a gitignored CLAUDE.local.md or a committed CLAUDE.md imports.
+
+## M-137 — Promotion classifies deletions too
+- Affected refs: GRANT-HARNESS-REF-UNATTENDED: `TestHarnessPromotionRefusesDeletion`
+- Baseline: `f3581fda`, the commit that adds the #784 inventory rows, in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^TestHarnessKey$' ./agent/interceptor`; `go test -count=1 -v -run '^(TestHarnessRead(MarkdownImports|ArgvWhole|ShellStrings|KeySelection|TOML|GlobAdversarial|CwdDirBases)|TestHarnessPlanReferences(Kinds|NFD|StoredSpelling|Fold|ResolvedSpelling|AntiGoals|Freshness|RootInHarnessFolder|UserSettings)|TestHarnessRefs(NestedRepository|FailClosed|NotFailures|PromotionCheck|HarnessFileFirst|DanglingVirtualLink)|TestHarnessPlan(InvokeRecheck|ReasonLine))$' ./agent/tools`; `go test -count=1 -v -run '^(TestHarnessApprovalRef(Prompts|SameRun|Headless|TaskStep)|TestHarnessPromotionRefuses(GitignoredImport|Deletion))$' ./cmd/golem`; `go test -count=1 -v -run '^TestContainment$/^(G5|H3)$' ./cmd/golem` (every ref of PATH-HARNESS-REF, GRANT-HARNESS-REF and GRANT-HARNESS-REF-UNATTENDED, and five tests that are no ref: `TestHarnessReadCwdDirBases`, `TestHarnessPlanReferencesNFD`, `TestHarnessPlanReferencesStoredSpelling`, `TestHarnessPlanReferencesUserSettings` and `TestHarnessPlanReasonLine`; in four commands: interceptor, tools, approval, containment)
+- Patch:
+  ```diff
+  diff --git a/cmd/golem/agentflow_parallel.go b/cmd/golem/agentflow_parallel.go
+  --- a/cmd/golem/agentflow_parallel.go
+  +++ b/cmd/golem/agentflow_parallel.go
+  @@ -234,9 +234,11 @@
+   	// applied (#784, spec D10).
+   	ws, err := agenttools.NewWorkspace(c.root)
+   	if err == nil {
+  -		paths := make([]string, len(changes))
+  -		for i, change := range changes {
+  -			paths[i] = change.path
+  +		var paths []string
+  +		for _, change := range changes {
+  +			if !change.delete {
+  +				paths = append(paths, change.path)
+  +			}
+   		}
+   		err = ws.CheckHarnessPromotion(ctx, paths)
+   	}
+  ```
+- Baseline: pass (exit 0, all four commands). Mutant: FAIL `TestHarnessPromotionRefusesDeletion` (`agentflow_parallel_test.go:1998: runCohort() error = <nil>, want a refused promotion naming docs/a.md`); every other ref passes, `TestHarnessPromotionRefusesGitignoredImport` included (its covered path is a write). Exit 1 for the approval command, 0 for the others. Restored (sha256 match): pass (exit 0, all four commands).
+- Kind: guard
+- Notes: Deleting an import target changes what the importing harness file loads as surely as rewriting it.
+
+## M-138 — The harness files in the folders above the root are read
+- Affected refs: PATH-HARNESS-REF: `TestHarnessPlanReferencesKinds`, `TestHarnessRefsFailClosed`
+- Baseline: `f3581fda`, the commit that adds the #784 inventory rows, in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^TestHarnessKey$' ./agent/interceptor`; `go test -count=1 -v -run '^(TestHarnessRead(MarkdownImports|ArgvWhole|ShellStrings|KeySelection|TOML|GlobAdversarial|CwdDirBases)|TestHarnessPlanReferences(Kinds|NFD|StoredSpelling|Fold|ResolvedSpelling|AntiGoals|Freshness|RootInHarnessFolder|UserSettings)|TestHarnessRefs(NestedRepository|FailClosed|NotFailures|PromotionCheck|HarnessFileFirst|DanglingVirtualLink)|TestHarnessPlan(InvokeRecheck|ReasonLine))$' ./agent/tools`; `go test -count=1 -v -run '^(TestHarnessApprovalRef(Prompts|SameRun|Headless|TaskStep)|TestHarnessPromotionRefuses(GitignoredImport|Deletion))$' ./cmd/golem`; `go test -count=1 -v -run '^TestContainment$/^(G5|H3)$' ./cmd/golem` (every ref of PATH-HARNESS-REF, GRANT-HARNESS-REF and GRANT-HARNESS-REF-UNATTENDED, and five tests that are no ref: `TestHarnessReadCwdDirBases`, `TestHarnessPlanReferencesNFD`, `TestHarnessPlanReferencesStoredSpelling`, `TestHarnessPlanReferencesUserSettings` and `TestHarnessPlanReasonLine`; in four commands: interceptor, tools, approval, containment)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/harness_refs.go b/agent/tools/harness_refs.go
+  --- a/agent/tools/harness_refs.go
+  +++ b/agent/tools/harness_refs.go
+  @@ -195,7 +195,6 @@
+   		return hit, err == nil
+   	}
+   	b.walk()
+  -	b.ancestors()
+   	b.patternLinks()
+   	return b.refs
+   }
+  ```
+- Baseline: pass (exit 0, all four commands). Mutant: FAIL `TestHarnessPlanReferencesKinds`, four ancestor rows (`approval_key_test.go:768: write_file docs/up.md key = "write-class:files" (reason ""), want ""` and `scripts/up.sh` for `ancestor CLAUDE.md and settings`, and the same for `docs/cl.md` (`ancestor .clinerules folder`), `scripts/a.sh` (`repository settings with the root under a .codex folder`) and `rules/new.md` (`ancestor glob with [ in the root path`)); FAIL `TestHarnessRefsFailClosed/malformed_ancestor_settings` (`harness_refs_test.go:173: complete=true cause="", want incomplete naming "outer/.claude/settings.json does not parse"`); FAIL `TestHarnessPlanReferencesUserSettings`, which is no ref (`approval_key_test.go:900: write_file scripts/lint.sh key = "write-class:files" (reason ""), want ""`); every other ref passes. Exit 1 for the tools command, 0 for the others. Restored (sha256 match): pass (exit 0, all four commands).
+- Kind: guard
+- Notes: The patch drops the ancestor scan (spec D12), so a repository's or the user's own harness files above the root reference nothing.
+
+## M-139 — The walk skips build-output folders
+- Affected refs: PATH-HARNESS-REF: `TestHarnessRefsNotFailures`
+- Baseline: `f3581fda`, the commit that adds the #784 inventory rows, in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^TestHarnessKey$' ./agent/interceptor`; `go test -count=1 -v -run '^(TestHarnessRead(MarkdownImports|ArgvWhole|ShellStrings|KeySelection|TOML|GlobAdversarial|CwdDirBases)|TestHarnessPlanReferences(Kinds|NFD|StoredSpelling|Fold|ResolvedSpelling|AntiGoals|Freshness|RootInHarnessFolder|UserSettings)|TestHarnessRefs(NestedRepository|FailClosed|NotFailures|PromotionCheck|HarnessFileFirst|DanglingVirtualLink)|TestHarnessPlan(InvokeRecheck|ReasonLine))$' ./agent/tools`; `go test -count=1 -v -run '^(TestHarnessApprovalRef(Prompts|SameRun|Headless|TaskStep)|TestHarnessPromotionRefuses(GitignoredImport|Deletion))$' ./cmd/golem`; `go test -count=1 -v -run '^TestContainment$/^(G5|H3)$' ./cmd/golem` (every ref of PATH-HARNESS-REF, GRANT-HARNESS-REF and GRANT-HARNESS-REF-UNATTENDED, and five tests that are no ref: `TestHarnessReadCwdDirBases`, `TestHarnessPlanReferencesNFD`, `TestHarnessPlanReferencesStoredSpelling`, `TestHarnessPlanReferencesUserSettings` and `TestHarnessPlanReasonLine`; in four commands: interceptor, tools, approval, containment)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/harness_refs.go b/agent/tools/harness_refs.go
+  --- a/agent/tools/harness_refs.go
+  +++ b/agent/tools/harness_refs.go
+  @@ -297,7 +297,7 @@
+   			b.fail(harnessQuote(vrel), "link cannot be resolved")
+   		}
+   	case t.IsDir():
+  -		if ignoreDirs[name] || buildOutputDirs[name] {
+  +		if ignoreDirs[name] {
+   			return
+   		}
+   		if _, err := os.Lstat(filepath.Join(abs, ".git")); err == nil {
+  ```
+- Baseline: pass (exit 0, all four commands). Mutant: FAIL `TestHarnessRefsNotFailures/build_output_past_the_entry_bound` (`harness_refs_test.go:289: set incomplete: walk stopped at the entry limit`); every other ref passes. Exit 1 for the tools command, 0 for the others. Restored (sha256 match): pass (exit 0, all four commands).
+- Kind: guard
+- Notes: The fail-closed direction: a `build/` or `target/` tree past the entry bound would otherwise make every write prompt.
+
+## M-140 — A covered target's preview opens with the reason, and unattended denials print it
+- Affected refs: GRANT-HARNESS-REF-UNATTENDED: `TestHarnessApprovalRefHeadless`, `TestHarnessApprovalRefTaskStep`
+- Baseline: `f3581fda`, the commit that adds the #784 inventory rows, in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^TestHarnessKey$' ./agent/interceptor`; `go test -count=1 -v -run '^(TestHarnessRead(MarkdownImports|ArgvWhole|ShellStrings|KeySelection|TOML|GlobAdversarial|CwdDirBases)|TestHarnessPlanReferences(Kinds|NFD|StoredSpelling|Fold|ResolvedSpelling|AntiGoals|Freshness|RootInHarnessFolder|UserSettings)|TestHarnessRefs(NestedRepository|FailClosed|NotFailures|PromotionCheck|HarnessFileFirst|DanglingVirtualLink)|TestHarnessPlan(InvokeRecheck|ReasonLine))$' ./agent/tools`; `go test -count=1 -v -run '^(TestHarnessApprovalRef(Prompts|SameRun|Headless|TaskStep)|TestHarnessPromotionRefuses(GitignoredImport|Deletion))$' ./cmd/golem`; `go test -count=1 -v -run '^TestContainment$/^(G5|H3)$' ./cmd/golem` (every ref of PATH-HARNESS-REF, GRANT-HARNESS-REF and GRANT-HARNESS-REF-UNATTENDED, and five tests that are no ref: `TestHarnessReadCwdDirBases`, `TestHarnessPlanReferencesNFD`, `TestHarnessPlanReferencesStoredSpelling`, `TestHarnessPlanReferencesUserSettings` and `TestHarnessPlanReasonLine`; in four commands: interceptor, tools, approval, containment)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/mutate.go b/agent/tools/mutate.go
+  --- a/agent/tools/mutate.go
+  +++ b/agent/tools/mutate.go
+  @@ -62,10 +62,7 @@
+   
+   // harnessPreview prefixes diff with the reason line when reason is not empty.
+   func harnessPreview(reason, diff string) string {
+  -	if reason == "" {
+  -		return diff
+  -	}
+  -	return HarnessReferenceReasonPrefix + reason + "\n" + diff
+  +	return diff
+   }
+   
+   // ContentHash is the SHA-256 hex of b. Stable, distinct from absentHash, and reused by cmd/golem's undo journal to detect post-write changes.
+  ```
+- Baseline: pass (exit 0, all four commands). Mutant: FAIL `TestHarnessApprovalRefHeadless` (`harness_approval_test.go:443: notices = "golem: denied write_file: harness file, -allow-tool does not cover it (...)\n...", want the reason line`); FAIL `TestHarnessApprovalRefTaskStep` (`harness_approval_test.go:491: out = "... golem: task step denied write_file: harness file (...)\n< error: tool call denied by approver\n...", want "golem: harness reference: CLAUDE.md imports docs/a.md"`). Outside this entry's row the GRANT-HARNESS-REF ref `TestHarnessApprovalRefPrompts` (`harness_approval_test.go:377: reason lines = 0, want 6:`) fails, and so does `TestHarnessPlanReasonLine`, which is no ref, in all three rows (`harness_refs_test.go:506: covered plan = key "" preview "--- docs/policy.md\n+++ docs/policy.md\n-old\n+new\n", want key "" and prefix "harness reference: CLAUDE.md imports docs/policy.md\n"`, and `harness_refs_test.go:529` for the incomplete set); every other ref passes. Exit 1 for the tools and approval commands, 0 for the others. Restored (sha256 match): pass (exit 0, all four commands).
+- Kind: guard
+- Notes: Keys and denials are unchanged; only the line saying why is gone. Both unattended tests deny as before and fail on the missing reason line.
 
 ## Administrative evidence
 
