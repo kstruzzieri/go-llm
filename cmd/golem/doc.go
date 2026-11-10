@@ -212,6 +212,7 @@
 // every command read from the files below are covered completely, and if
 // Golem cannot read or parse something it needs, every write prompts. What
 // a command does at run time is best effort: cd in a shell string, the
+// working-directory flags --directory, -C, --cwd and --project, the
 // documented project-folder variables and Golem's own PATH lookup are
 // followed; other variables, command substitution, scripts sourced by
 // scripts and another tool's own PATH are not. Covered are Markdown @
@@ -228,20 +229,22 @@
 // top level or inside an object that also holds a command; an env or
 // permissions key anywhere else is read, so a server named env cannot hide
 // its command. .codex/config.toml reads every string, env tables included.
-// Commands are read best-effort: cd in a shell string, the project-folder
-// variables ($CLAUDE_PROJECT_DIR, ${workspaceFolder} and the like) and
-// Golem's own PATH lookup are followed; other variables, command
-// substitution, scripts that call scripts and another tool's own PATH are
-// not. The search skips .git and the other ignored folders, the
-// build-output folders target, build, dist, out, .venv, venv, __pycache__,
-// .gradle, .next and .tox, any folder holding its own .git entry, and
-// folders this user cannot search; it is bounded to 100,000 entries, 256
-// KiB per configuration file, 32 MiB read per call and five import hops, 64
-// cd folders per shell string, 100,000 resolution steps per configuration
-// file and a 40-link dangling symlink chain; crossing a bound makes the set
-// incomplete. If the search cannot finish (an unreadable or malformed
-// harness file, an ancestor ~/.claude/settings.json included, or a crossed
-// bound), every file-tool write prompts. The preview's first line, "harness
+// Commands are read best-effort: cd in a shell string, the working-directory
+// flags --directory, -C, --cwd and --project (the folder they name is a base
+// for the rest of that command), the project-folder variables
+// ($CLAUDE_PROJECT_DIR, ${workspaceFolder} and the like) and Golem's own PATH
+// lookup are followed; other variables, command substitution, scripts that
+// call scripts and another tool's own PATH are not. The search skips .git
+// and the other ignored folders, the build-output folders target, build,
+// dist, out, .venv, venv, __pycache__, .gradle, .next and .tox, any folder
+// holding its own .git entry, and folders this user cannot search; it is
+// bounded to 100,000 entries, 256 KiB per configuration file, 32 MiB read
+// per call and five import hops, 64 cd or working-directory folders per
+// command, 100,000 resolution steps per configuration file and a 40-link
+// dangling symlink chain; crossing a bound makes the set incomplete. If the
+// search cannot finish (an unreadable or malformed harness file, an ancestor
+// ~/.claude/settings.json included, or a crossed bound), every file-tool
+// write prompts. The preview's first line, "harness
 // reference: <reason>", names the cause; -p prints "golem: harness
 // reference: ..." after its denial line, and Agentflow task steps print
 // "golem: task step denied <tool>: harness file (<notice>)" and the same
@@ -249,13 +252,17 @@
 // deletions, with "refuse parallel promotion: <path>: <reason>" and applies
 // nothing. Residuals: other variables and run-time command behavior;
 // ancestor files below the fixed paths; skipped folders; permission rules
-// that are not commands; Copilot #file: references, YAML configuration and
-// custom Gemini contextFileName names; folder links at paths other than
+// that are not commands; Copilot #file: references, YAML configuration,
+// custom Gemini contextFileName names, skill scripts mentioned in prose and
+// the other agents' folders #725 left out; inline shell commands in
+// .claude/commands/*.md (!`cmd` lines) and scripts named in skill front
+// matter, which are not read as commands; folder links at paths other than
 // .github and .vscode; a change between the last check and the rename; on
-// Windows, cmd.exe running a bare run.bat from the current folder and
-// cloud-sync placeholder files; cmd /k, PowerShell flag abbreviations and
-// -EncodedCommand, and pushd; and macOS privacy protection (TCC) blocking a
-// read.
+// Windows, cmd.exe running a bare run.bat from the current folder,
+// cloud-sync placeholder files and a junction under an OpenCode glob prefix;
+// cmd /k, PowerShell flag abbreviations and -EncodedCommand, and pushd; other
+// tools' working-directory flags (only --directory, -C, --cwd and --project
+// are followed); and macOS privacy protection (TCC) blocking a read.
 //
 // Not covered: writes made by commands (run_command, start_command, the
 // post-write verifier, scratch commands); a workspace rooted in a git
