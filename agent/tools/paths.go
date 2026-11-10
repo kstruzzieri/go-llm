@@ -153,6 +153,12 @@ type Workspace struct {
 	harnessPrefixUnverified bool
 	// resolveForKey replaces resolvedWriteRel in fileToolApprovalKey, in tests only.
 	resolveForKey func(string) (string, bool, error)
+	// screenLimits overrides the credential screen's bounds, in tests only;
+	// each zero field takes its default.
+	screenLimits screenLimits
+	// screenSeams injects failures into the credential screen's walk and
+	// reads, in tests only.
+	screenSeams *screenSeams
 }
 
 // CanonicalWorkspaceRoot resolves a workspace root to its absolute, symlink-free
