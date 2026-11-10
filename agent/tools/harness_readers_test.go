@@ -311,6 +311,10 @@ func TestHarnessReadShellStrings(t *testing.T) {
 		{"cd with redirect", claude, `{"command":"cd sub 2>/dev/null && ./r.sh"}`, []string{"w/sub/r.sh"}, false, nil},
 		{"home residual", claude, `{"command":"~/scripts/x.sh"}`, []string{"w/scripts/x.sh"}, false, nil},
 		{"backslash whole token", mcp, `{"command":"tools\\my server.exe"}`, []string{"w/tools/my server.exe"}, false, nil},
+		// Fix round 2 (ruling R14 and the cd /d flag).
+		{"server named env", mcp, `{"mcpServers":{"env":{"command":"./evil.sh"}}}`, []string{"w/evil.sh"}, false, nil},
+		{"server named permissions", claude, `{"mcpServers":{"permissions":{"command":"./p.sh"}}}`, []string{"w/p.sh"}, false, nil},
+		{"cd /D flag", claude, `{"command":"cd /D sub && ./run.bat"}`, []string{"w/sub/run.bat"}, false, nil},
 	}
 	for _, r := range rows {
 		t.Run(r.name, func(t *testing.T) {
@@ -366,7 +370,6 @@ func TestHarnessReadKeySelection(t *testing.T) {
 		{".claude/settings.json", `{"env":{"COMMAND":"scripts/z.sh","DIR":"sub"}}`},
 		{".claude/settings.json", `{"ENV":{"command":"scripts/z.sh","cwd":"sub"}}`},
 		{".claude/settings.json", `{"permissions":{"command":"./scripts/p.sh","allow":["Bash(./scripts/p.sh)"],"dir":"sub"}}`},
-		{".mcp.json", `{"mcpServers":{"s":{"env":{"DIR":"sub","COMMAND":"other/z.sh","ARGS":["other/a.sh"]}}}}`},
 	}
 	for _, r := range rows {
 		v, err := decodeJSONC([]byte(r.doc))
@@ -377,18 +380,22 @@ func TestHarnessReadKeySelection(t *testing.T) {
 			t.Errorf("%s: got tokens %v and dirs %q, want none", r.doc, cs.tokens, cs.dirs)
 		}
 	}
-	v, err = decodeJSONC([]byte(`{"command":"python3","args":["server.py"],"env":{"DIR":"sub","COMMAND":"other/z.sh"}}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	cs = extractCommands(harnessKeysFor(t, ".mcp.json"), v)
-	texts = texts[:0]
-	for _, tk := range cs.tokens {
-		texts = append(texts, tk.text)
-	}
-	slices.Sort(texts)
-	if want := []string{"python3", "python3", "server.py"}; !reflect.DeepEqual(texts, want) || len(cs.dirs) != 0 {
-		t.Fatalf("got tokens %q and dirs %q, want %q and none", texts, cs.dirs, want)
+	// A server's own env, beside a listed key, at the top level and nested (R14).
+	const server = `{"command":"python3","args":["server.py"],"env":{"DIR":"sub","COMMAND":"other/z.sh","ARGS":["other/a.sh"]}}`
+	for _, doc := range []string{server, `{"mcpServers":{"s":` + server + `}}`} {
+		v, err = decodeJSONC([]byte(doc))
+		if err != nil {
+			t.Fatal(err)
+		}
+		cs = extractCommands(harnessKeysFor(t, ".mcp.json"), v)
+		texts = texts[:0]
+		for _, tk := range cs.tokens {
+			texts = append(texts, tk.text)
+		}
+		slices.Sort(texts)
+		if want := []string{"python3", "python3", "server.py"}; !reflect.DeepEqual(texts, want) || len(cs.dirs) != 0 {
+			t.Fatalf("%s: got tokens %q and dirs %q, want %q and none", doc, texts, cs.dirs, want)
+		}
 	}
 }
 
@@ -455,9 +462,12 @@ func TestHarnessCommandFilesIsACopy(t *testing.T) {
 
 func TestHarnessReadCommandBounds(t *testing.T) {
 	w, p := absBase(t, "w"), absBase(t, "p")
-	var pairs []string
+	var pairs, cwds []string
 	for i := range 2000 {
 		pairs = append(pairs, fmt.Sprintf(`{"cwd":"d%d","command":"./c%d.sh"}`, i, i))
+	}
+	for i := range 3000 {
+		cwds = append(cwds, fmt.Sprintf(`{"cwd":"d%d"}`, i))
 	}
 	rows := []struct {
 		name, file, doc string
@@ -465,6 +475,8 @@ func TestHarnessReadCommandBounds(t *testing.T) {
 	}{
 		{"cd chain 28 KB", ".claude/settings.json", `{"command":"` + strings.Repeat("cd a;x;", 4000) + `"}`, false},
 		{"cwd x command", ".mcp.json", `{"s":[` + strings.Join(pairs, ",") + `]}`, false},
+		// $A names nothing, but each token is still tried against every start.
+		{"cwd x empty tokens", ".mcp.json", `{"s":[` + strings.Join(cwds, ",") + `],"command":"` + strings.Repeat("$A;", 60000) + `"}`, false},
 		{"64 cd bases", ".claude/settings.json", `{"command":"` + strings.Repeat("cd a;", 64) + `./x.sh"}`, true},
 		{"65 cd bases", ".claude/settings.json", `{"command":"` + strings.Repeat("cd a;", 65) + `./x.sh"}`, false},
 		{"repeated cd deduped", ".claude/settings.json", `{"command":"` + strings.Repeat("cd a; cd /abs; ", 500) + `./x.sh"}`, true},

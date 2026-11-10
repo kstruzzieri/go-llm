@@ -49,8 +49,11 @@ import (
 // toolCallCommand; .github/copilot/*.json also reads args; and .mcp.json,
 // .claude/settings.json and .claude/settings.local.json also read an MCP
 // server's headersHelper, which "Claude Code runs ... in a shell" when
-// connecting (https://code.claude.com/docs/en/mcp, ruling R9). The env and
-// permissions subtrees are skipped whole, whatever keys they hold.
+// connecting (https://code.claude.com/docs/en/mcp, ruling R9). A top-level
+// permissions or env subtree, and the env of an object that also holds a
+// listed key (a server or hook's own env), are skipped whole (ruling R14); an
+// env or permissions key anywhere else is read like any other, so a server
+// named "env" cannot hide its command.
 var commandFileKeys = map[string][]string{
 	interceptor.HarnessKey(".claude/settings.json"):       {"command", "args", "apiKeyHelper", "awsAuthRefresh", "awsCredentialExport", "otelHeadersHelper", "headersHelper"},
 	interceptor.HarnessKey(".claude/settings.local.json"): {"command", "args", "apiKeyHelper", "awsAuthRefresh", "awsCredentialExport", "otelHeadersHelper", "headersHelper"},
@@ -353,9 +356,10 @@ type commandSet struct {
 // command set incomplete.
 const maxCdBases = 64
 
-// maxCommandPaths bounds the paths resolveCommandTokens builds for one file,
-// counting start folders, "cd" folders, candidates and PATH lookups (ruling
-// R8). A real hook or MCP file builds a few hundred; 2,000 cwd and command
+// maxCommandPaths bounds the work resolveCommandTokens does for one file
+// (ruling R8): every resolution step costs one unit, or one per path when it
+// builds more, so a step that yields nothing (a "$A" token tried against each
+// start folder) is charged too, and every PATH lookup costs one. A real hook or MCP file builds a few hundred; 2,000 cwd and command
 // pairs (69 KB) would build four million. Crossing it stops the work and
 // reports the result incomplete.
 const maxCommandPaths = 100_000
@@ -388,36 +392,43 @@ const wholeTokenMeta = "'\"\\$`;&|()<>\n\r*?["
 //     wholeTokenMeta once "\" is folded to "/" is also one whole program
 //     token (R2, R13);
 //   - a string under cwd or dir, whatever the file's keys, is a working folder;
-//   - an env or permissions subtree is skipped whole (spec D4's exclusions).
+//   - a top-level env or permissions subtree, and the env of an object that
+//     also holds a listed key, are skipped whole (spec D4's exclusions, R14).
 func extractCommands(keys []string, doc any) commandSet {
 	var cs commandSet
-	cs.walkJSON(keys, doc)
+	cs.walkJSON(keys, doc, true)
 	return cs
 }
 
-// walkJSON visits every object in v, reading the listed keys of each.
-func (cs *commandSet) walkJSON(keys []string, v any) {
+// walkJSON visits every object in v, reading the listed keys of each; top
+// marks the document's own top-level value.
+func (cs *commandSet) walkJSON(keys []string, v any, top bool) {
+	listed := func(k string) bool {
+		return slices.ContainsFunc(keys, func(want string) bool { return strings.EqualFold(k, want) })
+	}
 	switch v := v.(type) {
 	case []any:
 		for _, e := range v {
-			cs.walkJSON(keys, e)
+			cs.walkJSON(keys, e, false)
 		}
 	case map[string]any:
-		for _, k := range slices.Sorted(maps.Keys(v)) {
+		names := slices.Sorted(maps.Keys(v))
+		ownsEnv := top || slices.ContainsFunc(names, listed)
+		for _, k := range names {
 			if cs.capped {
 				return
 			}
-			if strings.EqualFold(k, "env") || strings.EqualFold(k, "permissions") {
+			if strings.EqualFold(k, "env") && ownsEnv || strings.EqualFold(k, "permissions") && top {
 				continue
 			}
 			e := v[k]
 			if s, ok := e.(string); ok && (strings.EqualFold(k, "cwd") || strings.EqualFold(k, "dir")) {
 				cs.dirs = append(cs.dirs, s)
 			}
-			if slices.ContainsFunc(keys, func(want string) bool { return strings.EqualFold(k, want) }) {
+			if listed(k) {
 				cs.readValue(strings.ToLower(k), e, v)
 			}
-			cs.walkJSON(keys, e)
+			cs.walkJSON(keys, e, false)
 		}
 	}
 }
@@ -514,7 +525,8 @@ func isShellFlag(sh, f string) bool {
 
 // shell adds the tokens of shell string s, run in state st. Each command's
 // first word is its program and the rest are operands; "cd X" (X its first
-// argument not starting with "-") makes X a base for later commands; the shell-command flag rule applies to each command's
+// argument that is not a "-" flag or cmd's "/d") makes X a base for later
+// commands; the shell-command flag rule applies to each command's
 // words; and a word holding "$(" or a backtick, which survives double quotes,
 // is read again from there. A string holding "\" is also read with "\" folded
 // to "/", so a Windows path in a command does not lose its separators. Both
@@ -543,7 +555,7 @@ func (cs *commandSet) shellOnce(s string, st shellState) {
 		if words[0] != "cd" {
 			continue
 		}
-		if i := slices.IndexFunc(words[1:], func(a string) bool { return a != "" && a[0] != '-' }); i >= 0 {
+		if i := slices.IndexFunc(words[1:], func(a string) bool { return a != "" && a[0] != '-' && !strings.EqualFold(a, "/d") }); i >= 0 {
 			var ok bool
 			if st, ok = st.cd(words[1+i]); !ok {
 				cs.capped = true
@@ -728,18 +740,20 @@ func resolveCommandTokens(cs commandSet, bases []string, projectDirs []string, l
 		return nil, false
 	}
 	budget := maxCommandPaths
-	// grow appends resolveUnder(start, tok) to *dst; false once over budget.
+	// grow appends resolveUnder(start, tok) to *dst, charging one unit per
+	// path and at least one per call; false once over budget.
 	grow := func(dst *[]string, start, tok string) bool {
 		r := resolveUnder(start, tok, projectDirs)
-		if budget -= len(r); budget < 0 {
+		if budget -= max(1, len(r)); budget < 0 {
 			return false
 		}
 		*dst = append(*dst, r...)
 		return true
 	}
+	dirs := slices.Compact(slices.Sorted(slices.Values(cs.dirs)))
 	starts := slices.Clone(bases)
 	for _, b := range bases {
-		for _, d := range slices.Compact(slices.Sorted(slices.Values(cs.dirs))) {
+		for _, d := range dirs {
 			if !grow(&starts, b, d) {
 				return nil, false
 			}
