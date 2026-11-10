@@ -4,6 +4,8 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+
+	"golang.org/x/text/unicode/norm"
 )
 
 // harnessPaths lists the files and folders whose contents change how an agent
@@ -54,12 +56,21 @@ func HarnessPaths() []string { return slices.Clone(harnessPaths) }
 // turn a deny into an allow. A component shaped like an 8.3 short name also
 // matches, since NTFS can reach .claude as CLAUDE~1.
 func IsHarnessPath(p string) bool {
-	parts := strings.Split(normalizePath(p), "/")
+	n := HarnessKey(p)
+	return harnessPattern.MatchString(n) || hasShortNameComponent(n)
+}
+
+// HarnessKey is the one fold every harness path and reference is compared
+// through (#784): Unicode NFC, because APFS treats NFC and NFD spellings as one
+// name, then normalizePath, then windowsComponent on every component, rejoined
+// with "/". IsHarnessPath matches against it, so a write target and a
+// reference that name the same file on some filesystem share one key.
+func HarnessKey(p string) string {
+	parts := strings.Split(normalizePath(norm.NFC.String(p)), "/")
 	for i, c := range parts {
 		parts[i] = windowsComponent(c)
 	}
-	n := strings.Join(parts, "/")
-	return harnessPattern.MatchString(n) || hasShortNameComponent(n)
+	return strings.Join(parts, "/")
 }
 
 // hasShortNameComponent reports whether any component of the normalized path
