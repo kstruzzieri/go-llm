@@ -267,6 +267,40 @@ func TestBuildOutputScreenBounds(t *testing.T) {
 			t.Fatalf("empty dir: notes differ (%d notes)", len(notes))
 		}
 	})
+	// Two files hold the same three keys: a key already held is counted
+	// once, so limits that fit one file's keys build a screen with them.
+	for _, r := range []struct {
+		label  string
+		limits screenLimits
+	}{
+		{"keys repeated", screenLimits{keys: 3}},
+		{"total repeated", screenLimits{totalBytes: 53}},
+	} {
+		t.Run(r.label, func(t *testing.T) {
+			ws, _, _ := tolerantFixture(t, map[string]string{".env": keys3, "sub/.env": keys3}, nil)
+			ws.screenLimits = r.limits
+			s := mustBuild(t, r.label, ws)
+			if notes := s.notes(); notes != nil {
+				t.Fatalf("%s: unexpected notes (%d)", r.label, len(notes))
+			}
+			if got := screenThrough(s, "key-0003-cccccccc\n"); got != tM+"\n" {
+				t.Fatalf("%s: output differs (len %d)", r.label, len(got))
+			}
+		})
+	}
+	// A .git/config line with more than 32 "=" after a name is not keyed:
+	// it withholds with its own cause, not the line-length one.
+	t.Run("crowded git config", func(t *testing.T) {
+		ws, _, _ := tolerantFixture(t, map[string]string{".git/config": strings.Repeat("a=", 33) + "x\n"}, nil)
+		s := mustBuild(t, "crowded", ws)
+		want := withheldNote + `more than 32 name= pairs on a line: ".git/config")`
+		if notes := s.notes(); len(notes) != 1 || notes[0] != want {
+			t.Fatalf("crowded: notes differ (%d notes)", len(notes))
+		}
+		if got := screenThrough(s, "hello\n"); got != "" {
+			t.Fatalf("crowded: output delivered (len %d)", len(got))
+		}
+	})
 	t.Run("defaults", func(t *testing.T) {
 		want := screenLimits{fileBytes: 262144, keyBytes: 16384, keys: 4096, totalBytes: 1048576, budget: 5 * time.Second}
 		if got := (screenLimits{}).orDefaults(); got != want {

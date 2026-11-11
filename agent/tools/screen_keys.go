@@ -79,8 +79,9 @@ loop:
 // the userinfo of a record that is itself a URL (a credential-store line).
 // Keys are CSI-stripped (each key is stripped after the raw record is parsed),
 // at least screenKeyFloor bytes, and unique. overLong reports a record longer
-// than keyCap (no key is taken from it) or one with too many settings to try.
-func credentialFileKeys(content []byte, gitConfig bool, keyCap int) (keys [][]byte, overLong bool) {
+// than keyCap (no key is taken from it); crowded reports a git config record
+// with more than gitConfigEqCap named "=" (not every setting was tried).
+func credentialFileKeys(content []byte, gitConfig bool, keyCap int) (keys [][]byte, overLong, crowded bool) {
 	seen := map[string]bool{}
 	add := func(k []byte) {
 		k = stripCSI(k)
@@ -100,7 +101,7 @@ func credentialFileKeys(content []byte, gitConfig bool, keyCap int) (keys [][]by
 		add(line)
 		if gitConfig {
 			if !gitConfigKeys(rec, add) {
-				overLong = true
+				crowded = true
 			}
 		} else {
 			// A credential-store line (.git-credentials) is a URL: the
@@ -114,7 +115,7 @@ func credentialFileKeys(content []byte, gitConfig bool, keyCap int) (keys [][]by
 			}
 		}
 	}
-	return keys, overLong
+	return keys, overLong, crowded
 }
 
 // envValueKeys adds the K2 forms of r, the trimmed text after a .env line's

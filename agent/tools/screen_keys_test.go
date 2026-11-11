@@ -72,9 +72,9 @@ func TestCredentialFileKeys(t *testing.T) {
 	}
 	for _, tc := range exact {
 		t.Run(tc.label, func(t *testing.T) {
-			keys, over := credentialFileKeys([]byte(tc.content), false, 1<<14)
-			if over {
-				t.Fatalf("overLong set")
+			keys, over, crowded := credentialFileKeys([]byte(tc.content), false, 1<<14)
+			if over || crowded {
+				t.Fatalf("overLong %t, crowded %t", over, crowded)
 			}
 			got := keyStrings(keys)
 			want := append([]string(nil), tc.want...)
@@ -226,7 +226,7 @@ func TestCredentialFileKeys(t *testing.T) {
 	}
 	for _, tc := range git {
 		t.Run(tc.label, func(t *testing.T) {
-			keys, _ := credentialFileKeys([]byte(tc.content), true, 1<<14)
+			keys, _, _ := credentialFileKeys([]byte(tc.content), true, 1<<14)
 			set := map[string]bool{}
 			for _, k := range keys {
 				if len(k) < screenKeyFloor {
@@ -251,19 +251,19 @@ func TestCredentialFileKeys(t *testing.T) {
 	}
 
 	t.Run("git-eq-cap", func(t *testing.T) {
-		if _, over := credentialFileKeys([]byte(strings.Repeat("a=", 32)+"x"), true, 1<<14); over {
-			t.Fatal("32 named = should not set overLong")
+		if _, over, crowded := credentialFileKeys([]byte(strings.Repeat("a=", 32)+"x"), true, 1<<14); over || crowded {
+			t.Fatal("32 named = should set neither overLong nor crowded")
 		}
-		if _, over := credentialFileKeys([]byte(strings.Repeat("a=", 33)+"x"), true, 1<<14); !over {
-			t.Fatal("33 named = should set overLong")
+		if _, over, crowded := credentialFileKeys([]byte(strings.Repeat("a=", 33)+"x"), true, 1<<14); over || !crowded {
+			t.Fatal("33 named = should set crowded, not overLong")
 		}
 	})
 	// Every byte at the edge of the setting-name class names an "=", so 33
 	// of them reach the cap.
 	t.Run("git-eq-cap-name-bytes", func(t *testing.T) {
 		for _, b := range []string{"a", "z", "A", "Z", "0", "9", "-"} {
-			if _, over := credentialFileKeys([]byte(strings.Repeat(b+"=", 33)+"x"), true, 1<<14); !over {
-				t.Errorf("name byte %q: 33 named = should set overLong", b)
+			if _, _, crowded := credentialFileKeys([]byte(strings.Repeat(b+"=", 33)+"x"), true, 1<<14); !crowded {
+				t.Errorf("name byte %q: 33 named = should set crowded", b)
 			}
 		}
 	})
@@ -279,7 +279,7 @@ func TestCredentialFileKeys(t *testing.T) {
 					pair = "4" + c.b
 				}
 				content := "url = https://user-0138:p%" + pair + "ass%41-0138-abcdef@example.invalid/r.git"
-				keys, _ := credentialFileKeys([]byte(content), true, 1<<14)
+				keys, _, _ := credentialFileKeys([]byte(content), true, 1<<14)
 				if !slices.Contains(keyStrings(keys), "p%"+pair+"assA-0138-abcdef") {
 					t.Errorf("bad digit %s in the %s position: decoded password missing", c.class, pos)
 				}
@@ -287,20 +287,20 @@ func TestCredentialFileKeys(t *testing.T) {
 		}
 	})
 	t.Run("overlong-no-keys", func(t *testing.T) {
-		keys, over := credentialFileKeys([]byte("abcdefghijkl\nNAME=value-0001-abcdef"), false, 22)
+		keys, over, _ := credentialFileKeys([]byte("abcdefghijkl\nNAME=value-0001-abcdef"), false, 22)
 		if over || len(keys) != 3 {
 			t.Fatalf("control: over=%v keys=%d", over, len(keys))
 		}
-		keys, over = credentialFileKeys([]byte("abcdefghijkl\nshort-ok-1"), false, 11)
+		keys, over, _ = credentialFileKeys([]byte("abcdefghijkl\nshort-ok-1"), false, 11)
 		if !over || len(keys) != 1 {
 			t.Fatalf("over=%v keys=%d, want over with only the other record's key", over, len(keys))
 		}
 	})
 	t.Run("overlong", func(t *testing.T) {
-		if _, over := credentialFileKeys([]byte("abcdefghijk"), false, 10); !over {
+		if _, over, _ := credentialFileKeys([]byte("abcdefghijk"), false, 10); !over {
 			t.Fatal("keyCap+1 record should set overLong")
 		}
-		if _, over := credentialFileKeys([]byte("abcdefghij"), false, 10); over {
+		if _, over, _ := credentialFileKeys([]byte("abcdefghij"), false, 10); over {
 			t.Fatal("keyCap record should not set overLong")
 		}
 	})

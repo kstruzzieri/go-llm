@@ -45,6 +45,7 @@ func buildOutputScreen(ctx context.Context, ws *Workspace) (*outputScreen, error
 		total    int
 		withhold string
 		changed  int
+		held     = map[string]bool{} // keys already taken, from any file
 	)
 	// stop records the first withhold cause and ends the walk.
 	stop := func(cause string) error {
@@ -80,17 +81,24 @@ func buildOutputScreen(ctx context.Context, ws *Workspace) (*outputScreen, error
 		if len(content) > lim.fileBytes {
 			return stop(fmt.Sprintf("file over %d bytes: %q", lim.fileBytes, notePath(rel)))
 		}
-		ks, overLong := credentialFileKeys(content, gitConfig, lim.keyBytes)
+		ks, overLong, crowded := credentialFileKeys(content, gitConfig, lim.keyBytes)
 		if overLong {
 			return stop(fmt.Sprintf("line over %d bytes: %q", lim.keyBytes, notePath(rel)))
 		}
+		if crowded {
+			return stop(fmt.Sprintf("more than %d name= pairs on a line: %q", gitConfigEqCap, notePath(rel)))
+		}
 		for _, k := range ks {
+			if held[string(k)] {
+				continue
+			}
 			if len(keys) == lim.keys {
 				return stop(fmt.Sprintf("more than %d keys", lim.keys))
 			}
 			if total+len(k) > lim.totalBytes {
 				return stop(fmt.Sprintf("keys over %d bytes", lim.totalBytes))
 			}
+			held[string(k)] = true
 			keys = append(keys, k)
 			total += len(k)
 		}
