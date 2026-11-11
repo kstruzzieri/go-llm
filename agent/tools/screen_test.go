@@ -52,10 +52,20 @@ func TestScreenStream(t *testing.T) {
 		{"span raw", []string{longKey}, "\x00\xff value-0001-abcdef\n", "\x00\xff " + tM + "\n", true},
 		{"longest first", []string{"value-0001", longKey}, "x value-0001-abcdef y\n", "x " + tM + " y\n", true},
 		{"line", nil, ".env:3:NAME=short\nnext\n", tM + "\nnext\n", true},
+		// grep --color=always -n: the colon-separated fields are found only
+		// after the color codes are stripped; no key, so only the path-prefix
+		// rule can withhold the line.
+		// A record ended by \r is screened on its own: the path-prefix rule
+		// reads what follows the \r, not the line since the last \n.
+		{"line after cr", nil, "50%\r.env:3:NAME=short\nnext\n", "50%\r" + tM + "\nnext\n", true},
+		{"line color", nil, "\x1b[35m\x1b[K.env\x1b[m\x1b[K\x1b[36m\x1b[K:\x1b[m\x1b[KNAME=short\nnext\n", tM + "\nnext\n", true},
 		{"cut", nil, diff, "a\n" + tP + "\n", true},
 		{"cut d", nil, diffD, "a\n" + tP + "\n", true},
 		{"cut and line", nil, "diff --git a/.env b/.env:text\n", tP + "\n", true},
 		{"cut key", []string{"zzzz-key-1"}, "diff --git a/.env b/.env zzzz-key-1\n", tP + "\n", true},
+		// Color codes inside the path: the header names .env only once they
+		// are stripped; no key, so only the header rule can stop the patch.
+		{"cut color name", nil, "diff --git a/.\x1b[01;31m\x1b[Kenv\x1b[m\x1b[K b/.\x1b[01;31m\x1b[Kenv\x1b[m\x1b[K\n+NAME=x\n", tP + "\n", true},
 		{"go results", nil, "    --- FAIL: TestNames/.env (0.00s)\n        x_test.go:9: detail\n",
 			"    --- FAIL: TestNames/.env (0.00s)\n        x_test.go:9: detail\n", false},
 		{"bound ok", nil, strings.Repeat("a", 32768) + "\n", strings.Repeat("a", 32768) + "\n", false},

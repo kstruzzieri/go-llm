@@ -44,6 +44,7 @@ func TestCredentialFileKeys(t *testing.T) {
 		{"empty", "", nil},
 		{"csi-in-eq-run", "NAME\x1b[=1m=value-0042-abcdef", []string{"NAME=value-0042-abcdef", "1m=value-0042-abcdef"}},
 		{"csi-before-semicolon", "NAME=value-0043-abcdef \x1b[1m; note", []string{"NAME=value-0043-abcdef ; note", "value-0043-abcdef ; note"}},
+		{"env-padded", "  NAME=value-0046-abcdef  ", []string{"NAME=value-0046-abcdef", "value-0046-abcdef"}},
 	}
 	for _, tc := range exact {
 		t.Run(tc.label, func(t *testing.T) {
@@ -82,6 +83,8 @@ func TestCredentialFileKeys(t *testing.T) {
 		{"git-url-two-at", "url = https://user-0027:p@ss-0027-abcdef@example.invalid/r.git", []string{"p@ss-0027-abcdef"}, nil},
 		{"git-csi-in-name", "extraheader\x1b[=5h = \"AUTH: basic placeholder-0044-abcdef\"",
 			[]string{"extraheader = \"AUTH: basic placeholder-0044-abcdef\""}, []string{"AUTH: basic placeholder-0044-abcdef"}},
+		{"git-csi-in-pass", "url = https://user-0045:pa\x1b[1mss-0045-abcdef@example.invalid/r.git",
+			[]string{"user-0045:pass-0045-abcdef", "pass-0045-abcdef"}, nil},
 		{"git-trailing-backslash", "extraheader = ordinary-0038-abcdef\\\n", []string{"ordinary-0038-abcdef"}, nil},
 	}
 	for _, tc := range git {
