@@ -17,6 +17,7 @@ func keyStrings(keys [][]byte) []string {
 }
 
 func TestCredentialFileKeys(t *testing.T) {
+	// containment: CMP-EXEC-CREDENTIAL-OUTPUT
 	exact := []struct {
 		label   string
 		content string

@@ -89,6 +89,7 @@ func assertScreensOutput(t *testing.T, rc *RunCommand, root string) {
 }
 
 func TestRunCommandScreensOutput(t *testing.T) {
+	// containment: CMP-EXEC-CREDENTIAL-OUTPUT
 	ws, root, _ := tolerantFixture(t, nil, nil)
 	spy := &specSpy{inner: newPlatformRunner()}
 	rc := NewRunCommand(ws, spy)
@@ -143,6 +144,7 @@ func TestRunCommandLongLineCutsOnlyThatStream(t *testing.T) {
 }
 
 func TestRunCommandNoScreenFails(t *testing.T) {
+	// containment: CMP-EXEC-CREDENTIAL-OUTPUT
 	dir := t.TempDir()
 	spec := execSpec{Path: "/bin/sh", Argv: []string{"sh", "-c", "touch ran.txt"}, Dir: dir, Env: []string{"PATH=/usr/bin:/bin"}}
 	_, err := unixRunner{}.Run(context.Background(), spec)
@@ -155,6 +157,7 @@ func TestRunCommandNoScreenFails(t *testing.T) {
 }
 
 func TestRunCommandWithheldStreams(t *testing.T) {
+	// containment: CMP-EXEC-CREDENTIAL-OUTPUT
 	tree := map[string]string{
 		".env":      "NAME=value-0001-abcdef\nvalue-0002-abcdef\n",
 		"data/.env": "NAME=value-0003-abcdef\n",
@@ -198,6 +201,7 @@ func TestRunCommandWithheldStreams(t *testing.T) {
 }
 
 func TestRunCommandUnreadableAfterFirstCommand(t *testing.T) {
+	// containment: CMP-EXEC-CREDENTIAL-OUTPUT
 	ws, _, _ := tolerantFixture(t, map[string]string{".env": screenEnvFile}, nil)
 	rc := NewRunCommand(ws, newPlatformRunner())
 	args := map[string]any{"argv": []string{"sh", "-c", "cat .e*"}}
@@ -214,6 +218,7 @@ func TestRunCommandUnreadableAfterFirstCommand(t *testing.T) {
 }
 
 func TestRunCommandRootReplacedNotRun(t *testing.T) {
+	// containment: CMP-EXEC-CREDENTIAL-OUTPUT
 	ws, root, _ := tolerantFixture(t, map[string]string{".env": screenEnvFile}, nil)
 	rc := NewRunCommand(ws, newPlatformRunner())
 	raw := json.RawMessage(`{"argv":["sh","-c","touch ran.txt"]}`)
@@ -282,6 +287,7 @@ func TestRunCommandWalkTimeNotCharged(t *testing.T) {
 }
 
 func TestVerifyFailingObservationScreened(t *testing.T) {
+	// containment: CMP-EXEC-CREDENTIAL-OUTPUT
 	ws, _, _ := tolerantFixture(t, map[string]string{".env": screenEnvFile}, nil)
 	v, err := NewVerifyCommand(ws, []string{"sh", "-c", "echo " + screenSentinel + "; cat .e*; exit 3"}, "", 30*time.Second)
 	if err != nil {

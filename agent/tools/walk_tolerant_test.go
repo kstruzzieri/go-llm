@@ -76,6 +76,7 @@ type wantSkip struct {
 }
 
 func TestWalkTolerant(t *testing.T) {
+	// containment: CMP-EXEC-CREDENTIAL-OUTPUT
 	errBoom := errors.New("boom")
 	all := []string{"a", "a/bad", "a/gone", "a/ok", "data", "data/f", "sub", "sub/g", "z", "z/x"}
 	rows := []struct {

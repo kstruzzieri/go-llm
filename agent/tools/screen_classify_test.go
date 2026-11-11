@@ -9,6 +9,7 @@ import (
 )
 
 func TestClassifySkip(t *testing.T) {
+	// containment: CMP-EXEC-CREDENTIAL-OUTPUT
 	rows := []struct {
 		label string
 		err   error

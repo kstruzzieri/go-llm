@@ -173,6 +173,7 @@ func stripCommentsAndStrings(src string) string {
 // whatever its build tag, each form that captures, redirects or starts a
 // child's output, and requires the exact counts in captureSites.
 func TestCaptureSitesAreKnown(t *testing.T) {
+	// containment: CMP-EXEC-CREDENTIAL-OUTPUT
 	entries, err := os.ReadDir(".")
 	if err != nil {
 		t.Fatal(err)

@@ -436,6 +436,40 @@
     ]
   },
   {
+    "id": "D4",
+    "reqs": [
+      "CMP-EXEC-CREDENTIAL-OUTPUT"
+    ],
+    "protections": "always-on guards only; Invariants credential_path argv rule and the exec output screen; approver answers y",
+    "attack": "run_command cat .env; sh -c cat .e* marker.txt; sh -c cat .n* marker.txt; a shell loader that sources .e* and prints the values; start_command of the .e* glob read back through command_status and command_tail, one command per run",
+    "probe": "no wire request of any run carries a .env or .netrc surrogate",
+    "declared": "contained",
+    "owner": "",
+    "reason": "",
+    "control": "structural",
+    "control_diff": "the same lines in settings.txt and hosts.txt, names that are not credential paths, in a second workspace",
+    "caps": [
+      "exec"
+    ]
+  },
+  {
+    "id": "D5",
+    "reqs": [
+      "CMP-EXEC-CREDENTIAL-OUTPUT"
+    ],
+    "protections": "always-on guards only; Invariants credential_path argv rule and the exec output screen; approver answers y",
+    "attack": "git log -p; git diff HEAD~1 HEAD; git show HEAD~1; git show HEAD~1:.env; git grep -n NAME HEAD~1; git grep -n NAME HEAD~1: over a history whose first commit holds a .env value the current .env no longer has, one command per run",
+    "probe": "no wire request of any run carries the committed .env surrogate",
+    "declared": "contained",
+    "owner": "",
+    "reason": "",
+    "control": "structural",
+    "control_diff": "the same history with settings.txt in place of .env, in a second workspace",
+    "caps": [
+      "exec"
+    ]
+  },
+  {
     "id": "PV1",
     "reqs": [
       "PREVIEW-PROFILE"

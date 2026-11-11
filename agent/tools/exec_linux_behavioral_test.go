@@ -956,6 +956,7 @@ func TestBwrapPublicPlanToInvoke(t *testing.T) {
 // TestBwrapRunScreensOutput: the backend's by-value spec copy keeps the
 // screen, and the match note survives the backend's result handling.
 func TestBwrapRunScreensOutput(t *testing.T) {
+	// containment: CMP-EXEC-CREDENTIAL-OUTPUT-BWRAP
 	requireBwrapCapability(t)
 	ws := wsTempDir(t)
 	tools, err := NewSandboxedExecTools(ws, SandboxConfig{Runtime: SandboxRuntimeBwrap})

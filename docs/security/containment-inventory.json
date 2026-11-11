@@ -84,7 +84,9 @@
         "TestContainment/D3=capability:unix",
         "TestContainment/B1=capability:exec",
         "TestContainment/V1=capability:exec",
-        "TestContainment/V2=capability:exec"
+        "TestContainment/V2=capability:exec",
+        "TestContainment/D4=capability:exec",
+        "TestContainment/D5=capability:exec"
       ]
     }
   ],
@@ -2252,6 +2254,30 @@
           "test": "TestHardeningContracts/Active/Invariants/local_command",
           "file": "agent/hardening_contract_test.go",
           "func": "runInvariantContracts"
+        },
+        {
+          "package": "./agent",
+          "test": "TestHardeningContracts/Active/Invariants/run_env_argv",
+          "file": "agent/hardening_contract_test.go",
+          "func": "runInvariantContracts"
+        },
+        {
+          "package": "./agent",
+          "test": "TestHardeningContracts/Active/Invariants/start_env_argv",
+          "file": "agent/hardening_contract_test.go",
+          "func": "runInvariantContracts"
+        },
+        {
+          "package": "./agent",
+          "test": "TestHardeningContracts/Active/Invariants/run_dir_ssh",
+          "file": "agent/hardening_contract_test.go",
+          "func": "runInvariantContracts"
+        },
+        {
+          "package": "./agent",
+          "test": "TestHardeningContracts/Active/Invariants/start_dir_git",
+          "file": "agent/hardening_contract_test.go",
+          "func": "runInvariantContracts"
         }
       ],
       "profiles": [
@@ -2796,6 +2822,241 @@
       ],
       "refs": [],
       "profiles": [],
+      "mutations": [],
+      "artifacts": []
+    },
+    {
+      "id": "CMP-EXEC-CREDENTIAL-OUTPUT",
+      "source": "issue-777:7",
+      "requirement": "Under the always-on guards: (1) a `run_command` or `start_command` is refused when an argv word names a credential path other than as a git exclusion pathspec, or when its `dir` is a protected directory. (2) Exec output (foreground, background tail, post-write verifier) does not carry a patch's `diff` line or `+++` line that shows a credential path, nor anything after it on the same stream; nor a line in which a `:`-separated field other than the last is a credential path; nor a line of 8 bytes or more, or a `NAME=value` value of 8 bytes or more (as written, inside its quotes, or up to a `#`), that was read from a workspace credential-path file just before the command started (for `.git/config`: its lines, URL userinfo and password, and `extraheader` values). (3) Both output streams are withheld when that read was incomplete, unless the only entries missed changed during the read, which is announced. Outside this row: encoded, transformed or reshaped output; values under 8 bytes or spanning a line break; values of files not shaped `NAME=value` printed without their line; a patch whose `diff` and `+++` lines do not show the credential path; committed content printed outside a patch or by object ID; content that changed after it was read; entries that changed during the read (announced); files outside the workspace; copies read back through file tools; AgentFlow and MCP output.",
+      "status": "",
+      "owner": "",
+      "layer": "aggregate",
+      "exempt": "",
+      "scenarios": [
+        "D4",
+        "D5"
+      ],
+      "refs": [
+        {
+          "package": "./cmd/golem",
+          "test": "TestContainment/D4",
+          "file": "cmd/golem/containment_scenarios_test.go",
+          "func": "d4"
+        },
+        {
+          "package": "./cmd/golem",
+          "test": "TestContainment/D5",
+          "file": "cmd/golem/containment_scenarios_test.go",
+          "func": "d5"
+        },
+        {
+          "package": "./agent/interceptor",
+          "test": "TestWordNamesCredentialPath",
+          "file": "agent/interceptor/credential_argv_test.go",
+          "func": "TestWordNamesCredentialPath"
+        },
+        {
+          "package": "./agent/interceptor",
+          "test": "TestCredentialArgvCheck",
+          "file": "agent/interceptor/credential_argv_test.go",
+          "func": "TestCredentialArgvCheck"
+        },
+        {
+          "package": "./agent/interceptor",
+          "test": "TestExecDirInvariant",
+          "file": "agent/interceptor/invariants_test.go",
+          "func": "TestExecDirInvariant"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestCredentialPatchHeader",
+          "file": "agent/tools/screen_path_test.go",
+          "func": "TestCredentialPatchHeader"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestCredentialPathPrefix",
+          "file": "agent/tools/screen_path_test.go",
+          "func": "TestCredentialPathPrefix"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestCredentialFileKeys",
+          "file": "agent/tools/screen_keys_test.go",
+          "func": "TestCredentialFileKeys"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestScreenStream",
+          "file": "agent/tools/screen_test.go",
+          "func": "TestScreenStream"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestClassifySkip",
+          "file": "agent/tools/screen_classify_test.go",
+          "func": "TestClassifySkip"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestWalkTolerant",
+          "file": "agent/tools/walk_tolerant_test.go",
+          "func": "TestWalkTolerant"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestBuildOutputScreenBounds",
+          "file": "agent/tools/screen_build_test.go",
+          "func": "TestBuildOutputScreenBounds"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestBuildOutputScreenSkips",
+          "file": "agent/tools/screen_build_test.go",
+          "func": "TestBuildOutputScreenSkips"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestBuildOutputScreenRootReplaced",
+          "file": "agent/tools/screen_build_test.go",
+          "func": "TestBuildOutputScreenRootReplaced"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestBuildOutputScreenGitConfigAlias",
+          "file": "agent/tools/screen_build_test.go",
+          "func": "TestBuildOutputScreenGitConfigAlias"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestBuildOutputScreenGitConfigRootReplaced",
+          "file": "agent/tools/screen_build_test.go",
+          "func": "TestBuildOutputScreenGitConfigRootReplaced"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestRunCommandScreensOutput",
+          "file": "agent/tools/exec_screen_test.go",
+          "func": "TestRunCommandScreensOutput"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestRunCommandNoScreenFails",
+          "file": "agent/tools/exec_screen_test.go",
+          "func": "TestRunCommandNoScreenFails"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestRunCommandWithheldStreams",
+          "file": "agent/tools/exec_screen_test.go",
+          "func": "TestRunCommandWithheldStreams"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestRunCommandUnreadableAfterFirstCommand",
+          "file": "agent/tools/exec_screen_test.go",
+          "func": "TestRunCommandUnreadableAfterFirstCommand"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestRunCommandRootReplacedNotRun",
+          "file": "agent/tools/exec_screen_test.go",
+          "func": "TestRunCommandRootReplacedNotRun"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestVerifyFailingObservationScreened",
+          "file": "agent/tools/exec_screen_test.go",
+          "func": "TestVerifyFailingObservationScreened"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestBackgroundTailScreened",
+          "file": "agent/tools/background_screen_test.go",
+          "func": "TestBackgroundTailScreened"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestBackgroundCutStopsTail",
+          "file": "agent/tools/background_screen_test.go",
+          "func": "TestBackgroundCutStopsTail"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestBackgroundCarriageReturnBeforeExit",
+          "file": "agent/tools/background_screen_test.go",
+          "func": "TestBackgroundCarriageReturnBeforeExit"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestBackgroundNoScreenFails",
+          "file": "agent/tools/background_screen_test.go",
+          "func": "TestBackgroundNoScreenFails"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestCaptureSitesAreKnown",
+          "file": "agent/tools/screen_sites_test.go",
+          "func": "TestCaptureSitesAreKnown"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestBuildOutputScreenIgnoresGuard",
+          "file": "agent/tools/screen_build_test.go",
+          "func": "TestBuildOutputScreenIgnoresGuard"
+        }
+      ],
+      "profiles": [
+        "linux-host",
+        "darwin-host"
+      ],
+      "mutations": [],
+      "artifacts": []
+    },
+    {
+      "id": "CMP-EXEC-CREDENTIAL-OUTPUT-SEATBELT",
+      "source": "issue-777:7",
+      "requirement": "A command run under the Seatbelt backend is captured through the same screen.",
+      "status": "verified",
+      "owner": "",
+      "layer": "focused",
+      "exempt": "",
+      "scenarios": [],
+      "refs": [
+        {
+          "package": "./agent/tools",
+          "test": "TestSeatbeltRunScreensOutput",
+          "file": "agent/tools/exec_darwin_test.go",
+          "func": "TestSeatbeltRunScreensOutput"
+        }
+      ],
+      "profiles": [
+        "seatbelt"
+      ],
+      "mutations": [],
+      "artifacts": []
+    },
+    {
+      "id": "CMP-EXEC-CREDENTIAL-OUTPUT-BWRAP",
+      "source": "issue-777:7",
+      "requirement": "A command run under the bwrap backend is captured through the same screen.",
+      "status": "verified",
+      "owner": "",
+      "layer": "focused",
+      "exempt": "",
+      "scenarios": [],
+      "refs": [
+        {
+          "package": "./agent/tools",
+          "test": "TestBwrapRunScreensOutput",
+          "file": "agent/tools/exec_linux_behavioral_test.go",
+          "func": "TestBwrapRunScreensOutput"
+        }
+      ],
+      "profiles": [
+        "bwrap"
+      ],
       "mutations": [],
       "artifacts": []
     },

@@ -55,6 +55,7 @@ func TestGitUnquote(t *testing.T) {
 }
 
 func TestCredentialPatchHeader(t *testing.T) {
+	// containment: CMP-EXEC-CREDENTIAL-OUTPUT
 	colored := string(stripCSI([]byte("\x1b[1mdiff --git a/.env b/.env\x1b[m")))
 	cases := []struct {
 		label, in string
@@ -104,6 +105,7 @@ func TestCredentialPatchHeader(t *testing.T) {
 }
 
 func TestCredentialPathPrefix(t *testing.T) {
+	// containment: CMP-EXEC-CREDENTIAL-OUTPUT
 	colored := stripCSI([]byte("\x1b[35mHEAD~1:.env\x1b[m\x1b[36m:\x1b[m\x1b[32m1\x1b[m\x1b[36m:\x1b[m\x1b[1;31mNAME\x1b[m=x"))
 	cases := []struct {
 		label string

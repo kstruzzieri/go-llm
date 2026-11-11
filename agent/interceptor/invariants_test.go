@@ -407,6 +407,7 @@ func sprintfJSON(tmpl, p string) string {
 // TestExecDirInvariant: the working directory of an exec call is refused when
 // it is, or sits under, a protected directory (#777).
 func TestExecDirInvariant(t *testing.T) {
+	// containment: CMP-EXEC-CREDENTIAL-OUTPUT
 	iv, err := NewInvariants(DefaultInvariants())
 	if err != nil {
 		t.Fatal(err)

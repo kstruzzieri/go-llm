@@ -1463,6 +1463,7 @@ func TestSeatbeltBehavioralPublicWiring(t *testing.T) {
 // TestSeatbeltRunScreensOutput: the backend's by-value spec copy keeps the
 // screen, and the match note survives the backend's own note handling.
 func TestSeatbeltRunScreensOutput(t *testing.T) {
+	// containment: CMP-EXEC-CREDENTIAL-OUTPUT-SEATBELT
 	requireSeatbeltCapability(t)
 	root := t.TempDir()
 	toolsList, err := NewSandboxedExecTools(root, seatbeltTestCfg())

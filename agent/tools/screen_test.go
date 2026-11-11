@@ -31,6 +31,7 @@ func screenRun(keys []string, chunks ...string) string {
 }
 
 func TestScreenStream(t *testing.T) {
+	// containment: CMP-EXEC-CREDENTIAL-OUTPUT
 	longKey := "value-0001-abcdef"
 	diff := "a\ndiff --git a/.env b/.env\n--- a/.env\n+++ b/.env\n+NAME=x\ndiff --git a/x b/x\n+later\n"
 	diffD := strings.ReplaceAll(diff, "\n+", "\nd")

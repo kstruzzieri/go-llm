@@ -141,6 +141,7 @@ func checkScreened(t *testing.T, label, out string) {
 var bgScreenTree = map[string]string{".env": screenEnvFile, "marker.txt": screenSentinel + "\n"}
 
 func TestBackgroundTailScreened(t *testing.T) {
+	// containment: CMP-EXEC-CREDENTIAL-OUTPUT
 	rows := []struct{ label, script, stream, other string }{
 		{"stdout", "cat .e* marker.txt", "stdout", "stderr"},
 		{"stderr", "cat .e* marker.txt >&2", "stderr", "stdout"},
@@ -165,6 +166,7 @@ func TestBackgroundTailScreened(t *testing.T) {
 }
 
 func TestBackgroundCutStopsTail(t *testing.T) {
+	// containment: CMP-EXEC-CREDENTIAL-OUTPUT
 	const body = "yes 0123456789012345678901234567890123456789012345678901234567890123456789 | head -n 1024; " +
 		"printf 'diff --git a/.env b/.env\\n'; echo content-line; while :; do echo more; sleep 0.05; done"
 	rows := []struct{ label, script, stream string }{
@@ -213,6 +215,7 @@ func TestBackgroundTailOneByte(t *testing.T) {
 }
 
 func TestBackgroundCarriageReturnBeforeExit(t *testing.T) {
+	// containment: CMP-EXEC-CREDENTIAL-OUTPUT
 	b := newBGScreenTools(t, nil)
 	h := b.start(t, "cr", `printf "partial\r"; sleep 30`)
 	deadline := time.Now().Add(2 * time.Second)
@@ -267,6 +270,7 @@ func TestBackgroundStatusCarriesScreenNote(t *testing.T) {
 }
 
 func TestBackgroundNoScreenFails(t *testing.T) {
+	// containment: CMP-EXEC-CREDENTIAL-OUTPUT
 	starter := starterOf(newFakeProc(1))
 	m := newBackgroundManager(starter, &countingRandom{})
 	t.Cleanup(m.Shutdown)

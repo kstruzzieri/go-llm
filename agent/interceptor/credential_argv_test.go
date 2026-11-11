@@ -7,6 +7,7 @@ import (
 )
 
 func TestWordNamesCredentialPath(t *testing.T) {
+	// containment: CMP-EXEC-CREDENTIAL-OUTPUT
 	rows := []struct {
 		label string
 		in    string
@@ -93,6 +94,7 @@ func TestScriptFields(t *testing.T) {
 }
 
 func TestCredentialArgvCheck(t *testing.T) {
+	// containment: CMP-EXEC-CREDENTIAL-OUTPUT
 	rows := []struct {
 		label   string
 		raw     string

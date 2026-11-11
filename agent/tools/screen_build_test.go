@@ -69,6 +69,7 @@ func TestBuildOutputScreenKeys(t *testing.T) {
 }
 
 func TestBuildOutputScreenGitConfigAlias(t *testing.T) {
+	// containment: CMP-EXEC-CREDENTIAL-OUTPUT
 	ws, _, _ := tolerantFixture(t, map[string]string{
 		".GIT/config": "[remote \"origin\"]\n\turl = https://user-0012:pass-0012-abcdef@example.invalid/r.git\n",
 	}, nil)
@@ -79,6 +80,7 @@ func TestBuildOutputScreenGitConfigAlias(t *testing.T) {
 }
 
 func TestBuildOutputScreenGitConfigRootReplaced(t *testing.T) {
+	// containment: CMP-EXEC-CREDENTIAL-OUTPUT
 	// .env sorts before .git, so .git is the last root entry.
 	ws, root, sib := tolerantFixture(t, map[string]string{
 		".env":        "TOKEN=env-0010-abcdef\n",
@@ -175,6 +177,7 @@ func secretFree(t *testing.T, label string, secrets []string, texts ...string) {
 }
 
 func TestBuildOutputScreenBounds(t *testing.T) {
+	// containment: CMP-EXEC-CREDENTIAL-OUTPUT
 	const (
 		file   = "TOKEN=bound-0001-abcdef-0123456789\n"     // 35 bytes, one record of 34
 		keys3  = "A=key-0003-aaaaaaaa\nkey-0003-cccccccc\n" // 3 keys
@@ -248,6 +251,7 @@ func TestScreenNotePathIsQuoted(t *testing.T) {
 }
 
 func TestBuildOutputScreenSkips(t *testing.T) {
+	// containment: CMP-EXEC-CREDENTIAL-OUTPUT
 	tree := map[string]string{
 		".env":       "TOKEN=skip-0001-abcdef\n",
 		"data/.env":  "TOKEN=skip-0002-abcdef\n",
@@ -331,6 +335,7 @@ func TestBuildOutputScreenSkips(t *testing.T) {
 }
 
 func TestBuildOutputScreenRootReplaced(t *testing.T) {
+	// containment: CMP-EXEC-CREDENTIAL-OUTPUT
 	var texts []string
 	check := func(label string, s *outputScreen, err, want error) {
 		t.Helper()
@@ -489,6 +494,7 @@ func TestBuildOutputScreenGitConfigHeld(t *testing.T) {
 // The screen's walk reads what the scope guard hides; the strict walk still
 // obeys the guard.
 func TestBuildOutputScreenIgnoresGuard(t *testing.T) {
+	// containment: CMP-EXEC-CREDENTIAL-OUTPUT
 	ws, _, _ := tolerantFixture(t, map[string]string{"secrets/.env": "TOKEN=guard-0001-abcdef\n", "a.txt": "x\n"}, nil)
 	ws.SetScopeGuard(func(rel string, _ bool) error {
 		if rel == "secrets" || strings.HasPrefix(rel, "secrets/") {
