@@ -169,6 +169,15 @@ func TestCredentialArgvCheck(t *testing.T) {
 		{"string not array", `"cat .env"`, false},
 		{"git grep magic", `["git","grep","-h","x","HEAD","--",":(top).env"]`, true},
 		{"git grep exclude magic", `["git","grep","-h","x","HEAD","--",":(exclude,top).env"]`, false},
+		// Naming a credential file only to leave it out is refused too; a
+		// pattern that does not spell the name is not.
+		{"grep exclude", `["grep","-r","--exclude=.env","x","."]`, true},
+		{"rsync exclude", `["rsync","-a","--exclude",".env","a/","b/"]`, true},
+		{"find name", `["find",".","-name",".env"]`, true},
+		{"sh gitignore", `["sh","-c","echo .env >> .gitignore"]`, true},
+		{"grep exclude glob", `["grep","-r","--exclude=.e*","x","."]`, false},
+		{"rsync exclude glob", `["rsync","-a","--exclude",".e*","a/","b/"]`, false},
+		{"find name glob", `["find",".","-name",".en?"]`, false},
 	}
 	for _, r := range rows {
 		t.Run(r.label, func(t *testing.T) {

@@ -14,14 +14,17 @@ import (
 // is the registered form plus a non-empty suffix that starts with the marker.
 func TestRegisteredSpecOmitsTheCredentialSentence(t *testing.T) {
 	const marker = " Commands that name a credential file"
+	// The whole suffix registeredSpec drops: a sentence appended after it
+	// later would be dropped too, so it must make this test red.
+	const dropped = " Commands that name a credential file (.env and .env.* other than .env.example, .env.sample, .env.template and .env.dist; .netrc, _netrc, .npmrc, .pypirc, .git-credentials; anything under .ssh, .gnupg, .aws or .kube), or that use a credential directory or .git as dir, are refused, and the content of those files is withheld from output."
 	for _, s := range []agent.ToolSpec{agenttools.NewRunCommand(nil, nil).Spec(), agenttools.NewStartCommand(nil, nil).Spec()} {
 		got, err := registeredSpec(s)
 		if err != nil {
 			t.Fatalf("%s: %v", s.Name, err)
 		}
 		suffix, ok := strings.CutPrefix(s.Description, got.Description)
-		if !ok || !strings.HasPrefix(suffix, marker) || strings.Contains(got.Description, marker) {
-			t.Errorf("%s: registered form is not the product description minus a suffix starting with the marker (suffix %d bytes)", s.Name, len(suffix))
+		if !ok || suffix != dropped || strings.Contains(got.Description, marker) {
+			t.Errorf("%s: registered form is not the product description minus exactly the credential sentence (suffix %d bytes)", s.Name, len(suffix))
 		}
 		if got.Name != s.Name || string(got.Parameters) != string(s.Parameters) {
 			t.Errorf("%s: name or parameters changed", s.Name)

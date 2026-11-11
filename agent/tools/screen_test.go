@@ -46,7 +46,7 @@ func TestScreenStream(t *testing.T) {
 		{"color", nil, "\x1b[32mok\x1b[m\n", "\x1b[32mok\x1b[m\n", false},
 		{"crlf", nil, "a\r\nb\r\n", "a\r\nb\r\n", false},
 		{"progress", nil, "10%\r20%\r", "10%\r20%\r", false},
-		{"marker text", nil, tM + "\n" + tP + "\n", tM + "\n" + tP + "\n", false},
+		{"marker text", nil, tM + "\n" + tP + "\n" + tL + "\n", tM + "\n" + tP + "\n" + tL + "\n", false},
 		{"span", []string{longKey}, "x NAME=value-0001-abcdef y\n", "x NAME=" + tM + " y\n", true},
 		{"span csi", []string{longKey}, "NAME=value-\x1b[01;31m\x1b[K0001\x1b[m\x1b[K-abcdef\n", "NAME=" + tM + "\n", true},
 		{"span raw", []string{longKey}, "\x00\xff value-0001-abcdef\n", "\x00\xff " + tM + "\n", true},
@@ -163,6 +163,7 @@ func TestScreenStream(t *testing.T) {
 		}
 	})
 
+	// The bytes arrive after the cut and Write drops them; nothing is held.
 	t.Run("after cut discards held", func(t *testing.T) {
 		got := screenRun(nil, "diff --git a/.env b/.env\n", "held")
 		if got != tP+"\n" {

@@ -1,7 +1,6 @@
 package tools
 
 import (
-	"bytes"
 	"testing"
 )
 
@@ -182,5 +181,4 @@ func TestCredentialPathPrefix(t *testing.T) {
 			}
 		})
 	}
-	_ = bytes.MinRead
 }

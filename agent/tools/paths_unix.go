@@ -443,7 +443,9 @@ func (e workspaceEntry) openRegular() (*os.File, error) {
 // openListedDir opens the enumerated directory entry from its pinned
 // directory descriptor, never through a symlink, and checks it is the
 // directory listed. Nothing at the name now, or a non-directory, is
-// errFileChanged, as a changed identity is.
+// errFileChanged, as a changed identity is. A symbolic link at the name fails
+// the open with ELOOP, which is errSymlink; classifySkip announces it like a
+// change.
 func (e workspaceEntry) openListedDir() (*os.File, error) {
 	fd, err := unix.Openat(int(e.dir.Fd()), e.name, workspaceSearchFlags|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
@@ -563,7 +565,8 @@ func (w *Workspace) readDirEntries(f *os.File, rel string) ([]fs.DirEntry, error
 
 // readDirEntriesTolerant is readDirEntries for walkTolerant. An entry whose
 // stat fails is left out and returned as a skip with that error (one
-// satisfying fs.ErrNotExist when the entry is gone), and the rest are kept. A failure to read the names is a listingError.
+// satisfying fs.ErrNotExist when the entry is gone), and the rest are kept. A
+// failure to read the names is a listingError.
 // The listing ends with the same reachability check; skips are returned
 // rather than reported, so a directory found unreachable contributes none.
 func (w *Workspace) readDirEntriesTolerant(f *os.File, rel string) ([]fs.DirEntry, []walkSkip, error) {

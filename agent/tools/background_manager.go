@@ -57,8 +57,10 @@ type JobStatus struct {
 	StderrFloor, StderrEnd uint64
 
 	// Notes are backend diagnostics recorded when the job completed, such as
-	// a refused Seatbelt private-temp cleanup (#576). They never change
-	// State, ExitCode or ExitKnown. Copied; nil when there are none.
+	// a refused Seatbelt private-temp cleanup (#576), and the output screen's
+	// notes, which are present while the job runs and whose match count can
+	// grow between calls. They never change State, ExitCode or ExitKnown.
+	// Copied; nil when there are none.
 	Notes []string
 }
 

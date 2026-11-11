@@ -353,6 +353,6 @@ func TestContainmentDeclaredRate(t *testing.T) {
 	}
 	// containment: META-INVENTORY
 	if c != 22 || u != 6 || p != 16 || o != 1 {
-		t.Fatalf("declared %d/%d/%d/%d, want 22 contained, 6 uncontained, 16 pending, 1 out-of-scope (spec §5.3)", c, u, p, o)
+		t.Fatalf("declared %d/%d/%d/%d, want 22 contained, 6 uncontained, 16 pending, 1 out-of-scope", c, u, p, o)
 	}
 }

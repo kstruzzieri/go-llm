@@ -63,6 +63,9 @@ func TestCredentialFileKeys(t *testing.T) {
 		{"store-pct-pass", "https://user-0140:p%40ss-0140-abcdef@example.invalid",
 			[]string{"https://user-0140:p%40ss-0140-abcdef@example.invalid", "user-0140:p%40ss-0140-abcdef", "user-0140:p@ss-0140-abcdef", "user-0140", "p%40ss-0140-abcdef", "p@ss-0140-abcdef"}},
 		{"store-user-only", "https://tokn-0141-abcdef@example.invalid", []string{"https://tokn-0141-abcdef@example.invalid", "tokn-0141-abcdef"}},
+		// An "=" after the scheme (a query) does not stop the line being a URL.
+		{"store-query", "https://user-0146:pass-0146-abcdef@example.invalid/r?x=1",
+			[]string{"https://user-0146:pass-0146-abcdef@example.invalid/r?x=1", "user-0146:pass-0146-abcdef", "user-0146", "pass-0146-abcdef"}},
 		{"store-short-parts", "https://u-142:p-142@example.invalid", []string{"https://u-142:p-142@example.invalid", "u-142:p-142"}},
 		// A URL after a name or other text is not a store line: only the
 		// line and NAME=value forms are keys.
@@ -223,6 +226,9 @@ func TestCredentialFileKeys(t *testing.T) {
 		// A byte outside the setting-name class right before the name: the
 		// name is still extraheader, so its value is a key.
 		{"git-xh-name-after-tilde", "~extraheader = AUTH: basic placeholder-0137-abcdef", []string{"AUTH: basic placeholder-0137-abcdef"}, nil},
+		// The same on a line git accepts: a section header and its setting on
+		// one line, "]" right before the name.
+		{"git-xh-name-after-header", "[http]extraheader = AUTH: basic placeholder-0145-abcdef", []string{"AUTH: basic placeholder-0145-abcdef"}, nil},
 	}
 	for _, tc := range git {
 		t.Run(tc.label, func(t *testing.T) {
@@ -268,8 +274,8 @@ func TestCredentialFileKeys(t *testing.T) {
 		}
 	})
 	// A "%" followed by a pair that is not two hex digits stays as written,
-	// beside a valid escape that is decoded. Each bad byte sits just outside
-	// one edge of the digit classes.
+	// beside a valid escape that is decoded. "G" is one past "F"; "-", "<"
+	// and "z" are bytes outside every hex class.
 	t.Run("git-pct-bad-digit", func(t *testing.T) {
 		bad := []struct{ class, b string }{{"below 0", "-"}, {"between 9 and A", "<"}, {"between F and a", "G"}, {"above f", "z"}}
 		for _, c := range bad {

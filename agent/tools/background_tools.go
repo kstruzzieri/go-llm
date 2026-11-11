@@ -134,7 +134,10 @@ func bgCwdDisplay(label string) string {
 // the BackgroundManager. PlanningTool: Plan validates and previews via the
 // SHARED prepareExecPlan helper; Invoke re-checks via recheckExecPlan and
 // publishes an opaque job handle. The dispatch context gates only admission
-// and publication — a published process's lifetime is manager-owned.
+// and publication — a published process's lifetime is manager-owned. Each start
+// first walks the workspace and the job's output is screened for the values of
+// the workspace's credential files; a failed or bounded read withholds both
+// streams.
 type StartCommand struct {
 	ws      *Workspace
 	manager *BackgroundManager

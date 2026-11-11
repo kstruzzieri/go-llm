@@ -174,7 +174,9 @@ func (c *cappedBuffer) Write(p []byte) (int, error) {
 }
 
 // RunCommand is the argv-first, approval-gated exec tool. PlanningTool: Plan validates
-// and previews; Invoke re-checks and spawns through the runner seam.
+// and previews; Invoke re-checks and spawns through the runner seam. Each spawn
+// first walks the workspace and its output is screened for the values of the
+// workspace's credential files; a failed or bounded read withholds both streams.
 type RunCommand struct {
 	ws      *Workspace
 	runner  commandRunner

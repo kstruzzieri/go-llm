@@ -205,7 +205,7 @@ func TestBuildOutputScreenBounds(t *testing.T) {
 		label  string
 		env    string
 		limits screenLimits
-		slow   bool   // beforeReadDir sleeps 50 ms
+		slow   bool   // beforeReadDir sleeps 300 ms
 		cause  string // "": not withheld
 	}{
 		{"file", file, screenLimits{fileBytes: 34}, false, `file over 34 bytes: ".env"`},
@@ -223,7 +223,9 @@ func TestBuildOutputScreenBounds(t *testing.T) {
 			ws, _, _ := tolerantFixture(t, map[string]string{".env": r.env, "a.txt": "x\n"}, nil)
 			ws.screenLimits = r.limits
 			if r.slow {
-				ws.beforeReadDir = func(string) { time.Sleep(50 * time.Millisecond) }
+				// Far past the 10 ms budget, so the budget's timer has fired
+				// even on a loaded machine.
+				ws.beforeReadDir = func(string) { time.Sleep(300 * time.Millisecond) }
 			}
 			s := mustBuild(t, r.label, ws)
 			notes := s.notes()

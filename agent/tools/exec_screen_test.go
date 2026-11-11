@@ -182,7 +182,7 @@ func TestRunCommandWithheldStreams(t *testing.T) {
 	rows := []struct {
 		label  string
 		limits screenLimits
-		slow   bool // beforeReadDir sleeps 50 ms
+		slow   bool // beforeReadDir sleeps 300 ms
 		seams  *screenSeams
 		cause  string
 	}{
@@ -201,7 +201,9 @@ func TestRunCommandWithheldStreams(t *testing.T) {
 			ws.screenLimits = r.limits
 			ws.screenSeams = r.seams
 			if r.slow {
-				ws.beforeReadDir = func(string) { time.Sleep(50 * time.Millisecond) }
+				// Far past the 10 ms budget, so the budget's timer has fired
+				// even on a loaded machine.
+				ws.beforeReadDir = func(string) { time.Sleep(300 * time.Millisecond) }
 			}
 			rc := NewRunCommand(ws, newPlatformRunner())
 			res := planInvoke(t, context.Background(), rc, r.label,
