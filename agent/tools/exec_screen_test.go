@@ -107,6 +107,22 @@ func TestRunCommandScreensOutput(t *testing.T) {
 	if keys, _, released := spy.spec.Screen.snapshot(); keys != nil || !released {
 		t.Fatalf("partial: screen not released (keys %d)", len(keys))
 	}
+
+	// The value alone on an unterminated last line: it is screened at finish,
+	// and the note counts it.
+	res = planInvoke(t, context.Background(), rc, "last", map[string]any{"argv": []string{"sh", "-c", "cut -d= -f2 .e* | tr -d '\\n'"}})
+	c := res.Content
+	head, _, _ := strings.Cut(c, "--- stdout ---\n")
+	switch {
+	case res.IsError:
+		t.Fatalf("last: tool error (len %d)", len(c))
+	case strings.Contains(c, screenEnvValue):
+		t.Fatal("last: the value reached the result")
+	case stdoutSection(t, "last", c) != tM:
+		t.Fatalf("last: stdout is not the marker alone (len %d)", len(stdoutSection(t, "last", c)))
+	case !strings.Contains(head, screenMatchNote):
+		t.Fatalf("last: no match note before stdout (head len %d)", len(head))
+	}
 }
 
 func TestRunCommandLongLineCutsOnlyThatStream(t *testing.T) {
@@ -283,5 +299,10 @@ func TestVerifyFailingObservationScreened(t *testing.T) {
 		t.Fatalf("sentinel %t, marker %t", strings.Contains(obs, screenSentinel), strings.Contains(obs, tM))
 	case !strings.Contains(obs, "status: failed\n"), !strings.Contains(obs, "exit_code: 3\n"):
 		t.Fatalf("failing status missing (len %d)", len(obs))
+	}
+	// The command line quotes the sentinel too; the printed one is the last.
+	note := strings.Index(obs, screenMatchNote)
+	if note < 0 || note > strings.LastIndex(obs, screenSentinel) {
+		t.Fatalf("match note missing or after the output (note at %d)", note)
 	}
 }
