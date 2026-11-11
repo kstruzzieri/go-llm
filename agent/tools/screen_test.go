@@ -51,6 +51,9 @@ func TestScreenStream(t *testing.T) {
 		{"span csi", []string{longKey}, "NAME=value-\x1b[01;31m\x1b[K0001\x1b[m\x1b[K-abcdef\n", "NAME=" + tM + "\n", true},
 		{"span raw", []string{longKey}, "\x00\xff value-0001-abcdef\n", "\x00\xff " + tM + "\n", true},
 		{"longest first", []string{"value-0001", longKey}, "x value-0001-abcdef y\n", "x " + tM + " y\n", true},
+		{"two spans", []string{longKey}, "x value-0001-abcdef y value-0001-abcdef\n", "x " + tM + " y " + tM + "\n", true},
+		// A line the path-prefix rule replaces whole, though it also holds a key.
+		{"line and key", []string{longKey}, ".env:3:NAME=value-0001-abcdef\n", tM + "\n", true},
 		{"line", nil, ".env:3:NAME=short\nnext\n", tM + "\nnext\n", true},
 		// grep --color=always -n: the colon-separated fields are found only
 		// after the color codes are stripped; no key, so only the path-prefix
@@ -69,6 +72,8 @@ func TestScreenStream(t *testing.T) {
 		{"go results", nil, "    --- FAIL: TestNames/.env (0.00s)\n        x_test.go:9: detail\n",
 			"    --- FAIL: TestNames/.env (0.00s)\n        x_test.go:9: detail\n", false},
 		{"bound ok", nil, strings.Repeat("a", 32768) + "\n", strings.Repeat("a", 32768) + "\n", false},
+		// One write holding a terminated record of 32769 bytes: record's own bound.
+		{"bound over", nil, strings.Repeat("a", 32769) + "\n", tL + "\n", false},
 		{"long header", nil, "diff --git " + strings.Repeat("a", 33000) + "/.env\n+NAME=x\n", tL + "\n", false},
 	}
 	for _, r := range rows {
@@ -222,6 +227,7 @@ func TestScreenStream(t *testing.T) {
 }
 
 func TestScreenNotes(t *testing.T) {
+	// containment: CMP-EXEC-CREDENTIAL-OUTPUT
 	t.Run("nothing", func(t *testing.T) {
 		if n := newOutputScreen(nil).notes(); n != nil {
 			t.Fatalf("got %d notes", len(n))

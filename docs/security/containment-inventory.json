@@ -3008,6 +3008,48 @@
           "test": "TestBuildOutputScreenIgnoresGuard",
           "file": "agent/tools/screen_build_test.go",
           "func": "TestBuildOutputScreenIgnoresGuard"
+        },
+        {
+          "package": "./agent/interceptor",
+          "test": "TestScriptFields",
+          "file": "agent/interceptor/credential_argv_test.go",
+          "func": "TestScriptFields"
+        },
+        {
+          "package": "./agent/interceptor",
+          "test": "TestIsGitConfigPath",
+          "file": "agent/interceptor/credential_argv_test.go",
+          "func": "TestIsGitConfigPath"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestStripCSI",
+          "file": "agent/tools/screen_path_test.go",
+          "func": "TestStripCSI"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestGitUnquote",
+          "file": "agent/tools/screen_path_test.go",
+          "func": "TestGitUnquote"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestScreenNotes",
+          "file": "agent/tools/screen_test.go",
+          "func": "TestScreenNotes"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestBuildOutputScreenKeys",
+          "file": "agent/tools/screen_build_test.go",
+          "func": "TestBuildOutputScreenKeys"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestBuildOutputScreenGitConfigHeld",
+          "file": "agent/tools/screen_build_test.go",
+          "func": "TestBuildOutputScreenGitConfigHeld"
         }
       ],
       "profiles": [

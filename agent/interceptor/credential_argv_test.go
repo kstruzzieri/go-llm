@@ -26,6 +26,11 @@ func TestWordNamesCredentialPath(t *testing.T) {
 		{"short flag ssh", "-i.ssh/key", true},
 		{"assignment chain", "KEY=a:b:.netrc", true},
 		{"top magic", ":(top)sub/.npmrc", true},
+		{"short flag upper", "-F.env", true},
+		{"short flag a", "-a.env", true},
+		{"short flag z", "-z.env", true},
+		{"excluded magic", ":(excluded)sub/.env", true},
+		{"empty magic", ":()sub/.env", true},
 		{"template", ".env.example", false},
 		{"process env", "process.env", false},
 		{"x env", "x.env", false},
@@ -49,6 +54,7 @@ func TestWordNamesCredentialPath(t *testing.T) {
 }
 
 func TestIsGitConfigPath(t *testing.T) {
+	// containment: CMP-EXEC-CREDENTIAL-OUTPUT
 	rows := []struct {
 		label string
 		in    string
@@ -57,6 +63,7 @@ func TestIsGitConfigPath(t *testing.T) {
 		{"git config", ".git/config", true},
 		{"upper git", "sub/.GIT/config", true},
 		{"zero width git", ".gi\u200dt/config", true},
+		{"submodule config", ".git/modules/x/config", true},
 		{"hooks", ".git/hooks/x", false},
 		{"bare config", "config", false},
 		{"github dir", ".github/config", false},
@@ -75,6 +82,7 @@ func TestIsGitConfigPath(t *testing.T) {
 }
 
 func TestScriptFields(t *testing.T) {
+	// containment: CMP-EXEC-CREDENTIAL-OUTPUT
 	rows := []struct {
 		label  string
 		script string
@@ -83,6 +91,19 @@ func TestScriptFields(t *testing.T) {
 		{"pipe", "cat ~/.npmrc|head -1", "~/.npmrc"},
 		{"dollar", "cat $HOME/.netrc", "HOME/.netrc"},
 		{"quoted", `git commit -m "fix .env loading"`, ".env"},
+		// One row per separator, each holding only that separator.
+		{"semicolon", "x;.env", ".env"},
+		{"ampersand", "x&.env", ".env"},
+		{"open paren", "x(.env", ".env"},
+		{"close paren", "x).env", ".env"},
+		{"less than", "x<.env", ".env"},
+		{"greater than", "x>.env", ".env"},
+		{"double quote", `x".env`, ".env"},
+		{"backtick", "x`.env", ".env"},
+		{"backslash", `x\.env`, ".env"},
+		{"open brace", "x{.env", ".env"},
+		{"close brace", "x}.env", ".env"},
+		{"tab", "x\t.env", ".env"},
 	}
 	for _, r := range rows {
 		t.Run(r.label, func(t *testing.T) {
@@ -113,6 +134,9 @@ func TestCredentialArgvCheck(t *testing.T) {
 		{"env wrapper", `["env","FOO=1","cat",".env"]`, true},
 		{"sh prose", `["sh","-c","git commit -m \"fix .env loading\""]`, true},
 		{"sh exclude", `["sh","-c","git log -p -- . ':(exclude,glob)**/.env'"]`, true},
+		// The script as one word does not end in a credential name, so only
+		// its fields can refuse it; the exemption is for whole argv words.
+		{"sh bang exclude", `["sh","-c","git log -- :!sub/.env HEAD"]`, true},
 		{"template", `["cat",".env.example"]`, false},
 		{"node process env", `["node","-e","console.log(process.env)"]`, false},
 		{"x env", `["cat","x.env"]`, false},

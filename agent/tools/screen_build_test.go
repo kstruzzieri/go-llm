@@ -40,6 +40,7 @@ func mustBuild(t *testing.T, label string, ws *Workspace) *outputScreen {
 const withheldNote = "credential screen: output withheld; credential files could not be read completely ("
 
 func TestBuildOutputScreenKeys(t *testing.T) {
+	// containment: CMP-EXEC-CREDENTIAL-OUTPUT
 	ws, _, _ := tolerantFixture(t, map[string]string{
 		".env":          "TOKEN=env-0001-abcdef\n",
 		"sub/.npmrc":    "//registry.example.invalid/:_authToken=npm-0002-abcdef\n",
@@ -354,6 +355,20 @@ func TestBuildOutputScreenRootReplaced(t *testing.T) {
 	s, err := buildOutputScreen(t.Context(), ws)
 	check("swap", s, err, ErrRootReplaced)
 
+	// The root is swapped while a credential file is opened, and the open
+	// fails with an ordinary error: the walk has no later check that would
+	// catch it, so the file's own failure must end the build.
+	ws, root, sib = tolerantFixture(t, map[string]string{".env": "TOKEN=root-0005-abcdef\n"}, map[string]string{"a": "x\n"})
+	ws.screenSeams = &screenSeams{openErr: func(rel string) error {
+		if rel != ".env" {
+			return nil
+		}
+		swapRoot(t, root, sib)
+		return fs.ErrNotExist // the ordinary error, not the sentinel
+	}}
+	s, err = buildOutputScreen(t.Context(), ws)
+	check("file open swap", s, err, ErrRootReplaced)
+
 	ws, _, _ = tolerantFixture(t, map[string]string{".env": "TOKEN=root-0002-abcdef\n"}, nil)
 	ws.screenSeams = &screenSeams{listErr: answer("", syscall.EIO)}
 	s, err = buildOutputScreen(t.Context(), ws)
@@ -372,12 +387,13 @@ func TestBuildOutputScreenRootReplaced(t *testing.T) {
 	s, err = buildOutputScreen(ctx, ws)
 	check("parent deadline", s, err, context.DeadlineExceeded)
 
-	secretFree(t, "root", []string{"root-0001-abcdef", "root-0002-abcdef", "root-0003-abcdef", "root-0004-abcdef"}, texts...)
+	secretFree(t, "root", []string{"root-0001-abcdef", "root-0002-abcdef", "root-0003-abcdef", "root-0004-abcdef", "root-0005-abcdef"}, texts...)
 }
 
 // .git/config is read through the held .git descriptor, so a .git moved,
 // replaced or denied during the read is never silently "no config".
 func TestBuildOutputScreenGitConfigHeld(t *testing.T) {
+	// containment: CMP-EXEC-CREDENTIAL-OUTPUT
 	const cfg = "[remote \"origin\"]\n\turl = https://user-0020:pass-0020-abcdef@example.invalid/r.git\n"
 	gitTree := map[string]string{".git/config": cfg, "a.txt": "x\n"}
 	changed := "credential screen: 1 entr(ies) changed during the read and were skipped; output screened without them"

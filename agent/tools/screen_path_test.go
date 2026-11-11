@@ -9,11 +9,19 @@ import (
 // an input can itself contain text this feature withholds.
 
 func TestStripCSI(t *testing.T) {
+	// containment: CMP-EXEC-CREDENTIAL-OUTPUT
 	cases := []struct{ label, in, want string }{
 		{"bold", "\x1b[1mdiff\x1b[m", "diff"},
 		{"color then erase", "a\x1b[01;31m\x1b[Kb", "ab"},
 		{"truncated sequence", "ab\x1b[01;3", "ab\x1b[01;3"},
 		{"binary bytes", "\x00\xff", "\x00\xff"},
+		{"private param", "\x1b[?25lA", "A"},
+		{"space intermediate", "\x1b[ qA", "A"},
+		{"slash intermediate", "\x1b[/xA", "A"},
+		{"hash intermediate", "\x1b[#xA", "A"},
+		{"at final", "\x1b[@A", "A"},
+		{"tilde final", "\x1b[3~A", "A"},
+		{"escape not csi", "\x1bX/.envA", "\x1bX/.envA"},
 	}
 	for _, c := range cases {
 		t.Run(c.label, func(t *testing.T) {
@@ -25,6 +33,7 @@ func TestStripCSI(t *testing.T) {
 }
 
 func TestGitUnquote(t *testing.T) {
+	// containment: CMP-EXEC-CREDENTIAL-OUTPUT
 	cases := []struct {
 		label, in, want string
 		n               int
@@ -34,6 +43,16 @@ func TestGitUnquote(t *testing.T) {
 		{"quote then space", `"x\" /.env"`, `x" /.env`, 11, true},
 		{"octal zero width joiner", `"b/my dir/.s\342\200\215sh/key"`, "b/my dir/.s\u200dsh/key", 31, true},
 		{"tab escape", `"a\tb"`, "a\tb", 6, true},
+		{"bell escape", `"\a"`, "\a", 4, true},
+		{"backspace escape", `"\b"`, "\b", 4, true},
+		{"form feed escape", `"\f"`, "\f", 4, true},
+		{"newline escape", `"\n"`, "\n", 4, true},
+		{"carriage return escape", `"\r"`, "\r", 4, true},
+		{"vertical tab escape", `"\v"`, "\v", 4, true},
+		{"backslash escape", `"\\"`, "\\", 4, true},
+		{"low octal", `"\001"`, "\x01", 6, true},
+		{"octal second 7", `"\370"`, "\xf8", 6, true},
+		{"octal third 7", `"\307"`, "\xc7", 6, true},
 		{"literal u escape", `"caf\u00e9/.env"`, "", 0, false},
 		{"no close", `"no close`, "", 0, false},
 		{"bad escape", `"bad \8"`, "", 0, false},
@@ -81,6 +100,9 @@ func TestCredentialPatchHeader(t *testing.T) {
 		{"name with spaces", "diff --git a/notes .env draft b/notes .env draft", true},
 		{"test failure quoting header", `y_test.go:8: screen("diff --git a/.env b/.env") cut = false`, true},
 		{"colored header", colored, true},
+		{"marker in quoted run", `diff -q "diff --git a/.env b/x"`, true},
+		{"lone open quote", `+++ ".env`, true},
+		{"after quoted run", `+++ "a/b" .env`, true},
 
 		{"plain files", "diff --git a/x b/x", false},
 		{"key basename", "diff --git a/key b/key", false},
