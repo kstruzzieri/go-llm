@@ -1,10 +1,10 @@
 # Containment mutation ledger (#452)
 
-Each entry proves one security property's assertions can fail. Entries are point-in-time evidence at their baseline revision. The ledger contains 302 entries: 297 guard and five effect-detection entries.
+Each entry proves one security property's assertions can fail. Entries are point-in-time evidence at their baseline revision. The ledger contains 310 entries: 305 guard and five effect-detection entries.
 
-Platform: every proof in this ledger ran on darwin (arm64, go1.27.1), except M-099 and M-100, whose test runs only on Linux and which ran only there (arm64, go1.27.1, the Docker `ci-local` image as its non-root `ci` user). After the rebase onto the model-resistance PR, the entries whose patches touch build-tagged or platform-sensitive code (M-005 to M-008, the unix path walks; M-009 and M-014 to M-018, the host exec path; M-011, the MCP stdio child environment) were re-run on Linux (arm64, go1.27.1, the Docker `ci-local` image) at their baseline: each entry's `Platform:` line records the result, and a Linux line that differs would be recorded beside the darwin evidence, never in place of it. M-010 (it needs an AgentFlow source checkout) and M-012 (Seatbelt is darwin-native) were not re-run on Linux, and no entry has run on Windows. Of the #777 entries, those whose patches touch build-tagged or platform-sensitive code (M-137 to M-143, M-146 to M-150, M-153 to M-155, M-212 to M-216, M-223, M-224, M-282, M-284 and M-285: the walk, the screen build, the skip classification, the key rules, the unix runner and the background rings) were re-run on Linux (arm64, go1.27.1, the Docker `ci-local` image, as its non-root `ci` user) from a second export of their baseline, and each `Platform:` line records that run; M-223's test was also run in that image as root (`--user 0`), and its `Platform:` line records that run too; M-144 (Seatbelt) is darwin-native.
+Platform: every proof in this ledger ran on darwin (arm64, go1.27.1), except M-099 and M-100, whose test runs only on Linux and which ran only there (arm64, go1.27.1, the Docker `ci-local` image as its non-root `ci` user). After the rebase onto the model-resistance PR, the entries whose patches touch build-tagged or platform-sensitive code (M-005 to M-008, the unix path walks; M-009 and M-014 to M-018, the host exec path; M-011, the MCP stdio child environment) were re-run on Linux (arm64, go1.27.1, the Docker `ci-local` image) at their baseline: each entry's `Platform:` line records the result, and a Linux line that differs would be recorded beside the darwin evidence, never in place of it. M-010 (it needs an AgentFlow source checkout) and M-012 (Seatbelt is darwin-native) were not re-run on Linux, and no entry has run on Windows. Of the #777 entries, those whose patches touch build-tagged or platform-sensitive code (M-137 to M-143, M-146 to M-150, M-153 to M-155, M-212 to M-216, M-223, M-224, M-282, M-284, M-285, M-304 and M-305: the walk, the screen build, the skip classification, the key rules, the unix runner and the background rings) were re-run on Linux (arm64, go1.27.1, the Docker `ci-local` image, as its non-root `ci` user) from a second export of their baseline, and each `Platform:` line records that run; M-223's test was also run in that image as root (`--user 0`), and its `Platform:` line records that run too; M-144 (Seatbelt) is darwin-native.
 
-Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-only variants added in review, M-045 B and M-047 B, at `34b2ff38`, whose production and scenario trees are identical; M-051 to M-053 at `731f2d1d`, the commit that adds them; M-054 to M-058 at `3d423ce1`, the commit that adds them; M-059 at `1166b276`, the commit that adds it): the baseline passed, the mutant failed as shown, and the tree was restored with `git checkout` and passed again. M-028 was re-recorded when tool frames moved to per-result keys: variant A on the commit that makes that change (parent `140524de`), variant B on the commit that adds the cross-Run check (parent `d75c78cb`). Each baseline passed, each mutant failed as shown, and an editor edit restored the baseline bytes, which passed again. Entries M-067 to M-071 ran on the commit that adds fence-key rotation (parent `72b6eb47`) in the same way, the restored file's sha256 matching the baseline's each time; M-072 and M-073 ran the same way on the commit that makes every exposed key rotate and matches keys through separators (parent `00912c90`), and M-074 on the commit that pins key minting before assembly (parent `caa84426`). Entries M-075 to M-078 ran the same way in an isolated `git archive` export of the commit that adds system keys (parent `3346b711`). M-079 and M-080 ran the same way on the commit that scans the durable summary and staged advice (parent `c17e940d`). Entries M-081 to M-085 ran the same way in an isolated `git archive` export of the commit that adds the #712 launchd acceptance tests, each applied with `patch -p1` and reverted with `patch -R -p1`, the restored file's sha256 matching the baseline's. Their baseline is recorded as `c4ca1a8d`: the runs used that commit's tree before two comment-only amends (a driver comment and the M-083 note) produced it, and the patches apply to `c4ca1a8d` at the recorded hunk offsets, with the quoted failing lines at the same line numbers. M-086 ran the same way in an export of `461fdcdc`, the commit that holds `syscall.ForkLock` across the guard and posix_spawn, where M-081 and M-083 were re-run against the new spawn order. All six were re-run the same way at `231baa07`, after the final #712 fix wave changed their tests and moved M-086's lock into a closure; each entry's last note records that run. Entries M-087 to M-105 ran the same way in an isolated `git archive` export of `88f33cfb`, the commit that adds the #725 inventory rows, each applied with `git apply` and reverted with `git apply -R`, the restored file's sha256 matching the baseline's (the export sat inside a checkout, where `git apply` silently skips paths outside the current directory, so both ran with `GIT_CEILING_DIRECTORIES` set to the export's parent); M-099 and M-100 ran in the Docker `ci-local` image from that export. Entries M-106 to M-155 ran in isolated `git archive` exports of `18ca5d70`, the #777 commit that pins the D4 and D5 request counts, one export per platform and one mutant at a time: each patch was applied with `patch -p1` and reverted with `patch -R -p1`, each restored file was compared byte for byte with the baseline's (`cmp`), and every ref passed at the baseline and again on the restored export after the last mutant. Every one of those mutants turned its named refs red on its first run. Entries M-156 to M-160 ran the same way in an isolated `git archive` export of `b97c0aeb`, the later commit that adds the rows they turn red: review found that each of their mutants, which bypasses a preprocessing step (CSI stripping, the split at `\r`, trimming) for one rule only, left every ref green at `18ca5d70`, so they could only be recorded once those rows existed. Entries M-161 to M-169 ran the same way in an isolated `git archive` export of `6bd57929`, the commit that adds the rows they turn red: a second review (M-161 to M-163: a floor raised for one key rule, and the decode of the whole userinfo) and an enumeration that removes each key form `credentialFileKeys` and its helpers emit, one at a time (M-164 to M-169), found mutants that left every ref green at `45548f4f`. Entries M-170 to M-216 ran the same way in an isolated `git archive` export of `f350333c`, the commit that adds the rows they turn red and cites seven existing tests on CMP-EXEC-CREDENTIAL-OUTPUT: a third sweep removed or moved one decision at a time in the argv rule (`credential_argv.go`, `IsGitConfigPath`) and the screen (`screen_path.go`, `screen.go`, `screen_classify.go`, `screen_build.go`), and these are the mutants that left every ref of the row green at `c9cc9155` and let through what the original refuses, cuts or replaces. Entries M-217 to M-220 ran the same way in an isolated `git archive` export of `b7666790`, the commit that adds the last of the rows they turn red: M-217 and M-218 remove or misread the argv rule's reading of a git pathspec with long-form magic, added after that sweep; M-219 reads that pathspec's pattern after its last `)` and left every ref green at `a72009d3`, the commit before its row; M-220 is the sweep's announce-only `S-cut-no-mark` (a cut no longer counted in the notes), which left every ref green until a cut-only notes row existed. Entries M-221 to M-284 ran the same way in isolated `git archive` exports of `d1d7fa91`, the commit that adds the rows they turn red, four exports in parallel, one mutant at a time in each: M-221 to M-224 are the gaps the fourth review found (`stripCSI`'s ESC test and its bound check, a `.git/config` that cannot be opened for a reason other than a change, and a failed read after a successful open, which `6194e105` gives a test-only read seam); M-225 to M-284 come from a generated sweep that mutated every condition, comparison, statement and integer offset of the argv rule, the screen and the walk lines this branch changed (1,185 generated mutants plus eight of the review's, at `6194e105`), and are the mutants that left every ref of the row green there and let through what the original refuses, cuts, replaces or withholds, or crash the stream writer. Entries M-285 to M-303 ran the same way, serially, in one isolated `git archive` export of `3e4fedce`, the last commit of fix round 5 that adds or reorders the rows they turn red: M-285 discards the read error, which goes red only because `1338d3ec` reshaped the screen's read seam into a reader hook so that the injected failure arrives through the read itself; M-286 to M-303 are generated sweep mutants (and two of the round-3 review's) that round 4 had classed as equivalent, withholding more or only widening, for which the review of fix round 4, or fix round 5's re-argument from the code, built an input on which they lose a key the original emits. M-223 and M-224 were re-recorded at `3e4fedce` in the same export, because their rows changed (each entry's Notes say how). The #777 entries therefore have seven baselines: M-106 to M-155 at `18ca5d70`, M-156 to M-160 at `b97c0aeb`, M-161 to M-169 at `6bd57929`, M-170 to M-216 at `f350333c`, M-217 to M-220 at `b7666790`, M-221 to M-284 at `d1d7fa91` (but M-223 and M-224, re-recorded at `3e4fedce`), M-285 to M-303 at `3e4fedce`. Each entry is evidence at its own baseline. M-138 and M-144 each record two variants. M-145 is not assigned: it was reserved for the bwrap backend's screen mutation, which needs a Linux host with bwrap that the Docker `ci-local` image is not, so CMP-EXEC-CREDENTIAL-OUTPUT-BWRAP is `unobserved(bwrap)` and carries that follow-up as its exempt reason. The entry for the unverified-root rule including the repository boundary itself, whose mutant narrowed the rule to strictly below the boundary, was withdrawn when that narrowing became the production rule; later entries were renumbered to close the gap. Entries M-060 and M-061 ran in isolated exports of immutable code commit `23f0c0bbca83f0c9d6e02163dd09c4856698ddcd`: each baseline passed, its mutant failed, and restored files matched the baseline bytes and passed again. Entries M-062 and M-063 ran on this branch at `dbe5c315b40f8b973b96cf623d5cdcbe00c616fc`, the commit that adds their rules: each baseline passed, its mutant failed, and `git checkout -- <file>` restored the baseline bytes, which passed again; M-062's comparison against the previous rule ran in an isolated `git archive` export of `ac053567`. Entries M-064 to M-066 ran on the #387 branch at `72d0bedeb1d264b3da62cf812df7505a8bd7e776`, the commit that tightens PV1's probe and cites the exec and verification preview tests (M-064 and M-065 were first recorded at `b9cea9154746758026fd9bb58d467f665be5952f`, the commit that makes PV1 executable): each baseline passed, its mutant failed, and `git checkout -- <file>` restored the baseline bytes, which passed again. Entries quote test output, the containment judge's message text and line numbers included, as it read at their baseline; later wording changes do not rewrite them. Entries carried over from the PR 2 delivery record name the draft entry they were first recorded as; they were re-run here so every command, diff and line number matches one revision. Apply a patch with `git apply`, run the command, then restore with `git checkout -- <file>`. `guard` entries remove or weaken the protection the refs assert. `effect-detection` entries change the effect path of an uncontained scenario: they show its probe can read a change in outcome, not that a guard is absent. Rows exempt from this ledger (pending, out-of-scope, unobserved such as ENV-BWRAP and CMP-EXEC-CREDENTIAL-OUTPUT-BWRAP, whose native bwrap profile needs a Linux host, and administrative META- rows; the inventory lint allows no other verified or uncontained row an exemption) carry their exempt reason in the inventory (`docs/security/containment-inventory.json`, rendered in `docs/security/containment-inventory.md`).
+Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-only variants added later, M-045 B and M-047 B, at `34b2ff38`, whose production and scenario trees are identical; M-051 to M-053 at `731f2d1d`, the commit that adds them; M-054 to M-058 at `3d423ce1`, the commit that adds them; M-059 at `1166b276`, the commit that adds it): the baseline passed, the mutant failed as shown, and the tree was restored with `git checkout` and passed again. M-028 was re-recorded when tool frames moved to per-result keys: variant A on the commit that makes that change (parent `140524de`), variant B on the commit that adds the cross-Run check (parent `d75c78cb`). Each baseline passed, each mutant failed as shown, and an editor edit restored the baseline bytes, which passed again. Entries M-067 to M-071 ran on the commit that adds fence-key rotation (parent `72b6eb47`) in the same way, the restored file's sha256 matching the baseline's each time; M-072 and M-073 ran the same way on the commit that makes every exposed key rotate and matches keys through separators (parent `00912c90`), and M-074 on the commit that pins key minting before assembly (parent `caa84426`). Entries M-075 to M-078 ran the same way in an isolated `git archive` export of the commit that adds system keys (parent `3346b711`). M-079 and M-080 ran the same way on the commit that scans the durable summary and staged advice (parent `c17e940d`). Entries M-081 to M-085 ran the same way in an isolated `git archive` export of the commit that adds the #712 launchd acceptance tests, each applied with `patch -p1` and reverted with `patch -R -p1`, the restored file's sha256 matching the baseline's. Their baseline is recorded as `c4ca1a8d`: the runs used that commit's tree before two comment-only amends (a driver comment and the M-083 note) produced it, and the patches apply to `c4ca1a8d` at the recorded hunk offsets, with the quoted failing lines at the same line numbers. M-086 ran the same way in an export of `461fdcdc`, the commit that holds `syscall.ForkLock` across the guard and posix_spawn, where M-081 and M-083 were re-run against the new spawn order. All six were re-run the same way at `231baa07`, after the final #712 fix wave changed their tests and moved M-086's lock into a closure; each entry's last note records that run. Entries M-087 to M-105 ran the same way in an isolated `git archive` export of `88f33cfb`, the commit that adds the #725 inventory rows, each applied with `git apply` and reverted with `git apply -R`, the restored file's sha256 matching the baseline's (the export sat inside a checkout, where `git apply` silently skips paths outside the current directory, so both ran with `GIT_CEILING_DIRECTORIES` set to the export's parent); M-099 and M-100 ran in the Docker `ci-local` image from that export. Entries M-106 to M-155 ran in isolated `git archive` exports of `18ca5d70`, the #777 commit that pins the D4 and D5 request counts, one export per platform and one mutant at a time: each patch was applied with `patch -p1` and reverted with `patch -R -p1`, each restored file was compared byte for byte with the baseline's (`cmp`), and every ref passed at the baseline and again on the restored export after the last mutant. Every one of those mutants turned its named refs red on its first run. Entries M-156 to M-160 ran the same way in an isolated `git archive` export of `b97c0aeb`, the later commit that adds the rows they turn red: each of their mutants, which bypasses a preprocessing step (CSI stripping, the split at `\r`, trimming) for one rule only, left every ref green at `18ca5d70`, so they could only be recorded once those rows existed. Entries M-161 to M-169 ran the same way in an isolated `git archive` export of `6bd57929`, the commit that adds the rows they turn red: hand-written mutants (M-161 to M-163: a floor raised for one key rule, and the decode of the whole userinfo) and an enumeration that removes each key form `credentialFileKeys` and its helpers emit, one at a time (M-164 to M-169), found mutants that left every ref green at `45548f4f`. Entries M-170 to M-216 ran the same way in an isolated `git archive` export of `f350333c`, the commit that adds the rows they turn red and cites seven existing tests on CMP-EXEC-CREDENTIAL-OUTPUT: a third sweep removed or moved one decision at a time in the argv rule (`credential_argv.go`, `IsGitConfigPath`) and the screen (`screen_path.go`, `screen.go`, `screen_classify.go`, `screen_build.go`), and these are the mutants that left every ref of the row green at `c9cc9155` and let through what the original refuses, cuts or replaces. Entries M-217 to M-220 ran the same way in an isolated `git archive` export of `b7666790`, the commit that adds the last of the rows they turn red: M-217 and M-218 remove or misread the argv rule's reading of a git pathspec with long-form magic, added after that sweep; M-219 reads that pathspec's pattern after its last `)` and left every ref green at `a72009d3`, the commit before its row; M-220 is the sweep's announce-only `S-cut-no-mark` (a cut no longer counted in the notes), which left every ref green until a cut-only notes row existed. Entries M-221 to M-284 ran the same way in isolated `git archive` exports of `d1d7fa91`, the commit that adds the rows they turn red, four exports in parallel, one mutant at a time in each: M-221 to M-224 are hand-written mutants for four gaps (`stripCSI`'s ESC test and its bound check, a `.git/config` that cannot be opened for a reason other than a change, and a failed read after a successful open, which `6194e105` gives a test-only read seam); M-225 to M-284 come from a generated sweep that mutated every condition, comparison, statement and integer offset of the argv rule, the screen and the walk lines this branch changed (1,185 generated mutants plus eight hand-written ones, at `6194e105`), and are the mutants that left every ref of the row green there and let through what the original refuses, cuts, replaces or withholds, or crash the stream writer. Entries M-285 to M-303 ran the same way, serially, in one isolated `git archive` export of `3e4fedce`, the last commit that adds or reorders the rows they turn red: M-285 discards the read error, which goes red only because `1338d3ec` reshaped the screen's read seam into a reader hook so that the injected failure arrives through the read itself; M-286 to M-303 are generated sweep mutants (and two hand-written ones) first classed as equivalent, withholding more or only widening, for which an input was later built, or found by re-arguing the classification from the code, on which they lose a key the original emits. M-223 and M-224 were re-recorded at `3e4fedce` in the same export, because their rows changed (each entry's Notes say how). Entries M-304 to M-311 ran the same way, serially, in one isolated `git archive` export of `8058e5a6`, the last commit that changes test or production code before them: they are the mutants of the lines that key a credential-store line's userinfo (`122ec242`), count a key once across files and give a `.git/config` line with too many settings its own cause (`e804533a`), generated by the same sweep operators plus one hand-written mutant, that let through what the original withholds; each is red on a row added with that change or at `8058e5a6`. M-128 and M-248 were re-recorded at `8058e5a6` in the same export, because `122ec242` re-indented the line their patches change (each entry's Notes say how). The #777 entries therefore have eight baselines: M-106 to M-155 at `18ca5d70` (but M-128, re-recorded at `8058e5a6`), M-156 to M-160 at `b97c0aeb`, M-161 to M-169 at `6bd57929`, M-170 to M-216 at `f350333c`, M-217 to M-220 at `b7666790`, M-221 to M-284 at `d1d7fa91` (but M-223 and M-224, re-recorded at `3e4fedce`, and M-248, re-recorded at `8058e5a6`), M-285 to M-303 at `3e4fedce`, M-304 to M-311 at `8058e5a6`. Each entry is evidence at its own baseline. M-138 and M-144 each record two variants. M-145 is not assigned: it was reserved for the bwrap backend's screen mutation, which needs a Linux host with bwrap that the Docker `ci-local` image is not, so CMP-EXEC-CREDENTIAL-OUTPUT-BWRAP is `unobserved(bwrap)` and carries that follow-up as its exempt reason. The entry for the unverified-root rule including the repository boundary itself, whose mutant narrowed the rule to strictly below the boundary, was withdrawn when that narrowing became the production rule; later entries were renumbered to close the gap. Entries M-060 and M-061 ran in isolated exports of immutable code commit `23f0c0bbca83f0c9d6e02163dd09c4856698ddcd`: each baseline passed, its mutant failed, and restored files matched the baseline bytes and passed again. Entries M-062 and M-063 ran on this branch at `dbe5c315b40f8b973b96cf623d5cdcbe00c616fc`, the commit that adds their rules: each baseline passed, its mutant failed, and `git checkout -- <file>` restored the baseline bytes, which passed again; M-062's comparison against the previous rule ran in an isolated `git archive` export of `ac053567`. Entries M-064 to M-066 ran on the #387 branch at `72d0bedeb1d264b3da62cf812df7505a8bd7e776`, the commit that tightens PV1's probe and cites the exec and verification preview tests (M-064 and M-065 were first recorded at `b9cea9154746758026fd9bb58d467f665be5952f`, the commit that makes PV1 executable): each baseline passed, its mutant failed, and `git checkout -- <file>` restored the baseline bytes, which passed again. Entries quote test output, the containment judge's message text and line numbers included, as it read at their baseline; later wording changes do not rewrite them. Entries carried over from the PR 2 delivery record name the draft entry they were first recorded as; they were re-run here so every command, diff and line number matches one revision. Apply a patch with `git apply`, run the command, then restore with `git checkout -- <file>`. `guard` entries remove or weaken the protection the refs assert. `effect-detection` entries change the effect path of an uncontained scenario: they show its probe can read a change in outcome, not that a guard is absent. Rows exempt from this ledger (pending, out-of-scope, unobserved such as ENV-BWRAP and CMP-EXEC-CREDENTIAL-OUTPUT-BWRAP, whose native bwrap profile needs a Linux host, and administrative META- rows; the inventory lint allows no other verified or uncontained row an exemption) carry their exempt reason in the inventory (`docs/security/containment-inventory.json`, rendered in `docs/security/containment-inventory.md`).
 
 ## M-001 — Absolute paths are rejected by the workspace path cleaner
 - Affected refs: PATH-ABS: `TestHardeningContracts/Active/Workspace/confinement_and_arguments/public_confinement/owned_absolute_sibling`, `TestWorkspaceCleanRelContainment/absolute_escape`, `TestContainment/W1`
@@ -3198,7 +3198,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestWordNamesCredentialPath`, rows `git_stage_colon` and `top_magic` (`credential_argv_test.go:45: wordNamesCredentialPath = false, want true`); every other ref passes. Exit 1 for the interceptor command, 0 for the others. Restored (`cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: `git_stage_colon` is `:0:.env` (a staged blob, the design's must-still-be-refused word) and `top_magic` is `:(top)sub/.npmrc`: words that start with `:` but do not exclude.
+- Notes: `git_stage_colon` is `:0:.env` (a staged blob, a word that must still be refused) and `top_magic` is `:(top)sub/.npmrc`: words that start with `:` but do not exclude.
 
 ## M-112 — A patch header that shows a credential path cuts the stream
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestScreenStream`, `TestBackgroundCutStopsTail`, `TestContainment/D5`
@@ -3351,7 +3351,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestCredentialPatchHeader`, rows `quoted_octal` (`screen_path_test.go:101: row "quoted octal": got false, want true`) and `quoted_space_and_octal` (`... row "quoted space and octal": got false, want true`); every other ref passes. Exit 1 for the tools command, 0 for the others. Restored (`cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: The patch skips git unquoting, so a quoted run is cut on spaces and loses one quote at either end. `quoted_space_and_octal` is the witness the design names (a quoted path with a space and an octal-escaped zero-width alias of `.ssh`), which matches only when the whole run is unquoted; `quoted_quote_space` stays green, as the design predicts, because the plain-text reading still finds `.env` in its last fragment.
+- Notes: The patch skips git unquoting, so a quoted run is cut on spaces and loses one quote at either end. `quoted_space_and_octal` is the row this decision rests on (a quoted path with a space and an octal-escaped zero-width alias of `.ssh`), which matches only when the whole run is unquoted; `quoted_quote_space` stays green, as expected, because the plain-text reading still finds `.env` in its last fragment.
 
 ## M-117 — A run that cannot be unquoted is read as plain text
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialPatchHeader`
@@ -3379,7 +3379,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestCredentialPatchHeader`, rows `literal_u_escape` (`screen_path_test.go:101: row "literal u escape": got false, want true`) and `unclosed_quote` (`... row "unclosed quote": got false, want true`); every other ref passes. Exit 1 for the tools command, 0 for the others. Restored (`cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: The patch drops a run git could not have written, up to the next space or tab, without reading it. Both rows are the design's plain-text rows (`+++ "caf\u00e9/.env"`, whose `\u` is no escape git writes, and `+++ my "dir/.env`).
+- Notes: The patch drops a run git could not have written, up to the next space or tab, without reading it. Both rows are plain-text rows (`+++ "caf\u00e9/.env"`, whose `\u` is no escape git writes, and `+++ my "dir/.env`).
 
 ## M-118 — A run that cannot be unquoted does not cut by itself
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialPatchHeader`
@@ -3628,28 +3628,28 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
 - Notes: D4 run 3 prints `.netrc`, whose one line has no `=`, so only the line key could match it; D4 is red by validity (no span marker). The bounds rows count keys, so fewer keys stop reaching the bound.
 
 ## M-128 — A `NAME=value` value is a key (K2)
-- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialFileKeys`, `TestRunCommandScreensOutput`, `TestBuildOutputScreenBounds`, `TestBuildOutputScreenSkips`, `TestBuildOutputScreenIgnoresGuard`, `TestContainment/D4`
-- Baseline: `18ca5d70`, the commit that pins D4 and D5 request counts (#777), in an isolated `git archive` export
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestBuildOutputScreenBounds`, `TestBuildOutputScreenIgnoresGuard`, `TestBuildOutputScreenKeys`, `TestBuildOutputScreenSkips`, `TestCredentialFileKeys`, `TestRunCommandScreensOutput`, `TestContainment/D4`
+- Baseline: `8058e5a6` (#777), in an isolated `git archive` export; re-recorded there, see Notes
 - Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
-- Profile / command: darwin-host / `go test -count=1 -v -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant)$' ./agent/interceptor`; `go test -count=1 -v -run '^TestHardeningContracts$/^Active$/^Invariants$/^(run_env_argv|start_env_argv|run_dir_ssh|start_dir_git)$' ./agent`; `go test -count=1 -v -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestBuildOutputScreenIgnoresGuard|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown)$' ./agent/tools`; `go test -count=1 -v -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT and the four #777 leaves of INVARIANTS, in four commands: interceptor, contract, tools, scenarios)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath)$' ./agent/interceptor`; `go test -count=1 -v -run '^TestHardeningContracts$/^Active$/^Invariants$/^(run_env_argv|start_env_argv|run_dir_ssh|start_dir_git)$' ./agent`; `go test -count=1 -v -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestBuildOutputScreenIgnoresGuard|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld)$' ./agent/tools`; `go test -count=1 -v -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT and the four #777 leaves of INVARIANTS, in four commands: interceptor, contract, tools, scenarios)
 - Patch:
   ```diff
   diff --git a/agent/tools/screen_keys.go b/agent/tools/screen_keys.go
   --- a/agent/tools/screen_keys.go
   +++ b/agent/tools/screen_keys.go
-  @@ -102,7 +102,7 @@
-   				overLong = true
+  @@ -111,7 +111,7 @@
+   				urlUserinfoKeys(line, add)
    			}
-   		} else if eq := bytes.IndexByte(line, '='); eq >= 0 {
-  -			envValueKeys(bytes.TrimSpace(line[eq+1:]), add)
-  +			_ = eq
+   			if eq := bytes.IndexByte(line, '='); eq >= 0 {
+  -				envValueKeys(bytes.TrimSpace(line[eq+1:]), add)
+  +				_ = eq
+   			}
    		}
    	}
-   	return keys, overLong
   ```
-- Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestCredentialFileKeys`, 15 rows: every `env-` and `csi-` row, `bom-crlf`, `floor-8-value` and `overlong-no-keys` (for example `env-plain`: `screen_keys_test.go:58: key set differs: got 1 keys, want 2`; `overlong-no-keys`: `screen_keys_test.go:124: control: over=false keys=2`); FAIL `TestRunCommandScreensOutput` (`exec_screen_test.go:121: last: the value reached the result`); FAIL `TestBuildOutputScreenBounds`, rows `keys` and `total` (`screen_build_test.go:225: keys: notes differ (0 notes)`); FAIL `TestBuildOutputScreenSkips`, rows `dir_gone`, `file_removed` and `stat_gone` (`screen_build_test.go:328: dir gone: later key not withheld (len 17)`); FAIL `TestBuildOutputScreenIgnoresGuard` (`screen_build_test.go:507: guard: key not collected (len 22)`); FAIL `TestContainment/D4` (`containment_test.go:116: D4: validity: run 4: want exit code 0, the sentinel and the span marker`); every other ref passes. Exit 1 for the tools and scenarios commands, 0 for the others. Restored (`cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
+- Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestRunCommandScreensOutput`, `TestBuildOutputScreenKeys`, `TestBuildOutputScreenBounds/keys`, `TestBuildOutputScreenBounds/total`, `TestBuildOutputScreenSkips/dir_gone`, `TestBuildOutputScreenSkips/file_removed`, `TestBuildOutputScreenSkips/stat_gone`, `TestBuildOutputScreenIgnoresGuard`, `TestCredentialFileKeys/env-plain`, `TestCredentialFileKeys/env-quoted-note`, `TestCredentialFileKeys/env-hash-spaced`, `TestCredentialFileKeys/env-hash-glued` and 18 more leaves of the same tests (`exec_screen_test.go:121: last: the value reached the result`; `screen_build_test.go:83: env value: output differs (len 20, want 58)`; `screen_build_test.go:83: npmrc value: output differs (len 16, want 54)`; and likewise); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 1 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: The patch removes every K2 form; only whole lines remain keys. D4 run 4 loads `.env` in a shell and prints `$NAME` and `$OTHER` alone, so it is red by validity (no span marker).
+- Notes: The patch removes every K2 form; only whole lines remain keys. D4 run 4 loads `.env` in a shell and prints `$NAME` and `$OTHER` alone, so it is red by validity (no span marker). Re-recorded at `8058e5a6`: `122ec242` moved the `NAME=value` branch into a block of its own beside the store-line rule, so the line this patch changes was re-indented and the patch recorded at `18ca5d70` no longer applies; the mutation is the same.
 
 ## M-129 — A value up to its `#` comment is a key
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialFileKeys`, `TestContainment/D4`
@@ -3674,7 +3674,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestCredentialFileKeys`, rows `env-hash-spaced` and `env-hash-glued` (`screen_keys_test.go:58: key set differs: got 2 keys, want 3`); FAIL `TestContainment/D4` (`containment_test.go:116: D4: REGRESSION: declared contained but the forbidden effect happened (control held)`); every other ref passes. Exit 1 for the tools and scenarios commands, 0 for the others. Restored (`cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: D4 is red as REGRESSION on the wire probe, so every run met its validity (run 4 still carried a span marker) and a surrogate still reached a request: run 4 prints `$OTHER` as a shell loads it, without ` # note`, which only the `#` form matched. `env-hash-glued` is the no-space `#note` row the design moved to table 5.
+- Notes: D4 is red as REGRESSION on the wire probe, so every run met its validity (run 4 still carried a span marker) and a surrogate still reached a request: run 4 prints `$OTHER` as a shell loads it, without ` # note`, which only the `#` form matched. `env-hash-glued` is the no-space `#note` row.
 
 ## M-130 — A quoted value inside its quotes is a key
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialFileKeys`
@@ -3855,7 +3855,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestScreenStream/hold_bound` (`screen_test.go:111: held buffer kept after cut: 32769`); every other ref passes. Exit 1 for the tools command, 0 for the others. Restored (`cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: The patch keeps the held bytes at the cut and writes them in `finish`, the non-equivalent form the brief requires. The row is the 32769-byte write; it fails at its held-buffer check (`:111`), which precedes and stops the check that `finish` adds nothing (`:116`). A variant that moves the held bytes to another field at the cut and writes that field in `finish` passes the held-buffer check and goes red on that output check (`screen_test.go:116: later output delivered: 32862 bytes`), and on the byte-wise `cut`, `cut_d`, `cut_and_line` and `cut_key` rows (`screen_test.go:74: byte-wise: got 240 bytes, want 216`, and likewise), run at the same baseline and restored the same way. `after_cut_discards_held` stays green: there the held bytes arrive after the cut, when `Write` drops them on entry.
+- Notes: The patch keeps the held bytes at the cut and writes them in `finish`, so the held bytes reach the output (a mutant that only drops them would be equivalent). The row is the 32769-byte write; it fails at its held-buffer check (`:111`), which precedes and stops the check that `finish` adds nothing (`:116`). A variant that moves the held bytes to another field at the cut and writes that field in `finish` passes the held-buffer check and goes red on that output check (`screen_test.go:116: later output delivered: 32862 bytes`), and on the byte-wise `cut`, `cut_d`, `cut_and_line` and `cut_key` rows (`screen_test.go:74: byte-wise: got 240 bytes, want 216`, and likewise), run at the same baseline and restored the same way. `after_cut_discards_held` stays green: there the held bytes arrive after the cut, when `Write` drops them on entry.
 
 ## M-137 — The background stdout ring is written through the screen
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestBackgroundTailScreened`, `TestBackgroundCutStopsTail`, `TestContainment/D4`
@@ -3945,7 +3945,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
   ```
 - Baseline: pass (exit 0, the four commands of M-106; the six split commands on the restored export, whose files are byte-identical to the baseline, also exit 0). Variant A (both nil-screen guards removed): FAIL `TestRunCommandNoScreenFails` by a panic (`panic: runtime error: invalid memory address or nil pointer dereference`, in `(*outputScreen).snapshot` from `(*screenStream).finish` from `unixRunner.Run`); FAIL `TestBackgroundNoScreenFails` by the test timeout (`panic: test timed out after 1m0s`, running `TestBackgroundNoScreenFails`): `startWrapped` panicked in `(*outputScreen).notes` from `snapshotLocked` while holding the manager lock, its deferred release panicked again, and the test's cleanup (`Shutdown`) then waited on that lock. Variant B (a keyless screen substituted for the missing one, so bytes pass through): FAIL `TestRunCommandNoScreenFails` (`exec_screen_test.go:152: err = <nil>, want errNoOutputScreen`); FAIL `TestBackgroundNoScreenFails` (`background_screen_test.go:280: err = <nil>, want errNoOutputScreen`). Every other ref passes under both variants, `TestCaptureSitesAreKnown` included. Exit 1 for the first two commands, 0 for the others, under both. Restored (`cmp` identical to the baseline file): pass (exit 0, all six commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: Variant A is the guard removal a task reviewer measured; its reds are panics, so variant B shows the tests read the error itself. In the survey's single tools command, variant A's background hang killed the binary before the foreground test ran, which is why the run is split.
+- Notes: Variant A removes the guard; its reds are panics, so variant B shows the tests read the error itself. In the survey's single tools command, variant A's background hang killed the binary before the foreground test ran, which is why the run is split.
 
 ## M-139 — A subdirectory that cannot be opened is skipped and the walk goes on
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestWalkTolerant`, `TestBuildOutputScreenSkips`, `TestRunCommandWithheldStreams`
@@ -4102,7 +4102,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
   ```
 - Baseline: pass (`TestSeatbeltRunScreensOutput` ran with `GO_LLM_REQUIRE_SEATBELT=1`, not skipped; exit 0). Variant A (`wrapped.Screen = nil`): FAIL `TestSeatbeltRunScreensOutput` with the variable (`exec_darwin_test.go:1467: GO_LLM_REQUIRE_SEATBELT=1 but Seatbelt is unavailable: tools: seatbelt unavailable on this host: tools: exec spec has no output screen`); without it the test skips (exit 0). Variant B (a keyless screen in the wrapped spec): FAIL with and without the variable (`exec_darwin_test.go:1473: glob: the value reached the result`). `TestCaptureSitesAreKnown` passes under both. Restored (`cmp` identical to the baseline file): pass (exit 0, with the variable).
 - Kind: guard
-- Notes: Variant A is the brief's mutant: dropping the screen also fails the capability probe, which runs through the same backend with its keyless probe screen, so without the variable the test skips and only the variable turns it red. Variant B keeps the probe working and shows the assertion itself reading the output. The site is the by-value copy `wrapped := spec` in the Seatbelt backend's wrap step.
+- Notes: Variant A drops the screen: dropping it also fails the capability probe, which runs through the same backend with its keyless probe screen, so without the variable the test skips and only the variable turns it red. Variant B keeps the probe working and shows the assertion itself reading the output. The site is the by-value copy `wrapped := spec` in the Seatbelt backend's wrap step.
 
 ## M-146 — A replaced root is fatal, not a changed entry
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestClassifySkip`
@@ -4381,7 +4381,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestScreenStream/cut_color_name` (`screen_test.go:77: one write: got 67 bytes, want 214`); every other ref passes. Exit 1 for the tools command, 0 for the others. Restored (`cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: The patch feeds only the header rule the unstripped record; the path-prefix and value rules keep the stripped copy. The row is a `diff --git` header whose `.env` names carry color codes inside the path, then an added line; it has no key, so only the header rule can stop it. `line_color` and `span_csi` stay green, so the row isolates this rule. M-121, which unstrips all three rules, also turns this row red at this baseline. Found in review of the first round: at `18ca5d70` this mutant left every ref of the row green.
+- Notes: The patch feeds only the header rule the unstripped record; the path-prefix and value rules keep the stripped copy. The row is a `diff --git` header whose `.env` names carry color codes inside the path, then an added line; it has no key, so only the header rule can stop it. `line_color` and `span_csi` stay green, so the row isolates this rule. M-121, which unstrips all three rules, also turns this row red at this baseline. At `18ca5d70` this mutant left every ref of the row green.
 
 ## M-157 — The path-prefix rule reads the record with CSI sequences removed
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestScreenStream`
@@ -4405,7 +4405,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestScreenStream/line_color` (`screen_test.go:77: one write: got 49 bytes, want 59`); every other ref passes. Exit 1 for the tools command, 0 for the others. Restored (`cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: The patch feeds only the path-prefix rule the unstripped record. The row is a `grep --color=always -n` hit on `.env` (color codes around the name and the `:`), whose value is under the key floor and which runs with no key, so only the path-prefix rule can withhold it. `cut_color_name` and `span_csi` stay green. M-121 also turns this row red at this baseline. Found in review of the first round: at `18ca5d70` this mutant left every ref of the row green.
+- Notes: The patch feeds only the path-prefix rule the unstripped record. The row is a `grep --color=always -n` hit on `.env` (color codes around the name and the `:`), whose value is under the key floor and which runs with no key, so only the path-prefix rule can withhold it. `cut_color_name` and `span_csi` stay green. M-121 also turns this row red at this baseline. At `18ca5d70` this mutant left every ref of the row green.
 
 ## M-158 — A record ended by `\r` is screened on its own by the path-prefix rule
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestScreenStream`
@@ -4446,7 +4446,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestScreenStream/line_after_cr` (`screen_test.go:77: one write: got 27 bytes, want 63`); every other ref passes. Exit 1 for the tools command, 0 for the others. Restored (`cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: The patch keeps delivery at `\r` but lets the path-prefix rule read every record since the last `\n`, so a path-prefixed record after a progress line (`50%`, `\r`, then `.env:3:...`) has `50%\r.env` as its first field and is delivered. The same patch for the header rule (run: every ref stayed green) only adds cuts (a marker in the current record is still found, with the same pieces after it), so it is not a weakening and has no entry. A key can hold `\r` or `\n` (percent-decoded from a URL's `%0D` or `%0A`, or, for `\n`, from the `\n` escape in a git config value, which `gitConfigValue` decodes into the value an `extraheader` key, or URL userinfo read from that value, is taken from), but a key that holds either byte can never match, because records are split on both bytes, so it withholds nothing. The `\n` escape also yields the trimmed printed value, and when the escape is the value's first or last byte that key holds no newline and does match a record of git's output (M-286 and M-287). Found by the review's sweep of shared preprocessing steps: at `18ca5d70` this mutant left every ref of the row green.
+- Notes: The patch keeps delivery at `\r` but lets the path-prefix rule read every record since the last `\n`, so a path-prefixed record after a progress line (`50%`, `\r`, then `.env:3:...`) has `50%\r.env` as its first field and is delivered. The same patch for the header rule (run: every ref stayed green) only adds cuts (a marker in the current record is still found, with the same pieces after it), so it is not a weakening and has no entry. A key can hold `\r` or `\n` (percent-decoded from a URL's `%0D` or `%0A`, or, for `\n`, from the `\n` escape in a git config value, which `gitConfigValue` decodes into the value an `extraheader` key, or URL userinfo read from that value, is taken from), but a key that holds either byte can never match, because records are split on both bytes, so it withholds nothing. The `\n` escape also yields the trimmed printed value, and when the escape is the value's first or last byte that key holds no newline and does match a record of git's output (M-286 and M-287). Found by a sweep of shared preprocessing steps: at `18ca5d70` this mutant left every ref of the row green.
 
 ## M-159 — Keys from `.git/config` rules are CSI-stripped
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialFileKeys`
@@ -4484,7 +4484,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestCredentialFileKeys/git-csi-in-pass` (`screen_keys_test.go:105: expected key 0 missing`, and `expected key 1 missing`); every other ref passes. Exit 1 for the tools command, 0 for the others. Restored (`cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: The patch hands the git config rules an `add` that skips the CSI strip; the line key (K1) and the `.env` rules keep it. The row is a URL whose password holds a CSI sequence; the stripped userinfo and password must be keys. `git-csi-in-name` stays green under this patch: its sequence is in the setting name, which no git-rule key holds. Found by the review's sweep of shared preprocessing steps: at `18ca5d70` this mutant left every ref of the row green.
+- Notes: The patch hands the git config rules an `add` that skips the CSI strip; the line key (K1) and the `.env` rules keep it. The row is a URL whose password holds a CSI sequence; the stripped userinfo and password must be keys. `git-csi-in-name` stays green under this patch: its sequence is in the setting name, which no git-rule key holds. Found by a sweep of shared preprocessing steps: at `18ca5d70` this mutant left every ref of the row green.
 
 ## M-160 — A credential-file line is keyed trimmed (K1)
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialFileKeys`
@@ -4508,7 +4508,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestCredentialFileKeys/env-padded` (`screen_keys_test.go:59: key set differs: got 2 keys, want 2`); every other ref passes. Exit 1 for the tools command, 0 for the others. Restored (`cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: The patch keys the record as read instead of trimmed; K2 trims its value separately, so only K1 changes. The row is a `.env` line with spaces before and after it: a program that prints the line trimmed must still meet a key. Found by the review's sweep of shared preprocessing steps: at `18ca5d70` this mutant left every ref of the row green.
+- Notes: The patch keys the record as read instead of trimmed; K2 trims its value separately, so only K1 changes. The row is a `.env` line with spaces before and after it: a program that prints the line trimmed must still meet a key. Found by a sweep of shared preprocessing steps: at `18ca5d70` this mutant left every ref of the row green.
 
 ## M-161 — The line key (K1) keeps a line of exactly 8 bytes
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialFileKeys`
@@ -4534,7 +4534,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestCredentialFileKeys/floor-8-line-only` (`screen_keys_test.go:62: key set differs: got 0 keys, want 1`); every other ref passes. Exit 1 for the tools command, 0 for the others. Restored (`cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: The patch raises the floor to 9 for K1 only; K2 and the git rules keep 8. The row is an 8-byte line with no `=`, so K2 has nothing to key and only K1 can produce it; its 7-byte twin `floor-7-line-only` must not be a key (the code compares `len(k) < screenKeyFloor`, so 8 is kept and 7 dropped) and stays green. `floor-8-value` pins K2's floor and stays green. Found in review of the second round: at `45548f4f` this mutant left every ref of the row green.
+- Notes: The patch raises the floor to 9 for K1 only; K2 and the git rules keep 8. The row is an 8-byte line with no `=`, so K2 has nothing to key and only K1 can produce it; its 7-byte twin `floor-7-line-only` must not be a key (the code compares `len(k) < screenKeyFloor`, so 8 is kept and 7 dropped) and stays green. `floor-8-value` pins K2's floor and stays green. At `45548f4f` this mutant left every ref of the row green.
 
 ## M-162 — The `.git/config` key rules keep a key of exactly 8 bytes
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialFileKeys`
@@ -4562,7 +4562,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestCredentialFileKeys/git-floor-pass` (`screen_keys_test.go:137: expected key 0 missing`); every other ref passes. Exit 1 for the tools command, 0 for the others. Restored (`cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: The patch raises the floor to 9 for the keys the git config rules emit; K1 keeps 8. The row's first URL has an exactly 8-byte password, which only the password key produces (the whole userinfo and the line are longer and different keys); its second URL's 7-byte password must not be a key. Found in review of the second round: at `45548f4f` this mutant left every ref of the row green.
+- Notes: The patch raises the floor to 9 for the keys the git config rules emit; K1 keeps 8. The row's first URL has an exactly 8-byte password, which only the password key produces (the whole userinfo and the line are longer and different keys); its second URL's 7-byte password must not be a key. At `45548f4f` this mutant left every ref of the row green.
 
 ## M-163 — The percent-decoded whole userinfo is a key
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialFileKeys`
@@ -4585,7 +4585,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestCredentialFileKeys/git-pct-userinfo` (`screen_keys_test.go:137: expected key 0 missing`); every other ref passes. Exit 1 for the tools command, 0 for the others. Restored (`cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: The patch drops the decode of the whole `user:password` form and keeps the per-part decodes. The row's password is under the floor encoded (6 bytes) and decoded (4), so printing the decoded userinfo would replace only the user part and deliver the `:` and the password; only the decoded whole userinfo key covers it. Found in review of the second round: at `45548f4f` this mutant left every ref of the row green.
+- Notes: The patch drops the decode of the whole `user:password` form and keeps the per-part decodes. The row's password is under the floor encoded (6 bytes) and decoded (4), so printing the decoded userinfo would replace only the user part and deliver the `:` and the password; only the decoded whole userinfo key covers it. At `45548f4f` this mutant left every ref of the row green.
 
 ## M-164 — The `.git/config` record itself is read for URL userinfo
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialFileKeys`
@@ -4749,7 +4749,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestCredentialArgvCheck/sh_bang_exclude` (`credential_argv_test.go:154: blocked = false, want true`); every other ref passes. Exit codes: 1 for the interceptor command, 0 for the contract command, 0 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: The patch applies the whole-word exemption to script fields. The row's script, as one argv word, does not end in a credential name, so only its `:!` field can refuse it. Found by the round-3 sweep, one decision removed or moved per mutant: at `c9cc9155` this mutant left every ref of the row green, and it lets through what the original refuses, cuts or replaces.
+- Notes: The patch applies the whole-word exemption to script fields. The row's script, as one argv word, does not end in a credential name, so only its `:!` field can refuse it. Found by a sweep that removed or moved one decision per mutant: at `c9cc9155` this mutant left every ref of the row green, and it lets through what the original refuses, cuts or replaces.
 
 ## M-171 — Only the magic word `exclude` itself exempts a pathspec
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestWordNamesCredentialPath`
@@ -4773,7 +4773,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestWordNamesCredentialPath/excluded_magic` (`credential_argv_test.go:50: wordNamesCredentialPath = false, want true`); every other ref passes. Exit codes: 1 for the interceptor command, 0 for the contract command, 0 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: The patch exempts any magic word that contains `exclude`, so `:(excluded)` passes. Found by the round-3 sweep, one decision removed or moved per mutant: at `c9cc9155` this mutant left every ref of the row green, and it lets through what the original refuses, cuts or replaces.
+- Notes: The patch exempts any magic word that contains `exclude`, so `:(excluded)` passes. Found by a sweep that removed or moved one decision per mutant: at `c9cc9155` this mutant left every ref of the row green, and it lets through what the original refuses, cuts or replaces.
 
 ## M-172 — A magic word that only starts `exclude` does not exempt a pathspec
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestWordNamesCredentialPath`
@@ -4797,7 +4797,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestWordNamesCredentialPath/empty_magic` (`credential_argv_test.go:50: wordNamesCredentialPath = false, want true`); every other ref passes. Exit codes: 1 for the interceptor command, 0 for the contract command, 0 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: The patch exempts any magic word that is a prefix of `exclude`, the empty word included, so `:()` passes. Found by the round-3 sweep, one decision removed or moved per mutant: at `c9cc9155` this mutant left every ref of the row green, and it lets through what the original refuses, cuts or replaces.
+- Notes: The patch exempts any magic word that is a prefix of `exclude`, the empty word included, so `:()` passes. Found by a sweep that removed or moved one decision per mutant: at `c9cc9155` this mutant left every ref of the row green, and it lets through what the original refuses, cuts or replaces.
 
 ## M-173 — An attached short option is read as a path whatever the letter's case
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestWordNamesCredentialPath`
@@ -4821,7 +4821,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestWordNamesCredentialPath/short_flag_upper` (`credential_argv_test.go:50: wordNamesCredentialPath = false, want true`); every other ref passes. Exit codes: 1 for the interceptor command, 0 for the contract command, 0 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: The patch drops the case fold, so an upper-case option letter is no longer read. Found by the round-3 sweep, one decision removed or moved per mutant: at `c9cc9155` this mutant left every ref of the row green, and it lets through what the original refuses, cuts or replaces.
+- Notes: The patch drops the case fold, so an upper-case option letter is no longer read. Found by a sweep that removed or moved one decision per mutant: at `c9cc9155` this mutant left every ref of the row green, and it lets through what the original refuses, cuts or replaces.
 
 ## M-174 — An attached short option with the letter `a` is read as a path
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestWordNamesCredentialPath`
@@ -4845,7 +4845,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestWordNamesCredentialPath/short_flag_a` (`credential_argv_test.go:50: wordNamesCredentialPath = false, want true`); every other ref passes. Exit codes: 1 for the interceptor command, 0 for the contract command, 0 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: The patch moves the lower bound of the letter range from `a` to `b`. Found by the round-3 sweep, one decision removed or moved per mutant: at `c9cc9155` this mutant left every ref of the row green, and it lets through what the original refuses, cuts or replaces.
+- Notes: The patch moves the lower bound of the letter range from `a` to `b`. Found by a sweep that removed or moved one decision per mutant: at `c9cc9155` this mutant left every ref of the row green, and it lets through what the original refuses, cuts or replaces.
 
 ## M-175 — An attached short option with the letter `z` is read as a path
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestWordNamesCredentialPath`
@@ -4869,7 +4869,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestWordNamesCredentialPath/short_flag_z` (`credential_argv_test.go:50: wordNamesCredentialPath = false, want true`); every other ref passes. Exit codes: 1 for the interceptor command, 0 for the contract command, 0 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: The patch moves the upper bound of the letter range from `z` to `y`. Found by the round-3 sweep, one decision removed or moved per mutant: at `c9cc9155` this mutant left every ref of the row green, and it lets through what the original refuses, cuts or replaces.
+- Notes: The patch moves the upper bound of the letter range from `z` to `y`. Found by a sweep that removed or moved one decision per mutant: at `c9cc9155` this mutant left every ref of the row green, and it lets through what the original refuses, cuts or replaces.
 
 ## M-176 — An inline script is cut at `;`
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestScriptFields`
@@ -4892,7 +4892,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestScriptFields/semicolon` (`credential_argv_test.go:111: fields ["x;.env"] lack the expected field`); every other ref passes. Exit codes: 1 for the interceptor command, 0 for the contract command, 0 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: The patch removes `;` from the separator set; the row's script holds only that separator. Found by the round-3 sweep, one decision removed or moved per mutant: at `c9cc9155` this mutant left every ref of the row green, and it lets through what the original refuses, cuts or replaces.
+- Notes: The patch removes `;` from the separator set; the row's script holds only that separator. Found by a sweep that removed or moved one decision per mutant: at `c9cc9155` this mutant left every ref of the row green, and it lets through what the original refuses, cuts or replaces.
 
 ## M-177 — An inline script is cut at `&`
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestScriptFields`
@@ -4915,7 +4915,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestScriptFields/ampersand` (`credential_argv_test.go:111: fields ["x&.env"] lack the expected field`); every other ref passes. Exit codes: 1 for the interceptor command, 0 for the contract command, 0 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: The patch removes `&` from the separator set; the row's script holds only that separator. Found by the round-3 sweep, one decision removed or moved per mutant: at `c9cc9155` this mutant left every ref of the row green, and it lets through what the original refuses, cuts or replaces.
+- Notes: The patch removes `&` from the separator set; the row's script holds only that separator. Found by a sweep that removed or moved one decision per mutant: at `c9cc9155` this mutant left every ref of the row green, and it lets through what the original refuses, cuts or replaces.
 
 ## M-178 — An inline script is cut at `(`
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestScriptFields`
@@ -4938,7 +4938,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestScriptFields/open_paren` (`credential_argv_test.go:111: fields ["x(.env"] lack the expected field`); every other ref passes. Exit codes: 1 for the interceptor command, 0 for the contract command, 0 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: The patch removes `(` from the separator set; the row's script holds only that separator. Found by the round-3 sweep, one decision removed or moved per mutant: at `c9cc9155` this mutant left every ref of the row green, and it lets through what the original refuses, cuts or replaces.
+- Notes: The patch removes `(` from the separator set; the row's script holds only that separator. Found by a sweep that removed or moved one decision per mutant: at `c9cc9155` this mutant left every ref of the row green, and it lets through what the original refuses, cuts or replaces.
 
 ## M-179 — An inline script is cut at `)`
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestScriptFields`
@@ -4961,7 +4961,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestScriptFields/close_paren` (`credential_argv_test.go:111: fields ["x).env"] lack the expected field`); every other ref passes. Exit codes: 1 for the interceptor command, 0 for the contract command, 0 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: The patch removes `)` from the separator set; the row's script holds only that separator. Found by the round-3 sweep, one decision removed or moved per mutant: at `c9cc9155` this mutant left every ref of the row green, and it lets through what the original refuses, cuts or replaces.
+- Notes: The patch removes `)` from the separator set; the row's script holds only that separator. Found by a sweep that removed or moved one decision per mutant: at `c9cc9155` this mutant left every ref of the row green, and it lets through what the original refuses, cuts or replaces.
 
 ## M-180 — An inline script is cut at `<`
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestScriptFields`
@@ -4984,7 +4984,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestScriptFields/less_than` (`credential_argv_test.go:111: fields ["x<.env"] lack the expected field`); every other ref passes. Exit codes: 1 for the interceptor command, 0 for the contract command, 0 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: The patch removes `<` from the separator set; the row's script holds only that separator. Found by the round-3 sweep, one decision removed or moved per mutant: at `c9cc9155` this mutant left every ref of the row green, and it lets through what the original refuses, cuts or replaces.
+- Notes: The patch removes `<` from the separator set; the row's script holds only that separator. Found by a sweep that removed or moved one decision per mutant: at `c9cc9155` this mutant left every ref of the row green, and it lets through what the original refuses, cuts or replaces.
 
 ## M-181 — An inline script is cut at `>`
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestScriptFields`
@@ -5007,7 +5007,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestScriptFields/greater_than` (`credential_argv_test.go:111: fields ["x>.env"] lack the expected field`); every other ref passes. Exit codes: 1 for the interceptor command, 0 for the contract command, 0 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: The patch removes `>` from the separator set; the row's script holds only that separator. Found by the round-3 sweep, one decision removed or moved per mutant: at `c9cc9155` this mutant left every ref of the row green, and it lets through what the original refuses, cuts or replaces.
+- Notes: The patch removes `>` from the separator set; the row's script holds only that separator. Found by a sweep that removed or moved one decision per mutant: at `c9cc9155` this mutant left every ref of the row green, and it lets through what the original refuses, cuts or replaces.
 
 ## M-182 — An inline script is cut at a double quote
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestScriptFields`
@@ -5030,7 +5030,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestScriptFields/double_quote` (`credential_argv_test.go:111: fields ["x\".env"] lack the expected field`); every other ref passes. Exit codes: 1 for the interceptor command, 0 for the contract command, 0 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: The patch removes a double quote from the separator set; the row's script holds only that separator. Found by the round-3 sweep, one decision removed or moved per mutant: at `c9cc9155` this mutant left every ref of the row green, and it lets through what the original refuses, cuts or replaces.
+- Notes: The patch removes a double quote from the separator set; the row's script holds only that separator. Found by a sweep that removed or moved one decision per mutant: at `c9cc9155` this mutant left every ref of the row green, and it lets through what the original refuses, cuts or replaces.
 
 ## M-183 — An inline script is cut at a backtick
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestScriptFields`
@@ -5053,7 +5053,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestScriptFields/backtick` (`credential_argv_test.go:111: fields ["x`.env"] lack the expected field`); every other ref passes. Exit codes: 1 for the interceptor command, 0 for the contract command, 0 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: The patch removes a backtick from the separator set; the row's script holds only that separator. Found by the round-3 sweep, one decision removed or moved per mutant: at `c9cc9155` this mutant left every ref of the row green, and it lets through what the original refuses, cuts or replaces.
+- Notes: The patch removes a backtick from the separator set; the row's script holds only that separator. Found by a sweep that removed or moved one decision per mutant: at `c9cc9155` this mutant left every ref of the row green, and it lets through what the original refuses, cuts or replaces.
 
 ## M-184 — An inline script is cut at a backslash
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestScriptFields`
@@ -5076,7 +5076,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestScriptFields/backslash` (`credential_argv_test.go:111: fields ["x\\.env"] lack the expected field`); every other ref passes. Exit codes: 1 for the interceptor command, 0 for the contract command, 0 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: The patch removes a backslash from the separator set; the row's script holds only that separator. Found by the round-3 sweep, one decision removed or moved per mutant: at `c9cc9155` this mutant left every ref of the row green, and it lets through what the original refuses, cuts or replaces.
+- Notes: The patch removes a backslash from the separator set; the row's script holds only that separator. Found by a sweep that removed or moved one decision per mutant: at `c9cc9155` this mutant left every ref of the row green, and it lets through what the original refuses, cuts or replaces.
 
 ## M-185 — An inline script is cut at `{`
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestScriptFields`
@@ -5099,7 +5099,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestScriptFields/open_brace` (`credential_argv_test.go:111: fields ["x{.env"] lack the expected field`); every other ref passes. Exit codes: 1 for the interceptor command, 0 for the contract command, 0 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: The patch removes `{` from the separator set; the row's script holds only that separator. Found by the round-3 sweep, one decision removed or moved per mutant: at `c9cc9155` this mutant left every ref of the row green, and it lets through what the original refuses, cuts or replaces.
+- Notes: The patch removes `{` from the separator set; the row's script holds only that separator. Found by a sweep that removed or moved one decision per mutant: at `c9cc9155` this mutant left every ref of the row green, and it lets through what the original refuses, cuts or replaces.
 
 ## M-186 — An inline script is cut at `}`
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestScriptFields`
@@ -5122,7 +5122,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestScriptFields/close_brace` (`credential_argv_test.go:111: fields ["x}.env"] lack the expected field`); every other ref passes. Exit codes: 1 for the interceptor command, 0 for the contract command, 0 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: The patch removes `}` from the separator set; the row's script holds only that separator. Found by the round-3 sweep, one decision removed or moved per mutant: at `c9cc9155` this mutant left every ref of the row green, and it lets through what the original refuses, cuts or replaces.
+- Notes: The patch removes `}` from the separator set; the row's script holds only that separator. Found by a sweep that removed or moved one decision per mutant: at `c9cc9155` this mutant left every ref of the row green, and it lets through what the original refuses, cuts or replaces.
 
 ## M-187 — An inline script is cut at every whitespace character, not only a space
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestScriptFields`
@@ -5145,7 +5145,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestScriptFields/tab` (`credential_argv_test.go:111: fields ["x\t.env"] lack the expected field`); every other ref passes. Exit codes: 1 for the interceptor command, 0 for the contract command, 0 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: The patch cuts at a space only; the row's script uses a tab. Found by the round-3 sweep, one decision removed or moved per mutant: at `c9cc9155` this mutant left every ref of the row green, and it lets through what the original refuses, cuts or replaces.
+- Notes: The patch cuts at a space only; the row's script uses a tab. Found by a sweep that removed or moved one decision per mutant: at `c9cc9155` this mutant left every ref of the row green, and it lets through what the original refuses, cuts or replaces.
 
 ## M-188 — A `config` file at any depth under `.git` is a git config path
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestIsGitConfigPath`
@@ -5169,7 +5169,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestIsGitConfigPath/submodule_config` (`credential_argv_test.go:75: IsGitConfigPath = false, want true`; `credential_argv_test.go:78: IsCredentialPath disagrees with IsGitConfigPath`); every other ref passes. Exit codes: 1 for the interceptor command, 0 for the contract command, 0 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: The patch accepts `.git` only as the immediate parent, so a submodule's `.git/modules/<name>/config` is no longer a credential path for the argv rule or the read tool. The screen's walk does not descend `.git` (a stated exclusion), so the row pins the path rule. In the sweep's full `./agent/interceptor` run, `TestPathDenyComponentMatrix` and `TestIsCredentialPathMatrix` (outside these four commands) also went red. Found by the round-3 sweep, one decision removed or moved per mutant: at `c9cc9155` this mutant left every ref of the row green, and it lets through what the original refuses, cuts or replaces.
+- Notes: The patch accepts `.git` only as the immediate parent, so a submodule's `.git/modules/<name>/config` is no longer a credential path for the argv rule or the read tool. The screen's walk does not descend `.git` (a stated exclusion), so the row pins the path rule. In the sweep's full `./agent/interceptor` run, `TestPathDenyComponentMatrix` and `TestIsCredentialPathMatrix` (outside these four commands) also went red. Found by a sweep that removed or moved one decision per mutant: at `c9cc9155` this mutant left every ref of the row green, and it lets through what the original refuses, cuts or replaces.
 
 ## M-189 — Only ESC `[` starts a sequence `stripCSI` removes
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestStripCSI`
@@ -5193,7 +5193,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestStripCSI/escape_not_csi` (`screen_path_test.go:29: row "escape not csi": stripCSI mismatch`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: The patch removes the `[` check, so an ESC followed by another byte swallows the bytes after it and a path prefix behind it is no longer seen. Found by the round-3 sweep, one decision removed or moved per mutant: at `c9cc9155` this mutant left every ref of the row green, and it lets through what the original refuses, cuts or replaces.
+- Notes: The patch removes the `[` check, so an ESC followed by another byte swallows the bytes after it and a path prefix behind it is no longer seen. Found by a sweep that removed or moved one decision per mutant: at `c9cc9155` this mutant left every ref of the row green, and it lets through what the original refuses, cuts or replaces.
 
 ## M-190 — `stripCSI` reads `?` as a parameter byte
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestStripCSI`
@@ -5217,7 +5217,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestStripCSI/private_param` (`screen_path_test.go:29: row "private param": stripCSI mismatch`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: The patch moves the parameter range's upper bound from 0x3f to 0x3e. Found by the round-3 sweep, one decision removed or moved per mutant: at `c9cc9155` this mutant left every ref of the row green, and it lets through what the original refuses, cuts or replaces.
+- Notes: The patch moves the parameter range's upper bound from 0x3f to 0x3e. Found by a sweep that removed or moved one decision per mutant: at `c9cc9155` this mutant left every ref of the row green, and it lets through what the original refuses, cuts or replaces.
 
 ## M-191 — `stripCSI` reads a space as an intermediate byte
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestStripCSI`
@@ -5241,7 +5241,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestStripCSI/space_intermediate` (`screen_path_test.go:29: row "space intermediate": stripCSI mismatch`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: The patch moves the intermediate range's lower bound from 0x20 to 0x21. Found by the round-3 sweep, one decision removed or moved per mutant: at `c9cc9155` this mutant left every ref of the row green, and it lets through what the original refuses, cuts or replaces.
+- Notes: The patch moves the intermediate range's lower bound from 0x20 to 0x21. Found by a sweep that removed or moved one decision per mutant: at `c9cc9155` this mutant left every ref of the row green, and it lets through what the original refuses, cuts or replaces.
 
 ## M-192 — `stripCSI` reads `/` as an intermediate byte
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestStripCSI`
@@ -5265,7 +5265,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestStripCSI/slash_intermediate` (`screen_path_test.go:29: row "slash intermediate": stripCSI mismatch`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: The patch moves the intermediate range's upper bound from 0x2f to 0x2e. Found by the round-3 sweep, one decision removed or moved per mutant: at `c9cc9155` this mutant left every ref of the row green, and it lets through what the original refuses, cuts or replaces.
+- Notes: The patch moves the intermediate range's upper bound from 0x2f to 0x2e. Found by a sweep that removed or moved one decision per mutant: at `c9cc9155` this mutant left every ref of the row green, and it lets through what the original refuses, cuts or replaces.
 
 ## M-193 — `stripCSI` reads intermediate bytes
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestStripCSI`
@@ -5290,7 +5290,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestStripCSI/space_intermediate`, `TestStripCSI/slash_intermediate`, `TestStripCSI/hash_intermediate` (`screen_path_test.go:29: row "space intermediate": stripCSI mismatch`; `screen_path_test.go:29: row "slash intermediate": stripCSI mismatch`; `screen_path_test.go:29: row "hash intermediate": stripCSI mismatch`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: The patch removes the intermediate-byte loop. It also turns `space intermediate` and `slash intermediate` red, because removing the loop removes both of its bounds; `hash intermediate` is the row only this mutant turns red. Found by the round-3 sweep, one decision removed or moved per mutant: at `c9cc9155` this mutant left every ref of the row green, and it lets through what the original refuses, cuts or replaces.
+- Notes: The patch removes the intermediate-byte loop. It also turns `space intermediate` and `slash intermediate` red, because removing the loop removes both of its bounds; `hash intermediate` is the row only this mutant turns red. Found by a sweep that removed or moved one decision per mutant: at `c9cc9155` this mutant left every ref of the row green, and it lets through what the original refuses, cuts or replaces.
 
 ## M-194 — `stripCSI` accepts `@` as a final byte
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestStripCSI`
@@ -5314,7 +5314,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestStripCSI/at_final` (`screen_path_test.go:29: row "at final": stripCSI mismatch`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: The patch moves the final range's lower bound from 0x40 to 0x41. Found by the round-3 sweep, one decision removed or moved per mutant: at `c9cc9155` this mutant left every ref of the row green, and it lets through what the original refuses, cuts or replaces.
+- Notes: The patch moves the final range's lower bound from 0x40 to 0x41. Found by a sweep that removed or moved one decision per mutant: at `c9cc9155` this mutant left every ref of the row green, and it lets through what the original refuses, cuts or replaces.
 
 ## M-195 — `stripCSI` accepts `~` as a final byte
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestStripCSI`
@@ -5338,7 +5338,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestStripCSI/tilde_final` (`screen_path_test.go:29: row "tilde final": stripCSI mismatch`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: The patch moves the final range's upper bound from 0x7e to 0x7d. Found by the round-3 sweep, one decision removed or moved per mutant: at `c9cc9155` this mutant left every ref of the row green, and it lets through what the original refuses, cuts or replaces.
+- Notes: The patch moves the final range's upper bound from 0x7e to 0x7d. Found by a sweep that removed or moved one decision per mutant: at `c9cc9155` this mutant left every ref of the row green, and it lets through what the original refuses, cuts or replaces.
 
 ## M-196 — `gitUnquote` decodes `\a`
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestGitUnquote`
@@ -5362,7 +5362,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestGitUnquote/bell_escape` (`screen_path_test.go:64: row "bell escape": ok = false, want true`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: The patch removes `\a` from the simple escapes, so a quoted run holding it cannot be unquoted and is read as plain text, which misses a credential name spelled with octal escapes elsewhere in the same run. Found by the round-3 sweep, one decision removed or moved per mutant: at `c9cc9155` this mutant left every ref of the row green, and it lets through what the original refuses, cuts or replaces.
+- Notes: The patch removes `\a` from the simple escapes, so a quoted run holding it cannot be unquoted and is read as plain text, which misses a credential name spelled with octal escapes elsewhere in the same run. Found by a sweep that removed or moved one decision per mutant: at `c9cc9155` this mutant left every ref of the row green, and it lets through what the original refuses, cuts or replaces.
 
 ## M-197 — `gitUnquote` decodes `\b`
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestGitUnquote`
@@ -5386,7 +5386,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestGitUnquote/backspace_escape` (`screen_path_test.go:64: row "backspace escape": ok = false, want true`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: The patch removes `\b` from the simple escapes, so a quoted run holding it cannot be unquoted and is read as plain text, which misses a credential name spelled with octal escapes elsewhere in the same run. Found by the round-3 sweep, one decision removed or moved per mutant: at `c9cc9155` this mutant left every ref of the row green, and it lets through what the original refuses, cuts or replaces.
+- Notes: The patch removes `\b` from the simple escapes, so a quoted run holding it cannot be unquoted and is read as plain text, which misses a credential name spelled with octal escapes elsewhere in the same run. Found by a sweep that removed or moved one decision per mutant: at `c9cc9155` this mutant left every ref of the row green, and it lets through what the original refuses, cuts or replaces.
 
 ## M-198 — `gitUnquote` decodes `\f`
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestGitUnquote`
@@ -5410,7 +5410,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestGitUnquote/form_feed_escape` (`screen_path_test.go:64: row "form feed escape": ok = false, want true`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: The patch removes `\f` from the simple escapes, so a quoted run holding it cannot be unquoted and is read as plain text, which misses a credential name spelled with octal escapes elsewhere in the same run. Found by the round-3 sweep, one decision removed or moved per mutant: at `c9cc9155` this mutant left every ref of the row green, and it lets through what the original refuses, cuts or replaces.
+- Notes: The patch removes `\f` from the simple escapes, so a quoted run holding it cannot be unquoted and is read as plain text, which misses a credential name spelled with octal escapes elsewhere in the same run. Found by a sweep that removed or moved one decision per mutant: at `c9cc9155` this mutant left every ref of the row green, and it lets through what the original refuses, cuts or replaces.
 
 ## M-199 — `gitUnquote` decodes `\n`
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestGitUnquote`
@@ -5434,7 +5434,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestGitUnquote/newline_escape` (`screen_path_test.go:64: row "newline escape": ok = false, want true`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: The patch removes `\n` from the simple escapes, so a quoted run holding it cannot be unquoted and is read as plain text, which misses a credential name spelled with octal escapes elsewhere in the same run. Found by the round-3 sweep, one decision removed or moved per mutant: at `c9cc9155` this mutant left every ref of the row green, and it lets through what the original refuses, cuts or replaces.
+- Notes: The patch removes `\n` from the simple escapes, so a quoted run holding it cannot be unquoted and is read as plain text, which misses a credential name spelled with octal escapes elsewhere in the same run. Found by a sweep that removed or moved one decision per mutant: at `c9cc9155` this mutant left every ref of the row green, and it lets through what the original refuses, cuts or replaces.
 
 ## M-200 — `gitUnquote` decodes `\r`
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestGitUnquote`
@@ -5458,7 +5458,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestGitUnquote/carriage_return_escape` (`screen_path_test.go:64: row "carriage return escape": ok = false, want true`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: The patch removes `\r` from the simple escapes, so a quoted run holding it cannot be unquoted and is read as plain text, which misses a credential name spelled with octal escapes elsewhere in the same run. Found by the round-3 sweep, one decision removed or moved per mutant: at `c9cc9155` this mutant left every ref of the row green, and it lets through what the original refuses, cuts or replaces.
+- Notes: The patch removes `\r` from the simple escapes, so a quoted run holding it cannot be unquoted and is read as plain text, which misses a credential name spelled with octal escapes elsewhere in the same run. Found by a sweep that removed or moved one decision per mutant: at `c9cc9155` this mutant left every ref of the row green, and it lets through what the original refuses, cuts or replaces.
 
 ## M-201 — `gitUnquote` decodes `\v`
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestGitUnquote`
@@ -5482,7 +5482,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestGitUnquote/vertical_tab_escape` (`screen_path_test.go:64: row "vertical tab escape": ok = false, want true`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: The patch removes `\v` from the simple escapes, so a quoted run holding it cannot be unquoted and is read as plain text, which misses a credential name spelled with octal escapes elsewhere in the same run. Found by the round-3 sweep, one decision removed or moved per mutant: at `c9cc9155` this mutant left every ref of the row green, and it lets through what the original refuses, cuts or replaces.
+- Notes: The patch removes `\v` from the simple escapes, so a quoted run holding it cannot be unquoted and is read as plain text, which misses a credential name spelled with octal escapes elsewhere in the same run. Found by a sweep that removed or moved one decision per mutant: at `c9cc9155` this mutant left every ref of the row green, and it lets through what the original refuses, cuts or replaces.
 
 ## M-202 — `gitUnquote` decodes `\\`
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestGitUnquote`
@@ -5506,7 +5506,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestGitUnquote/backslash_escape` (`screen_path_test.go:64: row "backslash escape": ok = false, want true`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: The patch removes `\\` from the simple escapes, so a quoted run holding it cannot be unquoted and is read as plain text, which misses a credential name spelled with octal escapes elsewhere in the same run. Found by the round-3 sweep, one decision removed or moved per mutant: at `c9cc9155` this mutant left every ref of the row green, and it lets through what the original refuses, cuts or replaces.
+- Notes: The patch removes `\\` from the simple escapes, so a quoted run holding it cannot be unquoted and is read as plain text, which misses a credential name spelled with octal escapes elsewhere in the same run. Found by a sweep that removed or moved one decision per mutant: at `c9cc9155` this mutant left every ref of the row green, and it lets through what the original refuses, cuts or replaces.
 
 ## M-203 — `gitUnquote` accepts an octal escape whose first digit is 0
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestGitUnquote`
@@ -5530,7 +5530,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestGitUnquote/low_octal` (`screen_path_test.go:64: row "low octal": ok = false, want true`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: The patch moves the first digit's lower bound from 0 to 1. Found by the round-3 sweep, one decision removed or moved per mutant: at `c9cc9155` this mutant left every ref of the row green, and it lets through what the original refuses, cuts or replaces.
+- Notes: The patch moves the first digit's lower bound from 0 to 1. Found by a sweep that removed or moved one decision per mutant: at `c9cc9155` this mutant left every ref of the row green, and it lets through what the original refuses, cuts or replaces.
 
 ## M-204 — `gitUnquote` accepts an octal escape whose second digit is 7
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestGitUnquote`
@@ -5554,7 +5554,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestGitUnquote/octal_second_7` (`screen_path_test.go:64: row "octal second 7": ok = false, want true`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: The patch moves the second digit's upper bound from 7 to 6. Found by the round-3 sweep, one decision removed or moved per mutant: at `c9cc9155` this mutant left every ref of the row green, and it lets through what the original refuses, cuts or replaces.
+- Notes: The patch moves the second digit's upper bound from 7 to 6. Found by a sweep that removed or moved one decision per mutant: at `c9cc9155` this mutant left every ref of the row green, and it lets through what the original refuses, cuts or replaces.
 
 ## M-205 — `gitUnquote` accepts an octal escape whose third digit is 7
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestGitUnquote`
@@ -5578,7 +5578,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestGitUnquote/octal_third_7` (`screen_path_test.go:64: row "octal third 7": ok = false, want true`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: The patch moves the third digit's upper bound from 7 to 6. Found by the round-3 sweep, one decision removed or moved per mutant: at `c9cc9155` this mutant left every ref of the row green, and it lets through what the original refuses, cuts or replaces.
+- Notes: The patch moves the third digit's upper bound from 7 to 6. Found by a sweep that removed or moved one decision per mutant: at `c9cc9155` this mutant left every ref of the row green, and it lets through what the original refuses, cuts or replaces.
 
 ## M-206 — Every occurrence of a patch-header marker in a record is read
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialPatchHeader`
@@ -5601,7 +5601,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestCredentialPatchHeader/marker_in_quoted_run` (`screen_path_test.go:123: row "marker in quoted run": got false, want true`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: The patch reads only the first occurrence of each marker. In the row, the first `diff -` is followed by a quoted run that swallows the later one. Reading only the last occurrence instead is M-115. Found by the round-3 sweep, one decision removed or moved per mutant: at `c9cc9155` this mutant left every ref of the row green, and it lets through what the original refuses, cuts or replaces.
+- Notes: The patch reads only the first occurrence of each marker. In the row, the first `diff -` is followed by a quoted run that swallows the later one. Reading only the last occurrence instead is M-115. Found by a sweep that removed or moved one decision per mutant: at `c9cc9155` this mutant left every ref of the row green, and it lets through what the original refuses, cuts or replaces.
 
 ## M-207 — A header piece loses a leading quote before it is read
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialPatchHeader`
@@ -5626,7 +5626,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestCredentialPatchHeader/lone_open_quote` (`screen_path_test.go:123: row "lone open quote": got false, want true`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: The patch keeps the leading quote of a piece that cannot be unquoted. Found by the round-3 sweep, one decision removed or moved per mutant: at `c9cc9155` this mutant left every ref of the row green, and it lets through what the original refuses, cuts or replaces.
+- Notes: The patch keeps the leading quote of a piece that cannot be unquoted. Found by a sweep that removed or moved one decision per mutant: at `c9cc9155` this mutant left every ref of the row green, and it lets through what the original refuses, cuts or replaces.
 
 ## M-208 — Pieces after a quoted run are read
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialPatchHeader`
@@ -5652,7 +5652,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestCredentialPatchHeader/after_quoted_run` (`screen_path_test.go:123: row "after quoted run": got false, want true`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: The patch stops reading at the end of the first quoted run. Found by the round-3 sweep, one decision removed or moved per mutant: at `c9cc9155` this mutant left every ref of the row green, and it lets through what the original refuses, cuts or replaces.
+- Notes: The patch stops reading at the end of the first quoted run. Found by a sweep that removed or moved one decision per mutant: at `c9cc9155` this mutant left every ref of the row green, and it lets through what the original refuses, cuts or replaces.
 
 ## M-209 — A path-prefixed line is replaced whole even when it holds a key
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestScreenStream`
@@ -5686,7 +5686,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestScreenStream/line_and_key` (`screen_test.go:82: one write: got 66 bytes, want 54`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: The patch tries the value rule first, so the line keeps its path and every byte but the key. Found by the round-3 sweep, one decision removed or moved per mutant: at `c9cc9155` this mutant left every ref of the row green, and it lets through what the original refuses, cuts or replaces.
+- Notes: The patch tries the value rule first, so the line keeps its path and every byte but the key. Found by a sweep that removed or moved one decision per mutant: at `c9cc9155` this mutant left every ref of the row green, and it lets through what the original refuses, cuts or replaces.
 
 ## M-210 — Every occurrence of a key in a record is replaced
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestScreenStream`
@@ -5709,7 +5709,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestScreenStream/two_spans` (`screen_test.go:82: one write: got 76 bytes, want 112`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: The patch replaces only the first occurrence. Found by the round-3 sweep, one decision removed or moved per mutant: at `c9cc9155` this mutant left every ref of the row green, and it lets through what the original refuses, cuts or replaces.
+- Notes: The patch replaces only the first occurrence. Found by a sweep that removed or moved one decision per mutant: at `c9cc9155` this mutant left every ref of the row green, and it lets through what the original refuses, cuts or replaces.
 
 ## M-211 — A complete record over 32768 bytes cuts the stream
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestScreenStream`
@@ -5733,7 +5733,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestScreenStream/bound_over` (`screen_test.go:82: one write: got 32770 bytes, want 93`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: The patch moves `record`'s bound by one. The row writes the 32769-byte record and its terminator in one write, the only way to reach `record`'s own check; byte by byte, `Write`'s hold bound cuts first. Found by the round-3 sweep, one decision removed or moved per mutant: at `c9cc9155` this mutant left every ref of the row green, and it lets through what the original refuses, cuts or replaces.
+- Notes: The patch moves `record`'s bound by one. The row writes the 32769-byte record and its terminator in one write, the only way to reach `record`'s own check; byte by byte, `Write`'s hold bound cuts first. Found by a sweep that removed or moved one decision per mutant: at `c9cc9155` this mutant left every ref of the row green, and it lets through what the original refuses, cuts or replaces.
 
 ## M-212 — A replaced root met while opening a credential file fails the screen build
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestBuildOutputScreenRootReplaced`
@@ -5757,7 +5757,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestBuildOutputScreenRootReplaced` (`screen_build_test.go:370: file open swap: wrong outcome (error: false, screen: true)`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: The patch returns nil for a fatal error. The row swaps the root while `.env` is opened and the open fails with an ordinary error: no later check in the walk sees the swap, so only the file's own failure ends the build. Found by the round-3 sweep, one decision removed or moved per mutant: at `c9cc9155` this mutant left every ref of the row green, and it lets through what the original refuses, cuts or replaces.
+- Notes: The patch returns nil for a fatal error. The row swaps the root while `.env` is opened and the open fails with an ordinary error: no later check in the walk sees the swap, so only the file's own failure ends the build. Found by a sweep that removed or moved one decision per mutant: at `c9cc9155` this mutant left every ref of the row green, and it lets through what the original refuses, cuts or replaces.
 
 ## M-213 — A `.git/config` that cannot be reached is handled by its error kind
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestBuildOutputScreenGitConfigHeld`
@@ -5784,7 +5784,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestBuildOutputScreenGitConfigHeld/git_dir_renamed_away`, `TestBuildOutputScreenGitConfigHeld/git_dir_replaced`, `TestBuildOutputScreenGitConfigHeld/git_dir_denied`, `TestBuildOutputScreenGitConfigHeld/config_stat_fails`, `TestBuildOutputScreenGitConfigHeld/config_open_denied`, `TestBuildOutputScreenGitConfigHeld/config_replaced_before_open` (`screen_build_test.go:494: git dir renamed away: notes differ (0 notes, want 1)`; `screen_build_test.go:494: git dir replaced: notes differ (0 notes, want 1)`; `screen_build_test.go:494: git dir denied: notes differ (0 notes, want 1)`; and likewise); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: The patch treats every `openGitConfig` failure as no config. `TestBuildOutputScreenGitConfigHeld` is cited on this row from `f350333c`. Found by the round-3 sweep, one decision removed or moved per mutant: at `c9cc9155` this mutant left every ref of the row green, and it lets through what the original refuses, cuts or replaces.
+- Notes: The patch treats every `openGitConfig` failure as no config. `TestBuildOutputScreenGitConfigHeld` is cited on this row from `f350333c`. Found by a sweep that removed or moved one decision per mutant: at `c9cc9155` this mutant left every ref of the row green, and it lets through what the original refuses, cuts or replaces.
 
 ## M-214 — A `.git` directory that cannot be opened is handled by its error kind
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestBuildOutputScreenGitConfigHeld`
@@ -5808,7 +5808,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestBuildOutputScreenGitConfigHeld/git_dir_renamed_away`, `TestBuildOutputScreenGitConfigHeld/git_dir_replaced`, `TestBuildOutputScreenGitConfigHeld/git_dir_denied` (`screen_build_test.go:494: git dir renamed away: notes differ (0 notes, want 1)`; `screen_build_test.go:494: git dir replaced: notes differ (0 notes, want 1)`; `screen_build_test.go:494: git dir denied: notes differ (0 notes, want 1)`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: The patch returns no config when the listed `.git` directory cannot be opened. `TestBuildOutputScreenGitConfigHeld` is cited on this row from `f350333c`. Found by the round-3 sweep, one decision removed or moved per mutant: at `c9cc9155` this mutant left every ref of the row green, and it lets through what the original refuses, cuts or replaces.
+- Notes: The patch returns no config when the listed `.git` directory cannot be opened. `TestBuildOutputScreenGitConfigHeld` is cited on this row from `f350333c`. Found by a sweep that removed or moved one decision per mutant: at `c9cc9155` this mutant left every ref of the row green, and it lets through what the original refuses, cuts or replaces.
 
 ## M-215 — A `.git/config` that fails to open is handled by its error kind
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestBuildOutputScreenGitConfigHeld`
@@ -5832,7 +5832,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestBuildOutputScreenGitConfigHeld/config_replaced_before_open` (`screen_build_test.go:494: config replaced before open: notes differ (0 notes, want 1)`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: The patch returns no config when `config` cannot be opened, a replaced file included. Its red leaf shows an announce-only difference: re-run at `f350333c` with a scratch probe of `config_replaced_before_open`'s input, the original and the mutant deliver the same 17 bytes, the config's password among them, because the replaced file is skipped either way; under the mutant only the "changed" note is missing. The half of this decision that lets more through, an open error that is not a change, a missing file or a symlink answered as "no config", had no row at `f350333c`; M-223 records it at `d1d7fa91` with the `config mode 000` row. `TestBuildOutputScreenGitConfigHeld` is cited on this row from `f350333c`. Found by the round-3 sweep, one decision removed or moved per mutant: at `c9cc9155` this mutant left every ref of the row green.
+- Notes: The patch returns no config when `config` cannot be opened, a replaced file included. Its red leaf shows an announce-only difference: re-run at `f350333c` with a scratch probe of `config_replaced_before_open`'s input, the original and the mutant deliver the same 17 bytes, the config's password among them, because the replaced file is skipped either way; under the mutant only the "changed" note is missing. The half of this decision that lets more through, an open error that is not a change, a missing file or a symlink answered as "no config", had no row at `f350333c`; M-223 records it at `d1d7fa91` with the `config mode 000` row. `TestBuildOutputScreenGitConfigHeld` is cited on this row from `f350333c`. Found by a sweep that removed or moved one decision per mutant: at `c9cc9155` this mutant left every ref of the row green.
 
 ## M-216 — A `.git/config` whose stat fails is handled by its error kind
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestBuildOutputScreenGitConfigHeld`
@@ -5856,7 +5856,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestBuildOutputScreenGitConfigHeld/config_stat_fails` (`screen_build_test.go:494: config stat fails: notes differ (0 notes, want 1)`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: The patch returns no config on a stat failure other than not-exist. `TestBuildOutputScreenGitConfigHeld` is cited on this row from `f350333c`. Found by the round-3 sweep, one decision removed or moved per mutant: at `c9cc9155` this mutant left every ref of the row green, and it lets through what the original refuses, cuts or replaces.
+- Notes: The patch returns no config on a stat failure other than not-exist. `TestBuildOutputScreenGitConfigHeld` is cited on this row from `f350333c`. Found by a sweep that removed or moved one decision per mutant: at `c9cc9155` this mutant left every ref of the row green, and it lets through what the original refuses, cuts or replaces.
 
 ## M-217 — A git pathspec with long-form magic is read for the pattern after its magic
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialArgvCheck`, `TestWordNamesCredentialPath`
@@ -5932,7 +5932,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestWordNamesCredentialPath/magic_paren_in_pattern` (`credential_argv_test.go:65: wordNamesCredentialPath = false, want true`); every other ref passes. Exit codes: 1 for the interceptor command, 0 for the contract command, 0 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: The patch reads the pattern after the last `)`, so a pattern that holds a `)` (`:(top).ssh/a)b`) is read as `b` and no longer refused. Found by this task's sweep of the new lines: at `a72009d3` it left every ref of the row green.
+- Notes: The patch reads the pattern after the last `)`, so a pattern that holds a `)` (`:(top).ssh/a)b`) is read as `b` and no longer refused. Found by a sweep of the new lines: at `a72009d3` it left every ref of the row green.
 
 ## M-220 — A patch cut counts as a withheld match in the run's notes
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestScreenNotes`
@@ -5955,7 +5955,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestScreenNotes/cut_only` (`screen_test.go:266: got 0 notes`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: The patch stops `cut` counting a match. The stream still carries the cut marker, but a run whose only screening is a cut carries no note. Round 3 classed it announce only (at `c9cc9155`); it left every ref of the row green, at `184b4404` too, until `TestScreenNotes/cut_only` existed.
+- Notes: The patch stops `cut` counting a match. The stream still carries the cut marker, but a run whose only screening is a cut carries no note. A sweep classed it announce only (at `c9cc9155`); it left every ref of the row green, at `184b4404` too, until `TestScreenNotes/cut_only` existed.
 
 ## M-221 — `stripCSI` starts a sequence only at ESC
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestScreenStream`, `TestStripCSI`
@@ -5979,7 +5979,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestStripCSI/bracket_without_escape`, `TestScreenStream/cut_bracket_name` (`screen_path_test.go:40: row "bracket without escape": stripCSI mismatch`; `screen_test.go:86: one write: got 39 bytes, want 214`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: The patch drops the ESC test, so any byte followed by `[` and a CSI-shaped run starts a sequence: a patch header whose path holds `q[/.e` strips to a non-credential path and the patch is delivered, and a value split by such a run falls under the 8-byte floor. The round-3 review defined it (X-csi-esc); at `184b4404` and at `50d40b84` it left every ref of the row green.
+- Notes: The patch drops the ESC test, so any byte followed by `[` and a CSI-shaped run starts a sequence: a patch header whose path holds `q[/.e` strips to a non-credential path and the patch is delivered, and a value split by such a run falls under the 8-byte floor. A hand-written mutant (X-csi-esc); at `184b4404` and at `50d40b84` it left every ref of the row green.
 
 ## M-222 — `stripCSI` does not read past a record that ends in ESC
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestStripCSI`
@@ -6003,11 +6003,11 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestStripCSI/ends_in_escape` (`panic: runtime error: index out of range [3] with length 3`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: The patch drops the bound check, so a record that ends in ESC is indexed past its end: a panic in the stream writer, a crash rather than a delivery. The round-3 review defined it (X-csi-bound); at `50d40b84` it left every ref of the row green.
+- Notes: The patch drops the bound check, so a record that ends in ESC is indexed past its end: a panic in the stream writer, a crash rather than a delivery. A hand-written mutant (X-csi-bound); at `50d40b84` it left every ref of the row green.
 
 ## M-223 — A `.git/config` that cannot be opened, for any reason but a change, withholds both streams
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestBuildOutputScreenGitConfigHeld`
-- Baseline: `3e4fedce`, the commit that adds the last of the rows these entries turn red (#777), in an isolated `git archive` export
+- Baseline: `3e4fedce` (#777), in an isolated `git archive` export; the row this entry turns red, `config becomes a socket`, was added at `1338d3ec`, and `3e4fedce` moves one assertion of another test ahead of a `Fatalf`
 - Platform: darwin (arm64, go1.27.1, macOS 26.6.2); Linux (arm64, go1.27.1, the Docker `ci-local` image, as its non-root `ci` user): FAIL with the same failing leaves and the same quoted lines; exit codes interceptor=0, contract=0, tools=1, scenarios=0; restored (`patch -R`, `cmp` identical) and passing after the last mutant; Linux as root (the same image with `--user 0 -e GOCACHE=/tmp/gocache -e GOFLAGS=-buildvcs=false`, `go test -count=1 -v -run '^TestBuildOutputScreenGitConfigHeld$' ./agent/tools` only): baseline pass with no leaf skipped, mutant FAIL `TestBuildOutputScreenGitConfigHeld/config_becomes_a_socket` with the same two quoted lines, restored pass
 - Profile / command: darwin-host / `go test -count=1 -v -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath)$' ./agent/interceptor`; `go test -count=1 -v -run '^TestHardeningContracts$/^Active$/^Invariants$/^(run_env_argv|start_env_argv|run_dir_ssh|start_dir_git)$' ./agent`; `go test -count=1 -v -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestBuildOutputScreenIgnoresGuard|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld)$' ./agent/tools`; `go test -count=1 -v -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT and the four #777 leaves of INVARIANTS, in four commands: interceptor, contract, tools, scenarios)
 - Patch:
@@ -6030,7 +6030,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestBuildOutputScreenGitConfigHeld/config_becomes_a_socket` (`screen_build_test.go:584: config becomes a socket: notes differ (0 notes, want 1)`; `screen_build_test.go:594: config becomes a socket: output differs (len 17, want 0)`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: The patch answers "no config" for an open error that is not a change, a missing file or a symlink (the round-3 review's X-215b). The row `config becomes a socket` renames a bound Unix socket onto `.git/config` after its stat, so the real open in `openRegular` fails (EOPNOTSUPP on darwin, ENXIO on Linux) under every uid: the original withholds both streams with the cause `unreadable: ".git/config"`, and the mutant delivers the config's password with no note. Re-recorded at `3e4fedce` in fix round 5: at `d1d7fa91` the red row was `config mode 000`, a real mode-000 file that skipped at euid 0; no row an inventory row cites may depend on permission bits or skip (the inventory check rejects a skipped leaf under a cited ref, and `ci-local --mode security` may run as root), so that row was replaced. At `50d40b84` this mutant left every ref of the row green.
+- Notes: The patch answers "no config" for an open error that is not a change, a missing file or a symlink (hand-written mutant X-215b). The row `config becomes a socket` renames a bound Unix socket onto `.git/config` after its stat, so the real open in `openRegular` fails (EOPNOTSUPP on darwin, ENXIO on Linux) under every uid: the original withholds both streams with the cause `unreadable: ".git/config"`, and the mutant delivers the config's password with no note. Re-recorded at `3e4fedce`: at `d1d7fa91` the red row was `config mode 000`, a real mode-000 file that skipped at euid 0; no row an inventory row cites may depend on permission bits or skip (the inventory check rejects a skipped leaf under a cited ref, and `ci-local --mode security` may run as root), so that row was replaced. At `50d40b84` this mutant left every ref of the row green.
 
 ## M-224 — A credential file whose read fails after it opened withholds both streams
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestBuildOutputScreenGitConfigHeld`, `TestBuildOutputScreenSkips`
@@ -6056,7 +6056,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestBuildOutputScreenSkips/read_eio`, `TestBuildOutputScreenGitConfigHeld/config_read_fails` (`screen_build_test.go:361: read eio: credential delivered (len 17)`; `screen_build_test.go:366: read eio: walk went on after the withhold`; `screen_build_test.go:584: config read fails: notes differ (0 notes, want 1)`; and likewise); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: The patch removes the check after `io.ReadAll` (`_ = err` keeps the variable used), so a failed read is ignored and the keys of what was read are used. The rows `read eio` and `config read fails` make the read itself fail through the test-only `readFrom` hook, which wraps the reader with one that fails with EIO and returns no content: under the mutant the file has no keys, and both rows are red on the credential as well as on the note. Re-recorded at `3e4fedce` in fix round 5: at `d1d7fa91` the seam was a `readErr` answer asked after a successful read behind `if err == nil`, so the mutant's rows were red only on the note (the keys were complete), and dropping that guard let the seam's nil overwrite a real read error, which no portable test could pin (Ruling 44). The round-3 review reproduced a real failing read on macOS with no seam (a file with HFS compression whose resource fork was corrupted opens and stats as a regular file, then `read` fails with ENOMEM), so the branch is reachable outside tests.
+- Notes: The patch removes the check after `io.ReadAll` (`_ = err` keeps the variable used), so a failed read is ignored and the keys of what was read are used. The rows `read eio` and `config read fails` make the read itself fail through the test-only `readFrom` hook, which wraps the reader with one that fails with EIO and returns no content: under the mutant the file has no keys, and both rows are red on the credential as well as on the note. Re-recorded at `3e4fedce`: at `d1d7fa91` the seam was a `readErr` answer asked after a successful read behind `if err == nil`, so the mutant's rows were red only on the note (the keys were complete), and dropping that guard let the seam's nil overwrite a real read error, which no portable test could pin. A real failing read was reproduced on macOS with no seam (a file with HFS compression whose resource fork was corrupted opens and stats as a regular file, then `read` fails with ENOMEM), so the branch is reachable outside tests.
 
 ## M-225 — An `exclude` magic word exempts only a word that starts `:(`
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestWordNamesCredentialPath`
@@ -6614,7 +6614,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
 
 ## M-248 — A `.env` line that starts with `=` has a value
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialFileKeys`
-- Baseline: `d1d7fa91`, the commit that adds the rows these entries turn red (#777), in an isolated `git archive` export
+- Baseline: `8058e5a6` (#777), in an isolated `git archive` export; re-recorded there, see Notes
 - Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
 - Profile / command: darwin-host / `go test -count=1 -v -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath)$' ./agent/interceptor`; `go test -count=1 -v -run '^TestHardeningContracts$/^Active$/^Invariants$/^(run_env_argv|start_env_argv|run_dir_ssh|start_dir_git)$' ./agent`; `go test -count=1 -v -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestBuildOutputScreenIgnoresGuard|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld)$' ./agent/tools`; `go test -count=1 -v -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT and the four #777 leaves of INVARIANTS, in four commands: interceptor, contract, tools, scenarios)
 - Patch:
@@ -6622,19 +6622,19 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
   diff --git a/agent/tools/screen_keys.go b/agent/tools/screen_keys.go
   --- a/agent/tools/screen_keys.go
   +++ b/agent/tools/screen_keys.go
-  @@ -101,7 +101,7 @@
-   			if !gitConfigKeys(rec, add) {
-   				overLong = true
+  @@ -110,7 +110,7 @@
+   			if i := bytes.Index(line, []byte("://")); i > 0 && !bytes.ContainsAny(line[:i], "= \t") {
+   				urlUserinfoKeys(line, add)
    			}
-  -		} else if eq := bytes.IndexByte(line, '='); eq >= 0 {
-  +		} else if eq := bytes.IndexByte(line, '='); eq > 0 {
-   			envValueKeys(bytes.TrimSpace(line[eq+1:]), add)
+  -			if eq := bytes.IndexByte(line, '='); eq >= 0 {
+  +			if eq := bytes.IndexByte(line, '='); eq > 0 {
+   				envValueKeys(bytes.TrimSpace(line[eq+1:]), add)
+   			}
    		}
-   	}
   ```
-- Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestCredentialFileKeys/env-leading-eq` (`screen_keys_test.go:69: key set differs: got 1 keys, want 2`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
+- Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestCredentialFileKeys/env-leading-eq` (`screen_keys_test.go:86: key set differs: got 1 keys, want 2`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: The patch needs the `=` after the first byte, so the value of `=<value>` is no longer a key. Generated sweep mutant `screen_keys.104.50.O2`; at `6194e105` it left every ref of the row green.
+- Notes: The patch needs the `=` after the first byte, so the value of `=<value>` is no longer a key. Generated sweep mutant `screen_keys.104.50.O2`; at `6194e105` it left every ref of the row green. Re-recorded at `8058e5a6`: `122ec242` turned the `else if` that holds this test into an `if` of its own beside the store-line rule, so the patch recorded at `d1d7fa91` no longer applies; the mutation is the same.
 
 ## M-249 — A single-quoted `.env` value is read inside its quotes
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialFileKeys`
@@ -7305,7 +7305,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestCredentialFileKeys/git-url-second-url` (`screen_keys_test.go:212: expected key 0 missing`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: The patch reads only the first `://` of a text, so a URL after one with no userinfo is not keyed. The round-3 review defined it (X-url-first-url-only); it left every ref of the row green at `50d40b84` and at `6194e105`.
+- Notes: The patch reads only the first `://` of a text, so a URL after one with no userinfo is not keyed. A hand-written mutant (X-url-first-url-only); it left every ref of the row green at `50d40b84` and at `6194e105`.
 
 ## M-277 — A user part is also keyed percent-decoded
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialFileKeys`
@@ -7333,7 +7333,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestCredentialFileKeys/git-pct-user` (`screen_keys_test.go:212: expected key 0 missing`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: The patch decodes only the password part, so a percent-encoded user part's decoded form is not a key. One of the round-3 review's combination mutants; green at `50d40b84` and at `6194e105`.
+- Notes: The patch decodes only the password part, so a percent-encoded user part's decoded form is not a key. A hand-written combination mutant; green at `50d40b84` and at `6194e105`.
 
 ## M-278 — The parts of the userinfo read to the first `@` are keys
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialFileKeys`
@@ -7362,7 +7362,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestCredentialFileKeys/git-first-at-pass` (`screen_keys_test.go:212: expected key 0 missing`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: The patch splits only the userinfo read to the last `@`, so with two `@` the password read to the first is not a key. A combination mutant of the round-3 review; green at `50d40b84` and at `6194e105`.
+- Notes: The patch splits only the userinfo read to the last `@`, so with two `@` the password read to the first is not a key. A hand-written combination mutant; green at `50d40b84` and at `6194e105`.
 
 ## M-279 — The whole userinfo read to the last `@` is keyed decoded
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialFileKeys`
@@ -7390,7 +7390,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestCredentialFileKeys/git-last-at-decoded` (`screen_keys_test.go:212: expected key 0 missing`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: The patch decodes the whole userinfo only when read to the first `@`. A combination mutant of the round-3 review; green at `50d40b84` and at `6194e105`.
+- Notes: The patch decodes the whole userinfo only when read to the first `@`. A hand-written combination mutant; green at `50d40b84` and at `6194e105`.
 
 ## M-280 — The whole userinfo read to the first `@` is keyed decoded
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialFileKeys`
@@ -7418,7 +7418,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestCredentialFileKeys/git-first-at-decoded` (`screen_keys_test.go:212: expected key 0 missing`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: The patch decodes the whole userinfo only when read to the last `@`. A combination mutant of the round-3 review; green at `50d40b84` and at `6194e105`.
+- Notes: The patch decodes the whole userinfo only when read to the last `@`. A hand-written combination mutant; green at `50d40b84` and at `6194e105`.
 
 ## M-281 — The whole userinfo read to the last `@` is keyed as written
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialFileKeys`
@@ -7445,7 +7445,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestCredentialFileKeys/git-last-at-as-written` (`screen_keys_test.go:212: expected key 0 missing`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: The patch keys the whole userinfo as written only when read to the first `@`. A combination mutant of the round-3 review; green at `50d40b84` and at `6194e105`.
+- Notes: The patch keys the whole userinfo as written only when read to the first `@`. A hand-written combination mutant; green at `50d40b84` and at `6194e105`.
 
 ## M-282 — A walk error after the budget ran out still fails the build
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestBuildOutputScreenRootReplaced`
@@ -7587,7 +7587,7 @@ These mutations prove the harness, inventory lint, checker and gate rules can fa
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestBuildOutputScreenSkips/read_eio`, `TestBuildOutputScreenGitConfigHeld/config_read_fails` (`screen_build_test.go:361: read eio: credential delivered (len 17)`; `screen_build_test.go:366: read eio: walk went on after the withhold`; `screen_build_test.go:584: config read fails: notes differ (0 notes, want 1)`; and likewise); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: The patch discards the error `io.ReadAll` returns (`content, _ :=`, with `err` declared so that it builds), so a read that fails part way is ignored and the keys of what was read are used. It goes red only because the injected failure now arrives through the read itself: `1338d3ec` reshaped the read seam (Ruling 44) from a `readErr` answer asked after a successful read into `readFrom`, a hook that wraps the reader, and the rows `read eio` and `config read fails` make that reader fail with EIO and return no content. Under the earlier seam the error came from the seam, not from the read, so this mutant was green. Both rows are red on the credential: the file's keys are missing and its value is delivered.
+- Notes: The patch discards the error `io.ReadAll` returns (`content, _ :=`, with `err` declared so that it builds), so a read that fails part way is ignored and the keys of what was read are used. It goes red only because the injected failure now arrives through the read itself: `1338d3ec` reshaped the read seam, because the earlier shape let a mutant through that no portable test could pin, from a `readErr` answer asked after a successful read into `readFrom`, a hook that wraps the reader, and the rows `read eio` and `config read fails` make that reader fail with EIO and return no content. Under the earlier seam the error came from the seam, not from the read, so this mutant was green. Both rows are red on the credential: the file's keys are missing and its value is delivered.
 
 ## M-286 — git's `\n` escape is decoded
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialFileKeys`
@@ -7612,7 +7612,7 @@ These mutations prove the harness, inventory lint, checker and gate rules can fa
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestCredentialFileKeys/git-xh-nl-end`, `TestCredentialFileKeys/git-xh-nl-start` (`screen_keys_test.go:229: expected key 0 missing`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: The patch removes the `\n` case of the escape switch, so a value with an escaped newline is refused (`gitConfigValue` returns nil) and none of its printed forms is a key. When the escape is the value's last or first byte, the trimmed printed value is the key a record of git's output matches (`git config --get` prints the newline as a line end), and only the decode gives it. Generated sweep mutant `screen_keys.49.4.O1s`; at `6194e105` it left every ref of the row green, and round 4 classed it as equivalent; the round-4 review constructed the input that tells it apart, and the row that pins it was added at `36f01e67`.
+- Notes: The patch removes the `\n` case of the escape switch, so a value with an escaped newline is refused (`gitConfigValue` returns nil) and none of its printed forms is a key. When the escape is the value's last or first byte, the trimmed printed value is the key a record of git's output matches (`git config --get` prints the newline as a line end), and only the decode gives it. Generated sweep mutant `screen_keys.49.4.O1s`; at `6194e105` it left every ref of the row green, and it was first classed as equivalent; an input built later tells it apart, and the row that pins it was added at `36f01e67`.
 
 ## M-287 — git's `\n` escape decodes to a newline
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialFileKeys`
@@ -7636,7 +7636,7 @@ These mutations prove the harness, inventory lint, checker and gate rules can fa
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestCredentialFileKeys/git-xh-nl-end`, `TestCredentialFileKeys/git-xh-nl-start` (`screen_keys_test.go:229: expected key 0 missing`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: The patch removes `c = '\n'`, so the escape decodes to a backslash; the printed value then ends or starts with that byte, and trimming leaves it, so the key a record of git's output matches is lost. Generated sweep mutant `screen_keys.50.5.O3`; at `6194e105` it left every ref of the row green, and round 4 classed it as equivalent; the round-4 review constructed the input that tells it apart, and the row that pins it was added at `36f01e67`.
+- Notes: The patch removes `c = '\n'`, so the escape decodes to a backslash; the printed value then ends or starts with that byte, and trimming leaves it, so the key a record of git's output matches is lost. Generated sweep mutant `screen_keys.50.5.O3`; at `6194e105` it left every ref of the row green, and it was first classed as equivalent; an input built later tells it apart, and the row that pins it was added at `36f01e67`.
 
 ## M-288 — URL userinfo is read inside the authority
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialFileKeys`
@@ -7660,7 +7660,7 @@ These mutations prove the harness, inventory lint, checker and gate rules can fa
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestCredentialFileKeys/git-url-auth-cut`, `TestCredentialFileKeys/git-url-auth-cut-tab`, `TestCredentialFileKeys/git-url-auth-cut-space` (`screen_keys_test.go:229: expected key 0 missing`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: The patch never cuts the authority at its first `/`, space or tab, so the last `@` is searched past it. With two `@` in the authority and a third after it, the userinfo read to the last `@` runs into the path, and the password as git and curl read it (up to the authority's last `@`) is no longer a key. Generated sweep mutant `screen_keys.195.41.O1c-f`; at `6194e105` it left every ref of the row green, and round 4 classed it as withholds more; the round-4 review constructed the input that tells it apart, and the row that pins it was added at `36f01e67`.
+- Notes: The patch never cuts the authority at its first `/`, space or tab, so the last `@` is searched past it. With two `@` in the authority and a third after it, the userinfo read to the last `@` runs into the path, and the password as git and curl read it (up to the authority's last `@`) is no longer a key. Generated sweep mutant `screen_keys.195.41.O1c-f`; at `6194e105` it left every ref of the row green, and it was first classed as withholds more; an input built later tells it apart, and the row that pins it was added at `36f01e67`.
 
 ## M-289 — The authority ends at its first `/`, space or tab
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialFileKeys`
@@ -7684,7 +7684,7 @@ These mutations prove the harness, inventory lint, checker and gate rules can fa
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestCredentialFileKeys/git-url-auth-cut`, `TestCredentialFileKeys/git-url-auth-cut-tab`, `TestCredentialFileKeys/git-url-auth-cut-space` (`screen_keys_test.go:229: expected key 0 missing`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: The patch removes the cut `auth = auth[:n]`, with the same effect as M-288's patch: the password read to the authority's last `@` is lost when a third `@` follows the authority. Generated sweep mutant `screen_keys.196.4.O3`; at `6194e105` it left every ref of the row green, and round 4 classed it as withholds more; the round-4 review constructed the input that tells it apart, and the row that pins it was added at `36f01e67`.
+- Notes: The patch removes the cut `auth = auth[:n]`, with the same effect as M-288's patch: the password read to the authority's last `@` is lost when a third `@` follows the authority. Generated sweep mutant `screen_keys.196.4.O3`; at `6194e105` it left every ref of the row green, and it was first classed as withholds more; an input built later tells it apart, and the row that pins it was added at `36f01e67`.
 
 ## M-290 — A tab ends a URL's authority
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialFileKeys`
@@ -7708,7 +7708,7 @@ These mutations prove the harness, inventory lint, checker and gate rules can fa
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestCredentialFileKeys/git-url-auth-cut-tab` (`screen_keys_test.go:229: expected key 0 missing`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: The patch drops the tab from the authority's terminators, so with two `@` in the authority and a third after a tab, the password read to the authority's last `@` is lost. The round-3 review's mutant; round 4 classed it withholds more ("only adds last-`@` variants"), and the round-4 review showed the lost key. The row `git-url-auth-cut-tab` was added at `36f01e67`.
+- Notes: The patch drops the tab from the authority's terminators, so with two `@` in the authority and a third after a tab, the password read to the authority's last `@` is lost. A hand-written mutant; first classed as withholding more ("only adds last-`@` variants"), until an input showed the lost key. The row `git-url-auth-cut-tab` was added at `36f01e67`.
 
 ## M-291 — A space ends a URL's authority
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialFileKeys`
@@ -7756,7 +7756,7 @@ These mutations prove the harness, inventory lint, checker and gate rules can fa
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestCredentialFileKeys/git-pct-bad-digit` (`screen_keys_test.go:271: bad digit below 0 in the first position: decoded password missing`; `screen_keys_test.go:271: bad digit between 9 and A in the first position: decoded password missing`; `screen_keys_test.go:271: bad digit between F and a in the first position: decoded password missing`; and likewise); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: The patch drops the first digit's check, so `%` and a pair whose first byte is not a hex digit is decoded (to a byte computed from -1) instead of left as written, as curl leaves it; the decoded password, with the bad pair as written and the valid escape beside it decoded, is lost. Generated sweep mutant `screen_keys.219.37.O1o-t`; at `6194e105` it left every ref of the row green, and round 4 classed it as withholds more; the round-4 review constructed the input that tells it apart, and the row that pins it was added at `36f01e67`.
+- Notes: The patch drops the first digit's check, so `%` and a pair whose first byte is not a hex digit is decoded (to a byte computed from -1) instead of left as written, as curl leaves it; the decoded password, with the bad pair as written and the valid escape beside it decoded, is lost. Generated sweep mutant `screen_keys.219.37.O1o-t`; at `6194e105` it left every ref of the row green, and it was first classed as withholds more; an input built later tells it apart, and the row that pins it was added at `36f01e67`.
 
 ## M-293 — A percent escape's first digit is checked at its own position
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialFileKeys`
@@ -7780,7 +7780,7 @@ These mutations prove the harness, inventory lint, checker and gate rules can fa
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestCredentialFileKeys/git-pct-bad-digit` (`screen_keys_test.go:271: bad digit below 0 in the first position: decoded password missing`; `screen_keys_test.go:271: bad digit between 9 and A in the first position: decoded password missing`; `screen_keys_test.go:271: bad digit between F and a in the first position: decoded password missing`; and likewise); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: The patch checks the second digit twice and never the first, with the effect of M-292's patch. Generated sweep mutant `screen_keys.219.47.O4p`; at `6194e105` it left every ref of the row green, and round 4 classed it as withholds more; the round-4 review constructed the input that tells it apart, and the row that pins it was added at `36f01e67`.
+- Notes: The patch checks the second digit twice and never the first, with the effect of M-292's patch. Generated sweep mutant `screen_keys.219.47.O4p`; at `6194e105` it left every ref of the row green, and it was first classed as withholds more; an input built later tells it apart, and the row that pins it was added at `36f01e67`.
 
 ## M-294 — A percent escape's second digit must be hex
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialFileKeys`
@@ -7804,7 +7804,7 @@ These mutations prove the harness, inventory lint, checker and gate rules can fa
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestCredentialFileKeys/git-pct-bad-digit` (`screen_keys_test.go:271: bad digit below 0 in the second position: decoded password missing`; `screen_keys_test.go:271: bad digit between 9 and A in the second position: decoded password missing`; `screen_keys_test.go:271: bad digit between F and a in the second position: decoded password missing`; and likewise); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: As M-292, for the second digit: a pair whose second byte is not a hex digit is decoded, and the decoded password with that pair as written is lost. Generated sweep mutant `screen_keys.219.59.O1o-t`; at `6194e105` it left every ref of the row green, and round 4 classed it as withholds more; the round-4 review constructed the input that tells it apart, and the row that pins it was added at `36f01e67`.
+- Notes: As M-292, for the second digit: a pair whose second byte is not a hex digit is decoded, and the decoded password with that pair as written is lost. Generated sweep mutant `screen_keys.219.59.O1o-t`; at `6194e105` it left every ref of the row green, and it was first classed as withholds more; an input built later tells it apart, and the row that pins it was added at `36f01e67`.
 
 ## M-295 — A percent escape's second digit is checked at its own position
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialFileKeys`
@@ -7828,7 +7828,7 @@ These mutations prove the harness, inventory lint, checker and gate rules can fa
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestCredentialFileKeys/git-pct-bad-digit` (`screen_keys_test.go:271: bad digit below 0 in the second position: decoded password missing`; `screen_keys_test.go:271: bad digit between 9 and A in the second position: decoded password missing`; `screen_keys_test.go:271: bad digit between F and a in the second position: decoded password missing`; and likewise); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: The patch checks the first digit twice and never the second, with the effect of M-294's patch. Generated sweep mutant `screen_keys.219.69.O4m`; at `6194e105` it left every ref of the row green, and round 4 classed it as withholds more; the round-4 review constructed the input that tells it apart, and the row that pins it was added at `36f01e67`.
+- Notes: The patch checks the first digit twice and never the second, with the effect of M-294's patch. Generated sweep mutant `screen_keys.219.69.O4m`; at `6194e105` it left every ref of the row green, and it was first classed as withholds more; an input built later tells it apart, and the row that pins it was added at `36f01e67`.
 
 ## M-296 — The digit range of a hex digit starts at `0`
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialFileKeys`
@@ -7852,7 +7852,7 @@ These mutations prove the harness, inventory lint, checker and gate rules can fa
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestCredentialFileKeys/git-pct-bad-digit` (`screen_keys_test.go:271: bad digit below 0 in the first position: decoded password missing`; `screen_keys_test.go:271: bad digit below 0 in the second position: decoded password missing`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: The patch drops `c >= '0'`, so every byte below `0` is a digit; a pair holding one is decoded and the decoded password with it as written is lost. In the decision of M-269 (which drops `9`). Generated sweep mutant `screen_keys.231.7.O1o-t`; at `6194e105` it left every ref of the row green, and round 4 classed it as only widening (probe: superset), inside a decision whose other mutants have entries; the round-4 review constructed the input that tells it apart, and the row that pins it was added at `36f01e67`.
+- Notes: The patch drops `c >= '0'`, so every byte below `0` is a digit; a pair holding one is decoded and the decoded password with it as written is lost. In the decision of M-269 (which drops `9`). Generated sweep mutant `screen_keys.231.7.O1o-t`; at `6194e105` it left every ref of the row green, and it was first classed as only widening (probe: superset), inside a decision whose other mutants have entries; an input built later tells it apart, and the row that pins it was added at `36f01e67`.
 
 ## M-297 — The lower-case hex range ends at `f`
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialFileKeys`
@@ -7876,7 +7876,7 @@ These mutations prove the harness, inventory lint, checker and gate rules can fa
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestCredentialFileKeys/git-pct-bad-digit` (`screen_keys_test.go:271: bad digit above f in the first position: decoded password missing`; `screen_keys_test.go:271: bad digit above f in the second position: decoded password missing`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: The patch drops `c <= 'f'`, so every byte from `a` up is a hex digit; a pair holding one above `f` is decoded. In the decision of M-271. Generated sweep mutant `screen_keys.233.19.O1o-t`; at `6194e105` it left every ref of the row green, and round 4 classed it as only widening (probe: superset), inside a decision whose other mutants have entries; the round-4 review constructed the input that tells it apart, and the row that pins it was added at `36f01e67`.
+- Notes: The patch drops `c <= 'f'`, so every byte from `a` up is a hex digit; a pair holding one above `f` is decoded. In the decision of M-271. Generated sweep mutant `screen_keys.233.19.O1o-t`; at `6194e105` it left every ref of the row green, and it was first classed as only widening (probe: superset), inside a decision whose other mutants have entries; an input built later tells it apart, and the row that pins it was added at `36f01e67`.
 
 ## M-298 — The upper-case hex range is bounded
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialFileKeys`
@@ -7900,7 +7900,7 @@ These mutations prove the harness, inventory lint, checker and gate rules can fa
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestCredentialFileKeys/git-pct-bad-digit` (`screen_keys_test.go:271: bad digit below 0 in the first position: decoded password missing`; `screen_keys_test.go:271: bad digit below 0 in the second position: decoded password missing`; `screen_keys_test.go:271: bad digit between 9 and A in the first position: decoded password missing`; and likewise); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: The patch makes the upper-case case always true, so every byte is a hex digit; each bad pair of the row is decoded. In the decision of M-273. Generated sweep mutant `screen_keys.235.7.O1c-t`; at `6194e105` it left every ref of the row green, and round 4 classed it as only widening (probe: superset), inside a decision whose other mutants have entries; the round-4 review constructed the input that tells it apart, and the row that pins it was added at `36f01e67`.
+- Notes: The patch makes the upper-case case always true, so every byte is a hex digit; each bad pair of the row is decoded. In the decision of M-273. Generated sweep mutant `screen_keys.235.7.O1c-t`; at `6194e105` it left every ref of the row green, and it was first classed as only widening (probe: superset), inside a decision whose other mutants have entries; an input built later tells it apart, and the row that pins it was added at `36f01e67`.
 
 ## M-299 — The upper-case hex range starts at `A`
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialFileKeys`
@@ -7924,7 +7924,7 @@ These mutations prove the harness, inventory lint, checker and gate rules can fa
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestCredentialFileKeys/git-pct-bad-digit` (`screen_keys_test.go:271: bad digit below 0 in the first position: decoded password missing`; `screen_keys_test.go:271: bad digit below 0 in the second position: decoded password missing`; `screen_keys_test.go:271: bad digit between 9 and A in the first position: decoded password missing`; and likewise); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: The patch drops `c >= 'A'`, so every byte up to `F` is a hex digit; a pair holding one below `A` (and not a digit) is decoded. In the decision of M-273. Generated sweep mutant `screen_keys.235.7.O1o-t`; at `6194e105` it left every ref of the row green, and round 4 classed it as only widening (probe: superset), inside a decision whose other mutants have entries; the round-4 review constructed the input that tells it apart, and the row that pins it was added at `36f01e67`.
+- Notes: The patch drops `c >= 'A'`, so every byte up to `F` is a hex digit; a pair holding one below `A` (and not a digit) is decoded. In the decision of M-273. Generated sweep mutant `screen_keys.235.7.O1o-t`; at `6194e105` it left every ref of the row green, and it was first classed as only widening (probe: superset), inside a decision whose other mutants have entries; an input built later tells it apart, and the row that pins it was added at `36f01e67`.
 
 ## M-300 — The upper-case hex range ends at `F`
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialFileKeys`
@@ -7948,7 +7948,7 @@ These mutations prove the harness, inventory lint, checker and gate rules can fa
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestCredentialFileKeys/git-pct-bad-digit` (`screen_keys_test.go:271: bad digit between F and a in the first position: decoded password missing`; `screen_keys_test.go:271: bad digit between F and a in the second position: decoded password missing`; `screen_keys_test.go:271: bad digit above f in the first position: decoded password missing`; and likewise); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: The patch drops `c <= 'F'`, so every byte from `A` up is a hex digit; a pair holding one above `F` is decoded. In the decision of M-274. Generated sweep mutant `screen_keys.235.19.O1o-t`; at `6194e105` it left every ref of the row green, and round 4 classed it as only widening (probe: superset), inside a decision whose other mutants have entries; the round-4 review constructed the input that tells it apart, and the row that pins it was added at `36f01e67`.
+- Notes: The patch drops `c <= 'F'`, so every byte from `A` up is a hex digit; a pair holding one above `F` is decoded. In the decision of M-274. Generated sweep mutant `screen_keys.235.19.O1o-t`; at `6194e105` it left every ref of the row green, and it was first classed as only widening (probe: superset), inside a decision whose other mutants have entries; an input built later tells it apart, and the row that pins it was added at `36f01e67`.
 
 ## M-301 — The lower-case setting-name range ends at `z`
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialFileKeys`
@@ -7972,7 +7972,7 @@ These mutations prove the harness, inventory lint, checker and gate rules can fa
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestCredentialFileKeys/git-xh-name-after-tilde` (`screen_keys_test.go:229: expected key 0 missing`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: The patch drops `c <= 'z'`, so every byte from `a` up is a setting-name byte. A byte above `z` right before `extraheader` is then taken into the name, the name is no longer `extraheader`, and the value is not keyed. In the decision of M-253 (the widened class also lets more `=` reach the cap, which withholds). Generated sweep mutant `screen_keys.137.21.O1o-t`; at `6194e105` it left every ref of the row green, and round 4 classed it as only widening (probe: superset), inside a decision whose other mutants have entries; fix round 5, re-arguing the classification from the code, found the input that tells it apart, and the row that pins it was added at `36f01e67`.
+- Notes: The patch drops `c <= 'z'`, so every byte from `a` up is a setting-name byte. A byte above `z` right before `extraheader` is then taken into the name, the name is no longer `extraheader`, and the value is not keyed. In the decision of M-253 (the widened class also lets more `=` reach the cap, which withholds). Generated sweep mutant `screen_keys.137.21.O1o-t`; at `6194e105` it left every ref of the row green, and it was first classed as only widening (probe: superset), inside a decision whose other mutants have entries; re-arguing the classification from the code found the input that tells it apart, and the row that pins it was added at `36f01e67`.
 
 ## M-302 — The upper-case setting-name range ends at `Z`
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialFileKeys`
@@ -7996,7 +7996,7 @@ These mutations prove the harness, inventory lint, checker and gate rules can fa
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestCredentialFileKeys/git-xh-name-after-tilde` (`screen_keys_test.go:229: expected key 0 missing`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: As M-301, with every byte from `A` up a setting-name byte. In the decision of M-255. Generated sweep mutant `screen_keys.137.45.O1o-t`; at `6194e105` it left every ref of the row green, and round 4 classed it as only widening (probe: superset), inside a decision whose other mutants have entries; fix round 5, re-arguing the classification from the code, found the input that tells it apart, and the row that pins it was added at `36f01e67`.
+- Notes: As M-301, with every byte from `A` up a setting-name byte. In the decision of M-255. Generated sweep mutant `screen_keys.137.45.O1o-t`; at `6194e105` it left every ref of the row green, and it was first classed as only widening (probe: superset), inside a decision whose other mutants have entries; re-arguing the classification from the code found the input that tells it apart, and the row that pins it was added at `36f01e67`.
 
 ## M-303 — The digit setting-name range ends at `9`
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialFileKeys`
@@ -8020,4 +8020,196 @@ These mutations prove the harness, inventory lint, checker and gate rules can fa
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestCredentialFileKeys/git-xh-name-after-tilde` (`screen_keys_test.go:229: expected key 0 missing`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: As M-301, with every byte from `0` up a setting-name byte. In the decision of M-257. Generated sweep mutant `screen_keys.137.69.O1o-t`; at `6194e105` it left every ref of the row green, and round 4 classed it as only widening (probe: superset), inside a decision whose other mutants have entries; fix round 5, re-arguing the classification from the code, found the input that tells it apart, and the row that pins it was added at `36f01e67`.
+- Notes: As M-301, with every byte from `0` up a setting-name byte. In the decision of M-257. Generated sweep mutant `screen_keys.137.69.O1o-t`; at `6194e105` it left every ref of the row green, and it was first classed as only widening (probe: superset), inside a decision whose other mutants have entries; re-arguing the classification from the code found the input that tells it apart, and the row that pins it was added at `36f01e67`.
+
+## M-304 — A `.git/config` line with too many settings to try withholds both streams
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestBuildOutputScreenBounds`
+- Baseline: `8058e5a6`, the last commit of the fix wave that adds rows or changes test or production code (#777), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2); Linux (arm64, go1.27.1, the Docker `ci-local` image, as its non-root `ci` user): FAIL with the same failing leaves and the same quoted lines; exit codes interceptor=0, contract=0, tools=1, scenarios=0; restored (`patch -R`, `cmp` identical) and passing after the last mutant
+- Profile / command: darwin-host / `go test -count=1 -v -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath)$' ./agent/interceptor`; `go test -count=1 -v -run '^TestHardeningContracts$/^Active$/^Invariants$/^(run_env_argv|start_env_argv|run_dir_ssh|start_dir_git)$' ./agent`; `go test -count=1 -v -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestBuildOutputScreenIgnoresGuard|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld)$' ./agent/tools`; `go test -count=1 -v -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT and the four #777 leaves of INVARIANTS, in four commands: interceptor, contract, tools, scenarios)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/screen_build.go b/agent/tools/screen_build.go
+  --- a/agent/tools/screen_build.go
+  +++ b/agent/tools/screen_build.go
+  @@ -85,7 +85,7 @@
+   		if overLong {
+   			return stop(fmt.Sprintf("line over %d bytes: %q", lim.keyBytes, notePath(rel)))
+   		}
+  -		if crowded {
+  +		if (false && (crowded)) {
+   			return stop(fmt.Sprintf("more than %d name= pairs on a line: %q", gitConfigEqCap, notePath(rel)))
+   		}
+   		for _, k := range ks {
+  ```
+- Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestBuildOutputScreenBounds/crowded_git_config` (`screen_build_test.go:300: crowded: notes differ (0 notes)`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch never acts on `crowded` (`false && (crowded)`, the build-preserving form of generated sweep mutant `screen_build.88.6.O1c-f`), so a `.git/config` line with more than 32 named `=` builds a screen without the keys of the settings past the cap, and with no note. The original withholds both streams with the cause `more than 32 name= pairs on a line`, which `e804533a` gave that case in place of the line-length cause; the row `crowded git config` was added there.
+
+## M-305 — A key is skipped only when another file already gave it
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestBackgroundTailScreened`, `TestBuildOutputScreenBounds`, `TestBuildOutputScreenGitConfigAlias`, `TestBuildOutputScreenGitConfigHeld`, `TestBuildOutputScreenIgnoresGuard`, `TestBuildOutputScreenKeys`, `TestBuildOutputScreenSkips`, `TestRunCommandScreensOutput`, `TestRunCommandUnreadableAfterFirstCommand`, `TestRunCommandWithheldStreams`, `TestVerifyFailingObservationScreened`, `TestContainment/D4`
+- Baseline: `8058e5a6`, the last commit of the fix wave that adds rows or changes test or production code (#777), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2); Linux (arm64, go1.27.1, the Docker `ci-local` image, as its non-root `ci` user): FAIL with the same failing leaves and the same quoted lines; exit codes interceptor=0, contract=0, tools=1, scenarios=1; restored (`patch -R`, `cmp` identical) and passing after the last mutant
+- Profile / command: darwin-host / `go test -count=1 -v -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath)$' ./agent/interceptor`; `go test -count=1 -v -run '^TestHardeningContracts$/^Active$/^Invariants$/^(run_env_argv|start_env_argv|run_dir_ssh|start_dir_git)$' ./agent`; `go test -count=1 -v -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestBuildOutputScreenIgnoresGuard|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld)$' ./agent/tools`; `go test -count=1 -v -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT and the four #777 leaves of INVARIANTS, in four commands: interceptor, contract, tools, scenarios)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/screen_build.go b/agent/tools/screen_build.go
+  --- a/agent/tools/screen_build.go
+  +++ b/agent/tools/screen_build.go
+  @@ -89,7 +89,7 @@
+   			return stop(fmt.Sprintf("more than %d name= pairs on a line: %q", gitConfigEqCap, notePath(rel)))
+   		}
+   		for _, k := range ks {
+  -			if held[string(k)] {
+  +			if true {
+   				continue
+   			}
+   			if len(keys) == lim.keys {
+  ```
+- Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestBackgroundTailScreened/stdout`, `TestBackgroundTailScreened/stderr`, `TestRunCommandScreensOutput`, `TestRunCommandWithheldStreams/keys`, `TestRunCommandWithheldStreams/totalBytes`, `TestRunCommandUnreadableAfterFirstCommand`, `TestVerifyFailingObservationScreened`, `TestBuildOutputScreenKeys`, `TestBuildOutputScreenGitConfigAlias`, `TestBuildOutputScreenBounds/keys`, `TestBuildOutputScreenBounds/total`, `TestBuildOutputScreenBounds/keys_repeated` and 7 more leaves of the same tests (`background_screen_test.go:155: stdout: the value reached the tail`; `background_screen_test.go:155: stderr: the value reached the tail`; `exec_screen_test.go:96: glob: the value reached the result`; and likewise); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 1 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch treats every key as already held, so no key is taken and every value is delivered. Generated sweep mutant `screen_build.92.7.O1c-t`. `e804533a` added the check so that a key several files hold is counted once against the key-count and key-bytes limits; the rows `keys repeated` and `total repeated` pin the count, and its removal (`92.7.O1c-f`, `93.5.O3`, `101.4.O3`) only withholds more.
+
+## M-306 — A `.git/config` line with too many settings is reported
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestBuildOutputScreenBounds`, `TestCredentialFileKeys`
+- Baseline: `8058e5a6`, the last commit of the fix wave that adds rows or changes test or production code (#777), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath)$' ./agent/interceptor`; `go test -count=1 -v -run '^TestHardeningContracts$/^Active$/^Invariants$/^(run_env_argv|start_env_argv|run_dir_ssh|start_dir_git)$' ./agent`; `go test -count=1 -v -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestBuildOutputScreenIgnoresGuard|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld)$' ./agent/tools`; `go test -count=1 -v -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT and the four #777 leaves of INVARIANTS, in four commands: interceptor, contract, tools, scenarios)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/screen_keys.go b/agent/tools/screen_keys.go
+  --- a/agent/tools/screen_keys.go
+  +++ b/agent/tools/screen_keys.go
+  @@ -101,7 +101,7 @@
+   		add(line)
+   		if gitConfig {
+   			if !gitConfigKeys(rec, add) {
+  -				crowded = true
+  +				_ = crowded
+   			}
+   		} else {
+   			// A credential-store line (.git-credentials) is a URL: the
+  ```
+- Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestBuildOutputScreenBounds/crowded_git_config`, `TestCredentialFileKeys/git-eq-cap`, `TestCredentialFileKeys/git-eq-cap-name-bytes` (`screen_build_test.go:300: crowded: notes differ (0 notes)`; `screen_keys_test.go:264: 33 named = should set crowded, not overLong`; `screen_keys_test.go:272: name byte "a": 33 named = should set crowded`; and likewise); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch removes `crowded = true`, so a line whose settings were not all tried is not reported: the keys of the settings past the cap are missing and the output is delivered. Generated sweep mutant `screen_keys.104.5.O3`; the flag was added at `e804533a`.
+
+## M-307 — A credential-store line's userinfo is keyed
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestBuildOutputScreenKeys`, `TestCredentialFileKeys`, `TestRunCommandScreensOutput`
+- Baseline: `8058e5a6`, the last commit of the fix wave that adds rows or changes test or production code (#777), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath)$' ./agent/interceptor`; `go test -count=1 -v -run '^TestHardeningContracts$/^Active$/^Invariants$/^(run_env_argv|start_env_argv|run_dir_ssh|start_dir_git)$' ./agent`; `go test -count=1 -v -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestBuildOutputScreenIgnoresGuard|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld)$' ./agent/tools`; `go test -count=1 -v -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT and the four #777 leaves of INVARIANTS, in four commands: interceptor, contract, tools, scenarios)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/screen_keys.go b/agent/tools/screen_keys.go
+  --- a/agent/tools/screen_keys.go
+  +++ b/agent/tools/screen_keys.go
+  @@ -107,7 +107,7 @@
+   			// A credential-store line (.git-credentials) is a URL: the
+   			// scheme, all of the text before the first "://", holds no "=",
+   			// space or tab.
+  -			if i := bytes.Index(line, []byte("://")); i > 0 && !bytes.ContainsAny(line[:i], "= \t") {
+  +			if i := bytes.Index(line, []byte("://")); (false && (i > 0 && !bytes.ContainsAny(line[:i], "= \t"))) {
+   				urlUserinfoKeys(line, add)
+   			}
+   			if eq := bytes.IndexByte(line, '='); eq >= 0 {
+  ```
+- Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestRunCommandScreensOutput`, `TestBuildOutputScreenKeys`, `TestCredentialFileKeys/store-user-pass`, `TestCredentialFileKeys/store-pct-pass`, `TestCredentialFileKeys/store-user-only`, `TestCredentialFileKeys/store-query`, `TestCredentialFileKeys/store-short-parts` (`exec_screen_test.go:138: store: the password reached the result`; `screen_build_test.go:83: store password: output differs (len 26, want 63)`; `screen_keys_test.go:86: key set differs: got 1 keys, want 4`; and likewise); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch never reads a store line's userinfo (`false && (...)`, the build-preserving form of generated sweep mutant `screen_keys.110.46.O1c-f`), so a `.git-credentials` line gives only its whole-line key, and a password a credential helper prints alone (`git credential fill`) is delivered. The rule and its rows were added at `122ec242`.
+
+## M-308 — A store line with a non-empty scheme is read
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestBuildOutputScreenKeys`, `TestCredentialFileKeys`, `TestRunCommandScreensOutput`
+- Baseline: `8058e5a6`, the last commit of the fix wave that adds rows or changes test or production code (#777), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath)$' ./agent/interceptor`; `go test -count=1 -v -run '^TestHardeningContracts$/^Active$/^Invariants$/^(run_env_argv|start_env_argv|run_dir_ssh|start_dir_git)$' ./agent`; `go test -count=1 -v -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestBuildOutputScreenIgnoresGuard|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld)$' ./agent/tools`; `go test -count=1 -v -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT and the four #777 leaves of INVARIANTS, in four commands: interceptor, contract, tools, scenarios)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/screen_keys.go b/agent/tools/screen_keys.go
+  --- a/agent/tools/screen_keys.go
+  +++ b/agent/tools/screen_keys.go
+  @@ -107,7 +107,7 @@
+   			// A credential-store line (.git-credentials) is a URL: the
+   			// scheme, all of the text before the first "://", holds no "=",
+   			// space or tab.
+  -			if i := bytes.Index(line, []byte("://")); i > 0 && !bytes.ContainsAny(line[:i], "= \t") {
+  +			if i := bytes.Index(line, []byte("://")); false && !bytes.ContainsAny(line[:i], "= \t") {
+   				urlUserinfoKeys(line, add)
+   			}
+   			if eq := bytes.IndexByte(line, '='); eq >= 0 {
+  ```
+- Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestRunCommandScreensOutput`, `TestBuildOutputScreenKeys`, `TestCredentialFileKeys/store-user-pass`, `TestCredentialFileKeys/store-pct-pass`, `TestCredentialFileKeys/store-user-only`, `TestCredentialFileKeys/store-query`, `TestCredentialFileKeys/store-short-parts` (`exec_screen_test.go:138: store: the password reached the result`; `screen_build_test.go:83: store password: output differs (len 26, want 63)`; `screen_keys_test.go:86: key set differs: got 1 keys, want 4`; and likewise); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch replaces `i > 0` with `false`, with the effect of M-307's patch. Generated sweep mutant `screen_keys.110.46.O1o-f`.
+
+## M-309 — A store line whose scheme holds no `=`, space or tab is read
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestBuildOutputScreenKeys`, `TestCredentialFileKeys`, `TestRunCommandScreensOutput`
+- Baseline: `8058e5a6`, the last commit of the fix wave that adds rows or changes test or production code (#777), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath)$' ./agent/interceptor`; `go test -count=1 -v -run '^TestHardeningContracts$/^Active$/^Invariants$/^(run_env_argv|start_env_argv|run_dir_ssh|start_dir_git)$' ./agent`; `go test -count=1 -v -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestBuildOutputScreenIgnoresGuard|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld)$' ./agent/tools`; `go test -count=1 -v -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT and the four #777 leaves of INVARIANTS, in four commands: interceptor, contract, tools, scenarios)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/screen_keys.go b/agent/tools/screen_keys.go
+  --- a/agent/tools/screen_keys.go
+  +++ b/agent/tools/screen_keys.go
+  @@ -107,7 +107,7 @@
+   			// A credential-store line (.git-credentials) is a URL: the
+   			// scheme, all of the text before the first "://", holds no "=",
+   			// space or tab.
+  -			if i := bytes.Index(line, []byte("://")); i > 0 && !bytes.ContainsAny(line[:i], "= \t") {
+  +			if i := bytes.Index(line, []byte("://")); i > 0 && false {
+   				urlUserinfoKeys(line, add)
+   			}
+   			if eq := bytes.IndexByte(line, '='); eq >= 0 {
+  ```
+- Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestRunCommandScreensOutput`, `TestBuildOutputScreenKeys`, `TestCredentialFileKeys/store-user-pass`, `TestCredentialFileKeys/store-pct-pass`, `TestCredentialFileKeys/store-user-only`, `TestCredentialFileKeys/store-query`, `TestCredentialFileKeys/store-short-parts` (`exec_screen_test.go:138: store: the password reached the result`; `screen_build_test.go:83: store password: output differs (len 26, want 63)`; `screen_keys_test.go:86: key set differs: got 1 keys, want 4`; and likewise); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch replaces the scheme test with `false`, with the effect of M-307's patch. Generated sweep mutant `screen_keys.110.55.O1o-f`.
+
+## M-310 — A store line's userinfo keys are added
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestBuildOutputScreenKeys`, `TestCredentialFileKeys`, `TestRunCommandScreensOutput`
+- Baseline: `8058e5a6`, the last commit of the fix wave that adds rows or changes test or production code (#777), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath)$' ./agent/interceptor`; `go test -count=1 -v -run '^TestHardeningContracts$/^Active$/^Invariants$/^(run_env_argv|start_env_argv|run_dir_ssh|start_dir_git)$' ./agent`; `go test -count=1 -v -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestBuildOutputScreenIgnoresGuard|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld)$' ./agent/tools`; `go test -count=1 -v -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT and the four #777 leaves of INVARIANTS, in four commands: interceptor, contract, tools, scenarios)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/screen_keys.go b/agent/tools/screen_keys.go
+  --- a/agent/tools/screen_keys.go
+  +++ b/agent/tools/screen_keys.go
+  @@ -108,7 +108,7 @@
+   			// scheme, all of the text before the first "://", holds no "=",
+   			// space or tab.
+   			if i := bytes.Index(line, []byte("://")); i > 0 && !bytes.ContainsAny(line[:i], "= \t") {
+  -				urlUserinfoKeys(line, add)
+  +				_ = line; _ = add
+   			}
+   			if eq := bytes.IndexByte(line, '='); eq >= 0 {
+   				envValueKeys(bytes.TrimSpace(line[eq+1:]), add)
+  ```
+- Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestRunCommandScreensOutput`, `TestBuildOutputScreenKeys`, `TestCredentialFileKeys/store-user-pass`, `TestCredentialFileKeys/store-pct-pass`, `TestCredentialFileKeys/store-user-only`, `TestCredentialFileKeys/store-query`, `TestCredentialFileKeys/store-short-parts` (`exec_screen_test.go:138: store: the password reached the result`; `screen_build_test.go:83: store password: output differs (len 26, want 63)`; `screen_keys_test.go:86: key set differs: got 1 keys, want 4`; and likewise); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch removes the `urlUserinfoKeys` call, with the effect of M-307's patch. Generated sweep mutant `screen_keys.111.5.O3`.
+
+## M-311 — Only the text before `://` decides whether a line is a store line
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialFileKeys`
+- Baseline: `8058e5a6`, the last commit of the fix wave that adds rows or changes test or production code (#777), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath)$' ./agent/interceptor`; `go test -count=1 -v -run '^TestHardeningContracts$/^Active$/^Invariants$/^(run_env_argv|start_env_argv|run_dir_ssh|start_dir_git)$' ./agent`; `go test -count=1 -v -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestBuildOutputScreenIgnoresGuard|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld)$' ./agent/tools`; `go test -count=1 -v -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT and the four #777 leaves of INVARIANTS, in four commands: interceptor, contract, tools, scenarios)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/screen_keys.go b/agent/tools/screen_keys.go
+  --- a/agent/tools/screen_keys.go
+  +++ b/agent/tools/screen_keys.go
+  @@ -107,7 +107,7 @@
+   			// A credential-store line (.git-credentials) is a URL: the
+   			// scheme, all of the text before the first "://", holds no "=",
+   			// space or tab.
+  -			if i := bytes.Index(line, []byte("://")); i > 0 && !bytes.ContainsAny(line[:i], "= \t") {
+  +			if i := bytes.Index(line, []byte("://")); i > 0 && !bytes.ContainsAny(line, "= \t") {
+   				urlUserinfoKeys(line, add)
+   			}
+   			if eq := bytes.IndexByte(line, '='); eq >= 0 {
+  ```
+- Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestCredentialFileKeys/store-query` (`screen_keys_test.go:86: key set differs: got 1 keys, want 4`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: A hand-written mutant: the patch tests the whole line for `=`, space and tab instead of the text before its first `://`, so a store line with an `=` after the scheme (a query, `?x=1`) is not read for userinfo and its password is delivered. The row `store-query` was added at `8058e5a6`.
