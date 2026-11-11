@@ -80,7 +80,7 @@ Each is its own issue, not part of this decision.
 
 - **Weak-phrase demotion (K3).** Weak phrases tag at every origin and account for most detector fires in the go-llm and llm-app strata of the benign report (73 of 85 files, 11 of 11 and 49 of 50). Demoting them is a policy change, so it needs re-registered arms and cannot reuse this evidence.
 - **Payment-card rule hardening.** `payment_card` accounts for 122 of the 221 benign (file, rule) pairs in the Secrets census, where a file blocked under two rules counts under both (go-llm 8, go-src 114; 221 is the sum of the report's rule table). Issuer and BIN checks, context words and rejecting digit tables would target it; `secret_assignment` is the second source.
-- **Credential-path coverage of exec output (B5).** `read_file` of a credential path is refused by the always-on guards; exec output carries no such filter. A row for the containment inventory under #581 or #420.
+- **Credential-path coverage of exec output (B5).** `read_file` of a credential path is refused by the always-on guards. Done in #777: exec commands that name a credential path are refused, and credential-path content is withheld from exec output; the containment inventory row is `CMP-EXEC-CREDENTIAL-OUTPUT` ([inventory](containment-inventory.md)), with its Seatbelt and bwrap rows.
 
 ## Evidence
 
