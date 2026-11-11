@@ -48,6 +48,13 @@ func TestCredentialFileKeys(t *testing.T) {
 		{"csi-in-eq-run", "NAME\x1b[=1m=value-0042-abcdef", []string{"NAME=value-0042-abcdef", "1m=value-0042-abcdef"}},
 		{"csi-before-semicolon", "NAME=value-0043-abcdef \x1b[1m; note", []string{"NAME=value-0043-abcdef ; note", "value-0043-abcdef ; note"}},
 		{"env-padded", "  NAME=value-0046-abcdef  ", []string{"NAME=value-0046-abcdef", "value-0046-abcdef"}},
+		{"env-single-quoted", "NAME='value-0111-abcdef' x", []string{"NAME='value-0111-abcdef' x", "'value-0111-abcdef' x", "value-0111-abcdef"}},
+		{"env-unclosed-quote", "NAME=\"unterminated-0112", []string{"NAME=\"unterminated-0112", "\"unterminated-0112"}},
+		{"env-tab-semicolon", "NAME=value-0113-abcdef\t; note", []string{"NAME=value-0113-abcdef\t; note", "value-0113-abcdef\t; note", "value-0113-abcdef"}},
+		// A line that starts with "=": the text after it is still a value.
+		{"env-leading-eq", "=value-0110-abcdef", []string{"=value-0110-abcdef", "value-0110-abcdef"}},
+		// Nothing after "=": the line is the only key.
+		{"env-empty-value", "LONGNAME=", []string{"LONGNAME="}},
 	}
 	for _, tc := range exact {
 		t.Run(tc.label, func(t *testing.T) {
@@ -117,6 +124,74 @@ func TestCredentialFileKeys(t *testing.T) {
 		// the whole userinfo as written covers it.
 		{"git-pct-userinfo-as-written", "url = https://u-56:p%40ss@example.invalid/r.git",
 			[]string{"u-56:p%40ss"}, nil},
+		// A URL after one with no userinfo in the same text: reading goes on
+		// to the next "://".
+		{"git-url-second-url", "url = https://example.invalid/x https://user-0057:pass-0057-abcdef@example.invalid/r.git",
+			[]string{"pass-0057-abcdef"}, nil},
+		// A percent-encoded user part: only its decoded form is this key.
+		{"git-pct-user", "url = https://us%65r-0058-abcdef:x@example.invalid/r.git",
+			[]string{"user-0058-abcdef"}, nil},
+		// Two "@": the password part of the userinfo read to the first "@"
+		// is a key of its own (the one read to the last "@" ends later).
+		{"git-first-at-pass", "url = https://user-0059:pass-0059-abcdef@x@example.invalid/r.git",
+			[]string{"pass-0059-abcdef"}, nil},
+		// Two "@" and percent-encoding: the whole userinfo read to the last
+		// "@", decoded.
+		{"git-last-at-decoded", "url = https://u-60:p%40ss-60@x@example.invalid/r.git",
+			[]string{"u-60:p@ss-60@x"}, nil},
+		// Two "@" and percent-encoding: the whole userinfo read to the first
+		// "@", decoded.
+		{"git-first-at-decoded", "url = https://u-61:p%40s@x@example.invalid/r.git",
+			[]string{"u-61:p@s"}, nil},
+		// Two "@" and percent-encoding: the whole userinfo read to the last
+		// "@", as written.
+		{"git-last-at-as-written", "url = https://u-62:p%40s@x@example.invalid/r.git",
+			[]string{"u-62:p%40s@x"}, nil},
+		// A comment after the value: git prints the value without it.
+		{"git-xh-comment", "extraheader = AUTH: basic placeholder-0095-abcdef ; note",
+			[]string{"AUTH: basic placeholder-0095-abcdef"}, nil},
+		{"git-xh-hash-comment", "extraheader = AUTH: basic placeholder-0099-abcdef # note",
+			[]string{"AUTH: basic placeholder-0099-abcdef"}, nil},
+		// Inside quotes ";" is part of the value, not a comment.
+		{"git-xh-quoted-semicolon", `extraheader = "AUTH: basic;placeholder-0100-abcdef"`,
+			[]string{"AUTH: basic;placeholder-0100-abcdef"}, nil},
+		// The value git prints is 11 bytes and its trimmed form 7, so only
+		// the printed value is a key: a tab before the quote, and spaces
+		// after it, are dropped from what git prints.
+		{"git-xh-tab-before-quote", "extraheader = \t\"  ab-0097  \"", []string{"  ab-0097  "}, nil},
+		{"git-xh-padded-short-trailing", `extraheader = "  ab-0098  "  `, []string{"  ab-0098  "}, nil},
+		// An escape as the last byte of the value: git prints the escaped
+		// character, and the printed value is exactly 8 bytes.
+		{"git-xh-escape-at-end", `extraheader = ab-0104\\`, []string{`ab-0104\`}, nil},
+		{"git-xh-backspace", `extraheader = AUTH\bplaceholder-0105-abcdef`, []string{"AUTH\bplaceholder-0105-abcdef"}, nil},
+		{"git-xh-escaped-quote", `extraheader = AUTH\"placeholder-0109-abcdef`, []string{`AUTH"placeholder-0109-abcdef`}, nil},
+		// A tab between the setting name and "=" is skipped like a space.
+		{"git-xh-tab-before-eq", "extraheader\t= AUTH: basic placeholder-0116-abcdef",
+			[]string{"AUTH: basic placeholder-0116-abcdef"}, nil},
+		// No space after "=": the value as written starts right after it.
+		{"git-xh-escape-no-space", "extraheader=AUTH: basic\\tplaceholder-0117-abcdef",
+			[]string{"AUTH: basic\\tplaceholder-0117-abcdef"}, nil},
+		// A record that starts with "=": no setting name, only the line.
+		{"git-leading-eq", "=value-0115-abcdef", []string{"=value-0115-abcdef"}, nil},
+		// A "://" at the start of a text is read too.
+		{"git-url-no-scheme", "://user-0118:pass-0118-abcdef@example.invalid/r.git", []string{"pass-0118-abcdef"}, nil},
+		// An authority that ends the text, with no path.
+		{"git-url-no-path", "url = https://user-0119:pass-0119-abcdef@example.invalid", []string{"pass-0119-abcdef"}, nil},
+		// A userinfo with no ":" is a user part only.
+		{"git-url-user-only", "url = https://tokn-0120-abcdef@example.invalid/r.git", []string{"tokn-0120-abcdef"}, nil},
+		// An empty user part: the password is still a key on its own.
+		{"git-url-empty-user", "url = https://:pass-0121-abcdef@example.invalid/r.git", []string{"pass-0121-abcdef"}, nil},
+		// A "%" too close to the end to start an escape stays as written.
+		{"git-pct-at-end", "url = https://user-0122:pass-0122-abcd%2@example.invalid/r.git", []string{"pass-0122-abcd%2"}, nil},
+		// An escape as the last three bytes of a part is decoded.
+		{"git-pct-last", "url = https://user-0123:pass-0123-abcde%66@example.invalid/r.git", []string{"pass-0123-abcdef"}, nil},
+		// An escape whose first digit is 0 is decoded.
+		{"git-pct-control", "url = https://user-0124:pass-0124%09abcdef@example.invalid/r.git", []string{"pass-0124\tabcdef"}, nil},
+		// Hex digits at each end of both letter ranges decode.
+		{"git-pct-hex-lower-a", "url = https://user-0128:pass-0128%4aabcdef@example.invalid/r.git", []string{"pass-0128Jabcdef"}, nil},
+		{"git-pct-hex-lower-f", "url = https://user-0129:pass-0129%4fabcdef@example.invalid/r.git", []string{"pass-0129Oabcdef"}, nil},
+		{"git-pct-hex-upper-a", "url = https://user-0130:pass-0130%4Aabcdef@example.invalid/r.git", []string{"pass-0130Jabcdef"}, nil},
+		{"git-pct-hex-upper-f", "url = https://user-0131:pass-0131%4Fabcdef@example.invalid/r.git", []string{"pass-0131Oabcdef"}, nil},
 		{"git-trailing-backslash", "extraheader = ordinary-0038-abcdef\\\n", []string{"ordinary-0038-abcdef"}, nil},
 	}
 	for _, tc := range git {
@@ -151,6 +226,15 @@ func TestCredentialFileKeys(t *testing.T) {
 		}
 		if _, over := credentialFileKeys([]byte(strings.Repeat("a=", 33)+"x"), true, 1<<14); !over {
 			t.Fatal("33 named = should set overLong")
+		}
+	})
+	// Every byte at the edge of the setting-name class names an "=", so 33
+	// of them reach the cap.
+	t.Run("git-eq-cap-name-bytes", func(t *testing.T) {
+		for _, b := range []string{"a", "z", "A", "Z", "0", "9", "-"} {
+			if _, over := credentialFileKeys([]byte(strings.Repeat(b+"=", 33)+"x"), true, 1<<14); !over {
+				t.Errorf("name byte %q: 33 named = should set overLong", b)
+			}
 		}
 	})
 	t.Run("overlong-no-keys", func(t *testing.T) {

@@ -25,6 +25,14 @@ func TestStripCSI(t *testing.T) {
 		// A CSI-shaped run with no ESC before its "[" is text.
 		{"bracket without escape", "a[1mb", "a[1mb"},
 		{"ends in escape", "ab\x1b", "ab\x1b"},
+		// Bytes outside each class end the sequence unfinished, so it stays
+		// as written: an intermediate before a parameter, a control byte
+		// where a parameter, an intermediate or the final byte would be, and
+		// a byte above 0x7e as the final byte.
+		{"intermediate then param", "\x1b[ 1A", "\x1b[ 1A"},
+		{"control after bracket", "\x1b[\x01A", "\x1b[\x01A"},
+		{"control as final", "\x1b[\x01", "\x1b[\x01"},
+		{"high byte as final", "\x1b[\xe2A", "\x1b[\xe2A"},
 	}
 	for _, c := range cases {
 		t.Run(c.label, func(t *testing.T) {
@@ -58,6 +66,15 @@ func TestGitUnquote(t *testing.T) {
 		{"octal third 7", `"\307"`, "\xc7", 6, true},
 		{"literal u escape", `"caf\u00e9/.env"`, "", 0, false},
 		{"no close", `"no close`, "", 0, false},
+		{"backslash at end", `"abc\`, "", 0, false},
+		// An octal escape is three digits 0-7, the first 0-3; anything else
+		// leaves the run quoted text, read piece by piece.
+		{"escape below zero", `"\$00"`, "", 0, false},
+		{"second digit below zero", `"\3/0"`, "", 0, false},
+		{"second digit 8", `"\380"`, "", 0, false},
+		{"third digit below zero", `"\30/"`, "", 0, false},
+		{"third digit 8", `"\308"`, "", 0, false},
+		{"octal cut short", `"\34`, "", 0, false},
 		{"bad escape", `"bad \8"`, "", 0, false},
 	}
 	for _, c := range cases {
@@ -119,6 +136,8 @@ func TestCredentialPatchHeader(t *testing.T) {
 		{"go fail header name", "--- FAIL: TestHeader/diff_--git_a/.env_b/.env (0.00s)", false},
 		{"trace unclosed quote", `+ diff -u "a b`, false},
 		{"template", "diff --git a/.env.example b/.env.example", false},
+		{"trailing space", "+++ b/x ", false},
+		{"lone quote", `+++ "`, false},
 	}
 	for _, c := range cases {
 		t.Run(c.label, func(t *testing.T) {

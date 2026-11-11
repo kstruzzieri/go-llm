@@ -230,6 +230,33 @@ func TestBuildOutputScreenBounds(t *testing.T) {
 			}
 		})
 	}
+	// The budget runs out while the last directory, an empty one, is
+	// opened: the walk checks it on entering a directory, not only between
+	// entries. The sleep is far past the budget so the budget's timer has
+	// fired even on a loaded machine.
+	t.Run("budget at empty dir", func(t *testing.T) {
+		ws, root, _ := tolerantFixture(t, map[string]string{".env": budget, "a.txt": "x\n"}, nil)
+		if err := os.Mkdir(filepath.Join(root, "z"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		ws.screenLimits = screenLimits{budget: 10 * time.Millisecond}
+		ws.screenSeams = &screenSeams{openErr: func(rel string) error {
+			if rel == "z" {
+				time.Sleep(300 * time.Millisecond)
+			}
+			return nil
+		}}
+		notes := mustBuild(t, "empty dir", ws).notes()
+		if !slices.Equal(notes, []string{withheldNote + "time budget of 10ms exhausted)"}) {
+			t.Fatalf("empty dir: notes differ (%d notes)", len(notes))
+		}
+	})
+	t.Run("defaults", func(t *testing.T) {
+		want := screenLimits{fileBytes: 262144, keyBytes: 16384, keys: 4096, totalBytes: 1048576, budget: 5 * time.Second}
+		if got := (screenLimits{}).orDefaults(); got != want {
+			t.Fatalf("default limits differ (budget %s)", got.budget)
+		}
+	})
 }
 
 func TestScreenNotePathIsQuoted(t *testing.T) {
@@ -390,7 +417,21 @@ func TestBuildOutputScreenRootReplaced(t *testing.T) {
 	s, err = buildOutputScreen(ctx, ws)
 	check("parent deadline", s, err, context.DeadlineExceeded)
 
-	secretFree(t, "root", []string{"root-0001-abcdef", "root-0002-abcdef", "root-0003-abcdef", "root-0004-abcdef", "root-0005-abcdef"}, texts...)
+	// The root is replaced after the time budget has run out: the walk ends
+	// on the replaced root, which is not the budget, so the build fails. The
+	// sleep is far past the budget so its timer has fired.
+	ws, root, sib = tolerantFixture(t, map[string]string{".env": "TOKEN=root-0006-abcdef\n"}, map[string]string{"a": "x\n"})
+	ws.screenLimits = screenLimits{budget: 10 * time.Millisecond}
+	ws.beforeReadDir = func(rel string) {
+		if rel == "" {
+			time.Sleep(300 * time.Millisecond)
+			swapRoot(t, root, sib)
+		}
+	}
+	s, err = buildOutputScreen(t.Context(), ws)
+	check("swap after budget", s, err, ErrRootReplaced)
+
+	secretFree(t, "root", []string{"root-0001-abcdef", "root-0002-abcdef", "root-0003-abcdef", "root-0004-abcdef", "root-0005-abcdef", "root-0006-abcdef"}, texts...)
 }
 
 // .git/config is read through the held .git descriptor, so a .git moved,

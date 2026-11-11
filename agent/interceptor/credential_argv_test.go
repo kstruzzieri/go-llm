@@ -40,6 +40,12 @@ func TestWordNamesCredentialPath(t *testing.T) {
 		// The magic ends at the first ")"; a later ")" belongs to the pattern.
 		{"magic paren in pattern", ":(top).ssh/a)b", true},
 		{"short top", ":/.env", true},
+		// "exclude" before a ")" is magic only after ":(": this word is not a
+		// pathspec, and the text after its ":" is a credential path.
+		{"exclude without magic", "exclude)HEAD:.env", true},
+		// The option letter is the second byte; the path after it may start
+		// with any byte, "_" included.
+		{"short flag underscore", "-a_netrc", true},
 		{"colon colon", "::.env", true},
 		{"magic template", ":(top).env.example", false},
 		{"magic prefixed name", ":(top)x.env", false},
