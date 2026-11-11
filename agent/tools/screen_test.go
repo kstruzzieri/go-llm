@@ -68,6 +68,10 @@ func TestScreenStream(t *testing.T) {
 		{"cut key", []string{"zzzz-key-1"}, "diff --git a/.env b/.env zzzz-key-1\n", tP + "\n", true},
 		// Color codes inside the path: the header names .env only once they
 		// are stripped; no key, so only the header rule can stop the patch.
+		// A "[" run with no ESC is part of the path: stripping it would
+		// leave a non-credential path. No key and no colon, so only the
+		// header rule can stop the patch.
+		{"cut bracket name", nil, "diff --git a/q[/.env b/q[/.env\n+NAME=x\n", tP + "\n", true},
 		{"cut color name", nil, "diff --git a/.\x1b[01;31m\x1b[Kenv\x1b[m\x1b[K b/.\x1b[01;31m\x1b[Kenv\x1b[m\x1b[K\n+NAME=x\n", tP + "\n", true},
 		{"go results", nil, "    --- FAIL: TestNames/.env (0.00s)\n        x_test.go:9: detail\n",
 			"    --- FAIL: TestNames/.env (0.00s)\n        x_test.go:9: detail\n", false},

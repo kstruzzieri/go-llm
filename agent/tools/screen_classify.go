@@ -49,11 +49,11 @@ func (l screenLimits) orDefaults() screenLimits {
 // is asked, with the workspace-relative slash path, where the real call is
 // about to happen: openErr before each file and subdirectory is opened
 // (.git/config included), listErr before a directory's names are read (the
-// root is ""), statErr before each listed entry's stat. A non-nil answer is
-// handled exactly as that error from the real call. A seam may change the tree
-// and return nil.
+// root is ""), statErr before each listed entry's stat, readErr after each
+// credential file's read succeeds. A non-nil answer is handled exactly as that
+// error from the real call. A seam may change the tree and return nil.
 type screenSeams struct {
-	openErr, listErr, statErr func(rel string) error
+	openErr, listErr, statErr, readErr func(rel string) error
 }
 
 func (s *screenSeams) open(rel string) error {
@@ -75,6 +75,13 @@ func (s *screenSeams) stat(rel string) error {
 		return nil
 	}
 	return s.statErr(rel)
+}
+
+func (s *screenSeams) read(rel string) error {
+	if s == nil || s.readErr == nil {
+		return nil
+	}
+	return s.readErr(rel)
 }
 
 // skipKind is what an entry the screen could not read does to the output.

@@ -22,6 +22,9 @@ func TestStripCSI(t *testing.T) {
 		{"at final", "\x1b[@A", "A"},
 		{"tilde final", "\x1b[3~A", "A"},
 		{"escape not csi", "\x1bX/.envA", "\x1bX/.envA"},
+		// A CSI-shaped run with no ESC before its "[" is text.
+		{"bracket without escape", "a[1mb", "a[1mb"},
+		{"ends in escape", "ab\x1b", "ab\x1b"},
 	}
 	for _, c := range cases {
 		t.Run(c.label, func(t *testing.T) {

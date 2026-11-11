@@ -290,6 +290,9 @@ func TestBuildOutputScreenSkips(t *testing.T) {
 		{"stat gone", func(*testing.T, string) *screenSeams {
 			return &screenSeams{statErr: answer("sub/.npmrc", fs.ErrNotExist)}
 		}, changed, true},
+		{"read eio", func(*testing.T, string) *screenSeams {
+			return &screenSeams{readErr: answer(".env", syscall.EIO)}
+		}, withheldNote + `unreadable: ".env")`, false},
 		{"stat eio", func(*testing.T, string) *screenSeams {
 			return &screenSeams{statErr: answer("sub/.npmrc", syscall.EIO)}
 		}, withheldNote + `unreadable: "sub/.npmrc")`, false},
@@ -451,6 +454,21 @@ func TestBuildOutputScreenGitConfigHeld(t *testing.T) {
 		}, nil, nil, false},
 		{"config open denied", gitTree, func(_ *testing.T, ws *Workspace, _, _ string) {
 			ws.screenSeams = &screenSeams{openErr: answer(".git/config", fs.ErrPermission)}
+		}, nil, []string{withheldNote + `unreadable: ".git/config")`}, false},
+		// A real config the process cannot open (mode 000), through
+		// openRegular rather than the seam.
+		{"config mode 000", gitTree, func(t *testing.T, _ *Workspace, root, _ string) {
+			if os.Geteuid() == 0 {
+				t.Skip("root opens a mode-000 file, so the open cannot fail; the seam row config open denied covers this branch")
+			}
+			p := filepath.Join(root, ".git", "config")
+			if err := os.Chmod(p, 0); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.Chmod(p, 0o600) })
+		}, nil, []string{withheldNote + `unreadable: ".git/config")`}, false},
+		{"config read fails", gitTree, func(_ *testing.T, ws *Workspace, _, _ string) {
+			ws.screenSeams = &screenSeams{readErr: answer(".git/config", syscall.EIO)}
 		}, nil, []string{withheldNote + `unreadable: ".git/config")`}, false},
 		{"config replaced before open", gitTree, func(t *testing.T, ws *Workspace, root, _ string) {
 			other := root + "-other-config"
