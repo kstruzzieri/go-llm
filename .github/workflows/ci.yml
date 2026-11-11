@@ -331,11 +331,14 @@ jobs:
       # cannot detect a replaced root being mistaken for the original (#658).
       # TestValidateSandboxUnavailable proves Windows refuses both native
       # sandbox selections (#576). #725: the harness matcher's Windows rows
-      # and the plan-key tests run natively here.
+      # and the plan-key tests run natively here. #777: the credential argv
+      # rule and the output screen's pure functions run here (matched through
+      # the Windows path normalization), and TestBuildOutputScreenOtherPlatform
+      # proves that exec output is withheld where no hardened walk exists.
       - name: Test workspace identity and undo on Windows
         env:
           CGO_ENABLED: "0"
-        run: go test -count=1 -v -run '^(TestWorkspaceVerifyRoot.*|TestNewWorkspace.*|TestUndoCreatedFile.*|TestCheckpointUndoCreatedFile.*|TestValidateSandboxUnavailable|TestIsHarnessPath.*|TestHasShortNameComponent|TestHarnessPathsIsACopy|TestHarnessPlan.*)$' ./agent/interceptor ./agent/tools ./cmd/golem
+        run: go test -count=1 -v -run '^(TestWorkspaceVerifyRoot.*|TestNewWorkspace.*|TestUndoCreatedFile.*|TestCheckpointUndoCreatedFile.*|TestValidateSandboxUnavailable|TestIsHarnessPath.*|TestHasShortNameComponent|TestHarnessPathsIsACopy|TestHarnessPlan.*|TestWordNamesCredentialPath|TestIsGitConfigPath|TestScriptFields|TestCredentialArgvCheck|TestExecDirInvariant|TestStripCSI|TestGitUnquote|TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestGitConfigValue|TestScreenStream|TestClassifySkip|TestBuildOutputScreenOtherPlatform|TestScreenNotes|TestCaptureSitesAreKnown|TestOnlyProbesCaptureWithoutWorkspaceScreen)$' ./agent/interceptor ./agent/tools ./cmd/golem
 
       # The containment inventory's windows profile: exec scenarios skip only
       # with the profile's enumerated capability reasons (#452).
