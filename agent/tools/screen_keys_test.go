@@ -2,6 +2,7 @@ package tools
 
 import (
 	"bytes"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -193,6 +194,22 @@ func TestCredentialFileKeys(t *testing.T) {
 		{"git-pct-hex-upper-a", "url = https://user-0130:pass-0130%4Aabcdef@example.invalid/r.git", []string{"pass-0130Jabcdef"}, nil},
 		{"git-pct-hex-upper-f", "url = https://user-0131:pass-0131%4Fabcdef@example.invalid/r.git", []string{"pass-0131Oabcdef"}, nil},
 		{"git-trailing-backslash", "extraheader = ordinary-0038-abcdef\\\n", []string{"ordinary-0038-abcdef"}, nil},
+		// An escaped newline as the last or first byte of the value: git
+		// prints the newline, and the trimmed printed value is the key a
+		// record of git's output matches.
+		{"git-xh-nl-end", `extraheader = AUTH: basic placeholder-0132-abcdef\n`, []string{"AUTH: basic placeholder-0132-abcdef"}, nil},
+		{"git-xh-nl-start", `extraheader = \nAUTH: basic placeholder-0133-abcdef`, []string{"AUTH: basic placeholder-0133-abcdef"}, nil},
+		// Two "@" in the authority and a third after its end (a path, a tab,
+		// a space): the password git reads ends at the authority's last "@".
+		{"git-url-auth-cut", "url = https://user-0134:pass-0134-abcdef@tail-0134-abcdef@example.invalid/a@b",
+			[]string{"pass-0134-abcdef@tail-0134-abcdef"}, nil},
+		{"git-url-auth-cut-tab", "url = https://user-0135:pass-0135-abcdef@tail-0135-abcdef@example.invalid\tx@b",
+			[]string{"pass-0135-abcdef@tail-0135-abcdef"}, nil},
+		{"git-url-auth-cut-space", "url = https://user-0136:pass-0136-abcdef@tail-0136-abcdef@example.invalid x@b",
+			[]string{"pass-0136-abcdef@tail-0136-abcdef"}, nil},
+		// A byte outside the setting-name class right before the name: the
+		// name is still extraheader, so its value is a key.
+		{"git-xh-name-after-tilde", "~extraheader = AUTH: basic placeholder-0137-abcdef", []string{"AUTH: basic placeholder-0137-abcdef"}, nil},
 	}
 	for _, tc := range git {
 		t.Run(tc.label, func(t *testing.T) {
@@ -234,6 +251,25 @@ func TestCredentialFileKeys(t *testing.T) {
 		for _, b := range []string{"a", "z", "A", "Z", "0", "9", "-"} {
 			if _, over := credentialFileKeys([]byte(strings.Repeat(b+"=", 33)+"x"), true, 1<<14); !over {
 				t.Errorf("name byte %q: 33 named = should set overLong", b)
+			}
+		}
+	})
+	// A "%" followed by a pair that is not two hex digits stays as written,
+	// beside a valid escape that is decoded. Each bad byte sits just outside
+	// one edge of the digit classes.
+	t.Run("git-pct-bad-digit", func(t *testing.T) {
+		bad := []struct{ class, b string }{{"below 0", "-"}, {"between 9 and A", "<"}, {"between F and a", "G"}, {"above f", "z"}}
+		for _, c := range bad {
+			for _, pos := range []string{"first", "second"} {
+				pair := c.b + "1"
+				if pos == "second" {
+					pair = "4" + c.b
+				}
+				content := "url = https://user-0138:p%" + pair + "ass%41-0138-abcdef@example.invalid/r.git"
+				keys, _ := credentialFileKeys([]byte(content), true, 1<<14)
+				if !slices.Contains(keyStrings(keys), "p%"+pair+"assA-0138-abcdef") {
+					t.Errorf("bad digit %s in the %s position: decoded password missing", c.class, pos)
+				}
 			}
 		}
 	})
