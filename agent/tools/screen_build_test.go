@@ -355,15 +355,15 @@ func TestBuildOutputScreenSkips(t *testing.T) {
 				return nil
 			}
 			s := mustBuild(t, r.label, ws)
-			// A withhold ends the walk: z, which sorts last, is never opened.
-			if !r.later && slices.Contains(asked, "z") {
-				t.Fatalf("%s: walk went on after the withhold", r.label)
-			}
-			// A withheld run delivers no credential, whatever its notes say.
+			// A withheld run delivers no credential, whatever else differs.
 			if !r.later {
 				if got := screenThrough(s, secrets[0]+"\n"); got != "" {
 					t.Errorf("%s: credential delivered (len %d)", r.label, len(got))
 				}
+			}
+			// A withhold ends the walk: z, which sorts last, is never opened.
+			if !r.later && slices.Contains(asked, "z") {
+				t.Fatalf("%s: walk went on after the withhold", r.label)
 			}
 			notes := s.notes()
 			if !slices.Equal(notes, []string{r.want}) {
