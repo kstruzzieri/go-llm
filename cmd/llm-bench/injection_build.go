@@ -90,7 +90,33 @@ func (s stubTool) Invoke(context.Context, json.RawMessage) (agent.ToolResult, er
 	return agent.ToolResult{Content: s.result}, nil
 }
 
-func injectionPalette(fetchTool, observation string) []agent.Tool {
+// registeredSpec returns s as the registered corpora carry it. For
+// run_command and start_command it cuts the description at the sentence #777
+// appended; a description without that sentence is an error, because the
+// sentence was reworded or removed and the freeze must be decided again.
+// Every other spec is returned unchanged.
+//
+// ponytail: the registered corpora predate the #777 sentence on these two
+// descriptions; the corpus builders omit it so trace hashes, registrations
+// and captured results stay valid. Any other change to the two descriptions
+// still reaches the traces and fails the regeneration gates. Remove at the
+// next re-registration.
+func registeredSpec(s agent.ToolSpec) (agent.ToolSpec, error) {
+	const marker = " Commands that name a credential file"
+	if s.Name != "run_command" && s.Name != "start_command" {
+		return s, nil
+	}
+	before, _, ok := strings.Cut(s.Description, marker)
+	if !ok {
+		return s, fmt.Errorf("registered spec: %s: the #777 credential sentence is missing from the description", s.Name)
+	}
+	s.Description = before
+	return s, nil
+}
+
+// injectionPalette is the tool palette every corpus builder renders, with
+// specs in their registered form (registeredSpec).
+func injectionPalette(fetchTool, observation string) ([]agent.Tool, error) {
 	read := agent.Effect{Class: agent.Read, Timeout: time.Minute, OutputCap: 32 << 10}
 	write := agent.Effect{Class: agent.Write, Approval: agent.ApprovalOnWrite, Timeout: time.Minute, OutputCap: 32 << 10}
 	exec := agent.Effect{Class: agent.Read | agent.Write | agent.Exec | agent.Network, Approval: agent.ApprovalAlways, Timeout: time.Minute, OutputCap: 32 << 10}
@@ -114,13 +140,17 @@ func injectionPalette(fetchTool, observation string) []agent.Tool {
 	}
 	out := make([]agent.Tool, 0, len(specs))
 	for _, s := range specs {
-		st := stubTool{spec: s.spec, effect: s.effect, origin: s.origin}
+		spec, err := registeredSpec(s.spec)
+		if err != nil {
+			return nil, err
+		}
+		st := stubTool{spec: spec, effect: s.effect, origin: s.origin}
 		if s.spec.Name == fetchTool {
 			st.result = observation
 		}
 		out = append(out, st)
 	}
-	return out
+	return out, nil
 }
 
 type captureCaller struct {
@@ -402,12 +432,16 @@ func buildInjectionTrace(ctx context.Context, cases injectionCases, b injectionB
 // errBlockedAtBuild and the *agent.BlockedError.
 func captureInjectionRequest(ctx context.Context, b injectionBase, id, goal, slot string, chain []agent.Interceptor) (provider.ChatRequest, error) {
 	observation := strings.Replace(b.Observation, injectionPayloadSlot, slot, 1)
+	tools, err := injectionPalette(b.Fetch.Tool, observation)
+	if err != nil {
+		return provider.ChatRequest{}, fmt.Errorf("injection build %s: %w", id, err)
+	}
 	caller := &captureCaller{fetch: b.Fetch}
 	o := agent.New(caller, agent.ContextManager{}, agent.WithInterceptors(chain...))
-	_, err := o.Run(ctx, agent.Request{
+	_, err = o.Run(ctx, agent.Request{
 		Goal:     goal,
 		System:   golem.SystemPrompt(true, true),
-		Tools:    injectionPalette(b.Fetch.Tool, observation),
+		Tools:    tools,
 		MaxSteps: 2,
 		Approver: approveAll{},
 		Options:  provider.ModelOptions{NumPredict: 4096},
