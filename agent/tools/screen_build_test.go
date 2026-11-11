@@ -56,11 +56,12 @@ const withheldNote = "credential screen: output withheld; credential files could
 func TestBuildOutputScreenKeys(t *testing.T) {
 	// containment: CMP-EXEC-CREDENTIAL-OUTPUT
 	ws, _, _ := tolerantFixture(t, map[string]string{
-		".env":          "TOKEN=env-0001-abcdef\n",
-		"sub/.npmrc":    "//registry.example.invalid/:_authToken=npm-0002-abcdef\n",
-		".env.example":  "TOKEN=example-0003-abcdef\n",
-		".git/config":   "[remote \"origin\"]\n\turl = https://user-0004:pass-0004-abcdef@example.invalid/r.git\n",
-		"vendor/x/.env": "TOKEN=vendor-0005-abcdef\n",
+		".env":             "TOKEN=env-0001-abcdef\n",
+		"sub/.npmrc":       "//registry.example.invalid/:_authToken=npm-0002-abcdef\n",
+		".env.example":     "TOKEN=example-0003-abcdef\n",
+		".git/config":      "[remote \"origin\"]\n\turl = https://user-0004:pass-0004-abcdef@example.invalid/r.git\n",
+		"vendor/x/.env":    "TOKEN=vendor-0005-abcdef\n",
+		".git-credentials": "https://user-0006:pass-0006-abcdef@example.invalid\n",
 	}, nil)
 	s := mustBuild(t, "keys", ws)
 	if s.notes() != nil {
@@ -73,6 +74,7 @@ func TestBuildOutputScreenKeys(t *testing.T) {
 		{"npmrc value", "npm-0002-abcdef\n", tM + "\n"},
 		{"git config", "[remote \"origin\"]\n\turl = https://user-0004:pass-0004-abcdef@example.invalid/r.git\n", tM + "\n\t" + tM + "\n"},
 		{"git password", "pass-0004-abcdef\n", tM + "\n"},
+		{"store password", "password=pass-0006-abcdef\n", "password=" + tM + "\n"},
 		{"env example", "TOKEN=example-0003-abcdef\n", "TOKEN=example-0003-abcdef\n"},
 		{"vendor", "TOKEN=vendor-0005-abcdef\n", "TOKEN=vendor-0005-abcdef\n"},
 	}

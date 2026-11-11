@@ -124,6 +124,23 @@ func TestRunCommandScreensOutput(t *testing.T) {
 	case !strings.Contains(head, screenMatchNote):
 		t.Fatalf("last: no match note before stdout (head len %d)", len(head))
 	}
+
+	// A credential-store line's password printed alone, as a credential
+	// helper prints it: the password is a key of its own.
+	writeTree(t, root, map[string]string{".git-credentials": "https://user-0007:pass-0007-abcdef@example.invalid\n"})
+	res = planInvoke(t, context.Background(), rc, "store", map[string]any{"argv": []string{"sh", "-c", "cut -d@ -f1 .git-c* | cut -d: -f3"}})
+	c = res.Content
+	head, _, _ = strings.Cut(c, "--- stdout ---\n")
+	switch {
+	case res.IsError:
+		t.Fatalf("store: tool error (len %d)", len(c))
+	case strings.Contains(c, "pass-0007-abcdef"):
+		t.Fatal("store: the password reached the result")
+	case stdoutSection(t, "store", c) != tM+"\n":
+		t.Fatalf("store: stdout differs (len %d)", len(stdoutSection(t, "store", c)))
+	case !strings.Contains(head, screenMatchNote):
+		t.Fatalf("store: no match note before stdout (head len %d)", len(head))
+	}
 }
 
 func TestRunCommandLongLineCutsOnlyThatStream(t *testing.T) {

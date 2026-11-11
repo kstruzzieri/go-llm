@@ -75,10 +75,11 @@ loop:
 }
 
 // credentialFileKeys returns the byte strings to withhold from command output
-// for one credential file: each record, and the values inside it. Keys are
-// CSI-stripped (each key is stripped after the raw record is parsed), at least screenKeyFloor bytes, and unique. overLong reports a
-// record longer than keyCap (no key is taken from it) or one with too many
-// settings to try.
+// for one credential file: each record, and the values inside it, including
+// the userinfo of a record that is itself a URL (a credential-store line).
+// Keys are CSI-stripped (each key is stripped after the raw record is parsed),
+// at least screenKeyFloor bytes, and unique. overLong reports a record longer
+// than keyCap (no key is taken from it) or one with too many settings to try.
 func credentialFileKeys(content []byte, gitConfig bool, keyCap int) (keys [][]byte, overLong bool) {
 	seen := map[string]bool{}
 	add := func(k []byte) {
@@ -101,8 +102,16 @@ func credentialFileKeys(content []byte, gitConfig bool, keyCap int) (keys [][]by
 			if !gitConfigKeys(rec, add) {
 				overLong = true
 			}
-		} else if eq := bytes.IndexByte(line, '='); eq >= 0 {
-			envValueKeys(bytes.TrimSpace(line[eq+1:]), add)
+		} else {
+			// A credential-store line (.git-credentials) is a URL: the
+			// scheme, all of the text before the first "://", holds no "=",
+			// space or tab.
+			if i := bytes.Index(line, []byte("://")); i > 0 && !bytes.ContainsAny(line[:i], "= \t") {
+				urlUserinfoKeys(line, add)
+			}
+			if eq := bytes.IndexByte(line, '='); eq >= 0 {
+				envValueKeys(bytes.TrimSpace(line[eq+1:]), add)
+			}
 		}
 	}
 	return keys, overLong

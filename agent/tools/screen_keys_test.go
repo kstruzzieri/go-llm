@@ -56,6 +56,19 @@ func TestCredentialFileKeys(t *testing.T) {
 		{"env-leading-eq", "=value-0110-abcdef", []string{"=value-0110-abcdef", "value-0110-abcdef"}},
 		// Nothing after "=": the line is the only key.
 		{"env-empty-value", "LONGNAME=", []string{"LONGNAME="}},
+		// A credential-store line (.git-credentials) is itself a URL: its
+		// userinfo is keyed as a .git/config URL's is, under the same floor.
+		{"store-user-pass", "https://user-0139:pass-0139-abcdef@example.invalid",
+			[]string{"https://user-0139:pass-0139-abcdef@example.invalid", "user-0139:pass-0139-abcdef", "user-0139", "pass-0139-abcdef"}},
+		{"store-pct-pass", "https://user-0140:p%40ss-0140-abcdef@example.invalid",
+			[]string{"https://user-0140:p%40ss-0140-abcdef@example.invalid", "user-0140:p%40ss-0140-abcdef", "user-0140:p@ss-0140-abcdef", "user-0140", "p%40ss-0140-abcdef", "p@ss-0140-abcdef"}},
+		{"store-user-only", "https://tokn-0141-abcdef@example.invalid", []string{"https://tokn-0141-abcdef@example.invalid", "tokn-0141-abcdef"}},
+		{"store-short-parts", "https://u-142:p-142@example.invalid", []string{"https://u-142:p-142@example.invalid", "u-142:p-142"}},
+		// A URL after a name or other text is not a store line: only the
+		// line and NAME=value forms are keys.
+		{"store-after-name", "DATABASE_URL=postgres://user-0143:pass-0143-abcdef@db.example.invalid",
+			[]string{"DATABASE_URL=postgres://user-0143:pass-0143-abcdef@db.example.invalid", "postgres://user-0143:pass-0143-abcdef@db.example.invalid"}},
+		{"store-after-text", "see https://user-0144:pass-0144-abcdef@example.invalid", []string{"see https://user-0144:pass-0144-abcdef@example.invalid"}},
 	}
 	for _, tc := range exact {
 		t.Run(tc.label, func(t *testing.T) {
