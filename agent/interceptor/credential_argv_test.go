@@ -37,6 +37,8 @@ func TestWordNamesCredentialPath(t *testing.T) {
 		{"magic top icase", ":(top,icase).ENV", true},
 		{"magic literal", ":(literal).npmrc", true},
 		{"magic attr colon", ":(attr:x).env", true},
+		// The magic ends at the first ")"; a later ")" belongs to the pattern.
+		{"magic paren in pattern", ":(top).ssh/a)b", true},
 		{"short top", ":/.env", true},
 		{"colon colon", "::.env", true},
 		{"magic template", ":(top).env.example", false},
