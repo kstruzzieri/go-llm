@@ -254,6 +254,18 @@ func TestScreenNotes(t *testing.T) {
 			t.Fatalf("after release: %d notes", len(n))
 		}
 	})
+	// No keys and no path-prefix line: only the patch cut can count a match.
+	t.Run("cut only", func(t *testing.T) {
+		s := newOutputScreen(nil)
+		var a bytes.Buffer
+		w := s.stream(&a)
+		_, _ = w.Write([]byte("a\ndiff --git a/.env b/.env\n+NAME=x\n"))
+		w.finish()
+		want := "credential screen: 1 match(es) withheld from output (credential_path)"
+		if n := s.notes(); len(n) != 1 || n[0] != want {
+			t.Fatalf("got %d notes", len(n))
+		}
+	})
 	t.Run("changed only", func(t *testing.T) {
 		s := newOutputScreen(nil)
 		s.changed = 2
