@@ -76,10 +76,10 @@ func (b *bgScreenTools) waitState(t *testing.T, label, handle, state string) {
 	}
 }
 
-// tailAt runs one command_tail read of stdout from cursor.
-func (b *bgScreenTools) tailAt(t *testing.T, label, handle string, cursor uint64, maxBytes int) (payload string, next uint64, eof bool) {
+// tailAt runs one command_tail read of stream from cursor.
+func (b *bgScreenTools) tailAt(t *testing.T, label, handle, stream string, cursor uint64, maxBytes int) (payload string, next uint64, eof bool) {
 	t.Helper()
-	raw := fmt.Sprintf(`{"handle":%q,"cursor":%d,"max_bytes":%d}`, handle, cursor, maxBytes)
+	raw := fmt.Sprintf(`{"handle":%q,"stream":%q,"cursor":%d,"max_bytes":%d}`, handle, stream, cursor, maxBytes)
 	res := mustInvoke(t, b.tail, json.RawMessage(raw))
 	if res.IsError {
 		t.Fatalf("%s: tail failed (len %d)", label, len(res.Content))
@@ -103,15 +103,15 @@ func (b *bgScreenTools) tailAt(t *testing.T, label, handle string, cursor uint64
 	return payload, next, eof
 }
 
-// readToEOF reads stdout from cursor 0, following each returned cursor,
+// readToEOF reads stream from cursor 0, following each returned cursor,
 // until eof, and returns the joined payloads.
-func (b *bgScreenTools) readToEOF(t *testing.T, label, handle string, maxBytes int) string {
+func (b *bgScreenTools) readToEOF(t *testing.T, label, handle, stream string, maxBytes int) string {
 	t.Helper()
 	var all strings.Builder
 	cursor := uint64(0)
 	deadline := time.Now().Add(10 * time.Second)
 	for {
-		payload, next, eof := b.tailAt(t, label, handle, cursor, maxBytes)
+		payload, next, eof := b.tailAt(t, label, handle, stream, cursor, maxBytes)
 		all.WriteString(payload)
 		cursor = next
 		if eof {
@@ -141,31 +141,52 @@ func checkScreened(t *testing.T, label, out string) {
 var bgScreenTree = map[string]string{".env": screenEnvFile, "marker.txt": screenSentinel + "\n"}
 
 func TestBackgroundTailScreened(t *testing.T) {
-	b := newBGScreenTools(t, bgScreenTree)
-	h := b.start(t, "glob", "cat .e* marker.txt")
-	b.waitState(t, "glob", h, "exited")
-	whole := b.readToEOF(t, "whole", h, bgTailMaxBytes)
-	checkScreened(t, "whole", whole)
-	// "NAME=" is 5 bytes, so a 10-byte read ends inside the marker.
-	split := b.readToEOF(t, "split", h, 10)
-	if split != whole {
-		t.Fatalf("split: joined bytes differ (len %d, want %d)", len(split), len(whole))
+	rows := []struct{ label, script, stream, other string }{
+		{"stdout", "cat .e* marker.txt", "stdout", "stderr"},
+		{"stderr", "cat .e* marker.txt >&2", "stderr", "stdout"},
+	}
+	for _, r := range rows {
+		t.Run(r.label, func(t *testing.T) {
+			b := newBGScreenTools(t, bgScreenTree)
+			h := b.start(t, r.label, r.script)
+			b.waitState(t, r.label, h, "exited")
+			whole := b.readToEOF(t, r.label, h, r.stream, bgTailMaxBytes)
+			checkScreened(t, r.label, whole)
+			// "NAME=" is 5 bytes, so a 10-byte read ends inside the marker.
+			split := b.readToEOF(t, r.label, h, r.stream, 10)
+			if split != whole {
+				t.Fatalf("%s: split joined bytes differ (len %d, want %d)", r.label, len(split), len(whole))
+			}
+			if other := b.readToEOF(t, r.label, h, r.other, bgTailMaxBytes); other != "" {
+				t.Fatalf("%s: the other stream is not empty (len %d)", r.label, len(other))
+			}
+		})
 	}
 }
 
 func TestBackgroundCutStopsTail(t *testing.T) {
-	b := newBGScreenTools(t, nil)
-	script := "yes 0123456789012345678901234567890123456789012345678901234567890123456789 | head -n 1024; " +
+	const body = "yes 0123456789012345678901234567890123456789012345678901234567890123456789 | head -n 1024; " +
 		"printf 'diff --git a/.env b/.env\\n'; echo content-line; while :; do echo more; sleep 0.05; done"
-	h := b.start(t, "cut", script)
+	rows := []struct{ label, script, stream string }{
+		{"stdout", body, "stdout"},
+		{"stderr", "{ " + body + "; } >&2", "stderr"},
+	}
+	for _, r := range rows {
+		t.Run(r.label, func(t *testing.T) { checkCutStopsTail(t, r.label, r.script, r.stream) })
+	}
+}
+
+func checkCutStopsTail(t *testing.T, label, script, stream string) {
+	b := newBGScreenTools(t, nil)
+	h := b.start(t, label, script)
 	var all strings.Builder
 	cursor := uint64(0)
 	deadline := time.Now().Add(10 * time.Second)
 	for !strings.HasSuffix(all.String(), tP+"\n") {
 		if time.Now().After(deadline) {
-			t.Fatalf("cut: never ended with the patch marker (read %d bytes)", all.Len())
+			t.Fatalf("%s: never ended with the patch marker (read %d bytes)", label, all.Len())
 		}
-		payload, next, _ := b.tailAt(t, "cut", h, cursor, bgTailMaxBytes)
+		payload, next, _ := b.tailAt(t, label, h, stream, cursor, bgTailMaxBytes)
 		all.WriteString(payload)
 		cursor = next
 		if payload == "" {
@@ -174,13 +195,13 @@ func TestBackgroundCutStopsTail(t *testing.T) {
 	}
 	for i := 0; i < 2; i++ {
 		time.Sleep(200 * time.Millisecond)
-		payload, next, _ := b.tailAt(t, "after", h, cursor, bgTailMaxBytes)
+		payload, next, _ := b.tailAt(t, label, h, stream, cursor, bgTailMaxBytes)
 		if payload != "" || next != cursor {
-			t.Fatalf("after %d: payload len %d, next %d, want 0 and %d", i, len(payload), next, cursor)
+			t.Fatalf("%s after %d: payload len %d, next %d, want 0 and %d", label, i, len(payload), next, cursor)
 		}
 	}
 	if !strings.Contains(b.statusOf(t, h), "\nstate: running\n") {
-		t.Fatal("cut: the job stopped printing")
+		t.Fatalf("%s: the job stopped printing", label)
 	}
 }
 
@@ -188,7 +209,7 @@ func TestBackgroundTailOneByte(t *testing.T) {
 	b := newBGScreenTools(t, bgScreenTree)
 	h := b.start(t, "one", "cat .e* marker.txt")
 	b.waitState(t, "one", h, "exited")
-	checkScreened(t, "one", b.readToEOF(t, "one", h, 1))
+	checkScreened(t, "one", b.readToEOF(t, "one", h, "stdout", 1))
 }
 
 func TestBackgroundCarriageReturnBeforeExit(t *testing.T) {
@@ -196,7 +217,7 @@ func TestBackgroundCarriageReturnBeforeExit(t *testing.T) {
 	h := b.start(t, "cr", `printf "partial\r"; sleep 30`)
 	deadline := time.Now().Add(2 * time.Second)
 	for {
-		payload, _, _ := b.tailAt(t, "cr", h, 0, bgTailMaxBytes)
+		payload, _, _ := b.tailAt(t, "cr", h, "stdout", 0, bgTailMaxBytes)
 		if strings.Contains(payload, "partial") {
 			break
 		}
@@ -223,7 +244,7 @@ func TestBackgroundUnterminatedHeldUntilStop(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	if payload, _, _ := b.tailAt(t, "held", h, 0, bgTailMaxBytes); payload != "" {
+	if payload, _, _ := b.tailAt(t, "held", h, "stdout", 0, bgTailMaxBytes); payload != "" {
 		t.Fatalf("held: unterminated record delivered early (len %d)", len(payload))
 	}
 	raw := json.RawMessage(fmt.Sprintf(`{"handle":%q}`, h))
@@ -231,7 +252,7 @@ func TestBackgroundUnterminatedHeldUntilStop(t *testing.T) {
 	if res := mustInvoke(t, b.stop, raw); res.IsError || !strings.Contains(res.Content, "state: killed\n") {
 		t.Fatalf("held: stop failed (len %d)", len(res.Content))
 	}
-	if payload, _, _ := b.tailAt(t, "stopped", h, 0, bgTailMaxBytes); payload != "ready" {
+	if payload, _, _ := b.tailAt(t, "stopped", h, "stdout", 0, bgTailMaxBytes); payload != "ready" {
 		t.Fatalf("stopped: payload len %d, want the 5 held bytes", len(payload))
 	}
 }
@@ -367,4 +388,18 @@ func TestBackgroundReapReleasesScreen(t *testing.T) {
 	proc.release()
 	<-done
 	assertReleased(t, "exited", spec.Screen)
+}
+
+func TestBackgroundScratchSetupFailureReleasesScreen(t *testing.T) {
+	root := buildIsolationWorkspace(t)
+	m := NewBackgroundManager()
+	t.Cleanup(m.Shutdown)
+	sc, _ := scratchBackgroundTools(t, root, ScratchConfig{Enabled: true}, m)
+	// A root other than the runtime's fails beginScratchSession at once.
+	spec := execSpec{WorkspaceRoot: root + "-elsewhere", Screen: keyedScreen()}
+	res, err := sc.invokeScratched(context.Background(), execPending{}, spec)
+	if err != nil || !res.IsError {
+		t.Fatalf("scratch setup: want an error result (error %t, err %v)", res.IsError, err)
+	}
+	assertReleased(t, "scratch setup", spec.Screen)
 }

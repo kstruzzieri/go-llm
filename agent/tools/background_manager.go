@@ -204,34 +204,36 @@ func (m *BackgroundManager) start(ctx context.Context, spec execSpec, cwdDisplay
 // resource cleanup on every path — including the spawned-but-unregistered
 // abandonment below. The manager stays ignorant of what the wrapper does.
 //
-// From the call on, startWrapped owns spec.Screen: it finishes the screen's
-// streams and releases it on every path, here on failure and in reap once a
-// registered job exits. A spec without a screen does not start.
+// From the call on, startWrapped owns spec.Screen, and a spec without one
+// does not start. One deferred release covers every return that does not
+// hand the job to reap; once reap is launched, only reap releases.
 func (m *BackgroundManager) startWrapped(ctx context.Context, spec execSpec, cwdDisplay string, wrap func(backgroundProcess) backgroundProcess) (JobStatus, error) {
 	if spec.Screen == nil {
 		return JobStatus{}, errNoOutputScreen
 	}
+	owned := false // true once reap owns the screen
+	defer func() {
+		if !owned {
+			spec.Screen.release()
+		}
+	}()
 	handle, err := m.readHandle()
 	if err != nil {
-		spec.Screen.release()
 		return JobStatus{}, err
 	}
 
 	m.mu.Lock()
 	if m.closed {
 		m.mu.Unlock()
-		spec.Screen.release()
 		return JobStatus{}, errBackgroundShutDown
 	}
 	if m.active >= backgroundActiveCap {
 		m.mu.Unlock()
-		spec.Screen.release()
 		return JobStatus{}, fmt.Errorf("active background job limit reached (%d); stop one first", backgroundActiveCap)
 	}
 	for m.handleTaken(handle) {
 		if handle, err = m.readHandle(); err != nil {
 			m.mu.Unlock()
-			spec.Screen.release()
 			return JobStatus{}, err
 		}
 	}
@@ -241,7 +243,6 @@ func (m *BackgroundManager) startWrapped(ctx context.Context, spec execSpec, cwd
 	m.mu.Unlock()
 
 	if err := ctx.Err(); err != nil {
-		spec.Screen.release()
 		m.releaseReservation(handle)
 		return JobStatus{}, err
 	}
@@ -251,7 +252,6 @@ func (m *BackgroundManager) startWrapped(ctx context.Context, spec execSpec, cwd
 	outStream, errStream := spec.Screen.stream(stdout), spec.Screen.stream(stderr)
 	proc, err := m.backend.Start(spec, outStream, errStream)
 	if err != nil {
-		spec.Screen.release()
 		m.releaseReservation(handle)
 		return JobStatus{}, fmt.Errorf("start background command: %w", err)
 	}
@@ -288,7 +288,6 @@ func (m *BackgroundManager) startWrapped(ctx context.Context, spec execSpec, cwd
 		_, _, _ = proc.Wait()
 		outStream.finish()
 		errStream.finish()
-		spec.Screen.release()
 		m.releaseReservation(handle)
 		err := ctx.Err()
 		if closed {
@@ -302,6 +301,7 @@ func (m *BackgroundManager) startWrapped(ctx context.Context, spec execSpec, cwd
 	st := m.snapshotLocked(job)
 	m.mu.Unlock()
 	m.startWG.Done()
+	owned = true
 	go m.reap(job)
 	return st, nil
 }
