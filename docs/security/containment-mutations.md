@@ -1,10 +1,10 @@
 # Containment mutation ledger (#452)
 
-Each entry proves one security property's assertions can fail. Entries are point-in-time evidence at their baseline revision. The ledger contains 154 entries: 149 guard and five effect-detection entries.
+Each entry proves one security property's assertions can fail. Entries are point-in-time evidence at their baseline revision. The ledger contains 159 entries: 154 guard and five effect-detection entries.
 
-Platform: every proof in this ledger ran on darwin (arm64, go1.27.1), except M-099 and M-100, whose test runs only on Linux and which ran only there (arm64, go1.27.1, the Docker `ci-local` image as its non-root `ci` user). After the rebase onto the model-resistance PR, the entries whose patches touch build-tagged or platform-sensitive code (M-005 to M-008, the unix path walks; M-009 and M-014 to M-018, the host exec path; M-011, the MCP stdio child environment) were re-run on Linux (arm64, go1.27.1, the Docker `ci-local` image) at their baseline: each entry's `Platform:` line records the result, and a Linux line that differs would be recorded beside the darwin evidence, never in place of it. M-010 (it needs an AgentFlow source checkout) and M-012 (Seatbelt is darwin-native) were not re-run on Linux, and no entry has run on Windows. Of the #777 entries, those whose patches touch build-tagged or platform-sensitive code (M-137 to M-141, M-143, M-147, M-148, M-150 and M-153 to M-155: the walk, the screen build, the unix runner and the background rings) were re-run on Linux (arm64, go1.27.1, the Docker `ci-local` image, as its non-root `ci` user) from a second export of their baseline, and each `Platform:` line records that run; M-144 (Seatbelt) is darwin-native.
+Platform: every proof in this ledger ran on darwin (arm64, go1.27.1), except M-099 and M-100, whose test runs only on Linux and which ran only there (arm64, go1.27.1, the Docker `ci-local` image as its non-root `ci` user). After the rebase onto the model-resistance PR, the entries whose patches touch build-tagged or platform-sensitive code (M-005 to M-008, the unix path walks; M-009 and M-014 to M-018, the host exec path; M-011, the MCP stdio child environment) were re-run on Linux (arm64, go1.27.1, the Docker `ci-local` image) at their baseline: each entry's `Platform:` line records the result, and a Linux line that differs would be recorded beside the darwin evidence, never in place of it. M-010 (it needs an AgentFlow source checkout) and M-012 (Seatbelt is darwin-native) were not re-run on Linux, and no entry has run on Windows. Of the #777 entries, those whose patches touch build-tagged or platform-sensitive code (M-137 to M-143, M-146 to M-150 and M-153 to M-155: the walk, the screen build, the skip classification, the key rules, the unix runner and the background rings) were re-run on Linux (arm64, go1.27.1, the Docker `ci-local` image, as its non-root `ci` user) from a second export of their baseline, and each `Platform:` line records that run; M-144 (Seatbelt) is darwin-native.
 
-Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-only variants added in review, M-045 B and M-047 B, at `34b2ff38`, whose production and scenario trees are identical; M-051 to M-053 at `731f2d1d`, the commit that adds them; M-054 to M-058 at `3d423ce1`, the commit that adds them; M-059 at `1166b276`, the commit that adds it): the baseline passed, the mutant failed as shown, and the tree was restored with `git checkout` and passed again. M-028 was re-recorded when tool frames moved to per-result keys: variant A on the commit that makes that change (parent `140524de`), variant B on the commit that adds the cross-Run check (parent `d75c78cb`). Each baseline passed, each mutant failed as shown, and an editor edit restored the baseline bytes, which passed again. Entries M-067 to M-071 ran on the commit that adds fence-key rotation (parent `72b6eb47`) in the same way, the restored file's sha256 matching the baseline's each time; M-072 and M-073 ran the same way on the commit that makes every exposed key rotate and matches keys through separators (parent `00912c90`), and M-074 on the commit that pins key minting before assembly (parent `caa84426`). Entries M-075 to M-078 ran the same way in an isolated `git archive` export of the commit that adds system keys (parent `3346b711`). M-079 and M-080 ran the same way on the commit that scans the durable summary and staged advice (parent `c17e940d`). Entries M-081 to M-085 ran the same way in an isolated `git archive` export of the commit that adds the #712 launchd acceptance tests, each applied with `patch -p1` and reverted with `patch -R -p1`, the restored file's sha256 matching the baseline's. Their baseline is recorded as `c4ca1a8d`: the runs used that commit's tree before two comment-only amends (a driver comment and the M-083 note) produced it, and the patches apply to `c4ca1a8d` at the recorded hunk offsets, with the quoted failing lines at the same line numbers. M-086 ran the same way in an export of `461fdcdc`, the commit that holds `syscall.ForkLock` across the guard and posix_spawn, where M-081 and M-083 were re-run against the new spawn order. All six were re-run the same way at `231baa07`, after the final #712 fix wave changed their tests and moved M-086's lock into a closure; each entry's last note records that run. Entries M-087 to M-105 ran the same way in an isolated `git archive` export of `88f33cfb`, the commit that adds the #725 inventory rows, each applied with `git apply` and reverted with `git apply -R`, the restored file's sha256 matching the baseline's (the export sat inside a checkout, where `git apply` silently skips paths outside the current directory, so both ran with `GIT_CEILING_DIRECTORIES` set to the export's parent); M-099 and M-100 ran in the Docker `ci-local` image from that export. Entries M-106 to M-155 ran in isolated `git archive` exports of `18ca5d70`, the #777 commit that pins the D4 and D5 request counts, one export per platform and one mutant at a time: each patch was applied with `patch -p1` and reverted with `patch -R -p1`, each restored file was compared byte for byte with the baseline's (`cmp`), and every ref passed at the baseline and again on the restored export after the last mutant. Every mutant turned its named refs red on its first run, so no test was added for this ledger. M-138 and M-144 each record two variants. M-145 is not assigned: it was reserved for the bwrap backend's screen mutation, which needs a Linux host with bwrap that the Docker `ci-local` image is not, so CMP-EXEC-CREDENTIAL-OUTPUT-BWRAP is `unobserved(bwrap)` and carries that follow-up as its exempt reason. The entry for the unverified-root rule including the repository boundary itself, whose mutant narrowed the rule to strictly below the boundary, was withdrawn when that narrowing became the production rule; later entries were renumbered to close the gap. Entries M-060 and M-061 ran in isolated exports of immutable code commit `23f0c0bbca83f0c9d6e02163dd09c4856698ddcd`: each baseline passed, its mutant failed, and restored files matched the baseline bytes and passed again. Entries M-062 and M-063 ran on this branch at `dbe5c315b40f8b973b96cf623d5cdcbe00c616fc`, the commit that adds their rules: each baseline passed, its mutant failed, and `git checkout -- <file>` restored the baseline bytes, which passed again; M-062's comparison against the previous rule ran in an isolated `git archive` export of `ac053567`. Entries M-064 to M-066 ran on the #387 branch at `72d0bedeb1d264b3da62cf812df7505a8bd7e776`, the commit that tightens PV1's probe and cites the exec and verification preview tests (M-064 and M-065 were first recorded at `b9cea9154746758026fd9bb58d467f665be5952f`, the commit that makes PV1 executable): each baseline passed, its mutant failed, and `git checkout -- <file>` restored the baseline bytes, which passed again. Entries quote test output, the containment judge's message text and line numbers included, as it read at their baseline; later wording changes do not rewrite them. Entries carried over from the PR 2 delivery record name the draft entry they were first recorded as; they were re-run here so every command, diff and line number matches one revision. Apply a patch with `git apply`, run the command, then restore with `git checkout -- <file>`. `guard` entries remove or weaken the protection the refs assert. `effect-detection` entries change the effect path of an uncontained scenario: they show its probe can read a change in outcome, not that a guard is absent. Rows exempt from this ledger (pending, out-of-scope, unobserved such as ENV-BWRAP and CMP-EXEC-CREDENTIAL-OUTPUT-BWRAP, whose native bwrap profile needs a Linux host, and administrative META- rows; the inventory lint allows no other verified or uncontained row an exemption) carry their exempt reason in the inventory (`docs/security/containment-inventory.json`, rendered in `docs/security/containment-inventory.md`).
+Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-only variants added in review, M-045 B and M-047 B, at `34b2ff38`, whose production and scenario trees are identical; M-051 to M-053 at `731f2d1d`, the commit that adds them; M-054 to M-058 at `3d423ce1`, the commit that adds them; M-059 at `1166b276`, the commit that adds it): the baseline passed, the mutant failed as shown, and the tree was restored with `git checkout` and passed again. M-028 was re-recorded when tool frames moved to per-result keys: variant A on the commit that makes that change (parent `140524de`), variant B on the commit that adds the cross-Run check (parent `d75c78cb`). Each baseline passed, each mutant failed as shown, and an editor edit restored the baseline bytes, which passed again. Entries M-067 to M-071 ran on the commit that adds fence-key rotation (parent `72b6eb47`) in the same way, the restored file's sha256 matching the baseline's each time; M-072 and M-073 ran the same way on the commit that makes every exposed key rotate and matches keys through separators (parent `00912c90`), and M-074 on the commit that pins key minting before assembly (parent `caa84426`). Entries M-075 to M-078 ran the same way in an isolated `git archive` export of the commit that adds system keys (parent `3346b711`). M-079 and M-080 ran the same way on the commit that scans the durable summary and staged advice (parent `c17e940d`). Entries M-081 to M-085 ran the same way in an isolated `git archive` export of the commit that adds the #712 launchd acceptance tests, each applied with `patch -p1` and reverted with `patch -R -p1`, the restored file's sha256 matching the baseline's. Their baseline is recorded as `c4ca1a8d`: the runs used that commit's tree before two comment-only amends (a driver comment and the M-083 note) produced it, and the patches apply to `c4ca1a8d` at the recorded hunk offsets, with the quoted failing lines at the same line numbers. M-086 ran the same way in an export of `461fdcdc`, the commit that holds `syscall.ForkLock` across the guard and posix_spawn, where M-081 and M-083 were re-run against the new spawn order. All six were re-run the same way at `231baa07`, after the final #712 fix wave changed their tests and moved M-086's lock into a closure; each entry's last note records that run. Entries M-087 to M-105 ran the same way in an isolated `git archive` export of `88f33cfb`, the commit that adds the #725 inventory rows, each applied with `git apply` and reverted with `git apply -R`, the restored file's sha256 matching the baseline's (the export sat inside a checkout, where `git apply` silently skips paths outside the current directory, so both ran with `GIT_CEILING_DIRECTORIES` set to the export's parent); M-099 and M-100 ran in the Docker `ci-local` image from that export. Entries M-106 to M-155 ran in isolated `git archive` exports of `18ca5d70`, the #777 commit that pins the D4 and D5 request counts, one export per platform and one mutant at a time: each patch was applied with `patch -p1` and reverted with `patch -R -p1`, each restored file was compared byte for byte with the baseline's (`cmp`), and every ref passed at the baseline and again on the restored export after the last mutant. Every one of those mutants turned its named refs red on its first run. Entries M-156 to M-160 ran the same way in an isolated `git archive` export of `b97c0aeb`, the later commit that adds the rows they turn red: review found that each of their mutants, which bypasses a preprocessing step (CSI stripping, the split at `\r`, trimming) for one rule only, left every ref green at `18ca5d70`, so they could only be recorded once those rows existed. Each entry is evidence at its own baseline; the earlier entries keep `18ca5d70`. M-138 and M-144 each record two variants. M-145 is not assigned: it was reserved for the bwrap backend's screen mutation, which needs a Linux host with bwrap that the Docker `ci-local` image is not, so CMP-EXEC-CREDENTIAL-OUTPUT-BWRAP is `unobserved(bwrap)` and carries that follow-up as its exempt reason. The entry for the unverified-root rule including the repository boundary itself, whose mutant narrowed the rule to strictly below the boundary, was withdrawn when that narrowing became the production rule; later entries were renumbered to close the gap. Entries M-060 and M-061 ran in isolated exports of immutable code commit `23f0c0bbca83f0c9d6e02163dd09c4856698ddcd`: each baseline passed, its mutant failed, and restored files matched the baseline bytes and passed again. Entries M-062 and M-063 ran on this branch at `dbe5c315b40f8b973b96cf623d5cdcbe00c616fc`, the commit that adds their rules: each baseline passed, its mutant failed, and `git checkout -- <file>` restored the baseline bytes, which passed again; M-062's comparison against the previous rule ran in an isolated `git archive` export of `ac053567`. Entries M-064 to M-066 ran on the #387 branch at `72d0bedeb1d264b3da62cf812df7505a8bd7e776`, the commit that tightens PV1's probe and cites the exec and verification preview tests (M-064 and M-065 were first recorded at `b9cea9154746758026fd9bb58d467f665be5952f`, the commit that makes PV1 executable): each baseline passed, its mutant failed, and `git checkout -- <file>` restored the baseline bytes, which passed again. Entries quote test output, the containment judge's message text and line numbers included, as it read at their baseline; later wording changes do not rewrite them. Entries carried over from the PR 2 delivery record name the draft entry they were first recorded as; they were re-run here so every command, diff and line number matches one revision. Apply a patch with `git apply`, run the command, then restore with `git checkout -- <file>`. `guard` entries remove or weaken the protection the refs assert. `effect-detection` entries change the effect path of an uncontained scenario: they show its probe can read a change in outcome, not that a guard is absent. Rows exempt from this ledger (pending, out-of-scope, unobserved such as ENV-BWRAP and CMP-EXEC-CREDENTIAL-OUTPUT-BWRAP, whose native bwrap profile needs a Linux host, and administrative META- rows; the inventory lint allows no other verified or uncontained row an exemption) carry their exempt reason in the inventory (`docs/security/containment-inventory.json`, rendered in `docs/security/containment-inventory.md`).
 
 ## M-001 — Absolute paths are rejected by the workspace path cleaner
 - Affected refs: PATH-ABS: `TestHardeningContracts/Active/Workspace/confinement_and_arguments/public_confinement/owned_absolute_sibling`, `TestWorkspaceCleanRelContainment/absolute_escape`, `TestContainment/W1`
@@ -3222,7 +3222,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestScreenStream`, rows `cut`, `cut_d`, `cut_and_line`, `cut_key` (`screen_test.go:67: one write: got 83 bytes, want 216`, and likewise for each row), `after_cut_discards_held` (`screen_test.go:150: got 29 bytes`) and `two_streams` (`screen_test.go:163: a=11 b=5`); FAIL `TestBackgroundCutStopsTail`, both rows (`background_screen_test.go:189: stdout: never ended with the patch marker (read 66341 bytes)`, and the same for `stderr`); FAIL `TestContainment/D5` (`containment_test.go:116: D5: validity: run 1 did not meet its validity; run 2 did not meet its validity; run 3 did not meet its validity (...)`); every other ref passes. Exit 1 for the tools and scenarios commands, 0 for the others. Restored (`cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: D5 is red by validity (runs 1 to 3 carry no patch-cut marker), so its wire probe was not read. `TestCredentialPatchHeader` stays green: the patch removes the call in `record`, not the header rule.
+- Notes: D5 is red by validity (runs 1 to 3 carry no patch-cut marker), so its wire probe was not read. `TestCredentialPatchHeader` stays green: the patch removes the call in `record`, not the header rule. The byte counts in the background cut test's lines vary with timing and are not part of the evidence.
 
 ## M-113 — A cut stream stays cut
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestScreenStream`
@@ -3855,7 +3855,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestScreenStream/hold_bound` (`screen_test.go:111: held buffer kept after cut: 32769`); every other ref passes. Exit 1 for the tools command, 0 for the others. Restored (`cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: The patch keeps the held bytes at the cut and writes them in `finish`, the non-equivalent form the brief requires. The row is the 32769-byte write; it fails at its held-buffer check (`:111`), which precedes and stops the check that `finish` adds nothing (`:117`). `after_cut_discards_held` stays green: there the held bytes arrive after the cut, when `Write` drops them on entry.
+- Notes: The patch keeps the held bytes at the cut and writes them in `finish`, the non-equivalent form the brief requires. The row is the 32769-byte write; it fails at its held-buffer check (`:111`), which precedes and stops the check that `finish` adds nothing (`:116`). A variant that moves the held bytes to another field at the cut and writes that field in `finish` passes the held-buffer check and goes red on that output check (`screen_test.go:116: later output delivered: 32862 bytes`), and on the byte-wise `cut`, `cut_d`, `cut_and_line` and `cut_key` rows (`screen_test.go:74: byte-wise: got 240 bytes, want 216`, and likewise), run at the same baseline and restored the same way. `after_cut_discards_held` stays green: there the held bytes arrive after the cut, when `Write` drops them on entry.
 
 ## M-137 — The background stdout ring is written through the screen
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestBackgroundTailScreened`, `TestBackgroundCutStopsTail`, `TestContainment/D4`
@@ -3879,7 +3879,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestBackgroundTailScreened/stdout` (`background_screen_test.go:155: stdout: the value reached the tail`); FAIL `TestBackgroundCutStopsTail/stdout` (`background_screen_test.go:189: stdout: never ended with the patch marker (read 66316 bytes)`); FAIL `TestContainment/D4` (`containment_test.go:116: D4: validity: run 5: want exit_code 0 in the status and a complete tail from cursor 0 holding the sentinel and the span marker`); every other ref passes. Exit 1 for the tools and scenarios commands, 0 for the others. Restored (`cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: D4 is red on run 5's validity: the raw ring carries no span marker. `TestCaptureSitesAreKnown` stays green: the patch changes an argument, not a capture form. The stderr ring is M-154.
+- Notes: D4 is red on run 5's validity: the raw ring carries no span marker. The byte count in the cut test's line (`read 66316 bytes`) varies with timing from run to run and is not part of the evidence; the failure is that the tail never ended with the patch marker. `TestCaptureSitesAreKnown` stays green: the patch changes an argument, not a capture form. The stderr ring is M-154.
 
 ## M-138 — A spec without a screen does not run
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestRunCommandNoScreenFails`, `TestBackgroundNoScreenFails`
@@ -4021,7 +4021,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
 ## M-142 — A permission failure withholds both streams
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestClassifySkip`, `TestBuildOutputScreenSkips`, `TestRunCommandWithheldStreams`, `TestRunCommandUnreadableAfterFirstCommand`
 - Baseline: `18ca5d70`, the commit that pins D4 and D5 request counts (#777), in an isolated `git archive` export
-- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2); re-run on linux (arm64, go1.27.1, the Docker `ci-local` image: Alpine 3.24.2, kernel 6.10.14-linuxkit, run as the non-root `ci` user, uid 1000) from a second export of the baseline mounted as the container's workspace: baseline pass, the same failing leaves and quoted lines as on darwin, restored pass
 - Profile / command: darwin-host / `go test -count=1 -v -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant)$' ./agent/interceptor`; `go test -count=1 -v -run '^TestHardeningContracts$/^Active$/^Invariants$/^(run_env_argv|start_env_argv|run_dir_ssh|start_dir_git)$' ./agent`; `go test -count=1 -v -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestBuildOutputScreenIgnoresGuard|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown)$' ./agent/tools`; `go test -count=1 -v -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT and the four #777 leaves of INVARIANTS, in four commands: interceptor, contract, tools, scenarios)
 - Patch:
   ```diff
@@ -4107,7 +4107,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
 ## M-146 — A replaced root is fatal, not a changed entry
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestClassifySkip`
 - Baseline: `18ca5d70`, the commit that pins D4 and D5 request counts (#777), in an isolated `git archive` export
-- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2); re-run on linux (arm64, go1.27.1, the Docker `ci-local` image: Alpine 3.24.2, kernel 6.10.14-linuxkit, run as the non-root `ci` user, uid 1000) from a second export of the baseline mounted as the container's workspace: baseline pass, the same failing leaves and quoted lines as on darwin, restored pass
 - Profile / command: darwin-host / `go test -count=1 -v -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant)$' ./agent/interceptor`; `go test -count=1 -v -run '^TestHardeningContracts$/^Active$/^Invariants$/^(run_env_argv|start_env_argv|run_dir_ssh|start_dir_git)$' ./agent`; `go test -count=1 -v -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestBuildOutputScreenIgnoresGuard|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown)$' ./agent/tools`; `go test -count=1 -v -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT and the four #777 leaves of INVARIANTS, in four commands: interceptor, contract, tools, scenarios)
 - Patch:
   ```diff
@@ -4187,7 +4187,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
 ## M-149 — An `extraheader` value is keyed as git prints it
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialFileKeys`
 - Baseline: `18ca5d70`, the commit that pins D4 and D5 request counts (#777), in an isolated `git archive` export
-- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2); re-run on linux (arm64, go1.27.1, the Docker `ci-local` image: Alpine 3.24.2, kernel 6.10.14-linuxkit, run as the non-root `ci` user, uid 1000) from a second export of the baseline mounted as the container's workspace: baseline pass, the same failing leaves and quoted lines as on darwin, restored pass
 - Profile / command: darwin-host / `go test -count=1 -v -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant)$' ./agent/interceptor`; `go test -count=1 -v -run '^TestHardeningContracts$/^Active$/^Invariants$/^(run_env_argv|start_env_argv|run_dir_ssh|start_dir_git)$' ./agent`; `go test -count=1 -v -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestBuildOutputScreenIgnoresGuard|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown)$' ./agent/tools`; `go test -count=1 -v -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT and the four #777 leaves of INVARIANTS, in four commands: interceptor, contract, tools, scenarios)
 - Patch:
   ```diff
@@ -4330,7 +4330,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestBackgroundTailScreened/stderr` (`background_screen_test.go:155: stderr: the value reached the tail`); FAIL `TestBackgroundCutStopsTail/stderr` (`background_screen_test.go:189: stderr: never ended with the patch marker (read 66336 bytes)`); every other ref passes. Exit 1 for the tools command, 0 for the others. Restored (`cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: D4's background run writes its output to stdout and stays green; the stdout ring is M-137.
+- Notes: D4's background run writes its output to stdout and stays green; the stdout ring is M-137. The byte count in the cut test's line varies with timing and is not part of the evidence.
 
 ## M-155 — A new unscreened capture site fails the capture-site guard
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCaptureSitesAreKnown`
@@ -4358,6 +4358,157 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestCaptureSitesAreKnown` (`screen_sites_test.go:201: exec_unix.go: form "CombinedOutput(" counted 1, want 0: ...`; the same for `CombinedOutput`, and `form "exec.Command" counted 3, want 2`); every other ref passes. Exit 1 for the tools command, 0 for the others. Restored (`cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
 - Notes: The patch adds an unused function returning `exec.Command(spec.Path, ...).CombinedOutput()` to `exec_unix.go`.
+
+## M-156 — The patch-header rule reads the record with CSI sequences removed
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestScreenStream`
+- Baseline: `b97c0aeb`, the commit that adds the per-rule rows these entries turn red (#777), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant)$' ./agent/interceptor`; `go test -count=1 -v -run '^TestHardeningContracts$/^Active$/^Invariants$/^(run_env_argv|start_env_argv|run_dir_ssh|start_dir_git)$' ./agent`; `go test -count=1 -v -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestBuildOutputScreenIgnoresGuard|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown)$' ./agent/tools`; `go test -count=1 -v -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT and the four #777 leaves of INVARIANTS, in four commands: interceptor, contract, tools, scenarios)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/screen.go b/agent/tools/screen.go
+  --- a/agent/tools/screen.go
+  +++ b/agent/tools/screen.go
+  @@ -183,7 +183,7 @@
+   		return w.cut(out, screenMarkerLongCut)
+   	}
+   	stripped := stripCSI(rec)
+  -	if credentialPatchHeader(stripped) {
+  +	if credentialPatchHeader(rec) {
+   		return w.cut(out, screenMarkerPatchCut)
+   	}
+   	if credentialPathPrefix(stripped) {
+  ```
+- Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestScreenStream/cut_color_name` (`screen_test.go:77: one write: got 67 bytes, want 214`); every other ref passes. Exit 1 for the tools command, 0 for the others. Restored (`cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch feeds only the header rule the unstripped record; the path-prefix and value rules keep the stripped copy. The row is a `diff --git` header whose `.env` names carry color codes inside the path, then an added line; it has no key, so only the header rule can stop it. `line_color` and `span_csi` stay green, so the row isolates this rule. M-121, which unstrips all three rules, also turns this row red at this baseline. Found in review of the first round: at `18ca5d70` this mutant left every ref of the row green.
+
+## M-157 — The path-prefix rule reads the record with CSI sequences removed
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestScreenStream`
+- Baseline: `b97c0aeb`, the commit that adds the per-rule rows these entries turn red (#777), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant)$' ./agent/interceptor`; `go test -count=1 -v -run '^TestHardeningContracts$/^Active$/^Invariants$/^(run_env_argv|start_env_argv|run_dir_ssh|start_dir_git)$' ./agent`; `go test -count=1 -v -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestBuildOutputScreenIgnoresGuard|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown)$' ./agent/tools`; `go test -count=1 -v -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT and the four #777 leaves of INVARIANTS, in four commands: interceptor, contract, tools, scenarios)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/screen.go b/agent/tools/screen.go
+  --- a/agent/tools/screen.go
+  +++ b/agent/tools/screen.go
+  @@ -186,7 +186,7 @@
+   	if credentialPatchHeader(stripped) {
+   		return w.cut(out, screenMarkerPatchCut)
+   	}
+  -	if credentialPathPrefix(stripped) {
+  +	if credentialPathPrefix(rec) {
+   		w.s.mark()
+   		out = append(out, screenMarkerSpan...)
+   	} else if scrubbed, hits := replaceKeys(stripped, keys); hits > 0 {
+  ```
+- Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestScreenStream/line_color` (`screen_test.go:77: one write: got 49 bytes, want 59`); every other ref passes. Exit 1 for the tools command, 0 for the others. Restored (`cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch feeds only the path-prefix rule the unstripped record. The row is a `grep --color=always -n` hit on `.env` (color codes around the name and the `:`), whose value is under the key floor and which runs with no key, so only the path-prefix rule can withhold it. `cut_color_name` and `span_csi` stay green. M-121 also turns this row red at this baseline. Found in review of the first round: at `18ca5d70` this mutant left every ref of the row green.
+
+## M-158 — A record ended by `\r` is screened on its own by the path-prefix rule
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestScreenStream`
+- Baseline: `b97c0aeb`, the commit that adds the per-rule rows these entries turn red (#777), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant)$' ./agent/interceptor`; `go test -count=1 -v -run '^TestHardeningContracts$/^Active$/^Invariants$/^(run_env_argv|start_env_argv|run_dir_ssh|start_dir_git)$' ./agent`; `go test -count=1 -v -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestBuildOutputScreenIgnoresGuard|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown)$' ./agent/tools`; `go test -count=1 -v -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT and the four #777 leaves of INVARIANTS, in four commands: interceptor, contract, tools, scenarios)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/screen.go b/agent/tools/screen.go
+  --- a/agent/tools/screen.go
+  +++ b/agent/tools/screen.go
+  @@ -100,6 +100,7 @@
+   	mu   sync.Mutex
+   	held []byte
+   	dead bool // cut or finished: later writes are consumed and dropped
+  +	line []byte
+   }
+   
+   // stream returns a writer that screens records on their way to dst.
+  @@ -183,10 +184,16 @@
+   		return w.cut(out, screenMarkerLongCut)
+   	}
+   	stripped := stripCSI(rec)
+  +	joined := append(append([]byte(nil), w.line...), stripped...)
+  +	if term == '\r' {
+  +		w.line = append(joined, '\r')
+  +	} else {
+  +		w.line = nil
+  +	}
+   	if credentialPatchHeader(stripped) {
+   		return w.cut(out, screenMarkerPatchCut)
+   	}
+  -	if credentialPathPrefix(stripped) {
+  +	if credentialPathPrefix(joined) {
+   		w.s.mark()
+   		out = append(out, screenMarkerSpan...)
+   	} else if scrubbed, hits := replaceKeys(stripped, keys); hits > 0 {
+  ```
+- Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestScreenStream/line_after_cr` (`screen_test.go:77: one write: got 27 bytes, want 63`); every other ref passes. Exit 1 for the tools command, 0 for the others. Restored (`cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch keeps delivery at `\r` but lets the path-prefix rule read every record since the last `\n`, so a path-prefixed record after a progress line (`50%`, `\r`, then `.env:3:...`) has `50%\r.env` as its first field and is delivered. The same patch for the header rule (run: every ref stayed green) only adds cuts (a marker in the current record is still found, with the same pieces after it), so it is not a weakening and has no entry; for the value rule a key never holds `\r` or `\n`, so it cannot change a match. Found by the review's sweep of shared preprocessing steps: at `18ca5d70` this mutant left every ref of the row green.
+
+## M-159 — Keys from `.git/config` rules are CSI-stripped
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialFileKeys`
+- Baseline: `b97c0aeb`, the commit that adds the per-rule rows these entries turn red (#777), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant)$' ./agent/interceptor`; `go test -count=1 -v -run '^TestHardeningContracts$/^Active$/^Invariants$/^(run_env_argv|start_env_argv|run_dir_ssh|start_dir_git)$' ./agent`; `go test -count=1 -v -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestBuildOutputScreenIgnoresGuard|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown)$' ./agent/tools`; `go test -count=1 -v -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT and the four #777 leaves of INVARIANTS, in four commands: interceptor, contract, tools, scenarios)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/screen_keys.go b/agent/tools/screen_keys.go
+  --- a/agent/tools/screen_keys.go
+  +++ b/agent/tools/screen_keys.go
+  @@ -89,6 +89,13 @@
+   		seen[string(k)] = true
+   		keys = append(keys, k)
+   	}
+  +	addRaw := func(k []byte) {
+  +		if len(k) < screenKeyFloor || seen[string(k)] {
+  +			return
+  +		}
+  +		seen[string(k)] = true
+  +		keys = append(keys, k)
+  +	}
+   	content = bytes.TrimPrefix(content, []byte("\xef\xbb\xbf"))
+   	for _, rec := range bytes.FieldsFunc(content, func(r rune) bool { return r == '\n' || r == '\r' }) {
+   		if len(rec) > keyCap {
+  @@ -98,7 +105,7 @@
+   		line := bytes.TrimSpace(rec)
+   		add(line)
+   		if gitConfig {
+  -			if !gitConfigKeys(rec, add) {
+  +			if !gitConfigKeys(rec, addRaw) {
+   				overLong = true
+   			}
+   		} else if eq := bytes.IndexByte(line, '='); eq >= 0 {
+  ```
+- Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestCredentialFileKeys/git-csi-in-pass` (`screen_keys_test.go:105: expected key 0 missing`, and `expected key 1 missing`); every other ref passes. Exit 1 for the tools command, 0 for the others. Restored (`cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch hands the git config rules an `add` that skips the CSI strip; the line key (K1) and the `.env` rules keep it. The row is a URL whose password holds a CSI sequence; the stripped userinfo and password must be keys. `git-csi-in-name` stays green under this patch: its sequence is in the setting name, which no git-rule key holds. Found by the review's sweep of shared preprocessing steps: at `18ca5d70` this mutant left every ref of the row green.
+
+## M-160 — A credential-file line is keyed trimmed (K1)
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialFileKeys`
+- Baseline: `b97c0aeb`, the commit that adds the per-rule rows these entries turn red (#777), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant)$' ./agent/interceptor`; `go test -count=1 -v -run '^TestHardeningContracts$/^Active$/^Invariants$/^(run_env_argv|start_env_argv|run_dir_ssh|start_dir_git)$' ./agent`; `go test -count=1 -v -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestBuildOutputScreenIgnoresGuard|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown)$' ./agent/tools`; `go test -count=1 -v -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT and the four #777 leaves of INVARIANTS, in four commands: interceptor, contract, tools, scenarios)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/screen_keys.go b/agent/tools/screen_keys.go
+  --- a/agent/tools/screen_keys.go
+  +++ b/agent/tools/screen_keys.go
+  @@ -96,7 +96,7 @@
+   			continue
+   		}
+   		line := bytes.TrimSpace(rec)
+  -		add(line)
+  +		add(rec)
+   		if gitConfig {
+   			if !gitConfigKeys(rec, add) {
+   				overLong = true
+  ```
+- Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestCredentialFileKeys/env-padded` (`screen_keys_test.go:59: key set differs: got 2 keys, want 2`); every other ref passes. Exit 1 for the tools command, 0 for the others. Restored (`cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch keys the record as read instead of trimmed; K2 trims its value separately, so only K1 changes. The row is a `.env` line with spaces before and after it: a program that prints the line trimmed must still meet a key. Found by the review's sweep of shared preprocessing steps: at `18ca5d70` this mutant left every ref of the row green.
 
 ## Administrative evidence
 
