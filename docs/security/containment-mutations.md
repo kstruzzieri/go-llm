@@ -1,10 +1,10 @@
 # Containment mutation ledger (#452)
 
-Each entry proves one security property's assertions can fail. Entries are point-in-time evidence at their baseline revision. The ledger contains 219 entries: 214 guard and five effect-detection entries.
+Each entry proves one security property's assertions can fail. Entries are point-in-time evidence at their baseline revision. The ledger contains 283 entries: 278 guard and five effect-detection entries.
 
-Platform: every proof in this ledger ran on darwin (arm64, go1.27.1), except M-099 and M-100, whose test runs only on Linux and which ran only there (arm64, go1.27.1, the Docker `ci-local` image as its non-root `ci` user). After the rebase onto the model-resistance PR, the entries whose patches touch build-tagged or platform-sensitive code (M-005 to M-008, the unix path walks; M-009 and M-014 to M-018, the host exec path; M-011, the MCP stdio child environment) were re-run on Linux (arm64, go1.27.1, the Docker `ci-local` image) at their baseline: each entry's `Platform:` line records the result, and a Linux line that differs would be recorded beside the darwin evidence, never in place of it. M-010 (it needs an AgentFlow source checkout) and M-012 (Seatbelt is darwin-native) were not re-run on Linux, and no entry has run on Windows. Of the #777 entries, those whose patches touch build-tagged or platform-sensitive code (M-137 to M-143, M-146 to M-150, M-153 to M-155 and M-212 to M-216: the walk, the screen build, the skip classification, the key rules, the unix runner and the background rings) were re-run on Linux (arm64, go1.27.1, the Docker `ci-local` image, as its non-root `ci` user) from a second export of their baseline, and each `Platform:` line records that run; M-144 (Seatbelt) is darwin-native.
+Platform: every proof in this ledger ran on darwin (arm64, go1.27.1), except M-099 and M-100, whose test runs only on Linux and which ran only there (arm64, go1.27.1, the Docker `ci-local` image as its non-root `ci` user). After the rebase onto the model-resistance PR, the entries whose patches touch build-tagged or platform-sensitive code (M-005 to M-008, the unix path walks; M-009 and M-014 to M-018, the host exec path; M-011, the MCP stdio child environment) were re-run on Linux (arm64, go1.27.1, the Docker `ci-local` image) at their baseline: each entry's `Platform:` line records the result, and a Linux line that differs would be recorded beside the darwin evidence, never in place of it. M-010 (it needs an AgentFlow source checkout) and M-012 (Seatbelt is darwin-native) were not re-run on Linux, and no entry has run on Windows. Of the #777 entries, those whose patches touch build-tagged or platform-sensitive code (M-137 to M-143, M-146 to M-150, M-153 to M-155, M-212 to M-216, M-223, M-224, M-282 and M-284: the walk, the screen build, the skip classification, the key rules, the unix runner and the background rings) were re-run on Linux (arm64, go1.27.1, the Docker `ci-local` image, as its non-root `ci` user) from a second export of their baseline, and each `Platform:` line records that run; M-144 (Seatbelt) is darwin-native.
 
-Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-only variants added in review, M-045 B and M-047 B, at `34b2ff38`, whose production and scenario trees are identical; M-051 to M-053 at `731f2d1d`, the commit that adds them; M-054 to M-058 at `3d423ce1`, the commit that adds them; M-059 at `1166b276`, the commit that adds it): the baseline passed, the mutant failed as shown, and the tree was restored with `git checkout` and passed again. M-028 was re-recorded when tool frames moved to per-result keys: variant A on the commit that makes that change (parent `140524de`), variant B on the commit that adds the cross-Run check (parent `d75c78cb`). Each baseline passed, each mutant failed as shown, and an editor edit restored the baseline bytes, which passed again. Entries M-067 to M-071 ran on the commit that adds fence-key rotation (parent `72b6eb47`) in the same way, the restored file's sha256 matching the baseline's each time; M-072 and M-073 ran the same way on the commit that makes every exposed key rotate and matches keys through separators (parent `00912c90`), and M-074 on the commit that pins key minting before assembly (parent `caa84426`). Entries M-075 to M-078 ran the same way in an isolated `git archive` export of the commit that adds system keys (parent `3346b711`). M-079 and M-080 ran the same way on the commit that scans the durable summary and staged advice (parent `c17e940d`). Entries M-081 to M-085 ran the same way in an isolated `git archive` export of the commit that adds the #712 launchd acceptance tests, each applied with `patch -p1` and reverted with `patch -R -p1`, the restored file's sha256 matching the baseline's. Their baseline is recorded as `c4ca1a8d`: the runs used that commit's tree before two comment-only amends (a driver comment and the M-083 note) produced it, and the patches apply to `c4ca1a8d` at the recorded hunk offsets, with the quoted failing lines at the same line numbers. M-086 ran the same way in an export of `461fdcdc`, the commit that holds `syscall.ForkLock` across the guard and posix_spawn, where M-081 and M-083 were re-run against the new spawn order. All six were re-run the same way at `231baa07`, after the final #712 fix wave changed their tests and moved M-086's lock into a closure; each entry's last note records that run. Entries M-087 to M-105 ran the same way in an isolated `git archive` export of `88f33cfb`, the commit that adds the #725 inventory rows, each applied with `git apply` and reverted with `git apply -R`, the restored file's sha256 matching the baseline's (the export sat inside a checkout, where `git apply` silently skips paths outside the current directory, so both ran with `GIT_CEILING_DIRECTORIES` set to the export's parent); M-099 and M-100 ran in the Docker `ci-local` image from that export. Entries M-106 to M-155 ran in isolated `git archive` exports of `18ca5d70`, the #777 commit that pins the D4 and D5 request counts, one export per platform and one mutant at a time: each patch was applied with `patch -p1` and reverted with `patch -R -p1`, each restored file was compared byte for byte with the baseline's (`cmp`), and every ref passed at the baseline and again on the restored export after the last mutant. Every one of those mutants turned its named refs red on its first run. Entries M-156 to M-160 ran the same way in an isolated `git archive` export of `b97c0aeb`, the later commit that adds the rows they turn red: review found that each of their mutants, which bypasses a preprocessing step (CSI stripping, the split at `\r`, trimming) for one rule only, left every ref green at `18ca5d70`, so they could only be recorded once those rows existed. Entries M-161 to M-169 ran the same way in an isolated `git archive` export of `6bd57929`, the commit that adds the rows they turn red: a second review (M-161 to M-163: a floor raised for one key rule, and the decode of the whole userinfo) and an enumeration that removes each key form `credentialFileKeys` and its helpers emit, one at a time (M-164 to M-169), found mutants that left every ref green at `45548f4f`. Entries M-170 to M-216 ran the same way in an isolated `git archive` export of `f350333c`, the commit that adds the rows they turn red and cites seven existing tests on CMP-EXEC-CREDENTIAL-OUTPUT: a third sweep removed or moved one decision at a time in the argv rule (`credential_argv.go`, `IsGitConfigPath`) and the screen (`screen_path.go`, `screen.go`, `screen_classify.go`, `screen_build.go`), and these are the mutants that left every ref of the row green at `c9cc9155` and let through what the original refuses, cuts or replaces. Entries M-217 to M-220 ran the same way in an isolated `git archive` export of `b7666790`, the commit that adds the last of the rows they turn red: M-217 and M-218 remove or misread the argv rule's reading of a git pathspec with long-form magic, added after that sweep; M-219 reads that pathspec's pattern after its last `)` and left every ref green at `a72009d3`, the commit before its row; M-220 is the sweep's announce-only `S-cut-no-mark` (a cut no longer counted in the notes), which left every ref green until a cut-only notes row existed. The #777 entries therefore have five baselines: M-106 to M-155 at `18ca5d70`, M-156 to M-160 at `b97c0aeb`, M-161 to M-169 at `6bd57929`, M-170 to M-216 at `f350333c`, M-217 to M-220 at `b7666790`. Each entry is evidence at its own baseline. M-138 and M-144 each record two variants. M-145 is not assigned: it was reserved for the bwrap backend's screen mutation, which needs a Linux host with bwrap that the Docker `ci-local` image is not, so CMP-EXEC-CREDENTIAL-OUTPUT-BWRAP is `unobserved(bwrap)` and carries that follow-up as its exempt reason. The entry for the unverified-root rule including the repository boundary itself, whose mutant narrowed the rule to strictly below the boundary, was withdrawn when that narrowing became the production rule; later entries were renumbered to close the gap. Entries M-060 and M-061 ran in isolated exports of immutable code commit `23f0c0bbca83f0c9d6e02163dd09c4856698ddcd`: each baseline passed, its mutant failed, and restored files matched the baseline bytes and passed again. Entries M-062 and M-063 ran on this branch at `dbe5c315b40f8b973b96cf623d5cdcbe00c616fc`, the commit that adds their rules: each baseline passed, its mutant failed, and `git checkout -- <file>` restored the baseline bytes, which passed again; M-062's comparison against the previous rule ran in an isolated `git archive` export of `ac053567`. Entries M-064 to M-066 ran on the #387 branch at `72d0bedeb1d264b3da62cf812df7505a8bd7e776`, the commit that tightens PV1's probe and cites the exec and verification preview tests (M-064 and M-065 were first recorded at `b9cea9154746758026fd9bb58d467f665be5952f`, the commit that makes PV1 executable): each baseline passed, its mutant failed, and `git checkout -- <file>` restored the baseline bytes, which passed again. Entries quote test output, the containment judge's message text and line numbers included, as it read at their baseline; later wording changes do not rewrite them. Entries carried over from the PR 2 delivery record name the draft entry they were first recorded as; they were re-run here so every command, diff and line number matches one revision. Apply a patch with `git apply`, run the command, then restore with `git checkout -- <file>`. `guard` entries remove or weaken the protection the refs assert. `effect-detection` entries change the effect path of an uncontained scenario: they show its probe can read a change in outcome, not that a guard is absent. Rows exempt from this ledger (pending, out-of-scope, unobserved such as ENV-BWRAP and CMP-EXEC-CREDENTIAL-OUTPUT-BWRAP, whose native bwrap profile needs a Linux host, and administrative META- rows; the inventory lint allows no other verified or uncontained row an exemption) carry their exempt reason in the inventory (`docs/security/containment-inventory.json`, rendered in `docs/security/containment-inventory.md`).
+Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-only variants added in review, M-045 B and M-047 B, at `34b2ff38`, whose production and scenario trees are identical; M-051 to M-053 at `731f2d1d`, the commit that adds them; M-054 to M-058 at `3d423ce1`, the commit that adds them; M-059 at `1166b276`, the commit that adds it): the baseline passed, the mutant failed as shown, and the tree was restored with `git checkout` and passed again. M-028 was re-recorded when tool frames moved to per-result keys: variant A on the commit that makes that change (parent `140524de`), variant B on the commit that adds the cross-Run check (parent `d75c78cb`). Each baseline passed, each mutant failed as shown, and an editor edit restored the baseline bytes, which passed again. Entries M-067 to M-071 ran on the commit that adds fence-key rotation (parent `72b6eb47`) in the same way, the restored file's sha256 matching the baseline's each time; M-072 and M-073 ran the same way on the commit that makes every exposed key rotate and matches keys through separators (parent `00912c90`), and M-074 on the commit that pins key minting before assembly (parent `caa84426`). Entries M-075 to M-078 ran the same way in an isolated `git archive` export of the commit that adds system keys (parent `3346b711`). M-079 and M-080 ran the same way on the commit that scans the durable summary and staged advice (parent `c17e940d`). Entries M-081 to M-085 ran the same way in an isolated `git archive` export of the commit that adds the #712 launchd acceptance tests, each applied with `patch -p1` and reverted with `patch -R -p1`, the restored file's sha256 matching the baseline's. Their baseline is recorded as `c4ca1a8d`: the runs used that commit's tree before two comment-only amends (a driver comment and the M-083 note) produced it, and the patches apply to `c4ca1a8d` at the recorded hunk offsets, with the quoted failing lines at the same line numbers. M-086 ran the same way in an export of `461fdcdc`, the commit that holds `syscall.ForkLock` across the guard and posix_spawn, where M-081 and M-083 were re-run against the new spawn order. All six were re-run the same way at `231baa07`, after the final #712 fix wave changed their tests and moved M-086's lock into a closure; each entry's last note records that run. Entries M-087 to M-105 ran the same way in an isolated `git archive` export of `88f33cfb`, the commit that adds the #725 inventory rows, each applied with `git apply` and reverted with `git apply -R`, the restored file's sha256 matching the baseline's (the export sat inside a checkout, where `git apply` silently skips paths outside the current directory, so both ran with `GIT_CEILING_DIRECTORIES` set to the export's parent); M-099 and M-100 ran in the Docker `ci-local` image from that export. Entries M-106 to M-155 ran in isolated `git archive` exports of `18ca5d70`, the #777 commit that pins the D4 and D5 request counts, one export per platform and one mutant at a time: each patch was applied with `patch -p1` and reverted with `patch -R -p1`, each restored file was compared byte for byte with the baseline's (`cmp`), and every ref passed at the baseline and again on the restored export after the last mutant. Every one of those mutants turned its named refs red on its first run. Entries M-156 to M-160 ran the same way in an isolated `git archive` export of `b97c0aeb`, the later commit that adds the rows they turn red: review found that each of their mutants, which bypasses a preprocessing step (CSI stripping, the split at `\r`, trimming) for one rule only, left every ref green at `18ca5d70`, so they could only be recorded once those rows existed. Entries M-161 to M-169 ran the same way in an isolated `git archive` export of `6bd57929`, the commit that adds the rows they turn red: a second review (M-161 to M-163: a floor raised for one key rule, and the decode of the whole userinfo) and an enumeration that removes each key form `credentialFileKeys` and its helpers emit, one at a time (M-164 to M-169), found mutants that left every ref green at `45548f4f`. Entries M-170 to M-216 ran the same way in an isolated `git archive` export of `f350333c`, the commit that adds the rows they turn red and cites seven existing tests on CMP-EXEC-CREDENTIAL-OUTPUT: a third sweep removed or moved one decision at a time in the argv rule (`credential_argv.go`, `IsGitConfigPath`) and the screen (`screen_path.go`, `screen.go`, `screen_classify.go`, `screen_build.go`), and these are the mutants that left every ref of the row green at `c9cc9155` and let through what the original refuses, cuts or replaces. Entries M-217 to M-220 ran the same way in an isolated `git archive` export of `b7666790`, the commit that adds the last of the rows they turn red: M-217 and M-218 remove or misread the argv rule's reading of a git pathspec with long-form magic, added after that sweep; M-219 reads that pathspec's pattern after its last `)` and left every ref green at `a72009d3`, the commit before its row; M-220 is the sweep's announce-only `S-cut-no-mark` (a cut no longer counted in the notes), which left every ref green until a cut-only notes row existed. Entries M-221 to M-284 ran the same way in isolated `git archive` exports of `d1d7fa91`, the commit that adds the rows they turn red, four exports in parallel, one mutant at a time in each: M-221 to M-224 are the gaps the fourth review found (`stripCSI`'s ESC test and its bound check, a `.git/config` that cannot be opened for a reason other than a change, and a failed read after a successful open, which `6194e105` gives a test-only read seam); M-225 to M-284 come from a generated sweep that mutated every condition, comparison, statement and integer offset of the argv rule, the screen and the walk lines this branch changed (1,185 generated mutants plus eight of the review's, at `6194e105`), and are the mutants that left every ref of the row green there and let through what the original refuses, cuts, replaces or withholds, or crash the stream writer. The #777 entries therefore have six baselines: M-106 to M-155 at `18ca5d70`, M-156 to M-160 at `b97c0aeb`, M-161 to M-169 at `6bd57929`, M-170 to M-216 at `f350333c`, M-217 to M-220 at `b7666790`, M-221 to M-284 at `d1d7fa91`. Each entry is evidence at its own baseline. M-138 and M-144 each record two variants. M-145 is not assigned: it was reserved for the bwrap backend's screen mutation, which needs a Linux host with bwrap that the Docker `ci-local` image is not, so CMP-EXEC-CREDENTIAL-OUTPUT-BWRAP is `unobserved(bwrap)` and carries that follow-up as its exempt reason. The entry for the unverified-root rule including the repository boundary itself, whose mutant narrowed the rule to strictly below the boundary, was withdrawn when that narrowing became the production rule; later entries were renumbered to close the gap. Entries M-060 and M-061 ran in isolated exports of immutable code commit `23f0c0bbca83f0c9d6e02163dd09c4856698ddcd`: each baseline passed, its mutant failed, and restored files matched the baseline bytes and passed again. Entries M-062 and M-063 ran on this branch at `dbe5c315b40f8b973b96cf623d5cdcbe00c616fc`, the commit that adds their rules: each baseline passed, its mutant failed, and `git checkout -- <file>` restored the baseline bytes, which passed again; M-062's comparison against the previous rule ran in an isolated `git archive` export of `ac053567`. Entries M-064 to M-066 ran on the #387 branch at `72d0bedeb1d264b3da62cf812df7505a8bd7e776`, the commit that tightens PV1's probe and cites the exec and verification preview tests (M-064 and M-065 were first recorded at `b9cea9154746758026fd9bb58d467f665be5952f`, the commit that makes PV1 executable): each baseline passed, its mutant failed, and `git checkout -- <file>` restored the baseline bytes, which passed again. Entries quote test output, the containment judge's message text and line numbers included, as it read at their baseline; later wording changes do not rewrite them. Entries carried over from the PR 2 delivery record name the draft entry they were first recorded as; they were re-run here so every command, diff and line number matches one revision. Apply a patch with `git apply`, run the command, then restore with `git checkout -- <file>`. `guard` entries remove or weaken the protection the refs assert. `effect-detection` entries change the effect path of an uncontained scenario: they show its probe can read a change in outcome, not that a guard is absent. Rows exempt from this ledger (pending, out-of-scope, unobserved such as ENV-BWRAP and CMP-EXEC-CREDENTIAL-OUTPUT-BWRAP, whose native bwrap profile needs a Linux host, and administrative META- rows; the inventory lint allows no other verified or uncontained row an exemption) carry their exempt reason in the inventory (`docs/security/containment-inventory.json`, rendered in `docs/security/containment-inventory.md`).
 
 ## M-001 — Absolute paths are rejected by the workspace path cleaner
 - Affected refs: PATH-ABS: `TestHardeningContracts/Active/Workspace/confinement_and_arguments/public_confinement/owned_absolute_sibling`, `TestWorkspaceCleanRelContainment/absolute_escape`, `TestContainment/W1`
@@ -4446,7 +4446,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestScreenStream/line_after_cr` (`screen_test.go:77: one write: got 27 bytes, want 63`); every other ref passes. Exit 1 for the tools command, 0 for the others. Restored (`cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: The patch keeps delivery at `\r` but lets the path-prefix rule read every record since the last `\n`, so a path-prefixed record after a progress line (`50%`, `\r`, then `.env:3:...`) has `50%\r.env` as its first field and is delivered. The same patch for the header rule (run: every ref stayed green) only adds cuts (a marker in the current record is still found, with the same pieces after it), so it is not a weakening and has no entry. A key can hold `\r` or `\n` (percent-decoded from a URL's `%0D` or `%0A`), but such a key can never match, because records are split on both bytes, so it withholds nothing. Found by the review's sweep of shared preprocessing steps: at `18ca5d70` this mutant left every ref of the row green.
+- Notes: The patch keeps delivery at `\r` but lets the path-prefix rule read every record since the last `\n`, so a path-prefixed record after a progress line (`50%`, `\r`, then `.env:3:...`) has `50%\r.env` as its first field and is delivered. The same patch for the header rule (run: every ref stayed green) only adds cuts (a marker in the current record is still found, with the same pieces after it), so it is not a weakening and has no entry. A key can hold `\r` or `\n` (percent-decoded from a URL's `%0D` or `%0A`, or, for `\n`, from the `\n` escape in a git config value, which `gitConfigValue` decodes into the value an `extraheader` key, or URL userinfo read from that value, is taken from), but such a key can never match, because records are split on both bytes, so it withholds nothing. Found by the review's sweep of shared preprocessing steps: at `18ca5d70` this mutant left every ref of the row green.
 
 ## M-159 — Keys from `.git/config` rules are CSI-stripped
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialFileKeys`
@@ -5832,7 +5832,7 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
   ```
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestBuildOutputScreenGitConfigHeld/config_replaced_before_open` (`screen_build_test.go:494: config replaced before open: notes differ (0 notes, want 1)`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: The patch returns no config when `config` cannot be opened, a replaced file included. `TestBuildOutputScreenGitConfigHeld` is cited on this row from `f350333c`. Found by the round-3 sweep, one decision removed or moved per mutant: at `c9cc9155` this mutant left every ref of the row green, and it lets through what the original refuses, cuts or replaces.
+- Notes: The patch returns no config when `config` cannot be opened, a replaced file included. Its red leaf shows an announce-only difference: re-run at `f350333c` with a scratch probe of `config_replaced_before_open`'s input, the original and the mutant deliver the same 17 bytes, the config's password among them, because the replaced file is skipped either way; under the mutant only the "changed" note is missing. The half of this decision that lets more through, an open error that is not a change, a missing file or a symlink answered as "no config", had no row at `f350333c`; M-223 records it at `d1d7fa91` with the `config mode 000` row. `TestBuildOutputScreenGitConfigHeld` is cited on this row from `f350333c`. Found by the round-3 sweep, one decision removed or moved per mutant: at `c9cc9155` this mutant left every ref of the row green.
 
 ## M-216 — A `.git/config` whose stat fails is handled by its error kind
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestBuildOutputScreenGitConfigHeld`
@@ -5956,6 +5956,1567 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestScreenNotes/cut_only` (`screen_test.go:266: got 0 notes`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
 - Notes: The patch stops `cut` counting a match. The stream still carries the cut marker, but a run whose only screening is a cut carries no note. Round 3 classed it announce only (at `c9cc9155`); it left every ref of the row green, at `184b4404` too, until `TestScreenNotes/cut_only` existed.
+
+## M-221 — `stripCSI` starts a sequence only at ESC
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestScreenStream`, `TestStripCSI`
+- Baseline: `d1d7fa91`, the commit that adds the rows these entries turn red (#777), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath)$' ./agent/interceptor`; `go test -count=1 -v -run '^TestHardeningContracts$/^Active$/^Invariants$/^(run_env_argv|start_env_argv|run_dir_ssh|start_dir_git)$' ./agent`; `go test -count=1 -v -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestBuildOutputScreenIgnoresGuard|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld)$' ./agent/tools`; `go test -count=1 -v -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT and the four #777 leaves of INVARIANTS, in four commands: interceptor, contract, tools, scenarios)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/screen_path.go b/agent/tools/screen_path.go
+  --- a/agent/tools/screen_path.go
+  +++ b/agent/tools/screen_path.go
+  @@ -12,7 +12,7 @@
+   func stripCSI(rec []byte) []byte {
+   	out := make([]byte, 0, len(rec))
+   	for i := 0; i < len(rec); {
+  -		if rec[i] != 0x1b || i+1 >= len(rec) || rec[i+1] != '[' {
+  +		if i+1 >= len(rec) || rec[i+1] != '[' {
+   			out = append(out, rec[i])
+   			i++
+   			continue
+  ```
+- Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestStripCSI/bracket_without_escape`, `TestScreenStream/cut_bracket_name` (`screen_path_test.go:40: row "bracket without escape": stripCSI mismatch`; `screen_test.go:86: one write: got 39 bytes, want 214`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch drops the ESC test, so any byte followed by `[` and a CSI-shaped run starts a sequence: a patch header whose path holds `q[/.e` strips to a non-credential path and the patch is delivered, and a value split by such a run falls under the 8-byte floor. The round-3 review defined it (X-csi-esc); at `184b4404` and at `50d40b84` it left every ref of the row green.
+
+## M-222 — `stripCSI` does not read past a record that ends in ESC
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestStripCSI`
+- Baseline: `d1d7fa91`, the commit that adds the rows these entries turn red (#777), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath)$' ./agent/interceptor`; `go test -count=1 -v -run '^TestHardeningContracts$/^Active$/^Invariants$/^(run_env_argv|start_env_argv|run_dir_ssh|start_dir_git)$' ./agent`; `go test -count=1 -v -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestBuildOutputScreenIgnoresGuard|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld)$' ./agent/tools`; `go test -count=1 -v -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT and the four #777 leaves of INVARIANTS, in four commands: interceptor, contract, tools, scenarios)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/screen_path.go b/agent/tools/screen_path.go
+  --- a/agent/tools/screen_path.go
+  +++ b/agent/tools/screen_path.go
+  @@ -12,7 +12,7 @@
+   func stripCSI(rec []byte) []byte {
+   	out := make([]byte, 0, len(rec))
+   	for i := 0; i < len(rec); {
+  -		if rec[i] != 0x1b || i+1 >= len(rec) || rec[i+1] != '[' {
+  +		if rec[i] != 0x1b || rec[i+1] != '[' {
+   			out = append(out, rec[i])
+   			i++
+   			continue
+  ```
+- Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestStripCSI/ends_in_escape` (`panic: runtime error: index out of range [3] with length 3`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch drops the bound check, so a record that ends in ESC is indexed past its end: a panic in the stream writer, a crash rather than a delivery. The round-3 review defined it (X-csi-bound); at `50d40b84` it left every ref of the row green.
+
+## M-223 — A `.git/config` that cannot be opened, for any reason but a change, withholds both streams
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestBuildOutputScreenGitConfigHeld`
+- Baseline: `d1d7fa91`, the commit that adds the rows these entries turn red (#777), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2); Linux (arm64, go1.27.1, the Docker `ci-local` image, as its non-root `ci` user): FAIL with the same failing leaves and the same quoted lines; exit codes interceptor=0, contract=0, tools=1, scenarios=0; restored (`patch -R`, `cmp` identical) and passing after the last mutant
+- Profile / command: darwin-host / `go test -count=1 -v -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath)$' ./agent/interceptor`; `go test -count=1 -v -run '^TestHardeningContracts$/^Active$/^Invariants$/^(run_env_argv|start_env_argv|run_dir_ssh|start_dir_git)$' ./agent`; `go test -count=1 -v -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestBuildOutputScreenIgnoresGuard|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld)$' ./agent/tools`; `go test -count=1 -v -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT and the four #777 leaves of INVARIANTS, in four commands: interceptor, contract, tools, scenarios)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/screen_build.go b/agent/tools/screen_build.go
+  --- a/agent/tools/screen_build.go
+  +++ b/agent/tools/screen_build.go
+  @@ -196,7 +196,10 @@
+   	// classifySkip ignores.
+   	f, err := workspaceEntry{name: "config", stat: st, dir: dir}.openRegular()
+   	if err != nil {
+  -		return nil, cfg, err
+  +		if errors.Is(err, errFileChanged) || errors.Is(err, fs.ErrNotExist) || errors.Is(err, errSymlink) {
+  +			return nil, cfg, err
+  +		}
+  +		return nil, "", nil
+   	}
+   	return f, "", nil
+   }
+  ```
+- Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestBuildOutputScreenGitConfigHeld/config_mode_000` (`screen_build_test.go:553: config mode 000: notes differ (0 notes, want 1)`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch answers "no config" for an open error that is not a change, a missing file or a symlink (the round-3 review's X-215b). With `.git/config` at mode 000 for a non-root user the original withholds both streams with the cause `unreadable: ".git/config"`, and the mutant delivers the config's values with no note. The row `config mode 000` uses a real mode-000 file so that the open reaches `openRegular` rather than the seam; it skips when the effective uid is 0, where the open cannot fail (the Docker `ci-local` image runs as uid 1000, so the row ran there). At `50d40b84` this mutant left every ref of the row green.
+
+## M-224 — A credential file whose read fails after it opened withholds both streams
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestBuildOutputScreenGitConfigHeld`, `TestBuildOutputScreenSkips`
+- Baseline: `d1d7fa91`, the commit that adds the rows these entries turn red (#777), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2); Linux (arm64, go1.27.1, the Docker `ci-local` image, as its non-root `ci` user): FAIL with the same failing leaves and the same quoted lines; exit codes interceptor=0, contract=0, tools=1, scenarios=0; restored (`patch -R`, `cmp` identical) and passing after the last mutant
+- Profile / command: darwin-host / `go test -count=1 -v -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath)$' ./agent/interceptor`; `go test -count=1 -v -run '^TestHardeningContracts$/^Active$/^Invariants$/^(run_env_argv|start_env_argv|run_dir_ssh|start_dir_git)$' ./agent`; `go test -count=1 -v -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestBuildOutputScreenIgnoresGuard|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld)$' ./agent/tools`; `go test -count=1 -v -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT and the four #777 leaves of INVARIANTS, in four commands: interceptor, contract, tools, scenarios)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/screen_build.go b/agent/tools/screen_build.go
+  --- a/agent/tools/screen_build.go
+  +++ b/agent/tools/screen_build.go
+  @@ -77,9 +77,6 @@
+   		if err == nil {
+   			err = ws.screenSeams.read(rel)
+   		}
+  -		if err != nil {
+  -			return failed(rel, err, false)
+  -		}
+   		if len(content) > lim.fileBytes {
+   			return stop(fmt.Sprintf("file over %d bytes: %q", lim.fileBytes, notePath(rel)))
+   		}
+  ```
+- Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestBuildOutputScreenSkips/read_eio`, `TestBuildOutputScreenGitConfigHeld/config_read_fails` (`screen_build_test.go:346: read eio: walk went on after the withhold`; `screen_build_test.go:553: config read fails: notes differ (0 notes, want 1)`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch removes the check after `io.ReadAll`, so a failed read is ignored and the keys read so far are used. No test could reach the check before `6194e105` gave the screen a `readErr` seam (Ruling 37), which only tests set; the rows inject EIO on `.env` and on `.git/config`, which is read through the same closure. The round-3 review reproduced a real failing read on macOS with no seam (a file with HFS compression whose resource fork was corrupted opens and stats as a regular file, then `read` fails with ENOMEM), so the branch is reachable outside tests.
+
+## M-225 — An `exclude` magic word exempts only a word that starts `:(`
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestWordNamesCredentialPath`
+- Baseline: `d1d7fa91`, the commit that adds the rows these entries turn red (#777), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath)$' ./agent/interceptor`; `go test -count=1 -v -run '^TestHardeningContracts$/^Active$/^Invariants$/^(run_env_argv|start_env_argv|run_dir_ssh|start_dir_git)$' ./agent`; `go test -count=1 -v -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestBuildOutputScreenIgnoresGuard|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld)$' ./agent/tools`; `go test -count=1 -v -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT and the four #777 leaves of INVARIANTS, in four commands: interceptor, contract, tools, scenarios)
+- Patch:
+  ```diff
+  diff --git a/agent/interceptor/credential_argv.go b/agent/interceptor/credential_argv.go
+  --- a/agent/interceptor/credential_argv.go
+  +++ b/agent/interceptor/credential_argv.go
+  @@ -47,7 +47,7 @@
+   		return true
+   	}
+   	rest, ok := strings.CutPrefix(w, ":(")
+  -	if !ok {
+  +	if (false && (!ok)) {
+   		return false
+   	}
+   	magic, _, _ := strings.Cut(rest, ")")
+  ```
+- Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestWordNamesCredentialPath/exclude_without_magic` (`credential_argv_test.go:71: wordNamesCredentialPath = false, want true`); every other ref passes. Exit codes: 1 for the interceptor command, 0 for the contract command, 0 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch (the generator's fallback form, which keeps `ok` referenced) never returns at `!ok`, so a word without `:(` is read as magic from its first byte: `exclude)HEAD:.env` is exempt and no longer refused. Generated sweep mutant `{id}`; at `6194e105` it left every ref of the row green.
+
+## M-226 — The short-option letter is the word's second byte
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestWordNamesCredentialPath`
+- Baseline: `d1d7fa91`, the commit that adds the rows these entries turn red (#777), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath)$' ./agent/interceptor`; `go test -count=1 -v -run '^TestHardeningContracts$/^Active$/^Invariants$/^(run_env_argv|start_env_argv|run_dir_ssh|start_dir_git)$' ./agent`; `go test -count=1 -v -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestBuildOutputScreenIgnoresGuard|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld)$' ./agent/tools`; `go test -count=1 -v -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT and the four #777 leaves of INVARIANTS, in four commands: interceptor, contract, tools, scenarios)
+- Patch:
+  ```diff
+  diff --git a/agent/interceptor/credential_argv.go b/agent/interceptor/credential_argv.go
+  --- a/agent/interceptor/credential_argv.go
+  +++ b/agent/interceptor/credential_argv.go
+  @@ -78,7 +78,7 @@
+   			return true
+   		}
+   	}
+  -	if len(w) > 2 && w[0] == '-' && (w[1]|0x20 >= 'a' && w[1]|0x20 <= 'z') {
+  +	if len(w) > 2 && w[0] == '-' && (w[1]|0x20 >= 'a' && w[(1+1)]|0x20 <= 'z') {
+   		return IsCredentialPath(w[2:])
+   	}
+   	return false
+  ```
+- Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestWordNamesCredentialPath/short_flag_underscore` (`credential_argv_test.go:71: wordNamesCredentialPath = false, want true`); every other ref passes. Exit codes: 1 for the interceptor command, 0 for the contract command, 0 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch tests the third byte against the upper bound of the letter range instead of the second, so `-a_netrc` (`_` folds to 0x7f) is no longer read past its option letter. Generated sweep mutant `{id}`; at `6194e105` it left every ref of the row green.
+
+## M-227 — `stripCSI` reads parameter bytes from 0x30 up
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestStripCSI`
+- Baseline: `d1d7fa91`, the commit that adds the rows these entries turn red (#777), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath)$' ./agent/interceptor`; `go test -count=1 -v -run '^TestHardeningContracts$/^Active$/^Invariants$/^(run_env_argv|start_env_argv|run_dir_ssh|start_dir_git)$' ./agent`; `go test -count=1 -v -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestBuildOutputScreenIgnoresGuard|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld)$' ./agent/tools`; `go test -count=1 -v -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT and the four #777 leaves of INVARIANTS, in four commands: interceptor, contract, tools, scenarios)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/screen_path.go b/agent/tools/screen_path.go
+  --- a/agent/tools/screen_path.go
+  +++ b/agent/tools/screen_path.go
+  @@ -18,7 +18,7 @@
+   			continue
+   		}
+   		j := i + 2
+  -		for j < len(rec) && rec[j] >= 0x30 && rec[j] <= 0x3f {
+  +		for j < len(rec) && true && rec[j] <= 0x3f {
+   			j++
+   		}
+   		for j < len(rec) && rec[j] >= 0x20 && rec[j] <= 0x2f {
+  ```
+- Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestStripCSI/intermediate_then_param`, `TestStripCSI/control_after_bracket` (`screen_path_test.go:40: row "intermediate then param": stripCSI mismatch`; `screen_path_test.go:40: row "control after bracket": stripCSI mismatch`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch drops the lower bound of the parameter range, so a control byte or an intermediate before a parameter starts a sequence that is stripped with the byte after it; in a header path that can remove part of a credential name (`a/` ESC `[` 0x01 `/.env` strips to `a/nv`, and the patch is delivered). Generated sweep mutant `{id}`; at `6194e105` it left every ref of the row green.
+
+## M-228 — `stripCSI` reads intermediate bytes from 0x20 up
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestStripCSI`
+- Baseline: `d1d7fa91`, the commit that adds the rows these entries turn red (#777), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath)$' ./agent/interceptor`; `go test -count=1 -v -run '^TestHardeningContracts$/^Active$/^Invariants$/^(run_env_argv|start_env_argv|run_dir_ssh|start_dir_git)$' ./agent`; `go test -count=1 -v -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestBuildOutputScreenIgnoresGuard|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld)$' ./agent/tools`; `go test -count=1 -v -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT and the four #777 leaves of INVARIANTS, in four commands: interceptor, contract, tools, scenarios)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/screen_path.go b/agent/tools/screen_path.go
+  --- a/agent/tools/screen_path.go
+  +++ b/agent/tools/screen_path.go
+  @@ -21,7 +21,7 @@
+   		for j < len(rec) && rec[j] >= 0x30 && rec[j] <= 0x3f {
+   			j++
+   		}
+  -		for j < len(rec) && rec[j] >= 0x20 && rec[j] <= 0x2f {
+  +		for j < len(rec) && true && rec[j] <= 0x2f {
+   			j++
+   		}
+   		if j < len(rec) && rec[j] >= 0x40 && rec[j] <= 0x7e {
+  ```
+- Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestStripCSI/control_after_bracket` (`screen_path_test.go:40: row "control after bracket": stripCSI mismatch`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch drops the lower bound of the intermediate range, so a control byte starts a sequence that is stripped with the byte after it, with the same effect on a header path. Generated sweep mutant `{id}`; at `6194e105` it left every ref of the row green.
+
+## M-229 — `stripCSI` accepts final bytes from 0x40 up
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestStripCSI`
+- Baseline: `d1d7fa91`, the commit that adds the rows these entries turn red (#777), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath)$' ./agent/interceptor`; `go test -count=1 -v -run '^TestHardeningContracts$/^Active$/^Invariants$/^(run_env_argv|start_env_argv|run_dir_ssh|start_dir_git)$' ./agent`; `go test -count=1 -v -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestBuildOutputScreenIgnoresGuard|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld)$' ./agent/tools`; `go test -count=1 -v -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT and the four #777 leaves of INVARIANTS, in four commands: interceptor, contract, tools, scenarios)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/screen_path.go b/agent/tools/screen_path.go
+  --- a/agent/tools/screen_path.go
+  +++ b/agent/tools/screen_path.go
+  @@ -24,7 +24,7 @@
+   		for j < len(rec) && rec[j] >= 0x20 && rec[j] <= 0x2f {
+   			j++
+   		}
+  -		if j < len(rec) && rec[j] >= 0x40 && rec[j] <= 0x7e {
+  +		if j < len(rec) && true && rec[j] <= 0x7e {
+   			i = j + 1
+   			continue
+   		}
+  ```
+- Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestStripCSI/intermediate_then_param`, `TestStripCSI/control_after_bracket`, `TestStripCSI/control_as_final` (`screen_path_test.go:40: row "intermediate then param": stripCSI mismatch`; `screen_path_test.go:40: row "control after bracket": stripCSI mismatch`; `screen_path_test.go:40: row "control as final": stripCSI mismatch`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch drops the lower bound of the final range, so a control byte ends a sequence that the original keeps as written. Generated sweep mutant `{id}`; at `6194e105` it left every ref of the row green.
+
+## M-230 — `stripCSI` accepts final bytes up to 0x7e
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestStripCSI`
+- Baseline: `d1d7fa91`, the commit that adds the rows these entries turn red (#777), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath)$' ./agent/interceptor`; `go test -count=1 -v -run '^TestHardeningContracts$/^Active$/^Invariants$/^(run_env_argv|start_env_argv|run_dir_ssh|start_dir_git)$' ./agent`; `go test -count=1 -v -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestBuildOutputScreenIgnoresGuard|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld)$' ./agent/tools`; `go test -count=1 -v -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT and the four #777 leaves of INVARIANTS, in four commands: interceptor, contract, tools, scenarios)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/screen_path.go b/agent/tools/screen_path.go
+  --- a/agent/tools/screen_path.go
+  +++ b/agent/tools/screen_path.go
+  @@ -24,7 +24,7 @@
+   		for j < len(rec) && rec[j] >= 0x20 && rec[j] <= 0x2f {
+   			j++
+   		}
+  -		if j < len(rec) && rec[j] >= 0x40 && rec[j] <= 0x7e {
+  +		if j < len(rec) && rec[j] >= 0x40 && true {
+   			i = j + 1
+   			continue
+   		}
+  ```
+- Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestStripCSI/high_byte_as_final` (`screen_path_test.go:40: row "high byte as final": stripCSI mismatch`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch drops the upper bound of the final range, so a byte above 0x7e ends a sequence; 0xE2 starts the format characters `normalizePath` removes, so a header path component such as U+200C `.env` loses its first byte and no longer names a credential path. Generated sweep mutant `{id}`; at `6194e105` it left every ref of the row green.
+
+## M-231 — `gitUnquote` stops at a backslash that ends the input
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestGitUnquote`
+- Baseline: `d1d7fa91`, the commit that adds the rows these entries turn red (#777), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath)$' ./agent/interceptor`; `go test -count=1 -v -run '^TestHardeningContracts$/^Active$/^Invariants$/^(run_env_argv|start_env_argv|run_dir_ssh|start_dir_git)$' ./agent`; `go test -count=1 -v -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestBuildOutputScreenIgnoresGuard|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld)$' ./agent/tools`; `go test -count=1 -v -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT and the four #777 leaves of INVARIANTS, in four commands: interceptor, contract, tools, scenarios)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/screen_path.go b/agent/tools/screen_path.go
+  --- a/agent/tools/screen_path.go
+  +++ b/agent/tools/screen_path.go
+  @@ -50,7 +50,7 @@
+   			path = append(path, c)
+   		default:
+   			i++
+  -			if i >= len(s) {
+  +			if false {
+   				return nil, 0, false
+   			}
+   			e := s[i]
+  ```
+- Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestGitUnquote/backslash_at_end` (`panic: runtime error: index out of range [5] with length 5`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch drops the bound check after a backslash, so a quoted run that ends in one is indexed past its end: a panic, a crash rather than a delivery. Generated sweep mutant `{id}`; at `6194e105` it left every ref of the row green.
+
+## M-232 — An octal escape's first digit is not below 0
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestGitUnquote`
+- Baseline: `d1d7fa91`, the commit that adds the rows these entries turn red (#777), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath)$' ./agent/interceptor`; `go test -count=1 -v -run '^TestHardeningContracts$/^Active$/^Invariants$/^(run_env_argv|start_env_argv|run_dir_ssh|start_dir_git)$' ./agent`; `go test -count=1 -v -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestBuildOutputScreenIgnoresGuard|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld)$' ./agent/tools`; `go test -count=1 -v -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT and the four #777 leaves of INVARIANTS, in four commands: interceptor, contract, tools, scenarios)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/screen_path.go b/agent/tools/screen_path.go
+  --- a/agent/tools/screen_path.go
+  +++ b/agent/tools/screen_path.go
+  @@ -58,7 +58,7 @@
+   				path = append(path, m)
+   				continue
+   			}
+  -			if e < '0' || e > '3' || i+2 >= len(s) ||
+  +			if false || e > '3' || i+2 >= len(s) ||
+   				s[i+1] < '0' || s[i+1] > '7' || s[i+2] < '0' || s[i+2] > '7' {
+   				return nil, 0, false
+   			}
+  ```
+- Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestGitUnquote/escape_below_zero` (`screen_path_test.go:84: row "escape below zero": ok = true, want false`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch accepts a first digit below `0`. Accepting an escape the original rejects keeps a run quoted whose pieces the original reads one by one: `+++ "\$00 .ssh/x"` is cut by the original through its `.ssh/x"` piece and delivered by the mutant, whose one unquoted path has no `.ssh` component. Generated sweep mutant `{id}`; at `6194e105` it left every ref of the row green.
+
+## M-233 — An octal escape needs two more bytes
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestGitUnquote`
+- Baseline: `d1d7fa91`, the commit that adds the rows these entries turn red (#777), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath)$' ./agent/interceptor`; `go test -count=1 -v -run '^TestHardeningContracts$/^Active$/^Invariants$/^(run_env_argv|start_env_argv|run_dir_ssh|start_dir_git)$' ./agent`; `go test -count=1 -v -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestBuildOutputScreenIgnoresGuard|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld)$' ./agent/tools`; `go test -count=1 -v -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT and the four #777 leaves of INVARIANTS, in four commands: interceptor, contract, tools, scenarios)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/screen_path.go b/agent/tools/screen_path.go
+  --- a/agent/tools/screen_path.go
+  +++ b/agent/tools/screen_path.go
+  @@ -58,7 +58,7 @@
+   				path = append(path, m)
+   				continue
+   			}
+  -			if e < '0' || e > '3' || i+2 >= len(s) ||
+  +			if e < '0' || e > '3' || false ||
+   				s[i+1] < '0' || s[i+1] > '7' || s[i+2] < '0' || s[i+2] > '7' {
+   				return nil, 0, false
+   			}
+  ```
+- Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestGitUnquote/octal_cut_short` (`panic: runtime error: index out of range [4] with length 4`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch drops the length check of an octal escape, so one cut short at the end of the input is indexed past it: a panic, a crash rather than a delivery. Generated sweep mutant `{id}`; at `6194e105` it left every ref of the row green.
+
+## M-234 — An octal escape's second digit is not below 0
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestGitUnquote`
+- Baseline: `d1d7fa91`, the commit that adds the rows these entries turn red (#777), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath)$' ./agent/interceptor`; `go test -count=1 -v -run '^TestHardeningContracts$/^Active$/^Invariants$/^(run_env_argv|start_env_argv|run_dir_ssh|start_dir_git)$' ./agent`; `go test -count=1 -v -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestBuildOutputScreenIgnoresGuard|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld)$' ./agent/tools`; `go test -count=1 -v -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT and the four #777 leaves of INVARIANTS, in four commands: interceptor, contract, tools, scenarios)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/screen_path.go b/agent/tools/screen_path.go
+  --- a/agent/tools/screen_path.go
+  +++ b/agent/tools/screen_path.go
+  @@ -59,7 +59,7 @@
+   				continue
+   			}
+   			if e < '0' || e > '3' || i+2 >= len(s) ||
+  -				s[i+1] < '0' || s[i+1] > '7' || s[i+2] < '0' || s[i+2] > '7' {
+  +				false || s[i+1] > '7' || s[i+2] < '0' || s[i+2] > '7' {
+   				return nil, 0, false
+   			}
+   			path = append(path, (e-'0')<<6|(s[i+1]-'0')<<3|(s[i+2]-'0'))
+  ```
+- Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestGitUnquote/second_digit_below_zero` (`screen_path_test.go:84: row "second digit below zero": ok = true, want false`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch accepts a second digit below `0`, with the effect on quoted pieces described for the first digit. Generated sweep mutant `{id}`; at `6194e105` it left every ref of the row green.
+
+## M-235 — An octal escape's second digit is not above 7
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestGitUnquote`
+- Baseline: `d1d7fa91`, the commit that adds the rows these entries turn red (#777), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath)$' ./agent/interceptor`; `go test -count=1 -v -run '^TestHardeningContracts$/^Active$/^Invariants$/^(run_env_argv|start_env_argv|run_dir_ssh|start_dir_git)$' ./agent`; `go test -count=1 -v -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestBuildOutputScreenIgnoresGuard|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld)$' ./agent/tools`; `go test -count=1 -v -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT and the four #777 leaves of INVARIANTS, in four commands: interceptor, contract, tools, scenarios)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/screen_path.go b/agent/tools/screen_path.go
+  --- a/agent/tools/screen_path.go
+  +++ b/agent/tools/screen_path.go
+  @@ -59,7 +59,7 @@
+   				continue
+   			}
+   			if e < '0' || e > '3' || i+2 >= len(s) ||
+  -				s[i+1] < '0' || s[i+1] > '7' || s[i+2] < '0' || s[i+2] > '7' {
+  +				s[i+1] < '0' || false || s[i+2] < '0' || s[i+2] > '7' {
+   				return nil, 0, false
+   			}
+   			path = append(path, (e-'0')<<6|(s[i+1]-'0')<<3|(s[i+2]-'0'))
+  ```
+- Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestGitUnquote/second_digit_8` (`screen_path_test.go:84: row "second digit 8": ok = true, want false`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch accepts a second digit above `7`, with the same effect. Generated sweep mutant `{id}`; at `6194e105` it left every ref of the row green.
+
+## M-236 — An octal escape's third digit is not below 0
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestGitUnquote`
+- Baseline: `d1d7fa91`, the commit that adds the rows these entries turn red (#777), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath)$' ./agent/interceptor`; `go test -count=1 -v -run '^TestHardeningContracts$/^Active$/^Invariants$/^(run_env_argv|start_env_argv|run_dir_ssh|start_dir_git)$' ./agent`; `go test -count=1 -v -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestBuildOutputScreenIgnoresGuard|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld)$' ./agent/tools`; `go test -count=1 -v -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT and the four #777 leaves of INVARIANTS, in four commands: interceptor, contract, tools, scenarios)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/screen_path.go b/agent/tools/screen_path.go
+  --- a/agent/tools/screen_path.go
+  +++ b/agent/tools/screen_path.go
+  @@ -59,7 +59,7 @@
+   				continue
+   			}
+   			if e < '0' || e > '3' || i+2 >= len(s) ||
+  -				s[i+1] < '0' || s[i+1] > '7' || s[i+2] < '0' || s[i+2] > '7' {
+  +				s[i+1] < '0' || s[i+1] > '7' || false || s[i+2] > '7' {
+   				return nil, 0, false
+   			}
+   			path = append(path, (e-'0')<<6|(s[i+1]-'0')<<3|(s[i+2]-'0'))
+  ```
+- Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestGitUnquote/third_digit_below_zero` (`screen_path_test.go:84: row "third digit below zero": ok = true, want false`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch accepts a third digit below `0`, with the same effect. Generated sweep mutant `{id}`; at `6194e105` it left every ref of the row green.
+
+## M-237 — An octal escape's third digit is not above 7
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestGitUnquote`
+- Baseline: `d1d7fa91`, the commit that adds the rows these entries turn red (#777), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath)$' ./agent/interceptor`; `go test -count=1 -v -run '^TestHardeningContracts$/^Active$/^Invariants$/^(run_env_argv|start_env_argv|run_dir_ssh|start_dir_git)$' ./agent`; `go test -count=1 -v -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestBuildOutputScreenIgnoresGuard|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld)$' ./agent/tools`; `go test -count=1 -v -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT and the four #777 leaves of INVARIANTS, in four commands: interceptor, contract, tools, scenarios)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/screen_path.go b/agent/tools/screen_path.go
+  --- a/agent/tools/screen_path.go
+  +++ b/agent/tools/screen_path.go
+  @@ -59,7 +59,7 @@
+   				continue
+   			}
+   			if e < '0' || e > '3' || i+2 >= len(s) ||
+  -				s[i+1] < '0' || s[i+1] > '7' || s[i+2] < '0' || s[i+2] > '7' {
+  +				s[i+1] < '0' || s[i+1] > '7' || s[i+2] < '0' || false {
+   				return nil, 0, false
+   			}
+   			path = append(path, (e-'0')<<6|(s[i+1]-'0')<<3|(s[i+2]-'0'))
+  ```
+- Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestGitUnquote/third_digit_8` (`screen_path_test.go:84: row "third digit 8": ok = true, want false`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch accepts a third digit above `7`, with the same effect. Generated sweep mutant `{id}`; at `6194e105` it left every ref of the row green.
+
+## M-238 — A header's pieces end when only spaces are left
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialPatchHeader`
+- Baseline: `d1d7fa91`, the commit that adds the rows these entries turn red (#777), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath)$' ./agent/interceptor`; `go test -count=1 -v -run '^TestHardeningContracts$/^Active$/^Invariants$/^(run_env_argv|start_env_argv|run_dir_ssh|start_dir_git)$' ./agent`; `go test -count=1 -v -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestBuildOutputScreenIgnoresGuard|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld)$' ./agent/tools`; `go test -count=1 -v -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT and the four #777 leaves of INVARIANTS, in four commands: interceptor, contract, tools, scenarios)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/screen_path.go b/agent/tools/screen_path.go
+  --- a/agent/tools/screen_path.go
+  +++ b/agent/tools/screen_path.go
+  @@ -98,7 +98,7 @@
+   func anyCredentialPiece(s []byte) bool {
+   	for len(s) > 0 {
+   		s = bytes.TrimLeft(s, " \t")
+  -		if len(s) == 0 {
+  +		if false {
+   			break
+   		}
+   		if s[0] == '"' {
+  ```
+- Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestCredentialPatchHeader/trailing_space` (`panic: runtime error: index out of range [0] with length 0`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch drops the empty check after the spaces are trimmed, so a header that ends in a space is indexed past its end: a panic, a crash rather than a delivery. Generated sweep mutant `{id}`; at `6194e105` it left every ref of the row green.
+
+## M-239 — A piece that was only a quote is not indexed
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialPatchHeader`
+- Baseline: `d1d7fa91`, the commit that adds the rows these entries turn red (#777), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath)$' ./agent/interceptor`; `go test -count=1 -v -run '^TestHardeningContracts$/^Active$/^Invariants$/^(run_env_argv|start_env_argv|run_dir_ssh|start_dir_git)$' ./agent`; `go test -count=1 -v -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestBuildOutputScreenIgnoresGuard|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld)$' ./agent/tools`; `go test -count=1 -v -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT and the four #777 leaves of INVARIANTS, in four commands: interceptor, contract, tools, scenarios)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/screen_path.go b/agent/tools/screen_path.go
+  --- a/agent/tools/screen_path.go
+  +++ b/agent/tools/screen_path.go
+  @@ -118,7 +118,7 @@
+   		if p[0] == '"' {
+   			p = p[1:]
+   		}
+  -		if len(p) > 0 && p[len(p)-1] == '"' {
+  +		if true && p[len(p)-1] == '"' {
+   			p = p[:len(p)-1]
+   		}
+   		if interceptor.IsCredentialPath(string(p)) {
+  ```
+- Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestCredentialPatchHeader/lone_quote` (`panic: runtime error: index out of range [-1]`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch drops the length check before the trailing quote is removed, so a lone quote is indexed at -1: a panic, a crash rather than a delivery. Generated sweep mutant `{id}`; at `6194e105` it left every ref of the row green.
+
+## M-240 — `gitConfigValue` skips a comment
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialFileKeys`
+- Baseline: `d1d7fa91`, the commit that adds the rows these entries turn red (#777), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath)$' ./agent/interceptor`; `go test -count=1 -v -run '^TestHardeningContracts$/^Active$/^Invariants$/^(run_env_argv|start_env_argv|run_dir_ssh|start_dir_git)$' ./agent`; `go test -count=1 -v -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestBuildOutputScreenIgnoresGuard|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld)$' ./agent/tools`; `go test -count=1 -v -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT and the four #777 leaves of INVARIANTS, in four commands: interceptor, contract, tools, scenarios)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/screen_keys.go b/agent/tools/screen_keys.go
+  --- a/agent/tools/screen_keys.go
+  +++ b/agent/tools/screen_keys.go
+  @@ -19,7 +19,7 @@
+   loop:
+   	for i := 0; i < len(r); i++ {
+   		c := r[i]
+  -		if comment {
+  +		if (false && (comment)) {
+   			continue
+   		}
+   		if (c == ' ' || c == '\t' || c == '\r' || c == '\n') && !quote {
+  ```
+- Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestCredentialFileKeys/git-xh-comment`, `TestCredentialFileKeys/git-xh-hash-comment` (`screen_keys_test.go:212: expected key 0 missing`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch (the generator's fallback form, which keeps `comment` referenced) keeps reading after `;`, so the value of `extraheader = <value> ; note` gains the comment text, and the value git prints is no longer a key. Generated sweep mutant `{id}`; at `6194e105` it left every ref of the row green.
+
+## M-241 — `#` starts a comment in a git value
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialFileKeys`
+- Baseline: `d1d7fa91`, the commit that adds the rows these entries turn red (#777), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath)$' ./agent/interceptor`; `go test -count=1 -v -run '^TestHardeningContracts$/^Active$/^Invariants$/^(run_env_argv|start_env_argv|run_dir_ssh|start_dir_git)$' ./agent`; `go test -count=1 -v -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestBuildOutputScreenIgnoresGuard|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld)$' ./agent/tools`; `go test -count=1 -v -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT and the four #777 leaves of INVARIANTS, in four commands: interceptor, contract, tools, scenarios)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/screen_keys.go b/agent/tools/screen_keys.go
+  --- a/agent/tools/screen_keys.go
+  +++ b/agent/tools/screen_keys.go
+  @@ -31,7 +31,7 @@
+   			}
+   			continue
+   		}
+  -		if !quote && (c == ';' || c == '#') {
+  +		if !quote && (c == ';' || false) {
+   			comment = true
+   			continue
+   		}
+  ```
+- Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestCredentialFileKeys/git-xh-hash-comment` (`screen_keys_test.go:212: expected key 0 missing`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch reads `#` as part of the value, with the same effect for a `#` comment. Generated sweep mutant `{id}`; at `6194e105` it left every ref of the row green.
+
+## M-242 — A `;` inside quotes is part of a git value
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialFileKeys`
+- Baseline: `d1d7fa91`, the commit that adds the rows these entries turn red (#777), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath)$' ./agent/interceptor`; `go test -count=1 -v -run '^TestHardeningContracts$/^Active$/^Invariants$/^(run_env_argv|start_env_argv|run_dir_ssh|start_dir_git)$' ./agent`; `go test -count=1 -v -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestBuildOutputScreenIgnoresGuard|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld)$' ./agent/tools`; `go test -count=1 -v -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT and the four #777 leaves of INVARIANTS, in four commands: interceptor, contract, tools, scenarios)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/screen_keys.go b/agent/tools/screen_keys.go
+  --- a/agent/tools/screen_keys.go
+  +++ b/agent/tools/screen_keys.go
+  @@ -31,7 +31,7 @@
+   			}
+   			continue
+   		}
+  -		if !quote && (c == ';' || c == '#') {
+  +		if true && (c == ';' || c == '#') {
+   			comment = true
+   			continue
+   		}
+  ```
+- Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestCredentialFileKeys/git-xh-quoted-semicolon` (`screen_keys_test.go:212: expected key 0 missing`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch starts a comment at `;` inside quotes too; the quote is then never closed, git's rule refuses the line, and the value git prints is no longer a key. Generated sweep mutant `{id}`; at `6194e105` it left every ref of the row green.
+
+## M-243 — A tab is whitespace in a git value
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialFileKeys`
+- Baseline: `d1d7fa91`, the commit that adds the rows these entries turn red (#777), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath)$' ./agent/interceptor`; `go test -count=1 -v -run '^TestHardeningContracts$/^Active$/^Invariants$/^(run_env_argv|start_env_argv|run_dir_ssh|start_dir_git)$' ./agent`; `go test -count=1 -v -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestBuildOutputScreenIgnoresGuard|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld)$' ./agent/tools`; `go test -count=1 -v -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT and the four #777 leaves of INVARIANTS, in four commands: interceptor, contract, tools, scenarios)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/screen_keys.go b/agent/tools/screen_keys.go
+  --- a/agent/tools/screen_keys.go
+  +++ b/agent/tools/screen_keys.go
+  @@ -22,7 +22,7 @@
+   		if comment {
+   			continue
+   		}
+  -		if (c == ' ' || c == '\t' || c == '\r' || c == '\n') && !quote {
+  +		if (c == ' ' || false || c == '\r' || c == '\n') && !quote {
+   			if trim == 0 {
+   				trim = len(out)
+   			}
+  ```
+- Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestCredentialFileKeys/git-xh-tab-before-quote` (`screen_keys_test.go:212: expected key 0 missing`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch treats a tab as a value byte, so a tab before a quoted value is kept and the value git prints (11 bytes, 7 once trimmed) is no longer a key. Generated sweep mutant `{id}`; at `6194e105` it left every ref of the row green.
+
+## M-244 — Trailing unquoted whitespace is cut from a git value
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialFileKeys`
+- Baseline: `d1d7fa91`, the commit that adds the rows these entries turn red (#777), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath)$' ./agent/interceptor`; `go test -count=1 -v -run '^TestHardeningContracts$/^Active$/^Invariants$/^(run_env_argv|start_env_argv|run_dir_ssh|start_dir_git)$' ./agent`; `go test -count=1 -v -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestBuildOutputScreenIgnoresGuard|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld)$' ./agent/tools`; `go test -count=1 -v -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT and the four #777 leaves of INVARIANTS, in four commands: interceptor, contract, tools, scenarios)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/screen_keys.go b/agent/tools/screen_keys.go
+  --- a/agent/tools/screen_keys.go
+  +++ b/agent/tools/screen_keys.go
+  @@ -24,7 +24,7 @@
+   		}
+   		if (c == ' ' || c == '\t' || c == '\r' || c == '\n') && !quote {
+   			if trim == 0 {
+  -				trim = len(out)
+  +				_ = trim; _ = out
+   			}
+   			if len(out) > 0 {
+   				out = append(out, c)
+  ```
+- Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestCredentialFileKeys/git-xh-padded-short-trailing` (`screen_keys_test.go:212: expected key 0 missing`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch never sets the trim point, so spaces after a quoted value stay on it and the value git prints (11 bytes, 7 once trimmed) is no longer a key. Generated sweep mutant `{id}`; at `6194e105` it left every ref of the row green.
+
+## M-245 — An escape that ends a git value is decoded
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialFileKeys`
+- Baseline: `d1d7fa91`, the commit that adds the rows these entries turn red (#777), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath)$' ./agent/interceptor`; `go test -count=1 -v -run '^TestHardeningContracts$/^Active$/^Invariants$/^(run_env_argv|start_env_argv|run_dir_ssh|start_dir_git)$' ./agent`; `go test -count=1 -v -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestBuildOutputScreenIgnoresGuard|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld)$' ./agent/tools`; `go test -count=1 -v -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT and the four #777 leaves of INVARIANTS, in four commands: interceptor, contract, tools, scenarios)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/screen_keys.go b/agent/tools/screen_keys.go
+  --- a/agent/tools/screen_keys.go
+  +++ b/agent/tools/screen_keys.go
+  @@ -37,7 +37,7 @@
+   		}
+   		trim = 0
+   		if c == '\\' {
+  -			if i+1 >= len(r) {
+  +			if i+(1+1) >= len(r) {
+   				break loop
+   			}
+   			i++
+  ```
+- Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestCredentialFileKeys/git-xh-escape-at-end` (`screen_keys_test.go:212: expected key 0 missing`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch stops one byte early, so an escape as the last byte is dropped: the printed value is 8 bytes, the mutant's 7 falls under the floor, and the value is delivered. Generated sweep mutant `{id}`; at `6194e105` it left every ref of the row green.
+
+## M-246 — `\b` is decoded in a git value
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialFileKeys`
+- Baseline: `d1d7fa91`, the commit that adds the rows these entries turn red (#777), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath)$' ./agent/interceptor`; `go test -count=1 -v -run '^TestHardeningContracts$/^Active$/^Invariants$/^(run_env_argv|start_env_argv|run_dir_ssh|start_dir_git)$' ./agent`; `go test -count=1 -v -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestBuildOutputScreenIgnoresGuard|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld)$' ./agent/tools`; `go test -count=1 -v -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT and the four #777 leaves of INVARIANTS, in four commands: interceptor, contract, tools, scenarios)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/screen_keys.go b/agent/tools/screen_keys.go
+  --- a/agent/tools/screen_keys.go
+  +++ b/agent/tools/screen_keys.go
+  @@ -44,8 +44,7 @@
+   			switch r[i] {
+   			case 't':
+   				c = '\t'
+  -			case 'b':
+  -				c = '\b'
+  +			
+   			case 'n':
+   				c = '\n'
+   			case '\\', '"':
+  ```
+- Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestCredentialFileKeys/git-xh-backspace` (`screen_keys_test.go:212: expected key 0 missing`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch removes the `\b` case, so git's rule refuses the line and the value git prints, which holds a backspace, is no longer a key. Generated sweep mutant `{id}`; at `6194e105` it left every ref of the row green.
+
+## M-247 — `\\` and `\"` are decoded in a git value
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialFileKeys`
+- Baseline: `d1d7fa91`, the commit that adds the rows these entries turn red (#777), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath)$' ./agent/interceptor`; `go test -count=1 -v -run '^TestHardeningContracts$/^Active$/^Invariants$/^(run_env_argv|start_env_argv|run_dir_ssh|start_dir_git)$' ./agent`; `go test -count=1 -v -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestBuildOutputScreenIgnoresGuard|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld)$' ./agent/tools`; `go test -count=1 -v -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT and the four #777 leaves of INVARIANTS, in four commands: interceptor, contract, tools, scenarios)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/screen_keys.go b/agent/tools/screen_keys.go
+  --- a/agent/tools/screen_keys.go
+  +++ b/agent/tools/screen_keys.go
+  @@ -48,8 +48,7 @@
+   				c = '\b'
+   			case 'n':
+   				c = '\n'
+  -			case '\\', '"':
+  -				c = r[i]
+  +			
+   			default:
+   				return nil
+   			}
+  ```
+- Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestCredentialFileKeys/git-xh-escape-at-end`, `TestCredentialFileKeys/git-xh-escaped-quote` (`screen_keys_test.go:212: expected key 0 missing`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch removes that case, with the same effect for a value holding an escaped quote or backslash. Generated sweep mutant `{id}`; at `6194e105` it left every ref of the row green.
+
+## M-248 — A `.env` line that starts with `=` has a value
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialFileKeys`
+- Baseline: `d1d7fa91`, the commit that adds the rows these entries turn red (#777), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath)$' ./agent/interceptor`; `go test -count=1 -v -run '^TestHardeningContracts$/^Active$/^Invariants$/^(run_env_argv|start_env_argv|run_dir_ssh|start_dir_git)$' ./agent`; `go test -count=1 -v -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestBuildOutputScreenIgnoresGuard|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld)$' ./agent/tools`; `go test -count=1 -v -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT and the four #777 leaves of INVARIANTS, in four commands: interceptor, contract, tools, scenarios)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/screen_keys.go b/agent/tools/screen_keys.go
+  --- a/agent/tools/screen_keys.go
+  +++ b/agent/tools/screen_keys.go
+  @@ -101,7 +101,7 @@
+   			if !gitConfigKeys(rec, add) {
+   				overLong = true
+   			}
+  -		} else if eq := bytes.IndexByte(line, '='); eq >= 0 {
+  +		} else if eq := bytes.IndexByte(line, '='); eq > 0 {
+   			envValueKeys(bytes.TrimSpace(line[eq+1:]), add)
+   		}
+   	}
+  ```
+- Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestCredentialFileKeys/env-leading-eq` (`screen_keys_test.go:69: key set differs: got 1 keys, want 2`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch needs the `=` after the first byte, so the value of `=<value>` is no longer a key. Generated sweep mutant `{id}`; at `6194e105` it left every ref of the row green.
+
+## M-249 — A single-quoted `.env` value is read inside its quotes
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialFileKeys`
+- Baseline: `d1d7fa91`, the commit that adds the rows these entries turn red (#777), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath)$' ./agent/interceptor`; `go test -count=1 -v -run '^TestHardeningContracts$/^Active$/^Invariants$/^(run_env_argv|start_env_argv|run_dir_ssh|start_dir_git)$' ./agent`; `go test -count=1 -v -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestBuildOutputScreenIgnoresGuard|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld)$' ./agent/tools`; `go test -count=1 -v -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT and the four #777 leaves of INVARIANTS, in four commands: interceptor, contract, tools, scenarios)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/screen_keys.go b/agent/tools/screen_keys.go
+  --- a/agent/tools/screen_keys.go
+  +++ b/agent/tools/screen_keys.go
+  @@ -112,7 +112,7 @@
+   // first "=".
+   func envValueKeys(r []byte, add func([]byte)) {
+   	add(r)
+  -	if len(r) > 0 && (r[0] == '"' || r[0] == '\'') {
+  +	if len(r) > 0 && (r[0] == '"' || false) {
+   		if end := bytes.IndexByte(r[1:], r[0]); end >= 0 {
+   			add(r[1 : 1+end])
+   		}
+  ```
+- Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestCredentialFileKeys/env-single-quoted` (`screen_keys_test.go:69: key set differs: got 2 keys, want 3`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch reads only double quotes, so the value inside single quotes is no longer a key. Generated sweep mutant `{id}`; at `6194e105` it left every ref of the row green.
+
+## M-250 — An unclosed quote gives no inner `.env` value
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialFileKeys`
+- Baseline: `d1d7fa91`, the commit that adds the rows these entries turn red (#777), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath)$' ./agent/interceptor`; `go test -count=1 -v -run '^TestHardeningContracts$/^Active$/^Invariants$/^(run_env_argv|start_env_argv|run_dir_ssh|start_dir_git)$' ./agent`; `go test -count=1 -v -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestBuildOutputScreenIgnoresGuard|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld)$' ./agent/tools`; `go test -count=1 -v -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT and the four #777 leaves of INVARIANTS, in four commands: interceptor, contract, tools, scenarios)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/screen_keys.go b/agent/tools/screen_keys.go
+  --- a/agent/tools/screen_keys.go
+  +++ b/agent/tools/screen_keys.go
+  @@ -113,7 +113,7 @@
+   func envValueKeys(r []byte, add func([]byte)) {
+   	add(r)
+   	if len(r) > 0 && (r[0] == '"' || r[0] == '\'') {
+  -		if end := bytes.IndexByte(r[1:], r[0]); end >= 0 {
+  +		if end := bytes.IndexByte(r[1:], r[0]); true {
+   			add(r[1 : 1+end])
+   		}
+   		return
+  ```
+- Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestCredentialFileKeys/env-unclosed-quote` (`panic: runtime error: slice bounds out of range [1:0]`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch drops the found check, so an unclosed quote slices `r[1:0]`: a panic, a crash rather than a delivery. Generated sweep mutant `{id}`; at `6194e105` it left every ref of the row green.
+
+## M-251 — An empty `.env` value is not indexed
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialFileKeys`
+- Baseline: `d1d7fa91`, the commit that adds the rows these entries turn red (#777), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath)$' ./agent/interceptor`; `go test -count=1 -v -run '^TestHardeningContracts$/^Active$/^Invariants$/^(run_env_argv|start_env_argv|run_dir_ssh|start_dir_git)$' ./agent`; `go test -count=1 -v -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestBuildOutputScreenIgnoresGuard|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld)$' ./agent/tools`; `go test -count=1 -v -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT and the four #777 leaves of INVARIANTS, in four commands: interceptor, contract, tools, scenarios)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/screen_keys.go b/agent/tools/screen_keys.go
+  --- a/agent/tools/screen_keys.go
+  +++ b/agent/tools/screen_keys.go
+  @@ -112,7 +112,7 @@
+   // first "=".
+   func envValueKeys(r []byte, add func([]byte)) {
+   	add(r)
+  -	if len(r) > 0 && (r[0] == '"' || r[0] == '\'') {
+  +	if true && (r[0] == '"' || r[0] == '\'') {
+   		if end := bytes.IndexByte(r[1:], r[0]); end >= 0 {
+   			add(r[1 : 1+end])
+   		}
+  ```
+- Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestCredentialFileKeys/env-empty-value` (`panic: runtime error: index out of range [0] with length 0`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch drops the length check, so `NAME=` with nothing after it is indexed at 0: a panic, a crash rather than a delivery. Generated sweep mutant `{id}`; at `6194e105` it left every ref of the row green.
+
+## M-252 — A tab before `;` ends a `.env` value
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialFileKeys`
+- Baseline: `d1d7fa91`, the commit that adds the rows these entries turn red (#777), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath)$' ./agent/interceptor`; `go test -count=1 -v -run '^TestHardeningContracts$/^Active$/^Invariants$/^(run_env_argv|start_env_argv|run_dir_ssh|start_dir_git)$' ./agent`; `go test -count=1 -v -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestBuildOutputScreenIgnoresGuard|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld)$' ./agent/tools`; `go test -count=1 -v -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT and the four #777 leaves of INVARIANTS, in four commands: interceptor, contract, tools, scenarios)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/screen_keys.go b/agent/tools/screen_keys.go
+  --- a/agent/tools/screen_keys.go
+  +++ b/agent/tools/screen_keys.go
+  @@ -122,7 +122,7 @@
+   		add(bytes.TrimSpace(r[:i]))
+   	}
+   	for i := 1; i < len(r); i++ {
+  -		if r[i] == ';' && (r[i-1] == ' ' || r[i-1] == '\t') {
+  +		if r[i] == ';' && (r[i-1] == ' ' || false) {
+   			add(bytes.TrimSpace(r[:i]))
+   			break
+   		}
+  ```
+- Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestCredentialFileKeys/env-tab-semicolon` (`screen_keys_test.go:69: key set differs: got 2 keys, want 3`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch reads only a space before `;`, so the value before a tab and `;` is no longer a key. Generated sweep mutant `{id}`; at `6194e105` it left every ref of the row green.
+
+## M-253 — `z` is a setting-name byte
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialFileKeys`
+- Baseline: `d1d7fa91`, the commit that adds the rows these entries turn red (#777), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath)$' ./agent/interceptor`; `go test -count=1 -v -run '^TestHardeningContracts$/^Active$/^Invariants$/^(run_env_argv|start_env_argv|run_dir_ssh|start_dir_git)$' ./agent`; `go test -count=1 -v -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestBuildOutputScreenIgnoresGuard|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld)$' ./agent/tools`; `go test -count=1 -v -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT and the four #777 leaves of INVARIANTS, in four commands: interceptor, contract, tools, scenarios)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/screen_keys.go b/agent/tools/screen_keys.go
+  --- a/agent/tools/screen_keys.go
+  +++ b/agent/tools/screen_keys.go
+  @@ -134,7 +134,7 @@
+   const gitConfigEqCap = 32
+   
+   func isSettingNameByte(c byte) bool {
+  -	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-'
+  +	return c >= 'a' && c < 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-'
+   }
+   
+   // gitConfigKeys adds the keys for one git config record: what git prints for
+  ```
+- Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestCredentialFileKeys/git-eq-cap-name-bytes` (`screen_keys_test.go:236: name byte "z": 33 named = should set overLong`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch takes `z` out of the setting-name class, so a record of 33 `z=` no longer reaches the cap of 32 named `=`: the original withholds both streams for it, the mutant screens and delivers. Generated sweep mutant `{id}`; at `6194e105` it left every ref of the row green.
+
+## M-254 — `A` is a setting-name byte
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialFileKeys`
+- Baseline: `d1d7fa91`, the commit that adds the rows these entries turn red (#777), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath)$' ./agent/interceptor`; `go test -count=1 -v -run '^TestHardeningContracts$/^Active$/^Invariants$/^(run_env_argv|start_env_argv|run_dir_ssh|start_dir_git)$' ./agent`; `go test -count=1 -v -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestBuildOutputScreenIgnoresGuard|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld)$' ./agent/tools`; `go test -count=1 -v -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT and the four #777 leaves of INVARIANTS, in four commands: interceptor, contract, tools, scenarios)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/screen_keys.go b/agent/tools/screen_keys.go
+  --- a/agent/tools/screen_keys.go
+  +++ b/agent/tools/screen_keys.go
+  @@ -134,7 +134,7 @@
+   const gitConfigEqCap = 32
+   
+   func isSettingNameByte(c byte) bool {
+  -	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-'
+  +	return c >= 'a' && c <= 'z' || c > 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-'
+   }
+   
+   // gitConfigKeys adds the keys for one git config record: what git prints for
+  ```
+- Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestCredentialFileKeys/git-eq-cap-name-bytes` (`screen_keys_test.go:236: name byte "A": 33 named = should set overLong`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch takes `A` out of the setting-name class, so a record of 33 `A=` no longer reaches the cap of 32 named `=`: the original withholds both streams for it, the mutant screens and delivers. Generated sweep mutant `{id}`; at `6194e105` it left every ref of the row green.
+
+## M-255 — `Z` is a setting-name byte
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialFileKeys`
+- Baseline: `d1d7fa91`, the commit that adds the rows these entries turn red (#777), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath)$' ./agent/interceptor`; `go test -count=1 -v -run '^TestHardeningContracts$/^Active$/^Invariants$/^(run_env_argv|start_env_argv|run_dir_ssh|start_dir_git)$' ./agent`; `go test -count=1 -v -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestBuildOutputScreenIgnoresGuard|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld)$' ./agent/tools`; `go test -count=1 -v -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT and the four #777 leaves of INVARIANTS, in four commands: interceptor, contract, tools, scenarios)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/screen_keys.go b/agent/tools/screen_keys.go
+  --- a/agent/tools/screen_keys.go
+  +++ b/agent/tools/screen_keys.go
+  @@ -134,7 +134,7 @@
+   const gitConfigEqCap = 32
+   
+   func isSettingNameByte(c byte) bool {
+  -	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-'
+  +	return c >= 'a' && c <= 'z' || c >= 'A' && c < 'Z' || c >= '0' && c <= '9' || c == '-'
+   }
+   
+   // gitConfigKeys adds the keys for one git config record: what git prints for
+  ```
+- Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestCredentialFileKeys/git-eq-cap-name-bytes` (`screen_keys_test.go:236: name byte "Z": 33 named = should set overLong`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch takes `Z` out of the setting-name class, so a record of 33 `Z=` no longer reaches the cap of 32 named `=`: the original withholds both streams for it, the mutant screens and delivers. Generated sweep mutant `{id}`; at `6194e105` it left every ref of the row green.
+
+## M-256 — `0` is a setting-name byte
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialFileKeys`
+- Baseline: `d1d7fa91`, the commit that adds the rows these entries turn red (#777), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath)$' ./agent/interceptor`; `go test -count=1 -v -run '^TestHardeningContracts$/^Active$/^Invariants$/^(run_env_argv|start_env_argv|run_dir_ssh|start_dir_git)$' ./agent`; `go test -count=1 -v -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestBuildOutputScreenIgnoresGuard|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld)$' ./agent/tools`; `go test -count=1 -v -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT and the four #777 leaves of INVARIANTS, in four commands: interceptor, contract, tools, scenarios)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/screen_keys.go b/agent/tools/screen_keys.go
+  --- a/agent/tools/screen_keys.go
+  +++ b/agent/tools/screen_keys.go
+  @@ -134,7 +134,7 @@
+   const gitConfigEqCap = 32
+   
+   func isSettingNameByte(c byte) bool {
+  -	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-'
+  +	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c > '0' && c <= '9' || c == '-'
+   }
+   
+   // gitConfigKeys adds the keys for one git config record: what git prints for
+  ```
+- Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestCredentialFileKeys/git-eq-cap-name-bytes` (`screen_keys_test.go:236: name byte "0": 33 named = should set overLong`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch takes `0` out of the setting-name class, so a record of 33 `0=` no longer reaches the cap of 32 named `=`: the original withholds both streams for it, the mutant screens and delivers. Generated sweep mutant `{id}`; at `6194e105` it left every ref of the row green.
+
+## M-257 — `9` is a setting-name byte
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialFileKeys`
+- Baseline: `d1d7fa91`, the commit that adds the rows these entries turn red (#777), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath)$' ./agent/interceptor`; `go test -count=1 -v -run '^TestHardeningContracts$/^Active$/^Invariants$/^(run_env_argv|start_env_argv|run_dir_ssh|start_dir_git)$' ./agent`; `go test -count=1 -v -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestBuildOutputScreenIgnoresGuard|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld)$' ./agent/tools`; `go test -count=1 -v -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT and the four #777 leaves of INVARIANTS, in four commands: interceptor, contract, tools, scenarios)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/screen_keys.go b/agent/tools/screen_keys.go
+  --- a/agent/tools/screen_keys.go
+  +++ b/agent/tools/screen_keys.go
+  @@ -134,7 +134,7 @@
+   const gitConfigEqCap = 32
+   
+   func isSettingNameByte(c byte) bool {
+  -	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-'
+  +	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c < '9' || c == '-'
+   }
+   
+   // gitConfigKeys adds the keys for one git config record: what git prints for
+  ```
+- Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestCredentialFileKeys/git-eq-cap-name-bytes` (`screen_keys_test.go:236: name byte "9": 33 named = should set overLong`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch takes `9` out of the setting-name class, so a record of 33 `9=` no longer reaches the cap of 32 named `=`: the original withholds both streams for it, the mutant screens and delivers. Generated sweep mutant `{id}`; at `6194e105` it left every ref of the row green.
+
+## M-258 — `-` is a setting-name byte
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialFileKeys`
+- Baseline: `d1d7fa91`, the commit that adds the rows these entries turn red (#777), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath)$' ./agent/interceptor`; `go test -count=1 -v -run '^TestHardeningContracts$/^Active$/^Invariants$/^(run_env_argv|start_env_argv|run_dir_ssh|start_dir_git)$' ./agent`; `go test -count=1 -v -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestBuildOutputScreenIgnoresGuard|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld)$' ./agent/tools`; `go test -count=1 -v -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT and the four #777 leaves of INVARIANTS, in four commands: interceptor, contract, tools, scenarios)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/screen_keys.go b/agent/tools/screen_keys.go
+  --- a/agent/tools/screen_keys.go
+  +++ b/agent/tools/screen_keys.go
+  @@ -134,7 +134,7 @@
+   const gitConfigEqCap = 32
+   
+   func isSettingNameByte(c byte) bool {
+  -	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-'
+  +	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || false
+   }
+   
+   // gitConfigKeys adds the keys for one git config record: what git prints for
+  ```
+- Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestCredentialFileKeys/git-eq-cap-name-bytes` (`screen_keys_test.go:236: name byte "-": 33 named = should set overLong`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch takes `-` out of the setting-name class, so a record of 33 `-=` no longer reaches the cap of 32 named `=`: the original withholds both streams for it, the mutant screens and delivers. Generated sweep mutant `{id}`; at `6194e105` it left every ref of the row green.
+
+## M-259 — A tab between a setting name and `=` is skipped
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialFileKeys`
+- Baseline: `d1d7fa91`, the commit that adds the rows these entries turn red (#777), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath)$' ./agent/interceptor`; `go test -count=1 -v -run '^TestHardeningContracts$/^Active$/^Invariants$/^(run_env_argv|start_env_argv|run_dir_ssh|start_dir_git)$' ./agent`; `go test -count=1 -v -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestBuildOutputScreenIgnoresGuard|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld)$' ./agent/tools`; `go test -count=1 -v -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT and the four #777 leaves of INVARIANTS, in four commands: interceptor, contract, tools, scenarios)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/screen_keys.go b/agent/tools/screen_keys.go
+  --- a/agent/tools/screen_keys.go
+  +++ b/agent/tools/screen_keys.go
+  @@ -149,7 +149,7 @@
+   			continue
+   		}
+   		end := eq
+  -		for end > 0 && (rec[end-1] == ' ' || rec[end-1] == '\t') {
+  +		for end > 0 && (rec[end-1] == ' ' || false) {
+   			end--
+   		}
+   		start := end
+  ```
+- Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestCredentialFileKeys/git-xh-tab-before-eq` (`screen_keys_test.go:212: expected key 0 missing`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch skips only spaces, so `extraheader<tab>= <value>` is not read as an extraheader and the value is no longer a key. Generated sweep mutant `{id}`; at `6194e105` it left every ref of the row green.
+
+## M-260 — A record that starts with `=` has no setting name
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialFileKeys`
+- Baseline: `d1d7fa91`, the commit that adds the rows these entries turn red (#777), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath)$' ./agent/interceptor`; `go test -count=1 -v -run '^TestHardeningContracts$/^Active$/^Invariants$/^(run_env_argv|start_env_argv|run_dir_ssh|start_dir_git)$' ./agent`; `go test -count=1 -v -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestBuildOutputScreenIgnoresGuard|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld)$' ./agent/tools`; `go test -count=1 -v -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT and the four #777 leaves of INVARIANTS, in four commands: interceptor, contract, tools, scenarios)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/screen_keys.go b/agent/tools/screen_keys.go
+  --- a/agent/tools/screen_keys.go
+  +++ b/agent/tools/screen_keys.go
+  @@ -149,7 +149,7 @@
+   			continue
+   		}
+   		end := eq
+  -		for end > 0 && (rec[end-1] == ' ' || rec[end-1] == '\t') {
+  +		for true && (rec[end-1] == ' ' || rec[end-1] == '\t') {
+   			end--
+   		}
+   		start := end
+  ```
+- Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestCredentialFileKeys/git-leading-eq` (`panic: runtime error: index out of range [-1]`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch drops the bound check, so a git record that starts with `=` is indexed at -1: a panic, a crash rather than a delivery. Generated sweep mutant `{id}`; at `6194e105` it left every ref of the row green.
+
+## M-261 — The as-written extraheader value starts right after `=`
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialFileKeys`
+- Baseline: `d1d7fa91`, the commit that adds the rows these entries turn red (#777), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath)$' ./agent/interceptor`; `go test -count=1 -v -run '^TestHardeningContracts$/^Active$/^Invariants$/^(run_env_argv|start_env_argv|run_dir_ssh|start_dir_git)$' ./agent`; `go test -count=1 -v -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestBuildOutputScreenIgnoresGuard|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld)$' ./agent/tools`; `go test -count=1 -v -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT and the four #777 leaves of INVARIANTS, in four commands: interceptor, contract, tools, scenarios)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/screen_keys.go b/agent/tools/screen_keys.go
+  --- a/agent/tools/screen_keys.go
+  +++ b/agent/tools/screen_keys.go
+  @@ -168,7 +168,7 @@
+   			texts = append(texts, v)
+   		}
+   		if strings.EqualFold(string(rec[start:end]), "extraheader") {
+  -			add(bytes.TrimSpace(rec[eq+1:]))
+  +			add(bytes.TrimSpace(rec[eq+(1+1):]))
+   			if v != nil {
+   				add(v)
+   				add(bytes.TrimSpace(v))
+  ```
+- Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestCredentialFileKeys/git-xh-escape-no-space` (`screen_keys_test.go:212: expected key 0 missing`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch skips one more byte, which a space after `=` hides; with no space the value as written loses its first byte and is no longer a key. Generated sweep mutant `{id}`; at `6194e105` it left every ref of the row green.
+
+## M-262 — A `://` at the start of a text is read
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialFileKeys`
+- Baseline: `d1d7fa91`, the commit that adds the rows these entries turn red (#777), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath)$' ./agent/interceptor`; `go test -count=1 -v -run '^TestHardeningContracts$/^Active$/^Invariants$/^(run_env_argv|start_env_argv|run_dir_ssh|start_dir_git)$' ./agent`; `go test -count=1 -v -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestBuildOutputScreenIgnoresGuard|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld)$' ./agent/tools`; `go test -count=1 -v -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT and the four #777 leaves of INVARIANTS, in four commands: interceptor, contract, tools, scenarios)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/screen_keys.go b/agent/tools/screen_keys.go
+  --- a/agent/tools/screen_keys.go
+  +++ b/agent/tools/screen_keys.go
+  @@ -187,7 +187,7 @@
+   func urlUserinfoKeys(t []byte, add func([]byte)) {
+   	for rest := t; ; {
+   		i := bytes.Index(rest, []byte("://"))
+  -		if i < 0 {
+  +		if i <= 0 {
+   			return
+   		}
+   		auth := rest[i+3:]
+  ```
+- Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestCredentialFileKeys/git-url-no-scheme` (`screen_keys_test.go:212: expected key 0 missing`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch stops when `://` is at index 0, so the userinfo of a text that starts with it is no longer keyed. Generated sweep mutant `{id}`; at `6194e105` it left every ref of the row green.
+
+## M-263 — An authority that ends the text is read whole
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialFileKeys`
+- Baseline: `d1d7fa91`, the commit that adds the rows these entries turn red (#777), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath)$' ./agent/interceptor`; `go test -count=1 -v -run '^TestHardeningContracts$/^Active$/^Invariants$/^(run_env_argv|start_env_argv|run_dir_ssh|start_dir_git)$' ./agent`; `go test -count=1 -v -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestBuildOutputScreenIgnoresGuard|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld)$' ./agent/tools`; `go test -count=1 -v -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT and the four #777 leaves of INVARIANTS, in four commands: interceptor, contract, tools, scenarios)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/screen_keys.go b/agent/tools/screen_keys.go
+  --- a/agent/tools/screen_keys.go
+  +++ b/agent/tools/screen_keys.go
+  @@ -192,7 +192,7 @@
+   		}
+   		auth := rest[i+3:]
+   		rest = auth
+  -		if n := bytes.IndexAny(auth, "/ \t"); n >= 0 {
+  +		if n := bytes.IndexAny(auth, "/ \t"); true {
+   			auth = auth[:n]
+   		}
+   		first, last := bytes.IndexByte(auth, '@'), bytes.LastIndexByte(auth, '@')
+  ```
+- Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestCredentialFileKeys/git-url-no-path` (`panic: runtime error: slice bounds out of range [:-1]`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch cuts the authority even when nothing ends it, at -1: a panic, a crash rather than a delivery. Generated sweep mutant `{id}`; at `6194e105` it left every ref of the row green.
+
+## M-264 — A userinfo with no `:` has no parts
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialFileKeys`
+- Baseline: `d1d7fa91`, the commit that adds the rows these entries turn red (#777), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath)$' ./agent/interceptor`; `go test -count=1 -v -run '^TestHardeningContracts$/^Active$/^Invariants$/^(run_env_argv|start_env_argv|run_dir_ssh|start_dir_git)$' ./agent`; `go test -count=1 -v -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestBuildOutputScreenIgnoresGuard|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld)$' ./agent/tools`; `go test -count=1 -v -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT and the four #777 leaves of INVARIANTS, in four commands: interceptor, contract, tools, scenarios)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/screen_keys.go b/agent/tools/screen_keys.go
+  --- a/agent/tools/screen_keys.go
+  +++ b/agent/tools/screen_keys.go
+  @@ -202,7 +202,7 @@
+   		for _, u := range [][]byte{auth[:first], auth[:last]} {
+   			add(u)
+   			add(pctDecode(u))
+  -			if c := bytes.IndexByte(u, ':'); c >= 0 {
+  +			if c := bytes.IndexByte(u, ':'); true {
+   				for _, p := range [][]byte{u[:c], u[c+1:]} {
+   					add(p)
+   					add(pctDecode(p))
+  ```
+- Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestCredentialFileKeys/git-url-user-only` (`panic: runtime error: slice bounds out of range [:-1]`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch splits a userinfo with no `:` at -1: a panic, a crash rather than a delivery. Generated sweep mutant `{id}`; at `6194e105` it left every ref of the row green.
+
+## M-265 — An empty user part still gives the password part
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialFileKeys`
+- Baseline: `d1d7fa91`, the commit that adds the rows these entries turn red (#777), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath)$' ./agent/interceptor`; `go test -count=1 -v -run '^TestHardeningContracts$/^Active$/^Invariants$/^(run_env_argv|start_env_argv|run_dir_ssh|start_dir_git)$' ./agent`; `go test -count=1 -v -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestBuildOutputScreenIgnoresGuard|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld)$' ./agent/tools`; `go test -count=1 -v -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT and the four #777 leaves of INVARIANTS, in four commands: interceptor, contract, tools, scenarios)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/screen_keys.go b/agent/tools/screen_keys.go
+  --- a/agent/tools/screen_keys.go
+  +++ b/agent/tools/screen_keys.go
+  @@ -202,7 +202,7 @@
+   		for _, u := range [][]byte{auth[:first], auth[:last]} {
+   			add(u)
+   			add(pctDecode(u))
+  -			if c := bytes.IndexByte(u, ':'); c >= 0 {
+  +			if c := bytes.IndexByte(u, ':'); c > 0 {
+   				for _, p := range [][]byte{u[:c], u[c+1:]} {
+   					add(p)
+   					add(pctDecode(p))
+  ```
+- Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestCredentialFileKeys/git-url-empty-user` (`screen_keys_test.go:212: expected key 0 missing`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch needs the `:` after the first byte, so the password of `://:<password>@` is no longer a key on its own. Generated sweep mutant `{id}`; at `6194e105` it left every ref of the row green.
+
+## M-266 — A `%` too close to the end stays as written
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialFileKeys`
+- Baseline: `d1d7fa91`, the commit that adds the rows these entries turn red (#777), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath)$' ./agent/interceptor`; `go test -count=1 -v -run '^TestHardeningContracts$/^Active$/^Invariants$/^(run_env_argv|start_env_argv|run_dir_ssh|start_dir_git)$' ./agent`; `go test -count=1 -v -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestBuildOutputScreenIgnoresGuard|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld)$' ./agent/tools`; `go test -count=1 -v -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT and the four #777 leaves of INVARIANTS, in four commands: interceptor, contract, tools, scenarios)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/screen_keys.go b/agent/tools/screen_keys.go
+  --- a/agent/tools/screen_keys.go
+  +++ b/agent/tools/screen_keys.go
+  @@ -216,7 +216,7 @@
+   func pctDecode(s []byte) []byte {
+   	out := make([]byte, 0, len(s))
+   	for i := 0; i < len(s); i++ {
+  -		if s[i] == '%' && i+2 < len(s) && unhex(s[i+1]) >= 0 && unhex(s[i+2]) >= 0 {
+  +		if s[i] == '%' && true && unhex(s[i+1]) >= 0 && unhex(s[i+2]) >= 0 {
+   			out = append(out, byte(unhex(s[i+1])<<4|unhex(s[i+2])))
+   			i += 2
+   			continue
+  ```
+- Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestCredentialFileKeys/git-pct-at-end` (`panic: runtime error: index out of range [26] with length 26`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch drops the length check, so a `%` in the last two bytes is indexed past the end: a panic, a crash rather than a delivery. Generated sweep mutant `{id}`; at `6194e105` it left every ref of the row green.
+
+## M-267 — A percent escape as the last three bytes is decoded
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialFileKeys`
+- Baseline: `d1d7fa91`, the commit that adds the rows these entries turn red (#777), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath)$' ./agent/interceptor`; `go test -count=1 -v -run '^TestHardeningContracts$/^Active$/^Invariants$/^(run_env_argv|start_env_argv|run_dir_ssh|start_dir_git)$' ./agent`; `go test -count=1 -v -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestBuildOutputScreenIgnoresGuard|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld)$' ./agent/tools`; `go test -count=1 -v -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT and the four #777 leaves of INVARIANTS, in four commands: interceptor, contract, tools, scenarios)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/screen_keys.go b/agent/tools/screen_keys.go
+  --- a/agent/tools/screen_keys.go
+  +++ b/agent/tools/screen_keys.go
+  @@ -216,7 +216,7 @@
+   func pctDecode(s []byte) []byte {
+   	out := make([]byte, 0, len(s))
+   	for i := 0; i < len(s); i++ {
+  -		if s[i] == '%' && i+2 < len(s) && unhex(s[i+1]) >= 0 && unhex(s[i+2]) >= 0 {
+  +		if s[i] == '%' && i+(2+1) < len(s) && unhex(s[i+1]) >= 0 && unhex(s[i+2]) >= 0 {
+   			out = append(out, byte(unhex(s[i+1])<<4|unhex(s[i+2])))
+   			i += 2
+   			continue
+  ```
+- Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestCredentialFileKeys/git-pct-last` (`screen_keys_test.go:212: expected key 0 missing`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch needs one more byte, so an escape that ends a part is not decoded and the decoded part is no longer a key. Generated sweep mutant `{id}`; at `6194e105` it left every ref of the row green.
+
+## M-268 — A percent escape whose first digit is 0 is decoded
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialFileKeys`
+- Baseline: `d1d7fa91`, the commit that adds the rows these entries turn red (#777), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath)$' ./agent/interceptor`; `go test -count=1 -v -run '^TestHardeningContracts$/^Active$/^Invariants$/^(run_env_argv|start_env_argv|run_dir_ssh|start_dir_git)$' ./agent`; `go test -count=1 -v -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestBuildOutputScreenIgnoresGuard|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld)$' ./agent/tools`; `go test -count=1 -v -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT and the four #777 leaves of INVARIANTS, in four commands: interceptor, contract, tools, scenarios)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/screen_keys.go b/agent/tools/screen_keys.go
+  --- a/agent/tools/screen_keys.go
+  +++ b/agent/tools/screen_keys.go
+  @@ -216,7 +216,7 @@
+   func pctDecode(s []byte) []byte {
+   	out := make([]byte, 0, len(s))
+   	for i := 0; i < len(s); i++ {
+  -		if s[i] == '%' && i+2 < len(s) && unhex(s[i+1]) >= 0 && unhex(s[i+2]) >= 0 {
+  +		if s[i] == '%' && i+2 < len(s) && unhex(s[i+1]) > 0 && unhex(s[i+2]) >= 0 {
+   			out = append(out, byte(unhex(s[i+1])<<4|unhex(s[i+2])))
+   			i += 2
+   			continue
+  ```
+- Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestCredentialFileKeys/git-pct-control` (`screen_keys_test.go:212: expected key 0 missing`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch rejects a first digit of 0, so `%0X` is not decoded and the decoded part is no longer a key. Generated sweep mutant `{id}`; at `6194e105` it left every ref of the row green.
+
+## M-269 — `9` is a hex digit
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialFileKeys`
+- Baseline: `d1d7fa91`, the commit that adds the rows these entries turn red (#777), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath)$' ./agent/interceptor`; `go test -count=1 -v -run '^TestHardeningContracts$/^Active$/^Invariants$/^(run_env_argv|start_env_argv|run_dir_ssh|start_dir_git)$' ./agent`; `go test -count=1 -v -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestBuildOutputScreenIgnoresGuard|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld)$' ./agent/tools`; `go test -count=1 -v -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT and the four #777 leaves of INVARIANTS, in four commands: interceptor, contract, tools, scenarios)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/screen_keys.go b/agent/tools/screen_keys.go
+  --- a/agent/tools/screen_keys.go
+  +++ b/agent/tools/screen_keys.go
+  @@ -228,7 +228,7 @@
+   
+   func unhex(c byte) int {
+   	switch {
+  -	case c >= '0' && c <= '9':
+  +	case c >= '0' && c < '9':
+   		return int(c - '0')
+   	case c >= 'a' && c <= 'f':
+   		return int(c-'a') + 10
+  ```
+- Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestCredentialFileKeys/git-pct-control` (`screen_keys_test.go:212: expected key 0 missing`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch takes `9` out of the digit range, so `%09` is not decoded and the decoded part is no longer a key. Generated sweep mutant `{id}`; at `6194e105` it left every ref of the row green.
+
+## M-270 — `a` is a hex digit
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialFileKeys`
+- Baseline: `d1d7fa91`, the commit that adds the rows these entries turn red (#777), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath)$' ./agent/interceptor`; `go test -count=1 -v -run '^TestHardeningContracts$/^Active$/^Invariants$/^(run_env_argv|start_env_argv|run_dir_ssh|start_dir_git)$' ./agent`; `go test -count=1 -v -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestBuildOutputScreenIgnoresGuard|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld)$' ./agent/tools`; `go test -count=1 -v -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT and the four #777 leaves of INVARIANTS, in four commands: interceptor, contract, tools, scenarios)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/screen_keys.go b/agent/tools/screen_keys.go
+  --- a/agent/tools/screen_keys.go
+  +++ b/agent/tools/screen_keys.go
+  @@ -230,7 +230,7 @@
+   	switch {
+   	case c >= '0' && c <= '9':
+   		return int(c - '0')
+  -	case c >= 'a' && c <= 'f':
+  +	case c > 'a' && c <= 'f':
+   		return int(c-'a') + 10
+   	case c >= 'A' && c <= 'F':
+   		return int(c-'A') + 10
+  ```
+- Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestCredentialFileKeys/git-pct-hex-lower-a` (`screen_keys_test.go:212: expected key 0 missing`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch takes `a` out of the lower-case range, so `%4a` is not decoded. Generated sweep mutant `{id}`; at `6194e105` it left every ref of the row green.
+
+## M-271 — `f` is a hex digit
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialFileKeys`
+- Baseline: `d1d7fa91`, the commit that adds the rows these entries turn red (#777), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath)$' ./agent/interceptor`; `go test -count=1 -v -run '^TestHardeningContracts$/^Active$/^Invariants$/^(run_env_argv|start_env_argv|run_dir_ssh|start_dir_git)$' ./agent`; `go test -count=1 -v -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestBuildOutputScreenIgnoresGuard|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld)$' ./agent/tools`; `go test -count=1 -v -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT and the four #777 leaves of INVARIANTS, in four commands: interceptor, contract, tools, scenarios)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/screen_keys.go b/agent/tools/screen_keys.go
+  --- a/agent/tools/screen_keys.go
+  +++ b/agent/tools/screen_keys.go
+  @@ -230,7 +230,7 @@
+   	switch {
+   	case c >= '0' && c <= '9':
+   		return int(c - '0')
+  -	case c >= 'a' && c <= 'f':
+  +	case c >= 'a' && c < 'f':
+   		return int(c-'a') + 10
+   	case c >= 'A' && c <= 'F':
+   		return int(c-'A') + 10
+  ```
+- Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestCredentialFileKeys/git-pct-hex-lower-f` (`screen_keys_test.go:212: expected key 0 missing`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch takes `f` out of the lower-case range, so `%4f` is not decoded. Generated sweep mutant `{id}`; at `6194e105` it left every ref of the row green.
+
+## M-272 — `a` to `f` are worth 10 to 15
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialFileKeys`
+- Baseline: `d1d7fa91`, the commit that adds the rows these entries turn red (#777), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath)$' ./agent/interceptor`; `go test -count=1 -v -run '^TestHardeningContracts$/^Active$/^Invariants$/^(run_env_argv|start_env_argv|run_dir_ssh|start_dir_git)$' ./agent`; `go test -count=1 -v -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestBuildOutputScreenIgnoresGuard|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld)$' ./agent/tools`; `go test -count=1 -v -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT and the four #777 leaves of INVARIANTS, in four commands: interceptor, contract, tools, scenarios)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/screen_keys.go b/agent/tools/screen_keys.go
+  --- a/agent/tools/screen_keys.go
+  +++ b/agent/tools/screen_keys.go
+  @@ -231,7 +231,7 @@
+   	case c >= '0' && c <= '9':
+   		return int(c - '0')
+   	case c >= 'a' && c <= 'f':
+  -		return int(c-'a') + 10
+  +		return int(c-'a') + (10+1)
+   	case c >= 'A' && c <= 'F':
+   		return int(c-'A') + 10
+   	}
+  ```
+- Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestCredentialFileKeys/git-pct-hex-lower-a`, `TestCredentialFileKeys/git-pct-hex-lower-f` (`screen_keys_test.go:212: expected key 0 missing`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch adds 11 instead of 10, so a lower-case escape decodes to the wrong byte and the decoded part is no longer a key. Generated sweep mutant `{id}`; at `6194e105` it left every ref of the row green.
+
+## M-273 — `A` is a hex digit
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialFileKeys`
+- Baseline: `d1d7fa91`, the commit that adds the rows these entries turn red (#777), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath)$' ./agent/interceptor`; `go test -count=1 -v -run '^TestHardeningContracts$/^Active$/^Invariants$/^(run_env_argv|start_env_argv|run_dir_ssh|start_dir_git)$' ./agent`; `go test -count=1 -v -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestBuildOutputScreenIgnoresGuard|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld)$' ./agent/tools`; `go test -count=1 -v -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT and the four #777 leaves of INVARIANTS, in four commands: interceptor, contract, tools, scenarios)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/screen_keys.go b/agent/tools/screen_keys.go
+  --- a/agent/tools/screen_keys.go
+  +++ b/agent/tools/screen_keys.go
+  @@ -232,7 +232,7 @@
+   		return int(c - '0')
+   	case c >= 'a' && c <= 'f':
+   		return int(c-'a') + 10
+  -	case c >= 'A' && c <= 'F':
+  +	case c > 'A' && c <= 'F':
+   		return int(c-'A') + 10
+   	}
+   	return -1
+  ```
+- Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestCredentialFileKeys/git-pct-hex-upper-a` (`screen_keys_test.go:212: expected key 0 missing`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch takes `A` out of the upper-case range, so `%4A` is not decoded. Generated sweep mutant `{id}`; at `6194e105` it left every ref of the row green.
+
+## M-274 — `F` is a hex digit
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialFileKeys`
+- Baseline: `d1d7fa91`, the commit that adds the rows these entries turn red (#777), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath)$' ./agent/interceptor`; `go test -count=1 -v -run '^TestHardeningContracts$/^Active$/^Invariants$/^(run_env_argv|start_env_argv|run_dir_ssh|start_dir_git)$' ./agent`; `go test -count=1 -v -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestBuildOutputScreenIgnoresGuard|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld)$' ./agent/tools`; `go test -count=1 -v -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT and the four #777 leaves of INVARIANTS, in four commands: interceptor, contract, tools, scenarios)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/screen_keys.go b/agent/tools/screen_keys.go
+  --- a/agent/tools/screen_keys.go
+  +++ b/agent/tools/screen_keys.go
+  @@ -232,7 +232,7 @@
+   		return int(c - '0')
+   	case c >= 'a' && c <= 'f':
+   		return int(c-'a') + 10
+  -	case c >= 'A' && c <= 'F':
+  +	case c >= 'A' && c < 'F':
+   		return int(c-'A') + 10
+   	}
+   	return -1
+  ```
+- Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestCredentialFileKeys/git-pct-hex-upper-f` (`screen_keys_test.go:212: expected key 0 missing`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch takes `F` out of the upper-case range, so `%4F` is not decoded. Generated sweep mutant `{id}`; at `6194e105` it left every ref of the row green.
+
+## M-275 — `A` to `F` are worth 10 to 15
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialFileKeys`
+- Baseline: `d1d7fa91`, the commit that adds the rows these entries turn red (#777), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath)$' ./agent/interceptor`; `go test -count=1 -v -run '^TestHardeningContracts$/^Active$/^Invariants$/^(run_env_argv|start_env_argv|run_dir_ssh|start_dir_git)$' ./agent`; `go test -count=1 -v -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestBuildOutputScreenIgnoresGuard|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld)$' ./agent/tools`; `go test -count=1 -v -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT and the four #777 leaves of INVARIANTS, in four commands: interceptor, contract, tools, scenarios)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/screen_keys.go b/agent/tools/screen_keys.go
+  --- a/agent/tools/screen_keys.go
+  +++ b/agent/tools/screen_keys.go
+  @@ -233,7 +233,7 @@
+   	case c >= 'a' && c <= 'f':
+   		return int(c-'a') + 10
+   	case c >= 'A' && c <= 'F':
+  -		return int(c-'A') + 10
+  +		return int(c-'A') + (10+1)
+   	}
+   	return -1
+   }
+  ```
+- Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestCredentialFileKeys/git-pct-hex-upper-a`, `TestCredentialFileKeys/git-pct-hex-upper-f` (`screen_keys_test.go:212: expected key 0 missing`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch adds 11 instead of 10, so an upper-case escape decodes to the wrong byte. Generated sweep mutant `{id}`; at `6194e105` it left every ref of the row green.
+
+## M-276 — Every URL in a text is read
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialFileKeys`
+- Baseline: `d1d7fa91`, the commit that adds the rows these entries turn red (#777), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath)$' ./agent/interceptor`; `go test -count=1 -v -run '^TestHardeningContracts$/^Active$/^Invariants$/^(run_env_argv|start_env_argv|run_dir_ssh|start_dir_git)$' ./agent`; `go test -count=1 -v -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestBuildOutputScreenIgnoresGuard|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld)$' ./agent/tools`; `go test -count=1 -v -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT and the four #777 leaves of INVARIANTS, in four commands: interceptor, contract, tools, scenarios)
+- Patch:
+  ```diff
+  --- a/agent/tools/screen_keys.go
+  +++ b/agent/tools/screen_keys.go
+  @@ -191,7 +191,7 @@
+   			return
+   		}
+   		auth := rest[i+3:]
+  -		rest = auth
+  +		rest = nil
+   		if n := bytes.IndexAny(auth, "/ \t"); n >= 0 {
+   			auth = auth[:n]
+   		}
+  ```
+- Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestCredentialFileKeys/git-url-second-url` (`screen_keys_test.go:212: expected key 0 missing`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch reads only the first `://` of a text, so a URL after one with no userinfo is not keyed. The round-3 review defined it (X-url-first-url-only); it left every ref of the row green at `50d40b84` and at `6194e105`.
+
+## M-277 — A user part is also keyed percent-decoded
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialFileKeys`
+- Baseline: `d1d7fa91`, the commit that adds the rows these entries turn red (#777), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath)$' ./agent/interceptor`; `go test -count=1 -v -run '^TestHardeningContracts$/^Active$/^Invariants$/^(run_env_argv|start_env_argv|run_dir_ssh|start_dir_git)$' ./agent`; `go test -count=1 -v -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestBuildOutputScreenIgnoresGuard|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld)$' ./agent/tools`; `go test -count=1 -v -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT and the four #777 leaves of INVARIANTS, in four commands: interceptor, contract, tools, scenarios)
+- Patch:
+  ```diff
+  --- a/agent/tools/screen_keys.go
+  +++ b/agent/tools/screen_keys.go
+  @@ -203,9 +203,11 @@
+   			add(u)
+   			add(pctDecode(u))
+   			if c := bytes.IndexByte(u, ':'); c >= 0 {
+  -				for _, p := range [][]byte{u[:c], u[c+1:]} {
+  +				for j, p := range [][]byte{u[:c], u[c+1:]} {
+   					add(p)
+  -					add(pctDecode(p))
+  +					if j == 1 {
+  +						add(pctDecode(p))
+  +					}
+   				}
+   			}
+   		}
+  ```
+- Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestCredentialFileKeys/git-pct-user` (`screen_keys_test.go:212: expected key 0 missing`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch decodes only the password part, so a percent-encoded user part's decoded form is not a key. One of the round-3 review's combination mutants; green at `50d40b84` and at `6194e105`.
+
+## M-278 — The parts of the userinfo read to the first `@` are keys
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialFileKeys`
+- Baseline: `d1d7fa91`, the commit that adds the rows these entries turn red (#777), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath)$' ./agent/interceptor`; `go test -count=1 -v -run '^TestHardeningContracts$/^Active$/^Invariants$/^(run_env_argv|start_env_argv|run_dir_ssh|start_dir_git)$' ./agent`; `go test -count=1 -v -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestBuildOutputScreenIgnoresGuard|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld)$' ./agent/tools`; `go test -count=1 -v -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT and the four #777 leaves of INVARIANTS, in four commands: interceptor, contract, tools, scenarios)
+- Patch:
+  ```diff
+  --- a/agent/tools/screen_keys.go
+  +++ b/agent/tools/screen_keys.go
+  @@ -199,9 +199,13 @@
+   		if first <= 0 {
+   			continue
+   		}
+  -		for _, u := range [][]byte{auth[:first], auth[:last]} {
+  +		for k, u := range [][]byte{auth[:first], auth[:last]} {
+   			add(u)
+   			add(pctDecode(u))
+  +			if c := 0; k == 0 {
+  +				_ = c
+  +				continue
+  +			}
+   			if c := bytes.IndexByte(u, ':'); c >= 0 {
+   				for _, p := range [][]byte{u[:c], u[c+1:]} {
+   					add(p)
+  ```
+- Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestCredentialFileKeys/git-first-at-pass` (`screen_keys_test.go:212: expected key 0 missing`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch splits only the userinfo read to the last `@`, so with two `@` the password read to the first is not a key. A combination mutant of the round-3 review; green at `50d40b84` and at `6194e105`.
+
+## M-279 — The whole userinfo read to the last `@` is keyed decoded
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialFileKeys`
+- Baseline: `d1d7fa91`, the commit that adds the rows these entries turn red (#777), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath)$' ./agent/interceptor`; `go test -count=1 -v -run '^TestHardeningContracts$/^Active$/^Invariants$/^(run_env_argv|start_env_argv|run_dir_ssh|start_dir_git)$' ./agent`; `go test -count=1 -v -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestBuildOutputScreenIgnoresGuard|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld)$' ./agent/tools`; `go test -count=1 -v -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT and the four #777 leaves of INVARIANTS, in four commands: interceptor, contract, tools, scenarios)
+- Patch:
+  ```diff
+  --- a/agent/tools/screen_keys.go
+  +++ b/agent/tools/screen_keys.go
+  @@ -199,9 +199,11 @@
+   		if first <= 0 {
+   			continue
+   		}
+  -		for _, u := range [][]byte{auth[:first], auth[:last]} {
+  +		for k, u := range [][]byte{auth[:first], auth[:last]} {
+   			add(u)
+  -			add(pctDecode(u))
+  +			if k == 0 {
+  +				add(pctDecode(u))
+  +			}
+   			if c := bytes.IndexByte(u, ':'); c >= 0 {
+   				for _, p := range [][]byte{u[:c], u[c+1:]} {
+   					add(p)
+  ```
+- Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestCredentialFileKeys/git-last-at-decoded` (`screen_keys_test.go:212: expected key 0 missing`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch decodes the whole userinfo only when read to the first `@`. A combination mutant of the round-3 review; green at `50d40b84` and at `6194e105`.
+
+## M-280 — The whole userinfo read to the first `@` is keyed decoded
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialFileKeys`
+- Baseline: `d1d7fa91`, the commit that adds the rows these entries turn red (#777), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath)$' ./agent/interceptor`; `go test -count=1 -v -run '^TestHardeningContracts$/^Active$/^Invariants$/^(run_env_argv|start_env_argv|run_dir_ssh|start_dir_git)$' ./agent`; `go test -count=1 -v -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestBuildOutputScreenIgnoresGuard|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld)$' ./agent/tools`; `go test -count=1 -v -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT and the four #777 leaves of INVARIANTS, in four commands: interceptor, contract, tools, scenarios)
+- Patch:
+  ```diff
+  --- a/agent/tools/screen_keys.go
+  +++ b/agent/tools/screen_keys.go
+  @@ -199,9 +199,11 @@
+   		if first <= 0 {
+   			continue
+   		}
+  -		for _, u := range [][]byte{auth[:first], auth[:last]} {
+  +		for k, u := range [][]byte{auth[:first], auth[:last]} {
+   			add(u)
+  -			add(pctDecode(u))
+  +			if k == 1 {
+  +				add(pctDecode(u))
+  +			}
+   			if c := bytes.IndexByte(u, ':'); c >= 0 {
+   				for _, p := range [][]byte{u[:c], u[c+1:]} {
+   					add(p)
+  ```
+- Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestCredentialFileKeys/git-first-at-decoded` (`screen_keys_test.go:212: expected key 0 missing`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch decodes the whole userinfo only when read to the last `@`. A combination mutant of the round-3 review; green at `50d40b84` and at `6194e105`.
+
+## M-281 — The whole userinfo read to the last `@` is keyed as written
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialFileKeys`
+- Baseline: `d1d7fa91`, the commit that adds the rows these entries turn red (#777), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath)$' ./agent/interceptor`; `go test -count=1 -v -run '^TestHardeningContracts$/^Active$/^Invariants$/^(run_env_argv|start_env_argv|run_dir_ssh|start_dir_git)$' ./agent`; `go test -count=1 -v -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestBuildOutputScreenIgnoresGuard|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld)$' ./agent/tools`; `go test -count=1 -v -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT and the four #777 leaves of INVARIANTS, in four commands: interceptor, contract, tools, scenarios)
+- Patch:
+  ```diff
+  --- a/agent/tools/screen_keys.go
+  +++ b/agent/tools/screen_keys.go
+  @@ -199,8 +199,10 @@
+   		if first <= 0 {
+   			continue
+   		}
+  -		for _, u := range [][]byte{auth[:first], auth[:last]} {
+  -			add(u)
+  +		for k, u := range [][]byte{auth[:first], auth[:last]} {
+  +			if k == 0 {
+  +				add(u)
+  +			}
+   			add(pctDecode(u))
+   			if c := bytes.IndexByte(u, ':'); c >= 0 {
+   				for _, p := range [][]byte{u[:c], u[c+1:]} {
+  ```
+- Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestCredentialFileKeys/git-last-at-as-written` (`screen_keys_test.go:212: expected key 0 missing`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch keys the whole userinfo as written only when read to the first `@`. A combination mutant of the round-3 review; green at `50d40b84` and at `6194e105`.
+
+## M-282 — A walk error after the budget ran out still fails the build
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestBuildOutputScreenRootReplaced`
+- Baseline: `d1d7fa91`, the commit that adds the rows these entries turn red (#777), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2); Linux (arm64, go1.27.1, the Docker `ci-local` image, as its non-root `ci` user): FAIL with the same failing leaves and the same quoted lines; exit codes interceptor=0, contract=0, tools=1, scenarios=0; restored (`patch -R`, `cmp` identical) and passing after the last mutant
+- Profile / command: darwin-host / `go test -count=1 -v -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath)$' ./agent/interceptor`; `go test -count=1 -v -run '^TestHardeningContracts$/^Active$/^Invariants$/^(run_env_argv|start_env_argv|run_dir_ssh|start_dir_git)$' ./agent`; `go test -count=1 -v -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestBuildOutputScreenIgnoresGuard|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld)$' ./agent/tools`; `go test -count=1 -v -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT and the four #777 leaves of INVARIANTS, in four commands: interceptor, contract, tools, scenarios)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/screen_build.go b/agent/tools/screen_build.go
+  --- a/agent/tools/screen_build.go
+  +++ b/agent/tools/screen_build.go
+  @@ -143,7 +143,7 @@
+   	case ctx.Err() != nil:
+   		return nil, fmt.Errorf("tools: credential screen: %w", ctx.Err())
+   	case err == nil, errors.Is(err, fs.SkipAll):
+  -	case errors.Is(err, context.DeadlineExceeded) && wctx.Err() != nil:
+  +	case true && wctx.Err() != nil:
+   		_ = stop(fmt.Sprintf("time budget of %s exhausted", lim.budget))
+   	default:
+   		return nil, err
+  ```
+- Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestBuildOutputScreenRootReplaced` (`screen_build_test.go:432: swap after budget: wrong outcome (error: false, screen: true)`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch takes any walk error for the budget once the budget's context has expired, so a replaced root met after the budget ran out runs the command with both streams withheld instead of not running it. Generated sweep mutant `{id}`; at `6194e105` it left every ref of the row green.
+
+## M-283 — The screen's default time budget is 5 seconds
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestBuildOutputScreenBounds`
+- Baseline: `d1d7fa91`, the commit that adds the rows these entries turn red (#777), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: darwin-host / `go test -count=1 -v -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath)$' ./agent/interceptor`; `go test -count=1 -v -run '^TestHardeningContracts$/^Active$/^Invariants$/^(run_env_argv|start_env_argv|run_dir_ssh|start_dir_git)$' ./agent`; `go test -count=1 -v -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestBuildOutputScreenIgnoresGuard|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld)$' ./agent/tools`; `go test -count=1 -v -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT and the four #777 leaves of INVARIANTS, in four commands: interceptor, contract, tools, scenarios)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/screen_classify.go b/agent/tools/screen_classify.go
+  --- a/agent/tools/screen_classify.go
+  +++ b/agent/tools/screen_classify.go
+  @@ -21,7 +21,7 @@
+   	keyBytes:   16384,
+   	keys:       4096,
+   	totalBytes: 1048576,
+  -	budget:     5 * time.Second,
+  +	budget:     (5+1) * time.Second,
+   }
+   
+   // orDefaults returns l with each zero field replaced by its default.
+  ```
+- Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestBuildOutputScreenBounds/defaults` (`screen_build_test.go:257: default limits differ (budget 6s)`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch makes the default 6 seconds, so a walk that takes between 5 and 6 seconds is screened and delivered where the original withholds both streams. Generated sweep mutant `{id}`; at `6194e105` it left every ref of the row green.
+
+## M-284 — The walk checks its budget on entering a directory
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestBuildOutputScreenBounds`
+- Baseline: `d1d7fa91`, the commit that adds the rows these entries turn red (#777), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2); Linux (arm64, go1.27.1, the Docker `ci-local` image, as its non-root `ci` user): FAIL with the same failing leaves and the same quoted lines; exit codes interceptor=0, contract=0, tools=1, scenarios=0; restored (`patch -R`, `cmp` identical) and passing after the last mutant
+- Profile / command: darwin-host / `go test -count=1 -v -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath)$' ./agent/interceptor`; `go test -count=1 -v -run '^TestHardeningContracts$/^Active$/^Invariants$/^(run_env_argv|start_env_argv|run_dir_ssh|start_dir_git)$' ./agent`; `go test -count=1 -v -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestBuildOutputScreenIgnoresGuard|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld)$' ./agent/tools`; `go test -count=1 -v -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT and the four #777 leaves of INVARIANTS, in four commands: interceptor, contract, tools, scenarios)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/paths_unix.go b/agent/tools/paths_unix.go
+  --- a/agent/tools/paths_unix.go
+  +++ b/agent/tools/paths_unix.go
+  @@ -716,7 +716,7 @@
+   // subdirectory's is reported through opts.skip after the held directory is
+   // rechecked.
+   func (w *Workspace) walkDir(ctx context.Context, parent *os.File, base string, fn func(string, fs.DirEntry) error, opts *walkOptions) error {
+  -	if err := ctx.Err(); err != nil {
+  +	if err := ctx.Err(); false {
+   		return err
+   	}
+   	fd, err := unix.Openat(int(parent.Fd()), ".", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+  ```
+- Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestBuildOutputScreenBounds/budget_at_empty_dir` (`screen_build_test.go:251: empty dir: notes differ (0 notes)`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch drops the check at the start of `walkDir`, so a budget that runs out while the last directory, an empty one, is entered goes unnoticed and the output is delivered where the original withholds it. Generated sweep mutant `{id}`; at `6194e105` it left every ref of the row green.
 
 ## Administrative evidence
 
