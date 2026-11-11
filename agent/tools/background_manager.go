@@ -73,18 +73,23 @@ type tailChunk struct {
 }
 
 // backgroundJob is the manager's record of one started process. proc, the
-// rings, and done are set at registration and immutable after; the remaining
-// mutable fields are guarded by the manager mutex. done closes only after the
-// job's exit, retention, and active-cap bookkeeping are published.
+// rings, the screen and its streams, and done are set at registration and
+// immutable after; the remaining mutable fields are guarded by the manager
+// mutex. done closes only after the job's exit, retention, and active-cap
+// bookkeeping are published. The process writes each ring only through its
+// screen stream; tail reads the rings.
 type backgroundJob struct {
-	handle string
-	pid    int
-	argv   []string
-	cwd    string
-	proc   backgroundProcess
-	stdout *tailRing
-	stderr *tailRing
-	done   chan struct{}
+	handle    string
+	pid       int
+	argv      []string
+	cwd       string
+	proc      backgroundProcess
+	stdout    *tailRing
+	stderr    *tailRing
+	screen    *outputScreen
+	outStream *screenStream
+	errStream *screenStream
+	done      chan struct{}
 
 	running       bool
 	killRequested bool
@@ -198,24 +203,35 @@ func (m *BackgroundManager) start(ctx context.Context, spec execSpec, cwdDisplay
 // backend.Start and before registration, so the wrapped Wait owns per-job
 // resource cleanup on every path — including the spawned-but-unregistered
 // abandonment below. The manager stays ignorant of what the wrapper does.
+//
+// From the call on, startWrapped owns spec.Screen: it finishes the screen's
+// streams and releases it on every path, here on failure and in reap once a
+// registered job exits. A spec without a screen does not start.
 func (m *BackgroundManager) startWrapped(ctx context.Context, spec execSpec, cwdDisplay string, wrap func(backgroundProcess) backgroundProcess) (JobStatus, error) {
+	if spec.Screen == nil {
+		return JobStatus{}, errNoOutputScreen
+	}
 	handle, err := m.readHandle()
 	if err != nil {
+		spec.Screen.release()
 		return JobStatus{}, err
 	}
 
 	m.mu.Lock()
 	if m.closed {
 		m.mu.Unlock()
+		spec.Screen.release()
 		return JobStatus{}, errBackgroundShutDown
 	}
 	if m.active >= backgroundActiveCap {
 		m.mu.Unlock()
+		spec.Screen.release()
 		return JobStatus{}, fmt.Errorf("active background job limit reached (%d); stop one first", backgroundActiveCap)
 	}
 	for m.handleTaken(handle) {
 		if handle, err = m.readHandle(); err != nil {
 			m.mu.Unlock()
+			spec.Screen.release()
 			return JobStatus{}, err
 		}
 	}
@@ -225,14 +241,17 @@ func (m *BackgroundManager) startWrapped(ctx context.Context, spec execSpec, cwd
 	m.mu.Unlock()
 
 	if err := ctx.Err(); err != nil {
+		spec.Screen.release()
 		m.releaseReservation(handle)
 		return JobStatus{}, err
 	}
 
 	stdout := newTailRing(backgroundRingCap)
 	stderr := newTailRing(backgroundRingCap)
-	proc, err := m.backend.Start(spec, stdout, stderr)
+	outStream, errStream := spec.Screen.stream(stdout), spec.Screen.stream(stderr)
+	proc, err := m.backend.Start(spec, outStream, errStream)
 	if err != nil {
+		spec.Screen.release()
 		m.releaseReservation(handle)
 		return JobStatus{}, fmt.Errorf("start background command: %w", err)
 	}
@@ -241,16 +260,19 @@ func (m *BackgroundManager) startWrapped(ctx context.Context, spec execSpec, cwd
 	}
 
 	job := &backgroundJob{
-		handle:  handle,
-		pid:     proc.PID(),
-		argv:    append([]string(nil), spec.Argv...),
-		cwd:     cwdDisplay,
-		proc:    proc,
-		stdout:  stdout,
-		stderr:  stderr,
-		done:    make(chan struct{}),
-		running: true,
-		state:   backgroundStateRunning,
+		handle:    handle,
+		pid:       proc.PID(),
+		argv:      append([]string(nil), spec.Argv...),
+		cwd:       cwdDisplay,
+		proc:      proc,
+		stdout:    stdout,
+		stderr:    stderr,
+		screen:    spec.Screen,
+		outStream: outStream,
+		errStream: errStream,
+		done:      make(chan struct{}),
+		running:   true,
+		state:     backgroundStateRunning,
 	}
 
 	m.mu.Lock()
@@ -264,6 +286,9 @@ func (m *BackgroundManager) startWrapped(ctx context.Context, spec execSpec, cwd
 		// which errors.Is still classifies.
 		_ = proc.Kill()
 		_, _, _ = proc.Wait()
+		outStream.finish()
+		errStream.finish()
+		spec.Screen.release()
 		m.releaseReservation(handle)
 		err := ctx.Err()
 		if closed {
@@ -284,8 +309,14 @@ func (m *BackgroundManager) startWrapped(ctx context.Context, spec execSpec, cwd
 // reap waits for the job's process, then publishes exit state, releases the
 // active slot, and applies completed-job retention — all before done closes.
 // Nothing that only presents or notifies may ever be added before the close.
+// The streams finish (delivering a held unterminated last record) and the
+// screen is released before done closes, so a reader that sees done reads
+// the whole screened stream.
 func (m *BackgroundManager) reap(job *backgroundJob) {
 	code, managerKilled, waitErr := job.proc.Wait()
+	job.outStream.finish()
+	job.errStream.finish()
+	job.screen.release()
 	note := cleanupNoteOf(job.proc)
 
 	m.mu.Lock()
@@ -344,7 +375,7 @@ func (m *BackgroundManager) snapshotLocked(job *backgroundJob) JobStatus {
 		StdoutEnd:   outEnd,
 		StderrFloor: errFloor,
 		StderrEnd:   errEnd,
-		Notes:       append([]string(nil), job.notes...),
+		Notes:       append(append([]string(nil), job.notes...), job.screen.notes()...),
 	}
 }
 

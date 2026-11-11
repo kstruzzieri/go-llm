@@ -13,9 +13,10 @@ func testScreen() *outputScreen { return newOutputScreen(nil) }
 
 // TestOnlyProbesCaptureWithoutWorkspaceScreen pins, over the package's
 // non-test source, the only places exec output is captured without a screen
-// built from the workspace: the Seatbelt probe's keyless screen, the unix
-// runner's two capture buffers behind the screen, the bwrap probe's buffer,
-// and the background manager's rings (screened by Task 8).
+// built from the workspace: the Seatbelt probe's keyless screen and the bwrap
+// probe's buffer. The unix runner's two capture buffers and the background
+// manager's two rings are listed too: each is written only through a stream
+// of the spec's screen.
 func TestOnlyProbesCaptureWithoutWorkspaceScreen(t *testing.T) {
 	entries, err := os.ReadDir(".")
 	if err != nil {
@@ -89,6 +90,10 @@ var captureForms = []captureForm{
 	{"CombinedOutput(", regexp.MustCompile(`\bCombinedOutput\(`), ""},
 	{"StdoutPipe(", regexp.MustCompile(`\bStdoutPipe\(`), ""},
 	{"StderrPipe(", regexp.MustCompile(`\bStderrPipe\(`), ""},
+	// The bare names also catch a method value such as f := c.CombinedOutput.
+	{"CombinedOutput", regexp.MustCompile(`\bCombinedOutput\b`), ""},
+	{"StdoutPipe", regexp.MustCompile(`\bStdoutPipe\b`), ""},
+	{"StderrPipe", regexp.MustCompile(`\bStderrPipe\b`), ""},
 	{"cappedBuffer literal", regexp.MustCompile(`\bcappedBuffer\{`), ""},
 	{"new(cappedBuffer)", regexp.MustCompile(`\bnew\(cappedBuffer\)`), ""},
 	{"os.Pipe(", regexp.MustCompile(`\bos\.Pipe\(`), ""},
@@ -118,7 +123,7 @@ var captureSites = map[string]struct {
 		"assign .Stdout": 1, "assign .Stderr": 1, "cappedBuffer literal": 1, "exec.Command": 1,
 	}, "probeBwrap: a probe with fixed argv; its output goes only into the probe's own error"},
 	"background_unix.go": {map[string]int{"spawn(": 1},
-		"unixStarter.Start hands the background manager's rings to the spawner; Task 8 screens them"},
+		"unixStarter.Start hands the spawner the writers the background manager gives it: one screen stream over each tail ring"},
 	"spawn_darwin.go": {map[string]int{
 		"assign .Stdout": 1, "assign .Stderr": 1, "os.Pipe(": 1, "newNativeCmd(": 1,
 		"posixSpawn(": 1, "posixSpawnFileActionsAdddup2(": 2,

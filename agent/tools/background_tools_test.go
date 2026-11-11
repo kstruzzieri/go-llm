@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kstruzzieri/go-llm/agent"
 )
@@ -54,7 +55,7 @@ func newBGJobFixture(t *testing.T, argv []string, cwd string) *bgJobFixture {
 	}}
 	f.m = newBackgroundManager(starter, &countingRandom{})
 	t.Cleanup(f.m.Shutdown)
-	st, err := f.m.start(context.Background(), execSpec{Path: "/bin/cmd", Argv: argv, Dir: "/w"}, cwd)
+	st, err := f.m.start(context.Background(), execSpec{Path: "/bin/cmd", Argv: argv, Dir: "/w", Screen: testScreen()}, cwd)
 	if err != nil {
 		t.Fatalf("start fixture job: %v", err)
 	}
@@ -126,7 +127,7 @@ func TestBackgroundExecToolsContract(t *testing.T) {
 		class      agent.EffectClass
 		exactClass bool
 		approval   agent.ApprovalPolicy
-		timeout    bool // must be the frozen 10s
+		timeout    time.Duration // 0: no timeout is checked
 		outputCap  int
 		planning   bool
 	}{
@@ -135,7 +136,7 @@ func TestBackgroundExecToolsContract(t *testing.T) {
 			schemaHas:  []string{`"argv"`, `"dir"`, `"required":["argv"]`},
 			class:      agent.Read | agent.Write | agent.Exec | agent.Network,
 			exactClass: true, approval: agent.ApprovalAlways,
-			timeout: true, outputCap: 4096, planning: true,
+			timeout: 15 * time.Second, outputCap: 4096, planning: true,
 		},
 		{
 			tool: status, name: "command_status",
@@ -156,7 +157,7 @@ func TestBackgroundExecToolsContract(t *testing.T) {
 			schemaHas:  []string{`"handle"`, `"required":["handle"]`},
 			class:      agent.Exec,
 			exactClass: true, approval: agent.ApprovalAlways,
-			timeout: true, outputCap: 4096, planning: true,
+			timeout: 10 * time.Second, outputCap: 4096, planning: true,
 		},
 	}
 	for _, tc := range cases {
@@ -177,8 +178,8 @@ func TestBackgroundExecToolsContract(t *testing.T) {
 			if e.Approval != tc.approval {
 				t.Errorf("approval = %v, want %v", e.Approval, tc.approval)
 			}
-			if tc.timeout && e.Timeout != bgToolTimeout {
-				t.Errorf("timeout = %v, want %v", e.Timeout, bgToolTimeout)
+			if tc.timeout != 0 && e.Timeout != tc.timeout {
+				t.Errorf("timeout = %v, want %v", e.Timeout, tc.timeout)
 			}
 			if e.OutputCap != tc.outputCap {
 				t.Errorf("OutputCap = %d, want %d", e.OutputCap, tc.outputCap)
@@ -683,12 +684,12 @@ func TestCommandStatusGoldenRendering(t *testing.T) {
 	f := newBGJobFixture(t, []string{"cmd", "a b"}, "~/w")
 	cs := NewCommandStatus(f.m)
 	raw := json.RawMessage(fmt.Sprintf(`{"handle":%q}`, f.handle))
-	f.write(t, f.stdout, "hello")
-	f.write(t, f.stderr, "oops")
+	f.write(t, f.stdout, "hello\n")
+	f.write(t, f.stderr, "oops\n")
 
 	head := "handle: " + fixtureHandle + "\n"
 	tailLines := "pid: 4242\ncwd: \"~/w\"\nargv: [\"cmd\",\"a b\"]\n" +
-		"stdout_floor: 0\nstdout_cursor: 5\nstderr_floor: 0\nstderr_cursor: 4\n"
+		"stdout_floor: 0\nstdout_cursor: 6\nstderr_floor: 0\nstderr_cursor: 5\n"
 
 	res := mustInvoke(t, cs, raw)
 	if want := head + "state: running\n" + tailLines; res.Content != want {
@@ -768,9 +769,9 @@ func TestCommandStatusUnknownHandle(t *testing.T) {
 
 func TestCommandTailGoldenRendering(t *testing.T) {
 	f := newBGJobFixture(t, []string{"cmd"}, "/w")
-	f.write(t, f.stdout, "hello")
+	f.write(t, f.stdout, "hello\n")
 	res := mustInvoke(t, NewCommandTail(f.m), json.RawMessage(fmt.Sprintf(`{"handle":%q}`, f.handle)))
-	want := "handle: " + fixtureHandle + "\nstream: stdout\nnext_cursor: 5\ndropped_bytes: 0\neof: false\n--- output ---\nhello"
+	want := "handle: " + fixtureHandle + "\nstream: stdout\nnext_cursor: 6\ndropped_bytes: 0\neof: false\n--- output ---\nhello\n"
 	if res.Content != want {
 		t.Errorf("content = %q, want golden %q", res.Content, want)
 	}
@@ -779,15 +780,15 @@ func TestCommandTailGoldenRendering(t *testing.T) {
 func TestCommandTailStreamIsolationAndDefault(t *testing.T) {
 	f := newBGJobFixture(t, []string{"cmd"}, "/w")
 	ct := NewCommandTail(f.m)
-	f.write(t, f.stdout, "outdata")
-	f.write(t, f.stderr, "errdata")
+	f.write(t, f.stdout, "outdata\n")
+	f.write(t, f.stderr, "errdata\n")
 
 	res := mustInvoke(t, ct, json.RawMessage(fmt.Sprintf(`{"handle":%q}`, f.handle)))
-	if got := tailPayload(t, res.Content); got != "outdata" {
+	if got := tailPayload(t, res.Content); got != "outdata\n" {
 		t.Errorf("default stream payload = %q, want stdout bytes only", got)
 	}
 	res = mustInvoke(t, ct, json.RawMessage(fmt.Sprintf(`{"handle":%q,"stream":"stderr"}`, f.handle)))
-	if got := tailPayload(t, res.Content); got != "errdata" {
+	if got := tailPayload(t, res.Content); got != "errdata\n" {
 		t.Errorf("stderr payload = %q, want stderr bytes only", got)
 	}
 	if !strings.Contains(res.Content, "stream: stderr\n") {
@@ -797,14 +798,14 @@ func TestCommandTailStreamIsolationAndDefault(t *testing.T) {
 
 func TestCommandTailOmittedCursorIsNewestTail(t *testing.T) {
 	f := newBGJobFixture(t, []string{"cmd"}, "/w")
-	f.write(t, f.stdout, "0123456789")
+	f.write(t, f.stdout, "0123456789\n")
 	res := mustInvoke(t, NewCommandTail(f.m),
 		json.RawMessage(fmt.Sprintf(`{"handle":%q,"max_bytes":4}`, f.handle)))
 	// Newest max_bytes, NOT the oldest prefix; dropped stays 0 in this mode.
-	if got := tailPayload(t, res.Content); got != "6789" {
+	if got := tailPayload(t, res.Content); got != "789\n" {
 		t.Errorf("newest-tail payload = %q, want the newest 4 bytes", got)
 	}
-	for _, want := range []string{"next_cursor: 10\n", "dropped_bytes: 0\n"} {
+	for _, want := range []string{"next_cursor: 11\n", "dropped_bytes: 0\n"} {
 		if !strings.Contains(res.Content, want) {
 			t.Errorf("content missing %q:\n%s", want, res.Content)
 		}
@@ -813,21 +814,22 @@ func TestCommandTailOmittedCursorIsNewestTail(t *testing.T) {
 
 func TestCommandTailOmittedCursorReportsPriorEviction(t *testing.T) {
 	f := newBGJobFixture(t, []string{"cmd"}, "/w")
-	f.write(t, f.stdout, strings.Repeat("x", backgroundRingCap+100))
+	// 66 lines of 1000 bytes: 66000 bytes, 464 more than the 65536-byte ring.
+	f.write(t, f.stdout, strings.Repeat(strings.Repeat("x", 999)+"\n", 66))
 	res := mustInvoke(t, NewCommandTail(f.m),
 		json.RawMessage(fmt.Sprintf(`{"handle":%q,"max_bytes":10}`, f.handle)))
-	if got := tailPayload(t, res.Content); got != strings.Repeat("x", 10) {
+	if got := tailPayload(t, res.Content); got != strings.Repeat("x", 9)+"\n" {
 		t.Errorf("newest-tail payload = %q, want newest 10 bytes", got)
 	}
-	if !strings.Contains(res.Content, "dropped_bytes: 100\n") {
-		t.Errorf("omitted-cursor tail did not report 100 evicted bytes:\n%s", res.Content)
+	if !strings.Contains(res.Content, "dropped_bytes: 464\n") {
+		t.Errorf("omitted-cursor tail did not report 464 evicted bytes:\n%s", res.Content)
 	}
 }
 
 func TestCommandTailExplicitCursorIncremental(t *testing.T) {
 	f := newBGJobFixture(t, []string{"cmd"}, "/w")
 	ct := NewCommandTail(f.m)
-	f.write(t, f.stdout, "hello world")
+	f.write(t, f.stdout, "hello world\n")
 
 	res := mustInvoke(t, ct, json.RawMessage(fmt.Sprintf(`{"handle":%q,"cursor":0,"max_bytes":5}`, f.handle)))
 	if got := tailPayload(t, res.Content); got != "hello" {
@@ -837,7 +839,7 @@ func TestCommandTailExplicitCursorIncremental(t *testing.T) {
 		t.Errorf("cursor 0 content missing next_cursor 5:\n%s", res.Content)
 	}
 	res = mustInvoke(t, ct, json.RawMessage(fmt.Sprintf(`{"handle":%q,"cursor":5}`, f.handle)))
-	if got := tailPayload(t, res.Content); got != " world" {
+	if got := tailPayload(t, res.Content); got != " world\n" {
 		t.Errorf("cursor 5 payload = %q, want the remainder", got)
 	}
 	// Cursor at/ahead of end: no bytes, current end cursor.
@@ -845,16 +847,20 @@ func TestCommandTailExplicitCursorIncremental(t *testing.T) {
 	if got := tailPayload(t, res.Content); got != "" {
 		t.Errorf("ahead-of-end payload = %q, want empty", got)
 	}
-	if !strings.Contains(res.Content, "next_cursor: 11\n") {
+	if !strings.Contains(res.Content, "next_cursor: 12\n") {
 		t.Errorf("ahead-of-end content missing clamped end cursor:\n%s", res.Content)
 	}
 }
 
 func TestCommandTailDroppedBytesExact(t *testing.T) {
 	f := newBGJobFixture(t, []string{"cmd"}, "/w")
-	data := make([]byte, backgroundRingCap+100)
+	// 66 lines of 1000 bytes: 66000 bytes, 464 more than the 65536-byte ring.
+	data := make([]byte, 66000)
 	for i := range data {
 		data[i] = byte('a' + i%26)
+		if i%1000 == 999 {
+			data[i] = '\n'
+		}
 	}
 	f.write(t, f.stdout, string(data))
 	res := mustInvoke(t, NewCommandTail(f.m),
@@ -863,21 +869,21 @@ func TestCommandTailDroppedBytesExact(t *testing.T) {
 	if len(head) > 200 {
 		head = head[:200]
 	}
-	if !strings.Contains(res.Content, "dropped_bytes: 100\n") {
+	if !strings.Contains(res.Content, "dropped_bytes: 464\n") {
 		t.Errorf("content must report the exact evicted gap:\n%s", head)
 	}
-	if got, want := tailPayload(t, res.Content), string(data[100:110]); got != want {
+	if got, want := tailPayload(t, res.Content), string(data[464:474]); got != want {
 		t.Errorf("payload = %q, want the 10 bytes at the floor %q", got, want)
 	}
-	if !strings.Contains(res.Content, "next_cursor: 110\n") {
-		t.Errorf("content missing next_cursor 110:\n%s", head)
+	if !strings.Contains(res.Content, "next_cursor: 474\n") {
+		t.Errorf("content missing next_cursor 474:\n%s", head)
 	}
 }
 
 func TestCommandTailMaxBytesValidationAndClamp(t *testing.T) {
 	f := newBGJobFixture(t, []string{"cmd"}, "/w")
 	ct := NewCommandTail(f.m)
-	f.write(t, f.stdout, strings.Repeat("x", 17000))
+	f.write(t, f.stdout, strings.Repeat("x", 16999)+"\n")
 
 	for _, raw := range []string{
 		fmt.Sprintf(`{"handle":%q,"max_bytes":0}`, f.handle),
@@ -906,14 +912,14 @@ func TestCommandTailMaxBytesValidationAndClamp(t *testing.T) {
 func TestCommandTailEOFTiming(t *testing.T) {
 	f := newBGJobFixture(t, []string{"cmd"}, "/w")
 	ct := NewCommandTail(f.m)
-	f.write(t, f.stdout, "hello")
+	f.write(t, f.stdout, "hello\n")
 
 	res := mustInvoke(t, ct, json.RawMessage(fmt.Sprintf(`{"handle":%q}`, f.handle)))
 	if !strings.Contains(res.Content, "eof: false\n") {
 		t.Errorf("running tail must render eof false:\n%s", res.Content)
 	}
 	f.finish(t)
-	res = mustInvoke(t, ct, json.RawMessage(fmt.Sprintf(`{"handle":%q,"cursor":5}`, f.handle)))
+	res = mustInvoke(t, ct, json.RawMessage(fmt.Sprintf(`{"handle":%q,"cursor":6}`, f.handle)))
 	if !strings.Contains(res.Content, "eof: true\n") {
 		t.Errorf("post-publication end-of-stream tail must render eof true:\n%s", res.Content)
 	}

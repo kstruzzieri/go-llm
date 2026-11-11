@@ -157,7 +157,7 @@ func (t *StartCommand) Spec() agent.ToolSpec {
 		Description: "Start a command in the background (argv-first, NO shell) and return an opaque handle immediately. " +
 			"The command is shown to the user and starts only after they approve it; it keeps running across turns until it exits, " +
 			"is stopped via stop_command, or the session shuts down. When the command exits, background processes it left running " +
-			"in its process group are terminated. Poll with command_status and read output with command_tail." +
+			"in its process group are terminated. Poll with command_status and read output with command_tail. " +
 			"Commands that name a credential file (.env and .env.* other than .env.example, .env.sample, .env.template and .env.dist; .netrc, _netrc, .npmrc, .pypirc, .git-credentials; anything under .ssh, .gnupg, .aws or .kube), or that use a credential directory or .git as dir, are refused, and the content of those files is withheld from output.",
 		Parameters: json.RawMessage(`{
   "type":"object",
@@ -171,12 +171,13 @@ func (t *StartCommand) Spec() agent.ToolSpec {
 }
 
 // Effect declares the same effect class as run_command with the frozen
-// 10-second tool-call timeout (admission/publication only) and small result cap.
+// 10-second tool-call timeout (admission/publication only) plus the credential
+// screen's pre-run walk budget, and the small result cap.
 func (t *StartCommand) Effect() agent.Effect {
 	return agent.Effect{
 		Class:     agent.Read | agent.Write | agent.Exec | agent.Network,
 		Approval:  agent.ApprovalAlways,
-		Timeout:   bgToolTimeout,
+		Timeout:   bgToolTimeout + defaultScreenLimits.budget,
 		OutputCap: bgSmallOutputCap,
 	}
 }
@@ -222,7 +223,7 @@ func (t *StartCommand) Plan(_ context.Context, raw json.RawMessage) (agent.ToolP
 		if err != nil {
 			return agent.ToolPlan{Effect: eff}, err
 		}
-		eff.Timeout = outer
+		eff.Timeout = outer + defaultScreenLimits.budget
 	}
 	return agent.ToolPlan{
 		Effect:      eff,
@@ -234,6 +235,8 @@ func (t *StartCommand) Plan(_ context.Context, raw json.RawMessage) (agent.ToolP
 // Invoke consumes the pending plan (fail-closed on hash mismatch), re-checks
 // cwd and executable identity via recheckExecPlan, then starts the job. The
 // context is used only up to the manager's registration linearization point.
+// The manager owns the spec's screen from the call on; only a path that
+// returns before calling it releases the screen here.
 func (t *StartCommand) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolResult, error) {
 	pp, ok := t.consume(ContentHash(raw))
 	if !ok {
@@ -270,6 +273,7 @@ func (t *StartCommand) invokeScratched(ctx context.Context, pp execPending, spec
 	session, rewritten, err := beginScratchSession(setupCtx, t.scratchRT, spec)
 	cancelSetup()
 	if err != nil {
+		spec.Screen.release()
 		return errResult("scratch snapshot failed; command not started: " + err.Error()), nil
 	}
 	// Admission/publication gets a fresh bgToolTimeout child so a slow
