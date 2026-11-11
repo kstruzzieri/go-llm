@@ -36,6 +36,9 @@ func TestCredentialFileKeys(t *testing.T) {
 		{"floor-7-value", "NAME=1234567", []string{"NAME=1234567"}},
 		{"floor-8-value", "NAME=12345678", []string{"NAME=12345678", "12345678"}},
 		{"floor-7-line", "ABCD=12", nil},
+		// No "=": only the line key (K1) can key these, at exactly 8 and 7 bytes.
+		{"floor-8-line-only", "line-047", []string{"line-047"}},
+		{"floor-7-line-only", "line-48", nil},
 		{"no-eq", "machine example.invalid password value-0010-abcdef", []string{"machine example.invalid password value-0010-abcdef"}},
 		{"pem", "-----BEGIN PRIVATE KEY-----\npem-body-0013-abcdef\nshort\n-----END PRIVATE KEY-----\n", []string{"-----BEGIN PRIVATE KEY-----", "pem-body-0013-abcdef", "-----END PRIVATE KEY-----"}},
 		{"csi-inside", "NAME=va\x1b[1mlue-0011-abcdef", []string{"NAME=value-0011-abcdef", "value-0011-abcdef"}},
@@ -85,6 +88,35 @@ func TestCredentialFileKeys(t *testing.T) {
 			[]string{"extraheader = \"AUTH: basic placeholder-0044-abcdef\""}, []string{"AUTH: basic placeholder-0044-abcdef"}},
 		{"git-csi-in-pass", "url = https://user-0045:pa\x1b[1mss-0045-abcdef@example.invalid/r.git",
 			[]string{"user-0045:pass-0045-abcdef", "pass-0045-abcdef"}, nil},
+		// The password alone is the only key exactly 8 bytes long; the
+		// 7-byte one on the next line must not be keyed.
+		{"git-floor-pass", "url = https://u:pass-049@example.invalid/r.git\nurl = https://u:pass-50@example.invalid/r.git",
+			[]string{"pass-049"}, []string{"pass-50"}},
+		// The password is under the floor encoded (6 bytes) and decoded (4),
+		// so only the decoded whole userinfo covers it once decoded.
+		{"git-pct-userinfo", "url = https://user-0049:p%40ss@example.invalid/r.git",
+			[]string{"user-0049:p@ss"}, nil},
+		// A URL in a section header has no setting value: only the record
+		// itself is read for userinfo.
+		{"git-url-in-section", `[http "https://user-0051:pass-0051-abcdef@example.invalid/"]`,
+			[]string{"pass-0051-abcdef"}, nil},
+		// An escape git decodes: the value as written differs from the
+		// value git prints, so both are keys.
+		{"git-xh-escape", "extraheader = AUTH: basic\\tplaceholder-0052-abcdef",
+			[]string{"AUTH: basic\\tplaceholder-0052-abcdef", "AUTH: basic\tplaceholder-0052-abcdef"}, nil},
+		// Quoted spaces: the value git prints is 11 bytes, its trimmed form 7,
+		// so only the untrimmed value is a key.
+		{"git-xh-padded-short", `extraheader = "  ab-0054  "`, []string{"  ab-0054  "}, []string{"ab-0054"}},
+		// Quoted spaces around a long value: the trimmed value is a key too.
+		{"git-xh-padded", `extraheader = "  AUTH: basic placeholder-0053-abcdef  "`,
+			[]string{"AUTH: basic placeholder-0053-abcdef"}, nil},
+		// Two "@": the userinfo read to the first one is a key of its own.
+		{"git-url-first-at", "url = https://user-0055:pw@ss-0055-abcdef@example.invalid/r.git",
+			[]string{"user-0055:pw"}, nil},
+		// Percent-encoded and short: the parts are under the floor, so only
+		// the whole userinfo as written covers it.
+		{"git-pct-userinfo-as-written", "url = https://u-56:p%40ss@example.invalid/r.git",
+			[]string{"u-56:p%40ss"}, nil},
 		{"git-trailing-backslash", "extraheader = ordinary-0038-abcdef\\\n", []string{"ordinary-0038-abcdef"}, nil},
 	}
 	for _, tc := range git {
