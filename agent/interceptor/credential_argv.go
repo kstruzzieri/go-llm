@@ -60,13 +60,21 @@ func isExclusionPathspec(w string) bool {
 }
 
 // namesCredentialPath reports whether w, or the text after any "=", ":" or
-// "@" in it, or the text after a short-flag prefix, is a credential path.
+// "@" in it, or the pattern after the magic of a long-form git pathspec
+// (":(top).env"), or the text after a short-flag prefix, is a credential path.
 func namesCredentialPath(w string) bool {
 	if IsCredentialPath(w) {
 		return true
 	}
 	for i := 0; i < len(w); i++ {
 		if (w[i] == '=' || w[i] == ':' || w[i] == '@') && IsCredentialPath(w[i+1:]) {
+			return true
+		}
+	}
+	// A git pathspec with long-form magic, ":(top).env": the pattern follows
+	// the closing parenthesis. Exclusions never reach here as whole words.
+	if rest, ok := strings.CutPrefix(w, ":("); ok {
+		if _, pat, ok := strings.Cut(rest, ")"); ok && IsCredentialPath(pat) {
 			return true
 		}
 	}

@@ -31,6 +31,19 @@ func TestWordNamesCredentialPath(t *testing.T) {
 		{"short flag z", "-z.env", true},
 		{"excluded magic", ":(excluded)sub/.env", true},
 		{"empty magic", ":()sub/.env", true},
+		// Long-form magic with the pattern straight after ")": the pattern is
+		// the credential path, and a ":" inside the magic list does not hide it.
+		{"magic top", ":(top).env", true},
+		{"magic top icase", ":(top,icase).ENV", true},
+		{"magic literal", ":(literal).npmrc", true},
+		{"magic attr colon", ":(attr:x).env", true},
+		{"short top", ":/.env", true},
+		{"colon colon", "::.env", true},
+		{"magic template", ":(top).env.example", false},
+		{"magic prefixed name", ":(top)x.env", false},
+		{"magic unclosed", ":(top.env", false},
+		{"exclude top", ":(exclude,top).env", false},
+		{"top exclude", ":(top,exclude).env", false},
 		{"template", ".env.example", false},
 		{"process env", "process.env", false},
 		{"x env", "x.env", false},
@@ -146,6 +159,8 @@ func TestCredentialArgvCheck(t *testing.T) {
 		{"env -C", `["env","-C",".git","cat","config"]`, false},
 		{"sh glob", `["sh","-c","cat .e*"]`, false},
 		{"string not array", `"cat .env"`, false},
+		{"git grep magic", `["git","grep","-h","x","HEAD","--",":(top).env"]`, true},
+		{"git grep exclude magic", `["git","grep","-h","x","HEAD","--",":(exclude,top).env"]`, false},
 	}
 	for _, r := range rows {
 		t.Run(r.label, func(t *testing.T) {
@@ -155,4 +170,10 @@ func TestCredentialArgvCheck(t *testing.T) {
 			}
 		})
 	}
+	t.Run("git grep magic detail", func(t *testing.T) {
+		detail, _ := CredentialArgv{}.check(json.RawMessage(`["git","grep","-h","x","HEAD","--",":(top).env"]`))
+		if detail != `argv word ":(top).env" names a credential path` {
+			t.Errorf("detail does not name the magic pathspec word (%d bytes)", len(detail))
+		}
+	})
 }
