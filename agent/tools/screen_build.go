@@ -72,11 +72,8 @@ func buildOutputScreen(ctx context.Context, ws *Workspace) (*outputScreen, error
 	}
 	// read keys the file f holds and closes it.
 	read := func(rel string, f *os.File, gitConfig bool) error {
-		content, err := io.ReadAll(io.LimitReader(f, int64(lim.fileBytes)+1))
+		content, err := io.ReadAll(io.LimitReader(ws.screenSeams.reader(rel, f), int64(lim.fileBytes)+1))
 		_ = f.Close()
-		if err == nil {
-			err = ws.screenSeams.read(rel)
-		}
 		if err != nil {
 			return failed(rel, err, false)
 		}

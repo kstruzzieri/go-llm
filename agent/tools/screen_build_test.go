@@ -6,13 +6,16 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"io/fs"
+	"net"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"syscall"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -35,6 +38,17 @@ func mustBuild(t *testing.T, label string, ws *Workspace) *outputScreen {
 		t.Fatalf("%s: build failed (error: %t)", label, err != nil)
 	}
 	return s
+}
+
+// failRead is a readFrom seam whose read of want fails with EIO and returns
+// no content; every other path reads through.
+func failRead(want string) func(string, io.Reader) io.Reader {
+	return func(rel string, r io.Reader) io.Reader {
+		if rel == want {
+			return iotest.ErrReader(syscall.EIO)
+		}
+		return r
+	}
 }
 
 const withheldNote = "credential screen: output withheld; credential files could not be read completely ("
@@ -318,7 +332,7 @@ func TestBuildOutputScreenSkips(t *testing.T) {
 			return &screenSeams{statErr: answer("sub/.npmrc", fs.ErrNotExist)}
 		}, changed, true},
 		{"read eio", func(*testing.T, string) *screenSeams {
-			return &screenSeams{readErr: answer(".env", syscall.EIO)}
+			return &screenSeams{readFrom: failRead(".env")}
 		}, withheldNote + `unreadable: ".env")`, false},
 		{"stat eio", func(*testing.T, string) *screenSeams {
 			return &screenSeams{statErr: answer("sub/.npmrc", syscall.EIO)}
@@ -344,6 +358,12 @@ func TestBuildOutputScreenSkips(t *testing.T) {
 			// A withhold ends the walk: z, which sorts last, is never opened.
 			if !r.later && slices.Contains(asked, "z") {
 				t.Fatalf("%s: walk went on after the withhold", r.label)
+			}
+			// A withheld run delivers no credential, whatever its notes say.
+			if !r.later {
+				if got := screenThrough(s, secrets[0]+"\n"); got != "" {
+					t.Errorf("%s: credential delivered (len %d)", r.label, len(got))
+				}
 			}
 			notes := s.notes()
 			if !slices.Equal(notes, []string{r.want}) {
@@ -496,20 +516,31 @@ func TestBuildOutputScreenGitConfigHeld(t *testing.T) {
 		{"config open denied", gitTree, func(_ *testing.T, ws *Workspace, _, _ string) {
 			ws.screenSeams = &screenSeams{openErr: answer(".git/config", fs.ErrPermission)}
 		}, nil, []string{withheldNote + `unreadable: ".git/config")`}, false},
-		// A real config the process cannot open (mode 000), through
-		// openRegular rather than the seam.
-		{"config mode 000", gitTree, func(t *testing.T, _ *Workspace, root, _ string) {
-			if os.Geteuid() == 0 {
-				t.Skip("root opens a mode-000 file, so the open cannot fail; the seam row config open denied covers this branch")
-			}
-			p := filepath.Join(root, ".git", "config")
-			if err := os.Chmod(p, 0); err != nil {
+		// A config that cannot be opened for a reason other than a change: a
+		// Unix socket renamed onto it after its stat, so the real open in
+		// openRegular fails (ENXIO on Linux, EOPNOTSUPP on darwin) under any
+		// uid and without permission bits.
+		{"config becomes a socket", gitTree, func(t *testing.T, ws *Workspace, root, _ string) {
+			dir, err := os.MkdirTemp("/tmp", "scr")
+			if err != nil {
 				t.Fatal(err)
 			}
-			t.Cleanup(func() { _ = os.Chmod(p, 0o600) })
+			t.Cleanup(func() { _ = os.RemoveAll(dir) })
+			sock := filepath.Join(dir, "s")
+			l, err := net.Listen("unix", sock)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = l.Close() })
+			ws.screenSeams = &screenSeams{openErr: func(rel string) error {
+				if rel == ".git/config" {
+					mustRename(t, sock, filepath.Join(root, ".git", "config"))
+				}
+				return nil
+			}}
 		}, nil, []string{withheldNote + `unreadable: ".git/config")`}, false},
 		{"config read fails", gitTree, func(_ *testing.T, ws *Workspace, _, _ string) {
-			ws.screenSeams = &screenSeams{readErr: answer(".git/config", syscall.EIO)}
+			ws.screenSeams = &screenSeams{readFrom: failRead(".git/config")}
 		}, nil, []string{withheldNote + `unreadable: ".git/config")`}, false},
 		{"config replaced before open", gitTree, func(t *testing.T, ws *Workspace, root, _ string) {
 			other := root + "-other-config"
@@ -550,7 +581,7 @@ func TestBuildOutputScreenGitConfigHeld(t *testing.T) {
 			}
 			notes := s.notes()
 			if !slices.Equal(notes, r.notes) {
-				t.Fatalf("%s: notes differ (%d notes, want %d)", r.label, len(notes), len(r.notes))
+				t.Errorf("%s: notes differ (%d notes, want %d)", r.label, len(notes), len(r.notes))
 			}
 			secretFree(t, r.label, []string{"pass-0020-abcdef"}, notes...)
 			want := "pass-0020-abcdef\n"
