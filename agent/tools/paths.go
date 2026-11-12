@@ -56,6 +56,10 @@ var (
 	// backend (openWalked, verifyWalkedParent) raises it; it lives here because
 	// search.go builds on every platform.
 	errWalkEntryUnheld = errors.New("tools: walk entry has no held directory")
+	// errBadDirent reports a directory record the walk's own directory read
+	// could not parse (#789). The listing fails as a whole, never partially.
+	// Only the Unix backend raises it; it lives here beside errWalkEntryUnheld.
+	errBadDirent = errors.New("tools: directory record does not parse")
 	// errAnchorUnreachable marks a reachability lookup (#613) that failed on
 	// the way to the workspace's own root for a reason other than a changed
 	// path, such as lost permission above the root. It wraps the cause, which
