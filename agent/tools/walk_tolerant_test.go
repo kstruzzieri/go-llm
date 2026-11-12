@@ -446,7 +446,9 @@ func TestWalkTolerantExamines(t *testing.T) {
 	}
 }
 
-// An entry whose type the directory read did not report is stat'ed as today.
+// An entry whose type the directory read did not report is stat'ed with the
+// statErr seam and then fstatat, and a failed stat is a skip. Every unknown
+// path is plain-named, so the matcher never forces the stat.
 func TestWalkTolerantUnknownType(t *testing.T) {
 	rows := []struct {
 		label     string
@@ -459,8 +461,8 @@ func TestWalkTolerantUnknownType(t *testing.T) {
 		{label: "plain file", unknown: "plain.txt", wantStat: true, wantVisit: "plain.txt"},
 		// The name is plain, so only its unknown type forces the stat.
 		{label: "directory", unknown: "plain-dir", wantStat: true, wantVisit: "plain-dir/.env"},
-		{label: "credential gone", unknown: "a/.env", statErr: fs.ErrNotExist, wantStat: true, wantSkip: fs.ErrNotExist},
-		{label: "credential eio", unknown: "a/.env", statErr: syscall.EIO, wantStat: true, wantSkip: syscall.EIO},
+		{label: "unknown gone", unknown: "a/plain.txt", statErr: fs.ErrNotExist, wantStat: true, wantSkip: fs.ErrNotExist},
+		{label: "unknown eio", unknown: "a/plain.txt", statErr: syscall.EIO, wantStat: true, wantSkip: syscall.EIO},
 	}
 	for _, r := range rows {
 		t.Run(r.label, func(t *testing.T) {
@@ -468,6 +470,7 @@ func TestWalkTolerantUnknownType(t *testing.T) {
 				"plain.txt":      "x\n",
 				"plain-dir/.env": "TOKEN=unknown-0001-abcdef\n",
 				"a/.env":         "TOKEN=unknown-0002-abcdef\n",
+				"a/plain.txt":    "x\n",
 			}, nil)
 			var stats []string
 			ws.screenSeams = &screenSeams{
@@ -494,6 +497,9 @@ func TestWalkTolerantUnknownType(t *testing.T) {
 			}
 			if len(skips) != 1 || skips[0].rel != r.unknown || !errors.Is(skips[0].err, r.wantSkip) {
 				t.Fatalf("%s: want one skip for the untyped entry with the seam's error (%d skips)", r.label, len(skips))
+			}
+			if slices.Contains(visits, r.unknown) {
+				t.Fatalf("%s: the skipped entry was visited", r.label)
 			}
 		})
 	}
