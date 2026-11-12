@@ -106,11 +106,12 @@ func oracleExistingTables() []string {
 	return out
 }
 
-// oracleLiteralRows is group (c).
+// oracleLiteralRows is group (c). ".Aws/x" has one upper-case letter, the
+// lowest: the fast route's upper-case test must include 'A' itself.
 func oracleLiteralRows() []string {
 	return []string{"", "/", ".", "..", ".env/", ".ssh/../plain", ".git/\u200c../config", "a/.git/x/../config",
 		"A/.Git/Config", ".env.EXAMPLE", "sub/.Env.Local", "a\\.env", ".ssh\\id", "\x80/.env", ".env\xff",
-		"\xc3\x28/.git/config", ".ssh./id", ".netrc:x", ".env::$DATA", "c:/work/.env", ".kube. /x"}
+		"\xc3\x28/.git/config", ".ssh./id", ".netrc:x", ".env::$DATA", "c:/work/.env", ".kube. /x", ".Aws/x"}
 }
 
 // oracleAliasRows is group (d): every key of pathAliases, written out, placed
@@ -200,8 +201,8 @@ func FuzzCredentialPathMatchesOracle(f *testing.F) {
 	if n != 6624 {
 		f.Fatalf("short corpus has %d seeds, want 6624", n)
 	}
-	if seeds != 57363 {
-		f.Fatalf("fuzz seeded %d paths, want 57363", seeds)
+	if seeds != 57364 {
+		f.Fatalf("fuzz seeded %d paths, want 57364", seeds)
 	}
 	f.Fuzz(func(t *testing.T, p string) {
 		if c, co, g, goOld, ok := oracleAgrees(p); !ok {
