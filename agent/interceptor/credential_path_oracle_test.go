@@ -134,6 +134,7 @@ func oracleAgrees(p string) (cred, credOld, git, gitOld, ok bool) {
 }
 
 func TestCredentialPathMatchesOracle(t *testing.T) {
+	// containment: CMP-EXEC-CREDENTIAL-OUTPUT
 	groups := []struct {
 		name  string
 		paths []string

@@ -413,6 +413,7 @@ func recordStats(got *[]string, fail func(string) error) func(string) error {
 // The listing stats directories, symbolic links, other non-regular entries
 // and every path the matcher accepts; a plain regular file is never stat'ed.
 func TestWalkTolerantExamines(t *testing.T) {
+	// containment: CMP-EXEC-CREDENTIAL-OUTPUT
 	const label = "examines"
 	ws, root, _ := tolerantFixture(t, map[string]string{
 		"plain.txt":      "x\n",
@@ -450,6 +451,7 @@ func TestWalkTolerantExamines(t *testing.T) {
 // statErr seam and then fstatat, and a failed stat is a skip. Every unknown
 // path is plain-named, so the matcher never forces the stat.
 func TestWalkTolerantUnknownType(t *testing.T) {
+	// containment: CMP-EXEC-CREDENTIAL-OUTPUT
 	rows := []struct {
 		label     string
 		unknown   string // the path the read reports as DT_UNKNOWN
@@ -508,6 +510,7 @@ func TestWalkTolerantUnknownType(t *testing.T) {
 // On a filesystem that reports no types, every entry is stat'ed and the walk
 // visits what it visits today.
 func TestWalkTolerantAllUnknown(t *testing.T) {
+	// containment: CMP-EXEC-CREDENTIAL-OUTPUT
 	const label = "all unknown"
 	ws, _, _ := tolerantFixture(t, tolerantTree, nil)
 	var stats []string
@@ -575,6 +578,7 @@ func examinedEntry(t *testing.T, label string, dir *os.File, name string) worksp
 }
 
 func TestWorkspaceEntryUnexamined(t *testing.T) {
+	// containment: CMP-EXEC-CREDENTIAL-OUTPUT
 	const label = "unexamined entry"
 	root := t.TempDir()
 	writeTree(t, root, map[string]string{
@@ -612,6 +616,7 @@ func TestWorkspaceEntryUnexamined(t *testing.T) {
 }
 
 func TestOpenScreenedUnexamined(t *testing.T) {
+	// containment: CMP-EXEC-CREDENTIAL-OUTPUT
 	const env = "TOKEN=surrogate-0003-mnopqr\n"
 	rows := []struct {
 		label      string

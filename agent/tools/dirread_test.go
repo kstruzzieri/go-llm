@@ -62,6 +62,7 @@ func noLeak(t *testing.T, label string, read func()) {
 }
 
 func TestDirReadKinds(t *testing.T) {
+	// containment: CMP-EXEC-CREDENTIAL-OUTPUT
 	dir, err := os.MkdirTemp("", "s")
 	if err != nil {
 		failNoPath(t, "kinds", err)
