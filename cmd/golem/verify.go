@@ -22,7 +22,10 @@ const verifyToolName = agenttools.VerifyToolName
 //     that cannot be prepared), so it costs a notice rather than the session;
 //   - (nil, "", err) with err wrapping agenttools.ErrSandboxPolicy when the
 //     policy cannot be honored. That is fatal: never a notice, and never a
-//     fallback to another runtime.
+//     fallback to another runtime;
+//   - (nil, "", err) when screenBudget is outside the credential screen's
+//     bounds. That is host configuration and is refused, never turned into a
+//     "verification disabled" notice.
 //
 // screenBudget is the credential screen's time budget for the verifier's
 // workspace (zero: the default); it comes from -credential-screen-budget only.

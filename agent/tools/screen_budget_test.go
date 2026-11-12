@@ -119,6 +119,28 @@ func TestCredentialScreenBudgetWalk(t *testing.T) {
 			t.Fatal("canceled mid-walk: the walk went on after the cancel")
 		}
 	})
+	// The control: with no cancel the same seam records b/.env, so the row
+	// above would see a walk that went on.
+	t.Run("not canceled (control)", func(t *testing.T) {
+		ws, _, _ := tolerantFixture(t, files, nil)
+		var mu sync.Mutex
+		var opened []string
+		ws.screenSeams = &screenSeams{openErr: func(rel string) error {
+			mu.Lock()
+			opened = append(opened, rel)
+			mu.Unlock()
+			return nil
+		}}
+		s := mustBuild(t, "not canceled (control)", ws)
+		if notes := s.notes(); len(notes) != 0 {
+			t.Fatalf("not canceled (control): %d notes, want a complete screen", len(notes))
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		if !slices.Contains(opened, "b/.env") {
+			t.Fatal("not canceled (control): b/.env was never asked to open")
+		}
+	})
 }
 
 // budgetTools are the pieces of one options constructor's tool set the

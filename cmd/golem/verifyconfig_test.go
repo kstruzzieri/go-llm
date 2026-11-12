@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kstruzzieri/go-llm/agent"
 	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
@@ -236,6 +237,36 @@ func TestBuildVerifierFromWorkspace(t *testing.T) {
 	}
 	if v == nil {
 		t.Fatal("a valid config must arm a verifier")
+	}
+}
+
+func TestBuildVerifierScreenBudget(t *testing.T) {
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		label   string
+		budget  time.Duration
+		wantErr string
+	}{
+		{"too small", time.Second, "tools: credential screen budget 1s is outside 5s to 5m0s"},
+		{"raised", 6 * time.Second, ""},
+	} {
+		t.Run(tc.label, func(t *testing.T) {
+			root := t.TempDir()
+			writeGolemJSON(t, root, `{"verify":{"argv":["`+self+`","__golem_exec_helper__","echo","ok"]}}`)
+			v, warn, err := buildVerifier(root, agenttools.SandboxConfig{}, tc.budget)
+			if tc.wantErr != "" {
+				if v != nil || warn != "" || err == nil || err.Error() != tc.wantErr {
+					t.Fatalf("%s: command %t, warning %q, error %v; want only the budget error", tc.label, v != nil, warn, err)
+				}
+				return
+			}
+			if v == nil || warn != "" || err != nil {
+				t.Fatalf("%s: command %t, warning %q, error %v; want a command", tc.label, v != nil, warn, err)
+			}
+		})
 	}
 }
 
