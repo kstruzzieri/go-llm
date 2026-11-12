@@ -49,6 +49,12 @@
 // sockets inside the shared workspace stay reachable. -sandbox does not
 // confine /consult, git-context helpers, MCP servers or the /edit editor.
 //
+// -credential-screen-budget sets how long the credential screen may spend
+// reading the workspace before each command (#777, #789): 5s to 5m, default
+// 5s, one value for the session, and a value outside that range is a startup
+// error. A longer budget makes a large workspace usable, not fast: every
+// command waits for the read, and the tool timeout grows with the budget.
+//
 // The openai-compat backend URL can be overridden with -base-url (or
 // GO_LLM_BASE_URL); otherwise, when the configured loopback URL does not
 // serve the active model route, startup scans 127.0.0.1:8080-8090 for it

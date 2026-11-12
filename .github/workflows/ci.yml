@@ -336,11 +336,14 @@ jobs:
       # credential argv rule and the output screen's pure functions run here
       # (matched through the Windows path normalization), and
       # TestBuildOutputScreenOtherPlatform proves that exec output is withheld
-      # where no hardened walk exists.
+      # where no hardened walk exists. #789: TestCredentialPathMatchesOracle
+      # runs the credential-path matcher against its oracle here, where the
+      # Windows path normalization applies; it has not run on Windows before
+      # this job.
       - name: Test workspace identity and undo on Windows
         env:
           CGO_ENABLED: "0"
-        run: go test -count=1 -v -run '^(TestWorkspaceVerifyRoot.*|TestNewWorkspace.*|TestUndoCreatedFile.*|TestCheckpointUndoCreatedFile.*|TestValidateSandboxUnavailable|TestIsHarnessPath.*|TestHasShortNameComponent|TestHarnessPathsIsACopy|TestHarnessPlan.*|TestHarnessKey.*|TestHarnessRead.*|TestHarnessCommandFiles.*|TestWordNamesCredentialPath|TestIsGitConfigPath|TestScriptFields|TestCredentialArgvCheck|TestExecDirInvariant|TestStripCSI|TestGitUnquote|TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestGitConfigValue|TestScreenStream|TestClassifySkip|TestBuildOutputScreenOtherPlatform|TestScreenNotes|TestCaptureSitesAreKnown|TestOnlyProbesCaptureWithoutWorkspaceScreen)$' ./agent/interceptor ./agent/tools ./cmd/golem
+        run: go test -count=1 -v -run '^(TestWorkspaceVerifyRoot.*|TestNewWorkspace.*|TestUndoCreatedFile.*|TestCheckpointUndoCreatedFile.*|TestValidateSandboxUnavailable|TestIsHarnessPath.*|TestHasShortNameComponent|TestHarnessPathsIsACopy|TestHarnessPlan.*|TestHarnessKey.*|TestHarnessRead.*|TestHarnessCommandFiles.*|TestWordNamesCredentialPath|TestIsGitConfigPath|TestScriptFields|TestCredentialArgvCheck|TestExecDirInvariant|TestStripCSI|TestGitUnquote|TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestGitConfigValue|TestScreenStream|TestClassifySkip|TestBuildOutputScreenOtherPlatform|TestCredentialPathMatchesOracle|TestScreenNotes|TestCaptureSitesAreKnown|TestOnlyProbesCaptureWithoutWorkspaceScreen)$' ./agent/interceptor ./agent/tools ./cmd/golem
 
       # The containment inventory's windows profile: exec scenarios skip only
       # with the profile's enumerated capability reasons (#452).
