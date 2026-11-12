@@ -230,7 +230,7 @@ func TestBuildVerifierFromWorkspace(t *testing.T) {
 	}
 	writeGolemJSON(t, root, `{"verify":{"argv":["`+self+`","__golem_exec_helper__","echo","ok"]}}`)
 
-	v, warn, err := buildVerifier(root, agenttools.SandboxConfig{})
+	v, warn, err := buildVerifier(root, agenttools.SandboxConfig{}, 0)
 	if err != nil || warn != "" {
 		t.Fatalf("unexpected err %v / warning %q", err, warn)
 	}
@@ -240,7 +240,7 @@ func TestBuildVerifierFromWorkspace(t *testing.T) {
 }
 
 func TestBuildVerifierAbsentConfigArmsNothingQuietly(t *testing.T) {
-	v, warn, err := buildVerifier(t.TempDir(), agenttools.SandboxConfig{})
+	v, warn, err := buildVerifier(t.TempDir(), agenttools.SandboxConfig{}, 0)
 	if v != nil || err != nil {
 		t.Fatalf("expected no verifier and no error, got %+v, %v", v, err)
 	}
@@ -259,7 +259,7 @@ func TestBuildVerifierInvalidConfigWarnsAndDisables(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			root := t.TempDir()
 			writeGolemJSON(t, root, body)
-			v, warn, err := buildVerifier(root, agenttools.SandboxConfig{})
+			v, warn, err := buildVerifier(root, agenttools.SandboxConfig{}, 0)
 			if v != nil || err != nil {
 				t.Fatalf("an invalid config must arm nothing and stay non-fatal, got %+v, %v", v, err)
 			}
@@ -314,7 +314,7 @@ func TestBuildVerifierClassification(t *testing.T) {
 			if tc.body != "" {
 				writeGolemJSON(t, root, tc.body)
 			}
-			cmd, notice, err := buildVerifier(root, tc.policy)
+			cmd, notice, err := buildVerifier(root, tc.policy, 0)
 			if (cmd != nil) != tc.wantCmd {
 				t.Fatalf("command = %v, want present=%t", cmd, tc.wantCmd)
 			}
@@ -373,7 +373,7 @@ func TestVerifierIsFrozenAtStartup(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeGolemJSON(t, root, `{"verify":{"argv":["`+self+`","__golem_exec_helper__","echo","first"]}}`)
-	v, warn, err := buildVerifier(root, agenttools.SandboxConfig{})
+	v, warn, err := buildVerifier(root, agenttools.SandboxConfig{}, 0)
 	if err != nil || warn != "" || v == nil {
 		t.Fatalf("buildVerifier: v=%v warn=%q err=%v", v, warn, err)
 	}

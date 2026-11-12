@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"time"
 
 	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
 )
@@ -23,12 +24,15 @@ const verifyToolName = agenttools.VerifyToolName
 //     policy cannot be honored. That is fatal: never a notice, and never a
 //     fallback to another runtime.
 //
+// screenBudget is the credential screen's time budget for the verifier's
+// workspace (zero: the default); it comes from -credential-screen-budget only.
+//
 // It has exactly two call sites, both REPL-only: startup under f.allowWrite
 // (AFTER mode normalization: applyOneShotMode clears the flag, and task,
 // planning and Agentflow modes reject it outright) and the REPL's
 // /allow-write (#372). Together those keep every non-interactive mode from
 // reading the file at all; do not add a third site outside the REPL.
-func buildVerifier(root string, policy agenttools.SandboxConfig) (*agenttools.VerifyCommand, string, error) {
+func buildVerifier(root string, policy agenttools.SandboxConfig, screenBudget time.Duration) (*agenttools.VerifyCommand, string, error) {
 	disabled := func(err error) (*agenttools.VerifyCommand, string, error) {
 		return nil, "verification disabled: " + err.Error(), nil
 	}
@@ -42,6 +46,9 @@ func buildVerifier(root string, policy agenttools.SandboxConfig) (*agenttools.Ve
 	ws, err := agenttools.NewWorkspace(root)
 	if err != nil {
 		return disabled(err)
+	}
+	if err := ws.SetCredentialScreenBudget(screenBudget); err != nil {
+		return nil, "", err // host configuration, not a repository mistake
 	}
 	cmd, err := agenttools.NewSandboxedVerifyCommand(ws, policy, spec.Argv, spec.Dir, spec.Timeout())
 	if errors.Is(err, agenttools.ErrSandboxPolicy) {

@@ -8,6 +8,16 @@ import (
 	"time"
 )
 
+// The bounds of the credential screen's time budget a host may set with
+// (*Workspace).SetCredentialScreenBudget or ExecToolsOptions.
+// The lower bound is also the default: the budget can be raised, never lowered.
+const (
+	// MinCredentialScreenBudget is the shortest budget, and the default.
+	MinCredentialScreenBudget = 5 * time.Second
+	// MaxCredentialScreenBudget is the longest budget.
+	MaxCredentialScreenBudget = 5 * time.Minute
+)
+
 // screenLimits bounds the pre-run read of credential files: bytes read per
 // file, the longest record a key is taken from, the number of keys, the total
 // bytes of keys held, and the walk's time budget. Hitting any of them withholds

@@ -63,7 +63,7 @@ func TestBreakingEditSurfacesInTheSameTurn(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cmd, warn, err := buildVerifier(root, agenttools.SandboxConfig{})
+	cmd, warn, err := buildVerifier(root, agenttools.SandboxConfig{}, 0)
 	if err != nil || warn != "" || cmd == nil {
 		t.Fatalf("buildVerifier: cmd=%v warn=%q err=%v", cmd, warn, err)
 	}

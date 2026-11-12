@@ -204,7 +204,7 @@ func handleAllowWrite(ctx context.Context, out io.Writer, sess *replSession, fie
 	// #347: .golem.json is read only once writes are enabled, as at startup.
 	// A repository mistake is a notice (vwarn); a policy failure, or a command
 	// the slot would refuse, fails the mount here, before anything publishes.
-	verifier, vwarn, err := buildVerifierFn(sess.root, sess.sandbox)
+	verifier, vwarn, err := buildVerifierFn(sess.root, sess.sandbox, sess.screenBudget)
 	if err != nil {
 		fail(fmt.Errorf("verifier: %w", err), store)
 		return
@@ -293,7 +293,8 @@ func (s *replSession) closeLateMounts() error {
 // (foreground run_command plus the #346 background tools over one manager)
 // mounted live, atomically with the recomposed system prompt. Scratch is
 // startup-only (-scratch requires -allow-exec), so the set is always the
-// zero-option legacy one. A rejected replacement shuts the unpublished
+// scratch-less legacy one, built with the session's credential screen budget.
+// A rejected replacement shuts the unpublished
 // manager down and leaves the session unchanged.
 func handleAllowExec(ctx context.Context, out io.Writer, sess *replSession, fields []string) {
 	if refuseLateMountOutsideTrusted(out, sess, "/allow-exec", "-allow-exec") {
@@ -312,7 +313,7 @@ func handleAllowExec(ctx context.Context, out io.Writer, sess *replSession, fiel
 		return
 	}
 	// The session's frozen policy, the one startup used (#576).
-	manager, execTools, err := buildExecMountFn(sess.root, sess.sandbox, agenttools.ExecToolsOptions{})
+	manager, execTools, err := buildExecMountFn(sess.root, sess.sandbox, agenttools.ExecToolsOptions{CredentialScreenBudget: sess.screenBudget})
 	if err != nil {
 		_, _ = fmt.Fprintf(out, "exec not enabled: %v\n", err)
 		return

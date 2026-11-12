@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/kstruzzieri/go-llm/agent"
 )
@@ -352,6 +353,44 @@ func canonicalFuturePathVerified(root, path string) (string, bool, error) {
 // SetScopeGuard installs (or clears with nil) the proof-mode scope guard.
 // Host setup must complete before workspace calls; installation is not concurrent-safe.
 func (w *Workspace) SetScopeGuard(g ScopeGuard) { w.guard = g }
+
+// SetCredentialScreenBudget sets how long the credential screen may spend
+// reading this workspace before each command, from MinCredentialScreenBudget
+// to MaxCredentialScreenBudget; zero restores the default. A value outside the
+// bounds returns an error and changes nothing. A longer budget makes a large
+// workspace usable, not fast: every command waits for the read. Like
+// SetScopeGuard this is host setup, done before any tool is planned or run;
+// it is not safe to call while one is.
+func (w *Workspace) SetCredentialScreenBudget(d time.Duration) error {
+	if d != 0 && (d < MinCredentialScreenBudget || d > MaxCredentialScreenBudget) {
+		return fmt.Errorf("tools: credential screen budget %s is outside 5s to 5m0s", d)
+	}
+	w.screenLimits.budget = d
+	return nil
+}
+
+// screenBudget is the credential screen's time budget for w; a nil workspace
+// has the default.
+func (w *Workspace) screenBudget() time.Duration {
+	if w == nil {
+		return defaultScreenLimits.budget
+	}
+	return w.screenLimits.orDefaults().budget
+}
+
+// newBudgetedWorkspace builds a workspace over root with the given credential
+// screen budget (zero: the default). A budget outside the bounds is returned
+// unwrapped.
+func newBudgetedWorkspace(root string, budget time.Duration) (*Workspace, error) {
+	ws, err := NewWorkspace(root)
+	if err != nil {
+		return nil, fmt.Errorf("tools: build exec tools: %w", err)
+	}
+	if err := ws.SetCredentialScreenBudget(budget); err != nil {
+		return nil, err
+	}
+	return ws, nil
+}
 
 // readAnchor returns where reachability checks start: the top-level root path,
 // its construction-time identity, and this workspace's path below it.
