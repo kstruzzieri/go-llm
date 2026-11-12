@@ -9,10 +9,23 @@ import (
 // TestIsHarnessPath uses literal rows on purpose: a deleted harness entry
 // must fail its own row, so the table is never built from HarnessPaths().
 func TestIsHarnessPath(t *testing.T) {
-	cases := []struct {
-		in   string
-		want bool
-	}{
+	for _, tc := range harnessPathCases() {
+		t.Run(tc.in, func(t *testing.T) {
+			// containment: PATH-HARNESS
+			if got := IsHarnessPath(tc.in); got != tc.want {
+				t.Errorf("IsHarnessPath(%q) = %v, want %v", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+type harnessPathCase struct {
+	in   string
+	want bool
+}
+
+func harnessPathCases() []harnessPathCase {
+	cases := []harnessPathCase{
 		{"AGENTS.md", true},
 		{"AGENTS.override.md", true},
 		{"CLAUDE.md", true},
@@ -110,18 +123,35 @@ func TestIsHarnessPath(t *testing.T) {
 		{".github/agentsx/y", false},
 	}
 	if runtime.GOOS != "windows" {
-		cases = append(cases, struct {
-			in   string
-			want bool
-		}{`foo\CLAUDE.md`, false})
+		cases = append(cases, harnessPathCase{`foo\CLAUDE.md`, false})
 	}
-	for _, tc := range cases {
-		t.Run(tc.in, func(t *testing.T) {
-			// containment: PATH-HARNESS
-			if got := IsHarnessPath(tc.in); got != tc.want {
-				t.Errorf("IsHarnessPath(%q) = %v, want %v", tc.in, got, tc.want)
-			}
-		})
+	return cases
+}
+
+func TestHarnessKey(t *testing.T) {
+	equal := [][2]string{
+		{"caf\u00e9/policy.md", "cafe\u0301/policy.md"}, // NFC vs NFD
+		{"Docs/Policy.md", "docs/policy.md"},
+		{"CLAUDE.md.", "claude.md"},
+		{"a/./b/../c.md", "a/c.md"},
+		{"Key.md", "key.md"},
+	}
+	for _, p := range equal {
+		// containment: PATH-HARNESS-REF
+		if a, b := HarnessKey(p[0]), HarnessKey(p[1]); a != b {
+			t.Errorf("HarnessKey(%q) = %q, HarnessKey(%q) = %q, want equal", p[0], a, p[1], b)
+		}
+	}
+	if HarnessKey("docs/a.md") == HarnessKey("docs/b.md") {
+		t.Error("HarnessKey(docs/a.md) == HarnessKey(docs/b.md), want distinct")
+	}
+}
+
+func TestHarnessKeyIsHarnessPathAgree(t *testing.T) {
+	for _, tc := range harnessPathCases() {
+		if tc.want && !IsHarnessPath(HarnessKey(tc.in)) {
+			t.Errorf("IsHarnessPath(HarnessKey(%q)) = false, want true", tc.in)
+		}
 	}
 }
 

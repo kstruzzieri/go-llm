@@ -426,6 +426,165 @@
       "artifacts": []
     },
     {
+      "id": "PATH-HARNESS-REF",
+      "source": "issue-784:41",
+      "requirement": "The files harness files load, run or link to are found by bounded per-format readers (Markdown imports, OpenCode `instructions`, hook and MCP commands under the keys each known configuration file runs) and a walk of harness folders that skips nested repositories, and are matched through #725's key on both the requested and resolved spelling; permission rules, `env` values and `.agent/` files name nothing. A harness file that cannot be read or parsed, or a bound that is reached, makes every write prompt and never clears the set.",
+      "status": "verified",
+      "owner": "",
+      "layer": "focused",
+      "exempt": "",
+      "scenarios": [],
+      "refs": [
+        {
+          "package": "./agent/interceptor",
+          "test": "TestHarnessKey",
+          "file": "agent/interceptor/harness_test.go",
+          "func": "TestHarnessKey"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestHarnessReadMarkdownImports",
+          "file": "agent/tools/harness_readers_test.go",
+          "func": "TestHarnessReadMarkdownImports"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestHarnessReadArgvWhole",
+          "file": "agent/tools/harness_readers_test.go",
+          "func": "TestHarnessReadArgvWhole"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestHarnessReadShellStrings",
+          "file": "agent/tools/harness_readers_test.go",
+          "func": "TestHarnessReadShellStrings"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestHarnessReadKeySelection",
+          "file": "agent/tools/harness_readers_test.go",
+          "func": "TestHarnessReadKeySelection"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestHarnessReadTOML",
+          "file": "agent/tools/harness_readers_test.go",
+          "func": "TestHarnessReadTOML"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestHarnessReadGlobAdversarial",
+          "file": "agent/tools/harness_readers_test.go",
+          "func": "TestHarnessReadGlobAdversarial"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestHarnessRefsSymlinkParentPaths",
+          "file": "agent/tools/harness_paths_test.go",
+          "func": "TestHarnessRefsSymlinkParentPaths"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestHarnessPlanReferencesKinds",
+          "file": "agent/tools/approval_key_test.go",
+          "func": "harnessPlanKeys"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestHarnessPlanReferencesAntiGoals",
+          "file": "agent/tools/approval_key_test.go",
+          "func": "harnessPlanKeys"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestHarnessPlanReferencesFold",
+          "file": "agent/tools/approval_key_test.go",
+          "func": "harnessPlanKeys"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestHarnessPlanReferencesResolvedSpelling",
+          "file": "agent/tools/approval_key_test.go",
+          "func": "harnessPlanKeys"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestHarnessPlanReferencesRootInHarnessFolder",
+          "file": "agent/tools/approval_key_test.go",
+          "func": "TestHarnessPlanReferencesRootInHarnessFolder"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestHarnessRefsNestedRepository",
+          "file": "agent/tools/harness_refs_test.go",
+          "func": "TestHarnessRefsNestedRepository"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestHarnessRefsFailClosed",
+          "file": "agent/tools/harness_refs_test.go",
+          "func": "TestHarnessRefsFailClosed"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestHarnessRefsNotFailures",
+          "file": "agent/tools/harness_refs_test.go",
+          "func": "TestHarnessRefsNotFailures"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestHarnessRefsPromotionCheck",
+          "file": "agent/tools/harness_refs_test.go",
+          "func": "TestHarnessRefsPromotionCheck"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestHarnessRefsHarnessFileFirst",
+          "file": "agent/tools/harness_refs_test.go",
+          "func": "TestHarnessRefsHarnessFileFirst"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestHarnessRefsDanglingVirtualLink",
+          "file": "agent/tools/harness_refs_test.go",
+          "func": "TestHarnessRefsDanglingVirtualLink"
+        }
+      ],
+      "profiles": [
+        "linux-host",
+        "darwin-host"
+      ],
+      "mutations": [
+        "M-108",
+        "M-110",
+        "M-113",
+        "M-114",
+        "M-115",
+        "M-116",
+        "M-117",
+        "M-118",
+        "M-119",
+        "M-120",
+        "M-121",
+        "M-122",
+        "M-123",
+        "M-124",
+        "M-125",
+        "M-126",
+        "M-127",
+        "M-128",
+        "M-129",
+        "M-130",
+        "M-132",
+        "M-133",
+        "M-134",
+        "M-135",
+        "M-138",
+        "M-139"
+      ],
+      "artifacts": []
+    },
+    {
       "id": "MUT-WRITE",
       "source": "issue-452:53",
       "requirement": "A parent directory substituted at any write phase (before and after the temporary file, before the rename) never lets the write reach the outside-root or guard-denied sibling canaries (#552).",
@@ -1607,6 +1766,125 @@
         "M-103",
         "M-104",
         "M-105"
+      ],
+      "artifacts": []
+    },
+    {
+      "id": "GRANT-HARNESS-REF",
+      "source": "issue-784:37",
+      "requirement": "A file-tool write or edit to a file that an agent instruction or harness configuration file loads, runs or links to (an import target, a script a hook or MCP server command names, a file reached through a link inside a harness folder) prompts even with the `/auto-edits` grant held, offers no reusable answer, and leaves no grant. The set is read when each call is planned and checked again before the write, so an import added earlier in the same run counts; an ordinary write still auto-approves.",
+      "status": "",
+      "owner": "",
+      "layer": "aggregate",
+      "exempt": "",
+      "scenarios": [
+        "G5"
+      ],
+      "refs": [
+        {
+          "package": "./agent/tools",
+          "test": "TestHarnessPlanReferencesKinds",
+          "file": "agent/tools/approval_key_test.go",
+          "func": "TestHarnessPlanReferencesKinds"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestHarnessPlanReferencesFreshness",
+          "file": "agent/tools/approval_key_test.go",
+          "func": "TestHarnessPlanReferencesFreshness"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestHarnessPlanInvokeRecheck",
+          "file": "agent/tools/harness_refs_test.go",
+          "func": "TestHarnessPlanInvokeRecheck"
+        },
+        {
+          "package": "./cmd/golem",
+          "test": "TestContainment/G5",
+          "file": "cmd/golem/containment_scenarios_test.go",
+          "func": "g5"
+        },
+        {
+          "package": "./cmd/golem",
+          "test": "TestHarnessApprovalRefPrompts",
+          "file": "cmd/golem/harness_approval_test.go",
+          "func": "TestHarnessApprovalRefPrompts"
+        },
+        {
+          "package": "./cmd/golem",
+          "test": "TestHarnessApprovalRefSameRun",
+          "file": "cmd/golem/harness_approval_test.go",
+          "func": "TestHarnessApprovalRefSameRun"
+        }
+      ],
+      "profiles": [
+        "linux-host",
+        "darwin-host"
+      ],
+      "mutations": [
+        "M-106",
+        "M-107",
+        "M-109",
+        "M-111",
+        "M-112",
+        "M-131"
+      ],
+      "artifacts": []
+    },
+    {
+      "id": "GRANT-HARNESS-REF-UNATTENDED",
+      "source": "issue-784:39",
+      "requirement": "A headless `-allow-tool write_file`/`edit_file` run and Agentflow `-approve-plan-edits` never write a file that a harness file loads, runs or links to, and Agentflow parallel promotion refuses to write or delete one; ordinary writes stay approved.",
+      "status": "",
+      "owner": "",
+      "layer": "aggregate",
+      "exempt": "",
+      "scenarios": [
+        "H3"
+      ],
+      "refs": [
+        {
+          "package": "./cmd/golem",
+          "test": "TestContainment/H3",
+          "file": "cmd/golem/containment_scenarios_test.go",
+          "func": "h3"
+        },
+        {
+          "package": "./cmd/golem",
+          "test": "TestHarnessApprovalRefHeadless",
+          "file": "cmd/golem/harness_approval_test.go",
+          "func": "TestHarnessApprovalRefHeadless"
+        },
+        {
+          "package": "./cmd/golem",
+          "test": "TestHarnessApprovalRefTaskStep",
+          "file": "cmd/golem/harness_approval_test.go",
+          "func": "TestHarnessApprovalRefTaskStep"
+        },
+        {
+          "package": "./cmd/golem",
+          "test": "TestHarnessPromotionRefusesGitignoredImport",
+          "file": "cmd/golem/agentflow_parallel_test.go",
+          "func": "TestHarnessPromotionRefusesGitignoredImport"
+        },
+        {
+          "package": "./cmd/golem",
+          "test": "TestHarnessPromotionRefusesDeletion",
+          "file": "cmd/golem/agentflow_parallel_test.go",
+          "func": "TestHarnessPromotionRefusesDeletion"
+        }
+      ],
+      "profiles": [
+        "linux-host",
+        "darwin-host"
+      ],
+      "mutations": [
+        "M-106",
+        "M-131",
+        "M-136",
+        "M-137",
+        "M-140"
       ],
       "artifacts": []
     },

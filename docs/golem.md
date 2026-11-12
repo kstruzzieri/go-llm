@@ -1142,10 +1142,46 @@ How a path is classified: by the spelling the model gave, by the spelling the fi
 
 When Golem cannot list the repository folder or a folder between it and the workspace root (any folder holding a component of the root's path when there is no `.git`), it cannot verify the root's spelling and every file-tool write prompts; an unlistable folder that holds the repository changes nothing. An unlistable folder inside the workspace makes writes beneath it prompt, and the same holds for a spelling it cannot verify for the target itself. The line still says `harness file` in that case, although the file may be ordinary.
 
+### Files a harness file loads, runs or links to
+
+A harness file also controls the files it points at: another tool loads them or runs them. `write_file` and `edit_file` therefore treat the files below as harness files too (#784). They always prompt, no answer creates a grant, `/auto-edits` and an earlier grant do not cover them, and unattended runs deny them, with or without `-allow-tool`. The notice reads: `agent instruction or harness configuration file, or a file one of them loads, runs or links to; other tools load or run it, so this approval is not remembered`.
+
+Coverage promise. Four things are covered completely: Markdown `@` imports, OpenCode `instructions`, symlinks at harness paths and what they reach, and the literal paths named in every command Golem reads from the files below. If Golem cannot read or parse something it needs for those, every write prompts. What a command does at run time is best effort: Golem follows `cd` inside a shell string, the working-directory flags `--directory`, `-C`, `--cwd` and `--project`, the project-folder variables listed below and its own PATH lookup. It does not follow other variables, command substitution, scripts that source other scripts, or another tool's own PATH.
+
+What counts, in the order Golem reads it:
+
+- Markdown `@` imports. Every `.md` or `.mdc` file in a harness folder, plus `CLAUDE.md`, `CLAUDE.local.md`, `GEMINI.md`, `AGENTS.md` and the rules files, is scanned for `@path` at the start of a line or after a space. Imports of imports are followed up to five hops. A file counts whether or not it exists yet, so adding `@docs/new.md` to `CLAUDE.md` makes creating `docs/new.md` prompt. A leading `~/` is expanded to the home folder and counts when it lands in the workspace.
+- Commands in configuration files. Golem reads commands from these files: <!-- command-file list -->`.claude/settings.json`, `.claude/settings.local.json`, `.mcp.json`, `.cursor/hooks.json`, `.cursor/mcp.json`, `.windsurf/hooks.json`, `.gemini/settings.json`, `.github/hooks/*.json`, `.github/copilot/*.json`, `.vscode/mcp.json`, `.vscode/settings.json`, `opencode.json`, `opencode.jsonc`, `.golem.json` and `.codex/config.toml`. <!-- end command-file list --> No other file is read for commands. Every path-like word in a command or argument list counts, such as `scripts/lint.sh` or the `server.py` in `python3 server.py`, whether or not the file exists. A bare program name is looked up on Golem's own PATH and counts when it resolves into the workspace. A top-level `permissions` section is skipped, and so is an `env` section at the top level or inside an object that also holds a command (a server's or hook's own `env`). An `env` or `permissions` key anywhere else is read, so a server named `env` cannot hide its command. `.codex/config.toml` is read as text: every string in it counts, `env` tables included.
+- OpenCode `instructions`. The `instructions` entries in `opencode.json` and `opencode.jsonc` are paths or glob patterns, and a pattern covers every matching file.
+- Symlinks. A link at a harness path covers what it points to inside the workspace, and Golem reads the target as if it sat at the link. A link named `.github` or `.vscode` is followed as if its target were at the link's path.
+- Folders above the workspace. Every parent folder, up to the filesystem root, is checked at fixed paths only: the instruction files, `.claude/rules/*` and the configuration files above. That includes `~/.claude/settings.json`. A file there that points into the workspace counts.
+
+Commands are read on a best-effort basis. Golem follows `cd` inside a shell string, the working-directory flags `--directory`, `-C`, `--cwd` and `--project` (written `--directory X` or `--directory=X`, and `-C X`; the folder they name is a base for the rest of that command, as `cd` is for the rest of a shell string), the project-folder variables `$CLAUDE_PROJECT_DIR`, `${CLAUDE_PROJECT_DIR}`, `${workspaceFolder}`, `GEMINI_PROJECT_DIR` and `CURSOR_PROJECT_DIR` (they resolve to the file's own base, the workspace root and the repository folder), and the PATH lookup above. It does not follow other variables, command substitution, scripts that call scripts, or another tool's own PATH.
+
+The search is bounded and skips places no one should have to wade through: `.git`, `node_modules`, `vendor` and the other folders the file tools already ignore, the build-output folders target, build, dist, out, .venv, venv, __pycache__, .gradle, .next and .tox, any folder that holds its own `.git` entry (nested repositories, worktrees, submodules), and folders this user cannot search. The bounds are 100,000 directory entries and 100,000 checks for links inside covered subtrees per call, 256 KiB per configuration file, 32 MiB read per call, five import hops, 64 `cd` or working-directory folders per shell string or argument list and 100,000 resolution steps per configuration file. A dangling symlink chain is followed up to 40 links; a longer one makes the set incomplete.
+
+Fail closed. If Golem cannot finish the search, every `write_file` and `edit_file` call prompts, not only the ones that touch a referenced file. That happens when a harness file or an ancestor file such as `~/.claude/settings.json` cannot be read, is not valid JSON or TOML (an empty file is fine), is not a regular file, or crosses a bound (`<file> names too many paths`). An import that sits behind a folder this user cannot search counts as absent; a file that exists but cannot be read makes the set incomplete. The prompt says why. The first line of the preview is `harness reference: <reason>`, naming the file or the limit. `-p` prints `golem: harness reference: ...` after its denial line, and Agentflow task steps print `golem: task step denied <tool>: harness file (<notice>)` followed by the same reason line. If the answer changed between the preview and the write, the write fails with `harness files changed or could not be checked since preview; retry`.
+
+Agentflow parallel promotion applies the same check to a whole batch, writes and deletions both. If any path in it is covered, Golem refuses the batch with `refuse parallel promotion: <path>: <reason>` and applies nothing.
+
+Residuals, documented and not fixed:
+
+- Run-time command behavior outside the list above: other variables, command substitution, scripts that call scripts, another tool's own PATH.
+- Above the workspace, only the fixed paths are read. Harness files deeper in a parent's folders, and symlinks there, are not.
+- Skipped places: nested repositories, `vendor/`, `node_modules/`, `.superpowers/`, folders this user cannot search and the build-output folders. A hand-written `build/CLAUDE.md` is not read, and the files it imports stay ordinary.
+- Permission rules that are not commands, such as Claude's `Bash(./scripts/x.sh)`, and VS Code interpreter paths.
+- Reference forms not read: Copilot `#file:` references and Markdown links in prompt files, YAML configuration, custom Gemini `contextFileName` names, skill scripts mentioned in prose, and the agent folders the harness list leaves out.
+- Commands written in Markdown: inline shell commands in `.claude/commands/*.md` (``!`cmd` `` lines) and scripts named in skill front matter are not read as commands.
+- Folder links at paths other than `.github` and `.vscode` are not walked, so a nested `CLAUDE.md` inside such a link's target outside the workspace is not read.
+- A change that lands between the final check and the rename, made by a command or another process.
+- Windows: `cmd.exe` looks in the current folder before PATH, so a bare `run.bat` named in a hook may run a workspace file. Golem resolves bare names only through its own PATH lookup. Cloud-sync placeholder files (OneDrive Files On-Demand) at harness paths report as irregular and make the set incomplete, and a junction under an OpenCode glob prefix is not followed.
+- Command forms not followed: `cmd /k`, PowerShell flag abbreviations and `-EncodedCommand`, `pushd`.
+- Other tools' working-directory flags are not followed. Golem follows only `--directory`, `-C`, `--cwd` and `--project`.
+- macOS privacy protection (TCC) can stop Golem reading a file another app can read; such imports are not followed further.
+
 Not covered:
 
-- Writes made by commands: `run_command`, `start_command`, the post-write verifier, scratch commands and Agentflow parallel promotion.
-- Files that a harness file imports or runs, and symlinks inside harness folders that point at ordinary folders (tracked as issue #784).
+- Writes made by commands: `run_command`, `start_command`, the post-write verifier and scratch commands. Agentflow parallel promotion is checked (see above).
 - A workspace rooted in a git submodule or nested repository inside a harness folder: its files are classified from that repository's own folder.
 - Hosts embedding the library with a plain `agent.Approver`, which never receives the key.
 
