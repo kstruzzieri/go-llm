@@ -97,7 +97,7 @@ func TestDirReadSeams(t *testing.T) {
 
 	f, err := os.Open(t.TempDir())
 	if err != nil {
-		t.Fatal(err)
+		failNoPath(t, "seams", err)
 	}
 	defer func() { _ = f.Close() }()
 
@@ -149,7 +149,7 @@ func TestDirReadSeams(t *testing.T) {
 	t.Run("cloexec", func(t *testing.T) {
 		dir := t.TempDir()
 		if err := os.WriteFile(filepath.Join(dir, "a"), nil, 0o600); err != nil {
-			t.Fatal(err)
+			failNoPath(t, "cloexec", err)
 		}
 		var flags, seen int
 		var flagErr error
@@ -163,7 +163,7 @@ func TestDirReadSeams(t *testing.T) {
 			t.Helper()
 			h, err := os.Open(dir)
 			if err != nil {
-				t.Fatal(err)
+				failNoPath(t, "cloexec", err)
 			}
 			defer func() { _ = h.Close() }()
 			var got []dirEntry
@@ -187,12 +187,12 @@ func TestDirReadSeams(t *testing.T) {
 		dir := t.TempDir()
 		for i := range 5000 {
 			if err := os.WriteFile(filepath.Join(dir, fmt.Sprintf("file-with-a-fairly-long-name-%05d.txt", i)), nil, 0o600); err != nil {
-				t.Fatal(err)
+				failNoPath(t, "real readdir error", err)
 			}
 		}
 		reg, err := os.Open(filepath.Join(dir, "file-with-a-fairly-long-name-00000.txt"))
 		if err != nil {
-			t.Fatal(err)
+			failNoPath(t, "real readdir error", err)
 		}
 		defer func() { _ = reg.Close() }()
 		var dupErr error
@@ -208,7 +208,7 @@ func TestDirReadSeams(t *testing.T) {
 			t.Helper()
 			h, err := os.Open(dir)
 			if err != nil {
-				t.Fatal(err)
+				failNoPath(t, "real readdir error", err)
 			}
 			defer func() { _ = h.Close() }()
 			dupErr = errors.New("fdopendir wrapper not called")
