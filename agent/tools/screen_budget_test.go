@@ -15,6 +15,7 @@ import (
 )
 
 func TestCredentialScreenBudget(t *testing.T) {
+	// containment: CMP-EXEC-CREDENTIAL-OUTPUT
 	for _, tc := range []struct {
 		label   string
 		set     time.Duration
@@ -52,6 +53,7 @@ func TestCredentialScreenBudget(t *testing.T) {
 }
 
 func TestCredentialScreenBudgetWalk(t *testing.T) {
+	// containment: CMP-EXEC-CREDENTIAL-OUTPUT
 	files := map[string]string{
 		"a/f":    "plain\n",
 		"b/.env": "TOKEN=budget-0001-abcdef\n",
@@ -151,6 +153,7 @@ type budgetTools struct {
 }
 
 func TestExecToolsOptionsScreenBudget(t *testing.T) {
+	// containment: CMP-EXEC-CREDENTIAL-OUTPUT
 	type ctor struct {
 		label string
 		build func(t *testing.T, root string, opts ExecToolsOptions) ([]agent.Tool, error)

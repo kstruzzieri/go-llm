@@ -51,6 +51,7 @@ func withReclen(rec []byte, n uint16) []byte {
 }
 
 func TestParseDirents(t *testing.T) {
+	// containment: CMP-EXEC-CREDENTIAL-OUTPUT
 	valid := direntBytes(7, unix.DT_REG, "a", 0)
 	long := strings.Repeat("n", 255)
 	noNul := direntBytes(1, unix.DT_REG, "abc", 0)

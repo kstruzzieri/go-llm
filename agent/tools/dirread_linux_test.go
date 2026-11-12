@@ -52,6 +52,7 @@ func TestDirReadReusesBuffer(t *testing.T) {
 
 // TestDirReadSeams drives the Linux read through a scripted getdents.
 func TestDirReadSeams(t *testing.T) {
+	// containment: CMP-EXEC-CREDENTIAL-OUTPUT
 	rec := func(name string) []byte { return direntBytes(1, unix.DT_REG, name, 2) }
 	rows := []struct {
 		label string

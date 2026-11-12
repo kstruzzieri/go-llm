@@ -3328,6 +3328,102 @@
           "test": "TestBuildOutputScreenGitConfigHeld",
           "file": "agent/tools/screen_build_test.go",
           "func": "TestBuildOutputScreenGitConfigHeld"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestParseDirents",
+          "file": "agent/tools/dirparse_test.go",
+          "func": "TestParseDirents"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestDirReadSeams",
+          "file": "agent/tools/dirread_linux_test.go",
+          "func": "TestDirReadSeams"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestDirReadSeams",
+          "file": "agent/tools/dirread_darwin_test.go",
+          "func": "TestDirReadSeams"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestDirReadKinds",
+          "file": "agent/tools/dirread_test.go",
+          "func": "TestDirReadKinds"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestWorkspaceEntryUnexamined",
+          "file": "agent/tools/walk_tolerant_test.go",
+          "func": "TestWorkspaceEntryUnexamined"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestOpenScreenedUnexamined",
+          "file": "agent/tools/walk_tolerant_test.go",
+          "func": "TestOpenScreenedUnexamined"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestWalkTolerantExamines",
+          "file": "agent/tools/walk_tolerant_test.go",
+          "func": "TestWalkTolerantExamines"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestWalkTolerantUnknownType",
+          "file": "agent/tools/walk_tolerant_test.go",
+          "func": "TestWalkTolerantUnknownType"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestWalkTolerantAllUnknown",
+          "file": "agent/tools/walk_tolerant_test.go",
+          "func": "TestWalkTolerantAllUnknown"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestBuildOutputScreenUnknownType",
+          "file": "agent/tools/screen_build_test.go",
+          "func": "TestBuildOutputScreenUnknownType"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestBuildOutputScreenStaleType",
+          "file": "agent/tools/screen_build_test.go",
+          "func": "TestBuildOutputScreenStaleType"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestBuildOutputScreenUnexamined",
+          "file": "agent/tools/screen_build_test.go",
+          "func": "TestBuildOutputScreenUnexamined"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestCredentialScreenBudget",
+          "file": "agent/tools/screen_budget_test.go",
+          "func": "TestCredentialScreenBudget"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestCredentialScreenBudgetWalk",
+          "file": "agent/tools/screen_budget_test.go",
+          "func": "TestCredentialScreenBudgetWalk"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestExecToolsOptionsScreenBudget",
+          "file": "agent/tools/screen_budget_test.go",
+          "func": "TestExecToolsOptionsScreenBudget"
+        },
+        {
+          "package": "./agent/interceptor",
+          "test": "TestCredentialPathMatchesOracle",
+          "file": "agent/interceptor/credential_path_oracle_test.go",
+          "func": "TestCredentialPathMatchesOracle"
         }
       ],
       "profiles": [

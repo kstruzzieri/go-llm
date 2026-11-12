@@ -110,6 +110,7 @@ func TestBuildOutputScreenKeys(t *testing.T) {
 // A directory whose type the read did not report is stat'ed and descended,
 // and the credential file inside it is keyed.
 func TestBuildOutputScreenUnknownType(t *testing.T) {
+	// containment: CMP-EXEC-CREDENTIAL-OUTPUT
 	const label = "unknown type"
 	ws, _, _ := tolerantFixture(t, map[string]string{"plain-dir/.env": "TOKEN=unknown-0010-abcdef\n"}, nil)
 	ws.screenSeams = &screenSeams{entryType: func(rel string, typ uint8) uint8 {
@@ -131,6 +132,7 @@ func TestBuildOutputScreenUnknownType(t *testing.T) {
 // a directory by the time the walk reaches it. These rows pin a stated limit
 // (spec D1), not a guarantee.
 func TestBuildOutputScreenStaleType(t *testing.T) {
+	// containment: CMP-EXEC-CREDENTIAL-OUTPUT
 	t.Run("typed regular", func(t *testing.T) {
 		const label = "typed regular"
 		ws, _, _ := tolerantFixture(t, map[string]string{"z/.env": "TOKEN=stale-0001-abcdef\n"}, nil)
@@ -183,6 +185,7 @@ func TestBuildOutputScreenStaleType(t *testing.T) {
 // A credential file the listing returned unexamined is never read: the
 // output is withheld with a cause that names it, or the command is not run.
 func TestBuildOutputScreenUnexamined(t *testing.T) {
+	// containment: CMP-EXEC-CREDENTIAL-OUTPUT
 	const secret = "unexamined-0001-abcdef"
 	rows := []struct {
 		label   string

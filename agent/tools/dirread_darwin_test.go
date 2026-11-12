@@ -88,6 +88,7 @@ func (fk *fakeDir) sys() dirSys {
 // TestDirReadSeams drives the Darwin read through stubs (simulated rows) and
 // through wrapped real calls (real rows).
 func TestDirReadSeams(t *testing.T) {
+	// containment: CMP-EXEC-CREDENTIAL-OUTPUT
 	abc := []unix.Dirent{darwinDirent("a", 1), darwinDirent("b", 2), darwinDirent("c", 3), darwinDirent("d", 4), darwinDirent("e", 5)}
 	badNamlen := darwinDirent("x", 1)
 	badNamlen.Namlen = 1024
