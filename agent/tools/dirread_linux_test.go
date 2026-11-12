@@ -26,15 +26,27 @@ func TestDirReadReusesBuffer(t *testing.T) {
 		failNoPath(t, "reuse", err)
 	}
 	defer func() { _ = f.Close() }()
-	s := dirSys{getdents: func(int, []byte) (int, error) { return 0, nil }}
+	// The stub records every buffer length it is given; each must be the
+	// plan's fixed 65536.
+	calls, wrong := 0, 0
+	s := dirSys{getdents: func(_ int, buf []byte) (int, error) {
+		calls++
+		if len(buf) != 65536 {
+			wrong++
+		}
+		return 0, nil
+	}}
 	emit := func(string, uint8) {}
 	allocs := testing.AllocsPerRun(200, func() {
 		if err := s.read(f, emit); err != nil {
-			t.Fatalf("reuse: %v", err)
+			failNoPath(t, "reuse", err)
 		}
 	})
 	if allocs >= 1 {
 		t.Fatalf("reuse: %.1f allocations per read, want under 1", allocs)
+	}
+	if calls == 0 || wrong != 0 {
+		t.Fatalf("reuse: %d of %d reads had a buffer other than 65536 bytes", wrong, calls)
 	}
 }
 

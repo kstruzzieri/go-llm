@@ -103,14 +103,16 @@ var screenShapes = []screenShape{
 // screenTree returns the root of sh's tree. Under GO_LLM_BENCH_PARENT the tree
 // is kept at a fixed name and reused by later processes once its marker, a
 // sibling written last, exists; a tree without one is rebuilt from scratch.
-// Otherwise the tree goes under tb.TempDir().
+// Otherwise the tree goes under tb.TempDir(): a plain -bench . without
+// GO_LLM_BENCH_PARENT builds every tree afresh, about 5.7 million files in
+// all, so the sub-benchmarks are meant to be selected one at a time.
 func screenTree(tb testing.TB, sh screenShape) string {
 	tb.Helper()
 	parent := os.Getenv("GO_LLM_BENCH_PARENT")
 	if parent == "" {
 		root := tb.TempDir()
 		if _, _, err := genTree(root, sh.shape, sh.entries); err != nil {
-			tb.Fatalf("%s: generate: %v", sh.name, err)
+			failNoPath(tb, sh.name+": generate", err)
 		}
 		return root
 	}
@@ -120,13 +122,13 @@ func screenTree(tb testing.TB, sh screenShape) string {
 		return root
 	}
 	if err := os.RemoveAll(root); err != nil {
-		tb.Fatalf("%s: clear: %v", sh.name, err)
+		failNoPath(tb, sh.name+": clear", err)
 	}
 	if _, _, err := genTree(root, sh.shape, sh.entries); err != nil {
-		tb.Fatalf("%s: generate: %v", sh.name, err)
+		failNoPath(tb, sh.name+": generate", err)
 	}
 	if err := os.WriteFile(marker, nil, 0o600); err != nil {
-		tb.Fatalf("%s: marker: %v", sh.name, err)
+		failNoPath(tb, sh.name+": marker", err)
 	}
 	return root
 }
@@ -139,7 +141,7 @@ func BenchmarkScreenWalk(b *testing.B) {
 		b.Run(sh.name, func(b *testing.B) {
 			ws, err := NewWorkspace(screenTree(b, sh))
 			if err != nil {
-				b.Fatalf("%s: workspace: %v", sh.name, err)
+				failNoPath(b, sh.name+": workspace", err)
 			}
 			var visits, skips int
 			fn := func(string, fs.DirEntry) error { visits++; return nil }
@@ -148,7 +150,7 @@ func BenchmarkScreenWalk(b *testing.B) {
 			for b.Loop() {
 				visits, skips = 0, 0
 				if err := benchWalk(context.Background(), ws, fn, ignored, skip); err != nil {
-					b.Fatalf("%s: walk: %v", sh.name, err)
+					failNoPath(b, sh.name+": walk", err)
 				}
 				if visits != sh.visits || skips != 0 {
 					b.Fatalf("%s: visits %d, skips %d; want %d, 0", sh.name, visits, skips, sh.visits)
@@ -162,7 +164,7 @@ func BenchmarkScreenWalk(b *testing.B) {
 func checkScreen(tb testing.TB, label string, s *outputScreen, err error, want int) {
 	tb.Helper()
 	if err != nil {
-		tb.Fatalf("%s: build: %v", label, err)
+		failNoPath(tb, label+": build", err)
 	}
 	if s.withhold != "" || s.changed != 0 || len(s.keys) != want {
 		tb.Fatalf("%s: withheld %t, changed %d, keys %d; want a complete screen of %d keys", label, s.withhold != "", s.changed, len(s.keys), want)
@@ -177,7 +179,7 @@ func BenchmarkBuildOutputScreen(b *testing.B) {
 		b.Run(sh.name, func(b *testing.B) {
 			ws, err := NewWorkspace(screenTree(b, sh))
 			if err != nil {
-				b.Fatalf("%s: workspace: %v", sh.name, err)
+				failNoPath(b, sh.name+": workspace", err)
 			}
 			ws.screenLimits.budget = 10 * time.Minute
 			for b.Loop() {
@@ -204,10 +206,10 @@ func TestBuildOutputScreenLargeTree(t *testing.T) {
 	}
 	ws, err := NewWorkspace(screenTree(t, sh))
 	if err != nil {
-		t.Fatalf("%s: workspace: %v", sh.name, err)
+		failNoPath(t, sh.name+": workspace", err)
 	}
 	if _, err := buildOutputScreen(context.Background(), ws); err != nil {
-		t.Fatalf("%s warm-up: build: %v", sh.name, err)
+		failNoPath(t, sh.name+" warm-up: build", err)
 	}
 	var ds []time.Duration
 	for i := 0; i < 5; i++ {
