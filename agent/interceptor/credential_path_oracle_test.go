@@ -85,30 +85,24 @@ func oracleCorpusShort(check func(p string)) {
 	}
 }
 
-// oracleExistingTables is group (a): the path arguments of the package's
-// existing IsCredentialPath and IsGitConfigPath tests, written out.
+// oracleExistingTables is group (a): every path the package's own tests pass
+// to IsCredentialPath or IsGitConfigPath, read from the variables those tests
+// range over so the two cannot drift.
 func oracleExistingTables() []string {
 	var out []string
-	for _, dir := range []string{".ssh", ".gnupg", ".aws", ".kube"} {
-		out = append(out, dir, dir+"/key", "sub/"+dir, "sub/"+dir+"/key")
+	for _, r := range gitConfigPathRows {
+		out = append(out, r.in)
 	}
-	for _, name := range []string{".env", ".netrc", "_netrc", ".npmrc", ".pypirc", ".git-credentials",
-		".env.local", ".env.production.local", ".env."} {
-		out = append(out, name, "sub/"+name, "a/b/"+name)
+	out = append(out, credentialMatrixBlocked...)
+	out = append(out, credentialMatrixAllowed...)
+	for _, s := range ancestorScopes {
+		if IsProtectedPath(s) {
+			continue
+		}
+		for _, c := range ancestorChildren {
+			out = append(out, s+"/"+c, c)
+		}
 	}
-	for _, name := range []string{".env.example", ".env.sample", ".env.template", ".env.dist"} {
-		out = append(out, name, "sub/"+name, "a/b/"+name)
-	}
-	out = append(out,
-		".git/config", "sub/.git/config", ".git/modules/x/config", ".Git/config",
-		".ENV", ".Env.Local", ".SSH/x",
-		".\u017Fsh/x", ".\u00DFh/x", ".\u1E9Eh/x", ".aw\u017F/credentials", ".git-credential\u017F", ".\u212Aube/config",
-		".s\u200Csh/x", ".e\uFEFFnv",
-		".ENV.EXAMPLE", "env", ".environment", ".envrc", "prod.env", ".env/bin/activate", "py/.env/lib/site.py",
-		".git/HEAD", "config", ".gitconfig", "stra\u00DFe.md", ".g\u0131t/config", ".s\u200Bsh/x",
-		"README.md", ".github/workflows/ci.yml",
-		"sub/.GIT/config", ".gi\u200dt/config", ".git/hooks/x", ".github/config",
-	)
 	return out
 }
 
@@ -148,10 +142,21 @@ func TestCredentialPathMatchesOracle(t *testing.T) {
 		{"c", oracleLiteralRows()},
 		{"d", oracleAliasRows()},
 	}
+	// Report the first oracleMaxReports mismatches, then stop: a broken
+	// matcher disagrees on a large share of 3.5 million paths.
+	const oracleMaxReports = 20
+	mismatches := 0
+	report := func(group string, i int, cred, credOld, git, gitOld bool) {
+		mismatches++
+		t.Errorf("group %s index %d: IsCredentialPath=%v oracle=%v IsGitConfigPath=%v oracle=%v", group, i, cred, credOld, git, gitOld)
+		if mismatches >= oracleMaxReports {
+			t.Fatalf("stopped after %d mismatches (cap reached; more may follow)", mismatches)
+		}
+	}
 	// (a) existing tables first, then (b), (c), (d) in the brief's order.
 	run := func(group string, i int, p string) {
 		if c, co, g, goOld, ok := oracleAgrees(p); !ok {
-			t.Errorf("group %s index %d: IsCredentialPath=%v oracle=%v IsGitConfigPath=%v oracle=%v", group, i, c, co, g, goOld)
+			report(group, i, c, co, g, goOld)
 		}
 	}
 	for i, p := range groups[0].paths {
@@ -160,7 +165,7 @@ func TestCredentialPathMatchesOracle(t *testing.T) {
 	calls := 0
 	oracleCorpus(func(p string) {
 		if c, co, g, goOld, ok := oracleAgrees(p); !ok {
-			t.Errorf("group b index %d: IsCredentialPath=%v oracle=%v IsGitConfigPath=%v oracle=%v", calls, c, co, g, goOld)
+			report("b", calls, c, co, g, goOld)
 		}
 		calls++
 	})
@@ -193,6 +198,9 @@ func FuzzCredentialPathMatchesOracle(f *testing.F) {
 	oracleCorpusShort(func(p string) { add(p); n++ })
 	if n != 6624 {
 		f.Fatalf("short corpus has %d seeds, want 6624", n)
+	}
+	if seeds != 57363 {
+		f.Fatalf("fuzz seeded %d paths, want 57363", seeds)
 	}
 	f.Fuzz(func(t *testing.T, p string) {
 		if c, co, g, goOld, ok := oracleAgrees(p); !ok {
