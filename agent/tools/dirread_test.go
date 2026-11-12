@@ -3,6 +3,7 @@
 package tools
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"runtime/debug"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 
 	"golang.org/x/sys/unix"
@@ -21,7 +23,7 @@ func readDirAt(t *testing.T, label, dir string) []dirEntry {
 	t.Helper()
 	h, err := os.Open(dir)
 	if err != nil {
-		t.Fatal(err)
+		failNoPath(t, label, err)
 	}
 	defer func() { _ = h.Close() }()
 	var got []dirEntry
@@ -29,6 +31,17 @@ func readDirAt(t *testing.T, label, dir string) []dirEntry {
 		t.Fatalf("%s: read: %v", label, err)
 	}
 	return got
+}
+
+// failNoPath fails the test with label and the cause of err: the errno it
+// wraps, else only its type. Never err's text, which can quote a test path.
+func failNoPath(t *testing.T, label string, err error) {
+	t.Helper()
+	var errno syscall.Errno
+	if errors.As(err, &errno) {
+		t.Fatalf("%s: %v", label, errno)
+	}
+	t.Fatalf("%s: failed (%T)", label, err)
 }
 
 // noLeak runs read once to warm up, then checks that 64 more leave the
@@ -51,24 +64,24 @@ func noLeak(t *testing.T, label string, read func()) {
 func TestDirReadKinds(t *testing.T) {
 	dir, err := os.MkdirTemp("", "s")
 	if err != nil {
-		t.Fatal(err)
+		failNoPath(t, "kinds", err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	if err := os.WriteFile(filepath.Join(dir, "reg"), nil, 0o600); err != nil {
-		t.Fatal(err)
+		failNoPath(t, "kinds", err)
 	}
 	if err := os.Mkdir(filepath.Join(dir, "dir"), 0o700); err != nil {
-		t.Fatal(err)
+		failNoPath(t, "kinds", err)
 	}
 	if err := os.Symlink("reg", filepath.Join(dir, "lnk")); err != nil {
-		t.Fatal(err)
+		failNoPath(t, "kinds", err)
 	}
 	if err := unix.Mkfifo(filepath.Join(dir, "fifo"), 0o600); err != nil {
-		t.Fatal(err)
+		failNoPath(t, "kinds", err)
 	}
 	ln, err := net.Listen("unix", filepath.Join(dir, "sock"))
 	if err != nil {
-		t.Fatal(err)
+		failNoPath(t, "kinds", err)
 	}
 	defer func() { _ = ln.Close() }()
 
@@ -96,18 +109,18 @@ func TestDirReadMany(t *testing.T) {
 	dir := t.TempDir()
 	for i := range 10000 {
 		if err := os.WriteFile(filepath.Join(dir, fmt.Sprintf("f%05d", i)), nil, 0o600); err != nil {
-			t.Fatal(err)
+			failNoPath(t, "many", err)
 		}
 	}
 	got := names(readDirAt(t, "many", dir))
 	h, err := os.Open(dir)
 	if err != nil {
-		t.Fatal(err)
+		failNoPath(t, "many", err)
 	}
 	want, err := h.Readdirnames(-1)
 	_ = h.Close()
 	if err != nil {
-		t.Fatal(err)
+		failNoPath(t, "many", err)
 	}
 	slices.Sort(got)
 	slices.Sort(want)
@@ -129,7 +142,7 @@ func TestDirReadNames(t *testing.T) {
 		t.Run(r.label, func(t *testing.T) {
 			dir := t.TempDir()
 			if err := os.WriteFile(filepath.Join(dir, r.name), nil, 0o600); err != nil {
-				t.Fatalf("%s: create: %v", r.label, err)
+				failNoPath(t, r.label+": create", err)
 			}
 			got := readDirAt(t, r.label, dir)
 			if len(got) != 1 || got[0].name != r.name {
@@ -143,7 +156,7 @@ func TestDirReadNoDescriptorLeak(t *testing.T) {
 	dir := t.TempDir()
 	for i := range 10 {
 		if err := os.WriteFile(filepath.Join(dir, fmt.Sprintf("f%d", i)), nil, 0o600); err != nil {
-			t.Fatal(err)
+			failNoPath(t, "no leak", err)
 		}
 	}
 	noLeak(t, "no leak", func() { readDirAt(t, "no leak", dir) })

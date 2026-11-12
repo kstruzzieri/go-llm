@@ -12,9 +12,10 @@ import (
 
 // getdentsStep is one scripted answer of a getdents stub.
 type getdentsStep struct {
-	batch []byte
-	n     int // used when batch is nil
-	err   error
+	batch   []byte
+	n       int  // used when batch is nil
+	pastBuf bool // return len(buf)+1
+	err     error
 }
 
 // TestDirReadSeams drives the Linux read through a scripted getdents.
@@ -31,10 +32,11 @@ func TestDirReadSeams(t *testing.T) {
 		{"error after records", []getdentsStep{{batch: rec("a")}, {err: syscall.EIO}}, nil, syscall.EIO},
 		{"bad record", []getdentsStep{{batch: slices.Concat(rec("a"), rec("b")[:18])}}, nil, errBadDirent},
 		{"negative count", []getdentsStep{{n: -1}}, nil, errBadDirent},
+		{"count past buffer", []getdentsStep{{pastBuf: true}}, nil, errBadDirent},
 	}
 	f, err := os.Open(t.TempDir())
 	if err != nil {
-		t.Fatal(err)
+		failNoPath(t, "seams", err)
 	}
 	defer func() { _ = f.Close() }()
 	for _, r := range rows {
@@ -42,7 +44,7 @@ func TestDirReadSeams(t *testing.T) {
 			calls := 0
 			stub := func(_ int, buf []byte) (int, error) {
 				calls++
-				if calls > 3 && r.label == "bad record" {
+				if calls > 3 && r.label == "bad record" || calls > 1 && r.label == "count past buffer" {
 					t.Fatalf("%s: getdents called %d times", r.label, calls)
 				}
 				if calls > len(r.steps) {
@@ -51,6 +53,9 @@ func TestDirReadSeams(t *testing.T) {
 				s := r.steps[calls-1]
 				if s.err != nil {
 					return 0, s.err
+				}
+				if s.pastBuf {
+					return len(buf) + 1, nil
 				}
 				if s.batch == nil {
 					return s.n, nil

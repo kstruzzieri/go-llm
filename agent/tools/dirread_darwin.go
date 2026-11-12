@@ -3,6 +3,7 @@ package tools
 import (
 	"errors"
 	"os"
+	"runtime"
 	"syscall"
 	"unsafe"
 
@@ -71,6 +72,7 @@ var sysDir = dirSys{
 // handle and closes the duplicate, is called exactly once once fdopendir has
 // succeeded; before that, a refused duplicate is closed once.
 func (s dirSys) read(f *os.File, emit func(name string, typ uint8)) error {
+	defer runtime.KeepAlive(f)
 	fd, err := s.dup(int(f.Fd()))
 	if err != nil {
 		return err
