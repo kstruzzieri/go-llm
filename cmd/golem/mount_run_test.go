@@ -11,6 +11,7 @@ import (
 	"runtime/debug"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kstruzzieri/go-llm/agent"
 	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
@@ -584,7 +585,7 @@ func TestStartupVerifierPolicyErrorAbortsStartup(t *testing.T) {
 	orig := buildVerifierFn
 	t.Cleanup(func() { buildVerifierFn = orig })
 	calls := 0
-	buildVerifierFn = func(string, agenttools.SandboxConfig) (*agenttools.VerifyCommand, string, error) {
+	buildVerifierFn = func(string, agenttools.SandboxConfig, time.Duration) (*agenttools.VerifyCommand, string, error) {
 		calls++
 		return nil, "", fmt.Errorf("stub backend: %w", agenttools.ErrSandboxPolicy)
 	}
