@@ -194,6 +194,7 @@ func TestRunCommandWithheldStreams(t *testing.T) {
 		{"file denied", screenLimits{}, false, &screenSeams{openErr: answer(".env", fs.ErrPermission)}, `unreadable: ".env"`},
 		{"dir denied", screenLimits{}, false, &screenSeams{openErr: answer("data", fs.ErrPermission)}, `unreadable: "data"`},
 		{"stat eio", screenLimits{}, false, &screenSeams{statErr: answer(".env", syscall.EIO)}, `unreadable: ".env"`},
+		{"unexamined", screenLimits{}, false, &screenSeams{examine: func(rel string, need bool) bool { return need && rel != ".env" }}, `listed without metadata: ".env"`},
 	}
 	for _, r := range rows {
 		t.Run(r.label, func(t *testing.T) {

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io"
 	"io/fs"
+	"os"
 	"time"
 )
 
@@ -54,9 +55,16 @@ func (l screenLimits) orDefaults() screenLimits {
 // handled exactly as that error from the real call. A seam may change the tree
 // and return nil. readFrom wraps the reader each credential file's content is
 // read through, so that a test can make the read itself fail.
+//
+// The tolerant listing's seams: readDir reads the directory at rel in place of
+// the real directory read; entryType may change the type the read reported for
+// rel; examine may change what the walk's matcher answered for rel.
 type screenSeams struct {
 	openErr, listErr, statErr func(rel string) error
 	readFrom                  func(rel string, r io.Reader) io.Reader
+	readDir                   func(rel string, f *os.File, emit func(name string, typ uint8)) error
+	entryType                 func(rel string, typ uint8) uint8
+	examine                   func(rel string, need bool) bool
 }
 
 func (s *screenSeams) open(rel string) error {
@@ -78,6 +86,22 @@ func (s *screenSeams) stat(rel string) error {
 		return nil
 	}
 	return s.statErr(rel)
+}
+
+// typ is the type the listing uses for rel, which the read reported as t.
+func (s *screenSeams) typ(rel string, t uint8) uint8 {
+	if s == nil || s.entryType == nil {
+		return t
+	}
+	return s.entryType(rel, t)
+}
+
+// need is whether the listing examines rel, for which the matcher answered n.
+func (s *screenSeams) need(rel string, n bool) bool {
+	if s == nil || s.examine == nil {
+		return n
+	}
+	return s.examine(rel, n)
 }
 
 func (s *screenSeams) reader(rel string, r io.Reader) io.Reader {

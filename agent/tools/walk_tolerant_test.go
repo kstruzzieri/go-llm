@@ -14,6 +14,8 @@ import (
 	"testing"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/kstruzzieri/go-llm/agent/interceptor"
 )
 
 // tolerantFixture writes files under a fresh workspace root and sibFiles under
@@ -90,6 +92,8 @@ func TestWalkTolerant(t *testing.T) {
 		wantSkips   []wantSkip
 		wantErr     error  // nil: the walk returns nil
 		fnErr       string // fn returns errBoom for this path
+		// examine is the walk's matcher; nil examines nothing.
+		examine func(string) bool
 	}{
 		{
 			label:       "clean",
@@ -111,9 +115,31 @@ func TestWalkTolerant(t *testing.T) {
 				}}
 				return nil
 			},
+			examine:     func(rel string) bool { return rel == "a/gone" || rel == "a/bad" },
 			wantVisits:  []string{"a", "a/ok", "data", "data/f", "sub", "sub/g", "z", "z/x"},
 			wantIgnored: []string{".git", "vendor"},
 			wantSkips:   []wantSkip{{"a/bad", syscall.EIO}, {"a/gone", fs.ErrNotExist}},
+		},
+		{
+			// A plain file the matcher does not accept is never stat'ed.
+			label: "plain stat never asked",
+			setup: func(_ *testing.T, ws *Workspace, _, _ string) func(string) error {
+				ws.screenSeams = &screenSeams{statErr: answer("a/ok", syscall.EIO)}
+				return nil
+			},
+			wantVisits:  all,
+			wantIgnored: []string{".git", "vendor"},
+		},
+		{
+			// A directory is always stat'ed, whatever the matcher says.
+			label: "dir stat fails",
+			setup: func(_ *testing.T, ws *Workspace, _, _ string) func(string) error {
+				ws.screenSeams = &screenSeams{statErr: answer("data", syscall.EIO)}
+				return nil
+			},
+			wantVisits:  []string{"a", "a/bad", "a/gone", "a/ok", "sub", "sub/g", "z", "z/x"},
+			wantIgnored: []string{".git", "vendor"},
+			wantSkips:   []wantSkip{{"data", syscall.EIO}},
 		},
 		{
 			label: "subdir open denied",
@@ -174,6 +200,7 @@ func TestWalkTolerant(t *testing.T) {
 				}
 				return nil
 			},
+			examine:     func(rel string) bool { return rel == "sub/g" },
 			wantVisits:  []string{"a", "a/bad", "a/gone", "a/ok", "data", "data/f", "sub", "z", "z/x"},
 			wantIgnored: []string{".git", "vendor"},
 			wantSkips:   []wantSkip{{"sub", errFileChanged}},
@@ -296,6 +323,10 @@ func TestWalkTolerant(t *testing.T) {
 		t.Run(r.label, func(t *testing.T) {
 			ws, root, sib := tolerantFixture(t, tolerantTree, map[string]string{"other": "x\n"})
 			onIgnored := r.setup(t, ws, root, sib)
+			examine := r.examine
+			if examine == nil {
+				examine = func(string) bool { return false }
+			}
 			var visits, ignored []string
 			var skips []walkSkip
 			err := ws.walkTolerant(t.Context(), func(rel string, _ fs.DirEntry) error {
@@ -310,7 +341,7 @@ func TestWalkTolerant(t *testing.T) {
 					return onIgnored(rel)
 				}
 				return nil
-			}, func(s walkSkip) { skips = append(skips, s) })
+			}, func(s walkSkip) { skips = append(skips, s) }, examine)
 			if r.wantErr == nil && err != nil || r.wantErr != nil && !errors.Is(err, r.wantErr) {
 				t.Fatalf("%s: walk error mismatch (got nil: %t)", r.label, err == nil)
 			}
@@ -336,7 +367,7 @@ func TestWalkTolerant(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	nop := func(string, fs.DirEntry) error { return nil }
-	if err := ws.walkTolerant(ctx, func(string, fs.DirEntry) error { return nil }, nop, func(walkSkip) {}); !errors.Is(err, context.Canceled) {
+	if err := ws.walkTolerant(ctx, func(string, fs.DirEntry) error { return nil }, nop, func(walkSkip) {}, func(string) bool { return false }); !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled: error is not context.Canceled (nil: %t)", err == nil)
 	}
 
@@ -348,6 +379,145 @@ func TestWalkTolerant(t *testing.T) {
 		return nil
 	}); err != nil || !slices.Equal(visits, all) {
 		t.Fatalf("walk: visits differ (%d, want %d; error: %t)", len(visits), len(all), err != nil)
+	}
+}
+
+// walkRecord walks ws tolerantly with examine, ignoring nothing, and returns
+// the paths fn visited and the skips.
+func walkRecord(t *testing.T, label string, ws *Workspace, examine func(string) bool) ([]string, []walkSkip) {
+	t.Helper()
+	var visits []string
+	var skips []walkSkip
+	err := ws.walkTolerant(t.Context(), func(rel string, _ fs.DirEntry) error {
+		visits = append(visits, rel)
+		return nil
+	}, func(string, fs.DirEntry) error { return nil }, func(s walkSkip) { skips = append(skips, s) }, examine)
+	if err != nil {
+		failNoPath(t, label, err)
+	}
+	return visits, skips
+}
+
+// recordStats returns a statErr seam that appends each path it is asked about
+// to got and answers fail(rel); a nil fail answers nil.
+func recordStats(got *[]string, fail func(string) error) func(string) error {
+	return func(rel string) error {
+		*got = append(*got, rel)
+		if fail != nil {
+			return fail(rel)
+		}
+		return nil
+	}
+}
+
+// The listing stats directories, symbolic links, other non-regular entries
+// and every path the matcher accepts; a plain regular file is never stat'ed.
+func TestWalkTolerantExamines(t *testing.T) {
+	const label = "examines"
+	ws, root, _ := tolerantFixture(t, map[string]string{
+		"plain.txt":      "x\n",
+		"a/b/c/deep.txt": "x\n",
+		"a/.env":         "TOKEN=examine-0001-abcdef\n",
+		"a/b/.npmrc":     "_authToken=examine-0002-abcdef\n",
+		".ssh/id":        "KEY=examine-0003-abcdef\n",
+		"Sub/.Env.Local": "TOKEN=examine-0004-abcdef\n",
+		"node_modules/x": "x\n",
+		".git/config":    "[core]\n",
+	}, nil)
+	if err := os.Symlink("plain.txt", filepath.Join(root, "link")); err != nil {
+		failNoPath(t, label, err)
+	}
+	if err := unix.Mkfifo(filepath.Join(root, "pipe"), 0o600); err != nil {
+		failNoPath(t, label, err)
+	}
+	var stats []string
+	ws.screenSeams = &screenSeams{statErr: recordStats(&stats, nil)}
+	visits, skips := walkRecord(t, label, ws, interceptor.IsCredentialPath)
+	slices.Sort(stats)
+	want := []string{".git", ".ssh", ".ssh/id", "Sub", "Sub/.Env.Local", "a", "a/.env", "a/b", "a/b/.npmrc", "a/b/c", "link", "node_modules", "pipe"}
+	if !slices.Equal(stats, want) {
+		t.Fatalf("%s: stat'ed paths differ (%d, want %d)", label, len(stats), len(want))
+	}
+	if !slices.Contains(visits, "plain.txt") || !slices.Contains(visits, "a/b/c/deep.txt") {
+		t.Fatalf("%s: a plain file was not visited", label)
+	}
+	if len(skips) != 0 {
+		t.Fatalf("%s: %d skips, want 0", label, len(skips))
+	}
+}
+
+// An entry whose type the directory read did not report is stat'ed as today.
+func TestWalkTolerantUnknownType(t *testing.T) {
+	rows := []struct {
+		label     string
+		unknown   string // the path the read reports as DT_UNKNOWN
+		statErr   error  // the stat seam's answer for unknown
+		wantStat  bool   // unknown is among the stat'ed paths
+		wantVisit string // "": no visit is checked
+		wantSkip  error  // nil: no skip
+	}{
+		{label: "plain file", unknown: "plain.txt", wantStat: true, wantVisit: "plain.txt"},
+		// The name is plain, so only its unknown type forces the stat.
+		{label: "directory", unknown: "plain-dir", wantStat: true, wantVisit: "plain-dir/.env"},
+		{label: "credential gone", unknown: "a/.env", statErr: fs.ErrNotExist, wantStat: true, wantSkip: fs.ErrNotExist},
+		{label: "credential eio", unknown: "a/.env", statErr: syscall.EIO, wantStat: true, wantSkip: syscall.EIO},
+	}
+	for _, r := range rows {
+		t.Run(r.label, func(t *testing.T) {
+			ws, _, _ := tolerantFixture(t, map[string]string{
+				"plain.txt":      "x\n",
+				"plain-dir/.env": "TOKEN=unknown-0001-abcdef\n",
+				"a/.env":         "TOKEN=unknown-0002-abcdef\n",
+			}, nil)
+			var stats []string
+			ws.screenSeams = &screenSeams{
+				statErr: recordStats(&stats, answer(r.unknown, r.statErr)),
+				entryType: func(rel string, typ uint8) uint8 {
+					if rel == r.unknown {
+						return unix.DT_UNKNOWN
+					}
+					return typ
+				},
+			}
+			visits, skips := walkRecord(t, r.label, ws, interceptor.IsCredentialPath)
+			if r.wantStat && !slices.Contains(stats, r.unknown) {
+				t.Fatalf("%s: the untyped entry was not stat'ed", r.label)
+			}
+			if r.wantVisit != "" && !slices.Contains(visits, r.wantVisit) {
+				t.Fatalf("%s: the expected visit is missing", r.label)
+			}
+			if r.wantSkip == nil {
+				if len(skips) != 0 {
+					t.Fatalf("%s: %d skips, want 0", r.label, len(skips))
+				}
+				return
+			}
+			if len(skips) != 1 || skips[0].rel != r.unknown || !errors.Is(skips[0].err, r.wantSkip) {
+				t.Fatalf("%s: want one skip for the untyped entry with the seam's error (%d skips)", r.label, len(skips))
+			}
+		})
+	}
+}
+
+// On a filesystem that reports no types, every entry is stat'ed and the walk
+// visits what it visits today.
+func TestWalkTolerantAllUnknown(t *testing.T) {
+	const label = "all unknown"
+	ws, _, _ := tolerantFixture(t, tolerantTree, nil)
+	var stats []string
+	ws.screenSeams = &screenSeams{
+		statErr:   recordStats(&stats, nil),
+		entryType: func(string, uint8) uint8 { return unix.DT_UNKNOWN },
+	}
+	visits, _ := walkRecord(t, label, ws, func(string) bool { return false })
+	slices.Sort(stats)
+	wantStats := []string{".git", "a", "a/bad", "a/gone", "a/ok", "data", "data/f", "sub", "sub/g", "vendor", "z", "z/x"}
+	if !slices.Equal(stats, wantStats) {
+		t.Fatalf("%s: stat'ed paths differ (%d, want %d)", label, len(stats), len(wantStats))
+	}
+	wantVisits := []string{"a", "a/bad", "a/gone", "a/ok", "data", "data/f", "sub", "sub/g", "z", "z/x"}
+	if !slices.Equal(visits, wantVisits) {
+		t.Fatalf("%s: visits differ (%d, want %d)", label, len(visits), len(wantVisits))
 	}
 }
 

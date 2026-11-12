@@ -577,39 +577,65 @@ func (w *Workspace) readDirEntries(f *os.File, rel string) ([]fs.DirEntry, error
 	return entries, nil
 }
 
-// readDirEntriesTolerant is readDirEntries for walkTolerant. An entry whose
-// stat fails is left out and returned as a skip with that error (one
-// satisfying fs.ErrNotExist when the entry is gone), and the rest are kept. A
-// failure to read the names is a listingError.
+// dirRead reads the directory f, at the slash path rel, through the readDir
+// seam, or with sysDir when there is none.
+func (s *screenSeams) dirRead(rel string, f *os.File, emit func(name string, typ uint8)) error {
+	if s == nil || s.readDir == nil {
+		return sysDir.read(f, emit)
+	}
+	return s.readDir(rel, f, emit)
+}
+
+// readDirEntriesTolerant is readDirEntries for walkTolerant. It reads the
+// directory's records itself and takes each entry's type from that read. An
+// entry typed anything but a regular file (unknown included), or whose slash
+// path examine accepts, is stat'ed; one whose stat fails is left out and
+// returned as a skip with that error (one satisfying fs.ErrNotExist when the
+// entry is gone). Every other entry is returned unexamined: no metadata, and
+// it can never be opened. A failure to read the directory is a listingError,
+// and nothing read before it is used.
 // The listing ends with the same reachability check; skips are returned
 // rather than reported, so a directory found unreachable contributes none.
-func (w *Workspace) readDirEntriesTolerant(f *os.File, rel string) ([]fs.DirEntry, []walkSkip, error) {
+// It is the only producer of unexamined entries.
+func (w *Workspace) readDirEntriesTolerant(f *os.File, rel string, examine func(rel string) bool) ([]fs.DirEntry, []walkSkip, error) {
 	if w.beforeReadDir != nil {
 		w.beforeReadDir(rel)
 	}
+	type listedName struct {
+		name string
+		typ  uint8
+	}
+	var ls []listedName
 	err := w.screenSeams.list(filepath.ToSlash(rel))
-	var names []string
 	if err == nil {
-		names, err = f.Readdirnames(-1)
+		err = w.screenSeams.dirRead(filepath.ToSlash(rel), f, func(name string, typ uint8) { ls = append(ls, listedName{name, typ}) })
 	}
 	if err != nil {
-		return nil, nil, listingError{err}
+		return nil, nil, listingError{err} // never a partial list
 	}
-	sort.Strings(names)
-	entries := make([]fs.DirEntry, 0, len(names))
+	sort.Slice(ls, func(i, j int) bool { return ls[i].name < ls[j].name })
+	entries := make([]fs.DirEntry, 0, len(ls))
 	var skips []walkSkip
-	for _, name := range names {
-		entryRel := filepath.Join(rel, name)
-		var st unix.Stat_t
-		err := w.screenSeams.stat(filepath.ToSlash(entryRel))
-		if err == nil {
-			err = unix.Fstatat(int(f.Fd()), name, &st, unix.AT_SYMLINK_NOFOLLOW)
-		}
-		if err != nil {
-			skips = append(skips, walkSkip{rel: filepath.ToSlash(entryRel), err: err})
+	for _, l := range ls {
+		entryRel := filepath.Join(rel, l.name)
+		slash := filepath.ToSlash(entryRel)
+		typ := w.screenSeams.typ(slash, l.typ)
+		// Stat everything the directory read did not type as a regular file,
+		// unknown included, and every path the matcher accepts.
+		if typ == unix.DT_REG && !w.screenSeams.need(slash, examine(slash)) {
+			entries = append(entries, workspaceEntry{name: l.name, dir: f, unexamined: true})
 			continue
 		}
-		entries = append(entries, workspaceEntry{name: name, stat: st, dir: f})
+		var st unix.Stat_t
+		err := w.screenSeams.stat(slash)
+		if err == nil {
+			err = unix.Fstatat(int(f.Fd()), l.name, &st, unix.AT_SYMLINK_NOFOLLOW)
+		}
+		if err != nil {
+			skips = append(skips, walkSkip{rel: slash, err: err})
+			continue
+		}
+		entries = append(entries, workspaceEntry{name: l.name, stat: st, dir: f})
 	}
 	if err := w.verifyReachable(rel, f); err != nil {
 		return nil, nil, err
@@ -628,6 +654,7 @@ type walkSkip struct {
 type walkOptions struct {
 	ignored func(rel string, d fs.DirEntry) error
 	skip    func(walkSkip)
+	examine func(rel string) bool
 }
 
 // dirFailure is a failure of the directory walkDir was given, returned to
@@ -706,21 +733,29 @@ func (w *Workspace) walk(ctx context.Context, fn func(string, fs.DirEntry) error
 // its directory is listed (satisfying fs.ErrNotExist when it is gone); a
 // subdirectory that cannot be opened or changed identity since it was listed;
 // and a subdirectory whose names cannot be read (its error is a listingError)
-// or that is no longer reachable once listed. ignored and skip must be
-// non-nil.
+// or that is no longer reachable once listed. ignored, skip and examine must
+// be non-nil.
+//
+// Each directory is read once, and each entry's type is taken from that read.
+// The listing stats an entry, as today, when the read typed it anything but a
+// regular file (unknown included) or when examine accepts its workspace-relative
+// slash path; every other entry is returned unexamined, with no metadata, and
+// can never be opened. Stated limit (spec D1): a plain file replaced by a
+// directory after its directory was read is not descended, so a credential
+// file inside it goes unread with no note.
 //
 // Before it goes past a subdirectory's failure, and after every call to
 // ignored that returned nil, it checks the held parent is still reachable,
 // and returns that error instead: a failure below a root that was just
 // replaced is never only a skip.
-func (w *Workspace) walkTolerant(ctx context.Context, fn func(rel string, d fs.DirEntry) error, ignored func(rel string, d fs.DirEntry) error, skip func(walkSkip)) (resultErr error) {
+func (w *Workspace) walkTolerant(ctx context.Context, fn func(rel string, d fs.DirEntry) error, ignored func(rel string, d fs.DirEntry) error, skip func(walkSkip), examine func(rel string) bool) (resultErr error) {
 	defer func() { resultErr = w.scopedPathError(resultErr) }()
 	root, release, err := w.workspaceRoot()
 	if err != nil {
 		return anchorError(err)
 	}
 	defer release()
-	err = w.walkDir(ctx, root, "", fn, &walkOptions{ignored: ignored, skip: skip})
+	err = w.walkDir(ctx, root, "", fn, &walkOptions{ignored: ignored, skip: skip, examine: examine})
 	if df, ok := err.(dirFailure); ok {
 		return anchorError(df.err)
 	}
@@ -750,7 +785,7 @@ func (w *Workspace) walkDir(ctx context.Context, parent *os.File, base string, f
 		entries, err = w.readDirEntries(f, base)
 	} else {
 		var skips []walkSkip
-		entries, skips, err = w.readDirEntriesTolerant(f, base)
+		entries, skips, err = w.readDirEntriesTolerant(f, base, opts.examine)
 		for _, s := range skips {
 			opts.skip(s)
 		}
