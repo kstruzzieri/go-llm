@@ -173,8 +173,10 @@ type Workspace struct {
 	harnessAncestorStop  string
 	beforeHarnessReadDir func(rel string)
 	onHarnessAncestor    func(dir string)
-	// screenLimits overrides the credential screen's bounds, in tests only;
-	// each zero field takes its default.
+	// screenLimits holds the credential screen's bounds; each zero field takes
+	// its default. The budget is host-set, through SetCredentialScreenBudget or
+	// ExecToolsOptions.CredentialScreenBudget; the other bounds are overridden
+	// in tests only.
 	screenLimits screenLimits
 	// screenSeams injects failures into the credential screen's walk and
 	// reads, in tests only.
@@ -357,7 +359,10 @@ func (w *Workspace) SetScopeGuard(g ScopeGuard) { w.guard = g }
 // SetCredentialScreenBudget sets how long the credential screen may spend
 // reading this workspace before each command, from MinCredentialScreenBudget
 // to MaxCredentialScreenBudget; zero restores the default. A value outside the
-// bounds returns an error and changes nothing. A longer budget makes a large
+// bounds returns an error and changes nothing. The budget bounds the pre-run
+// walk on Linux and macOS; on other platforms there is no walk (output is
+// withheld there), so a raised budget only lengthens the tools' effect
+// timeouts. A longer budget makes a large
 // workspace usable, not fast: every command waits for the read. Like
 // SetScopeGuard this is host setup, done before any tool is planned or run;
 // it is not safe to call while one is.
