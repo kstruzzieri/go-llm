@@ -503,16 +503,18 @@ func TestBuildOutputScreenSkips(t *testing.T) {
 		want  string // the one note; "": no note at all
 		// later: a value from z/.env, which sorts after data, still comes out as M
 		later bool
+		// all: every surrogate in secrets comes out as M
+		all bool
 	}{
 		{"file denied", func(*testing.T, string) *screenSeams {
 			return &screenSeams{openErr: answer(".env", fs.ErrPermission)}
-		}, withheldNote + `unreadable: ".env")`, false},
+		}, withheldNote + `unreadable: ".env")`, false, false},
 		{"dir denied", func(*testing.T, string) *screenSeams {
 			return &screenSeams{openErr: answer("data", fs.ErrPermission)}
-		}, withheldNote + `unreadable: "data")`, false},
+		}, withheldNote + `unreadable: "data")`, false, false},
 		{"dir gone", func(*testing.T, string) *screenSeams {
 			return &screenSeams{openErr: answer("data", fs.ErrNotExist)}
-		}, changed, true},
+		}, changed, true, false},
 		{"file removed", func(t *testing.T, root string) *screenSeams {
 			return &screenSeams{openErr: func(rel string) error {
 				if rel == ".env" {
@@ -522,28 +524,28 @@ func TestBuildOutputScreenSkips(t *testing.T) {
 				}
 				return nil
 			}}
-		}, changed, true},
+		}, changed, true, false},
 		{"stat gone", func(*testing.T, string) *screenSeams {
 			return &screenSeams{statErr: answer("sub/.npmrc", fs.ErrNotExist)}
-		}, changed, true},
+		}, changed, true, false},
 		{"read eio", func(*testing.T, string) *screenSeams {
 			return &screenSeams{readFrom: failRead(".env")}
-		}, withheldNote + `unreadable: ".env")`, false},
+		}, withheldNote + `unreadable: ".env")`, false, false},
 		{"stat eio", func(*testing.T, string) *screenSeams {
 			return &screenSeams{statErr: answer("sub/.npmrc", syscall.EIO)}
-		}, withheldNote + `unreadable: "sub/.npmrc")`, false},
+		}, withheldNote + `unreadable: "sub/.npmrc")`, false, false},
 		{"list eio", func(*testing.T, string) *screenSeams {
 			return &screenSeams{listErr: answer("sub", syscall.EIO)}
-		}, withheldNote + `listing failed: "sub")`, false},
+		}, withheldNote + `listing failed: "sub")`, false, false},
 		// A plain file is never stat'ed, so its stat seam's error never shows.
 		{"plain stat eio", func(*testing.T, string) *screenSeams {
 			return &screenSeams{statErr: answer("data/a.txt", syscall.EIO)}
-		}, "", true},
+		}, "", true, true},
 		// A read error after valid records is a failed listing; the records
 		// read before it are not used.
 		{"read error subdir", func(*testing.T, string) *screenSeams {
 			return &screenSeams{readDir: failingReadDir("data")}
-		}, withheldNote + `listing failed: "data")`, false},
+		}, withheldNote + `listing failed: "data")`, false, false},
 		{"read twice", func(*testing.T, string) *screenSeams {
 			return &screenSeams{readDir: func(rel string, f *os.File, emit func(string, uint8)) error {
 				if rel != "" {
@@ -554,7 +556,7 @@ func TestBuildOutputScreenSkips(t *testing.T) {
 					emit(name, typ)
 				})
 			}}
-		}, "", true},
+		}, "", true, true},
 		// A name typed regular that is gone by the time it would be used is
 		// unexamined, and a plain name is never opened.
 		{"plain gone", func(*testing.T, string) *screenSeams {
@@ -565,7 +567,7 @@ func TestBuildOutputScreenSkips(t *testing.T) {
 				emit("ghost.txt", unix.DT_REG)
 				return nil
 			}}
-		}, "", true},
+		}, "", true, true},
 	}
 	for _, r := range rows {
 		t.Run(r.label, func(t *testing.T) {
@@ -610,6 +612,13 @@ func TestBuildOutputScreenSkips(t *testing.T) {
 				}
 			} else if out != "" {
 				t.Fatalf("%s: output delivered (len %d)", r.label, len(out))
+			}
+			if r.all {
+				for i, k := range secrets {
+					if got := screenThrough(s, k+"\n"); got != tM+"\n" {
+						t.Fatalf("%s: key %d not withheld (len %d)", r.label, i, len(got))
+					}
+				}
 			}
 		})
 	}
