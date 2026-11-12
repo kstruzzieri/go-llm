@@ -623,7 +623,7 @@ func newTaskStepRunner(root string, plan *agentflow.Plan, af afClient, orch *age
 			Tools:    tools,
 			MaxSteps: sess.maxSteps,
 			Budget:   sess.startupBudget,
-			Approver: taskApprover(approveEdits),
+			Approver: taskApprover{edits: approveEdits, notices: out},
 			Options:  sess.startupModelOptions,
 			// Rotated per step only: steps may run in parallel, so none
 			// writes the shared session.
@@ -1243,9 +1243,25 @@ func readEvidenceSidecar(path string) ([]agentflow.EvidenceEntry, error) {
 // a human", when its target is an agent instruction or harness configuration
 // file or its spelling could not be verified; task mode has no human, so it is
 // denied even with edits opted in (#725).
-type taskApprover bool
+//
+// notices receives one line per denial, naming the tool and why.
+type taskApprover struct {
+	edits   bool
+	notices io.Writer
+}
 
-var _ agent.KeyedApprover = taskApprover(false)
+var _ agent.KeyedApprover = taskApprover{}
+
+// reasonLine returns the first line of a file-tool preview when it carries
+// agenttools.HarnessReferenceReasonPrefix (#784). Approvers print it and never
+// decide on it.
+func reasonLine(preview string) (string, bool) {
+	first, _, _ := strings.Cut(preview, "\n")
+	if !strings.HasPrefix(first, agenttools.HarnessReferenceReasonPrefix) {
+		return "", false
+	}
+	return first, true
+}
 
 // Approve delegates with no key, so a file-tool call reaching the plain entry
 // point fails closed.
@@ -1254,10 +1270,18 @@ func (a taskApprover) Approve(ctx context.Context, call provider.ToolCall, previ
 	return d.Approved, err
 }
 
-// ApproveKeyed denies a harness file write and otherwise returns the opt-in.
-func (a taskApprover) ApproveKeyed(_ context.Context, call provider.ToolCall, _, key string) (agent.ApprovalDecision, error) {
+// ApproveKeyed denies a harness file write, saying why to the notices writer,
+// and otherwise returns the opt-in.
+func (a taskApprover) ApproveKeyed(_ context.Context, call provider.ToolCall, preview, key string) (agent.ApprovalDecision, error) {
 	if harnessFileCall(call.Function.Name, key) {
+		if a.notices != nil {
+			_, _ = fmt.Fprintf(a.notices, "golem: task step denied %s: harness file (%s)\n",
+				call.Function.Name, agenttools.HarnessApprovalNotice)
+			if reason, ok := reasonLine(preview); ok {
+				_, _ = fmt.Fprintln(a.notices, "golem: "+reason)
+			}
+		}
 		return agent.ApprovalDecision{}, nil
 	}
-	return agent.ApprovalDecision{Approved: bool(a)}, nil
+	return agent.ApprovalDecision{Approved: a.edits}, nil
 }

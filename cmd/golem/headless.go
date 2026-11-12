@@ -234,10 +234,10 @@ func (a *headlessApprover) Approve(ctx context.Context, call provider.ToolCall, 
 }
 
 // ApproveKeyed approves iff the exact tool name was named by -allow-tool and
-// the call is not a harness file write (#725), which it denies with one line
-// to the notices writer. A canceled context denies and returns the error so
+// the call is not a harness file write (#725, #784), which it denies with one
+// line to the notices writer, plus the preview's reason line when it has one. A canceled context denies and returns the error so
 // the run aborts, matching the interactive approver's cancellation semantics.
-func (a *headlessApprover) ApproveKeyed(ctx context.Context, call provider.ToolCall, _, key string) (agent.ApprovalDecision, error) {
+func (a *headlessApprover) ApproveKeyed(ctx context.Context, call provider.ToolCall, preview, key string) (agent.ApprovalDecision, error) {
 	if err := ctx.Err(); err != nil {
 		return agent.ApprovalDecision{}, err
 	}
@@ -245,6 +245,9 @@ func (a *headlessApprover) ApproveKeyed(ctx context.Context, call provider.ToolC
 		if a.notices != nil {
 			_, _ = fmt.Fprintf(a.notices, "golem: denied %s: harness file, -allow-tool does not cover it (%s)\n",
 				call.Function.Name, agenttools.HarnessApprovalNotice)
+			if reason, ok := reasonLine(preview); ok {
+				_, _ = fmt.Fprintln(a.notices, "golem: "+reason)
+			}
 		}
 		return agent.ApprovalDecision{}, nil
 	}

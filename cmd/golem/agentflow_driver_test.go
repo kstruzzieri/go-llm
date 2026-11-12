@@ -1697,10 +1697,10 @@ func TestStepGoal_LegacyPlanPreservesExactInstructionBytes(t *testing.T) {
 }
 
 func TestTaskApprover_ApprovesWhenEnabled(t *testing.T) {
-	if ok, err := taskApprover(true).Approve(context.Background(), provider.ToolCall{}, ""); !ok || err != nil {
+	if ok, err := (taskApprover{edits: true}).Approve(context.Background(), provider.ToolCall{}, ""); !ok || err != nil {
 		t.Fatalf("enabled: ok=%v err=%v", ok, err)
 	}
-	if ok, err := taskApprover(false).Approve(context.Background(), provider.ToolCall{}, ""); ok || err != nil {
+	if ok, err := (taskApprover{edits: false}).Approve(context.Background(), provider.ToolCall{}, ""); ok || err != nil {
 		t.Fatalf("disabled: ok=%v err=%v", ok, err)
 	}
 }

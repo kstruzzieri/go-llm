@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 
@@ -32,13 +33,17 @@ func repositoryPrefix(canonRoot string) (prefix, boundary string) {
 }
 
 // fileToolApprovalKey is the ApprovalKey write_file and edit_file plan for
-// p: "" (ungrantable, always prompt) when the requested or the resolved
-// spelling, below the repository prefix, is an agent instruction or harness
-// file, or when the spelling cannot be verified; WriteClassApprovalKey
-// otherwise (#725).
-func (w *Workspace) fileToolApprovalKey(p string) string {
+// p, and why it is "" when #784 decides it. The key is "" (ungrantable,
+// always prompt), with no reason, when the requested or the resolved spelling,
+// below the repository prefix, is an agent instruction or harness file, or
+// when the spelling cannot be verified (#725). Otherwise it is "" when a
+// harness file loads, runs or links to either spelling, or when what they
+// reference could not be checked, with the reason; the reference set is
+// built afresh on every call (#784, spec D1). Anything else plans
+// WriteClassApprovalKey.
+func (w *Workspace) fileToolApprovalKey(ctx context.Context, p string) (key, reason string) {
 	if w.harnessPrefixUnverified || interceptor.IsHarnessPath(filepath.Join(w.harnessPrefix, p)) {
-		return ""
+		return "", ""
 	}
 	resolve := w.resolvedWriteRel
 	if w.resolveForKey != nil {
@@ -46,7 +51,16 @@ func (w *Workspace) fileToolApprovalKey(p string) string {
 	}
 	rel, verified, err := resolve(p)
 	if err != nil || !verified || interceptor.IsHarnessPath(filepath.Join(w.harnessPrefix, rel)) {
-		return "" // unknown or unverified spelling: prompt (#725)
+		return "", "" // unknown or unverified spelling: prompt (#725)
 	}
-	return WriteClassApprovalKey
+	refs := w.harnessReferences(ctx)
+	if !refs.complete {
+		return "", "could not check what harness files reference: " + refs.cause
+	}
+	for _, s := range []string{p, rel} {
+		if ok, why := refs.covers(s); ok {
+			return "", why
+		}
+	}
+	return WriteClassApprovalKey, ""
 }

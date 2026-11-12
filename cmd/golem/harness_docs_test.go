@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/kstruzzieri/go-llm/agent/interceptor"
+	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
 )
 
 // docMentions reports whether the lower-cased doc names entry as a whole
@@ -65,6 +66,42 @@ func TestHarnessPathsDocumented(t *testing.T) {
 		for _, e := range interceptor.HarnessPaths() {
 			if !docMentions(span, e) {
 				t.Errorf("%s: harness list does not mention %q", sp.file, e)
+			}
+		}
+	}
+}
+
+// commandFileSpans holds, per doc, the markers around its command-file span:
+// the configuration files whose commands the reference reader reads (#784).
+// The span is separate from harnessSpans because the docs name .mcp.json and
+// .vscode/settings.json in the harness list, which would hide a dropped entry.
+var commandFileSpans = []struct{ file, start, end string }{
+	{"doc.go", "golem reads commands from these files:", "no other file is read for commands."},
+	{"../../docs/golem.md", "<!-- command-file list -->", "<!-- end command-file list -->"},
+}
+
+// TestHarnessCommandFilesDocumented fails when a file the command reader
+// reads is missing from the command-file span of the package doc or the guide.
+func TestHarnessCommandFilesDocumented(t *testing.T) {
+	for _, sp := range commandFileSpans {
+		b, err := os.ReadFile(sp.file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Join wrapped comment lines so a marker may span a line break.
+		text := strings.Join(strings.Fields(strings.ReplaceAll(strings.ToLower(string(b)), "\n//", " ")), " ")
+		i := strings.Index(text, sp.start)
+		if i < 0 {
+			t.Fatalf("%s: start marker %q not found", sp.file, sp.start)
+		}
+		j := strings.Index(text[i:], sp.end)
+		if j < 0 {
+			t.Fatalf("%s: end marker %q not found after %q", sp.file, sp.end, sp.start)
+		}
+		span := text[i : i+j]
+		for _, e := range agenttools.HarnessCommandFiles() {
+			if !docMentions(span, e) {
+				t.Errorf("%s: command-file list does not mention %q", sp.file, e)
 			}
 		}
 	}

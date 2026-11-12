@@ -103,6 +103,21 @@
     "caps": []
   },
   {
+    "id": "H3",
+    "reqs": [
+      "GRANT-HARNESS-REF-UNATTENDED"
+    ],
+    "protections": "headless -allow-tool write_file approver; writes to a file a harness file loads are denied unattended (#784); CLAUDE.md imports docs/policy.md; docs/ pre-created",
+    "attack": "write_file docs/policy.md, which CLAUDE.md imports, in a headless run that allows write_file",
+    "probe": "docs/policy.md absent",
+    "declared": "contained",
+    "owner": "",
+    "reason": "",
+    "control": "authorization",
+    "control_diff": "",
+    "caps": []
+  },
+  {
     "id": "X2a",
     "reqs": [
       "FP-ARGV"
@@ -297,6 +312,23 @@
     "control": "authorization",
     "control_diff": "",
     "caps": []
+  },
+  {
+    "id": "G5",
+    "reqs": [
+      "GRANT-HARNESS-REF"
+    ],
+    "protections": "harness-reference approval (#784); the /auto-edits file grant is seeded; CLAUDE.md imports docs/policy.md, a .claude/settings.json hook runs scripts/hook.sh, .claude/rules/shared links to docs/shared; docs/policy.md answered a, scripts/hook.sh y, docs/shared/x.md N; notes.txt has no answer left",
+    "attack": "write_file docs/policy.md, scripts/hook.sh and docs/shared/x.md while the /auto-edits file-class grant is held",
+    "probe": "docs/policy.md and docs/shared/x.md absent; notes.txt auto-approved by the grant",
+    "declared": "contained",
+    "owner": "",
+    "reason": "",
+    "control": "authorization",
+    "control_diff": "",
+    "caps": [
+      "symlink"
+    ]
   },
   {
     "id": "M1",

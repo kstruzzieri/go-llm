@@ -6,4 +6,4 @@ The set has 28 entries: `AGENTS.md`, `AGENTS.override.md`, `CLAUDE.md`, `CLAUDE.
 
 Library hosts: `agent/tools` plans these writes with an empty approval key, and `agent/interceptor` exports `IsHarnessPath` and `HarnessPaths`. A host that uses a plain `agent.Approver` never receives the key.
 
-Not covered: writes made by commands, files that a harness file imports or runs, symlinks inside harness folders that point at ordinary folders (#784), and a workspace rooted in a git submodule or nested repository inside a harness folder.
+Not covered: writes made by commands, and a workspace rooted in a git submodule or nested repository inside a harness folder.

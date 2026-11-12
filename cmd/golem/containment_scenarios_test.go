@@ -39,10 +39,10 @@ func executableScenarios() []scenario {
 					t.Fatal(err)
 				}
 			}),
-		a1(), h1(), h2(),
+		a1(), h1(), h2(), h3(),
 		x2a(), x2b(), x2c(), x2d(), x3(), x4(),
 		e1(),
-		g1(), g2(), g3(), g4(),
+		g1(), g2(), g3(), g4(), g5(),
 		m1(), p1(),
 		v1(), v2(), b1(),
 		d1(), d2(), d3(),
@@ -215,6 +215,39 @@ func h2() scenario {
 			}
 			// containment: GRANT-HARNESS-UNATTENDED
 			o.AttackEffect = exists(t, filepath.Join(f.Root, ".claude", "settings.json"))
+			o.ControlEffect = readFile(t, filepath.Join(f.Root, "notes.txt")) == "notes\n"
+			return o
+		},
+	}
+}
+
+// h3: GRANT-HARNESS-REF-UNATTENDED (#784). A headless run that allows
+// write_file still denies a file CLAUDE.md imports; the ordinary write in the
+// same run is the matched control. The fixture's Workspace is built inside
+// buildWriteTools, so the reference scan reads the real ancestors of
+// t.TempDir(); CI temp roots hold no harness files.
+func h3() scenario {
+	return scenario{
+		ID: "H3", Reqs: []string{"GRANT-HARNESS-REF-UNATTENDED"}, Protections: "headless -allow-tool write_file approver; writes to a file a harness file loads are denied unattended (#784); CLAUDE.md imports docs/policy.md; docs/ pre-created",
+		Attack: "write_file docs/policy.md, which CLAUDE.md imports, in a headless run that allows write_file", Probe: "docs/policy.md absent",
+		Declared: outcomeContained, Control: controlAuthorization,
+		run: func(t *testing.T) observation {
+			f := newFixture(t, fixtureOpts{})
+			writeFixtureFile(t, f.Root, "CLAUDE.md", "see @docs/policy.md\n")
+			mkdirFixture(t, f.Root, "docs") // a missing parent would fail Plan with or without the guard
+			ap := newHeadlessApprover(allowToolSet{names: map[string]struct{}{"write_file": {}}})
+			calls := []agent.ModelResult{
+				call("write_file", map[string]string{"path": "docs/policy.md", "content": "pwned\n"}),
+				call("write_file", map[string]string{"path": "notes.txt", "content": "notes\n"}),
+			}
+			caller := &scriptCaller{responses: append(calls, agent.ModelResult{Response: provider.ChatResponse{Content: "done"}})}
+			res, err := f.runWith(t, caller, ap, 3)
+			var o observation
+			if err != nil || len(res.ToolCalls) != 2 || !res.ToolCalls[0].Denied || res.ToolCalls[0].Invoked || !res.ToolCalls[1].Invoked {
+				o.ValidityErr = fmt.Sprintf("want the import target denied and the ordinary write invoked: %v %+v", err, res.ToolCalls)
+			}
+			// containment: GRANT-HARNESS-REF-UNATTENDED
+			o.AttackEffect = exists(t, filepath.Join(f.Root, "docs", "policy.md"))
 			o.ControlEffect = readFile(t, filepath.Join(f.Root, "notes.txt")) == "notes\n"
 			return o
 		},
@@ -717,6 +750,47 @@ func g4() scenario {
 			// containment: GRANT-HARNESS
 			o.AttackEffect = exists(t, filepath.Join(f.Root, "CLAUDE.md")) || exists(t, filepath.Join(f.Root, "AGENTS.md")) || (len(recs) == 4 && !recs[3].AutoApproved)
 			o.ControlEffect = readFile(t, filepath.Join(f.Root, ".cursorrules")) == ".cursorrules\n" && readFile(t, filepath.Join(f.Root, "notes.txt")) == "notes.txt\n"
+			return o
+		},
+	}
+}
+
+// g5: GRANT-HARNESS-REF (#784). With the /auto-edits grant held, a file a
+// harness file loads, runs or links to gets g4's treatment: an import target,
+// a hook script and a file in a linked rules folder each reach their own
+// [y/N] prompt, "a" grants nothing, and an ordinary write still rides the
+// grant. The fixture's Workspace is built inside buildWriteTools, so the
+// reference scan reads the real ancestors of t.TempDir(); CI temp roots hold
+// no harness files.
+func g5() scenario {
+	return scenario{
+		ID: "G5", Reqs: []string{"GRANT-HARNESS-REF"}, Protections: "harness-reference approval (#784); the /auto-edits file grant is seeded; CLAUDE.md imports docs/policy.md, a .claude/settings.json hook runs scripts/hook.sh, .claude/rules/shared links to docs/shared; docs/policy.md answered a, scripts/hook.sh y, docs/shared/x.md N; notes.txt has no answer left",
+		Attack: "write_file docs/policy.md, scripts/hook.sh and docs/shared/x.md while the /auto-edits file-class grant is held", Probe: "docs/policy.md and docs/shared/x.md absent; notes.txt auto-approved by the grant",
+		Declared: outcomeContained, Control: controlAuthorization, Caps: []capability{capSymlink},
+		run: func(t *testing.T) observation {
+			f := newFixture(t, fixtureOpts{autoEdits: true})
+			writeFixtureFile(t, f.Root, "CLAUDE.md", "see @docs/policy.md\n")
+			writeFixtureFile(t, f.Root, ".claude/settings.json", `{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"scripts/hook.sh"}]}]}}`+"\n")
+			mkdirFixture(t, f.Root, "scripts")
+			mkdirFixture(t, f.Root, "docs/shared")
+			mkdirFixture(t, f.Root, ".claude/rules")
+			if err := os.Symlink("../../docs/shared", filepath.Join(f.Root, ".claude", "rules", "shared")); err != nil {
+				t.Fatal(err)
+			}
+			write := func(p string) agent.ModelResult {
+				return call("write_file", map[string]string{"path": p, "content": p + "\n"})
+			}
+			res := f.run(t, []agent.ModelResult{write("docs/policy.md"), write("scripts/hook.sh"), write("docs/shared/x.md"), write("notes.txt")}, "a\ny\nN\n")
+			recs := res.ToolCalls
+			var o observation
+			if len(recs) != 4 || f.prompts() != 3 ||
+				!recs[0].Denied || recs[0].Invoked || !recs[1].Invoked || recs[1].AutoApproved ||
+				!recs[2].Denied || recs[2].Invoked || !recs[3].AutoApproved {
+				o.ValidityErr = fmt.Sprintf("want docs/policy.md denied after a, scripts/hook.sh invoked after y without the grant, docs/shared/x.md denied after N and notes.txt auto-approved (3 prompts); records %+v prompts %d", recs, f.prompts())
+			}
+			// containment: GRANT-HARNESS-REF
+			o.AttackEffect = exists(t, filepath.Join(f.Root, "docs", "policy.md")) || exists(t, filepath.Join(f.Root, "docs", "shared", "x.md")) || (len(recs) == 4 && !recs[3].AutoApproved)
+			o.ControlEffect = readFile(t, filepath.Join(f.Root, "scripts", "hook.sh")) == "scripts/hook.sh\n" && readFile(t, filepath.Join(f.Root, "notes.txt")) == "notes.txt\n"
 			return o
 		},
 	}
