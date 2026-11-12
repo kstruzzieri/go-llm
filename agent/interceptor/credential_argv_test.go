@@ -74,23 +74,26 @@ func TestWordNamesCredentialPath(t *testing.T) {
 	}
 }
 
+// gitConfigPathRows are the TestIsGitConfigPath rows, shared with the matcher
+// oracle test so the two cannot drift.
+var gitConfigPathRows = []struct {
+	label string
+	in    string
+	want  bool
+}{
+	{"git config", ".git/config", true},
+	{"upper git", "sub/.GIT/config", true},
+	{"zero width git", ".gi\u200dt/config", true},
+	{"submodule config", ".git/modules/x/config", true},
+	{"hooks", ".git/hooks/x", false},
+	{"bare config", "config", false},
+	{"github dir", ".github/config", false},
+	{"env", ".env", false},
+}
+
 func TestIsGitConfigPath(t *testing.T) {
 	// containment: CMP-EXEC-CREDENTIAL-OUTPUT
-	rows := []struct {
-		label string
-		in    string
-		want  bool
-	}{
-		{"git config", ".git/config", true},
-		{"upper git", "sub/.GIT/config", true},
-		{"zero width git", ".gi\u200dt/config", true},
-		{"submodule config", ".git/modules/x/config", true},
-		{"hooks", ".git/hooks/x", false},
-		{"bare config", "config", false},
-		{"github dir", ".github/config", false},
-		{"env", ".env", false},
-	}
-	for _, r := range rows {
+	for _, r := range gitConfigPathRows {
 		t.Run(r.label, func(t *testing.T) {
 			if got := IsGitConfigPath(r.in); got != r.want {
 				t.Errorf("IsGitConfigPath = %v, want %v", got, r.want)
