@@ -409,6 +409,12 @@ type workspaceEntry struct {
 	name string
 	stat unix.Stat_t
 	dir  *os.File // enumerated directory; valid while the enumerator holds it open
+	// unexamined is true when the entry was listed without metadata (#789):
+	// stat is then meaningless and the entry can never be opened. The zero
+	// value means examined, so the three other producers of workspaceEntry
+	// (the strict listing, the screen's config entry, the mutation walk) leave
+	// it unset.
+	unexamined bool
 }
 
 // openRegular opens the enumerated entry from its pinned directory descriptor.
@@ -417,6 +423,9 @@ type workspaceEntry struct {
 // was consulted for this entry by the walk; identity is re-checked on the
 // opened descriptor exactly as openReadMode does.
 func (e workspaceEntry) openRegular() (*os.File, error) {
+	if e.unexamined {
+		return nil, errWalkEntryUnexamined
+	}
 	if e.stat.Mode&unix.S_IFMT != unix.S_IFREG {
 		return nil, errNotRegular
 	}
@@ -489,13 +498,18 @@ func (w *Workspace) openWalked(rel string, d fs.DirEntry) (*os.File, error) {
 	return f, nil
 }
 
-func (e workspaceEntry) Name() string               { return e.name }
-func (e workspaceEntry) Size() int64                { return e.stat.Size }
-func (e workspaceEntry) ModTime() time.Time         { return time.Unix(e.stat.Mtim.Sec, e.stat.Mtim.Nsec) }
-func (e workspaceEntry) Sys() any                   { return nil }
-func (e workspaceEntry) IsDir() bool                { return e.Mode().IsDir() }
-func (e workspaceEntry) Type() fs.FileMode          { return e.Mode().Type() }
-func (e workspaceEntry) Info() (fs.FileInfo, error) { return e, nil }
+func (e workspaceEntry) Name() string       { return e.name }
+func (e workspaceEntry) Size() int64        { return e.stat.Size }
+func (e workspaceEntry) ModTime() time.Time { return time.Unix(e.stat.Mtim.Sec, e.stat.Mtim.Nsec) }
+func (e workspaceEntry) Sys() any           { return nil }
+func (e workspaceEntry) IsDir() bool        { return e.Mode().IsDir() }
+func (e workspaceEntry) Type() fs.FileMode  { return e.Mode().Type() }
+func (e workspaceEntry) Info() (fs.FileInfo, error) {
+	if e.unexamined {
+		return nil, errWalkEntryUnexamined
+	}
+	return e, nil
+}
 func (e workspaceEntry) Mode() fs.FileMode {
 	mode := fs.FileMode(e.stat.Mode & 0777)
 	switch e.stat.Mode & unix.S_IFMT {

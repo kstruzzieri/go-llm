@@ -12,6 +12,8 @@ import (
 	"slices"
 	"syscall"
 	"testing"
+
+	"golang.org/x/sys/unix"
 )
 
 // tolerantFixture writes files under a fresh workspace root and sibFiles under
@@ -371,5 +373,152 @@ func TestWalkUnchangedByTolerantMode(t *testing.T) {
 	res, err := NewSearch(setup(t)).Invoke(t.Context(), json.RawMessage(`{"pattern":"needle"}`))
 	if err != nil || !res.IsError || res.Content != "path changed during access" {
 		t.Fatalf("search: want the changed-path tool error (is error: %t, invoke error: %t)", res.IsError, err != nil)
+	}
+}
+
+// openHeld opens dir and closes it when the test ends.
+func openHeld(t *testing.T, label, dir string) *os.File {
+	t.Helper()
+	f, err := os.Open(dir)
+	if err != nil {
+		failNoPath(t, label, err)
+	}
+	t.Cleanup(func() { _ = f.Close() })
+	return f
+}
+
+// examinedEntry builds an entry for name the way the listing does: a real
+// Fstatat that does not follow symbolic links.
+func examinedEntry(t *testing.T, label string, dir *os.File, name string) workspaceEntry {
+	t.Helper()
+	var st unix.Stat_t
+	if err := unix.Fstatat(int(dir.Fd()), name, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		failNoPath(t, label, err)
+	}
+	return workspaceEntry{name: name, stat: st, dir: dir}
+}
+
+func TestWorkspaceEntryUnexamined(t *testing.T) {
+	const label = "unexamined entry"
+	root := t.TempDir()
+	writeTree(t, root, map[string]string{
+		".env":      "TOKEN=surrogate-0001-abcdef\n",
+		"plain.txt": "PLAIN=surrogate-0002-ghijkl\n",
+	})
+	dir := openHeld(t, label, root)
+
+	e := workspaceEntry{name: ".env", dir: dir, unexamined: true}
+	f, err := e.openRegular()
+	if !errors.Is(err, errWalkEntryUnexamined) || f != nil {
+		t.Fatalf("%s: openRegular = (%v, %v), want (nil, sentinel)", label, f, err)
+	}
+	info, err := e.Info()
+	if !errors.Is(err, errWalkEntryUnexamined) || info != nil {
+		t.Fatalf("%s: Info = (%v, %v), want (nil, sentinel)", label, info, err)
+	}
+	if e.IsDir() {
+		t.Fatalf("%s: IsDir is true", label)
+	}
+	if e.Type() != 0 {
+		t.Fatalf("%s: Type = %v, want 0", label, e.Type())
+	}
+
+	ok, err := examinedEntry(t, label, dir, "plain.txt").openRegular()
+	if err != nil {
+		failNoPath(t, "examined entry", err)
+	}
+	defer func() { _ = ok.Close() }()
+	body := make([]byte, 64)
+	n, _ := ok.Read(body)
+	if string(body[:n]) != "PLAIN=surrogate-0002-ghijkl\n" {
+		t.Fatalf("examined entry: content differs from the fixture")
+	}
+}
+
+func TestOpenScreenedUnexamined(t *testing.T) {
+	const env = "TOKEN=surrogate-0003-mnopqr\n"
+	rows := []struct {
+		label      string
+		seam       func(t *testing.T, root, sib string) func(string) error
+		unexamined bool
+		wantErr    error // errors.Is target; nil: success
+		notErr     error // errors.Is must be false
+	}{
+		{label: "refused", unexamined: true, wantErr: errWalkEntryUnexamined},
+		{
+			label: "seam error ignored", unexamined: true,
+			seam: func(t *testing.T, root, sib string) func(string) error {
+				return answer("sub/.env", fs.ErrPermission)
+			},
+			wantErr: errWalkEntryUnexamined, notErr: fs.ErrPermission,
+		},
+		{
+			label: "parent moved", unexamined: true,
+			seam: func(t *testing.T, root, sib string) func(string) error {
+				return func(rel string) error {
+					if rel == "sub/.env" {
+						if err := os.Rename(filepath.Join(root, "sub"), filepath.Join(root, "sub-away")); err != nil {
+							failNoPath(t, "parent moved", err)
+						}
+					}
+					return nil
+				}
+			},
+			wantErr: errWalkEntryUnexamined, notErr: errFileChanged,
+		},
+		{
+			label: "root swapped", unexamined: true,
+			seam: func(t *testing.T, root, sib string) func(string) error {
+				return func(rel string) error {
+					if rel == "sub/.env" {
+						swapRoot(t, root, sib)
+					}
+					return nil
+				}
+			},
+			wantErr: ErrRootReplaced,
+		},
+		{
+			label: "examined seam error",
+			seam: func(t *testing.T, root, sib string) func(string) error {
+				return answer("sub/.env", fs.ErrPermission)
+			},
+			wantErr: fs.ErrPermission,
+		},
+		{label: "examined"},
+	}
+	for _, r := range rows {
+		t.Run(r.label, func(t *testing.T) {
+			ws, root, sib := tolerantFixture(t, map[string]string{"sub/.env": env}, map[string]string{"sub/.env": env})
+			dir := openHeld(t, r.label, filepath.Join(root, "sub"))
+			e := workspaceEntry{name: ".env", dir: dir, unexamined: true}
+			if !r.unexamined {
+				e = examinedEntry(t, r.label, dir, ".env")
+			}
+			if r.seam != nil {
+				ws.screenSeams = &screenSeams{openErr: r.seam(t, root, sib)}
+			}
+			f, err := ws.openScreened("sub/.env", e)
+			if f != nil {
+				defer func() { _ = f.Close() }()
+			}
+			if r.wantErr == nil {
+				if err != nil || f == nil {
+					t.Fatalf("%s: open failed (%T)", r.label, err)
+				}
+				body := make([]byte, 64)
+				n, _ := f.Read(body)
+				if string(body[:n]) != env {
+					t.Fatalf("%s: content differs from the fixture", r.label)
+				}
+				return
+			}
+			if !errors.Is(err, r.wantErr) || f != nil {
+				t.Fatalf("%s: got (file=%v, %T), want the expected error and no file", r.label, f != nil, err)
+			}
+			if r.notErr != nil && errors.Is(err, r.notErr) {
+				t.Fatalf("%s: error is the wrong kind (%T)", r.label, err)
+			}
+		})
 	}
 }
