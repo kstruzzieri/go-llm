@@ -60,6 +60,11 @@ var (
 	// could not parse (#789). The listing fails as a whole, never partially.
 	// Only the Unix backend raises it; it lives here beside errWalkEntryUnheld.
 	errBadDirent = errors.New("tools: directory record does not parse")
+	// errWalkEntryUnexamined reports a walk entry listed without metadata
+	// (#789). Such an entry is never opened: it is none of the errors the
+	// credential screen treats leniently, so trying to open one withholds
+	// output. Only the Unix backend raises it.
+	errWalkEntryUnexamined = errors.New("tools: walk entry was listed without metadata")
 	// errAnchorUnreachable marks a reachability lookup (#613) that failed on
 	// the way to the workspace's own root for a reason other than a changed
 	// path, such as lost permission above the root. It wraps the cause, which

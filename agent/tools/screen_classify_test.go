@@ -28,6 +28,7 @@ func TestClassifySkip(t *testing.T) {
 		{"eperm", syscall.EPERM, skipWithhold},
 		{"eio", syscall.EIO, skipWithhold},
 		{"bare", errors.New("boom"), skipWithhold},
+		{"unexamined", errWalkEntryUnexamined, skipWithhold},
 	}
 	for _, r := range rows {
 		t.Run(r.label, func(t *testing.T) {
@@ -35,5 +36,15 @@ func TestClassifySkip(t *testing.T) {
 				t.Fatalf("%s: classifySkip = %d, want %d", r.label, got, r.want)
 			}
 		})
+	}
+	for label, lenient := range map[string]error{
+		"not regular":  errNotRegular,
+		"file changed": errFileChanged,
+		"not exist":    fs.ErrNotExist,
+		"symlink":      errSymlink,
+	} {
+		if errors.Is(errWalkEntryUnexamined, lenient) {
+			t.Fatalf("%s: the sentinel matches a lenient error", label)
+		}
 	}
 }
