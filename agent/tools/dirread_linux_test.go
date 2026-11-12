@@ -18,6 +18,26 @@ type getdentsStep struct {
 	err     error
 }
 
+// TestDirReadReusesBuffer: a read allocates no 64 KiB buffer of its own; a
+// fresh one per directory cost 2.54 GB per walk of a 355,611-entry tree (#789).
+func TestDirReadReusesBuffer(t *testing.T) {
+	f, err := os.Open(t.TempDir())
+	if err != nil {
+		failNoPath(t, "reuse", err)
+	}
+	defer func() { _ = f.Close() }()
+	s := dirSys{getdents: func(int, []byte) (int, error) { return 0, nil }}
+	emit := func(string, uint8) {}
+	allocs := testing.AllocsPerRun(200, func() {
+		if err := s.read(f, emit); err != nil {
+			t.Fatalf("reuse: %v", err)
+		}
+	})
+	if allocs >= 1 {
+		t.Fatalf("reuse: %.1f allocations per read, want under 1", allocs)
+	}
+}
+
 // TestDirReadSeams drives the Linux read through a scripted getdents.
 func TestDirReadSeams(t *testing.T) {
 	rec := func(name string) []byte { return direntBytes(1, unix.DT_REG, name, 2) }
