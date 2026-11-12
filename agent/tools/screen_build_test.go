@@ -51,6 +51,18 @@ func failRead(want string) func(string, io.Reader) io.Reader {
 	}
 }
 
+// failingReadDir is a readDir seam whose read of dir emits .env, typed
+// regular, and then fails with EIO; every other directory is read for real.
+func failingReadDir(dir string) func(string, *os.File, func(string, uint8)) error {
+	return func(rel string, f *os.File, emit func(string, uint8)) error {
+		if rel != dir {
+			return sysDir.read(f, emit)
+		}
+		emit(".env", unix.DT_REG)
+		return syscall.EIO
+	}
+}
+
 const withheldNote = "credential screen: output withheld; credential files could not be read completely ("
 
 func TestBuildOutputScreenKeys(t *testing.T) {
@@ -63,9 +75,19 @@ func TestBuildOutputScreenKeys(t *testing.T) {
 		"vendor/x/.env":    "TOKEN=vendor-0005-abcdef\n",
 		".git-credentials": "https://user-0006:pass-0006-abcdef@example.invalid\n",
 	}, nil)
+	var stats []string
+	ws.screenSeams = &screenSeams{statErr: recordStats(&stats, nil)}
 	s := mustBuild(t, "keys", ws)
 	if s.notes() != nil {
 		t.Fatalf("keys: unexpected notes (%d)", len(s.notes()))
+	}
+	// .env.example is a plain regular file and is never stat'ed;
+	// vendor/x/.env is under an ignored directory and is never listed;
+	// .git/config is openGitConfig's stat.
+	slices.Sort(stats)
+	wantStats := []string{".env", ".git", ".git-credentials", ".git/config", "sub", "sub/.npmrc", "vendor"}
+	if !slices.Equal(stats, wantStats) {
+		t.Fatalf("keys: stat'ed paths differ (%d, want %d)", len(stats), len(wantStats))
 	}
 	rows := []struct{ label, in, want string }{
 		{"env", "TOKEN=env-0001-abcdef\n", tM + "\n"},
@@ -82,6 +104,140 @@ func TestBuildOutputScreenKeys(t *testing.T) {
 		if got := screenThrough(s, r.in); got != r.want {
 			t.Errorf("%s: output differs (len %d, want %d)", r.label, len(got), len(r.want))
 		}
+	}
+}
+
+// A directory whose type the read did not report is stat'ed and descended,
+// and the credential file inside it is keyed.
+func TestBuildOutputScreenUnknownType(t *testing.T) {
+	const label = "unknown type"
+	ws, _, _ := tolerantFixture(t, map[string]string{"plain-dir/.env": "TOKEN=unknown-0010-abcdef\n"}, nil)
+	ws.screenSeams = &screenSeams{entryType: func(rel string, typ uint8) uint8 {
+		if rel == "plain-dir" {
+			return unix.DT_UNKNOWN
+		}
+		return typ
+	}}
+	s := mustBuild(t, label, ws)
+	if s.notes() != nil {
+		t.Fatalf("%s: unexpected notes (%d)", label, len(s.notes()))
+	}
+	if got := screenThrough(s, "unknown-0010-abcdef\n"); got != tM+"\n" {
+		t.Fatalf("%s: value not withheld (len %d)", label, len(got))
+	}
+}
+
+// A name the directory read typed regular is not descended, even when it is
+// a directory by the time the walk reaches it. These rows pin a stated limit
+// (spec D1), not a guarantee.
+func TestBuildOutputScreenStaleType(t *testing.T) {
+	t.Run("typed regular", func(t *testing.T) {
+		const label = "typed regular"
+		ws, _, _ := tolerantFixture(t, map[string]string{"z/.env": "TOKEN=stale-0001-abcdef\n"}, nil)
+		ws.screenSeams = &screenSeams{entryType: func(rel string, typ uint8) uint8 {
+			if rel == "z" {
+				return unix.DT_REG
+			}
+			return typ
+		}}
+		s := mustBuild(t, label, ws)
+		if s.notes() != nil {
+			t.Fatalf("%s: unexpected notes (%d)", label, len(s.notes()))
+		}
+		if got := screenThrough(s, "stale-0001-abcdef\n"); got != "stale-0001-abcdef\n" {
+			t.Fatalf("%s: output changed (len %d)", label, len(got))
+		}
+	})
+	t.Run("replaced", func(t *testing.T) {
+		// z.txt is replaced by a directory holding a credential file after
+		// the root was read and before z.txt is reached. The code at
+		// 23d40b33 stats z.txt when it reaches it, descends that directory
+		// and keys the file; this row pins the stated limit of spec D1, not
+		// a guarantee.
+		const label = "replaced"
+		ws, root, sib := tolerantFixture(t, map[string]string{
+			".env":  "TOKEN=stale-0002-abcdef\n",
+			"z.txt": "x\n",
+		}, map[string]string{".env": "TOKEN=stale-0003-abcdef\n"})
+		ws.screenSeams = &screenSeams{statErr: func(rel string) error {
+			if rel == ".env" {
+				if err := os.Rename(filepath.Join(root, "z.txt"), root+"-z-away"); err != nil {
+					failNoPath(t, label, err)
+				}
+				if err := os.Rename(sib, filepath.Join(root, "z.txt")); err != nil {
+					failNoPath(t, label, err)
+				}
+			}
+			return nil
+		}}
+		s := mustBuild(t, label, ws)
+		if s.notes() != nil {
+			t.Fatalf("%s: unexpected notes (%d)", label, len(s.notes()))
+		}
+		if got := screenThrough(s, "stale-0003-abcdef\n"); got != "stale-0003-abcdef\n" {
+			t.Fatalf("%s: output changed (len %d)", label, len(got))
+		}
+	})
+}
+
+// A credential file the listing returned unexamined is never read: the
+// output is withheld with a cause that names it, or the command is not run.
+func TestBuildOutputScreenUnexamined(t *testing.T) {
+	const secret = "unexamined-0001-abcdef"
+	rows := []struct {
+		label   string
+		act     func(t *testing.T, root, sib string) // run when sub/.env is about to be opened
+		wantErr error                                // non-nil: the build fails with it
+	}{
+		{label: "withheld"},
+		{label: "parent moved", act: func(t *testing.T, root, _ string) {
+			if err := os.Rename(filepath.Join(root, "sub"), filepath.Join(root, "sub-away")); err != nil {
+				failNoPath(t, "parent moved", err)
+			}
+		}},
+		{label: "root swapped", act: func(t *testing.T, root, sib string) { swapRoot(t, root, sib) }, wantErr: ErrRootReplaced},
+	}
+	for _, r := range rows {
+		t.Run(r.label, func(t *testing.T) {
+			ws, root, sib := tolerantFixture(t, map[string]string{
+				"sub/.env": "TOKEN=" + secret + "\n",
+				"zz/f":     "x\n",
+			}, map[string]string{"a": "x\n"})
+			var asked []string
+			ws.screenSeams = &screenSeams{
+				examine: func(rel string, need bool) bool { return need && rel != "sub/.env" },
+				openErr: func(rel string) error {
+					asked = append(asked, rel)
+					if rel == "sub/.env" && r.act != nil {
+						r.act(t, root, sib)
+					}
+					return nil
+				},
+			}
+			s, err := buildOutputScreen(t.Context(), ws)
+			if r.wantErr != nil {
+				if !errors.Is(err, r.wantErr) || s != nil {
+					t.Fatalf("%s: wrong outcome (error: %t, screen: %t)", r.label, err != nil, s != nil)
+				}
+				secretFree(t, r.label, []string{secret}, err.Error())
+				return
+			}
+			if err != nil || s == nil {
+				t.Fatalf("%s: build failed (error: %t)", r.label, err != nil)
+			}
+			notes := s.notes()
+			want := []string{withheldNote + `listed without metadata: "sub/.env")`}
+			if !slices.Equal(notes, want) {
+				t.Fatalf("%s: notes differ (%d notes)", r.label, len(notes))
+			}
+			secretFree(t, r.label, []string{secret}, notes...)
+			if got := screenThrough(s, secret+"\n"); got != "" {
+				t.Fatalf("%s: output delivered (len %d)", r.label, len(got))
+			}
+			if slices.Contains(asked, "zz") {
+				t.Fatalf("%s: walk went on after the withhold", r.label)
+			}
+		})
 	}
 }
 
@@ -337,13 +493,14 @@ func TestBuildOutputScreenSkips(t *testing.T) {
 		"data/.env":  "TOKEN=skip-0002-abcdef\n",
 		"sub/.npmrc": "_authToken=skip-0003-abcdef\n",
 		"z/.env":     "TOKEN=skip-0004-abcdef\n",
+		"data/a.txt": "x\n",
 	}
 	secrets := []string{"skip-0001-abcdef", "skip-0002-abcdef", "skip-0003-abcdef", "skip-0004-abcdef"}
 	changed := "credential screen: 1 entr(ies) changed during the read and were skipped; output screened without them"
 	rows := []struct {
 		label string
 		seams func(t *testing.T, root string) *screenSeams
-		want  string // the one note
+		want  string // the one note; "": no note at all
 		// later: a value from z/.env, which sorts after data, still comes out as M
 		later bool
 	}{
@@ -378,6 +535,37 @@ func TestBuildOutputScreenSkips(t *testing.T) {
 		{"list eio", func(*testing.T, string) *screenSeams {
 			return &screenSeams{listErr: answer("sub", syscall.EIO)}
 		}, withheldNote + `listing failed: "sub")`, false},
+		// A plain file is never stat'ed, so its stat seam's error never shows.
+		{"plain stat eio", func(*testing.T, string) *screenSeams {
+			return &screenSeams{statErr: answer("data/a.txt", syscall.EIO)}
+		}, "", true},
+		// A read error after valid records is a failed listing; the records
+		// read before it are not used.
+		{"read error subdir", func(*testing.T, string) *screenSeams {
+			return &screenSeams{readDir: failingReadDir("data")}
+		}, withheldNote + `listing failed: "data")`, false},
+		{"read twice", func(*testing.T, string) *screenSeams {
+			return &screenSeams{readDir: func(rel string, f *os.File, emit func(string, uint8)) error {
+				if rel != "" {
+					return sysDir.read(f, emit)
+				}
+				return sysDir.read(f, func(name string, typ uint8) {
+					emit(name, typ)
+					emit(name, typ)
+				})
+			}}
+		}, "", true},
+		// A name typed regular that is gone by the time it would be used is
+		// unexamined, and a plain name is never opened.
+		{"plain gone", func(*testing.T, string) *screenSeams {
+			return &screenSeams{readDir: func(rel string, f *os.File, emit func(string, uint8)) error {
+				if err := sysDir.read(f, emit); err != nil || rel != "" {
+					return err
+				}
+				emit("ghost.txt", unix.DT_REG)
+				return nil
+			}}
+		}, "", true},
 	}
 	for _, r := range rows {
 		t.Run(r.label, func(t *testing.T) {
@@ -404,7 +592,11 @@ func TestBuildOutputScreenSkips(t *testing.T) {
 				t.Fatalf("%s: walk went on after the withhold", r.label)
 			}
 			notes := s.notes()
-			if !slices.Equal(notes, []string{r.want}) {
+			var wantNotes []string
+			if r.want != "" {
+				wantNotes = []string{r.want}
+			}
+			if !slices.Equal(notes, wantNotes) {
 				t.Fatalf("%s: notes differ (%d notes)", r.label, len(notes))
 			}
 			secretFree(t, r.label, secrets, notes...)
@@ -462,6 +654,11 @@ func TestBuildOutputScreenRootReplaced(t *testing.T) {
 	s, err = buildOutputScreen(t.Context(), ws)
 	check("root listing", s, err, errAnchorUnreachable)
 
+	ws, _, _ = tolerantFixture(t, map[string]string{".env": "TOKEN=root-0007-abcdef\n"}, nil)
+	ws.screenSeams = &screenSeams{readDir: failingReadDir("")}
+	s, err = buildOutputScreen(t.Context(), ws)
+	check("read error root", s, err, errAnchorUnreachable)
+
 	ws, _, _ = tolerantFixture(t, map[string]string{".env": "TOKEN=root-0003-abcdef\n"}, nil)
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
@@ -489,7 +686,7 @@ func TestBuildOutputScreenRootReplaced(t *testing.T) {
 	s, err = buildOutputScreen(t.Context(), ws)
 	check("swap after budget", s, err, ErrRootReplaced)
 
-	secretFree(t, "root", []string{"root-0001-abcdef", "root-0002-abcdef", "root-0003-abcdef", "root-0004-abcdef", "root-0005-abcdef", "root-0006-abcdef"}, texts...)
+	secretFree(t, "root", []string{"root-0001-abcdef", "root-0002-abcdef", "root-0003-abcdef", "root-0004-abcdef", "root-0005-abcdef", "root-0006-abcdef", "root-0007-abcdef"}, texts...)
 }
 
 // .git/config is read through the held .git descriptor, so a .git moved,

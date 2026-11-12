@@ -66,6 +66,10 @@ func buildOutputScreen(ctx context.Context, ws *Workspace) (*outputScreen, error
 			changed++
 			return nil
 		}
+		// After the switch: the sentinel reaches here only as a withhold.
+		if errors.Is(err, errWalkEntryUnexamined) {
+			return stop(fmt.Sprintf("listed without metadata: %q", notePath(rel)))
+		}
 		if listing {
 			return stop(fmt.Sprintf("listing failed: %q", notePath(rel)))
 		}
@@ -105,11 +109,14 @@ func buildOutputScreen(ctx context.Context, ws *Workspace) (*outputScreen, error
 		return nil
 	}
 
+	// examine is the one matcher: the walk's listing stats what it accepts,
+	// and fn reads what it accepts.
+	examine := interceptor.IsCredentialPath
 	fn := func(rel string, d fs.DirEntry) error {
 		if withhold != "" {
 			return fs.SkipAll
 		}
-		if d.IsDir() || d.Type()&fs.ModeSymlink != 0 || !interceptor.IsCredentialPath(rel) {
+		if d.IsDir() || d.Type()&fs.ModeSymlink != 0 || !examine(rel) {
 			return nil
 		}
 		f, err := ws.openScreened(rel, d)
@@ -143,7 +150,7 @@ func buildOutputScreen(ctx context.Context, ws *Workspace) (*outputScreen, error
 		}
 	}
 
-	err := ws.walkTolerant(wctx, fn, ignored, skip)
+	err := ws.walkTolerant(wctx, fn, ignored, skip, examine)
 	switch {
 	case ctx.Err() != nil:
 		return nil, fmt.Errorf("tools: credential screen: %w", ctx.Err())
