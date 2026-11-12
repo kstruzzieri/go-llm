@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"runtime"
+	"sync"
 	"syscall"
 
 	"golang.org/x/sys/unix"
@@ -20,6 +21,15 @@ type dirSys struct {
 // sysDir is the real directory read.
 var sysDir = dirSys{getdents: unix.ReadDirent}
 
+// dirBufPool holds the read's 65536-byte buffers, as os.dirBufPool does; only
+// buf[:n] is ever parsed, so a reused buffer's old bytes are never read.
+var dirBufPool = sync.Pool{
+	New: func() any {
+		buf := make([]byte, 65536)
+		return &buf
+	},
+}
+
 // read emits the name and raw d_type of every entry of f except "." and "..".
 // f must be freshly opened: the read starts at its current position. A nil
 // return means the whole directory was read; on any error the caller
@@ -27,7 +37,9 @@ var sysDir = dirSys{getdents: unix.ReadDirent}
 func (s dirSys) read(f *os.File, emit func(name string, typ uint8)) error {
 	defer runtime.KeepAlive(f)
 	fd := int(f.Fd())
-	buf := make([]byte, 65536)
+	bp := dirBufPool.Get().(*[]byte)
+	defer dirBufPool.Put(bp)
+	buf := *bp
 	for {
 		n, err := s.getdents(fd, buf)
 		if errors.Is(err, syscall.EINTR) {
