@@ -193,14 +193,58 @@ func componentPattern(names []string) *regexp.Regexp {
 // credential file basename at any depth; a .env.* basename other than the
 // committed templates; or a config file under any .git directory (remote URLs
 // and older CI checkouts carry tokens there). The search tool skips the same
-// files, so the two readers cannot drift (#627).
-func IsCredentialPath(p string) bool {
-	parts := strings.Split(normalizePath(p), "/")
-	base := parts[len(parts)-1]
-	for _, c := range parts {
+// files, so the two readers cannot drift (#627). A plain-ASCII, lower-case
+// path skips the alias replacer and the lower-casing (see matchNormalize), and
+// the answer is the same: every key of pathAliases is non-ASCII and
+// lower-casing changes nothing in such a string.
+func IsCredentialPath(p string) bool { return credentialNormalized(matchNormalize(p)) }
+
+// IsGitConfigPath reports whether p, after normalizePath, is a file named
+// config with a .git directory component. It takes the same exact fast route
+// as IsCredentialPath for a plain-ASCII, lower-case path.
+func IsGitConfigPath(p string) bool { return gitConfigNormalized(matchNormalize(p)) }
+
+// matchNormalize is normalizePath, except that off Windows a cleaned path
+// holding no byte at or above 0x80 and no upper-case ASCII letter is returned
+// as cleaned: the alias replacer and the lower-casing cannot change it.
+func matchNormalize(s string) string {
+	if runtime.GOOS != "windows" {
+		clean := filepath.Clean(s)
+		plain := true
+		for i := 0; i < len(clean); i++ {
+			if c := clean[i]; c >= 0x80 || (c >= 'A' && c <= 'Z') {
+				plain = false
+				break
+			}
+		}
+		if plain {
+			return clean
+		}
+	}
+	return normalizePath(s)
+}
+
+// credentialNormalized is IsCredentialPath on an already normalized path n,
+// in one pass over its components.
+func credentialNormalized(n string) bool {
+	base := n
+	if i := strings.LastIndexByte(n, '/'); i >= 0 {
+		base = n[i+1:]
+	}
+	sawGit := false
+	rest := n
+	for {
+		c, tail, more := strings.Cut(rest, "/")
 		if slices.Contains(credentialDirs, c) {
 			return true
 		}
+		if !more {
+			break
+		}
+		if c == ".git" {
+			sawGit = true
+		}
+		rest = tail
 	}
 	switch {
 	case slices.Contains(credentialFiles, base):
@@ -208,14 +252,26 @@ func IsCredentialPath(p string) bool {
 	case strings.HasPrefix(base, ".env.") && !slices.Contains(envTemplates, base):
 		return true
 	}
-	return IsGitConfigPath(p)
+	return base == "config" && sawGit
 }
 
-// IsGitConfigPath reports whether p, after normalizePath, is a file named
-// config with a .git directory component.
-func IsGitConfigPath(p string) bool {
-	parts := strings.Split(normalizePath(p), "/")
-	return parts[len(parts)-1] == "config" && slices.Contains(parts[:len(parts)-1], ".git")
+// gitConfigNormalized is IsGitConfigPath on an already normalized path n.
+func gitConfigNormalized(n string) bool {
+	i := strings.LastIndexByte(n, '/')
+	if i < 0 || n[i+1:] != "config" {
+		return false
+	}
+	rest := n[:i]
+	for {
+		c, tail, more := strings.Cut(rest, "/")
+		if c == ".git" {
+			return true
+		}
+		if !more {
+			return false
+		}
+		rest = tail
+	}
 }
 
 // IsProtectedPath reports whether p has a .git, .ssh, .gnupg, .aws or .kube
