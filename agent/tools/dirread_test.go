@@ -35,7 +35,7 @@ func readDirAt(t *testing.T, label, dir string) []dirEntry {
 
 // failNoPath fails the test with label and the cause of err: the errno it
 // wraps, else only its type. Never err's text, which can quote a test path.
-func failNoPath(t *testing.T, label string, err error) {
+func failNoPath(t testing.TB, label string, err error) {
 	t.Helper()
 	var errno syscall.Errno
 	if errors.As(err, &errno) {
