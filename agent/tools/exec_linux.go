@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -369,6 +370,14 @@ func (b *bwrapBackend) prepare(spec execSpec) (execSpec, error) {
 	if spec.ExeIdentity == nil || !os.SameFile(fi, spec.ExeIdentity) {
 		return execSpec{}, errors.New("executable changed since approval; retry")
 	}
+	// The workspace walk rejects an inode linked outside the workspace and
+	// finds the git layout the argv mounts read-only or un-renamable (#721).
+	// It is the last workspace walk before spawn: metadata created after it
+	// is residual R1, and a change racing it is the documented same-UID race.
+	layout, err := inspectSandboxWorkspace(spec.WorkspaceRoot)
+	if err != nil {
+		return execSpec{}, err
+	}
 	args, err := buildBwrapArgs(bwrapPolicy{
 		workspaceRoot:     spec.WorkspaceRoot,
 		exePath:           canonExe,
@@ -381,11 +390,10 @@ func (b *bwrapBackend) prepare(spec execSpec) (execSpec, error) {
 		payloadEnv:        sandboxChildEnv(spec.Env, "/tmp"),
 		allowNetwork:      b.cfg.AllowNetwork,
 		tmpfsSizeBytes:    b.capBytes,
+		gitWritable:       slices.Concat(layout.dotGitDirs, layout.gitDirs),
+		gitReadOnly:       slices.Concat(layout.containers, layout.intermediates, layout.metadata, layout.gitFiles),
 	})
 	if err != nil {
-		return execSpec{}, err
-	}
-	if _, err := inspectSandboxWorkspace(spec.WorkspaceRoot); err != nil {
 		return execSpec{}, err
 	}
 	wrapped := spec

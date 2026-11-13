@@ -93,6 +93,10 @@ func writeGitFixture(t *testing.T, root string) {
 	}
 }
 
+// gitMetaFixtureGitDirs are writeGitFixture's git dirs, workspace-relative.
+var gitMetaFixtureGitDirs = []string{".git", ".git/modules/m", ".git/modules/m/modules/inner",
+	".git/modules/libs/a", ".git/worktrees/wt", "nested/.git"}
+
 // gitMetaSnapshot renders the git metadata a sandbox must not change in
 // writeGitFixture's workspace as sorted "path kind inode mode extra" lines;
 // equal before and after a command means the command changed none of it.
@@ -102,8 +106,6 @@ func writeGitFixture(t *testing.T, root string) {
 // spelling of a protected name), and hooks/ and info/ recursively.
 func gitMetaSnapshot(t *testing.T, root string) string {
 	t.Helper()
-	gitDirs := []string{".git", ".git/modules/m", ".git/modules/m/modules/inner",
-		".git/modules/libs/a", ".git/worktrees/wt", "nested/.git"}
 	lines := []string{
 		// containers and the intermediate: identity only
 		gitMetaNode(t, root, ".git/modules"),
@@ -120,7 +122,7 @@ func gitMetaSnapshot(t *testing.T, root string) string {
 		gitMetaNode(t, root, ".git/modules/libs/b"),
 		gitMetaNode(t, root, "src/.git"),
 	}
-	for _, g := range gitDirs {
+	for _, g := range gitMetaFixtureGitDirs {
 		lines = append(lines, gitMetaNode(t, root, g))
 		if fi, err := os.Lstat(filepath.Join(root, g)); err != nil || !fi.IsDir() {
 			continue // missing, a file or a symlink: the node line records it
@@ -171,6 +173,28 @@ func gitMetaSnapshot(t *testing.T, root string) string {
 	return strings.Join(slices.Compact(lines), "\n") + "\n"
 }
 
+// gitMetaProtectedLines is snapshot without a git dir's own internals: the
+// line of each top-level entry of a gitMetaFixtureGitDirs git dir whose name
+// is not hooks, info, config, config.worktree, commondir, gitdir or a
+// container (modules, worktrees). Everything else stays: each git dir's own
+// identity line, all of hooks/ and info/, config-class files, gitfiles,
+// containers, intermediates, presence lines and new-.git lines.
+func gitMetaProtectedLines(snapshot string) string {
+	protected := []string{"hooks", "info", "config", "config.worktree", "commondir", "gitdir", "modules", "worktrees"}
+	var out []string
+	for _, line := range strings.SplitAfter(snapshot, "\n") {
+		internal := slices.ContainsFunc(gitMetaFixtureGitDirs, func(g string) bool {
+			rest, ok := strings.CutPrefix(line, g+"/")
+			name, _, _ := strings.Cut(rest, " ")
+			return ok && !strings.Contains(name, "/") && !slices.Contains(protected, name)
+		})
+		if !internal {
+			out = append(out, line)
+		}
+	}
+	return strings.Join(out, "")
+}
+
 // gitMetaNode is one snapshot line: kind, inode, raw mode and, for a regular
 // file, its content hash and link count (a new hard link is an alias a later
 // spawn could write through; a directory's count follows its entries on
@@ -219,6 +243,14 @@ func gitMetaNode(t *testing.T, root, rel string) string {
 type gitMetaAttack struct {
 	name, variant, snippet string
 	seatbeltOnly           bool
+	// bwrapProtectedOnly marks a row bwrap judges on gitMetaProtectedLines.
+	// Renaming a self-bound git dir out of its read-only container fails
+	// with EXDEV, and mv's copy-then-remove fallback then deletes the git
+	// dir's internals (HEAD, objects, refs) before failing on its read-only
+	// mounts. The design leaves those internals writable on both backends,
+	// since commits write them, and the plant itself is refused. Seatbelt
+	// refuses the rename outright and judges every row on the full snapshot.
+	bwrapProtectedOnly bool
 }
 
 const plantedConfig = `printf '[spike]\n\tplanted = PLANTED\n'`
@@ -281,7 +313,7 @@ var gitMetaAttacks = []gitMetaAttack{
 	{name: "intermediate-preplant", snippet: `mkdir -p .git/modules/libs/b/hooks && echo P > .git/modules/libs/b/hooks/post-checkout`},
 	{name: "uninit-preplant", snippet: `cp -R .git/modules/m evil && echo PLANTED > evil/hooks/post-checkout && mv evil .git/modules/u`},
 	{name: "uninit-preplant-symlink", snippet: `cp -R .git/modules/m evil && echo PLANTED > evil/hooks/post-checkout && ln -s ../../evil .git/modules/u`},
-	{name: "nested-submodule-rename", snippet: `mv .git/modules/m/modules/inner x && mkdir -p .git/modules/m/modules/inner/hooks && echo P > .git/modules/m/modules/inner/hooks/pre-commit`},
+	{name: "nested-submodule-rename", bwrapProtectedOnly: true, snippet: `mv .git/modules/m/modules/inner x && mkdir -p .git/modules/m/modules/inner/hooks && echo P > .git/modules/m/modules/inner/hooks/pre-commit`},
 	{name: "worktree-rename-into", snippet: `cp -R .git/worktrees/wt evilwt && echo ../../../evilcommon > evilwt/commondir && mv .git/worktrees/wt .git/worktrees/wt-old && mv evilwt .git/worktrees/wt`},
 	{name: "worktrees-container-rename", snippet: `mv .git/worktrees .git/worktrees-old && mkdir .git/worktrees && cp -R .git/worktrees-old/wt evilwt && echo ../../../evilcommon > evilwt/commondir && mv evilwt .git/worktrees/wt`},
 	{name: "libs-direct-hook", snippet: `echo PLANTED > .git/modules/libs/a/hooks/pre-commit`},
@@ -314,11 +346,42 @@ func applyGitMetaVariant(t *testing.T, root, variant string) {
 	}
 }
 
+// TestGitMetaProtectedLines: the filtered view hides a git dir's deleted
+// internals and still sees a planted hook, a rewritten config and a new
+// hooks entry, each in a git dir nested two containers deep.
+func TestGitMetaProtectedLines(t *testing.T) {
+	for _, c := range []struct {
+		snippet  string
+		wantSame bool
+	}{
+		{`rm .git/modules/m/modules/inner/HEAD && rmdir .git/modules/m/modules/inner/objects`, true},
+		{`echo P > .git/modules/m/modules/inner/hooks/pre-commit`, false},
+		{`echo P >> .git/modules/m/modules/inner/config`, false},
+		{`rm -rf .git/modules/m/modules/inner/hooks`, false},
+	} {
+		root := canonGitTempDir(t)
+		writeGitFixture(t, root)
+		before := gitMetaSnapshot(t, root)
+		if out, err := exec.Command("/bin/sh", "-c", "cd \"$1\" && "+c.snippet, "sh", root).CombinedOutput(); err != nil {
+			t.Fatalf("%s: %v\n%s", c.snippet, err, out)
+		}
+		after := gitMetaSnapshot(t, root)
+		if after == before {
+			t.Fatalf("%s left the full snapshot unchanged", c.snippet)
+		}
+		if same := gitMetaProtectedLines(after) == gitMetaProtectedLines(before); same != c.wantSame {
+			t.Errorf("%s: protected lines unchanged = %v, want %v", c.snippet, same, c.wantSame)
+		}
+	}
+}
+
 // TestGitMetaAttacksChangeTheSnapshotUnsandboxed is the oracle's positive
 // control: with no sandbox every row must change the snapshot, so an
 // unchanged snapshot under a sandbox means the sandbox refused the row, not
-// that the row is broken or the oracle is blind to it. Seatbelt-only rows run
-// on darwin only (two of them need its case-insensitive filesystem).
+// that the row is broken or the oracle is blind to it. A bwrapProtectedOnly
+// row must change gitMetaProtectedLines too, so the filter cannot hide its
+// plant. Seatbelt-only rows run on darwin only (two of them need its
+// case-insensitive filesystem).
 func TestGitMetaAttacksChangeTheSnapshotUnsandboxed(t *testing.T) {
 	for _, a := range gitMetaAttacks {
 		t.Run(a.name, func(t *testing.T) {
@@ -335,8 +398,12 @@ func TestGitMetaAttacksChangeTheSnapshotUnsandboxed(t *testing.T) {
 			cmd := exec.Command("/bin/sh", "-c", a.snippet)
 			cmd.Dir = root
 			out, _ := cmd.CombinedOutput() // exit status is not the oracle
-			if gitMetaSnapshot(t, root) == before {
+			after := gitMetaSnapshot(t, root)
+			if after == before {
 				t.Fatalf("unsandboxed attack left the snapshot unchanged; output: %s", out)
+			}
+			if a.bwrapProtectedOnly && gitMetaProtectedLines(after) == gitMetaProtectedLines(before) {
+				t.Fatalf("unsandboxed attack left the protected lines unchanged; output: %s", out)
 			}
 		})
 	}
