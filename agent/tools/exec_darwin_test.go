@@ -3158,21 +3158,6 @@ func TestProbeSeatbeltUnavailableInsideASandbox(t *testing.T) {
 // developer directory); real git under these rules was measured in the #721
 // spike.
 
-// requireGitMetaUnchanged fails with a line diff when the git metadata
-// snapshot of root differs from before; detail describes the run. Exit status
-// is not the oracle.
-func requireGitMetaUnchanged(t *testing.T, root, before, detail string) {
-	t.Helper()
-	if after := gitMetaSnapshot(t, root); after != before {
-		t.Errorf("git metadata changed (%s):\n%s", detail,
-			unifiedDiff("snapshot", []byte(before), []byte(after), true))
-	}
-}
-
-func resDetail(res execResult) string {
-	return fmt.Sprintf("exit %d, stderr %q", res.ExitCode, res.Stderr)
-}
-
 // realSeatbeltBackend builds one real Seatbelt backend (construction runs the
 // probe) for a test's many seatbeltRunWith calls.
 func realSeatbeltBackend(t *testing.T) resolvedExecBackend {
@@ -3217,7 +3202,7 @@ func TestSeatbeltGitMetadataDenied(t *testing.T) {
 		t.Run(a.name, func(t *testing.T) {
 			root := canonTempDirT(t)
 			before, res := runGitMetaAttack(t, backend, root, a)
-			requireGitMetaUnchanged(t, root, before, resDetail(res))
+			requireGitMetaUnchanged(t, root, before, resDetail(res), false)
 		})
 	}
 }
@@ -3247,7 +3232,7 @@ func TestSeatbeltGitMetadataDeniedWithoutDiscovery(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			root := canonTempDirT(t)
 			before, res := runGitMetaAttack(t, backend, root, a)
-			requireGitMetaUnchanged(t, root, before, resDetail(res))
+			requireGitMetaUnchanged(t, root, before, resDetail(res), false)
 		})
 	}
 }
@@ -3305,7 +3290,7 @@ func TestSeatbeltGitMetadataRegexIsLiteral(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			root := metaRoot(t)
 			before, res := runGitMetaAttack(t, backend, root, a)
-			requireGitMetaUnchanged(t, root, before, resDetail(res))
+			requireGitMetaUnchanged(t, root, before, resDetail(res), false)
 		})
 	}
 }
@@ -3370,7 +3355,7 @@ func TestSeatbeltVerifierCannotPlantHook(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	requireGitMetaUnchanged(t, root, before, "verifier observation:\n"+out)
+	requireGitMetaUnchanged(t, root, before, "verifier observation:\n"+out, false)
 	// The shell ran and its write was refused: not a vacuous pass where
 	// nothing spawned.
 	if !strings.Contains(out, "status: failed\n") || !strings.Contains(out, "pre-commit: Operation not permitted") {

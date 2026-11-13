@@ -307,6 +307,29 @@ func safeEtcPolicyPaths(paths []string, workspaceRoot, home string) ([]string, e
 	return out, nil
 }
 
+// bwrapRejectSymlinkedGitMetadata fails the spawn when a discovered git
+// metadata entry is a symbolic link (#721 R-13). A bind mount follows the
+// link: its target turns read-only while the link node, in a writable git
+// dir, stays replaceable (measured: rm .git/hooks && mkdir .git/hooks then
+// plants a hook), and a dangling link fails bwrap itself.
+func bwrapRejectSymlinkedGitMetadata(root string, metadata []string) error {
+	for _, p := range metadata {
+		rel, err := filepath.Rel(root, p)
+		if err != nil {
+			return fmt.Errorf("tools: bwrap inspect git metadata %q: %w", p, err)
+		}
+		rel = filepath.ToSlash(rel)
+		fi, err := os.Lstat(p)
+		if err != nil {
+			return fmt.Errorf("tools: bwrap inspect git metadata %q: %w", rel, err)
+		}
+		if fi.Mode()&fs.ModeSymlink != 0 {
+			return fmt.Errorf("tools: bwrap cannot protect git metadata %q: it is a symbolic link; keep hooks in the working tree with core.hooksPath instead", rel)
+		}
+	}
+	return nil
+}
+
 // bwrapRejectInheritableFDs is the shared descriptor audit over Linux's
 // per-process descriptor directory, with no exemption.
 func bwrapRejectInheritableFDs() error {
@@ -376,6 +399,9 @@ func (b *bwrapBackend) prepare(spec execSpec) (execSpec, error) {
 	// is residual R1, and a change racing it is the documented same-UID race.
 	layout, err := inspectSandboxWorkspace(spec.WorkspaceRoot)
 	if err != nil {
+		return execSpec{}, err
+	}
+	if err := bwrapRejectSymlinkedGitMetadata(spec.WorkspaceRoot, layout.metadata); err != nil {
 		return execSpec{}, err
 	}
 	args, err := buildBwrapArgs(bwrapPolicy{

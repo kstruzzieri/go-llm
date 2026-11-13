@@ -29,7 +29,7 @@ type sandboxGitLayout struct {
 	containers    []string // each existing <D>/modules and <D>/worktrees, D in dotGitDirs or gitDirs
 	intermediates []string // each directory between a modules container and a submodule git dir
 	gitFiles      []string // each regular file named .git (ASCII case-folded)
-	metadata      []string // each existing <D>/{hooks,info,config,config.worktree,commondir,gitdir}, D in dotGitDirs or gitDirs
+	metadata      []string // each existing <D>/{hooks,info,config,config.worktree,commondir,gitdir}, D in dotGitDirs or gitDirs, and each hooks/info directory classified under a modules container (descendModules)
 
 	root string // the workspace root; errors name paths relative to it
 }
@@ -129,18 +129,16 @@ func inspectSandboxWorkspace(root string) (sandboxGitLayout, error) {
 
 // scanGitDir records git dir d's metadata, its linked-worktree git dirs and
 // its submodule git dirs (recursively), bounded by the git-dir structure
-// rather than the workspace. Under <d>/modules a directory is a git dir when
-// it holds any non-directory entry (a HEAD file marks a working one; a broken
-// one, files and no HEAD, is protected the same way) or an entry named hooks
-// or info; it is scanned as a git dir, never descended as an intermediate.
-// Any other directory, holding only other directories, is an intermediate of
-// a slash-named submodule and is descended. Absent entries are skipped; any
-// other error fails closed.
+// rather than the workspace. Each directory under <d>/modules is classified
+// by descendModules. Absent entries are skipped; any other error fails
+// closed.
 //
 // Residual R9: a .git that is a symlink, and a hooks directory that is a
 // symlink into the tree, are user-chosen in-tree layouts; their targets are
 // ordinary workspace files, outside this protection like core.hooksPath into
-// the tree. The same holds for a <d>/modules or <d>/worktrees that is a
+// the tree. On bwrap a symlinked metadata entry fails the spawn instead
+// (bwrapRejectSymlinkedGitMetadata): its mount would cover the target and
+// leave the link replaceable. The same holds for a <d>/modules or <d>/worktrees that is a
 // symlink (or not a directory) and for a symlinked child of either
 // container: the scan skips them, so on bwrap such a container or git dir is
 // as unprotected as one absent at spawn (R1).
@@ -180,8 +178,20 @@ func scanGitDir(d string, out *sandboxGitLayout) error {
 	return out.descendModules(modules, entries)
 }
 
-// descendModules classifies each child directory of dir, a modules
-// container or an intermediate under one (see scanGitDir).
+// descendModules classifies each child directory c of dir, a modules
+// container or an intermediate under one, in order:
+//  1. c/HEAD is a non-directory: a working git dir, scanned (scanGitDir);
+//  2. c is named hooks or info (ASCII case-folded): read-only metadata, not
+//     descended;
+//  3. c holds any other non-directory entry: a broken git dir, scanned;
+//  4. otherwise: an intermediate of a slash-named submodule, descended.
+//
+// A git dir a command stripped of HEAD and every file (writable on both
+// backends) thus becomes an intermediate at the next spawn whose hooks and
+// info stay read-only, and slash-named siblings are always found. A real
+// submodule literally named <prefix>/hooks has a HEAD file and is a git dir;
+// Seatbelt's per-intermediate <prefix>/hooks subpath makes it wholly
+// read-only there: a refusal, not an escape.
 func (l *sandboxGitLayout) descendModules(dir string, entries []fs.DirEntry) error {
 	for _, e := range entries {
 		if !e.IsDir() {
@@ -195,23 +205,24 @@ func (l *sandboxGitLayout) descendModules(dir string, entries []fs.DirEntry) err
 		if !ok {
 			continue
 		}
-		// hooks and info cannot be deleted under either backend, so a git dir
-		// a command stripped of its writable files (HEAD, objects, refs) keeps
-		// its class at the next spawn instead of becoming an intermediate whose
-		// hooks would then be taken for a writable git dir. A submodule named
-		// <prefix>/hooks makes <prefix> a git dir instead, which fails safe:
-		// the real submodule git dir becomes <prefix>'s read-only hooks.
-		if !slices.ContainsFunc(kids, func(k fs.DirEntry) bool {
-			return !k.IsDir() || k.Name() == "hooks" || k.Name() == "info"
-		}) {
+		name := e.Name()
+		switch {
+		case slices.ContainsFunc(kids, func(k fs.DirEntry) bool { return k.Name() == "HEAD" && !k.IsDir() }):
+			l.gitDirs = append(l.gitDirs, c)
+			err = scanGitDir(c, l)
+		// Equal byte length keeps the fold ASCII: the non-ASCII runes that fold
+		// to an ASCII letter (Kelvin K, long s) are multi-byte.
+		case len(name) == len("hooks") && strings.EqualFold(name, "hooks"),
+			len(name) == len("info") && strings.EqualFold(name, "info"):
+			l.metadata = append(l.metadata, c)
+		case slices.ContainsFunc(kids, func(k fs.DirEntry) bool { return !k.IsDir() }):
+			l.gitDirs = append(l.gitDirs, c)
+			err = scanGitDir(c, l)
+		default:
 			l.intermediates = append(l.intermediates, c)
-			if err := l.descendModules(c, kids); err != nil {
-				return err
-			}
-			continue
+			err = l.descendModules(c, kids)
 		}
-		l.gitDirs = append(l.gitDirs, c)
-		if err := scanGitDir(c, l); err != nil {
+		if err != nil {
 			return err
 		}
 	}

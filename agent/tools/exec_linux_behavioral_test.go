@@ -1046,42 +1046,25 @@ func TestBwrapBehavioralApprovedExecutableShapes(t *testing.T) {
 // (residual R8); these tests assume the case-sensitive filesystem a Linux
 // host gives TMPDIR.
 
-// requireBwrapGitMetaUnchanged fails with a line diff when the git metadata
-// snapshot of root differs from before, compared on gitMetaProtectedLines
-// when protectedOnly; detail describes the run. Exit status is not the
-// oracle.
-func requireBwrapGitMetaUnchanged(t *testing.T, root, before, detail string, protectedOnly bool) {
-	t.Helper()
-	after := gitMetaSnapshot(t, root)
-	if protectedOnly {
-		before, after = gitMetaProtectedLines(before), gitMetaProtectedLines(after)
-	}
-	if after != before {
-		t.Errorf("git metadata changed (%s):\n%s", detail,
-			unifiedDiff("snapshot", []byte(before), []byte(after), true))
-	}
-}
-
 // TestBwrapGitMetadataDenied: no attack row bwrap is meant to refuse changes
 // the git metadata under real bubblewrap. The seatbeltOnly rows are bwrap's
-// documented residuals (R1: metadata or a repository created after spawn) or
-// need a case-insensitive filesystem; a bwrapProtectedOnly row is judged on
-// its protected lines.
+// documented residuals (R1: metadata or a repository created after spawn),
+// need a case-insensitive filesystem, or never spawn on bwrap (R-13); a
+// bwrapProtectedOnly row is judged on its protected lines.
 func TestBwrapGitMetadataDenied(t *testing.T) {
 	requireBwrapCapability(t)
 	cfg := SandboxConfig{Runtime: SandboxRuntimeBwrap}
 	for _, a := range gitMetaAttacks {
 		t.Run(a.name, func(t *testing.T) {
 			if a.seatbeltOnly {
-				t.Skip("Seatbelt-only row (#721 R1 on bwrap)")
+				t.Skip("Seatbelt-only row (see gitMetaAttack.seatbeltOnly)")
 			}
 			root := canonGitTempDir(t)
 			writeGitFixture(t, root)
 			applyGitMetaVariant(t, root, a.variant)
 			before := gitMetaSnapshot(t, root)
 			res := realBwrapRun(t, cfg, root, []string{"/bin/sh", "-c", a.snippet})
-			requireBwrapGitMetaUnchanged(t, root, before,
-				fmt.Sprintf("exit %d, stderr %q", res.ExitCode, res.Stderr), a.bwrapProtectedOnly)
+			requireGitMetaUnchanged(t, root, before, resDetail(res), a.bwrapProtectedOnly)
 		})
 	}
 }
@@ -1201,6 +1184,12 @@ func TestBwrapGitOrdinaryOps(t *testing.T) {
 				return
 			}
 			t.Logf("refused: exit %d, stderr %q", res.ExitCode, res.Stderr)
+			// The refusal is the protection's: a read-only mount (EROFS) or a
+			// rename onto a mounted file (EBUSY), not another failure.
+			if stderr := string(res.Stderr); !strings.Contains(stderr, "Read-only file system") &&
+				!strings.Contains(stderr, "Device or resource busy") {
+				t.Fatalf("refusal does not name the protection: stderr %q", stderr)
+			}
 			control := canonGitTempDir(t)
 			writeRealGitFixture(t, control)
 			cmd := exec.Command("/bin/sh", "-c", op.snippet)
@@ -1239,6 +1228,9 @@ func TestBwrapGitMetadataManySubmodules(t *testing.T) {
 	if _, err := os.Lstat(hook); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("s299 hook planted or unreadable (exit %d, stderr %q): %v", res.ExitCode, res.Stderr, err)
 	}
+	if res.ExitCode == 0 || !strings.Contains(string(res.Stderr), "Read-only") {
+		t.Fatalf("s299 hook write not refused by the read-only mount: %s", resDetail(res))
+	}
 }
 
 // TestBwrapGitMetadataExecInsideHooks: the protection is write-only, so an
@@ -1276,7 +1268,7 @@ func TestBwrapVerifierCannotPlantHook(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	requireBwrapGitMetaUnchanged(t, root, before, "verifier observation:\n"+out, false)
+	requireGitMetaUnchanged(t, root, before, "verifier observation:\n"+out, false)
 	// The shell ran and its write was refused: not a vacuous pass where
 	// nothing spawned.
 	if !strings.Contains(out, "status: failed\n") || !strings.Contains(out, "pre-commit: Read-only file system") {

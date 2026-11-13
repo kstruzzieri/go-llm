@@ -423,6 +423,8 @@ func TestSeatbeltProfileGitAnchors(t *testing.T) {
   (literal "/private/tmp/ws/.git/worktrees/wt/commondir")
   (literal "/private/tmp/ws/.git/worktrees/wt/gitdir")
   (regex "^/private/tmp/ws/\\.git/worktrees/wt/([mM][oO][dD][uU][lL][eE][sS]|[wW][oO][rR][kK][tT][rR][eE][eE][sS])(/[^/]+)?$")
+  (subpath "/private/tmp/ws/.git/modules/libs/hooks")
+  (subpath "/private/tmp/ws/.git/modules/libs/info")
   (regex "^/private/tmp/ws/\\.git/modules/libs/[^/]+$"))
 `
 	if got := mustProfile(t, gitAnchorPolicy()); !strings.Contains(got, "(allow file-write-data (literal \"/dev/null\"))\n"+want+"") || strings.Count(got, "(deny file-write*") != 1 {

@@ -236,8 +236,9 @@ func sbplRegex(prefix, tail string) (string, error) {
 // seatbeltGitMetadataDeny renders the (deny file-write*) form that protects
 // git metadata inside the workspace (#721): any .git entry, hooks/info,
 // config files and module/worktree containers, plus the same set for each
-// git dir that is not named .git, and the intermediate directories under a
-// modules container. Later rules win in SBPL, so it follows the write allow.
+// git dir that is not named .git, and for each intermediate directory under a
+// modules container its hooks and info subtrees and its direct children.
+// Later rules win in SBPL, so it follows the write allow.
 func seatbeltGitMetadataDeny(ws string, gitDirs, intermediates []string) (string, error) {
 	norm := func(in []string) ([]string, error) {
 		for _, p := range in {
@@ -286,7 +287,15 @@ func seatbeltGitMetadataDeny(ws string, gitDirs, intermediates []string) (string
 			return "", err
 		}
 	}
+	// An intermediate's hooks and info are write-denied whole: one may be a
+	// stripped git dir's (see descendModules), and a submodule named
+	// <prefix>/hooks becomes read-only rather than writable.
 	for _, i := range inters {
+		for _, sub := range []string{"/hooks", "/info"} {
+			if err := lit("subpath", i+sub); err != nil {
+				return "", err
+			}
+		}
 		if err := add(i, "/[^/]+$"); err != nil {
 			return "", err
 		}

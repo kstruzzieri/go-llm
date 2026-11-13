@@ -121,6 +121,8 @@ func gitMetaSnapshot(t *testing.T, root string) string {
 		gitMetaNode(t, root, ".git/modules/u"),
 		gitMetaNode(t, root, ".git/modules/libs/b"),
 		gitMetaNode(t, root, "src/.git"),
+		// the stripped variant's module git dir: its hook's content
+		gitMetaNode(t, root, ".git/modules/s/hooks/pre-commit"),
 	}
 	for _, g := range gitMetaFixtureGitDirs {
 		lines = append(lines, gitMetaNode(t, root, g))
@@ -195,6 +197,26 @@ func gitMetaProtectedLines(snapshot string) string {
 	return strings.Join(out, "")
 }
 
+// requireGitMetaUnchanged fails with a line diff when the git metadata
+// snapshot of root differs from before, compared on gitMetaProtectedLines
+// when protectedOnly; detail describes the run. Exit status is not the
+// oracle.
+func requireGitMetaUnchanged(t *testing.T, root, before, detail string, protectedOnly bool) {
+	t.Helper()
+	after := gitMetaSnapshot(t, root)
+	if protectedOnly {
+		before, after = gitMetaProtectedLines(before), gitMetaProtectedLines(after)
+	}
+	if after != before {
+		t.Errorf("git metadata changed (%s):\n%s", detail,
+			unifiedDiff("snapshot", []byte(before), []byte(after), true))
+	}
+}
+
+func resDetail(res execResult) string {
+	return fmt.Sprintf("exit %d, stderr %q", res.ExitCode, res.Stderr)
+}
+
 // gitMetaNode is one snapshot line: kind, inode, raw mode and, for a regular
 // file, its content hash and link count (a new hard link is an alias a later
 // spawn could write through; a directory's count follows its entries on
@@ -238,8 +260,9 @@ func gitMetaNode(t *testing.T, root, rel string) string {
 // execution. snippet runs under /bin/sh -c with the workspace as its working
 // directory, after variant is applied to a fresh fixture
 // (applyGitMetaVariant). seatbeltOnly marks the rows bwrap does not refuse
-// (#721 R1: metadata absent at spawn, or a new repository) or that need a
-// case-insensitive filesystem.
+// (#721 R1: metadata absent at spawn, or a new repository), that need a
+// case-insensitive filesystem, or whose layout bwrap refuses to spawn in
+// (R-13: symlinked metadata).
 type gitMetaAttack struct {
 	name, variant, snippet string
 	seatbeltOnly           bool
@@ -317,15 +340,46 @@ var gitMetaAttacks = []gitMetaAttack{
 	{name: "worktree-rename-into", snippet: `cp -R .git/worktrees/wt evilwt && echo ../../../evilcommon > evilwt/commondir && mv .git/worktrees/wt .git/worktrees/wt-old && mv evilwt .git/worktrees/wt`},
 	{name: "worktrees-container-rename", snippet: `mv .git/worktrees .git/worktrees-old && mkdir .git/worktrees && cp -R .git/worktrees-old/wt evilwt && echo ../../../evilcommon > evilwt/commondir && mv evilwt .git/worktrees/wt`},
 	{name: "libs-direct-hook", snippet: `echo PLANTED > .git/modules/libs/a/hooks/pre-commit`},
+	// s is an intermediate (no HEAD, no file) whose hooks/ is read-only metadata.
+	{name: "stripped-module-hook", variant: "stripped", snippet: `echo P > .git/modules/s/hooks/pre-commit`},
+	// bwrap refuses to spawn with a symlinked metadata entry (R-13), so the
+	// row runs on Seatbelt only, where it proves the link node is protected.
+	{name: "symlinked-hooks-replace", variant: "symhooks", seatbeltOnly: true,
+		snippet: `rm .git/hooks && mkdir .git/hooks && echo P > .git/hooks/pre-commit`},
 }
 
 // applyGitMetaVariant prepares a fresh fixture for an attack row: wtcfg turns
 // on extensions.worktreeConfig with no config.worktree file; nohooks removes
-// .git/hooks and .git/info.
+// .git/hooks and .git/info; stripped adds a module git dir s that a command
+// stripped of HEAD and of every top-level file (left: hooks/pre-commit,
+// info/exclude, empty objects/ and refs/); symhooks moves .git/hooks to the
+// in-tree scripts/hooks and leaves a symlink to it.
 func applyGitMetaVariant(t *testing.T, root, variant string) {
 	t.Helper()
 	switch variant {
 	case "":
+	case "stripped":
+		s := filepath.Join(root, ".git", "modules", "s")
+		for _, d := range []string{"hooks", "info", "objects", "refs"} {
+			if err := os.MkdirAll(filepath.Join(s, d), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for _, f := range []string{"hooks/pre-commit", "info/exclude"} {
+			if err := os.WriteFile(filepath.Join(s, f), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+	case "symhooks":
+		if err := os.Mkdir(filepath.Join(root, "scripts"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(filepath.Join(root, ".git", "hooks"), filepath.Join(root, "scripts", "hooks")); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink("../scripts/hooks", filepath.Join(root, ".git", "hooks")); err != nil {
+			t.Fatal(err)
+		}
 	case "wtcfg":
 		f, err := os.OpenFile(filepath.Join(root, ".git", "config"), os.O_APPEND|os.O_WRONLY, 0)
 		if err != nil {
@@ -347,17 +401,23 @@ func applyGitMetaVariant(t *testing.T, root, variant string) {
 }
 
 // TestGitMetaProtectedLines: the filtered view hides a git dir's deleted
-// internals and still sees a planted hook, a rewritten config and a new
-// hooks entry, each in a git dir nested two containers deep.
+// internals and still sees each kept name change in a git dir nested two
+// containers deep: a planted hook, a rewritten config, removed hooks, a new
+// commondir, a new info entry, and the git dir node itself replaced around
+// its own hooks and config.
 func TestGitMetaProtectedLines(t *testing.T) {
+	const inner = ".git/modules/m/modules/inner"
 	for _, c := range []struct {
 		snippet  string
 		wantSame bool
 	}{
-		{`rm .git/modules/m/modules/inner/HEAD && rmdir .git/modules/m/modules/inner/objects`, true},
-		{`echo P > .git/modules/m/modules/inner/hooks/pre-commit`, false},
-		{`echo P >> .git/modules/m/modules/inner/config`, false},
-		{`rm -rf .git/modules/m/modules/inner/hooks`, false},
+		{`rm ` + inner + `/HEAD && rmdir ` + inner + `/objects`, true},
+		{`echo P > ` + inner + `/hooks/pre-commit`, false},
+		{`echo P >> ` + inner + `/config`, false},
+		{`rm -rf ` + inner + `/hooks`, false},
+		{`echo ../evil > ` + inner + `/commondir`, false},
+		{`mkdir ` + inner + `/info && echo x > ` + inner + `/info/x`, false},
+		{`cd .git/modules/m/modules && mv inner i2 && mkdir inner && mv i2/hooks i2/config inner/`, false},
 	} {
 		root := canonGitTempDir(t)
 		writeGitFixture(t, root)

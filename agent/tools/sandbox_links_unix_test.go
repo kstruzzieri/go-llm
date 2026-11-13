@@ -141,37 +141,57 @@ func TestInspectSandboxWorkspaceBrokenModuleIsProtectedNotDescended(t *testing.T
 	}
 }
 
-// TestInspectSandboxWorkspaceStrippedModuleStaysGitDir: a module git dir a
-// command emptied of its writable files (HEAD, objects, refs: writable on both
-// backends) keeps the undeletable hooks/ or info/, so it is still a git dir at
-// the next spawn, not an intermediate whose hooks or info would be taken for
-// a git dir.
-func TestInspectSandboxWorkspaceStrippedModuleStaysGitDir(t *testing.T) {
-	for _, kept := range []string{"hooks", "info"} {
-		t.Run(kept, func(t *testing.T) {
-			root := canonGitTempDir(t)
-			writeGitFixture(t, root)
-			stripped := filepath.Join(root, ".git/modules/stripped")
-			for _, d := range []string{kept, "objects", "refs"} {
-				if err := os.MkdirAll(filepath.Join(stripped, d), 0o755); err != nil {
-					t.Fatal(err)
-				}
-			}
-			// No file at the top level; the read-only directory keeps its file.
-			if err := os.WriteFile(filepath.Join(stripped, kept, "x"), []byte("x\n"), 0o644); err != nil {
-				t.Fatal(err)
-			}
-			got, err := inspectSandboxWorkspace(root)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if !slices.Contains(got.gitDirs, stripped) || slices.Contains(got.intermediates, stripped) {
-				t.Errorf("stripped module: gitDirs %q, intermediates %q; want it a git dir", got.gitDirs, got.intermediates)
-			}
-			if slices.Contains(got.gitDirs, filepath.Join(stripped, kept)) {
-				t.Errorf("stripped module's %s taken for a git dir: %q", kept, got.gitDirs)
-			}
-		})
+// TestInspectSandboxWorkspaceSlashNamedHooksSubmodule: submodules named
+// libs/hooks and libs/a are both git dirs under the intermediate libs; a
+// sibling named hooks does not turn libs into a git dir that hides libs/a.
+func TestInspectSandboxWorkspaceSlashNamedHooksSubmodule(t *testing.T) {
+	root := canonGitTempDir(t)
+	writeGitFixture(t, root) // .git/modules/libs/a has a HEAD file
+	if err := os.MkdirAll(filepath.Join(root, ".git/modules/libs/hooks/objects"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".git/modules/libs/hooks/HEAD"), []byte("ref: refs/heads/main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := inspectSandboxWorkspace(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	libs := filepath.Join(root, ".git/modules/libs")
+	for _, g := range joinAll(root, ".git/modules/libs/a", ".git/modules/libs/hooks") {
+		if !slices.Contains(got.gitDirs, g) {
+			t.Errorf("%s not a git dir: %q", g, got.gitDirs)
+		}
+	}
+	if !slices.Contains(got.intermediates, libs) || slices.Contains(got.gitDirs, libs) {
+		t.Errorf("libs: gitDirs %q, intermediates %q; want it an intermediate", got.gitDirs, got.intermediates)
+	}
+}
+
+// TestInspectSandboxWorkspaceStrippedModuleIsIntermediate: a module git dir a
+// command stripped of HEAD and every top-level file is an intermediate, and
+// its hooks/ and info/ are read-only metadata, not git dirs.
+func TestInspectSandboxWorkspaceStrippedModuleIsIntermediate(t *testing.T) {
+	root := canonGitTempDir(t)
+	writeGitFixture(t, root)
+	applyGitMetaVariant(t, root, "stripped")
+	got, err := inspectSandboxWorkspace(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := filepath.Join(root, ".git/modules/s")
+	if !slices.Contains(got.intermediates, s) {
+		t.Errorf("s not an intermediate: %q", got.intermediates)
+	}
+	for _, m := range joinAll(root, ".git/modules/s/hooks", ".git/modules/s/info") {
+		if !slices.Contains(got.metadata, m) {
+			t.Errorf("%s not metadata: %q", m, got.metadata)
+		}
+	}
+	for _, g := range joinAll(root, ".git/modules/s", ".git/modules/s/hooks", ".git/modules/s/info") {
+		if slices.Contains(got.gitDirs, g) {
+			t.Errorf("%s taken for a git dir: %q", g, got.gitDirs)
+		}
 	}
 }
 
