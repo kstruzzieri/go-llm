@@ -270,6 +270,7 @@ func realBwrapRun(t *testing.T, cfg SandboxConfig, ws string, argv []string) exe
 		Env:           []string{"PATH=/usr/bin:/bin", "HOME=" + bwrapTestHome},
 		WorkspaceRoot: ws,
 		ExeIdentity:   execIdentityOf(t, argv[0]),
+		Screen:        testScreen(),
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -692,6 +693,7 @@ func TestBwrapTimeoutKillsTree(t *testing.T) {
 		Env:           []string{"PATH=/usr/bin:/bin", "HOME=" + bwrapTestHome},
 		WorkspaceRoot: ws,
 		ExeIdentity:   execIdentityOf(t, helper),
+		Screen:        testScreen(),
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 	defer cancel()
@@ -949,6 +951,19 @@ func TestBwrapPublicPlanToInvoke(t *testing.T) {
 	if !strings.Contains(result.Content, "exit code: 0") {
 		t.Fatalf("invoke result = %q", result.Content)
 	}
+}
+
+// TestBwrapRunScreensOutput: the backend's by-value spec copy keeps the
+// screen, and the match note survives the backend's result handling.
+func TestBwrapRunScreensOutput(t *testing.T) {
+	// containment: CMP-EXEC-CREDENTIAL-OUTPUT-BWRAP
+	requireBwrapCapability(t)
+	ws := wsTempDir(t)
+	tools, err := NewSandboxedExecTools(ws, SandboxConfig{Runtime: SandboxRuntimeBwrap})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertScreensOutput(t, tools[0].(*RunCommand), ws)
 }
 
 // TestBwrapBehavioralApprovedExecutableShapes: the identity check (#553)

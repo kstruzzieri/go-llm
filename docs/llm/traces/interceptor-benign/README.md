@@ -264,6 +264,15 @@ hand-authored in `delegated.json` and appended unchanged; a test checks that
 the two agree. `TestBenignCorpusRegen` rebuilds the traces twice and compares
 them byte for byte with `traces/`.
 
+The traces carry the `run_command` and `start_command` descriptions as they
+were at registration. #777 later added one sentence to both descriptions in
+the product: commands that name credential files are refused, and the content
+of those files is withheld from output. The builder leaves that sentence out,
+so the registered trace hashes stay valid. A new registration would include
+the sentence. That builder edit changed `builder_revision` (see Registration
+below), so `registration.json` and the report generated from it were
+regenerated; no trace changed.
+
 ## Registration (spec §6.7)
 
 `registration.json` is committed before any capture, and each run records its

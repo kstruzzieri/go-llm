@@ -475,6 +475,7 @@ func bwrapTestSpec(t *testing.T, ws string) execSpec {
 		Env:           []string{"PATH=/usr/bin", "HOME=/home/u", "TMPDIR=/ambient"},
 		WorkspaceRoot: ws,
 		ExeIdentity:   execIdentityOf(t, "/bin/sh"),
+		Screen:        testScreen(),
 	}
 }
 

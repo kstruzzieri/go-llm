@@ -30,7 +30,7 @@ type Invariant struct {
 }
 
 // Check is the sealed evaluator vocabulary. Tables are composed from the
-// shipped value kinds (PathDeny, CredentialPath, RemoteScript);
+// shipped value kinds (PathDeny, CredentialPath, CredentialArgv, RemoteScript);
 // NewInvariants rejects anything else, pointers included, so a check can
 // neither panic nor silently disable enforcement.
 type Check interface {
@@ -196,7 +196,7 @@ func componentPattern(names []string) *regexp.Regexp {
 // files, so the two readers cannot drift (#627).
 func IsCredentialPath(p string) bool {
 	parts := strings.Split(normalizePath(p), "/")
-	base, dirs := parts[len(parts)-1], parts[:len(parts)-1]
+	base := parts[len(parts)-1]
 	for _, c := range parts {
 		if slices.Contains(credentialDirs, c) {
 			return true
@@ -207,10 +207,15 @@ func IsCredentialPath(p string) bool {
 		return true
 	case strings.HasPrefix(base, ".env.") && !slices.Contains(envTemplates, base):
 		return true
-	case base == "config" && slices.Contains(dirs, ".git"):
-		return true
 	}
-	return false
+	return IsGitConfigPath(p)
+}
+
+// IsGitConfigPath reports whether p, after normalizePath, is a file named
+// config with a .git directory component.
+func IsGitConfigPath(p string) bool {
+	parts := strings.Split(normalizePath(p), "/")
+	return parts[len(parts)-1] == "config" && slices.Contains(parts[:len(parts)-1], ".git")
 }
 
 // IsProtectedPath reports whether p has a .git, .ssh, .gnupg, .aws or .kube
@@ -248,6 +253,10 @@ func DefaultInvariants() []Invariant {
 		{Tool: "read_file", Name: "credential_path", Field: "path", Check: CredentialPath{}},
 		{Tool: "run_command", Name: "remote_script_execution", Field: "argv", Check: RemoteScript{}},
 		{Tool: "start_command", Name: "remote_script_execution", Field: "argv", Check: RemoteScript{}},
+		{Tool: "run_command", Name: "credential_path", Field: "argv", Check: CredentialArgv{}},
+		{Tool: "start_command", Name: "credential_path", Field: "argv", Check: CredentialArgv{}},
+		{Tool: "run_command", Name: "protected_dir", Field: "dir", Check: protected},
+		{Tool: "start_command", Name: "protected_dir", Field: "dir", Check: protected},
 	}
 }
 
@@ -318,6 +327,8 @@ func ownedCheck(inv Invariant) (Check, error) {
 		}
 		return PathDeny{Pattern: &re}, nil
 	case CredentialPath:
+		return c, nil
+	case CredentialArgv:
 		return c, nil
 	case RemoteScript:
 		return c, nil
@@ -393,6 +404,7 @@ func (iv Invariants) InspectToolCall(_ context.Context, call agent.ToolCallInspe
 	}
 	tg := toolCallTarget(call.Call.ID)
 	var out []agent.Finding
+	ambiguous := make(map[string]bool)
 	for _, inv := range table {
 		raw, n := findMember(members, inv.Field)
 		switch n {
@@ -402,6 +414,10 @@ func (iv Invariants) InspectToolCall(_ context.Context, call agent.ToolCallInspe
 				out = append(out, tg.finding(inv.Name, agent.VerdictBlock, InvariantRisk, detail))
 			}
 		default:
+			if ambiguous[inv.Field] {
+				continue
+			}
+			ambiguous[inv.Field] = true
 			detail := fmt.Sprintf("argument %q appears %d times under equivalent spellings", inv.Field, n)
 			out = append(out, tg.finding(ambiguousRule, agent.VerdictBlock, InvariantRisk, detail))
 		}

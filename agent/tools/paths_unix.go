@@ -440,6 +440,29 @@ func (e workspaceEntry) openRegular() (*os.File, error) {
 	return os.NewFile(uintptr(fd), e.name), nil
 }
 
+// openListedDir opens the enumerated directory entry from its pinned
+// directory descriptor, never through a symlink, and checks it is the
+// directory listed. Nothing at the name now, or a non-directory, is
+// errFileChanged, as a changed identity is. A symbolic link at the name fails
+// the open with ELOOP, which is errSymlink; classifySkip announces it like a
+// change.
+func (e workspaceEntry) openListedDir() (*os.File, error) {
+	fd, err := unix.Openat(int(e.dir.Fd()), e.name, workspaceSearchFlags|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, reachabilityError(workspaceOpenError(err), false)
+	}
+	var st unix.Stat_t
+	if err := unix.Fstat(fd, &st); err != nil {
+		_ = unix.Close(fd)
+		return nil, err
+	}
+	if st.Dev != e.stat.Dev || st.Ino != e.stat.Ino {
+		_ = unix.Close(fd)
+		return nil, errFileChanged
+	}
+	return os.NewFile(uintptr(fd), e.name), nil
+}
+
 // openWalked opens a walked regular file from its pinned directory descriptor
 // and verifies (#613) that rel still reaches it after the walk's guard
 // decision. Every Unix walk entry holds its directory; any other entry fails
@@ -540,6 +563,96 @@ func (w *Workspace) readDirEntries(f *os.File, rel string) ([]fs.DirEntry, error
 	return entries, nil
 }
 
+// readDirEntriesTolerant is readDirEntries for walkTolerant. An entry whose
+// stat fails is left out and returned as a skip with that error (one
+// satisfying fs.ErrNotExist when the entry is gone), and the rest are kept. A
+// failure to read the names is a listingError.
+// The listing ends with the same reachability check; skips are returned
+// rather than reported, so a directory found unreachable contributes none.
+func (w *Workspace) readDirEntriesTolerant(f *os.File, rel string) ([]fs.DirEntry, []walkSkip, error) {
+	if w.beforeReadDir != nil {
+		w.beforeReadDir(rel)
+	}
+	err := w.screenSeams.list(filepath.ToSlash(rel))
+	var names []string
+	if err == nil {
+		names, err = f.Readdirnames(-1)
+	}
+	if err != nil {
+		return nil, nil, listingError{err}
+	}
+	sort.Strings(names)
+	entries := make([]fs.DirEntry, 0, len(names))
+	var skips []walkSkip
+	for _, name := range names {
+		entryRel := filepath.Join(rel, name)
+		var st unix.Stat_t
+		err := w.screenSeams.stat(filepath.ToSlash(entryRel))
+		if err == nil {
+			err = unix.Fstatat(int(f.Fd()), name, &st, unix.AT_SYMLINK_NOFOLLOW)
+		}
+		if err != nil {
+			skips = append(skips, walkSkip{rel: filepath.ToSlash(entryRel), err: err})
+			continue
+		}
+		entries = append(entries, workspaceEntry{name: name, stat: st, dir: f})
+	}
+	if err := w.verifyReachable(rel, f); err != nil {
+		return nil, nil, err
+	}
+	return entries, skips, nil
+}
+
+// walkSkip is an entry walkTolerant went past: its slash path and why.
+type walkSkip struct {
+	rel string
+	err error
+}
+
+// walkOptions turn walkDir into walkTolerant's go-on walk; nil is the strict
+// walk.
+type walkOptions struct {
+	ignored func(rel string, d fs.DirEntry) error
+	skip    func(walkSkip)
+}
+
+// dirFailure is a failure of the directory walkDir was given, returned to
+// its parent, which tells it from an error fn returned and goes past it.
+type dirFailure struct{ err error }
+
+func (e dirFailure) Error() string { return e.err.Error() }
+func (e dirFailure) Unwrap() error { return e.err }
+
+// listingError marks a directory whose names could not be read.
+type listingError struct{ err error }
+
+func (e listingError) Error() string { return e.err.Error() }
+func (e listingError) Unwrap() error { return e.err }
+
+// walkFatal reports an error no walk goes past.
+func walkFatal(err error) bool {
+	return errors.Is(err, ErrRootReplaced) || errors.Is(err, errAnchorUnreachable) || errors.Is(err, errWalkEntryUnheld)
+}
+
+// fail returns err, a failure of the directory being walked, as the walk
+// should report it: unchanged for the strict walk (o == nil) or when no walk
+// goes past it, and as a dirFailure otherwise.
+func (o *walkOptions) fail(err error) error {
+	if o == nil || walkFatal(err) {
+		return err
+	}
+	return dirFailure{err}
+}
+
+// anchorError wraps a failure at the walk's own root with
+// errAnchorUnreachable, unless it already ends every walk.
+func anchorError(err error) error {
+	if errors.Is(err, ErrRootReplaced) || errors.Is(err, errAnchorUnreachable) {
+		return err
+	}
+	return fmt.Errorf("%w: %w", errAnchorUnreachable, err)
+}
+
 // verifyWalkedParent binds a listed name to its held directory after the
 // walk's entry guard. Membership and metadata remain an enumeration snapshot.
 // Every Unix walk entry holds its directory; any other entry fails closed
@@ -559,31 +672,97 @@ func (w *Workspace) walk(ctx context.Context, fn func(string, fs.DirEntry) error
 		return err
 	}
 	defer release()
-	return w.walkDir(ctx, root, "", fn)
+	return w.walkDir(ctx, root, "", fn, nil)
 }
-func (w *Workspace) walkDir(ctx context.Context, parent *os.File, base string, fn func(string, fs.DirEntry) error) error {
+
+// walkTolerant visits what walk visits, and also what the workspace scope
+// guard hides, and calls ignored with each directory ignoreDirs skips; it
+// goes past what one entry's failure would end walk on. It ignores the guard
+// because the guard limits what the model's file tools may see, while a
+// command is not confined by it: the screen built from this walk shows the
+// model nothing and must see what a command can.
+//
+// The walk ends, returning the error, when the root cannot be opened or its
+// names cannot be read (wrapped with errAnchorUnreachable unless it is
+// ErrRootReplaced); on ErrRootReplaced, errAnchorUnreachable or
+// errWalkEntryUnheld from any step; on a context error; and on an error from
+// fn or ignored.
+//
+// It reports through skip, and goes on past: an entry whose stat fails while
+// its directory is listed (satisfying fs.ErrNotExist when it is gone); a
+// subdirectory that cannot be opened or changed identity since it was listed;
+// and a subdirectory whose names cannot be read (its error is a listingError)
+// or that is no longer reachable once listed. ignored and skip must be
+// non-nil.
+//
+// Before it goes past a subdirectory's failure, and after every call to
+// ignored that returned nil, it checks the held parent is still reachable,
+// and returns that error instead: a failure below a root that was just
+// replaced is never only a skip.
+func (w *Workspace) walkTolerant(ctx context.Context, fn func(rel string, d fs.DirEntry) error, ignored func(rel string, d fs.DirEntry) error, skip func(walkSkip)) (resultErr error) {
+	defer func() { resultErr = w.scopedPathError(resultErr) }()
+	root, release, err := w.workspaceRoot()
+	if err != nil {
+		return anchorError(err)
+	}
+	defer release()
+	err = w.walkDir(ctx, root, "", fn, &walkOptions{ignored: ignored, skip: skip})
+	if df, ok := err.(dirFailure); ok {
+		return anchorError(df.err)
+	}
+	return err
+}
+
+// walkDir walks the directory parent holds, at base. With nil opts it is the
+// strict walk; with opts a failure of this directory itself (it cannot be
+// listed, or is no longer reachable) is returned as a dirFailure, and a
+// subdirectory's is reported through opts.skip after the held directory is
+// rechecked.
+func (w *Workspace) walkDir(ctx context.Context, parent *os.File, base string, fn func(string, fs.DirEntry) error, opts *walkOptions) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	fd, err := unix.Openat(int(parent.Fd()), ".", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
 	if err != nil {
-		return err
+		if opts != nil {
+			err = listingError{err}
+		}
+		return opts.fail(err)
 	}
 	f := os.NewFile(uintptr(fd), ".")
 	defer func() { _ = f.Close() }()
-	entries, err := w.readDirEntries(f, base)
+	var entries []fs.DirEntry
+	if opts == nil {
+		entries, err = w.readDirEntries(f, base)
+	} else {
+		var skips []walkSkip
+		entries, skips, err = w.readDirEntriesTolerant(f, base)
+		for _, s := range skips {
+			opts.skip(s)
+		}
+	}
 	if err != nil {
-		return err
+		return opts.fail(err)
 	}
 	for _, entry := range entries {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 		if entry.IsDir() && ignoreDirs[entry.Name()] {
+			if opts != nil {
+				// ignored does its own I/O; a root swapped during the call
+				// must not read as "nothing there".
+				if err := opts.ignored(filepath.ToSlash(filepath.Join(base, entry.Name())), entry); err != nil {
+					return err
+				}
+				if err := w.verifyReachable(base, f); err != nil {
+					return opts.fail(err)
+				}
+			}
 			continue
 		}
 		rel := filepath.Join(base, entry.Name())
-		if w.checkScope(filepath.Join(w.root, rel), false) != nil {
+		if opts == nil && w.checkScope(filepath.Join(w.root, rel), false) != nil {
 			continue
 		}
 		err := fn(filepath.ToSlash(rel), entry)
@@ -594,28 +773,50 @@ func (w *Workspace) walkDir(ctx context.Context, parent *os.File, base string, f
 			return err
 		}
 		if entry.IsDir() {
-			fd, err := unix.Openat(int(f.Fd()), entry.Name(), workspaceSearchFlags|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
-			if err != nil {
-				// #613: enumerated as a directory, so nothing (ENOENT) or a
-				// non-directory (ENOTDIR, incl. a symlink under O_DIRECTORY)
-				// at this name now is a changed path, as the identity check is.
-				return reachabilityError(workspaceOpenError(err), false)
-			}
-			child := os.NewFile(uintptr(fd), entry.Name())
-			var st unix.Stat_t
-			err = unix.Fstat(fd, &st)
-			prior := entry.(workspaceEntry).stat
-			if err == nil && (st.Dev != prior.Dev || st.Ino != prior.Ino) {
-				err = errFileChanged
-			}
-			if err == nil {
-				err = w.walkDir(ctx, child, rel, fn)
-			}
-			_ = child.Close()
-			if err != nil {
+			err := w.walkSubdir(ctx, f, entry, rel, fn, opts)
+			df, ok := err.(dirFailure)
+			if err != nil && !ok {
 				return err
+			}
+			if ok {
+				if rerr := w.verifyReachable(base, f); rerr != nil {
+					return opts.fail(rerr)
+				}
+				opts.skip(walkSkip{rel: filepath.ToSlash(rel), err: df.err})
 			}
 		}
 	}
 	return nil
+}
+
+// walkSubdir opens the listed directory entry from f, checks it is the one
+// listed, and walks it. With opts, an open or identity failure is a
+// dirFailure, and opts' openErr seam is asked first.
+func (w *Workspace) walkSubdir(ctx context.Context, f *os.File, entry fs.DirEntry, rel string, fn func(string, fs.DirEntry) error, opts *walkOptions) error {
+	var err error
+	if opts != nil {
+		err = w.screenSeams.open(filepath.ToSlash(rel))
+	}
+	fd := -1
+	if err == nil {
+		fd, err = unix.Openat(int(f.Fd()), entry.Name(), workspaceSearchFlags|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	}
+	if err != nil {
+		// #613: enumerated as a directory, so nothing (ENOENT) or a
+		// non-directory (ENOTDIR, incl. a symlink under O_DIRECTORY)
+		// at this name now is a changed path, as the identity check is.
+		return opts.fail(reachabilityError(workspaceOpenError(err), false))
+	}
+	child := os.NewFile(uintptr(fd), entry.Name())
+	defer func() { _ = child.Close() }()
+	var st unix.Stat_t
+	err = unix.Fstat(fd, &st)
+	prior := entry.(workspaceEntry).stat
+	if err == nil && (st.Dev != prior.Dev || st.Ino != prior.Ino) {
+		err = errFileChanged
+	}
+	if err != nil {
+		return opts.fail(err)
+	}
+	return w.walkDir(ctx, child, rel, fn, opts)
 }

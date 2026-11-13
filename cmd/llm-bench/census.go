@@ -468,7 +468,10 @@ func (e *censusEnv) observe(ctx context.Context, carrier, path string) (censusOb
 // reads stdout with command_tail's default arguments, on a fresh manager so
 // its one job is unambiguous. The handle is random hex that command_tail
 // renders: a draw that any default interceptor flags on its own is redrawn
-// so findings stay a function of the file.
+// so findings stay a function of the file. A start an interceptor blocked
+// (#777: argv naming a credential path) leaves no job; the run then ends
+// after the start and the blocked start is the observation. A start that
+// left no job for any other reason fails the census.
 func (e *censusEnv) commandTail(ctx context.Context, path string) (censusObservation, error) {
 	for range 8 {
 		mgr, tools, err := censusExecTools(e.root)
@@ -476,17 +479,25 @@ func (e *censusEnv) commandTail(ctx context.Context, path string) (censusObserva
 			return censusObservation{}, err
 		}
 		var handle string
+		var awaitErr error
 		start := censusCall(0, "start_command", map[string]any{"argv": []string{"cat", "./" + path}})
 		tail := func() (*provider.ToolCall, error) {
-			var err error
-			handle, err = censusAwaitJob(ctx, mgr)
-			return censusCall(1, "command_tail", map[string]any{"handle": handle}), err
+			if handle, awaitErr = censusAwaitJob(ctx, mgr); awaitErr != nil {
+				return nil, nil // end the run; judged against the start's record below
+			}
+			return censusCall(1, "command_tail", map[string]any{"handle": handle}), nil
 		}
-		o, err := e.run(ctx, "command_tail", path, []agent.Tool{tools[1], tools[3]}, nil,
+		o, calls, err := e.runRecord(ctx, "command_tail", path, []agent.Tool{tools[1], tools[3]}, nil,
 			[]func() (*provider.ToolCall, error){func() (*provider.ToolCall, error) { return start, nil }, tail})
 		mgr.Shutdown()
 		if err != nil {
 			return o, err
+		}
+		if awaitErr != nil {
+			if len(calls) == 1 && calls[0].Name == "start_command" && calls[0].Blocked {
+				return o, nil
+			}
+			return censusObservation{}, awaitErr
 		}
 		flagged, err := censusHandleHasFindings(ctx, handle)
 		if err != nil {
@@ -615,6 +626,9 @@ func (c *censusCaller) Chat(context.Context, provider.ChatRequest, func(provider
 	if err != nil {
 		return agent.ModelResult{}, err
 	}
+	if call == nil { // the script ended early
+		return agent.ModelResult{Response: provider.ChatResponse{Content: "done", Done: true}}, nil
+	}
 	c.last = call
 	return agent.ModelResult{Response: provider.ChatResponse{ToolCalls: []provider.ToolCall{*call}}}, nil
 }
@@ -688,6 +702,12 @@ func (*censusProbe) OnToken(context.Context, agent.TokenEvent) error       { ret
 // of the final call (for the verifier carrier, the verifier output that
 // follows the write's own observation).
 func (e *censusEnv) run(ctx context.Context, carrier, path string, tools []agent.Tool, verifier agent.Verifier, script []func() (*provider.ToolCall, error)) (censusObservation, error) {
+	o, _, err := e.runRecord(ctx, carrier, path, tools, verifier, script)
+	return o, err
+}
+
+// runRecord is run that also returns the run's tool-call records.
+func (e *censusEnv) runRecord(ctx context.Context, carrier, path string, tools []agent.Tool, verifier agent.Verifier, script []func() (*provider.ToolCall, error)) (censusObservation, []agent.ToolCallRecord, error) {
 	probe := &censusProbe{}
 	opts := []agent.Option{agent.WithInterceptors(append(interceptor.Defaults(), probe)...)}
 	if verifier != nil {
@@ -698,22 +718,22 @@ func (e *censusEnv) run(ctx context.Context, carrier, path string, tools []agent
 		Goal: "census", Tools: tools, MaxSteps: len(script) + 1, Approver: approveAll{},
 	}, probe)
 	if probe.err != nil {
-		return censusObservation{}, probe.err
+		return censusObservation{}, nil, probe.err
 	}
 	// Only a bare BlockedError is an observation (a terminal block of the
 	// scripted call); one joined with a hook error is a failure.
 	if blocked := (*agent.BlockedError)(nil); err != nil && (!errors.As(err, &blocked) || err != error(blocked)) {
-		return censusObservation{}, err
+		return censusObservation{}, nil, err
 	}
 	var risk []agent.Finding
 	if res.Risk != nil {
 		risk = res.Risk.Findings
 	}
 	if !slices.Equal(probe.all, risk) {
-		return censusObservation{}, fmt.Errorf("census: the probe saw %d finding(s), Result.Risk holds %d, or they differ", len(probe.all), len(risk))
+		return censusObservation{}, nil, fmt.Errorf("census: the probe saw %d finding(s), Result.Risk holds %d, or they differ", len(probe.all), len(risk))
 	}
 	if caller.last == nil {
-		return censusObservation{}, errors.New("the scripted call was never emitted")
+		return censusObservation{}, nil, errors.New("the scripted call was never emitted")
 	}
 	var final *censusInspection
 	seen := 0
@@ -723,7 +743,7 @@ func (e *censusEnv) run(ctx context.Context, carrier, path string, tools []agent
 		}
 	}
 	if carrier == "verifier" && seen != 2 {
-		return censusObservation{}, fmt.Errorf("verifier output inspections = %d, want the write and the verifier", seen)
+		return censusObservation{}, nil, fmt.Errorf("verifier output inspections = %d, want the write and the verifier", seen)
 	}
 	o := censusObservation{Stratum: e.stratum, Path: path, Carrier: carrier, Findings: []censusFinding{}}
 	for _, t := range tools {
@@ -748,5 +768,5 @@ func (e *censusEnv) run(ctx context.Context, carrier, path string, tools []agent
 	for _, f := range findings {
 		o.Findings = append(o.Findings, censusFinding{Interceptor: f.Interceptor, Rule: f.Rule, Verdict: f.Verdict.String(), Target: f.Target.String(), Group: f.Group, Alt: f.Alternative})
 	}
-	return o, nil
+	return o, res.ToolCalls, nil
 }

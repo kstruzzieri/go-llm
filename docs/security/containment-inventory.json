@@ -84,7 +84,9 @@
         "TestContainment/D3=capability:unix",
         "TestContainment/B1=capability:exec",
         "TestContainment/V1=capability:exec",
-        "TestContainment/V2=capability:exec"
+        "TestContainment/V2=capability:exec",
+        "TestContainment/D4=capability:exec",
+        "TestContainment/D5=capability:exec"
       ]
     }
   ],
@@ -2530,6 +2532,30 @@
           "test": "TestHardeningContracts/Active/Invariants/local_command",
           "file": "agent/hardening_contract_test.go",
           "func": "runInvariantContracts"
+        },
+        {
+          "package": "./agent",
+          "test": "TestHardeningContracts/Active/Invariants/run_env_argv",
+          "file": "agent/hardening_contract_test.go",
+          "func": "runInvariantContracts"
+        },
+        {
+          "package": "./agent",
+          "test": "TestHardeningContracts/Active/Invariants/start_env_argv",
+          "file": "agent/hardening_contract_test.go",
+          "func": "runInvariantContracts"
+        },
+        {
+          "package": "./agent",
+          "test": "TestHardeningContracts/Active/Invariants/run_dir_ssh",
+          "file": "agent/hardening_contract_test.go",
+          "func": "runInvariantContracts"
+        },
+        {
+          "package": "./agent",
+          "test": "TestHardeningContracts/Active/Invariants/start_dir_git",
+          "file": "agent/hardening_contract_test.go",
+          "func": "runInvariantContracts"
         }
       ],
       "profiles": [
@@ -2537,7 +2563,10 @@
         "darwin-host"
       ],
       "mutations": [
-        "M-039"
+        "M-039",
+        "M-141",
+        "M-145",
+        "M-186"
       ],
       "artifacts": []
     },
@@ -3074,6 +3103,490 @@
       ],
       "refs": [],
       "profiles": [],
+      "mutations": [],
+      "artifacts": []
+    },
+    {
+      "id": "CMP-EXEC-CREDENTIAL-OUTPUT",
+      "source": "issue-777:7",
+      "requirement": "Under the always-on guards: (1) a `run_command` or `start_command` is refused when an argv word names a credential path other than as a git exclusion pathspec, or when its `dir` is a protected directory. (2) Exec output (foreground, background tail, post-write verifier) does not carry a patch's `diff` line or `+++` line that shows a credential path, nor anything after it on the same stream; nor a line in which a `:`-separated field other than the last is a credential path; nor a line of 8 bytes or more, or a `NAME=value` value of 8 bytes or more (as written, inside its quotes, or up to a `#`), that was read from a workspace credential-path file just before the command started (for `.git/config`: its lines, URL userinfo and password, and `extraheader` values; for a line of another credential file that is itself a URL with userinfo, as each line of `.git-credentials` is: the same userinfo and password). (3) Both output streams are withheld when that read was incomplete, unless the only entries missed changed during the read, which is announced. Outside this row: encoded, transformed or reshaped output; two credential values printed overlapping (the end of one is the start of the other), where matches are replaced longest key first and never overlap, so the bytes of the shorter value outside the overlap are delivered, whichever is printed first (of two values of equal length, those of the one read later); values under 8 bytes or spanning a line break; a value that ends in an unfinished terminal escape sequence, when the output completes the sequence; values of files not shaped `NAME=value` printed without their line, other than the userinfo of a line that is itself a URL; the userinfo of a URL when it holds an unencoded space or tab (git writes these percent-encoded); a patch whose `diff` and `+++` lines do not show the credential path; committed content printed outside a patch or by object ID; content that changed after it was read; entries that changed during the read (announced); files outside the workspace; files under directories the workspace walk does not descend (`.git`, `vendor`, `node_modules`, `.superpowers`), a submodule's `.git/modules/<name>/config` among those unread files (the one exception is the `config` directly inside each `.git` directory the walk meets, which is read); credential-named symbolic links, which are not read; copies read back through file tools; AgentFlow and MCP output.",
+      "status": "",
+      "owner": "",
+      "layer": "aggregate",
+      "exempt": "",
+      "scenarios": [
+        "D4",
+        "D5"
+      ],
+      "refs": [
+        {
+          "package": "./cmd/golem",
+          "test": "TestContainment/D4",
+          "file": "cmd/golem/containment_scenarios_test.go",
+          "func": "d4"
+        },
+        {
+          "package": "./cmd/golem",
+          "test": "TestContainment/D5",
+          "file": "cmd/golem/containment_scenarios_test.go",
+          "func": "d5"
+        },
+        {
+          "package": "./agent/interceptor",
+          "test": "TestWordNamesCredentialPath",
+          "file": "agent/interceptor/credential_argv_test.go",
+          "func": "TestWordNamesCredentialPath"
+        },
+        {
+          "package": "./agent/interceptor",
+          "test": "TestCredentialArgvCheck",
+          "file": "agent/interceptor/credential_argv_test.go",
+          "func": "TestCredentialArgvCheck"
+        },
+        {
+          "package": "./agent/interceptor",
+          "test": "TestExecDirInvariant",
+          "file": "agent/interceptor/invariants_test.go",
+          "func": "TestExecDirInvariant"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestCredentialPatchHeader",
+          "file": "agent/tools/screen_path_test.go",
+          "func": "TestCredentialPatchHeader"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestCredentialPathPrefix",
+          "file": "agent/tools/screen_path_test.go",
+          "func": "TestCredentialPathPrefix"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestCredentialFileKeys",
+          "file": "agent/tools/screen_keys_test.go",
+          "func": "TestCredentialFileKeys"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestScreenStream",
+          "file": "agent/tools/screen_test.go",
+          "func": "TestScreenStream"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestClassifySkip",
+          "file": "agent/tools/screen_classify_test.go",
+          "func": "TestClassifySkip"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestWalkTolerant",
+          "file": "agent/tools/walk_tolerant_test.go",
+          "func": "TestWalkTolerant"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestBuildOutputScreenBounds",
+          "file": "agent/tools/screen_build_test.go",
+          "func": "TestBuildOutputScreenBounds"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestBuildOutputScreenSkips",
+          "file": "agent/tools/screen_build_test.go",
+          "func": "TestBuildOutputScreenSkips"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestBuildOutputScreenRootReplaced",
+          "file": "agent/tools/screen_build_test.go",
+          "func": "TestBuildOutputScreenRootReplaced"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestBuildOutputScreenGitConfigAlias",
+          "file": "agent/tools/screen_build_test.go",
+          "func": "TestBuildOutputScreenGitConfigAlias"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestBuildOutputScreenGitConfigRootReplaced",
+          "file": "agent/tools/screen_build_test.go",
+          "func": "TestBuildOutputScreenGitConfigRootReplaced"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestRunCommandScreensOutput",
+          "file": "agent/tools/exec_screen_test.go",
+          "func": "TestRunCommandScreensOutput"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestRunCommandNoScreenFails",
+          "file": "agent/tools/exec_screen_test.go",
+          "func": "TestRunCommandNoScreenFails"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestRunCommandWithheldStreams",
+          "file": "agent/tools/exec_screen_test.go",
+          "func": "TestRunCommandWithheldStreams"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestRunCommandUnreadableAfterFirstCommand",
+          "file": "agent/tools/exec_screen_test.go",
+          "func": "TestRunCommandUnreadableAfterFirstCommand"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestRunCommandRootReplacedNotRun",
+          "file": "agent/tools/exec_screen_test.go",
+          "func": "TestRunCommandRootReplacedNotRun"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestVerifyFailingObservationScreened",
+          "file": "agent/tools/exec_screen_test.go",
+          "func": "TestVerifyFailingObservationScreened"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestBackgroundTailScreened",
+          "file": "agent/tools/background_screen_test.go",
+          "func": "TestBackgroundTailScreened"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestBackgroundCutStopsTail",
+          "file": "agent/tools/background_screen_test.go",
+          "func": "TestBackgroundCutStopsTail"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestBackgroundCarriageReturnBeforeExit",
+          "file": "agent/tools/background_screen_test.go",
+          "func": "TestBackgroundCarriageReturnBeforeExit"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestBackgroundNoScreenFails",
+          "file": "agent/tools/background_screen_test.go",
+          "func": "TestBackgroundNoScreenFails"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestCaptureSitesAreKnown",
+          "file": "agent/tools/screen_sites_test.go",
+          "func": "TestCaptureSitesAreKnown"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestBuildOutputScreenIgnoresGuard",
+          "file": "agent/tools/screen_build_test.go",
+          "func": "TestBuildOutputScreenIgnoresGuard"
+        },
+        {
+          "package": "./agent/interceptor",
+          "test": "TestScriptFields",
+          "file": "agent/interceptor/credential_argv_test.go",
+          "func": "TestScriptFields"
+        },
+        {
+          "package": "./agent/interceptor",
+          "test": "TestIsGitConfigPath",
+          "file": "agent/interceptor/credential_argv_test.go",
+          "func": "TestIsGitConfigPath"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestStripCSI",
+          "file": "agent/tools/screen_path_test.go",
+          "func": "TestStripCSI"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestGitUnquote",
+          "file": "agent/tools/screen_path_test.go",
+          "func": "TestGitUnquote"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestScreenNotes",
+          "file": "agent/tools/screen_test.go",
+          "func": "TestScreenNotes"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestBuildOutputScreenKeys",
+          "file": "agent/tools/screen_build_test.go",
+          "func": "TestBuildOutputScreenKeys"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestBuildOutputScreenGitConfigHeld",
+          "file": "agent/tools/screen_build_test.go",
+          "func": "TestBuildOutputScreenGitConfigHeld"
+        }
+      ],
+      "profiles": [
+        "linux-host",
+        "darwin-host"
+      ],
+      "mutations": [
+        "M-141",
+        "M-142",
+        "M-143",
+        "M-144",
+        "M-145",
+        "M-146",
+        "M-147",
+        "M-148",
+        "M-149",
+        "M-150",
+        "M-151",
+        "M-152",
+        "M-153",
+        "M-154",
+        "M-155",
+        "M-156",
+        "M-157",
+        "M-158",
+        "M-159",
+        "M-160",
+        "M-161",
+        "M-162",
+        "M-163",
+        "M-164",
+        "M-165",
+        "M-166",
+        "M-167",
+        "M-168",
+        "M-169",
+        "M-170",
+        "M-171",
+        "M-172",
+        "M-173",
+        "M-174",
+        "M-175",
+        "M-176",
+        "M-177",
+        "M-178",
+        "M-181",
+        "M-182",
+        "M-183",
+        "M-184",
+        "M-185",
+        "M-186",
+        "M-187",
+        "M-188",
+        "M-189",
+        "M-190",
+        "M-191",
+        "M-192",
+        "M-193",
+        "M-194",
+        "M-195",
+        "M-196",
+        "M-197",
+        "M-198",
+        "M-199",
+        "M-200",
+        "M-201",
+        "M-202",
+        "M-203",
+        "M-204",
+        "M-205",
+        "M-206",
+        "M-207",
+        "M-208",
+        "M-209",
+        "M-210",
+        "M-211",
+        "M-212",
+        "M-213",
+        "M-214",
+        "M-215",
+        "M-216",
+        "M-217",
+        "M-218",
+        "M-219",
+        "M-220",
+        "M-221",
+        "M-222",
+        "M-223",
+        "M-224",
+        "M-225",
+        "M-226",
+        "M-227",
+        "M-228",
+        "M-229",
+        "M-230",
+        "M-231",
+        "M-232",
+        "M-233",
+        "M-234",
+        "M-235",
+        "M-236",
+        "M-237",
+        "M-238",
+        "M-239",
+        "M-240",
+        "M-241",
+        "M-242",
+        "M-243",
+        "M-244",
+        "M-245",
+        "M-246",
+        "M-247",
+        "M-248",
+        "M-249",
+        "M-250",
+        "M-251",
+        "M-252",
+        "M-253",
+        "M-254",
+        "M-255",
+        "M-256",
+        "M-257",
+        "M-258",
+        "M-259",
+        "M-260",
+        "M-261",
+        "M-262",
+        "M-263",
+        "M-264",
+        "M-265",
+        "M-266",
+        "M-267",
+        "M-268",
+        "M-269",
+        "M-270",
+        "M-271",
+        "M-272",
+        "M-273",
+        "M-274",
+        "M-275",
+        "M-276",
+        "M-277",
+        "M-278",
+        "M-279",
+        "M-280",
+        "M-281",
+        "M-282",
+        "M-283",
+        "M-284",
+        "M-285",
+        "M-286",
+        "M-287",
+        "M-288",
+        "M-289",
+        "M-290",
+        "M-291",
+        "M-292",
+        "M-293",
+        "M-294",
+        "M-295",
+        "M-296",
+        "M-297",
+        "M-298",
+        "M-299",
+        "M-300",
+        "M-301",
+        "M-302",
+        "M-303",
+        "M-304",
+        "M-305",
+        "M-306",
+        "M-307",
+        "M-308",
+        "M-309",
+        "M-310",
+        "M-311",
+        "M-312",
+        "M-313",
+        "M-314",
+        "M-315",
+        "M-316",
+        "M-317",
+        "M-318",
+        "M-319",
+        "M-320",
+        "M-321",
+        "M-322",
+        "M-323",
+        "M-324",
+        "M-325",
+        "M-326",
+        "M-327",
+        "M-328",
+        "M-329",
+        "M-330",
+        "M-331",
+        "M-332",
+        "M-333",
+        "M-334",
+        "M-335",
+        "M-336",
+        "M-337",
+        "M-338",
+        "M-339",
+        "M-340",
+        "M-341",
+        "M-342",
+        "M-343",
+        "M-344",
+        "M-345",
+        "M-346"
+      ],
+      "artifacts": []
+    },
+    {
+      "id": "CMP-EXEC-CREDENTIAL-OUTPUT-SEATBELT",
+      "source": "issue-777:7",
+      "requirement": "A command run under the Seatbelt backend is captured through the same screen.",
+      "status": "verified",
+      "owner": "",
+      "layer": "focused",
+      "exempt": "",
+      "scenarios": [],
+      "refs": [
+        {
+          "package": "./agent/tools",
+          "test": "TestSeatbeltRunScreensOutput",
+          "file": "agent/tools/exec_darwin_test.go",
+          "func": "TestSeatbeltRunScreensOutput"
+        }
+      ],
+      "profiles": [
+        "seatbelt"
+      ],
+      "mutations": [
+        "M-179"
+      ],
+      "artifacts": []
+    },
+    {
+      "id": "CMP-EXEC-CREDENTIAL-OUTPUT-BWRAP",
+      "source": "issue-777:7",
+      "requirement": "A command run under the bwrap backend is captured through the same screen.",
+      "status": "unobserved(bwrap)",
+      "owner": "",
+      "layer": "focused",
+      "exempt": "the native-profile mutation needs a Linux host with bwrap: the Docker ci-local image has no /usr/bin/bwrap, so at 18ca5d70 the ref fails its capability check there before any mutant can be told apart, and the mutation ledger leaves M-180 unassigned for it. Follow-up, tracked in the PR body: on a Linux host with bwrap, apply an M-ledger-style mutation that builds the bwrap backend's wrapped spec without the screen (wrapped.Screen = nil after wrapped := spec in exec_linux.go, and a keyless newOutputScreen(nil) in its place as a second variant), run GO_LLM_REQUIRE_BWRAP=1 go test -count=1 -run '^TestBwrapRunScreensOutput$' ./agent/tools, record it in docs/security/containment-mutations.md and cite it here",
+      "scenarios": [],
+      "refs": [
+        {
+          "package": "./agent/tools",
+          "test": "TestBwrapRunScreensOutput",
+          "file": "agent/tools/exec_linux_behavioral_test.go",
+          "func": "TestBwrapRunScreensOutput"
+        }
+      ],
+      "profiles": [
+        "bwrap"
+      ],
       "mutations": [],
       "artifacts": []
     },

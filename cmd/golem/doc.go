@@ -150,9 +150,29 @@
 // controls, and the BOM on HFS+; ::$DATA streams on Windows). These are
 // direct-access tripwires on named tool arguments, not confinement: search
 // skips the credential files and dispatch refuses a scope at or below .git,
-// .ssh, .gnupg, .aws or .kube, but run_command, retrieve, MCP tools, verifier
-// commands, edit_file's pre-approval match errors, and copies or hard links
-// under other names can still reach or expose the same files. The egress
+// .ssh, .gnupg, .aws or .kube, but commands can still reach them, and
+// retrieve, MCP tools, edit_file's pre-approval match errors, and copies or
+// hard links under other names can still expose the same files.
+//
+// A run_command or start_command is also refused (credential_path) when an
+// argv word names a credential path, as a whole or after any "=", ":" or "@",
+// after a long-form git pathspec's magic, or after a one-letter short option;
+// an inline shell script's fields are tested the same way. A git exclusion
+// pathspec (":!x", ":^x", ":(exclude)x") is exempt as a whole argv word only.
+// A script handed to another program inside one word (git -c 'alias.x=!cat
+// .env' x, python3 -c) is not refused. A dir at or below .git, .ssh, .gnupg,
+// .aws or .kube is refused (protected_dir); a directory change the command
+// makes itself is not. Command output (foreground, background, post-write
+// verifier) is screened at capture (#777): before each command the workspace's
+// credential files, .git/config included, are read, and every line or
+// NAME=value value of 8 bytes or more found there is replaced in the output by
+// a marker, ordinary values such as localhost included; a line whose
+// colon-separated prefix names a credential path is replaced whole; a patch
+// header naming one, or a line over 32 KiB, ends that stream's output; and a
+// result that withheld anything carries a "credential screen:" note. A read
+// that cannot be completed, a permission failure included, withholds both
+// streams; on platforms other than Linux and macOS output is always withheld.
+// docs/golem.md lists what the screen does not cover. The egress
 // classifier reads the argv of every run_command and start_command, and of any
 // other exec-class call (MCP tools included) whose arguments carry a top-level
 // argv string array, after peeling env, nohup, nice, time, timeout and stdbuf,

@@ -123,6 +123,16 @@ format compatibility, `fired` still records verifier `bytes` as 0.
 
 The committed results cover all six strata of the manifest.
 
+Note (2026-11-10, #777): the committed results were measured before #777
+changed the exec carriers. The manifest lists no credential-path file, so the
+refusal of commands that name one and the withholding of credential values
+change no row. 20 listed files (2 in `go-llm`, 18 in `go-src`) hold a record
+longer than 32768 bytes, and the exec carriers now cut the output at such a
+record. Up to 60 exec-carrier rows (20 files, 3 carriers) therefore describe
+the earlier output. The file is not regenerated here: that needs the census
+source trees and a re-frozen benign registration, which binds this file's
+digest.
+
 Each arm is a chain filtered from `interceptor.Defaults()` in library order,
 without the canary: `golem-default-guards` (G: `invariants`, `egress`,
 `child_scope_denials`), `guards+detectors` (G+D, adding `zero_width`,

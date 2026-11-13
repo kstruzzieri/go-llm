@@ -124,6 +124,7 @@ func (b *seatbeltBackend) runProbe(ctx context.Context, ws string) (err error) {
 		Dir:           ws,
 		WorkspaceRoot: ws,
 		ExeIdentity:   exeID,
+		Screen:        probeScreen(),
 	})
 	if err != nil {
 		return fmt.Errorf("tools: seatbelt unavailable on this host: %w", err)

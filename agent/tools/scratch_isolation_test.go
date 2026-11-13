@@ -330,7 +330,7 @@ func TestScratchForegroundEffectBudget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := rt.cfg.SnapshotTimeout + 90*time.Second + 2*rt.cfg.CaptureTimeout + scratchEffectGrace
+	want := rt.cfg.SnapshotTimeout + 90*time.Second + 2*rt.cfg.CaptureTimeout + scratchEffectGrace + defaultScreenLimits.budget
 	if plan.Effect.Timeout != want {
 		t.Fatalf("outer effect timeout = %v, want %v", plan.Effect.Timeout, want)
 	}
@@ -616,7 +616,7 @@ func TestScratchBackgroundEffectBudget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := rt.cfg.SnapshotTimeout + bgToolTimeout + 2*rt.cfg.CaptureTimeout + scratchEffectGrace
+	want := rt.cfg.SnapshotTimeout + bgToolTimeout + 2*rt.cfg.CaptureTimeout + scratchEffectGrace + 5*time.Second
 	if plan.Effect.Timeout != want {
 		t.Fatalf("outer start effect = %v, want %v", plan.Effect.Timeout, want)
 	}
@@ -665,7 +665,7 @@ func TestScratchBackgroundFailedStartMatrix(t *testing.T) {
 		sc, rt := scratchBackgroundTools(t, root, ScratchConfig{Enabled: true, MaxConcurrentSessions: 8}, manager)
 		// Fill the manager's four slots directly (no scratch).
 		for i := 0; i < backgroundActiveCap; i++ {
-			spec := execSpec{Path: "/bin/sh", Argv: []string{"sh", "-c", "sleep 30"}, Dir: root, Env: []string{"PATH=/usr/bin:/bin"}, WorkspaceRoot: root}
+			spec := execSpec{Path: "/bin/sh", Argv: []string{"sh", "-c", "sleep 30"}, Dir: root, Env: []string{"PATH=/usr/bin:/bin"}, WorkspaceRoot: root, Screen: testScreen()}
 			if _, err := manager.start(context.Background(), spec, "(workspace root)"); err != nil {
 				t.Fatal(err)
 			}
@@ -804,7 +804,7 @@ func TestScratchBackgroundWrapCoversAbandonedReap(t *testing.T) {
 		t.Fatal(err)
 	}
 	rt.tempBase = t.TempDir()
-	spec := execSpec{Path: "/bin/sh", Argv: []string{"sh", "-c", "sleep 5"}, Dir: rt.root, Env: []string{"PATH=/usr/bin:/bin"}, WorkspaceRoot: rt.root}
+	spec := execSpec{Path: "/bin/sh", Argv: []string{"sh", "-c", "sleep 5"}, Dir: rt.root, Env: []string{"PATH=/usr/bin:/bin"}, WorkspaceRoot: rt.root, Screen: testScreen()}
 	if scratchIdentitySupported {
 		spec.ExeIdentity = execIdentityOf(t, spec.Path)
 		spec.DirIdentity = execIdentityOf(t, rt.root)

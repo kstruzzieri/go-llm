@@ -83,6 +83,7 @@ func seatbeltLifetimeRun(b execBackend, lifetime, ws string, argv ...string) lif
 		Env:           []string{"PATH=/usr/bin:/bin", "HOME=" + os.Getenv("HOME")},
 		WorkspaceRoot: ws,
 		ExeIdentity:   fi,
+		Screen:        testScreen(),
 	}
 	if lifetime == "run" {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

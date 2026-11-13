@@ -65,6 +65,10 @@ type VerifyResult struct {
 // it before launch, so a cwd escape or a binary swap between approval and
 // that check fails closed. A swap after the check, or an in-place rewrite,
 // remains the documented launch residual (#484).
+//
+// Each Run first walks the workspace, and the command's output is screened
+// for the values of the workspace's credential files; a failed or bounded
+// read withholds both streams.
 type VerifyCommand struct {
 	ws      *Workspace
 	runner  commandRunner
@@ -206,10 +210,11 @@ func (v *VerifyCommand) Preview() string {
 // classify; once the command was launched, that error comes with the partial
 // result, including Notes.
 func (v *VerifyCommand) Run(ctx context.Context) (VerifyResult, error) {
-	spec, err := recheckExecPlan(v.ws, v.pending)
+	spec, err := recheckExecPlan(ctx, v.ws, v.pending)
 	if err != nil {
 		return VerifyResult{}, err
 	}
+	defer spec.Screen.release()
 	cctx, cancel := context.WithTimeout(ctx, v.pending.timeout)
 	defer cancel()
 

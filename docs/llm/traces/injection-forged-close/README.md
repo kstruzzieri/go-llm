@@ -85,6 +85,13 @@ against `traces/`; `TestForgedCloseCorpusBalance` pins the 10 trace IDs;
 names tool message 0's frame key and every forged-stale one names none;
 `TestForgedCloseRegistrationBindsCorpus` binds the census to the files.
 
+The traces carry the `run_command` and `start_command` descriptions as they
+were at registration. #777 later added one sentence to both descriptions in
+the product: commands that name credential files are refused, and the content
+of those files is withheld from output. The builder leaves that sentence out,
+so the registered trace hashes and the captured results stay valid. A new
+registration would include the sentence.
+
 Capture and report as in the [#452 README](../injection/README.md#regeneration),
 with `-registration docs/llm/traces/injection-forged-close/registration.json`:
 `-calibrate-capture` over `traces/inj-*.json`, then `-injection-report`, which
