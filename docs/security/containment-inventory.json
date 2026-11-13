@@ -1659,7 +1659,10 @@
         "linux-host",
         "windows"
       ],
-      "mutations": [],
+      "mutations": [
+        "M-403",
+        "M-404"
+      ],
       "artifacts": []
     },
     {
