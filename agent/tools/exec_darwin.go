@@ -453,7 +453,7 @@ func (b *seatbeltBackend) prepare(spec execSpec) (execSpec, func() error, error)
 	if err != nil {
 		return fail(err)
 	}
-	if err := validateSandboxWorkspaceLinks(spec.WorkspaceRoot); err != nil {
+	if _, err := inspectSandboxWorkspace(spec.WorkspaceRoot); err != nil {
 		return fail(err)
 	}
 	// Last, as bwrap does: an inheritable descriptor crosses the profile's

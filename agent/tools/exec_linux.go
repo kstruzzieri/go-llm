@@ -385,7 +385,7 @@ func (b *bwrapBackend) prepare(spec execSpec) (execSpec, error) {
 	if err != nil {
 		return execSpec{}, err
 	}
-	if err := validateSandboxWorkspaceLinks(spec.WorkspaceRoot); err != nil {
+	if _, err := inspectSandboxWorkspace(spec.WorkspaceRoot); err != nil {
 		return execSpec{}, err
 	}
 	wrapped := spec
