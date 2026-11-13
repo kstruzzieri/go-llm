@@ -55,6 +55,7 @@ func probeBackend(t *testing.T, execPath string) *seatbeltBackend {
 		starter:     unixStarter{},
 		tempBase:    base,
 		systemRoots: func(string) ([]string, error) { return []string{"/usr/lib", "/bin"}, nil },
+		inspect:     inspectSandboxWorkspace,
 	}
 }
 
@@ -456,6 +457,7 @@ func testSeatbeltBackend(t *testing.T, runner commandRunner) (*seatbeltBackend, 
 		systemRoots: func(string) ([]string, error) {
 			return []string{"/usr/lib", "/bin"}, nil
 		},
+		inspect: inspectSandboxWorkspace,
 	}, base
 }
 
@@ -1013,6 +1015,12 @@ func realSeatbeltRun(t *testing.T, cfg SandboxConfig, ws string, argv []string, 
 	if err != nil {
 		t.Fatal(err)
 	}
+	return seatbeltRunWith(t, backend, ws, argv, extraEnv...)
+}
+
+// seatbeltRunWith is realSeatbeltRun over a caller-built backend.
+func seatbeltRunWith(t *testing.T, backend commandRunner, ws string, argv []string, extraEnv ...string) execResult {
+	t.Helper()
 	spec := execSpec{
 		Path:          argv[0],
 		Argv:          argv,
@@ -3140,5 +3148,209 @@ func TestProbeSeatbeltUnavailableInsideASandbox(t *testing.T) {
 	const want = "PROBE-RESULT: tools: seatbelt unavailable on this host"
 	if !strings.Contains(string(out), want) {
 		t.Fatalf("sandboxed child output:\n%s\nwant a line starting %q", out, want)
+	}
+}
+
+// --- Git metadata deny (#721): real processes under real sandbox-exec ---
+//
+// The rows write with the shell, not git: the production profile cannot run
+// git at all (it denies Homebrew git its pcre2 dylib and Apple's git its
+// developer directory); real git under these rules was measured in the #721
+// spike.
+
+// requireGitMetaUnchanged fails with a line diff when the git metadata
+// snapshot of root differs from before; detail describes the run. Exit status
+// is not the oracle.
+func requireGitMetaUnchanged(t *testing.T, root, before, detail string) {
+	t.Helper()
+	if after := gitMetaSnapshot(t, root); after != before {
+		t.Errorf("git metadata changed (%s):\n%s", detail,
+			unifiedDiff("snapshot", []byte(before), []byte(after), true))
+	}
+}
+
+func resDetail(res execResult) string {
+	return fmt.Sprintf("exit %d, stderr %q", res.ExitCode, res.Stderr)
+}
+
+// gitMetaAttackNamed returns the gitMetaAttacks row called name.
+func gitMetaAttackNamed(t *testing.T, name string) gitMetaAttack {
+	t.Helper()
+	for _, a := range gitMetaAttacks {
+		if a.name == name {
+			return a
+		}
+	}
+	t.Fatalf("gitMetaAttacks has no row %q", name)
+	return gitMetaAttack{}
+}
+
+// runGitMetaAttack runs row a through backend on a fresh fixture and returns
+// the fixture root, the snapshot taken before the run and the result.
+func runGitMetaAttack(t *testing.T, backend commandRunner, a gitMetaAttack) (root, before string, res execResult) {
+	t.Helper()
+	root = canonTempDirT(t)
+	writeGitFixture(t, root)
+	applyGitMetaVariant(t, root, a.variant)
+	before = gitMetaSnapshot(t, root)
+	res = seatbeltRunWith(t, backend, root, []string{"/bin/sh", "-c", a.snippet})
+	return root, before, res
+}
+
+// TestSeatbeltGitMetadataDenied: no attack row, Seatbelt-only rows included,
+// changes the git metadata under the production profile.
+func TestSeatbeltGitMetadataDenied(t *testing.T) {
+	requireSeatbeltCapability(t)
+	backend, err := newExecBackend(seatbeltTestCfg())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range gitMetaAttacks {
+		t.Run(a.name, func(t *testing.T) {
+			root, before, res := runGitMetaAttack(t, backend, a)
+			requireGitMetaUnchanged(t, root, before, resDetail(res))
+		})
+	}
+}
+
+// TestSeatbeltGitMetadataDeniedWithoutDiscovery: with discovery returning
+// nothing, the profile's any-depth rules (1-4) alone still refuse the
+// top-level rows, so a discovery bug cannot weaken them. The control row
+// needs a per-git-dir rule; it changing the snapshot proves the empty layout
+// reached the profile.
+func TestSeatbeltGitMetadataDeniedWithoutDiscovery(t *testing.T) {
+	requireSeatbeltCapability(t)
+	backend, err := newExecBackend(seatbeltTestCfg())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sb, ok := backend.execBackend.(*seatbeltBackend)
+	if !ok {
+		t.Fatalf("backend = %T, want *seatbeltBackend", backend.execBackend)
+	}
+	sb.inspect = func(string) (sandboxGitLayout, error) { return sandboxGitLayout{}, nil }
+	for _, name := range []string{"direct-hook", "direct-config", "commondir-create",
+		"rename-parent", "modules-container-rename", "uninit-preplant"} {
+		a := gitMetaAttackNamed(t, name)
+		t.Run(name, func(t *testing.T) {
+			root, before, res := runGitMetaAttack(t, backend, a)
+			requireGitMetaUnchanged(t, root, before, resDetail(res))
+		})
+	}
+	t.Run("control-submodule-hook", func(t *testing.T) {
+		root, before, res := runGitMetaAttack(t, backend, gitMetaAttackNamed(t, "submodule-hook"))
+		if gitMetaSnapshot(t, root) == before {
+			t.Fatalf("submodule hook write refused with no discovered git dirs (exit %d, stderr %q): the stub never reached the profile",
+				res.ExitCode, res.Stderr)
+		}
+	})
+}
+
+// TestSeatbeltGitMetadataOrdinaryWritesAllowed: the writes git itself makes
+// in normal use (index, objects, refs, a submodule's commit-graph, a branch
+// named info, a linked worktree's index) and look-alike names outside git
+// metadata stay writable.
+func TestSeatbeltGitMetadataOrdinaryWritesAllowed(t *testing.T) {
+	requireSeatbeltCapability(t)
+	root := canonTempDirT(t)
+	writeGitFixture(t, root)
+	for _, rel := range []string{".git/index", ".git/objects/ab/cd", ".git/refs/heads/x",
+		".git/COMMIT_EDITMSG", ".git/modules/m/index", ".git/modules/m/objects/info/commit-graph",
+		".git/modules/m/refs/heads/info", ".git/worktrees/wt/index", "xgit", "src/hooks/x"} {
+		t.Run(rel, func(t *testing.T) {
+			res := realSeatbeltRun(t, seatbeltTestCfg(), root,
+				[]string{"/bin/sh", "-c", `mkdir -p "$(dirname "$1")" && echo x > "$1"`, "sh", rel})
+			if res.ExitCode != 0 {
+				t.Fatalf("write %s: exit %d, stderr %q", rel, res.ExitCode, res.Stderr)
+			}
+			if _, err := os.Lstat(filepath.Join(root, rel)); err != nil {
+				t.Fatalf("write %s exited 0 but: %v", rel, err)
+			}
+		})
+	}
+}
+
+// TestSeatbeltGitMetadataRegexIsLiteral: a workspace root holding regex
+// metacharacters and a double quote is matched literally by the deny's
+// regexes, so the deny still fires there and does not widen to xgit.
+func TestSeatbeltGitMetadataRegexIsLiteral(t *testing.T) {
+	requireSeatbeltCapability(t)
+	root := filepath.Join(canonTempDirT(t), `ws+(v2)"q`)
+	if err := os.Mkdir(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeGitFixture(t, root)
+	before := gitMetaSnapshot(t, root)
+	if res := realSeatbeltRun(t, seatbeltTestCfg(), root, []string{"/usr/bin/touch", filepath.Join(root, "xgit")}); res.ExitCode != 0 {
+		t.Fatalf("touch xgit: exit %d, stderr %q", res.ExitCode, res.Stderr)
+	}
+	res := realSeatbeltRun(t, seatbeltTestCfg(), root, []string{"/bin/sh", "-c", "echo x > .git/hooks/pre-commit"})
+	requireGitMetaUnchanged(t, root, before, resDetail(res))
+}
+
+// TestSeatbeltGitMetadataManySubmodules: a profile with 300 discovered
+// submodule git dirs still compiles and runs, and its last git dir is
+// protected.
+func TestSeatbeltGitMetadataManySubmodules(t *testing.T) {
+	requireSeatbeltCapability(t)
+	root := canonTempDirT(t)
+	writeGitFixture(t, root)
+	for i := range 300 {
+		g := filepath.Join(root, ".git", "modules", fmt.Sprintf("s%03d", i))
+		for _, d := range []string{"objects", "hooks"} {
+			if err := os.MkdirAll(filepath.Join(g, d), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.WriteFile(filepath.Join(g, "HEAD"), []byte("ref: refs/heads/main\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if res := realSeatbeltRun(t, seatbeltTestCfg(), root, []string{"/usr/bin/true"}); res.ExitCode != 0 {
+		t.Fatalf("/usr/bin/true: exit %d, stderr %q", res.ExitCode, res.Stderr)
+	}
+	hook := filepath.Join(root, ".git", "modules", "s299", "hooks", "pre-commit")
+	res := realSeatbeltRun(t, seatbeltTestCfg(), root, []string{"/bin/sh", "-c", "echo P > .git/modules/s299/hooks/pre-commit"})
+	if _, err := os.Lstat(hook); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("s299 hook planted or unreadable (exit %d, stderr %q): %v", res.ExitCode, res.Stderr, err)
+	}
+}
+
+// TestSeatbeltGitMetadataExecInsideHooks: the deny is write-only, so an
+// approved executable inside .git/hooks still runs.
+func TestSeatbeltGitMetadataExecInsideHooks(t *testing.T) {
+	requireSeatbeltCapability(t)
+	root := canonTempDirT(t)
+	writeGitFixture(t, root)
+	if res := realSeatbeltRun(t, seatbeltTestCfg(), root, []string{filepath.Join(root, ".git", "hooks", "pre-commit")}); res.ExitCode != 0 {
+		t.Fatalf("hook exe: exit %d, stderr %q", res.ExitCode, res.Stderr)
+	}
+}
+
+// TestSeatbeltVerifierCannotPlantHook: a Seatbelt verifier command runs under
+// the same deny as exec.
+func TestSeatbeltVerifierCannotPlantHook(t *testing.T) {
+	requireSeatbeltCapability(t)
+	root := canonTempDirT(t)
+	writeGitFixture(t, root)
+	before := gitMetaSnapshot(t, root)
+	slot := newTestSlot(t, root, seatbeltTestCfg())
+	cmd, err := NewSandboxedVerifyCommand(mustWorkspace(t, root), seatbeltTestCfg(),
+		[]string{"/bin/sh", "-c", "echo P > .git/hooks/pre-commit"}, "", 30*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := slot.Set(cmd); err != nil {
+		t.Fatal(err)
+	}
+	out, err := slot.Verify(context.Background(), approved())
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireGitMetaUnchanged(t, root, before, "verifier observation:\n"+out)
+	// The shell ran and its write was refused: not a vacuous pass where
+	// nothing spawned.
+	if !strings.Contains(out, "status: failed\n") || !strings.Contains(out, "pre-commit: Operation not permitted") {
+		t.Errorf("observation:\n%s\nwant a failed run whose hook write was refused", out)
 	}
 }

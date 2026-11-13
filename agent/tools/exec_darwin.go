@@ -274,6 +274,7 @@ type seatbeltBackend struct {
 	starter      backgroundStarter
 	tempBase     string
 	systemRoots  func(workspaceRoot string) ([]string, error)
+	inspect      func(root string) (sandboxGitLayout, error)
 }
 
 // newSeatbeltExecBackend constructs the real Seatbelt backend, failing closed
@@ -306,6 +307,7 @@ func newSeatbeltExecBackendAt(execPath string, probe seatbeltProbeFunc, cfg Sand
 			}
 			return collectSystemRoots(seatbeltDefaultSystemRoots, workspaceRoot, home, seatbeltBroadRoot)
 		},
+		inspect: inspectSandboxWorkspace,
 	}
 	// The probe is this backend's first spawn, and construction (so
 	// ValidateSandbox) must fail where every later spawn would (#576). The
@@ -442,6 +444,15 @@ func (b *seatbeltBackend) prepare(spec execSpec) (execSpec, func() error, error)
 		return fail(err)
 	}
 	ancestors = append(ancestors, links...)
+	// The workspace walk rejects an inode linked outside the workspace and
+	// finds the git layout whose metadata the profile denies writes to (#721).
+	// It is also the last workspace walk before spawn: a change after it is
+	// the documented same-UID race, still under the profile's any-depth .git
+	// rules.
+	layout, err := b.inspect(spec.WorkspaceRoot)
+	if err != nil {
+		return fail(err)
+	}
 	profile, err := buildSeatbeltProfile(seatbeltPolicy{
 		workspaceRoot:     spec.WorkspaceRoot,
 		tempRoot:          canonTemp,
@@ -449,11 +460,10 @@ func (b *seatbeltBackend) prepare(spec execSpec) (execSpec, func() error, error)
 		systemReadRoots:   sysRoots,
 		metadataAncestors: ancestors,
 		allowNetwork:      b.allowNetwork,
+		gitDirs:           layout.gitDirs,
+		gitIntermediates:  layout.intermediates,
 	})
 	if err != nil {
-		return fail(err)
-	}
-	if _, err := inspectSandboxWorkspace(spec.WorkspaceRoot); err != nil {
 		return fail(err)
 	}
 	// Last, as bwrap does: an inheritable descriptor crosses the profile's
