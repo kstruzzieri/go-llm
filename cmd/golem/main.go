@@ -119,6 +119,12 @@ type flags struct {
 	sandboxSet        bool
 	sandboxNetwork    string
 	sandboxNetworkSet bool
+	// -credential-screen-budget: how long the credential screen may read the
+	// workspace before each command. screenBudgetSet distinguishes a typed
+	// value: validateFlags checks the range only then, so a zero nobody typed
+	// stays the library's default.
+	screenBudget    time.Duration
+	screenBudgetSet bool
 	// suppressAutoTools is resolved, not parsed: true under the Inspect
 	// profile and in a native sandbox session, it keeps automatic retrieval
 	// and the model memory tools from initializing (applyProfileGates).
@@ -164,6 +170,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.BoolVar(&f.fresh, "fresh", false, "start a new persistent session instead of resuming this workspace")
 	fs.BoolVar(&f.allowWrite, "allow-write", false, "enable approval-gated write_file/edit_file tools")
 	fs.BoolVar(&f.allowExec, "allow-exec", false, "enable the approval-gated run_command and background command tools (start/status/tail/stop)")
+	fs.DurationVar(&f.screenBudget, "credential-screen-budget", 5*time.Second, "time the credential screen may spend reading the workspace before each command (5s to 5m); a longer budget makes a large workspace usable, not fast: every command waits for the read")
 	fs.BoolVar(&f.scratch, "scratch", false, "run approved commands in a disposable snapshot of the workspace with .git omitted (requires -allow-exec): accident isolation on the host runtime, an enforced write boundary under a sandbox runtime; artifacts reach the real workspace only via approved promote_artifact (needs -allow-write)")
 	fs.BoolVar(&f.delegate, "delegate", false, "enable the delegate_code tool (route a scoped codegen sub-task to a specialist model)")
 	fs.StringVar(&f.delegateRole, "delegate-role", "coding", "model role the delegate_code tool routes to")
@@ -260,6 +267,8 @@ func parseFlags(args []string) (flags, error) {
 			f.sandboxSet = true
 		case "sandbox-network":
 			f.sandboxNetworkSet = true
+		case "credential-screen-budget":
+			f.screenBudgetSet = true
 		}
 	})
 	return f, nil
@@ -296,6 +305,9 @@ func validateFlags(f flags) error {
 	}
 	if err := validateSandboxFlags(f); err != nil {
 		return err
+	}
+	if f.screenBudgetSet && (f.screenBudget < agenttools.MinCredentialScreenBudget || f.screenBudget > agenttools.MaxCredentialScreenBudget) {
+		return fmt.Errorf("golem: -credential-screen-budget %s is outside %s to %s", f.screenBudget, agenttools.MinCredentialScreenBudget, agenttools.MaxCredentialScreenBudget)
 	}
 	if err := agentflow.ValidateEnvNames(f.agentflowEnv); err != nil {
 		return fmt.Errorf("golem: -agentflow-env: %w", err)
@@ -1621,7 +1633,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		// verify_command is not an -allow-tool name.
 		if f.allowWrite {
 			var verr error
-			if verifyCmd, verifyNotice, verr = buildVerifierFn(root, sandbox); verr != nil {
+			if verifyCmd, verifyNotice, verr = buildVerifierFn(root, sandbox, f.screenBudget); verr != nil {
 				return fmt.Errorf("golem: verifier: %w", verr)
 			}
 			if verifyNotice != "" {
@@ -1650,6 +1662,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		// -allow-write, scratch still captures and queries but promote_artifact
 		// is absent.
 		execOpts, line := scratchExecOptions(f.scratch, journal)
+		execOpts.CredentialScreenBudget = f.screenBudget
 		scratchLine = line
 		// #372: the same seam /allow-exec uses; a build failure has already
 		// shut the unpublished manager down.
@@ -1942,6 +1955,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		scratch:          f.scratch,
 		verifier:         verifySlot,
 		sandbox:          sandbox,
+		screenBudget:     f.screenBudget,
 		maxSteps:         f.maxSteps,
 		startupBudget:    budget,
 		color:            colorEnabled(renderOut, f.noColor),

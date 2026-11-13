@@ -66,6 +66,10 @@ func buildOutputScreen(ctx context.Context, ws *Workspace) (*outputScreen, error
 			changed++
 			return nil
 		}
+		// After the switch: the sentinel reaches here only as a withhold.
+		if errors.Is(err, errWalkEntryUnexamined) {
+			return stop(fmt.Sprintf("listed without metadata: %q", notePath(rel)))
+		}
 		if listing {
 			return stop(fmt.Sprintf("listing failed: %q", notePath(rel)))
 		}
@@ -105,11 +109,14 @@ func buildOutputScreen(ctx context.Context, ws *Workspace) (*outputScreen, error
 		return nil
 	}
 
+	// examine is the one matcher: the walk's listing stats what it accepts,
+	// and fn reads what it accepts.
+	examine := interceptor.IsCredentialPath
 	fn := func(rel string, d fs.DirEntry) error {
 		if withhold != "" {
 			return fs.SkipAll
 		}
-		if d.IsDir() || d.Type()&fs.ModeSymlink != 0 || !interceptor.IsCredentialPath(rel) {
+		if d.IsDir() || d.Type()&fs.ModeSymlink != 0 || !examine(rel) {
 			return nil
 		}
 		f, err := ws.openScreened(rel, d)
@@ -143,7 +150,7 @@ func buildOutputScreen(ctx context.Context, ws *Workspace) (*outputScreen, error
 		}
 	}
 
-	err := ws.walkTolerant(wctx, fn, ignored, skip)
+	err := ws.walkTolerant(wctx, fn, ignored, skip, examine)
 	switch {
 	case ctx.Err() != nil:
 		return nil, fmt.Errorf("tools: credential screen: %w", ctx.Err())
@@ -207,17 +214,28 @@ func (w *Workspace) openGitConfig(rel string, d fs.DirEntry) (*os.File, string, 
 }
 
 // openScreened is openWalked with the openErr seam asked first; a seam's
-// error is handled as openWalked handles a failed open.
+// error is handled as openWalked handles a failed open. An entry listed
+// without metadata is refused whatever the seam answers, with a sentinel the
+// screen does not treat leniently; only a lost anchor outranks the refusal.
 func (w *Workspace) openScreened(rel string, d fs.DirEntry) (*os.File, error) {
-	if err := w.screenSeams.open(rel); err != nil {
-		e, ok := d.(workspaceEntry)
+	seamErr := w.screenSeams.open(rel) // asked first, so a test can act at this instant
+	e, ok := d.(workspaceEntry)
+	if ok && e.unexamined {
+		// Only a lost anchor outranks the refusal: a moved parent must not
+		// turn it into an announced change.
+		if err := w.verifyReachable(filepath.Dir(rel), e.dir); err != nil && walkFatal(err) {
+			return nil, err
+		}
+		return nil, errWalkEntryUnexamined
+	}
+	if seamErr != nil {
 		if !ok {
 			return nil, errWalkEntryUnheld
 		}
 		if reachErr := w.verifyReachable(filepath.Dir(rel), e.dir); reachErr != nil {
 			return nil, reachErr
 		}
-		return nil, err
+		return nil, seamErr
 	}
 	return w.openWalked(rel, d)
 }

@@ -1,10 +1,12 @@
 # Containment mutation ledger (#452)
 
-Each entry proves one security property's assertions can fail. Entries are point-in-time evidence at their baseline revision. The ledger contains 345 entries: 340 guard and five effect-detection entries.
+Each entry proves one security property's assertions can fail. Entries are point-in-time evidence at their baseline revision. The ledger contains 377 entries: 372 guard and five effect-detection entries.
 
-Platform: every proof in this ledger ran on darwin (arm64, go1.27.1), except M-099 and M-100, whose test runs only on Linux and which ran only there (arm64, go1.27.1, the Docker `ci-local` image as its non-root `ci` user). After the rebase onto the model-resistance PR, the entries whose patches touch build-tagged or platform-sensitive code (M-005 to M-008, the unix path walks; M-009 and M-014 to M-018, the host exec path; M-011, the MCP stdio child environment) were re-run on Linux (arm64, go1.27.1, the Docker `ci-local` image) at their baseline: each entry's `Platform:` line records the result, and a Linux line that differs would be recorded beside the darwin evidence, never in place of it. M-010 (it needs an AgentFlow source checkout) and M-012 (Seatbelt is darwin-native) were not re-run on Linux, and no entry has run on Windows. Of the #777 entries, those whose patches touch build-tagged or platform-sensitive code (M-172 to M-178, M-181 to M-185, M-188 to M-190, M-247 to M-251, M-258, M-259, M-317, M-319, M-320, M-339 and M-340: the walk, the screen build, the skip classification, the key rules, the unix runner and the background rings) were re-run on Linux (arm64, go1.27.1, the Docker `ci-local` image, as its non-root `ci` user) from a second export of their baseline, and each `Platform:` line records that run; M-258's test was also run in that image as root (`--user 0`), and its `Platform:` line records that run too; M-179 (Seatbelt) is darwin-native.
+The original #777 and #789 history is preserved by tag `archive/pr-797-before-restack-254431e` at `254431e5f65387835807392d76739e472777c519`. PR #792 was squash-merged, and #797 was then rebased onto that squash; the baseline hashes below still name the original tested revisions. Fetch the archive with `git fetch origin tag archive/pr-797-before-restack-254431e` before reproducing those entries. Do not substitute the rebased commit hashes for the recorded baselines.
 
-Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-only variants added later, M-045 B and M-047 B, at `34b2ff38`, whose production and scenario trees are identical; M-051 to M-053 at `731f2d1d`, the commit that adds them; M-054 to M-058 at `3d423ce1`, the commit that adds them; M-059 at `1166b276`, the commit that adds it): the baseline passed, the mutant failed as shown, and the tree was restored with `git checkout` and passed again. M-028 was re-recorded when tool frames moved to per-result keys: variant A on the commit that makes that change (parent `140524de`), variant B on the commit that adds the cross-Run check (parent `d75c78cb`). Each baseline passed, each mutant failed as shown, and an editor edit restored the baseline bytes, which passed again. Entries M-067 to M-071 ran on the commit that adds fence-key rotation (parent `72b6eb47`) in the same way, the restored file's sha256 matching the baseline's each time; M-072 and M-073 ran the same way on the commit that makes every exposed key rotate and matches keys through separators (parent `00912c90`), and M-074 on the commit that pins key minting before assembly (parent `caa84426`). Entries M-075 to M-078 ran the same way in an isolated `git archive` export of the commit that adds system keys (parent `3346b711`). M-079 and M-080 ran the same way on the commit that scans the durable summary and staged advice (parent `c17e940d`). Entries M-081 to M-085 ran the same way in an isolated `git archive` export of the commit that adds the #712 launchd acceptance tests, each applied with `patch -p1` and reverted with `patch -R -p1`, the restored file's sha256 matching the baseline's. Their baseline is recorded as `c4ca1a8d`: the runs used that commit's tree before two comment-only amends (a driver comment and the M-083 note) produced it, and the patches apply to `c4ca1a8d` at the recorded hunk offsets, with the quoted failing lines at the same line numbers. M-086 ran the same way in an export of `461fdcdc`, the commit that holds `syscall.ForkLock` across the guard and posix_spawn, where M-081 and M-083 were re-run against the new spawn order. All six were re-run the same way at `231baa07`, after the final #712 fix wave changed their tests and moved M-086's lock into a closure; each entry's last note records that run. Entries M-087 to M-105 ran the same way in an isolated `git archive` export of `88f33cfb`, the commit that adds the #725 inventory rows, each applied with `git apply` and reverted with `git apply -R`, the restored file's sha256 matching the baseline's (the export sat inside a checkout, where `git apply` silently skips paths outside the current directory, so both ran with `GIT_CEILING_DIRECTORIES` set to the export's parent); M-099 and M-100 ran in the Docker `ci-local` image from that export. Entries M-106 to M-140 ran the same way in an isolated `git archive` export of `f3581fda`, the commit that adds the #784 inventory rows, each applied with `git apply` and reverted with `git apply -R`, the restored file's sha256 matching the baseline's (that export sat outside any checkout; both still ran with `GIT_CEILING_DIRECTORIES` set to its parent), and no test in their commands skipped; M-131 records two variants, each run that way. The commit that adds them also makes `TestHarnessPlanReferencesKinds` a PATH-HARNESS-REF ref, an inventory change only, so their quoted line numbers hold there too. Entries M-141 to M-190 ran in isolated `git archive` exports of `18ca5d70`, the #777 commit that pins the D4 and D5 request counts, one export per platform and one mutant at a time: each patch was applied with `patch -p1` and reverted with `patch -R -p1`, each restored file was compared byte for byte with the baseline's (`cmp`), and every ref passed at the baseline and again on the restored export after the last mutant. Every one of those mutants turned its named refs red on its first run. Entries M-191 to M-195 ran the same way in an isolated `git archive` export of `b97c0aeb`, the later commit that adds the rows they turn red: each of their mutants, which bypasses a preprocessing step (CSI stripping, the split at `\r`, trimming) for one rule only, left every ref green at `18ca5d70`, so they could only be recorded once those rows existed. Entries M-196 to M-204 ran the same way in an isolated `git archive` export of `6bd57929`, the commit that adds the rows they turn red: hand-written mutants (M-196 to M-198: a floor raised for one key rule, and the decode of the whole userinfo) and an enumeration that removes each key form `credentialFileKeys` and its helpers emit, one at a time (M-199 to M-204), found mutants that left every ref green at `45548f4f`. Entries M-205 to M-251 ran the same way in an isolated `git archive` export of `f350333c`, the commit that adds the rows they turn red and cites seven existing tests on CMP-EXEC-CREDENTIAL-OUTPUT: a third sweep removed or moved one decision at a time in the argv rule (`credential_argv.go`, `IsGitConfigPath`) and the screen (`screen_path.go`, `screen.go`, `screen_classify.go`, `screen_build.go`), and these are the mutants that left every ref of the row green at `c9cc9155` and let through what the original refuses, cuts or replaces. Entries M-252 to M-255 ran the same way in an isolated `git archive` export of `b7666790`, the commit that adds the last of the rows they turn red: M-252 and M-253 remove or misread the argv rule's reading of a git pathspec with long-form magic, added after that sweep; M-254 reads that pathspec's pattern after its last `)` and left every ref green at `a72009d3`, the commit before its row; M-255 is the sweep's announce-only `S-cut-no-mark` (a cut no longer counted in the notes), which left every ref green until a cut-only notes row existed. Entries M-256 to M-319 ran the same way in isolated `git archive` exports of `d1d7fa91`, the commit that adds the rows they turn red, four exports in parallel, one mutant at a time in each: M-256 to M-259 are hand-written mutants for four gaps (`stripCSI`'s ESC test and its bound check, a `.git/config` that cannot be opened for a reason other than a change, and a failed read after a successful open, which `6194e105` gives a test-only read seam); M-260 to M-319 come from a generated sweep that mutated every condition, comparison, statement and integer offset of the argv rule, the screen and the walk lines this branch changed (1,185 generated mutants plus eight hand-written ones, at `6194e105`), and are the mutants that left every ref of the row green there and let through what the original refuses, cuts, replaces or withholds, or crash the stream writer. Entries M-320 to M-338 ran the same way, serially, in one isolated `git archive` export of `3e4fedce`, the last commit that adds or reorders the rows they turn red: M-320 discards the read error, which goes red only because `1338d3ec` reshaped the screen's read seam into a reader hook so that the injected failure arrives through the read itself; M-321 to M-338 are generated sweep mutants (and two hand-written ones) first classed as equivalent, withholding more or only widening, for which an input was later built, or found by re-arguing the classification from the code, on which they lose a key the original emits. M-258 and M-259 were re-recorded at `3e4fedce` in the same export, because their rows changed (each entry's Notes say how). Entries M-339 to M-346 ran the same way, serially, in one isolated `git archive` export of `8058e5a6`, the last commit that changes test or production code before them: they are the mutants of the lines that key a credential-store line's userinfo (`122ec242`), count a key once across files and give a `.git/config` line with too many settings its own cause (`e804533a`), generated by the same sweep operators plus one hand-written mutant, that let through what the original withholds; each is red on a row added with that change or at `8058e5a6`. M-163 and M-283 were re-recorded at `8058e5a6` in the same export, because `122ec242` re-indented the line their patches change (each entry's Notes say how). The #777 entries therefore have eight baselines: M-141 to M-190 at `18ca5d70` (but M-163, re-recorded at `8058e5a6`), M-191 to M-195 at `b97c0aeb`, M-196 to M-204 at `6bd57929`, M-205 to M-251 at `f350333c`, M-252 to M-255 at `b7666790`, M-256 to M-319 at `d1d7fa91` (but M-258 and M-259, re-recorded at `3e4fedce`, and M-283, re-recorded at `8058e5a6`), M-320 to M-338 at `3e4fedce`, M-339 to M-346 at `8058e5a6`. Each entry is evidence at its own baseline. M-173 and M-179 each record two variants. M-180 is not assigned: it was reserved for the bwrap backend's screen mutation, which needs a Linux host with bwrap that the Docker `ci-local` image is not, so CMP-EXEC-CREDENTIAL-OUTPUT-BWRAP is `unobserved(bwrap)` and carries that follow-up as its exempt reason. The entry for the unverified-root rule including the repository boundary itself, whose mutant narrowed the rule to strictly below the boundary, was withdrawn when that narrowing became the production rule; later entries were renumbered to close the gap. Entries M-060 and M-061 ran in isolated exports of immutable code commit `23f0c0bbca83f0c9d6e02163dd09c4856698ddcd`: each baseline passed, its mutant failed, and restored files matched the baseline bytes and passed again. Entries M-062 and M-063 ran on this branch at `dbe5c315b40f8b973b96cf623d5cdcbe00c616fc`, the commit that adds their rules: each baseline passed, its mutant failed, and `git checkout -- <file>` restored the baseline bytes, which passed again; M-062's comparison against the previous rule ran in an isolated `git archive` export of `ac053567`. Entries M-064 to M-066 ran on the #387 branch at `72d0bedeb1d264b3da62cf812df7505a8bd7e776`, the commit that tightens PV1's probe and cites the exec and verification preview tests (M-064 and M-065 were first recorded at `b9cea9154746758026fd9bb58d467f665be5952f`, the commit that makes PV1 executable): each baseline passed, its mutant failed, and `git checkout -- <file>` restored the baseline bytes, which passed again. Entries quote test output, the containment judge's message text and line numbers included, as it read at their baseline; later wording changes do not rewrite them. Entries carried over from the PR 2 delivery record name the draft entry they were first recorded as; they were re-run here so every command, diff and line number matches one revision. Apply a patch with `git apply`, run the command, then restore with `git checkout -- <file>`. `guard` entries remove or weaken the protection the refs assert. `effect-detection` entries change the effect path of an uncontained scenario: they show its probe can read a change in outcome, not that a guard is absent. Rows exempt from this ledger (pending, out-of-scope, unobserved such as ENV-BWRAP and CMP-EXEC-CREDENTIAL-OUTPUT-BWRAP, whose native bwrap profile needs a Linux host, and administrative META- rows; the inventory lint allows no other verified or uncontained row an exemption) carry their exempt reason in the inventory (`docs/security/containment-inventory.json`, rendered in `docs/security/containment-inventory.md`).
+Platform: every proof in this ledger ran on darwin (arm64, go1.27.1), except M-099, M-100 and M-374, whose tests run only on Linux and which ran only there (arm64, go1.27.1, the Docker `ci-local` image as its non-root `ci` user). After the rebase onto the model-resistance PR, the entries whose patches touch build-tagged or platform-sensitive code (M-005 to M-008, the unix path walks; M-009 and M-014 to M-018, the host exec path; M-011, the MCP stdio child environment) were re-run on Linux (arm64, go1.27.1, the Docker `ci-local` image) at their baseline: each entry's `Platform:` line records the result, and a Linux line that differs would be recorded beside the darwin evidence, never in place of it. M-010 (it needs an AgentFlow source checkout) and M-012 (Seatbelt is darwin-native) were not re-run on Linux, and no entry has run on Windows. Of the #777 entries, those whose patches touch build-tagged or platform-sensitive code (M-172 to M-178, M-181 to M-185, M-188 to M-190, M-247 to M-251, M-258, M-259, M-317, M-319, M-320, M-339 and M-340: the walk, the screen build, the skip classification, the key rules, the unix runner and the background rings) were re-run on Linux (arm64, go1.27.1, the Docker `ci-local` image, as its non-root `ci` user) from a second export of their baseline, and each `Platform:` line records that run; M-258's test was also run in that image as root (`--user 0`), and its `Platform:` line records that run too; M-179 (Seatbelt) is darwin-native. Of the #789 entries, M-347, M-349 (its Linux patch), M-350, M-354 to M-373 and M-375 to M-377, and the re-recorded M-178, were re-run on Linux (arm64, go1.27.1, the Docker `ci-local` image, as its non-root `ci` user) from the same export, and M-374 ran only there; the Darwin-read entries (M-348, M-351 to M-353 and M-349's Darwin patch) ran on darwin arm64 and again under `GOARCH=amd64`, and have no Linux line. M-378 ran on darwin arm64 and, from a second export of its baseline, on Linux in the same image with the container capped at 4 GiB of memory and every test command at `-timeout 60s`. The 22 other #777 entries whose patches touch `paths_unix.go`, `screen_build.go` or `screen_classify.go` (M-174 to M-177, M-181 to M-183, M-185, M-188, M-247 to M-251, M-258, M-259, M-317 to M-320, M-339 and M-340) were re-applied at `9ce6e39f`, each patch applying without fuzz at moved line offsets, and are red on the leaves they quote on darwin and Linux.
+
+Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-only variants added later, M-045 B and M-047 B, at `34b2ff38`, whose production and scenario trees are identical; M-051 to M-053 at `731f2d1d`, the commit that adds them; M-054 to M-058 at `3d423ce1`, the commit that adds them; M-059 at `1166b276`, the commit that adds it): the baseline passed, the mutant failed as shown, and the tree was restored with `git checkout` and passed again. M-028 was re-recorded when tool frames moved to per-result keys: variant A on the commit that makes that change (parent `140524de`), variant B on the commit that adds the cross-Run check (parent `d75c78cb`). Each baseline passed, each mutant failed as shown, and an editor edit restored the baseline bytes, which passed again. Entries M-067 to M-071 ran on the commit that adds fence-key rotation (parent `72b6eb47`) in the same way, the restored file's sha256 matching the baseline's each time; M-072 and M-073 ran the same way on the commit that makes every exposed key rotate and matches keys through separators (parent `00912c90`), and M-074 on the commit that pins key minting before assembly (parent `caa84426`). Entries M-075 to M-078 ran the same way in an isolated `git archive` export of the commit that adds system keys (parent `3346b711`). M-079 and M-080 ran the same way on the commit that scans the durable summary and staged advice (parent `c17e940d`). Entries M-081 to M-085 ran the same way in an isolated `git archive` export of the commit that adds the #712 launchd acceptance tests, each applied with `patch -p1` and reverted with `patch -R -p1`, the restored file's sha256 matching the baseline's. Their baseline is recorded as `c4ca1a8d`: the runs used that commit's tree before two comment-only amends (a driver comment and the M-083 note) produced it, and the patches apply to `c4ca1a8d` at the recorded hunk offsets, with the quoted failing lines at the same line numbers. M-086 ran the same way in an export of `461fdcdc`, the commit that holds `syscall.ForkLock` across the guard and posix_spawn, where M-081 and M-083 were re-run against the new spawn order. All six were re-run the same way at `231baa07`, after the final #712 fix wave changed their tests and moved M-086's lock into a closure; each entry's last note records that run. Entries M-087 to M-105 ran the same way in an isolated `git archive` export of `88f33cfb`, the commit that adds the #725 inventory rows, each applied with `git apply` and reverted with `git apply -R`, the restored file's sha256 matching the baseline's (the export sat inside a checkout, where `git apply` silently skips paths outside the current directory, so both ran with `GIT_CEILING_DIRECTORIES` set to the export's parent); M-099 and M-100 ran in the Docker `ci-local` image from that export. Entries M-106 to M-140 ran the same way in an isolated `git archive` export of `f3581fda`, the commit that adds the #784 inventory rows, each applied with `git apply` and reverted with `git apply -R`, the restored file's sha256 matching the baseline's (that export sat outside any checkout; both still ran with `GIT_CEILING_DIRECTORIES` set to its parent), and no test in their commands skipped; M-131 records two variants, each run that way. The commit that adds them also makes `TestHarnessPlanReferencesKinds` a PATH-HARNESS-REF ref, an inventory change only, so their quoted line numbers hold there too. Entries M-141 to M-190 ran in isolated `git archive` exports of `18ca5d70`, the #777 commit that pins the D4 and D5 request counts, one export per platform and one mutant at a time: each patch was applied with `patch -p1` and reverted with `patch -R -p1`, each restored file was compared byte for byte with the baseline's (`cmp`), and every ref passed at the baseline and again on the restored export after the last mutant. Every one of those mutants turned its named refs red on its first run. Entries M-191 to M-195 ran the same way in an isolated `git archive` export of `b97c0aeb`, the later commit that adds the rows they turn red: each of their mutants, which bypasses a preprocessing step (CSI stripping, the split at `\r`, trimming) for one rule only, left every ref green at `18ca5d70`, so they could only be recorded once those rows existed. Entries M-196 to M-204 ran the same way in an isolated `git archive` export of `6bd57929`, the commit that adds the rows they turn red: hand-written mutants (M-196 to M-198: a floor raised for one key rule, and the decode of the whole userinfo) and an enumeration that removes each key form `credentialFileKeys` and its helpers emit, one at a time (M-199 to M-204), found mutants that left every ref green at `45548f4f`. Entries M-205 to M-251 ran the same way in an isolated `git archive` export of `f350333c`, the commit that adds the rows they turn red and cites seven existing tests on CMP-EXEC-CREDENTIAL-OUTPUT: a third sweep removed or moved one decision at a time in the argv rule (`credential_argv.go`, `IsGitConfigPath`) and the screen (`screen_path.go`, `screen.go`, `screen_classify.go`, `screen_build.go`), and these are the mutants that left every ref of the row green at `c9cc9155` and let through what the original refuses, cuts or replaces. Entries M-252 to M-255 ran the same way in an isolated `git archive` export of `b7666790`, the commit that adds the last of the rows they turn red: M-252 and M-253 remove or misread the argv rule's reading of a git pathspec with long-form magic, added after that sweep; M-254 reads that pathspec's pattern after its last `)` and left every ref green at `a72009d3`, the commit before its row; M-255 is the sweep's announce-only `S-cut-no-mark` (a cut no longer counted in the notes), which left every ref green until a cut-only notes row existed. Entries M-256 to M-319 ran the same way in isolated `git archive` exports of `d1d7fa91`, the commit that adds the rows they turn red, four exports in parallel, one mutant at a time in each: M-256 to M-259 are hand-written mutants for four gaps (`stripCSI`'s ESC test and its bound check, a `.git/config` that cannot be opened for a reason other than a change, and a failed read after a successful open, which `6194e105` gives a test-only read seam); M-260 to M-319 come from a generated sweep that mutated every condition, comparison, statement and integer offset of the argv rule, the screen and the walk lines this branch changed (1,185 generated mutants plus eight hand-written ones, at `6194e105`), and are the mutants that left every ref of the row green there and let through what the original refuses, cuts, replaces or withholds, or crash the stream writer. Entries M-320 to M-338 ran the same way, serially, in one isolated `git archive` export of `3e4fedce`, the last commit that adds or reorders the rows they turn red: M-320 discards the read error, which goes red only because `1338d3ec` reshaped the screen's read seam into a reader hook so that the injected failure arrives through the read itself; M-321 to M-338 are generated sweep mutants (and two hand-written ones) first classed as equivalent, withholding more or only widening, for which an input was later built, or found by re-arguing the classification from the code, on which they lose a key the original emits. M-258 and M-259 were re-recorded at `3e4fedce` in the same export, because their rows changed (each entry's Notes say how). Entries M-339 to M-346 ran the same way, serially, in one isolated `git archive` export of `8058e5a6`, the last commit that changes test or production code before them: they are the mutants of the lines that key a credential-store line's userinfo (`122ec242`), count a key once across files and give a `.git/config` line with too many settings its own cause (`e804533a`), generated by the same sweep operators plus one hand-written mutant, that let through what the original withholds; each is red on a row added with that change or at `8058e5a6`. M-163 and M-283 were re-recorded at `8058e5a6` in the same export, because `122ec242` re-indented the line their patches change (each entry's Notes say how). Entries M-347 to M-377 ran the same way, serially, in one isolated `git archive` export of `9ce6e39f`, the commit that registers the #789 refs and the last commit that adds rows or changes test or production code before them: hand-written mutants of the #789 walk (the directory read and its parser, the tolerant listing, the refusal of an entry listed without metadata, the matcher's fast route, and the credential screen's budget setting), each red on its named leaves wherever it ran. Entry M-378 ran the same way in an isolated `git archive` export of `56d7c158`, the commit that adds the row it turns red. It is the one decision a generated sweep of the #789 changes found unpinned: at `b22459c3`, the four operators of the #777 sweep (each condition and operand to true and false, each comparison to its neighbour, each call, assignment, increment, branch and defer removed, each integer offset in an index, slice bound or arithmetic expression plus and minus one) were applied to every line #789 changed in the tolerant listing, the two directory reads and the record parser, the screen, the budget and its routes, and the matcher: 358 mutants generated; 47 dropped as not building (44 removals of a `:=` declaration, one offset that made a constant index negative, and two removals of `defer runtime.KeepAlive(f)`, one in each directory read, that failed only because `runtime` was then imported and not used, a generator artifact; those two were not run, and are equivalent in production because the caller's deferred `f.Close()` keeps `f` reachable through the read); 275 red; 36 survivors in 27 decisions (one delivers more, M-378; six only withhold more; one only announces; 16 equivalent; two unreachable, one of them only on Windows; one test-only seam). Each mutant ran its own package's cited refs only: a matcher mutant the six refs in ./agent/interceptor, any other mutant the 42 refs in ./agent/tools; the `cmd/golem` scenarios D4 and D5 were not run on any sweep mutant. The 28 mutants of the Linux directory read ran in Docker in two parts, the second under the memory cap. M-178 was re-recorded at `9ce6e39f` in the same export, because #789 rewrote the listing its patch changes (its Notes say how). The #777 entries therefore have nine baselines: M-141 to M-190 at `18ca5d70` (but M-163, re-recorded at `8058e5a6`, and M-178, re-recorded at `9ce6e39f`), M-191 to M-195 at `b97c0aeb`, M-196 to M-204 at `6bd57929`, M-205 to M-251 at `f350333c`, M-252 to M-255 at `b7666790`, M-256 to M-319 at `d1d7fa91` (but M-258 and M-259, re-recorded at `3e4fedce`, and M-283, re-recorded at `8058e5a6`), M-320 to M-338 at `3e4fedce`, M-339 to M-346 at `8058e5a6`. Each entry is evidence at its own baseline. M-173 and M-179 each record two variants. M-180 is not assigned: it was reserved for the bwrap backend's screen mutation, which needs a Linux host with bwrap that the Docker `ci-local` image is not, so CMP-EXEC-CREDENTIAL-OUTPUT-BWRAP is `unobserved(bwrap)` and carries that follow-up as its exempt reason. The entry for the unverified-root rule including the repository boundary itself, whose mutant narrowed the rule to strictly below the boundary, was withdrawn when that narrowing became the production rule; later entries were renumbered to close the gap. Entries M-060 and M-061 ran in isolated exports of immutable code commit `23f0c0bbca83f0c9d6e02163dd09c4856698ddcd`: each baseline passed, its mutant failed, and restored files matched the baseline bytes and passed again. Entries M-062 and M-063 ran on this branch at `dbe5c315b40f8b973b96cf623d5cdcbe00c616fc`, the commit that adds their rules: each baseline passed, its mutant failed, and `git checkout -- <file>` restored the baseline bytes, which passed again; M-062's comparison against the previous rule ran in an isolated `git archive` export of `ac053567`. Entries M-064 to M-066 ran on the #387 branch at `72d0bedeb1d264b3da62cf812df7505a8bd7e776`, the commit that tightens PV1's probe and cites the exec and verification preview tests (M-064 and M-065 were first recorded at `b9cea9154746758026fd9bb58d467f665be5952f`, the commit that makes PV1 executable): each baseline passed, its mutant failed, and `git checkout -- <file>` restored the baseline bytes, which passed again. Entries quote test output, the containment judge's message text and line numbers included, as it read at their baseline; later wording changes do not rewrite them. Entries carried over from the PR 2 delivery record name the draft entry they were first recorded as; they were re-run here so every command, diff and line number matches one revision. Apply a patch with `git apply`, run the command, then restore with `git checkout -- <file>`. `guard` entries remove or weaken the protection the refs assert. `effect-detection` entries change the effect path of an uncontained scenario: they show its probe can read a change in outcome, not that a guard is absent. Rows exempt from this ledger (pending, out-of-scope, unobserved such as ENV-BWRAP and CMP-EXEC-CREDENTIAL-OUTPUT-BWRAP, whose native bwrap profile needs a Linux host, and administrative META- rows; the inventory lint allows no other verified or uncontained row an exemption) carry their exempt reason in the inventory (`docs/security/containment-inventory.json`, rendered in `docs/security/containment-inventory.md`).
 
 ## M-001 — Absolute paths are rejected by the workspace path cleaner
 - Affected refs: PATH-ABS: `TestHardeningContracts/Active/Workspace/confinement_and_arguments/public_confinement/owned_absolute_sibling`, `TestWorkspaceCleanRelContainment/absolute_escape`, `TestContainment/W1`
@@ -5001,27 +5003,27 @@ Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-o
 
 ## M-178 — A stat failure other than not-exist withholds both streams
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestWalkTolerant`, `TestBuildOutputScreenSkips`, `TestRunCommandWithheldStreams`
-- Baseline: `18ca5d70`, the commit that pins D4 and D5 request counts (#777), in an isolated `git archive` export
-- Platform: darwin (arm64, go1.27.1, macOS 26.6.2); re-run on linux (arm64, go1.27.1, the Docker `ci-local` image: Alpine 3.24.2, kernel 6.10.14-linuxkit, run as the non-root `ci` user, uid 1000) from a second export of the baseline mounted as the container's workspace: baseline pass, the same failing leaves and quoted lines as on darwin, restored pass
-- Profile / command: darwin-host / `go test -count=1 -v -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant)$' ./agent/interceptor`; `go test -count=1 -v -run '^TestHardeningContracts$/^Active$/^Invariants$/^(run_env_argv|start_env_argv|run_dir_ssh|start_dir_git)$' ./agent`; `go test -count=1 -v -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestBuildOutputScreenIgnoresGuard|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown)$' ./agent/tools`; `go test -count=1 -v -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT and the four #777 leaves of INVARIANTS, in four commands: interceptor, contract, tools, scenarios)
+- Baseline: `9ce6e39f` (#789), in an isolated `git archive` export; re-recorded there, see Notes
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2); re-run on linux (arm64, go1.27.1, the Docker `ci-local` image: Alpine 3.24.2, kernel 6.10.14-linuxkit, run as the non-root `ci` user, uid 1000) from the same export mounted as the container's workspace: baseline pass, the same failing leaves and quoted lines as on darwin, restored pass
+- Profile / command: darwin-host / `go test -count=1 -v -timeout 600s -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestBuildOutputScreenIgnoresGuard|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld|TestParseDirents|TestDirReadSeams|TestDirReadKinds|TestWorkspaceEntryUnexamined|TestOpenScreenedUnexamined|TestWalkTolerantExamines|TestWalkTolerantUnknownType|TestWalkTolerantAllUnknown|TestBuildOutputScreenUnknownType|TestBuildOutputScreenStaleType|TestBuildOutputScreenUnexamined|TestCredentialScreenBudget|TestCredentialScreenBudgetWalk|TestExecToolsOptionsScreenBudget)$' ./agent/tools`; `go test -count=1 -v -timeout 600s -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT in ./agent/tools, and the scenarios; at the baseline and on the restored export also `go test -count=1 -v -timeout 600s -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath|TestCredentialPathMatchesOracle)$' ./agent/interceptor`; all with `GOFLAGS=-trimpath`, no `-race`)
 - Patch:
   ```diff
   diff --git a/agent/tools/paths_unix.go b/agent/tools/paths_unix.go
   --- a/agent/tools/paths_unix.go
   +++ b/agent/tools/paths_unix.go
-  @@ -589,7 +589,7 @@
-   			err = unix.Fstatat(int(f.Fd()), name, &st, unix.AT_SYMLINK_NOFOLLOW)
+  @@ -634,7 +634,7 @@
+   			err = unix.Fstatat(int(f.Fd()), l.name, &st, unix.AT_SYMLINK_NOFOLLOW)
    		}
    		if err != nil {
-  -			skips = append(skips, walkSkip{rel: filepath.ToSlash(entryRel), err: err})
-  +			skips = append(skips, walkSkip{rel: filepath.ToSlash(entryRel), err: fs.ErrNotExist})
+  -			skips = append(skips, walkSkip{rel: slash, err: err})
+  +			skips = append(skips, walkSkip{rel: slash, err: fs.ErrNotExist})
    			continue
    		}
-   		entries = append(entries, workspaceEntry{name: name, stat: st, dir: f})
+   		entries = append(entries, workspaceEntry{name: l.name, stat: st, dir: f})
   ```
-- Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestWalkTolerant/stat_failures` (`walk_tolerant_test.go:326: stat failures: skip 0 differs (path matches: true, error matches: false)`); FAIL `TestBuildOutputScreenSkips/stat_eio` (`screen_build_test.go:315: stat eio: walk went on after the withhold`); FAIL `TestRunCommandWithheldStreams/stat_eio` (`exec_screen_test.go:194: stat eio: result differs (error false, len 160, want len 153)`); every other ref passes. Exit 1 for the tools command, 0 for the others. Restored (`cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
+- Baseline: pass (exit 0, the tools, interceptor and golem commands; no test failed or skipped). Mutant: FAIL `TestWalkTolerant/stat_failures` (`walk_tolerant_test.go:359: stat failures: skip 0 differs (path matches: true, error matches: false)`); FAIL `TestBuildOutputScreenSkips/stat_eio` (`screen_build_test.go:592: stat eio: credential delivered (len 54)`); FAIL `TestRunCommandWithheldStreams/stat_eio` (`exec_screen_test.go:214: stat eio: result differs (error false, len 160, want len 153)`); also red: `TestWalkTolerant/dir_stat_fails`, `TestWalkTolerantUnknownType/unknown_eio`; every other test the commands run passes. Exit 1 for the tools command, 0 for the golem command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, the tools, interceptor and golem commands, re-run on the restored export after the last mutant).
 - Kind: guard
-- Notes: A listing stat that fails for any reason other than not-exist withholds. The patch reports every failed listing stat as not-exist, so it is announced as changed instead of withholding. `stat_gone` (a real not-exist) stays green.
+- Notes: A listing stat that fails for any reason other than not-exist withholds. The patch reports every failed listing stat as not-exist, so it is announced as changed instead of withholding. `stat_gone` (a real not-exist) stays green. Re-recorded at `9ce6e39f`: #789 rewrote the listing in `readDirEntriesTolerant` (the stat-failure branch now names the entry `slash`, at `paths_unix.go:637`), so the patch recorded at `18ca5d70` no longer applies; the mutation is the same (every failed listing stat reported as `fs.ErrNotExist`). The first failing line of `TestBuildOutputScreenSkips/stat_eio` changed from `walk went on after the withhold` to `screen_build_test.go:592: stat eio: credential delivered (len 54)`; the earlier message still prints, as the next line (`screen_build_test.go:597`). The agent and agent/interceptor commands recorded at `18ca5d70` were not run on the mutant: neither package imports agent/tools (`go list -deps -test`), so a patch to agent/tools cannot change them.
 
 ## M-179 — The Seatbelt backend's wrapped spec keeps the screen
 - Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT-SEATBELT: `TestSeatbeltRunScreensOutput`
@@ -9170,3 +9172,811 @@ These mutations prove the harness, inventory lint, checker and gate rules can fa
 - Baseline: pass (exit 0, all four commands; no leaf skipped). Mutant: FAIL `TestCredentialFileKeys/store-query` (`screen_keys_test.go:86: key set differs: got 1 keys, want 4`); every other ref passes. Exit codes: 0 for the interceptor command, 0 for the contract command, 1 for the tools command, 0 for the scenarios command. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, all four commands, re-run on the restored export after the last mutant).
 - Kind: guard
 - Notes: A hand-written mutant: the patch tests the whole line for `=`, space and tab instead of the text before its first `://`, so a store line with an `=` after the scheme (a query, `?x=1`) is not read for userinfo and its password is delivered. The row `store-query` was added at `8058e5a6`.
+
+## M-347 — A directory record whose length is out of range fails the listing
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestParseDirents` (row `reclen past end`)
+- Baseline: `9ce6e39f`, the commit that registers the #789 refs and the last commit that adds rows or changes test or production code before these entries (#789), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2); re-run on linux (arm64, go1.27.1, the Docker `ci-local` image: Alpine 3.24.2, kernel 6.10.14-linuxkit, run as the non-root `ci` user, uid 1000) from the same export mounted as the container's workspace: baseline pass, the same failing leaves and quoted lines as on darwin, restored pass
+- Profile / command: darwin-host / `go test -count=1 -v -timeout 600s -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestBuildOutputScreenIgnoresGuard|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld|TestParseDirents|TestDirReadSeams|TestDirReadKinds|TestWorkspaceEntryUnexamined|TestOpenScreenedUnexamined|TestWalkTolerantExamines|TestWalkTolerantUnknownType|TestWalkTolerantAllUnknown|TestBuildOutputScreenUnknownType|TestBuildOutputScreenStaleType|TestBuildOutputScreenUnexamined|TestCredentialScreenBudget|TestCredentialScreenBudgetWalk|TestExecToolsOptionsScreenBudget)$' ./agent/tools` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT in ./agent/tools, 42 tests); at the baseline and on the restored export also `go test -count=1 -v -timeout 600s -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath|TestCredentialPathMatchesOracle)$' ./agent/interceptor` and `go test -count=1 -v -timeout 600s -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (all with `GOFLAGS=-trimpath`, no `-race`)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/dirparse.go b/agent/tools/dirparse.go
+  --- a/agent/tools/dirparse.go
+  +++ b/agent/tools/dirparse.go
+  @@ -25,7 +25,7 @@
+   		}
+   		reclen := int(binary.NativeEndian.Uint16(buf[16:]))
+   		if reclen < direntFixed+1 || reclen > len(buf) {
+  -			return errBadDirent
+  +			return nil
+   		}
+   		nameLen := bytes.IndexByte(buf[direntFixed:reclen], 0)
+   		if nameLen <= 0 {
+  ```
+- Baseline: pass (exit 0, the tools, interceptor and golem commands; no test failed or skipped). Mutant: FAIL `TestParseDirents/reclen_past_end` (`dirparse_test.go:86: reclen past end: err = <nil>, want tools: directory record does not parse`); also red: `TestParseDirents/reclen_zero`, `TestParseDirents/reclen_short`; every other test the command runs passes. Exit 1 for the tools command, the only command run on the mutant; on linux the same leaves red and exit 1. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, the tools, interceptor and golem commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch makes `parseDirents` return nil (success, with what was emitted so far) at a record whose length is out of range, so a truncated or corrupt listing is taken as complete and the entries after it are never screened. The rows `reclen zero` and `reclen short` went red as well, because the whole branch now returns nil; only `reclen past end` is cited, since `reclen short` cannot tell a bound of 20 from 19. A hand-written mutant from the #789 plan's table; no row was added for it: the rows it turns red exist at `9ce6e39f`.
+
+## M-348 — The Darwin read's duplicate of the held descriptor is close-on-exec
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestDirReadSeams` in `dirread_darwin_test.go` (row `cloexec`)
+- Baseline: `9ce6e39f`, the commit that registers the #789 refs and the last commit that adds rows or changes test or production code before these entries (#789), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2); re-run on darwin amd64 (`GOARCH=amd64`, under Rosetta, the same host and go1.27.1) from the same export: baseline pass, the same failing leaves and quoted lines as on arm64, restored pass. Not run on linux: the patched file builds only on darwin
+- Profile / command: darwin-host / `go test -count=1 -v -timeout 600s -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestBuildOutputScreenIgnoresGuard|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld|TestParseDirents|TestDirReadSeams|TestDirReadKinds|TestWorkspaceEntryUnexamined|TestOpenScreenedUnexamined|TestWalkTolerantExamines|TestWalkTolerantUnknownType|TestWalkTolerantAllUnknown|TestBuildOutputScreenUnknownType|TestBuildOutputScreenStaleType|TestBuildOutputScreenUnexamined|TestCredentialScreenBudget|TestCredentialScreenBudgetWalk|TestExecToolsOptionsScreenBudget)$' ./agent/tools` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT in ./agent/tools, 42 tests); at the baseline and on the restored export also `go test -count=1 -v -timeout 600s -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath|TestCredentialPathMatchesOracle)$' ./agent/interceptor` and `go test -count=1 -v -timeout 600s -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (all with `GOFLAGS=-trimpath`, no `-race`); under `GOARCH=amd64` the tools command alone
+- Patch:
+  ```diff
+  diff --git a/agent/tools/dirread_darwin.go b/agent/tools/dirread_darwin.go
+  --- a/agent/tools/dirread_darwin.go
+  +++ b/agent/tools/dirread_darwin.go
+  @@ -46,7 +46,7 @@
+   // sysDir is the real directory read.
+   var sysDir = dirSys{
+   	dup: func(fd int) (int, error) {
+  -		return unix.FcntlInt(uintptr(fd), unix.F_DUPFD_CLOEXEC, 0)
+  +		return unix.Dup(fd)
+   	},
+   	fdopendir: func(fd int) (uintptr, error) {
+   		d, _, e := syscall_syscallPtr(libc_fdopendir_trampoline_addr, uintptr(fd), 0, 0)
+  ```
+- Baseline: pass (exit 0, the tools, interceptor and golem commands; no test failed or skipped). Mutant: FAIL `TestDirReadSeams/cloexec` (`dirread_darwin_test.go:184: cloexec: duplicate flags = 0x0, <nil>; want FD_CLOEXEC`); every other test the command runs passes. Exit 1 for the tools command, the only command run on the mutant. Re-run under `GOARCH=amd64` (darwin amd64): baseline pass (exit 0, the tools command), the same failing leaves and quoted line, exit 1, restored pass (exit 0). Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, the tools, interceptor and golem commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch makes the Darwin read duplicate the held descriptor with plain `dup`, without close-on-exec, so a command started concurrently inherits a descriptor onto a workspace directory. A hand-written mutant from the #789 plan's table; no row was added for it: the rows it turns red exist at `9ce6e39f`.
+
+## M-349 — A failed directory read fails the listing, on Linux and on Darwin
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestDirReadSeams` in `dirread_linux_test.go` (row `error after records`) and in `dirread_darwin_test.go` (row `readdir error`)
+- Baseline: `9ce6e39f`, the commit that registers the #789 refs and the last commit that adds rows or changes test or production code before these entries (#789), in an isolated `git archive` export
+- Platform: Darwin patch: darwin (arm64, go1.27.1, macOS 26.6.2), re-run on darwin amd64 (`GOARCH=amd64`, under Rosetta, the same host and go1.27.1) from the same export: baseline pass, the same failing leaves and quoted lines as on arm64, restored pass. Linux patch: linux (arm64, go1.27.1, the Docker `ci-local` image: Alpine 3.24.2, kernel 6.10.14-linuxkit, run as the non-root `ci` user, uid 1000), from the same export mounted as the container's workspace
+- Profile / command: darwin-host / `go test -count=1 -v -timeout 600s -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestBuildOutputScreenIgnoresGuard|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld|TestParseDirents|TestDirReadSeams|TestDirReadKinds|TestWorkspaceEntryUnexamined|TestOpenScreenedUnexamined|TestWalkTolerantExamines|TestWalkTolerantUnknownType|TestWalkTolerantAllUnknown|TestBuildOutputScreenUnknownType|TestBuildOutputScreenStaleType|TestBuildOutputScreenUnexamined|TestCredentialScreenBudget|TestCredentialScreenBudgetWalk|TestExecToolsOptionsScreenBudget)$' ./agent/tools` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT in ./agent/tools, 42 tests); at the baseline and on the restored export also `go test -count=1 -v -timeout 600s -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath|TestCredentialPathMatchesOracle)$' ./agent/interceptor` and `go test -count=1 -v -timeout 600s -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (all with `GOFLAGS=-trimpath`, no `-race`); under `GOARCH=amd64` the tools command alone; on linux the same commands, in one container: `docker compose -f docker-compose.ci.yml run --rm ci bash -c './.mut/driver.sh linux run-linux.tsv tools,interceptor,golem'`
+- Patch (Linux read, run on linux):
+  ```diff
+  diff --git a/agent/tools/dirread_linux.go b/agent/tools/dirread_linux.go
+  --- a/agent/tools/dirread_linux.go
+  +++ b/agent/tools/dirread_linux.go
+  @@ -46,7 +46,7 @@
+   			continue
+   		}
+   		if err != nil {
+  -			return err
+  +			return nil
+   		}
+   		if n == 0 {
+   			return nil
+  ```
+- Patch (Darwin read, run on darwin arm64 and amd64):
+  ```diff
+  diff --git a/agent/tools/dirread_darwin.go b/agent/tools/dirread_darwin.go
+  --- a/agent/tools/dirread_darwin.go
+  +++ b/agent/tools/dirread_darwin.go
+  @@ -97,7 +97,7 @@
+   			if e == syscall.EINTR {
+   				continue
+   			}
+  -			return e
+  +			return nil
+   		}
+   		if result == nil {
+   			return nil
+  ```
+- Baseline: pass (exit 0, the tools, interceptor and golem commands; no test failed or skipped), on each platform. Linux patch, on linux: FAIL `TestDirReadSeams/error_after_records` (`dirread_linux_test.go:101: error after records: err = <nil>, want input/output error`); every other test the command runs passes; exit 1 for the tools command, the only command run on the mutant. Darwin patch, on darwin arm64: FAIL `TestDirReadSeams/readdir_error` (`dirread_darwin_test.go:128: readdir error: err = <nil>, want input/output error`); also red: `TestDirReadSeams/real_readdir_error`; every other test the command runs passes; exit 1 for the tools command, the only command run on the mutant; re-run under `GOARCH=amd64` (darwin amd64): baseline pass (exit 0, the tools command), the same failing leaves and quoted line, exit 1, restored pass (exit 0). Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, the tools, interceptor and golem commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The Linux patch makes the Linux read return nil on a getdents error, and the Darwin patch makes the Darwin read return nil on a readdir_r error; either way the records read before the error are taken as the whole directory and the unread entries are never screened. The Darwin patch also turns `real readdir error` red (that row's real EINVAL is now returned as nil). One entry, two patches: each was applied alone, on its own platform. A hand-written mutant from the #789 plan's table; no row was added for it: the rows it turns red exist at `9ce6e39f`.
+
+## M-350 — A directory record with inode 0 is listed
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestParseDirents` (row `inode zero`)
+- Baseline: `9ce6e39f`, the commit that registers the #789 refs and the last commit that adds rows or changes test or production code before these entries (#789), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2); re-run on linux (arm64, go1.27.1, the Docker `ci-local` image: Alpine 3.24.2, kernel 6.10.14-linuxkit, run as the non-root `ci` user, uid 1000) from the same export mounted as the container's workspace: baseline pass, the same failing leaves and quoted lines as on darwin, restored pass
+- Profile / command: darwin-host / `go test -count=1 -v -timeout 600s -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestBuildOutputScreenIgnoresGuard|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld|TestParseDirents|TestDirReadSeams|TestDirReadKinds|TestWorkspaceEntryUnexamined|TestOpenScreenedUnexamined|TestWalkTolerantExamines|TestWalkTolerantUnknownType|TestWalkTolerantAllUnknown|TestBuildOutputScreenUnknownType|TestBuildOutputScreenStaleType|TestBuildOutputScreenUnexamined|TestCredentialScreenBudget|TestCredentialScreenBudgetWalk|TestExecToolsOptionsScreenBudget)$' ./agent/tools` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT in ./agent/tools, 42 tests); at the baseline and on the restored export also `go test -count=1 -v -timeout 600s -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath|TestCredentialPathMatchesOracle)$' ./agent/interceptor` and `go test -count=1 -v -timeout 600s -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (all with `GOFLAGS=-trimpath`, no `-race`)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/dirparse.go b/agent/tools/dirparse.go
+  --- a/agent/tools/dirparse.go
+  +++ b/agent/tools/dirparse.go
+  @@ -32,7 +32,7 @@
+   			return errBadDirent
+   		}
+   		name := string(buf[direntFixed : direntFixed+nameLen])
+  -		if name != "." && name != ".." {
+  +		if name != "." && name != ".." && binary.NativeEndian.Uint64(buf) != 0 {
+   			emit(name, buf[18])
+   		}
+   		buf = buf[reclen:]
+  ```
+- Baseline: pass (exit 0, the tools, interceptor and golem commands; no test failed or skipped). Mutant: FAIL `TestParseDirents/inode_zero` (`dirparse_test.go:89: inode zero: emitted 0 entries, want 1 (or a name or type differs)`); every other test the command runs passes. Exit 1 for the tools command, the only command run on the mutant; on linux the same leaves red and exit 1. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, the tools, interceptor and golem commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch makes `parseDirents` drop a record whose inode is 0, so a name the Linux kernel lists with d_ino 0 (as os.File.Readdirnames keeps) is never screened. A hand-written mutant from the #789 plan's table; no row was added for it: the rows it turns red exist at `9ce6e39f`.
+
+## M-351 — The Darwin read takes a `readdir_r` failure from its return value
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestDirReadSeams` in `dirread_darwin_test.go` (row `real readdir error`)
+- Baseline: `9ce6e39f`, the commit that registers the #789 refs and the last commit that adds rows or changes test or production code before these entries (#789), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2); re-run on darwin amd64 (`GOARCH=amd64`, under Rosetta, the same host and go1.27.1) from the same export: baseline pass, the same failing leaves and quoted lines as on arm64, restored pass. Not run on linux: the patched file builds only on darwin
+- Profile / command: darwin-host / `go test -count=1 -v -timeout 600s -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestBuildOutputScreenIgnoresGuard|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld|TestParseDirents|TestDirReadSeams|TestDirReadKinds|TestWorkspaceEntryUnexamined|TestOpenScreenedUnexamined|TestWalkTolerantExamines|TestWalkTolerantUnknownType|TestWalkTolerantAllUnknown|TestBuildOutputScreenUnknownType|TestBuildOutputScreenStaleType|TestBuildOutputScreenUnexamined|TestCredentialScreenBudget|TestCredentialScreenBudgetWalk|TestExecToolsOptionsScreenBudget)$' ./agent/tools` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT in ./agent/tools, 42 tests); at the baseline and on the restored export also `go test -count=1 -v -timeout 600s -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath|TestCredentialPathMatchesOracle)$' ./agent/interceptor` and `go test -count=1 -v -timeout 600s -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (all with `GOFLAGS=-trimpath`, no `-race`); under `GOARCH=amd64` the tools command alone
+- Patch:
+  ```diff
+  diff --git a/agent/tools/dirread_darwin.go b/agent/tools/dirread_darwin.go
+  --- a/agent/tools/dirread_darwin.go
+  +++ b/agent/tools/dirread_darwin.go
+  @@ -56,8 +56,8 @@
+   		return d, nil
+   	},
+   	readdir: func(dir uintptr, entry *unix.Dirent, result **unix.Dirent) syscall.Errno {
+  -		r, _, _ := syscall_syscall(libc_readdir_r_trampoline_addr, dir, uintptr(unsafe.Pointer(entry)), uintptr(unsafe.Pointer(result)))
+  -		return syscall.Errno(r)
+  +		_, _, e := syscall_syscall(libc_readdir_r_trampoline_addr, dir, uintptr(unsafe.Pointer(entry)), uintptr(unsafe.Pointer(result)))
+  +		return e
+   	},
+   	closedir: func(dir uintptr) {
+   		_, _, _ = syscall_syscall(libc_closedir_trampoline_addr, dir, 0, 0)
+  ```
+- Baseline: pass (exit 0, the tools, interceptor and golem commands; no test failed or skipped). Mutant: FAIL `TestDirReadSeams/real_readdir_error` (`dirread_darwin_test.go:224: real readdir error: err = <nil>, want EINVAL`); every other test the command runs passes. Exit 1 for the tools command, the only command run on the mutant. Re-run under `GOARCH=amd64` (darwin amd64): baseline pass (exit 0, the tools command), the same failing leaves and quoted line, exit 1, restored pass (exit 0). Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, the tools, interceptor and golem commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch makes the real readdir_r binding ignore readdir_r's return value and report errno instead; readdir_r reports failure only in its return value, so a failed read looks like the end of the directory and a partial list is returned as complete (nil is returned with a partial list). A hand-written mutant from the #789 plan's table; no row was added for it: the rows it turns red exist at `9ce6e39f`.
+
+## M-352 — An interrupted Darwin read closes the directory handle once
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestDirReadSeams` in `dirread_darwin_test.go` (row `readdir eintr`, simulated)
+- Baseline: `9ce6e39f`, the commit that registers the #789 refs and the last commit that adds rows or changes test or production code before these entries (#789), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2); re-run on darwin amd64 (`GOARCH=amd64`, under Rosetta, the same host and go1.27.1) from the same export: baseline pass, the same failing leaves and quoted lines as on arm64, restored pass. Not run on linux: the patched file builds only on darwin
+- Profile / command: darwin-host / `go test -count=1 -v -timeout 600s -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestBuildOutputScreenIgnoresGuard|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld|TestParseDirents|TestDirReadSeams|TestDirReadKinds|TestWorkspaceEntryUnexamined|TestOpenScreenedUnexamined|TestWalkTolerantExamines|TestWalkTolerantUnknownType|TestWalkTolerantAllUnknown|TestBuildOutputScreenUnknownType|TestBuildOutputScreenStaleType|TestBuildOutputScreenUnexamined|TestCredentialScreenBudget|TestCredentialScreenBudgetWalk|TestExecToolsOptionsScreenBudget)$' ./agent/tools` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT in ./agent/tools, 42 tests); at the baseline and on the restored export also `go test -count=1 -v -timeout 600s -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath|TestCredentialPathMatchesOracle)$' ./agent/interceptor` and `go test -count=1 -v -timeout 600s -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (all with `GOFLAGS=-trimpath`, no `-race`); under `GOARCH=amd64` the tools command alone
+- Patch:
+  ```diff
+  diff --git a/agent/tools/dirread_darwin.go b/agent/tools/dirread_darwin.go
+  --- a/agent/tools/dirread_darwin.go
+  +++ b/agent/tools/dirread_darwin.go
+  @@ -95,6 +95,7 @@
+   		var result *unix.Dirent
+   		if e := s.readdir(dir, entry, &result); e != 0 {
+   			if e == syscall.EINTR {
+  +				s.closedir(dir)
+   				continue
+   			}
+   			return e
+  ```
+- Baseline: pass (exit 0, the tools, interceptor and golem commands; no test failed or skipped). Mutant: FAIL `TestDirReadSeams/readdir_eintr` (`dirread_darwin_test.go:135: readdir eintr: calls dup/fdopendir/closedir/closeFD = {dup:1 open:1 closedir:2 closeFD:0}, want {dup:1 open:1 closedir:1 closeFD:0}`); every other test the command runs passes. Exit 1 for the tools command, the only command run on the mutant. Re-run under `GOARCH=amd64` (darwin amd64): baseline pass (exit 0, the tools command), the same failing leaves and quoted line, exit 1, restored pass (exit 0). Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, the tools, interceptor and golem commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch makes the Darwin read call closedir after an interrupted readdir_r and go on reading, so the handle is freed (and the duplicate closed) twice, once here and once by the deferred call: a use after free and a double close of a descriptor number another goroutine may own. A hand-written mutant from the #789 plan's table; no row was added for it: the rows it turns red exist at `9ce6e39f`.
+
+## M-353 — The Darwin read closes the directory handle after a read error
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestDirReadSeams` in `dirread_darwin_test.go` (row `readdir error`, simulated)
+- Baseline: `9ce6e39f`, the commit that registers the #789 refs and the last commit that adds rows or changes test or production code before these entries (#789), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2); re-run on darwin amd64 (`GOARCH=amd64`, under Rosetta, the same host and go1.27.1) from the same export: baseline pass, the same failing leaves and quoted lines as on arm64, restored pass. Not run on linux: the patched file builds only on darwin
+- Profile / command: darwin-host / `go test -count=1 -v -timeout 600s -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestBuildOutputScreenIgnoresGuard|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld|TestParseDirents|TestDirReadSeams|TestDirReadKinds|TestWorkspaceEntryUnexamined|TestOpenScreenedUnexamined|TestWalkTolerantExamines|TestWalkTolerantUnknownType|TestWalkTolerantAllUnknown|TestBuildOutputScreenUnknownType|TestBuildOutputScreenStaleType|TestBuildOutputScreenUnexamined|TestCredentialScreenBudget|TestCredentialScreenBudgetWalk|TestExecToolsOptionsScreenBudget)$' ./agent/tools` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT in ./agent/tools, 42 tests); at the baseline and on the restored export also `go test -count=1 -v -timeout 600s -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath|TestCredentialPathMatchesOracle)$' ./agent/interceptor` and `go test -count=1 -v -timeout 600s -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (all with `GOFLAGS=-trimpath`, no `-race`); under `GOARCH=amd64` the tools command alone
+- Patch:
+  ```diff
+  diff --git a/agent/tools/dirread_darwin.go b/agent/tools/dirread_darwin.go
+  --- a/agent/tools/dirread_darwin.go
+  +++ b/agent/tools/dirread_darwin.go
+  @@ -88,7 +88,12 @@
+   		_ = s.closeFD(fd)
+   		return err
+   	}
+  -	defer s.closedir(dir)
+  +	readFailed := false
+  +	defer func() {
+  +		if !readFailed {
+  +			s.closedir(dir)
+  +		}
+  +	}()
+   	entry := new(unix.Dirent)
+   	for {
+   		*entry = unix.Dirent{}
+  @@ -97,6 +102,7 @@
+   			if e == syscall.EINTR {
+   				continue
+   			}
+  +			readFailed = true
+   			return e
+   		}
+   		if result == nil {
+  ```
+- Baseline: pass (exit 0, the tools, interceptor and golem commands; no test failed or skipped). Mutant: FAIL `TestDirReadSeams/readdir_error` (`dirread_darwin_test.go:135: readdir error: calls dup/fdopendir/closedir/closeFD = {dup:1 open:1 closedir:0 closeFD:0}, want {dup:1 open:1 closedir:1 closeFD:0}`); also red: `TestDirReadSeams/real_readdir_error`; every other test the command runs passes. Exit 1 for the tools command, the only command run on the mutant. Re-run under `GOARCH=amd64` (darwin amd64): baseline pass (exit 0, the tools command), the same failing leaves and quoted line, exit 1, restored pass (exit 0). Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, the tools, interceptor and golem commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch makes the Darwin read skip closedir when readdir_r fails, leaking the DIR handle and its descriptor on every failed listing. A hand-written mutant from the #789 plan's table; no row was added for it: the rows it turns red exist at `9ce6e39f`.
+
+## M-354 — The listing stats every entry the credential matcher accepts
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestWalkTolerantExamines`, `TestBuildOutputScreenKeys`
+- Baseline: `9ce6e39f`, the commit that registers the #789 refs and the last commit that adds rows or changes test or production code before these entries (#789), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2); re-run on linux (arm64, go1.27.1, the Docker `ci-local` image: Alpine 3.24.2, kernel 6.10.14-linuxkit, run as the non-root `ci` user, uid 1000) from the same export mounted as the container's workspace: baseline pass, the same failing leaves and quoted lines as on darwin, restored pass
+- Profile / command: darwin-host / `go test -count=1 -v -timeout 600s -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestBuildOutputScreenIgnoresGuard|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld|TestParseDirents|TestDirReadSeams|TestDirReadKinds|TestWorkspaceEntryUnexamined|TestOpenScreenedUnexamined|TestWalkTolerantExamines|TestWalkTolerantUnknownType|TestWalkTolerantAllUnknown|TestBuildOutputScreenUnknownType|TestBuildOutputScreenStaleType|TestBuildOutputScreenUnexamined|TestCredentialScreenBudget|TestCredentialScreenBudgetWalk|TestExecToolsOptionsScreenBudget)$' ./agent/tools` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT in ./agent/tools, 42 tests); at the baseline and on the restored export also `go test -count=1 -v -timeout 600s -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath|TestCredentialPathMatchesOracle)$' ./agent/interceptor` and `go test -count=1 -v -timeout 600s -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (all with `GOFLAGS=-trimpath`, no `-race`)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/paths_unix.go b/agent/tools/paths_unix.go
+  --- a/agent/tools/paths_unix.go
+  +++ b/agent/tools/paths_unix.go
+  @@ -624,7 +624,7 @@
+   		typ := w.screenSeams.typ(slash, l.typ)
+   		// Stat everything the directory read did not type as a regular file,
+   		// unknown included, and every path the matcher accepts.
+  -		if typ == unix.DT_REG && !w.screenSeams.need(slash, examine(slash)) {
+  +		if typ == unix.DT_REG && !w.screenSeams.need(slash, false) {
+   			entries = append(entries, workspaceEntry{name: l.name, dir: f, unexamined: true})
+   			continue
+   		}
+  ```
+- Baseline: pass (exit 0, the tools, interceptor and golem commands; no test failed or skipped). Mutant: FAIL `TestWalkTolerantExamines` (`walk_tolerant_test.go:440: examines: stat'ed paths differ (9, want 13)`); FAIL `TestBuildOutputScreenKeys` (`screen_build_test.go:82: keys: unexpected notes (1)`); also red: 42 more leaves, of `TestBackgroundTailScreened`, `TestRunCommandScreensOutput`, `TestRunCommandWithheldStreams`, `TestRunCommandUnreadableAfterFirstCommand`, `TestVerifyFailingObservationScreened`, `TestCredentialScreenBudgetWalk`, `TestBuildOutputScreenUnknownType`, `TestBuildOutputScreenStaleType`, `TestBuildOutputScreenGitConfigAlias`, `TestBuildOutputScreenGitConfigRootReplaced`, `TestBuildOutputScreenBounds`, `TestBuildOutputScreenSkips`, `TestBuildOutputScreenIgnoresGuard`, `TestWalkTolerant`; every other test the command runs passes. Exit 1 for the tools command, the only command run on the mutant; on linux the same leaves red and exit 1. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, the tools, interceptor and golem commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch makes the tolerant listing never ask the credential matcher, so a credential file typed regular is listed unexamined and the screen withholds output (listed without metadata) instead of reading its keys; with the refusal gone the file would be unread. A hand-written mutant from the #789 plan's table; no row was added for it: the rows it turns red exist at `9ce6e39f`.
+
+## M-355 — The listing stats every entry not typed as a regular file
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestWalkTolerantExamines`
+- Baseline: `9ce6e39f`, the commit that registers the #789 refs and the last commit that adds rows or changes test or production code before these entries (#789), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2); re-run on linux (arm64, go1.27.1, the Docker `ci-local` image: Alpine 3.24.2, kernel 6.10.14-linuxkit, run as the non-root `ci` user, uid 1000) from the same export mounted as the container's workspace: baseline pass, the same failing leaves and quoted lines as on darwin, restored pass
+- Profile / command: darwin-host / `go test -count=1 -v -timeout 600s -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestBuildOutputScreenIgnoresGuard|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld|TestParseDirents|TestDirReadSeams|TestDirReadKinds|TestWorkspaceEntryUnexamined|TestOpenScreenedUnexamined|TestWalkTolerantExamines|TestWalkTolerantUnknownType|TestWalkTolerantAllUnknown|TestBuildOutputScreenUnknownType|TestBuildOutputScreenStaleType|TestBuildOutputScreenUnexamined|TestCredentialScreenBudget|TestCredentialScreenBudgetWalk|TestExecToolsOptionsScreenBudget)$' ./agent/tools` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT in ./agent/tools, 42 tests); at the baseline and on the restored export also `go test -count=1 -v -timeout 600s -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath|TestCredentialPathMatchesOracle)$' ./agent/interceptor` and `go test -count=1 -v -timeout 600s -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (all with `GOFLAGS=-trimpath`, no `-race`)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/paths_unix.go b/agent/tools/paths_unix.go
+  --- a/agent/tools/paths_unix.go
+  +++ b/agent/tools/paths_unix.go
+  @@ -624,7 +624,7 @@
+   		typ := w.screenSeams.typ(slash, l.typ)
+   		// Stat everything the directory read did not type as a regular file,
+   		// unknown included, and every path the matcher accepts.
+  -		if typ == unix.DT_REG && !w.screenSeams.need(slash, examine(slash)) {
+  +		if typ != unix.DT_DIR && !w.screenSeams.need(slash, examine(slash)) {
+   			entries = append(entries, workspaceEntry{name: l.name, dir: f, unexamined: true})
+   			continue
+   		}
+  ```
+- Baseline: pass (exit 0, the tools, interceptor and golem commands; no test failed or skipped). Mutant: FAIL `TestWalkTolerantExamines` (`walk_tolerant_test.go:440: examines: stat'ed paths differ (11, want 13)`); also red: `TestBuildOutputScreenUnknownType`, `TestWalkTolerantUnknownType/plain_file`, `TestWalkTolerantUnknownType/directory`, `TestWalkTolerantUnknownType/unknown_gone`, `TestWalkTolerantUnknownType/unknown_eio`, `TestWalkTolerantAllUnknown`; every other test the command runs passes. Exit 1 for the tools command, the only command run on the mutant; on linux the same leaves red and exit 1. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, the tools, interceptor and golem commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch makes every entry that is not a directory (symbolic link, pipe, socket, unknown type) listed unexamined, without the stat that tells a credential-named link or special file from a regular one. A hand-written mutant from the #789 plan's table; no row was added for it: the rows it turns red exist at `9ce6e39f`.
+
+## M-356 — The listing stats an entry of unknown type
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestWalkTolerantUnknownType` (row `directory`), `TestBuildOutputScreenUnknownType`
+- Baseline: `9ce6e39f`, the commit that registers the #789 refs and the last commit that adds rows or changes test or production code before these entries (#789), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2); re-run on linux (arm64, go1.27.1, the Docker `ci-local` image: Alpine 3.24.2, kernel 6.10.14-linuxkit, run as the non-root `ci` user, uid 1000) from the same export mounted as the container's workspace: baseline pass, the same failing leaves and quoted lines as on darwin, restored pass
+- Profile / command: darwin-host / `go test -count=1 -v -timeout 600s -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestBuildOutputScreenIgnoresGuard|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld|TestParseDirents|TestDirReadSeams|TestDirReadKinds|TestWorkspaceEntryUnexamined|TestOpenScreenedUnexamined|TestWalkTolerantExamines|TestWalkTolerantUnknownType|TestWalkTolerantAllUnknown|TestBuildOutputScreenUnknownType|TestBuildOutputScreenStaleType|TestBuildOutputScreenUnexamined|TestCredentialScreenBudget|TestCredentialScreenBudgetWalk|TestExecToolsOptionsScreenBudget)$' ./agent/tools` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT in ./agent/tools, 42 tests); at the baseline and on the restored export also `go test -count=1 -v -timeout 600s -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath|TestCredentialPathMatchesOracle)$' ./agent/interceptor` and `go test -count=1 -v -timeout 600s -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (all with `GOFLAGS=-trimpath`, no `-race`)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/paths_unix.go b/agent/tools/paths_unix.go
+  --- a/agent/tools/paths_unix.go
+  +++ b/agent/tools/paths_unix.go
+  @@ -624,7 +624,7 @@
+   		typ := w.screenSeams.typ(slash, l.typ)
+   		// Stat everything the directory read did not type as a regular file,
+   		// unknown included, and every path the matcher accepts.
+  -		if typ == unix.DT_REG && !w.screenSeams.need(slash, examine(slash)) {
+  +		if (typ == unix.DT_REG || typ == unix.DT_UNKNOWN) && !w.screenSeams.need(slash, examine(slash)) {
+   			entries = append(entries, workspaceEntry{name: l.name, dir: f, unexamined: true})
+   			continue
+   		}
+  ```
+- Baseline: pass (exit 0, the tools, interceptor and golem commands; no test failed or skipped). Mutant: FAIL `TestWalkTolerantUnknownType/directory` (`walk_tolerant_test.go:489: directory: the untyped entry was not stat'ed`); FAIL `TestBuildOutputScreenUnknownType` (`screen_build_test.go:127: unknown type: value not withheld (len 20)`); also red: `TestWalkTolerantUnknownType/plain_file`, `TestWalkTolerantUnknownType/unknown_gone`, `TestWalkTolerantUnknownType/unknown_eio`, `TestWalkTolerantAllUnknown`; every other test the command runs passes. Exit 1 for the tools command, the only command run on the mutant; on linux the same leaves red and exit 1. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, the tools, interceptor and golem commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch treats an entry of unknown type (a filesystem that reports no d_type) as regular and does not stat it, so an untyped directory is never descended and the credential files under it are never read. A hand-written mutant from the #789 plan's table; no row was added for it: the rows it turns red exist at `9ce6e39f`.
+
+## M-357 — The listing asks the matcher with the entry's workspace path
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestWalkTolerantExamines`
+- Baseline: `9ce6e39f`, the commit that registers the #789 refs and the last commit that adds rows or changes test or production code before these entries (#789), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2); re-run on linux (arm64, go1.27.1, the Docker `ci-local` image: Alpine 3.24.2, kernel 6.10.14-linuxkit, run as the non-root `ci` user, uid 1000) from the same export mounted as the container's workspace: baseline pass, the same failing leaves and quoted lines as on darwin, restored pass
+- Profile / command: darwin-host / `go test -count=1 -v -timeout 600s -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestBuildOutputScreenIgnoresGuard|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld|TestParseDirents|TestDirReadSeams|TestDirReadKinds|TestWorkspaceEntryUnexamined|TestOpenScreenedUnexamined|TestWalkTolerantExamines|TestWalkTolerantUnknownType|TestWalkTolerantAllUnknown|TestBuildOutputScreenUnknownType|TestBuildOutputScreenStaleType|TestBuildOutputScreenUnexamined|TestCredentialScreenBudget|TestCredentialScreenBudgetWalk|TestExecToolsOptionsScreenBudget)$' ./agent/tools` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT in ./agent/tools, 42 tests); at the baseline and on the restored export also `go test -count=1 -v -timeout 600s -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath|TestCredentialPathMatchesOracle)$' ./agent/interceptor` and `go test -count=1 -v -timeout 600s -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (all with `GOFLAGS=-trimpath`, no `-race`)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/paths_unix.go b/agent/tools/paths_unix.go
+  --- a/agent/tools/paths_unix.go
+  +++ b/agent/tools/paths_unix.go
+  @@ -624,7 +624,7 @@
+   		typ := w.screenSeams.typ(slash, l.typ)
+   		// Stat everything the directory read did not type as a regular file,
+   		// unknown included, and every path the matcher accepts.
+  -		if typ == unix.DT_REG && !w.screenSeams.need(slash, examine(slash)) {
+  +		if typ == unix.DT_REG && !w.screenSeams.need(slash, examine(l.name)) {
+   			entries = append(entries, workspaceEntry{name: l.name, dir: f, unexamined: true})
+   			continue
+   		}
+  ```
+- Baseline: pass (exit 0, the tools, interceptor and golem commands; no test failed or skipped). Mutant: FAIL `TestWalkTolerantExamines` (`walk_tolerant_test.go:440: examines: stat'ed paths differ (12, want 13)`); also red: `TestBuildOutputScreenGitConfigAlias`, `TestWalkTolerant/stat_failures`; every other test the command runs passes. Exit 1 for the tools command, the only command run on the mutant; on linux the same leaves red and exit 1. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, the tools, interceptor and golem commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch makes the listing pass the entry's base name, not its workspace path, to the matcher, so a credential path that is credential only by an ancestor (.ssh/id) is listed unexamined. A hand-written mutant from the #789 plan's table; no row was added for it: the rows it turns red exist at `9ce6e39f`.
+
+## M-358 — `openScreened` refuses an entry listed without metadata
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestBuildOutputScreenUnexamined` (row `parent moved`)
+- Baseline: `9ce6e39f`, the commit that registers the #789 refs and the last commit that adds rows or changes test or production code before these entries (#789), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2); re-run on linux (arm64, go1.27.1, the Docker `ci-local` image: Alpine 3.24.2, kernel 6.10.14-linuxkit, run as the non-root `ci` user, uid 1000) from the same export mounted as the container's workspace: baseline pass, the same failing leaves and quoted lines as on darwin, restored pass
+- Profile / command: darwin-host / `go test -count=1 -v -timeout 600s -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestBuildOutputScreenIgnoresGuard|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld|TestParseDirents|TestDirReadSeams|TestDirReadKinds|TestWorkspaceEntryUnexamined|TestOpenScreenedUnexamined|TestWalkTolerantExamines|TestWalkTolerantUnknownType|TestWalkTolerantAllUnknown|TestBuildOutputScreenUnknownType|TestBuildOutputScreenStaleType|TestBuildOutputScreenUnexamined|TestCredentialScreenBudget|TestCredentialScreenBudgetWalk|TestExecToolsOptionsScreenBudget)$' ./agent/tools` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT in ./agent/tools, 42 tests); at the baseline and on the restored export also `go test -count=1 -v -timeout 600s -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath|TestCredentialPathMatchesOracle)$' ./agent/interceptor` and `go test -count=1 -v -timeout 600s -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (all with `GOFLAGS=-trimpath`, no `-race`)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/screen_build.go b/agent/tools/screen_build.go
+  --- a/agent/tools/screen_build.go
+  +++ b/agent/tools/screen_build.go
+  @@ -220,14 +220,6 @@
+   func (w *Workspace) openScreened(rel string, d fs.DirEntry) (*os.File, error) {
+   	seamErr := w.screenSeams.open(rel) // asked first, so a test can act at this instant
+   	e, ok := d.(workspaceEntry)
+  -	if ok && e.unexamined {
+  -		// Only a lost anchor outranks the refusal: a moved parent must not
+  -		// turn it into an announced change.
+  -		if err := w.verifyReachable(filepath.Dir(rel), e.dir); err != nil && walkFatal(err) {
+  -			return nil, err
+  -		}
+  -		return nil, errWalkEntryUnexamined
+  -	}
+   	if seamErr != nil {
+   		if !ok {
+   			return nil, errWalkEntryUnheld
+  ```
+- Baseline: pass (exit 0, the tools, interceptor and golem commands; no test failed or skipped). Mutant: FAIL `TestBuildOutputScreenUnexamined/parent_moved` (`screen_build_test.go:234: parent moved: notes differ (1 notes)`); also red: `TestOpenScreenedUnexamined/seam_error_ignored`, `TestOpenScreenedUnexamined/parent_moved`; every other test the command runs passes. Exit 1 for the tools command, the only command run on the mutant; on linux the same leaves red and exit 1. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, the tools, interceptor and golem commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch removes the refusal from `openScreened`, so the open seam's answer or a moved parent decides instead: a moved parent turns the withhold into an announced change and output is delivered. A hand-written mutant from the #789 plan's table; no row was added for it: the rows it turns red exist at `9ce6e39f`.
+
+## M-359 — `openScreened` checks that the root is reachable before it refuses an unexamined entry
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestBuildOutputScreenUnexamined` (row `root swapped`)
+- Baseline: `9ce6e39f`, the commit that registers the #789 refs and the last commit that adds rows or changes test or production code before these entries (#789), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2); re-run on linux (arm64, go1.27.1, the Docker `ci-local` image: Alpine 3.24.2, kernel 6.10.14-linuxkit, run as the non-root `ci` user, uid 1000) from the same export mounted as the container's workspace: baseline pass, the same failing leaves and quoted lines as on darwin, restored pass
+- Profile / command: darwin-host / `go test -count=1 -v -timeout 600s -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestBuildOutputScreenIgnoresGuard|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld|TestParseDirents|TestDirReadSeams|TestDirReadKinds|TestWorkspaceEntryUnexamined|TestOpenScreenedUnexamined|TestWalkTolerantExamines|TestWalkTolerantUnknownType|TestWalkTolerantAllUnknown|TestBuildOutputScreenUnknownType|TestBuildOutputScreenStaleType|TestBuildOutputScreenUnexamined|TestCredentialScreenBudget|TestCredentialScreenBudgetWalk|TestExecToolsOptionsScreenBudget)$' ./agent/tools` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT in ./agent/tools, 42 tests); at the baseline and on the restored export also `go test -count=1 -v -timeout 600s -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath|TestCredentialPathMatchesOracle)$' ./agent/interceptor` and `go test -count=1 -v -timeout 600s -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (all with `GOFLAGS=-trimpath`, no `-race`)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/screen_build.go b/agent/tools/screen_build.go
+  --- a/agent/tools/screen_build.go
+  +++ b/agent/tools/screen_build.go
+  @@ -223,9 +223,6 @@
+   	if ok && e.unexamined {
+   		// Only a lost anchor outranks the refusal: a moved parent must not
+   		// turn it into an announced change.
+  -		if err := w.verifyReachable(filepath.Dir(rel), e.dir); err != nil && walkFatal(err) {
+  -			return nil, err
+  -		}
+   		return nil, errWalkEntryUnexamined
+   	}
+   	if seamErr != nil {
+  ```
+- Baseline: pass (exit 0, the tools, interceptor and golem commands; no test failed or skipped). Mutant: FAIL `TestBuildOutputScreenUnexamined/root_swapped` (`screen_build_test.go:223: root swapped: wrong outcome (error: false, screen: true)`); also red: `TestOpenScreenedUnexamined/root_swapped`; every other test the command runs passes. Exit 1 for the tools command, the only command run on the mutant; on linux the same leaves red and exit 1. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, the tools, interceptor and golem commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch makes `openScreened` refuse an unexamined entry without first checking that the workspace root is still reachable, so a swapped root yields a withheld screen and the command runs instead of being refused. A hand-written mutant from the #789 plan's table; no row was added for it: the rows it turns red exist at `9ce6e39f`.
+
+## M-360 — `openRegular` refuses an entry listed without metadata
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestWorkspaceEntryUnexamined`
+- Baseline: `9ce6e39f`, the commit that registers the #789 refs and the last commit that adds rows or changes test or production code before these entries (#789), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2); re-run on linux (arm64, go1.27.1, the Docker `ci-local` image: Alpine 3.24.2, kernel 6.10.14-linuxkit, run as the non-root `ci` user, uid 1000) from the same export mounted as the container's workspace: baseline pass, the same failing leaves and quoted lines as on darwin, restored pass
+- Profile / command: darwin-host / `go test -count=1 -v -timeout 600s -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestBuildOutputScreenIgnoresGuard|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld|TestParseDirents|TestDirReadSeams|TestDirReadKinds|TestWorkspaceEntryUnexamined|TestOpenScreenedUnexamined|TestWalkTolerantExamines|TestWalkTolerantUnknownType|TestWalkTolerantAllUnknown|TestBuildOutputScreenUnknownType|TestBuildOutputScreenStaleType|TestBuildOutputScreenUnexamined|TestCredentialScreenBudget|TestCredentialScreenBudgetWalk|TestExecToolsOptionsScreenBudget)$' ./agent/tools` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT in ./agent/tools, 42 tests); at the baseline and on the restored export also `go test -count=1 -v -timeout 600s -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath|TestCredentialPathMatchesOracle)$' ./agent/interceptor` and `go test -count=1 -v -timeout 600s -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (all with `GOFLAGS=-trimpath`, no `-race`)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/paths_unix.go b/agent/tools/paths_unix.go
+  --- a/agent/tools/paths_unix.go
+  +++ b/agent/tools/paths_unix.go
+  @@ -423,9 +423,6 @@
+   // was consulted for this entry by the walk; identity is re-checked on the
+   // opened descriptor exactly as openReadMode does.
+   func (e workspaceEntry) openRegular() (*os.File, error) {
+  -	if e.unexamined {
+  -		return nil, errWalkEntryUnexamined
+  -	}
+   	if e.stat.Mode&unix.S_IFMT != unix.S_IFREG {
+   		return nil, errNotRegular
+   	}
+  ```
+- Baseline: pass (exit 0, the tools, interceptor and golem commands; no test failed or skipped). Mutant: FAIL `TestWorkspaceEntryUnexamined` (`walk_tolerant_test.go:593: unexamined entry: openRegular = (<nil>, not a regular file), want (nil, sentinel)`); every other test the command runs passes. Exit 1 for the tools command, the only command run on the mutant; on linux the same leaves red and exit 1. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, the tools, interceptor and golem commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch removes the refusal from `openRegular`, so its zero stat (mode 0) is what decides, and any caller holding such an entry gets errNotRegular, a lenient skip, rather than the withholding sentinel. A hand-written mutant from the #789 plan's table; no row was added for it: the rows it turns red exist at `9ce6e39f`.
+
+## M-361 — An entry listed without metadata is not classed as a file that is not regular
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestClassifySkip`, `TestBuildOutputScreenUnexamined` (row `withheld`)
+- Baseline: `9ce6e39f`, the commit that registers the #789 refs and the last commit that adds rows or changes test or production code before these entries (#789), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2); re-run on linux (arm64, go1.27.1, the Docker `ci-local` image: Alpine 3.24.2, kernel 6.10.14-linuxkit, run as the non-root `ci` user, uid 1000) from the same export mounted as the container's workspace: baseline pass, the same failing leaves and quoted lines as on darwin, restored pass
+- Profile / command: darwin-host / `go test -count=1 -v -timeout 600s -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestBuildOutputScreenIgnoresGuard|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld|TestParseDirents|TestDirReadSeams|TestDirReadKinds|TestWorkspaceEntryUnexamined|TestOpenScreenedUnexamined|TestWalkTolerantExamines|TestWalkTolerantUnknownType|TestWalkTolerantAllUnknown|TestBuildOutputScreenUnknownType|TestBuildOutputScreenStaleType|TestBuildOutputScreenUnexamined|TestCredentialScreenBudget|TestCredentialScreenBudgetWalk|TestExecToolsOptionsScreenBudget)$' ./agent/tools` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT in ./agent/tools, 42 tests); at the baseline and on the restored export also `go test -count=1 -v -timeout 600s -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath|TestCredentialPathMatchesOracle)$' ./agent/interceptor` and `go test -count=1 -v -timeout 600s -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (all with `GOFLAGS=-trimpath`, no `-race`)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/paths.go b/agent/tools/paths.go
+  --- a/agent/tools/paths.go
+  +++ b/agent/tools/paths.go
+  @@ -65,7 +65,7 @@
+   	// (#789). Such an entry is never opened: it is none of the errors the
+   	// credential screen treats leniently, so trying to open one withholds
+   	// output. Only the Unix backend raises it.
+  -	errWalkEntryUnexamined = errors.New("tools: walk entry was listed without metadata")
+  +	errWalkEntryUnexamined = fmt.Errorf("tools: walk entry was listed without metadata: %w", errNotRegular)
+   	// errAnchorUnreachable marks a reachability lookup (#613) that failed on
+   	// the way to the workspace's own root for a reason other than a changed
+   	// path, such as lost permission above the root. It wraps the cause, which
+  ```
+- Baseline: pass (exit 0, the tools, interceptor and golem commands; no test failed or skipped). Mutant: FAIL `TestClassifySkip` (`screen_classify_test.go:36: unexamined: classifySkip = 1, want 3`); FAIL `TestBuildOutputScreenUnexamined/withheld` (`screen_build_test.go:234: withheld: notes differ (0 notes)`); also red: `TestRunCommandWithheldStreams/unexamined`, `TestBuildOutputScreenUnexamined/parent_moved`, `TestClassifySkip/unexamined`; every other test the command runs passes. Exit 1 for the tools command, the only command run on the mutant; on linux the same leaves red and exit 1. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, the tools, interceptor and golem commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch makes the sentinel wrap errNotRegular, which the screen ignores, so an unexamined entry is skipped silently and its contents are delivered. The patch uses `fmt.Errorf` with `%w`, so the sentinel's text gains the wrapped error's; no test compares that text, and the failures are on classification. A hand-written mutant from the #789 plan's table; no row was added for it: the rows it turns red exist at `9ce6e39f`.
+
+## M-362 — An entry listed without metadata is not classed as a changed file
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestClassifySkip`, `TestBuildOutputScreenUnexamined` (row `withheld`)
+- Baseline: `9ce6e39f`, the commit that registers the #789 refs and the last commit that adds rows or changes test or production code before these entries (#789), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2); re-run on linux (arm64, go1.27.1, the Docker `ci-local` image: Alpine 3.24.2, kernel 6.10.14-linuxkit, run as the non-root `ci` user, uid 1000) from the same export mounted as the container's workspace: baseline pass, the same failing leaves and quoted lines as on darwin, restored pass
+- Profile / command: darwin-host / `go test -count=1 -v -timeout 600s -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestBuildOutputScreenIgnoresGuard|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld|TestParseDirents|TestDirReadSeams|TestDirReadKinds|TestWorkspaceEntryUnexamined|TestOpenScreenedUnexamined|TestWalkTolerantExamines|TestWalkTolerantUnknownType|TestWalkTolerantAllUnknown|TestBuildOutputScreenUnknownType|TestBuildOutputScreenStaleType|TestBuildOutputScreenUnexamined|TestCredentialScreenBudget|TestCredentialScreenBudgetWalk|TestExecToolsOptionsScreenBudget)$' ./agent/tools` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT in ./agent/tools, 42 tests); at the baseline and on the restored export also `go test -count=1 -v -timeout 600s -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath|TestCredentialPathMatchesOracle)$' ./agent/interceptor` and `go test -count=1 -v -timeout 600s -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (all with `GOFLAGS=-trimpath`, no `-race`)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/paths.go b/agent/tools/paths.go
+  --- a/agent/tools/paths.go
+  +++ b/agent/tools/paths.go
+  @@ -65,7 +65,7 @@
+   	// (#789). Such an entry is never opened: it is none of the errors the
+   	// credential screen treats leniently, so trying to open one withholds
+   	// output. Only the Unix backend raises it.
+  -	errWalkEntryUnexamined = errors.New("tools: walk entry was listed without metadata")
+  +	errWalkEntryUnexamined = fmt.Errorf("tools: walk entry was listed without metadata: %w", errFileChanged)
+   	// errAnchorUnreachable marks a reachability lookup (#613) that failed on
+   	// the way to the workspace's own root for a reason other than a changed
+   	// path, such as lost permission above the root. It wraps the cause, which
+  ```
+- Baseline: pass (exit 0, the tools, interceptor and golem commands; no test failed or skipped). Mutant: FAIL `TestClassifySkip` (`screen_classify_test.go:36: unexamined: classifySkip = 2, want 3`); FAIL `TestBuildOutputScreenUnexamined/withheld` (`screen_build_test.go:234: withheld: notes differ (1 notes)`); also red: `TestRunCommandWithheldStreams/unexamined`, `TestBuildOutputScreenUnexamined/parent_moved`, `TestClassifySkip/unexamined`, `TestOpenScreenedUnexamined/parent_moved`; every other test the command runs passes. Exit 1 for the tools command, the only command run on the mutant; on linux the same leaves red and exit 1. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, the tools, interceptor and golem commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch makes the sentinel wrap errFileChanged, which the screen announces as a change, so an unexamined entry is announced and output is delivered instead of withheld. The patch uses `fmt.Errorf` with `%w`, so the sentinel's text gains the wrapped error's; no test compares that text, and the failures are on classification. A hand-written mutant from the #789 plan's table; no row was added for it: the rows it turns red exist at `9ce6e39f`.
+
+## M-363 — An upper-case path is lower-cased before it is matched
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialPathMatchesOracle`
+- Baseline: `9ce6e39f`, the commit that registers the #789 refs and the last commit that adds rows or changes test or production code before these entries (#789), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2); re-run on linux (arm64, go1.27.1, the Docker `ci-local` image: Alpine 3.24.2, kernel 6.10.14-linuxkit, run as the non-root `ci` user, uid 1000) from the same export mounted as the container's workspace: baseline pass, the same failing leaves and quoted lines as on darwin, restored pass
+- Profile / command: darwin-host / `go test -count=1 -v -timeout 600s -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath|TestCredentialPathMatchesOracle)$' ./agent/interceptor` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT in ./agent/interceptor, 6 tests); at the baseline and on the restored export also `go test -count=1 -v -timeout 600s -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestBuildOutputScreenIgnoresGuard|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld|TestParseDirents|TestDirReadSeams|TestDirReadKinds|TestWorkspaceEntryUnexamined|TestOpenScreenedUnexamined|TestWalkTolerantExamines|TestWalkTolerantUnknownType|TestWalkTolerantAllUnknown|TestBuildOutputScreenUnknownType|TestBuildOutputScreenStaleType|TestBuildOutputScreenUnexamined|TestCredentialScreenBudget|TestCredentialScreenBudgetWalk|TestExecToolsOptionsScreenBudget)$' ./agent/tools` and `go test -count=1 -v -timeout 600s -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (all with `GOFLAGS=-trimpath`, no `-race`)
+- Patch:
+  ```diff
+  diff --git a/agent/interceptor/invariants.go b/agent/interceptor/invariants.go
+  --- a/agent/interceptor/invariants.go
+  +++ b/agent/interceptor/invariants.go
+  @@ -212,7 +212,7 @@
+   		clean := filepath.Clean(s)
+   		plain := true
+   		for i := 0; i < len(clean); i++ {
+  -			if c := clean[i]; c >= 0x80 || (c >= 'A' && c <= 'Z') {
+  +			if c := clean[i]; c >= 0x80 {
+   				plain = false
+   				break
+   			}
+  ```
+- Baseline: pass (exit 0, the tools, interceptor and golem commands; no test failed or skipped). Mutant: FAIL `TestCredentialPathMatchesOracle` (`credential_path_oracle_test.go:152: group a index 1: IsCredentialPath=false oracle=true IsGitConfigPath=false oracle=true`); also red: `TestWordNamesCredentialPath/upper_env`, `TestWordNamesCredentialPath/magic_top_icase`, `TestIsGitConfigPath/upper_git`; every other test the command runs passes. Exit 1 for the interceptor command, the only command run on the mutant; on linux the same leaves red and exit 1. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, the tools, interceptor and golem commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch makes `matchNormalize` take the fast route for upper-case ASCII paths, skipping the lower-casing, so .ENV or .SSH/id (one file on a case-insensitive filesystem) is not a credential path. The oracle test reports at most 20 mismatches and then stops. A hand-written mutant from the #789 plan's table; no row was added for it: the rows it turns red exist at `9ce6e39f`.
+
+## M-364 — A non-ASCII path is folded before it is matched
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialPathMatchesOracle`
+- Baseline: `9ce6e39f`, the commit that registers the #789 refs and the last commit that adds rows or changes test or production code before these entries (#789), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2); re-run on linux (arm64, go1.27.1, the Docker `ci-local` image: Alpine 3.24.2, kernel 6.10.14-linuxkit, run as the non-root `ci` user, uid 1000) from the same export mounted as the container's workspace: baseline pass, the same failing leaves and quoted lines as on darwin, restored pass
+- Profile / command: darwin-host / `go test -count=1 -v -timeout 600s -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath|TestCredentialPathMatchesOracle)$' ./agent/interceptor` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT in ./agent/interceptor, 6 tests); at the baseline and on the restored export also `go test -count=1 -v -timeout 600s -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestBuildOutputScreenIgnoresGuard|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld|TestParseDirents|TestDirReadSeams|TestDirReadKinds|TestWorkspaceEntryUnexamined|TestOpenScreenedUnexamined|TestWalkTolerantExamines|TestWalkTolerantUnknownType|TestWalkTolerantAllUnknown|TestBuildOutputScreenUnknownType|TestBuildOutputScreenStaleType|TestBuildOutputScreenUnexamined|TestCredentialScreenBudget|TestCredentialScreenBudgetWalk|TestExecToolsOptionsScreenBudget)$' ./agent/tools` and `go test -count=1 -v -timeout 600s -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (all with `GOFLAGS=-trimpath`, no `-race`)
+- Patch:
+  ```diff
+  diff --git a/agent/interceptor/invariants.go b/agent/interceptor/invariants.go
+  --- a/agent/interceptor/invariants.go
+  +++ b/agent/interceptor/invariants.go
+  @@ -212,7 +212,7 @@
+   		clean := filepath.Clean(s)
+   		plain := true
+   		for i := 0; i < len(clean); i++ {
+  -			if c := clean[i]; c >= 0x80 || (c >= 'A' && c <= 'Z') {
+  +			if c := clean[i]; c >= 'A' && c <= 'Z' {
+   				plain = false
+   				break
+   			}
+  ```
+- Baseline: pass (exit 0, the tools, interceptor and golem commands; no test failed or skipped). Mutant: FAIL `TestCredentialPathMatchesOracle` (`credential_path_oracle_test.go:152: group a index 2: IsCredentialPath=false oracle=true IsGitConfigPath=false oracle=true`); also red: `TestWordNamesCredentialPath/zero_width_ssh`, `TestIsGitConfigPath/zero_width_git`; every other test the command runs passes. Exit 1 for the interceptor command, the only command run on the mutant; on linux the same leaves red and exit 1. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, the tools, interceptor and golem commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch makes `matchNormalize` take the fast route for non-ASCII paths, skipping the alias replacer, so a spelling such as .env with an ignorable code point or a folding alias is not a credential path. The oracle test reports at most 20 mismatches and then stops. A hand-written mutant from the #789 plan's table; no row was added for it: the rows it turns red exist at `9ce6e39f`.
+
+## M-365 — The git-config clause matches the normalized path
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialPathMatchesOracle`
+- Baseline: `9ce6e39f`, the commit that registers the #789 refs and the last commit that adds rows or changes test or production code before these entries (#789), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2); re-run on linux (arm64, go1.27.1, the Docker `ci-local` image: Alpine 3.24.2, kernel 6.10.14-linuxkit, run as the non-root `ci` user, uid 1000) from the same export mounted as the container's workspace: baseline pass, the same failing leaves and quoted lines as on darwin, restored pass
+- Profile / command: darwin-host / `go test -count=1 -v -timeout 600s -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath|TestCredentialPathMatchesOracle)$' ./agent/interceptor` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT in ./agent/interceptor, 6 tests); at the baseline and on the restored export also `go test -count=1 -v -timeout 600s -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestBuildOutputScreenIgnoresGuard|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld|TestParseDirents|TestDirReadSeams|TestDirReadKinds|TestWorkspaceEntryUnexamined|TestOpenScreenedUnexamined|TestWalkTolerantExamines|TestWalkTolerantUnknownType|TestWalkTolerantAllUnknown|TestBuildOutputScreenUnknownType|TestBuildOutputScreenStaleType|TestBuildOutputScreenUnexamined|TestCredentialScreenBudget|TestCredentialScreenBudgetWalk|TestExecToolsOptionsScreenBudget)$' ./agent/tools` and `go test -count=1 -v -timeout 600s -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (all with `GOFLAGS=-trimpath`, no `-race`)
+- Patch:
+  ```diff
+  diff --git a/agent/interceptor/invariants.go b/agent/interceptor/invariants.go
+  --- a/agent/interceptor/invariants.go
+  +++ b/agent/interceptor/invariants.go
+  @@ -202,7 +202,7 @@
+   // IsGitConfigPath reports whether p, after normalizePath, is a file named
+   // config with a .git directory component. It takes the same exact fast route
+   // as IsCredentialPath for a plain-ASCII, lower-case path.
+  -func IsGitConfigPath(p string) bool { return gitConfigNormalized(matchNormalize(p)) }
+  +func IsGitConfigPath(p string) bool { return gitConfigNormalized(p) }
+   
+   // matchNormalize is normalizePath, except that off Windows a cleaned path
+   // holding no byte at or above 0x80 and no upper-case ASCII letter is returned
+  ```
+- Baseline: pass (exit 0, the tools, interceptor and golem commands; no test failed or skipped). Mutant: FAIL `TestCredentialPathMatchesOracle` (`credential_path_oracle_test.go:152: group a index 1: IsCredentialPath=true oracle=true IsGitConfigPath=false oracle=true`); also red: `TestIsGitConfigPath/upper_git`, `TestIsGitConfigPath/zero_width_git`; every other test the command runs passes. Exit 1 for the interceptor command, the only command run on the mutant; on linux the same leaves red and exit 1. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, the tools, interceptor and golem commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch makes `IsGitConfigPath` match the raw path, without cleaning, lower-casing or alias folding, so .GIT/config or .git//config is not recognised as a git config file. The oracle test reports at most 20 mismatches and then stops. A hand-written mutant from the #789 plan's table; no row was added for it: the rows it turns red exist at `9ce6e39f`.
+
+## M-366 — The normalized path is matched as normalized, without a second clean
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialPathMatchesOracle`
+- Baseline: `9ce6e39f`, the commit that registers the #789 refs and the last commit that adds rows or changes test or production code before these entries (#789), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2); re-run on linux (arm64, go1.27.1, the Docker `ci-local` image: Alpine 3.24.2, kernel 6.10.14-linuxkit, run as the non-root `ci` user, uid 1000) from the same export mounted as the container's workspace: baseline pass, the same failing leaves and quoted lines as on darwin, restored pass
+- Profile / command: darwin-host / `go test -count=1 -v -timeout 600s -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath|TestCredentialPathMatchesOracle)$' ./agent/interceptor` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT in ./agent/interceptor, 6 tests); at the baseline and on the restored export also `go test -count=1 -v -timeout 600s -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestBuildOutputScreenIgnoresGuard|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld|TestParseDirents|TestDirReadSeams|TestDirReadKinds|TestWorkspaceEntryUnexamined|TestOpenScreenedUnexamined|TestWalkTolerantExamines|TestWalkTolerantUnknownType|TestWalkTolerantAllUnknown|TestBuildOutputScreenUnknownType|TestBuildOutputScreenStaleType|TestBuildOutputScreenUnexamined|TestCredentialScreenBudget|TestCredentialScreenBudgetWalk|TestExecToolsOptionsScreenBudget)$' ./agent/tools` and `go test -count=1 -v -timeout 600s -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (all with `GOFLAGS=-trimpath`, no `-race`)
+- Patch:
+  ```diff
+  diff --git a/agent/interceptor/invariants.go b/agent/interceptor/invariants.go
+  --- a/agent/interceptor/invariants.go
+  +++ b/agent/interceptor/invariants.go
+  @@ -221,7 +221,7 @@
+   			return clean
+   		}
+   	}
+  -	return normalizePath(s)
+  +	return filepath.Clean(normalizePath(s))
+   }
+   
+   // credentialNormalized is IsCredentialPath on an already normalized path n,
+  ```
+- Baseline: pass (exit 0, the tools, interceptor and golem commands; no test failed or skipped). Mutant: FAIL `TestCredentialPathMatchesOracle` (`credential_path_oracle_test.go:152: group b index 2532: IsCredentialPath=false oracle=true IsGitConfigPath=false oracle=false`); every other test the command runs passes. Exit 1 for the interceptor command, the only command run on the mutant; on linux the same leaves red and exit 1. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, the tools, interceptor and golem commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch makes `matchNormalize` clean the normalized path a second time, so a `..` that only becomes a parent reference once an ignorable code point is removed is resolved away and the path matched as something else. The line quoted is the first mismatch as printed, and it is a different path of the generated group (b), at index 2532 (its git-config oracle answer is false, so it is not `.git/<U+200C>../config`). The test reports at most 20 mismatches and then stops; all 20 are in group (b), so nothing after them prints, the literal rows of group (c) included. The literal row `.git/<U+200C>../config` is red by derivation only, not by a recorded line: under the mutant the row's normalized form, `.git/../config`, is cleaned a second time to `config`, for which `IsGitConfigPath` answers false, while the oracle answers true for the row, because it matches the normalized form without that second clean (on the unmutated matcher, `IsGitConfigPath` and the oracle both answer true for the row and false for `config`). A hand-written mutant from the #789 plan's table; no row was added for it: the rows it turns red exist at `9ce6e39f`.
+
+## M-367 — A credential screen budget below 5s is refused
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialScreenBudget` (row `4999ms`)
+- Baseline: `9ce6e39f`, the commit that registers the #789 refs and the last commit that adds rows or changes test or production code before these entries (#789), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2); re-run on linux (arm64, go1.27.1, the Docker `ci-local` image: Alpine 3.24.2, kernel 6.10.14-linuxkit, run as the non-root `ci` user, uid 1000) from the same export mounted as the container's workspace: baseline pass, the same failing leaves and quoted lines as on darwin, restored pass
+- Profile / command: darwin-host / `go test -count=1 -v -timeout 600s -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestBuildOutputScreenIgnoresGuard|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld|TestParseDirents|TestDirReadSeams|TestDirReadKinds|TestWorkspaceEntryUnexamined|TestOpenScreenedUnexamined|TestWalkTolerantExamines|TestWalkTolerantUnknownType|TestWalkTolerantAllUnknown|TestBuildOutputScreenUnknownType|TestBuildOutputScreenStaleType|TestBuildOutputScreenUnexamined|TestCredentialScreenBudget|TestCredentialScreenBudgetWalk|TestExecToolsOptionsScreenBudget)$' ./agent/tools` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT in ./agent/tools, 42 tests); at the baseline and on the restored export also `go test -count=1 -v -timeout 600s -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath|TestCredentialPathMatchesOracle)$' ./agent/interceptor` and `go test -count=1 -v -timeout 600s -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (all with `GOFLAGS=-trimpath`, no `-race`)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/paths.go b/agent/tools/paths.go
+  --- a/agent/tools/paths.go
+  +++ b/agent/tools/paths.go
+  @@ -367,7 +367,7 @@
+   // SetScopeGuard this is host setup, done before any tool is planned or run;
+   // it is not safe to call while one is.
+   func (w *Workspace) SetCredentialScreenBudget(d time.Duration) error {
+  -	if d != 0 && (d < MinCredentialScreenBudget || d > MaxCredentialScreenBudget) {
+  +	if d != 0 && d > MaxCredentialScreenBudget {
+   		return fmt.Errorf("tools: credential screen budget %s is outside 5s to 5m0s", d)
+   	}
+   	w.screenLimits.budget = d
+  ```
+- Baseline: pass (exit 0, the tools, interceptor and golem commands; no test failed or skipped). Mutant: FAIL `TestCredentialScreenBudget/4999ms` (`screen_budget_test.go:46: 4999ms: error = <nil>, want "tools: credential screen budget 4.999s is outside 5s to 5m0s"`); also red: 13 more leaves, of `TestCredentialScreenBudget`, `TestExecToolsOptionsScreenBudget`; every other test the command runs passes. Exit 1 for the tools command, the only command run on the mutant; on linux the same leaves red and exit 1. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, the tools, interceptor and golem commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch makes `SetCredentialScreenBudget` accept a budget below 5s, so a host can shorten the walk below the default. It removes the whole lower bound, so the row `-1s` and the matching rows of `TestExecToolsOptionsScreenBudget` went red as well. The entry is one of the budget setting's (#789's `SetCredentialScreenBudget` and the options that carry it). A hand-written mutant from the #789 plan's table; no row was added for it: the rows it turns red exist at `9ce6e39f`.
+
+## M-368 — A credential screen budget above 5m is refused
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialScreenBudget` (row `5m0.000000001s`)
+- Baseline: `9ce6e39f`, the commit that registers the #789 refs and the last commit that adds rows or changes test or production code before these entries (#789), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2); re-run on linux (arm64, go1.27.1, the Docker `ci-local` image: Alpine 3.24.2, kernel 6.10.14-linuxkit, run as the non-root `ci` user, uid 1000) from the same export mounted as the container's workspace: baseline pass, the same failing leaves and quoted lines as on darwin, restored pass
+- Profile / command: darwin-host / `go test -count=1 -v -timeout 600s -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestBuildOutputScreenIgnoresGuard|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld|TestParseDirents|TestDirReadSeams|TestDirReadKinds|TestWorkspaceEntryUnexamined|TestOpenScreenedUnexamined|TestWalkTolerantExamines|TestWalkTolerantUnknownType|TestWalkTolerantAllUnknown|TestBuildOutputScreenUnknownType|TestBuildOutputScreenStaleType|TestBuildOutputScreenUnexamined|TestCredentialScreenBudget|TestCredentialScreenBudgetWalk|TestExecToolsOptionsScreenBudget)$' ./agent/tools` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT in ./agent/tools, 42 tests); at the baseline and on the restored export also `go test -count=1 -v -timeout 600s -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath|TestCredentialPathMatchesOracle)$' ./agent/interceptor` and `go test -count=1 -v -timeout 600s -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (all with `GOFLAGS=-trimpath`, no `-race`)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/paths.go b/agent/tools/paths.go
+  --- a/agent/tools/paths.go
+  +++ b/agent/tools/paths.go
+  @@ -367,7 +367,7 @@
+   // SetScopeGuard this is host setup, done before any tool is planned or run;
+   // it is not safe to call while one is.
+   func (w *Workspace) SetCredentialScreenBudget(d time.Duration) error {
+  -	if d != 0 && (d < MinCredentialScreenBudget || d > MaxCredentialScreenBudget) {
+  +	if d != 0 && d < MinCredentialScreenBudget {
+   		return fmt.Errorf("tools: credential screen budget %s is outside 5s to 5m0s", d)
+   	}
+   	w.screenLimits.budget = d
+  ```
+- Baseline: pass (exit 0, the tools, interceptor and golem commands; no test failed or skipped). Mutant: FAIL `TestCredentialScreenBudget/5m0.000000001s` (`screen_budget_test.go:46: 5m0.000000001s: error = <nil>, want "tools: credential screen budget 5m0.000000001s is outside 5s to 5m0s"`); also red: `TestExecToolsOptionsScreenBudget/NewExecToolsWithOptions/scratch_off/5m0.000000001s`, `TestExecToolsOptionsScreenBudget/NewExecToolsWithOptions/scratch_on/5m0.000000001s`, `TestExecToolsOptionsScreenBudget/NewSandboxedExecToolsWithOptions/scratch_off/5m0.000000001s`, `TestExecToolsOptionsScreenBudget/NewSandboxedExecToolsWithOptions/scratch_on/5m0.000000001s`, `TestExecToolsOptionsScreenBudget/NewExecToolsWithBackgroundOptions/scratch_off/5m0.000000001s`, `TestExecToolsOptionsScreenBudget/NewExecToolsWithBackgroundOptions/scratch_on/5m0.000000001s`; every other test the command runs passes. Exit 1 for the tools command, the only command run on the mutant; on linux the same leaves red and exit 1. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, the tools, interceptor and golem commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch makes `SetCredentialScreenBudget` accept a budget above 5m, so effect timeouts grow without bound. The entry is one of the budget setting's (#789's `SetCredentialScreenBudget` and the options that carry it). A hand-written mutant from the #789 plan's table; no row was added for it: the rows it turns red exist at `9ce6e39f`.
+
+## M-369 — An options constructor keeps the screen budget when scratch is off
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestExecToolsOptionsScreenBudget`
+- Baseline: `9ce6e39f`, the commit that registers the #789 refs and the last commit that adds rows or changes test or production code before these entries (#789), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2); re-run on linux (arm64, go1.27.1, the Docker `ci-local` image: Alpine 3.24.2, kernel 6.10.14-linuxkit, run as the non-root `ci` user, uid 1000) from the same export mounted as the container's workspace: baseline pass, the same failing leaves and quoted lines as on darwin, restored pass
+- Profile / command: darwin-host / `go test -count=1 -v -timeout 600s -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestBuildOutputScreenIgnoresGuard|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld|TestParseDirents|TestDirReadSeams|TestDirReadKinds|TestWorkspaceEntryUnexamined|TestOpenScreenedUnexamined|TestWalkTolerantExamines|TestWalkTolerantUnknownType|TestWalkTolerantAllUnknown|TestBuildOutputScreenUnknownType|TestBuildOutputScreenStaleType|TestBuildOutputScreenUnexamined|TestCredentialScreenBudget|TestCredentialScreenBudgetWalk|TestExecToolsOptionsScreenBudget)$' ./agent/tools` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT in ./agent/tools, 42 tests); at the baseline and on the restored export also `go test -count=1 -v -timeout 600s -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath|TestCredentialPathMatchesOracle)$' ./agent/interceptor` and `go test -count=1 -v -timeout 600s -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (all with `GOFLAGS=-trimpath`, no `-race`)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/exec.go b/agent/tools/exec.go
+  --- a/agent/tools/exec.go
+  +++ b/agent/tools/exec.go
+  @@ -248,7 +248,7 @@
+   		if opts.PromotionJournal != nil {
+   			return nil, fmt.Errorf("tools: promotion journal requires an enabled scratch config")
+   		}
+  -		return newExecTools(root, opts.CredentialScreenBudget)
+  +		return newExecTools(root, 0)
+   	}
+   	ws, err := newBudgetedWorkspace(root, opts.CredentialScreenBudget)
+   	if err != nil {
+  ```
+- Baseline: pass (exit 0, the tools, interceptor and golem commands; no test failed or skipped). Mutant: FAIL `TestExecToolsOptionsScreenBudget` (`screen_budget_test.go:223: NewExecToolsWithOptions/scratch off: run_command budget = 5s`); also red: `TestExecToolsOptionsScreenBudget/NewExecToolsWithOptions/scratch_off/raised`, `TestExecToolsOptionsScreenBudget/NewExecToolsWithOptions/scratch_off/5m`, `TestExecToolsOptionsScreenBudget/NewExecToolsWithOptions/scratch_off/4999ms`, `TestExecToolsOptionsScreenBudget/NewExecToolsWithOptions/scratch_off/5m0.000000001s`, `TestExecToolsOptionsScreenBudget/NewExecToolsWithOptions/scratch_off/-1s`; every other test the command runs passes. Exit 1 for the tools command, the only command run on the mutant; on linux the same leaves red and exit 1. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, the tools, interceptor and golem commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch makes `NewExecToolsWithOptions` drop CredentialScreenBudget when scratch is off, so the host's raised budget is silently replaced by the default. The entry is one of the budget setting's (#789's `SetCredentialScreenBudget` and the options that carry it). A hand-written mutant from the #789 plan's table; no row was added for it: the rows it turns red exist at `9ce6e39f`.
+
+## M-370 — A failed directory read fails the listing; no partial list is used
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestBuildOutputScreenSkips` (row `read error subdir`), `TestBuildOutputScreenRootReplaced` (row `read error root`)
+- Baseline: `9ce6e39f`, the commit that registers the #789 refs and the last commit that adds rows or changes test or production code before these entries (#789), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2); re-run on linux (arm64, go1.27.1, the Docker `ci-local` image: Alpine 3.24.2, kernel 6.10.14-linuxkit, run as the non-root `ci` user, uid 1000) from the same export mounted as the container's workspace: baseline pass, the same failing leaves and quoted lines as on darwin, restored pass
+- Profile / command: darwin-host / `go test -count=1 -v -timeout 600s -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestBuildOutputScreenIgnoresGuard|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld|TestParseDirents|TestDirReadSeams|TestDirReadKinds|TestWorkspaceEntryUnexamined|TestOpenScreenedUnexamined|TestWalkTolerantExamines|TestWalkTolerantUnknownType|TestWalkTolerantAllUnknown|TestBuildOutputScreenUnknownType|TestBuildOutputScreenStaleType|TestBuildOutputScreenUnexamined|TestCredentialScreenBudget|TestCredentialScreenBudgetWalk|TestExecToolsOptionsScreenBudget)$' ./agent/tools` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT in ./agent/tools, 42 tests); at the baseline and on the restored export also `go test -count=1 -v -timeout 600s -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath|TestCredentialPathMatchesOracle)$' ./agent/interceptor` and `go test -count=1 -v -timeout 600s -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (all with `GOFLAGS=-trimpath`, no `-race`)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/paths_unix.go b/agent/tools/paths_unix.go
+  --- a/agent/tools/paths_unix.go
+  +++ b/agent/tools/paths_unix.go
+  @@ -610,7 +610,7 @@
+   	var ls []listedName
+   	err := w.screenSeams.list(filepath.ToSlash(rel))
+   	if err == nil {
+  -		err = w.screenSeams.dirRead(filepath.ToSlash(rel), f, func(name string, typ uint8) { ls = append(ls, listedName{name, typ}) })
+  +		_ = w.screenSeams.dirRead(filepath.ToSlash(rel), f, func(name string, typ uint8) { ls = append(ls, listedName{name, typ}) })
+   	}
+   	if err != nil {
+   		return nil, nil, listingError{err} // never a partial list
+  ```
+- Baseline: pass (exit 0, the tools, interceptor and golem commands; no test failed or skipped). Mutant: FAIL `TestBuildOutputScreenSkips/read_error_subdir` (`screen_build_test.go:592: read error subdir: credential delivered (len 54)`); FAIL `TestBuildOutputScreenRootReplaced` (`screen_build_test.go:672: read error root: wrong outcome (error: false, screen: true)`); every other test the command runs passes. Exit 1 for the tools command, the only command run on the mutant; on linux the same leaves red and exit 1. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, the tools, interceptor and golem commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch ignores a failed directory read and uses the entries read before the failure as the listing, so the unread entries are never screened and nothing is withheld. A hand-written mutant from the #789 plan's table; no row was added for it: the rows it turns red exist at `9ce6e39f`.
+
+## M-371 — An entry the listing did not stat is marked unexamined
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestBuildOutputScreenUnexamined` (row `withheld`)
+- Baseline: `9ce6e39f`, the commit that registers the #789 refs and the last commit that adds rows or changes test or production code before these entries (#789), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2); re-run on linux (arm64, go1.27.1, the Docker `ci-local` image: Alpine 3.24.2, kernel 6.10.14-linuxkit, run as the non-root `ci` user, uid 1000) from the same export mounted as the container's workspace: baseline pass, the same failing leaves and quoted lines as on darwin, restored pass
+- Profile / command: darwin-host / `go test -count=1 -v -timeout 600s -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestBuildOutputScreenIgnoresGuard|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld|TestParseDirents|TestDirReadSeams|TestDirReadKinds|TestWorkspaceEntryUnexamined|TestOpenScreenedUnexamined|TestWalkTolerantExamines|TestWalkTolerantUnknownType|TestWalkTolerantAllUnknown|TestBuildOutputScreenUnknownType|TestBuildOutputScreenStaleType|TestBuildOutputScreenUnexamined|TestCredentialScreenBudget|TestCredentialScreenBudgetWalk|TestExecToolsOptionsScreenBudget)$' ./agent/tools` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT in ./agent/tools, 42 tests); at the baseline and on the restored export also `go test -count=1 -v -timeout 600s -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath|TestCredentialPathMatchesOracle)$' ./agent/interceptor` and `go test -count=1 -v -timeout 600s -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (all with `GOFLAGS=-trimpath`, no `-race`)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/paths_unix.go b/agent/tools/paths_unix.go
+  --- a/agent/tools/paths_unix.go
+  +++ b/agent/tools/paths_unix.go
+  @@ -625,7 +625,7 @@
+   		// Stat everything the directory read did not type as a regular file,
+   		// unknown included, and every path the matcher accepts.
+   		if typ == unix.DT_REG && !w.screenSeams.need(slash, examine(slash)) {
+  -			entries = append(entries, workspaceEntry{name: l.name, dir: f, unexamined: true})
+  +			entries = append(entries, workspaceEntry{name: l.name, dir: f})
+   			continue
+   		}
+   		var st unix.Stat_t
+  ```
+- Baseline: pass (exit 0, the tools, interceptor and golem commands; no test failed or skipped). Mutant: FAIL `TestBuildOutputScreenUnexamined/withheld` (`screen_build_test.go:234: withheld: notes differ (0 notes)`); also red: `TestRunCommandWithheldStreams/unexamined`, `TestBuildOutputScreenUnexamined/parent_moved`; every other test the command runs passes. Exit 1 for the tools command, the only command run on the mutant; on linux the same leaves red and exit 1. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, the tools, interceptor and golem commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch returns an entry the listing did not stat as examined, with a zero stat, so the walk sees mode 0 (not regular) and skips it leniently instead of refusing it. A hand-written mutant from the #789 plan's table; no row was added for it: the rows it turns red exist at `9ce6e39f`.
+
+## M-372 — An entry listed without metadata is not classed as a missing file
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestClassifySkip`, `TestBuildOutputScreenUnexamined` (row `withheld`)
+- Baseline: `9ce6e39f`, the commit that registers the #789 refs and the last commit that adds rows or changes test or production code before these entries (#789), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2); re-run on linux (arm64, go1.27.1, the Docker `ci-local` image: Alpine 3.24.2, kernel 6.10.14-linuxkit, run as the non-root `ci` user, uid 1000) from the same export mounted as the container's workspace: baseline pass, the same failing leaves and quoted lines as on darwin, restored pass
+- Profile / command: darwin-host / `go test -count=1 -v -timeout 600s -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestBuildOutputScreenIgnoresGuard|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld|TestParseDirents|TestDirReadSeams|TestDirReadKinds|TestWorkspaceEntryUnexamined|TestOpenScreenedUnexamined|TestWalkTolerantExamines|TestWalkTolerantUnknownType|TestWalkTolerantAllUnknown|TestBuildOutputScreenUnknownType|TestBuildOutputScreenStaleType|TestBuildOutputScreenUnexamined|TestCredentialScreenBudget|TestCredentialScreenBudgetWalk|TestExecToolsOptionsScreenBudget)$' ./agent/tools` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT in ./agent/tools, 42 tests); at the baseline and on the restored export also `go test -count=1 -v -timeout 600s -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath|TestCredentialPathMatchesOracle)$' ./agent/interceptor` and `go test -count=1 -v -timeout 600s -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (all with `GOFLAGS=-trimpath`, no `-race`)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/paths.go b/agent/tools/paths.go
+  --- a/agent/tools/paths.go
+  +++ b/agent/tools/paths.go
+  @@ -65,7 +65,7 @@
+   	// (#789). Such an entry is never opened: it is none of the errors the
+   	// credential screen treats leniently, so trying to open one withholds
+   	// output. Only the Unix backend raises it.
+  -	errWalkEntryUnexamined = errors.New("tools: walk entry was listed without metadata")
+  +	errWalkEntryUnexamined = fmt.Errorf("tools: walk entry was listed without metadata: %w", fs.ErrNotExist)
+   	// errAnchorUnreachable marks a reachability lookup (#613) that failed on
+   	// the way to the workspace's own root for a reason other than a changed
+   	// path, such as lost permission above the root. It wraps the cause, which
+  ```
+- Baseline: pass (exit 0, the tools, interceptor and golem commands; no test failed or skipped). Mutant: FAIL `TestClassifySkip` (`screen_classify_test.go:36: unexamined: classifySkip = 2, want 3`); FAIL `TestBuildOutputScreenUnexamined/withheld` (`screen_build_test.go:234: withheld: notes differ (1 notes)`); also red: `TestRunCommandWithheldStreams/unexamined`, `TestBuildOutputScreenUnexamined/parent_moved`, `TestClassifySkip/unexamined`; every other test the command runs passes. Exit 1 for the tools command, the only command run on the mutant; on linux the same leaves red and exit 1. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, the tools, interceptor and golem commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch makes the sentinel wrap fs.ErrNotExist, which the screen announces as a change, so an unexamined entry is announced and output is delivered instead of withheld. The patch uses `fmt.Errorf` with `%w`, so the sentinel's text gains the wrapped error's; no test compares that text, and the failures are on classification. A hand-written mutant from the #789 plan's table; no row was added for it: the rows it turns red exist at `9ce6e39f`.
+
+## M-373 — An entry listed without metadata is not classed as a symbolic link
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestClassifySkip`, `TestBuildOutputScreenUnexamined` (row `withheld`)
+- Baseline: `9ce6e39f`, the commit that registers the #789 refs and the last commit that adds rows or changes test or production code before these entries (#789), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2); re-run on linux (arm64, go1.27.1, the Docker `ci-local` image: Alpine 3.24.2, kernel 6.10.14-linuxkit, run as the non-root `ci` user, uid 1000) from the same export mounted as the container's workspace: baseline pass, the same failing leaves and quoted lines as on darwin, restored pass
+- Profile / command: darwin-host / `go test -count=1 -v -timeout 600s -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestBuildOutputScreenIgnoresGuard|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld|TestParseDirents|TestDirReadSeams|TestDirReadKinds|TestWorkspaceEntryUnexamined|TestOpenScreenedUnexamined|TestWalkTolerantExamines|TestWalkTolerantUnknownType|TestWalkTolerantAllUnknown|TestBuildOutputScreenUnknownType|TestBuildOutputScreenStaleType|TestBuildOutputScreenUnexamined|TestCredentialScreenBudget|TestCredentialScreenBudgetWalk|TestExecToolsOptionsScreenBudget)$' ./agent/tools` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT in ./agent/tools, 42 tests); at the baseline and on the restored export also `go test -count=1 -v -timeout 600s -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath|TestCredentialPathMatchesOracle)$' ./agent/interceptor` and `go test -count=1 -v -timeout 600s -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (all with `GOFLAGS=-trimpath`, no `-race`)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/paths.go b/agent/tools/paths.go
+  --- a/agent/tools/paths.go
+  +++ b/agent/tools/paths.go
+  @@ -65,7 +65,7 @@
+   	// (#789). Such an entry is never opened: it is none of the errors the
+   	// credential screen treats leniently, so trying to open one withholds
+   	// output. Only the Unix backend raises it.
+  -	errWalkEntryUnexamined = errors.New("tools: walk entry was listed without metadata")
+  +	errWalkEntryUnexamined = fmt.Errorf("tools: walk entry was listed without metadata: %w", errSymlink)
+   	// errAnchorUnreachable marks a reachability lookup (#613) that failed on
+   	// the way to the workspace's own root for a reason other than a changed
+   	// path, such as lost permission above the root. It wraps the cause, which
+  ```
+- Baseline: pass (exit 0, the tools, interceptor and golem commands; no test failed or skipped). Mutant: FAIL `TestClassifySkip` (`screen_classify_test.go:36: unexamined: classifySkip = 2, want 3`); FAIL `TestBuildOutputScreenUnexamined/withheld` (`screen_build_test.go:234: withheld: notes differ (1 notes)`); also red: `TestRunCommandWithheldStreams/unexamined`, `TestBuildOutputScreenUnexamined/parent_moved`, `TestClassifySkip/unexamined`; every other test the command runs passes. Exit 1 for the tools command, the only command run on the mutant; on linux the same leaves red and exit 1. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, the tools, interceptor and golem commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch makes the sentinel wrap errSymlink, which `classifySkip` announces as a change (`skipAnnounceChanged`, the quoted `classifySkip = 2`), so an unexamined entry is announced as changed instead of withholding output. The patch uses `fmt.Errorf` with `%w`, so the sentinel's text gains the wrapped error's; no test compares that text, and the failures are on classification. A hand-written mutant from the #789 plan's table; no row was added for it: the rows it turns red exist at `9ce6e39f`.
+
+## M-374 — The Linux read returns the parser's error
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestDirReadSeams` in `dirread_linux_test.go` (row `bad record`)
+- Baseline: `9ce6e39f`, the commit that registers the #789 refs and the last commit that adds rows or changes test or production code before these entries (#789), in an isolated `git archive` export
+- Platform: linux (arm64, go1.27.1, the Docker `ci-local` image: Alpine 3.24.2, kernel 6.10.14-linuxkit, run as the non-root `ci` user, uid 1000)
+- Profile / command: linux-host (Docker `ci-local`, from the export, one container: `docker compose -f docker-compose.ci.yml run --rm ci bash -c './.mut/driver.sh linux run-linux.tsv tools,interceptor,golem'`) / `go test -count=1 -v -timeout 600s -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestBuildOutputScreenIgnoresGuard|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld|TestParseDirents|TestDirReadSeams|TestDirReadKinds|TestWorkspaceEntryUnexamined|TestOpenScreenedUnexamined|TestWalkTolerantExamines|TestWalkTolerantUnknownType|TestWalkTolerantAllUnknown|TestBuildOutputScreenUnknownType|TestBuildOutputScreenStaleType|TestBuildOutputScreenUnexamined|TestCredentialScreenBudget|TestCredentialScreenBudgetWalk|TestExecToolsOptionsScreenBudget)$' ./agent/tools` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT in ./agent/tools, 42 tests); at the baseline and on the restored export also `go test -count=1 -v -timeout 600s -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath|TestCredentialPathMatchesOracle)$' ./agent/interceptor` and `go test -count=1 -v -timeout 600s -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (all with `GOFLAGS=-trimpath`, no `-race`)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/dirread_linux.go b/agent/tools/dirread_linux.go
+  --- a/agent/tools/dirread_linux.go
+  +++ b/agent/tools/dirread_linux.go
+  @@ -54,8 +54,6 @@
+   		if n < 0 || n > len(buf) {
+   			return errBadDirent
+   		}
+  -		if err := parseDirents(buf[:n], emit); err != nil {
+  -			return err
+  -		}
+  +		_ = parseDirents(buf[:n], emit)
+   	}
+   }
+  ```
+- Baseline: pass (exit 0, the tools, interceptor and golem commands; no test failed or skipped). Mutant: FAIL `TestDirReadSeams/bad_record` (`dirread_linux_test.go:101: bad record: err = <nil>, want tools: directory record does not parse`); every other test the command runs passes. Exit 1 for the tools command, the only command run on the mutant. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, the tools, interceptor and golem commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: Linux only: `dirread_linux.go` and its test build only on Linux. The patch makes the Linux read drop the parser's error and go on reading, so a batch with a record that does not parse yields a partial list taken as complete. A hand-written mutant from the #789 plan's table; no row was added for it: the rows it turns red exist at `9ce6e39f`.
+
+## M-375 — A zero budget restores the 5s default
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialScreenBudget` (row `0`)
+- Baseline: `9ce6e39f`, the commit that registers the #789 refs and the last commit that adds rows or changes test or production code before these entries (#789), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2); re-run on linux (arm64, go1.27.1, the Docker `ci-local` image: Alpine 3.24.2, kernel 6.10.14-linuxkit, run as the non-root `ci` user, uid 1000) from the same export mounted as the container's workspace: baseline pass, the same failing leaves and quoted lines as on darwin, restored pass
+- Profile / command: darwin-host / `go test -count=1 -v -timeout 600s -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestBuildOutputScreenIgnoresGuard|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld|TestParseDirents|TestDirReadSeams|TestDirReadKinds|TestWorkspaceEntryUnexamined|TestOpenScreenedUnexamined|TestWalkTolerantExamines|TestWalkTolerantUnknownType|TestWalkTolerantAllUnknown|TestBuildOutputScreenUnknownType|TestBuildOutputScreenStaleType|TestBuildOutputScreenUnexamined|TestCredentialScreenBudget|TestCredentialScreenBudgetWalk|TestExecToolsOptionsScreenBudget)$' ./agent/tools` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT in ./agent/tools, 42 tests); at the baseline and on the restored export also `go test -count=1 -v -timeout 600s -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath|TestCredentialPathMatchesOracle)$' ./agent/interceptor` and `go test -count=1 -v -timeout 600s -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (all with `GOFLAGS=-trimpath`, no `-race`)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/paths.go b/agent/tools/paths.go
+  --- a/agent/tools/paths.go
+  +++ b/agent/tools/paths.go
+  @@ -370,7 +370,9 @@
+   	if d != 0 && (d < MinCredentialScreenBudget || d > MaxCredentialScreenBudget) {
+   		return fmt.Errorf("tools: credential screen budget %s is outside 5s to 5m0s", d)
+   	}
+  -	w.screenLimits.budget = d
+  +	if d != 0 {
+  +		w.screenLimits.budget = d
+  +	}
+   	return nil
+   }
+   
+  ```
+- Baseline: pass (exit 0, the tools, interceptor and golem commands; no test failed or skipped). Mutant: FAIL `TestCredentialScreenBudget/0` (`screen_budget_test.go:49: 0: screenBudget = 7s, want 5s`); every other test the command runs passes. Exit 1 for the tools command, the only command run on the mutant; on linux the same leaves red and exit 1. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, the tools, interceptor and golem commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch makes `SetCredentialScreenBudget(0)` keep the previous budget instead of restoring the 5s default. The entry is one of the budget setting's (#789's `SetCredentialScreenBudget` and the options that carry it). A hand-written mutant from the #789 plan's table; no row was added for it: the rows it turns red exist at `9ce6e39f`.
+
+## M-376 — The walk's deadline is the budget the host set
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialScreenBudgetWalk` (row `expires`)
+- Baseline: `9ce6e39f`, the commit that registers the #789 refs and the last commit that adds rows or changes test or production code before these entries (#789), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2); re-run on linux (arm64, go1.27.1, the Docker `ci-local` image: Alpine 3.24.2, kernel 6.10.14-linuxkit, run as the non-root `ci` user, uid 1000) from the same export mounted as the container's workspace: baseline pass, the same failing leaves and quoted lines as on darwin, restored pass
+- Profile / command: darwin-host / `go test -count=1 -v -timeout 600s -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestBuildOutputScreenIgnoresGuard|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld|TestParseDirents|TestDirReadSeams|TestDirReadKinds|TestWorkspaceEntryUnexamined|TestOpenScreenedUnexamined|TestWalkTolerantExamines|TestWalkTolerantUnknownType|TestWalkTolerantAllUnknown|TestBuildOutputScreenUnknownType|TestBuildOutputScreenStaleType|TestBuildOutputScreenUnexamined|TestCredentialScreenBudget|TestCredentialScreenBudgetWalk|TestExecToolsOptionsScreenBudget)$' ./agent/tools` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT in ./agent/tools, 42 tests); at the baseline and on the restored export also `go test -count=1 -v -timeout 600s -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath|TestCredentialPathMatchesOracle)$' ./agent/interceptor` and `go test -count=1 -v -timeout 600s -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (all with `GOFLAGS=-trimpath`, no `-race`)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/screen_build.go b/agent/tools/screen_build.go
+  --- a/agent/tools/screen_build.go
+  +++ b/agent/tools/screen_build.go
+  @@ -37,7 +37,7 @@
+   // streams. The screen is final when returned.
+   func buildOutputScreen(ctx context.Context, ws *Workspace) (*outputScreen, error) {
+   	lim := ws.screenLimits.orDefaults()
+  -	wctx, cancel := context.WithTimeout(ctx, lim.budget)
+  +	wctx, cancel := context.WithTimeout(ctx, defaultScreenLimits.budget)
+   	defer cancel()
+   
+   	var (
+  ```
+- Baseline: pass (exit 0, the tools, interceptor and golem commands; no test failed or skipped). Mutant: FAIL `TestCredentialScreenBudgetWalk/expires` (`screen_budget_test.go:83: expires: b was never listed`); also red: `TestRunCommandWithheldStreams/budget`, `TestBuildOutputScreenBounds/budget`, `TestBuildOutputScreenBounds/budget_at_empty_dir`; every other test the command runs passes. Exit 1 for the tools command, the only command run on the mutant; on linux the same leaves red and exit 1. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, the tools, interceptor and golem commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch makes the walk's deadline always the 5s default, whatever budget the host set, so a raised budget only lengthens effect timeouts while the walk still stops at 5s (and a large workspace keeps being withheld). The entry is one of the budget setting's (#789's `SetCredentialScreenBudget` and the options that carry it). A hand-written mutant from the #789 plan's table; no row was added for it: the rows it turns red exist at `9ce6e39f`.
+
+## M-377 — The caller's cancel reaches the walk
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialScreenBudgetWalk` (row `canceled mid-walk`)
+- Baseline: `9ce6e39f`, the commit that registers the #789 refs and the last commit that adds rows or changes test or production code before these entries (#789), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2); re-run on linux (arm64, go1.27.1, the Docker `ci-local` image: Alpine 3.24.2, kernel 6.10.14-linuxkit, run as the non-root `ci` user, uid 1000) from the same export mounted as the container's workspace: baseline pass, the same failing leaves and quoted lines as on darwin, restored pass
+- Profile / command: darwin-host / `go test -count=1 -v -timeout 600s -run '^(TestCredentialPatchHeader|TestCredentialPathPrefix|TestCredentialFileKeys|TestScreenStream|TestClassifySkip|TestWalkTolerant|TestBuildOutputScreenBounds|TestBuildOutputScreenSkips|TestBuildOutputScreenRootReplaced|TestBuildOutputScreenGitConfigAlias|TestBuildOutputScreenGitConfigRootReplaced|TestRunCommandScreensOutput|TestRunCommandNoScreenFails|TestRunCommandWithheldStreams|TestRunCommandUnreadableAfterFirstCommand|TestRunCommandRootReplacedNotRun|TestVerifyFailingObservationScreened|TestBackgroundTailScreened|TestBackgroundCutStopsTail|TestBackgroundCarriageReturnBeforeExit|TestBackgroundNoScreenFails|TestCaptureSitesAreKnown|TestBuildOutputScreenIgnoresGuard|TestStripCSI|TestGitUnquote|TestScreenNotes|TestBuildOutputScreenKeys|TestBuildOutputScreenGitConfigHeld|TestParseDirents|TestDirReadSeams|TestDirReadKinds|TestWorkspaceEntryUnexamined|TestOpenScreenedUnexamined|TestWalkTolerantExamines|TestWalkTolerantUnknownType|TestWalkTolerantAllUnknown|TestBuildOutputScreenUnknownType|TestBuildOutputScreenStaleType|TestBuildOutputScreenUnexamined|TestCredentialScreenBudget|TestCredentialScreenBudgetWalk|TestExecToolsOptionsScreenBudget)$' ./agent/tools` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT in ./agent/tools, 42 tests); at the baseline and on the restored export also `go test -count=1 -v -timeout 600s -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath|TestCredentialPathMatchesOracle)$' ./agent/interceptor` and `go test -count=1 -v -timeout 600s -run '^TestContainment$/^(D4|D5)$' ./cmd/golem` (all with `GOFLAGS=-trimpath`, no `-race`)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/screen_build.go b/agent/tools/screen_build.go
+  --- a/agent/tools/screen_build.go
+  +++ b/agent/tools/screen_build.go
+  @@ -37,7 +37,7 @@
+   // streams. The screen is final when returned.
+   func buildOutputScreen(ctx context.Context, ws *Workspace) (*outputScreen, error) {
+   	lim := ws.screenLimits.orDefaults()
+  -	wctx, cancel := context.WithTimeout(ctx, lim.budget)
+  +	wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), lim.budget)
+   	defer cancel()
+   
+   	var (
+  ```
+- Baseline: pass (exit 0, the tools, interceptor and golem commands; no test failed or skipped). Mutant: FAIL `TestCredentialScreenBudgetWalk/canceled_mid-walk` (`screen_budget_test.go:121: canceled mid-walk: the walk went on after the cancel`); every other test the command runs passes. Exit 1 for the tools command, the only command run on the mutant; on linux the same leaves red and exit 1. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, the tools, interceptor and golem commands, re-run on the restored export after the last mutant).
+- Kind: guard
+- Notes: The patch runs the walk on a context detached from the caller's cancellation, so a canceled call keeps walking and opening credential files until the budget expires. The entry is one of the budget setting's (#789's `SetCredentialScreenBudget` and the options that carry it). A hand-written mutant from the #789 plan's table; no row was added for it: the rows it turns red exist at `9ce6e39f`.
+
+## M-378 — The fast route's upper-case test includes `A`
+- Affected refs: CMP-EXEC-CREDENTIAL-OUTPUT: `TestCredentialPathMatchesOracle` (group (c) row `.Aws/x`)
+- Baseline: `56d7c158`, the commit that adds the row this mutant turns red and the last commit that adds rows or changes test or production code before this entry (#789), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2); re-run on linux (arm64, go1.27.1, the Docker `ci-local` image: Alpine 3.24.2, kernel 6.10.14-linuxkit, run as the non-root `ci` user, uid 1000, the container capped at 4 GiB of memory) from a second export of the same commit mounted as the container's workspace: baseline pass, the same failing leaf and quoted line as on darwin, restored pass
+- Profile / command: darwin-host / `go test -count=1 -v -timeout 600s -run '^(TestWordNamesCredentialPath|TestCredentialArgvCheck|TestExecDirInvariant|TestScriptFields|TestIsGitConfigPath|TestCredentialPathMatchesOracle)$' ./agent/interceptor` (every ref of CMP-EXEC-CREDENTIAL-OUTPUT in ./agent/interceptor, 6 tests; on linux with `-timeout 60s`), at the baseline, on the mutant and on the restored export (with `GOFLAGS=-trimpath`, no `-race`)
+- Patch:
+  ```diff
+  diff --git a/agent/interceptor/invariants.go b/agent/interceptor/invariants.go
+  --- a/agent/interceptor/invariants.go
+  +++ b/agent/interceptor/invariants.go
+  @@ -212,7 +212,7 @@
+   		clean := filepath.Clean(s)
+   		plain := true
+   		for i := 0; i < len(clean); i++ {
+  -			if c := clean[i]; c >= 0x80 || (c >= 'A' && c <= 'Z') {
+  +			if c := clean[i]; c >= 0x80 || (c > 'A' && c <= 'Z') {
+   				plain = false
+   				break
+   			}
+  ```
+- Baseline: pass (exit 0; 116 tests and subtests passed, none failed or skipped). Mutant: FAIL `TestCredentialPathMatchesOracle` (`credential_path_oracle_test.go:153: group c index 21: IsCredentialPath=false oracle=true IsGitConfigPath=false oracle=false`); every other test the command runs passes. Exit 1; on linux the same leaf and line red and exit 1. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, 116 passed).
+- Kind: guard
+- Notes: The patch makes the fast route of `matchNormalize` treat `A` as lower case, so a path whose only capital is `A` is returned without lower-casing: `.Aws/x` keeps `.Aws`, which is not the credential directory `.aws`, and on a case-insensitive filesystem the files under it would be listed unexamined and never read. Found by the #789 generated sweep at `b22459c3` (mutant `invariants.215.38.O2`), where every ref stayed green: no corpus component or literal row had `A` as its only capital (`A/.Git/Config` also has `G` and `C`). The row `.Aws/x` was added to the oracle's literal group (c), as its index 21, at `56d7c158`, which also moves the fuzz seed count from 57363 to 57364. The sibling bound `c <= 'Z'` changed to `c < 'Z'` survives and is equivalent: no credential name, template, `config` or `.git` contains `z`, so `Z` and `z` are matched alike. The full `go test -count=1 ./agent/tools ./agent/interceptor` passed at `56d7c158` on darwin, unmutated.

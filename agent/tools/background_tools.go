@@ -55,12 +55,18 @@ type commandTailArgs struct {
 // runtimes. The existing NewExecTools(root) remains the foreground-only
 // host constructor.
 func NewExecToolsWithBackground(root string, manager *BackgroundManager) ([]agent.Tool, error) {
+	return newExecToolsWithBackground(root, manager, 0)
+}
+
+// newExecToolsWithBackground is NewExecToolsWithBackground with a credential
+// screen budget (zero: the default).
+func newExecToolsWithBackground(root string, manager *BackgroundManager, budget time.Duration) ([]agent.Tool, error) {
 	if manager == nil || manager.backend.execBackend == nil {
 		return nil, fmt.Errorf("tools: build exec tools: background manager must have a resolved backend")
 	}
-	ws, err := NewWorkspace(root)
+	ws, err := newBudgetedWorkspace(root, budget)
 	if err != nil {
-		return nil, fmt.Errorf("tools: build exec tools: %w", err)
+		return nil, err
 	}
 	rc := NewRunCommand(ws, manager.backend)
 	rc.sandbox = manager.backend.approval
@@ -88,14 +94,14 @@ func NewExecToolsWithBackgroundOptions(root string, manager *BackgroundManager, 
 		if opts.PromotionJournal != nil {
 			return nil, fmt.Errorf("tools: promotion journal requires an enabled scratch config")
 		}
-		return NewExecToolsWithBackground(root, manager)
+		return newExecToolsWithBackground(root, manager, opts.CredentialScreenBudget)
 	}
 	if manager == nil || manager.backend.execBackend == nil {
 		return nil, fmt.Errorf("tools: build exec tools: background manager must have a resolved backend")
 	}
-	ws, err := NewWorkspace(root)
+	ws, err := newBudgetedWorkspace(root, opts.CredentialScreenBudget)
 	if err != nil {
-		return nil, fmt.Errorf("tools: build exec tools: %w", err)
+		return nil, err
 	}
 	rt, err := newScratchRuntime(root, opts.Scratch, opts.PromotionJournal, manager.backend.sandbox.Runtime)
 	if err != nil {
@@ -176,11 +182,16 @@ func (t *StartCommand) Spec() agent.ToolSpec {
 // Effect declares the same effect class as run_command with the frozen
 // 10-second tool-call timeout (admission/publication only) plus the credential
 // screen's pre-run walk budget, and the small result cap.
+// A nil tool, or one with no workspace, has the default budget.
 func (t *StartCommand) Effect() agent.Effect {
+	var ws *Workspace
+	if t != nil {
+		ws = t.ws
+	}
 	return agent.Effect{
 		Class:     agent.Read | agent.Write | agent.Exec | agent.Network,
 		Approval:  agent.ApprovalAlways,
-		Timeout:   bgToolTimeout + defaultScreenLimits.budget,
+		Timeout:   bgToolTimeout + ws.screenBudget(),
 		OutputCap: bgSmallOutputCap,
 	}
 }
@@ -226,7 +237,7 @@ func (t *StartCommand) Plan(_ context.Context, raw json.RawMessage) (agent.ToolP
 		if err != nil {
 			return agent.ToolPlan{Effect: eff}, err
 		}
-		eff.Timeout = outer + defaultScreenLimits.budget
+		eff.Timeout = outer + t.ws.screenBudget()
 	}
 	return agent.ToolPlan{
 		Effect:      eff,

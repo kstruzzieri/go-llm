@@ -82,8 +82,12 @@ type replSession struct {
 	// sandbox is the session's frozen sandbox policy (resolveSandbox): what
 	// /allow-write builds the verifier under and /allow-exec builds its
 	// manager under, the same one startup used.
-	sandbox  tools.SandboxConfig
-	maxSteps int
+	sandbox tools.SandboxConfig
+	// screenBudget is -credential-screen-budget, frozen at startup: every
+	// workspace that runs commands (the /allow-exec mount, the /allow-write
+	// verifier) is built with it.
+	screenBudget time.Duration
+	maxSteps     int
 	// startupBudget is the budget resolved at startup. It is IMMUTABLE and
 	// exists only for the AgentFlow planner/driver, which freeze their own
 	// request metadata; every REPL reader (status, /context, trace metadata)

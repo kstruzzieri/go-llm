@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/kstruzzieri/go-llm/agent"
 )
@@ -56,6 +57,15 @@ var (
 	// backend (openWalked, verifyWalkedParent) raises it; it lives here because
 	// search.go builds on every platform.
 	errWalkEntryUnheld = errors.New("tools: walk entry has no held directory")
+	// errBadDirent reports a directory record the walk's own directory read
+	// could not parse (#789). The listing fails as a whole, never partially.
+	// Only the Unix backend raises it; it lives here beside errWalkEntryUnheld.
+	errBadDirent = errors.New("tools: directory record does not parse")
+	// errWalkEntryUnexamined reports a walk entry listed without metadata
+	// (#789). Such an entry is never opened: it is none of the errors the
+	// credential screen treats leniently, so trying to open one withholds
+	// output. Only the Unix backend raises it.
+	errWalkEntryUnexamined = errors.New("tools: walk entry was listed without metadata")
 	// errAnchorUnreachable marks a reachability lookup (#613) that failed on
 	// the way to the workspace's own root for a reason other than a changed
 	// path, such as lost permission above the root. It wraps the cause, which
@@ -163,8 +173,10 @@ type Workspace struct {
 	harnessAncestorStop  string
 	beforeHarnessReadDir func(rel string)
 	onHarnessAncestor    func(dir string)
-	// screenLimits overrides the credential screen's bounds, in tests only;
-	// each zero field takes its default.
+	// screenLimits holds the credential screen's bounds; each zero field takes
+	// its default. The budget is host-set, through SetCredentialScreenBudget or
+	// ExecToolsOptions.CredentialScreenBudget; the other bounds are overridden
+	// in tests only.
 	screenLimits screenLimits
 	// screenSeams injects failures into the credential screen's walk and
 	// reads, in tests only.
@@ -343,6 +355,47 @@ func canonicalFuturePathVerified(root, path string) (string, bool, error) {
 // SetScopeGuard installs (or clears with nil) the proof-mode scope guard.
 // Host setup must complete before workspace calls; installation is not concurrent-safe.
 func (w *Workspace) SetScopeGuard(g ScopeGuard) { w.guard = g }
+
+// SetCredentialScreenBudget sets how long the credential screen may spend
+// reading this workspace before each command, from MinCredentialScreenBudget
+// to MaxCredentialScreenBudget; zero restores the default. A value outside the
+// bounds returns an error and changes nothing. The budget bounds the pre-run
+// walk on Linux and macOS; on other platforms there is no walk (output is
+// withheld there), so a raised budget only lengthens the tools' effect
+// timeouts. A longer budget makes a large
+// workspace usable, not fast: every command waits for the read. Like
+// SetScopeGuard this is host setup, done before any tool is planned or run;
+// it is not safe to call while one is.
+func (w *Workspace) SetCredentialScreenBudget(d time.Duration) error {
+	if d != 0 && (d < MinCredentialScreenBudget || d > MaxCredentialScreenBudget) {
+		return fmt.Errorf("tools: credential screen budget %s is outside 5s to 5m0s", d)
+	}
+	w.screenLimits.budget = d
+	return nil
+}
+
+// screenBudget is the credential screen's time budget for w; a nil workspace
+// has the default.
+func (w *Workspace) screenBudget() time.Duration {
+	if w == nil {
+		return defaultScreenLimits.budget
+	}
+	return w.screenLimits.orDefaults().budget
+}
+
+// newBudgetedWorkspace builds a workspace over root with the given credential
+// screen budget (zero: the default). A budget outside the bounds is returned
+// unwrapped.
+func newBudgetedWorkspace(root string, budget time.Duration) (*Workspace, error) {
+	ws, err := NewWorkspace(root)
+	if err != nil {
+		return nil, fmt.Errorf("tools: build exec tools: %w", err)
+	}
+	if err := ws.SetCredentialScreenBudget(budget); err != nil {
+		return nil, err
+	}
+	return ws, nil
+}
 
 // readAnchor returns where reachability checks start: the top-level root path,
 // its construction-time identity, and this workspace's path below it.

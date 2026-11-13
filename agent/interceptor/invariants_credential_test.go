@@ -6,14 +6,15 @@ import (
 	"testing"
 )
 
-// TestIsCredentialPathMatrix (#627 T1) pins the read set with literals. It
-// owns the set's correctness: the search parity test cannot see a defect here,
-// because search and the invariant share this predicate.
-func TestIsCredentialPathMatrix(t *testing.T) {
+// credentialMatrixBlocked and credentialMatrixAllowed are the paths
+// TestIsCredentialPathMatrix pins, shared with the matcher oracle test so the
+// two cannot drift.
+var credentialMatrixBlocked, credentialMatrixAllowed = credentialMatrixLists()
+
+func credentialMatrixLists() (blocked, allowed []string) {
 	// Literal lists, independent of the production lists: every directory as
 	// itself and with a file, at the root and nested; every file name and
 	// template at three depths.
-	var blocked, allowed []string
 	for _, dir := range []string{".ssh", ".gnupg", ".aws", ".kube"} {
 		blocked = append(blocked, dir, dir+"/key", "sub/"+dir, "sub/"+dir+"/key")
 	}
@@ -35,12 +36,19 @@ func TestIsCredentialPathMatrix(t *testing.T) {
 		".git/HEAD", "config", ".gitconfig", "stra\u00DFe.md", ".g\u0131t/config", ".s\u200Bsh/x",
 		"README.md", ".github/workflows/ci.yml",
 	)
-	for _, p := range blocked {
+	return blocked, allowed
+}
+
+// TestIsCredentialPathMatrix (#627 T1) pins the read set with literals. It
+// owns the set's correctness: the search parity test cannot see a defect here,
+// because search and the invariant share this predicate.
+func TestIsCredentialPathMatrix(t *testing.T) {
+	for _, p := range credentialMatrixBlocked {
 		if !IsCredentialPath(p) {
 			t.Errorf("IsCredentialPath(%q) = false, want true", p)
 		}
 	}
-	for _, p := range allowed {
+	for _, p := range credentialMatrixAllowed {
 		if IsCredentialPath(p) {
 			t.Errorf("IsCredentialPath(%q) = true, want false", p)
 		}
@@ -62,18 +70,17 @@ func TestIsProtectedPath(t *testing.T) {
 	}
 }
 
-// TestReadRuleAncestorsAreProtected (#627 T4, spec §5.4). Let s be a dispatch
-// scope IsProtectedPath does not flag, and c a clean strict-descendant child
-// path. Then IsCredentialPath(s/c) == IsCredentialPath(c), so a scoped child
-// judges its relative paths the way the parent judges the full path.
-// Corpora come from the rule lists, so a new rule is covered automatically.
-func TestReadRuleAncestorsAreProtected(t *testing.T) {
+// ancestorScopes and ancestorChildren are the corpora of
+// TestReadRuleAncestorsAreProtected, shared with the matcher oracle test so
+// the two cannot drift.
+var ancestorScopes, ancestorChildren = ancestorCorpora()
+
+func ancestorCorpora() (scopes, children []string) {
 	names := []string{"a", "home", "env", ".env", ".envrc", "config", ".github", "stra\u00DFe",
 		".git", ".Git", ".\u017Fsh", ".s\u200Csh"}
 	names = append(names, credentialDirs...)
 	names = append(names, credentialFiles...)
 	names = append(names, envTemplates...)
-	var scopes, children []string
 	for _, a := range names {
 		scopes = append(scopes, a, "a/"+a)
 		children = append(children, a)
@@ -81,11 +88,20 @@ func TestReadRuleAncestorsAreProtected(t *testing.T) {
 			children = append(children, a+"/"+b)
 		}
 	}
-	for _, s := range scopes {
+	return scopes, children
+}
+
+// TestReadRuleAncestorsAreProtected (#627 T4, spec §5.4). Let s be a dispatch
+// scope IsProtectedPath does not flag, and c a clean strict-descendant child
+// path. Then IsCredentialPath(s/c) == IsCredentialPath(c), so a scoped child
+// judges its relative paths the way the parent judges the full path.
+// Corpora come from the rule lists, so a new rule is covered automatically.
+func TestReadRuleAncestorsAreProtected(t *testing.T) {
+	for _, s := range ancestorScopes {
 		if IsProtectedPath(s) {
 			continue
 		}
-		for _, c := range children {
+		for _, c := range ancestorChildren {
 			if full, rel := IsCredentialPath(s+"/"+c), IsCredentialPath(c); full != rel {
 				t.Errorf("scope %q, child %q: IsCredentialPath(full)=%v but IsCredentialPath(child)=%v", s, c, full, rel)
 			}

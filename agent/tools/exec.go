@@ -195,9 +195,15 @@ func NewRunCommand(ws *Workspace, runner commandRunner) *RunCommand {
 // over root, using the platform's real runner. Retained for existing callers;
 // cmd/golem registers NewExecToolsWithBackground under -allow-exec.
 func NewExecTools(root string) ([]agent.Tool, error) {
-	ws, err := NewWorkspace(root)
+	return newExecTools(root, 0)
+}
+
+// newExecTools is NewExecTools with a credential screen budget (zero: the
+// default).
+func newExecTools(root string, budget time.Duration) ([]agent.Tool, error) {
+	ws, err := newBudgetedWorkspace(root, budget)
 	if err != nil {
-		return nil, fmt.Errorf("tools: build exec tools: %w", err)
+		return nil, err
 	}
 	return []agent.Tool{NewRunCommand(ws, newPlatformRunner())}, nil
 }
@@ -208,13 +214,19 @@ func NewExecTools(root string) ([]agent.Tool, error) {
 // combined foreground+background set, build a NewSandboxedBackgroundManager
 // and pass it to NewExecToolsWithBackground instead.
 func NewSandboxedExecTools(root string, cfg SandboxConfig) ([]agent.Tool, error) {
+	return newSandboxedExecTools(root, cfg, 0)
+}
+
+// newSandboxedExecTools is NewSandboxedExecTools with a credential screen
+// budget (zero: the default).
+func newSandboxedExecTools(root string, cfg SandboxConfig, budget time.Duration) ([]agent.Tool, error) {
 	backend, err := newExecBackend(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("tools: build exec tools: %w", err)
 	}
-	ws, err := NewWorkspace(root)
+	ws, err := newBudgetedWorkspace(root, budget)
 	if err != nil {
-		return nil, fmt.Errorf("tools: build exec tools: %w", err)
+		return nil, err
 	}
 	rc := NewRunCommand(ws, backend)
 	rc.sandbox = backend.approval
@@ -236,11 +248,11 @@ func NewExecToolsWithOptions(root string, opts ExecToolsOptions) ([]agent.Tool, 
 		if opts.PromotionJournal != nil {
 			return nil, fmt.Errorf("tools: promotion journal requires an enabled scratch config")
 		}
-		return NewExecTools(root)
+		return newExecTools(root, opts.CredentialScreenBudget)
 	}
-	ws, err := NewWorkspace(root)
+	ws, err := newBudgetedWorkspace(root, opts.CredentialScreenBudget)
 	if err != nil {
-		return nil, fmt.Errorf("tools: build exec tools: %w", err)
+		return nil, err
 	}
 	rt, err := newScratchRuntime(root, opts.Scratch, opts.PromotionJournal, SandboxRuntimeHost)
 	if err != nil {
@@ -267,15 +279,15 @@ func NewSandboxedExecToolsWithOptions(root string, sandbox SandboxConfig, opts E
 		if opts.PromotionJournal != nil {
 			return nil, fmt.Errorf("tools: promotion journal requires an enabled scratch config")
 		}
-		return NewSandboxedExecTools(root, sandbox)
+		return newSandboxedExecTools(root, sandbox, opts.CredentialScreenBudget)
 	}
 	backend, err := newExecBackend(sandbox)
 	if err != nil {
 		return nil, fmt.Errorf("tools: build exec tools: %w", err)
 	}
-	ws, err := NewWorkspace(root)
+	ws, err := newBudgetedWorkspace(root, opts.CredentialScreenBudget)
 	if err != nil {
-		return nil, fmt.Errorf("tools: build exec tools: %w", err)
+		return nil, err
 	}
 	rt, err := newScratchRuntime(root, opts.Scratch, opts.PromotionJournal, backend.sandbox.Runtime)
 	if err != nil {
@@ -355,7 +367,7 @@ func (t *RunCommand) Plan(_ context.Context, raw json.RawMessage) (agent.ToolPla
 	t.store(ContentHash(raw), p)
 	// The credential screen's pre-run walk is bounded by its budget, which is
 	// added here and never to the fingerprinted timeout.
-	eff.Timeout = timeout + defaultScreenLimits.budget
+	eff.Timeout = timeout + t.ws.screenBudget()
 	if t.scratchRT != nil {
 		// The outer effect budget covers setup + command + capture + cleanup + grace;
 		// Invoke gives each phase its own bounded child context (D6).
@@ -363,7 +375,7 @@ func (t *RunCommand) Plan(_ context.Context, raw json.RawMessage) (agent.ToolPla
 		if err != nil {
 			return agent.ToolPlan{Effect: eff}, err
 		}
-		eff.Timeout = outer + defaultScreenLimits.budget
+		eff.Timeout = outer + t.ws.screenBudget()
 	}
 	return agent.ToolPlan{
 		Effect:      eff,
