@@ -92,9 +92,12 @@ type seatbeltPolicy struct {
 	metadataAncestors []string
 	allowNetwork      bool
 	// gitDirs are submodule / linked-worktree git dirs (not named .git);
-	// gitIntermediates are intermediates under a modules container. Both are
-	// canonical and strictly inside workspaceRoot.
+	// gitReadOnlyDirs are modules-tree directories named hooks or info that
+	// are not git dirs, write-denied whole; gitIntermediates are
+	// intermediates under a modules container. All are canonical and strictly
+	// inside workspaceRoot.
 	gitDirs          []string
+	gitReadOnlyDirs  []string
 	gitIntermediates []string
 }
 
@@ -199,7 +202,7 @@ func buildSeatbeltProfile(p seatbeltPolicy) (string, error) {
 	fmt.Fprintf(&b, "(allow file-write*\n  (subpath %s)\n  (subpath %s))\n", wsQ, tempQ)
 	b.WriteString("(allow file-write-data (literal \"/dev/null\"))\n")
 
-	deny, err := seatbeltGitMetadataDeny(p.workspaceRoot, p.gitDirs, p.gitIntermediates)
+	deny, err := seatbeltGitMetadataDeny(p.workspaceRoot, p.gitDirs, p.gitReadOnlyDirs, p.gitIntermediates)
 	if err != nil {
 		return "", err
 	}
@@ -236,10 +239,11 @@ func sbplRegex(prefix, tail string) (string, error) {
 // seatbeltGitMetadataDeny renders the (deny file-write*) form that protects
 // git metadata inside the workspace (#721): any .git entry, hooks/info,
 // config files and module/worktree containers, plus the same set for each
-// git dir that is not named .git, and for each intermediate directory under a
-// modules container its hooks and info subtrees and its direct children.
+// git dir that is not named .git, each read-only modules-tree directory whole
+// (named hooks or info, not a git dir: descendModules clause 2), and the
+// direct children of each intermediate directory under a modules container.
 // Later rules win in SBPL, so it follows the write allow.
-func seatbeltGitMetadataDeny(ws string, gitDirs, intermediates []string) (string, error) {
+func seatbeltGitMetadataDeny(ws string, gitDirs, readOnlyDirs, intermediates []string) (string, error) {
 	norm := func(in []string) ([]string, error) {
 		for _, p := range in {
 			if !posixCleanAbs(p) || !strings.HasPrefix(p, ws+"/") {
@@ -249,6 +253,10 @@ func seatbeltGitMetadataDeny(ws string, gitDirs, intermediates []string) (string
 		return slices.Compact(slices.Sorted(slices.Values(in))), nil
 	}
 	dirs, err := norm(gitDirs)
+	if err != nil {
+		return "", err
+	}
+	readOnly, err := norm(readOnlyDirs)
 	if err != nil {
 		return "", err
 	}
@@ -287,15 +295,12 @@ func seatbeltGitMetadataDeny(ws string, gitDirs, intermediates []string) (string
 			return "", err
 		}
 	}
-	// An intermediate's hooks and info are write-denied whole: one may be a
-	// stripped git dir's (see descendModules), and a submodule named
-	// <prefix>/hooks becomes read-only rather than writable.
-	for _, i := range inters {
-		for _, sub := range []string{"/hooks", "/info"} {
-			if err := lit("subpath", i+sub); err != nil {
-				return "", err
-			}
+	for _, r := range readOnly {
+		if err := lit("subpath", r); err != nil {
+			return "", err
 		}
+	}
+	for _, i := range inters {
 		if err := add(i, "/[^/]+$"); err != nil {
 			return "", err
 		}

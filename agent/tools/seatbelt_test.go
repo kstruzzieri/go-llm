@@ -399,6 +399,7 @@ func TestSBPLRegexQuotes(t *testing.T) {
 func gitAnchorPolicy() seatbeltPolicy {
 	p := basePolicy()
 	p.gitDirs = []string{"/private/tmp/ws/.git/worktrees/wt", "/private/tmp/ws/.git/modules/libs/a"}
+	p.gitReadOnlyDirs = []string{"/private/tmp/ws/.git/modules/libs/Hooks", "/private/tmp/ws/.git/modules/hooks"}
 	p.gitIntermediates = []string{"/private/tmp/ws/.git/modules/libs"}
 	return p
 }
@@ -423,8 +424,8 @@ func TestSeatbeltProfileGitAnchors(t *testing.T) {
   (literal "/private/tmp/ws/.git/worktrees/wt/commondir")
   (literal "/private/tmp/ws/.git/worktrees/wt/gitdir")
   (regex "^/private/tmp/ws/\\.git/worktrees/wt/([mM][oO][dD][uU][lL][eE][sS]|[wW][oO][rR][kK][tT][rR][eE][eE][sS])(/[^/]+)?$")
-  (subpath "/private/tmp/ws/.git/modules/libs/hooks")
-  (subpath "/private/tmp/ws/.git/modules/libs/info")
+  (subpath "/private/tmp/ws/.git/modules/hooks")
+  (subpath "/private/tmp/ws/.git/modules/libs/Hooks")
   (regex "^/private/tmp/ws/\\.git/modules/libs/[^/]+$"))
 `
 	if got := mustProfile(t, gitAnchorPolicy()); !strings.Contains(got, "(allow file-write-data (literal \"/dev/null\"))\n"+want+"") || strings.Count(got, "(deny file-write*") != 1 {
@@ -440,6 +441,11 @@ func TestSeatbeltProfileRejectsGitPathsOutsideWorkspace(t *testing.T) {
 			t.Errorf("gitDirs %q: err = %v, want error naming the path", bad, err)
 		}
 		p = basePolicy()
+		p.gitReadOnlyDirs = []string{bad}
+		if _, err := buildSeatbeltProfile(p); err == nil || !strings.Contains(err.Error(), bad) {
+			t.Errorf("gitReadOnlyDirs %q: err = %v, want error naming the path", bad, err)
+		}
+		p = basePolicy()
 		p.gitIntermediates = []string{bad}
 		if _, err := buildSeatbeltProfile(p); err == nil || !strings.Contains(err.Error(), bad) {
 			t.Errorf("gitIntermediates %q: err = %v, want error naming the path", bad, err)
@@ -451,6 +457,7 @@ func TestSeatbeltProfileGitDeterministic(t *testing.T) {
 	want := mustProfile(t, gitAnchorPolicy())
 	p := basePolicy()
 	p.gitDirs = []string{"/private/tmp/ws/.git/modules/libs/a", "/private/tmp/ws/.git/worktrees/wt", "/private/tmp/ws/.git/modules/libs/a"}
+	p.gitReadOnlyDirs = []string{"/private/tmp/ws/.git/modules/hooks", "/private/tmp/ws/.git/modules/libs/Hooks", "/private/tmp/ws/.git/modules/hooks"}
 	p.gitIntermediates = []string{"/private/tmp/ws/.git/modules/libs", "/private/tmp/ws/.git/modules/libs"}
 	if got := mustProfile(t, p); got != want {
 		t.Fatalf("not deterministic:\n%s\n%s", got, want)

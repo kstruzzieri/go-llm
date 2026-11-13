@@ -121,8 +121,10 @@ func gitMetaSnapshot(t *testing.T, root string) string {
 		gitMetaNode(t, root, ".git/modules/u"),
 		gitMetaNode(t, root, ".git/modules/libs/b"),
 		gitMetaNode(t, root, "src/.git"),
-		// the stripped variant's module git dir: its hook's content
+		// the stripped, modhooks and libshooks variants' module hooks: content
 		gitMetaNode(t, root, ".git/modules/s/hooks/pre-commit"),
+		gitMetaNode(t, root, ".git/modules/hooks/hooks/pre-commit"),
+		gitMetaNode(t, root, ".git/modules/libs/Hooks/hooks/pre-commit"),
 	}
 	for _, g := range gitMetaFixtureGitDirs {
 		lines = append(lines, gitMetaNode(t, root, g))
@@ -274,6 +276,34 @@ type gitMetaAttack struct {
 	// since commits write them, and the plant itself is refused. Seatbelt
 	// refuses the rename outright and judges every row on the full snapshot.
 	bwrapProtectedOnly bool
+	// priorSpawn, when set, runs in an earlier spawn and must succeed: a
+	// design-writable change (such as deleting a git dir's HEAD) that alters
+	// what the next spawn's discovery finds. Such a row is judged on
+	// gitMetaProtectedLines on both backends.
+	priorSpawn string
+}
+
+// protectedOnly reports whether a backend (bwrap or Seatbelt) judges row a
+// on gitMetaProtectedLines rather than the full snapshot.
+func (a gitMetaAttack) protectedOnly(bwrap bool) bool {
+	return a.priorSpawn != "" || bwrap && a.bwrapProtectedOnly
+}
+
+// runGitMetaAttackWith writes a fresh fixture at root (an existing empty
+// directory), applies a's variant, snapshots it, runs a.priorSpawn (which
+// must exit 0) and then a.snippet through run, and returns the snapshot
+// taken before both and the snippet's result.
+func runGitMetaAttackWith(t *testing.T, root string, a gitMetaAttack, run func(snippet string) execResult) (before string, res execResult) {
+	t.Helper()
+	writeGitFixture(t, root)
+	applyGitMetaVariant(t, root, a.variant)
+	before = gitMetaSnapshot(t, root)
+	if a.priorSpawn != "" {
+		if prior := run(a.priorSpawn); prior.ExitCode != 0 {
+			t.Fatalf("prior spawn %q must succeed: %s", a.priorSpawn, resDetail(prior))
+		}
+	}
+	return before, run(a.snippet)
 }
 
 const plantedConfig = `printf '[spike]\n\tplanted = PLANTED\n'`
@@ -346,14 +376,23 @@ var gitMetaAttacks = []gitMetaAttack{
 	// row runs on Seatbelt only, where it proves the link node is protected.
 	{name: "symlinked-hooks-replace", variant: "symhooks", seatbeltOnly: true,
 		snippet: `rm .git/hooks && mkdir .git/hooks && echo P > .git/hooks/pre-commit`},
+	// Two spawns: the first deletes a submodule git dir's HEAD (writable by
+	// design), so the next spawn classifies the dir, named hooks, by clause 2
+	// (moduleReadOnly); its own hooks must still refuse the plant.
+	{name: "module-named-hooks-two-spawn", variant: "modhooks",
+		priorSpawn: `rm .git/modules/hooks/HEAD`, snippet: `echo P > .git/modules/hooks/hooks/pre-commit`},
+	{name: "slash-module-named-Hooks-two-spawn", variant: "libshooks",
+		priorSpawn: `rm .git/modules/libs/Hooks/HEAD`, snippet: `echo P > .git/modules/libs/Hooks/hooks/pre-commit`},
 }
 
 // applyGitMetaVariant prepares a fresh fixture for an attack row: wtcfg turns
 // on extensions.worktreeConfig with no config.worktree file; nohooks removes
 // .git/hooks and .git/info; stripped adds a module git dir s that a command
 // stripped of HEAD and of every top-level file (left: hooks/pre-commit,
-// info/exclude, empty objects/ and refs/); symhooks moves .git/hooks to the
-// in-tree scripts/hooks and leaves a symlink to it.
+// info/exclude, empty objects/ and refs/); modhooks and libshooks add a real
+// submodule git dir (HEAD, config, objects/, hooks/pre-commit) named
+// .git/modules/hooks and .git/modules/libs/Hooks; symhooks moves .git/hooks
+// to the in-tree scripts/hooks and leaves a symlink to it.
 func applyGitMetaVariant(t *testing.T, root, variant string) {
 	t.Helper()
 	switch variant {
@@ -367,6 +406,19 @@ func applyGitMetaVariant(t *testing.T, root, variant string) {
 		}
 		for _, f := range []string{"hooks/pre-commit", "info/exclude"} {
 			if err := os.WriteFile(filepath.Join(s, f), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+	case "modhooks", "libshooks":
+		g := filepath.Join(root, map[string]string{"modhooks": ".git/modules/hooks", "libshooks": ".git/modules/libs/Hooks"}[variant])
+		for _, d := range []string{"objects", "hooks"} {
+			if err := os.MkdirAll(filepath.Join(g, d), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for _, f := range [][2]string{{"HEAD", "ref: refs/heads/main\n"}, {"config", "[core]\n\tbare = false\n"},
+			{"hooks/pre-commit", "#!/bin/sh\nexit 0\n"}} {
+			if err := os.WriteFile(filepath.Join(g, f[0]), []byte(f[1]), 0o755); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -418,6 +470,7 @@ func TestGitMetaProtectedLines(t *testing.T) {
 		{`echo ../evil > ` + inner + `/commondir`, false},
 		{`mkdir ` + inner + `/info && echo x > ` + inner + `/info/x`, false},
 		{`cd .git/modules/m/modules && mv inner i2 && mkdir inner && mv i2/hooks i2/config inner/`, false},
+		{`mkdir -p .git/modules/hooks/hooks && echo P > .git/modules/hooks/hooks/pre-commit`, false},
 	} {
 		root := canonGitTempDir(t)
 		writeGitFixture(t, root)
@@ -449,20 +502,29 @@ func TestGitMetaAttacksChangeTheSnapshotUnsandboxed(t *testing.T) {
 				t.Skip("Seatbelt-only row")
 			}
 			root := canonGitTempDir(t)
-			writeGitFixture(t, root)
-			applyGitMetaVariant(t, root, a.variant)
-			before := gitMetaSnapshot(t, root)
-			if again := gitMetaSnapshot(t, root); again != before {
-				t.Fatalf("snapshot is not deterministic:\n%s\n---\n%s", before, again)
-			}
-			cmd := exec.Command("/bin/sh", "-c", a.snippet)
-			cmd.Dir = root
-			out, _ := cmd.CombinedOutput() // exit status is not the oracle
+			var out []byte
+			before, _ := runGitMetaAttackWith(t, root, a, func(snippet string) execResult {
+				cmd := exec.Command("/bin/sh", "-c", snippet)
+				cmd.Dir = root
+				o, err := cmd.CombinedOutput() // the snippet's exit status is not the oracle
+				out = append(out, o...)
+				var exitErr *exec.ExitError
+				if errors.As(err, &exitErr) {
+					return execResult{ExitCode: exitErr.ExitCode(), Stderr: o}
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				return execResult{}
+			})
 			after := gitMetaSnapshot(t, root)
 			if after == before {
 				t.Fatalf("unsandboxed attack left the snapshot unchanged; output: %s", out)
 			}
-			if a.bwrapProtectedOnly && gitMetaProtectedLines(after) == gitMetaProtectedLines(before) {
+			if again := gitMetaSnapshot(t, root); again != after {
+				t.Fatalf("snapshot is not deterministic:\n%s\n---\n%s", after, again)
+			}
+			if a.protectedOnly(true) && gitMetaProtectedLines(after) == gitMetaProtectedLines(before) {
 				t.Fatalf("unsandboxed attack left the protected lines unchanged; output: %s", out)
 			}
 		})

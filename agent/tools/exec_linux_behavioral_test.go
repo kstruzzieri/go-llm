@@ -1060,11 +1060,10 @@ func TestBwrapGitMetadataDenied(t *testing.T) {
 				t.Skip("Seatbelt-only row (see gitMetaAttack.seatbeltOnly)")
 			}
 			root := canonGitTempDir(t)
-			writeGitFixture(t, root)
-			applyGitMetaVariant(t, root, a.variant)
-			before := gitMetaSnapshot(t, root)
-			res := realBwrapRun(t, cfg, root, []string{"/bin/sh", "-c", a.snippet})
-			requireGitMetaUnchanged(t, root, before, resDetail(res), a.bwrapProtectedOnly)
+			before, res := runGitMetaAttackWith(t, root, a, func(snippet string) execResult {
+				return realBwrapRun(t, cfg, root, []string{"/bin/sh", "-c", snippet})
+			})
+			requireGitMetaUnchanged(t, root, before, resDetail(res), a.protectedOnly(true))
 		})
 	}
 }

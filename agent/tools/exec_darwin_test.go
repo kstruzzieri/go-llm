@@ -3181,16 +3181,12 @@ func gitMetaAttackNamed(t *testing.T, name string) gitMetaAttack {
 	return gitMetaAttack{}
 }
 
-// runGitMetaAttack writes a fresh fixture at root (an existing empty
-// directory), runs row a through backend there, and returns the snapshot
-// taken before the run and the result.
+// runGitMetaAttack is runGitMetaAttackWith through a real Seatbelt backend.
 func runGitMetaAttack(t *testing.T, backend commandRunner, root string, a gitMetaAttack) (before string, res execResult) {
 	t.Helper()
-	writeGitFixture(t, root)
-	applyGitMetaVariant(t, root, a.variant)
-	before = gitMetaSnapshot(t, root)
-	res = seatbeltRunWith(t, backend, root, []string{"/bin/sh", "-c", a.snippet})
-	return before, res
+	return runGitMetaAttackWith(t, root, a, func(snippet string) execResult {
+		return seatbeltRunWith(t, backend, root, []string{"/bin/sh", "-c", snippet})
+	})
 }
 
 // TestSeatbeltGitMetadataDenied: no attack row, Seatbelt-only rows included,
@@ -3202,7 +3198,7 @@ func TestSeatbeltGitMetadataDenied(t *testing.T) {
 		t.Run(a.name, func(t *testing.T) {
 			root := canonTempDirT(t)
 			before, res := runGitMetaAttack(t, backend, root, a)
-			requireGitMetaUnchanged(t, root, before, resDetail(res), false)
+			requireGitMetaUnchanged(t, root, before, resDetail(res), a.protectedOnly(false))
 		})
 	}
 }
@@ -3232,7 +3228,7 @@ func TestSeatbeltGitMetadataDeniedWithoutDiscovery(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			root := canonTempDirT(t)
 			before, res := runGitMetaAttack(t, backend, root, a)
-			requireGitMetaUnchanged(t, root, before, resDetail(res), false)
+			requireGitMetaUnchanged(t, root, before, resDetail(res), a.protectedOnly(false))
 		})
 	}
 }
@@ -3290,7 +3286,7 @@ func TestSeatbeltGitMetadataRegexIsLiteral(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			root := metaRoot(t)
 			before, res := runGitMetaAttack(t, backend, root, a)
-			requireGitMetaUnchanged(t, root, before, resDetail(res), false)
+			requireGitMetaUnchanged(t, root, before, resDetail(res), a.protectedOnly(false))
 		})
 	}
 }

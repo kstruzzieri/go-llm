@@ -417,7 +417,8 @@ func (b *bwrapBackend) prepare(spec execSpec) (execSpec, error) {
 		allowNetwork:      b.cfg.AllowNetwork,
 		tmpfsSizeBytes:    b.capBytes,
 		gitWritable:       slices.Concat(layout.dotGitDirs, layout.gitDirs),
-		gitReadOnly:       slices.Concat(layout.containers, layout.intermediates, layout.metadata, layout.gitFiles),
+		gitReadOnly: slices.Concat(layout.containers, layout.intermediates, layout.metadata,
+			layout.moduleReadOnly, layout.gitFiles),
 	})
 	if err != nil {
 		return execSpec{}, err

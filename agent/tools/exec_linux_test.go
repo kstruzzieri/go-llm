@@ -547,11 +547,13 @@ func TestBwrapPrepareWrapsRunSpec(t *testing.T) {
 
 // TestBwrapPrepareMountsGitLayout: prepare hands every class of the
 // discovered git layout to the argv (a .git dir and a submodule git dir
-// writable; a container, an intermediate, metadata and a gitfile read-only),
-// so a dropped gitWritable or gitReadOnly entry fails without bwrap.
+// writable; a container, an intermediate, metadata, a modules-tree hooks dir
+// and a gitfile read-only), so a dropped gitWritable or gitReadOnly entry
+// fails without bwrap.
 func TestBwrapPrepareMountsGitLayout(t *testing.T) {
 	ws := wsTempDir(t)
 	writeGitFixture(t, ws)
+	applyGitMetaVariant(t, ws, "stripped") // .git/modules/s/hooks: moduleReadOnly
 	runner := &captureRunner{}
 	b := testBwrapBackend(runner, &captureStarter{proc: fakeProcess{}}, SandboxConfig{Runtime: SandboxRuntimeBwrap}, 0)
 	if _, err := b.Run(context.Background(), bwrapTestSpec(t, ws)); err != nil {
@@ -561,7 +563,7 @@ func TestBwrapPrepareMountsGitLayout(t *testing.T) {
 	for _, m := range [][2]string{
 		{"--bind", "/.git"}, {"--bind", "/.git/modules/m"},
 		{"--ro-bind", "/.git/modules"}, {"--ro-bind", "/.git/modules/libs"},
-		{"--ro-bind", "/.git/hooks"}, {"--ro-bind", "/m/.git"},
+		{"--ro-bind", "/.git/hooks"}, {"--ro-bind", "/.git/modules/s/hooks"}, {"--ro-bind", "/m/.git"},
 	} {
 		if must := " " + m[0] + " " + ws + m[1] + " " + ws + m[1] + " "; !strings.Contains(joined, must) {
 			t.Errorf("wrapped argv missing %q", must)

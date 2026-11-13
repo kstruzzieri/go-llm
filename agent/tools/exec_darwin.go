@@ -461,6 +461,7 @@ func (b *seatbeltBackend) prepare(spec execSpec) (execSpec, func() error, error)
 		metadataAncestors: ancestors,
 		allowNetwork:      b.allowNetwork,
 		gitDirs:           layout.gitDirs,
+		gitReadOnlyDirs:   layout.moduleReadOnly,
 		gitIntermediates:  layout.intermediates,
 	})
 	if err != nil {

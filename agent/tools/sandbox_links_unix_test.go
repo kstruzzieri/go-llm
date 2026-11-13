@@ -170,7 +170,7 @@ func TestInspectSandboxWorkspaceSlashNamedHooksSubmodule(t *testing.T) {
 
 // TestInspectSandboxWorkspaceStrippedModuleIsIntermediate: a module git dir a
 // command stripped of HEAD and every top-level file is an intermediate, and
-// its hooks/ and info/ are read-only metadata, not git dirs.
+// its hooks/ and info/ are moduleReadOnly, not git dirs.
 func TestInspectSandboxWorkspaceStrippedModuleIsIntermediate(t *testing.T) {
 	root := canonGitTempDir(t)
 	writeGitFixture(t, root)
@@ -183,15 +183,49 @@ func TestInspectSandboxWorkspaceStrippedModuleIsIntermediate(t *testing.T) {
 	if !slices.Contains(got.intermediates, s) {
 		t.Errorf("s not an intermediate: %q", got.intermediates)
 	}
-	for _, m := range joinAll(root, ".git/modules/s/hooks", ".git/modules/s/info") {
-		if !slices.Contains(got.metadata, m) {
-			t.Errorf("%s not metadata: %q", m, got.metadata)
-		}
+	if want := joinAll(root, ".git/modules/s/hooks", ".git/modules/s/info"); !slices.Equal(got.moduleReadOnly, want) {
+		t.Errorf("moduleReadOnly %q, want %q", got.moduleReadOnly, want)
 	}
 	for _, g := range joinAll(root, ".git/modules/s", ".git/modules/s/hooks", ".git/modules/s/info") {
-		if slices.Contains(got.gitDirs, g) {
-			t.Errorf("%s taken for a git dir: %q", g, got.gitDirs)
+		if slices.Contains(got.gitDirs, g) || slices.Contains(got.metadata, g) {
+			t.Errorf("%s in gitDirs or metadata: %q, %q", g, got.gitDirs, got.metadata)
 		}
+	}
+}
+
+// TestInspectSandboxWorkspaceModuleNamedHooks: a submodule git dir named
+// hooks (directly under a modules container, or as libs/Hooks under an
+// intermediate) is a git dir while it has HEAD; once a command deletes HEAD it
+// is moduleReadOnly, at its on-disk spelling, and neither a git dir nor
+// metadata.
+func TestInspectSandboxWorkspaceModuleNamedHooks(t *testing.T) {
+	for _, c := range []struct {
+		variant, rel string
+		head         bool
+	}{
+		{"modhooks", ".git/modules/hooks", true},
+		{"modhooks", ".git/modules/hooks", false},
+		{"libshooks", ".git/modules/libs/Hooks", false},
+	} {
+		t.Run(fmt.Sprintf("%s head=%v", c.rel, c.head), func(t *testing.T) {
+			root := canonGitTempDir(t)
+			writeGitFixture(t, root)
+			applyGitMetaVariant(t, root, c.variant)
+			g := filepath.Join(root, c.rel)
+			if !c.head {
+				if err := os.Remove(filepath.Join(g, "HEAD")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			got, err := inspectSandboxWorkspace(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			inGitDirs, inReadOnly := slices.Contains(got.gitDirs, g), slices.Contains(got.moduleReadOnly, g)
+			if inGitDirs != c.head || inReadOnly == c.head || slices.Contains(got.metadata, g) {
+				t.Errorf("%s: gitDirs %q, moduleReadOnly %q, metadata %q", c.rel, got.gitDirs, got.moduleReadOnly, got.metadata)
+			}
+		})
 	}
 }
 
