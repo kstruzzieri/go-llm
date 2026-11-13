@@ -129,11 +129,13 @@ func inspectSandboxWorkspace(root string) (sandboxGitLayout, error) {
 
 // scanGitDir records git dir d's metadata, its linked-worktree git dirs and
 // its submodule git dirs (recursively), bounded by the git-dir structure
-// rather than the workspace. Under <d>/modules a directory holding only
-// directories is an intermediate of a slash-named submodule and is
-// descended; any other directory is a git dir: a HEAD file marks a working
-// one, and a broken one (files, no HEAD) is protected the same way, never
-// descended. Absent entries are skipped; any other error fails closed.
+// rather than the workspace. Under <d>/modules a directory is a git dir when
+// it holds any non-directory entry (a HEAD file marks a working one; a broken
+// one, files and no HEAD, is protected the same way) or an entry named hooks
+// or info; it is scanned as a git dir, never descended as an intermediate.
+// Any other directory, holding only other directories, is an intermediate of
+// a slash-named submodule and is descended. Absent entries are skipped; any
+// other error fails closed.
 //
 // Residual R9: a .git that is a symlink, and a hooks directory that is a
 // symlink into the tree, are user-chosen in-tree layouts; their targets are
@@ -193,7 +195,15 @@ func (l *sandboxGitLayout) descendModules(dir string, entries []fs.DirEntry) err
 		if !ok {
 			continue
 		}
-		if !slices.ContainsFunc(kids, func(k fs.DirEntry) bool { return !k.IsDir() }) {
+		// hooks and info cannot be deleted under either backend, so a git dir
+		// a command stripped of its writable files (HEAD, objects, refs) keeps
+		// its class at the next spawn instead of becoming an intermediate whose
+		// hooks would then be taken for a writable git dir. A submodule named
+		// <prefix>/hooks makes <prefix> a git dir instead, which fails safe:
+		// the real submodule git dir becomes <prefix>'s read-only hooks.
+		if !slices.ContainsFunc(kids, func(k fs.DirEntry) bool {
+			return !k.IsDir() || k.Name() == "hooks" || k.Name() == "info"
+		}) {
 			l.intermediates = append(l.intermediates, c)
 			if err := l.descendModules(c, kids); err != nil {
 				return err
