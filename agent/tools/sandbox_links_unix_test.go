@@ -171,6 +171,31 @@ func TestInspectSandboxWorkspaceSlashNamedHooksSubmodule(t *testing.T) {
 	}
 }
 
+// TestInspectSandboxWorkspaceHostLitterKeepsIntermediate: Finder's .DS_Store
+// and an AppleDouble ._ file in the intermediate libs do not make it a broken
+// git dir that hides its submodule libs/a.
+func TestInspectSandboxWorkspaceHostLitterKeepsIntermediate(t *testing.T) {
+	root := canonGitTempDir(t)
+	writeGitFixture(t, root) // .git/modules/libs/a has a HEAD file
+	libs := filepath.Join(root, ".git/modules/libs")
+	for _, name := range []string{".DS_Store", "._x"} {
+		if err := os.WriteFile(filepath.Join(libs, name), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := inspectSandboxWorkspace(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// containment: GITMETA-DISCOVERY
+	if !slices.Contains(got.intermediates, libs) || slices.Contains(got.gitDirs, libs) {
+		t.Errorf("libs: gitDirs %q, intermediates %q; want it an intermediate", got.gitDirs, got.intermediates)
+	}
+	if a := filepath.Join(libs, "a"); !slices.Contains(got.gitDirs, a) {
+		t.Errorf("%s not a git dir: %q", a, got.gitDirs)
+	}
+}
+
 // TestInspectSandboxWorkspaceStrippedModuleIsIntermediate: a module git dir a
 // command stripped of HEAD and every top-level file is an intermediate, and
 // its hooks/ and info/ are moduleReadOnly, not git dirs.

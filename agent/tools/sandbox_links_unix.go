@@ -188,7 +188,8 @@ func scanGitDir(d string, out *sandboxGitLayout) error {
 //  1. c/HEAD is a non-directory: a working git dir, scanned (scanGitDir);
 //  2. c is named hooks or info (ASCII case-folded): moduleReadOnly, which
 //     both backends make read-only whole, not descended;
-//  3. c holds any other non-directory entry: a broken git dir, scanned;
+//  3. c holds any other non-directory entry (hostLitter aside): a broken git
+//     dir, scanned;
 //  4. otherwise: an intermediate of a slash-named submodule, descended.
 //
 // A git dir a command stripped of HEAD and every file (writable on both
@@ -220,7 +221,7 @@ func (l *sandboxGitLayout) descendModules(dir string, entries []fs.DirEntry) err
 		case len(name) == len("hooks") && strings.EqualFold(name, "hooks"),
 			len(name) == len("info") && strings.EqualFold(name, "info"):
 			l.moduleReadOnly = append(l.moduleReadOnly, c)
-		case slices.ContainsFunc(kids, func(k fs.DirEntry) bool { return !k.IsDir() }):
+		case slices.ContainsFunc(kids, func(k fs.DirEntry) bool { return !k.IsDir() && !hostLitter(k.Name()) }):
 			l.gitDirs = append(l.gitDirs, c)
 			err = scanGitDir(c, l)
 		default:
@@ -232,6 +233,18 @@ func (l *sandboxGitLayout) descendModules(dir string, entries []fs.DirEntry) err
 		}
 	}
 	return nil
+}
+
+// hostLitter reports a file macOS leaves in a directory the user browsed or
+// copied: Finder's .DS_Store and AppleDouble ._* files. descendModules clause
+// 3 ignores them, or a stray one in an intermediate would make it a broken git
+// dir and hide its sibling submodules from both backends. A sandboxed command
+// cannot create a file in an intermediate (Seatbelt denies its direct
+// children; bwrap mounts it read-only); one it leaves in a git dir stripped of
+// HEAD and every other file only makes that dir an intermediate, as stripping
+// alone does.
+func hostLitter(name string) bool {
+	return name == ".DS_Store" || strings.HasPrefix(name, "._")
 }
 
 // listDir reads p when it is a directory (not a symlink to one); ok is false
