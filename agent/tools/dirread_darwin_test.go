@@ -94,6 +94,8 @@ func TestDirReadSeams(t *testing.T) {
 	badNamlen.Namlen = 1024
 	noNul := darwinDirent("x", 1)
 	noNul.Name[1] = 1
+	embeddedNul := []unix.Dirent{darwinDirent("plain\x00zz", 1), darwinDirent("after", 2)}
+	emptyName := []unix.Dirent{darwinDirent("", 1), darwinDirent("after", 2)}
 	ghost := []unix.Dirent{darwinDirent("a", 1), darwinDirent("b", 0), darwinDirent("c", 3)}
 
 	f, err := os.Open(t.TempDir())
@@ -118,6 +120,8 @@ func TestDirReadSeams(t *testing.T) {
 		{"dup fails", &fakeDir{recs: abc, dupErr: syscall.EMFILE}, nil, syscall.EMFILE, counts{1, 0, 0, 0}},
 		{"bad namlen", &fakeDir{recs: []unix.Dirent{badNamlen}}, nil, errBadDirent, counts{1, 1, 1, 0}},
 		{"no nul", &fakeDir{recs: []unix.Dirent{noNul}}, nil, errBadDirent, counts{1, 1, 1, 0}},
+		{"embedded nul", &fakeDir{recs: embeddedNul}, nil, errBadDirent, counts{1, 1, 1, 0}},
+		{"empty name", &fakeDir{recs: emptyName}, nil, errBadDirent, counts{1, 1, 1, 0}},
 		{"inode zero", &fakeDir{recs: ghost}, []string{"a", "c"}, nil, counts{1, 1, 1, 0}},
 	}
 	for _, r := range sim {
@@ -126,6 +130,9 @@ func TestDirReadSeams(t *testing.T) {
 			err := r.fk.sys().read(f, collect(&got))
 			if !errors.Is(err, r.err) {
 				t.Fatalf("%s: err = %v, want %v", r.label, err, r.err)
+			}
+			if errors.Is(r.err, errBadDirent) && len(got) != 0 {
+				t.Fatalf("%s: %d names emitted before the bad record was refused, want 0", r.label, len(got))
 			}
 			if r.err == nil && !slices.Equal(names(got), r.names) {
 				t.Fatalf("%s: got %d names, want %d (or one differs)", r.label, len(got), len(r.names))

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"runtime"
+	"strings"
 	"syscall"
 	"unsafe"
 
@@ -109,6 +110,10 @@ func (s dirSys) read(f *os.File, emit func(name string, typ uint8)) error {
 			return errBadDirent
 		}
 		name := string(unsafe.Slice((*byte)(unsafe.Pointer(&entry.Name[0])), entry.Namlen))
+		// No name the kernel's own listing can hold: fail closed, as the Linux parser does.
+		if name == "" || strings.IndexByte(name, 0) >= 0 {
+			return errBadDirent
+		}
 		if name == "." || name == ".." {
 			continue
 		}
