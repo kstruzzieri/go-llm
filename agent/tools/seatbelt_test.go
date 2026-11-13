@@ -425,22 +425,22 @@ func TestSeatbeltProfileGitAnchors(t *testing.T) {
   (regex "^/private/tmp/ws/\\.git/worktrees/wt/([mM][oO][dD][uU][lL][eE][sS]|[wW][oO][rR][kK][tT][rR][eE][eE][sS])(/[^/]+)?$")
   (regex "^/private/tmp/ws/\\.git/modules/libs/[^/]+$"))
 `
-	if got := mustProfile(t, gitAnchorPolicy()); !strings.Contains(got, want) {
+	if got := mustProfile(t, gitAnchorPolicy()); !strings.Contains(got, "(allow file-write-data (literal \"/dev/null\"))\n"+want+"") || strings.Count(got, "(deny file-write*") != 1 {
 		t.Fatalf("git deny block missing or misordered:\n%s\n--- want ---\n%s", got, want)
 	}
 }
 
 func TestSeatbeltProfileRejectsGitPathsOutsideWorkspace(t *testing.T) {
-	for _, bad := range []string{"/private/tmp/other/.git/modules/m", "/private/tmp/ws/../x/.git/modules/m", "/private/tmp/ws", "relative"} {
+	for _, bad := range []string{"/private/tmp/other/.git/modules/m", "/private/tmp/ws/../x/.git/modules/m", "/private/tmp/ws", "/private/tmp/wsx/.git/modules/m", "relative"} {
 		p := basePolicy()
 		p.gitDirs = []string{bad}
-		if _, err := buildSeatbeltProfile(p); err == nil {
-			t.Errorf("gitDirs %q accepted", bad)
+		if _, err := buildSeatbeltProfile(p); err == nil || !strings.Contains(err.Error(), bad) {
+			t.Errorf("gitDirs %q: err = %v, want error naming the path", bad, err)
 		}
 		p = basePolicy()
 		p.gitIntermediates = []string{bad}
-		if _, err := buildSeatbeltProfile(p); err == nil {
-			t.Errorf("gitIntermediates %q accepted", bad)
+		if _, err := buildSeatbeltProfile(p); err == nil || !strings.Contains(err.Error(), bad) {
+			t.Errorf("gitIntermediates %q: err = %v, want error naming the path", bad, err)
 		}
 	}
 }
