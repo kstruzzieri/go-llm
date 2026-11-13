@@ -176,23 +176,52 @@ func TestInspectSandboxWorkspaceScanErrorFailsClosed(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root ignores directory permissions")
 	}
+	for _, c := range []struct {
+		name, chmod string
+		mode        os.FileMode
+		want        string // the path the scan's error must name
+	}{
+		{"modules", ".git/modules", 0o000, ".git/modules"},       // listDir(modules): ReadDir fails
+		{"worktrees", ".git/worktrees", 0o000, ".git/worktrees"}, // listDir(worktrees): ReadDir fails
+		{"metadata", ".git", 0o600, ".git/hooks"},                // readable, not searchable: Lstat fails
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			root := canonGitTempDir(t)
+			writeGitFixture(t, root)
+			p := filepath.Join(root, c.chmod)
+			if err := os.Chmod(p, c.mode); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.Chmod(p, 0o755) })
+			if _, err := inspectSandboxWorkspace(root); err == nil || !strings.Contains(err.Error(), c.chmod) {
+				t.Fatalf("unreadable %s: err = %v, want a failure naming it", c.chmod, err)
+			}
+			// The workspace walk reads these before the scan does, so the
+			// call above fails in the walk; the scan's own error paths are
+			// pinned directly (they alone cover a change between the two).
+			l := sandboxGitLayout{root: root}
+			err := scanGitDir(filepath.Join(root, ".git"), &l)
+			if want := fmt.Sprintf("git metadata %q", c.want); err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("scan with unreadable %s: err = %v, want a failure naming %s", c.chmod, err, c.want)
+			}
+		})
+	}
+}
+
+// TestInspectSandboxWorkspaceSymlinkedDotGitIsNeither pins residual R9: a
+// symlink named .git is neither a git dir nor a gitfile (a read-only bind of
+// it would follow the link out of the user's layout).
+func TestInspectSandboxWorkspaceSymlinkedDotGitIsNeither(t *testing.T) {
 	root := canonGitTempDir(t)
-	writeGitFixture(t, root)
-	modules := filepath.Join(root, ".git/modules")
-	if err := os.Chmod(modules, 0o000); err != nil {
+	if err := os.Symlink("x", filepath.Join(root, ".git")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	got, err := inspectSandboxWorkspace(root)
+	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.Chmod(modules, 0o755) })
-	if _, err := inspectSandboxWorkspace(root); err == nil || !strings.Contains(err.Error(), ".git/modules") {
-		t.Fatalf("unreadable .git/modules: err = %v, want a failure naming it", err)
-	}
-	// The workspace walk reads .git/modules before the scan does, so the
-	// call above fails in the walk; the scan's own error path is pinned
-	// directly (it alone covers a directory changed between the two).
-	l := sandboxGitLayout{root: root}
-	err := scanGitDir(filepath.Join(root, ".git"), &l)
-	if err == nil || !strings.Contains(err.Error(), `git metadata ".git/modules"`) {
-		t.Fatalf("scan of unreadable .git/modules: err = %v, want a failure naming it", err)
+	if len(got.gitFiles) != 0 || len(got.dotGitDirs) != 0 {
+		t.Errorf("symlinked .git recorded: gitFiles %q dotGitDirs %q", got.gitFiles, got.dotGitDirs)
 	}
 }
 

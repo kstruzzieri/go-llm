@@ -46,6 +46,7 @@ func writeGitFixture(t *testing.T, root string) {
 		{".git/HEAD", "ref: refs/heads/main\n", 0o644},
 		{".git/config", "[core]\n\trepositoryformatversion = 0\n", 0o644},
 		{".git/hooks/pre-commit", hook, 0o755},
+		{".git/hooks/disabled-hook", hook, 0o644}, // not executable: git skips it
 		{".git/info/exclude", "# exclude\n", 0o644},
 		{".git/modules/m/HEAD", "ref: refs/heads/main\n", 0o644},
 		{".git/modules/m/config", "[core]\n\tworktree = ../../../m\n", 0o644},
@@ -171,7 +172,9 @@ func gitMetaSnapshot(t *testing.T, root string) string {
 }
 
 // gitMetaNode is one snapshot line: kind, inode, raw mode and, for a regular
-// file, its content hash (a symlink records its target).
+// file, its content hash and link count (a new hard link is an alias a later
+// spawn could write through; a directory's count follows its entries on
+// APFS, so it is not recorded). A symlink records its target.
 func gitMetaNode(t *testing.T, root, rel string) string {
 	t.Helper()
 	p := filepath.Join(root, rel)
@@ -202,7 +205,7 @@ func gitMetaNode(t *testing.T, root, rel string) string {
 			t.Fatal(err)
 		}
 		sum := sha256.Sum256(b)
-		extra = hex.EncodeToString(sum[:])
+		extra = fmt.Sprintf("%s nlink=%d", hex.EncodeToString(sum[:]), st.Nlink)
 	}
 	return fmt.Sprintf("%s %s %d %o %s", rel, kind, st.Ino, st.Mode, extra)
 }
@@ -229,8 +232,7 @@ var gitMetaAttacks = []gitMetaAttack{
 	{name: "direct-hook", snippet: `echo PLANTED > .git/hooks/pre-commit`},
 	{name: "direct-hook-new", snippet: `echo PLANTED > .git/hooks/post-checkout`},
 	{name: "delete-hook", snippet: `rm -f .git/hooks/pre-commit`},
-	// spike: chmod 755 on a non-executable hook the fixture does not have
-	{name: "chmod-hook", snippet: `chmod 644 .git/hooks/pre-commit`},
+	{name: "chmod-hook", snippet: `chmod 755 .git/hooks/disabled-hook`}, // enables it
 	{name: "direct-config", snippet: plantedConfig + ` >> .git/config`},
 	// spike names: direct-info-exclude, direct-info-attributes
 	{name: "info-exclude", snippet: `echo PLANTED >> .git/info/exclude`},
