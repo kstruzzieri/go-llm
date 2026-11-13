@@ -126,6 +126,11 @@ func TestSeatbeltProfileGolden(t *testing.T) {
   (subpath "/private/tmp/ws")
   (subpath "/private/tmp/pt"))
 (allow file-write-data (literal "/dev/null"))
+(deny file-write*
+  (regex "^/private/tmp/ws/(.*/)?\\.[gG][iI][tT]$")
+  (regex "^/private/tmp/ws/(.*/)?\\.[gG][iI][tT]/([hH][oO][oO][kK][sS]|[iI][nN][fF][oO])(/.*)?$")
+  (regex "^/private/tmp/ws/(.*/)?\\.[gG][iI][tT]/([cC][oO][nN][fF][iI][gG](\\.[wW][oO][rR][kK][tT][rR][eE][eE])?|[cC][oO][mM][mM][oO][nN][dD][iI][rR]|[gG][iI][tT][dD][iI][rR])$")
+  (regex "^/private/tmp/ws/(.*/)?\\.[gG][iI][tT]/([mM][oO][dD][uU][lL][eE][sS]|[wW][oO][rR][kK][tT][rR][eE][eE][sS])(/[^/]+)?$"))
 `
 	if got := mustProfile(t, basePolicy()); got != want {
 		t.Fatalf("profile mismatch:\n--- got ---\n%s\n--- want ---\n%s", got, want)
@@ -375,5 +380,77 @@ func TestSeatbeltCleanupNoteIsBoundedAndControlSafe(t *testing.T) {
 func TestSeatbeltCleanupNoteNeverWrapsNilError(t *testing.T) {
 	if err := withCleanupNote(nil, "sandbox temp cleanup: x"); err != nil {
 		t.Fatalf("withCleanupNote(nil, note) = %#v; want nil", err)
+	}
+}
+
+func TestSBPLRegexQuotes(t *testing.T) {
+	got, err := sbplRegex(`/w/a+b (v2)"q`, "$")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := `(regex "^/w/a\\+b \\(v2\\)\"q$")`; got != want {
+		t.Fatalf("got %s, want %s", got, want)
+	}
+	if _, err := sbplRegex("/w/\x01", "$"); err == nil {
+		t.Fatal("control character must be rejected")
+	}
+}
+
+func gitAnchorPolicy() seatbeltPolicy {
+	p := basePolicy()
+	p.gitDirs = []string{"/private/tmp/ws/.git/worktrees/wt", "/private/tmp/ws/.git/modules/libs/a"}
+	p.gitIntermediates = []string{"/private/tmp/ws/.git/modules/libs"}
+	return p
+}
+
+func TestSeatbeltProfileGitAnchors(t *testing.T) {
+	want := `(deny file-write*
+  (regex "^/private/tmp/ws/(.*/)?\\.[gG][iI][tT]$")
+  (regex "^/private/tmp/ws/(.*/)?\\.[gG][iI][tT]/([hH][oO][oO][kK][sS]|[iI][nN][fF][oO])(/.*)?$")
+  (regex "^/private/tmp/ws/(.*/)?\\.[gG][iI][tT]/([cC][oO][nN][fF][iI][gG](\\.[wW][oO][rR][kK][tT][rR][eE][eE])?|[cC][oO][mM][mM][oO][nN][dD][iI][rR]|[gG][iI][tT][dD][iI][rR])$")
+  (regex "^/private/tmp/ws/(.*/)?\\.[gG][iI][tT]/([mM][oO][dD][uU][lL][eE][sS]|[wW][oO][rR][kK][tT][rR][eE][eE][sS])(/[^/]+)?$")
+  (subpath "/private/tmp/ws/.git/modules/libs/a/hooks")
+  (subpath "/private/tmp/ws/.git/modules/libs/a/info")
+  (literal "/private/tmp/ws/.git/modules/libs/a/config")
+  (literal "/private/tmp/ws/.git/modules/libs/a/config.worktree")
+  (literal "/private/tmp/ws/.git/modules/libs/a/commondir")
+  (literal "/private/tmp/ws/.git/modules/libs/a/gitdir")
+  (regex "^/private/tmp/ws/\\.git/modules/libs/a/([mM][oO][dD][uU][lL][eE][sS]|[wW][oO][rR][kK][tT][rR][eE][eE][sS])(/[^/]+)?$")
+  (subpath "/private/tmp/ws/.git/worktrees/wt/hooks")
+  (subpath "/private/tmp/ws/.git/worktrees/wt/info")
+  (literal "/private/tmp/ws/.git/worktrees/wt/config")
+  (literal "/private/tmp/ws/.git/worktrees/wt/config.worktree")
+  (literal "/private/tmp/ws/.git/worktrees/wt/commondir")
+  (literal "/private/tmp/ws/.git/worktrees/wt/gitdir")
+  (regex "^/private/tmp/ws/\\.git/worktrees/wt/([mM][oO][dD][uU][lL][eE][sS]|[wW][oO][rR][kK][tT][rR][eE][eE][sS])(/[^/]+)?$")
+  (regex "^/private/tmp/ws/\\.git/modules/libs/[^/]+$"))
+`
+	if got := mustProfile(t, gitAnchorPolicy()); !strings.Contains(got, want) {
+		t.Fatalf("git deny block missing or misordered:\n%s\n--- want ---\n%s", got, want)
+	}
+}
+
+func TestSeatbeltProfileRejectsGitPathsOutsideWorkspace(t *testing.T) {
+	for _, bad := range []string{"/private/tmp/other/.git/modules/m", "/private/tmp/ws/../x/.git/modules/m", "/private/tmp/ws", "relative"} {
+		p := basePolicy()
+		p.gitDirs = []string{bad}
+		if _, err := buildSeatbeltProfile(p); err == nil {
+			t.Errorf("gitDirs %q accepted", bad)
+		}
+		p = basePolicy()
+		p.gitIntermediates = []string{bad}
+		if _, err := buildSeatbeltProfile(p); err == nil {
+			t.Errorf("gitIntermediates %q accepted", bad)
+		}
+	}
+}
+
+func TestSeatbeltProfileGitDeterministic(t *testing.T) {
+	want := mustProfile(t, gitAnchorPolicy())
+	p := basePolicy()
+	p.gitDirs = []string{"/private/tmp/ws/.git/modules/libs/a", "/private/tmp/ws/.git/worktrees/wt", "/private/tmp/ws/.git/modules/libs/a"}
+	p.gitIntermediates = []string{"/private/tmp/ws/.git/modules/libs", "/private/tmp/ws/.git/modules/libs"}
+	if got := mustProfile(t, p); got != want {
+		t.Fatalf("not deterministic:\n%s\n%s", got, want)
 	}
 }

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"path"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"unicode/utf8"
@@ -90,6 +91,11 @@ type seatbeltPolicy struct {
 	systemReadRoots   []string
 	metadataAncestors []string
 	allowNetwork      bool
+	// gitDirs are submodule / linked-worktree git dirs (not named .git);
+	// gitIntermediates are intermediates under a modules container. Both are
+	// canonical and strictly inside workspaceRoot.
+	gitDirs          []string
+	gitIntermediates []string
 }
 
 // seatbeltBroadRoot rejects allowance positions that would reach beyond the
@@ -193,10 +199,99 @@ func buildSeatbeltProfile(p seatbeltPolicy) (string, error) {
 	fmt.Fprintf(&b, "(allow file-write*\n  (subpath %s)\n  (subpath %s))\n", wsQ, tempQ)
 	b.WriteString("(allow file-write-data (literal \"/dev/null\"))\n")
 
+	deny, err := seatbeltGitMetadataDeny(p.workspaceRoot, p.gitDirs, p.gitIntermediates)
+	if err != nil {
+		return "", err
+	}
+	b.WriteString(deny)
+
 	if p.allowNetwork {
 		b.WriteString("(allow network*)\n")
 	}
 	return b.String(), nil
+}
+
+// Regex tails for the git metadata deny. The ASCII case classes are part of
+// the policy: APFS is case-insensitive by default, so ".GIT/hooks" is the
+// same directory as ".git/hooks".
+const (
+	sbplAnyDotGit   = `/(.*/)?\.[gG][iI][tT]`
+	sbplHooksInfo   = `/([hH][oO][oO][kK][sS]|[iI][nN][fF][oO])(/.*)?$`
+	sbplConfigFiles = `/([cC][oO][nN][fF][iI][gG](\.[wW][oO][rR][kK][tT][rR][eE][eE])?|[cC][oO][mM][mM][oO][nN][dD][iI][rR]|[gG][iI][tT][dD][iI][rR])$`
+	sbplContainers  = `/([mM][oO][dD][uU][lL][eE][sS]|[wW][oO][rR][kK][tT][rR][eE][eE][sS])(/[^/]+)?$`
+)
+
+// sbplRegex renders an SBPL regex filter anchored at prefix (matched
+// literally) followed by the regex tail. The plain-string form is used
+// because the #"..." literal cannot carry a double quote; sbplQuote's
+// rejections (invalid UTF-8, control characters) pass through.
+func sbplRegex(prefix, tail string) (string, error) {
+	q, err := sbplQuote("^" + regexp.QuoteMeta(prefix) + tail)
+	if err != nil {
+		return "", err
+	}
+	return "(regex " + q + ")", nil
+}
+
+// seatbeltGitMetadataDeny renders the (deny file-write*) form that protects
+// git metadata inside the workspace (#721): any .git entry, hooks/info,
+// config files and module/worktree containers, plus the same set for each
+// git dir that is not named .git, and the intermediate directories under a
+// modules container. Later rules win in SBPL, so it follows the write allow.
+func seatbeltGitMetadataDeny(ws string, gitDirs, intermediates []string) (string, error) {
+	norm := func(in []string) ([]string, error) {
+		for _, p := range in {
+			if !posixCleanAbs(p) || !strings.HasPrefix(p, ws+"/") {
+				return nil, fmt.Errorf("tools: seatbelt git path %q must be canonical and inside workspace %q", p, ws)
+			}
+		}
+		return slices.Compact(slices.Sorted(slices.Values(in))), nil
+	}
+	dirs, err := norm(gitDirs)
+	if err != nil {
+		return "", err
+	}
+	inters, err := norm(intermediates)
+	if err != nil {
+		return "", err
+	}
+
+	var clauses []string
+	add := func(prefix, tail string) error {
+		c, err := sbplRegex(prefix, tail)
+		if err == nil {
+			clauses = append(clauses, c)
+		}
+		return err
+	}
+	lit := func(kind, p string) error {
+		q, err := sbplQuote(p)
+		if err == nil {
+			clauses = append(clauses, "("+kind+" "+q+")")
+		}
+		return err
+	}
+	for _, tail := range []string{sbplAnyDotGit + "$", sbplAnyDotGit + sbplHooksInfo, sbplAnyDotGit + sbplConfigFiles, sbplAnyDotGit + sbplContainers} {
+		if err := add(ws, tail); err != nil {
+			return "", err
+		}
+	}
+	for _, g := range dirs {
+		for _, c := range [][2]string{{"subpath", "/hooks"}, {"subpath", "/info"}, {"literal", "/config"}, {"literal", "/config.worktree"}, {"literal", "/commondir"}, {"literal", "/gitdir"}} {
+			if err := lit(c[0], g+c[1]); err != nil {
+				return "", err
+			}
+		}
+		if err := add(g, sbplContainers); err != nil {
+			return "", err
+		}
+	}
+	for _, i := range inters {
+		if err := add(i, "/[^/]+$"); err != nil {
+			return "", err
+		}
+	}
+	return "(deny file-write*\n  " + strings.Join(clauses, "\n  ") + ")\n", nil
 }
 
 // sandboxChildEnv returns env with every inherited TMPDIR entry removed and
