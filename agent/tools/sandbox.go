@@ -233,6 +233,17 @@ func renderSandboxLine(cfg SandboxConfig) string {
 	if cfg.Runtime == SandboxRuntimeSeatbelt || cfg.Runtime == SandboxRuntimeBwrap {
 		line += " temp=private"
 	}
+	// Git-metadata marker (#721): sandboxed commands cannot write git
+	// metadata. Seatbelt matches path patterns per write, so it also covers
+	// metadata created later; bwrap fixes its mounts at launch, so it
+	// protects only what exists when the command starts. The preview must not
+	// claim more than each backend delivers.
+	switch cfg.Runtime {
+	case SandboxRuntimeSeatbelt:
+		line += " git_metadata=ro"
+	case SandboxRuntimeBwrap:
+		line += " git_metadata=ro(existing)"
+	}
 	return line
 }
 

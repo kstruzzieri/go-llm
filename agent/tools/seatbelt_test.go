@@ -353,7 +353,7 @@ func TestSeatbeltCollectSystemRootsFailsClosed(t *testing.T) {
 func TestRenderSandboxLineSeatbeltTempPrivate(t *testing.T) {
 	cfg := mustNormalizeSandbox(t, SandboxConfig{Runtime: SandboxRuntimeSeatbelt})
 	got := renderSandboxLine(cfg)
-	want := `runtime="seatbelt" network=denied memory_cap=none cpu_limit=none drop_caps=[] temp=private`
+	want := `runtime="seatbelt" network=denied memory_cap=none cpu_limit=none drop_caps=[] temp=private git_metadata=ro`
 	if got != want {
 		t.Fatalf("renderSandboxLine() = %q, want %q", got, want)
 	}

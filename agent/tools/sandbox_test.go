@@ -444,7 +444,7 @@ func TestNormalizeSandboxConfigOwnsCanonicalCaps(t *testing.T) {
 func TestRenderSandboxLineBwrapPrivateTempMarker(t *testing.T) {
 	cfg := mustNormalizeSandbox(t, SandboxConfig{Runtime: SandboxRuntimeBwrap})
 	got := renderSandboxLine(cfg)
-	want := `runtime="bwrap" network=ip-denied memory_cap=none cpu_limit=none drop_caps=[] temp=private`
+	want := `runtime="bwrap" network=ip-denied memory_cap=none cpu_limit=none drop_caps=[] temp=private git_metadata=ro(existing)`
 	if got != want {
 		t.Fatalf("renderSandboxLine() = %q, want %q", got, want)
 	}
@@ -488,7 +488,7 @@ func TestBwrapApprovalValidatesWorkspace(t *testing.T) {
 func TestRenderSandboxLineBwrapQualifiesMemoryScope(t *testing.T) {
 	cfg := mustNormalizeSandbox(t, SandboxConfig{Runtime: SandboxRuntimeBwrap, MemoryCapMB: 512})
 	got := renderSandboxLine(cfg)
-	want := `runtime="bwrap" network=ip-denied memory_cap=512MiB/process cpu_limit=none drop_caps=[] temp=private`
+	want := `runtime="bwrap" network=ip-denied memory_cap=512MiB/process cpu_limit=none drop_caps=[] temp=private git_metadata=ro(existing)`
 	if got != want {
 		t.Fatalf("renderSandboxLine() = %q, want %q", got, want)
 	}
@@ -506,5 +506,39 @@ func TestRenderSandboxLineQualifierIsBwrapOnly(t *testing.T) {
 	if got := renderSandboxLine(uncapped); !strings.Contains(got, "memory_cap=none") ||
 		strings.Contains(got, "/process") {
 		t.Fatalf("uncapped bwrap config must render an unqualified none: %q", got)
+	}
+}
+
+func TestRenderSandboxLineGitMetadata(t *testing.T) {
+	for _, tc := range []struct {
+		rt   SandboxRuntime
+		want string
+	}{
+		{SandboxRuntimeSeatbelt, " temp=private git_metadata=ro"},
+		{SandboxRuntimeBwrap, " temp=private git_metadata=ro(existing)"},
+	} {
+		got := renderSandboxLine(mustNormalizeSandbox(t, SandboxConfig{Runtime: tc.rt}))
+		if !strings.HasSuffix(got, tc.want) {
+			t.Errorf("%s line = %q, want suffix %q", tc.rt, got, tc.want)
+		}
+	}
+	for _, rt := range []SandboxRuntime{SandboxRuntimeHost, SandboxRuntime("other")} {
+		if got := renderSandboxLine(SandboxConfig{Runtime: rt}); strings.Contains(got, "git_metadata") {
+			t.Errorf("%q line = %q, must not mention git_metadata", rt, got)
+		}
+	}
+}
+
+// The #721 git-metadata boundary rides on the preview only; the grant key
+// must not move, or every existing session grant would silently re-prompt.
+func TestSandboxApprovalKeyUnmovedBy721(t *testing.T) {
+	for rt, want := range map[SandboxRuntime]string{
+		SandboxRuntimeSeatbelt: "sb:388c0ebf98f177d27a491abd31245b77ca188a9244797d985f89e788bf011e63:",
+		SandboxRuntimeBwrap:    "sb:efa4aede38982cbe6ca95a4926f873f54881ad881c7e3d13c7e3236d1d4a46e9:",
+	} {
+		n := mustNormalizeSandbox(t, SandboxConfig{Runtime: rt})
+		if got := approvalForSandbox(n).keyComponent; got != want {
+			t.Errorf("%s keyComponent = %q, want %q", rt, got, want)
+		}
 	}
 }

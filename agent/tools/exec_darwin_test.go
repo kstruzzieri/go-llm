@@ -1775,7 +1775,7 @@ func TestNewExecBackendSeatbeltMatchesRealCapability(t *testing.T) {
 	if !strings.HasPrefix(got.approval.keyComponent, "sb:") {
 		t.Fatalf("seatbelt must get a sandbox key namespace, got %q", got.approval.keyComponent)
 	}
-	want := `runtime="seatbelt" network=denied memory_cap=none cpu_limit=none drop_caps=[] temp=private`
+	want := `runtime="seatbelt" network=denied memory_cap=none cpu_limit=none drop_caps=[] temp=private git_metadata=ro`
 	if got.approval.preview != want {
 		t.Fatalf("preview = %q, want %q", got.approval.preview, want)
 	}
