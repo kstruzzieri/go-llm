@@ -1,12 +1,12 @@
 # Containment mutation ledger (#452)
 
-Each entry proves one security property's assertions can fail. Entries are point-in-time evidence at their baseline revision. The ledger contains 377 entries: 372 guard and five effect-detection entries.
+Each entry proves one security property's assertions can fail. Entries are point-in-time evidence at their baseline revision. The ledger contains 404 entries: 399 guard and five effect-detection entries.
 
 The original #777 and #789 history is preserved by tag `archive/pr-797-before-restack-254431e` at `254431e5f65387835807392d76739e472777c519`. PR #792 was squash-merged, and #797 was then rebased onto that squash; the baseline hashes below still name the original tested revisions. Fetch the archive with `git fetch origin tag archive/pr-797-before-restack-254431e` before reproducing those entries. Do not substitute the rebased commit hashes for the recorded baselines.
 
-Platform: every proof in this ledger ran on darwin (arm64, go1.27.1), except M-099, M-100 and M-374, whose tests run only on Linux and which ran only there (arm64, go1.27.1, the Docker `ci-local` image as its non-root `ci` user). After the rebase onto the model-resistance PR, the entries whose patches touch build-tagged or platform-sensitive code (M-005 to M-008, the unix path walks; M-009 and M-014 to M-018, the host exec path; M-011, the MCP stdio child environment) were re-run on Linux (arm64, go1.27.1, the Docker `ci-local` image) at their baseline: each entry's `Platform:` line records the result, and a Linux line that differs would be recorded beside the darwin evidence, never in place of it. M-010 (it needs an AgentFlow source checkout) and M-012 (Seatbelt is darwin-native) were not re-run on Linux, and no entry has run on Windows. Of the #777 entries, those whose patches touch build-tagged or platform-sensitive code (M-172 to M-178, M-181 to M-185, M-188 to M-190, M-247 to M-251, M-258, M-259, M-317, M-319, M-320, M-339 and M-340: the walk, the screen build, the skip classification, the key rules, the unix runner and the background rings) were re-run on Linux (arm64, go1.27.1, the Docker `ci-local` image, as its non-root `ci` user) from a second export of their baseline, and each `Platform:` line records that run; M-258's test was also run in that image as root (`--user 0`), and its `Platform:` line records that run too; M-179 (Seatbelt) is darwin-native. Of the #789 entries, M-347, M-349 (its Linux patch), M-350, M-354 to M-373 and M-375 to M-377, and the re-recorded M-178, were re-run on Linux (arm64, go1.27.1, the Docker `ci-local` image, as its non-root `ci` user) from the same export, and M-374 ran only there; the Darwin-read entries (M-348, M-351 to M-353 and M-349's Darwin patch) ran on darwin arm64 and again under `GOARCH=amd64`, and have no Linux line. M-378 ran on darwin arm64 and, from a second export of its baseline, on Linux in the same image with the container capped at 4 GiB of memory and every test command at `-timeout 60s`. The 22 other #777 entries whose patches touch `paths_unix.go`, `screen_build.go` or `screen_classify.go` (M-174 to M-177, M-181 to M-183, M-185, M-188, M-247 to M-251, M-258, M-259, M-317 to M-320, M-339 and M-340) were re-applied at `9ce6e39f`, each patch applying without fuzz at moved line offsets, and are red on the leaves they quote on darwin and Linux.
+Platform: every proof in this ledger ran on darwin (arm64, go1.27.1), except M-099, M-100 and M-374, whose tests run only on Linux and which ran only there (arm64, go1.27.1, the Docker `ci-local` image as its non-root `ci` user), and the #721 entries M-395 to M-399, M-401 and M-402, which ran only on Linux as their batch's sentence below describes. After the rebase onto the model-resistance PR, the entries whose patches touch build-tagged or platform-sensitive code (M-005 to M-008, the unix path walks; M-009 and M-014 to M-018, the host exec path; M-011, the MCP stdio child environment) were re-run on Linux (arm64, go1.27.1, the Docker `ci-local` image) at their baseline: each entry's `Platform:` line records the result, and a Linux line that differs would be recorded beside the darwin evidence, never in place of it. M-010 (it needs an AgentFlow source checkout) and M-012 (Seatbelt is darwin-native) were not re-run on Linux, and no entry has run on Windows. Of the #777 entries, those whose patches touch build-tagged or platform-sensitive code (M-172 to M-178, M-181 to M-185, M-188 to M-190, M-247 to M-251, M-258, M-259, M-317, M-319, M-320, M-339 and M-340: the walk, the screen build, the skip classification, the key rules, the unix runner and the background rings) were re-run on Linux (arm64, go1.27.1, the Docker `ci-local` image, as its non-root `ci` user) from a second export of their baseline, and each `Platform:` line records that run; M-258's test was also run in that image as root (`--user 0`), and its `Platform:` line records that run too; M-179 (Seatbelt) is darwin-native. Of the #789 entries, M-347, M-349 (its Linux patch), M-350, M-354 to M-373 and M-375 to M-377, and the re-recorded M-178, were re-run on Linux (arm64, go1.27.1, the Docker `ci-local` image, as its non-root `ci` user) from the same export, and M-374 ran only there; the Darwin-read entries (M-348, M-351 to M-353 and M-349's Darwin patch) ran on darwin arm64 and again under `GOARCH=amd64`, and have no Linux line. M-378 ran on darwin arm64 and, from a second export of its baseline, on Linux in the same image with the container capped at 4 GiB of memory and every test command at `-timeout 60s`. The 22 other #777 entries whose patches touch `paths_unix.go`, `screen_build.go` or `screen_classify.go` (M-174 to M-177, M-181 to M-183, M-185, M-188, M-247 to M-251, M-258, M-259, M-317 to M-320, M-339 and M-340) were re-applied at `9ce6e39f`, each patch applying without fuzz at moved line offsets, and are red on the leaves they quote on darwin and Linux.
 
-Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-only variants added later, M-045 B and M-047 B, at `34b2ff38`, whose production and scenario trees are identical; M-051 to M-053 at `731f2d1d`, the commit that adds them; M-054 to M-058 at `3d423ce1`, the commit that adds them; M-059 at `1166b276`, the commit that adds it): the baseline passed, the mutant failed as shown, and the tree was restored with `git checkout` and passed again. M-028 was re-recorded when tool frames moved to per-result keys: variant A on the commit that makes that change (parent `140524de`), variant B on the commit that adds the cross-Run check (parent `d75c78cb`). Each baseline passed, each mutant failed as shown, and an editor edit restored the baseline bytes, which passed again. Entries M-067 to M-071 ran on the commit that adds fence-key rotation (parent `72b6eb47`) in the same way, the restored file's sha256 matching the baseline's each time; M-072 and M-073 ran the same way on the commit that makes every exposed key rotate and matches keys through separators (parent `00912c90`), and M-074 on the commit that pins key minting before assembly (parent `caa84426`). Entries M-075 to M-078 ran the same way in an isolated `git archive` export of the commit that adds system keys (parent `3346b711`). M-079 and M-080 ran the same way on the commit that scans the durable summary and staged advice (parent `c17e940d`). Entries M-081 to M-085 ran the same way in an isolated `git archive` export of the commit that adds the #712 launchd acceptance tests, each applied with `patch -p1` and reverted with `patch -R -p1`, the restored file's sha256 matching the baseline's. Their baseline is recorded as `c4ca1a8d`: the runs used that commit's tree before two comment-only amends (a driver comment and the M-083 note) produced it, and the patches apply to `c4ca1a8d` at the recorded hunk offsets, with the quoted failing lines at the same line numbers. M-086 ran the same way in an export of `461fdcdc`, the commit that holds `syscall.ForkLock` across the guard and posix_spawn, where M-081 and M-083 were re-run against the new spawn order. All six were re-run the same way at `231baa07`, after the final #712 fix wave changed their tests and moved M-086's lock into a closure; each entry's last note records that run. Entries M-087 to M-105 ran the same way in an isolated `git archive` export of `88f33cfb`, the commit that adds the #725 inventory rows, each applied with `git apply` and reverted with `git apply -R`, the restored file's sha256 matching the baseline's (the export sat inside a checkout, where `git apply` silently skips paths outside the current directory, so both ran with `GIT_CEILING_DIRECTORIES` set to the export's parent); M-099 and M-100 ran in the Docker `ci-local` image from that export. Entries M-106 to M-140 ran the same way in an isolated `git archive` export of `f3581fda`, the commit that adds the #784 inventory rows, each applied with `git apply` and reverted with `git apply -R`, the restored file's sha256 matching the baseline's (that export sat outside any checkout; both still ran with `GIT_CEILING_DIRECTORIES` set to its parent), and no test in their commands skipped; M-131 records two variants, each run that way. The commit that adds them also makes `TestHarnessPlanReferencesKinds` a PATH-HARNESS-REF ref, an inventory change only, so their quoted line numbers hold there too. Entries M-141 to M-190 ran in isolated `git archive` exports of `18ca5d70`, the #777 commit that pins the D4 and D5 request counts, one export per platform and one mutant at a time: each patch was applied with `patch -p1` and reverted with `patch -R -p1`, each restored file was compared byte for byte with the baseline's (`cmp`), and every ref passed at the baseline and again on the restored export after the last mutant. Every one of those mutants turned its named refs red on its first run. Entries M-191 to M-195 ran the same way in an isolated `git archive` export of `b97c0aeb`, the later commit that adds the rows they turn red: each of their mutants, which bypasses a preprocessing step (CSI stripping, the split at `\r`, trimming) for one rule only, left every ref green at `18ca5d70`, so they could only be recorded once those rows existed. Entries M-196 to M-204 ran the same way in an isolated `git archive` export of `6bd57929`, the commit that adds the rows they turn red: hand-written mutants (M-196 to M-198: a floor raised for one key rule, and the decode of the whole userinfo) and an enumeration that removes each key form `credentialFileKeys` and its helpers emit, one at a time (M-199 to M-204), found mutants that left every ref green at `45548f4f`. Entries M-205 to M-251 ran the same way in an isolated `git archive` export of `f350333c`, the commit that adds the rows they turn red and cites seven existing tests on CMP-EXEC-CREDENTIAL-OUTPUT: a third sweep removed or moved one decision at a time in the argv rule (`credential_argv.go`, `IsGitConfigPath`) and the screen (`screen_path.go`, `screen.go`, `screen_classify.go`, `screen_build.go`), and these are the mutants that left every ref of the row green at `c9cc9155` and let through what the original refuses, cuts or replaces. Entries M-252 to M-255 ran the same way in an isolated `git archive` export of `b7666790`, the commit that adds the last of the rows they turn red: M-252 and M-253 remove or misread the argv rule's reading of a git pathspec with long-form magic, added after that sweep; M-254 reads that pathspec's pattern after its last `)` and left every ref green at `a72009d3`, the commit before its row; M-255 is the sweep's announce-only `S-cut-no-mark` (a cut no longer counted in the notes), which left every ref green until a cut-only notes row existed. Entries M-256 to M-319 ran the same way in isolated `git archive` exports of `d1d7fa91`, the commit that adds the rows they turn red, four exports in parallel, one mutant at a time in each: M-256 to M-259 are hand-written mutants for four gaps (`stripCSI`'s ESC test and its bound check, a `.git/config` that cannot be opened for a reason other than a change, and a failed read after a successful open, which `6194e105` gives a test-only read seam); M-260 to M-319 come from a generated sweep that mutated every condition, comparison, statement and integer offset of the argv rule, the screen and the walk lines this branch changed (1,185 generated mutants plus eight hand-written ones, at `6194e105`), and are the mutants that left every ref of the row green there and let through what the original refuses, cuts, replaces or withholds, or crash the stream writer. Entries M-320 to M-338 ran the same way, serially, in one isolated `git archive` export of `3e4fedce`, the last commit that adds or reorders the rows they turn red: M-320 discards the read error, which goes red only because `1338d3ec` reshaped the screen's read seam into a reader hook so that the injected failure arrives through the read itself; M-321 to M-338 are generated sweep mutants (and two hand-written ones) first classed as equivalent, withholding more or only widening, for which an input was later built, or found by re-arguing the classification from the code, on which they lose a key the original emits. M-258 and M-259 were re-recorded at `3e4fedce` in the same export, because their rows changed (each entry's Notes say how). Entries M-339 to M-346 ran the same way, serially, in one isolated `git archive` export of `8058e5a6`, the last commit that changes test or production code before them: they are the mutants of the lines that key a credential-store line's userinfo (`122ec242`), count a key once across files and give a `.git/config` line with too many settings its own cause (`e804533a`), generated by the same sweep operators plus one hand-written mutant, that let through what the original withholds; each is red on a row added with that change or at `8058e5a6`. M-163 and M-283 were re-recorded at `8058e5a6` in the same export, because `122ec242` re-indented the line their patches change (each entry's Notes say how). Entries M-347 to M-377 ran the same way, serially, in one isolated `git archive` export of `9ce6e39f`, the commit that registers the #789 refs and the last commit that adds rows or changes test or production code before them: hand-written mutants of the #789 walk (the directory read and its parser, the tolerant listing, the refusal of an entry listed without metadata, the matcher's fast route, and the credential screen's budget setting), each red on its named leaves wherever it ran. Entry M-378 ran the same way in an isolated `git archive` export of `56d7c158`, the commit that adds the row it turns red. It is the one decision a generated sweep of the #789 changes found unpinned: at `b22459c3`, the four operators of the #777 sweep (each condition and operand to true and false, each comparison to its neighbour, each call, assignment, increment, branch and defer removed, each integer offset in an index, slice bound or arithmetic expression plus and minus one) were applied to every line #789 changed in the tolerant listing, the two directory reads and the record parser, the screen, the budget and its routes, and the matcher: 358 mutants generated; 47 dropped as not building (44 removals of a `:=` declaration, one offset that made a constant index negative, and two removals of `defer runtime.KeepAlive(f)`, one in each directory read, that failed only because `runtime` was then imported and not used, a generator artifact; those two were not run, and are equivalent in production because the caller's deferred `f.Close()` keeps `f` reachable through the read); 275 red; 36 survivors in 27 decisions (one delivers more, M-378; six only withhold more; one only announces; 16 equivalent; two unreachable, one of them only on Windows; one test-only seam). Each mutant ran its own package's cited refs only: a matcher mutant the six refs in ./agent/interceptor, any other mutant the 42 refs in ./agent/tools; the `cmd/golem` scenarios D4 and D5 were not run on any sweep mutant. The 28 mutants of the Linux directory read ran in Docker in two parts, the second under the memory cap. M-178 was re-recorded at `9ce6e39f` in the same export, because #789 rewrote the listing its patch changes (its Notes say how). The #777 entries therefore have nine baselines: M-141 to M-190 at `18ca5d70` (but M-163, re-recorded at `8058e5a6`, and M-178, re-recorded at `9ce6e39f`), M-191 to M-195 at `b97c0aeb`, M-196 to M-204 at `6bd57929`, M-205 to M-251 at `f350333c`, M-252 to M-255 at `b7666790`, M-256 to M-319 at `d1d7fa91` (but M-258 and M-259, re-recorded at `3e4fedce`, and M-283, re-recorded at `8058e5a6`), M-320 to M-338 at `3e4fedce`, M-339 to M-346 at `8058e5a6`. Each entry is evidence at its own baseline. M-173 and M-179 each record two variants. M-180 is not assigned: it was reserved for the bwrap backend's screen mutation, which needs a Linux host with bwrap that the Docker `ci-local` image is not, so CMP-EXEC-CREDENTIAL-OUTPUT-BWRAP is `unobserved(bwrap)` and carries that follow-up as its exempt reason. The entry for the unverified-root rule including the repository boundary itself, whose mutant narrowed the rule to strictly below the boundary, was withdrawn when that narrowing became the production rule; later entries were renumbered to close the gap. Entries M-060 and M-061 ran in isolated exports of immutable code commit `23f0c0bbca83f0c9d6e02163dd09c4856698ddcd`: each baseline passed, its mutant failed, and restored files matched the baseline bytes and passed again. Entries M-062 and M-063 ran on this branch at `dbe5c315b40f8b973b96cf623d5cdcbe00c616fc`, the commit that adds their rules: each baseline passed, its mutant failed, and `git checkout -- <file>` restored the baseline bytes, which passed again; M-062's comparison against the previous rule ran in an isolated `git archive` export of `ac053567`. Entries M-064 to M-066 ran on the #387 branch at `72d0bedeb1d264b3da62cf812df7505a8bd7e776`, the commit that tightens PV1's probe and cites the exec and verification preview tests (M-064 and M-065 were first recorded at `b9cea9154746758026fd9bb58d467f665be5952f`, the commit that makes PV1 executable): each baseline passed, its mutant failed, and `git checkout -- <file>` restored the baseline bytes, which passed again. Entries quote test output, the containment judge's message text and line numbers included, as it read at their baseline; later wording changes do not rewrite them. Entries carried over from the PR 2 delivery record name the draft entry they were first recorded as; they were re-run here so every command, diff and line number matches one revision. Apply a patch with `git apply`, run the command, then restore with `git checkout -- <file>`. `guard` entries remove or weaken the protection the refs assert. `effect-detection` entries change the effect path of an uncontained scenario: they show its probe can read a change in outcome, not that a guard is absent. Rows exempt from this ledger (pending, out-of-scope, unobserved such as ENV-BWRAP and CMP-EXEC-CREDENTIAL-OUTPUT-BWRAP, whose native bwrap profile needs a Linux host, and administrative META- rows; the inventory lint allows no other verified or uncontained row an exemption) carry their exempt reason in the inventory (`docs/security/containment-inventory.json`, rendered in `docs/security/containment-inventory.md`).
+Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-only variants added later, M-045 B and M-047 B, at `34b2ff38`, whose production and scenario trees are identical; M-051 to M-053 at `731f2d1d`, the commit that adds them; M-054 to M-058 at `3d423ce1`, the commit that adds them; M-059 at `1166b276`, the commit that adds it): the baseline passed, the mutant failed as shown, and the tree was restored with `git checkout` and passed again. M-028 was re-recorded when tool frames moved to per-result keys: variant A on the commit that makes that change (parent `140524de`), variant B on the commit that adds the cross-Run check (parent `d75c78cb`). Each baseline passed, each mutant failed as shown, and an editor edit restored the baseline bytes, which passed again. Entries M-067 to M-071 ran on the commit that adds fence-key rotation (parent `72b6eb47`) in the same way, the restored file's sha256 matching the baseline's each time; M-072 and M-073 ran the same way on the commit that makes every exposed key rotate and matches keys through separators (parent `00912c90`), and M-074 on the commit that pins key minting before assembly (parent `caa84426`). Entries M-075 to M-078 ran the same way in an isolated `git archive` export of the commit that adds system keys (parent `3346b711`). M-079 and M-080 ran the same way on the commit that scans the durable summary and staged advice (parent `c17e940d`). Entries M-081 to M-085 ran the same way in an isolated `git archive` export of the commit that adds the #712 launchd acceptance tests, each applied with `patch -p1` and reverted with `patch -R -p1`, the restored file's sha256 matching the baseline's. Their baseline is recorded as `c4ca1a8d`: the runs used that commit's tree before two comment-only amends (a driver comment and the M-083 note) produced it, and the patches apply to `c4ca1a8d` at the recorded hunk offsets, with the quoted failing lines at the same line numbers. M-086 ran the same way in an export of `461fdcdc`, the commit that holds `syscall.ForkLock` across the guard and posix_spawn, where M-081 and M-083 were re-run against the new spawn order. All six were re-run the same way at `231baa07`, after the final #712 fix wave changed their tests and moved M-086's lock into a closure; each entry's last note records that run. Entries M-087 to M-105 ran the same way in an isolated `git archive` export of `88f33cfb`, the commit that adds the #725 inventory rows, each applied with `git apply` and reverted with `git apply -R`, the restored file's sha256 matching the baseline's (the export sat inside a checkout, where `git apply` silently skips paths outside the current directory, so both ran with `GIT_CEILING_DIRECTORIES` set to the export's parent); M-099 and M-100 ran in the Docker `ci-local` image from that export. Entries M-106 to M-140 ran the same way in an isolated `git archive` export of `f3581fda`, the commit that adds the #784 inventory rows, each applied with `git apply` and reverted with `git apply -R`, the restored file's sha256 matching the baseline's (that export sat outside any checkout; both still ran with `GIT_CEILING_DIRECTORIES` set to its parent), and no test in their commands skipped; M-131 records two variants, each run that way. The commit that adds them also makes `TestHarnessPlanReferencesKinds` a PATH-HARNESS-REF ref, an inventory change only, so their quoted line numbers hold there too. Entries M-141 to M-190 ran in isolated `git archive` exports of `18ca5d70`, the #777 commit that pins the D4 and D5 request counts, one export per platform and one mutant at a time: each patch was applied with `patch -p1` and reverted with `patch -R -p1`, each restored file was compared byte for byte with the baseline's (`cmp`), and every ref passed at the baseline and again on the restored export after the last mutant. Every one of those mutants turned its named refs red on its first run. Entries M-191 to M-195 ran the same way in an isolated `git archive` export of `b97c0aeb`, the later commit that adds the rows they turn red: each of their mutants, which bypasses a preprocessing step (CSI stripping, the split at `\r`, trimming) for one rule only, left every ref green at `18ca5d70`, so they could only be recorded once those rows existed. Entries M-196 to M-204 ran the same way in an isolated `git archive` export of `6bd57929`, the commit that adds the rows they turn red: hand-written mutants (M-196 to M-198: a floor raised for one key rule, and the decode of the whole userinfo) and an enumeration that removes each key form `credentialFileKeys` and its helpers emit, one at a time (M-199 to M-204), found mutants that left every ref green at `45548f4f`. Entries M-205 to M-251 ran the same way in an isolated `git archive` export of `f350333c`, the commit that adds the rows they turn red and cites seven existing tests on CMP-EXEC-CREDENTIAL-OUTPUT: a third sweep removed or moved one decision at a time in the argv rule (`credential_argv.go`, `IsGitConfigPath`) and the screen (`screen_path.go`, `screen.go`, `screen_classify.go`, `screen_build.go`), and these are the mutants that left every ref of the row green at `c9cc9155` and let through what the original refuses, cuts or replaces. Entries M-252 to M-255 ran the same way in an isolated `git archive` export of `b7666790`, the commit that adds the last of the rows they turn red: M-252 and M-253 remove or misread the argv rule's reading of a git pathspec with long-form magic, added after that sweep; M-254 reads that pathspec's pattern after its last `)` and left every ref green at `a72009d3`, the commit before its row; M-255 is the sweep's announce-only `S-cut-no-mark` (a cut no longer counted in the notes), which left every ref green until a cut-only notes row existed. Entries M-256 to M-319 ran the same way in isolated `git archive` exports of `d1d7fa91`, the commit that adds the rows they turn red, four exports in parallel, one mutant at a time in each: M-256 to M-259 are hand-written mutants for four gaps (`stripCSI`'s ESC test and its bound check, a `.git/config` that cannot be opened for a reason other than a change, and a failed read after a successful open, which `6194e105` gives a test-only read seam); M-260 to M-319 come from a generated sweep that mutated every condition, comparison, statement and integer offset of the argv rule, the screen and the walk lines this branch changed (1,185 generated mutants plus eight hand-written ones, at `6194e105`), and are the mutants that left every ref of the row green there and let through what the original refuses, cuts, replaces or withholds, or crash the stream writer. Entries M-320 to M-338 ran the same way, serially, in one isolated `git archive` export of `3e4fedce`, the last commit that adds or reorders the rows they turn red: M-320 discards the read error, which goes red only because `1338d3ec` reshaped the screen's read seam into a reader hook so that the injected failure arrives through the read itself; M-321 to M-338 are generated sweep mutants (and two hand-written ones) first classed as equivalent, withholding more or only widening, for which an input was later built, or found by re-arguing the classification from the code, on which they lose a key the original emits. M-258 and M-259 were re-recorded at `3e4fedce` in the same export, because their rows changed (each entry's Notes say how). Entries M-339 to M-346 ran the same way, serially, in one isolated `git archive` export of `8058e5a6`, the last commit that changes test or production code before them: they are the mutants of the lines that key a credential-store line's userinfo (`122ec242`), count a key once across files and give a `.git/config` line with too many settings its own cause (`e804533a`), generated by the same sweep operators plus one hand-written mutant, that let through what the original withholds; each is red on a row added with that change or at `8058e5a6`. M-163 and M-283 were re-recorded at `8058e5a6` in the same export, because `122ec242` re-indented the line their patches change (each entry's Notes say how). Entries M-347 to M-377 ran the same way, serially, in one isolated `git archive` export of `9ce6e39f`, the commit that registers the #789 refs and the last commit that adds rows or changes test or production code before them: hand-written mutants of the #789 walk (the directory read and its parser, the tolerant listing, the refusal of an entry listed without metadata, the matcher's fast route, and the credential screen's budget setting), each red on its named leaves wherever it ran. Entry M-378 ran the same way in an isolated `git archive` export of `56d7c158`, the commit that adds the row it turns red. It is the one decision a generated sweep of the #789 changes found unpinned: at `b22459c3`, the four operators of the #777 sweep (each condition and operand to true and false, each comparison to its neighbour, each call, assignment, increment, branch and defer removed, each integer offset in an index, slice bound or arithmetic expression plus and minus one) were applied to every line #789 changed in the tolerant listing, the two directory reads and the record parser, the screen, the budget and its routes, and the matcher: 358 mutants generated; 47 dropped as not building (44 removals of a `:=` declaration, one offset that made a constant index negative, and two removals of `defer runtime.KeepAlive(f)`, one in each directory read, that failed only because `runtime` was then imported and not used, a generator artifact; those two were not run, and are equivalent in production because the caller's deferred `f.Close()` keeps `f` reachable through the read); 275 red; 36 survivors in 27 decisions (one delivers more, M-378; six only withhold more; one only announces; 16 equivalent; two unreachable, one of them only on Windows; one test-only seam). Each mutant ran its own package's cited refs only: a matcher mutant the six refs in ./agent/interceptor, any other mutant the 42 refs in ./agent/tools; the `cmd/golem` scenarios D4 and D5 were not run on any sweep mutant. The 28 mutants of the Linux directory read ran in Docker in two parts, the second under the memory cap. M-178 was re-recorded at `9ce6e39f` in the same export, because #789 rewrote the listing its patch changes (its Notes say how). Entries M-379 to M-402 (#721) ran serially, one mutant at a time, in one isolated `git archive` export of `4f21580d`, the commit that adds the GITMETA rows they turn red: each patch was applied with `patch -p1` and reverted with `patch -R -p1`, each restored file was compared byte for byte with the baseline's (`cmp`), and every command passed at the baseline and again on the restored export after the last mutant. The Seatbelt, discovery and builder entries (M-379 to M-394 and M-400) ran on darwin under a watchdog that killed the test process group above 4 GiB resident; the discovery, builder and prepare entries (M-388 to M-394 and M-400 to M-402) ran in the Docker `ci-local` image capped at 4 GiB of memory, M-401 and M-402, whose code is Linux-only, there and in the container below but not on darwin. The bwrap entries (M-395 to M-399, and M-401 and M-402 a second time) ran in a throwaway privileged Docker Desktop container (Ubuntu 24.04, bubblewrap 0.9.0, git 2.43.0, capped at 4 GiB, the fixtures on the container's own filesystem) with a test binary cross-compiled from the export, not on the CI VM, whose `linux-sandbox` job runs the bwrap profile's own check. Entries M-403 and M-404 (#721) ran the same way, serially, in an isolated `git archive` export of `ad0ccf57`, the commit that adds the GITMETA-PREVIEW row they turn red, on darwin under the same watchdog and in the `ci-local` image capped at 4 GiB. Entry M-405 (#721) ran the same way in an isolated `git archive` export of `b8b4a40d`, the commit that adds the GITMETA-DISCOVERY ref it turns red, on darwin under the same watchdog and in the `ci-local` image capped at 4 GiB. The #777 entries therefore have nine baselines: M-141 to M-190 at `18ca5d70` (but M-163, re-recorded at `8058e5a6`, and M-178, re-recorded at `9ce6e39f`), M-191 to M-195 at `b97c0aeb`, M-196 to M-204 at `6bd57929`, M-205 to M-251 at `f350333c`, M-252 to M-255 at `b7666790`, M-256 to M-319 at `d1d7fa91` (but M-258 and M-259, re-recorded at `3e4fedce`, and M-283, re-recorded at `8058e5a6`), M-320 to M-338 at `3e4fedce`, M-339 to M-346 at `8058e5a6`. Each entry is evidence at its own baseline. M-173 and M-179 each record two variants, and M-390 three. M-180 is not assigned: it was reserved for the bwrap backend's screen mutation, which needs a Linux host with bwrap that the Docker `ci-local` image is not, so CMP-EXEC-CREDENTIAL-OUTPUT-BWRAP is `unobserved(bwrap)` and carries that follow-up as its exempt reason. The entry for the unverified-root rule including the repository boundary itself, whose mutant narrowed the rule to strictly below the boundary, was withdrawn when that narrowing became the production rule; later entries were renumbered to close the gap. Entries M-060 and M-061 ran in isolated exports of immutable code commit `23f0c0bbca83f0c9d6e02163dd09c4856698ddcd`: each baseline passed, its mutant failed, and restored files matched the baseline bytes and passed again. Entries M-062 and M-063 ran on this branch at `dbe5c315b40f8b973b96cf623d5cdcbe00c616fc`, the commit that adds their rules: each baseline passed, its mutant failed, and `git checkout -- <file>` restored the baseline bytes, which passed again; M-062's comparison against the previous rule ran in an isolated `git archive` export of `ac053567`. Entries M-064 to M-066 ran on the #387 branch at `72d0bedeb1d264b3da62cf812df7505a8bd7e776`, the commit that tightens PV1's probe and cites the exec and verification preview tests (M-064 and M-065 were first recorded at `b9cea9154746758026fd9bb58d467f665be5952f`, the commit that makes PV1 executable): each baseline passed, its mutant failed, and `git checkout -- <file>` restored the baseline bytes, which passed again. Entries quote test output, the containment judge's message text and line numbers included, as it read at their baseline; later wording changes do not rewrite them. Entries carried over from the PR 2 delivery record name the draft entry they were first recorded as; they were re-run here so every command, diff and line number matches one revision. Apply a patch with `git apply`, run the command, then restore with `git checkout -- <file>`. `guard` entries remove or weaken the protection the refs assert. `effect-detection` entries change the effect path of an uncontained scenario: they show its probe can read a change in outcome, not that a guard is absent. Rows exempt from this ledger (pending, out-of-scope, unobserved such as ENV-BWRAP and CMP-EXEC-CREDENTIAL-OUTPUT-BWRAP, whose native bwrap profile needs a Linux host, and administrative META- rows; the inventory lint allows no other verified or uncontained row an exemption) carry their exempt reason in the inventory (`docs/security/containment-inventory.json`, rendered in `docs/security/containment-inventory.md`).
 
 ## M-001 — Absolute paths are rejected by the workspace path cleaner
 - Affected refs: PATH-ABS: `TestHardeningContracts/Active/Workspace/confinement_and_arguments/public_confinement/owned_absolute_sibling`, `TestWorkspaceCleanRelContainment/absolute_escape`, `TestContainment/W1`
@@ -9980,3 +9980,715 @@ These mutations prove the harness, inventory lint, checker and gate rules can fa
 - Baseline: pass (exit 0; 116 tests and subtests passed, none failed or skipped). Mutant: FAIL `TestCredentialPathMatchesOracle` (`credential_path_oracle_test.go:153: group c index 21: IsCredentialPath=false oracle=true IsGitConfigPath=false oracle=false`); every other test the command runs passes. Exit 1; on linux the same leaf and line red and exit 1. Restored (`patch -R`, `cmp` identical to the baseline file): pass (exit 0, 116 passed).
 - Kind: guard
 - Notes: The patch makes the fast route of `matchNormalize` treat `A` as lower case, so a path whose only capital is `A` is returned without lower-casing: `.Aws/x` keeps `.Aws`, which is not the credential directory `.aws`, and on a case-insensitive filesystem the files under it would be listed unexamined and never read. Found by the #789 generated sweep at `b22459c3` (mutant `invariants.215.38.O2`), where every ref stayed green: no corpus component or literal row had `A` as its only capital (`A/.Git/Config` also has `G` and `C`). The row `.Aws/x` was added to the oracle's literal group (c), as its index 21, at `56d7c158`, which also moves the fuzz seed count from 57363 to 57364. The sibling bound `c <= 'Z'` changed to `c < 'Z'` survives and is equivalent: no credential name, template, `config` or `.git` contains `z`, so `Z` and `z` are matched alike. The full `go test -count=1 ./agent/tools ./agent/interceptor` passed at `56d7c158` on darwin, unmutated.
+
+## M-379 — The Seatbelt deny covers the `.git` entry itself
+- Affected refs: GITMETA-SEATBELT: `TestSeatbeltGitMetadataDenied` (row `rename-parent` and eight others), `TestSeatbeltGitMetadataDeniedWithoutDiscovery` (row `rename-parent`); GITMETA-BUILDERS: `TestSeatbeltProfileGolden`, `TestSeatbeltProfileGitAnchors`
+- Baseline: `4f21580d`, the commit that adds the GITMETA rows (#721), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: seatbelt / `GO_LLM_REQUIRE_SEATBELT=1 go test -count=1 -v -timeout 120s -run '^(TestSeatbeltGitMetadataDenied|TestSeatbeltGitMetadataDeniedWithoutDiscovery|TestSeatbeltGitMetadataOrdinaryWritesAllowed|TestSeatbeltGitMetadataRegexIsLiteral|TestSeatbeltGitMetadataManySubmodules|TestSeatbeltGitMetadataExecInsideHooks|TestSeatbeltVerifierCannotPlantHook|TestGitMetaAttacksChangeTheSnapshotUnsandboxed|TestGitMetaProtectedLines|TestSeatbeltProfileGolden|TestSeatbeltProfileGitAnchors|TestSBPLRegexQuotes|TestSeatbeltProfileRejectsGitPathsOutsideWorkspace|TestSeatbeltProfileGitDeterministic)$' ./agent/tools` (the nine GITMETA-SEATBELT refs and the five Seatbelt GITMETA-BUILDERS refs, under a watchdog that kills the test process group above 4 GiB resident)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/seatbelt.go b/agent/tools/seatbelt.go
+  --- a/agent/tools/seatbelt.go
+  +++ b/agent/tools/seatbelt.go
+  @@ -280,7 +280,7 @@
+   		}
+   		return err
+   	}
+  -	for _, tail := range []string{sbplAnyDotGit + "$", sbplAnyDotGit + sbplHooksInfo, sbplAnyDotGit + sbplConfigFiles, sbplAnyDotGit + sbplContainers} {
+  +	for _, tail := range []string{sbplAnyDotGit + sbplHooksInfo, sbplAnyDotGit + sbplConfigFiles, sbplAnyDotGit + sbplContainers} {
+   		if err := add(ws, tail); err != nil {
+   			return "", err
+   		}
+  ```
+- Baseline: pass (exit 0; 142 tests and subtests passed, none failed or skipped). Mutant: FAIL `TestSeatbeltGitMetadataDenied/rename-parent` (`exec_darwin_test.go:3202: git metadata changed (exit 0, stderr "Error opening /private/var/select/sh: Operation not permitted\n"):`, its diff `+.git/hooks/pre-commit file 473930982 100755 b048663c... nlink=1` where the baseline line ends `306c6ca7... nlink=1`; content hashes shortened here); also red: rows `dotgit-impostor`, `nested-rename-dotgit`, `gitfile-rewrite`, `submodule-gitfile-replace`, `worktree-gitfile-rewrite`, `worktree-gitfile-replace`, `new-dotgit-subdir` and `new-dotgit-case` of `TestSeatbeltGitMetadataDenied`, `TestSeatbeltGitMetadataDeniedWithoutDiscovery/rename-parent`, `TestSeatbeltProfileGolden` (`seatbelt_test.go:137: profile mismatch:`) and `TestSeatbeltProfileGitAnchors` (`seatbelt_test.go:435: git deny block missing or misordered:`); every other test passes (exit 1; 128 passed). Restored (`patch -R -p1`, `cmp` identical to the baseline file); the restored export passed every command again after the last mutant.
+- Kind: guard
+- Notes: The patch drops rule 1, the any-depth regex for an entry named `.git`. The issue's parent-rename attack then moves `.git` to `.g2`, writes the hook through `.g2/hooks` (no rule names `.g2`) and moves it back: the #721 acceptance list asks for exactly this red. The gitfile rows go red with it, because a gitfile is a regular file named `.git` and only rule 1 denies writing it; the new-repository rows, because creating `src/.git` is no longer refused.
+
+## M-380 — The Seatbelt deny covers hooks and info under any `.git`
+- Affected refs: GITMETA-SEATBELT: `TestSeatbeltGitMetadataDenied` (rows `direct-hook`, `info-exclude` and 16 others), `TestSeatbeltGitMetadataDeniedWithoutDiscovery` (row `direct-hook`), `TestSeatbeltGitMetadataRegexIsLiteral` (row `direct-hook`), `TestSeatbeltVerifierCannotPlantHook`; GITMETA-BUILDERS: `TestSeatbeltProfileGolden`, `TestSeatbeltProfileGitAnchors`
+- Baseline: `4f21580d`, the commit that adds the GITMETA rows (#721), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: seatbelt / `GO_LLM_REQUIRE_SEATBELT=1 go test -count=1 -v -timeout 120s -run '^(TestSeatbeltGitMetadataDenied|TestSeatbeltGitMetadataDeniedWithoutDiscovery|TestSeatbeltGitMetadataOrdinaryWritesAllowed|TestSeatbeltGitMetadataRegexIsLiteral|TestSeatbeltGitMetadataManySubmodules|TestSeatbeltGitMetadataExecInsideHooks|TestSeatbeltVerifierCannotPlantHook|TestGitMetaAttacksChangeTheSnapshotUnsandboxed|TestGitMetaProtectedLines|TestSeatbeltProfileGolden|TestSeatbeltProfileGitAnchors|TestSBPLRegexQuotes|TestSeatbeltProfileRejectsGitPathsOutsideWorkspace|TestSeatbeltProfileGitDeterministic)$' ./agent/tools` (the nine GITMETA-SEATBELT refs and the five Seatbelt GITMETA-BUILDERS refs, under a watchdog that kills the test process group above 4 GiB resident)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/seatbelt.go b/agent/tools/seatbelt.go
+  --- a/agent/tools/seatbelt.go
+  +++ b/agent/tools/seatbelt.go
+  @@ -280,7 +280,7 @@
+   		}
+   		return err
+   	}
+  -	for _, tail := range []string{sbplAnyDotGit + "$", sbplAnyDotGit + sbplHooksInfo, sbplAnyDotGit + sbplConfigFiles, sbplAnyDotGit + sbplContainers} {
+  +	for _, tail := range []string{sbplAnyDotGit + "$", sbplAnyDotGit + sbplConfigFiles, sbplAnyDotGit + sbplContainers} {
+   		if err := add(ws, tail); err != nil {
+   			return "", err
+   		}
+  ```
+- Baseline: pass (exit 0; 142 tests and subtests passed, none failed or skipped). Mutant: FAIL `TestSeatbeltGitMetadataDenied/direct-hook` (`exec_darwin_test.go:3202: git metadata changed (exit 0, stderr "Error opening /private/var/select/sh: Operation not permitted\n"):`, its diff `+.git/hooks/pre-commit file 473939795 100755 b048663c... nlink=1`); also red: rows `direct-hook-new`, `delete-hook`, `chmod-hook`, `info-exclude`, `info-attributes`, `case-hook`, `rename-hooks`, `symlink-replace-hooks`, `symlink-alias-hooks`, `hardlink-hook`, `hooks-absent-create`, `hooks-absent-case`, `hooks-absent-kelvin`, `info-absent-create`, `nested-direct`, `nested-grandparent-rename` and `symlinked-hooks-replace`, the `direct-hook` rows of the two other tests, `TestSeatbeltVerifierCannotPlantHook` (`exec_darwin_test.go:3361: git metadata changed (verifier observation:`), `TestSeatbeltProfileGolden` and `TestSeatbeltProfileGitAnchors`; every other test passes (exit 1; 116 passed). Restored (`patch -R -p1`, `cmp` identical to the baseline file); the restored export passed every command again after the last mutant.
+- Kind: guard
+- Notes: The patch drops rule 2, the any-depth regex for `hooks` and `info` under an entry named `.git` and everything below them. Rule 2 is one regex for both names, so this one patch is both acceptance mutations of #721: removing the hooks rule turns the direct-write row red, and removing the info rule turns the exclude row (`info-exclude`) red. The verifier test shows a verification command runs under the same deny.
+
+## M-381 — The Seatbelt deny covers config-class files under any `.git`
+- Affected refs: GITMETA-SEATBELT: `TestSeatbeltGitMetadataDenied` (row `commondir-create` and nine others), `TestSeatbeltGitMetadataDeniedWithoutDiscovery` (rows `commondir-create`, `direct-config`); GITMETA-BUILDERS: `TestSeatbeltProfileGolden`, `TestSeatbeltProfileGitAnchors`
+- Baseline: `4f21580d`, the commit that adds the GITMETA rows (#721), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: seatbelt / `GO_LLM_REQUIRE_SEATBELT=1 go test -count=1 -v -timeout 120s -run '^(TestSeatbeltGitMetadataDenied|TestSeatbeltGitMetadataDeniedWithoutDiscovery|TestSeatbeltGitMetadataOrdinaryWritesAllowed|TestSeatbeltGitMetadataRegexIsLiteral|TestSeatbeltGitMetadataManySubmodules|TestSeatbeltGitMetadataExecInsideHooks|TestSeatbeltVerifierCannotPlantHook|TestGitMetaAttacksChangeTheSnapshotUnsandboxed|TestGitMetaProtectedLines|TestSeatbeltProfileGolden|TestSeatbeltProfileGitAnchors|TestSBPLRegexQuotes|TestSeatbeltProfileRejectsGitPathsOutsideWorkspace|TestSeatbeltProfileGitDeterministic)$' ./agent/tools` (the nine GITMETA-SEATBELT refs and the five Seatbelt GITMETA-BUILDERS refs, under a watchdog that kills the test process group above 4 GiB resident)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/seatbelt.go b/agent/tools/seatbelt.go
+  --- a/agent/tools/seatbelt.go
+  +++ b/agent/tools/seatbelt.go
+  @@ -280,7 +280,7 @@
+   		}
+   		return err
+   	}
+  -	for _, tail := range []string{sbplAnyDotGit + "$", sbplAnyDotGit + sbplHooksInfo, sbplAnyDotGit + sbplConfigFiles, sbplAnyDotGit + sbplContainers} {
+  +	for _, tail := range []string{sbplAnyDotGit + "$", sbplAnyDotGit + sbplHooksInfo, sbplAnyDotGit + sbplContainers} {
+   		if err := add(ws, tail); err != nil {
+   			return "", err
+   		}
+  ```
+- Baseline: pass (exit 0; 142 tests and subtests passed, none failed or skipped). Mutant: FAIL `TestSeatbeltGitMetadataDenied/commondir-create` (`exec_darwin_test.go:3202: git metadata changed (exit 0, stderr "Error opening /private/var/select/sh: Operation not permitted\n"):`, its diff `+.git/commondir file 473950221 100644 1a1f4b61... nlink=1`); also red: rows `direct-config`, `case-config`, `symlink-alias-config`, `hardlink-config`, `commondir-case`, `configworktree-create`, `configworktree-case`, `configworktree-ligature` and `nested-config`, `TestSeatbeltGitMetadataDeniedWithoutDiscovery/direct-config` and `/commondir-create`, `TestSeatbeltProfileGolden` and `TestSeatbeltProfileGitAnchors`; every other test passes (exit 1; 126 passed). Restored (`patch -R -p1`, `cmp` identical to the baseline file); the restored export passed every command again after the last mutant.
+- Kind: guard
+- Notes: The patch drops rule 3, the any-depth regex for `config`, `config.worktree`, `commondir` and `gitdir` under an entry named `.git`. `commondir-create` writes a `.git/commondir` that would redirect the repository's config to a planted one; it is a Seatbelt-only row, because bwrap mounts only metadata present at spawn (#721 R1).
+
+## M-382 — The Seatbelt deny covers module and worktree containers and their first level under any `.git`
+- Affected refs: GITMETA-SEATBELT: `TestSeatbeltGitMetadataDenied` (row `modules-container-rename` and seven others), `TestSeatbeltGitMetadataDeniedWithoutDiscovery` (rows `uninit-preplant`, `modules-container-rename`); GITMETA-BUILDERS: `TestSeatbeltProfileGolden`, `TestSeatbeltProfileGitAnchors`
+- Baseline: `4f21580d`, the commit that adds the GITMETA rows (#721), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: seatbelt / `GO_LLM_REQUIRE_SEATBELT=1 go test -count=1 -v -timeout 120s -run '^(TestSeatbeltGitMetadataDenied|TestSeatbeltGitMetadataDeniedWithoutDiscovery|TestSeatbeltGitMetadataOrdinaryWritesAllowed|TestSeatbeltGitMetadataRegexIsLiteral|TestSeatbeltGitMetadataManySubmodules|TestSeatbeltGitMetadataExecInsideHooks|TestSeatbeltVerifierCannotPlantHook|TestGitMetaAttacksChangeTheSnapshotUnsandboxed|TestGitMetaProtectedLines|TestSeatbeltProfileGolden|TestSeatbeltProfileGitAnchors|TestSBPLRegexQuotes|TestSeatbeltProfileRejectsGitPathsOutsideWorkspace|TestSeatbeltProfileGitDeterministic)$' ./agent/tools` (the nine GITMETA-SEATBELT refs and the five Seatbelt GITMETA-BUILDERS refs, under a watchdog that kills the test process group above 4 GiB resident)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/seatbelt.go b/agent/tools/seatbelt.go
+  --- a/agent/tools/seatbelt.go
+  +++ b/agent/tools/seatbelt.go
+  @@ -280,7 +280,7 @@
+   		}
+   		return err
+   	}
+  -	for _, tail := range []string{sbplAnyDotGit + "$", sbplAnyDotGit + sbplHooksInfo, sbplAnyDotGit + sbplConfigFiles, sbplAnyDotGit + sbplContainers} {
+  +	for _, tail := range []string{sbplAnyDotGit + "$", sbplAnyDotGit + sbplHooksInfo, sbplAnyDotGit + sbplConfigFiles} {
+   		if err := add(ws, tail); err != nil {
+   			return "", err
+   		}
+  ```
+- Baseline: pass (exit 0; 142 tests and subtests passed, none failed or skipped). Mutant: FAIL `TestSeatbeltGitMetadataDenied/modules-container-rename` (`exec_darwin_test.go:3202: git metadata changed (exit 0, stderr "Error opening /private/var/select/sh: Operation not permitted\n"):`, its diff `+.git/modules-old dir 473960961 40755 -` and `+.git/modules/m/hooks/pre-commit file 473961021 100755 b048663c... nlink=1`) and FAIL `TestSeatbeltGitMetadataDeniedWithoutDiscovery/uninit-preplant` (`exec_darwin_test.go:3233: git metadata changed (exit 0, stderr "Error opening /private/var/select/sh: Operation not permitted\n"):`, its diff `+.git/modules/u dir 473962231 40755 -`); also red: rows `module-rename-into`, `module-symlink`, `intermediate-rename`, `uninit-preplant`, `uninit-preplant-symlink`, `worktree-rename-into` and `worktrees-container-rename` of `TestSeatbeltGitMetadataDenied`, `TestSeatbeltGitMetadataDeniedWithoutDiscovery/modules-container-rename`, `TestSeatbeltProfileGolden` and `TestSeatbeltProfileGitAnchors`; every other test passes (exit 1; 128 passed). Restored (`patch -R -p1`, `cmp` identical to the baseline file); the restored export passed every command again after the last mutant.
+- Kind: guard
+- Notes: The patch drops rule 4, the any-depth regex for the `modules` and `worktrees` containers and their direct children. Without discovery (the stubbed empty layout) nothing else refuses creating the uninitialized submodule's git dir `.git/modules/u` with a planted hook, which the next `git submodule update` would adopt; with discovery the same row is red too, because `.git` itself has no per-git-dir clauses.
+
+## M-383 — Each discovered git dir's hooks are write-denied on Seatbelt
+- Affected refs: GITMETA-SEATBELT: `TestSeatbeltGitMetadataDenied` (rows `submodule-hook`, `libs-direct-hook`), `TestSeatbeltGitMetadataManySubmodules`; GITMETA-BUILDERS: `TestSeatbeltProfileGitAnchors`
+- Baseline: `4f21580d`, the commit that adds the GITMETA rows (#721), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: seatbelt / `GO_LLM_REQUIRE_SEATBELT=1 go test -count=1 -v -timeout 120s -run '^(TestSeatbeltGitMetadataDenied|TestSeatbeltGitMetadataDeniedWithoutDiscovery|TestSeatbeltGitMetadataOrdinaryWritesAllowed|TestSeatbeltGitMetadataRegexIsLiteral|TestSeatbeltGitMetadataManySubmodules|TestSeatbeltGitMetadataExecInsideHooks|TestSeatbeltVerifierCannotPlantHook|TestGitMetaAttacksChangeTheSnapshotUnsandboxed|TestGitMetaProtectedLines|TestSeatbeltProfileGolden|TestSeatbeltProfileGitAnchors|TestSBPLRegexQuotes|TestSeatbeltProfileRejectsGitPathsOutsideWorkspace|TestSeatbeltProfileGitDeterministic)$' ./agent/tools` (the nine GITMETA-SEATBELT refs and the five Seatbelt GITMETA-BUILDERS refs, under a watchdog that kills the test process group above 4 GiB resident)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/seatbelt.go b/agent/tools/seatbelt.go
+  --- a/agent/tools/seatbelt.go
+  +++ b/agent/tools/seatbelt.go
+  @@ -286,7 +286,7 @@
+   		}
+   	}
+   	for _, g := range dirs {
+  -		for _, c := range [][2]string{{"subpath", "/hooks"}, {"subpath", "/info"}, {"literal", "/config"}, {"literal", "/config.worktree"}, {"literal", "/commondir"}, {"literal", "/gitdir"}} {
+  +		for _, c := range [][2]string{{"subpath", "/info"}, {"literal", "/config"}, {"literal", "/config.worktree"}, {"literal", "/commondir"}, {"literal", "/gitdir"}} {
+   			if err := lit(c[0], g+c[1]); err != nil {
+   				return "", err
+   			}
+  ```
+- Baseline: pass (exit 0; 142 tests and subtests passed, none failed or skipped). Mutant: FAIL `TestSeatbeltGitMetadataDenied/submodule-hook` (`exec_darwin_test.go:3202: git metadata changed (exit 0, stderr "Error opening /private/var/select/sh: Operation not permitted\n"):`, its diff `+.git/modules/m/hooks/pre-commit file 473969740 100755 b048663c... nlink=1`); also red: row `libs-direct-hook`, `TestSeatbeltGitMetadataManySubmodules` (`exec_darwin_test.go:3324: s299 hook planted or unreadable (exit 0, stderr "Error opening /private/var/select/sh: Operation not permitted\n"): <nil>`) and `TestSeatbeltProfileGitAnchors`; every other test passes (exit 1; 137 passed). Restored (`patch -R -p1`, `cmp` identical to the baseline file); the restored export passed every command again after the last mutant.
+- Kind: guard
+- Notes: The patch drops the per-git-dir `(subpath <g>/hooks)` clause of rule 5, so a submodule git dir (not named `.git`, so outside rules 1-4) keeps its `info` and config-class clauses but its hooks are writable.
+
+## M-384 — Each discovered git dir's containers are write-denied on Seatbelt
+- Affected refs: GITMETA-SEATBELT: `TestSeatbeltGitMetadataDenied` (row `nested-submodule-rename`), `TestSeatbeltGitMetadataRegexIsLiteral` (row `nested-submodule-rename`); GITMETA-BUILDERS: `TestSeatbeltProfileGitAnchors`
+- Baseline: `4f21580d`, the commit that adds the GITMETA rows (#721), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: seatbelt / `GO_LLM_REQUIRE_SEATBELT=1 go test -count=1 -v -timeout 120s -run '^(TestSeatbeltGitMetadataDenied|TestSeatbeltGitMetadataDeniedWithoutDiscovery|TestSeatbeltGitMetadataOrdinaryWritesAllowed|TestSeatbeltGitMetadataRegexIsLiteral|TestSeatbeltGitMetadataManySubmodules|TestSeatbeltGitMetadataExecInsideHooks|TestSeatbeltVerifierCannotPlantHook|TestGitMetaAttacksChangeTheSnapshotUnsandboxed|TestGitMetaProtectedLines|TestSeatbeltProfileGolden|TestSeatbeltProfileGitAnchors|TestSBPLRegexQuotes|TestSeatbeltProfileRejectsGitPathsOutsideWorkspace|TestSeatbeltProfileGitDeterministic)$' ./agent/tools` (the nine GITMETA-SEATBELT refs and the five Seatbelt GITMETA-BUILDERS refs, under a watchdog that kills the test process group above 4 GiB resident)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/seatbelt.go b/agent/tools/seatbelt.go
+  --- a/agent/tools/seatbelt.go
+  +++ b/agent/tools/seatbelt.go
+  @@ -291,9 +291,6 @@
+   				return "", err
+   			}
+   		}
+  -		if err := add(g, sbplContainers); err != nil {
+  -			return "", err
+  -		}
+   	}
+   	for _, r := range readOnly {
+   		if err := lit("subpath", r); err != nil {
+  ```
+- Baseline: pass (exit 0; 142 tests and subtests passed, none failed or skipped). Mutant: FAIL `TestSeatbeltGitMetadataDenied/nested-submodule-rename` (`exec_darwin_test.go:3202: git metadata changed (exit 1, stderr "Error opening /private/var/select/sh: Operation not permitted\nmkdir: .git/modules/m/modules/inner/hooks: Operation not permitted\n"):`, its diff `-.git/modules/m/modules/inner dir 473980059 40755 -` and `+.git/modules/m/modules/inner dir 473980105 40755 -`); also red: `TestSeatbeltGitMetadataRegexIsLiteral/nested-submodule-rename` and `TestSeatbeltProfileGitAnchors`; every other test passes (exit 1; 137 passed). Restored (`patch -R -p1`, `cmp` identical to the baseline file); the restored export passed every command again after the last mutant.
+- Kind: guard
+- Notes: The patch drops the per-git-dir containers regex of rule 5, so the nested submodule `inner`, under the submodule `m`'s own `modules` container (beyond rule 4's first level), can be renamed out and replaced. The plant into the replacement is still refused by the path-based hooks clause, which names the same path; the snapshot sees the git dir itself replaced.
+
+## M-385 — Each intermediate's direct children are write-denied on Seatbelt
+- Affected refs: GITMETA-SEATBELT: `TestSeatbeltGitMetadataDenied` (row `intermediate-preplant`), `TestSeatbeltGitMetadataRegexIsLiteral` (row `intermediate-preplant`); GITMETA-BUILDERS: `TestSeatbeltProfileGitAnchors`
+- Baseline: `4f21580d`, the commit that adds the GITMETA rows (#721), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: seatbelt / `GO_LLM_REQUIRE_SEATBELT=1 go test -count=1 -v -timeout 120s -run '^(TestSeatbeltGitMetadataDenied|TestSeatbeltGitMetadataDeniedWithoutDiscovery|TestSeatbeltGitMetadataOrdinaryWritesAllowed|TestSeatbeltGitMetadataRegexIsLiteral|TestSeatbeltGitMetadataManySubmodules|TestSeatbeltGitMetadataExecInsideHooks|TestSeatbeltVerifierCannotPlantHook|TestGitMetaAttacksChangeTheSnapshotUnsandboxed|TestGitMetaProtectedLines|TestSeatbeltProfileGolden|TestSeatbeltProfileGitAnchors|TestSBPLRegexQuotes|TestSeatbeltProfileRejectsGitPathsOutsideWorkspace|TestSeatbeltProfileGitDeterministic)$' ./agent/tools` (the nine GITMETA-SEATBELT refs and the five Seatbelt GITMETA-BUILDERS refs, under a watchdog that kills the test process group above 4 GiB resident)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/seatbelt.go b/agent/tools/seatbelt.go
+  --- a/agent/tools/seatbelt.go
+  +++ b/agent/tools/seatbelt.go
+  @@ -300,7 +300,7 @@
+   			return "", err
+   		}
+   	}
+  -	for _, i := range inters {
+  +	for _, i := range inters[:0] {
+   		if err := add(i, "/[^/]+$"); err != nil {
+   			return "", err
+   		}
+  ```
+- Baseline: pass (exit 0; 142 tests and subtests passed, none failed or skipped). Mutant: FAIL `TestSeatbeltGitMetadataDenied/intermediate-preplant` (`exec_darwin_test.go:3202: git metadata changed (exit 0, stderr "Error opening /private/var/select/sh: Operation not permitted\n"):`, its diff `-.git/modules/libs/b missing` and `+.git/modules/libs/b dir 473989253 40755 -`); also red: `TestSeatbeltGitMetadataRegexIsLiteral/intermediate-preplant` and `TestSeatbeltProfileGitAnchors`; every other test passes (exit 1; 137 passed). Restored (`patch -R -p1`, `cmp` identical to the baseline file); the restored export passed every command again after the last mutant.
+- Kind: guard
+- Notes: The patch renders no intermediate's `^I/[^/]+$` regex (the loop runs over an empty slice), so a second slash-named submodule's git dir `.git/modules/libs/b` can be created with a planted hook under the intermediate `libs`, below rule 4's first level.
+
+## M-386 — Seatbelt regex prefixes are matched literally
+- Affected refs: GITMETA-SEATBELT: `TestSeatbeltGitMetadataRegexIsLiteral` (rows `direct-hook`, `nested-submodule-rename`, `intermediate-preplant`); GITMETA-BUILDERS: `TestSBPLRegexQuotes`, `TestSeatbeltProfileGitAnchors`
+- Baseline: `4f21580d`, the commit that adds the GITMETA rows (#721), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: seatbelt / `GO_LLM_REQUIRE_SEATBELT=1 go test -count=1 -v -timeout 120s -run '^(TestSeatbeltGitMetadataDenied|TestSeatbeltGitMetadataDeniedWithoutDiscovery|TestSeatbeltGitMetadataOrdinaryWritesAllowed|TestSeatbeltGitMetadataRegexIsLiteral|TestSeatbeltGitMetadataManySubmodules|TestSeatbeltGitMetadataExecInsideHooks|TestSeatbeltVerifierCannotPlantHook|TestGitMetaAttacksChangeTheSnapshotUnsandboxed|TestGitMetaProtectedLines|TestSeatbeltProfileGolden|TestSeatbeltProfileGitAnchors|TestSBPLRegexQuotes|TestSeatbeltProfileRejectsGitPathsOutsideWorkspace|TestSeatbeltProfileGitDeterministic)$' ./agent/tools` (the nine GITMETA-SEATBELT refs and the five Seatbelt GITMETA-BUILDERS refs, under a watchdog that kills the test process group above 4 GiB resident)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/seatbelt.go b/agent/tools/seatbelt.go
+  --- a/agent/tools/seatbelt.go
+  +++ b/agent/tools/seatbelt.go
+  @@ -10,7 +10,6 @@
+   	"fmt"
+   	"path"
+   	"path/filepath"
+  -	"regexp"
+   	"slices"
+   	"strings"
+   	"unicode/utf8"
+  @@ -229,7 +228,7 @@
+   // because the #"..." literal cannot carry a double quote; sbplQuote's
+   // rejections (invalid UTF-8, control characters) pass through.
+   func sbplRegex(prefix, tail string) (string, error) {
+  -	q, err := sbplQuote("^" + regexp.QuoteMeta(prefix) + tail)
+  +	q, err := sbplQuote("^" + prefix + tail)
+   	if err != nil {
+   		return "", err
+   	}
+  ```
+- Baseline: pass (exit 0; 142 tests and subtests passed, none failed or skipped). Mutant: FAIL `TestSeatbeltGitMetadataRegexIsLiteral` rows `direct-hook` (`exec_darwin_test.go:3293: git metadata changed (exit 0, stderr "Error opening /private/var/select/sh: Operation not permitted\n"):`, its diff `+.git/hooks/pre-commit file 473999811 100755 b048663c... nlink=1`), `nested-submodule-rename` and `intermediate-preplant`; `TestSBPLRegexQuotes` (`seatbelt_test.go:394: got (regex "^/w/a+b (v2)\"q$"), want (regex "^/w/a\\+b \\(v2\\)\"q$")`) and `TestSeatbeltProfileGitAnchors` are red too; the row `xgit` and every other test pass (exit 1; 136 passed). Restored (`patch -R -p1`, `cmp` identical to the baseline file); the restored export passed every command again after the last mutant.
+- Kind: guard
+- Notes: The patch renders the prefix of every regex unquoted (and drops the `regexp` import it leaves unused). In the workspace `ws+(v2)"q` the prefix becomes a pattern that no longer matches its own path, so each regex family (rules 1-4 at the root, a git dir's containers, an intermediate's children) stops firing; the workspace root of the other tests holds no metacharacter, which is why only this test and the builder pins go red.
+
+## M-387 — Read-only modules-tree directories are write-denied whole on Seatbelt
+- Affected refs: GITMETA-SEATBELT: `TestSeatbeltGitMetadataDenied` (rows `module-named-hooks-two-spawn`, `slash-module-named-Hooks-two-spawn`, `stripped-module-hook`); GITMETA-BUILDERS: `TestSeatbeltProfileGitAnchors`
+- Baseline: `4f21580d`, the commit that adds the GITMETA rows (#721), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2)
+- Profile / command: seatbelt / `GO_LLM_REQUIRE_SEATBELT=1 go test -count=1 -v -timeout 120s -run '^(TestSeatbeltGitMetadataDenied|TestSeatbeltGitMetadataDeniedWithoutDiscovery|TestSeatbeltGitMetadataOrdinaryWritesAllowed|TestSeatbeltGitMetadataRegexIsLiteral|TestSeatbeltGitMetadataManySubmodules|TestSeatbeltGitMetadataExecInsideHooks|TestSeatbeltVerifierCannotPlantHook|TestGitMetaAttacksChangeTheSnapshotUnsandboxed|TestGitMetaProtectedLines|TestSeatbeltProfileGolden|TestSeatbeltProfileGitAnchors|TestSBPLRegexQuotes|TestSeatbeltProfileRejectsGitPathsOutsideWorkspace|TestSeatbeltProfileGitDeterministic)$' ./agent/tools` (the nine GITMETA-SEATBELT refs and the five Seatbelt GITMETA-BUILDERS refs, under a watchdog that kills the test process group above 4 GiB resident)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/seatbelt.go b/agent/tools/seatbelt.go
+  --- a/agent/tools/seatbelt.go
+  +++ b/agent/tools/seatbelt.go
+  @@ -295,7 +295,7 @@
+   			return "", err
+   		}
+   	}
+  -	for _, r := range readOnly {
+  +	for _, r := range readOnly[:0] {
+   		if err := lit("subpath", r); err != nil {
+   			return "", err
+   		}
+  ```
+- Baseline: pass (exit 0; 142 tests and subtests passed, none failed or skipped). Mutant: FAIL `TestSeatbeltGitMetadataDenied/module-named-hooks-two-spawn` (`exec_darwin_test.go:3202: git metadata changed (exit 0, stderr "Error opening /private/var/select/sh: Operation not permitted\n"):`, its diff `+.git/modules/hooks/hooks/pre-commit file 474008559 100755 852a478e... nlink=1`) and FAIL `TestSeatbeltGitMetadataDenied/slash-module-named-Hooks-two-spawn` (the same line, its diff `+.git/modules/libs/Hooks/hooks/pre-commit file 474008624 100755 852a478e... nlink=1`); also red: row `stripped-module-hook` and `TestSeatbeltProfileGitAnchors`; every other test passes (exit 1; 137 passed). Restored (`patch -R -p1`, `cmp` identical to the baseline file); the restored export passed every command again after the last mutant.
+- Kind: guard
+- Notes: The patch renders no `gitReadOnlyDirs` entry (the loop runs over an empty slice). In each two-spawn row the first spawn deletes a submodule git dir's `HEAD` (writable by design), so the second spawn's discovery records that directory, named `hooks` or `Hooks`, as read-only whole (clause 2); without its `(subpath ...)` clause only rule 4 or the intermediate's regex names it, and neither reaches its own `hooks/pre-commit`. The stripped row's `s/hooks` is the same class.
+
+## M-388 — Discovery descends through intermediates
+- Affected refs: GITMETA-DISCOVERY: `TestInspectSandboxWorkspaceFindsGitLayout`, `TestInspectSandboxWorkspaceSlashNamedHooksSubmodule`, `TestInspectSandboxWorkspaceStrippedModuleIsIntermediate`, `TestInspectSandboxWorkspaceModuleNamedHooks` (subtest `.git/modules/libs/Hooks head=false`); GITMETA-BWRAP-PREPARE: `TestBwrapPrepareMountsGitLayout`
+- Baseline: `4f21580d`, the commit that adds the GITMETA rows (#721), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2); re-run on linux (arm64, go1.27.1, the Docker `ci-local` image: Alpine 3.24.2, kernel 6.10.14-linuxkit, run as the non-root `ci` user, uid 1000, the container capped at 4 GiB of memory) from the same export mounted as the container's workspace: baseline pass, the same failing leaves and quoted lines as on darwin (paths under `/tmp` rather than the darwin temp directory), and on linux also `TestBwrapPrepareMountsGitLayout` (`exec_linux_test.go:570: wrapped argv missing " --ro-bind <tmp>/.git/modules/s/hooks <tmp>/.git/modules/s/hooks "`; linux exit 1, 26 of 32 passed), restored pass
+- Profile / command: darwin-host / `go test -count=1 -v -timeout 120s -run '^(TestInspectSandboxWorkspaceFindsGitLayout|TestInspectSandboxWorkspaceBrokenModuleIsProtectedNotDescended|TestInspectSandboxWorkspaceSlashNamedHooksSubmodule|TestInspectSandboxWorkspaceStrippedModuleIsIntermediate|TestInspectSandboxWorkspaceModuleNamedHooks|TestInspectSandboxWorkspaceGitfileWorkspace|TestInspectSandboxWorkspaceCaseFoldedDotGit|TestInspectSandboxWorkspaceScanErrorFailsClosed|TestInspectSandboxWorkspaceSymlinkedDotGitIsNeither|TestScanGitDirTreatsAbsentAsAbsent|TestInspectSandboxWorkspaceManySubmodules)$' ./agent/tools` (the 11 GITMETA-DISCOVERY refs, under the same watchdog); linux-host / `go test -count=1 -v -timeout 120s -run '^(TestInspectSandboxWorkspaceFindsGitLayout|TestInspectSandboxWorkspaceBrokenModuleIsProtectedNotDescended|TestInspectSandboxWorkspaceSlashNamedHooksSubmodule|TestInspectSandboxWorkspaceStrippedModuleIsIntermediate|TestInspectSandboxWorkspaceModuleNamedHooks|TestInspectSandboxWorkspaceGitfileWorkspace|TestInspectSandboxWorkspaceCaseFoldedDotGit|TestInspectSandboxWorkspaceScanErrorFailsClosed|TestInspectSandboxWorkspaceSymlinkedDotGitIsNeither|TestScanGitDirTreatsAbsentAsAbsent|TestInspectSandboxWorkspaceManySubmodules|TestSeatbeltProfileGolden|TestSeatbeltProfileGitAnchors|TestSBPLRegexQuotes|TestSeatbeltProfileRejectsGitPathsOutsideWorkspace|TestSeatbeltProfileGitDeterministic|TestBuildBwrapArgsGitMetadata|TestBuildBwrapArgsGitMetadataRejections|TestBuildBwrapArgsGitMetadataDedupesAndKeepsCallerSlices|TestBuildBwrapArgsExeInWritableGitDirUnderReadOnlyContainerKeepsLiteral|TestBuildBwrapArgsExeInsideGitReadOnlyIsCovered|TestBuildBwrapArgsExeLiteralFollowsGitMounts|TestBwrapPrepareMountsGitLayout|TestBwrapPrepareRefusesSymlinkedGitMetadata)$' ./agent/tools` (every GITMETA-DISCOVERY, GITMETA-BUILDERS and GITMETA-BWRAP-PREPARE ref, 24 tests)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/sandbox_links_unix.go b/agent/tools/sandbox_links_unix.go
+  --- a/agent/tools/sandbox_links_unix.go
+  +++ b/agent/tools/sandbox_links_unix.go
+  @@ -225,7 +225,6 @@
+   			err = scanGitDir(c, l)
+   		default:
+   			l.intermediates = append(l.intermediates, c)
+  -			err = l.descendModules(c, kids)
+   		}
+   		if err != nil {
+   			return err
+  ```
+- Baseline: pass on darwin (exit 0; 17 tests and subtests passed, none skipped) and on linux (exit 0; 32 passed, none skipped). Mutant: FAIL `TestInspectSandboxWorkspaceFindsGitLayout` (`sandbox_links_unix_test.go:113: gitDirs:` with got `["<tmp>/.git/modules/m" "<tmp>/.git/modules/m/modules/inner" "<tmp>/.git/worktrees/wt"]` against want `["<tmp>/.git/modules/libs/a" "<tmp>/.git/modules/m" ...]`, and the same line for `metadata`, which lacks `.git/modules/libs/a/config` and `.git/modules/libs/a/hooks`; `<tmp>` is the test's temp directory); also red: `TestInspectSandboxWorkspaceSlashNamedHooksSubmodule`, `TestInspectSandboxWorkspaceStrippedModuleIsIntermediate` and `TestInspectSandboxWorkspaceModuleNamedHooks/.git/modules/libs/Hooks_head=false`; every other test passes (exit 1; 12 of 17 passed). Restored (`patch -R -p1`, `cmp` identical to the baseline file); the restored export passed every command again after the last mutant.
+- Kind: guard
+- Notes: The patch records each intermediate but no longer descends into it, so the slash-named submodule `libs/a` is never found: neither its git dir nor its hooks and config reach either backend.
+
+## M-389 — A broken module is a protected git dir, not an intermediate
+- Affected refs: GITMETA-DISCOVERY: `TestInspectSandboxWorkspaceBrokenModuleIsProtectedNotDescended`
+- Baseline: `4f21580d`, the commit that adds the GITMETA rows (#721), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2); re-run on linux (arm64, go1.27.1, the Docker `ci-local` image: Alpine 3.24.2, kernel 6.10.14-linuxkit, run as the non-root `ci` user, uid 1000, the container capped at 4 GiB of memory) from the same export mounted as the container's workspace: baseline pass, the same failing leaves and quoted lines as on darwin (linux exit 1, 31 of 32 passed), restored pass
+- Profile / command: darwin-host / `go test -count=1 -v -timeout 120s -run '^(TestInspectSandboxWorkspaceFindsGitLayout|TestInspectSandboxWorkspaceBrokenModuleIsProtectedNotDescended|TestInspectSandboxWorkspaceSlashNamedHooksSubmodule|TestInspectSandboxWorkspaceStrippedModuleIsIntermediate|TestInspectSandboxWorkspaceModuleNamedHooks|TestInspectSandboxWorkspaceGitfileWorkspace|TestInspectSandboxWorkspaceCaseFoldedDotGit|TestInspectSandboxWorkspaceScanErrorFailsClosed|TestInspectSandboxWorkspaceSymlinkedDotGitIsNeither|TestScanGitDirTreatsAbsentAsAbsent|TestInspectSandboxWorkspaceManySubmodules)$' ./agent/tools` (the 11 GITMETA-DISCOVERY refs, under the same watchdog); linux-host / `go test -count=1 -v -timeout 120s -run '^(TestInspectSandboxWorkspaceFindsGitLayout|TestInspectSandboxWorkspaceBrokenModuleIsProtectedNotDescended|TestInspectSandboxWorkspaceSlashNamedHooksSubmodule|TestInspectSandboxWorkspaceStrippedModuleIsIntermediate|TestInspectSandboxWorkspaceModuleNamedHooks|TestInspectSandboxWorkspaceGitfileWorkspace|TestInspectSandboxWorkspaceCaseFoldedDotGit|TestInspectSandboxWorkspaceScanErrorFailsClosed|TestInspectSandboxWorkspaceSymlinkedDotGitIsNeither|TestScanGitDirTreatsAbsentAsAbsent|TestInspectSandboxWorkspaceManySubmodules|TestSeatbeltProfileGolden|TestSeatbeltProfileGitAnchors|TestSBPLRegexQuotes|TestSeatbeltProfileRejectsGitPathsOutsideWorkspace|TestSeatbeltProfileGitDeterministic|TestBuildBwrapArgsGitMetadata|TestBuildBwrapArgsGitMetadataRejections|TestBuildBwrapArgsGitMetadataDedupesAndKeepsCallerSlices|TestBuildBwrapArgsExeInWritableGitDirUnderReadOnlyContainerKeepsLiteral|TestBuildBwrapArgsExeInsideGitReadOnlyIsCovered|TestBuildBwrapArgsExeLiteralFollowsGitMounts|TestBwrapPrepareMountsGitLayout|TestBwrapPrepareRefusesSymlinkedGitMetadata)$' ./agent/tools` (every GITMETA-DISCOVERY, GITMETA-BUILDERS and GITMETA-BWRAP-PREPARE ref, 24 tests)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/sandbox_links_unix.go b/agent/tools/sandbox_links_unix.go
+  --- a/agent/tools/sandbox_links_unix.go
+  +++ b/agent/tools/sandbox_links_unix.go
+  @@ -220,9 +220,6 @@
+   		case len(name) == len("hooks") && strings.EqualFold(name, "hooks"),
+   			len(name) == len("info") && strings.EqualFold(name, "info"):
+   			l.moduleReadOnly = append(l.moduleReadOnly, c)
+  -		case slices.ContainsFunc(kids, func(k fs.DirEntry) bool { return !k.IsDir() }):
+  -			l.gitDirs = append(l.gitDirs, c)
+  -			err = scanGitDir(c, l)
+   		default:
+   			l.intermediates = append(l.intermediates, c)
+   			err = l.descendModules(c, kids)
+  ```
+- Baseline: pass on darwin (exit 0; 17 tests and subtests passed, none skipped) and on linux (exit 0; 32 passed, none skipped). Mutant: FAIL `TestInspectSandboxWorkspaceBrokenModuleIsProtectedNotDescended` (`sandbox_links_unix_test.go:134: broken module not a git dir: [...]`, `sandbox_links_unix_test.go:138: descended into the broken module: "<tmp>/.git/modules/broken/objects"` and `sandbox_links_unix_test.go:142: broken module classed as an intermediate: ["<tmp>/.git/modules/broken" "<tmp>/.git/modules/broken/objects" "<tmp>/.git/modules/broken/objects/ab" "<tmp>/.git/modules/libs"]`); every other test passes (exit 1; 16 of 17 passed). Restored (`patch -R -p1`, `cmp` identical to the baseline file); the restored export passed every command again after the last mutant.
+- Kind: guard
+- Notes: The patch deletes clause 3, so a module directory without `HEAD` that still holds a file (here `config`) falls through to an intermediate: its config is not protected, and its own `objects` tree is walked as if it held submodules.
+
+## M-390 — A git scan error other than absence fails the spawn
+- Affected refs: GITMETA-DISCOVERY: `TestInspectSandboxWorkspaceScanErrorFailsClosed` (subtests `metadata`, `worktrees`, `modules`)
+- Baseline: `4f21580d`, the commit that adds the GITMETA rows (#721), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2); re-run on linux (arm64, go1.27.1, the Docker `ci-local` image: Alpine 3.24.2, kernel 6.10.14-linuxkit, run as the non-root `ci` user, uid 1000, the container capped at 4 GiB of memory) from the same export mounted as the container's workspace: baseline pass, the same failing leaves and quoted lines as on darwin (paths under `/tmp`; linux exit 1, 30 of 32 passed, for each variant), restored pass
+- Profile / command: darwin-host / `go test -count=1 -v -timeout 120s -run '^(TestInspectSandboxWorkspaceFindsGitLayout|TestInspectSandboxWorkspaceBrokenModuleIsProtectedNotDescended|TestInspectSandboxWorkspaceSlashNamedHooksSubmodule|TestInspectSandboxWorkspaceStrippedModuleIsIntermediate|TestInspectSandboxWorkspaceModuleNamedHooks|TestInspectSandboxWorkspaceGitfileWorkspace|TestInspectSandboxWorkspaceCaseFoldedDotGit|TestInspectSandboxWorkspaceScanErrorFailsClosed|TestInspectSandboxWorkspaceSymlinkedDotGitIsNeither|TestScanGitDirTreatsAbsentAsAbsent|TestInspectSandboxWorkspaceManySubmodules)$' ./agent/tools` (the 11 GITMETA-DISCOVERY refs, under the same watchdog); linux-host / `go test -count=1 -v -timeout 120s -run '^(TestInspectSandboxWorkspaceFindsGitLayout|TestInspectSandboxWorkspaceBrokenModuleIsProtectedNotDescended|TestInspectSandboxWorkspaceSlashNamedHooksSubmodule|TestInspectSandboxWorkspaceStrippedModuleIsIntermediate|TestInspectSandboxWorkspaceModuleNamedHooks|TestInspectSandboxWorkspaceGitfileWorkspace|TestInspectSandboxWorkspaceCaseFoldedDotGit|TestInspectSandboxWorkspaceScanErrorFailsClosed|TestInspectSandboxWorkspaceSymlinkedDotGitIsNeither|TestScanGitDirTreatsAbsentAsAbsent|TestInspectSandboxWorkspaceManySubmodules|TestSeatbeltProfileGolden|TestSeatbeltProfileGitAnchors|TestSBPLRegexQuotes|TestSeatbeltProfileRejectsGitPathsOutsideWorkspace|TestSeatbeltProfileGitDeterministic|TestBuildBwrapArgsGitMetadata|TestBuildBwrapArgsGitMetadataRejections|TestBuildBwrapArgsGitMetadataDedupesAndKeepsCallerSlices|TestBuildBwrapArgsExeInWritableGitDirUnderReadOnlyContainerKeepsLiteral|TestBuildBwrapArgsExeInsideGitReadOnlyIsCovered|TestBuildBwrapArgsExeLiteralFollowsGitMounts|TestBwrapPrepareMountsGitLayout|TestBwrapPrepareRefusesSymlinkedGitMetadata)$' ./agent/tools` (every GITMETA-DISCOVERY, GITMETA-BUILDERS and GITMETA-BWRAP-PREPARE ref, 24 tests)
+- Patch:
+  Variant A (the metadata branch):
+  ```diff
+  diff --git a/agent/tools/sandbox_links_unix.go b/agent/tools/sandbox_links_unix.go
+  --- a/agent/tools/sandbox_links_unix.go
+  +++ b/agent/tools/sandbox_links_unix.go
+  @@ -152,8 +152,6 @@
+   		p := filepath.Join(d, name)
+   		if _, err := os.Lstat(p); err == nil {
+   			out.metadata = append(out.metadata, p)
+  -		} else if !errors.Is(err, fs.ErrNotExist) {
+  -			return out.scanErr(p, err)
+   		}
+   	}
+   	worktrees := filepath.Join(d, "worktrees")
+  ```
+  Variant B (the worktrees branch):
+  ```diff
+  diff --git a/agent/tools/sandbox_links_unix.go b/agent/tools/sandbox_links_unix.go
+  --- a/agent/tools/sandbox_links_unix.go
+  +++ b/agent/tools/sandbox_links_unix.go
+  @@ -158,9 +158,6 @@
+   	}
+   	worktrees := filepath.Join(d, "worktrees")
+   	entries, ok, err := out.listDir(worktrees)
+  -	if err != nil {
+  -		return err
+  -	}
+   	if ok {
+   		out.containers = append(out.containers, worktrees)
+   		for _, e := range entries {
+  ```
+  Variant C (the modules branch):
+  ```diff
+  diff --git a/agent/tools/sandbox_links_unix.go b/agent/tools/sandbox_links_unix.go
+  --- a/agent/tools/sandbox_links_unix.go
+  +++ b/agent/tools/sandbox_links_unix.go
+  @@ -177,7 +177,7 @@
+   	modules := filepath.Join(d, "modules")
+   	entries, ok, err = out.listDir(modules)
+   	if err != nil || !ok {
+  -		return err
+  +		return nil
+   	}
+   	out.containers = append(out.containers, modules)
+   	return out.descendModules(modules, entries)
+  ```
+- Baseline: pass on darwin (exit 0; 17 tests and subtests passed, none skipped) and on linux (exit 0; 32 passed, none skipped). Variant A: FAIL `TestInspectSandboxWorkspaceScanErrorFailsClosed/metadata` (`sandbox_links_unix_test.go:301: scan with unreadable .git: err = tools: sandbox inspect git metadata ".git/worktrees": lstat <tmp>/.git/worktrees: permission denied, want a failure naming .git/hooks`). Variant B: FAIL `TestInspectSandboxWorkspaceScanErrorFailsClosed/worktrees` (`sandbox_links_unix_test.go:301: scan with unreadable .git/worktrees: err = <nil>, want a failure naming .git/worktrees`). Variant C: FAIL `TestInspectSandboxWorkspaceScanErrorFailsClosed/modules` (`sandbox_links_unix_test.go:301: scan with unreadable .git/modules: err = <nil>, want a failure naming .git/modules`). Under each variant every other test passes (exit 1; 15 of 17 passed). Restored (`patch -R -p1`, `cmp` identical to the baseline file); the restored export passed every command again after the last mutant.
+- Kind: guard
+- Notes: Each variant ignores one fail-closed branch of `scanGitDir`: A a metadata `Lstat` error, B the worktrees listing's error, C the modules listing's error. B and C return a layout without that container's git dirs; A's scan reaches the next unsearchable path, so it fails naming `.git/worktrees`, not the metadata entry the subtest makes unreadable. The subtests run as a non-root user (root ignores directory permissions and the test skips), which holds on darwin, in `ci-local` and on the CI runners.
+
+## M-391 — A modules-tree directory named hooks or info is read-only whole
+- Affected refs: GITMETA-DISCOVERY: `TestInspectSandboxWorkspaceStrippedModuleIsIntermediate`, `TestInspectSandboxWorkspaceModuleNamedHooks` (subtests `.git/modules/hooks head=false`, `.git/modules/libs/Hooks head=false`); GITMETA-BWRAP-PREPARE: `TestBwrapPrepareMountsGitLayout`
+- Baseline: `4f21580d`, the commit that adds the GITMETA rows (#721), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2); re-run on linux (arm64, go1.27.1, the Docker `ci-local` image: Alpine 3.24.2, kernel 6.10.14-linuxkit, run as the non-root `ci` user, uid 1000, the container capped at 4 GiB of memory) from the same export mounted as the container's workspace: baseline pass, the same failing leaves and quoted lines as on darwin (paths under `/tmp`), and on linux also `TestBwrapPrepareMountsGitLayout` (`exec_linux_test.go:570: wrapped argv missing " --ro-bind <tmp>/.git/modules/s/hooks <tmp>/.git/modules/s/hooks "`; linux exit 1, 27 of 32 passed), restored pass
+- Profile / command: darwin-host / `go test -count=1 -v -timeout 120s -run '^(TestInspectSandboxWorkspaceFindsGitLayout|TestInspectSandboxWorkspaceBrokenModuleIsProtectedNotDescended|TestInspectSandboxWorkspaceSlashNamedHooksSubmodule|TestInspectSandboxWorkspaceStrippedModuleIsIntermediate|TestInspectSandboxWorkspaceModuleNamedHooks|TestInspectSandboxWorkspaceGitfileWorkspace|TestInspectSandboxWorkspaceCaseFoldedDotGit|TestInspectSandboxWorkspaceScanErrorFailsClosed|TestInspectSandboxWorkspaceSymlinkedDotGitIsNeither|TestScanGitDirTreatsAbsentAsAbsent|TestInspectSandboxWorkspaceManySubmodules)$' ./agent/tools` (the 11 GITMETA-DISCOVERY refs, under the same watchdog); linux-host / `go test -count=1 -v -timeout 120s -run '^(TestInspectSandboxWorkspaceFindsGitLayout|TestInspectSandboxWorkspaceBrokenModuleIsProtectedNotDescended|TestInspectSandboxWorkspaceSlashNamedHooksSubmodule|TestInspectSandboxWorkspaceStrippedModuleIsIntermediate|TestInspectSandboxWorkspaceModuleNamedHooks|TestInspectSandboxWorkspaceGitfileWorkspace|TestInspectSandboxWorkspaceCaseFoldedDotGit|TestInspectSandboxWorkspaceScanErrorFailsClosed|TestInspectSandboxWorkspaceSymlinkedDotGitIsNeither|TestScanGitDirTreatsAbsentAsAbsent|TestInspectSandboxWorkspaceManySubmodules|TestSeatbeltProfileGolden|TestSeatbeltProfileGitAnchors|TestSBPLRegexQuotes|TestSeatbeltProfileRejectsGitPathsOutsideWorkspace|TestSeatbeltProfileGitDeterministic|TestBuildBwrapArgsGitMetadata|TestBuildBwrapArgsGitMetadataRejections|TestBuildBwrapArgsGitMetadataDedupesAndKeepsCallerSlices|TestBuildBwrapArgsExeInWritableGitDirUnderReadOnlyContainerKeepsLiteral|TestBuildBwrapArgsExeInsideGitReadOnlyIsCovered|TestBuildBwrapArgsExeLiteralFollowsGitMounts|TestBwrapPrepareMountsGitLayout|TestBwrapPrepareRefusesSymlinkedGitMetadata)$' ./agent/tools` (every GITMETA-DISCOVERY, GITMETA-BUILDERS and GITMETA-BWRAP-PREPARE ref, 24 tests)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/sandbox_links_unix.go b/agent/tools/sandbox_links_unix.go
+  --- a/agent/tools/sandbox_links_unix.go
+  +++ b/agent/tools/sandbox_links_unix.go
+  @@ -210,16 +210,10 @@
+   		if !ok {
+   			continue
+   		}
+  -		name := e.Name()
+   		switch {
+   		case slices.ContainsFunc(kids, func(k fs.DirEntry) bool { return k.Name() == "HEAD" && !k.IsDir() }):
+   			l.gitDirs = append(l.gitDirs, c)
+   			err = scanGitDir(c, l)
+  -		// Equal byte length keeps the fold ASCII: the non-ASCII runes that fold
+  -		// to an ASCII letter (Kelvin K, long s) are multi-byte.
+  -		case len(name) == len("hooks") && strings.EqualFold(name, "hooks"),
+  -			len(name) == len("info") && strings.EqualFold(name, "info"):
+  -			l.moduleReadOnly = append(l.moduleReadOnly, c)
+   		case slices.ContainsFunc(kids, func(k fs.DirEntry) bool { return !k.IsDir() }):
+   			l.gitDirs = append(l.gitDirs, c)
+   			err = scanGitDir(c, l)
+  ```
+- Baseline: pass on darwin (exit 0; 17 tests and subtests passed, none skipped) and on linux (exit 0; 32 passed, none skipped). Mutant: FAIL `TestInspectSandboxWorkspaceStrippedModuleIsIntermediate` (`sandbox_links_unix_test.go:191: moduleReadOnly [], want ["<tmp>/.git/modules/s/hooks" "<tmp>/.git/modules/s/info"]`, and line 195 reporting `<tmp>/.git/modules/s/hooks` and `.../s/info` in gitDirs) and FAIL `TestInspectSandboxWorkspaceModuleNamedHooks/.git/modules/hooks_head=false` (`sandbox_links_unix_test.go:231: .git/modules/hooks: gitDirs ["<tmp>/.git/modules/hooks" ...], moduleReadOnly [], metadata [...]`) and its `.git/modules/libs/Hooks_head=false` sibling; every other test passes (exit 1; 13 of 17 passed). Restored (`patch -R -p1`, `cmp` identical to the baseline file); the restored export passed every command again after the last mutant.
+- Kind: guard
+- Notes: The patch deletes clause 2 (and the `name` it alone reads). A stripped module's `hooks` and `info`, which hold files, then become git dirs of their own, protecting only their own `hooks`/`info`/config children rather than the directories whole, and a submodule git dir named `hooks` whose `HEAD` a command deleted is again a writable git dir, not read-only whole.
+
+## M-392 — The hooks/info name clause precedes the broken-module clause
+- Affected refs: GITMETA-DISCOVERY: `TestInspectSandboxWorkspaceStrippedModuleIsIntermediate`, `TestInspectSandboxWorkspaceModuleNamedHooks` (subtests `.git/modules/hooks head=false`, `.git/modules/libs/Hooks head=false`); GITMETA-BWRAP-PREPARE: `TestBwrapPrepareMountsGitLayout`
+- Baseline: `4f21580d`, the commit that adds the GITMETA rows (#721), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2); re-run on linux (arm64, go1.27.1, the Docker `ci-local` image: Alpine 3.24.2, kernel 6.10.14-linuxkit, run as the non-root `ci` user, uid 1000, the container capped at 4 GiB of memory) from the same export mounted as the container's workspace: baseline pass, the same failing leaves and quoted lines as on darwin (paths under `/tmp`), and on linux also `TestBwrapPrepareMountsGitLayout` (the same `exec_linux_test.go:570` line as M-391; linux exit 1, 27 of 32 passed), restored pass
+- Profile / command: darwin-host / `go test -count=1 -v -timeout 120s -run '^(TestInspectSandboxWorkspaceFindsGitLayout|TestInspectSandboxWorkspaceBrokenModuleIsProtectedNotDescended|TestInspectSandboxWorkspaceSlashNamedHooksSubmodule|TestInspectSandboxWorkspaceStrippedModuleIsIntermediate|TestInspectSandboxWorkspaceModuleNamedHooks|TestInspectSandboxWorkspaceGitfileWorkspace|TestInspectSandboxWorkspaceCaseFoldedDotGit|TestInspectSandboxWorkspaceScanErrorFailsClosed|TestInspectSandboxWorkspaceSymlinkedDotGitIsNeither|TestScanGitDirTreatsAbsentAsAbsent|TestInspectSandboxWorkspaceManySubmodules)$' ./agent/tools` (the 11 GITMETA-DISCOVERY refs, under the same watchdog); linux-host / `go test -count=1 -v -timeout 120s -run '^(TestInspectSandboxWorkspaceFindsGitLayout|TestInspectSandboxWorkspaceBrokenModuleIsProtectedNotDescended|TestInspectSandboxWorkspaceSlashNamedHooksSubmodule|TestInspectSandboxWorkspaceStrippedModuleIsIntermediate|TestInspectSandboxWorkspaceModuleNamedHooks|TestInspectSandboxWorkspaceGitfileWorkspace|TestInspectSandboxWorkspaceCaseFoldedDotGit|TestInspectSandboxWorkspaceScanErrorFailsClosed|TestInspectSandboxWorkspaceSymlinkedDotGitIsNeither|TestScanGitDirTreatsAbsentAsAbsent|TestInspectSandboxWorkspaceManySubmodules|TestSeatbeltProfileGolden|TestSeatbeltProfileGitAnchors|TestSBPLRegexQuotes|TestSeatbeltProfileRejectsGitPathsOutsideWorkspace|TestSeatbeltProfileGitDeterministic|TestBuildBwrapArgsGitMetadata|TestBuildBwrapArgsGitMetadataRejections|TestBuildBwrapArgsGitMetadataDedupesAndKeepsCallerSlices|TestBuildBwrapArgsExeInWritableGitDirUnderReadOnlyContainerKeepsLiteral|TestBuildBwrapArgsExeInsideGitReadOnlyIsCovered|TestBuildBwrapArgsExeLiteralFollowsGitMounts|TestBwrapPrepareMountsGitLayout|TestBwrapPrepareRefusesSymlinkedGitMetadata)$' ./agent/tools` (every GITMETA-DISCOVERY, GITMETA-BUILDERS and GITMETA-BWRAP-PREPARE ref, 24 tests)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/sandbox_links_unix.go b/agent/tools/sandbox_links_unix.go
+  --- a/agent/tools/sandbox_links_unix.go
+  +++ b/agent/tools/sandbox_links_unix.go
+  @@ -215,14 +215,14 @@
+   		case slices.ContainsFunc(kids, func(k fs.DirEntry) bool { return k.Name() == "HEAD" && !k.IsDir() }):
+   			l.gitDirs = append(l.gitDirs, c)
+   			err = scanGitDir(c, l)
+  +		case slices.ContainsFunc(kids, func(k fs.DirEntry) bool { return !k.IsDir() }):
+  +			l.gitDirs = append(l.gitDirs, c)
+  +			err = scanGitDir(c, l)
+   		// Equal byte length keeps the fold ASCII: the non-ASCII runes that fold
+   		// to an ASCII letter (Kelvin K, long s) are multi-byte.
+   		case len(name) == len("hooks") && strings.EqualFold(name, "hooks"),
+   			len(name) == len("info") && strings.EqualFold(name, "info"):
+   			l.moduleReadOnly = append(l.moduleReadOnly, c)
+  -		case slices.ContainsFunc(kids, func(k fs.DirEntry) bool { return !k.IsDir() }):
+  -			l.gitDirs = append(l.gitDirs, c)
+  -			err = scanGitDir(c, l)
+   		default:
+   			l.intermediates = append(l.intermediates, c)
+   			err = l.descendModules(c, kids)
+  ```
+- Baseline: pass on darwin (exit 0; 17 tests and subtests passed, none skipped) and on linux (exit 0; 32 passed, none skipped). Mutant: the same failing tests and lines as M-391: FAIL `TestInspectSandboxWorkspaceStrippedModuleIsIntermediate` (`sandbox_links_unix_test.go:191: moduleReadOnly [], want ["<tmp>/.git/modules/s/hooks" "<tmp>/.git/modules/s/info"]`) and FAIL `TestInspectSandboxWorkspaceModuleNamedHooks/.git/modules/hooks_head=false` (`sandbox_links_unix_test.go:231: .git/modules/hooks: gitDirs ["<tmp>/.git/modules/hooks" ...], moduleReadOnly [], metadata [...]`) and its `libs/Hooks` sibling; every other test passes (exit 1; 13 of 17 passed). Restored (`patch -R -p1`, `cmp` identical to the baseline file); the restored export passed every command again after the last mutant.
+- Kind: guard
+- Notes: The patch moves clause 3 above clause 2. Every directory clause 2 catches in these fixtures also holds a file, so clause 3 claims it first: the order of the two clauses is itself pinned.
+
+## M-393 — A read-only modules-tree directory is recorded as moduleReadOnly, not metadata
+- Affected refs: GITMETA-DISCOVERY: `TestInspectSandboxWorkspaceStrippedModuleIsIntermediate`, `TestInspectSandboxWorkspaceModuleNamedHooks` (subtests `.git/modules/hooks head=false`, `.git/modules/libs/Hooks head=false`)
+- Baseline: `4f21580d`, the commit that adds the GITMETA rows (#721), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2); re-run on linux (arm64, go1.27.1, the Docker `ci-local` image: Alpine 3.24.2, kernel 6.10.14-linuxkit, run as the non-root `ci` user, uid 1000, the container capped at 4 GiB of memory) from the same export mounted as the container's workspace: baseline pass, the same failing leaves and quoted lines as on darwin (paths under `/tmp`; `TestBwrapPrepareMountsGitLayout` passes, linux exit 1, 28 of 32 passed), restored pass
+- Profile / command: darwin-host / `go test -count=1 -v -timeout 120s -run '^(TestInspectSandboxWorkspaceFindsGitLayout|TestInspectSandboxWorkspaceBrokenModuleIsProtectedNotDescended|TestInspectSandboxWorkspaceSlashNamedHooksSubmodule|TestInspectSandboxWorkspaceStrippedModuleIsIntermediate|TestInspectSandboxWorkspaceModuleNamedHooks|TestInspectSandboxWorkspaceGitfileWorkspace|TestInspectSandboxWorkspaceCaseFoldedDotGit|TestInspectSandboxWorkspaceScanErrorFailsClosed|TestInspectSandboxWorkspaceSymlinkedDotGitIsNeither|TestScanGitDirTreatsAbsentAsAbsent|TestInspectSandboxWorkspaceManySubmodules)$' ./agent/tools` (the 11 GITMETA-DISCOVERY refs, under the same watchdog); linux-host / `go test -count=1 -v -timeout 120s -run '^(TestInspectSandboxWorkspaceFindsGitLayout|TestInspectSandboxWorkspaceBrokenModuleIsProtectedNotDescended|TestInspectSandboxWorkspaceSlashNamedHooksSubmodule|TestInspectSandboxWorkspaceStrippedModuleIsIntermediate|TestInspectSandboxWorkspaceModuleNamedHooks|TestInspectSandboxWorkspaceGitfileWorkspace|TestInspectSandboxWorkspaceCaseFoldedDotGit|TestInspectSandboxWorkspaceScanErrorFailsClosed|TestInspectSandboxWorkspaceSymlinkedDotGitIsNeither|TestScanGitDirTreatsAbsentAsAbsent|TestInspectSandboxWorkspaceManySubmodules|TestSeatbeltProfileGolden|TestSeatbeltProfileGitAnchors|TestSBPLRegexQuotes|TestSeatbeltProfileRejectsGitPathsOutsideWorkspace|TestSeatbeltProfileGitDeterministic|TestBuildBwrapArgsGitMetadata|TestBuildBwrapArgsGitMetadataRejections|TestBuildBwrapArgsGitMetadataDedupesAndKeepsCallerSlices|TestBuildBwrapArgsExeInWritableGitDirUnderReadOnlyContainerKeepsLiteral|TestBuildBwrapArgsExeInsideGitReadOnlyIsCovered|TestBuildBwrapArgsExeLiteralFollowsGitMounts|TestBwrapPrepareMountsGitLayout|TestBwrapPrepareRefusesSymlinkedGitMetadata)$' ./agent/tools` (every GITMETA-DISCOVERY, GITMETA-BUILDERS and GITMETA-BWRAP-PREPARE ref, 24 tests)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/sandbox_links_unix.go b/agent/tools/sandbox_links_unix.go
+  --- a/agent/tools/sandbox_links_unix.go
+  +++ b/agent/tools/sandbox_links_unix.go
+  @@ -219,7 +219,7 @@
+   		// to an ASCII letter (Kelvin K, long s) are multi-byte.
+   		case len(name) == len("hooks") && strings.EqualFold(name, "hooks"),
+   			len(name) == len("info") && strings.EqualFold(name, "info"):
+  -			l.moduleReadOnly = append(l.moduleReadOnly, c)
+  +			l.metadata = append(l.metadata, c)
+   		case slices.ContainsFunc(kids, func(k fs.DirEntry) bool { return !k.IsDir() }):
+   			l.gitDirs = append(l.gitDirs, c)
+   			err = scanGitDir(c, l)
+  ```
+- Baseline: pass on darwin (exit 0; 17 tests and subtests passed, none skipped) and on linux (exit 0; 32 passed, none skipped). Mutant: FAIL `TestInspectSandboxWorkspaceStrippedModuleIsIntermediate` (`sandbox_links_unix_test.go:191: moduleReadOnly [], want [...]` and `sandbox_links_unix_test.go:195: <tmp>/.git/modules/s/hooks in gitDirs or metadata: ...`) and FAIL `TestInspectSandboxWorkspaceModuleNamedHooks/.git/modules/hooks_head=false` (`sandbox_links_unix_test.go:231: .git/modules/hooks: gitDirs [...], moduleReadOnly [], metadata [... "<tmp>/.git/modules/hooks" ...]`) and its `libs/Hooks` sibling; every other test passes (exit 1; 13 of 17 passed). Restored (`patch -R -p1`, `cmp` identical to the baseline file); the restored export passed every command again after the last mutant.
+- Kind: guard
+- Notes: The patch records clause-2 directories in `metadata`. Seatbelt renders no rule from `metadata` (its rules come from the git dirs), so the directory would go unprotected there; on bwrap `metadata` also feeds the read-only list, which is why the prepare test stays green: the argv is the same.
+
+## M-394 — A symlinked `.git` is not a gitfile
+- Affected refs: GITMETA-DISCOVERY: `TestInspectSandboxWorkspaceSymlinkedDotGitIsNeither`
+- Baseline: `4f21580d`, the commit that adds the GITMETA rows (#721), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2); re-run on linux (arm64, go1.27.1, the Docker `ci-local` image: Alpine 3.24.2, kernel 6.10.14-linuxkit, run as the non-root `ci` user, uid 1000, the container capped at 4 GiB of memory) from the same export mounted as the container's workspace: baseline pass, the same failing leaves and quoted lines as on darwin (linux exit 1, 31 of 32 passed), restored pass
+- Profile / command: darwin-host / `go test -count=1 -v -timeout 120s -run '^(TestInspectSandboxWorkspaceFindsGitLayout|TestInspectSandboxWorkspaceBrokenModuleIsProtectedNotDescended|TestInspectSandboxWorkspaceSlashNamedHooksSubmodule|TestInspectSandboxWorkspaceStrippedModuleIsIntermediate|TestInspectSandboxWorkspaceModuleNamedHooks|TestInspectSandboxWorkspaceGitfileWorkspace|TestInspectSandboxWorkspaceCaseFoldedDotGit|TestInspectSandboxWorkspaceScanErrorFailsClosed|TestInspectSandboxWorkspaceSymlinkedDotGitIsNeither|TestScanGitDirTreatsAbsentAsAbsent|TestInspectSandboxWorkspaceManySubmodules)$' ./agent/tools` (the 11 GITMETA-DISCOVERY refs, under the same watchdog); linux-host / `go test -count=1 -v -timeout 120s -run '^(TestInspectSandboxWorkspaceFindsGitLayout|TestInspectSandboxWorkspaceBrokenModuleIsProtectedNotDescended|TestInspectSandboxWorkspaceSlashNamedHooksSubmodule|TestInspectSandboxWorkspaceStrippedModuleIsIntermediate|TestInspectSandboxWorkspaceModuleNamedHooks|TestInspectSandboxWorkspaceGitfileWorkspace|TestInspectSandboxWorkspaceCaseFoldedDotGit|TestInspectSandboxWorkspaceScanErrorFailsClosed|TestInspectSandboxWorkspaceSymlinkedDotGitIsNeither|TestScanGitDirTreatsAbsentAsAbsent|TestInspectSandboxWorkspaceManySubmodules|TestSeatbeltProfileGolden|TestSeatbeltProfileGitAnchors|TestSBPLRegexQuotes|TestSeatbeltProfileRejectsGitPathsOutsideWorkspace|TestSeatbeltProfileGitDeterministic|TestBuildBwrapArgsGitMetadata|TestBuildBwrapArgsGitMetadataRejections|TestBuildBwrapArgsGitMetadataDedupesAndKeepsCallerSlices|TestBuildBwrapArgsExeInWritableGitDirUnderReadOnlyContainerKeepsLiteral|TestBuildBwrapArgsExeInsideGitReadOnlyIsCovered|TestBuildBwrapArgsExeLiteralFollowsGitMounts|TestBwrapPrepareMountsGitLayout|TestBwrapPrepareRefusesSymlinkedGitMetadata)$' ./agent/tools` (every GITMETA-DISCOVERY, GITMETA-BUILDERS and GITMETA-BWRAP-PREPARE ref, 24 tests)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/sandbox_links_unix.go b/agent/tools/sandbox_links_unix.go
+  --- a/agent/tools/sandbox_links_unix.go
+  +++ b/agent/tools/sandbox_links_unix.go
+  @@ -75,7 +75,7 @@
+   			switch {
+   			case entry.IsDir():
+   				layout.dotGitDirs = append(layout.dotGitDirs, name)
+  -			case entry.Type().IsRegular():
+  +			default:
+   				layout.gitFiles = append(layout.gitFiles, name)
+   			}
+   		}
+  ```
+- Baseline: pass on darwin (exit 0; 17 tests and subtests passed, none skipped) and on linux (exit 0; 32 passed, none skipped). Mutant: FAIL `TestInspectSandboxWorkspaceSymlinkedDotGitIsNeither` (`sandbox_links_unix_test.go:321: symlinked .git recorded: gitFiles ["<tmp>/.git"] dotGitDirs []`); every other test passes (exit 1; 16 of 17 passed). Restored (`patch -R -p1`, `cmp` identical to the baseline file); the restored export passed every command again after the last mutant.
+- Kind: guard
+- Notes: The patch turns the regular-file case into `default:`, so a symbolic link named `.git` is recorded as a gitfile and bwrap would bind it read-only, following the link out of the user's layout (residual R9 keeps symlinked `.git` outside the protection).
+
+## M-395 — bwrap self-binds each writable git dir
+- Affected refs: GITMETA-BWRAP: `TestBwrapGitMetadataDenied/dotgit-impostor`, `TestBwrapGitMetadataDenied/module-named-hooks-two-spawn`, `TestBwrapGitMetadataDenied/slash-module-named-Hooks-two-spawn`, `TestBwrapGitOrdinaryOps`; GITMETA-BWRAP-PREPARE: `TestBwrapPrepareMountsGitLayout`
+- Baseline: `4f21580d`, the commit that adds the GITMETA rows (#721), in an isolated `git archive` export
+- Platform: linux (arm64; the test binary cross-compiled with go1.27.1 on darwin from the export, `GOOS=linux GOARCH=arm64 go test -c ./agent/tools`; the throwaway image `go-llm-721-bwrap`: Ubuntu 24.04.5, bubblewrap 0.9.0, git 2.43.0, kernel 6.10.14-linuxkit; Docker Desktop linuxkit, privileged, `--network none`, 4 GiB memory and swap, 512 pids, run as root, the fixture on the container's own overlayfs under `TMPDIR=/root/tmp`, the export mounted read-only), not the CI VM
+- Profile / command: bwrap / `GO_LLM_REQUIRE_BWRAP=1 TMPDIR=/root/tmp tools.test -test.count=1 -test.timeout 120s -test.v -test.run '^(TestBwrapGitMetadataDenied|TestBwrapGitOrdinaryOps|TestBwrapGitMetadataManySubmodules|TestBwrapGitMetadataExecInsideHooks|TestBwrapVerifierCannotPlantHook|TestBwrapPrepareMountsGitLayout|TestBwrapPrepareRefusesSymlinkedGitMetadata|TestBuildBwrapArgsGitMetadata|TestBuildBwrapArgsGitMetadataRejections|TestBuildBwrapArgsGitMetadataDedupesAndKeepsCallerSlices|TestBuildBwrapArgsExeInWritableGitDirUnderReadOnlyContainerKeepsLiteral|TestBuildBwrapArgsExeInsideGitReadOnlyIsCovered|TestBuildBwrapArgsExeLiteralFollowsGitMounts)$'`, from the export's `agent/tools` (the five GITMETA-BWRAP test functions, whose 14 Seatbelt-only attack rows skip by design and are not inventory leaves, the two GITMETA-BWRAP-PREPARE refs and the six bwrap GITMETA-BUILDERS refs)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/exec_linux.go b/agent/tools/exec_linux.go
+  --- a/agent/tools/exec_linux.go
+  +++ b/agent/tools/exec_linux.go
+  @@ -416,7 +416,7 @@
+   		payloadEnv:        sandboxChildEnv(spec.Env, "/tmp"),
+   		allowNetwork:      b.cfg.AllowNetwork,
+   		tmpfsSizeBytes:    b.capBytes,
+  -		gitWritable:       slices.Concat(layout.dotGitDirs, layout.gitDirs),
+  +		gitWritable:       nil,
+   		gitReadOnly: slices.Concat(layout.containers, layout.intermediates, layout.metadata,
+   			layout.moduleReadOnly, layout.gitFiles),
+   	})
+  ```
+- Baseline: pass (exit 0; 71 tests and subtests passed, the 14 Seatbelt-only rows of `TestBwrapGitMetadataDenied` skipped). Mutant: FAIL `TestBwrapGitMetadataDenied/dotgit-impostor` (`exec_linux_behavioral_test.go:1067: git metadata changed (exit 0, stderr ""):`, its diff `-.git dir 33793223 40755 -`, `+.git dir 33793284 40755 -` and `+.git/hooks/pre-commit file 33793286 100644 852a478e... nlink=1`); also red: the two two-spawn rows (`exec_linux_behavioral_test.go:1063: prior spawn "rm .git/modules/hooks/HEAD" must succeed: exit 1, stderr "rm: cannot remove '.git/modules/hooks/HEAD': Read-only file system\n"`), `TestBwrapGitOrdinaryOps` subtests `gc` (`exec_linux_behavioral_test.go:1182: exit 128, want success=true; stdout "", stderr "error: cannot lock ref 'worktrees/wt/HEAD': Unable to create '<tmp>/.git/worktrees/wt/HEAD.lock': Read-only file system\nfatal: failed to run reflog\n"`), `submodule-commit`, `submodule-gc`, `submodule-commit-graph`, `submodule-branch-named-info` and `linkedwt-commit`, and `TestBwrapPrepareMountsGitLayout` (`exec_linux_test.go:570: wrapped argv missing " --bind <tmp>/.git <tmp>/.git "`); every other test passes (exit 1; 59 passed, the 14 Seatbelt-only rows skipped). Restored (`patch -R -p1`, `cmp` identical to the baseline file); the restored export passed every command again after the last mutant.
+- Kind: guard
+- Notes: The patch passes no writable git dir to the argv. `.git` is then no mount point, so the impostor attack renames it away and creates a new `.git` holding a planted hook; and every git dir under a read-only container (submodules, the linked worktree's git dir) is read-only, which breaks the ordinary operations the self-binds exist to keep working.
+
+## M-396 — bwrap mounts present git metadata read-only
+- Affected refs: GITMETA-BWRAP: `TestBwrapGitMetadataDenied/direct-hook` and 18 other rows, `TestBwrapGitOrdinaryOps`, `TestBwrapGitMetadataManySubmodules`, `TestBwrapVerifierCannotPlantHook`; GITMETA-BWRAP-PREPARE: `TestBwrapPrepareMountsGitLayout`
+- Baseline: `4f21580d`, the commit that adds the GITMETA rows (#721), in an isolated `git archive` export
+- Platform: linux (arm64; the test binary cross-compiled with go1.27.1 on darwin from the export, `GOOS=linux GOARCH=arm64 go test -c ./agent/tools`; the throwaway image `go-llm-721-bwrap`: Ubuntu 24.04.5, bubblewrap 0.9.0, git 2.43.0, kernel 6.10.14-linuxkit; Docker Desktop linuxkit, privileged, `--network none`, 4 GiB memory and swap, 512 pids, run as root, the fixture on the container's own overlayfs under `TMPDIR=/root/tmp`, the export mounted read-only), not the CI VM
+- Profile / command: bwrap / `GO_LLM_REQUIRE_BWRAP=1 TMPDIR=/root/tmp tools.test -test.count=1 -test.timeout 120s -test.v -test.run '^(TestBwrapGitMetadataDenied|TestBwrapGitOrdinaryOps|TestBwrapGitMetadataManySubmodules|TestBwrapGitMetadataExecInsideHooks|TestBwrapVerifierCannotPlantHook|TestBwrapPrepareMountsGitLayout|TestBwrapPrepareRefusesSymlinkedGitMetadata|TestBuildBwrapArgsGitMetadata|TestBuildBwrapArgsGitMetadataRejections|TestBuildBwrapArgsGitMetadataDedupesAndKeepsCallerSlices|TestBuildBwrapArgsExeInWritableGitDirUnderReadOnlyContainerKeepsLiteral|TestBuildBwrapArgsExeInsideGitReadOnlyIsCovered|TestBuildBwrapArgsExeLiteralFollowsGitMounts)$'`, from the export's `agent/tools` (the five GITMETA-BWRAP test functions, whose 14 Seatbelt-only attack rows skip by design and are not inventory leaves, the two GITMETA-BWRAP-PREPARE refs and the six bwrap GITMETA-BUILDERS refs)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/exec_linux.go b/agent/tools/exec_linux.go
+  --- a/agent/tools/exec_linux.go
+  +++ b/agent/tools/exec_linux.go
+  @@ -417,7 +417,7 @@
+   		allowNetwork:      b.cfg.AllowNetwork,
+   		tmpfsSizeBytes:    b.capBytes,
+   		gitWritable:       slices.Concat(layout.dotGitDirs, layout.gitDirs),
+  -		gitReadOnly: slices.Concat(layout.containers, layout.intermediates, layout.metadata,
+  +		gitReadOnly: slices.Concat(layout.containers, layout.intermediates,
+   			layout.moduleReadOnly, layout.gitFiles),
+   	})
+   	if err != nil {
+  ```
+- Baseline: pass (exit 0; 71 tests and subtests passed, the 14 Seatbelt-only rows of `TestBwrapGitMetadataDenied` skipped). Mutant: FAIL `TestBwrapGitMetadataDenied/direct-hook` (`exec_linux_behavioral_test.go:1067: git metadata changed (exit 0, stderr ""):`, its diff `+.git/hooks/pre-commit file 33793252 100755 b048663c... nlink=1`); also red: rows `direct-hook-new`, `delete-hook`, `chmod-hook`, `direct-config`, `info-exclude`, `info-attributes`, `rename-hooks`, `symlink-replace-hooks`, `symlink-alias-hooks`, `symlink-alias-config`, `nested-direct`, `nested-config`, `nested-grandparent-rename`, `submodule-hook`, `submodule-config`, `worktree-commondir`, `nested-submodule-rename` and `libs-direct-hook`; `TestBwrapGitOrdinaryOps` subtests `config-set`, `hookspath-set` and `sparse-checkout` (`exec_linux_behavioral_test.go:1182: exit 0, want success=false; stdout "", stderr ""`); `TestBwrapGitMetadataManySubmodules`, `TestBwrapVerifierCannotPlantHook` (`exec_linux_behavioral_test.go:1275: git metadata changed (verifier observation:`) and `TestBwrapPrepareMountsGitLayout` (`exec_linux_test.go:570: wrapped argv missing " --ro-bind <tmp>/.git/hooks <tmp>/.git/hooks "`); every other test passes (exit 1; 44 passed, 14 skipped). Restored (`patch -R -p1`, `cmp` identical to the baseline file); the restored export passed every command again after the last mutant.
+- Kind: guard
+- Notes: The patch leaves `metadata` (each present hooks, info, config, config.worktree, commondir and gitdir entry) out of the read-only list: under the writable `.git` self-bind every hook and config is then writable, and the intended refusals of `git config`, `core.hooksPath` and `sparse-checkout` succeed.
+
+## M-397 — bwrap mounts containers and intermediates read-only
+- Affected refs: GITMETA-BWRAP: `TestBwrapGitMetadataDenied/uninit-preplant`, `TestBwrapGitMetadataDenied/intermediate-preplant`, `TestBwrapGitMetadataDenied/uninit-preplant-symlink`, `TestBwrapGitOrdinaryOps`; GITMETA-BWRAP-PREPARE: `TestBwrapPrepareMountsGitLayout`
+- Baseline: `4f21580d`, the commit that adds the GITMETA rows (#721), in an isolated `git archive` export
+- Platform: linux (arm64; the test binary cross-compiled with go1.27.1 on darwin from the export, `GOOS=linux GOARCH=arm64 go test -c ./agent/tools`; the throwaway image `go-llm-721-bwrap`: Ubuntu 24.04.5, bubblewrap 0.9.0, git 2.43.0, kernel 6.10.14-linuxkit; Docker Desktop linuxkit, privileged, `--network none`, 4 GiB memory and swap, 512 pids, run as root, the fixture on the container's own overlayfs under `TMPDIR=/root/tmp`, the export mounted read-only), not the CI VM
+- Profile / command: bwrap / `GO_LLM_REQUIRE_BWRAP=1 TMPDIR=/root/tmp tools.test -test.count=1 -test.timeout 120s -test.v -test.run '^(TestBwrapGitMetadataDenied|TestBwrapGitOrdinaryOps|TestBwrapGitMetadataManySubmodules|TestBwrapGitMetadataExecInsideHooks|TestBwrapVerifierCannotPlantHook|TestBwrapPrepareMountsGitLayout|TestBwrapPrepareRefusesSymlinkedGitMetadata|TestBuildBwrapArgsGitMetadata|TestBuildBwrapArgsGitMetadataRejections|TestBuildBwrapArgsGitMetadataDedupesAndKeepsCallerSlices|TestBuildBwrapArgsExeInWritableGitDirUnderReadOnlyContainerKeepsLiteral|TestBuildBwrapArgsExeInsideGitReadOnlyIsCovered|TestBuildBwrapArgsExeLiteralFollowsGitMounts)$'`, from the export's `agent/tools` (the five GITMETA-BWRAP test functions, whose 14 Seatbelt-only attack rows skip by design and are not inventory leaves, the two GITMETA-BWRAP-PREPARE refs and the six bwrap GITMETA-BUILDERS refs)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/exec_linux.go b/agent/tools/exec_linux.go
+  --- a/agent/tools/exec_linux.go
+  +++ b/agent/tools/exec_linux.go
+  @@ -416,8 +416,8 @@
+   		payloadEnv:        sandboxChildEnv(spec.Env, "/tmp"),
+   		allowNetwork:      b.cfg.AllowNetwork,
+   		tmpfsSizeBytes:    b.capBytes,
+  -		gitWritable:       slices.Concat(layout.dotGitDirs, layout.gitDirs),
+  -		gitReadOnly: slices.Concat(layout.containers, layout.intermediates, layout.metadata,
+  +		gitWritable:       slices.Concat(layout.dotGitDirs, layout.gitDirs, layout.containers, layout.intermediates),
+  +		gitReadOnly: slices.Concat(layout.metadata,
+   			layout.moduleReadOnly, layout.gitFiles),
+   	})
+   	if err != nil {
+  ```
+- Baseline: pass (exit 0; 71 tests and subtests passed, the 14 Seatbelt-only rows of `TestBwrapGitMetadataDenied` skipped). Mutant: FAIL `TestBwrapGitMetadataDenied/uninit-preplant` (`exec_linux_behavioral_test.go:1067: git metadata changed (exit 0, stderr ""):`, its diff `-.git/modules/u missing` and `+.git/modules/u dir 33793301 40755 -`); also red: rows `intermediate-preplant` and `uninit-preplant-symlink`, `TestBwrapGitOrdinaryOps/worktree-add` (`exec_linux_behavioral_test.go:1182: exit 0, want success=false; stdout "", stderr ""`) and `TestBwrapPrepareMountsGitLayout`; every other test passes (exit 1; 64 passed, 14 skipped). Restored (`patch -R -p1`, `cmp` identical to the baseline file); the restored export passed every command again after the last mutant.
+- Kind: guard
+- Notes: The patch moves containers and intermediates from the read-only list to the writable one (bound writable, still un-renamable mount points): renaming the containers stays refused, but a new child, an uninitialized submodule's git dir or a second linked worktree, can be created inside them.
+
+## M-398 — bwrap mounts gitfiles read-only
+- Affected refs: GITMETA-BWRAP: `TestBwrapGitMetadataDenied/gitfile-rewrite`, `TestBwrapGitMetadataDenied/submodule-gitfile-replace`, `TestBwrapGitMetadataDenied/worktree-gitfile-rewrite`, `TestBwrapGitMetadataDenied/worktree-gitfile-replace`; GITMETA-BWRAP-PREPARE: `TestBwrapPrepareMountsGitLayout`
+- Baseline: `4f21580d`, the commit that adds the GITMETA rows (#721), in an isolated `git archive` export
+- Platform: linux (arm64; the test binary cross-compiled with go1.27.1 on darwin from the export, `GOOS=linux GOARCH=arm64 go test -c ./agent/tools`; the throwaway image `go-llm-721-bwrap`: Ubuntu 24.04.5, bubblewrap 0.9.0, git 2.43.0, kernel 6.10.14-linuxkit; Docker Desktop linuxkit, privileged, `--network none`, 4 GiB memory and swap, 512 pids, run as root, the fixture on the container's own overlayfs under `TMPDIR=/root/tmp`, the export mounted read-only), not the CI VM
+- Profile / command: bwrap / `GO_LLM_REQUIRE_BWRAP=1 TMPDIR=/root/tmp tools.test -test.count=1 -test.timeout 120s -test.v -test.run '^(TestBwrapGitMetadataDenied|TestBwrapGitOrdinaryOps|TestBwrapGitMetadataManySubmodules|TestBwrapGitMetadataExecInsideHooks|TestBwrapVerifierCannotPlantHook|TestBwrapPrepareMountsGitLayout|TestBwrapPrepareRefusesSymlinkedGitMetadata|TestBuildBwrapArgsGitMetadata|TestBuildBwrapArgsGitMetadataRejections|TestBuildBwrapArgsGitMetadataDedupesAndKeepsCallerSlices|TestBuildBwrapArgsExeInWritableGitDirUnderReadOnlyContainerKeepsLiteral|TestBuildBwrapArgsExeInsideGitReadOnlyIsCovered|TestBuildBwrapArgsExeLiteralFollowsGitMounts)$'`, from the export's `agent/tools` (the five GITMETA-BWRAP test functions, whose 14 Seatbelt-only attack rows skip by design and are not inventory leaves, the two GITMETA-BWRAP-PREPARE refs and the six bwrap GITMETA-BUILDERS refs)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/exec_linux.go b/agent/tools/exec_linux.go
+  --- a/agent/tools/exec_linux.go
+  +++ b/agent/tools/exec_linux.go
+  @@ -418,7 +418,7 @@
+   		tmpfsSizeBytes:    b.capBytes,
+   		gitWritable:       slices.Concat(layout.dotGitDirs, layout.gitDirs),
+   		gitReadOnly: slices.Concat(layout.containers, layout.intermediates, layout.metadata,
+  -			layout.moduleReadOnly, layout.gitFiles),
+  +			layout.moduleReadOnly),
+   	})
+   	if err != nil {
+   		return execSpec{}, err
+  ```
+- Baseline: pass (exit 0; 71 tests and subtests passed, the 14 Seatbelt-only rows of `TestBwrapGitMetadataDenied` skipped). Mutant: FAIL `TestBwrapGitMetadataDenied/gitfile-rewrite` (`exec_linux_behavioral_test.go:1067: git metadata changed (exit 0, stderr ""):`, its diff `-m/.git file 33793272 100644 ee64becd... nlink=1` and `+m/.git file 33793272 100644 ca97e122... nlink=1`); also red: rows `submodule-gitfile-replace`, `worktree-gitfile-rewrite` and `worktree-gitfile-replace`, and `TestBwrapPrepareMountsGitLayout`; every other test passes (exit 1; 65 passed, 14 skipped). Restored (`patch -R -p1`, `cmp` identical to the baseline file); the restored export passed every command again after the last mutant.
+- Kind: guard
+- Notes: The patch leaves gitfiles out of the read-only list, so a submodule's or linked worktree's `.git` file can be rewritten to point git at a planted git dir.
+
+## M-399 — bwrap orders git mounts parent first
+- Affected refs: GITMETA-BWRAP: `TestBwrapGitOrdinaryOps`, `TestBwrapGitMetadataDenied/direct-hook` and 22 other rows, `TestBwrapGitMetadataManySubmodules`, `TestBwrapVerifierCannotPlantHook`; GITMETA-BUILDERS: `TestBuildBwrapArgsGitMetadata`
+- Baseline: `4f21580d`, the commit that adds the GITMETA rows (#721), in an isolated `git archive` export
+- Platform: linux (arm64; the test binary cross-compiled with go1.27.1 on darwin from the export, `GOOS=linux GOARCH=arm64 go test -c ./agent/tools`; the throwaway image `go-llm-721-bwrap`: Ubuntu 24.04.5, bubblewrap 0.9.0, git 2.43.0, kernel 6.10.14-linuxkit; Docker Desktop linuxkit, privileged, `--network none`, 4 GiB memory and swap, 512 pids, run as root, the fixture on the container's own overlayfs under `TMPDIR=/root/tmp`, the export mounted read-only), not the CI VM
+- Profile / command: bwrap / `GO_LLM_REQUIRE_BWRAP=1 TMPDIR=/root/tmp tools.test -test.count=1 -test.timeout 120s -test.v -test.run '^(TestBwrapGitMetadataDenied|TestBwrapGitOrdinaryOps|TestBwrapGitMetadataManySubmodules|TestBwrapGitMetadataExecInsideHooks|TestBwrapVerifierCannotPlantHook|TestBwrapPrepareMountsGitLayout|TestBwrapPrepareRefusesSymlinkedGitMetadata|TestBuildBwrapArgsGitMetadata|TestBuildBwrapArgsGitMetadataRejections|TestBuildBwrapArgsGitMetadataDedupesAndKeepsCallerSlices|TestBuildBwrapArgsExeInWritableGitDirUnderReadOnlyContainerKeepsLiteral|TestBuildBwrapArgsExeInsideGitReadOnlyIsCovered|TestBuildBwrapArgsExeLiteralFollowsGitMounts)$'`, from the export's `agent/tools` (the five GITMETA-BWRAP test functions, whose 14 Seatbelt-only attack rows skip by design and are not inventory leaves, the two GITMETA-BWRAP-PREPARE refs and the six bwrap GITMETA-BUILDERS refs)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/bwrap.go b/agent/tools/bwrap.go
+  --- a/agent/tools/bwrap.go
+  +++ b/agent/tools/bwrap.go
+  @@ -220,7 +220,7 @@
+   			return nil, fmt.Errorf("tools: bwrap git path %q is both writable and read-only", p)
+   		}
+   	}
+  -	slices.SortFunc(mounts, func(a, b mount) int { return strings.Compare(a.path, b.path) })
+  +	slices.SortFunc(mounts, func(a, b mount) int { return strings.Compare(b.path, a.path) })
+   	args := make([]string, 0, len(mounts)*3)
+   	for _, m := range mounts {
+   		args = append(args, m.flag, m.path, m.path)
+  ```
+- Baseline: pass (exit 0; 71 tests and subtests passed, the 14 Seatbelt-only rows of `TestBwrapGitMetadataDenied` skipped). Mutant: FAIL `TestBwrapGitOrdinaryOps/worktree-add` (`exec_linux_behavioral_test.go:1182: exit 0, want success=false; stdout "", stderr ""`); also red: `TestBuildBwrapArgsGitMetadata` (`bwrap_test.go:437: git mounts mismatch:`), rows `direct-hook` (`exec_linux_behavioral_test.go:1067: git metadata changed (exit 0, stderr ""):`, its diff `+.git/hooks/pre-commit file 33793252 100755 b048663c... nlink=1`), `direct-hook-new`, `delete-hook`, `chmod-hook`, `direct-config`, `info-exclude`, `info-attributes`, `symlink-replace-hooks`, `symlink-alias-hooks`, `symlink-alias-config`, `nested-direct`, `nested-config`, `nested-grandparent-rename`, `submodule-hook`, `submodule-config`, `worktree-commondir`, `intermediate-preplant`, `uninit-preplant`, `uninit-preplant-symlink`, `libs-direct-hook`, `stripped-module-hook`, `module-named-hooks-two-spawn` and `slash-module-named-Hooks-two-spawn`, `TestBwrapGitMetadataManySubmodules` and `TestBwrapVerifierCannotPlantHook`; every other test passes (exit 1; 42 passed, 14 skipped). Restored (`patch -R -p1`, `cmp` identical to the baseline file); the restored export passed every command again after the last mutant.
+- Kind: guard
+- Notes: The patch sorts the git mounts children first, so each writable self-bind lands on top of the read-only mounts beneath it. Measured: those paths stay mount points (`config-set`, `hookspath-set` and `submodule-update-init` still fail, `could not write config file .git/config: Device or resource busy`) but are writable, so 23 attack rows change the protected metadata and `git worktree add` succeeds. Every expected-success operation, submodule operations included, still passes: the red leaf of `TestBwrapGitOrdinaryOps` is an intended refusal that now succeeds, not a submodule operation that fails, as the plan had predicted for this mutant. `TestBuildBwrapArgsGitMetadata` pins the parent-first order at the argv level.
+
+## M-400 — The deepest git mount decides whether the executable keeps its literal
+- Affected refs: GITMETA-BUILDERS: `TestBuildBwrapArgsExeInWritableGitDirUnderReadOnlyContainerKeepsLiteral`
+- Baseline: `4f21580d`, the commit that adds the GITMETA rows (#721), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2); re-run on linux (arm64, go1.27.1, the Docker `ci-local` image: Alpine 3.24.2, kernel 6.10.14-linuxkit, run as the non-root `ci` user, uid 1000, the container capped at 4 GiB of memory) from the same export mounted as the container's workspace: baseline pass, the same failing leaf and quoted line as on darwin (linux exit 1, 31 of 32 passed), restored pass
+- Profile / command: darwin-host / `go test -count=1 -v -timeout 120s -run '^(TestSeatbeltProfileGolden|TestSeatbeltProfileGitAnchors|TestSBPLRegexQuotes|TestSeatbeltProfileRejectsGitPathsOutsideWorkspace|TestSeatbeltProfileGitDeterministic|TestBuildBwrapArgsGitMetadata|TestBuildBwrapArgsGitMetadataRejections|TestBuildBwrapArgsGitMetadataDedupesAndKeepsCallerSlices|TestBuildBwrapArgsExeInWritableGitDirUnderReadOnlyContainerKeepsLiteral|TestBuildBwrapArgsExeInsideGitReadOnlyIsCovered|TestBuildBwrapArgsExeLiteralFollowsGitMounts)$' ./agent/tools` (the 11 GITMETA-BUILDERS refs, under the same watchdog); linux-host / `go test -count=1 -v -timeout 120s -run '^(TestInspectSandboxWorkspaceFindsGitLayout|TestInspectSandboxWorkspaceBrokenModuleIsProtectedNotDescended|TestInspectSandboxWorkspaceSlashNamedHooksSubmodule|TestInspectSandboxWorkspaceStrippedModuleIsIntermediate|TestInspectSandboxWorkspaceModuleNamedHooks|TestInspectSandboxWorkspaceGitfileWorkspace|TestInspectSandboxWorkspaceCaseFoldedDotGit|TestInspectSandboxWorkspaceScanErrorFailsClosed|TestInspectSandboxWorkspaceSymlinkedDotGitIsNeither|TestScanGitDirTreatsAbsentAsAbsent|TestInspectSandboxWorkspaceManySubmodules|TestSeatbeltProfileGolden|TestSeatbeltProfileGitAnchors|TestSBPLRegexQuotes|TestSeatbeltProfileRejectsGitPathsOutsideWorkspace|TestSeatbeltProfileGitDeterministic|TestBuildBwrapArgsGitMetadata|TestBuildBwrapArgsGitMetadataRejections|TestBuildBwrapArgsGitMetadataDedupesAndKeepsCallerSlices|TestBuildBwrapArgsExeInWritableGitDirUnderReadOnlyContainerKeepsLiteral|TestBuildBwrapArgsExeInsideGitReadOnlyIsCovered|TestBuildBwrapArgsExeLiteralFollowsGitMounts|TestBwrapPrepareMountsGitLayout|TestBwrapPrepareRefusesSymlinkedGitMetadata)$' ./agent/tools` (every GITMETA-DISCOVERY, GITMETA-BUILDERS and GITMETA-BWRAP-PREPARE ref, 24 tests)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/bwrap.go b/agent/tools/bwrap.go
+  --- a/agent/tools/bwrap.go
+  +++ b/agent/tools/bwrap.go
+  @@ -176,6 +176,11 @@
+   			if within(root) {
+   				return true
+   			}
+  +		}
+  +	}
+  +	for _, root := range gitReadOnly {
+  +		if within(root) {
+  +			return true
+   		}
+   	}
+   	deepest, readOnly := "", false
+  ```
+- Baseline: pass on darwin (exit 0; 11 passed) and on linux (exit 0; 32 passed, none skipped). Mutant: FAIL `TestBuildBwrapArgsExeInWritableGitDirUnderReadOnlyContainerKeepsLiteral` (`bwrap_test.go:500: exe literal must be present after every git mount: ["--unshare-user" ...]`); every other test passes (exit 1; 10 of 11 passed). Restored (`patch -R -p1`, `cmp` identical to the baseline file); the restored export passed every command again after the last mutant.
+- Kind: guard
+- Notes: The patch counts the executable as covered when any read-only git mount contains it. An approved executable in a writable submodule git dir under the read-only `.git/modules` container then loses its read-only literal, and the command could rewrite the approved binary; the deepest containing mount, the writable git dir, must decide.
+
+## M-401 — bwrap refuses a symlinked git metadata entry
+- Affected refs: GITMETA-BWRAP-PREPARE: `TestBwrapPrepareRefusesSymlinkedGitMetadata`
+- Baseline: `4f21580d`, the commit that adds the GITMETA rows (#721), in an isolated `git archive` export
+- Platform: linux (arm64, go1.27.1, the Docker `ci-local` image: Alpine 3.24.2, kernel 6.10.14-linuxkit, run as the non-root `ci` user, uid 1000, the container capped at 4 GiB of memory) from the same export mounted as the container's workspace; also run in the privileged bwrap container (linux (arm64; the test binary cross-compiled with go1.27.1 on darwin from the export, `GOOS=linux GOARCH=arm64 go test -c ./agent/tools`; the throwaway image `go-llm-721-bwrap`: Ubuntu 24.04.5, bubblewrap 0.9.0, git 2.43.0, kernel 6.10.14-linuxkit; Docker Desktop linuxkit, privileged, `--network none`, 4 GiB memory and swap, 512 pids, run as root, the fixture on the container's own overlayfs under `TMPDIR=/root/tmp`, the export mounted read-only), not the CI VM) with the bwrap command
+- Profile / command: linux-host / `go test -count=1 -v -timeout 120s -run '^(TestInspectSandboxWorkspaceFindsGitLayout|TestInspectSandboxWorkspaceBrokenModuleIsProtectedNotDescended|TestInspectSandboxWorkspaceSlashNamedHooksSubmodule|TestInspectSandboxWorkspaceStrippedModuleIsIntermediate|TestInspectSandboxWorkspaceModuleNamedHooks|TestInspectSandboxWorkspaceGitfileWorkspace|TestInspectSandboxWorkspaceCaseFoldedDotGit|TestInspectSandboxWorkspaceScanErrorFailsClosed|TestInspectSandboxWorkspaceSymlinkedDotGitIsNeither|TestScanGitDirTreatsAbsentAsAbsent|TestInspectSandboxWorkspaceManySubmodules|TestSeatbeltProfileGolden|TestSeatbeltProfileGitAnchors|TestSBPLRegexQuotes|TestSeatbeltProfileRejectsGitPathsOutsideWorkspace|TestSeatbeltProfileGitDeterministic|TestBuildBwrapArgsGitMetadata|TestBuildBwrapArgsGitMetadataRejections|TestBuildBwrapArgsGitMetadataDedupesAndKeepsCallerSlices|TestBuildBwrapArgsExeInWritableGitDirUnderReadOnlyContainerKeepsLiteral|TestBuildBwrapArgsExeInsideGitReadOnlyIsCovered|TestBuildBwrapArgsExeLiteralFollowsGitMounts|TestBwrapPrepareMountsGitLayout|TestBwrapPrepareRefusesSymlinkedGitMetadata)$' ./agent/tools` (every GITMETA-DISCOVERY, GITMETA-BUILDERS and GITMETA-BWRAP-PREPARE ref, 24 tests); bwrap / `GO_LLM_REQUIRE_BWRAP=1 TMPDIR=/root/tmp tools.test -test.count=1 -test.timeout 120s -test.v -test.run '^(TestBwrapGitMetadataDenied|TestBwrapGitOrdinaryOps|TestBwrapGitMetadataManySubmodules|TestBwrapGitMetadataExecInsideHooks|TestBwrapVerifierCannotPlantHook|TestBwrapPrepareMountsGitLayout|TestBwrapPrepareRefusesSymlinkedGitMetadata|TestBuildBwrapArgsGitMetadata|TestBuildBwrapArgsGitMetadataRejections|TestBuildBwrapArgsGitMetadataDedupesAndKeepsCallerSlices|TestBuildBwrapArgsExeInWritableGitDirUnderReadOnlyContainerKeepsLiteral|TestBuildBwrapArgsExeInsideGitReadOnlyIsCovered|TestBuildBwrapArgsExeLiteralFollowsGitMounts)$'`, from the export's `agent/tools` (the five GITMETA-BWRAP test functions, whose 14 Seatbelt-only attack rows skip by design and are not inventory leaves, the two GITMETA-BWRAP-PREPARE refs and the six bwrap GITMETA-BUILDERS refs)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/exec_linux.go b/agent/tools/exec_linux.go
+  --- a/agent/tools/exec_linux.go
+  +++ b/agent/tools/exec_linux.go
+  @@ -401,9 +401,6 @@
+   	if err != nil {
+   		return execSpec{}, err
+   	}
+  -	if err := bwrapRejectSymlinkedGitMetadata(spec.WorkspaceRoot, layout.metadata); err != nil {
+  -		return execSpec{}, err
+  -	}
+   	args, err := buildBwrapArgs(bwrapPolicy{
+   		workspaceRoot:     spec.WorkspaceRoot,
+   		exePath:           canonExe,
+  ```
+- Baseline: pass in `ci-local` (exit 0; 32 passed, none skipped) and in the container (exit 0; 71 passed, 14 skipped). Mutant: FAIL `TestBwrapPrepareRefusesSymlinkedGitMetadata/in-tree_hooks` (`exec_linux_test.go:603: err = <nil>, want "tools: bwrap cannot protect git metadata \".git/hooks\": it is a symbolic link; keep hooks in the working tree with core.hooksPath instead"`) and `.../dangling_submodule_config` (the same line naming `.git/modules/m/config`); every other test passes (exit 1; 29 of 32 passed in `ci-local`; in the container the same leaves red, 68 passed, 14 skipped). Restored (`patch -R -p1`, `cmp` identical to the baseline file); the restored export passed every command again after the last mutant.
+- Kind: guard
+- Notes: The patch drops the prepare step's check, so a git dir whose `hooks` (or `config`) is a symbolic link spawns: the read-only bind follows the link to its target while the link node itself, inside the writable git dir, stays replaceable (measured in #721 R-13: `rm .git/hooks && mkdir .git/hooks` then plants a hook), and a dangling link fails bwrap itself. No behavioral row turns red: the one attack row with a symlinked metadata entry, `symlinked-hooks-replace`, is Seatbelt-only because bwrap refuses that layout.
+
+## M-402 — bwrap prepare mounts read-only modules-tree directories
+- Affected refs: GITMETA-BWRAP-PREPARE: `TestBwrapPrepareMountsGitLayout`
+- Baseline: `4f21580d`, the commit that adds the GITMETA rows (#721), in an isolated `git archive` export
+- Platform: linux (arm64, go1.27.1, the Docker `ci-local` image: Alpine 3.24.2, kernel 6.10.14-linuxkit, run as the non-root `ci` user, uid 1000, the container capped at 4 GiB of memory) from the same export mounted as the container's workspace; also run in the privileged bwrap container (linux (arm64; the test binary cross-compiled with go1.27.1 on darwin from the export, `GOOS=linux GOARCH=arm64 go test -c ./agent/tools`; the throwaway image `go-llm-721-bwrap`: Ubuntu 24.04.5, bubblewrap 0.9.0, git 2.43.0, kernel 6.10.14-linuxkit; Docker Desktop linuxkit, privileged, `--network none`, 4 GiB memory and swap, 512 pids, run as root, the fixture on the container's own overlayfs under `TMPDIR=/root/tmp`, the export mounted read-only), not the CI VM) with the bwrap command
+- Profile / command: linux-host / `go test -count=1 -v -timeout 120s -run '^(TestInspectSandboxWorkspaceFindsGitLayout|TestInspectSandboxWorkspaceBrokenModuleIsProtectedNotDescended|TestInspectSandboxWorkspaceSlashNamedHooksSubmodule|TestInspectSandboxWorkspaceStrippedModuleIsIntermediate|TestInspectSandboxWorkspaceModuleNamedHooks|TestInspectSandboxWorkspaceGitfileWorkspace|TestInspectSandboxWorkspaceCaseFoldedDotGit|TestInspectSandboxWorkspaceScanErrorFailsClosed|TestInspectSandboxWorkspaceSymlinkedDotGitIsNeither|TestScanGitDirTreatsAbsentAsAbsent|TestInspectSandboxWorkspaceManySubmodules|TestSeatbeltProfileGolden|TestSeatbeltProfileGitAnchors|TestSBPLRegexQuotes|TestSeatbeltProfileRejectsGitPathsOutsideWorkspace|TestSeatbeltProfileGitDeterministic|TestBuildBwrapArgsGitMetadata|TestBuildBwrapArgsGitMetadataRejections|TestBuildBwrapArgsGitMetadataDedupesAndKeepsCallerSlices|TestBuildBwrapArgsExeInWritableGitDirUnderReadOnlyContainerKeepsLiteral|TestBuildBwrapArgsExeInsideGitReadOnlyIsCovered|TestBuildBwrapArgsExeLiteralFollowsGitMounts|TestBwrapPrepareMountsGitLayout|TestBwrapPrepareRefusesSymlinkedGitMetadata)$' ./agent/tools` (every GITMETA-DISCOVERY, GITMETA-BUILDERS and GITMETA-BWRAP-PREPARE ref, 24 tests); bwrap / `GO_LLM_REQUIRE_BWRAP=1 TMPDIR=/root/tmp tools.test -test.count=1 -test.timeout 120s -test.v -test.run '^(TestBwrapGitMetadataDenied|TestBwrapGitOrdinaryOps|TestBwrapGitMetadataManySubmodules|TestBwrapGitMetadataExecInsideHooks|TestBwrapVerifierCannotPlantHook|TestBwrapPrepareMountsGitLayout|TestBwrapPrepareRefusesSymlinkedGitMetadata|TestBuildBwrapArgsGitMetadata|TestBuildBwrapArgsGitMetadataRejections|TestBuildBwrapArgsGitMetadataDedupesAndKeepsCallerSlices|TestBuildBwrapArgsExeInWritableGitDirUnderReadOnlyContainerKeepsLiteral|TestBuildBwrapArgsExeInsideGitReadOnlyIsCovered|TestBuildBwrapArgsExeLiteralFollowsGitMounts)$'`, from the export's `agent/tools` (the five GITMETA-BWRAP test functions, whose 14 Seatbelt-only attack rows skip by design and are not inventory leaves, the two GITMETA-BWRAP-PREPARE refs and the six bwrap GITMETA-BUILDERS refs)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/exec_linux.go b/agent/tools/exec_linux.go
+  --- a/agent/tools/exec_linux.go
+  +++ b/agent/tools/exec_linux.go
+  @@ -418,7 +418,7 @@
+   		tmpfsSizeBytes:    b.capBytes,
+   		gitWritable:       slices.Concat(layout.dotGitDirs, layout.gitDirs),
+   		gitReadOnly: slices.Concat(layout.containers, layout.intermediates, layout.metadata,
+  -			layout.moduleReadOnly, layout.gitFiles),
+  +			layout.gitFiles),
+   	})
+   	if err != nil {
+   		return execSpec{}, err
+  ```
+- Baseline: pass in `ci-local` (exit 0; 32 passed, none skipped) and in the container (exit 0; 71 passed, 14 skipped). Mutant: FAIL `TestBwrapPrepareMountsGitLayout` (`exec_linux_test.go:570: wrapped argv missing " --ro-bind <tmp>/.git/modules/s/hooks <tmp>/.git/modules/s/hooks "`); every other test passes (exit 1; 31 of 32 passed in `ci-local`; in the container the same leaf red and every behavioral test green, 70 passed, 14 skipped). Restored (`patch -R -p1`, `cmp` identical to the baseline file); the restored export passed every command again after the last mutant.
+- Kind: guard
+- Notes: The patch leaves `moduleReadOnly` out of the read-only list. This is behaviorally redundant on bwrap: every such directory lies under a read-only container or intermediate mount, so the stripped-module and two-spawn rows stay refused in the container; the argv-level prepare test is its pin. On Seatbelt the same class is load-bearing (M-387).
+
+## M-403 — The bwrap preview line does not claim protection of metadata created later
+- Affected refs: GITMETA-PREVIEW: `TestRenderSandboxLineGitMetadata`
+- Baseline: `ad0ccf57`, the commit that adds GITMETA-PREVIEW (#721), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2); re-run on linux (arm64, go1.27.1, the Docker `ci-local` image: Alpine 3.24.2, kernel 6.10.14-linuxkit, run as the non-root `ci` user, uid 1000, the container capped at 4 GiB of memory) from the same export mounted as the container's workspace: baseline pass, the same failing leaf and quoted line as on darwin, restored pass
+- Profile / command: darwin-host / `go test -count=1 -v -timeout 120s -run '^(TestRenderSandboxLineGitMetadata|TestSandboxApprovalKeyUnmovedBy721)$' ./agent/tools` (both GITMETA-PREVIEW refs, under a watchdog that kills the test process group above 4 GiB resident); linux-host / the same command in `ci-local`
+- Patch:
+  ```diff
+  diff --git a/agent/tools/sandbox.go b/agent/tools/sandbox.go
+  --- a/agent/tools/sandbox.go
+  +++ b/agent/tools/sandbox.go
+  @@ -242,7 +242,7 @@
+   	case SandboxRuntimeSeatbelt:
+   		line += " git_metadata=ro"
+   	case SandboxRuntimeBwrap:
+  -		line += " git_metadata=ro(existing)"
+  +		line += " git_metadata=ro"
+   	}
+   	return line
+   }
+  ```
+- Baseline: pass (exit 0; 2 passed, none skipped). Mutant: FAIL `TestRenderSandboxLineGitMetadata` (`sandbox_test.go:523: bwrap line = "runtime=\"bwrap\" network=ip-denied memory_cap=none cpu_limit=none drop_caps=[] temp=private git_metadata=ro", want suffix " temp=private git_metadata=ro(existing)"`); `TestSandboxApprovalKeyUnmovedBy721` passes (exit 1). Restored (`patch -R -p1`, `cmp` identical to the baseline file): pass (exit 0, 2 passed) on both platforms.
+- Kind: guard
+- Notes: The patch makes the bwrap preview say `git_metadata=ro`, the Seatbelt claim, although bwrap mounts only the metadata present when the command starts and cannot refuse a new file inside a git dir or a new repository (#721 R1). The approval prompt would then claim more than the backend delivers; the issue asks the preview to state bwrap's limit.
+
+## M-404 — The git metadata change leaves the sandbox approval key unmoved
+- Affected refs: GITMETA-PREVIEW: `TestSandboxApprovalKeyUnmovedBy721`
+- Baseline: `ad0ccf57`, the commit that adds GITMETA-PREVIEW (#721), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2); re-run on linux (arm64, go1.27.1, the Docker `ci-local` image: Alpine 3.24.2, kernel 6.10.14-linuxkit, run as the non-root `ci` user, uid 1000, the container capped at 4 GiB of memory) from the same export mounted as the container's workspace: baseline pass, the same failing leaf and quoted line as on darwin, restored pass
+- Profile / command: darwin-host / `go test -count=1 -v -timeout 120s -run '^(TestRenderSandboxLineGitMetadata|TestSandboxApprovalKeyUnmovedBy721)$' ./agent/tools` (both GITMETA-PREVIEW refs, under a watchdog that kills the test process group above 4 GiB resident); linux-host / the same command in `ci-local`
+- Patch:
+  ```diff
+  diff --git a/agent/tools/sandbox.go b/agent/tools/sandbox.go
+  --- a/agent/tools/sandbox.go
+  +++ b/agent/tools/sandbox.go
+  @@ -163,6 +163,8 @@
+   	for _, name := range cfg.DropCaps {
+   		write(name)
+   	}
+  +	write("git_metadata")
+  +	write("ro")
+   	return hex.EncodeToString(h.Sum(nil))
+   }
+   
+  ```
+- Baseline: pass (exit 0; 2 passed, none skipped). Mutant: FAIL `TestSandboxApprovalKeyUnmovedBy721` (`sandbox_test.go:543: seatbelt keyComponent = "sb:e1652c2afda4a60618b3c1896478d8bafeb2e529af616de2605e456b339339f0:", want "sb:388c0ebf98f177d27a491abd31245b77ca188a9244797d985f89e788bf011e63:"` and the same line for bwrap, `"sb:3caa9cf1891a5b2cb3d44ea85819f6c261b6179a6f8e471dd4fb9acb759cf787:"` against `"sb:efa4aede38982cbe6ca95a4926f873f54881ad881c7e3d13c7e3236d1d4a46e9:"`); `TestRenderSandboxLineGitMetadata` passes (exit 1). Restored (`patch -R -p1`, `cmp` identical to the baseline file): pass (exit 0, 2 passed) on both platforms.
+- Kind: guard
+- Notes: The patch writes a git metadata field into the sandbox fingerprint, as a recipe that keyed grants on the new boundary would. Every Seatbelt and bwrap approval key would move, so each existing session grant would silently stop matching and re-prompt. #721 only narrows the policy, and the issue asks that the key decision be recorded: the pinned keys are the baseline keys captured before the change.
+
+## M-405 — Host litter in an intermediate does not hide its submodules
+- Affected refs: GITMETA-DISCOVERY: `TestInspectSandboxWorkspaceHostLitterKeepsIntermediate`
+- Baseline: `b8b4a40d`, the commit that adds the discovery test (#721), in an isolated `git archive` export
+- Platform: darwin (arm64, go1.27.1, macOS 26.6.2); re-run on linux (arm64, go1.27.1, the Docker `ci-local` image: Alpine 3.24.2, kernel 6.10.14-linuxkit, run as the non-root `ci` user, uid 1000, the container capped at 4 GiB of memory) from the same export mounted as the container's workspace: baseline pass, the same failing leaf and quoted lines as on darwin (paths under `/tmp`; linux exit 1, 32 of 33 passed), restored pass
+- Profile / command: darwin-host / `go test -count=1 -v -timeout 120s -run '^(TestInspectSandboxWorkspaceFindsGitLayout|TestInspectSandboxWorkspaceBrokenModuleIsProtectedNotDescended|TestInspectSandboxWorkspaceSlashNamedHooksSubmodule|TestInspectSandboxWorkspaceHostLitterKeepsIntermediate|TestInspectSandboxWorkspaceStrippedModuleIsIntermediate|TestInspectSandboxWorkspaceModuleNamedHooks|TestInspectSandboxWorkspaceGitfileWorkspace|TestInspectSandboxWorkspaceCaseFoldedDotGit|TestInspectSandboxWorkspaceScanErrorFailsClosed|TestInspectSandboxWorkspaceSymlinkedDotGitIsNeither|TestScanGitDirTreatsAbsentAsAbsent|TestInspectSandboxWorkspaceManySubmodules)$' ./agent/tools` (the 12 GITMETA-DISCOVERY refs, under a watchdog that kills the test process group above 4 GiB resident); linux-host / `go test -count=1 -v -timeout 120s -run '^(TestInspectSandboxWorkspaceFindsGitLayout|TestInspectSandboxWorkspaceBrokenModuleIsProtectedNotDescended|TestInspectSandboxWorkspaceSlashNamedHooksSubmodule|TestInspectSandboxWorkspaceHostLitterKeepsIntermediate|TestInspectSandboxWorkspaceStrippedModuleIsIntermediate|TestInspectSandboxWorkspaceModuleNamedHooks|TestInspectSandboxWorkspaceGitfileWorkspace|TestInspectSandboxWorkspaceCaseFoldedDotGit|TestInspectSandboxWorkspaceScanErrorFailsClosed|TestInspectSandboxWorkspaceSymlinkedDotGitIsNeither|TestScanGitDirTreatsAbsentAsAbsent|TestInspectSandboxWorkspaceManySubmodules|TestSeatbeltProfileGolden|TestSeatbeltProfileGitAnchors|TestSBPLRegexQuotes|TestSeatbeltProfileRejectsGitPathsOutsideWorkspace|TestSeatbeltProfileGitDeterministic|TestBuildBwrapArgsGitMetadata|TestBuildBwrapArgsGitMetadataRejections|TestBuildBwrapArgsGitMetadataDedupesAndKeepsCallerSlices|TestBuildBwrapArgsExeInWritableGitDirUnderReadOnlyContainerKeepsLiteral|TestBuildBwrapArgsExeInsideGitReadOnlyIsCovered|TestBuildBwrapArgsExeLiteralFollowsGitMounts|TestBwrapPrepareMountsGitLayout|TestBwrapPrepareRefusesSymlinkedGitMetadata)$' ./agent/tools` (every GITMETA-DISCOVERY, GITMETA-BUILDERS and GITMETA-BWRAP-PREPARE ref, 25 tests)
+- Patch:
+  ```diff
+  diff --git a/agent/tools/sandbox_links_unix.go b/agent/tools/sandbox_links_unix.go
+  --- a/agent/tools/sandbox_links_unix.go
+  +++ b/agent/tools/sandbox_links_unix.go
+  @@ -221,7 +221,7 @@
+   		case len(name) == len("hooks") && strings.EqualFold(name, "hooks"),
+   			len(name) == len("info") && strings.EqualFold(name, "info"):
+   			l.moduleReadOnly = append(l.moduleReadOnly, c)
+  -		case slices.ContainsFunc(kids, func(k fs.DirEntry) bool { return !k.IsDir() && !hostLitter(k.Name()) }):
+  +		case slices.ContainsFunc(kids, func(k fs.DirEntry) bool { return !k.IsDir() }):
+   			l.gitDirs = append(l.gitDirs, c)
+   			err = scanGitDir(c, l)
+   		default:
+  ```
+- Baseline: pass on darwin (exit 0; 18 tests and subtests passed, none skipped) and on linux (exit 0; 33 passed, none skipped). Mutant: FAIL `TestInspectSandboxWorkspaceHostLitterKeepsIntermediate` (`sandbox_links_unix_test.go:192: libs: gitDirs ["<tmp>/.git/modules/libs" "<tmp>/.git/modules/m" "<tmp>/.git/modules/m/modules/inner" "<tmp>/.git/worktrees/wt"], intermediates []; want it an intermediate` and `sandbox_links_unix_test.go:195: <tmp>/.git/modules/libs/a not a git dir: [...]`, the same list; `<tmp>` is the test's temp directory); every other test passes (exit 1; 17 of 18 passed). Restored (`patch -R -p1`, `cmp` identical to the baseline file); the restored export passed both commands again.
+- Kind: guard
+- Notes: The patch counts Finder's `.DS_Store` and AppleDouble `._` files again in clause 3, so one the host left in the intermediate `libs` makes `libs` a broken git dir that is scanned and not descended: the slash-named submodule `libs/a` is never found, and neither its git dir nor its hooks and config reach either backend. A sandboxed command cannot create such a file in an intermediate, so the exemption opens nothing to it.

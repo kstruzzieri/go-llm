@@ -545,6 +545,70 @@ func TestBwrapPrepareWrapsRunSpec(t *testing.T) {
 	}
 }
 
+// TestBwrapPrepareMountsGitLayout: prepare hands every class of the
+// discovered git layout to the argv (a .git dir and a submodule git dir
+// writable; a container, an intermediate, metadata, a modules-tree hooks dir
+// and a gitfile read-only), so a dropped gitWritable or gitReadOnly entry
+// fails without bwrap.
+func TestBwrapPrepareMountsGitLayout(t *testing.T) {
+	ws := wsTempDir(t)
+	writeGitFixture(t, ws)
+	applyGitMetaVariant(t, ws, "stripped") // .git/modules/s/hooks: moduleReadOnly
+	runner := &captureRunner{}
+	b := testBwrapBackend(runner, &captureStarter{proc: fakeProcess{}}, SandboxConfig{Runtime: SandboxRuntimeBwrap}, 0)
+	if _, err := b.Run(context.Background(), bwrapTestSpec(t, ws)); err != nil {
+		t.Fatal(err)
+	}
+	// containment: GITMETA-BWRAP-PREPARE
+	joined := " " + strings.Join(runner.spec.Argv, " ") + " "
+	for _, m := range [][2]string{
+		{"--bind", "/.git"}, {"--bind", "/.git/modules/m"},
+		{"--ro-bind", "/.git/modules"}, {"--ro-bind", "/.git/modules/libs"},
+		{"--ro-bind", "/.git/hooks"}, {"--ro-bind", "/.git/modules/s/hooks"}, {"--ro-bind", "/m/.git"},
+	} {
+		if must := " " + m[0] + " " + ws + m[1] + " " + ws + m[1] + " "; !strings.Contains(joined, must) {
+			t.Errorf("wrapped argv missing %q", must)
+		}
+	}
+}
+
+// TestBwrapPrepareRefusesSymlinkedGitMetadata: a symlinked metadata entry
+// fails prepare (R-13) before anything runs, whether its target exists or
+// not.
+func TestBwrapPrepareRefusesSymlinkedGitMetadata(t *testing.T) {
+	for _, c := range []struct{ name, rel, target string }{
+		{"in-tree hooks", ".git/hooks", "../scripts/hooks"},
+		{"dangling submodule config", ".git/modules/m/config", "../../../nowhere"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			ws := wsTempDir(t)
+			writeGitFixture(t, ws)
+			p := filepath.Join(ws, c.rel)
+			if err := os.MkdirAll(filepath.Join(ws, "scripts"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Rename(p, filepath.Join(ws, "scripts", filepath.Base(p))); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(c.target, p); err != nil {
+				t.Fatal(err)
+			}
+			runner := &captureRunner{}
+			b := testBwrapBackend(runner, &captureStarter{proc: fakeProcess{}}, SandboxConfig{Runtime: SandboxRuntimeBwrap}, 0)
+			_, err := b.Run(context.Background(), bwrapTestSpec(t, ws))
+			// containment: GITMETA-BWRAP-PREPARE
+			want := `tools: bwrap cannot protect git metadata "` + c.rel +
+				`": it is a symbolic link; replace the link with the file or directory itself (for hooks, core.hooksPath keeps them in the working tree)`
+			if err == nil || err.Error() != want {
+				t.Fatalf("err = %v, want %q", err, want)
+			}
+			if runner.called != 0 {
+				t.Fatalf("runner called %d times after a refused prepare", runner.called)
+			}
+		})
+	}
+}
+
 func TestBwrapPrepareBindsWorkspaceResidentExecutable(t *testing.T) {
 	ws := wsTempDir(t)
 	runner := &captureRunner{}

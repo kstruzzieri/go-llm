@@ -126,7 +126,13 @@ func TestSeatbeltProfileGolden(t *testing.T) {
   (subpath "/private/tmp/ws")
   (subpath "/private/tmp/pt"))
 (allow file-write-data (literal "/dev/null"))
+(deny file-write*
+  (regex "^/private/tmp/ws/(.*/)?\\.[gG][iI][tT]$")
+  (regex "^/private/tmp/ws/(.*/)?\\.[gG][iI][tT]/([hH][oO][oO][kK][sS]|[iI][nN][fF][oO])(/.*)?$")
+  (regex "^/private/tmp/ws/(.*/)?\\.[gG][iI][tT]/([cC][oO][nN][fF][iI][gG](\\.[wW][oO][rR][kK][tT][rR][eE][eE])?|[cC][oO][mM][mM][oO][nN][dD][iI][rR]|[gG][iI][tT][dD][iI][rR])$")
+  (regex "^/private/tmp/ws/(.*/)?\\.[gG][iI][tT]/([mM][oO][dD][uU][lL][eE][sS]|[wW][oO][rR][kK][tT][rR][eE][eE][sS])(/[^/]+)?$"))
 `
+	// containment: GITMETA-BUILDERS
 	if got := mustProfile(t, basePolicy()); got != want {
 		t.Fatalf("profile mismatch:\n--- got ---\n%s\n--- want ---\n%s", got, want)
 	}
@@ -348,7 +354,7 @@ func TestSeatbeltCollectSystemRootsFailsClosed(t *testing.T) {
 func TestRenderSandboxLineSeatbeltTempPrivate(t *testing.T) {
 	cfg := mustNormalizeSandbox(t, SandboxConfig{Runtime: SandboxRuntimeSeatbelt})
 	got := renderSandboxLine(cfg)
-	want := `runtime="seatbelt" network=denied memory_cap=none cpu_limit=none drop_caps=[] temp=private`
+	want := `runtime="seatbelt" network=denied memory_cap=none cpu_limit=none drop_caps=[] temp=private git_metadata=ro`
 	if got != want {
 		t.Fatalf("renderSandboxLine() = %q, want %q", got, want)
 	}
@@ -375,5 +381,90 @@ func TestSeatbeltCleanupNoteIsBoundedAndControlSafe(t *testing.T) {
 func TestSeatbeltCleanupNoteNeverWrapsNilError(t *testing.T) {
 	if err := withCleanupNote(nil, "sandbox temp cleanup: x"); err != nil {
 		t.Fatalf("withCleanupNote(nil, note) = %#v; want nil", err)
+	}
+}
+
+func TestSBPLRegexQuotes(t *testing.T) {
+	got, err := sbplRegex(`/w/a+b (v2)"q`, "$")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// containment: GITMETA-BUILDERS
+	if want := `(regex "^/w/a\\+b \\(v2\\)\"q$")`; got != want {
+		t.Fatalf("got %s, want %s", got, want)
+	}
+	if _, err := sbplRegex("/w/\x01", "$"); err == nil {
+		t.Fatal("control character must be rejected")
+	}
+}
+
+func gitAnchorPolicy() seatbeltPolicy {
+	p := basePolicy()
+	p.gitDirs = []string{"/private/tmp/ws/.git/worktrees/wt", "/private/tmp/ws/.git/modules/libs/a"}
+	p.gitReadOnlyDirs = []string{"/private/tmp/ws/.git/modules/libs/Hooks", "/private/tmp/ws/.git/modules/hooks"}
+	p.gitIntermediates = []string{"/private/tmp/ws/.git/modules/libs"}
+	return p
+}
+
+func TestSeatbeltProfileGitAnchors(t *testing.T) {
+	want := `(deny file-write*
+  (regex "^/private/tmp/ws/(.*/)?\\.[gG][iI][tT]$")
+  (regex "^/private/tmp/ws/(.*/)?\\.[gG][iI][tT]/([hH][oO][oO][kK][sS]|[iI][nN][fF][oO])(/.*)?$")
+  (regex "^/private/tmp/ws/(.*/)?\\.[gG][iI][tT]/([cC][oO][nN][fF][iI][gG](\\.[wW][oO][rR][kK][tT][rR][eE][eE])?|[cC][oO][mM][mM][oO][nN][dD][iI][rR]|[gG][iI][tT][dD][iI][rR])$")
+  (regex "^/private/tmp/ws/(.*/)?\\.[gG][iI][tT]/([mM][oO][dD][uU][lL][eE][sS]|[wW][oO][rR][kK][tT][rR][eE][eE][sS])(/[^/]+)?$")
+  (subpath "/private/tmp/ws/.git/modules/libs/a/hooks")
+  (subpath "/private/tmp/ws/.git/modules/libs/a/info")
+  (literal "/private/tmp/ws/.git/modules/libs/a/config")
+  (literal "/private/tmp/ws/.git/modules/libs/a/config.worktree")
+  (literal "/private/tmp/ws/.git/modules/libs/a/commondir")
+  (literal "/private/tmp/ws/.git/modules/libs/a/gitdir")
+  (regex "^/private/tmp/ws/\\.git/modules/libs/a/([mM][oO][dD][uU][lL][eE][sS]|[wW][oO][rR][kK][tT][rR][eE][eE][sS])(/[^/]+)?$")
+  (subpath "/private/tmp/ws/.git/worktrees/wt/hooks")
+  (subpath "/private/tmp/ws/.git/worktrees/wt/info")
+  (literal "/private/tmp/ws/.git/worktrees/wt/config")
+  (literal "/private/tmp/ws/.git/worktrees/wt/config.worktree")
+  (literal "/private/tmp/ws/.git/worktrees/wt/commondir")
+  (literal "/private/tmp/ws/.git/worktrees/wt/gitdir")
+  (regex "^/private/tmp/ws/\\.git/worktrees/wt/([mM][oO][dD][uU][lL][eE][sS]|[wW][oO][rR][kK][tT][rR][eE][eE][sS])(/[^/]+)?$")
+  (subpath "/private/tmp/ws/.git/modules/hooks")
+  (subpath "/private/tmp/ws/.git/modules/libs/Hooks")
+  (regex "^/private/tmp/ws/\\.git/modules/libs/[^/]+$"))
+`
+	// containment: GITMETA-BUILDERS
+	if got := mustProfile(t, gitAnchorPolicy()); !strings.Contains(got, "(allow file-write-data (literal \"/dev/null\"))\n"+want+"") || strings.Count(got, "(deny file-write*") != 1 {
+		t.Fatalf("git deny block missing or misordered:\n%s\n--- want ---\n%s", got, want)
+	}
+}
+
+func TestSeatbeltProfileRejectsGitPathsOutsideWorkspace(t *testing.T) {
+	// containment: GITMETA-BUILDERS
+	for _, bad := range []string{"/private/tmp/other/.git/modules/m", "/private/tmp/ws/../x/.git/modules/m", "/private/tmp/ws", "/private/tmp/wsx/.git/modules/m", "relative"} {
+		p := basePolicy()
+		p.gitDirs = []string{bad}
+		if _, err := buildSeatbeltProfile(p); err == nil || !strings.Contains(err.Error(), bad) {
+			t.Errorf("gitDirs %q: err = %v, want error naming the path", bad, err)
+		}
+		p = basePolicy()
+		p.gitReadOnlyDirs = []string{bad}
+		if _, err := buildSeatbeltProfile(p); err == nil || !strings.Contains(err.Error(), bad) {
+			t.Errorf("gitReadOnlyDirs %q: err = %v, want error naming the path", bad, err)
+		}
+		p = basePolicy()
+		p.gitIntermediates = []string{bad}
+		if _, err := buildSeatbeltProfile(p); err == nil || !strings.Contains(err.Error(), bad) {
+			t.Errorf("gitIntermediates %q: err = %v, want error naming the path", bad, err)
+		}
+	}
+}
+
+func TestSeatbeltProfileGitDeterministic(t *testing.T) {
+	want := mustProfile(t, gitAnchorPolicy())
+	p := basePolicy()
+	p.gitDirs = []string{"/private/tmp/ws/.git/modules/libs/a", "/private/tmp/ws/.git/worktrees/wt", "/private/tmp/ws/.git/modules/libs/a"}
+	p.gitReadOnlyDirs = []string{"/private/tmp/ws/.git/modules/hooks", "/private/tmp/ws/.git/modules/libs/Hooks", "/private/tmp/ws/.git/modules/hooks"}
+	p.gitIntermediates = []string{"/private/tmp/ws/.git/modules/libs", "/private/tmp/ws/.git/modules/libs"}
+	// containment: GITMETA-BUILDERS
+	if got := mustProfile(t, p); got != want {
+		t.Fatalf("not deterministic:\n%s\n%s", got, want)
 	}
 }
