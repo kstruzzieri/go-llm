@@ -1116,7 +1116,15 @@
         "darwin-host",
         "linux-host"
       ],
-      "mutations": [],
+      "mutations": [
+        "M-388",
+        "M-389",
+        "M-390",
+        "M-391",
+        "M-392",
+        "M-393",
+        "M-394"
+      ],
       "artifacts": []
     },
     {
@@ -1201,7 +1209,19 @@
         "linux-host",
         "windows"
       ],
-      "mutations": [],
+      "mutations": [
+        "M-379",
+        "M-380",
+        "M-381",
+        "M-382",
+        "M-383",
+        "M-384",
+        "M-385",
+        "M-386",
+        "M-387",
+        "M-399",
+        "M-400"
+      ],
       "artifacts": []
     },
     {
@@ -1230,7 +1250,17 @@
       "profiles": [
         "linux-host"
       ],
-      "mutations": [],
+      "mutations": [
+        "M-388",
+        "M-391",
+        "M-392",
+        "M-395",
+        "M-396",
+        "M-397",
+        "M-398",
+        "M-401",
+        "M-402"
+      ],
       "artifacts": []
     },
     {
@@ -1301,7 +1331,17 @@
       "profiles": [
         "seatbelt"
       ],
-      "mutations": [],
+      "mutations": [
+        "M-379",
+        "M-380",
+        "M-381",
+        "M-382",
+        "M-383",
+        "M-384",
+        "M-385",
+        "M-386",
+        "M-387"
+      ],
       "artifacts": []
     },
     {
@@ -1582,7 +1622,13 @@
       "profiles": [
         "bwrap"
       ],
-      "mutations": [],
+      "mutations": [
+        "M-395",
+        "M-396",
+        "M-397",
+        "M-398",
+        "M-399"
+      ],
       "artifacts": []
     },
     {
