@@ -324,7 +324,7 @@ func bwrapRejectSymlinkedGitMetadata(root string, metadata []string) error {
 			return fmt.Errorf("tools: bwrap inspect git metadata %q: %w", rel, err)
 		}
 		if fi.Mode()&fs.ModeSymlink != 0 {
-			return fmt.Errorf("tools: bwrap cannot protect git metadata %q: it is a symbolic link; keep hooks in the working tree with core.hooksPath instead", rel)
+			return fmt.Errorf("tools: bwrap cannot protect git metadata %q: it is a symbolic link; replace the link with the file or directory itself (for hooks, core.hooksPath keeps them in the working tree)", rel)
 		}
 	}
 	return nil

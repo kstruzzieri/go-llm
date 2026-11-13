@@ -137,16 +137,17 @@ func inspectSandboxWorkspace(root string) (sandboxGitLayout, error) {
 // by descendModules. Absent entries are skipped; any other error fails
 // closed.
 //
-// Residual R9: a .git that is a symlink, and a hooks directory that is a
-// symlink into the tree, are user-chosen in-tree layouts; their targets are
-// ordinary workspace files, outside this protection like core.hooksPath into
-// the tree. The same holds for a <d>/modules or <d>/worktrees that is a
-// symlink (or not a directory) and for a symlinked child of either
-// container: the scan skips them, so on bwrap such a container or git dir is
-// as unprotected as one absent at spawn (R1). A symlinked metadata entry
-// (hooks, info, config, ...) is the exception on bwrap: it fails the spawn
-// (bwrapRejectSymlinkedGitMetadata), because its mount would cover the
-// target and leave the link replaceable.
+// Residual R9: a .git that is a symlink, and a metadata entry or a file inside
+// hooks or info that is a symlink or hard link to a workspace file, are
+// user-chosen in-tree layouts; their targets are ordinary workspace files,
+// outside this protection like core.hooksPath into the workspace. The same
+// holds for a <d>/modules or <d>/worktrees that is a symlink (or not a
+// directory) and for a symlinked child of either container: the scan skips
+// them, so on bwrap such a container or git dir is as unprotected as one
+// absent at spawn (R1). A symlinked metadata entry itself (hooks, info,
+// config, ...; not a file inside hooks or info) is the exception on bwrap: it
+// fails the spawn (bwrapRejectSymlinkedGitMetadata), because its mount would
+// cover the target and leave the link replaceable.
 func scanGitDir(d string, out *sandboxGitLayout) error {
 	for _, name := range []string{"hooks", "info", "config", "config.worktree", "commondir", "gitdir"} {
 		p := filepath.Join(d, name)

@@ -598,7 +598,7 @@ func TestBwrapPrepareRefusesSymlinkedGitMetadata(t *testing.T) {
 			_, err := b.Run(context.Background(), bwrapTestSpec(t, ws))
 			// containment: GITMETA-BWRAP-PREPARE
 			want := `tools: bwrap cannot protect git metadata "` + c.rel +
-				`": it is a symbolic link; keep hooks in the working tree with core.hooksPath instead`
+				`": it is a symbolic link; replace the link with the file or directory itself (for hooks, core.hooksPath keeps them in the working tree)`
 			if err == nil || err.Error() != want {
 				t.Fatalf("err = %v, want %q", err, want)
 			}
