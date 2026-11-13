@@ -1063,6 +1063,7 @@ func TestBwrapGitMetadataDenied(t *testing.T) {
 			before, res := runGitMetaAttackWith(t, root, a, func(snippet string) execResult {
 				return realBwrapRun(t, cfg, root, []string{"/bin/sh", "-c", snippet})
 			})
+			// containment: GITMETA-BWRAP
 			requireGitMetaUnchanged(t, root, before, resDetail(res), a.protectedOnly(true))
 		})
 	}
@@ -1176,6 +1177,7 @@ func TestBwrapGitOrdinaryOps(t *testing.T) {
 			root := canonGitTempDir(t)
 			writeRealGitFixture(t, root)
 			res := realBwrapRun(t, cfg, root, []string{"/bin/sh", "-c", op.snippet})
+			// containment: GITMETA-BWRAP
 			if (res.ExitCode == 0) != op.wantOK {
 				t.Fatalf("exit %d, want success=%v; stdout %q, stderr %q", res.ExitCode, op.wantOK, res.Stdout, res.Stderr)
 			}
@@ -1222,6 +1224,7 @@ func TestBwrapGitMetadataManySubmodules(t *testing.T) {
 	if res := realBwrapRun(t, cfg, root, []string{"/usr/bin/true"}); res.ExitCode != 0 {
 		t.Fatalf("/usr/bin/true: exit %d, stderr %q", res.ExitCode, res.Stderr)
 	}
+	// containment: GITMETA-BWRAP
 	hook := filepath.Join(root, ".git", "modules", "s299", "hooks", "pre-commit")
 	res := realBwrapRun(t, cfg, root, []string{"/bin/sh", "-c", "echo P > .git/modules/s299/hooks/pre-commit"})
 	if _, err := os.Lstat(hook); !errors.Is(err, os.ErrNotExist) {
@@ -1241,6 +1244,7 @@ func TestBwrapGitMetadataExecInsideHooks(t *testing.T) {
 	writeGitFixture(t, root)
 	res := realBwrapRun(t, SandboxConfig{Runtime: SandboxRuntimeBwrap}, root,
 		[]string{filepath.Join(root, ".git", "hooks", "pre-commit")})
+	// containment: GITMETA-BWRAP
 	if res.ExitCode != 0 {
 		t.Fatalf("hook exe: exit %d, stderr %q", res.ExitCode, res.Stderr)
 	}
@@ -1267,6 +1271,7 @@ func TestBwrapVerifierCannotPlantHook(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// containment: GITMETA-BWRAP
 	requireGitMetaUnchanged(t, root, before, "verifier observation:\n"+out, false)
 	// The shell ran and its write was refused: not a vacuous pass where
 	// nothing spawned.

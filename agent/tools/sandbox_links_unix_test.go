@@ -89,6 +89,7 @@ func TestInspectSandboxWorkspaceFindsGitLayout(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// containment: GITMETA-DISCOVERY
 	for _, c := range []struct {
 		field     string
 		got, want []string
@@ -128,6 +129,7 @@ func TestInspectSandboxWorkspaceBrokenModuleIsProtectedNotDescended(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
+	// containment: GITMETA-DISCOVERY
 	if !slices.Contains(got.gitDirs, broken) {
 		t.Errorf("broken module not a git dir: %q", got.gitDirs)
 	}
@@ -158,6 +160,7 @@ func TestInspectSandboxWorkspaceSlashNamedHooksSubmodule(t *testing.T) {
 		t.Fatal(err)
 	}
 	libs := filepath.Join(root, ".git/modules/libs")
+	// containment: GITMETA-DISCOVERY
 	for _, g := range joinAll(root, ".git/modules/libs/a", ".git/modules/libs/hooks") {
 		if !slices.Contains(got.gitDirs, g) {
 			t.Errorf("%s not a git dir: %q", g, got.gitDirs)
@@ -179,6 +182,7 @@ func TestInspectSandboxWorkspaceStrippedModuleIsIntermediate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// containment: GITMETA-DISCOVERY
 	s := filepath.Join(root, ".git/modules/s")
 	if !slices.Contains(got.intermediates, s) {
 		t.Errorf("s not an intermediate: %q", got.intermediates)
@@ -221,6 +225,7 @@ func TestInspectSandboxWorkspaceModuleNamedHooks(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			// containment: GITMETA-DISCOVERY
 			inGitDirs, inReadOnly := slices.Contains(got.gitDirs, g), slices.Contains(got.moduleReadOnly, g)
 			if inGitDirs != c.head || inReadOnly == c.head || slices.Contains(got.metadata, g) {
 				t.Errorf("%s: gitDirs %q, moduleReadOnly %q, metadata %q", c.rel, got.gitDirs, got.moduleReadOnly, got.metadata)
@@ -238,6 +243,7 @@ func TestInspectSandboxWorkspaceGitfileWorkspace(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// containment: GITMETA-DISCOVERY
 	if want := joinAll(root, ".git"); !slices.Equal(got.gitFiles, want) {
 		t.Errorf("gitFiles = %q, want %q", got.gitFiles, want)
 	}
@@ -255,6 +261,7 @@ func TestInspectSandboxWorkspaceCaseFoldedDotGit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// containment: GITMETA-DISCOVERY
 	if want := joinAll(root, "sub/.Git"); !slices.Equal(got.dotGitDirs, want) {
 		t.Errorf("dotGitDirs = %q, want %q", got.dotGitDirs, want)
 	}
@@ -287,6 +294,7 @@ func TestInspectSandboxWorkspaceScanErrorFailsClosed(t *testing.T) {
 			// The workspace walk reads these before the scan does, so the
 			// call above fails in the walk; the scan's own error paths are
 			// pinned directly (they alone cover a change between the two).
+			// containment: GITMETA-DISCOVERY
 			l := sandboxGitLayout{root: root}
 			err := scanGitDir(filepath.Join(root, ".git"), &l)
 			if want := fmt.Sprintf("git metadata %q", c.want); err == nil || !strings.Contains(err.Error(), want) {
@@ -308,6 +316,7 @@ func TestInspectSandboxWorkspaceSymlinkedDotGitIsNeither(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// containment: GITMETA-DISCOVERY
 	if len(got.gitFiles) != 0 || len(got.dotGitDirs) != 0 {
 		t.Errorf("symlinked .git recorded: gitFiles %q dotGitDirs %q", got.gitFiles, got.dotGitDirs)
 	}
@@ -325,6 +334,7 @@ func TestScanGitDirTreatsAbsentAsAbsent(t *testing.T) {
 	if err := scanGitDir(filepath.Join(root, ".git"), &l); err != nil {
 		t.Fatal(err)
 	}
+	// containment: GITMETA-DISCOVERY
 	if len(l.containers)+len(l.gitDirs)+len(l.metadata)+len(l.intermediates) != 0 {
 		t.Errorf("absent entries recorded: %+v", l)
 	}
@@ -345,6 +355,7 @@ func TestInspectSandboxWorkspaceManySubmodules(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// containment: GITMETA-DISCOVERY
 	if len(got.gitDirs) != 300 {
 		t.Fatalf("len(gitDirs) = %d, want 300", len(got.gitDirs))
 	}

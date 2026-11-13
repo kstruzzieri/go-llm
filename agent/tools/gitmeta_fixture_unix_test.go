@@ -483,6 +483,7 @@ func TestGitMetaProtectedLines(t *testing.T) {
 		if after == before {
 			t.Fatalf("%s left the full snapshot unchanged", c.snippet)
 		}
+		// containment: GITMETA-SEATBELT
 		if same := gitMetaProtectedLines(after) == gitMetaProtectedLines(before); same != c.wantSame {
 			t.Errorf("%s: protected lines unchanged = %v, want %v", c.snippet, same, c.wantSame)
 		}
@@ -519,6 +520,7 @@ func TestGitMetaAttacksChangeTheSnapshotUnsandboxed(t *testing.T) {
 				return execResult{}
 			})
 			after := gitMetaSnapshot(t, root)
+			// containment: GITMETA-SEATBELT
 			if after == before {
 				t.Fatalf("unsandboxed attack left the snapshot unchanged; output: %s", out)
 			}

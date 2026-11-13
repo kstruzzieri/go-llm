@@ -1036,6 +1036,556 @@
       "artifacts": []
     },
     {
+      "id": "GITMETA-DISCOVERY",
+      "source": "issue-721:64",
+      "requirement": "Before a native sandboxed spawn, the workspace walk finds the git layout both backends protect: every directory or regular file named .git at any depth (ASCII case-folded; a symbolic link named .git is neither), each linked-worktree and submodule git dir under a worktrees or modules container, recursively, the intermediate directories of slash-named submodules, each present hooks, info, config, config.worktree, commondir and gitdir entry, and each modules-tree directory named hooks or info that is not a git dir. A module directory with a HEAD file is a git dir; one named hooks or info is read-only whole; one holding any other file is a broken git dir, protected and not descended. A scan error other than absence fails the spawn.",
+      "status": "verified",
+      "owner": "",
+      "layer": "focused",
+      "exempt": "",
+      "scenarios": [],
+      "refs": [
+        {
+          "package": "./agent/tools",
+          "test": "TestInspectSandboxWorkspaceFindsGitLayout",
+          "file": "agent/tools/sandbox_links_unix_test.go",
+          "func": "TestInspectSandboxWorkspaceFindsGitLayout"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestInspectSandboxWorkspaceBrokenModuleIsProtectedNotDescended",
+          "file": "agent/tools/sandbox_links_unix_test.go",
+          "func": "TestInspectSandboxWorkspaceBrokenModuleIsProtectedNotDescended"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestInspectSandboxWorkspaceSlashNamedHooksSubmodule",
+          "file": "agent/tools/sandbox_links_unix_test.go",
+          "func": "TestInspectSandboxWorkspaceSlashNamedHooksSubmodule"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestInspectSandboxWorkspaceStrippedModuleIsIntermediate",
+          "file": "agent/tools/sandbox_links_unix_test.go",
+          "func": "TestInspectSandboxWorkspaceStrippedModuleIsIntermediate"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestInspectSandboxWorkspaceModuleNamedHooks",
+          "file": "agent/tools/sandbox_links_unix_test.go",
+          "func": "TestInspectSandboxWorkspaceModuleNamedHooks"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestInspectSandboxWorkspaceGitfileWorkspace",
+          "file": "agent/tools/sandbox_links_unix_test.go",
+          "func": "TestInspectSandboxWorkspaceGitfileWorkspace"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestInspectSandboxWorkspaceCaseFoldedDotGit",
+          "file": "agent/tools/sandbox_links_unix_test.go",
+          "func": "TestInspectSandboxWorkspaceCaseFoldedDotGit"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestInspectSandboxWorkspaceScanErrorFailsClosed",
+          "file": "agent/tools/sandbox_links_unix_test.go",
+          "func": "TestInspectSandboxWorkspaceScanErrorFailsClosed"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestInspectSandboxWorkspaceSymlinkedDotGitIsNeither",
+          "file": "agent/tools/sandbox_links_unix_test.go",
+          "func": "TestInspectSandboxWorkspaceSymlinkedDotGitIsNeither"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestScanGitDirTreatsAbsentAsAbsent",
+          "file": "agent/tools/sandbox_links_unix_test.go",
+          "func": "TestScanGitDirTreatsAbsentAsAbsent"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestInspectSandboxWorkspaceManySubmodules",
+          "file": "agent/tools/sandbox_links_unix_test.go",
+          "func": "TestInspectSandboxWorkspaceManySubmodules"
+        }
+      ],
+      "profiles": [
+        "darwin-host",
+        "linux-host"
+      ],
+      "mutations": [],
+      "artifacts": []
+    },
+    {
+      "id": "GITMETA-BUILDERS",
+      "source": "issue-721:55",
+      "requirement": "The Seatbelt profile builder renders the git metadata deny after the workspace write grant, exactly: four any-depth, ASCII case-folded regexes for the .git entry, its hooks and info, its config-class files and its module and worktree containers; per discovered git dir its hooks and info subpaths, config-class literals and containers regex; each read-only modules-tree directory whole; and each intermediate's direct children, every prefix matched literally and every path inside the workspace. The bwrap argv builder mounts the discovered layout after the workspace bind, parents first, writable git dirs self-bound and the rest read-only, rejects a path outside the workspace or in both lists, and keeps the executable's read-only literal unless the deepest git mount containing it is read-only.",
+      "status": "verified",
+      "owner": "",
+      "layer": "focused",
+      "exempt": "",
+      "scenarios": [],
+      "refs": [
+        {
+          "package": "./agent/tools",
+          "test": "TestSeatbeltProfileGolden",
+          "file": "agent/tools/seatbelt_test.go",
+          "func": "TestSeatbeltProfileGolden"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestSeatbeltProfileGitAnchors",
+          "file": "agent/tools/seatbelt_test.go",
+          "func": "TestSeatbeltProfileGitAnchors"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestSBPLRegexQuotes",
+          "file": "agent/tools/seatbelt_test.go",
+          "func": "TestSBPLRegexQuotes"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestSeatbeltProfileRejectsGitPathsOutsideWorkspace",
+          "file": "agent/tools/seatbelt_test.go",
+          "func": "TestSeatbeltProfileRejectsGitPathsOutsideWorkspace"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestSeatbeltProfileGitDeterministic",
+          "file": "agent/tools/seatbelt_test.go",
+          "func": "TestSeatbeltProfileGitDeterministic"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestBuildBwrapArgsGitMetadata",
+          "file": "agent/tools/bwrap_test.go",
+          "func": "TestBuildBwrapArgsGitMetadata"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestBuildBwrapArgsGitMetadataRejections",
+          "file": "agent/tools/bwrap_test.go",
+          "func": "TestBuildBwrapArgsGitMetadataRejections"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestBuildBwrapArgsGitMetadataDedupesAndKeepsCallerSlices",
+          "file": "agent/tools/bwrap_test.go",
+          "func": "TestBuildBwrapArgsGitMetadataDedupesAndKeepsCallerSlices"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestBuildBwrapArgsExeInWritableGitDirUnderReadOnlyContainerKeepsLiteral",
+          "file": "agent/tools/bwrap_test.go",
+          "func": "TestBuildBwrapArgsExeInWritableGitDirUnderReadOnlyContainerKeepsLiteral"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestBuildBwrapArgsExeInsideGitReadOnlyIsCovered",
+          "file": "agent/tools/bwrap_test.go",
+          "func": "TestBuildBwrapArgsExeInsideGitReadOnlyIsCovered"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestBuildBwrapArgsExeLiteralFollowsGitMounts",
+          "file": "agent/tools/bwrap_test.go",
+          "func": "TestBuildBwrapArgsExeLiteralFollowsGitMounts"
+        }
+      ],
+      "profiles": [
+        "darwin-host",
+        "linux-host",
+        "windows"
+      ],
+      "mutations": [],
+      "artifacts": []
+    },
+    {
+      "id": "GITMETA-BWRAP-PREPARE",
+      "source": "issue-721:56",
+      "requirement": "The bwrap backend's prepare step hands every discovered git layout class to the argv (.git dirs and git dirs as writable self-binds; containers, intermediates, metadata, read-only modules-tree directories and gitfiles read-only) and refuses to spawn, naming the entry, when a discovered git dir's metadata entry is a symbolic link.",
+      "status": "verified",
+      "owner": "",
+      "layer": "focused",
+      "exempt": "",
+      "scenarios": [],
+      "refs": [
+        {
+          "package": "./agent/tools",
+          "test": "TestBwrapPrepareMountsGitLayout",
+          "file": "agent/tools/exec_linux_test.go",
+          "func": "TestBwrapPrepareMountsGitLayout"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestBwrapPrepareRefusesSymlinkedGitMetadata",
+          "file": "agent/tools/exec_linux_test.go",
+          "func": "TestBwrapPrepareRefusesSymlinkedGitMetadata"
+        }
+      ],
+      "profiles": [
+        "linux-host"
+      ],
+      "mutations": [],
+      "artifacts": []
+    },
+    {
+      "id": "GITMETA-SEATBELT",
+      "source": "issue-721:56",
+      "requirement": "Under the Seatbelt backend a command or a verifier cannot create, change, rename, replace or delete git hooks, config, config.worktree, commondir, gitdir, anything under info, the .git entry, a gitfile, or the metadata of a submodule, nested-repository or linked-worktree git dir, at any depth and in any ASCII case spelling, including metadata and repositories created during the run; git's index, object, ref and commit-graph writes stay allowed, and the any-depth rules alone still refuse the top-level attacks when discovery finds nothing. Each attack changes the git metadata snapshot when run unsandboxed.",
+      "status": "verified",
+      "owner": "",
+      "layer": "focused",
+      "exempt": "",
+      "scenarios": [],
+      "refs": [
+        {
+          "package": "./agent/tools",
+          "test": "TestSeatbeltGitMetadataDenied",
+          "file": "agent/tools/exec_darwin_test.go",
+          "func": "TestSeatbeltGitMetadataDenied"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestSeatbeltGitMetadataDeniedWithoutDiscovery",
+          "file": "agent/tools/exec_darwin_test.go",
+          "func": "TestSeatbeltGitMetadataDeniedWithoutDiscovery"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestSeatbeltGitMetadataOrdinaryWritesAllowed",
+          "file": "agent/tools/exec_darwin_test.go",
+          "func": "TestSeatbeltGitMetadataOrdinaryWritesAllowed"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestSeatbeltGitMetadataRegexIsLiteral",
+          "file": "agent/tools/exec_darwin_test.go",
+          "func": "TestSeatbeltGitMetadataRegexIsLiteral"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestSeatbeltGitMetadataManySubmodules",
+          "file": "agent/tools/exec_darwin_test.go",
+          "func": "TestSeatbeltGitMetadataManySubmodules"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestSeatbeltGitMetadataExecInsideHooks",
+          "file": "agent/tools/exec_darwin_test.go",
+          "func": "TestSeatbeltGitMetadataExecInsideHooks"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestSeatbeltVerifierCannotPlantHook",
+          "file": "agent/tools/exec_darwin_test.go",
+          "func": "TestSeatbeltVerifierCannotPlantHook"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestGitMetaAttacksChangeTheSnapshotUnsandboxed",
+          "file": "agent/tools/gitmeta_fixture_unix_test.go",
+          "func": "TestGitMetaAttacksChangeTheSnapshotUnsandboxed"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestGitMetaProtectedLines",
+          "file": "agent/tools/gitmeta_fixture_unix_test.go",
+          "func": "TestGitMetaProtectedLines"
+        }
+      ],
+      "profiles": [
+        "seatbelt"
+      ],
+      "mutations": [],
+      "artifacts": []
+    },
+    {
+      "id": "GITMETA-BWRAP",
+      "source": "issue-721:56",
+      "requirement": "Under the bwrap backend a command or a verifier cannot change, rename, replace or delete git metadata that exists when the command starts: hooks, info, config-class files, the .git entry, gitfiles, module and worktree containers, and submodule, nested-repository and linked-worktree git dirs. git add, commit, checkout, stash, gc and rebase keep working, in submodules, nested repositories and linked worktrees too; git config, core.hooksPath, sparse-checkout, worktree add and submodule update --init are refused. A new file inside a writable git dir and a new repository are not refused (#721 R1), and a symbolic link among a git dir's metadata entries makes bwrap refuse to spawn.",
+      "status": "verified",
+      "owner": "",
+      "layer": "focused",
+      "exempt": "",
+      "scenarios": [],
+      "refs": [
+        {
+          "package": "./agent/tools",
+          "test": "TestBwrapGitMetadataDenied/direct-hook",
+          "file": "agent/tools/exec_linux_behavioral_test.go",
+          "func": "TestBwrapGitMetadataDenied"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestBwrapGitMetadataDenied/direct-hook-new",
+          "file": "agent/tools/exec_linux_behavioral_test.go",
+          "func": "TestBwrapGitMetadataDenied"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestBwrapGitMetadataDenied/delete-hook",
+          "file": "agent/tools/exec_linux_behavioral_test.go",
+          "func": "TestBwrapGitMetadataDenied"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestBwrapGitMetadataDenied/chmod-hook",
+          "file": "agent/tools/exec_linux_behavioral_test.go",
+          "func": "TestBwrapGitMetadataDenied"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestBwrapGitMetadataDenied/direct-config",
+          "file": "agent/tools/exec_linux_behavioral_test.go",
+          "func": "TestBwrapGitMetadataDenied"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestBwrapGitMetadataDenied/info-exclude",
+          "file": "agent/tools/exec_linux_behavioral_test.go",
+          "func": "TestBwrapGitMetadataDenied"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestBwrapGitMetadataDenied/info-attributes",
+          "file": "agent/tools/exec_linux_behavioral_test.go",
+          "func": "TestBwrapGitMetadataDenied"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestBwrapGitMetadataDenied/rename-hooks",
+          "file": "agent/tools/exec_linux_behavioral_test.go",
+          "func": "TestBwrapGitMetadataDenied"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestBwrapGitMetadataDenied/rename-parent",
+          "file": "agent/tools/exec_linux_behavioral_test.go",
+          "func": "TestBwrapGitMetadataDenied"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestBwrapGitMetadataDenied/dotgit-impostor",
+          "file": "agent/tools/exec_linux_behavioral_test.go",
+          "func": "TestBwrapGitMetadataDenied"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestBwrapGitMetadataDenied/symlink-replace-hooks",
+          "file": "agent/tools/exec_linux_behavioral_test.go",
+          "func": "TestBwrapGitMetadataDenied"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestBwrapGitMetadataDenied/symlink-alias-hooks",
+          "file": "agent/tools/exec_linux_behavioral_test.go",
+          "func": "TestBwrapGitMetadataDenied"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestBwrapGitMetadataDenied/symlink-alias-config",
+          "file": "agent/tools/exec_linux_behavioral_test.go",
+          "func": "TestBwrapGitMetadataDenied"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestBwrapGitMetadataDenied/hardlink-config",
+          "file": "agent/tools/exec_linux_behavioral_test.go",
+          "func": "TestBwrapGitMetadataDenied"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestBwrapGitMetadataDenied/hardlink-hook",
+          "file": "agent/tools/exec_linux_behavioral_test.go",
+          "func": "TestBwrapGitMetadataDenied"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestBwrapGitMetadataDenied/nested-direct",
+          "file": "agent/tools/exec_linux_behavioral_test.go",
+          "func": "TestBwrapGitMetadataDenied"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestBwrapGitMetadataDenied/nested-config",
+          "file": "agent/tools/exec_linux_behavioral_test.go",
+          "func": "TestBwrapGitMetadataDenied"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestBwrapGitMetadataDenied/nested-rename-dotgit",
+          "file": "agent/tools/exec_linux_behavioral_test.go",
+          "func": "TestBwrapGitMetadataDenied"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestBwrapGitMetadataDenied/nested-grandparent-rename",
+          "file": "agent/tools/exec_linux_behavioral_test.go",
+          "func": "TestBwrapGitMetadataDenied"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestBwrapGitMetadataDenied/submodule-hook",
+          "file": "agent/tools/exec_linux_behavioral_test.go",
+          "func": "TestBwrapGitMetadataDenied"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestBwrapGitMetadataDenied/submodule-config",
+          "file": "agent/tools/exec_linux_behavioral_test.go",
+          "func": "TestBwrapGitMetadataDenied"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestBwrapGitMetadataDenied/gitfile-rewrite",
+          "file": "agent/tools/exec_linux_behavioral_test.go",
+          "func": "TestBwrapGitMetadataDenied"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestBwrapGitMetadataDenied/submodule-gitfile-replace",
+          "file": "agent/tools/exec_linux_behavioral_test.go",
+          "func": "TestBwrapGitMetadataDenied"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestBwrapGitMetadataDenied/worktree-commondir",
+          "file": "agent/tools/exec_linux_behavioral_test.go",
+          "func": "TestBwrapGitMetadataDenied"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestBwrapGitMetadataDenied/worktree-gitfile-rewrite",
+          "file": "agent/tools/exec_linux_behavioral_test.go",
+          "func": "TestBwrapGitMetadataDenied"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestBwrapGitMetadataDenied/worktree-gitfile-replace",
+          "file": "agent/tools/exec_linux_behavioral_test.go",
+          "func": "TestBwrapGitMetadataDenied"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestBwrapGitMetadataDenied/module-rename-into",
+          "file": "agent/tools/exec_linux_behavioral_test.go",
+          "func": "TestBwrapGitMetadataDenied"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestBwrapGitMetadataDenied/module-symlink",
+          "file": "agent/tools/exec_linux_behavioral_test.go",
+          "func": "TestBwrapGitMetadataDenied"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestBwrapGitMetadataDenied/modules-container-rename",
+          "file": "agent/tools/exec_linux_behavioral_test.go",
+          "func": "TestBwrapGitMetadataDenied"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestBwrapGitMetadataDenied/intermediate-rename",
+          "file": "agent/tools/exec_linux_behavioral_test.go",
+          "func": "TestBwrapGitMetadataDenied"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestBwrapGitMetadataDenied/intermediate-preplant",
+          "file": "agent/tools/exec_linux_behavioral_test.go",
+          "func": "TestBwrapGitMetadataDenied"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestBwrapGitMetadataDenied/uninit-preplant",
+          "file": "agent/tools/exec_linux_behavioral_test.go",
+          "func": "TestBwrapGitMetadataDenied"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestBwrapGitMetadataDenied/uninit-preplant-symlink",
+          "file": "agent/tools/exec_linux_behavioral_test.go",
+          "func": "TestBwrapGitMetadataDenied"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestBwrapGitMetadataDenied/nested-submodule-rename",
+          "file": "agent/tools/exec_linux_behavioral_test.go",
+          "func": "TestBwrapGitMetadataDenied"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestBwrapGitMetadataDenied/worktree-rename-into",
+          "file": "agent/tools/exec_linux_behavioral_test.go",
+          "func": "TestBwrapGitMetadataDenied"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestBwrapGitMetadataDenied/worktrees-container-rename",
+          "file": "agent/tools/exec_linux_behavioral_test.go",
+          "func": "TestBwrapGitMetadataDenied"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestBwrapGitMetadataDenied/libs-direct-hook",
+          "file": "agent/tools/exec_linux_behavioral_test.go",
+          "func": "TestBwrapGitMetadataDenied"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestBwrapGitMetadataDenied/stripped-module-hook",
+          "file": "agent/tools/exec_linux_behavioral_test.go",
+          "func": "TestBwrapGitMetadataDenied"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestBwrapGitMetadataDenied/module-named-hooks-two-spawn",
+          "file": "agent/tools/exec_linux_behavioral_test.go",
+          "func": "TestBwrapGitMetadataDenied"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestBwrapGitMetadataDenied/slash-module-named-Hooks-two-spawn",
+          "file": "agent/tools/exec_linux_behavioral_test.go",
+          "func": "TestBwrapGitMetadataDenied"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestBwrapGitOrdinaryOps",
+          "file": "agent/tools/exec_linux_behavioral_test.go",
+          "func": "TestBwrapGitOrdinaryOps"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestBwrapGitMetadataManySubmodules",
+          "file": "agent/tools/exec_linux_behavioral_test.go",
+          "func": "TestBwrapGitMetadataManySubmodules"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestBwrapGitMetadataExecInsideHooks",
+          "file": "agent/tools/exec_linux_behavioral_test.go",
+          "func": "TestBwrapGitMetadataExecInsideHooks"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestBwrapVerifierCannotPlantHook",
+          "file": "agent/tools/exec_linux_behavioral_test.go",
+          "func": "TestBwrapVerifierCannotPlantHook"
+        }
+      ],
+      "profiles": [
+        "bwrap"
+      ],
+      "mutations": [],
+      "artifacts": []
+    },
+    {
       "id": "TERM-PREVIEW",
       "source": "issue-452:55",
       "requirement": "Approval previews render ESC, C1, carriage return, backspace, tab and bidi controls inert and visibly escaped, for file, exec and background prompts.",

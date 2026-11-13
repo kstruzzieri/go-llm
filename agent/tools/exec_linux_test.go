@@ -559,6 +559,7 @@ func TestBwrapPrepareMountsGitLayout(t *testing.T) {
 	if _, err := b.Run(context.Background(), bwrapTestSpec(t, ws)); err != nil {
 		t.Fatal(err)
 	}
+	// containment: GITMETA-BWRAP-PREPARE
 	joined := " " + strings.Join(runner.spec.Argv, " ") + " "
 	for _, m := range [][2]string{
 		{"--bind", "/.git"}, {"--bind", "/.git/modules/m"},
@@ -595,6 +596,7 @@ func TestBwrapPrepareRefusesSymlinkedGitMetadata(t *testing.T) {
 			runner := &captureRunner{}
 			b := testBwrapBackend(runner, &captureStarter{proc: fakeProcess{}}, SandboxConfig{Runtime: SandboxRuntimeBwrap}, 0)
 			_, err := b.Run(context.Background(), bwrapTestSpec(t, ws))
+			// containment: GITMETA-BWRAP-PREPARE
 			want := `tools: bwrap cannot protect git metadata "` + c.rel +
 				`": it is a symbolic link; keep hooks in the working tree with core.hooksPath instead`
 			if err == nil || err.Error() != want {

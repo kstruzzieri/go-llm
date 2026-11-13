@@ -132,6 +132,7 @@ func TestSeatbeltProfileGolden(t *testing.T) {
   (regex "^/private/tmp/ws/(.*/)?\\.[gG][iI][tT]/([cC][oO][nN][fF][iI][gG](\\.[wW][oO][rR][kK][tT][rR][eE][eE])?|[cC][oO][mM][mM][oO][nN][dD][iI][rR]|[gG][iI][tT][dD][iI][rR])$")
   (regex "^/private/tmp/ws/(.*/)?\\.[gG][iI][tT]/([mM][oO][dD][uU][lL][eE][sS]|[wW][oO][rR][kK][tT][rR][eE][eE][sS])(/[^/]+)?$"))
 `
+	// containment: GITMETA-BUILDERS
 	if got := mustProfile(t, basePolicy()); got != want {
 		t.Fatalf("profile mismatch:\n--- got ---\n%s\n--- want ---\n%s", got, want)
 	}
@@ -388,6 +389,7 @@ func TestSBPLRegexQuotes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// containment: GITMETA-BUILDERS
 	if want := `(regex "^/w/a\\+b \\(v2\\)\"q$")`; got != want {
 		t.Fatalf("got %s, want %s", got, want)
 	}
@@ -428,12 +430,14 @@ func TestSeatbeltProfileGitAnchors(t *testing.T) {
   (subpath "/private/tmp/ws/.git/modules/libs/Hooks")
   (regex "^/private/tmp/ws/\\.git/modules/libs/[^/]+$"))
 `
+	// containment: GITMETA-BUILDERS
 	if got := mustProfile(t, gitAnchorPolicy()); !strings.Contains(got, "(allow file-write-data (literal \"/dev/null\"))\n"+want+"") || strings.Count(got, "(deny file-write*") != 1 {
 		t.Fatalf("git deny block missing or misordered:\n%s\n--- want ---\n%s", got, want)
 	}
 }
 
 func TestSeatbeltProfileRejectsGitPathsOutsideWorkspace(t *testing.T) {
+	// containment: GITMETA-BUILDERS
 	for _, bad := range []string{"/private/tmp/other/.git/modules/m", "/private/tmp/ws/../x/.git/modules/m", "/private/tmp/ws", "/private/tmp/wsx/.git/modules/m", "relative"} {
 		p := basePolicy()
 		p.gitDirs = []string{bad}
@@ -459,6 +463,7 @@ func TestSeatbeltProfileGitDeterministic(t *testing.T) {
 	p.gitDirs = []string{"/private/tmp/ws/.git/modules/libs/a", "/private/tmp/ws/.git/worktrees/wt", "/private/tmp/ws/.git/modules/libs/a"}
 	p.gitReadOnlyDirs = []string{"/private/tmp/ws/.git/modules/hooks", "/private/tmp/ws/.git/modules/libs/Hooks", "/private/tmp/ws/.git/modules/hooks"}
 	p.gitIntermediates = []string{"/private/tmp/ws/.git/modules/libs", "/private/tmp/ws/.git/modules/libs"}
+	// containment: GITMETA-BUILDERS
 	if got := mustProfile(t, p); got != want {
 		t.Fatalf("not deterministic:\n%s\n%s", got, want)
 	}

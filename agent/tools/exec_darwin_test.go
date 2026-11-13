@@ -3197,6 +3197,7 @@ func TestSeatbeltGitMetadataDenied(t *testing.T) {
 	for _, a := range gitMetaAttacks {
 		t.Run(a.name, func(t *testing.T) {
 			root := canonTempDirT(t)
+			// containment: GITMETA-SEATBELT
 			before, res := runGitMetaAttack(t, backend, root, a)
 			requireGitMetaUnchanged(t, root, before, resDetail(res), a.protectedOnly(false))
 		})
@@ -3217,6 +3218,7 @@ func TestSeatbeltGitMetadataDeniedWithoutDiscovery(t *testing.T) {
 	}
 	sb.inspect = func(string) (sandboxGitLayout, error) { return sandboxGitLayout{}, nil }
 	root := canonTempDirT(t)
+	// containment: GITMETA-SEATBELT
 	if before, res := runGitMetaAttack(t, backend, root, gitMetaAttackNamed(t, "submodule-hook")); gitMetaSnapshot(t, root) == before {
 		t.Fatalf("control: submodule hook write refused with no discovered git dirs (%s). Either the stubbed "+
 			"inspect never reached the profile, or rules 1-4 now cover submodule hooks and the control needs "+
@@ -3248,6 +3250,7 @@ func TestSeatbeltGitMetadataOrdinaryWritesAllowed(t *testing.T) {
 		t.Run(rel, func(t *testing.T) {
 			res := seatbeltRunWith(t, backend, root,
 				[]string{"/bin/sh", "-c", `mkdir -p "$(dirname "$1")" && echo x > "$1"`, "sh", rel})
+			// containment: GITMETA-SEATBELT
 			if res.ExitCode != 0 {
 				t.Fatalf("write %s: %s", rel, resDetail(res))
 			}
@@ -3281,6 +3284,7 @@ func TestSeatbeltGitMetadataRegexIsLiteral(t *testing.T) {
 			t.Fatalf("touch xgit: %s", resDetail(res))
 		}
 	})
+	// containment: GITMETA-SEATBELT
 	for _, name := range []string{"direct-hook", "nested-submodule-rename", "intermediate-preplant"} {
 		a := gitMetaAttackNamed(t, name)
 		t.Run(name, func(t *testing.T) {
@@ -3313,6 +3317,7 @@ func TestSeatbeltGitMetadataManySubmodules(t *testing.T) {
 	if res := seatbeltRunWith(t, backend, root, []string{"/usr/bin/true"}); res.ExitCode != 0 {
 		t.Fatalf("/usr/bin/true: %s", resDetail(res))
 	}
+	// containment: GITMETA-SEATBELT
 	hook := filepath.Join(root, ".git", "modules", "s299", "hooks", "pre-commit")
 	res := seatbeltRunWith(t, backend, root, []string{"/bin/sh", "-c", "echo P > .git/modules/s299/hooks/pre-commit"})
 	if _, err := os.Lstat(hook); !errors.Is(err, os.ErrNotExist) {
@@ -3326,6 +3331,7 @@ func TestSeatbeltGitMetadataExecInsideHooks(t *testing.T) {
 	requireSeatbeltCapability(t)
 	root := canonTempDirT(t)
 	writeGitFixture(t, root)
+	// containment: GITMETA-SEATBELT
 	if res := realSeatbeltRun(t, seatbeltTestCfg(), root, []string{filepath.Join(root, ".git", "hooks", "pre-commit")}); res.ExitCode != 0 {
 		t.Fatalf("hook exe: %s", resDetail(res))
 	}
@@ -3351,6 +3357,7 @@ func TestSeatbeltVerifierCannotPlantHook(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// containment: GITMETA-SEATBELT
 	requireGitMetaUnchanged(t, root, before, "verifier observation:\n"+out, false)
 	// The shell ran and its write was refused: not a vacuous pass where
 	// nothing spawned.

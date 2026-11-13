@@ -432,6 +432,7 @@ func TestBuildBwrapArgsGitMetadata(t *testing.T) {
 		"--ro-bind", ws + "/.git/modules/m/config", ws + "/.git/modules/m/config",
 		"--ro-bind", ws + "/m/.git", ws + "/m/.git",
 	}
+	// containment: GITMETA-BUILDERS
 	if !slices.Equal(between, want) {
 		t.Fatalf("git mounts mismatch:\n got %q\nwant %q", between, want)
 	}
@@ -453,6 +454,7 @@ func TestBuildBwrapArgsGitMetadataRejections(t *testing.T) {
 		p := validBwrapPolicy()
 		p.gitWritable, p.gitReadOnly = tc.w, tc.r
 		_, err := buildBwrapArgs(p)
+		// containment: GITMETA-BUILDERS
 		if err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Errorf("%s: err = %v, want substring %q", name, err, tc.want)
 		}
@@ -468,6 +470,7 @@ func TestBuildBwrapArgsGitMetadataDedupesAndKeepsCallerSlices(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// containment: GITMETA-BUILDERS
 	if n := strings.Count(" "+strings.Join(got, " ")+" ", " /home/u/proj/.git/z /home/u/proj/.git/z "); n != 1 {
 		t.Fatalf("duplicate writable path emitted %d times: %q", n, got)
 	}
@@ -492,6 +495,7 @@ func TestBuildBwrapArgsExeInWritableGitDirUnderReadOnlyContainerKeepsLiteral(t *
 	exe := strings.Index(joined, " --ro-bind "+p.exePath+" "+p.exePath+" ")
 	ro := strings.Index(joined, " --ro-bind /home/u/proj/.git/modules ")
 	rw := strings.Index(joined, " --bind /home/u/proj/.git/modules/m ")
+	// containment: GITMETA-BUILDERS
 	if exe < 0 || ro < 0 || rw < 0 || exe < ro || exe < rw {
 		t.Fatalf("exe literal must be present after every git mount: %q", got)
 	}
@@ -506,6 +510,7 @@ func TestBuildBwrapArgsExeInsideGitReadOnlyIsCovered(t *testing.T) {
 		t.Fatal(err)
 	}
 	joined := " " + strings.Join(got, " ") + " "
+	// containment: GITMETA-BUILDERS
 	if strings.Contains(joined, " --ro-bind "+p.exePath+" "+p.exePath+" ") {
 		t.Fatalf("exe literal emitted inside read-only git dir: %q", got)
 	}
@@ -524,6 +529,7 @@ func TestBuildBwrapArgsExeLiteralFollowsGitMounts(t *testing.T) {
 	exe := strings.Index(joined, " --ro-bind "+p.exePath+" ")
 	hooks := strings.Index(joined, " --ro-bind /home/u/proj/.git/hooks ")
 	dotgit := strings.Index(joined, " --bind /home/u/proj/.git ")
+	// containment: GITMETA-BUILDERS
 	if exe < 0 || hooks < 0 || dotgit < 0 || exe < hooks || exe < dotgit {
 		t.Fatalf("exe literal must follow every git mount: %q", got)
 	}
