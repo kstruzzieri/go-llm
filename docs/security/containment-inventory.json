@@ -1266,7 +1266,7 @@
     {
       "id": "GITMETA-SEATBELT",
       "source": "issue-721:56",
-      "requirement": "Under the Seatbelt backend a command or a verifier cannot create, change, rename, replace or delete git hooks, config, config.worktree, commondir, gitdir, anything under info, the .git entry, a gitfile, or the metadata of a submodule, nested-repository or linked-worktree git dir, at any depth and in any ASCII case spelling, including metadata and repositories created during the run; git's index, object, ref and commit-graph writes stay allowed, and the any-depth rules alone still refuse the top-level attacks when discovery finds nothing. Each attack changes the git metadata snapshot when run unsandboxed.",
+      "requirement": "Under the Seatbelt backend a command or a verifier cannot create, change, rename, replace or delete git hooks, config, config.worktree, commondir, gitdir, anything under info, the .git entry, a gitfile, or the metadata of a submodule, nested-repository or linked-worktree git dir under .git/modules or .git/worktrees, in any ASCII case spelling, including metadata and repositories created during the run; git's index, object, ref and commit-graph writes stay allowed, and the any-depth rules alone still refuse the top-level attacks when discovery finds nothing. Each attack changes the git metadata snapshot when run unsandboxed. Outside this row: a .git/hooks, info or config that is a symbolic link into the workspace leaves its target writable, and a .git that is itself a symbolic link is not protected (#721 R9); a git dir inside the workspace but outside .git, .git/modules and .git/worktrees (git init --separate-git-dir into the workspace) keeps writable hooks and config, only the gitfile pointing at it being protected (#721 R7).",
       "status": "verified",
       "owner": "",
       "layer": "focused",
@@ -1347,7 +1347,7 @@
     {
       "id": "GITMETA-BWRAP",
       "source": "issue-721:56",
-      "requirement": "Under the bwrap backend a command or a verifier cannot change, rename, replace or delete git metadata that exists when the command starts: hooks, info, config-class files, the .git entry, gitfiles, module and worktree containers, and submodule, nested-repository and linked-worktree git dirs. git add, commit, checkout, stash, gc and rebase keep working, in submodules, nested repositories and linked worktrees too; git config, core.hooksPath, sparse-checkout, worktree add and submodule update --init are refused. A new file inside a writable git dir and a new repository are not refused (#721 R1), and a symbolic link among a git dir's metadata entries makes bwrap refuse to spawn.",
+      "requirement": "Under the bwrap backend a command or a verifier cannot change, rename, replace or delete the git metadata that exists when the command starts (hooks, info, the config-class files and gitfiles), cannot create a child in an existing module or worktree container, and cannot rename or replace the .git entry or a submodule, nested-repository or linked-worktree git dir, whose other contents stay writable as commits need. git add, commit, checkout, stash, gc and rebase keep working at the top level, as do commits in a submodule, a nested repository and a linked worktree, and gc, commit-graph and a branch named info in a submodule; git config, core.hooksPath, sparse-checkout, worktree add and submodule update --init are refused. A new file inside a writable git dir and a new repository are not refused (#721 R1), #721 R7 applies as on Seatbelt, and a .git that is itself a symbolic link is not protected (#721 R9); the refusal to spawn with a symbolic link among a git dir's metadata entries is GITMETA-BWRAP-PREPARE's.",
       "status": "verified",
       "owner": "",
       "layer": "focused",
@@ -1629,6 +1629,37 @@
         "M-398",
         "M-399"
       ],
+      "artifacts": []
+    },
+    {
+      "id": "GITMETA-PREVIEW",
+      "source": "issue-721:68",
+      "requirement": "The approval preview's sandbox line states the git metadata boundary each backend delivers: git_metadata=ro for Seatbelt, git_metadata=ro(existing) for bwrap, which protects only the metadata present when the command starts (#721 R1), and nothing for the host or any other runtime. The change only narrows the policy, so the approval key's sandbox component does not move for either backend and existing grants keep matching.",
+      "status": "verified",
+      "owner": "",
+      "layer": "focused",
+      "exempt": "",
+      "scenarios": [],
+      "refs": [
+        {
+          "package": "./agent/tools",
+          "test": "TestRenderSandboxLineGitMetadata",
+          "file": "agent/tools/sandbox_test.go",
+          "func": "TestRenderSandboxLineGitMetadata"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestSandboxApprovalKeyUnmovedBy721",
+          "file": "agent/tools/sandbox_test.go",
+          "func": "TestSandboxApprovalKeyUnmovedBy721"
+        }
+      ],
+      "profiles": [
+        "darwin-host",
+        "linux-host",
+        "windows"
+      ],
+      "mutations": [],
       "artifacts": []
     },
     {

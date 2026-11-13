@@ -517,6 +517,7 @@ func TestRenderSandboxLineGitMetadata(t *testing.T) {
 		{SandboxRuntimeSeatbelt, " temp=private git_metadata=ro"},
 		{SandboxRuntimeBwrap, " temp=private git_metadata=ro(existing)"},
 	} {
+		// containment: GITMETA-PREVIEW
 		got := renderSandboxLine(mustNormalizeSandbox(t, SandboxConfig{Runtime: tc.rt}))
 		if !strings.HasSuffix(got, tc.want) {
 			t.Errorf("%s line = %q, want suffix %q", tc.rt, got, tc.want)
@@ -537,6 +538,7 @@ func TestSandboxApprovalKeyUnmovedBy721(t *testing.T) {
 		SandboxRuntimeBwrap:    "sb:efa4aede38982cbe6ca95a4926f873f54881ad881c7e3d13c7e3236d1d4a46e9:",
 	} {
 		n := mustNormalizeSandbox(t, SandboxConfig{Runtime: rt})
+		// containment: GITMETA-PREVIEW
 		if got := approvalForSandbox(n).keyComponent; got != want {
 			t.Errorf("%s keyComponent = %q, want %q", rt, got, want)
 		}

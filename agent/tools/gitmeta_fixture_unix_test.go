@@ -10,6 +10,7 @@ package tools
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -313,7 +314,9 @@ const plantedConfig = `printf '[spike]\n\tplanted = PLANTED\n'`
 // plus the design amendment's rows. Not ported: the swap-* rows (they need a
 // renameat2/renamex_np helper binary; rename-parent and dotgit-impostor
 // exercise the same rules), deep-ancestor-rename (no deep repository here;
-// nested/.git covers any depth) and nested-impostor (residual R2).
+// nested/.git covers any depth) and nested-impostor (residual R2). Every row
+// that is not seatbeltOnly is also a TestBwrapGitMetadataDenied/<row> leaf of
+// the GITMETA-BWRAP inventory row (TestGitMetaBwrapRowsAreInventoryLeaves).
 var gitMetaAttacks = []gitMetaAttack{
 	{name: "direct-hook", snippet: `echo PLANTED > .git/hooks/pre-commit`},
 	{name: "direct-hook-new", snippet: `echo PLANTED > .git/hooks/post-checkout`},
@@ -531,5 +534,43 @@ func TestGitMetaAttacksChangeTheSnapshotUnsandboxed(t *testing.T) {
 				t.Fatalf("unsandboxed attack left the protected lines unchanged; output: %s", out)
 			}
 		})
+	}
+}
+
+// TestGitMetaBwrapRowsAreInventoryLeaves: the GITMETA-BWRAP inventory row
+// cites each attack row bwrap refuses as its own TestBwrapGitMetadataDenied
+// leaf (the parent cannot be the leaf: its seatbeltOnly rows skip, and the
+// bwrap profile allows no skip), so a new row is checked there too.
+func TestGitMetaBwrapRowsAreInventoryLeaves(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "docs", "security", "containment-inventory.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var inv struct {
+		Rows []struct {
+			ID   string
+			Refs []struct{ Test string }
+		}
+	}
+	if err := json.Unmarshal(data, &inv); err != nil {
+		t.Fatal(err)
+	}
+	var cited, refused []string
+	for _, r := range inv.Rows {
+		for _, ref := range r.Refs {
+			if row, ok := strings.CutPrefix(ref.Test, "TestBwrapGitMetadataDenied/"); ok && r.ID == "GITMETA-BWRAP" {
+				cited = append(cited, row)
+			}
+		}
+	}
+	for _, a := range gitMetaAttacks {
+		if !a.seatbeltOnly {
+			refused = append(refused, a.name)
+		}
+	}
+	slices.Sort(cited)
+	slices.Sort(refused)
+	if !slices.Equal(cited, refused) {
+		t.Errorf("GITMETA-BWRAP cites rows %q, want the bwrap-refused attack rows %q", cited, refused)
 	}
 }
