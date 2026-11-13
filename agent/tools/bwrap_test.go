@@ -413,9 +413,15 @@ func TestBuildBwrapArgsGitMetadata(t *testing.T) {
 	}
 	start := slices.Index(got, "--chdir")
 	const ws = "/home/u/proj"
-	i := slices.Index(got, "--bind")
-	for got[i+1] != ws {
-		i += slices.Index(got[i+1:], "--bind") + 1
+	i := -1
+	for j := 0; j+2 < len(got); j++ {
+		if got[j] == "--bind" && got[j+1] == ws && got[j+2] == ws {
+			i = j
+			break
+		}
+	}
+	if i < 0 || start <= i {
+		t.Fatalf("workspace bind or chdir missing/misordered: %q", got)
 	}
 	between := got[i+3 : start]
 	want := []string{
@@ -432,19 +438,62 @@ func TestBuildBwrapArgsGitMetadata(t *testing.T) {
 }
 
 func TestBuildBwrapArgsGitMetadataRejections(t *testing.T) {
-	cases := map[string]struct{ w, r []string }{
-		"outside workspace": {w: []string{"/other/.git"}},
-		"equal workspace":   {r: []string{"/home/u/proj"}},
-		"relative":          {w: []string{"proj/.git"}},
-		"dotdot":            {r: []string{"/home/u/proj/a/../.git"}},
-		"both lists":        {w: []string{"/home/u/proj/.git"}, r: []string{"/home/u/proj/.git"}},
+	cases := map[string]struct {
+		w, r []string
+		want string
+	}{
+		"outside workspace": {w: []string{"/other/.git"}, want: `"/other/.git" must be canonical and inside`},
+		"sibling prefix":    {w: []string{"/home/u/projx/.git"}, want: `"/home/u/projx/.git" must be canonical and inside`},
+		"equal workspace":   {r: []string{"/home/u/proj"}, want: `"/home/u/proj" must be canonical and inside`},
+		"relative":          {w: []string{"proj/.git"}, want: `"proj/.git" must be canonical and inside`},
+		"dotdot":            {r: []string{"/home/u/proj/a/../.git"}, want: `"/home/u/proj/a/../.git" must be canonical and inside`},
+		"both lists":        {w: []string{"/home/u/proj/.git"}, r: []string{"/home/u/proj/.git"}, want: `"/home/u/proj/.git" is both writable and read-only`},
 	}
 	for name, tc := range cases {
 		p := validBwrapPolicy()
 		p.gitWritable, p.gitReadOnly = tc.w, tc.r
-		if _, err := buildBwrapArgs(p); err == nil {
-			t.Errorf("%s: want error", name)
+		_, err := buildBwrapArgs(p)
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: err = %v, want substring %q", name, err, tc.want)
 		}
+	}
+}
+
+func TestBuildBwrapArgsGitMetadataDedupesAndKeepsCallerSlices(t *testing.T) {
+	p := validBwrapPolicy()
+	p.gitWritable = []string{"/home/u/proj/.git/z", "/home/u/proj/.git", "/home/u/proj/.git/z"}
+	p.gitReadOnly = []string{"/home/u/proj/b/.git", "/home/u/proj/a/.git", "/home/u/proj/b/.git"}
+	w0, r0 := slices.Clone(p.gitWritable), slices.Clone(p.gitReadOnly)
+	got, err := buildBwrapArgs(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(" "+strings.Join(got, " ")+" ", " /home/u/proj/.git/z /home/u/proj/.git/z "); n != 1 {
+		t.Fatalf("duplicate writable path emitted %d times: %q", n, got)
+	}
+	if n := strings.Count(" "+strings.Join(got, " ")+" ", " /home/u/proj/b/.git /home/u/proj/b/.git "); n != 1 {
+		t.Fatalf("duplicate read-only path emitted %d times: %q", n, got)
+	}
+	if !slices.Equal(p.gitWritable, w0) || !slices.Equal(p.gitReadOnly, r0) {
+		t.Fatalf("caller slices mutated: %q %q", p.gitWritable, p.gitReadOnly)
+	}
+}
+
+func TestBuildBwrapArgsExeInWritableGitDirUnderReadOnlyContainerKeepsLiteral(t *testing.T) {
+	p := validBwrapPolicy()
+	p.exePath = "/home/u/proj/.git/modules/m/tool"
+	p.gitReadOnly = []string{"/home/u/proj/.git/modules"}
+	p.gitWritable = []string{"/home/u/proj/.git/modules/m"}
+	got, err := buildBwrapArgs(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := " " + strings.Join(got, " ") + " "
+	exe := strings.Index(joined, " --ro-bind "+p.exePath+" "+p.exePath+" ")
+	ro := strings.Index(joined, " --ro-bind /home/u/proj/.git/modules ")
+	rw := strings.Index(joined, " --bind /home/u/proj/.git/modules/m ")
+	if exe < 0 || ro < 0 || rw < 0 || exe < ro || exe < rw {
+		t.Fatalf("exe literal must be present after every git mount: %q", got)
 	}
 }
 

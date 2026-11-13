@@ -161,20 +161,35 @@ func bwrapPayloadEnvArgs(env []string) ([]string, error) {
 
 // bwrapExeCoveredByReadOnly reports whether the resolved executable path is
 // lexically inside one of the read-only mounted regions (a reviewed system
-// root, a fixed-layout directory bind, or a fixed-layout symlink whose
-// canonical target the collector already verified is covered).
-func bwrapExeCoveredByReadOnly(exe string, sysRoots, layoutDirs, linkDests, gitReadOnly []string) bool {
+// root, a fixed-layout directory bind, a fixed-layout symlink whose canonical
+// target the collector already verified is covered, or a git metadata
+// read-only mount). Among the git mounts containing the executable the deepest
+// decides, because a later, deeper mount covers a shallower one: an executable
+// in a writable git dir nested under a read-only container is not covered and
+// keeps its read-only literal.
+func bwrapExeCoveredByReadOnly(exe string, sysRoots, layoutDirs, linkDests, gitReadOnly, gitWritable []string) bool {
 	within := func(root string) bool {
 		return exe == root || strings.HasPrefix(exe, root+"/")
 	}
-	for _, set := range [][]string{sysRoots, layoutDirs, linkDests, gitReadOnly} {
+	for _, set := range [][]string{sysRoots, layoutDirs, linkDests} {
 		for _, root := range set {
 			if within(root) {
 				return true
 			}
 		}
 	}
-	return false
+	deepest, readOnly := "", false
+	for _, root := range gitWritable {
+		if within(root) && len(root) > len(deepest) {
+			deepest, readOnly = root, false
+		}
+	}
+	for _, root := range gitReadOnly {
+		if within(root) && len(root) > len(deepest) {
+			deepest, readOnly = root, true
+		}
+	}
+	return readOnly
 }
 
 // bwrapGitMetadataArgs renders the git metadata self-binds (#721). Binds apply
@@ -188,8 +203,12 @@ func bwrapGitMetadataArgs(workspaceRoot string, writable, readOnly []string) ([]
 	readOnly = slices.Compact(slices.Sorted(slices.Values(readOnly)))
 	type mount struct{ path, flag string }
 	var mounts []mount
-	for flag, set := range map[string][]string{"--bind": writable, "--ro-bind": readOnly} {
-		for _, p := range set {
+	for _, group := range []struct {
+		flag string
+		set  []string
+	}{{"--bind", writable}, {"--ro-bind", readOnly}} {
+		flag := group.flag
+		for _, p := range group.set {
 			if !posixCleanAbs(p) || !strings.HasPrefix(p, workspaceRoot+"/") {
 				return nil, fmt.Errorf("tools: bwrap git path %q must be canonical and inside workspace %q", p, workspaceRoot)
 			}
@@ -213,7 +232,9 @@ func bwrapGitMetadataArgs(workspaceRoot string, writable, readOnly []string) ([]
 // fixed D5 order: isolation prefix, payload environment, /proc and /dev,
 // quota'd private /dev/shm, reviewed read-only system roots and aliases,
 // fixed-layout directories and symlinks, /etc literals, quota'd private /tmp, the
-// workspace as the only host-visible writable mount, the executable literal,
+// workspace as the only host-visible writable mount (git metadata then
+// re-mounts paths inside it: read-only protections and writable self-binds that
+// keep their directories un-renamable), the executable literal,
 // the approved cwd, and finally the read-only root remount. List inputs are
 // sorted and de-duplicated into owned copies; ordering is part of the policy.
 func buildBwrapArgs(p bwrapPolicy) ([]string, error) {
@@ -350,7 +371,7 @@ func buildBwrapArgs(p bwrapPolicy) ([]string, error) {
 	// blocks self-modification of the approved binary -- except where the
 	// workspace itself sits under a fixed-layout directory, where the layout
 	// bind already covers it and that secondary property does not apply.
-	if !bwrapExeCoveredByReadOnly(p.exePath, sysRoots, layoutDirs, linkDests, p.gitReadOnly) {
+	if !bwrapExeCoveredByReadOnly(p.exePath, sysRoots, layoutDirs, linkDests, p.gitReadOnly, p.gitWritable) {
 		args = append(args, "--ro-bind", p.exePath, p.exePath)
 	}
 	args = append(args, "--chdir", p.chdir)
