@@ -130,7 +130,7 @@ func TestBuildOutputScreenUnknownType(t *testing.T) {
 
 // A name the directory read typed regular is not descended, even when it is
 // a directory by the time the walk reaches it. These rows pin a stated limit
-// (spec D1), not a guarantee.
+// (#789, spec D1), not a guarantee.
 func TestBuildOutputScreenStaleType(t *testing.T) {
 	// containment: CMP-EXEC-CREDENTIAL-OUTPUT
 	t.Run("typed regular", func(t *testing.T) {
@@ -154,7 +154,7 @@ func TestBuildOutputScreenStaleType(t *testing.T) {
 		// z.txt is replaced by a directory holding a credential file after
 		// the root was read and before z.txt is reached. The code at
 		// 23d40b33 stats z.txt when it reaches it, descends that directory
-		// and keys the file; this row pins the stated limit of spec D1, not
+		// and keys the file; this row pins the stated limit of #789, spec D1, not
 		// a guarantee.
 		const label = "replaced"
 		ws, root, sib := tolerantFixture(t, map[string]string{

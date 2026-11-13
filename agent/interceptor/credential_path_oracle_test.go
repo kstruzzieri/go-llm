@@ -155,7 +155,7 @@ func TestCredentialPathMatchesOracle(t *testing.T) {
 			t.Fatalf("stopped after %d mismatches (cap reached; more may follow)", mismatches)
 		}
 	}
-	// (a) existing tables first, then (b), (c), (d) in the brief's order.
+	// Groups run in the order a, b, c, d: the existing tables first.
 	run := func(group string, i int, p string) {
 		if c, co, g, goOld, ok := oracleAgrees(p); !ok {
 			report(group, i, c, co, g, goOld)

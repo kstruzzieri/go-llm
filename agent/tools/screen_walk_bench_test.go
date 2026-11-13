@@ -103,9 +103,9 @@ var screenShapes = []screenShape{
 // screenTree returns the root of sh's tree. Under GO_LLM_BENCH_PARENT the tree
 // is kept at a fixed name and reused by later processes once its marker, a
 // sibling written last, exists; a tree without one is rebuilt from scratch.
-// Otherwise the tree goes under tb.TempDir(): a plain -bench . without
-// GO_LLM_BENCH_PARENT builds every tree afresh, about 5.7 million files in
-// all, so the sub-benchmarks are meant to be selected one at a time.
+// Otherwise the tree goes under tb.TempDir(); only TestBuildOutputScreenLargeTree
+// reaches that path, since the benchmarks skip without GO_LLM_BENCH_PARENT
+// rather than build every tree afresh, about 5.7 million files in all.
 func screenTree(tb testing.TB, sh screenShape) string {
 	tb.Helper()
 	parent := os.Getenv("GO_LLM_BENCH_PARENT")
@@ -137,6 +137,9 @@ func screenTree(tb testing.TB, sh screenShape) string {
 // Every iteration must visit the shape's measured number of entries and
 // report no skip.
 func BenchmarkScreenWalk(b *testing.B) {
+	if os.Getenv("GO_LLM_BENCH_PARENT") == "" {
+		b.Skip("set GO_LLM_BENCH_PARENT to a directory for the generated trees: these benchmarks build up to 5.7 million files")
+	}
 	for _, sh := range screenShapes {
 		b.Run(sh.name, func(b *testing.B) {
 			ws, err := NewWorkspace(screenTree(b, sh))
@@ -175,6 +178,9 @@ func checkScreen(tb testing.TB, label string, s *outputScreen, err error, want i
 // variant reaches, so every iteration measures a complete screen; one that
 // is withheld, changed or short of keys fails the benchmark.
 func BenchmarkBuildOutputScreen(b *testing.B) {
+	if os.Getenv("GO_LLM_BENCH_PARENT") == "" {
+		b.Skip("set GO_LLM_BENCH_PARENT to a directory for the generated trees: these benchmarks build up to 5.7 million files")
+	}
 	for _, sh := range screenShapes {
 		b.Run(sh.name, func(b *testing.B) {
 			ws, err := NewWorkspace(screenTree(b, sh))
