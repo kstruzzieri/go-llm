@@ -274,7 +274,8 @@ type gitMetaAttack struct {
 	// dir's internals (HEAD, objects, refs) before failing on its read-only
 	// mounts. The design leaves those internals writable on both backends,
 	// since commits write them, and the plant itself is refused. Seatbelt
-	// refuses the rename outright and judges every row on the full snapshot.
+	// refuses the rename outright and judges this row on the full snapshot;
+	// only priorSpawn rows are judged on gitMetaProtectedLines there.
 	bwrapProtectedOnly bool
 	// priorSpawn, when set, runs in an earlier spawn and must succeed: a
 	// design-writable change (such as deleting a git dir's HEAD) that alters

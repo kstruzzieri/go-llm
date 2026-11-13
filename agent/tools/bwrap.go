@@ -53,7 +53,7 @@ type bwrapPolicy struct {
 	allowNetwork      bool
 	tmpfsSizeBytes    int64
 	gitWritable       []string // dot-git dirs and git dirs: rw self-bind (un-renamable mount point)
-	gitReadOnly       []string // containers, intermediates, present metadata, gitfiles: ro-bind over self
+	gitReadOnly       []string // containers, intermediates, present metadata, modules-tree hooks/info dirs that are not git dirs, gitfiles: ro-bind over self
 }
 
 // bwrapLayoutDirs is the fixed set of top-level compatibility entries a
