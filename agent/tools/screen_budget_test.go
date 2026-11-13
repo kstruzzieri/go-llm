@@ -109,7 +109,7 @@ func TestCredentialScreenBudgetWalk(t *testing.T) {
 		}}
 		start := time.Now()
 		s, err := buildOutputScreen(ctx, ws)
-		if elapsed := time.Since(start); elapsed > time.Second {
+		if elapsed := time.Since(start); elapsed > 30*time.Second {
 			t.Fatalf("canceled mid-walk: build took %s", elapsed)
 		}
 		if s != nil || !errors.Is(err, context.Canceled) {

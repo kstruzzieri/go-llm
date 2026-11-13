@@ -27,7 +27,7 @@ func TestDirReadReusesBuffer(t *testing.T) {
 	}
 	defer func() { _ = f.Close() }()
 	// The stub records every buffer length it is given; each must be the
-	// plan's fixed 65536.
+	// read's fixed buffer size, 65536.
 	calls, wrong := 0, 0
 	s := dirSys{getdents: func(_ int, buf []byte) (int, error) {
 		calls++

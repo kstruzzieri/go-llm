@@ -21,6 +21,8 @@ import (
 // tolerantFixture writes files under a fresh workspace root and sibFiles under
 // a sibling directory beside it. It returns the workspace, its canonical root,
 // and the sibling's path, which swapRoot renames into the root's place.
+// Its tests assume the temporary directory's filesystem reports entry types in
+// directory listings, and fail rather than skip on one that does not.
 func tolerantFixture(t *testing.T, files, sibFiles map[string]string) (*Workspace, string, string) {
 	t.Helper()
 	dir := filepath.Join(t.TempDir(), "ws")
@@ -508,7 +510,8 @@ func TestWalkTolerantUnknownType(t *testing.T) {
 }
 
 // On a filesystem that reports no types, every entry is stat'ed and the walk
-// visits what it visits today.
+// visits every entry, as the walk did before the listing took types from the
+// directory read.
 func TestWalkTolerantAllUnknown(t *testing.T) {
 	// containment: CMP-EXEC-CREDENTIAL-OUTPUT
 	const label = "all unknown"

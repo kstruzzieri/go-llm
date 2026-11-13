@@ -588,12 +588,11 @@ func (s *screenSeams) dirRead(rel string, f *os.File, emit func(name string, typ
 
 // readDirEntriesTolerant is readDirEntries for walkTolerant. It reads the
 // directory's records once, through dirRead, and takes each entry's type from
-// that read. An
-// entry typed anything but a regular file (unknown included), or whose slash
-// path examine accepts, is stat'ed with the statErr seam and then fstatat
-// without following symbolic links; one whose stat fails is left out and
-// returned as a skip with that error (one satisfying fs.ErrNotExist when the
-// entry is gone). Every other entry is returned unexamined: no metadata, and
+// that read. An entry typed anything but a regular file (unknown included), or
+// whose slash path examine accepts, is stat'ed with the statErr seam and then
+// fstatat without following symbolic links; one whose stat fails is left out
+// and returned as a skip with that error (one satisfying fs.ErrNotExist when
+// the entry is gone). Every other entry is returned unexamined: no metadata, and
 // it can never be opened. A failure to read the directory is a listingError,
 // and nothing read before it is used.
 // The listing ends with the same reachability check; skips are returned
@@ -743,7 +742,7 @@ func (w *Workspace) walk(ctx context.Context, fn func(string, fs.DirEntry) error
 // following symbolic links, when the read typed it anything but a regular file
 // (unknown included) or when examine accepts its workspace-relative slash
 // path; every other entry is returned unexamined, with no metadata, and
-// can never be opened. Stated limit (spec D1): a plain file replaced by a
+// can never be opened. Stated limit (#789, spec D1): a plain file replaced by a
 // directory after its directory was read is not descended, so a credential
 // file inside it goes unread with no note.
 //
