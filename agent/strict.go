@@ -21,7 +21,8 @@ import (
 // approved through a grant.
 //
 // preview is sanitized display text and is empty for a tool that does not
-// plan, so call must be rendered as well. keyed reports whether the original
+// plan, so an implementation should render call as well; a host whose tools
+// all plan may rely on the preview alone. keyed reports whether the original
 // request carried an approval key; it is display information only, so a host
 // can keep its notice for a target that always prompts. risk is the run's
 // cumulative report, empty for the verifier. exposure is the conversation's

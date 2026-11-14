@@ -341,6 +341,9 @@ func TestStrictRaisesApprovalNever(t *testing.T) {
 	// containment: STRICT-1
 	lowering := planningStub{stubTool{"lowering", Effect{Class: Write, Approval: ApprovalAlways}},
 		ToolPlan{Effect: Effect{Class: Write, Approval: ApprovalNever}}}
+	// Static effect Read, planned effect Write: only the planned effect raises.
+	planRaises := planningStub{stubTool{"planRaises", Effect{Class: Read}},
+		ToolPlan{Effect: Effect{Class: Write, Approval: ApprovalNever}}}
 	for _, tt := range []struct {
 		name        string
 		strict      bool
@@ -354,6 +357,7 @@ func TestStrictRaisesApprovalNever(t *testing.T) {
 		{"exposed, plain approver", true, exposedPrior(), &grantApprover{}, neverWrite("w"), false, false},
 		{"exposed, nil approver", true, exposedPrior(), nil, neverWrite("w"), false, false},
 		{"exposed, plan lowers approval", true, exposedPrior(), &freshGrantApprover{}, lowering, true, true},
+		{"exposed, plan raises a static read", true, exposedPrior(), &freshGrantApprover{}, planRaises, true, true},
 		{"clean", true, nil, &freshGrantApprover{}, neverWrite("w"), false, true},
 		{"strict off", false, exposedPrior(), &freshGrantApprover{}, neverWrite("w"), false, true},
 	} {
@@ -523,5 +527,96 @@ func TestStrictWireBytesIdentical(t *testing.T) {
 	wantFreshOnly(t, ap, 1) // the strict run took the fresh path
 	if len(off) != 3 || !slices.Equal(off, on) {
 		t.Fatalf("wire requests differ:\noff %q\non  %q", off, on)
+	}
+}
+
+// methodApprover records which Approver method was reached and answers each
+// with a distinct reason, so a wrapper that routes to the wrong one shows.
+type methodApprover struct {
+	reached []string
+}
+
+func (m *methodApprover) Approve(context.Context, provider.ToolCall, string) (bool, error) {
+	m.reached = append(m.reached, "Approve")
+	return true, nil
+}
+
+func (m *methodApprover) ApproveKeyed(context.Context, provider.ToolCall, string, string) (ApprovalDecision, error) {
+	m.reached = append(m.reached, "ApproveKeyed")
+	return ApprovalDecision{Approved: true, ViaGrant: true}, nil
+}
+
+func (m *methodApprover) ApproveWithRisk(context.Context, provider.ToolCall, string, string, RiskReport) (ApprovalDecision, error) {
+	m.reached = append(m.reached, "ApproveWithRisk")
+	return ApprovalDecision{Approved: true, ViaGrant: true}, nil
+}
+
+type methodFreshApprover struct{ methodApprover }
+
+func (m *methodFreshApprover) ApproveFresh(context.Context, provider.ToolCall, string, bool, RiskReport, Exposure) (bool, error) {
+	m.reached = append(m.reached, "ApproveFresh")
+	return true, nil
+}
+
+func TestStrictApproverEntryPoints(t *testing.T) {
+	call := tc("w", `{}`)
+	entries := []struct {
+		name  string
+		clean string // inner method a clean run must reach
+		ask   func(Approver) (ApprovalDecision, error)
+	}{
+		{"Approve", "Approve", func(a Approver) (ApprovalDecision, error) {
+			ok, err := a.Approve(context.Background(), call, "p")
+			return ApprovalDecision{Approved: ok}, err
+		}},
+		{"ApproveKeyed", "ApproveKeyed", func(a Approver) (ApprovalDecision, error) {
+			return a.(KeyedApprover).ApproveKeyed(context.Background(), call, "p", "k")
+		}},
+		{"ApproveWithRisk", "ApproveWithRisk", func(a Approver) (ApprovalDecision, error) {
+			return a.(RiskApprover).ApproveWithRisk(context.Background(), call, "p", "k", RiskReport{})
+		}},
+	}
+	for _, e := range entries {
+		for _, tt := range []struct {
+			name        string
+			exposed     bool
+			canFresh    bool
+			want        []string
+			wantAllowed bool
+		}{
+			{"clean", false, true, []string{e.clean}, true},
+			{"exposed, fresh approver", true, true, []string{"ApproveFresh"}, true},
+			{"exposed, no fresh approver", true, false, nil, false},
+		} {
+			t.Run(e.name+"/"+tt.name, func(t *testing.T) {
+				var inner Approver
+				var reached func() []string
+				if tt.canFresh {
+					f := &methodFreshApprover{}
+					inner, reached = f, func() []string { return f.reached }
+				} else {
+					m := &methodApprover{}
+					inner, reached = m, func() []string { return m.reached }
+				}
+				req := Request{StrictApproval: true}
+				if tt.exposed {
+					req.PriorExposure = exposedPrior()
+				}
+				_, run := newExposureRun(context.Background(), req)
+				d, err := e.ask(&strictApprover{inner: inner, exposure: run})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got := reached(); !slices.Equal(got, tt.want) {
+					t.Fatalf("inner methods reached = %v, want %v", got, tt.want)
+				}
+				if d.Approved != tt.wantAllowed {
+					t.Fatalf("Approved = %v, want %v", d.Approved, tt.wantAllowed)
+				}
+				if tt.exposed && d.ViaGrant {
+					t.Fatal("exposed decision carries ViaGrant")
+				}
+			})
+		}
 	}
 }
