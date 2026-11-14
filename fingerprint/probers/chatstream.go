@@ -37,6 +37,9 @@ func (p *OpenAICompatProber) ProbeCapabilities(ctx context.Context, model string
 	if err != nil {
 		return fingerprint.CapabilityProbeResult{}, fmt.Errorf("fingerprint: openaicompat probe %q: %w", model, err)
 	}
+	if model == "" {
+		return fingerprint.CapabilityProbeResult{}, errors.New("fingerprint: openaicompat probe: model name is required")
+	}
 	wrap := func(err error) error {
 		return fmt.Errorf("fingerprint: openaicompat %s probe %q: %w", recipe.Method, model, err)
 	}
@@ -49,7 +52,11 @@ func (p *OpenAICompatProber) ProbeCapabilities(ctx context.Context, model string
 			return result, wrap(err)
 		}
 		final, err := p.streamOnce(ctx, model, recipe, i == 0)
-		result.Requests++
+		// Requests counts what was sent: a body the client's content guard
+		// refuses never leaves the process.
+		if !errors.Is(err, provider.ErrContentDenied) {
+			result.Requests++
+		}
 		if err == nil {
 			p.observe(model, final.Usage)
 			result.Answers = streamAnswers(final, recipe, i > 0)

@@ -815,26 +815,44 @@ func TestProbeCapabilities_InvalidRequestSendsNothing(t *testing.T) {
 		name    string
 		adapter string
 		req     fingerprint.CapabilityProbeRequest
+		// emptyModel sends the empty model name; denyAll installs a content
+		// guard that refuses every body before it is sent. Neither request
+		// leaves the process, so neither counts.
+		emptyModel, denyAll bool
 	}{
-		{"unknown method", fingerprint.AdapterOpenAICompat, fingerprint.CapabilityProbeRequest{Method: "chat-tools", Capabilities: []string{"tool_call"}}},
-		{"the other adapter's method", fingerprint.AdapterOpenAICompat, fingerprint.CapabilityProbeRequest{Method: fingerprint.MethodOllamaShow, Capabilities: []string{"tool_call"}}},
-		{"empty subset", fingerprint.AdapterOpenAICompat, fingerprint.CapabilityProbeRequest{Method: fingerprint.MethodChatStreamTools}},
-		{"capability outside the recipe", fingerprint.AdapterOpenAICompat, fingerprint.CapabilityProbeRequest{Method: fingerprint.MethodChatStream, Capabilities: []string{"tool_call"}}},
-		{"capability outside the tools recipe", fingerprint.AdapterOpenAICompat, fingerprint.CapabilityProbeRequest{Method: fingerprint.MethodChatStreamTools, Capabilities: []string{"tool_call", "embed"}}},
-		{"unknown method", fingerprint.AdapterOllama, fingerprint.CapabilityProbeRequest{Method: "chat-tools", Capabilities: []string{"tool_call"}}},
-		{"the other adapter's method", fingerprint.AdapterOllama, fingerprint.CapabilityProbeRequest{Method: fingerprint.MethodChatStreamTools, Capabilities: []string{"tool_call"}}},
-		{"empty subset", fingerprint.AdapterOllama, fingerprint.CapabilityProbeRequest{Method: fingerprint.MethodOllamaShow, Capabilities: []string{}}},
-		{"capability outside the recipe", fingerprint.AdapterOllama, fingerprint.CapabilityProbeRequest{Method: fingerprint.MethodOllamaShow, Capabilities: []string{"vision"}}},
+		{"unknown method", fingerprint.AdapterOpenAICompat, fingerprint.CapabilityProbeRequest{Method: "chat-tools", Capabilities: []string{"tool_call"}}, false, false},
+		{"the other adapter's method", fingerprint.AdapterOpenAICompat, fingerprint.CapabilityProbeRequest{Method: fingerprint.MethodOllamaShow, Capabilities: []string{"tool_call"}}, false, false},
+		{"empty subset", fingerprint.AdapterOpenAICompat, fingerprint.CapabilityProbeRequest{Method: fingerprint.MethodChatStreamTools}, false, false},
+		{"capability outside the recipe", fingerprint.AdapterOpenAICompat, fingerprint.CapabilityProbeRequest{Method: fingerprint.MethodChatStream, Capabilities: []string{"tool_call"}}, false, false},
+		{"capability outside the tools recipe", fingerprint.AdapterOpenAICompat, fingerprint.CapabilityProbeRequest{Method: fingerprint.MethodChatStreamTools, Capabilities: []string{"tool_call", "embed"}}, false, false},
+		{"unknown method", fingerprint.AdapterOllama, fingerprint.CapabilityProbeRequest{Method: "chat-tools", Capabilities: []string{"tool_call"}}, false, false},
+		{"the other adapter's method", fingerprint.AdapterOllama, fingerprint.CapabilityProbeRequest{Method: fingerprint.MethodChatStreamTools, Capabilities: []string{"tool_call"}}, false, false},
+		{"empty subset", fingerprint.AdapterOllama, fingerprint.CapabilityProbeRequest{Method: fingerprint.MethodOllamaShow, Capabilities: []string{}}, false, false},
+		{"capability outside the recipe", fingerprint.AdapterOllama, fingerprint.CapabilityProbeRequest{Method: fingerprint.MethodOllamaShow, Capabilities: []string{"vision"}}, false, false},
+		{"empty model", fingerprint.AdapterOpenAICompat, toolsRequest(), true, false},
+		{"empty model", fingerprint.AdapterOllama, fingerprint.CapabilityProbeRequest{Method: fingerprint.MethodOllamaShow, Capabilities: []string{"tool_call"}}, true, false},
+		{"body refused by the content guard", fingerprint.AdapterOpenAICompat, toolsRequest(), false, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.adapter+" "+tt.name, func(t *testing.T) {
 			stub := newProbeStub(t)
-			var p prober = newStreamProber(stub.srv.URL)
+			var opts []openaicompat.ClientOption
+			if tt.denyAll {
+				opts = append(opts, openaicompat.WithContentGuard(func(string) bool { return true }))
+			}
+			var p prober = newStreamProber(stub.srv.URL, opts...)
 			if tt.adapter == fingerprint.AdapterOllama {
 				p = fingerprint.NewProber(ollama.NewClient(ollama.WithBaseURL(stub.srv.URL)))
 			}
-			res, err := p.ProbeCapabilities(context.Background(), "m", tt.req)
+			model := "m"
+			if tt.emptyModel {
+				model = ""
+			}
+			res, err := p.ProbeCapabilities(context.Background(), model, tt.req)
 			assertFailed(t, res, err, stub, 0)
+			if tt.denyAll && !errors.Is(err, provider.ErrContentDenied) {
+				t.Errorf("err = %v, want ErrContentDenied", err)
+			}
 		})
 	}
 }

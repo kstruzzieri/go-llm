@@ -234,8 +234,12 @@ func TestBoundedRequest_PermissiveHostPolicyCannotAllow(t *testing.T) {
 }
 
 // keyEchoTransport delivers a rejection whose body read fails with an error
-// quoting the API key, so redaction of the cause is observable.
-type keyEchoTransport struct{ status int }
+// quoting the API key, so redaction of the cause is observable. noRequest
+// leaves Response.Request nil, as a host's RoundTripper may.
+type keyEchoTransport struct {
+	status    int
+	noRequest bool
+}
 
 type keyEchoBody struct{ sent bool }
 
@@ -251,10 +255,14 @@ func (b *keyEchoBody) Read(p []byte) (int, error) {
 func (b *keyEchoBody) Close() error { return nil }
 
 func (tr keyEchoTransport) RoundTrip(r *http.Request) (*http.Response, error) {
-	return &http.Response{
+	resp := &http.Response{
 		StatusCode: tr.status, Status: fmt.Sprintf("%d %s", tr.status, http.StatusText(tr.status)),
 		Header: http.Header{}, Body: &keyEchoBody{}, Request: r,
-	}, nil
+	}
+	if tr.noRequest {
+		resp.Request = nil
+	}
+	return resp, nil
 }
 
 func TestBoundedRequest_ErrorBodyReadFailureKeepsStatusAndCause(t *testing.T) {
@@ -283,6 +291,17 @@ func TestBoundedRequest_ErrorBodyReadFailureKeepsStatusAndCause(t *testing.T) {
 			err := streamCall.do(boundedCtx(t), NewProvider(NewClient("http://127.0.0.1:1", WithAPIKey(boundedTestKey), WithHTTPClient(hc))))
 			assertRejectionRead(t, err, status, errKeyEcho)
 		})
+		for _, c := range []call{streamCall, chatCall, modelsCall} {
+			t.Run(fmt.Sprintf("%d response without its request %s", status, c.name), func(t *testing.T) {
+				hc := &http.Client{Transport: keyEchoTransport{status: status, noRequest: true}}
+				p := NewProvider(NewClient("http://127.0.0.1:1", WithAPIKey(boundedTestKey), WithHTTPClient(hc)))
+				assertRejectionRead(t, c.do(boundedCtx(t), p), status, errKeyEcho)
+				// The same reply on an ordinary request is still a status error.
+				if got, ok := statusOf(c.do(context.Background(), p)); !ok || got != status {
+					t.Errorf("ordinary request: status %d (%v), want a status error for %d", got, ok, status)
+				}
+			})
+		}
 	}
 }
 

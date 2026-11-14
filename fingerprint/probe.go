@@ -127,6 +127,9 @@ func (p *OllamaProber) ProbeCapabilities(ctx context.Context, model string, req 
 	if err != nil {
 		return CapabilityProbeResult{}, fmt.Errorf("fingerprint: ollama probe %q: %w", model, err)
 	}
+	if model == "" { // ShowModel would refuse it without sending, and Requests counts what is sent
+		return CapabilityProbeResult{}, errors.New("fingerprint: ollama probe: model name is required")
+	}
 	reqCtx, cancel := context.WithTimeout(responsebound.WithLimit(ctx, recipe.MaxResponseBytes), cmp.Or(p.requestTimeout, recipe.RequestTimeout))
 	defer cancel()
 	result := CapabilityProbeResult{Method: recipe.Method, Requests: 1}

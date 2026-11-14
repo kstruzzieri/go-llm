@@ -8,7 +8,8 @@
 //	GO_LLM_TEST_OPENAI_BASE   server root, no /v1 (e.g. http://127.0.0.1:8090)
 //	GO_LLM_TEST_TOOL_MODEL    a model the server lists
 //
-// Skipped when either is unset. Run with:
+// Skipped when either is unset. Fails, before sending anything, when the base
+// URL's host is not localhost or a loopback address. Run with:
 //
 //	go test -tags integration -run TestChatStreamTools_LiveLocal -v ./fingerprint/probers/
 package probers
@@ -19,7 +20,9 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -90,11 +93,29 @@ func argumentEncodings(body []byte) []string {
 	return out
 }
 
+// loopbackURL reports whether raw is an http(s) URL whose host is localhost or
+// a loopback IP address.
+func loopbackURL(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+		return false
+	}
+	host := u.Hostname()
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
 func TestChatStreamTools_LiveLocal(t *testing.T) {
 	base := strings.TrimRight(os.Getenv("GO_LLM_TEST_OPENAI_BASE"), "/")
 	model := os.Getenv("GO_LLM_TEST_TOOL_MODEL")
 	if base == "" || model == "" {
 		t.Skip("set GO_LLM_TEST_OPENAI_BASE and GO_LLM_TEST_TOOL_MODEL to run the live streamed-probe check")
+	}
+	if !loopbackURL(base) {
+		t.Fatalf("GO_LLM_TEST_OPENAI_BASE %q: host is not localhost or a loopback address; this check never leaves the machine", base)
 	}
 	rt := &recordingTransport{}
 	p := NewOpenAICompatProber(openaicompat.NewProvider(openaicompat.NewClient(base,

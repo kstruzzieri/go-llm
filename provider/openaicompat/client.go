@@ -355,7 +355,7 @@ func (c *Client) postJSON(ctx context.Context, path string, body any, out any) e
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	if err := decodeJSONOrError(resp, c.apiKey, out); err != nil {
+	if err := decodeJSONOrError(ctx, resp, c.apiKey, out); err != nil {
 		return err
 	}
 	return nil
@@ -372,7 +372,7 @@ func (c *Client) postSSE(ctx context.Context, path string, body any) (*sseReader
 	}
 
 	if resp.StatusCode/100 != 2 {
-		err := readErrorEnvelope(resp, c.apiKey)
+		err := readErrorEnvelope(ctx, resp, c.apiKey)
 		_ = resp.Body.Close()
 		return nil, err
 	}
@@ -393,7 +393,7 @@ func (c *Client) getJSON(ctx context.Context, path string, out any) error {
 	}
 	resp.Body = responsebound.Wrap(ctx, resp.Body)
 	defer func() { _ = resp.Body.Close() }()
-	return decodeJSONOrError(resp, c.apiKey, out)
+	return decodeJSONOrError(ctx, resp, c.apiKey, out)
 }
 
 // post is the shared transport for postJSON / postSSE. It marshals body
@@ -569,10 +569,11 @@ func (c *Client) setHeaders(req *http.Request, contentType string) {
 }
 
 // decodeJSONOrError reads resp.Body. On 2xx, it JSON-decodes into out. On
-// non-2xx, it parses an OpenAI error envelope and returns it as an error.
-func decodeJSONOrError(resp *http.Response, apiKey string, out any) error {
+// non-2xx, it parses an OpenAI error envelope and returns it as an error. ctx
+// is the context the request was sent with.
+func decodeJSONOrError(ctx context.Context, resp *http.Response, apiKey string, out any) error {
 	if resp.StatusCode/100 != 2 {
-		return readErrorEnvelope(resp, apiKey)
+		return readErrorEnvelope(ctx, resp, apiKey)
 	}
 	if out == nil {
 		// Drain the body so the connection can be reused.
@@ -596,14 +597,15 @@ func decodeJSONOrError(resp *http.Response, apiKey string, out any) error {
 // warnings and logs.
 //
 // For an ordinary request a failed body read is ignored, as it always was. For
-// a bounded request (responsebound) it returns a *responsebound.RejectionReadError
+// a bounded request (responsebound), judged by ctx, the context the request was
+// sent with, so a response without its Request still counts, it returns a *responsebound.RejectionReadError
 // carrying the status and the redacted read failure instead: a rejection whose
 // body stalled, reset or ended short is not a clean rejection. A clean end,
 // empty included, and a body cut at the cap below are not failed reads.
-func readErrorEnvelope(resp *http.Response, apiKey string) error {
+func readErrorEnvelope(ctx context.Context, resp *http.Response, apiKey string) error {
 	const limit = 64 * 1024
 	body, readErr := io.ReadAll(io.LimitReader(resp.Body, limit))
-	if readErr != nil && resp.Request != nil && responsebound.Bounded(resp.Request.Context()) {
+	if readErr != nil && responsebound.Bounded(ctx) {
 		return &responsebound.RejectionReadError{StatusCode: resp.StatusCode, Err: redactError(apiKey, readErr)}
 	}
 	body = bytes.TrimSpace(body)
