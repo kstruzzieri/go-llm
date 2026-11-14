@@ -471,12 +471,14 @@ func (r *ModelRegistry) resolveToolCallFromLog(ctx context.Context, key ModelKey
 		return state, err
 	}
 
-	// 7. If the probe panics, the deferred refund returns the whole reservation:
-	// nothing is known to have been sent.
-	reserved, refunded := 0, false
+	// 7. A panic inside the prober spends the whole reservation: a request may
+	// already have been sent (the streamed prober counts one, then calls the
+	// host's usage observer, which can panic), so nothing is refunded. Once the
+	// prober returns, its count is known first; a later panic refunds the rest.
+	reserved, unsent := 0, 0
 	defer func() {
-		if reserved > 0 && !refunded {
-			r.refundAllowance(reserved)
+		if unsent > 0 {
+			r.refundAllowance(unsent)
 		}
 	}()
 	if generation {
@@ -493,15 +495,18 @@ func (r *ModelRegistry) resolveToolCallFromLog(ctx context.Context, key ModelKey
 	result, err := prober.ProbeCapabilities(ctx, key.Model, fingerprint.CapabilityProbeRequest{
 		Method: recipe.Method, Capabilities: []string{capabilityToolCall},
 	})
+	sent := min(max(result.Requests, 0), reserved)
+	unsent = reserved - sent
 	completedAt := r.now()
 	release()
 	if generation {
-		sent := min(max(result.Requests, 0), reserved)
 		event.Stage, event.Requests = probeStageFinished, sent
 		if err != nil && ctx.Err() != nil {
 			event.Stage = probeStageCancelled
 		}
-		event.RemainingRequests, refunded = r.refundAllowance(reserved-sent), true
+		refund := unsent
+		unsent = 0
+		event.RemainingRequests = r.refundAllowance(refund)
 		r.emitProgress(event)
 	}
 	if err != nil {

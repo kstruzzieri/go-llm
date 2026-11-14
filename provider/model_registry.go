@@ -473,7 +473,9 @@ func (r *ModelRegistry) Refresh(ctx context.Context, key ModelKey) (*ModelProfil
 // generation check (openai-compat's chat-stream-tools) spends the registry's
 // fixed allowance of 2 requests the check sends, shared by every caller and
 // never refilled; a refused check returns ErrAutomaticProbeBudgetExhausted and
-// sends nothing. Native ollama-show checks spend none. A provider the binder
+// sends nothing. A check that returns gives back what it reserved and did not
+// send; a check that panics spends its whole reservation, since a request may
+// already have gone out. Native ollama-show checks spend none. A provider the binder
 // does not resolve returns ErrEvidenceUnbound and a log that cannot be read
 // ErrEvidenceUnreadable; neither sends, writes or reserves anything.
 //

@@ -1736,7 +1736,11 @@ func TestAutomaticProbeProgress_StartedBeforeProbeAndCancelReported(t *testing.T
 	})
 }
 
-func TestAutomaticProbeBudget_PanicRefundsReservation(t *testing.T) {
+// A panic inside the prober is no proof that nothing was sent: the streamed
+// prober counts a request and then calls the host's usage observer, which can
+// panic. Refunding would let a host that recovers exceed the fixed allowance,
+// so the whole reservation stays spent. The permit is still released once.
+func TestAutomaticProbeBudget_PanicSpendsReservation(t *testing.T) {
 	prober := &capProbeFake{}
 	prober.setRun(func(_ context.Context, model string) (fingerprint.CapabilityProbeResult, error) {
 		if model == "probe-a" {
@@ -1747,6 +1751,8 @@ func TestAutomaticProbeBudget_PanicRefundsReservation(t *testing.T) {
 	mr, _ := newLogResolver(t, newEvidenceLog(t), prober, oneProv(t, infos("probe-a", "probe-b")...))
 	adm := newHoldAdmitter()
 	mr.setSlotAdmitter(adm)
+	recipe, _ := fingerprint.RecipeFor(fingerprint.MethodChatStreamTools)
+	reserved := recipe.MaxRequests
 
 	recovered := func() (r any) {
 		defer func() { r = recover() }()
@@ -1759,11 +1765,14 @@ func TestAutomaticProbeBudget_PanicRefundsReservation(t *testing.T) {
 	if n := adm.releaseCount(); n != 1 {
 		t.Fatalf("releases after the panic = %d; want exactly 1", n)
 	}
-	if n := allowanceOf(mr); n != automaticProbeAllowance {
-		t.Fatalf("allowance after the panic = %d; want the whole reservation back", n)
+	if got, want := allowanceOf(mr), automaticProbeAllowance-reserved; got != want {
+		t.Fatalf("allowance after the panic = %d; want %d, the reservation spent", got, want)
 	}
 	state, err := mr.ResolveToolCall(t.Context(), localKey("probe-b"))
-	wantState(t, "a different key after the panic", state, err, fingerprint.CapProbeYes)
+	wantErrIs(t, "a different key after the panic", state, err, ErrAutomaticProbeBudgetExhausted)
+	if got := prober.callList(); !slices.Equal(got, []string{"probe-a"}) {
+		t.Fatalf("checks = %v; want probe-a only", got)
+	}
 }
 
 // ---------------------------------------------------------------------------
