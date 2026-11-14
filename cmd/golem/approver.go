@@ -89,13 +89,11 @@ func (a *replApprover) ApproveWithRisk(ctx context.Context, call provider.ToolCa
 // harnessFileCall.
 func (a *replApprover) ApproveFresh(ctx context.Context, call provider.ToolCall, preview string, keyed bool, risk agent.RiskReport, exposure agent.Exposure) (bool, error) {
 	notice := []string{suspendedNotice(exposure)}
-	switch call.Function.Name {
-	case "run_command", "start_command", verifyToolName:
-		if a.hostCommands {
-			notice = append(notice, "network is not confined")
-		}
+	scope := grantScope(call.Function.Name)
+	if a.hostCommands && (scope == grantScopeExec || scope == grantScopeVerify) {
+		notice = append(notice, "network is not confined")
 	}
-	harness := grantScope(call.Function.Name) == grantScopeFiles && !keyed
+	harness := scope == grantScopeFiles && !keyed
 	d, err := a.ask(ctx, call, preview, "", risk, harness, notice)
 	return d.Approved, err
 }
