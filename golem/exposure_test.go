@@ -177,7 +177,14 @@ func TestExposureFailedRunIsDropped(t *testing.T) {
 				"t": {ID: "t", Revision: 1, Exposure: agent.Exposure{Recorded: true}, Messages: []conversation.Message{{Role: "user", Content: "q"}, {Role: "assistant", Content: "a"}}},
 			}}
 			rt := newExposureRuntime(t, tc.caller, golem.Options{SessionStore: store})
-			res, _ := exposureTurn(t, rt, "t")
+			before := len(store.conversations["t"].Messages)
+			res, err := exposureTurn(t, rt, "t")
+			if tc.name == "error" && err == nil {
+				t.Fatal("turn error = nil, want the model failure")
+			}
+			if after := len(store.conversations["t"].Messages); after != before {
+				t.Fatalf("stored messages = %d, want %d: content and record are dropped together", after, before)
+			}
 			if !res.Exposure.Foreign {
 				t.Fatalf("failed run exposure = %+v, want Foreign (the tool round must have run)", res.Exposure)
 			}
@@ -407,8 +414,8 @@ func TestThreadExposureCanceledByClose(t *testing.T) {
 	}
 	select {
 	case o := <-done:
-		if o.err == nil || o.got != (agent.Exposure{}) {
-			t.Fatalf("ThreadExposure = %+v, %v; want zero and an error", o.got, o.err)
+		if !errors.Is(o.err, context.Canceled) || o.got != (agent.Exposure{}) {
+			t.Fatalf("ThreadExposure = %+v, %v; want zero and context.Canceled", o.got, o.err)
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("ThreadExposure did not return")
