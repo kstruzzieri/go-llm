@@ -79,6 +79,8 @@ func TestCompactThreadInjectedStoreReuseAndNextRun(t *testing.T) {
 	want.Messages = append(want.Messages[2:], conversation.Message{Role: "user", Content: "next goal"}, conversation.Message{Role: "assistant", Content: "next answer"})
 	want.Title = current.Messages[2].Content // ordinary turns apply the existing title policy
 	want.DurableSummary = &conversation.DurableSummary{Content: "SUM", MessageCount: 2}
+	// The stored conversation predates exposure records, so the run records it as unknown.
+	want.Exposure = agent.Exposure{Recorded: true, Unknown: true, First: "history"}
 	if saved := store.conversations[current.ID]; !reflect.DeepEqual(saved, want) {
 		t.Errorf("reused store after next Run = %+v; want %+v", saved, want)
 	}

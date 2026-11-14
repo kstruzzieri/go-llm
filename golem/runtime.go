@@ -610,6 +610,7 @@ func (r *Runtime) Run(ctx context.Context, turn Turn, sink EventSink) (agent.Res
 	if thread != nil {
 		request.History = thread.history()
 		request.HistorySummary = thread.summary()
+		request.PriorExposure = thread.priorExposure()
 	}
 	result, err := snap.orchestrator.RunWithVerifier(runCtx, request, observer, verifier)
 	if !r.retainReasoning {

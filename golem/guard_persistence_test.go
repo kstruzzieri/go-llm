@@ -140,9 +140,9 @@ func TestGuardBlockedObservationsPersistAsToday(t *testing.T) {
 	// wall-clock fields, so CreatedAt and UpdatedAt are zero and compared as
 	// such. The messages are pinned above; comparing them to themselves here
 	// leaves every other field of the conversation under test.
-	wantConv := conversation.Conversation{ID: "t", Title: "q1", Messages: conv.Messages, Revision: 2}
+	wantConv := conversation.Conversation{ID: "t", Title: "q1", Messages: conv.Messages, Revision: 2, Exposure: agent.Exposure{Recorded: true}}
 	if !reflect.DeepEqual(conv, wantConv) {
-		t.Fatalf("stored conversation = %+v, want only id, title, revision and messages: %+v", conv, wantConv)
+		t.Fatalf("stored conversation = %+v, want only id, title, revision, messages and a clean exposure record: %+v", conv, wantConv)
 	}
 
 	if first.Risk == nil || first.Risk.Score != 30 {
