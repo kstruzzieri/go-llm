@@ -523,13 +523,13 @@
     "reqs": [
       "STRICT-1"
     ],
-    "protections": "Pending #584: strict mode for write and edit calls",
-    "attack": "Pending #584: a write_file or edit_file call under strict mode",
-    "probe": "Pending #584: the effect probe is defined with the owning issue",
-    "declared": "pending",
-    "owner": "#584",
+    "protections": "strict approval (#584); the /auto-edits file grant is seeded; a foreign read (stub MCP tool) exposes the run; write_file one.txt answered y, write_file two.txt N, edit_file seed.txt N",
+    "attack": "write_file and edit_file after a foreign read while the /auto-edits file-class grant is held",
+    "probe": "two.txt absent and seed.txt unchanged",
+    "declared": "contained",
+    "owner": "",
     "reason": "",
-    "control": "",
+    "control": "authorization",
     "control_diff": "",
     "caps": []
   },
@@ -538,15 +538,18 @@
     "reqs": [
       "STRICT-2"
     ],
-    "protections": "Pending #584: strict mode for foreground exec",
-    "attack": "Pending #584: a foreground run_command call under strict mode",
-    "probe": "Pending #584: the effect probe is defined with the owning issue",
-    "declared": "pending",
-    "owner": "#584",
+    "protections": "strict approval (#584); run_command answered a stores a grant before a foreign read (stub MCP tool) exposes the run; the identical command is answered N",
+    "attack": "a granted run_command repeated after a foreign read",
+    "probe": "append-only sink holds one line",
+    "declared": "contained",
+    "owner": "",
     "reason": "",
-    "control": "",
+    "control": "authorization",
     "control_diff": "",
-    "caps": []
+    "caps": [
+      "bash",
+      "exec"
+    ]
   },
   {
     "id": "S3",
@@ -554,43 +557,49 @@
       "STRICT-3",
       "CMP-BG-RECHECK"
     ],
-    "protections": "Pending #584: strict mode for background start, including the start-time recheck",
-    "attack": "Pending #584: a start_command call under strict mode",
-    "probe": "Pending #584: the effect probe is defined with the owning issue",
-    "declared": "pending",
-    "owner": "#584",
+    "protections": "strict approval (#584): the approval gate covers a background start; start_command answered a stores a grant before a foreign read (stub MCP tool) exposes the run; the identical start is answered N",
+    "attack": "a granted start_command repeated after a foreign read",
+    "probe": "append-only job sink holds one line and the background manager lists one job",
+    "declared": "contained",
+    "owner": "",
     "reason": "",
-    "control": "",
+    "control": "authorization",
     "control_diff": "",
-    "caps": []
+    "caps": [
+      "bash",
+      "exec"
+    ]
   },
   {
     "id": "S4",
     "reqs": [
       "STRICT-4"
     ],
-    "protections": "Pending #584: strict mode for the verifier",
-    "attack": "Pending #584: a verify_command call under strict mode",
-    "probe": "Pending #584: the effect probe is defined with the owning issue",
-    "declared": "pending",
-    "owner": "#584",
+    "protections": "strict approval (#584); write_file one.txt answered y, its post-write verifier answered a (stores a verify grant); a foreign read (stub MCP tool) exposes the run; write_file two.txt answered y, its verifier N",
+    "attack": "the granted post-write verifier running again after a foreign read",
+    "probe": "append-only verify sink holds one line",
+    "declared": "contained",
+    "owner": "",
     "reason": "",
-    "control": "",
+    "control": "authorization",
     "control_diff": "",
-    "caps": []
+    "caps": [
+      "bash",
+      "exec"
+    ]
   },
   {
     "id": "S5",
     "reqs": [
       "STRICT-5"
     ],
-    "protections": "Pending #584: strict mode for headless runs",
-    "attack": "Pending #584: a gated call in a headless run under strict mode",
-    "probe": "Pending #584: the effect probe is defined with the owning issue",
-    "declared": "pending",
-    "owner": "#584",
+    "protections": "strict approval (#584); headless -allow-tool write_file approver; a stub foreign read stands in for outside content, which no one-shot run reaches today",
+    "attack": "write_file between two foreign reads in a headless run that allows write_file",
+    "probe": "out.txt absent",
+    "declared": "contained",
+    "owner": "",
     "reason": "",
-    "control": "",
+    "control": "authorization",
     "control_diff": "",
     "caps": []
   },
@@ -599,28 +608,31 @@
     "reqs": [
       "STRICT-6"
     ],
-    "protections": "Pending #584: strict mode for a one-time approval without trust reset",
-    "attack": "Pending #584: a call repeated after a one-time approval under strict mode",
-    "probe": "Pending #584: the effect probe is defined with the owning issue",
-    "declared": "pending",
-    "owner": "#584",
+    "protections": "strict approval (#584); run_command answered a stores a grant before a foreign read (stub MCP tool) exposes the run; the identical command is answered y once, then N",
+    "attack": "a granted run_command repeated twice after a foreign read, the first repeat approved once",
+    "probe": "append-only sink holds two lines",
+    "declared": "contained",
+    "owner": "",
     "reason": "",
-    "control": "",
+    "control": "authorization",
     "control_diff": "",
-    "caps": []
+    "caps": [
+      "bash",
+      "exec"
+    ]
   },
   {
     "id": "S7",
     "reqs": [
       "STRICT-7"
     ],
-    "protections": "Pending #584: strict mode against the /auto-edits bypass",
-    "attack": "Pending #584: an edit that /auto-edits would approve under strict mode",
-    "probe": "Pending #584: the effect probe is defined with the owning issue",
-    "declared": "pending",
-    "owner": "#584",
+    "protections": "strict approval (#584); a foreign read (stub MCP tool) exposes each run; with the /auto-edits file grant seeded, edit_file seed.txt answered a, write_file two.txt N, write_file one.txt y; with an empty grant store, write_file three.txt y, write_file four.txt a",
+    "attack": "an edit and a write after a foreign read while /auto-edits is on, and an always answer to a fresh prompt",
+    "probe": "seed.txt unchanged, two.txt and four.txt absent, and the empty grant store stays empty",
+    "declared": "contained",
+    "owner": "",
     "reason": "",
-    "control": "",
+    "control": "authorization",
     "control_diff": "",
     "caps": []
   },
@@ -629,90 +641,108 @@
     "reqs": [
       "EXPOSURE-1"
     ],
-    "protections": "Pending #582/#583: exposure carried through child results",
-    "attack": "Pending #582/#583: foreign content returned in a child result",
-    "probe": "Pending #582/#583: the effect probe is defined with the owning issue",
-    "declared": "pending",
-    "owner": "#582/#583",
+    "protections": "strict approval (#584); run_command answered a stores a grant; a workspace-origin host tool runs a child orchestrator that reads a stub foreign tool (no product path reaches this today); the identical command is answered N",
+    "attack": "foreign content returned in a child result, then a granted run_command",
+    "probe": "append-only sink holds one line",
+    "declared": "contained",
+    "owner": "",
     "reason": "",
-    "control": "",
+    "control": "authorization",
     "control_diff": "",
-    "caps": []
+    "caps": [
+      "bash",
+      "exec"
+    ]
   },
   {
     "id": "C2",
     "reqs": [
       "EXPOSURE-2"
     ],
-    "protections": "Pending #582/#583: exposure carried through model answers",
-    "attack": "Pending #582/#583: foreign content restated in a model answer",
-    "probe": "Pending #582/#583: the effect probe is defined with the owning issue",
-    "declared": "pending",
-    "owner": "#582/#583",
+    "protections": "strict approval (#584) through golem.Runtime over a real SQLite session store; turn 1: run_command answered a stores a grant, a foreign read (stub MCP tool), and an answer restating it; turn 2: the identical command answered N",
+    "attack": "foreign content restated in a model answer, then a granted run_command in the next turn",
+    "probe": "append-only sink holds one line",
+    "declared": "contained",
+    "owner": "",
     "reason": "",
-    "control": "",
+    "control": "authorization",
     "control_diff": "",
-    "caps": []
+    "caps": [
+      "bash",
+      "exec"
+    ]
   },
   {
     "id": "C3",
     "reqs": [
       "EXPOSURE-3"
     ],
-    "protections": "Pending #582/#583: exposure carried through mixed-context assembly",
-    "attack": "Pending #582/#583: foreign content assembled into a mixed context",
-    "probe": "Pending #582/#583: the effect probe is defined with the owning issue",
-    "declared": "pending",
-    "owner": "#582/#583",
+    "protections": "strict approval (#584); -progressive mixed context assembly; run_command answered a stores a grant; a stub foreign tool returns the instruction only as a context-set alternative; the identical command is answered N",
+    "attack": "foreign content assembled into a mixed context, then a granted run_command",
+    "probe": "append-only sink holds one line",
+    "declared": "contained",
+    "owner": "",
     "reason": "",
-    "control": "",
+    "control": "authorization",
     "control_diff": "",
-    "caps": []
+    "caps": [
+      "bash",
+      "exec"
+    ]
   },
   {
     "id": "C4",
     "reqs": [
       "EXPOSURE-4"
     ],
-    "protections": "Pending #582/#583: exposure carried through summary replacement",
-    "attack": "Pending #582/#583: foreign content folded into a replacement summary",
-    "probe": "Pending #582/#583: the effect probe is defined with the owning issue",
-    "declared": "pending",
-    "owner": "#582/#583",
+    "protections": "strict approval (#584) through golem.Runtime over a real SQLite session store with a summarizer; turn 1: run_command answered a stores a grant, a foreign read (stub MCP tool), and an answer restating it; four more turns push it past the retention floor; CompactThread folds it into the summary; then the identical command answered N",
+    "attack": "foreign content folded into a replacement summary, then a granted run_command",
+    "probe": "append-only sink holds one line",
+    "declared": "contained",
+    "owner": "",
     "reason": "",
-    "control": "",
+    "control": "authorization",
     "control_diff": "",
-    "caps": []
+    "caps": [
+      "bash",
+      "exec"
+    ]
   },
   {
     "id": "C5",
     "reqs": [
       "EXPOSURE-5"
     ],
-    "protections": "Pending #582/#583: exposure carried through subsequent turns",
-    "attack": "Pending #582/#583: foreign content reaching a later turn",
-    "probe": "Pending #582/#583: the effect probe is defined with the owning issue",
-    "declared": "pending",
-    "owner": "#582/#583",
+    "protections": "strict approval (#584) through golem.Runtime over a real SQLite session store; turn 1: run_command answered a stores a grant, then a foreign read (stub MCP tool); turn 2: the identical command answered N",
+    "attack": "a granted run_command in the turn after a foreign read",
+    "probe": "append-only sink holds one line",
+    "declared": "contained",
+    "owner": "",
     "reason": "",
-    "control": "",
+    "control": "authorization",
     "control_diff": "",
-    "caps": []
+    "caps": [
+      "bash",
+      "exec"
+    ]
   },
   {
     "id": "C6",
     "reqs": [
       "EXPOSURE-6"
     ],
-    "protections": "Pending #582/#583: exposure carried through resume",
-    "attack": "Pending #582/#583: foreign content reaching a resumed session",
-    "probe": "Pending #582/#583: the effect probe is defined with the owning issue",
-    "declared": "pending",
-    "owner": "#582/#583",
+    "protections": "strict approval (#584) through golem.Runtime over a real SQLite session store; turn 1: run_command answered a stores a grant, then a foreign read (stub MCP tool); the session database is reopened under a new Runtime, the grant store kept; then the identical command answered N",
+    "attack": "a granted run_command after resuming a conversation a foreign read exposed",
+    "probe": "append-only sink holds one line",
+    "declared": "contained",
+    "owner": "",
     "reason": "",
-    "control": "",
+    "control": "authorization",
     "control_diff": "",
-    "caps": []
+    "caps": [
+      "bash",
+      "exec"
+    ]
   },
   {
     "id": "R1",

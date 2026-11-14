@@ -274,6 +274,7 @@ func TestStrictParallelReadsExposeNextStep(t *testing.T) {
 }
 
 func TestStrictAcceptedAdviceSuspendsFirstCall(t *testing.T) {
+	// containment: EXPOSURE-2
 	ap := &freshGrantApprover{}
 	res := strictRun(t, Request{StrictApproval: true, Approver: ap, Advisory: testAdvisory(),
 		Tools: []Tool{grantedWrite(EditFileToolName)}}, steps(EditFileToolName)...)
@@ -337,6 +338,7 @@ func TestStrictOneTimeApprovalDoesNotClear(t *testing.T) {
 }
 
 func TestStrictRaisesApprovalNever(t *testing.T) {
+	// containment: STRICT-1
 	lowering := planningStub{stubTool{"lowering", Effect{Class: Write, Approval: ApprovalAlways}},
 		ToolPlan{Effect: Effect{Class: Write, Approval: ApprovalNever}}}
 	for _, tt := range []struct {

@@ -413,6 +413,7 @@ func requireFreshHarness(t *testing.T, f *fixture, calls []agent.ModelResult, wa
 }
 
 func TestHeadlessApproverIsNotFresh(t *testing.T) {
+	// containment: STRICT-5
 	if _, ok := any((*headlessApprover)(nil)).(agent.FreshApprover); ok {
 		t.Fatal("headlessApprover implements agent.FreshApprover; an unattended run must be denied once exposed")
 	}
@@ -654,6 +655,15 @@ func TestStrictApprovalFlagAcceptedInAllModes(t *testing.T) {
 // any extra tools mounted, and -strict-approval on in the CLI and the runtime.
 func newStrictSession(t *testing.T, caller agent.ModelCaller, extra ...agent.Tool) *replSession {
 	t.Helper()
+	sess, _ := newStrictSessionOpts(t, caller, golemruntime.Options{}, extra...)
+	return sess
+}
+
+// newStrictSessionOpts is newStrictSession over base runtime options (a
+// summarizer, for C4). It returns the options the runtime was built from, so
+// a test can build a second runtime over the same database (C6).
+func newStrictSessionOpts(t *testing.T, caller agent.ModelCaller, base golemruntime.Options, extra ...agent.Tool) (*replSession, golemruntime.Options) {
+	t.Helper()
 	root := t.TempDir()
 	sess := newSessionedTestSession(t, caller, root, "user:active")
 	sess.root = root
@@ -666,8 +676,9 @@ func newStrictSession(t *testing.T, caller agent.ModelCaller, extra ...agent.Too
 	mounted := append(writeTools, extra...)
 	sess.tools = append(sess.tools, mounted...)
 	sess.journal, sess.allowWrite, sess.strictApproval = journal, true, true
-	installCompactRuntime(t, sess, golemruntime.Options{Profile: golemruntime.ProfileTrusted, Tools: mounted, StrictApproval: true})
-	return sess
+	base.Profile, base.Tools, base.StrictApproval = golemruntime.ProfileTrusted, mounted, true
+	installCompactRuntime(t, sess, base)
+	return sess, base
 }
 
 func writeOut(path string) agent.ModelResult {
