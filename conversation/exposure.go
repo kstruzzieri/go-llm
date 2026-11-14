@@ -3,9 +3,7 @@ package conversation
 import (
 	"database/sql"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
 	"strings"
 	"unicode/utf8"
 )
@@ -48,7 +46,7 @@ func BoundExposureFirst(s string) string {
 	return s[:n]
 }
 
-// exposureWireVersion is the only stored record version this package reads.
+// exposureWireVersion is the only stored record version this package writes.
 const exposureWireVersion = 1
 
 // exposureWire is the stored form. Field order fixes the key order.
@@ -62,7 +60,7 @@ type exposureWire struct {
 // encodeExposure returns the stored form of e, or SQL NULL when e is not
 // Recorded. Invalid UTF-8 is stripped before the label is bounded, because
 // encoding/json would otherwise widen each bad byte to three bytes and push a
-// bounded label past the bound that decodeExposure enforces.
+// bounded label past the bound, and decodeExposure accepts only text this function wrote.
 func encodeExposure(e Exposure) (sql.NullString, error) {
 	if !e.Recorded {
 		return sql.NullString{}, nil
@@ -80,35 +78,20 @@ func encodeExposure(e Exposure) (sql.NullString, error) {
 }
 
 // decodeExposure reads a stored record. It returns the zero Exposure (no
-// record) unless the record is present, bound to revision, and strictly well
-// formed: one JSON object, no unknown keys, all four keys present, version 1,
-// First within the bound. It never fails and never panics.
+// record) unless the record is bound to revision and is byte-for-byte the text
+// encodeExposure writes for the record it decodes to. It never fails and never
+// panics.
 func decodeExposure(raw sql.NullString, exposureRevision sql.NullInt64, revision int64) Exposure {
-	if !raw.Valid || !utf8.ValidString(raw.String) {
+	if !raw.Valid || !exposureRevision.Valid || exposureRevision.Int64 != revision {
 		return Exposure{}
 	}
-	if !exposureRevision.Valid || exposureRevision.Int64 != revision {
+	var w exposureWire
+	if json.Unmarshal([]byte(raw.String), &w) != nil {
 		return Exposure{}
 	}
-	var w struct {
-		V       *int    `json:"v"`
-		Foreign *bool   `json:"foreign"`
-		Unknown *bool   `json:"unknown"`
-		First   *string `json:"first"`
-	}
-	dec := json.NewDecoder(strings.NewReader(raw.String))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&w); err != nil {
+	e := Exposure{Recorded: true, Foreign: w.Foreign, Unknown: w.Unknown, First: w.First}
+	if canonical, err := encodeExposure(e); err != nil || canonical.String != raw.String {
 		return Exposure{}
 	}
-	if _, err := dec.Token(); !errors.Is(err, io.EOF) { // trailing data
-		return Exposure{}
-	}
-	if w.V == nil || w.Foreign == nil || w.Unknown == nil || w.First == nil {
-		return Exposure{}
-	}
-	if *w.V != exposureWireVersion || len(*w.First) > MaxExposureFirstBytes {
-		return Exposure{}
-	}
-	return Exposure{Recorded: true, Foreign: *w.Foreign, Unknown: *w.Unknown, First: *w.First}
+	return e
 }

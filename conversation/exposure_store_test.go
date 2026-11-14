@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"strings"
 	"testing"
-	"unicode/utf8"
 )
 
 // saveExposure saves a fresh conversation carrying e and returns its ID.
@@ -57,6 +56,7 @@ func TestExposureRoundTrip(t *testing.T) {
 		{"both flags", Exposure{Recorded: true, Foreign: true, Unknown: true, First: "tool:x"}},
 		{"foreign empty first", Exposure{Recorded: true, Foreign: true}},
 		{"recorded clean", Exposure{Recorded: true}},
+		{"label with HTML and non-ASCII", Exposure{Recorded: true, Unknown: true, First: "tool:<a>&</a> é日本"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -128,6 +128,10 @@ func TestExposureStoredValueReadsNotRecorded(t *testing.T) {
 		{"trailing object", ok + `{}`},
 		{"trailing garbage", ok + ` x`},
 		{"trailing brace", ok + `}`},
+		{"duplicate key, last wins", `{"v":1,"foreign":true,"unknown":false,"first":"","foreign":false}`},
+		{"upper-case keys", `{"V":1,"FOREIGN":false,"Unknown":false,"First":""}`},
+		{"extra whitespace", `{"v": 1, "foreign": false, "unknown": false, "first": ""}`},
+		{"key order", `{"first":"","v":1,"foreign":false,"unknown":false}`},
 		{"JSON null", `null`},
 		{"JSON array", `[]`},
 		{"wrong type", `{"v":1,"foreign":"yes","unknown":false,"first":""}`},
@@ -253,28 +257,18 @@ func TestExposureBoundsFirstOnSave(t *testing.T) {
 	tests := []struct {
 		name  string
 		first string
-		check func(t *testing.T, got string)
+		want  string
 	}{
-		{"oversized ASCII", "tool:" + strings.Repeat("a", 300), func(t *testing.T, got string) {
-			if want := ("tool:" + strings.Repeat("a", 300))[:MaxExposureFirstBytes]; got != want {
-				t.Fatalf("First = %q, want truncated to %d bytes", got, MaxExposureFirstBytes)
-			}
-		}},
-		{"oversized multi-byte", strings.Repeat("é", 200), func(t *testing.T, got string) {
-			if len(got) > MaxExposureFirstBytes || !utf8.ValidString(got) || got != strings.Repeat("é", len(got)/2) {
-				t.Fatalf("First = %q (%d bytes), want whole runes within bound", got, len(got))
-			}
-		}},
-		{"invalid UTF-8", "tool:" + strings.Repeat("\xff", 128), func(t *testing.T, got string) {
-			if got != "tool:" {
-				t.Fatalf("First = %q, want invalid bytes stripped", got)
-			}
-		}},
-		{"invalid UTF-8 inside long label", strings.Repeat("a\xff", 100), func(t *testing.T, got string) {
-			if !utf8.ValidString(got) || len(got) > MaxExposureFirstBytes || got != strings.Repeat("a", len(got)) {
-				t.Fatalf("First = %q, want valid and bounded", got)
-			}
-		}},
+		{"oversized ASCII", "tool:" + strings.Repeat("a", 300), "tool:" + strings.Repeat("a", 123)},
+		// 200 bytes of two-byte runes: the 128-byte bound lands on a rune start, 64 runes.
+		{"oversized multi-byte", strings.Repeat("é", 100), strings.Repeat("é", 64)},
+		// 127 bytes, then a 3-byte rune straddling the 128-byte bound: cut before it.
+		{"multi-byte straddling the bound", "tool:" + strings.Repeat("a", 122) + "日本", "tool:" + strings.Repeat("a", 122)},
+		{"invalid UTF-8", "tool:" + strings.Repeat("\xff", 128), "tool:"},
+		// 100 x "a\xff" strips to 100 "a"; all fit in the bound.
+		{"invalid UTF-8 inside long label", strings.Repeat("a\xff", 100), strings.Repeat("a", 100)},
+		// 200 x "a\xff" strips to 200 "a", cut to 128.
+		{"invalid UTF-8 over the bound", strings.Repeat("a\xff", 200), strings.Repeat("a", 128)},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -283,7 +277,9 @@ func TestExposureBoundsFirstOnSave(t *testing.T) {
 			if !got.Recorded || !got.Foreign {
 				t.Fatalf("Exposure = %+v, want recorded and foreign", got)
 			}
-			tt.check(t, got.First)
+			if got.First != tt.want {
+				t.Fatalf("First = %q (%d bytes), want %q (%d bytes)", got.First, len(got.First), tt.want, len(tt.want))
+			}
 		})
 	}
 }

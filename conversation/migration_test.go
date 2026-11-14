@@ -578,7 +578,7 @@ func TestRunMigrations_V2BackwardCompat(t *testing.T) {
 	}
 
 	// The pre-v3 row loads with a nil DurableSummary and preserved content.
-	// NewStore re-runs migrations idempotently (already at v5).
+	// NewStore re-runs migrations idempotently (already at v6).
 	store, err := NewStore(context.Background(), db)
 	if err != nil {
 		t.Fatalf("NewStore() error: %v", err)
