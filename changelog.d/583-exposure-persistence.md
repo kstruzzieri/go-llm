@@ -4,6 +4,7 @@ Conversations now store their exposure record on the conversation row, bound to 
 
 - The conversation store schema moves to version 6 with two added nullable columns.
 - Conversations saved before this version, or last written by an older binary, read as unknown (and so as exposed) until a new or cleared conversation replaces them. A custom `SessionStore` that does not keep the record reads the same way.
+- Consumers with a custom `SessionStore` should read the "Exposure record" section of `docs/library.md` for what a store and a conversation-writing host must carry.
 - `Runtime.ThreadExposure` is read-only: it does not reserve the thread, needs no compression setup and never creates a conversation. A well-formed thread ID with no stored conversation reads as clean.
 
 Nothing changes for a session yet: nothing reads the record until the strict approval mode lands (#584).

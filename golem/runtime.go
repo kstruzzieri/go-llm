@@ -66,6 +66,10 @@ const (
 // snapshot, then a best-effort compressed snapshot. The caller owns the store
 // and must keep it alive until Runtime.Close returns; Runtime never closes,
 // migrates, or hardens it.
+//
+// Implementations must carry Conversation.Exposure with the snapshot it
+// describes, in the same atomic Save. A store that does not makes every
+// conversation read as unknown, which is treated as exposed.
 type SessionStore interface {
 	Load(ctx context.Context, id string) (*conversation.Conversation, error)
 	Save(ctx context.Context, conv conversation.Conversation) (int64, error)
