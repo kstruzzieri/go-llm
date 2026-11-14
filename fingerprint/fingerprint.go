@@ -231,9 +231,10 @@ type ProbeAnswer struct {
 
 // CapabilityProbeResult is what one probe produced. Requests is the number of
 // requests the prober sent, set on success and on failure alike. A request
-// counts once its headers were written; one the transport took but never wrote
-// (a refused connection, a dial or TLS failure) and one a caller already done
-// never started do not. When the transport reports nothing, the request
+// counts once its headers were written; a request the transport could not send
+// while the call was still live (for example a refused connection) and one a
+// caller already done never started do not. A request whose context ended
+// while it was in flight counts. When the transport reports nothing, the request
 // counts unless the prober can prove it never left, so the count errs high,
 // never low. Answers may include capabilities the recipe proved beyond those
 // requested, and never one the recipe does not cover.

@@ -29,7 +29,8 @@ var _ fingerprint.CapabilityProber = (*OpenAICompatProber)(nil)
 // tool_choice; on the second it records request_rejected. Any other failure,
 // and a cancelled caller, returns an error and no answers: no failure yields a
 // no. result.Requests counts the requests sent, on failure too; a request the
-// transport took but never wrote, such as a refused connection, is not sent.
+// transport could not send while the call was still live (for example a
+// refused connection) is not sent.
 func (p *OpenAICompatProber) ProbeCapabilities(ctx context.Context, model string, req fingerprint.CapabilityProbeRequest) (fingerprint.CapabilityProbeResult, error) {
 	if p == nil || p.prov == nil {
 		return fingerprint.CapabilityProbeResult{}, fmt.Errorf("fingerprint: openaicompat probe %q: provider is required", model)
@@ -52,17 +53,17 @@ func (p *OpenAICompatProber) ProbeCapabilities(ctx context.Context, model string
 		if err := ctx.Err(); err != nil {
 			return result, wrap(err)
 		}
-		final, sends, err := p.streamOnce(ctx, model, recipe, i == 0)
+		final, notSent, err := p.streamOnce(ctx, model, recipe, i == 0)
 		// Requests counts what was sent, decided by what the transport
-		// reported: a request it took but whose headers it never wrote (a
-		// refused connection) was not sent. Without a report it counts, unless
+		// reported: a request it could not send while the call was still
+		// live (for example a refused connection) was not sent. Without a report it counts, unless
 		// this code can prove it never left: a body the client's content guard
 		// refuses, or a destination denial from the guarded transport or gate,
 		// which is a *DestinationDeniedError. A refused redirect also matches
 		// ErrDestinationDenied but is not that type, and follows a request that
 		// was sent, so it counts.
 		var denied *provider.DestinationDeniedError
-		if !sends.NotSent() && !errors.Is(err, provider.ErrContentDenied) && !errors.As(err, &denied) {
+		if !notSent && !errors.Is(err, provider.ErrContentDenied) && !errors.As(err, &denied) {
 			result.Requests++
 		}
 		if err == nil {
@@ -104,9 +105,9 @@ func rejected(err error) bool {
 
 // streamOnce sends one recipe request under its own timeout and returns the
 // stream's final response (metadata, usage, finish reason and tool calls) and
-// what the transport reported sending. Content and thinking deltas are
-// discarded.
-func (p *OpenAICompatProber) streamOnce(ctx context.Context, model string, recipe fingerprint.ProbeRecipe, first bool) (provider.ChatResponse, *responsebound.Sends, error) {
+// whether the transport could not send it while the call was live. Content
+// and thinking deltas are discarded.
+func (p *OpenAICompatProber) streamOnce(ctx context.Context, model string, recipe fingerprint.ProbeRecipe, first bool) (final provider.ChatResponse, notSent bool, err error) {
 	ctx, sends := responsebound.TrackSends(responsebound.WithLimit(ctx, recipe.MaxResponseBytes))
 	ctx, cancel := context.WithTimeout(ctx, cmp.Or(p.requestTimeout, recipe.RequestTimeout))
 	defer cancel()
@@ -127,9 +128,8 @@ func (p *OpenAICompatProber) streamOnce(ctx context.Context, model string, recip
 	if send == nil {
 		send = p.prov.ChatStream
 	}
-	var final provider.ChatResponse
 	var done bool
-	err := send(ctx, req, func(r provider.ChatResponse) error {
+	err = send(ctx, req, func(r provider.ChatResponse) error {
 		if r.Done { // a partial final comes only with an error, which discards it
 			final, done = r, true
 		}
@@ -138,7 +138,8 @@ func (p *OpenAICompatProber) streamOnce(ctx context.Context, model string, recip
 	if err == nil && !done {
 		err = errors.New("stream ended without a final response")
 	}
-	return final, sends, err
+	// Read before the deferred cancel ends this request's context.
+	return final, sends.NotSent(ctx), err
 }
 
 // streamAnswers classifies a completed stream. retried is true for the second

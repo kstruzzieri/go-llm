@@ -51,13 +51,17 @@ func TrackSends(ctx context.Context) (context.Context, *Sends) {
 	}), s
 }
 
-// NotSent reports whether the transport took the request and wrote none of
-// its headers (a refused connection, a DNS, dial or TLS failure, or a cancel
-// while connecting): the server cannot have acted on it. Without any trace
-// event (a transport that does not report, or a failure before the transport)
-// it is false, so a caller counting requests errs toward counting.
-func (s *Sends) NotSent() bool {
-	return s.took.Load() && !s.wrote.Load()
+// NotSent reports whether the transport could not send the request while the
+// call was still live (for example a refused connection, or a DNS, dial or TLS
+// failure): it took the request, wrote none of its headers, and reqCtx, the
+// request's own context, is not done. Once reqCtx is done the record is not
+// trusted, because on HTTP/2 the client can return on cancellation before its
+// writer goroutine writes the headers; such a request counts as sent. Without
+// any trace event (a transport that does not report, or a failure before the
+// transport) it is false too, so a caller counting requests errs toward
+// counting. Call it after the request returns, before reqCtx is cancelled.
+func (s *Sends) NotSent(reqCtx context.Context) bool {
+	return reqCtx.Err() == nil && s.took.Load() && !s.wrote.Load()
 }
 
 // Wrap returns body counted against ctx's limit, or body unchanged when ctx

@@ -913,18 +913,32 @@ func TestProbeCapabilities_CountsOnlyRequestsSent(t *testing.T) {
 	silent := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 		return nil, errors.New("scripted transport failure")
 	})}
+	// dialing is a transport whose dial blocks until the request's context
+	// ends, after signalling that the transport took the request: cancelled
+	// there, it took the request and wrote no headers, but the record is not
+	// trusted once the context is done, so the request counts.
+	dialing := make(chan struct{}, 2)
+	connecting := &http.Client{Transport: &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			dialing <- struct{}{}
+			<-ctx.Done()
+			return nil, ctx.Err()
+		},
+	}}
 	tests := []struct {
 		name      string
 		url       func(t *testing.T, stub *probeStub) string
 		hc        *http.Client
 		cancelled bool
+		inDial    bool // cancel once the dial has begun
 		wantErr   bool
 		want      int
 	}{
-		{"connection refused", func(t *testing.T, _ *probeStub) string { return closedPortURL(t) }, nil, false, true, 0},
-		{"cancelled at entry", func(_ *testing.T, s *probeStub) string { return s.srv.URL }, nil, true, true, 0},
-		{"answered", func(_ *testing.T, s *probeStub) string { return s.srv.URL }, nil, false, false, 1},
-		{"a transport that reports nothing fails", func(_ *testing.T, s *probeStub) string { return s.srv.URL }, silent, false, true, 1},
+		{"connection refused", func(t *testing.T, _ *probeStub) string { return closedPortURL(t) }, nil, false, false, true, 0},
+		{"cancelled at entry", func(_ *testing.T, s *probeStub) string { return s.srv.URL }, nil, true, false, true, 0},
+		{"cancelled while connecting", func(_ *testing.T, s *probeStub) string { return s.srv.URL }, connecting, false, true, true, 1},
+		{"answered", func(_ *testing.T, s *probeStub) string { return s.srv.URL }, nil, false, false, false, 1},
+		{"a transport that reports nothing fails", func(_ *testing.T, s *probeStub) string { return s.srv.URL }, silent, false, false, true, 1},
 	}
 	for _, adapter := range []string{fingerprint.AdapterOpenAICompat, fingerprint.AdapterOllama} {
 		for _, tt := range tests {
@@ -939,6 +953,12 @@ func TestProbeCapabilities_CountsOnlyRequestsSent(t *testing.T) {
 				defer cancel()
 				if tt.cancelled {
 					cancel()
+				}
+				if tt.inDial {
+					go func() {
+						<-dialing
+						cancel()
+					}()
 				}
 				res, err := p.ProbeCapabilities(ctx, "m", req)
 				if (err != nil) != tt.wantErr {

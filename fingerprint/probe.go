@@ -138,11 +138,11 @@ func (p *OllamaProber) ProbeCapabilities(ctx context.Context, model string, req 
 	reqCtx, cancel := context.WithTimeout(reqCtx, cmp.Or(p.requestTimeout, recipe.RequestTimeout))
 	defer cancel()
 	info, err := p.client.ShowModel(reqCtx, model)
-	// The request counts unless the transport took it and wrote no headers (a
-	// refused connection). This package cannot import provider to recognize a
-	// destination denial, so a denial the transport did not report counts; a
-	// metadata check spends no allowance.
-	if !sends.NotSent() {
+	// The request counts unless the transport could not send it while the call
+	// was still live (for example a refused connection). This package cannot
+	// import provider to recognize a destination denial, so a denial the
+	// transport did not report counts; a metadata check spends no allowance.
+	if !sends.NotSent(reqCtx) {
 		result.Requests = 1
 	}
 	if err != nil {
