@@ -1293,3 +1293,72 @@ func equalStrings(a, b []string) bool {
 	}
 	return true
 }
+
+// TestCompat_UpstreamFinishReasonWins pins that a nonempty upstream
+// FinishReason is forwarded in both response modes, even when a tool call
+// would otherwise derive "tool_calls"; the one exception is an upstream "stop"
+// on a reply carrying tool calls, which still reports "tool_calls" because
+// some servers send stop with tool calls and clients key their tool loop on it.
+func TestCompat_UpstreamFinishReasonWins(t *testing.T) {
+	call := provider.ToolCall{
+		ID: "call_1", Type: "function",
+		Function: provider.ToolCallFunction{Name: "get_time", Arguments: json.RawMessage(`{}`)},
+	}
+	rows := []struct{ upstream, want string }{
+		{"length", "length"},
+		{"stop", "tool_calls"},
+	}
+	for _, row := range rows {
+		t.Run("non-streaming upstream "+row.upstream, func(t *testing.T) {
+			srv, _, teardown := newChatFixtureWithResponse(t, func(req provider.ChatRequest) *provider.ChatResponse {
+				return &provider.ChatResponse{
+					Model: req.Model, Provider: "ollama", Done: true,
+					ToolCalls: []provider.ToolCall{call}, FinishReason: row.upstream,
+				}
+			})
+			defer teardown()
+			rec := doChat(t, srv, map[string]any{
+				"model":    "ollama/qwen3:8b",
+				"messages": []map[string]string{{"role": "user", "content": "hi"}},
+			})
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+			}
+			var out ChatCompletionResponse
+			if err := json.NewDecoder(rec.Body).Decode(&out); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if got := out.Choices[0].FinishReason; got != row.want {
+				t.Errorf("finish_reason = %q, want %s", got, row.want)
+			}
+		})
+		t.Run("streaming upstream "+row.upstream, func(t *testing.T) {
+			srv, teardown := newStreamingServer(t, func(_ context.Context, req provider.ChatRequest, fn func(provider.ChatResponse) error) error {
+				return fn(provider.ChatResponse{
+					Model: req.Model, Done: true,
+					ToolCalls: []provider.ToolCall{call}, FinishReason: row.upstream,
+				})
+			})
+			defer teardown()
+			rec := doChatRequest(t, srv, map[string]any{
+				"model":    "ollama/qwen3:8b",
+				"stream":   true,
+				"messages": []map[string]string{{"role": "user", "content": "hi"}},
+			})
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+			}
+			chunks := decodeSSEChunks(t, rec.Body.String())
+			if len(chunks) != 1 {
+				t.Fatalf("got %d chunks, want 1", len(chunks))
+			}
+			fr := chunks[0].Choices[0].FinishReason
+			if fr == nil {
+				t.Fatalf("finish_reason = null, want %s", row.want)
+			}
+			if *fr != row.want {
+				t.Errorf("finish_reason = %q, want %s", *fr, row.want)
+			}
+		})
+	}
+}

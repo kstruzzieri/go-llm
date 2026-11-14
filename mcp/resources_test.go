@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"net"
@@ -18,6 +19,7 @@ import (
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/kstruzzieri/go-llm/configview"
+	"github.com/kstruzzieri/go-llm/fingerprint"
 	"github.com/kstruzzieri/go-llm/provider"
 )
 
@@ -621,5 +623,89 @@ func TestRouteResourcesWithoutRouter(t *testing.T) {
 		if got := res.Contents[0].Text; got != c.want {
 			t.Errorf("%s without router = %s, want %s", name, got, c.want)
 		}
+	}
+}
+
+// countingCapProber counts capability checks; profiling is not expected.
+type countingCapProber struct{ calls atomic.Int64 }
+
+func (p *countingCapProber) ProbeCapabilities(context.Context, string, fingerprint.CapabilityProbeRequest) (fingerprint.CapabilityProbeResult, error) {
+	p.calls.Add(1)
+	yes := func(c string, k fingerprint.EvidenceKind) fingerprint.ProbeAnswer {
+		return fingerprint.ProbeAnswer{Capability: c, Source: fingerprint.EvidenceSourceProbe, Kind: k, State: fingerprint.CapProbeYes}
+	}
+	return fingerprint.CapabilityProbeResult{Method: fingerprint.MethodChatStreamTools, Requests: 1, Answers: []fingerprint.ProbeAnswer{
+		yes("chat", fingerprint.EvidenceKindAnswer), yes("stream", fingerprint.EvidenceKindAnswer), yes("tool_call", fingerprint.EvidenceKindAnswer),
+	}}, nil
+}
+func (p *countingCapProber) DetectKind(context.Context, string) (*fingerprint.KindDetection, error) {
+	return nil, errors.New("profiling is not expected")
+}
+func (p *countingCapProber) ProbeChat(context.Context, string, interface{}) (*fingerprint.ChatMetrics, error) {
+	return nil, errors.New("profiling is not expected")
+}
+func (p *countingCapProber) ProbeEmbedding(context.Context, string) (*fingerprint.EmbeddingMetrics, error) {
+	return nil, errors.New("profiling is not expected")
+}
+
+// TestConfigViewResource_LogBoundRegistryStartsNoCheck pins that resource reads
+// over a log-bound registry start no capability check.
+func TestConfigViewResource_LogBoundRegistryStartsNoCheck(t *testing.T) {
+	ctx := context.Background()
+	cfgPath := filepath.Join(t.TempDir(), "models.json")
+	if err := os.WriteFile(cfgPath, []byte(`{
+  "providers": {"local": {"base_url": "http://127.0.0.1:1", "api_format": "openai-compat"}},
+  "models": {"agent": {"name": "m1", "provider": "local", "type": "dense"}},
+  "defaults": {"chat": "agent"}
+}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	env := newTestEnv(t, http.NotFoundHandler(), WithConfig(cfgPath))
+	defer env.cleanup()
+
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "fingerprints.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	store, err := fingerprint.NewStore(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reg := provider.NewRegistry()
+	if err := reg.Register(&mutableModelProvider{fakeRouteProvider: &fakeRouteProvider{name: "local"}, models: []provider.ModelInfo{{Name: "m1"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.RefreshModels(ctx, "local"); err != nil {
+		t.Fatal(err)
+	}
+	binding, err := provider.EvidenceBindingFor("http://127.0.0.1:1", "openai-compat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	prober := &countingCapProber{}
+	mr, err := provider.NewModelRegistry(reg, nil,
+		provider.WithEvidenceLog(store, func(string) (provider.EvidenceBinding, bool) { return binding, true }),
+		provider.WithCapabilityProber(func(context.Context, provider.ModelKey, *provider.ModelInfo, provider.Provider) (*provider.FingerprintProberSpec, error) {
+			return &provider.FingerprintProberSpec{Prober: prober}, nil
+		}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	env.server.mu.Lock()
+	env.server.providerRegistry, env.server.modelRegistry = reg, mr
+	env.server.mu.Unlock()
+
+	for _, uri := range []string{"go-llm://configview/v1", "go-llm://models", "go-llm://config", "go-llm://health"} {
+		if _, err := env.session.ReadResource(ctx, &gomcp.ReadResourceParams{URI: uri}); err != nil {
+			t.Fatalf("ReadResource(%s): %v", uri, err)
+		}
+	}
+	if n := prober.calls.Load(); n != 0 {
+		t.Fatalf("resource reads started %d checks; want 0", n)
+	}
+	// Positive control: the counter sees a caller's request.
+	if _, err := mr.ResolveToolCall(ctx, provider.ModelKey{Provider: "local", Model: "m1"}); err != nil || prober.calls.Load() != 1 {
+		t.Fatalf("control: err=%v calls=%d; want one check", err, prober.calls.Load())
 	}
 }

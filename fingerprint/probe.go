@@ -1,11 +1,14 @@
 package fingerprint
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
+	"github.com/kstruzzieri/go-llm/internal/responsebound"
 	"github.com/kstruzzieri/go-llm/ollama"
 )
 
@@ -13,6 +16,10 @@ import (
 // collect performance metrics for building a fingerprint Profile.
 type OllamaProber struct {
 	client *ollama.Client
+
+	// requestTimeout replaces the recipe's timeout in tests; zero uses the
+	// recipe's.
+	requestTimeout time.Duration
 }
 
 // NewProber creates an OllamaProber using the given Ollama client.
@@ -104,14 +111,63 @@ func (p *OllamaProber) probeKind(ctx context.Context, model string, info *ollama
 
 // Compile-time interface checks.
 var (
-	_ ModelProber    = (*OllamaProber)(nil)
-	_ ToolCallProber = (*OllamaProber)(nil)
+	_ ModelProber      = (*OllamaProber)(nil)
+	_ ToolCallProber   = (*OllamaProber)(nil)
+	_ CapabilityProber = (*OllamaProber)(nil)
 )
 
+// ProbeCapabilities answers from /api/show metadata with one bounded request
+// under the ollama-show recipe's timeout and byte limit: no generation, no
+// model load. Every answer comes from OllamaCapabilityFacts with source
+// provider. A requested capability the metadata does not answer is an
+// inconclusive attempt, never an invented no. A failed request answers
+// nothing.
+func (p *OllamaProber) ProbeCapabilities(ctx context.Context, model string, req CapabilityProbeRequest) (CapabilityProbeResult, error) {
+	recipe, err := RecipeForRequest(req, AdapterOllama)
+	if err != nil {
+		return CapabilityProbeResult{}, fmt.Errorf("fingerprint: ollama probe %q: %w", model, err)
+	}
+	if model == "" { // ShowModel would refuse it without sending, and Requests counts what is sent
+		return CapabilityProbeResult{}, errors.New("fingerprint: ollama probe: model name is required")
+	}
+	result := CapabilityProbeResult{Method: recipe.Method}
+	if err := ctx.Err(); err != nil { // a caller already done sends nothing
+		return result, fmt.Errorf("fingerprint: ollama probe %q: %w", model, err)
+	}
+	reqCtx, sends := responsebound.TrackSends(responsebound.WithLimit(ctx, recipe.MaxResponseBytes))
+	reqCtx, cancel := context.WithTimeout(reqCtx, cmp.Or(p.requestTimeout, recipe.RequestTimeout))
+	defer cancel()
+	info, err := p.client.ShowModel(reqCtx, model)
+	// The request counts unless the transport could not send it while the call
+	// was still live (for example a refused connection). This package cannot
+	// import provider to recognize a destination denial, so a denial the
+	// transport did not report counts; a metadata check spends no allowance.
+	if !sends.NotSent(reqCtx) {
+		result.Requests = 1
+	}
+	if err != nil {
+		return result, fmt.Errorf("fingerprint: ollama probe %q: %w", model, err)
+	}
+	facts := OllamaCapabilityFacts(info.Capabilities, info.Template)
+	for _, capability := range recipe.Capabilities {
+		answer := ProbeAnswer{Capability: capability, Source: EvidenceSourceProvider}
+		if state, ok := facts[capability]; ok {
+			answer.Kind, answer.State = EvidenceKindAnswer, state
+		} else if slices.Contains(req.Capabilities, capability) {
+			answer.Kind, answer.State, answer.TTL = EvidenceKindAttempt, CapProbeInconclusive, CapProbeInconclusiveTTL
+		} else {
+			continue
+		}
+		result.Answers = append(result.Answers, answer)
+	}
+	return result, nil
+}
+
 // ProbeToolCall determines tool support passively from /api/show model
-// metadata — no generation request, no model load. A present capabilities
-// array is authoritative in both directions; a missing array (older
-// Ollama) is inconclusive, never a hard no.
+// metadata — no generation request, no model load — through the same
+// OllamaCapabilityFacts mapping as ProbeCapabilities, so "Tools" and
+// "tool_call" read yes. A present capabilities array is authoritative in both
+// directions; a missing array (older Ollama) is inconclusive, never a hard no.
 func (p *OllamaProber) ProbeToolCall(ctx context.Context, model string) (CapProbeOutcome, error) {
 	info, err := p.client.ShowModel(ctx, model)
 	if err != nil {
@@ -124,10 +180,8 @@ func (p *OllamaProber) ProbeToolCall(ctx context.Context, model string) (CapProb
 			Detail: "ollama /api/show has no capabilities array",
 		}, nil
 	}
-	for _, c := range info.Capabilities {
-		if c == "tools" {
-			return CapProbeOutcome{State: CapProbeYes, Detail: "ollama capabilities lists tools"}, nil
-		}
+	if OllamaCapabilityFacts(info.Capabilities, info.Template)["tool_call"] == CapProbeYes {
+		return CapProbeOutcome{State: CapProbeYes, Detail: "ollama capabilities lists tools"}, nil
 	}
 	return CapProbeOutcome{State: CapProbeNo, Detail: "ollama capabilities array lacks tools"}, nil
 }

@@ -4,8 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -772,5 +774,239 @@ func TestNew_BestEffortRefreshRecordsWarnings(t *testing.T) {
 	defer func() { _ = b.Close() }()
 	if len(b.Warnings) == 0 {
 		t.Fatalf("expected a best-effort refresh warning")
+	}
+}
+
+// streamedToolCall is a streamed reply that calls get_time as the probe asks.
+const streamedToolCall = `data: {"choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"get_time","arguments":"{}"}}]}}]}
+
+data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
+
+data: {"choices":[],"usage":{"prompt_tokens":11,"completion_tokens":7,"total_tokens":18}}
+
+data: [DONE]
+
+`
+
+// nonStreamedToolCall is the legacy prober's non-streamed reply.
+const nonStreamedToolCall = `{"choices":[{"message":{"role":"assistant","content":"","tool_calls":[{"id":"1","type":"function","function":{"name":"get_time","arguments":"{}"}}]}}],"usage":{"completion_tokens":4}}`
+
+// probeStub serves one model and records each chat request body. before, when
+// set, runs at the start of every chat request.
+type probeStub struct {
+	*httptest.Server
+	mu     sync.Mutex
+	bodies []map[string]any
+	before func()
+}
+
+func newProbeStub(t *testing.T, model string) *probeStub {
+	t.Helper()
+	s := &probeStub{}
+	s.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/models":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"data":[{"id":"`+model+`"}]}`)
+		case "/v1/chat/completions":
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("decode chat body: %v", err)
+			}
+			s.mu.Lock()
+			s.bodies = append(s.bodies, body)
+			before := s.before
+			s.mu.Unlock()
+			if before != nil {
+				before()
+			}
+			if body["stream"] == true {
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = io.WriteString(w, streamedToolCall)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, nonStreamedToolCall)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(s.Close)
+	return s
+}
+
+func (s *probeStub) chatBodies() []map[string]any {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]map[string]any(nil), s.bodies...)
+}
+
+func stubConfig(url, model string) *config.Config {
+	return &config.Config{
+		Providers: map[string]config.ProviderConfig{"lc": {APIFormat: "openai-compat", BaseURL: url}},
+		Models:    map[string]config.ModelConfig{"agent": {Provider: "lc", Name: model, Type: "dense"}},
+	}
+}
+
+func logRows(t *testing.T, store fingerprint.EvidenceStore, url, model string) []fingerprint.EvidenceRow {
+	t.Helper()
+	b, err := provider.EvidenceBindingFor(url, "openai-compat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, err := store.EvidenceRows(t.Context(), b.Endpoint, model)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return rows
+}
+
+var agentCaps = provider.CapChat | provider.CapStream | provider.CapToolCall
+
+func TestBootstrap_EvidenceLogAloneResolves(t *testing.T) {
+	const model = "mystery-model-x"
+	stub := newProbeStub(t, model)
+	store := newTestFingerprintStore(t)
+	// The configured URL is overridden, so the binding must come from the
+	// effective config: rows go under the endpoint the bytes went to.
+	const configured = "http://127.0.0.1:1"
+	b, err := New(t.Context(), Options{
+		Config: stubConfig(configured, model), EvidenceLog: store,
+		OpenAICompatURLOverrideProvider: "lc", OpenAICompatURLOverride: stub.URL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = b.Close() })
+	key := provider.ModelKey{Provider: "lc", Model: model}
+	if state, err := b.Models.ResolveToolCall(t.Context(), key); err != nil || state != fingerprint.CapProbeYes {
+		t.Fatalf("ResolveToolCall = %q, %v; want yes", state, err)
+	}
+	bodies := stub.chatBodies()
+	if len(bodies) != 1 || bodies[0]["stream"] != true {
+		t.Fatalf("chat requests = %v; want one streamed probe", bodies)
+	}
+	if rows := logRows(t, store, stub.URL, model); len(rows) != 3 {
+		t.Fatalf("log rows at the effective endpoint = %d; want 3", len(rows))
+	}
+	if rows := logRows(t, store, configured, model); len(rows) != 0 {
+		t.Fatalf("log rows at the configured endpoint = %d; want 0", len(rows))
+	}
+}
+
+func TestBootstrap_ProbeBodyIgnoresCardSettings(t *testing.T) {
+	const model = "mystery-model-x"
+	stub := newProbeStub(t, model)
+	cfg := stubConfig(stub.URL, model)
+	cfg.Models["agent"] = config.ModelConfig{
+		Provider: "lc", Name: model, Type: "dense", ThinkMode: "toggle",
+		Options: &config.SamplingOptions{Temperature: provider.Ptr(0.7), TopP: provider.Ptr(0.9), TopK: provider.Ptr(40)},
+	}
+	b, err := New(t.Context(), Options{Config: cfg, EvidenceLog: newTestFingerprintStore(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = b.Close() })
+	_, _ = b.Router.Route(t.Context(), provider.RoutingRequest{Model: "lc/" + model, UseCase: "agent", RequiredCaps: agentCaps})
+	bodies := stub.chatBodies()
+	if len(bodies) != 1 {
+		t.Fatalf("chat requests = %d; want the one probe", len(bodies))
+	}
+	body := bodies[0]
+	for _, k := range []string{"temperature", "top_p", "top_k", "reasoning_effort", "chat_template_kwargs"} {
+		if _, ok := body[k]; ok {
+			t.Fatalf("probe body carries %q: %v", k, body)
+		}
+	}
+	if body["max_tokens"] != float64(2048) || body["stream"] != true {
+		t.Fatalf("probe body max_tokens=%v stream=%v; want 2048, true", body["max_tokens"], body["stream"])
+	}
+}
+
+func TestBootstrap_NilEvidenceLogIsLegacyPath(t *testing.T) {
+	const model = "mystery-model-x"
+	stub := newProbeStub(t, model)
+	probes := newTestFingerprintStore(t)
+	b, err := New(t.Context(), Options{Config: stubConfig(stub.URL, model), CapabilityProbeStore: probes})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = b.Close() })
+	key := provider.ModelKey{Provider: "lc", Model: model}
+	if state, err := b.Models.ResolveToolCall(t.Context(), key); err != nil || state != fingerprint.CapProbeYes {
+		t.Fatalf("ResolveToolCall = %q, %v; want yes", state, err)
+	}
+	bodies := stub.chatBodies()
+	if len(bodies) != 1 || bodies[0]["stream"] == true {
+		t.Fatalf("chat requests = %v; want the legacy non-streamed probe", bodies)
+	}
+	if row, err := probes.GetCapProbe(t.Context(), "lc", model, "tool_call"); err != nil || row.State != fingerprint.CapProbeYes {
+		t.Fatalf("legacy row = %+v, %v; want a saved yes", row, err)
+	}
+	if rows := logRows(t, probes, stub.URL, model); len(rows) != 0 {
+		t.Fatalf("log rows = %d; want 0 on the legacy path", len(rows))
+	}
+}
+
+func TestBootstrap_ProgressStartsBeforeFirstRequest(t *testing.T) {
+	const model = "mystery-model-x"
+	stub := newProbeStub(t, model)
+	started := make(chan struct{})
+	var once sync.Once
+	var sawStarted atomic.Bool
+	stub.before = func() { // hold the first request until the test has seen started
+		select {
+		case <-started:
+			sawStarted.Store(true)
+		case <-time.After(2 * time.Second):
+		}
+	}
+	var events []provider.CapabilityProbeProgress
+	var mu sync.Mutex
+	b, err := New(t.Context(), Options{
+		Config: stubConfig(stub.URL, model), EvidenceLog: newTestFingerprintStore(t),
+		CapabilityProbeProgress: func(e provider.CapabilityProbeProgress) {
+			mu.Lock()
+			events = append(events, e)
+			mu.Unlock()
+			if e.Stage == "started" {
+				once.Do(func() { close(started) })
+			}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = b.Close() })
+	if _, err := b.Models.ResolveToolCall(t.Context(), provider.ModelKey{Provider: "lc", Model: model}); err != nil {
+		t.Fatal(err)
+	}
+	if !sawStarted.Load() {
+		t.Fatal("the first probe request arrived before started was delivered")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(events) != 2 || events[1].Stage != "finished" || events[1].Requests != 1 || events[1].RemainingRequests != 1 {
+		t.Fatalf("events = %+v; want started then finished with 1 request sent", events)
+	}
+}
+
+// TestNoProbeWithoutCallerRequest pins that bootstrap with an evidence log
+// starts no capability check.
+func TestNoProbeWithoutCallerRequest(t *testing.T) {
+	const model = "mystery-model-x"
+	stub := newProbeStub(t, model)
+	store := newTestFingerprintStore(t)
+	b, err := New(context.Background(), Options{Config: stubConfig(stub.URL, model), EvidenceLog: store})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = b.Close() })
+	if n := len(stub.chatBodies()); n != 0 {
+		t.Fatalf("bootstrap sent %d chat requests; want 0", n)
+	}
+	// Positive control: a caller's request reaches the stub.
+	if _, err := b.Models.ResolveToolCall(t.Context(), provider.ModelKey{Provider: "lc", Model: model}); err != nil || len(stub.chatBodies()) != 1 {
+		t.Fatalf("control: err=%v requests=%d; want one probe", err, len(stub.chatBodies()))
 	}
 }
