@@ -66,6 +66,10 @@ const (
 // snapshot, then a best-effort compressed snapshot. The caller owns the store
 // and must keep it alive until Runtime.Close returns; Runtime never closes,
 // migrates, or hardens it.
+//
+// Implementations must carry Conversation.Exposure with the snapshot it
+// describes, in the same atomic Save. A store that does not makes every
+// conversation that has history read as unknown, which is treated as exposed.
 type SessionStore interface {
 	Load(ctx context.Context, id string) (*conversation.Conversation, error)
 	Save(ctx context.Context, conv conversation.Conversation) (int64, error)
@@ -317,14 +321,17 @@ type Runtime struct {
 	mu              sync.Mutex
 	active          map[string]*activeRun
 	activeThreads   map[string]*activeRun
-	wg              sync.WaitGroup
-	closed          bool
-	closeDone       chan struct{}
-	closeErr        error
-	sessionMu       sync.Mutex
-	sessions        *threadStore
-	bundle          *providerbootstrap.Bundle
-	closeOwned      func() error
+	// readers holds in-flight ThreadExposure calls so Close can cancel them.
+	// They never reserve a thread, so they stay out of activeThreads.
+	readers    map[*activeRun]struct{}
+	wg         sync.WaitGroup
+	closed     bool
+	closeDone  chan struct{}
+	closeErr   error
+	sessionMu  sync.Mutex
+	sessions   *threadStore
+	bundle     *providerbootstrap.Bundle
+	closeOwned func() error
 }
 
 // New constructs a Runtime.
@@ -430,6 +437,7 @@ func New(ctx context.Context, opts Options) (*Runtime, error) {
 	r.failureMessage = opts.FailureMessage
 	r.active = make(map[string]*activeRun)
 	r.activeThreads = make(map[string]*activeRun)
+	r.readers = make(map[*activeRun]struct{})
 	r.closeDone = make(chan struct{})
 	r.sessions = sessions
 	r.bundle = bundle
@@ -610,6 +618,7 @@ func (r *Runtime) Run(ctx context.Context, turn Turn, sink EventSink) (agent.Res
 	if thread != nil {
 		request.History = thread.history()
 		request.HistorySummary = thread.summary()
+		request.PriorExposure = thread.priorExposure()
 	}
 	result, err := snap.orchestrator.RunWithVerifier(runCtx, request, observer, verifier)
 	if !r.retainReasoning {
@@ -1074,8 +1083,8 @@ func (r *Runtime) release(turn Turn, active *activeRun) {
 	r.wg.Done()
 }
 
-// Close cancels active runs and compactions, waits for them, and releases owned resources.
-// It must not be called synchronously by code executing within Run or CompactThread.
+// Close cancels active runs, compactions and ThreadExposure calls, waits for them, and releases owned resources.
+// It must not be called synchronously by code executing within Run, CompactThread or ThreadExposure.
 func (r *Runtime) Close() error {
 	r.mu.Lock()
 	if r.closeDone == nil {
@@ -1101,6 +1110,9 @@ func (r *Runtime) Close() error {
 	// maps; canceling their contexts twice is safe.
 	for _, active := range r.activeThreads {
 		active.cancel()
+	}
+	for reader := range r.readers {
+		reader.cancel()
 	}
 	r.mu.Unlock()
 	r.wg.Wait()

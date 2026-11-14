@@ -271,6 +271,57 @@ share one transaction. Existing rows and indexes are retained; incompatible
 legacy tables fail without a committed version claim. Already-versioned
 schemas keep the read-only fast path and are not revalidated or repaired.
 
+### Exposure record
+
+Each conversation carries one exposure record, the `Exposure` field of
+`conversation.Conversation`, that says whether outside content has entered it.
+Its type is `conversation.Exposure`, the same type as `agent.Exposure`.
+`Recorded` is true when a record exists, `Foreign` when content from outside the
+conversation entered it, and `Unknown` when the origin of entered content could
+not be determined. `First` is a short, content-free label of the
+first exposing source, at most 128 bytes, such as `tool:<name>`, `consult` or
+`history`. The record is metadata for the host: it is never sent to the model
+and is not part of any prompt.
+
+The zero value means "no record", and `Exposed()` treats it as exposed, never as
+clean: a missing record, foreign content and unknown origin all read as exposed.
+
+`golem.Runtime` reads the record at the start of each stateful turn, stores the
+run's record with the turn in the same save as the content, and keeps it through
+compaction. Exposure only grows within a conversation. `Runtime.ThreadExposure`
+returns the record the next turn on a thread would start from: the stored
+record, or a clean record for a well-formed thread ID with nothing stored.
+
+A custom `golem.SessionStore` must carry `Conversation.Exposure` with the
+content it describes, in the same atomic save. A store that drops the field is
+safe, but every conversation that has history then reads as unknown. A store
+that serializes the whole struct (JSON, for instance) carries it with no change.
+
+A host that writes conversations itself must set `Exposure` from that run's
+`agent.Result.Exposure` whenever it adds content to a stored conversation, or
+clear it to the zero value. It must not save a loaded clean record over content
+it did not track. A host that calls `agent.Orchestrator` directly passes the
+stored record as `Request.PriorExposure`.
+
+A turn with no thread ID is its own conversation; nothing is carried to the next
+one.
+
+Only a new conversation, or a conversation whose stored row was deleted, starts
+clean. Clearing approval grants, compaction and summaries do not clear the
+record. A failed delete or a failed resume leaves the record of the
+still-active conversation in force.
+
+Opening an existing database applies migration v6, which adds two nullable
+columns (`exposure`, `exposure_revision`) and rewrites no row. Conversations
+saved before this version have no record and read as unknown for the life of
+that conversation. A conversation last written by an older binary also reads as
+unknown, because its record is bound to the row revision it was saved with. This
+has no visible effect until a host turns on a policy that reads the record.
+
+The record describes what the runtime admitted. It is not a guarantee that
+content is safe, and a writer that changes a conversation's messages by direct
+SQL without advancing the row revision is outside what the record can detect.
+
 ## RAG Details
 
 ### Chunking

@@ -104,6 +104,58 @@ func visibleCost(estimate conversation.TokenEstimator) func(conversation.Message
 	}
 }
 
+// priorExposure is the record the next turn starts from, as a copy. A recorded
+// value stands even for an empty conversation. Only the exact zero Exposure on
+// an empty conversation (no messages, no summary) is a clean start; any other
+// unrecorded value, or an unrecorded one on any history, stays unrecorded,
+// which the agent reads as unknown.
+func (s *threadState) priorExposure() *agent.Exposure {
+	e := s.conversation.Exposure
+	if e == (agent.Exposure{}) && len(s.conversation.Messages) == 0 && s.conversation.DurableSummary == nil {
+		e = agent.Exposure{Recorded: true}
+	}
+	return &e
+}
+
+// ThreadExposure returns the exposure record the next turn on threadID would
+// start from: the stored record, a clean record for a well-formed ID with no
+// stored conversation (no conversation is inserted), or an unrecorded record
+// (which reads as exposed) for a conversation saved without one. It never
+// writes a conversation row, reserves the thread, or needs compression, but on
+// a runtime with no SessionStore it opens the default session database on first
+// use, creating and migrating the file if absent, as CompactThread does. An
+// empty or over-long ID returns ErrInvalidRequest and a closed runtime
+// ErrClosed; on any error the zero Exposure, which reads as exposed, is
+// returned. Close cancels a call in flight, which then returns the context
+// error, and waits for it.
+func (r *Runtime) ThreadExposure(ctx context.Context, threadID string) (agent.Exposure, error) {
+	if threadID == "" || len(threadID) > maxCorrelationIDBytes {
+		return agent.Exposure{}, fmt.Errorf("%w: thread ID must contain 1 to %d bytes", ErrInvalidRequest, maxCorrelationIDBytes)
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	reader := &activeRun{cancel: cancel}
+	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		return agent.Exposure{}, ErrClosed
+	}
+	r.readers[reader] = struct{}{}
+	r.wg.Add(1)
+	r.mu.Unlock()
+	defer func() {
+		r.mu.Lock()
+		delete(r.readers, reader)
+		r.mu.Unlock()
+		r.wg.Done()
+	}()
+	state, err := r.loadThread(ctx, threadID)
+	if err != nil {
+		return agent.Exposure{}, err
+	}
+	return *state.priorExposure(), nil
+}
+
 func (s *threadState) summary() string {
 	if s.conversation.DurableSummary == nil {
 		return ""
@@ -200,6 +252,7 @@ func (r *Runtime) saveThread(ctx context.Context, active *activeRun, budget agen
 	candidate := state.conversation
 	candidate.Messages = append(append([]conversation.Message(nil), candidate.Messages...), messages...)
 	candidate.Title = threadTitle(candidate.Messages)
+	candidate.Exposure = result.Exposure
 
 	if r.commitTerminal(active, ctx, "run.finished") == "run.canceled" {
 		return ctx.Err()
