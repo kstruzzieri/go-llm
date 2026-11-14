@@ -273,11 +273,12 @@ schemas keep the read-only fast path and are not revalidated or repaired.
 
 ### Exposure record
 
-Each conversation carries one exposure record, `conversation.Conversation.Exposure`
-(also available as `agent.Exposure`), that says whether outside content has
-entered it. `Recorded` is true when a record exists, `Foreign` when content from
-outside the conversation entered it, and `Unknown` when the origin of entered
-content could not be determined. `First` is a short, content-free label of the
+Each conversation carries one exposure record, the `Exposure` field of
+`conversation.Conversation`, that says whether outside content has entered it.
+Its type is `conversation.Exposure`, the same type as `agent.Exposure`.
+`Recorded` is true when a record exists, `Foreign` when content from outside the
+conversation entered it, and `Unknown` when the origin of entered content could
+not be determined. `First` is a short, content-free label of the
 first exposing source, at most 128 bytes, such as `tool:<name>`, `consult` or
 `history`. The record is metadata for the host: it is never sent to the model
 and is not part of any prompt.
@@ -289,20 +290,21 @@ clean: a missing record, foreign content and unknown origin all read as exposed.
 run's record with the turn in the same save as the content, and keeps it through
 compaction. Exposure only grows within a conversation. `Runtime.ThreadExposure`
 returns the record the next turn on a thread would start from: the stored
-record, or a clean record for a well-formed thread ID with nothing stored. A
-turn with no thread ID is its own conversation; nothing is carried to the next
-one.
+record, or a clean record for a well-formed thread ID with nothing stored.
 
 A custom `golem.SessionStore` must carry `Conversation.Exposure` with the
 content it describes, in the same atomic save. A store that drops the field is
-safe, but every conversation then reads as unknown. A store that serializes the
-whole struct (JSON, for instance) carries it with no change.
+safe, but every conversation that has history then reads as unknown. A store
+that serializes the whole struct (JSON, for instance) carries it with no change.
 
 A host that writes conversations itself must set `Exposure` from that run's
 `agent.Result.Exposure` whenever it adds content to a stored conversation, or
 clear it to the zero value. It must not save a loaded clean record over content
 it did not track. A host that calls `agent.Orchestrator` directly passes the
 stored record as `Request.PriorExposure`.
+
+A turn with no thread ID is its own conversation; nothing is carried to the next
+one.
 
 Only a new conversation, or a conversation whose stored row was deleted, starts
 clean. Clearing approval grants, compaction and summaries do not clear the

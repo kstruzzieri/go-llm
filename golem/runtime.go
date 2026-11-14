@@ -69,7 +69,7 @@ const (
 //
 // Implementations must carry Conversation.Exposure with the snapshot it
 // describes, in the same atomic Save. A store that does not makes every
-// conversation read as unknown, which is treated as exposed.
+// conversation that has history read as unknown, which is treated as exposed.
 type SessionStore interface {
 	Load(ctx context.Context, id string) (*conversation.Conversation, error)
 	Save(ctx context.Context, conv conversation.Conversation) (int64, error)
