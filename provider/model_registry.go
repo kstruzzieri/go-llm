@@ -477,7 +477,8 @@ func (r *ModelRegistry) Refresh(ctx context.Context, key ModelKey) (*ModelProfil
 // send; a check that panics spends its whole reservation, since a request may
 // already have gone out. Native ollama-show checks spend none. A provider the binder
 // does not resolve returns ErrEvidenceUnbound and a log that cannot be read
-// ErrEvidenceUnreadable; neither sends, writes or reserves anything.
+// ErrEvidenceUnreadable; neither starts a check, writes or reserves anything
+// (a runtime metadata request may still have been made).
 //
 // A non-nil error means the probe was transient (network/auth); nothing
 // is persisted and the state is "".

@@ -597,11 +597,13 @@ func decodeJSONOrError(ctx context.Context, resp *http.Response, apiKey string, 
 // warnings and logs.
 //
 // For an ordinary request a failed body read is ignored, as it always was. For
-// a bounded request (responsebound), judged by ctx, the context the request was
-// sent with, so a response without its Request still counts, it returns a *responsebound.RejectionReadError
+// a bounded request (responsebound) it returns a *responsebound.RejectionReadError
 // carrying the status and the redacted read failure instead: a rejection whose
-// body stalled, reset or ended short is not a clean rejection. A clean end,
-// empty included, and a body cut at the cap below are not failed reads.
+// body stalled, reset or ended short is not a clean rejection. Whether the
+// request is bounded is read from ctx, the context it was sent with, not from
+// resp.Request, so a response that does not carry its request is judged the
+// same way. A clean end, empty included, and a body cut at the cap below are
+// not failed reads.
 func readErrorEnvelope(ctx context.Context, resp *http.Response, apiKey string) error {
 	const limit = 64 * 1024
 	body, readErr := io.ReadAll(io.LimitReader(resp.Body, limit))
