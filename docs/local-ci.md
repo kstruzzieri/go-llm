@@ -105,7 +105,12 @@ docker compose -f docker-compose.ci.yml run --build --rm ci ./scripts/ci-local -
 - the containment inventory check, profile `darwin-host` on macOS and `linux-host` on Linux or in Docker (below)
 - `golangci-lint fmt --diff` (all Go files, including inactive build tags)
 - `golangci-lint run`
-- `go test -race ./...`
+- `go test -race -timeout 30m ./...`
+
+The race pass sets its own 30-minute per-binary timeout. Go's 10-minute default
+is too short for `cmd/golem` run natively on a macOS host: about 14 minutes
+there even on a lightly loaded machine, against about 3 minutes in Docker. The
+GitHub workflow keeps the default, which still leaves its Linux runners room.
 
 `full` runs the pre-push suite plus:
 

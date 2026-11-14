@@ -194,7 +194,9 @@ section "lint"
 golangci-lint run
 
 section "race tests"
-go test -race ./...
+# Go's 10-minute default per test binary is too short for cmd/golem under
+# -race on a macOS host (about 14 minutes measured); docs/local-ci.md.
+go test -race -timeout 30m ./...
 
 if [ "$mode" = "full" ]; then
   section "compile smoke"

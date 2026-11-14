@@ -89,7 +89,9 @@ func installTrustAgentflow(t *testing.T) string {
 	t.Helper()
 	bin := t.TempDir()
 	state := t.TempDir()
-	script := "#!/bin/sh\nexec \"$GOLEM_TRUST_TEST_BINARY\" -test.run=^TestProjectTrustAgentflowProcess$ -- \"$@\"\n"
+	// The AgentFlow runner forwards only allowlisted env, so TestMain's GORACE
+	// never reaches this child; without it each call sleeps 1s at exit under -race.
+	script := "#!/bin/sh\nGORACE=atexit_sleep_ms=0 exec \"$GOLEM_TRUST_TEST_BINARY\" -test.run=^TestProjectTrustAgentflowProcess$ -- \"$@\"\n"
 	if err := os.WriteFile(filepath.Join(bin, "agentflow"), []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}
