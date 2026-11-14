@@ -239,6 +239,8 @@ func (p *Provider) Chat(ctx context.Context, req provider.ChatRequest) (*provide
 		ToolCalls: toProviderToolCalls(msg.ToolCalls),
 		Done:      true,
 		Usage:     u,
+
+		FinishReason: resp.Choices[0].FinishReason,
 	}, nil
 }
 
@@ -303,6 +305,7 @@ func (p *Provider) ChatStream(ctx context.Context, req provider.ChatRequest, fn 
 		callbackErr    error
 		streamErr      error
 		finished       bool
+		finishReason   string
 		seenUsage      bool
 		toolCalls      streamToolCallAccumulator
 	)
@@ -411,6 +414,7 @@ func (p *Provider) ChatStream(ctx context.Context, req provider.ChatRequest, fn 
 		}
 		if choice.FinishReason != nil {
 			finished = true
+			finishReason = *choice.FinishReason
 			if err := parser.Flush(); err != nil {
 				callbackErr = err
 				break
@@ -457,6 +461,8 @@ func (p *Provider) ChatStream(ctx context.Context, req provider.ChatRequest, fn 
 			ToolCalls: lastToolCalls,
 			Done:      true,
 			Usage:     lastUsage,
+
+			FinishReason: finishReason,
 		}); err != nil {
 			return err
 		}

@@ -233,13 +233,17 @@ type ChatRequest struct {
 
 // ChatResponse is the provider-agnostic response from a chat completion.
 type ChatResponse struct {
-	Model        string        `json:"model"`
-	Provider     string        `json:"provider"`
-	Content      string        `json:"content"`
-	Thinking     string        `json:"thinking,omitempty"`
-	ToolCalls    []ToolCall    `json:"tool_calls,omitempty"`
-	Done         bool          `json:"done"`
-	Partial      bool          `json:"partial,omitempty"`
+	Model     string     `json:"model"`
+	Provider  string     `json:"provider"`
+	Content   string     `json:"content"`
+	Thinking  string     `json:"thinking,omitempty"`
+	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
+	Done      bool       `json:"done"`
+	Partial   bool       `json:"partial,omitempty"`
+	// FinishReason is the server's reason the generation ended ("stop",
+	// "length", "tool_calls", ...), set only by the openai-compat provider
+	// and empty on a cancelled partial.
+	FinishReason string        `json:"finish_reason,omitempty"`
 	Usage        Usage         `json:"usage,omitempty"`
 	Latency      LatencyInfo   `json:"latency,omitempty"`
 	RouteOutcome *RouteOutcome `json:"route_outcome,omitempty"`

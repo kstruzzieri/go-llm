@@ -313,6 +313,9 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	} else if req.MaxTokens != nil && *req.MaxTokens > 0 && resp.Usage.CompletionTokens >= *req.MaxTokens {
 		finish = "length"
 	}
+	if resp.FinishReason != "" {
+		finish = resp.FinishReason
+	}
 
 	out := ChatCompletionResponse{
 		ID:      chatResponseID(r.Context()),
@@ -414,7 +417,10 @@ func (s *Server) serveChatStream(w http.ResponseWriter, r *http.Request, rr prov
 		}
 		var finish *string
 		if chunk.Done {
-			reason := deriveStreamFinishReason(chunk, rr.Options.NumPredict)
+			reason := chunk.FinishReason
+			if reason == "" {
+				reason = deriveStreamFinishReason(chunk, rr.Options.NumPredict)
+			}
 			finish = &reason
 		}
 		return sw.writeEvent(ChatCompletionChunk{

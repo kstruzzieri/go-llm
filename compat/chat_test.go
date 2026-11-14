@@ -1293,3 +1293,60 @@ func equalStrings(a, b []string) bool {
 	}
 	return true
 }
+
+// TestCompat_UpstreamFinishReasonWins pins that a nonempty upstream
+// FinishReason is forwarded in both response modes, even when a tool call
+// would otherwise derive "tool_calls".
+func TestCompat_UpstreamFinishReasonWins(t *testing.T) {
+	call := provider.ToolCall{
+		ID: "call_1", Type: "function",
+		Function: provider.ToolCallFunction{Name: "get_time", Arguments: json.RawMessage(`{}`)},
+	}
+	t.Run("non-streaming", func(t *testing.T) {
+		srv, _, teardown := newChatFixtureWithResponse(t, func(req provider.ChatRequest) *provider.ChatResponse {
+			return &provider.ChatResponse{
+				Model: req.Model, Provider: "ollama", Done: true,
+				ToolCalls: []provider.ToolCall{call}, FinishReason: "length",
+			}
+		})
+		defer teardown()
+		rec := doChat(t, srv, map[string]any{
+			"model":    "ollama/qwen3:8b",
+			"messages": []map[string]string{{"role": "user", "content": "hi"}},
+		})
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+		}
+		var out ChatCompletionResponse
+		if err := json.NewDecoder(rec.Body).Decode(&out); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if got := out.Choices[0].FinishReason; got != "length" {
+			t.Errorf("finish_reason = %q, want length", got)
+		}
+	})
+	t.Run("streaming", func(t *testing.T) {
+		srv, teardown := newStreamingServer(t, func(_ context.Context, req provider.ChatRequest, fn func(provider.ChatResponse) error) error {
+			return fn(provider.ChatResponse{
+				Model: req.Model, Done: true,
+				ToolCalls: []provider.ToolCall{call}, FinishReason: "length",
+			})
+		})
+		defer teardown()
+		rec := doChatRequest(t, srv, map[string]any{
+			"model":    "ollama/qwen3:8b",
+			"stream":   true,
+			"messages": []map[string]string{{"role": "user", "content": "hi"}},
+		})
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+		}
+		chunks := decodeSSEChunks(t, rec.Body.String())
+		if len(chunks) != 1 {
+			t.Fatalf("got %d chunks, want 1", len(chunks))
+		}
+		if fr := chunks[0].Choices[0].FinishReason; fr == nil || *fr != "length" {
+			t.Errorf("finish_reason = %v, want length", fr)
+		}
+	})
+}
