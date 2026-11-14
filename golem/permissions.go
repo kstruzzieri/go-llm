@@ -106,6 +106,8 @@ type EffectivePermissions struct {
 	Scratch bool
 	// Verification describes post-write verification.
 	Verification Verification
+	// StrictApproval reports Options.StrictApproval.
+	StrictApproval bool
 }
 
 // EffectivePermissions returns a deep copy of the runtime's current permission
@@ -118,13 +120,14 @@ func (r *Runtime) EffectivePermissions() EffectivePermissions {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return EffectivePermissions{
-		Profile:      r.profile,
-		Root:         r.root,
-		Ceiling:      slices.Clone(r.ceilingNames),
-		Tools:        slices.Clone(r.snap.permissions),
-		Command:      commandPermissions(r.profile, r.sandbox),
-		Scratch:      agenttools.CommandsRunInScratch(unfloored(r.snap.tools)),
-		Verification: verificationOf(r.profile, r.snap.orchestrator),
+		Profile:        r.profile,
+		Root:           r.root,
+		Ceiling:        slices.Clone(r.ceilingNames),
+		Tools:          slices.Clone(r.snap.permissions),
+		Command:        commandPermissions(r.profile, r.sandbox),
+		Scratch:        agenttools.CommandsRunInScratch(unfloored(r.snap.tools)),
+		Verification:   verificationOf(r.profile, r.snap.orchestrator),
+		StrictApproval: r.strictApproval,
 	}
 }
 
