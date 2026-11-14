@@ -313,7 +313,10 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	} else if req.MaxTokens != nil && *req.MaxTokens > 0 && resp.Usage.CompletionTokens >= *req.MaxTokens {
 		finish = "length"
 	}
-	if resp.FinishReason != "" {
+	// A nonempty upstream reason wins, except that a reply carrying tool calls
+	// whose upstream reason is "stop" still reports "tool_calls": some servers
+	// send stop with tool calls, and clients key their tool loop on tool_calls.
+	if resp.FinishReason != "" && (resp.FinishReason != "stop" || len(resp.ToolCalls) == 0) {
 		finish = resp.FinishReason
 	}
 
@@ -418,7 +421,9 @@ func (s *Server) serveChatStream(w http.ResponseWriter, r *http.Request, rr prov
 		var finish *string
 		if chunk.Done {
 			reason := chunk.FinishReason
-			if reason == "" {
+			// As in the non-streaming branch: upstream wins, but "stop" with
+			// tool calls still reports "tool_calls".
+			if reason == "" || (reason == "stop" && len(chunk.ToolCalls) > 0) {
 				reason = deriveStreamFinishReason(chunk, rr.Options.NumPredict)
 			}
 			finish = &reason

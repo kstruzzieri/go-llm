@@ -11,7 +11,7 @@ A host that attaches the shared capability store's evidence log to its model reg
 #### Responses
 
 - `provider.ChatResponse` has a new `FinishReason` field (`finish_reason` in JSON), set by the OpenAI-compatible provider. Golem trace files carry it for each step.
-- The OpenAI-compatible shim (`compat`) now passes an upstream finish reason through when the provider reports one.
+- The OpenAI-compatible shim (`compat`) now passes an upstream finish reason through when the provider reports one, so a reply cut off at `length` reports `length` even when it carries a tool call. The one exception: a reply carrying tool calls whose upstream reason is `stop` still reports `tool_calls`, as before, because some servers send `stop` with tool calls and clients run their tool loop on `tool_calls`.
 
 #### Behavior changes
 
