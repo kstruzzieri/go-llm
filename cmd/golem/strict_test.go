@@ -288,22 +288,44 @@ func TestApproveFreshHostNetworkLine(t *testing.T) {
 }
 
 // TestStrictHostCommandSaysNetworkIsNotConfined: runOnce marks a host session's
-// approver, so a command in an exposed conversation says so before it runs.
+// approver, so a command in an exposed conversation says so before it runs. A
+// session on a native sandbox confines the network itself and omits the line.
+// The tools are built on the host manager either way and the answer is N, so
+// nothing executes and no native backend is needed.
 func TestStrictHostCommandSaysNetworkIsNotConfined(t *testing.T) {
-	root := t.TempDir()
-	mgr, execTools, err := buildExecMount(root, agenttools.SandboxConfig{}, agenttools.ExecToolsOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(mgr.Shutdown)
-	sess := newStrictSession(t, &scriptCaller{responses: []agent.ModelResult{
-		call("run_command", map[string]any{"argv": []string{"true"}}), answerStep("done"),
-	}}, execTools...)
-	sess.allowExec = true
-	seedActive(t, sess)
-	out := strictTurn(t, sess, "N\n")
-	if !strings.Contains(out, foreignNotice+"\n"+networkLine+"\n") || strings.Count(out, "Run this command? [y/N] ") != 1 {
-		t.Fatalf("want the notice and the network line on one fresh prompt:\n%s", out)
+	for _, tt := range []struct {
+		name     string
+		sandbox  agenttools.SandboxConfig
+		wantLine bool
+	}{
+		{"host", agenttools.SandboxConfig{}, true},
+		{"seatbelt", agenttools.SandboxConfig{Runtime: agenttools.SandboxRuntimeSeatbelt}, false},
+		{"bwrap", agenttools.SandboxConfig{Runtime: agenttools.SandboxRuntimeBwrap}, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			mgr, execTools, err := buildExecMount(root, agenttools.SandboxConfig{}, agenttools.ExecToolsOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(mgr.Shutdown)
+			sess := newStrictSession(t, &scriptCaller{responses: []agent.ModelResult{
+				call("run_command", map[string]any{"argv": []string{"true"}}), answerStep("done"),
+			}}, execTools...)
+			sess.allowExec = true
+			sess.sandbox = tt.sandbox
+			seedActive(t, sess)
+			out := strictTurn(t, sess, "N\n")
+			if strings.Count(out, "Run this command? [y/N] ") != 1 || !strings.Contains(out, foreignNotice+"\n") {
+				t.Fatalf("want the notice on one fresh prompt:\n%s", out)
+			}
+			if got := strings.Contains(out, networkLine); got != tt.wantLine {
+				t.Fatalf("network line present = %v, want %v:\n%s", got, tt.wantLine, out)
+			}
+			if tt.wantLine && !strings.Contains(out, foreignNotice+"\n"+networkLine+"\n") {
+				t.Fatalf("want the network line right after the notice:\n%s", out)
+			}
+		})
 	}
 }
 
