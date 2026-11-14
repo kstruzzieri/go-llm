@@ -86,7 +86,17 @@
         "TestContainment/V1=capability:exec",
         "TestContainment/V2=capability:exec",
         "TestContainment/D4=capability:exec",
-        "TestContainment/D5=capability:exec"
+        "TestContainment/D5=capability:exec",
+        "TestContainment/S2=capability:exec",
+        "TestContainment/S3=capability:exec",
+        "TestContainment/S4=capability:exec",
+        "TestContainment/S6=capability:exec",
+        "TestContainment/C1=capability:exec",
+        "TestContainment/C2=capability:exec",
+        "TestContainment/C3=capability:exec",
+        "TestContainment/C4=capability:exec",
+        "TestContainment/C5=capability:exec",
+        "TestContainment/C6=capability:exec"
       ]
     }
   ],
@@ -3714,17 +3724,30 @@
     {
       "id": "CMP-BG-RECHECK",
       "source": "issue-452:77",
-      "requirement": "A background start rechecks strict state at start time (#584).",
+      "requirement": "A background start cannot reuse a grant once exposed, because the approval gate covers it (#584).",
       "status": "",
       "owner": "",
       "layer": "scenario",
-      "exempt": "pending #584: no shipped guard to mutate",
+      "exempt": "",
       "scenarios": [
         "S3"
       ],
-      "refs": [],
-      "profiles": [],
-      "mutations": [],
+      "refs": [
+        {
+          "package": "./cmd/golem",
+          "test": "TestContainment/S3",
+          "file": "cmd/golem/containment_scenarios_test.go",
+          "func": "s3"
+        }
+      ],
+      "profiles": [
+        "linux-host",
+        "darwin-host"
+      ],
+      "mutations": [
+        "M-406",
+        "M-408"
+      ],
       "artifacts": []
     },
     {
@@ -4358,17 +4381,39 @@
     {
       "id": "STRICT-1",
       "source": "issue-452:78",
-      "requirement": "Strict mode covers write and edit calls (#584).",
+      "requirement": "Strict mode covers write and edit calls, including a write tool that declares it needs no approval (#584).",
       "status": "",
       "owner": "",
-      "layer": "scenario",
-      "exempt": "pending #584: no shipped guard to mutate",
+      "layer": "aggregate",
+      "exempt": "",
       "scenarios": [
         "S1"
       ],
-      "refs": [],
-      "profiles": [],
-      "mutations": [],
+      "refs": [
+        {
+          "package": "./cmd/golem",
+          "test": "TestContainment/S1",
+          "file": "cmd/golem/containment_scenarios_test.go",
+          "func": "s1"
+        },
+        {
+          "package": "./agent",
+          "test": "TestStrictRaisesApprovalNever",
+          "file": "agent/strict_test.go",
+          "func": "TestStrictRaisesApprovalNever"
+        }
+      ],
+      "profiles": [
+        "linux-host",
+        "darwin-host"
+      ],
+      "mutations": [
+        "M-406",
+        "M-408",
+        "M-411",
+        "M-414",
+        "M-415"
+      ],
       "artifacts": []
     },
     {
@@ -4378,13 +4423,26 @@
       "status": "",
       "owner": "",
       "layer": "scenario",
-      "exempt": "pending #584: no shipped guard to mutate",
+      "exempt": "",
       "scenarios": [
         "S2"
       ],
-      "refs": [],
-      "profiles": [],
-      "mutations": [],
+      "refs": [
+        {
+          "package": "./cmd/golem",
+          "test": "TestContainment/S2",
+          "file": "cmd/golem/containment_scenarios_test.go",
+          "func": "s2"
+        }
+      ],
+      "profiles": [
+        "linux-host",
+        "darwin-host"
+      ],
+      "mutations": [
+        "M-406",
+        "M-408"
+      ],
       "artifacts": []
     },
     {
@@ -4394,13 +4452,26 @@
       "status": "",
       "owner": "",
       "layer": "scenario",
-      "exempt": "pending #584: no shipped guard to mutate",
+      "exempt": "",
       "scenarios": [
         "S3"
       ],
-      "refs": [],
-      "profiles": [],
-      "mutations": [],
+      "refs": [
+        {
+          "package": "./cmd/golem",
+          "test": "TestContainment/S3",
+          "file": "cmd/golem/containment_scenarios_test.go",
+          "func": "s3"
+        }
+      ],
+      "profiles": [
+        "linux-host",
+        "darwin-host"
+      ],
+      "mutations": [
+        "M-406",
+        "M-408"
+      ],
       "artifacts": []
     },
     {
@@ -4410,13 +4481,28 @@
       "status": "",
       "owner": "",
       "layer": "scenario",
-      "exempt": "pending #584: no shipped guard to mutate",
+      "exempt": "",
       "scenarios": [
         "S4"
       ],
-      "refs": [],
-      "profiles": [],
-      "mutations": [],
+      "refs": [
+        {
+          "package": "./cmd/golem",
+          "test": "TestContainment/S4",
+          "file": "cmd/golem/containment_scenarios_test.go",
+          "func": "s4"
+        }
+      ],
+      "profiles": [
+        "linux-host",
+        "darwin-host"
+      ],
+      "mutations": [
+        "M-406",
+        "M-408",
+        "M-413",
+        "M-414"
+      ],
       "artifacts": []
     },
     {
@@ -4425,14 +4511,34 @@
       "requirement": "Strict mode covers headless runs (#584).",
       "status": "",
       "owner": "",
-      "layer": "scenario",
-      "exempt": "pending #584: no shipped guard to mutate",
+      "layer": "aggregate",
+      "exempt": "",
       "scenarios": [
         "S5"
       ],
-      "refs": [],
-      "profiles": [],
-      "mutations": [],
+      "refs": [
+        {
+          "package": "./cmd/golem",
+          "test": "TestContainment/S5",
+          "file": "cmd/golem/containment_scenarios_test.go",
+          "func": "s5"
+        },
+        {
+          "package": "./cmd/golem",
+          "test": "TestHeadlessApproverIsNotFresh",
+          "file": "cmd/golem/strict_test.go",
+          "func": "TestHeadlessApproverIsNotFresh"
+        }
+      ],
+      "profiles": [
+        "linux-host",
+        "darwin-host"
+      ],
+      "mutations": [
+        "M-406",
+        "M-407",
+        "M-408"
+      ],
       "artifacts": []
     },
     {
@@ -4442,13 +4548,27 @@
       "status": "",
       "owner": "",
       "layer": "scenario",
-      "exempt": "pending #584: no shipped guard to mutate",
+      "exempt": "",
       "scenarios": [
         "S6"
       ],
-      "refs": [],
-      "profiles": [],
-      "mutations": [],
+      "refs": [
+        {
+          "package": "./cmd/golem",
+          "test": "TestContainment/S6",
+          "file": "cmd/golem/containment_scenarios_test.go",
+          "func": "s6"
+        }
+      ],
+      "profiles": [
+        "linux-host",
+        "darwin-host"
+      ],
+      "mutations": [
+        "M-406",
+        "M-408",
+        "M-414"
+      ],
       "artifacts": []
     },
     {
@@ -4458,13 +4578,28 @@
       "status": "",
       "owner": "",
       "layer": "scenario",
-      "exempt": "pending #584: no shipped guard to mutate",
+      "exempt": "",
       "scenarios": [
         "S7"
       ],
-      "refs": [],
-      "profiles": [],
-      "mutations": [],
+      "refs": [
+        {
+          "package": "./cmd/golem",
+          "test": "TestContainment/S7",
+          "file": "cmd/golem/containment_scenarios_test.go",
+          "func": "s7"
+        }
+      ],
+      "profiles": [
+        "linux-host",
+        "darwin-host"
+      ],
+      "mutations": [
+        "M-406",
+        "M-408",
+        "M-414",
+        "M-415"
+      ],
       "artifacts": []
     },
     {
@@ -4474,29 +4609,71 @@
       "status": "",
       "owner": "",
       "layer": "scenario",
-      "exempt": "pending #582/#583: no shipped guard to mutate",
+      "exempt": "",
       "scenarios": [
         "C1"
       ],
-      "refs": [],
-      "profiles": [],
-      "mutations": [],
+      "refs": [
+        {
+          "package": "./cmd/golem",
+          "test": "TestContainment/C1",
+          "file": "cmd/golem/containment_scenarios_test.go",
+          "func": "c1"
+        }
+      ],
+      "profiles": [
+        "linux-host",
+        "darwin-host"
+      ],
+      "mutations": [
+        "M-406",
+        "M-408",
+        "M-416"
+      ],
       "artifacts": []
     },
     {
       "id": "EXPOSURE-2",
       "source": "issue-452:75",
-      "requirement": "Foreign or unknown exposure propagates through model answers; no transformation silently clears it (#582/#583).",
+      "requirement": "Foreign or unknown exposure propagates through model answers, including accepted `/consult` advice; no transformation silently clears it (#582/#583).",
       "status": "",
       "owner": "",
-      "layer": "scenario",
-      "exempt": "pending #582/#583: no shipped guard to mutate",
+      "layer": "aggregate",
+      "exempt": "",
       "scenarios": [
         "C2"
       ],
-      "refs": [],
-      "profiles": [],
-      "mutations": [],
+      "refs": [
+        {
+          "package": "./cmd/golem",
+          "test": "TestContainment/C2",
+          "file": "cmd/golem/containment_scenarios_test.go",
+          "func": "c2"
+        },
+        {
+          "package": "./agent",
+          "test": "TestAdmitAcceptedAdvice",
+          "file": "agent/exposure_admission_test.go",
+          "func": "TestAdmitAcceptedAdvice"
+        },
+        {
+          "package": "./agent",
+          "test": "TestStrictAcceptedAdviceSuspendsFirstCall",
+          "file": "agent/strict_test.go",
+          "func": "TestStrictAcceptedAdviceSuspendsFirstCall"
+        }
+      ],
+      "profiles": [
+        "linux-host",
+        "darwin-host"
+      ],
+      "mutations": [
+        "M-406",
+        "M-408",
+        "M-409",
+        "M-410",
+        "M-412"
+      ],
       "artifacts": []
     },
     {
@@ -4506,13 +4683,26 @@
       "status": "",
       "owner": "",
       "layer": "scenario",
-      "exempt": "pending #582/#583: no shipped guard to mutate",
+      "exempt": "",
       "scenarios": [
         "C3"
       ],
-      "refs": [],
-      "profiles": [],
-      "mutations": [],
+      "refs": [
+        {
+          "package": "./cmd/golem",
+          "test": "TestContainment/C3",
+          "file": "cmd/golem/containment_scenarios_test.go",
+          "func": "c3"
+        }
+      ],
+      "profiles": [
+        "linux-host",
+        "darwin-host"
+      ],
+      "mutations": [
+        "M-406",
+        "M-408"
+      ],
       "artifacts": []
     },
     {
@@ -4522,13 +4712,29 @@
       "status": "",
       "owner": "",
       "layer": "scenario",
-      "exempt": "pending #582/#583: no shipped guard to mutate",
+      "exempt": "",
       "scenarios": [
         "C4"
       ],
-      "refs": [],
-      "profiles": [],
-      "mutations": [],
+      "refs": [
+        {
+          "package": "./cmd/golem",
+          "test": "TestContainment/C4",
+          "file": "cmd/golem/containment_scenarios_test.go",
+          "func": "c4"
+        }
+      ],
+      "profiles": [
+        "linux-host",
+        "darwin-host"
+      ],
+      "mutations": [
+        "M-406",
+        "M-408",
+        "M-409",
+        "M-410",
+        "M-417"
+      ],
       "artifacts": []
     },
     {
@@ -4538,13 +4744,28 @@
       "status": "",
       "owner": "",
       "layer": "scenario",
-      "exempt": "pending #582/#583: no shipped guard to mutate",
+      "exempt": "",
       "scenarios": [
         "C5"
       ],
-      "refs": [],
-      "profiles": [],
-      "mutations": [],
+      "refs": [
+        {
+          "package": "./cmd/golem",
+          "test": "TestContainment/C5",
+          "file": "cmd/golem/containment_scenarios_test.go",
+          "func": "c5"
+        }
+      ],
+      "profiles": [
+        "linux-host",
+        "darwin-host"
+      ],
+      "mutations": [
+        "M-406",
+        "M-408",
+        "M-409",
+        "M-410"
+      ],
       "artifacts": []
     },
     {
@@ -4554,13 +4775,28 @@
       "status": "",
       "owner": "",
       "layer": "scenario",
-      "exempt": "pending #582/#583: no shipped guard to mutate",
+      "exempt": "",
       "scenarios": [
         "C6"
       ],
-      "refs": [],
-      "profiles": [],
-      "mutations": [],
+      "refs": [
+        {
+          "package": "./cmd/golem",
+          "test": "TestContainment/C6",
+          "file": "cmd/golem/containment_scenarios_test.go",
+          "func": "c6"
+        }
+      ],
+      "profiles": [
+        "linux-host",
+        "darwin-host"
+      ],
+      "mutations": [
+        "M-406",
+        "M-408",
+        "M-409",
+        "M-410"
+      ],
       "artifacts": []
     },
     {

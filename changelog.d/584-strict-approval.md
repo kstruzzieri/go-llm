@@ -1,0 +1,10 @@
+### Added — Strict approval: suspend reusable approvals after outside content (#584)
+
+`golem -strict-approval`, and `golem.Options.StrictApproval` for library hosts, suspend every reusable approval once outside content has entered a conversation. While suspended, each consequential action asks again: the prompt opens with a notice naming the first outside source and offers `[y/N]` only, a yes approves that one call, and an `a` answer is refused. Grants and `/auto-edits` stay stored but are not used in an exposed conversation; `/new` or `/clear` starts a clean one, which behaves as before. On the host runtime, the prompt for a command, a background start or the verifier also says that the network is not confined.
+
+- Headless runs (`-p -allow-tool`) and any approver that does not implement `agent.FreshApprover` are denied once a strict run is exposed, because nothing can ask a person. No one-shot run can become exposed today.
+- Reach is narrow. Only an MCP tool result, `/consult` advice a run accepts, and history saved without a record expose a conversation. Workspace files and command output do not, so a poisoned file in the workspace or a `curl` in a command does not suspend anything.
+- `-strict-approval` does not select the Trusted profile and is accepted with `-p` and the AgentFlow modes, where it has no effect today. `/grants` shows the conversation's exposure.
+- Library: `agent.Request.StrictApproval` and `StrictExempt`, `agent.FreshApprover` and `agent.ApprovalsSuspended`. While suspended, a tool that declares it needs no approval is asked about too, except plain reads and the tools named in `StrictExempt`; `golem.Runtime` names its four floor exemptions there.
+
+Conversations with history saved before this version read as unknown for their lifetime; with strict approval on, each consequential action in them asks every time. A plain `golem` start reopens the workspace's own conversation, so run `/clear` there to start clean; `/new` and `-fresh` only change the current run.
