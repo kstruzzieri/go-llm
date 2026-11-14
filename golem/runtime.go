@@ -317,14 +317,17 @@ type Runtime struct {
 	mu              sync.Mutex
 	active          map[string]*activeRun
 	activeThreads   map[string]*activeRun
-	wg              sync.WaitGroup
-	closed          bool
-	closeDone       chan struct{}
-	closeErr        error
-	sessionMu       sync.Mutex
-	sessions        *threadStore
-	bundle          *providerbootstrap.Bundle
-	closeOwned      func() error
+	// readers holds in-flight ThreadExposure calls so Close can cancel them.
+	// They never reserve a thread, so they stay out of activeThreads.
+	readers    map[*activeRun]struct{}
+	wg         sync.WaitGroup
+	closed     bool
+	closeDone  chan struct{}
+	closeErr   error
+	sessionMu  sync.Mutex
+	sessions   *threadStore
+	bundle     *providerbootstrap.Bundle
+	closeOwned func() error
 }
 
 // New constructs a Runtime.
@@ -430,6 +433,7 @@ func New(ctx context.Context, opts Options) (*Runtime, error) {
 	r.failureMessage = opts.FailureMessage
 	r.active = make(map[string]*activeRun)
 	r.activeThreads = make(map[string]*activeRun)
+	r.readers = make(map[*activeRun]struct{})
 	r.closeDone = make(chan struct{})
 	r.sessions = sessions
 	r.bundle = bundle
@@ -1102,6 +1106,9 @@ func (r *Runtime) Close() error {
 	// maps; canceling their contexts twice is safe.
 	for _, active := range r.activeThreads {
 		active.cancel()
+	}
+	for reader := range r.readers {
+		reader.cancel()
 	}
 	r.mu.Unlock()
 	r.wg.Wait()

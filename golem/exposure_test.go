@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/kstruzzieri/go-llm/agent"
 	"github.com/kstruzzieri/go-llm/conversation"
@@ -33,22 +34,30 @@ func (foreignTool) Invoke(context.Context, json.RawMessage) (agent.ToolResult, e
 }
 
 // exposureCaller calls tool once per turn when tool is set, then answers.
-// A non-nil fail makes every request fail.
+// A non-nil fail makes requests fail, but only after the tool round when tool
+// is set, so the failed run has already admitted the tool's result. before, if
+// set, runs once at the start of the first request.
 type exposureCaller struct {
 	tool   string
 	answer string
 	fail   error
+	before func()
 }
 
 func (c *exposureCaller) Chat(_ context.Context, req provider.ChatRequest, onToken func(provider.ChatResponse) error) (agent.ModelResult, error) {
-	if c.fail != nil {
+	if c.before != nil {
+		before := c.before
+		c.before = nil
+		before()
+	}
+	called := false
+	for _, m := range req.Messages {
+		called = called || m.Role == "tool"
+	}
+	if c.fail != nil && (c.tool == "" || called) {
 		return agent.ModelResult{}, c.fail
 	}
 	if c.tool != "" {
-		called := false
-		for _, m := range req.Messages {
-			called = called || m.Role == "tool"
-		}
 		if !called {
 			call := provider.ToolCall{ID: "call-1", Type: "function", Function: provider.ToolCallFunction{Name: c.tool, Arguments: json.RawMessage(`{}`)}}
 			return agent.ModelResult{Response: provider.ChatResponse{ToolCalls: []provider.ToolCall{call}}}, nil
@@ -145,7 +154,10 @@ func TestExposureFailedRunIsDropped(t *testing.T) {
 				"t": {ID: "t", Revision: 1, Exposure: agent.Exposure{Recorded: true}, Messages: []conversation.Message{{Role: "user", Content: "q"}, {Role: "assistant", Content: "a"}}},
 			}}
 			rt := newExposureRuntime(t, tc.caller, golem.Options{SessionStore: store})
-			_, _ = exposureTurn(t, rt, "t")
+			res, _ := exposureTurn(t, rt, "t")
+			if !res.Exposure.Foreign {
+				t.Fatalf("failed run exposure = %+v, want Foreign (the tool round must have run)", res.Exposure)
+			}
 			if got, want := mustExposure(t, rt, "t"), (agent.Exposure{Recorded: true}); got != want {
 				t.Fatalf("ThreadExposure = %+v, want %+v", got, want)
 			}
@@ -153,24 +165,28 @@ func TestExposureFailedRunIsDropped(t *testing.T) {
 	}
 }
 
-// refusingStore refuses every Save as a lost revision race.
-type refusingStore struct{ mapSessionStore }
-
-func (s *refusingStore) Save(_ context.Context, conv conversation.Conversation) (int64, error) {
-	return 0, &conversation.ConflictError{ID: conv.ID, ExpectedRevision: conv.Revision}
-}
-
 func TestExposureLostRevisionRaceKeepsStored(t *testing.T) {
 	t.Parallel()
-	store := &refusingStore{mapSessionStore{conversations: map[string]conversation.Conversation{
+	store := &mapSessionStore{conversations: map[string]conversation.Conversation{
 		"t": {ID: "t", Revision: 1, Exposure: agent.Exposure{Recorded: true}, Messages: []conversation.Message{{Role: "user", Content: "q"}, {Role: "assistant", Content: "a"}}},
-	}}}
-	rt := newExposureRuntime(t, &exposureCaller{tool: "fetch_page", answer: "a"}, golem.Options{SessionStore: store})
+	}}
+	racer := agent.Exposure{Recorded: true, Foreign: true, First: "tool:racer"}
+	caller := &exposureCaller{tool: "fetch_page", answer: "a"}
+	// A second writer commits at the revision this turn loaded, so the turn's
+	// own save is stale.
+	caller.before = func() {
+		won := cloneConversation(store.conversations["t"])
+		won.Exposure = racer
+		if _, err := store.Save(context.Background(), won); err != nil {
+			t.Errorf("racing save: %v", err)
+		}
+	}
+	rt := newExposureRuntime(t, caller, golem.Options{SessionStore: store})
 	if _, err := exposureTurn(t, rt, "t"); !errors.Is(err, conversation.ErrConflict) {
 		t.Fatalf("turn error = %v, want conflict", err)
 	}
-	if got, want := mustExposure(t, rt, "t"), (agent.Exposure{Recorded: true}); got != want {
-		t.Fatalf("ThreadExposure = %+v, want %+v", got, want)
+	if got := mustExposure(t, rt, "t"); got != racer {
+		t.Fatalf("ThreadExposure = %+v, want the racer's %+v", got, racer)
 	}
 }
 
@@ -229,8 +245,8 @@ func TestExposureTrackedWithoutStrict(t *testing.T) {
 	if _, err := exposureTurn(t, rt, "t"); err != nil {
 		t.Fatal(err)
 	}
-	if got := store.conversations["t"].Exposure; !got.Foreign {
-		t.Fatalf("stored = %+v, want Foreign", got)
+	if got, want := store.conversations["t"].Exposure, (agent.Exposure{Recorded: true, Foreign: true, First: "tool:fetch_page"}); got != want {
+		t.Fatalf("stored = %+v, want %+v", got, want)
 	}
 }
 
@@ -323,5 +339,71 @@ func TestExposureCustomStoreRecordedWithoutHistory(t *testing.T) {
 	}
 	if res.Exposure != want {
 		t.Fatalf("result exposure = %+v, want %+v", res.Exposure, want)
+	}
+}
+
+// blockingLoadStore blocks Load until its context is done.
+type blockingLoadStore struct {
+	mapSessionStore
+	started chan struct{}
+}
+
+func (s *blockingLoadStore) Load(ctx context.Context, _ string) (*conversation.Conversation, error) {
+	close(s.started)
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func TestThreadExposureCanceledByClose(t *testing.T) {
+	t.Parallel()
+	store := &blockingLoadStore{started: make(chan struct{})}
+	rt := newExposureRuntime(t, &exposureCaller{answer: "a"}, golem.Options{SessionStore: store})
+	type outcome struct {
+		got agent.Exposure
+		err error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		got, err := rt.ThreadExposure(context.Background(), "t")
+		done <- outcome{got, err}
+	}()
+	select {
+	case <-store.started:
+	case <-time.After(10 * time.Second):
+		t.Fatal("ThreadExposure never reached Load")
+	}
+	closed := make(chan error, 1)
+	go func() { closed <- rt.Close() }()
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Close did not return: it cannot cancel an in-flight ThreadExposure")
+	}
+	select {
+	case o := <-done:
+		if o.err == nil || o.got != (agent.Exposure{}) {
+			t.Fatalf("ThreadExposure = %+v, %v; want zero and an error", o.got, o.err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("ThreadExposure did not return")
+	}
+}
+
+func TestThreadExposureDuringRun(t *testing.T) {
+	t.Parallel()
+	caller := &exposureCaller{tool: "fetch_page", answer: "a"}
+	var rt *golem.Runtime
+	var during agent.Exposure
+	var duringErr error
+	caller.before = func() { during, duringErr = rt.ThreadExposure(context.Background(), "t") }
+	rt = newExposureRuntime(t, caller, golem.Options{SessionStore: &mapSessionStore{}})
+	if _, err := exposureTurn(t, rt, "t"); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if duringErr != nil || during != (agent.Exposure{Recorded: true}) {
+		t.Fatalf("ThreadExposure during Run = %+v, %v; want clean, nil", during, duringErr)
 	}
 }

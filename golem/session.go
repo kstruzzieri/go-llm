@@ -123,22 +123,32 @@ func (s *threadState) priorExposure() *agent.Exposure {
 // read-only: it does not reserve the thread and does not need compression. An
 // empty or over-long ID returns ErrInvalidRequest and a closed runtime
 // ErrClosed; on any error the zero Exposure, which reads as exposed, is
-// returned. Close waits for a call in flight.
+// returned. Close cancels a call in flight, which then returns the context
+// error, and waits for it.
 func (r *Runtime) ThreadExposure(ctx context.Context, threadID string) (agent.Exposure, error) {
 	if threadID == "" || len(threadID) > maxCorrelationIDBytes {
 		return agent.Exposure{}, fmt.Errorf("%w: thread ID must contain 1 to %d bytes", ErrInvalidRequest, maxCorrelationIDBytes)
 	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	reader := &activeRun{cancel: cancel}
 	r.mu.Lock()
 	if r.closed {
 		r.mu.Unlock()
 		return agent.Exposure{}, ErrClosed
 	}
+	r.readers[reader] = struct{}{}
 	r.wg.Add(1)
 	r.mu.Unlock()
-	defer r.wg.Done()
+	defer func() {
+		r.mu.Lock()
+		delete(r.readers, reader)
+		r.mu.Unlock()
+		r.wg.Done()
+	}()
 	state, err := r.loadThread(ctx, threadID)
 	if err != nil {
-		return agent.Exposure{}, err
+		return agent.Exposure{}, fmt.Errorf("golem: thread exposure %q: %w", threadID, err)
 	}
 	return *state.priorExposure(), nil
 }
