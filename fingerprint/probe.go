@@ -130,10 +130,21 @@ func (p *OllamaProber) ProbeCapabilities(ctx context.Context, model string, req 
 	if model == "" { // ShowModel would refuse it without sending, and Requests counts what is sent
 		return CapabilityProbeResult{}, errors.New("fingerprint: ollama probe: model name is required")
 	}
-	reqCtx, cancel := context.WithTimeout(responsebound.WithLimit(ctx, recipe.MaxResponseBytes), cmp.Or(p.requestTimeout, recipe.RequestTimeout))
+	result := CapabilityProbeResult{Method: recipe.Method}
+	if err := ctx.Err(); err != nil { // a caller already done sends nothing
+		return result, fmt.Errorf("fingerprint: ollama probe %q: %w", model, err)
+	}
+	reqCtx, sends := responsebound.TrackSends(responsebound.WithLimit(ctx, recipe.MaxResponseBytes))
+	reqCtx, cancel := context.WithTimeout(reqCtx, cmp.Or(p.requestTimeout, recipe.RequestTimeout))
 	defer cancel()
-	result := CapabilityProbeResult{Method: recipe.Method, Requests: 1}
 	info, err := p.client.ShowModel(reqCtx, model)
+	// The request counts unless the transport took it and wrote no headers (a
+	// refused connection). This package cannot import provider to recognize a
+	// destination denial, so a denial the transport did not report counts; a
+	// metadata check spends no allowance.
+	if !sends.NotSent() {
+		result.Requests = 1
+	}
 	if err != nil {
 		return result, fmt.Errorf("fingerprint: ollama probe %q: %w", model, err)
 	}

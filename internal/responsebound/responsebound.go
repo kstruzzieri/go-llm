@@ -12,6 +12,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptrace"
+	"sync/atomic"
 )
 
 // ErrExceeded reports that a bounded response passed its byte limit. Its text
@@ -30,6 +32,32 @@ func WithLimit(ctx context.Context, maxBytes int64) context.Context {
 func Bounded(ctx context.Context) bool {
 	_, ok := ctx.Value(limitKey{}).(int64)
 	return ok
+}
+
+// Sends is what the HTTP transport reported for one request: whether it took
+// the request (GetConn) and whether the request's headers were written
+// (WroteHeaders). Trace callbacks may run on transport goroutines.
+type Sends struct {
+	took, wrote atomic.Bool
+}
+
+// TrackSends returns ctx with a client trace that records into a fresh Sends.
+// The probers call it once per request; no other request carries the trace.
+func TrackSends(ctx context.Context) (context.Context, *Sends) {
+	s := &Sends{}
+	return httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
+		GetConn:      func(string) { s.took.Store(true) },
+		WroteHeaders: func() { s.wrote.Store(true) },
+	}), s
+}
+
+// NotSent reports whether the transport took the request and wrote none of
+// its headers (a refused connection, a DNS, dial or TLS failure, or a cancel
+// while connecting): the server cannot have acted on it. Without any trace
+// event (a transport that does not report, or a failure before the transport)
+// it is false, so a caller counting requests errs toward counting.
+func (s *Sends) NotSent() bool {
+	return s.took.Load() && !s.wrote.Load()
 }
 
 // Wrap returns body counted against ctx's limit, or body unchanged when ctx

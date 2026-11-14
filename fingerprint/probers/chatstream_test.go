@@ -857,6 +857,102 @@ func TestProbeCapabilities_InvalidRequestSendsNothing(t *testing.T) {
 	}
 }
 
+// closedPortURL is a loopback URL nothing listens on: a connection to it is
+// refused before any byte of a request is written.
+func closedPortURL(t *testing.T) string {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := l.Addr().String()
+	if err := l.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return "http://" + addr
+}
+
+// roundTripFunc is a transport that reports no trace event.
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// TestProbeCapabilities_CountsOnlyRequestsSent pins the rule both probers
+// share: a request counts once its headers were written; a request the
+// transport took but never wrote (a refused connection) does not; a caller
+// already done sends nothing; and a transport that reports nothing counts,
+// because an under-count would let the registry exceed its allowance.
+func TestProbeCapabilities_CountsOnlyRequestsSent(t *testing.T) {
+	type prober interface {
+		ProbeCapabilities(context.Context, string, fingerprint.CapabilityProbeRequest) (fingerprint.CapabilityProbeResult, error)
+	}
+	build := func(adapter, url string, hc *http.Client) (prober, fingerprint.CapabilityProbeRequest) {
+		if adapter == fingerprint.AdapterOllama {
+			opts := []ollama.Option{ollama.WithBaseURL(url)}
+			if hc != nil {
+				opts = append(opts, ollama.WithHTTPClient(hc))
+			}
+			return fingerprint.NewProber(ollama.NewClient(opts...)),
+				fingerprint.CapabilityProbeRequest{Method: fingerprint.MethodOllamaShow, Capabilities: []string{"tool_call"}}
+		}
+		var opts []openaicompat.ClientOption
+		if hc != nil {
+			opts = append(opts, openaicompat.WithHTTPClient(hc))
+		}
+		return newStreamProber(url, opts...), toolsRequest()
+	}
+	answer := func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/show" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"capabilities": []string{"completion", "tools"}})
+			return
+		}
+		sseStep(calledReply)(w, r)
+	}
+	silent := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("scripted transport failure")
+	})}
+	tests := []struct {
+		name      string
+		url       func(t *testing.T, stub *probeStub) string
+		hc        *http.Client
+		cancelled bool
+		wantErr   bool
+		want      int
+	}{
+		{"connection refused", func(t *testing.T, _ *probeStub) string { return closedPortURL(t) }, nil, false, true, 0},
+		{"cancelled at entry", func(_ *testing.T, s *probeStub) string { return s.srv.URL }, nil, true, true, 0},
+		{"answered", func(_ *testing.T, s *probeStub) string { return s.srv.URL }, nil, false, false, 1},
+		{"a transport that reports nothing fails", func(_ *testing.T, s *probeStub) string { return s.srv.URL }, silent, false, true, 1},
+	}
+	for _, adapter := range []string{fingerprint.AdapterOpenAICompat, fingerprint.AdapterOllama} {
+		for _, tt := range tests {
+			t.Run(adapter+" "+tt.name, func(t *testing.T) {
+				var steps []step
+				if tt.name == "answered" {
+					steps = []step{answer}
+				}
+				stub := newProbeStub(t, steps...)
+				p, req := build(adapter, tt.url(t, stub), tt.hc)
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				if tt.cancelled {
+					cancel()
+				}
+				res, err := p.ProbeCapabilities(ctx, "m", req)
+				if (err != nil) != tt.wantErr {
+					t.Fatalf("err = %v, want error %v", err, tt.wantErr)
+				}
+				if res.Requests != tt.want {
+					t.Errorf("result.Requests = %d, want %d", res.Requests, tt.want)
+				}
+				if hits := stub.hits(); hits != len(steps) {
+					t.Errorf("stub received %d requests, want %d", hits, len(steps))
+				}
+			})
+		}
+	}
+}
+
 func TestProbeCapabilities_FailedSecondRequestRetainsRequestCount(t *testing.T) {
 	stub := newProbeStub(t, statusStep(400), statusStep(500))
 	res, err := probeTools(newStreamProber(stub.srv.URL))
