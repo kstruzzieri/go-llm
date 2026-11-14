@@ -57,7 +57,10 @@ const (
 
 // EvidenceRow is one row of the append-only capability evidence log.
 type EvidenceRow struct {
-	ID            int64  // insertion order; only ever the final tie-breaker
+	// ID is insertion order, only ever the final tie-breaker. A negative ID
+	// marks a row that was never stored: a registry kept it in memory after
+	// its append failed. It loses every exact tie to a stored row.
+	ID            int64
 	KeyVersion    int    // EvidenceKeyVersion when written; other versions are not read
 	Endpoint      string // destination canonical form
 	Adapter       string // the API the row came through

@@ -3,11 +3,13 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -299,5 +301,86 @@ func TestRunModels_ReprobeDeletesRowsFirst(t *testing.T) {
 		if di >= fi || fi >= ri {
 			t.Fatalf("%s: delete (idx %d) must precede refresh (idx %d) then resolve (idx %d); timeline=%v", s, di, fi, ri, events)
 		}
+	}
+}
+
+// TestGolemModels_DefaultLegacyReprobeStillWorks pins that golem's production
+// default stays on the legacy resolver: -reprobe deletes the cached verdict,
+// the non-streamed legacy probe runs, its verdict lands in capability_probes,
+// and the evidence log gains nothing.
+func TestGolemModels_DefaultLegacyReprobeStillWorks(t *testing.T) {
+	ctx := context.Background()
+	var chats, streamed atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/models":
+			_, _ = w.Write([]byte(`{"data":[{"id":"mystery"}]}`))
+		case "/v1/chat/completions":
+			chats.Add(1)
+			var body map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			if body["stream"] == true {
+				streamed.Add(1)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"","tool_calls":[{"id":"1","type":"function","function":{"name":"get_time","arguments":"{}"}}]}}],"usage":{"completion_tokens":4}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", filepath.Join(dir, "data"))
+	root := filepath.Join(dir, "workspace")
+	if err := os.Mkdir(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	key := provider.ModelKey{Provider: "llamacpp", Model: "mystery"}
+	h, warn := openCapProbeStore(ctx, os.Getenv, root)
+	if warn != "" || h == nil {
+		t.Fatalf("openCapProbeStore: %v, %q", h, warn)
+	}
+	if err := h.Probes().SaveCapProbe(ctx, fingerprint.CapProbe{
+		BackendID: key.Provider, ModelName: key.Model, Capability: "tool_call", State: fingerprint.CapProbeNo,
+		ModelDigest: key.String(), ProbeVersion: fingerprint.CurrentToolProbeVersion, TestedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Close(); err != nil {
+		t.Fatal(err)
+	}
+	cfgPath := filepath.Join(dir, "models.json")
+	if err := os.WriteFile(cfgPath, []byte(`{
+		"providers": {"llamacpp": {"base_url": "`+srv.URL+`", "api_format": "openai-compat"}},
+		"models": {"agent": {"name": "mystery", "provider": "llamacpp", "type": "dense"}},
+		"defaults": {"agent": "agent"}
+	}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var out, errOut bytes.Buffer
+	if err := runModels(ctx, []string{"-config", cfgPath, "-root", root, "-no-probe", "-reprobe"}, &out, &errOut); err != nil {
+		t.Fatalf("runModels: %v\nstderr:\n%s", err, errOut.String())
+	}
+	if got := out.String(); !strings.Contains(got, "tool_call=yes (probe)") {
+		t.Fatalf("output = %q; want the reprobed yes", got)
+	}
+	if chats.Load() != 1 || streamed.Load() != 0 {
+		t.Fatalf("chat requests = %d (streamed %d); want one legacy non-streamed probe", chats.Load(), streamed.Load())
+	}
+
+	h, _ = openCapProbeStore(ctx, os.Getenv, root)
+	defer func() { _ = h.Close() }()
+	row, err := h.Probes().GetCapProbe(ctx, key.Provider, key.Model, "tool_call")
+	if err != nil || row.State != fingerprint.CapProbeYes {
+		t.Fatalf("legacy row = %+v, %v; want the reprobed yes", row, err)
+	}
+	b, err := provider.EvidenceBindingFor(srv.URL, "openai-compat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rows, err := h.Log().EvidenceRows(ctx, b.Endpoint, key.Model); err != nil || len(rows) != 0 {
+		t.Fatalf("evidence rows = %d, %v; want none on the default path", len(rows), err)
 	}
 }

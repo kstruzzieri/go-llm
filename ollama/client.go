@@ -9,6 +9,8 @@ import (
 	"io"
 	"net/http"
 	"time"
+
+	"github.com/kstruzzieri/go-llm/internal/responsebound"
 )
 
 const (
@@ -74,7 +76,10 @@ func (c *Client) IsAvailable(ctx context.Context) bool {
 	return resp.StatusCode == http.StatusOK
 }
 
-// doJSON sends a JSON request and decodes the response into dst.
+// doJSON sends a JSON request and decodes the response into dst. A bounded
+// request (responsebound) follows no redirect, reads its body under the
+// limit, and reports a rejection whose body could not be read as a
+// *responsebound.RejectionReadError rather than an *APIError.
 func (c *Client) doJSON(ctx context.Context, method, path string, body any, dst any) error {
 	var bodyReader io.Reader
 	if body != nil {
@@ -93,14 +98,19 @@ func (c *Client) doJSON(ctx context.Context, method, path string, body any, dst 
 		req.Header.Set("Content-Type", "application/json")
 	}
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := responsebound.HTTPClient(ctx, c.httpClient).Do(req)
 	if err != nil {
 		return fmt.Errorf("ollama: request failed: %w", err)
 	}
+	resp.Body = responsebound.Wrap(ctx, resp.Body)
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		return newAPIError(resp.StatusCode, resp.Body)
+		apiErr, readErr := readAPIError(resp.StatusCode, resp.Body)
+		if readErr != nil && responsebound.Bounded(ctx) {
+			return &responsebound.RejectionReadError{StatusCode: resp.StatusCode, Err: readErr}
+		}
+		return apiErr
 	}
 
 	if dst != nil {
@@ -159,7 +169,14 @@ func (c *Client) doStream(ctx context.Context, path string, body any, fn func(js
 // falls back to the raw body text. Reads at most 4KB to prevent memory
 // exhaustion from misbehaving upstreams.
 func newAPIError(statusCode int, body io.Reader) *APIError {
-	respBody, _ := io.ReadAll(io.LimitReader(body, 4096))
+	apiErr, _ := readAPIError(statusCode, body)
+	return apiErr
+}
+
+// readAPIError is newAPIError that also returns the body read failure, if
+// any. A body cut at the 4KB cap is not a failure.
+func readAPIError(statusCode int, body io.Reader) (*APIError, error) {
+	respBody, readErr := io.ReadAll(io.LimitReader(body, 4096))
 	msg := string(respBody)
 	var errResp struct {
 		Error string `json:"error"`
@@ -167,5 +184,5 @@ func newAPIError(statusCode int, body io.Reader) *APIError {
 	if json.Unmarshal(respBody, &errResp) == nil && errResp.Error != "" {
 		msg = errResp.Error
 	}
-	return &APIError{StatusCode: statusCode, Message: msg}
+	return &APIError{StatusCode: statusCode, Message: msg}, readErr
 }

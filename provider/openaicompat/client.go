@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kstruzzieri/go-llm/internal/responsebound"
 	"github.com/kstruzzieri/go-llm/internal/secretscan"
 	"github.com/kstruzzieri/go-llm/provider"
 )
@@ -354,7 +355,7 @@ func (c *Client) postJSON(ctx context.Context, path string, body any, out any) e
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	if err := decodeJSONOrError(resp, c.apiKey, out); err != nil {
+	if err := decodeJSONOrError(ctx, resp, c.apiKey, out); err != nil {
 		return err
 	}
 	return nil
@@ -371,7 +372,7 @@ func (c *Client) postSSE(ctx context.Context, path string, body any) (*sseReader
 	}
 
 	if resp.StatusCode/100 != 2 {
-		err := readErrorEnvelope(resp, c.apiKey)
+		err := readErrorEnvelope(ctx, resp, c.apiKey)
 		_ = resp.Body.Close()
 		return nil, err
 	}
@@ -390,8 +391,9 @@ func (c *Client) getJSON(ctx context.Context, path string, out any) error {
 	if err != nil {
 		return fmt.Errorf("openaicompat: %s: %w", path, err)
 	}
+	resp.Body = responsebound.Wrap(ctx, resp.Body)
 	defer func() { _ = resp.Body.Close() }()
-	return decodeJSONOrError(resp, c.apiKey, out)
+	return decodeJSONOrError(ctx, resp, c.apiKey, out)
 }
 
 // post is the shared transport for postJSON / postSSE. It marshals body
@@ -415,23 +417,32 @@ func (c *Client) post(ctx context.Context, path string, body any, contentType st
 	if err != nil {
 		return nil, fmt.Errorf("openaicompat: %s: %w", path, err)
 	}
+	resp.Body = responsebound.Wrap(ctx, resp.Body)
 	return resp, nil
 }
 
 // do redacts errors from HTTP parsing before a response exists, while
-// preserving their causes for cancellation and routing classification.
+// preserving their causes for cancellation and routing classification. A
+// bounded request (responsebound) is sent through a per-request copy of the
+// client that hands back any redirect unfollowed.
 func (c *Client) do(req *http.Request) (*http.Response, error) {
-	resp, err := c.hc.Do(req)
-	key := strings.TrimRight(c.apiKey, " \t") // Match HTTP's trailing header whitespace trimming.
+	resp, err := responsebound.HTTPClient(req.Context(), c.hc).Do(req)
+	return resp, redactError(c.apiKey, err)
+}
+
+// redactError returns err with apiKey, raw or JSON-escaped, replaced in its
+// text, keeping err as the cause. nil and a key-less client return err as is.
+func redactError(apiKey string, err error) error {
+	key := strings.TrimRight(apiKey, " \t") // Match HTTP's trailing header whitespace trimming.
 	if err == nil || key == "" {
-		return resp, err
+		return err
 	}
 	quoted := strconv.Quote(key)
 	message := strings.NewReplacer(
 		key, "[redacted]",
 		quoted[1:len(quoted)-1], "[redacted]",
 	).Replace(err.Error())
-	return resp, &redactedError{err: err, message: message}
+	return &redactedError{err: err, message: message}
 }
 
 // marshalBody encodes body for post. Without a content guard that is plain
@@ -558,10 +569,11 @@ func (c *Client) setHeaders(req *http.Request, contentType string) {
 }
 
 // decodeJSONOrError reads resp.Body. On 2xx, it JSON-decodes into out. On
-// non-2xx, it parses an OpenAI error envelope and returns it as an error.
-func decodeJSONOrError(resp *http.Response, apiKey string, out any) error {
+// non-2xx, it parses an OpenAI error envelope and returns it as an error. ctx
+// is the context the request was sent with.
+func decodeJSONOrError(ctx context.Context, resp *http.Response, apiKey string, out any) error {
 	if resp.StatusCode/100 != 2 {
-		return readErrorEnvelope(resp, apiKey)
+		return readErrorEnvelope(ctx, resp, apiKey)
 	}
 	if out == nil {
 		// Drain the body so the connection can be reused.
@@ -583,9 +595,21 @@ func decodeJSONOrError(resp *http.Response, apiKey string, out any) error {
 // status: servers that echo the Authorization header, in the body or in the
 // server-chosen reason phrase, would otherwise put the key into bootstrap
 // warnings and logs.
-func readErrorEnvelope(resp *http.Response, apiKey string) error {
+//
+// For an ordinary request a failed body read is ignored, as it always was. For
+// a bounded request (responsebound) it returns a *responsebound.RejectionReadError
+// carrying the status and the redacted read failure instead: a rejection whose
+// body stalled, reset or ended short is not a clean rejection. Whether the
+// request is bounded is read from ctx, the context it was sent with, not from
+// resp.Request, so a response that does not carry its request is judged the
+// same way. A clean end, empty included, and a body cut at the cap below are
+// not failed reads.
+func readErrorEnvelope(ctx context.Context, resp *http.Response, apiKey string) error {
 	const limit = 64 * 1024
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, limit))
+	body, readErr := io.ReadAll(io.LimitReader(resp.Body, limit))
+	if readErr != nil && responsebound.Bounded(ctx) {
+		return &responsebound.RejectionReadError{StatusCode: resp.StatusCode, Err: redactError(apiKey, readErr)}
+	}
 	body = bytes.TrimSpace(body)
 
 	redact := func(m string) string {
