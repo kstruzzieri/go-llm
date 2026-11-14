@@ -3,7 +3,6 @@ package agent
 import (
 	"context"
 	"sync"
-	"unicode/utf8"
 
 	"github.com/kstruzzieri/go-llm/conversation"
 )
@@ -56,7 +55,7 @@ func (r *exposureRun) merge(e Exposure) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if (e.Foreign || e.Unknown) && s.exp.First == "" {
-		s.exp.First = boundExposureFirst(e.First)
+		s.exp.First = conversation.BoundExposureFirst(e.First)
 	}
 	s.exp.Foreign = s.exp.Foreign || e.Foreign
 	s.exp.Unknown = s.exp.Unknown || e.Unknown
@@ -96,16 +95,4 @@ func (r *exposureRun) snapshot() Exposure {
 	e := r.state.exp
 	e.Recorded = true
 	return e
-}
-
-// boundExposureFirst (applied in merge) cuts s to MaxExposureFirstBytes at a UTF-8 boundary.
-func boundExposureFirst(s string) string {
-	if len(s) <= conversation.MaxExposureFirstBytes {
-		return s
-	}
-	n := conversation.MaxExposureFirstBytes
-	for n > 0 && !utf8.RuneStart(s[n]) {
-		n--
-	}
-	return s[:n]
 }

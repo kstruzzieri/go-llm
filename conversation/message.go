@@ -77,9 +77,13 @@ type Conversation struct {
 	Title          string
 	Messages       []Message
 	DurableSummary *DurableSummary
-	Revision       int64
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
+	// Exposure is the conversation's exposure record. It is saved and loaded
+	// with the content it describes; a store that does not carry it reads as
+	// "no record", which is treated as exposed.
+	Exposure  Exposure
+	Revision  int64
+	CreatedAt time.Time
+	UpdatedAt time.Time
 }
 
 // DurableSummary is compressed transcript history kept beside recent raw
