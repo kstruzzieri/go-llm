@@ -42,9 +42,12 @@ type exposureCaller struct {
 	answer string
 	fail   error
 	before func()
+	// seen holds every request the caller was sent.
+	seen []provider.ChatRequest
 }
 
 func (c *exposureCaller) Chat(_ context.Context, req provider.ChatRequest, onToken func(provider.ChatResponse) error) (agent.ModelResult, error) {
+	c.seen = append(c.seen, req)
 	if c.before != nil {
 		before := c.before
 		c.before = nil
@@ -136,6 +139,26 @@ func TestExposureSurvivesCompaction(t *testing.T) {
 	}
 	if got := mustExposure(t, rt, current.ID); got != current.Exposure {
 		t.Fatalf("ThreadExposure after compaction = %+v, want %+v", got, current.Exposure)
+	}
+}
+
+func TestExposureSurvivesCompactionOfExistingSummary(t *testing.T) {
+	t.Parallel()
+	current := compactionConversation(5)
+	current.DurableSummary = &conversation.DurableSummary{Content: "OLD", MessageCount: 4}
+	current.Exposure = agent.Exposure{Recorded: true, Foreign: true, Unknown: true, First: "tool:x"}
+	store := &mapSessionStore{conversations: map[string]conversation.Conversation{current.ID: cloneConversation(current)}}
+	rt := newExposureRuntime(t, &exposureCaller{answer: "x"}, golem.Options{SessionStore: store, Summarizer: func(context.Context, string, []conversation.Message) (string, error) { return "NEW", nil }})
+	rep, err := rt.CompactThread(context.Background(), current.ID)
+	if err != nil || !rep.Changed {
+		t.Fatalf("CompactThread = %+v, %v; want changed", rep, err)
+	}
+	stored := store.conversations[current.ID]
+	if stored.DurableSummary == nil || stored.DurableSummary.Content == "OLD" || stored.DurableSummary.MessageCount <= 4 {
+		t.Fatalf("summary = %+v, want rewritten beyond OLD/4; test would prove nothing", stored.DurableSummary)
+	}
+	if want := (agent.Exposure{Recorded: true, Foreign: true, Unknown: true, First: "tool:x"}); stored.Exposure != want {
+		t.Fatalf("stored exposure after compaction = %+v, want %+v", stored.Exposure, want)
 	}
 }
 
@@ -405,5 +428,50 @@ func TestThreadExposureDuringRun(t *testing.T) {
 	}
 	if duringErr != nil || during != (agent.Exposure{Recorded: true}) {
 		t.Fatalf("ThreadExposure during Run = %+v, %v; want clean, nil", during, duringErr)
+	}
+}
+
+func TestExposureUnrecordedNonZeroOnEmptyConversationIsUnknown(t *testing.T) {
+	t.Parallel()
+	store := &mapSessionStore{conversations: map[string]conversation.Conversation{
+		"t": {ID: "t", Revision: 1, Exposure: agent.Exposure{Recorded: false, Foreign: true}},
+	}}
+	rt := newExposureRuntime(t, &exposureCaller{answer: "a"}, golem.Options{SessionStore: store})
+	res, err := exposureTurn(t, rt, "t")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := agent.Exposure{Recorded: true, Unknown: true, First: "history"}
+	if res.Exposure != want || store.conversations["t"].Exposure != want {
+		t.Fatalf("result %+v / stored %+v, want %+v", res.Exposure, store.conversations["t"].Exposure, want)
+	}
+}
+
+func TestExposureIsNotSentToTheModel(t *testing.T) {
+	t.Parallel()
+	const sentinel = "zz-exposure-sentinel"
+	store := &mapSessionStore{conversations: map[string]conversation.Conversation{
+		"t": {ID: "t", Revision: 1, Exposure: agent.Exposure{Recorded: true, Foreign: true, First: "tool:" + sentinel},
+			Messages: []conversation.Message{{Role: "user", Content: "q"}, {Role: "assistant", Content: "a"}}},
+	}}
+	caller := &exposureCaller{answer: "a"}
+	rt := newExposureRuntime(t, caller, golem.Options{SessionStore: store})
+	if _, err := exposureTurn(t, rt, "t"); err != nil {
+		t.Fatal(err)
+	}
+	if len(caller.seen) == 0 {
+		t.Fatal("caller saw no request")
+	}
+	for i, req := range caller.seen {
+		b, err := json.Marshal(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(b), `"go"`) || !strings.Contains(string(b), "fetch_page") {
+			t.Fatalf("request %d capture misses the turn message or tool definitions: %s", i, b)
+		}
+		if strings.Contains(string(b), sentinel) {
+			t.Fatalf("request %d carries the exposure label: %s", i, b)
+		}
 	}
 }

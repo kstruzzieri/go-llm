@@ -1083,8 +1083,8 @@ func (r *Runtime) release(turn Turn, active *activeRun) {
 	r.wg.Done()
 }
 
-// Close cancels active runs and compactions, waits for them, and releases owned resources.
-// It must not be called synchronously by code executing within Run or CompactThread.
+// Close cancels active runs, compactions and ThreadExposure calls, waits for them, and releases owned resources.
+// It must not be called synchronously by code executing within Run, CompactThread or ThreadExposure.
 func (r *Runtime) Close() error {
 	r.mu.Lock()
 	if r.closeDone == nil {

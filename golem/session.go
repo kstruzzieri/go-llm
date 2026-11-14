@@ -105,12 +105,13 @@ func visibleCost(estimate conversation.TokenEstimator) func(conversation.Message
 }
 
 // priorExposure is the record the next turn starts from, as a copy. A recorded
-// value stands even for an empty conversation. An unrecorded value on an empty
-// conversation (no messages, no summary) is a clean start; on any history it
-// stays unrecorded, which the agent reads as unknown.
+// value stands even for an empty conversation. Only the exact zero Exposure on
+// an empty conversation (no messages, no summary) is a clean start; any other
+// unrecorded value, or an unrecorded one on any history, stays unrecorded,
+// which the agent reads as unknown.
 func (s *threadState) priorExposure() *agent.Exposure {
 	e := s.conversation.Exposure
-	if !e.Recorded && len(s.conversation.Messages) == 0 && s.conversation.DurableSummary == nil {
+	if e == (agent.Exposure{}) && len(s.conversation.Messages) == 0 && s.conversation.DurableSummary == nil {
 		e = agent.Exposure{Recorded: true}
 	}
 	return &e
@@ -119,8 +120,10 @@ func (s *threadState) priorExposure() *agent.Exposure {
 // ThreadExposure returns the exposure record the next turn on threadID would
 // start from: the stored record, a clean record for a well-formed ID with no
 // stored conversation (no conversation is inserted), or an unrecorded record
-// (which reads as exposed) for a conversation saved without one. It is
-// read-only: it does not reserve the thread and does not need compression. An
+// (which reads as exposed) for a conversation saved without one. It never
+// writes a conversation row, reserves the thread, or needs compression, but on
+// a runtime with no SessionStore it opens the default session database on first
+// use, creating and migrating the file if absent, as CompactThread does. An
 // empty or over-long ID returns ErrInvalidRequest and a closed runtime
 // ErrClosed; on any error the zero Exposure, which reads as exposed, is
 // returned. Close cancels a call in flight, which then returns the context
@@ -148,7 +151,7 @@ func (r *Runtime) ThreadExposure(ctx context.Context, threadID string) (agent.Ex
 	}()
 	state, err := r.loadThread(ctx, threadID)
 	if err != nil {
-		return agent.Exposure{}, fmt.Errorf("golem: thread exposure %q: %w", threadID, err)
+		return agent.Exposure{}, err
 	}
 	return *state.priorExposure(), nil
 }
