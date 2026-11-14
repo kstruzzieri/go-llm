@@ -665,33 +665,60 @@ func TestResolveToolCall_PhaseThreeSeesRebuiltProfile(t *testing.T) {
 }
 
 func TestResolveToolCall_AnswerFromLogRefreshesProfile(t *testing.T) {
-	ctx := t.Context()
 	b := openAIBinding(t)
-	prober := &capProbeFake{}
-	mr, _ := newLogResolver(t, newEvidenceLog(t), prober, []logProv{
-		{name: "p1", binding: b, models: infos(logModel)},
-		{name: "p2", binding: b, models: infos(logModel)},
+	t.Run("two provider names in one candidate list", func(t *testing.T) {
+		ctx := t.Context()
+		prober := &capProbeFake{}
+		mr, _ := newLogResolver(t, newEvidenceLog(t), prober, []logProv{
+			{name: "p1", binding: b, models: infos(logModel)},
+			{name: "p2", binding: b, models: infos(logModel)},
+		})
+		var candidates []*ModelProfile
+		for _, name := range []string{"p1", "p2"} {
+			p, err := mr.Lookup(ctx, ModelKey{Provider: name, Model: logModel})
+			if err != nil {
+				t.Fatal(err)
+			}
+			candidates = append(candidates, p)
+		}
+		out, diags := mr.EnsureToolCallResolved(ctx, candidates, agentCaps)
+		if len(diags) != 0 {
+			t.Fatalf("diags = %v", diags)
+		}
+		for i, p := range out {
+			if !p.Caps.Has(CapToolCall) {
+				t.Fatalf("candidate %d (%s) caps = %v; want tool_call", i, p.Key, p.Caps)
+			}
+		}
+		if n := prober.callCount(); n != 1 {
+			t.Fatalf("calls = %d; want 1 (the second name reads the first one's answer)", n)
+		}
 	})
-	var candidates []*ModelProfile
-	for _, name := range []string{"p1", "p2"} {
-		p, err := mr.Lookup(ctx, ModelKey{Provider: name, Model: logModel})
+	// The boundary sync drops a profile cached before a write it sees, so the
+	// yes found by the slow path's own read must drop the one cached before a
+	// write that lands after the sync.
+	t.Run("an answer written after the lookup", func(t *testing.T) {
+		ctx := t.Context()
+		path := filepath.Join(t.TempDir(), "fingerprints.db")
+		other := openEvidenceLog(t, path)
+		prober := &capProbeFake{}
+		factory := func(context.Context, ModelKey, *ModelInfo, Provider) (*FingerprintProberSpec, error) {
+			appendRows(t, other, logRow(b, capabilityToolCall, fingerprint.CapProbeYes, logDigest, logT0))
+			return &FingerprintProberSpec{Prober: prober}, nil
+		}
+		mr, _ := newLogResolver(t, openEvidenceLog(t, path), nil, oneProv(t, infos(logModel)...), WithCapabilityProber(factory))
+		before, err := mr.Lookup(ctx, localKey(logModel))
 		if err != nil {
 			t.Fatal(err)
 		}
-		candidates = append(candidates, p)
-	}
-	out, diags := mr.EnsureToolCallResolved(ctx, candidates, agentCaps)
-	if len(diags) != 0 {
-		t.Fatalf("diags = %v", diags)
-	}
-	for i, p := range out {
-		if !p.Caps.Has(CapToolCall) {
-			t.Fatalf("candidate %d (%s) caps = %v; want tool_call", i, p.Key, p.Caps)
+		out, diags := mr.EnsureToolCallResolved(ctx, []*ModelProfile{before}, agentCaps)
+		if len(diags) != 0 || !out[0].Caps.Has(CapToolCall) {
+			t.Fatalf("candidate caps = %v, diags = %v; want tool_call from the refreshed profile", out[0].Caps, diags)
 		}
-	}
-	if n := prober.callCount(); n != 1 {
-		t.Fatalf("calls = %d; want 1 (the second name reads the first one's answer)", n)
-	}
+		if n := prober.callCount(); n != 0 {
+			t.Fatalf("calls = %d; want 0", n)
+		}
+	})
 }
 
 // holdFirstAppend makes the log's first append wait until release closes,
