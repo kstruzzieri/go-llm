@@ -1921,6 +1921,51 @@ func TestAutomaticProbeBudget_PanicSpendsReservation(t *testing.T) {
 	}
 }
 
+// A panic after the prober has returned (here the registry clock's read of the
+// completion time) refunds by the count the prober reported, taken before that
+// later work: 1 of the 2 reserved requests was sent, so 1 comes back. The permit
+// is released once and nothing is written.
+func TestAutomaticProbeBudget_PanicAfterProberReturnsRefundsKnownCount(t *testing.T) {
+	var armed atomic.Bool
+	prober := &capProbeFake{}
+	prober.setRun(func(context.Context, string) (fingerprint.CapabilityProbeResult, error) {
+		armed.Store(true) // the next clock read is the one after the prober returns
+		return toolsResult(fingerprint.CapProbeYes, 1), nil
+	})
+	log := &hookedLog{EvidenceStore: newEvidenceLog(t)}
+	mr, _ := newLogResolver(t, log, prober, oneProv(t, infos(logModel)...))
+	clock := mr.now
+	mr.now = func() time.Time {
+		if armed.CompareAndSwap(true, false) {
+			panic("clock exploded")
+		}
+		return clock()
+	}
+	adm := newHoldAdmitter()
+	mr.setSlotAdmitter(adm)
+
+	recovered := func() (r any) {
+		defer func() { r = recover() }()
+		_, _ = mr.ResolveToolCall(t.Context(), localKey(logModel))
+		return nil
+	}()
+	if recovered == nil {
+		t.Fatal("the clock's panic did not reach the caller")
+	}
+	if n := prober.callCount(); n != 1 {
+		t.Fatalf("calls = %d; want 1", n)
+	}
+	if n := adm.releaseCount(); n != 1 {
+		t.Fatalf("releases after the panic = %d; want exactly 1", n)
+	}
+	if n := allowanceOf(mr); n != automaticProbeAllowance-1 {
+		t.Fatalf("allowance after the panic = %d; want %d, the unsent request refunded", n, automaticProbeAllowance-1)
+	}
+	if n := len(log.appendCalls()); n != 0 {
+		t.Fatalf("appends = %d; want 0", n)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Lost write: a completed check whose append fails is kept for the registry's
 // life. Checks report 0 requests unless a case says otherwise, so the
