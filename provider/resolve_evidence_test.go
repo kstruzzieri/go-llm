@@ -1109,65 +1109,70 @@ func TestNoProbeWithoutCallerRequest(t *testing.T) {
 			t.Fatalf("calls = %d; want 0", n)
 		}
 	})
-	t.Run("enabled", func(t *testing.T) {
-		ctx := t.Context()
-		log := &hookedLog{EvidenceStore: newEvidenceLog(t)}
-		prober := &capProbeFake{}
-		prov := newStubProvider("local", infos(logModel)...)
-		provReg := NewRegistry()
-		if err := provReg.Register(prov); err != nil {
-			t.Fatal(err)
-		}
-		if err := provReg.RefreshModels(ctx, "local"); err != nil {
-			t.Fatal(err)
-		}
-		b := openAIBinding(t)
-		mr, err := NewModelRegistry(provReg, nil,
-			WithEvidenceLog(log, func(string) (EvidenceBinding, bool) { return b, true }),
-			WithCapabilityProber(capProberFactory(prober)))
-		if err != nil {
-			t.Fatal(err)
-		}
-		mr.SetCapabilityFloor(func(ModelKey) []string { return []string{"chat", "stream"} })
-		router := NewRouter(mr, provReg)
-		t.Cleanup(func() { _ = router.Close() })
-		key := localKey(logModel)
+	// Each step runs on its own fresh registry, so it meets cold profiles and a
+	// full allowance and stands alone. Profiling from lookups is
+	// TestLogBoundRegistryDoesNotProfile's.
+	type fixture struct {
+		mr     *ModelRegistry
+		router *Router
+		log    *hookedLog
+		prober *capProbeFake
+	}
+	key := localKey(logModel)
+	steps := []struct {
+		name string
+		run  func(ctx context.Context, f fixture) error
+	}{
+		{"Lookup", func(ctx context.Context, f fixture) error { _, err := f.mr.Lookup(ctx, key); return err }},
+		{"LookupAny", func(ctx context.Context, f fixture) error { _, err := f.mr.LookupAny(ctx, logModel); return err }},
+		{"All", func(ctx context.Context, f fixture) error { _, err := f.mr.All(ctx); return err }},
+		{"Recommend", func(ctx context.Context, f fixture) error { _, err := f.mr.Recommend(ctx, RecommendOpts{}); return err }},
+		{"Refresh", func(ctx context.Context, f fixture) error { _, err := f.mr.Refresh(ctx, key); return err }},
+		{"ExplainToolCall", func(ctx context.Context, f fixture) error { _, err := f.mr.ExplainToolCall(ctx, key); return err }},
+		{"listing projection", func(ctx context.Context, f fixture) error {
+			_, err := f.mr.ProjectListedModels(ctx, "local", infos(logModel))
+			return err
+		}},
+		{"route without tool calls", func(ctx context.Context, f fixture) error {
+			_, err := f.router.Route(ctx, RoutingRequest{Model: "local/" + logModel, RequiredCaps: CapChat | CapStream})
+			return err
+		}},
+	}
+	for _, step := range steps {
+		t.Run("enabled/"+step.name, func(t *testing.T) {
+			ctx := t.Context()
+			f := fixture{log: &hookedLog{EvidenceStore: newEvidenceLog(t)}, prober: &capProbeFake{}}
+			provReg := NewRegistry()
+			if err := provReg.Register(newStubProvider("local", infos(logModel)...)); err != nil {
+				t.Fatal(err)
+			}
+			if err := provReg.RefreshModels(ctx, "local"); err != nil {
+				t.Fatal(err)
+			}
+			b := openAIBinding(t)
+			var err error
+			f.mr, err = NewModelRegistry(provReg, nil,
+				WithEvidenceLog(f.log, func(string) (EvidenceBinding, bool) { return b, true }),
+				WithCapabilityProber(capProberFactory(f.prober)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			f.mr.SetCapabilityFloor(func(ModelKey) []string { return []string{"chat", "stream"} })
+			f.router = NewRouter(f.mr, provReg)
+			t.Cleanup(func() { _ = f.router.Close() })
 
-		steps := map[string]func() error{
-			"Lookup":    func() error { _, err := mr.Lookup(ctx, key); return err },
-			"LookupAny": func() error { _, err := mr.LookupAny(ctx, logModel); return err },
-			"All":       func() error { _, err := mr.All(ctx); return err },
-			"Recommend": func() error { _, err := mr.Recommend(ctx, RecommendOpts{}); return err },
-			"Refresh":   func() error { _, err := mr.Refresh(ctx, key); return err },
-			"ExplainToolCall": func() error {
-				_, err := mr.ExplainToolCall(ctx, key)
-				return err
-			},
-			"listing projection": func() error {
-				_, err := mr.ProjectListedModels(ctx, "local", infos(logModel))
-				return err
-			},
-			"route without tool calls": func() error {
-				_, err := router.Route(ctx, RoutingRequest{Model: "local/" + logModel, RequiredCaps: CapChat | CapStream})
-				return err
-			},
-		}
-		for name, step := range steps {
-			if err := step(); err != nil {
-				t.Fatalf("%s: %v", name, err)
+			if err := step.run(ctx, f); err != nil {
+				t.Fatalf("%s: %v", step.name, err)
 			}
-			if n := prober.callCount(); n != 0 {
-				t.Fatalf("%s started %d checks; want 0", name, n)
+			if n := f.prober.callCount(); n != 0 || allowanceOf(f.mr) != automaticProbeAllowance || len(f.log.appendCalls()) != 0 {
+				t.Fatalf("%s: calls=%d allowance=%d appends=%d; want 0, full, 0", step.name, n, allowanceOf(f.mr), len(f.log.appendCalls()))
 			}
-		}
-		if allowanceOf(mr) != automaticProbeAllowance || len(log.appendCalls()) != 0 || prober.profilingCount() != 0 {
-			t.Fatalf("allowance=%d appends=%d profiling=%d; want full, 0, 0", allowanceOf(mr), len(log.appendCalls()), prober.profilingCount())
-		}
-		// Positive control: the counter sees a caller's request.
-		if _, err := mr.ResolveToolCall(ctx, key); err != nil || prober.callCount() != 1 {
-			t.Fatalf("control: ResolveToolCall err=%v calls=%d; want one check", err, prober.callCount())
-		}
-	})
+			// Positive control: the counter sees a caller's request.
+			if _, err := f.mr.ResolveToolCall(ctx, key); err != nil || f.prober.callCount() != 1 {
+				t.Fatalf("control: ResolveToolCall err=%v calls=%d; want one check", err, f.prober.callCount())
+			}
+		})
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -1726,4 +1731,34 @@ func TestAutomaticProbeProgress_StartedBeforeProbeAndCancelReported(t *testing.T
 			t.Fatalf("events = %d; want started, three budget_exhausted, finished", n)
 		}
 	})
+}
+
+func TestAutomaticProbeBudget_PanicRefundsReservation(t *testing.T) {
+	prober := &capProbeFake{}
+	prober.setRun(func(_ context.Context, model string) (fingerprint.CapabilityProbeResult, error) {
+		if model == "probe-a" {
+			panic("prober exploded")
+		}
+		return toolsResult(fingerprint.CapProbeYes, 1), nil
+	})
+	mr, _ := newLogResolver(t, newEvidenceLog(t), prober, oneProv(t, infos("probe-a", "probe-b")...))
+	adm := newHoldAdmitter()
+	mr.setSlotAdmitter(adm)
+
+	recovered := func() (r any) {
+		defer func() { r = recover() }()
+		_, _ = mr.ResolveToolCall(t.Context(), localKey("probe-a"))
+		return nil
+	}()
+	if recovered == nil {
+		t.Fatal("the prober's panic did not reach the caller")
+	}
+	if n := adm.releaseCount(); n != 1 {
+		t.Fatalf("releases after the panic = %d; want exactly 1", n)
+	}
+	if n := allowanceOf(mr); n != automaticProbeAllowance {
+		t.Fatalf("allowance after the panic = %d; want the whole reservation back", n)
+	}
+	state, err := mr.ResolveToolCall(t.Context(), localKey("probe-b"))
+	wantState(t, "a different key after the panic", state, err, fingerprint.CapProbeYes)
 }

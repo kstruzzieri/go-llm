@@ -287,7 +287,9 @@ const (
 // ReservedRequests what it reserved from the allowance, RemainingRequests what
 // the allowance holds after the event. EndpointHost is host[:port] only; no
 // event carries a credential or an endpoint path. Native metadata checks report
-// nothing.
+// nothing. RemainingRequests is read when the allowance changes and emitted
+// after, so with concurrent checks on distinct keys events can arrive out of
+// that order.
 type CapabilityProbeProgress struct {
 	Key                       ModelKey
 	EndpointHost              string
@@ -449,8 +451,14 @@ func (r *ModelRegistry) resolveToolCallFromLog(ctx context.Context, key ModelKey
 		return state, err
 	}
 
-	// 7.
-	reserved := 0
+	// 7. If the probe panics, the deferred refund returns the whole reservation:
+	// nothing is known to have been sent.
+	reserved, refunded := 0, false
+	defer func() {
+		if reserved > 0 && !refunded {
+			r.refundAllowance(reserved)
+		}
+	}()
 	if generation {
 		remaining, ok := r.reserveAllowance(recipe.MaxRequests)
 		if !ok {
@@ -473,7 +481,7 @@ func (r *ModelRegistry) resolveToolCallFromLog(ctx context.Context, key ModelKey
 		if err != nil && ctx.Err() != nil {
 			event.Stage = probeStageCancelled
 		}
-		event.RemainingRequests = r.refundAllowance(reserved - sent)
+		event.RemainingRequests, refunded = r.refundAllowance(reserved-sent), true
 		r.emitProgress(event)
 	}
 	if err != nil {
@@ -524,6 +532,8 @@ func (r *ModelRegistry) toolCallFromLog(ctx context.Context, key ModelKey, bindi
 		}
 		return answer.State, true, nil
 	}
+	// An attempt with no ExpiresAt (ExpiryFor never writes one; another writer
+	// might) holds its cooldown indefinitely, as the explanation reads it.
 	if a := reading.Attempt; a != nil && (a.ExpiresAt.IsZero() || !view.now.After(a.ExpiresAt)) {
 		return fingerprint.CapProbeInconclusive, true, nil
 	}
@@ -531,7 +541,9 @@ func (r *ModelRegistry) toolCallFromLog(ctx context.Context, key ModelKey, bindi
 }
 
 // probeEvidenceRows builds one row per answer of a completed check, observed at
-// completedAt on the store's millisecond, and returns the tool_call state.
+// completedAt on the store's millisecond, and returns the tool_call state. A
+// result with no valid tool_call answer is an error: the requests it sent stay
+// spent, nothing is written and no cooldown starts.
 func probeEvidenceRows(key ModelKey, binding EvidenceBinding, digest string, recipe fingerprint.ProbeRecipe, result fingerprint.CapabilityProbeResult, completedAt time.Time) ([]fingerprint.EvidenceRow, fingerprint.CapProbeState, error) {
 	observedAt := storeMillis(completedAt)
 	var state fingerprint.CapProbeState
