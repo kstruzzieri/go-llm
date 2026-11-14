@@ -16,12 +16,21 @@ import (
 // benchToolCallArgs returns the argument text of one write-file-shaped tool
 // call, exactly n*fragSize bytes long, split into n fragments of fragSize
 // bytes. The text is a valid JSON object once every fragment has arrived
-// and a truncated one before that, which is the shape a model streams.
-func benchToolCallArgs(n, fragSize int) (string, []string) {
-	const prefix, suffix = `{"path":"a.go","content":"`, `"}`
+// and a truncated one before that, which is the shape a model streams. It
+// refuses sizes it cannot honour: too short to hold the object, or cutting
+// the content right after a backslash, which would escape the closing quote.
+func benchToolCallArgs(tb testing.TB, n, fragSize int) (string, []string) {
+	tb.Helper()
+	const prefix, suffix, unit = `{"path":"a.go","content":"`, `"}`, `lorem ipsum dolor sit amet\n`
 	total := n * fragSize
-	body := strings.Repeat(`lorem ipsum dolor sit amet\n`, total/27+1)
-	text := prefix + body[:total-len(prefix)-len(suffix)] + suffix
+	if total < len(prefix)+len(suffix) {
+		tb.Fatalf("benchToolCallArgs: %d bytes cannot hold the argument object", total)
+	}
+	body := strings.Repeat(unit, total/len(unit)+1)[:total-len(prefix)-len(suffix)]
+	if strings.HasSuffix(body, `\`) {
+		tb.Fatalf("benchToolCallArgs: %d bytes cuts the content after a backslash; pick another size", total)
+	}
+	text := prefix + body + suffix
 	frags := make([]string, n)
 	for i := range frags {
 		frags[i] = text[i*fragSize : (i+1)*fragSize]
@@ -60,7 +69,7 @@ var benchShapes = []struct{ fragSize, n int }{
 // linear assembly, growing with n under quadratic assembly.
 func BenchmarkStreamToolCallAccumulator(b *testing.B) {
 	for _, s := range benchShapes {
-		want, frags := benchToolCallArgs(s.n, s.fragSize)
+		want, frags := benchToolCallArgs(b, s.n, s.fragSize)
 		deltas := benchToolCallDeltas(b, frags)
 		b.Run(fmt.Sprintf("frag=%dB/n=%d", s.fragSize, s.n), func(b *testing.B) {
 			b.ReportAllocs()
@@ -84,7 +93,7 @@ func BenchmarkStreamToolCallAccumulator(b *testing.B) {
 // same input costs when nothing is redone per fragment.
 func BenchmarkToolCallAssemblyFloor(b *testing.B) {
 	for _, s := range benchShapes {
-		want, frags := benchToolCallArgs(s.n, s.fragSize)
+		want, frags := benchToolCallArgs(b, s.n, s.fragSize)
 		deltas := benchToolCallDeltas(b, frags)
 		b.Run(fmt.Sprintf("frag=%dB/n=%d", s.fragSize, s.n), func(b *testing.B) {
 			b.ReportAllocs()
@@ -110,7 +119,7 @@ func BenchmarkToolCallAssemblyFloor(b *testing.B) {
 // whole stream (HTTP, SSE framing, per-chunk JSON decode) is visible.
 func BenchmarkChatStreamToolCallFragments(b *testing.B) {
 	for _, s := range benchShapes {
-		want, frags := benchToolCallArgs(s.n, s.fragSize)
+		want, frags := benchToolCallArgs(b, s.n, s.fragSize)
 		var body bytes.Buffer
 		for _, d := range benchToolCallDeltas(b, frags) {
 			chunk, err := json.Marshal(chatChunk{Model: "m", Choices: []chatChunkChoice{{Delta: chatMessage{ToolCalls: d}}}})

@@ -110,7 +110,7 @@ func TestStreamToolCallAccumulator_AssembledArguments(t *testing.T) {
 // fragments carry none, so they must follow the open call.
 func TestStreamToolCallAccumulator_ManyFragments(t *testing.T) {
 	const n, fragSize = 2_000, 7
-	_, frags := benchToolCallArgs(n, fragSize)
+	_, frags := benchToolCallArgs(t, n, fragSize)
 	for _, mode := range []string{"envelope", "raw"} {
 		for _, kept := range []int{n, n - 3} {
 			t.Run(fmt.Sprintf("%s/kept=%d", mode, kept), func(t *testing.T) {
@@ -118,11 +118,12 @@ func TestStreamToolCallAccumulator_ManyFragments(t *testing.T) {
 				var sent strings.Builder
 				acc.Add([]chatToolCall{toolCallOpen(3)})
 				for _, f := range frags[:kept] {
+					// Whitespace at the edge of a raw fragment, or at the
+					// end of the assembled text, is trimmed. Keep it out so
+					// the expectation is simply what was sent.
+					f = strings.ReplaceAll(f, " ", "_")
 					wire := envelope(t, f)
 					if mode == "raw" {
-						// Raw fragments are trimmed one by one, so keep
-						// whitespace out of them.
-						f = strings.ReplaceAll(f, " ", "_")
 						wire = f
 					}
 					sent.WriteString(f)
@@ -161,7 +162,7 @@ func TestStreamToolCallAccumulator_SnapshotOwnsItsBytes(t *testing.T) {
 // at this fragment count, and more as the count grows.
 func TestStreamToolCallAccumulator_AllocatedBytesStayLinear(t *testing.T) {
 	const n, fragSize, maxFactor = 1_000, 105, 100
-	text, frags := benchToolCallArgs(n, fragSize)
+	text, frags := benchToolCallArgs(t, n, fragSize)
 	deltas := benchToolCallDeltas(t, frags)
 
 	// TotalAlloc counts the whole process, so take the lowest of a few runs.
@@ -213,7 +214,7 @@ func streamChunks(t *testing.T, chunks []chatChunk, tail string) *httptest.Serve
 // the Done chunk carries exactly the text that was sent, and that no earlier
 // chunk carries tool calls.
 func TestProvider_ChatStream_ManyFragmentToolCall_AssembledOnDone(t *testing.T) {
-	text, frags := benchToolCallArgs(2_000, 7)
+	text, frags := benchToolCallArgs(t, 2_000, 7)
 	chunks := make([]chatChunk, 0, len(frags)+2)
 	chunks = append(chunks, toolChunk(toolCallOpen(0)))
 	for _, f := range frags {
