@@ -3,11 +3,17 @@ package fingerprint
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/kstruzzieri/go-llm/internal/responsebound"
 	"github.com/kstruzzieri/go-llm/ollama"
 )
 
@@ -438,5 +444,195 @@ func TestOllamaProbeToolCall_ShowError(t *testing.T) {
 	}
 	if out != (CapProbeOutcome{}) {
 		t.Errorf("outcome = %+v, want zero value", out)
+	}
+}
+
+// showStub serves /api/show with body and counts the requests it receives.
+type showStub struct {
+	srv  *httptest.Server
+	hits atomic.Int64
+}
+
+func newShowStub(t *testing.T, handler func(w http.ResponseWriter, r *http.Request)) (*OllamaProber, *showStub) {
+	t.Helper()
+	s := &showStub{}
+	s.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		s.hits.Add(1)
+		// Drain the request so the server notices when the client goes away.
+		_, _ = io.Copy(io.Discard, r.Body)
+		handler(w, r)
+	}))
+	t.Cleanup(s.srv.Close)
+	return NewProber(ollama.NewClient(ollama.WithBaseURL(s.srv.URL))), s
+}
+
+func showJSON(body map[string]any) func(http.ResponseWriter, *http.Request) {
+	return func(w http.ResponseWriter, _ *http.Request) { _ = json.NewEncoder(w).Encode(body) }
+}
+
+func showRecipe(t *testing.T) ProbeRecipe {
+	t.Helper()
+	recipe, ok := RecipeFor(MethodOllamaShow)
+	if !ok {
+		t.Fatal("no ollama-show recipe")
+	}
+	return recipe
+}
+
+func providerAnswer(capability string, state CapProbeState) ProbeAnswer {
+	if state == CapProbeInconclusive {
+		return ProbeAnswer{Capability: capability, Source: EvidenceSourceProvider, Kind: EvidenceKindAttempt, State: state, TTL: CapProbeInconclusiveTTL}
+	}
+	return ProbeAnswer{Capability: capability, Source: EvidenceSourceProvider, Kind: EvidenceKindAnswer, State: state}
+}
+
+func TestOllamaBoundedRequest_ResponseLimit(t *testing.T) {
+	recipe := showRecipe(t)
+	huge := strings.Repeat("x", int(recipe.MaxResponseBytes))
+	prober, stub := newShowStub(t, showJSON(map[string]any{"capabilities": []string{"completion"}, "template": huge}))
+	res, err := prober.ProbeCapabilities(context.Background(), "m", CapabilityProbeRequest{Method: MethodOllamaShow, Capabilities: []string{"chat"}})
+	if !errors.Is(err, responsebound.ErrExceeded) {
+		t.Fatalf("err = %v, want ErrExceeded", err)
+	}
+	if len(res.Answers) != 0 {
+		t.Errorf("answers = %+v, want none", res.Answers)
+	}
+	if res.Requests != 1 || stub.hits.Load() != 1 {
+		t.Errorf("Requests = %d, stub saw %d, want 1 and 1", res.Requests, stub.hits.Load())
+	}
+}
+
+func TestOllamaProbeCapabilities_AllMetadataAndMissingFields(t *testing.T) {
+	recipe := showRecipe(t)
+	capabilities := []string{"completion", "tools", "thinking"}
+	template := "{{ .Prompt }}{{ .Suffix }}"
+	prober, stub := newShowStub(t, showJSON(map[string]any{"capabilities": capabilities, "template": template}))
+
+	res, err := prober.ProbeCapabilities(context.Background(), "m", CapabilityProbeRequest{Method: MethodOllamaShow, Capabilities: recipe.Capabilities})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Method != MethodOllamaShow || res.Requests != 1 || stub.hits.Load() != 1 {
+		t.Fatalf("Method %q, Requests %d, stub saw %d; want %q, 1, 1", res.Method, res.Requests, stub.hits.Load(), MethodOllamaShow)
+	}
+	facts := OllamaCapabilityFacts(capabilities, template)
+	want := []ProbeAnswer{
+		providerAnswer("chat", CapProbeYes), providerAnswer("generate", CapProbeYes),
+		providerAnswer("insert", CapProbeYes), providerAnswer("embed", CapProbeInconclusive),
+		providerAnswer("stream", CapProbeYes), providerAnswer("tool_call", CapProbeYes),
+		providerAnswer("thinking", CapProbeYes),
+	}
+	got := map[string]ProbeAnswer{}
+	for _, a := range res.Answers {
+		if _, dup := got[a.Capability]; dup {
+			t.Errorf("capability %q answered twice", a.Capability)
+		}
+		got[a.Capability] = a
+		if state, ok := facts[a.Capability]; ok && a.State != state {
+			t.Errorf("%s = %s, the listing mapping says %s", a.Capability, a.State, state)
+		}
+	}
+	if len(got) != len(want) {
+		t.Errorf("answers = %+v, want %+v", res.Answers, want)
+	}
+	for _, w := range want {
+		if got[w.Capability] != w {
+			t.Errorf("%s = %+v, want %+v", w.Capability, got[w.Capability], w)
+		}
+	}
+
+	// Only the facts reported, plus the requested capabilities with no fact.
+	prober, _ = newShowStub(t, showJSON(map[string]any{"capabilities": []string{"embedding"}}))
+	res, err = prober.ProbeCapabilities(context.Background(), "m", CapabilityProbeRequest{Method: MethodOllamaShow, Capabilities: []string{"chat"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantSmall := []ProbeAnswer{providerAnswer("chat", CapProbeInconclusive), providerAnswer("embed", CapProbeYes), providerAnswer("tool_call", CapProbeNo)}
+	if !slices.Equal(res.Answers, wantSmall) {
+		t.Errorf("answers = %+v, want %+v", res.Answers, wantSmall)
+	}
+}
+
+func TestOllamaProbeCapabilities_TimeoutAndRedirect(t *testing.T) {
+	req := CapabilityProbeRequest{Method: MethodOllamaShow, Capabilities: []string{"tool_call"}}
+	t.Run("timeout", func(t *testing.T) {
+		prober, stub := newShowStub(t, func(w http.ResponseWriter, r *http.Request) {
+			select {
+			case <-r.Context().Done():
+			case <-time.After(5 * time.Second):
+			}
+		})
+		prober.requestTimeout = 100 * time.Millisecond
+		start := time.Now()
+		res, err := prober.ProbeCapabilities(context.Background(), "m", req)
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("err = %v, want a deadline", err)
+		}
+		if time.Since(start) > 2*time.Second {
+			t.Errorf("took %v; the overridden timeout did not apply", time.Since(start))
+		}
+		if len(res.Answers) != 0 || res.Requests != 1 || stub.hits.Load() != 1 {
+			t.Errorf("answers %+v, Requests %d, stub saw %d; want none, 1, 1", res.Answers, res.Requests, stub.hits.Load())
+		}
+	})
+	t.Run("redirect", func(t *testing.T) {
+		_, target := newShowStub(t, showJSON(map[string]any{"capabilities": []string{"tools"}}))
+		prober, origin := newShowStub(t, func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, target.srv.URL+r.URL.Path, http.StatusTemporaryRedirect)
+		})
+		res, err := prober.ProbeCapabilities(context.Background(), "m", req)
+		if err == nil {
+			t.Fatal("a redirect was followed")
+		}
+		if len(res.Answers) != 0 || res.Requests != 1 || origin.hits.Load() != 1 || target.hits.Load() != 0 {
+			t.Errorf("answers %+v, Requests %d, origin %d, target %d; want none, 1, 1, 0", res.Answers, res.Requests, origin.hits.Load(), target.hits.Load())
+		}
+	})
+}
+
+func TestOllamaProbe_CapabilitiesArrayCases(t *testing.T) {
+	tests := []struct {
+		name string
+		body map[string]any
+		want CapProbeState
+	}{
+		{"empty array", map[string]any{"capabilities": []string{}}, CapProbeNo},
+		{"missing array", map[string]any{"details": map[string]any{"family": "llama"}}, CapProbeInconclusive},
+		{"template only", map[string]any{"template": "{{ .Prompt }}{{ .Suffix }}"}, CapProbeInconclusive},
+		{"Tools", map[string]any{"capabilities": []string{"completion", "Tools"}}, CapProbeYes},
+		{"tool_call", map[string]any{"capabilities": []string{"tool_call"}}, CapProbeYes},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name+" ProbeToolCall", func(t *testing.T) {
+			prober, _ := newShowStub(t, showJSON(tt.body))
+			out, err := prober.ProbeToolCall(context.Background(), "m")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if out.State != tt.want {
+				t.Errorf("State = %q, want %q", out.State, tt.want)
+			}
+			wantTTL := time.Duration(0)
+			if tt.want == CapProbeInconclusive {
+				wantTTL = CapProbeInconclusiveTTL
+			}
+			if out.TTL != wantTTL {
+				t.Errorf("TTL = %v, want %v", out.TTL, wantTTL)
+			}
+		})
+		t.Run(tt.name+" ProbeCapabilities", func(t *testing.T) {
+			prober, _ := newShowStub(t, showJSON(tt.body))
+			res, err := prober.ProbeCapabilities(context.Background(), "m", CapabilityProbeRequest{Method: MethodOllamaShow, Capabilities: []string{"tool_call"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			i := slices.IndexFunc(res.Answers, func(a ProbeAnswer) bool { return a.Capability == "tool_call" })
+			if i < 0 {
+				t.Fatalf("no tool_call answer in %+v", res.Answers)
+			}
+			if want := providerAnswer("tool_call", tt.want); res.Answers[i] != want {
+				t.Errorf("tool_call = %+v, want %+v", res.Answers[i], want)
+			}
+		})
 	}
 }

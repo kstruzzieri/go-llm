@@ -31,6 +31,14 @@ type OpenAICompatProber struct {
 	prov         *openaicompat.Provider
 	capabilities []string
 	onUsage      func(model string, u provider.Usage)
+
+	// streamChat sends each ProbeCapabilities request; nil means
+	// prov.ChatStream. Tests in this package replace it to count and pause
+	// requests; prov is concrete and cannot be wrapped.
+	streamChat func(ctx context.Context, req provider.ChatRequest, fn func(provider.ChatResponse) error) error
+	// requestTimeout replaces the recipe's per-request timeout in tests; zero
+	// uses the recipe's.
+	requestTimeout time.Duration
 }
 
 // OpenAICompatProberOption configures an OpenAICompatProber.
