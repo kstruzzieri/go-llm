@@ -99,6 +99,10 @@ type replSession struct {
 	retrieveOmitted bool // when true, /tools appends the omission note
 
 	session *session // nil => --no-session (no history, no persistence)
+	// strictApproval is -strict-approval (#584), the value the runtime was
+	// built with. /grants, /tools and /auto-edits read the active
+	// conversation's exposure record only when it is set and a session exists.
+	strictApproval bool
 
 	memory       *memory.SQLiteStore // nil => memory disabled (-no-memory or open failed)
 	memoryDBPath string              // used to re-secure SQLite sidecars after writes
@@ -388,6 +392,7 @@ func runOnceWithRecipeHint(ctx context.Context, out io.Writer, interrupts <-chan
 		ap := newReplApprover(src, renderOut, sess.color)
 		ap.beforeWrite = rend.breakLine
 		ap.grants = sess.grants
+		ap.hostCommands = !nativeSandbox(sess.sandbox)
 		approver = ap
 	}
 
@@ -849,7 +854,8 @@ func dispatchSlash(ctx context.Context, out io.Writer, sess *replSession, line s
 			_, _ = fmt.Fprintln(out, "retrieve omitted: no RAG index configured")
 		}
 		if sess.allowWrite {
-			_, _ = fmt.Fprintf(out, "auto-edits: %s\n", autoEditState(sess))
+			_, suspended := strictExposure(ctx, sess)
+			_, _ = fmt.Fprintln(out, autoEditLine(sess, suspended))
 		}
 	case "/auto-edits":
 		if !sess.allowWrite {
@@ -861,10 +867,12 @@ func dispatchSlash(ctx context.Context, out io.Writer, sess *replSession, line s
 		}
 		switch {
 		case len(fields) == 1:
-			_, _ = fmt.Fprintf(out, "auto-edits: %s\n", autoEditState(sess))
+			_, suspended := strictExposure(ctx, sess)
+			_, _ = fmt.Fprintln(out, autoEditLine(sess, suspended))
 		case len(fields) == 2 && fields[1] == "on":
 			sess.grants.grant(grantScopeFiles, tools.WriteClassApprovalKey)
-			_, _ = fmt.Fprintln(out, "auto-edits: on")
+			_, suspended := strictExposure(ctx, sess)
+			_, _ = fmt.Fprintln(out, autoEditLine(sess, suspended))
 		case len(fields) == 2 && fields[1] == "off":
 			sess.grants.revoke(grantScopeFiles, tools.WriteClassApprovalKey)
 			_, _ = fmt.Fprintln(out, "auto-edits: off")
@@ -878,8 +886,12 @@ func dispatchSlash(ctx context.Context, out io.Writer, sess *replSession, line s
 		switch {
 		case len(fields) == 1:
 			_, _ = fmt.Fprintf(out, "session grants: %d\n", sess.grants.count())
+			exposure, suspended := strictExposure(ctx, sess)
+			if exposure != "" {
+				_, _ = fmt.Fprintln(out, exposure)
+			}
 			if sess.allowWrite {
-				_, _ = fmt.Fprintf(out, "auto-edits: %s\n", autoEditState(sess))
+				_, _ = fmt.Fprintln(out, autoEditLine(sess, suspended))
 			}
 			if sess.destAdmission != nil {
 				sess.destAdmission.render(out)
@@ -1065,6 +1077,48 @@ func autoEditState(sess *replSession) string {
 		return "on"
 	}
 	return "off"
+}
+
+// autoEditLine renders autoEditState for output. Under -strict-approval an
+// "on" grant that the conversation's exposure suspends says so (#584): the
+// toggle must never lie.
+func autoEditLine(sess *replSession, suspended bool) string {
+	state := autoEditState(sess)
+	if state == "on" && suspended {
+		state += " (suspended: this conversation is exposed)"
+	}
+	return "auto-edits: " + state
+}
+
+// strictExposure is the -strict-approval view of the active conversation
+// (#584): the /grants exposure line and whether reusable approvals are
+// suspended in it. Strict off returns "" and false; without a session each
+// turn starts clean. Neither reads the record. An unreadable record shows as
+// unknown, never as its error, and counts as suspended; a turn whose thread
+// fails to load aborts anyway.
+func strictExposure(ctx context.Context, sess *replSession) (line string, suspended bool) {
+	switch {
+	case !sess.strictApproval:
+		return "", false
+	case sess.session == nil:
+		return "exposure: clean (--no-session: each turn starts fresh)", false
+	}
+	exp, err := sess.runtime.ThreadExposure(ctx, sess.session.id)
+	switch {
+	case err != nil:
+		return "exposure: unknown (could not read the record)", true
+	case !exp.Exposed():
+		return "exposure: clean", false
+	}
+	foreign, label := exposureSource(exp)
+	line = "exposure: unknown"
+	if foreign {
+		line = "exposure: foreign"
+	}
+	if label != "" {
+		line += " (" + label + ")"
+	}
+	return line, true
 }
 
 const golemHelp = `commands:

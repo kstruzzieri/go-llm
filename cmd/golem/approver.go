@@ -10,6 +10,7 @@ import (
 	"github.com/kstruzzieri/go-llm/agent"
 	"github.com/kstruzzieri/go-llm/agent/interceptor"
 	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
+	"github.com/kstruzzieri/go-llm/conversation"
 	"github.com/kstruzzieri/go-llm/internal/promptfence"
 	"github.com/kstruzzieri/go-llm/provider"
 )
@@ -26,12 +27,17 @@ type replApprover struct {
 	// grants is the session grant store (#341). nil disables the grant path
 	// entirely (the Agentflow author's plan-lock approver stays per-invocation).
 	grants *approvalGrants
+	// hostCommands reports that the session's commands run on the host, so a
+	// fresh prompt for a command, background start or verifier says the
+	// network is not confined (#584).
+	hostCommands bool
 }
 
-// Compile-time assertions: replApprover must satisfy all three approver contracts.
+// Compile-time assertions: replApprover must satisfy all four approver contracts.
 var _ agent.Approver = (*replApprover)(nil)
 var _ agent.KeyedApprover = (*replApprover)(nil)
 var _ agent.RiskApprover = (*replApprover)(nil)
+var _ agent.FreshApprover = (*replApprover)(nil)
 
 func newReplApprover(src lineSource, out io.Writer, color bool) *replApprover {
 	return &replApprover{src: src, out: out, color: color}
@@ -50,10 +56,10 @@ func (a *replApprover) ApproveKeyed(ctx context.Context, call provider.ToolCall,
 	return a.ApproveWithRisk(ctx, call, preview, key, agent.RiskReport{})
 }
 
-// ApproveWithRisk is the one prompt body (#514 D3). It shows the preview and
-// reads one line. "y"/"yes" (case-insensitive) approves. "n", empty, and EOF
-// deny with a nil error. A canceled context (Ctrl-C) denies and returns the
-// context error so the run aborts.
+// ApproveWithRisk is the ordinary entry to ask, the one prompt body (#514
+// D3). It shows the preview and reads one line. "y"/"yes" (case-insensitive)
+// approves. "n", empty, and EOF deny with a nil error. A canceled context
+// (Ctrl-C) denies and returns the context error so the run aborts.
 // The prompt and rendering are action-neutral: run_command and MCP calls get a
 // plain preview and run prompt; all other calls get the diff rendering and "Apply
 // this change?" prompt.
@@ -70,10 +76,73 @@ func (a *replApprover) ApproveKeyed(ctx context.Context, call provider.ToolCall,
 // demand for a human (#725): a harness target or a spelling the tool could
 // not verify. It prompts [y/N] with a notice line after the diff.
 func (a *replApprover) ApproveWithRisk(ctx context.Context, call provider.ToolCall, preview, key string, risk agent.RiskReport) (agent.ApprovalDecision, error) {
+	return a.ask(ctx, call, preview, key, risk, harnessFileCall(call.Function.Name, key), nil)
+}
+
+// ApproveFresh is the agent.FreshApprover entry (#584): a strict run whose
+// conversation is exposed asks here about this one call. It prints the
+// suspension notice, and on the host runtime "network is not confined" for a
+// command, background start or verifier, then runs the one prompt body with
+// the empty key, so no grant is looked up or stored, the question is [y/N]
+// and "a" denies. keyed decides only the #725 harness notice: a file-tool
+// call that planned without a key keeps it, by the same conservative rule as
+// harnessFileCall.
+func (a *replApprover) ApproveFresh(ctx context.Context, call provider.ToolCall, preview string, keyed bool, risk agent.RiskReport, exposure agent.Exposure) (bool, error) {
+	notice := []string{suspendedNotice(exposure)}
+	switch call.Function.Name {
+	case "run_command", "start_command", verifyToolName:
+		if a.hostCommands {
+			notice = append(notice, "network is not confined")
+		}
+	}
+	harness := grantScope(call.Function.Name) == grantScopeFiles && !keyed
+	d, err := a.ask(ctx, call, preview, "", risk, harness, notice)
+	return d.Approved, err
+}
+
+// suspendedNotice is the line a fresh prompt opens with (#584).
+func suspendedNotice(e agent.Exposure) string {
+	foreign, label := exposureSource(e)
+	why := "this conversation's provenance is unknown"
+	if foreign {
+		why = "outside content entered this conversation"
+	}
+	if label != "" {
+		why += " (" + label + ")"
+	}
+	return "reusable approvals suspended: " + why + "; /new or /clear starts fresh"
+}
+
+// exposureSource reads an exposed record for the strict notice and /grants
+// (#584): whether outside content entered it, and a label naming the first
+// exposing source. The label is First, bounded, without its "tool:" prefix
+// and made one inert line as riskLine makes its badge, because an MCP tool
+// name comes from the server. A missing record reads as unknown "history",
+// as the agent reads it, and so does an unknown one with no First; a foreign
+// one with no First has no label.
+func exposureSource(e agent.Exposure) (foreign bool, label string) {
+	if !e.Recorded {
+		return false, "history"
+	}
+	label = strings.TrimPrefix(conversation.BoundExposureFirst(e.First), "tool:")
+	label = sanitizeApprovalPreview(promptfence.FlattenLine(label))
+	if label == "" && !e.Foreign {
+		label = "history"
+	}
+	return e.Foreign, label
+}
+
+// ask is the one prompt body behind ApproveWithRisk and ApproveFresh. notice
+// lines print after beforeWrite and before the preview; harness adds the #725
+// notice after a diff.
+func (a *replApprover) ask(ctx context.Context, call provider.ToolCall, preview, key string, risk agent.RiskReport, harness bool, notice []string) (agent.ApprovalDecision, error) {
 	if a.beforeWrite != nil {
 		if err := a.beforeWrite(); err != nil {
 			return agent.ApprovalDecision{}, err
 		}
+	}
+	for _, line := range notice {
+		_, _ = fmt.Fprintln(a.out, line)
 	}
 	isExec := call.Function.Name == "run_command"
 	isStart := call.Function.Name == "start_command"
@@ -117,7 +186,7 @@ func (a *replApprover) ApproveWithRisk(ctx context.Context, call provider.ToolCa
 		a.renderDiff(preview)
 		// #725: an empty file-tool key marks a harness file. grantable is
 		// already false, so the prompt is [y/N]; the notice says why.
-		if harnessFileCall(call.Function.Name, key) {
+		if harness {
 			_, _ = fmt.Fprintln(a.out, "harness file: "+agenttools.HarnessApprovalNotice)
 		}
 		// The legend spells out the asymmetry: an exec grant covers one exact
