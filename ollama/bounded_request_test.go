@@ -5,16 +5,15 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync/atomic"
 	"syscall"
 	"testing"
-	"time"
 
 	"github.com/kstruzzieri/go-llm/fingerprint"
+	"github.com/kstruzzieri/go-llm/internal/brokenbody"
 	"github.com/kstruzzieri/go-llm/internal/responsebound"
 	"github.com/kstruzzieri/go-llm/ollama"
 	"github.com/kstruzzieri/go-llm/provider"
@@ -31,28 +30,9 @@ func boundedCtx(t *testing.T) context.Context {
 	return responsebound.WithLimit(context.Background(), recipe.MaxResponseBytes)
 }
 
-func show(ctx context.Context, url string) error {
-	_, err := ollama.NewClient(ollama.WithBaseURL(url)).ShowModel(ctx, "m")
+func show(ctx context.Context, url string, opts ...ollama.Option) error {
+	_, err := ollama.NewClient(append([]ollama.Option{ollama.WithBaseURL(url)}, opts...)...).ShowModel(ctx, "m")
 	return err
-}
-
-// writeBrokenBody sends status with a Content-Length the body never reaches,
-// then either closes the connection (a short body) or resets it.
-func writeBrokenBody(t *testing.T, w http.ResponseWriter, status int, reset bool) {
-	t.Helper()
-	conn, buf, err := w.(http.Hijacker).Hijack()
-	if err != nil {
-		t.Errorf("hijack: %v", err)
-		return
-	}
-	_, _ = fmt.Fprintf(buf, "HTTP/1.1 %d %s\r\nContent-Type: application/json\r\nContent-Length: 4096\r\n\r\n{\"error\":\"cut", status, http.StatusText(status))
-	_ = buf.Flush()
-	if reset {
-		// Let the client take the headers before the reset discards unread data.
-		time.Sleep(100 * time.Millisecond)
-		_ = conn.(*net.TCPConn).SetLinger(0)
-	}
-	_ = conn.Close()
 }
 
 func statusOf(err error) (int, bool) {
@@ -115,11 +95,14 @@ func TestOllamaBoundedRequest_ErrorBodyReadFailureKeepsStatusAndCause(t *testing
 			{"reset", true, syscall.ECONNRESET},
 		} {
 			t.Run(fmt.Sprintf("%d %s", status, mode.name), func(t *testing.T) {
+				fixture := brokenbody.New()
 				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					writeBrokenBody(t, w, status, mode.reset)
+					if err := fixture.Write(w, status, mode.reset); err != nil {
+						t.Error(err)
+					}
 				}))
 				defer srv.Close()
-				err := show(boundedCtx(t), srv.URL)
+				err := show(boundedCtx(t), srv.URL, ollama.WithHTTPClient(fixture.Client()))
 				var rre *responsebound.RejectionReadError
 				if !errors.As(err, &rre) {
 					t.Fatalf("err = %v (%T), want a *RejectionReadError", err, err)
@@ -175,8 +158,11 @@ func TestOllamaOrdinaryRequest_Unchanged(t *testing.T) {
 	for _, status := range []int{400, 429, 500} {
 		for _, reset := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%d reset=%v", status, reset), func(t *testing.T) {
+				fixture := brokenbody.New()
 				broken := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					writeBrokenBody(t, w, status, reset)
+					if err := fixture.Write(w, status, reset); err != nil {
+						t.Error(err)
+					}
 				}))
 				defer broken.Close()
 				clean := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -185,7 +171,7 @@ func TestOllamaOrdinaryRequest_Unchanged(t *testing.T) {
 				}))
 				defer clean.Close()
 
-				brokenErr := show(context.Background(), broken.URL)
+				brokenErr := show(context.Background(), broken.URL, ollama.WithHTTPClient(fixture.Client()))
 				cleanErr := show(context.Background(), clean.URL)
 				var apiErr *ollama.APIError
 				if !errors.As(brokenErr, &apiErr) || apiErr.StatusCode != status {

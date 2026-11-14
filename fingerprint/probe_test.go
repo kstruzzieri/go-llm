@@ -556,13 +556,10 @@ func TestOllamaProbeCapabilities_AllMetadataAndMissingFields(t *testing.T) {
 func TestOllamaProbeCapabilities_TimeoutAndRedirect(t *testing.T) {
 	req := CapabilityProbeRequest{Method: MethodOllamaShow, Capabilities: []string{"tool_call"}}
 	t.Run("timeout", func(t *testing.T) {
-		prober, stub := newShowStub(t, func(w http.ResponseWriter, r *http.Request) {
-			select {
-			case <-r.Context().Done():
-			case <-time.After(5 * time.Second):
-			}
+		prober, stub := newShowStub(t, func(_ http.ResponseWriter, r *http.Request) {
+			<-r.Context().Done() // stalls until the client gives up
 		})
-		prober.requestTimeout = 100 * time.Millisecond
+		prober.requestTimeout = 500 * time.Millisecond
 		start := time.Now()
 		res, err := prober.ProbeCapabilities(context.Background(), "m", req)
 		if !errors.Is(err, context.DeadlineExceeded) {

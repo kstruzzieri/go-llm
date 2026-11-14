@@ -16,9 +16,11 @@ import (
 	"sync/atomic"
 	"syscall"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/kstruzzieri/go-llm/fingerprint"
+	"github.com/kstruzzieri/go-llm/internal/brokenbody"
 	"github.com/kstruzzieri/go-llm/internal/responsebound"
 	"github.com/kstruzzieri/go-llm/ollama"
 	"github.com/kstruzzieri/go-llm/provider"
@@ -530,7 +532,7 @@ func TestChatStreamTools_EndlessStreamEndsAtTimeout(t *testing.T) {
 		}
 	})
 	p := newStreamProber(stub.srv.URL)
-	p.requestTimeout = 200 * time.Millisecond
+	p.requestTimeout = stallTimeout
 	start := time.Now()
 	res, err := probeTools(p)
 	assertFailed(t, res, err, stub, 1)
@@ -1046,26 +1048,8 @@ func TestChatStream_NoToolsMaxTokensOne(t *testing.T) {
 // Errors after the headers
 // ---------------------------------------------------------------------------
 
-// writeBrokenBody sends status with a Content-Length the body never reaches,
-// then closes the connection (a short body) or resets it.
-func writeBrokenBody(t *testing.T, w http.ResponseWriter, status int, reset bool) {
-	t.Helper()
-	conn, buf, err := w.(http.Hijacker).Hijack()
-	if err != nil {
-		t.Errorf("hijack: %v", err)
-		return
-	}
-	_, _ = fmt.Fprintf(buf, "HTTP/1.1 %d %s\r\nContent-Type: application/json\r\nContent-Length: 4096\r\n\r\n{\"error\":{\"message\":\"cut", status, http.StatusText(status))
-	_ = buf.Flush()
-	if reset {
-		// Let the client take the headers before the reset discards unread data.
-		time.Sleep(100 * time.Millisecond)
-		_ = conn.(*net.TCPConn).SetLinger(0)
-	}
-	_ = conn.Close()
-}
-
-// stallBody sends status and part of a body, then waits for the client to go.
+// stallBody sends status and part of a body, then stalls until the request's
+// context ends: the stall never ends before the client gives up.
 func stallBody(status int, started chan<- struct{}) step {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -1076,30 +1060,39 @@ func stallBody(status int, started chan<- struct{}) step {
 		if started != nil {
 			close(started)
 		}
-		select {
-		case <-r.Context().Done():
-		case <-time.After(5 * time.Second):
-		}
+		<-r.Context().Done()
 	}
 }
 
+// stallTimeout is the timeout of the tests that stall a reply: long enough
+// that everything before the stall finishes well inside it.
+const stallTimeout = 500 * time.Millisecond
+
 func TestChatStreamTools_RejectionBodyUnreadableSavesNothing(t *testing.T) {
 	for _, status := range []int{400, 422} {
+		// Each case builds its stub's step and the prober for the stub's URL.
 		cases := []struct {
 			name  string
-			step  step
-			setup func(url string) *OpenAICompatProber
+			setup func(t *testing.T) (step, func(url string) *OpenAICompatProber)
 			cause error
 		}{
-			{"reset", func(w http.ResponseWriter, _ *http.Request) { writeBrokenBody(t, w, status, true) }, nil, syscall.ECONNRESET},
-			{"short body", func(w http.ResponseWriter, _ *http.Request) { writeBrokenBody(t, w, status, false) }, nil, io.ErrUnexpectedEOF},
-			{"stall past the recipe deadline", stallBody(status, nil), func(url string) *OpenAICompatProber {
-				p := newStreamProber(url)
-				p.requestTimeout = 200 * time.Millisecond
-				return p
+			{"reset", func(t *testing.T) (step, func(string) *OpenAICompatProber) {
+				return brokenStep(t, status, true)
+			}, syscall.ECONNRESET},
+			{"short body", func(t *testing.T) (step, func(string) *OpenAICompatProber) {
+				return brokenStep(t, status, false)
+			}, io.ErrUnexpectedEOF},
+			{"stall past the recipe deadline", func(*testing.T) (step, func(string) *OpenAICompatProber) {
+				return stallBody(status, nil), func(url string) *OpenAICompatProber {
+					p := newStreamProber(url)
+					p.requestTimeout = stallTimeout
+					return p
+				}
 			}, context.DeadlineExceeded},
-			{"stall past a shorter client timeout", stallBody(status, nil), func(url string) *OpenAICompatProber {
-				return newStreamProber(url, openaicompat.WithHTTPClient(&http.Client{Timeout: 200 * time.Millisecond}))
+			{"stall past a shorter client timeout", func(*testing.T) (step, func(string) *OpenAICompatProber) {
+				return stallBody(status, nil), func(url string) *OpenAICompatProber {
+					return newStreamProber(url, openaicompat.WithHTTPClient(&http.Client{Timeout: stallTimeout}))
+				}
 			}, nil},
 		}
 		t.Run(fmt.Sprintf("%d unreadable before a status rule, whatever its cause carries", status), func(t *testing.T) {
@@ -1119,12 +1112,10 @@ func TestChatStreamTools_RejectionBodyUnreadableSavesNothing(t *testing.T) {
 		})
 		for _, tc := range cases {
 			t.Run(fmt.Sprintf("%d %s", status, tc.name), func(t *testing.T) {
-				stub := newProbeStub(t, tc.step)
-				p := newStreamProber(stub.srv.URL)
-				if tc.setup != nil {
-					p = tc.setup(stub.srv.URL)
-				}
-				res, err := probeTools(p)
+				t.Parallel() // the stalls wait out their timeouts side by side
+				st, build := tc.setup(t)
+				stub := newProbeStub(t, st)
+				res, err := probeTools(build(stub.srv.URL))
 				assertFailed(t, res, err, stub, 1)
 				var rre *responsebound.RejectionReadError
 				if !errors.As(err, &rre) || rre.StatusCode != status {
@@ -1139,6 +1130,19 @@ func TestChatStreamTools_RejectionBodyUnreadableSavesNothing(t *testing.T) {
 			})
 		}
 	}
+}
+
+// brokenStep is a step that sends status and a body cut short, closed or
+// reset, with a prober whose client lets the reset wait for the headers.
+func brokenStep(t *testing.T, status int, reset bool) (step, func(string) *OpenAICompatProber) {
+	fixture := brokenbody.New()
+	return func(w http.ResponseWriter, _ *http.Request) {
+			if err := fixture.Write(w, status, reset); err != nil {
+				t.Error(err)
+			}
+		}, func(url string) *OpenAICompatProber {
+			return newStreamProber(url, openaicompat.WithHTTPClient(fixture.Client()))
+		}
 }
 
 func TestChatStreamTools_RejectionWithEmptyOrCappedBodyGoesOn(t *testing.T) {
@@ -1260,31 +1264,42 @@ func TestChatStreamTools_OtherStatusesFail(t *testing.T) {
 	}
 }
 
+// TestChatStreamTools_EachRequestHasItsOwnTimeout runs on the request seam in
+// a synctest bubble, so the delays are simulated time: each request takes 70%
+// of the timeout, which fits each request's own timeout but not one shared by
+// both.
 func TestChatStreamTools_EachRequestHasItsOwnTimeout(t *testing.T) {
-	const timeout = 400 * time.Millisecond
-	delay := timeout * 7 / 10
-	slow := func(s step) step {
-		return func(w http.ResponseWriter, r *http.Request) {
-			time.Sleep(delay)
-			s(w, r)
+	synctest.Test(t, func(t *testing.T) {
+		const timeout = 400 * time.Millisecond
+		delay := timeout * 7 / 10
+		p := newStreamProber("http://127.0.0.1:1")
+		p.requestTimeout = timeout
+		var calls atomic.Int64
+		p.streamChat = func(ctx context.Context, _ provider.ChatRequest, fn func(provider.ChatResponse) error) error {
+			n := calls.Add(1)
+			select {
+			case <-time.After(delay):
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+			if n == 1 {
+				return statusCause{http.StatusBadRequest}
+			}
+			return fn(provider.ChatResponse{Done: true, FinishReason: "tool_calls", Usage: testUsage, ToolCalls: []provider.ToolCall{{
+				ID: "call_1", Type: "function", Function: provider.ToolCallFunction{Name: toolName, Arguments: json.RawMessage(`{}`)},
+			}}})
 		}
-	}
-	stub := newProbeStub(t, slow(statusStep(400)), slow(sseStep(calledReply)))
-	p := newStreamProber(stub.srv.URL)
-	p.requestTimeout = timeout
-	res, err := probeTools(p)
-	assertResult(t, res, err, stub, 2, proven(toolCalled()))
+		res, err := probeTools(p)
+		assertResult(t, res, err, nil, 2, proven(toolCalled()))
+	})
 }
 
 func TestChatStreamTools_TimeoutBeforeHeaders(t *testing.T) {
-	stub := newProbeStub(t, func(w http.ResponseWriter, r *http.Request) {
-		select {
-		case <-r.Context().Done():
-		case <-time.After(5 * time.Second):
-		}
+	stub := newProbeStub(t, func(_ http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done() // stalls until the client gives up
 	})
 	p := newStreamProber(stub.srv.URL, openaicompat.WithAPIKey(testKey))
-	p.requestTimeout = 150 * time.Millisecond
+	p.requestTimeout = stallTimeout
 	res, err := probeTools(p)
 	assertFailed(t, res, err, stub, 1)
 	if !errors.Is(err, context.DeadlineExceeded) {

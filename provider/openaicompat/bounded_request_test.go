@@ -5,16 +5,15 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync/atomic"
 	"syscall"
 	"testing"
-	"time"
 
 	"github.com/kstruzzieri/go-llm/fingerprint"
+	"github.com/kstruzzieri/go-llm/internal/brokenbody"
 	"github.com/kstruzzieri/go-llm/internal/responsebound"
 	"github.com/kstruzzieri/go-llm/provider"
 )
@@ -64,25 +63,6 @@ func serveCompleted(w http.ResponseWriter, r *http.Request) {
 func readAll(r *http.Request) string {
 	b, _ := io.ReadAll(r.Body)
 	return string(b)
-}
-
-// writeBrokenBody sends status with a Content-Length the body never reaches,
-// then either closes the connection (a short body) or resets it.
-func writeBrokenBody(t *testing.T, w http.ResponseWriter, status int, reset bool) {
-	t.Helper()
-	conn, buf, err := w.(http.Hijacker).Hijack()
-	if err != nil {
-		t.Errorf("hijack: %v", err)
-		return
-	}
-	_, _ = fmt.Fprintf(buf, "HTTP/1.1 %d %s\r\nContent-Type: application/json\r\nContent-Length: 4096\r\n\r\n{\"error\":{\"message\":\"cut", status, http.StatusText(status))
-	_ = buf.Flush()
-	if reset {
-		// Let the client take the headers before the reset discards unread data.
-		time.Sleep(100 * time.Millisecond)
-		_ = conn.(*net.TCPConn).SetLinger(0)
-	}
-	_ = conn.Close()
 }
 
 // call is one way of sending a request through the client.
@@ -277,11 +257,14 @@ func TestBoundedRequest_ErrorBodyReadFailureKeepsStatusAndCause(t *testing.T) {
 		} {
 			for _, c := range []call{streamCall, chatCall} {
 				t.Run(fmt.Sprintf("%d %s %s", status, mode.name, c.name), func(t *testing.T) {
+					fixture := brokenbody.New()
 					srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-						writeBrokenBody(t, w, status, mode.reset)
+						if err := fixture.Write(w, status, mode.reset); err != nil {
+							t.Error(err)
+						}
 					}))
 					defer srv.Close()
-					err := c.do(boundedCtx(t), NewProvider(NewClient(srv.URL, WithAPIKey(boundedTestKey))))
+					err := c.do(boundedCtx(t), NewProvider(NewClient(srv.URL, WithAPIKey(boundedTestKey), WithHTTPClient(fixture.Client()))))
 					assertRejectionRead(t, err, status, mode.cause)
 				})
 			}
@@ -368,8 +351,11 @@ func TestOrdinaryRequest_Unchanged(t *testing.T) {
 		for _, reset := range []bool{false, true} {
 			for _, c := range []call{streamCall, chatCall} {
 				t.Run(fmt.Sprintf("%d reset=%v %s", status, reset, c.name), func(t *testing.T) {
+					fixture := brokenbody.New()
 					broken := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-						writeBrokenBody(t, w, status, reset)
+						if err := fixture.Write(w, status, reset); err != nil {
+							t.Error(err)
+						}
 					}))
 					defer broken.Close()
 					clean := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -378,7 +364,7 @@ func TestOrdinaryRequest_Unchanged(t *testing.T) {
 					}))
 					defer clean.Close()
 
-					brokenErr := c.do(context.Background(), NewProvider(NewClient(broken.URL)))
+					brokenErr := c.do(context.Background(), NewProvider(NewClient(broken.URL, WithHTTPClient(fixture.Client()))))
 					cleanErr := c.do(context.Background(), NewProvider(NewClient(clean.URL)))
 					if got, ok := statusOf(brokenErr); !ok || got != status {
 						t.Fatalf("broken body: err = %v, want a status error for %d", brokenErr, status)

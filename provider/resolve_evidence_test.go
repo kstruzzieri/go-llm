@@ -15,12 +15,12 @@ import (
 	"math"
 	"path/filepath"
 	"reflect"
-	"runtime"
 	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/kstruzzieri/go-llm/fingerprint"
@@ -192,6 +192,51 @@ func (p *capProbeFake) profilingCount() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.profiling
+}
+
+// memLog is an in-memory evidence log for tests in a synctest bubble, where the
+// SQLite store's goroutines and file I/O do not belong. It serves ReadSnapshot
+// and Generation from the rows appended to it (one generation per append) and
+// fails every append while failAppends is set. Any other method panics through
+// the nil embedded interface, so a test reaching one fails loudly.
+type memLog struct {
+	fingerprint.EvidenceStore
+	mu          sync.Mutex
+	rows        []fingerprint.EvidenceRow
+	generation  int64
+	failAppends bool
+}
+
+func (l *memLog) ReadSnapshot(_ context.Context, endpoint, _ string, _ *string, _ string, models []string, _ time.Time) (fingerprint.EvidenceSnapshot, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	snap := fingerprint.EvidenceSnapshot{Generation: l.generation}
+	for _, row := range l.rows {
+		if row.Endpoint == endpoint && slices.Contains(models, row.Model) {
+			snap.Rows = append(snap.Rows, row)
+		}
+	}
+	return snap, nil
+}
+
+func (l *memLog) Generation(context.Context) (int64, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.generation, nil
+}
+
+func (l *memLog) AppendEvidence(_ context.Context, rows ...fingerprint.EvidenceRow) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.failAppends {
+		return errInjected
+	}
+	for _, row := range rows {
+		row.ID = int64(len(l.rows) + 1)
+		l.rows = append(l.rows, row)
+	}
+	l.generation++
+	return nil
 }
 
 // bothProber implements both probe interfaces and counts legacy calls, which
@@ -1645,49 +1690,58 @@ func TestAutomaticProbeBudget_MetadataCheckReservesNothing(t *testing.T) {
 // Order
 // ---------------------------------------------------------------------------
 
+// TestAutomaticProbeBudget_FirstCandidateReservesFirst runs in a synctest
+// bubble over an in-memory log: with the first key held at admission,
+// synctest.Wait returns only once every goroutine has settled, so a resolver
+// working on later keys in parallel would already have arrived or checked.
 func TestAutomaticProbeBudget_FirstCandidateReservesFirst(t *testing.T) {
-	models := []string{"probe-a", "probe-b", "probe-c", "probe-d"}
-	prober := &capProbeFake{run: spendAll}
-	mr, _ := newLogResolver(t, newEvidenceLog(t), prober, oneProv(t, infos(models...)...))
-	var candidates []*ModelProfile
-	for _, m := range models {
-		p, err := mr.Lookup(t.Context(), localKey(m))
-		if err != nil {
-			t.Fatal(err)
+	synctest.Test(t, func(t *testing.T) {
+		models := []string{"probe-a", "probe-b", "probe-c", "probe-d"}
+		prober := &capProbeFake{run: spendAll}
+		mr, _ := newLogResolver(t, &memLog{}, prober, oneProv(t, infos(models...)...))
+		var candidates []*ModelProfile
+		for _, m := range models {
+			p, err := mr.Lookup(t.Context(), localKey(m))
+			if err != nil {
+				t.Fatal(err)
+			}
+			candidates = append(candidates, p)
 		}
-		candidates = append(candidates, p)
-	}
-	adm := newHoldAdmitter()
-	gate := adm.holdKey(localKey("probe-a"))
-	mr.setSlotAdmitter(adm)
+		adm := newHoldAdmitter()
+		gate := adm.holdKey(localKey("probe-a"))
+		mr.setSlotAdmitter(adm)
 
-	type ensured struct {
-		out   []*ModelProfile
-		diags []error
-	}
-	done := make(chan ensured, 1)
-	go func() {
-		out, diags := mr.EnsureToolCallResolved(t.Context(), candidates, agentCaps)
-		done <- ensured{out, diags}
-	}()
-	if got := waitFor(t, adm.entered, "the first key's admission"); got != localKey("probe-a") {
-		t.Fatalf("first admission = %v; want probe-a", got)
-	}
-	time.Sleep(50 * time.Millisecond) // room for a parallel resolver to show itself
-	if got := adm.arrivalList(); len(got) != 1 {
-		t.Fatalf("admission arrivals while the first key is held = %v; want only probe-a", got)
-	}
-	if prober.callCount() != 0 || allowanceOf(mr) != automaticProbeAllowance {
-		t.Fatalf("calls=%d allowance=%d while the first key is held; want 0, full", prober.callCount(), allowanceOf(mr))
-	}
-	close(gate)
-	res := waitFor(t, done, "resolution")
-	if got := prober.callList(); !slices.Equal(got, []string{"probe-a"}) {
-		t.Fatalf("checks = %v; want probe-a only", got)
-	}
-	if !res.out[0].Caps.Has(CapToolCall) || len(res.diags) != 3 {
-		t.Fatalf("probe-a caps = %v, diags = %v; want probe-a qualified and three refusals", res.out[0].Caps, res.diags)
-	}
+		type ensured struct {
+			out   []*ModelProfile
+			diags []error
+		}
+		done := make(chan ensured, 1)
+		go func() {
+			out, diags := mr.EnsureToolCallResolved(t.Context(), candidates, agentCaps)
+			done <- ensured{out, diags}
+		}()
+		var res ensured
+		join := sync.OnceFunc(func() {
+			close(gate)
+			res = <-done
+		})
+		t.Cleanup(join) // no goroutine outlives a failed assertion
+
+		synctest.Wait() // everything has settled with probe-a held at admission
+		if got := adm.arrivalList(); !slices.Equal(got, []ModelKey{localKey("probe-a")}) {
+			t.Fatalf("admission arrivals while the first key is held = %v; want only probe-a", got)
+		}
+		if prober.callCount() != 0 || allowanceOf(mr) != automaticProbeAllowance {
+			t.Fatalf("calls=%d allowance=%d while the first key is held; want 0, full", prober.callCount(), allowanceOf(mr))
+		}
+		join()
+		if got := prober.callList(); !slices.Equal(got, []string{"probe-a"}) {
+			t.Fatalf("checks = %v; want probe-a only", got)
+		}
+		if !res.out[0].Caps.Has(CapToolCall) || len(res.diags) != 3 {
+			t.Fatalf("probe-a caps = %v, diags = %v; want probe-a qualified and three refusals", res.out[0].Caps, res.diags)
+		}
+	})
 }
 
 func TestRoute_BareChainEntryChecksInProviderIndexOrder(t *testing.T) {
@@ -1767,30 +1821,60 @@ func TestAutomaticProbeProgress_StartedBeforeProbeAndCancelReported(t *testing.T
 		}
 	})
 	t.Run("callbacks never overlap", func(t *testing.T) {
-		rec := &progressRecorder{hook: func(CapabilityProbeProgress) { time.Sleep(5 * time.Millisecond) }}
-		entered, release := make(chan struct{}), make(chan struct{})
+		// Not in a synctest bubble: callbacks are serialized by a sync.Mutex,
+		// and a goroutine waiting on a mutex is not durably blocked, so
+		// synctest.Wait would never return while a callback is held and others
+		// queue behind it. Instead the first callback is held open by explicit
+		// blocking while three refusals run, and every callback checks that the
+		// serializing lock is held around it, which no second callback can
+		// begin without taking. A queued refusal cannot finish until the first
+		// callback returns.
+		var mr *ModelRegistry
+		var lockFree atomic.Bool
+		held, release := make(chan struct{}), make(chan struct{})
+		first := sync.OnceFunc(func() {
+			close(held)
+			<-release
+		})
+		rec := &progressRecorder{hook: func(CapabilityProbeProgress) {
+			if mr.progressMu.TryLock() {
+				mr.progressMu.Unlock()
+				lockFree.Store(true)
+			}
+			first()
+		}}
+		entered, check := make(chan struct{}), make(chan struct{})
 		prober := &capProbeFake{}
 		prober.setRun(func(context.Context, string) (fingerprint.CapabilityProbeResult, error) {
 			close(entered)
-			<-release
+			<-check
 			return toolsResult(fingerprint.CapProbeYes, 2), nil
 		})
 		models := []string{"probe-a", "probe-b", "probe-c", "probe-d"}
-		mr, _ := newLogResolver(t, newEvidenceLog(t), prober, oneProv(t, infos(models...)...), WithCapabilityProbeProgress(rec.record))
-		first := resolveAsync(t.Context(), mr, localKey("probe-a"))
-		<-entered
+		mr, _ = newLogResolver(t, newEvidenceLog(t), prober, oneProv(t, infos(models...)...), WithCapabilityProbeProgress(rec.record))
+		openRelease := sync.OnceFunc(func() { close(release) })
+		openCheck := sync.OnceFunc(func() { close(check) })
+		t.Cleanup(func() { openRelease(); openCheck() })
+
+		a := resolveAsync(t.Context(), mr, localKey("probe-a"))
+		waitFor(t, held, "probe-a's started callback")
 		var refused []<-chan resolveOutcome
 		for _, m := range models[1:] {
 			refused = append(refused, resolveAsync(t.Context(), mr, localKey(m)))
 		}
+		if n := len(rec.list()); n != 1 || rec.overlap.Load() || lockFree.Load() {
+			t.Fatalf("while the first callback is held: events=%d overlap=%v lock free=%v; want 1, false, false", n, rec.overlap.Load(), lockFree.Load())
+		}
+		openRelease()
+		waitFor(t, entered, "probe-a's check")
 		for _, ch := range refused {
 			out := waitFor(t, ch, "a refused resolution")
 			wantErrIs(t, "refused", out.state, out.err, ErrAutomaticProbeBudgetExhausted)
 		}
-		close(release)
-		waitFor(t, first, "the check")
-		if rec.overlap.Load() {
-			t.Fatal("progress callbacks overlapped")
+		openCheck()
+		waitFor(t, a, "the check")
+		if rec.overlap.Load() || lockFree.Load() {
+			t.Fatalf("overlap=%v lock free during a callback=%v; want neither", rec.overlap.Load(), lockFree.Load())
 		}
 		if n := len(rec.list()); n != 5 {
 			t.Fatalf("events = %d; want started, three budget_exhausted, finished", n)
@@ -1929,38 +2013,53 @@ func TestLostWrite_LaterCallsReadKeptRows(t *testing.T) {
 
 func TestLostWrite_FollowerAndDuplicateSeeIt(t *testing.T) {
 	t.Run("a follower of a direct leader", func(t *testing.T) {
-		ctx := t.Context()
-		mr, _, _, prober := lostWriteResolver(t, fingerprint.CapProbeYes, oneProv(t, infos(logModel)...))
-		entered, release := make(chan struct{}), make(chan struct{})
-		prober.setRun(func(context.Context, string) (fingerprint.CapabilityProbeResult, error) {
-			close(entered)
-			<-release
-			return toolsResult(fingerprint.CapProbeYes, 0), nil
+		// In a synctest bubble over an in-memory log whose appends fail: the
+		// leader is held inside the check, and synctest.Wait returns once the
+		// follower is durably blocked too, joined to the leader's flight. The
+		// allowance funds two checks, so only the singleflight can keep the
+		// follower from checking on its own.
+		synctest.Test(t, func(t *testing.T) {
+			ctx := t.Context()
+			log := &memLog{failAppends: true}
+			release := make(chan struct{})
+			prober := &capProbeFake{run: func(context.Context, string) (fingerprint.CapabilityProbeResult, error) {
+				<-release
+				return toolsResult(fingerprint.CapProbeYes, 0), nil
+			}}
+			mr, _ := newLogResolver(t, log, prober, oneProv(t, infos(logModel)...))
+			setAllowance(mr, 2*automaticProbeAllowance)
+			candidate, err := mr.Lookup(ctx, localKey(logModel))
+			if err != nil {
+				t.Fatal(err)
+			}
+			type ensured struct {
+				out   []*ModelProfile
+				diags []error
+			}
+			leader := resolveAsync(ctx, mr, localKey(logModel))
+			synctest.Wait() // the leader is inside the check
+			follower := make(chan ensured, 1)
+			go func() {
+				out, diags := mr.EnsureToolCallResolved(ctx, []*ModelProfile{candidate}, agentCaps)
+				follower <- ensured{out, diags}
+			}()
+			var lead resolveOutcome
+			var got ensured
+			join := sync.OnceFunc(func() {
+				close(release)
+				lead, got = <-leader, <-follower
+			})
+			t.Cleanup(join) // no goroutine outlives a failed assertion
+
+			synctest.Wait() // the follower has joined the flight or checked on its own
+			wantCalls(t, "while the leader is held", prober, 1)
+			join()
+			wantState(t, "leader", lead.state, lead.err, fingerprint.CapProbeYes)
+			if len(got.diags) != 0 || !got.out[0].Caps.Has(CapToolCall) {
+				t.Fatalf("follower candidate caps = %v, diags = %v; want tool_call", got.out[0].Caps, got.diags)
+			}
+			wantCalls(t, "leader and follower", prober, 1)
 		})
-		candidate, err := mr.Lookup(ctx, localKey(logModel))
-		if err != nil {
-			t.Fatal(err)
-		}
-		leader := resolveAsync(ctx, mr, localKey(logModel))
-		waitFor(t, entered, "the leader's check")
-		type ensured struct {
-			out   []*ModelProfile
-			diags []error
-		}
-		follower := make(chan ensured, 1)
-		go func() {
-			out, diags := mr.EnsureToolCallResolved(ctx, []*ModelProfile{candidate}, agentCaps)
-			follower <- ensured{out, diags}
-		}()
-		waitForFlightFollower(t, mr)
-		close(release)
-		out := waitFor(t, leader, "the leader")
-		wantState(t, "leader", out.state, out.err, fingerprint.CapProbeYes)
-		got := waitFor(t, follower, "the follower")
-		if len(got.diags) != 0 || !got.out[0].Caps.Has(CapToolCall) {
-			t.Fatalf("follower candidate caps = %v, diags = %v; want tool_call", got.out[0].Caps, got.diags)
-		}
-		wantCalls(t, "leader and follower", prober, 1)
 	})
 	t.Run("the same key twice in one candidate list", func(t *testing.T) {
 		ctx := t.Context()
@@ -1975,29 +2074,6 @@ func TestLostWrite_FollowerAndDuplicateSeeIt(t *testing.T) {
 		}
 		wantCalls(t, "duplicate", prober, 1)
 	})
-}
-
-// waitForFlightFollower waits until a goroutine running mr's
-// EnsureToolCallResolved is parked in the singleflight as a follower, waiting
-// on the leader's call. Nothing outside the group shows a join, so it reads the
-// goroutine stacks; the registry's address in the frame keeps other tests'
-// goroutines out. It fails the test if no follower joins within five seconds.
-func waitForFlightFollower(t *testing.T, mr *ModelRegistry) {
-	t.Helper()
-	ensure := fmt.Sprintf("(*ModelRegistry).EnsureToolCallResolved(%p", mr)
-	buf := make([]byte, 1<<20)
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		stacks := string(buf[:runtime.Stack(buf, true)])
-		for _, g := range strings.Split(stacks, "\n\n") {
-			if strings.Contains(g, ensure) && strings.Contains(g, "singleflight.(*Group).Do(") &&
-				strings.Contains(g, "sync.(*WaitGroup).Wait(") && !strings.Contains(g, "singleflight.(*Group).doCall(") {
-				return
-			}
-		}
-		runtime.Gosched()
-	}
-	t.Fatal("the follower never joined the leader's flight")
 }
 
 func TestLostWrite_OverrideStillWins(t *testing.T) {
@@ -2300,36 +2376,58 @@ func TestLostWrite_FencesBuildInFlight(t *testing.T) {
 	t.Run("keeping races no reader", func(t *testing.T) {
 		ctx := t.Context()
 		mr, _ := newLogResolver(t, newEvidenceLog(t), nil, oneProv(t, infos(logModel)...))
-		// Readers run until the keeper is done, so they overlap it. The keeper is
-		// bounded: every read reduces all of a model's kept rows.
+		// Readers start once keeping has begun and run until it is done. The
+		// keeper does not finish until every reader has completed a read, so
+		// each reader overlaps it at least once. The keeper is bounded: every
+		// read reduces all of a model's kept rows.
 		const checks = 30
-		done := make(chan struct{})
-		var wg sync.WaitGroup
-		wg.Go(func() {
-			defer close(done)
-			for i := range checks {
-				mr.keepUnsavedEvidence(keptYes(b, logT0.Add(time.Duration(i)*time.Millisecond)))
-				time.Sleep(time.Millisecond)
-			}
-		})
 		readers := []func(){
 			func() { _, _ = mr.Lookup(ctx, localKey(logModel)) },
 			func() { _, _ = mr.ExplainToolCall(ctx, localKey(logModel)) },
 			func() { _, _ = mr.ProjectListedModels(ctx, "local", infos(logModel)) },
 		}
-		for _, read := range readers {
+		keeping, done := make(chan struct{}), make(chan struct{})
+		started := make([]chan struct{}, len(readers))
+		for i := range started {
+			started[i] = make(chan struct{})
+		}
+		counts := make([]int, len(readers))
+		var wg sync.WaitGroup
+		wg.Go(func() {
+			defer close(done)
+			for i := range checks {
+				mr.keepUnsavedEvidence(keptYes(b, logT0.Add(time.Duration(i)*time.Millisecond)))
+				if i == 0 {
+					close(keeping)
+					for _, s := range started {
+						<-s
+					}
+				}
+			}
+		})
+		for i, read := range readers {
 			wg.Go(func() {
+				<-keeping
 				for {
+					read()
+					counts[i]++
+					if counts[i] == 1 {
+						close(started[i])
+					}
 					select {
 					case <-done:
 						return
 					default:
-						read()
 					}
 				}
 			})
 		}
 		wg.Wait()
+		for i, n := range counts {
+			if n == 0 {
+				t.Errorf("reader %d completed no read while keeping", i)
+			}
+		}
 		if n := len(keptRows(mr)); n != 3*checks {
 			t.Fatalf("kept rows = %d; want %d", n, 3*checks)
 		}
