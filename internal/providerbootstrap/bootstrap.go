@@ -44,6 +44,17 @@ type Options struct {
 	// fingerprint.CapProbeStore (interface-assert fallback below).
 	CapabilityProbeStore fingerprint.CapProbeStore
 
+	// EvidenceLog, when non-nil, attaches the capability evidence log to the
+	// model registry (provider.WithEvidenceLog) with a binder built from the
+	// effective config, so a URL override is the endpoint answers are read and
+	// written under. On-demand resolution then reads and writes only the log,
+	// spends the registry's fixed automatic allowance, and needs no
+	// CapabilityProbeStore; lookups never profile. nil keeps the legacy path.
+	EvidenceLog fingerprint.EvidenceStore
+	// CapabilityProbeProgress, when non-nil, receives automatic check progress
+	// from a log-bound registry (provider.WithCapabilityProbeProgress).
+	CapabilityProbeProgress func(provider.CapabilityProbeProgress)
+
 	// DestinationGate arms the destination-admission boundary (#477). When
 	// non-nil, every provider HTTP client — ollama, openai-compat, and the
 	// slot-probe client — is wrapped by the destination guard bound to that
@@ -253,10 +264,16 @@ func New(ctx context.Context, opts Options) (*Bundle, error) {
 		}
 	}
 	if capProbeStore != nil {
-		mrOpts = append(mrOpts,
-			provider.WithCapabilityProbeStore(capProbeStore),
-			provider.WithCapabilityProber(factory),
-		)
+		mrOpts = append(mrOpts, provider.WithCapabilityProbeStore(capProbeStore))
+	}
+	if opts.EvidenceLog != nil {
+		mrOpts = append(mrOpts, provider.WithEvidenceLog(opts.EvidenceLog, evidenceBinder(effCfg)))
+	}
+	if capProbeStore != nil || opts.EvidenceLog != nil {
+		mrOpts = append(mrOpts, provider.WithCapabilityProber(factory))
+	}
+	if opts.CapabilityProbeProgress != nil {
+		mrOpts = append(mrOpts, provider.WithCapabilityProbeProgress(opts.CapabilityProbeProgress))
 	}
 	mr, err := provider.NewModelRegistry(pReg, fpStore, mrOpts...)
 	if err != nil {
@@ -362,4 +379,21 @@ func (b *Bundle) Close() error {
 		return nil
 	}
 	return b.Router.Close()
+}
+
+// evidenceBinder maps each provider of the frozen effective config to its
+// evidence binding. A provider whose base URL or format has no binding is
+// unbound. The map is built once and never written, so the binder does no I/O
+// and is safe for concurrent use.
+func evidenceBinder(cfg *config.Config) func(string) (provider.EvidenceBinding, bool) {
+	bindings := make(map[string]provider.EvidenceBinding, len(cfg.Providers))
+	for name, pc := range cfg.Providers {
+		if b, err := provider.EvidenceBindingFor(pc.BaseURL, pc.APIFormat); err == nil {
+			bindings[name] = b
+		}
+	}
+	return func(name string) (provider.EvidenceBinding, bool) {
+		b, ok := bindings[name]
+		return b, ok
+	}
 }

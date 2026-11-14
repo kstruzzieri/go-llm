@@ -2,6 +2,7 @@ package configio
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/kstruzzieri/go-llm/fingerprint"
@@ -37,8 +38,10 @@ import (
 // Errors carry bounded codes (CodeOf): invalid_argument; probe_unavailable
 // when no resolution path could answer (unwired globally, or unavailable
 // for this specific provider/model — distinct from a probe that ran and
-// answered inconclusively); probe_failed for transient failures, with the
-// cause retained in the chain.
+// answered inconclusively), which includes provider.ErrEvidenceUnbound;
+// probe_failed for transient failures, including
+// provider.ErrEvidenceUnreadable and provider.ErrAutomaticProbeBudgetExhausted
+// on a log-bound registry, with the cause retained in the chain.
 func ProbeToolCall(ctx context.Context, resolver ToolCallResolver, key provider.ModelKey) (ProbeOutcome, error) {
 	if key.Provider == "" || key.Model == "" {
 		return ProbeOutcome{}, wrapCode(CodeInvalidArgument,
@@ -54,7 +57,11 @@ func ProbeToolCall(ctx context.Context, resolver ToolCallResolver, key provider.
 		return ProbeOutcome{}, cerr
 	}
 	if err != nil {
-		return ProbeOutcome{}, wrapCode(CodeProbeFailed,
+		code := CodeProbeFailed
+		if errors.Is(err, provider.ErrEvidenceUnbound) {
+			code = CodeProbeUnavailable // no path can answer for this provider
+		}
+		return ProbeOutcome{}, wrapCode(code,
 			fmt.Errorf("configio: probe tool_call %s: %w", key, err))
 	}
 	switch state {

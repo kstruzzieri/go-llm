@@ -3,10 +3,17 @@ package configio
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
+	"github.com/kstruzzieri/go-llm/config"
 	"github.com/kstruzzieri/go-llm/fingerprint"
+	"github.com/kstruzzieri/go-llm/internal/providerbootstrap"
 	"github.com/kstruzzieri/go-llm/provider"
 )
 
@@ -249,5 +256,75 @@ func TestProbeToolCall_CancelDuringDurabilityReadPublishesNothing(t *testing.T) 
 	}
 	if out != (ProbeOutcome{}) {
 		t.Fatalf("outcome = %+v; a cancelled caller must receive nothing", out)
+	}
+}
+
+func TestProbeToolCall_EvidenceErrorCodes(t *testing.T) {
+	cases := []struct {
+		sentinel error
+		want     ErrorCode
+	}{
+		{provider.ErrEvidenceUnbound, CodeProbeUnavailable},
+		{provider.ErrEvidenceUnreadable, CodeProbeFailed},
+		{provider.ErrAutomaticProbeBudgetExhausted, CodeProbeFailed},
+	}
+	for _, tc := range cases {
+		r := &fakeResolver{err: fmt.Errorf("wrapped: %w", tc.sentinel)}
+		out, err := ProbeToolCall(context.Background(), r, key("p", "m"))
+		if code, ok := CodeOf(err); !ok || code != tc.want {
+			t.Fatalf("%v: CodeOf = %q, %v; want %q", tc.sentinel, code, ok, tc.want)
+		}
+		if !errors.Is(err, tc.sentinel) {
+			t.Fatalf("%v: sentinel lost from the chain: %v", tc.sentinel, err)
+		}
+		if out != (ProbeOutcome{}) {
+			t.Fatalf("%v: outcome = %+v; want zero", tc.sentinel, out)
+		}
+	}
+}
+
+// TestNoProbeWithoutCallerRequest pins that RefreshInventory over a log-bound
+// registry, publishing included, starts no capability check.
+func TestNoProbeWithoutCallerRequest(t *testing.T) {
+	const model = "mystery-model-x"
+	var chats atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/models":
+			_, _ = io.WriteString(w, `{"data":[{"id":"`+model+`"}]}`)
+		case "/v1/chat/completions":
+			chats.Add(1)
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = io.WriteString(w, "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"get_time\",\"arguments\":\"{}\"}}]}}]}\n\n"+
+				"data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n"+
+				"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1,\"total_tokens\":2}}\n\n"+
+				"data: [DONE]\n\n")
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	cfg := &config.Config{
+		Providers: map[string]config.ProviderConfig{"lc": {APIFormat: "openai-compat", BaseURL: srv.URL}},
+		Models:    map[string]config.ModelConfig{"agent": {Provider: "lc", Name: model, Type: "dense"}},
+	}
+	store := newStore(t)
+	b, err := providerbootstrap.New(t.Context(), providerbootstrap.Options{Config: cfg, EvidenceLog: store})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = b.Close() }()
+
+	inv, err := RefreshInventory(t.Context(), b.Providers, b.Models, WithPublish(store, b.Config))
+	if err != nil || len(inv.Models) != 1 {
+		t.Fatalf("RefreshInventory = %+v, %v; want the one model", inv.Models, err)
+	}
+	if n := chats.Load(); n != 0 {
+		t.Fatalf("refresh sent %d chat requests; want 0", n)
+	}
+	// Positive control: an explicit probe reaches the stub.
+	out, err := ProbeToolCall(t.Context(), b.Models, key("lc", model))
+	if err != nil || out.State != fingerprint.CapProbeYes || chats.Load() != 1 {
+		t.Fatalf("control: %+v, %v, %d requests; want yes after one request", out, err, chats.Load())
 	}
 }

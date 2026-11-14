@@ -1,13 +1,18 @@
 // provider/evidence_binding.go
 //
-// The registry's read path over the capability evidence log (#734). Answers are
+// The registry's read path over the capability evidence log (#734), and the
+// on-demand tool_call resolution that writes it on a log-bound registry (#735),
+// with its cooldown and automatic allowance. Answers are
 // keyed by canonical endpoint and adapter, not provider name, so a rename keeps
 // them and two providers of one name at different endpoints never share them.
 package provider
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/url"
+	"sync"
 	"time"
 
 	"github.com/kstruzzieri/go-llm/fingerprint"
@@ -42,12 +47,33 @@ func EvidenceBindingFor(baseURL, apiFormat string) (EvidenceBinding, error) {
 // share the store. bind maps a provider name to its binding; a provider it does
 // not resolve has no evidence, with no fallback to the old table. bind must do no
 // I/O and be safe for concurrent use. Without this option the registry behaves as
-// if the log did not exist. On-demand resolution (ResolveToolCall's probe path)
-// still reads and writes capability_probes.
+// if the log did not exist.
+//
+// On-demand resolution (ResolveToolCall, EnsureToolCallResolved) then reads and
+// writes only the log: it never reads or writes capability_probes, never asserts
+// fingerprint.ToolCallProber, and spends the registry's automatic allowance (see
+// ResolveToolCall). WithCapabilityProber is enough to enable it; a probe store
+// is not needed. A lookup never profiles on such a registry, even with a full
+// fingerprint.Store and WithFingerprintProberFactory: stored profiles are read
+// and validated as without the log, but DetectKind and ProbeChat never run.
+//
+// The binding of a provider name is fixed for the registry's life; a host that
+// re-points a name builds a new registry. Resolution takes the binding before
+// it prepares the provider and prober and compares it at both of its log reads,
+// which catches a binding that changes one way during a resolution, not a name
+// re-pointed and back while the prober is being built.
 func WithEvidenceLog(store fingerprint.EvidenceStore, bind func(provider string) (EvidenceBinding, bool)) ModelRegistryOption {
 	return func(r *ModelRegistry) {
 		r.evidenceStore, r.evidenceBind = store, bind
 	}
+}
+
+// bindingFor resolves a provider's evidence binding, false when there is none.
+func (r *ModelRegistry) bindingFor(provider string) (EvidenceBinding, bool) {
+	if r.evidenceBind == nil {
+		return EvidenceBinding{}, false
+	}
+	return r.evidenceBind(provider)
 }
 
 // syncGeneration drops every cached profile when the log has been written since
@@ -75,6 +101,7 @@ func (r *ModelRegistry) syncGeneration(ctx context.Context) {
 // evidenceView is one read of the log for a provider's models, evaluated at one
 // instant. A nil view means no log is attached.
 type evidenceView struct {
+	endpoint   string // the binding read under; set whenever the binder resolved the provider
 	adapter    string
 	now        time.Time
 	generation int64
@@ -91,20 +118,18 @@ func (r *ModelRegistry) readEvidence(ctx context.Context, provider string, model
 		return nil
 	}
 	view := &evidenceView{now: r.now()}
-	binding, ok := EvidenceBinding{}, false
-	if r.evidenceBind != nil {
-		binding, ok = r.evidenceBind(provider)
-	}
+	binding, ok := r.bindingFor(provider)
 	if !ok {
 		view.unbound = true
 		return view
 	}
+	view.endpoint, view.adapter = binding.Endpoint, binding.Adapter
 	snap, err := r.evidenceStore.ReadSnapshot(ctx, binding.Endpoint, binding.Adapter, nil, "", models, view.now)
 	if err != nil {
 		view.failed = true
 		return view
 	}
-	view.adapter, view.generation = binding.Adapter, snap.Generation
+	view.generation = snap.Generation
 	view.rows = make(map[string][]fingerprint.EvidenceRow, len(models))
 	for _, row := range snap.Rows {
 		view.rows[row.Model] = append(view.rows[row.Model], row)
@@ -224,4 +249,318 @@ func (r *ModelRegistry) explainToolCallFromLog(ctx context.Context, key ModelKey
 		exp.Source = "runtime"
 	}
 	return exp, nil
+}
+
+// automaticProbeAllowance is how many requests automatic capability checks on a
+// log-bound registry may send over the registry's life. It is fixed: there is no
+// setting for it, and time does not refill it.
+const automaticProbeAllowance = 2
+
+// Sentinels of on-demand resolution on a log-bound registry. Each carries a
+// fixed message; match them with errors.Is.
+var (
+	// ErrAutomaticProbeBudgetExhausted: the automatic allowance cannot fund the
+	// check, so nothing was sent or written and no cooldown started. It is never
+	// a definitive no. Its bounded code is automatic_probe_budget_exhausted.
+	ErrAutomaticProbeBudgetExhausted = errors.New("provider: automatic_probe_budget_exhausted: the automatic capability checks have spent their allowance")
+	// ErrEvidenceUnbound: the provider has no evidence binding, so no answer
+	// could be read or saved for it.
+	ErrEvidenceUnbound = errors.New("provider: the provider has no evidence binding")
+	// ErrEvidenceUnreadable: the evidence log could not be read, so no check
+	// was started.
+	ErrEvidenceUnreadable = errors.New("provider: the evidence log could not be read")
+)
+
+// Stages of CapabilityProbeProgress.
+const (
+	probeStageStarted         = "started"
+	probeStageFinished        = "finished"
+	probeStageCancelled       = "cancelled"
+	probeStageBudgetExhausted = "budget_exhausted"
+)
+
+// CapabilityProbeProgress reports an automatic generation check on a log-bound
+// registry. Stage is "started" (before the first request), "finished" or
+// "cancelled" (after the check returns), or "budget_exhausted" (the allowance
+// refused the check; reported once per model per registry). Counts are requests
+// the check sends: Requests is what it sent (0 before it runs),
+// ReservedRequests what it reserved from the allowance, RemainingRequests what
+// the allowance holds after the event. EndpointHost is host[:port] only; no
+// event carries a credential or an endpoint path. Native metadata checks report
+// nothing.
+type CapabilityProbeProgress struct {
+	Key                       ModelKey
+	EndpointHost              string
+	Method                    string
+	Stage                     string
+	Requests                  int
+	ReservedRequests          int
+	RemainingRequests         int
+	MaxOutputTokensPerRequest int
+}
+
+// WithCapabilityProbeProgress installs a callback for automatic check progress
+// on a log-bound registry. Calls are serialized, made outside registry locks,
+// and "started" is delivered before the check's first request. fn must not
+// call back into the registry's resolution.
+func WithCapabilityProbeProgress(fn func(CapabilityProbeProgress)) ModelRegistryOption {
+	return func(r *ModelRegistry) {
+		r.progress = fn
+	}
+}
+
+func (r *ModelRegistry) emitProgress(p CapabilityProbeProgress) {
+	if r.progress == nil {
+		return
+	}
+	r.progressMu.Lock()
+	defer r.progressMu.Unlock()
+	r.progress(p)
+}
+
+// allowanceCovers reports whether the allowance could fund n requests now.
+func (r *ModelRegistry) allowanceCovers(n int) bool {
+	r.budgetMu.Lock()
+	defer r.budgetMu.Unlock()
+	return r.budgetRemaining >= n
+}
+
+// reserveAllowance takes n requests whole, or none, and returns what is left.
+func (r *ModelRegistry) reserveAllowance(n int) (remaining int, ok bool) {
+	r.budgetMu.Lock()
+	defer r.budgetMu.Unlock()
+	if r.budgetRemaining < n {
+		return r.budgetRemaining, false
+	}
+	r.budgetRemaining -= n
+	return r.budgetRemaining, true
+}
+
+// refundAllowance returns n unsent requests and reports what is left.
+func (r *ModelRegistry) refundAllowance(n int) int {
+	r.budgetMu.Lock()
+	defer r.budgetMu.Unlock()
+	r.budgetRemaining += n
+	return r.budgetRemaining
+}
+
+// refuseCheck reports a check the allowance cannot fund, once per model.
+func (r *ModelRegistry) refuseCheck(event CapabilityProbeProgress) error {
+	r.budgetMu.Lock()
+	first := !r.budgetReported[event.Key]
+	r.budgetReported[event.Key] = true
+	event.RemainingRequests = r.budgetRemaining
+	r.budgetMu.Unlock()
+	if first {
+		event.Stage = probeStageBudgetExhausted
+		r.emitProgress(event)
+	}
+	return ErrAutomaticProbeBudgetExhausted
+}
+
+// probeMethodFor is the method an automatic check uses through adapter.
+func probeMethodFor(adapter string) string {
+	switch adapter {
+	case fingerprint.AdapterOllama:
+		return fingerprint.MethodOllamaShow
+	case fingerprint.AdapterOpenAICompat:
+		return fingerprint.MethodChatStreamTools
+	}
+	return ""
+}
+
+// endpointHost is the host[:port] of a canonical endpoint, never its path.
+func endpointHost(endpoint string) string {
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return ""
+	}
+	return u.Host
+}
+
+// resolveToolCallFromLog is ResolveToolCall's slow path on a log-bound registry.
+// See ResolveToolCall and WithEvidenceLog. Must not be called while holding r.mu.
+func (r *ModelRegistry) resolveToolCallFromLog(ctx context.Context, key ModelKey) (fingerprint.CapProbeState, error) {
+	// 1. The binding the rows are written under, taken before the provider and
+	// prober are prepared.
+	binding, ok := r.bindingFor(key.Provider)
+	if !ok {
+		return "", ErrEvidenceUnbound
+	}
+	ctx, err := r.bindMetaPurpose(ctx, DestinationPurposeCapabilityProbe, key.Provider)
+	if err != nil {
+		return "", err
+	}
+	p, err := r.providers.Resolve(key)
+	if err != nil {
+		return "", err
+	}
+	runtimeInfo, err := r.queryRuntime(ctx, key)
+	if err != nil {
+		return "", err
+	}
+	spec, err := r.capProber(ctx, key, runtimeInfo, p)
+	if err != nil {
+		return "", err
+	}
+	if spec == nil || spec.Prober == nil {
+		return "", nil
+	}
+	// 2. Never ToolCallProber: it certifies a non-streamed request.
+	prober, ok := spec.Prober.(fingerprint.CapabilityProber)
+	if !ok {
+		return "", nil
+	}
+	recipe, ok := fingerprint.RecipeFor(probeMethodFor(binding.Adapter))
+	if !ok {
+		return "", nil
+	}
+	digest := runtimeDigest(runtimeInfo)
+
+	// 3 and 4.
+	if state, done, err := r.toolCallFromLog(ctx, key, binding, digest); done {
+		return state, err
+	}
+
+	generation := recipe.MaxOutputTokensPerRequest > 0
+	event := CapabilityProbeProgress{
+		Key: key, EndpointHost: endpointHost(binding.Endpoint), Method: recipe.Method,
+		MaxOutputTokensPerRequest: recipe.MaxOutputTokensPerRequest,
+	}
+	// 5. A check that will be refused must not wait in a slot queue.
+	if generation && !r.allowanceCovers(recipe.MaxRequests) {
+		return "", r.refuseCheck(event)
+	}
+
+	// 6. Admission; the deferred release is the backstop for every return.
+	r.mu.RLock()
+	admitter := r.admitter
+	r.mu.RUnlock()
+	release := noopRelease
+	if admitter != nil {
+		release, err = admitter.acquireSlot(ctx, key)
+		if err != nil {
+			return "", err
+		}
+	}
+	release = sync.OnceFunc(release)
+	defer release()
+	if state, done, err := r.toolCallFromLog(ctx, key, binding, digest); done {
+		return state, err
+	}
+
+	// 7.
+	reserved := 0
+	if generation {
+		remaining, ok := r.reserveAllowance(recipe.MaxRequests)
+		if !ok {
+			return "", r.refuseCheck(event)
+		}
+		reserved = recipe.MaxRequests
+		event.Stage, event.ReservedRequests, event.RemainingRequests = probeStageStarted, reserved, remaining
+		r.emitProgress(event)
+	}
+
+	// 8.
+	result, err := prober.ProbeCapabilities(ctx, key.Model, fingerprint.CapabilityProbeRequest{
+		Method: recipe.Method, Capabilities: []string{capabilityToolCall},
+	})
+	completedAt := r.now()
+	release()
+	if generation {
+		sent := min(max(result.Requests, 0), reserved)
+		event.Stage, event.Requests = probeStageFinished, sent
+		if err != nil && ctx.Err() != nil {
+			event.Stage = probeStageCancelled
+		}
+		event.RemainingRequests = r.refundAllowance(reserved - sent)
+		r.emitProgress(event)
+	}
+	if err != nil {
+		return "", err
+	}
+
+	// 9.
+	rows, state, err := probeEvidenceRows(key, binding, digest, recipe, result, completedAt)
+	if err != nil {
+		return "", err
+	}
+	// 10. The cached profile is dropped either way, so phase 3's Lookup in the
+	// same call rebuilds it.
+	if err := r.evidenceStore.AppendEvidence(ctx, rows...); err != nil {
+		r.keepUnsavedEvidence(rows)
+	}
+	r.invalidateProfile(key)
+	// 11.
+	return state, nil
+}
+
+// keepUnsavedEvidence is where the rows of a completed check whose append
+// failed are kept for the registry's life (D11, the "Lost write" rules). Until
+// that lands it keeps nothing.
+func (r *ModelRegistry) keepUnsavedEvidence([]fingerprint.EvidenceRow) {}
+
+// toolCallFromLog is one read of the log for key's tool_call at digest. done
+// means it settled the resolution: a definitive answer, an attempt still in its
+// cooldown, or an error. Reserving and progress are the caller's.
+func (r *ModelRegistry) toolCallFromLog(ctx context.Context, key ModelKey, binding EvidenceBinding, digest string) (state fingerprint.CapProbeState, done bool, err error) {
+	view := r.readEvidence(ctx, key.Provider, []string{key.Model})
+	// readEvidence keeps only a flag for a failed read, so a done caller is
+	// checked first.
+	if err := ctx.Err(); err != nil {
+		return "", true, err
+	}
+	switch {
+	case view.unbound, view.endpoint != binding.Endpoint, view.adapter != binding.Adapter:
+		return "", true, ErrEvidenceUnbound
+	case view.failed:
+		return "", true, ErrEvidenceUnreadable
+	}
+	reading := view.readings(key.Model, digest)[capabilityToolCall]
+	if answer := readingAnswer(reading); answer != nil {
+		if answer.State == fingerprint.CapProbeYes {
+			// The profile that sent the caller here was built without this row.
+			r.invalidateProfile(key)
+		}
+		return answer.State, true, nil
+	}
+	if a := reading.Attempt; a != nil && (a.ExpiresAt.IsZero() || !view.now.After(a.ExpiresAt)) {
+		return fingerprint.CapProbeInconclusive, true, nil
+	}
+	return "", false, nil
+}
+
+// probeEvidenceRows builds one row per answer of a completed check, observed at
+// completedAt on the store's millisecond, and returns the tool_call state.
+func probeEvidenceRows(key ModelKey, binding EvidenceBinding, digest string, recipe fingerprint.ProbeRecipe, result fingerprint.CapabilityProbeResult, completedAt time.Time) ([]fingerprint.EvidenceRow, fingerprint.CapProbeState, error) {
+	observedAt := storeMillis(completedAt)
+	var state fingerprint.CapProbeState
+	rows := make([]fingerprint.EvidenceRow, 0, len(result.Answers))
+	for _, a := range result.Answers {
+		row := fingerprint.EvidenceRow{
+			KeyVersion: fingerprint.EvidenceKeyVersion, Endpoint: binding.Endpoint, Adapter: binding.Adapter,
+			Model: key.Model, Digest: digest, Capability: a.Capability,
+			Source: a.Source, Kind: a.Kind, State: a.State,
+			Method: recipe.Method, MethodVersion: recipe.Version, Detail: a.Detail,
+			ObservedAt: observedAt,
+		}
+		freshUntil, expiresAt := fingerprint.ExpiryFor(row, a.TTL)
+		row.FreshUntil, row.ExpiresAt = storeMillis(freshUntil), storeMillis(expiresAt)
+		rows = append(rows, row)
+		if a.Capability == capabilityToolCall {
+			state = a.State
+		}
+	}
+	if !validCapProbeState(state) {
+		return nil, "", fmt.Errorf("provider: probe tool_call %v returned no valid tool_call answer", key)
+	}
+	return rows, state, nil
+}
+
+// storeMillis truncates t to the store's millisecond precision; zero stays zero.
+func storeMillis(t time.Time) time.Time {
+	if t.IsZero() {
+		return t
+	}
+	return time.UnixMilli(t.UnixMilli())
 }
