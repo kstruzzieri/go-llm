@@ -66,10 +66,10 @@ func BenchmarkStreamToolCallAccumulator(b *testing.B) {
 			b.ReportAllocs()
 			for b.Loop() {
 				var acc streamToolCallAccumulator
-				var calls []provider.ToolCall
 				for _, d := range deltas {
-					calls = acc.Add(d)
+					acc.Add(d)
 				}
+				calls := acc.Snapshot()
 				if len(calls) != 1 || string(calls[0].Function.Arguments) != want {
 					b.Fatalf("assembled arguments differ from input (len %d)", len(calls))
 				}

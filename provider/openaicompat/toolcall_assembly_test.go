@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -151,6 +152,37 @@ func TestStreamToolCallAccumulator_SnapshotOwnsItsBytes(t *testing.T) {
 		first[0].Function.Arguments[i] = 'X'
 	}
 	assertToolCall(t, acc.Snapshot(), 0, `{"q":"go"}`, false)
+}
+
+// TestStreamToolCallAccumulator_AllocatedBytesStayLinear is the tripwire for
+// assembly cost. Appending fragments and normalizing once allocates a small
+// multiple of the final argument size. Copying or re-normalizing the
+// accumulated text on every fragment allocates hundreds of times that size
+// at this fragment count, and more as the count grows.
+func TestStreamToolCallAccumulator_AllocatedBytesStayLinear(t *testing.T) {
+	const n, fragSize, maxFactor = 1_000, 105, 100
+	text, frags := benchToolCallArgs(n, fragSize)
+	deltas := benchToolCallDeltas(t, frags)
+
+	// TotalAlloc counts the whole process, so take the lowest of a few runs.
+	lowest := ^uint64(0)
+	for range 3 {
+		var before, after runtime.MemStats
+		runtime.ReadMemStats(&before)
+		var acc streamToolCallAccumulator
+		for _, d := range deltas {
+			acc.Add(d)
+		}
+		calls := acc.Snapshot()
+		runtime.ReadMemStats(&after)
+		assertToolCall(t, calls, 0, text, false)
+		lowest = min(lowest, after.TotalAlloc-before.TotalAlloc)
+	}
+	factor := float64(lowest) / float64(len(text))
+	t.Logf("allocated %d bytes assembling %d bytes in %d fragments: %.1f times the final size", lowest, len(text), n, factor)
+	if factor > maxFactor {
+		t.Errorf("assembly allocated %.1f times the final argument size, limit %d: accumulated text is being copied or re-normalized per fragment", factor, maxFactor)
+	}
 }
 
 // streamChunks serves chunks as an SSE stream, then tail verbatim, then
