@@ -196,7 +196,90 @@ golem -root /path/to/project -allow-write -allow-exec
 golem -root /path/to/project -profile trusted -allow-write -allow-exec
 ```
 
-By default Trusted commands run on the host with your filesystem and network authority; approval decides each call (the always-on argument invariants also refuse some), but nothing confines the process. To confine commands and post-write verification, add a native `-sandbox`; see the next section.
+By default Trusted commands run on the host with your filesystem and network authority; approval decides each call (the always-on argument invariants also refuse some), but nothing confines the process. To confine commands and post-write verification, add a native `-sandbox`; see [Native command sandbox](#native-command-sandbox--sandbox).
+
+## Strict approval (-strict-approval)
+
+`-strict-approval` suspends reusable approvals while the active conversation is **exposed**: outside content entered it, or Golem cannot tell where its content came from. Golem keeps a record of this for every conversation whether or not the flag is set; the flag decides whether approvals read it.
+
+```bash
+golem -root /path/to/project -allow-write -allow-exec -strict-approval
+```
+
+While the conversation is clean nothing changes: session grants and `/auto-edits` approve as before. Once it is exposed, Golem consults no grant. Every approval the run needs, the post-write verifier's included, asks about that one call, `[y/N]` only: `a` is not offered and denies, a yes approves that call alone, and no answer creates a grant. A run with no one to ask is denied instead, though no one-shot run can become exposed today (see the second table below). `agent_memory_create`, `agent_memory_promote`, `delegate_code` and `dispatch` keep running unprompted. A yes never overrides an existing refusal, such as a native sandbox's git-metadata refusal.
+
+The prompt opens with one line naming the first source that exposed the conversation:
+
+```text
+reusable approvals suspended: outside content entered this conversation (mcp__docs__fetch); /new or /clear starts fresh
+reusable approvals suspended: this conversation's provenance is unknown (history); /new or /clear starts fresh
+```
+
+The source is shown as one line with terminal controls made visible, because an MCP tool name comes from the server; `history` means history Golem has no record for, and foreign content with no recorded source shows no parentheses. On the host runtime the prompt for `run_command`, `start_command` or post-write verification adds `network is not confined`: an approved command there still has your network authority. The preview, the interceptor risk line and the harness file notice appear as they would otherwise.
+
+The flag does not select the Trusted profile, because it only narrows what approvals can do. Startup's `permissions:` line adds `strict-approval=on` after `verification=`. There is no in-session toggle in this version. `-p` and the AgentFlow modes (`-plan`, `-goal`, `-agentflow-status`, `-agentflow-resume`) accept the flag, where it has no effect today (see the second table below).
+
+**Seeing the state.** With the flag, `/grants` adds one line after the grant count:
+
+- `exposure: clean`
+- `exposure: foreign (<source>)` or `exposure: unknown (<source>)`, with the source named as in the prompt
+- `exposure: unknown (could not read the record)` when the stored record could not be read
+- `exposure: clean (--no-session: each turn starts fresh)` under `-no-session`
+
+In an exposed conversation, or one whose record could not be read, `/grants`, `/tools` and `/auto-edits` show a held write grant as `auto-edits: on (suspended: this conversation is exposed)`. `/auto-edits on` still stores the grant, but no prompt in an exposed conversation consults it.
+
+**What starts fresh.** The record belongs to the conversation, not to the grants:
+
+| Action | Exposure afterwards |
+|---|---|
+| `/new`, `-fresh` | clean: a new conversation |
+| `/clear` that succeeds | clean: the stored conversation is deleted |
+| `/clear` that fails | unchanged |
+| `/resume <id>` | that conversation's own record |
+| `/grants clear`, a one-time approval, `/compact`, time | unchanged |
+| A failed or empty turn | unchanged: the turn's content and its exposure are not saved |
+
+Under `-no-session` Golem keeps no history, so every turn starts clean: an MCP read suspends grants for the rest of that turn only, and the next turn uses them again.
+
+A conversation with history saved before this version has no exposure record, so Golem treats where its content came from as unknown for as long as it exists. With `-strict-approval`, each file write or edit, command, background start and verifier run in it then asks every time, and a run with no one to ask denies it; the agent-memory writes, `delegate_code` and `dispatch` stay unprompted, and a yes never overrides an existing refusal such as a native sandbox's git-metadata refusal. A plain `golem` start always opens the workspace's own conversation, so it keeps asking there until you run `/clear` in it; `/new` and `-fresh` open a separate conversation for that run only.
+
+### What exposes a conversation
+
+Reach is narrow. A row marked **limit** is content you did not write that still does not expose the conversation:
+
+| Input | Exposes it? | Why |
+|---|---|---|
+| An MCP tool result, including an error | yes, foreign | it comes from outside the workspace |
+| A tool result from a tool that declares no origin, or an invalid one | yes, unknown | its origin cannot be told |
+| A workspace tool that marks one call's result as foreign | yes, foreign | a tool may lower its own trust for a call |
+| A planning failure from a foreign tool | yes, foreign | its error text is not controlled |
+| `/consult` advice a run accepts | yes, foreign (`consult`) | a model Golem cannot see wrote it outside this process |
+| `/consult` advice that is blocked, previewed, staged or dropped | no | the model never saw it |
+| History with no valid record | yes, unknown (`history`) | saved before this version, or by a store that drops the record |
+| `read_file`, `search`, `glob`, `list`, `retrieve`, memory search | no | **limit:** a poisoned workspace file does not trigger this |
+| `run_command`, `start_command`, `command_tail`, verifier output | no | **limit:** `curl` output does not trigger this |
+| The `dispatch` and `delegate_code` result envelope | no, itself | anything a child run admits counts directly |
+| MCP tool catalog text | no | **limit:** pinned by the operator and flattened |
+| `/trust`-approved project context | no | approved by exact digest |
+| Recalled agent-memory records | no | **limit:** an exposed conversation can write a record a clean one later reads, without a prompt; the tool-result fence still applies |
+| A blocked observation | no | never admitted |
+| A denial, malformed arguments, an unknown tool | no | fixed text with no outside content |
+| Files an exposed conversation wrote | no | **limit:** a later clean conversation reads them as workspace files |
+| Context a library host passes with a turn | no | the host's own decision |
+
+### Where it can take effect today
+
+| Surface | Can it become exposed? | How |
+|---|---|---|
+| Interactive REPL | yes | an approved MCP call, `/consult` advice a run accepts, or resuming a conversation with no valid record |
+| One-shot `-p` | no | `-allow-tool` refuses MCP tools, `-p` runs with no session, `/consult` is REPL-only, and every built-in tool declares its origin |
+| AgentFlow modes | no | they use workspace-origin tools only and do not run through the session runtime |
+| `dispatch` children | no | limited to five read-only workspace tools |
+| A library host such as Firn | yes | its own foreign or undeclared tools, once it opts in; not through a runtime whose own sandbox option is native |
+
+A REPL session with no MCP tools and no `/consult` that started on this version never triggers it.
+
+A native `-sandbox` narrows the sources further. Golem refuses `-mcp-stdio` and `-mcp-http` there, along with `-agent-memory`, `-delegate` and `-dispatch`, so a native session becomes exposed only through `/consult` advice, which needs configured consultants and `-interceptors`, or by resuming an exposed or legacy conversation, including one an MCP tool exposed in an earlier host session. A live MCP session always runs on the host, with no OS network boundary.
 
 ## Native command sandbox (-sandbox)
 
@@ -309,7 +392,7 @@ Inside the REPL, `/help` lists every command: sessions (`/new`, `/clear`, `/resu
 
 `/compact` accepts no arguments and compacts the current session's persisted history. It keeps the newest four completed user/assistant exchanges, including their tool chains, along with system messages and any unresolved tool-call tail, and folds older messages into the existing progressive summary. The summarizer receives only the user and assistant text of the folded messages, never tool results. The command reports history token estimates that count only the user and assistant text Golem replays to the model plus the rendered summary; stored tool results and tool-call details are not counted, so tool-heavy threads show small numbers. The estimates also exclude the live prompt, tool schemas, and current turn. Unless `--no-compress` is set, Golem also compresses on its own after a saved goal once this estimate passes half the input ceiling, folding history down to half of that threshold, so the summary at the start of every request is rewritten once and then left alone for several goals. Every repeat with an existing summary can invoke the summarizer again, with model latency and provider charges even when the result is `(unchanged)`. A `(changed)` result can have a larger estimate, especially for short histories where the summary's trust-boundary wrapper outweighs the removed messages. The command is unavailable with `--no-session` or `--no-compress`. Cancellation or another failure before a successful save preserves the previous session snapshot; only a successful save replaces it.
 
-Approval prompts that offer an `a` answer also accept "always this session", and the prompt names the grant's scope because the two classes are deliberately asymmetric: `a` on a command prompt (`a=always this command`) covers only that exact command, while `a` on an edit prompt (`a=all edits this session`) enables auto-approval for **every** write/edit in the workspace — it is `/auto-edits on`, not "always this file". Writes to agent instruction and harness configuration files are the exception: `write_file` and `edit_file` always prompt `[y/N]` for them, `a` denies, no answer creates a grant, and `/auto-edits` does not cover them (see [Harness files always prompt](#harness-files-always-prompt)). `/auto-edits on|off` toggles the write/edit grant explicitly, `/grants` counts the active session grants, and `/grants clear` revokes them all without touching history. Grants are in-memory only and die with `/new`, `/clear`, a successful `/resume`, or process exit. Destination admission keeps its own lifetime: admitted destinations survive conversation resets and model switches, `/grants` lists them alongside the approval-grant count, and only `/grants clear` revokes them — after which the next goal re-runs the admission prompt.
+Approval prompts that offer an `a` answer also accept "always this session", and the prompt names the grant's scope because the two classes are deliberately asymmetric: `a` on a command prompt (`a=always this command`) covers only that exact command, while `a` on an edit prompt (`a=all edits this session`) enables auto-approval for **every** write/edit in the workspace — it is `/auto-edits on`, not "always this file". Writes to agent instruction and harness configuration files are the exception: `write_file` and `edit_file` always prompt `[y/N]` for them, `a` denies, no answer creates a grant, and `/auto-edits` does not cover them (see [Harness files always prompt](#harness-files-always-prompt)). `/auto-edits on|off` toggles the write/edit grant explicitly, `/grants` counts the active session grants (and, with [`-strict-approval`](#strict-approval--strict-approval), shows the conversation's exposure), and `/grants clear` revokes them all without touching history. Grants are in-memory only and die with `/new`, `/clear`, a successful `/resume`, or process exit. Destination admission keeps its own lifetime: admitted destinations survive conversation resets and model switches, `/grants` lists them alongside the approval-grant count, and only `/grants clear` revokes them — after which the next goal re-runs the admission prompt.
 
 `/allow-write` and `/allow-exec` work only in the Trusted profile. They mount exactly the tools the startup flags would, under the session's frozen `-sandbox` policy, with the same approval prompts, undo journal, and post-write verification; they are one-way for the session and never grant approval by themselves. With `-scratch`, promotion stays as it was at startup and `/allow-write` says so. In any other profile, including the default Inspect, they are refused before any store, key or manager is opened, for example `/allow-write is unavailable in profile inspect: restart with -profile trusted -allow-write`; a profile cannot change mid-session, so restart with the named flags. Likewise `/undo`, `/checkpoints`, `/auto-edits` and `/jobs` answer `writes disabled in profile inspect: restart with -profile trusted -allow-write` (or `exec disabled in profile inspect: restart with -profile trusted -allow-exec`) when the capability is not mounted; under Trusted they suggest `/allow-write` or `/allow-exec` instead.
 
