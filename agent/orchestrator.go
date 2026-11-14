@@ -193,6 +193,11 @@ func (o *Orchestrator) RunWithVerifier(ctx context.Context, req Request, obs Obs
 	ctx, req, budgetRun := newRunBudget(ctx, req)
 	defer func() { res.DescendantUsage = budgetRun.close() }()
 	ctx, exposure := newExposureRun(ctx, req)
+	if exposure.strict && req.Approver != nil {
+		// #584: dispatch and the verifier both receive req.Approver, so one
+		// wrapper gates both. A nil approver stays nil: it already denies.
+		req.Approver = &strictApprover{inner: req.Approver, exposure: exposure}
+	}
 	ic := &interceptorRun{}
 	res, err = o.run(ctx, req, obs, ic, budgetRun, verifier)
 	res.Risk = ic.result()
