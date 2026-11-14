@@ -12,7 +12,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -1761,4 +1763,580 @@ func TestAutomaticProbeBudget_PanicRefundsReservation(t *testing.T) {
 	}
 	state, err := mr.ResolveToolCall(t.Context(), localKey("probe-b"))
 	wantState(t, "a different key after the panic", state, err, fingerprint.CapProbeYes)
+}
+
+// ---------------------------------------------------------------------------
+// Lost write: a completed check whose append fails is kept for the registry's
+// life. Checks report 0 requests unless a case says otherwise, so the
+// allowance stays full and cannot be what holds a second check back; each case
+// uses a fresh registry, so a profile cached elsewhere cannot answer.
+// ---------------------------------------------------------------------------
+
+// failAppends makes every append through the log fail without reaching the
+// store.
+func (l *hookedLog) failAppends() {
+	l.setOnAppend(func(context.Context, []fingerprint.EvidenceRow) error { return errInjected })
+}
+
+// keptRows is a copy of the registry's kept rows.
+func keptRows(mr *ModelRegistry) []fingerprint.EvidenceRow {
+	mr.mu.RLock()
+	defer mr.mu.RUnlock()
+	return slices.Clone(mr.kept)
+}
+
+// lostWriteResolver is newLogResolver over a log whose appends fail, with a
+// prober whose checks report 0 requests.
+func lostWriteResolver(t *testing.T, state fingerprint.CapProbeState, provs []logProv, opts ...ModelRegistryOption) (*ModelRegistry, *logClock, *hookedLog, *capProbeFake) {
+	t.Helper()
+	log := &hookedLog{EvidenceStore: newEvidenceLog(t)}
+	log.failAppends()
+	prober := &capProbeFake{run: scripted(toolsResult(state, 0), nil)}
+	mr, clock := newLogResolver(t, log, prober, provs, opts...)
+	return mr, clock, log, prober
+}
+
+// routerOver is a router for mr whose provider registry serves "local" with
+// models.
+func routerOver(t *testing.T, mr *ModelRegistry, models ...string) *Router {
+	t.Helper()
+	provReg := NewRegistry()
+	if err := provReg.Register(newStubProvider("local", infos(models...)...)); err != nil {
+		t.Fatal(err)
+	}
+	router := NewRouter(mr, provReg)
+	t.Cleanup(func() { _ = router.Close() })
+	return router
+}
+
+func wantCalls(t *testing.T, label string, prober *capProbeFake, want int) {
+	t.Helper()
+	if n := prober.callCount(); n != want {
+		t.Fatalf("%s: calls = %d; want %d", label, n, want)
+	}
+}
+
+func TestLostWrite_SameCallQualifies(t *testing.T) {
+	mr, _, log, prober := lostWriteResolver(t, fingerprint.CapProbeYes, oneProv(t, infos(logModel)...))
+	mr.SetCapabilityFloor(nil) // chat and stream come only from the check's rows
+	if caps := lookupCaps(t, mr, "local"); caps.Has(CapChat) || caps.Has(CapStream) {
+		t.Fatalf("precondition: caps = %v; want neither chat nor stream", caps)
+	}
+	router := routerOver(t, mr, logModel)
+	if _, err := router.Route(t.Context(), RoutingRequest{Model: "local/" + logModel, UseCase: "agent", RequiredCaps: agentCaps}); err != nil {
+		t.Fatalf("Route: %v; want the checked model accepted in this call", err)
+	}
+	wantCalls(t, "route", prober, 1)
+	if len(log.appendCalls()) != 1 || len(storedRows(t, log.EvidenceStore, openAIBinding(t), logModel)) != 0 {
+		t.Fatal("precondition: want one failed append and nothing stored")
+	}
+}
+
+func TestLostWrite_LaterCallsReadKeptRows(t *testing.T) {
+	ctx := t.Context()
+	mr, _, _, prober := lostWriteResolver(t, fingerprint.CapProbeYes, oneProv(t, infos(logModel)...))
+	router := routerOver(t, mr, logModel)
+	state, err := mr.ResolveToolCall(ctx, localKey(logModel))
+	wantState(t, "the check", state, err, fingerprint.CapProbeYes)
+	allowance := allowanceOf(mr)
+
+	state, err = mr.ResolveToolCall(ctx, localKey(logModel))
+	wantState(t, "a later direct call", state, err, fingerprint.CapProbeYes)
+	if _, err := router.Route(ctx, RoutingRequest{Model: "local/" + logModel, UseCase: "agent", RequiredCaps: agentCaps}); err != nil {
+		t.Fatalf("Route after a direct call: %v", err)
+	}
+	wantCalls(t, "later calls", prober, 1)
+	if n := allowanceOf(mr); n != allowance {
+		t.Fatalf("allowance = %d; want unchanged %d", n, allowance)
+	}
+	exp, err := mr.ExplainToolCall(ctx, localKey(logModel))
+	if err != nil || exp.State != fingerprint.CapProbeYes || !exp.Has || !exp.Unsaved {
+		t.Fatalf("explanation = %+v, %v; want a yes marked Unsaved", exp, err)
+	}
+}
+
+func TestLostWrite_FollowerAndDuplicateSeeIt(t *testing.T) {
+	t.Run("a follower of a direct leader", func(t *testing.T) {
+		ctx := t.Context()
+		mr, _, _, prober := lostWriteResolver(t, fingerprint.CapProbeYes, oneProv(t, infos(logModel)...))
+		entered, release := make(chan struct{}), make(chan struct{})
+		prober.setRun(func(context.Context, string) (fingerprint.CapabilityProbeResult, error) {
+			close(entered)
+			<-release
+			return toolsResult(fingerprint.CapProbeYes, 0), nil
+		})
+		candidate, err := mr.Lookup(ctx, localKey(logModel))
+		if err != nil {
+			t.Fatal(err)
+		}
+		leader := resolveAsync(ctx, mr, localKey(logModel))
+		waitFor(t, entered, "the leader's check")
+		type ensured struct {
+			out   []*ModelProfile
+			diags []error
+		}
+		follower := make(chan ensured, 1)
+		go func() {
+			out, diags := mr.EnsureToolCallResolved(ctx, []*ModelProfile{candidate}, agentCaps)
+			follower <- ensured{out, diags}
+		}()
+		// Nothing outside the singleflight shows a join; this is room for the
+		// follower to reach it. One that arrived late reads the kept rows instead.
+		time.Sleep(50 * time.Millisecond)
+		close(release)
+		out := waitFor(t, leader, "the leader")
+		wantState(t, "leader", out.state, out.err, fingerprint.CapProbeYes)
+		got := waitFor(t, follower, "the follower")
+		if len(got.diags) != 0 || !got.out[0].Caps.Has(CapToolCall) {
+			t.Fatalf("follower candidate caps = %v, diags = %v; want tool_call", got.out[0].Caps, got.diags)
+		}
+		wantCalls(t, "leader and follower", prober, 1)
+	})
+	t.Run("the same key twice in one candidate list", func(t *testing.T) {
+		ctx := t.Context()
+		mr, _, _, prober := lostWriteResolver(t, fingerprint.CapProbeYes, oneProv(t, infos(logModel)...))
+		p, err := mr.Lookup(ctx, localKey(logModel))
+		if err != nil {
+			t.Fatal(err)
+		}
+		out, diags := mr.EnsureToolCallResolved(ctx, []*ModelProfile{p, p}, agentCaps)
+		if len(diags) != 0 || !out[0].Caps.Has(CapToolCall) || !out[1].Caps.Has(CapToolCall) {
+			t.Fatalf("caps = %v, %v, diags = %v; want both with tool_call", out[0].Caps, out[1].Caps, diags)
+		}
+		wantCalls(t, "duplicate", prober, 1)
+	})
+}
+
+func TestLostWrite_OverrideStillWins(t *testing.T) {
+	ctx := t.Context()
+	mr, _, _, prober := lostWriteResolver(t, fingerprint.CapProbeYes, oneProv(t, infos(logModel)...))
+	prober.setRun(func(context.Context, string) (fingerprint.CapabilityProbeResult, error) {
+		mr.SetCapabilityOverride(func(ModelKey) []string { return []string{"chat", "stream"} })
+		return toolsResult(fingerprint.CapProbeYes, 0), nil
+	})
+	p, err := mr.Lookup(ctx, localKey(logModel))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, _ := mr.EnsureToolCallResolved(ctx, []*ModelProfile{p}, agentCaps)
+	if out[0].Caps.Has(CapToolCall) {
+		t.Fatalf("candidate caps = %v; the override withholds tool_call", out[0].Caps)
+	}
+	// Control: the kept yes is what the override was hiding.
+	mr.SetCapabilityOverride(nil)
+	wantCaps(t, "without the override", lookupCaps(t, mr, "local"), agentCaps)
+}
+
+func TestLostWrite_KeptAttemptHoldsCooldown(t *testing.T) {
+	ctx := t.Context()
+	mr, clock, _, prober := lostWriteResolver(t, fingerprint.CapProbeInconclusive, oneProv(t, infos(logModel)...))
+	state, err := mr.ResolveToolCall(ctx, localKey(logModel))
+	wantState(t, "the check", state, err, fingerprint.CapProbeInconclusive)
+	clock.set(logT0.Add(time.Hour))
+	state, err = mr.ResolveToolCall(ctx, localKey(logModel))
+	wantState(t, "in the cooldown", state, err, fingerprint.CapProbeInconclusive)
+	wantCalls(t, "in the cooldown", prober, 1)
+	if n := allowanceOf(mr); n != automaticProbeAllowance {
+		t.Fatalf("allowance = %d; want full, so only the cooldown held the check", n)
+	}
+	exp, err := mr.ExplainToolCall(ctx, localKey(logModel))
+	if err != nil || exp.State != fingerprint.CapProbeInconclusive || !exp.Unsaved {
+		t.Fatalf("explanation = %+v, %v; want an inconclusive marked Unsaved", exp, err)
+	}
+}
+
+func TestLostWrite_ScopedToEndpoint(t *testing.T) {
+	b := openAIBinding(t)
+	t.Run("a name re-bound to another endpoint reads nothing", func(t *testing.T) {
+		ctx := t.Context()
+		binder := newSwitchBinder(b)
+		log := &hookedLog{EvidenceStore: newEvidenceLog(t)}
+		log.failAppends()
+		prober := &capProbeFake{run: scripted(toolsResult(fingerprint.CapProbeYes, 0), nil)}
+		mr, _ := newLogResolver(t, log, prober, oneProv(t, infos(logModel)...), WithEvidenceLog(log, binder.bind))
+		state, err := mr.ResolveToolCall(ctx, localKey(logModel))
+		wantState(t, "the check", state, err, fingerprint.CapProbeYes)
+		if exp, _ := mr.ExplainToolCall(ctx, localKey(logModel)); exp.State != fingerprint.CapProbeYes {
+			t.Fatalf("precondition: explanation state = %q; want the kept yes", exp.State)
+		}
+		binder.set(mustBinding(t, "http://127.0.0.1:9090", "openai-compat"))
+		if rows := mr.readEvidence(ctx, "local", []string{logModel}).rows[logModel]; len(rows) != 0 {
+			t.Fatalf("rows read through the new endpoint = %d; want 0", len(rows))
+		}
+		if exp, err := mr.ExplainToolCall(ctx, localKey(logModel)); err != nil || exp.State != "" || exp.Has {
+			t.Fatalf("explanation = %+v, %v; want nothing", exp, err)
+		}
+	})
+	t.Run("a second name at the same endpoint reads the rows", func(t *testing.T) {
+		ctx := t.Context()
+		mr, _, _, prober := lostWriteResolver(t, fingerprint.CapProbeYes, []logProv{
+			{name: "p1", binding: b, models: infos(logModel)},
+			{name: "p2", binding: b, models: infos(logModel)},
+		})
+		state, err := mr.ResolveToolCall(ctx, ModelKey{Provider: "p1", Model: logModel})
+		wantState(t, "p1", state, err, fingerprint.CapProbeYes)
+		state, err = mr.ResolveToolCall(ctx, ModelKey{Provider: "p2", Model: logModel})
+		wantState(t, "p2", state, err, fingerprint.CapProbeYes)
+		wantCalls(t, "p2", prober, 1)
+		wantCaps(t, "p2's profile", lookupCaps(t, mr, "p2"), agentCaps)
+	})
+}
+
+// toolCallReading reduces rows to their tool_call reading, and its answer's
+// state, for the fixture route.
+func toolCallReading(rows []fingerprint.EvidenceRow, now time.Time) (fingerprint.CapabilityReading, fingerprint.CapProbeState) {
+	reading := fingerprint.ReadCapabilities(rows, fingerprint.AdapterOpenAICompat, logDigest, now)[capabilityToolCall]
+	if a := readingAnswer(reading); a != nil {
+		return reading, a.State
+	}
+	return reading, ""
+}
+
+func TestLostWrite_OrderingMatchesStoredRows(t *testing.T) {
+	b := openAIBinding(t)
+	at := logT0.Add(time.Second)
+	key := []string{logModel}
+	// both answers the reading of view's rows in the given order and reversed.
+	both := func(t *testing.T, mr *ModelRegistry) (fingerprint.CapProbeState, fingerprint.CapProbeState) {
+		t.Helper()
+		rows := mr.readEvidence(t.Context(), "local", key).rows[logModel]
+		_, forward := toolCallReading(rows, at)
+		reversed := slices.Clone(rows)
+		slices.Reverse(reversed)
+		_, backward := toolCallReading(reversed, at)
+		return forward, backward
+	}
+
+	t.Run("a newer stored row beats a kept one", func(t *testing.T) {
+		ctx := t.Context()
+		mr, clock, log, _ := lostWriteResolver(t, fingerprint.CapProbeYes, oneProv(t, infos(logModel)...))
+		clock.set(logT0.Add(1500 * time.Microsecond))
+		state, err := mr.ResolveToolCall(ctx, localKey(logModel))
+		wantState(t, "the check", state, err, fingerprint.CapProbeYes)
+		if exp, _ := mr.ExplainToolCall(ctx, localKey(logModel)); exp.State != fingerprint.CapProbeYes || !exp.Unsaved {
+			t.Fatalf("precondition: explanation = %+v; want the kept yes", exp)
+		}
+		appendRows(t, log.EvidenceStore, logRow(b, capabilityToolCall, fingerprint.CapProbeNo, logDigest, logT0.Add(1900*time.Microsecond)))
+		exp, err := mr.ExplainToolCall(ctx, localKey(logModel))
+		if err != nil || exp.State != fingerprint.CapProbeNo || exp.Unsaved {
+			t.Fatalf("explanation = %+v, %v; want the stored no, not Unsaved", exp, err)
+		}
+	})
+	t.Run("two kept rows at one instant: the later wins", func(t *testing.T) {
+		mr, _ := newLogResolver(t, newEvidenceLog(t), nil, oneProv(t, infos(logModel)...))
+		mr.keepUnsavedEvidence([]fingerprint.EvidenceRow{logRow(b, capabilityToolCall, fingerprint.CapProbeNo, logDigest, at)})
+		mr.keepUnsavedEvidence([]fingerprint.EvidenceRow{logRow(b, capabilityToolCall, fingerprint.CapProbeYes, logDigest, at)})
+		kept := keptRows(mr)
+		if len(kept) != 2 || kept[0].ID != math.MinInt64 || kept[1].ID != math.MinInt64+1 {
+			t.Fatalf("kept IDs = %v; want MinInt64, MinInt64+1", kept)
+		}
+		if f, r := both(t, mr); f != fingerprint.CapProbeYes || r != fingerprint.CapProbeYes {
+			t.Fatalf("answers = %q, %q; want yes in both orders", f, r)
+		}
+	})
+	t.Run("a kept and a stored row at one instant: stored wins", func(t *testing.T) {
+		store := newEvidenceLog(t)
+		appendRows(t, store, logRow(b, capabilityToolCall, fingerprint.CapProbeNo, logDigest, at))
+		mr, _ := newLogResolver(t, store, nil, oneProv(t, infos(logModel)...))
+		mr.keepUnsavedEvidence([]fingerprint.EvidenceRow{logRow(b, capabilityToolCall, fingerprint.CapProbeYes, logDigest, at)})
+		if n := len(mr.readEvidence(t.Context(), "local", key).rows[logModel]); n != 2 {
+			t.Fatalf("rows read = %d; want the stored and the kept row", n)
+		}
+		if f, r := both(t, mr); f != fingerprint.CapProbeNo || r != fingerprint.CapProbeNo {
+			t.Fatalf("answers = %q, %q; want the stored no in both orders", f, r)
+		}
+	})
+	t.Run("across slots the choice is the same as for stored rows", func(t *testing.T) {
+		probe := logRow(b, capabilityToolCall, fingerprint.CapProbeYes, logDigest, at)
+		observed := logRow(b, capabilityToolCall, fingerprint.CapProbeNo, logDigest, at)
+		observed.Source = fingerprint.EvidenceSourceObserved
+		store := newEvidenceLog(t)
+		appendRows(t, store, observed)
+		mr, _ := newLogResolver(t, store, nil, oneProv(t, infos(logModel)...))
+		mr.keepUnsavedEvidence([]fingerprint.EvidenceRow{probe})
+
+		mirror := newEvidenceLog(t)
+		appendRows(t, mirror, probe, observed)
+		_, want := toolCallReading(storedRows(t, mirror, b, logModel), at)
+		if f, r := both(t, mr); f != want || r != want || want == "" {
+			t.Fatalf("answers = %q, %q; want %q, as for two stored rows", f, r, want)
+		}
+	})
+}
+
+// withoutIDs is readings with every row's ID zeroed, to compare kept rows with
+// the same rows stored.
+func withoutIDs(readings map[string]fingerprint.CapabilityReading) map[string]fingerprint.CapabilityReading {
+	strip := func(r *fingerprint.EvidenceRow) *fingerprint.EvidenceRow {
+		if r == nil {
+			return nil
+		}
+		c := *r
+		c.ID = 0
+		return &c
+	}
+	out := make(map[string]fingerprint.CapabilityReading, len(readings))
+	for k, c := range readings {
+		c.Probe, c.Observed, c.Provider = strip(c.Probe), strip(c.Observed), strip(c.Provider)
+		c.Attempt, c.Flag, c.OtherAdapter = strip(c.Attempt), strip(c.Flag), strip(c.OtherAdapter)
+		out[k] = c
+	}
+	return out
+}
+
+func TestLostWrite_LateOlderFailureKeepsNewerAttempt(t *testing.T) {
+	ctx := t.Context()
+	b := openAIBinding(t)
+	log := &hookedLog{EvidenceStore: newEvidenceLog(t)}
+	entered, release := make(chan struct{}), make(chan struct{})
+	var first atomic.Bool // not sync.Once: a second append must not wait for the first
+	log.setOnAppend(func(context.Context, []fingerprint.EvidenceRow) error {
+		if first.CompareAndSwap(false, true) {
+			close(entered)
+			<-release
+		}
+		return errInjected
+	})
+	prober := &capProbeFake{run: scripted(toolsResult(fingerprint.CapProbeInconclusive, 0), nil)}
+	mr, clock := newLogResolver(t, log, prober, []logProv{
+		{name: "p1", binding: b, models: infos(logModel)},
+		{name: "p2", binding: b, models: infos(logModel)},
+	})
+	older, newer := logT0, logT0.Add(time.Hour)
+
+	olderDone := resolveAsync(ctx, mr, ModelKey{Provider: "p1", Model: logModel})
+	waitFor(t, entered, "the older check's append")
+	clock.set(newer)
+	state, err := mr.ResolveToolCall(ctx, ModelKey{Provider: "p2", Model: logModel})
+	wantState(t, "the newer check", state, err, fingerprint.CapProbeInconclusive)
+	close(release)
+	out := waitFor(t, olderDone, "the older check")
+	wantState(t, "the older check", out.state, out.err, fingerprint.CapProbeInconclusive)
+	if n := len(keptRows(mr)); n != 6 {
+		t.Fatalf("kept rows = %d; want 6", n)
+	}
+
+	// The older attempt has expired; the newer one has not.
+	clock.set(older.Add(fingerprint.CapProbeInconclusiveTTL + time.Nanosecond))
+	state, err = mr.ResolveToolCall(ctx, ModelKey{Provider: "p1", Model: logModel})
+	wantState(t, "past the older expiry", state, err, fingerprint.CapProbeInconclusive)
+	wantCalls(t, "past the older expiry", prober, 2)
+
+	mirror := newEvidenceLog(t)
+	appendRows(t, mirror, keptRows(mr)...)
+	stored := storedRows(t, mirror, b, logModel)
+	for _, now := range []time.Time{newer, older.Add(fingerprint.CapProbeInconclusiveTTL + time.Nanosecond), newer.Add(fingerprint.CapProbeInconclusiveTTL + time.Nanosecond)} {
+		mr.now = func() time.Time { return now }
+		view := mr.readEvidence(ctx, "p1", []string{logModel})
+		got := withoutIDs(view.readings(logModel, logDigest))
+		want := withoutIDs(fingerprint.ReadCapabilities(stored, b.Adapter, logDigest, now))
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("at %v: readings of kept rows = %+v; want %+v, as stored", now, got, want)
+		}
+		if g, w := view.deadline(logModel, logDigest), fingerprint.NextReadingTransition(stored, b.Adapter, logDigest, now); !g.Equal(w) {
+			t.Fatalf("at %v: NextReadingTransition = %v; want %v, as stored", now, g, w)
+		}
+	}
+}
+
+func TestLostWrite_ExternalWriterStillCounts(t *testing.T) {
+	b := openAIBinding(t)
+	cases := []struct {
+		name string
+		at   time.Time
+		want fingerprint.CapProbeState
+	}{
+		{"a newer observation", logT0.Add(2 * time.Second), fingerprint.CapProbeNo},
+		{"an older observation", logT0, fingerprint.CapProbeYes},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			path := filepath.Join(t.TempDir(), "fingerprints.db")
+			log := &hookedLog{EvidenceStore: openEvidenceLog(t, path)}
+			log.failAppends()
+			mr, clock := newLogResolver(t, log, &capProbeFake{run: scripted(toolsResult(fingerprint.CapProbeYes, 0), nil)}, oneProv(t, infos(logModel)...))
+			clock.set(logT0.Add(time.Second))
+			state, err := mr.ResolveToolCall(ctx, localKey(logModel))
+			wantState(t, "the kept check", state, err, fingerprint.CapProbeYes)
+			appendRows(t, openEvidenceLog(t, path), logRow(b, capabilityToolCall, fingerprint.CapProbeNo, logDigest, tc.at))
+			clock.set(logT0.Add(3 * time.Second))
+			exp, err := mr.ExplainToolCall(ctx, localKey(logModel))
+			if err != nil || exp.State != tc.want {
+				t.Fatalf("explanation = %+v, %v; want %q, the newest of both", exp, err, tc.want)
+			}
+		})
+	}
+}
+
+// keptYes is the rows of a tools yes for logModel through b at at.
+func keptYes(b EvidenceBinding, at time.Time) []fingerprint.EvidenceRow {
+	return []fingerprint.EvidenceRow{
+		logRow(b, "chat", fingerprint.CapProbeYes, logDigest, at),
+		logRow(b, "stream", fingerprint.CapProbeYes, logDigest, at),
+		logRow(b, capabilityToolCall, fingerprint.CapProbeYes, logDigest, at),
+	}
+}
+
+func TestLostWrite_FencesBuildInFlight(t *testing.T) {
+	b := openAIBinding(t)
+	t.Run("a build that read the log before the rows were kept does not publish", func(t *testing.T) {
+		ctx := t.Context()
+		mr, prov := logRegistry(t, newEvidenceLog(t), "local", b, logDigest)
+		entered, release := make(chan struct{}), make(chan struct{})
+		var once sync.Once
+		prov.onModels = func() {
+			once.Do(func() {
+				close(entered)
+				<-release
+			})
+		}
+		built := make(chan *ModelProfile, 1)
+		go func() {
+			p, _ := mr.Lookup(ctx, ModelKey{Provider: "local", Model: logModel})
+			built <- p
+		}()
+		waitFor(t, entered, "the build after its log read")
+		mr.keepUnsavedEvidence(keptYes(b, logT0))
+		close(release)
+		if stale := waitFor(t, built, "the held build"); stale == nil || stale.Caps.Has(CapToolCall) {
+			t.Fatalf("precondition: the held build = %v; want one without tool_call", stale)
+		}
+		wantCaps(t, "the next lookup", lookupCaps(t, mr, "local"), agentCaps)
+	})
+	t.Run("keeping races no reader", func(t *testing.T) {
+		ctx := t.Context()
+		mr, _ := newLogResolver(t, newEvidenceLog(t), nil, oneProv(t, infos(logModel)...))
+		// Readers run until the keeper is done, so they overlap it. The keeper is
+		// bounded: every read reduces all of a model's kept rows.
+		const checks = 30
+		done := make(chan struct{})
+		var wg sync.WaitGroup
+		wg.Go(func() {
+			defer close(done)
+			for i := range checks {
+				mr.keepUnsavedEvidence(keptYes(b, logT0.Add(time.Duration(i)*time.Millisecond)))
+				time.Sleep(time.Millisecond)
+			}
+		})
+		readers := []func(){
+			func() { _, _ = mr.Lookup(ctx, localKey(logModel)) },
+			func() { _, _ = mr.ExplainToolCall(ctx, localKey(logModel)) },
+			func() { _, _ = mr.ProjectListedModels(ctx, "local", infos(logModel)) },
+		}
+		for _, read := range readers {
+			wg.Go(func() {
+				for {
+					select {
+					case <-done:
+						return
+					default:
+						read()
+					}
+				}
+			})
+		}
+		wg.Wait()
+		if n := len(keptRows(mr)); n != 3*checks {
+			t.Fatalf("kept rows = %d; want %d", n, 3*checks)
+		}
+	})
+}
+
+func TestLostWrite_ExpiryRebuilds(t *testing.T) {
+	store := newEvidenceLog(t)
+	b := openAIBinding(t)
+	appendRows(t, store, logRow(b, capabilityToolCall, fingerprint.CapProbeYes, logDigest, logT0))
+	mr, clock := newLogResolver(t, store, nil, oneProv(t, infos(logModel)...))
+	wantCaps(t, "the stored yes", lookupCaps(t, mr, "local"), agentCaps)
+
+	no := logRow(b, capabilityToolCall, fingerprint.CapProbeNo, logDigest, logT0.Add(time.Second))
+	no.ExpiresAt = no.ObservedAt.Add(time.Hour)
+	mr.keepUnsavedEvidence([]fingerprint.EvidenceRow{no})
+	clock.set(no.ExpiresAt)
+	if lookupCaps(t, mr, "local").Has(CapToolCall) {
+		t.Fatal("at ExpiresAt the kept no does not count")
+	}
+	clock.set(no.ExpiresAt.Add(time.Nanosecond))
+	wantCaps(t, "the instant after ExpiresAt", lookupCaps(t, mr, "local"), agentCaps)
+}
+
+func TestLostWrite_CancelledAppendIsKept(t *testing.T) {
+	t.Run("a completed check", func(t *testing.T) {
+		log := &hookedLog{EvidenceStore: newEvidenceLog(t)}
+		log.setOnAppend(func(ctx context.Context, _ []fingerprint.EvidenceRow) error { return ctx.Err() })
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		prober := &capProbeFake{run: func(context.Context, string) (fingerprint.CapabilityProbeResult, error) {
+			cancel()
+			return toolsResult(fingerprint.CapProbeYes, 0), nil
+		}}
+		mr, _ := newLogResolver(t, log, prober, oneProv(t, infos(logModel)...))
+		_, _ = mr.ResolveToolCall(ctx, localKey(logModel))
+		if n := len(keptRows(mr)); n != 3 {
+			t.Fatalf("kept rows = %d; want the check's 3", n)
+		}
+		state, err := mr.ResolveToolCall(t.Context(), localKey(logModel))
+		wantState(t, "a later call", state, err, fingerprint.CapProbeYes)
+		wantCalls(t, "a later call", prober, 1)
+	})
+	t.Run("an interrupted check", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		prober := &capProbeFake{run: func(ctx context.Context, _ string) (fingerprint.CapabilityProbeResult, error) {
+			cancel()
+			return fingerprint.CapabilityProbeResult{}, ctx.Err()
+		}}
+		log := &hookedLog{EvidenceStore: newEvidenceLog(t)}
+		log.failAppends()
+		mr, _ := newLogResolver(t, log, prober, oneProv(t, infos(logModel)...))
+		state, err := mr.ResolveToolCall(ctx, localKey(logModel))
+		wantErrIs(t, "interrupted", state, err, context.Canceled)
+		if n := len(keptRows(mr)); n != 0 {
+			t.Fatalf("kept rows = %d; want 0", n)
+		}
+	})
+}
+
+func TestLostWrite_SecondRegistrySeesNothing(t *testing.T) {
+	ctx := t.Context()
+	path := filepath.Join(t.TempDir(), "fingerprints.db")
+	log := &hookedLog{EvidenceStore: openEvidenceLog(t, path)}
+	log.failAppends()
+	first, _ := newLogResolver(t, log, &capProbeFake{run: scripted(toolsResult(fingerprint.CapProbeYes, 0), nil)}, oneProv(t, infos(logModel)...))
+	state, err := first.ResolveToolCall(ctx, localKey(logModel))
+	wantState(t, "first registry", state, err, fingerprint.CapProbeYes)
+	if exp, _ := first.ExplainToolCall(ctx, localKey(logModel)); exp.State != fingerprint.CapProbeYes {
+		t.Fatalf("precondition: first registry explanation state = %q; want the kept yes", exp.State)
+	}
+
+	second, _ := newLogResolver(t, openEvidenceLog(t, path), nil, oneProv(t, infos(logModel)...))
+	if exp, err := second.ExplainToolCall(ctx, localKey(logModel)); err != nil || exp.State != "" || exp.Has {
+		t.Fatalf("second registry explanation = %+v, %v; want nothing", exp, err)
+	}
+	if n := len(storedRows(t, log.EvidenceStore, openAIBinding(t), logModel)); n != 0 {
+		t.Fatalf("stored rows = %d; want 0", n)
+	}
+}
+
+func TestLostWrite_NoLogPathKeepsItsPatch(t *testing.T) {
+	store := newFakeCapProbeStore()
+	store.saveErr = errInjected
+	prober := newFakeToolCallProber()
+	prober.outcomes[logModel] = fingerprint.CapProbeOutcome{State: fingerprint.CapProbeYes}
+	mr := newCapResolveRegistry(t, "local", []string{logModel}, store, prober)
+	p, err := mr.Lookup(t.Context(), localKey(logModel))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, _ := mr.EnsureToolCallResolved(t.Context(), []*ModelProfile{p}, CapToolCall)
+	if !out[0].Caps.Has(CapToolCall) || out[0] == p || p.Caps.Has(CapToolCall) {
+		t.Fatalf("out caps = %v (same pointer %v), input caps = %v; want a patched copy", out[0].Caps, out[0] == p, p.Caps)
+	}
+	if n := len(keptRows(mr)); n != 0 {
+		t.Fatalf("kept rows = %d; the legacy path keeps none", n)
+	}
+	if lookupCaps(t, mr, "local").Has(CapToolCall) {
+		t.Fatal("the patch reached the registry's profile; it is the caller's copy only")
+	}
 }

@@ -110,6 +110,19 @@ type ModelRegistry struct {
 	budgetMu        sync.Mutex
 	budgetRemaining int
 	budgetReported  map[ModelKey]bool
+
+	// kept holds, for the registry's life, the rows of completed checks whose
+	// append failed (keepUnsavedEvidence). A kept row's ID is
+	// math.MinInt64 plus its index here. Guarded by mu.
+	//
+	// ponytail: never compacted, so it grows by at most three rows per failed
+	// generation check and seven per failed native check, with no lifetime
+	// bound on native checks; readEvidence copies a model's kept rows under
+	// RLock and the reduction and NextReadingTransition (quadratic in a model's
+	// rows) then run outside it. Upgrade path if it ever matters: drop a kept
+	// row only when another kept row of the same slot is newer and, for an
+	// answer, does not expire before it.
+	kept []fingerprint.EvidenceRow
 }
 
 // FingerprintProberSpec contains the model prober and digest identity the
@@ -451,7 +464,11 @@ func (r *ModelRegistry) Refresh(ctx context.Context, key ModelKey) (*ModelProfil
 // returns with no request; an inconclusive attempt still before its ExpiresAt
 // (inclusive) returns inconclusive with no request, which is the 24-hour
 // cooldown; otherwise the prober must implement fingerprint.CapabilityProber
-// (else ""), and every row the check produced is appended in one call. A
+// (else ""), and every row the check produced is appended in one call. When
+// that append fails the rows are kept in memory for the registry's life and
+// read beside the log, so this process (a singleflight follower and later
+// callers included) still sees the result; ExplainToolCall marks it Unsaved,
+// another process never sees it, and the write is not retried. A
 // generation check (openai-compat's chat-stream-tools) spends the registry's
 // fixed allowance of 2 requests the check sends, shared by every caller and
 // never refilled; a refused check returns ErrAutomaticProbeBudgetExhausted and
@@ -1104,6 +1121,10 @@ type ToolCallExplanation struct {
 	State    fingerprint.CapProbeState // cached probe state, "" if none
 	TestedAt time.Time                 // zero when no probe row
 	Valid    bool                      // cached probe matches current identity/version and is unexpired
+	// Unsaved: the answer or attempt behind State was never stored. Its check
+	// completed but the evidence log append failed, so the registry serves it
+	// for its own life only and another process or a restart never sees it.
+	Unsaved bool
 }
 
 // ExplainToolCall reports where a model's tool_call bit comes from (or why it

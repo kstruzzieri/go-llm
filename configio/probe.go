@@ -87,22 +87,27 @@ func ProbeToolCall(ctx context.Context, resolver ToolCallResolver, key provider.
 // probe row holds this verdict AND currently validates (a stale same-state
 // row will not validate next session — Valid is required), or explicit/
 // catalog knowledge declares it, or (for yes) the merged profile carries
-// the bit from a source the next session re-derives. A failed read is
-// conservative Persisted=false — never an error; the verdict stands.
+// the bit from a source the next session re-derives. An explanation resting
+// on a row that was never stored (Unsaved: the log append failed, so only
+// this registry holds it) is not durable unless explicit or catalog
+// knowledge declares it. A failed read is conservative Persisted=false —
+// never an error; the verdict stands.
 func probeDurable(ctx context.Context, resolver ToolCallResolver, key provider.ModelKey, state fingerprint.CapProbeState) bool {
 	exp, err := resolver.ExplainToolCall(ctx, key)
 	if err != nil {
 		return false
 	}
 	switch {
-	case exp.State == state && exp.Valid: // probe row holds this verdict and validates
-		return true
 	// Source literals are provider.ToolCallExplanation's documented vocabulary
 	// (model_registry.go: "explicit" | "catalog" | "runtime" | "probe" |
 	// "unknown"); a provider-side rename degrades this to conservative
 	// Persisted=false.
 	case exp.Source == "explicit" || exp.Source == "catalog":
 		return true // durable without a row
+	case exp.Unsaved:
+		return false // only this registry holds the row
+	case exp.State == state && exp.Valid: // probe row holds this verdict and validates
+		return true
 	case state == fingerprint.CapProbeYes && exp.Has && exp.Source == "runtime":
 		// ExplainToolCall labels this "runtime" only when its fresh,
 		// read-only projection re-derives the cached profile bit.

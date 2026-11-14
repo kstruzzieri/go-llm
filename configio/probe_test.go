@@ -328,3 +328,127 @@ func TestNoProbeWithoutCallerRequest(t *testing.T) {
 		t.Fatalf("control: %+v, %v, %d requests; want yes after one request", out, err, chats.Load())
 	}
 }
+
+// scriptedCapProber is a fingerprint.CapabilityProber whose every check
+// returns result. Profiling is not expected.
+type scriptedCapProber struct {
+	result fingerprint.CapabilityProbeResult
+	calls  atomic.Int64
+}
+
+func (p *scriptedCapProber) ProbeCapabilities(context.Context, string, fingerprint.CapabilityProbeRequest) (fingerprint.CapabilityProbeResult, error) {
+	p.calls.Add(1)
+	return p.result, nil
+}
+
+func (p *scriptedCapProber) DetectKind(context.Context, string) (*fingerprint.KindDetection, error) {
+	return nil, errors.New("profiling is not expected")
+}
+
+func (p *scriptedCapProber) ProbeChat(context.Context, string, interface{}) (*fingerprint.ChatMetrics, error) {
+	return nil, errors.New("profiling is not expected")
+}
+
+func (p *scriptedCapProber) ProbeEmbedding(context.Context, string) (*fingerprint.EmbeddingMetrics, error) {
+	return nil, errors.New("profiling is not expected")
+}
+
+// unwritableLog is an evidence log whose appends always fail.
+type unwritableLog struct{ fingerprint.EvidenceStore }
+
+func (unwritableLog) AppendEvidence(context.Context, ...fingerprint.EvidenceRow) error {
+	return errors.New("disk full")
+}
+
+// toolCallCheck is a completed check's result for tool_call at state. Through
+// openai-compat it is the streamed check's (chat and stream too, probe
+// source); through ollama it is what /api/show reported (provider source).
+func toolCallCheck(apiFormat string, state fingerprint.CapProbeState) fingerprint.CapabilityProbeResult {
+	source, method, requests := fingerprint.EvidenceSourceProbe, fingerprint.MethodChatStreamTools, 1
+	if apiFormat == "ollama" {
+		source, method, requests = fingerprint.EvidenceSourceProvider, fingerprint.MethodOllamaShow, 1
+	}
+	tc := fingerprint.ProbeAnswer{Capability: "tool_call", Source: source, Kind: fingerprint.EvidenceKindAnswer, State: state}
+	if state == fingerprint.CapProbeInconclusive {
+		tc.Kind, tc.TTL, tc.Detail = fingerprint.EvidenceKindAttempt, fingerprint.CapProbeInconclusiveTTL, fingerprint.DetailToolIgnored
+	}
+	answers := []fingerprint.ProbeAnswer{tc}
+	if apiFormat != "ollama" {
+		for _, c := range []string{"chat", "stream"} {
+			answers = append(answers, fingerprint.ProbeAnswer{Capability: c, Source: source, Kind: fingerprint.EvidenceKindAnswer, State: fingerprint.CapProbeYes})
+		}
+	}
+	return fingerprint.CapabilityProbeResult{Method: method, Requests: requests, Answers: answers}
+}
+
+// lostWriteRegistry is a real registry bound to an evidence log that cannot be
+// written, serving model through provider "lc" over apiFormat, with prober.
+func lostWriteRegistry(t *testing.T, apiFormat, model string, prober *scriptedCapProber) (*provider.Registry, *provider.ModelRegistry) {
+	t.Helper()
+	reg := provider.NewRegistry()
+	if err := reg.Register(&fakeProvider{name: "lc", models: []provider.ModelInfo{{Name: model, Digest: "sha256:d", ContextWindow: 32768}}}); err != nil {
+		t.Fatal(err)
+	}
+	binding, err := provider.EvidenceBindingFor("http://127.0.0.1:8080", apiFormat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mr, err := provider.NewModelRegistry(reg, nil,
+		provider.WithEvidenceLog(unwritableLog{newStore(t)}, func(name string) (provider.EvidenceBinding, bool) { return binding, name == "lc" }),
+		provider.WithCapabilityProber(func(context.Context, provider.ModelKey, *provider.ModelInfo, provider.Provider) (*provider.FingerprintProberSpec, error) {
+			return &provider.FingerprintProberSpec{Prober: prober}, nil
+		}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mr.SetCapabilityFloor(func(provider.ModelKey) []string { return []string{"chat", "stream"} })
+	return reg, mr
+}
+
+func TestLostWrite_NotDurable(t *testing.T) {
+	const model = "mystery-model-x" // not in the catalog
+	agent := provider.RoutingRequest{Model: "lc/" + model, UseCase: "agent", RequiredCaps: provider.CapChat | provider.CapStream | provider.CapToolCall}
+	for _, apiFormat := range []string{"openai-compat", "ollama"} {
+		for _, state := range []fingerprint.CapProbeState{fingerprint.CapProbeYes, fingerprint.CapProbeNo, fingerprint.CapProbeInconclusive} {
+			t.Run(apiFormat+"/kept "+string(state), func(t *testing.T) {
+				prober := &scriptedCapProber{result: toolCallCheck(apiFormat, state)}
+				reg, mr := lostWriteRegistry(t, apiFormat, model, prober)
+				out, err := ProbeToolCall(t.Context(), mr, key("lc", model))
+				if err != nil || out.State != state || out.Persisted {
+					t.Fatalf("ProbeToolCall = %+v, %v; want {State:%s Persisted:false}", out, err, state)
+				}
+				if state != fingerprint.CapProbeYes {
+					return
+				}
+				router := provider.NewRouter(mr, reg)
+				defer func() { _ = router.Close() }()
+				if _, err := router.Route(t.Context(), agent); err != nil {
+					t.Fatalf("Route in the same session: %v; want the kept yes to serve it", err)
+				}
+				if n := prober.calls.Load(); n != 1 {
+					t.Fatalf("checks = %d; want 1", n)
+				}
+			})
+		}
+	}
+	t.Run("an explicit declaration stays durable", func(t *testing.T) {
+		_, mr := lostWriteRegistry(t, "openai-compat", model, &scriptedCapProber{result: toolCallCheck("openai-compat", fingerprint.CapProbeYes)})
+		if out, err := ProbeToolCall(t.Context(), mr, key("lc", model)); err != nil || out.Persisted {
+			t.Fatalf("precondition: ProbeToolCall = %+v, %v; want a kept yes, not persisted", out, err)
+		}
+		mr.SetCapabilityOverride(func(provider.ModelKey) []string { return []string{"chat", "stream", "tool_call"} })
+		out, err := ProbeToolCall(t.Context(), mr, key("lc", model))
+		if err != nil || out.State != fingerprint.CapProbeYes || !out.Persisted {
+			t.Fatalf("ProbeToolCall = %+v, %v; want {State:yes Persisted:true}", out, err)
+		}
+	})
+	t.Run("a catalog entry stays durable", func(t *testing.T) {
+		const catalogModel = "qwen3:8b" // the catalog declares tool_call
+		prober := &scriptedCapProber{result: toolCallCheck("openai-compat", fingerprint.CapProbeYes)}
+		_, mr := lostWriteRegistry(t, "openai-compat", catalogModel, prober)
+		out, err := ProbeToolCall(t.Context(), mr, key("lc", catalogModel))
+		if err != nil || out.State != fingerprint.CapProbeYes || !out.Persisted || prober.calls.Load() != 0 {
+			t.Fatalf("ProbeToolCall = %+v, %v, %d checks; want {State:yes Persisted:true} with no check", out, err, prober.calls.Load())
+		}
+	})
+}

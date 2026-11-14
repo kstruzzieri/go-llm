@@ -11,7 +11,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"net/url"
+	"slices"
 	"sync"
 	"time"
 
@@ -111,8 +113,10 @@ type evidenceView struct {
 }
 
 // readEvidence reads the log for models in one snapshot, without account reads:
-// capability evidence belongs to the endpoint and adapter, not to a key. A failed
-// read degrades to no evidence, like the old table's, and the view remembers it.
+// capability evidence belongs to the endpoint and adapter, not to a key. A
+// successful read adds the registry's kept rows (keepUnsavedEvidence) for the
+// binding's endpoint. A failed read degrades to no evidence, kept rows included,
+// like the old table's, and the view remembers it.
 func (r *ModelRegistry) readEvidence(ctx context.Context, provider string, models []string) *evidenceView {
 	if r.evidenceStore == nil {
 		return nil
@@ -134,6 +138,16 @@ func (r *ModelRegistry) readEvidence(ctx context.Context, provider string, model
 	for _, row := range snap.Rows {
 		view.rows[row.Model] = append(view.rows[row.Model], row)
 	}
+	// Kept rows join as the store's endpoint query would return them: this
+	// endpoint, a model asked for, any adapter. Copied by value into the view's
+	// own slices, so no view shares storage with r.kept.
+	r.mu.RLock()
+	for _, row := range r.kept {
+		if row.Endpoint == binding.Endpoint && slices.Contains(models, row.Model) {
+			view.rows[row.Model] = append(view.rows[row.Model], row)
+		}
+	}
+	r.mu.RUnlock()
 	return view
 }
 
@@ -226,9 +240,11 @@ func (r *ModelRegistry) explainToolCallFromLog(ctx context.Context, key ModelKey
 	switch {
 	case answer != nil:
 		exp.State, exp.TestedAt, exp.Valid = answer.State, answer.ObservedAt, true
+		exp.Unsaved = answer.ID < 0
 	case attempt != nil:
 		exp.State, exp.TestedAt = attempt.State, attempt.ObservedAt
 		exp.Valid = attempt.ExpiresAt.IsZero() || !log.now.After(attempt.ExpiresAt)
+		exp.Unsaved = attempt.ID < 0
 	}
 
 	direct := answer != nil && answer.Source != fingerprint.EvidenceSourceProvider
@@ -493,20 +509,36 @@ func (r *ModelRegistry) resolveToolCallFromLog(ctx context.Context, key ModelKey
 	if err != nil {
 		return "", err
 	}
-	// 10. The cached profile is dropped either way, so phase 3's Lookup in the
-	// same call rebuilds it.
+	// 10. The cached profile is dropped either way (keeping drops them all), so
+	// phase 3's Lookup in the same call rebuilds it. A failed append, the
+	// caller's cancellation included, keeps the rows.
 	if err := r.evidenceStore.AppendEvidence(ctx, rows...); err != nil {
 		r.keepUnsavedEvidence(rows)
+	} else {
+		r.invalidateProfile(key)
 	}
-	r.invalidateProfile(key)
 	// 11.
 	return state, nil
 }
 
-// keepUnsavedEvidence is where the rows of a completed check whose append
-// failed are kept for the registry's life (D11, the "Lost write" rules). Until
-// that lands it keeps nothing.
-func (r *ModelRegistry) keepUnsavedEvidence([]fingerprint.EvidenceRow) {}
+// keepUnsavedEvidence keeps, for the registry's life, the rows of a completed
+// check whose append failed, so this process still reads what the check found.
+// Each row is unchanged but for its ID, which counts up from math.MinInt64: a
+// negative ID marks a row that was never stored, a stored row beats a kept one
+// on an exact ObservedAt tie, and a later kept row beats an earlier one. Keeping
+// the rows, dropping every cached profile and fencing builds in flight happen
+// in one critical section with no store I/O, as syncGeneration does for a
+// write. The write is not retried; another process sees nothing.
+func (r *ModelRegistry) keepUnsavedEvidence(rows []fingerprint.EvidenceRow) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, row := range rows {
+		row.ID = math.MinInt64 + int64(len(r.kept))
+		r.kept = append(r.kept, row)
+	}
+	clear(r.profiles)
+	r.overrideVersion++
+}
 
 // toolCallFromLog is one read of the log for key's tool_call at digest. done
 // means it settled the resolution: a definitive answer, an attempt still in its
