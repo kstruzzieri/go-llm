@@ -52,9 +52,13 @@ func (p *OpenAICompatProber) ProbeCapabilities(ctx context.Context, model string
 			return result, wrap(err)
 		}
 		final, err := p.streamOnce(ctx, model, recipe, i == 0)
-		// Requests counts what was sent: a body the client's content guard
-		// refuses never leaves the process.
-		if !errors.Is(err, provider.ErrContentDenied) {
+		// Requests counts what was sent. Two refusals send nothing: a body
+		// the client's content guard refuses, and a destination denial from
+		// the guarded transport or gate, which is a *DestinationDeniedError.
+		// A refused redirect also matches ErrDestinationDenied but is not
+		// that type, and follows a request that was sent, so it counts.
+		var denied *provider.DestinationDeniedError
+		if !errors.Is(err, provider.ErrContentDenied) && !errors.As(err, &denied) {
 			result.Requests++
 		}
 		if err == nil {

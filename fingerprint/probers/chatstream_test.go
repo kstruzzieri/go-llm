@@ -1250,3 +1250,58 @@ func TestCompleteToolCall(t *testing.T) {
 		}
 	}
 }
+
+// TestChatStreamTools_DestinationDenialIsNotARequest drives a real guarded
+// client: a denial before sending counts nothing; a refused redirect follows a
+// request that was sent and counts one.
+func TestChatStreamTools_DestinationDenialIsNotARequest(t *testing.T) {
+	target := newProbeStub(t)
+	stub := newProbeStub(t, func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.srv.URL+r.URL.Path, http.StatusTemporaryRedirect)
+	})
+	dest, err := provider.NewDestination("llamacpp", stub.srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := provider.NewDestinationManifest(provider.DestinationEdge{Purpose: "agent", Destination: dest})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gate := provider.NewDestinationGate()
+	if err := gate.Install(provider.NewDestinationPolicy(dest), manifest); err != nil {
+		t.Fatal(err)
+	}
+	hc, err := provider.GuardHTTPClient(gate, dest, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := newStreamProber(stub.srv.URL, openaicompat.WithHTTPClient(hc))
+
+	t.Run("denied before sending", func(t *testing.T) {
+		// A context the gate never bound: the transport refuses before dialing.
+		res, err := p.ProbeCapabilities(context.Background(), "m", toolsRequest())
+		var denied *provider.DestinationDeniedError
+		if !errors.As(err, &denied) {
+			t.Fatalf("err = %v, want a *DestinationDeniedError", err)
+		}
+		assertFailed(t, res, err, stub, 0)
+	})
+	t.Run("redirect refused after sending", func(t *testing.T) {
+		bound, err := gate.Bind(context.Background(), "agent", "llamacpp")
+		if err != nil {
+			t.Fatal(err)
+		}
+		res, err := p.ProbeCapabilities(bound, "m", toolsRequest())
+		if !errors.Is(err, provider.ErrDestinationDenied) {
+			t.Fatalf("err = %v, want ErrDestinationDenied", err)
+		}
+		var denied *provider.DestinationDeniedError
+		if errors.As(err, &denied) {
+			t.Fatalf("a refused redirect carries a *DestinationDeniedError: %v", err)
+		}
+		assertFailed(t, res, err, stub, 1)
+		if target.hits() != 0 {
+			t.Errorf("redirect target saw %d requests, want 0", target.hits())
+		}
+	})
+}
