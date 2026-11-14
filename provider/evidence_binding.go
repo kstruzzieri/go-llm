@@ -13,7 +13,6 @@ import (
 	"fmt"
 	"math"
 	"net/url"
-	"slices"
 	"sync"
 	"time"
 
@@ -139,11 +138,16 @@ func (r *ModelRegistry) readEvidence(ctx context.Context, provider string, model
 		view.rows[row.Model] = append(view.rows[row.Model], row)
 	}
 	// Kept rows join as the store's endpoint query would return them: this
-	// endpoint, a model asked for, any adapter. Copied by value into the view's
-	// own slices, so no view shares storage with r.kept.
+	// endpoint, a model asked for, any adapter. The work under RLock is one pass
+	// over all kept rows, copying the matching ones by value into the view's own
+	// slices, so no view shares storage with r.kept.
+	asked := make(map[string]bool, len(models))
+	for _, m := range models {
+		asked[m] = true
+	}
 	r.mu.RLock()
 	for _, row := range r.kept {
-		if row.Endpoint == binding.Endpoint && slices.Contains(models, row.Model) {
+		if row.Endpoint == binding.Endpoint && asked[row.Model] {
 			view.rows[row.Model] = append(view.rows[row.Model], row)
 		}
 	}
@@ -533,6 +537,8 @@ func (r *ModelRegistry) keepUnsavedEvidence(rows []fingerprint.EvidenceRow) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for _, row := range rows {
+		// Valid only while kept rows are never dropped; dropping them needs a
+		// separate counter, or IDs repeat and a later row can lose a tie.
 		row.ID = math.MinInt64 + int64(len(r.kept))
 		r.kept = append(r.kept, row)
 	}

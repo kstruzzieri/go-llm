@@ -259,6 +259,35 @@ func TestProbeToolCall_CancelDuringDurabilityReadPublishesNothing(t *testing.T) 
 	}
 }
 
+// TestProbeToolCall_UnsavedExplanationDurability pins probeDurable's order: an
+// explicit or catalog source is durable even when the explanation rests on a
+// row that was never stored; any other Unsaved explanation is not, though it
+// would otherwise validate.
+func TestProbeToolCall_UnsavedExplanationDurability(t *testing.T) {
+	yes, no, inc := fingerprint.CapProbeYes, fingerprint.CapProbeNo, fingerprint.CapProbeInconclusive
+	cases := []struct {
+		name  string
+		state fingerprint.CapProbeState
+		exp   provider.ToolCallExplanation
+		want  bool
+	}{
+		{"catalog over a kept yes", yes, provider.ToolCallExplanation{Source: "catalog", Has: true, State: yes, Valid: true, Unsaved: true}, true},
+		{"explicit over a kept yes", yes, provider.ToolCallExplanation{Source: "explicit", Has: true, State: yes, Valid: true, Unsaved: true}, true},
+		{"kept probe yes", yes, provider.ToolCallExplanation{Source: "probe", Has: true, State: yes, Valid: true, Unsaved: true}, false},
+		{"kept provider yes", yes, provider.ToolCallExplanation{Source: "runtime", Has: true, State: yes, Valid: true, Unsaved: true}, false},
+		{"kept probe no", no, provider.ToolCallExplanation{Source: "probe", State: no, Valid: true, Unsaved: true}, false},
+		{"kept probe attempt", inc, provider.ToolCallExplanation{Source: "probe", State: inc, Valid: true, Unsaved: true}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := ProbeToolCall(context.Background(), &fakeResolver{state: tc.state, exp: tc.exp}, key("p", "m"))
+			if err != nil || out.State != tc.state || out.Persisted != tc.want {
+				t.Fatalf("ProbeToolCall = %+v, %v; want {State:%s Persisted:%v}", out, err, tc.state, tc.want)
+			}
+		})
+	}
+}
+
 func TestProbeToolCall_EvidenceErrorCodes(t *testing.T) {
 	cases := []struct {
 		sentinel error

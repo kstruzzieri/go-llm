@@ -117,11 +117,12 @@ type ModelRegistry struct {
 	//
 	// ponytail: never compacted, so it grows by at most three rows per failed
 	// generation check and seven per failed native check, with no lifetime
-	// bound on native checks; readEvidence copies a model's kept rows under
-	// RLock and the reduction and NextReadingTransition (quadratic in a model's
-	// rows) then run outside it. Upgrade path if it ever matters: drop a kept
-	// row only when another kept row of the same slot is newer and, for an
-	// answer, does not expire before it.
+	// bound on native checks. Every readEvidence makes one pass over all kept
+	// rows under RLock, copying the matching ones, and the reduction and
+	// NextReadingTransition (quadratic in a model's rows) then run outside it.
+	// Upgrade path if it ever matters: drop a kept row only when another kept
+	// row of the same slot is newer and, for an answer, does not expire before
+	// it, and give IDs their own counter (they are derived from len(kept)).
 	kept []fingerprint.EvidenceRow
 }
 

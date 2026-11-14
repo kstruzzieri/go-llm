@@ -15,6 +15,7 @@ import (
 	"math"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -1880,9 +1881,7 @@ func TestLostWrite_FollowerAndDuplicateSeeIt(t *testing.T) {
 			out, diags := mr.EnsureToolCallResolved(ctx, []*ModelProfile{candidate}, agentCaps)
 			follower <- ensured{out, diags}
 		}()
-		// Nothing outside the singleflight shows a join; this is room for the
-		// follower to reach it. One that arrived late reads the kept rows instead.
-		time.Sleep(50 * time.Millisecond)
+		waitForFlightFollower(t, mr)
 		close(release)
 		out := waitFor(t, leader, "the leader")
 		wantState(t, "leader", out.state, out.err, fingerprint.CapProbeYes)
@@ -1905,6 +1904,29 @@ func TestLostWrite_FollowerAndDuplicateSeeIt(t *testing.T) {
 		}
 		wantCalls(t, "duplicate", prober, 1)
 	})
+}
+
+// waitForFlightFollower waits until a goroutine running mr's
+// EnsureToolCallResolved is parked in the singleflight as a follower, waiting
+// on the leader's call. Nothing outside the group shows a join, so it reads the
+// goroutine stacks; the registry's address in the frame keeps other tests'
+// goroutines out. It fails the test if no follower joins within five seconds.
+func waitForFlightFollower(t *testing.T, mr *ModelRegistry) {
+	t.Helper()
+	ensure := fmt.Sprintf("(*ModelRegistry).EnsureToolCallResolved(%p", mr)
+	buf := make([]byte, 1<<20)
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		stacks := string(buf[:runtime.Stack(buf, true)])
+		for _, g := range strings.Split(stacks, "\n\n") {
+			if strings.Contains(g, ensure) && strings.Contains(g, "singleflight.(*Group).Do(") &&
+				strings.Contains(g, "sync.(*WaitGroup).Wait(") && !strings.Contains(g, "singleflight.(*Group).doCall(") {
+				return
+			}
+		}
+		runtime.Gosched()
+	}
+	t.Fatal("the follower never joined the leader's flight")
 }
 
 func TestLostWrite_OverrideStillWins(t *testing.T) {

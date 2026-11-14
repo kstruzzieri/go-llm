@@ -30,6 +30,6 @@ These apply to a registry given `provider.WithEvidenceLog` (or `Options.Evidence
 
 #### New exported names
 
-- `fingerprint`: `CapabilityProber`, `CapabilityProbeRequest`, `CapabilityProbeResult`, `ProbeAnswer`, `RecipeForRequest`, and the `Detail*` constants (`DetailToolCalled` and the five inconclusive codes).
+- `fingerprint`: `CapabilityProber`, `CapabilityProbeRequest`, `CapabilityProbeResult`, `ProbeAnswer`, `RecipeForRequest`, and the `Detail*` constants (`DetailToolCalled` and the five inconclusive codes). The shipped probers implement `CapabilityProber` through the new methods `(*fingerprint.OllamaProber).ProbeCapabilities` and `(*probers.OpenAICompatProber).ProbeCapabilities` (package `fingerprint/probers`).
 - `provider`: `WithCapabilityProbeProgress`, `CapabilityProbeProgress`, `ErrAutomaticProbeBudgetExhausted`, `ErrEvidenceUnbound`, `ErrEvidenceUnreadable`, and the `Unsaved` field of `ToolCallExplanation`.
 - `providerbootstrap.Options` gains `EvidenceLog` and `CapabilityProbeProgress`. That package is internal, so only code inside this module can use them.
