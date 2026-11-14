@@ -48,6 +48,7 @@ type hookedLog struct {
 	onAppend func(ctx context.Context, rows []fingerprint.EvidenceRow) error
 	reads    int
 	capGets  int
+	genFails bool
 	appended [][]fingerprint.EvidenceRow
 }
 
@@ -98,6 +99,25 @@ func (l *hookedLog) GetCapProbe(ctx context.Context, backendID, modelName, capab
 	l.capGets++
 	l.mu.Unlock()
 	return l.EvidenceStore.GetCapProbe(ctx, backendID, modelName, capability)
+}
+
+// Generation fails while genFails is set, as a log that cannot be opened would.
+func (l *hookedLog) Generation(ctx context.Context) (int64, error) {
+	l.mu.Lock()
+	fail := l.genFails
+	l.mu.Unlock()
+	if fail {
+		return 0, errInjected
+	}
+	return l.EvidenceStore.Generation(ctx)
+}
+
+// failEverything fails every read, the generation included.
+func (l *hookedLog) failEverything() {
+	l.failReads()
+	l.mu.Lock()
+	l.genFails = true
+	l.mu.Unlock()
 }
 
 func (l *hookedLog) appendCalls() [][]fingerprint.EvidenceRow {
@@ -1060,6 +1080,48 @@ func TestResolveToolCall_RecoversWhenLogReadsAgain(t *testing.T) {
 	wantState(t, "readable again", state, err, fingerprint.CapProbeYes)
 	if n := prober.callCount(); n != 1 {
 		t.Fatalf("calls = %d; want 1", n)
+	}
+}
+
+// TestResolveToolCall_CachedAnswerServedWhileLogUnreadable characterizes a
+// deliberate rule: a profile cached while the log was readable keeps its
+// log-derived tool_call when the log later cannot be read at all (the cache is
+// kept on a generation read error, #734's rule), so ResolveToolCall still says
+// yes from it with no check, while ExplainToolCall, which reads fresh, finds no
+// answer at that moment.
+func TestResolveToolCall_CachedAnswerServedWhileLogUnreadable(t *testing.T) {
+	cases := map[string]func(t *testing.T) (*ModelRegistry, *hookedLog, *capProbeFake){
+		"stored yes": func(t *testing.T) (*ModelRegistry, *hookedLog, *capProbeFake) {
+			log := &hookedLog{EvidenceStore: newEvidenceLog(t)}
+			appendRows(t, log.EvidenceStore, logRow(openAIBinding(t), capabilityToolCall, fingerprint.CapProbeYes, logDigest, logT0))
+			prober := &capProbeFake{}
+			mr, _ := newLogResolver(t, log, prober, oneProv(t, infos(logModel)...))
+			return mr, log, prober
+		},
+		"kept yes": func(t *testing.T) (*ModelRegistry, *hookedLog, *capProbeFake) {
+			mr, _, log, prober := lostWriteResolver(t, fingerprint.CapProbeYes, oneProv(t, infos(logModel)...))
+			state, err := mr.ResolveToolCall(t.Context(), localKey(logModel))
+			wantState(t, "the check whose save fails", state, err, fingerprint.CapProbeYes)
+			return mr, log, prober
+		},
+	}
+	for name, arrange := range cases {
+		t.Run(name, func(t *testing.T) {
+			mr, log, prober := arrange(t)
+			if caps := lookupCaps(t, mr, "local"); !caps.Has(CapToolCall) {
+				t.Fatalf("precondition: cached caps = %v; want tool_call from the log", caps)
+			}
+			calls := prober.callCount()
+			log.failEverything()
+
+			state, err := mr.ResolveToolCall(t.Context(), localKey(logModel))
+			wantState(t, "while unreadable", state, err, fingerprint.CapProbeYes)
+			wantCalls(t, "while unreadable", prober, calls)
+			exp, err := mr.ExplainToolCall(t.Context(), localKey(logModel))
+			if err != nil || exp.Has || exp.State != "" {
+				t.Fatalf("explanation = %+v, %v; want no answer from a fresh read", exp, err)
+			}
+		})
 	}
 }
 

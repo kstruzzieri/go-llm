@@ -287,7 +287,10 @@ var (
 	// could be read or saved for it.
 	ErrEvidenceUnbound = errors.New("provider: the provider has no evidence binding")
 	// ErrEvidenceUnreadable: the evidence log could not be read, so no check
-	// was started.
+	// was started. An answer already merged into a cached profile is still
+	// served while the log cannot be read (ResolveToolCall may say yes while
+	// ExplainToolCall, which reads fresh, finds none); the cache is checked
+	// again at the next boundary at which the log's generation reads.
 	ErrEvidenceUnreadable = errors.New("provider: the evidence log could not be read")
 )
 
