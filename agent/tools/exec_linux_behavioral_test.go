@@ -1296,6 +1296,7 @@ func TestBwrapNarrowVerifier(t *testing.T) { bwrapNarrow(t, routeVerifier) }
 // bwrapNarrow runs proveNarrowRoute for route, with the workspace copy of
 // the bwrap helper as the command.
 func bwrapNarrow(t *testing.T, route narrowRoute) {
+	// containment: STRICT-9
 	t.Helper()
 	requireBwrapCapability(t)
 	ws := wsTempDir(t)
@@ -1312,6 +1313,7 @@ func bwrapNarrow(t *testing.T, route narrowRoute) {
 // network-denied policy: in an exposed strict run, a pathname Unix socket
 // inside the shared workspace stays reachable.
 func TestBwrapNarrowWorkspacePathSocketReachable(t *testing.T) {
+	// containment: STRICT-9
 	requireBwrapCapability(t)
 	ws := wsTempDir(t)
 	helper := bwrapHelperBinary(t, ws)

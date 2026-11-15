@@ -4603,6 +4603,96 @@
       "artifacts": []
     },
     {
+      "id": "STRICT-8",
+      "source": "issue-584:83",
+      "requirement": "Under strict approval, once a conversation is exposed, Seatbelt commands whose policy allows network run network-denied: foreground, scratch, background start and verifier, each approved at a prompt showing network=denied, while the same command in a clean conversation connects (#584).",
+      "status": "verified",
+      "owner": "",
+      "layer": "focused",
+      "exempt": "",
+      "scenarios": [],
+      "refs": [
+        {
+          "package": "./agent/tools",
+          "test": "TestSeatbeltNarrowForeground",
+          "file": "agent/tools/exec_darwin_test.go",
+          "func": "seatbeltNarrow"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestSeatbeltNarrowScratch",
+          "file": "agent/tools/exec_darwin_test.go",
+          "func": "seatbeltNarrow"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestSeatbeltNarrowBackground",
+          "file": "agent/tools/exec_darwin_test.go",
+          "func": "seatbeltNarrow"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestSeatbeltNarrowVerifier",
+          "file": "agent/tools/exec_darwin_test.go",
+          "func": "seatbeltNarrow"
+        }
+      ],
+      "profiles": [
+        "seatbelt"
+      ],
+      "mutations": [
+        "M-418"
+      ],
+      "artifacts": []
+    },
+    {
+      "id": "STRICT-9",
+      "source": "issue-584:83",
+      "requirement": "Under strict approval, once a conversation is exposed, bwrap commands whose policy allows network run IP-network-denied: foreground, scratch, background start and verifier, each approved at a prompt showing network=ip-denied, while the same command in a clean conversation connects; a pathname Unix socket inside the shared workspace stays reachable (#584).",
+      "status": "unobserved(bwrap)",
+      "owner": "",
+      "layer": "focused",
+      "exempt": "the mutation needs a Linux host with bwrap, which the Docker ci-local image is not: M-418 ran on darwin under Seatbelt only (STRICT-8). Follow-up, tracked in the PR body: on a Linux host with bwrap, apply M-418's patch (the network-denied variant keeps the session's network), run GO_LLM_REQUIRE_BWRAP=1 go test -count=1 -run '^TestBwrapNarrow(Foreground|Scratch|Background|Verifier)$' ./agent/tools, record it in docs/security/containment-mutations.md and cite it here",
+      "scenarios": [],
+      "refs": [
+        {
+          "package": "./agent/tools",
+          "test": "TestBwrapNarrowForeground",
+          "file": "agent/tools/exec_linux_behavioral_test.go",
+          "func": "bwrapNarrow"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestBwrapNarrowScratch",
+          "file": "agent/tools/exec_linux_behavioral_test.go",
+          "func": "bwrapNarrow"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestBwrapNarrowBackground",
+          "file": "agent/tools/exec_linux_behavioral_test.go",
+          "func": "bwrapNarrow"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestBwrapNarrowVerifier",
+          "file": "agent/tools/exec_linux_behavioral_test.go",
+          "func": "bwrapNarrow"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestBwrapNarrowWorkspacePathSocketReachable",
+          "file": "agent/tools/exec_linux_behavioral_test.go",
+          "func": "TestBwrapNarrowWorkspacePathSocketReachable"
+        }
+      ],
+      "profiles": [
+        "bwrap"
+      ],
+      "mutations": [],
+      "artifacts": []
+    },
+    {
       "id": "EXPOSURE-1",
       "source": "issue-452:75",
       "requirement": "Foreign or unknown exposure propagates through child results; no transformation silently clears it (#582/#583).",

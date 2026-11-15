@@ -3362,6 +3362,7 @@ func TestSeatbeltNarrowVerifier(t *testing.T) { seatbeltNarrow(t, routeVerifier)
 // seatbeltNarrow runs proveNarrowRoute for route, with this test binary's
 // dial helper as the command.
 func seatbeltNarrow(t *testing.T, route narrowRoute) {
+	// containment: STRICT-8
 	t.Helper()
 	requireSeatbeltCapability(t)
 	if raceInstrumented {
