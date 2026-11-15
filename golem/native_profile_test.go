@@ -749,6 +749,112 @@ func TestNativeConstructionFailsClosed(t *testing.T) {
 	}
 }
 
+// newStrictNative is New over a fresh root with policy and StrictApproval set
+// to strict, closing the runtime at cleanup.
+func newStrictNative(t *testing.T, policy agenttools.SandboxConfig, strict bool) (*Runtime, error) {
+	t.Helper()
+	rt, err := New(context.Background(), Options{
+		Root:           t.TempDir(),
+		Profile:        ProfileTrusted,
+		Sandbox:        policy,
+		StrictApproval: strict,
+		Orchestrator:   agent.New(&countingCaller{}, agent.ContextManager{}),
+	})
+	if err == nil {
+		t.Cleanup(func() { closeTestRuntime(t, rt) })
+	}
+	return rt, err
+}
+
+// TestStrictStartupValidatesDeniedVariant pins #584's start check: with
+// StrictApproval, a native policy that allows network also validates its
+// network-denied copy, so a host that cannot run that copy refuses the
+// session instead of failing at the first narrowed command. Every probe after
+// the session's own fails here.
+func TestStrictStartupValidatesDeniedVariant(t *testing.T) {
+	refused := fmt.Errorf("denied probe refused: %w", agenttools.ErrSandboxPolicy)
+	seatbeltNet := agenttools.SandboxConfig{Runtime: agenttools.SandboxRuntimeSeatbelt, AllowNetwork: true}
+	bwrapNet := agenttools.SandboxConfig{Runtime: agenttools.SandboxRuntimeBwrap, AllowNetwork: true, MemoryCapMB: 512, DropCaps: []string{"NET_RAW"}}
+	bwrapDenied := bwrapNet
+	bwrapDenied.AllowNetwork = false
+	for _, tc := range []struct {
+		name   string
+		policy agenttools.SandboxConfig
+		strict bool
+		probes []agenttools.SandboxConfig
+	}{
+		{"strict seatbelt allowed", seatbeltNet, true, []agenttools.SandboxConfig{seatbeltNet, seatbeltPolicy}},
+		{"strict bwrap allowed", bwrapNet, true, []agenttools.SandboxConfig{bwrapNet, bwrapDenied}},
+		{"seatbelt allowed", seatbeltNet, false, []agenttools.SandboxConfig{seatbeltNet}},
+		{"bwrap allowed", bwrapNet, false, []agenttools.SandboxConfig{bwrapNet}},
+		{"strict seatbelt denied", seatbeltPolicy, true, []agenttools.SandboxConfig{seatbeltPolicy}},
+		{"strict bwrap denied", bwrapPolicy, true, []agenttools.SandboxConfig{bwrapPolicy}},
+		{"strict host", agenttools.SandboxConfig{}, true, []agenttools.SandboxConfig{{}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var probes []agenttools.SandboxConfig
+			saved := validateSandbox
+			validateSandbox = func(cfg agenttools.SandboxConfig, _ string) error {
+				probes = append(probes, cfg)
+				if len(probes) > 1 {
+					return refused
+				}
+				return nil
+			}
+			t.Cleanup(func() { validateSandbox = saved })
+			_, err := newStrictNative(t, tc.policy, tc.strict)
+			if !reflect.DeepEqual(probes, tc.probes) {
+				t.Errorf("probes = %+v, want %+v", probes, tc.probes)
+			}
+			if refuses := len(tc.probes) > 1; refuses != errors.Is(err, refused) || (!refuses && err != nil) {
+				t.Fatalf("New = %v, want refused %v", err, refuses)
+			}
+		})
+	}
+}
+
+// TestCommandPermissionsStrictLine pins the narrowing limit (#584): strict
+// approval adds it after a native network-allowed policy's limits, and on
+// bwrap also adds the pathname-socket limit after it (the network-allowed row
+// does not list it), because the denied copy keeps that channel. Host, a network-denied policy and strict off add
+// nothing; TestNativePermissionsCopy pins the strict-off values.
+func TestCommandPermissionsStrictLine(t *testing.T) {
+	stubValidateSandbox(t)
+	const (
+		strictLine  = "strict approval denies network to commands once a conversation is exposed"
+		unixSockets = "pathname Unix sockets reachable inside the shared workspace remain a channel"
+	)
+	for _, tc := range []struct {
+		name   string
+		policy agenttools.SandboxConfig
+		extra  []string
+	}{
+		{"host", agenttools.SandboxConfig{}, nil},
+		{"seatbelt denied", seatbeltPolicy, nil},
+		{"bwrap denied", bwrapPolicy, nil},
+		{"seatbelt allowed", agenttools.SandboxConfig{Runtime: agenttools.SandboxRuntimeSeatbelt, AllowNetwork: true}, []string{strictLine}},
+		{"bwrap allowed", agenttools.SandboxConfig{Runtime: agenttools.SandboxRuntimeBwrap, AllowNetwork: true}, []string{strictLine, unixSockets}},
+		{"bwrap allowed with memory cap", agenttools.SandboxConfig{Runtime: agenttools.SandboxRuntimeBwrap, AllowNetwork: true, MemoryCapMB: 512}, []string{strictLine, unixSockets}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			command := func(strict bool) CommandPermissions {
+				t.Helper()
+				rt, err := newStrictNative(t, tc.policy, strict)
+				if err != nil {
+					t.Fatalf("New: %v", err)
+				}
+				return rt.EffectivePermissions().Command
+			}
+			off, on := command(false), command(true)
+			want := off
+			want.Limits = append(slices.Clone(off.Limits), tc.extra...)
+			if !reflect.DeepEqual(on, want) {
+				t.Fatalf("strict Command =\n%#v\nwant\n%#v", on, want)
+			}
+		})
+	}
+}
+
 // TestSeatbeltSessionBindsCanonicalRootSpelling needs a case-insensitive
 // filesystem: a differently cased root resolves to the same directory, but
 // native tools and the verifier slot carry the workspace's own spelling, so the

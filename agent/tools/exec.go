@@ -124,6 +124,10 @@ type execPending struct {
 	fingerprint       string
 	sandbox           sandboxApproval // stamped by the owning tool, NOT by prepareExecPlan
 	scratch           scratchApproval // stamped by the owning tool (#443); zero = disabled
+	// narrowed is the network-denied backend the call was approved to run on
+	// while approvals were suspended (#584); nil runs on the tool's own
+	// backend. Stamped by the owning tool together with sandbox.
+	narrowed *resolvedExecBackend
 }
 
 type execPlanCache struct {
@@ -341,9 +345,13 @@ func (t *RunCommand) Effect() agent.Effect { return t.baseEffect() }
 func (*RunCommand) Origin() agent.Origin { return agent.OriginWorkspace }
 
 // Plan validates args, resolves cwd + executable + env + timeout, renders the preview,
-// and stashes a pending plan keyed by the raw-args hash. It never spawns. Any failure
-// returns an error so dispatch reports it without prompting for approval.
-func (t *RunCommand) Plan(_ context.Context, raw json.RawMessage) (agent.ToolPlan, error) {
+// and stashes a pending plan keyed by the raw-args hash. It never spawns the command.
+// While ctx's run has approvals suspended, a native (non-host) backend whose policy
+// allows network is swapped for its network-denied variant (#584), whose first build
+// probes the runtime; the preview and key then name that variant. Any failure, a
+// failed variant build included, returns an error so dispatch reports it without
+// prompting for approval.
+func (t *RunCommand) Plan(ctx context.Context, raw json.RawMessage) (agent.ToolPlan, error) {
 	eff := t.baseEffect()
 	if err := t.sandbox.validateWorkspace(t.ws.root); err != nil {
 		return agent.ToolPlan{Effect: eff}, err
@@ -361,6 +369,13 @@ func (t *RunCommand) Plan(_ context.Context, raw json.RawMessage) (agent.ToolPla
 		return agent.ToolPlan{Effect: eff}, err
 	}
 	p.sandbox = t.sandbox
+	narrowed, err := t.variant().forContext(ctx)
+	if err != nil {
+		return agent.ToolPlan{Effect: eff}, err
+	}
+	if narrowed != nil {
+		p.sandbox, p.narrowed = narrowed.approval, narrowed
+	}
 	if t.scratchRT != nil {
 		p.scratch = t.scratchRT.approval
 	}
@@ -498,12 +513,19 @@ func resolveExecDir(ws *Workspace, dir string) (abs, label string, identity os.F
 }
 
 // Invoke consumes the pending plan (fail-closed on hash mismatch), re-checks it via
-// recheckExecPlan, then spawns through the runner. Non-zero exit is a normal
-// observation; only infra failures are tool errors.
+// recheckExecPlan, then spawns through the backend the plan was approved for. Non-zero
+// exit is a normal observation; only infra failures are tool errors.
 func (t *RunCommand) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolResult, error) {
 	pp, ok := t.consume(ContentHash(raw))
 	if !ok {
 		return errResult("exec preview missing; retry"), nil
+	}
+	// One pending plan serves every run sharing this tool, so a plan approved
+	// in the other suspension state may reach this run (#584): refuse it
+	// rather than run with network the approver was told was denied, or the
+	// reverse.
+	if t.variant().active(ctx) != (pp.narrowed != nil) {
+		return errResult(approvalStateChanged), nil
 	}
 	spec, err := recheckExecPlan(ctx, t.ws, pp)
 	if err != nil {
@@ -519,7 +541,7 @@ func (t *RunCommand) Invoke(ctx context.Context, raw json.RawMessage) (agent.Too
 	// The run gets its own approved timeout, so the walk's time, which the
 	// outer effect budget covers, is not charged to the command.
 	runCtx, cancelRun := context.WithTimeout(ctx, pp.timeout)
-	res, runErr := t.runner.Run(runCtx, spec)
+	res, runErr := t.runnerFor(pp).Run(runCtx, spec)
 	cancelRun()
 	if runErr != nil {
 		if res.TimedOut {
@@ -531,6 +553,21 @@ func (t *RunCommand) Invoke(ctx context.Context, raw json.RawMessage) (agent.Too
 		return execErr("command failed to run: "+runErr.Error(), res.Notes), nil
 	}
 	return agent.ToolResult{Content: formatExecResult(res)}, nil
+}
+
+// variant returns the network-denied variant of t's backend (#584): nil for a
+// backend without one and for a raw runner, which host-only constructors use.
+func (t *RunCommand) variant() *networkVariant {
+	b, _ := t.runner.(resolvedExecBackend)
+	return b.variant
+}
+
+// runnerFor returns the backend pp was approved to run on.
+func (t *RunCommand) runnerFor(pp execPending) commandRunner {
+	if pp.narrowed != nil {
+		return *pp.narrowed
+	}
+	return t.runner
 }
 
 // invokeScratched runs one approved command inside a scratch session (#443):
@@ -549,7 +586,7 @@ func (t *RunCommand) invokeScratched(ctx context.Context, pp execPending, spec e
 		return errResult("scratch snapshot failed; command not run: " + err.Error()), nil
 	}
 	runCtx, cancelRun := context.WithTimeout(ctx, pp.timeout)
-	res, runErr := t.runner.Run(runCtx, rewritten)
+	res, runErr := t.runnerFor(pp).Run(runCtx, rewritten)
 	cancelRun()
 
 	if ctx.Err() != nil {

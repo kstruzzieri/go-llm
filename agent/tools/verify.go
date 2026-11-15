@@ -71,7 +71,7 @@ type VerifyResult struct {
 // read withholds both streams.
 type VerifyCommand struct {
 	ws      *Workspace
-	runner  commandRunner
+	runner  resolvedExecBackend
 	sandbox SandboxConfig // normalized; its approval metadata is pending.sandbox
 	pending execPending
 	argv0   string
@@ -128,6 +128,33 @@ func newVerifyCommandWithBackend(ws *Workspace, backend resolvedExecBackend, arg
 // its frozen sandbox policy, for session-scoped approval grants (#341).
 func (v *VerifyCommand) ApprovalKey() string {
 	return verifyApprovalKeyPrefix + verifyKeyDigest(sandboxFingerprint(v.sandbox), v.pending.fingerprint)
+}
+
+// variant returns the network-denied variant of v's backend (#584), nil when
+// it has none.
+func (v *VerifyCommand) variant() *networkVariant {
+	return v.runner.variant
+}
+
+// narrowFor returns the executor a verification in ctx's run must use and
+// whether it is narrowed (#584). That is v itself, unless v's backend is native
+// (non-host) with a policy that allows network and the run's approvals are
+// suspended; then it is a copy of v on the network-denied variant, whose
+// Preview, ApprovalKey and Run all name that variant. v is unchanged. A failed
+// variant build is returned with no executor; the caller must not fall back to
+// v.
+func (v *VerifyCommand) narrowFor(ctx context.Context) (verifyExecutor, bool, error) {
+	denied, err := v.variant().forContext(ctx)
+	if err != nil {
+		return nil, false, err
+	}
+	if denied == nil {
+		return v, false, nil
+	}
+	n := *v
+	n.runner, n.sandbox = *denied, denied.sandbox
+	n.pending.sandbox = denied.approval
+	return &n, true, nil
 }
 
 // Sandbox returns a copy of the normalized policy this command runs under.

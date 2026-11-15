@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"slices"
 	"strings"
@@ -671,6 +672,57 @@ func TestStrictApprovalFlagAcceptedInAllModes(t *testing.T) {
 			t.Fatalf("validateFlags: %v", err)
 		}
 	})
+}
+
+// TestStrictStartupValidatesDeniedVariant pins the CLI's early check (#584):
+// -strict-approval with a native network-allowed policy also validates the
+// network-denied copy, before any config is read, so a copy this host cannot
+// run refuses the session. Every probe after the policy's own fails here.
+// Without the flag, or with network denied, startup asks no second probe and
+// reaches the config, which is missing.
+func TestStrictStartupValidatesDeniedVariant(t *testing.T) {
+	refused := errors.New("denied probe refused")
+	allowed := agenttools.SandboxConfig{Runtime: agenttools.SandboxRuntimeBwrap, AllowNetwork: true}
+	denied := agenttools.SandboxConfig{Runtime: agenttools.SandboxRuntimeBwrap}
+	for _, tc := range []struct {
+		name   string
+		args   []string
+		probes []agenttools.SandboxConfig
+	}{
+		{"strict network allowed", []string{"-sandbox-network", "allowed", "-strict-approval"}, []agenttools.SandboxConfig{allowed, denied}},
+		{"network allowed", []string{"-sandbox-network", "allowed"}, []agenttools.SandboxConfig{allowed}},
+		{"strict network denied", []string{"-strict-approval"}, []agenttools.SandboxConfig{denied}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			isolateRunEnv(t)
+			var probes []agenttools.SandboxConfig
+			saved := validateSandbox
+			validateSandbox = func(cfg agenttools.SandboxConfig, _ string) error {
+				probes = append(probes, cfg)
+				if len(probes) > 1 {
+					return refused
+				}
+				return nil
+			}
+			t.Cleanup(func() { validateSandbox = saved })
+			stdin, stdout, stderr := runTestFiles(t)
+			args := append([]string{"-config", filepath.Join(t.TempDir(), "missing-models.json"), "-root", t.TempDir(),
+				"-sandbox", "bwrap", "-no-probe", "-no-cap-probe", "-no-session", "-no-memory", "-no-project-context"}, tc.args...)
+			err := run(args, stdin, stdout, stderr)
+			if !reflect.DeepEqual(probes, tc.probes) {
+				t.Errorf("probes = %+v, want %+v", probes, tc.probes)
+			}
+			if len(tc.probes) > 1 {
+				if !errors.Is(err, refused) || !strings.HasPrefix(err.Error(), "golem: sandbox: ") {
+					t.Fatalf("run = %v, want the sandbox refusal", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), "golem: load config") {
+				t.Fatalf("run = %v, want the missing config's error after the sandbox checks", err)
+			}
+		})
+	}
 }
 
 // newStrictSession is newExposureSession with the journaled write tools and

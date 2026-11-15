@@ -1670,25 +1670,6 @@ func bgStart(t *testing.T, byName map[string]agent.Tool, argvJSON string) string
 	return ""
 }
 
-func bgAwaitExit(t *testing.T, byName map[string]agent.Tool, handle string) string {
-	t.Helper()
-	status := byName["command_status"].(*CommandStatus)
-	raw := json.RawMessage(fmt.Sprintf(`{"handle":%q}`, handle))
-	deadline := time.Now().Add(15 * time.Second)
-	for time.Now().Before(deadline) {
-		res, err := status.Invoke(context.Background(), raw)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !strings.Contains(res.Content, "state: running") {
-			return res.Content
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	t.Fatal("background job never exited")
-	return ""
-}
-
 // TestSeatbeltBehavioralBackgroundPublicConfinement drives the PUBLIC
 // background constructors end to end: an outside write is denied (the probe
 // file never appears) while a workspace write succeeds — through
@@ -3364,4 +3345,35 @@ func TestSeatbeltVerifierCannotPlantHook(t *testing.T) {
 	if !strings.Contains(out, "status: failed\n") || !strings.Contains(out, "pre-commit: Operation not permitted") {
 		t.Errorf("observation:\n%s\nwant a failed run whose hook write was refused", out)
 	}
+}
+
+// TestSeatbeltNarrowForeground and its three siblings prove network
+// narrowing (#584) on the real Seatbelt backend, through real strict runs
+// with the default suspension predicate: a policy that allows network runs
+// an exposed conversation's command network=denied (proveNarrowRoute).
+func TestSeatbeltNarrowForeground(t *testing.T) { seatbeltNarrow(t, routeForeground) }
+
+func TestSeatbeltNarrowScratch(t *testing.T) { seatbeltNarrow(t, routeScratch) }
+
+func TestSeatbeltNarrowBackground(t *testing.T) { seatbeltNarrow(t, routeBackground) }
+
+func TestSeatbeltNarrowVerifier(t *testing.T) { seatbeltNarrow(t, routeVerifier) }
+
+// seatbeltNarrow runs proveNarrowRoute for route, with this test binary's
+// dial helper as the command.
+func seatbeltNarrow(t *testing.T, route narrowRoute) {
+	// containment: STRICT-8
+	t.Helper()
+	requireSeatbeltCapability(t)
+	if raceInstrumented {
+		t.Skip("race-instrumented helper cannot initialize under the sandbox; helper legs run in the non-race pass")
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := SandboxConfig{Runtime: SandboxRuntimeSeatbelt, AllowNetwork: true}
+	proveNarrowRoute(t, route, cfg, "denied", canonTempDirT(t), func(network, addr string) []string {
+		return []string{exe, "__golem_exec_helper__", "dial", network, addr}
+	})
 }

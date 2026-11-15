@@ -117,6 +117,11 @@ func resolveSandbox(f flags) agenttools.SandboxConfig {
 	return agenttools.SandboxConfig{Runtime: agenttools.SandboxRuntime(f.sandbox), AllowNetwork: f.sandboxNetwork == "allowed"}
 }
 
+// validateSandbox is agenttools.ValidateSandbox, replaceable only by this
+// package's tests so run's startup probes are observable without a backend
+// (mirrors golem's own seam).
+var validateSandbox = agenttools.ValidateSandbox
+
 // nativeSandbox reports whether policy selects a runtime other than host.
 func nativeSandbox(policy agenttools.SandboxConfig) bool {
 	return policy.Runtime != "" && policy.Runtime != agenttools.SandboxRuntimeHost

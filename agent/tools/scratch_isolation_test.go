@@ -814,7 +814,7 @@ func TestScratchBackgroundWrapCoversAbandonedReap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, startErr := manager.startWrapped(ctx, rewritten, "(workspace root)", func(bp backgroundProcess) backgroundProcess {
+	_, startErr := manager.startWrapped(ctx, manager.backend, rewritten, "(workspace root)", func(bp backgroundProcess) backgroundProcess {
 		return &scratchProcess{backgroundProcess: bp, session: session}
 	})
 	if startErr == nil {

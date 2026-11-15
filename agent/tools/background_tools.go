@@ -206,7 +206,10 @@ func (*StartCommand) Origin() agent.Origin { return agent.OriginWorkspace }
 // Plan validates args through the shared exec preparation helper with zero
 // effective and requested timeouts (manager-owned lifetime), stashes the
 // pending plan keyed by the raw-args hash, and renders the approval preview.
-func (t *StartCommand) Plan(_ context.Context, raw json.RawMessage) (agent.ToolPlan, error) {
+// While ctx's run has approvals suspended, a native (non-host) manager backend
+// whose policy allows network is swapped for its network-denied variant (#584),
+// as run_command does; a failed variant build fails Plan.
+func (t *StartCommand) Plan(ctx context.Context, raw json.RawMessage) (agent.ToolPlan, error) {
 	eff := t.Effect()
 	if t.manager == nil || t.manager.backend.execBackend == nil {
 		return agent.ToolPlan{Effect: eff}, fmt.Errorf("background manager must have a resolved backend")
@@ -225,6 +228,13 @@ func (t *StartCommand) Plan(_ context.Context, raw json.RawMessage) (agent.ToolP
 	// The manager is the source of truth for sandbox identity on EVERY
 	// construction path, including direct NewStartCommand callers.
 	p.sandbox = t.manager.backend.approval
+	narrowed, err := t.manager.backend.variant.forContext(ctx)
+	if err != nil {
+		return agent.ToolPlan{Effect: eff}, err
+	}
+	if narrowed != nil {
+		p.sandbox, p.narrowed = narrowed.approval, narrowed
+	}
 	if t.scratchRT != nil {
 		p.scratch = t.scratchRT.approval
 	}
@@ -247,14 +257,20 @@ func (t *StartCommand) Plan(_ context.Context, raw json.RawMessage) (agent.ToolP
 }
 
 // Invoke consumes the pending plan (fail-closed on hash mismatch), re-checks
-// cwd and executable identity via recheckExecPlan, then starts the job. The
-// context is used only up to the manager's registration linearization point.
+// cwd and executable identity via recheckExecPlan, then starts the job on the
+// backend the plan was approved for. The context is used only up to the
+// manager's registration linearization point.
 // The manager owns the spec's screen from the call on; only a path that
 // returns before calling it releases the screen here.
 func (t *StartCommand) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolResult, error) {
 	pp, ok := t.consume(ContentHash(raw))
 	if !ok {
 		return errResult("start preview missing; retry"), nil
+	}
+	// As in run_command (#584): refuse a plan approved in the other
+	// suspension state, before any screen exists.
+	if t.manager.backend.variant.active(ctx) != (pp.narrowed != nil) {
+		return errResult(approvalStateChanged), nil
 	}
 	spec, err := recheckExecPlan(ctx, t.ws, pp)
 	if err != nil {
@@ -266,7 +282,7 @@ func (t *StartCommand) Invoke(ctx context.Context, raw json.RawMessage) (agent.T
 	if t.scratchRT != nil {
 		return t.invokeScratched(ctx, pp, spec)
 	}
-	st, err := t.manager.start(ctx, spec, bgCwdDisplay(pp.dirLabel))
+	st, err := t.manager.startWrapped(ctx, t.backendFor(pp), spec, bgCwdDisplay(pp.dirLabel), nil)
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return startCanceled(err), nil
@@ -274,6 +290,14 @@ func (t *StartCommand) Invoke(ctx context.Context, raw json.RawMessage) (agent.T
 		return errResult(err.Error()), nil
 	}
 	return agent.ToolResult{Content: renderStartResult(st)}, nil
+}
+
+// backendFor returns the backend pp was approved to start on.
+func (t *StartCommand) backendFor(pp execPending) resolvedExecBackend {
+	if pp.narrowed != nil {
+		return *pp.narrowed
+	}
+	return t.manager.backend
 }
 
 // invokeScratched starts one approved command inside a scratch session
@@ -293,7 +317,7 @@ func (t *StartCommand) invokeScratched(ctx context.Context, pp execPending, spec
 	// Admission/publication gets a fresh bgToolTimeout child so a slow
 	// snapshot cannot eat it (D6).
 	admitCtx, cancelAdmit := context.WithTimeout(ctx, bgToolTimeout)
-	st, err := t.manager.startWrapped(admitCtx, rewritten, bgCwdDisplay(pp.dirLabel), func(bp backgroundProcess) backgroundProcess {
+	st, err := t.manager.startWrapped(admitCtx, t.backendFor(pp), rewritten, bgCwdDisplay(pp.dirLabel), func(bp backgroundProcess) backgroundProcess {
 		return &scratchProcess{backgroundProcess: bp, session: session}
 	})
 	cancelAdmit()
