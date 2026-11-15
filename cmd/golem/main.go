@@ -52,6 +52,7 @@ type flags struct {
 	sessionID           string
 	allowWrite          bool
 	allowExec           bool
+	strictApproval      bool // -strict-approval: suspend reusable approvals once a conversation is exposed (#584)
 	scratch             bool
 	delegate            bool
 	delegateRole        string
@@ -170,6 +171,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.BoolVar(&f.fresh, "fresh", false, "start a new persistent session instead of resuming this workspace")
 	fs.BoolVar(&f.allowWrite, "allow-write", false, "enable approval-gated write_file/edit_file tools")
 	fs.BoolVar(&f.allowExec, "allow-exec", false, "enable the approval-gated run_command and background command tools (start/status/tail/stop)")
+	fs.BoolVar(&f.strictApproval, "strict-approval", false, "suspend reusable approvals (session grants, /auto-edits) while the conversation is exposed, that is outside content entered it or its provenance is unknown: each file write or edit, command, background start and verifier run then asks [y/N] every time; accepted with -p and AgentFlow modes, where it has no effect today")
 	fs.DurationVar(&f.screenBudget, "credential-screen-budget", 5*time.Second, "time the credential screen may spend reading the workspace before each command (5s to 5m); a longer budget makes a large workspace usable, not fast: every command waits for the read")
 	fs.BoolVar(&f.scratch, "scratch", false, "run approved commands in a disposable snapshot of the workspace with .git omitted (requires -allow-exec): accident isolation on the host runtime, an enforced write boundary under a sandbox runtime; artifacts reach the real workspace only via approved promote_artifact (needs -allow-write)")
 	fs.BoolVar(&f.delegate, "delegate", false, "enable the delegate_code tool (route a scoped codegen sub-task to a specialist model)")
@@ -1907,6 +1909,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		// The CLI is the trusted host: -trace records include model reasoning.
 		RetainReasoning:    true,
 		DisableCompression: f.noCompress,
+		StrictApproval:     f.strictApproval,
 		OnWarning: func(err error) {
 			_, _ = fmt.Fprintf(stderr, "warning: %v\n", err)
 		},
@@ -1961,6 +1964,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		color:            colorEnabled(renderOut, f.noColor),
 		retrieveOmitted:  retrieveOmitted,
 		session:          sessn,
+		strictApproval:   f.strictApproval,
 		journal:          journal,
 		bgManager:        bgManager,
 		grants:           grants,

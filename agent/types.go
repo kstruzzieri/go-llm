@@ -123,6 +123,17 @@ type Request struct {
 	// Nil with no History and no HistorySummary is a clean start; nil with
 	// either, or a record that is not Recorded, reads as Unknown ("history").
 	PriorExposure *Exposure
+	// StrictApproval suspends reusable approvals while the conversation is
+	// exposed (#584): every call that needs approval goes to a fresh, one-time
+	// approval through FreshApprover, and calls that would skip approval are
+	// raised to it, except plain Read and the tools named in StrictExempt. A
+	// nested Run on this run's context is strict too, whatever its own value.
+	// False, with no strict parent, leaves every approval path unchanged.
+	StrictApproval bool
+	// StrictExempt names the tools that keep ApprovalNever while approvals
+	// are suspended. It applies to this run only: a nested Run does not
+	// inherit it. A name left out fails closed.
+	StrictExempt []string
 }
 
 // Segment tags a message as always-present (Pinned) or compactable (Elastic).

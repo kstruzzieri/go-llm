@@ -216,6 +216,12 @@ type Options struct {
 	// own ContextManager. The golem CLI's -progressive flag drives both halves;
 	// a library host owns both itself.
 	Progressive bool
+	// StrictApproval suspends reusable approvals while a conversation is
+	// exposed (#584): each run carries agent.Request.StrictApproval, so once the
+	// conversation's exposure record reads as exposed, every approval goes to the
+	// approver's agent.FreshApprover and an approver without one is denied. The
+	// tools floorExempt names keep their own ApprovalNever. Off by default.
+	StrictApproval bool
 }
 
 // ContextItem is trusted context supplied with one turn.
@@ -316,6 +322,7 @@ type Runtime struct {
 	summarizer      conversation.Summarizer
 	compress        bool
 	retainReasoning bool
+	strictApproval  bool
 	onWarning       func(error)
 	failureMessage  func(code string, err error) string
 	mu              sync.Mutex
@@ -433,6 +440,7 @@ func New(ctx context.Context, opts Options) (*Runtime, error) {
 	r.summarizer = summarizer
 	r.compress = !opts.DisableCompression && summarizer != nil
 	r.retainReasoning = opts.RetainReasoning
+	r.strictApproval = opts.StrictApproval
 	r.onWarning = opts.OnWarning
 	r.failureMessage = opts.FailureMessage
 	r.active = make(map[string]*activeRun)
@@ -614,6 +622,10 @@ func (r *Runtime) Run(ctx context.Context, turn Turn, sink EventSink) (agent.Res
 		SessionID:  turn.ThreadID,
 		Advisory:   turn.Advisory,
 		SystemKeys: turn.SystemKeys,
+		// Strictness is inherited from an enclosing run through ctx, so the
+		// exempt names are set even when this runtime is not strict (#584).
+		StrictApproval: r.strictApproval,
+		StrictExempt:   strictExemptNames(snap.tools),
 	}
 	if thread != nil {
 		request.History = thread.history()

@@ -150,3 +150,16 @@ func floorWrap(t agent.Tool) agent.Tool {
 	}
 	return floorTool{inner: t}
 }
+
+// strictExemptNames returns the names of the tools floorExempt exempts, the
+// ones a strict run leaves at their own ApprovalNever (#584). The check is by
+// concrete type, so a tool merely named like one is not listed.
+func strictExemptNames(tools []agent.Tool) []string {
+	var names []string
+	for _, t := range unfloored(tools) {
+		if floorExempt(t) {
+			names = append(names, t.Spec().Name)
+		}
+	}
+	return names
+}

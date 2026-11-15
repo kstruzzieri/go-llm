@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"slices"
 	"sync"
 
 	"github.com/kstruzzieri/go-llm/conversation"
@@ -19,19 +20,23 @@ type exposureState struct {
 	exp Exposure
 }
 
-// exposureRun is one run's node over the shared state. It is a struct so
-// per-run fields can join it later; today it only points at the state.
+// exposureRun is one run's node over the shared state. strict is sticky
+// downward (this run's StrictApproval or its parent's strictness); exempt is
+// this run's own StrictExempt and is never inherited (#584).
 type exposureRun struct {
-	state *exposureState
+	state  *exposureState
+	strict bool
+	exempt []string
 }
 
 // newExposureRun joins the parent run's tracker found in ctx, or starts a
 // fresh one, then folds in req's prior state. Exposure only grows: a nested
 // run adds to its parent's record and never clears it.
 func newExposureRun(ctx context.Context, req Request) (context.Context, *exposureRun) {
-	r := &exposureRun{}
+	r := &exposureRun{strict: req.StrictApproval, exempt: slices.Clone(req.StrictExempt)}
 	if parent := exposureFrom(ctx); parent != nil {
 		r.state = parent.state
+		r.strict = r.strict || parent.strict
 	} else {
 		r.state = &exposureState{}
 	}

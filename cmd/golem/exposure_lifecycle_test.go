@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"io"
 	"strings"
 	"testing"
 
@@ -211,5 +212,59 @@ func TestExposureLifecycle(t *testing.T) {
 		runTurn(t, sess)
 		wantMessages(t, sess, "user:legacy", 4)
 		wantExposure(t, sess, "user:legacy", agent.Exposure{Recorded: true, Unknown: true, First: "history"})
+	})
+
+	// #584: under -strict-approval, /grants shows the record each step above
+	// leaves. These prove the display only; strict_test.go's
+	// TestStrictGateEffect proves the gate acts on it.
+	t.Run("strict grants line follows the record", func(t *testing.T) {
+		const foreign, unknown, cleanLine = "exposure: foreign (mcp__docs__fetch)", "exposure: unknown (history)", "exposure: clean"
+		for _, tc := range []struct {
+			name  string
+			steps func(t *testing.T, sess *replSession)
+			want  string
+		}{
+			{"grants clear keeps it", func(t *testing.T, sess *replSession) {
+				seedActive(t, sess)
+				dispatchSlash(t.Context(), io.Discard, sess, "/grants clear")
+			}, foreign},
+			{"failed clear keeps it", func(t *testing.T, sess *replSession) {
+				seedActive(t, sess)
+				sess.session.store = canaryDeleteFailureStore{sess.session.store}
+				dispatchSlash(t.Context(), io.Discard, sess, "/clear")
+			}, foreign},
+			{"successful clear is clean", func(t *testing.T, sess *replSession) {
+				seedActive(t, sess)
+				dispatchSlash(t.Context(), io.Discard, sess, "/clear")
+			}, cleanLine},
+			{"new is clean", func(t *testing.T, sess *replSession) {
+				seedActive(t, sess)
+				dispatchSlash(t.Context(), io.Discard, sess, "/new")
+			}, cleanLine},
+			{"resuming the first conversation restores it", func(t *testing.T, sess *replSession) {
+				id := seedActive(t, sess)
+				dispatchSlash(t.Context(), io.Discard, sess, "/new")
+				dispatchSlash(t.Context(), io.Discard, sess, "/resume "+id)
+			}, foreign},
+			{"failed resume keeps it", func(t *testing.T, sess *replSession) {
+				seedActive(t, sess)
+				dispatchSlash(t.Context(), io.Discard, sess, "/resume does-not-exist")
+			}, foreign},
+			{"resuming a conversation with no record is unknown", func(t *testing.T, sess *replSession) {
+				seedExposed(t, sess, "user:legacy", agent.Exposure{})
+				dispatchSlash(t.Context(), io.Discard, sess, "/resume user:legacy")
+			}, unknown},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				sess := newExposureSession(t)
+				sess.strictApproval = true
+				tc.steps(t, sess)
+				var out strings.Builder
+				dispatchSlash(t.Context(), &out, sess, "/grants")
+				if want := "session grants: 0\n" + tc.want + "\n"; out.String() != want {
+					t.Fatalf("/grants = %q, want %q", out.String(), want)
+				}
+			})
+		}
 	})
 }

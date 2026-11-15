@@ -322,6 +322,43 @@ The record describes what the runtime admitted. It is not a guarantee that
 content is safe, and a writer that changes a conversation's messages by direct
 SQL without advancing the row revision is outside what the record can detect.
 
+### Strict approval
+
+Strict approval suspends reusable approvals once a conversation is exposed.
+Set `golem.Options.StrictApproval`, or `agent.Request.StrictApproval` when
+calling `agent.Orchestrator` directly. While the conversation's exposure record
+reads as exposed, a run that needs an approval, the post-write verifier's
+included, does not consult grants or the approver's ordinary methods. It asks
+the approver's `agent.FreshApprover` about that one call:
+
+```go
+ApproveFresh(ctx, call, preview, keyed, risk, exposure) (bool, error)
+```
+
+An approver that does not implement `FreshApprover` is denied without being
+asked, so the run fails closed. An implementation must ask a person about
+exactly this call, and must not consult, reuse or create any reusable grant.
+The approval key is withheld, but withholding it is not what guarantees this;
+the contract is. A yes approves this call only. `preview` is empty for a tool
+that does not plan, so render `call` as well; `keyed` is display information
+only.
+
+`agent.ApprovalsSuspended(ctx)` reports whether the run `ctx` belongs to is
+strict and exposed. A tool's `Invoke` receives such a context and can ask. A
+nested run started with that context inherits the enclosing run's strictness
+and shares its exposure record, even when its own runtime is not strict.
+
+The four library tools that keep their own `ApprovalNever` stay unprompted:
+`agent_memory_create`, `agent_memory_promote`, `delegate_code` and `dispatch`.
+`golem.Runtime` fills `Request.StrictExempt` with their names on every turn;
+a direct `agent.Orchestrator` caller lists them itself. Every other tool is
+raised to approval, except plain reads. `EffectivePermissions.StrictApproval`
+reports the option.
+
+A conversation that has history and no record, whether saved before this version
+or by a `SessionStore` that drops the field, reads as unknown for its lifetime.
+Under strict approval every consequential action in it needs a fresh approval.
+
 ## RAG Details
 
 ### Chunking

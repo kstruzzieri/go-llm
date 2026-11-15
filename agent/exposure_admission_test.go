@@ -237,6 +237,7 @@ func TestAdmitMixedAssembly(t *testing.T) {
 }
 
 func TestAdmitAcceptedAdvice(t *testing.T) {
+	// containment: EXPOSURE-2
 	res, err := runAdmit(t, exposureAnswer(), Request{Advisory: testAdvisory()}, nil)
 	if err != nil {
 		t.Fatal(err)
