@@ -318,17 +318,39 @@ func currentEgress(risk agent.RiskReport) (agent.Finding, bool) {
 	return agent.Finding{}, false
 }
 
-// memoryNoteText is an agent_memory_create call's note, decoded as the tool
-// decodes it, or the raw arguments when they do not decode to a note. Either
-// way it is sanitized for display; the note keeps its newlines.
+// memoryNoteText renders an agent_memory_create call's note as the tool will
+// store it: decoded as the tool decodes it and trimmed as the tool trims it.
+// Each sanitized line is marked "| " and a size line follows, so a note
+// cannot fake its own header or push the real one off screen and still end
+// right above the question. A note over the tool's limit shows only its size,
+// since it will not be saved. Arguments that do not decode, or a note that is
+// empty after trimming, show as the one-line raw arguments.
 func memoryNoteText(args json.RawMessage) string {
 	var a struct {
 		Content string `json:"content"`
 	}
-	if json.Unmarshal(args, &a) != nil || a.Content == "" {
+	if json.Unmarshal(args, &a) != nil {
 		return rawArgsLine(string(args))
 	}
-	return sanitizeApprovalPreview(a.Content)
+	note := strings.TrimSpace(a.Content)
+	if note == "" {
+		return rawArgsLine(string(args))
+	}
+	n := strings.Count(note, "\n") + 1
+	lines := "lines"
+	if n == 1 {
+		lines = "line"
+	}
+	size := fmt.Sprintf("(note: %d %s, %d bytes", n, lines, len(note))
+	if len(note) > agenttools.MaxAgentMemoryContentBytes {
+		return fmt.Sprintf("%s: over the %d-byte limit, so it will not be saved)", size, agenttools.MaxAgentMemoryContentBytes)
+	}
+	var b strings.Builder
+	for _, line := range strings.Split(sanitizeApprovalPreview(note), "\n") {
+		b.WriteString(strings.TrimRight("| "+line, " "))
+		b.WriteByte('\n')
+	}
+	return b.String() + size + ")"
 }
 
 // memoryPromoteLine is an agent_memory_promote call as one sanitized line,

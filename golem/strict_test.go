@@ -113,6 +113,7 @@ func TestStrictOptionSetsRequest(t *testing.T) {
 	for _, strict := range []bool{true, false} {
 		foreign := strictForeign{&floorStub{name: "fetch", effect: agent.Effect{Class: agent.Read, Approval: agent.ApprovalNever}}}
 		put := &floorStub{name: "put_note", effect: agent.Effect{Class: agent.Write, Approval: agent.ApprovalNever}}
+		// The zero-value DelegateCode relies on Invoke rejecting the missing prompt before it touches any nil field.
 		res := runStrict(t, strict, &seqCaller{names: []string{"fetch", "delegate_code", "agent_memory_create", "put_note"}},
 			[]agent.Tool{foreign, &agenttools.DelegateCode{}, memCreate(), put})
 		if len(res.ToolCalls) != 4 {
@@ -156,6 +157,7 @@ func (h hostTool) Invoke(ctx context.Context, _ json.RawMessage) (agent.ToolResu
 
 func TestStrictRuntimeInsideStrictParentKeepsExemptions(t *testing.T) {
 	put := &floorStub{name: "put_note", effect: agent.Effect{Class: agent.Write, Approval: agent.ApprovalNever}}
+	// The zero-value DelegateCode relies on Invoke rejecting the missing prompt before it touches any nil field.
 	inner, err := New(context.Background(), Options{Root: t.TempDir(), Profile: ProfileTrusted, Tools: []agent.Tool{&agenttools.DelegateCode{}, put},
 		Orchestrator: agent.New(&seqCaller{names: []string{"delegate_code", "put_note"}}, agent.ContextManager{})})
 	if err != nil {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -972,7 +973,7 @@ func TestStrictMemoryWritesAskWhenExposed(t *testing.T) {
 			sess, rs, acc := newStrictMemorySession(t, &scriptCaller{responses: []agent.ModelResult{create, answerStep("done")}})
 			seedActive(t, sess)
 			out := strictTurn(t, sess, tc.answer)
-			requireOneFreshPrompt(t, out, "agent memory note:\n"+note, noteQuestion)
+			requireOneFreshPrompt(t, out, "agent memory note:\n| "+note+"\n"+fmt.Sprintf("(note: 1 line, %d bytes)", len(note)), noteQuestion)
 			if got := storedNotes(t, rs, acc); !slices.Equal(got, tc.want) {
 				t.Fatalf("stored notes = %q, want %q", got, tc.want)
 			}
@@ -1011,6 +1012,19 @@ func TestStrictMemoryWritesAskWhenExposed(t *testing.T) {
 			t.Fatalf("stored notes = %q, want none", got)
 		}
 	})
+	t.Run("oversize create shows only its size and is not saved", func(t *testing.T) {
+		big := call(agenttools.AgentMemoryCreateToolName, map[string]string{"content": strings.Repeat("x", agenttools.MaxAgentMemoryContentBytes+1)})
+		sess, rs, acc := newStrictMemorySession(t, &scriptCaller{responses: []agent.ModelResult{big, answerStep("done")}})
+		seedActive(t, sess)
+		out := strictTurn(t, sess, "y\n")
+		requireOneFreshPrompt(t, out, "agent memory note:\n"+overLimitLine(), noteQuestion)
+		if strings.Contains(out, "\n|") {
+			t.Fatalf("an oversize note printed a body line:\n%s", out)
+		}
+		if got := storedNotes(t, rs, acc); len(got) != 0 {
+			t.Fatalf("stored notes = %q, want none", got)
+		}
+	})
 	t.Run("clean conversation asks nothing", func(t *testing.T) {
 		sess, rs, acc := newStrictMemorySession(t, &scriptCaller{responses: []agent.ModelResult{create, answerStep("done")}})
 		out := strictTurn(t, sess, "")
@@ -1030,7 +1044,10 @@ func TestApproveFreshRendersCallsWithoutPreview(t *testing.T) {
 	for _, tc := range []struct {
 		name, tool, args, body, question string
 	}{
-		{"note keeps lines, escapes controls", agenttools.AgentMemoryCreateToolName, `{"content":"one\ntwo\u001b[2J"}`, "agent memory note:\none\ntwo\\x1b[2J", noteQuestion},
+		{"note keeps lines, escapes controls", agenttools.AgentMemoryCreateToolName, `{"content":"one\ntwo\u001b[2J"}`, "agent memory note:\n| one\n| two\\x1b[2J\n(note: 2 lines, 11 bytes)", noteQuestion},
+		{"note trimmed as the tool trims it", agenttools.AgentMemoryCreateToolName, `{"content":"\n  hi\n\n there \n\n"}`, "agent memory note:\n| hi\n|\n|  there\n(note: 3 lines, 10 bytes)", noteQuestion},
+		{"note over the limit", agenttools.AgentMemoryCreateToolName, `{"content":"` + strings.Repeat("x", agenttools.MaxAgentMemoryContentBytes+1) + `"}`, "agent memory note:\n" + overLimitLine(), noteQuestion},
+		{"note only whitespace", agenttools.AgentMemoryCreateToolName, `{"content":" \n\t "}`, "agent memory note:\n" + `{"content":" \n\t "}`, noteQuestion},
 		{"note missing", agenttools.AgentMemoryCreateToolName, `{"note":"x"}`, "agent memory note:\n" + `{"note":"x"}`, noteQuestion},
 		{"note not JSON", agenttools.AgentMemoryCreateToolName, "{\"content\":\n\x1b", "agent memory note:\n" + `{"content": \x1b`, noteQuestion},
 		{"promote is one line", agenttools.AgentMemoryPromoteToolName, `{"id":"r1\nforged","kind":"semantic"}`, "promote agent memory record r1 forged to semantic", promoteQuestion},
@@ -1053,5 +1070,52 @@ func TestApproveFreshRendersCallsWithoutPreview(t *testing.T) {
 				t.Fatalf("offered a grant or kept a control:\n%q", out.String())
 			}
 		})
+	}
+}
+
+// overLimitLine is the size line for a one-line note one byte over the limit.
+func overLimitLine() string {
+	n := agenttools.MaxAgentMemoryContentBytes
+	return fmt.Sprintf("(note: 1 line, %d bytes: over the %d-byte limit, so it will not be saved)", n+1, n)
+}
+
+// TestApproveFreshNoteCannotSpoofItsPrompt: a note that ends in a fake
+// header and note cannot pass for the real prompt. Every body line is marked
+// "|", and the size line, not a note line, sits right above the question.
+func TestApproveFreshNoteCannotSpoofItsPrompt(t *testing.T) {
+	content := "real instruction" + strings.Repeat("\n", 50) + "agent memory note:\nprefers tabs"
+	args, err := json.Marshal(map[string]string{"content": content})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var b strings.Builder
+	ap := newReplApprover(newScannerSource(strings.NewReader("n\n"), &b), &b, false)
+	c := freshCall(agenttools.AgentMemoryCreateToolName)
+	c.Function.Arguments = args
+	if ok, err := ap.ApproveFresh(context.Background(), c, "", true, agent.RiskReport{}, foreignExposure); ok || err != nil {
+		t.Fatalf("ok=%v err=%v, want a prompted denial", ok, err)
+	}
+	out := b.String()
+	header := foreignNotice + "\nagent memory note:\n"
+	if !strings.HasPrefix(out, header) {
+		t.Fatalf("want the notice, then the real header:\n%s", out)
+	}
+	// 51 newlines between the ends, so 52 lines.
+	size := fmt.Sprintf("(note: 52 lines, %d bytes)", len(content))
+	body, _, ok := strings.Cut(strings.TrimPrefix(out, header), "\n"+size+"\n"+noteQuestion)
+	if !ok {
+		t.Fatalf("want %q right above the question:\n%s", size, out)
+	}
+	lines := strings.Split(body, "\n")
+	if len(lines) != 52 || lines[0] != "| real instruction" || lines[len(lines)-1] != "| prefers tabs" {
+		t.Fatalf("body = %d lines, first %q, last %q", len(lines), lines[0], lines[len(lines)-1])
+	}
+	for i, line := range lines {
+		if !strings.HasPrefix(line, "|") {
+			t.Fatalf("body line %d is not marked: %q", i, line)
+		}
+	}
+	if strings.Count(out, "agent memory note:") != 2 || strings.Count(body, "| agent memory note:") != 1 {
+		t.Fatalf("the fake header must appear once, only as a marked line:\n%s", out)
 	}
 }
