@@ -135,6 +135,10 @@ go test ./...
 go test -tags integration ./...
 ```
 
+Mocks prove a package against itself, not against its neighbors. When packages are built separately (in parallel, or by different agents) and integrate later, test across the boundary: call one instance with varying parameters, not only identical repeated calls, and round-trip every public field meant to persist.
+
+When a review names one instance of a bug, fix the class: find every place the same assumption holds (every input to a cache key, every path that emits a counted event, the empty case of a cleanup) before calling the finding resolved.
+
 ## Code Style
 
 - Standard Go conventions (gofmt, golint)
