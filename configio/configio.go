@@ -80,10 +80,13 @@ func CodeOf(err error) (ErrorCode, bool) {
 // ProbeOutcome is ProbeToolCall's result (D9 dual-outcome contract): the
 // tri-state verdict, valid for this session immediately, and whether it
 // is durable — persisted as a CURRENTLY-VALID probe row, or carried by
-// explicit/catalog/profile knowledge that re-derives next session.
-// Persisted=false means the verdict works now but may need a re-probe
-// after restart; consumers render their own fixed message for it (no raw
-// I/O text crosses here).
+// explicit/catalog/profile knowledge that re-derives next session (on a
+// registry with an evidence log, catalog knowledge counts only when the
+// explanation read the log and rests on no unsaved row). Persisted=false
+// means not confirmed durable (the write was lost, the evidence log could
+// not be read, or the answer rests on an unsaved row): the verdict works
+// now but may need a re-probe after restart; consumers render their own
+// fixed message for it (no raw I/O text crosses here).
 type ProbeOutcome struct {
 	State     fingerprint.CapProbeState
 	Persisted bool

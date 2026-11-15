@@ -1,8 +1,12 @@
 package completion
 
 import (
+	"context"
+	"strings"
 	"testing"
+	"time"
 
+	"github.com/kstruzzieri/go-llm/fingerprint"
 	"github.com/kstruzzieri/go-llm/provider"
 )
 
@@ -112,5 +116,53 @@ func TestProviderConfigFromProfile(t *testing.T) {
 				t.Errorf("StopTokens len = %d, want %d", len(cfg.FIM.StopTokens), tt.wantStops)
 			}
 		})
+	}
+}
+
+// evidenceStub is an empty evidence log: every read finds nothing.
+type evidenceStub struct{ fingerprint.EvidenceStore }
+
+func (evidenceStub) ReadSnapshot(context.Context, string, string, *string, string, []string, time.Time) (fingerprint.EvidenceSnapshot, error) {
+	return fingerprint.EvidenceSnapshot{}, nil
+}
+func (evidenceStub) Generation(context.Context) (int64, error) { return 0, nil }
+
+type fimProvider struct {
+	provider.Provider
+	models []provider.ModelInfo
+}
+
+func (p fimProvider) Name() string { return "local" }
+func (p fimProvider) Models(context.Context) ([]provider.ModelInfo, error) {
+	return p.models, nil
+}
+
+type fimResolver struct{ p provider.Provider }
+
+func (r fimResolver) Resolve(provider.ModelKey) (provider.Provider, error) { return r.p, nil }
+func (r fimResolver) ProvidersForModel(string) ([]provider.Provider, error) {
+	return []provider.Provider{r.p}, nil
+}
+func (r fimResolver) All() []provider.Provider { return []provider.Provider{r.p} }
+
+func TestProviderConfigFromProfile_ExplicitWithoutInsertOnLogPath(t *testing.T) {
+	b, err := provider.EvidenceBindingFor("http://127.0.0.1:11434", "ollama")
+	if err != nil {
+		t.Fatal(err)
+	}
+	info := provider.ModelInfo{Name: "m", Digest: "sha256:d", Template: "{{ .Prompt }}{{ .Suffix }}"}
+	mr, err := provider.NewModelRegistry(fimResolver{fimProvider{models: []provider.ModelInfo{info}}}, nil,
+		provider.WithEvidenceLog(evidenceStub{}, func(string) (provider.EvidenceBinding, bool) { return b, true }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mr.SetCapabilityOverride(func(provider.ModelKey) []string { return []string{"chat", "stream"} })
+	p, err := mr.Lookup(t.Context(), provider.ModelKey{Provider: "local", Model: "m"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = ProviderConfigFromProfile(p)
+	if err == nil || !strings.Contains(err.Error(), "decided capabilities exclude insert") {
+		t.Fatalf("error = %v, want one naming the decided capabilities", err)
 	}
 }
