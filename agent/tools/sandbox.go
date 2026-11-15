@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -10,6 +11,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"unicode"
 
 	"github.com/kstruzzieri/go-llm/agent"
@@ -82,11 +84,14 @@ type execBackend interface {
 }
 
 // resolvedExecBackend binds an implementation to the exact normalized
-// policy used to construct it and to render approvals.
+// policy used to construct it and to render approvals. variant is its
+// network-denied twin (#584), nil unless the policy is non-host and allows
+// network; every copy of the struct shares it.
 type resolvedExecBackend struct {
 	execBackend
 	sandbox  SandboxConfig
 	approval sandboxApproval
+	variant  *networkVariant
 }
 
 type hostBackend struct {
@@ -98,13 +103,68 @@ type hostBackend struct {
 // approval metadata derived from it. Future runtime switch cases must use
 // this helper and extend the key/preview with an immutable digest of any
 // execution-affecting policy not present in SandboxConfig before the case
-// is enabled.
+// is enabled. It also attaches the policy's network-denied variant, so no
+// constructor stamps one and none can forget to.
 func bindExecBackend(backend execBackend, cfg SandboxConfig) resolvedExecBackend {
 	return resolvedExecBackend{
 		execBackend: backend,
 		sandbox:     cfg,
 		approval:    approvalForSandbox(cfg),
+		variant:     newNetworkVariant(cfg),
 	}
+}
+
+// networkVariant is a native backend's network-denied twin (#584): while
+// approvals are suspended (agent.ApprovalsSuspended), a command approved for
+// a backend that allows network runs on this copy instead. It is built on
+// first use, because construction probes the runtime and a session that
+// never suspends must not be refused for a variant it does not use. One
+// variant may serve run_command, start_command and the verifier at once.
+type networkVariant struct {
+	cfg       SandboxConfig                                    // the original policy with AllowNetwork=false
+	build     func(SandboxConfig) (resolvedExecBackend, error) // newExecBackend; tests substitute it
+	suspended func(context.Context) bool                       // agent.ApprovalsSuspended; tests substitute it
+
+	mu     sync.Mutex
+	denied *resolvedExecBackend // the first successful build
+}
+
+// newNetworkVariant returns the variant for a backend bound to the
+// normalized cfg: nil unless cfg is a non-host runtime that allows network.
+// The denied copy owns its DropCaps.
+func newNetworkVariant(cfg SandboxConfig) *networkVariant {
+	if cfg.isHost() || !cfg.AllowNetwork {
+		return nil
+	}
+	cfg.AllowNetwork = false
+	cfg.DropCaps = slices.Clone(cfg.DropCaps)
+	return &networkVariant{cfg: cfg, build: newExecBackend, suspended: agent.ApprovalsSuspended}
+}
+
+// active reports whether a command in ctx's run must use the variant: v is
+// non-nil and the run's approvals are suspended.
+func (v *networkVariant) active(ctx context.Context) bool {
+	return v != nil && v.suspended(ctx)
+}
+
+// forContext returns the network-denied backend when v is active for ctx,
+// building it on first use, and (nil, nil) otherwise. A build failure is
+// returned to this caller, which must fail the call rather than fall back to
+// the original backend; it is not cached, so the next call tries again.
+func (v *networkVariant) forContext(ctx context.Context) (*resolvedExecBackend, error) {
+	if !v.active(ctx) {
+		return nil, nil
+	}
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if v.denied == nil {
+		b, err := v.build(v.cfg)
+		if err != nil {
+			return nil, fmt.Errorf("tools: network-denied sandbox unavailable; command not run: %w", err)
+		}
+		v.denied = &b
+	}
+	return v.denied, nil
 }
 
 func newHostExecBackend(starter backgroundStarter) resolvedExecBackend {
