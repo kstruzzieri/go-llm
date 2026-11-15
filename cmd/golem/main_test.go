@@ -60,6 +60,12 @@ func TestMain(m *testing.M) {
 	if err := os.Setenv(dataHomeChosenEnv, "1"); err != nil {
 		panic(err)
 	}
+	// A race-built child sleeps 1s at exit (GORACE atexit_sleep_ms), and these
+	// tests start over a hundred of them. Children inherit this; races are still
+	// reported while they run, and this process keeps its own exit sleep.
+	if err := os.Setenv("GORACE", strings.TrimSpace(os.Getenv("GORACE")+" atexit_sleep_ms=0")); err != nil {
+		panic(err)
+	}
 	code := m.Run()
 	_ = os.RemoveAll(dir)
 	os.Exit(code)

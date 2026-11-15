@@ -230,7 +230,7 @@ case "$*" in
     printf 'stub: containment check\n' >&2
     exit "${CI_LOCAL_CONTAINMENT_STATUS:-0}"
     ;;
-  'test -race ./...')
+  'test -race -timeout 30m ./...')
     exit "$CI_LOCAL_RACE_STATUS"
     ;;
   *TestHardeningContracts*)
@@ -362,7 +362,7 @@ EOF
   cat >>"$tmp/$1" <<EOF
 $module|fmt --diff
 $module|run
-$module|test -race ./...
+$module|test -race -timeout 30m ./...
 EOF
   if [ "$2" = full ]; then
     cat >>"$tmp/$1" <<EOF
