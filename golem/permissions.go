@@ -40,9 +40,9 @@ const (
 	limitBwrapMemory      = "RLIMIT_AS per-process virtual address space plus separate private tmpfs quotas; not aggregate process-tree memory"
 	// limitStrictNarrows follows a native network-allowed policy's limits
 	// under strict approval (#584): an exposed conversation's commands run on
-	// the network-denied copy, which on bwrap keeps the pathname socket
-	// channel: the network-allowed row does not list that limit, so the strict
-	// line adds limitBwrapUnixSockets after it.
+	// the network-denied copy. On bwrap that copy is ip-denied, so its
+	// pathname socket channel applies; the network-allowed row does not list
+	// limitBwrapUnixSockets, so the strict line adds it after this one.
 	limitStrictNarrows = "strict approval denies network to commands once a conversation is exposed"
 )
 
@@ -72,9 +72,9 @@ type CommandPermissions struct {
 	// Warning is the required disclosure for the selected runtime, empty when
 	// none applies.
 	Warning string
-	// Limits are the native backend's material limits, in display order, then the
-	// strict-approval policy line when it applies; nil
-	// for Inspect and host.
+	// Limits are the native backend's material limits in display order,
+	// followed by the strict-approval policy line when it applies; nil for
+	// Inspect and host.
 	Limits []string
 }
 

@@ -137,11 +137,12 @@ func (v *VerifyCommand) variant() *networkVariant {
 }
 
 // narrowFor returns the executor a verification in ctx's run must use and
-// whether it is narrowed (#584): v itself unless v's backend is native (non-host) with a
-// policy that allows network and the run's approvals are suspended, then a copy of v on the network-
-// denied variant, whose Preview, ApprovalKey and Run all name that variant.
-// v is unchanged. A failed variant build is returned with no executor; the
-// caller must not fall back to v.
+// whether it is narrowed (#584). That is v itself, unless v's backend is native
+// (non-host) with a policy that allows network and the run's approvals are
+// suspended; then it is a copy of v on the network-denied variant, whose
+// Preview, ApprovalKey and Run all name that variant. v is unchanged. A failed
+// variant build is returned with no executor; the caller must not fall back to
+// v.
 func (v *VerifyCommand) narrowFor(ctx context.Context) (verifyExecutor, bool, error) {
 	denied, err := v.variant().forContext(ctx)
 	if err != nil {
