@@ -299,7 +299,6 @@ func (p *Provider) ChatStream(ctx context.Context, req provider.ChatRequest, fn 
 
 	var (
 		lastModel      string
-		lastToolCalls  []provider.ToolCall
 		lastUsage      provider.Usage
 		chunksReceived int
 		callbackErr    error
@@ -391,7 +390,7 @@ func (p *Provider) ChatStream(ctx context.Context, req provider.ChatRequest, fn 
 		choice := chunk.Choices[0]
 
 		if len(choice.Delta.ToolCalls) > 0 {
-			lastToolCalls = toolCalls.Add(choice.Delta.ToolCalls)
+			toolCalls.Add(choice.Delta.ToolCalls)
 		}
 		// Native reasoning text arrives on its own delta field, separate from
 		// content and from the inline-tag parser. Emit it directly as a Thinking
@@ -436,7 +435,7 @@ func (p *Provider) ChatStream(ctx context.Context, req provider.ChatRequest, fn 
 			_ = fn(provider.ChatResponse{
 				Model:     model,
 				Provider:  p.name,
-				ToolCalls: lastToolCalls,
+				ToolCalls: toolCalls.Snapshot(),
 				Done:      true,
 				Partial:   true,
 				Usage:     lastUsage,
@@ -458,7 +457,7 @@ func (p *Provider) ChatStream(ctx context.Context, req provider.ChatRequest, fn 
 		if err := fn(provider.ChatResponse{
 			Model:     model,
 			Provider:  p.name,
-			ToolCalls: lastToolCalls,
+			ToolCalls: toolCalls.Snapshot(),
 			Done:      true,
 			Usage:     lastUsage,
 
@@ -971,7 +970,7 @@ type streamToolCall struct {
 	id        string
 	callType  string
 	name      string
-	arguments string
+	arguments []byte
 	argMode   fragmentMode
 }
 
@@ -1006,7 +1005,10 @@ const (
 // OpenAI's reference servers do not produce that shape; the consequence of
 // the heuristic in that case is "arguments attach to the most recently
 // active call" — degraded but not silently corrupted across the wrong slot.
-func (a *streamToolCallAccumulator) Add(deltas []chatToolCall) []provider.ToolCall {
+//
+// Add only appends: its cost is proportional to the deltas it is given, not
+// to what has accumulated. Assembled calls come from Snapshot.
+func (a *streamToolCallAccumulator) Add(deltas []chatToolCall) {
 	if a.calls == nil {
 		a.calls = make(map[int]*streamToolCall, len(deltas))
 	}
@@ -1031,11 +1033,10 @@ func (a *streamToolCallAccumulator) Add(deltas []chatToolCall) []provider.ToolCa
 		if call.argMode == fragModeUnknown {
 			call.argMode = mode
 		}
-		call.arguments += fragment
+		call.arguments = append(call.arguments, fragment...)
 		a.lastIndex = index
 		a.hasLastIndex = true
 	}
-	return a.Snapshot()
 }
 
 // resolveIndex implements the index-precedence rules documented on Add.
@@ -1049,6 +1050,10 @@ func (a *streamToolCallAccumulator) resolveIndex(delta chatToolCall, position in
 	return position
 }
 
+// Snapshot returns the calls assembled so far, in order of first appearance,
+// with arguments normalized. It reads everything accumulated, so ChatStream
+// calls it once, when it emits tool calls, never per delta. The returned
+// arguments are copies the caller owns.
 func (a *streamToolCallAccumulator) Snapshot() []provider.ToolCall {
 	if len(a.order) == 0 {
 		return nil
@@ -1062,7 +1067,7 @@ func (a *streamToolCallAccumulator) Snapshot() []provider.ToolCall {
 			Function: provider.ToolCallFunction{
 				Index:     index,
 				Name:      call.name,
-				Arguments: normalizeToolCallArguments(json.RawMessage(call.arguments)),
+				Arguments: normalizeToolCallArguments(call.arguments),
 			},
 		})
 	}
