@@ -41,7 +41,8 @@ const (
 	// limitStrictNarrows follows a native network-allowed policy's limits
 	// under strict approval (#584): an exposed conversation's commands run on
 	// the network-denied copy, which on bwrap keeps the pathname socket
-	// channel, so bwrap repeats limitBwrapUnixSockets after it.
+	// channel: the network-allowed row does not list that limit, so the strict
+	// line adds limitBwrapUnixSockets after it.
 	limitStrictNarrows = "strict approval denies network to commands once a conversation is exposed"
 )
 
@@ -71,7 +72,8 @@ type CommandPermissions struct {
 	// Warning is the required disclosure for the selected runtime, empty when
 	// none applies.
 	Warning string
-	// Limits are the native backend's material limits, in display order; nil
+	// Limits are the native backend's material limits, in display order, then the
+	// strict-approval policy line when it applies; nil
 	// for Inspect and host.
 	Limits []string
 }

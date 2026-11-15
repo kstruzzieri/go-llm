@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -1246,6 +1247,20 @@ func (l *countingListener) reached(wait time.Duration) bool {
 	return true
 }
 
+// narrowedDialFailed reports whether result shows the dial helper ran and
+// failed: a non-zero exit code (foreground, scratch, background job) or a
+// failed verifier status. It keeps the exposed legs from passing when the
+// narrowed command never ran at all.
+func narrowedDialFailed(route narrowRoute, result string) bool {
+	switch route {
+	case routeVerifier:
+		return strings.Contains(result, "status: failed\n")
+	case routeBackground:
+		return regexp.MustCompile(`(?m)^exit_code: [1-9]`).MatchString(result)
+	}
+	return regexp.MustCompile(`(?m)^exit code: [1-9]`).MatchString(result)
+}
+
 // proveNarrowRoute is the behavioural proof of network narrowing (#584) for
 // route on a real native backend that allows network: in a strict run with
 // a recorded foreign exposure, the command dialing a local TCP listener or
@@ -1269,6 +1284,8 @@ func proveNarrowRoute(t *testing.T, route narrowRoute, cfg SandboxConfig, denied
 				switch {
 				case exposed && l.reached(500*time.Millisecond):
 					t.Errorf("%s listener reached from an exposed run's %s command; result:\n%s", network, route, result)
+				case exposed && !narrowedDialFailed(route, result):
+					t.Errorf("exposed %s command did not report a failed dial (it may never have run); result:\n%s", route, result)
 				case !exposed && !l.reached(5*time.Second):
 					t.Errorf("clean control: %s listener never reached; result:\n%s", network, result)
 				}

@@ -346,7 +346,7 @@ func (*RunCommand) Origin() agent.Origin { return agent.OriginWorkspace }
 
 // Plan validates args, resolves cwd + executable + env + timeout, renders the preview,
 // and stashes a pending plan keyed by the raw-args hash. It never spawns the command.
-// While ctx's run has approvals suspended, a backend that allows network is swapped for
+// While ctx's run has approvals suspended, a native (non-host) backend whose policy allows network is swapped for
 // its network-denied variant (#584), whose first build probes the runtime; the preview
 // and key then name that variant. Any failure, a failed variant build included, returns
 // an error so dispatch reports it without prompting for approval.

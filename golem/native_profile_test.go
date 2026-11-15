@@ -815,8 +815,8 @@ func TestStrictStartupValidatesDeniedVariant(t *testing.T) {
 
 // TestCommandPermissionsStrictLine pins the narrowing limit (#584): strict
 // approval adds it after a native network-allowed policy's limits, and on
-// bwrap repeats the pathname-socket limit after it, because the denied copy
-// keeps that channel. Host, a network-denied policy and strict off add
+// bwrap also adds the pathname-socket limit after it (the network-allowed row
+// does not list it), because the denied copy keeps that channel. Host, a network-denied policy and strict off add
 // nothing; TestNativePermissionsCopy pins the strict-off values.
 func TestCommandPermissionsStrictLine(t *testing.T) {
 	stubValidateSandbox(t)

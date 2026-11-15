@@ -116,10 +116,10 @@ func bindExecBackend(backend execBackend, cfg SandboxConfig) resolvedExecBackend
 
 // networkVariant is a native backend's network-denied twin (#584): while
 // approvals are suspended (agent.ApprovalsSuspended), a command approved for
-// a backend that allows network runs on this copy instead. It is built on
+// a native (non-host) backend whose policy allows network runs on this copy instead. It is built on
 // first use, because construction probes the runtime and a session that
-// never suspends must not be refused for a variant it does not use. One
-// variant may serve run_command, start_command and the verifier at once.
+// never suspends must not be refused for a variant it does not use. The
+// variant is shared by every tool built over one bound backend.
 type networkVariant struct {
 	cfg       SandboxConfig                                    // the original policy with AllowNetwork=false
 	build     func(SandboxConfig) (resolvedExecBackend, error) // newExecBackend; tests substitute it

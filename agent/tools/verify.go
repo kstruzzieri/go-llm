@@ -71,7 +71,7 @@ type VerifyResult struct {
 // read withholds both streams.
 type VerifyCommand struct {
 	ws      *Workspace
-	runner  commandRunner
+	runner  resolvedExecBackend
 	sandbox SandboxConfig // normalized; its approval metadata is pending.sandbox
 	pending execPending
 	argv0   string
@@ -133,13 +133,12 @@ func (v *VerifyCommand) ApprovalKey() string {
 // variant returns the network-denied variant of v's backend (#584), nil when
 // it has none.
 func (v *VerifyCommand) variant() *networkVariant {
-	b, _ := v.runner.(resolvedExecBackend)
-	return b.variant
+	return v.runner.variant
 }
 
 // narrowFor returns the executor a verification in ctx's run must use and
-// whether it is narrowed (#584): v itself unless v's backend allows network
-// and the run's approvals are suspended, then a copy of v on the network-
+// whether it is narrowed (#584): v itself unless v's backend is native (non-host) with a
+// policy that allows network and the run's approvals are suspended, then a copy of v on the network-
 // denied variant, whose Preview, ApprovalKey and Run all name that variant.
 // v is unchanged. A failed variant build is returned with no executor; the
 // caller must not fall back to v.

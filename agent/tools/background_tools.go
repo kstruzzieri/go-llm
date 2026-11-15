@@ -206,8 +206,8 @@ func (*StartCommand) Origin() agent.Origin { return agent.OriginWorkspace }
 // Plan validates args through the shared exec preparation helper with zero
 // effective and requested timeouts (manager-owned lifetime), stashes the
 // pending plan keyed by the raw-args hash, and renders the approval preview.
-// While ctx's run has approvals suspended, a manager backend that allows
-// network is swapped for its network-denied variant (#584), as run_command
+// While ctx's run has approvals suspended, a manager backend (native, non-host)
+// whose policy allows network is swapped for its network-denied variant (#584), as run_command
 // does; a failed variant build fails Plan.
 func (t *StartCommand) Plan(ctx context.Context, raw json.RawMessage) (agent.ToolPlan, error) {
 	eff := t.Effect()
