@@ -12,19 +12,54 @@ Recorded TODO-RESULTS
 
 The scripted `/consult` rows (row 3 and the native leg below) run with interceptors switched on but without the `-interceptors` detector chain, as the existing consult tests do. They measure approval behavior once advice is accepted, not advisory screening.
 
-Summary of its numbers: TODO-RESULTS
+Every threshold held.
+- **Clean conversations cost nothing extra.** With grants held, the clean loop (row 1) and a clean resume (row 7) asked exactly as many times with strict approval on as with it off.
+- **Exposed conversations ask once per consequential call.** After outside content entered (rows 2 and 3), or after resuming a legacy or exposed conversation (rows 6 and 8), every consequential call asked once, with no duplicates and no `a` option. Prompts went from 1 to 5 in row 2, where the one prompt with strict approval off is the MCP call itself; from 0 to 3 in row 3; and from 2 to 4 in rows 6 and 8.
+- **Host prompts disclose the network.** Every host command, verifier and background-start prompt in those rows said the network is not confined.
+- **The headless run denies.** Row 5 denied all three consequential calls and completed all three reads.
 
 ## Native sandbox leg
 
 `TestStrictModeEvaluationNative` (`cmd/golem/strict_evaluation_native_test.go`) runs on a native backend with `-sandbox-network allowed`. The conversation is exposed either by accepted `/consult` advice or by resuming a foreign record. It asserts that the command's `sandbox:` line shows the narrowed network label, that a TCP connection from `bash` to a local listener fails with nothing received, and that a clean turn first connects (in the resume sub-test that clean turn is on a different conversation). It prints one line per sub-test with `-v` and skips on a host with no native backend, so its result names the machine it ran on.
 
-Backend, label and probe result, and where it ran: TODO-RESULTS
+Where it ran, and what it showed:
+- **macOS, Seatbelt, with and without `-race`.** In both exposed sub-tests the command's line read `network=denied`, `bash` exited 1 with `/dev/tcp/127.0.0.1/<port>: Operation not permitted`, and the listener received nothing. The clean turn read `network=allowed`, exited 0 and connected.
+- **Docker ci-local.** The image has no bubblewrap, so the test skips there.
+- **bwrap.** The test runs in GitHub's Linux race jobs, whose runners have a working bwrap. There it is asserted pass or fail, but those jobs run without `-v`, so the error text is not captured. This record does not hold that result; the CI run of the pull request that added the test does.
 
 ## Local-model pass
 
 One pass, not a sample. A local model served by llama.cpp drove each interactive workflow through the REPL with a scripted driver that approved every prompt. The tools were a stdio MCP server built from the repository's test binary and a local `/consult` stub, with synthetic content throughout. The pass records whether each task completed next to the prompts it cost.
 
-Per-workflow completion and prompt counts: TODO-RESULTS
+Run on 2026-11-15:
+- **Model:** `gemma4:31b` (Q4_K_XL GGUF) on llama.cpp `b11146-7fe450e19`, with a 32,768-token context.
+- **Binaries:** built from develop `3498cbae`. The legacy conversation was written by a binary from `aef141f2`, which predates the exposure record.
+- **Answers:** the driver answered `a` wherever it was offered and `y` otherwise. Every Golem start listed only the local model server.
+- **Calls:** consequential calls are the prompts plus the calls a session grant approved.
+
+| Workflow | Strict off: prompts / consequential calls | Strict on: prompts / consequential calls | Task completed (off, on) |
+|---|---|---|---|
+| Clean edit/test loop, then a background start | 5 / 9 | 5 / 9 | yes, yes |
+| MCP read, then edit, test, verifier, background start | 6 / 9 | 11 / 11 | yes, yes |
+| Accepted `/consult` advice, then the same work | 5 / 9 | 9 / 9 | yes, yes |
+| Native sandbox, network allowed, accepted `/consult` advice, a TCP probe, then an edit | 4 / 4 | 5 / 5 | yes, yes |
+| Legacy resume, then the same work | 5 / 8 | 9 / 9 | yes, yes |
+| Clean resume with a record, then the same work | 5 / 9 | 5 / 8 | yes, yes |
+| Exposed resume with a record, then the same work | 5 / 8 | 8 / 8 | yes, yes |
+
+What the pass shows:
+- **Strict off:** in the six host workflows, a person answered 56-67% of consequential calls. Grants covered the rest, except that every edit to the verifier's own script asked anyway, because Golem treats a file the verifier runs as a harness file.
+- **Strict on, once the conversation was exposed:** they answered every one. Each task still completed.
+- **Clean conversations:** strict approval added no prompts.
+- **Variance:** the model did not make the same calls in both arms, so counts differ by a call or two for that reason alone.
+
+The native row's probe was `bash -c 'exec 3<>/dev/tcp/127.0.0.1/<port>'`:
+- **Strict off:** the prompt read `network=allowed`, the probe exited 0, and the listener logged one connection from Golem.
+- **Strict on, after the advice was accepted:** the prompt read `network=denied`, the probe exited 1 with `connect: Operation not permitted`, and the listener logged none.
+
+A first native pair, run with `curl`, could not show this either way: macOS's `curl` stops before connecting when the Seatbelt profile denies it its OpenSSL configuration under `/private/etc`. That pair is kept in the raw results, and the `bash` pair above was run in its place.
+
+The raw transcripts are not committed.
 
 ## What strict approval does not cover
 
