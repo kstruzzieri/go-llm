@@ -376,15 +376,26 @@ func TestExplainToolCall_LogProvenance(t *testing.T) {
 	}
 	tests := []struct {
 		name   string
+		model  string // logModel when empty
+		native bool   // bound through Ollama's own API rather than b
 		rows   []fingerprint.EvidenceRow
 		listed []string // what the runtime itself lists
 		want   ToolCallExplanation
 	}{
 		{name: "nothing", want: ToolCallExplanation{Source: "unknown"}},
 		{
-			name: "the runtime's bit beside a probe no is the runtime's",
+			// #736, deliberate: the live array without tools is the
+			// provider's no and overturns the catalog's yes, but with no stored
+			// row today's Source switch has no label for it, so it reads "unknown".
+			name: "a live array without tools overturns a catalog yes", model: catalogToolModel, native: true,
+			listed: []string{"completion"},
+			want:   ToolCallExplanation{Caps: catalogToolCaps &^ CapToolCall, Source: "unknown"},
+		},
+		{
+			// #736: a checked no outranks the runtime's bit (it was the runtime's yes before).
+			name: "a probe no beside the runtime's bit is the probe's",
 			rows: []fingerprint.EvidenceRow{logRow(b, "tool_call", fingerprint.CapProbeNo, logDigest, at)}, listed: []string{"tools"},
-			want: ToolCallExplanation{Caps: CapToolCall, Has: true, Source: "runtime", State: fingerprint.CapProbeNo, TestedAt: at, Valid: true},
+			want: ToolCallExplanation{Source: "probe", State: fingerprint.CapProbeNo, TestedAt: at, Valid: true},
 		},
 		{
 			name: "the runtime's bit with nothing in the log", listed: []string{"tools"},
@@ -441,9 +452,16 @@ func TestExplainToolCall_LogProvenance(t *testing.T) {
 			if len(tt.rows) > 0 {
 				appendRows(t, store, tt.rows...)
 			}
-			mr, prov := logRegistry(t, store, "local", b, logDigest)
-			prov.models[0].Capabilities = tt.listed
-			got, err := mr.ExplainToolCall(t.Context(), ModelKey{Provider: "local", Model: logModel})
+			binding, model := b, logModel
+			if tt.native {
+				binding = mustBinding(t, "http://127.0.0.1:11434", "ollama")
+			}
+			if tt.model != "" {
+				model = tt.model
+			}
+			mr, prov := logRegistry(t, store, "local", binding, logDigest)
+			prov.models[0].Name, prov.models[0].Capabilities = model, tt.listed
+			got, err := mr.ExplainToolCall(t.Context(), ModelKey{Provider: "local", Model: model})
 			if err != nil {
 				t.Fatalf("ExplainToolCall: %v", err)
 			}
@@ -1229,4 +1247,203 @@ func TestExplainToolCall_NoLogBaseline(t *testing.T) {
 			}
 		})
 	}
+}
+
+// --- ExplainToolCall on the log path takes Caps and Has from the precedence
+// (#736) ---
+
+// A failed read is flagged, not an error, and the catalog still answers;
+// the stored no it hides answers once the log reads again.
+func TestExplainToolCall_UnreadableLogFlagged(t *testing.T) {
+	store := &hookedEvidenceStore{EvidenceStore: newEvidenceLog(t)}
+	b := mustBinding(t, "http://127.0.0.1:8080", "openai-compat")
+	at := logT0.Add(-logDay)
+	appendRows(t, store, rowFor(catalogToolModel, logRow(b, capabilityToolCall, fingerprint.CapProbeNo, logDigest, at)))
+	mr := logBoundRegistry(t, store, b, true, nil, ModelInfo{Name: catalogToolModel, Digest: logDigest})
+	key := ModelKey{Provider: "local", Model: catalogToolModel}
+
+	store.snapshotErr = errors.New("database is locked")
+	got, err := mr.ExplainToolCall(t.Context(), key)
+	if err != nil {
+		t.Fatalf("ExplainToolCall: %v; want nil on a failed read", err)
+	}
+	if want := (ToolCallExplanation{Caps: catalogToolCaps, Has: true, Source: "catalog", EvidenceUnreadable: true}); got != want {
+		t.Fatalf("unreadable: got %+v; want %+v", got, want)
+	}
+
+	store.snapshotErr = nil
+	got, err = mr.ExplainToolCall(t.Context(), key)
+	if err != nil {
+		t.Fatalf("ExplainToolCall: %v", err)
+	}
+	want := ToolCallExplanation{Caps: catalogToolCaps &^ CapToolCall, Source: "probe", State: fingerprint.CapProbeNo, TestedAt: at, Valid: true}
+	if !got.TestedAt.Equal(want.TestedAt) {
+		t.Fatalf("readable: TestedAt = %v; want %v", got.TestedAt, want.TestedAt)
+	}
+	if got.TestedAt = want.TestedAt; got != want {
+		t.Fatalf("readable: got %+v; want %+v", got, want)
+	}
+}
+
+// A kept row (its append failed) answers and is marked Unsaved.
+func TestExplainToolCall_UnsavedKept(t *testing.T) {
+	b := mustBinding(t, "http://127.0.0.1:8080", "openai-compat")
+	mr, _ := logRegistry(t, newEvidenceLog(t), "local", b, logDigest)
+	at := logT0.Add(-time.Hour)
+	mr.keepUnsavedEvidence([]fingerprint.EvidenceRow{logRow(b, capabilityToolCall, fingerprint.CapProbeYes, logDigest, at)})
+	got, err := mr.ExplainToolCall(t.Context(), ModelKey{Provider: "local", Model: logModel})
+	if err != nil {
+		t.Fatalf("ExplainToolCall: %v", err)
+	}
+	want := ToolCallExplanation{Caps: CapToolCall, Has: true, Source: "probe", State: fingerprint.CapProbeYes, TestedAt: at, Valid: true, Unsaved: true}
+	if !got.TestedAt.Equal(want.TestedAt) {
+		t.Fatalf("TestedAt = %v; want %v", got.TestedAt, want.TestedAt)
+	}
+	if got.TestedAt = want.TestedAt; got != want {
+		t.Fatalf("got %+v; want %+v", got, want)
+	}
+}
+
+// An explicit list answers before any listing or log read.
+func TestExplainToolCall_ExplicitSendsNoListing(t *testing.T) {
+	store := &hookedEvidenceStore{EvidenceStore: newEvidenceLog(t)}
+	b := mustBinding(t, "http://127.0.0.1:8080", "openai-compat")
+	appendRows(t, store, logRow(b, capabilityToolCall, fingerprint.CapProbeNo, logDigest, logT0))
+	mr, prov := logRegistry(t, store, "local", b, logDigest)
+	mr.SetCapabilityOverride(func(ModelKey) []string { return []string{"chat", "tool_call"} })
+	store.snapshots.Store(0)
+	got, err := mr.ExplainToolCall(t.Context(), ModelKey{Provider: "local", Model: logModel})
+	if err != nil {
+		t.Fatalf("ExplainToolCall: %v", err)
+	}
+	if want := (ToolCallExplanation{Caps: CapChat | CapToolCall, Has: true, Source: "explicit"}); got != want {
+		t.Fatalf("got %+v; want %+v", got, want)
+	}
+	wantModelsCalls(t, "the explicit short cut", prov, 0)
+	if n := store.snapshots.Load(); n != 0 {
+		t.Fatalf("%d log reads; want none", n)
+	}
+}
+
+// With no stored provider row, Ollama's live /api/show facts answer, and
+// the explanation calls them the runtime's.
+func TestExplainToolCall_OllamaKeepsRuntimeSource(t *testing.T) {
+	b := mustBinding(t, "http://127.0.0.1:11434", "ollama")
+	mr := logBoundRegistry(t, newEvidenceLog(t), b, true, nil, ModelInfo{Name: logModel, Digest: logDigest, Capabilities: []string{"tools"}})
+	got, err := mr.ExplainToolCall(t.Context(), ModelKey{Provider: "local", Model: logModel})
+	if err != nil {
+		t.Fatalf("ExplainToolCall: %v", err)
+	}
+	if want := (ToolCallExplanation{Caps: CapToolCall, Has: true, Source: "runtime"}); got != want {
+		t.Fatalf("got %+v; want %+v", got, want)
+	}
+}
+
+// A failed read degrades to what needs no log, with a nil error and no
+// log-derived State, TestedAt or Valid.
+func TestExplainToolCall_FailedReadDegrades(t *testing.T) {
+	compat := mustBinding(t, "http://127.0.0.1:8080", "openai-compat")
+	native := mustBinding(t, "http://127.0.0.1:11434", "ollama")
+	tests := []struct {
+		name     string
+		b        EvidenceBinding
+		info     ModelInfo
+		override []string
+		want     ToolCallExplanation
+	}{
+		{
+			name: "explicit", b: compat, info: ModelInfo{Name: logModel, Digest: logDigest}, override: []string{"chat"},
+			want: ToolCallExplanation{Caps: CapChat, Source: "explicit"},
+		},
+		{
+			name: "catalog", b: compat, info: ModelInfo{Name: catalogToolModel, Digest: logDigest},
+			want: ToolCallExplanation{Caps: catalogToolCaps, Has: true, Source: "catalog", EvidenceUnreadable: true},
+		},
+		{
+			name: "runtime", b: native, info: ModelInfo{Name: logModel, Digest: logDigest, Capabilities: []string{"tools"}},
+			want: ToolCallExplanation{Caps: CapToolCall, Has: true, Source: "runtime", EvidenceUnreadable: true},
+		},
+		{
+			name: "nothing", b: compat, info: ModelInfo{Name: logModel, Digest: logDigest},
+			want: ToolCallExplanation{Source: "unknown", EvidenceUnreadable: true},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := &hookedEvidenceStore{EvidenceStore: newEvidenceLog(t)}
+			// A stored direct no the failed read must hide.
+			hidden := logRow(tt.b, capabilityToolCall, fingerprint.CapProbeNo, logDigest, logT0)
+			if tt.b.Adapter == fingerprint.AdapterOllama {
+				hidden = observed(showRow(tt.b, capabilityToolCall, fingerprint.CapProbeNo, logDigest, logT0))
+			}
+			appendRows(t, store, rowFor(tt.info.Name, hidden))
+			store.snapshotErr = errors.New("database is locked")
+			mr := logBoundRegistry(t, store, tt.b, true, nil, tt.info)
+			if tt.override != nil {
+				mr.SetCapabilityOverride(func(ModelKey) []string { return tt.override })
+			}
+			got, err := mr.ExplainToolCall(t.Context(), ModelKey{Provider: "local", Model: tt.info.Name})
+			if err != nil {
+				t.Fatalf("ExplainToolCall: %v; want nil", err)
+			}
+			if got != tt.want {
+				t.Fatalf("got %+v; want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
+// An expired attempt alone stays the probe's, invalid, as before #736.
+func TestExplainToolCall_ExpiredAttemptStaysProbe(t *testing.T) {
+	b := mustBinding(t, "http://127.0.0.1:8080", "openai-compat")
+	store := newEvidenceLog(t)
+	at := logT0.Add(-2 * logDay)
+	appendRows(t, store, attemptRow(b, logDigest, at, fingerprint.DetailToolIgnored))
+	mr, _ := logRegistry(t, store, "local", b, logDigest)
+	got, err := mr.ExplainToolCall(t.Context(), ModelKey{Provider: "local", Model: logModel})
+	if err != nil {
+		t.Fatalf("ExplainToolCall: %v", err)
+	}
+	want := ToolCallExplanation{Source: "probe", State: fingerprint.CapProbeInconclusive, TestedAt: at}
+	if !got.TestedAt.Equal(want.TestedAt) {
+		t.Fatalf("TestedAt = %v; want %v", got.TestedAt, want.TestedAt)
+	}
+	if got.TestedAt = want.TestedAt; got != want {
+		t.Fatalf("got %+v; want %+v", got, want)
+	}
+}
+
+// The type floor reaches ExplainToolCall's log path through the same policy
+// Lookup uses, so the two agree.
+func TestExplainToolCall_TypeFloorAgreesWithLookup(t *testing.T) {
+	b := mustBinding(t, "http://127.0.0.1:8080", "openai-compat")
+	mr := logBoundRegistry(t, newEvidenceLog(t), b, true, nil, ModelInfo{Name: logModel, Digest: logDigest})
+	mr.SetCapabilityFloor(func(ModelKey) []string { return []string{"chat", "tool_call"} })
+	got, err := mr.ExplainToolCall(t.Context(), ModelKey{Provider: "local", Model: logModel})
+	if err != nil {
+		t.Fatalf("ExplainToolCall: %v", err)
+	}
+	// A bit no catalog or stored row gives is labelled "runtime" by today's switch.
+	if want := (ToolCallExplanation{Caps: CapChat | CapToolCall, Has: true, Source: "runtime"}); got != want {
+		t.Fatalf("got %+v; want %+v", got, want)
+	}
+	wantCaps(t, "Lookup", lookupProfile(t, mr, logModel).Caps, got.Caps)
+}
+
+// An explicit list on a log-bound registry answers ExplainToolCall as it
+// answers Lookup, over a stored answer that says otherwise.
+func TestExplainToolCall_LogExplicitAgreesWithLookup(t *testing.T) {
+	b := mustBinding(t, "http://127.0.0.1:8080", "openai-compat")
+	store := newEvidenceLog(t)
+	appendRows(t, store, logRow(b, capabilityToolCall, fingerprint.CapProbeYes, logDigest, logT0.Add(-logDay)))
+	mr := logBoundRegistry(t, store, b, true, nil, ModelInfo{Name: logModel, Digest: logDigest})
+	mr.SetCapabilityOverride(func(ModelKey) []string { return []string{"chat"} })
+	got, err := mr.ExplainToolCall(t.Context(), ModelKey{Provider: "local", Model: logModel})
+	if err != nil {
+		t.Fatalf("ExplainToolCall: %v", err)
+	}
+	if want := (ToolCallExplanation{Caps: CapChat, Source: "explicit"}); got != want {
+		t.Fatalf("got %+v; want %+v", got, want)
+	}
+	wantCaps(t, "Lookup", lookupProfile(t, mr, logModel).Caps, got.Caps)
 }

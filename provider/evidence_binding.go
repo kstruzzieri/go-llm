@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"math"
 	"net/url"
+	"slices"
 	"sync"
 	"time"
 
@@ -49,6 +50,12 @@ func EvidenceBindingFor(baseURL, apiFormat string) (EvidenceBinding, error) {
 // not resolve has no evidence, with no fallback to the old table. bind must do no
 // I/O and be safe for concurrent use. Without this option the registry behaves as
 // if the log did not exist.
+//
+// Lookup, ProjectListedModels and ExplainToolCall then take capability masks
+// from one precedence (ExplainEvidence): the explicit list, a direct answer, a
+// stored provider row, live Ollama facts, the catalog, the type floor. So a
+// checked no beats a catalog or type yes, and a stored fingerprint profile adds
+// no capability (its memory and context still count).
 //
 // On-demand resolution (ResolveToolCall, EnsureToolCallResolved) then reads and
 // writes only the log: it never reads or writes capability_probes, never asserts
@@ -112,10 +119,13 @@ type evidenceView struct {
 }
 
 // readEvidence reads the log for models in one snapshot, without account reads:
-// capability evidence belongs to the endpoint and adapter, not to a key. A
-// successful read adds the registry's kept rows (keepUnsavedEvidence) for the
-// binding's endpoint. A failed read degrades to no evidence, kept rows included,
-// like the old table's, and the view remembers it.
+// capability evidence belongs to the endpoint and adapter, not to a key. Each
+// model is read under every spelling its rows may be stored under
+// (EvidenceModelNames: for ollama, m and m:latest), and those rows are filed
+// under the model as requested. A successful read adds the registry's kept rows
+// (keepUnsavedEvidence) for the binding's endpoint, filed the same way. A
+// failed read degrades to no evidence, kept rows included, like the old
+// table's, and the view remembers it.
 func (r *ModelRegistry) readEvidence(ctx context.Context, provider string, models []string) *evidenceView {
 	if r.evidenceStore == nil {
 		return nil
@@ -127,28 +137,43 @@ func (r *ModelRegistry) readEvidence(ctx context.Context, provider string, model
 		return view
 	}
 	view.endpoint, view.adapter = binding.Endpoint, binding.Adapter
-	snap, err := r.evidenceStore.ReadSnapshot(ctx, binding.Endpoint, binding.Adapter, nil, "", models, view.now)
+	// owners maps each stored spelling to the requested models it answers for;
+	// two requested spellings of one model (a listing holding both) share rows.
+	owners := make(map[string][]string, len(models))
+	var spellings []string
+	for _, m := range models {
+		for _, name := range EvidenceModelNames(binding.Adapter, m) {
+			if _, seen := owners[name]; !seen {
+				spellings = append(spellings, name)
+			}
+			if !slices.Contains(owners[name], m) {
+				owners[name] = append(owners[name], m)
+			}
+		}
+	}
+	snap, err := r.evidenceStore.ReadSnapshot(ctx, binding.Endpoint, binding.Adapter, nil, "", spellings, view.now)
 	if err != nil {
 		view.failed = true
 		return view
 	}
 	view.generation = snap.Generation
 	view.rows = make(map[string][]fingerprint.EvidenceRow, len(models))
+	file := func(row fingerprint.EvidenceRow) {
+		for _, m := range owners[row.Model] {
+			view.rows[m] = append(view.rows[m], row)
+		}
+	}
 	for _, row := range snap.Rows {
-		view.rows[row.Model] = append(view.rows[row.Model], row)
+		file(row)
 	}
 	// Kept rows join as the store's endpoint query would return them: this
-	// endpoint, a model asked for, any adapter. The work under RLock is one pass
-	// over all kept rows, copying the matching ones by value into the view's own
-	// slices, so no view shares storage with r.kept.
-	asked := make(map[string]bool, len(models))
-	for _, m := range models {
-		asked[m] = true
-	}
+	// endpoint, a spelling asked for, any adapter. The work under RLock is one
+	// pass over all kept rows, copying the matching ones by value into the
+	// view's own slices, so no view shares storage with r.kept.
 	r.mu.RLock()
 	for _, row := range r.kept {
-		if row.Endpoint == binding.Endpoint && asked[row.Model] {
-			view.rows[row.Model] = append(view.rows[row.Model], row)
+		if row.Endpoint == binding.Endpoint {
+			file(row)
 		}
 	}
 	r.mu.RUnlock()
@@ -175,23 +200,6 @@ func (v *evidenceView) readings(model, digest string) map[string]fingerprint.Cap
 	return fingerprint.ReadCapabilities(v.rows[model], v.adapter, digest, v.now)
 }
 
-// caps reduces a model's readings at digest to the capabilities the log says yes
-// to and those it has a definitive answer for.
-func (v *evidenceView) caps(model, digest string) (yes, known Capability) {
-	for name, reading := range v.readings(model, digest) {
-		bit, ok := canonicalCapability(name)
-		answer := readingAnswer(reading)
-		if !ok || answer == nil {
-			continue
-		}
-		known |= bit
-		if answer.State == fingerprint.CapProbeYes {
-			yes |= bit
-		}
-	}
-	return yes, known
-}
-
 // deadline is the next instant the model's readings at digest change with no
 // write, or zero when there is none or no view.
 func (v *evidenceView) deadline(model, digest string) time.Time {
@@ -211,20 +219,55 @@ func runtimeDigest(info *ModelInfo) string {
 	return info.Digest
 }
 
-// explainToolCallFromLog is ExplainToolCall's provenance on the log path, from the
-// log's tool_call reading. The vocabulary stays ToolCallExplanation's: a direct
-// answer or an attempt is "probe" and what the provider reported is "runtime". #736
-// reworks it.
+// logCapabilityFacts runs the core for one model on a log-bound registry: the
+// view's rows (both alias spellings) at the runtime's digest, the explicit list
+// and the type floor from the same callbacks merge applies (exact spelling;
+// a list that fails to parse counts as none), the catalog profile the caller
+// resolved, and the live Ollama facts of info whatever the binding says, so an
+// unbound provider or a failed read keeps them. It fires no rejection hook: the
+// merge in buildProfile and the projection does, and ExplainToolCall on the log
+// path runs no merge, so it fires none.
+func (r *ModelRegistry) logCapabilityFacts(view *evidenceView, key ModelKey, info *ModelInfo,
+	static *ModelProfile, override CapabilityOverride, floor CapabilityFloor) []CapabilityFact {
+	in := EvidenceInputs{
+		Adapter: view.adapter, Digest: runtimeDigest(info), Now: view.now,
+		Catalog: static, Rows: view.rows[key.Model],
+	}
+	if info != nil {
+		in.Runtime = OllamaListingFacts(*info)
+	}
+	if override != nil {
+		if tokens := override(key); len(tokens) > 0 {
+			if caps, err := ParseCapsStrict(tokens); err == nil && caps != 0 {
+				in.Explicit = tokens
+			}
+		}
+	}
+	if floor != nil {
+		if caps, err := ParseCapsStrict(floor(key)); err == nil {
+			in.TypeCaps = caps
+		}
+	}
+	return ExplainEvidence(in)
+}
+
+// explainToolCallFromLog is ExplainToolCall's provenance on the log path: Caps and
+// Has are the precedence core's (logCapabilityFacts), so a checked no beats a
+// catalog, type or runtime yes. The rest reads the log's tool_call reading in
+// ToolCallExplanation's vocabulary: a direct answer or an attempt is "probe" and
+// what the provider reported is "runtime". A failed read is not an error: it sets
+// EvidenceUnreadable and the explanation carries no log fact.
 func (r *ModelRegistry) explainToolCallFromLog(ctx context.Context, key ModelKey, runtimeInfo *ModelInfo) (ToolCallExplanation, error) {
 	log := r.readEvidence(ctx, key.Provider, []string{key.Model})
-	digest := runtimeDigest(runtimeInfo)
-	yes, known := log.caps(key.Model, digest)
-	facts := r.projectListedModel(ctx, key, *runtimeInfo, yes, known, r.snapshotListedProjectionPolicy())
 	if err := ctx.Err(); err != nil {
 		return ToolCallExplanation{}, err
 	}
+	policy := r.snapshotListedProjectionPolicy()
+	static := r.catalogProfileFor(ParseModelName(key.Model), runtimeInfo)
+	yes, _, _ := CapabilityMasks(r.logCapabilityFacts(log, key, runtimeInfo, static, policy.override, policy.floor))
 
-	exp := ToolCallExplanation{Caps: facts.Caps, Has: facts.Caps.Has(CapToolCall), Source: "unknown"}
+	exp := ToolCallExplanation{Caps: yes, Has: yes.Has(CapToolCall), Source: "unknown", EvidenceUnreadable: log.failed}
+	digest := runtimeDigest(runtimeInfo)
 	reading := log.readings(key.Model, digest)[capabilityToolCall]
 	answer := readingAnswer(reading)
 	attempt := reading.Attempt
@@ -241,7 +284,6 @@ func (r *ModelRegistry) explainToolCallFromLog(ctx context.Context, key ModelKey
 	direct := answer != nil && answer.Source != fingerprint.EvidenceSourceProvider
 	switch {
 	case exp.Has:
-		static := r.catalogProfileFor(ParseModelName(key.Model), runtimeInfo)
 		switch {
 		case static != nil && static.Caps.Has(CapToolCall):
 			exp.Source = "catalog"

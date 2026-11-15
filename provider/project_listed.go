@@ -17,8 +17,8 @@ import (
 // provider re-query. KnownMask covers every present Caps bit, plus
 // tool_call when a persisted probe row validated against the listing
 // identity answers definitively (including "no", which no cap bit can carry).
-// With the evidence log, it covers every capability the log answers definitively
-// at the listing's identity.
+// With the evidence log, Caps is what the precedence core says yes to and
+// KnownMask what it says yes or no to, at the listing's identity.
 type ListedModelFacts struct {
 	Key       ModelKey
 	Family    string
@@ -81,7 +81,9 @@ func (r *ModelRegistry) snapshotListedProjectionPolicy() listedProjectionPolicy 
 //
 // With WithEvidenceLog, one snapshot without account reads answers for the whole
 // listing, each model read at its own listed digest (empty when name-only), and
-// cap-probe rows are not consulted.
+// cap-probe rows are not consulted. The precedence core (ExplainEvidence) then
+// decides each model's mask from that snapshot, the listing's own live facts,
+// the catalog and the config policy, so a checked no survives as a known no.
 func (r *ModelRegistry) ProjectListedModels(ctx context.Context, providerName string, infos []ModelInfo) ([]ListedModelFacts, error) {
 	policy := r.snapshotListedProjectionPolicy()
 	now := time.Now()
@@ -98,12 +100,10 @@ func (r *ModelRegistry) ProjectListedModels(ctx context.Context, providerName st
 		info := infos[i] // value copy; the caller's slice is never mutated
 		key := ModelKey{Provider: providerName, Model: info.Name}
 		var evidenceYes, known Capability
-		if log != nil {
-			evidenceYes, known = log.caps(info.Name, info.Digest)
-		} else {
+		if log == nil {
 			evidenceYes, known = legacyProbeBits(r.capProbeRow(ctx, key), capProbeDigest(key, &info), now)
 		}
-		out = append(out, r.projectListedModel(ctx, key, info, evidenceYes, known, policy))
+		out = append(out, r.projectListedModel(ctx, key, info, evidenceYes, known, log, policy))
 	}
 	// Final barrier: cancellation landing mid-final-iteration (or arriving
 	// with an empty listing) must not return a degraded slice with nil error.
@@ -127,18 +127,28 @@ func legacyProbeBits(row *fingerprint.CapProbe, digest string, now time.Time) (y
 	return 0, 0
 }
 
+// projectListedModel merges one listed model. Without a view, evidenceYes and
+// known are the legacy row's bits. With one (the log path) they are ignored:
+// the precedence core over the view and the listing's own info decides Caps
+// (its yes mask) and KnownMask (yes or no).
 func (r *ModelRegistry) projectListedModel(
 	ctx context.Context,
 	key ModelKey,
 	info ModelInfo,
 	evidenceYes, known Capability,
+	view *evidenceView,
 	policy listedProjectionPolicy,
 ) ListedModelFacts {
 	parsed := ParseModelName(info.Name)
 	static := r.catalogProfileFor(parsed, &info)
 	fp := r.fingerprintProfileMode(ctx, key, &info, true) // read-only: never EnsureProfile
 
-	profile := r.merge(key, &info, static, fp, parsed, policy.override, policy.floor, policy.thinkOverride, policy.contextOverride, policy.qualityCeilingOverride, policy.rejectionHook, evidenceYes)
+	var decided *Capability
+	if view != nil {
+		yes, no, _ := CapabilityMasks(r.logCapabilityFacts(view, key, &info, static, policy.override, policy.floor))
+		decided, known = &yes, yes|no
+	}
+	profile := r.merge(key, &info, static, fp, parsed, policy.override, policy.floor, policy.thinkOverride, policy.contextOverride, policy.qualityCeilingOverride, policy.rejectionHook, evidenceYes, decided)
 	return ListedModelFacts{
 		Key:               key,
 		Family:            profile.Family,
