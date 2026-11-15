@@ -1022,8 +1022,17 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	// cleared first, before this probe or any spawn; host sessions keep them.
 	if nativeSandbox(sandbox) {
 		clearInheritedDescriptors()
-		if err := agenttools.ValidateSandbox(sandbox, root); err != nil {
+		if err := validateSandbox(sandbox, root); err != nil {
 			return fmt.Errorf("golem: sandbox: %w", err)
+		}
+		// #584: -strict-approval runs an exposed conversation's commands on
+		// the network-denied copy; a copy this host cannot run refuses here.
+		if f.strictApproval && sandbox.AllowNetwork {
+			denied := sandbox
+			denied.AllowNetwork = false
+			if err := validateSandbox(denied, root); err != nil {
+				return fmt.Errorf("golem: sandbox: network-denied variant for -strict-approval: %w", err)
+			}
 		}
 	}
 	mcpServers, merr = withMCPPolicy(root, mcpServers, len(f.mcpStdio), f.mcpEnv)

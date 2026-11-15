@@ -220,7 +220,11 @@ type Options struct {
 	// exposed (#584): each run carries agent.Request.StrictApproval, so once the
 	// conversation's exposure record reads as exposed, every approval goes to the
 	// approver's agent.FreshApprover and an approver without one is denied. The
-	// tools floorExempt names keep their own ApprovalNever. Off by default.
+	// tools floorExempt names keep their own ApprovalNever. While exposed, a
+	// native command tool whose policy allows network runs on its
+	// network-denied copy, so with a native Sandbox that allows network, New
+	// also validates that copy and refuses a host that cannot run it. Off by
+	// default.
 	StrictApproval bool
 }
 
@@ -368,6 +372,16 @@ func New(ctx context.Context, opts Options) (*Runtime, error) {
 	}
 	if err := validateSandbox(sandbox, root); err != nil {
 		return nil, fmt.Errorf("golem: sandbox: %w", err)
+	}
+	// #584: strict approval runs an exposed conversation's commands on the
+	// network-denied copy, so a host that cannot run that copy refuses the
+	// session here rather than at the first narrowed command.
+	if opts.StrictApproval && nativeRuntime(sandbox) && sandbox.AllowNetwork {
+		denied := sandbox
+		denied.AllowNetwork = false
+		if err := validateSandbox(denied, root); err != nil {
+			return nil, fmt.Errorf("golem: sandbox: network-denied variant for strict approval: %w", err)
+		}
 	}
 	if nativeRuntime(sandbox) {
 		// Native tools and the verifier slot carry the workspace's own

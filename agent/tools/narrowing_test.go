@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -524,7 +526,13 @@ func callScript(name, args string) []agent.ModelResult {
 // record and the result the model saw.
 func runStrictCommand(t *testing.T, tool agent.Tool, prior *agent.Exposure, ap agent.Approver) (agent.ToolCallRecord, string) {
 	t.Helper()
-	res, err := agent.New(&proposalRunCaller{responses: callScript(tool.Spec().Name, narrowRaw)}, agent.ContextManager{}).Run(
+	return runStrictCall(t, tool, narrowRaw, prior, ap)
+}
+
+// runStrictCall is runStrictCommand with the call's arguments.
+func runStrictCall(t *testing.T, tool agent.Tool, args string, prior *agent.Exposure, ap agent.Approver) (agent.ToolCallRecord, string) {
+	t.Helper()
+	res, err := agent.New(&proposalRunCaller{responses: callScript(tool.Spec().Name, args)}, agent.ContextManager{}).Run(
 		context.Background(), agent.Request{
 			Goal: "run it", Tools: []agent.Tool{tool}, Approver: ap,
 			StrictApproval: true, PriorExposure: prior,
@@ -975,11 +983,17 @@ func TestVerifierVariantStateMismatch(t *testing.T) {
 // observation with the verification appended.
 func runStrictVerified(t *testing.T, f *narrowFixture, prior *agent.Exposure, ap agent.Approver) string {
 	t.Helper()
+	return runStrictVerifiedOn(t, f.rc.ws, f.slot, prior, ap)
+}
+
+// runStrictVerifiedOn is runStrictVerified over ws and slot.
+func runStrictVerifiedOn(t *testing.T, ws *Workspace, slot *VerifierSlot, prior *agent.Exposure, ap agent.Approver) string {
+	t.Helper()
 	caller := &proposalRunCaller{responses: callScript("write_file", `{"path":"a.txt","content":"x\n"}`)}
 	res, err := agent.New(caller, agent.ContextManager{}).RunWithVerifier(context.Background(), agent.Request{
-		Goal: "write it", Tools: []agent.Tool{NewWriteFile(f.rc.ws, nil)}, Approver: ap,
+		Goal: "write it", Tools: []agent.Tool{NewWriteFile(ws, nil)}, Approver: ap,
 		StrictApproval: true, PriorExposure: prior,
-	}, nil, f.slot)
+	}, nil, slot)
 	if err != nil {
 		t.Fatalf("RunWithVerifier: %v", err)
 	}
@@ -1071,5 +1085,194 @@ func TestNoVariantUnchangedWhenSuspended(t *testing.T) {
 				t.Fatalf("original runner calls = %d, want 1", n)
 			}
 		})
+	}
+}
+
+// --- Real backends (Task 12) ---
+
+// bgAwaitExit polls command_status in byName until handle's job leaves the
+// running state and returns that status.
+func bgAwaitExit(t *testing.T, byName map[string]agent.Tool, handle string) string {
+	t.Helper()
+	status := byName["command_status"].(*CommandStatus)
+	raw := json.RawMessage(fmt.Sprintf(`{"handle":%q}`, handle))
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		res, err := status.Invoke(context.Background(), raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(res.Content, "state: running") {
+			return res.Content
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatal("background job never exited")
+	return ""
+}
+
+// narrowRoute is one of the four command routes network narrowing covers.
+type narrowRoute string
+
+const (
+	routeForeground narrowRoute = "foreground"
+	routeScratch    narrowRoute = "scratch"
+	routeBackground narrowRoute = "background"
+	routeVerifier   narrowRoute = "verifier"
+)
+
+// runNarrowRoute runs argv once on route over a real backend for cfg, in a
+// strict run over root (exposed when prior is set) whose approver says yes,
+// and returns the preview that approved the command and what the command
+// reported. It waits for a background job to exit.
+func runNarrowRoute(t *testing.T, route narrowRoute, cfg SandboxConfig, root string, argv []string, prior *agent.Exposure) (preview, result string) {
+	t.Helper()
+	ap := &freshYes{}
+	if route == routeVerifier {
+		ws := mustWorkspace(t, root)
+		cmd, err := NewSandboxedVerifyCommand(ws, cfg, argv, "", 30*time.Second)
+		if err != nil {
+			t.Fatal(err)
+		}
+		slot := newTestSlot(t, root, cfg)
+		if err := slot.Set(cmd); err != nil {
+			t.Fatal(err)
+		}
+		result = runStrictVerifiedOn(t, ws, slot, prior, ap)
+		if len(ap.previews) != 2 {
+			t.Fatalf("previews %q, want the write's and the verifier's", ap.previews)
+		}
+		return ap.previews[1], result
+	}
+	m, err := NewSandboxedBackgroundManager(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(m.Shutdown)
+	var opts ExecToolsOptions
+	opts.Scratch.Enabled = route == routeScratch
+	set, err := NewExecToolsWithBackgroundOptions(root, m, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName := map[string]agent.Tool{}
+	for _, tool := range set {
+		byName[tool.Spec().Name] = tool
+	}
+	if route == routeScratch {
+		// Both backends bind the snapshot's root, which must be canonical.
+		base, err := filepath.EvalSymlinks(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		byName["run_command"].(*RunCommand).scratchRT.tempBase = base
+	}
+	name := "run_command"
+	if route == routeBackground {
+		name = "start_command"
+	}
+	raw, err := json.Marshal(map[string]any{"argv": argv})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, seen := runStrictCall(t, byName[name], string(raw), prior, ap)
+	if rec.IsError || !rec.Invoked || len(ap.previews) != 1 {
+		t.Fatalf("%s record = %+v, result %q, previews %q", name, rec, seen, ap.previews)
+	}
+	if route != routeBackground {
+		return ap.previews[0], seen
+	}
+	_, handle, _ := strings.Cut(seen, "handle: ")
+	handle, _, _ = strings.Cut(handle, "\n")
+	return ap.previews[0], bgAwaitExit(t, byName, handle)
+}
+
+// countingListener is a local TCP listener or UDP socket that counts the
+// connections or datagrams it receives until the test ends.
+type countingListener struct {
+	addr string
+	hits atomic.Int64
+}
+
+func listenCounting(t *testing.T, network string) *countingListener {
+	t.Helper()
+	l := &countingListener{}
+	if network == "tcp" {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = ln.Close() })
+		l.addr = ln.Addr().String()
+		go func() {
+			for {
+				conn, err := ln.Accept()
+				if err != nil {
+					return
+				}
+				l.hits.Add(1)
+				_ = conn.Close()
+			}
+		}()
+		return l
+	}
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = pc.Close() })
+	l.addr = pc.LocalAddr().String()
+	go func() {
+		buf := make([]byte, 256)
+		for {
+			if _, _, err := pc.ReadFrom(buf); err != nil {
+				return
+			}
+			l.hits.Add(1)
+		}
+	}()
+	return l
+}
+
+// reached reports whether anything arrived within wait.
+func (l *countingListener) reached(wait time.Duration) bool {
+	deadline := time.Now().Add(wait)
+	for l.hits.Load() == 0 {
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	return true
+}
+
+// proveNarrowRoute is the behavioural proof of network narrowing (#584) for
+// route on a real native backend that allows network: in a strict run with
+// a recorded foreign exposure, the command dialing a local TCP listener or
+// sending a UDP datagram is approved on a preview showing deniedLabel and
+// reaches nothing; the same command in a clean run is approved on a
+// network=allowed preview and arrives. dial returns the command's argv.
+func proveNarrowRoute(t *testing.T, route narrowRoute, cfg SandboxConfig, deniedLabel, root string, dial func(network, addr string) []string) {
+	t.Helper()
+	for _, network := range []string{"tcp", "udp"} {
+		for _, exposed := range []bool{true, false} {
+			state, prior, label := "clean", (*agent.Exposure)(nil), " network=allowed "
+			if exposed {
+				state, prior, label = "exposed", exposedPrior(), " network="+deniedLabel+" "
+			}
+			t.Run(network+"/"+state, func(t *testing.T) {
+				l := listenCounting(t, network)
+				preview, result := runNarrowRoute(t, route, cfg, root, dial(network, l.addr), prior)
+				if !strings.Contains(preview, label) {
+					t.Errorf("approved preview lacks %q:\n%s", label, preview)
+				}
+				switch {
+				case exposed && l.reached(500*time.Millisecond):
+					t.Errorf("%s listener reached from an exposed run's %s command; result:\n%s", network, route, result)
+				case !exposed && !l.reached(5*time.Second):
+					t.Errorf("clean control: %s listener never reached; result:\n%s", network, result)
+				}
+			})
+		}
 	}
 }

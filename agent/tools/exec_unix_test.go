@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -95,6 +96,8 @@ func TestMain(m *testing.M) {
 //	                                  detached stdio (pipes released), write its PID
 //	                                  to <pidfile>, exit 0 immediately
 //	["holdpipeescape", <pidfile>]  -> same, but the pipe holder escapes via setsid
+//	["dial", <network>, <addr>]    -> connect over tcp, or send one udp datagram,
+//	                                  to addr; exit 1 on any failure
 //
 // Any other mode goes to platformHelperMain (darwin: helper_darwin_test.go).
 func helperMain(args []string) int {
@@ -219,6 +222,17 @@ func helperMain(args []string) int {
 		if err := os.WriteFile(args[1], []byte(strconv.Itoa(child.Process.Pid)), 0o600); err != nil {
 			_, _ = fmt.Fprintln(os.Stderr, "holdpipeescape: WriteFile:", err)
 			_ = child.Process.Kill()
+			return 1
+		}
+		return 0
+	case "dial":
+		conn, err := net.DialTimeout(args[1], args[2], 3*time.Second)
+		if err == nil {
+			_, err = conn.Write([]byte("ping"))
+			_ = conn.Close()
+		}
+		if err != nil {
+			_, _ = fmt.Fprintln(os.Stderr, "dial:", err)
 			return 1
 		}
 		return 0

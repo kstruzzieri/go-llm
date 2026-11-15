@@ -38,6 +38,11 @@ const (
 	limitBwrapMounts      = "reviewed read-only system mounts, workspace/snapshot and private temp"
 	limitBwrapCaps        = "all capabilities dropped by the backend"
 	limitBwrapMemory      = "RLIMIT_AS per-process virtual address space plus separate private tmpfs quotas; not aggregate process-tree memory"
+	// limitStrictNarrows follows a native network-allowed policy's limits
+	// under strict approval (#584): an exposed conversation's commands run on
+	// the network-denied copy, which on bwrap keeps the pathname socket
+	// channel, so bwrap repeats limitBwrapUnixSockets after it.
+	limitStrictNarrows = "strict approval denies network to commands once a conversation is exposed"
 )
 
 // ToolPermission describes one mounted tool as the model is offered it.
@@ -124,7 +129,7 @@ func (r *Runtime) EffectivePermissions() EffectivePermissions {
 		Root:           r.root,
 		Ceiling:        slices.Clone(r.ceilingNames),
 		Tools:          slices.Clone(r.snap.permissions),
-		Command:        commandPermissions(r.profile, r.sandbox),
+		Command:        commandPermissions(r.profile, r.sandbox, r.strictApproval),
 		Scratch:        agenttools.CommandsRunInScratch(unfloored(r.snap.tools)),
 		Verification:   verificationOf(r.profile, r.snap.orchestrator),
 		StrictApproval: r.strictApproval,
@@ -132,14 +137,20 @@ func (r *Runtime) EffectivePermissions() EffectivePermissions {
 }
 
 // commandPermissions projects the frozen sandbox policy (spec section 7).
-func commandPermissions(p Profile, s agenttools.SandboxConfig) CommandPermissions {
+// With strict set, a native policy that allows network also lists the
+// narrowing its commands get once the conversation is exposed (#584).
+func commandPermissions(p Profile, s agenttools.SandboxConfig, strict bool) CommandPermissions {
 	if p == ProfileInspect {
 		return CommandPermissions{Runtime: "n/a", Network: "n/a"}
 	}
 	switch s.Runtime {
 	case agenttools.SandboxRuntimeSeatbelt:
 		if s.AllowNetwork {
-			return CommandPermissions{Runtime: "seatbelt", Network: "allowed", Limits: []string{limitSeatbeltProfile, limitNetworkAllowed, limitNoQuota}}
+			c := CommandPermissions{Runtime: "seatbelt", Network: "allowed", Limits: []string{limitSeatbeltProfile, limitNetworkAllowed, limitNoQuota}}
+			if strict {
+				c.Limits = append(c.Limits, limitStrictNarrows)
+			}
+			return c
 		}
 		return CommandPermissions{Runtime: "seatbelt", Network: "denied", Limits: []string{limitSeatbeltProfile, limitNetworkDenied, limitNoQuota}}
 	case agenttools.SandboxRuntimeBwrap:
@@ -149,6 +160,9 @@ func commandPermissions(p Profile, s agenttools.SandboxConfig) CommandPermission
 		}
 		if s.MemoryCapMB > 0 {
 			c.Limits = append(c.Limits, limitBwrapMemory)
+		}
+		if strict && s.AllowNetwork {
+			c.Limits = append(c.Limits, limitStrictNarrows, limitBwrapUnixSockets)
 		}
 		return c
 	}

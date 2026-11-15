@@ -1279,3 +1279,63 @@ func TestBwrapVerifierCannotPlantHook(t *testing.T) {
 		t.Errorf("observation:\n%s\nwant a failed run whose hook write was refused", out)
 	}
 }
+
+// TestBwrapNarrowForeground and its three siblings prove network narrowing
+// (#584) on the real bwrap backend, through real strict runs with the
+// default suspension predicate: a policy that allows network runs an
+// exposed conversation's command network=ip-denied (proveNarrowRoute),
+// following TestBwrapAllowNetworkControl.
+func TestBwrapNarrowForeground(t *testing.T) { bwrapNarrow(t, routeForeground) }
+
+func TestBwrapNarrowScratch(t *testing.T) { bwrapNarrow(t, routeScratch) }
+
+func TestBwrapNarrowBackground(t *testing.T) { bwrapNarrow(t, routeBackground) }
+
+func TestBwrapNarrowVerifier(t *testing.T) { bwrapNarrow(t, routeVerifier) }
+
+// bwrapNarrow runs proveNarrowRoute for route, with the workspace copy of
+// the bwrap helper as the command.
+func bwrapNarrow(t *testing.T, route narrowRoute) {
+	t.Helper()
+	requireBwrapCapability(t)
+	ws := wsTempDir(t)
+	helper := bwrapHelperBinary(t, ws)
+	token := bwrapToken(t)
+	cfg := SandboxConfig{Runtime: SandboxRuntimeBwrap, AllowNetwork: true}
+	proveNarrowRoute(t, route, cfg, "ip-denied", ws, func(network, addr string) []string {
+		return bwrapHelperArgv(helper, network, addr, token)
+	})
+}
+
+// TestBwrapNarrowWorkspacePathSocketReachable pins the limit the narrowed
+// copy discloses, as TestBwrapWorkspacePathSocketIsReachable pins it for a
+// network-denied policy: in an exposed strict run, a pathname Unix socket
+// inside the shared workspace stays reachable.
+func TestBwrapNarrowWorkspacePathSocketReachable(t *testing.T) {
+	requireBwrapCapability(t)
+	ws := wsTempDir(t)
+	helper := bwrapHelperBinary(t, ws)
+	sock := filepath.Join(ws, "chan.sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ln.Close() }()
+	accepted := make(chan struct{}, 1)
+	go func() {
+		if conn, err := ln.Accept(); err == nil {
+			accepted <- struct{}{}
+			_ = conn.Close()
+		}
+	}()
+	cfg := SandboxConfig{Runtime: SandboxRuntimeBwrap, AllowNetwork: true}
+	preview, result := runNarrowRoute(t, routeForeground, cfg, ws, bwrapHelperArgv(helper, "unixdial", sock), exposedPrior())
+	if !strings.Contains(preview, " network=ip-denied ") {
+		t.Errorf("approved preview lacks network=ip-denied:\n%s", preview)
+	}
+	select {
+	case <-accepted:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("workspace pathname socket unreachable from the narrowed command (limitation contract changed): %s", result)
+	}
+}
