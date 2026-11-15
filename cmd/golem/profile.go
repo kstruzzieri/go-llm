@@ -215,7 +215,7 @@ func renderPermissions(ep golemruntime.EffectivePermissions) string {
 	}
 	line += " scratch=" + scratch + " verification=" + ep.Verification.State
 	if ep.StrictApproval {
-		line += " strict-approval=on"
+		line += " strict-approval=on (exposed by MCP results, accepted /consult advice or unrecorded history)"
 	}
 	if ep.Profile == golemruntime.ProfileInspect {
 		line += "; restart with -profile trusted to enable retrieval, memory tools, writes or commands"

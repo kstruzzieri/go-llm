@@ -38,6 +38,8 @@ const (
 	writeQuestion   = "Apply this change? [y/N] "
 	mcpQuestion     = "Run this MCP tool? [y/N] "
 	grantedApproval = "auto-approved (session grant)"
+	cleanExposure   = "exposure: clean (files and command output are not tracked)"
+	strictToken     = " strict-approval=on (exposed by MCP results, accepted /consult advice or unrecorded history)"
 	noteQuestion    = "Save this agent memory note? [y/N] "
 	promoteQuestion = "Promote this agent memory record? [y/N] "
 )
@@ -476,8 +478,8 @@ func TestGrantsPrintsExposureOnlyUnderStrict(t *testing.T) {
 		record *agent.Exposure // nil leaves the active conversation unsaved
 		want   string
 	}{
-		{"clean", nil, "exposure: clean"},
-		{"clean with history", &agent.Exposure{Recorded: true}, "exposure: clean"},
+		{"clean", nil, cleanExposure},
+		{"clean with history", &agent.Exposure{Recorded: true}, cleanExposure},
 		{"foreign", &foreignExposure, "exposure: foreign (mcp__docs__fetch)"},
 		{"foreign without a source", &agent.Exposure{Recorded: true, Foreign: true}, "exposure: foreign"},
 		{"consult", &agent.Exposure{Recorded: true, Foreign: true, First: "consult"}, "exposure: foreign (consult)"},
@@ -632,8 +634,8 @@ func TestStrictApprovalFlagAcceptedInAllModes(t *testing.T) {
 			if !sessOn || !rtOn {
 				t.Fatalf("with the flag: session=%v runtime=%v, want both on", sessOn, rtOn)
 			}
-			if strings.Count(on, " strict-approval=on") != 1 || strings.Replace(on, " strict-approval=on", "", 1) != off {
-				t.Fatalf("permissions line with the flag = %q, want %q plus strict-approval=on", on, off)
+			if strings.Count(on, strictToken) != 1 || strings.Replace(on, strictToken, "", 1) != off {
+				t.Fatalf("permissions line with the flag = %q, want %q plus %q", on, off, strictToken)
 			}
 		})
 	}

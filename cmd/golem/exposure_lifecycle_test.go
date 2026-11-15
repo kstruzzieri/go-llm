@@ -218,7 +218,7 @@ func TestExposureLifecycle(t *testing.T) {
 	// leaves. These prove the display only; strict_test.go's
 	// TestStrictGateEffect proves the gate acts on it.
 	t.Run("strict grants line follows the record", func(t *testing.T) {
-		const foreign, unknown, cleanLine = "exposure: foreign (mcp__docs__fetch)", "exposure: unknown (history)", "exposure: clean"
+		const foreign, unknown, cleanLine = "exposure: foreign (mcp__docs__fetch)", "exposure: unknown (history)", cleanExposure
 		for _, tc := range []struct {
 			name  string
 			steps func(t *testing.T, sess *replSession)

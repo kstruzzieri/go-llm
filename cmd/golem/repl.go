@@ -1108,7 +1108,7 @@ func strictExposure(ctx context.Context, sess *replSession) (line string, suspen
 	case err != nil:
 		return "exposure: unknown (could not read the record)", true
 	case !exp.Exposed():
-		return "exposure: clean", false
+		return "exposure: clean (files and command output are not tracked)", false
 	}
 	foreign, label := exposureSource(exp)
 	line = "exposure: unknown"

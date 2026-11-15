@@ -221,11 +221,11 @@ The source is shown as one line with terminal controls made visible, because an 
 
 For library hosts, narrowing follows each command tool's own backend, not the runtime's option: a natively sandboxed command tool whose policy allows network narrows in any strict run that is exposed. That includes a tool named in `agent.Request.StrictExempt`, which changes only whether a tool that declares it needs no approval is asked, not where a command runs. `golem.New` validates the copy only when `StrictApproval` is set and its own `Sandbox` is native and allows network; with strict approval off, a native session is not refused for it. A runtime whose own policy is host validates none of its tools' copies at start, so such a tool whose copy cannot be built fails at its first narrowed command, again without falling back.
 
-The flag does not select the Trusted profile, because it only narrows what approvals can do. Startup's `permissions:` line adds `strict-approval=on` after `verification=`. There is no in-session toggle in this version. `-p` and the AgentFlow modes (`-plan`, `-goal`, `-agentflow-status`, `-agentflow-resume`) accept the flag, where it has no effect today beyond the startup check of the network-denied variant, which can still refuse startup on a host that cannot build it (see the second table below).
+The flag does not select the Trusted profile, because it only narrows what approvals can do. Startup's `permissions:` line adds `strict-approval=on (exposed by MCP results, accepted /consult advice or unrecorded history)` after `verification=`. There is no in-session toggle in this version. `-p` and the AgentFlow modes (`-plan`, `-goal`, `-agentflow-status`, `-agentflow-resume`) accept the flag, where it has no effect today beyond the startup check of the network-denied variant, which can still refuse startup on a host that cannot build it (see the second table below).
 
 **Seeing the state.** With the flag, `/grants` adds one line after the grant count:
 
-- `exposure: clean`
+- `exposure: clean (files and command output are not tracked)`
 - `exposure: foreign (<source>)` or `exposure: unknown (<source>)`, with the source named as in the prompt
 - `exposure: unknown (could not read the record)` when the stored record could not be read
 - `exposure: clean (--no-session: each turn starts fresh)` under `-no-session`

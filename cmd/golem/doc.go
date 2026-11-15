@@ -66,7 +66,8 @@
 // agent_memory_promote ask too, showing the note or the record being
 // promoted; delegate_code and dispatch stay unprompted. /new and a
 // successful /clear start clean; /grants prints the exposure line and the
-// permissions line gains strict-approval=on. Under -no-session each turn
+// permissions line gains strict-approval=on with what exposes a
+// conversation. Under -no-session each turn
 // starts clean. The flag does not select Trusted, and -p and AgentFlow modes
 // accept it with no effect today, since neither can become exposed.
 //
