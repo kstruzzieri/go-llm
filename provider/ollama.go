@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kstruzzieri/go-llm/fingerprint"
 	"github.com/kstruzzieri/go-llm/ollama"
 	"golang.org/x/sync/singleflight"
 )
@@ -222,6 +223,24 @@ func ollamaTaggedName(name string) string {
 		return name + ":latest"
 	}
 	return name
+}
+
+// EvidenceModelNames returns the spellings under which evidence rows and
+// listing members for model may be stored through adapter: for ollama the
+// untagged and ":latest" forms when the tag is latest or absent (a colon
+// before the last slash is a port, as in ollamaTaggedName), the name alone
+// otherwise; for every other adapter, and for an empty name, the name alone.
+// Tags are case-exact. Sorted, no duplicates, the requested spelling always
+// included. Config lookups never use it: they stay exact-spelling, so a
+// configured m and a listed m:latest are different selectors.
+func EvidenceModelNames(adapter, model string) []string {
+	if adapter == fingerprint.AdapterOllama && model != "" {
+		// The untagged form is a strict prefix of the tagged one, so it sorts first.
+		if tagged := ollamaTaggedName(model); strings.HasSuffix(tagged, ":latest") {
+			return []string{strings.TrimSuffix(tagged, ":latest"), tagged}
+		}
+	}
+	return []string{model}
 }
 
 func ollamaModelInfo(detail *ollama.ModelInfo) ModelInfo {

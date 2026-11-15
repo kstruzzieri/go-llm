@@ -2,6 +2,7 @@ package provider
 
 import (
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -788,12 +789,17 @@ func TestCatalogQualityCtxCeilingSeeds(t *testing.T) {
 	}
 }
 
-// TestCatalog_ProfileForLadder pins every rung of today's catalogProfileFor
-// ladder (#736, PR 3 task 3.3 step 0): expectations were captured from the
-// code before the ladder moves to an exported home and are written literally.
-// Quality and context tell the rungs apart: an exact variant carries its own
-// tier, a family-only match carries the family default.
+// TestCatalog_ProfileForLadder pins every rung of the catalog ladder (#736):
+// expectations were captured from the registry's catalogProfileFor before the
+// ladder moved to Catalog.ProfileFor and are written
+// literally; the registry now delegates to the same ladder, with the runtime
+// family as the hint. Quality and context tell the rungs apart: an exact
+// variant carries its own tier, a family-only match carries the family default.
 func TestCatalog_ProfileForLadder(t *testing.T) {
+	cat, err := LoadCatalog()
+	if err != nil {
+		t.Fatal(err)
+	}
 	r, err := NewModelRegistry(&mrMockProviderRegistry{providers: map[string]Provider{}}, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -830,20 +836,70 @@ func TestCatalog_ProfileForLadder(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := r.catalogProfileFor(ParseModelName(tt.model), tt.runtime)
-			if tt.wantNil {
-				if got != nil {
-					t.Fatalf("catalogProfileFor(%q) = %+v; want nil", tt.model, got)
+			hint := ""
+			if tt.runtime != nil {
+				hint = tt.runtime.Family
+			}
+			// The registry's wrapper is held to the same literals: its only
+			// logic is passing the runtime family as the hint.
+			for _, c := range []struct {
+				via string
+				got *ModelProfile
+			}{
+				{"ProfileFor", cat.ProfileFor(tt.model, hint)},
+				{"catalogProfileFor", r.catalogProfileFor(ParseModelName(tt.model), tt.runtime)},
+			} {
+				switch {
+				case tt.wantNil && c.got != nil:
+					t.Errorf("%s(%q, hint %q) = %+v; want nil", c.via, tt.model, hint, c.got)
+				case tt.wantNil:
+				case c.got == nil:
+					t.Errorf("%s(%q, hint %q) = nil; want family %q", c.via, tt.model, hint, tt.wantFamily)
+				case c.got.Family != tt.wantFamily || c.got.Quality != tt.wantQuality || c.got.ContextWindow != tt.wantContext:
+					t.Errorf("%s(%q, hint %q) = family %q quality %v context %d; want %q %v %d",
+						c.via, tt.model, hint, c.got.Family, c.got.Quality, c.got.ContextWindow, tt.wantFamily, tt.wantQuality, tt.wantContext)
 				}
-				return
-			}
-			if got == nil {
-				t.Fatalf("catalogProfileFor(%q) = nil; want family %q", tt.model, tt.wantFamily)
-			}
-			if got.Family != tt.wantFamily || got.Quality != tt.wantQuality || got.ContextWindow != tt.wantContext {
-				t.Errorf("catalogProfileFor(%q) = family %q quality %v context %d; want %q %v %d",
-					tt.model, got.Family, got.Quality, got.ContextWindow, tt.wantFamily, tt.wantQuality, tt.wantContext)
 			}
 		})
+	}
+}
+
+// TestCatalog_ProfileForFIMIsACopy: a host changing the FIM policy of a
+// returned profile reaches neither the catalog nor a later lookup.
+func TestCatalog_ProfileForFIMIsACopy(t *testing.T) {
+	cat, err := LoadCatalog()
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := cat.ProfileFor("qwen2.5-coder:7b", "")
+	if first == nil || first.FIM == nil || len(first.FIM.StopTokens) == 0 {
+		t.Fatalf("fixture: qwen2.5-coder:7b profile %+v; want a FIM policy with stop tokens", first)
+	}
+	want := *first.FIM
+	want.StopTokens = slices.Clone(first.FIM.StopTokens)
+
+	first.FIM.StopTokens[0] = "mutated"
+	first.FIM.StopTokens = append(first.FIM.StopTokens, "appended")
+	first.FIM.PrefixBudgetPct = 1
+
+	second := cat.ProfileFor("qwen2.5-coder:7b", "")
+	if second.FIM == first.FIM || !reflect.DeepEqual(*second.FIM, want) {
+		t.Errorf("second ProfileFor FIM = %+v; want an unshared %+v", *second.FIM, want)
+	}
+}
+
+// TestCatalog_ProfileForHostedIDIsNil: a hosted model ID names no catalog
+// family, and a nil catalog answers nil whatever it is asked.
+func TestCatalog_ProfileForHostedIDIsNil(t *testing.T) {
+	cat, err := LoadCatalog()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p := cat.ProfileFor("zai-org/GLM-5.2", ""); p != nil {
+		t.Errorf("ProfileFor(zai-org/GLM-5.2) = %+v; want nil", p)
+	}
+	var none *Catalog
+	if p := none.ProfileFor("qwen3:8b", "qwen3"); p != nil {
+		t.Errorf("nil Catalog ProfileFor = %+v; want nil", p)
 	}
 }

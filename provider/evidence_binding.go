@@ -201,19 +201,6 @@ func (v *evidenceView) deadline(model, digest string) time.Time {
 	return fingerprint.NextReadingTransition(v.rows[model], v.adapter, digest, v.now)
 }
 
-// readingAnswer is the answer a reading gives when its sources disagree: the newer
-// direct answer, else what the provider reported, else nil. #736's precedence core
-// replaces it.
-func readingAnswer(c fingerprint.CapabilityReading) *fingerprint.EvidenceRow {
-	switch {
-	case c.Probe != nil && (c.Observed == nil || !c.Observed.ObservedAt.After(c.Probe.ObservedAt)):
-		return c.Probe
-	case c.Observed != nil:
-		return c.Observed
-	}
-	return c.Provider
-}
-
 // runtimeDigest is the identity evidence is read under: the runtime's content
 // digest, empty when name-only. Unlike capProbeDigest it has no fallback, because
 // the log stores a name-only row under an empty digest.
@@ -247,7 +234,7 @@ func (r *ModelRegistry) explainToolCallFromLog(ctx context.Context, key ModelKey
 		exp.Unsaved = answer.ID < 0
 	case attempt != nil:
 		exp.State, exp.TestedAt = attempt.State, attempt.ObservedAt
-		exp.Valid = attempt.ExpiresAt.IsZero() || !log.now.After(attempt.ExpiresAt)
+		exp.Valid = attemptHolds(attempt, log.now)
 		exp.Unsaved = attempt.ID < 0
 	}
 
@@ -578,9 +565,9 @@ func (r *ModelRegistry) toolCallFromLog(ctx context.Context, key ModelKey, bindi
 		}
 		return answer.State, true, nil
 	}
-	// An attempt with no ExpiresAt (ExpiryFor never writes one; another writer
-	// might) holds its cooldown indefinitely, as the explanation reads it.
-	if a := reading.Attempt; a != nil && (a.ExpiresAt.IsZero() || !view.now.After(a.ExpiresAt)) {
+	// An attempt in its cooldown settles the resolution, read as the
+	// explanation and the core read it (attemptHolds).
+	if attemptHolds(reading.Attempt, view.now) {
 		return fingerprint.CapProbeInconclusive, true, nil
 	}
 	return "", false, nil

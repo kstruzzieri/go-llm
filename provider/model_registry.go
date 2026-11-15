@@ -1094,25 +1094,15 @@ func (r *ModelRegistry) buildProfile(ctx context.Context, key ModelKey) (*ModelP
 }
 
 // catalogProfileFor resolves the static-catalog profile for a parsed model
-// name, applying the same fallback ladder buildProfile uses: exact
-// family+param, family+tag, family-only, then runtime-reported family.
-// Returns nil when the catalog knows nothing about the model.
+// name through the catalog ladder Catalog.ProfileFor applies, with the
+// runtime-reported family as the hint. Returns nil when the catalog knows
+// nothing about the model.
 func (r *ModelRegistry) catalogProfileFor(parsed ParsedModel, runtimeInfo *ModelInfo) *ModelProfile {
-	staticProfile := r.catalog.lookup(parsed.NormalizedFamily(), parsed.ParamSize)
-	if staticProfile == nil && parsed.ParamSize == "" && parsed.Tag != "" {
-		// Some catalog-only variants are keyed by tag (for example ":latest")
-		// rather than by parsed parameter size.
-		staticProfile = r.catalog.lookup(parsed.NormalizedFamily(), parsed.Tag)
+	hint := ""
+	if runtimeInfo != nil {
+		hint = runtimeInfo.Family
 	}
-	if staticProfile == nil {
-		// Try family-only lookup for family-level metadata (FIM, think mode).
-		staticProfile = r.catalog.lookupFamily(parsed.NormalizedFamily())
-	}
-	if staticProfile == nil && runtimeInfo != nil && runtimeInfo.Family != "" {
-		// Fall back to runtime-reported family.
-		staticProfile = r.catalog.lookupFamily(strings.ToLower(runtimeInfo.Family))
-	}
-	return staticProfile
+	return r.catalog.profileFor(parsed, hint)
 }
 
 // ToolCallExplanation is read-only provenance for one model's tool_call
