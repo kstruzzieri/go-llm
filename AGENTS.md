@@ -121,6 +121,19 @@ Response: `{"embeddings": [[0.1, 0.2, ...]]}`
 ### Streaming
 When `stream: true`, response is newline-delimited JSON. Each chunk has `done: false` until the final one which has `done: true` and includes timing stats.
 
+## Data Sensitivity
+
+The repository itself holds no production data, personal data, or client data. At runtime, go-llm and Golem handle the user's own data on the user's machine:
+
+- **Credentials and keys:** provider API keys in a user's `models.json` (`api_key`), signing keys used by `signing/`, and any secrets an agent run reads from the workspace or environment. Committed secret-shaped strings are synthetic test fixtures only (`internal/secretscan/secrettest/cases.json`, `agent/testdata/hardening/secrets/`); never replace them with live values.
+- **Private source code and documents:** workspace files that Golem reads and edits, and text indexed into the RAG store (`~/.local/share/go-llm/rag.db` by default).
+- **User conversations and memories:** conversation history, Golem memories (`$XDG_DATA_HOME/golem/memories.db`), and checkpoints (`<data dir>/golem/checkpoints/`). These may contain anything a user typed or a tool returned.
+- **Data leaving the machine:** local backends keep prompts on the host. A remote provider or a `/consult` consultant (Claude, Codex) receives the prompt and any attached context; see `docs/consult.md`.
+
+AI tools must never read, print, or transmit real credentials, a user's data directories, or a user's `models.json`; use the synthetic fixtures and mock servers. Treat changes to `config/`, `signing/`, `agent/interceptor/`, `internal/secretscan/`, `consult/`, `conversation/`, and `memory/` as security-relevant in review.
+
+**AI policy:** no organization AI policy applies to this project.
+
 ## Changelog
 
 Outside the fold-and-stamp release PR, never edit `CHANGELOG.md`; concurrent PRs conflict at the shared insertion point under `## [Unreleased]`. Add `changelog.d/<issue>-<slug>.md` holding the full `### <Category> — <title> (#<issue>)` section instead (see `changelog.d/README.md`). CI rejects direct edits; `scripts/changelog-fold` folds fragments at release.
