@@ -841,6 +841,10 @@ func TestStrictGateEffect(t *testing.T) {
 	}
 }
 
+// mcpReadText is what mcp__fs__act returns, so a call reads as an MCP read
+// (#581). It is synthetic.
+const mcpReadText = "SYNTHETIC MCP READ: build notes for the evaluation workspace"
+
 // strictMCPTools serves one MCP tool, mcp__fs__act, from a loopback server and
 // adapts it with the real mcpclient, as the M1 containment row does.
 func strictMCPTools(t *testing.T) ([]agent.Tool, *atomic.Int32) {
@@ -853,7 +857,7 @@ func strictMCPTools(t *testing.T) ([]agent.Tool, *atomic.Int32) {
 	var invokes atomic.Int32
 	srv.AddTool(&gomcp.Tool{Name: "act", Description: "Act", InputSchema: map[string]any{"type": "object"}}, func(context.Context, *gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
 		invokes.Add(1)
-		return &gomcp.CallToolResult{}, nil
+		return &gomcp.CallToolResult{Content: []gomcp.Content{&gomcp.TextContent{Text: mcpReadText}}}, nil
 	})
 	httpServer := httptest.NewServer(gomcp.NewStreamableHTTPHandler(func(*http.Request) *gomcp.Server { return srv }, nil))
 	t.Cleanup(httpServer.Close)
