@@ -55,31 +55,37 @@ type evalOpts struct {
 	mcp bool
 	// extra tools are mounted last (foreignStub for the headless row).
 	extra []agent.Tool
-	// allowTools installs the headless -allow-tool approver over these names,
-	// which runOnce prefers to the line source. Headless mounts no verifier
-	// (main.go:1641-1645), so leave verify nil with it.
+	// allowTools makes the session a headless -p run: the -allow-tool
+	// approver over these names, which runOnce prefers to the line source,
+	// and no session, as applyOneShotMode forces. Headless mounts no verifier
+	// (main.go:1641-1645), so newEvalRuntime refuses verify with it.
 	allowTools []string
 }
 
 // evalRuntime is a sessioned REPL for the workflow evaluation: strictRuntime
 // generalized to a strict choice, a shared root and a verifier. act.sh sits in
-// the root and appends one line to sink per run.
+// the root and appends one line per run: a foreground command's to sink, a
+// background start's to bgSink.
 type evalRuntime struct {
 	sess     *replSession
 	model    *scriptCaller // serves the script across every turn
 	sink     string
-	argv     map[string]any // bash act.sh <sink>
-	mcpCalls *atomic.Int32  // the MCP server's invocations; nil unless opts.mcp
+	bgSink   string
+	mgr      *agenttools.BackgroundManager // the exec tools' background jobs
+	mcpCalls *atomic.Int32                 // the MCP server's invocations; nil unless opts.mcp
 }
 
 func newEvalRuntime(t *testing.T, o evalOpts) *evalRuntime {
 	t.Helper()
+	if o.allowTools != nil && o.verify != nil {
+		t.Fatal("evalOpts: a headless run mounts no verifier; leave verify nil with allowTools")
+	}
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "act.sh"), []byte(appendScript("x")), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	r := &evalRuntime{model: &scriptCaller{}, sink: filepath.Join(t.TempDir(), "sink.log")}
-	r.argv = map[string]any{"argv": []string{"bash", "act.sh", r.sink}}
+	sinks := t.TempDir()
+	r := &evalRuntime{model: &scriptCaller{}, sink: filepath.Join(sinks, "sink.log"), bgSink: filepath.Join(sinks, "bg.log")}
 
 	sess := newSessionedTestSession(t, r.model, root, "user:active")
 	sess.root, sess.grants = root, newApprovalGrants()
@@ -93,6 +99,7 @@ func newEvalRuntime(t *testing.T, o evalOpts) *evalRuntime {
 		t.Fatal(err)
 	}
 	t.Cleanup(mgr.Shutdown)
+	r.mgr = mgr
 	mounted := slices.Concat(writeTools, execTools)
 	if o.mcp {
 		tools, calls := strictMCPTools(t)
@@ -126,6 +133,9 @@ func newEvalRuntime(t *testing.T, o evalOpts) *evalRuntime {
 	sess.tools = append(sess.tools, mounted...)
 	sess.journal, sess.allowWrite, sess.allowExec, sess.strictApproval = journal, true, true, o.strict
 	installCompactRuntime(t, sess, golemruntime.Options{Profile: golemruntime.ProfileTrusted, Tools: mounted, StrictApproval: o.strict})
+	if o.allowTools != nil {
+		sess.session = nil // -p runs with no session (applyOneShotMode)
+	}
 	r.sess = sess
 	return r
 }
@@ -133,13 +143,32 @@ func newEvalRuntime(t *testing.T, o evalOpts) *evalRuntime {
 // script sets the model's responses for every turn, in order.
 func (r *evalRuntime) script(responses ...agent.ModelResult) { r.model.responses = responses }
 
-// command scripts act.sh as a foreground command; start scripts it as a
-// background start.
-func (r *evalRuntime) command() agent.ModelResult { return call("run_command", r.argv) }
-func (r *evalRuntime) start() agent.ModelResult   { return call("start_command", r.argv) }
+// command scripts act.sh as a foreground command appending to sink; start
+// scripts it as a background start appending to bgSink.
+func (r *evalRuntime) command() agent.ModelResult {
+	return call("run_command", map[string]any{"argv": []string{"bash", "act.sh", r.sink}})
+}
+func (r *evalRuntime) start() agent.ModelResult {
+	return call("start_command", map[string]any{"argv": []string{"bash", "act.sh", r.bgSink}})
+}
 
 // lines counts the sink's lines.
 func (r *evalRuntime) lines(t *testing.T) int { return len(sinkLines(readFile(t, r.sink))) }
+
+// started waits, as S3's waitExited does, until every background job the
+// manager lists has exited, and returns bgSink's lines. No job is no wait.
+func (r *evalRuntime) started(t *testing.T) []string {
+	t.Helper()
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		jobs := r.mgr.List()
+		if !slices.ContainsFunc(jobs, func(j agenttools.JobStatus) bool { return j.State != "exited" }) {
+			return sinkLines(readFile(t, r.bgSink))
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("background jobs did not all exit within 10s; jobs %+v", jobs)
+		}
+	}
+}
 
 // consult stages accepted advice for the next turn through /consult, with
 // the fake consultant answering evalAdvice. The orchestrator carries no
@@ -220,12 +249,17 @@ func (e evalTurn) networkLines() int { return strings.Count(e.out, networkLine+"
 func (e evalTurn) granted() int { return strings.Count(e.out, grantedApproval) }
 
 // turnErr runs one REPL turn through runOnce, answering its questions from
-// answers in order, and returns the run error.
+// answers in order, and returns the run error. An answer the turn never
+// asked for fails the test, so a misaligned script cannot pass on counts; the
+// turn still returns, so a row's own counts report the mismatch as well.
 func (r *evalRuntime) turnErr(t *testing.T, answers ...string) (evalTurn, error) {
 	t.Helper()
 	var out strings.Builder
 	src := &answerScript{out: &out, answers: answers}
 	res, err := runOnce(t.Context(), &out, nil, r.sess, "go", src)
+	if n := len(src.questions); n < len(answers) {
+		t.Errorf("turn asked %d questions; answers %q went unused\n%s", n, answers[n:], out.String())
+	}
 	return evalTurn{res: res, out: out.String(), questions: src.questions}, err
 }
 
@@ -247,20 +281,23 @@ func (r *evalRuntime) turn(t *testing.T, answers ...string) evalTurn {
 // command answered a is one prompt and stores an exec grant. S2's repeat and
 // S4's second verifier are fresh prompts there only because a foreign read
 // exposed the run; in a clean loop they ride the grants. So 4 prompts and 2
-// grant-covered calls. The first write edits act.sh, and both the verifier
-// and the command run the edited script, so all three share one root.
+// grant-covered calls. A background start of the same argv answered y is one
+// more prompt, since the exec grant does not cover it (G3), and stores
+// nothing: 5 prompts. The first write edits act.sh, and the verifier, the
+// command and the start all run the edited script, so all four share one root.
 func TestStrictEvalHarnessCleanLoop(t *testing.T) {
 	vsink := filepath.Join(t.TempDir(), "verify.log")
 	r := newEvalRuntime(t, evalOpts{verify: []string{"bash", "act.sh", vsink}})
 	edit := call("write_file", map[string]string{"path": "act.sh", "content": appendScript("edited")})
-	r.script(edit, r.command(), fileCall("write_file", "two.txt"), r.command(), answerStep("done"))
-	tr := r.turn(t, "y", "a", "a", "y")
+	r.script(edit, r.command(), fileCall("write_file", "two.txt"), r.command(), r.start(), answerStep("done"))
+	tr := r.turn(t, "y", "a", "a", "y", "y")
 
 	wantQuestions := []string{
 		"Apply this change? [y/N/a=all edits this session] ",
 		"Run this verification command? [y/N/a=always this verifier] ",
 		"Run this command? [y/N/a=always this command] ",
 		"Apply this change? [y/N/a=all edits this session] ",
+		"Start this background command? [y/N/a=always this command] ",
 	}
 	if !slices.Equal(tr.questions, wantQuestions) {
 		t.Fatalf("questions = %q, want %q\n%s", tr.questions, wantQuestions, tr.out)
@@ -272,7 +309,7 @@ func TestStrictEvalHarnessCleanLoop(t *testing.T) {
 		{"apply", tr.asked(askApply), 2},
 		{"verify", tr.asked(askVerify), 1},
 		{"run", tr.asked(askRun), 1},
-		{"start", tr.asked(askStart), 0},
+		{"start", tr.asked(askStart), 1},
 		{"mcp", tr.asked(askMCP), 0},
 		{"grant-covered", tr.granted(), 2},
 		{"notices", tr.notices(), 0},
@@ -284,15 +321,18 @@ func TestStrictEvalHarnessCleanLoop(t *testing.T) {
 		}
 	}
 	rec := tr.res.ToolCalls
-	if len(rec) != 4 || !rec[0].Invoked || rec[0].AutoApproved || !rec[1].Invoked || rec[1].AutoApproved ||
-		!rec[2].Invoked || rec[2].AutoApproved || !rec[3].Invoked || !rec[3].AutoApproved {
-		t.Errorf("want both writes and the first command run at their prompts and the repeat on its grant; records %+v", rec)
+	if len(rec) != 5 || !rec[0].Invoked || rec[0].AutoApproved || !rec[1].Invoked || rec[1].AutoApproved ||
+		!rec[2].Invoked || rec[2].AutoApproved || !rec[3].Invoked || !rec[3].AutoApproved || !rec[4].Invoked || rec[4].AutoApproved {
+		t.Errorf("want both writes, the first command and the start run at their prompts and the repeat on its grant; records %+v", rec)
 	}
 	if got := sinkLines(readFile(t, r.sink)); !slices.Equal(got, []string{"edited", "edited"}) {
 		t.Errorf("command sink = %q, want the edited act.sh run twice", got)
 	}
 	if got := sinkLines(readFile(t, vsink)); !slices.Equal(got, []string{"edited", "edited"}) {
 		t.Errorf("verify sink = %q, want the edited act.sh verified twice", got)
+	}
+	if got := r.started(t); !slices.Equal(got, []string{"edited"}) {
+		t.Errorf("background sink = %q, want the edited act.sh started once", got)
 	}
 }
 
