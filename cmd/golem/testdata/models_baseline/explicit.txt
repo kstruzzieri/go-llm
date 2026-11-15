@@ -1,0 +1,1 @@
+llamacpp/mystery	caps=chat|stream|tool_call	tool_call=yes (explicit) (declared by model entry "agent")

@@ -1,0 +1,53 @@
+{
+  "ready": true,
+  "origin": {
+    "source": "explicit_path"
+  },
+  "bindings": [
+    {
+      "use_case": "agent",
+      "role": "agent",
+      "resolved": "llamacpp/qwen3:8b",
+      "resolution_state": "resolved",
+      "is_fallback": false,
+      "chain": [
+        "llamacpp/qwen3:8b"
+      ],
+      "candidates": [
+        {
+          "selector": "llamacpp/qwen3:8b",
+          "eligibility": "eligible"
+        }
+      ],
+      "source": "config-default"
+    }
+  ],
+  "models": [
+    {
+      "selector": "llamacpp/qwen3:8b",
+      "provider": "llamacpp",
+      "type": "dense",
+      "family": "qwen3",
+      "caps": [
+        "chat",
+        "generate",
+        "stream",
+        "tool_call"
+      ],
+      "profile_source": "merged",
+      "context_window": 40960
+    }
+  ],
+  "providers": [
+    {
+      "name": "llamacpp",
+      "endpoint": "<url>",
+      "api_format": "openai-compat",
+      "has_key": false,
+      "slot_discovery": false
+    }
+  ],
+  "profile": {
+    "dirty": false
+  }
+}

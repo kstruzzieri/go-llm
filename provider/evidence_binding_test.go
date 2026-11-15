@@ -1080,3 +1080,153 @@ func TestRegistryFreshness_ConcurrentReadersSyncsAndWrites(t *testing.T) {
 		t.Fatalf("caps = %v; want the last writes", caps)
 	}
 }
+
+// TestExplainToolCall_NoLogBaseline pins the complete ToolCallExplanation a
+// registry WITHOUT an evidence log returns for each source (#736). Every
+// value was captured from the code before the capability
+// precedence change and is written out literally; the golem text output hides
+// State and TestedAt when Has is true and never shows Valid, and -json does
+// not use the explanation, so only this test sees all seven fields.
+func TestExplainToolCall_NoLogBaseline(t *testing.T) {
+	const (
+		prov    = "prov"
+		mystery = "mystery-model"
+		catalog = "qwen3:8b"
+	)
+	row := func(model string, state fingerprint.CapProbeState, digest string) *fingerprint.CapProbe {
+		if digest == "" {
+			digest = prov + "/" + model // the digestless runtime's key.String()
+		}
+		return &fingerprint.CapProbe{
+			BackendID: prov, ModelName: model, Capability: "tool_call", State: state,
+			ModelDigest: digest, ProbeVersion: fingerprint.CurrentToolProbeVersion, TestedAt: logT0,
+		}
+	}
+	floorTools := func(ModelKey) []string { return []string{"tool_call"} }
+	catalogCaps := CapChat | CapGenerate | CapStream | CapToolCall
+
+	tests := []struct {
+		name     string
+		model    string
+		row      *fingerprint.CapProbe
+		floor    func(ModelKey) []string
+		override func(ModelKey) []string
+		runtime  []string // capabilities the provider's own model listing reports
+		want     ToolCallExplanation
+	}{
+		{
+			name: "explicit", model: mystery,
+			override: func(ModelKey) []string { return []string{"chat", "tool_call"} },
+			want:     ToolCallExplanation{Caps: CapChat | CapToolCall, Has: true, Source: "explicit"},
+		},
+		{
+			name: "catalog", model: catalog,
+			want: ToolCallExplanation{Caps: catalogCaps, Has: true, Source: "catalog"},
+		},
+		{
+			name: "probe yes valid", model: mystery,
+			row: row(mystery, fingerprint.CapProbeYes, ""),
+			want: ToolCallExplanation{
+				Caps: CapToolCall, Has: true, Source: "probe",
+				State: fingerprint.CapProbeYes, TestedAt: logT0, Valid: true,
+			},
+		},
+		{
+			name: "probe yes stale alone", model: mystery,
+			row: row(mystery, fingerprint.CapProbeYes, "stale-digest"),
+			want: ToolCallExplanation{
+				Caps: 0, Has: false, Source: "probe",
+				State: fingerprint.CapProbeYes, TestedAt: logT0, Valid: false,
+			},
+		},
+		{
+			name: "probe yes stale beside a floor bit", model: mystery,
+			row: row(mystery, fingerprint.CapProbeYes, "stale-digest"), floor: floorTools,
+			want: ToolCallExplanation{
+				Caps: CapToolCall, Has: true, Source: "runtime",
+				State: fingerprint.CapProbeYes, TestedAt: logT0, Valid: false,
+			},
+		},
+		{
+			name: "probe no", model: mystery,
+			row: row(mystery, fingerprint.CapProbeNo, ""),
+			want: ToolCallExplanation{
+				Caps: 0, Has: false, Source: "probe",
+				State: fingerprint.CapProbeNo, TestedAt: logT0, Valid: true,
+			},
+		},
+		{
+			name: "inconclusive row", model: mystery,
+			row: row(mystery, fingerprint.CapProbeInconclusive, ""),
+			want: ToolCallExplanation{
+				Caps: 0, Has: false, Source: "probe",
+				State: fingerprint.CapProbeInconclusive, TestedAt: logT0, Valid: true,
+			},
+		},
+		{
+			name: "runtime floor bit", model: mystery, floor: floorTools,
+			want: ToolCallExplanation{Caps: CapToolCall, Has: true, Source: "runtime"},
+		},
+		{
+			name: "runtime capabilities report tools", model: mystery, runtime: []string{"completion", "tools"},
+			want: ToolCallExplanation{Caps: CapChat | CapGenerate | CapStream | CapToolCall, Has: true, Source: "runtime"},
+		},
+		{
+			name: "floor bit beside a legacy no row", model: mystery, floor: floorTools,
+			row: row(mystery, fingerprint.CapProbeNo, ""),
+			want: ToolCallExplanation{
+				Caps: CapToolCall, Has: true, Source: "runtime",
+				State: fingerprint.CapProbeNo, TestedAt: logT0, Valid: true,
+			},
+		},
+		{
+			name: "unknown", model: mystery,
+			want: ToolCallExplanation{Source: "unknown"},
+		},
+		{
+			name: "catalog yes beside a legacy no row", model: catalog,
+			row: row(catalog, fingerprint.CapProbeNo, ""),
+			want: ToolCallExplanation{
+				Caps: catalogCaps, Has: true, Source: "catalog",
+				State: fingerprint.CapProbeNo, TestedAt: logT0, Valid: true,
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := t.Context()
+			store := newFakeCapProbeStore()
+			if tt.row != nil {
+				if err := store.SaveCapProbe(ctx, *tt.row); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// newCapResolveRegistry is the fixture TestExplainToolCall_Provenance
+			// already uses, so these rows stay comparable with it; a fixture
+			// whose runtime reports capabilities needs its own provider.
+			mr := newCapResolveRegistry(t, prov, []string{tt.model}, store, nil)
+			if tt.runtime != nil {
+				var err error
+				mr, err = NewModelRegistry(&mrMockProviderRegistry{providers: map[string]Provider{
+					prov: &mrMockProvider{name: prov, models: []ModelInfo{{Name: tt.model, Capabilities: tt.runtime}}},
+				}}, nil, WithCapabilityProbeStore(store))
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tt.floor != nil {
+				mr.SetCapabilityFloor(tt.floor)
+			}
+			if tt.override != nil {
+				mr.SetCapabilityOverride(tt.override)
+			}
+			got, err := mr.ExplainToolCall(ctx, ModelKey{Provider: prov, Model: tt.model})
+			if err != nil {
+				t.Fatalf("ExplainToolCall: %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("explanation mismatch\n got: %+v\nwant: %+v", got, tt.want)
+			}
+		})
+	}
+}

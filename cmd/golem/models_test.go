@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -382,5 +383,127 @@ func TestGolemModels_DefaultLegacyReprobeStillWorks(t *testing.T) {
 	}
 	if rows, err := h.Log().EvidenceRows(ctx, b.Endpoint, key.Model); err != nil || len(rows) != 0 {
 		t.Fatalf("evidence rows = %d, %v; want none on the default path", len(rows), err)
+	}
+}
+
+// TestGolemModels_OutputUnchangedForEachSource pins what `golem models` prints,
+// as text and as -json, for a real registry (no log) in front of each source of
+// the tool_call verdict (#736). The goldens under
+// testdata/models_baseline were captured from the code before the capability
+// precedence change and reviewed by hand. Relative probe ages and the test
+// server's address are replaced before comparing. Fixtures declare no shared
+// roles: their annotations follow map order, and the parity tests cover them.
+//
+// To rewrite the goldens after a reviewed change: temporarily add
+// os.WriteFile(path, []byte(got), 0o644) before the os.ReadFile below, run this
+// test once, read `git diff testdata/models_baseline`, then remove the line.
+func TestGolemModels_OutputUnchangedForEachSource(t *testing.T) {
+	type fixture struct {
+		name   string
+		model  string
+		apiFmt string // provider api_format; "ollama" serves /api/tags and /api/show
+		ollama string // capabilities /api/show reports
+		extra  string // extra JSON members of the model entry
+		row    fingerprint.CapProbeState
+		rowOld bool // row keyed by a digest that no longer matches
+	}
+	fixtures := []fixture{
+		{name: "explicit", model: "mystery", apiFmt: "openai-compat", extra: `, "capabilities": ["chat", "stream", "tool_call"]`},
+		{name: "catalog", model: "qwen3:8b", apiFmt: "openai-compat"},
+		{name: "probe_yes", model: "mystery", apiFmt: "openai-compat", row: fingerprint.CapProbeYes},
+		{name: "probe_yes_stale", model: "mystery", apiFmt: "openai-compat", row: fingerprint.CapProbeYes, rowOld: true},
+		{name: "probe_no", model: "mystery", apiFmt: "openai-compat", row: fingerprint.CapProbeNo},
+		{name: "probe_inconclusive", model: "mystery", apiFmt: "openai-compat", row: fingerprint.CapProbeInconclusive},
+		{name: "catalog_beside_probe_no", model: "qwen3:8b", apiFmt: "openai-compat", row: fingerprint.CapProbeNo},
+		{name: "runtime", model: "mystery", apiFmt: "ollama", ollama: `["completion","tools"]`},
+		{name: "unknown", model: "mystery", apiFmt: "openai-compat"},
+	}
+	age := regexp.MustCompile(`\d+[hms] ago`)
+
+	for _, fx := range fixtures {
+		t.Run(fx.name, func(t *testing.T) {
+			ctx := t.Context()
+			// A developer's own endpoint settings must not leak into the output.
+			for _, env := range []string{"GO_LLM_BASE_URL", "GO_LLM_CONFIG"} {
+				if previous, ok := os.LookupEnv(env); ok {
+					t.Cleanup(func() { _ = os.Setenv(env, previous) })
+				}
+				if err := os.Unsetenv(env); err != nil {
+					t.Fatal(err)
+				}
+			}
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/v1/models":
+					_, _ = w.Write([]byte(`{"data":[{"id":"` + fx.model + `"}]}`))
+				case "/api/tags":
+					_, _ = w.Write([]byte(`{"models":[{"name":"` + fx.model + `"}]}`))
+				case "/api/show":
+					_, _ = w.Write([]byte(`{"details":{"family":"mystery","parameter_size":"8B"},"capabilities":` + fx.ollama + `}`))
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer srv.Close()
+
+			dir := t.TempDir()
+			t.Setenv("XDG_DATA_HOME", filepath.Join(dir, "data"))
+			root := filepath.Join(dir, "workspace")
+			if err := os.Mkdir(root, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if fx.row != "" {
+				h, warn := openCapProbeStore(ctx, os.Getenv, root)
+				if warn != "" || h == nil {
+					t.Fatalf("openCapProbeStore: %v, %q", h, warn)
+				}
+				key := provider.ModelKey{Provider: "llamacpp", Model: fx.model}
+				digest := key.String()
+				if fx.rowOld {
+					digest = "sha256:old"
+				}
+				if err := h.Probes().SaveCapProbe(ctx, fingerprint.CapProbe{
+					BackendID: key.Provider, ModelName: key.Model, Capability: "tool_call", State: fx.row,
+					ModelDigest: digest, ProbeVersion: fingerprint.CurrentToolProbeVersion,
+					TestedAt: time.Now().Add(-2 * time.Hour),
+				}); err != nil {
+					t.Fatal(err)
+				}
+				if err := h.Close(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cfgPath := filepath.Join(dir, "models.json")
+			if err := os.WriteFile(cfgPath, []byte(`{
+				"providers": {"llamacpp": {"base_url": "`+srv.URL+`", "api_format": "`+fx.apiFmt+`"}},
+				"models": {"agent": {"name": "`+fx.model+`", "provider": "llamacpp", "type": "dense"`+fx.extra+`}},
+				"defaults": {"agent": "agent"}
+			}`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			normalize := func(b []byte) string {
+				out := strings.ReplaceAll(string(b), srv.URL, "<url>")
+				return age.ReplaceAllString(out, "<age>")
+			}
+			var text, jsonOut, errOut bytes.Buffer
+			if err := runModels(ctx, []string{"-config", cfgPath, "-root", root, "-no-probe"}, &text, &errOut); err != nil {
+				t.Fatalf("runModels text: %v\nstderr:\n%s", err, errOut.String())
+			}
+			errOut.Reset()
+			if err := runModels(ctx, []string{"-json", "-config", cfgPath, "-root", root}, &jsonOut, &errOut); err != nil {
+				t.Fatalf("runModels -json: %v\nstderr:\n%s", err, errOut.String())
+			}
+			for ext, got := range map[string]string{"txt": normalize(text.Bytes()), "json": normalize(jsonOut.Bytes())} {
+				path := filepath.Join("testdata", "models_baseline", fx.name+"."+ext)
+				want, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got != string(want) {
+					t.Errorf("%s output changed\n got:\n%s\nwant:\n%s", ext, got, want)
+				}
+			}
+		})
 	}
 }

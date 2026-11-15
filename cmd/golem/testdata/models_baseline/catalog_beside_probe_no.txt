@@ -1,0 +1,1 @@
+llamacpp/qwen3:8b	caps=chat|generate|stream|tool_call	tool_call=yes (catalog)

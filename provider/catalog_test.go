@@ -787,3 +787,63 @@ func TestCatalogQualityCtxCeilingSeeds(t *testing.T) {
 		t.Errorf("static lookup qwen3.5:9b QualityCtxCeiling = %v, want 262144", p)
 	}
 }
+
+// TestCatalog_ProfileForLadder pins every rung of today's catalogProfileFor
+// ladder (#736, PR 3 task 3.3 step 0): expectations were captured from the
+// code before the ladder moves to an exported home and are written literally.
+// Quality and context tell the rungs apart: an exact variant carries its own
+// tier, a family-only match carries the family default.
+func TestCatalog_ProfileForLadder(t *testing.T) {
+	r, err := NewModelRegistry(&mrMockProviderRegistry{providers: map[string]Provider{}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name        string
+		model       string
+		runtime     *ModelInfo
+		wantNil     bool
+		wantFamily  string
+		wantQuality Tier
+		wantContext int
+	}{
+		{name: "exact family and parameter size", model: "qwen3:8b",
+			wantFamily: "qwen3", wantQuality: TierGood, wantContext: 40960},
+		{name: "family and tag, paramless latest variant", model: "qwen3-coder-next:latest",
+			wantFamily: "qwen3-coder-next", wantQuality: TierBest, wantContext: 262144},
+		{name: "family and tag, bare name defaults to latest", model: "qwen3-coder-next",
+			wantFamily: "qwen3-coder-next", wantQuality: TierBest, wantContext: 262144},
+		{name: "family only, unknown parameter size", model: "qwen3:999b",
+			wantFamily: "qwen3", wantQuality: TierBasic, wantContext: 40960},
+		{name: "family only, bare family", model: "qwen3",
+			wantFamily: "qwen3", wantQuality: TierBasic, wantContext: 40960},
+		{name: "family only, dotted family with latest tag", model: "llama3.2:latest",
+			wantFamily: "llama3.2", wantQuality: TierBasic, wantContext: 131072},
+		{name: "runtime-reported family hint rescues an unknown name", model: "mystery-model",
+			runtime:    &ModelInfo{Family: "qwen3"},
+			wantFamily: "qwen3", wantQuality: TierBasic, wantContext: 40960},
+		{name: "runtime hint does not override an exact match", model: "gemma4:31b",
+			runtime:    &ModelInfo{Family: "qwen3"},
+			wantFamily: "gemma4", wantQuality: TierBest, wantContext: 256000},
+		{name: "hosted id matches nothing", model: "zai-org/GLM-5.2", wantNil: true},
+		{name: "unknown name without runtime hint", model: "mystery-model", wantNil: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := r.catalogProfileFor(ParseModelName(tt.model), tt.runtime)
+			if tt.wantNil {
+				if got != nil {
+					t.Fatalf("catalogProfileFor(%q) = %+v; want nil", tt.model, got)
+				}
+				return
+			}
+			if got == nil {
+				t.Fatalf("catalogProfileFor(%q) = nil; want family %q", tt.model, tt.wantFamily)
+			}
+			if got.Family != tt.wantFamily || got.Quality != tt.wantQuality || got.ContextWindow != tt.wantContext {
+				t.Errorf("catalogProfileFor(%q) = family %q quality %v context %d; want %q %v %d",
+					tt.model, got.Family, got.Quality, got.ContextWindow, tt.wantFamily, tt.wantQuality, tt.wantContext)
+			}
+		})
+	}
+}
