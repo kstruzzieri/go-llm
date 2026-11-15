@@ -1,0 +1,51 @@
+{
+  "ready": true,
+  "origin": {
+    "source": "explicit_path"
+  },
+  "bindings": [
+    {
+      "use_case": "agent",
+      "role": "agent",
+      "resolved": "llamacpp/mystery",
+      "resolution_state": "resolved",
+      "is_fallback": false,
+      "chain": [
+        "llamacpp/mystery"
+      ],
+      "candidates": [
+        {
+          "selector": "llamacpp/mystery",
+          "eligibility": "eligible"
+        }
+      ],
+      "source": "config-default"
+    }
+  ],
+  "models": [
+    {
+      "selector": "llamacpp/mystery",
+      "provider": "llamacpp",
+      "type": "dense",
+      "family": "mystery",
+      "caps": [
+        "chat",
+        "stream",
+        "tool_call"
+      ],
+      "profile_source": "merged"
+    }
+  ],
+  "providers": [
+    {
+      "name": "llamacpp",
+      "endpoint": "<url>",
+      "api_format": "openai-compat",
+      "has_key": false,
+      "slot_discovery": false
+    }
+  ],
+  "profile": {
+    "dirty": false
+  }
+}

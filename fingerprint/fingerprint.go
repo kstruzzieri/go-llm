@@ -186,9 +186,10 @@ type ToolCallProber interface {
 	ProbeToolCall(ctx context.Context, model string) (CapProbeOutcome, error)
 }
 
-// The Detail codes a tools check saves on its tool_call row. #736, #737 and
-// Firn share this spelling. DetailToolCalled goes with a yes; the other five
-// are the inconclusive codes.
+// The Detail codes a tools check saves on its tool_call row, and the cause a
+// flag row carries. #736, #737 and Firn share this spelling. DetailToolCalled
+// goes with a yes; the next five are the inconclusive codes; DetailRunRefused
+// is a flag's cause.
 const (
 	// DetailToolCalled: every emitted call met the probe's contract.
 	DetailToolCalled = "tool_called"
@@ -206,6 +207,9 @@ const (
 	// rule (wrong name, ID or type, or arguments that are not a JSON object).
 	// It says nothing about whether a dispatcher could have run the call.
 	DetailToolCallInvalid = "tool_call_invalid"
+	// DetailRunRefused: a flag's cause when the provider refused a run that
+	// used the capability. Used by #736's projection and #737's flags.
+	DetailRunRefused = "run_refused"
 )
 
 // CapabilityProbeRequest asks a CapabilityProber to run one recipe for a

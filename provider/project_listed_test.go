@@ -460,7 +460,10 @@ func TestProjectListedModels_LogReadFailureDegrades(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ProjectListedModels() error: %v", err)
 	}
-	if f := facts[0]; f.Caps != CapChat || f.KnownMask != CapChat {
-		t.Fatalf("Caps=%v KnownMask=%v; want only the listing's own chat", f.Caps, f.KnownMask)
+	// #736: the listing's own facts are its array's: chat yes, and tool_call no
+	// because the array lacks tools (OllamaListingFacts); the stored yes counts
+	// for nothing.
+	if f := facts[0]; f.Caps != CapChat || f.KnownMask != CapChat|CapToolCall {
+		t.Fatalf("Caps=%v KnownMask=%v; want only the listing's own facts: chat yes, tool_call no", f.Caps, f.KnownMask)
 	}
 }

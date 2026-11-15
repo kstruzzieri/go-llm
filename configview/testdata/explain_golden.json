@@ -1,0 +1,222 @@
+{
+  "capabilities": [
+    {
+      "key": {
+        "Provider": "lc",
+        "Model": "m"
+      },
+      "capabilities": [
+        {
+          "capability": "chat",
+          "state": "yes",
+          "source": "observed",
+          "method": "chat-stream-tools",
+          "identity": "content-digest",
+          "checked_at": "2026-01-01T02:00:00Z",
+          "last_check": {
+            "state": "yes",
+            "method": "chat-stream-tools",
+            "detail": "tool_called",
+            "at": "2026-01-01T01:00:00Z",
+            "unsaved": true
+          },
+          "flag": {
+            "cause": "request_rejected",
+            "at": "2026-01-01T03:00:00Z"
+          },
+          "other_adapter": {
+            "adapter": "ollama",
+            "state": "yes",
+            "method": "ollama-show",
+            "at": "2026-01-01T01:00:00Z"
+          }
+        },
+        {
+          "capability": "generate",
+          "state": "yes",
+          "source": "type",
+          "method": "type:dense"
+        },
+        {
+          "capability": "stream",
+          "state": "yes",
+          "source": "probe",
+          "method": "chat-stream-tools",
+          "identity": "content-digest",
+          "checked_at": "2026-01-01T01:00:00Z",
+          "fresh_until": "2026-01-01T01:30:00Z",
+          "stale": true,
+          "unsaved": true
+        },
+        {
+          "capability": "embed",
+          "state": "unknown",
+          "source": "none"
+        },
+        {
+          "capability": "tool_call",
+          "state": "no",
+          "source": "probe",
+          "method": "chat-stream-tools",
+          "detail": "tool_ignored",
+          "identity": "content-digest",
+          "checked_at": "2026-01-01T01:00:00Z",
+          "expires_at": "2999-01-01T00:00:00Z",
+          "last_attempt": {
+            "state": "inconclusive",
+            "method": "chat-stream-tools",
+            "at": "2026-01-01T00:00:00Z"
+          },
+          "flag": {
+            "cause": "run_refused",
+            "at": "2026-01-01T03:00:00Z",
+            "status": 400,
+            "unsaved": true
+          },
+          "other_adapter": {
+            "adapter": "ollama",
+            "state": "yes",
+            "method": "ollama-show",
+            "at": "2026-01-01T01:00:00Z",
+            "unsaved": true
+          },
+          "history": {
+            "provider": "lc",
+            "state": "yes",
+            "at": "2026-01-01T00:00:00Z"
+          }
+        },
+        {
+          "capability": "thinking",
+          "state": "unknown",
+          "source": "none"
+        },
+        {
+          "capability": "insert",
+          "state": "unknown",
+          "source": "none"
+        }
+      ],
+      "access": {
+        "state": "refused",
+        "at": "2026-01-01T04:00:00Z",
+        "status": 403
+      }
+    },
+    {
+      "key": {
+        "Provider": "lc",
+        "Model": "x"
+      },
+      "capabilities": [
+        {
+          "capability": "chat",
+          "state": "yes",
+          "source": "explicit"
+        },
+        {
+          "capability": "generate",
+          "state": "no",
+          "source": "explicit"
+        },
+        {
+          "capability": "stream",
+          "state": "yes",
+          "source": "explicit"
+        },
+        {
+          "capability": "embed",
+          "state": "no",
+          "source": "explicit"
+        },
+        {
+          "capability": "tool_call",
+          "state": "yes",
+          "source": "explicit",
+          "history": {
+            "provider": "lc",
+            "state": "no"
+          }
+        },
+        {
+          "capability": "thinking",
+          "state": "no",
+          "source": "explicit"
+        },
+        {
+          "capability": "insert",
+          "state": "no",
+          "source": "explicit"
+        }
+      ],
+      "access": {
+        "state": "answered"
+      }
+    },
+    {
+      "key": {
+        "Provider": "lc",
+        "Model": "x"
+      },
+      "capabilities": [
+        {
+          "capability": "chat",
+          "state": "yes",
+          "source": "explicit"
+        },
+        {
+          "capability": "generate",
+          "state": "no",
+          "source": "explicit"
+        },
+        {
+          "capability": "stream",
+          "state": "yes",
+          "source": "explicit"
+        },
+        {
+          "capability": "embed",
+          "state": "no",
+          "source": "explicit"
+        },
+        {
+          "capability": "tool_call",
+          "state": "yes",
+          "source": "explicit"
+        },
+        {
+          "capability": "thinking",
+          "state": "no",
+          "source": "explicit"
+        },
+        {
+          "capability": "insert",
+          "state": "no",
+          "source": "explicit"
+        }
+      ]
+    }
+  ],
+  "listings": [
+    {
+      "listed_at": "2026-01-01T05:00:00Z",
+      "has_listing": true,
+      "models": [
+        {
+          "model": "m",
+          "owned_by": "acme"
+        },
+        {
+          "model": "n"
+        }
+      ],
+      "named": [
+        "q"
+      ]
+    },
+    {
+      "has_listing": false,
+      "unavailable": "credential_unresolved"
+    }
+  ]
+}

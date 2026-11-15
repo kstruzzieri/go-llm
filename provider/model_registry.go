@@ -251,6 +251,9 @@ type CapabilityOverride func(key ModelKey) []string
 // CapInsert (`&^= CapInsert`) when the model's template lacks suffix
 // markers, so a floor-supplied "insert" bit may still be removed by
 // runtime template detection. Every other floor bit is OR-only.
+//
+// With WithEvidenceLog the floor is the precedence core's type tier: a
+// checked or provider-reported no beats a floor bit.
 type CapabilityFloor func(key ModelKey) []string
 
 // OverrideRejectionHook is called when a capability override returned a
@@ -1026,6 +1029,7 @@ func (r *ModelRegistry) FIMConfigFor(ctx context.Context, key ModelKey) (*FIMCon
 // the result. The merge layers in order of ascending precedence are:
 //  1. Static catalog: FIM policy, think_mode, quality/speed tiers, RAM estimates
 //  2. Fingerprint: capability probing data, context, benchmarked observations
+//     (its capabilities do not count with WithEvidenceLog)
 //  3. Runtime: context_window, parameter_size, quant_level, digest (freshest)
 //  4. Config: explicit per-model overrides
 func (r *ModelRegistry) buildProfile(ctx context.Context, key ModelKey) (*ModelProfile, error) {
@@ -1065,15 +1069,25 @@ func (r *ModelRegistry) buildProfile(ctx context.Context, key ModelKey) (*ModelP
 	// Layer 3: Fingerprint enrichment.
 	fpProfile := r.fingerprintProfile(ctx, key, runtimeInfo)
 
-	// Cap-probe merge layer: READ ONLY -- never probes. A valid cached
-	// "yes" row ORs CapToolCall into the profile (with the evidence log, each
-	// yes reading ORs its own bit). Computed here (not in merge) so merge stays
-	// IO-free and applies exactly the bits this buildProfile snapshot observed.
-	capProbeCaps := r.capProbeCaps(ctx, key, runtimeInfo, log)
+	// Capabilities: READ ONLY -- never probes. Without the log a valid cached
+	// "yes" cap-probe row ORs CapToolCall into the profile. With it the
+	// precedence core decides the whole mask from this snapshot's view, the
+	// same override and floor, and the live facts (ExplainEvidence), so a
+	// checked no beats a catalog, type or runtime yes. Computed here (not in
+	// merge) so merge stays IO-free and applies exactly what this buildProfile
+	// observed.
+	var capProbeCaps Capability
+	var decided *Capability
+	if log != nil {
+		yes, _, _ := CapabilityMasks(r.logCapabilityFacts(log, key, runtimeInfo, staticProfile, override, floor))
+		decided = &yes
+	} else {
+		capProbeCaps = r.capProbeCaps(ctx, key, runtimeInfo)
+	}
 
 	// Merge layers using the (override, floor, rejectionHook) snapshot
 	// taken at function entry.
-	profile := r.merge(key, runtimeInfo, staticProfile, fpProfile, parsed, override, floor, thinkOverride, contextOverride, qualityCeilingOverride, rejectionHook, capProbeCaps)
+	profile := r.merge(key, runtimeInfo, staticProfile, fpProfile, parsed, override, floor, thinkOverride, contextOverride, qualityCeilingOverride, rejectionHook, capProbeCaps, decided)
 
 	// Cache the result iff the override snapshot and the log's generation are
 	// still current. The generation is store I/O, so it is read before the lock.
@@ -1094,25 +1108,15 @@ func (r *ModelRegistry) buildProfile(ctx context.Context, key ModelKey) (*ModelP
 }
 
 // catalogProfileFor resolves the static-catalog profile for a parsed model
-// name, applying the same fallback ladder buildProfile uses: exact
-// family+param, family+tag, family-only, then runtime-reported family.
-// Returns nil when the catalog knows nothing about the model.
+// name through the catalog ladder Catalog.ProfileFor applies, with the
+// runtime-reported family as the hint. Returns nil when the catalog knows
+// nothing about the model.
 func (r *ModelRegistry) catalogProfileFor(parsed ParsedModel, runtimeInfo *ModelInfo) *ModelProfile {
-	staticProfile := r.catalog.lookup(parsed.NormalizedFamily(), parsed.ParamSize)
-	if staticProfile == nil && parsed.ParamSize == "" && parsed.Tag != "" {
-		// Some catalog-only variants are keyed by tag (for example ":latest")
-		// rather than by parsed parameter size.
-		staticProfile = r.catalog.lookup(parsed.NormalizedFamily(), parsed.Tag)
+	hint := ""
+	if runtimeInfo != nil {
+		hint = runtimeInfo.Family
 	}
-	if staticProfile == nil {
-		// Try family-only lookup for family-level metadata (FIM, think mode).
-		staticProfile = r.catalog.lookupFamily(parsed.NormalizedFamily())
-	}
-	if staticProfile == nil && runtimeInfo != nil && runtimeInfo.Family != "" {
-		// Fall back to runtime-reported family.
-		staticProfile = r.catalog.lookupFamily(strings.ToLower(runtimeInfo.Family))
-	}
-	return staticProfile
+	return r.catalog.profileFor(parsed, hint)
 }
 
 // ToolCallExplanation is read-only provenance for one model's tool_call
@@ -1129,6 +1133,11 @@ type ToolCallExplanation struct {
 	// completed but the evidence log append failed, so the registry serves it
 	// for its own life only and another process or a restart never sees it.
 	Unsaved bool
+	// EvidenceUnreadable: on a registry with an evidence log, this
+	// explanation's read of the log failed, so it carries no log-derived fact
+	// and a stored answer may be hidden behind what it shows. Always false
+	// without a log, and for an explicit list, which reads nothing.
+	EvidenceUnreadable bool
 }
 
 // ExplainToolCall reports where a model's tool_call bit comes from (or why it
@@ -1145,7 +1154,11 @@ type ToolCallExplanation struct {
 //
 // For non-explicit sources, State, TestedAt, and Valid are populated whenever a
 // cap-probe row exists so callers can distinguish stale verdicts. With
-// WithEvidenceLog the provenance comes from the log, not cap-probe rows.
+// WithEvidenceLog the provenance comes from the log, not cap-probe rows, and
+// Caps and Has from the precedence core merge uses there (ExplainEvidence), so
+// a checked no beats a catalog, type or runtime yes; that path runs no merge
+// and reads no fingerprint store, and a failed log read is not an error but
+// sets EvidenceUnreadable.
 func (r *ModelRegistry) ExplainToolCall(ctx context.Context, key ModelKey) (ToolCallExplanation, error) {
 	r.syncGeneration(ctx)
 
@@ -1177,7 +1190,7 @@ func (r *ModelRegistry) ExplainToolCall(ctx context.Context, key ModelKey) (Tool
 	row := r.capProbeRow(ctx, key)
 	now := time.Now()
 	probeYes, known := legacyProbeBits(row, capProbeDigest(key, runtimeInfo), now)
-	facts := r.projectListedModel(ctx, key, *runtimeInfo, probeYes, known, r.snapshotListedProjectionPolicy())
+	facts := r.projectListedModel(ctx, key, *runtimeInfo, probeYes, known, nil, r.snapshotListedProjectionPolicy())
 	if err := ctx.Err(); err != nil {
 		return ToolCallExplanation{}, err
 	}
@@ -1306,13 +1319,9 @@ func currentFingerprintProfile(profile *fingerprint.Profile, modelDigest string)
 
 // capProbeCaps reads the persisted tool-call probe verdict for a key and
 // returns the capability bits it contributes to the merge (CapToolCall for
-// a valid "yes" row, zero otherwise). With the evidence log it instead maps
-// every yes reading in log to its capability bit. Pure cache read; never probes.
-func (r *ModelRegistry) capProbeCaps(ctx context.Context, key ModelKey, runtimeInfo *ModelInfo, log *evidenceView) Capability {
-	if log != nil {
-		yes, _ := log.caps(key.Model, runtimeDigest(runtimeInfo))
-		return yes
-	}
+// a valid "yes" row, zero otherwise). The no-log path only: with the evidence
+// log the precedence core decides the mask. Pure cache read; never probes.
+func (r *ModelRegistry) capProbeCaps(ctx context.Context, key ModelKey, runtimeInfo *ModelInfo) Capability {
 	digest := capProbeDigest(key, runtimeInfo)
 	row := r.capProbeRow(ctx, key)
 	if row == nil {
@@ -1364,9 +1373,15 @@ func (r *ModelRegistry) queryRuntime(ctx context.Context, key ModelKey) (*ModelI
 // merge combines runtime, static, fingerprint, and config data into a single
 // ModelProfile. Precedence (lowest to highest):
 //   - Static catalog: FIM policy, think_mode, quality/speed tiers, RAM estimates
-//   - Fingerprint: capability probing data, benchmarked resource observations
+//   - Fingerprint: capability probing data (not counted on the log path),
+//     benchmarked resource observations
 //   - Runtime: context_window, dimensions, parameter_size, quant_level (freshest)
 //   - Config: explicit per-model overrides
+//
+// decided is nil without the evidence log, and every layer ORs or replaces
+// capabilities as below. On the log path it is the precedence core's yes mask,
+// written to Caps last, after the override; every other field is merged as
+// without the log.
 func (r *ModelRegistry) merge(
 	key ModelKey,
 	runtime *ModelInfo,
@@ -1380,6 +1395,7 @@ func (r *ModelRegistry) merge(
 	qualityCeilingOverride QualityCtxCeilingOverride,
 	rejectionHook OverrideRejectionHook,
 	capProbeCaps Capability,
+	decided *Capability,
 ) *ModelProfile {
 	profile := &ModelProfile{
 		Key:       key,
@@ -1576,6 +1592,13 @@ func (r *ModelRegistry) merge(
 				profile.Caps = parsedCaps
 			}
 		}
+	}
+
+	// The log path's decision (ExplainEvidence) is the last write to Caps. It
+	// already honors the override above, so the two never disagree.
+	if decided != nil {
+		profile.Caps = *decided
+		profile.capsDecided = true
 	}
 
 	// Config think override (final precedence, #220). Per-field REPLACE:
