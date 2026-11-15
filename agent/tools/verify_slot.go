@@ -49,6 +49,16 @@ type verifyExecutor interface {
 
 var _ verifyExecutor = (*VerifyCommand)(nil)
 
+// narrowingExecutor is a verifyExecutor whose backend may have a
+// network-denied variant (#584). *VerifyCommand is one; an executor that is
+// not, such as a test fake, is never narrowed.
+type narrowingExecutor interface {
+	variant() *networkVariant
+	narrowFor(ctx context.Context) (verifyExecutor, bool, error)
+}
+
+var _ narrowingExecutor = (*VerifyCommand)(nil)
+
 // VerifierSlot is the session's post-write verification hook (#372, #576): an
 // agent.Verifier bound at construction to one canonical workspace root and
 // one normalized sandbox policy. It starts absent and is armed only with a
@@ -190,12 +200,29 @@ func (s *VerifierSlot) Verify(ctx context.Context, approver agent.Approver) (str
 			Arguments: json.RawMessage(`{}`),
 		},
 	}
+	// Select the backend before the preview (#584), so what the approver is
+	// shown, the grant key and the run name one policy. A variant that
+	// cannot be built is an observation, never a run on the original.
+	var variant *networkVariant
+	narrowed := false
+	if n, ok := e.(narrowingExecutor); ok {
+		selected, isNarrowed, err := n.narrowFor(ctx)
+		if err != nil {
+			return verifyRender(e, "error", "reason: "+sanitizeVerifyLine(err.Error())+"\n"), nil
+		}
+		variant, e, narrowed = n.variant(), selected, isNarrowed
+	}
 	d, err := approveVerify(ctx, approver, call, e.Preview(), e.ApprovalKey())
 	if err != nil {
 		return "", err
 	}
 	if !d.Approved {
 		return verifyRender(e, "skipped", "reason: not approved\n"), nil
+	}
+	// The approval may have changed the run's suspension state: run nothing
+	// on a backend the approver was not shown.
+	if variant.active(ctx) != narrowed {
+		return verifyRender(e, "error", "reason: "+approvalStateChanged+"\n"), nil
 	}
 
 	res, runErr := e.Run(ctx)

@@ -524,7 +524,7 @@ func (t *RunCommand) Invoke(ctx context.Context, raw json.RawMessage) (agent.Too
 	// rather than run with network the approver was told was denied, or the
 	// reverse.
 	if t.variant().active(ctx) != (pp.narrowed != nil) {
-		return errResult("approval state changed; retry"), nil
+		return errResult(approvalStateChanged), nil
 	}
 	spec, err := recheckExecPlan(ctx, t.ws, pp)
 	if err != nil {

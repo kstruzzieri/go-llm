@@ -129,6 +129,11 @@ type networkVariant struct {
 	denied *resolvedExecBackend // the first successful build
 }
 
+// approvalStateChanged refuses a command approved in the other suspension
+// state than the one it would now run in (#584): run_command and
+// start_command return it, the verifier reports it as its reason.
+const approvalStateChanged = "approval state changed; retry"
+
 // newNetworkVariant returns the variant for a backend bound to the
 // normalized cfg: nil unless cfg is a non-host runtime that allows network.
 // The denied copy owns its DropCaps.

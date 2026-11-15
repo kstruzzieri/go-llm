@@ -197,19 +197,21 @@ func (m *BackgroundManager) releaseReservation(handle string) {
 // closure observed before registration kills and reaps the process
 // synchronously and returns no handle.
 func (m *BackgroundManager) start(ctx context.Context, spec execSpec, cwdDisplay string) (JobStatus, error) {
-	return m.startWrapped(ctx, spec, cwdDisplay, nil)
+	return m.startWrapped(ctx, m.backend, spec, cwdDisplay, nil)
 }
 
-// startWrapped is start with a generic post-start process decorator (#443):
-// wrap, when non-nil, is applied to the spawned process immediately after
-// backend.Start and before registration, so the wrapped Wait owns per-job
-// resource cleanup on every path — including the spawned-but-unregistered
-// abandonment below. The manager stays ignorant of what the wrapper does.
+// startWrapped is start on backend, the manager's own or the network-denied
+// variant a start was approved for (#584), with a generic post-start process
+// decorator (#443): wrap, when non-nil, is applied to the spawned process
+// immediately after backend.Start and before registration, so the wrapped
+// Wait owns per-job resource cleanup on every path — including the
+// spawned-but-unregistered abandonment below. The manager stays ignorant of
+// what the wrapper does.
 //
 // From the call on, startWrapped owns spec.Screen, and a spec without one
 // does not start. One deferred release covers every return that does not
 // hand the job to reap; once reap is launched, only reap releases.
-func (m *BackgroundManager) startWrapped(ctx context.Context, spec execSpec, cwdDisplay string, wrap func(backgroundProcess) backgroundProcess) (JobStatus, error) {
+func (m *BackgroundManager) startWrapped(ctx context.Context, backend resolvedExecBackend, spec execSpec, cwdDisplay string, wrap func(backgroundProcess) backgroundProcess) (JobStatus, error) {
 	if spec.Screen == nil {
 		return JobStatus{}, errNoOutputScreen
 	}
@@ -252,7 +254,7 @@ func (m *BackgroundManager) startWrapped(ctx context.Context, spec execSpec, cwd
 	stdout := newTailRing(backgroundRingCap)
 	stderr := newTailRing(backgroundRingCap)
 	outStream, errStream := spec.Screen.stream(stdout), spec.Screen.stream(stderr)
-	proc, err := m.backend.Start(spec, outStream, errStream)
+	proc, err := backend.Start(spec, outStream, errStream)
 	if err != nil {
 		m.releaseReservation(handle)
 		return JobStatus{}, fmt.Errorf("start background command: %w", err)
