@@ -348,11 +348,14 @@ strict and exposed. A tool's `Invoke` receives such a context and can ask. A
 nested run started with that context inherits the enclosing run's strictness
 and shares its exposure record, even when its own runtime is not strict.
 
-The four library tools that keep their own `ApprovalNever` stay unprompted:
-`agent_memory_create`, `agent_memory_promote`, `delegate_code` and `dispatch`.
-`golem.Runtime` fills `Request.StrictExempt` with their names on every turn;
-a direct `agent.Orchestrator` caller lists them itself. Every other tool is
-raised to approval, except plain reads. `EffectivePermissions.StrictApproval`
+Only `delegate_code` and `dispatch` keep their own `ApprovalNever` and stay
+unprompted. `golem.Runtime` fills `Request.StrictExempt` with their names on
+every turn; a direct `agent.Orchestrator` caller lists them itself. Every
+other tool is raised to approval, except plain reads. That includes
+`agent_memory_create` and `agent_memory_promote`, which the approval floor
+still exempts: once the conversation is exposed, `FreshApprover` is asked
+about them with an empty preview, so render the call's arguments. In a clean
+conversation they stay unprompted. `EffectivePermissions.StrictApproval`
 reports the option.
 
 A conversation that has history and no record, whether saved before this version

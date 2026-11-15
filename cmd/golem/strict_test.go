@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -20,6 +21,7 @@ import (
 	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
 	golemruntime "github.com/kstruzzieri/go-llm/golem"
 	"github.com/kstruzzieri/go-llm/mcpclient"
+	"github.com/kstruzzieri/go-llm/memory"
 	"github.com/kstruzzieri/go-llm/provider"
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -36,6 +38,8 @@ const (
 	writeQuestion   = "Apply this change? [y/N] "
 	mcpQuestion     = "Run this MCP tool? [y/N] "
 	grantedApproval = "auto-approved (session grant)"
+	noteQuestion    = "Save this agent memory note? [y/N] "
+	promoteQuestion = "Promote this agent memory record? [y/N] "
 )
 
 func freshCall(name string) provider.ToolCall {
@@ -911,5 +915,141 @@ func TestStrictNoSessionNextTurnClean(t *testing.T) {
 	}
 	if got := slashOutput(t, sess, "/grants"); !strings.Contains(got, "exposure: clean (--no-session: each turn starts fresh)\n") {
 		t.Fatalf("/grants = %q", got)
+	}
+}
+
+// newStrictMemorySession is newStrictSession with Golem's own agent-memory
+// tools mounted over a real record store. It returns the store and the access
+// the tools write under; the tools read only the records session's id.
+func newStrictMemorySession(t *testing.T, caller agent.ModelCaller) (*replSession, *memory.MemoryRecordStore, memory.RecordAccess) {
+	t.Helper()
+	rec, dbPath := newTestReplWithRecords(t)
+	tools := appendAgentMemoryTools(nil, rec.records, dbPath, rec.workspaceID, rec.session)
+	acc := memory.RecordAccess{WorkspaceID: rec.workspaceID, SessionID: rec.session.id}
+	return newStrictSession(t, caller, tools...), rec.records, acc
+}
+
+// storedNotes lists the content of every live record visible under acc.
+func storedNotes(t *testing.T, rs *memory.MemoryRecordStore, acc memory.RecordAccess) []string {
+	t.Helper()
+	recs, err := rs.Search(t.Context(), "", memory.RecordSearchOptions{WorkspaceID: acc.WorkspaceID, SessionID: acc.SessionID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var notes []string
+	for _, r := range recs {
+		notes = append(notes, r.Content)
+	}
+	return notes
+}
+
+// requireOneFreshPrompt fails unless out asks exactly once, with body right
+// after the suspended notice and question right after body.
+func requireOneFreshPrompt(t *testing.T, out, body, question string) {
+	t.Helper()
+	if strings.Count(out, "? [y/N") != 1 || strings.Count(out, foreignNotice) != 1 {
+		t.Fatalf("want exactly one fresh prompt:\n%s", out)
+	}
+	if !strings.Contains(out, foreignNotice+"\n"+body+"\n"+question) {
+		t.Fatalf("want the notice, %q, then %q:\n%s", body, question, out)
+	}
+}
+
+// TestStrictMemoryWritesAskWhenExposed: in an exposed strict conversation
+// agent_memory_create and agent_memory_promote ask once, [y/N] only, showing
+// the note or the promotion. The store, not the output, shows what an answer
+// did. In a clean conversation the same create asks nothing (#584).
+func TestStrictMemoryWritesAskWhenExposed(t *testing.T) {
+	const note = "the build runs make check"
+	create := call(agenttools.AgentMemoryCreateToolName, map[string]string{"content": note})
+	for _, tc := range []struct {
+		answer string
+		want   []string
+	}{{"y\n", []string{note}}, {"N\n", nil}} {
+		t.Run("create "+strings.TrimSpace(tc.answer), func(t *testing.T) {
+			sess, rs, acc := newStrictMemorySession(t, &scriptCaller{responses: []agent.ModelResult{create, answerStep("done")}})
+			seedActive(t, sess)
+			out := strictTurn(t, sess, tc.answer)
+			requireOneFreshPrompt(t, out, "agent memory note:\n"+note, noteQuestion)
+			if got := storedNotes(t, rs, acc); !slices.Equal(got, tc.want) {
+				t.Fatalf("stored notes = %q, want %q", got, tc.want)
+			}
+		})
+	}
+	for _, tc := range []struct {
+		answer string
+		want   memory.MemoryKind
+	}{{"y\n", memory.KindSemantic}, {"N\n", memory.KindWorking}} {
+		t.Run("promote "+strings.TrimSpace(tc.answer), func(t *testing.T) {
+			rec, dbPath := newTestReplWithRecords(t)
+			acc := memory.RecordAccess{WorkspaceID: rec.workspaceID, SessionID: rec.session.id}
+			seed, err := rec.records.Create(t.Context(), memory.CreateRecordParams{Kind: memory.KindWorking, Content: "seed", WorkspaceID: acc.WorkspaceID, SessionID: acc.SessionID})
+			if err != nil {
+				t.Fatal(err)
+			}
+			promote := call(agenttools.AgentMemoryPromoteToolName, map[string]string{"id": seed.ID, "kind": "semantic"})
+			sess := newStrictSession(t, &scriptCaller{responses: []agent.ModelResult{promote, answerStep("done")}},
+				appendAgentMemoryTools(nil, rec.records, dbPath, rec.workspaceID, rec.session)...)
+			seedActive(t, sess)
+			out := strictTurn(t, sess, tc.answer)
+			requireOneFreshPrompt(t, out, "promote agent memory record "+seed.ID+" to semantic", promoteQuestion)
+			got, err := rec.records.Get(t.Context(), seed.ID, acc)
+			if err != nil || got.Kind != tc.want {
+				t.Fatalf("record kind = %q (err %v), want %q", got.Kind, err, tc.want)
+			}
+		})
+	}
+	t.Run("undecodable create shows the raw arguments", func(t *testing.T) {
+		bad := call(agenttools.AgentMemoryCreateToolName, map[string]int{"content": 5})
+		sess, rs, acc := newStrictMemorySession(t, &scriptCaller{responses: []agent.ModelResult{bad, answerStep("done")}})
+		seedActive(t, sess)
+		out := strictTurn(t, sess, "N\n")
+		requireOneFreshPrompt(t, out, `agent memory note:`+"\n"+`{"content":5}`, noteQuestion)
+		if got := storedNotes(t, rs, acc); len(got) != 0 {
+			t.Fatalf("stored notes = %q, want none", got)
+		}
+	})
+	t.Run("clean conversation asks nothing", func(t *testing.T) {
+		sess, rs, acc := newStrictMemorySession(t, &scriptCaller{responses: []agent.ModelResult{create, answerStep("done")}})
+		out := strictTurn(t, sess, "")
+		if strings.Contains(out, "? [y/N") || strings.Contains(out, "suspended") {
+			t.Fatalf("a clean conversation asked:\n%s", out)
+		}
+		if got := storedNotes(t, rs, acc); !slices.Equal(got, []string{note}) {
+			t.Fatalf("stored notes = %q, want %q", got, note)
+		}
+	})
+}
+
+// TestApproveFreshRendersCallsWithoutPreview: calls that reach the prompt
+// with no preview show their sanitized arguments, never a blank prompt, and
+// none offers a grant.
+func TestApproveFreshRendersCallsWithoutPreview(t *testing.T) {
+	for _, tc := range []struct {
+		name, tool, args, body, question string
+	}{
+		{"note keeps lines, escapes controls", agenttools.AgentMemoryCreateToolName, `{"content":"one\ntwo\u001b[2J"}`, "agent memory note:\none\ntwo\\x1b[2J", noteQuestion},
+		{"note missing", agenttools.AgentMemoryCreateToolName, `{"note":"x"}`, "agent memory note:\n" + `{"note":"x"}`, noteQuestion},
+		{"note not JSON", agenttools.AgentMemoryCreateToolName, "{\"content\":\n\x1b", "agent memory note:\n" + `{"content": \x1b`, noteQuestion},
+		{"promote is one line", agenttools.AgentMemoryPromoteToolName, `{"id":"r1\nforged","kind":"semantic"}`, "promote agent memory record r1 forged to semantic", promoteQuestion},
+		{"promote missing kind", agenttools.AgentMemoryPromoteToolName, `{"id":"r1"}`, `{"id":"r1"}`, promoteQuestion},
+		{"other tool", "put_note", "{\"a\":\n1}", "put_note " + `{"a": 1}`, writeQuestion},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var out strings.Builder
+			ap := newReplApprover(newScannerSource(strings.NewReader("n\n"), &out), &out, false)
+			ap.grants = newApprovalGrants()
+			c := freshCall(tc.tool)
+			c.Function.Arguments = json.RawMessage(tc.args)
+			if ok, err := ap.ApproveFresh(context.Background(), c, "", true, agent.RiskReport{}, foreignExposure); ok || err != nil {
+				t.Fatalf("ok=%v err=%v, want a prompted denial", ok, err)
+			}
+			if want := foreignNotice + "\n" + tc.body + "\n" + tc.question; !strings.HasPrefix(out.String(), want) {
+				t.Fatalf("output = %q, want prefix %q", out.String(), want)
+			}
+			if strings.Contains(out.String(), "a=") || strings.ContainsRune(out.String(), '\x1b') {
+				t.Fatalf("offered a grant or kept a control:\n%q", out.String())
+			}
+		})
 	}
 }

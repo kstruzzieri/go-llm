@@ -219,8 +219,11 @@ type Options struct {
 	// StrictApproval suspends reusable approvals while a conversation is
 	// exposed (#584): each run carries agent.Request.StrictApproval, so once the
 	// conversation's exposure record reads as exposed, every approval goes to the
-	// approver's agent.FreshApprover and an approver without one is denied. The
-	// tools floorExempt names keep their own ApprovalNever. While exposed, a
+	// approver's agent.FreshApprover and an approver without one is denied.
+	// Only the library delegate_code and dispatch keep their own
+	// ApprovalNever: the agent-memory writes, floor-exempt otherwise, are
+	// asked through FreshApprover too, with an empty preview because they do
+	// not plan, so the approver should render the call. While exposed, a
 	// native command tool whose policy allows network runs on its
 	// network-denied copy, so with a native Sandbox that allows network, New
 	// also validates that copy and refuses a host that cannot run it. Off by

@@ -45,7 +45,7 @@ Post-write verification keys are `verify:v2` for every runtime, host included, b
 
 **Approval floor.** Trusted raises a floor under every extra tool: any tool, or tool plan, whose effect is not a plain `Read` and would otherwise run without approval is forced to `ApprovalAlways`, including one that asks for `ApprovalNever`. A stronger existing approval is kept. This covers library-built tools too, which leaves them unchanged because they already gate. Four library types, identified by concrete type and never by name or declared effect, keep `ApprovalNever`:
 
-- `agent_memory_create` and `agent_memory_promote`, over the real memory store, write only the agent-memory database under `-agent-memory`'s own guards and their own provenance rules (the #387 decision: the floor does not add a prompt to them).
+- `agent_memory_create` and `agent_memory_promote`, over the real memory store, write only the agent-memory database under `-agent-memory`'s own guards and their own provenance rules (the #387 decision: the floor does not add a prompt to them). [Strict approval](golem.md#strict-approval--strict-approval) does ask before them while a conversation is exposed.
 - `delegate_code` and `dispatch` have a `Network` effect that is model-provider traffic under the existing destination admission, which is a host operation.
 
 The floor exempts these library types; it does not constrain what the host injects into them. A host-supplied store or `AfterWrite` hook on the memory tools, or the model caller behind `delegate_code` and `dispatch`, is host code that runs without a prompt. The floor is a guardrail against a tool that declares `ApprovalNever` for itself, not a boundary against host code.

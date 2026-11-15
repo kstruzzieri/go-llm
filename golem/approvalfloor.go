@@ -151,13 +151,21 @@ func floorWrap(t agent.Tool) agent.Tool {
 	return floorTool{inner: t}
 }
 
-// strictExemptNames returns the names of the tools floorExempt exempts, the
-// ones a strict run leaves at their own ApprovalNever (#584). The check is by
-// concrete type, so a tool merely named like one is not listed.
+// strictExemptNames returns the names of the mounted library delegate_code and
+// dispatch tools, the only ones a strict run leaves at their own ApprovalNever
+// while the conversation is exposed (#584). The two agent-memory writes are
+// floorExempt but not listed: an exposed conversation could otherwise save a
+// record that a later clean one reads, so they ask then. The check is by
+// concrete type, so a tool merely named like one is not listed; a typed nil
+// pointer is not listed either.
 func strictExemptNames(tools []agent.Tool) []string {
 	var names []string
 	for _, t := range unfloored(tools) {
-		if floorExempt(t) {
+		if !libraryTool(t) {
+			continue
+		}
+		switch t.(type) {
+		case *agenttools.DelegateCode, *agenttools.Dispatch:
 			names = append(names, t.Spec().Name)
 		}
 	}
