@@ -512,7 +512,7 @@ func TestMerge_NonCapabilityFieldsUnchanged(t *testing.T) {
 					mr.SetQualityCtxCeilingOverride(func(ModelKey) int { return 2000 })
 				}
 				p := *lookupProfile(t, mr, tt.info.Name)
-				p.Caps, p.UpdatedAt = 0, time.Time{}
+				p.Caps, p.capsDecided, p.UpdatedAt = 0, false, time.Time{} // the marker is part of the Caps decision
 				return p
 			}
 			if noLog, withLog := build(false), build(true); !reflect.DeepEqual(withLog, noLog) {

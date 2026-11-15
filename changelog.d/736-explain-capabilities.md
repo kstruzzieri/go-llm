@@ -14,6 +14,7 @@ Hosts can now explain a model's capabilities, and a provider's model listing, wi
 - Evidence stored under either Ollama spelling of a model (`m` or `m:latest`) counts for both, so a stored answer under `qwen3:latest` settles `qwen3` without a check.
 - Capabilities in stored fingerprint profiles do not add to a model's capabilities. Those profiles still supply memory and context-window figures.
 - A listing projection's `KnownMask` also marks the capabilities the evidence says no to.
+- FIM routing and completion follow the decided `insert` capability: an explicit list without `insert` refuses FIM (error "the model's decided capabilities exclude insert") even when the Ollama template uses `.Suffix`, and an explicit list with `insert` admits it even when the template does not. Without the evidence log the template still decides FIM, as before.
 
 #### Known differences between the offline explanations and routing
 

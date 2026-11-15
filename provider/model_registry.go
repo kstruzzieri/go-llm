@@ -1598,6 +1598,7 @@ func (r *ModelRegistry) merge(
 	// already honors the override above, so the two never disagree.
 	if decided != nil {
 		profile.Caps = *decided
+		profile.capsDecided = true
 	}
 
 	// Config think override (final precedence, #220). Per-field REPLACE:
