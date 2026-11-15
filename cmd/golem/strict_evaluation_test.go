@@ -241,6 +241,7 @@ func evalResume(exposure agent.Exposure, on []string) func(*testing.T, bool) eva
 			writeOut("src.txt"), r.command(), fileCall("write_file", "src.txt"), r.command(), answerStep("done"))
 		seedGrants(t, r, 2)
 		r.resume(t, exposure)
+		wantExposure(t, r.sess, resumedID, exposure) // the resumed record, in both arms
 		if n := len(r.sess.session.msgs); n != 2 {
 			t.Fatalf("/resume loaded %d messages, want the stored 2", n)
 		}
