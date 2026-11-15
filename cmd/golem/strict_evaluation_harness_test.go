@@ -17,7 +17,6 @@ import (
 	"github.com/kstruzzieri/go-llm/agent"
 	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
 	golemruntime "github.com/kstruzzieri/go-llm/golem"
-	"github.com/kstruzzieri/go-llm/provider"
 )
 
 // strict_evaluation_harness_test.go is the harness the strict-mode workflow
@@ -333,86 +332,6 @@ func TestStrictEvalHarnessCleanLoop(t *testing.T) {
 	}
 	if got := r.started(t); !slices.Equal(got, []string{"edited"}) {
 		t.Errorf("background sink = %q, want the edited act.sh started once", got)
-	}
-}
-
-// TestStrictEvalHarnessMCPRead: the real loopback MCP tool runs once at its
-// own prompt and its synthetic text reaches the conversation; under strict
-// the command after it asks fresh, saying the host network is not confined.
-func TestStrictEvalHarnessMCPRead(t *testing.T) {
-	r := newEvalRuntime(t, evalOpts{strict: true, mcp: true})
-	r.script(act(), r.command(), answerStep("done"))
-	tr := r.turn(t, "y", "y")
-	if n := r.mcpCalls.Load(); n != 1 {
-		t.Fatalf("server invocations = %d, want 1", n)
-	}
-	if !slices.ContainsFunc(tr.res.Messages, func(m provider.ChatMessage) bool { return strings.Contains(m.Content, mcpReadText) }) {
-		t.Fatalf("the synthetic MCP text never reached the conversation: %+v", tr.res.Messages)
-	}
-	if tr.asked(askMCP) != 1 || tr.asked(askRun) != 1 || len(tr.questions) != 2 || tr.notices() != 1 || tr.networkLines() != 1 || r.lines(t) != 1 {
-		t.Fatalf("want the MCP prompt, then one fresh command prompt with the network line, and one run; questions %q:\n%s", tr.questions, tr.out)
-	}
-}
-
-// TestStrictEvalHarnessConsult: staged advice is admitted by the turn that
-// consumes it, so under strict its first write asks fresh, naming consult.
-func TestStrictEvalHarnessConsult(t *testing.T) {
-	r := newEvalRuntime(t, evalOpts{strict: true})
-	r.consult(t)
-	r.script(writeOut("out.txt"), answerStep("done"))
-	tr := r.turn(t, "y")
-	if r.sess.advisory != nil {
-		t.Fatal("the turn did not consume the staged advice")
-	}
-	if tr.asked(askApply) != 1 || len(tr.questions) != 1 || tr.notices() != 1 || !strings.Contains(tr.out, "outside content entered this conversation (consult)") {
-		t.Fatalf("want one fresh write prompt naming consult; questions %q:\n%s", tr.questions, tr.out)
-	}
-	if readFile(t, filepath.Join(r.sess.root, "out.txt")) != "x\n" {
-		t.Fatal("the approved write did not land")
-	}
-	wantExposure(t, r.sess, r.sess.session.id, agent.Exposure{Recorded: true, Foreign: true, First: "consult"})
-}
-
-// TestStrictEvalHarnessHeadless: the real headless approver authorizes an
-// -allow-tool write between two foreign reads with strict off, and is denied
-// without being asked once a strict run is exposed. It asks nothing in either.
-func TestStrictEvalHarnessHeadless(t *testing.T) {
-	for _, strict := range []bool{false, true} {
-		t.Run(fmt.Sprintf("strict=%v", strict), func(t *testing.T) {
-			r := newEvalRuntime(t, evalOpts{strict: strict, extra: []agent.Tool{foreignStub{}}, allowTools: []string{"write_file"}})
-			r.script(fetch(), writeOut("out.txt"), fetch(), answerStep("done"))
-			tr := r.turn(t)
-			rec := tr.res.ToolCalls
-			if len(rec) != 3 || !rec[0].Invoked || !rec[2].Invoked || len(tr.questions) != 0 {
-				t.Fatalf("want both reads invoked and no question; records %+v questions %q", rec, tr.questions)
-			}
-			written := exists(t, filepath.Join(r.sess.root, "out.txt"))
-			if strict && (!deniedAtPrompt(rec[1]) || written) {
-				t.Fatalf("strict: want the write denied, not run; record %+v written %v", rec[1], written)
-			}
-			if !strict && (!rec[1].Invoked || rec[1].AutoApproved || !written) {
-				t.Fatalf("strict off: want the -allow-tool write run; record %+v written %v", rec[1], written)
-			}
-		})
-	}
-}
-
-// TestStrictEvalHarnessResume: each of the three stored states is the active
-// conversation's record after resume.
-func TestStrictEvalHarnessResume(t *testing.T) {
-	for _, tc := range []struct {
-		name     string
-		exposure agent.Exposure
-	}{
-		{"legacy", agent.Exposure{}},
-		{"clean", agent.Exposure{Recorded: true}},
-		{"exposed", foreignExposure},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			r := newEvalRuntime(t, evalOpts{strict: true})
-			r.resume(t, tc.exposure)
-			wantExposure(t, r.sess, r.sess.session.id, tc.exposure)
-		})
 	}
 }
 

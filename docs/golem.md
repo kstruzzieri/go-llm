@@ -283,7 +283,7 @@ Reach is narrow. A row marked **limit** is content you did not write that still 
 
 A REPL session with no MCP tools and no `/consult` that started on this version never triggers it.
 
-Strict approval governs actions, not what reaches the model: once a conversation is exposed, its content still goes to the configured model provider, hosted or local, on every later turn. The [workflow evaluation and decision record](security/strict-mode-decision.md) lists these limits with the measured prompt counts.
+Strict approval governs actions, not what reaches the model: once a conversation is exposed, its content still goes to the configured model provider, hosted or local, on every later turn. The [workflow evaluation and decision record](security/strict-mode-decision.md) lists the limits of this reach, including this one, with the measured prompt counts.
 
 A native `-sandbox` narrows the sources further. Golem refuses `-mcp-stdio` and `-mcp-http` there, along with `-agent-memory`, `-delegate` and `-dispatch`, so a native session becomes exposed only through `/consult` advice, which needs configured consultants and `-interceptors`, or by resuming an exposed or legacy conversation, including one an MCP tool exposed in an earlier host session. Those are the cases network narrowing covers in the CLI. A live MCP session always runs on the host, with no OS network boundary, so it gets no network narrowing: a `git push` after an MCP read prompts once and then has your full network.
 

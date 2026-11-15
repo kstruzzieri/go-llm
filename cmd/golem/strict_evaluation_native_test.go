@@ -29,7 +29,9 @@ import (
 // approval, wrapped as an evalRuntime so the 13a consult staging, resume
 // seeding and counting turns run on it unchanged. golem.New rebuilds the
 // runtime from those options, so it validates the network-denied variant at
-// construction as the CLI's runtime does (#584).
+// construction as the CLI's runtime does (#584). Its command(), start(),
+// lines() and started() helpers are unusable on this runtime: its sinks are
+// empty, so a call would pass on exit 127.
 func newNativeEvalRuntime(t *testing.T, policy agenttools.SandboxConfig) *evalRuntime {
 	t.Helper()
 	sess := newNativeSession(t, policy)
@@ -97,6 +99,12 @@ func nativeTurn(t *testing.T, r *evalRuntime, p *wiringProbe, label, why string)
 	}
 	if exposed && code <= 0 || !exposed && code != 0 {
 		t.Errorf("probe exit code = %d with exposed %t; want > 0 exposed, 0 clean\n%s", code, exposed, result)
+	}
+	// A denied sandbox that fails before bash starts also exits non-zero with
+	// no connection. Bash names the redirection target on Seatbelt and on
+	// bwrap, so its presence shows the connect was attempted and refused.
+	if target := fmt.Sprintf("/dev/tcp/127.0.0.1/%d", p.ln.Addr().(*net.TCPAddr).Port); exposed && !strings.Contains(result, target) {
+		t.Errorf("exposed probe output never names %s: bash may not have run\n%s", target, result)
 	}
 	if got := p.connects(t); got != connects {
 		t.Errorf("listener received %d connection(s), want %d\n%s", got, connects, result)
