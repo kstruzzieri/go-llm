@@ -123,14 +123,13 @@ When `stream: true`, response is newline-delimited JSON. Each chunk has `done: f
 
 ## Data Sensitivity
 
-The repository itself holds no production data, personal data, or client data. At runtime, go-llm and Golem handle the user's own data on the user's machine:
+The repository holds no production, personal, or client data. At runtime, go-llm and Golem handle the user's own data on the user's machine:
 
-- **Credentials and keys:** provider API keys in a user's `models.json` (`api_key`), signing keys used by `signing/`, and any secrets an agent run reads from the workspace or environment. Committed secret-shaped strings are synthetic test fixtures only (`internal/secretscan/secrettest/cases.json`, `agent/testdata/hardening/secrets/`); never replace them with live values.
-- **Private source code and documents:** workspace files that Golem reads and edits, and text indexed into the RAG store (`~/.local/share/go-llm/rag.db` by default).
-- **User conversations and memories:** conversation history, Golem memories (`$XDG_DATA_HOME/golem/memories.db`), and checkpoints (`<data dir>/golem/checkpoints/`). These may contain anything a user typed or a tool returned.
-- **Data leaving the machine:** local backends keep prompts on the host. A remote provider or a `/consult` consultant (Claude, Codex) receives the prompt and any attached context; see `docs/consult.md`.
+- **User data directories:** the Golem data dir (`$XDG_DATA_HOME/golem/`, else `~/.local/share/golem/`: sessions, memories, goal history, checkpoints, code indexes, `-trace` traces, telemetry, capability evidence, the signing key), `~/.local/share/go-llm/` (MCP server RAG store), and `<os.UserConfigDir>/go-llm/`. They may hold private source, anything the user typed, and anything a tool returned.
+- **Credentials:** `api_key` in a user's `models.json`, signing keys, Claude and Codex logins used by `/consult`, and secrets in the environment or workspace. Every committed secret-shaped string is synthetic (e.g. `internal/secretscan/secrettest/cases.json`, `agent/testdata/hardening/secrets/`); never swap in a live value.
+- **Data leaving the machine:** an endpoint is local only if its `base_url` is; `api_format` says nothing about location. Remote providers, `/consult` consultants (`docs/consult.md`), `-mcp-http` servers, and stdio MCP servers given `-mcp-env` receive prompts, tool arguments, or secrets; exec commands reach the network unless denied.
 
-AI tools must never read, print, or transmit real credentials, a user's data directories, or a user's `models.json`; use the synthetic fixtures and mock servers. Treat changes to `config/`, `signing/`, `agent/interceptor/`, `internal/secretscan/`, `consult/`, `conversation/`, and `memory/` as security-relevant in review.
+AI tools must not read, print, or transmit real credentials, a user's `models.json`, or the directories above unless the user asks in the current session, and must never commit them or paste them into an issue or PR; use the synthetic fixtures and mock servers. In review, all code outside `docs/` and test data is security-relevant; highest risk: `agent/tools/` (exec sandbox), Golem trust and approval code, `projectcontext/`, `mcpclient/`, `agent/interceptor/`, `internal/secretscan/`, `config/`, `signing/`, `consult/`, `provider/`.
 
 **AI policy:** no organization AI policy applies to this project.
 
