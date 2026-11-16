@@ -1,6 +1,6 @@
 # Strict approval: workflow evaluation and acceptance decision (#581)
 
-Recorded TODO-RESULTS
+Recorded 2026-11-16. **Accepted as opt-in approval continuity; strict approval stays off by default.**
 
 ## What was evaluated
 
@@ -79,7 +79,9 @@ These are the limits of the reach in the [exposure tables in docs/golem.md](../g
 
 ## Decision
 
-TODO-RESULTS (Keith's decision, recorded here in his words)
+The repository owner's decision, 2026-11-16, in his words:
+
+> Accepted as opt-in "approval continuity". Strict approval stays off by default. In an exposed conversation, one prompt per consequential call is accepted, with no cap on how many calls a conversation makes. It is not prompt-injection protection, and release notes and the README must not call it that. Follow-ups, not blockers: network-using command output under a native sandbox should expose the conversation, and a strong detector hit in a workspace file should too.
 
 ## #581 acceptance criteria
 
@@ -92,5 +94,5 @@ TODO-RESULTS (Keith's decision, recorded here in his words)
 | Documentation states covered inputs and actions, the hosted-inference and already-running-process limits, and the reset and resume rules | The strict approval section of [docs/golem.md](../golem.md#strict-approval--strict-approval) (what starts fresh, what exposes, where it takes effect) and the limits above. |
 | Any proposal to change the default includes regression and workflow evidence | No default change is proposed. Strict approval stays opt-in; the decision above records whether that stands. |
 | Review: document the admission and reset decision table and the evaluation protocol | The two golem.md tables, and the scripted, native and local-model sections above. |
-| Review: compare strict on and off with prompt counts, task completion and headless denial outcomes, with synthetic content, and record thresholds or an explicit decision | Rows 1 to 8 of [strict-mode-evaluation.md](strict-mode-evaluation.md) with their thresholds; the headless denial outcome is row 5; the decision is TODO-RESULTS. |
+| Review: compare strict on and off with prompt counts, task completion and headless denial outcomes, with synthetic content, and record thresholds or an explicit decision | Rows 1 to 8 of [strict-mode-evaluation.md](strict-mode-evaluation.md) with their thresholds; the headless denial outcome is row 5; the decision above accepts strict approval as opt-in, with one prompt per consequential call and no cap on calls. |
 | Review: keep strict mode opt-in; no declassification through compaction, assertions, timeouts or repeated approvals | PR #804 and #806 keep exposure monotonic (a successful `/new` or `/clear`, or `-fresh`, is the only reset; `/resume <id>` takes that conversation's own record, see "What starts fresh" in golem.md); the flag is opt-in and no declassification mechanism was added. |
