@@ -4,7 +4,7 @@
 
 `go-llm` is a shared Go module providing local LLM integration (chat, completions, embeddings) and a lightweight RAG layer with SQLite-backed vector storage.
 
-**Local backends:** models are reached per-provider via `models.json` `api_format`. **llama.cpp (via its OpenAI-compatible `llama-server`, `api_format: openai-compat`) is the primary/recommended backend** — best local performance. Ollama (native REST, `api_format: ollama`, the default when omitted) is fully supported. The `ollama/` package is the native Ollama client; `provider/openaicompat` + `provider.Router` reach any OpenAI `/v1` server (llama.cpp, vLLM, LM Studio). Local benchmarking and the `cmd/llm-bench` harness run against llama.cpp.
+**Local backends:** each `models.json` provider picks its wire API with `api_format`. **llama.cpp (`llama-server`, `api_format: openai-compat`) is the primary backend**; Ollama (`api_format: ollama`, the default when omitted) is fully supported. `ollama/` is the native Ollama client; `provider/openaicompat` + `provider.Router` reach any OpenAI `/v1` server (llama.cpp, vLLM, LM Studio). `cmd/llm-bench` runs against llama.cpp.
 
 **Consumers:** Firn IDE (custom Wails IDE), Flux ML (Wails ML dev environment), Quantum Trader (Go+Python trading platform)
 
@@ -13,32 +13,32 @@
 ```
 go-llm/
 ├── ollama/          # Ollama REST API client (chat, generate, embeddings, models)
-├── config/          # Model configuration loader (models.json, resolve, fallback) + Document (origin/revision-aware load, secret-literal-preserving atomic writer, role lifecycle + selector overrides + credential scrub) + `CapabilityPolicy` (one provider/model selector's capability policy: explicit list, type-derived capabilities, type floor; matches bootstrap's override and floor builders)
-├── configview/      # Pure projection of a config for panels/CLI/MCP (`Build`: v1 wire contract, tri-state candidate eligibility, no I/O; consumed by golem models -json, MCP configview resource, Firn config panel) + offline capability and listing explanations for the Firn config panel (`ExplainCapabilities`, `ExplainListing`: at most one evidence-store read each, no other I/O)
-├── configio/        # Explicit I/O tier for the config stack: RefreshInventory (provider listing → configview.Inventory value via the read-only ProjectListedModels projection; publishes listings and provider facts to the evidence store only through the explicit `WithPublish` option) + ProbeToolCall (consent-gated per-model probe, ProbeOutcome{State,Persisted}) — never implicit, values in/out, bounded error codes (CodeOf), cancellation unclassified
-├── profiles/        # Profile catalog: curated go:embed configs (credential-free by pinned rule) + user store under a 0700 profiles/ boundary; stable IDs, bounded error codes, SaveOutcome writes (nil error whenever persisted) — the Firn config-panel write path
-├── provider/        # Use-case-aware Router (chat/fim/embedding/reasoning/analysis/code-review/agent profiles), circuit breakers, warmth, slot-capacity discovery + slot-aware admission, sticky routing, scoring, fallback chains; `WithEvidenceLog` attaches the shared capability store, after which on-demand tool_call resolution reads and writes only its log (24 h cooldown, two-request automatic allowance, a result whose save failed kept in memory and marked unsaved); `CanonicalEndpoint` is the one endpoint spelling evidence is keyed by; `ExplainEvidence` is the one precedence core that ranks capability evidence (explicit, direct, provider, catalog, type), shared on the evidence-log path by routing, the listing projection and `ExplainToolCall`, and by `configview.ExplainCapabilities`
+├── config/          # Model configuration (models.json load, resolve, fallback) + Document (revision-aware load, secret-preserving atomic writer, role lifecycle, credential scrub) + `CapabilityPolicy`
+├── configview/      # Pure config projection for panels/CLI/MCP (`Build`: v1 wire contract, no I/O) + offline capability and listing explanations (`ExplainCapabilities`, `ExplainListing`)
+├── configio/        # Explicit I/O tier: `RefreshInventory` (provider listing → `configview.Inventory`; publishes to the evidence store only via `WithPublish`) + consent-gated `ProbeToolCall`; bounded error codes (`CodeOf`)
+├── profiles/        # Profile catalog: curated credential-free go:embed configs + a 0700 user store; the Firn config-panel write path
+├── provider/        # Use-case-aware Router: circuit breakers, warmth, slot-aware admission, sticky routing, scoring, fallback chains; `WithEvidenceLog` capability resolution; `CanonicalEndpoint` keys evidence; `ExplainEvidence` is the one capability-evidence precedence core
 │   └── openaicompat/ # OpenAI /v1 client — reaches llama.cpp (primary), vLLM, LM Studio via api_format: openai-compat
 ├── rag/             # RAG: chunking, SQLite vector store, indexing, retrieval, managed document registry (stable IDs, lifecycle, freshness)
 ├── rag/ast/         # Scoped structural symbol graph: Extractor + SymbolStore interfaces (skeleton)
 ├── completion/      # IDE inline completion (Fill-in-the-Middle)
 ├── analysis/        # Domain-specific analysis helpers (code review, ML metrics, trading)
-├── agent/           # Agent runtime: Orchestrator loop, effect-aware tools, serial/parallel dispatch, opt-in interceptor pipeline (#436: ingress hooks on frozen values, allow/tag/block/abort, per-run RiskReport, provenance)
-├── agent/interceptor/ # Opt-in defaults: origin-sensitive injection detectors (zero-width, encoded instructions, typoglycemia), all-origin secret/payment-card blocking, argument-invariant guards, exec egress labels, and native scoped-child refusal reporting (#555)
+├── agent/           # Agent runtime: Orchestrator loop, effect-aware tools, serial/parallel dispatch, opt-in interceptor pipeline (#436)
+├── agent/interceptor/ # Opt-in defaults: injection detectors, secret/payment-card blocking, argument-invariant guards, exec egress labels, scoped-child refusal reporting (#555)
 ├── mcp/             # MCP server: tools, prompts, resources over stdio/HTTP/2 — wired through provider.Router
 ├── mcpclient/       # MCP client: adapts external MCP servers' tools into agent.Tool (stdio/streamable-HTTP); consumed by cmd/golem
 ├── consult/         # /consult seam: bounded host runner + Claude and Codex subscription adapters (#382, #546); unsigned consult-result/v1 receipts
 ├── conversation/    # Persistent conversation storage with SQLite
-├── memory/          # Explicit user-controlled local memories + agent-memory records (SQLite, scope-filtered FTS5/bm25 search); shared hardened-open primitives (open.go); separate from conversation + RAG; backs Golem /remember + memory_search AND MCP agent_memory_* tools
+├── memory/          # User memories + agent-memory records (SQLite, FTS5 search) + shared hardened-open primitives (open.go); backs Golem /remember, memory_search and MCP agent_memory_* tools
 ├── projectcontext/  # AGENTS.md-style project-context loader (discovery, safe read, ordering; consumed by cmd/golem)
-├── recipe/          # Versioned JSON prompt bundles (v1): Parse for embedded bytes, Load for explicit paths (regular-file + identity checks, 64 KiB bound, nonblocking Unix open); closed schema, strict keys, advisory role/use-case hints. Template expansion + discovery are #353.
-├── signing/         # Detached signatures over canonical JSON (ZT-301): Signer/Verifier seam, canonical form v1, Ed25519 + HMAC-SHA256 backends, Keyring rotation, hardened key files. Consumed by #445/#446/#447/#450; knows no record schema.
+├── recipe/          # Versioned JSON prompt bundles (v1): `Parse`/`Load`, closed schema, strict keys; expansion + discovery are #353
+├── signing/         # Detached signatures over canonical JSON (ZT-301): Ed25519 + HMAC-SHA256, Keyring rotation, hardened key files; knows no record schema
 ├── feedback/        # Implicit user behavioral signal collection
-├── fingerprint/     # Model profiling (latency benchmarks, capability detection) + the shared capability store (#734): append-only evidence log (per-endpoint/adapter/digest answers with expiry + pruning), per-credential listings (account HMAC never exported), registry reads; `OpenSharedStore` is the one hardened opener (file, memory-only fallback, disabled; golem and other hosts use it); `CapabilityProber` + probe recipes (`probers/` streamed tools check answers chat, stream and tool_call; `Detail*` inconclusive codes)
+├── fingerprint/     # Model profiling + the shared capability store (#734): append-only evidence log, per-credential listings (account HMAC never exported); `OpenSharedStore` is the one hardened opener; `CapabilityProber` + `probers/`
 ├── prefetch/        # Predictive cache-warming engine for RAG retrieval
 ├── compat/          # OpenAI-compatible endpoint shim (chat, completions, model aliases, concurrency limiter)
 ├── cmd/
-│   ├── golem/       # Golem CLI: agent REPL. Interactive input goes through one lineSource seam — a golang.org/x/term line editor on a TTY (arrow editing, per-workspace goal history, bracketed-paste composition, `/edit`, Ctrl-C arm/quit) or the bufio.Scanner for pipes, -no-editor, dumb terminals, and Windows
+│   ├── golem/       # Golem CLI agent REPL; input goes through one lineSource seam (x/term line editor on a TTY, bufio.Scanner otherwise)
 │   ├── go-llm-mcp/  # Standalone MCP server binary (stdio + HTTP/2)
 │   ├── fim-smoke/   # FIM smoke-test harness
 │   └── llm-bench/   # Model evaluation harness (AnswerQuality, tool-use, tool-restraint, latency, tokens; paired Δ + bootstrap CIs; llama.cpp via openai-compat)
@@ -135,7 +135,7 @@ go test ./...
 go test -tags integration ./...
 ```
 
-Mocks prove a package against itself, not against its neighbors. When packages are built separately (in parallel, or by different agents) and integrate later, test across the boundary: call one instance with varying parameters, not only identical repeated calls, and round-trip every public field meant to persist.
+Mocks of a neighboring go-llm package test each side against your assumptions, not against each other. When separately built packages are joined, add a test in the default (untagged) run that wires the real packages together, mocking only the external server. Vary inputs on one instance (one prefetch cache asked for two different `k`), since identical repeated calls cannot reveal a key that omits a parameter, and round-trip every public field meant to persist.
 
 When a review names one instance of a bug, fix the class: find every place the same assumption holds (every input to a cache key, every path that emits a counted event, the empty case of a cleanup) before calling the finding resolved.
 
