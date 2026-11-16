@@ -306,7 +306,7 @@ func strictEvalRows() []evalRow {
 			grants: "session grants: 0\n" + exposure + "\nauto-edits: off\n"}
 	}
 	cleanOn := resumed
-	cleanOn.grants = "session grants: 0\nexposure: clean\nauto-edits: off\n"
+	cleanOn.grants = "session grants: 0\nexposure: clean (files and command output are not tracked)\nauto-edits: off\n"
 	return []evalRow{
 		{
 			workflow:  "Clean edit/test loop, grants held: edit, verifier, foreground test, background start",
