@@ -121,6 +121,18 @@ Response: `{"embeddings": [[0.1, 0.2, ...]]}`
 ### Streaming
 When `stream: true`, response is newline-delimited JSON. Each chunk has `done: false` until the final one which has `done: true` and includes timing stats.
 
+## Data Sensitivity
+
+The repository holds no production, personal, or client data. At runtime, go-llm and Golem handle the user's own data on the user's machine:
+
+- **User data directories:** the Golem data dir (`$XDG_DATA_HOME/golem/`, else `~/.local/share/golem/`: sessions, memories, goal history, checkpoints, code indexes, `-trace` traces, telemetry, capability evidence, the signing key), `~/.local/share/go-llm/` (MCP server RAG store), and `<os.UserConfigDir>/go-llm/`. They may hold private source, anything the user typed, and anything a tool returned.
+- **Credentials:** `api_key` in a user's `models.json`, signing keys, Claude and Codex logins used by `/consult`, and secrets in the environment or workspace. Every committed secret-shaped string is synthetic (e.g. `internal/secretscan/secrettest/cases.json`, `agent/testdata/hardening/secrets/`); never swap in a live value.
+- **Data leaving the machine:** an endpoint is local only if its `base_url` is; `api_format` says nothing about location. Remote providers, `/consult` consultants (`docs/consult.md`), `-mcp-http` servers, and stdio MCP servers given `-mcp-env` receive prompts, tool arguments, or secrets; exec commands reach the network unless denied.
+
+AI tools must not read, print, or transmit real credentials, a user's `models.json`, or the directories above unless the user asks in the current session, and must never commit them or paste them into an issue or PR; use the synthetic fixtures and mock servers. In review, all code outside `docs/` and test data is security-relevant; highest risk: `agent/tools/` (exec sandbox), Golem trust and approval code, `projectcontext/`, `mcpclient/`, `agent/interceptor/`, `internal/secretscan/`, `config/`, `signing/`, `consult/`, `provider/`.
+
+**AI policy:** no organization AI policy applies to this project.
+
 ## Changelog
 
 Outside the fold-and-stamp release PR, never edit `CHANGELOG.md`; concurrent PRs conflict at the shared insertion point under `## [Unreleased]`. Add `changelog.d/<issue>-<slug>.md` holding the full `### <Category> — <title> (#<issue>)` section instead (see `changelog.d/README.md`). CI rejects direct edits; `scripts/changelog-fold` folds fragments at release.
