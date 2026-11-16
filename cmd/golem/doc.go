@@ -62,12 +62,14 @@
 // consulted: every approval the run needs asks [y/N] about that one call,
 // after a line naming the source, and on the host runtime a command,
 // background start or verifier prompt adds "network is not confined"; "a"
-// denies and no answer creates a grant. agent_memory_create,
-// agent_memory_promote, delegate_code and dispatch stay unprompted. /new and a
-// successful /clear start clean; /grants prints the exposure line and the
-// permissions line gains strict-approval=on. Under -no-session each turn
-// starts clean. The flag does not select Trusted, and -p and AgentFlow modes
-// accept it with no effect today, since neither can become exposed.
+// denies and no answer creates a grant. agent_memory_create and
+// agent_memory_promote ask too, showing the note with each line marked "|"
+// and its size, or the record being promoted; delegate_code and dispatch stay
+// unprompted. /new and a successful /clear start clean; /grants prints the
+// exposure line and the permissions line gains strict-approval=on with what
+// exposes a conversation. Under -no-session each turn starts clean. The flag
+// does not select Trusted, and -p and AgentFlow modes accept it with no
+// effect today, since neither can become exposed.
 //
 // The openai-compat backend URL can be overridden with -base-url (or
 // GO_LLM_BASE_URL); otherwise, when the configured loopback URL does not

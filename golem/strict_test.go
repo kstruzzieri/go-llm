@@ -57,14 +57,20 @@ func runStrict(t *testing.T, strict bool, caller agent.ModelCaller, tools []agen
 	return res
 }
 
-func TestStrictExemptNamesMatchFloor(t *testing.T) {
+// TestStrictExemptNamesOmitMemoryTools: with all four floor-exempt library
+// tools mounted, a strict run exempts only delegate_code and dispatch; the
+// floor still exempts all four.
+func TestStrictExemptNamesOmitMemoryTools(t *testing.T) {
 	fake := &floorStub{name: "dispatch", effect: agent.Effect{Class: agent.Read}}
-	tools := []agent.Tool{
-		memCreate(), agenttools.AgentMemoryPromote{}, &agenttools.DelegateCode{}, &agenttools.Dispatch{},
-		fake, &floorStub{name: "other", effect: agent.Effect{Class: agent.Read}},
+	floorExemptTools := []agent.Tool{memCreate(), agenttools.AgentMemoryPromote{}, &agenttools.DelegateCode{}, &agenttools.Dispatch{}}
+	for _, tool := range floorExemptTools {
+		if !floorExempt(tool) {
+			t.Fatalf("floorExempt(%T) = false, want the floor unchanged", tool)
+		}
 	}
+	tools := append(slices.Clone(floorExemptTools), fake, &floorStub{name: "other", effect: agent.Effect{Class: agent.Read}})
 	got := strictExemptNames(floorAll(tools))
-	want := []string{"agent_memory_create", "agent_memory_promote", "delegate_code", "dispatch"}
+	want := []string{"delegate_code", "dispatch"}
 	slices.Sort(got)
 	if !slices.Equal(got, want) {
 		t.Fatalf("names = %v, want %v", got, want)
@@ -72,6 +78,9 @@ func TestStrictExemptNamesMatchFloor(t *testing.T) {
 	// Exactly one "dispatch": the library type, not the fake.
 	if n := len(strictExemptNames([]agent.Tool{floorWrap(fake)})); n != 0 {
 		t.Fatalf("a tool merely named dispatch listed: %d", n)
+	}
+	if n := len(strictExemptNames(floorAll([]agent.Tool{(*agenttools.Dispatch)(nil), (*agenttools.DelegateCode)(nil)}))); n != 0 {
+		t.Fatalf("a typed nil pointer listed: %d", n)
 	}
 }
 
@@ -98,19 +107,25 @@ func TestEffectivePermissionsReportsStrict(t *testing.T) {
 
 // TestStrictOptionSetsRequest drives the request through a real run: the
 // option decides suspension, and the exempt names are present either way.
+// The memory write is floor-exempt but not strict-exempt, so once exposed it
+// asks, and this approver cannot ask fresh.
 func TestStrictOptionSetsRequest(t *testing.T) {
 	for _, strict := range []bool{true, false} {
 		foreign := strictForeign{&floorStub{name: "fetch", effect: agent.Effect{Class: agent.Read, Approval: agent.ApprovalNever}}}
 		put := &floorStub{name: "put_note", effect: agent.Effect{Class: agent.Write, Approval: agent.ApprovalNever}}
-		res := runStrict(t, strict, &seqCaller{names: []string{"fetch", "agent_memory_create", "put_note"}}, []agent.Tool{foreign, memCreate(), put})
-		if len(res.ToolCalls) != 3 {
+		// The zero-value DelegateCode relies on Invoke rejecting the missing prompt before it touches any nil field.
+		res := runStrict(t, strict, &seqCaller{names: []string{"fetch", "delegate_code", "agent_memory_create", "put_note"}},
+			[]agent.Tool{foreign, &agenttools.DelegateCode{}, memCreate(), put})
+		if len(res.ToolCalls) != 4 {
 			t.Fatalf("strict=%v calls = %+v", strict, res.ToolCalls)
 		}
 		if res.ToolCalls[1].Denied || !res.ToolCalls[1].Invoked {
 			t.Fatalf("strict=%v exempt tool = %+v, want invoked", strict, res.ToolCalls[1])
 		}
-		if denied := res.ToolCalls[2].Denied; denied != strict {
-			t.Fatalf("strict=%v floored tool denied = %v", strict, denied)
+		for _, i := range []int{2, 3} {
+			if denied := res.ToolCalls[i].Denied; denied != strict {
+				t.Fatalf("strict=%v %s denied = %v", strict, res.ToolCalls[i].Name, denied)
+			}
 		}
 	}
 }
@@ -142,8 +157,9 @@ func (h hostTool) Invoke(ctx context.Context, _ json.RawMessage) (agent.ToolResu
 
 func TestStrictRuntimeInsideStrictParentKeepsExemptions(t *testing.T) {
 	put := &floorStub{name: "put_note", effect: agent.Effect{Class: agent.Write, Approval: agent.ApprovalNever}}
-	inner, err := New(context.Background(), Options{Root: t.TempDir(), Profile: ProfileTrusted, Tools: []agent.Tool{memCreate(), put},
-		Orchestrator: agent.New(&seqCaller{names: []string{"agent_memory_create", "put_note"}}, agent.ContextManager{})})
+	// The zero-value DelegateCode relies on Invoke rejecting the missing prompt before it touches any nil field.
+	inner, err := New(context.Background(), Options{Root: t.TempDir(), Profile: ProfileTrusted, Tools: []agent.Tool{&agenttools.DelegateCode{}, put},
+		Orchestrator: agent.New(&seqCaller{names: []string{"delegate_code", "put_note"}}, agent.ContextManager{})})
 	if err != nil {
 		t.Fatal(err)
 	}

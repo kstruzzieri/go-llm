@@ -193,8 +193,8 @@ func applyProfileGates(f flags, p golemruntime.Profile, policy agenttools.Sandbo
 // renderPermissions is the one-line notice for a runtime's effective
 // permissions (spec section 7): profile, mounted tools, command runtime (with
 // its warning, or a native backend's network and limits), scratch and
-// verification state, and strict-approval=on when set (#584). Inspect names
-// how to get the old defaults back.
+// verification state, and, when set, strict-approval=on with what exposes a
+// conversation (#584). Inspect names how to get the old defaults back.
 func renderPermissions(ep golemruntime.EffectivePermissions) string {
 	names := make([]string, len(ep.Tools))
 	for i, tool := range ep.Tools {
@@ -215,7 +215,7 @@ func renderPermissions(ep golemruntime.EffectivePermissions) string {
 	}
 	line += " scratch=" + scratch + " verification=" + ep.Verification.State
 	if ep.StrictApproval {
-		line += " strict-approval=on"
+		line += " strict-approval=on (exposed by MCP results, accepted /consult advice or unrecorded history)"
 	}
 	if ep.Profile == golemruntime.ProfileInspect {
 		line += "; restart with -profile trusted to enable retrieval, memory tools, writes or commands"

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -61,8 +62,9 @@ func (a *replApprover) ApproveKeyed(ctx context.Context, call provider.ToolCall,
 // approves. "n", empty, and EOF deny with a nil error. A canceled context
 // (Ctrl-C) denies and returns the context error so the run aborts.
 // The prompt and rendering are action-neutral: run_command and MCP calls get a
-// plain preview and run prompt; all other calls get the diff rendering and "Apply
-// this change?" prompt.
+// plain preview and run prompt; the agent-memory writes show their arguments;
+// all other calls get the diff rendering and "Apply this change?" prompt, with
+// the tool name and its arguments in place of an empty preview.
 //
 // Grant path (#341): grantability requires ALL of a non-empty structural key, a
 // grant store, and a tool name on the grantScope allowlist — scope comes from
@@ -180,8 +182,24 @@ func (a *replApprover) ask(ctx context.Context, call provider.ToolCall, preview,
 	case isMCP:
 		a.renderPlain(preview)
 		question = "Run this MCP tool? [y/N] "
+	// #584: the agent-memory writes ask only in an exposed strict
+	// conversation. They do not plan, so the preview is empty and the
+	// arguments are the display. Neither has a grant scope.
+	case call.Function.Name == agenttools.AgentMemoryCreateToolName:
+		_, _ = fmt.Fprintln(a.out, "agent memory note:")
+		a.renderPlain(memoryNoteText(call.Function.Arguments))
+		question = "Save this agent memory note? [y/N] "
+	case call.Function.Name == agenttools.AgentMemoryPromoteToolName:
+		a.renderPlain(memoryPromoteLine(call.Function.Arguments))
+		question = "Promote this agent memory record? [y/N] "
 	default:
-		a.renderDiff(preview)
+		if preview == "" {
+			// A tool that does not plan has no preview; show the call itself
+			// rather than an empty diff.
+			a.renderPlain(rawArgsLine(call.Function.Name + " " + string(call.Function.Arguments)))
+		} else {
+			a.renderDiff(preview)
+		}
 		// #725: an empty file-tool key marks a harness file. grantable is
 		// already false, so the prompt is [y/N]; the notice says why.
 		if harness {
@@ -298,6 +316,59 @@ func currentEgress(risk agent.RiskReport) (agent.Finding, bool) {
 		}
 	}
 	return agent.Finding{}, false
+}
+
+// memoryNoteText renders an agent_memory_create call's note as the tool will
+// store it: decoded as the tool decodes it and trimmed as the tool trims it.
+// Each sanitized line is marked "| " and a size line follows, so a note
+// cannot fake its own header or push the real one off screen and still end
+// right above the question. A note over the tool's limit shows only its size,
+// since it will not be saved. Arguments that do not decode, or a note that is
+// empty after trimming, show as the one-line raw arguments.
+func memoryNoteText(args json.RawMessage) string {
+	var a struct {
+		Content string `json:"content"`
+	}
+	if json.Unmarshal(args, &a) != nil {
+		return rawArgsLine(string(args))
+	}
+	note := strings.TrimSpace(a.Content)
+	if note == "" {
+		return rawArgsLine(string(args))
+	}
+	n := strings.Count(note, "\n") + 1
+	lines := "lines"
+	if n == 1 {
+		lines = "line"
+	}
+	size := fmt.Sprintf("(note: %d %s, %d bytes", n, lines, len(note))
+	if len(note) > agenttools.MaxAgentMemoryContentBytes {
+		return fmt.Sprintf("%s: over the %d-byte limit, so it will not be saved)", size, agenttools.MaxAgentMemoryContentBytes)
+	}
+	var b strings.Builder
+	for _, line := range strings.Split(sanitizeApprovalPreview(note), "\n") {
+		b.WriteString(strings.TrimRight("| "+line, " "))
+		b.WriteByte('\n')
+	}
+	return b.String() + size + ")"
+}
+
+// memoryPromoteLine is an agent_memory_promote call as one sanitized line,
+// or the raw arguments when they do not decode to an id and a kind.
+func memoryPromoteLine(args json.RawMessage) string {
+	var a struct {
+		ID   string `json:"id"`
+		Kind string `json:"kind"`
+	}
+	if json.Unmarshal(args, &a) != nil || a.ID == "" || a.Kind == "" {
+		return rawArgsLine(string(args))
+	}
+	return rawArgsLine("promote agent memory record " + a.ID + " to " + a.Kind)
+}
+
+// rawArgsLine makes model-written call text one inert display line.
+func rawArgsLine(s string) string {
+	return sanitizeApprovalPreview(promptfence.FlattenLine(s))
 }
 
 // renderPlain prints a non-diff preview verbatim (no +/- coloring).

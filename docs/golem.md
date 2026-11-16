@@ -206,7 +206,7 @@ By default Trusted commands run on the host with your filesystem and network aut
 golem -root /path/to/project -allow-write -allow-exec -strict-approval
 ```
 
-While the conversation is clean nothing changes: session grants and `/auto-edits` approve as before. Once it is exposed, Golem consults no approval grant. Every approval the run needs, the post-write verifier's included, asks about that one call, `[y/N]` only: `a` is not offered and denies, a yes approves that call alone, and no answer creates a grant. A run with no one to ask is denied instead, though no one-shot run can become exposed today (see the second table below). `agent_memory_create`, `agent_memory_promote`, `delegate_code` and `dispatch` keep running unprompted. A yes never overrides an existing refusal, such as a native sandbox's git-metadata refusal.
+While the conversation is clean nothing changes: session grants and `/auto-edits` approve as before. Once it is exposed, Golem consults no approval grant. Every approval the run needs, the post-write verifier's included, asks about that one call, `[y/N]` only: `a` is not offered and denies, a yes approves that call alone, and no answer creates a grant. A run with no one to ask is denied instead, though no one-shot run can become exposed today (see the second table below). `delegate_code` and `dispatch` keep running unprompted. `agent_memory_create` and `agent_memory_promote` ask while the conversation is exposed. The note prompt shows the note with each line marked `|`, then its size. A note over the 4096-byte limit is not shown: the prompt gives only its size, and the note is not saved whatever the answer. The promote prompt shows `promote agent memory record <id> to <kind>`. In a clean conversation they never ask. A yes never overrides an existing refusal, such as a native sandbox's git-metadata refusal.
 
 The prompt opens with one line naming the first source that exposed the conversation:
 
@@ -221,11 +221,11 @@ The source is shown as one line with terminal controls made visible, because an 
 
 For library hosts, narrowing follows each command tool's own backend, not the runtime's option: a natively sandboxed command tool whose policy allows network narrows in any strict run that is exposed. That includes a tool named in `agent.Request.StrictExempt`, which changes only whether a tool that declares it needs no approval is asked, not where a command runs. `golem.New` validates the copy only when `StrictApproval` is set and its own `Sandbox` is native and allows network; with strict approval off, a native session is not refused for it. A runtime whose own policy is host validates none of its tools' copies at start, so such a tool whose copy cannot be built fails at its first narrowed command, again without falling back.
 
-The flag does not select the Trusted profile, because it only narrows what approvals can do. Startup's `permissions:` line adds `strict-approval=on` after `verification=`. There is no in-session toggle in this version. `-p` and the AgentFlow modes (`-plan`, `-goal`, `-agentflow-status`, `-agentflow-resume`) accept the flag, where it has no effect today beyond the startup check of the network-denied variant, which can still refuse startup on a host that cannot build it (see the second table below).
+The flag does not select the Trusted profile, because it only narrows what approvals can do. Startup's `permissions:` line adds `strict-approval=on (exposed by MCP results, accepted /consult advice or unrecorded history)` after `verification=`. There is no in-session toggle in this version. `-p` and the AgentFlow modes (`-plan`, `-goal`, `-agentflow-status`, `-agentflow-resume`) accept the flag, where it has no effect today beyond the startup check of the network-denied variant, which can still refuse startup on a host that cannot build it (see the second table below).
 
 **Seeing the state.** With the flag, `/grants` adds one line after the grant count:
 
-- `exposure: clean`
+- `exposure: clean (files and command output are not tracked)`
 - `exposure: foreign (<source>)` or `exposure: unknown (<source>)`, with the source named as in the prompt
 - `exposure: unknown (could not read the record)` when the stored record could not be read
 - `exposure: clean (--no-session: each turn starts fresh)` under `-no-session`
@@ -245,7 +245,7 @@ In an exposed conversation, or one whose record could not be read, `/grants`, `/
 
 Under `-no-session` Golem keeps no history, so every turn starts clean: an MCP read suspends grants for the rest of that turn only, and the next turn uses them again.
 
-A conversation with history saved before this version has no exposure record, so Golem treats where its content came from as unknown for as long as it exists. With `-strict-approval`, each file write or edit, command, background start and verifier run in it then asks every time, and a run with no one to ask denies it; the agent-memory writes, `delegate_code` and `dispatch` stay unprompted, and a yes never overrides an existing refusal such as a native sandbox's git-metadata refusal. `/grants` shows `exposure: unknown (history)` for such a conversation until you run `/clear`. A plain `golem` start always opens the workspace's own conversation, so it keeps asking there until you run `/clear` in it; `/new` and `-fresh` open a separate conversation for that run only.
+A conversation with history saved before this version has no exposure record, so Golem treats where its content came from as unknown for as long as it exists. With `-strict-approval`, each file write or edit, command, background start, verifier run and agent-memory write in it then asks every time, and a run with no one to ask denies it; `delegate_code` and `dispatch` stay unprompted, and a yes never overrides an existing refusal such as a native sandbox's git-metadata refusal. `/grants` shows `exposure: unknown (history)` for such a conversation until you run `/clear`. A plain `golem` start always opens the workspace's own conversation, so it keeps asking there until you run `/clear` in it; `/new` and `-fresh` open a separate conversation for that run only.
 
 ### What exposes a conversation
 
@@ -265,7 +265,7 @@ Reach is narrow. A row marked **limit** is content you did not write that still 
 | The `dispatch` and `delegate_code` result envelope | no, itself | anything a child run admits counts directly |
 | MCP tool catalog text | no | **limit:** pinned by the operator and flattened |
 | `/trust`-approved project context | no | approved by exact digest |
-| Recalled agent-memory records | no | **limit:** an exposed conversation can write a record a clean one later reads, without a prompt; the tool-result fence still applies |
+| Recalled agent-memory records | no | **limit:** a clean conversation reads, as workspace content, a record an exposed one wrote; writing or promoting one while exposed asks first, and the tool-result fence still applies |
 | A blocked observation | no | never admitted |
 | A denial, malformed arguments, an unknown tool | no | fixed text with no outside content |
 | Files an exposed conversation wrote | no | **limit:** a later clean conversation reads them as workspace files |
