@@ -218,6 +218,28 @@ jobs:
           path: ${{ runner.temp }}/native-wiring-linux.txt
           if-no-files-found: error
 
+      # Strict approval's native leg (#581) under real bwrap: an exposed
+      # conversation's command runs on the ip-denied copy and its TCP probe
+      # fails. No other job has bwrap, and elsewhere the test skips, so this
+      # step fails on a skip and requires the test and both sub-tests to pass.
+      # -v keeps each sub-test's label, exit code and error in the job log.
+      - name: Strict approval native leg (non-race)
+        shell: bash
+        env:
+          GO_LLM_REQUIRE_BWRAP: "1"
+        run: |
+          set -o pipefail; go test -count=1 -run '^TestStrictModeEvaluationNative$' -v ./cmd/golem | tee "$RUNNER_TEMP/strict-native-linux.txt"
+          if grep -q -- '--- SKIP' "$RUNNER_TEMP/strict-native-linux.txt"; then
+            echo "::error::strict native leg skipped: a skip is not bwrap evidence"
+            exit 1
+          fi
+          top=$(grep -cE -- '^--- PASS: TestStrictModeEvaluationNative ' "$RUNNER_TEMP/strict-native-linux.txt" || true)
+          sub=$(grep -cE -- '^    --- PASS: TestStrictModeEvaluationNative/' "$RUNNER_TEMP/strict-native-linux.txt" || true)
+          if [ "$top" -ne 1 ] || [ "$sub" -ne 2 ]; then
+            echo "::error::expected the test and its 2 sub-tests to pass, saw $top and $sub"
+            exit 1
+          fi
+
       # The containment inventory's bwrap profile: every mandatory ref must
       # run and pass under the real sandbox, no skip allowed (#452).
       - name: Containment inventory (bwrap)
