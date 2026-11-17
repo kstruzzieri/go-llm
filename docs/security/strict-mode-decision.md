@@ -29,7 +29,7 @@ Every threshold held. These are the spec's structural thresholds: no added promp
 Where it ran, and what it showed:
 - **macOS, Seatbelt, with and without `-race`.** In both exposed sub-tests the command's line read `network=denied`, `bash` exited 1 with `/dev/tcp/127.0.0.1/<port>: Operation not permitted`, and the listener received nothing. The clean turn read `network=allowed`, exited 0 and connected.
 - **Docker ci-local.** The image has no bubblewrap, so the test skips there.
-- **bwrap.** The test runs in GitHub's Linux race jobs, whose runners have a working bwrap. There it is asserted pass or fail, but those jobs run without `-v`, so the error text is not captured. This record does not hold that result; the CI run of the pull request that added the test does.
+- **bwrap.** When this record was first written, no job had run the test under bwrap: GitHub's Linux race job installs no bubblewrap, so the test skipped there, and the `Linux Sandbox (bwrap)` job did not select it. That job now runs it with `-v` and `GO_LLM_REQUIRE_BWRAP=1`, and fails if it skips or if the test and its two sub-tests do not all pass; its log shows each sub-test's network label, exit code and error.
 
 ## Local-model pass
 
