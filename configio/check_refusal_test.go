@@ -1035,3 +1035,54 @@ func TestRunCheck_CancelStopsNewRequestsFinishedStaySaved(t *testing.T) {
 		}
 	})
 }
+
+// TestRunCheck_CancelDropsHeldRefusals: a refusal held when the caller cancels
+// is neither saved nor reported, whether nothing had answered yet or the answer
+// that would corroborate it was the last thing reported.
+func TestRunCheck_CancelDropsHeldRefusals(t *testing.T) {
+	t.Run("cancelled before any answer", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		stub := newRCStub(t, rfByModel(map[string]rcServe{
+			"a": rfForbidden,
+			"b": func(_ http.ResponseWriter, r *http.Request, _ string, _ int) {
+				cancel() // a is held by now
+				<-r.Context().Done()
+			},
+		}))
+		cfg := rcConfig("lc", stub.srv.URL, "openai-compat", cpKey, "a", "b")
+		store, db, _ := rfStore(t)
+		res, err := rcRunCtx(t, ctx, cpPlan(t, cfg, store, "lc", []string{"a", "b"}, cpTools, false), RunOptions{Config: cfg, Store: store})
+		if !errors.Is(err, context.Canceled) || len(res) != 0 {
+			t.Fatalf("RunCheck = %+v, %v; want no results and the cancellation", res, err)
+		}
+		if got := rfAccessRows(t, db); len(got) != 0 {
+			t.Fatalf("access rows %q; want none", got)
+		}
+	})
+	t.Run("cancelled from the corroborating answer's report", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		stub := newRCStub(t, rfByModel(map[string]rcServe{"a": rfForbidden}))
+		cfg := rcConfig("lc", stub.srv.URL, "openai-compat", cpKey, "a", "b")
+		store, db, _ := rfStore(t)
+		res, err := rcRunCtx(t, ctx, cpPlan(t, cfg, store, "lc", []string{"a", "b"}, cpTools, false), RunOptions{
+			Config: cfg, Store: store,
+			OnResult: func(r CheckResult) {
+				if r.Model == "b" {
+					cancel()
+				}
+			},
+		})
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("RunCheck error = %v; want the cancellation", err)
+		}
+		if len(res) != 1 {
+			t.Fatalf("results %+v; want b's alone", res)
+		}
+		rfWant(t, res, "b", "", true, 1)
+		if got := rfAccessRows(t, db); !slices.Equal(got, []string{"b answered 0"}) {
+			t.Fatalf("access rows %q; want b's answer alone", got)
+		}
+	})
+}
