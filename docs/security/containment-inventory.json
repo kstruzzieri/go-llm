@@ -4649,10 +4649,10 @@
       "id": "STRICT-9",
       "source": "issue-584:83",
       "requirement": "Under strict approval, once a conversation is exposed, bwrap commands whose policy allows network run IP-network-denied: foreground, scratch, background start and verifier, each approved at a prompt showing network=ip-denied, while the same command in a clean conversation connects; a pathname Unix socket inside the shared workspace stays reachable (#584).",
-      "status": "unobserved(bwrap)",
+      "status": "verified",
       "owner": "",
       "layer": "focused",
-      "exempt": "the mutation needs a Linux host with bwrap, which the Docker ci-local image is not: M-418 ran on darwin under Seatbelt only (STRICT-8). Follow-up, tracked in the PR body: on a Linux host with bwrap, apply M-418's patch (the network-denied variant keeps the session's network), run GO_LLM_REQUIRE_BWRAP=1 go test -count=1 -run '^TestBwrapNarrow(Foreground|Scratch|Background|Verifier)$' ./agent/tools, record it in docs/security/containment-mutations.md and cite it here",
+      "exempt": "",
       "scenarios": [],
       "refs": [
         {
@@ -4689,7 +4689,9 @@
       "profiles": [
         "bwrap"
       ],
-      "mutations": [],
+      "mutations": [
+        "M-419"
+      ],
       "artifacts": []
     },
     {
