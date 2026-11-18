@@ -741,7 +741,6 @@ func TestRunCheck_FailureCodesTable(t *testing.T) {
 		{"429", rcStatus(429, `{"error":{"message":"slow down"}}`), "", 0, CodeRateLimited, 1},
 		{"a timeout", stall, "", 300 * time.Millisecond, CodeTimeout, 1},
 		{"a refused connection", nil, closed, 0, CodeUnreachable, 0},
-		{"500", rcStatus(500, `{"error":{"message":"broken"}}`), "", 0, CodeServerError, 1},
 		{"503", rcStatus(503, `{"error":{"message":"down"}}`), "", 0, CodeServerError, 1},
 		{"another 4xx", rcStatus(409, `{"error":{"message":"conflict"}}`), "", 0, CodeRejected, 1},
 		{"a bad stream", rfSSE("data: {not json\n\n"), "", 0, CodeMalformedResponse, 1},

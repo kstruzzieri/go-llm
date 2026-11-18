@@ -231,9 +231,10 @@ than guessing.
   failed with a server error (5xx), its own timeout, or a broken or oversized
   reply records a `check_failed` attempt that suppresses automatic checks of
   that model for 5 minutes, so the next start moves on to the next chain
-  entry; a 4xx such as 401, 403, 404 or 429, a cancelled check, or one that
-  sent nothing records nothing. Answers in the old `capability_probes` table
-  no longer count.
+  entry; a model with no later chain entry stays inconclusive until the 5
+  minutes pass, and `golem models -probe-all` checks it now. A 4xx such as
+  401, 403, 404 or 429, a cancelled check, or one that sent nothing records
+  nothing. Answers in the old `capability_probes` table no longer count.
 - **Disabling.** Pass `-no-cap-probe` to Golem to turn automatic checks off;
   routing then also ignores stored answers, while catalog and explicit
   `capabilities` still apply.

@@ -565,7 +565,8 @@ func (r *ModelRegistry) resolveToolCallFromLog(ctx context.Context, key ModelKey
 		if generation && sent > 0 && ctx.Err() == nil && serverSideFailure(err) {
 			rows := fingerprint.AnswerRows(binding.Endpoint, binding.Adapter, key.Model, digest, recipe, []fingerprint.ProbeAnswer{{
 				Capability: capabilityToolCall, Source: fingerprint.EvidenceSourceProbe, Kind: fingerprint.EvidenceKindAttempt,
-				State: fingerprint.CapProbeInconclusive, Detail: fingerprint.DetailCheckFailed, TTL: fingerprint.CapProbeCheckFailedTTL,
+				State: fingerprint.CapProbeInconclusive, Detail: fingerprint.DetailCheckFailed,
+				TTL: fingerprint.CapProbeCheckFailedTTL, // intent only: ExpiryFor sets the lifetime from the Detail
 			}}, completedAt)
 			if aerr := r.evidenceStore.AppendEvidence(ctx, rows...); aerr != nil {
 				r.keepUnsavedEvidence(rows)
@@ -600,8 +601,9 @@ func (r *ModelRegistry) resolveToolCallFromLog(ctx context.Context, key ModelKey
 	return state, nil
 }
 
-// keepUnsavedEvidence keeps, for the registry's life, the rows of a completed
-// check whose append failed, so this process still reads what the check found.
+// keepUnsavedEvidence keeps, for the registry's life, a check's rows whose
+// append failed (a completed check's answers, or a failed check's check_failed
+// attempt), so this process still reads what the check found.
 // Each row is unchanged but for its ID, which counts up from math.MinInt64: a
 // negative ID marks a row that was never stored, a stored row beats a kept one
 // on an exact ObservedAt tie, and a later kept row beats an earlier one. Keeping
