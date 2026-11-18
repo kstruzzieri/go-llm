@@ -220,6 +220,7 @@ var purityMustWalk = []string{
 	"(*" + purityModule + "/provider.Catalog).ProfileFor",
 	"(*" + purityModule + "/config.Config).CapabilityPolicy",
 	purityModule + "/fingerprint.ReadCapabilities",
+	purityModule + "/internal/evidencesel.Select",
 }
 
 // purityIsModule reports whether path is module code: a package of this module,
