@@ -257,9 +257,6 @@ func runModelsWith(
 
 	now := time.Now()
 	for _, sel := range chain {
-		if err := ctx.Err(); err != nil {
-			return err // cancelled: no diagnostics for entries left unread
-		}
 		key, parsed := parseSelector(sel)
 		if !parsed {
 			// Bare selector: no single provider/model to explain per-entry.
@@ -271,7 +268,7 @@ func runModelsWith(
 		// diagnostic the startup preflight uses, rather than a bare zero row.
 		if _, lerr := reg.Lookup(ctx, key); lerr != nil {
 			if err := ctx.Err(); err != nil {
-				return err
+				return err // cancelled: not a connectivity failure, and no entry after it is read
 			}
 			ep, epOK := resolvePreflightEndpoint(resolveEndpoint, key.Provider)
 			_, _ = fmt.Fprintf(out, "%s\t%s\n", sel, preflightConnectivityWarn("agent", sel, key.Provider, ep, epOK, lerr))

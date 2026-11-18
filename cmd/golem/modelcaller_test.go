@@ -497,25 +497,38 @@ func TestGolemNoCapProbe_SendsNoAutomaticGeneration(t *testing.T) {
 }
 
 // TestGolemNoCapProbe_AttachesNoLog pins that -no-cap-probe attaches no log:
-// a stored no is ignored, as legacy rows were, so the catalog's yes passes
-// preflight, nothing is checked, and the input ceiling is still derived. The
-// control without the flag honors the stored no.
+// a stored no is ignored, as legacy rows were, so the Ollama model's live
+// tools yes passes preflight; and the store still opens for the input ceiling.
+// Neither the config, the catalog nor the runtime gives the model a window, so
+// 22528 (a stored profile's 24576 less the agent reserve) can come only from
+// the store. The control without the flag honors the stored no.
 func TestGolemNoCapProbe_AttachesNoLog(t *testing.T) {
+	const digest = "sha256:d1"
 	srv := newMCServer(t)
-	srv.ids = []string{"qwen3:8b"}
-	e := newMCEnv(t, mcConfig(srv.URL, "openai-compat", "qwen3:8b"))
-	mcSeed(t, e.root, mcToolAnswers(t, srv.URL, "qwen3:8b", fingerprint.CapProbeNo, time.Now().Add(-time.Hour))...)
+	srv.tags = []mcTag{{"mystery", digest}}
+	srv.setCaps(`["completion","tools"]`)
+	e := newMCEnv(t, strings.Replace(mcConfig(srv.URL, "ollama", "mystery"), `, "context_window": 32768`, "", 1))
+	no := fingerprint.ProbeAnswer{Capability: "tool_call", Source: fingerprint.EvidenceSourceProvider, Kind: fingerprint.EvidenceKindAnswer, State: fingerprint.CapProbeNo}
+	mcSeed(t, e.root, mcAnswers(t, srv.URL, "ollama", "mystery", digest, fingerprint.MethodOllamaShow, time.Now().Add(-time.Hour), no)...)
+	h := mcOpen(t, e.root)
+	if err := h.Profiles().Save(context.Background(), fingerprint.Profile{
+		BackendID: "lc", ModelName: "mystery", ModelDigest: digest,
+		ProfileVersion: fingerprint.CurrentProfileVersion, EffectiveContext: 24_576, TestedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Close(); err != nil {
+		t.Fatal(err)
+	}
+
 	stderr, err := autoRun(t, e, []string{"-no-cap-probe"}, stopWhenReady)
 	if !errors.Is(err, errAutoReady) {
 		t.Fatalf("-no-cap-probe: run = %v\nstderr:\n%s", err, stderr)
 	}
-	if !strings.Contains(stderr, "input ceiling: ") || !strings.Contains(stderr, "(chain minimum)") {
-		t.Fatalf("no derived input ceiling:\n%s", stderr)
+	if !strings.Contains(stderr, "input ceiling: 22528 tokens (chain minimum)") {
+		t.Fatalf("the input ceiling is not the stored profile's:\n%s", stderr)
 	}
 	if stderr, err = autoRun(t, e, nil, stopWhenReady); err == nil || errors.Is(err, errAutoReady) {
 		t.Fatalf("control: run = %v; want the stored no to fail preflight\nstderr:\n%s", err, stderr)
-	}
-	if n := srv.totalChecks(); n != 0 {
-		t.Fatalf("checks = %d; want 0", n)
 	}
 }

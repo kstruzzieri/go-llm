@@ -417,6 +417,10 @@ func preflightRecommendToolCapable(ctx context.Context, reg capChecker, resolver
 	return nil, fmt.Errorf("golem: no tool-capable model available (require chat|stream|tool_call)")
 }
 
+// evidenceUnreadableReason says why nothing could be resolved or checked while
+// the capability store cannot be read.
+const evidenceUnreadableReason = "the capability store could not be read; run again"
+
 // resolutionRefusals are the resolution errors that say nothing about a
 // model's capabilities, each with the reason preflight gives for it. They are
 // ordinary errors, never a configured capability gap.
@@ -425,7 +429,7 @@ var resolutionRefusals = [...]struct {
 	reason string
 }{
 	{provider.ErrAutomaticProbeBudgetExhausted, automaticChecksUsedUp},
-	{provider.ErrEvidenceUnreadable, "the capability store could not be read; run again"},
+	{provider.ErrEvidenceUnreadable, evidenceUnreadableReason},
 	{provider.ErrEvidenceUnbound, "the provider has no evidence binding; check its base_url"},
 }
 

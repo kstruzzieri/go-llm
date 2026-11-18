@@ -122,7 +122,7 @@ func reportCheckError(ctx context.Context, errOut io.Writer, name string, err er
 	case code == configio.CodeBatchTooLarge:
 		_, _ = fmt.Fprintf(errOut, "check: provider %q not checked (%s): one check takes at most 25 models; keep at most 25 of its models in the agent chain\n", name, code)
 	case errors.Is(err, provider.ErrEvidenceUnreadable):
-		_, _ = fmt.Fprintf(errOut, "check: provider %q not checked: the capability store could not be read; run again\n", name)
+		_, _ = fmt.Fprintf(errOut, "check: provider %q not checked: %s\n", name, evidenceUnreadableReason)
 	case code != "":
 		_, _ = fmt.Fprintf(errOut, "check: provider %q not checked (%s): %v\n", name, code, err)
 	default:

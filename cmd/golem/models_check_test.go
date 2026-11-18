@@ -16,6 +16,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -874,5 +875,53 @@ func TestModelsReprobe_ExplicitEntrySendsNothing(t *testing.T) {
 	}
 	if checks := srv.totalChecks(); checks != 0 {
 		t.Fatalf("checks = %d; want 0", checks)
+	}
+}
+
+// TestGolemModels_ListingCancelledReportsOnce pins that cancelling a plain
+// listing (no check) while it reads an entry stops it: the context error, one
+// cancelled line, nothing more sent, and no connectivity diagnostic on stdout
+// for the interrupted entry or any after it. A listing of [a, b] sends five
+// requests: the bootstrap listing, then a lookup and a tool_call explanation
+// per entry; the cancel lands in a's lookup or in its explanation.
+func TestGolemModels_ListingCancelledReportsOnce(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		at   int32 // the request during which the caller cancels
+	}{
+		{"during a lookup", 2},
+		{"during a tool_call explanation", 3},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+			defer cancel()
+			var requests atomic.Int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if requests.Add(1) == tc.at {
+					cancel()
+					select {
+					case <-r.Context().Done():
+					case <-time.After(5 * time.Second):
+					}
+				}
+				_, _ = io.WriteString(w, `{"data":[{"id":"a"},{"id":"b"}]}`)
+			}))
+			t.Cleanup(srv.Close)
+			e := newMCEnv(t, mcConfig(srv.URL, "openai-compat", "a", "b"))
+			var stdout, stderr bytes.Buffer
+			err := e.run(ctx, &stdout, &stderr)
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("runModels = %v; want the context error\nstdout:\n%s", err, stdout.String())
+			}
+			if got := lines(stderr.String(), "cancelled"); len(got) != 1 || got[0] != "cancelled" {
+				t.Fatalf("cancelled lines %q; want exactly one\nstderr:\n%s", got, stderr.String())
+			}
+			if stdout.Len() != 0 {
+				t.Fatalf("stdout after the cancel:\n%s", stdout.String())
+			}
+			if got := requests.Load(); got != tc.at {
+				t.Fatalf("requests = %d; want %d, none after the cancel", got, tc.at)
+			}
+		})
 	}
 }
