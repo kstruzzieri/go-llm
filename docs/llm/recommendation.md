@@ -220,8 +220,8 @@ Inspect and refresh verdicts with the `golem models` subcommand:
 
 ```bash
 golem models              # list models, capabilities, and tool-call provenance
-golem models -probe-all   # actively probe every non-explicit entry
-golem models -reprobe     # drop cached verdicts for non-explicit entries, re-probe
+golem models -probe-all   # check every agent-chain entry without fresh answers
+golem models -reprobe     # check them again, fresh answers included; deletes nothing
 ```
 
 Provenance in the listing tells you *why* a model has (or lacks) tool support:

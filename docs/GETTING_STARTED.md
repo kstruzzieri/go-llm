@@ -322,9 +322,10 @@ the config elsewhere. Literal keys and the user config are unchanged.
 - `-base-url` — overrides the primary openai-compat agent provider's base URL.
   Server root, without `/v1`, used exactly as given; also disables discovery.
 - `golem models -probe-all` / `golem models -reprobe` — subcommand flags for
-  explicit capability-probe refresh: `-probe-all` actively probes every
-  non-explicit entry, `-reprobe` deletes the cached verdicts first and probes
-  fresh. Use these when checking provenance with `golem models`; they are not
+  explicit capability checks: `-probe-all` checks every agent-chain entry
+  without fresh answers, `-reprobe` checks them again even when fresh. Both
+  print the plan before sending and each result after, on stderr, and delete
+  nothing. Use these when checking provenance with `golem models`; they are not
   top-level `golem` flags.
 
 ### Capabilities the agent loop needs
