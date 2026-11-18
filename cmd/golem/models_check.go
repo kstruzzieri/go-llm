@@ -123,7 +123,7 @@ func reportCheckError(ctx context.Context, errOut io.Writer, name string, err er
 	code, _ := configio.CodeOf(err)
 	switch {
 	case code == configio.CodeBatchTooLarge:
-		_, _ = fmt.Fprintf(errOut, "check: provider %q not checked (%s): one check takes at most 25 models; keep at most 25 of its models in the agent chain\n", name, code)
+		_, _ = fmt.Fprintf(errOut, "check: provider %q not checked (%s): %v; keep fewer of its models in the agent chain\n", name, code, err)
 	case errors.Is(err, provider.ErrEvidenceUnreadable):
 		_, _ = fmt.Fprintf(errOut, "check: provider %q not checked: %s\n", name, evidenceUnreadableReason)
 	case code != "":
@@ -137,7 +137,9 @@ func reportCheckError(ctx context.Context, errOut io.Writer, name string, err er
 // printCheckPlan shows what a check will send: its provider and endpoint
 // host, then per model the method, the capabilities it asks, the requests it
 // usually and at most sends, the output tokens each requests of the server,
-// the time and response bytes each may take, and whether it may load a model.
+// the time and response bytes each may take, and what it may load: nothing for
+// a metadata read, the model once at a loopback endpoint, and whatever a
+// remote server decides.
 func printCheckPlan(w io.Writer, plan configio.CheckPlan) {
 	head := fmt.Sprintf("check plan: provider %q at %s", plan.Provider, plan.EndpointHost)
 	if plan.Force {
@@ -153,9 +155,12 @@ func printCheckPlan(w io.Writer, plan configio.CheckPlan) {
 		if it.MaxOutputTokensPerRequest > 0 {
 			output = fmt.Sprintf("requests up to %d output tokens per request", it.MaxOutputTokensPerRequest)
 		}
-		load := "loads no model"
-		if it.ModelLoads > 0 {
-			load = "may load the model"
+		load := "the server may load the model" // a remote server's loads cannot be predicted
+		switch {
+		case it.MaxOutputTokensPerRequest == 0:
+			load = "loads no model" // a metadata read generates nothing
+		case it.ModelLoads > 0:
+			load = "may load the model once"
 		}
 		_, _ = fmt.Fprintf(w, "  %q: %s, %s; usually %s, at most %d; %s; up to %s and %d response bytes per request; %s\n",
 			it.Model, strings.Join(it.Methods, "+"), strings.Join(it.Capabilities, "|"),

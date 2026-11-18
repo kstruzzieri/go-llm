@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kstruzzieri/go-llm/configio"
 	"github.com/kstruzzieri/go-llm/configview"
 	"github.com/kstruzzieri/go-llm/fingerprint"
 	"github.com/kstruzzieri/go-llm/provider"
@@ -588,11 +589,15 @@ func over25() []string {
 	return models
 }
 
-// wantBatchRefused fails unless stderr gives the bounded instruction and no
-// plan, and nothing was checked or written.
+// mcAtMost is the limit configio's refusal names, whatever its value.
+var mcAtMost = regexp.MustCompile(`at most \d+`)
+
+// wantBatchRefused fails unless stderr gives the refusal with its limit and
+// the bounded instruction, and no plan, and nothing was checked or written.
 func wantBatchRefused(t *testing.T, stderr string, rows int) {
 	t.Helper()
-	if !strings.Contains(stderr, "batch_too_large") || !strings.Contains(stderr, "at most 25") || strings.Contains(stderr, "check plan") {
+	if !strings.Contains(stderr, "batch_too_large") || !mcAtMost.MatchString(stderr) ||
+		!strings.Contains(stderr, "keep fewer of its models in the agent chain") || strings.Contains(stderr, "check plan") {
 		t.Fatalf("stderr does not refuse the batch:\n%s", stderr)
 	}
 	if rows != 0 {
@@ -667,7 +672,7 @@ func TestGolemModels_PlanAndResultsOnStderr(t *testing.T) {
 	for _, m := range []string{`"a"`, `"b"`} {
 		item := lines(errText, "  "+m+": chat-stream-tools")
 		if len(item) != 1 || !strings.Contains(item[0], "requests up to 2048 output tokens per request") ||
-			!strings.Contains(item[0], "1048576 response bytes") || !strings.Contains(item[0], "may load the model") {
+			!strings.Contains(item[0], "1048576 response bytes") || !strings.Contains(item[0], "may load the model once") {
 			t.Fatalf("plan item for %s: %q", m, item)
 		}
 	}
@@ -946,5 +951,34 @@ func TestGolemModels_MemoryOnlyStoreSaysSo(t *testing.T) {
 	got := lines(stderr.String(), `check result "mystery"`)
 	if len(got) != 1 || !strings.HasSuffix(got[0], "; 1 request sent; saved (memory only)") {
 		t.Fatalf("result lines %q; want one saved to memory only\nstderr:\n%s", got, stderr)
+	}
+}
+
+// TestPrintCheckPlan_LoadWording pins what a plan says it may load: nothing for
+// a metadata read, the model once at a loopback endpoint, and, at a remote
+// endpoint, what the server decides (ModelLoads 0 there is not "none").
+func TestPrintCheckPlan_LoadWording(t *testing.T) {
+	tests := []struct {
+		name         string
+		outputTokens int
+		loads        int
+		want         string
+	}{
+		{"metadata read", 0, 0, "loads no model"},
+		{"loopback generation", 2048, 1, "may load the model once"},
+		{"remote generation", 2048, 0, "the server may load the model"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var out strings.Builder
+			printCheckPlan(&out, configio.CheckPlan{Provider: "p", EndpointHost: "h:1", Items: []configio.CheckItem{{
+				Model: "m", Methods: []string{"x"}, Capabilities: []string{"tool_call"}, UsualRequests: 1, MaxRequests: 2,
+				MaxOutputTokensPerRequest: tt.outputTokens, ModelLoads: tt.loads,
+			}}})
+			item := lines(out.String(), `  "m": `)
+			if len(item) != 1 || !strings.HasSuffix(item[0], "; "+tt.want) {
+				t.Fatalf("plan item %q; want it to end %q", item, tt.want)
+			}
+		})
 	}
 }
