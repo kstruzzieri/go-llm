@@ -2576,3 +2576,45 @@ func TestLostWrite_NoLogPathKeepsItsPatch(t *testing.T) {
 		t.Fatal("the patch reached the registry's profile; it is the caller's copy only")
 	}
 }
+
+// TestResolveToolCall_NativeWriterPrefersReplyDigest: the registry files a
+// metadata answer under the digest the reply named, not the runtime's. Rows
+// filed under another identity are not read at the runtime's digest, so the
+// next resolution checks again rather than trusting a stale identity.
+func TestResolveToolCall_NativeWriterPrefersReplyDigest(t *testing.T) {
+	native := mustBinding(t, "http://127.0.0.1:11434", "ollama")
+	for _, tt := range []struct {
+		name, reply, filed string
+		calls              int // probe calls after two resolutions
+	}{
+		{"reply names another digest", "sha256:reply", "sha256:reply", 2},
+		{"reply names none", "", logDigest, 1},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			store := newEvidenceLog(t)
+			prober := &capProbeFake{run: scripted(fingerprint.CapabilityProbeResult{
+				Method: fingerprint.MethodOllamaShow, Requests: 1, Digest: tt.reply,
+				Answers: []fingerprint.ProbeAnswer{{Capability: capabilityToolCall, Source: fingerprint.EvidenceSourceProvider, Kind: fingerprint.EvidenceKindAnswer, State: fingerprint.CapProbeYes}},
+			}, nil)}
+			mr, clock := newLogResolver(t, store, prober, []logProv{{name: "local", binding: native, models: infos(logModel)}})
+
+			state, err := mr.ResolveToolCall(t.Context(), localKey(logModel))
+			wantState(t, "first resolution", state, err, fingerprint.CapProbeYes)
+			rows := storedRows(t, store, native, logModel)
+			if len(rows) != 1 || rows[0].Digest != tt.filed {
+				t.Fatalf("stored rows = %+v; want one at digest %q", rows, tt.filed)
+			}
+			readAtRuntime := toolCallAnswer(t, store, native, logDigest, logT0.Add(time.Minute))
+			if want := map[bool]fingerprint.CapProbeState{true: fingerprint.CapProbeYes, false: ""}[tt.filed == logDigest]; readAtRuntime != want {
+				t.Fatalf("answer read at the runtime digest = %q; want %q", readAtRuntime, want)
+			}
+
+			clock.set(logT0.Add(time.Minute))
+			state, err = mr.ResolveToolCall(t.Context(), localKey(logModel))
+			wantState(t, "second resolution", state, err, fingerprint.CapProbeYes)
+			if n := prober.callCount(); n != tt.calls {
+				t.Fatalf("probe calls = %d; want %d", n, tt.calls)
+			}
+		})
+	}
+}

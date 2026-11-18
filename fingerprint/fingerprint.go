@@ -241,11 +241,14 @@ type ProbeAnswer struct {
 // while it was in flight counts. When the transport reports nothing, the request
 // counts unless the prober can prove it never left, so the count errs high,
 // never low. Answers may include capabilities the recipe proved beyond those
-// requested, and never one the recipe does not cover.
+// requested, and never one the recipe does not cover. Digest is the content
+// digest the reply named for the model, "" when it named none: the metadata
+// prober copies the one /api/show reports; the streamed prober leaves it empty.
 type CapabilityProbeResult struct {
 	Method   string
 	Requests int
 	Answers  []ProbeAnswer
+	Digest   string
 }
 
 // CapabilityProber runs a probe recipe against one model. It is optional; a

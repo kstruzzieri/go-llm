@@ -545,8 +545,15 @@ func (r *ModelRegistry) resolveToolCallFromLog(ctx context.Context, key ModelKey
 		return "", err
 	}
 
-	// 9.
-	rows, state, err := probeEvidenceRows(key, binding, digest, recipe, result, completedAt)
+	// 9. Rows go under the digest the reply named, when it named one: a model
+	// re-pulled since the runtime query must not get the old identity's answer.
+	// Rows under another digest are not read at the runtime's, so the next
+	// resolution checks again.
+	filed := digest
+	if result.Digest != "" {
+		filed = result.Digest
+	}
+	rows, state, err := probeEvidenceRows(key, binding, filed, recipe, result, completedAt)
 	if err != nil {
 		return "", err
 	}
