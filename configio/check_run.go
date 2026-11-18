@@ -297,7 +297,7 @@ type checkRun struct {
 	prober   fingerprint.CapabilityProber
 	store    fingerprint.EvidenceWriter
 	digests  map[string]string            // the plan's runtime digests
-	snap     fingerprint.EvidenceSnapshot // the pre-flight snapshot
+	listing  *fingerprint.ListingSnapshot // the preflight listing, if available
 	onResult func(CheckResult)
 	cb       sync.Mutex // serializes the host's callbacks
 
@@ -311,10 +311,12 @@ type checkRun struct {
 // become fresh. It never adds one.
 func (r *checkRun) preflight(ctx context.Context, store fingerprint.EvidenceReader, in *planInputs) ([]planItem, error) {
 	var spellings []string
-	for _, it := range in.items {
-		spellings = append(spellings, provider.EvidenceModelNames(r.binding.Adapter, it.item.Model)...)
+	if !in.force {
+		for _, it := range in.items {
+			spellings = append(spellings, provider.EvidenceModelNames(r.binding.Adapter, it.item.Model)...)
+		}
+		slices.Sort(spellings)
 	}
-	slices.Sort(spellings)
 	key, now := r.apiKey, time.Now()
 	snap, err := store.ReadSnapshot(ctx, r.binding.Endpoint, r.binding.Adapter, &key, "", slices.Compact(spellings), now)
 	if err := ctx.Err(); err != nil {
@@ -323,15 +325,16 @@ func (r *checkRun) preflight(ctx context.Context, store fingerprint.EvidenceRead
 	if err != nil {
 		return nil, fmt.Errorf("configio: run check: %w", provider.ErrEvidenceUnreadable)
 	}
-	r.snap = snap
+	r.listing = snap.Listing
 	if in.force {
 		return in.items, nil
 	}
+	rows := evidencesel.IndexRows(snap.Rows, r.binding, in.models)
 	var items []planItem
 	for _, it := range in.items {
 		m := it.item.Model
 		i, _ := slices.BinarySearch(in.models, m) // planned models are among the sorted requested ones
-		if !answersFresh(snap, r.binding, m, r.digests[m], in.policies[i], in.caps, now) {
+		if !answersFresh(rows[m], snap.Listing, r.binding.Adapter, m, r.digests[m], in.policies[i], in.caps, now) {
 			items = append(items, it)
 		}
 	}
@@ -384,8 +387,10 @@ func (r *checkRun) classify(model string, recipe fingerprint.ProbeRecipe, res fi
 		}
 		return out
 	}
-	listed, _ := evidencesel.Select(r.snap, r.binding, model, true)
-	digest := cmp.Or(res.Digest, r.digests[model], listed)
+	digest := cmp.Or(res.Digest, r.digests[model])
+	if digest == "" {
+		digest = evidencesel.ListingDigest(r.listing, r.binding.Adapter, model)
+	}
 	for _, a := range res.Answers {
 		out.result.Answers = append(out.result.Answers, CheckAnswer{Capability: a.Capability, State: string(a.State), Detail: a.Detail})
 	}

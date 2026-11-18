@@ -1164,9 +1164,10 @@ type ToolCallExplanation struct {
 // cap-probe row exists so callers can distinguish stale verdicts. With
 // WithEvidenceLog the provenance comes from the log, not cap-probe rows, and
 // Caps and Has from the precedence core merge uses there (ExplainEvidence), so
-// a checked no beats a catalog, type or runtime yes; that path runs no merge
-// and reads no fingerprint store, and a failed log read is not an error but
-// sets EvidenceUnreadable.
+// a checked no beats a catalog, type or runtime yes. A live provider no has
+// Source "runtime" even when State and TestedAt describe an older inconclusive
+// check. This path runs no merge and reads no fingerprint store; a failed log
+// read sets EvidenceUnreadable.
 func (r *ModelRegistry) ExplainToolCall(ctx context.Context, key ModelKey) (ToolCallExplanation, error) {
 	r.syncGeneration(ctx)
 

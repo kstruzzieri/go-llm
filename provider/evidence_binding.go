@@ -271,6 +271,7 @@ func (r *ModelRegistry) explainToolCallFromLog(ctx context.Context, key ModelKey
 	for _, f := range facts {
 		if f.Capability == capabilityToolCall {
 			toolFact = f
+			break
 		}
 	}
 
@@ -300,14 +301,14 @@ func (r *ModelRegistry) explainToolCallFromLog(ctx context.Context, key ModelKey
 		default:
 			exp.Source = "runtime"
 		}
-	case direct, answer == nil && attempt != nil:
+	case direct:
 		exp.Source = "probe"
-	case answer != nil:
+	case toolFact.Source == string(fingerprint.EvidenceSourceProvider) && toolFact.State == string(fingerprint.CapProbeNo):
+		// A stored or live provider no outranks an inconclusive attempt.
+		// State and TestedAt still describe the last recorded check.
 		exp.Source = "runtime"
-	case toolFact.Source == string(fingerprint.EvidenceSourceProvider):
-		// No stored answer and no attempt, so the provider tier that said no
-		// is the live listing's: Ollama's capabilities array without tools.
-		exp.Source = "runtime"
+	case attempt != nil:
+		exp.Source = "probe"
 	}
 	return exp, nil
 }

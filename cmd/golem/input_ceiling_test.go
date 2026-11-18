@@ -403,6 +403,7 @@ func TestInputCeiling_ProviderNoIsIneligible(t *testing.T) {
 	}{
 		{"a stored provider no", provider.ToolCallExplanation{Source: "runtime", State: fingerprint.CapProbeNo, Valid: true}, withoutSmall},
 		{"a live provider no", provider.ToolCallExplanation{Source: "runtime"}, withoutSmall},
+		{"a live provider no beside an expired attempt", provider.ToolCallExplanation{Source: "runtime", State: fingerprint.CapProbeInconclusive}, withoutSmall},
 		{"a provider yes beside a valid legacy no", provider.ToolCallExplanation{Has: true, Source: "runtime", State: fingerprint.CapProbeNo, Valid: true}, withSmall},
 		{"a valid inconclusive probe in its cooldown", provider.ToolCallExplanation{Source: "probe", State: fingerprint.CapProbeInconclusive, Valid: true}, withoutSmall},
 	}

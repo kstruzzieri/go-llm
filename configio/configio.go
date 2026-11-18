@@ -52,8 +52,9 @@ const (
 	// CodeProbeFailed reports a failed probe attempt: transient transport
 	// trouble (network, auth) or a resolution failure (unknown provider
 	// or model). Not necessarily retryable — the wrapped cause
-	// distinguishes, for log/CLI surfaces only. Nothing was persisted;
-	// the state is unknown.
+	// distinguishes, for log/CLI surfaces only. A log-bound registry may
+	// record a five-minute check_failed attempt when a request was sent
+	// and a server or transport failure prevented an answer.
 	CodeProbeFailed ErrorCode = "probe_failed"
 )
 

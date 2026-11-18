@@ -19,24 +19,54 @@ import (
 // no listing. The rows are those at binding's endpoint under any of model's
 // spellings, in snapshot order.
 func Select(snap fingerprint.EvidenceSnapshot, binding provider.EvidenceBinding, model string, credentialResolved bool) (digest string, rows []fingerprint.EvidenceRow) {
-	names := provider.EvidenceModelNames(binding.Adapter, model)
-	if snap.Listing != nil && credentialResolved {
-		aliased := false
-		for _, m := range snap.Listing.Members {
-			if m.Model == model {
-				digest = m.Digest
-				break
-			}
-			if !aliased && slices.Contains(names, m.Model) {
-				digest, aliased = m.Digest, true
+	if credentialResolved {
+		digest = ListingDigest(snap.Listing, binding.Adapter, model)
+	}
+	return digest, IndexRows(snap.Rows, binding, []string{model})[model]
+}
+
+// ListingDigest returns the first exact listing member's digest, falling back
+// to the first member under another spelling when the exact name is absent.
+func ListingDigest(listing *fingerprint.ListingSnapshot, adapter, model string) string {
+	if listing == nil {
+		return ""
+	}
+	names := provider.EvidenceModelNames(adapter, model)
+	var aliasDigest string
+	aliased := false
+	for _, m := range listing.Members {
+		if m.Model == model {
+			return m.Digest
+		}
+		if !aliased && slices.Contains(names, m.Model) {
+			aliasDigest, aliased = m.Digest, true
+		}
+	}
+	return aliasDigest
+}
+
+// IndexRows groups the requested models' evidence in one pass over the
+// snapshot. Each group includes all of the model's spellings at the bound
+// endpoint, through every adapter, in the order the snapshot returned them.
+func IndexRows(rows []fingerprint.EvidenceRow, binding provider.EvidenceBinding, models []string) map[string][]fingerprint.EvidenceRow {
+	if len(rows) == 0 || len(models) == 0 {
+		return nil
+	}
+	requested := make(map[string][]string, len(models))
+	for _, model := range models {
+		for _, name := range provider.EvidenceModelNames(binding.Adapter, model) {
+			if !slices.Contains(requested[name], model) {
+				requested[name] = append(requested[name], model)
 			}
 		}
 	}
-	rows = make([]fingerprint.EvidenceRow, 0, len(snap.Rows))
-	for _, r := range snap.Rows {
-		if r.Endpoint == binding.Endpoint && slices.Contains(names, r.Model) {
-			rows = append(rows, r)
+	byModel := make(map[string][]fingerprint.EvidenceRow, len(models))
+	for _, row := range rows {
+		if row.Endpoint == binding.Endpoint {
+			for _, model := range requested[row.Model] {
+				byModel[model] = append(byModel[model], row)
+			}
 		}
 	}
-	return digest, rows
+	return byModel
 }

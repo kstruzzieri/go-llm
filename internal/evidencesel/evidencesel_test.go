@@ -71,3 +71,27 @@ func TestEvidenceSelect_DigestAndRows(t *testing.T) {
 		}
 	})
 }
+
+func TestIndexRows_OllamaBatchPreservesAliasOrder(t *testing.T) {
+	b := provider.EvidenceBinding{Endpoint: "http://localhost:11434", Adapter: fingerprint.AdapterOllama}
+	rows := []fingerprint.EvidenceRow{
+		{ID: 1, Endpoint: b.Endpoint, Model: "a:latest"},
+		{ID: 2, Endpoint: b.Endpoint, Model: "b"},
+		{ID: 3, Endpoint: "http://other", Model: "a"},
+		{ID: 4, Endpoint: b.Endpoint, Model: "a", Adapter: fingerprint.AdapterOpenAICompat},
+		{ID: 5, Endpoint: b.Endpoint, Model: "b:8b"},
+		{ID: 6, Endpoint: b.Endpoint, Model: "a:latest"},
+	}
+	got := IndexRows(rows, b, []string{"a", "a:latest", "b:latest", "a"})
+	for _, name := range []string{"a", "a:latest"} {
+		if want := []fingerprint.EvidenceRow{rows[0], rows[3], rows[5]}; !reflect.DeepEqual(got[name], want) {
+			t.Errorf("rows for %q = %+v, want %+v", name, got[name], want)
+		}
+	}
+	if want := []fingerprint.EvidenceRow{rows[1]}; !reflect.DeepEqual(got["b:latest"], want) {
+		t.Errorf("rows for b:latest = %+v, want %+v", got["b:latest"], want)
+	}
+	if len(got) != 3 {
+		t.Errorf("got groups for %d models, want 3", len(got))
+	}
+}

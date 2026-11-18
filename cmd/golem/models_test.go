@@ -131,6 +131,29 @@ func TestRunModels_ReadsCachedProbeOnPlainListing(t *testing.T) {
 	}
 }
 
+func TestRunModels_LiveOllamaNoBesideInconclusiveAttempts(t *testing.T) {
+	srv := newMCServer(t)
+	srv.tags = []mcTag{{"current", "sha256:c"}, {"expired", "sha256:e"}}
+	srv.caps = `["completion"]`
+	e := newMCEnv(t, mcConfig(srv.URL, "ollama", "current", "expired"))
+	attempt := fingerprint.ProbeAnswer{
+		Capability: "tool_call", Source: fingerprint.EvidenceSourceProvider,
+		Kind: fingerprint.EvidenceKindAttempt, State: fingerprint.CapProbeInconclusive,
+	}
+	now := time.Now()
+	for i, age := range []time.Duration{time.Hour, 48 * time.Hour} {
+		tag := srv.tags[i]
+		mcSeed(t, e.root, mcAnswers(t, srv.URL, "ollama", tag.name, tag.digest, fingerprint.MethodOllamaShow, now.Add(-age), attempt)...)
+	}
+	out, _ := e.mustRun(t, srv)
+	for _, tag := range srv.tags {
+		want := "lc/" + tag.name + "\tcaps=chat|generate|stream\ttool_call=MISSING (runtime)"
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("listing missing %q:\n%s", want, out)
+		}
+	}
+}
+
 func TestRunModels_SharedKeyNamesDeclaringRole(t *testing.T) {
 	ctx := context.Background()
 	// The agent chain uses key llamacpp/shared with NO explicit caps of its

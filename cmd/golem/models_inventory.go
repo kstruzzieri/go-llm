@@ -42,7 +42,7 @@ func renderModelsJSON(w io.Writer, in configview.BuildInput) error {
 	return enc.Encode(configview.Build(in))
 }
 
-// buildInventoryFromRegistry adapts registry profiles into a configview
+// buildInventoryFromRegistry projects one listing per provider into a configview
 // Inventory. Explicit-command context only (network). Every provider/list
 // error is propagated — an empty inventory must mean "nothing found", never
 // "something failed".
@@ -68,26 +68,12 @@ func buildInventoryFromRegistry(ctx context.Context, providers *provider.Registr
 		if err != nil {
 			return configview.Inventory{}, fmt.Errorf("list models for -json inventory from provider %q: %w", name, err)
 		}
-		// Caps and KnownMask come together from the listing projection, which
-		// keeps a checked no as known; it sends nothing.
 		facts, err := models.ProjectListedModels(ctx, name, infos)
 		if err != nil {
 			return configview.Inventory{}, fmt.Errorf("project models for -json inventory from provider %q: %w", name, err)
 		}
-		for i, info := range infos {
-			profile, err := models.Lookup(ctx, provider.ModelKey{Provider: name, Model: info.Name})
-			if err != nil {
-				return configview.Inventory{}, fmt.Errorf("load model %q from provider %q for -json inventory: %w", info.Name, name, err)
-			}
-			inv.Models = append(inv.Models, configview.InventoryModel{
-				Key:               profile.Key,
-				Family:            profile.Family,
-				Caps:              facts[i].Caps,
-				KnownMask:         facts[i].KnownMask,
-				ProfileSource:     profile.Source.String(),
-				ContextWindow:     profile.ContextWindow,
-				QualityCtxCeiling: profile.QualityCtxCeiling,
-			})
+		for _, f := range facts {
+			inv.Models = append(inv.Models, configview.InventoryModel(f))
 		}
 	}
 	return inv, nil

@@ -39,8 +39,9 @@ func runModels(ctx context.Context, args []string, out, errOut io.Writer) error 
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	err := runModelsCommand(ctx, args, out, errOut)
-	if err != nil && ctx.Err() != nil && errors.Is(err, ctx.Err()) {
+	if cancelled := ctx.Err(); cancelled != nil && (err == nil || errors.Is(err, cancelled)) {
 		_, _ = fmt.Fprintln(errOut, "cancelled")
+		return cancelled
 	}
 	return err
 }
@@ -94,6 +95,9 @@ func runModelsCommand(ctx context.Context, args []string, out, errOut io.Writer)
 			return err
 		}
 		if doc == nil {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			return renderModelsJSON(out, modelsJSONInput(nil, configview.Inventory{}))
 		}
 		cfg = doc.Config()
@@ -218,6 +222,9 @@ func runModelsCommand(ctx context.Context, args []string, out, errOut io.Writer)
 		if ierr != nil {
 			return ierr
 		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		return renderModelsJSON(out, modelsJSONInput(doc, inv))
 	}
 
@@ -234,8 +241,8 @@ func runModelsCommand(ctx context.Context, args []string, out, errOut io.Writer)
 // output logic is unit-testable without standing up providerbootstrap. reg
 // supplies lookup + provenance; resolveEndpoint feeds the same connectivity
 // diagnostics the run() preflight uses on a lookup error. A non-nil checks runs
-// first, so the listing shows what it wrote. The caller's cancellation is the
-// only error: it stops the checks and the listing alike.
+// first, so the listing shows what it wrote. A failed plan write stops the
+// checks, and caller cancellation stops both the checks and the listing.
 func runModelsWith(
 	ctx context.Context,
 	reg modelsRegistry,
@@ -245,6 +252,9 @@ func runModelsWith(
 	checks *modelsCheck,
 	out, errOut io.Writer,
 ) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if len(chain) == 0 {
 		_, _ = fmt.Fprintln(out, "no defaults.agent configured; the run will route to the model recommendation.")
 		_, _ = fmt.Fprintln(out, "configure a defaults.agent chain in models.json to list per-entry capabilities.")
@@ -258,6 +268,9 @@ func runModelsWith(
 
 	now := time.Now()
 	for _, sel := range chain {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		key, parsed := parseSelector(sel)
 		if !parsed {
 			// Bare selector: no single provider/model to explain per-entry.
@@ -277,17 +290,17 @@ func runModelsWith(
 		}
 
 		exp, err := reg.ExplainToolCall(ctx, key)
+		if cerr := ctx.Err(); cerr != nil {
+			return cerr
+		}
 		if err != nil {
-			if cerr := ctx.Err(); cerr != nil {
-				return cerr
-			}
 			ep, epOK := resolvePreflightEndpoint(resolveEndpoint, key.Provider)
 			_, _ = fmt.Fprintf(out, "%s\t%s\n", sel, preflightConnectivityWarn("agent", sel, key.Provider, ep, epOK, err))
 			continue
 		}
 		_, _ = fmt.Fprintln(out, renderModelLine(sel, key, exp, cfg, now))
 	}
-	return nil
+	return ctx.Err()
 }
 
 // renderModelLine formats one chain entry: selector, capabilities, and
@@ -347,15 +360,15 @@ func samplingDefaultsField(opts *config.SamplingOptions) string {
 
 // toolCallField renders the tool_call verdict + its provenance source. A
 // present bit reads "tool_call=yes (<source>)"; an absent bit reads
-// "tool_call=MISSING" plus the last probe verdict + relative age when known.
+// "tool_call=MISSING" with its source. A probe verdict includes its age.
 func toolCallField(exp provider.ToolCallExplanation, now time.Time) string {
 	if exp.Has {
 		return fmt.Sprintf("tool_call=yes (%s)", exp.Source)
 	}
-	if exp.State != "" {
-		return fmt.Sprintf("tool_call=MISSING (probe: %s, %s)", exp.State, relAge(exp.TestedAt, now))
+	if exp.State == "" || (exp.Source == "runtime" && exp.State == fingerprint.CapProbeInconclusive) {
+		return "tool_call=MISSING (" + exp.Source + ")"
 	}
-	return "tool_call=MISSING (" + exp.Source + ")"
+	return fmt.Sprintf("tool_call=MISSING (probe: %s, %s)", exp.State, relAge(exp.TestedAt, now))
 }
 
 // relAge renders a coarse "Nh ago" / "Nm ago" / "Ns ago" age for a probe

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -16,8 +17,76 @@ import (
 
 	"github.com/kstruzzieri/go-llm/config"
 	"github.com/kstruzzieri/go-llm/configview"
+	"github.com/kstruzzieri/go-llm/ollama"
 	"github.com/kstruzzieri/go-llm/provider"
 )
+
+// tagReplacementTransport serves a different model for the same tag after its first listing.
+type tagReplacementTransport struct {
+	listings int
+	shows    int
+}
+
+func (tr *tagReplacementTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	var body string
+	switch req.URL.Path {
+	case "/api/tags":
+		tr.listings++
+		body = fmt.Sprintf(`{"models":[{"name":"test:latest","digest":"sha256:%d"}]}`, tr.listings)
+	case "/api/show":
+		tr.shows++
+		body = `{"details":{"family":"original"},"capabilities":["completion"]}`
+		if tr.listings > 1 {
+			body = `{"details":{"family":"replacement"},"capabilities":["completion","tools"]}`
+		}
+	default:
+		return nil, fmt.Errorf("unexpected inventory request to %s", req.URL.Path)
+	}
+	return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
+}
+
+func TestBuildInventoryFromRegistry_OneListingPerProvider(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	handle := mcOpen(t, t.TempDir())
+	defer func() { _ = handle.Close() }()
+
+	const endpoint = "http://ollama.test"
+	transport := &tagReplacementTransport{}
+	client := ollama.NewClient(ollama.WithBaseURL(endpoint), ollama.WithHTTPClient(&http.Client{Transport: transport}))
+	providers := provider.NewRegistry()
+	if err := providers.Register(provider.NewOllamaProvider(client)); err != nil {
+		t.Fatal(err)
+	}
+	binding, err := provider.EvidenceBindingFor(endpoint, "ollama")
+	if err != nil {
+		t.Fatal(err)
+	}
+	models, err := provider.NewModelRegistry(providers, nil, provider.WithEvidenceLog(handle.Log(), func(name string) (provider.EvidenceBinding, bool) {
+		return binding, name == "ollama"
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	models.SetContextWindowOverride(func(provider.ModelKey) int { return 32768 })
+	models.SetQualityCtxCeilingOverride(func(provider.ModelKey) int { return 8192 })
+
+	inv, err := buildInventoryFromRegistry(t.Context(), providers, models, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	caps := provider.CapChat | provider.CapGenerate | provider.CapStream
+	want := configview.InventoryModel{
+		Key: provider.ModelKey{Provider: "ollama", Model: "test:latest"}, Family: "original",
+		Caps: caps, KnownMask: caps | provider.CapToolCall, ProfileSource: "merged",
+		ContextWindow: 32768, QualityCtxCeiling: 8192,
+	}
+	if len(inv.Models) != 1 || inv.Models[0] != want {
+		t.Errorf("inventory = %+v, want [%+v]", inv.Models, want)
+	}
+	if transport.listings != 1 || transport.shows != 1 {
+		t.Errorf("requests: %d listings, %d shows; want one of each", transport.listings, transport.shows)
+	}
+}
 
 func writeModelsJSON(t *testing.T, path, baseURL, model string) {
 	t.Helper()

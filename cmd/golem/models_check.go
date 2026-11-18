@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -34,8 +35,8 @@ type modelsCheck struct {
 // run checks the chain's qualified entries, grouped by provider, providers in
 // sorted order; a bare selector names no provider and is not checked. For each
 // provider it prints the plan, then one line per result, on errOut. A provider
-// that cannot be checked is reported and the rest still run. Only the caller's
-// cancellation stops it, returning ctx's error.
+// that cannot be checked is reported and the rest still run. Cancellation or
+// a failure to display a plan stops the command before further checks.
 func (c *modelsCheck) run(ctx context.Context, chain []string, errOut io.Writer) error {
 	byProvider := make(map[string][]string)
 	for _, sel := range chain {
@@ -62,7 +63,9 @@ func (c *modelsCheck) checkProvider(ctx context.Context, name string, models []s
 	if err != nil {
 		return reportCheckError(ctx, errOut, name, err)
 	}
-	printCheckPlan(errOut, plan)
+	if err := printCheckPlan(errOut, plan); err != nil {
+		return fmt.Errorf("write check plan for provider %q: %w", name, err)
+	}
 	if len(plan.Items) == 0 {
 		return nil
 	}
@@ -141,16 +144,17 @@ func reportCheckError(ctx context.Context, errOut io.Writer, name string, err er
 // the time and response bytes each may take, and what it may load: nothing for
 // a metadata read, the model once at a loopback endpoint, and whatever a
 // remote server decides.
-func printCheckPlan(w io.Writer, plan configio.CheckPlan) {
+func printCheckPlan(out io.Writer, plan configio.CheckPlan) error {
+	var buf bytes.Buffer
 	head := fmt.Sprintf("check plan: provider %q at %q", plan.Provider, plan.EndpointHost) // the host comes from config: quoted, so no control rune reaches the terminal
 	if plan.Force {
 		head += " (forced)"
 	}
-	if len(plan.Items) == 0 {
-		_, _ = fmt.Fprintf(w, "%s: nothing to check\n", head)
-		return
+	summary := "nothing to check"
+	if len(plan.Items) > 0 {
+		summary = plural(len(plan.Items), "model", "models") + " to check"
 	}
-	_, _ = fmt.Fprintf(w, "%s: %s to check\n", head, plural(len(plan.Items), "model", "models"))
+	_, _ = fmt.Fprintf(&buf, "%s: %s\n", head, summary)
 	for _, it := range plan.Items {
 		output := "generates nothing"
 		if it.MaxOutputTokensPerRequest > 0 {
@@ -163,10 +167,12 @@ func printCheckPlan(w io.Writer, plan configio.CheckPlan) {
 		case it.ModelLoads > 0:
 			load = "may load the model once"
 		}
-		_, _ = fmt.Fprintf(w, "  %q: %s, %s; usually %s, at most %d; %s; up to %s and %d response bytes per request; %s\n",
+		_, _ = fmt.Fprintf(&buf, "  %q: %s, %s; usually %s, at most %d; %s; up to %s and %d response bytes per request; %s\n",
 			it.Model, strings.Join(it.Methods, "+"), strings.Join(it.Capabilities, "|"),
 			plural(it.UsualRequests, "request", "requests"), it.MaxRequests, output, it.RequestTimeout, it.MaxResponseBytes, load)
 	}
+	_, err := buf.WriteTo(out) // includes a partial write without an underlying error
+	return err
 }
 
 // printResult shows one model's result: its code or its answers, the requests

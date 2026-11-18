@@ -841,6 +841,30 @@ func TestPlanCheck_OneSnapshotForAllInputs(t *testing.T) {
 	}
 }
 
+// A forced plan and its execution both need the listing, but neither reads
+// the per-model history that an unforced check uses to decide freshness.
+func TestForcedCheckReadsListingWithoutEvidenceHistory(t *testing.T) {
+	cfg := cpConfig(nil)
+	b := cpBinding(t, cfg, "ol")
+	reader := &cpReader{snap: fingerprint.EvidenceSnapshot{
+		Listing: &fingerprint.ListingSnapshot{Members: []fingerprint.ListingMember{{Model: "a:latest", Digest: "sha256:a"}}},
+	}}
+	plan, err := PlanCheck(t.Context(), "ol", []string{"a"}, cpTools, CheckOptions{Config: cfg, Store: reader, Force: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := &checkRun{binding: b, apiKey: cpKey}
+	items, err := run.preflight(t.Context(), reader, &plan.state.inputs)
+	if err != nil || len(items) != 1 || !reflect.DeepEqual(run.listing, reader.snap.Listing) {
+		t.Fatalf("preflight returned %d items, listing %v, err %v", len(items), run.listing, err)
+	}
+	reads, other := reader.calls()
+	want := cpRead{endpoint: b.Endpoint, adapter: b.Adapter, apiKey: cpKey}
+	if !reflect.DeepEqual(reads, []cpRead{want, want}) || len(other) != 0 {
+		t.Errorf("forced plan and run reads = %+v, other %v; want two listing-only snapshots", reads, other)
+	}
+}
+
 func TestPlanCheck_RecipeMetadataAndIdentityStayAligned(t *testing.T) {
 	cfg := cpConfig(cpAuthored("lc", "m", "n"))
 	for k, v := range cpAuthored("ol", "m") {

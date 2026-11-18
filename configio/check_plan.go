@@ -81,10 +81,10 @@ type CheckItem struct {
 }
 
 // CheckPlan is what an explicit capability check of one provider will send.
-// Its exported fields are a display copy: changing them changes nothing. The
-// value PlanCheck returns also holds the inputs it was planned from, frozen and
-// never a credential, and its identity. A plan built from its fields or
-// decoded from JSON has neither, so a run refuses it as stale.
+// Its exported fields are a display copy. RunCheck refuses a modified copy
+// with plan_stale. The returned value holds its frozen inputs and an identity
+// bound to the provider key. The key itself is never retained. A plan rebuilt
+// from its exported fields or decoded from JSON is stale.
 type CheckPlan struct {
 	Provider     string      `json:"provider"`
 	EndpointHost string      `json:"endpoint_host"` // host[:port] of the canonical endpoint; never a path
@@ -157,8 +157,9 @@ type planState struct {
 // chat-stream-tools), and every model's capability policy must be valid, else
 // invalid_argument.
 //
-// It reads one snapshot, at one instant, for every model under both Ollama
-// spellings. Every model must be listed for the key or named for the endpoint
+// It reads one snapshot. An unforced check reads each model's evidence under
+// both Ollama spellings. A forced check needs only the listing and named models.
+// Every model must be listed for the key or named for the endpoint
 // (under either spelling), or authored in the config (exactly), else
 // listing_required. A model whose policy has an explicit list is never
 // planned, even under force. Any other is planned when a requested capability
@@ -221,10 +222,12 @@ func PlanCheck(ctx context.Context, providerName string, models []string, caps p
 	var snap fingerprint.EvidenceSnapshot
 	if opts.Store != nil {
 		var spellings []string
-		for _, m := range ids {
-			spellings = append(spellings, provider.EvidenceModelNames(target.binding.Adapter, m)...)
+		if !opts.Force {
+			for _, m := range ids {
+				spellings = append(spellings, provider.EvidenceModelNames(target.binding.Adapter, m)...)
+			}
+			slices.Sort(spellings)
 		}
-		slices.Sort(spellings)
 		key := apiKey
 		var readErr error
 		snap, readErr = opts.Store.ReadSnapshot(ctx, target.binding.Endpoint, target.binding.Adapter, &key, "", slices.Compact(spellings), now)
@@ -236,6 +239,10 @@ func PlanCheck(ctx context.Context, providerName string, models []string, caps p
 		}
 	}
 
+	var rows map[string][]fingerprint.EvidenceRow
+	if !opts.Force {
+		rows = evidencesel.IndexRows(snap.Rows, target.binding, ids)
+	}
 	digests := make(map[string]string)
 	var items []planItem
 	for i, m := range ids {
@@ -250,7 +257,7 @@ func PlanCheck(ctx context.Context, providerName string, models []string, caps p
 		if policies[i].Explicit != nil {
 			continue // an explicit list fixes every capability
 		}
-		if !opts.Force && answersFresh(snap, target.binding, m, digest, policies[i], caps, now) {
+		if !opts.Force && answersFresh(rows[m], snap.Listing, target.binding.Adapter, m, digest, policies[i], caps, now) {
 			continue
 		}
 		items = append(items, newPlanItem(target, m, caps, recipe))
@@ -367,15 +374,15 @@ func listedOrNamed(snap fingerprint.EvidenceSnapshot, adapter, model string) boo
 }
 
 // answersFresh reports whether every capability in caps has a fresh answer
-// for model through binding, read at runtimeDigest when nonempty, else at the
+// for model through adapter, read at runtimeDigest when nonempty, else at the
 // listing member's digest.
-func answersFresh(snap fingerprint.EvidenceSnapshot, binding provider.EvidenceBinding, model, runtimeDigest string, policy config.ModelCapabilityPolicy, caps provider.Capability, now time.Time) bool {
-	digest, rows := evidencesel.Select(snap, binding, model, true)
-	if runtimeDigest != "" {
-		digest = runtimeDigest
+func answersFresh(rows []fingerprint.EvidenceRow, listing *fingerprint.ListingSnapshot, adapter, model, runtimeDigest string, policy config.ModelCapabilityPolicy, caps provider.Capability, now time.Time) bool {
+	digest := runtimeDigest
+	if digest == "" {
+		digest = evidencesel.ListingDigest(listing, adapter, model)
 	}
 	facts := provider.ExplainEvidence(provider.EvidenceInputs{
-		Adapter: binding.Adapter, Digest: digest, Now: now,
+		Adapter: adapter, Digest: digest, Now: now,
 		Explicit: policy.Explicit, TypeCaps: policy.TypeCaps, TypeNames: policy.TypeNames,
 		Rows: rows,
 	})

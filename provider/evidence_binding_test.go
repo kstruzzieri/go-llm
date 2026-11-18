@@ -459,15 +459,17 @@ func TestExplainToolCall_LogProvenance(t *testing.T) {
 	}
 }
 
-// TestExplainToolCall_LiveOllamaNoIsRuntime pins that a live Ollama
-// capabilities array without tools, with no stored row and no attempt, is the
-// provider's no and reads as "runtime", catalog yes or not. An attempt still
-// makes it the probe's, and no array at all still says nothing.
+// TestExplainToolCall_LiveOllamaNoIsRuntime pins the source of a live no
+// beside a catalog yes or an inconclusive attempt. The last check is still
+// available to callers, including after it expires.
 func TestExplainToolCall_LiveOllamaNoIsRuntime(t *testing.T) {
 	b := mustBinding(t, "http://127.0.0.1:11434", "ollama")
 	attempt := showRow(b, "tool_call", fingerprint.CapProbeInconclusive, logDigest, logT0.Add(-time.Hour))
 	attempt.Kind = fingerprint.EvidenceKindAttempt
 	attempt.FreshUntil, attempt.ExpiresAt = fingerprint.ExpiryFor(attempt, 0)
+	expired := attempt
+	expired.ObservedAt = logT0.Add(-2 * logDay)
+	expired.FreshUntil, expired.ExpiresAt = fingerprint.ExpiryFor(expired, 0)
 	tests := []struct {
 		name   string
 		model  string
@@ -484,8 +486,16 @@ func TestExplainToolCall_LiveOllamaNoIsRuntime(t *testing.T) {
 			want: ToolCallExplanation{Caps: CapChat | CapGenerate | CapStream, Source: "runtime"},
 		},
 		{
-			name: "an attempt makes it the probe's", model: logModel, listed: []string{"completion"}, rows: []fingerprint.EvidenceRow{attempt},
-			want: ToolCallExplanation{Caps: CapChat | CapGenerate | CapStream, Source: "probe", State: fingerprint.CapProbeInconclusive, Valid: true},
+			name: "no beside a current attempt", model: logModel, listed: []string{"completion"}, rows: []fingerprint.EvidenceRow{attempt},
+			want: ToolCallExplanation{Caps: CapChat | CapGenerate | CapStream, Source: "runtime", State: fingerprint.CapProbeInconclusive, TestedAt: attempt.ObservedAt, Valid: true},
+		},
+		{
+			name: "no beside an expired attempt", model: logModel, listed: []string{"completion"}, rows: []fingerprint.EvidenceRow{expired},
+			want: ToolCallExplanation{Caps: CapChat | CapGenerate | CapStream, Source: "runtime", State: fingerprint.CapProbeInconclusive, TestedAt: expired.ObservedAt},
+		},
+		{
+			name: "only a provider metadata attempt", model: logModel, rows: []fingerprint.EvidenceRow{attempt},
+			want: ToolCallExplanation{Source: "probe", State: fingerprint.CapProbeInconclusive, TestedAt: attempt.ObservedAt, Valid: true},
 		},
 		{
 			name: "no array says nothing", model: logModel,
@@ -504,7 +514,10 @@ func TestExplainToolCall_LiveOllamaNoIsRuntime(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ExplainToolCall: %v", err)
 			}
-			got.TestedAt = time.Time{}
+			if !got.TestedAt.Equal(tt.want.TestedAt) {
+				t.Fatalf("TestedAt = %v; want %v", got.TestedAt, tt.want.TestedAt)
+			}
+			got.TestedAt = tt.want.TestedAt
 			if got != tt.want {
 				t.Fatalf("got %+v; want %+v", got, tt.want)
 			}

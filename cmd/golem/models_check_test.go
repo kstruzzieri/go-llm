@@ -10,6 +10,7 @@ import (
 	"maps"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httptrace"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -932,6 +933,71 @@ func TestGolemModels_ListingCancelledReportsOnce(t *testing.T) {
 	}
 }
 
+// A recommendation-only config has no entries to look up after bootstrap.
+// Cancel during its refresh, before there is any connection to a provider.
+func TestGolemModels_RecommendationListingCancelledDuringBootstrap(t *testing.T) {
+	e := newMCEnv(t, `{
+		"providers": {"p": {"base_url": "http://127.0.0.1:1", "api_format": "openai-compat"}},
+		"models": {"chat": {"name": "m", "provider": "p", "type": "dense"}},
+		"defaults": {"chat": "chat"}
+	}`)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{GetConn: func(string) { cancel() }})
+	var stdout, stderr bytes.Buffer
+	err := e.run(ctx, &stdout, &stderr)
+	if !errors.Is(err, context.Canceled) || stdout.Len() != 0 {
+		t.Fatalf("cancelled recommendation listing returned %v, stdout %q", err, stdout.String())
+	}
+	if got := lines(stderr.String(), "cancelled"); !slices.Equal(got, []string{"cancelled"}) {
+		t.Fatalf("cancellation lines = %q; want one", got)
+	}
+}
+
+// limitedPlanWriter simulates a destination that accepts only a prefix.
+type limitedPlanWriter struct {
+	left int
+	err  error
+}
+
+func (w *limitedPlanWriter) Write(p []byte) (int, error) {
+	n := min(w.left, len(p))
+	w.left -= n
+	if n < len(p) {
+		return n, w.err
+	}
+	return n, nil
+}
+
+func TestGolemModels_IncompletePlanSendsNoCheck(t *testing.T) {
+	c := modelsCheck{cfg: &config.Config{
+		Providers: map[string]config.ProviderConfig{"p": {BaseURL: "http://127.0.0.1:1", APIFormat: "openai-compat"}},
+		Models:    map[string]config.ModelConfig{"role": {Name: "m", Provider: "p", Type: "dense"}},
+	}}
+	diskFull := errors.New("disk full")
+	for _, tc := range []struct {
+		name string
+		left int
+		err  error
+		want error
+	}{
+		{"header fails", 0, diskFull, diskFull},
+		{"item partially written", 70, diskFull, diskFull},
+		{"short write without error", 70, nil, io.ErrShortWrite},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var attempted atomic.Bool
+			ctx := httptrace.WithClientTrace(t.Context(), &httptrace.ClientTrace{
+				GetConn: func(string) { attempted.Store(true) },
+			})
+			err := c.checkProvider(ctx, "p", []string{"m"}, &limitedPlanWriter{left: tc.left, err: tc.err})
+			if !errors.Is(err, tc.want) || attempted.Load() {
+				t.Fatalf("checkProvider returned %v, connection attempted %t; want %v before any connection", err, attempted.Load(), tc.want)
+			}
+		})
+	}
+}
+
 // TestGolemModels_MemoryOnlyStoreSaysSo pins that a check saved to a store that
 // fell back to memory says so, since its answer lasts only for the command. A
 // file-backed store's "saved" is pinned by
@@ -972,10 +1038,12 @@ func TestPrintCheckPlan_LoadWording(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var out strings.Builder
-			printCheckPlan(&out, configio.CheckPlan{Provider: "p", EndpointHost: "h:1", Items: []configio.CheckItem{{
+			if err := printCheckPlan(&out, configio.CheckPlan{Provider: "p", EndpointHost: "h:1", Items: []configio.CheckItem{{
 				Model: "m", Methods: []string{"x"}, Capabilities: []string{"tool_call"}, UsualRequests: 1, MaxRequests: 2,
 				MaxOutputTokensPerRequest: tt.outputTokens, ModelLoads: tt.loads,
-			}}})
+			}}}); err != nil {
+				t.Fatal(err)
+			}
 			item := lines(out.String(), `  "m": `)
 			if len(item) != 1 || !strings.HasSuffix(item[0], "; "+tt.want) {
 				t.Fatalf("plan item %q; want it to end %q", item, tt.want)
@@ -1034,7 +1102,9 @@ func TestGolemCheckOutput_QuotesEndpointHost(t *testing.T) {
 		t.Fatal("fixture host did not parse")
 	}
 	var plan, progress strings.Builder
-	printCheckPlan(&plan, configio.CheckPlan{Provider: "p", EndpointHost: host})
+	if err := printCheckPlan(&plan, configio.CheckPlan{Provider: "p", EndpointHost: host}); err != nil {
+		t.Fatal(err)
+	}
 	probeProgressPrinter(&progress)(provider.CapabilityProbeProgress{
 		Key: provider.ModelKey{Provider: "p", Model: "m"}, EndpointHost: host, Method: "chat-stream-tools",
 		Stage: "started", ReservedRequests: 2, MaxOutputTokensPerRequest: 2048,
