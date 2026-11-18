@@ -1,0 +1,484 @@
+// configio/check_run.go
+//
+// RunCheck: send what a plan showed and nothing else, through a client guarded
+// by a grant for one destination, and file each answer in the evidence log.
+package configio
+
+import (
+	"cmp"
+	"context"
+	"crypto/hmac"
+	"errors"
+	"fmt"
+	"net/http"
+	"reflect"
+	"slices"
+	"sync"
+	"time"
+
+	"golang.org/x/sync/errgroup"
+
+	"github.com/kstruzzieri/go-llm/config"
+	"github.com/kstruzzieri/go-llm/fingerprint"
+	"github.com/kstruzzieri/go-llm/fingerprint/probers"
+	"github.com/kstruzzieri/go-llm/internal/evidencesel"
+	"github.com/kstruzzieri/go-llm/internal/providerbootstrap"
+	"github.com/kstruzzieri/go-llm/provider"
+	"github.com/kstruzzieri/go-llm/provider/openaicompat"
+)
+
+// remoteCheckWorkers is how many checks run at once at a remote endpoint
+// through openai-compat; a loopback one runs one at a time, so a local server
+// loads one model at a time.
+const remoteCheckWorkers = 4
+
+// CheckAnswer is one capability's outcome in a check result.
+type CheckAnswer struct {
+	Capability string `json:"capability"`       // canonical name
+	State      string `json:"state"`            // yes, no or inconclusive
+	Detail     string `json:"detail,omitempty"` // a bounded code; "" when none
+}
+
+// CheckResult is one planned model's finished check. Code is "" when the check
+// answered, else why it did not, and Answers is then empty. Requests counts the
+// requests the check sent. Persisted is true only once the result's rows were
+// committed to the run's store: its answers, or a model_refused's access row.
+// It says nothing of whether that store outlives the process; a memory-only
+// store reports that in its own status. A result never carries provider text.
+type CheckResult struct {
+	Model     string        `json:"model"`
+	Method    string        `json:"method"`
+	Code      ErrorCode     `json:"code,omitempty"`
+	Requests  int           `json:"requests"`
+	Answers   []CheckAnswer `json:"answers,omitempty"`
+	Persisted bool          `json:"persisted"`
+}
+
+// RunOptions configures RunCheck.
+type RunOptions struct {
+	// Config is the current effective config, URL overrides applied. The
+	// plan's provider, endpoint, api, key, timeout and capability policies are
+	// read from it again and must be the ones the plan was sealed with.
+	// Required.
+	Config *config.Config
+	// Store receives the answers. Nil checks and saves nothing.
+	Store fingerprint.EvidenceStore
+	// Policy grants remote destinations; a loopback one needs no grant.
+	Policy provider.DestinationPolicy
+	// OnResult receives each checked model's result once its rows are
+	// committed; a refusal's, once another model answers or every check has
+	// finished. A planned model an unforced run skips because its answers
+	// became fresh gets no call. Calls never overlap each other or OnUsage, and
+	// run outside any store transaction. A panic in it is not recovered. May be
+	// nil.
+	OnResult func(CheckResult)
+	// OnUsage receives the usage of each completed generation as it completes,
+	// before anything is saved. Calls never overlap each other or OnResult. May
+	// be nil.
+	OnUsage func(model string, u provider.Usage)
+	// Transport is the base transport of the check's client; nil uses a copy
+	// of the default. Every request still passes the destination guard, and a
+	// loopback endpoint gets a clone without its proxy that dials localhost as
+	// the loopback addresses. A remote endpoint uses it as is, and RunCheck
+	// leaves its idle connections open.
+	Transport *http.Transport
+}
+
+// RunCheck sends the checks plan showed, and nothing else, and files each
+// answer in opts.Store. It never touches a model registry.
+//
+// Before anything is sent it refuses: a nil context or config, with
+// invalid_argument; a plan PlanCheck did not return, one whose displayed
+// fields were changed, or one the current config no longer resolves to (its
+// provider, endpoint, api, key, timeout or capability policies, or this
+// binary's recipes), with plan_stale; and a remote endpoint opts.Policy does
+// not grant, with destination_not_granted. With a store it then reads one
+// snapshot: an unforced run skips a model whose requested answers have become
+// fresh, sends nothing for it and reports no result for it, and no run ever
+// adds a model. So when RunCheck returns nil, a planned model with no result
+// was skipped as fresh. A failed read is an error wrapping
+// provider.ErrEvidenceUnreadable.
+//
+// The remaining models are checked at most 4 at once at a remote openai-compat
+// endpoint, one at a time at a loopback one, and all at once through Ollama,
+// whose checks read metadata. A failed check is its model's result, with a
+// code, and never stops another. A usable result's rows are appended in one
+// transaction, filed under the first nonempty of: the digest the reply named,
+// the plan's runtime digest for the model, the listing digest the snapshot
+// holds, else "". With none of the first three a row is name-only, and a reader
+// at a live digest ignores it; a model re-pulled between the host's listing and
+// a check whose reply names no digest gets its new answer filed under the old
+// digest.
+//
+// Refusals belong to the key. A completed stream (chat-stream or
+// chat-stream-tools whose reply proved chat, tool_call_invalid included) is an
+// answer, and its answered access row commits in the same transaction as its
+// answers. A 403 or 404, whatever became of its body, is held with its
+// observation time. Once a model in this call has answered, every refusal held
+// or still to come is model_refused: the key works and this model is refused
+// to it, saved as a refused access row with its status and that time, in a
+// transaction of its own. A refusal no model in this call corroborated is
+// refused once every check has finished, and saved nowhere, since a refused key
+// cannot be told from a refused model. A request_rejected attempt, a metadata
+// answer, a listing, another call's answer and a failure corroborate nothing,
+// so through Ollama every 403 or 404 is refused. A check deletes nothing.
+// A held refusal is reported after the answer that corroborated it, or, when
+// nothing did, after every other result. Results therefore do not come in plan
+// order: a host matches them by Model, never by position.
+//
+// Cancellation stops scheduling and retries. A result committed before ctx was
+// done stays saved and is reported; a check that finished after it, or whose
+// commit it interrupted, is neither saved nor reported, and refusals still held
+// are dropped, including the uncorroborated ones still to be reported when the
+// host cancels from OnResult. Usage the prober already reported through OnUsage
+// stays reported. RunCheck then returns ctx's error, uncoded. Otherwise it
+// returns nil once every check has finished; no worker outlives the call. Idle
+// connections of a transport the run made are closed before it returns; a
+// host's remote Transport keeps its own.
+func RunCheck(ctx context.Context, plan CheckPlan, opts RunOptions) error {
+	if ctx == nil {
+		return wrapCode(CodeInvalidArgument, errors.New("configio: run check: nil context"))
+	}
+	if opts.Config == nil {
+		return wrapCode(CodeInvalidArgument, errors.New("configio: run check: nil config"))
+	}
+	st, pc, err := verifyPlan(plan, opts.Config)
+	if err != nil {
+		return err
+	}
+	in := &st.inputs
+	dest, err := provider.NewDestination(in.target.provider, pc.BaseURL)
+	if err != nil { // resolveCheckTarget built it a moment ago
+		return wrapCode(CodePlanStale, fmt.Errorf("configio: run check: %w", err))
+	}
+	manifest, err := provider.NewDestinationManifest(provider.DestinationEdge{Purpose: provider.DestinationPurposeCapabilityProbe, Destination: dest})
+	if err != nil {
+		return wrapCode(CodePlanStale, fmt.Errorf("configio: run check: %w", err))
+	}
+	gate := provider.NewDestinationGate()
+	if err := gate.Install(opts.Policy, manifest); err != nil {
+		return wrapCode(CodeDestinationNotGranted, fmt.Errorf("configio: run check: %w", err))
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	r := &checkRun{
+		binding: in.target.binding, provider: in.target.provider, apiKey: pc.APIKey,
+		gate: gate, digests: st.runtimeDigests, onResult: opts.OnResult,
+	}
+	items := in.items
+	if opts.Store != nil && len(items) > 0 {
+		r.store = opts.Store
+		if items, err = r.preflight(ctx, opts.Store, in); err != nil {
+			return err
+		}
+	}
+	if len(items) == 0 {
+		return nil
+	}
+
+	prov, client, closeIdle, err := providerbootstrap.BuildGuardedProvider(in.target.provider, pc, gate, dest, nil, opts.Transport)
+	if err != nil { // a transport the guard cannot use, such as a TLS dial hook for loopback
+		return wrapCode(CodeInvalidArgument, fmt.Errorf("configio: run check: %w", err))
+	}
+	defer closeIdle() // after every worker: the run's own connections, never a host transport's
+	factory := probers.ProberFactoryInput{APIFormat: pc.APIFormat, OllamaClient: client}
+	factory.OpenAICompatProvider, _ = prov.(*openaicompat.Provider)
+	if opts.OnUsage != nil {
+		factory.UsageObserver = func(model string, u provider.Usage) {
+			r.cb.Lock()
+			defer r.cb.Unlock()
+			opts.OnUsage(model, u)
+		}
+	}
+	mp, err := probers.NewProberForAPIFormat(factory)
+	if err != nil {
+		return wrapCode(CodePlanStale, fmt.Errorf("configio: run check: %w", err))
+	}
+	var ok bool
+	if r.prober, ok = mp.(fingerprint.CapabilityProber); !ok {
+		return wrapCode(CodePlanStale, errors.New("configio: run check: the prober cannot run a check recipe"))
+	}
+
+	var g errgroup.Group // no context: one model's failure is its result, not the others' cancellation
+	g.SetLimit(checkWorkers(in.target, len(items)))
+	for _, it := range items {
+		if ctx.Err() != nil {
+			break
+		}
+		g.Go(func() error {
+			r.check(ctx, it)
+			return nil
+		})
+	}
+	_ = g.Wait()
+	for _, out := range r.held { // no model answered: refused, saved nowhere
+		if ctx.Err() != nil {
+			break // the rest are dropped, even after a cancel from OnResult
+		}
+		r.report(out.result)
+	}
+	return ctx.Err()
+}
+
+// errPlanStale is every stale plan's error; it says nothing of what changed.
+var errPlanStale = errors.New("configio: run check: the plan no longer matches its provider, key or config")
+
+// verifyPlan returns plan's frozen state and the provider config it verified
+// against (its APIKey the current key), or plan_stale when plan is not one
+// PlanCheck returned, its displayed fields were changed, or cfg no longer
+// resolves to the inputs it was sealed from. The run builds its client from
+// that config, never from a second read of cfg.
+func verifyPlan(plan CheckPlan, cfg *config.Config) (*planState, config.ProviderConfig, error) {
+	stale := wrapCode(CodePlanStale, errPlanStale)
+	st := plan.state
+	if st == nil || !shownMatches(plan, &st.inputs) {
+		return nil, config.ProviderConfig{}, stale
+	}
+	target, pc, err := resolveCheckTarget(cfg, st.inputs.target.provider)
+	if err != nil {
+		return nil, config.ProviderConfig{}, stale
+	}
+	recipe, ok := checkRecipe(target.binding.Adapter, st.inputs.caps)
+	if !ok {
+		return nil, config.ProviderConfig{}, stale
+	}
+	cur := planInputs{target: target, models: st.inputs.models, caps: st.inputs.caps, force: st.inputs.force}
+	for _, m := range cur.models {
+		policy, err := cfg.CapabilityPolicy(target.provider, m)
+		if err != nil {
+			return nil, config.ProviderConfig{}, stale
+		}
+		cur.policies = append(cur.policies, policy)
+	}
+	for _, it := range st.inputs.items {
+		cur.items = append(cur.items, newPlanItem(target, it.item.Model, cur.caps, recipe))
+	}
+	if !hmac.Equal([]byte(sealPlan(st.secret, pc.APIKey, &cur)), []byte(st.identity)) {
+		return nil, config.ProviderConfig{}, stale
+	}
+	return st, pc, nil
+}
+
+// shownMatches reports whether plan's displayed fields are the ones in was
+// planned with.
+func shownMatches(plan CheckPlan, in *planInputs) bool {
+	if plan.Provider != in.target.provider || plan.EndpointHost != provider.EndpointHost(in.target.binding.Endpoint) ||
+		plan.Adapter != in.target.binding.Adapter || plan.Force != in.force || len(plan.Items) != len(in.items) {
+		return false
+	}
+	for i, shown := range plan.Items {
+		if !reflect.DeepEqual(shown, in.items[i].item) {
+			return false
+		}
+	}
+	return true
+}
+
+// checkWorkers is how many of a run's checks may be in flight at once.
+func checkWorkers(t checkTarget, items int) int {
+	switch {
+	case t.binding.Adapter == fingerprint.AdapterOllama:
+		return items // metadata reads; the plan's 25-model cap bounds them
+	case t.local:
+		return 1
+	}
+	return remoteCheckWorkers
+}
+
+// checkRun is one RunCheck call's verified, granted state, shared by its
+// workers.
+type checkRun struct {
+	binding  provider.EvidenceBinding
+	provider string
+	apiKey   string
+	gate     *provider.DestinationGate
+	prober   fingerprint.CapabilityProber
+	store    fingerprint.EvidenceWriter
+	digests  map[string]string            // the plan's runtime digests
+	listing  *fingerprint.ListingSnapshot // the preflight listing, if available
+	onResult func(CheckResult)
+	cb       sync.Mutex // serializes the host's callbacks
+
+	mu       sync.Mutex     // guards answered and held
+	answered bool           // a model in this call gave a completed reply
+	held     []checkOutcome // refusals waiting for one
+}
+
+// preflight reads one snapshot of the planned models and returns the items
+// still to check: an unforced run drops a model whose requested answers have
+// become fresh. It never adds one.
+func (r *checkRun) preflight(ctx context.Context, store fingerprint.EvidenceReader, in *planInputs) ([]planItem, error) {
+	var spellings []string
+	if !in.force {
+		for _, it := range in.items {
+			spellings = append(spellings, provider.EvidenceModelNames(r.binding.Adapter, it.item.Model)...)
+		}
+		slices.Sort(spellings)
+	}
+	key, now := r.apiKey, time.Now()
+	snap, err := store.ReadSnapshot(ctx, r.binding.Endpoint, r.binding.Adapter, &key, "", slices.Compact(spellings), now)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err != nil {
+		return nil, fmt.Errorf("configio: run check: %w", provider.ErrEvidenceUnreadable)
+	}
+	r.listing = snap.Listing
+	if in.force {
+		return in.items, nil
+	}
+	rows := evidencesel.IndexRows(snap.Rows, r.binding, in.models)
+	var items []planItem
+	for _, it := range in.items {
+		m := it.item.Model
+		i, _ := slices.BinarySearch(in.models, m) // planned models are among the sorted requested ones
+		if !answersFresh(rows[m], snap.Listing, r.binding.Adapter, m, r.digests[m], in.policies[i], in.caps, now) {
+			items = append(items, it)
+		}
+	}
+	return items, nil
+}
+
+// checkOutcome is one model's finished check: the result to report, the rows
+// that file its answers, and its access record: answered for a completed
+// stream, refused for a 403 or 404, nil otherwise.
+type checkOutcome struct {
+	result CheckResult
+	rows   []fingerprint.EvidenceRow
+	access *fingerprint.ModelAccess
+}
+
+// check sends one planned model's check. A refusal is held; anything else is
+// settled, and an answer then corroborates the refusals held so far.
+func (r *checkRun) check(ctx context.Context, it planItem) {
+	if ctx.Err() != nil {
+		return
+	}
+	recipe := it.recipes[0] // a planned item has one method
+	var res fingerprint.CapabilityProbeResult
+	bound, err := r.gate.Bind(ctx, provider.DestinationPurposeCapabilityProbe, r.provider)
+	if err == nil {
+		res, err = r.prober.ProbeCapabilities(bound, it.item.Model, fingerprint.CapabilityProbeRequest{
+			Method: recipe.Method, Capabilities: it.item.Capabilities,
+		})
+	}
+	out := r.classify(it.item.Model, recipe, res, err, time.Now())
+	if out.result.Code == CodeRefused {
+		r.hold(ctx, out)
+		return
+	}
+	if r.settle(ctx, out) && out.access != nil { // a completed stream
+		r.corroborate(ctx)
+	}
+}
+
+// classify turns a check that returned into its outcome: a coded failure with
+// no rows (a 403 or 404 is refused, with a refused access record of its status
+// and completedAt), or its answers, the rows that file them
+// (fingerprint.AnswerRows) and, for a completed stream, an answered access
+// record.
+func (r *checkRun) classify(model string, recipe fingerprint.ProbeRecipe, res fingerprint.CapabilityProbeResult, err error, completedAt time.Time) checkOutcome {
+	out := checkOutcome{result: CheckResult{Model: model, Method: recipe.Method, Requests: max(res.Requests, 0)}}
+	if err != nil {
+		if out.result.Code = checkCode(err); out.result.Code == CodeRefused {
+			out.access = &fingerprint.ModelAccess{Model: model, State: fingerprint.AccessRefused, HTTPStatus: checkStatus(err), ObservedAt: completedAt}
+		}
+		return out
+	}
+	digest := cmp.Or(res.Digest, r.digests[model])
+	if digest == "" {
+		digest = evidencesel.ListingDigest(r.listing, r.binding.Adapter, model)
+	}
+	for _, a := range res.Answers {
+		out.result.Answers = append(out.result.Answers, CheckAnswer{Capability: a.Capability, State: string(a.State), Detail: a.Detail})
+	}
+	out.rows = fingerprint.AnswerRows(r.binding.Endpoint, r.binding.Adapter, model, digest, recipe, res.Answers, completedAt)
+	if completedStream(recipe.Method, res.Answers) {
+		out.access = &fingerprint.ModelAccess{Model: model, State: fingerprint.AccessAnswered, ObservedAt: completedAt}
+	}
+	return out
+}
+
+// completedStream reports whether a check's answers show a completed
+// generation: a streamed method whose reply proved chat. A request_rejected
+// attempt proves nothing, and a metadata answer is not a generation.
+func completedStream(method string, answers []fingerprint.ProbeAnswer) bool {
+	if method != fingerprint.MethodChatStream && method != fingerprint.MethodChatStreamTools {
+		return false
+	}
+	return slices.ContainsFunc(answers, func(a fingerprint.ProbeAnswer) bool {
+		return a.Capability == "chat" && a.State == fingerprint.CapProbeYes
+	})
+}
+
+// hold keeps a refusal until a model in this call answers, or flushes it at
+// once when one already has. Each refusal is flushed, or left for the end of
+// the run, exactly once.
+func (r *checkRun) hold(ctx context.Context, out checkOutcome) {
+	r.mu.Lock()
+	answered := r.answered
+	if !answered {
+		r.held = append(r.held, out)
+	}
+	r.mu.Unlock()
+	if answered {
+		r.flush(ctx, out)
+	}
+}
+
+// corroborate records that a model answered and flushes every refusal held so
+// far.
+func (r *checkRun) corroborate(ctx context.Context) {
+	r.mu.Lock()
+	held := r.held
+	r.held, r.answered = nil, true
+	r.mu.Unlock()
+	for _, out := range held {
+		r.flush(ctx, out)
+	}
+}
+
+// flush settles a corroborated refusal as model_refused: its refused access
+// row alone, in a transaction of its own.
+func (r *checkRun) flush(ctx context.Context, out checkOutcome) {
+	out.result.Code = CodeModelRefused
+	r.settle(ctx, out)
+}
+
+// settle commits out and reports it, and says whether it did. Once the caller
+// has cancelled, only a result already committed is reported: a check that
+// finished after the cancellation, or whose commit it interrupted, is neither
+// saved nor reported.
+func (r *checkRun) settle(ctx context.Context, out checkOutcome) bool {
+	r.commit(ctx, &out)
+	if ctx.Err() != nil && !out.result.Persisted {
+		return false
+	}
+	r.report(out.result)
+	return true
+}
+
+// commit appends out's rows and access record in one transaction and marks its
+// result persisted once that commits. Nothing is written without a store or
+// anything to write, or once the caller cancelled.
+func (r *checkRun) commit(ctx context.Context, out *checkOutcome) {
+	if r.store == nil || (len(out.rows) == 0 && out.access == nil) || ctx.Err() != nil {
+		return
+	}
+	if r.store.AppendCheckResult(ctx, r.binding.Endpoint, r.apiKey, out.result.Model, out.rows, out.access) == nil {
+		out.result.Persisted = true
+	}
+}
+
+// report hands res to the host's callback, serialized with every other
+// callback.
+func (r *checkRun) report(res CheckResult) {
+	if r.onResult == nil {
+		return
+	}
+	r.cb.Lock()
+	defer r.cb.Unlock()
+	r.onResult(res)
+}

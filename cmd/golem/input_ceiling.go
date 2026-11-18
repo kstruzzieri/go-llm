@@ -124,6 +124,9 @@ func resolveInputCeiling(ctx context.Context, reg capChecker, chain []string, us
 		if explanation.Source == "probe" && explanation.Valid {
 			return explanation.State == fingerprint.CapProbeYes
 		}
+		if explanation.Source == "runtime" && !explanation.Has {
+			return false // the provider said no, stored or live: routing rejects it
+		}
 		return true
 	}
 

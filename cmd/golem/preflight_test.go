@@ -264,7 +264,7 @@ func TestPreflight_LookupErrorNonStatus(t *testing.T) {
 		t.Fatalf("warnings = %v, want 1", warns)
 	}
 	w := warns[0]
-	if !strings.Contains(w, `cannot reach provider "llamacpp" at http://127.0.0.1:8080 (GET /v1/models): lookup llamacpp.local`) {
+	if !strings.Contains(w, `cannot reach provider "llamacpp" at "http://127.0.0.1:8080" (GET /v1/models): "lookup llamacpp.local`) {
 		t.Errorf("warning = %q, want non-status connectivity message with endpoint + underlying error", w)
 	}
 	if strings.Contains(w, "->") {
@@ -290,7 +290,7 @@ func TestPreflight_QualifiedModelNotFoundIsLookupFailure(t *testing.T) {
 		t.Fatalf("warnings = %v, want 1", warns)
 	}
 	w := warns[0]
-	if !strings.Contains(w, "provider lookup failed:") || !strings.Contains(w, `model "missing" not found on "ollama"`) {
+	if !strings.Contains(w, "provider lookup failed:") || !strings.Contains(w, `model \"missing\" not found on \"ollama\"`) {
 		t.Errorf("warning = %q, want neutral lookup failure with model-not-found cause", w)
 	}
 	if strings.Contains(w, "cannot reach provider") || strings.Contains(w, "GET /api/tags") {
@@ -461,7 +461,7 @@ func TestPreflight_AllExhaustedFatalIncludesProbeOutcomes(t *testing.T) {
 	if !strings.Contains(msg, "ollama/a") || !strings.Contains(msg, "did not produce a tool call") {
 		t.Errorf("err = %q, missing A probed-no line", msg)
 	}
-	if !strings.Contains(msg, "ollama/b") || !strings.Contains(msg, "probe was inconclusive") ||
+	if !strings.Contains(msg, "ollama/b") || !strings.Contains(msg, "check was inconclusive; golem models -probe-all checks the configured agent chain") ||
 		!strings.Contains(msg, "declare capabilities to override") {
 		t.Errorf("err = %q, missing B inconclusive line", msg)
 	}

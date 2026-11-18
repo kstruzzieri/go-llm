@@ -218,7 +218,7 @@ func resolveBackend(ctx context.Context, cfg *config.Config, o backendResolveOpt
 	}
 	if derr != nil {
 		return backendResolution{warns: []string{
-			fmt.Sprintf("openai-compat backend discovery: %v", derr),
+			fmt.Sprintf("openai-compat backend discovery: %q", derr), // quoted: may carry a candidate server's text
 		}}, nil
 	}
 	if hit == strings.TrimRight(pc.BaseURL, "/") {

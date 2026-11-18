@@ -62,6 +62,7 @@ func withDigest(d string) func(*EvidenceRow) { return func(r *EvidenceRow) { r.D
 func withVersion(v int) func(*EvidenceRow)   { return func(r *EvidenceRow) { r.MethodVersion = v } }
 func withCap(c string) func(*EvidenceRow)    { return func(r *EvidenceRow) { r.Capability = c } }
 func withMethod(m string) func(*EvidenceRow) { return func(r *EvidenceRow) { r.Method = m } }
+func withDetail(d string) func(*EvidenceRow) { return func(r *EvidenceRow) { r.Detail = d } }
 func expiring(at time.Time) func(*EvidenceRow) {
 	return func(r *EvidenceRow) { r.ExpiresAt = at }
 }
@@ -388,6 +389,11 @@ func TestExpiryFor(t *testing.T) {
 		{name: "no with digest, negative ttl is none", row: evRow(1, at, asNo), ttl: -time.Hour},
 		{name: "inconclusive with digest", row: evRow(1, at, asAttempt), wantExp: at.Add(day)},
 		{name: "inconclusive name-only", row: evRow(1, at, asAttempt, nameOnly), ttl: 7 * day, wantExp: at.Add(day)},
+		{name: "inconclusive check_failed", row: evRow(1, at, asAttempt, withDetail(DetailCheckFailed)), wantExp: at.Add(5 * time.Minute)},
+		{name: "inconclusive check_failed ignores the prober", row: evRow(1, at, asAttempt, withDetail(DetailCheckFailed)), ttl: 7 * day, wantExp: at.Add(5 * time.Minute)},
+		{name: "inconclusive tool_ignored", row: evRow(1, at, asAttempt, withDetail(DetailToolIgnored)), ttl: 7 * day, wantExp: at.Add(day)},
+		{name: "no with digest and check_failed detail", row: evRow(1, at, asNo, withDetail(DetailCheckFailed)), ttl: 48 * time.Hour, wantExp: at.Add(48 * time.Hour)},
+		{name: "yes name-only with check_failed detail", row: evRow(1, at, nameOnly, withDetail(DetailCheckFailed)), wantFresh: at.Add(month)},
 		{name: "flag", row: evRow(1, at, asFlag), ttl: day},
 		{name: "unknown state", row: evRow(1, at, func(r *EvidenceRow) { r.State = "maybe" }), ttl: day},
 	}
@@ -1330,4 +1336,60 @@ func TestWriteTx_FullDiskReportsOnlyTheFullDisk(t *testing.T) {
 	}
 	wantGeneration(t, s, gen)
 	wantStoredIDs(t, s)
+}
+
+func TestAnswerRows(t *testing.T) {
+	recipe, ok := RecipeFor(MethodOllamaShow)
+	if !ok {
+		t.Fatal("no ollama-show recipe")
+	}
+	completed := evNow.Add(1500 * time.Microsecond) // between milliseconds
+	at := evNow.Add(time.Millisecond)               // the store's millisecond
+	answer := func(capability string, kind EvidenceKind, state CapProbeState, detail string, ttl time.Duration) ProbeAnswer {
+		return ProbeAnswer{Capability: capability, Source: EvidenceSourceProvider, Kind: kind, State: state, Detail: detail, TTL: ttl}
+	}
+	answers := []ProbeAnswer{
+		answer("chat", EvidenceKindAnswer, CapProbeYes, "", 0),
+		answer("embed", EvidenceKindAnswer, CapProbeNo, "", 48*time.Hour+500*time.Microsecond),
+		answer("tool_call", EvidenceKindAttempt, CapProbeInconclusive, DetailToolIgnored, CapProbeInconclusiveTTL),
+	}
+	for _, tt := range []struct {
+		digest string
+		// fresh until and expires at per answer, as offsets from at; -1 is unset.
+		fresh, expires [3]time.Duration
+	}{
+		{"", [3]time.Duration{30 * evDayLen, -1, -1}, [3]time.Duration{-1, 7 * evDayLen, evDayLen}},
+		{evDigest, [3]time.Duration{-1, -1, -1}, [3]time.Duration{-1, 48 * time.Hour, evDayLen}},
+	} {
+		rows := AnswerRows(evEndpoint, AdapterOllama, evModel, tt.digest, recipe, answers, completed)
+		if len(rows) != len(answers) {
+			t.Fatalf("digest %q: %d rows; want %d", tt.digest, len(rows), len(answers))
+		}
+		offset := func(d time.Duration) time.Time {
+			if d < 0 {
+				return time.Time{}
+			}
+			return at.Add(d)
+		}
+		for i, r := range rows {
+			a := answers[i]
+			want := EvidenceRow{
+				KeyVersion: 1, Endpoint: evEndpoint, Adapter: AdapterOllama, Model: evModel, Digest: tt.digest,
+				Capability: a.Capability, Source: a.Source, Kind: a.Kind, State: a.State,
+				Method: MethodOllamaShow, MethodVersion: 1, Detail: a.Detail,
+				ObservedAt: at, FreshUntil: offset(tt.fresh[i]), ExpiresAt: offset(tt.expires[i]),
+			}
+			if !r.ObservedAt.Equal(want.ObservedAt) || !r.FreshUntil.Equal(want.FreshUntil) || !r.ExpiresAt.Equal(want.ExpiresAt) {
+				t.Fatalf("digest %q %s: observed %v, fresh until %v, expires %v; want %v, %v, %v", tt.digest, a.Capability,
+					r.ObservedAt, r.FreshUntil, r.ExpiresAt, want.ObservedAt, want.FreshUntil, want.ExpiresAt)
+			}
+			r.ObservedAt, r.FreshUntil, r.ExpiresAt = want.ObservedAt, want.FreshUntil, want.ExpiresAt
+			if r != want {
+				t.Fatalf("digest %q row %d = %+v; want %+v", tt.digest, i, r, want)
+			}
+		}
+	}
+	if rows := AnswerRows(evEndpoint, AdapterOllama, evModel, "", recipe, nil, completed); rows == nil || len(rows) != 0 {
+		t.Fatalf("no answers = %#v; want an empty, non-nil slice", rows)
+	}
 }

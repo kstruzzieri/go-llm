@@ -117,6 +117,11 @@ func dispatchSystemFragment(enabled bool) string {
 // parent's "agent" use case by review.
 const dispatchUseCase = "agent"
 
+// dispatchPreflightLabel names a dispatch chain's entries in its startup
+// preflight messages ("dispatch fallback ..."). Preflight uses its use-case
+// argument only for labels; routing still uses dispatchUseCase.
+const dispatchPreflightLabel = "dispatch"
+
 // resolveDispatchChain returns the chain dispatch children route down. An
 // empty role follows parentChain verbatim (which may itself be empty:
 // recommend mode) so children route to the already-resident primary model and
