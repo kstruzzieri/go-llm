@@ -309,8 +309,8 @@ func TestModelsJSONSkipsBackendDiscovery(t *testing.T) {
 		t.Fatalf("runModels: %v\nstderr:\n%s", err, errOut.String())
 	}
 
-	if got := requests.Load(); got != 3 {
-		t.Fatalf("backend requests = %d, want 3 inventory requests and no discovery request", got)
+	if got := requests.Load(); got != 2 {
+		t.Fatalf("backend requests = %d, want one bootstrap refresh and one inventory listing", got)
 	}
 }
 
@@ -430,11 +430,11 @@ func TestModelsJSONRejectsPartialInventory(t *testing.T) {
 	}
 }
 
-func TestModelsJSONRejectsPartialLookupInventory(t *testing.T) {
+func TestModelsJSONReturnsWholeListingWithoutPerModelLookups(t *testing.T) {
 	var requests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		if requests.Add(1) == 4 {
-			http.Error(w, "model lookup unavailable", http.StatusServiceUnavailable)
+		if requests.Add(1) > 2 {
+			http.Error(w, "unexpected request after inventory listing", http.StatusServiceUnavailable)
 			return
 		}
 		_, _ = fmt.Fprint(w, `{"data":[{"id":"m1"},{"id":"m2"}]}`)
@@ -445,8 +445,21 @@ func TestModelsJSONRejectsPartialLookupInventory(t *testing.T) {
 	configPath := filepath.Join(root, "models.json")
 	writeModelsJSON(t, configPath, server.URL, "m1")
 	var out, errOut bytes.Buffer
-	err := runModels(context.Background(), []string{"-json", "-config", configPath, "-root", root}, &out, &errOut)
-	if err == nil || !strings.Contains(err.Error(), `model "m2"`) {
-		t.Fatalf("runModels error = %v, want partial-inventory error naming m2", err)
+	if err := runModels(t.Context(), []string{"-json", "-config", configPath, "-root", root}, &out, &errOut); err != nil {
+		t.Fatalf("runModels: %v", err)
+	}
+	var snap configview.Snapshot
+	if err := json.Unmarshal(out.Bytes(), &snap); err != nil {
+		t.Fatal(err)
+	}
+	var selectors []string
+	for _, m := range snap.Models {
+		selectors = append(selectors, m.Selector)
+	}
+	if !slices.Equal(selectors, []string{"local/m1", "local/m2"}) {
+		t.Errorf("model selectors = %v, want both listed models", selectors)
+	}
+	if got := requests.Load(); got != 2 {
+		t.Errorf("backend requests = %d, want one bootstrap refresh and one inventory listing", got)
 	}
 }
