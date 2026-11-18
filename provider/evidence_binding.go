@@ -264,7 +264,14 @@ func (r *ModelRegistry) explainToolCallFromLog(ctx context.Context, key ModelKey
 	}
 	policy := r.snapshotListedProjectionPolicy()
 	static := r.catalogProfileFor(ParseModelName(key.Model), runtimeInfo)
-	yes, _, _ := CapabilityMasks(r.logCapabilityFacts(log, key, runtimeInfo, static, policy.override, policy.floor))
+	facts := r.logCapabilityFacts(log, key, runtimeInfo, static, policy.override, policy.floor)
+	yes, _, _ := CapabilityMasks(facts)
+	var toolFact CapabilityFact
+	for _, f := range facts {
+		if f.Capability == capabilityToolCall {
+			toolFact = f
+		}
+	}
 
 	exp := ToolCallExplanation{Caps: yes, Has: yes.Has(CapToolCall), Source: "unknown", EvidenceUnreadable: log.failed}
 	digest := runtimeDigest(runtimeInfo)
@@ -295,6 +302,10 @@ func (r *ModelRegistry) explainToolCallFromLog(ctx context.Context, key ModelKey
 	case direct, answer == nil && attempt != nil:
 		exp.Source = "probe"
 	case answer != nil:
+		exp.Source = "runtime"
+	case toolFact.Source == string(fingerprint.EvidenceSourceProvider):
+		// No stored answer and no attempt, so the provider tier that said no
+		// is the live listing's: Ollama's capabilities array without tools.
 		exp.Source = "runtime"
 	}
 	return exp, nil

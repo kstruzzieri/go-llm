@@ -208,7 +208,8 @@ const (
 	// It says nothing about whether a dispatcher could have run the call.
 	DetailToolCallInvalid = "tool_call_invalid"
 	// DetailRunRefused: a flag's cause when the provider refused a run that
-	// used the capability. Used by #736's projection and #737's flags.
+	// used the capability. Used by #736's projection; written by passive
+	// refresh (#741), never by a check.
 	DetailRunRefused = "run_refused"
 )
 

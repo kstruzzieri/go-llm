@@ -376,21 +376,11 @@ func TestExplainToolCall_LogProvenance(t *testing.T) {
 	}
 	tests := []struct {
 		name   string
-		model  string // logModel when empty
-		native bool   // bound through Ollama's own API rather than b
 		rows   []fingerprint.EvidenceRow
 		listed []string // what the runtime itself lists
 		want   ToolCallExplanation
 	}{
 		{name: "nothing", want: ToolCallExplanation{Source: "unknown"}},
-		{
-			// #736, deliberate: the live array without tools is the
-			// provider's no and overturns the catalog's yes, but with no stored
-			// row today's Source switch has no label for it, so it reads "unknown".
-			name: "a live array without tools overturns a catalog yes", model: catalogToolModel, native: true,
-			listed: []string{"completion"},
-			want:   ToolCallExplanation{Caps: catalogToolCaps &^ CapToolCall, Source: "unknown"},
-		},
 		{
 			// #736: a checked no outranks the runtime's bit (it was the runtime's yes before).
 			name: "a probe no beside the runtime's bit is the probe's",
@@ -452,16 +442,9 @@ func TestExplainToolCall_LogProvenance(t *testing.T) {
 			if len(tt.rows) > 0 {
 				appendRows(t, store, tt.rows...)
 			}
-			binding, model := b, logModel
-			if tt.native {
-				binding = mustBinding(t, "http://127.0.0.1:11434", "ollama")
-			}
-			if tt.model != "" {
-				model = tt.model
-			}
-			mr, prov := logRegistry(t, store, "local", binding, logDigest)
-			prov.models[0].Name, prov.models[0].Capabilities = model, tt.listed
-			got, err := mr.ExplainToolCall(t.Context(), ModelKey{Provider: "local", Model: model})
+			mr, prov := logRegistry(t, store, "local", b, logDigest)
+			prov.models[0].Capabilities = tt.listed
+			got, err := mr.ExplainToolCall(t.Context(), ModelKey{Provider: "local", Model: logModel})
 			if err != nil {
 				t.Fatalf("ExplainToolCall: %v", err)
 			}
@@ -469,6 +452,59 @@ func TestExplainToolCall_LogProvenance(t *testing.T) {
 				t.Fatalf("TestedAt = %v; want %v", got.TestedAt, tt.want.TestedAt)
 			}
 			got.TestedAt, tt.want.TestedAt = time.Time{}, time.Time{}
+			if got != tt.want {
+				t.Fatalf("got %+v; want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestExplainToolCall_LiveOllamaNoIsRuntime pins that a live Ollama
+// capabilities array without tools, with no stored row and no attempt, is the
+// provider's no and reads as "runtime", catalog yes or not. An attempt still
+// makes it the probe's, and no array at all still says nothing.
+func TestExplainToolCall_LiveOllamaNoIsRuntime(t *testing.T) {
+	b := mustBinding(t, "http://127.0.0.1:11434", "ollama")
+	attempt := showRow(b, "tool_call", fingerprint.CapProbeInconclusive, logDigest, logT0.Add(-time.Hour))
+	attempt.Kind = fingerprint.EvidenceKindAttempt
+	attempt.FreshUntil, attempt.ExpiresAt = fingerprint.ExpiryFor(attempt, 0)
+	tests := []struct {
+		name   string
+		model  string
+		listed []string
+		rows   []fingerprint.EvidenceRow
+		want   ToolCallExplanation
+	}{
+		{
+			name: "overturns a catalog yes", model: catalogToolModel, listed: []string{"completion"},
+			want: ToolCallExplanation{Caps: catalogToolCaps &^ CapToolCall, Source: "runtime"},
+		},
+		{
+			name: "a model the catalog does not know", model: logModel, listed: []string{"completion"},
+			want: ToolCallExplanation{Caps: CapChat | CapGenerate | CapStream, Source: "runtime"},
+		},
+		{
+			name: "an attempt makes it the probe's", model: logModel, listed: []string{"completion"}, rows: []fingerprint.EvidenceRow{attempt},
+			want: ToolCallExplanation{Caps: CapChat | CapGenerate | CapStream, Source: "probe", State: fingerprint.CapProbeInconclusive, Valid: true},
+		},
+		{
+			name: "no array says nothing", model: logModel,
+			want: ToolCallExplanation{Source: "unknown"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := newEvidenceLog(t)
+			if len(tt.rows) > 0 {
+				appendRows(t, store, tt.rows...)
+			}
+			mr, prov := logRegistry(t, store, "local", b, logDigest)
+			prov.models[0].Name, prov.models[0].Capabilities = tt.model, tt.listed
+			got, err := mr.ExplainToolCall(t.Context(), ModelKey{Provider: "local", Model: tt.model})
+			if err != nil {
+				t.Fatalf("ExplainToolCall: %v", err)
+			}
+			got.TestedAt = time.Time{}
 			if got != tt.want {
 				t.Fatalf("got %+v; want %+v", got, tt.want)
 			}
