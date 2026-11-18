@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kstruzzieri/go-llm/config"
 	"github.com/kstruzzieri/go-llm/configio"
 	"github.com/kstruzzieri/go-llm/configview"
 	"github.com/kstruzzieri/go-llm/fingerprint"
@@ -665,7 +666,7 @@ func TestGolemModels_PlanAndResultsOnStderr(t *testing.T) {
 	stdout, stderr := e.mustRun(t, srv, "-probe-all")
 	errText := stderr.String()
 
-	header := lines(errText, "check plan: provider \"lc\" at "+strings.TrimPrefix(srv.URL, "http://"))
+	header := lines(errText, fmt.Sprintf("check plan: provider \"lc\" at %q", strings.TrimPrefix(srv.URL, "http://")))
 	if len(header) != 1 || !strings.Contains(header[0], "2 models") {
 		t.Fatalf("plan header %q\nstderr:\n%s", header, errText)
 	}
@@ -980,5 +981,67 @@ func TestPrintCheckPlan_LoadWording(t *testing.T) {
 				t.Fatalf("plan item %q; want it to end %q", item, tt.want)
 			}
 		})
+	}
+}
+
+// failingAppendStore is a store whose check-result writes fail.
+type failingAppendStore struct{ fingerprint.EvidenceStore }
+
+func (failingAppendStore) AppendCheckResult(context.Context, string, string, string, []fingerprint.EvidenceRow, *fingerprint.ModelAccess) error {
+	return errors.New("disk full")
+}
+
+// TestGolemModels_StoreWriteFailureIsNotAFailedCheck pins that a completed
+// check the store did not keep says "store write failed", while a failed
+// check keeps a plain "not saved".
+func TestGolemModels_StoreWriteFailureIsNotAFailedCheck(t *testing.T) {
+	srv := newMCServer(t)
+	srv.ids = []string{"good", "bad"}
+	srv.reply = func(w http.ResponseWriter, _ *http.Request, model string, _ int) {
+		if model == "bad" {
+			http.Error(w, "boom", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, mcCalled)
+	}
+	e := newMCEnv(t, mcConfig(srv.URL, "openai-compat", "good", "bad"))
+	cfg, err := config.Load(e.cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := mcOpen(t, e.root)
+	t.Cleanup(func() { _ = h.Close() })
+	c := &modelsCheck{cfg: cfg, store: failingAppendStore{h.Log()}}
+	var errOut strings.Builder
+	if err := c.checkProvider(t.Context(), "lc", []string{"good", "bad"}, &errOut); err != nil {
+		t.Fatal(err)
+	}
+	if got := lines(errOut.String(), `check result "good"`); len(got) != 1 || !strings.HasSuffix(got[0], "; 1 request sent; not saved (store write failed)") {
+		t.Fatalf("completed check: %q\n%s", got, errOut.String())
+	}
+	if got := lines(errOut.String(), `check result "bad"`); len(got) != 1 || !strings.HasSuffix(got[0], ": server_error; 1 request sent; not saved") {
+		t.Fatalf("failed check: %q\n%s", got, errOut.String())
+	}
+}
+
+// TestGolemCheckOutput_QuotesEndpointHost pins that a host from config is
+// printed quoted on the plan header and the automatic progress line, so a
+// right-to-left override reaches the terminal escaped, not as the raw rune.
+func TestGolemCheckOutput_QuotesEndpointHost(t *testing.T) {
+	host := provider.EndpointHost("http://ev\u202eil:11434")
+	if host == "" {
+		t.Fatal("fixture host did not parse")
+	}
+	var plan, progress strings.Builder
+	printCheckPlan(&plan, configio.CheckPlan{Provider: "p", EndpointHost: host})
+	probeProgressPrinter(&progress)(provider.CapabilityProbeProgress{
+		Key: provider.ModelKey{Provider: "p", Model: "m"}, EndpointHost: host, Method: "chat-stream-tools",
+		Stage: "started", ReservedRequests: 2, MaxOutputTokensPerRequest: 2048,
+	})
+	for name, out := range map[string]string{"plan": plan.String(), "progress": progress.String()} {
+		if strings.ContainsRune(out, '\u202e') || !strings.Contains(out, `"ev\u202eil:11434"`) {
+			t.Fatalf("%s line %q; want the host quoted and escaped", name, out)
+		}
 	}
 }

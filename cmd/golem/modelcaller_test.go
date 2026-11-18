@@ -532,3 +532,24 @@ func TestGolemNoCapProbe_AttachesNoLog(t *testing.T) {
 		t.Fatalf("control: run = %v; want the stored no to fail preflight\nstderr:\n%s", err, stderr)
 	}
 }
+
+// TestGolemPreflight_ProbeErrorTextIsQuoted pins that a failed check's error,
+// which can carry a server's body, reaches the preflight message quoted, so an
+// escape sequence in a 500 body is escaped rather than sent to the terminal.
+func TestGolemPreflight_ProbeErrorTextIsQuoted(t *testing.T) {
+	srv := newMCServer(t)
+	srv.ids = []string{"a"}
+	srv.reply = func(w http.ResponseWriter, _ *http.Request, _ string, _ int) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = io.WriteString(w, "\x1b[31mboom\x1b[0m")
+	}
+	e := newMCEnv(t, mcConfig(srv.URL, "openai-compat", "a"))
+	b := activatedBundle(t, e, srv, io.Discard, "a")
+	warns, err := preflightToolCapable(t.Context(), b.Models, []string{"lc/a"}, "agent", noEndpoints, b.Models)
+	if err == nil || len(warns) != 1 || !strings.Contains(warns[0], "tool-capability probe failed: ") {
+		t.Fatalf("preflight = %q, %v; want the failed check's warning", warns, err)
+	}
+	if strings.ContainsRune(err.Error(), 0x1b) || !strings.Contains(warns[0], `\x1b[31mboom`) {
+		t.Fatalf("warning %q; want the body's escape sequence quoted", warns[0])
+	}
+}

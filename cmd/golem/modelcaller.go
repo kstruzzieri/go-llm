@@ -507,7 +507,8 @@ func classifyToolCapability(ctx context.Context, sel, useCase string, key provid
 	}
 	switch {
 	case err != nil:
-		return false, fmt.Sprintf("%s %q: tool-capability probe failed: %v; %s", fallbackLabel(useCase), sel, err, remediationHint(sel)), true
+		// Quoted: the error may carry a server's body, control characters included.
+		return false, fmt.Sprintf("%s %q: tool-capability probe failed: %q; %s", fallbackLabel(useCase), sel, err, remediationHint(sel)), true
 	case state == fingerprint.CapProbeYes:
 		return true, "", true
 	case state == fingerprint.CapProbeNo:

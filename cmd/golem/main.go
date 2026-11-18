@@ -1494,7 +1494,9 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 			// gate (children always carry the file tools, so a chain without
 			// tool_call would otherwise fail only at invocation time) and its
 			// own context-derived ceiling.
-			dwarns, perr := preflightToolCapable(ctx, bundle.Models, dchain, dispatchUseCase, resolveEndpoint, resolver)
+			// Labelled "dispatch", not the routing use case, so a dispatch-only
+			// entry is not reported as an agent fallback.
+			dwarns, perr := preflightToolCapable(ctx, bundle.Models, dchain, dispatchPreflightLabel, resolveEndpoint, resolver)
 			warns = append(warns, dwarns...)
 			if perr != nil {
 				if isPreflightCapabilityError(perr) {

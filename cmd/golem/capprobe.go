@@ -51,7 +51,8 @@ func probeProgressPrinter(w io.Writer) func(provider.CapabilityProbeProgress) {
 	return func(p provider.CapabilityProbeProgress) {
 		switch p.Stage {
 		case "started":
-			_, _ = fmt.Fprintf(w, "capability check: %q at %s via %s: reserving %s, each requesting up to %d output tokens\n",
+			// The host comes from config: quoted, so no control rune reaches the terminal.
+			_, _ = fmt.Fprintf(w, "capability check: %q at %q via %s: reserving %s, each requesting up to %d output tokens\n",
 				p.Key.String(), p.EndpointHost, p.Method, plural(p.ReservedRequests, "request", "requests"), p.MaxOutputTokensPerRequest)
 		case "finished", "cancelled":
 			_, _ = fmt.Fprintf(w, "capability check: %q %s: %s sent\n", p.Key.String(), p.Stage, plural(p.Requests, "request", "requests"))

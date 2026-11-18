@@ -71,7 +71,7 @@ func (c *modelsCheck) checkProvider(ctx context.Context, name string, models []s
 		Config: c.cfg, Store: c.store, Policy: c.policy,
 		OnResult: func(r configio.CheckResult) {
 			reported[r.Model] = true
-			printCheckResult(errOut, r, c.memoryOnly)
+			c.printResult(errOut, r)
 		},
 	})
 	if err != nil {
@@ -141,7 +141,7 @@ func reportCheckError(ctx context.Context, errOut io.Writer, name string, err er
 // a metadata read, the model once at a loopback endpoint, and whatever a
 // remote server decides.
 func printCheckPlan(w io.Writer, plan configio.CheckPlan) {
-	head := fmt.Sprintf("check plan: provider %q at %s", plan.Provider, plan.EndpointHost)
+	head := fmt.Sprintf("check plan: provider %q at %q", plan.Provider, plan.EndpointHost) // the host comes from config: quoted, so no control rune reaches the terminal
 	if plan.Force {
 		head += " (forced)"
 	}
@@ -168,10 +168,11 @@ func printCheckPlan(w io.Writer, plan configio.CheckPlan) {
 	}
 }
 
-// printCheckResult shows one model's result: its code or its answers, the
-// requests it sent, and whether it was saved, and only in memory when the
-// store fell back to memory.
-func printCheckResult(w io.Writer, r configio.CheckResult, memoryOnly bool) {
+// printResult shows one model's result: its code or its answers, the requests
+// it sent, and whether it was saved: only in memory when the store fell back to
+// memory, and "store write failed" for a completed check a store did not keep,
+// so that is not mistaken for a failed check.
+func (c *modelsCheck) printResult(w io.Writer, r configio.CheckResult) {
 	outcome := string(r.Code)
 	if r.Code == "" {
 		parts := make([]string, 0, len(r.Answers))
@@ -186,10 +187,12 @@ func printCheckResult(w io.Writer, r configio.CheckResult, memoryOnly bool) {
 	}
 	saved := "not saved"
 	switch {
-	case r.Persisted && memoryOnly:
+	case r.Persisted && c.memoryOnly:
 		saved = "saved (memory only)"
 	case r.Persisted:
 		saved = "saved"
+	case r.Code == "" && len(r.Answers) > 0 && c.store != nil:
+		saved = "not saved (store write failed)"
 	}
 	_, _ = fmt.Fprintf(w, "check result %q: %s; %s sent; %s\n", r.Model, outcome, plural(r.Requests, "request", "requests"), saved)
 }
