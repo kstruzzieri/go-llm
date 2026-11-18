@@ -213,12 +213,14 @@ func dispatchObservation(t *testing.T, sess *replSession, b *modelBackend) pathO
 		answer: r.Summary, failure: r.Error, score: r.RiskScore}
 }
 
-// footerRisk reads the score from a completed run's finalFooter line, or 0
-// when it has none. Every probe column expects a nonzero score, so a missing
-// footer still fails there.
+// footerRisk reads the score from a run's finalFooter line, which starts
+// "done · " or, for a turn with no answer, "no answer · " (#767), or returns
+// 0 when it has none. Every probe column expects a nonzero score, so a
+// missing footer still fails there.
 func footerRisk(stderr string) int {
 	for _, line := range strings.Split(stderr, "\n") {
-		if _, score, ok := strings.Cut(line, " · risk "); ok && strings.HasPrefix(line, "done · ") {
+		footer := strings.HasPrefix(line, "done · ") || strings.HasPrefix(line, "no answer · ")
+		if _, score, ok := strings.Cut(line, " · risk "); ok && footer {
 			if n, err := strconv.Atoi(score); err == nil {
 				return n
 			}

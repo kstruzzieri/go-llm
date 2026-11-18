@@ -263,3 +263,37 @@ func TestTraceRecordGroundingIsAdditive(t *testing.T) {
 		}
 	}
 }
+
+// #767: the recovery opt-in round-trips through a trace, and a trace without
+// it omits the key, so pre-#767 traces stay byte-identical.
+func TestTraceRequestRecoverThinkingOnlyAnswer(t *testing.T) {
+	for _, on := range []bool{false, true} {
+		rec := BuildTrace(TraceMeta{Goal: "g", RecoverThinkingOnlyAnswer: on}, sampleResult(), "completed", false, nil)
+		raw, err := json.Marshal(rec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var keys struct {
+			Request map[string]json.RawMessage `json:"request"`
+		}
+		var back struct {
+			Request TraceRequest `json:"request"`
+		}
+		if err := json.Unmarshal(raw, &keys); err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal(raw, &back); err != nil {
+			t.Fatal(err)
+		}
+		if back.Request.RecoverThinkingOnlyAnswer != on {
+			t.Errorf("on=%v: round-tripped opt-in = %v", on, back.Request.RecoverThinkingOnlyAnswer)
+		}
+		got, present := keys.Request["recover_thinking_only_answer"]
+		if on && string(got) != "true" {
+			t.Errorf("on: request key = %s (present %v), want true", got, present)
+		}
+		if !on && present {
+			t.Errorf("off: request carries recover_thinking_only_answer = %s, want the key omitted", got)
+		}
+	}
+}
