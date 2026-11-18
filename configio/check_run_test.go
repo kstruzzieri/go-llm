@@ -148,6 +148,12 @@ func rcConfig(name, base, format, key string, models ...string) *config.Config {
 // rcRun runs plan and returns the results it reported, sorted by model.
 func rcRun(t *testing.T, plan CheckPlan, opts RunOptions) ([]CheckResult, error) {
 	t.Helper()
+	return rcRunCtx(t, t.Context(), plan, opts)
+}
+
+// rcRunCtx is rcRun under ctx.
+func rcRunCtx(t *testing.T, ctx context.Context, plan CheckPlan, opts RunOptions) ([]CheckResult, error) {
+	t.Helper()
 	var mu sync.Mutex
 	var out []CheckResult
 	next := opts.OnResult
@@ -159,7 +165,7 @@ func rcRun(t *testing.T, plan CheckPlan, opts RunOptions) ([]CheckResult, error)
 			next(r)
 		}
 	}
-	err := RunCheck(t.Context(), plan, opts)
+	err := RunCheck(ctx, plan, opts)
 	mu.Lock()
 	defer mu.Unlock()
 	slices.SortFunc(out, func(a, b CheckResult) int { return strings.Compare(a.Model, b.Model) })
@@ -353,8 +359,12 @@ func TestRunCheck_RefuseEverythingNeverExceedsPlan(t *testing.T) {
 		{"tools rejected", "openai-compat", 400},
 		{"tools unprocessable", "openai-compat", 422},
 		{"tools server error", "openai-compat", 500},
+		{"tools refused", "openai-compat", 403},
+		{"tools not found", "openai-compat", 404},
 		{"show rejected", "ollama", 400},
 		{"show server error", "ollama", 503},
+		{"show refused", "ollama", 403},
+		{"show not found", "ollama", 404},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			stub := newRCStub(t, rcStatus(tt.status, `{"error":{"message":"no"}}`))
@@ -369,6 +379,11 @@ func TestRunCheck_RefuseEverythingNeverExceedsPlan(t *testing.T) {
 				got := stub.count(item.Model)
 				if got < 1 || got > item.MaxRequests || res[i].Requests != got {
 					t.Fatalf("%s: server received %d, Requests %d; want 1..%d and equal", item.Model, got, res[i].Requests, item.MaxRequests)
+				}
+				// A clean refusal is one request, and no model answered, so
+				// it is refused.
+				if (tt.status == 403 || tt.status == 404) && (got != 1 || res[i].Code != CodeRefused) {
+					t.Fatalf("%s: server received %d, result %+v; want 1 request, refused", item.Model, got, res[i])
 				}
 			}
 		})

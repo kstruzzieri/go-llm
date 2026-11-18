@@ -18,16 +18,7 @@ import (
 // byte limit, a destination denial, and the transport and decoding failures.
 // Anything else is malformed_response.
 func checkCode(err error) ErrorCode {
-	status := 0
-	var hs interface{ HTTPStatusCode() int }
-	var unreadable *responsebound.RejectionReadError
-	switch {
-	case errors.As(err, &unreadable):
-		status = unreadable.StatusCode
-	case errors.As(err, &hs):
-		status = hs.HTTPStatusCode()
-	}
-	switch {
+	switch status := checkStatus(err); {
 	case status == 401:
 		return CodeAuthFailed
 	case status == 403 || status == 404:
@@ -54,6 +45,21 @@ func checkCode(err error) ErrorCode {
 		return code
 	}
 	return CodeMalformedResponse
+}
+
+// checkStatus is a failed check's HTTP status, 0 when it has none: a bounded
+// rejection whose body could not be read keeps its status; otherwise the
+// chain's HTTPStatusCode. A 403 or 404 is a refusal whatever its body did.
+func checkStatus(err error) int {
+	var unreadable *responsebound.RejectionReadError
+	if errors.As(err, &unreadable) {
+		return unreadable.StatusCode
+	}
+	var hs interface{ HTTPStatusCode() int }
+	if errors.As(err, &hs) {
+		return hs.HTTPStatusCode()
+	}
+	return 0
 }
 
 // transportCode classifies a transport or decoding failure by type: timeout,

@@ -41,8 +41,10 @@ type CheckAnswer struct {
 
 // CheckResult is one planned model's finished check. Code is "" when the check
 // answered, else why it did not, and Answers is then empty. Requests counts the
-// requests the check sent. Persisted is true only once the answers were
-// committed to the run's store. A result never carries provider text.
+// requests the check sent. Persisted is true only once the result's rows were
+// committed to the run's store: its answers, or a model_refused's access row.
+// It says nothing of whether that store outlives the process; a memory-only
+// store reports that in its own status. A result never carries provider text.
 type CheckResult struct {
 	Model     string        `json:"model"`
 	Method    string        `json:"method"`
@@ -63,8 +65,10 @@ type RunOptions struct {
 	Store fingerprint.EvidenceStore
 	// Policy grants remote destinations; a loopback one needs no grant.
 	Policy provider.DestinationPolicy
-	// OnResult receives each checked model's result once its answers are
-	// committed. Calls never overlap each other or OnUsage. May be nil.
+	// OnResult receives each checked model's result once its rows are
+	// committed; a refusal's, once another model answers or every check has
+	// finished. Calls never overlap each other or OnUsage, and run outside any
+	// store transaction. A panic in it is not recovered. May be nil.
 	OnResult func(CheckResult)
 	// OnUsage receives the usage of each completed generation as it completes,
 	// before anything is saved. Calls never overlap each other or OnResult. May
@@ -94,19 +98,35 @@ type RunOptions struct {
 // The remaining models are checked at most 4 at once at a remote openai-compat
 // endpoint, one at a time at a loopback one, and all at once through Ollama,
 // whose checks read metadata. A failed check is its model's result, with a
-// code, and never stops another; a 403 or 404 is refused, and nothing is saved
-// for it. A usable result's rows are appended in one transaction, filed under
-// the first nonempty of: the digest the reply named, the plan's runtime digest
-// for the model, the listing digest the snapshot holds, else "". With none of
-// the first three a row is name-only, and a reader at a live digest ignores
-// it; a model re-pulled between the host's listing and a check whose reply
-// names no digest gets its new answer filed under the old digest.
+// code, and never stops another. A usable result's rows are appended in one
+// transaction, filed under the first nonempty of: the digest the reply named,
+// the plan's runtime digest for the model, the listing digest the snapshot
+// holds, else "". With none of the first three a row is name-only, and a reader
+// at a live digest ignores it; a model re-pulled between the host's listing and
+// a check whose reply names no digest gets its new answer filed under the old
+// digest.
 //
-// Cancellation stops scheduling. A check that returns after ctx is done is
-// neither saved nor reported, and RunCheck returns ctx's error, uncoded.
-// Otherwise it returns nil once every check has finished; no worker outlives
-// the call. Idle connections of a transport the run made are closed before it
-// returns; a host's remote Transport keeps its own.
+// Refusals belong to the key. A completed stream (chat-stream or
+// chat-stream-tools whose reply proved chat, tool_call_invalid included) is an
+// answer, and its answered access row commits in the same transaction as its
+// answers. A 403 or 404, whatever became of its body, is held with its
+// observation time. Once a model in this call has answered, every refusal held
+// or still to come is model_refused: the key works and this model is refused
+// to it, saved as a refused access row with its status and that time, in a
+// transaction of its own. A refusal no model in this call corroborated is
+// refused once every check has finished, and saved nowhere, since a refused key
+// cannot be told from a refused model. A request_rejected attempt, a metadata
+// answer, a listing, another call's answer and a failure corroborate nothing,
+// so through Ollama every 403 or 404 is refused. A check deletes nothing.
+//
+// Cancellation stops scheduling and retries. A result committed before ctx was
+// done stays saved and is reported; a check that finished after it, or whose
+// commit it interrupted, is neither saved nor reported, and refusals still held
+// are dropped. Usage the prober already reported through OnUsage stays
+// reported. RunCheck then returns ctx's error, uncoded. Otherwise it returns
+// nil once every check has finished; no worker outlives the call. Idle
+// connections of a transport the run made are closed before it returns; a
+// host's remote Transport keeps its own.
 func RunCheck(ctx context.Context, plan CheckPlan, opts RunOptions) error {
 	if ctx == nil {
 		return wrapCode(CodeInvalidArgument, errors.New("configio: run check: nil context"))
@@ -186,7 +206,13 @@ func RunCheck(ctx context.Context, plan CheckPlan, opts RunOptions) error {
 		})
 	}
 	_ = g.Wait()
-	return ctx.Err()
+	if err := ctx.Err(); err != nil {
+		return err // refusals still held are dropped
+	}
+	for _, out := range r.held { // no model answered: refused, saved nowhere
+		r.report(out.result)
+	}
+	return nil
 }
 
 // errPlanStale is every stale plan's error; it says nothing of what changed.
@@ -265,6 +291,10 @@ type checkRun struct {
 	snap     fingerprint.EvidenceSnapshot // the pre-flight snapshot
 	onResult func(CheckResult)
 	cb       sync.Mutex // serializes the host's callbacks
+
+	mu       sync.Mutex     // guards answered and held
+	answered bool           // a model in this call gave a completed reply
+	held     []checkOutcome // refusals waiting for one
 }
 
 // preflight reads one snapshot of the planned models and returns the items
@@ -299,15 +329,17 @@ func (r *checkRun) preflight(ctx context.Context, store fingerprint.EvidenceRead
 	return items, nil
 }
 
-// checkOutcome is one model's finished check: the result to report and the
-// rows that file its answers.
+// checkOutcome is one model's finished check: the result to report, the rows
+// that file its answers, and its access record: answered for a completed
+// stream, refused for a 403 or 404, nil otherwise.
 type checkOutcome struct {
 	result CheckResult
 	rows   []fingerprint.EvidenceRow
+	access *fingerprint.ModelAccess
 }
 
-// check sends one planned model's check, then commits and reports it. A check
-// that returns after the caller cancelled is neither saved nor reported.
+// check sends one planned model's check. A refusal is held; anything else is
+// settled, and an answer then corroborates the refusals held so far.
 func (r *checkRun) check(ctx context.Context, it planItem) {
 	if ctx.Err() != nil {
 		return
@@ -320,25 +352,27 @@ func (r *checkRun) check(ctx context.Context, it planItem) {
 			Method: recipe.Method, Capabilities: it.item.Capabilities,
 		})
 	}
-	completedAt := time.Now()
-	if ctx.Err() != nil {
+	out := r.classify(it.item.Model, recipe, res, err, time.Now())
+	if out.result.Code == CodeRefused {
+		r.hold(ctx, out)
 		return
 	}
-	out := r.classify(it.item.Model, recipe, res, err, completedAt)
-	r.commit(ctx, &out)
-	if ctx.Err() != nil && !out.result.Persisted {
-		return
+	if r.settle(ctx, out) && out.access != nil { // a completed stream
+		r.corroborate(ctx)
 	}
-	r.report(out.result)
 }
 
-// classify turns a check that returned, the caller still live, into its
-// outcome: a coded failure with nothing to save (a 403 or 404 is refused), or
-// its answers and the rows that file them (fingerprint.AnswerRows).
+// classify turns a check that returned into its outcome: a coded failure with
+// no rows (a 403 or 404 is refused, with a refused access record of its status
+// and completedAt), or its answers, the rows that file them
+// (fingerprint.AnswerRows) and, for a completed stream, an answered access
+// record.
 func (r *checkRun) classify(model string, recipe fingerprint.ProbeRecipe, res fingerprint.CapabilityProbeResult, err error, completedAt time.Time) checkOutcome {
 	out := checkOutcome{result: CheckResult{Model: model, Method: recipe.Method, Requests: max(res.Requests, 0)}}
 	if err != nil {
-		out.result.Code = checkCode(err)
+		if out.result.Code = checkCode(err); out.result.Code == CodeRefused {
+			out.access = &fingerprint.ModelAccess{Model: model, State: fingerprint.AccessRefused, HTTPStatus: checkStatus(err), ObservedAt: completedAt}
+		}
 		return out
 	}
 	listed, _ := evidencesel.Select(r.snap, r.binding, model, true)
@@ -347,17 +381,79 @@ func (r *checkRun) classify(model string, recipe fingerprint.ProbeRecipe, res fi
 		out.result.Answers = append(out.result.Answers, CheckAnswer{Capability: a.Capability, State: string(a.State), Detail: a.Detail})
 	}
 	out.rows = fingerprint.AnswerRows(r.binding.Endpoint, r.binding.Adapter, model, digest, recipe, res.Answers, completedAt)
+	if completedStream(recipe.Method, res.Answers) {
+		out.access = &fingerprint.ModelAccess{Model: model, State: fingerprint.AccessAnswered, ObservedAt: completedAt}
+	}
 	return out
 }
 
-// commit appends out's rows in one transaction and marks its result persisted
-// once that commits. Nothing is written without a store or rows, or once the
-// caller cancelled.
+// completedStream reports whether a check's answers show a completed
+// generation: a streamed method whose reply proved chat. A request_rejected
+// attempt proves nothing, and a metadata answer is not a generation.
+func completedStream(method string, answers []fingerprint.ProbeAnswer) bool {
+	if method != fingerprint.MethodChatStream && method != fingerprint.MethodChatStreamTools {
+		return false
+	}
+	return slices.ContainsFunc(answers, func(a fingerprint.ProbeAnswer) bool {
+		return a.Capability == "chat" && a.State == fingerprint.CapProbeYes
+	})
+}
+
+// hold keeps a refusal until a model in this call answers, or flushes it at
+// once when one already has. Each refusal is flushed, or left for the end of
+// the run, exactly once.
+func (r *checkRun) hold(ctx context.Context, out checkOutcome) {
+	r.mu.Lock()
+	answered := r.answered
+	if !answered {
+		r.held = append(r.held, out)
+	}
+	r.mu.Unlock()
+	if answered {
+		r.flush(ctx, out)
+	}
+}
+
+// corroborate records that a model answered and flushes every refusal held so
+// far.
+func (r *checkRun) corroborate(ctx context.Context) {
+	r.mu.Lock()
+	held := r.held
+	r.held, r.answered = nil, true
+	r.mu.Unlock()
+	for _, out := range held {
+		r.flush(ctx, out)
+	}
+}
+
+// flush settles a corroborated refusal as model_refused: its refused access
+// row alone, in a transaction of its own.
+func (r *checkRun) flush(ctx context.Context, out checkOutcome) {
+	out.result.Code = CodeModelRefused
+	r.settle(ctx, out)
+}
+
+// settle commits out and reports it, and says whether it did. Once the caller
+// has cancelled, only a result already committed is reported: a check that
+// finished after the cancellation, or whose commit it interrupted, is neither
+// saved nor reported.
+func (r *checkRun) settle(ctx context.Context, out checkOutcome) bool {
+	r.commit(ctx, &out)
+	if ctx.Err() != nil && !out.result.Persisted {
+		return false
+	}
+	r.report(out.result)
+	return true
+}
+
+// commit appends out's rows and access record in one transaction and marks its
+// result persisted once that commits. Nothing is written without a store or
+// anything to write, or once the caller cancelled.
 func (r *checkRun) commit(ctx context.Context, out *checkOutcome) {
-	if r.store == nil || len(out.rows) == 0 || ctx.Err() != nil {
+	if r.store == nil || (len(out.rows) == 0 && out.access == nil) || ctx.Err() != nil {
 		return
 	}
-	if r.store.AppendCheckResult(ctx, r.binding.Endpoint, r.apiKey, out.result.Model, out.rows, nil) == nil {
+	if r.store.AppendCheckResult(ctx, r.binding.Endpoint, r.apiKey, out.result.Model, out.rows, out.access) == nil {
 		out.result.Persisted = true
 	}
 }
