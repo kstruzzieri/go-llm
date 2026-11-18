@@ -40,8 +40,9 @@ func TestCancellationIsUnclassified(t *testing.T) {
 }
 
 func TestCheckCodes_AllTyped(t *testing.T) {
-	// Each value goes into an interface as declared: a constant left untyped by
-	// a const block's implicit repetition arrives as a plain string and fails.
+	// Each value goes into an interface as declared: a constant written
+	// CodeX = "x", without the type, is an untyped string constant, arrives as
+	// a plain string and fails.
 	cases := []struct {
 		code any
 		want string

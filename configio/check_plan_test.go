@@ -27,6 +27,8 @@ const (
 	cpOllama = "http://127.0.0.1:11434"
 	cpRemote = "https://api.example.test"
 	cpKey    = "sk-plan-test-key-7f3a"
+	// cpURLPassword is the password of a base URL that carries userinfo.
+	cpURLPassword = "pw-url-secret-41c"
 )
 
 const cpTools = provider.CapChat | provider.CapStream | provider.CapToolCall
@@ -681,7 +683,7 @@ func TestPlanCheck_InvalidInputsRejected(t *testing.T) {
 		{name: "slash in provider name", provider: "a/b", models: []string{"m"}, change: setProvider("a/b", valid)},
 		{name: "not a URL", provider: "lc", models: []string{"m"}, change: setProvider("lc", withURL("not a url"))},
 		{name: "ftp URL", provider: "lc", models: []string{"m"}, change: setProvider("lc", withURL("ftp://127.0.0.1:8080"))},
-		{name: "userinfo", provider: "lc", models: []string{"m"}, change: setProvider("lc", withURL("http://u:pw@127.0.0.1:8080"))},
+		{name: "userinfo", provider: "lc", models: []string{"m"}, change: setProvider("lc", withURL("http://u:"+cpURLPassword+"@127.0.0.1:8080"))},
 		{name: "query", provider: "lc", models: []string{"m"}, change: setProvider("lc", withURL("http://127.0.0.1:8080/?q=1"))},
 		{name: "unknown api format", provider: "lc", models: []string{"m"}, change: setProvider("lc", config.ProviderConfig{BaseURL: cpLocal, APIFormat: "grpc", APIKey: cpKey})},
 		{name: "unresolved key", provider: "lc", models: []string{"m"}, change: setProvider("lc", config.ProviderConfig{BaseURL: cpLocal, APIFormat: "openai-compat", APIKey: "${K}"})},
@@ -713,8 +715,8 @@ func TestPlanCheck_InvalidInputsRejected(t *testing.T) {
 			if reads, _ := rec.calls(); len(reads) != 0 {
 				t.Fatalf("read the store; want no read")
 			}
-			if strings.Contains(err.Error(), cpKey) {
-				t.Fatalf("error %q holds the key", err)
+			if strings.Contains(err.Error(), cpKey) || strings.Contains(err.Error(), cpURLPassword) {
+				t.Fatalf("error %q holds the key or the URL's password", err)
 			}
 		})
 	}
@@ -795,6 +797,9 @@ func TestPlanCheck_StoreReadFailureIsNotEmptySuccess(t *testing.T) {
 	if err == nil || !errors.Is(err, provider.ErrEvidenceUnreadable) || strings.Contains(err.Error(), "MARKER") {
 		t.Fatalf("error = %v; want ErrEvidenceUnreadable without the store's text", err)
 	}
+	if code, ok := CodeOf(err); ok {
+		t.Fatalf("error carries code %q; want no bounded code", code)
+	}
 	if !reflect.DeepEqual(p, CheckPlan{}) {
 		t.Fatalf("plan = %+v; want zero", p)
 	}
@@ -859,43 +864,94 @@ func TestPlanCheck_RecipeMetadataAndIdentityStayAligned(t *testing.T) {
 
 	p := cpPlan(t, cfg, nil, "lc", []string{"m", "n"}, cpTools, false)
 	base := p.state.inputs
+	// One case per field of every sealed type, named type.Field.
 	mutations := map[string]func(in *planInputs){
-		"usual requests":     func(in *planInputs) { in.items[0].item.UsualRequests++ },
-		"max requests":       func(in *planInputs) { in.items[0].item.MaxRequests++ },
-		"output tokens":      func(in *planInputs) { in.items[0].item.MaxOutputTokensPerRequest++ },
-		"model loads":        func(in *planInputs) { in.items[0].item.ModelLoads++ },
-		"request timeout":    func(in *planInputs) { in.items[0].item.RequestTimeout++ },
-		"response bytes":     func(in *planInputs) { in.items[0].item.MaxResponseBytes++ },
-		"item capabilities":  func(in *planInputs) { in.items[0].item.Capabilities = in.items[0].item.Capabilities[:2] },
-		"item methods":       func(in *planInputs) { in.items[0].item.Methods[0] = fingerprint.MethodChatStream },
-		"item model":         func(in *planInputs) { in.items[0].item.Model = "n" },
-		"recipe version":     func(in *planInputs) { in.items[0].recipes[0].Version++ },
-		"recipe message":     func(in *planInputs) { in.items[0].recipes[0].Message += "!" },
-		"recipe tool schema": func(in *planInputs) { in.items[0].recipes[0].ToolParameters = `{}` },
-		"recipe first tool":  func(in *planInputs) { in.items[0].recipes[0].RequiredToolChoiceFirst = false },
-		"recipe max":         func(in *planInputs) { in.items[0].recipes[0].MaxRequests++ },
-		"recipe tokens":      func(in *planInputs) { in.items[0].recipes[0].MaxOutputTokensPerRequest++ },
-		"recipe caps":        func(in *planInputs) { in.items[0].recipes[0].Capabilities = in.items[0].recipes[0].Capabilities[:1] },
-		"one item fewer":     func(in *planInputs) { in.items = in.items[:1] },
-		"requested caps":     func(in *planInputs) { in.caps &^= provider.CapStream },
-		"force":              func(in *planInputs) { in.force = !in.force },
-		"provider timeout":   func(in *planInputs) { in.target.timeout++ },
-		"locality":           func(in *planInputs) { in.target.local = !in.target.local },
-		"provider name":      func(in *planInputs) { in.target.provider = "lc2" },
-		"endpoint":           func(in *planInputs) { in.target.binding.Endpoint = "http://127.0.0.1:8081" },
-		"adapter":            func(in *planInputs) { in.target.binding.Adapter = fingerprint.AdapterOllama },
-		"models":             func(in *planInputs) { in.models = in.models[:1] },
-		"policy authored":    func(in *planInputs) { in.policies[0].Authored = false },
-		"policy explicit":    func(in *planInputs) { in.policies[0].Explicit = []string{"chat"} },
-		"policy derived":     func(in *planInputs) { in.policies[0].Derived = nil },
-		"policy type names":  func(in *planInputs) { in.policies[0].TypeNames = []string{"moe"} },
-		"policy type caps":   func(in *planInputs) { in.policies[0].TypeCaps = 0 },
+		"inputs.target":   func(in *planInputs) { in.target = checkTarget{} },
+		"inputs.models":   func(in *planInputs) { in.models = in.models[:1] },
+		"inputs.caps":     func(in *planInputs) { in.caps &^= provider.CapStream },
+		"inputs.policies": func(in *planInputs) { in.policies = in.policies[:1] },
+		"inputs.items":    func(in *planInputs) { in.items = in.items[:1] },
+		"inputs.force":    func(in *planInputs) { in.force = !in.force },
+
+		"target.provider": func(in *planInputs) { in.target.provider = "lc2" },
+		"target.binding":  func(in *planInputs) { in.target.binding = provider.EvidenceBinding{} },
+		"target.local":    func(in *planInputs) { in.target.local = !in.target.local },
+		"target.timeout":  func(in *planInputs) { in.target.timeout++ },
+
+		"binding.Endpoint": func(in *planInputs) { in.target.binding.Endpoint = "http://127.0.0.1:8081" },
+		"binding.Adapter":  func(in *planInputs) { in.target.binding.Adapter = fingerprint.AdapterOllama },
+
+		"policy.Authored":  func(in *planInputs) { in.policies[0].Authored = false },
+		"policy.Explicit":  func(in *planInputs) { in.policies[0].Explicit = []string{"chat"} },
+		"policy.Derived":   func(in *planInputs) { in.policies[0].Derived = nil },
+		"policy.TypeNames": func(in *planInputs) { in.policies[0].TypeNames = []string{"moe"} },
+		"policy.TypeCaps":  func(in *planInputs) { in.policies[0].TypeCaps = 0 },
+
+		"planItem.item":    func(in *planInputs) { in.items[0].item = CheckItem{} },
+		"planItem.recipes": func(in *planInputs) { in.items[0].recipes = nil },
+
+		"item.Model":                     func(in *planInputs) { in.items[0].item.Model = "n" },
+		"item.Capabilities":              func(in *planInputs) { in.items[0].item.Capabilities = in.items[0].item.Capabilities[:2] },
+		"item.Methods":                   func(in *planInputs) { in.items[0].item.Methods[0] = fingerprint.MethodChatStream },
+		"item.UsualRequests":             func(in *planInputs) { in.items[0].item.UsualRequests++ },
+		"item.MaxRequests":               func(in *planInputs) { in.items[0].item.MaxRequests++ },
+		"item.MaxOutputTokensPerRequest": func(in *planInputs) { in.items[0].item.MaxOutputTokensPerRequest++ },
+		"item.ModelLoads":                func(in *planInputs) { in.items[0].item.ModelLoads++ },
+		"item.RequestTimeout":            func(in *planInputs) { in.items[0].item.RequestTimeout++ },
+		"item.MaxResponseBytes":          func(in *planInputs) { in.items[0].item.MaxResponseBytes++ },
+
+		"recipe.Method":                    func(in *planInputs) { in.items[0].recipes[0].Method = fingerprint.MethodChatStream },
+		"recipe.Adapter":                   func(in *planInputs) { in.items[0].recipes[0].Adapter = fingerprint.AdapterOllama },
+		"recipe.Version":                   func(in *planInputs) { in.items[0].recipes[0].Version++ },
+		"recipe.Capabilities":              func(in *planInputs) { in.items[0].recipes[0].Capabilities = in.items[0].recipes[0].Capabilities[:1] },
+		"recipe.UsualRequests":             func(in *planInputs) { in.items[0].recipes[0].UsualRequests++ },
+		"recipe.MaxRequests":               func(in *planInputs) { in.items[0].recipes[0].MaxRequests++ },
+		"recipe.MaxOutputTokensPerRequest": func(in *planInputs) { in.items[0].recipes[0].MaxOutputTokensPerRequest++ },
+		"recipe.RequestTimeout":            func(in *planInputs) { in.items[0].recipes[0].RequestTimeout++ },
+		"recipe.MaxResponseBytes":          func(in *planInputs) { in.items[0].recipes[0].MaxResponseBytes++ },
+		"recipe.Message":                   func(in *planInputs) { in.items[0].recipes[0].Message += "!" },
+		"recipe.ToolName":                  func(in *planInputs) { in.items[0].recipes[0].ToolName += "!" },
+		"recipe.ToolDescription":           func(in *planInputs) { in.items[0].recipes[0].ToolDescription += "!" },
+		"recipe.ToolParameters":            func(in *planInputs) { in.items[0].recipes[0].ToolParameters = `{}` },
+		"recipe.RequiredToolChoiceFirst":   func(in *planInputs) { in.items[0].recipes[0].RequiredToolChoiceFirst = false },
+
 		// A string moved across a field boundary must not seal the same.
 		"boundary shift": func(in *planInputs) {
 			in.target.provider += in.target.binding.Endpoint[:1]
 			in.target.binding.Endpoint = in.target.binding.Endpoint[1:]
 		},
 	}
+
+	// The table covers every field of every sealed type, and names no field
+	// that is gone. A field added to one of these types fails here until
+	// sealPlan (configio/check_plan.go) writes it and this table changes it.
+	fields := map[string]bool{"boundary shift": true}
+	for _, sealed := range []struct {
+		prefix string
+		typ    reflect.Type
+	}{
+		{"inputs", reflect.TypeFor[planInputs]()},
+		{"target", reflect.TypeFor[checkTarget]()},
+		{"binding", reflect.TypeFor[provider.EvidenceBinding]()},
+		{"policy", reflect.TypeFor[config.ModelCapabilityPolicy]()},
+		{"planItem", reflect.TypeFor[planItem]()},
+		{"item", reflect.TypeFor[CheckItem]()},
+		{"recipe", reflect.TypeFor[fingerprint.ProbeRecipe]()},
+	} {
+		for i := range sealed.typ.NumField() {
+			name := sealed.prefix + "." + sealed.typ.Field(i).Name
+			fields[name] = true
+			if mutations[name] == nil {
+				t.Errorf("%s (%d fields in %s) has no case: write it in sealPlan, then add a case to this table", name, sealed.typ.NumField(), sealed.typ)
+			}
+		}
+	}
+	for name := range mutations {
+		if !fields[name] {
+			t.Errorf("case %q names no field of a sealed type; rename or remove it", name)
+		}
+	}
+
 	secret := [32]byte{9}
 	want := sealPlan(secret, cpKey, &base)
 	for name, change := range mutations {
@@ -910,6 +966,43 @@ func TestPlanCheck_RecipeMetadataAndIdentityStayAligned(t *testing.T) {
 		if sealPlan(secret, cpKey, &base) != want {
 			t.Fatalf("%s: the mutation reached the base inputs", name)
 		}
+	}
+}
+
+func TestPlanCheck_SealEncodingPinned(t *testing.T) {
+	// A fixed input seals to a fixed value, so dropping or reordering any write
+	// in sealPlan fails here, the version and the list counts included, which
+	// no field change can show. A deliberate change to the encoding changes
+	// planSealVersion and this value.
+	in := planInputs{
+		target: checkTarget{
+			provider: "lc", binding: provider.EvidenceBinding{Endpoint: "http://127.0.0.1:8080", Adapter: "openai-compat"},
+			local: true, timeout: 5 * time.Minute,
+		},
+		models: []string{"m", "n"},
+		caps:   cpTools,
+		policies: []config.ModelCapabilityPolicy{
+			{Authored: true, Derived: []string{"chat", "stream"}, TypeNames: []string{"dense"}, TypeCaps: provider.CapChat | provider.CapStream},
+			{Authored: true, Explicit: []string{"chat"}},
+		},
+		items: []planItem{{
+			item: CheckItem{
+				Model: "m", Capabilities: []string{"chat", "stream", "tool_call"}, Methods: []string{"chat-stream-tools"},
+				UsualRequests: 1, MaxRequests: 2, MaxOutputTokensPerRequest: 2048, ModelLoads: 1,
+				RequestTimeout: 3 * time.Minute, MaxResponseBytes: 1 << 20,
+			},
+			recipes: []fingerprint.ProbeRecipe{{
+				Method: "chat-stream-tools", Adapter: "openai-compat", Version: 1, Capabilities: []string{"chat", "stream", "tool_call"},
+				UsualRequests: 1, MaxRequests: 2, MaxOutputTokensPerRequest: 2048, RequestTimeout: 3 * time.Minute, MaxResponseBytes: 1 << 20,
+				Message: "Call get_time.", ToolName: "get_time", ToolDescription: "Get the current time.",
+				ToolParameters: `{"type":"object","properties":{}}`, RequiredToolChoiceFirst: true,
+			}},
+		}},
+		force: true,
+	}
+	const want = "1b05358a9e85bcdadc0ee0f04a6b836102c2c70e7e512f9b4a448725114bba46"
+	if got := sealPlan([32]byte{7}, "sk-golden-key", &in); got != want {
+		t.Fatalf("sealPlan = %s; want %s", got, want)
 	}
 }
 
