@@ -1086,3 +1086,32 @@ func TestRunCheck_CancelDropsHeldRefusals(t *testing.T) {
 		}
 	})
 }
+
+// TestRunCheck_CancelFromOnResultStopsRefusalReports: nothing answers, so both
+// refusals are reported once every check has finished; a cancel from the first
+// report stops the second.
+func TestRunCheck_CancelFromOnResultStopsRefusalReports(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	stub := newRCStub(t, rfByModel(map[string]rcServe{
+		"a": rfForbidden,
+		"c": rcStatus(http.StatusNotFound, `{"error":{"message":"no such model"}}`),
+	}))
+	cfg := rcConfig("lc", stub.srv.URL, "openai-compat", cpKey, "a", "c")
+	store, db, _ := rfStore(t)
+	res, err := rcRunCtx(t, ctx, cpPlan(t, cfg, store, "lc", []string{"a", "c"}, cpTools, false), RunOptions{
+		Config: cfg, Store: store,
+		OnResult: func(r CheckResult) {
+			if r.Model == "a" {
+				cancel()
+			}
+		},
+	})
+	if !errors.Is(err, context.Canceled) || len(res) != 1 {
+		t.Fatalf("RunCheck = %+v, %v; want a's result alone and the cancellation", res, err)
+	}
+	rfWant(t, res, "a", CodeRefused, false, 1)
+	if got := rfAccessRows(t, db); len(got) != 0 {
+		t.Fatalf("access rows %q; want none", got)
+	}
+}

@@ -118,13 +118,17 @@ type RunOptions struct {
 // cannot be told from a refused model. A request_rejected attempt, a metadata
 // answer, a listing, another call's answer and a failure corroborate nothing,
 // so through Ollama every 403 or 404 is refused. A check deletes nothing.
+// A held refusal is reported after the answer that corroborated it, or, when
+// nothing did, after every other result. Results therefore do not come in plan
+// order: a host matches them by Model, never by position.
 //
 // Cancellation stops scheduling and retries. A result committed before ctx was
 // done stays saved and is reported; a check that finished after it, or whose
 // commit it interrupted, is neither saved nor reported, and refusals still held
-// are dropped. Usage the prober already reported through OnUsage stays
-// reported. RunCheck then returns ctx's error, uncoded. Otherwise it returns
-// nil once every check has finished; no worker outlives the call. Idle
+// are dropped, including the uncorroborated ones still to be reported when the
+// host cancels from OnResult. Usage the prober already reported through OnUsage
+// stays reported. RunCheck then returns ctx's error, uncoded. Otherwise it
+// returns nil once every check has finished; no worker outlives the call. Idle
 // connections of a transport the run made are closed before it returns; a
 // host's remote Transport keeps its own.
 func RunCheck(ctx context.Context, plan CheckPlan, opts RunOptions) error {
@@ -206,13 +210,13 @@ func RunCheck(ctx context.Context, plan CheckPlan, opts RunOptions) error {
 		})
 	}
 	_ = g.Wait()
-	if err := ctx.Err(); err != nil {
-		return err // refusals still held are dropped
-	}
 	for _, out := range r.held { // no model answered: refused, saved nowhere
+		if ctx.Err() != nil {
+			break // the rest are dropped, even after a cancel from OnResult
+		}
 		r.report(out.result)
 	}
-	return nil
+	return ctx.Err()
 }
 
 // errPlanStale is every stale plan's error; it says nothing of what changed.
