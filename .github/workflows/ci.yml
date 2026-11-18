@@ -48,6 +48,17 @@ jobs:
             exit 1
           fi
 
+      # docs/superpowers/ and .superpowers/ hold private plans, specs, handoffs
+      # and scratch. .gitignore keeps them out of a plain add; this catches a
+      # forced one, in any letter case, and a .superpowers/ at any depth.
+      - name: Reject tracked private planning docs
+        run: |
+          tracked="$(git ls-files -- ':(icase)docs/superpowers' ':(icase,glob)**/.superpowers/**')"
+          if [ -n "$tracked" ]; then
+            printf 'private planning docs must stay untracked (git rm --cached); tracked:\n%s\n' "$tracked" >&2
+            exit 1
+          fi
+
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version-file: go.mod
