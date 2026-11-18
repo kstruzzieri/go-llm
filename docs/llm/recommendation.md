@@ -193,36 +193,56 @@ explicit `capabilities` entry supplies one.
 ### Tool-capability probe
 
 Catalog and explicit `capabilities` cover the bundled lineup. For a model the
-router has **no** static tool-call answer for — an undeclared model on an
-OpenAI-compat backend — `go-llm` actively probes tool support rather than
-guessing.
+router has **no** tool-call answer for (undeclared, unknown to the catalog,
+and with nothing in the capability store), Golem checks tool support rather
+than guessing.
 
-- **When it runs.** At agent startup the router bounded-eagerly probes the
-  models it is about to route, and route-time it probes on a cache miss. Models
-  with a catalog or explicit answer are never probed.
-- **What it sends (OpenAI-compat only).** A minimal `get_time` tool with up to
-  two chat-completions requests: attempt 1 forces `tool_choice: "required"`;
-  only if the server rejects that (400/422) does attempt 2 retry with `tools`
-  but no `tool_choice`. A tool call in the response means **yes**; a plain
-  answer is **inconclusive** (short TTL); a rejected `tools` array on both
-  attempts is **no**. Auth / rate-limit / transport failures are diagnostic and
-  never cached.
-- **Ollama is passive.** The Ollama path reads tool support from `/api/show`
-  template metadata — it sends no `get_time` request. The two-attempt live
-  probe is OpenAI-compat only.
-- **Cache.** Verdicts persist to `$XDG_DATA_HOME/golem/fingerprints.db` (else
-  `~/.local/share/golem/fingerprints.db`), keyed by backend + model, so a
-  probe runs at most once per model per version.
-- **Disabling.** Pass `-no-cap-probe` to Golem to skip the active probe
-  entirely; catalog and explicit `capabilities` still apply.
+- **When it runs.** At agent startup the router bounded-eagerly checks the
+  models it is about to route (only until the first capable chain entry); at
+  route time it checks a model it is about to use; and `/model set` checks the
+  chosen model. Models with an explicit, catalog or stored answer are not
+  checked.
+- **What it sends (OpenAI-compat).** The streamed `chat-stream-tools` check: a
+  minimal `get_time` tool in up to two streamed chat-completions requests, each
+  requesting up to 2,048 output tokens. Attempt 1 sets
+  `tool_choice: "required"`; only if the server rejects that (400/422) does
+  attempt 2 retry without `tool_choice`. A reply that completes proves chat and
+  stream, and a valid `get_time` call is a tool_call **yes**. A reply without a
+  usable call, or two rejected requests, is an **inconclusive** attempt, never
+  a no. Auth, rate-limit and transport failures save nothing.
+- **Ollama is passive.** An Ollama model is read from `/api/show` metadata: one
+  request, no `get_time` request, and none of the allowance below. Its
+  capabilities array answers yes or no; without one the result is
+  inconclusive.
+- **Allowance.** All automatic checks in one Golem invocation, startup
+  included, share two requests the check sends, which buys one model's check.
+  A model the allowance cannot fund stays unknown, never a no, and Golem says
+  so on stderr; the next run has a fresh allowance. Each `chat-stream-tools`
+  check prints its progress on stderr before its first request and when it
+  ends.
+- **Where answers live.** Answers are appended to the evidence log in
+  `$XDG_DATA_HOME/golem/fingerprints.db` (else
+  `~/.local/share/golem/fingerprints.db`), keyed by endpoint and model (and an
+  Ollama model's content digest), so a model with a current answer is not
+  checked again. A matching inconclusive attempt suppresses automatic checks
+  of that model for 24 hours. Answers in the old `capability_probes` table no
+  longer count.
+- **Disabling.** Pass `-no-cap-probe` to Golem to turn automatic checks off;
+  routing then also ignores stored answers, while catalog and explicit
+  `capabilities` still apply.
 
-Inspect and refresh verdicts with the `golem models` subcommand:
+Inspect and refresh answers with the `golem models` subcommand:
 
 ```bash
 golem models              # list models, capabilities, and tool-call provenance
 golem models -probe-all   # check every agent-chain entry without fresh answers
 golem models -reprobe     # check them again, fresh answers included; deletes nothing
 ```
+
+`-probe-all` and `-reprobe` print their plan on stderr (each model, its method,
+its usual and maximum requests, the output tokens each requests, its timeout and
+response limit), then check exactly that, print each result on stderr, and
+delete nothing. They spend none of the automatic allowance.
 
 Provenance in the listing tells you *why* a model has (or lacks) tool support:
 `explicit` (config), `catalog`, `probe` (with a tested-at timestamp),
