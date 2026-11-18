@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/kstruzzieri/go-llm/fingerprint"
+	"github.com/kstruzzieri/go-llm/internal/responsebound"
 )
 
 // EvidenceBinding says which log rows answer for a provider: its endpoint in
@@ -557,6 +558,21 @@ func (r *ModelRegistry) resolveToolCallFromLog(ctx context.Context, key ModelKey
 		r.emitProgress(event)
 	}
 	if err != nil {
+		// A generation check that sent a request and then failed on the
+		// server's side, its caller still live, records a check_failed
+		// attempt so the next resolution moves on for a few minutes instead
+		// of re-sending. The error is returned unchanged.
+		if generation && sent > 0 && ctx.Err() == nil && serverSideFailure(err) {
+			rows := fingerprint.AnswerRows(binding.Endpoint, binding.Adapter, key.Model, digest, recipe, []fingerprint.ProbeAnswer{{
+				Capability: capabilityToolCall, Source: fingerprint.EvidenceSourceProbe, Kind: fingerprint.EvidenceKindAttempt,
+				State: fingerprint.CapProbeInconclusive, Detail: fingerprint.DetailCheckFailed, TTL: fingerprint.CapProbeCheckFailedTTL,
+			}}, completedAt)
+			if aerr := r.evidenceStore.AppendEvidence(ctx, rows...); aerr != nil {
+				r.keepUnsavedEvidence(rows)
+			} else {
+				r.invalidateProfile(key)
+			}
+		}
 		return "", err
 	}
 
@@ -635,6 +651,27 @@ func (r *ModelRegistry) toolCallFromLog(ctx context.Context, key ModelKey, bindi
 		return fingerprint.CapProbeInconclusive, true, nil
 	}
 	return "", false, nil
+}
+
+// serverSideFailure reports whether a failed check's error belongs to the
+// server rather than to a key or a request: its HTTP status, read as
+// configio's checkStatus reads it (a bounded rejection whose body could not be
+// read keeps its status, else the chain's HTTPStatusCode), is 500 or more; or
+// it has none and is not a destination denial. Capability evidence is shared by
+// every key at the endpoint, so any other status (401, 403, 404, 429 among
+// them) records nothing.
+func serverSideFailure(err error) bool {
+	status, _ := httpStatusCode(err)
+	var unreadable *responsebound.RejectionReadError
+	if errors.As(err, &unreadable) {
+		status = unreadable.StatusCode
+	}
+	if status != 0 {
+		return status >= 500
+	}
+	// ponytail: a *DestinationDeniedError unwraps to ErrDestinationDenied, so
+	// one errors.Is covers both a denied destination and a refused redirect.
+	return !errors.Is(err, ErrDestinationDenied)
 }
 
 // probeEvidenceRows builds one row per answer of a completed check with

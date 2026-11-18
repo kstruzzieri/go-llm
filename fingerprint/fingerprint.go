@@ -129,6 +129,12 @@ const CurrentToolProbeVersion = 1
 // trusted before the next demand re-probes.
 const CapProbeInconclusiveTTL = 24 * time.Hour
 
+// CapProbeCheckFailedTTL is how long a DetailCheckFailed attempt holds off
+// the next automatic check of its model: long enough that the next start moves
+// on to the next chain entry, short enough that a server that recovers is
+// checked again soon. ExpiryFor gives such an attempt this lifetime.
+const CapProbeCheckFailedTTL = 5 * time.Minute
+
 // CapProbeDigestlessNoTTL bounds a negative verdict for models with no
 // content digest (openai-compat fallback keying): a wedged "no" silently
 // blocks usage, so digestless negatives expire rather than sticking until
@@ -188,7 +194,7 @@ type ToolCallProber interface {
 
 // The Detail codes a tools check saves on its tool_call row, and the cause a
 // flag row carries. #736, #737 and Firn share this spelling. DetailToolCalled
-// goes with a yes; the next five are the inconclusive codes; DetailRunRefused
+// goes with a yes; the next six are the inconclusive codes; DetailRunRefused
 // is a flag's cause.
 const (
 	// DetailToolCalled: every emitted call met the probe's contract.
@@ -207,6 +213,12 @@ const (
 	// rule (wrong name, ID or type, or arguments that are not a JSON object).
 	// It says nothing about whether a dispatcher could have run the call.
 	DetailToolCallInvalid = "tool_call_invalid"
+	// DetailCheckFailed: an automatic check that sent at least one request
+	// failed with a server or transport error (an HTTP 5xx, the check's own
+	// timeout, a broken, malformed or oversized reply) before it settled
+	// anything. Written only by a model registry's automatic path, never by an
+	// explicit check (configio.RunCheck). It lives CapProbeCheckFailedTTL.
+	DetailCheckFailed = "check_failed"
 	// DetailRunRefused: a flag's cause when the provider refused a run that
 	// used the capability. Used by #736's projection; written by passive
 	// refresh (#741), never by a check.
@@ -253,9 +265,10 @@ type CapabilityProbeResult struct {
 }
 
 // CapabilityProber runs a probe recipe against one model. It is optional; a
-// ModelProber need not implement it. A non-nil error means nothing may be
-// saved: no failure yields a no. An error carrying a status keeps its
-// HTTPStatusCode() for classification.
+// ModelProber need not implement it. A non-nil error means the prober's
+// result saves nothing: no failure yields a no. A log-bound model registry's
+// automatic path may then record a DetailCheckFailed attempt of its own. An
+// error carrying a status keeps its HTTPStatusCode() for classification.
 type CapabilityProber interface {
 	ProbeCapabilities(ctx context.Context, model string, req CapabilityProbeRequest) (CapabilityProbeResult, error)
 }

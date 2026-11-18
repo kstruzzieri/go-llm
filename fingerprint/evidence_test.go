@@ -62,6 +62,7 @@ func withDigest(d string) func(*EvidenceRow) { return func(r *EvidenceRow) { r.D
 func withVersion(v int) func(*EvidenceRow)   { return func(r *EvidenceRow) { r.MethodVersion = v } }
 func withCap(c string) func(*EvidenceRow)    { return func(r *EvidenceRow) { r.Capability = c } }
 func withMethod(m string) func(*EvidenceRow) { return func(r *EvidenceRow) { r.Method = m } }
+func withDetail(d string) func(*EvidenceRow) { return func(r *EvidenceRow) { r.Detail = d } }
 func expiring(at time.Time) func(*EvidenceRow) {
 	return func(r *EvidenceRow) { r.ExpiresAt = at }
 }
@@ -388,6 +389,11 @@ func TestExpiryFor(t *testing.T) {
 		{name: "no with digest, negative ttl is none", row: evRow(1, at, asNo), ttl: -time.Hour},
 		{name: "inconclusive with digest", row: evRow(1, at, asAttempt), wantExp: at.Add(day)},
 		{name: "inconclusive name-only", row: evRow(1, at, asAttempt, nameOnly), ttl: 7 * day, wantExp: at.Add(day)},
+		{name: "inconclusive check_failed", row: evRow(1, at, asAttempt, withDetail(DetailCheckFailed)), wantExp: at.Add(5 * time.Minute)},
+		{name: "inconclusive check_failed ignores the prober", row: evRow(1, at, asAttempt, withDetail(DetailCheckFailed)), ttl: 7 * day, wantExp: at.Add(5 * time.Minute)},
+		{name: "inconclusive tool_ignored", row: evRow(1, at, asAttempt, withDetail(DetailToolIgnored)), ttl: 7 * day, wantExp: at.Add(day)},
+		{name: "no with digest and check_failed detail", row: evRow(1, at, asNo, withDetail(DetailCheckFailed)), ttl: 48 * time.Hour, wantExp: at.Add(48 * time.Hour)},
+		{name: "yes name-only with check_failed detail", row: evRow(1, at, nameOnly, withDetail(DetailCheckFailed)), wantFresh: at.Add(month)},
 		{name: "flag", row: evRow(1, at, asFlag), ttl: day},
 		{name: "unknown state", row: evRow(1, at, func(r *EvidenceRow) { r.State = "maybe" }), ttl: day},
 	}

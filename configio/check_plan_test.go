@@ -760,16 +760,32 @@ func TestPlanCheck_NormalizationPreservesExactIDs(t *testing.T) {
 }
 
 func TestPlanCheck_InconclusiveCanBeExplicitlyRechecked(t *testing.T) {
-	// An inconclusive attempt inside its 24-hour cooldown does not stop an
-	// explicit, unforced check.
-	cfg := cpConfig(nil)
-	store := newStore(t)
-	lc := cpBinding(t, cfg, "lc")
-	cpList(t, store, lc, cpKey, "m")
-	cpAppend(t, store, cpYes(lc, "m", "chat", "stream")...)
-	cpAppend(t, store, cpRow(lc, "m", "", "tool_call", fingerprint.CapProbeInconclusive, time.Now().Add(-time.Hour)))
-	if p := cpPlan(t, cfg, store, "lc", []string{"m"}, cpTools, false); !slices.Equal(cpPlanned(p), []string{"m"}) {
-		t.Fatalf("planned %q; want [m]", cpPlanned(p))
+	// An inconclusive attempt inside its cooldown, 24 hours or a check_failed
+	// attempt's 5 minutes, does not stop an explicit, unforced check.
+	for _, tt := range []struct {
+		detail string
+		age    time.Duration
+	}{
+		{fingerprint.DetailToolIgnored, time.Hour},
+		{fingerprint.DetailCheckFailed, time.Minute},
+	} {
+		t.Run(tt.detail, func(t *testing.T) {
+			cfg := cpConfig(nil)
+			store := newStore(t)
+			lc := cpBinding(t, cfg, "lc")
+			cpList(t, store, lc, cpKey, "m")
+			cpAppend(t, store, cpYes(lc, "m", "chat", "stream")...)
+			attempt := cpRow(lc, "m", "", "tool_call", fingerprint.CapProbeInconclusive, time.Now().Add(-tt.age))
+			attempt.Detail = tt.detail
+			attempt.FreshUntil, attempt.ExpiresAt = fingerprint.ExpiryFor(attempt, 0)
+			if !attempt.ExpiresAt.After(time.Now()) {
+				t.Fatalf("precondition: attempt expires at %s, already past", attempt.ExpiresAt)
+			}
+			cpAppend(t, store, attempt)
+			if p := cpPlan(t, cfg, store, "lc", []string{"m"}, cpTools, false); !slices.Equal(cpPlanned(p), []string{"m"}) {
+				t.Fatalf("planned %q; want [m]", cpPlanned(p))
+			}
+		})
 	}
 }
 

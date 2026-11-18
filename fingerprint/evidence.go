@@ -106,7 +106,8 @@ type CapabilityReading struct {
 // with a content digest does not expire, because a new digest invalidates it. A
 // yes with none is valid indefinitely but fresh for 30 days. A no with none
 // expires after 7 days; a no with a digest after proberTTL, or never when that
-// is zero. An inconclusive expires after 24 hours.
+// is zero. An inconclusive expires after 24 hours, except a DetailCheckFailed
+// one, which expires after CapProbeCheckFailedTTL.
 func ExpiryFor(row EvidenceRow, proberTTL time.Duration) (freshUntil, expiresAt time.Time) {
 	switch row.State {
 	case CapProbeYes:
@@ -120,7 +121,11 @@ func ExpiryFor(row EvidenceRow, proberTTL time.Duration) (freshUntil, expiresAt 
 			expiresAt = row.ObservedAt.Add(proberTTL)
 		}
 	case CapProbeInconclusive:
-		expiresAt = row.ObservedAt.Add(CapProbeInconclusiveTTL)
+		ttl := CapProbeInconclusiveTTL
+		if row.Detail == DetailCheckFailed {
+			ttl = CapProbeCheckFailedTTL
+		}
+		expiresAt = row.ObservedAt.Add(ttl)
 	}
 	return freshUntil, expiresAt
 }

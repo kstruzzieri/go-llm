@@ -467,8 +467,9 @@ func (r *ModelRegistry) Refresh(ctx context.Context, key ModelKey) (*ModelProfil
 // writes only the log, never capability_probes: a definitive answer in the log
 // returns with no request; an inconclusive attempt still before its ExpiresAt
 // (inclusive) returns inconclusive with no request, which is the 24-hour
-// cooldown; otherwise the prober must implement fingerprint.CapabilityProber
-// (else ""), and every row the check produced is appended in one call. When
+// cooldown, 5 minutes for a check_failed attempt; otherwise the prober must
+// implement fingerprint.CapabilityProber (else ""), and every row the check
+// produced is appended in one call. When
 // that append fails the rows are kept in memory for the registry's life and
 // read beside the log, so this process (a singleflight follower and later
 // callers included) still sees the result; ExplainToolCall marks it Unsaved,
@@ -483,8 +484,15 @@ func (r *ModelRegistry) Refresh(ctx context.Context, key ModelKey) (*ModelProfil
 // ErrEvidenceUnreadable; neither starts a check, writes or reserves anything
 // (a runtime metadata request may still have been made).
 //
-// A non-nil error means the probe was transient (network/auth); nothing
-// is persisted and the state is "".
+// A non-nil error means the probe was transient (network/auth); the state
+// is "" and the prober's result is not persisted. On a log-bound registry a
+// generation check that sent a request and then failed on the server's side
+// (an HTTP 5xx, its own timeout, a broken, malformed or oversized reply), its
+// caller still live, records one fingerprint.DetailCheckFailed attempt that
+// holds off the next automatic check for fingerprint.CapProbeCheckFailedTTL,
+// kept in memory like any row whose append fails; a 1xx-4xx status, a
+// destination denial, a done caller or a check that sent nothing records
+// nothing, since evidence is shared by every key at the endpoint.
 func (r *ModelRegistry) ResolveToolCall(ctx context.Context, key ModelKey) (fingerprint.CapProbeState, error) {
 	r.syncGeneration(ctx)
 
