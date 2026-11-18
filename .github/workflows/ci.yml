@@ -50,12 +50,22 @@ jobs:
 
       # docs/superpowers/ and .superpowers/ hold private plans, specs, handoffs
       # and scratch. .gitignore keeps them out of a plain add; this catches a
-      # forced one, in any letter case, and a .superpowers/ at any depth.
+      # forced one, in any letter case, and a .superpowers/ at any depth. On a
+      # pull request it also checks the PR's own commits, since a note added
+      # and then removed would reach the base's history through a merge commit
+      # or a rebase merge. A deletion is the fix, so it never counts.
       - name: Reject tracked private planning docs
+        env:
+          BASE: ${{ github.base_ref }}
         run: |
-          tracked="$(git ls-files -- ':(icase)docs/superpowers' ':(icase,glob)**/.superpowers/**')"
-          if [ -n "$tracked" ]; then
-            printf 'private planning docs must stay untracked (git rm --cached); tracked:\n%s\n' "$tracked" >&2
+          private=(':(icase)docs/superpowers' ':(icase,glob)**/.superpowers/**')
+          found="$(git ls-files -- "${private[@]}")"
+          if [ -n "$BASE" ]; then
+            in_commits="$(git log --format= --name-only --diff-filter=d "origin/$BASE..HEAD" -- "${private[@]}")"
+            found="$(printf '%s\n%s\n' "$found" "$in_commits" | sort -u | sed '/^$/d')"
+          fi
+          if [ -n "$found" ]; then
+            printf 'private planning docs must never be committed (untrack them, and drop them from every commit of the PR):\n%s\n' "$found" >&2
             exit 1
           fi
 

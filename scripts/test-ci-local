@@ -27,11 +27,27 @@ require_step() {
   done
 }
 # Private planning docs never land in the repo: the Lint & Test job fails on
-# any tracked path under docs/superpowers/ or .superpowers/.
-require_step ci.yml 'Reject tracked private planning docs' \
-  "          tracked=\"\$(git ls-files -- ':(icase)docs/superpowers' ':(icase,glob)**/.superpowers/**')\"" \
-  '          if [ -n "$tracked" ]; then' \
+# any tracked path under docs/superpowers/ or .superpowers/ and, on a pull
+# request, on any PR commit that adds or changes one. The step must run
+# unconditionally in that job, and its failure must fail the job.
+private_step='Reject tracked private planning docs'
+require_step ci.yml "$private_step" \
+  '          BASE: ${{ github.base_ref }}' \
+  "          private=(':(icase)docs/superpowers' ':(icase,glob)**/.superpowers/**')" \
+  '          found="$(git ls-files -- "${private[@]}")"' \
+  '            in_commits="$(git log --format= --name-only --diff-filter=d "origin/$BASE..HEAD" -- "${private[@]}")"' \
+  '          if [ -n "$found" ]; then' \
   '            exit 1'
+if ! awk -v name="      - name: $private_step" '
+  /^  [^ #][^:]*:$/ { job = $1 }
+  /^      - / { step = ($0 == name); if (step) { found++; in_ci = (job == "ci:") } }
+  step && /^        (if|continue-on-error):/ { bad = 1 }
+  job == "ci:" && /^    (if|continue-on-error):/ { bad = 1 }
+  END { exit !(found == 1 && in_ci && !bad) }
+' "$repo_root/.github/workflows/ci.yml"; then
+  printf 'ci.yml: step "%s" must appear once, in the Lint & Test job, with no if: or continue-on-error: on it or the job\n' "$private_step" >&2
+  exit 1
+fi
 # Every containment profile has its checker step in CI, bound to the commit
 # under test, and every job publishes its evidence (#452).
 # The tree is its own statement, so bash -e fails the step if it cannot resolve.
