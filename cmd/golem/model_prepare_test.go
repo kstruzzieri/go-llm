@@ -384,7 +384,7 @@ func TestPrepareModelPreservesPreflightErrorClassification(t *testing.T) {
 			reg:   prepRegistry(prepProfile("qwen3", 32_768)),
 			chain: []string{"ollama//qwen3"},
 			wantErr: "golem: tool-capability preflight failed:\n" +
-				`agent fallback "ollama//qwen3": provider lookup failed: model not found`,
+				`agent fallback "ollama//qwen3": provider lookup failed: "model not found"`,
 			wantCapability: false,
 		},
 	}

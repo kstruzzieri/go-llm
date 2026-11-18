@@ -115,7 +115,8 @@ func runtimeDigests(cfg *config.Config, providerName string, models []string, li
 }
 
 // reportCheckError prints why provider name was not checked and returns nil,
-// or returns ctx's error once the caller cancelled.
+// or returns ctx's error once the caller cancelled. The error is quoted: it
+// can name config values.
 func reportCheckError(ctx context.Context, errOut io.Writer, name string, err error) error {
 	if ctx.Err() != nil {
 		return ctx.Err()
@@ -123,13 +124,13 @@ func reportCheckError(ctx context.Context, errOut io.Writer, name string, err er
 	code, _ := configio.CodeOf(err)
 	switch {
 	case code == configio.CodeBatchTooLarge:
-		_, _ = fmt.Fprintf(errOut, "check: provider %q not checked (%s): %v; keep fewer of its models in the agent chain\n", name, code, err)
+		_, _ = fmt.Fprintf(errOut, "check: provider %q not checked (%s): %q; keep fewer of its models in the agent chain\n", name, code, err)
 	case errors.Is(err, provider.ErrEvidenceUnreadable):
 		_, _ = fmt.Fprintf(errOut, "check: provider %q not checked: %s\n", name, evidenceUnreadableReason)
 	case code != "":
-		_, _ = fmt.Fprintf(errOut, "check: provider %q not checked (%s): %v\n", name, code, err)
+		_, _ = fmt.Fprintf(errOut, "check: provider %q not checked (%s): %q\n", name, code, err)
 	default:
-		_, _ = fmt.Fprintf(errOut, "check: provider %q not checked: %v\n", name, err)
+		_, _ = fmt.Fprintf(errOut, "check: provider %q not checked: %q\n", name, err)
 	}
 	return nil
 }

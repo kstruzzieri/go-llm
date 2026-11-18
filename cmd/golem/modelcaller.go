@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 
 	"github.com/kstruzzieri/go-llm/agent"
@@ -268,14 +269,15 @@ func providerDiscoveryFailure(err error) bool {
 // capability gap. When the provider's endpoint is known it names the provider +
 // base_url + discovery path (and the HTTP status, when the underlying error
 // carries one). With no endpoint, or when the lookup error is not a discovery
-// failure, it surfaces the underlying error verbatim under a neutral
-// "provider lookup failed" framing.
+// failure, it surfaces the underlying error under a neutral "provider lookup
+// failed" framing. The error and the base_url are quoted: either can carry a
+// server's body or config text, control characters included.
 // The returned string is bare: the startup renderer prepends "warning: ".
 func preflightConnectivityWarn(useCase, sel, providerName string, ep preflightEndpoint, epOK bool, lookupErr error) string {
 	if !epOK || ep.BaseURL == "" || !providerDiscoveryFailure(lookupErr) {
-		return fmt.Sprintf("%s %q: provider lookup failed: %v", fallbackLabel(useCase), sel, lookupErr)
+		return fmt.Sprintf("%s %q: provider lookup failed: %q", fallbackLabel(useCase), sel, lookupErr)
 	}
-	addr := redactBaseURL(ep.BaseURL)
+	addr := strconv.Quote(redactBaseURL(ep.BaseURL))
 	if ep.Source != "" {
 		// A failing explicit override must be named as such: the fix is the
 		// flag/env value the user passed, not models.json.
@@ -286,7 +288,7 @@ func preflightConnectivityWarn(useCase, sel, providerName string, ep preflightEn
 		return fmt.Sprintf("%s %q: cannot reach provider %q at %s (GET %s -> %s); check server/base_url",
 			fallbackLabel(useCase), sel, providerName, addr, ep.ModelsPath, statusLabel(hs.HTTPStatusCode()))
 	}
-	return fmt.Sprintf("%s %q: cannot reach provider %q at %s (GET %s): %v",
+	return fmt.Sprintf("%s %q: cannot reach provider %q at %s (GET %s): %q",
 		fallbackLabel(useCase), sel, providerName, addr, ep.ModelsPath, lookupErr)
 }
 

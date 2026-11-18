@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"reflect"
 	"slices"
@@ -550,6 +551,27 @@ func TestGolemPreflight_ProbeErrorTextIsQuoted(t *testing.T) {
 		t.Fatalf("preflight = %q, %v; want the failed check's warning", warns, err)
 	}
 	if strings.ContainsRune(err.Error(), 0x1b) || !strings.Contains(warns[0], `\x1b[31mboom`) {
+		t.Fatalf("warning %q; want the body's escape sequence quoted", warns[0])
+	}
+}
+
+// TestGolemPreflight_LookupErrorTextIsQuoted pins that a failed lookup's
+// error, which can carry a server's body, reaches the connectivity warning
+// quoted, so an escape sequence in the body is escaped rather than sent to the
+// terminal.
+func TestGolemPreflight_LookupErrorTextIsQuoted(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = io.WriteString(w, "\x1b[31mdown\x1b[0m")
+	}))
+	t.Cleanup(srv.Close)
+	e := newMCEnv(t, mcConfig(srv.URL, "openai-compat", "a"))
+	b := activatedBundle(t, e, &mcServer{Server: srv}, io.Discard, "a")
+	warns, err := preflightToolCapable(t.Context(), b.Models, []string{"lc/a"}, "agent", noEndpoints, b.Models)
+	if err == nil || len(warns) != 1 || !strings.Contains(warns[0], "provider lookup failed: ") {
+		t.Fatalf("preflight = %q, %v; want the lookup failure's warning", warns, err)
+	}
+	if strings.ContainsRune(err.Error(), 0x1b) || !strings.Contains(warns[0], `\x1b[31mdown`) {
 		t.Fatalf("warning %q; want the body's escape sequence quoted", warns[0])
 	}
 }
