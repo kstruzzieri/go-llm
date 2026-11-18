@@ -20,10 +20,6 @@ import (
 // It is sent on that step's wire request only, never kept in State.
 const finalAnswerNudge = "Your last reply had reasoning but no answer. Reply now with your final answer only."
 
-// finalAnswerTail is the recovery step's transient request tail: an empty
-// assistant turn standing in for the thinking-only reply, then the nudge.
-var finalAnswerTail = [...]provider.ChatMessage{{Role: "assistant"}, {Role: "user", Content: finalAnswerNudge}}
-
 // Orchestrator runs the plan->act->observe loop. It must not be copied after use.
 type Orchestrator struct {
 	model     ModelCaller
@@ -323,6 +319,14 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 		if limited {
 			scanSafeThrough = len(state.Messages)
 		}
+		if recovering {
+			// #767: the nudge scan may rotate a key, and a recovery whose tail
+			// does not fit returns before the events below. Record this scan's
+			// events now; that site then records only what the mixed
+			// post-assembly scan adds.
+			res.Events = appendFenceEvents(res.Events, step, rotated, limited)
+			rotated, limited = 0, false
+		}
 		in := state
 		if sticky {
 			in = visibleState(state, hidden)
@@ -342,16 +346,20 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 			manager.advisoryTokens = max(0, extra)
 		}
 		stepSpecs, stepSchemaTokens := specs, toolSchemaTokens
+		var tail []provider.ChatMessage
 		if recovering {
 			// #767: the recovery step offers no tools, and its wire-only tail
 			// joins the advisory's reserve, priced by the estimator this
 			// assembly will use (guarded on the mixed path).
 			stepSpecs, stepSchemaTokens = nil, 0
+			// An empty assistant turn stands in for the thinking-only reply.
+			// The same slice is priced here and sent below.
+			tail = []provider.ChatMessage{{Role: "assistant"}, {Role: "user", Content: finalAnswerNudge}}
 			pricer := manager
 			if manager.Mixed && hasStructuredAnchor(in) {
 				pricer.Estimate = guardedEstimate(manager.Estimate)
 			}
-			for _, m := range finalAnswerTail {
+			for _, m := range tail {
 				cost, costOK := pricer.checkedMessageCost(Message{ChatMessage: m})
 				var addOK bool
 				manager.advisoryTokens, addOK = checkedTokenAdd(manager.advisoryTokens, cost)
@@ -431,12 +439,7 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 				}
 			}
 		}
-		for range rotated {
-			res.Events = append(res.Events, EventRecord{Step: step, Kind: "fence_rotation"})
-		}
-		if limited {
-			res.Events = append(res.Events, EventRecord{Step: step, Kind: "fence_scan_limit"})
-		}
+		res.Events = appendFenceEvents(res.Events, step, rotated, limited)
 		if pressure.Compactions > 0 {
 			res.Events = append(res.Events, EventRecord{Step: step, Kind: "compaction"})
 		}
@@ -447,7 +450,7 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 		if recovering {
 			// #767: on the wire copy only. assembled may alias State's
 			// backing array (a custom Compactor can return its prefix).
-			chatReq.Messages = append(chatReq.Messages, finalAnswerTail[:]...)
+			chatReq.Messages = append(chatReq.Messages, tail...)
 		}
 		// Session identity belongs to the run, independent of transcript rebuilding.
 		chatReq.SessionID = req.SessionID
@@ -635,6 +638,19 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 	res.Messages = resultMessages(state, historyLen)
 	res.Events = append(res.Events, EventRecord{Step: maxSteps - 1, Kind: "stop"})
 	return res, nil
+}
+
+// appendFenceEvents records one step's fence-key refresh: a fence_rotation
+// event per rotated key, then a fence_scan_limit event if the scan hit its
+// work limit.
+func appendFenceEvents(events []EventRecord, step, rotated int, limited bool) []EventRecord {
+	for range rotated {
+		events = append(events, EventRecord{Step: step, Kind: "fence_rotation"})
+	}
+	if limited {
+		events = append(events, EventRecord{Step: step, Kind: "fence_scan_limit"})
+	}
+	return events
 }
 
 // prepareAdvisory runs the observation hook over the advisory as a

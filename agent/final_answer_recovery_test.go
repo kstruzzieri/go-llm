@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math"
 	"slices"
 	"strconv"
 	"strings"
@@ -474,15 +475,25 @@ func TestFinalAnswerRecovery(t *testing.T) {
 				}
 				return nil
 			}}},
-			script:    []recoveryStep{pelicanThinking, answerStep("PELICAN")},
+			// The blocked reply also carries reasoning and a tool call, so the
+			// redacted record has something to drop in every field.
+			script: []recoveryStep{pelicanThinking, {result: ModelResult{Response: provider.ChatResponse{
+				Content: "PELICAN", Thinking: "It said PELICAN.", ToolCalls: []provider.ToolCall{spyToolCall()}, Done: true,
+			}}}},
 			wantCalls: 2, wantAnswer: "", wantStop: Completed, wantRetries: 1,
 			wantErr: isBlocked,
-			check: func(t *testing.T, res Result, _ *recoveryCaller, _ *recoveryObs, _ int) {
+			check: func(t *testing.T, res Result, _ *recoveryCaller, _ *recoveryObs, invoked int) {
 				if got, want := eventLog(res.Events), "step(0),final_answer_retry(1),token(1),step(1),blocked(1)"; got != want {
 					t.Errorf("events = %s, want %s", got, want)
 				}
-				if len(res.Steps) != 2 || res.Steps[1].Response.Content != "" {
-					t.Errorf("steps = %+v, want a redacted record for step 1", res.Steps)
+				if len(res.Steps) != 2 {
+					t.Fatalf("steps = %+v, want a redacted record for step 1", res.Steps)
+				}
+				if r := res.Steps[1].Response; r.Content != "" || r.Thinking != "" || r.ToolCalls != nil {
+					t.Errorf("step 1 response = %+v, want content, thinking and tool calls redacted", r)
+				}
+				if invoked != 0 {
+					t.Errorf("spy invoked %d times, want 0", invoked)
 				}
 			},
 		},
@@ -599,9 +610,14 @@ func TestFinalAnswerRecoveryTailFit(t *testing.T) {
 		name    string
 		mixed   bool
 		advised bool
+		keyed   bool // a live system key folded into the nudge
 	}
+	// 12 letters, as long as the key that replaces it, so the rotation does
+	// not change the System price the ceilings are computed from.
+	const nudgeKey = "REASONINGBUT"
 	variants := []variant{
 		{name: "legacy"},
+		{name: "legacy keyed", keyed: true},
 		{name: "legacy advisory", advised: true},
 		{name: "mixed", mixed: true},
 		{name: "mixed advisory", mixed: true, advised: true},
@@ -611,7 +627,11 @@ func TestFinalAnswerRecoveryTailFit(t *testing.T) {
 		if v.mixed {
 			price.Estimate = guardedEstimate(est)
 		}
-		mustFit := price.estimate(withToolTrustContract("")) +
+		system, keys := "", []string(nil)
+		if v.keyed {
+			system, keys = "Snapshot fenced by "+nudgeKey+".", []string{nudgeKey}
+		}
+		mustFit := price.estimate(withToolTrustContract(system)) +
 			price.messageCost(Message{ChatMessage: provider.ChatMessage{Role: "user", Content: recoveryGoal}, Segment: Pinned})
 		for _, m := range tailMessages() {
 			mustFit += price.messageCost(m)
@@ -645,7 +665,8 @@ func TestFinalAnswerRecoveryTailFit(t *testing.T) {
 				}
 				invoked := 0
 				req := Request{
-					Goal: recoveryGoal, Tools: []Tool{spyTool{invoked: &invoked, set: mixedTraceSet()}},
+					Goal: recoveryGoal, System: system, SystemKeys: keys,
+					Tools:    []Tool{spyTool{invoked: &invoked, set: mixedTraceSet()}},
 					MaxSteps: 5, Budget: Budget{InputCeiling: tc.ceiling}, RecoverThinkingOnlyAnswer: true,
 				}
 				if v.advised {
@@ -666,6 +687,22 @@ func TestFinalAnswerRecoveryTailFit(t *testing.T) {
 				}
 				if invoked != 1 {
 					t.Fatalf("spy invoked %d times, want 1", invoked)
+				}
+				if v.keyed {
+					// The nudge scan rotated the key on the recovery step, on
+					// the fitting path and on the no-fit one alike.
+					rotations := 0
+					for _, e := range res.Events {
+						if e.Kind == "fence_rotation" {
+							if e.Step != 2 {
+								t.Errorf("fence_rotation at step %d, want 2 (%s)", e.Step, eventLog(res.Events))
+							}
+							rotations++
+						}
+					}
+					if rotations != 1 || len(res.SystemKeys) != 1 || res.SystemKeys[0] == nudgeKey {
+						t.Errorf("rotations = %d, SystemKeys = %v; want the key rotated once at step 2 (%s)", rotations, res.SystemKeys, eventLog(res.Events))
+					}
 				}
 				if v.mixed {
 					if _, ok := obs.traces[1]; !ok {
@@ -720,5 +757,57 @@ func TestFinalAnswerRecoveryTailFit(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// TestFinalAnswerRecoveryTailOverflow pins the checked pricing of the tail:
+// a nudge price that overflows either its own message cost or the reserve it
+// joins refuses the recovery with ErrContextExhausted, before any assembly,
+// retry event or model call.
+func TestFinalAnswerRecoveryTailOverflow(t *testing.T) {
+	rows := []struct {
+		name    string
+		empty   int // the estimator's price for empty text
+		advised bool
+	}{
+		// Empty text priced at 2: the nudge message's own cost overflows. It
+		// saturates at MaxInt, so the reserve add (already holding the empty
+		// turn's 6) overflows too; either check refuses the recovery.
+		{name: "message cost", empty: 2},
+		// Empty text free: the nudge costs exactly MaxInt, and adding it to
+		// the advisory's non-zero reserve overflows.
+		{name: "reserve", empty: 0, advised: true},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			est := func(s string) int {
+				switch s {
+				case recoveryNudge:
+					return math.MaxInt
+				case "":
+					return row.empty
+				}
+				return len([]rune(s))
+			}
+			c := &recoveryCaller{script: []recoveryStep{spyStep(""), thinkingOnlyStep("The code word is PELICAN."), answerStep("PELICAN")}}
+			invoked := 0
+			req := Request{
+				Goal: recoveryGoal, Tools: []Tool{spyTool{invoked: &invoked}},
+				MaxSteps: 5, RecoverThinkingOnlyAnswer: true,
+			}
+			if row.advised {
+				req.Advisory = testAdvisory()
+			}
+			res, err := New(c, ContextManager{Estimate: est}).Run(context.Background(), req, nil)
+			if !errors.Is(err, ErrContextExhausted) {
+				t.Fatalf("Run error = %v, want ErrContextExhausted", err)
+			}
+			if len(c.reqs) != 2 {
+				t.Errorf("calls = %d, want 2 (no recovery call)", len(c.reqs))
+			}
+			if n := countKind(res.Events, "final_answer_retry"); n != 0 {
+				t.Errorf("events = %s, want no retry", eventLog(res.Events))
+			}
+		})
 	}
 }
