@@ -12,8 +12,8 @@ Usage of golem models:
   -ollama-url string
     	override Ollama base URL
   -probe-all
-    	actively probe every non-explicit entry (no bounded-eager stop)
+    	check every agent-chain entry without fresh answers; prints the plan and results on stderr
   -reprobe
-    	delete cached probe verdicts for non-explicit entries then re-probe
+    	check every agent-chain entry again, fresh answers included; deletes nothing
   -root string
     	workspace root (scopes the cap-probe cache path guard) (default ".")

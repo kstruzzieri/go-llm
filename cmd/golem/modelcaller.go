@@ -368,7 +368,9 @@ func preflightToolCapable(ctx context.Context, reg capChecker, chain []string, u
 // model. With no resolver it requires the declared tool_call capability up
 // front. With a resolver it relaxes the recommend query (drops CapToolCall so
 // undeclared-but-probeable models are considered) and probes candidates,
-// passing on the first that already declares tool_call or probes yes.
+// passing on the first that already declares tool_call or probes yes. When no
+// candidate does and any resolution was refused (resolutionRefusals), the error
+// gives those reasons instead of claiming no tool-capable model exists.
 func preflightRecommendToolCapable(ctx context.Context, reg capChecker, resolver toolCallResolver) ([]string, error) {
 	if resolver == nil {
 		profs, rerr := reg.Recommend(ctx, provider.RecommendOpts{RequiredCaps: agent.ModelCallCapabilities(true)})
@@ -393,12 +395,38 @@ func preflightRecommendToolCapable(ctx context.Context, reg capChecker, resolver
 			return nil, nil
 		}
 	}
+	var refused [len(resolutionRefusals)]bool
 	for _, p := range profs {
-		if state, err := resolver.ResolveToolCall(ctx, p.Key); err == nil && state == fingerprint.CapProbeYes {
+		state, err := resolver.ResolveToolCall(ctx, p.Key)
+		if err == nil && state == fingerprint.CapProbeYes {
 			return nil, nil
 		}
+		for i, r := range resolutionRefusals {
+			refused[i] = refused[i] || errors.Is(err, r.err)
+		}
+	}
+	var reasons []string
+	for i, r := range resolutionRefusals {
+		if refused[i] {
+			reasons = append(reasons, r.reason)
+		}
+	}
+	if len(reasons) > 0 {
+		return nil, fmt.Errorf("golem: no recommended model could be confirmed tool-capable: %s", strings.Join(reasons, "; "))
 	}
 	return nil, fmt.Errorf("golem: no tool-capable model available (require chat|stream|tool_call)")
+}
+
+// resolutionRefusals are the resolution errors that say nothing about a
+// model's capabilities, each with the reason preflight gives for it. They are
+// ordinary errors, never a configured capability gap.
+var resolutionRefusals = [...]struct {
+	err    error
+	reason string
+}{
+	{provider.ErrAutomaticProbeBudgetExhausted, automaticChecksUsedUp},
+	{provider.ErrEvidenceUnreadable, "the capability store could not be read; run again"},
+	{provider.ErrEvidenceUnbound, "the provider has no evidence binding; check its base_url"},
 }
 
 // evalChainEntry classifies one active-chain selector. It returns capable=true
@@ -457,7 +485,9 @@ func evalChainEntry(ctx context.Context, reg capChecker, sel, useCase string, re
 // not declare tool_call. With no resolver, or when probing is not allowed for
 // this entry (bounded-eager: a capable entry already found), it reports a
 // non-fatal / capability-gap message rather than making a call. Otherwise it
-// probes and maps the tri-state verdict to a capable flag + diagnostic.
+// probes and maps the tri-state verdict to a capable flag + diagnostic; a
+// refused resolution (resolutionRefusals) leaves the capability unknown and
+// says why.
 func classifyToolCapability(ctx context.Context, sel, useCase string, key provider.ModelKey, resolver toolCallResolver, allowProbe bool) (bool, string, bool) {
 	if resolver == nil {
 		return false, notToolCapableWarn(useCase, sel), false
@@ -466,6 +496,11 @@ func classifyToolCapability(ctx context.Context, sel, useCase string, key provid
 		return false, fmt.Sprintf("%s %q: tool capability unknown; probed on first use", fallbackLabel(useCase), sel), false
 	}
 	state, err := resolver.ResolveToolCall(ctx, key)
+	for _, r := range resolutionRefusals {
+		if errors.Is(err, r.err) {
+			return false, fmt.Sprintf("%s %q: tool capability unknown: %s", fallbackLabel(useCase), sel, r.reason), true
+		}
+	}
 	switch {
 	case err != nil:
 		return false, fmt.Sprintf("%s %q: tool-capability probe failed: %v; %s", fallbackLabel(useCase), sel, err, remediationHint(sel)), true

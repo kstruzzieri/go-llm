@@ -1231,7 +1231,10 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		}
 	}
 
-	var capStore fingerprint.CapProbeStore
+	// With probing on, routing reads and writes capability answers in the
+	// evidence log. -no-cap-probe attaches no log, so routing ignores stored
+	// answers, and still opens the store for a derived input ceiling.
+	var evidenceLog fingerprint.EvidenceStore
 	var profileStore fingerprint.Store
 	capStoreWarn := ""
 	if !f.noCapProbe || f.inputCeiling <= 0 {
@@ -1239,7 +1242,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		if capHandle != nil {
 			profileStore = capHandle.Profiles()
 			if !f.noCapProbe {
-				capStore = capHandle.Probes()
+				evidenceLog = capHandle.Log()
 			}
 			defer func() { _ = capHandle.Close() }()
 		}
@@ -1255,7 +1258,8 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		OpenAICompatURLOverrideProvider: backendRes.providerKey,
 		OpenAICompatURLOverride:         backendRes.baseURL,
 		FingerprintProfileStore:         profileStore,
-		CapabilityProbeStore:            capStore, // nil when -no-cap-probe or open fully failed
+		EvidenceLog:                     evidenceLog, // nil when -no-cap-probe or open fully failed
+		CapabilityProbeProgress:         probeProgressPrinter(stderr),
 		DestinationGate:                 gate,
 		ActiveProviders:                 netPlan.ActiveProviders,
 		// #424: -interceptors also refuses a non-loopback openai-compat
@@ -1280,7 +1284,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 
 	resolveEndpoint := newPreflightEndpointResolver(bundle.Config, f.ollamaURL, backendRes.providerKey, backendRes.diagSource())
 	var resolver toolCallResolver
-	if !f.noCapProbe && capStore != nil {
+	if !f.noCapProbe && evidenceLog != nil {
 		resolver = bundle.Models // concrete *provider.ModelRegistry; always non-nil after bootstrap
 	}
 	// The ONE post-admission preparation sequence (#376 M4): preflight,
