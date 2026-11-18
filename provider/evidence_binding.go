@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/kstruzzieri/go-llm/fingerprint"
+	"github.com/kstruzzieri/go-llm/internal/responsebound"
 )
 
 // EvidenceBinding says which log rows answer for a provider: its endpoint in
@@ -264,7 +265,15 @@ func (r *ModelRegistry) explainToolCallFromLog(ctx context.Context, key ModelKey
 	}
 	policy := r.snapshotListedProjectionPolicy()
 	static := r.catalogProfileFor(ParseModelName(key.Model), runtimeInfo)
-	yes, _, _ := CapabilityMasks(r.logCapabilityFacts(log, key, runtimeInfo, static, policy.override, policy.floor))
+	facts := r.logCapabilityFacts(log, key, runtimeInfo, static, policy.override, policy.floor)
+	yes, _, _ := CapabilityMasks(facts)
+	var toolFact CapabilityFact
+	for _, f := range facts {
+		if f.Capability == capabilityToolCall {
+			toolFact = f
+			break
+		}
+	}
 
 	exp := ToolCallExplanation{Caps: yes, Has: yes.Has(CapToolCall), Source: "unknown", EvidenceUnreadable: log.failed}
 	digest := runtimeDigest(runtimeInfo)
@@ -292,10 +301,14 @@ func (r *ModelRegistry) explainToolCallFromLog(ctx context.Context, key ModelKey
 		default:
 			exp.Source = "runtime"
 		}
-	case direct, answer == nil && attempt != nil:
+	case direct:
 		exp.Source = "probe"
-	case answer != nil:
+	case toolFact.Source == string(fingerprint.EvidenceSourceProvider) && toolFact.State == string(fingerprint.CapProbeNo):
+		// A stored or live provider no outranks an inconclusive attempt.
+		// State and TestedAt still describe the last recorded check.
 		exp.Source = "runtime"
+	case attempt != nil:
+		exp.Source = "probe"
 	}
 	return exp, nil
 }
@@ -423,8 +436,12 @@ func probeMethodFor(adapter string) string {
 	return ""
 }
 
-// endpointHost is the host[:port] of a canonical endpoint, never its path.
-func endpointHost(endpoint string) string {
+// EndpointHost returns the host[:port] of a canonical endpoint
+// (EvidenceBinding.Endpoint): never its userinfo or path, with an IPv6
+// address kept in brackets. It returns "" when the endpoint does not parse or
+// names no host, as a scheme-less "host:1" does (it parses as scheme "host").
+// It is what progress and check plans show of an endpoint.
+func EndpointHost(endpoint string) string {
 	u, err := url.Parse(endpoint)
 	if err != nil {
 		return ""
@@ -478,7 +495,7 @@ func (r *ModelRegistry) resolveToolCallFromLog(ctx context.Context, key ModelKey
 
 	generation := recipe.MaxOutputTokensPerRequest > 0
 	event := CapabilityProbeProgress{
-		Key: key, EndpointHost: endpointHost(binding.Endpoint), Method: recipe.Method,
+		Key: key, EndpointHost: EndpointHost(binding.Endpoint), Method: recipe.Method,
 		MaxOutputTokensPerRequest: recipe.MaxOutputTokensPerRequest,
 	}
 	// 5. A check that will be refused must not wait in a slot queue.
@@ -542,11 +559,34 @@ func (r *ModelRegistry) resolveToolCallFromLog(ctx context.Context, key ModelKey
 		r.emitProgress(event)
 	}
 	if err != nil {
+		// A generation check that sent a request and then failed on the
+		// server's side, its caller still live, records a check_failed
+		// attempt so the next resolution moves on for a few minutes instead
+		// of re-sending. The error is returned unchanged.
+		if generation && sent > 0 && ctx.Err() == nil && serverSideFailure(err) {
+			rows := fingerprint.AnswerRows(binding.Endpoint, binding.Adapter, key.Model, digest, recipe, []fingerprint.ProbeAnswer{{
+				Capability: capabilityToolCall, Source: fingerprint.EvidenceSourceProbe, Kind: fingerprint.EvidenceKindAttempt,
+				State: fingerprint.CapProbeInconclusive, Detail: fingerprint.DetailCheckFailed,
+				TTL: fingerprint.CapProbeCheckFailedTTL, // intent only: ExpiryFor sets the lifetime from the Detail
+			}}, completedAt)
+			if aerr := r.evidenceStore.AppendEvidence(ctx, rows...); aerr != nil {
+				r.keepUnsavedEvidence(rows)
+			} else {
+				r.invalidateProfile(key)
+			}
+		}
 		return "", err
 	}
 
-	// 9.
-	rows, state, err := probeEvidenceRows(key, binding, digest, recipe, result, completedAt)
+	// 9. Rows go under the digest the reply named, when it named one: a model
+	// re-pulled since the runtime query must not get the old identity's answer.
+	// Rows under another digest are not read at the runtime's, so the next
+	// resolution checks again.
+	filed := digest
+	if result.Digest != "" {
+		filed = result.Digest
+	}
+	rows, state, err := probeEvidenceRows(key, binding, filed, recipe, result, completedAt)
 	if err != nil {
 		return "", err
 	}
@@ -562,8 +602,9 @@ func (r *ModelRegistry) resolveToolCallFromLog(ctx context.Context, key ModelKey
 	return state, nil
 }
 
-// keepUnsavedEvidence keeps, for the registry's life, the rows of a completed
-// check whose append failed, so this process still reads what the check found.
+// keepUnsavedEvidence keeps, for the registry's life, a check's rows whose
+// append failed (a completed check's answers, or a failed check's check_failed
+// attempt), so this process still reads what the check found.
 // Each row is unchanged but for its ID, which counts up from math.MinInt64: a
 // negative ID marks a row that was never stored, a stored row beats a kept one
 // on an exact ObservedAt tie, and a later kept row beats an earlier one. Keeping
@@ -615,39 +656,41 @@ func (r *ModelRegistry) toolCallFromLog(ctx context.Context, key ModelKey, bindi
 	return "", false, nil
 }
 
-// probeEvidenceRows builds one row per answer of a completed check, observed at
-// completedAt on the store's millisecond, and returns the tool_call state. A
+// serverSideFailure reports whether a failed check's error belongs to the
+// server rather than to a key or a request: its HTTP status, read as
+// configio's checkStatus reads it (a bounded rejection whose body could not be
+// read keeps its status, else the chain's HTTPStatusCode), is 500 or more; or
+// it has none and is not a destination denial. Capability evidence is shared by
+// every key at the endpoint, so any other status (401, 403, 404, 429 among
+// them) records nothing.
+func serverSideFailure(err error) bool {
+	status, _ := httpStatusCode(err)
+	var unreadable *responsebound.RejectionReadError
+	if errors.As(err, &unreadable) {
+		status = unreadable.StatusCode
+	}
+	if status != 0 {
+		return status >= 500
+	}
+	// ponytail: a *DestinationDeniedError unwraps to ErrDestinationDenied, so
+	// one errors.Is covers both a denied destination and a refused redirect.
+	return !errors.Is(err, ErrDestinationDenied)
+}
+
+// probeEvidenceRows builds one row per answer of a completed check with
+// fingerprint.AnswerRows, and returns the tool_call state. A
 // result with no valid tool_call answer is an error: the requests it sent stay
 // spent, nothing is written and no cooldown starts.
 func probeEvidenceRows(key ModelKey, binding EvidenceBinding, digest string, recipe fingerprint.ProbeRecipe, result fingerprint.CapabilityProbeResult, completedAt time.Time) ([]fingerprint.EvidenceRow, fingerprint.CapProbeState, error) {
-	observedAt := storeMillis(completedAt)
+	rows := fingerprint.AnswerRows(binding.Endpoint, binding.Adapter, key.Model, digest, recipe, result.Answers, completedAt)
 	var state fingerprint.CapProbeState
-	rows := make([]fingerprint.EvidenceRow, 0, len(result.Answers))
-	for _, a := range result.Answers {
-		row := fingerprint.EvidenceRow{
-			KeyVersion: fingerprint.EvidenceKeyVersion, Endpoint: binding.Endpoint, Adapter: binding.Adapter,
-			Model: key.Model, Digest: digest, Capability: a.Capability,
-			Source: a.Source, Kind: a.Kind, State: a.State,
-			Method: recipe.Method, MethodVersion: recipe.Version, Detail: a.Detail,
-			ObservedAt: observedAt,
-		}
-		freshUntil, expiresAt := fingerprint.ExpiryFor(row, a.TTL)
-		row.FreshUntil, row.ExpiresAt = storeMillis(freshUntil), storeMillis(expiresAt)
-		rows = append(rows, row)
-		if a.Capability == capabilityToolCall {
-			state = a.State
+	for _, row := range rows {
+		if row.Capability == capabilityToolCall {
+			state = row.State
 		}
 	}
 	if !validCapProbeState(state) {
 		return nil, "", fmt.Errorf("provider: probe tool_call %v returned no valid tool_call answer", key)
 	}
 	return rows, state, nil
-}
-
-// storeMillis truncates t to the store's millisecond precision; zero stays zero.
-func storeMillis(t time.Time) time.Time {
-	if t.IsZero() {
-		return t
-	}
-	return time.UnixMilli(t.UnixMilli())
 }

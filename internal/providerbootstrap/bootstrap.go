@@ -134,6 +134,11 @@ type Bundle struct {
 	// read-only: never mutate it, since its CachedInput/CacheWrite pointers
 	// alias the config's.
 	Prices map[provider.ModelKey]config.ModelPrice
+	// Listings holds the model listing each refreshed provider returned during
+	// New, keyed by provider name; a provider whose refresh failed, or that a
+	// gate left inactive, is absent. It costs no request beyond the refresh. It
+	// is read-only: never mutate it.
+	Listings map[string][]provider.ModelInfo
 }
 
 // defaultOllamaURL is the fallback base URL for the nil-Config / default provider.
@@ -201,6 +206,7 @@ func New(ctx context.Context, opts Options) (*Bundle, error) {
 	pReg := provider.NewRegistry()
 	registered := 0
 	var warnings []error
+	listings := make(map[string][]provider.ModelInfo)
 	for _, p := range provs {
 		if err := pReg.Register(p); err != nil {
 			warnings = append(warnings, fmt.Errorf("providerbootstrap: register %q: %w", p.Name(), err))
@@ -225,12 +231,15 @@ func New(ctx context.Context, opts Options) (*Bundle, error) {
 				return nil, fmt.Errorf("providerbootstrap: refresh %q: %w", p.Name(), err)
 			}
 		}
-		if err := pReg.RefreshModels(rctx, p.Name()); err != nil {
+		listed, err := pReg.RefreshModelsAndList(rctx, p.Name())
+		if err != nil {
 			if errors.Is(err, provider.ErrDestinationDenied) {
 				return nil, fmt.Errorf("providerbootstrap: refresh %q: %w", p.Name(), err)
 			}
 			warnings = append(warnings, fmt.Errorf("providerbootstrap: refresh %q: %w", p.Name(), err))
+			continue
 		}
+		listings[p.Name()] = listed
 	}
 	if registered == 0 {
 		return nil, fmt.Errorf("providerbootstrap: no providers registered: %v", warnings)
@@ -370,6 +379,7 @@ func New(ctx context.Context, opts Options) (*Bundle, error) {
 		Warnings:      warnings,
 		SecretMatcher: match,
 		Prices:        prices,
+		Listings:      listings,
 	}, nil
 }
 

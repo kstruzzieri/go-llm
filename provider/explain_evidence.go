@@ -285,7 +285,8 @@ func historyAnswer(legacy *fingerprint.CapProbe, capability string) *HistoryAnsw
 func projectDetail(detail string) string {
 	switch detail {
 	case "", fingerprint.DetailToolCalled, fingerprint.DetailToolIgnored, fingerprint.DetailToolNotCalled,
-		fingerprint.DetailRequestRejected, fingerprint.DetailCutOff, fingerprint.DetailToolCallInvalid, fingerprint.DetailRunRefused:
+		fingerprint.DetailRequestRejected, fingerprint.DetailCutOff, fingerprint.DetailToolCallInvalid,
+		fingerprint.DetailCheckFailed, fingerprint.DetailRunRefused:
 		return detail
 	}
 	return detailOther

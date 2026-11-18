@@ -310,21 +310,29 @@ the config elsewhere. Literal keys and the user config are unchanged.
   `openai-compat backend discovery skipped: provider "<key>" has an api_key;
   pass -base-url to use another port`. Keyless providers still find a moved
   local backend.
-- `-no-cap-probe` — disables the active tool-capability probe. For a model
-  with no declared or catalog-known `tool_call` capability, golem sends up to
-  two real chat-completion requests to the endpoint to test tool support —
-  against a hosted API those are billable calls. Verdicts are cached in
-  `fingerprints.db` under the golem data directory, so a positive verdict is
-  probed once per backend/model rather than per session (negative and
-  inconclusive verdicts can expire and re-probe). Declaring `capabilities` explicitly (as in
-  the example above) makes the probe unnecessary: an explicit declaration is
-  authoritative and no probe is sent.
+- `-no-cap-probe` — turns off automatic tool-capability checks. For a model
+  with no declared or catalog-known `tool_call` capability and no stored
+  answer, golem sends the streamed `chat-stream-tools` check: up to two real
+  chat-completion requests to the endpoint, each requesting up to 2,048 output
+  tokens — against a hosted API those are billable calls. All automatic checks
+  in one golem run, startup included, share those two requests. Answers are
+  kept in the evidence log in `fingerprints.db` under the golem data
+  directory, so a model with a current answer is not checked again, and a
+  matching inconclusive attempt suppresses automatic checks for 24 hours (5
+  minutes for the `check_failed` attempt a check leaves when it sent a request
+  and then failed with a server error, its own timeout, or a broken or
+  oversized reply; a 4xx leaves none); answers in the old `capability_probes`
+  table no longer count. With `-no-cap-probe`, routing
+  also ignores stored answers. Declaring `capabilities` explicitly (as in the
+  example above) makes the check unnecessary: an explicit declaration is
+  authoritative and no check is sent.
 - `-base-url` — overrides the primary openai-compat agent provider's base URL.
   Server root, without `/v1`, used exactly as given; also disables discovery.
 - `golem models -probe-all` / `golem models -reprobe` — subcommand flags for
-  explicit capability-probe refresh: `-probe-all` actively probes every
-  non-explicit entry, `-reprobe` deletes the cached verdicts first and probes
-  fresh. Use these when checking provenance with `golem models`; they are not
+  explicit capability checks: `-probe-all` checks every agent-chain entry
+  without fresh answers, `-reprobe` checks them again even when fresh. Both
+  print the plan before sending and each result after, on stderr, and delete
+  nothing. Use these when checking provenance with `golem models`; they are not
   top-level `golem` flags.
 
 ### Capabilities the agent loop needs

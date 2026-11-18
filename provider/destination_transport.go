@@ -56,6 +56,16 @@ func (t *destinationTransport) RoundTrip(req *http.Request) (*http.Response, err
 	return t.delegate.RoundTrip(req)
 }
 
+// CloseIdleConnections closes the delegate's idle connections when the delegate
+// can, so http.Client.CloseIdleConnections reaches through the guard. A caller
+// must call it only on a client whose delegate it owns: a remote destination's
+// delegate is the base client's transport, used as is.
+func (t *destinationTransport) CloseIdleConnections() {
+	if c, ok := t.delegate.(interface{ CloseIdleConnections() }); ok {
+		c.CloseIdleConnections()
+	}
+}
+
 // admit reports why req may not pass the guard, or nil when it may.
 func (t *destinationTransport) admit(req *http.Request) error {
 	if err := t.gate.authorize(req.Context(), t.dest.Provider(), t.dest); err != nil {

@@ -1154,3 +1154,43 @@ func TestExplain_LegacyExactSpellingOnly(t *testing.T) {
 		})
 	}
 }
+
+// lateCancelContext reports cancellation from its nth Err call on, and counts
+// every call.
+type lateCancelContext struct {
+	context.Context
+	n, calls int
+}
+
+func (c *lateCancelContext) Err() error {
+	c.calls++
+	if c.calls >= c.n {
+		return context.Canceled
+	}
+	return nil
+}
+
+func TestExplainCapabilities_CancelledBeforeReturn(t *testing.T) {
+	// A host that cancels after the read and the policy succeed still gets
+	// nothing: the reader looks at its context once more before returning.
+	cfg := exConfig("", map[string]config.ModelConfig{"chat": {Provider: "lc", Name: "m", Type: "dense"}})
+	key := provider.ModelKey{Provider: "lc", Model: "m"}
+	snap := goodSnapshot(exBinding(t, cfg, "lc"))
+
+	// Control: the reader observes its context three times, at entry, after
+	// the read and before returning, and succeeds when none reports done.
+	quiet := &lateCancelContext{Context: t.Context(), n: 4}
+	if _, err := ExplainCapabilities(quiet, cfg, &recordingReader{snap: snap}, nil, key); err != nil || quiet.calls != 3 {
+		t.Fatalf("uncancelled: error = %v after %d context observations; want nil after 3", err, quiet.calls)
+	}
+
+	ctx := &lateCancelContext{Context: t.Context(), n: 3}
+	rec := &recordingReader{snap: snap}
+	e, err := ExplainCapabilities(ctx, cfg, rec, nil, key)
+	if !errors.Is(err, context.Canceled) || !reflect.DeepEqual(e, CapabilityExplanation{}) {
+		t.Fatalf("ExplainCapabilities = %+v, %v; want zero, context.Canceled", e, err)
+	}
+	if calls := rec.callNames(); !reflect.DeepEqual(calls, []string{"ReadSnapshot"}) {
+		t.Fatalf("store calls = %v; want one ReadSnapshot", calls)
+	}
+}

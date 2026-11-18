@@ -106,7 +106,8 @@ type CapabilityReading struct {
 // with a content digest does not expire, because a new digest invalidates it. A
 // yes with none is valid indefinitely but fresh for 30 days. A no with none
 // expires after 7 days; a no with a digest after proberTTL, or never when that
-// is zero. An inconclusive expires after 24 hours.
+// is zero. An inconclusive expires after 24 hours, except a DetailCheckFailed
+// one, which expires after CapProbeCheckFailedTTL.
 func ExpiryFor(row EvidenceRow, proberTTL time.Duration) (freshUntil, expiresAt time.Time) {
 	switch row.State {
 	case CapProbeYes:
@@ -120,9 +121,46 @@ func ExpiryFor(row EvidenceRow, proberTTL time.Duration) (freshUntil, expiresAt 
 			expiresAt = row.ObservedAt.Add(proberTTL)
 		}
 	case CapProbeInconclusive:
-		expiresAt = row.ObservedAt.Add(CapProbeInconclusiveTTL)
+		ttl := CapProbeInconclusiveTTL
+		if row.Detail == DetailCheckFailed {
+			ttl = CapProbeCheckFailedTTL
+		}
+		expiresAt = row.ObservedAt.Add(ttl)
 	}
 	return freshUntil, expiresAt
+}
+
+// AnswerRows builds the rows that file a completed check's answers, one per
+// answer in order: through endpoint and adapter, for model at digest ("" for
+// name-only), under recipe's method and version, observed at completedAt
+// truncated to the store's millisecond, with the expiry ExpiryFor gives each
+// answer's TTL, truncated alike. Every writer of a check's answers builds its
+// rows here, so they cannot disagree on the key version, method version,
+// expiry or precision.
+func AnswerRows(endpoint, adapter, model, digest string, recipe ProbeRecipe, answers []ProbeAnswer, completedAt time.Time) []EvidenceRow {
+	observedAt := storeMillis(completedAt)
+	rows := make([]EvidenceRow, 0, len(answers))
+	for _, a := range answers {
+		row := EvidenceRow{
+			KeyVersion: EvidenceKeyVersion, Endpoint: endpoint, Adapter: adapter,
+			Model: model, Digest: digest, Capability: a.Capability,
+			Source: a.Source, Kind: a.Kind, State: a.State,
+			Method: recipe.Method, MethodVersion: recipe.Version, Detail: a.Detail,
+			ObservedAt: observedAt,
+		}
+		freshUntil, expiresAt := ExpiryFor(row, a.TTL)
+		row.FreshUntil, row.ExpiresAt = storeMillis(freshUntil), storeMillis(expiresAt)
+		rows = append(rows, row)
+	}
+	return rows
+}
+
+// storeMillis truncates t to the store's millisecond; zero stays zero.
+func storeMillis(t time.Time) time.Time {
+	if t.IsZero() {
+		return t
+	}
+	return time.UnixMilli(t.UnixMilli())
 }
 
 // Fresh reports whether the row is a definitive answer that, at now, is

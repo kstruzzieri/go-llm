@@ -633,3 +633,26 @@ func TestOllamaProbe_CapabilitiesArrayCases(t *testing.T) {
 		})
 	}
 }
+
+func TestOllamaProbeCapabilities_CarriesReplyDigest(t *testing.T) {
+	req := CapabilityProbeRequest{Method: MethodOllamaShow, Capabilities: []string{"tool_call"}}
+	for _, tt := range []struct {
+		name string
+		body map[string]any
+		want string
+	}{
+		{"present", map[string]any{"capabilities": []string{"tools"}, "digest": "sha256:reply"}, "sha256:reply"},
+		{"absent", map[string]any{"capabilities": []string{"tools"}}, ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			prober, _ := newShowStub(t, showJSON(tt.body))
+			res, err := prober.ProbeCapabilities(context.Background(), "m", req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res.Digest != tt.want {
+				t.Errorf("Digest = %q, want %q", res.Digest, tt.want)
+			}
+		})
+	}
+}

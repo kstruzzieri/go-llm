@@ -121,7 +121,7 @@ var (
 // model load. Every answer comes from OllamaCapabilityFacts with source
 // provider. A requested capability the metadata does not answer is an
 // inconclusive attempt, never an invented no. A failed request answers
-// nothing.
+// nothing. The result carries the digest the reply names, "" when none.
 func (p *OllamaProber) ProbeCapabilities(ctx context.Context, model string, req CapabilityProbeRequest) (CapabilityProbeResult, error) {
 	recipe, err := RecipeForRequest(req, AdapterOllama)
 	if err != nil {
@@ -148,6 +148,7 @@ func (p *OllamaProber) ProbeCapabilities(ctx context.Context, model string, req 
 	if err != nil {
 		return result, fmt.Errorf("fingerprint: ollama probe %q: %w", model, err)
 	}
+	result.Digest = info.Digest
 	facts := OllamaCapabilityFacts(info.Capabilities, info.Template)
 	for _, capability := range recipe.Capabilities {
 		answer := ProbeAnswer{Capability: capability, Source: EvidenceSourceProvider}

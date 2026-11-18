@@ -16,9 +16,9 @@
       "candidates": [
         {
           "selector": "llamacpp/mystery",
-          "eligibility": "unknown",
+          "eligibility": "ineligible",
           "reasons": [
-            "capability_unknown:tool_call"
+            "missing_capability:tool_call"
           ]
         }
       ],

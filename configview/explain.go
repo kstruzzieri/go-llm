@@ -10,12 +10,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"slices"
 	"strings"
 	"time"
 
 	"github.com/kstruzzieri/go-llm/config"
 	"github.com/kstruzzieri/go-llm/fingerprint"
+	"github.com/kstruzzieri/go-llm/internal/evidencesel"
 	"github.com/kstruzzieri/go-llm/provider"
 )
 
@@ -122,24 +122,7 @@ func ExplainCapabilities(ctx context.Context, cfg config.Config, store fingerpri
 	// An unexpanded key reads no account data; the store already refuses it,
 	// and the reader does not trust a store that answers anyway.
 	unresolved := strings.Contains(pc.APIKey, "${")
-	digest, aliased := "", false
-	if snap.Listing != nil && !unresolved {
-		for _, m := range snap.Listing.Members {
-			if m.Model == key.Model {
-				digest = m.Digest
-				break
-			}
-			if !aliased && slices.Contains(names, m.Model) {
-				digest, aliased = m.Digest, true
-			}
-		}
-	}
-	rows := make([]fingerprint.EvidenceRow, 0, len(snap.Rows))
-	for _, r := range snap.Rows {
-		if r.Endpoint == binding.Endpoint && slices.Contains(names, r.Model) {
-			rows = append(rows, r)
-		}
-	}
+	digest, rows := evidencesel.Select(snap, binding, key.Model, !unresolved)
 	out := CapabilityExplanation{
 		Key: key,
 		Capabilities: provider.ExplainEvidence(provider.EvidenceInputs{

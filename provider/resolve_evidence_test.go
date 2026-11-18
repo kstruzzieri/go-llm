@@ -12,18 +12,23 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"math"
+	"net"
+	"net/url"
 	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"testing/synctest"
 	"time"
 
 	"github.com/kstruzzieri/go-llm/fingerprint"
+	"github.com/kstruzzieri/go-llm/internal/responsebound"
 )
 
 // ---------------------------------------------------------------------------
@@ -2574,5 +2579,267 @@ func TestLostWrite_NoLogPathKeepsItsPatch(t *testing.T) {
 	}
 	if lookupCaps(t, mr, "local").Has(CapToolCall) {
 		t.Fatal("the patch reached the registry's profile; it is the caller's copy only")
+	}
+}
+
+// TestResolveToolCall_NativeWriterPrefersReplyDigest: the registry files a
+// metadata answer under the digest the reply named, not the runtime's. Rows
+// filed under another identity are not read at the runtime's digest, so the
+// next resolution checks again rather than trusting a stale identity.
+func TestResolveToolCall_NativeWriterPrefersReplyDigest(t *testing.T) {
+	native := mustBinding(t, "http://127.0.0.1:11434", "ollama")
+	for _, tt := range []struct {
+		name, reply, filed string
+		calls              int // probe calls after two resolutions
+	}{
+		{"reply names another digest", "sha256:reply", "sha256:reply", 2},
+		{"reply names none", "", logDigest, 1},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			store := newEvidenceLog(t)
+			prober := &capProbeFake{run: scripted(fingerprint.CapabilityProbeResult{
+				Method: fingerprint.MethodOllamaShow, Requests: 1, Digest: tt.reply,
+				Answers: []fingerprint.ProbeAnswer{{Capability: capabilityToolCall, Source: fingerprint.EvidenceSourceProvider, Kind: fingerprint.EvidenceKindAnswer, State: fingerprint.CapProbeYes}},
+			}, nil)}
+			mr, clock := newLogResolver(t, store, prober, []logProv{{name: "local", binding: native, models: infos(logModel)}})
+
+			state, err := mr.ResolveToolCall(t.Context(), localKey(logModel))
+			wantState(t, "first resolution", state, err, fingerprint.CapProbeYes)
+			rows := storedRows(t, store, native, logModel)
+			if len(rows) != 1 || rows[0].Digest != tt.filed {
+				t.Fatalf("stored rows = %+v; want one at digest %q", rows, tt.filed)
+			}
+			readAtRuntime := toolCallAnswer(t, store, native, logDigest, logT0.Add(time.Minute))
+			if want := map[bool]fingerprint.CapProbeState{true: fingerprint.CapProbeYes, false: ""}[tt.filed == logDigest]; readAtRuntime != want {
+				t.Fatalf("answer read at the runtime digest = %q; want %q", readAtRuntime, want)
+			}
+
+			clock.set(logT0.Add(time.Minute))
+			state, err = mr.ResolveToolCall(t.Context(), localKey(logModel))
+			wantState(t, "second resolution", state, err, fingerprint.CapProbeYes)
+			if n := prober.callCount(); n != tt.calls {
+				t.Fatalf("probe calls = %d; want %d", n, tt.calls)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Failed checks: check_failed
+// ---------------------------------------------------------------------------
+
+// failWith is a run that reports requests sent and fails with err.
+func failWith(requests int, err error) func(context.Context, string) (fingerprint.CapabilityProbeResult, error) {
+	return scripted(fingerprint.CapabilityProbeResult{Method: fingerprint.MethodChatStreamTools, Requests: requests}, err)
+}
+
+// wantCheckFailed fails unless rows is one check_failed tool_call attempt at
+// logDigest, observed at logT0 and expiring 5 minutes later.
+func wantCheckFailed(t *testing.T, rows []fingerprint.EvidenceRow) {
+	t.Helper()
+	if len(rows) != 1 {
+		t.Fatalf("rows = %+v; want one check_failed attempt", rows)
+	}
+	r := rows[0]
+	if r.Capability != capabilityToolCall || r.Source != fingerprint.EvidenceSourceProbe || r.Kind != fingerprint.EvidenceKindAttempt ||
+		r.State != fingerprint.CapProbeInconclusive || r.Detail != fingerprint.DetailCheckFailed ||
+		r.Method != fingerprint.MethodChatStreamTools || r.Digest != logDigest ||
+		!r.ObservedAt.Equal(logT0) || !r.ExpiresAt.Equal(logT0.Add(5*time.Minute)) {
+		t.Fatalf("row = %+v; want a check_failed attempt at %s expiring 5 minutes later", r, logT0)
+	}
+}
+
+// TestCheckFailed_ServerErrorRecordsShortAttempt pins that a generation check
+// that sent a request and got a 500 records one check_failed attempt, returns
+// the 500 unchanged and gives back the request it did not send.
+func TestCheckFailed_ServerErrorRecordsShortAttempt(t *testing.T) {
+	store := newEvidenceLog(t)
+	cause := &HTTPStatusError{StatusCode: 500, Status: "500 Internal Server Error"}
+	prober := &capProbeFake{run: failWith(1, fmt.Errorf("probe: %w", cause))}
+	mr, _ := newLogResolver(t, store, prober, oneProv(t, infos(logModel)...))
+	state, err := mr.ResolveToolCall(t.Context(), localKey(logModel))
+	if status, _ := httpStatusCode(err); state != "" || !errors.Is(err, cause) || status != 500 {
+		t.Fatalf("ResolveToolCall = %q, %v; want the 500 unchanged", state, err)
+	}
+	wantCheckFailed(t, storedRows(t, store, openAIBinding(t), logModel))
+	if n := allowanceOf(mr); n != automaticProbeAllowance-1 {
+		t.Fatalf("allowance = %d; want %d", n, automaticProbeAllowance-1)
+	}
+}
+
+// TestCheckFailed_ServerSideFailuresRecord pins the other failures that belong
+// to the server: a 5xx whose body could not be read, the check's own timeout
+// with its caller still live, an oversized reply and a broken stream.
+func TestCheckFailed_ServerSideFailuresRecord(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		err  error
+	}{
+		{"unreadable 503 rejection", &responsebound.RejectionReadError{StatusCode: 503, Err: io.ErrUnexpectedEOF}},
+		{"the check's own timeout", fmt.Errorf("probe: %w", context.DeadlineExceeded)},
+		{"oversized reply", fmt.Errorf("probe: %w", responsebound.ErrExceeded)},
+		{"broken stream", fmt.Errorf("probe: %w", io.ErrUnexpectedEOF)},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			store := newEvidenceLog(t)
+			mr, _ := newLogResolver(t, store, &capProbeFake{run: failWith(1, tt.err)}, oneProv(t, infos(logModel)...))
+			if _, err := mr.ResolveToolCall(t.Context(), localKey(logModel)); !errors.Is(err, tt.err) {
+				t.Fatalf("ResolveToolCall error = %v; want %v unchanged", err, tt.err)
+			}
+			wantCheckFailed(t, storedRows(t, store, openAIBinding(t), logModel))
+		})
+	}
+}
+
+// TestCheckFailed_RecordsNothing pins every failed check that records
+// nothing: a status below 500, read through an unreadable rejection too (it
+// belongs to a key or a request, and evidence is shared by every key at the
+// endpoint); a destination denial or refused redirect; a caller cancelled
+// after its first request was received; a check that sent nothing; and a
+// metadata check. A caller past its deadline is
+// TestCheckFailed_CallerPastDeadlineRecordsNothing.
+func TestCheckFailed_RecordsNothing(t *testing.T) {
+	type tc struct {
+		name     string
+		requests int
+		err      error
+		native   bool
+		cancels  bool // the caller is cancelled once the first request is out
+	}
+	var cases []tc
+	for _, status := range []int{302, 400, 401, 403, 404, 422, 429} {
+		cases = append(cases, tc{name: fmt.Sprintf("status %d", status), requests: 1, err: &HTTPStatusError{StatusCode: status}})
+	}
+	refused := &url.Error{Op: "Post", URL: resolveEndpoint, Err: &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}}
+	cases = append(cases,
+		tc{name: "unreadable 403 rejection", requests: 1, err: &responsebound.RejectionReadError{StatusCode: 403, Err: io.ErrUnexpectedEOF}},
+		tc{name: "destination denied", requests: 1, err: &DestinationDeniedError{Provider: "local", Purpose: DestinationPurposeCapabilityProbe}},
+		tc{name: "refused redirect", requests: 1, err: fmt.Errorf("probe: %w", ErrDestinationDenied)},
+		tc{name: "refused connection, nothing sent", requests: 0, err: refused},
+		tc{name: "cancelled caller", requests: 1, cancels: true},
+		tc{name: "metadata check 500", requests: 1, err: &HTTPStatusError{StatusCode: 500}, native: true},
+	)
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			run := failWith(tt.requests, tt.err)
+			if tt.cancels {
+				// The server has the first request; the caller then ends.
+				run = func(runCtx context.Context, _ string) (fingerprint.CapabilityProbeResult, error) {
+					cancel()
+					<-runCtx.Done()
+					return fingerprint.CapabilityProbeResult{Method: fingerprint.MethodChatStreamTools, Requests: tt.requests}, runCtx.Err()
+				}
+			}
+			binding := openAIBinding(t)
+			if tt.native {
+				binding = mustBinding(t, "http://127.0.0.1:11434", "ollama")
+			}
+			log := &hookedLog{EvidenceStore: newEvidenceLog(t)}
+			prober := &capProbeFake{run: run}
+			mr, _ := newLogResolver(t, log, prober, []logProv{{name: "local", binding: binding, models: infos(logModel)}})
+			if _, err := mr.ResolveToolCall(ctx, localKey(logModel)); err == nil || prober.callCount() != 1 {
+				t.Fatalf("ResolveToolCall error = %v after %d checks; want the one check's failure", err, prober.callCount())
+			}
+			if n, kept := len(log.appendCalls()), len(keptRows(mr)); n != 0 || kept != 0 {
+				t.Fatalf("appends = %d, kept rows = %d; want none", n, kept)
+			}
+			want := automaticProbeAllowance - tt.requests
+			if tt.native {
+				want = automaticProbeAllowance
+			}
+			if n := allowanceOf(mr); n != want {
+				t.Fatalf("allowance = %d; want %d", n, want)
+			}
+		})
+	}
+}
+
+// TestCheckFailed_CallerPastDeadlineRecordsNothing runs in a synctest bubble,
+// so the caller's deadline passes only once the check's first request is out:
+// the check's DeadlineExceeded is the caller's, not the check's own timeout,
+// and records nothing.
+func TestCheckFailed_CallerPastDeadlineRecordsNothing(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+		defer cancel()
+		log := &memLog{}
+		prober := &capProbeFake{run: func(runCtx context.Context, _ string) (fingerprint.CapabilityProbeResult, error) {
+			<-runCtx.Done()
+			return fingerprint.CapabilityProbeResult{Method: fingerprint.MethodChatStreamTools, Requests: 1}, runCtx.Err()
+		}}
+		mr, _ := newLogResolver(t, log, prober, oneProv(t, infos(logModel)...))
+		if _, err := mr.ResolveToolCall(ctx, localKey(logModel)); !errors.Is(err, context.DeadlineExceeded) || prober.callCount() != 1 {
+			t.Fatalf("ResolveToolCall error = %v after %d checks; want the caller's deadline after one", err, prober.callCount())
+		}
+		log.mu.Lock()
+		stored := len(log.rows)
+		log.mu.Unlock()
+		if kept := len(keptRows(mr)); stored != 0 || kept != 0 {
+			t.Fatalf("stored rows = %d, kept rows = %d; want none", stored, kept)
+		}
+	})
+}
+
+// TestCheckFailed_HoldsFiveMinutesThenChecksAgain pins the attempt's lifetime:
+// at its expiry a second resolution sends nothing and answers inconclusive;
+// just after, it checks again. The allowance is refilled first, so only the
+// attempt can hold the check back.
+func TestCheckFailed_HoldsFiveMinutesThenChecksAgain(t *testing.T) {
+	prober := &capProbeFake{run: failWith(1, &HTTPStatusError{StatusCode: 500})}
+	mr, clock := newLogResolver(t, newEvidenceLog(t), prober, oneProv(t, infos(logModel)...))
+	key := localKey(logModel)
+	if _, err := mr.ResolveToolCall(t.Context(), key); err == nil {
+		t.Fatal("first check succeeded; want the 500")
+	}
+	setAllowance(mr, automaticProbeAllowance)
+	prober.setRun(nil) // a yes
+
+	clock.set(logT0.Add(5 * time.Minute))
+	state, err := mr.ResolveToolCall(t.Context(), key)
+	wantState(t, "at expiry", state, err, fingerprint.CapProbeInconclusive)
+	if n := prober.callCount(); n != 1 {
+		t.Fatalf("calls at expiry = %d; want 1", n)
+	}
+	clock.set(logT0.Add(5*time.Minute + time.Millisecond))
+	state, err = mr.ResolveToolCall(t.Context(), key)
+	wantState(t, "after expiry", state, err, fingerprint.CapProbeYes)
+	if n := prober.callCount(); n != 2 {
+		t.Fatalf("calls after expiry = %d; want 2", n)
+	}
+}
+
+// TestCheckFailed_UnsavedAttemptStillHolds pins that a check_failed attempt
+// whose append fails is kept unsaved and still holds off the next resolution
+// in this process.
+func TestCheckFailed_UnsavedAttemptStillHolds(t *testing.T) {
+	log := &hookedLog{EvidenceStore: newEvidenceLog(t)}
+	log.failAppends()
+	prober := &capProbeFake{run: failWith(1, &HTTPStatusError{StatusCode: 500})}
+	mr, clock := newLogResolver(t, log, prober, oneProv(t, infos(logModel)...))
+	key := localKey(logModel)
+	if _, err := mr.ResolveToolCall(t.Context(), key); err == nil {
+		t.Fatal("first check succeeded; want the 500")
+	}
+	kept := keptRows(mr)
+	if len(kept) != 1 || kept[0].ID >= 0 {
+		t.Fatalf("kept rows = %+v; want one unsaved", kept)
+	}
+	kept[0].ID = 0
+	wantCheckFailed(t, kept)
+	if rows := storedRows(t, log, openAIBinding(t), logModel); len(rows) != 0 {
+		t.Fatalf("stored rows = %d; want 0", len(rows))
+	}
+	setAllowance(mr, automaticProbeAllowance)
+	prober.setRun(nil)
+	clock.set(logT0.Add(time.Minute))
+	state, err := mr.ResolveToolCall(t.Context(), key)
+	wantState(t, "second resolution", state, err, fingerprint.CapProbeInconclusive)
+	if n := prober.callCount(); n != 1 {
+		t.Fatalf("calls = %d; want 1", n)
+	}
+	if exp, err := mr.ExplainToolCall(t.Context(), key); err != nil || !exp.Unsaved || exp.State != fingerprint.CapProbeInconclusive {
+		t.Fatalf("explanation = %+v, %v; want an unsaved inconclusive", exp, err)
 	}
 }

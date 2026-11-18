@@ -384,3 +384,36 @@ func TestInputCeilingResolutionLineReportsValueAndSource(t *testing.T) {
 		t.Fatalf("line = %q, want %q", got, want)
 	}
 }
+
+// TestInputCeiling_ProviderNoIsIneligible pins that a model whose provider said
+// no to tool_call, stored or live, does not set the chain minimum; that a
+// provider yes beside a valid legacy no stays eligible; and that a valid
+// inconclusive probe stays excluded during its cooldown, as before.
+func TestInputCeiling_ProviderNoIsIneligible(t *testing.T) {
+	key := func(model string) provider.ModelKey { return provider.ModelKey{Provider: "test", Model: model} }
+	profiles := map[provider.ModelKey]*provider.ModelProfile{
+		key("small"): {Key: key("small"), ContextWindow: 8_192, Caps: agent.ModelCallCapabilities(false)},
+		key("large"): {Key: key("large"), ContextWindow: 65_536, Caps: agent.ModelCallCapabilities(true)},
+	}
+	const withoutSmall, withSmall = 65_536 - 2_048, 8_192 - 2_048
+	tests := []struct {
+		name string
+		exp  provider.ToolCallExplanation
+		want int
+	}{
+		{"a stored provider no", provider.ToolCallExplanation{Source: "runtime", State: fingerprint.CapProbeNo, Valid: true}, withoutSmall},
+		{"a live provider no", provider.ToolCallExplanation{Source: "runtime"}, withoutSmall},
+		{"a live provider no beside an expired attempt", provider.ToolCallExplanation{Source: "runtime", State: fingerprint.CapProbeInconclusive}, withoutSmall},
+		{"a provider yes beside a valid legacy no", provider.ToolCallExplanation{Has: true, Source: "runtime", State: fingerprint.CapProbeNo, Valid: true}, withSmall},
+		{"a valid inconclusive probe in its cooldown", provider.ToolCallExplanation{Source: "probe", State: fingerprint.CapProbeInconclusive, Valid: true}, withoutSmall},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reg := inputCeilingTestRegistry{profiles: profiles, explanations: map[provider.ModelKey]provider.ToolCallExplanation{key("small"): tt.exp}}
+			got := resolveInputCeiling(t.Context(), reg, []string{"test/small", "test/large"}, "agent", 0, 0, true)
+			if got.ceiling != tt.want {
+				t.Fatalf("ceiling = %d; want %d", got.ceiling, tt.want)
+			}
+		})
+	}
+}

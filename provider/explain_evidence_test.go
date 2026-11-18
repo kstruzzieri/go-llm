@@ -444,6 +444,21 @@ func TestExplainEvidence_InconclusiveNeverReplacesDefinitive(t *testing.T) {
 	}
 }
 
+// TestExplainEvidence_CheckFailedNeverReplacesDefinitive pins that a live
+// check_failed attempt newer than a checked no leaves the no standing, shown
+// as the last attempt with its code.
+func TestExplainEvidence_CheckFailedNeverReplacesDefinitive(t *testing.T) {
+	at := eeNow.Add(-time.Minute)
+	attempt := eeAttempt("tool_call", at)
+	attempt.Detail = fingerprint.DetailCheckFailed
+	attempt.FreshUntil, attempt.ExpiresAt = fingerprint.ExpiryFor(attempt, 0)
+	in := eeIn(fingerprint.AdapterOpenAICompat, eeProbe("tool_call", fingerprint.CapProbeNo, logT0), attempt)
+	eeWant(t, ExplainEvidence(in), CapabilityFact{
+		Capability: "tool_call", State: "no", Source: "probe", Method: "chat-stream-tools", Identity: "content-digest", CheckedAt: logT0,
+		LastAttempt: &CheckedAnswer{State: "inconclusive", Method: "chat-stream-tools", Detail: "check_failed", At: at},
+	})
+}
+
 func TestExplainEvidence_ExpiredAttemptIsUnknown(t *testing.T) {
 	at := eeNow.Add(-48 * time.Hour)
 	in := eeIn(fingerprint.AdapterOpenAICompat, eeAttempt("tool_call", at))
@@ -665,6 +680,7 @@ func TestExplainEvidence_DetailProjected(t *testing.T) {
 		{fingerprint.DetailRequestRejected, "request_rejected"},
 		{fingerprint.DetailCutOff, "cut_off"},
 		{fingerprint.DetailToolCallInvalid, "tool_call_invalid"},
+		{fingerprint.DetailCheckFailed, "check_failed"},
 		{"run_refused", "run_refused"},
 		{"HTTP 500 /v1/x", "other"},
 	}

@@ -44,7 +44,11 @@ import (
 // answered inconclusively), which includes provider.ErrEvidenceUnbound;
 // probe_failed for transient failures, including
 // provider.ErrEvidenceUnreadable and provider.ErrAutomaticProbeBudgetExhausted
-// on a log-bound registry, with the cause retained in the chain.
+// on a log-bound registry, with the cause retained in the chain. On such a
+// registry a probe_failed from a server or transport failure after a request
+// was sent leaves the registry's check_failed attempt (see
+// provider.ModelRegistry.ResolveToolCall), so a repeat within 5 minutes
+// answers inconclusive without a request.
 func ProbeToolCall(ctx context.Context, resolver ToolCallResolver, key provider.ModelKey) (ProbeOutcome, error) {
 	if key.Provider == "" || key.Model == "" {
 		return ProbeOutcome{}, wrapCode(CodeInvalidArgument,
