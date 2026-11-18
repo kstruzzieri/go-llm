@@ -178,10 +178,11 @@ func PlanCheck(ctx context.Context, providerName string, models []string, caps p
 	if ctx == nil {
 		return CheckPlan{}, invalidPlan("nil context")
 	}
-	target, apiKey, err := resolveCheckTarget(opts.Config, providerName)
+	target, pc, err := resolveCheckTarget(opts.Config, providerName)
 	if err != nil {
 		return CheckPlan{}, err
 	}
+	apiKey := pc.APIKey
 	if caps == 0 || caps&^knownCaps != 0 {
 		return CheckPlan{}, invalidPlan("capabilities %#x are empty or unknown", uint32(caps))
 	}
@@ -288,30 +289,31 @@ func invalidPlan(format string, args ...any) error {
 	return wrapCode(CodeInvalidArgument, fmt.Errorf("configio: plan check: "+format, args...))
 }
 
-// resolveCheckTarget reads providerName's target and resolved key from cfg.
-// Every failure is invalid_argument, and none quotes the key or base URL.
-func resolveCheckTarget(cfg *config.Config, providerName string) (checkTarget, string, error) {
+// resolveCheckTarget reads providerName's target from cfg, with the one
+// provider config it was read from, whose APIKey is the resolved key. Every
+// failure is invalid_argument, and none quotes the key or base URL.
+func resolveCheckTarget(cfg *config.Config, providerName string) (checkTarget, config.ProviderConfig, error) {
 	if cfg == nil {
-		return checkTarget{}, "", invalidPlan("nil config")
+		return checkTarget{}, config.ProviderConfig{}, invalidPlan("nil config")
 	}
 	pc, ok := cfg.Providers[providerName]
 	if !ok {
-		return checkTarget{}, "", invalidPlan("unknown provider %q", providerName)
+		return checkTarget{}, config.ProviderConfig{}, invalidPlan("unknown provider %q", providerName)
 	}
 	dest, err := provider.NewDestination(providerName, pc.BaseURL)
 	if err != nil {
-		return checkTarget{}, "", wrapCode(CodeInvalidArgument, fmt.Errorf("configio: plan check: %w", err))
+		return checkTarget{}, config.ProviderConfig{}, wrapCode(CodeInvalidArgument, fmt.Errorf("configio: plan check: %w", err))
 	}
 	binding, err := provider.EvidenceBindingFor(pc.BaseURL, pc.APIFormat)
 	if err != nil {
-		return checkTarget{}, "", wrapCode(CodeInvalidArgument, fmt.Errorf("configio: plan check: provider %q: %w", providerName, err))
+		return checkTarget{}, config.ProviderConfig{}, wrapCode(CodeInvalidArgument, fmt.Errorf("configio: plan check: provider %q: %w", providerName, err))
 	}
 	if strings.Contains(pc.APIKey, "${") {
-		return checkTarget{}, "", invalidPlan("provider %q: the key holds an unexpanded ${...} reference", providerName)
+		return checkTarget{}, config.ProviderConfig{}, invalidPlan("provider %q: the key holds an unexpanded ${...} reference", providerName)
 	}
 	return checkTarget{
 		provider: providerName, binding: binding, local: dest.IsLocal(), timeout: providerbootstrap.ProviderTimeout(pc),
-	}, pc.APIKey, nil
+	}, pc, nil
 }
 
 // checkRecipe is the recipe that answers caps through adapter: ollama-show for

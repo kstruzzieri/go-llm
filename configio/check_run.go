@@ -67,8 +67,10 @@ type RunOptions struct {
 	Policy provider.DestinationPolicy
 	// OnResult receives each checked model's result once its rows are
 	// committed; a refusal's, once another model answers or every check has
-	// finished. Calls never overlap each other or OnUsage, and run outside any
-	// store transaction. A panic in it is not recovered. May be nil.
+	// finished. A planned model an unforced run skips because its answers
+	// became fresh gets no call. Calls never overlap each other or OnUsage, and
+	// run outside any store transaction. A panic in it is not recovered. May be
+	// nil.
 	OnResult func(CheckResult)
 	// OnUsage receives the usage of each completed generation as it completes,
 	// before anything is saved. Calls never overlap each other or OnResult. May
@@ -92,7 +94,9 @@ type RunOptions struct {
 // binary's recipes), with plan_stale; and a remote endpoint opts.Policy does
 // not grant, with destination_not_granted. With a store it then reads one
 // snapshot: an unforced run skips a model whose requested answers have become
-// fresh, and no run ever adds a model. A failed read is an error wrapping
+// fresh, sends nothing for it and reports no result for it, and no run ever
+// adds a model. So when RunCheck returns nil, a planned model with no result
+// was skipped as fresh. A failed read is an error wrapping
 // provider.ErrEvidenceUnreadable.
 //
 // The remaining models are checked at most 4 at once at a remote openai-compat
@@ -138,12 +142,11 @@ func RunCheck(ctx context.Context, plan CheckPlan, opts RunOptions) error {
 	if opts.Config == nil {
 		return wrapCode(CodeInvalidArgument, errors.New("configio: run check: nil config"))
 	}
-	st, apiKey, err := verifyPlan(plan, opts.Config)
+	st, pc, err := verifyPlan(plan, opts.Config)
 	if err != nil {
 		return err
 	}
 	in := &st.inputs
-	pc := opts.Config.Providers[in.target.provider]
 	dest, err := provider.NewDestination(in.target.provider, pc.BaseURL)
 	if err != nil { // resolveCheckTarget built it a moment ago
 		return wrapCode(CodePlanStale, fmt.Errorf("configio: run check: %w", err))
@@ -161,7 +164,7 @@ func RunCheck(ctx context.Context, plan CheckPlan, opts RunOptions) error {
 	}
 
 	r := &checkRun{
-		binding: in.target.binding, provider: in.target.provider, apiKey: apiKey,
+		binding: in.target.binding, provider: in.target.provider, apiKey: pc.APIKey,
 		gate: gate, digests: st.runtimeDigests, onResult: opts.OnResult,
 	}
 	items := in.items
@@ -222,38 +225,40 @@ func RunCheck(ctx context.Context, plan CheckPlan, opts RunOptions) error {
 // errPlanStale is every stale plan's error; it says nothing of what changed.
 var errPlanStale = errors.New("configio: run check: the plan no longer matches its provider, key or config")
 
-// verifyPlan returns plan's frozen state and the current key, or plan_stale
-// when plan is not one PlanCheck returned, its displayed fields were changed,
-// or cfg no longer resolves to the inputs it was sealed from.
-func verifyPlan(plan CheckPlan, cfg *config.Config) (*planState, string, error) {
+// verifyPlan returns plan's frozen state and the provider config it verified
+// against (its APIKey the current key), or plan_stale when plan is not one
+// PlanCheck returned, its displayed fields were changed, or cfg no longer
+// resolves to the inputs it was sealed from. The run builds its client from
+// that config, never from a second read of cfg.
+func verifyPlan(plan CheckPlan, cfg *config.Config) (*planState, config.ProviderConfig, error) {
 	stale := wrapCode(CodePlanStale, errPlanStale)
 	st := plan.state
 	if st == nil || !shownMatches(plan, &st.inputs) {
-		return nil, "", stale
+		return nil, config.ProviderConfig{}, stale
 	}
-	target, apiKey, err := resolveCheckTarget(cfg, st.inputs.target.provider)
+	target, pc, err := resolveCheckTarget(cfg, st.inputs.target.provider)
 	if err != nil {
-		return nil, "", stale
+		return nil, config.ProviderConfig{}, stale
 	}
 	recipe, ok := checkRecipe(target.binding.Adapter, st.inputs.caps)
 	if !ok {
-		return nil, "", stale
+		return nil, config.ProviderConfig{}, stale
 	}
 	cur := planInputs{target: target, models: st.inputs.models, caps: st.inputs.caps, force: st.inputs.force}
 	for _, m := range cur.models {
 		policy, err := cfg.CapabilityPolicy(target.provider, m)
 		if err != nil {
-			return nil, "", stale
+			return nil, config.ProviderConfig{}, stale
 		}
 		cur.policies = append(cur.policies, policy)
 	}
 	for _, it := range st.inputs.items {
 		cur.items = append(cur.items, newPlanItem(target, it.item.Model, cur.caps, recipe))
 	}
-	if !hmac.Equal([]byte(sealPlan(st.secret, apiKey, &cur)), []byte(st.identity)) {
-		return nil, "", stale
+	if !hmac.Equal([]byte(sealPlan(st.secret, pc.APIKey, &cur)), []byte(st.identity)) {
+		return nil, config.ProviderConfig{}, stale
 	}
-	return st, apiKey, nil
+	return st, pc, nil
 }
 
 // shownMatches reports whether plan's displayed fields are the ones in was

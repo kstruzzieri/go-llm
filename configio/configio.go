@@ -1,8 +1,10 @@
 // Package configio implements the explicit I/O tier of the role-config
 // stack (spec slice 4): RefreshInventory, ProbeToolCall, PlanCheck and
 // RunCheck. All are user-invoked operations with values in and values out —
-// nothing here runs implicitly on view or build, and a cancelled operation
-// returns a zero value: the caller receives nothing.
+// nothing here runs implicitly on view or build. A cancelled operation returns
+// a zero value, so the caller receives nothing, with one exception: RunCheck
+// reports through OnResult the results committed before the cancellation,
+// then returns the context error.
 //
 // Error discipline follows the config/profiles house rules — bounded
 // codes, message text passes through unchanged; CodeOf uses
