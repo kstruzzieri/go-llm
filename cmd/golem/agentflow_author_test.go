@@ -1639,6 +1639,27 @@ func TestRunAgentflowAuthor_StopReasonNamesTheCause(t *testing.T) {
 	}
 }
 
+// #767 boundary: the planner builds its own agent.Request and does not opt in
+// to the thinking-only recovery, so a reasoning-only reply ends the loop after
+// one request even with steps to spare. The second response is a sentinel a
+// recovery request would consume.
+func TestRunAgentflowAuthor_DoesNotRecoverThinkingOnlyAnswer(t *testing.T) {
+	root := t.TempDir()
+	caller := &recordingCaller{next: &scriptCaller{responses: []agent.ModelResult{
+		{Response: provider.ChatResponse{Thinking: "The code word is PELICAN.", Done: true}},
+		answerStep("SENTINEL"),
+	}}}
+	sess := newTestSession(t, caller, root)
+	sess.maxSteps = 4
+	err := runAgentflowAuthorWithClient(context.Background(), io.Discard, io.Discard, nil, sess, flags{goal: "x", goalSet: true}, root, &stubLocker{}, nil)
+	if !errors.Is(err, errPlannerNoSubmission) || err.Error() != errPlannerNoSubmission.Error() {
+		t.Fatalf("err = %v, want exactly errPlannerNoSubmission", err)
+	}
+	if len(caller.reqs) != 1 {
+		t.Fatalf("model requests = %d, want 1", len(caller.reqs))
+	}
+}
+
 // #611: a denial on the planner's last step makes Run return a nil error with
 // a non-Completed StopReason. The approval-denied case must still win: it is
 // checked before the default branch, so the denial is never reported as a stop.
