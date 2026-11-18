@@ -191,7 +191,7 @@ func TestFinalAnswerRecovery(t *testing.T) {
 
 	callerErr := errors.New("stream broke")
 	sentinel := errors.New("observer failed")
-	const fenceKey = "REASONINGBUTNOANSWER" // folded from the nudge's "reasoning but no answer"
+	tailKeys := []string{"REASONINGONLY", "REASONINGBUTNOANSWER"} // one folded key per recovery message
 
 	pelicanThinking := thinkingOnlyStep("The code word is PELICAN.")
 	isBlocked := func(err error) bool {
@@ -515,23 +515,26 @@ func TestFinalAnswerRecovery(t *testing.T) {
 			wantErr: func(err error) bool { return errors.Is(err, sentinel) },
 		},
 		{
-			name:       "fence key in the nudge",
-			system:     "Snapshot fenced by " + fenceKey + ".",
-			systemKeys: []string{fenceKey},
+			name:       "fence keys in the placeholder and nudge",
+			system:     "Snapshot fenced by " + strings.Join(tailKeys, " and ") + ".",
+			systemKeys: tailKeys,
 			script:     []recoveryStep{pelicanThinking, answerStep("PELICAN")},
 			wantCalls:  2, wantAnswer: "PELICAN", wantStop: Completed, wantRetries: 1,
 			check: func(t *testing.T, res Result, c *recoveryCaller, _ *recoveryObs, _ int) {
-				if got, want := eventLog(res.Events), "step(0),fence_rotation(1),final_answer_retry(1),token(1),step(1),stop(1)"; got != want {
+				if got, want := eventLog(res.Events), "step(0),fence_rotation(1),fence_rotation(1),final_answer_retry(1),token(1),step(1),stop(1)"; got != want {
 					t.Errorf("events = %s, want %s", got, want)
 				}
-				if !strings.Contains(c.reqs[0].Messages[0].Content, fenceKey) {
-					t.Fatalf("request 1 system = %q, want the key", c.reqs[0].Messages[0].Content)
+				if len(res.SystemKeys) != len(tailKeys) {
+					t.Fatalf("SystemKeys = %v, want %d keys", res.SystemKeys, len(tailKeys))
 				}
-				if sys := c.reqs[1].Messages[0]; sys.Role != "system" || strings.Contains(sys.Content, fenceKey) {
-					t.Errorf("request 2 system = %+v, want the key rotated", sys)
-				}
-				if len(res.SystemKeys) != 1 || res.SystemKeys[0] == fenceKey {
-					t.Errorf("SystemKeys = %v, want the key rotated", res.SystemKeys)
+				before, after := c.reqs[0].Messages[0], c.reqs[1].Messages[0]
+				for i, key := range tailKeys {
+					if !strings.Contains(before.Content, key) {
+						t.Errorf("request 1 system is missing original key %d", i)
+					}
+					if after.Role != "system" || strings.Contains(after.Content, key) || !strings.Contains(after.Content, res.SystemKeys[i]) {
+						t.Errorf("request 2 system does not carry the rotated key %d", i)
+					}
 				}
 			},
 		},

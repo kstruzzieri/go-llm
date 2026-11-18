@@ -317,16 +317,23 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 				pinned = append(pinned, advisory.Source, advisory.Tool, advisory.Model, advisory.Digest, advisory.Content, advisory.Annotation)
 			}
 		}
+		var tail []provider.ChatMessage
 		if recovering {
-			// #767: the nudge is rendered this step, so a key it exposes rotates first.
-			pinned = append(pinned, finalAnswerNudge)
+			// Scan the same wire-only messages we price and send below.
+			tail = []provider.ChatMessage{
+				{Role: "assistant", Content: finalAnswerPlaceholder},
+				{Role: "user", Content: finalAnswerNudge},
+			}
+			for _, m := range tail {
+				pinned = append(pinned, m.Content)
+			}
 		}
 		next, rotated, limited, preRotated = refreshFenceKeys(&state, liveAdvisory, next, pinned...)
 		if limited {
 			scanSafeThrough = len(state.Messages)
 		}
 		if recovering {
-			// #767: the nudge scan may rotate a key, and a recovery whose tail
+			// #767: the tail scan may rotate a key, and a recovery whose tail
 			// does not fit returns before the events below. Record this scan's
 			// events now; that site then records only what the mixed
 			// post-assembly scan adds.
@@ -352,15 +359,11 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 			manager.advisoryTokens = max(0, extra)
 		}
 		stepSpecs, stepSchemaTokens := specs, toolSchemaTokens
-		var tail []provider.ChatMessage
 		if recovering {
 			// #767: the recovery step offers no tools, and its wire-only tail
 			// joins the advisory's reserve, priced by the estimator this
 			// assembly will use (guarded on the mixed path).
 			stepSpecs, stepSchemaTokens = nil, 0
-			// A fixed placeholder assistant turn stands in for the thinking-only reply.
-			// The same slice is priced here and sent below.
-			tail = []provider.ChatMessage{{Role: "assistant", Content: finalAnswerPlaceholder}, {Role: "user", Content: finalAnswerNudge}}
 			pricer := manager
 			if manager.Mixed && hasStructuredAnchor(in) {
 				pricer.Estimate = guardedEstimate(manager.Estimate)
