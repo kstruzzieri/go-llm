@@ -482,6 +482,8 @@ func runOnceWithRecipeHint(ctx context.Context, out io.Writer, interrupts <-chan
 		History:        sess.session.history(),        // nil-safe: nil session => nil
 		MaxSteps:       sess.maxSteps,
 		Budget:         sess.runtime.Budget(),
+		// Mirrors the runtime's request, so a replay keeps the opt-in (#767).
+		RecoverThinkingOnlyAnswer: true,
 	}
 	threadID := ""
 	if sess.session != nil {
@@ -651,14 +653,15 @@ func runOnceWithRecipeHint(ctx context.Context, out io.Writer, interrupts <-chan
 	}
 	if sess.obs != nil && sess.obs.trace && !sensitiveBlock && !canaryBlock {
 		meta := agenttrace.TraceMeta{
-			Goal:           req.Goal,
-			System:         req.System,
-			HistorySummary: req.HistorySummary,
-			History:        req.History,
-			MaxSteps:       req.MaxSteps,
-			Budget:         req.Budget,
-			ToolSchemaHash: toolSchemaHash(sess.tools),
-			ModelHint:      lastRoutedModel(res),
+			Goal:                      req.Goal,
+			System:                    req.System,
+			HistorySummary:            req.HistorySummary,
+			History:                   req.History,
+			MaxSteps:                  req.MaxSteps,
+			Budget:                    req.Budget,
+			ToolSchemaHash:            toolSchemaHash(sess.tools),
+			RecoverThinkingOnlyAnswer: req.RecoverThinkingOnlyAnswer,
+			ModelHint:                 lastRoutedModel(res),
 		}
 		startedStr := startedAt.UTC().Format(time.RFC3339Nano)
 		if terr := sess.obs.writeTrace(runID, startedStr, endedStr, meta, res, status, partial, runErr, groundingRaw); terr != nil {

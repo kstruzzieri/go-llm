@@ -643,6 +643,8 @@ func (r *Runtime) Run(ctx context.Context, turn Turn, sink EventSink) (agent.Res
 		// exempt names are set even when this runtime is not strict (#584).
 		StrictApproval: r.strictApproval,
 		StrictExempt:   strictExemptNames(snap.tools),
+		// #767: AgentFlow and dispatch children build their own requests and stay off.
+		RecoverThinkingOnlyAnswer: true,
 	}
 	if thread != nil {
 		request.History = thread.history()

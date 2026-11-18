@@ -298,6 +298,37 @@ func TestTaskStepRunnerUsesItsRootAndAgentflowJournal(t *testing.T) {
 	}
 }
 
+// #767 boundary: an AgentFlow worker builds its own agent.Request and does
+// not opt in to the thinking-only recovery, so a reasoning-only reply ends the
+// step after one request even with steps to spare, and the step finishes as
+// before. The second response is a sentinel a recovery request would consume.
+func TestTaskStepRunnerDoesNotRecoverThinkingOnlyAnswer(t *testing.T) {
+	root := t.TempDir()
+	plan := &agentflow.Plan{Steps: []agentflow.Step{{ID: "P1"}}}
+	caller := &recordingCaller{next: &scriptCaller{responses: []agent.ModelResult{
+		{Response: provider.ChatResponse{Thinking: "The code word is PELICAN.", Done: true}},
+		answerStep("SENTINEL"),
+	}}}
+	orch := agent.New(caller, agent.ContextManager{})
+	af := &fakeAF{}
+	runCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runStep, err := newTaskStepRunner(root, plan, af, orch, &replSession{maxSteps: 4}, true, io.Discard, nil, cancel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &driver{af: af, plan: plan, runStep: runStep}
+	if err := d.runOneStep(runCtx, "P1"); err != nil {
+		t.Fatal(err)
+	}
+	if len(caller.reqs) != 1 {
+		t.Fatalf("model requests = %d, want 1", len(caller.reqs))
+	}
+	if want := []string{"claim:P1", "finish-step:P1:A-P1"}; !equalSeq(af.seq, want) {
+		t.Fatalf("agentflow calls = %v, want %v", af.seq, want)
+	}
+}
+
 func TestDriver_ParallelCohortRunsBeforeSerialWork(t *testing.T) {
 	af := &fakeAF{nextSteps: []string{"P1"}}
 	d := &driver{

@@ -39,7 +39,7 @@ func TestDefaultGuardsPath_OneShot(t *testing.T) {
 		}
 	}
 	// finalFooter ends a completed run's line with the score and no stop suffix.
-	assertFooterTail(t, stderr, " · risk 30")
+	assertFooterTail(t, stderr, "done", " · risk 30")
 }
 
 // TestDefaultGuardsPath_ProductionAgentflowModes: the -goal and -plan

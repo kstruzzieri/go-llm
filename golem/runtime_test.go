@@ -2963,3 +2963,88 @@ func TestRuntimeSessionConflictPreservesWinner(t *testing.T) {
 		t.Fatalf("winner = %+v, %v; want only winning turn at revision 2", saved, err)
 	}
 }
+
+// thinkingOnlyCaller answers its first request with reasoning alone and every
+// later one with "PELICAN".
+type thinkingOnlyCaller struct {
+	requests []provider.ChatRequest
+}
+
+func (c *thinkingOnlyCaller) Chat(_ context.Context, req provider.ChatRequest, onToken func(provider.ChatResponse) error) (agent.ModelResult, error) {
+	c.requests = append(c.requests, req)
+	resp := provider.ChatResponse{Content: "PELICAN", Done: true}
+	if len(c.requests) == 1 {
+		resp = provider.ChatResponse{Thinking: "The code word is PELICAN.", Done: true}
+	}
+	if err := onToken(resp); err != nil {
+		return agent.ModelResult{}, err
+	}
+	return agent.ModelResult{Response: resp}, nil
+}
+
+// recordingStepObserver records the step indices and the step-tagged
+// reasoning a host observer receives.
+type recordingStepObserver struct {
+	steps    []int
+	thinking map[int]string
+}
+
+func (o *recordingStepObserver) OnStep(_ context.Context, e agent.StepEvent) error {
+	o.steps = append(o.steps, e.Index)
+	return nil
+}
+
+func (*recordingStepObserver) OnToolCall(context.Context, agent.ToolCallEvent) error { return nil }
+
+func (*recordingStepObserver) OnToken(context.Context, agent.TokenEvent) error { return nil }
+
+func (o *recordingStepObserver) OnThinking(_ context.Context, e agent.ThinkingEvent) error {
+	o.thinking[e.Step] += e.Content
+	return nil
+}
+
+// #767: a Golem turn opts in to the thinking-only recovery, so a reply that
+// is only reasoning gets one more request and the turn carries its answer.
+// The host observer sees both steps and the reasoning at step 0.
+func TestRunRecoversThinkingOnlyAnswer(t *testing.T) {
+	caller := &thinkingOnlyCaller{}
+	runtime, err := golem.New(context.Background(), golem.Options{
+		Root:         t.TempDir(),
+		Orchestrator: agent.New(caller, agent.ContextManager{}),
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := runtime.Close(); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+	})
+
+	host := &recordingStepObserver{thinking: map[int]string{}}
+	result, err := runtime.Run(context.Background(), golem.Turn{
+		RunID:    "run-recover",
+		Message:  "what is the code word?",
+		Observer: host,
+	}, func(golem.Event) error { return nil })
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(caller.requests) != 2 {
+		t.Fatalf("model requests = %d, want 2", len(caller.requests))
+	}
+	msgs := caller.requests[1].Messages
+	if n := len(msgs); n < 2 || msgs[n-2].Role != "assistant" || msgs[n-2].Content != "" ||
+		msgs[n-1].Role != "user" || msgs[n-1].Content != "Your last reply had reasoning but no answer. Reply now with your final answer only." {
+		t.Errorf("second request does not end with the empty assistant turn and the nudge: %+v", msgs)
+	}
+	if result.Answer != "PELICAN" || result.StopReason != agent.Completed {
+		t.Errorf("result answer = %q, stop = %v, want PELICAN, completed", result.Answer, result.StopReason)
+	}
+	if !slices.Equal(host.steps, []int{0, 1}) {
+		t.Errorf("host step indices = %v, want [0 1]", host.steps)
+	}
+	if want := map[int]string{0: "The code word is PELICAN."}; !reflect.DeepEqual(host.thinking, want) {
+		t.Errorf("host reasoning by step = %v, want %v", host.thinking, want)
+	}
+}
