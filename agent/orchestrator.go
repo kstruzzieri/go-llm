@@ -20,6 +20,12 @@ import (
 // It is sent on that step's wire request only, never kept in State.
 const finalAnswerNudge = "Your last reply had reasoning but no answer. Reply now with your final answer only."
 
+// finalAnswerPlaceholder stands in for the reasoning-only reply as the
+// assistant turn of the answer-only recovery step (#767). It is sent on that
+// step's wire request only, never kept in State. It is non-empty because some
+// providers reject an empty assistant message that is not the last one.
+const finalAnswerPlaceholder = "(reasoning only, no reply)"
+
 // Orchestrator runs the plan->act->observe loop. It must not be copied after use.
 type Orchestrator struct {
 	model     ModelCaller
@@ -352,9 +358,9 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 			// joins the advisory's reserve, priced by the estimator this
 			// assembly will use (guarded on the mixed path).
 			stepSpecs, stepSchemaTokens = nil, 0
-			// An empty assistant turn stands in for the thinking-only reply.
+			// A fixed placeholder assistant turn stands in for the thinking-only reply.
 			// The same slice is priced here and sent below.
-			tail = []provider.ChatMessage{{Role: "assistant"}, {Role: "user", Content: finalAnswerNudge}}
+			tail = []provider.ChatMessage{{Role: "assistant", Content: finalAnswerPlaceholder}, {Role: "user", Content: finalAnswerNudge}}
 			pricer := manager
 			if manager.Mixed && hasStructuredAnchor(in) {
 				pricer.Estimate = guardedEstimate(manager.Estimate)

@@ -34,10 +34,10 @@ func sseReasoning(text string) []string {
 }
 
 // endsWithNudge reports whether req is a recovery request: its last two
-// messages are the empty assistant turn and the nudge.
+// messages are the placeholder assistant turn and the nudge.
 func (r wireRequest) endsWithNudge() bool {
 	n := len(r.Messages)
-	return n >= 2 && r.Messages[n-2] == wireMessage{Role: "assistant"} &&
+	return n >= 2 && r.Messages[n-2] == wireMessage{Role: "assistant", Content: "(reasoning only, no reply)"} &&
 		r.Messages[n-1] == wireMessage{Role: "user", Content: recoveryNudge}
 }
 
@@ -82,7 +82,7 @@ func assertRecoveryRequests(t *testing.T, reqs []wireRequest) {
 		t.Errorf("recovery request offers %d tools, want none", len(reqs[1].Tools))
 	}
 	if !reqs[1].endsWithNudge() {
-		t.Errorf("recovery request does not end with the empty assistant turn and the nudge: %+v", reqs[1].Messages)
+		t.Errorf("recovery request does not end with the placeholder assistant turn and the nudge: %+v", reqs[1].Messages)
 	}
 }
 
@@ -265,11 +265,11 @@ func readTraceRecords(t *testing.T) []traceRecord {
 	return out
 }
 
-// assertNoRecoveryTail fails if msgs carry the nudge or an empty assistant turn.
+// assertNoRecoveryTail fails if msgs carry the nudge or the placeholder assistant turn.
 func assertNoRecoveryTail(t *testing.T, where string, msgs []provider.ChatMessage) {
 	t.Helper()
 	for _, m := range msgs {
-		if m.Content == recoveryNudge || (m.Role == "assistant" && m.Content == "" && len(m.ToolCalls) == 0) {
+		if m.Content == recoveryNudge || m.Content == "(reasoning only, no reply)" {
 			t.Errorf("%s carries the recovery tail: %+v", where, msgs)
 			return
 		}

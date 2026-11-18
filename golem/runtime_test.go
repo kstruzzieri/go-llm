@@ -3034,9 +3034,9 @@ func TestRunRecoversThinkingOnlyAnswer(t *testing.T) {
 		t.Fatalf("model requests = %d, want 2", len(caller.requests))
 	}
 	msgs := caller.requests[1].Messages
-	if n := len(msgs); n < 2 || msgs[n-2].Role != "assistant" || msgs[n-2].Content != "" ||
+	if n := len(msgs); n < 2 || msgs[n-2].Role != "assistant" || msgs[n-2].Content != "(reasoning only, no reply)" ||
 		msgs[n-1].Role != "user" || msgs[n-1].Content != "Your last reply had reasoning but no answer. Reply now with your final answer only." {
-		t.Errorf("second request does not end with the empty assistant turn and the nudge: %+v", msgs)
+		t.Errorf("second request does not end with the placeholder assistant turn and the nudge: %+v", msgs)
 	}
 	if result.Answer != "PELICAN" || result.StopReason != agent.Completed {
 		t.Errorf("result answer = %q, stop = %v, want PELICAN, completed", result.Answer, result.StopReason)

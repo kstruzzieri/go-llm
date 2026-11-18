@@ -17,8 +17,9 @@ import (
 // #767. The nudge is written out, not read from finalAnswerNudge, so wording
 // drift fails here.
 const (
-	recoveryGoal  = "What is the code word?"
-	recoveryNudge = "Your last reply had reasoning but no answer. Reply now with your final answer only."
+	recoveryGoal        = "What is the code word?"
+	recoveryPlaceholder = "(reasoning only, no reply)"
+	recoveryNudge       = "Your last reply had reasoning but no answer. Reply now with your final answer only."
 )
 
 // recoveryStep is one scripted Chat call. chunks, when nil, streams the
@@ -148,7 +149,7 @@ func eventLog(events []EventRecord) string {
 
 func tailMessages() []Message {
 	return []Message{
-		{ChatMessage: provider.ChatMessage{Role: "assistant"}},
+		{ChatMessage: provider.ChatMessage{Role: "assistant", Content: recoveryPlaceholder}},
 		{ChatMessage: provider.ChatMessage{Role: "user", Content: recoveryNudge}},
 	}
 }
@@ -251,7 +252,7 @@ func TestFinalAnswerRecovery(t *testing.T) {
 				if len(msgs) < 2 {
 					t.Fatalf("request 2 messages = %+v", msgs)
 				}
-				want := []provider.ChatMessage{{Role: "assistant"}, {Role: "user", Content: recoveryNudge}}
+				want := []provider.ChatMessage{{Role: "assistant", Content: recoveryPlaceholder}, {Role: "user", Content: recoveryNudge}}
 				for i, w := range want {
 					got := msgs[len(msgs)-2+i]
 					if got.Role != w.Role || got.Content != w.Content || len(got.ToolCalls) != 0 {
@@ -259,7 +260,7 @@ func TestFinalAnswerRecovery(t *testing.T) {
 					}
 				}
 				for _, m := range res.Messages {
-					if m.Content == recoveryNudge || (m.Role == "assistant" && m.Content == "" && len(m.ToolCalls) == 0) {
+					if m.Content == recoveryNudge || m.Content == recoveryPlaceholder {
 						t.Errorf("Result.Messages carries the tail: %+v", res.Messages)
 					}
 				}
@@ -592,9 +593,9 @@ func TestFinalAnswerRecovery(t *testing.T) {
 
 // TestFinalAnswerRecoveryTailFit pins the recovery's admission at the exact
 // must-fit ceiling and one below it, in legacy and Mixed assembly, with and
-// without an advisory. The raw estimator prices the nudge at 0 and empty text
-// at 2, so its raw and guarded (Mixed) tail prices differ: pricing the tail
-// with the other assembly's estimator fails one of the two ceilings.
+// without an advisory. The raw estimator prices the nudge and the placeholder at 0
+// (and empty text at 2), so its raw and guarded (Mixed) tail prices differ:
+// pricing the tail with the other assembly's estimator fails one of the two ceilings.
 func TestFinalAnswerRecoveryTailFit(t *testing.T) {
 	est := func(s string) int {
 		switch s {
@@ -602,6 +603,8 @@ func TestFinalAnswerRecoveryTailFit(t *testing.T) {
 			return 0
 		case "":
 			return 2
+		case recoveryPlaceholder:
+			return 0
 		}
 		return len([]rune(s))
 	}
@@ -767,16 +770,17 @@ func TestFinalAnswerRecoveryTailFit(t *testing.T) {
 func TestFinalAnswerRecoveryTailOverflow(t *testing.T) {
 	rows := []struct {
 		name    string
-		empty   int // the estimator's price for empty text
+		holder  int // the estimator's price for the placeholder text
 		advised bool
 	}{
-		// Empty text priced at 2: the nudge message's own cost overflows. It
-		// saturates at MaxInt, so the reserve add (already holding the empty
-		// turn's 6) overflows too; either check refuses the recovery.
-		{name: "message cost", empty: 2},
-		// Empty text free: the nudge costs exactly MaxInt, and adding it to
+		// Placeholder priced at 2: the nudge message's own cost overflows. It
+		// saturates at MaxInt, so the reserve add (already holding the
+		// placeholder turn's cost) overflows too; either check refuses the
+		// recovery.
+		{name: "message cost", holder: 2},
+		// Placeholder free: the nudge costs exactly MaxInt, and adding it to
 		// the advisory's non-zero reserve overflows.
-		{name: "reserve", empty: 0, advised: true},
+		{name: "reserve", holder: 0, advised: true},
 	}
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
@@ -784,8 +788,8 @@ func TestFinalAnswerRecoveryTailOverflow(t *testing.T) {
 				switch s {
 				case recoveryNudge:
 					return math.MaxInt
-				case "":
-					return row.empty
+				case recoveryPlaceholder:
+					return row.holder
 				}
 				return len([]rune(s))
 			}

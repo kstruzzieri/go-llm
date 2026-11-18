@@ -138,7 +138,7 @@ type Request struct {
 	// calls, blank content and non-blank reasoning (the collected
 	// Response.Thinking) one more step, if one is left, to state its answer
 	// (#767). That step offers no tools, and its request alone ends with an
-	// empty assistant turn and a fixed user nudge. The tail is transient:
+	// fixed placeholder assistant turn and a fixed user nudge. The tail is transient:
 	// State, Result.Messages and history never carry it, and it is priced
 	// into the step's input like any prompt text. Reasoning that a
 	// ModelCaller only streams, without returning it in Response.Thinking, is
