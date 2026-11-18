@@ -134,6 +134,16 @@ type Request struct {
 	// are suspended. It applies to this run only: a nested Run does not
 	// inherit it. A name left out fails closed.
 	StrictExempt []string
+	// RecoverThinkingOnlyAnswer gives a run whose final step returns no tool
+	// calls, blank content and non-blank reasoning (the collected
+	// Response.Thinking) one more step, if one is left, to state its answer
+	// (#767). That step offers no tools, and its request alone ends with an
+	// empty assistant turn and a fixed user nudge. The tail is transient:
+	// State, Result.Messages and history never carry it, and it is priced
+	// into the step's input like any prompt text. Reasoning that a
+	// ModelCaller only streams, without returning it in Response.Thinking, is
+	// not recovered. A nested Run does not inherit it.
+	RecoverThinkingOnlyAnswer bool
 }
 
 // Segment tags a message as always-present (Pinned) or compactable (Elastic).
@@ -263,7 +273,7 @@ type StepRecord struct {
 // EventRecord is a lightweight ordered log entry for replay/eval.
 type EventRecord struct {
 	Step int
-	Kind string // "token" | "step" | "tool_call" | "tool_result" | "compaction" | "fence_rotation" | "fence_scan_limit" | "blocked" | "stop"
+	Kind string // "token" | "step" | "tool_call" | "tool_result" | "compaction" | "fence_rotation" | "fence_scan_limit" | "final_answer_retry" | "blocked" | "stop"
 }
 
 // ToolCallRecord captures one dispatched tool call and its outcome.
