@@ -179,14 +179,14 @@ func TestGolemModels_OutputUnchangedForEachSource(t *testing.T) {
 		ollama string // capabilities /api/show reports
 		extra  string // extra JSON members of the model entry
 		row    fingerprint.CapProbeState
-		rowOld bool // row filed under a digest the runtime does not report
+		rowOld bool // row filed under a digest the runtime does not report, which reads unknown
 		legacy bool // row is a legacy capability_probes verdict, which no longer counts
 	}
 	fixtures := []fixture{
 		{name: "explicit", model: "mystery", apiFmt: "openai-compat", extra: `, "capabilities": ["chat", "stream", "tool_call"]`},
 		{name: "catalog", model: "qwen3:8b", apiFmt: "openai-compat"},
 		{name: "probe_yes", model: "mystery", apiFmt: "openai-compat", row: fingerprint.CapProbeYes},
-		{name: "probe_yes_stale", model: "mystery", apiFmt: "openai-compat", row: fingerprint.CapProbeYes, rowOld: true},
+		{name: "probe_yes_other_digest", model: "mystery", apiFmt: "openai-compat", row: fingerprint.CapProbeYes, rowOld: true},
 		{name: "probe_no", model: "mystery", apiFmt: "openai-compat", row: fingerprint.CapProbeNo},
 		{name: "probe_inconclusive", model: "mystery", apiFmt: "openai-compat", row: fingerprint.CapProbeInconclusive},
 		{name: "catalog_beside_probe_no", model: "qwen3:8b", apiFmt: "openai-compat", row: fingerprint.CapProbeNo},

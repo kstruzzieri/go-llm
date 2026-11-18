@@ -223,7 +223,8 @@ func runModelsCommand(ctx context.Context, args []string, out, errOut io.Writer)
 
 	var checks *modelsCheck
 	if probeAll || reprobe {
-		checks = &modelsCheck{cfg: bundle.Config, store: evidenceLog, listings: bundle.Listings, policy: adm.grantedPolicy(), force: reprobe}
+		checks = &modelsCheck{cfg: bundle.Config, store: evidenceLog, listings: bundle.Listings, policy: adm.grantedPolicy(), force: reprobe,
+			memoryOnly: capHandle.Status() == fingerprint.StoreMemoryOnly}
 	}
 	resolveEndpoint := newPreflightEndpointResolver(bundle.Config, ollamaURL, backendRes.providerKey, backendRes.diagSource())
 	return runModelsWith(ctx, bundle.Models, plan.chain, bundle.Config, resolveEndpoint, checks, out, errOut)

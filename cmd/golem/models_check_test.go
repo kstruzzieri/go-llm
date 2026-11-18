@@ -925,3 +925,26 @@ func TestGolemModels_ListingCancelledReportsOnce(t *testing.T) {
 		})
 	}
 }
+
+// TestGolemModels_MemoryOnlyStoreSaysSo pins that a check saved to a store that
+// fell back to memory says so, since its answer lasts only for the command. A
+// file-backed store's "saved" is pinned by
+// TestGolemModels_ReprobeOpenAICompatRunsForcedPlan.
+func TestGolemModels_MemoryOnlyStoreSaysSo(t *testing.T) {
+	srv := newMCServer(t)
+	srv.ids = []string{"mystery"}
+	e := newMCEnv(t, mcConfig(srv.URL, "openai-compat", "mystery"))
+	blocker := filepath.Join(t.TempDir(), "blocker")
+	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_DATA_HOME", blocker) // the store cannot be created, so it falls back to memory
+	stdout, stderr := &mcWriter{srv: srv}, &mcWriter{srv: srv}
+	if err := e.run(t.Context(), stdout, stderr, "-probe-all"); err != nil {
+		t.Fatalf("golem models -probe-all: %v\nstderr:\n%s", err, stderr)
+	}
+	got := lines(stderr.String(), `check result "mystery"`)
+	if len(got) != 1 || !strings.HasSuffix(got[0], "; 1 request sent; saved (memory only)") {
+		t.Fatalf("result lines %q; want one saved to memory only\nstderr:\n%s", got, stderr)
+	}
+}

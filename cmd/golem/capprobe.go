@@ -40,7 +40,13 @@ const automaticChecksUsedUp = "the automatic capability checks for this run are 
 // when it finishes or is cancelled, and when the run's allowance cannot fund
 // it (once per model). Golem passes stderr, so none of it reaches stdout, a -p
 // record or the headless stream. Output tokens are worded as a request to the
-// server, not as a cost.
+// server, not as a cost. The stage names are the provider's (unexported):
+// each is rendered from the real registry by a test (started and finished by
+// TestGolemAutomaticProgress_StderrOnlyAndBeforeHTTP, cancelled by
+// TestGolemAutomaticCancel_StopsR2AndPreservesCommittedRows, budget_exhausted
+// by TestGolemPreflight_SecondEntryRefusedThenNextRunSucceeds and
+// TestGolemAutomaticBudget_SharedAcrossTurnsAndCandidates), so a rename fails
+// one of them.
 func probeProgressPrinter(w io.Writer) func(provider.CapabilityProbeProgress) {
 	return func(p provider.CapabilityProbeProgress) {
 		switch p.Stage {

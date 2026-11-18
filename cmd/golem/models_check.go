@@ -26,6 +26,9 @@ type modelsCheck struct {
 	listings map[string][]provider.ModelInfo // bootstrap listings, for runtime digests
 	policy   provider.DestinationPolicy      // the destinations admission granted
 	force    bool                            // -reprobe: fresh answers are checked too
+	// memoryOnly is true when the shared store fell back to memory, so a
+	// saved result lasts only for this command.
+	memoryOnly bool
 }
 
 // run checks the chain's qualified entries, grouped by provider, providers in
@@ -68,7 +71,7 @@ func (c *modelsCheck) checkProvider(ctx context.Context, name string, models []s
 		Config: c.cfg, Store: c.store, Policy: c.policy,
 		OnResult: func(r configio.CheckResult) {
 			reported[r.Model] = true
-			printCheckResult(errOut, r)
+			printCheckResult(errOut, r, c.memoryOnly)
 		},
 	})
 	if err != nil {
@@ -161,8 +164,9 @@ func printCheckPlan(w io.Writer, plan configio.CheckPlan) {
 }
 
 // printCheckResult shows one model's result: its code or its answers, the
-// requests it sent, and whether it was saved.
-func printCheckResult(w io.Writer, r configio.CheckResult) {
+// requests it sent, and whether it was saved, and only in memory when the
+// store fell back to memory.
+func printCheckResult(w io.Writer, r configio.CheckResult, memoryOnly bool) {
 	outcome := string(r.Code)
 	if r.Code == "" {
 		parts := make([]string, 0, len(r.Answers))
@@ -176,7 +180,10 @@ func printCheckResult(w io.Writer, r configio.CheckResult) {
 		outcome = strings.Join(parts, " ")
 	}
 	saved := "not saved"
-	if r.Persisted {
+	switch {
+	case r.Persisted && memoryOnly:
+		saved = "saved (memory only)"
+	case r.Persisted:
 		saved = "saved"
 	}
 	_, _ = fmt.Fprintf(w, "check result %q: %s; %s sent; %s\n", r.Model, outcome, plural(r.Requests, "request", "requests"), saved)
