@@ -63,23 +63,25 @@ type CheckOptions struct {
 
 // CheckItem is one planned model: what its check asks, and what it may send.
 type CheckItem struct {
-	Model        string
-	Capabilities []string // requested, in canonical order
-	Methods      []string // probe methods, in the order they run
+	Model        string   `json:"model"`
+	Capabilities []string `json:"capabilities"` // requested, in canonical order
+	Methods      []string `json:"methods"`      // probe methods, in the order they run
 	// UsualRequests and MaxRequests count requests the check sends.
-	UsualRequests, MaxRequests int
+	UsualRequests int `json:"usual_requests"`
+	MaxRequests   int `json:"max_requests"`
 	// MaxOutputTokensPerRequest is the output limit requested of the server for
 	// each request: not a limit enforced locally, nor a billing ceiling. Zero
 	// when the method generates nothing.
-	MaxOutputTokensPerRequest int
+	MaxOutputTokensPerRequest int `json:"max_output_tokens_per_request"`
 	// ModelLoads is how many model loads the check may cause: 1 for a
 	// generating check at a loopback endpoint, else 0.
-	ModelLoads int
+	ModelLoads int `json:"model_loads"`
 	// RequestTimeout bounds each request: the method's timeout, or the
 	// provider's when that is shorter. A caller's deadline can cut it further.
-	RequestTimeout time.Duration
+	// JSON encodes it as Go's time.Duration does: an integer of nanoseconds.
+	RequestTimeout time.Duration `json:"request_timeout"`
 	// MaxResponseBytes bounds each decoded response body, framing included.
-	MaxResponseBytes int64
+	MaxResponseBytes int64 `json:"max_response_bytes"`
 }
 
 // CheckPlan is what an explicit capability check of one provider will send.
@@ -88,11 +90,11 @@ type CheckItem struct {
 // never a credential, and its identity. A plan built from its fields or
 // decoded from JSON has neither, so a run refuses it as stale.
 type CheckPlan struct {
-	Provider     string
-	EndpointHost string // host[:port] of the canonical endpoint; never a path
-	Adapter      string
-	Force        bool
-	Items        []CheckItem // planned models, sorted by ID; empty when none needs a check
+	Provider     string      `json:"provider"`
+	EndpointHost string      `json:"endpoint_host"` // host[:port] of the canonical endpoint; never a path
+	Adapter      string      `json:"adapter"`
+	Force        bool        `json:"force"`
+	Items        []CheckItem `json:"items"` // planned models, sorted by ID; empty when none needs a check
 
 	state *planState // a pointer, so printing a plan shows none of it
 }

@@ -173,12 +173,12 @@ func TestBuildGuardedProvider_RequiresGate(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if prov, client, err := BuildGuardedProvider("p", cfg, nil, dest, nil, nil); err == nil || prov != nil || client != nil {
+		if prov, client, closeIdle, err := BuildGuardedProvider("p", cfg, nil, dest, nil, nil); err == nil || prov != nil || client != nil || closeIdle != nil {
 			t.Fatalf("%s without a gate = %v, %v, %v; want an error and nothing built", format, prov, client, err)
 		}
-		prov, client, err := BuildGuardedProvider("p", cfg, provider.NewDestinationGate(), dest, nil, &http.Transport{})
-		if err != nil || prov == nil || prov.Name() != "p" {
-			t.Fatalf("%s with a gate = %v, %v; want provider p", format, prov, err)
+		prov, client, closeIdle, err := BuildGuardedProvider("p", cfg, provider.NewDestinationGate(), dest, nil, &http.Transport{})
+		if err != nil || prov == nil || prov.Name() != "p" || closeIdle == nil {
+			t.Fatalf("%s with a gate = %v, %v; want provider p and a close function", format, prov, err)
 		}
 		if (client != nil) != (format == "ollama") {
 			t.Fatalf("%s: ollama client = %v; want one only for ollama", format, client)

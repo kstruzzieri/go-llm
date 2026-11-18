@@ -58,7 +58,7 @@ func TestCacheAffinityReachesTransport(t *testing.T) {
 			defer srv.Close()
 			p, _, err := buildProvider("hosted", config.ProviderConfig{
 				BaseURL: srv.URL, APIFormat: "openai-compat", CacheAffinity: tc.affinity,
-			}, nil, provider.Destination{}, nil, nil)
+			}, nil, provider.Destination{}, nil)
 			if err != nil {
 				t.Fatal(err)
 			}

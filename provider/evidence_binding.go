@@ -622,39 +622,20 @@ func (r *ModelRegistry) toolCallFromLog(ctx context.Context, key ModelKey, bindi
 	return "", false, nil
 }
 
-// probeEvidenceRows builds one row per answer of a completed check, observed at
-// completedAt on the store's millisecond, and returns the tool_call state. A
+// probeEvidenceRows builds one row per answer of a completed check with
+// fingerprint.AnswerRows, and returns the tool_call state. A
 // result with no valid tool_call answer is an error: the requests it sent stay
 // spent, nothing is written and no cooldown starts.
 func probeEvidenceRows(key ModelKey, binding EvidenceBinding, digest string, recipe fingerprint.ProbeRecipe, result fingerprint.CapabilityProbeResult, completedAt time.Time) ([]fingerprint.EvidenceRow, fingerprint.CapProbeState, error) {
-	observedAt := storeMillis(completedAt)
+	rows := fingerprint.AnswerRows(binding.Endpoint, binding.Adapter, key.Model, digest, recipe, result.Answers, completedAt)
 	var state fingerprint.CapProbeState
-	rows := make([]fingerprint.EvidenceRow, 0, len(result.Answers))
-	for _, a := range result.Answers {
-		row := fingerprint.EvidenceRow{
-			KeyVersion: fingerprint.EvidenceKeyVersion, Endpoint: binding.Endpoint, Adapter: binding.Adapter,
-			Model: key.Model, Digest: digest, Capability: a.Capability,
-			Source: a.Source, Kind: a.Kind, State: a.State,
-			Method: recipe.Method, MethodVersion: recipe.Version, Detail: a.Detail,
-			ObservedAt: observedAt,
-		}
-		freshUntil, expiresAt := fingerprint.ExpiryFor(row, a.TTL)
-		row.FreshUntil, row.ExpiresAt = storeMillis(freshUntil), storeMillis(expiresAt)
-		rows = append(rows, row)
-		if a.Capability == capabilityToolCall {
-			state = a.State
+	for _, row := range rows {
+		if row.Capability == capabilityToolCall {
+			state = row.State
 		}
 	}
 	if !validCapProbeState(state) {
 		return nil, "", fmt.Errorf("provider: probe tool_call %v returned no valid tool_call answer", key)
 	}
 	return rows, state, nil
-}
-
-// storeMillis truncates t to the store's millisecond precision; zero stays zero.
-func storeMillis(t time.Time) time.Time {
-	if t.IsZero() {
-		return t
-	}
-	return time.UnixMilli(t.UnixMilli())
 }

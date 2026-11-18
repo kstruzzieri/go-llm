@@ -50,11 +50,13 @@ var rcCalled = rcFrame(map[string]any{"choices": []any{map[string]any{"index": 0
 // before it.
 type rcServe func(w http.ResponseWriter, r *http.Request, model string, n int)
 
-// rcStub serves both check APIs at one address and counts requests per model.
+// rcStub serves both check APIs at one address, counts requests per model and
+// keeps each connection's latest state.
 type rcStub struct {
-	srv  *httptest.Server
-	mu   sync.Mutex
-	hits map[string]int
+	srv   *httptest.Server
+	mu    sync.Mutex
+	hits  map[string]int
+	conns map[net.Conn]http.ConnState
 }
 
 // newRCStub serves every request with serve, or rcAnswer when nil.
@@ -63,8 +65,8 @@ func newRCStub(t *testing.T, serve rcServe) *rcStub {
 	if serve == nil {
 		serve = rcAnswer
 	}
-	s := &rcStub{hits: map[string]int{}}
-	s.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	s := &rcStub{hits: map[string]int{}, conns: map[net.Conn]http.ConnState{}}
+	s.srv = httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var body struct{ Model, Name string }
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		model := cmp.Or(body.Model, body.Name)
@@ -74,8 +76,30 @@ func newRCStub(t *testing.T, serve rcServe) *rcStub {
 		s.mu.Unlock()
 		serve(w, r, model, n)
 	}))
+	s.srv.Config.ConnState = func(c net.Conn, state http.ConnState) {
+		s.mu.Lock()
+		s.conns[c] = state
+		s.mu.Unlock()
+	}
+	s.srv.Start()
 	t.Cleanup(s.srv.Close)
 	return s
+}
+
+// connStates counts the connections the stub saw, those now idle and those
+// closed.
+func (s *rcStub) connStates() (seen, idle, closed int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, state := range s.conns {
+		switch state {
+		case http.StateIdle:
+			idle++
+		case http.StateClosed:
+			closed++
+		}
+	}
+	return len(s.conns), idle, closed
 }
 
 func (s *rcStub) count(model string) int {
@@ -1050,5 +1074,125 @@ func TestRunCheck_FiledWhereRoutingReads(t *testing.T) {
 				t.Fatalf("routing checked %d times; want %d", prober.calls.Load(), want)
 			}
 		})
+	}
+}
+
+// rcAppendFails is a store whose check appends fail with text that must not
+// leak; it reads as the store it wraps.
+type rcAppendFails struct{ fingerprint.EvidenceStore }
+
+func (rcAppendFails) AppendCheckResult(context.Context, string, string, string, []fingerprint.EvidenceRow, *fingerprint.ModelAccess) error {
+	return errors.New("database is locked at SECRET-DB-APPEND")
+}
+
+func TestRunCheck_AppendFailureReportsUnsaved(t *testing.T) {
+	stub := newRCStub(t, nil)
+	cfg := rcConfig("lc", stub.srv.URL, "openai-compat", cpKey, "m")
+	b := cpBinding(t, cfg, "lc")
+	store := newStore(t)
+	plan := cpPlan(t, cfg, store, "lc", []string{"m"}, cpTools, false)
+	res, err := rcRun(t, plan, RunOptions{Config: cfg, Store: rcAppendFails{store}})
+	rcWantAnswered(t, res, err, "m")
+	if r := res[0]; r.Persisted || fmt.Sprint(r.Answers) != fmt.Sprint(rcToolsAnswers) {
+		t.Fatalf("result %+v; want its answers, not persisted", r)
+	}
+	shown, _ := json.Marshal(res[0])
+	if text := fmt.Sprintf("%+v %s", res[0], shown); strings.Contains(text, "SECRET-DB-APPEND") {
+		t.Fatalf("result carries the store's text: %s", text)
+	}
+	if rows, err := store.EvidenceRows(t.Context(), b.Endpoint, "m"); err != nil || len(rows) != 0 {
+		t.Fatalf("rows %d (%v); want none", len(rows), err)
+	}
+}
+
+// TestRunCheck_ClosesRunOwnedConnections: when RunCheck returns, the idle
+// connections of a transport the run made are closed: the guard's clone at a
+// loopback endpoint, and its copy of the default at a remote one. A host's
+// remote transport, which the guard uses as is, keeps its idle connection.
+// Ollama's metadata reply has a length, so a kept connection goes idle.
+func TestRunCheck_ClosesRunOwnedConnections(t *testing.T) {
+	run := func(t *testing.T, stub *rcStub, base string, opts RunOptions) {
+		t.Helper()
+		opts.Config = rcConfig("ol", base, "ollama", cpKey, "m")
+		plan := cpPlan(t, opts.Config, nil, "ol", []string{"m"}, cpTools, false)
+		res, err := rcRun(t, plan, opts)
+		rcWantAnswered(t, res, err, "m")
+	}
+	wantClosed := func(t *testing.T, stub *rcStub) {
+		t.Helper()
+		for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(5 * time.Millisecond) {
+			seen, _, closed := stub.connStates()
+			if seen > 0 && closed == seen {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("connections seen %d, closed %d; want every one closed when RunCheck returns", seen, closed)
+			}
+		}
+	}
+
+	t.Run("loopback", func(t *testing.T) {
+		stub := newRCStub(t, nil)
+		run(t, stub, stub.srv.URL, RunOptions{})
+		wantClosed(t, stub)
+	})
+	t.Run("loopback with a host transport", func(t *testing.T) {
+		stub := newRCStub(t, nil)
+		tr := &http.Transport{}
+		t.Cleanup(tr.CloseIdleConnections)
+		run(t, stub, stub.srv.URL, RunOptions{Transport: tr})
+		wantClosed(t, stub)
+	})
+	t.Run("remote with the default transport", func(t *testing.T) {
+		stub := newRCStub(t, nil)
+		_, grant, _ := rcRemote(t, stub, "ol")
+		// The guard copies http.DefaultTransport for a remote endpoint; this one
+		// dials the stub. Not parallel: it swaps a global.
+		addr := stub.srv.Listener.Addr().String()
+		saved := http.DefaultTransport
+		http.DefaultTransport = &http.Transport{DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, network, addr)
+		}}
+		t.Cleanup(func() { http.DefaultTransport = saved })
+		run(t, stub, rcRemoteBase, RunOptions{Policy: grant})
+		wantClosed(t, stub)
+	})
+	t.Run("remote with a host transport", func(t *testing.T) {
+		stub := newRCStub(t, nil)
+		tr, grant, _ := rcRemote(t, stub, "ol")
+		run(t, stub, rcRemoteBase, RunOptions{Policy: grant, Transport: tr})
+		time.Sleep(200 * time.Millisecond) // room for a close that must not come
+		if seen, idle, closed := stub.connStates(); seen != 1 || idle != 1 || closed != 0 {
+			t.Fatalf("connections seen %d, idle %d, closed %d; want the host's one connection kept idle", seen, idle, closed)
+		}
+	})
+}
+
+// TestCheckJSON_FieldNames pins the wire names hosts read. A duration is Go's
+// integer nanoseconds.
+func TestCheckJSON_FieldNames(t *testing.T) {
+	cfg := rcConfig("lc", cpLocal, "openai-compat", cpKey, "m")
+	declared := rcConfig("lc", cpLocal, "openai-compat", cpKey) // an explicit list is never planned
+	declared.Models = map[string]config.ModelConfig{"lc-00": {Provider: "lc", Name: "m", Type: "dense", Capabilities: []string{"chat"}}}
+	for _, tt := range []struct {
+		name string
+		v    any
+		want string
+	}{
+		{"plan", cpPlan(t, cfg, nil, "lc", []string{"m"}, cpTools, false),
+			`{"provider":"lc","endpoint_host":"127.0.0.1:8080","adapter":"openai-compat","force":false,"items":[` +
+				`{"model":"m","capabilities":["chat","stream","tool_call"],"methods":["chat-stream-tools"],"usual_requests":1,` +
+				`"max_requests":2,"max_output_tokens_per_request":2048,"model_loads":1,"request_timeout":180000000000,"max_response_bytes":1048576}]}`},
+		{"empty plan", cpPlan(t, declared, nil, "lc", []string{"m"}, cpTools, false).Items, `[]`},
+		{"answered", CheckResult{Model: "m", Method: fingerprint.MethodChatStreamTools, Requests: 1, Answers: rcToolsAnswers, Persisted: true},
+			`{"model":"m","method":"chat-stream-tools","requests":1,"answers":[{"capability":"chat","state":"yes"},` +
+				`{"capability":"stream","state":"yes"},{"capability":"tool_call","state":"yes","detail":"tool_called"}],"persisted":true}`},
+		{"failed", CheckResult{Model: "m", Method: fingerprint.MethodChatStreamTools, Code: CodeServerError, Requests: 1},
+			`{"model":"m","method":"chat-stream-tools","code":"server_error","requests":1,"persisted":false}`},
+	} {
+		got, err := json.Marshal(tt.v)
+		if err != nil || string(got) != tt.want {
+			t.Errorf("%s = %s, %v; want %s", tt.name, got, err, tt.want)
+		}
 	}
 }

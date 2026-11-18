@@ -125,6 +125,39 @@ func ExpiryFor(row EvidenceRow, proberTTL time.Duration) (freshUntil, expiresAt 
 	return freshUntil, expiresAt
 }
 
+// AnswerRows builds the rows that file a completed check's answers, one per
+// answer in order: through endpoint and adapter, for model at digest ("" for
+// name-only), under recipe's method and version, observed at completedAt
+// truncated to the store's millisecond, with the expiry ExpiryFor gives each
+// answer's TTL, truncated alike. Every writer of a check's answers builds its
+// rows here, so they cannot disagree on the key version, method version,
+// expiry or precision.
+func AnswerRows(endpoint, adapter, model, digest string, recipe ProbeRecipe, answers []ProbeAnswer, completedAt time.Time) []EvidenceRow {
+	observedAt := storeMillis(completedAt)
+	rows := make([]EvidenceRow, 0, len(answers))
+	for _, a := range answers {
+		row := EvidenceRow{
+			KeyVersion: EvidenceKeyVersion, Endpoint: endpoint, Adapter: adapter,
+			Model: model, Digest: digest, Capability: a.Capability,
+			Source: a.Source, Kind: a.Kind, State: a.State,
+			Method: recipe.Method, MethodVersion: recipe.Version, Detail: a.Detail,
+			ObservedAt: observedAt,
+		}
+		freshUntil, expiresAt := ExpiryFor(row, a.TTL)
+		row.FreshUntil, row.ExpiresAt = storeMillis(freshUntil), storeMillis(expiresAt)
+		rows = append(rows, row)
+	}
+	return rows
+}
+
+// storeMillis truncates t to the store's millisecond; zero stays zero.
+func storeMillis(t time.Time) time.Time {
+	if t.IsZero() {
+		return t
+	}
+	return time.UnixMilli(t.UnixMilli())
+}
+
 // Fresh reports whether the row is a definitive answer that, at now, is
 // unexpired and within FreshUntil when set. A valid answer can be stale.
 func (r EvidenceRow) Fresh(now time.Time) bool {

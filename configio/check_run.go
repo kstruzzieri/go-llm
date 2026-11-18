@@ -34,9 +34,9 @@ const remoteCheckWorkers = 4
 
 // CheckAnswer is one capability's outcome in a check result.
 type CheckAnswer struct {
-	Capability string // canonical name
-	State      string // yes, no or inconclusive
-	Detail     string // a bounded code; "" when none
+	Capability string `json:"capability"`       // canonical name
+	State      string `json:"state"`            // yes, no or inconclusive
+	Detail     string `json:"detail,omitempty"` // a bounded code; "" when none
 }
 
 // CheckResult is one planned model's finished check. Code is "" when the check
@@ -44,12 +44,12 @@ type CheckAnswer struct {
 // requests the check sent. Persisted is true only once the answers were
 // committed to the run's store. A result never carries provider text.
 type CheckResult struct {
-	Model     string
-	Method    string
-	Code      ErrorCode
-	Requests  int
-	Answers   []CheckAnswer
-	Persisted bool
+	Model     string        `json:"model"`
+	Method    string        `json:"method"`
+	Code      ErrorCode     `json:"code,omitempty"`
+	Requests  int           `json:"requests"`
+	Answers   []CheckAnswer `json:"answers,omitempty"`
+	Persisted bool          `json:"persisted"`
 }
 
 // RunOptions configures RunCheck.
@@ -70,10 +70,11 @@ type RunOptions struct {
 	// before anything is saved. Calls never overlap each other or OnResult. May
 	// be nil.
 	OnUsage func(model string, u provider.Usage)
-	// Transport is the base transport of the check's client; nil uses the
-	// default. Every request still passes the destination guard, and a loopback
-	// endpoint gets a clone without its proxy that dials localhost as the
-	// loopback addresses.
+	// Transport is the base transport of the check's client; nil uses a copy
+	// of the default. Every request still passes the destination guard, and a
+	// loopback endpoint gets a clone without its proxy that dials localhost as
+	// the loopback addresses. A remote endpoint uses it as is, and RunCheck
+	// leaves its idle connections open.
 	Transport *http.Transport
 }
 
@@ -104,7 +105,8 @@ type RunOptions struct {
 // Cancellation stops scheduling. A check that returns after ctx is done is
 // neither saved nor reported, and RunCheck returns ctx's error, uncoded.
 // Otherwise it returns nil once every check has finished; no worker outlives
-// the call.
+// the call. Idle connections of a transport the run made are closed before it
+// returns; a host's remote Transport keeps its own.
 func RunCheck(ctx context.Context, plan CheckPlan, opts RunOptions) error {
 	if ctx == nil {
 		return wrapCode(CodeInvalidArgument, errors.New("configio: run check: nil context"))
@@ -149,10 +151,11 @@ func RunCheck(ctx context.Context, plan CheckPlan, opts RunOptions) error {
 		return nil
 	}
 
-	prov, client, err := providerbootstrap.BuildGuardedProvider(in.target.provider, pc, gate, dest, nil, opts.Transport)
+	prov, client, closeIdle, err := providerbootstrap.BuildGuardedProvider(in.target.provider, pc, gate, dest, nil, opts.Transport)
 	if err != nil { // a transport the guard cannot use, such as a TLS dial hook for loopback
 		return wrapCode(CodeInvalidArgument, fmt.Errorf("configio: run check: %w", err))
 	}
+	defer closeIdle() // after every worker: the run's own connections, never a host transport's
 	factory := probers.ProberFactoryInput{APIFormat: pc.APIFormat, OllamaClient: client}
 	factory.OpenAICompatProvider, _ = prov.(*openaicompat.Provider)
 	if opts.OnUsage != nil {
@@ -331,8 +334,7 @@ func (r *checkRun) check(ctx context.Context, it planItem) {
 
 // classify turns a check that returned, the caller still live, into its
 // outcome: a coded failure with nothing to save (a 403 or 404 is refused), or
-// its answers and the rows that file them, observed at completedAt on the
-// store's millisecond.
+// its answers and the rows that file them (fingerprint.AnswerRows).
 func (r *checkRun) classify(model string, recipe fingerprint.ProbeRecipe, res fingerprint.CapabilityProbeResult, err error, completedAt time.Time) checkOutcome {
 	out := checkOutcome{result: CheckResult{Model: model, Method: recipe.Method, Requests: max(res.Requests, 0)}}
 	if err != nil {
@@ -341,20 +343,10 @@ func (r *checkRun) classify(model string, recipe fingerprint.ProbeRecipe, res fi
 	}
 	listed, _ := evidencesel.Select(r.snap, r.binding, model, true)
 	digest := cmp.Or(res.Digest, r.digests[model], listed)
-	observedAt := storeMillis(completedAt)
 	for _, a := range res.Answers {
 		out.result.Answers = append(out.result.Answers, CheckAnswer{Capability: a.Capability, State: string(a.State), Detail: a.Detail})
-		row := fingerprint.EvidenceRow{
-			KeyVersion: fingerprint.EvidenceKeyVersion, Endpoint: r.binding.Endpoint, Adapter: r.binding.Adapter,
-			Model: model, Digest: digest, Capability: a.Capability,
-			Source: a.Source, Kind: a.Kind, State: a.State,
-			Method: recipe.Method, MethodVersion: recipe.Version, Detail: a.Detail,
-			ObservedAt: observedAt,
-		}
-		freshUntil, expiresAt := fingerprint.ExpiryFor(row, a.TTL)
-		row.FreshUntil, row.ExpiresAt = storeMillis(freshUntil), storeMillis(expiresAt)
-		out.rows = append(out.rows, row)
 	}
+	out.rows = fingerprint.AnswerRows(r.binding.Endpoint, r.binding.Adapter, model, digest, recipe, res.Answers, completedAt)
 	return out
 }
 
@@ -379,12 +371,4 @@ func (r *checkRun) report(res CheckResult) {
 	r.cb.Lock()
 	defer r.cb.Unlock()
 	r.onResult(res)
-}
-
-// storeMillis truncates t to the store's millisecond; zero stays zero.
-func storeMillis(t time.Time) time.Time {
-	if t.IsZero() {
-		return t
-	}
-	return time.UnixMilli(t.UnixMilli())
 }
