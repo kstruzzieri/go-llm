@@ -51,7 +51,7 @@ func constructProviders(eff *Effective, gate *provider.DestinationGate, match fu
 	ollamaClients := make(map[string]*ollama.Client)
 	for _, key := range keys {
 		pc := eff.cfg.Providers[key]
-		prov, client, err := buildProvider(key, pc, gate, eff.dests[key], match)
+		prov, client, err := buildProvider(key, pc, gate, eff.dests[key], match, nil)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -108,21 +108,40 @@ func ProviderTimeout(cfg config.ProviderConfig) time.Duration {
 	return defaultProviderTimeout
 }
 
+// BuildGuardedProvider constructs one provider from cfg whose every request
+// passes the destination guard bound to gate and dest, as bootstrap builds a
+// gated provider. For ollama it also returns the underlying client. A non-nil
+// transport is the guarded client's base transport; nil uses the default. A
+// loopback destination still clones it, strips its proxy and dials localhost
+// as the loopback addresses. match is the content guard, as in bootstrap. A
+// nil gate is an error: this constructor never builds an ungated client.
+func BuildGuardedProvider(key string, cfg config.ProviderConfig, gate *provider.DestinationGate, dest provider.Destination, match func(string) bool, transport *http.Transport) (provider.Provider, *ollama.Client, error) {
+	if gate == nil {
+		return nil, nil, fmt.Errorf("providerbootstrap: provider %q: a guarded provider requires a gate", key)
+	}
+	return buildProvider(key, cfg, gate, dest, match, transport)
+}
+
 // buildProvider constructs one provider from its config. For ollama it also
 // returns the underlying client so the prober factory can reuse it. A
 // non-nil gate wraps the provider's HTTP client with the destination guard
 // bound to dest; a nil gate keeps the ungated construction byte-identical.
+// A non-nil transport is the guarded client's base transport.
 //
 // A non-nil match is installed as the content guard on an openai-compat client
 // whose destination is not loopback. Loopback is decided on the materialized
 // destination, so a URL override moves a provider across the boundary; ollama
 // clients take no guard.
-func buildProvider(key string, cfg config.ProviderConfig, gate *provider.DestinationGate, dest provider.Destination, match func(string) bool) (provider.Provider, *ollama.Client, error) {
+func buildProvider(key string, cfg config.ProviderConfig, gate *provider.DestinationGate, dest provider.Destination, match func(string) bool, transport *http.Transport) (provider.Provider, *ollama.Client, error) {
 	timeout := ProviderTimeout(cfg)
 	var guarded *http.Client
 	if gate != nil {
+		base := &http.Client{Timeout: timeout}
+		if transport != nil { // a nil *http.Transport in the interface field is not a nil RoundTripper
+			base.Transport = transport
+		}
 		var err error
-		guarded, err = provider.GuardHTTPClient(gate, dest, &http.Client{Timeout: timeout})
+		guarded, err = provider.GuardHTTPClient(gate, dest, base)
 		if err != nil {
 			return nil, nil, fmt.Errorf("providerbootstrap: provider %q: %w", key, err)
 		}

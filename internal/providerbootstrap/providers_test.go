@@ -1,9 +1,11 @@
 package providerbootstrap
 
 import (
+	"net/http"
 	"testing"
 
 	"github.com/kstruzzieri/go-llm/config"
+	"github.com/kstruzzieri/go-llm/provider"
 )
 
 // buildProviders returns (providers, ollamaClients, effectiveConfig, error).
@@ -161,5 +163,25 @@ func TestBuildProviders_OllamaOverrideUnchangedBesideOCOverride(t *testing.T) {
 	// so display, manifest, and client all read the URL the client dials.
 	if got := eff.Providers["ollama"].BaseURL; got != "http://127.0.0.1:7777" {
 		t.Fatalf("ollama BaseURL = %q, want the override in the effective config", got)
+	}
+}
+
+func TestBuildGuardedProvider_RequiresGate(t *testing.T) {
+	for _, format := range []string{"ollama", "openai-compat"} {
+		cfg := config.ProviderConfig{APIFormat: format, BaseURL: "http://127.0.0.1:8080"}
+		dest, err := provider.NewDestination("p", cfg.BaseURL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if prov, client, err := BuildGuardedProvider("p", cfg, nil, dest, nil, nil); err == nil || prov != nil || client != nil {
+			t.Fatalf("%s without a gate = %v, %v, %v; want an error and nothing built", format, prov, client, err)
+		}
+		prov, client, err := BuildGuardedProvider("p", cfg, provider.NewDestinationGate(), dest, nil, &http.Transport{})
+		if err != nil || prov == nil || prov.Name() != "p" {
+			t.Fatalf("%s with a gate = %v, %v; want provider p", format, prov, err)
+		}
+		if (client != nil) != (format == "ollama") {
+			t.Fatalf("%s: ollama client = %v; want one only for ollama", format, client)
+		}
 	}
 }

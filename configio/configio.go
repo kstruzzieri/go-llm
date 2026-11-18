@@ -1,8 +1,8 @@
 // Package configio implements the explicit I/O tier of the role-config
-// stack (spec slice 4): RefreshInventory, ProbeToolCall and PlanCheck. All are
-// user-invoked operations with values in and values out — nothing here
-// runs implicitly on view or build, and a cancelled operation returns a
-// zero value: the caller receives nothing.
+// stack (spec slice 4): RefreshInventory, ProbeToolCall, PlanCheck and
+// RunCheck. All are user-invoked operations with values in and values out —
+// nothing here runs implicitly on view or build, and a cancelled operation
+// returns a zero value: the caller receives nothing.
 //
 // Error discipline follows the config/profiles house rules — bounded
 // codes, message text passes through unchanged; CodeOf uses
@@ -15,9 +15,11 @@
 // (argument validation runs first: a structurally invalid request returns
 // invalid_argument even under a cancelled context).
 //
-// Import graph: configio -> config, configview, fingerprint, provider,
-// internal/evidencesel, internal/providerbootstrap. It must never be imported
-// by config, configview, provider or the internal packages it imports.
+// Import graph: configio -> config, configview, fingerprint,
+// fingerprint/probers, provider, provider/openaicompat, internal/evidencesel,
+// internal/providerbootstrap, internal/responsebound. It must never be
+// imported by config, configview, fingerprint, provider or the internal
+// packages it imports.
 package configio
 
 import (
