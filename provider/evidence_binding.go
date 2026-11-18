@@ -435,7 +435,9 @@ func probeMethodFor(adapter string) string {
 }
 
 // EndpointHost returns the host[:port] of a canonical endpoint
-// (EvidenceBinding.Endpoint), never its path, or "" when it does not parse.
+// (EvidenceBinding.Endpoint): never its userinfo or path, with an IPv6
+// address kept in brackets. It returns "" when the endpoint does not parse or
+// names no host, as a scheme-less "host:1" does (it parses as scheme "host").
 // It is what progress and check plans show of an endpoint.
 func EndpointHost(endpoint string) string {
 	u, err := url.Parse(endpoint)

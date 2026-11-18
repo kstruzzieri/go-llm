@@ -1483,3 +1483,22 @@ func TestExplainToolCall_LogExplicitAgreesWithLookup(t *testing.T) {
 	}
 	wantCaps(t, "Lookup", lookupProfile(t, mr, logModel).Caps, got.Caps)
 }
+
+// TestEndpointHost pins what EndpointHost shows of an endpoint: host[:port]
+// only, IPv6 in brackets, and "" for an endpoint that does not parse or names
+// no host.
+func TestEndpointHost(t *testing.T) {
+	tests := []struct{ endpoint, want string }{
+		{"http://127.0.0.1:8080/v1", "127.0.0.1:8080"},
+		{"https://u:p@h.example/x", "h.example"},
+		{"http://[::1]:11434", "[::1]:11434"},
+		{"%zz", ""},
+		{"://", ""},
+		{"host:1", ""},
+	}
+	for _, tt := range tests {
+		if got := EndpointHost(tt.endpoint); got != tt.want {
+			t.Errorf("EndpointHost(%q) = %q; want %q", tt.endpoint, got, tt.want)
+		}
+	}
+}
