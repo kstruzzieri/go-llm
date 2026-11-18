@@ -482,8 +482,9 @@ func runOnceWithRecipeHint(ctx context.Context, out io.Writer, interrupts <-chan
 		History:        sess.session.history(),        // nil-safe: nil session => nil
 		MaxSteps:       sess.maxSteps,
 		Budget:         sess.runtime.Budget(),
-		// The runtime's own opt-in, so a replay keeps it (#767).
-		RecoverThinkingOnlyAnswer: golemruntime.RecoverThinkingOnlyAnswer,
+		// Mirrors golem.Runtime.Run's turn request; TestFinalAnswerRecoveryWire_TraceAndTelemetry
+		// pins both (two requests sent, and the trace says true) (#767).
+		RecoverThinkingOnlyAnswer: true,
 	}
 	threadID := ""
 	if sess.session != nil {

@@ -38,10 +38,6 @@ var errDuplicateRunID = errors.New("golem: duplicate active run ID")
 // ProtocolVersion is the current consumer event contract version.
 const ProtocolVersion = 1
 
-// RecoverThinkingOnlyAnswer is the agent.Request opt-in every Run turn sets
-// (#767). A caller that records the request, such as a trace, reads it here.
-const RecoverThinkingOnlyAnswer = true
-
 const (
 	defaultMaxMessageBytes     = 64 * 1024
 	maxContextDescriptionBytes = 256
@@ -648,7 +644,7 @@ func (r *Runtime) Run(ctx context.Context, turn Turn, sink EventSink) (agent.Res
 		StrictApproval: r.strictApproval,
 		StrictExempt:   strictExemptNames(snap.tools),
 		// #767: AgentFlow and dispatch children build their own requests and stay off.
-		RecoverThinkingOnlyAnswer: RecoverThinkingOnlyAnswer,
+		RecoverThinkingOnlyAnswer: true,
 	}
 	if thread != nil {
 		request.History = thread.history()

@@ -142,7 +142,10 @@ type Request struct {
 	// State, Result.Messages and history never carry it, and it is priced
 	// into the step's input like any prompt text. Reasoning that a
 	// ModelCaller only streams, without returning it in Response.Thinking, is
-	// not recovered. A nested Run does not inherit it.
+	// not recovered. A nested Run does not inherit it. The follow-up advertises
+	// no tools, so a router choosing by required capabilities may send it to a
+	// different model in a preferred chain than the one that produced the
+	// reasoning, as can already happen between any two steps.
 	RecoverThinkingOnlyAnswer bool
 }
 

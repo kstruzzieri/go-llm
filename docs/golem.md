@@ -1384,8 +1384,9 @@ the run's `run.failed` event; the CLI adds `empty_answer`,
 turn's final reply holds reasoning but no answer and a step is left, Golem
 spends one tool-free follow-up step asking the model for its answer alone, in
 `-p` runs and REPL turns alike; the `-trace` record's `result` shows it as a
-`final_answer_retry` event. `empty_answer` now also means that follow-up
-produced no answer either. The result record
+`final_answer_retry` event. `empty_answer` also covers a turn whose
+follow-up produced no answer or could not run (no step left, or it did not fit
+the context window). The result record
 has **no size cap** — a large answer is one large line, so do not read the
 stream with a fixed 64 KiB line buffer. To tell the two shapes apart: a protocol
 event has a top-level `protocol` key and never `schema`; the result record has
