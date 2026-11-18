@@ -98,6 +98,16 @@ const defaultProviderTimeout = 5 * time.Minute
 // client timeout; each probe is additionally ctx-bounded to the same value.
 const defaultSlotProbeClientTimeout = 5 * time.Second
 
+// ProviderTimeout is the per-request timeout a provider built from cfg runs
+// with: its configured timeout when positive, else the clients' 5-minute
+// default.
+func ProviderTimeout(cfg config.ProviderConfig) time.Duration {
+	if cfg.Timeout.Duration > 0 {
+		return cfg.Timeout.Duration
+	}
+	return defaultProviderTimeout
+}
+
 // buildProvider constructs one provider from its config. For ollama it also
 // returns the underlying client so the prober factory can reuse it. A
 // non-nil gate wraps the provider's HTTP client with the destination guard
@@ -108,10 +118,7 @@ const defaultSlotProbeClientTimeout = 5 * time.Second
 // destination, so a URL override moves a provider across the boundary; ollama
 // clients take no guard.
 func buildProvider(key string, cfg config.ProviderConfig, gate *provider.DestinationGate, dest provider.Destination, match func(string) bool) (provider.Provider, *ollama.Client, error) {
-	timeout := defaultProviderTimeout
-	if cfg.Timeout.Duration > 0 {
-		timeout = cfg.Timeout.Duration
-	}
+	timeout := ProviderTimeout(cfg)
 	var guarded *http.Client
 	if gate != nil {
 		var err error

@@ -38,3 +38,38 @@ func TestCancellationIsUnclassified(t *testing.T) {
 		t.Fatalf("CodeOf(wrapped deadline) = %q, %v; cancellation must stay unclassified", code, ok)
 	}
 }
+
+func TestCheckCodes_AllTyped(t *testing.T) {
+	// Each value goes into an interface as declared: a constant left untyped by
+	// a const block's implicit repetition arrives as a plain string and fails.
+	cases := []struct {
+		code any
+		want string
+	}{
+		{CodeAuthFailed, "auth_failed"},
+		{CodeModelRefused, "model_refused"},
+		{CodeRefused, "refused"},
+		{CodeRateLimited, "rate_limited"},
+		{CodeTimeout, "timeout"},
+		{CodeUnreachable, "unreachable"},
+		{CodeServerError, "server_error"},
+		{CodeRejected, "rejected"},
+		{CodeMalformedResponse, "malformed_response"},
+		{CodeDestinationNotGranted, "destination_not_granted"},
+		{CodePlanStale, "plan_stale"},
+		{CodeListingRequired, "listing_required"},
+		{CodeBatchTooLarge, "batch_too_large"},
+		{CodeResponseTooLarge, "response_too_large"},
+		{CodeInvalidArgument, "invalid_argument"},
+	}
+	for _, tc := range cases {
+		code, ok := tc.code.(ErrorCode)
+		if !ok {
+			t.Errorf("%v is a %T; want ErrorCode", tc.code, tc.code)
+			continue
+		}
+		if string(code) != tc.want {
+			t.Errorf("code = %q; want %q", code, tc.want)
+		}
+	}
+}
