@@ -209,7 +209,9 @@ than guessing.
   attempt 2 retry without `tool_choice`. A reply that completes proves chat and
   stream, and a valid `get_time` call is a tool_call **yes**. A reply without a
   usable call, or two rejected requests, is an **inconclusive** attempt, never
-  a no. Auth, rate-limit and transport failures save nothing.
+  a no. Auth, rate-limit and other 4xx failures save nothing; a server or
+  transport failure after a request was sent saves a short `check_failed`
+  attempt (below).
 - **Ollama is passive.** An Ollama model is read from `/api/show` metadata: one
   request, no `get_time` request, and none of the allowance below. Its
   capabilities array answers yes or no; without one the result is
@@ -225,8 +227,13 @@ than guessing.
   `~/.local/share/golem/fingerprints.db`), keyed by endpoint and model (and an
   Ollama model's content digest), so a model with a current answer is not
   checked again. A matching inconclusive attempt suppresses automatic checks
-  of that model for 24 hours. Answers in the old `capability_probes` table no
-  longer count.
+  of that model for 24 hours. An automatic check that sent a request and then
+  failed with a server error (5xx), its own timeout, or a broken or oversized
+  reply records a `check_failed` attempt that suppresses automatic checks of
+  that model for 5 minutes, so the next start moves on to the next chain
+  entry; a 4xx such as 401, 403, 404 or 429, a cancelled check, or one that
+  sent nothing records nothing. Answers in the old `capability_probes` table
+  no longer count.
 - **Disabling.** Pass `-no-cap-probe` to Golem to turn automatic checks off;
   routing then also ignores stored answers, while catalog and explicit
   `capabilities` still apply.

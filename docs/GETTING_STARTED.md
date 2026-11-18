@@ -318,8 +318,11 @@ the config elsewhere. Literal keys and the user config are unchanged.
   in one golem run, startup included, share those two requests. Answers are
   kept in the evidence log in `fingerprints.db` under the golem data
   directory, so a model with a current answer is not checked again, and a
-  matching inconclusive attempt suppresses automatic checks for 24 hours;
-  answers in the old `capability_probes` table no longer count. With `-no-cap-probe`, routing
+  matching inconclusive attempt suppresses automatic checks for 24 hours (5
+  minutes for the `check_failed` attempt a check leaves when it sent a request
+  and then failed with a server error, its own timeout, or a broken or
+  oversized reply; a 4xx leaves none); answers in the old `capability_probes`
+  table no longer count. With `-no-cap-probe`, routing
   also ignores stored answers. Declaring `capabilities` explicitly (as in the
   example above) makes the check unnecessary: an explicit declaration is
   authoritative and no check is sent.
