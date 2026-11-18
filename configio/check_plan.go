@@ -15,7 +15,6 @@ import (
 	"errors"
 	"fmt"
 	"hash"
-	"net/url"
 	"slices"
 	"strings"
 	"time"
@@ -30,10 +29,6 @@ import (
 
 // maxCheckModels is the most distinct models one plan may hold.
 const maxCheckModels = 25
-
-// knownCaps is every canonical capability bit.
-const knownCaps = provider.CapChat | provider.CapGenerate | provider.CapInsert | provider.CapEmbed |
-	provider.CapStream | provider.CapToolCall | provider.CapThinking
 
 // planSealVersion names the encoding sealPlan hashes.
 const planSealVersion = "go-llm configio check plan v1"
@@ -73,8 +68,9 @@ type CheckItem struct {
 	// each request: not a limit enforced locally, nor a billing ceiling. Zero
 	// when the method generates nothing.
 	MaxOutputTokensPerRequest int `json:"max_output_tokens_per_request"`
-	// ModelLoads is how many model loads the check may cause: 1 for a
-	// generating check at a loopback endpoint, else 0.
+	// ModelLoads is the model loads the check can predict: 1 for a generating
+	// check at a loopback endpoint, else 0. A remote server may load models
+	// too.
 	ModelLoads int `json:"model_loads"`
 	// RequestTimeout bounds each request: the method's timeout, or the
 	// provider's when that is shorter. A caller's deadline can cut it further.
@@ -183,7 +179,7 @@ func PlanCheck(ctx context.Context, providerName string, models []string, caps p
 		return CheckPlan{}, err
 	}
 	apiKey := pc.APIKey
-	if caps == 0 || caps&^knownCaps != 0 {
+	if caps == 0 || caps&^provider.CanonicalCaps() != 0 {
 		return CheckPlan{}, invalidPlan("capabilities %#x are empty or unknown", uint32(caps))
 	}
 	if len(models) == 0 {
@@ -274,7 +270,7 @@ func PlanCheck(ctx context.Context, providerName string, models []string, caps p
 	st.identity = sealPlan(st.secret, apiKey, &st.inputs)
 
 	plan := CheckPlan{
-		Provider: target.provider, EndpointHost: endpointHost(target.binding.Endpoint),
+		Provider: target.provider, EndpointHost: provider.EndpointHost(target.binding.Endpoint),
 		Adapter: target.binding.Adapter, Force: opts.Force, Items: make([]CheckItem, 0, len(items)), state: st,
 	}
 	for _, it := range items {
@@ -407,15 +403,6 @@ func factFresh(f provider.CapabilityFact, now time.Time) bool {
 	}
 	definitive := f.State == string(fingerprint.CapProbeYes) || f.State == string(fingerprint.CapProbeNo)
 	return definitive && (f.FreshUntil.IsZero() || !f.FreshUntil.Before(now))
-}
-
-// endpointHost is the host[:port] of a canonical endpoint, never its path.
-func endpointHost(endpoint string) string {
-	u, err := url.Parse(endpoint)
-	if err != nil {
-		return ""
-	}
-	return u.Host
 }
 
 // sealPlan is a plan's identity: HMAC-SHA256 under secret of a versioned

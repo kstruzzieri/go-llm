@@ -264,7 +264,7 @@ func verifyPlan(plan CheckPlan, cfg *config.Config) (*planState, config.Provider
 // shownMatches reports whether plan's displayed fields are the ones in was
 // planned with.
 func shownMatches(plan CheckPlan, in *planInputs) bool {
-	if plan.Provider != in.target.provider || plan.EndpointHost != endpointHost(in.target.binding.Endpoint) ||
+	if plan.Provider != in.target.provider || plan.EndpointHost != provider.EndpointHost(in.target.binding.Endpoint) ||
 		plan.Adapter != in.target.binding.Adapter || plan.Force != in.force || len(plan.Items) != len(in.items) {
 		return false
 	}

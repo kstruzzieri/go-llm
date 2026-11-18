@@ -434,8 +434,10 @@ func probeMethodFor(adapter string) string {
 	return ""
 }
 
-// endpointHost is the host[:port] of a canonical endpoint, never its path.
-func endpointHost(endpoint string) string {
+// EndpointHost returns the host[:port] of a canonical endpoint
+// (EvidenceBinding.Endpoint), never its path, or "" when it does not parse.
+// It is what progress and check plans show of an endpoint.
+func EndpointHost(endpoint string) string {
 	u, err := url.Parse(endpoint)
 	if err != nil {
 		return ""
@@ -489,7 +491,7 @@ func (r *ModelRegistry) resolveToolCallFromLog(ctx context.Context, key ModelKey
 
 	generation := recipe.MaxOutputTokensPerRequest > 0
 	event := CapabilityProbeProgress{
-		Key: key, EndpointHost: endpointHost(binding.Endpoint), Method: recipe.Method,
+		Key: key, EndpointHost: EndpointHost(binding.Endpoint), Method: recipe.Method,
 		MaxOutputTokensPerRequest: recipe.MaxOutputTokensPerRequest,
 	}
 	// 5. A check that will be refused must not wait in a slot queue.

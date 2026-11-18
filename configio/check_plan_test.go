@@ -1152,3 +1152,17 @@ func TestPlanCheck_CancelledReturnsContextError(t *testing.T) {
 		t.Fatalf("reads = %d; want 1", len(reads))
 	}
 }
+
+// TestPlanCheck_KnownCapsAreTheCanonicalNames pins that the capability set
+// PlanCheck accepts, provider.CanonicalCaps, is exactly the bits of
+// provider.CanonicalCapabilityNames, so a new canonical name needs no second
+// list here.
+func TestPlanCheck_KnownCapsAreTheCanonicalNames(t *testing.T) {
+	named, err := provider.ParseCapsStrict(provider.CanonicalCapabilityNames)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if named != provider.CanonicalCaps() {
+		t.Fatalf("canonical names parse to %v; CanonicalCaps is %v", named, provider.CanonicalCaps())
+	}
+}
