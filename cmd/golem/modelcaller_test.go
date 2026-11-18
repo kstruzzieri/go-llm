@@ -11,6 +11,7 @@ import (
 	"os"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -367,6 +368,79 @@ func TestGolemPreflight_SecondEntryRefusedThenNextRunSucceeds(t *testing.T) {
 	}
 	if a, b := srv.checksOf("a"), srv.checksOf("b"); a != 2 || b != 1 {
 		t.Fatalf("after the second run checks a=%d b=%d; want 2 and 1", a, b)
+	}
+}
+
+// failChecks answers every check of model with status; others get mcCalled.
+func failChecks(model string, status int) func(http.ResponseWriter, *http.Request, string, int) {
+	return func(w http.ResponseWriter, _ *http.Request, m string, _ int) {
+		if m == model {
+			http.Error(w, "check failed", status)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, mcCalled)
+	}
+}
+
+// TestGolemPreflight_ServerErrorFirstEntryThenNextRunChecksSecond pins the
+// chain [a, b] case where a's check fails with a 500 after its first request:
+// the run fails with b unchecked, and the check_failed attempt a's failure
+// leaves lets the next run send nothing for a, check b and proceed, naming
+// golem models -probe-all for a.
+func TestGolemPreflight_ServerErrorFirstEntryThenNextRunChecksSecond(t *testing.T) {
+	srv := newMCServer(t)
+	srv.ids = []string{"a", "b"}
+	srv.reply = failChecks("a", http.StatusInternalServerError)
+	e := newMCEnv(t, mcConfig(srv.URL, "openai-compat", "a", "b"))
+
+	stderr, err := autoRun(t, e, nil, stopWhenReady)
+	if err == nil || errors.Is(err, errAutoReady) || isPreflightCapabilityError(err) || !strings.Contains(err.Error(), "500") {
+		t.Fatalf("first run = %v; want the 500\nstderr:\n%s", err, stderr)
+	}
+	if a, b := srv.checksOf("a"), srv.checksOf("b"); a != 1 || b != 0 {
+		t.Fatalf("first run checks a=%d b=%d; want 1 and 0", a, b)
+	}
+	if got := lines(stderr, `"lc/b" not checked`); len(got) != 1 {
+		t.Fatalf("budget lines for b %q; want one\nstderr:\n%s", got, stderr)
+	}
+
+	stderr, err = autoRun(t, e, nil, stopWhenReady)
+	if !errors.Is(err, errAutoReady) {
+		t.Fatalf("second run = %v; want a ready session\nstderr:\n%s", err, stderr)
+	}
+	if a, b := srv.checksOf("a"), srv.checksOf("b"); a != 1 || b != 1 {
+		t.Fatalf("after the second run checks a=%d b=%d; want 1 and 1", a, b)
+	}
+	hinted := false
+	for _, l := range lines(stderr, `"lc/a"`) {
+		hinted = hinted || strings.Contains(l, "golem models -probe-all")
+	}
+	if !hinted {
+		t.Fatalf("no line for \"lc/a\" names golem models -probe-all\nstderr:\n%s", stderr)
+	}
+}
+
+// TestGolemPreflight_KeyErrorFirstEntryBlocksEveryRun pins the known issue: a
+// 401 or 429 belongs to the key, not the shared endpoint, so a's failed check
+// records nothing and every run re-sends it, leaving b unchecked.
+func TestGolemPreflight_KeyErrorFirstEntryBlocksEveryRun(t *testing.T) {
+	for _, status := range []int{http.StatusUnauthorized, http.StatusTooManyRequests} {
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
+			srv := newMCServer(t)
+			srv.ids = []string{"a", "b"}
+			srv.reply = failChecks("a", status)
+			e := newMCEnv(t, mcConfig(srv.URL, "openai-compat", "a", "b"))
+			for run := 1; run <= 2; run++ {
+				stderr, err := autoRun(t, e, nil, stopWhenReady)
+				if err == nil || errors.Is(err, errAutoReady) {
+					t.Fatalf("run %d = %v; want a failure\nstderr:\n%s", run, err, stderr)
+				}
+				if a, b := srv.checksOf("a"), srv.checksOf("b"); a != run || b != 0 {
+					t.Fatalf("after run %d checks a=%d b=%d; want %d and 0", run, a, b, run)
+				}
+			}
+		})
 	}
 }
 

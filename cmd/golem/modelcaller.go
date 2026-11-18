@@ -516,7 +516,7 @@ func classifyToolCapability(ctx context.Context, sel, useCase string, key provid
 	case state == fingerprint.CapProbeNo:
 		return false, fmt.Sprintf("%s %q: model did not produce a tool call when probed; %s", fallbackLabel(useCase), sel, remediationHint(sel)), true
 	case state == fingerprint.CapProbeInconclusive:
-		return false, fmt.Sprintf("%s %q: tool-capability probe was inconclusive; declare capabilities to override: %s", fallbackLabel(useCase), sel, remediationHint(sel)), true
+		return false, fmt.Sprintf("%s %q: tool-capability check was inconclusive; golem models -probe-all checks the configured agent chain, or declare capabilities to override: %s", fallbackLabel(useCase), sel, remediationHint(sel)), true
 	default: // "" unknown: resolution disabled for this provider (no prober/store)
 		return false, notToolCapableWarn(useCase, sel), true
 	}

@@ -461,7 +461,7 @@ func TestPreflight_AllExhaustedFatalIncludesProbeOutcomes(t *testing.T) {
 	if !strings.Contains(msg, "ollama/a") || !strings.Contains(msg, "did not produce a tool call") {
 		t.Errorf("err = %q, missing A probed-no line", msg)
 	}
-	if !strings.Contains(msg, "ollama/b") || !strings.Contains(msg, "probe was inconclusive") ||
+	if !strings.Contains(msg, "ollama/b") || !strings.Contains(msg, "check was inconclusive; golem models -probe-all checks the configured agent chain") ||
 		!strings.Contains(msg, "declare capabilities to override") {
 		t.Errorf("err = %q, missing B inconclusive line", msg)
 	}
