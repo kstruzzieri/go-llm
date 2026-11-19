@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/kstruzzieri/go-llm/agent"
@@ -75,6 +76,42 @@ func codeOf(t *testing.T, payload map[string]json.RawMessage) string {
 		t.Fatalf("decode code: %v", err)
 	}
 	return code
+}
+
+// A model caller can return validation errors by value, directly or inside
+// a value wrapper whose error interface holds the slice.
+type modelValidationError []string
+
+func (e modelValidationError) Error() string     { return strings.Join(e, ", ") }
+func (modelValidationError) HTTPStatusCode() int { return 422 }
+
+type wrappedModelError struct{ error }
+
+func (e wrappedModelError) Unwrap() error { return e.error }
+
+func TestRunProviderRejectionWithUncomparableError(t *testing.T) {
+	rejection := modelValidationError{"prompt too large"}
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"slice", rejection},
+		{"slice in interface field", wrappedModelError{rejection}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			typ, payload, runErr := runFailure(t, golem.Options{
+				Orchestrator: agent.New(errorCaller{err: tc.err}, agent.ContextManager{}),
+			}, golem.Turn{})
+			var got modelValidationError
+			if !errors.As(runErr, &got) || !slices.Equal(got, rejection) {
+				t.Fatalf("Run error = %v, want model validation error %v", runErr, rejection)
+			}
+			if typ != "run.failed" {
+				t.Fatalf("terminal event = %q, want run.failed", typ)
+			}
+			assertTwoKeyPayload(t, payload, "provider_rejected", rejection.Error())
+		})
+	}
 }
 
 func TestRunApproverStatusErrorIsNotProviderRejected(t *testing.T) {

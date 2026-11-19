@@ -768,24 +768,16 @@ func failureCode(err, modelErr error) string {
 	case errors.Is(err, agent.ErrAdvisoryBlocked):
 		return "policy_blocked"
 	// Last, so only a failure that was "internal" changes (#740).
-	case providerRejected(err, modelErr):
+	case providerRejected(modelErr):
 		return "provider_rejected"
 	default:
 		return "internal"
 	}
 }
 
-// providerRejected reports whether err is this run's model error and the
-// provider refused the request with a 4xx other than 401, 403 and 429. 429 is
-// already provider_unavailable (infrastructure); 401 and 403 keep "internal"
-// until #709 gives them their own code. A status reached any other way (a
-// session store, an approver, routing diagnostics) is not a provider reply to
-// this run. The status stays in err's chain, so a FailureMessage presenter
-// can read it with errors.As.
-func providerRejected(err, modelErr error) bool {
-	if modelErr == nil || !errors.Is(err, modelErr) {
-		return false
-	}
+// providerRejected classifies the error recorded by the orchestrator for this
+// run's model call. Model callers may return non-comparable error values.
+func providerRejected(modelErr error) bool {
 	var status interface{ HTTPStatusCode() int }
 	if !errors.As(modelErr, &status) {
 		return false
