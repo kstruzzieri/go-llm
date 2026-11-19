@@ -339,8 +339,9 @@ type Result struct {
 	// nil when one of this Run's own stream callbacks failed (a host OnToken
 	// or OnThinking error), when an output block was joined with it, and on
 	// every other failure. What it covers is the caller's to say: a caller
-	// that routes may return a routing error, not only a provider's reply. A host can tell a provider's reply from its
-	// own errors with errors.Is(runErr, res.ModelError), even when another
-	// run's error was forwarded to it (#740). Runtime-only.
+	// that routes may return a routing error, not only a provider's reply.
+	// A host can tell the caller's error from its own errors with
+	// errors.Is(runErr, res.ModelError), even when another run's error was
+	// forwarded to it (#740). Runtime-only.
 	ModelError error `json:"-"`
 }
