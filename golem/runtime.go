@@ -545,7 +545,7 @@ func (r *Runtime) Run(ctx context.Context, turn Turn, sink EventSink) (agent.Res
 		if emitErr := emit("run.started", struct{}{}); emitErr != nil {
 			return agent.Result{}, emitErr
 		}
-		if emitErr := emit("run.failed", r.runFailedPayload(err)); emitErr != nil {
+		if emitErr := emit("run.failed", r.runFailedPayload(err, nil)); emitErr != nil {
 			return agent.Result{}, emitErr
 		}
 		return agent.Result{}, err
@@ -581,14 +581,14 @@ func (r *Runtime) Run(ctx context.Context, turn Turn, sink EventSink) (agent.Res
 	// Capture before validation and retain this identity across all callbacks.
 	verifier := snap.orchestrator.Verifier()
 	if err := r.checkVerifier(verifier); err != nil {
-		return agent.Result{}, finish("run.failed", r.runFailedPayload(err), err)
+		return agent.Result{}, finish("run.failed", r.runFailedPayload(err, nil), err)
 	}
 	var thread *threadState
 	if turn.ThreadID != "" {
 		var err error
 		thread, err = r.loadThread(runCtx, turn.ThreadID)
 		if err != nil {
-			eventType, payload := r.terminalFailure(err)
+			eventType, payload := r.terminalFailure(err, nil)
 			return agent.Result{}, finish(eventType, payload, err)
 		}
 	}
@@ -623,7 +623,7 @@ func (r *Runtime) Run(ctx context.Context, turn Turn, sink EventSink) (agent.Res
 	observer := &eventObserver{runID: turn.RunID, emit: emit, emitDelta: emitDelta, host: turn.Observer}
 	goal, err := turnGoal(turn)
 	if err != nil {
-		return agent.Result{}, finish("run.failed", r.runFailedPayload(err), err)
+		return agent.Result{}, finish("run.failed", r.runFailedPayload(err, nil), err)
 	}
 	request := agent.Request{
 		Goal:     goal,
@@ -662,13 +662,13 @@ func (r *Runtime) Run(ctx context.Context, turn Turn, sink EventSink) (agent.Res
 		err = runCtx.Err()
 	}
 	if err != nil {
-		eventType, payload := r.terminalFailure(err)
+		eventType, payload := r.terminalFailure(err, result.ModelError)
 		return result, finish(eventType, payload, err)
 	}
 	if thread != nil && result.Answer != "" {
 		if err := r.saveThread(runCtx, active, snap.budget, thread, turn.Message, result); err != nil {
 			err = fmt.Errorf("%w: %w", ErrSessionPersistence, err)
-			eventType, payload := r.terminalFailure(err)
+			eventType, payload := r.terminalFailure(err, nil)
 			return result, finish(eventType, payload, err)
 		}
 	} else if err := runCtx.Err(); err != nil {
@@ -705,8 +705,8 @@ type failurePayload struct {
 // installed, then cap the message exactly as the raw err.Error() was capped
 // before. Presentation affects only the event payload — never the error Run
 // returns.
-func (r *Runtime) runFailedPayload(err error) failurePayload {
-	code := failureCode(err)
+func (r *Runtime) runFailedPayload(err, modelErr error) failurePayload {
+	code := failureCode(err, modelErr)
 	// Previously reservation-only; ErrRunConflict is only produced by reserve
 	// today, so applying the override at every run.failed site is a deliberate,
 	// benign unification.
@@ -725,14 +725,18 @@ func (r *Runtime) runFailedPayload(err error) failurePayload {
 // already classified as cancellations. A Cancel landing between payload
 // construction and commitTerminal can still flip the event to run.canceled,
 // in which case the presenter ran but its output is discarded — benign.
-func (r *Runtime) terminalFailure(err error) (eventType string, payload any) {
+func (r *Runtime) terminalFailure(err, modelErr error) (eventType string, payload any) {
 	if isCancellation(err) {
 		return "run.canceled", struct{}{}
 	}
-	return "run.failed", r.runFailedPayload(err)
+	return "run.failed", r.runFailedPayload(err, modelErr)
 }
 
-func failureCode(err error) string {
+// failureCode classifies a run's failure. modelErr is the run's
+// agent.Result.ModelError where the orchestrator's error is reported, and nil
+// at every other site, so only the provider's reply to this run's model
+// request can be provider_rejected.
+func failureCode(err, modelErr error) string {
 	var observerErr *hostObserverError
 	switch {
 	case errors.As(err, &observerErr):
@@ -763,8 +767,36 @@ func failureCode(err error) string {
 	// describes the host's own sink, not the policy.
 	case errors.Is(err, agent.ErrAdvisoryBlocked):
 		return "policy_blocked"
+	// Last, so only a failure that was "internal" changes (#740).
+	case providerRejected(err, modelErr):
+		return "provider_rejected"
 	default:
 		return "internal"
+	}
+}
+
+// providerRejected reports whether err is this run's model error and the
+// provider refused the request with a 4xx other than 401, 403 and 429. 429 is
+// already provider_unavailable (infrastructure); 401 and 403 keep "internal"
+// until #709 gives them their own code. A status reached any other way (a
+// session store, an approver, routing diagnostics) is not a provider reply to
+// this run. The status stays in err's chain, so a FailureMessage presenter
+// can read it with errors.As.
+func providerRejected(err, modelErr error) bool {
+	if modelErr == nil || !errors.Is(err, modelErr) {
+		return false
+	}
+	var status interface{ HTTPStatusCode() int }
+	if !errors.As(modelErr, &status) {
+		return false
+	}
+	switch code := status.HTTPStatusCode(); {
+	case code < 400 || code >= 500:
+		return false
+	case code == 401 || code == 403 || code == 429:
+		return false
+	default:
+		return true
 	}
 }
 

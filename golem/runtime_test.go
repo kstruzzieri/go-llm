@@ -21,6 +21,7 @@ import (
 	"github.com/kstruzzieri/go-llm/conversation"
 	"github.com/kstruzzieri/go-llm/golem"
 	"github.com/kstruzzieri/go-llm/memory"
+	"github.com/kstruzzieri/go-llm/ollama"
 	"github.com/kstruzzieri/go-llm/provider"
 )
 
@@ -1544,9 +1545,16 @@ func TestRuntimeCloseDoesNotCloseInjectedSessionStore(t *testing.T) {
 }
 
 func TestInjectedSessionStoreLoadFailurePreservesRunFailure(t *testing.T) {
+	// #740: a store error that carries an HTTP status is still the host's
+	// fault, never provider_rejected.
+	for _, loadErr := range []error{errors.New("load failed"), &provider.HTTPStatusError{StatusCode: 422}} {
+		t.Run(loadErr.Error(), func(t *testing.T) { testStoreLoadFailure(t, loadErr) })
+	}
+}
+
+func testStoreLoadFailure(t *testing.T, loadErr error) {
 	root := t.TempDir()
 	t.Setenv("XDG_DATA_HOME", root)
-	loadErr := errors.New("load failed")
 	caller := &countingCaller{}
 	store := &mapSessionStore{loadErr: loadErr}
 	runtime, err := golem.New(context.Background(), golem.Options{
@@ -1639,9 +1647,16 @@ func TestInjectedSessionStoreRejectsMalformedLoadResult(t *testing.T) {
 }
 
 func TestInjectedSessionStoreSaveFailurePreservesRunFailure(t *testing.T) {
+	// #740: a store error that carries an HTTP status is still the host's
+	// fault, never provider_rejected.
+	for _, saveErr := range []error{errors.New("save failed"), &provider.HTTPStatusError{StatusCode: 422}} {
+		t.Run(saveErr.Error(), func(t *testing.T) { testStoreSaveFailure(t, saveErr) })
+	}
+}
+
+func testStoreSaveFailure(t *testing.T, saveErr error) {
 	root := t.TempDir()
 	t.Setenv("XDG_DATA_HOME", root)
-	saveErr := errors.New("save failed")
 	store := &mapSessionStore{saveErr: saveErr}
 	runtime, err := golem.New(context.Background(), golem.Options{
 		Root:         root,
@@ -2679,6 +2694,22 @@ func TestRunFailureCodesAreStable(t *testing.T) {
 		{name: "budget exceeded", err: provider.ErrBudgetExceeded, code: "invalid_request"},
 		{name: "provider mismatch", err: provider.ErrProviderMismatch, code: "invalid_request"},
 		{name: "unknown", err: errors.New("boom"), code: "internal"},
+		// #740: a provider's 4xx refusal of the model request.
+		{name: "provider HTTP 400", err: &provider.HTTPStatusError{StatusCode: 400}, code: "provider_rejected"},
+		{name: "provider HTTP 404", err: &provider.HTTPStatusError{StatusCode: 404}, code: "provider_rejected"},
+		{name: "provider HTTP 408", err: &provider.HTTPStatusError{StatusCode: 408}, code: "provider_rejected"},
+		{name: "provider HTTP 413", err: &provider.HTTPStatusError{StatusCode: 413}, code: "provider_rejected"},
+		{name: "provider HTTP 422", err: &provider.HTTPStatusError{StatusCode: 422}, code: "provider_rejected"},
+		{name: "provider HTTP 499", err: &provider.HTTPStatusError{StatusCode: 499}, code: "provider_rejected"},
+		{name: "ollama HTTP 404", err: &ollama.APIError{StatusCode: 404, Message: "model not found"}, code: "provider_rejected"},
+		{name: "wrapped HTTP 400", err: fmt.Errorf("adapter: %w", &provider.HTTPStatusError{StatusCode: 400}), code: "provider_rejected"},
+		{name: "provider HTTP 429", err: &provider.HTTPStatusError{StatusCode: 429}, code: "provider_unavailable"},
+		{name: "provider HTTP 500", err: &provider.HTTPStatusError{StatusCode: 500}, code: "provider_unavailable"},
+		{name: "provider HTTP 401", err: &provider.HTTPStatusError{StatusCode: 401}, code: "internal"},
+		{name: "provider HTTP 403", err: &provider.HTTPStatusError{StatusCode: 403}, code: "internal"},
+		{name: "provider HTTP 399", err: &provider.HTTPStatusError{StatusCode: 399}, code: "internal"},
+		{name: "no viable joined with 404", err: errors.Join(provider.ErrNoViableCandidate, &provider.HTTPStatusError{StatusCode: 404}), code: "provider_unavailable"},
+		{name: "advisory block joined with 400", err: errors.Join(agent.ErrAdvisoryBlocked, &provider.HTTPStatusError{StatusCode: 400}), code: "policy_blocked"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
