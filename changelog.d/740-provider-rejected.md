@@ -1,0 +1,8 @@
+### Changed — Golem reports a provider's refusal of a run as `provider_rejected` (#740)
+
+A run whose model request the provider refused used to fail with the code `internal`, the same code as a bug in Golem, so a host could only say "the run failed".
+
+- When the provider's final reply to the run's model request, after any fallback, is an HTTP 4xx other than 401, 403 and 429, `run.failed` now carries `provider_rejected`, and so does the `golem.result.v1` record that `golem -p -output-format json` and `stream-json` write. A host that matched `internal` for these failures sees the new code. 429 stays `provider_unavailable`; 401 and 403 stay `internal`; every earlier code (for example `policy_blocked` or `invalid_request`) still wins.
+- Only the reply to the run's own model request counts. A status that reaches a run from a session store, an approver or another run is never `provider_rejected`, and a 4xx met while listing models or probing capabilities during routing is reported as before.
+- The message is unchanged and no field is added: the payload is still `code` and `message`, and no more of the provider's reply is included than before.
+- Library hosts: `agent.Result` has a new runtime-only field, `ModelError` (never serialized), holding the error the model caller returned for the request that ended the run, unless the run's own stream callbacks caused it or an output block was joined with it. Golem's `Options.FailureMessage` presenter receives the run error with the provider's status reachable through `errors.As` and an `HTTPStatusCode() int` interface.
