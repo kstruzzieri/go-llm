@@ -21,6 +21,7 @@ import (
 	"github.com/kstruzzieri/go-llm/conversation"
 	"github.com/kstruzzieri/go-llm/golem"
 	"github.com/kstruzzieri/go-llm/memory"
+	"github.com/kstruzzieri/go-llm/ollama"
 	"github.com/kstruzzieri/go-llm/provider"
 )
 
@@ -1544,9 +1545,16 @@ func TestRuntimeCloseDoesNotCloseInjectedSessionStore(t *testing.T) {
 }
 
 func TestInjectedSessionStoreLoadFailurePreservesRunFailure(t *testing.T) {
+	// #740: a store error that carries an HTTP status is still the host's
+	// fault, never provider_rejected.
+	for _, loadErr := range []error{errors.New("load failed"), &provider.HTTPStatusError{StatusCode: 422}} {
+		t.Run(loadErr.Error(), func(t *testing.T) { testStoreLoadFailure(t, loadErr) })
+	}
+}
+
+func testStoreLoadFailure(t *testing.T, loadErr error) {
 	root := t.TempDir()
 	t.Setenv("XDG_DATA_HOME", root)
-	loadErr := errors.New("load failed")
 	caller := &countingCaller{}
 	store := &mapSessionStore{loadErr: loadErr}
 	runtime, err := golem.New(context.Background(), golem.Options{
@@ -1639,9 +1647,16 @@ func TestInjectedSessionStoreRejectsMalformedLoadResult(t *testing.T) {
 }
 
 func TestInjectedSessionStoreSaveFailurePreservesRunFailure(t *testing.T) {
+	// #740: a store error that carries an HTTP status is still the host's
+	// fault, never provider_rejected.
+	for _, saveErr := range []error{errors.New("save failed"), &provider.HTTPStatusError{StatusCode: 422}} {
+		t.Run(saveErr.Error(), func(t *testing.T) { testStoreSaveFailure(t, saveErr) })
+	}
+}
+
+func testStoreSaveFailure(t *testing.T, saveErr error) {
 	root := t.TempDir()
 	t.Setenv("XDG_DATA_HOME", root)
-	saveErr := errors.New("save failed")
 	store := &mapSessionStore{saveErr: saveErr}
 	runtime, err := golem.New(context.Background(), golem.Options{
 		Root:         root,
@@ -2679,6 +2694,22 @@ func TestRunFailureCodesAreStable(t *testing.T) {
 		{name: "budget exceeded", err: provider.ErrBudgetExceeded, code: "invalid_request"},
 		{name: "provider mismatch", err: provider.ErrProviderMismatch, code: "invalid_request"},
 		{name: "unknown", err: errors.New("boom"), code: "internal"},
+		// #740: a provider's 4xx refusal of the model request.
+		{name: "provider HTTP 400", err: &provider.HTTPStatusError{StatusCode: 400}, code: "provider_rejected"},
+		{name: "provider HTTP 404", err: &provider.HTTPStatusError{StatusCode: 404}, code: "provider_rejected"},
+		{name: "provider HTTP 408", err: &provider.HTTPStatusError{StatusCode: 408}, code: "provider_rejected"},
+		{name: "provider HTTP 413", err: &provider.HTTPStatusError{StatusCode: 413}, code: "provider_rejected"},
+		{name: "provider HTTP 422", err: &provider.HTTPStatusError{StatusCode: 422}, code: "provider_rejected"},
+		{name: "provider HTTP 499", err: &provider.HTTPStatusError{StatusCode: 499}, code: "provider_rejected"},
+		{name: "ollama HTTP 404", err: &ollama.APIError{StatusCode: 404, Message: "model not found"}, code: "provider_rejected"},
+		{name: "wrapped HTTP 400", err: fmt.Errorf("adapter: %w", &provider.HTTPStatusError{StatusCode: 400}), code: "provider_rejected"},
+		{name: "provider HTTP 429", err: &provider.HTTPStatusError{StatusCode: 429}, code: "provider_unavailable"},
+		{name: "provider HTTP 500", err: &provider.HTTPStatusError{StatusCode: 500}, code: "provider_unavailable"},
+		{name: "provider HTTP 401", err: &provider.HTTPStatusError{StatusCode: 401}, code: "internal"},
+		{name: "provider HTTP 403", err: &provider.HTTPStatusError{StatusCode: 403}, code: "internal"},
+		{name: "provider HTTP 399", err: &provider.HTTPStatusError{StatusCode: 399}, code: "internal"},
+		{name: "no viable joined with 404", err: errors.Join(provider.ErrNoViableCandidate, &provider.HTTPStatusError{StatusCode: 404}), code: "provider_unavailable"},
+		{name: "advisory block joined with 400", err: errors.Join(agent.ErrAdvisoryBlocked, &provider.HTTPStatusError{StatusCode: 400}), code: "policy_blocked"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -2961,5 +2992,90 @@ func TestRuntimeSessionConflictPreservesWinner(t *testing.T) {
 	saved, err := base.Load(ctx, "shared")
 	if err != nil || saved.Revision != 2 || len(saved.Messages) != 2 || saved.Messages[0].Content != "winning question" || saved.Messages[1].Content != "next answer" {
 		t.Fatalf("winner = %+v, %v; want only winning turn at revision 2", saved, err)
+	}
+}
+
+// thinkingOnlyCaller answers its first request with reasoning alone and every
+// later one with "PELICAN".
+type thinkingOnlyCaller struct {
+	requests []provider.ChatRequest
+}
+
+func (c *thinkingOnlyCaller) Chat(_ context.Context, req provider.ChatRequest, onToken func(provider.ChatResponse) error) (agent.ModelResult, error) {
+	c.requests = append(c.requests, req)
+	resp := provider.ChatResponse{Content: "PELICAN", Done: true}
+	if len(c.requests) == 1 {
+		resp = provider.ChatResponse{Thinking: "The code word is PELICAN.", Done: true}
+	}
+	if err := onToken(resp); err != nil {
+		return agent.ModelResult{}, err
+	}
+	return agent.ModelResult{Response: resp}, nil
+}
+
+// recordingStepObserver records the step indices and the step-tagged
+// reasoning a host observer receives.
+type recordingStepObserver struct {
+	steps    []int
+	thinking map[int]string
+}
+
+func (o *recordingStepObserver) OnStep(_ context.Context, e agent.StepEvent) error {
+	o.steps = append(o.steps, e.Index)
+	return nil
+}
+
+func (*recordingStepObserver) OnToolCall(context.Context, agent.ToolCallEvent) error { return nil }
+
+func (*recordingStepObserver) OnToken(context.Context, agent.TokenEvent) error { return nil }
+
+func (o *recordingStepObserver) OnThinking(_ context.Context, e agent.ThinkingEvent) error {
+	o.thinking[e.Step] += e.Content
+	return nil
+}
+
+// #767: a Golem turn opts in to the thinking-only recovery, so a reply that
+// is only reasoning gets one more request and the turn carries its answer.
+// The host observer sees both steps and the reasoning at step 0.
+func TestRunRecoversThinkingOnlyAnswer(t *testing.T) {
+	caller := &thinkingOnlyCaller{}
+	runtime, err := golem.New(context.Background(), golem.Options{
+		Root:         t.TempDir(),
+		Orchestrator: agent.New(caller, agent.ContextManager{}),
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := runtime.Close(); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+	})
+
+	host := &recordingStepObserver{thinking: map[int]string{}}
+	result, err := runtime.Run(context.Background(), golem.Turn{
+		RunID:    "run-recover",
+		Message:  "what is the code word?",
+		Observer: host,
+	}, func(golem.Event) error { return nil })
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(caller.requests) != 2 {
+		t.Fatalf("model requests = %d, want 2", len(caller.requests))
+	}
+	msgs := caller.requests[1].Messages
+	if n := len(msgs); n < 2 || msgs[n-2].Role != "assistant" || msgs[n-2].Content != "(reasoning only, no reply)" ||
+		msgs[n-1].Role != "user" || msgs[n-1].Content != "Your last reply had reasoning but no answer. Reply now with your final answer only." {
+		t.Errorf("second request does not end with the placeholder assistant turn and the nudge: %+v", msgs)
+	}
+	if result.Answer != "PELICAN" || result.StopReason != agent.Completed {
+		t.Errorf("result answer = %q, stop = %v, want PELICAN, completed", result.Answer, result.StopReason)
+	}
+	if !slices.Equal(host.steps, []int{0, 1}) {
+		t.Errorf("host step indices = %v, want [0 1]", host.steps)
+	}
+	if want := map[int]string{0: "The code word is PELICAN."}; !reflect.DeepEqual(host.thinking, want) {
+		t.Errorf("host reasoning by step = %v, want %v", host.thinking, want)
 	}
 }

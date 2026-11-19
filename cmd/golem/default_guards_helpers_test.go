@@ -85,16 +85,17 @@ func assertBlockedObservationSeen(t *testing.T, reqs []provider.ChatRequest, wan
 }
 
 // assertFooterTail checks that stderr carries a finalFooter line
-// ("done · <n> steps · <s>s · <n> tok · risk <score>", plus a stop suffix when
-// the run stopped early) ending in tail.
-func assertFooterTail(t *testing.T, stderr, tail string) {
+// ("<prefix> · <n> steps · <s>s · <n> tok · risk <score>", plus a stop suffix
+// when the run stopped early) ending in tail. prefix is "done", or "no answer"
+// for a turn without one (#767).
+func assertFooterTail(t *testing.T, stderr, prefix, tail string) {
 	t.Helper()
 	for _, line := range strings.Split(stderr, "\n") {
-		if strings.HasPrefix(line, "done · ") && strings.HasSuffix(line, tail) {
+		if strings.HasPrefix(line, prefix+" · ") && strings.HasSuffix(line, tail) {
 			return
 		}
 	}
-	t.Errorf("stderr has no footer ending %q:\n%s", tail, stderr)
+	t.Errorf("stderr has no footer starting %q and ending %q:\n%s", prefix+" · ", tail, stderr)
 }
 
 // guardProbeWire answers a turn's first request with a .env read and, once a

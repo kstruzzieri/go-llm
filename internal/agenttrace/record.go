@@ -31,6 +31,9 @@ type TraceMeta struct {
 	ModelHint      string
 	MaxSteps       int
 	Budget         agent.Budget
+	// RecoverThinkingOnlyAnswer is agent.Request's opt-in (#767), so a replay
+	// of the recorded request keeps it.
+	RecoverThinkingOnlyAnswer bool
 }
 
 // TraceRequest is the serialized request side of a trace.
@@ -43,6 +46,9 @@ type TraceRequest struct {
 	ModelHint      string                 `json:"model_hint,omitempty"`
 	MaxSteps       int                    `json:"max_steps"`
 	Budget         agent.Budget           `json:"budget"`
+	// RecoverThinkingOnlyAnswer is omitted when false, so a trace without the
+	// opt-in stays byte-identical.
+	RecoverThinkingOnlyAnswer bool `json:"recover_thinking_only_answer,omitempty"`
 }
 
 // TraceRecord is one content-full run trace (#238). It embeds agent.Result but

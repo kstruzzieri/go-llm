@@ -923,10 +923,10 @@
       "id": "ENV-BWRAP",
       "source": "issue-452:54",
       "requirement": "A bwrap-confined payload sees exactly the approved environment set (PATH, HOME, TMPDIR and the PWD bwrap sets); a parent sentinel never appears.",
-      "status": "unobserved(bwrap)",
+      "status": "verified",
       "owner": "",
       "layer": "focused",
-      "exempt": "the native-profile mutation needs a Linux host with bwrap: PR #478 (e4d580b3) records bwrap confinement mutations but none for the payload environment set. Follow-up, tracked in the PR body: on a Linux host with bwrap, apply an M-ledger-style mutation that lets a parent variable through the bwrap payload environment, run GO_LLM_REQUIRE_BWRAP=1 go test -count=1 -run '^TestBwrapPayloadEnvironment$' ./agent/tools, record it in docs/security/containment-mutations.md and cite it here",
+      "exempt": "",
       "scenarios": [],
       "refs": [
         {
@@ -939,7 +939,9 @@
       "profiles": [
         "bwrap"
       ],
-      "mutations": [],
+      "mutations": [
+        "M-420"
+      ],
       "artifacts": []
     },
     {
@@ -4359,10 +4361,10 @@
       "id": "CMP-EXEC-CREDENTIAL-OUTPUT-BWRAP",
       "source": "issue-777:7",
       "requirement": "A command run under the bwrap backend is captured through the same screen.",
-      "status": "unobserved(bwrap)",
+      "status": "verified",
       "owner": "",
       "layer": "focused",
-      "exempt": "the native-profile mutation needs a Linux host with bwrap: the Docker ci-local image has no /usr/bin/bwrap, so at 18ca5d70 the ref fails its capability check there before any mutant can be told apart, and the mutation ledger leaves M-180 unassigned for it. Follow-up, tracked in the PR body: on a Linux host with bwrap, apply an M-ledger-style mutation that builds the bwrap backend's wrapped spec without the screen (wrapped.Screen = nil after wrapped := spec in exec_linux.go, and a keyless newOutputScreen(nil) in its place as a second variant), run GO_LLM_REQUIRE_BWRAP=1 go test -count=1 -run '^TestBwrapRunScreensOutput$' ./agent/tools, record it in docs/security/containment-mutations.md and cite it here",
+      "exempt": "",
       "scenarios": [],
       "refs": [
         {
@@ -4375,7 +4377,9 @@
       "profiles": [
         "bwrap"
       ],
-      "mutations": [],
+      "mutations": [
+        "M-180"
+      ],
       "artifacts": []
     },
     {
@@ -4649,10 +4653,10 @@
       "id": "STRICT-9",
       "source": "issue-584:83",
       "requirement": "Under strict approval, once a conversation is exposed, bwrap commands whose policy allows network run IP-network-denied: foreground, scratch, background start and verifier, each approved at a prompt showing network=ip-denied, while the same command in a clean conversation connects; a pathname Unix socket inside the shared workspace stays reachable (#584).",
-      "status": "unobserved(bwrap)",
+      "status": "verified",
       "owner": "",
       "layer": "focused",
-      "exempt": "the mutation needs a Linux host with bwrap, which the Docker ci-local image is not: M-418 ran on darwin under Seatbelt only (STRICT-8). Follow-up, tracked in the PR body: on a Linux host with bwrap, apply M-418's patch (the network-denied variant keeps the session's network), run GO_LLM_REQUIRE_BWRAP=1 go test -count=1 -run '^TestBwrapNarrow(Foreground|Scratch|Background|Verifier)$' ./agent/tools, record it in docs/security/containment-mutations.md and cite it here",
+      "exempt": "",
       "scenarios": [],
       "refs": [
         {
@@ -4689,7 +4693,9 @@
       "profiles": [
         "bwrap"
       ],
-      "mutations": [],
+      "mutations": [
+        "M-419"
+      ],
       "artifacts": []
     },
     {

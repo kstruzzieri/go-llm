@@ -1010,3 +1010,53 @@ func TestNoProbeWithoutCallerRequest(t *testing.T) {
 		t.Fatalf("control: err=%v requests=%d; want one probe", err, len(stub.chatBodies()))
 	}
 }
+
+// TestNew_ListingsHoldEachRefreshedProvidersListing pins Bundle.Listings: the
+// listing each refreshed provider returned at bootstrap, with nothing for a
+// provider whose refresh failed or that a gate left inactive, and no request
+// beyond the refresh itself.
+func TestNew_ListingsHoldEachRefreshedProvidersListing(t *testing.T) {
+	var requests atomic.Int32
+	good := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"data":[{"id":"m1"},{"id":"m2"}]}`)
+	}))
+	t.Cleanup(good.Close)
+	cfg := &config.Config{Providers: map[string]config.ProviderConfig{
+		"good":     {APIFormat: "openai-compat", BaseURL: good.URL},
+		"bad":      {APIFormat: "openai-compat", BaseURL: "http://127.0.0.1:1"},
+		"inactive": {APIFormat: "openai-compat", BaseURL: good.URL},
+	}}
+	gate := provider.NewDestinationGate()
+	var edges []provider.DestinationEdge
+	for _, name := range []string{"bad", "good", "inactive"} {
+		d, err := provider.NewDestination(name, cfg.Providers[name].BaseURL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		edges = append(edges, provider.DestinationEdge{Purpose: provider.DestinationPurposeModelRefresh, Destination: d})
+	}
+	m, err := provider.NewDestinationManifest(edges...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := gate.Install(provider.NewDestinationPolicy(), m); err != nil {
+		t.Fatal(err)
+	}
+	b, err := New(t.Context(), Options{Config: cfg, DestinationGate: gate, ActiveProviders: []string{"bad", "good"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = b.Close() })
+	if len(b.Listings) != 1 {
+		t.Fatalf("Listings = %v; want only the good provider's", b.Listings)
+	}
+	got := b.Listings["good"]
+	if len(got) != 2 || got[0].Name != "m1" || got[1].Name != "m2" {
+		t.Fatalf("Listings[good] = %+v; want m1, m2", got)
+	}
+	if n := requests.Load(); n != 1 {
+		t.Fatalf("requests = %d; want the one bootstrap refresh", n)
+	}
+}

@@ -52,7 +52,7 @@ func TestRenderer_FinalFooter_Stopped(t *testing.T) {
 		Usage:      provider.Usage{TotalTokens: 128},
 		StopReason: agent.StepCapReached,
 	}, 3*time.Second)
-	want := "done · 2 steps · 3.0s · 128 tok  stopped: step_cap_reached\n"
+	want := "no answer · 2 steps · 3.0s · 128 tok  stopped: step_cap_reached\n"
 	if buf.String() != want {
 		t.Errorf("final footer = %q, want %q", buf.String(), want)
 	}
@@ -76,19 +76,30 @@ func TestRenderer_OnStepStartsNewLineAfterUnterminatedToken(t *testing.T) {
 	}
 }
 
+// #767: the footer's prefix says whether the turn produced an answer;
+// everything after it is unchanged.
 func TestRenderer_FinalFooter_Completed_NoStoppedSuffix(t *testing.T) {
-	var buf bytes.Buffer
-	clock := time.Unix(0, 0)
-	r := newRenderer(&buf, false, 16, func() time.Time { return clock }, false)
-	clock = clock.Add(2 * time.Second)
-	r.finalFooter(agent.Result{
-		Steps:      make([]agent.StepRecord, 1),
-		Usage:      provider.Usage{TotalTokens: 42},
-		StopReason: agent.Completed,
-	}, 2*time.Second)
-	want := "done · 1 step · 2.0s · 42 tok\n"
-	if buf.String() != want {
-		t.Errorf("completed footer = %q, want %q (no stopped suffix)", buf.String(), want)
+	for _, tc := range []struct {
+		name, answer, want string
+	}{
+		{"empty answer", "", "no answer · 1 step · 2.0s · 42 tok\n"},
+		{"blank answer", " \n", "no answer · 1 step · 2.0s · 42 tok\n"},
+		{"answer", "x", "done · 1 step · 2.0s · 42 tok\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			clock := time.Unix(0, 0)
+			r := newRenderer(&buf, false, 16, func() time.Time { return clock }, false)
+			r.finalFooter(agent.Result{
+				Answer:     tc.answer,
+				Steps:      make([]agent.StepRecord, 1),
+				Usage:      provider.Usage{TotalTokens: 42},
+				StopReason: agent.Completed,
+			}, 2*time.Second)
+			if buf.String() != tc.want {
+				t.Errorf("completed footer = %q, want %q (no stopped suffix)", buf.String(), tc.want)
+			}
+		})
 	}
 }
 
@@ -383,6 +394,7 @@ func TestRenderer_FinalFooter_Risk(t *testing.T) {
 			r := newRenderer(&buf, false, 16, func() time.Time { return clock }, false)
 			clock = clock.Add(3 * time.Second)
 			r.finalFooter(agent.Result{
+				Answer:     "x",
 				Steps:      make([]agent.StepRecord, 2),
 				Usage:      provider.Usage{TotalTokens: 128},
 				StopReason: tc.stop,
@@ -444,6 +456,7 @@ func TestFinalFooterShowsRunEvents(t *testing.T) {
 			var buf bytes.Buffer
 			r := newRenderer(&buf, false, 16, func() time.Time { return time.Unix(0, 0) }, false)
 			r.finalFooter(agent.Result{
+				Answer:     "x",
 				Steps:      make([]agent.StepRecord, 1),
 				Events:     tt.events,
 				Usage:      tt.usage,
@@ -498,6 +511,7 @@ func TestFinalFooterShowsCached(t *testing.T) {
 			var buf bytes.Buffer
 			r := newRenderer(&buf, false, 16, func() time.Time { return time.Unix(0, 0) }, false)
 			r.finalFooter(agent.Result{
+				Answer:     "x",
 				Steps:      make([]agent.StepRecord, 1),
 				Usage:      tt.usage,
 				StopReason: tt.stop,

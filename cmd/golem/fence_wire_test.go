@@ -33,7 +33,8 @@ type wireMessage struct {
 }
 
 type wireRequest struct {
-	Messages []wireMessage `json:"messages"`
+	Messages []wireMessage     `json:"messages"`
+	Tools    []json.RawMessage `json:"tools"`
 }
 
 func (r wireRequest) hasToolMessage() bool {

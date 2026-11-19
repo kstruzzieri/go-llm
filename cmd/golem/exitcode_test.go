@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/kstruzzieri/go-llm/agent"
@@ -325,5 +327,159 @@ func TestDispatchPreflightProviderFailureWritesResultAndExitsOne(t *testing.T) {
 	var recErr struct{ Code string }
 	if err := json.Unmarshal(m["error"], &recErr); err != nil || recErr.Code != "provider_unavailable" {
 		t.Errorf("record error = %s, want provider_unavailable", m["error"])
+	}
+}
+
+// TestHeadlessProviderRejectionCodes wires the real openai-compat client,
+// router and runtime to a stub server whose chat endpoint refuses the request
+// (#740). A 4xx other than 401, 403 and 429 is provider_rejected in both the
+// run.failed event and the golem.result.v1 record; the message is the
+// existing diagnostic, unchanged, and the payload has no other field.
+func TestHeadlessProviderRejectionCodes(t *testing.T) {
+	for _, tc := range []struct {
+		status int
+		code   string
+	}{
+		{http.StatusBadRequest, "provider_rejected"},
+		{http.StatusNotFound, "provider_rejected"},
+		{http.StatusRequestEntityTooLarge, "provider_rejected"},
+		{http.StatusUnprocessableEntity, "provider_rejected"},
+		{http.StatusTooManyRequests, "provider_unavailable"},
+		{http.StatusUnauthorized, "internal"},
+		{http.StatusForbidden, "internal"},
+	} {
+		t.Run(fmt.Sprint(tc.status), func(t *testing.T) {
+			t.Setenv("XDG_DATA_HOME", t.TempDir())
+			var chatPosts atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/v1/models":
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = w.Write([]byte(`{"data":[{"id":"agent-model"}]}`))
+				case "/v1/chat/completions":
+					chatPosts.Add(1)
+					http.Error(w, "stub refused", tc.status)
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			t.Cleanup(server.Close)
+
+			root := t.TempDir()
+			configPath := filepath.Join(t.TempDir(), "models.json")
+			configJSON := `{
+  "providers": {"local": {"base_url": "` + server.URL + `", "api_format": "openai-compat", "timeout": "5s"}},
+  "models": {"agent": {"name": "agent-model", "provider": "local", "type": "dense", "context_window": 32768,
+    "capabilities": ["chat", "generate", "stream", "tool_call"]}},
+  "defaults": {"agent": "agent"}
+}`
+			if err := os.WriteFile(configPath, []byte(configJSON), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			stdin, stdout, stderr := runTestFiles(t)
+			runErr := run([]string{"-config", configPath, "-root", root, "-base-url", server.URL,
+				"-p", "say done", "-output-format", "stream-json",
+				"-no-probe", "-no-cap-probe", "-no-rag", "-no-project-context", "-no-session", "-no-memory"},
+				stdin, stdout, stderr)
+			if got := chatPosts.Load(); got != 1 {
+				t.Fatalf("chat POSTs = %d, want 1; stderr:\n%s", got, readRunTestFile(t, stderr))
+			}
+			if got := exitCodeFor(runErr); got != 1 {
+				t.Fatalf("exit = %d (err %v), want 1", got, runErr)
+			}
+
+			lines := strings.Split(strings.TrimSuffix(readRunTestFile(t, stdout), "\n"), "\n")
+			var failed []map[string]json.RawMessage
+			for _, line := range lines[:len(lines)-1] {
+				var ev struct {
+					Type    string                     `json:"type"`
+					Payload map[string]json.RawMessage `json:"payload"`
+				}
+				if err := json.Unmarshal([]byte(line), &ev); err != nil {
+					t.Fatalf("event line %q: %v", line, err)
+				}
+				if ev.Type == "run.failed" {
+					failed = append(failed, ev.Payload)
+				}
+			}
+			if len(failed) != 1 || len(failed[0]) != 2 {
+				t.Fatalf("run.failed payloads = %v, want one with exactly code and message", failed)
+			}
+			var code, message string
+			if json.Unmarshal(failed[0]["code"], &code) != nil || json.Unmarshal(failed[0]["message"], &message) != nil {
+				t.Fatalf("run.failed payload = %v", failed[0])
+			}
+			wantMessage := fmt.Sprintf("provider: openaicompat: chat stream: openaicompat: %d %s: stub refused", tc.status, http.StatusText(tc.status))
+			if code != tc.code || message != wantMessage {
+				t.Fatalf("run.failed = %q / %q, want %q / %q", code, message, tc.code, wantMessage)
+			}
+
+			rec := decodeResult(t, lines[len(lines)-1])
+			var status string
+			var recErr struct{ Code, Message string }
+			if json.Unmarshal(rec["status"], &status) != nil || json.Unmarshal(rec["error"], &recErr) != nil {
+				t.Fatalf("record = %v", rec)
+			}
+			if status != "error" || recErr.Code != code || recErr.Message != message {
+				t.Fatalf("record status %q error %+v, want error with the event's code and message", status, recErr)
+			}
+		})
+	}
+}
+
+// TestHeadlessOllamaProviderRejection is the Ollama sibling of
+// TestHeadlessProviderRejectionCodes: the native client's 404 for a model
+// the server does not have keeps its status through provider/ollama.go and
+// the router, so the run fails with provider_rejected (#740).
+func TestHeadlessOllamaProviderRejection(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	var chatPosts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/tags":
+			_, _ = w.Write([]byte(`{"models":[{"name":"agent-model"}]}`))
+		case "/api/show":
+			_, _ = w.Write([]byte(`{"details":{"family":"qwen3","parameter_size":"8B"},"capabilities":["completion","tools"]}`))
+		case "/api/chat":
+			chatPosts.Add(1)
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":"model not found"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	root := t.TempDir()
+	configPath := filepath.Join(t.TempDir(), "models.json")
+	configJSON := `{
+  "providers": {"local": {"base_url": "` + server.URL + `", "api_format": "ollama", "timeout": "5s"}},
+  "models": {"agent": {"name": "agent-model", "provider": "local", "type": "dense", "context_window": 32768,
+    "capabilities": ["chat", "generate", "stream", "tool_call"]}},
+  "defaults": {"agent": "agent"}
+}`
+	if err := os.WriteFile(configPath, []byte(configJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stdin, stdout, stderr := runTestFiles(t)
+	runErr := run([]string{"-config", configPath, "-root", root, "-ollama-url", server.URL,
+		"-p", "say done", "-output-format", "json",
+		"-no-probe", "-no-cap-probe", "-no-rag", "-no-project-context", "-no-session", "-no-memory"},
+		stdin, stdout, stderr)
+	if got := chatPosts.Load(); got != 1 {
+		t.Fatalf("chat POSTs = %d, want 1; stderr:\n%s", got, readRunTestFile(t, stderr))
+	}
+	if got := exitCodeFor(runErr); got != 1 {
+		t.Fatalf("exit = %d (err %v), want 1", got, runErr)
+	}
+	rec := decodeResult(t, strings.TrimSpace(readRunTestFile(t, stdout)))
+	var recErr struct{ Code, Message string }
+	if err := json.Unmarshal(rec["error"], &recErr); err != nil {
+		t.Fatalf("record error = %s: %v", rec["error"], err)
+	}
+	const wantMessage = "provider: ollama: chat stream: ollama: HTTP 404: model not found"
+	if recErr.Code != "provider_rejected" || recErr.Message != wantMessage {
+		t.Fatalf("record error = %+v, want provider_rejected / %q", recErr, wantMessage)
 	}
 }

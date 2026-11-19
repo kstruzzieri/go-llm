@@ -1,0 +1,54 @@
+{
+  "ready": true,
+  "origin": {
+    "source": "explicit_path"
+  },
+  "bindings": [
+    {
+      "use_case": "agent",
+      "role": "agent",
+      "resolved": "llamacpp/mystery",
+      "resolution_state": "resolved",
+      "is_fallback": false,
+      "chain": [
+        "llamacpp/mystery"
+      ],
+      "candidates": [
+        {
+          "selector": "llamacpp/mystery",
+          "eligibility": "ineligible",
+          "reasons": [
+            "missing_capability:tool_call"
+          ]
+        }
+      ],
+      "source": "config-default"
+    }
+  ],
+  "models": [
+    {
+      "selector": "llamacpp/mystery",
+      "provider": "llamacpp",
+      "type": "dense",
+      "family": "mystery",
+      "caps": [
+        "chat",
+        "generate",
+        "stream"
+      ],
+      "profile_source": "merged"
+    }
+  ],
+  "providers": [
+    {
+      "name": "llamacpp",
+      "endpoint": "<url>",
+      "api_format": "ollama",
+      "has_key": false,
+      "slot_discovery": false
+    }
+  ],
+  "profile": {
+    "dirty": false
+  }
+}

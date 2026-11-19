@@ -203,12 +203,14 @@ var purityBannedParams = map[string]bool{
 	"net/http.RoundTripper":                        true,
 }
 
-// purityNewFiles are the files #736 adds that must declare no init function and
-// no package-level variable initialized by a call: package path, file name.
+// purityNewFiles are the reader files #736 and #737 add, which must declare no
+// init function and no package-level variable initialized by a call: package
+// path, file name.
 var purityNewFiles = [][2]string{
 	{purityModule + "/config", "capabilities.go"},
 	{purityModule + "/configview", "explain.go"},
 	{purityModule + "/provider", "explain_evidence.go"},
+	{purityModule + "/internal/evidencesel", "evidencesel.go"},
 }
 
 // purityMustWalk are module functions the readers call; the walk must walk
@@ -220,6 +222,7 @@ var purityMustWalk = []string{
 	"(*" + purityModule + "/provider.Catalog).ProfileFor",
 	"(*" + purityModule + "/config.Config).CapabilityPolicy",
 	purityModule + "/fingerprint.ReadCapabilities",
+	purityModule + "/internal/evidencesel.Select",
 }
 
 // purityIsModule reports whether path is module code: a package of this module,

@@ -16,7 +16,10 @@
       "candidates": [
         {
           "selector": "llamacpp/qwen3:8b",
-          "eligibility": "eligible"
+          "eligibility": "ineligible",
+          "reasons": [
+            "missing_capability:tool_call"
+          ]
         }
       ],
       "source": "config-default"
@@ -31,8 +34,7 @@
       "caps": [
         "chat",
         "generate",
-        "stream",
-        "tool_call"
+        "stream"
       ],
       "profile_source": "merged",
       "context_window": 40960

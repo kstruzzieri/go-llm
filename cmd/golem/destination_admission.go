@@ -154,6 +154,14 @@ func (a *destinationAdmission) ensure(ctx context.Context) error {
 	return nil
 }
 
+// grantedPolicy returns the destination policy the current generation was
+// installed with.
+func (a *destinationAdmission) grantedPolicy() provider.DestinationPolicy {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.granted
+}
+
 // revoke atomically drops destination authority (D12: the /grants clear
 // path) and re-arms ensure, so the next goal re-runs the same batch gate.
 // Conversation resets never call this.

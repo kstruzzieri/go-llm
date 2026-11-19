@@ -1,0 +1,2 @@
+llamacpp/mystery	caps=chat|generate|stream	tool_call=MISSING (unknown)
+  if it supports function calling, add "capabilities": ["chat","generate","stream","tool_call"] to the model entry for "llamacpp/mystery" in models.json

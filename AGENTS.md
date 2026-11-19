@@ -15,7 +15,7 @@ go-llm/
 ├── ollama/          # Ollama REST API client (chat, generate, embeddings, models)
 ├── config/          # Model configuration (models.json load, resolve, fallback) + Document (revision-aware load, secret-preserving atomic writer, role lifecycle, credential scrub) + `CapabilityPolicy`
 ├── configview/      # Pure config projection for panels/CLI/MCP (`Build`: v1 wire contract, no I/O) + offline capability and listing explanations (`ExplainCapabilities`, `ExplainListing`)
-├── configio/        # Explicit I/O tier: `RefreshInventory` (provider listing → `configview.Inventory`; publishes to the evidence store only via `WithPublish`) + consent-gated `ProbeToolCall`; bounded error codes (`CodeOf`)
+├── configio/        # Explicit I/O tier: `RefreshInventory` (provider listing → `configview.Inventory`; publishes to the evidence store only via `WithPublish`) + consent-gated `ProbeToolCall`, `PlanCheck`, `RunCheck`; bounded error codes (`CodeOf`)
 ├── profiles/        # Profile catalog: curated credential-free go:embed configs + a 0700 user store; the Firn config-panel write path
 ├── provider/        # Use-case-aware Router: circuit breakers, warmth, slot-aware admission, sticky routing, scoring, fallback chains; `WithEvidenceLog` capability resolution; `CanonicalEndpoint` keys evidence; `ExplainEvidence` is the one capability-evidence precedence core
 │   └── openaicompat/ # OpenAI /v1 client — reaches llama.cpp (primary), vLLM, LM Studio via api_format: openai-compat
@@ -129,7 +129,7 @@ The repository holds no production, personal, or client data. At runtime, go-llm
 - **Credentials:** `api_key` in a user's `models.json`, signing keys, Claude and Codex logins used by `/consult`, and secrets in the environment or workspace. Every committed secret-shaped string is synthetic (e.g. `internal/secretscan/secrettest/cases.json`, `agent/testdata/hardening/secrets/`); never swap in a live value.
 - **Data leaving the machine:** an endpoint is local only if its `base_url` is; `api_format` says nothing about location. Remote providers, `/consult` consultants (`docs/consult.md`), `-mcp-http` servers, and stdio MCP servers given `-mcp-env` receive prompts, tool arguments, or secrets; exec commands reach the network unless denied.
 
-AI tools must not read, print, or transmit real credentials, a user's `models.json`, or the directories above unless the user asks in the current session, and must never commit them or paste them into an issue or PR; use the synthetic fixtures and mock servers. In review, all code outside `docs/` and test data is security-relevant; highest risk: `agent/tools/` (exec sandbox), Golem trust and approval code, `projectcontext/`, `mcpclient/`, `agent/interceptor/`, `internal/secretscan/`, `config/`, `signing/`, `consult/`, `provider/`.
+AI tools must not read, print, or transmit real credentials, a user's `models.json`, or the directories above unless the user asks in the current session, and must never commit them or paste them into an issue or PR; use the synthetic fixtures and mock servers. Never commit or `git add -f` `docs/superpowers/` or `.superpowers/`: they are private, and CI rejects them. In review, all code outside `docs/` and test data is security-relevant; highest risk: `agent/tools/` (exec sandbox), Golem trust and approval code, `projectcontext/`, `mcpclient/`, `agent/interceptor/`, `internal/secretscan/`, `config/`, `signing/`, `consult/`, `provider/`.
 
 **AI policy:** no organization AI policy applies to this project.
 

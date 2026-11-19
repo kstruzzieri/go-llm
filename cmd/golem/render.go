@@ -111,8 +111,13 @@ func (r *renderer) OnStep(_ context.Context, e agent.StepEvent) error {
 func (r *renderer) finalFooter(res agent.Result, elapsed time.Duration) {
 	_ = r.flushPending()
 	_ = r.markdown.Finish()
-	line := fmt.Sprintf("done · %s · %.1fs · %d tok",
-		plural(len(res.Steps), "step", "steps"), elapsed.Seconds(), res.Usage.TotalTokens)
+	// #767: a turn with no answer says so, whatever its stop reason.
+	prefix := "done"
+	if strings.TrimSpace(res.Answer) == "" {
+		prefix = "no answer"
+	}
+	line := fmt.Sprintf("%s · %s · %.1fs · %d tok",
+		prefix, plural(len(res.Steps), "step", "steps"), elapsed.Seconds(), res.Usage.TotalTokens)
 	if res.Usage.CachedPromptTokensReported {
 		// Cache hits are shown only when the backend measured them, so a
 		// backend that reports nothing keeps its footer unchanged.

@@ -134,6 +134,19 @@ type Request struct {
 	// are suspended. It applies to this run only: a nested Run does not
 	// inherit it. A name left out fails closed.
 	StrictExempt []string
+	// RecoverThinkingOnlyAnswer gives a run whose final step returns no tool
+	// calls, blank content and non-blank reasoning (the collected
+	// Response.Thinking) one more step, if one is left, to state its answer
+	// (#767). That step offers no tools, and its request alone ends with an
+	// fixed placeholder assistant turn and a fixed user nudge. The tail is transient:
+	// State, Result.Messages and history never carry it, and it is priced
+	// into the step's input like any prompt text. Reasoning that a
+	// ModelCaller only streams, without returning it in Response.Thinking, is
+	// not recovered. A nested Run does not inherit it. The follow-up advertises
+	// no tools, so a router choosing by required capabilities may send it to a
+	// different model in a preferred chain than the one that produced the
+	// reasoning, as can already happen between any two steps.
+	RecoverThinkingOnlyAnswer bool
 }
 
 // Segment tags a message as always-present (Pinned) or compactable (Elastic).
@@ -263,7 +276,7 @@ type StepRecord struct {
 // EventRecord is a lightweight ordered log entry for replay/eval.
 type EventRecord struct {
 	Step int
-	Kind string // "token" | "step" | "tool_call" | "tool_result" | "compaction" | "fence_rotation" | "fence_scan_limit" | "blocked" | "stop"
+	Kind string // "token" | "step" | "tool_call" | "tool_result" | "compaction" | "fence_rotation" | "fence_scan_limit" | "final_answer_retry" | "blocked" | "stop"
 }
 
 // ToolCallRecord captures one dispatched tool call and its outcome.
@@ -321,4 +334,13 @@ type Result struct {
 	// Exposure is the conversation's exposure after this run, set on every
 	// return path. Runtime-only, so run traces stay byte-identical.
 	Exposure Exposure `json:"-"`
+	// ModelError is the error this Run's model caller returned for the
+	// request that ended the run, and the error Run returned with it. It is
+	// nil when one of this Run's own stream callbacks failed (a host OnToken
+	// or OnThinking error), when an output block was joined with it, and on
+	// every other failure. What it covers is the caller's to say: a caller
+	// that routes may return a routing error, not only a provider's reply.
+	// When handling a failed Run, hosts can inspect ModelError directly
+	// with errors.As. Runtime-only.
+	ModelError error `json:"-"`
 }

@@ -16,6 +16,16 @@ import (
 	"github.com/kstruzzieri/go-llm/provider"
 )
 
+// finalAnswerNudge is the user turn of the answer-only recovery step (#767).
+// It is sent on that step's wire request only, never kept in State.
+const finalAnswerNudge = "Your last reply had reasoning but no answer. Reply now with your final answer only."
+
+// finalAnswerPlaceholder stands in for the reasoning-only reply as the
+// assistant turn of the answer-only recovery step (#767). It is sent on that
+// step's wire request only, never kept in State. It is non-empty because some
+// providers reject an empty assistant message that is not the last one.
+const finalAnswerPlaceholder = "(reasoning only, no reply)"
+
 // Orchestrator runs the plan->act->observe loop. It must not be copied after use.
 type Orchestrator struct {
 	model     ModelCaller
@@ -290,6 +300,8 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 	// filtered; fence keys and Result.Messages keep using canonical state.
 	sticky := o.ctxMgr.stickyEviction()
 	var hidden []bool // aligned to state.Messages
+	// #767: set when a thinking-only final step earned one tool-free retry.
+	recovering := false
 	for step := 0; step < maxSteps; step++ {
 		// Rotate every live key the previous step's text exposed, then key
 		// the tool messages it appended, now that verifyBatch has finished
@@ -305,9 +317,28 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 				pinned = append(pinned, advisory.Source, advisory.Tool, advisory.Model, advisory.Digest, advisory.Content, advisory.Annotation)
 			}
 		}
+		var tail []provider.ChatMessage
+		if recovering {
+			// Scan the same wire-only messages we price and send below.
+			tail = []provider.ChatMessage{
+				{Role: "assistant", Content: finalAnswerPlaceholder},
+				{Role: "user", Content: finalAnswerNudge},
+			}
+			for _, m := range tail {
+				pinned = append(pinned, m.Content)
+			}
+		}
 		next, rotated, limited, preRotated = refreshFenceKeys(&state, liveAdvisory, next, pinned...)
 		if limited {
 			scanSafeThrough = len(state.Messages)
+		}
+		if recovering {
+			// #767: the tail scan may rotate a key, and a recovery whose tail
+			// does not fit returns before the events below. Record this scan's
+			// events now; that site then records only what the mixed
+			// post-assembly scan adds.
+			res.Events = appendFenceEvents(res.Events, step, rotated, limited)
+			rotated, limited = 0, false
 		}
 		in := state
 		if sticky {
@@ -327,7 +358,26 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 			// Never create spare capacity from a non-monotonic estimator.
 			manager.advisoryTokens = max(0, extra)
 		}
-		assembled, pressure, atrace, err := manager.AssembleWithTrace(ctx, in, toolSchemaTokens, budget)
+		stepSpecs, stepSchemaTokens := specs, toolSchemaTokens
+		if recovering {
+			// #767: the recovery step offers no tools, and its wire-only tail
+			// joins the advisory's reserve, priced by the estimator this
+			// assembly will use (guarded on the mixed path).
+			stepSpecs, stepSchemaTokens = nil, 0
+			pricer := manager
+			if manager.Mixed && hasStructuredAnchor(in) {
+				pricer.Estimate = guardedEstimate(manager.Estimate)
+			}
+			for _, m := range tail {
+				cost, costOK := pricer.checkedMessageCost(Message{ChatMessage: m})
+				var addOK bool
+				manager.advisoryTokens, addOK = checkedTokenAdd(manager.advisoryTokens, cost)
+				if !costOK || !addOK {
+					return res, ErrContextExhausted
+				}
+			}
+		}
+		assembled, pressure, atrace, err := manager.AssembleWithTrace(ctx, in, stepSchemaTokens, budget)
 		// Emit pressure before the model call on the success path and on the
 		// exhaustion path; skip only opaque compactor failures (pressure is zero).
 		if err == nil || errors.Is(err, ErrContextExhausted) {
@@ -338,6 +388,18 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 			}
 		}
 		if err != nil {
+			if recovering && errors.Is(err, ErrContextExhausted) {
+				// #767: a recovery that does not fit ends the run as the
+				// thinking-only step would have, without its empty turn.
+				res.Messages = resultMessages(state, historyLen)
+				if cerr := ctx.Err(); cerr != nil {
+					return res, cerr
+				}
+				res.Answer = ""
+				res.StopReason = Completed
+				res.Events = append(res.Events, EventRecord{Step: step, Kind: "stop"})
+				return res, nil
+			}
 			return res, err
 		}
 		if sticky && pressure.Compactions > 0 {
@@ -386,19 +448,19 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 				}
 			}
 		}
-		for range rotated {
-			res.Events = append(res.Events, EventRecord{Step: step, Kind: "fence_rotation"})
-		}
-		if limited {
-			res.Events = append(res.Events, EventRecord{Step: step, Kind: "fence_scan_limit"})
-		}
+		res.Events = appendFenceEvents(res.Events, step, rotated, limited)
 		if pressure.Compactions > 0 {
 			res.Events = append(res.Events, EventRecord{Step: step, Kind: "compaction"})
 		}
 
 		tokenLogged := false
 		modelStart := o.now()
-		chatReq := buildChatRequest(assembled, specs, req.Budget.OutputReserve, req.Options, advisory, advisoryFence)
+		chatReq := buildChatRequest(assembled, stepSpecs, req.Budget.OutputReserve, req.Options, advisory, advisoryFence)
+		if recovering {
+			// #767: on the wire copy only. assembled may alias State's
+			// backing array (a custom Compactor can return its prefix).
+			chatReq.Messages = append(chatReq.Messages, tail...)
+		}
 		// Session identity belongs to the run, independent of transcript rebuilding.
 		chatReq.SessionID = req.SessionID
 		// Both assembly modes report the checked, complete prompt cost. Spend
@@ -413,10 +475,18 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 			res.Events = append(res.Events, EventRecord{Step: step, Kind: "stop"})
 			return res, nil
 		}
+		if recovering {
+			res.Events = append(res.Events, EventRecord{Step: step, Kind: "final_answer_retry"}) // #767
+		}
+		// cbErr is the error this run's own stream callback returned, if any.
+		// A provider hands it back as Chat's error, so Chat's error is then not
+		// the provider's reply (#740).
+		var cbErr error
 		modelResult, err := o.model.Chat(ctx, chatReq, func(c provider.ChatResponse) error {
 			if c.Thinking != "" {
 				if to, ok := obs.(ThinkingObserver); ok {
 					if terr := to.OnThinking(ctx, ThinkingEvent{Step: step, Content: c.Thinking}); terr != nil {
+						cbErr = terr
 						return terr
 					}
 				}
@@ -428,7 +498,11 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 				res.Events = append(res.Events, EventRecord{Step: step, Kind: "token"})
 				tokenLogged = true
 			}
-			return obs.OnToken(ctx, TokenEvent{Step: step, Content: c.Content})
+			if terr := obs.OnToken(ctx, TokenEvent{Step: step, Content: c.Content}); terr != nil {
+				cbErr = terr
+				return terr
+			}
+			return nil
 		})
 		reservation.settle(modelResult, err)
 		modelLatency := o.now().Sub(modelStart)
@@ -461,6 +535,13 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 			res.Messages = resultMessages(state, historyLen)
 			if denied {
 				suppressSensitive(res.Messages, ic.sensitiveText)
+			}
+			// Once this run's own callback failed, the stream ended for the
+			// host's reason, whatever the provider wrapped around it; an
+			// errors.Is test would also miss a callback error whose type is
+			// not comparable.
+			if cbErr == nil {
+				res.ModelError = err
 			}
 			return res, err
 		}
@@ -502,25 +583,58 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 		}); err != nil {
 			return res, err
 		}
+		if recovering {
+			// #767: a caller may cancel and still return success; the budget
+			// branch checks cancellation only once the budget is spent.
+			if err := ctx.Err(); err != nil {
+				res.Messages = resultMessages(state, historyLen)
+				return res, err
+			}
+		}
 
 		if budgetRun.stopped() {
 			if err := ctx.Err(); err != nil {
 				res.Messages = resultMessages(state, historyLen)
 				return res, err
 			}
+			content := resp.Content
+			if recovering && strings.TrimSpace(content) == "" {
+				content = "" // #767: Golem saves a thread on a non-empty Answer
+			}
 			// Keep accepted text, but never persist unexecuted tool-call residue.
-			if resp.Content != "" {
+			if content != "" {
 				accepted := resp
 				accepted.ToolCalls = nil
 				state.Messages = append(state.Messages, assistantMessage(accepted))
 			}
-			res.Answer = resp.Content
+			res.Answer = content
 			res.StopReason = BudgetReached
 			res.Messages = resultMessages(state, historyLen)
 			res.Events = append(res.Events, EventRecord{Step: step, Kind: "stop"})
 			return res, nil
 		}
+		if recovering {
+			// #767: the recovery step always ends the run. Its tool calls are
+			// dropped undispatched, and a blank reply leaves no empty turn.
+			if strings.TrimSpace(resp.Content) != "" {
+				accepted := resp
+				accepted.ToolCalls = nil
+				state.Messages = append(state.Messages, assistantMessage(accepted))
+				res.Answer = resp.Content
+			}
+			res.Messages = resultMessages(state, historyLen)
+			res.StopReason = Completed
+			res.Events = append(res.Events, EventRecord{Step: step, Kind: "stop"})
+			return res, nil
+		}
 		if len(resp.ToolCalls) == 0 {
+			if req.RecoverThinkingOnlyAnswer && step+1 < maxSteps &&
+				strings.TrimSpace(resp.Content) == "" && strings.TrimSpace(resp.Thinking) != "" {
+				// #767: the answer is only in the reasoning. Keep nothing of
+				// this reply and spend one tool-free step asking for it.
+				recovering = true
+				continue
+			}
 			state.Messages = append(state.Messages, assistantMessage(resp))
 			res.Answer = resp.Content
 			res.Messages = resultMessages(state, historyLen)
@@ -549,6 +663,19 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 	res.Messages = resultMessages(state, historyLen)
 	res.Events = append(res.Events, EventRecord{Step: maxSteps - 1, Kind: "stop"})
 	return res, nil
+}
+
+// appendFenceEvents records one step's fence-key refresh: a fence_rotation
+// event per rotated key, then a fence_scan_limit event if the scan hit its
+// work limit.
+func appendFenceEvents(events []EventRecord, step, rotated int, limited bool) []EventRecord {
+	for range rotated {
+		events = append(events, EventRecord{Step: step, Kind: "fence_rotation"})
+	}
+	if limited {
+		events = append(events, EventRecord{Step: step, Kind: "fence_scan_limit"})
+	}
+	return events
 }
 
 // prepareAdvisory runs the observation hook over the advisory as a

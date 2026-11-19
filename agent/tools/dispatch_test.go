@@ -375,6 +375,51 @@ func TestParentRunCapsRepeatedDispatchFanout(t *testing.T) {
 	}
 }
 
+// TestDispatchChildDoesNotRecoverThinkingOnlyAnswer pins #767's scope: the
+// parent opts into answer-only recovery, but a dispatch child never does, so a
+// child that answers only in reasoning ends after one request even with steps
+// to spare.
+func TestDispatchChildDoesNotRecoverThinkingOnlyAnswer(t *testing.T) {
+	read := agent.Effect{Class: agent.Read, Approval: agent.ApprovalNever}
+	available := []agent.Tool{
+		dispatchNamedTool{name: "read_file", effect: read},
+		dispatchNamedTool{name: "search", effect: read},
+		dispatchNamedTool{name: "glob", effect: read},
+		dispatchNamedTool{name: "list", effect: read},
+	}
+	var childCalls atomic.Int32
+	child := dispatchModelFunc(func(context.Context, provider.ChatRequest) (agent.ModelResult, error) {
+		childCalls.Add(1)
+		return agent.ModelResult{Response: provider.ChatResponse{Thinking: "The code word is PELICAN.", Done: true}}, nil
+	})
+	dispatch, err := NewDispatch(child, agent.ContextManager{}, available, DispatchLimits{MaxSteps: 5})
+	if err != nil {
+		t.Fatalf("NewDispatch: %v", err)
+	}
+	var parentCalls atomic.Int32
+	parentCaller := dispatchModelFunc(func(context.Context, provider.ChatRequest) (agent.ModelResult, error) {
+		if parentCalls.Add(1) == 1 {
+			return agent.ModelResult{Response: provider.ChatResponse{ToolCalls: []provider.ToolCall{{
+				ID:       "d1",
+				Function: provider.ToolCallFunction{Name: DispatchToolName, Arguments: json.RawMessage(`{"tasks":["find the code word"]}`)},
+			}}}}, nil
+		}
+		return agent.ModelResult{Response: provider.ChatResponse{Content: "done", Done: true}}, nil
+	})
+	result, err := agent.New(parentCaller, agent.ContextManager{}).Run(context.Background(), agent.Request{
+		Goal: "investigate", Tools: []agent.Tool{dispatch}, MaxSteps: 5, RecoverThinkingOnlyAnswer: true,
+	}, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(result.ToolCalls) != 1 || !result.ToolCalls[0].Invoked {
+		t.Fatalf("dispatch calls = %+v, want one invoked", result.ToolCalls)
+	}
+	if n := childCalls.Load(); n != 1 {
+		t.Fatalf("child requests = %d, want 1 (children never opt into recovery)", n)
+	}
+}
+
 func TestNewDispatchRejectsMutatingCanonicalTool(t *testing.T) {
 	read := agent.Effect{Class: agent.Read, Approval: agent.ApprovalNever}
 	available := []agent.Tool{

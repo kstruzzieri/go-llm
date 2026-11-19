@@ -376,21 +376,11 @@ func TestExplainToolCall_LogProvenance(t *testing.T) {
 	}
 	tests := []struct {
 		name   string
-		model  string // logModel when empty
-		native bool   // bound through Ollama's own API rather than b
 		rows   []fingerprint.EvidenceRow
 		listed []string // what the runtime itself lists
 		want   ToolCallExplanation
 	}{
 		{name: "nothing", want: ToolCallExplanation{Source: "unknown"}},
-		{
-			// #736, deliberate: the live array without tools is the
-			// provider's no and overturns the catalog's yes, but with no stored
-			// row today's Source switch has no label for it, so it reads "unknown".
-			name: "a live array without tools overturns a catalog yes", model: catalogToolModel, native: true,
-			listed: []string{"completion"},
-			want:   ToolCallExplanation{Caps: catalogToolCaps &^ CapToolCall, Source: "unknown"},
-		},
 		{
 			// #736: a checked no outranks the runtime's bit (it was the runtime's yes before).
 			name: "a probe no beside the runtime's bit is the probe's",
@@ -452,16 +442,9 @@ func TestExplainToolCall_LogProvenance(t *testing.T) {
 			if len(tt.rows) > 0 {
 				appendRows(t, store, tt.rows...)
 			}
-			binding, model := b, logModel
-			if tt.native {
-				binding = mustBinding(t, "http://127.0.0.1:11434", "ollama")
-			}
-			if tt.model != "" {
-				model = tt.model
-			}
-			mr, prov := logRegistry(t, store, "local", binding, logDigest)
-			prov.models[0].Name, prov.models[0].Capabilities = model, tt.listed
-			got, err := mr.ExplainToolCall(t.Context(), ModelKey{Provider: "local", Model: model})
+			mr, prov := logRegistry(t, store, "local", b, logDigest)
+			prov.models[0].Capabilities = tt.listed
+			got, err := mr.ExplainToolCall(t.Context(), ModelKey{Provider: "local", Model: logModel})
 			if err != nil {
 				t.Fatalf("ExplainToolCall: %v", err)
 			}
@@ -469,6 +452,72 @@ func TestExplainToolCall_LogProvenance(t *testing.T) {
 				t.Fatalf("TestedAt = %v; want %v", got.TestedAt, tt.want.TestedAt)
 			}
 			got.TestedAt, tt.want.TestedAt = time.Time{}, time.Time{}
+			if got != tt.want {
+				t.Fatalf("got %+v; want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestExplainToolCall_LiveOllamaNoIsRuntime pins the source of a live no
+// beside a catalog yes or an inconclusive attempt. The last check is still
+// available to callers, including after it expires.
+func TestExplainToolCall_LiveOllamaNoIsRuntime(t *testing.T) {
+	b := mustBinding(t, "http://127.0.0.1:11434", "ollama")
+	attempt := showRow(b, "tool_call", fingerprint.CapProbeInconclusive, logDigest, logT0.Add(-time.Hour))
+	attempt.Kind = fingerprint.EvidenceKindAttempt
+	attempt.FreshUntil, attempt.ExpiresAt = fingerprint.ExpiryFor(attempt, 0)
+	expired := attempt
+	expired.ObservedAt = logT0.Add(-2 * logDay)
+	expired.FreshUntil, expired.ExpiresAt = fingerprint.ExpiryFor(expired, 0)
+	tests := []struct {
+		name   string
+		model  string
+		listed []string
+		rows   []fingerprint.EvidenceRow
+		want   ToolCallExplanation
+	}{
+		{
+			name: "overturns a catalog yes", model: catalogToolModel, listed: []string{"completion"},
+			want: ToolCallExplanation{Caps: catalogToolCaps &^ CapToolCall, Source: "runtime"},
+		},
+		{
+			name: "a model the catalog does not know", model: logModel, listed: []string{"completion"},
+			want: ToolCallExplanation{Caps: CapChat | CapGenerate | CapStream, Source: "runtime"},
+		},
+		{
+			name: "no beside a current attempt", model: logModel, listed: []string{"completion"}, rows: []fingerprint.EvidenceRow{attempt},
+			want: ToolCallExplanation{Caps: CapChat | CapGenerate | CapStream, Source: "runtime", State: fingerprint.CapProbeInconclusive, TestedAt: attempt.ObservedAt, Valid: true},
+		},
+		{
+			name: "no beside an expired attempt", model: logModel, listed: []string{"completion"}, rows: []fingerprint.EvidenceRow{expired},
+			want: ToolCallExplanation{Caps: CapChat | CapGenerate | CapStream, Source: "runtime", State: fingerprint.CapProbeInconclusive, TestedAt: expired.ObservedAt},
+		},
+		{
+			name: "only a provider metadata attempt", model: logModel, rows: []fingerprint.EvidenceRow{attempt},
+			want: ToolCallExplanation{Source: "probe", State: fingerprint.CapProbeInconclusive, TestedAt: attempt.ObservedAt, Valid: true},
+		},
+		{
+			name: "no array says nothing", model: logModel,
+			want: ToolCallExplanation{Source: "unknown"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := newEvidenceLog(t)
+			if len(tt.rows) > 0 {
+				appendRows(t, store, tt.rows...)
+			}
+			mr, prov := logRegistry(t, store, "local", b, logDigest)
+			prov.models[0].Name, prov.models[0].Capabilities = tt.model, tt.listed
+			got, err := mr.ExplainToolCall(t.Context(), ModelKey{Provider: "local", Model: tt.model})
+			if err != nil {
+				t.Fatalf("ExplainToolCall: %v", err)
+			}
+			if !got.TestedAt.Equal(tt.want.TestedAt) {
+				t.Fatalf("TestedAt = %v; want %v", got.TestedAt, tt.want.TestedAt)
+			}
+			got.TestedAt = tt.want.TestedAt
 			if got != tt.want {
 				t.Fatalf("got %+v; want %+v", got, tt.want)
 			}
@@ -1446,4 +1495,23 @@ func TestExplainToolCall_LogExplicitAgreesWithLookup(t *testing.T) {
 		t.Fatalf("got %+v; want %+v", got, want)
 	}
 	wantCaps(t, "Lookup", lookupProfile(t, mr, logModel).Caps, got.Caps)
+}
+
+// TestEndpointHost pins what EndpointHost shows of an endpoint: host[:port]
+// only, IPv6 in brackets, and "" for an endpoint that does not parse or names
+// no host.
+func TestEndpointHost(t *testing.T) {
+	tests := []struct{ endpoint, want string }{
+		{"http://127.0.0.1:8080/v1", "127.0.0.1:8080"},
+		{"https://u:p@h.example/x", "h.example"},
+		{"http://[::1]:11434", "[::1]:11434"},
+		{"%zz", ""},
+		{"://", ""},
+		{"host:1", ""},
+	}
+	for _, tt := range tests {
+		if got := EndpointHost(tt.endpoint); got != tt.want {
+			t.Errorf("EndpointHost(%q) = %q; want %q", tt.endpoint, got, tt.want)
+		}
+	}
 }

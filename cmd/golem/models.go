@@ -7,9 +7,11 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/kstruzzieri/go-llm/config"
@@ -20,27 +22,33 @@ import (
 	"github.com/kstruzzieri/go-llm/provider/openaicompat"
 )
 
-// modelsRegistry is the narrow slice of *provider.ModelRegistry that runModels
-// needs: profile lookup, tool_call provenance, and (for -probe-all/-reprobe)
-// active resolution. The concrete registry satisfies all three.
+// modelsRegistry is the narrow slice of *provider.ModelRegistry that the
+// listing needs: profile lookup and tool_call provenance. Checks never go
+// through it.
 type modelsRegistry interface {
 	Lookup(ctx context.Context, key provider.ModelKey) (*provider.ModelProfile, error)
-	Refresh(ctx context.Context, key provider.ModelKey) (*provider.ModelProfile, error)
 	ExplainToolCall(ctx context.Context, key provider.ModelKey) (provider.ToolCallExplanation, error)
-	ResolveToolCall(ctx context.Context, key provider.ModelKey) (fingerprint.CapProbeState, error)
-}
-
-// modelsOpts carries the two active-probe switches for `golem models`.
-type modelsOpts struct {
-	probeAll bool // probe EVERY non-explicit entry (no bounded-eager stop)
-	reprobe  bool // delete cached rows, then re-resolve every non-explicit entry
 }
 
 // runModels is the `golem models` entry point: resolve the agent chain and
-// print each entry's capabilities + tool_call provenance, and optionally probe
-// (-probe-all) or re-probe (-reprobe) non-explicit entries. It builds the real
-// providerbootstrap deps then delegates rendering to runModelsWith.
+// print each entry's capabilities + tool_call provenance, after checking the
+// chain's entries with -probe-all (unforced) or -reprobe (forced). It runs
+// under its own interrupt handling: Ctrl-C or SIGTERM cancels a check in
+// flight, so nothing more is sent, and prints one "cancelled" line.
 func runModels(ctx context.Context, args []string, out, errOut io.Writer) error {
+	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	err := runModelsCommand(ctx, args, out, errOut)
+	if cancelled := ctx.Err(); cancelled != nil && (err == nil || errors.Is(err, cancelled)) {
+		_, _ = fmt.Fprintln(errOut, "cancelled")
+		return cancelled
+	}
+	return err
+}
+
+// runModelsCommand builds the real providerbootstrap deps then delegates
+// rendering to runModelsWith.
+func runModelsCommand(ctx context.Context, args []string, out, errOut io.Writer) error {
 	var (
 		configPath string
 		rootFlag   string
@@ -58,8 +66,8 @@ func runModels(ctx context.Context, args []string, out, errOut io.Writer) error 
 	fs.StringVar(&baseURL, "base-url", "", "override the openai-compat backend base URL (server root, without /v1); used as given, disables discovery")
 	fs.BoolVar(&noProbe, "no-probe", false, "disable openai-compat backend port discovery; explicit and configured URLs are still used as resolved")
 	fs.StringVar(&ollamaURL, "ollama-url", "", "override Ollama base URL")
-	fs.BoolVar(&probeAll, "probe-all", false, "actively probe every non-explicit entry (no bounded-eager stop)")
-	fs.BoolVar(&reprobe, "reprobe", false, "delete cached probe verdicts for non-explicit entries then re-probe")
+	fs.BoolVar(&probeAll, "probe-all", false, "check every agent-chain entry without fresh answers; prints the plan and results on stderr")
+	fs.BoolVar(&reprobe, "reprobe", false, "check every agent-chain entry again, fresh answers included; deletes nothing")
 	fs.BoolVar(&jsonOut, "json", false, "emit the configview snapshot as JSON (no probing; excludes -probe-all/-reprobe)")
 	var allowDest stringSliceFlag
 	fs.Var(&allowDest, "allow-destination", "admit a remote model destination: \"<provider>/<canonical base URL>\" (repeatable; this command never prompts)")
@@ -87,6 +95,9 @@ func runModels(ctx context.Context, args []string, out, errOut io.Writer) error 
 			return err
 		}
 		if doc == nil {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			return renderModelsJSON(out, modelsJSONInput(nil, configview.Inventory{}))
 		}
 		cfg = doc.Config()
@@ -156,21 +167,21 @@ func runModels(ctx context.Context, args []string, out, errOut io.Writer) error 
 		}
 	}
 
-	// The cap-probe store is required for cached provenance in normal listings
-	// and for probe/reprobe writes, mirroring run()'s handle lifecycle.
-	var capStore fingerprint.CapProbeStore
-	capHandle, capStoreWarn := openCapProbeStore(ctx, os.Getenv, root)
+	// The shared store's evidence log holds the answers the listing reads and
+	// the checks write, mirroring run()'s handle lifecycle.
+	var evidenceLog fingerprint.EvidenceStore
+	capHandle, capStoreWarn := openModelsStore(ctx, os.Getenv, root)
 	if capHandle != nil {
-		capStore = capHandle.Probes()
+		evidenceLog = capHandle.Log()
 		defer func() { _ = capHandle.Close() }()
 	}
 	if capStoreWarn != "" {
 		_, _ = fmt.Fprintln(errOut, "warning: "+capStoreWarn)
 	}
-	// Store fully unavailable (not even the in-memory fallback): a probe run
-	// would silently no-op. Tell the operator why nothing gets probed, then
-	// drop the switches so runModelsWith renders cached provenance only.
-	if capStore == nil {
+	// Store fully unavailable (not even the in-memory fallback): a check could
+	// save nothing. Tell the operator why nothing gets checked, then drop the
+	// switches so runModelsWith renders what the runtime and config say.
+	if evidenceLog == nil {
 		if probeAll || reprobe {
 			reason := capStoreWarn
 			if reason == "" {
@@ -187,7 +198,7 @@ func runModels(ctx context.Context, args []string, out, errOut io.Writer) error 
 		OllamaURLOverride:               ollamaURL,
 		OpenAICompatURLOverrideProvider: backendRes.providerKey,
 		OpenAICompatURLOverride:         backendRes.baseURL,
-		CapabilityProbeStore:            capStore,
+		EvidenceLog:                     evidenceLog,
 		DestinationGate:                 gate,
 		ActiveProviders:                 netPlan.ActiveProviders,
 	})
@@ -211,37 +222,55 @@ func runModels(ctx context.Context, args []string, out, errOut io.Writer) error 
 		if ierr != nil {
 			return ierr
 		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		return renderModelsJSON(out, modelsJSONInput(doc, inv))
 	}
 
+	var checks *modelsCheck
+	if probeAll || reprobe {
+		checks = &modelsCheck{cfg: bundle.Config, store: evidenceLog, listings: bundle.Listings, policy: adm.grantedPolicy(), force: reprobe,
+			memoryOnly: capHandle.Status() == fingerprint.StoreMemoryOnly}
+	}
 	resolveEndpoint := newPreflightEndpointResolver(bundle.Config, ollamaURL, backendRes.providerKey, backendRes.diagSource())
-	return runModelsWith(ctx, bundle.Models, plan.chain, bundle.Config, capStore, resolveEndpoint,
-		modelsOpts{probeAll: probeAll, reprobe: reprobe}, out, errOut)
+	return runModelsWith(ctx, bundle.Models, plan.chain, bundle.Config, resolveEndpoint, checks, out, errOut)
 }
 
 // runModelsWith renders the models listing against injectable deps so the
-// output/probe/reprobe logic is unit-testable without standing up
-// providerbootstrap. reg supplies lookup + provenance (+ probing); store is used
-// only for -reprobe's DeleteCapProbes; resolveEndpoint feeds the same
-// connectivity diagnostics the run() preflight uses on a lookup error.
+// output logic is unit-testable without standing up providerbootstrap. reg
+// supplies lookup + provenance; resolveEndpoint feeds the same connectivity
+// diagnostics the run() preflight uses on a lookup error. A non-nil checks runs
+// first, so the listing shows what it wrote. A failed plan write stops the
+// checks, and caller cancellation stops both the checks and the listing.
 func runModelsWith(
 	ctx context.Context,
 	reg modelsRegistry,
 	chain []string,
 	cfg *config.Config,
-	store fingerprint.CapProbeStore,
 	resolveEndpoint endpointResolver,
-	opts modelsOpts,
+	checks *modelsCheck,
 	out, errOut io.Writer,
 ) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if len(chain) == 0 {
 		_, _ = fmt.Fprintln(out, "no defaults.agent configured; the run will route to the model recommendation.")
 		_, _ = fmt.Fprintln(out, "configure a defaults.agent chain in models.json to list per-entry capabilities.")
 		return nil
 	}
+	if checks != nil {
+		if err := checks.run(ctx, chain, errOut); err != nil {
+			return err
+		}
+	}
 
 	now := time.Now()
 	for _, sel := range chain {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		key, parsed := parseSelector(sel)
 		if !parsed {
 			// Bare selector: no single provider/model to explain per-entry.
@@ -252,37 +281,26 @@ func runModelsWith(
 		// Lookup first so a connectivity/config failure renders the same
 		// diagnostic the startup preflight uses, rather than a bare zero row.
 		if _, lerr := reg.Lookup(ctx, key); lerr != nil {
+			if err := ctx.Err(); err != nil {
+				return err // cancelled: not a connectivity failure, and no entry after it is read
+			}
 			ep, epOK := resolvePreflightEndpoint(resolveEndpoint, key.Provider)
 			_, _ = fmt.Fprintf(out, "%s\t%s\n", sel, preflightConnectivityWarn("agent", sel, key.Provider, ep, epOK, lerr))
 			continue
 		}
 
 		exp, err := reg.ExplainToolCall(ctx, key)
+		if cerr := ctx.Err(); cerr != nil {
+			return cerr
+		}
 		if err != nil {
 			ep, epOK := resolvePreflightEndpoint(resolveEndpoint, key.Provider)
 			_, _ = fmt.Fprintf(out, "%s\t%s\n", sel, preflightConnectivityWarn("agent", sel, key.Provider, ep, epOK, err))
 			continue
 		}
-		explicit := exp.Source == "explicit"
-
-		// -reprobe deletes the cached verdict BEFORE resolving so the probe is
-		// forced fresh. -probe-all / -reprobe then resolve every non-explicit
-		// entry (no bounded-eager stop) and re-read provenance.
-		if !explicit && (opts.probeAll || opts.reprobe) {
-			if opts.reprobe && store != nil {
-				_ = store.DeleteCapProbes(ctx, key.Provider, key.Model)
-				_, _ = reg.Refresh(ctx, key)
-			}
-			if _, rerr := reg.ResolveToolCall(ctx, key); rerr == nil {
-				if re, eerr := reg.ExplainToolCall(ctx, key); eerr == nil {
-					exp = re
-				}
-			}
-		}
-
 		_, _ = fmt.Fprintln(out, renderModelLine(sel, key, exp, cfg, now))
 	}
-	return nil
+	return ctx.Err()
 }
 
 // renderModelLine formats one chain entry: selector, capabilities, and
@@ -342,15 +360,15 @@ func samplingDefaultsField(opts *config.SamplingOptions) string {
 
 // toolCallField renders the tool_call verdict + its provenance source. A
 // present bit reads "tool_call=yes (<source>)"; an absent bit reads
-// "tool_call=MISSING" plus the last probe verdict + relative age when known.
+// "tool_call=MISSING" with its source. A probe verdict includes its age.
 func toolCallField(exp provider.ToolCallExplanation, now time.Time) string {
 	if exp.Has {
 		return fmt.Sprintf("tool_call=yes (%s)", exp.Source)
 	}
-	if exp.State != "" {
-		return fmt.Sprintf("tool_call=MISSING (probe: %s, %s)", exp.State, relAge(exp.TestedAt, now))
+	if exp.State == "" || (exp.Source == "runtime" && exp.State == fingerprint.CapProbeInconclusive) {
+		return "tool_call=MISSING (" + exp.Source + ")"
 	}
-	return "tool_call=MISSING (" + exp.Source + ")"
+	return fmt.Sprintf("tool_call=MISSING (probe: %s, %s)", exp.State, relAge(exp.TestedAt, now))
 }
 
 // relAge renders a coarse "Nh ago" / "Nm ago" / "Ns ago" age for a probe

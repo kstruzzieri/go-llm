@@ -2,12 +2,8 @@ package configio
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"net"
-	"net/url"
 	"sort"
 	"strings"
 	"time"
@@ -60,24 +56,10 @@ func listingReason(err error) string {
 			return configview.ListingMalformedResponse // not a listing: a redirect or other non-2xx
 		}
 	}
-	var urlErr *url.Error
-	var syntax *json.SyntaxError
-	var typed *json.UnmarshalTypeError
-	var netErr net.Error
-	switch {
-	case errors.As(err, &urlErr):
-		// A transport failure, even one wrapping io.EOF (a server that hangs up).
-		if urlErr.Timeout() {
-			return configview.ListingTimeout
-		}
-		return configview.ListingUnreachable
-	case errors.As(err, &syntax), errors.As(err, &typed),
-		errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF):
-		return configview.ListingMalformedResponse
-	case errors.Is(err, context.DeadlineExceeded), errors.As(err, &netErr) && netErr.Timeout():
-		return configview.ListingTimeout
-	case errors.As(err, &netErr):
-		return configview.ListingUnreachable
+	// The check codes timeout, unreachable and malformed_response are spelled
+	// as the listing reasons of the same meaning.
+	if code, ok := transportCode(err); ok {
+		return string(code)
 	}
 	return configview.ListingUnreachable
 }
