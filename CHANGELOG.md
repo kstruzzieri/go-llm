@@ -6,6 +6,400 @@ All notable changes to `go-llm` are documented here. Downstream consumers
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-19
+
+### Changed — v0.8.0 consumer upgrade notes (#823)
+
+Read this before upgrading from v0.7.0. Consumers on older pins must also apply
+the earlier upgrade notes. The
+[v0.8.0 upgrade guide](docs/releases/v0.8.0.md) has the details, the known
+issues and the consumer compile check.
+
+- `apidiff` reports three incompatible changes since v0.7.0:
+  `agentflow.(*Client).ProbeRecovery` is removed (#766),
+  `configio.RefreshInventory` takes variadic options (#734), and
+  `fingerprint.SQLiteStore` is no longer comparable (#734).
+- Golem requires AgentFlow 1.3 (#766).
+- A working-directory `models.json` with `${NAME}` keys needs `-config` or
+  `GO_LLM_CONFIG` (#776). Consumers that mirror `config`'s error codes add
+  `key_reference_refused`.
+- Commands that name credential files are refused, and their values are
+  withheld from command output (#777). Writes to harness files always ask
+  (#725, #784). Some `git` commands fail inside a native sandbox (#721).
+- Answers in the old `capability_probes` table stop counting, so Golem checks
+  each model's tool support again on first use (#737).
+- A provider's 4xx refusal of a run, other than 401, 403 and 429, fails with
+  `provider_rejected` instead of `internal` (#740). A turn that ends without an
+  answer starts its footer with `no answer ·` instead of `done ·` (#767).
+- Library hosts that opt in to strict approval implement
+  `agent.FreshApprover` (#584).
+
+### Fixed — openai-compat assembles streamed tool-call arguments in linear time (#807)
+
+A tool call that an OpenAI-compatible server streams in many small fragments used to cost more to assemble the longer it got: every fragment copied the argument text received so far and re-normalized every tool call in the stream, so the cost grew with the square of the fragment count. One 1 MiB tool call in 10,000 fragments took 13 seconds and 24 GB of short-lived allocation to assemble; it now takes 7 milliseconds and 7.6 MB.
+
+- `ChatStream` hands callers the same values as before: the same `ToolCall.Function.Arguments` on the Done chunk, the same partial tool calls on the Done+Partial chunk after cancellation, and no Done chunk on a failed stream.
+- Nothing to change in calling code, and no new option.
+- There is still no limit on how large a streamed tool call may be; a server decides how much the client holds until the stream ends.
+
+### Security — Writes to files that harness files load, run or link to always prompt (#784)
+
+Under `/auto-edits`, `write_file` and `edit_file` now prompt for any file that an agent instruction or harness file loads, runs or links to, not only for the harness files themselves (#725). That covers files named by a Markdown `@` import (followed five hops, existing or not), scripts and arguments in hook and MCP commands in the configuration files Golem reads (`.claude/settings.json`, `.mcp.json`, `.gemini/settings.json`, `.codex/config.toml`, `.vscode/mcp.json` and the rest), files and patterns in OpenCode `instructions`, and the targets of symlinks at harness paths. Fixed paths in every folder above the workspace count too, so a hook in `~/.claude/settings.json` that runs `"$CLAUDE_PROJECT_DIR"/scripts/lint.sh` makes `scripts/lint.sh` prompt. No answer creates a grant, and an earlier grant does not silence the prompt.
+
+Unattended runs deny these writes: `golem -p -allow-tool write_file` (or `edit_file`) and Agentflow `-approve-plan-edits` refuse them, and Agentflow parallel promotion refuses a whole batch, writes and deletions, if any path in it is covered, then applies nothing (`refuse parallel promotion: <path>: <reason>`).
+
+Reference discovery preserves distinct files whose names compare alike, follows imports from each symlink location, and protects file-symlink targets matched by OpenCode globs. Literal paths containing a symlink followed by `..` also cover the file the filesystem actually resolves.
+
+Golem fails closed. If it cannot finish the search, because a harness file is unreadable or malformed (including `~/.claude/settings.json` above the workspace), is not a regular file, or crosses a bound, every file write prompts, not only the covered ones. An empty configuration file counts as no configuration. To see why, read the first line of the preview, `harness reference: <reason>`; `-p` prints `golem: harness reference: ...` after its denial line, and Agentflow task steps print `golem: task step denied <tool>: harness file (<notice>)` and the same line, for #725 denials as well.
+
+Coverage is complete for Markdown `@` imports, OpenCode `instructions`, symlinks at harness paths and the literal paths in the commands Golem reads, or it fails closed. What a command does at run time is best effort: variables other than the project-folder ones, command substitution, scripts that call scripts and another tool's own PATH are not followed. The search skips `.git`, `node_modules`, `vendor`, build-output folders (`target`, `build`, `dist`, `out`, `.venv`, `venv`, `__pycache__`, `.gradle`, `.next`, `.tox`), nested repositories and folders this user cannot search. The full list is in `docs/golem.md` under "Files a harness file loads, runs or links to".
+
+### Security — Exec output no longer carries credential-path files (#777)
+
+`read_file` already refused credential paths, but a command could print the same files. Command output from `run_command`, `start_command` and the post-write verifier is now screened, and commands that name a credential file are refused.
+
+#### Upgrade note
+
+- Commands that name a credential file are refused before they are planned or approved, with `tool call blocked by interceptor invariants (credential_path)`: an argv word such as `.env`, `--env-file=.env`, `HEAD~2:.env`, `@.env` or `-f.env`, or the same text in an inline `sh -c` script. A git exclusion pathspec such as `':(exclude,glob)**/.env'` passed as its own argv word is allowed. A command that names a credential file only to leave it out is refused too (`grep -r --exclude=.env x .`, `rsync -a --exclude .env a/ b/`, `find . -name .env`, `sh -c 'echo .env >> .gitignore'`); use a git exclusion pathspec as its own argv word, or for other tools a pattern that does not spell the name (`--exclude=.e*`). A `dir` at or below `.git`, `.ssh`, `.gnupg`, `.aws` or `.kube` is refused (`protected_dir`).
+- Values of 8 bytes or more from `.env`-style files are withheld from command output, ordinary ones included: with `HOST=localhost` and `NODE_ENV=development` in `.env`, `localhost` and `development` are replaced by `[withheld: credential-path content (credential_path)]` wherever a command prints them. Each line of 8 bytes or more of a credential file, URL userinfo and `extraheader` values from `.git/config`, and the userinfo of a `.git-credentials` line (any credential-file line that is itself a URL), are withheld the same way. Only the matched span is replaced, and the result carries a `credential screen:` note with the count.
+- Patch output stops at the first credential-file section: from a `diff -` or `+++ ` line that names a credential path on, that stream shows one marker, which says to rerun with the file excluded. A line that names a credential path in a `:`-separated prefix (`grep -rn`, `git grep`, some error messages) is replaced whole.
+- A line over 32 KiB ends that stream's output with a marker; such a line used to show its first 32 KiB. A background job's unterminated last line is held until it ends.
+- Each spawn walks the workspace and reads its credential files first, within a time budget (5 seconds by default) added to the tool's timeout. When that read cannot be completed (a file over 256 KiB, a directory this process cannot read, the budget exhausted), the command still runs, and its result shows the exit code and a note naming the cause, with no output, until the cause is removed. On Linux the common trigger is a container's data directory inside the workspace owned by another uid. A workspace root that was replaced or cannot be opened means the command is not run. The walk lists every directory outside `.git`, `vendor`, `node_modules` and `.superpowers` and examines only directories, files at a credential path and entries the listing does not report as regular files (on a filesystem whose listing carries no entry types, every entry), so its cost grows mainly with the number of directories (#789): on one Apple-silicon Mac a tree of 355,611 entries in about 36,000 directories takes 1.7 to 2.1 s (3.8 s before #789), a tree of 100,000 entries (50 files per directory) 0.25 s (0.5 s before), and a directory-heavy tree of 1,000,000 entries 10.2 s, which exhausts the default budget. A tree that large (a big build or data directory, a Python environment, nested worktrees) makes every command wait the whole budget and withholds its output; `-credential-screen-budget` (`5s` to `5m`, default `5s`) raises the budget and the tool timeout grows with it, but every command still waits for the read. A plain file replaced by a directory after its parent directory was listed is not descended, so credential files inside it are not read, with no note. Screening time also grows with the number of keys and the size of the output. On platforms other than Linux and macOS, exec output is always withheld.
+- Library consumers of `agent/tools` exec get the screen with no switch: `RunCommand`, `StartCommand` and the verifier screen their output, and `agent/interceptor`'s `DefaultInvariants` gains four rows and the `CredentialArgv` check kind (and exports `IsGitConfigPath`). The `run_command` and `start_command` descriptions gain one sentence, which says that commands naming a credential file, or using a credential directory or `.git` as `dir`, are refused and that those files' content is withheld from output; a consumer who pins prompts or hashes tool specifications sees the change. The screen's time budget is 5 seconds by default; a host raises it, from `MinCredentialScreenBudget` (5 s) to `MaxCredentialScreenBudget` (5 min), with `ExecToolsOptions.CredentialScreenBudget` or `(*Workspace).SetCredentialScreenBudget`, and a non-zero value outside that range is an error (#789).
+- The benchmark harness `cmd/llm-bench` keeps the `run_command` and `start_command` descriptions its registered corpora were built with (the new sentence is omitted there), so registered trace hashes are unchanged; its census now records a refused background start as a blocked call.
+
+Not covered: encoded or transformed output, values under 8 bytes or spanning a line break, the userinfo of a URL when it holds an unencoded space or tab, committed content printed where the output does not show its path, files under directories the walk does not descend (a submodule's `.git/modules/<name>/config` among them), a directory that the filesystem's listing reports as a regular file, which is not descended, so credential files inside it are not read, credential files outside the workspace, copies read back through the file tools, and AgentFlow and MCP output. `docs/golem.md` lists the rest.
+
+### Security — Working-directory configs can no longer spend your environment secrets (#776)
+
+A `models.json` found only because it sits in the current directory could name any environment variable in `api_key` (`"${AWS_SECRET_ACCESS_KEY}"`) and a `base_url` of its choosing, and go-llm would send that secret there. Four changes close it.
+
+#### Behavior changes
+
+- A config found by working-directory discovery now refuses every `${NAME}` `api_key` reference with the new error code `key_reference_refused` (subject: the provider), before any environment variable is read. A malformed reference is refused the same way. To use a file's references, name it: `golem -config ./models.json`, `go-llm-mcp -config ./models.json`, or set `GO_LLM_CONFIG` for one run (`GO_LLM_CONFIG=./models.json golem ...`). Do not export a relative `GO_LLM_CONFIG`: it would trust the `models.json` in every directory you run from. Saving the config to another path or as a profile lifts the refusal; saving it back to its own path keeps it. Literal keys, the user config (including when you run from inside its directory), `GO_LLM_CONFIG` and explicit paths are unchanged.
+- Golem prints `pass -config ./models.json to use this file's key references, or set GO_LLM_CONFIG`; `golem ops` prints the code, the provider and that sentence; `go-llm-mcp` names its `-config` flag; `llm-bench` fails on the refusal (`set GO_LLM_CONFIG or pass -judge-model`) instead of silently falling back to its built-in judge.
+- An `openai-compat` provider with an `api_key` never runs the loopback discovery scan (ports 8080-8090). Only its configured URL is probed, through the destination guard. If that URL does not serve the model, Golem prints `openai-compat backend discovery skipped: provider "<key>" has an api_key; pass -base-url to use another port`. Keyless providers still discover a moved local backend.
+- The destination consent screen adds `sends api_key from $NAME` (several: `$A, $B`) or `sends a literal api_key` under each destination whose provider sends a key. This extends the #477 consent field set.
+- The openai-compat client replaces its own key with `[redacted]` in error text built from a server response, including malformed HTTP status lines and headers. Transport error causes remain available through `errors.Is` and `errors.As`.
+
+#### For consumers that mirror the error codes
+
+`key_reference_refused` joins the closed `config` error-code list. Firn (kstruzzieri/firn-ide#524) must add it before it bumps go-llm.
+
+### Fixed — -agentflow-resume tells a retried attempt which files a stopped attempt left behind (#774)
+
+When an earlier attempt of a step stopped after changing in-scope files,
+resume gave the next attempt the same instructions as the first. A model that
+found the content already right often wrote nothing, and the step stopped before
+its gates. After resume claims the new attempt, it now reads `next-action` once
+more and adds a `Retry context` section that lists those files and says how to
+keep each one: fix a file that is wrong, and confirm one that is already right
+with an `edit_file` whose `old_string` and `new_string` are the same unique text,
+which keeps the bytes and records the receipt.
+
+If that read fails, the model does not run and the attempt is blocked as a
+failed run is, with `golem: agent run failed`. Fresh `-plan` runs are
+unchanged. A model can still leave a file untouched; resume then stops with the
+message from the earlier #774 fix.
+
+### Fixed — -agentflow-resume says what to do when a retried attempt leaves files unrecorded (#774)
+
+A retried step stops before its gates when the new attempt leaves an in-scope
+file unrecorded. That happens when a model finds a stopped attempt's edit already
+right and writes nothing. The error used to read
+`agentflow resumed step "P1" reached state "file_receipts_missing" before gates, want validation_missing`,
+which named no file and no next step. It now reads:
+
+```text
+step P1 attempt A2 ended without recording its changed files, so no gate ran and the attempt stays open (unrecorded: src/answer.txt). To keep the files as they are, run the record-file-change command -agentflow-status shows for each one, then resume. To discard them, block the open attempt with agentflow block-step, then restore them, then resume; restoring first would settle the attempt on its gates without running the model
+```
+
+A second `-agentflow-resume` that finds the same state keeps its
+`blocked by missing file receipts` text and adds the same files and ways out. Exit
+codes, JSON output and `-agentflow-status` are unchanged. A script that matches
+the old text must change.
+
+### Fixed — Runs whose final answer is only in the model's reasoning (#767)
+
+Some reasoning models end a turn with their answer inside the reasoning and nothing in the reply itself, so Golem used to finish with no answer.
+
+- `agent.Request` has a new opt-in, `RecoverThinkingOnlyAnswer`. When a run's final step returns no tool calls, a blank reply and non-blank reasoning, and a step is left, the run spends one more tool-free step asking the model for its final answer only. A fixed placeholder assistant turn (non-empty, because some providers reject an empty one that is not last) and the request for the answer are sent on that step's request alone; they are never saved in the run's messages or a session's history, and reasoning never becomes the answer. Each such step records a `final_answer_retry` event in `Result.Events`. Reasoning a model caller only streams, without returning it in the response, is not recovered.
+- Golem turns the opt-in on for every turn it runs: REPL goals, `-p` runs and hosts that use the Golem runtime. The `-trace` record's request carries `recover_thinking_only_answer: true`, and the `-telemetry` run span counts the extra step.
+- AgentFlow planner runs and task steps, and dispatch children, build their own requests and do not opt in, so their behavior is unchanged.
+- A turn whose follow-up also has no answer ends as before: a `-p` run exits 1, text format prints `one-shot: model produced no final answer`, and `json` and `stream-json` report `status: error` with `empty_answer`. `golem.result.v1` gains and loses no field.
+- The stderr footer of a REPL or `-p` turn that ends without an answer now starts `no answer ·` instead of `done ·`, whatever stopped it. Everything after the prefix is unchanged.
+
+### Changed — Golem requires AgentFlow 1.3 (#766)
+
+Golem now requires AgentFlow 1.3.0 or a later 1.x. AgentFlow 1.2 and older are
+refused before any other AgentFlow call
+(`agentflow 1.2 is too old; need >= 1.3`), so upgrade AgentFlow before or with
+Golem. This includes fresh `-goal` and `-plan` runs, which still ran on 1.2.1.
+CI's AgentFlow compatibility job already pins the AgentFlow v1.3.0 release
+commit.
+
+On AgentFlow 1.2.x an edit left by a stopped amendment does not fail the run:
+`-agentflow-status` exits 2 with `run_unverified`, and `-agentflow-resume` reaches
+`state: complete` with `proof: verified` while the edit stays unverified.
+AgentFlow 1.3.0 fails `verify-run` and `finish-run` on it
+(kstruzzieri/agentflow#103).
+
+The separate refusal of AgentFlow 1.2.1 for recovery (#756) is gone, because
+every 1.2 build is now below the floor. A script that matches
+`agentflow 1.2.1 cannot drive recovery` must match the too-old text instead.
+`-agentflow-status` now runs `agentflow --version` once.
+
+`agentflow.Client.ProbeRecovery` and the `-review-manifest` run's call to it are
+removed. Library callers use `CheckVersion` or `Probe`, which refuse the same
+versions.
+
+### Fixed — -agentflow-status and -agentflow-resume hand a stopped amendment's edit to an operator (#765)
+
+AgentFlow 1.3.0 will not finish a run while an edit left by a stopped attempt is unverified, and it leaves the next step to a person: `next-action` reports `step_amendment_needed` with `amend` marked `automatic: false`. Golem reported this as a malformed projection, then refused the amendment the operator opened, so the operator had to finish the work by hand.
+
+- `-agentflow-status` prefixed every projection check failure with `resume: blocked by unsafe or malformed projection:`, including refusals of a well-formed projection. The line now reads `resume: blocked:`, and each reason speaks for itself. Exit codes and JSON output are unchanged. A script that matches the old text must change.
+- When AgentFlow allows `amend` but marks it `automatic: false`, status and resume say an operator must decide, and what to do: run the advised `amend-step`, record the edit in the new attempt, then resume. The steps are the same whether the operator keeps the edit or restores the file first.
+- `-agentflow-resume` now settles an amendment an operator opened and recorded an edit in. It still refuses, before any change, an amendment with no file receipt of its own, one Golem opened itself, one with an unfinished review amendment on the step or linked to a review itself, one with a failed command gate, and one owned by another agent.
+
+Golem's compatibility job now verifies AgentFlow 1.3.0. #766, in this same release, raises the floor to 1.3, so v0.8.0 itself requires AgentFlow 1.3 or a later 1.x.
+
+### Changed — Golem reports a provider's refusal of a run as `provider_rejected` (#740)
+
+A run whose model request the provider refused used to fail with the code `internal`, the same code as a bug in Golem, so a host could only say "the run failed".
+
+- When the provider's final reply to the run's model request, after any fallback, is an HTTP 4xx other than 401, 403 and 429, `run.failed` now carries `provider_rejected`, and so does the `golem.result.v1` record that `golem -p -output-format json` and `stream-json` write. A host that matched `internal` for these failures sees the new code. 429 stays `provider_unavailable`; 401 and 403 stay `internal`; every earlier code (for example `policy_blocked` or `invalid_request`) still wins.
+- Only the error the run's model caller returned counts. A status that reaches a run from a session store, an approver, the host's own stream observers or another run is never `provider_rejected`. With Golem's model callers, a 4xx met while listing models or probing capabilities during routing reaches the run without its status and is reported as before; a library host whose own model caller asks the router for an explicit model can see that lookup's 4xx reported as `provider_rejected`.
+- The message is unchanged and no field is added: the payload is still `code` and `message`, and no more of the provider's reply is included than before.
+- Library hosts: `agent.Result` has a new runtime-only field, `ModelError` (never serialized), holding the error the model caller returned for the request that ended the run, unless one of the run's own stream callbacks failed or an output block was joined with it. Golem's `Options.FailureMessage` presenter receives the run error with the provider's status reachable through `errors.As` and an `HTTPStatusCode() int` interface.
+
+### Changed — golem routes on the capability evidence log, and explicit capability checks show what they send and delete nothing (#737)
+
+Golem now reads and writes capability answers in the shared store's evidence log, the same log `configview.ExplainCapabilities` reads, and `golem models -probe-all` and `-reprobe` run through a new library pair, `configio.PlanCheck` and `configio.RunCheck`, that sends exactly the checks it showed.
+
+#### Golem routing and automatic checks
+
+- Golem routes on the evidence log. A checked no beats a catalog or type yes. Answers in the old `capability_probes` table stop counting; an older golem keeps working on the same file and does not see new answers.
+- Automatic checks share an allowance of two requests per golem invocation, startup included, which buys one model's tools check. An exhausted allowance leaves the model unknown, never a no. The progress line says so once per model; the startup preflight message and each `/model set` reply that meets it repeat the reason: the next run has a fresh allowance, and `golem models -probe-all` checks the configured agent chain. A chain whose first entry comes back inconclusive can fail startup on that run and move on at the next, since a matching inconclusive attempt suppresses automatic checks for 24 hours (5 minutes for a `check_failed` attempt, below).
+- An automatic check that sent a request and then failed with a server error (5xx), its own timeout, or a broken or oversized reply records a `check_failed` attempt that suppresses automatic checks of that model for 5 minutes, so the next start moves on to the next chain entry; a model with no later chain entry stays inconclusive until the 5 minutes pass, and `golem models -probe-all` checks it now. A 4xx such as 401, 403, 404 or 429, a cancelled check, or one that sent nothing records nothing. This keeps a failing first chain entry from blocking the next entry's check on every run. The startup message for an inconclusive entry now names `golem models -probe-all` beside declaring capabilities.
+- Each automatic check prints its progress on stderr: before its first request (model, endpoint host, method, requests reserved, output tokens requested per request), then when it finishes or is cancelled. None of it reaches stdout, a `-p` record or the headless stream.
+- `-no-cap-probe` turns automatic checks off and, as before, makes routing ignore stored checks; the store still opens for a derived input ceiling.
+- Startup preflight reports a refused check (allowance used up, the capability store unreadable, or a provider with no evidence binding) as an ordinary error with its reason, never as a configured capability gap.
+- A model whose provider reports no tool support no longer lowers golem's input ceiling.
+
+#### `golem models`
+
+- `-probe-all` and `-reprobe` delete nothing. For every provider of the agent chain they print, on stderr, what they will check (each quoted model, its method, usual and maximum requests, output tokens requested per request, request timeout, response byte limit, and whether it may load the model), then check exactly that and print each result there; `-reprobe` re-checks fresh answers too. If stderr cannot accept the complete plan for a provider, the command exits before sending that provider a check. stdout keeps the listing's one line per entry. A provider with more than 25 distinct models is refused (`batch_too_large`) rather than split into unshown checks.
+- An Ollama model is checked with one `/api/show` and filed under the content digest golem's listing reports for it, under either spelling (`m` or `m:latest`); once it has a yes or no for each checked capability it is not re-read until `-reprobe` or a new model version. An inconclusive answer (no capabilities array, or one without `completion`) is checked again by the next `-probe-all`.
+- Ctrl-C (or SIGTERM) stops a check in flight or the listing, sends nothing more and reports the cancellation.
+- `golem models -json` reports a checked no, and Ollama's live no (a capabilities array without tools), as a known no, so the candidate is ineligible rather than unknown. Each entry takes its capabilities and context limits from the same provider listing. A listed `m:latest` still does not answer for a configured `m`.
+- `golem models` prints `tool_call=MISSING (runtime)`, not `(unknown)`, when Ollama's live capabilities array leaves out tools.
+- A tools check requests up to 2,048 output tokens per request and sends at most two requests. A server may ignore the token request; local time and response bytes are bounded, billing is the provider's. It is not an end-to-end tool round-trip certificate. A reply that completes but carries an unusable tool call reads as chat and stream yes, tool_call `tool_call_invalid`. A local openai-compat check may load a model under llama-swap.
+
+#### Library
+
+- `configio.PlanCheck` plans an explicit check of one provider's models offline, from the config and one store read, and seals the plan to its key and endpoint; `configio.RunCheck` sends exactly that plan through its own guarded client, never through a model registry. A run refuses a plan whose key or endpoint changed (`plan_stale`) and a remote endpoint its policy does not grant (`destination_not_granted`), before sending anything. A plan holds 25 models at most. `CheckOptions.RuntimeDigests` files results under the identity the host routes on. An executable plan stays in the process that made it. A completed reply also writes an `answered` `model_access` row for the key, in the same transaction as its answers, so a host reading access (`fingerprint.EvidenceSnapshot.Access`, `configview.CapabilityExplanation.Access`) sees it.
+- New check codes on `configio.ErrorCode`: `auth_failed`, `model_refused`, `refused`, `rate_limited`, `timeout`, `unreachable`, `server_error`, `rejected`, `malformed_response`, `destination_not_granted`, `plan_stale`, `listing_required`, `batch_too_large`, `response_too_large`. A 403 or 404 is `model_refused` and remembered for 7 days only when another model gave a completed reply in the same check run; otherwise it is `refused` and not saved.
+- `fingerprint.CapabilityProbeResult` gains `Digest`, the digest the reply named, and the registry's automatic Ollama writer files under it first. `fingerprint.AnswerRows` is the one builder of the rows that file a check's answers, so every writer agrees on key version, method version, expiry and precision. `provider.EndpointHost` returns the host[:port] a check plan or progress event shows of an endpoint. Golem passes its explicit checks the content digests from its own startup listing, so their answers are filed under the identity its routing reads.
+- A name-only yes goes stale after 30 days and still counts; daily use does not refresh it (#741).
+- `fingerprint.DetailCheckFailed` (`check_failed`) is a sixth inconclusive code and `fingerprint.CapProbeCheckFailedTTL` (5 minutes) its lifetime: `fingerprint.ExpiryFor` gives an inconclusive `check_failed` attempt that expiry instead of 24 hours. A log-bound model registry writes it when its automatic check, `configio.ProbeToolCall` included, sent a request and then failed with a 5xx or a transport failure while its caller was still live; `configio.RunCheck` never writes it.
+
+#### Known issues
+
+- A first chain entry whose automatic check fails with a 4xx (401, 403, 404, 429) still leaves later entries unchecked on every run, since no attempt is recorded for a key-specific failure; fix the key or model name, or run `golem models -probe-all`.
+- When another process records a 24-hour inconclusive attempt while a check is in flight and that check then fails with a server error, automatic checks of that model can resume after 5 minutes instead of 24 hours (at most one extra check).
+- Ctrl-C during golem's startup ends golem without a `cancelled` line; no further check request is sent and nothing is half-saved.
+- Startup preflight can accept a model that has a tool answer but lacks chat or stream, which routing then rejects.
+- While the capability store cannot be read after opening, every model lookup re-queries the provider, a kept no is dropped, and no golem output says the store could not be read. An unsaved check's yes beside a catalog yes is labelled `catalog`.
+- A library host that checks an Ollama model without a runtime digest or a current stored listing, against a server that names no digest, files a name-only result that golem's routing does not read. A re-pulled Ollama model reads under its old digest until the next listing.
+- FIM admission differs between the evidence-log and legacy paths in both directions, and its refusal says "decided capabilities exclude insert" when insert is only unknown.
+- `ExplainToolCall` still lists the provider's models unless an explicit list answers. `mcp.WithFingerprintStore` hosts stay on the old table and the non-streaming probe. Per-capability assertions and `insert`/`vision` checks are not yet available.
+
+### Changed — offline capability explanations, and a checked no now beats a catalog or type yes on the evidence-log path (#736)
+
+Hosts can now explain a model's capabilities, and a provider's model listing, without contacting any server: `configview.ExplainCapabilities` and `configview.ExplainListing` each make at most one read of the shared capability store (none with a nil store) and no other I/O. Golem's default behavior does not change in this release step: it does not attach the evidence log yet, so the precedence and probe changes below apply only to a registry given `provider.WithEvidenceLog`. Without a log, routing, listings and explanations work as before.
+
+#### Offline explanations
+
+- Pass `configview.ExplainCapabilities` the effective config the registry was built from and the catalog from `provider.LoadCatalog`; with a nil catalog the catalog tier is skipped. `config.(*Config).CapabilityPolicy` returns what the configuration says about one model's capabilities (its explicit list and the capabilities its type implies), read the way the registry reads it.
+
+#### One precedence on the evidence-log path
+
+- Routing, the listing projection (`ProjectListedModels`), `ExplainToolCall` and `configview.ExplainCapabilities` rank capability evidence the same way: an explicit `capabilities` list first, then an answer from a check or from use, then what the provider reports, then the catalog, then the model type.
+- A checked no beats a catalog or type yes: a model the catalog lists with tool calls, but whose check answered no, is not routed for tool calls.
+- What the provider reports as missing also beats a catalog yes: an Ollama model whose capabilities array lacks `tools` is not routed for tool calls, even when the catalog says it supports them.
+- Evidence stored under either Ollama spelling of a model (`m` or `m:latest`) counts for both, so a stored answer under `qwen3:latest` settles `qwen3` without a check.
+- Capabilities in stored fingerprint profiles do not add to a model's capabilities. Those profiles still supply memory and context-window figures.
+- A listing projection's `KnownMask` also marks the capabilities the evidence says no to.
+- FIM routing and completion follow the decided `insert` capability: an explicit list without `insert` refuses FIM (error "the model's decided capabilities exclude insert") even when the Ollama template uses `.Suffix`, and an explicit list with `insert` admits it even when the template does not. Without the evidence log the template still decides FIM, as before.
+
+#### Known differences between the offline explanations and routing
+
+- The offline explanations see what Ollama reports about a model only after a refresh publishes it (`configio.RefreshInventory` with `WithPublish`); routing reads it live.
+- They ignore the model family Ollama reports, so a model the catalog knows only by that family gets no catalog answer offline.
+- When the store cannot be read they return `provider.ErrEvidenceUnreadable`, while routing keeps serving an answer it has already cached.
+
+#### Tool-call explanations and probe results
+
+- `provider.ToolCallExplanation` has a new `EvidenceUnreadable` field, true when that explanation could not read the evidence log and so may hide a stored answer.
+- `configio.ProbeToolCall` reports a result whose save failed as `Persisted: false` even when the catalog also says yes, and does the same for any result explained while the log could not be read. After a restart a stored no, or the provider's own report, could overturn either, so the report errs toward asking for a new check. An explicit `capabilities` list still counts as persisted.
+- With the evidence log attached, `ExplainToolCall` no longer runs the profile merge, so it no longer calls a hook installed with `SetOverrideRejectionHook`; `Lookup` and the listing projection still do.
+
+#### New exported names
+
+- `provider`: `ExplainEvidence`, `EvidenceInputs`, `CapabilityFact`, `CheckedAnswer`, `CapabilityFlag`, `OtherAdapterAnswer`, `HistoryAnswer`, `CapabilityMasks`, `Catalog`, `LoadCatalog`, `(*Catalog).ProfileFor`, `EvidenceModelNames`, and the `EvidenceUnreadable` field of `ToolCallExplanation`.
+- `fingerprint`: `DetailRunRefused`.
+- `config`: `ModelCapabilityPolicy` and `(*Config).CapabilityPolicy`.
+- `configview`: `ExplainCapabilities`, `ExplainListing`, `AccessFact`, `CapabilityExplanation` (with its `Masks` method), `ListedModel` and `ListingExplanation`.
+
+### Added — Streamed tool-call check and capability resolution from the evidence log (#735)
+
+A host that attaches the shared capability store's evidence log to its model registry now resolves tool calls from that log. On an OpenAI-compatible server (llama.cpp, vLLM, LM Studio) such a registry checks a model with one streamed chat request offering a single no-argument tool, so a check that passes also shows that the model chats and streams. Golem's own behavior is unchanged in this release step: it does not attach the log yet, so it keeps the existing `capability_probes` table and its `-reprobe` flag works as before.
+
+#### The streamed check
+
+- The check streams `POST /v1/chat/completions` with `max_tokens` 2048 and sends none of the model card's sampling settings. Its responses are size-limited and its redirects are refused; ordinary chat requests are not affected.
+- A yes needs a well-formed call of the offered tool. A reply that does not settle the question is inconclusive and carries one of five codes: `tool_ignored`, `tool_not_called`, `request_rejected`, `cut_off` or `tool_call_invalid`. An inconclusive result holds off a new check of that model for 24 hours.
+- On Ollama the check stays a metadata read of `/api/show`; it sends no generation request.
+
+#### Responses
+
+- `provider.ChatResponse` has a new `FinishReason` field (`finish_reason` in JSON), set by the OpenAI-compatible provider. Golem trace files carry it for each step.
+- The OpenAI-compatible shim (`compat`) now passes an upstream finish reason through when the provider reports one, so a reply cut off at `length` reports `length` even when it carries a tool call. The one exception: a reply carrying tool calls whose upstream reason is `stop` still reports `tool_calls`, as before, because some servers send `stop` with tool calls and clients run their tool loop on `tool_calls`.
+
+#### Behavior changes
+
+- Capability names from Ollama's `/api/show` are matched case-insensitively, and `tool_call` is accepted beside `tools`. This also changes the existing native tool-call probe: a model listing `Tools` or `tool_call` now reads yes.
+- Recommendations break an exact tie on provider name, then model name. Exactly tied models used to come out in a different order from run to run; they now list in a fixed order, and with tool-call checks that order decides which model is checked first.
+
+#### Registries with an evidence log attached
+
+These apply to a registry given `provider.WithEvidenceLog` (or `Options.EvidenceLog` in the internal bootstrap package). Without a log, resolution works as before.
+
+- Tool-call resolution reads and writes only the evidence log. It never reads or writes the `capability_probes` table, and a lookup never starts fingerprint profiling on such a registry; stored profiles are still read. An answer already in the log is used with no request, including one another process wrote.
+- Automatic checks share an allowance of two generation requests per registry, whoever asks for them. The allowance counts the requests the check sends; redirects are refused rather than followed, and a resend made below the HTTP client is not counted. A request the transport could not send while the call was still live, for example because the connection was refused, does not count; one cancelled or timed out in flight counts. A check that panics spends everything it reserved, since a request may already have gone out. Time does not refill it. A check the allowance cannot fund sends nothing, saves nothing and returns `provider.ErrAutomaticProbeBudgetExhausted`; it is never read as a no. Ollama metadata checks do not spend it.
+- A provider with no evidence binding returns `provider.ErrEvidenceUnbound`, and a log that cannot be read returns `provider.ErrEvidenceUnreadable`. Neither starts a capability check, though the registry may still ask the server for the model's runtime details first. `configio.ProbeToolCall` reports the first as `probe_unavailable` and the second, like an exhausted allowance, as `probe_failed`.
+- `provider.WithCapabilityProbeProgress` reports a generation check as it starts and ends, or when the allowance refuses it, with request counts and the endpoint's host only.
+- When a completed check's result cannot be saved, the registry keeps it in memory for its whole life and uses it while the result is still valid and the log can be read, so a route right after the check is still served. It is not saved later, and other processes do not see it. `provider.ToolCallExplanation.Unsaved` marks such a result, and `configio.ProbeToolCall` reports it as `Persisted: false` unless an explicit declaration supplies the answer.
+
+#### New exported names
+
+- `fingerprint`: `CapabilityProber`, `CapabilityProbeRequest`, `CapabilityProbeResult`, `ProbeAnswer`, `RecipeForRequest`, and the `Detail*` constants (`DetailToolCalled` and the five inconclusive codes). The shipped probers implement `CapabilityProber` through the new methods `(*fingerprint.OllamaProber).ProbeCapabilities` and `(*probers.OpenAICompatProber).ProbeCapabilities` (package `fingerprint/probers`).
+- `provider`: `WithCapabilityProbeProgress`, `CapabilityProbeProgress`, `ErrAutomaticProbeBudgetExhausted`, `ErrEvidenceUnbound`, `ErrEvidenceUnreadable`, and the `Unsaved` field of `ToolCallExplanation`.
+- `providerbootstrap.Options` gains `EvidenceLog` and `CapabilityProbeProgress`. That package is internal, so only code inside this module can use them.
+
+### Added — Shared capability evidence store for hosts and Golem (#734)
+
+Hosts can now open one shared capability store with `fingerprint.OpenSharedStore`, and Golem opens it the same way. The store lives at `$XDG_DATA_HOME/golem/fingerprints.db` (else `~/.local/share/golem/fingerprints.db`). A new directory is created 0700 (an existing one keeps its mode), the file and its sidecars are 0600, and the path is refused inside the workspace; an empty workspace root means no workspace. If the file cannot be used, the store falls back to memory for that run and `Warning()` says why; if even that fails, `Status()` is `disabled` and `Log()` and `Probes()` return nil. A file-backed store whose pruning fails for any reason but a cancelled open or a busy store stays file-backed, and `Warning()` reports the failure, because it can mean a damaged file. Golem prints these warnings and still honors `-no-cap-probe`.
+
+- The first open of an existing store by this release migrates it in place. An older binary that opens the migrated file skips the migrations it does not know.
+- The store keeps an append-only log of capability evidence, keyed by endpoint, adapter and model digest, so the same model name on two endpoints, or a `localhost` and a `127.0.0.1` address of one server, are told apart. Old rows are pruned at open, only when there are some to prune.
+- Provider listings are stored per credential. The key is never stored, and the credential's identifier appears in no exported type. Each credential gets its own listing and access state, and one server reached through two adapters at one address keeps a listing per adapter.
+- `configio.RefreshInventory` writes listings and provider-reported facts to the store only when the host passes `configio.WithPublish`. A listing that fails keeps the previous snapshot and reports one of a fixed set of reasons, such as `listing_unsupported` or `rate_limited`.
+- Capability answers and fingerprint profiles for Ollama models now key on the model's real digest (a name with no tag takes the digest of its `:latest` form), so existing rows are re-checked once on next use. When probing is enabled, fingerprint profiles re-run once per Ollama model, latency benchmark included, and a failed `/api/tags` call can cause one more fingerprint re-run on that lookup and another when it recovers.
+- The existing `capability_probes` table is untouched and older binaries keep reading and writing it.
+- `Provider` implementers: return a non-nil slice for an empty listing. A nil slice means the body held no listing and reads as `malformed_response` when publishing.
+
+### Security — File-tool writes to agent instruction and harness files always prompt (#725)
+
+`write_file` and `edit_file` calls that target an agent instruction or harness configuration file now always need a human. `/auto-edits` and the `a` answer no longer cover these files, `golem -p -allow-tool write_file` (or `edit_file`) and Agentflow `-approve-plan-edits` deny them, and every listed file, including `models.json` and `.vscode/settings.json`, which many go-llm and VS Code users edit often, now prompts where it was an ordinary write before. `submit_plan` under `-approve-plan-lock` still writes `.agent/` itself.
+
+The set has 28 entries: `AGENTS.md`, `AGENTS.override.md`, `CLAUDE.md`, `CLAUDE.local.md`, `GEMINI.md`, the legacy rules files `.cursorrules`, `.windsurfrules` and `.clinerules`, `.mcp.json`, `opencode.json` and `opencode.jsonc`, `.golem.json`, `models.json`, the `.claude`, `.cursor`, `.windsurf`, `.gemini`, `.codex`, `.opencode` and `.agent` folders, GitHub Copilot's instruction, prompt, agent, hook and settings paths, and `.vscode/mcp.json` and `.vscode/settings.json`. A path is matched by the requested spelling, by the spelling the filesystem resolves, and by the workspace root counted from the repository folder; a spelling Golem cannot verify prompts rather than passing.
+
+Library hosts: `agent/tools` plans these writes with an empty approval key, and `agent/interceptor` exports `IsHarnessPath` and `HarnessPaths`. A host that uses a plain `agent.Approver` never receives the key.
+
+Not covered: writes made by commands, and a workspace rooted in a git submodule or nested repository inside a harness folder.
+
+### Security — Native sandboxes refuse writes to git metadata (#721)
+
+A command run in the Seatbelt (macOS) or Bubblewrap (Linux) sandbox could write the workspace's git hooks and git config. Git runs those later outside the sandbox, on your next commit or checkout, so a sandboxed command, or a test run by post-write verification, could plant code that runs unsandboxed. It could also write `.git/info/exclude` or `.git/info/attributes` to hide a new file from `git status` or a change from `git diff`.
+
+#### Behavior changes
+
+- Both native sandboxes now refuse to change, rename, replace or delete the workspace's git metadata: hooks, anything under `info`, the `config`, `config.worktree`, `commondir` and `gitdir` files, the `.git` entry itself, and the `.git` file that points a submodule or linked worktree at its git directory. This covers the top-level repository, nested repositories, and the submodule and linked-worktree git directories git keeps under `.git/modules` and `.git/worktrees`, for verification commands as well as commands. The exceptions are under Remaining limits.
+- Seatbelt also refuses creating any of this during the run, in any letter case, including a new `.git` anywhere in the workspace. It does not refuse a new bare repository (see Remaining limits).
+- Ordinary git work in an existing repository keeps working. On Linux the tests run add, commit, checkout, stash, gc and rebase, commits in a submodule, a nested repository and a linked worktree, and gc, commit-graph and a new branch in a submodule. On macOS the tests check that the writes git makes in normal use (the index, objects, refs, a submodule's commit-graph, a linked worktree's index) stay allowed. Git itself does not currently start under the macOS sandbox profile (the Homebrew git and the stock `/usr/bin/git` both fail at startup), so on macOS real git was measured under the new rules alone, not under the full profile.
+- Some git commands now fail inside the sandbox on purpose. On both backends: `git config` (including setting `core.hooksPath`), `git sparse-checkout`, `git worktree add` and `git submodule update --init`. `git remote add`, `git remote set-url` and setting an upstream branch also write the repository's config: they fail under the macOS rules and are expected to fail under Bubblewrap, and git can report the upstream failure as an error yet still exit 0. On macOS, `git worktree remove` and `git worktree prune` fail too, as do `git init` and `git clone` into the workspace without `--bare`.
+- Before each spawn the sandbox reads the workspace's git layout; an error reading it, other than a missing entry, refuses the command.
+- The approval preview's sandbox line states the boundary: `git_metadata=ro` for Seatbelt, `git_metadata=ro(existing)` for Bubblewrap. Approval grants are unchanged: the approval key does not move, so existing grants stay valid.
+
+#### Remaining limits
+
+- A sandboxed command can create a directory that git treats as a bare repository (one holding `HEAD`, `objects` and `refs`); `git init --bare` succeeds inside the sandbox on both backends. Git run from inside that directory, or from the workspace root when the workspace has no `.git` of its own (for example a workspace that is a subdirectory of a repository), reads that directory's config, which can run commands on the host. To stop this on your machine, run `git config --global safe.bareRepository explicit` (git 2.38 or later), so git uses a bare repository only when you name it. A program that runs git as you can pass `-c safe.bareRepository=explicit`. Closing this inside the sandbox is left to a follow-up.
+- Bubblewrap protects only the git metadata that exists when the command starts. A command can still create a new file inside a git directory there, such as a `commondir` (which points git at another directory's configuration) or a `config.worktree` (which adds configuration), and git configuration can make git run commands on the host. It can also create a `hooks` or `info` directory that was absent, or a new repository; `git init` and `git clone` into the workspace work under Bubblewrap. Closing this is left to a follow-up.
+- Under Bubblewrap, a command can rename a submodule's, linked worktree's or nested repository's checkout directory aside and put a new directory with its own `.git` in its place; the protected `.git` moves with the renamed directory, and the host's next git there uses the new one. Seatbelt refuses creating the new `.git`.
+- Hooks you keep in the working tree through `core.hooksPath` are ordinary workspace files: a sandboxed command can change them on either backend. The same holds for a file inside `.git/hooks` or `.git/info` that is a symbolic link to a file elsewhere in the workspace (such as `.git/hooks/pre-commit` linked to `scripts/pre-commit`), for any git metadata file that is a hard link to a workspace file, and for a file the repository's config pulls in with `[include]` or `[includeIf]` when that file lies elsewhere in the workspace or inside `.git` under a name that is not protected. Git runs or reads that file's contents, which a sandboxed command can change.
+- Symbolic links among the git metadata are outside the protection. On macOS, if a git directory's `hooks`, `info`, `config`, `config.worktree`, `commondir` or `gitdir` (the top-level `.git`'s, a nested repository's, or a submodule's or linked worktree's own) is a symbolic link into the workspace, a sandboxed command can write through it to the link's target, and git then uses what it wrote. Bubblewrap instead refuses to start a command when one of those entries is a symbolic link, because a read-only mount would protect the target but not the link; it checks only those entries, not the files inside `hooks` or `info`. A `.git` that is itself a symbolic link is not protected on either backend.
+- A git directory kept inside the workspace somewhere other than `.git`, `.git/modules` or `.git/worktrees`, for example one made with `git init --separate-git-dir` into the workspace, is not recognized: its hooks and config stay writable on both backends. Only the `.git` file that points at it is protected.
+- A submodule whose name has a directory called `hooks` or `info` before its last part (for example `hooks/shared`) has its whole git directory read-only inside the sandbox on both backends, so git commands that write in that submodule fail there.
+- On a case-insensitive network or FUSE filesystem, a differently cased spelling can get past the Bubblewrap protection.
+- Other files the host runs later, such as a `Makefile`, `package.json` scripts, `.envrc` or CI workflows, are not covered.
+
+### Security — Seatbelt commands can no longer reach launchd (#712)
+
+A command run under the macOS Seatbelt sandbox inherited a connection to launchd. Through it the command could start (`kickstart`) a launchd job you had already loaded, which then ran outside the sandbox, switch jobs on or off persistently (`enable`, `disable`), and list your launchd domain (`print`), including any environment variables set there, which can hold secrets.
+
+#### Behavior changes
+
+- Seatbelt commands now start through a native launcher with no launchd connection and no exception ports, and close-on-exec by default. Start, enable, disable and list requests from inside the sandbox are refused. The sandbox profile itself is unchanged.
+
+#### Remaining limits
+
+- A launchd job you set up to watch a path inside the workspace (`WatchPaths`, `QueueDirectories`) can still be triggered by a sandboxed write.
+- With network allowed, a sandboxed command can connect to Unix-domain sockets at paths the profile lets it resolve: the workspace, the private temp and the reviewed system roots.
+
+#### For embedders
+
+The Seatbelt backend empties the host process's legacy registered Mach port table before each spawn; nothing in go-llm reads it. It does this under Go's `syscall.ForkLock`, so forks from C code in the host that do not take that lock are not serialized against Seatbelt spawns: such a fork running at the same time as a Seatbelt spawn can hand that command the host's launchd connection.
+
+### Added — Strict approval: suspend reusable approvals after outside content (#584)
+
+`golem -strict-approval`, and `golem.Options.StrictApproval` for library hosts, suspend every reusable approval once outside content has entered a conversation or its provenance is unknown. While suspended, each consequential action asks again: the prompt opens with a notice naming the first outside source and offers `[y/N]` only, a yes approves that one call, and an `a` answer is refused. Grants and `/auto-edits` stay stored but are not used in an exposed conversation; `/new` or `/clear` starts a clean one, which behaves as before. On the host runtime, the prompt for a command, a background start or the verifier also says that the network is not confined.
+
+- Headless runs (`-p -allow-tool`) and any approver that does not implement `agent.FreshApprover` are denied once a strict run is exposed, because nothing can ask a person. No one-shot run can become exposed today.
+- The agent-memory writes ask too, so outside content cannot save or promote a record that a later clean conversation reads as workspace content. In an exposed conversation, `agent_memory_create` and `agent_memory_promote` ask `[y/N]` before they run. The note prompt shows `agent memory note:`, the note with each line marked `|`, and a size line such as `(note: 1 line, 25 bytes)`, then `Save this agent memory note? [y/N] `. A note over the 4096-byte limit is not shown: the size line says it will not be saved, and it is not saved whatever the answer. The promote prompt shows `promote agent memory record <id> to <kind>`, then `Promote this agent memory record? [y/N] `. Arguments that do not decode, or a note that is empty or only whitespace, are shown as one sanitized line. In a clean conversation, or with strict approval off, both run unprompted.
+- Reach is narrow. Only an MCP tool result, `/consult` advice a run accepts, a tool that declares no origin (library hosts), and history saved without a record expose a conversation. Workspace files and command output do not, so a poisoned file in the workspace or a `curl` in a command does not suspend anything.
+- `-strict-approval` does not select the Trusted profile and is accepted with `-p` and the AgentFlow modes, where it has no effect today. `/grants` shows the conversation's exposure, and a clean one as `exposure: clean (files and command output are not tracked)`. The startup `permissions:` line shows `strict-approval=on (exposed by MCP results, accepted /consult advice or unrecorded history)`.
+- Library: `agent.Request.StrictApproval` and `StrictExempt`, `agent.FreshApprover` and `agent.ApprovalsSuspended`. While suspended, a tool that declares it needs no approval is asked about too, except plain reads and the tools named in `StrictExempt`; `golem.Runtime` names `delegate_code` and `dispatch` there. A host's `agent.FreshApprover` is therefore asked about the two agent-memory writes in an exposed strict run, with an empty preview, and should render the call's arguments. The approval floor exempts all four of those library tools; only strict approval asks about the memory writes.
+
+Conversations with history saved before this version read as unknown for their lifetime; with strict approval on, each consequential action in them asks every time. A plain `golem` start reopens the workspace's own conversation, so run `/clear` there to start clean; `/new` and `-fresh` only change the current run.
+
+### Added — Strict approval: deny network to commands in an exposed conversation (#584)
+
+With `-strict-approval` on a native sandbox that allows network (`-sandbox seatbelt` or `-sandbox bwrap` with `-sandbox-network allowed`), every command approved while the conversation is exposed runs with network denied: a `run_command`, scratch included, a `start_command` and the post-write verifier. The prompt's `sandbox:` line shows the narrowed policy, `network=denied` on Seatbelt and `network=ip-denied` on Bubblewrap, where a pathname Unix socket inside the workspace stays reachable as for any `ip-denied` command. Nothing falls back to the network-allowed policy.
+
+- A command approved while the conversation was clean runs as approved, and a background job already running keeps its network. A command whose conversation changed state between its prompt and its run is refused with `approval state changed; retry`.
+- Startup also checks the network-denied policy and refuses to start when this host cannot run it, before any config, store or session is touched; `golem.New` does the same only when `StrictApproval` is set and the library host's `Sandbox` is native and allows network (strict-off native sessions are not refused). The `permissions:` line's `limits=` adds `strict approval denies network to commands once a conversation is exposed`.
+- A host session, including every live MCP session, has no OS boundary and gets no narrowing; its prompt keeps saying `network is not confined`.
+- Library: narrowing follows each command tool's own backend, so a natively sandboxed command tool narrows in any exposed strict run, including one named in `agent.Request.StrictExempt`. A runtime whose own policy is host does not validate its tools' network-denied policies at start; such a tool fails its first narrowed command instead.
+
+### Added — Conversations remember whether outside content entered them (#583)
+
+Conversations now store their exposure record on the conversation row, bound to the row's revision, so a write by an older binary reads back as no record rather than leaving a stale record beside newer content. The Golem runtime carries the record from turn to turn, across resume and across compaction: a turn starts from the stored record and saves the record its run reports, and a failed run, or one with no answer, leaves the stored record as it was. `Runtime.ThreadExposure` reads the record the next turn on a thread would start from.
+
+- The conversation store schema moves to version 6 with two added nullable columns.
+- Conversations saved before this version, or last written by an older binary, read as unknown (and so as exposed) until a new or cleared conversation replaces them. A custom `SessionStore` that does not keep the record reads the same way.
+- Consumers with a custom `SessionStore` should read the "Exposure record" section of `docs/library.md` for what a store and a conversation-writing host must carry.
+- `Runtime.ThreadExposure` never writes a conversation row, does not reserve the thread and needs no compression setup; on a runtime with no `SessionStore` it opens the default session database on first use, creating and migrating the file if absent, as `CompactThread` does. A well-formed thread ID with no stored conversation reads as clean.
+
+Nothing changes for a session yet: nothing reads the record until the strict approval mode lands (#584).
+
+### Added — Runs record whether outside content has entered the conversation (#582)
+
+Every `agent` run now keeps a small record of whether content from outside the conversation has entered it, and reports it as `Result.Exposure`. The record is always on and needs no option.
+
+- `Exposure` says whether a record was kept (`Recorded`), whether foreign content was seen (`Foreign`), whether content of unknown origin was seen (`Unknown`), and the first source that did so (`First`, for example `tool:fetch` or `consult`).
+- A tool result admits its origin after interceptors have judged it: foreign results set `Foreign`, results of unknown origin (a tool that declares none) set `Unknown`, and workspace, model, user and system content set nothing. A staged advisory set in `Request.Advisory` counts as foreign once accepted. A blocked result, a denied call, an unknown tool name and malformed arguments admit nothing, because the fixed text carries no outside content.
+- `Request.PriorExposure` carries a record from an earlier turn. A request with history but no usable prior record starts as `Unknown` with `First` set to `history`, so continuing a conversation never claims a clean record it cannot vouch for.
+- A run started inside a tool of another run shares that run's record, so exposure in a child run is visible on the parent's `Result.Exposure`. A child that runs on a fresh `context.Background()` instead of the context its tool received is not part of the tree and escapes the record, as it does for budgets.
+
+By itself this changes no behaviour: nothing is sent to the model differently, and no call is gated on the record yet.
+
+### Added — Strict approval workflow evaluation (#581)
+
+- A scripted evaluation of opt-in `-strict-approval` over eight workflows, run with strict approval off and on and counting prompts, with its generated record in `docs/security/strict-mode-evaluation.md`.
+- A native-sandbox leg that checks an exposed conversation's commands lose IP network under `-sandbox-network allowed`; it skips on a host with no native backend.
+- A decision record, `docs/security/strict-mode-decision.md`, with the limits and the #581 acceptance map, and `docs/least-privilege.md` rewritten to describe the shipped behavior, including that strict approval does not limit what reaches the model.
+
 ## [0.7.0] - 2026-11-04
 
 ### Changed — v0.7.0 consumer upgrade notes (#761)
