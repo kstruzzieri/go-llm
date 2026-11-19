@@ -478,10 +478,15 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 		if recovering {
 			res.Events = append(res.Events, EventRecord{Step: step, Kind: "final_answer_retry"}) // #767
 		}
+		// cbErr is the error this run's own stream callback returned, if any.
+		// A provider hands it back as Chat's error, so it must not be read as
+		// the provider's reply (#740).
+		var cbErr error
 		modelResult, err := o.model.Chat(ctx, chatReq, func(c provider.ChatResponse) error {
 			if c.Thinking != "" {
 				if to, ok := obs.(ThinkingObserver); ok {
 					if terr := to.OnThinking(ctx, ThinkingEvent{Step: step, Content: c.Thinking}); terr != nil {
+						cbErr = terr
 						return terr
 					}
 				}
@@ -493,7 +498,11 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 				res.Events = append(res.Events, EventRecord{Step: step, Kind: "token"})
 				tokenLogged = true
 			}
-			return obs.OnToken(ctx, TokenEvent{Step: step, Content: c.Content})
+			if terr := obs.OnToken(ctx, TokenEvent{Step: step, Content: c.Content}); terr != nil {
+				cbErr = terr
+				return terr
+			}
+			return nil
 		})
 		reservation.settle(modelResult, err)
 		modelLatency := o.now().Sub(modelStart)
@@ -526,6 +535,9 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 			res.Messages = resultMessages(state, historyLen)
 			if denied {
 				suppressSensitive(res.Messages, ic.sensitiveText)
+			}
+			if cbErr == nil || !errors.Is(err, cbErr) {
+				res.ModelError = err
 			}
 			return res, err
 		}
