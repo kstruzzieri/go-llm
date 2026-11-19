@@ -76,6 +76,23 @@ func TestRunCallbackErrorIsNotModelError(t *testing.T) {
 	}
 }
 
+// sliceErr is a value error whose type is not comparable, so errors.Is can
+// never match it by ==.
+type sliceErr struct{ parts []string }
+
+func (e sliceErr) Error() string { return strings.Join(e.parts, ",") }
+
+func TestRunUncomparableCallbackErrorIsNotModelError(t *testing.T) {
+	o := newTestOrchestrator(statusCaller{content: "partial"})
+	res, err := o.Run(context.Background(), Request{Goal: "q"}, callbackErrObserver{token: sliceErr{parts: []string{"host", "failed"}}})
+	if err == nil || !strings.Contains(err.Error(), "host,failed") {
+		t.Fatalf("err = %v, want the observer's error", err)
+	}
+	if res.ModelError != nil {
+		t.Fatalf("res.ModelError = %v, want nil after the run's own callback failed", res.ModelError)
+	}
+}
+
 func TestRunInspectionJoinIsNotModelError(t *testing.T) {
 	status := &provider.HTTPStatusError{StatusCode: 400}
 	ic := &stubInterceptor{name: "guard", output: func(out OutputInspection) []Finding {

@@ -479,7 +479,7 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 			res.Events = append(res.Events, EventRecord{Step: step, Kind: "final_answer_retry"}) // #767
 		}
 		// cbErr is the error this run's own stream callback returned, if any.
-		// A provider hands it back as Chat's error, so it must not be read as
+		// A provider hands it back as Chat's error, so Chat's error is then not
 		// the provider's reply (#740).
 		var cbErr error
 		modelResult, err := o.model.Chat(ctx, chatReq, func(c provider.ChatResponse) error {
@@ -536,7 +536,11 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 			if denied {
 				suppressSensitive(res.Messages, ic.sensitiveText)
 			}
-			if cbErr == nil || !errors.Is(err, cbErr) {
+			// Once this run's own callback failed, the stream ended for the
+			// host's reason, whatever the provider wrapped around it; an
+			// errors.Is test would also miss a callback error whose type is
+			// not comparable.
+			if cbErr == nil {
 				res.ModelError = err
 			}
 			return res, err

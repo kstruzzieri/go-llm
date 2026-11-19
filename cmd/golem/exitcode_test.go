@@ -426,3 +426,60 @@ func TestHeadlessProviderRejectionCodes(t *testing.T) {
 		})
 	}
 }
+
+// TestHeadlessOllamaProviderRejection is the Ollama sibling of
+// TestHeadlessProviderRejectionCodes: the native client's 404 for a model
+// the server does not have keeps its status through provider/ollama.go and
+// the router, so the run fails with provider_rejected (#740).
+func TestHeadlessOllamaProviderRejection(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	var chatPosts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/tags":
+			_, _ = w.Write([]byte(`{"models":[{"name":"agent-model"}]}`))
+		case "/api/show":
+			_, _ = w.Write([]byte(`{"details":{"family":"qwen3","parameter_size":"8B"},"capabilities":["completion","tools"]}`))
+		case "/api/chat":
+			chatPosts.Add(1)
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":"model not found"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	root := t.TempDir()
+	configPath := filepath.Join(t.TempDir(), "models.json")
+	configJSON := `{
+  "providers": {"local": {"base_url": "` + server.URL + `", "api_format": "ollama", "timeout": "5s"}},
+  "models": {"agent": {"name": "agent-model", "provider": "local", "type": "dense", "context_window": 32768,
+    "capabilities": ["chat", "generate", "stream", "tool_call"]}},
+  "defaults": {"agent": "agent"}
+}`
+	if err := os.WriteFile(configPath, []byte(configJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stdin, stdout, stderr := runTestFiles(t)
+	runErr := run([]string{"-config", configPath, "-root", root, "-ollama-url", server.URL,
+		"-p", "say done", "-output-format", "json",
+		"-no-probe", "-no-cap-probe", "-no-rag", "-no-project-context", "-no-session", "-no-memory"},
+		stdin, stdout, stderr)
+	if got := chatPosts.Load(); got != 1 {
+		t.Fatalf("chat POSTs = %d, want 1; stderr:\n%s", got, readRunTestFile(t, stderr))
+	}
+	if got := exitCodeFor(runErr); got != 1 {
+		t.Fatalf("exit = %d (err %v), want 1", got, runErr)
+	}
+	rec := decodeResult(t, strings.TrimSpace(readRunTestFile(t, stdout)))
+	var recErr struct{ Code, Message string }
+	if err := json.Unmarshal(rec["error"], &recErr); err != nil {
+		t.Fatalf("record error = %s: %v", rec["error"], err)
+	}
+	const wantMessage = "provider: ollama: chat stream: ollama: HTTP 404: model not found"
+	if recErr.Code != "provider_rejected" || recErr.Message != wantMessage {
+		t.Fatalf("record error = %+v, want provider_rejected / %q", recErr, wantMessage)
+	}
+}
