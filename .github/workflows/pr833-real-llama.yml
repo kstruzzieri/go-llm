@@ -1,0 +1,163 @@
+name: PR 833 real llama-server refusal
+on:
+  push:
+    branches: [verify/pr833-real-llama-62a3d055]
+permissions:
+  contents: read
+jobs:
+  live:
+    name: Real context-window refusal
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 62a3d055c1b4bdf564db5448a7e807e822cad540
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Build PR head
+        run: |
+          test "$(git rev-parse HEAD)" = "62a3d055c1b4bdf564db5448a7e807e822cad540"
+          go build -o "$RUNNER_TEMP/golem" ./cmd/golem
+      - name: Install verified llama.cpp build and Qwen model in temporary directory
+        run: |
+          cd "$RUNNER_TEMP"
+          curl -fsSL --retry 3 --max-time 180 -o llama.tgz https://github.com/ggml-org/llama.cpp/releases/download/b11146/llama-b11146-bin-ubuntu-x64.tar.gz
+          echo 'c150306eb16b5ab696f76a8bdf810c35fd98a24e82158742e6fa28f420ff8410  llama.tgz' | sha256sum -c -
+          mkdir llama
+          tar -xzf llama.tgz -C llama
+          curl -fsSL --retry 3 --max-time 240 -o model.gguf 'https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/df5bf01389a39c743ab467d734bf501681e041c5/qwen2.5-0.5b-instruct-q4_k_m.gguf?download=true&run='${GITHUB_RUN_ID}
+          echo '74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db  model.gguf' | sha256sum -c -
+      - name: Verify live refusal at 1024 tokens
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          server=$(find "$RUNNER_TEMP/llama" -name llama-server -print -quit)
+          test -x "$server"
+          export LD_LIBRARY_PATH="$(dirname "$server")"
+          "$server" --version
+          cat > verify.py <<'PY'
+          import argparse
+          import json
+          import os
+          from pathlib import Path
+          import re
+          import shutil
+          import socket
+          import subprocess
+          import tempfile
+          import time
+          import urllib.request
+          
+          
+          def require(ok, message):
+              if not ok:
+                  raise RuntimeError(message)
+          
+          
+          def main():
+              parser = argparse.ArgumentParser(description="Check PR 833 against a real llama-server.")
+              parser.add_argument("--model", type=Path, required=True)
+              parser.add_argument("--server", default=shutil.which("llama-server"))
+              parser.add_argument("--golem", type=Path, required=True)
+              parser.add_argument("--evidence", type=Path)
+              args = parser.parse_args()
+              require(args.server and args.model.is_file() and args.golem.is_file(), "Missing server, model or Golem binary")
+              out = args.evidence or Path(tempfile.mkdtemp(prefix="pr833-real-"))
+              out = out.resolve()
+              out.mkdir(parents=True, exist_ok=True)
+              print(f"Evidence: {out}", flush=True)
+              workspace = out / "workspace"
+              home = out / "home"
+              workspace.mkdir()
+              home.mkdir(mode=0o700)
+              env = dict(HOME=str(home), PATH=os.defpath, XDG_DATA_HOME=str(home / "data"),
+                         XDG_CONFIG_HOME=str(home / "config"), XDG_CACHE_HOME=str(home / "cache"))
+              if "LD_LIBRARY_PATH" in os.environ:
+                  env["LD_LIBRARY_PATH"] = os.environ["LD_LIBRARY_PATH"]
+              with socket.socket() as reservation:
+                  reservation.bind(("127.0.0.1", 0))
+                  port = reservation.getsockname()[1]
+              base = f"http://127.0.0.1:{port}"
+              model_id = "pr833-model"
+              config = out / "synthetic-models.json"
+              config.write_text(json.dumps({
+                  "providers": {"local": {"base_url": base, "api_format": "openai-compat", "timeout": "45s"}},
+                  "models": {"agent": {"name": model_id, "provider": "local", "type": "dense",
+                                       "context_window": 32768, "capabilities": ["chat", "generate", "stream", "tool_call"]}},
+                  "defaults": {"agent": "agent"}
+              }))
+              logfile = out / "llama-server.log"
+              opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+              with logfile.open("wb") as log:
+                  server = subprocess.Popen([args.server, "--offline", "-m", str(args.model.resolve()), "-a", model_id,
+                                             "-c", "1024", "-np", "1", "-ngl", "0", "-t", "2", "--no-warmup",
+                                             "--host", "127.0.0.1", "--port", str(port), "-lv", "5"],
+                                            stdout=log, stderr=subprocess.STDOUT, env=env, cwd=workspace)
+                  try:
+                      deadline = time.monotonic() + 180
+                      while time.monotonic() < deadline:
+                          require(server.poll() is None, f"llama-server exited {server.returncode}; see {logfile}")
+                          try:
+                              with opener.open(base + "/health", timeout=2) as response:
+                                  if json.load(response).get("status") == "ok":
+                                      break
+                          except OSError:
+                              pass
+                          time.sleep(0.5)
+                      else:
+                          raise RuntimeError(f"llama-server readiness timed out; see {logfile}")
+                      prompt = (" apple" * 3000).strip() + "\n"
+                      golem = subprocess.run([str(args.golem.resolve()), "-config", str(config), "-root", ".",
+                                              "-base-url", base, "-p", "-", "-output-format", "stream-json",
+                                              "-no-probe", "-no-cap-probe", "-no-rag", "-no-project-context",
+                                              "-no-session", "-no-memory"], cwd=workspace, env=env, input=prompt,
+                                             text=True, capture_output=True, timeout=100)
+                      (out / "stream.jsonl").write_text(golem.stdout)
+                      (out / "golem.stderr").write_text(golem.stderr)
+                  finally:
+                      if server.poll() is None:
+                          server.terminate()
+                          try:
+                              server.wait(timeout=10)
+                          except subprocess.TimeoutExpired:
+                              server.kill()
+                              server.wait()
+              lines = [json.loads(line) for line in golem.stdout.splitlines() if line.strip()]
+              require(lines, f"Golem produced no JSON; see {out / 'golem.stderr'}")
+              print("Golem exit:", golem.returncode, flush=True)
+              print("Final record:", json.dumps(lines[-1]), flush=True)
+              require(golem.returncode == 1, "Golem must exit 1")
+              record = lines[-1]
+              require(record.get("schema") == "golem.result.v1" and record.get("status") == "error", "Missing final failure record")
+              failed = [row["payload"] for row in lines[:-1] if row.get("type") == "run.failed"]
+              require(len(failed) == 1, "Expected one run.failed event before final record")
+              payload = failed[0]
+              require(set(payload) == {"code", "message"} and payload == record.get("error"), "Event and record error differ")
+              require(payload["code"] == "provider_rejected", "Wrong refusal code")
+              message = payload["message"]
+              require("400 Bad Request" in message, "Missing HTTP 400 in provider diagnostic")
+              match = re.search(r"request \((\d+) tokens\) exceeds the available context size \((\d+) tokens\)", message)
+              require(match and int(match[1]) > int(match[2]) and int(match[2]) == 1024, "Missing oversized-prompt evidence in provider diagnostic")
+              access = [line for line in logfile.read_text(errors="replace").splitlines()
+                        if re.search(r"done request:\s*POST /v1/chat/completions\s+\S+\s+\d{3}\b", line)]
+              require(len(access) == 1 and re.search(r"\b400\b", access[0]), "Expected one HTTP 400 in llama-server's access log")
+              print("Server:", access[0], flush=True)
+              print("Event:", json.dumps(payload), flush=True)
+              print(f"PASS: prompt={match[1]} context={match[2]} HTTP=400 code=provider_rejected exit=1", flush=True)
+          
+          
+          if __name__ == "__main__":
+              main()
+          PY
+          python3 verify.py --server "$server" --golem "$RUNNER_TEMP/golem" --model "$RUNNER_TEMP/model.gguf" --evidence "$RUNNER_TEMP/verify833"
+      - name: Show diagnostics on failure
+        if: failure()
+        run: |
+          cd "$RUNNER_TEMP"
+          if test -f verify833/llama-server.log; then grep -Ei 'done request|exceeds the available context|n_ctx_slot|[[:space:]]E[[:space:]]' verify833/llama-server.log | cut -c1-500 | tail -20 || true; fi
+          if test -f verify833/golem.stderr; then tail -15 verify833/golem.stderr; fi
+          if test -f verify833/stream.jsonl; then tail -3 verify833/stream.jsonl; fi
