@@ -1380,8 +1380,14 @@ carries a bounded `code` plus a diagnostic `message` (runtime codes come from
 the run's `run.failed` event; the CLI adds `empty_answer`,
 `project_context_untrusted`, `mcp_untrusted`,
 `provider_unavailable`, and `destination_denied`); `grounding` is the same
-`-grounding` report object, field for field, when verification ran. When a
-turn's final reply holds reasoning but no answer and a step is left, Golem
+`-grounding` report object, field for field, when verification ran. When the
+provider's final reply to the run's model request, after any fallback, is an
+HTTP 4xx other than 401, 403 and 429, the code is `provider_rejected`: the
+provider refused the request (for example a model it does not serve, or a
+prompt larger than its context). 429 stays `provider_unavailable`, 401 and 403
+stay `internal`, and an earlier code such as `policy_blocked` still wins. The
+record has no separate HTTP status field; the status text is in `message`.
+When a turn's final reply holds reasoning but no answer and a step is left, Golem
 spends one tool-free follow-up step asking the model for its answer alone, in
 `-p` runs and REPL turns alike; the `-trace` record's `result` shows it as a
 `final_answer_retry` event. `empty_answer` also covers a turn whose

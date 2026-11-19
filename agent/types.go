@@ -334,4 +334,13 @@ type Result struct {
 	// Exposure is the conversation's exposure after this run, set on every
 	// return path. Runtime-only, so run traces stay byte-identical.
 	Exposure Exposure `json:"-"`
+	// ModelError is the error this Run's model caller returned for the
+	// request that ended the run, and the error Run returned with it. It is
+	// nil when one of this Run's own stream callbacks failed (a host OnToken
+	// or OnThinking error), when an output block was joined with it, and on
+	// every other failure. What it covers is the caller's to say: a caller
+	// that routes may return a routing error, not only a provider's reply.
+	// When handling a failed Run, hosts can inspect ModelError directly
+	// with errors.As. Runtime-only.
+	ModelError error `json:"-"`
 }
