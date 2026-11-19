@@ -142,10 +142,18 @@ jobs:
               require("400 Bad Request" in message, "Missing HTTP 400 in provider diagnostic")
               match = re.search(r"request \((\d+) tokens\) exceeds the available context size \((\d+) tokens\)", message)
               require(match and int(match[1]) > int(match[2]) and int(match[2]) == 1024, "Missing oversized-prompt evidence in provider diagnostic")
-              access = [line for line in logfile.read_text(errors="replace").splitlines()
-                        if re.search(r"done request:\s*POST /v1/chat/completions\s+\S+\s+\d{3}\b", line)]
-              require(len(access) == 1 and re.search(r"\b400\b", access[0]), "Expected one HTTP 400 in llama-server's access log")
-              print("Server:", access[0], flush=True)
+              wire = json.loads(message.split("400 Bad Request: ", 1)[1])["error"]
+              require(wire["code"] == 400 and wire["type"] == "exceed_context_size_error", "Wrong server error")
+              require(wire["n_prompt_tokens"] == int(match[1]) and wire["n_ctx"] == 1024, "Wrong server token counts")
+              server_lines = logfile.read_text(errors="replace").splitlines()
+              requests = [re.search(r"task\s+(\d+)\s+\|\s+new prompt, n_ctx_slot = (\d+),.*task\.n_tokens = (\d+)", line)
+                          for line in server_lines if "new prompt, n_ctx_slot" in line]
+              require(len(requests) == 1 and requests[0] and requests[0].group(2, 3) == (match[2], match[1]),
+                      "Expected one matching prompt in llama-server's slot log")
+              refusal = [line for line in server_lines if "send_error:" in line
+                         and f"task id = {requests[0][1]}, error: {wire['message']}" in line]
+              require(len(refusal) == 1, "Missing server-side refusal for the matching task")
+              print("Server:", refusal[0], flush=True)
               print("Event:", json.dumps(payload), flush=True)
               print(f"PASS: prompt={match[1]} context={match[2]} HTTP=400 code=provider_rejected exit=1", flush=True)
           
