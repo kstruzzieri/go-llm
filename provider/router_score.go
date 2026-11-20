@@ -234,7 +234,8 @@ func scoreCandidate(
 	//    doesn't have, eliminate the candidate immediately. CapInsert is
 	//    satisfied by either the explicit capability bit or a live template that
 	//    proves native suffix insertion support; this keeps Router admission in
-	//    sync with ModelProfile.SupportsFIM.
+	//    sync with ModelProfile.SupportsFIM. On the evidence-log path the
+	//    decided insert bit governs instead of the template.
 	if !profileSatisfiesRequiredCaps(profile, req.RequiredCaps) {
 		bd.capabilityGate = false
 		return bd

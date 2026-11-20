@@ -77,6 +77,12 @@ type execSpec struct {
 	ExeIdentity  os.FileInfo
 	DirIdentity  os.FileInfo
 	RootIdentity os.FileInfo
+	// Screen screens the command's stdout and stderr for credential-path
+	// content. recheckExecPlan builds it just before the run; the by-value
+	// copies the sandbox backends and scratch make share it, and both capture
+	// sites (the unix runner and the background manager) refuse a spec
+	// without one. Whoever received the spec from recheckExecPlan releases it.
+	Screen *outputScreen
 }
 
 type execResult struct {
@@ -118,6 +124,10 @@ type execPending struct {
 	fingerprint       string
 	sandbox           sandboxApproval // stamped by the owning tool, NOT by prepareExecPlan
 	scratch           scratchApproval // stamped by the owning tool (#443); zero = disabled
+	// narrowed is the network-denied backend the call was approved to run on
+	// while approvals were suspended (#584); nil runs on the tool's own
+	// backend. Stamped by the owning tool together with sandbox.
+	narrowed *resolvedExecBackend
 }
 
 type execPlanCache struct {
@@ -168,7 +178,9 @@ func (c *cappedBuffer) Write(p []byte) (int, error) {
 }
 
 // RunCommand is the argv-first, approval-gated exec tool. PlanningTool: Plan validates
-// and previews; Invoke re-checks and spawns through the runner seam.
+// and previews; Invoke re-checks and spawns through the runner seam. Each spawn
+// first walks the workspace and its output is screened for the values of the
+// workspace's credential files; a failed or bounded read withholds both streams.
 type RunCommand struct {
 	ws      *Workspace
 	runner  commandRunner
@@ -187,9 +199,15 @@ func NewRunCommand(ws *Workspace, runner commandRunner) *RunCommand {
 // over root, using the platform's real runner. Retained for existing callers;
 // cmd/golem registers NewExecToolsWithBackground under -allow-exec.
 func NewExecTools(root string) ([]agent.Tool, error) {
-	ws, err := NewWorkspace(root)
+	return newExecTools(root, 0)
+}
+
+// newExecTools is NewExecTools with a credential screen budget (zero: the
+// default).
+func newExecTools(root string, budget time.Duration) ([]agent.Tool, error) {
+	ws, err := newBudgetedWorkspace(root, budget)
 	if err != nil {
-		return nil, fmt.Errorf("tools: build exec tools: %w", err)
+		return nil, err
 	}
 	return []agent.Tool{NewRunCommand(ws, newPlatformRunner())}, nil
 }
@@ -200,13 +218,19 @@ func NewExecTools(root string) ([]agent.Tool, error) {
 // combined foreground+background set, build a NewSandboxedBackgroundManager
 // and pass it to NewExecToolsWithBackground instead.
 func NewSandboxedExecTools(root string, cfg SandboxConfig) ([]agent.Tool, error) {
+	return newSandboxedExecTools(root, cfg, 0)
+}
+
+// newSandboxedExecTools is NewSandboxedExecTools with a credential screen
+// budget (zero: the default).
+func newSandboxedExecTools(root string, cfg SandboxConfig, budget time.Duration) ([]agent.Tool, error) {
 	backend, err := newExecBackend(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("tools: build exec tools: %w", err)
 	}
-	ws, err := NewWorkspace(root)
+	ws, err := newBudgetedWorkspace(root, budget)
 	if err != nil {
-		return nil, fmt.Errorf("tools: build exec tools: %w", err)
+		return nil, err
 	}
 	rc := NewRunCommand(ws, backend)
 	rc.sandbox = backend.approval
@@ -228,11 +252,11 @@ func NewExecToolsWithOptions(root string, opts ExecToolsOptions) ([]agent.Tool, 
 		if opts.PromotionJournal != nil {
 			return nil, fmt.Errorf("tools: promotion journal requires an enabled scratch config")
 		}
-		return NewExecTools(root)
+		return newExecTools(root, opts.CredentialScreenBudget)
 	}
-	ws, err := NewWorkspace(root)
+	ws, err := newBudgetedWorkspace(root, opts.CredentialScreenBudget)
 	if err != nil {
-		return nil, fmt.Errorf("tools: build exec tools: %w", err)
+		return nil, err
 	}
 	rt, err := newScratchRuntime(root, opts.Scratch, opts.PromotionJournal, SandboxRuntimeHost)
 	if err != nil {
@@ -259,15 +283,15 @@ func NewSandboxedExecToolsWithOptions(root string, sandbox SandboxConfig, opts E
 		if opts.PromotionJournal != nil {
 			return nil, fmt.Errorf("tools: promotion journal requires an enabled scratch config")
 		}
-		return NewSandboxedExecTools(root, sandbox)
+		return newSandboxedExecTools(root, sandbox, opts.CredentialScreenBudget)
 	}
 	backend, err := newExecBackend(sandbox)
 	if err != nil {
 		return nil, fmt.Errorf("tools: build exec tools: %w", err)
 	}
-	ws, err := NewWorkspace(root)
+	ws, err := newBudgetedWorkspace(root, opts.CredentialScreenBudget)
 	if err != nil {
-		return nil, fmt.Errorf("tools: build exec tools: %w", err)
+		return nil, err
 	}
 	rt, err := newScratchRuntime(root, opts.Scratch, opts.PromotionJournal, backend.sandbox.Runtime)
 	if err != nil {
@@ -288,7 +312,8 @@ func (t *RunCommand) Spec() agent.ToolSpec {
 		Name: "run_command",
 		Description: "Run a command directly (argv-first, NO shell: no metacharacters, globbing, or pipes). " +
 			"Returns the exit code plus bounded stdout/stderr. The command is shown to the user and runs only after they approve it. " +
-			"A non-zero exit code is a normal result to read and react to, not an error.",
+			"A non-zero exit code is a normal result to read and react to, not an error. " +
+			"Commands that name a credential file (.env and .env.* other than .env.example, .env.sample, .env.template and .env.dist; .netrc, _netrc, .npmrc, .pypirc, .git-credentials; anything under .ssh, .gnupg, .aws or .kube), or that use a credential directory or .git as dir, are refused, and the content of those files is withheld from output.",
 		Parameters: json.RawMessage(`{
   "type":"object",
   "properties":{
@@ -320,9 +345,13 @@ func (t *RunCommand) Effect() agent.Effect { return t.baseEffect() }
 func (*RunCommand) Origin() agent.Origin { return agent.OriginWorkspace }
 
 // Plan validates args, resolves cwd + executable + env + timeout, renders the preview,
-// and stashes a pending plan keyed by the raw-args hash. It never spawns. Any failure
-// returns an error so dispatch reports it without prompting for approval.
-func (t *RunCommand) Plan(_ context.Context, raw json.RawMessage) (agent.ToolPlan, error) {
+// and stashes a pending plan keyed by the raw-args hash. It never spawns the command.
+// While ctx's run has approvals suspended, a native (non-host) backend whose policy
+// allows network is swapped for its network-denied variant (#584), whose first build
+// probes the runtime; the preview and key then name that variant. Any failure, a
+// failed variant build included, returns an error so dispatch reports it without
+// prompting for approval.
+func (t *RunCommand) Plan(ctx context.Context, raw json.RawMessage) (agent.ToolPlan, error) {
 	eff := t.baseEffect()
 	if err := t.sandbox.validateWorkspace(t.ws.root); err != nil {
 		return agent.ToolPlan{Effect: eff}, err
@@ -340,11 +369,20 @@ func (t *RunCommand) Plan(_ context.Context, raw json.RawMessage) (agent.ToolPla
 		return agent.ToolPlan{Effect: eff}, err
 	}
 	p.sandbox = t.sandbox
+	narrowed, err := t.variant().forContext(ctx)
+	if err != nil {
+		return agent.ToolPlan{Effect: eff}, err
+	}
+	if narrowed != nil {
+		p.sandbox, p.narrowed = narrowed.approval, narrowed
+	}
 	if t.scratchRT != nil {
 		p.scratch = t.scratchRT.approval
 	}
 	t.store(ContentHash(raw), p)
-	eff.Timeout = timeout
+	// The credential screen's pre-run walk is bounded by its budget, which is
+	// added here and never to the fingerprinted timeout.
+	eff.Timeout = timeout + t.ws.screenBudget()
 	if t.scratchRT != nil {
 		// The outer effect budget covers setup + command + capture + cleanup + grace;
 		// Invoke gives each phase its own bounded child context (D6).
@@ -352,7 +390,7 @@ func (t *RunCommand) Plan(_ context.Context, raw json.RawMessage) (agent.ToolPla
 		if err != nil {
 			return agent.ToolPlan{Effect: eff}, err
 		}
-		eff.Timeout = outer
+		eff.Timeout = outer + t.ws.screenBudget()
 	}
 	return agent.ToolPlan{
 		Effect:      eff,
@@ -411,7 +449,11 @@ func prepareExecPlan(ws *Workspace, argv []string, dir string, timeout time.Dura
 // snapshot carrying the compared identities for the later scratch and
 // backend checks; on mismatch a descriptive error the caller renders
 // model-visible. Shared by foreground Invoke and the background tool (#346).
-func recheckExecPlan(ws *Workspace, pp execPending) (execSpec, error) {
+// After the identity checks it builds the spec's output screen from the
+// workspace's credential files: a done ctx is returned wrapped, and a root
+// that was replaced or cannot be opened or listed means the command must not
+// run. The caller owns the returned screen and releases it.
+func recheckExecPlan(ctx context.Context, ws *Workspace, pp execPending) (execSpec, error) {
 	dir, _, dirIdentity, err := resolveExecDir(ws, pp.dirLabel)
 	if err != nil || dir != pp.dir || pp.dirIdentity == nil || !os.SameFile(dirIdentity, pp.dirIdentity) {
 		return execSpec{}, errors.New("working directory changed since approval; retry")
@@ -425,6 +467,13 @@ func recheckExecPlan(ws *Workspace, pp execPending) (execSpec, error) {
 	if rerr != nil || path != pp.path || !os.SameFile(fi, pp.identity) {
 		return execSpec{}, errors.New("executable changed since approval; retry")
 	}
+	screen, err := buildOutputScreen(ctx, ws)
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil && errors.Is(err, ctxErr) {
+			return execSpec{}, err // already wraps ctxErr
+		}
+		return execSpec{}, errors.New("credential screen failed; command not run: " + toolErrMessage(err))
+	}
 	// Env is []string{} and never []string(nil): os/exec treats a nil Env as
 	// "inherit the parent environment", which would silently defeat the
 	// allowlist when none of its variables are set.
@@ -437,6 +486,7 @@ func recheckExecPlan(ws *Workspace, pp execPending) (execSpec, error) {
 		ExeIdentity:   pp.identity,
 		DirIdentity:   pp.dirIdentity,
 		RootIdentity:  pp.workspaceIdentity,
+		Screen:        screen,
 	}, nil
 }
 
@@ -463,21 +513,36 @@ func resolveExecDir(ws *Workspace, dir string) (abs, label string, identity os.F
 }
 
 // Invoke consumes the pending plan (fail-closed on hash mismatch), re-checks it via
-// recheckExecPlan, then spawns through the runner. Non-zero exit is a normal
-// observation; only infra failures are tool errors.
+// recheckExecPlan, then spawns through the backend the plan was approved for. Non-zero
+// exit is a normal observation; only infra failures are tool errors.
 func (t *RunCommand) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolResult, error) {
 	pp, ok := t.consume(ContentHash(raw))
 	if !ok {
 		return errResult("exec preview missing; retry"), nil
 	}
-	spec, err := recheckExecPlan(t.ws, pp)
+	// One pending plan serves every run sharing this tool, so a plan approved
+	// in the other suspension state may reach this run (#584): refuse it
+	// rather than run with network the approver was told was denied, or the
+	// reverse.
+	if t.variant().active(ctx) != (pp.narrowed != nil) {
+		return errResult(approvalStateChanged), nil
+	}
+	spec, err := recheckExecPlan(ctx, t.ws, pp)
 	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return errResult("command canceled"), nil
+		}
 		return errResult(err.Error()), nil
 	}
+	defer spec.Screen.release()
 	if t.scratchRT != nil {
 		return t.invokeScratched(ctx, pp, spec)
 	}
-	res, runErr := t.runner.Run(ctx, spec)
+	// The run gets its own approved timeout, so the walk's time, which the
+	// outer effect budget covers, is not charged to the command.
+	runCtx, cancelRun := context.WithTimeout(ctx, pp.timeout)
+	res, runErr := t.runnerFor(pp).Run(runCtx, spec)
+	cancelRun()
 	if runErr != nil {
 		if res.TimedOut {
 			return execErr(fmt.Sprintf("command timed out after %s", pp.timeout), res.Notes), nil
@@ -488,6 +553,21 @@ func (t *RunCommand) Invoke(ctx context.Context, raw json.RawMessage) (agent.Too
 		return execErr("command failed to run: "+runErr.Error(), res.Notes), nil
 	}
 	return agent.ToolResult{Content: formatExecResult(res)}, nil
+}
+
+// variant returns the network-denied variant of t's backend (#584): nil for a
+// backend without one and for a raw runner, which host-only constructors use.
+func (t *RunCommand) variant() *networkVariant {
+	b, _ := t.runner.(resolvedExecBackend)
+	return b.variant
+}
+
+// runnerFor returns the backend pp was approved to run on.
+func (t *RunCommand) runnerFor(pp execPending) commandRunner {
+	if pp.narrowed != nil {
+		return *pp.narrowed
+	}
+	return t.runner
 }
 
 // invokeScratched runs one approved command inside a scratch session (#443):
@@ -506,7 +586,7 @@ func (t *RunCommand) invokeScratched(ctx context.Context, pp execPending, spec e
 		return errResult("scratch snapshot failed; command not run: " + err.Error()), nil
 	}
 	runCtx, cancelRun := context.WithTimeout(ctx, pp.timeout)
-	res, runErr := t.runner.Run(runCtx, rewritten)
+	res, runErr := t.runnerFor(pp).Run(runCtx, rewritten)
 	cancelRun()
 
 	if ctx.Err() != nil {

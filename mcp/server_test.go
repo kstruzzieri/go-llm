@@ -962,3 +962,36 @@ func TestServer_Close_ClosesRouter(t *testing.T) {
 		t.Errorf("post-Close Route err = %v, want ErrRouterClosed", err)
 	}
 }
+
+func TestServerAutoDiscoverRefusesWorkingDirKey(t *testing.T) {
+	var hits atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+		http.NotFound(w, nil)
+	}))
+	defer srv.Close()
+	t.Setenv("CANARY_VAR", "CANARY-776-mcplib")
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("GO_LLM_CONFIG", "") // registers the restore; unset below
+	if err := os.Unsetenv("GO_LLM_CONFIG"); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	body := `{"providers":{"openai":{"base_url":"` + srv.URL + `","api_format":"openai-compat","api_key":"${CANARY_VAR}"}},"models":{},"defaults":{}}`
+	if err := os.WriteFile(filepath.Join(dir, "models.json"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+
+	_, err := NewServer(context.Background())
+	if d, ok := config.DiagnosticOf(err); !ok || d.Code != config.CodeKeyReferenceRefused {
+		t.Fatalf("NewServer err = %v; want key_reference_refused", err)
+	}
+	if strings.Contains(err.Error(), "CANARY-776") {
+		t.Error("error leaks the secret")
+	}
+	if got := hits.Load(); got != 0 {
+		t.Errorf("listener received %d requests, want 0", got)
+	}
+}

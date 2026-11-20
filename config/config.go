@@ -212,6 +212,26 @@ type Config struct {
 type resolvedKey struct {
 	effective  string
 	components []string
+	names      []string // variable names, never values, in reference order
+}
+
+// APIKeyRefNames returns the environment variable names the provider's
+// api_key referenced, in reference order, from the last successful finalize.
+// It is nil for a literal key, no key, or an unknown provider. Names only:
+// no resolved value is reachable through it. The slice is a copy.
+//
+// Like SecretMatcher, it is also nil when the record is stale: the
+// provider's api_key no longer equals the value the record resolved to.
+// A nil Config has no names.
+func (c *Config) APIKeyRefNames(provider string) []string {
+	if c == nil {
+		return nil
+	}
+	rk, ok := c.resolved[provider]
+	if !ok || rk.effective != c.Providers[provider].APIKey {
+		return nil
+	}
+	return slices.Clone(rk.names)
 }
 
 // ErrConfigNotFound indicates that Default could not find a models.json file
@@ -400,17 +420,24 @@ func (c *Config) ProviderFor(role string) *ProviderConfig {
 
 // Default discovers and loads the configuration file from standard locations.
 // It searches in order:
-//  1. $GO_LLM_CONFIG environment variable (absolute path)
+//  1. $GO_LLM_CONFIG environment variable (absolute or relative path)
 //  2. ./models.json (current working directory)
 //  3. ~/.config/go-llm/models.json (user config directory)
 //
 // Returns a descriptive error if no configuration file is found at any location.
+//
+// A ./models.json found in the working directory may not expand ${NAME}
+// api_key references: any reference fails with CodeKeyReferenceRefused
+// before the environment is read, because a cloned repository must not
+// choose which of the user's secrets go to the URLs it names (#776). Load
+// it by explicit path (Load) or name it in GO_LLM_CONFIG to use its
+// references. Literal keys load from any location.
 func Default() (*Config, error) {
-	path, _, err := discoverConfigPath()
+	path, src, err := discoverConfigPath()
 	if err != nil {
 		return nil, err
 	}
-	return Load(path)
+	return loadFrom(path, src)
 }
 
 // discoverConfigPath resolves the models.json discovery order shared by
@@ -426,6 +453,12 @@ func Default() (*Config, error) {
 //
 // When nothing matches, the error wraps ErrConfigNotFound with the same
 // remediation hint Default has always produced.
+//
+// A ./models.json that is the same file (os.SameFile) as the user-config or
+// legacy candidate reports that candidate's origin instead of
+// OriginWorkingDir: running from inside the user's own config directory
+// must not subject the user's config to the working-directory key-reference
+// refusal (#776).
 func discoverConfigPath() (string, OriginSource, error) {
 	if envPath, ok := os.LookupEnv("GO_LLM_CONFIG"); ok {
 		if envPath == "" {
@@ -435,22 +468,31 @@ func discoverConfigPath() (string, OriginSource, error) {
 		return envPath, OriginEnvOverride, nil
 	}
 
-	if _, err := os.Stat("models.json"); err == nil {
+	type candidate struct {
+		path string
+		src  OriginSource
+	}
+	var userCandidates []candidate
+	configDir, configDirErr := os.UserConfigDir()
+	if configDirErr == nil {
+		userCandidates = append(userCandidates, candidate{filepath.Join(configDir, "go-llm", "models.json"), OriginUserConfig})
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		userCandidates = append(userCandidates, candidate{filepath.Join(home, ".config", "go-llm", "models.json"), OriginLegacy})
+	}
+
+	if wd, err := os.Stat("models.json"); err == nil {
+		for _, c := range userCandidates {
+			if fi, err := os.Stat(c.path); err == nil && os.SameFile(wd, fi) {
+				return c.path, c.src, nil
+			}
+		}
 		return "models.json", OriginWorkingDir, nil
 	}
 
-	configDir, configDirErr := os.UserConfigDir()
-	if configDirErr == nil {
-		configPath := filepath.Join(configDir, "go-llm", "models.json")
-		if _, err := os.Stat(configPath); err == nil {
-			return configPath, OriginUserConfig, nil
-		}
-	}
-
-	if home, err := os.UserHomeDir(); err == nil {
-		legacyPath := filepath.Join(home, ".config", "go-llm", "models.json")
-		if _, err := os.Stat(legacyPath); err == nil {
-			return legacyPath, OriginLegacy, nil
+	for _, c := range userCandidates {
+		if _, err := os.Stat(c.path); err == nil {
+			return c.path, c.src, nil
 		}
 	}
 
@@ -467,8 +509,13 @@ func discoverConfigPath() (string, OriginSource, error) {
 // As part of loading, ${ENV} references in each provider's api_key are expanded
 // from the environment (see expandProviderAPIKeys); this happens only on the
 // file-backed Load path, so programmatically constructed Config values keep
-// api_key literal.
-func Load(path string) (*Config, error) {
+// api_key literal. Naming the path is consent: references expand whatever
+// directory the file is in.
+func Load(path string) (*Config, error) { return loadFrom(path, OriginExplicit) }
+
+// loadFrom is Load with the origin that chose path; OriginWorkingDir
+// refuses key references (see refuseKeyRefs).
+func loadFrom(path string, src OriginSource) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, diagWrap(CodeIO, SubjectNone, "",
@@ -481,31 +528,68 @@ func Load(path string) (*Config, error) {
 			fmt.Errorf("config: parse %q: %w", path, err))
 	}
 
-	if err := cfg.finalize(); err != nil {
+	if err := cfg.finalizeEnv(os.LookupEnv, src); err != nil {
 		return nil, err
 	}
 
 	return &cfg, nil
 }
 
-// finalize runs the post-unmarshal pipeline shared by Load and newDocument:
-// validate first (before materializing defaults), expand ${ENV} api_key
-// references (file-backed loads only), then apply defaults.
-func (c *Config) finalize() error { return c.finalizeEnv(os.LookupEnv) }
-
-// finalizeEnv is finalize with an injectable environment lookup (spec §7);
-// nil falls back to ambient os.LookupEnv.
-func (c *Config) finalizeEnv(lookup func(string) (string, bool)) error {
+// finalizeEnv runs the post-unmarshal pipeline shared by Load and the
+// Document paths: validate first (before materializing defaults), refuse
+// key references when src is OriginWorkingDir (before any lookup), expand
+// ${ENV} api_key references through lookup (spec §7; nil falls back to
+// ambient os.LookupEnv), then apply defaults.
+func (c *Config) finalizeEnv(lookup func(string) (string, bool), src OriginSource) error {
 	if lookup == nil {
 		lookup = os.LookupEnv
 	}
 	if err := c.validate(); err != nil {
 		return err
 	}
+	if src == OriginWorkingDir {
+		if err := refuseKeyRefs(c); err != nil {
+			return err
+		}
+	}
 	if err := c.expandProviderAPIKeys(lookup); err != nil {
 		return err
 	}
 	c.applyDefaults()
+	return nil
+}
+
+// refuseKeyRefs fails on the first provider (sorted order) whose api_key
+// contains "${", malformed references included, without consulting the
+// environment: a working-directory models.json may not choose which of the
+// user's variables it sends (#776). The error names the first valid
+// ${NAME} in that key, never a value.
+func refuseKeyRefs(c *Config) error {
+	for _, k := range slices.Sorted(maps.Keys(c.Providers)) {
+		key := c.Providers[k].APIKey
+		if !strings.Contains(key, "${") {
+			continue
+		}
+		what := "an environment variable"
+		for rest := key; ; {
+			_, after, ok := strings.Cut(rest, "${")
+			if !ok {
+				break
+			}
+			name, tail, ok := strings.Cut(after, "}")
+			if !ok {
+				break
+			}
+			if validEnvName(name) {
+				what = fmt.Sprintf("environment variable %q", name)
+				break
+			}
+			rest = tail
+		}
+		return diagWrap(CodeKeyReferenceRefused, SubjectProvider, k,
+			fmt.Errorf("config: provider %q api_key references %s, but this models.json was found in the working directory; "+
+				"load it by explicit path or set GO_LLM_CONFIG to use its key references", k, what))
+	}
 	return nil
 }
 
@@ -515,39 +599,41 @@ func (c *Config) finalizeEnv(lookup func(string) (string, bool)) error {
 // referenced variable that is unset or empty, or a malformed reference,
 // returns an error naming providerName. Errors never contain an expanded
 // secret value. Only the provider api_key field uses this helper.
-// components holds each value lookup returned, in reference order; it is
-// nil for a literal value and on error.
-func expandAPIKeyRefs(providerName, value string, lookup func(string) (string, bool)) (expanded string, components []string, err error) {
+// components holds each value lookup returned, and names the matching
+// variable names, in reference order; both are nil for a literal value and
+// on error.
+func expandAPIKeyRefs(providerName, value string, lookup func(string) (string, bool)) (expanded string, components, names []string, err error) {
 	if !strings.Contains(value, "${") {
-		return value, nil, nil
+		return value, nil, nil, nil
 	}
 	var b strings.Builder
 	for i := 0; i < len(value); {
 		if value[i] == '$' && i+1 < len(value) && value[i+1] == '{' {
 			rel := strings.IndexByte(value[i+2:], '}')
 			if rel < 0 {
-				return "", nil, diagWrap(CodeKeyReferenceMalformed, SubjectProvider, providerName,
+				return "", nil, nil, diagWrap(CodeKeyReferenceMalformed, SubjectProvider, providerName,
 					fmt.Errorf("config: provider %q api_key: malformed environment reference", providerName))
 			}
 			name := value[i+2 : i+2+rel]
 			if !validEnvName(name) {
-				return "", nil, diagWrap(CodeKeyReferenceMalformed, SubjectProvider, providerName,
+				return "", nil, nil, diagWrap(CodeKeyReferenceMalformed, SubjectProvider, providerName,
 					fmt.Errorf("config: provider %q api_key: malformed environment reference", providerName))
 			}
 			v, ok := lookup(name)
 			if !ok || v == "" {
-				return "", nil, diagWrap(CodeKeyReferenceUnavailable, SubjectProvider, providerName,
+				return "", nil, nil, diagWrap(CodeKeyReferenceUnavailable, SubjectProvider, providerName,
 					fmt.Errorf("config: provider %q api_key references unset or empty environment variable %q", providerName, name))
 			}
 			b.WriteString(v)
 			components = append(components, v)
+			names = append(names, name)
 			i += 2 + rel + 1
 			continue
 		}
 		b.WriteByte(value[i])
 		i++
 	}
-	return b.String(), components, nil
+	return b.String(), components, names, nil
 }
 
 // validEnvName reports whether s is a POSIX-style environment identifier
@@ -607,7 +693,7 @@ func (cfg *Config) expandProviderAPIKeys(lookup func(string) (string, bool)) err
 	var resolved map[string]resolvedKey
 	for _, k := range keys {
 		p := cfg.Providers[k]
-		expanded, components, err := expandAPIKeyRefs(k, p.APIKey, memoLookup)
+		expanded, components, names, err := expandAPIKeyRefs(k, p.APIKey, memoLookup)
 		if err != nil {
 			return err
 		}
@@ -617,7 +703,7 @@ func (cfg *Config) expandProviderAPIKeys(lookup func(string) (string, bool)) err
 			if resolved == nil {
 				resolved = make(map[string]resolvedKey)
 			}
-			resolved[k] = resolvedKey{effective: expanded, components: components}
+			resolved[k] = resolvedKey{effective: expanded, components: components, names: names}
 		}
 	}
 	cfg.resolved = resolved

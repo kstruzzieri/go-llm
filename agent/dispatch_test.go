@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/kstruzzieri/go-llm/contextdepth"
+	"github.com/kstruzzieri/go-llm/fingerprint"
 	"github.com/kstruzzieri/go-llm/provider"
 )
 
@@ -551,5 +552,55 @@ func TestToolCallRecord_NilRouteOutcome_OmittedFromJSON(t *testing.T) {
 	const want = `{"Step":1,"Name":"read_file","IsError":false,"Denied":false,"Invoked":false,"Latency":0}`
 	if string(b) != want {
 		t.Fatalf("ordinary ToolCallRecord JSON changed:\n got %s\nwant %s", b, want)
+	}
+}
+
+// probeTimeTool records the arguments it is invoked with and does nothing else.
+type probeTimeTool struct {
+	name string
+	args *[]string
+}
+
+func (p probeTimeTool) Spec() ToolSpec {
+	recipe, _ := fingerprint.RecipeFor(fingerprint.MethodChatStreamTools)
+	return ToolSpec{Name: p.name, Description: recipe.ToolDescription, Parameters: json.RawMessage(recipe.ToolParameters)}
+}
+func (probeTimeTool) Effect() Effect { return Effect{Class: Read, Approval: ApprovalNever} }
+func (p probeTimeTool) Invoke(_ context.Context, args json.RawMessage) (ToolResult, error) {
+	*p.args = append(*p.args, string(args))
+	return ToolResult{Content: "12:00"}, nil
+}
+
+// TestProbeToolPayload_AcceptedByActualDispatcher pins that a call the
+// streamed probe certifies (the recipe's tool name, an ID, function type and
+// a JSON object) is one the real dispatcher invokes, not merely one the probe
+// likes.
+func TestProbeToolPayload_AcceptedByActualDispatcher(t *testing.T) {
+	recipe, ok := fingerprint.RecipeFor(fingerprint.MethodChatStreamTools)
+	if !ok {
+		t.Fatal("no chat-stream-tools recipe")
+	}
+	for _, args := range []string{`{}`, " {} ", `{"zone":"UTC"}`} {
+		t.Run(args, func(t *testing.T) {
+			var invoked []string
+			mc := &scriptedCaller{responses: []ModelResult{
+				{Response: provider.ChatResponse{ToolCalls: []provider.ToolCall{{
+					ID: "call_1", Type: "function",
+					Function: provider.ToolCallFunction{Name: recipe.ToolName, Arguments: json.RawMessage(args)},
+				}}}},
+				{Response: provider.ChatResponse{Content: "done", Done: true}},
+			}}
+			res, err := newTestOrchestrator(mc).Run(context.Background(),
+				Request{Goal: recipe.Message, Tools: []Tool{probeTimeTool{name: recipe.ToolName, args: &invoked}}}, nil)
+			if err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			if len(invoked) != 1 {
+				t.Fatalf("tool invoked %d times, want 1", len(invoked))
+			}
+			if len(res.ToolCalls) != 1 || res.ToolCalls[0].IsError {
+				t.Fatalf("tool call records = %+v, want one success", res.ToolCalls)
+			}
+		})
 	}
 }

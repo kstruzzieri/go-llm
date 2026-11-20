@@ -41,6 +41,30 @@ func TestEditFileSingleMatch(t *testing.T) {
 	}
 }
 
+// #774: Golem's retry prompt tells a model to confirm a file that is already
+// right with an edit whose old_string and new_string are the same. That edit
+// must keep the bytes and still reach the journal, which records the receipt.
+func TestEditFileIdenticalReplacementKeepsBytesAndJournals(t *testing.T) {
+	root := t.TempDir()
+	writeSeed(t, root, "a.txt", "alpha\nbravo\n")
+	jr := &recJournal{}
+	ef := NewEditFile(mustWorkspace(t, root), jr)
+
+	_, res := planThenInvoke(t, ef, map[string]any{
+		"path": "a.txt", "old_string": "bravo", "new_string": "bravo",
+	})
+	if res.IsError {
+		t.Fatalf("identical edit errored: %s", res.Content)
+	}
+	got, _ := os.ReadFile(filepath.Join(root, "a.txt"))
+	if string(got) != "alpha\nbravo\n" {
+		t.Fatalf("content = %q, want the bytes unchanged", got)
+	}
+	if len(jr.recs) != 1 || jr.recs[0].Path != "a.txt" {
+		t.Fatalf("journal records = %+v, want one for a.txt", jr.recs)
+	}
+}
+
 func TestEditFileZeroMatch(t *testing.T) {
 	root := t.TempDir()
 	writeSeed(t, root, "a.txt", "alpha\n")

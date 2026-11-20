@@ -89,6 +89,15 @@ type ExecToolsOptions struct {
 	// PromotionJournal is the write-ahead journal promotion must use. Nil
 	// means capture/query only: promote_artifact is not registered.
 	PromotionJournal PreparingJournal
+	// CredentialScreenBudget is how long the credential screen may spend
+	// reading the workspace before each command, MinCredentialScreenBudget to
+	// MaxCredentialScreenBudget; zero means the default. A value outside the
+	// bounds fails construction. The budget bounds the pre-run walk on Linux
+	// and macOS; on other platforms there is no walk (output is withheld
+	// there), so a raised budget only lengthens the tools' effect timeouts.
+	// Host policy: never take it from a model or a
+	// workspace file.
+	CredentialScreenBudget time.Duration
 }
 
 // normalizeScratchConfig validates and defaults a ScratchConfig. Disabled

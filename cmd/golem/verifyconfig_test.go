@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kstruzzieri/go-llm/agent"
 	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
@@ -230,7 +231,7 @@ func TestBuildVerifierFromWorkspace(t *testing.T) {
 	}
 	writeGolemJSON(t, root, `{"verify":{"argv":["`+self+`","__golem_exec_helper__","echo","ok"]}}`)
 
-	v, warn, err := buildVerifier(root, agenttools.SandboxConfig{})
+	v, warn, err := buildVerifier(root, agenttools.SandboxConfig{}, 0)
 	if err != nil || warn != "" {
 		t.Fatalf("unexpected err %v / warning %q", err, warn)
 	}
@@ -239,8 +240,38 @@ func TestBuildVerifierFromWorkspace(t *testing.T) {
 	}
 }
 
+func TestBuildVerifierScreenBudget(t *testing.T) {
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		label   string
+		budget  time.Duration
+		wantErr string
+	}{
+		{"too small", time.Second, "tools: credential screen budget 1s is outside 5s to 5m0s"},
+		{"raised", 6 * time.Second, ""},
+	} {
+		t.Run(tc.label, func(t *testing.T) {
+			root := t.TempDir()
+			writeGolemJSON(t, root, `{"verify":{"argv":["`+self+`","__golem_exec_helper__","echo","ok"]}}`)
+			v, warn, err := buildVerifier(root, agenttools.SandboxConfig{}, tc.budget)
+			if tc.wantErr != "" {
+				if v != nil || warn != "" || err == nil || err.Error() != tc.wantErr {
+					t.Fatalf("%s: command %t, warning %q, error %v; want only the budget error", tc.label, v != nil, warn, err)
+				}
+				return
+			}
+			if v == nil || warn != "" || err != nil {
+				t.Fatalf("%s: command %t, warning %q, error %v; want a command", tc.label, v != nil, warn, err)
+			}
+		})
+	}
+}
+
 func TestBuildVerifierAbsentConfigArmsNothingQuietly(t *testing.T) {
-	v, warn, err := buildVerifier(t.TempDir(), agenttools.SandboxConfig{})
+	v, warn, err := buildVerifier(t.TempDir(), agenttools.SandboxConfig{}, 0)
 	if v != nil || err != nil {
 		t.Fatalf("expected no verifier and no error, got %+v, %v", v, err)
 	}
@@ -259,7 +290,7 @@ func TestBuildVerifierInvalidConfigWarnsAndDisables(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			root := t.TempDir()
 			writeGolemJSON(t, root, body)
-			v, warn, err := buildVerifier(root, agenttools.SandboxConfig{})
+			v, warn, err := buildVerifier(root, agenttools.SandboxConfig{}, 0)
 			if v != nil || err != nil {
 				t.Fatalf("an invalid config must arm nothing and stay non-fatal, got %+v, %v", v, err)
 			}
@@ -314,7 +345,7 @@ func TestBuildVerifierClassification(t *testing.T) {
 			if tc.body != "" {
 				writeGolemJSON(t, root, tc.body)
 			}
-			cmd, notice, err := buildVerifier(root, tc.policy)
+			cmd, notice, err := buildVerifier(root, tc.policy, 0)
 			if (cmd != nil) != tc.wantCmd {
 				t.Fatalf("command = %v, want present=%t", cmd, tc.wantCmd)
 			}
@@ -373,7 +404,7 @@ func TestVerifierIsFrozenAtStartup(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeGolemJSON(t, root, `{"verify":{"argv":["`+self+`","__golem_exec_helper__","echo","first"]}}`)
-	v, warn, err := buildVerifier(root, agenttools.SandboxConfig{})
+	v, warn, err := buildVerifier(root, agenttools.SandboxConfig{}, 0)
 	if err != nil || warn != "" || v == nil {
 		t.Fatalf("buildVerifier: v=%v warn=%q err=%v", v, warn, err)
 	}

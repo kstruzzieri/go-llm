@@ -124,7 +124,7 @@ type ModelInfo struct {
 	Size         int64    `json:"size"`
 	ParamSize    string   `json:"parameter_size"`
 	QuantLevel   string   `json:"quantization_level"`
-	Digest       string   `json:"digest"`       // model version hash from /api/show
+	Digest       string   `json:"digest"`       // model version hash: /api/tags reports it; /api/show may not
 	Family       string   `json:"family"`       // model family (e.g. "qwen2", "llama")
 	Template     string   `json:"template"`     // prompt template; non-empty for chat models
 	Capabilities []string `json:"capabilities"` // e.g. ["completion","tools"]; nil if not reported
@@ -142,10 +142,17 @@ type listModelsResponse struct {
 	Models []listModelEntry `json:"models"`
 }
 
+// listModelsRaw is listModelsResponse with Models left raw, so a body with no
+// "models" key (nil) can be told from an explicit empty or null list (non-nil).
+type listModelsRaw struct {
+	Models json.RawMessage `json:"models"`
+}
+
 // listModelEntry represents a single model in the /api/tags response.
 type listModelEntry struct {
-	Name string `json:"name"`
-	Size int64  `json:"size"`
+	Name   string `json:"name"`
+	Size   int64  `json:"size"`
+	Digest string `json:"digest"`
 }
 
 // showModelResponse wraps the /api/show response.

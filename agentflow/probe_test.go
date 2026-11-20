@@ -19,7 +19,7 @@ func TestProbe_OKWhenAllPresent(t *testing.T) {
 func probeReplies(topHelp string) map[string]fakeReply {
 	allFlags := []byte("--root --json --from-json --agent --step --attempt --path --gate --confirm-risk --reason --explain")
 	replies := map[string]fakeReply{
-		"--version": {stdout: []byte("agentflow 1.2.0\n")},
+		"--version": {stdout: []byte("agentflow 1.3.0\n")},
 		"--help":    {stdout: []byte(topHelp)},
 	}
 	for _, sub := range []string{
@@ -34,7 +34,7 @@ func probeReplies(topHelp string) map[string]fakeReply {
 func TestProbe_FailsOnMissingSubcommand(t *testing.T) {
 	help := "usage: agentflow {init,doctor}" // lock-plan etc missing
 	f := &fakeRunner{replies: map[string]fakeReply{
-		"--version": {stdout: []byte("agentflow 1.2.0\n")},
+		"--version": {stdout: []byte("agentflow 1.3.0\n")},
 		"--help":    {stdout: []byte(help)},
 	}}
 	err := NewClient(f, "/ws").Probe(context.Background())
@@ -234,20 +234,26 @@ const fullProbeHelp = "usage: agentflow {init,init-execution,lock-plan,record-fi
 // a *VersionError, so status may show it where it hides runner errors.
 func TestCheckVersion(t *testing.T) {
 	for _, tt := range []struct{ out, want string }{
-		{"agentflow 1.2.0\n", ""},
+		{"agentflow 1.3.0\n", ""},
 		{"agentflow 1.7.3\n", ""},
-		{"agentflow 1.2.0rc1\n", ""},
-		{"agentflow 1.2.0.dev1+gabc\n", ""},
-		// The base gate reads major.minor only: 1.2.1 still runs fresh work;
-		// ProbeRecovery refuses it for recovery.
-		{"agentflow 1.2.1\n", ""},
-		// 1.2 is the floor: the release CI verifies Golem against.
-		{"agentflow 1.1.0\n", "agentflow 1.1 is too old; need >= 1.2"},
-		{"agentflow 1.1.1\n", "agentflow 1.1 is too old; need >= 1.2"},
-		{"agentflow 1.0.0\n", "agentflow 1.0 is too old; need >= 1.2"},
-		{"agentflow 1.0.9\n", "agentflow 1.0 is too old; need >= 1.2"},
-		{"agentflow 0.3.0\n", "agentflow 0.3 is too old; need >= 1.2"},
-		{"agentflow 0.4.0\n", "agentflow 0.4 is too old; need >= 1.2"},
+		{"agentflow 1.3.0rc1\n", ""},
+		{"agentflow 1.3.0.dev1+gabc\n", ""},
+		// 1.3 is the floor: the release CI verifies Golem against. The gate reads
+		// major.minor only, so every 1.2 build is below it, with or without a
+		// readable patch, and the refusal echoes none of the version's text.
+		{"agentflow 1.2.2\n", "agentflow 1.2 is too old; need >= 1.3"},
+		{"agentflow 1.2.0\n", "agentflow 1.2 is too old; need >= 1.3"},
+		{"agentflow 1.2.1\n", "agentflow 1.2 is too old; need >= 1.3"},
+		{"agentflow 1.2.1rc1\n", "agentflow 1.2 is too old; need >= 1.3"},
+		{"agentflow 1.2.1+local\n", "agentflow 1.2 is too old; need >= 1.3"},
+		{"agentflow 1.2\n", "agentflow 1.2 is too old; need >= 1.3"},
+		{"agentflow 1.2.\x1b[2J\n", "agentflow 1.2 is too old; need >= 1.3"},
+		{"agentflow 1.1.0\n", "agentflow 1.1 is too old; need >= 1.3"},
+		{"agentflow 1.1.1\n", "agentflow 1.1 is too old; need >= 1.3"},
+		{"agentflow 1.0.0\n", "agentflow 1.0 is too old; need >= 1.3"},
+		{"agentflow 1.0.9\n", "agentflow 1.0 is too old; need >= 1.3"},
+		{"agentflow 0.3.0\n", "agentflow 0.3 is too old; need >= 1.3"},
+		{"agentflow 0.4.0\n", "agentflow 0.4 is too old; need >= 1.3"},
 		{"agentflow 2.0.0\n", "agentflow 2.0 is newer than this Golem supports; need 1.x"},
 		{"agentflow x.0.0\n", `cannot parse agentflow version "x.0.0"`},
 		{"agentflow 1.x\n", `cannot parse agentflow version "1.x"`},
@@ -261,8 +267,8 @@ func TestCheckVersion(t *testing.T) {
 		{"agentflow\n", `cannot parse agentflow version from "agentflow"`},
 		// Only the first line is the version; later lines (warnings, paths) are
 		// neither parsed nor echoed (#612).
-		{"agentflow 1.2.0\nwarning: deprecated /Users/x/y\n", ""},
-		{"\n  agentflow 1.2.0 (python 3.12)\n", ""},
+		{"agentflow 1.3.0\nwarning: deprecated /Users/x/y\n", ""},
+		{"\n  agentflow 1.3.0 (python 3.12)\n", ""},
 		{"agentflow 2.0.0\nwarning: /Users/x/y\n", "agentflow 2.0 is newer than this Golem supports; need 1.x"},
 		{"agentflow\nwarning: /Users/x/y\n", `cannot parse agentflow version from "agentflow"`},
 		// A real AgentFlow prints about 16 bytes; anything echoed is clipped.
@@ -306,79 +312,6 @@ func TestCheckVersion_LaunchFailureIsNotAVersionError(t *testing.T) {
 		var versionErr *VersionError
 		if err == nil || errors.As(err, &versionErr) || err.Error() != tt.want {
 			t.Fatalf("CheckVersion = %v, want plain %q", err, tt.want)
-		}
-	}
-}
-
-// TestProbeRecovery pins the AgentFlow 1.2.1 recovery exclusion: every 1.2.1
-// build by its leading patch digits, and a 1.2 whose patch cannot be read.
-// Every refusal is a *VersionError, so JSON status may report it.
-func TestProbeRecovery(t *testing.T) {
-	const refused = "agentflow 1.2.1 cannot drive recovery: its next-action counts a stopped attempt's file receipts toward the replacement attempt (agentflow#97); use AgentFlow 1.2.0 or a later fixed release"
-	unreadable := func(v string) string {
-		return "cannot parse agentflow patch version \"" + v + "\"; recovery refuses an AgentFlow 1.2 it cannot tell from 1.2.1"
-	}
-	for _, tt := range []struct{ out, want string }{
-		{"agentflow 1.2.0\n", ""},
-		{"agentflow 1.2.0rc1\n", ""},
-		{"agentflow 1.2.2\n", ""},
-		{"agentflow 1.2.2.dev0\n", ""},
-		{"agentflow 1.2.10\n", ""},
-		{"agentflow 1.3.1\n", ""},
-		{"agentflow 1.1.1\n", ""}, // the base gate refuses it
-		{"agentflow 1.2.1\n", refused},
-		{"agentflow 1.2.1rc1\n", refused},
-		{"agentflow 1.2.1a1\n", refused},
-		{"agentflow 1.2.1b1\n", refused},
-		{"agentflow 1.2.1.post1\n", refused},
-		{"agentflow 1.2.1.dev0\n", refused},
-		{"agentflow 1.2.1+local\n", refused},
-		{"agentflow 1.2.01\n", refused},
-		// JSON status prints the refusal raw on stderr: no token is echoed.
-		{"agentflow 1.2.1\x1b[2J\n", refused},
-		{"\n  agentflow 1.2.1 (python 3.12)\nwarning: /Users/x/y\n", refused},
-		{"agentflow 1.2\n", unreadable("1.2")},
-		{"agentflow 1.2.\n", unreadable("1.2.")},
-		{"agentflow 1.2.rc1\n", unreadable("1.2.rc1")},
-		{"agentflow 1.2.x\n", unreadable("1.2.x")},
-		{"agentflow 1.2.\x1b[2J\n", `cannot parse agentflow patch version "1.2.\x1b[2J"; recovery refuses an AgentFlow 1.2 it cannot tell from 1.2.1`},
-		{"agentflow 1.x.1\n", `cannot parse agentflow version "1.x.1"`},
-		{"agentflow\n", `cannot parse agentflow version from "agentflow"`},
-	} {
-		t.Run(strings.TrimSpace(tt.out), func(t *testing.T) {
-			c, f := newTestClient(map[string]fakeReply{"--version": {stdout: []byte(tt.out)}})
-			err := c.ProbeRecovery(context.Background())
-			if tt.want == "" {
-				if err != nil {
-					t.Fatalf("ProbeRecovery(%q) = %v", tt.out, err)
-				}
-			} else {
-				var versionErr *VersionError
-				if !errors.As(err, &versionErr) || err.Error() != tt.want {
-					t.Fatalf("ProbeRecovery(%q) = %v, want *VersionError %q", tt.out, err, tt.want)
-				}
-			}
-			if !reflect.DeepEqual(f.calls, [][]string{{"--version"}}) {
-				t.Fatalf("calls = %v, want only --version", f.calls)
-			}
-		})
-	}
-}
-
-// A launch failure is not a VersionError: JSON status keeps its text silent.
-func TestProbeRecovery_LaunchFailureIsNotAVersionError(t *testing.T) {
-	for _, tt := range []struct {
-		reply fakeReply
-		want  string
-	}{
-		{fakeReply{err: errors.New("exec: agentflow: not found")}, "agentflow unavailable (--version failed): exec: agentflow: not found"},
-		{fakeReply{exit: 1, stderr: []byte("boom\n")}, "agentflow unavailable (--version failed): agentflow --version: exit 1: boom"},
-	} {
-		c, _ := newTestClient(map[string]fakeReply{"--version": tt.reply})
-		err := c.ProbeRecovery(context.Background())
-		var versionErr *VersionError
-		if err == nil || errors.As(err, &versionErr) || err.Error() != tt.want {
-			t.Fatalf("ProbeRecovery = %v, want plain %q", err, tt.want)
 		}
 	}
 }

@@ -150,20 +150,28 @@ func (p *Provider) Health(ctx context.Context) error {
 // Models discovery
 // ---------------------------------------------------------------------------
 
-// Models returns the list of models advertised by /v1/models. OpenAI-compat
+// Models returns the list of models advertised by /v1/models (nil, with nil
+// error, when the body has no "data" key). OpenAI-compat
 // servers expose only the ID reliably; Family, ParameterSize, QuantLevel,
 // Template, Capabilities, ContextWindow, and Digest are NOT part of the
 // /v1/models spec and will be empty/zero. Consumers needing those fields
 // should populate them via models.json (catalog merge happens upstream in
 // ModelRegistry).
 func (p *Provider) Models(ctx context.Context) ([]provider.ModelInfo, error) {
-	var resp modelsResponse
+	var resp modelsListing
 	if err := p.client.getJSON(ctx, "/v1/models", &resp); err != nil {
 		return nil, fmt.Errorf("provider: openaicompat: list models: %w", err)
 	}
-	out := make([]provider.ModelInfo, len(resp.Data))
-	for i, m := range resp.Data {
-		out[i] = provider.ModelInfo{Name: m.ID}
+	if resp.Data == nil {
+		return nil, nil // no listing key: not a listing (see provider.Provider.Models)
+	}
+	var entries []modelEntry
+	if err := json.Unmarshal(resp.Data, &entries); err != nil {
+		return nil, fmt.Errorf("provider: openaicompat: list models: decode response: %w", err)
+	}
+	out := make([]provider.ModelInfo, len(entries))
+	for i, m := range entries {
+		out[i] = provider.ModelInfo{Name: m.ID, OwnedBy: m.OwnedBy}
 	}
 	return out, nil
 }
@@ -231,6 +239,8 @@ func (p *Provider) Chat(ctx context.Context, req provider.ChatRequest) (*provide
 		ToolCalls: toProviderToolCalls(msg.ToolCalls),
 		Done:      true,
 		Usage:     u,
+
+		FinishReason: resp.Choices[0].FinishReason,
 	}, nil
 }
 
@@ -289,12 +299,12 @@ func (p *Provider) ChatStream(ctx context.Context, req provider.ChatRequest, fn 
 
 	var (
 		lastModel      string
-		lastToolCalls  []provider.ToolCall
 		lastUsage      provider.Usage
 		chunksReceived int
 		callbackErr    error
 		streamErr      error
 		finished       bool
+		finishReason   string
 		seenUsage      bool
 		toolCalls      streamToolCallAccumulator
 	)
@@ -380,7 +390,7 @@ func (p *Provider) ChatStream(ctx context.Context, req provider.ChatRequest, fn 
 		choice := chunk.Choices[0]
 
 		if len(choice.Delta.ToolCalls) > 0 {
-			lastToolCalls = toolCalls.Add(choice.Delta.ToolCalls)
+			toolCalls.Add(choice.Delta.ToolCalls)
 		}
 		// Native reasoning text arrives on its own delta field, separate from
 		// content and from the inline-tag parser. Emit it directly as a Thinking
@@ -403,6 +413,7 @@ func (p *Provider) ChatStream(ctx context.Context, req provider.ChatRequest, fn 
 		}
 		if choice.FinishReason != nil {
 			finished = true
+			finishReason = *choice.FinishReason
 			if err := parser.Flush(); err != nil {
 				callbackErr = err
 				break
@@ -424,7 +435,7 @@ func (p *Provider) ChatStream(ctx context.Context, req provider.ChatRequest, fn 
 			_ = fn(provider.ChatResponse{
 				Model:     model,
 				Provider:  p.name,
-				ToolCalls: lastToolCalls,
+				ToolCalls: toolCalls.Snapshot(),
 				Done:      true,
 				Partial:   true,
 				Usage:     lastUsage,
@@ -446,9 +457,11 @@ func (p *Provider) ChatStream(ctx context.Context, req provider.ChatRequest, fn 
 		if err := fn(provider.ChatResponse{
 			Model:     model,
 			Provider:  p.name,
-			ToolCalls: lastToolCalls,
+			ToolCalls: toolCalls.Snapshot(),
 			Done:      true,
 			Usage:     lastUsage,
+
+			FinishReason: finishReason,
 		}); err != nil {
 			return err
 		}
@@ -957,7 +970,7 @@ type streamToolCall struct {
 	id        string
 	callType  string
 	name      string
-	arguments string
+	arguments []byte
 	argMode   fragmentMode
 }
 
@@ -992,7 +1005,10 @@ const (
 // OpenAI's reference servers do not produce that shape; the consequence of
 // the heuristic in that case is "arguments attach to the most recently
 // active call" — degraded but not silently corrupted across the wrong slot.
-func (a *streamToolCallAccumulator) Add(deltas []chatToolCall) []provider.ToolCall {
+//
+// Add only appends: its cost is proportional to the deltas it is given, not
+// to what has accumulated. Assembled calls come from Snapshot.
+func (a *streamToolCallAccumulator) Add(deltas []chatToolCall) {
 	if a.calls == nil {
 		a.calls = make(map[int]*streamToolCall, len(deltas))
 	}
@@ -1017,11 +1033,10 @@ func (a *streamToolCallAccumulator) Add(deltas []chatToolCall) []provider.ToolCa
 		if call.argMode == fragModeUnknown {
 			call.argMode = mode
 		}
-		call.arguments += fragment
+		call.arguments = append(call.arguments, fragment...)
 		a.lastIndex = index
 		a.hasLastIndex = true
 	}
-	return a.Snapshot()
 }
 
 // resolveIndex implements the index-precedence rules documented on Add.
@@ -1035,6 +1050,10 @@ func (a *streamToolCallAccumulator) resolveIndex(delta chatToolCall, position in
 	return position
 }
 
+// Snapshot returns the calls assembled so far, in order of first appearance,
+// with arguments normalized. It reads everything accumulated, so ChatStream
+// calls it once, when it emits tool calls, never per delta. The returned
+// arguments are copies the caller owns.
 func (a *streamToolCallAccumulator) Snapshot() []provider.ToolCall {
 	if len(a.order) == 0 {
 		return nil
@@ -1048,7 +1067,7 @@ func (a *streamToolCallAccumulator) Snapshot() []provider.ToolCall {
 			Function: provider.ToolCallFunction{
 				Index:     index,
 				Name:      call.name,
-				Arguments: normalizeToolCallArguments(json.RawMessage(call.arguments)),
+				Arguments: normalizeToolCallArguments(call.arguments),
 			},
 		})
 	}

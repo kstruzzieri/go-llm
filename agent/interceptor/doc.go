@@ -28,8 +28,14 @@
 // Guards inspect tool calls only and add no model-visible trailer.
 // Invariants is a declarative table of per-tool argument bounds: protected
 // path components on writes, the credential set IsCredentialPath defines on
-// direct reads (the search tool skips the same files, #627), and an inline
-// shell script that pipes a recognized remote fetch into a shell. Paths are
+// direct reads (the search tool skips the same files, #627), an inline shell
+// script that pipes a recognized remote fetch into a shell, and, for
+// run_command and start_command, an argv word or inline-script field that
+// names a credential path (a git exclusion pathspec is exempt as a whole argv
+// word) and a working directory under a protected component (#777). Its rows
+// use four check kinds: PathDeny, CredentialPath, CredentialArgv and
+// RemoteScript. The screen that withholds credential-path content from command
+// output lives in agent/tools, not here. Paths are
 // matched after a normalization that also maps the alias spellings APFS, HFS+
 // and NTFS treat as one name, so a custom PathDeny pattern is written in
 // normalized form (PathDeny lists the mapping). A violation BLOCKS the call

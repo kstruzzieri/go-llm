@@ -111,7 +111,7 @@ func TestScratchSeatbeltComposition(t *testing.T) {
 func TestScratchSeatbeltClonedTreePassesLinkValidation(t *testing.T) {
 	root := buildIsolationWorkspace(t)
 	// Hard-link a canonical file elsewhere: the canonical tree itself would
-	// fail validateSandboxWorkspaceLinks, but its clone must pass.
+	// fail inspectSandboxWorkspace, but its clone must pass.
 	outside := filepath.Join(t.TempDir(), "outside-link.txt")
 	if err := os.Link(filepath.Join(root, "tracked.txt"), outside); err != nil {
 		t.Skipf("hard links unavailable: %v", err)

@@ -291,6 +291,9 @@ func TestRunOneShot_DispatchRolePreflightGate(t *testing.T) {
 	if !strings.Contains(err.Error(), "tool-capability preflight") || !strings.Contains(err.Error(), "weak") {
 		t.Fatalf("error must name the capability preflight and the failing chain entry: %v", err)
 	}
+	if !strings.Contains(err.Error(), `dispatch fallback "`) || strings.Contains(err.Error(), "agent fallback") {
+		t.Fatalf("a dispatch-only entry must be labelled as a dispatch fallback: %v", err)
+	}
 	if got := chatBodies(); len(got) != 0 {
 		t.Fatalf("no model call may happen after a failed dispatch preflight, got %d", len(got))
 	}

@@ -402,8 +402,8 @@ func TestPlanValid(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if plan.Effect.Timeout != execDefaultTimeout {
-		t.Errorf("timeout = %v, want %v", plan.Effect.Timeout, execDefaultTimeout)
+	if want := execDefaultTimeout + defaultScreenLimits.budget; plan.Effect.Timeout != want {
+		t.Errorf("timeout = %v, want %v", plan.Effect.Timeout, want)
 	}
 	if plan.Effect.OutputCap != execRuntimeCap {
 		t.Errorf("OutputCap = %d", plan.Effect.OutputCap)
@@ -973,7 +973,7 @@ func TestExecRecheckSuccessReturnsOwnedSpec(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	spec, err := recheckExecPlan(ws, pp)
+	spec, err := recheckExecPlan(t.Context(), ws, pp)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1005,7 +1005,7 @@ func TestExecRecheckPreservesEmptySanitizedEnv(t *testing.T) {
 	}
 	pp.env = nil
 
-	spec, err := recheckExecPlan(ws, pp)
+	spec, err := recheckExecPlan(t.Context(), ws, pp)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1033,7 +1033,7 @@ func TestExecRecheckDirChanged(t *testing.T) {
 	if err := os.Symlink(t.TempDir(), subDir); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := recheckExecPlan(ws, pp); err == nil || err.Error() != "working directory changed since approval; retry" {
+	if _, err := recheckExecPlan(t.Context(), ws, pp); err == nil || err.Error() != "working directory changed since approval; retry" {
 		t.Errorf("err = %v, want exact dir-changed message", err)
 	}
 }
@@ -1063,7 +1063,7 @@ func TestExecRecheckDirIdentityChanged(t *testing.T) {
 	if err := os.Rename(newSub, subDir); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := recheckExecPlan(ws, pp); err == nil || err.Error() != "working directory changed since approval; retry" {
+	if _, err := recheckExecPlan(t.Context(), ws, pp); err == nil || err.Error() != "working directory changed since approval; retry" {
 		t.Errorf("err = %v, want exact dir-changed message", err)
 	}
 }
@@ -1083,7 +1083,7 @@ func TestExecRecheckExecutableChanged(t *testing.T) {
 	if err := os.Rename(swapped, filepath.Join(pathDir, "mycmd")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := recheckExecPlan(ws, pp); err == nil || err.Error() != "executable changed since approval; retry" {
+	if _, err := recheckExecPlan(t.Context(), ws, pp); err == nil || err.Error() != "executable changed since approval; retry" {
 		t.Errorf("err = %v, want exact executable-changed message", err)
 	}
 }
@@ -1102,7 +1102,7 @@ func TestRecheckExecPlanStampsWorkspaceRoot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	spec, err := recheckExecPlan(ws, pp)
+	spec, err := recheckExecPlan(t.Context(), ws, pp)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1149,7 +1149,7 @@ func TestRecheckExecPlanRejectsReplacedWorkspaceRoot(t *testing.T) {
 	if err := os.Rename(filepath.Join(moved, "sub"), sub); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := recheckExecPlan(ws, pp); err == nil || err.Error() != "workspace root changed since approval; retry" {
+	if _, err := recheckExecPlan(t.Context(), ws, pp); err == nil || err.Error() != "workspace root changed since approval; retry" {
 		t.Errorf("err = %v, want exact root-changed message", err)
 	}
 }

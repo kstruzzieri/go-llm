@@ -540,3 +540,81 @@ func TestScoreCandidateActiveFeedbackPopulatesBreakdown(t *testing.T) {
 		t.Errorf("feedbackUpdatedAt = %v, want unix 123", bd.feedbackUpdatedAt)
 	}
 }
+
+// fimProfile looks up a model with the given template and explicit capability
+// list, on a registry bound to an empty evidence log (log) or none.
+func fimProfile(t *testing.T, log bool, template string, explicit []string) *ModelProfile {
+	t.Helper()
+	info := ModelInfo{Name: logModel, Digest: logDigest, Template: template}
+	var mr *ModelRegistry
+	if log {
+		mr = logBoundRegistry(t, newEvidenceLog(t), mustBinding(t, "http://127.0.0.1:11434", "ollama"), true, nil, info)
+	} else {
+		var err error
+		mr, err = NewModelRegistry(&mrMockProviderRegistry{providers: map[string]Provider{"local": newStubProvider("local", info)}}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if explicit != nil {
+		mr.SetCapabilityOverride(func(ModelKey) []string { return explicit })
+	}
+	return lookupProfile(t, mr, logModel)
+}
+
+const (
+	fimSuffixTmpl = "{{ .Prompt }}{{ .Suffix }}"
+	fimPlainTmpl  = "{{ .Prompt }}"
+)
+
+func TestFIM_ExplicitWithoutInsertRefusedOnLogPath(t *testing.T) {
+	p := fimProfile(t, true, fimSuffixTmpl, []string{"chat", "stream"})
+	if p.SupportsFIM() {
+		t.Error("SupportsFIM = true, want false")
+	}
+	if profileSatisfiesRequiredCaps(p, CapInsert) {
+		t.Error("router admits a FIM request")
+	}
+	if got, want := p.FIMUnsupportedReason(), "the model's decided capabilities exclude insert"; got != want {
+		t.Errorf("FIMUnsupportedReason = %q, want %q", got, want)
+	}
+}
+
+func TestFIM_ExplicitInsertBesidePlainTemplateAdmits(t *testing.T) {
+	p := fimProfile(t, true, fimPlainTmpl, []string{"chat", "generate", "stream", "insert"})
+	if !p.SupportsFIM() || !profileSatisfiesRequiredCaps(p, CapGenerate|CapInsert|CapStream) {
+		t.Error("FIM refused, want admitted")
+	}
+	if got := p.FIMUnsupportedReason(); got != "" {
+		t.Errorf("FIMUnsupportedReason = %q, want empty", got)
+	}
+}
+
+func TestFIM_TemplateDecidesInsertOnLogPath(t *testing.T) {
+	if p := fimProfile(t, true, fimSuffixTmpl, nil); !p.SupportsFIM() || p.FIMUnsupportedReason() != "" {
+		t.Error("suffix template refused, want admitted")
+	}
+	if p := fimProfile(t, true, fimPlainTmpl, nil); p.SupportsFIM() || p.FIMUnsupportedReason() == "" {
+		t.Error("plain template admitted, want refused")
+	}
+}
+
+// Known issue: without the log the template alone decides, so an explicit list
+// without insert still admits FIM. The #736 changelog entry records it.
+func TestFIM_NoLogPathUnchanged(t *testing.T) {
+	p := fimProfile(t, false, fimSuffixTmpl, []string{"chat", "stream"})
+	if !p.SupportsFIM() || p.FIMUnsupportedReason() != "" {
+		t.Error("no-log FIM refused, want today's template rule")
+	}
+}
+
+func TestFIM_CopiedProfileKeepsDecision(t *testing.T) {
+	p := fimProfile(t, true, fimSuffixTmpl, []string{"chat", "stream"})
+	// Guards that the marker lives on the struct value, so a value copy (as
+	// model_registry.go makes without a log) cannot drop it.
+	cp := *p
+	cp.Caps |= CapToolCall
+	if cp.SupportsFIM() {
+		t.Error("copy admits FIM, want the decision kept")
+	}
+}

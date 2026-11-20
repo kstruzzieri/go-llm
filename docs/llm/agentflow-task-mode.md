@@ -209,10 +209,6 @@ cannot be read, human mode reports the sanitized failure, JSON mode emits no
 bytes, and status exits `3`. In JSON mode a rejected version, like an unset
 `-agentflow-env` name, is also printed as one `golem:` line on stderr; any other
 launch failure stays silent.
-On AgentFlow 1.2.1, status reports every state that would otherwise exit `2`
-as blocked and exits `3`; JSON mode relays the same bytes and prints the
-refusal as one `golem:` line on stderr. See
-[AgentFlow 1.2.1 and recovery](#agentflow-121-and-recovery).
 
 Status exit codes are stable for scripts:
 
@@ -253,9 +249,12 @@ and checks all of these bindings:
   attempt may also be `verified`, and an advisory lease may also be expired,
   as AgentFlow allows. The independent owner check also applies under
   advisory lease policy. An open attempt on a step AgentFlow already counts
-  completed (an amendment) is refused unless it timed out;
+  completed (an amendment) is refused unless it timed out, or an operator
+  opened it and recorded an edit in it (see
+  [An edit a stopped amendment left](#an-edit-a-stopped-amendment-left));
 - `step_amendment_needed` projects a completed step and one allowed automatic
-  non-break-glass `amend` action;
+  non-break-glass `amend` action. An `amend` AgentFlow allows but marks
+  `automatic: false` is left to an operator;
 - for `attempt_timed_out` and `step_amendment_needed`, the step has no review
   amendment that never completed. Resume replaces an attempt with the step's
   own goal, which would drop the review findings, so it refuses
@@ -340,8 +339,7 @@ Drift exposed by a settlement is also refused; after the serial loop,
 `finish-run`'s drift audit stops before building a proof. The table describes
 the state resume finds on entry.
 
-The complete disposition table is (on AgentFlow 1.2.1 every exit-`2` row is
-blocked instead: see [AgentFlow 1.2.1 and recovery](#agentflow-121-and-recovery)):
+The complete disposition table is:
 
 | AgentFlow state | Status exit | Resume behavior |
 |---|---:|---|
@@ -355,6 +353,7 @@ blocked instead: see [AgentFlow 1.2.1 and recovery](#agentflow-121-and-recovery)
 | `validation_missing` with a `failed` command gate | 2 | Block the owned attempt with `golem: resume found failed command gate`, run none of its gates, then claim a new attempt and run the model. |
 | `attempt_timed_out` | 2 | Block the owned attempt with `golem: resume found timed-out gate`, then continue from the state AgentFlow reports next: a new claim, or an amendment of a completed step. |
 | `step_amendment_needed` | 2 | Open a replacement attempt with `amend-step` (reason `golem: resume replaces the step's attempt`) and run the model on the step's own goal, then its gates and `finish-step`; then continue serially. One step per resume: when another step also needs a replacement, resume stops at the step-work check before `finish-run` without building a proof, and the next `-agentflow-resume` amends it. |
+| `step_amendment_needed` with `amend` marked `automatic: false` | 3 | Fail closed: an operator decides. See [An edit a stopped amendment left](#an-edit-a-stopped-amendment-left). |
 | `step_unverified` | 2 | Call the fixed `FinishStep` adapter for the owned attempt. |
 | `step_uncompleted` | 2 | Call the fixed `CompleteStep` adapter without re-verifying. |
 | `drift_failing` | 3 | Fail closed for operator inspection. |
@@ -487,20 +486,31 @@ Edits the failed run made stay in the workspace, including an edit AgentFlow
 never receipted. To retry from a clean tree, restore the modified tracked files
 (for example `git restore`) and delete files the failed run created *before*
 you resume. Otherwise the new attempt must record its own receipts for every
-in-scope file that is still changed, by writing it again; writing the same
-bytes again is enough. If it does not, resume fails before any gate (exit `1`)
-and leaves the new attempt open, and `-agentflow-status` then reports
-`file_receipts_missing` (exit `3`). Do not just restore the files at that
-point. A resume would then settle the open attempt on its gates without running
-the model. Block the open attempt first, then restore, then resume:
+in-scope file that is still changed. After resume claims that attempt, it reads
+`next-action` again and adds a `Retry context` section to the model's
+instructions. The section lists the unrecorded files, quoted, and says to fix a
+file that is wrong and to confirm one that is already right with an `edit_file`
+whose `old_string` and `new_string` are the same unique text. That edit keeps
+the bytes and records the receipt. An empty file has nothing to match, so the
+model writes it again as empty. If that read fails, the model does not run and
+resume blocks the attempt as it blocks a failed run.
+
+A model can still leave a file untouched. Resume then fails before any gate
+(exit `1`), leaves the new attempt open, and names the step, the attempt, the
+unrecorded files and both ways out. `-agentflow-status` reports
+`file_receipts_missing` (exit `3`).
+
+To keep the files as they are, run the `record-file-change` command status shows
+for each one, then resume. Resume runs the attempt's gates and finishes it
+without running the model.
+
+To discard them, do not just restore the files. A resume would then settle the
+open attempt on its gates without running the model. Block the open attempt
+first, then restore, then resume:
 
 ```text
 agentflow block-step <step> --root <workspace> --attempt <open attempt> --reason "<text>" --agent golem
 ```
-
-AgentFlow 1.2.1 does not hold the new attempt to its own receipts, so Golem
-refuses to resume with it at all; see
-[AgentFlow 1.2.1 and recovery](#agentflow-121-and-recovery).
 
 An attempt can still stay open: when recording the block itself fails, when
 the process dies mid-attempt,
@@ -602,49 +612,41 @@ If the run came from a planning handoff, re-plan with `-goal`, or run `-plan`
 without `-workflow-handoff`: the handoff check reads
 `.agent/workflow.contract.json`, which went with the archive.
 
-## AgentFlow 1.2.1 and recovery
+#### An edit a stopped amendment left
 
-AgentFlow 1.2.1 (kstruzzieri/agentflow#97) counts an in-scope file as recorded
-when its latest receipt, from any step or attempt, matches the file. A
-stopped attempt's receipt therefore satisfies the attempt that replaces it, so
-resume would run the gates and complete the step on an edit the stopped run
-made and nobody accepted, instead of failing in `file_receipts_missing`
-as described in [Failed step runs](#failed-step-runs).
+When an amendment records an edit and then stops, no attempt has verified that
+edit. AgentFlow fails `verify-run` and `finish-run` on it and reports
+`step_amendment_needed` with an `amend` action marked `automatic: false`,
+because someone must decide whether to keep the edit. AgentFlow marks an edit
+in a completed step's scope that no receipt covers the same way. Status exits
+`3` and resume refuses before any change:
 
-Golem refuses AgentFlow 1.2.1, including its pre-releases, post-releases and
-local builds (`1.2.1rc1`, `1.2.1.post1`, `1.2.1+local`), for every path that
-can retry a stopped attempt:
+```text
+resume: blocked: an operator must decide whether to amend step P1: AgentFlow does not allow it unattended; to replace the attempt, run its advised amend-step, record the edit in the new attempt, then resume
+```
 
-- `-agentflow-resume` stops after its read-only checks and before its first
-  change to the run (exit `1`), and does not ask AgentFlow for recovery advice.
-- `-agentflow-status` shows every state that would otherwise exit `2` as
-  blocked and exits `3`. Earlier refusals of an unsafe projection keep
-  precedence.
-- A `-review-manifest` run stops before `init`. A review round over the
-  locked plan skips the execution-history refusal and runs the serial loop
-  over the retained attempts, so it counts as recovery.
+To keep the edit, run the `amend-step` command status shows as advisory, then
+the `record-file-change` command it shows next. `amend-step` names `--agent
+golem`, which resume needs as the attempt's owner. `-agentflow-resume` then runs
+the attempt's missing gates and finishes it without running the model. To drop
+the edit, restore the file first, then do the same: AgentFlow's latest receipt
+still holds the dropped content, so it counts the restored file as an edit too.
 
-A complete run still reports its verified proof through status (exit `0`) and
-resume. A fresh `-plan` or `-goal` run without a review manifest is
-unaffected: it refuses retained execution history and never retries a
-stopped attempt. To recover, use AgentFlow 1.2.0 or a later release that fixes
-the receipt rule. An AgentFlow 1.2 whose patch version cannot be read is
-refused the same way.
-
-The check reads the version AgentFlow prints. A source build that contains
-the 1.2.1 change but still reports another version is not caught. AgentFlow
-`main` between the merge of that change (kstruzzieri/agentflow#98) and the 1.2.1
-release still reports `1.2.0`: update such a checkout, or an editable install
-of it, to the 1.2.1 release or later so the check sees its version, or install
-AgentFlow 1.2.0. A build with a fix that still reports `1.2.1` is refused.
+Resume settles an open amendment only when an operator opened it and recorded
+an edit in it. It still refuses an amendment with no recorded edit, one Golem
+opened itself (its reason starts with `golem:`), one linked to a review, and one
+with a failed command gate.
 
 ## Upgrading from AgentFlow 0.x
 
-Golem drives AgentFlow 1.x only, from 1.2: earlier 1.x releases are refused
+Golem drives AgentFlow 1.x only, from 1.3: earlier 1.x releases are refused
 by version. Golem relies on 1.1's timeout and amendment recovery
-(kstruzzieri/agentflow#60, #70), and 1.2 is the release CI verifies it
-against: `next-action` answers only from the ledger rows it validated and
-reports `state_invalid` when they change during the call. AgentFlow 1.0
+(kstruzzieri/agentflow#60, #70), and on 1.2's `next-action`, which answers only
+from the ledger rows it validated and reports `state_invalid` when they change
+during the call. 1.3 is the release CI verifies it against: `verify-run` and
+`finish-run` fail on an edit a stopped attempt left unverified
+(kstruzzieri/agentflow#103). On 1.2, such a run could reach `complete`
+with the edit unverified. AgentFlow 1.0
 moved its plan, execution contract, ledgers, drift report and proof pack to
 schema `1.0.0` and gives 0.x working state no upgrade path, so Golem does not
 migrate it either:
@@ -654,9 +656,7 @@ migrate it either:
 2. Move the workspace's `.agent/` directory aside. Re-initializing only the
    execution contract is not enough: AgentFlow keeps the old ledger rows and
    rejects them when it reads them.
-3. Install AgentFlow 1.2 or a later 1.x (1.2.1 is refused for recovery; see
-   [AgentFlow 1.2.1 and recovery](#agentflow-121-and-recovery)), then
-   re-plan with `-goal`, or
+3. Install AgentFlow 1.3 or a later 1.x, then re-plan with `-goal`, or
    migrate an external plan to `schema_version` `1.0.0` and review it again
    before `-plan`.
 
@@ -764,8 +764,6 @@ refuses a root that retains a timed-out command receipt no later attempt can
 supersede (see [Timed-out gates](#timed-out-gates)). The condition is
 "same plan plus a manifest", not "the run finished": over an unfinished run the
 same command first runs the remaining steps, as `-review-manifest` documents.
-On AgentFlow 1.2.1 every `-review-manifest` run is refused before `init` (see
-[AgentFlow 1.2.1 and recovery](#agentflow-121-and-recovery)).
 Repeat the original `-task-brief`, `-workflow-profile` and `-workflow-reason`,
 or `-workflow-handoff`, on that run: without a handoff Golem materializes the
 workflow route from those flags again, so changed flags would replace the proof

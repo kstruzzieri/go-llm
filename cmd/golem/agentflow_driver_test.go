@@ -107,10 +107,6 @@ func (f *fakeAF) ProbeReview(context.Context) error {
 	f.seq = append(f.seq, "probe-review")
 	return f.failure("probe-review")
 }
-func (f *fakeAF) ProbeRecovery(context.Context) error {
-	f.seq = append(f.seq, "probe-recovery")
-	return f.failure("probe-recovery")
-}
 func (f *fakeAF) Init(context.Context) error { f.seq = append(f.seq, "init"); return nil }
 func (f *fakeAF) LockPlan(_ context.Context, p string) error {
 	f.seq = append(f.seq, "lock:"+p)
@@ -302,6 +298,37 @@ func TestTaskStepRunnerUsesItsRootAndAgentflowJournal(t *testing.T) {
 	}
 }
 
+// #767 boundary: an AgentFlow worker builds its own agent.Request and does
+// not opt in to the thinking-only recovery, so a reasoning-only reply ends the
+// step after one request even with steps to spare, and the step finishes as
+// before. The second response is a sentinel a recovery request would consume.
+func TestTaskStepRunnerDoesNotRecoverThinkingOnlyAnswer(t *testing.T) {
+	root := t.TempDir()
+	plan := &agentflow.Plan{Steps: []agentflow.Step{{ID: "P1"}}}
+	caller := &recordingCaller{next: &scriptCaller{responses: []agent.ModelResult{
+		{Response: provider.ChatResponse{Thinking: "The code word is PELICAN.", Done: true}},
+		answerStep("SENTINEL"),
+	}}}
+	orch := agent.New(caller, agent.ContextManager{})
+	af := &fakeAF{}
+	runCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runStep, err := newTaskStepRunner(root, plan, af, orch, &replSession{maxSteps: 4}, true, io.Discard, nil, cancel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &driver{af: af, plan: plan, runStep: runStep}
+	if err := d.runOneStep(runCtx, "P1"); err != nil {
+		t.Fatal(err)
+	}
+	if len(caller.reqs) != 1 {
+		t.Fatalf("model requests = %d, want 1", len(caller.reqs))
+	}
+	if want := []string{"claim:P1", "finish-step:P1:A-P1"}; !equalSeq(af.seq, want) {
+		t.Fatalf("agentflow calls = %v, want %v", af.seq, want)
+	}
+}
+
 func TestDriver_ParallelCohortRunsBeforeSerialWork(t *testing.T) {
 	af := &fakeAF{nextSteps: []string{"P1"}}
 	d := &driver{
@@ -343,7 +370,7 @@ func TestDriver_ParallelCohortFailuresAbortBeforeSerialWork(t *testing.T) {
 			cohort: func(context.Context) error {
 				return errors.New("cohort failed")
 			},
-			wantSeq: []string{"probe", "probe-parallel", "probe-workflow", "recommend", "probe-review", "probe-recovery", "init", "lock:plan.json", "materialize", "init-exec", "doctor"},
+			wantSeq: []string{"probe", "probe-parallel", "probe-workflow", "recommend", "probe-review", "init", "lock:plan.json", "materialize", "init-exec", "doctor"},
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -905,7 +932,7 @@ func TestDriver_RouteIsReadOnlyBeforeMutationAndShownBeforeReview(t *testing.T) 
 	if _, err := d.run(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	wantPrefix := []string{"probe", "probe-workflow", "recommend", "probe-review", "probe-recovery", "init", "lock:plan.json", "materialize"}
+	wantPrefix := []string{"probe", "probe-workflow", "recommend", "probe-review", "init", "lock:plan.json", "materialize"}
 	if len(af.seq) < len(wantPrefix) || !equalSeq(af.seq[:len(wantPrefix)], wantPrefix) {
 		t.Fatalf("route/mutation prefix = %v, want %v", af.seq, wantPrefix)
 	}
@@ -996,7 +1023,7 @@ func TestDriver_AmendmentReadyFindingUsesExistingAttemptLifecycle(t *testing.T) 
 	}
 	ref := "RR-20260714T120000Z-1234abcd#RF-1"
 	want := []string{
-		"probe", "probe-workflow", "recommend", "probe-review", "probe-recovery", "init", "lock:plan.json", "materialize", "init-exec", "doctor", "next-step",
+		"probe", "probe-workflow", "recommend", "probe-review", "init", "lock:plan.json", "materialize", "init-exec", "doctor", "next-step",
 		"record-review:review.json", "amend:P1:" + ref, "gate:P1:test one", "finish-step:P1:AM-P1", "next-action", "finish-run",
 	}
 	if !equalSeq(af.seq, want) {
@@ -1368,7 +1395,7 @@ func TestRunAgentflowTask_RejectedVersionMakesNoOtherCall(t *testing.T) {
 			if !errors.Is(err, errAgentflowTaskFailed) {
 				t.Fatalf("err = %v, want errAgentflowTaskFailed", err)
 			}
-			if !strings.Contains(stderr.String(), "agentflow 0.4 is too old; need >= 1.2") {
+			if !strings.Contains(stderr.String(), "agentflow 0.4 is too old; need >= 1.3") {
 				t.Fatalf("stderr = %q, want the version rejection", stderr.String())
 			}
 			got, err := os.ReadFile(calls)
@@ -1396,7 +1423,6 @@ func TestDriverRun_MarksProbeFailuresUnavailable(t *testing.T) {
 		{probe: "probe-parallel", wantErr: "agentflow parallel runtime unavailable: too old", parallel: true},
 		{probe: "probe-workflow", wantErr: "agentflow workflow routing unavailable: too old"},
 		{probe: "probe-review", wantErr: "agentflow review unavailable: too old", review: "review.json"},
-		{probe: "probe-recovery", wantErr: "agentflow review unavailable: too old", review: "review.json"},
 	} {
 		t.Run(tt.probe, func(t *testing.T) {
 			af := &fakeAF{failAt: map[string]error{tt.probe: errors.New("too old")}}
@@ -1702,10 +1728,10 @@ func TestStepGoal_LegacyPlanPreservesExactInstructionBytes(t *testing.T) {
 }
 
 func TestTaskApprover_ApprovesWhenEnabled(t *testing.T) {
-	if ok, err := taskApprover(true).Approve(context.Background(), provider.ToolCall{}, ""); !ok || err != nil {
+	if ok, err := (taskApprover{edits: true}).Approve(context.Background(), provider.ToolCall{}, ""); !ok || err != nil {
 		t.Fatalf("enabled: ok=%v err=%v", ok, err)
 	}
-	if ok, err := taskApprover(false).Approve(context.Background(), provider.ToolCall{}, ""); ok || err != nil {
+	if ok, err := (taskApprover{edits: false}).Approve(context.Background(), provider.ToolCall{}, ""); ok || err != nil {
 		t.Fatalf("disabled: ok=%v err=%v", ok, err)
 	}
 }
@@ -1968,44 +1994,6 @@ func TestDriver_ReviewProbeFailureAbortsBeforeInit(t *testing.T) {
 	}
 	if want := []string{"probe", "probe-workflow", "recommend", "probe-review"}; !equalSeq(af.seq, want) {
 		t.Fatalf("review-probe failure must abort before Init: seq = %v", af.seq)
-	}
-}
-
-// A -review-manifest run is recovery too: a same-plan round skips the
-// execution-history refusal and its serial loop retries retained attempts, so
-// on AgentFlow 1.2.1 it stops before Init, before any write.
-func TestDriver_ReviewRunRefusesAgentflow121BeforeInit(t *testing.T) {
-	af := &fakeAF{
-		review: reviewRun(true, activeFinding("RF-1", "P1")),
-		failAt: map[string]error{"probe-recovery": errAgentflow121},
-	}
-	d := &driver{
-		af: af, plan: reviewPlan(), planPath: "plan.json", reviewManifest: "review.json", out: io.Discard,
-		runStep: func(context.Context, agentflow.Step, string, string) error { return nil },
-	}
-	_, err := d.run(context.Background())
-	var unavailable *agentflowUnavailableError
-	if !errors.As(err, &unavailable) || err.Error() != "agentflow review unavailable: agentflow 1.2.1 cannot drive recovery" {
-		t.Fatalf("err = %v, want the 1.2.1 refusal as agentflowUnavailableError", err)
-	}
-	if want := []string{"probe", "probe-workflow", "recommend", "probe-review", "probe-recovery"}; !equalSeq(af.seq, want) {
-		t.Fatalf("seq = %v, want %v", af.seq, want)
-	}
-}
-
-// A fresh run without a review manifest never retries a stopped attempt, so it
-// keeps running on AgentFlow 1.2.1.
-func TestDriver_FreshRunSkipsRecoveryProbe(t *testing.T) {
-	af := &fakeAF{nextSteps: []string{"P1"}, failAt: map[string]error{"probe-recovery": errAgentflow121}}
-	d := &driver{
-		af: af, plan: reviewPlan(), planPath: "plan.json", out: io.Discard,
-		runStep: func(context.Context, agentflow.Step, string, string) error { return nil },
-	}
-	if _, err := d.run(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if slices.Contains(af.seq, "probe-recovery") {
-		t.Fatalf("seq = %v, want no recovery probe", af.seq)
 	}
 }
 

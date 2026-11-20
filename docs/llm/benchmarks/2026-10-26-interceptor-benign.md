@@ -10,10 +10,10 @@ Detectors default: retain opt-in. K2: there is no measured benefit evidence for 
 
 ## Provenance
 
-- Registration: `llm-bench.interceptor-registration/v1`, sha256 `7a1dca1f2292ccd1b3274a4d27b38c0a3b71732e9c9cef44da76492ead584d5c`, binding every input below; the loader checks each digest.
+- Registration: `llm-bench.interceptor-registration/v1`, sha256 `97cf70b3a18b9c11c2597e3d23985b468e162912afb91fbed6fb69b1ed2eb4d4`, binding every input below; the loader checks each digest.
 - Benign cases: sha256 `55df4a5aaf3d3884007ba957568fca66c2cb8490b46096703f7b91966ba2bc1b`, 126 tasks, 252 registered traces.
 - Census: manifest sha256 `de84f7a4bb2e6893ad86c14074bdcb868368590397d0533704cc5803cf315eb5`, results sha256 `60a7d241c81b2a7636a8bc2c25d71eaa686adfbc406f968b92ded1bb1204afff`, full per-observation output sha256 `86d8d5744404fc8339e76e067a0c3d76652655da50f6490502014afd6bfc65bc` (gitignored; bound by the results).
-- Builder revision `ae655f76b3d440968480844bc1a341dd7ef8795e464e3c37934526fd501db883`; scorer revision `deferred (K5=b)`.
+- Builder revision `37a05ef24a966bfc2b02b954ce7ae28902b3cc5a7574b50e40217706e806a863`; scorer revision `deferred (K5=b)`.
 - Budgets (K1): δ = 0.1 on the primary contrast, task-failure budget 0, unnecessary-block budget 0.01 per stratum.
 - Arms (spec §6.1), each filtered from `interceptor.Defaults()` in library order, without the canary:
 

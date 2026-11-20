@@ -137,6 +137,14 @@ func windowsURIFilename(u *url.URL, abs func(string) (string, error)) error {
 
 func isASCIILetter(c byte) bool { return 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' }
 
+// SharedMemoryURI returns the URI of the in-memory database called name, which
+// every connection in this process opening that name shares, and which lasts
+// until its last connection closes. Unlike ":memory:", it survives database/sql
+// replacing a connection as long as another one holds it open.
+func SharedMemoryURI(name string) string {
+	return "file:" + name + "?mode=memory&cache=shared"
+}
+
 // WithBusyTimeout returns a DSN for path whose every connection starts with the
 // given busy_timeout, including connections database/sql opens to replace a
 // discarded one. A one-off PRAGMA configures only the connection that ran it,

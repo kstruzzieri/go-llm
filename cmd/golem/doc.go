@@ -49,6 +49,28 @@
 // sockets inside the shared workspace stay reachable. -sandbox does not
 // confine /consult, git-context helpers, MCP servers or the /edit editor.
 //
+// -credential-screen-budget sets how long the credential screen may spend
+// reading the workspace before each command (#777, #789): 5s to 5m, default
+// 5s, one value for the session, and a value outside that range is a startup
+// error. A longer budget makes a large workspace usable, not fast: every
+// command waits for the read, and the tool timeout grows with the budget.
+//
+// -strict-approval suspends reusable approvals while the active conversation
+// is exposed (#584): outside content entered it (an MCP tool result, /consult
+// advice a run accepted) or its provenance is unknown (history saved before
+// the exposure record existed). Session grants and /auto-edits are then not
+// consulted: every approval the run needs asks [y/N] about that one call,
+// after a line naming the source, and on the host runtime a command,
+// background start or verifier prompt adds "network is not confined"; "a"
+// denies and no answer creates a grant. agent_memory_create and
+// agent_memory_promote ask too, showing the note with each line marked "|"
+// and its size, or the record being promoted; delegate_code and dispatch stay
+// unprompted. /new and a successful /clear start clean; /grants prints the
+// exposure line and the permissions line gains strict-approval=on with what
+// exposes a conversation. Under -no-session each turn starts clean. The flag
+// does not select Trusted, and -p and AgentFlow modes accept it with no
+// effect today, since neither can become exposed.
+//
 // The openai-compat backend URL can be overridden with -base-url (or
 // GO_LLM_BASE_URL); otherwise, when the configured loopback URL does not
 // serve the active model route, startup scans 127.0.0.1:8080-8090 for it
@@ -150,9 +172,29 @@
 // controls, and the BOM on HFS+; ::$DATA streams on Windows). These are
 // direct-access tripwires on named tool arguments, not confinement: search
 // skips the credential files and dispatch refuses a scope at or below .git,
-// .ssh, .gnupg, .aws or .kube, but run_command, retrieve, MCP tools, verifier
-// commands, edit_file's pre-approval match errors, and copies or hard links
-// under other names can still reach or expose the same files. The egress
+// .ssh, .gnupg, .aws or .kube, but commands can still reach them, and
+// retrieve, MCP tools, edit_file's pre-approval match errors, and copies or
+// hard links under other names can still expose the same files.
+//
+// A run_command or start_command is also refused (credential_path) when an
+// argv word names a credential path, as a whole or after any "=", ":" or "@",
+// after a long-form git pathspec's magic, or after a one-letter short option;
+// an inline shell script's fields are tested the same way. A git exclusion
+// pathspec (":!x", ":^x", ":(exclude)x") is exempt as a whole argv word only.
+// A script handed to another program inside one word (git -c 'alias.x=!cat
+// .env' x, python3 -c) is not refused. A dir at or below .git, .ssh, .gnupg,
+// .aws or .kube is refused (protected_dir); a directory change the command
+// makes itself is not. Command output (foreground, background, post-write
+// verifier) is screened at capture (#777): before each command the workspace's
+// credential files, .git/config included, are read, and every line or
+// NAME=value value of 8 bytes or more found there is replaced in the output by
+// a marker, ordinary values such as localhost included; a line whose
+// colon-separated prefix names a credential path is replaced whole; a patch
+// header naming one, or a line over 32 KiB, ends that stream's output; and a
+// result that withheld anything carries a "credential screen:" note. A read
+// that cannot be completed, a permission failure included, withholds both
+// streams; on platforms other than Linux and macOS output is always withheld.
+// docs/golem.md lists what the screen does not cover. The egress
 // classifier reads the argv of every run_command and start_command, and of any
 // other exec-class call (MCP tools included) whose arguments carry a top-level
 // argv string array, after peeling env, nohup, nice, time, timeout and stdbuf,
@@ -169,6 +211,107 @@
 // quiet commands such as find -exec, awk system() or git -c options can still
 // run anything. No score or badge revokes a grant. The hard line-count limit
 // the issue mentioned is deferred; the existing 256 KiB write bounds remain.
+//
+// Writes to agent instruction and harness configuration files always need a
+// human (#725). A write_file or edit_file call that targets one of these
+// names, as a file or as a folder it sits under, at any depth, prompts [y/N]
+// with a "harness file:" line giving the reason: other tools load or run the
+// file, so the approval is not remembered. The set is AGENTS.md,
+// AGENTS.override.md, CLAUDE.md, CLAUDE.local.md, GEMINI.md, .cursorrules,
+// .windsurfrules, .clinerules, .mcp.json, opencode.json, opencode.jsonc,
+// .golem.json, models.json, the folders .claude, .cursor, .windsurf, .gemini,
+// .codex, .opencode and .agent, and the paths
+// .github/copilot-instructions.md, .github/instructions, .github/prompts,
+// .github/agents, .github/hooks, .github/copilot, .vscode/mcp.json and
+// .vscode/settings.json. The answer a denies and grants nothing, /auto-edits
+// does not cover these files, and an earlier grant never silences the prompt.
+// Unattended runs deny them: -p with -allow-tool write_file or edit_file
+// prints "golem: denied <tool>: harness file, -allow-tool does not cover it
+// (<reason>)" on stderr, and Agentflow -approve-plan-edits denies. The one
+// exception is submit_plan under -approve-plan-lock, which writes .agent/
+// itself. A path is classified by the spelling the model gave, by the
+// spelling the filesystem resolves, and by the workspace root counted from
+// the folder holding the nearest .git entry (file or folder), that folder's
+// own name included: a git-tracked ~/.claude used as the root prompts for
+// every write, while a worktree under .claude/worktrees/<name> behaves like
+// an ordinary checkout. With no .git above the root, the whole absolute root
+// path is classified. When Golem cannot list the repository folder or a
+// folder between it and the workspace root (any folder holding a component of
+// the root's path when there is no .git), it cannot verify the root's
+// spelling and every file-tool write prompts; an unlistable folder that holds
+// the repository changes nothing, and an unlistable folder inside the
+// workspace makes writes beneath it prompt. The line still says "harness
+// file" though the file may be ordinary. Windows 8.3 short names (CLAUDE~1)
+// and trailing-dot or alternate-stream spellings match on every platform.
+//
+// A harness file also controls the files it points at, so write_file and
+// edit_file treat those as harness files too (#784): they always prompt,
+// grant nothing, and are denied unattended, under the notice "agent
+// instruction or harness configuration file, or a file one of them loads,
+// runs or links to; other tools load or run it, so this approval is not
+// remembered". Coverage promise: Markdown @ imports, OpenCode instructions,
+// symlinks at harness paths and what they reach, and the literal paths in
+// every command read from the files below are covered completely, and if
+// Golem cannot read or parse something it needs, every write prompts. What
+// a command does at run time is best effort: cd in a shell string, the
+// working-directory flags --directory, -C, --cwd and --project, the
+// documented project-folder variables and Golem's own PATH lookup are
+// followed; other variables, command substitution, scripts sourced by
+// scripts and another tool's own PATH are not. Covered are Markdown @
+// imports (followed five hops, existing or not), the commands and arguments
+// in the configuration files named next, OpenCode instructions entries and
+// patterns, what symlinks at harness paths reach, and fixed paths in every
+// ancestor folder, ~/.claude/settings.json included. Golem reads commands
+// from these files: .claude/settings.json, .claude/settings.local.json,
+// .mcp.json, .cursor/hooks.json, .cursor/mcp.json, .windsurf/hooks.json,
+// .gemini/settings.json, .github/hooks/*.json, .github/copilot/*.json,
+// .vscode/mcp.json, .vscode/settings.json, opencode.json, opencode.jsonc,
+// .golem.json and .codex/config.toml. No other file is read for commands. A
+// top-level permissions section is skipped, and so is an env section at the
+// top level or inside an object that also holds a command; an env or
+// permissions key anywhere else is read, so a server named env cannot hide
+// its command. .codex/config.toml reads every string, env tables included.
+// Commands are read best-effort: cd in a shell string, the working-directory
+// flags --directory, -C, --cwd and --project (the folder they name is a base
+// for the rest of that command), the project-folder variables
+// ($CLAUDE_PROJECT_DIR, ${workspaceFolder} and the like) and Golem's own PATH
+// lookup are followed; other variables, command substitution, scripts that
+// call scripts and another tool's own PATH are not. The search skips .git
+// and the other ignored folders, the build-output folders target, build,
+// dist, out, .venv, venv, __pycache__, .gradle, .next and .tox, any folder
+// holding its own .git entry, and folders this user cannot search; it is
+// bounded to 100,000 directory entries and 100,000 checks for links inside
+// covered subtrees per call, 256 KiB per configuration file, 32 MiB read
+// per call and five import hops, 64 cd or working-directory folders per
+// shell string or argument list, 100,000 resolution steps per configuration
+// file and a 40-link dangling symlink chain; crossing a bound makes the set
+// incomplete. If the search cannot finish (an unreadable or malformed harness
+// file, an ancestor ~/.claude/settings.json included, or a crossed bound),
+// every file-tool write prompts. The preview's first line, "harness
+// reference: <reason>", names the cause; -p prints "golem: harness
+// reference: ..." after its denial line, and Agentflow task steps print
+// "golem: task step denied <tool>: harness file (<notice>)" and the same
+// line. Parallel Agentflow promotion refuses a whole batch, writes and
+// deletions, with "refuse parallel promotion: <path>: <reason>" and applies
+// nothing. Residuals: other variables and run-time command behavior;
+// ancestor files below the fixed paths; skipped folders; permission rules
+// that are not commands; Copilot #file: references, YAML configuration,
+// custom Gemini contextFileName names, skill scripts mentioned in prose and
+// the other agents' folders #725 left out; inline shell commands in
+// .claude/commands/*.md (!`cmd` lines) and scripts named in skill front
+// matter, which are not read as commands; folder links at paths other than
+// .github and .vscode; a change between the last check and the rename; on
+// Windows, cmd.exe running a bare run.bat from the current folder,
+// cloud-sync placeholder files and a junction under an OpenCode glob prefix;
+// cmd /k, PowerShell flag abbreviations and -EncodedCommand, and pushd; other
+// tools' working-directory flags (only --directory, -C, --cwd and --project
+// are followed); and macOS privacy protection (TCC) blocking a read.
+//
+// Not covered: writes made by commands (run_command, start_command, the
+// post-write verifier, scratch commands); a workspace rooted in a git
+// submodule or nested repository inside a harness folder, whose files are
+// classified from that repository's own folder; and hosts embedding the
+// library with a plain agent.Approver, which never receives the key.
 //
 // Independently of -interceptors, every tool result reaches the model inside
 // a keyed <<<TOOL_RESULT / >>>TOOL_RESULT frame, each result under its own

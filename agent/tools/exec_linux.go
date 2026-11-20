@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -306,6 +307,29 @@ func safeEtcPolicyPaths(paths []string, workspaceRoot, home string) ([]string, e
 	return out, nil
 }
 
+// bwrapRejectSymlinkedGitMetadata fails the spawn when a discovered git
+// metadata entry is a symbolic link (#721 R-13). A bind mount follows the
+// link: its target turns read-only while the link node, in a writable git
+// dir, stays replaceable (measured: rm .git/hooks && mkdir .git/hooks then
+// plants a hook), and a dangling link fails bwrap itself.
+func bwrapRejectSymlinkedGitMetadata(root string, metadata []string) error {
+	for _, p := range metadata {
+		rel, err := filepath.Rel(root, p)
+		if err != nil {
+			return fmt.Errorf("tools: bwrap inspect git metadata %q: %w", p, err)
+		}
+		rel = filepath.ToSlash(rel)
+		fi, err := os.Lstat(p)
+		if err != nil {
+			return fmt.Errorf("tools: bwrap inspect git metadata %q: %w", rel, err)
+		}
+		if fi.Mode()&fs.ModeSymlink != 0 {
+			return fmt.Errorf("tools: bwrap cannot protect git metadata %q: it is a symbolic link; replace the link with the file or directory itself (for hooks, core.hooksPath keeps them in the working tree)", rel)
+		}
+	}
+	return nil
+}
+
 // bwrapRejectInheritableFDs is the shared descriptor audit over Linux's
 // per-process descriptor directory, with no exemption.
 func bwrapRejectInheritableFDs() error {
@@ -369,6 +393,17 @@ func (b *bwrapBackend) prepare(spec execSpec) (execSpec, error) {
 	if spec.ExeIdentity == nil || !os.SameFile(fi, spec.ExeIdentity) {
 		return execSpec{}, errors.New("executable changed since approval; retry")
 	}
+	// The workspace walk rejects an inode linked outside the workspace and
+	// finds the git layout the argv mounts read-only or un-renamable (#721).
+	// It is the last workspace walk before spawn: metadata created after it
+	// is residual R1, and a change racing it is the documented same-UID race.
+	layout, err := inspectSandboxWorkspace(spec.WorkspaceRoot)
+	if err != nil {
+		return execSpec{}, err
+	}
+	if err := bwrapRejectSymlinkedGitMetadata(spec.WorkspaceRoot, layout.metadata); err != nil {
+		return execSpec{}, err
+	}
 	args, err := buildBwrapArgs(bwrapPolicy{
 		workspaceRoot:     spec.WorkspaceRoot,
 		exePath:           canonExe,
@@ -381,11 +416,11 @@ func (b *bwrapBackend) prepare(spec execSpec) (execSpec, error) {
 		payloadEnv:        sandboxChildEnv(spec.Env, "/tmp"),
 		allowNetwork:      b.cfg.AllowNetwork,
 		tmpfsSizeBytes:    b.capBytes,
+		gitWritable:       slices.Concat(layout.dotGitDirs, layout.gitDirs),
+		gitReadOnly: slices.Concat(layout.containers, layout.intermediates, layout.metadata,
+			layout.moduleReadOnly, layout.gitFiles),
 	})
 	if err != nil {
-		return execSpec{}, err
-	}
-	if err := validateSandboxWorkspaceLinks(spec.WorkspaceRoot); err != nil {
 		return execSpec{}, err
 	}
 	wrapped := spec

@@ -155,6 +155,12 @@ func (o *Orchestrator) recordResult(ctx context.Context, res *Result, state *Sta
 		}
 	}
 
+	// #582: a result the model will see admits its origin. Fixed
+	// orchestrator text (denial, malformed arguments) and blocked
+	// observations carry no outside content and admit nothing.
+	if (rec.Invoked || inspectResult) && !rec.Blocked {
+		exposureFrom(ctx).admit(out.Origin, call.Function.Name)
+	}
 	if !rec.Blocked {
 		rec.Provenance = provenance
 	}
@@ -288,7 +294,10 @@ func (o *Orchestrator) prepareCall(ctx context.Context, reg *toolRegistry, call 
 	effect = normalizeEffect(effect)
 	p.effect = effect // capture now so a denial (which returns before invoke) still carries the effect
 
-	if needsApproval(effect.Approval, effect.Class) {
+	// #584: while approvals are suspended, a call that would skip approval
+	// is raised to it unless it is plain Read or exempt by name. Checked
+	// after Plan, so a per-call effect cannot lower it.
+	if needsApproval(effect.Approval, effect.Class) || (ApprovalsSuspended(ctx) && effect.Class != Read && !strictExempt(ctx, name)) {
 		d, err := approve(ctx, approver, cloneToolCall(call), preview, approvalKey, ic.snapshot())
 		if err != nil {
 			return p, err // ctx cancel / approver failure propagates

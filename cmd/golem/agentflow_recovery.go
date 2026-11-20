@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/kstruzzieri/go-llm/agentflow"
@@ -133,23 +134,14 @@ func runAgentflowStatusWithRunner(ctx context.Context, out io.Writer, root strin
 	disposition := resumeDisposition(state.State)
 	if disposition.action != failClosed {
 		if err := validateStatusRecovery(root, state); err != nil {
-			disposition = recoveryDisposition{failClosed, 3, "blocked by unsafe or malformed projection: " + err.Error()}
+			disposition = recoveryDisposition{failClosed, 3, "blocked: " + err.Error()}
 		} else if hasFailedCommandGate(state) {
 			disposition.description = "block the attempt whose gate failed, then re-run the step serially" // #652 A6
 		}
 	}
 	// #642 A9: after validateStatusRecovery, so earlier projection refusals keep precedence (D9).
-	// The AgentFlow 1.2.1 refusal goes first, in the order resume checks them;
-	// its text is Golem's own, so JSON mode reports it on stderr too.
-	var diagnostic string
 	if disposition.action == resumeSerial {
-		if err := client.ProbeRecovery(ctx); err != nil {
-			disposition = recoveryDisposition{failClosed, 3, "blocked: " + err.Error()}
-			var versionErr *agentflow.VersionError
-			if errors.As(err, &versionErr) {
-				diagnostic = versionErr.Error()
-			}
-		} else if err := refuseReviewAmendmentReplacement(root, state); err != nil {
+		if err := refuseReviewAmendmentReplacement(root, state); err != nil {
 			disposition = recoveryDisposition{failClosed, 3, "blocked: " + err.Error()}
 		} else if err := refuseUnrecoverableTimeout(root); err != nil {
 			disposition = recoveryDisposition{failClosed, 3, "blocked: " + err.Error()}
@@ -173,9 +165,6 @@ func runAgentflowStatusWithRunner(ctx context.Context, out io.Writer, root strin
 	if jsonOutput {
 		if _, err := out.Write(state.RawJSON); err != nil {
 			return fmt.Errorf("write Agentflow status: %w", err)
-		}
-		if diagnostic != "" {
-			return &agentflowStatusExit{code: disposition.exitCode, diagnostic: diagnostic}
 		}
 		return statusExit(disposition.exitCode)
 	}
@@ -365,11 +354,21 @@ func validateRecoveryProjection(state agentflow.NextActionState) error {
 // settlement would finish on its gates alone, without the work it was opened
 // for (#652 D1). Status and resume run it on the projection they start from,
 // not on an amendment resume opens itself. A timed-out one is only blocked, so
-// it passes.
-func refuseCompletedStepAttempt(state agentflow.NextActionState) error {
+// it passes. So does an amendment an operator opened and recorded an edit in:
+// the edit is the work, and settlement gates it (agentflow#103). If one of its
+// gates failed, settlement would block the operator's attempt, so that stays
+// refused.
+func refuseCompletedStepAttempt(root string, state agentflow.NextActionState) error {
 	projection := state.Resumability
 	if projection == nil || projection.Attempt == nil || projection.Step == nil || projection.Step.Completed == nil ||
 		!*projection.Step.Completed || state.State == "attempt_timed_out" {
+		return nil
+	}
+	settleable, err := operatorAmendmentWithEdit(root, projection.Step.ID, projection.Attempt.ID)
+	if err != nil {
+		return err
+	}
+	if settleable && !hasFailedCommandGate(state) {
 		return nil
 	}
 	return fmt.Errorf("agentflow resumability open attempt belongs to a completed step")
@@ -406,6 +405,12 @@ func validateAutomaticRecoveryAction(projection *agentflow.ResumabilityProjectio
 		}
 		matched = &projection.RecoveryActions[i]
 	}
+	// AgentFlow leaves amend to an operator when it cannot say whose an edit is,
+	// or when a stopped attempt's edit was never verified (agentflow#73, #103).
+	// That is a decision to surface, not a fault in the projection.
+	if action == "amend" && matched != nil && matched.Allowed && !matched.Automatic && matched.BreakGlass != nil && !*matched.BreakGlass {
+		return fmt.Errorf("an operator must decide whether to amend step %s: AgentFlow does not allow it unattended; to replace the attempt, run its advised amend-step, record the edit in the new attempt, then resume", projection.Step.ID)
+	}
 	if matched == nil || !matched.Allowed || !matched.Automatic || matched.BreakGlass == nil || *matched.BreakGlass {
 		return fmt.Errorf("agentflow resumability does not allow automatic non-break-glass %s", action)
 	}
@@ -425,7 +430,7 @@ func validateStatusRecovery(root string, state agentflow.NextActionState) error 
 	if err := validateRecoveryProjection(state); err != nil {
 		return err
 	}
-	if err := refuseCompletedStepAttempt(state); err != nil {
+	if err := refuseCompletedStepAttempt(root, state); err != nil {
 		return err
 	}
 	if resumeDisposition(state.State).action == resumeSerial {
@@ -672,6 +677,48 @@ func settleAgentflowAttempt(ctx context.Context, client afClient, plan *agentflo
 	return true, nil
 }
 
+// blockedDetail is resume's text for a state it refuses. Only
+// file_receipts_missing has a way out to name (#774).
+func blockedDetail(state agentflow.NextActionState, disposition recoveryDisposition) string {
+	if state.State != "file_receipts_missing" {
+		return disposition.description
+	}
+	return disposition.description + unrecordedFilesAdvice(state.Diagnostics)
+}
+
+// unrecordedFilesAdvice lists the files next-action reports unrecorded, then the
+// operator's two ways past them (#774). A model that finds a stopped attempt's
+// edit already right and writes nothing ends here.
+func unrecordedFilesAdvice(diagnostics []string) string {
+	files := ""
+	if len(diagnostics) > 0 {
+		files = " (" + strings.Join(diagnostics, "; ") + ")"
+	}
+	return files + ". To keep the files as they are, run the record-file-change command -agentflow-status shows for each one, then resume. To discard them, block the open attempt with agentflow block-step, then restore them, then resume; restoring first would settle the attempt on its gates without running the model"
+}
+
+// retryContext tells a just-claimed attempt which in-scope files a stopped
+// attempt left changed (#774). Without it, a model that finds the content
+// already right writes nothing and the attempt stops before its gates. Paths
+// are quoted, so a file name cannot add lines to the prompt.
+func retryContext(state agentflow.NextActionState) string {
+	if state.State != "file_receipts_missing" {
+		return ""
+	}
+	var files []string
+	for _, diagnostic := range state.Diagnostics {
+		if path, ok := strings.CutPrefix(diagnostic, "unrecorded: "); ok {
+			files = append(files, strconv.Quote(path))
+		}
+	}
+	if len(files) == 0 {
+		return ""
+	}
+	return "\n\nRetry context (authoritative Agentflow projection):\n" +
+		"An earlier attempt of this step stopped after changing these in-scope files, and this attempt has not recorded them: " + strings.Join(files, ", ") + ".\n" +
+		"Review each one. If it is wrong, fix it. If it is already right, confirm it with edit_file, giving the same unique text as old_string and new_string; that records the file without changing it. Write an empty file again with write_file. A file you leave untouched stops the step before its gates."
+}
+
 func (d *driver) resume(ctx context.Context, root string, planJSON []byte, approved *agentflow.WorkflowRecommendation) (agentflow.NextActionState, error) {
 	// #612 R6: resume mutates, so it runs the base probe (version gate and the
 	// base capability probes, including #611's block-step) before its first
@@ -685,12 +732,12 @@ func (d *driver) resume(ctx context.Context, root string, planJSON []byte, appro
 	}
 	disposition := resumeDisposition(state.State)
 	if disposition.action == failClosed {
-		return agentflow.NextActionState{}, fmt.Errorf("agentflow resume blocked in state %q: %s", state.State, disposition.description)
+		return agentflow.NextActionState{}, fmt.Errorf("agentflow resume blocked in state %q: %s", state.State, blockedDetail(state, disposition))
 	}
 	if err := validateResumeProjection(root, planJSON, state, approved); err != nil {
 		return agentflow.NextActionState{}, err
 	}
-	if err := refuseCompletedStepAttempt(state); err != nil {
+	if err := refuseCompletedStepAttempt(root, state); err != nil {
 		return agentflow.NextActionState{}, err
 	}
 	if err := validateRecoveryMutationSafety(state); err != nil {
@@ -698,12 +745,6 @@ func (d *driver) resume(ctx context.Context, root string, planJSON []byte, appro
 	}
 	if disposition.action == reportComplete {
 		return state, nil
-	}
-	// After the complete-run report and before settlement, the first mutation:
-	// AgentFlow 1.2.1's projection would let a replacement attempt complete on
-	// a stopped attempt's edit.
-	if err := d.af.ProbeRecovery(ctx); err != nil {
-		return agentflow.NextActionState{}, &agentflowUnavailableError{fmt.Errorf("agentflow recovery unavailable: %w", err)}
 	}
 	if err := refuseReviewAmendmentReplacement(root, state); err != nil {
 		return agentflow.NextActionState{}, err
@@ -749,17 +790,29 @@ func (d *driver) resume(ctx context.Context, root string, planJSON []byte, appro
 		default:
 			disposition = resumeDisposition(state.State)
 			if disposition.action == failClosed {
-				return agentflow.NextActionState{}, fmt.Errorf("agentflow resume blocked after settlement in state %q: %s", state.State, disposition.description)
+				return agentflow.NextActionState{}, fmt.Errorf("agentflow resume blocked after settlement in state %q: %s", state.State, blockedDetail(state, disposition))
 			}
 			return agentflow.NextActionState{}, fmt.Errorf("agentflow settlement progressed to unsupported in-flight state %q", state.State)
 		}
 	}
 
+	previousBeforeRun := d.beforeRun
+	d.beforeRun = func(ctx context.Context, _ agentflow.Step, _ string) (string, error) {
+		claimed, err := d.af.NextAction(ctx)
+		if err != nil {
+			return "", err
+		}
+		return retryContext(claimed), nil
+	}
+	defer func() { d.beforeRun = previousBeforeRun }()
 	previousBeforeGates := d.beforeGates
 	d.beforeGates = func(ctx context.Context, step agentflow.Step, attempt string) error {
 		projected, err := d.af.NextAction(ctx)
 		if err != nil {
 			return err
+		}
+		if projected.State == "file_receipts_missing" {
+			return fmt.Errorf("step %s attempt %s ended without recording its changed files, so no gate ran and the attempt stays open%s", step.ID, attempt, unrecordedFilesAdvice(projected.Diagnostics))
 		}
 		if projected.State != "validation_missing" {
 			return fmt.Errorf("agentflow resumed step %q reached state %q before gates, want validation_missing", step.ID, projected.State)

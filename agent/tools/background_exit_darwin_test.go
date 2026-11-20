@@ -73,7 +73,7 @@ func TestProcessExitObserverAlreadyExitedChildRecovers(t *testing.T) {
 
 	// The exit this observer would report already happened, so Wait must
 	// return rather than block on a notification that can no longer arrive.
-	proc := &unixProcess{cmd: cmd, pgid: pid, observer: observer, group: processGroupGuard{pgid: pid}}
+	proc := &unixProcess{cmd: osExecCmd{cmd}, pgid: pid, observer: observer, group: processGroupGuard{pgid: pid}}
 	type result struct {
 		code          int
 		managerKilled bool

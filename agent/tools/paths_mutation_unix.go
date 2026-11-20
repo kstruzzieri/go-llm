@@ -25,6 +25,9 @@ type mutationTarget struct {
 	stat    unix.Stat_t
 	mode    fs.FileMode
 	exists  bool
+	// unverified reports that some component's stored spelling could not be
+	// listed, so logical keeps a requested spelling there (#725).
+	unverified bool
 }
 
 func sameMutationEntry(a, b *unix.Stat_t) bool {
@@ -43,7 +46,13 @@ func regularMutationEntry(st *unix.Stat_t) error {
 
 // openMutationTarget owns the parent until release. Canonical policy consults
 // only the final logical name, including on resolution errors, as reads do.
-func (w *Workspace) openMutationTarget(p string) (target *mutationTarget, resultErr error) {
+func (w *Workspace) openMutationTarget(p string) (*mutationTarget, error) {
+	return w.lookupMutationTarget(p, true)
+}
+
+// lookupMutationTarget is openMutationTarget; checkWrite false skips the
+// scope guard's write check on the final name, for the approval-key lookup.
+func (w *Workspace) lookupMutationTarget(p string, checkWrite bool) (target *mutationTarget, resultErr error) {
 	defer func() { resultErr = w.scopedPathError(resultErr) }()
 	abs, err := w.cleanRel(p)
 	if err != nil {
@@ -65,7 +74,7 @@ func (w *Workspace) openMutationTarget(p string) (target *mutationTarget, result
 		}
 	}
 	defer func() {
-		if !errors.Is(resultErr, errScopeDenied) {
+		if checkWrite && !errors.Is(resultErr, errScopeDenied) {
 			if err := w.checkScope(filepath.Join(w.root, policyRel), true); err != nil {
 				resultErr = err
 			}
@@ -82,12 +91,13 @@ func (w *Workspace) openMutationTarget(p string) (target *mutationTarget, result
 	parent = root
 	parts := strings.Split(rel, string(os.PathSeparator))
 	logical := "."
+	unverified := false
 	for i, part := range parts {
 		last := i == len(parts)-1
 		var st unix.Stat_t
 		err := unix.Fstatat(int(parent.Fd()), part, &st, unix.AT_SYMLINK_NOFOLLOW)
 		if last && errors.Is(err, fs.ErrNotExist) {
-			return &mutationTarget{parent: parent, release: release, name: part, logical: filepath.Join(logical, part)}, nil
+			return &mutationTarget{parent: parent, release: release, name: part, logical: filepath.Join(logical, part), unverified: unverified}, nil
 		}
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil, errParentMissing // path-free; says a parent, not the target, is missing
@@ -100,7 +110,8 @@ func (w *Workspace) openMutationTarget(p string) (target *mutationTarget, result
 			if w.guard != nil {
 				return nil, w.denyScope()
 			}
-			name, err = part, nil // no policy relies on this unverified spelling
+			name, err = part, nil // no guard relies on this spelling; the harness key prompts on it
+			unverified = true
 		}
 		if err != nil {
 			return nil, err
@@ -111,7 +122,7 @@ func (w *Workspace) openMutationTarget(p string) (target *mutationTarget, result
 			if err := regularMutationEntry(&st); err != nil {
 				return nil, err
 			}
-			return &mutationTarget{parent: parent, release: release, name: name, logical: logical, stat: st, mode: fs.FileMode(st.Mode & 0777), exists: true}, nil
+			return &mutationTarget{parent: parent, release: release, name: name, logical: logical, stat: st, mode: fs.FileMode(st.Mode & 0777), exists: true, unverified: unverified}, nil
 		}
 		if st.Mode&unix.S_IFMT == unix.S_IFLNK {
 			return nil, errSymlink
@@ -150,6 +161,19 @@ func (w *Workspace) resolveWriteTarget(p string) (string, bool, error) {
 	}
 	defer target.release()
 	return filepath.Join(w.root, target.logical), target.exists, nil
+}
+
+// resolvedWriteRel returns the workspace-relative spelling the filesystem
+// stores for a write target, and whether every existing component's spelling
+// was verified (#725). It is a lookup only: it never asks the scope guard for
+// a write check.
+func (w *Workspace) resolvedWriteRel(p string) (string, bool, error) {
+	target, err := w.lookupMutationTarget(p, false)
+	if err != nil {
+		return "", false, err
+	}
+	target.release()
+	return target.logical, !target.unverified, nil
 }
 
 // CanonicalPathForUndo returns the admitted canonical logical name, enforcing

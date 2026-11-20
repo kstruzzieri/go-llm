@@ -349,7 +349,7 @@ func TestSecretMatcherRefinalizeReplacesSidecar(t *testing.T) {
 	p.APIKey = secPlainLitB
 	cfg.Providers["c"] = p
 	env := &recordingEnv{}
-	if err := cfg.finalizeEnv(env.lookup); err != nil {
+	if err := cfg.finalizeEnv(env.lookup, OriginExplicit); err != nil {
 		t.Fatal(err)
 	}
 	if len(env.calls) != 0 {

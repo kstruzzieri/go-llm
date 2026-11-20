@@ -270,6 +270,7 @@ func realBwrapRun(t *testing.T, cfg SandboxConfig, ws string, argv []string) exe
 		Env:           []string{"PATH=/usr/bin:/bin", "HOME=" + bwrapTestHome},
 		WorkspaceRoot: ws,
 		ExeIdentity:   execIdentityOf(t, argv[0]),
+		Screen:        testScreen(),
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -584,25 +585,27 @@ print("HELPER-OVER:", written)
 raise SystemExit(1)
 `
 
-func requireBwrapPython(t *testing.T) {
+// requireBwrapTool skips, or fails under GO_LLM_REQUIRE_BWRAP=1, when the
+// payload tool at path (on the payload's PATH) is not an executable.
+func requireBwrapTool(t *testing.T, path string) {
 	t.Helper()
-	// os.Stat (symlink-following): python3 is a payload vehicle, not a TCB
+	// os.Stat (symlink-following): the tool is a payload vehicle, not a TCB
 	// binary, and is conventionally a versioned symlink.
-	fi, err := os.Stat("/usr/bin/python3")
+	fi, err := os.Stat(path)
 	if err == nil && !isExecutableFile(fi) {
 		err = errNotExecutable
 	}
 	if err != nil {
 		if os.Getenv("GO_LLM_REQUIRE_BWRAP") == "1" {
-			t.Fatalf("GO_LLM_REQUIRE_BWRAP=1 but python3 is unavailable: %v", err)
+			t.Fatalf("GO_LLM_REQUIRE_BWRAP=1 but %s is unavailable: %v", path, err)
 		}
-		t.Skipf("python3 unavailable: %v", err)
+		t.Skipf("%s unavailable: %v", path, err)
 	}
 }
 
 func TestBwrapTmpfsQuotasRejectExcess(t *testing.T) {
 	requireBwrapCapability(t)
-	requireBwrapPython(t)
+	requireBwrapTool(t, "/usr/bin/python3")
 	ws := wsTempDir(t)
 	cfg := SandboxConfig{Runtime: SandboxRuntimeBwrap, MemoryCapMB: 512}
 	nonQuota := realBwrapRun(t, cfg, ws, []string{
@@ -656,7 +659,7 @@ print("HELPER-ALLOC-OK:", n)
 
 func TestBwrapMemoryCeilingDeniesAllocation(t *testing.T) {
 	requireBwrapCapability(t)
-	requireBwrapPython(t)
+	requireBwrapTool(t, "/usr/bin/python3")
 	ws := wsTempDir(t)
 	cfg := SandboxConfig{Runtime: SandboxRuntimeBwrap, MemoryCapMB: 512}
 
@@ -692,6 +695,7 @@ func TestBwrapTimeoutKillsTree(t *testing.T) {
 		Env:           []string{"PATH=/usr/bin:/bin", "HOME=" + bwrapTestHome},
 		WorkspaceRoot: ws,
 		ExeIdentity:   execIdentityOf(t, helper),
+		Screen:        testScreen(),
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 	defer cancel()
@@ -798,7 +802,7 @@ func TestBwrapExitCodeFidelity(t *testing.T) {
 		t.Fatalf("direct chain exit = %d, want 42: %s", res.ExitCode, helperOutput(t, res))
 	}
 
-	requireBwrapPython(t)
+	requireBwrapTool(t, "/usr/bin/python3")
 	res = realBwrapRun(t, SandboxConfig{Runtime: SandboxRuntimeBwrap, MemoryCapMB: 512}, ws,
 		[]string{"/usr/bin/python3", "-c", "raise SystemExit(42)"})
 	if res.ExitCode != 42 {
@@ -951,6 +955,19 @@ func TestBwrapPublicPlanToInvoke(t *testing.T) {
 	}
 }
 
+// TestBwrapRunScreensOutput: the backend's by-value spec copy keeps the
+// screen, and the match note survives the backend's result handling.
+func TestBwrapRunScreensOutput(t *testing.T) {
+	// containment: CMP-EXEC-CREDENTIAL-OUTPUT-BWRAP
+	requireBwrapCapability(t)
+	ws := wsTempDir(t)
+	tools, err := NewSandboxedExecTools(ws, SandboxConfig{Runtime: SandboxRuntimeBwrap})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertScreensOutput(t, tools[0].(*RunCommand), ws)
+}
+
 // TestBwrapBehavioralApprovedExecutableShapes: the identity check (#553)
 // binds the approved object without narrowing what runs. Under real bwrap an
 // unchanged workspace #! script, a Homebrew-style external symlink, an
@@ -1020,4 +1037,307 @@ func TestBwrapBehavioralApprovedExecutableShapes(t *testing.T) {
 		}
 		assertHelperRan(t, realBwrapRun(t, cfg, wsTempDir(t), bwrapHelperArgv(exe, "pid")))
 	})
+}
+
+// --- Git metadata protection (#721): real processes under real bubblewrap ---
+//
+// Fixtures live under TMPDIR. On a case-insensitive filesystem (a Docker
+// Desktop host share, SMB) a case variant bypasses the read-only mounts
+// (residual R8); these tests assume the case-sensitive filesystem a Linux
+// host gives TMPDIR.
+
+// TestBwrapGitMetadataDenied: no attack row bwrap is meant to refuse changes
+// the git metadata under real bubblewrap. The seatbeltOnly rows are bwrap's
+// documented residuals (R1: metadata or a repository created after spawn),
+// need a case-insensitive filesystem, or never spawn on bwrap (R-13); a
+// bwrapProtectedOnly row is judged on its protected lines.
+func TestBwrapGitMetadataDenied(t *testing.T) {
+	requireBwrapCapability(t)
+	cfg := SandboxConfig{Runtime: SandboxRuntimeBwrap}
+	for _, a := range gitMetaAttacks {
+		t.Run(a.name, func(t *testing.T) {
+			if a.seatbeltOnly {
+				t.Skip("Seatbelt-only row (see gitMetaAttack.seatbeltOnly)")
+			}
+			root := canonGitTempDir(t)
+			before, res := runGitMetaAttackWith(t, root, a, func(snippet string) execResult {
+				return realBwrapRun(t, cfg, root, []string{"/bin/sh", "-c", snippet})
+			})
+			// containment: GITMETA-BWRAP
+			requireGitMetaUnchanged(t, root, before, resDetail(res), a.protectedOnly(true))
+		})
+	}
+}
+
+// bwrapHostGitEnv is the host-side git environment: no global or system
+// configuration, so only the fixture's own repository config applies.
+var bwrapHostGitEnv = []string{"PATH=/usr/bin:/bin", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1"}
+
+// writeRealGitFixture builds with real git, on the host side of the sandbox,
+// the workspace evidence/721/spike/fixture.sh builds: a repository with a
+// pre-commit hook, submodule m, linked worktree wt, an independent nested
+// repository and an uninitialized submodule u (added, deinitialized, its git
+// dir removed). Every repository carries a local identity, since the bwrap
+// payload environment has none. Unlike the spike, the submodule source src-m
+// is inside the workspace: from outside it, an in-sandbox clone would fail on
+// the missing source, and git's local-clone hard links would fail the
+// workspace link check, whatever the git metadata protection did.
+func writeRealGitFixture(t *testing.T, root string) {
+	t.Helper()
+	git := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("/usr/bin/git", args...)
+		cmd.Dir = filepath.Join(root, dir)
+		cmd.Env = bwrapHostGitEnv
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("fixture git %q in %q: %v\n%s", args, dir, err, out)
+		}
+	}
+	write := func(rel, body string, mode os.FileMode) {
+		t.Helper()
+		p := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(body), mode); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(p, mode); err != nil { // umask-proof
+			t.Fatal(err)
+		}
+	}
+	repo := func(dir, file string) {
+		t.Helper()
+		git(".", "init", "-q", "-b", "main", dir)
+		git(dir, "config", "user.name", "fixture")
+		git(dir, "config", "user.email", "fixture@example.invalid")
+		write(filepath.Join(dir, file), "x\n", 0o644)
+		git(dir, "add", "-A")
+		git(dir, "commit", "-qm", "init")
+	}
+	git(".", "init", "-q", "-b", "main")
+	git(".", "config", "user.name", "fixture")
+	git(".", "config", "user.email", "fixture@example.invalid")
+	write("a.txt", "hello\n", 0o644)
+	write("src/x.go", "package x\n", 0o644)
+	git(".", "add", "-A")
+	git(".", "commit", "-qm", "init")
+	write(".git/hooks/pre-commit", "#!/bin/sh\nexit 0\n", 0o755)
+	repo("nested", "n.txt")
+	repo("src-m", "s.txt")
+	src := filepath.Join(root, "src-m")
+	git(".", "-c", "protocol.file.allow=always", "submodule", "add", "-q", src, "m")
+	git("m", "config", "user.name", "fixture")
+	git("m", "config", "user.email", "fixture@example.invalid")
+	git(".", "commit", "-qm", "add submodule m")
+	git(".", "worktree", "add", "-q", "wt", "-b", "wtbranch")
+	git(".", "-c", "protocol.file.allow=always", "submodule", "add", "-q", src, "u")
+	git(".", "commit", "-qm", "add submodule u")
+	git(".", "submodule", "deinit", "-q", "-f", "u")
+	if err := os.RemoveAll(filepath.Join(root, ".git", "modules", "u")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestBwrapGitOrdinaryOps: the git operations a legitimate command runs keep
+// working under the git metadata protection, and the ones that write
+// protected metadata fail — the recorded intended changes (design §7, §11.5).
+// submodule-update-init pins §11.5's claim, unmeasured by the spike, that it
+// fails on bwrap. Each refusal also runs unsandboxed on a fresh fixture and
+// must succeed there, so a refusal is the sandbox's doing, not a broken
+// command.
+func TestBwrapGitOrdinaryOps(t *testing.T) {
+	requireBwrapCapability(t)
+	requireBwrapTool(t, "/usr/bin/git")
+	cfg := SandboxConfig{Runtime: SandboxRuntimeBwrap}
+	ops := []struct {
+		name, snippet string
+		wantOK        bool
+	}{
+		{"add-commit", `echo more >> a.txt && git add a.txt && git commit -qm c2`, true},
+		{"branch-switch", `git checkout -q -b feature && git checkout -q main`, true},
+		{"stash", `echo wip >> a.txt && git stash push -q && git stash pop -q`, true},
+		{"gc", `git gc -q`, true},
+		{"submodule-commit", `cd m && echo x >> s.txt && git commit -qam subc`, true},
+		{"submodule-gc", `cd m && git gc -q`, true},
+		{"submodule-commit-graph", `cd m && git commit-graph write --reachable`, true},
+		{"submodule-branch-named-info", `cd m && git branch info && git branch -D info`, true},
+		{"nested-commit", `cd nested && echo x >> n.txt && git commit -qam nc`, true},
+		{"linkedwt-commit", `cd wt && echo x >> a.txt && git commit -qam wtc`, true},
+		{"rebase", `git checkout -q -b f3 && echo f >> src/x.go && git commit -qam f3 && git checkout -q main &&` +
+			` echo m >> a.txt && git commit -qam m2 && git checkout -q f3 && git rebase -q main`, true},
+		{"config-set", `git config user.name x`, false},
+		{"hookspath-set", `git config core.hooksPath .h`, false},
+		{"sparse-checkout", `git sparse-checkout init`, false},
+		{"worktree-add", `git worktree add -q wt2 -b wt2b`, false},
+		{"submodule-update-init", `git -c protocol.file.allow=always submodule update --init`, false},
+	}
+	for _, op := range ops {
+		t.Run(op.name, func(t *testing.T) {
+			root := canonGitTempDir(t)
+			writeRealGitFixture(t, root)
+			res := realBwrapRun(t, cfg, root, []string{"/bin/sh", "-c", op.snippet})
+			// containment: GITMETA-BWRAP
+			if (res.ExitCode == 0) != op.wantOK {
+				t.Fatalf("exit %d, want success=%v; stdout %q, stderr %q", res.ExitCode, op.wantOK, res.Stdout, res.Stderr)
+			}
+			if op.wantOK {
+				return
+			}
+			t.Logf("refused: exit %d, stderr %q", res.ExitCode, res.Stderr)
+			// The refusal is the protection's: a read-only mount (EROFS) or a
+			// rename onto a mounted file (EBUSY), not another failure.
+			if stderr := string(res.Stderr); !strings.Contains(stderr, "Read-only file system") &&
+				!strings.Contains(stderr, "Device or resource busy") {
+				t.Fatalf("refusal does not name the protection: stderr %q", stderr)
+			}
+			control := canonGitTempDir(t)
+			writeRealGitFixture(t, control)
+			cmd := exec.Command("/bin/sh", "-c", op.snippet)
+			cmd.Dir = control
+			cmd.Env = append([]string{"HOME=" + bwrapTestHome}, bwrapHostGitEnv...)
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("unsandboxed control failed, so the refusal proves nothing: %v\n%s", err, out)
+			}
+		})
+	}
+}
+
+// TestBwrapGitMetadataManySubmodules: an argv with 300 discovered submodule
+// git dirs still runs, and its last git dir is protected.
+func TestBwrapGitMetadataManySubmodules(t *testing.T) {
+	requireBwrapCapability(t)
+	cfg := SandboxConfig{Runtime: SandboxRuntimeBwrap}
+	root := canonGitTempDir(t)
+	writeGitFixture(t, root)
+	for i := range 300 {
+		g := filepath.Join(root, ".git", "modules", fmt.Sprintf("s%03d", i))
+		for _, d := range []string{"objects", "hooks"} {
+			if err := os.MkdirAll(filepath.Join(g, d), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.WriteFile(filepath.Join(g, "HEAD"), []byte("ref: refs/heads/main\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if res := realBwrapRun(t, cfg, root, []string{"/usr/bin/true"}); res.ExitCode != 0 {
+		t.Fatalf("/usr/bin/true: exit %d, stderr %q", res.ExitCode, res.Stderr)
+	}
+	// containment: GITMETA-BWRAP
+	hook := filepath.Join(root, ".git", "modules", "s299", "hooks", "pre-commit")
+	res := realBwrapRun(t, cfg, root, []string{"/bin/sh", "-c", "echo P > .git/modules/s299/hooks/pre-commit"})
+	if _, err := os.Lstat(hook); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("s299 hook planted or unreadable (exit %d, stderr %q): %v", res.ExitCode, res.Stderr, err)
+	}
+	if res.ExitCode == 0 || !strings.Contains(string(res.Stderr), "Read-only") {
+		t.Fatalf("s299 hook write not refused by the read-only mount: %s", resDetail(res))
+	}
+}
+
+// TestBwrapGitMetadataExecInsideHooks: the protection is write-only, so an
+// approved executable inside .git/hooks (covered by the read-only hooks
+// mount, which replaces its executable literal) still runs.
+func TestBwrapGitMetadataExecInsideHooks(t *testing.T) {
+	requireBwrapCapability(t)
+	root := canonGitTempDir(t)
+	writeGitFixture(t, root)
+	res := realBwrapRun(t, SandboxConfig{Runtime: SandboxRuntimeBwrap}, root,
+		[]string{filepath.Join(root, ".git", "hooks", "pre-commit")})
+	// containment: GITMETA-BWRAP
+	if res.ExitCode != 0 {
+		t.Fatalf("hook exe: exit %d, stderr %q", res.ExitCode, res.Stderr)
+	}
+}
+
+// TestBwrapVerifierCannotPlantHook: a bwrap verifier command runs under the
+// same git metadata protection as exec.
+func TestBwrapVerifierCannotPlantHook(t *testing.T) {
+	requireBwrapCapability(t)
+	cfg := SandboxConfig{Runtime: SandboxRuntimeBwrap}
+	root := canonGitTempDir(t)
+	writeGitFixture(t, root)
+	before := gitMetaSnapshot(t, root)
+	slot := newTestSlot(t, root, cfg)
+	cmd, err := NewSandboxedVerifyCommand(mustWorkspace(t, root), cfg,
+		[]string{"/bin/sh", "-c", "echo P > .git/hooks/pre-commit"}, "", 30*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := slot.Set(cmd); err != nil {
+		t.Fatal(err)
+	}
+	out, err := slot.Verify(context.Background(), approved())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// containment: GITMETA-BWRAP
+	requireGitMetaUnchanged(t, root, before, "verifier observation:\n"+out, false)
+	// The shell ran and its write was refused: not a vacuous pass where
+	// nothing spawned.
+	if !strings.Contains(out, "status: failed\n") || !strings.Contains(out, "pre-commit: Read-only file system") {
+		t.Errorf("observation:\n%s\nwant a failed run whose hook write was refused", out)
+	}
+}
+
+// TestBwrapNarrowForeground and its three siblings prove network narrowing
+// (#584) on the real bwrap backend, through real strict runs with the
+// default suspension predicate: a policy that allows network runs an
+// exposed conversation's command network=ip-denied (proveNarrowRoute),
+// following TestBwrapAllowNetworkControl.
+func TestBwrapNarrowForeground(t *testing.T) { bwrapNarrow(t, routeForeground) }
+
+func TestBwrapNarrowScratch(t *testing.T) { bwrapNarrow(t, routeScratch) }
+
+func TestBwrapNarrowBackground(t *testing.T) { bwrapNarrow(t, routeBackground) }
+
+func TestBwrapNarrowVerifier(t *testing.T) { bwrapNarrow(t, routeVerifier) }
+
+// bwrapNarrow runs proveNarrowRoute for route, with the workspace copy of
+// the bwrap helper as the command.
+func bwrapNarrow(t *testing.T, route narrowRoute) {
+	// containment: STRICT-9
+	t.Helper()
+	requireBwrapCapability(t)
+	ws := wsTempDir(t)
+	helper := bwrapHelperBinary(t, ws)
+	token := bwrapToken(t)
+	cfg := SandboxConfig{Runtime: SandboxRuntimeBwrap, AllowNetwork: true}
+	proveNarrowRoute(t, route, cfg, "ip-denied", ws, func(network, addr string) []string {
+		return bwrapHelperArgv(helper, network, addr, token)
+	})
+}
+
+// TestBwrapNarrowWorkspacePathSocketReachable pins the limit the narrowed
+// copy discloses, as TestBwrapWorkspacePathSocketIsReachable pins it for a
+// network-denied policy: in an exposed strict run, a pathname Unix socket
+// inside the shared workspace stays reachable.
+func TestBwrapNarrowWorkspacePathSocketReachable(t *testing.T) {
+	// containment: STRICT-9
+	requireBwrapCapability(t)
+	ws := wsTempDir(t)
+	helper := bwrapHelperBinary(t, ws)
+	sock := filepath.Join(ws, "chan.sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ln.Close() }()
+	accepted := make(chan struct{}, 1)
+	go func() {
+		if conn, err := ln.Accept(); err == nil {
+			accepted <- struct{}{}
+			_ = conn.Close()
+		}
+	}()
+	cfg := SandboxConfig{Runtime: SandboxRuntimeBwrap, AllowNetwork: true}
+	preview, result := runNarrowRoute(t, routeForeground, cfg, ws, bwrapHelperArgv(helper, "unixdial", sock), exposedPrior())
+	if !strings.Contains(preview, " network=ip-denied ") {
+		t.Errorf("approved preview lacks network=ip-denied:\n%s", preview)
+	}
+	select {
+	case <-accepted:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("workspace pathname socket unreachable from the narrowed command (limitation contract changed): %s", result)
+	}
 }

@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -54,6 +55,7 @@ func probeBackend(t *testing.T, execPath string) *seatbeltBackend {
 		starter:     unixStarter{},
 		tempBase:    base,
 		systemRoots: func(string) ([]string, error) { return []string{"/usr/lib", "/bin"}, nil },
+		inspect:     inspectSandboxWorkspace,
 	}
 }
 
@@ -375,6 +377,51 @@ func TestSeatbeltConstructorSucceedsOnProbeSuccess(t *testing.T) {
 	}
 }
 
+// TestSeatbeltBackendUsesNativeSpawn pins the production wiring (#712): both
+// lifetimes start commands through nativeSpawn, never os/exec. The real probe
+// runs against a fake applier, so construction spawns natively on any darwin
+// host.
+func TestSeatbeltBackendUsesNativeSpawn(t *testing.T) {
+	backend, err := newSeatbeltExecBackendAt(writeFakeSandboxExec(t, "exit 0\n"), probeSeatbelt, seatbeltTestCfg())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sb, ok := backend.(*seatbeltBackend)
+	if !ok {
+		t.Fatalf("backend = %T, want *seatbeltBackend", backend)
+	}
+	runner, ok := sb.runner.(unixRunner)
+	if !ok {
+		t.Fatalf("runner = %T, want unixRunner", sb.runner)
+	}
+	starter, ok := sb.starter.(unixStarter)
+	if !ok {
+		t.Fatalf("starter = %T, want unixStarter", sb.starter)
+	}
+	native := reflect.ValueOf(nativeSpawn).Pointer()
+	if runner.spawn == nil || reflect.ValueOf(runner.spawn).Pointer() != native {
+		t.Error("runner does not spawn through nativeSpawn")
+	}
+	if starter.spawn == nil || reflect.ValueOf(starter.spawn).Pointer() != native {
+		t.Error("starter does not spawn through nativeSpawn")
+	}
+}
+
+// TestSeatbeltConstructionFailsWhenRegisteredPortsStay: the probe is the
+// backend's first native spawn, so a registered-port table that will not
+// empty fails construction (design D4) rather than the first command. Not
+// parallel: it swaps the package-level guard.
+func TestSeatbeltConstructionFailsWhenRegisteredPortsStay(t *testing.T) {
+	orig := registeredPortsGuard
+	t.Cleanup(func() { registeredPortsGuard = orig })
+	registeredPortsGuard = func() error { return errRegisteredPortsNotEmpty }
+
+	backend, err := newSeatbeltExecBackend(seatbeltTestCfg())
+	if backend != nil || !errors.Is(err, errRegisteredPortsNotEmpty) {
+		t.Fatalf("construction = (%T, %v), want errRegisteredPortsNotEmpty", backend, err)
+	}
+}
+
 // captureRunner records the spec it was invoked with and returns a canned
 // result; the optional during hook runs mid-delegation to model races.
 type captureRunner struct {
@@ -410,6 +457,7 @@ func testSeatbeltBackend(t *testing.T, runner commandRunner) (*seatbeltBackend, 
 		systemRoots: func(string) ([]string, error) {
 			return []string{"/usr/lib", "/bin"}, nil
 		},
+		inspect: inspectSandboxWorkspace,
 	}, base
 }
 
@@ -430,6 +478,7 @@ func seatbeltSpec(t *testing.T, ws string) execSpec {
 		Dir:           ws,
 		Env:           []string{"PATH=/usr/bin", "HOME=/Users/nobody"},
 		WorkspaceRoot: ws,
+		Screen:        testScreen(),
 	}
 	s.ExeIdentity = execIdentityOf(t, s.Path)
 	return s
@@ -966,6 +1015,12 @@ func realSeatbeltRun(t *testing.T, cfg SandboxConfig, ws string, argv []string, 
 	if err != nil {
 		t.Fatal(err)
 	}
+	return seatbeltRunWith(t, backend, ws, argv, extraEnv...)
+}
+
+// seatbeltRunWith is realSeatbeltRun over a caller-built backend.
+func seatbeltRunWith(t *testing.T, backend commandRunner, ws string, argv []string, extraEnv ...string) execResult {
+	t.Helper()
 	spec := execSpec{
 		Path:          argv[0],
 		Argv:          argv,
@@ -973,6 +1028,7 @@ func realSeatbeltRun(t *testing.T, cfg SandboxConfig, ws string, argv []string, 
 		Env:           append([]string{"PATH=/usr/bin:/bin", "HOME=" + os.Getenv("HOME")}, extraEnv...),
 		WorkspaceRoot: ws,
 		ExeIdentity:   execIdentityOf(t, argv[0]),
+		Screen:        testScreen(),
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -1412,6 +1468,19 @@ func TestSeatbeltBehavioralPublicWiring(t *testing.T) {
 	}
 }
 
+// TestSeatbeltRunScreensOutput: the backend's by-value spec copy keeps the
+// screen, and the match note survives the backend's own note handling.
+func TestSeatbeltRunScreensOutput(t *testing.T) {
+	// containment: CMP-EXEC-CREDENTIAL-OUTPUT-SEATBELT
+	requireSeatbeltCapability(t)
+	root := t.TempDir()
+	toolsList, err := NewSandboxedExecTools(root, seatbeltTestCfg())
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertScreensOutput(t, toolsList[0].(*RunCommand), root)
+}
+
 func seatbeltTestCfg() SandboxConfig { return SandboxConfig{Runtime: SandboxRuntimeSeatbelt} }
 
 // --- Background lifetime acceptance (Task 7) ---
@@ -1601,25 +1670,6 @@ func bgStart(t *testing.T, byName map[string]agent.Tool, argvJSON string) string
 	return ""
 }
 
-func bgAwaitExit(t *testing.T, byName map[string]agent.Tool, handle string) string {
-	t.Helper()
-	status := byName["command_status"].(*CommandStatus)
-	raw := json.RawMessage(fmt.Sprintf(`{"handle":%q}`, handle))
-	deadline := time.Now().Add(15 * time.Second)
-	for time.Now().Before(deadline) {
-		res, err := status.Invoke(context.Background(), raw)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !strings.Contains(res.Content, "state: running") {
-			return res.Content
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	t.Fatal("background job never exited")
-	return ""
-}
-
 // TestSeatbeltBehavioralBackgroundPublicConfinement drives the PUBLIC
 // background constructors end to end: an outside write is denied (the probe
 // file never appears) while a workspace write succeeds — through
@@ -1706,7 +1756,7 @@ func TestNewExecBackendSeatbeltMatchesRealCapability(t *testing.T) {
 	if !strings.HasPrefix(got.approval.keyComponent, "sb:") {
 		t.Fatalf("seatbelt must get a sandbox key namespace, got %q", got.approval.keyComponent)
 	}
-	want := `runtime="seatbelt" network=denied memory_cap=none cpu_limit=none drop_caps=[] temp=private`
+	want := `runtime="seatbelt" network=denied memory_cap=none cpu_limit=none drop_caps=[] temp=private git_metadata=ro`
 	if got.approval.preview != want {
 		t.Fatalf("preview = %q, want %q", got.approval.preview, want)
 	}
@@ -2714,6 +2764,7 @@ func seatbeltShellSpec(t *testing.T, ws, script string) execSpec {
 		Env:           []string{"PATH=/usr/bin:/bin", "HOME=" + os.Getenv("HOME")},
 		WorkspaceRoot: ws,
 		ExeIdentity:   execIdentityOf(t, "/bin/sh"),
+		Screen:        testScreen(),
 	}
 }
 
@@ -2866,7 +2917,7 @@ func TestSeatbeltNetsrcNotInherited(t *testing.T) {
 	spec := execSpec{
 		Path: exe, Argv: []string{exe, "-test.run=^TestSeatbeltHelperProcess$", "--", "netsrcclosed", fmt.Sprint(fd), fmt.Sprint(id)},
 		Dir: ws, WorkspaceRoot: ws, ExeIdentity: execIdentityOf(t, exe),
-		Env: []string{"PATH=/usr/bin:/bin", "GO_LLM_SEATBELT_HELPER=1"},
+		Env: []string{"PATH=/usr/bin:/bin", "GO_LLM_SEATBELT_HELPER=1"}, Screen: testScreen(),
 	}
 	for _, background := range []bool{false, true} {
 		t.Run(fmt.Sprintf("background=%t", background), func(t *testing.T) {
@@ -3079,4 +3130,250 @@ func TestProbeSeatbeltUnavailableInsideASandbox(t *testing.T) {
 	if !strings.Contains(string(out), want) {
 		t.Fatalf("sandboxed child output:\n%s\nwant a line starting %q", out, want)
 	}
+}
+
+// --- Git metadata deny (#721): real processes under real sandbox-exec ---
+//
+// The rows write with the shell, not git: the production profile cannot run
+// git at all (it denies Homebrew git its pcre2 dylib and Apple's git its
+// developer directory); real git under these rules was measured in the #721
+// spike.
+
+// realSeatbeltBackend builds one real Seatbelt backend (construction runs the
+// probe) for a test's many seatbeltRunWith calls.
+func realSeatbeltBackend(t *testing.T) resolvedExecBackend {
+	t.Helper()
+	backend, err := newExecBackend(seatbeltTestCfg())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return backend
+}
+
+// gitMetaAttackNamed returns the gitMetaAttacks row called name.
+func gitMetaAttackNamed(t *testing.T, name string) gitMetaAttack {
+	t.Helper()
+	for _, a := range gitMetaAttacks {
+		if a.name == name {
+			return a
+		}
+	}
+	t.Fatalf("gitMetaAttacks has no row %q", name)
+	return gitMetaAttack{}
+}
+
+// runGitMetaAttack is runGitMetaAttackWith through a real Seatbelt backend.
+func runGitMetaAttack(t *testing.T, backend commandRunner, root string, a gitMetaAttack) (before string, res execResult) {
+	t.Helper()
+	return runGitMetaAttackWith(t, root, a, func(snippet string) execResult {
+		return seatbeltRunWith(t, backend, root, []string{"/bin/sh", "-c", snippet})
+	})
+}
+
+// TestSeatbeltGitMetadataDenied: no attack row, Seatbelt-only rows included,
+// changes the git metadata under the production profile.
+func TestSeatbeltGitMetadataDenied(t *testing.T) {
+	requireSeatbeltCapability(t)
+	backend := realSeatbeltBackend(t)
+	for _, a := range gitMetaAttacks {
+		t.Run(a.name, func(t *testing.T) {
+			root := canonTempDirT(t)
+			// containment: GITMETA-SEATBELT
+			before, res := runGitMetaAttack(t, backend, root, a)
+			requireGitMetaUnchanged(t, root, before, resDetail(res), a.protectedOnly(false))
+		})
+	}
+}
+
+// TestSeatbeltGitMetadataDeniedWithoutDiscovery: with discovery returning
+// nothing, the profile's any-depth rules (1-4) alone still refuse the
+// top-level rows, so a discovery bug cannot weaken them. The control row runs
+// first: it needs a per-git-dir rule, so it changing the snapshot shows the
+// empty layout reached the profile and the rows test rules 1-4 alone.
+func TestSeatbeltGitMetadataDeniedWithoutDiscovery(t *testing.T) {
+	requireSeatbeltCapability(t)
+	backend := realSeatbeltBackend(t)
+	sb, ok := backend.execBackend.(*seatbeltBackend)
+	if !ok {
+		t.Fatalf("backend = %T, want *seatbeltBackend", backend.execBackend)
+	}
+	sb.inspect = func(string) (sandboxGitLayout, error) { return sandboxGitLayout{}, nil }
+	root := canonTempDirT(t)
+	// containment: GITMETA-SEATBELT
+	if before, res := runGitMetaAttack(t, backend, root, gitMetaAttackNamed(t, "submodule-hook")); gitMetaSnapshot(t, root) == before {
+		t.Fatalf("control: submodule hook write refused with no discovered git dirs (%s). Either the stubbed "+
+			"inspect never reached the profile, or rules 1-4 now cover submodule hooks and the control needs "+
+			"a row they do not; the rows below would prove nothing", resDetail(res))
+	}
+	for _, name := range []string{"direct-hook", "direct-config", "commondir-create",
+		"rename-parent", "modules-container-rename", "uninit-preplant"} {
+		a := gitMetaAttackNamed(t, name)
+		t.Run(name, func(t *testing.T) {
+			root := canonTempDirT(t)
+			before, res := runGitMetaAttack(t, backend, root, a)
+			requireGitMetaUnchanged(t, root, before, resDetail(res), a.protectedOnly(false))
+		})
+	}
+}
+
+// TestSeatbeltGitMetadataOrdinaryWritesAllowed: the writes git itself makes
+// in normal use (index, objects, refs, a submodule's commit-graph, a branch
+// named info, a linked worktree's index) and look-alike names outside git
+// metadata stay writable.
+func TestSeatbeltGitMetadataOrdinaryWritesAllowed(t *testing.T) {
+	requireSeatbeltCapability(t)
+	backend := realSeatbeltBackend(t)
+	root := canonTempDirT(t)
+	writeGitFixture(t, root)
+	for _, rel := range []string{".git/index", ".git/objects/ab/cd", ".git/refs/heads/x",
+		".git/COMMIT_EDITMSG", ".git/modules/m/index", ".git/modules/m/objects/info/commit-graph",
+		".git/modules/m/refs/heads/info", ".git/worktrees/wt/index", "xgit", "src/hooks/x"} {
+		t.Run(rel, func(t *testing.T) {
+			res := seatbeltRunWith(t, backend, root,
+				[]string{"/bin/sh", "-c", `mkdir -p "$(dirname "$1")" && echo x > "$1"`, "sh", rel})
+			// containment: GITMETA-SEATBELT
+			if res.ExitCode != 0 {
+				t.Fatalf("write %s: %s", rel, resDetail(res))
+			}
+			if _, err := os.Lstat(filepath.Join(root, rel)); err != nil {
+				t.Fatalf("write %s exited 0 but: %v", rel, err)
+			}
+		})
+	}
+}
+
+// TestSeatbeltGitMetadataRegexIsLiteral: in a workspace root holding regex
+// metacharacters and a double quote, every regex family of the deny matches
+// its prefix literally, so it still fires there and does not widen to xgit.
+// One row per family: direct-hook needs the root-anchored rules (1-4),
+// nested-submodule-rename a git dir's containers regex (rule 5), and
+// intermediate-preplant an intermediate's regex (rule 6); the discovered
+// prefixes carry the same metacharacter root.
+func TestSeatbeltGitMetadataRegexIsLiteral(t *testing.T) {
+	requireSeatbeltCapability(t)
+	backend := realSeatbeltBackend(t)
+	metaRoot := func(t *testing.T) string {
+		root := filepath.Join(canonTempDirT(t), `ws+(v2)"q`)
+		if err := os.Mkdir(root, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return root
+	}
+	t.Run("xgit", func(t *testing.T) {
+		root := metaRoot(t)
+		if res := seatbeltRunWith(t, backend, root, []string{"/usr/bin/touch", filepath.Join(root, "xgit")}); res.ExitCode != 0 {
+			t.Fatalf("touch xgit: %s", resDetail(res))
+		}
+	})
+	// containment: GITMETA-SEATBELT
+	for _, name := range []string{"direct-hook", "nested-submodule-rename", "intermediate-preplant"} {
+		a := gitMetaAttackNamed(t, name)
+		t.Run(name, func(t *testing.T) {
+			root := metaRoot(t)
+			before, res := runGitMetaAttack(t, backend, root, a)
+			requireGitMetaUnchanged(t, root, before, resDetail(res), a.protectedOnly(false))
+		})
+	}
+}
+
+// TestSeatbeltGitMetadataManySubmodules: a profile with 300 discovered
+// submodule git dirs still compiles and runs, and its last git dir is
+// protected.
+func TestSeatbeltGitMetadataManySubmodules(t *testing.T) {
+	requireSeatbeltCapability(t)
+	backend := realSeatbeltBackend(t)
+	root := canonTempDirT(t)
+	writeGitFixture(t, root)
+	for i := range 300 {
+		g := filepath.Join(root, ".git", "modules", fmt.Sprintf("s%03d", i))
+		for _, d := range []string{"objects", "hooks"} {
+			if err := os.MkdirAll(filepath.Join(g, d), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.WriteFile(filepath.Join(g, "HEAD"), []byte("ref: refs/heads/main\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if res := seatbeltRunWith(t, backend, root, []string{"/usr/bin/true"}); res.ExitCode != 0 {
+		t.Fatalf("/usr/bin/true: %s", resDetail(res))
+	}
+	// containment: GITMETA-SEATBELT
+	hook := filepath.Join(root, ".git", "modules", "s299", "hooks", "pre-commit")
+	res := seatbeltRunWith(t, backend, root, []string{"/bin/sh", "-c", "echo P > .git/modules/s299/hooks/pre-commit"})
+	if _, err := os.Lstat(hook); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("s299 hook planted or unreadable (%s): %v", resDetail(res), err)
+	}
+}
+
+// TestSeatbeltGitMetadataExecInsideHooks: the deny is write-only, so an
+// approved executable inside .git/hooks still runs.
+func TestSeatbeltGitMetadataExecInsideHooks(t *testing.T) {
+	requireSeatbeltCapability(t)
+	root := canonTempDirT(t)
+	writeGitFixture(t, root)
+	// containment: GITMETA-SEATBELT
+	if res := realSeatbeltRun(t, seatbeltTestCfg(), root, []string{filepath.Join(root, ".git", "hooks", "pre-commit")}); res.ExitCode != 0 {
+		t.Fatalf("hook exe: %s", resDetail(res))
+	}
+}
+
+// TestSeatbeltVerifierCannotPlantHook: a Seatbelt verifier command runs under
+// the same deny as exec.
+func TestSeatbeltVerifierCannotPlantHook(t *testing.T) {
+	requireSeatbeltCapability(t)
+	root := canonTempDirT(t)
+	writeGitFixture(t, root)
+	before := gitMetaSnapshot(t, root)
+	slot := newTestSlot(t, root, seatbeltTestCfg())
+	cmd, err := NewSandboxedVerifyCommand(mustWorkspace(t, root), seatbeltTestCfg(),
+		[]string{"/bin/sh", "-c", "echo P > .git/hooks/pre-commit"}, "", 30*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := slot.Set(cmd); err != nil {
+		t.Fatal(err)
+	}
+	out, err := slot.Verify(context.Background(), approved())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// containment: GITMETA-SEATBELT
+	requireGitMetaUnchanged(t, root, before, "verifier observation:\n"+out, false)
+	// The shell ran and its write was refused: not a vacuous pass where
+	// nothing spawned.
+	if !strings.Contains(out, "status: failed\n") || !strings.Contains(out, "pre-commit: Operation not permitted") {
+		t.Errorf("observation:\n%s\nwant a failed run whose hook write was refused", out)
+	}
+}
+
+// TestSeatbeltNarrowForeground and its three siblings prove network
+// narrowing (#584) on the real Seatbelt backend, through real strict runs
+// with the default suspension predicate: a policy that allows network runs
+// an exposed conversation's command network=denied (proveNarrowRoute).
+func TestSeatbeltNarrowForeground(t *testing.T) { seatbeltNarrow(t, routeForeground) }
+
+func TestSeatbeltNarrowScratch(t *testing.T) { seatbeltNarrow(t, routeScratch) }
+
+func TestSeatbeltNarrowBackground(t *testing.T) { seatbeltNarrow(t, routeBackground) }
+
+func TestSeatbeltNarrowVerifier(t *testing.T) { seatbeltNarrow(t, routeVerifier) }
+
+// seatbeltNarrow runs proveNarrowRoute for route, with this test binary's
+// dial helper as the command.
+func seatbeltNarrow(t *testing.T, route narrowRoute) {
+	// containment: STRICT-8
+	t.Helper()
+	requireSeatbeltCapability(t)
+	if raceInstrumented {
+		t.Skip("race-instrumented helper cannot initialize under the sandbox; helper legs run in the non-race pass")
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := SandboxConfig{Runtime: SandboxRuntimeSeatbelt, AllowNetwork: true}
+	proveNarrowRoute(t, route, cfg, "denied", canonTempDirT(t), func(network, addr string) []string {
+		return []string{exe, "__golem_exec_helper__", "dial", network, addr}
+	})
 }

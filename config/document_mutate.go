@@ -33,7 +33,7 @@ func (d *Document) mutateCommit(fn func(authored *Config) error, commit func()) 
 		return err
 	}
 	effective := authored.clone()
-	if err := effective.finalizeEnv(d.env); err != nil {
+	if err := effective.finalizeEnv(d.env, d.origin.Source); err != nil {
 		return err
 	}
 	// Both tombstone diffs below compare the closure's NET effect: an entry

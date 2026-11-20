@@ -42,6 +42,8 @@ type ProviderResolver interface {
 // Profiles are cached by ModelKey after the first Lookup. The initial
 // implementation returns the cached profile on cache hit without digest
 // revalidation; callers that need freshness guarantees must use Refresh.
+// With WithEvidenceLog, routing boundaries also drop cached profiles when the
+// log's generation moves, and Lookup drops one whose evidence changes with time.
 //
 // Ownership: at most ONE live Router may attach to a ModelRegistry.
 // NewRouter installs itself as the registry's probe-admission gate, and
@@ -62,7 +64,7 @@ type ModelRegistry struct {
 	thinkOverride          ThinkOverride
 	contextOverride        ContextWindowOverride
 	qualityCeilingOverride QualityCtxCeilingOverride
-	overrideVersion        uint64 // bumped by policy setters and invalidateProfile; guards stale cache writes in buildProfile
+	overrideVersion        uint64 // bumped by policy setters, invalidateProfile and syncGeneration; guards stale cache writes in buildProfile
 	rejectionHook          OverrideRejectionHook
 
 	// Capability-probe resolution (ResolveToolCall). Both fields are set
@@ -83,6 +85,45 @@ type ModelRegistry struct {
 	// via setSlotAdmitter; guarded by mu. AT MOST ONE LIVE Router may own
 	// admission for a registry -- see setSlotAdmitter.
 	admitter slotAdmitter
+
+	// Evidence log (#734). The store and binder are set only at construction by
+	// WithEvidenceLog and read without mu; nil store means the legacy path.
+	evidenceStore fingerprint.EvidenceStore
+	evidenceBind  func(provider string) (EvidenceBinding, bool)
+	now           func() time.Time
+	// syncedGeneration is the log generation syncGeneration last acted on. The
+	// store's starts at 0, so a zero here is the true state of a new store. Every
+	// published profile was built at it or later, because moving it bumps
+	// overrideVersion. Guarded by mu.
+	syncedGeneration int64
+	// profileDeadlines holds, for a cached profile whose evidence changes with
+	// time, the first instant it does. Publication always overwrites a key's entry,
+	// so one whose profile has gone is harmless. Guarded by mu.
+	profileDeadlines map[ModelKey]time.Time
+
+	// Automatic capability checks on a log-bound registry. progress is set only
+	// at construction; progressMu serializes its calls and is never held with mu.
+	// budgetMu guards the allowance and the set of keys already reported as
+	// refused it.
+	progress        func(CapabilityProbeProgress)
+	progressMu      sync.Mutex
+	budgetMu        sync.Mutex
+	budgetRemaining int
+	budgetReported  map[ModelKey]bool
+
+	// kept holds, for the registry's life, the rows of completed checks whose
+	// append failed (keepUnsavedEvidence). A kept row's ID is
+	// math.MinInt64 plus its index here. Guarded by mu.
+	//
+	// ponytail: never compacted, so it grows by at most three rows per failed
+	// generation check and seven per failed native check, with no lifetime
+	// bound on native checks. Every readEvidence makes one pass over all kept
+	// rows under RLock, copying the matching ones, and the reduction and
+	// NextReadingTransition (quadratic in a model's rows) then run outside it.
+	// Upgrade path if it ever matters: drop a kept row only when another kept
+	// row of the same slot is newer and, for an answer, does not expire before
+	// it, and give IDs their own counter (they are derived from len(kept)).
+	kept []fingerprint.EvidenceRow
 }
 
 // FingerprintProberSpec contains the model prober and digest identity the
@@ -126,7 +167,10 @@ func (r *ModelRegistry) bindMetaPurpose(ctx context.Context, purpose, providerNa
 
 // WithFingerprintProberFactory installs provider-aware fingerprint prober
 // selection. The factory is used only when NewModelRegistry also receives a
-// non-nil fingerprint.Store.
+// non-nil fingerprint.Store. With WithEvidenceLog a lookup never profiles: the
+// factory still supplies the identity stored profiles are validated against,
+// exactly as without the log, but EnsureProfile (DetectKind, ProbeChat) is not
+// called.
 func WithFingerprintProberFactory(fn FingerprintProberFactory) ModelRegistryOption {
 	return func(r *ModelRegistry) {
 		r.fpProberFactory = fn
@@ -156,7 +200,8 @@ func WithCapabilityProbeStore(store fingerprint.CapProbeStore) ModelRegistryOpti
 // for on-demand capability resolution (ResolveToolCall). Unlike
 // WithFingerprintProberFactory it never triggers full profiling from
 // Lookup: Lookup/Recommend stay pure, and active probes run only at the
-// named call sites (golem preflight, router candidate resolution).
+// named call sites (golem preflight, router candidate resolution). Resolution
+// needs this and either WithCapabilityProbeStore or WithEvidenceLog.
 func WithCapabilityProber(fn FingerprintProberFactory) ModelRegistryOption {
 	return func(r *ModelRegistry) {
 		r.capProber = fn
@@ -206,6 +251,9 @@ type CapabilityOverride func(key ModelKey) []string
 // CapInsert (`&^= CapInsert`) when the model's template lacks suffix
 // markers, so a floor-supplied "insert" bit may still be removed by
 // runtime template detection. Every other floor bit is OR-only.
+//
+// With WithEvidenceLog the floor is the precedence core's type tier: a
+// checked or provider-reported no beats a floor bit.
 type CapabilityFloor func(key ModelKey) []string
 
 // OverrideRejectionHook is called when a capability override returned a
@@ -359,10 +407,14 @@ func NewModelRegistry(providers ProviderResolver, fpStore fingerprint.Store, opt
 	}
 
 	r := &ModelRegistry{
-		profiles:  make(map[ModelKey]*ModelProfile),
-		catalog:   newStaticCatalog(catData),
-		fpStore:   fpStore,
-		providers: providers,
+		profiles:         make(map[ModelKey]*ModelProfile),
+		catalog:          newStaticCatalog(catData),
+		fpStore:          fpStore,
+		providers:        providers,
+		now:              time.Now,
+		profileDeadlines: make(map[ModelKey]time.Time),
+		budgetRemaining:  automaticProbeAllowance,
+		budgetReported:   make(map[ModelKey]bool),
 	}
 	for _, opt := range opts {
 		opt(r)
@@ -373,14 +425,17 @@ func NewModelRegistry(providers ProviderResolver, fpStore fingerprint.Store, opt
 // Lookup returns the merged ModelProfile for a provider-qualified model key.
 // Results are cached by ModelKey. The initial implementation returns the cached
 // profile on cache hit; callers that need digest revalidation must use Refresh.
+// A cached profile whose deadline has arrived (see WithEvidenceLog) is not
+// returned: it is rebuilt, and publishing the rebuild replaces it and its deadline.
 func (r *ModelRegistry) Lookup(ctx context.Context, key ModelKey) (*ModelProfile, error) {
 	// Check cache first.
 	r.mu.RLock()
-	if cached, ok := r.profiles[key]; ok {
-		r.mu.RUnlock()
+	cached, ok := r.profiles[key]
+	deadline := r.profileDeadlines[key]
+	r.mu.RUnlock()
+	if ok && (deadline.IsZero() || r.now().Before(deadline)) {
 		return cached, nil
 	}
-	r.mu.RUnlock()
 
 	return r.buildProfile(ctx, key)
 }
@@ -402,15 +457,45 @@ func (r *ModelRegistry) Refresh(ctx context.Context, key ModelKey) (*ModelProfil
 //     (declared set contains tool_call => yes, otherwise no), no probe.
 //  2. Merged profile already carries CapToolCall (catalog/floor/runtime/
 //     cached probe row) => yes, no probe.
-//  3. Resolution disabled (no prober or no store) => "" (unknown) -- the
-//     empty state is never a claim.
+//  3. Resolution disabled (no prober, or neither a probe store nor an
+//     evidence log) => "" (unknown) -- the empty state is never a claim.
 //  4. Active probe, singleflight-deduplicated per key: valid cached row
 //     wins, otherwise probe, persist the verdict, and invalidate the
 //     cached profile so the next Lookup re-merges.
 //
-// A non-nil error means the probe was transient (network/auth); nothing
-// is persisted and the state is "".
+// On a registry with an evidence log (WithEvidenceLog), step 4 reads and
+// writes only the log, never capability_probes: a definitive answer in the log
+// returns with no request; an inconclusive attempt still before its ExpiresAt
+// (inclusive) returns inconclusive with no request, which is the 24-hour
+// cooldown, 5 minutes for a check_failed attempt; otherwise the prober must
+// implement fingerprint.CapabilityProber (else ""), and every row the check
+// produced is appended in one call. When
+// that append fails the rows are kept in memory for the registry's life and
+// read beside the log, so this process (a singleflight follower and later
+// callers included) still sees the result; ExplainToolCall marks it Unsaved,
+// another process never sees it, and the write is not retried. A
+// generation check (openai-compat's chat-stream-tools) spends the registry's
+// fixed allowance of 2 requests the check sends, shared by every caller and
+// never refilled; a refused check returns ErrAutomaticProbeBudgetExhausted and
+// sends nothing. A check that returns gives back what it reserved and did not
+// send; a check that panics spends its whole reservation, since a request may
+// already have gone out. Native ollama-show checks spend none. A provider the binder
+// does not resolve returns ErrEvidenceUnbound and a log that cannot be read
+// ErrEvidenceUnreadable; neither starts a check, writes or reserves anything
+// (a runtime metadata request may still have been made).
+//
+// A non-nil error means the probe was transient (network/auth); the state
+// is "" and the prober's result is not persisted. On a log-bound registry a
+// generation check that sent a request and then failed on the server's side
+// (an HTTP 5xx, its own timeout, a broken, malformed or oversized reply), its
+// caller still live, records one fingerprint.DetailCheckFailed attempt that
+// holds off the next automatic check for fingerprint.CapProbeCheckFailedTTL,
+// kept in memory like any row whose append fails; a 1xx-4xx status, a
+// destination denial, a done caller or a check that sent nothing records
+// nothing, since evidence is shared by every key at the endpoint.
 func (r *ModelRegistry) ResolveToolCall(ctx context.Context, key ModelKey) (fingerprint.CapProbeState, error) {
+	r.syncGeneration(ctx)
+
 	// 1. Explicit declaration is authoritative both directions. A rejected
 	// override (non-canonical tokens / zero caps) is a no-op here exactly
 	// as it is in merge(): fall through rather than fabricate a verdict.
@@ -438,7 +523,7 @@ func (r *ModelRegistry) ResolveToolCall(ctx context.Context, key ModelKey) (fing
 	}
 
 	// 3. Resolution disabled: unknown is never a claim.
-	if r.capProber == nil || r.capProbeStore == nil {
+	if !r.canResolveToolCall() {
 		return "", nil
 	}
 
@@ -451,6 +536,9 @@ func (r *ModelRegistry) ResolveToolCall(ctx context.Context, key ModelKey) (fing
 	// if their own ctx was canceled meanwhile.
 	flightKey := strconv.Itoa(len(key.Provider)) + ":" + key.Provider + key.Model
 	v, err, _ := r.capResolveGroup.Do(flightKey, func() (interface{}, error) {
+		if r.evidenceStore != nil {
+			return r.resolveToolCallFromLog(ctx, key)
+		}
 		return r.resolveToolCallSlow(ctx, key)
 	})
 	if err != nil {
@@ -475,8 +563,9 @@ func (r *ModelRegistry) setSlotAdmitter(a slotAdmitter) {
 }
 
 // resolveToolCallSlow is the probe path behind ResolveToolCall's
-// singleflight: cache check, admission, active probe, persistence, and
-// profile-cache invalidation. Must not be called while holding r.mu.
+// singleflight on a registry without an evidence log: cache check,
+// admission, active probe, persistence, and profile-cache invalidation.
+// Must not be called while holding r.mu.
 func (r *ModelRegistry) resolveToolCallSlow(ctx context.Context, key ModelKey) (fingerprint.CapProbeState, error) {
 	// The active probe is capability-probe traffic (#477); queryRuntime
 	// below re-binds its own model-refresh purpose over this for its one
@@ -615,9 +704,9 @@ func (r *ModelRegistry) invalidateProfile(key ModelKey) {
 }
 
 // canResolveToolCall reports whether on-demand tool-call resolution is
-// fully wired (prober factory AND probe store).
+// fully wired: a prober factory AND either the probe store or an evidence log.
 func (r *ModelRegistry) canResolveToolCall() bool {
-	return r != nil && r.capProber != nil && r.capProbeStore != nil
+	return r != nil && r.capProber != nil && (r.capProbeStore != nil || r.evidenceStore != nil)
 }
 
 // capResolveLimit bounds distinct unresolved-key resolution jobs within
@@ -657,6 +746,7 @@ const capResolveLimit = 4
 // not tool-capable" when a route comes up empty. Callers thread them
 // into the route-failure error.
 func (r *ModelRegistry) EnsureToolCallResolved(ctx context.Context, profiles []*ModelProfile, required Capability) ([]*ModelProfile, []error) {
+	r.syncGeneration(ctx)
 	out, diagAt := r.ensureToolCallResolvedIndexed(ctx, profiles, required)
 	var diags []error
 	for _, d := range diagAt {
@@ -672,6 +762,18 @@ func (r *ModelRegistry) EnsureToolCallResolved(ctx context.Context, profiles []*
 // diagnostic or nil. Chain batching consumes this form to repartition
 // per-entry diagnostics without re-deriving order. diagAt is nil on the
 // disabled/no-required fast path (input returned as-is).
+//
+// On a log-bound registry (WithEvidenceLog) distinct keys resolve serially in
+// first-occurrence order, so a faster worker cannot take the allowance's only
+// reservation from an earlier candidate; without a log they resolve
+// bounded-parallel (capResolveLimit). First-occurrence order is the order
+// candidates reach the resolver, which is one of three: chain order between
+// qualified chain entries; within a bare model name, LookupAny's
+// provider-index order, which is the order providers were last refreshed into
+// the index; and for a recommendation, sortProfiles' order (quality, then
+// speed, then provider and model). That order is fixed before route scoring,
+// so it is not the route score. On the log path a yes is applied only through
+// the refreshed profile; there is no patch.
 func (r *ModelRegistry) ensureToolCallResolvedIndexed(ctx context.Context, profiles []*ModelProfile, required Capability) ([]*ModelProfile, []error) {
 	if !r.canResolveToolCall() || !required.Has(CapToolCall) {
 		return profiles, nil
@@ -705,10 +807,13 @@ func (r *ModelRegistry) ensureToolCallResolvedIndexed(ctx context.Context, profi
 	// touch only their own capResolution (the map is not mutated after
 	// phase 1) and never fail the group -- per-key outcomes are data.
 	// A single distinct key resolves inline: no goroutine overhead for
-	// the common warm/qualified-selector case.
-	if len(keys) == 1 {
-		res := results[keys[0]]
-		res.state, res.err = r.ResolveToolCall(ctx, keys[0])
+	// the common warm/qualified-selector case. The log path is serial (see
+	// the doc comment).
+	if len(keys) == 1 || r.evidenceStore != nil {
+		for _, key := range keys {
+			res := results[key]
+			res.state, res.err = r.ResolveToolCall(ctx, key)
+		}
 	} else {
 		var g errgroup.Group
 		g.SetLimit(capResolveLimit)
@@ -741,6 +846,12 @@ func (r *ModelRegistry) ensureToolCallResolvedIndexed(ctx context.Context, profi
 		}
 		if refreshed, lErr := r.Lookup(ctx, p.Key); lErr == nil && refreshed.Caps.Has(CapToolCall) {
 			out[i] = refreshed
+			continue
+		}
+		if r.evidenceStore != nil {
+			// The log path never patches: a bit outside the merge could grant
+			// what an override withholds, and chat and stream come only from
+			// the log's rows.
 			continue
 		}
 		// The probe said yes but the refreshed profile lacks the bit --
@@ -926,6 +1037,7 @@ func (r *ModelRegistry) FIMConfigFor(ctx context.Context, key ModelKey) (*FIMCon
 // the result. The merge layers in order of ascending precedence are:
 //  1. Static catalog: FIM policy, think_mode, quality/speed tiers, RAM estimates
 //  2. Fingerprint: capability probing data, context, benchmarked observations
+//     (its capabilities do not count with WithEvidenceLog)
 //  3. Runtime: context_window, parameter_size, quant_level, digest (freshest)
 //  4. Config: explicit per-model overrides
 func (r *ModelRegistry) buildProfile(ctx context.Context, key ModelKey) (*ModelProfile, error) {
@@ -947,6 +1059,11 @@ func (r *ModelRegistry) buildProfile(ctx context.Context, key ModelKey) (*ModelP
 	rejectionHook := r.rejectionHook
 	r.mu.RUnlock()
 
+	// Read the log before the provider call: the snapshot's digest filter comes
+	// from the runtime afterward, and a write during that call moves the generation
+	// past this snapshot, which keeps the result from being published.
+	log := r.readEvidence(ctx, key.Provider, []string{key.Model})
+
 	// Layer 1: Runtime query.
 	runtimeInfo, err := r.queryRuntime(ctx, key)
 	if err != nil {
@@ -960,20 +1077,38 @@ func (r *ModelRegistry) buildProfile(ctx context.Context, key ModelKey) (*ModelP
 	// Layer 3: Fingerprint enrichment.
 	fpProfile := r.fingerprintProfile(ctx, key, runtimeInfo)
 
-	// Cap-probe merge layer: READ ONLY -- never probes. A valid cached
-	// "yes" row ORs CapToolCall into the profile. Computed here (not in
-	// merge) so merge stays IO-free and applies exactly the bits this
-	// buildProfile snapshot observed.
-	capProbeCaps := r.capProbeCaps(ctx, key, runtimeInfo)
+	// Capabilities: READ ONLY -- never probes. Without the log a valid cached
+	// "yes" cap-probe row ORs CapToolCall into the profile. With it the
+	// precedence core decides the whole mask from this snapshot's view, the
+	// same override and floor, and the live facts (ExplainEvidence), so a
+	// checked no beats a catalog, type or runtime yes. Computed here (not in
+	// merge) so merge stays IO-free and applies exactly what this buildProfile
+	// observed.
+	var capProbeCaps Capability
+	var decided *Capability
+	if log != nil {
+		yes, _, _ := CapabilityMasks(r.logCapabilityFacts(log, key, runtimeInfo, staticProfile, override, floor))
+		decided = &yes
+	} else {
+		capProbeCaps = r.capProbeCaps(ctx, key, runtimeInfo)
+	}
 
 	// Merge layers using the (override, floor, rejectionHook) snapshot
 	// taken at function entry.
-	profile := r.merge(key, runtimeInfo, staticProfile, fpProfile, parsed, override, floor, thinkOverride, contextOverride, qualityCeilingOverride, rejectionHook, capProbeCaps)
+	profile := r.merge(key, runtimeInfo, staticProfile, fpProfile, parsed, override, floor, thinkOverride, contextOverride, qualityCeilingOverride, rejectionHook, capProbeCaps, decided)
 
-	// Cache the result iff the override snapshot is still current.
+	// Cache the result iff the override snapshot and the log's generation are
+	// still current. The generation is store I/O, so it is read before the lock.
+	deadline := log.deadline(key.Model, runtimeDigest(runtimeInfo))
+	unchanged := r.evidenceUnchanged(ctx, log)
 	r.mu.Lock()
-	if r.overrideVersion == overrideVer {
+	if r.overrideVersion == overrideVer && unchanged {
 		r.profiles[key] = profile
+		if deadline.IsZero() {
+			delete(r.profileDeadlines, key)
+		} else {
+			r.profileDeadlines[key] = deadline
+		}
 	}
 	r.mu.Unlock()
 
@@ -981,25 +1116,15 @@ func (r *ModelRegistry) buildProfile(ctx context.Context, key ModelKey) (*ModelP
 }
 
 // catalogProfileFor resolves the static-catalog profile for a parsed model
-// name, applying the same fallback ladder buildProfile uses: exact
-// family+param, family+tag, family-only, then runtime-reported family.
-// Returns nil when the catalog knows nothing about the model.
+// name through the catalog ladder Catalog.ProfileFor applies, with the
+// runtime-reported family as the hint. Returns nil when the catalog knows
+// nothing about the model.
 func (r *ModelRegistry) catalogProfileFor(parsed ParsedModel, runtimeInfo *ModelInfo) *ModelProfile {
-	staticProfile := r.catalog.lookup(parsed.NormalizedFamily(), parsed.ParamSize)
-	if staticProfile == nil && parsed.ParamSize == "" && parsed.Tag != "" {
-		// Some catalog-only variants are keyed by tag (for example ":latest")
-		// rather than by parsed parameter size.
-		staticProfile = r.catalog.lookup(parsed.NormalizedFamily(), parsed.Tag)
+	hint := ""
+	if runtimeInfo != nil {
+		hint = runtimeInfo.Family
 	}
-	if staticProfile == nil {
-		// Try family-only lookup for family-level metadata (FIM, think mode).
-		staticProfile = r.catalog.lookupFamily(parsed.NormalizedFamily())
-	}
-	if staticProfile == nil && runtimeInfo != nil && runtimeInfo.Family != "" {
-		// Fall back to runtime-reported family.
-		staticProfile = r.catalog.lookupFamily(strings.ToLower(runtimeInfo.Family))
-	}
-	return staticProfile
+	return r.catalog.profileFor(parsed, hint)
 }
 
 // ToolCallExplanation is read-only provenance for one model's tool_call
@@ -1012,6 +1137,15 @@ type ToolCallExplanation struct {
 	State    fingerprint.CapProbeState // cached probe state, "" if none
 	TestedAt time.Time                 // zero when no probe row
 	Valid    bool                      // cached probe matches current identity/version and is unexpired
+	// Unsaved: the answer or attempt behind State was never stored. Its check
+	// completed but the evidence log append failed, so the registry serves it
+	// for its own life only and another process or a restart never sees it.
+	Unsaved bool
+	// EvidenceUnreadable: on a registry with an evidence log, this
+	// explanation's read of the log failed, so it carries no log-derived fact
+	// and a stored answer may be hidden behind what it shows. Always false
+	// without a log, and for an explicit list, which reads nothing.
+	EvidenceUnreadable bool
 }
 
 // ExplainToolCall reports where a model's tool_call bit comes from (or why it
@@ -1027,8 +1161,16 @@ type ToolCallExplanation struct {
 //  4. otherwise => "unknown".
 //
 // For non-explicit sources, State, TestedAt, and Valid are populated whenever a
-// cap-probe row exists so callers can distinguish stale verdicts.
+// cap-probe row exists so callers can distinguish stale verdicts. With
+// WithEvidenceLog the provenance comes from the log, not cap-probe rows, and
+// Caps and Has from the precedence core merge uses there (ExplainEvidence), so
+// a checked no beats a catalog, type or runtime yes. A live provider no has
+// Source "runtime" even when State and TestedAt describe an older inconclusive
+// check. This path runs no merge and reads no fingerprint store; a failed log
+// read sets EvidenceUnreadable.
 func (r *ModelRegistry) ExplainToolCall(ctx context.Context, key ModelKey) (ToolCallExplanation, error) {
+	r.syncGeneration(ctx)
+
 	// 1. Explicit override is authoritative in both directions.
 	r.mu.RLock()
 	override := r.capOverride
@@ -1049,11 +1191,15 @@ func (r *ModelRegistry) ExplainToolCall(ctx context.Context, key ModelKey) (Tool
 	if err != nil {
 		return ToolCallExplanation{}, err
 	}
+	if r.evidenceStore != nil {
+		return r.explainToolCallFromLog(ctx, key, runtimeInfo)
+	}
 	// Projection and provenance share one row/time snapshot so a concurrent
 	// expiry or replacement cannot turn a probe bit into a runtime claim.
 	row := r.capProbeRow(ctx, key)
 	now := time.Now()
-	facts := r.projectListedModel(ctx, key, *runtimeInfo, row, now, r.snapshotListedProjectionPolicy())
+	probeYes, known := legacyProbeBits(row, capProbeDigest(key, runtimeInfo), now)
+	facts := r.projectListedModel(ctx, key, *runtimeInfo, probeYes, known, nil, r.snapshotListedProjectionPolicy())
 	if err := ctx.Err(); err != nil {
 		return ToolCallExplanation{}, err
 	}
@@ -1153,7 +1299,9 @@ func (r *ModelRegistry) fingerprintProfileMode(ctx context.Context, key ModelKey
 				if modelDigest == "" {
 					modelDigest = key.String()
 				}
-				if !readOnly && spec.Prober != nil {
+				// A log-bound registry never profiles from a lookup; stored
+				// profiles are still validated below exactly as without it.
+				if !readOnly && r.evidenceStore == nil && spec.Prober != nil {
 					probeCtx, bindErr := r.bindMetaPurpose(ctx, DestinationPurposeCapabilityProbe, key.Provider)
 					if bindErr == nil {
 						profile, err := fingerprint.NewProfiler(r.fpStore, spec.Prober).EnsureProfile(probeCtx, key.Provider, key.Model, modelDigest)
@@ -1180,7 +1328,8 @@ func currentFingerprintProfile(profile *fingerprint.Profile, modelDigest string)
 
 // capProbeCaps reads the persisted tool-call probe verdict for a key and
 // returns the capability bits it contributes to the merge (CapToolCall for
-// a valid "yes" row, zero otherwise). Pure cache read; never probes.
+// a valid "yes" row, zero otherwise). The no-log path only: with the evidence
+// log the precedence core decides the mask. Pure cache read; never probes.
 func (r *ModelRegistry) capProbeCaps(ctx context.Context, key ModelKey, runtimeInfo *ModelInfo) Capability {
 	digest := capProbeDigest(key, runtimeInfo)
 	row := r.capProbeRow(ctx, key)
@@ -1233,9 +1382,15 @@ func (r *ModelRegistry) queryRuntime(ctx context.Context, key ModelKey) (*ModelI
 // merge combines runtime, static, fingerprint, and config data into a single
 // ModelProfile. Precedence (lowest to highest):
 //   - Static catalog: FIM policy, think_mode, quality/speed tiers, RAM estimates
-//   - Fingerprint: capability probing data, benchmarked resource observations
+//   - Fingerprint: capability probing data (not counted on the log path),
+//     benchmarked resource observations
 //   - Runtime: context_window, dimensions, parameter_size, quant_level (freshest)
 //   - Config: explicit per-model overrides
+//
+// decided is nil without the evidence log, and every layer ORs or replaces
+// capabilities as below. On the log path it is the precedence core's yes mask,
+// written to Caps last, after the override; every other field is merged as
+// without the log.
 func (r *ModelRegistry) merge(
 	key ModelKey,
 	runtime *ModelInfo,
@@ -1249,6 +1404,7 @@ func (r *ModelRegistry) merge(
 	qualityCeilingOverride QualityCtxCeilingOverride,
 	rejectionHook OverrideRejectionHook,
 	capProbeCaps Capability,
+	decided *Capability,
 ) *ModelProfile {
 	profile := &ModelProfile{
 		Key:       key,
@@ -1447,6 +1603,13 @@ func (r *ModelRegistry) merge(
 		}
 	}
 
+	// The log path's decision (ExplainEvidence) is the last write to Caps. It
+	// already honors the override above, so the two never disagree.
+	if decided != nil {
+		profile.Caps = *decided
+		profile.capsDecided = true
+	}
+
 	// Config think override (final precedence, #220). Per-field REPLACE:
 	// a nil pointer keeps the merged value; non-nil replaces it. Unlike
 	// capabilities there is no parse step to reject — config.validate
@@ -1594,13 +1757,21 @@ func quantBytesPerParam(quant string) float64 {
 	}
 }
 
-// sortProfiles sorts profiles by quality descending, then speed descending.
-// Uses sort.Slice for clarity and correctness.
+// sortProfiles sorts profiles by quality descending, then speed descending,
+// then provider and model name ascending, so exact ties land the same way on
+// every run although the input starts from map iteration.
 func sortProfiles(profiles []*ModelProfile) {
 	sort.Slice(profiles, func(i, j int) bool {
-		if profiles[i].Quality != profiles[j].Quality {
-			return profiles[i].Quality > profiles[j].Quality
+		a, b := profiles[i], profiles[j]
+		if a.Quality != b.Quality {
+			return a.Quality > b.Quality
 		}
-		return profiles[i].Speed > profiles[j].Speed
+		if a.Speed != b.Speed {
+			return a.Speed > b.Speed
+		}
+		if a.Key.Provider != b.Key.Provider {
+			return a.Key.Provider < b.Key.Provider
+		}
+		return a.Key.Model < b.Key.Model
 	})
 }

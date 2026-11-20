@@ -66,6 +66,10 @@ const (
 // snapshot, then a best-effort compressed snapshot. The caller owns the store
 // and must keep it alive until Runtime.Close returns; Runtime never closes,
 // migrates, or hardens it.
+//
+// Implementations must carry Conversation.Exposure with the snapshot it
+// describes, in the same atomic Save. A store that does not makes every
+// conversation that has history read as unknown, which is treated as exposed.
 type SessionStore interface {
 	Load(ctx context.Context, id string) (*conversation.Conversation, error)
 	Save(ctx context.Context, conv conversation.Conversation) (int64, error)
@@ -212,6 +216,19 @@ type Options struct {
 	// own ContextManager. The golem CLI's -progressive flag drives both halves;
 	// a library host owns both itself.
 	Progressive bool
+	// StrictApproval suspends reusable approvals while a conversation is
+	// exposed (#584): each run carries agent.Request.StrictApproval, so once the
+	// conversation's exposure record reads as exposed, every approval goes to the
+	// approver's agent.FreshApprover and an approver without one is denied.
+	// Only the library delegate_code and dispatch keep their own
+	// ApprovalNever: the agent-memory writes, floor-exempt otherwise, are
+	// asked through FreshApprover too, with an empty preview because they do
+	// not plan, so the approver should render the call. While exposed, a
+	// native command tool whose policy allows network runs on its
+	// network-denied copy, so with a native Sandbox that allows network, New
+	// also validates that copy and refuses a host that cannot run it. Off by
+	// default.
+	StrictApproval bool
 }
 
 // ContextItem is trusted context supplied with one turn.
@@ -312,19 +329,23 @@ type Runtime struct {
 	summarizer      conversation.Summarizer
 	compress        bool
 	retainReasoning bool
+	strictApproval  bool
 	onWarning       func(error)
 	failureMessage  func(code string, err error) string
 	mu              sync.Mutex
 	active          map[string]*activeRun
 	activeThreads   map[string]*activeRun
-	wg              sync.WaitGroup
-	closed          bool
-	closeDone       chan struct{}
-	closeErr        error
-	sessionMu       sync.Mutex
-	sessions        *threadStore
-	bundle          *providerbootstrap.Bundle
-	closeOwned      func() error
+	// readers holds in-flight ThreadExposure calls so Close can cancel them.
+	// They never reserve a thread, so they stay out of activeThreads.
+	readers    map[*activeRun]struct{}
+	wg         sync.WaitGroup
+	closed     bool
+	closeDone  chan struct{}
+	closeErr   error
+	sessionMu  sync.Mutex
+	sessions   *threadStore
+	bundle     *providerbootstrap.Bundle
+	closeOwned func() error
 }
 
 // New constructs a Runtime.
@@ -354,6 +375,16 @@ func New(ctx context.Context, opts Options) (*Runtime, error) {
 	}
 	if err := validateSandbox(sandbox, root); err != nil {
 		return nil, fmt.Errorf("golem: sandbox: %w", err)
+	}
+	// #584: strict approval runs an exposed conversation's commands on the
+	// network-denied copy, so a host that cannot run that copy refuses the
+	// session here rather than at the first narrowed command.
+	if opts.StrictApproval && nativeRuntime(sandbox) && sandbox.AllowNetwork {
+		denied := sandbox
+		denied.AllowNetwork = false
+		if err := validateSandbox(denied, root); err != nil {
+			return nil, fmt.Errorf("golem: sandbox: network-denied variant for strict approval: %w", err)
+		}
 	}
 	if nativeRuntime(sandbox) {
 		// Native tools and the verifier slot carry the workspace's own
@@ -426,10 +457,12 @@ func New(ctx context.Context, opts Options) (*Runtime, error) {
 	r.summarizer = summarizer
 	r.compress = !opts.DisableCompression && summarizer != nil
 	r.retainReasoning = opts.RetainReasoning
+	r.strictApproval = opts.StrictApproval
 	r.onWarning = opts.OnWarning
 	r.failureMessage = opts.FailureMessage
 	r.active = make(map[string]*activeRun)
 	r.activeThreads = make(map[string]*activeRun)
+	r.readers = make(map[*activeRun]struct{})
 	r.closeDone = make(chan struct{})
 	r.sessions = sessions
 	r.bundle = bundle
@@ -512,7 +545,7 @@ func (r *Runtime) Run(ctx context.Context, turn Turn, sink EventSink) (agent.Res
 		if emitErr := emit("run.started", struct{}{}); emitErr != nil {
 			return agent.Result{}, emitErr
 		}
-		if emitErr := emit("run.failed", r.runFailedPayload(err)); emitErr != nil {
+		if emitErr := emit("run.failed", r.runFailedPayload(err, nil)); emitErr != nil {
 			return agent.Result{}, emitErr
 		}
 		return agent.Result{}, err
@@ -548,14 +581,14 @@ func (r *Runtime) Run(ctx context.Context, turn Turn, sink EventSink) (agent.Res
 	// Capture before validation and retain this identity across all callbacks.
 	verifier := snap.orchestrator.Verifier()
 	if err := r.checkVerifier(verifier); err != nil {
-		return agent.Result{}, finish("run.failed", r.runFailedPayload(err), err)
+		return agent.Result{}, finish("run.failed", r.runFailedPayload(err, nil), err)
 	}
 	var thread *threadState
 	if turn.ThreadID != "" {
 		var err error
 		thread, err = r.loadThread(runCtx, turn.ThreadID)
 		if err != nil {
-			eventType, payload := r.terminalFailure(err)
+			eventType, payload := r.terminalFailure(err, nil)
 			return agent.Result{}, finish(eventType, payload, err)
 		}
 	}
@@ -590,7 +623,7 @@ func (r *Runtime) Run(ctx context.Context, turn Turn, sink EventSink) (agent.Res
 	observer := &eventObserver{runID: turn.RunID, emit: emit, emitDelta: emitDelta, host: turn.Observer}
 	goal, err := turnGoal(turn)
 	if err != nil {
-		return agent.Result{}, finish("run.failed", r.runFailedPayload(err), err)
+		return agent.Result{}, finish("run.failed", r.runFailedPayload(err, nil), err)
 	}
 	request := agent.Request{
 		Goal:     goal,
@@ -606,10 +639,17 @@ func (r *Runtime) Run(ctx context.Context, turn Turn, sink EventSink) (agent.Res
 		SessionID:  turn.ThreadID,
 		Advisory:   turn.Advisory,
 		SystemKeys: turn.SystemKeys,
+		// Strictness is inherited from an enclosing run through ctx, so the
+		// exempt names are set even when this runtime is not strict (#584).
+		StrictApproval: r.strictApproval,
+		StrictExempt:   strictExemptNames(snap.tools),
+		// #767: AgentFlow and dispatch children build their own requests and stay off.
+		RecoverThinkingOnlyAnswer: true,
 	}
 	if thread != nil {
 		request.History = thread.history()
 		request.HistorySummary = thread.summary()
+		request.PriorExposure = thread.priorExposure()
 	}
 	result, err := snap.orchestrator.RunWithVerifier(runCtx, request, observer, verifier)
 	if !r.retainReasoning {
@@ -622,13 +662,13 @@ func (r *Runtime) Run(ctx context.Context, turn Turn, sink EventSink) (agent.Res
 		err = runCtx.Err()
 	}
 	if err != nil {
-		eventType, payload := r.terminalFailure(err)
+		eventType, payload := r.terminalFailure(err, result.ModelError)
 		return result, finish(eventType, payload, err)
 	}
 	if thread != nil && result.Answer != "" {
 		if err := r.saveThread(runCtx, active, snap.budget, thread, turn.Message, result); err != nil {
 			err = fmt.Errorf("%w: %w", ErrSessionPersistence, err)
-			eventType, payload := r.terminalFailure(err)
+			eventType, payload := r.terminalFailure(err, nil)
 			return result, finish(eventType, payload, err)
 		}
 	} else if err := runCtx.Err(); err != nil {
@@ -665,8 +705,8 @@ type failurePayload struct {
 // installed, then cap the message exactly as the raw err.Error() was capped
 // before. Presentation affects only the event payload — never the error Run
 // returns.
-func (r *Runtime) runFailedPayload(err error) failurePayload {
-	code := failureCode(err)
+func (r *Runtime) runFailedPayload(err, modelErr error) failurePayload {
+	code := failureCode(err, modelErr)
 	// Previously reservation-only; ErrRunConflict is only produced by reserve
 	// today, so applying the override at every run.failed site is a deliberate,
 	// benign unification.
@@ -685,14 +725,18 @@ func (r *Runtime) runFailedPayload(err error) failurePayload {
 // already classified as cancellations. A Cancel landing between payload
 // construction and commitTerminal can still flip the event to run.canceled,
 // in which case the presenter ran but its output is discarded — benign.
-func (r *Runtime) terminalFailure(err error) (eventType string, payload any) {
+func (r *Runtime) terminalFailure(err, modelErr error) (eventType string, payload any) {
 	if isCancellation(err) {
 		return "run.canceled", struct{}{}
 	}
-	return "run.failed", r.runFailedPayload(err)
+	return "run.failed", r.runFailedPayload(err, modelErr)
 }
 
-func failureCode(err error) string {
+// failureCode classifies a run's failure. modelErr is the run's
+// agent.Result.ModelError where the orchestrator's error is reported, and nil
+// at every other site, so only the provider's reply to this run's model
+// request can be provider_rejected.
+func failureCode(err, modelErr error) string {
 	var observerErr *hostObserverError
 	switch {
 	case errors.As(err, &observerErr):
@@ -723,8 +767,28 @@ func failureCode(err error) string {
 	// describes the host's own sink, not the policy.
 	case errors.Is(err, agent.ErrAdvisoryBlocked):
 		return "policy_blocked"
+	// Last, so only a failure that was "internal" changes (#740).
+	case providerRejected(modelErr):
+		return "provider_rejected"
 	default:
 		return "internal"
+	}
+}
+
+// providerRejected classifies the error recorded by the orchestrator for this
+// run's model call. Model callers may return non-comparable error values.
+func providerRejected(modelErr error) bool {
+	var status interface{ HTTPStatusCode() int }
+	if !errors.As(modelErr, &status) {
+		return false
+	}
+	switch code := status.HTTPStatusCode(); {
+	case code < 400 || code >= 500:
+		return false
+	case code == 401 || code == 403 || code == 429:
+		return false
+	default:
+		return true
 	}
 }
 
@@ -1074,8 +1138,8 @@ func (r *Runtime) release(turn Turn, active *activeRun) {
 	r.wg.Done()
 }
 
-// Close cancels active runs and compactions, waits for them, and releases owned resources.
-// It must not be called synchronously by code executing within Run or CompactThread.
+// Close cancels active runs, compactions and ThreadExposure calls, waits for them, and releases owned resources.
+// It must not be called synchronously by code executing within Run, CompactThread or ThreadExposure.
 func (r *Runtime) Close() error {
 	r.mu.Lock()
 	if r.closeDone == nil {
@@ -1101,6 +1165,9 @@ func (r *Runtime) Close() error {
 	// maps; canceling their contexts twice is safe.
 	for _, active := range r.activeThreads {
 		active.cancel()
+	}
+	for reader := range r.readers {
+		reader.cancel()
 	}
 	r.mu.Unlock()
 	r.wg.Wait()

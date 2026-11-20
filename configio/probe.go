@@ -2,6 +2,7 @@ package configio
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/kstruzzieri/go-llm/fingerprint"
@@ -18,10 +19,13 @@ import (
 // D9 dual-outcome contract: the returned State is valid for this session
 // immediately; Persisted reports whether the verdict is durable — written
 // as a CURRENTLY-VALID probe row, or carried by explicit/catalog/profile
-// knowledge that re-derives next session. Persisted=false is a warning,
-// never an error: the verdict works now and a later session re-probes at
-// most once. (The registry's save is best-effort by design; this outcome
-// is how the caller learns a write was lost.)
+// knowledge that re-derives next session (on a log-bound registry, catalog
+// knowledge counts only when the explanation read the log and rests on no
+// unsaved row; see probeDurable). Persisted=false means not confirmed
+// durable: the write was lost, the evidence log could not be read, or the
+// answer rests on an unsaved row. It is a warning, never an error: the
+// verdict works now and a later session re-probes at most once. (The
+// registry's save is best-effort by design.)
 //
 // Explicitness: never call this from a view, a build, or an inventory
 // refresh — it is a user-invoked, consumer-consent-gated operation.
@@ -37,8 +41,14 @@ import (
 // Errors carry bounded codes (CodeOf): invalid_argument; probe_unavailable
 // when no resolution path could answer (unwired globally, or unavailable
 // for this specific provider/model — distinct from a probe that ran and
-// answered inconclusively); probe_failed for transient failures, with the
-// cause retained in the chain.
+// answered inconclusively), which includes provider.ErrEvidenceUnbound;
+// probe_failed for transient failures, including
+// provider.ErrEvidenceUnreadable and provider.ErrAutomaticProbeBudgetExhausted
+// on a log-bound registry, with the cause retained in the chain. On such a
+// registry a probe_failed from a server or transport failure after a request
+// was sent leaves the registry's check_failed attempt (see
+// provider.ModelRegistry.ResolveToolCall), so a repeat within 5 minutes
+// answers inconclusive without a request.
 func ProbeToolCall(ctx context.Context, resolver ToolCallResolver, key provider.ModelKey) (ProbeOutcome, error) {
 	if key.Provider == "" || key.Model == "" {
 		return ProbeOutcome{}, wrapCode(CodeInvalidArgument,
@@ -54,7 +64,11 @@ func ProbeToolCall(ctx context.Context, resolver ToolCallResolver, key provider.
 		return ProbeOutcome{}, cerr
 	}
 	if err != nil {
-		return ProbeOutcome{}, wrapCode(CodeProbeFailed,
+		code := CodeProbeFailed
+		if errors.Is(err, provider.ErrEvidenceUnbound) {
+			code = CodeProbeUnavailable // no path can answer for this provider
+		}
+		return ProbeOutcome{}, wrapCode(code,
 			fmt.Errorf("configio: probe tool_call %s: %w", key, err))
 	}
 	switch state {
@@ -76,26 +90,39 @@ func ProbeToolCall(ctx context.Context, resolver ToolCallResolver, key provider.
 	return out, nil
 }
 
-// probeDurable reports whether a resolved verdict survives a restart: the
-// probe row holds this verdict AND currently validates (a stale same-state
-// row will not validate next session — Valid is required), or explicit/
-// catalog knowledge declares it, or (for yes) the merged profile carries
-// the bit from a source the next session re-derives. A failed read is
-// conservative Persisted=false — never an error; the verdict stands.
+// probeDurable reports whether a resolved verdict survives a restart, in this
+// order. An explicit declaration is durable: the next session re-derives it
+// from an unchanged config. Otherwise an explanation whose evidence-log read
+// failed (EvidenceUnreadable) is not durable, since a stored answer it could
+// not see may overturn it after recovery; then one resting on a row that was
+// never stored (Unsaved: the log append failed, so only this registry holds
+// it) is not durable. Only then is catalog knowledge durable, then a probe row
+// that holds this verdict AND currently validates (a stale same-state row will
+// not validate next session — Valid is required), then (for yes) a merged
+// profile bit from a source the next session re-derives. Deliberately
+// conservative: an unsaved or unreadable answer beside a catalog yes reports
+// not durable even when the catalog would re-derive it. A failed explanation
+// is conservative Persisted=false — never an error; the verdict stands.
 func probeDurable(ctx context.Context, resolver ToolCallResolver, key provider.ModelKey, state fingerprint.CapProbeState) bool {
 	exp, err := resolver.ExplainToolCall(ctx, key)
 	if err != nil {
 		return false
 	}
 	switch {
-	case exp.State == state && exp.Valid: // probe row holds this verdict and validates
-		return true
 	// Source literals are provider.ToolCallExplanation's documented vocabulary
 	// (model_registry.go: "explicit" | "catalog" | "runtime" | "probe" |
 	// "unknown"); a provider-side rename degrades this to conservative
 	// Persisted=false.
-	case exp.Source == "explicit" || exp.Source == "catalog":
+	case exp.Source == "explicit":
 		return true // durable without a row
+	case exp.EvidenceUnreadable:
+		return false // a stored answer may be hidden behind this one
+	case exp.Unsaved:
+		return false // only this registry holds the row
+	case exp.Source == "catalog":
+		return true // durable without a row
+	case exp.State == state && exp.Valid: // probe row holds this verdict and validates
+		return true
 	case state == fingerprint.CapProbeYes && exp.Has && exp.Source == "runtime":
 		// ExplainToolCall labels this "runtime" only when its fresh,
 		// read-only projection re-derives the cached profile bit.

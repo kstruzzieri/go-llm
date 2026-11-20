@@ -55,12 +55,18 @@ type commandTailArgs struct {
 // runtimes. The existing NewExecTools(root) remains the foreground-only
 // host constructor.
 func NewExecToolsWithBackground(root string, manager *BackgroundManager) ([]agent.Tool, error) {
+	return newExecToolsWithBackground(root, manager, 0)
+}
+
+// newExecToolsWithBackground is NewExecToolsWithBackground with a credential
+// screen budget (zero: the default).
+func newExecToolsWithBackground(root string, manager *BackgroundManager, budget time.Duration) ([]agent.Tool, error) {
 	if manager == nil || manager.backend.execBackend == nil {
 		return nil, fmt.Errorf("tools: build exec tools: background manager must have a resolved backend")
 	}
-	ws, err := NewWorkspace(root)
+	ws, err := newBudgetedWorkspace(root, budget)
 	if err != nil {
-		return nil, fmt.Errorf("tools: build exec tools: %w", err)
+		return nil, err
 	}
 	rc := NewRunCommand(ws, manager.backend)
 	rc.sandbox = manager.backend.approval
@@ -88,14 +94,14 @@ func NewExecToolsWithBackgroundOptions(root string, manager *BackgroundManager, 
 		if opts.PromotionJournal != nil {
 			return nil, fmt.Errorf("tools: promotion journal requires an enabled scratch config")
 		}
-		return NewExecToolsWithBackground(root, manager)
+		return newExecToolsWithBackground(root, manager, opts.CredentialScreenBudget)
 	}
 	if manager == nil || manager.backend.execBackend == nil {
 		return nil, fmt.Errorf("tools: build exec tools: background manager must have a resolved backend")
 	}
-	ws, err := NewWorkspace(root)
+	ws, err := newBudgetedWorkspace(root, opts.CredentialScreenBudget)
 	if err != nil {
-		return nil, fmt.Errorf("tools: build exec tools: %w", err)
+		return nil, err
 	}
 	rt, err := newScratchRuntime(root, opts.Scratch, opts.PromotionJournal, manager.backend.sandbox.Runtime)
 	if err != nil {
@@ -134,7 +140,10 @@ func bgCwdDisplay(label string) string {
 // the BackgroundManager. PlanningTool: Plan validates and previews via the
 // SHARED prepareExecPlan helper; Invoke re-checks via recheckExecPlan and
 // publishes an opaque job handle. The dispatch context gates only admission
-// and publication — a published process's lifetime is manager-owned.
+// and publication — a published process's lifetime is manager-owned. Each start
+// first walks the workspace and the job's output is screened for the values of
+// the workspace's credential files; a failed or bounded read withholds both
+// streams.
 type StartCommand struct {
 	ws      *Workspace
 	manager *BackgroundManager
@@ -157,7 +166,8 @@ func (t *StartCommand) Spec() agent.ToolSpec {
 		Description: "Start a command in the background (argv-first, NO shell) and return an opaque handle immediately. " +
 			"The command is shown to the user and starts only after they approve it; it keeps running across turns until it exits, " +
 			"is stopped via stop_command, or the session shuts down. When the command exits, background processes it left running " +
-			"in its process group are terminated. Poll with command_status and read output with command_tail.",
+			"in its process group are terminated. Poll with command_status and read output with command_tail. " +
+			"Commands that name a credential file (.env and .env.* other than .env.example, .env.sample, .env.template and .env.dist; .netrc, _netrc, .npmrc, .pypirc, .git-credentials; anything under .ssh, .gnupg, .aws or .kube), or that use a credential directory or .git as dir, are refused, and the content of those files is withheld from output.",
 		Parameters: json.RawMessage(`{
   "type":"object",
   "properties":{
@@ -170,12 +180,18 @@ func (t *StartCommand) Spec() agent.ToolSpec {
 }
 
 // Effect declares the same effect class as run_command with the frozen
-// 10-second tool-call timeout (admission/publication only) and small result cap.
+// 10-second tool-call timeout (admission/publication only) plus the credential
+// screen's pre-run walk budget, and the small result cap.
+// A nil tool, or one with no workspace, has the default budget.
 func (t *StartCommand) Effect() agent.Effect {
+	var ws *Workspace
+	if t != nil {
+		ws = t.ws
+	}
 	return agent.Effect{
 		Class:     agent.Read | agent.Write | agent.Exec | agent.Network,
 		Approval:  agent.ApprovalAlways,
-		Timeout:   bgToolTimeout,
+		Timeout:   bgToolTimeout + ws.screenBudget(),
 		OutputCap: bgSmallOutputCap,
 	}
 }
@@ -190,7 +206,10 @@ func (*StartCommand) Origin() agent.Origin { return agent.OriginWorkspace }
 // Plan validates args through the shared exec preparation helper with zero
 // effective and requested timeouts (manager-owned lifetime), stashes the
 // pending plan keyed by the raw-args hash, and renders the approval preview.
-func (t *StartCommand) Plan(_ context.Context, raw json.RawMessage) (agent.ToolPlan, error) {
+// While ctx's run has approvals suspended, a native (non-host) manager backend
+// whose policy allows network is swapped for its network-denied variant (#584),
+// as run_command does; a failed variant build fails Plan.
+func (t *StartCommand) Plan(ctx context.Context, raw json.RawMessage) (agent.ToolPlan, error) {
 	eff := t.Effect()
 	if t.manager == nil || t.manager.backend.execBackend == nil {
 		return agent.ToolPlan{Effect: eff}, fmt.Errorf("background manager must have a resolved backend")
@@ -209,6 +228,13 @@ func (t *StartCommand) Plan(_ context.Context, raw json.RawMessage) (agent.ToolP
 	// The manager is the source of truth for sandbox identity on EVERY
 	// construction path, including direct NewStartCommand callers.
 	p.sandbox = t.manager.backend.approval
+	narrowed, err := t.manager.backend.variant.forContext(ctx)
+	if err != nil {
+		return agent.ToolPlan{Effect: eff}, err
+	}
+	if narrowed != nil {
+		p.sandbox, p.narrowed = narrowed.approval, narrowed
+	}
 	if t.scratchRT != nil {
 		p.scratch = t.scratchRT.approval
 	}
@@ -221,7 +247,7 @@ func (t *StartCommand) Plan(_ context.Context, raw json.RawMessage) (agent.ToolP
 		if err != nil {
 			return agent.ToolPlan{Effect: eff}, err
 		}
-		eff.Timeout = outer
+		eff.Timeout = outer + t.ws.screenBudget()
 	}
 	return agent.ToolPlan{
 		Effect:      eff,
@@ -231,21 +257,32 @@ func (t *StartCommand) Plan(_ context.Context, raw json.RawMessage) (agent.ToolP
 }
 
 // Invoke consumes the pending plan (fail-closed on hash mismatch), re-checks
-// cwd and executable identity via recheckExecPlan, then starts the job. The
-// context is used only up to the manager's registration linearization point.
+// cwd and executable identity via recheckExecPlan, then starts the job on the
+// backend the plan was approved for. The context is used only up to the
+// manager's registration linearization point.
+// The manager owns the spec's screen from the call on; only a path that
+// returns before calling it releases the screen here.
 func (t *StartCommand) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolResult, error) {
 	pp, ok := t.consume(ContentHash(raw))
 	if !ok {
 		return errResult("start preview missing; retry"), nil
 	}
-	spec, err := recheckExecPlan(t.ws, pp)
+	// As in run_command (#584): refuse a plan approved in the other
+	// suspension state, before any screen exists.
+	if t.manager.backend.variant.active(ctx) != (pp.narrowed != nil) {
+		return errResult(approvalStateChanged), nil
+	}
+	spec, err := recheckExecPlan(ctx, t.ws, pp)
 	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return startCanceled(err), nil
+		}
 		return errResult(err.Error()), nil
 	}
 	if t.scratchRT != nil {
 		return t.invokeScratched(ctx, pp, spec)
 	}
-	st, err := t.manager.start(ctx, spec, bgCwdDisplay(pp.dirLabel))
+	st, err := t.manager.startWrapped(ctx, t.backendFor(pp), spec, bgCwdDisplay(pp.dirLabel), nil)
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return startCanceled(err), nil
@@ -253,6 +290,14 @@ func (t *StartCommand) Invoke(ctx context.Context, raw json.RawMessage) (agent.T
 		return errResult(err.Error()), nil
 	}
 	return agent.ToolResult{Content: renderStartResult(st)}, nil
+}
+
+// backendFor returns the backend pp was approved to start on.
+func (t *StartCommand) backendFor(pp execPending) resolvedExecBackend {
+	if pp.narrowed != nil {
+		return *pp.narrowed
+	}
+	return t.manager.backend
 }
 
 // invokeScratched starts one approved command inside a scratch session
@@ -266,12 +311,13 @@ func (t *StartCommand) invokeScratched(ctx context.Context, pp execPending, spec
 	session, rewritten, err := beginScratchSession(setupCtx, t.scratchRT, spec)
 	cancelSetup()
 	if err != nil {
+		spec.Screen.release()
 		return errResult("scratch snapshot failed; command not started: " + err.Error()), nil
 	}
 	// Admission/publication gets a fresh bgToolTimeout child so a slow
 	// snapshot cannot eat it (D6).
 	admitCtx, cancelAdmit := context.WithTimeout(ctx, bgToolTimeout)
-	st, err := t.manager.startWrapped(admitCtx, rewritten, bgCwdDisplay(pp.dirLabel), func(bp backgroundProcess) backgroundProcess {
+	st, err := t.manager.startWrapped(admitCtx, t.backendFor(pp), rewritten, bgCwdDisplay(pp.dirLabel), func(bp backgroundProcess) backgroundProcess {
 		return &scratchProcess{backgroundProcess: bp, session: session}
 	})
 	cancelAdmit()

@@ -144,6 +144,52 @@ jobs:
           GO_LLM_REQUIRE_SEATBELT: "1"
         run: go test -race -count=1 -run '^(TestSeatbelt|TestSBPL|TestProbeSeatbelt|TestScratchSeatbelt|TestNewExecBackendSeatbelt|TestNativeBackend)' ./agent/tools ./golem
 
+      # The Seatbelt backend's native spawner (#712), unsandboxed: no launchd
+      # connection in the child, the registered-port guard, signal and
+      # descriptor state, and the unix runner suite through both spawners.
+      # Nothing here skips on macOS, so a skip fails the step, and so does
+      # any count other than 45 PASS lines: 37 leaves plus the 8 parents of
+      # subtests (23 top-level tests). A rename would otherwise run nothing
+      # and pass.
+      - name: Native spawner (race)
+        shell: bash
+        run: |
+          go test -race -count=1 -v -run '^(TestNativeCmd|TestUnixRunner|TestMach|TestInspectMachState|TestEnsureRegisteredPorts)' ./agent/tools | tee "$RUNNER_TEMP/native-spawner.txt"
+          if grep -q -- '--- SKIP' "$RUNNER_TEMP/native-spawner.txt"; then
+            echo "::error::native spawner tests skipped: this runner must exercise every selected case"
+            exit 1
+          fi
+          passed=$(grep -c -- '--- PASS: Test' "$RUNNER_TEMP/native-spawner.txt" || true)
+          if [ "$passed" -ne 45 ]; then
+            echo "::error::expected 45 native spawner PASS lines, saw $passed"
+            exit 1
+          fi
+
+      # Seatbelt commands cannot reach launchd (#712). The steps above already
+      # run the read-only launchd tests; the opt-in adds the two that load,
+      # kickstart, enable and disable throwaway jobs in the runner user's
+      # launchd domain (labels com.kstruzzieri.golem-test-712.*). It is the
+      # only automated run of those two, so a skip fails the step, and so
+      # does any count other than 7 PASS lines: 6 leaves (print run and
+      # start, child Mach state, reattach, kickstart, enable/disable) plus
+      # the print test's parent.
+      - name: Seatbelt launchd (opt-in)
+        shell: bash
+        env:
+          GO_LLM_REQUIRE_SEATBELT: "1"
+          GO_LLM_LAUNCHD_TESTS: "1"
+        run: |
+          go test -count=1 -v -run '^TestSeatbeltLaunchd' ./agent/tools | tee "$RUNNER_TEMP/seatbelt-launchd.txt"
+          if grep -q -- '--- SKIP' "$RUNNER_TEMP/seatbelt-launchd.txt"; then
+            echo "::error::Seatbelt launchd tests skipped: a skip is not confinement evidence"
+            exit 1
+          fi
+          passed=$(grep -c -- '--- PASS: TestSeatbeltLaunchd' "$RUNNER_TEMP/seatbelt-launchd.txt" || true)
+          if [ "$passed" -ne 7 ]; then
+            echo "::error::expected 7 Seatbelt launchd PASS lines, saw $passed"
+            exit 1
+          fi
+
       # Golem's own construction paths under real Seatbelt (#576): startup
       # and late exec, scratch and verification, each after a host positive
       # control. Non-race only: no race job runs these on macOS.

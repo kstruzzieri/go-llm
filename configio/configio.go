@@ -1,8 +1,10 @@
 // Package configio implements the explicit I/O tier of the role-config
-// stack (spec slice 4): RefreshInventory and ProbeToolCall. Both are
-// user-invoked operations with values in and values out — nothing here
-// runs implicitly on view or build, and a cancelled operation returns a
-// zero value: the caller receives nothing.
+// stack (spec slice 4): RefreshInventory, ProbeToolCall, PlanCheck and
+// RunCheck. All are user-invoked operations with values in and values out —
+// nothing here runs implicitly on view or build. A cancelled operation returns
+// a zero value, so the caller receives nothing, with one exception: RunCheck
+// reports through OnResult the results committed before the cancellation,
+// then returns the context error.
 //
 // Error discipline follows the config/profiles house rules — bounded
 // codes, message text passes through unchanged; CodeOf uses
@@ -15,8 +17,11 @@
 // (argument validation runs first: a structurally invalid request returns
 // invalid_argument even under a cancelled context).
 //
-// Import graph: configio -> provider, configview, fingerprint. It must
-// never be imported by config, configview, or provider.
+// Import graph: configio -> config, configview, fingerprint,
+// fingerprint/probers, provider, provider/openaicompat, internal/evidencesel,
+// internal/providerbootstrap, internal/responsebound. It must never be
+// imported by config, configview, fingerprint, provider or the internal
+// packages it imports.
 package configio
 
 import (
@@ -47,9 +52,52 @@ const (
 	// CodeProbeFailed reports a failed probe attempt: transient transport
 	// trouble (network, auth) or a resolution failure (unknown provider
 	// or model). Not necessarily retryable — the wrapped cause
-	// distinguishes, for log/CLI surfaces only. Nothing was persisted;
-	// the state is unknown.
+	// distinguishes, for log/CLI surfaces only. A log-bound registry may
+	// record a five-minute check_failed attempt when a request was sent
+	// and a server or transport failure prevented an answer.
 	CodeProbeFailed ErrorCode = "probe_failed"
+)
+
+// Capability check codes. A check result carries at most one; PlanCheck and
+// RunCheck return them on their errors. They are decided from status codes and
+// error types, never from provider text.
+const (
+	// CodeAuthFailed reports a 401: the provider did not accept the key.
+	CodeAuthFailed ErrorCode = "auth_failed"
+	// CodeModelRefused reports a 403 or 404 for one model while another model
+	// on the same provider answered in the same run: the key works, and this
+	// model is refused to it.
+	CodeModelRefused ErrorCode = "model_refused"
+	// CodeRefused reports a 403 or 404 when no model answered in the same run,
+	// so a refused key cannot be told from a refused model.
+	CodeRefused ErrorCode = "refused"
+	// CodeRateLimited reports a 429.
+	CodeRateLimited ErrorCode = "rate_limited"
+	// CodeTimeout reports a request that ran out of time.
+	CodeTimeout ErrorCode = "timeout"
+	// CodeUnreachable reports a request that could not reach the endpoint.
+	CodeUnreachable ErrorCode = "unreachable"
+	// CodeServerError reports a 5xx.
+	CodeServerError ErrorCode = "server_error"
+	// CodeRejected reports a 4xx not covered by another code.
+	CodeRejected ErrorCode = "rejected"
+	// CodeMalformedResponse reports a reply the check could not read.
+	CodeMalformedResponse ErrorCode = "malformed_response"
+	// CodeDestinationNotGranted reports a remote endpoint the caller's
+	// destination policy does not grant; nothing was sent.
+	CodeDestinationNotGranted ErrorCode = "destination_not_granted"
+	// CodePlanStale reports a plan that no longer matches its provider, key,
+	// endpoint or configuration, or that PlanCheck did not make; nothing was
+	// sent.
+	CodePlanStale ErrorCode = "plan_stale"
+	// CodeListingRequired reports a model that is neither listed for the
+	// key, named for the endpoint, nor authored in the config.
+	CodeListingRequired ErrorCode = "listing_required"
+	// CodeBatchTooLarge reports more than 25 distinct models in one plan.
+	CodeBatchTooLarge ErrorCode = "batch_too_large"
+	// CodeResponseTooLarge reports a reply larger than the check's response
+	// limit.
+	CodeResponseTooLarge ErrorCode = "response_too_large"
 )
 
 type opError struct {
@@ -80,10 +128,13 @@ func CodeOf(err error) (ErrorCode, bool) {
 // ProbeOutcome is ProbeToolCall's result (D9 dual-outcome contract): the
 // tri-state verdict, valid for this session immediately, and whether it
 // is durable — persisted as a CURRENTLY-VALID probe row, or carried by
-// explicit/catalog/profile knowledge that re-derives next session.
-// Persisted=false means the verdict works now but may need a re-probe
-// after restart; consumers render their own fixed message for it (no raw
-// I/O text crosses here).
+// explicit/catalog/profile knowledge that re-derives next session (on a
+// registry with an evidence log, catalog knowledge counts only when the
+// explanation read the log and rests on no unsaved row). Persisted=false
+// means not confirmed durable (the write was lost, the evidence log could
+// not be read, or the answer rests on an unsaved row): the verdict works
+// now but may need a re-probe after restart; consumers render their own
+// fixed message for it (no raw I/O text crosses here).
 type ProbeOutcome struct {
 	State     fingerprint.CapProbeState
 	Persisted bool

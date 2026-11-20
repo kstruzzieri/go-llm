@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -10,6 +11,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"unicode"
 
 	"github.com/kstruzzieri/go-llm/agent"
@@ -27,6 +29,15 @@ const SandboxRuntimeHost SandboxRuntime = "host"
 // workspace plus a private temp directory and reads to reviewed system roots,
 // the workspace and that temp. Selecting it off-darwin, or on a
 // host whose Seatbelt capability probe fails, fails closed at construction.
+//
+// Commands start with no launchd connection (#712), which has process-wide
+// side effects on the host. Before each spawn the backend empties the host
+// process's registered Mach port table: nothing in go-llm reads it, but a
+// host that registers ports with mach_ports_register loses them. It holds
+// syscall.ForkLock across each spawn, so Go forks wait for it. Forks from C
+// code that do not take syscall.ForkLock are not serialized: such a fork
+// running concurrently with a Seatbelt spawn can hand that command the host's
+// launchd connection.
 const SandboxRuntimeSeatbelt SandboxRuntime = "seatbelt"
 
 // SandboxRuntimeBwrap selects the Linux Bubblewrap backend (#441): a fresh
@@ -73,11 +84,14 @@ type execBackend interface {
 }
 
 // resolvedExecBackend binds an implementation to the exact normalized
-// policy used to construct it and to render approvals.
+// policy used to construct it and to render approvals. variant is its
+// network-denied twin (#584), nil unless the policy is non-host and allows
+// network; every copy of the struct shares it.
 type resolvedExecBackend struct {
 	execBackend
 	sandbox  SandboxConfig
 	approval sandboxApproval
+	variant  *networkVariant
 }
 
 type hostBackend struct {
@@ -89,13 +103,73 @@ type hostBackend struct {
 // approval metadata derived from it. Future runtime switch cases must use
 // this helper and extend the key/preview with an immutable digest of any
 // execution-affecting policy not present in SandboxConfig before the case
-// is enabled.
+// is enabled. It also attaches the policy's network-denied variant, so no
+// constructor stamps one and none can forget to.
 func bindExecBackend(backend execBackend, cfg SandboxConfig) resolvedExecBackend {
 	return resolvedExecBackend{
 		execBackend: backend,
 		sandbox:     cfg,
 		approval:    approvalForSandbox(cfg),
+		variant:     newNetworkVariant(cfg),
 	}
+}
+
+// networkVariant is a native backend's network-denied twin (#584): while
+// approvals are suspended (agent.ApprovalsSuspended), a command approved for
+// a native (non-host) backend whose policy allows network runs on this copy
+// instead. It is built on first use, because construction probes the runtime
+// and a session that never suspends must not be refused for a variant it does
+// not use. The variant is shared by every tool built over one bound backend.
+type networkVariant struct {
+	cfg       SandboxConfig                                    // the original policy with AllowNetwork=false
+	build     func(SandboxConfig) (resolvedExecBackend, error) // newExecBackend; tests substitute it
+	suspended func(context.Context) bool                       // agent.ApprovalsSuspended; tests substitute it
+
+	mu     sync.Mutex
+	denied *resolvedExecBackend // the first successful build
+}
+
+// approvalStateChanged refuses a command approved in the other suspension
+// state than the one it would now run in (#584): run_command and
+// start_command return it, the verifier reports it as its reason.
+const approvalStateChanged = "approval state changed; retry"
+
+// newNetworkVariant returns the variant for a backend bound to the
+// normalized cfg: nil unless cfg is a non-host runtime that allows network.
+// The denied copy owns its DropCaps.
+func newNetworkVariant(cfg SandboxConfig) *networkVariant {
+	if cfg.isHost() || !cfg.AllowNetwork {
+		return nil
+	}
+	cfg.AllowNetwork = false
+	cfg.DropCaps = slices.Clone(cfg.DropCaps)
+	return &networkVariant{cfg: cfg, build: newExecBackend, suspended: agent.ApprovalsSuspended}
+}
+
+// active reports whether a command in ctx's run must use the variant: v is
+// non-nil and the run's approvals are suspended.
+func (v *networkVariant) active(ctx context.Context) bool {
+	return v != nil && v.suspended(ctx)
+}
+
+// forContext returns the network-denied backend when v is active for ctx,
+// building it on first use, and (nil, nil) otherwise. A build failure is
+// returned to this caller, which must fail the call rather than fall back to
+// the original backend; it is not cached, so the next call tries again.
+func (v *networkVariant) forContext(ctx context.Context) (*resolvedExecBackend, error) {
+	if !v.active(ctx) {
+		return nil, nil
+	}
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if v.denied == nil {
+		b, err := v.build(v.cfg)
+		if err != nil {
+			return nil, fmt.Errorf("tools: network-denied sandbox unavailable; command not run: %w", err)
+		}
+		v.denied = &b
+	}
+	return v.denied, nil
 }
 
 func newHostExecBackend(starter backgroundStarter) resolvedExecBackend {
@@ -224,6 +298,17 @@ func renderSandboxLine(cfg SandboxConfig) string {
 	if cfg.Runtime == SandboxRuntimeSeatbelt || cfg.Runtime == SandboxRuntimeBwrap {
 		line += " temp=private"
 	}
+	// Git-metadata marker (#721): sandboxed commands cannot write git
+	// metadata. Seatbelt matches path patterns per write, so it also covers
+	// metadata created later; bwrap fixes its mounts at launch, so it
+	// protects only what exists when the command starts. The preview must not
+	// claim more than each backend delivers.
+	switch cfg.Runtime {
+	case SandboxRuntimeSeatbelt:
+		line += " git_metadata=ro"
+	case SandboxRuntimeBwrap:
+		line += " git_metadata=ro(existing)"
+	}
 	return line
 }
 
@@ -301,7 +386,9 @@ func normalizeSandboxConfig(c SandboxConfig) (SandboxConfig, error) {
 // constructor does, resolves its backend (the availability probe), and checks
 // that root, canonicalized as a Workspace does, can bound that backend. Every
 // failure wraps ErrSandboxPolicy, and there is no host fallback. It holds no
-// resources: a resolved backend owns nothing to close.
+// resources: a resolved backend owns nothing to close. Validating a Seatbelt
+// config runs the probe spawn, so it empties the host's registered Mach port
+// table too (see SandboxRuntimeSeatbelt).
 func ValidateSandbox(cfg SandboxConfig, root string) error {
 	backend, err := newExecBackend(cfg)
 	if err != nil {

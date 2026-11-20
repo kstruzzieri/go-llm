@@ -938,7 +938,7 @@ func TestAllowWritePolicyFailurePublishesNothing(t *testing.T) {
 		{
 			name: "unsupported backend",
 			build: func(_ *testing.T, root string, _ agenttools.SandboxConfig) (*agenttools.VerifyCommand, string, error) {
-				return buildVerifier(root, otherOSBackend())
+				return buildVerifier(root, otherOSBackend(), 0)
 			},
 			want: "writes not enabled: verifier: tools: verify command backend: tools: sandbox policy unavailable: ",
 		},
@@ -947,7 +947,7 @@ func TestAllowWritePolicyFailurePublishesNothing(t *testing.T) {
 			build: func(t *testing.T, _ string, policy agenttools.SandboxConfig) (*agenttools.VerifyCommand, string, error) {
 				other := t.TempDir()
 				writeGolemJSON(t, other, valid)
-				return buildVerifier(other, policy)
+				return buildVerifier(other, policy, 0)
 			},
 			want: "writes not enabled: verifier: tools: verify command does not match the session root or sandbox policy\n",
 		},
@@ -960,7 +960,7 @@ func TestAllowWritePolicyFailurePublishesNothing(t *testing.T) {
 			orig := buildVerifierFn
 			t.Cleanup(func() { buildVerifierFn = orig })
 			calls := 0
-			buildVerifierFn = func(r string, p agenttools.SandboxConfig) (*agenttools.VerifyCommand, string, error) {
+			buildVerifierFn = func(r string, p agenttools.SandboxConfig, _ time.Duration) (*agenttools.VerifyCommand, string, error) {
 				calls++
 				return tc.build(t, r, p)
 			}

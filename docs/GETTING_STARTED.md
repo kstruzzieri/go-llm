@@ -136,7 +136,15 @@ if resolved.IsFallback {
 }
 ```
 
-Consumer applications (Firn IDE, Flux ML) can also use `config.Default()` to discover `models.json` automatically.
+Consumer applications (Firn IDE, Flux ML) can also use `config.Default()` to discover `models.json` automatically. The
+search order is `$GO_LLM_CONFIG` (absolute or relative path), then `./models.json`,
+then the user config directory. A config found at `./models.json` cannot use
+`${NAME}` `api_key` references (error code `key_reference_refused`); load it with
+`config.Load` or name it in `GO_LLM_CONFIG` for one run
+(`GO_LLM_CONFIG=./models.json your-app`) to use them. Do not export a relative
+`GO_LLM_CONFIG`: it would trust the `models.json` in every directory you run
+from. Code that mirrors the
+closed error-code list must add `key_reference_refused`.
 
 ### Choosing a Model
 
@@ -281,6 +289,12 @@ error names the provider and variable, never the secret value. Never commit a
 literal key to a config file. Expansion applies only to file-loaded configs;
 a `config.Config` built programmatically keeps `api_key` as written.
 
+A `models.json` that Golem finds only because it is in the working directory
+cannot use `${ENV_VAR}` keys: loading it fails with `key_reference_refused`
+before any variable is read, and Golem prints `pass -config ./models.json to
+use this file's key references, or set GO_LLM_CONFIG`. Do one of those, or save
+the config elsewhere. Literal keys and the user config are unchanged.
+
 ### Remote-relevant flags
 
 - `-allow-destination "hosted/https://api.openai.com"` — pre-admits the
@@ -290,22 +304,35 @@ a `config.Config` built programmatically keeps `api_key` as written.
 - `-no-probe` — skips the openai-compat port discovery scan. The scan is
   loopback-only (localhost ports 8080-8090); a remote `base_url` is never
   scanned regardless, so this flag just silences local discovery when you are
-  not running a local backend.
-- `-no-cap-probe` — disables the active tool-capability probe. For a model
-  with no declared or catalog-known `tool_call` capability, golem sends up to
-  two real chat-completion requests to the endpoint to test tool support —
-  against a hosted API those are billable calls. Verdicts are cached in
-  `fingerprints.db` under the golem data directory, so a positive verdict is
-  probed once per backend/model rather than per session (negative and
-  inconclusive verdicts can expire and re-probe). Declaring `capabilities` explicitly (as in
-  the example above) makes the probe unnecessary: an explicit declaration is
-  authoritative and no probe is sent.
+  not running a local backend. A provider with an `api_key` is never scanned
+  either, so its key cannot reach another local port: only its configured URL
+  is probed, and if that does not serve the model Golem prints
+  `openai-compat backend discovery skipped: provider "<key>" has an api_key;
+  pass -base-url to use another port`. Keyless providers still find a moved
+  local backend.
+- `-no-cap-probe` — turns off automatic tool-capability checks. For a model
+  with no declared or catalog-known `tool_call` capability and no stored
+  answer, golem sends the streamed `chat-stream-tools` check: up to two real
+  chat-completion requests to the endpoint, each requesting up to 2,048 output
+  tokens — against a hosted API those are billable calls. All automatic checks
+  in one golem run, startup included, share those two requests. Answers are
+  kept in the evidence log in `fingerprints.db` under the golem data
+  directory, so a model with a current answer is not checked again, and a
+  matching inconclusive attempt suppresses automatic checks for 24 hours (5
+  minutes for the `check_failed` attempt a check leaves when it sent a request
+  and then failed with a server error, its own timeout, or a broken or
+  oversized reply; a 4xx leaves none); answers in the old `capability_probes`
+  table no longer count. With `-no-cap-probe`, routing
+  also ignores stored answers. Declaring `capabilities` explicitly (as in the
+  example above) makes the check unnecessary: an explicit declaration is
+  authoritative and no check is sent.
 - `-base-url` — overrides the primary openai-compat agent provider's base URL.
   Server root, without `/v1`, used exactly as given; also disables discovery.
 - `golem models -probe-all` / `golem models -reprobe` — subcommand flags for
-  explicit capability-probe refresh: `-probe-all` actively probes every
-  non-explicit entry, `-reprobe` deletes the cached verdicts first and probes
-  fresh. Use these when checking provenance with `golem models`; they are not
+  explicit capability checks: `-probe-all` checks every agent-chain entry
+  without fresh answers, `-reprobe` checks them again even when fresh. Both
+  print the plan before sending and each result after, on stderr, and delete
+  nothing. Use these when checking provenance with `golem models`; they are not
   top-level `golem` flags.
 
 ### Capabilities the agent loop needs

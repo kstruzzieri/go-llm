@@ -5,6 +5,7 @@ import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 )
 
@@ -101,6 +102,50 @@ func (sc *staticCatalog) lookupFamily(family string) *ModelProfile {
 	return sc.buildProfile(family, &fam, nil)
 }
 
+// profileFor is the catalog ladder, the one implementation behind
+// Catalog.ProfileFor and the registry's catalogProfileFor: exact family+param,
+// family+tag, family only, then familyHint as a family. Nil when nothing
+// matches.
+func (sc *staticCatalog) profileFor(parsed ParsedModel, familyHint string) *ModelProfile {
+	staticProfile := sc.lookup(parsed.NormalizedFamily(), parsed.ParamSize)
+	if staticProfile == nil && parsed.ParamSize == "" && parsed.Tag != "" {
+		// Some catalog-only variants are keyed by tag (for example ":latest")
+		// rather than by parsed parameter size.
+		staticProfile = sc.lookup(parsed.NormalizedFamily(), parsed.Tag)
+	}
+	if staticProfile == nil {
+		// Family-only lookup for family-level metadata (FIM, think mode).
+		staticProfile = sc.lookupFamily(parsed.NormalizedFamily())
+	}
+	if staticProfile == nil && familyHint != "" {
+		staticProfile = sc.lookupFamily(familyHint)
+	}
+	return staticProfile
+}
+
+// Catalog is the embedded static model catalog, for hosts that need the
+// registry's catalog tier without a registry (#736). Its lookups do no I/O.
+type Catalog struct{ sc *staticCatalog }
+
+// LoadCatalog parses the embedded catalog.
+func LoadCatalog() (*Catalog, error) {
+	data, err := loadCatalog()
+	if err != nil {
+		return nil, err
+	}
+	return &Catalog{sc: newStaticCatalog(data)}, nil
+}
+
+// ProfileFor applies the registry's ladder: family+param, family+tag,
+// family only, then familyHint as a family. Nil when nothing matches, and
+// always nil on a nil Catalog.
+func (c *Catalog) ProfileFor(model, familyHint string) *ModelProfile {
+	if c == nil || c.sc == nil {
+		return nil
+	}
+	return c.sc.profileFor(ParseModelName(model), familyHint)
+}
+
 // families returns all family names present in the catalog.
 func (sc *staticCatalog) families() []string {
 	names := make([]string, 0, len(sc.data.Families))
@@ -124,7 +169,11 @@ func (sc *staticCatalog) buildProfile(family string, fam *catalogFamily, variant
 	}
 
 	if fam.FIM != nil {
-		p.FIM = fam.FIM
+		// A copy, so a caller changing its profile cannot reach the catalog's
+		// data or race another lookup.
+		fim := *fam.FIM
+		fim.StopTokens = slices.Clone(fim.StopTokens)
+		p.FIM = &fim
 	}
 
 	if fam.ThinkTags != nil {

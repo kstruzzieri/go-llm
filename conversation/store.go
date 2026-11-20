@@ -69,6 +69,10 @@ func (s *SQLiteStore) Save(ctx context.Context, conv Conversation) (int64, error
 		return 0, fmt.Errorf("conversation: save: marshal messages: %w", err)
 	}
 	summaryContent, summaryMessageCount := durableSummaryValues(conv.DurableSummary)
+	exposure, err := encodeExposure(conv.Exposure)
+	if err != nil {
+		return 0, fmt.Errorf("conversation: save: %w", err)
+	}
 
 	now := time.Now().UnixMilli()
 
@@ -87,11 +91,11 @@ func (s *SQLiteStore) Save(ctx context.Context, conv Conversation) (int64, error
 		// Write first: reading the floor before this statement would allow a
 		// WAL read-to-write upgrade to fail with SQLITE_BUSY_SNAPSHOT.
 		err = tx.QueryRowContext(ctx,
-			`INSERT INTO conversations (id, title, messages, summary_content, summary_message_count, revision, created_at, updated_at)
-			 SELECT ?, ?, ?, ?, ?, value + 1, ?, ? FROM conversation_revision_floor
+			`INSERT INTO conversations (id, title, messages, summary_content, summary_message_count, exposure, exposure_revision, revision, created_at, updated_at)
+			 SELECT ?, ?, ?, ?, ?, ?, value + 1, value + 1, ?, ? FROM conversation_revision_floor
 			 WHERE id = 1 AND value < ?
 			 ON CONFLICT(id) DO NOTHING RETURNING revision`,
-			conv.ID, conv.Title, string(messagesJSON), summaryContent, summaryMessageCount, now, now, int64(math.MaxInt64),
+			conv.ID, conv.Title, string(messagesJSON), summaryContent, summaryMessageCount, exposure, now, now, int64(math.MaxInt64),
 		).Scan(&revision)
 		if errors.Is(err, sql.ErrNoRows) {
 			// Even a no-row INSERT holds the writer lock. Prefer a duplicate-ID
@@ -114,9 +118,9 @@ func (s *SQLiteStore) Save(ctx context.Context, conv Conversation) (int64, error
 	} else {
 		err = tx.QueryRowContext(ctx,
 			`UPDATE conversations SET title = ?, messages = ?, summary_content = ?, summary_message_count = ?,
-			 revision = revision + 1, updated_at = ?
+			 exposure = ?, exposure_revision = revision + 1, revision = revision + 1, updated_at = ?
 			 WHERE id = ? AND revision = ? RETURNING revision`,
-			conv.Title, string(messagesJSON), summaryContent, summaryMessageCount, now, conv.ID, conv.Revision,
+			conv.Title, string(messagesJSON), summaryContent, summaryMessageCount, exposure, now, conv.ID, conv.Revision,
 		).Scan(&revision)
 	}
 	if errors.Is(err, sql.ErrNoRows) {
@@ -141,11 +145,18 @@ func (s *SQLiteStore) Load(ctx context.Context, id string) (*Conversation, error
 	var summaryContent string
 	var summaryMessageCount int
 	var createdMs, updatedMs int64
+	var exposureRaw sql.NullString
+	var exposureRev sql.NullInt64
 
+	// The typeof guards hand the scan only the expected storage class, so a
+	// hand-edited or corrupt exposure column reads as no record, not a failed Load.
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id, title, messages, summary_content, summary_message_count, revision, created_at, updated_at FROM conversations WHERE id = ?`,
+		`SELECT id, title, messages, summary_content, summary_message_count, revision, created_at, updated_at,
+		        CASE WHEN typeof(exposure) = 'text' THEN exposure END,
+		        CASE WHEN typeof(exposure_revision) = 'integer' THEN exposure_revision END
+		   FROM conversations WHERE id = ?`,
 		id,
-	).Scan(&conv.ID, &conv.Title, &messagesJSON, &summaryContent, &summaryMessageCount, &conv.Revision, &createdMs, &updatedMs)
+	).Scan(&conv.ID, &conv.Title, &messagesJSON, &summaryContent, &summaryMessageCount, &conv.Revision, &createdMs, &updatedMs, &exposureRaw, &exposureRev)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, fmt.Errorf("conversation: load %q: %w", id, ErrNotFound)
@@ -159,6 +170,7 @@ func (s *SQLiteStore) Load(ctx context.Context, id string) (*Conversation, error
 
 	conv.CreatedAt = time.UnixMilli(createdMs)
 	conv.UpdatedAt = time.UnixMilli(updatedMs)
+	conv.Exposure = decodeExposure(exposureRaw, exposureRev, conv.Revision)
 	if summaryContent != "" || summaryMessageCount > 0 {
 		conv.DurableSummary = &DurableSummary{
 			Content:      summaryContent,

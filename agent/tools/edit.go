@@ -15,6 +15,10 @@ import (
 // old_string must occur exactly once; new_string may be empty (deletion). Plan
 // computes the after-content and diff; Invoke re-verifies the file is unchanged
 // and the match is still unique before writing atomically.
+//
+// Plan's ApprovalKey follows WriteFile's rule: "" for an agent instruction or
+// harness configuration file or an unverified spelling (#725). A host with a
+// plain agent.Approver never receives the key, so the rule does not cover it.
 type EditFile struct {
 	ws *Workspace
 	j  Journal
@@ -101,7 +105,7 @@ func (t *EditFile) computeEdit(args editFileArgs) (before, after []byte, err err
 	return before, after, nil
 }
 
-func (t *EditFile) Plan(_ context.Context, raw json.RawMessage) (agent.ToolPlan, error) {
+func (t *EditFile) Plan(ctx context.Context, raw json.RawMessage) (agent.ToolPlan, error) {
 	eff := t.Effect()
 	var args editFileArgs
 	if err := json.Unmarshal(raw, &args); err != nil {
@@ -111,6 +115,7 @@ func (t *EditFile) Plan(_ context.Context, raw json.RawMessage) (agent.ToolPlan,
 	if err != nil {
 		return agent.ToolPlan{Effect: eff}, err
 	}
+	key, reason := t.ws.fileToolApprovalKey(ctx, args.Path)
 	t.store(ContentHash(raw), pendingPlan{
 		path:         args.Path,
 		priorContent: before,
@@ -119,8 +124,9 @@ func (t *EditFile) Plan(_ context.Context, raw json.RawMessage) (agent.ToolPlan,
 		afterContent: after,
 		afterHash:    ContentHash(after),
 		summary:      fmt.Sprintf("edit %s", args.Path),
+		approvalKey:  key,
 	})
-	return agent.ToolPlan{Effect: eff, Preview: unifiedDiff(args.Path, before, after, true), ApprovalKey: WriteClassApprovalKey}, nil
+	return agent.ToolPlan{Effect: eff, Preview: harnessPreview(reason, unifiedDiff(args.Path, before, after, true)), ApprovalKey: key}, nil
 }
 
 func (t *EditFile) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolResult, error) {
@@ -144,6 +150,9 @@ func (t *EditFile) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolR
 	// before-hash match guarantees pp.afterContent equals a fresh recomputation.
 	if ContentHash(before) != pp.beforeHash {
 		return errResult("file changed since preview; retry"), nil
+	}
+	if t.ws.harnessKeyLost(ctx, pp) {
+		return errResult(harnessKeyLostMsg), nil
 	}
 	rec := MutationRecord{
 		Path: pp.path, PriorContent: pp.priorContent, Existed: true,

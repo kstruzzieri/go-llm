@@ -69,13 +69,15 @@ func TestDefaultGuardsHeadlessContracts(t *testing.T) {
 		// Blocked calls appear in neither.
 		wantEvents  []string
 		wantToolIDs []string
-		// The stderr text footer's tail. finalFooter prints "done · ... ·
-		// risk <score>" on stderr in the machine formats too (the progress
-		// renderer is format-independent) and appends "  stopped: <reason>"
-		// when the run stopped early. expr is outside the egress quiet set and
-		// scores "unknown" 10, so the allowed-exec row has a finding a wrongly
-		// wired risk line could show.
-		wantFooterTail string
+		// The stderr text footer's prefix and tail. finalFooter prints "done ·
+		// ... · risk <score>" on stderr in the machine formats too (the
+		// progress renderer is format-independent), starts with "no answer"
+		// instead when the turn has no answer (#767), and appends "  stopped:
+		// <reason>" when the run stopped early. expr is outside the egress
+		// quiet set and scores "unknown" 10, so the allowed-exec row has a
+		// finding a wrongly wired risk line could show.
+		wantFooterPrefix string
+		wantFooterTail   string
 	}{
 		{
 			name: "allowed exec",
@@ -84,9 +86,9 @@ func TestDefaultGuardsHeadlessContracts(t *testing.T) {
 				result: "exit code: 0\n--- stdout ---\n2\n\n--- stderr ---\n"}},
 			wantRequests: 2,
 			wantStatus:   "completed", wantStop: "completed", wantAnswer: "final answer",
-			wantEvents:     []string{"run.started", "tool.started", "tool.finished", "message.delta", "run.finished"},
-			wantToolIDs:    []string{"x1", "x1"},
-			wantFooterTail: " · risk 10",
+			wantEvents:       []string{"run.started", "tool.started", "tool.finished", "message.delta", "run.finished"},
+			wantToolIDs:      []string{"x1", "x1"},
+			wantFooterPrefix: "done", wantFooterTail: " · risk 10",
 		},
 		{
 			name: "block then recover",
@@ -96,9 +98,9 @@ func TestDefaultGuardsHeadlessContracts(t *testing.T) {
 			},
 			wantRequests: 3,
 			wantStatus:   "completed", wantStop: "completed", wantAnswer: "final answer",
-			wantEvents:     []string{"run.started", "tool.started", "tool.finished", "message.delta", "run.finished"},
-			wantToolIDs:    []string{"ok", "ok"},
-			wantFooterTail: " · risk 30",
+			wantEvents:       []string{"run.started", "tool.started", "tool.finished", "message.delta", "run.finished"},
+			wantToolIDs:      []string{"ok", "ok"},
+			wantFooterPrefix: "done", wantFooterTail: " · risk 30",
 		},
 		{
 			name: "three blocks",
@@ -110,8 +112,8 @@ func TestDefaultGuardsHeadlessContracts(t *testing.T) {
 			// The cap stops the run after the third observation: no fourth request.
 			wantRequests: 3,
 			wantStatus:   "error", wantStop: "tool_error_cap_reached", wantAnswer: "", wantCode: "empty_answer", wantExit: 1,
-			wantEvents:     []string{"run.started", "run.finished"},
-			wantFooterTail: " · risk 90  stopped: tool_error_cap_reached",
+			wantEvents:       []string{"run.started", "run.finished"},
+			wantFooterPrefix: "no answer", wantFooterTail: " · risk 90  stopped: tool_error_cap_reached",
 		},
 	}
 	for _, tc := range cases {
@@ -143,7 +145,7 @@ func TestDefaultGuardsHeadlessContracts(t *testing.T) {
 				if strings.Contains(out+errOut, "interceptor risk") {
 					t.Errorf("a headless run printed an interceptor risk line:\nstdout:\n%s\nstderr:\n%s", out, errOut)
 				}
-				assertFooterTail(t, errOut, tc.wantFooterTail)
+				assertFooterTail(t, errOut, tc.wantFooterPrefix, tc.wantFooterTail)
 
 				// Wire: the sentinel never leaves the host, the run makes exactly the
 				// expected requests, and each blocked call's observation is the framed

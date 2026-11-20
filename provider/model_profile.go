@@ -1,8 +1,9 @@
 package provider
 
 import (
-	"strings"
 	"time"
+
+	"github.com/kstruzzieri/go-llm/fingerprint"
 )
 
 // ---------------------------------------------------------------------------
@@ -134,6 +135,13 @@ type ModelProfile struct {
 	Source            ProfileSource   // static, fingerprint, runtime, merged
 	Digest            string          // model digest for staleness detection
 	UpdatedAt         time.Time       // when this profile was last computed
+
+	// capsDecided marks Caps as the evidence-log core's final decision (#736),
+	// so SupportsFIM reads its insert bit instead of the template. Unexported:
+	// a value copy keeps it, and no serializer sees it. A profile rebuilt from
+	// its exported fields (e.g. a JSON round-trip by a host) loses the decision
+	// and falls back to the template rule.
+	capsDecided bool
 }
 
 // qualitySensitiveUseCases identifies use cases whose call is single-shot and
@@ -169,11 +177,17 @@ func (p *ModelProfile) EffectiveContextWindow(useCase string) int {
 }
 
 // SupportsFIM reports whether the model supports native prompt+suffix insert.
-// When a live template is available, it is authoritative; older runtimes may
-// omit the template, in which case the insert capability bit is used.
+// On an evidence-log-bound registry the decided insert bit is final: the core
+// folds the live template's answer into it, but an explicit capability list or
+// a stored answer outranks the template. Otherwise, when a live template is
+// available, it is authoritative; older runtimes may omit the template, in
+// which case the insert capability bit is used.
 func (p *ModelProfile) SupportsFIM() bool {
 	if p == nil {
 		return false
+	}
+	if p.capsDecided {
+		return p.Caps.Has(CapInsert)
 	}
 	if p.Template != "" {
 		return templateUsesSuffix(p.Template)
@@ -182,10 +196,18 @@ func (p *ModelProfile) SupportsFIM() bool {
 }
 
 // FIMUnsupportedReason returns a human-readable explanation when SupportsFIM
-// is false. An empty string means the profile appears FIM-ready.
+// is false. An empty string means the profile appears FIM-ready. When the
+// profile's Caps were decided by the evidence-log core, the answer follows the
+// decided insert bit.
 func (p *ModelProfile) FIMUnsupportedReason() string {
 	if p == nil {
 		return "missing model profile"
+	}
+	if p.capsDecided {
+		if p.Caps.Has(CapInsert) {
+			return ""
+		}
+		return "the model's decided capabilities exclude insert"
 	}
 	if p.Template != "" {
 		if !templateUsesSuffix(p.Template) {
@@ -200,7 +222,7 @@ func (p *ModelProfile) FIMUnsupportedReason() string {
 }
 
 func templateUsesSuffix(tmpl string) bool {
-	return strings.Contains(tmpl, ".Suffix")
+	return fingerprint.TemplateUsesSuffix(tmpl)
 }
 
 // ---------------------------------------------------------------------------

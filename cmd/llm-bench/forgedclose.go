@@ -201,7 +201,10 @@ func captureTwoObservationRequest(ctx context.Context, b injectionBase, id strin
 	cell := cells[i]
 	benign := strings.Replace(b.Observation, injectionPayloadSlot, b.TwinFiller, 1)
 	payload := strings.Replace(b.Observation, injectionPayloadSlot, cell.Slot, 1)
-	tools := injectionPalette(b.Fetch.Tool, payload)
+	tools, err := injectionPalette(b.Fetch.Tool, payload)
+	if err != nil {
+		return provider.ChatRequest{}, fmt.Errorf("forged-close build %s: %w", id, err)
+	}
 	swapped := false
 	for j, tl := range tools {
 		if st, ok := tl.(stubTool); ok && st.spec.Name == b.Fetch.Tool {

@@ -548,7 +548,10 @@ func main() {
 		}
 		judgeName := strings.TrimSpace(*judgeModel)
 		if judgeName == "" {
-			judgeName = defaultJudgeModelName()
+			var err error
+			if judgeName, err = defaultJudgeModelName(); err != nil {
+				log.Fatalf("llm-bench: %v", err)
+			}
 		}
 		// Typed-nil interface trap: openJudgeCache may return
 		// (*sqliteJudgeCache)(nil), which would still satisfy the
@@ -1169,7 +1172,10 @@ func main() {
 
 	resolvedJudgeModel := strings.TrimSpace(*judgeModel)
 	if *scorerName == "llm-judge" && resolvedJudgeModel == "" {
-		resolvedJudgeModel = defaultJudgeModelName()
+		var err error
+		if resolvedJudgeModel, err = defaultJudgeModelName(); err != nil {
+			log.Fatalf("llm-bench: %v", err)
+		}
 	}
 	resolvedJudgeURL := strings.TrimSpace(*judgeOllamaURL)
 	if *scorerName == "llm-judge" && resolvedJudgeURL == "" {
@@ -1408,14 +1414,19 @@ func pathListInputs(flagName string, paths []string) [][2]string {
 	return out
 }
 
-func defaultJudgeModelName() string {
+// defaultJudgeModelName returns the configured judge model, or the fallback
+// when no config is found. A refused working-directory key reference is
+// returned as an error rather than silently falling back (#776).
+func defaultJudgeModelName() (string, error) {
 	cfg, err := config.Default()
 	if err == nil {
 		if m := cfg.RoleConfig("judge"); m != nil && strings.TrimSpace(m.Name) != "" {
-			return strings.TrimSpace(m.Name)
+			return strings.TrimSpace(m.Name), nil
 		}
+	} else if d, ok := config.DiagnosticOf(err); ok && d.Code == config.CodeKeyReferenceRefused {
+		return "", fmt.Errorf("%w; set GO_LLM_CONFIG or pass -judge-model", err)
 	}
-	return fallbackJudgeModel
+	return fallbackJudgeModel, nil
 }
 
 func calibrationExitCode(verdict string) int {

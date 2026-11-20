@@ -121,7 +121,11 @@ type Provider interface {
 	// Health checks whether the provider backend is reachable and ready.
 	Health(ctx context.Context) error
 
-	// Models returns the list of models available from this provider.
+	// Models returns the list of models available from this provider. A nil
+	// slice with a nil error means the response carried no listing at all (the
+	// listing key was absent); a listing that is present but empty, or null, is a
+	// non-nil empty slice. RefreshInventory treats the former as a failed listing
+	// when it publishes.
 	Models(ctx context.Context) ([]ModelInfo, error)
 
 	// Chat sends a chat completion request and returns the full response.
@@ -229,13 +233,17 @@ type ChatRequest struct {
 
 // ChatResponse is the provider-agnostic response from a chat completion.
 type ChatResponse struct {
-	Model        string        `json:"model"`
-	Provider     string        `json:"provider"`
-	Content      string        `json:"content"`
-	Thinking     string        `json:"thinking,omitempty"`
-	ToolCalls    []ToolCall    `json:"tool_calls,omitempty"`
-	Done         bool          `json:"done"`
-	Partial      bool          `json:"partial,omitempty"`
+	Model     string     `json:"model"`
+	Provider  string     `json:"provider"`
+	Content   string     `json:"content"`
+	Thinking  string     `json:"thinking,omitempty"`
+	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
+	Done      bool       `json:"done"`
+	Partial   bool       `json:"partial,omitempty"`
+	// FinishReason is the server's reason the generation ended ("stop",
+	// "length", "tool_calls", ...), set only by the openai-compat provider
+	// and empty on a cancelled partial.
+	FinishReason string        `json:"finish_reason,omitempty"`
 	Usage        Usage         `json:"usage,omitempty"`
 	Latency      LatencyInfo   `json:"latency,omitempty"`
 	RouteOutcome *RouteOutcome `json:"route_outcome,omitempty"`
@@ -359,6 +367,7 @@ type ModelInfo struct {
 	Capabilities  []string `json:"capabilities,omitempty"`
 	ContextWindow int      `json:"context_window,omitempty"`
 	Digest        string   `json:"digest,omitempty"`
+	OwnedBy       string   `json:"owned_by,omitempty"` // OpenAI-compat owned_by; empty when not reported
 }
 
 // ---------------------------------------------------------------------------

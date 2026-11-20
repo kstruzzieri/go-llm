@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -9,6 +10,8 @@ import (
 
 	"github.com/kstruzzieri/go-llm/agent"
 	"github.com/kstruzzieri/go-llm/agent/interceptor"
+	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
+	"github.com/kstruzzieri/go-llm/conversation"
 	"github.com/kstruzzieri/go-llm/internal/promptfence"
 	"github.com/kstruzzieri/go-llm/provider"
 )
@@ -25,12 +28,17 @@ type replApprover struct {
 	// grants is the session grant store (#341). nil disables the grant path
 	// entirely (the Agentflow author's plan-lock approver stays per-invocation).
 	grants *approvalGrants
+	// hostCommands reports that the session's commands run on the host, so a
+	// fresh prompt for a command, background start or verifier says the
+	// network is not confined (#584).
+	hostCommands bool
 }
 
-// Compile-time assertions: replApprover must satisfy all three approver contracts.
+// Compile-time assertions: replApprover must satisfy all four approver contracts.
 var _ agent.Approver = (*replApprover)(nil)
 var _ agent.KeyedApprover = (*replApprover)(nil)
 var _ agent.RiskApprover = (*replApprover)(nil)
+var _ agent.FreshApprover = (*replApprover)(nil)
 
 func newReplApprover(src lineSource, out io.Writer, color bool) *replApprover {
 	return &replApprover{src: src, out: out, color: color}
@@ -49,13 +57,14 @@ func (a *replApprover) ApproveKeyed(ctx context.Context, call provider.ToolCall,
 	return a.ApproveWithRisk(ctx, call, preview, key, agent.RiskReport{})
 }
 
-// ApproveWithRisk is the one prompt body (#514 D3). It shows the preview and
-// reads one line. "y"/"yes" (case-insensitive) approves. "n", empty, and EOF
-// deny with a nil error. A canceled context (Ctrl-C) denies and returns the
-// context error so the run aborts.
+// ApproveWithRisk is the ordinary entry to ask, the one prompt body (#514
+// D3). It shows the preview and reads one line. "y"/"yes" (case-insensitive)
+// approves. "n", empty, and EOF deny with a nil error. A canceled context
+// (Ctrl-C) denies and returns the context error so the run aborts.
 // The prompt and rendering are action-neutral: run_command and MCP calls get a
-// plain preview and run prompt; all other calls get the diff rendering and "Apply
-// this change?" prompt.
+// plain preview and run prompt; the agent-memory writes show their arguments;
+// all other calls get the diff rendering and "Apply this change?" prompt, with
+// the tool name and its arguments in place of an empty preview.
 //
 // Grant path (#341): grantability requires ALL of a non-empty structural key, a
 // grant store, and a tool name on the grantScope allowlist — scope comes from
@@ -65,12 +74,75 @@ func (a *replApprover) ApproveKeyed(ctx context.Context, call provider.ToolCall,
 // preview the prompt would have shown. A grantable prompt offers "a" (always
 // this session): approve now and store the grant. MCP tools and submit_plan
 // are never on the allowlist. The key is opaque: never parsed, never derived
-// from the preview.
+// from the preview. A write_file or edit_file call with the empty key is a
+// demand for a human (#725): a harness target or a spelling the tool could
+// not verify. It prompts [y/N] with a notice line after the diff.
 func (a *replApprover) ApproveWithRisk(ctx context.Context, call provider.ToolCall, preview, key string, risk agent.RiskReport) (agent.ApprovalDecision, error) {
+	return a.ask(ctx, call, preview, key, risk, harnessFileCall(call.Function.Name, key), nil)
+}
+
+// ApproveFresh is the agent.FreshApprover entry (#584): a strict run whose
+// conversation is exposed asks here about this one call. It prints the
+// suspension notice, and on the host runtime "network is not confined" for a
+// command, background start or verifier, then runs the one prompt body with
+// the empty key, so no grant is looked up or stored, the question is [y/N]
+// and "a" denies. keyed decides only the #725 harness notice: a file-tool
+// call that planned without a key keeps it, by the same conservative rule as
+// harnessFileCall.
+func (a *replApprover) ApproveFresh(ctx context.Context, call provider.ToolCall, preview string, keyed bool, risk agent.RiskReport, exposure agent.Exposure) (bool, error) {
+	notice := []string{suspendedNotice(exposure)}
+	scope := grantScope(call.Function.Name)
+	if a.hostCommands && (scope == grantScopeExec || scope == grantScopeVerify) {
+		notice = append(notice, "network is not confined")
+	}
+	harness := scope == grantScopeFiles && !keyed
+	d, err := a.ask(ctx, call, preview, "", risk, harness, notice)
+	return d.Approved, err
+}
+
+// suspendedNotice is the line a fresh prompt opens with (#584).
+func suspendedNotice(e agent.Exposure) string {
+	foreign, label := exposureSource(e)
+	why := "this conversation's provenance is unknown"
+	if foreign {
+		why = "outside content entered this conversation"
+	}
+	if label != "" {
+		why += " (" + label + ")"
+	}
+	return "reusable approvals suspended: " + why + "; /new or /clear starts fresh"
+}
+
+// exposureSource reads an exposed record for the strict notice and /grants
+// (#584): whether outside content entered it, and a label naming the first
+// exposing source. The label is First, bounded, without its "tool:" prefix
+// and made one inert line as riskLine makes its badge, because an MCP tool
+// name comes from the server. A missing record reads as unknown "history",
+// as the agent reads it, and so does an unknown one with no First; a foreign
+// one with no First has no label.
+func exposureSource(e agent.Exposure) (foreign bool, label string) {
+	if !e.Recorded {
+		return false, "history"
+	}
+	label = strings.TrimPrefix(conversation.BoundExposureFirst(e.First), "tool:")
+	label = sanitizeApprovalPreview(promptfence.FlattenLine(label))
+	if label == "" && !e.Foreign {
+		label = "history"
+	}
+	return e.Foreign, label
+}
+
+// ask is the one prompt body behind ApproveWithRisk and ApproveFresh. notice
+// lines print after beforeWrite and before the preview; harness adds the #725
+// notice after a diff.
+func (a *replApprover) ask(ctx context.Context, call provider.ToolCall, preview, key string, risk agent.RiskReport, harness bool, notice []string) (agent.ApprovalDecision, error) {
 	if a.beforeWrite != nil {
 		if err := a.beforeWrite(); err != nil {
 			return agent.ApprovalDecision{}, err
 		}
+	}
+	for _, line := range notice {
+		_, _ = fmt.Fprintln(a.out, line)
 	}
 	isExec := call.Function.Name == "run_command"
 	isStart := call.Function.Name == "start_command"
@@ -110,8 +182,29 @@ func (a *replApprover) ApproveWithRisk(ctx context.Context, call provider.ToolCa
 	case isMCP:
 		a.renderPlain(preview)
 		question = "Run this MCP tool? [y/N] "
+	// #584: the agent-memory writes ask only in an exposed strict
+	// conversation. They do not plan, so the preview is empty and the
+	// arguments are the display. Neither has a grant scope.
+	case call.Function.Name == agenttools.AgentMemoryCreateToolName:
+		_, _ = fmt.Fprintln(a.out, "agent memory note:")
+		a.renderPlain(memoryNoteText(call.Function.Arguments))
+		question = "Save this agent memory note? [y/N] "
+	case call.Function.Name == agenttools.AgentMemoryPromoteToolName:
+		a.renderPlain(memoryPromoteLine(call.Function.Arguments))
+		question = "Promote this agent memory record? [y/N] "
 	default:
-		a.renderDiff(preview)
+		if preview == "" {
+			// A tool that does not plan has no preview; show the call itself
+			// rather than an empty diff.
+			a.renderPlain(rawArgsLine(call.Function.Name + " " + string(call.Function.Arguments)))
+		} else {
+			a.renderDiff(preview)
+		}
+		// #725: an empty file-tool key marks a harness file. grantable is
+		// already false, so the prompt is [y/N]; the notice says why.
+		if harness {
+			_, _ = fmt.Fprintln(a.out, "harness file: "+agenttools.HarnessApprovalNotice)
+		}
 		// The legend spells out the asymmetry: an exec grant covers one exact
 		// command, but a write/edit grant covers the whole class — "a" here is
 		// /auto-edits on for the session, not "always this file".
@@ -223,6 +316,59 @@ func currentEgress(risk agent.RiskReport) (agent.Finding, bool) {
 		}
 	}
 	return agent.Finding{}, false
+}
+
+// memoryNoteText renders an agent_memory_create call's note as the tool will
+// store it: decoded as the tool decodes it and trimmed as the tool trims it.
+// Each sanitized line is marked "| " and a size line follows, so a note
+// cannot fake its own header or push the real one off screen and still end
+// right above the question. A note over the tool's limit shows only its size,
+// since it will not be saved. Arguments that do not decode, or a note that is
+// empty after trimming, show as the one-line raw arguments.
+func memoryNoteText(args json.RawMessage) string {
+	var a struct {
+		Content string `json:"content"`
+	}
+	if json.Unmarshal(args, &a) != nil {
+		return rawArgsLine(string(args))
+	}
+	note := strings.TrimSpace(a.Content)
+	if note == "" {
+		return rawArgsLine(string(args))
+	}
+	n := strings.Count(note, "\n") + 1
+	lines := "lines"
+	if n == 1 {
+		lines = "line"
+	}
+	size := fmt.Sprintf("(note: %d %s, %d bytes", n, lines, len(note))
+	if len(note) > agenttools.MaxAgentMemoryContentBytes {
+		return fmt.Sprintf("%s: over the %d-byte limit, so it will not be saved)", size, agenttools.MaxAgentMemoryContentBytes)
+	}
+	var b strings.Builder
+	for _, line := range strings.Split(sanitizeApprovalPreview(note), "\n") {
+		b.WriteString(strings.TrimRight("| "+line, " "))
+		b.WriteByte('\n')
+	}
+	return b.String() + size + ")"
+}
+
+// memoryPromoteLine is an agent_memory_promote call as one sanitized line,
+// or the raw arguments when they do not decode to an id and a kind.
+func memoryPromoteLine(args json.RawMessage) string {
+	var a struct {
+		ID   string `json:"id"`
+		Kind string `json:"kind"`
+	}
+	if json.Unmarshal(args, &a) != nil || a.ID == "" || a.Kind == "" {
+		return rawArgsLine(string(args))
+	}
+	return rawArgsLine("promote agent memory record " + a.ID + " to " + a.Kind)
+}
+
+// rawArgsLine makes model-written call text one inert display line.
+func rawArgsLine(s string) string {
+	return sanitizeApprovalPreview(promptfence.FlattenLine(s))
 }
 
 // renderPlain prints a non-diff preview verbatim (no +/- coloring).

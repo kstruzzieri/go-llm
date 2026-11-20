@@ -132,15 +132,18 @@ func TestCensusFindingsByCarrier(t *testing.T) {
 			t.Errorf("search %q refused/bytes/findings = %q/%d/%v, want \"\"/>0/%v", q, o.Refused, o.Bytes, got, want)
 		}
 	}
-	// The read_file credential-path invariant (a guard, not a detector) blocks
-	// the call itself, so nothing is inspected; exec and MCP read the bytes.
-	for _, carrier := range []string{"read_file", "mixed"} {
+	// The credential-path invariant (a guard, not a detector) blocks the
+	// read_file call and, since #777, an exec call whose argv names the file
+	// (command_tail's observation is its blocked start_command), so nothing is
+	// inspected. The verifier's command is configuration, not a call, and MCP
+	// is not guarded: both read the bytes.
+	for _, carrier := range []string{"read_file", "mixed", "run_command", "command_tail"} {
 		o := findCensusObservation(t, obs, carrier, ".npmrc")
 		if got, want := censusFindingKeys(o), []string{"invariants/credential_path/block/tool_call"}; !reflect.DeepEqual(got, want) || o.Bytes != 0 || o.Refused != "" {
 			t.Errorf("%s .npmrc findings/bytes/refused = %v/%d/%q, want %v/0/\"\"", carrier, got, o.Bytes, o.Refused, want)
 		}
 	}
-	for _, carrier := range []string{"run_command", "command_tail", "verifier", "mcp"} {
+	for _, carrier := range []string{"verifier", "mcp"} {
 		if o := findCensusObservation(t, obs, carrier, ".npmrc"); len(o.Findings) != 0 || o.Bytes == 0 {
 			t.Errorf("%s .npmrc findings/bytes = %v/%d, want none/the rendered bytes", carrier, censusFindingKeys(o), o.Bytes)
 		}
@@ -213,6 +216,25 @@ func TestCensusRecordsTerminalCallBlocks(t *testing.T) {
 	}
 	if len(obs) != 14 {
 		t.Errorf("observations = %d, want 6 file carriers and 8 queries", len(obs))
+	}
+}
+
+// Only a blocked start is an observation without a job (#777). A start that
+// fails for another reason (here: no cat on PATH, a tool error) leaves no job
+// either, and the census still fails with the job-count message.
+func TestCensusCommandTailUnblockedStartWithoutJobFails(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the census refuses windows (TestCensusRefusesWindows)")
+	}
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "plain.txt"), []byte("plain text\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", t.TempDir())
+	e := &censusEnv{stratum: "nojob", root: root}
+	o, err := e.commandTail(t.Context(), "plain.txt")
+	if err == nil || err.Error() != "background jobs = 0, want 1" {
+		t.Errorf("commandTail with an unblocked failed start = findings %v, error %v; want the job-count failure", censusFindingKeys(o), err)
 	}
 }
 

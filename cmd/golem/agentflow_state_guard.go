@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"path/filepath"
 	"regexp"
+	"strings"
 
 	"github.com/kstruzzieri/go-llm/agentflow"
 )
@@ -197,8 +198,8 @@ func unrecoverableTimedOutReceipt(root string) (string, error) {
 // attempt_id; AgentFlow's reader skips the others. review marks an amendment
 // linked to review findings (finding_refs, or reason_code review_feedback).
 type stepRunRow struct {
-	step, attempt, event string
-	review               bool
+	step, attempt, event, reason string
+	review                       bool
 }
 
 // readStepRunRows reads dir's step-run ledger in order.
@@ -233,6 +234,8 @@ func readStepRunRows(dir string) ([]stepRunRow, error) {
 				row.attempt, hasAttempt = string(s), true
 			case agentflowJSONStringEqualASCII(member.key, "event"):
 				row.event = string(s)
+			case agentflowJSONStringEqualASCII(member.key, "reason"):
+				row.reason = string(s)
 			case agentflowJSONStringEqualASCII(member.key, "reason_code"):
 				row.review = row.review || agentflowJSONStringEqualASCII(s, "review_feedback")
 			}
@@ -295,6 +298,58 @@ func unfinishedReviewAmendment(root, step string) (bool, error) {
 		}
 	}
 	return review, nil
+}
+
+// operatorAmendmentWithEdit reports whether root's ledgers record attempt as an
+// amendment of step that an operator opened, with a file receipt of its own. A
+// Golem-opened amendment carries a "golem:" reason, and a review amendment's
+// findings would go unaddressed, so neither counts.
+func operatorAmendmentWithEdit(root, step, attempt string) (bool, error) {
+	dir := filepath.Join(root, ".agent")
+	rows, err := readStepRunRows(dir)
+	if err != nil {
+		return false, err
+	}
+	operator := false
+	for _, row := range rows {
+		if row.step == step && row.attempt == attempt && row.event == "amendment_started" {
+			operator = !strings.HasPrefix(row.reason, "golem:")
+		}
+	}
+	if !operator {
+		return false, nil
+	}
+	if review, err := unfinishedReviewAmendment(root, step); err != nil || review {
+		return false, err
+	}
+	return attemptHasFileReceipt(dir, attempt)
+}
+
+// attemptHasFileReceipt reports whether dir's file-receipt ledger has a row for
+// attempt.
+func attemptHasFileReceipt(dir, attempt string) (bool, error) {
+	const name = "file-receipts.jsonl"
+	b, err := readAgentflowState(dir, name)
+	if err != nil {
+		return false, err
+	}
+	found := false
+	for i, line := range bytes.Split(b, []byte("\n")) {
+		if len(bytes.TrimSpace(line)) == 0 {
+			continue // AgentFlow skips blank lines too
+		}
+		value, err := parseAgentflowJSON(line)
+		row, isObject := value.(agentflowJSONObject)
+		if err != nil || !isObject {
+			return false, incompatibleAgentflowState(fmt.Sprintf(".agent/%s:%d", name, i+1), "unreadable")
+		}
+		for _, member := range row {
+			if s, isString := member.value.(agentflowJSONString); isString && agentflowJSONStringEqualASCII(member.key, "attempt_id") && string(s) == attempt {
+				found = true
+			}
+		}
+	}
+	return found, nil
 }
 
 // refuseUnrecoverableTimeout reports a timed-out command receipt root retains

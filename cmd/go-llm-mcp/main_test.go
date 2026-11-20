@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kstruzzieri/go-llm/config"
 	"github.com/kstruzzieri/go-llm/provider"
 )
 
@@ -509,5 +510,43 @@ func TestBinaryInstallsBearerToken(t *testing.T) {
 				t.Error("provider mock saw no requests from a started server")
 			}
 		})
+	}
+}
+
+func TestCreateServerErrRefusalRemedy(t *testing.T) {
+	t.Setenv("CANARY_VAR", "CANARY-776-mcpbin")
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("GO_LLM_CONFIG", "") // registers the restore; unset below
+	if err := os.Unsetenv("GO_LLM_CONFIG"); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	body := `{"providers":{"openai":{"base_url":"http://127.0.0.1:1","api_format":"openai-compat","api_key":"${CANARY_VAR}"}},"models":{},"defaults":{}}`
+	if err := os.WriteFile(filepath.Join(dir, "models.json"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+	_, refused := config.DefaultDocument()
+	got := createServerErr(refused)
+	if !strings.Contains(got.Error(), "pass -config ./models.json to use this file's key references, or set GO_LLM_CONFIG") {
+		t.Errorf("remedy missing: %v", got)
+	}
+	if !errors.Is(got, refused) {
+		t.Error("wrapper lost errors.Is")
+	}
+	if strings.Contains(got.Error(), "CANARY-776-mcpbin") {
+		t.Errorf("result leaks the canary (len %d)", len(got.Error()))
+	}
+
+	// Another config diagnostic, not just any error, so the code comparison
+	// is what keeps it unwrapped.
+	_, other := config.ParseDocument([]byte(`{"providers":{"openai":{"base_url":"http://127.0.0.1:1","api_format":"openai-compat","api_key":"abc${"}},"models":{},"defaults":{}}`),
+		config.Origin{Source: config.OriginExplicit}, config.DocumentOptions{})
+	if d, ok := config.DiagnosticOf(other); !ok || d.Code != config.CodeKeyReferenceMalformed {
+		t.Fatalf("fixture: DiagnosticOf = %+v, %v; want key_reference_malformed", d, ok)
+	}
+	if got := createServerErr(other); got != other || got.Error() != other.Error() {
+		t.Errorf("other diagnostic changed: %v", got)
 	}
 }

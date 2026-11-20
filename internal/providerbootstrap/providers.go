@@ -98,28 +98,84 @@ const defaultProviderTimeout = 5 * time.Minute
 // client timeout; each probe is additionally ctx-bounded to the same value.
 const defaultSlotProbeClientTimeout = 5 * time.Second
 
+// ProviderTimeout is the per-request timeout a provider built from cfg runs
+// with: its configured timeout when positive, else the clients' 5-minute
+// default.
+func ProviderTimeout(cfg config.ProviderConfig) time.Duration {
+	if cfg.Timeout.Duration > 0 {
+		return cfg.Timeout.Duration
+	}
+	return defaultProviderTimeout
+}
+
+// BuildGuardedProvider constructs one provider from cfg whose every request
+// passes the destination guard bound to gate and dest, as bootstrap builds a
+// gated provider. For ollama it also returns the underlying client. A non-nil
+// transport is the guarded client's base transport; nil uses the default. A
+// loopback destination still clones it, strips its proxy and dials localhost
+// as the loopback addresses. match is the content guard, as in bootstrap. A
+// nil gate is an error: this constructor never builds an ungated client.
+//
+// closeIdle closes the idle connections of the transport the guard made for
+// this provider: its clone for a loopback destination, and its copy of the
+// default for a remote one built with a nil transport. For a remote
+// destination built with a transport, which the guard uses as is, it does
+// nothing: those connections are the caller's.
+func BuildGuardedProvider(key string, cfg config.ProviderConfig, gate *provider.DestinationGate, dest provider.Destination, match func(string) bool, transport *http.Transport) (prov provider.Provider, client *ollama.Client, closeIdle func(), err error) {
+	if gate == nil {
+		return nil, nil, nil, fmt.Errorf("providerbootstrap: provider %q: a guarded provider requires a gate", key)
+	}
+	guarded, err := guardedClient(key, cfg, gate, dest, transport)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if prov, client, err = providerWith(key, cfg, guarded, dest, match); err != nil {
+		return nil, nil, nil, err
+	}
+	closeIdle = func() {}
+	if dest.IsLocal() || transport == nil {
+		closeIdle = guarded.CloseIdleConnections
+	}
+	return prov, client, closeIdle, nil
+}
+
 // buildProvider constructs one provider from its config. For ollama it also
 // returns the underlying client so the prober factory can reuse it. A
 // non-nil gate wraps the provider's HTTP client with the destination guard
 // bound to dest; a nil gate keeps the ungated construction byte-identical.
+func buildProvider(key string, cfg config.ProviderConfig, gate *provider.DestinationGate, dest provider.Destination, match func(string) bool) (provider.Provider, *ollama.Client, error) {
+	var guarded *http.Client
+	if gate != nil {
+		var err error
+		if guarded, err = guardedClient(key, cfg, gate, dest, nil); err != nil {
+			return nil, nil, err
+		}
+	}
+	return providerWith(key, cfg, guarded, dest, match)
+}
+
+// guardedClient is an HTTP client with cfg's timeout behind the destination
+// guard bound to gate and dest. A non-nil transport is its base transport.
+func guardedClient(key string, cfg config.ProviderConfig, gate *provider.DestinationGate, dest provider.Destination, transport *http.Transport) (*http.Client, error) {
+	base := &http.Client{Timeout: ProviderTimeout(cfg)}
+	if transport != nil { // a nil *http.Transport in the interface field is not a nil RoundTripper
+		base.Transport = transport
+	}
+	guarded, err := provider.GuardHTTPClient(gate, dest, base)
+	if err != nil {
+		return nil, fmt.Errorf("providerbootstrap: provider %q: %w", key, err)
+	}
+	return guarded, nil
+}
+
+// providerWith constructs the provider over guarded, or over the clients' own
+// HTTP client when guarded is nil.
 //
 // A non-nil match is installed as the content guard on an openai-compat client
 // whose destination is not loopback. Loopback is decided on the materialized
 // destination, so a URL override moves a provider across the boundary; ollama
 // clients take no guard.
-func buildProvider(key string, cfg config.ProviderConfig, gate *provider.DestinationGate, dest provider.Destination, match func(string) bool) (provider.Provider, *ollama.Client, error) {
-	timeout := defaultProviderTimeout
-	if cfg.Timeout.Duration > 0 {
-		timeout = cfg.Timeout.Duration
-	}
-	var guarded *http.Client
-	if gate != nil {
-		var err error
-		guarded, err = provider.GuardHTTPClient(gate, dest, &http.Client{Timeout: timeout})
-		if err != nil {
-			return nil, nil, fmt.Errorf("providerbootstrap: provider %q: %w", key, err)
-		}
-	}
+func providerWith(key string, cfg config.ProviderConfig, guarded *http.Client, dest provider.Destination, match func(string) bool) (provider.Provider, *ollama.Client, error) {
 	switch cfg.APIFormat {
 	case "", "ollama":
 		opts := []ollama.Option{ollama.WithBaseURL(cfg.BaseURL)}

@@ -636,9 +636,9 @@ func TestVerifyPreviewNamesRuntimeAndTarget(t *testing.T) {
 		line string
 	}{
 		{SandboxConfig{Runtime: SandboxRuntimeSeatbelt},
-			`  sandbox: runtime="seatbelt" network=denied memory_cap=none cpu_limit=none drop_caps=[] temp=private` + "\n"},
+			`  sandbox: runtime="seatbelt" network=denied memory_cap=none cpu_limit=none drop_caps=[] temp=private git_metadata=ro` + "\n"},
 		{SandboxConfig{Runtime: SandboxRuntimeBwrap},
-			`  sandbox: runtime="bwrap" network=ip-denied memory_cap=none cpu_limit=none drop_caps=[] temp=private` + "\n"},
+			`  sandbox: runtime="bwrap" network=ip-denied memory_cap=none cpu_limit=none drop_caps=[] temp=private git_metadata=ro(existing)` + "\n"},
 	} {
 		t.Run(string(tc.cfg.Runtime), func(t *testing.T) {
 			v := newTestVerifyCommandWith(t, ws, &stubRunner{}, tc.cfg, argv, "", time.Minute)

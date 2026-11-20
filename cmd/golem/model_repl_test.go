@@ -1555,3 +1555,52 @@ func TestModelCommandsAreNeverGoalsWhileEditStillForcesOne(t *testing.T) {
 		}
 	})
 }
+
+// Acceptance 12: a real /model set extension, on the session's real admission,
+// shows where the new remote provider's key comes from, and never the key.
+func TestModelSetExtensionShowsKeySource(t *testing.T) {
+	const canary = "CANARY-776-7a3c9e1b5d2f4086"
+	t.Setenv("CANARY_VAR", canary)
+	fx := newModelSwitchFixture(t, remoteModelURL)
+	raw, err := os.ReadFile(fx.configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyed := strings.Replace(string(raw), `"cloud": {"base_url"`, `"cloud": {"api_key": "${CANARY_VAR}", "base_url"`, 1)
+	if keyed == string(raw) {
+		t.Fatal("fixture drifted; key not injected")
+	}
+	if err := os.WriteFile(fx.configPath, []byte(keyed), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var atPrompt string
+	stderr := fx.withSession(t, nil, func(t *testing.T, sess *replSession) {
+		out, ok := sess.destAdmission.out.(*os.File)
+		if !ok {
+			t.Fatalf("admission Out is %T, want the run's stderr file", sess.destAdmission.out)
+		}
+		src := newScannerSource(strings.NewReader("yes\n"), io.Discard)
+		inner := lineSourcePromptYN(src)
+		sess.destAdmission.setPrompt(func(ctx context.Context, prompt string) (bool, error) {
+			b, err := os.ReadFile(out.Name())
+			if err != nil {
+				t.Fatal(err)
+			}
+			atPrompt = string(b)
+			return inner(ctx, prompt)
+		})
+		got := slash(t, sess, "/model set cloudrole")
+		if !strings.Contains(got, destinationGrantRetainedNotice) {
+			t.Fatalf("switch did not take the grant: %q", got)
+		}
+		if strings.Contains(got, canary) {
+			t.Errorf("canary leaked into slash output: %q", got)
+		}
+	})
+	if !strings.Contains(atPrompt, "      sends api_key from $CANARY_VAR\n") {
+		t.Errorf("extension consent screen missing the key source:\n%s", atPrompt)
+	}
+	if strings.Contains(atPrompt, canary) || strings.Contains(stderr, canary) {
+		t.Errorf("canary leaked into captured output:\n%s", stderr)
+	}
+}

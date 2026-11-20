@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kstruzzieri/go-llm/fingerprint"
 	"github.com/kstruzzieri/go-llm/ollama"
 	"golang.org/x/sync/singleflight"
 )
@@ -167,6 +168,10 @@ func (p *OllamaProvider) Models(ctx context.Context) ([]ModelInfo, error) {
 		return nil, fmt.Errorf("provider: ollama: list models: %w", err)
 	}
 
+	if oModels == nil {
+		return nil, nil // no listing key: not a listing (see Provider.Models)
+	}
+
 	models := make([]ModelInfo, len(oModels))
 	for i, m := range oModels {
 		// Fetch detailed info for each model.
@@ -174,11 +179,17 @@ func (p *OllamaProvider) Models(ctx context.Context) ([]ModelInfo, error) {
 		if showErr != nil {
 			// Fallback: use basic info from list.
 			models[i] = ModelInfo{
-				Name: m.Name,
+				Name:   m.Name,
+				Digest: m.Digest,
 			}
 			continue
 		}
 		models[i] = ollamaModelInfo(detail)
+		// /api/tags is where Ollama reports the digest; keep a show digest if
+		// one is ever present.
+		if models[i].Digest == "" {
+			models[i].Digest = m.Digest
+		}
 	}
 	return models, nil
 }
@@ -190,7 +201,46 @@ func (p *OllamaProvider) ModelInfo(ctx context.Context, name string) (*ModelInfo
 		return nil, fmt.Errorf("provider: ollama: show model %q: %w", name, err)
 	}
 	info := ollamaModelInfo(detail)
+	if info.Digest == "" {
+		// Same digest Models reports for this model, so the two paths agree.
+		if listed, err := p.client.ListModels(ctx); err == nil {
+			want := ollamaTaggedName(name)
+			for _, m := range listed {
+				if ollamaTaggedName(m.Name) == want {
+					info.Digest = m.Digest
+					break
+				}
+			}
+		}
+	}
 	return &info, nil
+}
+
+// ollamaTaggedName spells a name with its tag, as Ollama reads it: no tag means
+// :latest. A colon before the last slash is a registry port, not a tag.
+func ollamaTaggedName(name string) string {
+	if strings.LastIndex(name, ":") <= strings.LastIndex(name, "/") {
+		return name + ":latest"
+	}
+	return name
+}
+
+// EvidenceModelNames returns the spellings under which evidence rows and
+// listing members for model may be stored through adapter: for ollama the
+// untagged and ":latest" forms when the tag is latest or absent (a colon
+// before the last slash is a port, as in ollamaTaggedName), the name alone
+// otherwise; for every other adapter, and for an empty name, the name alone.
+// Tags are case-exact. Sorted, no duplicates, the requested spelling always
+// included. Config lookups never use it: they stay exact-spelling, so a
+// configured m and a listed m:latest are different selectors.
+func EvidenceModelNames(adapter, model string) []string {
+	if adapter == fingerprint.AdapterOllama && model != "" {
+		// The untagged form is a strict prefix of the tagged one, so it sorts first.
+		if tagged := ollamaTaggedName(model); strings.HasSuffix(tagged, ":latest") {
+			return []string{strings.TrimSuffix(tagged, ":latest"), tagged}
+		}
+	}
+	return []string{model}
 }
 
 func ollamaModelInfo(detail *ollama.ModelInfo) ModelInfo {

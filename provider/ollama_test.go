@@ -6,12 +6,15 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/kstruzzieri/go-llm/fingerprint"
 	"github.com/kstruzzieri/go-llm/ollama"
 )
 
@@ -1811,5 +1814,71 @@ func TestOllamaProvider_PullModel(t *testing.T) {
 	}
 	if gotPath != "/api/pull" {
 		t.Errorf("request path = %q, want /api/pull", gotPath)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Evidence spellings (#736)
+// ---------------------------------------------------------------------------
+
+func TestEvidenceModelNames(t *testing.T) {
+	tests := []struct {
+		adapter, model string
+		want           []string
+	}{
+		{fingerprint.AdapterOllama, "qwen3", []string{"qwen3", "qwen3:latest"}},
+		{fingerprint.AdapterOllama, "qwen3:latest", []string{"qwen3", "qwen3:latest"}},
+		{fingerprint.AdapterOllama, "qwen3:8b", []string{"qwen3:8b"}},
+		{fingerprint.AdapterOllama, "host:5000/m", []string{"host:5000/m", "host:5000/m:latest"}},
+		{fingerprint.AdapterOllama, "host:5000/m:latest", []string{"host:5000/m", "host:5000/m:latest"}},
+		{fingerprint.AdapterOllama, "ns/m:latest", []string{"ns/m", "ns/m:latest"}},
+		{fingerprint.AdapterOllama, "", []string{""}},
+		{fingerprint.AdapterOllama, "qwen3:LATEST", []string{"qwen3:LATEST"}}, // tags are case-exact
+		{fingerprint.AdapterOpenAICompat, "m", []string{"m"}},
+		{fingerprint.AdapterOpenAICompat, "m:latest", []string{"m:latest"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.adapter+"/"+tt.model, func(t *testing.T) {
+			got := EvidenceModelNames(tt.adapter, tt.model)
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("EvidenceModelNames(%q, %q) = %q; want %q", tt.adapter, tt.model, got, tt.want)
+			}
+			if !slices.IsSorted(got) || len(slices.Compact(slices.Clone(got))) != len(got) || !slices.Contains(got, tt.model) {
+				t.Errorf("EvidenceModelNames(%q, %q) = %q; want sorted, no duplicates, the requested spelling included", tt.adapter, tt.model, got)
+			}
+		})
+	}
+}
+
+// TestAlias_UntaggedConfigReadsTaggedRows: rows published under one Ollama
+// spelling explain a config naming the other, and a different tag's rows,
+// newer and disagreeing, are not read. It proves ReadCapabilities and
+// ExplainEvidence merge rows filed under both spellings once a reader has
+// requested EvidenceModelNames; that the readers really request both spellings
+// is pinned by TestExplain_AliasReadsBothSpellings and
+// TestParity_AliasBothDirections.
+func TestAlias_UntaggedConfigReadsTaggedRows(t *testing.T) {
+	tests := []struct{ configured, stored string }{
+		{"qwen3", "qwen3:latest"},
+		{"qwen3:latest", "qwen3"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.configured, func(t *testing.T) {
+			yes := eeShow("thinking", fingerprint.CapProbeYes, logT0)
+			yes.Model = tt.stored
+			otherTag := eeShow("thinking", fingerprint.CapProbeNo, logT0.Add(time.Hour))
+			otherTag.Model = "qwen3:8b"
+			names := EvidenceModelNames(fingerprint.AdapterOllama, tt.configured)
+			var rows []fingerprint.EvidenceRow
+			for _, r := range []fingerprint.EvidenceRow{yes, otherTag} {
+				if slices.Contains(names, r.Model) {
+					rows = append(rows, r)
+				}
+			}
+			eeWant(t, ExplainEvidence(eeIn(fingerprint.AdapterOllama, rows...)), CapabilityFact{
+				Capability: "thinking", State: "yes", Source: "provider", Method: "ollama-show",
+				Identity: "content-digest", CheckedAt: logT0,
+			})
+		})
 	}
 }

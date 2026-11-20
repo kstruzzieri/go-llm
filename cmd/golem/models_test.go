@@ -3,10 +3,12 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -16,18 +18,11 @@ import (
 	"github.com/kstruzzieri/go-llm/provider"
 )
 
-// fakeModelsReg is a fake modelsRegistry: canned Lookup profiles, canned
-// ExplainToolCall provenance, and a ResolveToolCall that records calls (so the
-// -probe-all / -reprobe tests can assert per-entry probing). When events is
-// non-nil, each ResolveToolCall appends "resolve:<key>" to the shared ordered
-// log so a test can assert delete-refresh-resolve ordering across both fakes.
+// fakeModelsReg is a fake modelsRegistry: canned Lookup profiles and canned
+// ExplainToolCall provenance.
 type fakeModelsReg struct {
 	profiles map[provider.ModelKey]*provider.ModelProfile
 	explain  map[provider.ModelKey]provider.ToolCallExplanation
-	states   map[provider.ModelKey]fingerprint.CapProbeState
-	calls    []provider.ModelKey
-	refresh  []provider.ModelKey
-	events   *[]string
 }
 
 func (f *fakeModelsReg) Lookup(_ context.Context, key provider.ModelKey) (*provider.ModelProfile, error) {
@@ -37,45 +32,8 @@ func (f *fakeModelsReg) Lookup(_ context.Context, key provider.ModelKey) (*provi
 	return nil, context.Canceled // any non-nil error stands in for not-found
 }
 
-func (f *fakeModelsReg) Refresh(_ context.Context, key provider.ModelKey) (*provider.ModelProfile, error) {
-	f.refresh = append(f.refresh, key)
-	if f.events != nil {
-		*f.events = append(*f.events, "refresh:"+key.String())
-	}
-	return f.Lookup(context.Background(), key)
-}
-
 func (f *fakeModelsReg) ExplainToolCall(_ context.Context, key provider.ModelKey) (provider.ToolCallExplanation, error) {
 	return f.explain[key], nil
-}
-
-func (f *fakeModelsReg) ResolveToolCall(_ context.Context, key provider.ModelKey) (fingerprint.CapProbeState, error) {
-	f.calls = append(f.calls, key)
-	if f.events != nil {
-		*f.events = append(*f.events, "resolve:"+key.String())
-	}
-	return f.states[key], nil
-}
-
-// fakeDeleteStore records DeleteCapProbes calls for the -reprobe test. Only the
-// delete path is exercised here; Get/Save satisfy the interface. When events is
-// non-nil, each delete appends "delete:<provider/model>" to the shared ordered
-// log so a test can pin delete-before-resolve ordering.
-type fakeDeleteStore struct {
-	deleted []string
-	events  *[]string
-}
-
-func (s *fakeDeleteStore) GetCapProbe(context.Context, string, string, string) (*fingerprint.CapProbe, error) {
-	return nil, fingerprint.ErrNotFound
-}
-func (s *fakeDeleteStore) SaveCapProbe(context.Context, fingerprint.CapProbe) error { return nil }
-func (s *fakeDeleteStore) DeleteCapProbes(_ context.Context, backendID, modelName string) error {
-	s.deleted = append(s.deleted, backendID+"/"+modelName)
-	if s.events != nil {
-		*s.events = append(*s.events, "delete:"+backendID+"/"+modelName)
-	}
-	return nil
 }
 
 func keyOf(sel string) provider.ModelKey {
@@ -109,7 +67,7 @@ func TestRunModels_ListsChainWithProvenance(t *testing.T) {
 			},
 		},
 	}}
-	if err := runModelsWith(ctx, reg, chain, cfg, nil, nil, modelsOpts{}, &out, &errOut); err != nil {
+	if err := runModelsWith(ctx, reg, chain, cfg, nil, nil, &out, &errOut); err != nil {
 		t.Fatalf("runModelsWith() error: %v", err)
 	}
 	got := out.String()
@@ -152,28 +110,7 @@ func TestRunModels_ReadsCachedProbeOnPlainListing(t *testing.T) {
 	if err := os.Mkdir(root, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	h, warn := openCapProbeStore(ctx, os.Getenv, root)
-	if warn != "" {
-		t.Fatalf("openCapProbeStore warning = %q", warn)
-	}
-	if h == nil || h.store == nil {
-		t.Fatal("openCapProbeStore returned nil store")
-	}
-	key := provider.ModelKey{Provider: "llamacpp", Model: "mystery"}
-	if err := h.store.SaveCapProbe(ctx, fingerprint.CapProbe{
-		BackendID:    key.Provider,
-		ModelName:    key.Model,
-		Capability:   "tool_call",
-		State:        fingerprint.CapProbeYes,
-		ModelDigest:  key.String(),
-		ProbeVersion: fingerprint.CurrentToolProbeVersion,
-		TestedAt:     time.Now(),
-	}); err != nil {
-		t.Fatalf("seed SaveCapProbe: %v", err)
-	}
-	if err := h.db.Close(); err != nil {
-		t.Fatalf("close seed store: %v", err)
-	}
+	mcSeed(t, root, mcToolAnswers(t, srv.URL, "mystery", fingerprint.CapProbeYes, time.Now())...)
 
 	cfgPath := filepath.Join(dir, "models.json")
 	if err := os.WriteFile(cfgPath, []byte(`{
@@ -191,6 +128,29 @@ func TestRunModels_ReadsCachedProbeOnPlainListing(t *testing.T) {
 	got := out.String()
 	if !strings.Contains(got, "tool_call=yes (probe)") {
 		t.Fatalf("output = %q, want cached probe provenance", got)
+	}
+}
+
+func TestRunModels_LiveOllamaNoBesideInconclusiveAttempts(t *testing.T) {
+	srv := newMCServer(t)
+	srv.tags = []mcTag{{"current", "sha256:c"}, {"expired", "sha256:e"}}
+	srv.caps = `["completion"]`
+	e := newMCEnv(t, mcConfig(srv.URL, "ollama", "current", "expired"))
+	attempt := fingerprint.ProbeAnswer{
+		Capability: "tool_call", Source: fingerprint.EvidenceSourceProvider,
+		Kind: fingerprint.EvidenceKindAttempt, State: fingerprint.CapProbeInconclusive,
+	}
+	now := time.Now()
+	for i, age := range []time.Duration{time.Hour, 48 * time.Hour} {
+		tag := srv.tags[i]
+		mcSeed(t, e.root, mcAnswers(t, srv.URL, "ollama", tag.name, tag.digest, fingerprint.MethodOllamaShow, now.Add(-age), attempt)...)
+	}
+	out, _ := e.mustRun(t, srv)
+	for _, tag := range srv.tags {
+		want := "lc/" + tag.name + "\tcaps=chat|generate|stream\ttool_call=MISSING (runtime)"
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("listing missing %q:\n%s", want, out)
+		}
 	}
 }
 
@@ -214,7 +174,7 @@ func TestRunModels_SharedKeyNamesDeclaringRole(t *testing.T) {
 		},
 	}
 	var out, errOut bytes.Buffer
-	if err := runModelsWith(ctx, reg, []string{"llamacpp/shared"}, cfg, nil, nil, modelsOpts{}, &out, &errOut); err != nil {
+	if err := runModelsWith(ctx, reg, []string{"llamacpp/shared"}, cfg, nil, nil, &out, &errOut); err != nil {
 		t.Fatalf("runModelsWith() error: %v", err)
 	}
 	got := out.String()
@@ -223,81 +183,160 @@ func TestRunModels_SharedKeyNamesDeclaringRole(t *testing.T) {
 	}
 }
 
-func TestRunModels_ProbeAllProbesEveryEntry(t *testing.T) {
-	ctx := context.Background()
-	sels := []string{"llamacpp/m1", "llamacpp/m2", "llamacpp/m3"}
-	reg := &fakeModelsReg{
-		profiles: map[provider.ModelKey]*provider.ModelProfile{},
-		explain:  map[provider.ModelKey]provider.ToolCallExplanation{},
-		states:   map[provider.ModelKey]fingerprint.CapProbeState{},
+// TestGolemModels_OutputUnchangedForEachSource pins what `golem models` prints,
+// as text and as -json, for a real registry reading the evidence log in front
+// of each source of the tool_call verdict. Answers are log rows; one fixture
+// keeps a legacy capability_probes row to show it no longer counts. The goldens
+// under testdata/models_baseline were reviewed by hand. Relative probe ages and the test
+// server's address are replaced before comparing. Fixtures declare no shared
+// roles: their annotations follow map order, and the parity tests cover them.
+//
+// To rewrite the goldens after a reviewed change: temporarily add
+// os.WriteFile(path, []byte(got), 0o644) before the os.ReadFile below, run this
+// test once, read `git diff testdata/models_baseline`, then remove the line.
+func TestGolemModels_OutputUnchangedForEachSource(t *testing.T) {
+	type fixture struct {
+		name   string
+		model  string
+		apiFmt string // provider api_format; "ollama" serves /api/tags and /api/show
+		ollama string // capabilities /api/show reports
+		extra  string // extra JSON members of the model entry
+		row    fingerprint.CapProbeState
+		rowOld bool // row filed under a digest the runtime does not report, which reads unknown
+		legacy bool // row is a legacy capability_probes verdict, which no longer counts
 	}
-	for _, s := range sels {
-		k := keyOf(s)
-		// Non-explicit, tool_call absent => all three are probe candidates.
-		reg.profiles[k] = &provider.ModelProfile{Key: k, Caps: provider.CapChat | provider.CapStream}
-		reg.explain[k] = provider.ToolCallExplanation{Caps: provider.CapChat | provider.CapStream, Has: false, Source: "unknown"}
-		reg.states[k] = fingerprint.CapProbeNo
+	fixtures := []fixture{
+		{name: "explicit", model: "mystery", apiFmt: "openai-compat", extra: `, "capabilities": ["chat", "stream", "tool_call"]`},
+		{name: "catalog", model: "qwen3:8b", apiFmt: "openai-compat"},
+		{name: "probe_yes", model: "mystery", apiFmt: "openai-compat", row: fingerprint.CapProbeYes},
+		{name: "probe_yes_other_digest", model: "mystery", apiFmt: "openai-compat", row: fingerprint.CapProbeYes, rowOld: true},
+		{name: "probe_no", model: "mystery", apiFmt: "openai-compat", row: fingerprint.CapProbeNo},
+		{name: "probe_inconclusive", model: "mystery", apiFmt: "openai-compat", row: fingerprint.CapProbeInconclusive},
+		{name: "catalog_beside_probe_no", model: "qwen3:8b", apiFmt: "openai-compat", row: fingerprint.CapProbeNo},
+		{name: "legacy_row_ignored", model: "mystery", apiFmt: "openai-compat", row: fingerprint.CapProbeYes, legacy: true},
+		{name: "runtime", model: "mystery", apiFmt: "ollama", ollama: `["completion","tools"]`},
+		{name: "runtime_no", model: "mystery", apiFmt: "ollama", ollama: `["completion"]`},
+		{name: "unknown", model: "mystery", apiFmt: "openai-compat"},
 	}
-	var out, errOut bytes.Buffer
-	if err := runModelsWith(ctx, reg, sels, nil, nil, nil, modelsOpts{probeAll: true}, &out, &errOut); err != nil {
-		t.Fatalf("runModelsWith() error: %v", err)
-	}
-	if len(reg.calls) != 3 {
-		t.Fatalf("ResolveToolCall calls = %d, want 3 (probe every non-explicit entry, no bounded-eager stop)", len(reg.calls))
+	age := regexp.MustCompile(`\d+[hms] ago`)
+
+	for _, fx := range fixtures {
+		t.Run(fx.name, func(t *testing.T) {
+			ctx := t.Context()
+			// A developer's own endpoint settings must not leak into the output.
+			for _, env := range []string{"GO_LLM_BASE_URL", "GO_LLM_CONFIG"} {
+				if previous, ok := os.LookupEnv(env); ok {
+					t.Cleanup(func() { _ = os.Setenv(env, previous) })
+				}
+				if err := os.Unsetenv(env); err != nil {
+					t.Fatal(err)
+				}
+			}
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/v1/models":
+					_, _ = w.Write([]byte(`{"data":[{"id":"` + fx.model + `"}]}`))
+				case "/api/tags":
+					_, _ = w.Write([]byte(`{"models":[{"name":"` + fx.model + `"}]}`))
+				case "/api/show":
+					_, _ = w.Write([]byte(`{"details":{"family":"mystery","parameter_size":"8B"},"capabilities":` + fx.ollama + `}`))
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer srv.Close()
+
+			dir := t.TempDir()
+			t.Setenv("XDG_DATA_HOME", filepath.Join(dir, "data"))
+			root := filepath.Join(dir, "workspace")
+			if err := os.Mkdir(root, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			switch {
+			case fx.row == "":
+			case fx.legacy:
+				h := mcOpen(t, root)
+				if err := h.Probes().SaveCapProbe(ctx, fingerprint.CapProbe{
+					BackendID: "llamacpp", ModelName: fx.model, Capability: "tool_call", State: fx.row,
+					ModelDigest: "llamacpp/" + fx.model, ProbeVersion: fingerprint.CurrentToolProbeVersion,
+					TestedAt: time.Now().Add(-2 * time.Hour),
+				}); err != nil {
+					t.Fatal(err)
+				}
+				if err := h.Close(); err != nil {
+					t.Fatal(err)
+				}
+			default:
+				digest := ""
+				if fx.rowOld {
+					digest = "sha256:old"
+				}
+				answer := fingerprint.ProbeAnswer{Capability: "tool_call", Source: fingerprint.EvidenceSourceProbe, Kind: fingerprint.EvidenceKindAnswer, State: fx.row}
+				if fx.row == fingerprint.CapProbeInconclusive {
+					answer.Kind = fingerprint.EvidenceKindAttempt
+				}
+				mcSeed(t, root, mcAnswers(t, srv.URL, fx.apiFmt, fx.model, digest, fingerprint.MethodChatStreamTools, time.Now().Add(-2*time.Hour), answer)...)
+			}
+			cfgPath := filepath.Join(dir, "models.json")
+			if err := os.WriteFile(cfgPath, []byte(`{
+				"providers": {"llamacpp": {"base_url": "`+srv.URL+`", "api_format": "`+fx.apiFmt+`"}},
+				"models": {"agent": {"name": "`+fx.model+`", "provider": "llamacpp", "type": "dense"`+fx.extra+`}},
+				"defaults": {"agent": "agent"}
+			}`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			normalize := func(b []byte) string {
+				out := strings.ReplaceAll(string(b), srv.URL, "<url>")
+				return age.ReplaceAllString(out, "<age>")
+			}
+			var text, jsonOut, errOut bytes.Buffer
+			if err := runModels(ctx, []string{"-config", cfgPath, "-root", root, "-no-probe"}, &text, &errOut); err != nil {
+				t.Fatalf("runModels text: %v\nstderr:\n%s", err, errOut.String())
+			}
+			errOut.Reset()
+			if err := runModels(ctx, []string{"-json", "-config", cfgPath, "-root", root}, &jsonOut, &errOut); err != nil {
+				t.Fatalf("runModels -json: %v\nstderr:\n%s", err, errOut.String())
+			}
+			for ext, got := range map[string]string{"txt": normalize(text.Bytes()), "json": normalize(jsonOut.Bytes())} {
+				path := filepath.Join("testdata", "models_baseline", fx.name+"."+ext)
+				want, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got != string(want) {
+					t.Errorf("%s output changed\n got:\n%s\nwant:\n%s", ext, got, want)
+				}
+			}
+		})
 	}
 }
 
-func TestRunModels_ReprobeDeletesRowsFirst(t *testing.T) {
-	ctx := context.Background()
-	sels := []string{"llamacpp/m1", "llamacpp/m2"}
-	// Shared ordered log so the two fakes agree on a single timeline; this is
-	// how delete-BEFORE-resolve is pinned (each fake alone has no ordering).
-	var events []string
-	reg := &fakeModelsReg{
-		profiles: map[provider.ModelKey]*provider.ModelProfile{},
-		explain:  map[provider.ModelKey]provider.ToolCallExplanation{},
-		states:   map[provider.ModelKey]fingerprint.CapProbeState{},
-		events:   &events,
+// TestGolemEvidenceActivation_AllCommandPathsUseLog pins that startup, the
+// listing and -reprobe agree on the evidence log: startup's check lands there,
+// the listing reads it without a check, -reprobe appends to it, the next
+// startup sends nothing, and the legacy table gets nothing throughout.
+func TestGolemEvidenceActivation_AllCommandPathsUseLog(t *testing.T) {
+	srv := newMCServer(t)
+	srv.ids = []string{"mystery"}
+	e := newMCEnv(t, mcConfig(srv.URL, "openai-compat", "mystery"))
+	rows := func() int { return len(mcRows(t, e.root, srv.URL, "openai-compat", "mystery")) }
+
+	if stderr, err := autoRun(t, e, nil, stopWhenReady); !errors.Is(err, errAutoReady) || srv.totalChecks() != 1 || rows() != 3 {
+		t.Fatalf("startup: run = %v, %d checks, %d rows; want ready, 1, 3\nstderr:\n%s", err, srv.totalChecks(), rows(), stderr)
 	}
-	for _, s := range sels {
-		k := keyOf(s)
-		reg.profiles[k] = &provider.ModelProfile{Key: k, Caps: provider.CapChat | provider.CapStream}
-		reg.explain[k] = provider.ToolCallExplanation{Caps: provider.CapChat | provider.CapStream, Has: false, Source: "unknown"}
-		reg.states[k] = fingerprint.CapProbeYes
+	if stdout, _ := e.mustRun(t, srv); !strings.Contains(stdout.String(), "tool_call=yes (probe)") || srv.totalChecks() != 1 {
+		t.Fatalf("listing: %d checks\n%s", srv.totalChecks(), stdout)
 	}
-	store := &fakeDeleteStore{events: &events}
-	var out, errOut bytes.Buffer
-	if err := runModelsWith(ctx, reg, sels, nil, store, nil, modelsOpts{reprobe: true}, &out, &errOut); err != nil {
-		t.Fatalf("runModelsWith() error: %v", err)
+	if _, _ = e.mustRun(t, srv, "-reprobe"); srv.totalChecks() != 2 || rows() != 6 {
+		t.Fatalf("-reprobe: %d checks, %d rows; want 2, 6", srv.totalChecks(), rows())
 	}
-	if len(store.deleted) != 2 {
-		t.Fatalf("DeleteCapProbes calls = %d (%v), want 2 (per non-explicit entry)", len(store.deleted), store.deleted)
+	if stderr, err := autoRun(t, e, nil, stopWhenReady); !errors.Is(err, errAutoReady) || srv.totalChecks() != 2 {
+		t.Fatalf("second startup: run = %v, %d checks; want ready, 2\nstderr:\n%s", err, srv.totalChecks(), stderr)
 	}
-	if len(reg.calls) != 2 {
-		t.Fatalf("ResolveToolCall calls = %d, want 2 (resolve after delete)", len(reg.calls))
-	}
-	if len(reg.refresh) != 2 {
-		t.Fatalf("Refresh calls = %d, want 2 (invalidate stale profile after delete)", len(reg.refresh))
-	}
-	// Every delete for a key must precede refresh, which must precede resolve.
-	idx := func(want string) int {
-		for i, e := range events {
-			if e == want {
-				return i
-			}
-		}
-		return -1
-	}
-	for _, s := range sels {
-		k := keyOf(s)
-		di := idx("delete:" + k.String())
-		fi := idx("refresh:" + k.String())
-		ri := idx("resolve:" + k.String())
-		if di < 0 || fi < 0 || ri < 0 {
-			t.Fatalf("missing events for %s: got %v", s, events)
-		}
-		if di >= fi || fi >= ri {
-			t.Fatalf("%s: delete (idx %d) must precede refresh (idx %d) then resolve (idx %d); timeline=%v", s, di, fi, ri, events)
-		}
+	h := mcOpen(t, e.root)
+	defer func() { _ = h.Close() }()
+	if _, err := h.Probes().GetCapProbe(context.Background(), "lc", "mystery", "tool_call"); !errors.Is(err, fingerprint.ErrNotFound) {
+		t.Fatalf("legacy row lookup = %v; want none", err)
 	}
 }

@@ -13,6 +13,12 @@ import (
 // WriteFile creates or overwrites a workspace file. It is a PlanningTool: Plan
 // computes the diff preview and stashes the resulting content keyed by raw-args
 // hash; Invoke re-checks the previewed state and writes atomically.
+//
+// Plan's ApprovalKey is WriteClassApprovalKey, except "" (ungrantable, always
+// prompt) when the target is an agent instruction or harness configuration
+// file, or its spelling cannot be verified (#725). Only an approver that
+// implements agent.KeyedApprover or agent.RiskApprover sees the key; a host
+// with a plain agent.Approver never receives it, so the rule does not cover it.
 type WriteFile struct {
 	ws *Workspace
 	j  Journal
@@ -56,7 +62,7 @@ func (*WriteFile) Origin() agent.Origin { return agent.OriginWorkspace }
 // Plan computes the preview and stashes the pending plan. It never mutates. On any
 // validation failure it returns an error so dispatch reports the failure without
 // asking the user to approve an empty diff.
-func (t *WriteFile) Plan(_ context.Context, raw json.RawMessage) (agent.ToolPlan, error) {
+func (t *WriteFile) Plan(ctx context.Context, raw json.RawMessage) (agent.ToolPlan, error) {
 	eff := t.Effect()
 	var args writeFileArgs
 	if err := json.Unmarshal(raw, &args); err != nil {
@@ -91,7 +97,8 @@ func (t *WriteFile) Plan(_ context.Context, raw json.RawMessage) (agent.ToolPlan
 		beforeHash = ContentHash(prior)
 	}
 	content := []byte(args.Content)
-	preview := unifiedDiff(args.Path, prior, content, priorExists)
+	key, reason := t.ws.fileToolApprovalKey(ctx, args.Path)
+	preview := harnessPreview(reason, unifiedDiff(args.Path, prior, content, priorExists))
 	t.store(ContentHash(raw), pendingPlan{
 		path:         args.Path,
 		priorContent: prior,
@@ -100,8 +107,9 @@ func (t *WriteFile) Plan(_ context.Context, raw json.RawMessage) (agent.ToolPlan
 		afterContent: content,
 		afterHash:    ContentHash(content),
 		summary:      fmt.Sprintf("write %s", args.Path),
+		approvalKey:  key,
 	})
-	return agent.ToolPlan{Effect: eff, Preview: preview, ApprovalKey: WriteClassApprovalKey}, nil
+	return agent.ToolPlan{Effect: eff, Preview: preview, ApprovalKey: key}, nil
 }
 
 func (t *WriteFile) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolResult, error) {
@@ -128,6 +136,9 @@ func (t *WriteFile) Invoke(ctx context.Context, raw json.RawMessage) (agent.Tool
 	}
 	if nowExists != pp.priorExists || curHash != pp.beforeHash {
 		return errResult("file changed since preview; retry"), nil
+	}
+	if t.ws.harnessKeyLost(ctx, pp) {
+		return errResult(harnessKeyLostMsg), nil
 	}
 	// The decisive hash/existence check runs after Prepare, through the same
 	// parent capability as installation. The earlier read supplies helpful errors;

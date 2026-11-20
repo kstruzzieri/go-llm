@@ -47,6 +47,7 @@ func Collect(fn func(ChatResponse) error) (wrapped func(ChatResponse) error, get
 		if resp.Done {
 			result.Done = true
 			result.Partial = resp.Partial
+			result.FinishReason = resp.FinishReason
 			result.Usage = resp.Usage
 			result.Latency = resp.Latency
 		}

@@ -2,6 +2,7 @@ package provider
 
 import (
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -785,5 +786,120 @@ func TestCatalogQualityCtxCeilingSeeds(t *testing.T) {
 	sc := newStaticCatalog(cat)
 	if p := sc.lookup("qwen3.5", "9b"); p == nil || p.QualityCtxCeiling != 262144 {
 		t.Errorf("static lookup qwen3.5:9b QualityCtxCeiling = %v, want 262144", p)
+	}
+}
+
+// TestCatalog_ProfileForLadder pins every rung of the catalog ladder (#736):
+// expectations were captured from the registry's catalogProfileFor before the
+// ladder moved to Catalog.ProfileFor and are written
+// literally; the registry now delegates to the same ladder, with the runtime
+// family as the hint. Quality and context tell the rungs apart: an exact
+// variant carries its own tier, a family-only match carries the family default.
+func TestCatalog_ProfileForLadder(t *testing.T) {
+	cat, err := LoadCatalog()
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := NewModelRegistry(&mrMockProviderRegistry{providers: map[string]Provider{}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name        string
+		model       string
+		runtime     *ModelInfo
+		wantNil     bool
+		wantFamily  string
+		wantQuality Tier
+		wantContext int
+	}{
+		{name: "exact family and parameter size", model: "qwen3:8b",
+			wantFamily: "qwen3", wantQuality: TierGood, wantContext: 40960},
+		{name: "family and tag, paramless latest variant", model: "qwen3-coder-next:latest",
+			wantFamily: "qwen3-coder-next", wantQuality: TierBest, wantContext: 262144},
+		{name: "family and tag, bare name defaults to latest", model: "qwen3-coder-next",
+			wantFamily: "qwen3-coder-next", wantQuality: TierBest, wantContext: 262144},
+		{name: "family only, unknown parameter size", model: "qwen3:999b",
+			wantFamily: "qwen3", wantQuality: TierBasic, wantContext: 40960},
+		{name: "family only, bare family", model: "qwen3",
+			wantFamily: "qwen3", wantQuality: TierBasic, wantContext: 40960},
+		{name: "family only, dotted family with latest tag", model: "llama3.2:latest",
+			wantFamily: "llama3.2", wantQuality: TierBasic, wantContext: 131072},
+		{name: "runtime-reported family hint rescues an unknown name", model: "mystery-model",
+			runtime:    &ModelInfo{Family: "qwen3"},
+			wantFamily: "qwen3", wantQuality: TierBasic, wantContext: 40960},
+		{name: "runtime hint does not override an exact match", model: "gemma4:31b",
+			runtime:    &ModelInfo{Family: "qwen3"},
+			wantFamily: "gemma4", wantQuality: TierBest, wantContext: 256000},
+		{name: "hosted id matches nothing", model: "zai-org/GLM-5.2", wantNil: true},
+		{name: "unknown name without runtime hint", model: "mystery-model", wantNil: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			hint := ""
+			if tt.runtime != nil {
+				hint = tt.runtime.Family
+			}
+			// The registry's wrapper is held to the same literals: its only
+			// logic is passing the runtime family as the hint.
+			for _, c := range []struct {
+				via string
+				got *ModelProfile
+			}{
+				{"ProfileFor", cat.ProfileFor(tt.model, hint)},
+				{"catalogProfileFor", r.catalogProfileFor(ParseModelName(tt.model), tt.runtime)},
+			} {
+				switch {
+				case tt.wantNil && c.got != nil:
+					t.Errorf("%s(%q, hint %q) = %+v; want nil", c.via, tt.model, hint, c.got)
+				case tt.wantNil:
+				case c.got == nil:
+					t.Errorf("%s(%q, hint %q) = nil; want family %q", c.via, tt.model, hint, tt.wantFamily)
+				case c.got.Family != tt.wantFamily || c.got.Quality != tt.wantQuality || c.got.ContextWindow != tt.wantContext:
+					t.Errorf("%s(%q, hint %q) = family %q quality %v context %d; want %q %v %d",
+						c.via, tt.model, hint, c.got.Family, c.got.Quality, c.got.ContextWindow, tt.wantFamily, tt.wantQuality, tt.wantContext)
+				}
+			}
+		})
+	}
+}
+
+// TestCatalog_ProfileForFIMIsACopy: a host changing the FIM policy of a
+// returned profile reaches neither the catalog nor a later lookup.
+func TestCatalog_ProfileForFIMIsACopy(t *testing.T) {
+	cat, err := LoadCatalog()
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := cat.ProfileFor("qwen2.5-coder:7b", "")
+	if first == nil || first.FIM == nil || len(first.FIM.StopTokens) == 0 {
+		t.Fatalf("fixture: qwen2.5-coder:7b profile %+v; want a FIM policy with stop tokens", first)
+	}
+	want := *first.FIM
+	want.StopTokens = slices.Clone(first.FIM.StopTokens)
+
+	first.FIM.StopTokens[0] = "mutated"
+	first.FIM.StopTokens = append(first.FIM.StopTokens, "appended")
+	first.FIM.PrefixBudgetPct = 1
+
+	second := cat.ProfileFor("qwen2.5-coder:7b", "")
+	if second.FIM == first.FIM || !reflect.DeepEqual(*second.FIM, want) {
+		t.Errorf("second ProfileFor FIM = %+v; want an unshared %+v", *second.FIM, want)
+	}
+}
+
+// TestCatalog_ProfileForHostedIDIsNil: a hosted model ID names no catalog
+// family, and a nil catalog answers nil whatever it is asked.
+func TestCatalog_ProfileForHostedIDIsNil(t *testing.T) {
+	cat, err := LoadCatalog()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p := cat.ProfileFor("zai-org/GLM-5.2", ""); p != nil {
+		t.Errorf("ProfileFor(zai-org/GLM-5.2) = %+v; want nil", p)
+	}
+	var none *Catalog
+	if p := none.ProfileFor("qwen3:8b", "qwen3"); p != nil {
+		t.Errorf("nil Catalog ProfileFor = %+v; want nil", p)
 	}
 }

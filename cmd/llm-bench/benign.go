@@ -172,12 +172,16 @@ func marshalBenignCases(c benignCases) ([]byte, error) {
 	return b.Bytes(), err
 }
 
-func benignPaletteNames() map[string]struct{} {
+func benignPaletteNames() (map[string]struct{}, error) {
+	tools, err := injectionPalette("", "")
+	if err != nil {
+		return nil, err
+	}
 	out := map[string]struct{}{}
-	for _, t := range injectionPalette("", "") {
+	for _, t := range tools {
 		out[t.Spec().Name] = struct{}{}
 	}
-	return out
+	return out, nil
 }
 
 func (c benignCases) validate() error {
@@ -199,7 +203,10 @@ func (c benignCases) validate() error {
 		}
 		refs[x.Ref] = true
 	}
-	palette := benignPaletteNames()
+	palette, err := benignPaletteNames()
+	if err != nil {
+		return err
+	}
 	ids := map[string]bool{}
 	for _, k := range c.Tasks {
 		if !injectionNamePattern.MatchString(k.ID) || ids[k.ID] {

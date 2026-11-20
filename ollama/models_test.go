@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"testing"
 )
 
@@ -260,5 +261,29 @@ func TestChatStream_APIError(t *testing.T) {
 	}
 	if apiErr.Message != "bad request" {
 		t.Errorf("Message = %q, want %q", apiErr.Message, "bad request")
+	}
+}
+
+func TestListModels_DigestFromTagsAndListingKeyContract(t *testing.T) {
+	for _, tc := range []struct {
+		body    string
+		nilList bool
+		want    []ModelInfo
+	}{
+		{`{"models":[{"name":"m","size":3,"digest":"sha256:x"}]}`, false, []ModelInfo{{Name: "m", Size: 3, Digest: "sha256:x"}}},
+		{`{}`, true, nil},
+		{`{"error":"backend down"}`, true, nil},
+		{`{"models":[]}`, false, []ModelInfo{}},
+		{`{"models":null}`, false, []ModelInfo{}},
+	} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(tc.body)) }))
+		got, err := NewClient(WithBaseURL(srv.URL)).ListModels(context.Background())
+		srv.Close()
+		if err != nil {
+			t.Fatalf("%s: %v", tc.body, err)
+		}
+		if (got == nil) != tc.nilList || !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("%s: got %#v, want %#v", tc.body, got, tc.want)
+		}
 	}
 }

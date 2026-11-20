@@ -40,6 +40,11 @@ var migrations = []migration{
 		description: "conversation revision floor across deletion",
 		fn:          migrateV5,
 	},
+	{
+		version:     6,
+		description: "conversation exposure record bound to revision",
+		fn:          migrateV6,
+	},
 }
 
 func migrateV1(tx *sql.Tx) error {
@@ -140,6 +145,19 @@ func migrateV5(tx *sql.Tx) error {
 	for _, stmt := range stmts {
 		if _, err := tx.Exec(stmt); err != nil {
 			return fmt.Errorf("conversation: migrate v5: %w", err)
+		}
+	}
+	return nil
+}
+
+func migrateV6(tx *sql.Tx) error {
+	stmts := []string{
+		`ALTER TABLE conversations ADD COLUMN exposure TEXT`,
+		`ALTER TABLE conversations ADD COLUMN exposure_revision INTEGER`,
+	}
+	for _, stmt := range stmts {
+		if _, err := tx.Exec(stmt); err != nil {
+			return fmt.Errorf("conversation: migrate v6: %w", err)
 		}
 	}
 	return nil

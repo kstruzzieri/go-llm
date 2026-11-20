@@ -339,7 +339,7 @@ func TestFailureMessagePayloadHelper(t *testing.T) {
 	cause := errors.New("boom at /secret/root")
 
 	nilPresenter := &Runtime{}
-	got := nilPresenter.runFailedPayload(cause)
+	got := nilPresenter.runFailedPayload(cause, nil)
 	if got.Code != "internal" || got.Message != cause.Error() {
 		t.Fatalf("nil presenter payload = %+v", got)
 	}
@@ -350,7 +350,7 @@ func TestFailureMessagePayloadHelper(t *testing.T) {
 		seenCode, seenErr = code, err
 		return "clean"
 	}}
-	got = custom.runFailedPayload(fmt.Errorf("%w: thread %q is active", ErrRunConflict, "/secret/thread"))
+	got = custom.runFailedPayload(fmt.Errorf("%w: thread %q is active", ErrRunConflict, "/secret/thread"), nil)
 	if got.Code != "run_conflict" || got.Message != "clean" {
 		t.Fatalf("custom presenter payload = %+v", got)
 	}
@@ -361,7 +361,7 @@ func TestFailureMessagePayloadHelper(t *testing.T) {
 	long := &Runtime{failureMessage: func(string, error) string {
 		return strings.Repeat("m", 2*maxDisplayBytes)
 	}}
-	got = long.runFailedPayload(cause)
+	got = long.runFailedPayload(cause, nil)
 	if len(got.Message) > maxDisplayBytes || !strings.HasSuffix(got.Message, truncatedMarker) {
 		t.Fatalf("presented message escaped the display cap: len=%d", len(got.Message))
 	}

@@ -27,9 +27,9 @@ func TestReplApproverApprovesOnYes(t *testing.T) {
 		var out strings.Builder
 		src := newScannerSource(strings.NewReader(in), &out)
 		ap := newReplApprover(src, &out, false)
-		ok, err := ap.Approve(context.Background(), newCall(), "--- a\n+old\n")
-		if err != nil || !ok {
-			t.Fatalf("input %q: ok=%v err=%v", in, ok, err)
+		d, err := ap.ApproveKeyed(context.Background(), newCall(), "--- a\n+old\n", tools.WriteClassApprovalKey)
+		if err != nil || !d.Approved {
+			t.Fatalf("input %q: d=%+v err=%v", in, d, err)
 		}
 		if !strings.Contains(out.String(), "Apply this change?") {
 			t.Fatalf("prompt missing for %q:\n%s", in, out.String())
@@ -45,9 +45,9 @@ func TestReplApproverDeniesOnNoEmptyEOF(t *testing.T) {
 		var out strings.Builder
 		src := newScannerSource(strings.NewReader(in), &out)
 		ap := newReplApprover(src, &out, false)
-		ok, err := ap.Approve(context.Background(), newCall(), "preview")
-		if err != nil || ok {
-			t.Fatalf("input %q must deny: ok=%v err=%v", in, ok, err)
+		d, err := ap.ApproveKeyed(context.Background(), newCall(), "preview", tools.WriteClassApprovalKey)
+		if err != nil || d.Approved {
+			t.Fatalf("input %q must deny: d=%+v err=%v", in, d, err)
 		}
 	}
 }
@@ -124,7 +124,7 @@ func TestReplApproverColorRendersAnsi(t *testing.T) {
 	var out strings.Builder
 	src := newScannerSource(strings.NewReader("n\n"), &out)
 	ap := newReplApprover(src, &out, true) // color on
-	_, _ = ap.Approve(context.Background(), newCall(), "+added\n-removed\n context\n")
+	_, _ = ap.ApproveKeyed(context.Background(), newCall(), "+added\n-removed\n context\n", tools.WriteClassApprovalKey)
 	s := out.String()
 	if !strings.Contains(s, "\x1b[32m+added") {
 		t.Fatalf("added line not green:\n%q", s)
@@ -217,8 +217,8 @@ func TestReplApproverFlushesPendingMarkdownBeforePreview(t *testing.T) {
 
 	ap := newReplApprover(newScannerSource(strings.NewReader("n\n"), &out), &out, true)
 	ap.beforeWrite = r.breakLine
-	if _, err := ap.Approve(context.Background(), newCall(), "+added\n"); err != nil {
-		t.Fatalf("Approve: %v", err)
+	if _, err := ap.ApproveKeyed(context.Background(), newCall(), "+added\n", tools.WriteClassApprovalKey); err != nil {
+		t.Fatalf("ApproveKeyed: %v", err)
 	}
 
 	got := out.String()
@@ -234,8 +234,8 @@ func TestReplApproverWritesThroughRendererCursor(t *testing.T) {
 	src := newScannerSource(strings.NewReader("n\n"), &out)
 	ap := newReplApprover(src, r.rawWriter(), false)
 	ap.beforeWrite = r.breakLine
-	if ok, err := ap.Approve(context.Background(), newCall(), "preview"); err != nil || ok {
-		t.Fatalf("Approve: ok=%v err=%v", ok, err)
+	if d, err := ap.ApproveKeyed(context.Background(), newCall(), "preview", tools.WriteClassApprovalKey); err != nil || d.Approved {
+		t.Fatalf("ApproveKeyed: d=%+v err=%v", d, err)
 	}
 	if err := r.OnToolResult(context.Background(), agent.ToolResultEvent{
 		Call:   newCall(),

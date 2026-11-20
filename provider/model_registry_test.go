@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"sync"
 	"testing"
 	"time"
@@ -2627,5 +2628,124 @@ func TestModelRegistry_Lookup_AmbiguousFamiliesHaveNoFabricatedCeiling(t *testin
 				t.Errorf("EffectiveContextWindow(chat) = %d, want full 262144", got)
 			}
 		})
+	}
+}
+
+// TestLogBoundRegistryDoesNotProfile pins that a registry with an evidence log
+// never runs fingerprint profiling from a lookup, while stored-profile
+// validation stays exactly as without the log.
+func TestLogBoundRegistryDoesNotProfile(t *testing.T) {
+	key := ModelKey{Provider: "local", Model: logModel}
+	b := mustBinding(t, "http://127.0.0.1:8080", "openai-compat")
+	stored := func(digest string) *mrMockFingerprintStore {
+		s := newMrMockFingerprintStore()
+		s.profiles["local\x00"+logModel] = &fingerprint.Profile{
+			BackendID: key.Provider, ModelName: key.Model, ModelDigest: digest,
+			ProfileVersion: fingerprint.CurrentProfileVersion, EffectiveContext: 24_576,
+		}
+		return s
+	}
+	identity := func(prober fingerprint.ModelProber) FingerprintProberFactory {
+		return func(context.Context, ModelKey, *ModelInfo, Provider) (*FingerprintProberSpec, error) {
+			return &FingerprintProberSpec{Prober: prober, ModelDigest: logDigest}, nil
+		}
+	}
+	noIdentity := func(context.Context, ModelKey, *ModelInfo, Provider) (*FingerprintProberSpec, error) {
+		return nil, nil
+	}
+	build := func(t *testing.T, store fingerprint.Store, withLog bool, factory FingerprintProberFactory, extra ...ModelRegistryOption) (*ModelRegistry, *Registry) {
+		t.Helper()
+		provReg := NewRegistry()
+		if err := provReg.Register(newStubProvider("local", ModelInfo{Name: logModel, Digest: logDigest})); err != nil {
+			t.Fatal(err)
+		}
+		opts := []ModelRegistryOption{WithFingerprintProberFactory(factory)}
+		if withLog {
+			opts = append(opts, WithEvidenceLog(newEvidenceLog(t), func(string) (EvidenceBinding, bool) { return b, true }))
+		}
+		mr, err := NewModelRegistry(provReg, store, append(opts, extra...)...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		mr.SetCapabilityFloor(func(ModelKey) []string { return []string{"chat", "stream"} })
+		return mr, provReg
+	}
+	lookupContext := func(t *testing.T, mr *ModelRegistry) int {
+		t.Helper()
+		p, err := mr.Lookup(t.Context(), key)
+		if err != nil {
+			t.Fatalf("Lookup: %v", err)
+		}
+		return p.ContextWindow
+	}
+
+	t.Run("cold store: lookup and a tool-call route profile nothing", func(t *testing.T) {
+		prober := &mrRecordingFingerprintProber{}
+		store := newMrMockFingerprintStore()
+		check := &capProbeFake{}
+		mr, provReg := build(t, store, true, identity(prober), WithCapabilityProber(capProberFactory(check)))
+		lookupContext(t, mr)
+		router := NewRouter(mr, provReg)
+		t.Cleanup(func() { _ = router.Close() })
+		_, _ = router.Route(t.Context(), RoutingRequest{Model: key.String(), RequiredCaps: CapChat | CapStream | CapToolCall})
+		if prober.detectCalls != 0 || prober.chatCalls != 0 || len(store.profiles) != 0 {
+			t.Fatalf("profiling ran: detect=%d chat=%d saved=%d; want none", prober.detectCalls, prober.chatCalls, len(store.profiles))
+		}
+		if n := check.callCount(); n != 1 {
+			t.Fatalf("control: the route made %d tool-call checks; want 1", n)
+		}
+	})
+	t.Run("a current stored profile is used", func(t *testing.T) {
+		prober := &mrRecordingFingerprintProber{}
+		mr, _ := build(t, stored(logDigest), true, identity(prober))
+		if got := lookupContext(t, mr); got != 24_576 {
+			t.Fatalf("ContextWindow = %d; want the stored profile's 24576", got)
+		}
+		if prober.detectCalls != 0 || prober.chatCalls != 0 {
+			t.Fatalf("profiling ran: detect=%d chat=%d", prober.detectCalls, prober.chatCalls)
+		}
+	})
+	t.Run("no factory identity still returns the stored profile, as without a log", func(t *testing.T) {
+		for _, withLog := range []bool{false, true} {
+			mr, _ := build(t, stored(logDigest), withLog, noIdentity)
+			if got := lookupContext(t, mr); got != 24_576 {
+				t.Fatalf("log %v: ContextWindow = %d; want the stored profile's 24576", withLog, got)
+			}
+		}
+	})
+	t.Run("a stale stored profile is rejected", func(t *testing.T) {
+		mr, _ := build(t, stored("sha256:old"), true, identity(&mrRecordingFingerprintProber{}))
+		if got := lookupContext(t, mr); got == 24_576 {
+			t.Fatal("stale stored profile was used")
+		}
+	})
+	t.Run("without the log profiling still runs", func(t *testing.T) {
+		prober := &mrRecordingFingerprintProber{}
+		mr, _ := build(t, newMrMockFingerprintStore(), false, identity(prober))
+		lookupContext(t, mr)
+		if prober.detectCalls == 0 {
+			t.Fatal("control: profiling did not run without the log")
+		}
+	})
+}
+
+func TestSortProfiles_TiesBreakOnProviderThenModel(t *testing.T) {
+	want := []ModelKey{
+		{Provider: "alpha", Model: "a"}, {Provider: "alpha", Model: "b"}, {Provider: "beta", Model: "a"},
+		{Provider: "beta", Model: "c"}, {Provider: "gamma", Model: "a"}, {Provider: "zeta", Model: "z"},
+	}
+	rng := rand.New(rand.NewPCG(1, 2))
+	for run := range 100 {
+		profiles := make([]*ModelProfile, len(want))
+		for i, k := range want {
+			profiles[i] = &ModelProfile{Key: k, Quality: TierGood, Speed: TierGood}
+		}
+		rng.Shuffle(len(profiles), func(i, j int) { profiles[i], profiles[j] = profiles[j], profiles[i] })
+		sortProfiles(profiles)
+		for i, p := range profiles {
+			if p.Key != want[i] {
+				t.Fatalf("run %d: position %d = %v; want %v", run, i, p.Key, want[i])
+			}
+		}
 	}
 }

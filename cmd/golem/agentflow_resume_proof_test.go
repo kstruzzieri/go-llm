@@ -38,7 +38,7 @@ func TestResumeRefusesUnverifiedExistingProofBeforeMutation(t *testing.T) {
 			if !errors.Is(err, verificationErr) || !strings.HasPrefix(err.Error(), "verify existing proof before resume") {
 				t.Errorf("resume(%s) error = %v, want verification failure wrapped with pre-resume context", test.name, err)
 			}
-			if want := []string{"probe", "next-action", "probe-recovery", "verify-proof"}; !reflect.DeepEqual(af.seq, want) || models != 0 {
+			if want := []string{"probe", "next-action", "verify-proof"}; !reflect.DeepEqual(af.seq, want) || models != 0 {
 				t.Errorf("resume(%s) calls = %v, model calls = %d, want %v and zero models", test.name, af.seq, models, want)
 			}
 			proof, readErr := os.ReadFile(filepath.Join(fixture.root, ".agent", "proof-pack.json"))
@@ -85,6 +85,7 @@ func TestResumeProofChangeBeforeFinishRun(t *testing.T) {
 				var initial, second agentflow.NextActionState
 				var nextSteps []string
 				wantModels := 0
+				guardCall := 3 // the pre-finish-run step-work check
 				if path == "settlement" {
 					initial = fixture.attemptState(t, "step_uncompleted", nil)
 					second = fixture.noAttemptState(t, "run_unverified", false)
@@ -98,18 +99,24 @@ func TestResumeProofChangeBeforeFinishRun(t *testing.T) {
 					})
 					second.Resumability.Attempt.ID = "A-P1"
 					nextSteps, wantModels = []string{"P1"}, 1
+					// #774: the serial path also reads next-action after the claim.
+					guardCall = 4
 				}
 				complete := fixture.noAttemptState(t, "complete", false)
+				states := []agentflow.NextActionState{initial, second, finishRunGuard, complete}
+				if guardCall == 4 {
+					states = []agentflow.NextActionState{initial, second, second, finishRunGuard, complete}
+				}
 				proofPath := filepath.Join(fixture.root, ".agent", "proof-pack.json")
 				if change != "created empty" {
 					writeAgentFile(t, fixture.root, "proof-pack.json", "verified proof")
 				}
 				af := &proofChangingAF{fakeAF: &fakeAF{
 					nextSteps:   nextSteps,
-					nextActions: []agentflow.NextActionState{initial, second, finishRunGuard, complete},
+					nextActions: states,
 				}}
 				af.afterNextAction = func(call int) {
-					if call != 3 {
+					if call != guardCall {
 						return
 					}
 					switch change {
@@ -179,7 +186,7 @@ func TestResumeRefusesProofChangedDuringVerification(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "proof changed during resume") {
 		t.Errorf("resume(proof changed during verification) error = %v, want proof-change refusal", err)
 	}
-	if want := []string{"probe", "next-action", "probe-recovery", "verify-proof"}; !reflect.DeepEqual(af.seq, want) {
+	if want := []string{"probe", "next-action", "verify-proof"}; !reflect.DeepEqual(af.seq, want) {
 		t.Errorf("resume(proof changed during verification) calls = %v, want %v before settlement", af.seq, want)
 	}
 }

@@ -152,7 +152,7 @@ func bgSpec(argv ...string) execSpec {
 	if len(argv) == 0 {
 		argv = []string{"helper", "arg"}
 	}
-	return execSpec{Path: "/bin/helper", Argv: argv, Dir: "/work"}
+	return execSpec{Path: "/bin/helper", Argv: argv, Dir: "/work", Screen: testScreen()}
 }
 
 // jobDoneChan white-boxes the job's completion-publication channel.
@@ -628,7 +628,7 @@ func TestBackgroundManagerSnapshotsAreCopies(t *testing.T) {
 	t.Cleanup(m.Shutdown)
 
 	argv := []string{"cmd", "arg"}
-	st, err := m.start(context.Background(), execSpec{Path: "/bin/cmd", Argv: argv, Dir: "/w"}, "/w")
+	st, err := m.start(context.Background(), execSpec{Path: "/bin/cmd", Argv: argv, Dir: "/w", Screen: testScreen()}, "/w")
 	if err != nil {
 		t.Fatalf("start: %v", err)
 	}
@@ -893,23 +893,23 @@ func TestBackgroundManagerTailStreamsAndEOF(t *testing.T) {
 	if _, err := m.tail(st.Handle, "both", nil, 100); err == nil {
 		t.Error("tail with invalid stream: want error")
 	}
-	if _, err := stdout.Write([]byte("hello")); err != nil {
+	if _, err := stdout.Write([]byte("hello\n")); err != nil {
 		t.Fatalf("write stdout: %v", err)
 	}
-	if _, err := stderr.Write([]byte("oops")); err != nil {
+	if _, err := stderr.Write([]byte("oops\n")); err != nil {
 		t.Fatalf("write stderr: %v", err)
 	}
 	chunk, err := m.tail(st.Handle, "stdout", nil, 100)
 	if err != nil {
 		t.Fatalf("tail stdout: %v", err)
 	}
-	if string(chunk.Data) != "hello" || chunk.NextCursor != 5 || chunk.Dropped != 0 {
-		t.Errorf("chunk = %+v, want newest-tail hello with cursor 5", chunk)
+	if string(chunk.Data) != "hello\n" || chunk.NextCursor != 6 || chunk.Dropped != 0 {
+		t.Errorf("chunk = %+v, want newest-tail hello with cursor 6", chunk)
 	}
 	if chunk.EOF {
 		t.Error("EOF = true while the job is still running")
 	}
-	if chunk.Status.State != backgroundStateRunning || chunk.Status.StdoutEnd != 5 || chunk.Status.StderrEnd != 4 {
+	if chunk.Status.State != backgroundStateRunning || chunk.Status.StdoutEnd != 6 || chunk.Status.StderrEnd != 5 {
 		t.Errorf("chunk status = %+v, want running with live stream bounds", chunk.Status)
 	}
 	done := jobDoneChan(t, m, st.Handle)
@@ -920,7 +920,7 @@ func TestBackgroundManagerTailStreamsAndEOF(t *testing.T) {
 	if err != nil {
 		t.Fatalf("tail after done: %v", err)
 	}
-	if string(chunk.Data) != "hello" || chunk.NextCursor != 5 || !chunk.EOF {
+	if string(chunk.Data) != "hello\n" || chunk.NextCursor != 6 || !chunk.EOF {
 		t.Errorf("chunk after done = %+v, want full replay with EOF", chunk)
 	}
 	mid := uint64(2)
@@ -935,7 +935,7 @@ func TestBackgroundManagerTailStreamsAndEOF(t *testing.T) {
 	if err != nil {
 		t.Fatalf("tail stderr: %v", err)
 	}
-	if string(echunk.Data) != "oops" || !echunk.EOF {
+	if string(echunk.Data) != "oops\n" || !echunk.EOF {
 		t.Errorf("stderr chunk = %+v, want oops with EOF", echunk)
 	}
 }

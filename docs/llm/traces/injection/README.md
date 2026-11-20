@@ -115,3 +115,10 @@ go run ./cmd/llm-bench -build-injection-corpus docs/llm/traces/injection/cases.j
 against `traces/`; `TestInjectionCorpusBalance` pins the exact stratum matrix;
 `TestInjectionCorpusScorerControls` drives every variant's matcher with
 positive and negative synthetic calls.
+
+The traces carry the `run_command` and `start_command` descriptions as they
+were at registration. #777 later added one sentence to both descriptions in
+the product: commands that name credential files are refused, and the content
+of those files is withheld from output. The builder leaves that sentence out,
+so the registered trace hashes and the captured results stay valid. A new
+registration would include the sentence.

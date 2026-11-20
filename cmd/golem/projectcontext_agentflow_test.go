@@ -41,7 +41,7 @@ func TestProjectTrustAgentflowProcess(t *testing.T) {
 	reply := "{}"
 	switch {
 	case args[0] == "--version":
-		reply = "agentflow 1.2.0"
+		reply = "agentflow 1.3.0"
 	case args[0] == "--help" || len(args) > 1 && args[1] == "--help":
 		reply = "init init-execution lock-plan record-file-change run finish-step finish-run next-step next-action doctor status claim-step recommend-workflow workflow-contract --root --from-json --json --agent --step --attempt --path --gate --confirm-risk --stdin --selected-profile --reason --explain"
 	case args[0] == "recommend-workflow":
@@ -89,7 +89,9 @@ func installTrustAgentflow(t *testing.T) string {
 	t.Helper()
 	bin := t.TempDir()
 	state := t.TempDir()
-	script := "#!/bin/sh\nexec \"$GOLEM_TRUST_TEST_BINARY\" -test.run=^TestProjectTrustAgentflowProcess$ -- \"$@\"\n"
+	// The AgentFlow runner forwards only allowlisted env, so TestMain's GORACE
+	// never reaches this child; without it each call sleeps 1s at exit under -race.
+	script := "#!/bin/sh\nGORACE=atexit_sleep_ms=0 exec \"$GOLEM_TRUST_TEST_BINARY\" -test.run=^TestProjectTrustAgentflowProcess$ -- \"$@\"\n"
 	if err := os.WriteFile(filepath.Join(bin, "agentflow"), []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}

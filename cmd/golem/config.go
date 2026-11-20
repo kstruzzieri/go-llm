@@ -41,7 +41,7 @@ func loadConfig(path string) (*config.Config, error) {
 		if errors.Is(err, config.ErrConfigNotFound) {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("golem: discover config: %w", err)
+		return nil, withKeyRefusalRemedy(fmt.Errorf("golem: discover config: %w", err))
 	}
 	return cfg, nil
 }

@@ -734,8 +734,8 @@ func TestLedgerRecordsProbeSideTask(t *testing.T) {
 		if !strings.Contains(body, "get_time") {
 			return false
 		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"","tool_calls":[{"id":"1","type":"function","function":{"name":"get_time","arguments":"{}"}}]}}],"usage":{"prompt_tokens":40,"completion_tokens":6,"total_tokens":46}}`)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, mcCalled) // usage 40 in, 6 out
 		return true
 	}
 	configPath := filepath.Join(t.TempDir(), "models.json")

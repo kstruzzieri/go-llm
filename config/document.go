@@ -100,6 +100,14 @@ func LoadDocument(path string) (*Document, error) {
 
 // DefaultDocument resolves the same discovery order as Default and loads the
 // winning path as a Document, retaining WHICH rule won as the origin.
+//
+// As with Default, an OriginWorkingDir document refuses ${NAME} api_key
+// references with CodeKeyReferenceRefused (#776), at load and on every
+// later mutation, since the rule is keyed on the stored origin. Saving the
+// document to another path (SaveNew/SaveReplace, or a profile store's
+// SaveAs) is the user's consent: the origin moves to that path and
+// references are allowed from then on. Saving back to its own path keeps
+// OriginWorkingDir and the refusal.
 func DefaultDocument() (*Document, error) {
 	path, src, err := discoverConfigPath()
 	if err != nil {
@@ -135,7 +143,7 @@ func newDocumentEnv(data []byte, origin Origin, env func(string) (string, bool))
 	if err := json.Unmarshal(data, &effective); err != nil {
 		return nil, diagWrap(CodeParseError, SubjectNone, "", fmt.Errorf("config: parse %q: %w", origin.Path, err))
 	}
-	if err := effective.finalizeEnv(env); err != nil {
+	if err := effective.finalizeEnv(env, origin.Source); err != nil {
 		return nil, err
 	}
 	diag, found, err := detectCollisions(data)
@@ -212,6 +220,7 @@ func (c *Config) clone() *Config {
 	out.resolved = maps.Clone(c.resolved)
 	for name, rk := range out.resolved {
 		rk.components = slices.Clone(rk.components)
+		rk.names = slices.Clone(rk.names)
 		out.resolved[name] = rk
 	}
 	return &out

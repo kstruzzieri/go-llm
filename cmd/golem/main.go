@@ -52,6 +52,7 @@ type flags struct {
 	sessionID           string
 	allowWrite          bool
 	allowExec           bool
+	strictApproval      bool // -strict-approval: suspend reusable approvals once a conversation is exposed (#584)
 	scratch             bool
 	delegate            bool
 	delegateRole        string
@@ -119,6 +120,12 @@ type flags struct {
 	sandboxSet        bool
 	sandboxNetwork    string
 	sandboxNetworkSet bool
+	// -credential-screen-budget: how long the credential screen may read the
+	// workspace before each command. screenBudgetSet distinguishes a typed
+	// value: validateFlags checks the range only then, so a zero nobody typed
+	// stays the library's default.
+	screenBudget    time.Duration
+	screenBudgetSet bool
 	// suppressAutoTools is resolved, not parsed: true under the Inspect
 	// profile and in a native sandbox session, it keeps automatic retrieval
 	// and the model memory tools from initializing (applyProfileGates).
@@ -164,6 +171,8 @@ func parseFlags(args []string) (flags, error) {
 	fs.BoolVar(&f.fresh, "fresh", false, "start a new persistent session instead of resuming this workspace")
 	fs.BoolVar(&f.allowWrite, "allow-write", false, "enable approval-gated write_file/edit_file tools")
 	fs.BoolVar(&f.allowExec, "allow-exec", false, "enable the approval-gated run_command and background command tools (start/status/tail/stop)")
+	fs.BoolVar(&f.strictApproval, "strict-approval", false, "suspend reusable approvals (session grants, /auto-edits) while the conversation is exposed, that is outside content entered it or its provenance is unknown: each file write or edit, command, background start, verifier run and agent-memory write then asks [y/N] every time, and with -sandbox seatbelt|bwrap and -sandbox-network allowed those commands run with network denied (startup checks that this host can run them so); accepted with -p and AgentFlow modes, where it has no effect today beyond that startup check")
+	fs.DurationVar(&f.screenBudget, "credential-screen-budget", 5*time.Second, "time the credential screen may spend reading the workspace before each command (5s to 5m); a longer budget makes a large workspace usable, not fast: every command waits for the read")
 	fs.BoolVar(&f.scratch, "scratch", false, "run approved commands in a disposable snapshot of the workspace with .git omitted (requires -allow-exec): accident isolation on the host runtime, an enforced write boundary under a sandbox runtime; artifacts reach the real workspace only via approved promote_artifact (needs -allow-write)")
 	fs.BoolVar(&f.delegate, "delegate", false, "enable the delegate_code tool (route a scoped codegen sub-task to a specialist model)")
 	fs.StringVar(&f.delegateRole, "delegate-role", "coding", "model role the delegate_code tool routes to")
@@ -260,6 +269,8 @@ func parseFlags(args []string) (flags, error) {
 			f.sandboxSet = true
 		case "sandbox-network":
 			f.sandboxNetworkSet = true
+		case "credential-screen-budget":
+			f.screenBudgetSet = true
 		}
 	})
 	return f, nil
@@ -296,6 +307,9 @@ func validateFlags(f flags) error {
 	}
 	if err := validateSandboxFlags(f); err != nil {
 		return err
+	}
+	if f.screenBudgetSet && (f.screenBudget < agenttools.MinCredentialScreenBudget || f.screenBudget > agenttools.MaxCredentialScreenBudget) {
+		return fmt.Errorf("golem: -credential-screen-budget %s is outside %s to %s", f.screenBudget, agenttools.MinCredentialScreenBudget, agenttools.MaxCredentialScreenBudget)
 	}
 	if err := agentflow.ValidateEnvNames(f.agentflowEnv); err != nil {
 		return fmt.Errorf("golem: -agentflow-env: %w", err)
@@ -1008,8 +1022,17 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	// cleared first, before this probe or any spawn; host sessions keep them.
 	if nativeSandbox(sandbox) {
 		clearInheritedDescriptors()
-		if err := agenttools.ValidateSandbox(sandbox, root); err != nil {
+		if err := validateSandbox(sandbox, root); err != nil {
 			return fmt.Errorf("golem: sandbox: %w", err)
+		}
+		// #584: -strict-approval runs an exposed conversation's commands on
+		// the network-denied copy; a copy this host cannot run refuses here.
+		if f.strictApproval && sandbox.AllowNetwork {
+			denied := sandbox
+			denied.AllowNetwork = false
+			if err := validateSandbox(denied, root); err != nil {
+				return fmt.Errorf("golem: sandbox: network-denied variant for -strict-approval: %w", err)
+			}
 		}
 	}
 	mcpServers, merr = withMCPPolicy(root, mcpServers, len(f.mcpStdio), f.mcpEnv)
@@ -1140,6 +1163,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		Interactive: interactive,
 		PromptYN:    startupPromptYN(stdin, stderr),
 		Out:         stderr,
+		KeySources:  keySourceLines(cfg),
 	})
 	if err != nil {
 		return maybeUsageError(err, headlessExitApplies(f))
@@ -1181,7 +1205,8 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	}
 
 	// Guarded, loopback-only discovery runs strictly after admission: each
-	// scan candidate probes through its own bound no-redirect client, and a
+	// probe (scan candidate, or the configured URL alone for a provider with
+	// an api_key) goes through its own bound no-redirect client, and a
 	// hit re-pins the target provider's admitted destination to the
 	// discovered loopback URL before any client is constructed.
 	backendRes, err := resolveBackend(ctx, eff.Config(), backendResolveOpts{
@@ -1206,17 +1231,20 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		}
 	}
 
-	var capStore fingerprint.CapProbeStore
+	// With probing on, routing reads and writes capability answers in the
+	// evidence log. -no-cap-probe attaches no log, so routing ignores stored
+	// answers, and still opens the store for a derived input ceiling.
+	var evidenceLog fingerprint.EvidenceStore
 	var profileStore fingerprint.Store
 	capStoreWarn := ""
 	if !f.noCapProbe || f.inputCeiling <= 0 {
 		capHandle, warning := openCapProbeStore(ctx, os.Getenv, root)
 		if capHandle != nil {
-			profileStore = capHandle.profiles
+			profileStore = capHandle.Profiles()
 			if !f.noCapProbe {
-				capStore = capHandle.store
+				evidenceLog = capHandle.Log()
 			}
-			defer func() { _ = capHandle.db.Close() }()
+			defer func() { _ = capHandle.Close() }()
 		}
 		capStoreWarn = warning
 	}
@@ -1230,7 +1258,8 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		OpenAICompatURLOverrideProvider: backendRes.providerKey,
 		OpenAICompatURLOverride:         backendRes.baseURL,
 		FingerprintProfileStore:         profileStore,
-		CapabilityProbeStore:            capStore, // nil when -no-cap-probe or open fully failed
+		EvidenceLog:                     evidenceLog, // nil when -no-cap-probe or open fully failed
+		CapabilityProbeProgress:         probeProgressPrinter(stderr),
 		DestinationGate:                 gate,
 		ActiveProviders:                 netPlan.ActiveProviders,
 		// #424: -interceptors also refuses a non-loopback openai-compat
@@ -1255,7 +1284,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 
 	resolveEndpoint := newPreflightEndpointResolver(bundle.Config, f.ollamaURL, backendRes.providerKey, backendRes.diagSource())
 	var resolver toolCallResolver
-	if !f.noCapProbe && capStore != nil {
+	if !f.noCapProbe && evidenceLog != nil {
 		resolver = bundle.Models // concrete *provider.ModelRegistry; always non-nil after bootstrap
 	}
 	// The ONE post-admission preparation sequence (#376 M4): preflight,
@@ -1465,7 +1494,9 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 			// gate (children always carry the file tools, so a chain without
 			// tool_call would otherwise fail only at invocation time) and its
 			// own context-derived ceiling.
-			dwarns, perr := preflightToolCapable(ctx, bundle.Models, dchain, dispatchUseCase, resolveEndpoint, resolver)
+			// Labelled "dispatch", not the routing use case, so a dispatch-only
+			// entry is not reported as an agent fallback.
+			dwarns, perr := preflightToolCapable(ctx, bundle.Models, dchain, dispatchPreflightLabel, resolveEndpoint, resolver)
 			warns = append(warns, dwarns...)
 			if perr != nil {
 				if isPreflightCapabilityError(perr) {
@@ -1619,7 +1650,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		// verify_command is not an -allow-tool name.
 		if f.allowWrite {
 			var verr error
-			if verifyCmd, verifyNotice, verr = buildVerifierFn(root, sandbox); verr != nil {
+			if verifyCmd, verifyNotice, verr = buildVerifierFn(root, sandbox, f.screenBudget); verr != nil {
 				return fmt.Errorf("golem: verifier: %w", verr)
 			}
 			if verifyNotice != "" {
@@ -1648,6 +1679,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		// -allow-write, scratch still captures and queries but promote_artifact
 		// is absent.
 		execOpts, line := scratchExecOptions(f.scratch, journal)
+		execOpts.CredentialScreenBudget = f.screenBudget
 		scratchLine = line
 		// #372: the same seam /allow-exec uses; a build failure has already
 		// shut the unpublished manager down.
@@ -1892,6 +1924,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		// The CLI is the trusted host: -trace records include model reasoning.
 		RetainReasoning:    true,
 		DisableCompression: f.noCompress,
+		StrictApproval:     f.strictApproval,
 		OnWarning: func(err error) {
 			_, _ = fmt.Fprintf(stderr, "warning: %v\n", err)
 		},
@@ -1940,16 +1973,18 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		scratch:          f.scratch,
 		verifier:         verifySlot,
 		sandbox:          sandbox,
+		screenBudget:     f.screenBudget,
 		maxSteps:         f.maxSteps,
 		startupBudget:    budget,
 		color:            colorEnabled(renderOut, f.noColor),
 		retrieveOmitted:  retrieveOmitted,
 		session:          sessn,
+		strictApproval:   f.strictApproval,
 		journal:          journal,
 		bgManager:        bgManager,
 		grants:           grants,
 		destAdmission:    adm,
-		headlessApprover: headlessApproverFor(allowTools),
+		headlessApprover: headlessApproverFor(allowTools).withNotices(stderr),
 		machine:          newMachineWriter(stdout, outFormat),
 		allowWrite:       f.allowWrite,
 		allowExec:        f.allowExec,

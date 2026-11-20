@@ -30,7 +30,43 @@ const (
 // approval answer or golem's /auto-edits on — covers the whole class.
 // Exported because cmd/golem's /auto-edits toggle must reference the same
 // value. MCP tools and submit_plan never emit any key and are not covered.
+// A write to an agent instruction or harness configuration file plans with
+// "" instead, so no grant covers it (#725; see HarnessApprovalNotice).
 const WriteClassApprovalKey = "write-class:files"
+
+// HarnessApprovalNotice is the one-line reason a host shows when write_file or
+// edit_file plans with an empty key because the tool demanded a human: its
+// target is an agent instruction or harness configuration file, a file one of
+// them loads, runs or links to, or Golem could not verify the target's
+// spelling or what the harness files reference (#725, #784).
+const HarnessApprovalNotice = "agent instruction or harness configuration file, or a file one of them loads, runs or links to; other tools load or run it, so this approval is not remembered"
+
+// HarnessReferenceReasonPrefix opens the first line of a write_file or
+// edit_file preview whose key is "" because of what harness files reference
+// (#784). Approvers print a line that carries it; they never decide on it.
+const HarnessReferenceReasonPrefix = "harness reference: "
+
+// harnessKeyLost reports whether pp planned a grantable key that the target no
+// longer earns, so Invoke must refuse: a harness file changed between Plan and
+// Invoke. A call that planned "" is not rechecked; a human approved it.
+func (w *Workspace) harnessKeyLost(ctx context.Context, pp pendingPlan) bool {
+	if pp.approvalKey == "" {
+		return false
+	}
+	key, _ := w.fileToolApprovalKey(ctx, pp.path)
+	return key == ""
+}
+
+// harnessKeyLostMsg is the refusal Invoke returns when harnessKeyLost is true.
+const harnessKeyLostMsg = "harness files changed or could not be checked since preview; retry"
+
+// harnessPreview prefixes diff with the reason line when reason is not empty.
+func harnessPreview(reason, diff string) string {
+	if reason == "" {
+		return diff
+	}
+	return HarnessReferenceReasonPrefix + reason + "\n" + diff
+}
 
 // ContentHash is the SHA-256 hex of b. Stable, distinct from absentHash, and reused by cmd/golem's undo journal to detect post-write changes.
 func ContentHash(b []byte) string {
@@ -188,6 +224,7 @@ type pendingPlan struct {
 	afterContent []byte
 	afterHash    string
 	summary      string
+	approvalKey  string // the key Plan returned; "" means a human approved it
 }
 
 // mutatingBase holds the single pending plan shared by a tool's Plan/Invoke pair.

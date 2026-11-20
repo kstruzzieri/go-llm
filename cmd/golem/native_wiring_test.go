@@ -634,7 +634,7 @@ func TestNativeWiringToolchainMatrix(t *testing.T) {
 		version, _ := vcmd.CombinedOutput()
 		vcancel()
 		writeVerifyArgv(t, sess.root, tc.argv)
-		cmd, notice, err := buildVerifier(sess.root, policy)
+		cmd, notice, err := buildVerifier(sess.root, policy, 0)
 		if err != nil {
 			t.Fatalf("%s: buildVerifier: %v", tc.argv[0], err)
 		}

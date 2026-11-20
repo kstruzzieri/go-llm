@@ -2,6 +2,7 @@ package fingerprint
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -24,6 +25,16 @@ var migrations = []migration{
 		version:     2,
 		description: "capability_probes table for tri-state capability verdicts",
 		fn:          migrateV2,
+	},
+	{
+		version:     3,
+		description: "append-only capability evidence log, listings, named models, model access and store_meta",
+		fn:          migrateV3,
+	},
+	{
+		version:     4,
+		description: "listing_snapshots adapter column and evidence and model_access lookup indexes",
+		fn:          migrateV4,
 	},
 }
 
@@ -84,6 +95,115 @@ func migrateV2(tx *sql.Tx) error {
 	)`
 	if _, err := tx.Exec(stmt); err != nil {
 		return fmt.Errorf("fingerprint: migrate v2: %w", err)
+	}
+	return nil
+}
+
+// migrateV3 is additive: capability_probes stays, for binaries that know only
+// the migrations before this one and skip it. The version claim in
+// applyMigration stops a second opener from seeding store_meta again.
+func migrateV3(tx *sql.Tx) error {
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS capability_evidence (
+			id             INTEGER PRIMARY KEY,
+			key_version    INTEGER NOT NULL,
+			endpoint       TEXT NOT NULL,
+			adapter        TEXT NOT NULL,
+			model_name     TEXT NOT NULL,
+			model_digest   TEXT NOT NULL,
+			capability     TEXT NOT NULL,
+			evidence       TEXT NOT NULL,
+			kind           TEXT NOT NULL,
+			state          TEXT NOT NULL,
+			method         TEXT NOT NULL,
+			method_version INTEGER NOT NULL,
+			detail         TEXT NOT NULL DEFAULT '',
+			http_status    INTEGER,
+			observed_at    INTEGER NOT NULL,
+			fresh_until    INTEGER,
+			expires_at     INTEGER
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_capability_evidence_lookup
+			ON capability_evidence (key_version, endpoint, adapter, model_name, capability, observed_at)`,
+		`CREATE TABLE IF NOT EXISTS listing_snapshots (
+			id           INTEGER PRIMARY KEY,
+			key_version  INTEGER NOT NULL,
+			endpoint     TEXT NOT NULL,
+			adapter      TEXT NOT NULL,
+			account      TEXT NOT NULL,
+			started_at   INTEGER NOT NULL,
+			committed_at INTEGER NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS listing_members (
+			snapshot_id  INTEGER NOT NULL,
+			model_name   TEXT NOT NULL,
+			owned_by     TEXT NOT NULL DEFAULT '',
+			model_digest TEXT NOT NULL DEFAULT '',
+			PRIMARY KEY (snapshot_id, model_name)
+		)`,
+		`CREATE TABLE IF NOT EXISTS named_models (
+			key_version INTEGER NOT NULL,
+			endpoint    TEXT NOT NULL,
+			model_name  TEXT NOT NULL,
+			added_at    INTEGER NOT NULL,
+			PRIMARY KEY (key_version, endpoint, model_name)
+		)`,
+		`CREATE TABLE IF NOT EXISTS model_access (
+			id          INTEGER PRIMARY KEY,
+			key_version INTEGER NOT NULL,
+			endpoint    TEXT NOT NULL,
+			account     TEXT NOT NULL,
+			model_name  TEXT NOT NULL,
+			state       TEXT NOT NULL,
+			http_status INTEGER,
+			observed_at INTEGER NOT NULL,
+			expires_at  INTEGER
+		)`,
+		`CREATE TABLE IF NOT EXISTS store_meta (
+			id             INTEGER PRIMARY KEY CHECK (id = 1),
+			generation     INTEGER NOT NULL,
+			account_secret BLOB NOT NULL
+		)`,
+	}
+	for _, stmt := range stmts {
+		if _, err := tx.Exec(stmt); err != nil {
+			return fmt.Errorf("fingerprint: migrate v3: %w", err)
+		}
+	}
+	secret := make([]byte, 32)
+	if _, err := rand.Read(secret); err != nil {
+		return fmt.Errorf("fingerprint: migrate v3: account secret: %w", err)
+	}
+	if _, err := tx.Exec(`INSERT INTO store_meta (id, generation, account_secret) VALUES (1, 0, ?)`, secret); err != nil {
+		return fmt.Errorf("fingerprint: migrate v3: seed store_meta: %w", err)
+	}
+	return nil
+}
+
+// migrateV4 repairs stores migrated by an earlier V3, whose listing_snapshots
+// had no adapter column, so a store from either V3 ends the same. Its lookup
+// indexes replace one that no query could use past the endpoint, because every
+// reader filters by model and none by adapter.
+func migrateV4(tx *sql.Tx) error {
+	var hasAdapter bool
+	if err := tx.QueryRow(
+		`SELECT EXISTS(SELECT 1 FROM pragma_table_info('listing_snapshots') WHERE name = 'adapter')`,
+	).Scan(&hasAdapter); err != nil {
+		return fmt.Errorf("fingerprint: migrate v4: read listing columns: %w", err)
+	}
+	var stmts []string
+	if !hasAdapter {
+		stmts = append(stmts, `ALTER TABLE listing_snapshots ADD COLUMN adapter TEXT NOT NULL DEFAULT ''`)
+	}
+	stmts = append(stmts,
+		`DROP INDEX IF EXISTS idx_capability_evidence_lookup`,
+		`CREATE INDEX idx_capability_evidence_lookup ON capability_evidence (key_version, endpoint, model_name, observed_at)`,
+		`CREATE INDEX idx_model_access_lookup ON model_access (key_version, endpoint, account, model_name, observed_at)`,
+	)
+	for _, stmt := range stmts {
+		if _, err := tx.Exec(stmt); err != nil {
+			return fmt.Errorf("fingerprint: migrate v4: %w", err)
+		}
 	}
 	return nil
 }

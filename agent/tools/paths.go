@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/kstruzzieri/go-llm/agent"
 )
@@ -56,6 +57,15 @@ var (
 	// backend (openWalked, verifyWalkedParent) raises it; it lives here because
 	// search.go builds on every platform.
 	errWalkEntryUnheld = errors.New("tools: walk entry has no held directory")
+	// errBadDirent reports a directory record the walk's own directory read
+	// could not parse (#789). The listing fails as a whole, never partially.
+	// Only the Unix backend raises it; it lives here beside errWalkEntryUnheld.
+	errBadDirent = errors.New("tools: directory record does not parse")
+	// errWalkEntryUnexamined reports a walk entry listed without metadata
+	// (#789). Such an entry is never opened: it is none of the errors the
+	// credential screen treats leniently, so trying to open one withholds
+	// output. Only the Unix backend raises it.
+	errWalkEntryUnexamined = errors.New("tools: walk entry was listed without metadata")
 	// errAnchorUnreachable marks a reachability lookup (#613) that failed on
 	// the way to the workspace's own root for a reason other than a changed
 	// path, such as lost permission above the root. It wraps the cause, which
@@ -141,34 +151,75 @@ type Workspace struct {
 	// noReplaceRename replaces the platform no-replace install in tests only, so
 	// an unsupported-filesystem result is observed at the real call site.
 	noReplaceRename func(srcFd int, tmpName string, dstFd int, dstName string) error
+	// harnessPrefix is the root's path from its enclosing repository's own
+	// name down (#725): just that name at a repository or worktree root, the
+	// canonical root itself when no .git exists above it. It feeds only
+	// harness classification.
+	harnessPrefix string
+	// harnessPrefixUnverified is true when a component of the root's path
+	// strictly below the repository boundary (the folder holding .git, or the
+	// volume root when there is none) has a spelling that could not be
+	// verified, so every write prompts.
+	harnessPrefixUnverified bool
+	// resolveForKey replaces resolvedWriteRel in fileToolApprovalKey, in tests only.
+	resolveForKey func(string) (string, bool, error)
+	// Test seams for harnessReferences (#784). harnessMaxEntries replaces the
+	// walk's entry bound when not 0. harnessAncestorStop, when set, ends the
+	// ancestor scan before that folder; "" scans up to and including the
+	// volume root. beforeHarnessReadDir runs before the walk lists a folder
+	// (its virtual workspace-relative path, "." for the root), and
+	// onHarnessAncestor before each ancestor folder is read.
+	harnessMaxEntries    int
+	harnessAncestorStop  string
+	beforeHarnessReadDir func(rel string)
+	onHarnessAncestor    func(dir string)
+	// screenLimits holds the credential screen's bounds; each zero field takes
+	// its default. The budget is host-set, through SetCredentialScreenBudget or
+	// ExecToolsOptions.CredentialScreenBudget; the other bounds are overridden
+	// in tests only.
+	screenLimits screenLimits
+	// screenSeams injects failures into the credential screen's walk and
+	// reads, in tests only.
+	screenSeams *screenSeams
 }
 
 // CanonicalWorkspaceRoot resolves a workspace root to its absolute, symlink-free
 // path, canonicalizing filesystem spelling where directory enumeration is
 // permitted without folding distinct names on case-sensitive filesystems.
 func CanonicalWorkspaceRoot(root string) (string, error) {
+	canon, _, err := canonicalWorkspaceRoot(root)
+	return canon, err
+}
+
+// canonicalWorkspaceRoot is CanonicalWorkspaceRoot that also returns the
+// deepest root component whose stored spelling it could not verify.
+func canonicalWorkspaceRoot(root string) (canon, unverified string, err error) {
 	if root == "" {
-		return "", errEmptyRoot
+		return "", "", errEmptyRoot
 	}
 	abs, err := filepath.Abs(root)
 	if err != nil {
-		return "", fmt.Errorf("tools: abs root: %w", err)
+		return "", "", fmt.Errorf("tools: abs root: %w", err)
 	}
 	abs, err = filepath.EvalSymlinks(abs)
 	if err != nil {
-		return "", fmt.Errorf("tools: resolve root: %w", err)
+		return "", "", fmt.Errorf("tools: resolve root: %w", err)
 	}
-	canon, err := canonicalExistingPath(abs)
+	canon, unverified, err = canonicalExistingPath(abs)
 	if err != nil {
-		return "", fmt.Errorf("tools: canonicalize root: %w", err)
+		return "", "", fmt.Errorf("tools: canonicalize root: %w", err)
 	}
-	return canon, nil
+	return canon, unverified, nil
 }
 
 // NewWorkspace canonicalizes root so the root itself may legitimately be a
 // symlinked or filesystem-aliased path while no later access follows a symlink.
+// It also records the canonical root's path from its enclosing repository's
+// own name down, which write_file and edit_file put in front of a target
+// before classifying it as a harness file (#725), so a root inside .claude,
+// or a .claude that is itself a repository, does not hide it.
 func NewWorkspace(root string) (*Workspace, error) {
-	canon, err := CanonicalWorkspaceRoot(root)
+	canon, unverified, err := canonicalWorkspaceRoot(root)
 	if err != nil {
 		return nil, err
 	}
@@ -176,40 +227,59 @@ func NewWorkspace(root string) (*Workspace, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Workspace{root: canon, rootIdentity: identity}, nil
+	prefix, boundary := repositoryPrefix(canon)
+	// An unverified root component strictly below the boundary is part of the
+	// classified prefix and its spelling cannot be checked, so every write
+	// prompts (#725): repo/CLAUDE reached unlistably may really be .claude.
+	// The boundary itself (the repository folder's own name) is classified
+	// from its requested spelling and does not force prompts: the user, never
+	// the model, chooses the root, so an alias spelling of it is no attack
+	// path, and lexical matching still covers case, 8.3 shapes, trailing dots
+	// and Unicode aliases. A Rel error fails closed.
+	inPrefix := false
+	if unverified != "" {
+		rel, err := filepath.Rel(boundary, unverified)
+		inPrefix = err != nil || rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator))
+	}
+	return &Workspace{root: canon, rootIdentity: identity, harnessPrefix: prefix, harnessPrefixUnverified: inPrefix}, nil
 }
 
-func canonicalExistingPath(path string) (string, error) {
+func canonicalExistingPath(path string) (string, string, error) {
 	volume := filepath.VolumeName(path)
 	return canonicalExistingPathFrom(volume+string(os.PathSeparator), path)
 }
 
-func canonicalExistingPathFrom(root, path string) (string, error) {
+// canonicalExistingPathFrom returns path's stored spelling below root, plus
+// the deepest component whose spelling it could not verify because its parent
+// could not be listed ("" when every component was verified).
+func canonicalExistingPathFrom(root, path string) (canonical, unverified string, err error) {
 	current := filepath.Clean(root)
 	rest, err := filepath.Rel(current, path)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	if rest == "." {
-		return current, nil
+		return current, "", nil
 	}
 	if rest == ".." || strings.HasPrefix(rest, ".."+string(os.PathSeparator)) {
-		return "", fmt.Errorf("path %q is outside canonical root %q", path, root)
+		return "", "", fmt.Errorf("path %q is outside canonical root %q", path, root)
 	}
 	for _, part := range strings.Split(rest, string(os.PathSeparator)) {
 		candidate := filepath.Join(current, part)
 		target, err := os.Stat(candidate)
 		if err != nil {
-			return "", err
+			return "", "", err
 		}
 		entries, err := os.ReadDir(current)
 		if err != nil {
 			if errors.Is(err, fs.ErrPermission) {
-				// Search permission is sufficient to reach a valid descendant.
+				// Search permission is sufficient to reach a valid descendant;
+				// part keeps its requested spelling, unverified.
 				current = candidate
+				unverified = candidate
 				continue
 			}
-			return "", err
+			return "", "", err
 		}
 		actual := ""
 		for _, entry := range entries {
@@ -222,7 +292,7 @@ func canonicalExistingPathFrom(root, path string) (string, error) {
 			for _, entry := range entries {
 				if strings.EqualFold(entry.Name(), part) {
 					if actual != "" {
-						return "", fmt.Errorf("filesystem entry for %q is ambiguous", candidate)
+						return "", "", fmt.Errorf("filesystem entry for %q is ambiguous", candidate)
 					}
 					actual = entry.Name()
 				}
@@ -232,43 +302,50 @@ func canonicalExistingPathFrom(root, path string) (string, error) {
 			for _, entry := range entries {
 				info, err := entry.Info()
 				if err != nil {
-					return "", err
+					return "", "", err
 				}
 				if os.SameFile(info, target) {
 					if actual != "" {
-						return "", fmt.Errorf("filesystem entry for %q is ambiguous", candidate)
+						return "", "", fmt.Errorf("filesystem entry for %q is ambiguous", candidate)
 					}
 					actual = entry.Name()
 				}
 			}
 		}
 		if actual == "" {
-			return "", fmt.Errorf("filesystem entry for %q disappeared", candidate)
+			return "", "", fmt.Errorf("filesystem entry for %q disappeared", candidate)
 		}
 		current = filepath.Join(current, actual)
 	}
-	return filepath.Clean(current), nil
+	return filepath.Clean(current), unverified, nil
 }
 
 func canonicalFuturePath(root, path string) (string, error) {
+	canonical, _, err := canonicalFuturePathVerified(root, path)
+	return canonical, err
+}
+
+// canonicalFuturePathVerified is canonicalFuturePath that also reports whether
+// every existing component's stored spelling was verified.
+func canonicalFuturePathVerified(root, path string) (string, bool, error) {
 	current := path
 	var suffix []string
 	for {
 		if _, err := os.Lstat(current); err == nil {
-			canonical, err := canonicalExistingPathFrom(root, current)
+			canonical, unverified, err := canonicalExistingPathFrom(root, current)
 			if err != nil {
-				return "", err
+				return "", false, err
 			}
 			for i := len(suffix) - 1; i >= 0; i-- {
 				canonical = filepath.Join(canonical, suffix[i])
 			}
-			return filepath.Clean(canonical), nil
+			return filepath.Clean(canonical), unverified == "", nil
 		} else if !os.IsNotExist(err) {
-			return "", err
+			return "", false, err
 		}
 		parent := filepath.Dir(current)
 		if parent == current {
-			return "", fmt.Errorf("no existing ancestor for %q", path)
+			return "", false, fmt.Errorf("no existing ancestor for %q", path)
 		}
 		suffix = append(suffix, filepath.Base(current))
 		current = parent
@@ -278,6 +355,47 @@ func canonicalFuturePath(root, path string) (string, error) {
 // SetScopeGuard installs (or clears with nil) the proof-mode scope guard.
 // Host setup must complete before workspace calls; installation is not concurrent-safe.
 func (w *Workspace) SetScopeGuard(g ScopeGuard) { w.guard = g }
+
+// SetCredentialScreenBudget sets how long the credential screen may spend
+// reading this workspace before each command, from MinCredentialScreenBudget
+// to MaxCredentialScreenBudget; zero restores the default. A value outside the
+// bounds returns an error and changes nothing. The budget bounds the pre-run
+// walk on Linux and macOS; on other platforms there is no walk (output is
+// withheld there), so a raised budget only lengthens the tools' effect
+// timeouts. A longer budget makes a large
+// workspace usable, not fast: every command waits for the read. Like
+// SetScopeGuard this is host setup, done before any tool is planned or run;
+// it is not safe to call while one is.
+func (w *Workspace) SetCredentialScreenBudget(d time.Duration) error {
+	if d != 0 && (d < MinCredentialScreenBudget || d > MaxCredentialScreenBudget) {
+		return fmt.Errorf("tools: credential screen budget %s is outside 5s to 5m0s", d)
+	}
+	w.screenLimits.budget = d
+	return nil
+}
+
+// screenBudget is the credential screen's time budget for w; a nil workspace
+// has the default.
+func (w *Workspace) screenBudget() time.Duration {
+	if w == nil {
+		return defaultScreenLimits.budget
+	}
+	return w.screenLimits.orDefaults().budget
+}
+
+// newBudgetedWorkspace builds a workspace over root with the given credential
+// screen budget (zero: the default). A budget outside the bounds is returned
+// unwrapped.
+func newBudgetedWorkspace(root string, budget time.Duration) (*Workspace, error) {
+	ws, err := NewWorkspace(root)
+	if err != nil {
+		return nil, fmt.Errorf("tools: build exec tools: %w", err)
+	}
+	if err := ws.SetCredentialScreenBudget(budget); err != nil {
+		return nil, err
+	}
+	return ws, nil
+}
 
 // readAnchor returns where reachability checks start: the top-level root path,
 // its construction-time identity, and this workspace's path below it.

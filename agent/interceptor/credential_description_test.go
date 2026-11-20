@@ -25,6 +25,22 @@ func TestSearchDescriptionNamesCredentialSet(t *testing.T) {
 	}
 }
 
+// TestExecDescriptionsNameCredentialSet (#777): both exec descriptions spell
+// the refused credential set out for the model.
+func TestExecDescriptionsNameCredentialSet(t *testing.T) {
+	for label, desc := range map[string]string{
+		"run_command":   (*tools.RunCommand)(nil).Spec().Description,
+		"start_command": (*tools.StartCommand)(nil).Spec().Description,
+	} {
+		words := descriptionWords(desc)
+		for _, name := range interceptor.CredentialRuleNames() {
+			if !slices.Contains(words, name) {
+				t.Errorf("%s description does not name %q: %s", label, name, desc)
+			}
+		}
+	}
+}
+
 // descriptionWords splits a description into whole names, so ".env" must
 // appear as itself, not only as the prefix of ".env.example".
 func descriptionWords(desc string) []string {

@@ -120,7 +120,7 @@ func TestNewStore_ConcurrentMigrations(t *testing.T) {
 	a, b := openMigrationDB(t, path), openMigrationDB(t, path)
 	newStoresConcurrently(t, a, b)
 	for _, db := range []*sql.DB{a, b} {
-		assertMigrationVersions(t, db, "1,2,3,4,5")
+		assertMigrationVersions(t, db, "1,2,3,4,5,6")
 	}
 }
 
@@ -395,14 +395,14 @@ func TestRunMigrations_FastPathAndReadOnly(t *testing.T) {
 	if _, err := NewStore(t.Context(), ro); err != nil {
 		t.Fatalf("NewStore(current mode=ro): %v", err)
 	}
-	assertMigrationVersions(t, ro, "1,2,3,4,5")
+	assertMigrationVersions(t, ro, "1,2,3,4,5,6")
 	// A real pending step requires a write, even though the old schema is readable.
 	err := runMigrationsWith(t.Context(), ro, []migration{{version: 9, description: "pending", fn: func(tx *sql.Tx) error {
 		_, err := tx.Exec("CREATE TABLE forbidden (id INTEGER)")
 		return err
 	}}})
 	assertMigrationSQLiteError(t, err, 8)
-	assertMigrationVersions(t, ro, "1,2,3,4,5")
+	assertMigrationVersions(t, ro, "1,2,3,4,5,6")
 	assertMigrationSQL(t, ro, "SELECT COUNT(*) FROM sqlite_schema WHERE name='forbidden'", "0")
 }
 
@@ -456,8 +456,8 @@ func TestRunMigrations_FreshDB(t *testing.T) {
 	if err != nil {
 		t.Fatalf("version query failed: %v", err)
 	}
-	if version != 5 {
-		t.Fatalf("schema version = %d, want 5", version)
+	if version != 6 {
+		t.Fatalf("schema version = %d, want 6", version)
 	}
 }
 
@@ -475,8 +475,8 @@ func TestRunMigrations_Idempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("version query failed: %v", err)
 	}
-	if version != 5 {
-		t.Fatalf("schema version = %d, want 5", version)
+	if version != 6 {
+		t.Fatalf("schema version = %d, want 6", version)
 	}
 }
 
@@ -565,7 +565,7 @@ func TestRunMigrations_V2BackwardCompat(t *testing.T) {
 		t.Fatalf("insert pre-v3 row: %v", err)
 	}
 
-	// Only v3, v4 and v5 should apply now (v1/v2 already stamped).
+	// Only v3 to v6 should apply now (v1/v2 already stamped).
 	if err := runMigrations(t.Context(), db); err != nil {
 		t.Fatalf("runMigrations() error: %v", err)
 	}
@@ -573,12 +573,12 @@ func TestRunMigrations_V2BackwardCompat(t *testing.T) {
 	if err := db.QueryRow(`SELECT MAX(version) FROM conversation_schema_version`).Scan(&version); err != nil {
 		t.Fatalf("version query failed: %v", err)
 	}
-	if version != 5 {
-		t.Fatalf("schema version = %d, want 5", version)
+	if version != 6 {
+		t.Fatalf("schema version = %d, want 6", version)
 	}
 
 	// The pre-v3 row loads with a nil DurableSummary and preserved content.
-	// NewStore re-runs migrations idempotently (already at v5).
+	// NewStore re-runs migrations idempotently (already at v6).
 	store, err := NewStore(context.Background(), db)
 	if err != nil {
 		t.Fatalf("NewStore() error: %v", err)
@@ -617,8 +617,8 @@ func TestNewStore_ConcurrentSchemaV3Fixture(t *testing.T) {
 		wantMessageCount   = 3
 		wantCreatedMillis  = int64(1700000000123)
 		wantUpdatedMillis  = int64(1700000010456)
-		wantSchemaVersion  = 5
-		wantVersionRecords = 5
+		wantSchemaVersion  = 6
+		wantVersionRecords = 6
 	)
 
 	assertState := func(phase string, db *sql.DB, store *SQLiteStore) {
@@ -697,8 +697,8 @@ func TestNewStore_ConcurrentSchemaV3Fixture(t *testing.T) {
 	other := openMigrationDB(t, dbPath)
 	stores := newStoresConcurrently(t, db, other)
 	store := stores[0]
-	assertMigrationVersions(t, db, "1,2,3,4,5")
-	assertMigrationVersions(t, other, "1,2,3,4,5")
+	assertMigrationVersions(t, db, "1,2,3,4,5,6")
+	assertMigrationVersions(t, other, "1,2,3,4,5,6")
 	assertState("first open", db, store)
 	assertState("other open", other, stores[1])
 	if err := db.Close(); err != nil {
@@ -780,7 +780,7 @@ func TestNewStore_ConcurrentSchemaV4RevisionFloor(t *testing.T) {
 	other := openMigrationDB(t, path)
 	newStoresConcurrently(t, db, other)
 	for _, handle := range []*sql.DB{db, other} {
-		assertMigrationVersions(t, handle, "1,2,3,4,5")
+		assertMigrationVersions(t, handle, "1,2,3,4,5,6")
 		assertMigrationSQL(t, handle, `SELECT value FROM conversation_revision_floor`, "17")
 		if snapshot(handle) != before {
 			t.Fatal("v5 migration rewrote v4 data")

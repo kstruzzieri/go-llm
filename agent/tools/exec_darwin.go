@@ -124,6 +124,7 @@ func (b *seatbeltBackend) runProbe(ctx context.Context, ws string) (err error) {
 		Dir:           ws,
 		WorkspaceRoot: ws,
 		ExeIdentity:   exeID,
+		Screen:        probeScreen(),
 	})
 	if err != nil {
 		return fmt.Errorf("tools: seatbelt unavailable on this host: %w", err)
@@ -255,6 +256,17 @@ var seatbeltDefaultSystemRoots = []string{
 // seatbeltBackend runs both command lifetimes under per-invocation Seatbelt
 // profiles by rewriting the re-checked spec to sandbox-exec and delegating to
 // the host unix implementations.
+//
+// Both lifetimes start sandbox-exec through posix_spawn (nativeSpawn), not
+// os/exec, so a command never inherits this process's launchd connection
+// (#712): the child gets no bootstrap port and no exception ports, and every
+// descriptor but stdio is close-on-exec by default. Before every spawn the
+// backend empties this process's registered-port table and re-checks it,
+// failing the spawn if a port remains. That table is process-wide: nothing in
+// go-llm reads it, but a host that registers ports with mach_ports_register
+// loses them. The guard and spawn run under syscall.ForkLock; a fork from C
+// code that skips that lock, concurrent with a spawn, can hand the command the
+// host's launchd connection.
 type seatbeltBackend struct {
 	execPath     string
 	allowNetwork bool
@@ -262,6 +274,7 @@ type seatbeltBackend struct {
 	starter      backgroundStarter
 	tempBase     string
 	systemRoots  func(workspaceRoot string) ([]string, error)
+	inspect      func(root string) (sandboxGitLayout, error)
 }
 
 // newSeatbeltExecBackend constructs the real Seatbelt backend, failing closed
@@ -278,8 +291,8 @@ func newSeatbeltExecBackendAt(execPath string, probe seatbeltProbeFunc, cfg Sand
 	b := &seatbeltBackend{
 		execPath:     execPath,
 		allowNetwork: cfg.AllowNetwork,
-		runner:       unixRunner{},
-		starter:      unixStarter{},
+		runner:       unixRunner{spawn: nativeSpawn},
+		starter:      unixStarter{spawn: nativeSpawn},
 		tempBase:     seatbeltTempBase,
 		systemRoots: func(workspaceRoot string) ([]string, error) {
 			// Canonicalize home so the coverage check compares like inodes
@@ -294,6 +307,7 @@ func newSeatbeltExecBackendAt(execPath string, probe seatbeltProbeFunc, cfg Sand
 			}
 			return collectSystemRoots(seatbeltDefaultSystemRoots, workspaceRoot, home, seatbeltBroadRoot)
 		},
+		inspect: inspectSandboxWorkspace,
 	}
 	// The probe is this backend's first spawn, and construction (so
 	// ValidateSandbox) must fail where every later spawn would (#576). The
@@ -430,6 +444,15 @@ func (b *seatbeltBackend) prepare(spec execSpec) (execSpec, func() error, error)
 		return fail(err)
 	}
 	ancestors = append(ancestors, links...)
+	// The workspace walk rejects an inode linked outside the workspace and
+	// finds the git layout whose metadata the profile denies writes to (#721).
+	// It is also the last workspace walk before spawn: a change after it is
+	// the documented same-UID race, still under the profile's any-depth .git
+	// rules.
+	layout, err := b.inspect(spec.WorkspaceRoot)
+	if err != nil {
+		return fail(err)
+	}
 	profile, err := buildSeatbeltProfile(seatbeltPolicy{
 		workspaceRoot:     spec.WorkspaceRoot,
 		tempRoot:          canonTemp,
@@ -437,11 +460,11 @@ func (b *seatbeltBackend) prepare(spec execSpec) (execSpec, func() error, error)
 		systemReadRoots:   sysRoots,
 		metadataAncestors: ancestors,
 		allowNetwork:      b.allowNetwork,
+		gitDirs:           layout.gitDirs,
+		gitReadOnlyDirs:   layout.moduleReadOnly,
+		gitIntermediates:  layout.intermediates,
 	})
 	if err != nil {
-		return fail(err)
-	}
-	if err := validateSandboxWorkspaceLinks(spec.WorkspaceRoot); err != nil {
 		return fail(err)
 	}
 	// Last, as bwrap does: an inheritable descriptor crosses the profile's

@@ -419,7 +419,7 @@ func TestSavePreservesLoadedRelativeOriginAfterChdir(t *testing.T) {
 		}
 	}
 	originalPath := filepath.Join(originalDir, "models.json")
-	if err := os.WriteFile(originalPath, []byte(rawWithUnknown), 0o600); err != nil {
+	if err := os.WriteFile(originalPath, []byte(literalKey(rawWithUnknown)), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("DOC_TEST_KEY", "sekret-value")
@@ -447,7 +447,7 @@ func TestSaveDoesNotPreserveLoadedRelativeOriginInDifferentDirectory(t *testing.
 		if err := os.Mkdir(dir, 0o700); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(filepath.Join(dir, "models.json"), []byte(rawWithUnknown), 0o600); err != nil {
+		if err := os.WriteFile(filepath.Join(dir, "models.json"), []byte(literalKey(rawWithUnknown)), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}

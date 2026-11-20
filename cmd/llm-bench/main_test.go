@@ -15,6 +15,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/kstruzzieri/go-llm/config"
 )
 
 func TestMain(m *testing.M) {
@@ -1144,5 +1146,34 @@ func TestMainRejectsRegistrationInUnsupportedModes(t *testing.T) {
 				t.Fatalf("unsupported mode did not reject -registration: %v\n%s", err, out)
 			}
 		})
+	}
+}
+
+func TestDefaultJudgeRefusesWorkingDirKey(t *testing.T) {
+	t.Setenv("CANARY_VAR", "CANARY-776-bench")
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("GO_LLM_CONFIG", "") // registers the restore; unset below
+	if err := os.Unsetenv("GO_LLM_CONFIG"); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	t.Chdir(dir)
+
+	// No config anywhere: the fallback still applies.
+	if got, err := defaultJudgeModelName(); err != nil || got != fallbackJudgeModel {
+		t.Fatalf("no config: got %q, %v; want fallback", got, err)
+	}
+
+	body := `{"providers":{"openai":{"base_url":"http://127.0.0.1:1","api_format":"openai-compat","api_key":"${CANARY_VAR}"}},"models":{},"defaults":{}}`
+	if err := os.WriteFile(filepath.Join(dir, "models.json"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := defaultJudgeModelName()
+	if d, ok := config.DiagnosticOf(err); !ok || d.Code != config.CodeKeyReferenceRefused {
+		t.Fatalf("got %q, %v; want key_reference_refused", got, err)
+	}
+	if !strings.Contains(err.Error(), "set GO_LLM_CONFIG or pass -judge-model") || strings.Contains(err.Error(), "CANARY-776") {
+		t.Errorf("bad message: %v", err)
 	}
 }

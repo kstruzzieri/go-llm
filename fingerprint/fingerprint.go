@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 )
 
@@ -128,6 +129,12 @@ const CurrentToolProbeVersion = 1
 // trusted before the next demand re-probes.
 const CapProbeInconclusiveTTL = 24 * time.Hour
 
+// CapProbeCheckFailedTTL is how long a DetailCheckFailed attempt holds off
+// the next automatic check of its model: long enough that the next start moves
+// on to the next chain entry, short enough that a server that recovers is
+// checked again soon. ExpiryFor gives such an attempt this lifetime.
+const CapProbeCheckFailedTTL = 5 * time.Minute
+
 // CapProbeDigestlessNoTTL bounds a negative verdict for models with no
 // content digest (openai-compat fallback keying): a wedged "no" silently
 // blocks usage, so digestless negatives expire rather than sticking until
@@ -183,4 +190,107 @@ type CapProbeOutcome struct {
 // NOT be persisted; the outcome is only meaningful when err is nil.
 type ToolCallProber interface {
 	ProbeToolCall(ctx context.Context, model string) (CapProbeOutcome, error)
+}
+
+// The Detail codes a tools check saves on its tool_call row, and the cause a
+// flag row carries. #736, #737 and Firn share this spelling. DetailToolCalled
+// goes with a yes; the next six are the inconclusive codes; DetailRunRefused
+// is a flag's cause.
+const (
+	// DetailToolCalled: every emitted call met the probe's contract.
+	DetailToolCalled = "tool_called"
+	// DetailToolIgnored: the first request completed with no call.
+	DetailToolIgnored = "tool_ignored"
+	// DetailToolNotCalled: the second request, sent after the first was
+	// rejected, completed with no call.
+	DetailToolNotCalled = "tool_not_called"
+	// DetailRequestRejected: both requests were rejected with 400 or 422.
+	DetailRequestRejected = "request_rejected"
+	// DetailCutOff: the reply stopped at its length limit before any
+	// complete call.
+	DetailCutOff = "cut_off"
+	// DetailToolCallInvalid: the reply did not meet the probe's certification
+	// rule (wrong name, ID or type, or arguments that are not a JSON object).
+	// It says nothing about whether a dispatcher could have run the call.
+	DetailToolCallInvalid = "tool_call_invalid"
+	// DetailCheckFailed: an automatic check that sent at least one request
+	// failed with a server or transport error (an HTTP 5xx, the check's own
+	// timeout, a broken, malformed or oversized reply) before it settled
+	// anything. Written only by a model registry's automatic path, never by an
+	// explicit check (configio.RunCheck). It lives CapProbeCheckFailedTTL.
+	DetailCheckFailed = "check_failed"
+	// DetailRunRefused: a flag's cause when the provider refused a run that
+	// used the capability. Used by #736's projection; written by passive
+	// refresh (#741), never by a check.
+	DetailRunRefused = "run_refused"
+)
+
+// CapabilityProbeRequest asks a CapabilityProber to run one recipe for a
+// nonempty subset of the capabilities that recipe answers, in canonical
+// names.
+type CapabilityProbeRequest struct {
+	Method       string
+	Capabilities []string
+}
+
+// ProbeAnswer is one capability's outcome from a probe: a definitive answer
+// (Kind answer, state yes or no) or an attempt that settled nothing (Kind
+// attempt, state inconclusive). TTL is the prober's lifetime for the row; see
+// ExpiryFor.
+type ProbeAnswer struct {
+	Capability string
+	Source     EvidenceSource
+	Kind       EvidenceKind
+	State      CapProbeState
+	Detail     string
+	TTL        time.Duration
+}
+
+// CapabilityProbeResult is what one probe produced. Requests is the number of
+// requests the prober sent, set on success and on failure alike. A request
+// counts once its headers were written; a request the transport could not send
+// while the call was still live (for example a refused connection) and one a
+// caller already done never started do not. A request whose context ended
+// while it was in flight counts. When the transport reports nothing, the request
+// counts unless the prober can prove it never left, so the count errs high,
+// never low. Answers may include capabilities the recipe proved beyond those
+// requested, and never one the recipe does not cover. Digest is the content
+// digest the reply named for the model, "" when it named none: the metadata
+// prober copies the one /api/show reports; the streamed prober leaves it empty.
+type CapabilityProbeResult struct {
+	Method   string
+	Requests int
+	Answers  []ProbeAnswer
+	Digest   string
+}
+
+// CapabilityProber runs a probe recipe against one model. It is optional; a
+// ModelProber need not implement it. A non-nil error means the prober's
+// result saves nothing: no failure yields a no. A log-bound model registry's
+// automatic path may then record a DetailCheckFailed attempt of its own. An
+// error carrying a status keeps its HTTPStatusCode() for classification.
+type CapabilityProber interface {
+	ProbeCapabilities(ctx context.Context, model string, req CapabilityProbeRequest) (CapabilityProbeResult, error)
+}
+
+// RecipeForRequest returns the recipe req names after checking that a prober
+// speaking adapter may run it: the method is known and speaks adapter, and
+// req asks for a nonempty subset of what the recipe answers. A prober calls it
+// before sending anything.
+func RecipeForRequest(req CapabilityProbeRequest, adapter string) (ProbeRecipe, error) {
+	recipe, ok := RecipeFor(req.Method)
+	switch {
+	case !ok:
+		return ProbeRecipe{}, fmt.Errorf("fingerprint: unknown probe method %q", req.Method)
+	case recipe.Adapter != adapter:
+		return ProbeRecipe{}, fmt.Errorf("fingerprint: probe method %q speaks %s, not %s", req.Method, recipe.Adapter, adapter)
+	case len(req.Capabilities) == 0:
+		return ProbeRecipe{}, fmt.Errorf("fingerprint: probe method %q: no capability requested", req.Method)
+	}
+	for _, c := range req.Capabilities {
+		if !slices.Contains(recipe.Capabilities, c) {
+			return ProbeRecipe{}, fmt.Errorf("fingerprint: probe method %q does not answer %q", req.Method, c)
+		}
+	}
+	return recipe, nil
 }

@@ -1478,7 +1478,7 @@ func TestParallelPromotionFailureRollsBackEarlierWrites(t *testing.T) {
 		"conflict":          {path: "conflict"},
 		"conflict/child.go": {path: "conflict/child.go"},
 	}}
-	if _, err := c.promoteWorkers(); err == nil || !strings.Contains(err.Error(), "promote") {
+	if _, err := c.promoteWorkers(context.Background()); err == nil || !strings.Contains(err.Error(), "promote") {
 		t.Fatalf("promoteWorkers() error = %v", err)
 	}
 	if _, err := os.Lstat(filepath.Join(root, "conflict")); !errors.Is(err, fs.ErrNotExist) {
@@ -1529,7 +1529,7 @@ func TestParallelPromotionUsesPreWorkerCanonicalSnapshot(t *testing.T) {
 	c.workers[0].changedPaths = []string{"a.go"}
 	writeTestFile(t, filepath.Join(root, "a.go"), "caller edit\n", 0o600)
 
-	if _, err := c.promoteWorkers(); err == nil || !strings.Contains(err.Error(), "changed after snapshot") {
+	if _, err := c.promoteWorkers(context.Background()); err == nil || !strings.Contains(err.Error(), "changed after snapshot") {
 		t.Fatalf("promoteWorkers() error = %v", err)
 	}
 	if got := readTestFile(t, filepath.Join(root, "a.go")); got != "caller edit\n" {
@@ -1701,6 +1701,7 @@ func TestParallelPromotionRejectsUnsafeStateBeforeWriting(t *testing.T) {
 		name  string
 		file  string
 		setup func(*testing.T, string, string)
+		want  string // a substring of promoteWorkers' error, when set
 	}{
 		{name: "escaping path", file: "../escape.go"},
 		{name: "worker symlink", file: "unsafe.go", setup: func(t *testing.T, _, worker string) {
@@ -1713,7 +1714,22 @@ func TestParallelPromotionRejectsUnsafeStateBeforeWriting(t *testing.T) {
 				t.Fatal(err)
 			}
 		}},
+		// The harness classifier keeps a link's own spelling, so with the target
+		// present it passes unsafe/file.go and apply's parent guard must refuse.
 		{name: "canonical symlink parent", file: "unsafe/file.go", setup: func(t *testing.T, root, worker string) {
+			if err := os.Mkdir(filepath.Join(worker, "unsafe"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			writeTestFile(t, filepath.Join(worker, "unsafe", "file.go"), "worker\n", 0o600)
+			if err := os.Mkdir(filepath.Join(root, "elsewhere"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink("elsewhere", filepath.Join(root, "unsafe")); err != nil {
+				t.Fatal(err)
+			}
+		}, want: "promotion parent is not a real directory"},
+		// A dangling parent link is refused earlier, by the harness classifier.
+		{name: "canonical dangling symlink parent", file: "unsafe/file.go", setup: func(t *testing.T, root, worker string) {
 			if err := os.Mkdir(filepath.Join(worker, "unsafe"), 0o700); err != nil {
 				t.Fatal(err)
 			}
@@ -1721,7 +1737,7 @@ func TestParallelPromotionRejectsUnsafeStateBeforeWriting(t *testing.T) {
 			if err := os.Symlink("elsewhere", filepath.Join(root, "unsafe")); err != nil {
 				t.Fatal(err)
 			}
-		}},
+		}, want: "refuse parallel promotion: unsafe/file.go: cannot resolve"},
 		{name: "canonical symlink", file: "unsafe.go", setup: func(t *testing.T, root, worker string) {
 			writeTestFile(t, filepath.Join(worker, "unsafe.go"), "worker\n", 0o600)
 			if err := os.Symlink("sentinel.go", filepath.Join(root, "unsafe.go")); err != nil {
@@ -1755,8 +1771,12 @@ func TestParallelPromotionRejectsUnsafeStateBeforeWriting(t *testing.T) {
 				tt.file:       {path: tt.file},
 			}
 			writeTestFile(t, filepath.Join(worker, "sentinel.go"), "promoted\n", 0o600)
-			if _, err := c.promoteWorkers(); err == nil {
+			_, err = c.promoteWorkers(context.Background())
+			if err == nil {
 				t.Fatal("promoteWorkers() unexpectedly succeeded")
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("promoteWorkers() error = %v, want it to contain %q", err, tt.want)
 			}
 			if got := readTestFile(t, filepath.Join(root, "sentinel.go")); got != "original\n" {
 				t.Fatalf("promotion wrote before validating every path: %q", got)
@@ -1779,7 +1799,7 @@ func TestParallelPromotionRejectsSpecialFile(t *testing.T) {
 	c := &parallelCoordinator{root: root, workers: []parallelWorker{{
 		root: worker, paths: []string{"unsafe.go"}, changedPaths: []string{"unsafe.go"},
 	}}}
-	if _, err := c.promoteWorkers(); err == nil || !strings.Contains(err.Error(), "regular") {
+	if _, err := c.promoteWorkers(context.Background()); err == nil || !strings.Contains(err.Error(), "regular") {
 		t.Fatalf("promoteWorkers() error = %v", err)
 	}
 }
@@ -1904,6 +1924,117 @@ func TestParallelSerialFallbackLeavesNextInterruptForSerialLoop(t *testing.T) {
 		case <-interrupts:
 		default:
 			t.Fatal("completed parallel watcher consumed the serial loop interrupt")
+		}
+	}
+}
+
+// The TestHarnessPromotion tests (#784, spec D10, Open 2(b)) scan the real
+// ancestors of t.TempDir(), as Task 6's tests do: promoteWorkers builds its
+// Workspace out of a seam's reach. CI temp roots hold no harness files.
+
+// runHarnessCohort runs a parallel cohort in root with one step per file.
+// Each worker deletes its file when its worktree holds it and otherwise writes
+// "worker\n" there. It returns the coordinator, whose worktrees t.Cleanup
+// removes, and runCohort's error.
+func runHarnessCohort(t *testing.T, root string, files ...string) (*parallelCoordinator, error) {
+	t.Helper()
+	c := newParallelCoordinator(root, parallelTestPlan(files...), len(files), func(_ context.Context, w parallelWorker) error {
+		p := filepath.Join(w.root, filepath.FromSlash(w.paths[0]))
+		if _, err := os.Lstat(p); err == nil {
+			return os.Remove(p)
+		}
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			return err
+		}
+		return os.WriteFile(p, []byte("worker\n"), 0o600)
+	})
+	c.aggregate = func(context.Context, []agentflow.AggregationInput, string, string, bool) (agentflow.AggregationResult, error) {
+		return agentflow.AggregationResult{Status: "ok"}, nil
+	}
+	ran, err := c.runCohort(context.Background())
+	t.Cleanup(func() { _ = c.cleanup(context.Background()) })
+	if !ran {
+		t.Fatalf("runCohort() ran no cohort: %v", err)
+	}
+	return c, err
+}
+
+// TestHarnessPromotionRefusesGitignoredImport (acceptance 7): a worker runs in
+// a worktree of HEAD and cannot see the canonical root's gitignored
+// CLAUDE.local.md, so promotion refuses the file it imports and promotes
+// nothing. Promotion is all-or-nothing, so the ordinary-file control is the
+// same cohort without the import, which promotes both files.
+func TestHarnessPromotionRefusesGitignoredImport(t *testing.T) {
+	for _, imports := range []bool{true, false} {
+		t.Run(fmt.Sprintf("imports=%t", imports), func(t *testing.T) {
+			root := newParallelTestRepo(t)
+			writeTestFile(t, filepath.Join(root, ".gitignore"), ".agent/\nignored.txt\nignored-dir/\nCLAUDE.local.md\n", 0o600)
+			runTestGit(t, root, "commit", "-q", "-am", "ignore CLAUDE.local.md")
+			local := "Local notes.\n"
+			if imports {
+				local = "@docs/p.md\n"
+			}
+			writeTestFile(t, filepath.Join(root, "CLAUDE.local.md"), local, 0o600)
+			runTestGit(t, root, "check-ignore", "-q", "CLAUDE.local.md")
+
+			c, err := runHarnessCohort(t, root, "docs/p.md", "src/q.go")
+			for _, w := range c.workers {
+				if got := readTestFile(t, filepath.Join(w.root, filepath.FromSlash(w.paths[0]))); got != "worker\n" {
+					t.Fatalf("worker %s wrote %q to %s", w.sourceID, got, w.paths[0])
+				}
+			}
+			// containment: GRANT-HARNESS-REF-UNATTENDED
+			if imports && (err == nil || !strings.Contains(err.Error(), "refuse parallel promotion") || !strings.Contains(err.Error(), "docs/p.md: CLAUDE.local.md imports docs/p.md")) {
+				t.Fatalf("runCohort() error = %v, want a refused promotion naming docs/p.md and the import", err)
+			}
+			if !imports && err != nil {
+				t.Fatalf("runCohort() error = %v, want both files promoted", err)
+			}
+			for _, f := range []string{"docs/p.md", "src/q.go"} {
+				_, statErr := os.Stat(filepath.Join(root, filepath.FromSlash(f)))
+				if promoted := statErr == nil; promoted == imports {
+					t.Errorf("canonical %s promoted=%t (%v), want %t", f, promoted, statErr, !imports)
+				}
+			}
+		})
+	}
+}
+
+// TestHarnessPromotionRefusesDeletion: deleting a file that a committed
+// CLAUDE.md imports is refused before anything is applied.
+func TestHarnessPromotionRefusesDeletion(t *testing.T) {
+	root := newParallelTestRepo(t)
+	writeTestFile(t, filepath.Join(root, "CLAUDE.md"), "@docs/a.md\n", 0o600)
+	if err := os.Mkdir(filepath.Join(root, "docs"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, filepath.Join(root, "docs", "a.md"), "a\n", 0o600)
+	runTestGit(t, root, "add", "-A")
+	runTestGit(t, root, "commit", "-q", "-m", "import docs/a.md")
+
+	_, err := runHarnessCohort(t, root, "docs/a.md", "src/q.go")
+	// containment: GRANT-HARNESS-REF-UNATTENDED
+	if err == nil || !strings.Contains(err.Error(), "refuse parallel promotion") || !strings.Contains(err.Error(), "docs/a.md: CLAUDE.md imports docs/a.md") {
+		t.Fatalf("runCohort() error = %v, want a refused promotion naming docs/a.md and the import", err)
+	}
+	if got := readTestFile(t, filepath.Join(root, "docs", "a.md")); got != "a\n" {
+		t.Fatalf("canonical docs/a.md = %q", got)
+	}
+	if _, err := os.Stat(filepath.Join(root, "src", "q.go")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("canonical src/q.go promoted from a refused batch: %v", err)
+	}
+}
+
+// TestHarnessPromotionAcceptsNewFolder: a file in a folder the canonical root
+// does not have yet is classified, not refused for its missing parents.
+func TestHarnessPromotionAcceptsNewFolder(t *testing.T) {
+	root := newParallelTestRepo(t)
+	if _, err := runHarnessCohort(t, root, "pkg/new/x.go", "src/q.go"); err != nil {
+		t.Fatalf("runCohort() error = %v", err)
+	}
+	for _, f := range []string{"pkg/new/x.go", "src/q.go"} {
+		if got := readTestFile(t, filepath.Join(root, filepath.FromSlash(f))); got != "worker\n" {
+			t.Fatalf("canonical %s = %q", f, got)
 		}
 	}
 }

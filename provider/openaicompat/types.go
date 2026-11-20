@@ -216,6 +216,12 @@ type modelsResponse struct {
 	Data []modelEntry `json:"data"`
 }
 
+// modelsListing is modelsResponse with Data left raw, so a body with no "data"
+// key (nil) can be told from an explicit empty or null list (non-nil).
+type modelsListing struct {
+	Data json.RawMessage `json:"data"`
+}
+
 // modelEntry is one model in the /v1/models listing. OpenAI-compat servers
 // expose only the ID reliably; family/quant/context-window are NOT in the
 // spec and would have to be inferred per-server.
