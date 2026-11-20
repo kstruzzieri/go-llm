@@ -135,7 +135,7 @@ AI tools must not read, print, or transmit real credentials, a user's `models.js
 
 ## Changelog
 
-Outside the fold-and-stamp release PR, never edit `CHANGELOG.md`; concurrent PRs conflict at the shared insertion point under `## [Unreleased]`. Add `changelog.d/<issue>-<slug>.md` holding the full `### <Category> — <title> (#<issue>)` section instead (see `changelog.d/README.md`). CI rejects direct edits; `scripts/changelog-fold` folds fragments at release.
+Outside the stamp PR or a pre-tag fix to the newest version's body, never edit `CHANGELOG.md`; concurrent PRs conflict under `## [Unreleased]`. Add `changelog.d/<issue>-<slug>.md` holding the full `### <Category> — <title> (#<issue>)` section (see `changelog.d/README.md`). CI rejects other direct edits; `scripts/changelog-fold` folds fragments at release.
 
 ## Testing
 
