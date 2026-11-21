@@ -324,7 +324,7 @@ func TestNativeBackendToolchainGoBuildAndTest(t *testing.T) {
 	if _, err := os.Lstat(probe); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("host stat of denied write: %v, want no file", err)
 	}
-	s.requirePreviews("runtime=seatbelt network=denied", "read_only_roots=", strconv.Quote(goroot), strconv.Quote(modRoot),
+	s.requirePreviews(`sandbox: runtime="seatbelt" network=denied`, "read_only_roots=", strconv.Quote(goroot), strconv.Quote(modRoot),
 		strconv.Quote("GOMODCACHE="+modRoot), strconv.Quote("GOPROXY=off"), strconv.Quote("GOTOOLCHAIN=local"),
 		strconv.Quote("GOFLAGS=-buildvcs=false"), strconv.Quote("GOCACHE=<private temp>/gocache"))
 
