@@ -181,8 +181,25 @@ func TestHostGitCommandRefusesRelativePaths(t *testing.T) {
 	bin, ws := resolvedTemp(t), resolvedTemp(t)
 	fake := filepath.Join(bin, "git")
 	writeExecutable(t, fake, "echo 'git version 2.56.0'\n")
-	if _, err := hostGitCommand(ctx, "bin/git", ws, ws, nil, "status"); err == nil {
-		t.Error("relative git path accepted")
+	// The attack: cwd holds an outside bin/git that passes every check, while
+	// the command would run <dir>/bin/git, which is inside the workspace.
+	cwd := resolvedTemp(t)
+	if err := os.MkdirAll(filepath.Join(cwd, "bin"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeExecutable(t, filepath.Join(cwd, "bin", "git"), "echo 'git version 2.56.0'\n")
+	marker := filepath.Join(cwd, "marker")
+	if err := os.MkdirAll(filepath.Join(ws, "bin"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeExecutable(t, filepath.Join(ws, "bin", "git"), "echo ran > "+shellQuote(marker)+"\necho 'git version 2.56.0'\n")
+	t.Chdir(cwd)
+	_, err := hostGitCommand(ctx, "bin/git", ws, ws, nil, "status")
+	if err == nil || !strings.Contains(err.Error(), "bin/git") {
+		t.Errorf("relative git path: err = %v", err)
+	}
+	if _, serr := os.Stat(marker); serr == nil {
+		t.Error("workspace git was executed")
 	}
 	for _, w := range []string{"", "ws"} {
 		if _, err := hostGitCommand(ctx, fake, w, ws, nil, "status"); err == nil {
