@@ -76,6 +76,18 @@ type CommandPermissions struct {
 	// followed by the strict-approval policy line when it applies; nil for
 	// Inspect and host.
 	Limits []string
+	// ReadOnlyRoots are the declared toolchain roots (#722) commands may read
+	// and run but never write, sorted and deduplicated, in the canonical
+	// spelling the host declared; nil when none or under Inspect.
+	ReadOnlyRoots []string
+	// DeveloperDirectory is the declared developer directory (#722), "" when
+	// not opted in or under Inspect.
+	DeveloperDirectory string
+	// Env is every variable the backend adds to a command, sorted NAME=value
+	// with the private temp shown as "<private temp>": the policy's
+	// SandboxConfig.EffectiveEnv("<private temp>"). nil when none or under
+	// Inspect.
+	Env []string
 }
 
 // Verification describes post-write verification as the runtime would run it
@@ -138,13 +150,26 @@ func (r *Runtime) EffectivePermissions() EffectivePermissions {
 	}
 }
 
-// commandPermissions projects the frozen sandbox policy (spec section 7).
-// With strict set, a native policy that allows network also lists the
-// narrowing its commands get once the conversation is exposed (#584).
+// commandPermissions projects the frozen sandbox policy (spec section 7) and
+// its declared toolchain (#722) into slices of the caller's own. With strict
+// set, a native policy that allows network also lists the narrowing its
+// commands get once the conversation is exposed (#584).
 func commandPermissions(p Profile, s agenttools.SandboxConfig, strict bool) CommandPermissions {
 	if p == ProfileInspect {
 		return CommandPermissions{Runtime: "n/a", Network: "n/a"}
 	}
+	c := runtimePermissions(s, strict)
+	// s is New's owned copy, validated but kept as the caller spelled it:
+	// sort and deduplicate into a new slice, as the backend normalizes it.
+	c.ReadOnlyRoots = slices.Compact(slices.Sorted(slices.Values(s.ReadOnlyRoots)))
+	c.DeveloperDirectory = s.DeveloperDirectory
+	c.Env = s.EffectiveEnv("<private temp>")
+	return c
+}
+
+// runtimePermissions is commandPermissions' runtime, network, warning and
+// limits for a non-Inspect profile.
+func runtimePermissions(s agenttools.SandboxConfig, strict bool) CommandPermissions {
 	switch s.Runtime {
 	case agenttools.SandboxRuntimeSeatbelt:
 		if s.AllowNetwork {

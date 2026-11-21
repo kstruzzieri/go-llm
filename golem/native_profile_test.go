@@ -900,6 +900,12 @@ func TestRuntimeSandboxInputMutation(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 	before := rt.EffectivePermissions()
+	// The comparison below bites only if the projection carries every
+	// toolchain field the mutation reaches.
+	if c := before.Command; !slices.Equal(c.ReadOnlyRoots, []string{"/opt/toolchain"}) || c.DeveloperDirectory != policy.DeveloperDirectory ||
+		!slices.Contains(c.Env, "GOMODCACHE=/opt/toolchain/mod") || !slices.Contains(c.Env, "GOCACHE=<private temp>/gocache") {
+		t.Fatalf("EffectivePermissions().Command = %+v, want the policy's roots, developer directory and Env", c)
+	}
 
 	policy.DropCaps[0] = "NONE"
 	policy.ReadOnlyRoots[0] = "/Users/victim"
@@ -911,5 +917,60 @@ func TestRuntimeSandboxInputMutation(t *testing.T) {
 	}
 	if after := rt.EffectivePermissions(); !reflect.DeepEqual(after, before) {
 		t.Fatalf("EffectivePermissions changed after the caller mutated its policy:\n%+v\nwant\n%+v", after, before)
+	}
+}
+
+// TestEffectivePermissionsToolchainDeepCopy: the projection reports the
+// declared roots sorted and deduplicated as the backend normalizes them, the
+// developer directory, and Env as SandboxConfig.EffectiveEnv("<private
+// temp>") with the three developer-directory settings; every returned slice
+// is the caller's own, so mutating one reaches neither the runtime nor the
+// next snapshot.
+func TestEffectivePermissionsToolchainDeepCopy(t *testing.T) {
+	stubValidateSandbox(t)
+	policy := agenttools.SandboxConfig{
+		Runtime:            agenttools.SandboxRuntimeSeatbelt,
+		ReadOnlyRoots:      []string{"/opt/b", "/opt/a", "/opt/b"},
+		DeveloperDirectory: "/Library/Developer/CommandLineTools",
+		Env:                []agenttools.SandboxEnv{{Name: "GOPROXY", Value: "off"}, {Name: "GOMODCACHE", Value: "/opt/a/mod"}},
+		TempEnv:            []string{"GOCACHE"},
+	}
+	rt, err := newNative(t, t.TempDir(), policy, &countingCaller{}, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	wantRoots := []string{"/opt/a", "/opt/b"}
+	// Spelled out, so the expectation is not read back from the code under
+	// test; the EffectiveEnv comparison below ties the two together.
+	wantEnv := []string{
+		"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1", "GOCACHE=<private temp>/gocache",
+		"GOMODCACHE=/opt/a/mod", "GOPROXY=off", "PYTHONDONTWRITEBYTECODE=1",
+	}
+	if got := policy.EffectiveEnv("<private temp>"); !slices.Equal(got, wantEnv) {
+		t.Fatalf("EffectiveEnv = %q, want %q", got, wantEnv)
+	}
+	check := func(label string, c CommandPermissions) {
+		t.Helper()
+		if !slices.Equal(c.ReadOnlyRoots, wantRoots) || c.DeveloperDirectory != policy.DeveloperDirectory || !slices.Equal(c.Env, wantEnv) {
+			t.Fatalf("%s: Command = %+v, want roots %q, developer directory %q, Env %q", label, c, wantRoots, policy.DeveloperDirectory, wantEnv)
+		}
+	}
+	first := rt.EffectivePermissions().Command
+	check("first snapshot", first)
+	for i := range first.ReadOnlyRoots {
+		first.ReadOnlyRoots[i] = "/Users/victim"
+	}
+	for i := range first.Env {
+		first.Env[i] = "HOME=/Users/victim"
+	}
+	check("after mutating the first snapshot", rt.EffectivePermissions().Command)
+	if !slices.Equal(rt.sandbox.ReadOnlyRoots, policy.ReadOnlyRoots) {
+		t.Fatalf("frozen roots = %q, want %q", rt.sandbox.ReadOnlyRoots, policy.ReadOnlyRoots)
+	}
+
+	// Inspect runs no commands, so it reports no toolchain.
+	inspect := commandPermissions(ProfileInspect, policy, false)
+	if inspect.ReadOnlyRoots != nil || inspect.DeveloperDirectory != "" || inspect.Env != nil {
+		t.Fatalf("Inspect Command = %+v, want no toolchain fields", inspect)
 	}
 }
