@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"math"
 	"reflect"
 	"slices"
@@ -217,13 +218,19 @@ func TestExecToolsWithBackgroundUseManagerBackend(t *testing.T) {
 	}
 }
 
+// TestSandboxedConstructorsFailClosed pins that every sandboxed exec
+// constructor refuses an unimplemented runtime with ErrSandboxPolicy.
 func TestSandboxedConstructorsFailClosed(t *testing.T) {
 	cfg := SandboxConfig{Runtime: "container"}
-	if _, err := NewSandboxedBackgroundManager(cfg); err == nil {
-		t.Fatal("background manager accepted unimplemented runtime")
+	if _, err := NewSandboxedBackgroundManager(cfg); !errors.Is(err, ErrSandboxPolicy) {
+		t.Fatalf("background manager = %v, want ErrSandboxPolicy", err)
 	}
-	if _, err := NewSandboxedExecTools(t.TempDir(), cfg); err == nil {
-		t.Fatal("foreground tools accepted unimplemented runtime")
+	if _, err := NewSandboxedExecTools(t.TempDir(), cfg); !errors.Is(err, ErrSandboxPolicy) {
+		t.Fatalf("foreground tools = %v, want ErrSandboxPolicy", err)
+	}
+	scratch := ExecToolsOptions{Scratch: ScratchConfig{Enabled: true}}
+	if _, err := NewSandboxedExecToolsWithOptions(t.TempDir(), cfg, scratch); !errors.Is(err, ErrSandboxPolicy) {
+		t.Fatalf("scratch tools = %v, want ErrSandboxPolicy", err)
 	}
 }
 

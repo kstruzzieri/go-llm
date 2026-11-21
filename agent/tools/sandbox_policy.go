@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"unicode/utf8"
@@ -133,10 +134,13 @@ var toolchainExcludedHome = []string{
 var toolchainRuntimeTemps = []string{"go-llm-seatbelt-", "go-llm-scratch-"}
 
 // toolchainExclusions returns the stores admitRoots refuses: the
-// home-relative list, go-llm's data stores under datadir.Base (which honors
-// XDG_DATA_HOME), and its config store under the user config directory.
+// home-relative list; go-llm's data stores under datadir.Base (which honors
+// XDG_DATA_HOME) and, when that is relocated, still under the default
+// ~/.local/share, where old sessions and the signing key may remain; and its
+// config store under the user config directory, derived as os.UserConfigDir
+// does but from home and getenv.
 func toolchainExclusions(home string, getenv func(string) string) ([]string, error) {
-	out := make([]string, 0, len(toolchainExcludedHome)+3)
+	out := make([]string, 0, len(toolchainExcludedHome)+5)
 	for _, rel := range toolchainExcludedHome {
 		out = append(out, filepath.Join(home, rel))
 	}
@@ -144,10 +148,16 @@ func toolchainExclusions(home string, getenv func(string) string) ([]string, err
 	if err != nil {
 		return nil, fmt.Errorf("tools: cannot locate go-llm's data directory: %w", err)
 	}
-	// ponytail: <UserConfigDir> as macOS spells it (Seatbelt is the only
-	// caller); ~/.config above covers the other unix default.
-	return append(out, filepath.Join(data, "golem"), filepath.Join(data, "go-llm"),
-		filepath.Join(home, "Library", "Application Support", "go-llm")), nil
+	for _, base := range []string{data, filepath.Join(home, ".local", "share")} {
+		out = append(out, filepath.Join(base, "golem"), filepath.Join(base, "go-llm"))
+	}
+	config := filepath.Join(home, ".config")
+	if runtime.GOOS == "darwin" {
+		config = filepath.Join(home, "Library", "Application Support")
+	} else if dir := getenv("XDG_CONFIG_HOME"); filepath.IsAbs(dir) {
+		config = dir
+	}
+	return append(out, filepath.Join(config, "go-llm")), nil
 }
 
 // overlaps reports whether a and b are the same directory or one lies inside

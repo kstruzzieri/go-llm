@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -151,19 +152,19 @@ func TestAdmitRoots(t *testing.T) {
 	xdg := mkdirT(t, filepath.Join(scratch, "xdg"))
 	env := map[string]string{"HOME": home}
 	getenv := func(k string) string { return env[k] }
-	relocated := func(k string) string {
-		if k == "XDG_DATA_HOME" {
-			return xdg
+	// with returns getenv with one more variable set.
+	with := func(name, value string) func(string) string {
+		return func(k string) string {
+			if k == name {
+				return value
+			}
+			return env[k]
 		}
-		return env[k]
 	}
-
-	admitted := []string{
-		mkdirT(t, filepath.Join(tempBase, "go-llm-a0-fixture", "modcache")),
-		mkdirT(t, filepath.Join(home, "go", "pkg", "mod")),
-	}
-	if err := admitRoots(admitted, home, tempBase, getenv); err != nil {
-		t.Fatalf("valid control refused: %v", err)
+	// go-llm's config store sits where os.UserConfigDir puts it.
+	configStore := ".config/go-llm"
+	if runtime.GOOS == "darwin" {
+		configStore = "Library/Application Support/go-llm"
 	}
 
 	target := mkdirT(t, filepath.Join(scratch, "target"))
@@ -202,7 +203,7 @@ func TestAdmitRoots(t *testing.T) {
 	}
 	excluded := []string{
 		".ssh", ".gnupg", ".aws", ".docker", ".kube", ".netrc", ".config", ".claude", ".codex",
-		"Library/Keychains", ".local/share/golem", ".local/share/go-llm", "Library/Application Support/go-llm",
+		"Library/Keychains", ".local/share/golem", ".local/share/go-llm", configStore,
 	}
 	for _, rel := range excluded {
 		e := mkdirT(t, filepath.Join(home, rel))
@@ -230,6 +231,14 @@ func TestAdmitRoots(t *testing.T) {
 		}
 		t.Cleanup(func() { _ = os.Chmod(ssh, 0o700) })
 	}
+	// The control runs with every excluded store present, as on a real host.
+	admitted := []string{
+		mkdirT(t, filepath.Join(tempBase, "go-llm-a0-fixture", "modcache")),
+		mkdirT(t, filepath.Join(home, "go", "pkg", "mod")),
+	}
+	if err := admitRoots(admitted, home, tempBase, getenv); err != nil {
+		t.Fatalf("valid control refused: %v", err)
+	}
 	for _, r := range rows {
 		t.Run(r.name, func(t *testing.T) {
 			ge := getenv
@@ -243,20 +252,69 @@ func TestAdmitRoots(t *testing.T) {
 		})
 	}
 
-	// go-llm's own stores move with XDG_DATA_HOME.
+	// go-llm's own stores move with XDG_DATA_HOME; the default stores stay
+	// excluded, since old sessions and the signing key may remain there.
 	t.Run("relocated XDG_DATA_HOME", func(t *testing.T) {
+		relocated := with("XDG_DATA_HOME", xdg)
+		refused := []string{
+			mkdirT(t, filepath.Join(xdg, "golem")),
+			mkdirT(t, filepath.Join(xdg, "go-llm", "x")),
+			xdg,
+			filepath.Join(home, ".local", "share", "golem"),
+			filepath.Join(home, ".local", "share"),
+		}
 		control := mkdirT(t, filepath.Join(xdg, "other"))
 		if err := admitRoots([]string{control}, home, tempBase, relocated); err != nil {
 			t.Fatalf("control refused: %v", err)
 		}
-		for _, root := range []string{
-			mkdirT(t, filepath.Join(xdg, "golem")),
-			mkdirT(t, filepath.Join(xdg, "go-llm", "x")),
-			xdg,
-		} {
+		for _, root := range refused {
 			if err := admitRoots([]string{root}, home, tempBase, relocated); err == nil || !strings.Contains(err.Error(), "excluded") {
 				t.Errorf("admitRoots(%q) = %v, want an excluded-store refusal", root, err)
 			}
+		}
+	})
+
+	// The config store follows XDG_CONFIG_HOME where os.UserConfigDir does:
+	// everywhere but darwin.
+	t.Run("relocated XDG_CONFIG_HOME", func(t *testing.T) {
+		xcfg := mkdirT(t, filepath.Join(scratch, "xcfg"))
+		relocated := with("XDG_CONFIG_HOME", xcfg)
+		store := mkdirT(t, filepath.Join(xcfg, "go-llm"))
+		control := mkdirT(t, filepath.Join(xcfg, "other"))
+		if err := admitRoots([]string{control}, home, tempBase, relocated); err != nil {
+			t.Fatalf("control refused: %v", err)
+		}
+		for _, root := range []string{store, xcfg} {
+			err := admitRoots([]string{root}, home, tempBase, relocated)
+			if runtime.GOOS == "darwin" {
+				if err != nil {
+					t.Errorf("admitRoots(%q) = %v; darwin's config dir ignores XDG_CONFIG_HOME", root, err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), "excluded") {
+				t.Errorf("admitRoots(%q) = %v, want an excluded-store refusal", root, err)
+			}
+		}
+	})
+
+	// A store that does not exist yet is still excluded: a root covering
+	// where it will be created is refused.
+	t.Run("store not created yet", func(t *testing.T) {
+		_, p := canonicalTempDir(t)
+		h := mkdirT(t, filepath.Join(p, "home"))
+		envNew := map[string]string{"HOME": h}
+		parent := filepath.Join(h, "Library", "Application Support")
+		if runtime.GOOS != "darwin" {
+			parent = filepath.Join(p, "xdg-config")
+			envNew["XDG_CONFIG_HOME"] = parent
+		}
+		mkdirT(t, parent)
+		store := filepath.Join(parent, "go-llm")
+		if _, err := os.Stat(store); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("store %q must not exist: %v", store, err)
+		}
+		err := admitRoots([]string{parent}, h, tempBase, func(k string) string { return envNew[k] })
+		if err == nil || !strings.Contains(err.Error(), `excluded "`+store+`"`) {
+			t.Fatalf("admitRoots(%q) = %v, want refusal naming the excluded %q", parent, err, store)
 		}
 	})
 }
