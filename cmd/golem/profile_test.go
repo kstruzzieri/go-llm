@@ -246,6 +246,11 @@ func TestValidateFlagsSandbox(t *testing.T) {
 		{"seatbelt toolchain", []string{"-sandbox", "seatbelt", "-sandbox-read-root", "/a", "-sandbox-read-root", "/b",
 			"-sandbox-env", "GOPROXY=off", "-sandbox-env", "GOFLAGS=", "-sandbox-temp-env", "GOCACHE", "-sandbox-developer-dir"}, ""},
 		{"env without equals", []string{"-sandbox", "seatbelt", "-sandbox-env", "GOPROXY"}, "golem: -sandbox-env must be NAME=VALUE"},
+		// An empty value (an unset variable, a failed $(go env GOROOT)) is
+		// refused, never resolved: filepath.Abs("") is the working directory.
+		{"empty read root", []string{"-sandbox", "seatbelt", "-sandbox-read-root", "/a", "-sandbox-read-root", ""}, "golem: -sandbox-read-root must not be empty"},
+		{"empty env", []string{"-sandbox", "seatbelt", "-sandbox-env", ""}, "golem: -sandbox-env must not be empty"},
+		{"empty temp env", []string{"-sandbox", "seatbelt", "-sandbox-temp-env", ""}, "golem: -sandbox-temp-env must not be empty"},
 	}
 	for _, tool := range [][]string{
 		{"-sandbox-read-root", "/a"}, {"-sandbox-env", "GOPROXY=off"}, {"-sandbox-temp-env", "GOCACHE"}, {"-sandbox-developer-dir"},

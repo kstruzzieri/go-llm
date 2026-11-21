@@ -96,6 +96,20 @@ func validateSandboxFlags(f flags) error {
 			return errors.New("golem: " + opt.flag + " requires -sandbox seatbelt")
 		}
 	}
+	// An empty value is usually an unset variable or a failed $(go env ...);
+	// filepath.Abs would turn an empty root into the working directory.
+	for _, opt := range []struct {
+		vals []string
+		flag string
+	}{
+		{f.sandboxReadRoots, "-sandbox-read-root"},
+		{f.sandboxEnv, "-sandbox-env"},
+		{f.sandboxTempEnv, "-sandbox-temp-env"},
+	} {
+		if slices.Contains(opt.vals, "") {
+			return errors.New("golem: " + opt.flag + " must not be empty")
+		}
+	}
 	for _, kv := range f.sandboxEnv {
 		if !strings.Contains(kv, "=") {
 			// Value-free: the library's table refuses the rest at startup.
