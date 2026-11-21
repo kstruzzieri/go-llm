@@ -36,6 +36,10 @@ func TestHostGitCommandPrefixesEveryCall(t *testing.T) {
 for a in "$@"; do echo "$a"; done
 `)
 	env := []string{"PATH=/usr/bin:/bin", "FOO=bar"}
+	wantEnv, err := hostGitFilterPath(env, ws)
+	if err != nil {
+		t.Fatal(err)
+	}
 	cmd, err := hostGitCommand(ctx, fake, ws, dir, env, "status")
 	if err != nil {
 		t.Fatal(err)
@@ -44,7 +48,7 @@ for a in "$@"; do echo "$a"; done
 	if !slices.Equal(cmd.Args[1:], want) {
 		t.Fatalf("args = %q; want %q", cmd.Args[1:], want)
 	}
-	if cmd.Dir != dir || !slices.Equal(cmd.Env, env) {
+	if cmd.Dir != dir || !slices.Equal(cmd.Env, wantEnv) {
 		t.Fatalf("Dir=%q Env=%q", cmd.Dir, cmd.Env)
 	}
 	out, err := cmd.Output()
@@ -356,8 +360,13 @@ func TestHostGitFilterPath(t *testing.T) {
 	if err := os.Symlink(filepath.Join(ws, "bin"), link); err != nil {
 		t.Fatal(err)
 	}
-	// Relative entries are resolved against the test's working directory.
-	t.Chdir(ws)
+	// Relative entries resolve against the working directory; use a directory
+	// outside the workspace (out/bin exists) so only the IsAbs check drops them.
+	t.Chdir(out)
+	tools := filepath.Join(ws, "tools")
+	if err := os.Symlink(outBin, tools); err != nil {
+		t.Fatal(err)
+	}
 	other := []string{"HOME=/h", "Path=keep", "ZED=1", "A="}
 	join := func(entries ...string) string { return strings.Join(entries, sep) }
 
@@ -367,7 +376,9 @@ func TestHostGitFilterPath(t *testing.T) {
 		want string
 	}{
 		{"keeps outside", join(out), join(out)},
-		{"order and spelling", join(outBin, out), join(outBin, out)},
+		{"order, resolved spelling", join(outBin, out), join(outBin, out)},
+		{"workspace spelling of an outside symlink", join(tools, out), join(outBin, out)},
+		{"ancestor of workspace", join(filepath.Dir(ws)), join(filepath.Dir(ws))},
 		{"leading empty", join("", out), join(out)},
 		{"trailing empty", join(out, ""), join(out)},
 		{"doubled empty", join(outBin, "", "", out), join(outBin, out)},
@@ -378,9 +389,11 @@ func TestHostGitFilterPath(t *testing.T) {
 		{"symlink into workspace", join(link, out), join(out)},
 		{"nonexistent", join(filepath.Join(out, "missing"), out), join(out)},
 	}
-	if variant := strings.ToUpper(filepath.Join(ws, "bin")); variant != filepath.Join(ws, "bin") {
-		if _, err := os.Stat(variant); err == nil {
-			cases = append(cases, struct{ name, path, want string }{"case variant", join(variant, out), join(out)})
+	for name, p := range map[string]string{"case variant": filepath.Join(ws, "bin"), "case variant of the workspace root": ws} {
+		if variant := strings.ToUpper(p); variant != p {
+			if _, err := os.Stat(variant); err == nil {
+				cases = append(cases, struct{ name, path, want string }{name, join(variant, out), join(out)})
+			}
 		}
 	}
 	for _, tc := range cases {
@@ -403,6 +416,14 @@ func TestHostGitFilterPath(t *testing.T) {
 		})
 	}
 
+	t.Run("every PATH entry is filtered", func(t *testing.T) {
+		env := []string{"PATH=" + join(ws, out), "X=1", "PATH=" + join(outBin, "", ws)}
+		got, err := hostGitFilterPath(env, ws)
+		want := []string{"PATH=" + out, "X=1", "PATH=" + outBin}
+		if err != nil || !slices.Equal(got, want) {
+			t.Fatalf("got %q, %v; want %q", got, err, want)
+		}
+	})
 	t.Run("no PATH entry", func(t *testing.T) {
 		env := []string{"HOME=/h", "Path=x"}
 		got, err := hostGitFilterPath(env, ws)

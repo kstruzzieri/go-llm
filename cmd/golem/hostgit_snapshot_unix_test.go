@@ -336,7 +336,7 @@ func TestSnapshotDoesNotRunWorkspaceProgramFromPath(t *testing.T) {
 			// Control: plain git in the same environment runs the program, so
 			// the fixture is live and an absent marker below means something.
 			stale()
-			ctl := exec.Command("git", "status", "--porcelain")
+			ctl := exec.Command("git", "--no-optional-locks", "status", "--porcelain")
 			ctl.Dir = ws
 			if out, err := ctl.CombinedOutput(); err != nil {
 				t.Fatalf("control status: %v\n%s", err, out)
