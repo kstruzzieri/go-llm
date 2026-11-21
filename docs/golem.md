@@ -346,7 +346,7 @@ Read the limits literally:
 - **Bubblewrap protects the git metadata that exists when the command starts.** It refuses the same writes for those paths but cannot refuse a new file created inside a git directory (`commondir`, `config.worktree`, or `hooks`/`info` when absent) or a new repository; `git init` and `git clone` into the workspace work there. The tests run add, commit, checkout, stash, gc and rebase, and commits in a submodule, a nested repository and a linked worktree, under Bubblewrap; `git config` (including `core.hooksPath`), `git sparse-checkout`, `git worktree add` and `git submodule update --init` fail there. `git remote add`, `set-url` and setting an upstream branch also write the repository's config, so they are expected to fail too. Bubblewrap cannot refuse renaming a submodule's, linked worktree's or nested repository's checkout directory aside and putting a new directory with its own `.git` in its place; the host's next git there uses the new `.git`. On a case-insensitive network or FUSE filesystem a differently-cased spelling can bypass this protection. Hooks you keep inside the working tree with `core.hooksPath` are ordinary workspace files and stay writable. If a git metadata entry (`hooks`, `info`, `config`, `config.worktree`, `commondir` or `gitdir`) is a symbolic link, Bubblewrap refuses to start the command, because a read-only mount would protect the link's target but not the link itself. It checks only those entries, not the files inside `hooks` or `info`.
 - **Metadata that leads into the workspace stays writable on both backends.** A file inside `.git/hooks` or `.git/info` that is a symbolic link to a file elsewhere in the workspace (such as `.git/hooks/pre-commit` linked to `scripts/pre-commit`), any git metadata file that is a hard link to a workspace file, and a file the repository's config pulls in with `[include]` or `[includeIf]` when it lies elsewhere in the workspace or inside `.git` under a name that is not protected are ordinary files a sandboxed command can change. Git runs or reads what it wrote, as with `core.hooksPath`.
 - **A submodule named under `hooks/` or `info/` is read-only.** On both backends, a submodule whose name has a directory called `hooks` or `info` before its last part (for example `hooks/shared`) has its whole git directory read-only inside the sandbox, so git commands that write in that submodule fail there.
-- **Git directories outside `.git` are not protected.** On both backends, a git directory kept inside the workspace somewhere other than `.git`, `.git/modules` or `.git/worktrees` (for example one made with `git init --separate-git-dir` into the workspace) is not recognized: its hooks and config stay writable, and only the `.git` file pointing at it is protected. A `.git` that is itself a symbolic link is not protected either. A sandboxed command can also create a directory that git treats as a bare repository (one holding `HEAD`, `objects` and `refs`); `git init --bare` succeeds inside the sandbox on both backends. Git run from inside that directory, or from the workspace root when the workspace has no `.git` of its own, reads that directory's config, which can run commands on the host. Run `git config --global safe.bareRepository explicit` (git 2.38 or later) so git uses a bare repository only when you name it; a program that runs git as you can pass `-c safe.bareRepository=explicit`.
+- **Git directories outside `.git` are not protected.** On both backends, a git directory kept inside the workspace somewhere other than `.git`, `.git/modules` or `.git/worktrees` (for example one made with `git init --separate-git-dir` into the workspace) is not recognized: its hooks and config stay writable, and only the `.git` file pointing at it is protected. A `.git` that is itself a symbolic link is not protected either. A sandboxed command can also create a directory that git treats as a bare repository (one holding `HEAD`, `objects` and `refs`); `git init --bare` succeeds inside the sandbox on both backends. Git run from inside that directory, or from the workspace root when the workspace has no `.git` of its own, reads that directory's config, which can run commands on the host. Run `git config --global safe.bareRepository explicit` (git 2.38 or later) so git uses a bare repository only when you name it; a program that runs git as you can pass `-c safe.bareRepository=explicit`. Golem's own git calls do this.
 
 ### Post-write verification under -sandbox
 
@@ -883,9 +883,10 @@ and helper-resistant: argv-only `git` with `--no-optional-locks` and
 submodule HEAD is reported, modified
 submodule content is not), and a refusal when the repository's own `.git/config`
 defines a content filter driver (`filter.<name>.clean`/`.process`; git-lfs's
-global definitions are fine) or relocates the work tree with `core.worktree`.
-Capture also passes `--no-lazy-fetch`; Git versions without this option stop
-capture with a warning. Missing objects cause a capture error rather than a
+global definitions are fine), relocates the work tree with `core.worktree`, or
+includes another file (`include.path` or `includeIf.<condition>.path`).
+Capture also passes `--no-lazy-fetch`, which needs Git 2.45 or later; older
+versions stop capture with a warning. Missing objects cause a capture error rather than a
 fetch from a configured remote.
 Linked worktrees, submodules, and subdirectory roots report the workspace
 actually opened. Status covers the whole repository; file tools can access only
@@ -975,8 +976,8 @@ Golem runs `git` itself in two places: parallel task mode (`-plan-workers`
 above 1) creates, checks and removes worker worktrees, and the session's git
 context snapshot reads the branch, status and recent commits. Those `git`
 processes, and everything they start (repository hooks such as
-`post-checkout`, checkout and clean filters, and `core.fsmonitor` helpers),
-receive an environment Golem builds from scratch:
+`post-checkout`, and checkout and clean filters) receive an environment
+Golem builds from scratch:
 
 - **Baseline:** `PATH`, `HOME`, `USER`, `TMPDIR`, `LANG`, `XDG_CONFIG_HOME`,
   `GIT_CONFIG_GLOBAL`, `GIT_CONFIG_SYSTEM` and `GIT_CONFIG_NOSYSTEM`, when set.
@@ -1020,6 +1021,39 @@ This keeps provider keys away from repository code; it does not confine that
 code. Hooks, filters and helpers still run as you with the baseline and can
 read your files under `HOME`. Your global and system git configuration is
 trusted: a filter it defines runs during the snapshot.
+
+Every `git` command Golem runs on the host follows four rules:
+
+- It passes `-c safe.bareRepository=explicit -c core.fsmonitor=false`. A bare
+  repository that a sandboxed command planted in a workspace with no `.git` of
+  its own is refused, and no `core.fsmonitor` helper runs.
+- Golem refuses `git` older than 2.38. It runs `git --version` once for each
+  `git` binary to check.
+- Golem refuses a `git` found on `PATH` that, after symbolic links are
+  resolved, lies inside the workspace. A relative `git` path is refused too.
+- The snapshot refuses a repository whose local or worktree config includes
+  another file (`include.path` or `includeIf.<condition>.path`). Startup prints
+  `git context disabled: ...`. `/git-context refresh` prints
+  `git context refresh failed: ...` and keeps the previous block.
+
+Parallel task mode still runs the repository's own hooks, filters (so git-lfs
+keeps working) and lazy fetch, with the environment above. Only `core.fsmonitor`
+helpers are newly off. A sandboxed command can still reach these through:
+
+- On Bubblewrap, creating `hooks/`, `info/` or `config.worktree` in a git
+  directory where they are absent when the command starts
+  ([#802](https://github.com/kstruzzieri/go-llm/issues/802); see the
+  [Bubblewrap residuals](#native-command-sandbox--sandbox)).
+- On both backends, an include target, a `core.hooksPath` or a linked hook that
+  lies in the workspace.
+- A git directory outside `.git`, which is
+  [not protected](#native-command-sandbox--sandbox).
+
+Golem keeps some trust on purpose: your global and system git config, the files
+they include, and a working-tree `.gitattributes` that chooses a filter you
+defined there. If you start Golem with `-root` inside a `.git` directory,
+`.git/worktrees/<name>` or `.git/modules/<name>`, git treats that root as a
+repository by its path. That is a root you chose.
 
 ## Grant security and observation fencing
 
