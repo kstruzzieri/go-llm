@@ -492,11 +492,14 @@ func TestNativeProbeBeforeResources(t *testing.T) {
 }
 
 // TestRunDeclaresToolchainOnce: run resolves each -sandbox-read-root to its
-// canonical spelling (a symlink to the real directory) and asks for the
-// active developer directory exactly once, although resolveSandbox runs
-// twice, and the startup probe receives that one policy. A root or developer
-// directory that cannot be resolved stops run before the probe. Portable:
-// both backend seams are stubbed, and the missing config stops a good run.
+// canonical spelling (a symlink to the real directory), respells a GOMODCACHE
+// typed through a root the same way, and asks for the active developer
+// directory exactly once, although resolveSandbox runs twice; the startup
+// probe receives that one policy. A GOMODCACHE outside every typed root
+// passes through unchanged, and the library then refuses it. A root or
+// developer directory that cannot be resolved stops run before the probe.
+// Portable: both backend seams are stubbed, and the missing config stops a
+// good run.
 func TestRunDeclaresToolchainOnce(t *testing.T) {
 	const devDir = "/Library/Developer/CommandLineTools"
 	devFailed := errors.New("no developer directory")
@@ -505,15 +508,20 @@ func TestRunDeclaresToolchainOnce(t *testing.T) {
 	if err := os.Symlink(real, link); err != nil {
 		t.Fatal(err)
 	}
+	// A sibling sharing the link's name as a prefix: lexically outside it.
+	outside := link + "x/mod"
 	for _, tc := range []struct {
-		name    string
-		root    string
-		devErr  error
-		wantErr string // "" means the policy reaches the probe
+		name        string
+		root, gomod string
+		devErr      error
+		wantGomod   string
+		wantErr     string // "" means the policy reaches the probe
 	}{
-		{"resolved", link, nil, ""},
-		{"missing root", filepath.Join(real, "missing"), nil, "golem: -sandbox-read-root: "},
-		{"developer directory fails", link, devFailed, "golem: -sandbox-developer-dir: no developer directory"},
+		{"resolved", link, filepath.Join(link, "mod"), nil, filepath.Join(real, "mod"), ""},
+		{"module cache is the root", link, link, nil, real, ""},
+		{"module cache outside every root", link, outside, nil, outside, ""},
+		{"missing root", filepath.Join(real, "missing"), filepath.Join(real, "missing"), nil, "", "golem: -sandbox-read-root: "},
+		{"developer directory fails", link, link, devFailed, "", "golem: -sandbox-developer-dir: no developer directory"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			isolateRunEnv(t)
@@ -533,7 +541,7 @@ func TestRunDeclaresToolchainOnce(t *testing.T) {
 			err := run([]string{"-config", filepath.Join(t.TempDir(), "missing-models.json"), "-root", t.TempDir(),
 				"-no-probe", "-no-cap-probe", "-no-session", "-no-memory", "-no-project-context",
 				"-sandbox", "seatbelt", "-sandbox-read-root", tc.root, "-sandbox-env", "GOPROXY=off",
-				"-sandbox-temp-env", "GOCACHE", "-sandbox-developer-dir"}, stdin, stdout, stderr)
+				"-sandbox-env", "GOMODCACHE=" + tc.gomod, "-sandbox-temp-env", "GOCACHE", "-sandbox-developer-dir"}, stdin, stdout, stderr)
 			if tc.wantErr != "" {
 				if err == nil || !strings.HasPrefix(err.Error(), tc.wantErr) || len(probes) != 0 {
 					t.Fatalf("run = %v with %d probes, want %q before any probe", err, len(probes), tc.wantErr)
@@ -547,11 +555,45 @@ func TestRunDeclaresToolchainOnce(t *testing.T) {
 				t.Fatalf("ActiveDeveloperDirectory calls = %d, want 1", devCalls)
 			}
 			want := []agenttools.SandboxConfig{{Runtime: agenttools.SandboxRuntimeSeatbelt, ReadOnlyRoots: []string{real},
-				DeveloperDirectory: devDir, Env: []agenttools.SandboxEnv{{Name: "GOPROXY", Value: "off"}}, TempEnv: []string{"GOCACHE"}}}
+				DeveloperDirectory: devDir, Env: []agenttools.SandboxEnv{{Name: "GOPROXY", Value: "off"}, {Name: "GOMODCACHE", Value: tc.wantGomod}},
+				TempEnv: []string{"GOCACHE"}}}
 			if !reflect.DeepEqual(probes, want) {
 				t.Fatalf("probes = %+v, want %+v", probes, want)
 			}
+			// The real check refuses a module cache outside every root by its
+			// pure table check, before any backend: on every OS, value-free.
+			verr := agenttools.ValidateSandbox(probes[0], t.TempDir())
+			if refused := verr != nil && strings.Contains(verr.Error(), "GOMODCACHE must be a clean absolute path inside a declared root"); refused != (tc.wantGomod == outside) {
+				t.Fatalf("ValidateSandbox = %v, want a GOMODCACHE refusal only for the module cache outside every root", verr)
+			}
+			if verr != nil && strings.Contains(verr.Error(), outside) {
+				t.Fatalf("ValidateSandbox echoed the refused value: %v", verr)
+			}
 		})
+	}
+}
+
+// rebaseUnderRoot respells only clean absolute paths lexically in a typed
+// root, under the longest such root: an inner root may be a link of its own,
+// and the longest match is where the path resolves.
+func TestRebaseUnderRoot(t *testing.T) {
+	typed := []string{"/t", "/t/inner", "/u"}
+	canon := []string{"/c", "/elsewhere", "/u"}
+	for _, tc := range []struct{ in, want string }{
+		{"/t", "/c"},
+		{"/t/mod", "/c/mod"},
+		{"/t/inner/mod", "/elsewhere/mod"},
+		{"/t/innerx/mod", "/c/innerx/mod"},
+		{"/tx/mod", "/tx/mod"},
+		{"/u/mod", "/u/mod"},
+		{"/other/mod", "/other/mod"},
+		{"t/mod", "t/mod"},
+		{"/t/../etc", "/t/../etc"},
+		{"/t/mod/", "/t/mod/"},
+	} {
+		if got := rebaseUnderRoot(tc.in, typed, canon); got != tc.want {
+			t.Errorf("rebaseUnderRoot(%q) = %q, want %q", tc.in, got, tc.want)
+		}
 	}
 }
 

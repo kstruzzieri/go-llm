@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"slices"
 	"strings"
 
@@ -150,16 +151,31 @@ func resolveSandbox(f flags) agenttools.SandboxConfig {
 
 // declareToolchain completes policy's declared toolchain (#722) for run:
 // each -sandbox-read-root in its canonical spelling, the one the backend,
-// approval key and permissions notice carry, and with -sandbox-developer-dir
-// the active developer directory, asked for once per run.
+// approval key and permissions notice carry; a GOMODCACHE typed inside a root
+// respelled under that root's canonical spelling; and with
+// -sandbox-developer-dir the active developer directory, asked for once per
+// run. It returns new slices and leaves policy's untouched; a nil slice stays
+// nil, so a policy declaring no toolchain is unchanged.
 func declareToolchain(ctx context.Context, policy agenttools.SandboxConfig, f flags) (agenttools.SandboxConfig, error) {
+	typed := make([]string, len(policy.ReadOnlyRoots))
+	roots := slices.Clone(policy.ReadOnlyRoots)
 	for i, root := range policy.ReadOnlyRoots {
-		canon, err := agenttools.CanonicalToolchainRoot(root)
+		abs, err := filepath.Abs(root)
+		if err == nil {
+			roots[i], err = agenttools.CanonicalToolchainRoot(abs)
+		}
 		if err != nil {
 			return policy, fmt.Errorf("golem: -sandbox-read-root: %w", err)
 		}
-		policy.ReadOnlyRoots[i] = canon
+		typed[i] = abs
 	}
+	env := slices.Clone(policy.Env)
+	for i, e := range env {
+		if e.Name == "GOMODCACHE" {
+			env[i].Value = rebaseUnderRoot(e.Value, typed, roots)
+		}
+	}
+	policy.ReadOnlyRoots, policy.Env = roots, env
 	if f.sandboxDeveloperDir {
 		dir, err := activeDeveloperDirectory(ctx)
 		if err != nil {
@@ -168,6 +184,25 @@ func declareToolchain(ctx context.Context, policy agenttools.SandboxConfig, f fl
 		policy.DeveloperDirectory = dir
 	}
 	return policy, nil
+}
+
+// rebaseUnderRoot respells a clean absolute path that lies lexically in a
+// typed root (the longest, when several hold it) under that root's canonical
+// spelling. It resolves nothing, so the path need not exist and stays inside
+// the canonical root; any other value is returned unchanged, for the library
+// to refuse without echoing it.
+func rebaseUnderRoot(path string, typed, canon []string) string {
+	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
+		return path
+	}
+	best, out := -1, path
+	for i, root := range typed {
+		rel, err := filepath.Rel(root, path)
+		if err == nil && (rel == "." || filepath.IsLocal(rel)) && len(root) > best {
+			best, out = len(root), filepath.Join(canon[i], rel)
+		}
+	}
+	return out
 }
 
 // validateSandbox is agenttools.ValidateSandbox, replaceable only by this

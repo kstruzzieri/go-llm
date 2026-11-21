@@ -9,11 +9,11 @@ import (
 	"testing"
 )
 
-// TestNativeWiringToolchainNotice: a -sandbox-read-root given as a symlink
-// reaches the Seatbelt session through run() in its canonical spelling, and
-// the startup permissions notice shows that spelling and every variable a
-// command gets (#722). macOS only: the toolchain flags are Seatbelt's, so the
-// Linux run has no skip.
+// TestNativeWiringToolchainNotice: a -sandbox-read-root given as a symlink,
+// and a GOMODCACHE typed through that link, reach the Seatbelt session through
+// run() in the root's canonical spelling, and the startup permissions notice
+// shows that spelling and every variable a command gets (#722). macOS only:
+// the toolchain flags are Seatbelt's, so the Linux run has no skip.
 func TestNativeWiringToolchainNotice(t *testing.T) {
 	config, root := golemWorkspace(t)
 	policy := nativePolicyForTest(t, root)
@@ -22,10 +22,9 @@ func TestNativeWiringToolchainNotice(t *testing.T) {
 	if err := os.Symlink(real, link); err != nil {
 		t.Fatal(err)
 	}
-	mod := filepath.Join(real, "mod")
-	wantEnv := []string{"GOCACHE=<private temp>/gocache", "GOMODCACHE=" + mod, "GOPROXY=off"}
+	wantEnv := []string{"GOCACHE=<private temp>/gocache", "GOMODCACHE=" + filepath.Join(real, "mod"), "GOPROXY=off"}
 	lines := withGolem(t, config, root, policy, []string{"-sandbox-read-root", link,
-		"-sandbox-env", "GOMODCACHE=" + mod, "-sandbox-env", "GOPROXY=off", "-sandbox-temp-env", "GOCACHE"},
+		"-sandbox-env", "GOMODCACHE=" + filepath.Join(link, "mod"), "-sandbox-env", "GOPROXY=off", "-sandbox-temp-env", "GOCACHE"},
 		func(sess *replSession) {
 			got := sess.runtime.EffectivePermissions().Command
 			if !slices.Equal(got.ReadOnlyRoots, []string{real}) || !slices.Equal(got.Env, wantEnv) {

@@ -65,15 +65,16 @@
 // declare only folders every command may read, and keep their contents
 // trusted, since processes outside Golem can still change them.
 // -sandbox-env NAME=VALUE (repeatable) sets a variable from a closed table:
-// GOMODCACHE (a path inside a declared root, in the root's canonical
-// spelling), GOPROXY=off, GOTOOLCHAIN=local and GOFLAGS=-buildvcs=false;
-// anything else is refused without echoing the value. -sandbox-temp-env NAME
-// (repeatable) points a variable into each command's private temp: GOCACHE
-// becomes <private temp>/gocache, a cold cache for every command, so a full
-// test suite may need a run_command timeout_seconds above the 60 s default (at
-// most 600) and a go test -timeout below it. -sandbox-developer-dir declares
-// the active developer directory (xcode-select -p: the Command Line Tools or
-// an Xcode.app bundle) so git, python3 and Go's VCS stamping run, and adds
+// GOMODCACHE (a path inside a -sandbox-read-root, respelled under the root's
+// canonical spelling), GOPROXY=off, GOTOOLCHAIN=local and
+// GOFLAGS=-buildvcs=false; anything else is refused without echoing the
+// value. -sandbox-temp-env NAME (repeatable) points a variable into each
+// command's private temp: GOCACHE becomes <private temp>/gocache, a cold
+// cache for every command, so a full test suite may need a run_command
+// timeout_seconds above the 60 s default (at most 600) and a go test -timeout
+// below it. -sandbox-developer-dir declares the active developer directory
+// (xcode-select -p: the Command Line Tools or an Xcode.app bundle) so git,
+// python3 and Go's VCS stamping run, and adds
 // GIT_CONFIG_NOSYSTEM=1, GIT_CONFIG_GLOBAL=/dev/null and
 // PYTHONDONTWRITEBYTECODE=1. The system's selection still chooses which
 // folder is declared; admission and the preview bound it, and the selection
