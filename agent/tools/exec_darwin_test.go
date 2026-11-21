@@ -3745,6 +3745,9 @@ func TestSeatbeltToolchainRootWriteDenied(t *testing.T) {
 	if res := realSeatbeltRun(t, cfg, ws, []string{"/bin/cat", marker}); res.ExitCode != 0 || string(res.Stdout) != "root-marker" {
 		t.Fatalf("cat of the root's marker: exit=%d stdout=%q stderr=%q", res.ExitCode, res.Stdout, res.Stderr)
 	}
+	if res := realSeatbeltRun(t, cfg, ws, []string{"/usr/bin/touch", filepath.Join(ws, "probe")}); res.ExitCode != 0 {
+		t.Fatalf("control: touch in the workspace failed: exit=%d stderr=%q", res.ExitCode, res.Stderr)
+	}
 	probe := filepath.Join(root, "probe")
 	if res := realSeatbeltRun(t, cfg, ws, []string{"/usr/bin/touch", probe}); res.ExitCode == 0 {
 		t.Fatal("touch under a declared root succeeded")
@@ -3805,8 +3808,8 @@ func TestSeatbeltToolchainNetworkDenied(t *testing.T) {
 
 // TestSeatbeltFactoryInputMutation: the exec factory and the verifier slot
 // keep their own copy of the caller's config, so mutating its slices
-// afterwards changes neither the environment a command gets nor the slot's
-// binding.
+// afterwards changes neither the environment a command gets, nor the roots
+// it may read, nor the slot's binding.
 func TestSeatbeltFactoryInputMutation(t *testing.T) {
 	requireSeatbeltCapability(t)
 	standInHome(t)
@@ -3814,6 +3817,10 @@ func TestSeatbeltFactoryInputMutation(t *testing.T) {
 	ws := mkdirT(t, filepath.Join(base, "ws"))
 	root := mkdirT(t, filepath.Join(base, "root"))
 	other := mkdirT(t, filepath.Join(base, "other"))
+	marker := filepath.Join(root, "marker")
+	if err := os.WriteFile(marker, []byte("root-marker"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	cfg := SandboxConfig{
 		Runtime:       SandboxRuntimeSeatbelt,
 		ReadOnlyRoots: []string{root, other},
@@ -3838,18 +3845,30 @@ func TestSeatbeltFactoryInputMutation(t *testing.T) {
 		t.Error("the verifier slot's binding followed the caller's mutation")
 	}
 	rc := list[0].(*RunCommand)
-	raw := json.RawMessage(`{"argv":["/usr/bin/env"]}`)
-	if _, err := rc.Plan(context.Background(), raw); err != nil {
-		t.Fatal(err)
+	run := func(argv ...string) string {
+		t.Helper()
+		raw, err := json.Marshal(map[string][]string{"argv": argv})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := rc.Plan(context.Background(), raw); err != nil {
+			t.Fatal(err)
+		}
+		res, err := rc.Invoke(context.Background(), raw)
+		if err != nil || !strings.Contains(res.Content, "exit code: 0\n") {
+			t.Fatalf("%q = %v:\n%s", argv, err, res.Content)
+		}
+		return res.Content
 	}
-	res, err := rc.Invoke(context.Background(), raw)
-	if err != nil || !strings.Contains(res.Content, "exit code: 0\n") {
-		t.Fatalf("env run = %v:\n%s", err, res.Content)
+	// The grant is the frozen root, not the mutated value.
+	if out := run("/bin/cat", marker); !strings.Contains(out, "root-marker") {
+		t.Errorf("cat of the frozen root's marker:\n%s", out)
 	}
-	lines := strings.Split(res.Content, "\n")
+	out := run("/usr/bin/env")
+	lines := strings.Split(out, "\n")
 	for _, kv := range want.EffectiveEnv(tmpdirOf(t, lines)) {
 		if !slices.Contains(lines, kv) {
-			t.Errorf("the command's environment lacks %s:\n%s", kv, res.Content)
+			t.Errorf("the command's environment lacks %s:\n%s", kv, out)
 		}
 	}
 	for _, kv := range []string{"GOMODCACHE=" + other, "GOTOOLCHAIN=local"} {
@@ -3859,9 +3878,12 @@ func TestSeatbeltFactoryInputMutation(t *testing.T) {
 	}
 }
 
-// requireDeveloperLink logs which developer selection links exist and skips
-// when none does; GO_LLM_REQUIRE_XCODE_LINK=1 makes that a failure.
-func requireDeveloperLink(t *testing.T) {
+// requireLinkedXcode logs which developer selection links exist and returns
+// the active developer directory. It skips when no link exists;
+// GO_LLM_REQUIRE_XCODE_LINK=1 makes that a failure, and also fails unless
+// the directory is an Xcode bundle, so a link to the Command Line Tools
+// cannot stand in for the linked-Xcode evidence D3 relies on.
+func requireLinkedXcode(t *testing.T) string {
 	t.Helper()
 	var present []string
 	for _, link := range developerSelectionLinks {
@@ -3876,22 +3898,26 @@ func requireDeveloperLink(t *testing.T) {
 		}
 		t.Skip("no developer selection link on this host")
 	}
+	dev, err := ActiveDeveloperDirectory(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("developer directory %s", dev)
+	if os.Getenv("GO_LLM_REQUIRE_XCODE_LINK") == "1" && !strings.HasSuffix(dev, ".app") {
+		t.Fatalf("GO_LLM_REQUIRE_XCODE_LINK=1 but the active developer directory %s is not an Xcode bundle", dev)
+	}
+	return dev
 }
 
 // TestSeatbeltDeveloperLinkLiterals is D3's ablation (#722): with the
 // developer directory a link selects, python3 must fail once a link literal
 // is dropped from seatbeltDeveloperLiterals. A literal python3 runs without
 // is not needed and must be removed. It runs only where a selection link
-// exists (requireDeveloperLink).
+// exists (requireLinkedXcode).
 func TestSeatbeltDeveloperLinkLiterals(t *testing.T) {
 	requireSeatbeltCapability(t)
-	requireDeveloperLink(t)
+	dev := requireLinkedXcode(t)
 	standInHome(t)
-	dev, err := ActiveDeveloperDirectory(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Logf("developer directory %s", dev)
 	cfg := SandboxConfig{Runtime: SandboxRuntimeSeatbelt, DeveloperDirectory: dev}
 	ws := canonTempDirT(t)
 	argv := []string{"/usr/bin/python3", "-c", "print(1)"}
@@ -3907,7 +3933,11 @@ func TestSeatbeltDeveloperLinkLiterals(t *testing.T) {
 			seatbeltDeveloperLiterals = slices.DeleteFunc(slices.Clone(all), func(l string) bool { return l == link })
 			t.Cleanup(func() { seatbeltDeveloperLiterals = all })
 			if res := realSeatbeltRun(t, cfg, ws, argv); res.ExitCode == 0 {
-				t.Errorf("python3 ran without the metadata literal %s: it is not needed and must be removed from seatbeltDeveloperLiterals (#722 D3)", link)
+				host := "present"
+				if _, err := os.Lstat(link); err != nil {
+					host = err.Error()
+				}
+				t.Errorf("python3 ran without the metadata literal %s (on the host: %s): it is not needed and must be removed from seatbeltDeveloperLiterals (#722 D3)", link, host)
 			}
 		})
 	}
