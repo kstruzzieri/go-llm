@@ -326,6 +326,8 @@ After `commands=`, the `permissions:` line shows the runtime and, for a native b
 
 With `-strict-approval`, both `-sandbox-network allowed` rows add `strict approval denies network to commands once a conversation is exposed` at the end of `limits=`, and the Bubblewrap row then adds `pathname Unix sockets reachable inside the shared workspace remain a channel` after it; see [Strict approval](#strict-approval--strict-approval).
 
+With a declared toolchain (`-sandbox-read-root` or `-sandbox-developer-dir`), Seatbelt's first limit reads `deny-default profile with reviewed system reads, declared read-only roots, allowed workspace and private temp`, and `read-only-roots=`, `developer-dir=` and `env=` follow `limits=` when set; see [Declared toolchain roots under Seatbelt](#declared-toolchain-roots-under-seatbelt).
+
 For example, `-sandbox seatbelt -allow-exec` on macOS prints:
 
 ```text
@@ -387,7 +389,7 @@ A Go, git or Python toolchain that lives outside the workspace can run under `-s
 - **`-sandbox-temp-env NAME`** (repeatable) points a variable into each command's private temp. The one name today is `GOCACHE`, which becomes `<private temp>/gocache`: a cold cache for every command, so a full test suite can need a `run_command` `timeout_seconds` above the 60 s default (at most 600) and a `go test -timeout` below it.
 - **`-sandbox-developer-dir`** declares the active developer directory (`xcode-select -p`: the Command Line Tools, or an `Xcode.app` bundle) so `git`, `python3` and Go's version-control stamping can run. It also sets `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null` and `PYTHONDONTWRITEBYTECODE=1`. The preview shows every variable the declaration adds.
 
-A Go recipe: seed a module cache outside the workspace on the host (for example `GOMODCACHE=$HOME/gomod go mod download` in the module), put `$(go env GOROOT)/bin` first on the shell's `PATH` (commands inherit Golem's `PATH`; no flag sets it), and start Golem with:
+A Go recipe: seed a module cache outside the workspace on the host (for example `GOMODCACHE=$HOME/gomod go mod download` in the module), put `$(go env GOROOT)/bin` first on the shell's `PATH` (commands inherit Golem's `PATH`; no flag sets it), and start Golem with the command below. Run every step in the module's folder: where `go` switches to the toolchain a module asks for, `go env GOROOT` run elsewhere names the base toolchain, and with `GOTOOLCHAIN=local` commands then fail with `requires go >=`.
 
 ```bash
 golem -root /path/to/project -allow-write -allow-exec \
@@ -401,9 +403,9 @@ Without `-sandbox-developer-dir` commands have no `git`, so keep `GOFLAGS=-build
 
 What this does and does not protect:
 
-- **No new write access.** Writes under a declared root stay denied, and the network is as `-sandbox-network` says. A root that overlaps the workspace is refused when the command is prepared.
+- **No new write access.** Writes under a declared root stay denied, and the network is as `-sandbox-network` says. A root that overlaps the workspace is refused at startup, when the command tools are built, and again when each command is prepared.
 - **A root is a path, not a guarded copy.** Declared roots are not protected by the operating system the way the system folders are. A process outside Golem running as you can change a root's contents, and a sandboxed command then runs what it finds. Declare only folders you keep trusted.
-- **The exclusion list is specific folders, not a proof of safety.** A root may not be or cover your home folder, the temp folder or a broad system folder, and may not be, cover or lie inside `~/.ssh`, `~/.gnupg`, `~/.aws`, `~/.docker`, `~/.kube`, `~/.netrc`, `~/.config`, `~/.claude`, `~/.codex`, `~/Library/Keychains` or go-llm's own data stores (`golem` and `go-llm` under `XDG_DATA_HOME`, and under the default `~/.local/share` too) and its config store (`~/Library/Application Support/go-llm` on macOS). The broad system folders it refuses are `/`, `/System` and `/System/Volumes/Data`; `/usr`, `/Library` and `/opt/homebrew` are not refused. Nothing says a folder outside that list holds nothing sensitive: declare only folders every command may read.
+- **The exclusion list is specific folders, not a proof of safety.** A root may not be or cover your home folder, `/private/tmp` (your `$TMPDIR` under `/private/var/folders` is not refused) or a broad system folder; may not lie inside go-llm's own temp directories `/private/tmp/go-llm-seatbelt-*` and `/private/tmp/go-llm-scratch-*`; and may not be, cover or lie inside `~/.ssh`, `~/.gnupg`, `~/.aws`, `~/.docker`, `~/.kube`, `~/.netrc`, `~/.config`, `~/.claude`, `~/.codex`, `~/Library/Keychains` or go-llm's own data stores (`golem` and `go-llm` under `XDG_DATA_HOME`, and under the default `~/.local/share` too) and its config store (`~/Library/Application Support/go-llm` on macOS). The broad system folders it refuses are `/`, `/System` and `/System/Volumes/Data`; `/usr`, `/Library` and `/opt/homebrew` are not refused. Nothing says a folder outside that list holds nothing sensitive: declare only folders every command may read.
 - **Roots must be canonical spellings.** The library refuses a root that is or passes through a symlink. Golem resolves your flags to canonical spellings at startup, so a symlinked path works but stays pinned to its target for the session. Library hosts call `tools.CanonicalToolchainRoot` and declare the result.
 - **The developer-directory link check is not the boundary.** With `-sandbox-developer-dir`, construction also checks that each of `/private/var/select/developer_dir` and `/private/var/db/xcode_select_link` that exists is a symlink owned by root in a directory chain owned by root. On a stock system that check cannot fire. The system's selection still chooses which folder is declared; what bounds it is that the folder is declared, admitted like any other root and shown in the preview.
 

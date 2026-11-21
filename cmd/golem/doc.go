@@ -57,13 +57,16 @@
 // startup, symlinks resolved, and the permissions line and every command's
 // approval preview show that spelling; the session keeps that directory, so
 // retargeting a link takes effect only at the next startup. A root may not
-// overlap the workspace; may not be or cover home, the temp folder or a broad
-// system folder; and may not be, cover or lie inside ~/.ssh, ~/.gnupg, ~/.aws,
-// ~/.docker, ~/.kube, ~/.netrc, ~/.config, ~/.claude, ~/.codex,
-// ~/Library/Keychains or Golem's own data and config stores. Those are
-// specific exclusions, not a proof that a root holds nothing sensitive:
-// declare only folders every command may read, and keep their contents
-// trusted, since processes outside Golem can still change them.
+// overlap the workspace; may not be or cover home, /private/tmp ($TMPDIR
+// under /private/var/folders is not refused) or a broad system folder; may
+// not lie inside go-llm's own /private/tmp/go-llm-seatbelt-* and
+// /private/tmp/go-llm-scratch-* directories; and may not be, cover or lie
+// inside ~/.ssh, ~/.gnupg, ~/.aws, ~/.docker, ~/.kube, ~/.netrc, ~/.config,
+// ~/.claude, ~/.codex, ~/Library/Keychains or Golem's own data and config
+// stores. Those are specific exclusions, not a proof that a root holds
+// nothing sensitive: declare only folders every command may read, and keep
+// their contents trusted, since processes outside Golem can still change
+// them.
 // -sandbox-env NAME=VALUE (repeatable) sets a variable from a closed table:
 // GOMODCACHE (a path inside a -sandbox-read-root, respelled under the root's
 // canonical spelling), GOPROXY=off, GOTOOLCHAIN=local and
@@ -83,7 +86,10 @@
 // A Go recipe: seed a module cache outside the workspace on the host (for
 // example GOMODCACHE=$HOME/gomod go mod download in the module), put
 // $(go env GOROOT)/bin first on the shell's PATH (commands inherit Golem's
-// PATH; no flag sets it), and start golem with
+// PATH; no flag sets it), and start golem with the flags below. Run every
+// step in the module's folder: where go switches to the toolchain a module
+// asks for, go env GOROOT run elsewhere names the base toolchain, and with
+// GOTOOLCHAIN=local commands then fail with "requires go >=".
 //
 //	-sandbox seatbelt -sandbox-read-root "$(go env GOROOT)"
 //	-sandbox-read-root "$HOME/gomod" -sandbox-env GOMODCACHE="$HOME/gomod"
