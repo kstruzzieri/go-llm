@@ -30,6 +30,7 @@ const hostCommandWarning = "unsandboxed; runs with the host user's filesystem an
 // runtime and network value's list whole, never by appending to another's.
 const (
 	limitSeatbeltProfile  = "deny-default profile with reviewed system reads, allowed workspace and private temp"
+	limitSeatbeltRoots    = "deny-default profile with reviewed system reads, declared read-only roots, allowed workspace and private temp"
 	limitNetworkDenied    = "network operations denied"
 	limitNoQuota          = "no memory/CPU quota"
 	limitNetworkAllowed   = "networking explicitly allowed by policy; filesystem limits remain"
@@ -172,14 +173,20 @@ func commandPermissions(p Profile, s agenttools.SandboxConfig, strict bool) Comm
 func runtimePermissions(s agenttools.SandboxConfig, strict bool) CommandPermissions {
 	switch s.Runtime {
 	case agenttools.SandboxRuntimeSeatbelt:
+		// #722: a declared toolchain is named in the first limit; a session
+		// without one keeps its line unchanged.
+		profile := limitSeatbeltProfile
+		if len(s.ReadOnlyRoots) > 0 || s.DeveloperDirectory != "" {
+			profile = limitSeatbeltRoots
+		}
 		if s.AllowNetwork {
-			c := CommandPermissions{Runtime: "seatbelt", Network: "allowed", Limits: []string{limitSeatbeltProfile, limitNetworkAllowed, limitNoQuota}}
+			c := CommandPermissions{Runtime: "seatbelt", Network: "allowed", Limits: []string{profile, limitNetworkAllowed, limitNoQuota}}
 			if strict {
 				c.Limits = append(c.Limits, limitStrictNarrows)
 			}
 			return c
 		}
-		return CommandPermissions{Runtime: "seatbelt", Network: "denied", Limits: []string{limitSeatbeltProfile, limitNetworkDenied, limitNoQuota}}
+		return CommandPermissions{Runtime: "seatbelt", Network: "denied", Limits: []string{profile, limitNetworkDenied, limitNoQuota}}
 	case agenttools.SandboxRuntimeBwrap:
 		c := CommandPermissions{Runtime: "bwrap", Network: "ip-denied", Limits: []string{limitBwrapIPDenied, limitBwrapUnixSockets, limitBwrapMounts, limitBwrapCaps}}
 		if s.AllowNetwork {

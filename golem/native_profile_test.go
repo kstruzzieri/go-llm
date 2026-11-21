@@ -576,6 +576,7 @@ func TestNativePermissionsCopy(t *testing.T) {
 	stubValidateSandbox(t)
 	const (
 		seatbeltProfile = "deny-default profile with reviewed system reads, allowed workspace and private temp"
+		seatbeltRoots   = "deny-default profile with reviewed system reads, declared read-only roots, allowed workspace and private temp"
 		noQuota         = "no memory/CPU quota"
 		netAllowed      = "networking explicitly allowed by policy; filesystem limits remain"
 		bwrapMounts     = "reviewed read-only system mounts, workspace/snapshot and private temp"
@@ -595,6 +596,19 @@ func TestNativePermissionsCopy(t *testing.T) {
 		}}},
 		{"seatbelt allowed", agenttools.SandboxConfig{Runtime: agenttools.SandboxRuntimeSeatbelt, AllowNetwork: true}, CommandPermissions{
 			Runtime: "seatbelt", Network: "allowed", Limits: []string{seatbeltProfile, netAllowed, noQuota},
+		}},
+		// #722: a declared root or developer directory names the roots in the
+		// first limit; either alone is enough.
+		{"seatbelt denied with a root", agenttools.SandboxConfig{Runtime: agenttools.SandboxRuntimeSeatbelt, ReadOnlyRoots: []string{"/opt/tools"}}, CommandPermissions{
+			Runtime: "seatbelt", Network: "denied", Limits: []string{seatbeltRoots, "network operations denied", noQuota},
+			ReadOnlyRoots: []string{"/opt/tools"},
+		}},
+		{"seatbelt allowed with a developer directory", agenttools.SandboxConfig{
+			Runtime: agenttools.SandboxRuntimeSeatbelt, AllowNetwork: true, DeveloperDirectory: "/Library/Developer/CommandLineTools",
+		}, CommandPermissions{
+			Runtime: "seatbelt", Network: "allowed", Limits: []string{seatbeltRoots, netAllowed, noQuota},
+			DeveloperDirectory: "/Library/Developer/CommandLineTools",
+			Env:                []string{"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1", "PYTHONDONTWRITEBYTECODE=1"},
 		}},
 		{"bwrap denied", bwrapPolicy, CommandPermissions{Runtime: "bwrap", Network: "ip-denied", Limits: []string{
 			"IP network namespace isolated",
