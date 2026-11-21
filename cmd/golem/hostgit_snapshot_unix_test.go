@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // plantBare copies a fresh bare repository's HEAD, objects, refs and config
@@ -280,5 +281,82 @@ func TestStartupWarningSanitizesStartError(t *testing.T) {
 	}
 	if strings.ContainsRune(lines[0], 0x1b) {
 		t.Fatalf("raw ESC in startup warning: %q", lines[0])
+	}
+}
+
+// A program git starts by name (a clean filter here) is looked up on PATH. A
+// workspace directory or an empty entry on PATH would let a sandboxed command
+// plant it, so Golem's own git must not find it there.
+func TestSnapshotDoesNotRunWorkspaceProgramFromPath(t *testing.T) {
+	const prog = "review-filter-803"
+	origPath := os.Getenv("PATH")
+	sep := string(os.PathListSeparator)
+	cases := []struct {
+		name     string
+		plantDir func(ws string) string // where the program is planted
+		path     func(ws, plantDir string) string
+		wantRan  bool
+	}{
+		{"workspace bin first", func(ws string) string { return filepath.Join(ws, "bin") },
+			func(_, p string) string { return p + sep + origPath }, false},
+		{"empty entry means workspace root", func(ws string) string { return ws },
+			func(_, _ string) string { return origPath + sep }, false},
+		{"outside directory still works", func(string) string { return resolvedTemp(t) },
+			func(_, p string) string { return p + sep + origPath }, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			isolateGitConfig(t)
+			ws := gitContextTestRepo(t)
+			writeTestFile(t, filepath.Join(ws, ".gitattributes"), "* filter=probe\n", 0o600)
+			gitContextTestCommit(t, ws, "tracked.txt", "content\n", "base")
+			gitContextTestRun(t, ws, "add", ".gitattributes")
+			gitContextTestRun(t, ws, "commit", "-q", "-m", "attributes")
+
+			globalCfg := filepath.Join(t.TempDir(), "config")
+			writeTestFile(t, globalCfg, "[filter \"probe\"]\n\tclean = "+prog+"\n", 0o600)
+			t.Setenv("GIT_CONFIG_GLOBAL", globalCfg)
+
+			dir := tc.plantDir(ws)
+			if err := os.MkdirAll(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			marker := filepath.Join(t.TempDir(), "marker")
+			writeExecutable(t, filepath.Join(dir, prog), "echo ran > "+shellQuote(marker)+"\nexec /bin/cat\n")
+			t.Setenv("PATH", tc.path(ws, dir))
+
+			stale := func() {
+				t.Helper()
+				when := time.Now().Add(-time.Hour).Truncate(time.Second)
+				if err := os.Chtimes(filepath.Join(ws, "tracked.txt"), when, when); err != nil {
+					t.Fatal(err)
+				}
+				_ = os.Remove(marker)
+			}
+			// Control: plain git in the same environment runs the program, so
+			// the fixture is live and an absent marker below means something.
+			stale()
+			ctl := exec.Command("git", "status", "--porcelain")
+			ctl.Dir = ws
+			if out, err := ctl.CombinedOutput(); err != nil {
+				t.Fatalf("control status: %v\n%s", err, out)
+			}
+			requireMarkerIf(t, marker, true)
+
+			stale()
+			_, _ = loadGitContext(context.Background(), "git", ws)
+			requireMarkerIf(t, marker, tc.wantRan)
+		})
+	}
+}
+
+func requireMarkerIf(t *testing.T, marker string, want bool) {
+	t.Helper()
+	_, err := os.Stat(marker)
+	if want && err != nil {
+		t.Fatalf("expected the program to run (marker missing): %v", err)
+	}
+	if !want && err == nil {
+		t.Fatal("a planted program ran: the marker exists")
 	}
 }

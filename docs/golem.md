@@ -1062,11 +1062,13 @@ Golem keeps some trust on purpose: your global and system git config, the files
 they include, and a working-tree `.gitattributes` that chooses a filter you
 defined there. Programs git starts by name, such as a filter command from your
 global config (git-lfs installs `git-lfs filter-process`), `ssh` for a fetch, or
-commands inside your own global hooks, are looked up on `PATH`. A workspace
-directory on `PATH`, or an empty `PATH` entry (which means the current
-directory), can supply them, and a working-tree `.gitattributes` can choose when
-a filter runs. Golem does not filter `PATH`. Version-manager shims (asdf, mise)
-that pick the real git from files in the workspace are a trust input too.
+commands inside your own global hooks, are looked up on `PATH`. For every git
+it runs, Golem drops empty entries (which mean the current directory), relative
+entries, entries inside the workspace and entries it cannot resolve from
+`PATH`, so such a program is not taken from the workspace. Parallel task mode's
+hooks see that filtered `PATH`. Version-manager shims (asdf, mise) that pick the
+real git from files in the workspace are still a trust input, and so is a
+program your config names by an absolute path inside the workspace.
 If you start Golem with `-root` inside a `.git` directory,
 `.git/worktrees/<name>` or `.git/modules/<name>`, git treats that root as a
 repository by its path. That is a root you chose.

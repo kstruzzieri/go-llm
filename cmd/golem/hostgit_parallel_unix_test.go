@@ -206,3 +206,31 @@ func TestParallelWorkerSideGitRefusesWorkspaceExecutable(t *testing.T) {
 	}
 	requireNoMarker(t, marker)
 }
+
+// Hooks git runs for a parallel-mode call look up programs by name on PATH; a
+// workspace directory on PATH must not supply one.
+func TestParallelHookDoesNotFindWorkspaceProgramOnPath(t *testing.T) {
+	isolateGitConfig(t)
+	root := resolvedParallelRepo(t)
+	bin := filepath.Join(root, "bin")
+	if err := os.Mkdir(bin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(t.TempDir(), "marker")
+	writeExecutable(t, filepath.Join(bin, "planted-803"), "echo ran > "+shellQuote(marker)+"\n")
+	children := t.TempDir()
+	hooks := t.TempDir()
+	writeExecutable(t, filepath.Join(hooks, "post-checkout"), recordScript(children, "hook")+"planted-803 || true\n")
+	runTestGit(t, root, "config", "core.hooksPath", hooks)
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	worktree := filepath.Join(t.TempDir(), "wt")
+	if _, err := runParallelGit(context.Background(), root, root, "worktree", "add", "--detach", worktree, "HEAD"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = runParallelGit(context.Background(), root, root, "worktree", "remove", "--force", worktree)
+	})
+	requireGitRecord(t, readGitRecords(t, children), "hook")
+	requireNoMarker(t, marker)
+}

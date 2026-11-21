@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -30,6 +31,10 @@ func hostGitCommand(ctx context.Context, gitPath, workspace, dir string, env []s
 	if cmd.Err != nil {
 		return nil, fmt.Errorf("git: %w", cmd.Err)
 	}
+	env, err := hostGitFilterPath(env, workspace)
+	if err != nil {
+		return nil, err
+	}
 	resolved, err := requireHostGit(ctx, cmd.Path, workspace, env)
 	if err != nil {
 		return nil, err
@@ -38,6 +43,49 @@ func hostGitCommand(ctx context.Context, gitPath, workspace, dir string, env []s
 	cmd.Dir = dir
 	cmd.Env = env
 	return cmd, nil
+}
+
+// hostGitFilterPath returns a copy of env whose PATH holds only directories
+// outside the workspace. Programs git starts by name (a clean or smudge filter
+// command, ssh for a fetch, commands inside hooks) are found on PATH, and an
+// empty entry means the current directory, which is the workspace root, so a
+// sandboxed command could plant one there. Empty, relative, nonexistent and
+// unresolvable entries are dropped, as is any entry that resolves into the
+// workspace (by spelling or file identity). It fails closed when no entry is
+// left, and returns env unchanged when there is no PATH entry.
+func hostGitFilterPath(env []string, workspace string) ([]string, error) {
+	out := slices.Clone(env)
+	idx := slices.IndexFunc(out, func(kv string) bool { return strings.HasPrefix(kv, "PATH=") })
+	if idx < 0 {
+		return out, nil
+	}
+	if !filepath.IsAbs(workspace) {
+		return nil, fmt.Errorf("git: workspace %s is not an absolute path", gitContextText(workspace))
+	}
+	ws, err := filepath.EvalSymlinks(workspace)
+	if err != nil {
+		return nil, fmt.Errorf("git: resolve workspace %s: %w", gitContextText(workspace), err)
+	}
+	var kept []string
+	for _, entry := range filepath.SplitList(strings.TrimPrefix(out[idx], "PATH=")) {
+		if entry == "" || !filepath.IsAbs(entry) {
+			continue
+		}
+		resolved, err := filepath.EvalSymlinks(entry)
+		if err != nil {
+			continue
+		}
+		// pathWithin checks a path's directory, so ask about a file in entry.
+		if inside, err := pathWithin(filepath.Join(resolved, "git"), ws); err != nil || inside {
+			continue
+		}
+		kept = append(kept, entry)
+	}
+	if len(kept) == 0 {
+		return nil, errors.New("git: no PATH entry outside the workspace")
+	}
+	out[idx] = "PATH=" + strings.Join(kept, string(os.PathListSeparator))
+	return out, nil
 }
 
 // requireHostGit refuses a git executable Golem must not run: one inside the

@@ -341,3 +341,84 @@ func TestHostGitCommandProbeFailureShowsGitMessage(t *testing.T) {
 		t.Fatalf("run error no longer wrapped: %v", err)
 	}
 }
+
+func TestHostGitFilterPath(t *testing.T) {
+	sep := string(os.PathListSeparator)
+	ws, out := resolvedTemp(t), resolvedTemp(t)
+	if err := os.Mkdir(filepath.Join(ws, "bin"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	outBin := filepath.Join(out, "bin")
+	if err := os.Mkdir(outBin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(out, "link")
+	if err := os.Symlink(filepath.Join(ws, "bin"), link); err != nil {
+		t.Fatal(err)
+	}
+	// Relative entries are resolved against the test's working directory.
+	t.Chdir(ws)
+	other := []string{"HOME=/h", "Path=keep", "ZED=1", "A="}
+	join := func(entries ...string) string { return strings.Join(entries, sep) }
+
+	cases := []struct {
+		name string
+		path string
+		want string
+	}{
+		{"keeps outside", join(out), join(out)},
+		{"order and spelling", join(outBin, out), join(outBin, out)},
+		{"leading empty", join("", out), join(out)},
+		{"trailing empty", join(out, ""), join(out)},
+		{"doubled empty", join(outBin, "", "", out), join(outBin, out)},
+		{"dot", join(".", out), join(out)},
+		{"relative", join("bin", out), join(out)},
+		{"workspace", join(ws, out), join(out)},
+		{"workspace bin", join(filepath.Join(ws, "bin"), out), join(out)},
+		{"symlink into workspace", join(link, out), join(out)},
+		{"nonexistent", join(filepath.Join(out, "missing"), out), join(out)},
+	}
+	if variant := strings.ToUpper(filepath.Join(ws, "bin")); variant != filepath.Join(ws, "bin") {
+		if _, err := os.Stat(variant); err == nil {
+			cases = append(cases, struct{ name, path, want string }{"case variant", join(variant, out), join(out)})
+		}
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env := append(slices.Clone(other[:2]), "PATH="+tc.path)
+			env = append(env, other[2:]...)
+			orig := slices.Clone(env)
+			got, err := hostGitFilterPath(env, ws)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := append(slices.Clone(other[:2]), "PATH="+tc.want)
+			want = append(want, other[2:]...)
+			if !slices.Equal(got, want) {
+				t.Fatalf("env = %q; want %q", got, want)
+			}
+			if !slices.Equal(env, orig) {
+				t.Fatalf("input env mutated: %q", env)
+			}
+		})
+	}
+
+	t.Run("no PATH entry", func(t *testing.T) {
+		env := []string{"HOME=/h", "Path=x"}
+		got, err := hostGitFilterPath(env, ws)
+		if err != nil || !slices.Equal(got, env) {
+			t.Fatalf("got %q, %v", got, err)
+		}
+	})
+	t.Run("nothing left", func(t *testing.T) {
+		_, err := hostGitFilterPath([]string{"PATH=" + join("", ".", ws)}, ws)
+		if err == nil || !strings.Contains(err.Error(), "no PATH entry outside the workspace") {
+			t.Fatalf("err = %v", err)
+		}
+	})
+	t.Run("relative workspace", func(t *testing.T) {
+		if _, err := hostGitFilterPath([]string{"PATH=" + out}, "ws"); err == nil {
+			t.Fatal("want an error for a relative workspace")
+		}
+	})
+}
