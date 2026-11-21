@@ -54,7 +54,9 @@ func collectLaunches(fset *token.FileSet, name string, src any) ([]launchRecord,
 	for _, is := range f.Imports {
 		p, _ := strconv.Unquote(is.Path.Value)
 		api := p
-		if strings.HasPrefix(p, "golang.org/x/sys/") {
+		if p == "golang.org/x/sys/execabs" { // drop-in for os/exec
+			api = "os/exec"
+		} else if strings.HasPrefix(p, "golang.org/x/sys/") {
 			api = "x/sys"
 		} else if _, ok := launchAPIs[p]; !ok {
 			continue
@@ -90,6 +92,7 @@ func collectLaunches(fset *token.FileSet, name string, src any) ([]launchRecord,
 		}
 		var dr []launchRecord
 		var paths []launchRecord
+		ptr := map[ast.Expr]bool{}
 		add := func(to *[]launchRecord, api string, pos token.Pos) {
 			*to = append(*to, launchRecord{fn + " " + api, fset.Position(pos).String()})
 		}
@@ -106,12 +109,21 @@ func collectLaunches(fset *token.FileSet, name string, src any) ([]launchRecord,
 		}
 		ast.Inspect(d, func(n ast.Node) bool {
 			switch x := n.(type) {
-			case *ast.CompositeLit:
-				if l, sel, ok := qualified(x.Type); ok && pkgOf[l] == "os/exec" && sel == "Cmd" {
-					add(&dr, "exec.Cmd literal", x.Pos())
+			case *ast.StarExpr: // *exec.Cmd names a pointer, not a launch
+				if _, sel, ok := qualified(x.X); ok && sel == "Cmd" {
+					ptr[x.X] = true
 				}
 			case *ast.SelectorExpr:
-				if l, sel, ok := qualified(x); ok && slices.Contains(launchAPIs[pkgOf[l]], sel) {
+				l, sel, ok := qualified(x)
+				switch {
+				case !ok:
+				case pkgOf[l] == "os/exec" && sel == "Cmd":
+					// Any non-pointer use builds a Cmd: var, new, literal,
+					// alias, embedding.
+					if !ptr[x] {
+						add(&dr, "exec.Cmd value", x.Pos())
+					}
+				case slices.Contains(launchAPIs[pkgOf[l]], sel):
 					add(&dr, canonPkg[pkgOf[l]]+"."+sel, x.Pos())
 				}
 			case *ast.AssignStmt:
@@ -144,7 +156,7 @@ func TestHostProcessLaunchGuardCatchesForms(t *testing.T) {
 		{"function value", "package main\nimport \"os/exec\"\nfunc f() { g := exec.Command; _ = g }",
 			[]string{"f exec.Command"}, false},
 		{"Cmd literal", "package main\nimport \"os/exec\"\nfunc f(p string) { _ = &exec.Cmd{Path: p} }",
-			[]string{"f exec.Cmd literal"}, false},
+			[]string{"f exec.Cmd value"}, false},
 		{"Cmd type is not a launch", "package main\nimport \"os/exec\"\nfunc f() *exec.Cmd { var c *exec.Cmd; return c }",
 			nil, false},
 		{"Path assignment", "package main\nimport \"os/exec\"\nfunc f(p string) { c := exec.CommandContext(nil, \"a\"); c.Path = p }",
@@ -157,6 +169,22 @@ func TestHostProcessLaunchGuardCatchesForms(t *testing.T) {
 			[]string{"T.m os.StartProcess", "x.go:<package-level> os.ProcAttr"}, false},
 		{"x/sys", "package main\nimport \"golang.org/x/sys/unix\"\nfunc f() { unix.ForkExec(\"a\", nil, nil) }",
 			[]string{"f sys.ForkExec"}, false},
+		{"var Cmd value", "package main\nimport \"os/exec\"\nfunc f(p string) { var c exec.Cmd; c.Path = p; c.Run() }",
+			[]string{"f exec.Cmd value", "f Path assignment"}, false},
+		{"new Cmd", "package main\nimport \"os/exec\"\nfunc f() { c := new(exec.Cmd); c.Run() }",
+			[]string{"f exec.Cmd value"}, false},
+		{"Cmd alias", "package main\nimport \"os/exec\"\ntype C = exec.Cmd",
+			[]string{"x.go:<package-level> exec.Cmd value"}, false},
+		{"Cmd embedding", "package main\nimport \"os/exec\"\ntype W struct{ exec.Cmd }",
+			[]string{"x.go:<package-level> exec.Cmd value"}, false},
+		{"Args assignment", "package main\nimport \"os/exec\"\nfunc f() { c := exec.CommandContext(nil, \"a\"); c.Args = nil }",
+			[]string{"f exec.CommandContext", "f Args assignment"}, false},
+		{"execabs Command", "package main\nimport \"golang.org/x/sys/execabs\"\nfunc f() { execabs.Command(\"git\").Run() }",
+			[]string{"f exec.Command"}, false},
+		{"execabs Cmd literal", "package main\nimport \"golang.org/x/sys/execabs\"\nfunc f() { (&execabs.Cmd{Path: \"/bin/sh\"}).Run() }",
+			[]string{"f exec.Cmd value"}, false},
+		{"execabs dot import", "package main\nimport . \"golang.org/x/sys/execabs\"\nfunc f() { Command(\"a\") }",
+			nil, true},
 		{"dot import", "package main\nimport . \"os/exec\"\nfunc f() { Command(\"a\") }",
 			nil, true},
 	}
