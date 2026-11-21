@@ -88,7 +88,7 @@ type seatbeltPolicy struct {
 	workspaceRoot     string
 	tempRoot          string
 	exePath           string
-	systemReadRoots   []string
+	systemReadRoots   []string // reviewed system roots and declared roots (#722): read and exec, never write
 	metadataAncestors []string
 	allowNetwork      bool
 	// gitDirs are submodule / linked-worktree git dirs (not named .git);

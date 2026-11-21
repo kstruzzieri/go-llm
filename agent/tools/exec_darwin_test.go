@@ -3559,3 +3559,356 @@ func TestSeatbeltPrepareRootWorkspace(t *testing.T) {
 		})
 	}
 }
+
+// seatbeltGrantsOf returns the rule ("allow file-read*", "deny file-write*")
+// of each profile line holding clause, in profile order.
+func seatbeltGrantsOf(profile, clause string) []string {
+	var rule string
+	var out []string
+	for _, line := range strings.Split(profile, "\n") {
+		if strings.HasPrefix(line, "(") {
+			f := strings.Fields(strings.TrimPrefix(line, "("))
+			if len(f) > 1 {
+				rule = f[0] + " " + strings.TrimRight(f[1], ")")
+			}
+		}
+		if strings.Contains(line, clause) {
+			out = append(out, rule)
+		}
+	}
+	return out
+}
+
+// strictAncestors lists p's parent directories up to "/", by the standard
+// library rather than the code under test.
+func strictAncestors(p string) []string {
+	var out []string
+	for dir := filepath.Dir(p); ; dir = filepath.Dir(dir) {
+		out = append(out, dir)
+		if dir == "/" {
+			return out
+		}
+	}
+}
+
+// toolchainTestConfig is a Seatbelt config with every #722 field set over
+// directories under base: two read-only roots (goroot and mod), a developer
+// directory, all four Env rows and GOCACHE. The directories are created.
+func toolchainTestConfig(t *testing.T, base string) SandboxConfig {
+	t.Helper()
+	mod := mkdirT(t, filepath.Join(base, "mod"))
+	return SandboxConfig{
+		Runtime:            SandboxRuntimeSeatbelt,
+		ReadOnlyRoots:      []string{mkdirT(t, filepath.Join(base, "goroot")), mod},
+		DeveloperDirectory: mkdirT(t, filepath.Join(base, "dev")),
+		Env: []SandboxEnv{
+			{Name: "GOMODCACHE", Value: mod}, {Name: "GOPROXY", Value: "off"},
+			{Name: "GOTOOLCHAIN", Value: "local"}, {Name: "GOFLAGS", Value: "-buildvcs=false"},
+		},
+		TempEnv: []string{"GOCACHE"},
+	}
+}
+
+// TestSeatbeltPrepareToolchainProfile pins how prepare applies the #722
+// fields: each declared root and the developer directory is a read and exec
+// subpath and nothing else (never writable); their ancestors are exact
+// metadata literals; the developer literals appear only with a developer
+// directory; no empty literal and no unfiltered metadata rule is rendered;
+// and the child environment is sandboxChildEnv's followed by EffectiveEnv
+// over the command's private temp. Construction runs the real probe against
+// a fake applier that records the profile and environment the probe ran
+// with: the probe runs the same policy. No real sandbox, so this runs under
+// -race too.
+func TestSeatbeltPrepareToolchainProfile(t *testing.T) {
+	standInHome(t)
+	old := seatbeltLinkLstat
+	seatbeltLinkLstat = fakeLinkHost(nil, "")
+	t.Cleanup(func() { seatbeltLinkLstat = old })
+	base := canonTempDirT(t)
+	ws, err := os.MkdirTemp("/private/tmp", "go-llm-test-ws-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(ws) })
+	full := toolchainTestConfig(t, base)
+	noDev := full.Clone()
+	noDev.DeveloperDirectory = ""
+
+	check := func(t *testing.T, label, profile string, cfg SandboxConfig) {
+		t.Helper()
+		roots := slices.Clone(cfg.ReadOnlyRoots)
+		if cfg.DeveloperDirectory != "" {
+			roots = append(roots, cfg.DeveloperDirectory)
+		}
+		for _, root := range roots {
+			if got := seatbeltGrantsOf(profile, `(subpath "`+root+`")`); !slices.Equal(got, []string{"allow process-exec*", "allow file-read*"}) {
+				t.Errorf("%s: root %s is under %q; want read and exec only", label, root, got)
+			}
+			for _, dir := range strictAncestors(root) {
+				if got := seatbeltGrantsOf(profile, `(literal "`+dir+`")`); !slices.Contains(got, "allow file-read-metadata") {
+					t.Errorf("%s: ancestor %s of root %s is under %q; want a metadata literal", label, dir, root, got)
+				}
+			}
+		}
+		if cfg.DeveloperDirectory == "" && strings.Contains(profile, `"`+full.DeveloperDirectory+`"`) {
+			t.Errorf("%s: the developer directory is granted without the opt-in", label)
+		}
+		for _, lit := range []string{"/var", "/private/var/select/developer_dir", "/private/var/db/xcode_select_link"} {
+			var want []string
+			if cfg.DeveloperDirectory != "" {
+				want = []string{"allow file-read-metadata"}
+			}
+			if got := seatbeltGrantsOf(profile, `(literal "`+lit+`")`); !slices.Equal(got, want) {
+				t.Errorf("%s: developer literal %s is under %q; want %q", label, lit, got, want)
+			}
+		}
+		for _, bad := range []string{`""`, "(allow file-read-metadata)", "(allow file-read-metadata\n)"} {
+			if strings.Contains(profile, bad) {
+				t.Errorf("%s: profile contains %q", label, bad)
+			}
+		}
+		if t.Failed() {
+			t.Logf("%s profile:\n%s", label, profile)
+		}
+	}
+
+	for name, cfg := range map[string]SandboxConfig{"developer directory": full, "no developer directory": noDev} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			argsFile, envFile := filepath.Join(dir, "args"), filepath.Join(dir, "env")
+			fake := writeFakeSandboxExec(t, "printf '%s\\0' \"$@\" > '"+argsFile+"'\n/usr/bin/env > '"+envFile+"'\n")
+			backend, err := newSeatbeltExecBackendAt(fake, probeSeatbelt, cfg)
+			if err != nil {
+				t.Fatalf("construction: %v", err)
+			}
+			raw, err := os.ReadFile(argsFile)
+			if err != nil {
+				t.Fatalf("the probe did not run the applier: %v", err)
+			}
+			args := strings.Split(strings.TrimSuffix(string(raw), "\x00"), "\x00")
+			if len(args) < 2 || args[0] != "-p" {
+				t.Fatalf("probe applier argv = %q", args)
+			}
+			check(t, "probe", args[1], cfg)
+			envRaw, err := os.ReadFile(envFile)
+			if err != nil {
+				t.Fatal(err)
+			}
+			probeEnv := strings.Split(strings.TrimSpace(string(envRaw)), "\n")
+			for _, kv := range cfg.EffectiveEnv(tmpdirOf(t, probeEnv)) {
+				if !slices.Contains(probeEnv, kv) {
+					t.Errorf("probe environment lacks %s: %q", kv, probeEnv)
+				}
+			}
+
+			// The workspace shares no ancestor with the roots, so their
+			// metadata literals can come only from the roots.
+			spec := seatbeltSpec(t, ws)
+			wrapped, cleanup, err := backend.(*seatbeltBackend).prepare(spec)
+			if err != nil {
+				t.Fatalf("prepare: %v", err)
+			}
+			t.Cleanup(func() {
+				if err := cleanup(); err != nil {
+					t.Error(err)
+				}
+			})
+			check(t, "command", wrapped.Argv[2], cfg)
+			temp := tmpdirOf(t, wrapped.Env)
+			if want := append(sandboxChildEnv(spec.Env, temp), cfg.EffectiveEnv(temp)...); !slices.Equal(wrapped.Env, want) {
+				t.Errorf("child environment = %q\nwant %q", wrapped.Env, want)
+			}
+		})
+	}
+}
+
+// TestSeatbeltToolchainRootWriteDenied: a declared root is readable and
+// never writable. The same read fails without the root, so the grant is what
+// allows it.
+func TestSeatbeltToolchainRootWriteDenied(t *testing.T) {
+	requireSeatbeltCapability(t)
+	standInHome(t)
+	base := canonTempDirT(t)
+	root := mkdirT(t, filepath.Join(base, "root"))
+	ws := mkdirT(t, filepath.Join(base, "ws"))
+	marker := filepath.Join(root, "marker")
+	if err := os.WriteFile(marker, []byte("root-marker"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := os.ReadFile(marker); err != nil || string(got) != "root-marker" {
+		t.Fatalf("host read of the marker = %q, %v", got, err)
+	}
+	if res := realSeatbeltRun(t, seatbeltTestCfg(), ws, []string{"/bin/cat", marker}); res.ExitCode == 0 {
+		t.Fatalf("control: cat of the marker succeeded without the root: %q", res.Stdout)
+	}
+	cfg := SandboxConfig{Runtime: SandboxRuntimeSeatbelt, ReadOnlyRoots: []string{root}}
+	if res := realSeatbeltRun(t, cfg, ws, []string{"/bin/cat", marker}); res.ExitCode != 0 || string(res.Stdout) != "root-marker" {
+		t.Fatalf("cat of the root's marker: exit=%d stdout=%q stderr=%q", res.ExitCode, res.Stdout, res.Stderr)
+	}
+	probe := filepath.Join(root, "probe")
+	if res := realSeatbeltRun(t, cfg, ws, []string{"/usr/bin/touch", probe}); res.ExitCode == 0 {
+		t.Fatal("touch under a declared root succeeded")
+	}
+	if _, err := os.Lstat(probe); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("probe under the declared root: %v; want it absent", err)
+	}
+}
+
+// TestSeatbeltToolchainNetworkDenied: no #722 field opens the network. nc
+// to a host listener fails with every field set and connects with the same
+// config and AllowNetwork, so the profile is what denies it. (curl cannot be
+// the client: its LibreSSL aborts at startup when the profile denies
+// /private/etc/ssl/openssl.cnf, network or not.)
+func TestSeatbeltToolchainNetworkDenied(t *testing.T) {
+	requireSeatbeltCapability(t)
+	standInHome(t)
+	base := canonTempDirT(t)
+	ws := mkdirT(t, filepath.Join(base, "ws"))
+	cfg := toolchainTestConfig(t, base)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ln.Close() }()
+	var accepts atomic.Int64
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			accepts.Add(1)
+			_ = conn.Close()
+		}
+	}()
+	host, port, err := net.SplitHostPort(ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	argv := []string{"/usr/bin/nc", "-z", "-G", "3", "-w", "3", host, port}
+	if res := realSeatbeltRun(t, cfg, ws, argv); res.ExitCode == 0 || accepts.Load() != 0 {
+		t.Fatalf("nc with the #722 fields set: exit=%d accepts=%d stderr=%q; want denied", res.ExitCode, accepts.Load(), res.Stderr)
+	}
+	allowed := cfg.Clone()
+	allowed.AllowNetwork = true
+	if res := realSeatbeltRun(t, allowed, ws, argv); res.ExitCode != 0 {
+		t.Fatalf("control with AllowNetwork: exit=%d stderr=%q", res.ExitCode, res.Stderr)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for accepts.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if accepts.Load() == 0 {
+		t.Fatal("control with AllowNetwork: the listener saw no connection")
+	}
+}
+
+// TestSeatbeltFactoryInputMutation: the exec factory and the verifier slot
+// keep their own copy of the caller's config, so mutating its slices
+// afterwards changes neither the environment a command gets nor the slot's
+// binding.
+func TestSeatbeltFactoryInputMutation(t *testing.T) {
+	requireSeatbeltCapability(t)
+	standInHome(t)
+	base := canonTempDirT(t)
+	ws := mkdirT(t, filepath.Join(base, "ws"))
+	root := mkdirT(t, filepath.Join(base, "root"))
+	other := mkdirT(t, filepath.Join(base, "other"))
+	cfg := SandboxConfig{
+		Runtime:       SandboxRuntimeSeatbelt,
+		ReadOnlyRoots: []string{root, other},
+		Env:           []SandboxEnv{{Name: "GOMODCACHE", Value: root}, {Name: "GOPROXY", Value: "off"}},
+		TempEnv:       []string{"GOCACHE"},
+	}
+	want := cfg.Clone()
+	list, err := NewSandboxedExecTools(ws, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	slot, err := NewVerifierSlot(ws, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.ReadOnlyRoots[0] = other
+	cfg.Env[0].Value = other
+	cfg.Env[1] = SandboxEnv{Name: "GOTOOLCHAIN", Value: "local"}
+	cfg.TempEnv[0] = "HOME"
+
+	if !slot.BoundTo(ws, want) {
+		t.Error("the verifier slot's binding followed the caller's mutation")
+	}
+	rc := list[0].(*RunCommand)
+	raw := json.RawMessage(`{"argv":["/usr/bin/env"]}`)
+	if _, err := rc.Plan(context.Background(), raw); err != nil {
+		t.Fatal(err)
+	}
+	res, err := rc.Invoke(context.Background(), raw)
+	if err != nil || !strings.Contains(res.Content, "exit code: 0\n") {
+		t.Fatalf("env run = %v:\n%s", err, res.Content)
+	}
+	lines := strings.Split(res.Content, "\n")
+	for _, kv := range want.EffectiveEnv(tmpdirOf(t, lines)) {
+		if !slices.Contains(lines, kv) {
+			t.Errorf("the command's environment lacks %s:\n%s", kv, res.Content)
+		}
+	}
+	for _, kv := range []string{"GOMODCACHE=" + other, "GOTOOLCHAIN=local"} {
+		if slices.Contains(lines, kv) {
+			t.Errorf("the command's environment has the mutated %s", kv)
+		}
+	}
+}
+
+// requireDeveloperLink logs which developer selection links exist and skips
+// when none does; GO_LLM_REQUIRE_XCODE_LINK=1 makes that a failure.
+func requireDeveloperLink(t *testing.T) {
+	t.Helper()
+	var present []string
+	for _, link := range developerSelectionLinks {
+		if _, err := os.Lstat(link); err == nil {
+			present = append(present, link)
+		}
+	}
+	t.Logf("developer selection links checked %q; present %q", developerSelectionLinks, present)
+	if len(present) == 0 {
+		if os.Getenv("GO_LLM_REQUIRE_XCODE_LINK") == "1" {
+			t.Fatalf("GO_LLM_REQUIRE_XCODE_LINK=1 but none of %q exists", developerSelectionLinks)
+		}
+		t.Skip("no developer selection link on this host")
+	}
+}
+
+// TestSeatbeltDeveloperLinkLiterals is D3's ablation (#722): with the
+// developer directory a link selects, python3 must fail once a link literal
+// is dropped from seatbeltDeveloperLiterals. A literal python3 runs without
+// is not needed and must be removed. It runs only where a selection link
+// exists (requireDeveloperLink).
+func TestSeatbeltDeveloperLinkLiterals(t *testing.T) {
+	requireSeatbeltCapability(t)
+	requireDeveloperLink(t)
+	standInHome(t)
+	dev, err := ActiveDeveloperDirectory(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("developer directory %s", dev)
+	cfg := SandboxConfig{Runtime: SandboxRuntimeSeatbelt, DeveloperDirectory: dev}
+	ws := canonTempDirT(t)
+	argv := []string{"/usr/bin/python3", "-c", "print(1)"}
+	if res := realSeatbeltRun(t, cfg, ws, argv); res.ExitCode != 0 || string(res.Stdout) != "1\n" {
+		t.Fatalf("control with every literal: exit=%d stdout=%q stderr=%q", res.ExitCode, res.Stdout, res.Stderr)
+	}
+	all := seatbeltDeveloperLiterals
+	for _, link := range developerSelectionLinks {
+		t.Run(filepath.Base(link), func(t *testing.T) {
+			if !slices.Contains(all, link) {
+				t.Fatalf("%s is not in seatbeltDeveloperLiterals %q", link, all)
+			}
+			seatbeltDeveloperLiterals = slices.DeleteFunc(slices.Clone(all), func(l string) bool { return l == link })
+			t.Cleanup(func() { seatbeltDeveloperLiterals = all })
+			if res := realSeatbeltRun(t, cfg, ws, argv); res.ExitCode == 0 {
+				t.Errorf("python3 ran without the metadata literal %s: it is not needed and must be removed from seatbeltDeveloperLiterals (#722 D3)", link)
+			}
+		})
+	}
+}
