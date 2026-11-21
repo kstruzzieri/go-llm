@@ -32,6 +32,11 @@ import (
 	"github.com/kstruzzieri/go-llm/provider"
 )
 
+// scriptedTimeout is every scripted run_command's timeout_seconds. GOCACHE
+// is cold for each command, and a cold go build or go test on a small CI
+// runner can outlast the 60 s default (A0 measured on a 16-core host).
+const scriptedTimeout = 300
+
 // scriptedCaller is the model: a turn's first call asks for run_command with
 // argv, and the next ends the turn, keeping the tool result it was shown.
 type scriptedCaller struct {
@@ -44,7 +49,7 @@ func (c *scriptedCaller) Chat(_ context.Context, req provider.ChatRequest, _ fun
 		c.result = req.Messages[n-1].Content
 		return agent.ModelResult{Response: provider.ChatResponse{Content: "done", Done: true}}, nil
 	}
-	args, err := json.Marshal(map[string][]string{"argv": c.argv})
+	args, err := json.Marshal(map[string]any{"argv": c.argv, "timeout_seconds": scriptedTimeout})
 	if err != nil {
 		return agent.ModelResult{}, err
 	}
@@ -135,9 +140,10 @@ func (s *toolchainSession) fails(reason string, argv ...string) {
 }
 
 // requirePreviews checks every recorded preview lists each want, quoted as
-// the preview renders it.
+// the preview renders it, and the scripted timeout.
 func (s *toolchainSession) requirePreviews(want ...string) {
 	s.t.Helper()
+	want = append(want, fmt.Sprintf("  timeout: %ds\n", scriptedTimeout))
 	if len(s.approver.previews) == 0 {
 		s.t.Fatal("no approval preview was recorded")
 	}
