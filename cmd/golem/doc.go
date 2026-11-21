@@ -75,7 +75,9 @@
 // command's private temp: GOCACHE becomes <private temp>/gocache, a cold
 // cache for every command, so a full test suite may need a run_command
 // timeout_seconds above the 60 s default (at most 600) and a go test -timeout
-// below it. -sandbox-developer-dir declares the active developer directory
+// below it; the cache (several hundred MB for a go-llm-sized build) is
+// written under /private/tmp and deleted when the command ends.
+// -sandbox-developer-dir declares the active developer directory
 // (xcode-select -p: the Command Line Tools or an Xcode.app bundle) so git,
 // python3 and Go's VCS stamping run, and adds
 // GIT_CONFIG_NOSYSTEM=1, GIT_CONFIG_GLOBAL=/dev/null and

@@ -124,8 +124,9 @@ func seatbeltAllowancePath(kind, p string) (string, error) {
 }
 
 // buildSeatbeltProfile renders the SBPL profile for one invocation:
-// deny-default, exec and reads restricted to the reviewed system roots +
-// workspace + private temp + the exact executable, with read-only device literals,
+// deny-default, exec and reads restricted to the reviewed system roots and
+// declared toolchain roots (#722) + workspace + private temp + the exact
+// executable, with read-only device literals,
 // metadata scoped to allowed subtrees plus exact traversal ancestors, writes
 // restricted to workspace + private temp, and network denied unless the
 // approved config allows it. Rendering is deterministic: list inputs are

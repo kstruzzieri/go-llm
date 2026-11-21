@@ -3761,6 +3761,23 @@ func TestSeatbeltToolchainRootWriteDenied(t *testing.T) {
 	if _, err := os.Lstat(probe); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("probe under the declared root: %v; want it absent", err)
 	}
+	// A hard link would give the root's inode a writable workspace name, and
+	// the pre-spawn walk only sees links that already exist: the profile must
+	// refuse to create one. Control: a link inside the workspace works.
+	if res := realSeatbeltRun(t, cfg, ws, []string{"/bin/ln", filepath.Join(ws, "probe"), filepath.Join(ws, "probe-link")}); res.ExitCode != 0 {
+		t.Fatalf("control: hard link inside the workspace failed: exit=%d stderr=%q", res.ExitCode, res.Stderr)
+	}
+	link := filepath.Join(ws, "root-link")
+	// containment: PATH-TOOLCHAIN-ROOT-WRITE
+	if res := realSeatbeltRun(t, cfg, ws, []string{"/bin/ln", marker, link}); res.ExitCode == 0 {
+		t.Fatal("hard link from a declared root into the workspace succeeded")
+	}
+	if _, err := os.Lstat(link); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("hard link into the workspace: %v; want it absent", err)
+	}
+	if got, err := os.ReadFile(marker); err != nil || string(got) != "root-marker" {
+		t.Fatalf("root marker after the link attempt = %q, %v; want it unchanged", got, err)
+	}
 }
 
 // TestSeatbeltToolchainNetworkDenied: no #722 field opens the network. nc
