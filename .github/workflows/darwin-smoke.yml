@@ -126,6 +126,11 @@ jobs:
             exit 1
           fi
 
+      # #722 supports the standalone Command Line Tools. Select them on this
+      # disposable runner before either broad suite invokes the system shims.
+      - name: Select standalone Command Line Tools
+        run: sudo /usr/bin/xcode-select --switch /Library/Developer/CommandLineTools
+
       # Real Seatbelt confinement (#442). GO_LLM_REQUIRE_SEATBELT=1 turns a
       # skip into a hard failure, so a runner that cannot apply Seatbelt (a
       # nested sandbox) fails the gate rather than silently passing. The
@@ -148,16 +153,14 @@ jobs:
       # an offline module cache, python3, git and VCS stamping through Golem
       # turns, and D3's ablation of each developer link literal whose link
       # exists here (an absent one logs "not exercised" and passes). This
-      # runner's Xcode is selected through a link, and
-      # GO_LLM_REQUIRE_XCODE_LINK=1 fails the tests without one, so the
-      # linked-Xcode leg always runs. A skip fails the step, and so does any
+      # runner explicitly selects the Command Line Tools. A skip fails the
+      # step, and so does any
       # count other than the 3 top-level tests passing (a rename would
       # otherwise run nothing and pass). scripts/test-ci-local pins this step.
       - name: Declared toolchain roots
         shell: bash
         env:
           GO_LLM_REQUIRE_SEATBELT: "1"
-          GO_LLM_REQUIRE_XCODE_LINK: "1"
         run: |
           set -o pipefail; go test -count=1 -timeout 300s -v -run '^(TestNativeBackend(ToolchainGoBuildAndTest|DeveloperTools)|TestSeatbeltDeveloperLinkLiterals)$' ./agent/tools ./golem | tee "$RUNNER_TEMP/toolchain-roots.txt"
           if grep -q -- '--- SKIP' "$RUNNER_TEMP/toolchain-roots.txt"; then

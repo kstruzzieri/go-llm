@@ -5,7 +5,7 @@ A host can now declare folders outside the workspace that Seatbelt commands may 
 #### Library
 
 - `agent/tools`: `SandboxConfig.ReadOnlyRoots`, `SandboxConfig.DeveloperDirectory`, `SandboxConfig.Env` (`[]SandboxEnv`, a closed table: `GOMODCACHE` inside a declared root, `GOPROXY=off`, `GOTOOLCHAIN=local`, `GOFLAGS=-buildvcs=false`) and `SandboxConfig.TempEnv` (`GOCACHE` under each command's private temp).
-- `SandboxConfig.Clone` copies every slice; `SandboxConfig.EffectiveEnv` lists every variable the backend adds; `CanonicalToolchainRoot` returns the canonical spelling a root must use; `ActiveDeveloperDirectory` (macOS) reads the system's developer directory.
+- `SandboxConfig.Clone` copies every slice; `SandboxConfig.EffectiveEnv` lists every variable the backend adds; `CanonicalToolchainRoot` returns the canonical spelling a root must use; `ActiveDeveloperDirectory` (macOS) requires the standalone Command Line Tools to be selected.
 - `golem.CommandPermissions` gains `ReadOnlyRoots`, `DeveloperDirectory` and `Env`; the approval preview shows them.
 - Bubblewrap and the host runtime refuse all four fields with `ErrSandboxPolicy`. The exec constructors now wrap `ErrSandboxPolicy` too.
 

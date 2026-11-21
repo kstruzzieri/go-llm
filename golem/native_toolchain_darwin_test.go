@@ -7,7 +7,7 @@ package golem
 // real Seatbelt backend runs a real toolchain under the session's policy. Each
 // leg also runs without the grant or setting it relies on, and fails there.
 // The darwin-smoke job runs these with GO_LLM_REQUIRE_SEATBELT=1 and
-// GO_LLM_REQUIRE_XCODE_LINK=1. Darwin-only: Linux CI also selects the
+// the standalone Command Line Tools selected. Darwin-only: Linux CI also selects the
 // TestNativeBackend prefix, and bwrap refuses these fields.
 
 import (
@@ -343,33 +343,6 @@ func TestNativeBackendToolchainGoBuildAndTest(t *testing.T) {
 	}
 }
 
-// requireLinkedXcodeIfAsked logs which developer selection links exist. With
-// GO_LLM_REQUIRE_XCODE_LINK=1, the test fails unless one exists and dev, the
-// active developer directory, is an Xcode bundle: that job must exercise an
-// Xcode a link selects, and a link to the Command Line Tools cannot stand in.
-func requireLinkedXcodeIfAsked(t *testing.T, dev string) {
-	t.Helper()
-	// The source of truth is developerSelectionLinks in
-	// agent/tools/sandbox_policy.go; this copy must change with it.
-	links := []string{"/private/var/select/developer_dir", "/private/var/db/xcode_select_link"}
-	var present []string
-	for _, link := range links {
-		if _, err := os.Lstat(link); err == nil {
-			present = append(present, link)
-		}
-	}
-	t.Logf("developer selection links checked %q; present %q", links, present)
-	if os.Getenv("GO_LLM_REQUIRE_XCODE_LINK") != "1" {
-		return
-	}
-	if len(present) == 0 {
-		t.Fatalf("GO_LLM_REQUIRE_XCODE_LINK=1 but none of %q exists", links)
-	}
-	if !strings.HasSuffix(dev, ".app") {
-		t.Fatalf("GO_LLM_REQUIRE_XCODE_LINK=1 but the active developer directory %s is not an Xcode bundle", dev)
-	}
-}
-
 // vcsSettings counts the vcs build settings stamped into bin.
 func vcsSettings(t *testing.T, bin string) int {
 	t.Helper()
@@ -410,11 +383,13 @@ func treeOf(t *testing.T, root string) []string {
 func TestNativeBackendDeveloperTools(t *testing.T) {
 	policy := nativePolicyOrSkip(t)
 	dev, err := agenttools.ActiveDeveloperDirectory(context.Background())
+	if errors.Is(err, errors.ErrUnsupported) && os.Getenv("GO_LLM_REQUIRE_SEATBELT") != "1" {
+		t.Skip(err)
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Logf("developer directory %s", dev)
-	requireLinkedXcodeIfAsked(t, dev)
 	goroot, _ := hostGo(t)
 	_, base := canonicalDir(t)
 	home := filepath.Join(base, "home")
@@ -460,7 +435,7 @@ func TestNativeBackendDeveloperTools(t *testing.T) {
 	if after := treeOf(t, repo); !slices.Equal(after, before) {
 		t.Errorf("python3 changed the workspace: %q, was %q", after, before)
 	}
-	s.ok("git", "--version")
+	s.ok("/usr/bin/git", "status", "--short")
 	s.ok("/usr/bin/stat", filepath.Join(repo, "go.mod"))
 	const receipts = "/private/var/db/receipts"
 	if _, err := os.Stat(receipts); err != nil {

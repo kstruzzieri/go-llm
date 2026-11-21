@@ -452,7 +452,7 @@ func TestParseFlags_SandboxHelp(t *testing.T) {
 		"  -sandbox-read-root value\n    \tread-only toolchain directory for -sandbox seatbelt commands (repeatable): readable and runnable, never writable; resolved to its canonical spelling at startup; refused if it overlaps the workspace or a credential or data store\n",
 		"  -sandbox-env value\n    \tset NAME=VALUE for -sandbox seatbelt commands (repeatable) from a closed table: GOMODCACHE=<path inside a -sandbox-read-root>, GOPROXY=off, GOTOOLCHAIN=local, GOFLAGS=-buildvcs=false\n",
 		"  -sandbox-temp-env value\n    \tpoint NAME into each -sandbox seatbelt command's private temp (repeatable) from a closed table: GOCACHE (<private temp>/gocache)\n",
-		"  -sandbox-developer-dir\n    \tfor -sandbox seatbelt: declare the active developer directory (xcode-select -p) read-only, so git, python3 and Go's VCS stamping run, and set GIT_CONFIG_NOSYSTEM=1, GIT_CONFIG_GLOBAL=/dev/null and PYTHONDONTWRITEBYTECODE=1\n",
+		"  -sandbox-developer-dir\n    \tfor -sandbox seatbelt: declare the standalone Command Line Tools read-only (requires xcode-select to select them), so git, python3 and Go's VCS stamping run, and set GIT_CONFIG_NOSYSTEM=1, GIT_CONFIG_GLOBAL=/dev/null and PYTHONDONTWRITEBYTECODE=1\n",
 	} {
 		if !strings.Contains(string(help), want) {
 			t.Fatalf("help lacks %q:\n%s", want, help)

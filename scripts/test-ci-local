@@ -95,11 +95,12 @@ for pin in ci.yml:linux:BWRAP:11 darwin-smoke.yml:darwin:SEATBELT:11; do
   require_step "$wf" 'Upload native wiring evidence' '        if: always()' "$upload" \
     "          name: native-wiring-$os" "          path: \${{ runner.temp }}/native-wiring-$os.txt"
 done
-# Declared toolchain roots (#722) run end to end on macOS with a linked Xcode
-# required, and fail on any skip or a top-level pass count other than 3.
+# Declared toolchain roots (#722) run with the standalone Command Line Tools.
+require_step darwin-smoke.yml 'Select standalone Command Line Tools' \
+  '        run: sudo /usr/bin/xcode-select --switch /Library/Developer/CommandLineTools'
 roots_log='"$RUNNER_TEMP/toolchain-roots.txt"'
 require_step darwin-smoke.yml 'Declared toolchain roots' '        shell: bash' \
-  '          GO_LLM_REQUIRE_SEATBELT: "1"' '          GO_LLM_REQUIRE_XCODE_LINK: "1"' '        run: |' \
+  '          GO_LLM_REQUIRE_SEATBELT: "1"' '        run: |' \
   "          set -o pipefail; go test -count=1 -timeout 300s -v -run '^(TestNativeBackend(ToolchainGoBuildAndTest|DeveloperTools)|TestSeatbeltDeveloperLinkLiterals)\$' ./agent/tools ./golem | tee $roots_log" \
   "          if grep -q -- '--- SKIP' $roots_log; then" \
   "          passed=\$(grep -cE -- '^--- PASS: Test' $roots_log || true)" \

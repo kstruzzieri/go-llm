@@ -59,7 +59,7 @@
 // retargeting a link takes effect only at the next startup. A root may not
 // overlap the workspace; may not be or cover home, /private/tmp ($TMPDIR
 // under /private/var/folders is not refused) or a broad system folder; may
-// not lie inside go-llm's own /private/tmp/go-llm-seatbelt-* and
+// not be or lie inside go-llm's own /private/tmp/go-llm-seatbelt-* and
 // /private/tmp/go-llm-scratch-* directories; and may not be, cover or lie
 // inside ~/.ssh, ~/.gnupg, ~/.aws, ~/.docker, ~/.kube, ~/.netrc, ~/.config,
 // ~/.claude, ~/.codex, ~/Library/Keychains or Golem's own data and config
@@ -78,11 +78,11 @@
 // below it; the cache (several hundred MB for a go-llm-sized build) is
 // written under /private/tmp and deleted when the command ends.
 // -sandbox-developer-dir declares the active developer directory
-// (xcode-select -p: the Command Line Tools or an Xcode.app bundle) so git,
+// when xcode-select points to the standalone Command Line Tools, so git,
 // python3 and Go's VCS stamping run, and adds
 // GIT_CONFIG_NOSYSTEM=1, GIT_CONFIG_GLOBAL=/dev/null and
 // PYTHONDONTWRITEBYTECODE=1. The system's selection still chooses which
-// folder is declared; admission and the preview bound it, and the selection
+// folder is declared; a full Xcode selection is refused. The selection
 // link check it adds is not the confinement boundary.
 //
 // A Go recipe: seed a module cache outside the workspace on the host (for

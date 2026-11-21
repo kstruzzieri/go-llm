@@ -62,12 +62,14 @@ const xcodeSelectReasonMax = 200
 // SandboxConfig.DeveloperDirectory. It runs xcode-select -p with
 // DEVELOPER_DIR removed from its environment, so the system selection
 // decides, under a timeout on top of ctx; refuses output that is not one
-// clean absolute path; resolves it with CanonicalToolchainRoot; and maps an
-// app bundle's Contents/Developer to the bundle, whose sibling frameworks
-// the dispatched tools load. Every failure wraps ErrSandboxPolicy. The
-// selection still chooses which directory is declared; admission and the
-// approval preview bound it.
+// clean absolute path; and requires the standalone Apple Command Line Tools.
+// Full Xcode shims require state outside the declared bundle. An unsupported
+// selection wraps errors.ErrUnsupported. Every failure wraps ErrSandboxPolicy.
 func ActiveDeveloperDirectory(ctx context.Context) (string, error) {
+	return selectedCommandLineTools(ctx, "/Library/Developer/CommandLineTools")
+}
+
+func selectedCommandLineTools(ctx context.Context, supported string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, activeDeveloperDirectoryTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, xcodeSelectPath, "-p")
@@ -100,8 +102,8 @@ func ActiveDeveloperDirectory(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("tools: active developer directory: %w: %w", ErrSandboxPolicy, err)
 	}
-	if app, ok := strings.CutSuffix(canon, "/Contents/Developer"); ok && strings.HasSuffix(app, ".app") {
-		return app, nil
+	if canon != supported {
+		return "", fmt.Errorf("tools: active developer directory: %w: %w: select the standalone Command Line Tools at %s", ErrSandboxPolicy, errors.ErrUnsupported, supported)
 	}
 	return canon, nil
 }

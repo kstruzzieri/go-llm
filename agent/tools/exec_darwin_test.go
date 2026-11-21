@@ -3901,34 +3901,6 @@ func TestSeatbeltFactoryInputMutation(t *testing.T) {
 	}
 }
 
-// requireLinkedXcode logs which developer selection links exist and returns
-// the active developer directory. GO_LLM_REQUIRE_XCODE_LINK=1 fails the test
-// unless a link exists and the directory is an Xcode bundle, so a link to the
-// Command Line Tools cannot stand in for the linked-Xcode evidence D3 relies
-// on.
-func requireLinkedXcode(t *testing.T) string {
-	t.Helper()
-	var present []string
-	for _, link := range developerSelectionLinks {
-		if _, err := os.Lstat(link); err == nil {
-			present = append(present, link)
-		}
-	}
-	t.Logf("developer selection links checked %q; present %q", developerSelectionLinks, present)
-	if len(present) == 0 && os.Getenv("GO_LLM_REQUIRE_XCODE_LINK") == "1" {
-		t.Fatalf("GO_LLM_REQUIRE_XCODE_LINK=1 but none of %q exists", developerSelectionLinks)
-	}
-	dev, err := ActiveDeveloperDirectory(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Logf("developer directory %s", dev)
-	if os.Getenv("GO_LLM_REQUIRE_XCODE_LINK") == "1" && !strings.HasSuffix(dev, ".app") {
-		t.Fatalf("GO_LLM_REQUIRE_XCODE_LINK=1 but the active developer directory %s is not an Xcode bundle", dev)
-	}
-	return dev
-}
-
 // TestSeatbeltDeveloperLinkLiterals is D3's ablation (#722): with the
 // active developer directory declared, python3 must fail once the literal of
 // a link that exists on the host is dropped from seatbeltDeveloperLiterals. A
@@ -3939,7 +3911,13 @@ func requireLinkedXcode(t *testing.T) string {
 // fails on any skip.
 func TestSeatbeltDeveloperLinkLiterals(t *testing.T) {
 	requireSeatbeltCapability(t)
-	dev := requireLinkedXcode(t)
+	dev, err := ActiveDeveloperDirectory(context.Background())
+	if errors.Is(err, errors.ErrUnsupported) && os.Getenv("GO_LLM_REQUIRE_SEATBELT") != "1" {
+		t.Skip(err)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
 	standInHome(t)
 	cfg := SandboxConfig{Runtime: SandboxRuntimeSeatbelt, DeveloperDirectory: dev}
 	ws := canonTempDirT(t)

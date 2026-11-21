@@ -236,7 +236,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.Var(&f.sandboxReadRoots, "sandbox-read-root", "read-only toolchain directory for -sandbox seatbelt commands (repeatable): readable and runnable, never writable; resolved to its canonical spelling at startup; refused if it overlaps the workspace or a credential or data store")
 	fs.Var(&f.sandboxEnv, "sandbox-env", "set NAME=VALUE for -sandbox seatbelt commands (repeatable) from a closed table: GOMODCACHE=<path inside a -sandbox-read-root>, GOPROXY=off, GOTOOLCHAIN=local, GOFLAGS=-buildvcs=false")
 	fs.Var(&f.sandboxTempEnv, "sandbox-temp-env", "point NAME into each -sandbox seatbelt command's private temp (repeatable) from a closed table: GOCACHE (<private temp>/gocache)")
-	fs.BoolVar(&f.sandboxDeveloperDir, "sandbox-developer-dir", false, "for -sandbox seatbelt: declare the active developer directory (xcode-select -p) read-only, so git, python3 and Go's VCS stamping run, and set GIT_CONFIG_NOSYSTEM=1, GIT_CONFIG_GLOBAL=/dev/null and PYTHONDONTWRITEBYTECODE=1")
+	fs.BoolVar(&f.sandboxDeveloperDir, "sandbox-developer-dir", false, "for -sandbox seatbelt: declare the standalone Command Line Tools read-only (requires xcode-select to select them), so git, python3 and Go's VCS stamping run, and set GIT_CONFIG_NOSYSTEM=1, GIT_CONFIG_GLOBAL=/dev/null and PYTHONDONTWRITEBYTECODE=1")
 	fs.Var(&f.allowTools, "allow-tool", "one-shot mode: mount and non-interactively approve one exact built-in gated tool by name (repeatable; write_file, edit_file, run_command, start_command, stop_command); creates no session grants; MCP tools and submit_plan are never eligible; requires -p")
 	// main() prefixes "golem: " when it prints the error.
 	if err := parseQuietly(fs, args, nil); err != nil {

@@ -31,9 +31,8 @@ func fakeXcodeSelect(t *testing.T, body string) {
 
 // TestSeatbeltActiveDeveloperDirectory pins the host helper (#722 D3)
 // through a stand-in xcode-select, so no row depends on this Mac's
-// selection: DEVELOPER_DIR never reaches the child, an app bundle's
-// Contents/Developer maps to the bundle while one outside a bundle stays
-// unchanged, the result is canonical, and output that is not one clean
+// selection: DEVELOPER_DIR never reaches the child, only the canonical
+// standalone Command Line Tools are accepted, and output that is not one clean
 // absolute path, a non-zero exit and a hung command are refused. Valid
 // controls run first.
 func TestSeatbeltActiveDeveloperDirectory(t *testing.T) {
@@ -42,7 +41,7 @@ func TestSeatbeltActiveDeveloperDirectory(t *testing.T) {
 	mkdirT(t, filepath.Join(canon, "Xcode.app", "Contents", "Developer"))
 	mkdirT(t, filepath.Join(canon, "Env.app", "Contents", "Developer"))
 	tools := mkdirT(t, filepath.Join(canon, "Tools", "Contents", "Developer"))
-	if err := os.Symlink(filepath.Join(canon, "Xcode.app"), filepath.Join(canon, "current")); err != nil {
+	if err := os.Symlink(filepath.Join(canon, "CommandLineTools"), filepath.Join(canon, "current")); err != nil {
 		t.Fatal(err)
 	}
 	// Real xcode-select prints DEVELOPER_DIR when it is set; the stand-in
@@ -53,15 +52,13 @@ func TestSeatbeltActiveDeveloperDirectory(t *testing.T) {
 
 	valid := []struct{ name, body, want string }{
 		{"command line tools", say(clt), clt},
-		{"app bundle", say(filepath.Join(canon, "Xcode.app", "Contents", "Developer")), filepath.Join(canon, "Xcode.app")},
-		{"canonical spelling", say(filepath.Join(canon, "current", "Contents", "Developer")), filepath.Join(canon, "Xcode.app")},
-		{"Contents/Developer outside an app bundle", say(tools), tools},
+		{"canonical spelling", say(filepath.Join(canon, "current")), clt},
 		{"no trailing newline", `printf '%s' "${DEVELOPER_DIR:-` + clt + `}"`, clt},
 	}
 	for _, r := range valid {
 		t.Run(r.name, func(t *testing.T) {
 			fakeXcodeSelect(t, r.body)
-			got, err := ActiveDeveloperDirectory(context.Background())
+			got, err := selectedCommandLineTools(context.Background(), clt)
 			if err != nil || got != r.want {
 				t.Fatalf("ActiveDeveloperDirectory = %q, %v; want %q", got, err, r.want)
 			}
@@ -72,6 +69,8 @@ func TestSeatbeltActiveDeveloperDirectory(t *testing.T) {
 	}
 
 	refused := []struct{ name, body, reason string }{
+		{"app bundle", say(filepath.Join(canon, "Xcode.app", "Contents", "Developer")), "standalone Command Line Tools"},
+		{"other selection", say(tools), "standalone Command Line Tools"},
 		{"relative", say("Library/Developer/CommandLineTools"), "not one clean absolute path"},
 		{"unclean", say(canon + "/Xcode.app/../CommandLineTools"), "not one clean absolute path"},
 		{"trailing slash", say(clt + "/"), "not one clean absolute path"},
@@ -87,7 +86,7 @@ func TestSeatbeltActiveDeveloperDirectory(t *testing.T) {
 	for _, r := range refused {
 		t.Run(r.name, func(t *testing.T) {
 			fakeXcodeSelect(t, r.body)
-			got, err := ActiveDeveloperDirectory(context.Background())
+			got, err := selectedCommandLineTools(context.Background(), clt)
 			if !errors.Is(err, ErrSandboxPolicy) || !strings.Contains(err.Error(), r.reason) || got != "" {
 				t.Fatalf("ActiveDeveloperDirectory = %q, %v; want ErrSandboxPolicy with reason %q", got, err, r.reason)
 			}
@@ -115,7 +114,7 @@ func TestSeatbeltActiveDeveloperDirectory(t *testing.T) {
 			fakeXcodeSelect(t, "exec sleep 30")
 			ctx := ctxFor(t)
 			start := time.Now()
-			got, err := ActiveDeveloperDirectory(ctx)
+			got, err := selectedCommandLineTools(ctx, clt)
 			if elapsed := time.Since(start); elapsed > 3*time.Second {
 				t.Fatalf("ActiveDeveloperDirectory returned after %v; want the 200ms deadline", elapsed)
 			}
@@ -134,7 +133,8 @@ func TestSeatbeltActiveDeveloperDirectory(t *testing.T) {
 func TestSeatbeltActiveDeveloperDirectoryHost(t *testing.T) {
 	probe := exec.Command(xcodeSelectPath, "-p")
 	probe.Env = slices.DeleteFunc(os.Environ(), func(kv string) bool { return strings.HasPrefix(kv, "DEVELOPER_DIR=") })
-	if err := probe.Run(); err != nil {
+	out, err := probe.Output()
+	if err != nil {
 		if os.Getenv("GO_LLM_REQUIRE_SEATBELT") == "1" {
 			t.Fatalf("GO_LLM_REQUIRE_SEATBELT=1 but no active developer directory on this host: %v", err)
 		}
@@ -143,12 +143,22 @@ func TestSeatbeltActiveDeveloperDirectoryHost(t *testing.T) {
 	t.Setenv("DEVELOPER_DIR", "/nonexistent-go-llm-developer-dir")
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+	selected, err := CanonicalToolchainRoot(strings.TrimSpace(string(out)))
+	if err != nil {
+		t.Fatal(err)
+	}
 	got, err := ActiveDeveloperDirectory(ctx)
+	if selected != "/Library/Developer/CommandLineTools" {
+		if got != "" || !errors.Is(err, errors.ErrUnsupported) || !errors.Is(err, ErrSandboxPolicy) {
+			t.Fatalf("unsupported selection: got %q, %v", got, err)
+		}
+		return
+	}
 	if err != nil {
 		t.Fatalf("ActiveDeveloperDirectory: %v", err)
 	}
-	if c, err := CanonicalToolchainRoot(got); err != nil || c != got || strings.HasSuffix(got, "/Contents/Developer") {
-		t.Fatalf("ActiveDeveloperDirectory = %q (canonical %q, %v); want a canonical root, an app bundle rather than its Contents/Developer", got, c, err)
+	if got != selected {
+		t.Fatalf("ActiveDeveloperDirectory = %q, want %q", got, selected)
 	}
 }
 
