@@ -362,6 +362,28 @@ A conversation that has history and no record, whether saved before this version
 or by a `SessionStore` that drops the field, reads as unknown for its lifetime.
 Under strict approval every consequential action in it needs a fresh approval.
 
+## Native sandbox and declared toolchain roots
+
+`tools.SandboxConfig` is the permission ceiling for a sandboxed exec runtime. On macOS, `SandboxRuntimeSeatbelt` can also run a toolchain that lives outside the workspace, from folders the host declares (#722). The fields are Seatbelt only; the Bubblewrap and host runtimes refuse them with `ErrSandboxPolicy`, as do the public constructors.
+
+| Field | Meaning |
+|---|---|
+| `ReadOnlyRoots []string` | Canonical folders commands may read and run, never write. |
+| `DeveloperDirectory string` | `""` is off. Otherwise a canonical folder declared like a root; commands also get `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null` and `PYTHONDONTWRITEBYTECODE=1`, and construction runs the selection-link ownership check. |
+| `Env []SandboxEnv` | Variables from a closed table: `GOMODCACHE` (inside a declared root), `GOPROXY=off`, `GOTOOLCHAIN=local`, `GOFLAGS=-buildvcs=false`. Anything else is refused. |
+| `TempEnv []string` | Variables pointed into each command's private temp; `GOCACHE` becomes `<private temp>/gocache`. |
+
+Helpers:
+
+- `SandboxConfig.Clone()` returns a copy that shares no slice with the original; copy before you keep or mutate a config.
+- `SandboxConfig.EffectiveEnv(privateTemp)` returns, sorted, every `NAME=value` the backend adds. Pass `"<private temp>"` to display it; the preview and `golem.CommandPermissions.Env` use it.
+- `tools.CanonicalToolchainRoot(path)` returns the canonical spelling (symlinks resolved, filesystem spelling) that a declared root must use. Call it once before building the config. Backends check that a root is still its own canonical spelling and never re-resolve it, so a link that changes makes the next construction fail and needs a new approval.
+- `tools.ActiveDeveloperDirectory(ctx)` (macOS) runs `xcode-select -p` with `DEVELOPER_DIR` removed, under a timeout, and returns the canonical folder to declare; an `Xcode.app/Contents/Developer` selection maps to the bundle.
+
+`golem.CommandPermissions` reports `ReadOnlyRoots`, `DeveloperDirectory` and `Env` for display.
+
+The limits are the CLI's, stated in [Declared toolchain roots under Seatbelt](golem.md#declared-toolchain-roots-under-seatbelt): declared roots are paths, not guarded copies, so their contents are the host's responsibility and a process outside the library can change them; admission excludes specific credential and go-llm folders, which is not a proof that a declared folder holds nothing sensitive; and the developer-directory link check is not the confinement boundary, the declared and admitted folder is.
+
 ## RAG Details
 
 ### Chunking

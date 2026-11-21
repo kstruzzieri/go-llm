@@ -304,6 +304,7 @@ golem -root /path/to/project -sandbox bwrap -sandbox-network allowed -allow-exec
 
 - **`-sandbox host|seatbelt|bwrap`**, default `host`. Nothing is chosen automatically by OS. Any explicit `-sandbox`, `host` included, selects the Trusted [profile](#runtime-profiles) when `-profile` is omitted, and `-profile inspect` with `-sandbox` or `-sandbox-network` is a usage error.
 - **`-sandbox-network denied|allowed`**, default `denied`, requires `-sandbox seatbelt` or `-sandbox bwrap`. With `host`, explicit or default, it is a usage error: the host cannot enforce a network policy. The one setting covers commands and verification.
+- **`-sandbox-read-root DIR`, `-sandbox-env NAME=VALUE`, `-sandbox-temp-env NAME`, `-sandbox-developer-dir`** declare a toolchain outside the workspace for `-sandbox seatbelt` only. Each is repeatable except the last, and `-sandbox bwrap` and `-sandbox host` refuse all four. See [Declared toolchain roots under Seatbelt](#declared-toolchain-roots-under-seatbelt).
 - **It fails closed.** Startup checks the backend against the canonical workspace root before any config, store, session, MCP connection or provider is touched. A backend this host cannot run (a missing `sandbox-exec` or `bwrap`, a failed probe, a root the backend cannot bound) stops startup with an error. Golem never falls back to the host, and no later command or verification failure retries there.
 - **Inherited descriptors are cleared.** Before the startup probe, a native session marks every descriptor Golem inherited above stdio close-on-exec, so a descriptor a launcher left open (a CI runner's, or a shell redirection) never reaches a sandboxed command. A sandboxed command could otherwise write or connect through it whatever the backend allows. Host sessions keep their inherited descriptors. Library hosts get a refusal instead: both backends refuse to construct or spawn while an unknown descriptor above stdio lacks close-on-exec. On macOS, the audit identifies libSystem's `com.apple.netsrc` resolver socket and marks it close-on-exec before construction and each spawn. The parent can keep using it; sandboxed children cannot inherit it. Failure to set the flag refuses the spawn.
 - **The policy is frozen.** Startup mounts, `/allow-write` and `/allow-exec` all use it. A late mount whose backend cannot honor the policy publishes nothing and leaves the session as it was. A mistake in `.golem.json` still costs only a `verification disabled: ...` notice, as on the host.
@@ -375,7 +376,36 @@ Seatbelt's profile reads files only under reviewed system roots (`/System/Librar
 - **Cleanup failures are reported.** When Seatbelt's private temp directory cannot be cleaned up, `run_command`, verification, `command_status`, `stop_command` and `/jobs` show `note: sandbox temp cleanup: <cause>`. The exit code and error are unchanged, and a successful command does not hide the note. A cleanup failure for the *startup probe's* own throwaway workspace is different: it fails startup, so a native session never begins over a probe directory it could not reap.
 - **A sandboxed parent reports Seatbelt unavailable.** The startup probe applies a deny-default profile, which macOS refuses inside an existing Seatbelt sandbox, so Golem started inside one (another tool's sandboxed shell, for example) fails startup with `-sandbox seatbelt`.
 
-**Recovery.** When a toolchain cannot run under Seatbelt, start a new host Trusted session for that work (pass `-sandbox host`, or omit `-sandbox` and keep your Trusted flags), or use a toolchain and caches laid out inside the workspace. Never broaden the policy instead: Golem never retries on the host or enables the network on its own, and no flag adds home, SDK or Homebrew read roots.
+**Recovery.** When a toolchain cannot run under Seatbelt, start a new host Trusted session for that work (pass `-sandbox host`, or omit `-sandbox` and keep your Trusted flags), or use a toolchain and caches laid out inside the workspace. Or declare the toolchain, folder by folder, as described next. Never broaden the policy instead: Golem never retries on the host or enables the network on its own, and no flag adds home, SDK or Homebrew read roots; a declared root is one folder you name, bounded as below.
+
+### Declared toolchain roots under Seatbelt
+
+A Go, git or Python toolchain that lives outside the workspace can run under `-sandbox seatbelt` if you declare the folders it needs. These flags are macOS Seatbelt only; `-sandbox bwrap` and `-sandbox host` refuse them at startup, and no command or model argument can set them.
+
+- **`-sandbox-read-root DIR`** (repeatable) names a folder commands may read and run but never write. Golem resolves each to its canonical spelling, with symlinks resolved, once at startup. The `permissions:` line and every command's approval preview show that spelling, and the session keeps that folder: retargeting a symlink takes effect only after a restart, which asks for a new approval.
+- **`-sandbox-env NAME=VALUE`** (repeatable) sets a variable from a closed table: `GOMODCACHE` (a path inside a declared root, respelled under the root's canonical spelling), `GOPROXY=off`, `GOTOOLCHAIN=local` and `GOFLAGS=-buildvcs=false`. Any other name or value is refused, and a refused value is not echoed.
+- **`-sandbox-temp-env NAME`** (repeatable) points a variable into each command's private temp. The one name today is `GOCACHE`, which becomes `<private temp>/gocache`: a cold cache for every command, so a full test suite can need a `run_command` `timeout_seconds` above the 60 s default (at most 600) and a `go test -timeout` below it.
+- **`-sandbox-developer-dir`** declares the active developer directory (`xcode-select -p`: the Command Line Tools, or an `Xcode.app` bundle) so `git`, `python3` and Go's version-control stamping can run. It also sets `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null` and `PYTHONDONTWRITEBYTECODE=1`. The preview shows every variable the declaration adds.
+
+A Go recipe: seed a module cache outside the workspace on the host (for example `GOMODCACHE=$HOME/gomod go mod download` in the module), put `$(go env GOROOT)/bin` first on the shell's `PATH` (commands inherit Golem's `PATH`; no flag sets it), and start Golem with:
+
+```bash
+golem -root /path/to/project -allow-write -allow-exec \
+  -sandbox seatbelt -sandbox-read-root "$(go env GOROOT)" \
+  -sandbox-read-root "$HOME/gomod" -sandbox-env GOMODCACHE="$HOME/gomod" \
+  -sandbox-env GOPROXY=off -sandbox-env GOTOOLCHAIN=local \
+  -sandbox-env GOFLAGS=-buildvcs=false -sandbox-temp-env GOCACHE
+```
+
+Without `-sandbox-developer-dir` commands have no `git`, so keep `GOFLAGS=-buildvcs=false`; with it, drop that row to stamp builds. In a linked git worktree builds stay unstamped unless the main repository's `.git` is declared too (or `-buildvcs=false` is kept). `go.work` workspaces with modules outside the workspace, and cgo, are not supported.
+
+What this does and does not protect:
+
+- **No new write access.** Writes under a declared root stay denied, and the network is as `-sandbox-network` says. A root that overlaps the workspace is refused when the command is prepared.
+- **A root is a path, not a guarded copy.** Declared roots are not protected by the operating system the way the system folders are. A process outside Golem running as you can change a root's contents, and a sandboxed command then runs what it finds. Declare only folders you keep trusted.
+- **The exclusion list is specific folders, not a proof of safety.** A root may not be or cover your home folder, the temp folder or a broad system folder, and may not be, cover or lie inside `~/.ssh`, `~/.gnupg`, `~/.aws`, `~/.docker`, `~/.kube`, `~/.netrc`, `~/.config`, `~/.claude`, `~/.codex`, `~/Library/Keychains` or Golem's own data and config stores (which follow `XDG_DATA_HOME`). Nothing says a folder outside that list holds nothing sensitive: declare only folders every command may read.
+- **Roots must be canonical spellings.** A root that is itself a symlink, or reached through one, is refused; Golem resolves your flags once at startup. Library hosts call `tools.CanonicalToolchainRoot` and declare the result.
+- **The developer-directory link check is not the boundary.** With `-sandbox-developer-dir`, construction also checks that each of `/private/var/select/developer_dir` and `/private/var/db/xcode_select_link` that exists is a symlink owned by root in a directory chain owned by root. On a stock system that check cannot fire. The system's selection still chooses which folder is declared; what bounds it is that the folder is declared, admitted like any other root and shown in the preview.
 
 ### What -sandbox does not confine
 
