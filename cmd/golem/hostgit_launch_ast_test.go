@@ -31,6 +31,7 @@ var allowedLaunches = map[string]int{
 	"hostGitCommand exec.CommandContext":   1,
 	"hostGitCommand Path assignment":       1, // pins the resolved git path
 	"requireHostGit exec.CommandContext":   1, // the --version probe
+	"requireHostGit Args assignment":       1, // probe.Args[0] = path, the real argv[0]
 	"runEditorProcess exec.CommandContext": 1,
 }
 
@@ -128,6 +129,12 @@ func collectLaunches(fset *token.FileSet, name string, src any) ([]launchRecord,
 				}
 			case *ast.AssignStmt:
 				for _, lhs := range x.Lhs {
+					if ix, ok := lhs.(*ast.IndexExpr); ok { // X.Args[i] = ...
+						if s, ok := ix.X.(*ast.SelectorExpr); ok && s.Sel.Name == "Args" {
+							add(&paths, "Args assignment", s.Pos())
+						}
+						continue
+					}
 					if s, ok := lhs.(*ast.SelectorExpr); ok && (s.Sel.Name == "Path" || s.Sel.Name == "Args") {
 						add(&paths, s.Sel.Name+" assignment", s.Pos())
 					}
@@ -136,7 +143,7 @@ func collectLaunches(fset *token.FileSet, name string, src any) ([]launchRecord,
 			return true
 		})
 		recs = append(recs, dr...)
-		if len(dr) > 0 { // ponytail: any .Path/.Args write beside a launch counts
+		if len(dr) > 0 { // ponytail: a .Path or .Args assignment, or an indexed .Args[i] assignment, beside a launch counts; other writes (append, copy, range) are not seen
 			recs = append(recs, paths...)
 		}
 	}
@@ -178,6 +185,8 @@ func TestHostProcessLaunchGuardCatchesForms(t *testing.T) {
 		{"Cmd embedding", "package main\nimport \"os/exec\"\ntype W struct{ exec.Cmd }",
 			[]string{"x.go:<package-level> exec.Cmd value"}, false},
 		{"Args assignment", "package main\nimport \"os/exec\"\nfunc f() { c := exec.CommandContext(nil, \"a\"); c.Args = nil }",
+			[]string{"f exec.CommandContext", "f Args assignment"}, false},
+		{"indexed Args assignment", "package main\nimport \"os/exec\"\nfunc f() { c := exec.CommandContext(nil, \"a\"); c.Args[1] = \"x\" }",
 			[]string{"f exec.CommandContext", "f Args assignment"}, false},
 		{"execabs Command", "package main\nimport \"golang.org/x/sys/execabs\"\nfunc f() { execabs.Command(\"git\").Run() }",
 			[]string{"f exec.Command"}, false},

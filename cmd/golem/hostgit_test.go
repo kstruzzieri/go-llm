@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"path/filepath"
+	"testing"
+)
 
 func TestParseGitVersion(t *testing.T) {
 	ok := []struct {
@@ -36,5 +39,34 @@ func TestGitVersionSupported(t *testing.T) {
 		if got := gitVersionSupported(c.major, c.minor); got != c.want {
 			t.Errorf("gitVersionSupported(%d,%d) = %v; want %v", c.major, c.minor, got, c.want)
 		}
+	}
+}
+
+// TestPathWithinLexicalHalf pins the lexical half of pathWithin: it must
+// decide without touching the filesystem, so a platform whose file identity
+// lookup fails cannot make a git inside the workspace look outside.
+func TestPathWithinLexicalHalf(t *testing.T) {
+	ws := filepath.Join(t.TempDir(), "ws")
+	tests := []struct {
+		name, path string
+		want       bool
+	}{
+		{"child", filepath.Join(ws, "git"), true},
+		{"deep child", filepath.Join(ws, "a", "b", "git"), true},
+		{"dot-dot prefixed child", filepath.Join(ws, "..foo", "git"), true},
+		{"sibling", filepath.Join(filepath.Dir(ws), "git"), false},
+		{"sibling sharing a prefix", ws + "x" + string(filepath.Separator) + "git", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Neither path exists, so only the lexical half can answer.
+			got, err := pathWithin(tt.path, ws)
+			if tt.want && (err != nil || !got) {
+				t.Errorf("pathWithin(%q, %q) = %v, %v; want true, nil", tt.path, ws, got, err)
+			}
+			if !tt.want && got {
+				t.Errorf("pathWithin(%q, %q) = true, want false", tt.path, ws)
+			}
+		})
 	}
 }

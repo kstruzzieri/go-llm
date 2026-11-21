@@ -85,7 +85,7 @@ func requireHostGit(ctx context.Context, path, workspace string, env []string) (
 	probe.WaitDelay = gitContextWaitDelay
 	runErr := probe.Run()
 	if err := ctx.Err(); err != nil {
-		return "", err
+		return "", fmt.Errorf("git: %s --version: %w", gitContextText(resolved), err)
 	}
 	if runErr != nil {
 		return "", fmt.Errorf("git: %s --version: %w", gitContextText(resolved), runErr)
@@ -100,12 +100,17 @@ func requireHostGit(ctx context.Context, path, workspace string, env []string) (
 	return resolved, nil
 }
 
-// pathWithin reports whether path is root or lies under it, by file identity
-// rather than spelling: a case-insensitive filesystem, Unicode normalization,
-// firmlinks and bind mounts all give one directory several spellings. It walks
-// up from path's directory comparing each ancestor with root through
-// os.SameFile, and fails closed on any stat error.
+// pathWithin reports whether path lies inside root: path itself is root or
+// below it by spelling, or path's directory is root or a descendant of root by
+// file identity. The identity walk covers what spelling cannot (a
+// case-insensitive filesystem, Unicode normalization, firmlinks, bind mounts)
+// and fails closed on any stat error. The lexical half is the floor: on
+// Windows os.SameFile can return false when its file-ID load fails, and that
+// must never make a git inside the workspace look outside.
 func pathWithin(path, root string) (bool, error) {
+	if rel, err := filepath.Rel(root, path); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return true, nil
+	}
 	rootInfo, err := os.Stat(root)
 	if err != nil {
 		return false, err

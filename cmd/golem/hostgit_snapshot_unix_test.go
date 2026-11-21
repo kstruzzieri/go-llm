@@ -246,3 +246,39 @@ func TestStartupWarnsOnceForRefusedGitLayout(t *testing.T) {
 		t.Fatalf("git block injected despite refusal: %q", system)
 	}
 }
+
+// TestStartupWarningSanitizesStartError: a git on PATH under an ESC-named
+// directory whose interpreter is missing fails at fork/exec with an error
+// carrying the raw path; the startup warning must not echo that ESC.
+func TestStartupWarningSanitizesStartError(t *testing.T) {
+	isolateGitConfig(t)
+	configPath, _ := writeRunLifecycleConfig(t)
+	bin := filepath.Join(resolvedTemp(t), "b\x1b[31mx")
+	if err := os.Mkdir(bin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bin, "git"), []byte("#!/nonexistent/interp\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	stdin, stdout, stderr := runTestFiles(t)
+	stop := errors.New("stop")
+	err := run([]string{"-config", configPath, "-root", resolvedTemp(t), "-p", "goal", "-no-probe", "-no-cap-probe", "-no-compress", "-no-memory", "-no-rag", "-no-project-context", "-no-auto-index", "-no-session"}, stdin, stdout, stderr, runHooks{afterSessionReady: func(*replSession) error { return stop }})
+	if !errors.Is(err, stop) {
+		t.Fatalf("run err = %v", err)
+	}
+	var lines []string
+	for _, f := range []*os.File{stdout, stderr} {
+		for _, l := range strings.Split(readRunTestFile(t, f), "\n") {
+			if strings.Contains(l, "git context disabled:") {
+				lines = append(lines, l)
+			}
+		}
+	}
+	if len(lines) != 1 {
+		t.Fatalf("want one warning, got %q", lines)
+	}
+	if strings.ContainsRune(lines[0], 0x1b) {
+		t.Fatalf("raw ESC in startup warning: %q", lines[0])
+	}
+}

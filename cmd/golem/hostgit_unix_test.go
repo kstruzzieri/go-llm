@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 func fakeGitScript(version, marker string) string {
@@ -296,5 +297,24 @@ func TestHostGitCommandSurfacesLookupError(t *testing.T) {
 	_, err := hostGitCommand(context.Background(), "definitely-not-a-git-binary-803", t.TempDir(), "", nil, "status")
 	if !errors.Is(err, exec.ErrNotFound) {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+// TestHostGitCommandProbeCancellationIsWrapped: a probe cut short by its
+// context reports what was cancelled, keeps the context error matchable, and
+// is not cached.
+func TestHostGitCommandProbeCancellationIsWrapped(t *testing.T) {
+	bin, ws := resolvedTemp(t), resolvedTemp(t)
+	p := filepath.Join(bin, "git")
+	writeExecutable(t, p, "if [ \"$1\" = \"--version\" ]; then sleep 5; fi\necho 'git version 2.56.0'\n")
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	_, err := hostGitCommand(ctx, p, ws, ws, nil, "status")
+	if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "--version") {
+		t.Fatalf("err = %v, want DeadlineExceeded mentioning --version", err)
+	}
+	writeExecutable(t, p, "echo 'git version 2.56.0'\n")
+	if _, err := hostGitCommand(context.Background(), p, ws, ws, nil, "status"); err != nil {
+		t.Fatalf("second call with a live context: %v", err)
 	}
 }
