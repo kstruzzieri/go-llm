@@ -14,13 +14,13 @@ import (
 	"unicode"
 )
 
-// fakeGit writes an executable /bin/sh script standing in for git. The
-// deadline and malformed-output cases need a controllable process; the
-// script sees the same argv and cwd the real capture would pass.
 // fakeGitVersion is prepended to every fake git script so the version probe
 // every host git call makes sees a supported git.
 const fakeGitVersion = "if [ \"$1\" = \"--version\" ]; then echo 'git version 2.56.0'; exit 0; fi\n"
 
+// fakeGit writes an executable /bin/sh script standing in for git. The
+// deadline and malformed-output cases need a controllable process; the
+// script sees the same argv and cwd the real capture would pass.
 func fakeGit(t *testing.T, body string) string {
 	t.Helper()
 	if _, err := os.Stat("/bin/sh"); err != nil {

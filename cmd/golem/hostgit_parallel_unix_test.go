@@ -196,7 +196,9 @@ func TestParallelWorkerSideGitRefusesWorkspaceExecutable(t *testing.T) {
 	c.aggregate = func(context.Context, []agentflow.AggregationInput, string, string, bool) (agentflow.AggregationResult, error) {
 		return agentflow.AggregationResult{Status: "ok"}, nil
 	}
-	t.Cleanup(func() { _ = c.cleanup(context.Background()) })
+	// The planted bin/git is first on PATH, so cleanup's own git calls would be
+	// refused and leak the worktrees; remove it first.
+	t.Cleanup(func() { _ = os.RemoveAll(bin); _ = c.cleanup(context.Background()) })
 
 	_, err := c.runCohort(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "inside the workspace") {

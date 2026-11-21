@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -199,5 +200,49 @@ func TestGitContextRefreshKeepsBlockOnRefusal(t *testing.T) {
 	}
 	if sess.baseSystem != system || sess.gitSnapshot.Block != snap.Block {
 		t.Fatal("a refused refresh changed the session's git block")
+	}
+}
+
+// Startup prints exactly one warning for a refused layout, sanitized, and
+// injects no git block. The root path holds an ESC byte, which must not reach
+// the warning raw.
+func TestStartupWarnsOnceForRefusedGitLayout(t *testing.T) {
+	isolateGitConfig(t)
+	globalCfg := filepath.Join(t.TempDir(), "config")
+	writeTestFile(t, globalCfg, "[safe]\n\tbareRepository = all\n", 0o600)
+	t.Setenv("GIT_CONFIG_GLOBAL", globalCfg)
+	configPath, _ := writeRunLifecycleConfig(t)
+	root := filepath.Join(resolvedTemp(t), "a\x1b[31mb")
+	if err := os.Mkdir(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	plantBare(t, root)
+
+	stdin, stdout, stderr := runTestFiles(t)
+	stop := errors.New("stop after startup")
+	var system string
+	err := run([]string{"-config", configPath, "-root", root, "-p", "goal", "-no-probe", "-no-cap-probe", "-no-compress", "-no-memory", "-no-rag", "-no-project-context", "-no-auto-index", "-no-session"}, stdin, stdout, stderr, runHooks{afterSessionReady: func(s *replSession) error {
+		system = s.sysInputs.gitContext
+		return stop
+	}})
+	if !errors.Is(err, stop) {
+		t.Fatalf("run() err = %v, want the hook's stop", err)
+	}
+	var lines []string
+	for _, f := range []*os.File{stdout, stderr} {
+		for _, l := range strings.Split(readRunTestFile(t, f), "\n") {
+			if strings.Contains(l, "git context disabled:") {
+				lines = append(lines, l)
+			}
+		}
+	}
+	if len(lines) != 1 || !strings.Contains(lines[0], "safe.bareRepository") {
+		t.Fatalf("warning lines = %q, want exactly one naming safe.bareRepository", lines)
+	}
+	if strings.ContainsRune(lines[0], 0x1b) {
+		t.Fatalf("raw ESC in startup warning: %q", lines[0])
+	}
+	if system != "" {
+		t.Fatalf("git block injected despite refusal: %q", system)
 	}
 }
