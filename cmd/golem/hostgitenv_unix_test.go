@@ -212,6 +212,40 @@ func TestParallelCohortGitDoesNotSeeParentEnvironment(t *testing.T) {
 	} {
 		requireGitRecord(t, got, "git", words...)
 	}
+	// The version probe carries no prefix; every repository command does.
+	wantRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var repoCmds int
+	var statusAtRoot, statusAtWorker bool
+	for _, r := range got {
+		if slices.Equal(r.argv, []string{"--version"}) {
+			continue
+		}
+		repoCmds++
+		if len(r.argv) < len(hostGitPrefix) || !slices.Equal(r.argv[:len(hostGitPrefix)], hostGitPrefix) {
+			t.Errorf("repository command argv %q does not start with the host git prefix", r.argv)
+			continue
+		}
+		if r.argv[len(hostGitPrefix)] != "status" {
+			continue
+		}
+		// pwd -P already printed the physical path; worker roots are gone by now,
+		// so they cannot be resolved again and are matched by name.
+		cwd := r.cwd
+		if cwd == wantRoot {
+			statusAtRoot = true
+		} else if filepath.Base(cwd) == "w1" || filepath.Base(cwd) == "w2" {
+			statusAtWorker = true
+		}
+	}
+	if repoCmds == 0 {
+		t.Fatal("no repository command was recorded")
+	}
+	if !statusAtRoot || !statusAtWorker {
+		t.Errorf("status records: at root=%v at a worker root=%v, want both", statusAtRoot, statusAtWorker)
+	}
 	requireCleanRecords(t, got)
 }
 
@@ -248,7 +282,9 @@ func TestGitContextCaptureDoesNotSeeParentEnvironment(t *testing.T) {
 }
 
 // Repository-controlled children: a post-checkout hook and a smudge filter run
-// by worktree add, and a core.fsmonitor helper run by status.
+// by worktree add must see only the baseline environment. A core.fsmonitor
+// helper, which a plain status runs (the control), must not run at all: Golem
+// disables it on every call.
 func TestParallelGitChildrenDoNotSeeParentEnvironment(t *testing.T) {
 	isolateGitConfig(t)
 	root := newParallelTestRepo(t)
@@ -272,26 +308,28 @@ func TestParallelGitChildrenDoNotSeeParentEnvironment(t *testing.T) {
 	runTestGit(t, root, "config", "core.fsmonitor", fsmonitor)
 	// Control: an ordinary status runs the fsmonitor helper on this git.
 	runTestGit(t, root, "status", "--porcelain")
-	fsmonitorRuns := slices.ContainsFunc(readGitRecords(t, children), func(r gitRecord) bool { return r.kind == "fsmonitor" })
+	if !slices.ContainsFunc(readGitRecords(t, children), func(r gitRecord) bool { return r.kind == "fsmonitor" }) {
+		t.Fatal("control: an ordinary status did not run the fsmonitor helper, so its absence below proves nothing")
+	}
 	clearRecords(t, children)
 	t.Setenv(hostGitCanaryName, hostGitCanaryValue)
 
 	ctx := context.Background()
 	worktree := filepath.Join(t.TempDir(), "wt")
-	if _, err := runParallelGit(ctx, root, "worktree", "add", "--detach", worktree, "HEAD"); err != nil {
+	if _, err := runParallelGit(ctx, root, root, "worktree", "add", "--detach", worktree, "HEAD"); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _, _ = runParallelGit(context.Background(), root, "worktree", "remove", "--force", worktree) })
-	if _, err := runParallelGit(ctx, root, "status", "--porcelain=v1", "-z"); err != nil {
+	t.Cleanup(func() {
+		_, _ = runParallelGit(context.Background(), root, root, "worktree", "remove", "--force", worktree)
+	})
+	if _, err := runParallelGit(ctx, root, root, "status", "--porcelain=v1", "-z"); err != nil {
 		t.Fatal(err)
 	}
 	got := readGitRecords(t, children)
 	requireGitRecord(t, got, "hook")
 	requireGitRecord(t, got, "smudge")
-	if fsmonitorRuns {
-		requireGitRecord(t, got, "fsmonitor")
-	} else {
-		t.Log("this git does not run core.fsmonitor helpers from status; hook and filter observed only")
+	if slices.ContainsFunc(got, func(r gitRecord) bool { return r.kind == "fsmonitor" }) {
+		t.Error("the fsmonitor helper ran: Golem's git calls must disable core.fsmonitor")
 	}
 	requireCleanRecords(t, got)
 }

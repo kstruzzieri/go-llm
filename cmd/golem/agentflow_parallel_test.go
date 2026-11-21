@@ -790,7 +790,7 @@ func TestParallelWorkersRejectHiddenAssignedEdits(t *testing.T) {
 				if err := os.WriteFile(filepath.Join(w.root, filepath.FromSlash(w.paths[0])), []byte("hidden worker edit\n"), 0o600); err != nil {
 					return err
 				}
-				_, err := runParallelGit(ctx, w.root, "update-index", flag, "--", w.paths[0])
+				_, err := runParallelGit(ctx, root, w.root, "update-index", flag, "--", w.paths[0])
 				return err
 			}
 			c := newParallelCoordinator(root, parallelTestPlan("a.go", "b.go"), 2, worker)
@@ -825,7 +825,7 @@ func TestParallelWorkersRejectHiddenUnassignedEdits(t *testing.T) {
 				if err := os.WriteFile(filepath.Join(w.root, "c.go"), []byte("hidden gate edit\n"), 0o600); err != nil {
 					return err
 				}
-				_, err := runParallelGit(ctx, w.root, "update-index", flag, "--", "c.go")
+				_, err := runParallelGit(ctx, root, w.root, "update-index", flag, "--", "c.go")
 				return err
 			}
 			c := newParallelCoordinator(root, parallelTestPlan("a.go", "b.go"), 2, worker)
