@@ -27,8 +27,9 @@ const SandboxRuntimeHost SandboxRuntime = "host"
 // SandboxRuntimeSeatbelt selects the macOS Seatbelt (sandbox-exec) backend
 // (#442): per-invocation deny-default profiles scoping writes to the
 // workspace plus a private temp directory and reads to reviewed system roots,
-// any declared read-only toolchain roots (#722), the workspace and that temp. Selecting it off-darwin, or on a
-// host whose Seatbelt capability probe fails, fails closed at construction.
+// any declared read-only toolchain roots (#722), the workspace and that
+// temp. Selecting it off-darwin, or on a host whose Seatbelt capability
+// probe fails, fails closed at construction.
 //
 // Commands start with no launchd connection (#712), which has process-wide
 // side effects on the host. Before each spawn the backend empties the host
