@@ -56,6 +56,7 @@ func recordScript(dir, kind string) string {
 	return "rec=$(mktemp " + shellQuote(filepath.Join(dir, kind+".XXXXXX")) + ") || exit 97\n" +
 		"{\n" +
 		"  printf 'argv'; for a in \"$@\"; do printf ' %s' \"$a\"; done; printf '\\n'\n" +
+		"  printf 'cwd %s\\n' \"$(pwd -P)\"\n" +
 		"  if /usr/bin/env | grep -qF " + shellQuote(hostGitCanaryValue) + "; then echo canary; fi\n" +
 		// The exported environment, not shell variables: sh defaults PATH.
 		"  if /usr/bin/env | grep -q '^HOME='; then echo home; fi\n" +
@@ -85,6 +86,7 @@ func installGitRecorder(t *testing.T) string {
 type gitRecord struct {
 	kind               string
 	argv               []string
+	cwd                string
 	canary, home, path bool
 }
 
@@ -106,6 +108,8 @@ func readGitRecords(t *testing.T, dir string) []gitRecord {
 			switch {
 			case line == "argv" || strings.HasPrefix(line, "argv "):
 				r.argv = strings.Fields(strings.TrimPrefix(line, "argv"))
+			case strings.HasPrefix(line, "cwd "):
+				r.cwd = strings.TrimPrefix(line, "cwd ")
 			case line == "canary":
 				r.canary = true
 			case line == "home":
@@ -225,6 +229,20 @@ func TestGitContextCaptureDoesNotSeeParentEnvironment(t *testing.T) {
 	got := readGitRecords(t, records)
 	for _, words := range [][]string{{"rev-parse", "--show-toplevel"}, {"config"}, {"status"}, {"log"}} {
 		requireGitRecord(t, got, "git", words...)
+	}
+	// The version probe carries no prefix; every repository command does.
+	var repoCmds int
+	for _, r := range got {
+		if slices.Equal(r.argv, []string{"--version"}) {
+			continue
+		}
+		repoCmds++
+		if len(r.argv) < len(hostGitPrefix) || !slices.Equal(r.argv[:len(hostGitPrefix)], hostGitPrefix) {
+			t.Errorf("repository command argv %q does not start with the host git prefix", r.argv)
+		}
+	}
+	if repoCmds == 0 {
+		t.Fatal("no repository command was recorded")
 	}
 	requireCleanRecords(t, got)
 }
