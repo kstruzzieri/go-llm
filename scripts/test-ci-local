@@ -95,6 +95,15 @@ for pin in ci.yml:linux:BWRAP:11 darwin-smoke.yml:darwin:SEATBELT:11; do
   require_step "$wf" 'Upload native wiring evidence' '        if: always()' "$upload" \
     "          name: native-wiring-$os" "          path: \${{ runner.temp }}/native-wiring-$os.txt"
 done
+# Declared toolchain roots (#722) run end to end on macOS with a linked Xcode
+# required, and fail on any skip or a top-level pass count other than 3.
+roots_log='"$RUNNER_TEMP/toolchain-roots.txt"'
+require_step darwin-smoke.yml 'Declared toolchain roots' '        shell: bash' \
+  '          GO_LLM_REQUIRE_SEATBELT: "1"' '          GO_LLM_REQUIRE_XCODE_LINK: "1"' '        run: |' \
+  "          set -o pipefail; go test -count=1 -timeout 300s -v -run '^(TestNativeBackend(ToolchainGoBuildAndTest|DeveloperTools)|TestSeatbeltDeveloperLinkLiterals)\$' ./agent/tools ./golem | tee $roots_log" \
+  "          if grep -q -- '--- SKIP' $roots_log; then" \
+  "          passed=\$(grep -cE -- '^--- PASS: Test' $roots_log || true)" \
+  '          if [ "$passed" -ne 3 ]; then'
 # One upload per job that runs the checker: four in ci.yml, one in darwin-smoke,
 # each under if: always() so a failed run still publishes its evidence. The
 # pinned action appears once more per file for the native wiring log.

@@ -146,11 +146,13 @@ jobs:
 
       # Declared toolchain roots (#722) end to end: go build and go test with
       # an offline module cache, python3, git and VCS stamping through Golem
-      # turns, and D3's ablation of each developer link literal. This runner's
-      # Xcode is selected through a link, and GO_LLM_REQUIRE_XCODE_LINK=1
-      # fails the tests without one, so the linked-Xcode leg always runs. A
-      # skip fails the step, and so does any count other than the 3 top-level
-      # tests passing (a rename would otherwise run nothing and pass).
+      # turns, and D3's ablation of each developer link literal whose link
+      # exists here (an absent one logs "not exercised" and passes). This
+      # runner's Xcode is selected through a link, and
+      # GO_LLM_REQUIRE_XCODE_LINK=1 fails the tests without one, so the
+      # linked-Xcode leg always runs. A skip fails the step, and so does any
+      # count other than the 3 top-level tests passing (a rename would
+      # otherwise run nothing and pass). scripts/test-ci-local pins this step.
       - name: Declared toolchain roots
         shell: bash
         env:
