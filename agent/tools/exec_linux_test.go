@@ -1268,6 +1268,8 @@ func TestNewExecBackendBwrapToolchainSentinel(t *testing.T) {
 		field string
 		cfg   SandboxConfig
 	}{
+		{"ReadOnlyRoots", SandboxConfig{Runtime: SandboxRuntimeBwrap, ReadOnlyRoots: []string{t.TempDir()}}},
+		{"DeveloperDirectory", SandboxConfig{Runtime: SandboxRuntimeBwrap, DeveloperDirectory: t.TempDir()}},
 		{"Env", SandboxConfig{Runtime: SandboxRuntimeBwrap, Env: []SandboxEnv{{Name: "GOPROXY", Value: "off"}}}},
 		{"TempEnv", SandboxConfig{Runtime: SandboxRuntimeBwrap, TempEnv: []string{"GOCACHE"}}},
 	} {
