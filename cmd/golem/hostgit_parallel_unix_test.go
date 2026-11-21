@@ -171,3 +171,36 @@ func TestHostGitWorksInLinkedWorktree(t *testing.T) {
 		t.Fatalf("lock dir %q is not under %q", lock, wantDir)
 	}
 }
+
+// Worker code runs before the first worker-side git call, so a git planted in
+// the workspace by a worker must be refused there: worker-side calls take the
+// coordinator root, not the worker root, as the workspace.
+func TestParallelWorkerSideGitRefusesWorkspaceExecutable(t *testing.T) {
+	isolateGitConfig(t)
+	root := resolvedParallelRepo(t)
+	bin := filepath.Join(root, "bin")
+	// bin does not exist yet, so selection resolves the real git past it.
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	marker := filepath.Join(t.TempDir(), "marker")
+	worker := func(_ context.Context, w parallelWorker) error {
+		if w.sourceID != "w1" {
+			return nil
+		}
+		if err := os.Mkdir(bin, 0o700); err != nil {
+			return err
+		}
+		writeExecutable(t, filepath.Join(bin, "git"), "echo ran > "+shellQuote(marker)+"\n")
+		return nil
+	}
+	c := newParallelCoordinator(root, parallelTestPlan("a.go", "b.go"), 2, worker)
+	c.aggregate = func(context.Context, []agentflow.AggregationInput, string, string, bool) (agentflow.AggregationResult, error) {
+		return agentflow.AggregationResult{Status: "ok"}, nil
+	}
+	t.Cleanup(func() { _ = c.cleanup(context.Background()) })
+
+	_, err := c.runCohort(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "inside the workspace") {
+		t.Fatalf("runCohort() err = %v, want a refusal: executable inside the workspace", err)
+	}
+	requireNoMarker(t, marker)
+}
