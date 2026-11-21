@@ -122,6 +122,8 @@ var captureSites = map[string]struct {
 	"exec_linux.go": {map[string]int{
 		"assign .Stdout": 1, "assign .Stderr": 1, "cappedBuffer literal": 1, "exec.Command": 1,
 	}, "probeBwrap: a probe with fixed argv; its output goes only into the probe's own error"},
+	"devdir_darwin.go": {map[string]int{".Output()": 1, "exec.Command": 1},
+		"ActiveDeveloperDirectory: the host, never the model, runs the fixed /usr/bin/xcode-select -p; its stdout is returned only as a validated canonical path and never placed in an error"},
 	"background_unix.go": {map[string]int{"spawn(": 1},
 		"unixStarter.Start hands the spawner the writers the background manager gives it: one screen stream over each tail ring"},
 	"spawn_darwin.go": {map[string]int{

@@ -3379,7 +3379,8 @@ func seatbeltNarrow(t *testing.T, route narrowRoute) {
 }
 
 // TestSeatbeltConstructionRefusals pins construction-time refusal of declared
-// roots (#722) through the public ValidateSandbox path: each wraps
+// roots (#722) and of a developer directory selected through a link root
+// does not own, through the public ValidateSandbox path: each wraps
 // ErrSandboxPolicy and names its reason. HOME is a stand-in, so nothing
 // under the real home is consulted.
 func TestSeatbeltConstructionRefusals(t *testing.T) {
@@ -3397,20 +3398,47 @@ func TestSeatbeltConstructionRefusals(t *testing.T) {
 	}
 	dev := mkdirT(t, filepath.Join(base, "dev"))
 	devWS := mkdirT(t, filepath.Join(dev, "ws"))
+	// The developer directory opts into the selection-link check (D3). It
+	// passes on this host's real links, and on a stand-in link that root
+	// owns; the row below differs from that control only in the owner.
+	devDir := mkdirT(t, filepath.Join(base, "devdir"))
+	devCfg := SandboxConfig{Runtime: SandboxRuntimeSeatbelt, DeveloperDirectory: devDir}
+	if err := ValidateSandbox(devCfg, ws); err != nil {
+		t.Fatalf("valid developer directory control refused on this host's links: %v", err)
+	}
+	selectLink := func(uid uint32) func(string) (linkInfo, error) {
+		return fakeLinkHost(map[string]linkInfo{testSelectLink: {exists: true, symlink: true, uid: uid}}, "")
+	}
+	withLinks := func(t *testing.T, lstat func(string) (linkInfo, error)) {
+		old := seatbeltLinkLstat
+		seatbeltLinkLstat = lstat
+		t.Cleanup(func() { seatbeltLinkLstat = old })
+	}
+	t.Run("root-owned developer link control", func(t *testing.T) {
+		withLinks(t, selectLink(0))
+		if err := ValidateSandbox(devCfg, ws); err != nil {
+			t.Fatalf("valid control refused: %v", err)
+		}
+	})
 	rows := []struct {
 		name   string
 		cfg    SandboxConfig
 		ws     string
 		reason string
+		lstat  func(string) (linkInfo, error) // replaces seatbeltLinkLstat when set
 	}{
-		{"home", SandboxConfig{ReadOnlyRoots: []string{home}}, ws, "home directory"},
-		{"parent of home", SandboxConfig{ReadOnlyRoots: []string{filepath.Dir(home)}}, ws, "home directory"},
-		{"dangling link", SandboxConfig{ReadOnlyRoots: []string{dangling}}, ws, "cannot be resolved"},
-		{"control character", SandboxConfig{ReadOnlyRoots: []string{tools + "/a\nb"}}, ws, "control characters"},
-		{"developer directory covering the workspace", SandboxConfig{DeveloperDirectory: dev}, devWS, "overlaps"},
+		{"home", SandboxConfig{ReadOnlyRoots: []string{home}}, ws, "home directory", nil},
+		{"parent of home", SandboxConfig{ReadOnlyRoots: []string{filepath.Dir(home)}}, ws, "home directory", nil},
+		{"dangling link", SandboxConfig{ReadOnlyRoots: []string{dangling}}, ws, "cannot be resolved", nil},
+		{"control character", SandboxConfig{ReadOnlyRoots: []string{tools + "/a\nb"}}, ws, "control characters", nil},
+		{"developer directory covering the workspace", SandboxConfig{DeveloperDirectory: dev}, devWS, "overlaps", nil},
+		{"non-root developer link", devCfg, ws, "is not a root-owned symlink", selectLink(501)},
 	}
 	for _, r := range rows {
 		t.Run(r.name, func(t *testing.T) {
+			if r.lstat != nil {
+				withLinks(t, r.lstat)
+			}
 			r.cfg.Runtime = SandboxRuntimeSeatbelt
 			err := ValidateSandbox(r.cfg, r.ws)
 			if !errors.Is(err, ErrSandboxPolicy) || !strings.Contains(err.Error(), r.reason) {

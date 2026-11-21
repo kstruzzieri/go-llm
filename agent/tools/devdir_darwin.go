@@ -1,0 +1,91 @@
+//go:build darwin
+
+package tools
+
+// The developer directory on macOS (#722 D3): the host helper that reads the
+// active selection, the lstat adapter behind checkDeveloperLinks, and the
+// metadata literals the Seatbelt profile grants with a developer directory.
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io/fs"
+	"os"
+	"os/exec"
+	"slices"
+	"strings"
+	"syscall"
+	"time"
+)
+
+// seatbeltDeveloperLiterals are the exact file-read-metadata literals a
+// developer directory needs (#722 A0 F4): /var, the spelling the xcode-select
+// shim reads, and the two selection links. The link entries stay only if the
+// linked-Xcode CI leg shows a denial without them (D3).
+var seatbeltDeveloperLiterals = []string{"/var", "/private/var/select/developer_dir", "/private/var/db/xcode_select_link"}
+
+// seatbeltLinkLstat is the lstat construction reads the selection links
+// through (checkDeveloperLinks); tests replace it.
+var seatbeltLinkLstat = lstatLinkInfo
+
+// lstatLinkInfo is os.Lstat as a linkInfo: a path that does not exist is not
+// an error, and the owner is Stat_t's.
+func lstatLinkInfo(path string) (linkInfo, error) {
+	fi, err := os.Lstat(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return linkInfo{}, nil
+	}
+	if err != nil {
+		return linkInfo{}, err
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok {
+		return linkInfo{}, fmt.Errorf("tools: no owner recorded for %q", path)
+	}
+	return linkInfo{exists: true, symlink: fi.Mode()&fs.ModeSymlink != 0, uid: st.Uid}, nil
+}
+
+// xcodeSelectPath is the system xcode-select; tests point it at a stand-in.
+var xcodeSelectPath = "/usr/bin/xcode-select"
+
+// activeDeveloperDirectoryTimeout bounds one xcode-select run on top of the
+// caller's context.
+var activeDeveloperDirectoryTimeout = 5 * time.Second
+
+// ActiveDeveloperDirectory returns the canonical spelling of the host's
+// active developer directory, for a host to declare as
+// SandboxConfig.DeveloperDirectory. It runs xcode-select -p with
+// DEVELOPER_DIR removed from its environment, so the system selection
+// decides, under a timeout on top of ctx; refuses output that is not one
+// clean absolute path; resolves it with CanonicalToolchainRoot; and maps an
+// app bundle's Contents/Developer to the bundle, whose sibling frameworks
+// the dispatched tools load. Every failure wraps ErrSandboxPolicy. The
+// selection still chooses which directory is declared; admission and the
+// approval preview bound it.
+func ActiveDeveloperDirectory(ctx context.Context) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, activeDeveloperDirectoryTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, xcodeSelectPath, "-p")
+	cmd.Env = slices.DeleteFunc(os.Environ(), func(kv string) bool { return strings.HasPrefix(kv, "DEVELOPER_DIR=") })
+	cmd.WaitDelay = execWaitDelay
+	out, err := cmd.Output()
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			err = ctxErr
+		}
+		return "", fmt.Errorf("tools: active developer directory: %w: xcode-select -p: %w", ErrSandboxPolicy, err)
+	}
+	dir := strings.TrimSuffix(string(out), "\n")
+	if !toolchainPath(dir) {
+		return "", fmt.Errorf("tools: active developer directory: %w: xcode-select -p printed not one clean absolute path", ErrSandboxPolicy)
+	}
+	canon, err := CanonicalToolchainRoot(dir)
+	if err != nil {
+		return "", fmt.Errorf("tools: active developer directory: %w: %w", ErrSandboxPolicy, err)
+	}
+	if app, ok := strings.CutSuffix(canon, "/Contents/Developer"); ok && strings.HasSuffix(app, ".app") {
+		return app, nil
+	}
+	return canon, nil
+}

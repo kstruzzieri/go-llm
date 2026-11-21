@@ -281,7 +281,9 @@ type seatbeltBackend struct {
 // newSeatbeltExecBackend constructs the real Seatbelt backend, failing closed
 // when the config requests ceilings Seatbelt cannot enforce, when a declared
 // root fails admission (admitRoots, against the process's HOME and
-// environment), or when the active capability probe fails.
+// environment), when a developer directory is set and a selection link fails
+// the ownership check (checkDeveloperLinks over seatbeltLinkLstat), or when
+// the active capability probe fails.
 func newSeatbeltExecBackend(cfg SandboxConfig) (execBackend, error) {
 	return newSeatbeltExecBackendAt(seatbeltExecPath, probeSeatbelt, cfg)
 }
@@ -297,6 +299,11 @@ func newSeatbeltExecBackendAt(execPath string, probe seatbeltProbeFunc, cfg Sand
 			return nil, fmt.Errorf("tools: seatbelt declared roots: %w", err)
 		}
 		if err := admitRoots(roots, home, seatbeltTempBase, os.Getenv); err != nil {
+			return nil, err
+		}
+	}
+	if cfg.DeveloperDirectory != "" {
+		if err := checkDeveloperLinks(seatbeltLinkLstat); err != nil {
 			return nil, err
 		}
 	}

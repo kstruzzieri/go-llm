@@ -2,7 +2,8 @@ package tools
 
 // Declared toolchain policy (#722): the closed tables behind SandboxConfig.Env
 // and TempEnv, the pure checks on the declared roots, and their admission
-// against the host (admitRoots), which stats the filesystem.
+// against the host (admitRoots), which stats the filesystem, and the
+// developer directory's link check over an lstat seam (checkDeveloperLinks).
 
 import (
 	"fmt"
@@ -230,6 +231,52 @@ func admitRoots(roots []string, home, tempBase string, getenv func(string) strin
 		}
 		if fi, err := os.Stat(root); err != nil || !fi.IsDir() {
 			return fmt.Errorf("tools: declared root %q is not a directory", root)
+		}
+	}
+	return nil
+}
+
+// linkInfo is the portable view of one lstat: whether the path exists,
+// whether it is a symlink, and its owner. A path that does not exist is
+// reported as exists false, not as an error.
+type linkInfo struct {
+	exists, symlink bool
+	uid             uint32
+}
+
+// developerSelectionLinks are the links through which xcode-select records
+// the active developer directory.
+var developerSelectionLinks = []string{"/private/var/select/developer_dir", "/private/var/db/xcode_select_link"}
+
+// checkDeveloperLinks is the issue's link-ownership check, run when a config
+// opts into a developer directory (#722 D3): each selection link that exists
+// must be a symlink root owns, and every directory above it, up to /, an
+// existing directory root owns. A missing link is fine; any other lstat error
+// refuses. The developer directory is still a declared root that admission
+// bounds; this check is not the confinement boundary.
+func checkDeveloperLinks(lstat func(string) (linkInfo, error)) error {
+	for _, link := range developerSelectionLinks {
+		info, err := lstat(link)
+		if err != nil {
+			return fmt.Errorf("tools: developer directory link %q cannot be inspected: %w", link, err)
+		}
+		if !info.exists {
+			continue
+		}
+		if !info.symlink || info.uid != 0 {
+			return fmt.Errorf("tools: developer directory link %q is not a root-owned symlink", link)
+		}
+		for dir := filepath.Dir(link); ; dir = filepath.Dir(dir) {
+			d, err := lstat(dir)
+			if err != nil {
+				return fmt.Errorf("tools: developer directory link %q: %q cannot be inspected: %w", link, dir, err)
+			}
+			if !d.exists || d.symlink || d.uid != 0 {
+				return fmt.Errorf("tools: developer directory link %q: %q is not a root-owned directory", link, dir)
+			}
+			if dir == "/" {
+				break
+			}
 		}
 	}
 	return nil
