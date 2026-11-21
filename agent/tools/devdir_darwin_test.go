@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -31,14 +32,16 @@ func fakeXcodeSelect(t *testing.T, body string) {
 // TestSeatbeltActiveDeveloperDirectory pins the host helper (#722 D3)
 // through a stand-in xcode-select, so no row depends on this Mac's
 // selection: DEVELOPER_DIR never reaches the child, an app bundle's
-// Contents/Developer maps to the bundle, the result is canonical, and output
-// that is not one clean absolute path, a non-zero exit and a hung command
-// are refused. Valid controls run first.
+// Contents/Developer maps to the bundle while one outside a bundle stays
+// unchanged, the result is canonical, and output that is not one clean
+// absolute path, a non-zero exit and a hung command are refused. Valid
+// controls run first.
 func TestSeatbeltActiveDeveloperDirectory(t *testing.T) {
 	canon := canonTempDirT(t)
 	mkdirT(t, filepath.Join(canon, "CommandLineTools"))
 	mkdirT(t, filepath.Join(canon, "Xcode.app", "Contents", "Developer"))
 	mkdirT(t, filepath.Join(canon, "Env.app", "Contents", "Developer"))
+	tools := mkdirT(t, filepath.Join(canon, "Tools", "Contents", "Developer"))
 	if err := os.Symlink(filepath.Join(canon, "Xcode.app"), filepath.Join(canon, "current")); err != nil {
 		t.Fatal(err)
 	}
@@ -52,6 +55,7 @@ func TestSeatbeltActiveDeveloperDirectory(t *testing.T) {
 		{"command line tools", say(clt), clt},
 		{"app bundle", say(filepath.Join(canon, "Xcode.app", "Contents", "Developer")), filepath.Join(canon, "Xcode.app")},
 		{"canonical spelling", say(filepath.Join(canon, "current", "Contents", "Developer")), filepath.Join(canon, "Xcode.app")},
+		{"Contents/Developer outside an app bundle", say(tools), tools},
 		{"no trailing newline", `printf '%s' "${DEVELOPER_DIR:-` + clt + `}"`, clt},
 	}
 	for _, r := range valid {
@@ -122,9 +126,11 @@ func TestSeatbeltActiveDeveloperDirectory(t *testing.T) {
 // TestSeatbeltActiveDeveloperDirectoryHost runs the real xcode-select once,
 // with DEVELOPER_DIR set to a path that does not exist: a leak would fail
 // canonicalization. Hosts with no developer directory selected skip, judged
-// by running xcode-select directly.
+// by running xcode-select directly without DEVELOPER_DIR, as the helper does.
 func TestSeatbeltActiveDeveloperDirectoryHost(t *testing.T) {
-	if err := exec.Command(xcodeSelectPath, "-p").Run(); err != nil {
+	probe := exec.Command(xcodeSelectPath, "-p")
+	probe.Env = slices.DeleteFunc(os.Environ(), func(kv string) bool { return strings.HasPrefix(kv, "DEVELOPER_DIR=") })
+	if err := probe.Run(); err != nil {
 		t.Skipf("no active developer directory on this host: %v", err)
 	}
 	t.Setenv("DEVELOPER_DIR", "/nonexistent-go-llm-developer-dir")
