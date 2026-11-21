@@ -1032,6 +1032,10 @@ the fourth applies only to the snapshot:
   `git` binary to check.
 - Golem refuses a `git` found on `PATH` that, after symbolic links are
   resolved, lies inside the workspace. A relative `git` path is refused too.
+  When the workspace is your home directory, this refuses a git installed under
+  it (for example `~/bin/git`, or asdf or mise shims), because a sandboxed
+  command can write anywhere in the workspace and could replace that git. This
+  is intended.
 - Only the snapshot refuses a repository whose local or worktree config includes
   another file (`include.path` or `includeIf.<condition>.path`). Startup prints
   `git context disabled: ...`. `/git-context refresh` prints

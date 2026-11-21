@@ -318,3 +318,26 @@ func TestHostGitCommandProbeCancellationIsWrapped(t *testing.T) {
 		t.Fatalf("second call with a live context: %v", err)
 	}
 }
+
+// TestHostGitCommandProbeFailureShowsGitMessage checks that a failed
+// `git --version` carries git's own stderr, with control bytes neutralized.
+func TestHostGitCommandProbeFailureShowsGitMessage(t *testing.T) {
+	ws := resolvedTemp(t)
+	bin := resolvedTemp(t)
+	fake := filepath.Join(bin, "git")
+	writeExecutable(t, fake, `printf 'boom-803 \033[31mred\n' >&2; exit 1`+"\n")
+	_, err := hostGitCommand(context.Background(), fake, ws, ws, nil, "status")
+	if err == nil {
+		t.Fatal("accepted a git whose --version fails")
+	}
+	if !strings.Contains(err.Error(), "boom-803") {
+		t.Fatalf("error lacks git's message: %v", err)
+	}
+	if strings.Contains(err.Error(), "\x1b") {
+		t.Fatalf("error carries a raw ESC byte: %q", err.Error())
+	}
+	var ee *exec.ExitError
+	if !errors.As(err, &ee) {
+		t.Fatalf("run error no longer wrapped: %v", err)
+	}
+}

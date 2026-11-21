@@ -81,13 +81,17 @@ func requireHostGit(ctx context.Context, path, workspace string, env []string) (
 	probe.Env = env
 	stdout := &capWriter{max: gitContextStderrCap}
 	probe.Stdout = stdout
-	probe.Stderr = &capWriter{max: gitContextStderrCap}
+	stderr := &capWriter{max: gitContextStderrCap}
+	probe.Stderr = stderr
 	probe.WaitDelay = gitContextWaitDelay
 	runErr := probe.Run()
 	if err := ctx.Err(); err != nil {
 		return "", fmt.Errorf("git: %s --version: %w", gitContextText(resolved), err)
 	}
 	if runErr != nil {
+		if msg := strings.TrimSpace(stderr.String()); msg != "" {
+			return "", fmt.Errorf("git: %s --version: %w: %s", gitContextText(resolved), runErr, gitContextText(msg))
+		}
 		return "", fmt.Errorf("git: %s --version: %w", gitContextText(resolved), runErr)
 	}
 	major, minor, perr := parseGitVersion(stdout.String())
