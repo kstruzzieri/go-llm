@@ -129,7 +129,9 @@ jobs:
       # #722 supports the standalone Command Line Tools. Select them on this
       # disposable runner before either broad suite invokes the system shims.
       - name: Select standalone Command Line Tools
-        run: sudo /usr/bin/xcode-select --switch /Library/Developer/CommandLineTools
+        run: |
+          sudo /usr/bin/xcode-select --switch /Library/Developer/CommandLineTools
+          test -L /private/var/select/developer_dir
 
       # Real Seatbelt confinement (#442). GO_LLM_REQUIRE_SEATBELT=1 turns a
       # skip into a hard failure, so a runner that cannot apply Seatbelt (a
@@ -151,12 +153,8 @@ jobs:
 
       # Declared toolchain roots (#722) end to end: go build and go test with
       # an offline module cache, python3, git and VCS stamping through Golem
-      # turns, and D3's ablation of each developer link literal whose link
-      # exists here (an absent one logs "not exercised" and passes). This
-      # runner explicitly selects the Command Line Tools. A skip fails the
-      # step, and so does any
-      # count other than the 3 top-level tests passing (a rename would
-      # otherwise run nothing and pass). scripts/test-ci-local pins this step.
+      # turns, and a denial with the active selection link's metadata grant
+      # removed. Require all three tests to pass without a skip.
       - name: Declared toolchain roots
         shell: bash
         env:

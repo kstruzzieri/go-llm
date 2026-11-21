@@ -3660,7 +3660,7 @@ func TestSeatbeltPrepareToolchainProfile(t *testing.T) {
 		}
 		for _, lit := range []string{"/var", "/private/var/select/developer_dir", "/private/var/db/xcode_select_link"} {
 			var want []string
-			if cfg.DeveloperDirectory != "" {
+			if cfg.DeveloperDirectory != "" && lit != "/private/var/db/xcode_select_link" {
 				want = []string{"allow file-read-metadata"}
 			}
 			if got := seatbeltGrantsOf(profile, `(literal "`+lit+`")`); !slices.Equal(got, want) {
@@ -3901,14 +3901,10 @@ func TestSeatbeltFactoryInputMutation(t *testing.T) {
 	}
 }
 
-// TestSeatbeltDeveloperLinkLiterals is D3's ablation (#722): with the
-// active developer directory declared, python3 must fail once the literal of
-// a link that exists on the host is dropped from seatbeltDeveloperLiterals. A
-// literal python3 runs without is not needed and must be removed. An absent
-// link is not ablated: A0 measured python3 running with neither literal when
-// no link exists, so its run proves nothing about the literal. Its subtest
-// logs that and passes rather than skipping, since the darwin-smoke step
-// fails on any skip.
+// TestSeatbeltDeveloperLinkLiterals proves the modern selection link's
+// metadata grant is needed when the CLT selection is explicit. An implicit
+// selection exercises the positive control only. CI creates and checks the
+// selection link before running this test.
 func TestSeatbeltDeveloperLinkLiterals(t *testing.T) {
 	requireSeatbeltCapability(t)
 	dev, err := ActiveDeveloperDirectory(context.Background())
@@ -3925,23 +3921,17 @@ func TestSeatbeltDeveloperLinkLiterals(t *testing.T) {
 	if res := realSeatbeltRun(t, cfg, ws, argv); res.ExitCode != 0 || string(res.Stdout) != "1\n" {
 		t.Fatalf("control with every literal: exit=%d stdout=%q stderr=%q", res.ExitCode, res.Stdout, res.Stderr)
 	}
+	const link = "/private/var/select/developer_dir"
+	if _, err := os.Lstat(link); errors.Is(err, os.ErrNotExist) {
+		t.Log("implicit CLT selection")
+		return
+	} else if err != nil {
+		t.Fatal(err)
+	}
 	all := seatbeltDeveloperLiterals
-	for _, link := range developerSelectionLinks {
-		t.Run(filepath.Base(link), func(t *testing.T) {
-			if !slices.Contains(all, link) {
-				t.Fatalf("%s is not in seatbeltDeveloperLiterals %q", link, all)
-			}
-			if _, err := os.Lstat(link); errors.Is(err, os.ErrNotExist) {
-				t.Logf("not exercised: %s absent on this host (lstat: %v)", link, err)
-				return
-			} else if err != nil {
-				t.Fatalf("lstat %s: %v", link, err)
-			}
-			seatbeltDeveloperLiterals = slices.DeleteFunc(slices.Clone(all), func(l string) bool { return l == link })
-			t.Cleanup(func() { seatbeltDeveloperLiterals = all })
-			if res := realSeatbeltRun(t, cfg, ws, argv); res.ExitCode == 0 {
-				t.Errorf("python3 ran without the metadata literal %s, whose link is present: it is not needed and must be removed from seatbeltDeveloperLiterals (#722 D3)", link)
-			}
-		})
+	seatbeltDeveloperLiterals = slices.DeleteFunc(slices.Clone(all), func(l string) bool { return l == link })
+	t.Cleanup(func() { seatbeltDeveloperLiterals = all })
+	if res := realSeatbeltRun(t, cfg, ws, argv); res.ExitCode == 0 {
+		t.Errorf("python3 ran without the metadata grant for %s", link)
 	}
 }

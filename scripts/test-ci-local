@@ -97,7 +97,8 @@ for pin in ci.yml:linux:BWRAP:11 darwin-smoke.yml:darwin:SEATBELT:11; do
 done
 # Declared toolchain roots (#722) run with the standalone Command Line Tools.
 require_step darwin-smoke.yml 'Select standalone Command Line Tools' \
-  '        run: sudo /usr/bin/xcode-select --switch /Library/Developer/CommandLineTools'
+  '          sudo /usr/bin/xcode-select --switch /Library/Developer/CommandLineTools' \
+  '          test -L /private/var/select/developer_dir'
 roots_log='"$RUNNER_TEMP/toolchain-roots.txt"'
 require_step darwin-smoke.yml 'Declared toolchain roots' '        shell: bash' \
   '          GO_LLM_REQUIRE_SEATBELT: "1"' '        run: |' \

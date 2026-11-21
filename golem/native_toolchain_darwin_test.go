@@ -316,8 +316,15 @@ func TestNativeBackendToolchainGoBuildAndTest(t *testing.T) {
 
 	s := newToolchainSession(t, ws, full, true)
 	s.ok("go", "build", "./...")
-	s.ok("go", "test", "./...")
-	s.requirePreviews("read_only_roots=", strconv.Quote(goroot), strconv.Quote(modRoot),
+	if result := s.ok("go", "test", "./..."); !strings.Contains(result, "example.com/hello/pool") {
+		t.Errorf("go test output lacks the fixture package: %s", result)
+	}
+	probe := filepath.Join(modRoot, "probe")
+	s.fails("Operation not permitted", "/usr/bin/touch", probe)
+	if _, err := os.Lstat(probe); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("host stat of denied write: %v, want no file", err)
+	}
+	s.requirePreviews("runtime=seatbelt network=denied", "read_only_roots=", strconv.Quote(goroot), strconv.Quote(modRoot),
 		strconv.Quote("GOMODCACHE="+modRoot), strconv.Quote("GOPROXY=off"), strconv.Quote("GOTOOLCHAIN=local"),
 		strconv.Quote("GOFLAGS=-buildvcs=false"), strconv.Quote("GOCACHE=<private temp>/gocache"))
 
@@ -450,14 +457,14 @@ func TestNativeBackendDeveloperTools(t *testing.T) {
 
 	s = newToolchainSession(t, repo, withGo, false)
 	s.ok("go", "build", "-o", "stamped", ".")
-	if n := vcsSettings(t, filepath.Join(repo, "stamped")); n == 0 {
-		t.Error("go build in a committed repository stamped no vcs settings")
+	if info := s.ok("go", "version", "-m", "stamped"); !strings.Contains(info, "vcs=git") {
+		t.Errorf("go version -m did not report git VCS stamping: %s", info)
 	}
 	s.requirePreviews(fixed...)
 
 	t.Run("without the developer directory", func(t *testing.T) {
 		// The xcode-select shim's own error: which link it names differs
-		// between a linked Xcode and the implicit Command Line Tools.
+		// between explicitly and implicitly selected Command Line Tools.
 		const shim = "xcode-select: error"
 		s := newToolchainSession(t, repo, policy, false)
 		t.Setenv("HOME", noHome)

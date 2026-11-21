@@ -2,8 +2,8 @@ package main
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
-	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -16,6 +16,11 @@ import (
 // shows that spelling and every variable a command gets (#722). macOS only:
 // the toolchain flags are Seatbelt's, so the Linux run has no skip.
 func TestNativeWiringToolchainNotice(t *testing.T) {
+	out, err := exec.Command("go", "env", "GOROOT").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	goRoot := canonicalDir(t, strings.TrimSpace(string(out)))
 	config, root := golemWorkspace(t)
 	policy := nativePolicyForTest(t, root)
 	real := canonicalDir(t, t.TempDir())
@@ -23,7 +28,6 @@ func TestNativeWiringToolchainNotice(t *testing.T) {
 	if err := os.Symlink(real, link); err != nil {
 		t.Fatal(err)
 	}
-	goRoot := canonicalDir(t, runtime.GOROOT())
 	wantRoots := []string{goRoot, real}
 	slices.Sort(wantRoots)
 	wantEnv := []string{"GOCACHE=<private temp>/gocache", "GOFLAGS=-buildvcs=false", "GOMODCACHE=" + real, "GOPROXY=off", "GOTOOLCHAIN=local"}

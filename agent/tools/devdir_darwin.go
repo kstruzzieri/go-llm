@@ -21,9 +21,9 @@ import (
 
 // seatbeltDeveloperLiterals are the exact file-read-metadata literals a
 // developer directory needs (#722 A0 F4): /var, the spelling the xcode-select
-// shim reads, and the two selection links. The link entries stay only if the
-// linked-Xcode CI leg shows a denial without them (D3).
-var seatbeltDeveloperLiterals = []string{"/var", "/private/var/select/developer_dir", "/private/var/db/xcode_select_link"}
+// shim reads, and the selection link used by explicitly selected Command
+// Line Tools. The host checks ownership of both known selection links.
+var seatbeltDeveloperLiterals = []string{"/var", "/private/var/select/developer_dir"}
 
 // seatbeltLinkLstat is the lstat construction reads the selection links
 // through (checkDeveloperLinks); tests replace it.
