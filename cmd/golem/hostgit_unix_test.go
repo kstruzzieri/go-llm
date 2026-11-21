@@ -224,6 +224,72 @@ func TestHostGitCommandErrorsAreSanitized(t *testing.T) {
 	if strings.ContainsRune(err.Error(), 0x1b) {
 		t.Fatalf("raw ESC in error: %q", err)
 	}
+	if !strings.Contains(err.Error(), "inside the workspace") {
+		t.Fatalf("err = %q, want the inside-the-workspace refusal", err)
+	}
+}
+
+func TestHostGitCommandRefusesCaseVariantWorkspacePath(t *testing.T) {
+	base := resolvedTemp(t)
+	ws := filepath.Join(base, "proj")
+	if err := os.MkdirAll(filepath.Join(ws, "bin"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(base, "PROJ")); err != nil {
+		t.Skip("case-sensitive filesystem")
+	}
+	marker := filepath.Join(base, "marker")
+	writeExecutable(t, filepath.Join(ws, "bin", "git"), "echo ran > "+shellQuote(marker)+"\necho 'git version 2.56.0'\n")
+	_, err := hostGitCommand(context.Background(), filepath.Join(base, "PROJ", "bin", "git"), ws, ws, nil, "status")
+	if err == nil || !strings.Contains(err.Error(), "inside the workspace") {
+		t.Fatalf("err = %v, want the inside-the-workspace refusal", err)
+	}
+	requireNoMarker(t, marker)
+}
+
+func TestHostGitCommandDotDotPrefixedNames(t *testing.T) {
+	base := resolvedTemp(t)
+	ws := filepath.Join(base, "ws")
+	inside := filepath.Join(ws, "..foo")
+	outside := filepath.Join(base, "..foo-sibling")
+	for _, d := range []string{inside, outside} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		writeExecutable(t, filepath.Join(d, "git"), "echo 'git version 2.56.0'\n")
+	}
+	if _, err := hostGitCommand(context.Background(), filepath.Join(inside, "git"), ws, ws, nil, "status"); err == nil || !strings.Contains(err.Error(), "inside the workspace") {
+		t.Fatalf("git in ..foo child: err = %v, want refusal", err)
+	}
+	if _, err := hostGitCommand(context.Background(), filepath.Join(outside, "git"), ws, ws, nil, "status"); err != nil {
+		t.Fatalf("git in ..foo-sibling outside the workspace: %v", err)
+	}
+}
+
+// A multi-call binary dispatches on argv[0]; the version probe must present the
+// same name the real command does.
+func TestHostGitCommandProbeUsesLookedUpArgv0(t *testing.T) {
+	goBin, err := exec.LookPath("go")
+	if err != nil {
+		t.Skip("go not on PATH")
+	}
+	src := t.TempDir()
+	writeTestFile(t, filepath.Join(src, "main.go"), "package main\nimport (\"fmt\"; \"os\"; \"path/filepath\")\nfunc main() {\n\tif filepath.Base(os.Args[0]) == \"git\" { fmt.Println(\"git version 2.56.0\"); return }\n\tfmt.Println(\"multitool 1.0\")\n}\n", 0o600)
+	writeTestFile(t, filepath.Join(src, "go.mod"), "module multitool\n\ngo 1.21\n", 0o600)
+	dir := resolvedTemp(t)
+	tool := filepath.Join(dir, "multitool")
+	build := exec.Command(goBin, "build", "-o", tool, ".")
+	build.Dir = src
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("go build: %v\n%s", err, out)
+	}
+	link := filepath.Join(dir, "git")
+	if err := os.Symlink(tool, link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := hostGitCommand(context.Background(), link, resolvedTemp(t), "", nil, "status"); err != nil {
+		t.Fatalf("multi-call git shim refused: %v", err)
+	}
 }
 
 func TestHostGitCommandSurfacesLookupError(t *testing.T) {

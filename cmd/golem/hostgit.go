@@ -57,8 +57,11 @@ func requireHostGit(ctx context.Context, path, workspace string, env []string) (
 	if err != nil {
 		return "", fmt.Errorf("git: resolve workspace %s: %w", gitContextText(workspace), err)
 	}
-	// Both paths are absolute, so a Rel error means different volumes: outside.
-	if rel, err := filepath.Rel(ws, resolved); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+	inside, err := pathWithin(resolved, ws)
+	if err != nil {
+		return "", fmt.Errorf("git: cannot place %s relative to the workspace: %w", gitContextText(resolved), err)
+	}
+	if inside {
 		return "", fmt.Errorf("git: refusing %s: the executable is inside the workspace", gitContextText(resolved))
 	}
 
@@ -74,6 +77,7 @@ func requireHostGit(ctx context.Context, path, workspace string, env []string) (
 	}
 
 	probe := exec.CommandContext(ctx, resolved, "--version")
+	probe.Args[0] = path // multi-call shims dispatch on argv[0]; match the real command
 	probe.Env = env
 	stdout := &capWriter{max: gitContextStderrCap}
 	probe.Stdout = stdout
@@ -94,6 +98,32 @@ func requireHostGit(ctx context.Context, path, workspace string, env []string) (
 	hostGitVerified[resolved] = before
 	hostGitMu.Unlock()
 	return resolved, nil
+}
+
+// pathWithin reports whether path is root or lies under it, by file identity
+// rather than spelling: a case-insensitive filesystem, Unicode normalization,
+// firmlinks and bind mounts all give one directory several spellings. It walks
+// up from path's directory comparing each ancestor with root through
+// os.SameFile, and fails closed on any stat error.
+func pathWithin(path, root string) (bool, error) {
+	rootInfo, err := os.Stat(root)
+	if err != nil {
+		return false, err
+	}
+	for dir := filepath.Dir(path); ; {
+		info, err := os.Stat(dir)
+		if err != nil {
+			return false, err
+		}
+		if os.SameFile(info, rootInfo) {
+			return true, nil
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return false, nil
+		}
+		dir = parent
+	}
 }
 
 // gitVersionSupported reports whether major.minor is at least 2.38.
