@@ -102,19 +102,34 @@ func (c SandboxConfig) Clone() SandboxConfig {
 }
 
 // EffectiveEnv returns, sorted as NAME=value, every variable the backend
-// adds: Env, each TempEnv name under privateTemp, and the fixed git and
-// python settings when DeveloperDirectory is set. Display passes
-// "<private temp>"; a backend passes the command's real directory.
+// adds: the fixed git and python settings when DeveloperDirectory is set,
+// each TempEnv name under privateTemp, and Env. Display passes
+// "<private temp>"; a backend passes the command's real directory. Each name
+// appears once. On a config that was never normalized, TempEnv names outside
+// the table are skipped and, for a repeated name, the first source in that
+// order wins, so a fixed setting is never overridden.
 func (c SandboxConfig) EffectiveEnv(privateTemp string) []string {
 	var env []string
-	for _, e := range c.Env {
-		env = append(env, e.Name+"="+e.Value)
-	}
-	for _, name := range c.TempEnv {
-		env = append(env, name+"="+privateTemp+"/"+sandboxTempEnv[name])
+	seen := make(map[string]bool)
+	add := func(name, value string) {
+		if !seen[name] {
+			seen[name] = true
+			env = append(env, name+"="+value)
+		}
 	}
 	if c.DeveloperDirectory != "" {
-		env = append(env, developerDirectoryEnv...)
+		for _, kv := range developerDirectoryEnv {
+			name, value, _ := strings.Cut(kv, "=")
+			add(name, value)
+		}
+	}
+	for _, name := range c.TempEnv {
+		if dir, ok := sandboxTempEnv[name]; ok {
+			add(name, privateTemp+"/"+dir)
+		}
+	}
+	for _, e := range c.Env {
+		add(e.Name, e.Value)
 	}
 	slices.Sort(env)
 	return env
@@ -453,6 +468,7 @@ func normalizeSandboxConfig(c SandboxConfig) (SandboxConfig, error) {
 	if c.Runtime == "" {
 		c.Runtime = SandboxRuntimeHost
 	}
+	c = c.Clone() // every check below reads the owned copy
 	if strings.TrimSpace(string(c.Runtime)) == "" || containsControl(string(c.Runtime)) {
 		return SandboxConfig{}, fmt.Errorf("tools: sandbox Runtime must be non-blank and contain no control characters")
 	}
@@ -473,7 +489,6 @@ func normalizeSandboxConfig(c SandboxConfig) (SandboxConfig, error) {
 	if err := validateToolchainFields(c); err != nil {
 		return SandboxConfig{}, err
 	}
-	c = c.Clone()
 	slices.Sort(c.DropCaps)
 	c.DropCaps = slices.Compact(c.DropCaps)
 	slices.Sort(c.ReadOnlyRoots)

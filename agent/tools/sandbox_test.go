@@ -653,6 +653,16 @@ func TestSandboxEffectiveEnv(t *testing.T) {
 	if !slices.IsSorted(got) || len(got) != len(want)+3 {
 		t.Fatalf("EffectiveEnv = %q, want the %d entries sorted", got, len(want)+3)
 	}
+
+	// Never normalized: an unknown temp name is skipped, a repeated one and
+	// an Env entry of the same name do not add a second GOCACHE.
+	raw := SandboxConfig{
+		Env:     []SandboxEnv{{Name: "GOCACHE", Value: "/Users/victim/cache"}},
+		TempEnv: []string{"GOCACHE", "XDG_CACHE_HOME", "GOCACHE"},
+	}
+	if got, want := raw.EffectiveEnv("<private temp>"), []string{"GOCACHE=<private temp>/gocache"}; !slices.Equal(got, want) {
+		t.Fatalf("EffectiveEnv(un-normalized) = %q, want %q", got, want)
+	}
 }
 
 func TestSandboxConfigClone(t *testing.T) {

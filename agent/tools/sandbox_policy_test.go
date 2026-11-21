@@ -41,40 +41,40 @@ func TestValidateSandboxEnv(t *testing.T) {
 		name    string
 		edit    func(*SandboxConfig)
 		reason  string
-		refused string // must not appear in the error; "" when nothing is refused by value
+		refused []string // must not appear in the error
 	}{
 		{"unknown name", func(c *SandboxConfig) { c.Env[1] = SandboxEnv{Name: "LD_PRELOAD", Value: "/tmp/evil.so"} },
-			"outside the allowed table", "/tmp/evil.so"},
+			"outside the allowed table", []string{"/tmp/evil.so", "LD_PRELOAD"}},
 		{"GOPROXY value", func(c *SandboxConfig) { c.Env[1].Value = "https://proxy.golang.org" },
-			`GOPROXY accepts only "off"`, "https://proxy.golang.org"},
+			`GOPROXY accepts only "off"`, []string{"https://proxy.golang.org"}},
 		{"GOFLAGS value", func(c *SandboxConfig) { c.Env[3].Value = "-toolexec=/bin/x" },
-			`GOFLAGS accepts only "-buildvcs=false"`, "-toolexec=/bin/x"},
+			`GOFLAGS accepts only "-buildvcs=false"`, []string{"-toolexec=/bin/x"}},
 		{"GOMODCACHE outside every root", func(c *SandboxConfig) { c.Env[0].Value = "/opt/xy/mod" },
-			"inside a declared root", "/opt/xy/mod"},
+			"inside a declared root", []string{"/opt/xy/mod"}},
 		{"GOMODCACHE not clean", func(c *SandboxConfig) { c.Env[0].Value = "/opt/x/../y" },
-			"inside a declared root", "/opt/x/../y"},
+			"inside a declared root", []string{"/opt/x/../y"}},
 		{"GOMODCACHE control character", func(c *SandboxConfig) { c.Env[0].Value = "/opt/x/m\nod" },
-			"inside a declared root", "m\nod"},
+			"inside a declared root", []string{"m\nod"}},
 		{"duplicate name", func(c *SandboxConfig) { c.Env = append(c.Env, SandboxEnv{Name: "GOPROXY", Value: "off"}) },
-			"Env[4] repeats", ""},
+			"Env[4] repeats", nil},
 		{"unknown temp name", func(c *SandboxConfig) { c.TempEnv = []string{"XDG_CACHE_HOME"} },
-			"TempEnv[0] names a variable outside the allowed table", "XDG_CACHE_HOME"},
+			"TempEnv[0] names a variable outside the allowed table", []string{"XDG_CACHE_HOME"}},
 		{"duplicate temp name", func(c *SandboxConfig) { c.TempEnv = []string{"GOCACHE", "GOCACHE"} },
-			"TempEnv[1] repeats", ""},
+			"TempEnv[1] repeats", nil},
 		{"root newline", func(c *SandboxConfig) { c.ReadOnlyRoots = []string{"/opt/x", "/opt/n\nl"} },
-			"ReadOnlyRoots[1]", "n\nl"},
+			"ReadOnlyRoots[1]", []string{"n\nl"}},
 		{"root DEL", func(c *SandboxConfig) { c.ReadOnlyRoots = []string{"/opt/d\x7fel"} },
-			"ReadOnlyRoots[0]", "d\x7fel"},
+			"ReadOnlyRoots[0]", []string{"d\x7fel"}},
 		{"root invalid UTF-8", func(c *SandboxConfig) { c.ReadOnlyRoots = []string{"/opt/\xffbad"} },
-			"ReadOnlyRoots[0]", "\xffbad"},
+			"ReadOnlyRoots[0]", []string{"\xffbad"}},
 		{"root relative", func(c *SandboxConfig) { c.ReadOnlyRoots = []string{"opt/rel"} },
-			"ReadOnlyRoots[0]", "opt/rel"},
+			"ReadOnlyRoots[0]", []string{"opt/rel"}},
 		{"root not clean", func(c *SandboxConfig) { c.ReadOnlyRoots = []string{"/opt/x/"} },
-			"ReadOnlyRoots[0]", "/opt/x/"},
+			"ReadOnlyRoots[0]", []string{"/opt/x/"}},
 		{"root empty", func(c *SandboxConfig) { c.ReadOnlyRoots = []string{""} },
-			"ReadOnlyRoots[0]", ""},
+			"ReadOnlyRoots[0]", nil},
 		{"developer directory relative", func(c *SandboxConfig) { c.DeveloperDirectory = "Developer/rel" },
-			"DeveloperDirectory", "Developer/rel"},
+			"DeveloperDirectory", []string{"Developer/rel"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -84,8 +84,10 @@ func TestValidateSandboxEnv(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), tt.reason) {
 				t.Fatalf("validateToolchainFields() = %v, want reason %q", err, tt.reason)
 			}
-			if tt.refused != "" && strings.Contains(err.Error(), tt.refused) {
-				t.Fatalf("error echoes the refused value %q: %v", tt.refused, err)
+			for _, refused := range tt.refused {
+				if strings.Contains(err.Error(), refused) {
+					t.Fatalf("error echoes the refused %q: %v", refused, err)
+				}
 			}
 			// The same refusal reaches every public path through normalization.
 			if _, err := normalizeSandboxConfig(cfg); err == nil || !strings.Contains(err.Error(), tt.reason) {
