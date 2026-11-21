@@ -109,7 +109,9 @@ func declaredRoots(c SandboxConfig) []string {
 // declared root (SandboxConfig.ReadOnlyRoots, DeveloperDirectory) must use:
 // absolute, symlinks resolved, every component in its stored filesystem
 // spelling. A host calls it once before building the config; backends never
-// re-resolve, so a root whose link later changes fails construction.
+// re-resolve, so the config pins the resolved folder: retargeting the link
+// you resolved changes nothing until you resolve again and rebuild. A root
+// whose own path later becomes a link, or that disappears, fails construction.
 func CanonicalToolchainRoot(path string) (string, error) {
 	canon, unverified, err := canonicalWorkspaceRoot(path)
 	if err != nil {

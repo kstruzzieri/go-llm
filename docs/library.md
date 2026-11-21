@@ -377,8 +377,10 @@ Helpers:
 
 - `SandboxConfig.Clone()` returns a copy that shares no slice with the original; copy before you keep or mutate a config.
 - `SandboxConfig.EffectiveEnv(privateTemp)` returns, sorted, every `NAME=value` the backend adds. Pass `"<private temp>"` to display it; the preview and `golem.CommandPermissions.Env` use it.
-- `tools.CanonicalToolchainRoot(path)` returns the canonical spelling (symlinks resolved, filesystem spelling) that a declared root must use. Call it once before building the config. Backends check that a root is still its own canonical spelling and never re-resolve it, so a link that changes makes the next construction fail and needs a new approval.
+- `tools.CanonicalToolchainRoot(path)` returns the canonical spelling (symlinks resolved, filesystem spelling) that a declared root must use. Call it once before building the config. The config pins the resolved folder: retargeting the link you resolved changes nothing until you resolve again and rebuild, with a new key and approval. A root whose own path later becomes a link, or that disappears, fails the next construction.
 - `tools.ActiveDeveloperDirectory(ctx)` (macOS) runs `xcode-select -p` with `DEVELOPER_DIR` removed, under a timeout, and returns the canonical folder to declare; an `Xcode.app/Contents/Developer` selection maps to the bundle.
+
+`PATH` is not a field: a library host must put `GOROOT/bin` on its own process `PATH`, and `PATH` is refused in `Env`.
 
 `golem.CommandPermissions` reports `ReadOnlyRoots`, `DeveloperDirectory` and `Env` for display.
 

@@ -597,7 +597,7 @@
     {
       "id": "PATH-TOOLCHAIN-ROOT-WRITE",
       "source": "issue-722",
-      "requirement": "Under the Seatbelt backend a declared toolchain root (SandboxConfig.ReadOnlyRoots, DeveloperDirectory) is readable and executable but a command cannot create a file under it; the same command writes inside the workspace. Outside this row: a declared root is a path, not an identity, and is not SIP-protected, so a process outside Golem running as the user can still change its contents.",
+      "requirement": "Under the Seatbelt backend a declared toolchain root (SandboxConfig.ReadOnlyRoots) is readable but a command cannot create a file under it; the same command writes inside the workspace. Outside this row: a declared root is a path, not an identity, and is not SIP-protected, so a process outside Golem running as the user can still change its contents.",
       "status": "verified",
       "owner": "",
       "layer": "focused",

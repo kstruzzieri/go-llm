@@ -1,6 +1,6 @@
 ### Added — Declared read-only toolchain roots for the macOS Seatbelt sandbox (#722)
 
-A host can now declare folders outside the workspace that Seatbelt commands may read and run but never write, so a Go, git or Python toolchain works under `-sandbox seatbelt`.
+A host can now declare folders outside the workspace that Seatbelt commands may read and run but never write, so a Go, git or Python toolchain can run under `-sandbox seatbelt`.
 
 #### Library
 
